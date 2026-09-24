@@ -1,0 +1,238 @@
+#pragma once
+// Scene data (INTERFACES_KO.md 6). The one scene description every consumer reads: the test scene generator (C) writes
+// it, the CPU reference path tracer (C) renders it directly, the real-time renderer builds its GPU representation from it
+// (clusters, bricks, BLAS). Conventions: unx/core/Math.h (right-handed, +Y up, metres).
+//
+// Units: lengths in metres; angles in radians; colours linear Rec.709 primaries; emitted radiance in cd/m^2 (nits);
+// point/spot intensity in candela; sun illuminance in lux at the top of the atmosphere.
+//
+// Versioning: kSceneFormatVersion changes only through the interface-change procedure (INTERFACES_KO.md 0).
+#include "unx/core/Math.h"
+
+#include <cstdint>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+namespace unx::scene
+{
+constexpr uint32_t kSceneFormatVersion = 1;
+constexpr uint32_t kNone = 0xFFFFFFFFu;
+
+enum class TextureFormat : uint8_t
+{
+    Rgba8Srgb = 0,  // base colour (+ alpha coverage)
+    Rgba8Linear = 1,
+    Rg8Normal = 2,     // tangent-space normal XY in [0,1]; Z reconstructed
+    Rg8RoughMetal = 3, // R = perceptual roughness, G = metallic (linear)
+    R8Linear = 4,      // occlusion or single-channel masks
+    Rgba16Float = 5,   // HDR (emission maps)
+};
+
+struct Texture
+{
+    std::string name;
+    uint32_t width = 0, height = 0;
+    TextureFormat format = TextureFormat::Rgba8Srgb;
+    bool wrap = true;              // repeat (true) or clamp (false) addressing, both axes
+    std::vector<uint8_t> texels;   // mip 0 only, rows top to bottom; consumers build their own mip chains
+};
+
+// Material classes select the shading model and the shading-kernel class (ARCHITECTURE 2.11). The reference path
+// tracer implements the same model per class (INTERFACES_KO.md 8).
+enum class MaterialClass : uint8_t
+{
+    Standard = 0,    // opaque/alpha-tested dielectric-metal (Lambert + GGX, 8.1)
+    Foliage = 1,     // two-sided thin leaf: Standard + diffuse transmission
+    Hair = 2,        // strands (P3)
+    Water = 3,       // water surface (P4)
+    Glass = 4,       // thin/solid dielectric (P4)
+    Subsurface = 5,  // skin and similar (P4)
+};
+
+struct Material
+{
+    std::string name;
+    MaterialClass cls = MaterialClass::Standard;
+    float3 baseColor{ 0.5f, 0.5f, 0.5f };  // linear albedo (dielectric) or f0 (metal)
+    float roughness = 0.5f;                  // perceptual roughness r; GGX alpha = r*r
+    float metallic = 0.0f;
+    float specular = 0.5f;                   // dielectric f0 = 0.08 * specular (0.5 -> 0.04)
+    float3 emissive{ 0, 0, 0 };              // nits
+    float alphaCutoff = 0.0f;                // 0 = opaque; otherwise alpha-tested against baseColor texture alpha
+    float transmission = 0.0f;               // Foliage: fraction of diffuse transmitted to the back side
+    float ior = 1.5f;                        // Glass / Water
+    bool twoSided = false;
+    uint32_t baseColorTexture = kNone;       // Rgba8Srgb; multiplies baseColor, alpha = coverage
+    uint32_t normalTexture = kNone;          // Rg8Normal
+    uint32_t roughMetalTexture = kNone;      // Rg8RoughMetal; multiplies roughness/metallic
+    uint32_t emissiveTexture = kNone;        // Rgba16Float or Rgba8Srgb; multiplies emissive
+    uint32_t occlusionTexture = kNone;       // R8Linear; ambient/specular occlusion (baked cavities only)
+};
+
+struct Submesh
+{
+    uint32_t indexOffset = 0;  // into Mesh::indices
+    uint32_t indexCount = 0;   // multiple of 3
+    uint32_t material = 0;     // index into Scene::materials
+};
+
+// Skinning stream (optional): up to 4 influences per vertex, weights sum to 1.
+struct SkinStream
+{
+    std::vector<uint16_t> joints;  // 4 per vertex
+    std::vector<float> weights;    // 4 per vertex
+    std::vector<float3x4> inverseBind;  // per joint
+};
+
+struct Mesh
+{
+    std::string name;
+    std::vector<float3> positions;
+    std::vector<float3> normals;   // unit, per vertex
+    std::vector<float4> tangents;  // xyz unit tangent, w = bitangent sign (+1/-1); required when any material of the
+                                   // mesh has a normal texture (the generator/importer computes them once, so the
+                                   // reference and the renderer use the same tangent frame)
+    std::vector<float2> uv0;
+    std::vector<uint32_t> indices; // triangle list, counter-clockwise front faces
+    std::vector<Submesh> submeshes;
+    SkinStream skin;               // empty = rigid
+};
+
+// Wind (ARCHITECTURE 2.3, 2.7): per-instance response to the scene wind field; the displacement function is shared
+// by raster, shadow pages and ray tracing (Passes/Common/Deformation.hlsli).
+struct WindParams
+{
+    float stiffness = 0;   // 0 = not affected
+    float phase = 0;       // per-instance phase offset (radians)
+    float anchorHeight = 0;  // object-space height below which vertices do not move
+};
+
+enum InstanceFlags : uint32_t
+{
+    InstanceCastShadow = 1u << 0,
+    InstanceDynamic = 1u << 1,   // transform may change every tick (dynamic TLAS, VSM caster revision)
+    InstanceSkinned = 1u << 2,   // uses Mesh::skin with Scene::skeletons[skeleton]
+    InstanceWind = 1u << 3,      // uses WindParams
+};
+
+struct Instance
+{
+    uint32_t mesh = 0;
+    float3x4 transform;            // object -> world: rotation, uniform scale, translation (no shear/non-uniform scale)
+    uint32_t flags = InstanceCastShadow;
+    uint32_t skeleton = kNone;     // index into Scene::skeletons when InstanceSkinned
+    WindParams wind;
+    std::vector<uint32_t> materialOverrides;  // per submesh; empty = mesh materials
+};
+
+// A skeleton's current pose: joint matrices in model space (applied after inverseBind).
+struct Skeleton
+{
+    std::string name;
+    std::vector<float3x4> jointToModel;
+};
+
+enum class LightType : uint8_t
+{
+    Point = 0,
+    Spot = 1,
+    Rect = 2,    // one-sided rectangle, emits along +forward
+    Disk = 3,    // one-sided disk
+    Sphere = 4,
+    Tube = 5,    // capsule (length along 'right', radius = size.y)
+};
+
+struct Light
+{
+    LightType type = LightType::Point;
+    float3 position{};
+    float3 forward{ 0, -1, 0 };    // emission axis (spot, rect, disk)
+    float3 right{ 1, 0, 0 };       // rect/tube orientation
+    float3 color{ 1, 1, 1 };       // linear tint, luminance-normalised to 1
+    float intensity = 1000;        // point/spot: candela; area lights: luminance in nits
+    float range = 30;              // influence radius (m); contribution is windowed to 0 at range (INTERFACES 8.3)
+    float spotInner = 0.3f, spotOuter = 0.5f;  // half-angles (rad)
+    float2 size{ 0, 0 };           // rect: width,height; disk/sphere: radius in x; tube: length,radius
+    bool castShadow = false;
+};
+
+// Sun and sky: the physical atmosphere of ARCHITECTURE 2.3, parameters from the previous engine (TitanNative
+// Atmosphere.h, Hillaire 2020 / Bruneton defaults).
+struct Sun
+{
+    float3 direction{ 0.3419f, 0.9117f, 0.2279f };  // unit, from the ground towards the sun
+    float illuminance = 128000;             // lux at the top of the atmosphere
+    float angularRadius = 0.004654f;        // radians (0.2667 deg)
+    float3 color{ 1, 1, 1 };                // linear tint at the top of the atmosphere
+};
+
+struct Atmosphere
+{
+    float bottomRadius = 6360000;   // m (scene origin sits on the planet's surface, planet centre at (0,-R,0))
+    float topRadius = 6460000;
+    float rayleighScaleHeight = 8000;
+    float mieScaleHeight = 1200;
+    float mieG = 0.8f;
+    float3 rayleighScattering{ 5.802e-6f, 13.558e-6f, 33.100e-6f };  // 1/m
+    float3 mieScattering{ 3.996e-6f, 3.996e-6f, 3.996e-6f };
+    float3 mieAbsorption{ 0.444e-6f, 0.444e-6f, 0.444e-6f };
+    float3 ozoneAbsorption{ 0.650e-6f, 1.881e-6f, 0.085e-6f };
+    float ozoneCenter = 25000, ozoneWidth = 15000;  // tent profile
+    float3 groundAlbedo{ 0.1f, 0.1f, 0.1f };
+};
+
+struct Camera
+{
+    std::string name;
+    float3 position{};
+    float3 forward{ 0, 0, -1 };
+    float3 up{ 0, 1, 0 };
+    float verticalFov = 1.0471976f;  // 60 degrees
+    float nearPlane = 0.05f;
+    float ev100 = 14.0f;             // exposure: radiance scale = 1 / (1.2 * 2^ev100)
+};
+
+// Camera path for gates (120 s RPP paths, P7) and temporal-stability tests: linear position, slerped orientation.
+struct CameraKey
+{
+    float time = 0;
+    float3 position{};
+    float3 forward{ 0, 0, -1 };
+    float3 up{ 0, 1, 0 };
+};
+struct CameraPath
+{
+    std::string name;
+    std::vector<CameraKey> keys;
+};
+
+struct Scene
+{
+    std::string name;
+    uint64_t seed = 0;
+    std::vector<Texture> textures;
+    std::vector<Material> materials;
+    std::vector<Mesh> meshes;
+    std::vector<Instance> instances;
+    std::vector<Skeleton> skeletons;
+    std::vector<Light> lights;
+    Sun sun;
+    Atmosphere atmosphere;
+    float3 windDirection{ 1, 0, 0 };  // unit, world
+    float windSpeed = 0;               // m/s
+    std::vector<Camera> cameras;
+    std::vector<CameraPath> paths;
+};
+
+// .unxscene binary file (little endian): "UNXSCENE", u32 version, then the fields in declaration order with u64
+// element counts before every array. Deterministic: the same Scene always yields the same bytes.
+void save(const Scene& scene, const std::filesystem::path& path);
+Scene load(const std::filesystem::path& path);
+std::vector<uint8_t> serialize(const Scene& scene);
+Scene deserialize(const std::vector<uint8_t>& bytes);
+// SHA-256 of serialize(scene): the scene identity recorded next to reference images and gate reports.
+std::string contentHash(const Scene& scene);
+// Structural checks (index ranges, unit vectors, sizes); throws unx::Error with the first problem found.
+void validate(const Scene& scene);
+} // namespace unx::scene

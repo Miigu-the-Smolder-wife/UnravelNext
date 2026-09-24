@@ -4,6 +4,8 @@
 #                verified by SHA-256 (the package's NuGet catalog SHA-512 was checked when pinning).
 #   NVAPI        git submodule External/nvapi (github.com/NVIDIA/nvapi), pinned to the R590 SDK commit,
 #                the branch of the measured driver 591.86. Used for OMM on drivers without DXR 1.2.
+#   FLIP         git submodule External/flip (github.com/NVlabs/flip, BSD-3), pinned to v1.7: image metric.
+# Track-specific libraries (Embree, meshoptimizer, ...) are added here by core on request (INTERFACES_KO.md 2.3).
 #
 # Changing a version here changes measured floors: re-run Tools/Microbench and record the result.
 
@@ -70,6 +72,22 @@ if(NOT TARGET Unx::NVAPI)
   set_target_properties(Unx::NVAPI PROPERTIES
     IMPORTED_LOCATION "${nv}/amd64/nvapi64.lib"
     INTERFACE_INCLUDE_DIRECTORIES "${nv}")
+endif()
+
+set(UNX_FLIP_COMMIT "b475eb4bf394ab877c42166c9eb0a84a02cc5b14")  # NVlabs/flip v1.7 (BSD-3)
+if(NOT TARGET Unx::FLIP)
+  set(flip "${UNX_EXTERNAL_DIR}/flip")
+  if(NOT EXISTS "${flip}/src/cpp/FLIP.h")
+    message(FATAL_ERROR "External/flip is missing. Run: git submodule update --init External/flip")
+  endif()
+  if(EXISTS "${flip}/.git")
+    execute_process(COMMAND git -C "${flip}" rev-parse HEAD OUTPUT_VARIABLE head OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(head AND NOT head STREQUAL UNX_FLIP_COMMIT)
+      message(FATAL_ERROR "External/flip is at ${head}, expected ${UNX_FLIP_COMMIT}. Run: git submodule update External/flip")
+    endif()
+  endif()
+  add_library(Unx::FLIP INTERFACE IMPORTED GLOBAL)
+  set_target_properties(Unx::FLIP PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${flip}/src/cpp")
 endif()
 
 # Copies the Agility runtime next to an executable (D3D12/ subfolder, matching D3D12SDKPath ".\\D3D12\\").

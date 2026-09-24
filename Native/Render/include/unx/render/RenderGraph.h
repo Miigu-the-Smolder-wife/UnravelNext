@@ -97,6 +97,8 @@ public:
     // Root constants b0 (up to Device::kRootConstantCount dwords) for the pipeline type bound next.
     void computeConstants(const void* data, uint32_t dwords) const;
     void graphicsConstants(const void* data, uint32_t dwords) const;
+    // Root CBV b1 (Frame.hlsli) for the compute and, on the graphics queue, graphics pipelines.
+    void bindFrameConstants(D3D12_GPU_VIRTUAL_ADDRESS address) const;
 
 private:
     friend class RenderGraph;

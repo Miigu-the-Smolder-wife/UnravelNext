@@ -1,0 +1,48 @@
+// Frame constants (root CBV b1), mirror of unx::render::gpu::FrameConstants (GpuSceneLayout.h). One per view.
+#ifndef UNX_FRAME_HLSLI
+#define UNX_FRAME_HLSLI
+
+#define UNX_NONE 0xFFFFFFFFu
+#define VIEW_MAIN 0u
+#define VIEW_PLANAR_REFLECTION 1u
+
+cbuffer FrameConstants : register(b1)
+{
+    row_major float4x4 g_viewProj;
+    row_major float4x4 g_prevViewProj;
+    row_major float4x4 g_invViewProj;
+    row_major float4x4 g_view;
+    row_major float4x4 g_proj;
+    float3 g_cameraPosition;
+    float g_nearPlane;
+    float4 g_clipPlane;
+    uint g_viewWidth, g_viewHeight, g_viewKind, g_frameIndex;
+    float g_time, g_deltaTime, g_exposure, g_tanHalfFovY;
+    float3 g_sunDirection;
+    float g_sunIlluminance;
+    float3 g_sunColor;
+    float g_sunAngularRadius;
+    float3 g_windDirection;
+    float g_windSpeed;
+    uint g_instances, g_meshes, g_submeshes, g_vertices;
+    uint g_indices, g_clusters, g_clusterVertexIndices, g_clusterTriangles;
+    uint g_lodLevels, g_materials, g_materialRemap, g_lights;
+    uint g_skinVertices, g_bonePalette, g_prevBonePalette, g_materialModelLut;
+    uint g_instanceCount, g_meshCount, g_clusterCount, g_lightCount;
+    uint g_materialCount, g_sceneRevision, g_framePad0, g_framePad1;
+};
+
+// Reversed-Z infinite projection: device depth d = near / viewDistance (1 at the near plane, 0 = sky).
+float linearDepth(float deviceDepth) { return g_nearPlane / max(deviceDepth, 1e-30); }
+
+// World position of a pixel centre (pixel in [0, size)) at a device depth.
+float3 worldFromDepth(float2 pixel, float deviceDepth)
+{
+    const float2 ndc = float2((pixel.x + 0.5) / g_viewWidth * 2 - 1, 1 - (pixel.y + 0.5) / g_viewHeight * 2);
+    const float4 p = mul(g_invViewProj, float4(ndc, deviceDepth, 1));
+    return p.xyz / p.w;
+}
+
+bool clipPlaneKeeps(float3 world) { return all(g_clipPlane == 0) || dot(g_clipPlane.xyz, world) + g_clipPlane.w >= 0; }
+
+#endif

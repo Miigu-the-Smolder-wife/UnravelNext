@@ -917,6 +917,11 @@ D3D12_GPU_VIRTUAL_ADDRESS PassContext::address(BufferRef b) const { return m_gra
 const TextureDesc& PassContext::desc(TextureRef t) const { return m_graph->m_impl->resources[t.id].tdesc; }
 void PassContext::computeConstants(const void* data, uint32_t dwords) const { cmd->SetComputeRoot32BitConstants(0, dwords, data, 0); }
 void PassContext::graphicsConstants(const void* data, uint32_t dwords) const { cmd->SetGraphicsRoot32BitConstants(0, dwords, data, 0); }
+void PassContext::bindFrameConstants(D3D12_GPU_VIRTUAL_ADDRESS address) const
+{
+    cmd->SetComputeRootConstantBufferView(1, address);
+    if (queue == QueueType::Graphics) cmd->SetGraphicsRootConstantBufferView(1, address);
+}
 
 // ------------------------------------------------------------------------------------------------ RenderGraph
 
