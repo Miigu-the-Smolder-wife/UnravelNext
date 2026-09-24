@@ -1,7 +1,9 @@
 // unx-kernel: ms_6_6 main
+// unx-variants: ALPHA=0,1
 // Band A visibility buffer: one mesh-shader group per visible cluster of a draw list (VisibilityCommon.hlsli lists).
 // Vertices go through deformVertex (skin, wind: the same geometry as shadows and rays), primitives carry the vis id
-// (visible-list index << 7 | triangle). The clip plane of planar-reflection views goes to SV_ClipDistance0.
+// (packVisId). The clip plane of planar-reflection views goes to SV_ClipDistance0. ALPHA=1 (alpha-tested lists) also
+// passes the uv and the triangle's material to the pixel kernel's alpha test.
 //   P[0] visible SRV (uint2), lists SRV (raw), state SRV (raw), list
 //   P[1] phase (1: entries of phase 1; 2: entries appended in phase 2), list capacity, views SRV, unused
 #include "Passes/Visibility/VisibilityCommon.hlsli"
@@ -11,11 +13,17 @@ struct VertexOut
 {
     float4 position : SV_Position;
     float clip : SV_ClipDistance0;
+#if ALPHA
+    float2 uv : TEXCOORD0;
+#endif
 };
 
 struct PrimitiveOut
 {
     uint visId : VISID;
+#if ALPHA
+    uint material : MATERIAL;
+#endif
 };
 
 [outputtopology("triangle")]
@@ -42,11 +50,18 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     SetMeshOutputCounts(vertexCount, triangleCount);
     StructuredBuffer<uint> clusterVertices = ResourceDescriptorHeap[g_clusterVertexIndices];
     const bool clip = any(v.clipPlane != 0);
+#if ALPHA
+    const uint material = clusterMaterial(inst, cl);
+#endif
     for (uint i = lane; i < vertexCount; i += 64)
     {
-        const DeformedVertex d = deformVertex(inst, mesh, clusterVertices[cl.vertexOffset + i]);
+        const uint meshVertex = clusterVertices[cl.vertexOffset + i];
+        const DeformedVertex d = deformVertex(inst, mesh, meshVertex);
         verts[i].position = mul(v.viewProj, float4(d.world, 1));
         verts[i].clip = clip ? dot(v.clipPlane.xyz, d.world) + v.clipPlane.w : 1.0;
+#if ALPHA
+        verts[i].uv = loadVertex(mesh, meshVertex).uv;
+#endif
     }
     StructuredBuffer<uint> clusterTriangles = ResourceDescriptorHeap[g_clusterTriangles];
     for (uint t = lane; t < triangleCount; t += 64)
@@ -54,5 +69,8 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         const uint packed = clusterTriangles[cl.triangleOffset + t];
         tris[t] = uint3(packed & 0xFFu, (packed >> 8) & 0xFFu, (packed >> 16) & 0xFFu);
         prims[t].visId = packVisId(visibleIndex, t);
+#if ALPHA
+        prims[t].material = material;
+#endif
     }
 }

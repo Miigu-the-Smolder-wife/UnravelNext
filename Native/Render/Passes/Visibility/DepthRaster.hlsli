@@ -10,6 +10,7 @@
 #define UNX_DEPTH_RASTER_HLSLI
 #include "Bindless.hlsli"
 #include "Scene.hlsli"
+#include "Passes/Visibility/AlphaTest.hlsli"
 
 struct DepthRasterPixel
 {
@@ -22,12 +23,6 @@ struct DepthRasterPixel
 
 // False where an alpha-tested material is transparent (baseColor texture alpha < alphaCutoff), as in the main view and
 // the reference (INTERFACES_KO.md 8.1).
-bool depthRasterCovered(DepthRasterPixel p)
-{
-    const GpuMaterial m = loadMaterial(p.material);
-    if ((m.classFlags & MATERIAL_ALPHA_TESTED) == 0 || m.baseColorTexture == UNX_NONE) return true;
-    Texture2D<float4> baseColor = ResourceDescriptorHeap[m.baseColorTexture];
-    return baseColor.Sample(g_anisoWrap, p.uv).a >= m.alphaCutoff;
-}
+bool depthRasterCovered(DepthRasterPixel p) { return alphaTestCovered(p.material, p.uv); }
 
 #endif

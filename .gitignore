@@ -16,3 +16,4 @@ Results/Gates/**/*.csv
 # GPU measurement lock state (Tools/CI/GpuLock.ps1) and reference-image caches
 .gpulock/
 Cache/
+Results/**/*.csv

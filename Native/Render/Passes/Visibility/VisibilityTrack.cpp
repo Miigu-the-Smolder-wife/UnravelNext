@@ -178,11 +178,15 @@ void refreshScene(State& s, FramePassContext& fc)
         if (!nodes[node].leaf)
             for (uint32_t c = 0; c < nodes[node].count; ++c) stack.push_back({ nodes[node].first + c, depth + 1 });
     }
-    // Alpha-tested materials with a texture need the alpha-tested vis pixel kernel (with M's texture system).
+    // Alpha-tested materials are cut by their baseColor texture on the GPU (AlphaTest.hlsli); where the GPU scene has no
+    // texture yet (no texture upload), the material covers its whole triangles. Said once, so results carry it.
     if (const scene::Scene* src = fc.scene.source())
+    {
+        uint32_t untextured = 0;
         for (const auto& m : src->materials)
-            if (m.alphaCutoff > 0 && m.baseColorTexture != UINT32_MAX)
-                fail("V: alpha-tested textured materials need the alpha-tested visibility pixel kernel, which comes with M's texture system");
+            if (m.alphaCutoff > 0 && m.baseColorTexture != UINT32_MAX) ++untextured;
+        if (untextured) logf("V: %u alpha-tested materials have a baseColor texture that the GPU scene does not upload yet: drawn uncut\n", untextured);
+    }
     s.traversalLevels = deepest;
     s.sceneRevision = fc.scene.revision();
     s.mainHiz.history = false;
@@ -479,14 +483,15 @@ void cullPhase(FramePassContext& fc, State& s, const Run& r, uint32_t phase)
 ID3D12PipelineState* visPipeline(FramePassContext& fc, uint32_t list, bool mirrored)
 {
     const bool back = list == kListABack || list == kListAAlphaBack;
+    const bool alpha = list == kListAAlphaBack || list == kListAAlphaNone;
     MeshPipelineDesc d;
-    d.meshShader = "Passes/Visibility/VisRaster.ms";
-    d.pixelShader = "Passes/Visibility/VisRaster.ps";
+    d.meshShader = alpha ? "Passes/Visibility/VisRaster.ms.ALPHA1" : "Passes/Visibility/VisRaster.ms.ALPHA0";
+    d.pixelShader = alpha ? "Passes/Visibility/VisRaster.ps.ALPHA1" : "Passes/Visibility/VisRaster.ps.ALPHA0";
     d.renderTargets = { DXGI_FORMAT_R32_UINT };
     d.depthFormat = DXGI_FORMAT_D32_FLOAT;
     d.cull = back ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
     d.frontCounterClockwise = !mirrored;
-    return fc.shaders.mesh(std::string("v.vis|") + (back ? "back" : "none") + (mirrored ? "|mirrored" : ""), d);
+    return fc.shaders.mesh(std::string("v.vis|") + (back ? "back" : "none") + (alpha ? "|alpha" : "") + (mirrored ? "|mirrored" : ""), d);
 }
 
 void rasterPass(FramePassContext& fc, State& s, const Run& r, ViewResources& view, uint32_t phase)
