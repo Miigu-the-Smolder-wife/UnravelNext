@@ -1,6 +1,9 @@
 # Owner: V (core session). ARCHITECTURE 2.1.
 [visibility]
 cluster_triangles = 64            # meshlet size (max 128: vis id triangle field is 7 bits)
+cluster_vertices = 64             # meshlet vertex limit (mesh shader output; max 255)
+lod_max_relative_width_error = 0.25  # a group may simplify only with error <= this x its narrowest feature width;
+                                     # thin geometry is never thinned by LOD (far thin geometry goes to band C bricks)
 lod_error_px = 1.0                # projected LOD error threshold
 band_a_min_width_px = 1.5         # w_px >= this: vis buffer + analytic edge coverage
 band_c_max_width_px = 0.25        # w_px < this (or too many fragments): aggregate bricks
