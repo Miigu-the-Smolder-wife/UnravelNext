@@ -1,0 +1,705 @@
+#include "unx/rt/RayScene.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <map>
+#include <memory>
+#include <mutex>
+
+namespace unx::render::rt
+{
+namespace
+{
+constexpr uint64_t kAsAlign = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT;  // 256
+constexpr uint64_t kScratchBatchBytes = 256ull << 20;  // scratch reused between load-time build batches
+
+uint64_t alignUp(uint64_t v, uint64_t a) { return (v + a - 1) / a * a; }
+
+// Load-time and test-path barriers (outside the frame graph, on the R track's own command lists).
+void globalBarrier(ID3D12GraphicsCommandList7* cmd, D3D12_BARRIER_SYNC syncBefore, D3D12_BARRIER_ACCESS accessBefore, D3D12_BARRIER_SYNC syncAfter,
+                   D3D12_BARRIER_ACCESS accessAfter)
+{
+    D3D12_GLOBAL_BARRIER g{ syncBefore, syncAfter, accessBefore, accessAfter };
+    D3D12_BARRIER_GROUP group{};
+    group.Type = D3D12_BARRIER_TYPE_GLOBAL;
+    group.NumBarriers = 1;
+    group.pGlobalBarriers = &g;
+    cmd->Barrier(1, &group);
+}
+
+constexpr D3D12_BARRIER_SYNC kSyncBuild = D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE;
+constexpr D3D12_BARRIER_SYNC kSyncTrace = D3D12_BARRIER_SYNC_ALL_SHADING | D3D12_BARRIER_SYNC_RAYTRACING | D3D12_BARRIER_SYNC_COMPUTE_SHADING;
+constexpr D3D12_BARRIER_ACCESS kAsRead = D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ;
+constexpr D3D12_BARRIER_ACCESS kAsWrite = D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE;
+
+std::mutex g_sceneMutex;
+std::map<std::pair<Device*, GpuScene*>, std::unique_ptr<RayScene>> g_scenes;
+} // namespace
+
+RayScene& RayScene::get(FramePassContext& fc)
+{
+    struct Slot
+    {
+        std::unique_ptr<RayScene> scene;
+    };
+    Slot& slot = fc.state<Slot>("R.rayScene");
+    if (slot.scene && slot.scene->sceneRevision() != fc.scene.revision()) slot.scene.reset();  // re-uploaded scene
+    if (!slot.scene) slot.scene = std::make_unique<RayScene>(fc.device, fc.shaders, fc.scene, fc.quality);
+    return *slot.scene;
+}
+
+RayScene& RayScene::get(Device& device, ShaderLibrary& shaders, GpuScene& scene, const QualityConfig& quality)
+{
+    std::lock_guard lock(g_sceneMutex);
+    auto& slot = g_scenes[{ &device, &scene }];
+    if (slot && slot->sceneRevision() != scene.revision()) slot.reset();  // re-uploaded scene: rebuild (streaming boundary)
+    if (!slot) slot = std::make_unique<RayScene>(device, shaders, scene, quality);
+    return *slot;
+}
+
+void RayScene::releaseDevice(Device& device)
+{
+    device.waitIdle();
+    std::lock_guard lock(g_sceneMutex);
+    std::erase_if(g_scenes, [&](const auto& e) { return e.first.first == &device; });
+}
+
+RayScene::Buffer RayScene::createBuffer(uint64_t bytes, bool uav, bool accelerationStructure, const wchar_t* name)
+{
+    Buffer b;
+    b.bytes = std::max<uint64_t>(bytes, 256);
+    D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC1 d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = b.bytes;
+    d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (uav || accelerationStructure) d.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (accelerationStructure) d.Flags |= D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE;
+    check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&b.resource)),
+          "RayScene buffer");
+    b.resource->SetName(name);
+    return b;
+}
+
+void RayScene::upload(Buffer& target, const void* data, uint64_t bytes)
+{
+    if (bytes == 0) return;
+    D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_UPLOAD };
+    D3D12_RESOURCE_DESC1 d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = bytes;
+    d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> staging;
+    check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&staging)),
+          "RayScene staging");
+    void* mapped = nullptr;
+    D3D12_RANGE none{ 0, 0 };
+    check(staging->Map(0, &none, &mapped), "map RayScene staging");
+    std::memcpy(mapped, data, (size_t)bytes);
+    staging->Unmap(0, nullptr);
+    CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
+    cl.list->CopyBufferRegion(target.resource.Get(), 0, staging.Get(), 0, bytes);
+    m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(cl));
+}
+
+RayScene::Buffer RayScene::createStructured(const void* data, uint32_t stride, uint32_t count, const wchar_t* name)
+{
+    std::vector<uint8_t> zero;
+    if (count == 0)
+    {
+        zero.assign(stride, 0);
+        data = zero.data();
+        count = 1;
+    }
+    Buffer b = createBuffer((uint64_t)stride * count, false, false, name);
+    upload(b, data, (uint64_t)stride * count);
+    DescriptorHeaps& h = m_device.descriptors();
+    b.srv = h.allocateResource();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Format = DXGI_FORMAT_UNKNOWN;
+    sd.Buffer.NumElements = count;
+    sd.Buffer.StructureByteStride = stride;
+    m_device.d3d()->CreateShaderResourceView(b.resource.Get(), &sd, h.resourceCpu(b.srv));
+    return b;
+}
+
+uint32_t RayScene::tlasSrv(D3D12_GPU_VIRTUAL_ADDRESS address)
+{
+    DescriptorHeaps& h = m_device.descriptors();
+    const uint32_t index = h.allocateResource();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.RaytracingAccelerationStructure.Location = address;
+    m_device.d3d()->CreateShaderResourceView(nullptr, &sd, h.resourceCpu(index));
+    return index;
+}
+
+void RayScene::release(Buffer& b)
+{
+    if (b.resource) m_device.deferRelease(b.resource);
+    if (b.srv != gpu::kNone)
+    {
+        DescriptorHeaps* h = &m_device.descriptors();
+        const uint32_t srv = b.srv;
+        m_device.deferCall([h, srv] { h->freeResource(srv); });
+    }
+    b = {};
+}
+
+RayScene::~RayScene()
+{
+    for (Buffer* b : { &m_meshBlasPool, &m_deformedPool, &m_deformedBlasPool, &m_deformedScratch, &m_deformJobs, &m_deformGroups, &m_instanceBuffer, &m_geometryBuffer,
+                       &m_indexPool, &m_vertexMap, &m_tlasStatic, &m_tlasDynamic, &m_tlasScratch, &m_staticDescBuffer, &m_dynamicDescBuffer })
+        release(*b);
+    DescriptorHeaps* h = &m_device.descriptors();
+    for (uint32_t srv : { m_tlasStaticSrv, m_tlasDynamicSrv, m_deformedPoolUav })
+        if (srv != gpu::kNone) m_device.deferCall([h, srv] { h->freeResource(srv); });
+}
+
+RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, const QualityConfig& quality) : m_device(device), m_shaders(shaders), m_scene(scene)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    if (device.caps().raytracingTier < D3D12_RAYTRACING_TIER_1_1) fail("RayScene: DXR tier 1.1 required");
+    const scene::Scene* src = scene.source();
+    if (!src) fail("RayScene: GpuScene has no uploaded scene");
+    m_sceneRevision = scene.revision();
+    const uint32_t proxyBudget = (uint32_t)quality.integer("raytracing.character_proxy_triangles");
+    const uint64_t dynamicMax = (uint64_t)quality.integer("raytracing.dynamic_tlas_instances_max");
+
+    const auto& instances = scene.instances();
+    const auto& meshes = scene.meshes();
+    m_meshBlas.assign(meshes.size(), {});
+
+    // Geometry records: one per non-empty submesh, shared by every BLAS of the mesh (material comes from the instance).
+    std::vector<uint32_t> meshGeometryBase(meshes.size(), gpu::kNone);
+    auto geometryBase = [&](uint32_t m) {
+        if (meshGeometryBase[m] != gpu::kNone) return meshGeometryBase[m];
+        meshGeometryBase[m] = (uint32_t)m_geometries.size();
+        const scene::Mesh& sm = src->meshes[m];
+        for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size(); ++s)
+            if (sm.submeshes[s].indexCount > 0) m_geometries.push_back({ meshes[m].indexOffset + sm.submeshes[s].indexOffset, s, 0, gpu::kNone });
+        return meshGeometryBase[m];
+    };
+
+    // Classify instances (INTERFACES 6.2 flags): deformed = skinned with a palette and skin stream; dynamic rigid =
+    // InstanceDynamic; the rest is static (wind-affected foliage uses its rest pose in RT, ARCHITECTURE 2.7).
+    std::vector<uint32_t> staticList, dynamicRigid, deformed;
+    for (uint32_t i = 0; i < (uint32_t)instances.size(); ++i)
+    {
+        const gpu::Instance& in = instances[i];
+        const gpu::Mesh& m = meshes[in.mesh];
+        if (m.triangleCount == 0) continue;
+        if ((in.flags & scene::InstanceSkinned) && in.bonePalette != gpu::kNone && m.skinOffset != gpu::kNone) deformed.push_back(i);
+        else if (in.flags & scene::InstanceDynamic) dynamicRigid.push_back(i);
+        else staticList.push_back(i);
+    }
+    if (dynamicRigid.size() + deformed.size() > dynamicMax)
+        fail("RayScene: %zu dynamic instances exceed raytracing.dynamic_tlas_instances_max %llu", dynamicRigid.size() + deformed.size(), (unsigned long long)dynamicMax);
+
+    auto materialAlpha = [&](uint32_t material) { return material < src->materials.size() && src->materials[material].alphaCutoff > 0; };
+    // Per-submesh alpha of an instance (overrides first); FORCE_NON_OPAQUE is needed when an override turns a submesh the
+    // mesh BLAS built OPAQUE into an alpha-tested one (the any-hit shader accepts opaque materials, so the reverse is exact).
+    auto instanceFlags = [&](uint32_t i) -> UINT {
+        const scene::Instance& in = src->instances[i];
+        const scene::Mesh& sm = src->meshes[in.mesh];
+        for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size() && s < (uint32_t)in.materialOverrides.size(); ++s)
+            if (materialAlpha(in.materialOverrides[s]) && !materialAlpha(sm.submeshes[s].material)) return D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE;
+        return 0;
+    };
+
+    // RtInstance records: static TLAS instances first, then the dynamic TLAS (rigid, then deformed).
+    for (uint32_t i : staticList) m_meshBlas[instances[i].mesh].geometryBase = geometryBase(instances[i].mesh);
+    for (uint32_t i : dynamicRigid) m_meshBlas[instances[i].mesh].geometryBase = geometryBase(instances[i].mesh);
+    buildMeshBlas();
+
+    auto transformOf = [&](const gpu::Instance& in, D3D12_RAYTRACING_INSTANCE_DESC& d) {
+        for (int r = 0; r < 3; ++r)
+        {
+            d.Transform[r][0] = in.objectToWorld[r].x;
+            d.Transform[r][1] = in.objectToWorld[r].y;
+            d.Transform[r][2] = in.objectToWorld[r].z;
+            d.Transform[r][3] = in.objectToWorld[r].w;
+        }
+    };
+    const D3D12_GPU_VIRTUAL_ADDRESS meshPool = m_meshBlasPool.address();
+    auto rigidDesc = [&](uint32_t i) {
+        const gpu::Instance& in = instances[i];
+        D3D12_RAYTRACING_INSTANCE_DESC d{};
+        transformOf(in, d);
+        d.InstanceID = (UINT)m_instances.size();
+        d.InstanceMask = kRtMaskAll;
+        d.InstanceContributionToHitGroupIndex = 0;
+        d.Flags = instanceFlags(i);  // DXR's default winding = CCW front in our right-handed frame (verified by Tests/RayScene)
+        d.AccelerationStructure = meshPool + m_meshBlas[in.mesh].offset;
+        m_instances.push_back({ i, m_meshBlas[in.mesh].geometryBase, gpu::kNone, 0 });
+        return d;
+    };
+    for (uint32_t i : staticList) m_staticDescs.push_back(rigidDesc(i));
+    for (uint32_t i : dynamicRigid)
+    {
+        m_dynamicRecord.push_back((uint32_t)m_instances.size());
+        m_dynamicDescs.push_back(rigidDesc(i));
+    }
+
+    // Deformed instances: per-instance BLAS over the full mesh until V's cluster LOD cuts exist (the proxy cut of
+    // raytracing.character_proxy_triangles is taken from them, ARCHITECTURE 2.8); counted in the stats meanwhile.
+    uint32_t vertexBase = 0;
+    for (uint32_t i : deformed)
+    {
+        const gpu::Instance& in = instances[i];
+        const gpu::Mesh& m = meshes[in.mesh];
+        Deformed d;
+        d.sceneInstance = i;
+        d.vertexBase = vertexBase;
+        d.vertexCount = m.vertexCount;
+        d.geometryBase = geometryBase(in.mesh);
+        vertexBase += m.vertexCount;
+        if (m.triangleCount > proxyBudget) ++m_stats.deformedAboveProxyBudget;
+        m_stats.deformedTriangles += m.triangleCount;
+        m_deformed.push_back(std::move(d));
+    }
+    m_stats.deformedVertices = vertexBase;
+    buildDeformed();
+    for (size_t k = 0; k < m_deformed.size(); ++k)
+    {
+        const Deformed& d = m_deformed[k];
+        D3D12_RAYTRACING_INSTANCE_DESC desc{};
+        desc.Transform[0][0] = desc.Transform[1][1] = desc.Transform[2][2] = 1;  // world-space vertices
+        desc.InstanceID = (UINT)m_instances.size();
+        desc.InstanceMask = kRtMaskAll;
+        desc.Flags = instanceFlags(d.sceneInstance);
+        desc.AccelerationStructure = m_deformedBlasPool.address() + d.blasOffset;
+        m_dynamicRecord.push_back((uint32_t)m_instances.size());
+        m_instances.push_back({ d.sceneInstance, d.geometryBase, d.vertexBase, kRtInstanceDeformed });
+        m_dynamicDescs.push_back(desc);
+    }
+    m_stats.staticInstances = (uint32_t)m_staticDescs.size();
+    m_stats.dynamicInstances = (uint32_t)m_dynamicDescs.size();
+    m_stats.deformedInstances = (uint32_t)m_deformed.size();
+
+    m_instanceBuffer = createStructured(m_instances.data(), sizeof(RtInstance), (uint32_t)m_instances.size(), L"RT instances");
+    m_geometryBuffer = createStructured(m_geometries.data(), sizeof(RtGeometry), (uint32_t)m_geometries.size(), L"RT geometries");
+    // R's own index pool and vertex map hold proxy cuts (empty until cluster LOD cuts exist); valid descriptors regardless.
+    m_indexPool = createStructured(nullptr, sizeof(uint32_t), 0, L"RT proxy indices");
+    m_vertexMap = createStructured(nullptr, sizeof(uint32_t), 0, L"RT vertex map");
+
+    buildStaticTlas();
+    // Dynamic TLAS and deformed BLASes: first full build at load.
+    {
+        CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
+        gpu::FrameConstants fcData{};
+        m_scene.fill(fcData);
+        Buffer constants = createBuffer(1024, false, false, L"RT load frame constants");
+        upload(constants, &fcData, sizeof fcData);
+        cl.list->SetComputeRootConstantBufferView(1, constants.address());
+        updateDynamic(cl.list.Get(), false);
+        m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(cl));
+        release(constants);
+    }
+    m_tlasStaticSrv = tlasSrv(m_tlasStatic.address());
+    m_tlasDynamicSrv = tlasSrv(m_tlasDynamic.address());
+    m_stats.loadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    logf("RayScene: %u static + %u dynamic instances (%u deformed), %u mesh BLAS (%llu tris, %.1f MB compacted from %.1f MB), deformed %llu tris / %llu verts "
+         "(%u above proxy budget), TLAS static %.1f MB dynamic %.2f MB, load %.0f ms\n",
+         m_stats.staticInstances, m_stats.dynamicInstances, m_stats.deformedInstances, m_stats.meshBlas, (unsigned long long)m_stats.meshBlasTriangles,
+         m_stats.meshBlasBytes / 1048576.0, m_stats.meshBlasBytesBeforeCompaction / 1048576.0, (unsigned long long)m_stats.deformedTriangles,
+         (unsigned long long)m_stats.deformedVertices, m_stats.deformedAboveProxyBudget, m_stats.tlasStaticBytes / 1048576.0, m_stats.tlasDynamicBytes / 1048576.0,
+         m_stats.loadMs);
+}
+
+void RayScene::buildMeshBlas()
+{
+    const scene::Scene* src = m_scene.source();
+    const auto& meshes = m_scene.meshes();
+    const D3D12_GPU_VIRTUAL_ADDRESS vertices = m_scene.buffer("vertices")->GetGPUVirtualAddress();
+    const D3D12_GPU_VIRTUAL_ADDRESS indices = m_scene.buffer("indices")->GetGPUVirtualAddress();
+    auto materialAlpha = [&](uint32_t material) { return material < src->materials.size() && src->materials[material].alphaCutoff > 0; };
+
+    struct Build
+    {
+        uint32_t mesh;
+        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
+        uint64_t offset = 0, scratchOffset = 0;
+    };
+    std::vector<Build> builds;
+    for (uint32_t m = 0; m < (uint32_t)meshes.size(); ++m)
+    {
+        if (m_meshBlas[m].geometryBase == gpu::kNone) continue;
+        const gpu::Mesh& gm = meshes[m];
+        const scene::Mesh& sm = src->meshes[m];
+        Build b;
+        b.mesh = m;
+        for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size(); ++s)
+        {
+            if (sm.submeshes[s].indexCount == 0) continue;
+            const bool alpha = materialAlpha(sm.submeshes[s].material);
+            m_meshBlas[m].anyAlpha |= alpha;
+            D3D12_RAYTRACING_GEOMETRY_DESC g{};
+            g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            g.Flags = alpha ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+            g.Triangles.VertexBuffer = { vertices + (uint64_t)gm.vertexOffset * sizeof(gpu::Vertex), sizeof(gpu::Vertex) };
+            g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+            g.Triangles.VertexCount = gm.vertexCount;
+            g.Triangles.IndexBuffer = indices + ((uint64_t)gm.indexOffset + sm.submeshes[s].indexOffset) * sizeof(uint32_t);
+            g.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+            g.Triangles.IndexCount = sm.submeshes[s].indexCount;
+            b.geometries.push_back(g);
+        }
+        m_stats.meshBlasTriangles += gm.triangleCount;
+        builds.push_back(std::move(b));
+    }
+    m_stats.meshBlas = (uint32_t)builds.size();
+    if (builds.empty())
+    {
+        m_meshBlasPool = createBuffer(kAsAlign, false, true, L"RT mesh BLAS pool (empty)");
+        return;
+    }
+
+    uint64_t poolBytes = 0;
+    for (Build& b : builds)
+    {
+        b.inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        b.inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
+        b.inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        b.inputs.NumDescs = (UINT)b.geometries.size();
+        b.inputs.pGeometryDescs = b.geometries.data();
+        m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&b.inputs, &b.sizes);
+        if (b.sizes.ResultDataMaxSizeInBytes == 0) fail("RayScene: empty BLAS prebuild size for mesh %u", b.mesh);
+        b.offset = poolBytes;
+        poolBytes += alignUp(b.sizes.ResultDataMaxSizeInBytes, kAsAlign);
+    }
+    m_stats.meshBlasBytesBeforeCompaction = poolBytes;
+    Buffer buildPool = createBuffer(poolBytes, false, true, L"RT mesh BLAS build pool");
+    Buffer sizes = createBuffer(builds.size() * 8, true, false, L"RT BLAS compacted sizes");
+
+    // Build in batches whose scratch fits kScratchBatchBytes; one scratch buffer reused across batches.
+    uint64_t maxScratch = 0;
+    for (const Build& b : builds) maxScratch = std::max(maxScratch, alignUp(b.sizes.ScratchDataSizeInBytes, kAsAlign));
+    Buffer scratch = createBuffer(std::max(maxScratch, std::min<uint64_t>(kScratchBatchBytes, [&] {
+                                      uint64_t t = 0;
+                                      for (const Build& b : builds) t += alignUp(b.sizes.ScratchDataSizeInBytes, kAsAlign);
+                                      return t;
+                                  }())),
+                                  true, false, L"RT BLAS scratch");
+    CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
+    uint64_t scratchUsed = 0;
+    for (Build& b : builds)
+    {
+        const uint64_t need = alignUp(b.sizes.ScratchDataSizeInBytes, kAsAlign);
+        if (scratchUsed + need > scratch.bytes)
+        {
+            globalBarrier(cl.list.Get(), kSyncBuild, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, kSyncBuild, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS);
+            scratchUsed = 0;
+        }
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
+        d.Inputs = b.inputs;
+        d.DestAccelerationStructureData = buildPool.address() + b.offset;
+        d.ScratchAccelerationStructureData = scratch.address() + scratchUsed;
+        cl.list->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
+        scratchUsed += need;
+    }
+    globalBarrier(cl.list.Get(), kSyncBuild, kAsWrite, D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO, kAsRead);
+    std::vector<D3D12_GPU_VIRTUAL_ADDRESS> sources;
+    for (const Build& b : builds) sources.push_back(buildPool.address() + b.offset);
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC post{ sizes.address(), D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE };
+    cl.list->EmitRaytracingAccelerationStructurePostbuildInfo(&post, (UINT)sources.size(), sources.data());
+    globalBarrier(cl.list.Get(), D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, D3D12_BARRIER_SYNC_COPY,
+                  D3D12_BARRIER_ACCESS_COPY_SOURCE);
+    D3D12_HEAP_PROPERTIES rb{ D3D12_HEAP_TYPE_READBACK };
+    D3D12_RESOURCE_DESC1 rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = builds.size() * 8;
+    rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;
+    check(m_device.d3d()->CreateCommittedResource3(&rb, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&readback)),
+          "RT compaction readback");
+    cl.list->CopyBufferRegion(readback.Get(), 0, sizes.resource.Get(), 0, builds.size() * 8);
+    m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(cl));
+
+    std::vector<uint64_t> compacted(builds.size());
+    void* mapped = nullptr;
+    D3D12_RANGE all{ 0, builds.size() * 8 };
+    check(readback->Map(0, &all, &mapped), "map compaction sizes");
+    std::memcpy(compacted.data(), mapped, builds.size() * 8);
+    D3D12_RANGE none{ 0, 0 };
+    readback->Unmap(0, &none);
+
+    uint64_t compactBytes = 0;
+    std::vector<uint64_t> compactOffset(builds.size());
+    for (size_t k = 0; k < builds.size(); ++k)
+    {
+        if (compacted[k] == 0 || compacted[k] > builds[k].sizes.ResultDataMaxSizeInBytes) fail("RayScene: invalid compacted BLAS size %llu", (unsigned long long)compacted[k]);
+        compactOffset[k] = compactBytes;
+        compactBytes += alignUp(compacted[k], kAsAlign);
+    }
+    m_meshBlasPool = createBuffer(compactBytes, false, true, L"RT mesh BLAS pool");
+    CommandList copy = m_device.acquireCommandList(QueueType::Graphics);
+    for (size_t k = 0; k < builds.size(); ++k)
+    {
+        copy.list->CopyRaytracingAccelerationStructure(m_meshBlasPool.address() + compactOffset[k], buildPool.address() + builds[k].offset,
+                                                      D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
+        m_meshBlas[builds[k].mesh].offset = compactOffset[k];
+    }
+    m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(copy));
+    m_stats.meshBlasBytes = compactBytes;
+    release(buildPool);
+    release(scratch);
+    release(sizes);
+}
+
+void RayScene::buildDeformed()
+{
+    const scene::Scene* src = m_scene.source();
+    const auto& instances = m_scene.instances();
+    const auto& meshes = m_scene.meshes();
+    const D3D12_GPU_VIRTUAL_ADDRESS indices = m_scene.buffer("indices")->GetGPUVirtualAddress();
+    m_deformedPool = createBuffer(std::max<uint64_t>(m_stats.deformedVertices, 1) * sizeof(RtDeformedVertex), true, false, L"RT deformed vertices");
+    {
+        DescriptorHeaps& h = m_device.descriptors();
+        m_deformedPool.srv = h.allocateResource();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Buffer.NumElements = (UINT)std::max<uint64_t>(m_stats.deformedVertices, 1);
+        sd.Buffer.StructureByteStride = sizeof(RtDeformedVertex);
+        m_device.d3d()->CreateShaderResourceView(m_deformedPool.resource.Get(), &sd, h.resourceCpu(m_deformedPool.srv));
+    }
+    if (m_deformed.empty())
+    {
+        m_deformedBlasPool = createBuffer(kAsAlign, false, true, L"RT deformed BLAS pool (empty)");
+        return;
+    }
+    auto materialAlpha = [&](uint32_t material) { return material < src->materials.size() && src->materials[material].alphaCutoff > 0; };
+
+    std::vector<DeformJob> jobs;
+    std::vector<uint32_t> groups;  // uint2 pairs
+    uint64_t poolBytes = 0, scratchBytes = 0;
+    for (Deformed& d : m_deformed)
+    {
+        const gpu::Instance& in = instances[d.sceneInstance];
+        const gpu::Mesh& gm = meshes[in.mesh];
+        const scene::Mesh& sm = src->meshes[in.mesh];
+        const scene::Instance& si = src->instances[d.sceneInstance];
+        for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size(); ++s)
+        {
+            if (sm.submeshes[s].indexCount == 0) continue;
+            const uint32_t material = s < si.materialOverrides.size() ? si.materialOverrides[s] : sm.submeshes[s].material;
+            D3D12_RAYTRACING_GEOMETRY_DESC g{};
+            g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            g.Flags = materialAlpha(material) ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+            g.Triangles.VertexBuffer = { 0, sizeof(RtDeformedVertex) };  // pool address patched below
+            g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+            g.Triangles.VertexCount = gm.vertexCount;
+            g.Triangles.IndexBuffer = indices + ((uint64_t)gm.indexOffset + sm.submeshes[s].indexOffset) * sizeof(uint32_t);
+            g.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+            g.Triangles.IndexCount = sm.submeshes[s].indexCount;
+            d.geometries.push_back(g);
+        }
+        for (auto& g : d.geometries) g.Triangles.VertexBuffer.StartAddress = m_deformedPool.address() + (uint64_t)d.vertexBase * sizeof(RtDeformedVertex);
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs = (UINT)d.geometries.size();
+        inputs.pGeometryDescs = d.geometries.data();
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
+        m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &sizes);
+        d.blasOffset = poolBytes;
+        poolBytes += alignUp(sizes.ResultDataMaxSizeInBytes, kAsAlign);
+        d.scratchOffset = scratchBytes;
+        scratchBytes += alignUp(std::max(sizes.ScratchDataSizeInBytes, sizes.UpdateScratchDataSizeInBytes), kAsAlign);
+
+        const uint32_t job = (uint32_t)jobs.size();
+        jobs.push_back({ d.sceneInstance, d.vertexBase, gpu::kNone, d.vertexCount });
+        for (uint32_t first = 0; first < d.vertexCount; first += 64) groups.insert(groups.end(), { job, first });
+    }
+    m_deformedBlasPool = createBuffer(poolBytes, false, true, L"RT deformed BLAS pool");
+    m_deformedScratch = createBuffer(scratchBytes, true, false, L"RT deformed BLAS scratch");
+    m_deformJobs = createStructured(jobs.data(), sizeof(DeformJob), (uint32_t)jobs.size(), L"RT deform jobs");
+    m_deformGroups = createStructured(groups.data(), 8, (uint32_t)(groups.size() / 2), L"RT deform groups");
+    m_deformGroupCount = (uint32_t)(groups.size() / 2);
+    m_stats.deformedBlasBytes = poolBytes;
+    // UAV of the deformed pool for the deform kernel.
+    DescriptorHeaps& h = m_device.descriptors();
+    m_deformedPoolUav = h.allocateResource();
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+    ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    ud.Buffer.NumElements = (UINT)m_stats.deformedVertices;
+    ud.Buffer.StructureByteStride = sizeof(RtDeformedVertex);
+    m_device.d3d()->CreateUnorderedAccessView(m_deformedPool.resource.Get(), nullptr, &ud, h.resourceCpu(m_deformedPoolUav));
+}
+
+void RayScene::buildStaticTlas()
+{
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+    inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    inputs.NumDescs = (UINT)m_staticDescs.size();
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
+    m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &sizes);
+    m_tlasStatic = createBuffer(sizes.ResultDataMaxSizeInBytes, false, true, L"RT static TLAS");
+    m_stats.tlasStaticBytes = m_tlasStatic.bytes;
+    Buffer scratch = createBuffer(sizes.ScratchDataSizeInBytes, true, false, L"RT static TLAS scratch");
+    m_staticDescBuffer = createBuffer(m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), false, false, L"RT static instance descs");
+    upload(m_staticDescBuffer, m_staticDescs.data(), m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
+    inputs.InstanceDescs = m_staticDescBuffer.address();
+    CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
+    d.Inputs = inputs;
+    d.DestAccelerationStructureData = m_tlasStatic.address();
+    d.ScratchAccelerationStructureData = scratch.address();
+    cl.list->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
+    m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(cl));
+    release(scratch);
+}
+
+void RayScene::recordDeform(ID3D12GraphicsCommandList7* cmd) const
+{
+    // The caller bound the frame constants (root CBV b1): deformVertex reads time, palettes and scene buffers.
+    cmd->SetPipelineState(m_shaders.compute("RayTracing/Deform"));
+    const uint32_t width = std::min<uint32_t>(m_deformGroupCount, 65535u);
+    const uint32_t constants[8] = { m_deformJobs.srv, m_deformGroups.srv, m_deformedPoolUav, m_deformGroupCount, m_vertexMap.srv, width, 0, 0 };
+    cmd->SetComputeRoot32BitConstants(0, 8, constants, 0);
+    cmd->Dispatch(width, (m_deformGroupCount + width - 1) / width, 1);
+}
+
+void RayScene::recordRefit(ID3D12GraphicsCommandList7* cmd, bool refit) const
+{
+    // Refit (or first build) of every deformed BLAS; each has its own scratch range, so the builds run concurrently.
+    for (const Deformed& dd : m_deformed)
+    {
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs = (UINT)dd.geometries.size();
+        inputs.pGeometryDescs = dd.geometries.data();
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
+        d.Inputs = inputs;
+        d.DestAccelerationStructureData = m_deformedBlasPool.address() + dd.blasOffset;
+        if (refit)
+        {
+            d.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+            d.SourceAccelerationStructureData = d.DestAccelerationStructureData;
+        }
+        d.ScratchAccelerationStructureData = m_deformedScratch.address() + dd.scratchOffset;
+        cmd->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
+    }
+}
+
+void RayScene::updateDynamic(ID3D12GraphicsCommandList7* cmd, bool refit)
+{
+    if (!m_deformed.empty())
+    {
+        recordDeform(cmd);
+        globalBarrier(cmd, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, kSyncBuild, D3D12_BARRIER_ACCESS_SHADER_RESOURCE);
+        recordRefit(cmd, refit);
+        globalBarrier(cmd, kSyncBuild, kAsWrite, kSyncBuild, kAsRead);
+    }
+    recordDynamicTlas(cmd);
+    globalBarrier(cmd, kSyncBuild, kAsWrite, kSyncTrace | kSyncBuild, kAsRead);
+}
+
+void RayScene::record(FramePassContext& fc)
+{
+    RenderGraph& g = fc.graph;
+    m_frame = {};
+    m_frame.tlasStatic = g.importBuffer(m_tlasStatic.resource.Get(), { "RT static TLAS", m_tlasStatic.bytes, 0 });
+    m_frame.tlasDynamic = g.importBuffer(m_tlasDynamic.resource.Get(), { "RT dynamic TLAS", m_tlasDynamic.bytes, 0 });
+    fc.resources.tlasStatic = m_frame.tlasStatic;
+    fc.resources.tlasDynamic = m_frame.tlasDynamic;
+    const BufferRef scratch = g.importBuffer(m_tlasScratch.resource.Get(), { "RT dynamic TLAS scratch", m_tlasScratch.bytes, 0 });
+    const BufferRef descs = g.importBuffer(m_dynamicDescBuffer.resource.Get(), { "RT dynamic instance descs", m_dynamicDescBuffer.bytes, 0 });
+    if (!m_deformed.empty())
+    {
+        const BufferRef pool = g.importBuffer(m_deformedPool.resource.Get(), { "RT deformed vertices", m_deformedPool.bytes, 0 });
+        const BufferRef blas = g.importBuffer(m_deformedBlasPool.resource.Get(), { "RT deformed BLAS pool", m_deformedBlasPool.bytes, 0 });
+        const BufferRef blasScratch = g.importBuffer(m_deformedScratch.resource.Get(), { "RT deformed BLAS scratch", m_deformedScratch.bytes, 0 });
+        m_frame.deformedBlas = blas;
+        m_frame.deformedVertices = pool;
+        const D3D12_GPU_VIRTUAL_ADDRESS constants = fc.frameConstantsFor(fc.frame.mainView);
+        g.addPass("r.as.deform", QueueType::Compute, [&](PassBuilder& b) { b.use(pool, Use::UavCompute); },
+                  [this, constants](PassContext& c) {
+                      c.bindFrameConstants(constants);
+                      recordDeform(c.cmd);
+                  });
+        g.addPass("r.as.refit", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(pool, Use::AccelerationStructureInput);
+                      b.use(blas, Use::AccelerationStructureWrite);
+                      b.use(blas, Use::AccelerationStructureRead);
+                      b.use(blasScratch, Use::AccelerationStructureScratch);
+                  },
+                  [this](PassContext& c) { recordRefit(c.cmd, true); });
+    }
+    const Frame frame = m_frame;
+    g.addPass("r.as.tlas.dynamic", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  if (frame.deformedBlas.valid()) b.use(frame.deformedBlas, Use::AccelerationStructureRead);
+                  b.use(descs, Use::AccelerationStructureInput);
+                  b.use(frame.tlasDynamic, Use::AccelerationStructureWrite);
+                  b.use(scratch, Use::AccelerationStructureScratch);
+              },
+              [this](PassContext& c) { recordDynamicTlas(c.cmd); });
+}
+
+void RayScene::declareTraversal(PassBuilder& b) const
+{
+    b.use(m_frame.tlasStatic, Use::AccelerationStructureRead);
+    b.use(m_frame.tlasDynamic, Use::AccelerationStructureRead);
+    if (m_frame.deformedBlas.valid()) b.use(m_frame.deformedBlas, Use::AccelerationStructureRead);
+    if (m_frame.deformedVertices.valid()) b.use(m_frame.deformedVertices, Use::SrvGraphics);
+}
+
+void RayScene::recordDynamicTlas(ID3D12GraphicsCommandList7* cmd)
+{
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+    inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    inputs.NumDescs = (UINT)m_dynamicDescs.size();
+    if (!m_tlasDynamic.resource)
+    {
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
+        m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &sizes);
+        m_tlasDynamic = createBuffer(sizes.ResultDataMaxSizeInBytes, false, true, L"RT dynamic TLAS");
+        m_tlasScratch = createBuffer(sizes.ScratchDataSizeInBytes, true, false, L"RT dynamic TLAS scratch");
+        m_dynamicDescBuffer = createBuffer(std::max<size_t>(m_dynamicDescs.size(), 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), false, false, L"RT dynamic instance descs");
+        m_stats.tlasDynamicBytes = m_tlasDynamic.bytes;
+        // Instance descriptors come from the GPU scene's transforms; until core updates instance transforms per tick
+        // (P6) they are the load-time values, uploaded once.
+        upload(m_dynamicDescBuffer, m_dynamicDescs.data(), m_dynamicDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
+    }
+    inputs.InstanceDescs = m_dynamicDescBuffer.address();
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
+    d.Inputs = inputs;
+    d.DestAccelerationStructureData = m_tlasDynamic.address();
+    d.ScratchAccelerationStructureData = m_tlasScratch.address();
+    cmd->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
+}
+
+void RayScene::rootConstants(uint32_t out[8]) const
+{
+    out[0] = m_tlasStaticSrv;
+    out[1] = m_tlasDynamicSrv;
+    out[2] = m_instanceBuffer.srv;
+    out[3] = m_geometryBuffer.srv;
+    out[4] = m_indexPool.srv;
+    out[5] = m_vertexMap.srv;
+    out[6] = m_deformedPool.srv;
+    out[7] = 0;
+}
+} // namespace unx::render::rt

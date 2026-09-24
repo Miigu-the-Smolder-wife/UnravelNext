@@ -7,3 +7,12 @@ screen_probe_spacing_px = 8
 near_occlusion_radius_m = 0.5
 near_occlusion_taps = 16
 relight_frames_max = 8             # frames to reconverge after a light change (quality definition, section 3)
+cache_cell_angle_deg = 0.5         # cache cell edge ~ distance * tan(angle): ~16 px at 4K 60 deg (level = ceil(log2(edge / min)))
+cache_cell_min_m = 0.0625          # finest cell edge (level 0)
+cache_levels_max = 24
+cache_max_age_frames = 240         # LRU eviction of entries not used (by probes or ray hits) for this many frames
+jacobi_updates = 8                 # after a reset (new entry, lighting epoch change): updates without averaging (multi-bounce
+                                   # converges geometrically: rho^8 < 0.4 % at albedo 0.5)
+history_updates_max = 32           # then the running mean over at most this many updates (static scenes converge; slow
+                                   # changes such as a moving sun are followed with this window)
+ray_length_m = 10000
