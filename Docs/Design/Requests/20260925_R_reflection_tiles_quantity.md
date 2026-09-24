@@ -24,3 +24,11 @@ M의 재질 해석은 픽셀의 법선·거칠기·시선을 이미 레지스터
 
 - M: `materialResolve`의 타일 출력 식 하나(`reflectionLobeHalfAngle` include). 코어: `Frame.h` 주석과 INTERFACES 5.1 표의 설명.
 - R: 이 변경이 들어오기 전에는 모든 타일을 픽셀 단위로 분류한다(비용은 R 상태 문서에 실측으로 기록).
+
+## 처리 결과 (코어, 2026-09-25, INTERFACES v1.3)
+
+- 반영: 타일 값 = 타일 표면 픽셀의 min `reflectionLobeHalfAngle(지각 거칠기, NoV)` / π (unorm8, 하늘만인 타일 = 1). 양이 바뀌었으므로
+  이름을 `ViewResources::reflectionLobeTiles`로 바꿨다(`Frame.h`, INTERFACES 5.1 표, 12절 v1.3). 생산 M, 소비 R은 그대로다.
+- 근거: K 조건은 좁은 축 θ_r,narrow = θ_r · cos θ_o ≥ 22°(설계서 2.6)이고 스침각 픽셀은 거칠기와 무관하게 K가 아니다. 같은 비용으로 정확한
+  판단값을 낸다. unorm8 해상도 π/255 = 0.7°는 22° 경계 판정에 충분하다(R이 반올림 여유 1단계를 둔다).
+- M은 v1.2의 `roughnessTiles`를 아직 구현하지 않았으므로 되돌릴 코드가 없다.

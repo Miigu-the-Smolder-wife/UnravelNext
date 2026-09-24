@@ -57,9 +57,10 @@ struct ViewResources
     TextureRef shadowVisibility;   // R32_UINT, 4 light slots x 8 bit (7.3)                 [S]
     TextureRef screenProbes;       // GI screen probes (main view only)                     [R]
     TextureRef reflection;         // RGBA16F reflection radiance + weight (main view only) [R]
-    TextureRef roughnessTiles;     // R8_UNORM ceil(W/8) x ceil(H/8): min perceptual roughness [M]
-                                   // of the tile's surface pixels (sky-only tile = 1); read by R's
-                                   // reflection classification
+    TextureRef reflectionLobeTiles;  // R8_UNORM ceil(W/8) x ceil(H/8): min over the tile's      [M]
+                                     // surface pixels of reflectionLobeHalfAngle(r, NoV) / pi
+                                     // (Reflection.hlsli; sky-only tile = 1); R skips ray
+                                     // classification in tiles whose minimum is K-path wide
     TextureRef color;              // final colour target of this view                      [M]
 };
 
