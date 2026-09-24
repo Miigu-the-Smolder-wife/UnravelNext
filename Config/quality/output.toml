@@ -1,0 +1,7 @@
+# Owner: core. Quality parameters (ARCHITECTURE_KO.md 6, 7.0; INTERFACES_KO.md 9): one file per track under
+# Config/quality, keys only under the file's own namespace, no code defaults. Every performance report records the
+# SHA-256 of the merged effective values.
+
+[output]
+# Measurement and gate resolutions. The harness refuses anything else.
+resolutions = ["3840x2160", "2560x1440"]

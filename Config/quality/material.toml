@@ -1,0 +1,4 @@
+# Owner: M (core session). ARCHITECTURE 2.2.
+[material]
+max_anisotropy = 16
+normal_filter = "lean"            # normal-map to roughness filtering (LEAN/Toksvig family)

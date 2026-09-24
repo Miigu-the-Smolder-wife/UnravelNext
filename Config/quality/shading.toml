@@ -1,0 +1,5 @@
+# Owner: M (core session). ARCHITECTURE 2.4, 2.10, 2.11.
+[shading]
+tonemap = "pbr_neutral"           # Khronos PBR Neutral (INTERFACES 8.4)
+output_encoding = "srgb"          # RGB10A2 display output
+analytic_lights_max = 16          # per froxel list beyond which the rest merge into froxel irradiance (error logged)

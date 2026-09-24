@@ -3,6 +3,7 @@
 // Every number is a GPU timestamp span, median of 101 submissions after a 1.5 s warm-up.
 #include "EmptyFrameScene.h"
 
+#include "unx/render/GpuLock.h"
 #include "unx/render/Harness.h"
 
 #include <winternl.h>  // NTSTATUS for d3dkmthk.h
@@ -161,9 +162,10 @@ void logSchedulingMode(Device& device)
 
 int runOverheadExperiments(Device& device, ShaderLibrary& shaders)
 {
+    requireGpuLock("graph overhead experiments");
     logSchedulingMode(device);
     Timer timer(device);
-    ID3D12PipelineState* pso = shaders.compute("Test/Touch");
+    ID3D12PipelineState* pso = shaders.compute("Passes/Test/Touch");
     uint32_t srv = 0, uav = 0;
     ComPtr<ID3D12Resource> tex = texture4k(device, srv, uav);
     const int N = 120;

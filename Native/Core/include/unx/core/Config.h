@@ -33,6 +33,9 @@ public:
     };
 
     static QualityConfig load(const std::filesystem::path& path);
+    // Every <name>.toml of a directory (Config/quality): a file may define only keys under "<name>." so each track
+    // owns its own file (INTERFACES_KO.md 9). The hash covers the merged set.
+    static QualityConfig loadDirectory(const std::filesystem::path& directory);
     static QualityConfig parse(std::string_view text, const std::string& origin);
 
     // "section.key=value" with the value in TOML syntax; recorded in the hash like any file value.

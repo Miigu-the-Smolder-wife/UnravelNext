@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 project(UnravelNext LANGUAGES CXX)
 
+# Shared file (core-owned). Tracks never edit it: their folders are registered automatically (cmake/Modules.cmake).
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -17,8 +18,11 @@ include(External/Dependencies.cmake)
 include(cmake/Toolchain.cmake)
 include(cmake/BuildIdentity.cmake)
 include(cmake/Shaders.cmake)
+include(cmake/Modules.cmake)
 
 add_subdirectory(Tools/ShaderCompiler)
 add_subdirectory(Native/Core)
+add_subdirectory(Native/Scene)
 add_subdirectory(Native/Render)
+unx_add_tool_folders()
 add_subdirectory(Tests)

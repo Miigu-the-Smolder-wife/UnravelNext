@@ -7,6 +7,8 @@ param(
 # Usage: powershell -File Run.ps1 -Tag rays --only-rays
 #        powershell -File Run.ps1 -Tag base --skip-raster --skip-rays --skip-pso --skip-async
 $ErrorActionPreference = "Continue"
+# Measurements run one at a time across sessions (INTERFACES_KO.md 3.3): call through Tools/CI/GpuLock.ps1.
+if (-not $env:UNX_GPU_LOCK) { throw "Run.ps1 measures the GPU: run it through Tools/CI/GpuLock.ps1 -Track <track> -- powershell -File Tools/Microbench/Run.ps1 ..." }
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $exe = Join-Path $root "build\Microbench.exe"
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"

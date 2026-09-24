@@ -60,7 +60,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        std::string resolutions = "both", out, qualityPath = std::string(UNX_SOURCE_DIR) + "/Config/quality.toml";
+        std::string resolutions = "both", out, qualityPath = std::string(UNX_SOURCE_DIR) + "/Config/quality";
         uint32_t frames = 600, repeats = 5;
         bool doValidate = false, doExperiments = false;
         D3D12_COMMAND_QUEUE_PRIORITY priority = DeviceOptions{}.queuePriority;
@@ -78,7 +78,7 @@ int main(int argc, char** argv)
             else if (a == "--quality") qualityPath = next();
             else fail("unknown argument %s", a.c_str());
         }
-        QualityConfig quality = QualityConfig::load(qualityPath);
+        QualityConfig quality = QualityConfig::loadDirectory(qualityPath);
         if (doValidate) return validate(quality);
         if (out.empty()) out = std::string(UNX_SOURCE_DIR) + "/Results/Gates/EmptyFrame";
 

@@ -1,0 +1,11 @@
+# Owner: S. ARCHITECTURE 2.3 (LUT sizes from the previous engine), 2.4 (froxels).
+[atmosphere]
+transmittance_lut = [256, 64]
+multiscatter_lut = [32, 32]
+sky_view_lut = [192, 108]
+aerial_perspective = [32, 32, 32]
+
+[atmosphere.froxels]
+tile_px = 24
+depth_slices = 64
+lights_max = 32

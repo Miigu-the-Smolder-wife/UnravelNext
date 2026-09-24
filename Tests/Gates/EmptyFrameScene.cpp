@@ -67,7 +67,7 @@ ComPtr<ID3D12Resource> committedBuffer(Device& device, uint64_t size, const wcha
 MeshPipelineDesc meshDesc(const char* ps, std::vector<DXGI_FORMAT> rts, DXGI_FORMAT depth, bool depthWrite, bool conservative = false)
 {
     MeshPipelineDesc d;
-    d.meshShader = "Test/Triangle.ms";
+    d.meshShader = "Passes/Test/Triangle.ms";
     d.pixelShader = ps ? ps : "";
     d.renderTargets = std::move(rts);
     d.depthFormat = depth;
@@ -89,18 +89,18 @@ EmptyFrameScene::EmptyFrameScene(Device& device, ShaderLibrary& shaders, uint32_
     m_giCache = committedBuffer(device, 32ull << 20, L"gi cache");         // 200k x 160 B
     m_particleState = committedBuffer(device, 32ull << 20, L"particles");  // 524k x 64 B
     m_tlas = committedBuffer(device, 64ull << 20, L"tlas (stand-in)");
-    shaders.compute("Test/Touch");
-    shaders.mesh("visDepth", meshDesc("Test/Triangle.ps.OUT1", { DXGI_FORMAT_R32_UINT }, DXGI_FORMAT_D32_FLOAT, true));
+    shaders.compute("Passes/Test/Touch");
+    shaders.mesh("visDepth", meshDesc("Passes/Test/Triangle.ps.OUT1", { DXGI_FORMAT_R32_UINT }, DXGI_FORMAT_D32_FLOAT, true));
     shaders.mesh("depthOnly", meshDesc(nullptr, {}, DXGI_FORMAT_D32_FLOAT, true));
-    shaders.mesh("coverage", meshDesc("Test/Triangle.ps.OUT2", {}, DXGI_FORMAT_D32_FLOAT, false, true));
-    shaders.mesh("colorF16", meshDesc("Test/Triangle.ps.OUT0", { DXGI_FORMAT_R16G16B16A16_FLOAT }, DXGI_FORMAT_UNKNOWN, false));
-    shaders.mesh("colorOut", meshDesc("Test/Triangle.ps.OUT0", { DXGI_FORMAT_R10G10B10A2_UNORM }, DXGI_FORMAT_UNKNOWN, false));
+    shaders.mesh("coverage", meshDesc("Passes/Test/Triangle.ps.OUT2", {}, DXGI_FORMAT_D32_FLOAT, false, true));
+    shaders.mesh("colorF16", meshDesc("Passes/Test/Triangle.ps.OUT0", { DXGI_FORMAT_R16G16B16A16_FLOAT }, DXGI_FORMAT_UNKNOWN, false));
+    shaders.mesh("colorOut", meshDesc("Passes/Test/Triangle.ps.OUT0", { DXGI_FORMAT_R10G10B10A2_UNORM }, DXGI_FORMAT_UNKNOWN, false));
 }
 
 void EmptyFrameScene::build(RenderGraph& g, uint64_t frame, bool fullGraph)
 {
     const uint32_t W = m_width, H = m_height;
-    ID3D12PipelineState* touchPso = m_shaders.compute("Test/Touch");
+    ID3D12PipelineState* touchPso = m_shaders.compute("Passes/Test/Touch");
     uint32_t seed = (uint32_t)frame * 131u;
     uint32_t declared = 0;
 

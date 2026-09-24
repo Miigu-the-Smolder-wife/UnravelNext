@@ -2,6 +2,7 @@
 
 #include "unx/BuildIdentity.generated.h"
 #include "unx/core/File.h"
+#include "unx/render/GpuLock.h"
 
 #include <nvapi.h>
 
@@ -104,6 +105,7 @@ uint32_t Harness::sampleSmClockMHz()
 HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& options, const BuildFrame& build)
 {
     if (resolution.width == 0) fail("harness: resolution not set");
+    const std::string lockHolder = requireGpuLock("Harness::run");
     RenderGraph graph(m_device);
     graph.setAsyncCompute(options.asyncCompute);
     GpuProfiler profiler(m_device, options.framesInFlight, 1024);
@@ -204,6 +206,7 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
         js << " \"adapter\": " << jsonString(caps.adapter) << ", \"driver\": " << jsonString(caps.driver) << ",\n";
         js << " \"d3d12core\": " << jsonString(caps.runtimeVersion) << ", \"agility_package\": " << jsonString(UNX_AGILITY_PACKAGE_VERSION) << ",\n";
         js << " \"nvapi\": " << jsonString(caps.nvapiInterface + " / driver branch " + caps.nvapiBranch) << ",\n";
+        js << " \"gpu_lock\": " << jsonString(lockHolder) << ",\n";
         js << " \"queue_priority\": " << jsonString(m_device.options().queuePriority == D3D12_COMMAND_QUEUE_PRIORITY_HIGH ? "high" : "normal") << ",\n";
         js << " \"warmup_s\": " << options.warmupSeconds << ", \"frames\": " << timings.size() << ", \"frames_in_flight\": " << options.framesInFlight << ", \"pass_timestamps\": " << (options.passTimestamps ? "true" : "false")
            << ", \"async_compute\": " << (options.asyncCompute ? "true" : "false") << ",\n";

@@ -1,0 +1,5 @@
+# Owner: C. Reference path tracer and metrics (ARCHITECTURE 3).
+[reference]
+samples_per_pixel = 4096
+russian_roulette_start_bounce = 4
+census_subsamples = 16

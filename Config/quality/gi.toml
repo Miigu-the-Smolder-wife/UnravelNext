@@ -1,0 +1,9 @@
+# Owner: R. ARCHITECTURE 2.5.
+[gi]
+rays_per_frame = 500000
+cache_entries = 200000
+cache_octahedral_texels = 8        # 8 x 8 per entry
+screen_probe_spacing_px = 8
+near_occlusion_radius_m = 0.5
+near_occlusion_taps = 16
+relight_frames_max = 8             # frames to reconverge after a light change (quality definition, section 3)

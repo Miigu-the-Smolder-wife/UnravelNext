@@ -4,6 +4,7 @@
 #include "unx/core/Log.h"
 #include "unx/core/Sha256.h"
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cmath>
@@ -156,6 +157,28 @@ std::string QualityConfig::Value::canonical() const
 QualityConfig QualityConfig::load(const std::filesystem::path& path)
 {
     return parse(readTextFile(path), path.string());
+}
+
+QualityConfig QualityConfig::loadDirectory(const std::filesystem::path& directory)
+{
+    if (!std::filesystem::is_directory(directory)) fail("quality directory %s does not exist", directory.string().c_str());
+    std::vector<std::filesystem::path> files;
+    for (const auto& e : std::filesystem::directory_iterator(directory))
+        if (e.is_regular_file() && e.path().extension() == ".toml") files.push_back(e.path());
+    std::sort(files.begin(), files.end());
+    QualityConfig merged;
+    merged.m_origin = directory.string();
+    for (const auto& f : files)
+    {
+        QualityConfig part = load(f);
+        const std::string prefix = f.stem().string() + ".";
+        for (auto& [key, value] : part.m_values)
+        {
+            if (key.rfind(prefix, 0) != 0) fail("%s: key '%s' is outside the file's namespace '%s*'", f.string().c_str(), key.c_str(), prefix.c_str());
+            merged.m_values[key] = std::move(value);
+        }
+    }
+    return merged;
 }
 
 QualityConfig QualityConfig::parse(std::string_view text, const std::string& origin)

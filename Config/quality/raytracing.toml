@@ -1,0 +1,5 @@
+# Owner: R. ARCHITECTURE 2.8, 2.12.
+[raytracing]
+character_proxy_triangles = 8000
+near_characters_with_proxy = 64
+dynamic_tlas_instances_max = 100000
