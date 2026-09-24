@@ -204,7 +204,7 @@ Scene waterside(const Request& rq)
 {
     Scene s;
     s.name = "waterside";
-    commonSky(s, 12.0f, 20.0f);
+    commonSky(s, 12.0f, 160.0f);  // low sun behind the lake camera: the far shore is front-lit in the calm mirror
     s.windSpeed = 4.0f;
     const Palette p = buildPalette(s, rq.seed, false);
     {
@@ -322,6 +322,9 @@ Scene waterside(const Request& rq)
     s.cameras.push_back(camera("lake", { -175.0f, lakeFloor(-175, 0) + 1.7f, 0.0f }, { 150.0f, 3.0f, 30.0f }, ev));
     s.cameras.push_back(camera("waves", { 300.0f, 2.5f, 175.0f }, { 280.0f, 0.0f, 80.0f }, ev));
     s.cameras.push_back(camera("grazing", { -100.0f, 0.5f, 30.0f }, { 100.0f, 0.2f, 40.0f }, ev));
+    // Into the sun over the wave bay: sun glints on the waves (specular aliasing test) and the Mie aureole.
+    const float3 toSun = normalize(f3(s.sun.direction.x, 0, s.sun.direction.z));
+    s.cameras.push_back(camera("glint", { 400.0f, 3.0f, -100.0f }, f3(400.0f, 3.0f, -100.0f) + toSun * 100.0f + f3(0, -3.0f, 0), ev));
     for (const auto& c : s.cameras) s.paths.push_back(staticPath(c));
     s.paths.push_back(orbitPath("shore_walk", { 0, 0, 0 }, 190.0f, 2.0f, 1.4f / 190.0f, 30.0f));
     return s;
@@ -478,7 +481,7 @@ Scene interior(const Request& rq)
         l.castShadow = false;
         s.lights.push_back(l);
     }
-    const float ev = 7.0f;
+    const float ev = 9.0f;  // sunlit room (a sun patch of ~1e5 lux on the floor)
     s.cameras.push_back(camera("overview", { -3.5f, 1.7f, 2.6f }, { 1.0f, 0.8f, -2.0f }, ev));
     s.cameras.push_back(camera("mirror", { 0.5f, 1.6f, 1.5f }, { 0.0f, 1.4f, -D }, ev));
     s.cameras.push_back(camera("floor_0", { 0.0f, 3.3f, 0.0f }, { 0.0f, 0.0f, 0.0f }, ev));

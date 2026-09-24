@@ -1,0 +1,206 @@
+#pragma once
+// Sampling of the v1 material model (INTERFACES_KO.md 8.1). The BRDF value is evaluateModel (below): the same
+// function as scene::model::evaluate, evaluated without the float cancellation of the GGX term; directions and pdfs:
+//   specular   GGX visible-normal sampling (Heitz 2018), pdf = G1(v) D(h) / (4 n.v)
+//   diffuse    cosine hemisphere about the shading normal
+//   transmit   (Foliage) cosine hemisphere about the reversed shading normal
+// Lobe probabilities follow the lobes' albedo estimates with a floor on the specular lobe, so every direction with
+// f > 0 has pdf > 0. Directions must lie on the same side of the geometric and the shading normal (no light leaks
+// through the geometric surface from interpolated normals).
+#include "RtScene.h"
+
+#include "unx/scene/MaterialModel.h"
+
+#include <algorithm>
+#include <cmath>
+
+namespace unx::reference
+{
+// The v1 model of scene::model::evaluate (INTERFACES_KO.md 8.1), evaluated in double precision with the GGX
+// normal distribution written without cancellation: D = alpha^2 / (pi (|n x h|^2 + alpha^2 (n.h)^2)^2). The float form
+// alpha^2 / (pi ((n.h)^2 (alpha^2 - 1) + 1)^2) evaluates to 1/0 for alpha = 1e-4 (roughness 0, mirrors) at n.h = 1
+// because alpha^2 is below float resolution next to 1 (Docs/Design/Requests/20260925_C_ggx_precision.md). The value is
+// the same function; tests compare it with scene::model::evaluate where that is well conditioned.
+struct ModelTerms
+{
+    static double ggx(double noh, double sin2, double alpha)
+    {
+        const double a2 = alpha * alpha, t = sin2 + a2 * noh * noh;
+        return a2 / (3.14159265358979323846 * t * t);
+    }
+    static double smith(double nov, double nol, double alpha)
+    {
+        const double a2 = alpha * alpha;
+        const double gv = nol * std::sqrt(nov * nov * (1 - a2) + a2), gl = nov * std::sqrt(nol * nol * (1 - a2) + a2);
+        return 0.5 / (gv + gl);
+    }
+};
+
+inline double dot3(float3 a, float3 b) { return (double)a.x * b.x + (double)a.y * b.y + (double)a.z * b.z; }
+
+inline Rgb evaluateModel(const scene::model::Surface& s, float3 n, float3 v, float3 l)
+{
+    const double nov = dot3(n, v), nol = dot3(n, l);
+    const double kd = (1 - s.metallic) / 3.14159265358979323846;
+    if (s.cls == scene::MaterialClass::Foliage && nov * nol < 0)
+        return Rgb(s.baseColor) * (float)(kd * s.transmission);
+    if (nov <= 0 || nol <= 0) return {};
+    double hx = (double)v.x + l.x, hy = (double)v.y + l.y, hz = (double)v.z + l.z;
+    const double hl = std::sqrt(hx * hx + hy * hy + hz * hz);
+    hx /= hl;
+    hy /= hl;
+    hz /= hl;
+    const double noh = std::clamp((double)n.x * hx + (double)n.y * hy + (double)n.z * hz, 0.0, 1.0);
+    const double voh = std::clamp((double)v.x * hx + (double)v.y * hy + (double)v.z * hz, 0.0, 1.0);
+    const double cx = (double)n.y * hz - (double)n.z * hy, cy = (double)n.z * hx - (double)n.x * hz, cz = (double)n.x * hy - (double)n.y * hx;
+    const double sin2 = cx * cx + cy * cy + cz * cz;
+    const double alpha = scene::model::alphaFromRoughness(s.roughness);
+    const double dv = ModelTerms::ggx(noh, sin2, alpha) * ModelTerms::smith(nov, nol, alpha);
+    const float3 f0 = scene::model::f0(s);
+    const double w = std::pow(1 - voh, 5.0);
+    const double e = scene::model::directionalAlbedo((float)nov, s.roughness);
+    const double diffuseScale = s.cls == scene::MaterialClass::Foliage ? kd * (1 - s.transmission) : kd;
+    const double f0c[3] = { f0.x, f0.y, f0.z }, base[3] = { s.baseColor.x, s.baseColor.y, s.baseColor.z };
+    double out[3];
+    for (int c = 0; c < 3; ++c)
+    {
+        const double fres = f0c[c] + (1 - f0c[c]) * w;
+        out[c] = base[c] * diffuseScale + fres * dv * (1 + f0c[c] * (1 / e - 1));
+    }
+    return { (float)out[0], (float)out[1], (float)out[2] };
+}
+
+struct BsdfSample
+{
+    float3 wi;
+    Rgb f;
+    float pdf = 0;
+};
+
+class Bsdf
+{
+public:
+    Bsdf(const Surface& s, float3 wo, bool lambertOnly = false) : m_s(s), m_wo(wo), m_lambert(lambertOnly)
+    {
+        const float3 ref = std::fabs(s.ns.y) < 0.99f ? float3{ 0, 1, 0 } : float3{ 1, 0, 0 };
+        m_t = normalize(cross(ref, s.ns));
+        m_b = cross(s.ns, m_t);
+        m_nov = std::max(dot(s.ns, wo), 1e-6f);
+        m_alpha = scene::model::alphaFromRoughness(s.bsdf.roughness);
+        if (m_lambert)
+        {
+            m_pSpec = 0;
+            m_pDiff = 1;
+            m_pTrans = 0;
+            return;
+        }
+        const Rgb f0(scene::model::f0(s.bsdf));
+        const float fres = std::pow(1 - m_nov, 5.0f);
+        const float ws = (f0 + (Rgb(1) - f0) * fres).luminance();
+        const Rgb albedo = Rgb(s.bsdf.baseColor) * (1 - s.bsdf.metallic);
+        const bool foliage = s.bsdf.cls == scene::MaterialClass::Foliage;
+        const float wd = albedo.luminance() * (foliage ? 1 - s.bsdf.transmission : 1.0f);
+        const float wt = foliage ? albedo.luminance() * s.bsdf.transmission : 0.0f;
+        const float sum = ws + wd + wt;
+        m_pSpec = sum > 0 ? std::max(ws / sum, 0.1f) : 1.0f;
+        const float rest = sum > 0 ? (wd + wt) : 0.0f;
+        m_pDiff = rest > 0 ? (1 - m_pSpec) * wd / rest : 0.0f;
+        m_pTrans = rest > 0 ? (1 - m_pSpec) * wt / rest : 0.0f;
+        if (rest <= 0) m_pSpec = 1;
+    }
+
+    // BRDF value without the cosine; zero for directions on inconsistent sides.
+    Rgb eval(float3 wi) const
+    {
+        const float gn = dot(m_s.ng, wi), sn = dot(m_s.ns, wi);
+        if (gn * sn <= 0) return {};
+        if (m_lambert) return sn > 0 ? Rgb(m_s.bsdf.baseColor) * (1.0f / scene::model::kPi) : Rgb();
+        if (sn < 0 && m_s.bsdf.cls != scene::MaterialClass::Foliage) return {};
+        return evaluateModel(m_s.bsdf, m_s.ns, m_wo, wi);
+    }
+
+    float pdf(float3 wi) const
+    {
+        const float sn = dot(m_s.ns, wi);
+        if (sn > 0)
+        {
+            float p = m_pDiff * sn / scene::model::kPi;
+            if (m_pSpec > 0) p += m_pSpec * specPdf(wi);
+            return p;
+        }
+        return m_pTrans * (-sn) / scene::model::kPi;
+    }
+
+    bool sample(float uLobe, float u1, float u2, BsdfSample& out) const
+    {
+        float3 wi;
+        if (uLobe < m_pSpec)
+        {
+            wi = sampleVisibleNormalReflection(u1, u2);
+            if (dot(wi, m_s.ns) <= 0) return false;
+        }
+        else if (uLobe < m_pSpec + m_pDiff) wi = cosine(m_s.ns, u1, u2);
+        else wi = cosine(-m_s.ns, u1, u2);
+        out.wi = wi;
+        out.f = eval(wi);
+        out.pdf = pdf(wi);
+        return out.pdf > 0 && !out.f.isZero();
+    }
+
+    float cosine(float3 wi) const { return std::fabs(dot(m_s.ns, wi)); }
+
+private:
+    float3 cosine(float3 n, float u1, float u2) const
+    {
+        const float r = std::sqrt(u1), phi = 2 * scene::model::kPi * u2;
+        const float3 ref = std::fabs(n.y) < 0.99f ? float3{ 0, 1, 0 } : float3{ 1, 0, 0 };
+        const float3 t = normalize(cross(ref, n)), b = cross(n, t);
+        return normalize(t * (r * std::cos(phi)) + b * (r * std::sin(phi)) + n * std::sqrt(std::max(0.0f, 1 - u1)));
+    }
+
+    float specPdf(float3 wi) const
+    {
+        double hx = (double)m_wo.x + wi.x, hy = (double)m_wo.y + wi.y, hz = (double)m_wo.z + wi.z;
+        const double hl = std::sqrt(hx * hx + hy * hy + hz * hz);
+        hx /= hl;
+        hy /= hl;
+        hz /= hl;
+        const float3 n = m_s.ns;
+        const double noh = n.x * hx + n.y * hy + n.z * hz;
+        if (noh <= 0) return 0;
+        const double cx = n.y * hz - n.z * hy, cy = n.z * hx - n.x * hz, cz = n.x * hy - n.y * hx;
+        const double a = m_alpha, a2 = a * a, nov = m_nov;
+        const double g1 = 2 * nov / (nov + std::sqrt(a2 + (1 - a2) * nov * nov));
+        return (float)(g1 * ModelTerms::ggx(noh, cx * cx + cy * cy + cz * cz, a) / (4 * nov));
+    }
+
+    float3 sampleVisibleNormalReflection(float u1, float u2) const
+    {
+        const float a = m_alpha;
+        const float3 v{ dot(m_wo, m_t), dot(m_wo, m_b), dot(m_wo, m_s.ns) };
+        const float3 vh = normalize(float3{ a * v.x, a * v.y, v.z });
+        const float lensq = vh.x * vh.x + vh.y * vh.y;
+        const float3 t1 = lensq > 0 ? float3{ -vh.y, vh.x, 0 } / std::sqrt(lensq) : float3{ 1, 0, 0 };
+        const float3 t2 = cross(vh, t1);
+        const float r = std::sqrt(u1), phi = 2 * scene::model::kPi * u2;
+        const float p1 = r * std::cos(phi);
+        const float s = 0.5f * (1 + vh.z);
+        const float p2 = (1 - s) * std::sqrt(std::max(0.0f, 1 - p1 * p1)) + s * r * std::sin(phi);
+        const float3 nh = t1 * p1 + t2 * p2 + vh * std::sqrt(std::max(0.0f, 1 - p1 * p1 - p2 * p2));
+        const float3 hl = normalize(float3{ a * nh.x, a * nh.y, std::max(0.0f, nh.z) });
+        const float3 h = m_t * hl.x + m_b * hl.y + m_s.ns * hl.z;
+        return normalize(h * (2 * dot(m_wo, h)) - m_wo);
+    }
+
+    const Surface& m_s;
+    float3 m_wo, m_t, m_b;
+    bool m_lambert;
+    float m_nov = 1, m_alpha = 1, m_pSpec = 0, m_pDiff = 0, m_pTrans = 0;
+};
+
+inline float powerHeuristic(float a, float b)
+{
+    const float a2 = a * a, b2 = b * b;
+    return a2 + b2 > 0 ? a2 / (a2 + b2) : 0.0f;
+}
+} // namespace unx::reference
