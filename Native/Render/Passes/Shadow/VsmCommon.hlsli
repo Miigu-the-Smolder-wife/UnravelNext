@@ -1,0 +1,103 @@
+// Virtual shadow maps (ARCHITECTURE 2.3, 2.4, 2.11): data layout and helpers shared by the S track's kernels and its
+// public lookups (ShadowVisibility.hlsli). Owner: S.
+//
+// Sun: a clipmap of VSM_LEVELS orthographic levels around the camera, level k covering 2^(k+4) m with VSM_VIRTUAL
+// texels (texel tau_k = 2^(k-10) m), cut into VSM_TABLE x VSM_TABLE virtual pages of VSM_PAGE^2 texels. A level's window
+// is [origin, origin + VSM_TABLE) pages in absolute page coordinates of its light-space grid; a page lives in table
+// slot (absolute page mod VSM_TABLE) and carries its wrap generation (absolute page div VSM_TABLE) as a tag, so the
+// window scrolls without moving cached pages.
+//
+// Stored values are light-space heights h = dot(p, towardSun) of the surface nearest the sun, as order-preserving
+// uints (vsmEncode) so rasterisation resolves them with InterlockedMax; 0 = no caster.
+#ifndef UNX_VSM_COMMON_HLSLI
+#define UNX_VSM_COMMON_HLSLI
+#include "Bindless.hlsli"
+
+#define VSM_LEVELS 12u
+#define VSM_PAGE 128u
+#define VSM_PAGE_SHIFT 7u
+#define VSM_TABLE 128u          // virtual pages per level axis (VSM_VIRTUAL / VSM_PAGE)
+#define VSM_TABLE_SHIFT 7u
+#define VSM_VIRTUAL 16384u
+#define VSM_SLOTS_PER_LEVEL (VSM_TABLE * VSM_TABLE)
+#define VSM_SUN_SLOTS (VSM_LEVELS * VSM_SLOTS_PER_LEVEL)
+
+// Page table entry .x
+#define VSM_PHYS_MASK 0x003FFFFFu
+#define VSM_FLAG_DIRTY (1u << 29)      // rendered this frame
+#define VSM_FLAG_STALE (1u << 30)      // content invalid: render when next requested
+#define VSM_FLAG_RESIDENT (1u << 31)
+// Request flags (one uint per slot)
+#define VSM_REQ_PIXEL 1u
+#define VSM_REQ_PROPAGATED 2u
+
+struct VsmLevel
+{
+    int2 origin;    // absolute page coordinate of the window's first page
+    float texel;    // tau_k (m)
+    float pad;
+};
+
+// Per-frame constants (VsmSystem.cpp mirrors this layout), read from an upload ring with ByteAddressBuffer::Load.
+struct VsmConstants
+{
+    float3 lightX;
+    float hMin;              // light-space height range of the casters (raster depth mapping)
+    float3 lightY;
+    float hMax;
+    float3 lightZ;           // towards the sun
+    float tanSunRadius;
+    uint poolPagesX, poolPagesY, frame, sceneInvalidate;  // sceneInvalidate: every resident page is stale
+    float time;
+    float lodBias;
+    float receiverBiasTexels;   // tolerance above the receiver's plane, in texels of the compared level (x (1 + slope))
+    float maxReceiverSlope;     // clamp of the receiver plane's light-space gradient (grazing surfaces)
+    uint cacheFrames;        // unrequested pages are released after this many frames
+    uint instanceCount;
+    uint windTexels;         // wind moves a caster "beyond a texel" at windTexels texels (normally 1)
+    uint pad0;
+    VsmLevel level[VSM_LEVELS];
+};
+
+VsmConstants vsmLoadConstants(uint buffer, uint offset)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[buffer];
+    return b.Load<VsmConstants>(offset);
+}
+
+uint vsmEncode(float h)
+{
+    const uint u = asuint(h);
+    return (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+}
+float vsmDecode(uint e) { return asfloat((e & 0x80000000u) ? (e & 0x7FFFFFFFu) : ~e); }
+#define VSM_EMPTY 0u
+
+float3 vsmLightSpace(VsmConstants c, float3 world) { return float3(dot(world, c.lightX), dot(world, c.lightY), dot(world, c.lightZ)); }
+
+// Finest level whose texel is not larger than the receiver's pixel footprint (ARCHITECTURE 2.3: page texel <= pixel).
+uint vsmLevelForFootprint(VsmConstants c, float footprint)
+{
+    const float k = floor(log2(max(footprint, 1e-30) * 1024.0) + c.lodBias);  // tau_0 = 2^-10 m
+    return (uint)clamp(k, 0.0, float(VSM_LEVELS - 1));
+}
+
+// Absolute texel (integer) of a light-space position at level k; floor division keeps negative coordinates exact.
+int2 vsmAbsTexel(VsmConstants c, float2 uv, uint k) { return int2(floor(uv / c.level[k].texel)); }
+int2 vsmAbsPage(int2 absTexel) { return absTexel >> (int)VSM_PAGE_SHIFT; }  // arithmetic shift = floor division
+bool vsmInWindow(VsmConstants c, int2 absPage, uint k) { return all(absPage >= c.level[k].origin) && all(absPage < c.level[k].origin + (int)VSM_TABLE); }
+uint vsmSlot(int2 absPage, uint k) { return k * VSM_SLOTS_PER_LEVEL + (uint(absPage.y) & (VSM_TABLE - 1)) * VSM_TABLE + (uint(absPage.x) & (VSM_TABLE - 1)); }
+uint vsmTag(int2 absPage) { return (uint(absPage.x >> (int)VSM_TABLE_SHIFT) & 0xFFFFu) | (uint(absPage.y >> (int)VSM_TABLE_SHIFT) << 16); }
+
+// Absolute page held by a slot of level k under the level's current window.
+int2 vsmSlotAbsPage(VsmConstants c, uint slotInLevel, uint k)
+{
+    const int2 s = int2(slotInLevel & (VSM_TABLE - 1), slotInLevel >> VSM_TABLE_SHIFT);
+    const int2 o = c.level[k].origin;
+    // The unique a in [o, o + TABLE) with a = s (mod TABLE).
+    return o + ((s - (o & (int)(VSM_TABLE - 1))) & (int)(VSM_TABLE - 1));
+}
+
+uint2 vsmPhysBase(VsmConstants c, uint phys) { return uint2(phys % c.poolPagesX, phys / c.poolPagesX) * VSM_PAGE; }
+
+#endif

@@ -1,0 +1,14 @@
+// unx-kernel: cs_6_6 main
+// Start of the frame's VSM update: empty dirty list and zeroed counters.
+// P[0].x dirty list UAV (raw), P[0].y stats UAV (raw)
+#include "Bindless.hlsli"
+
+[numthreads(1, 1, 1)]
+void main()
+{
+    RWByteAddressBuffer dirty = ResourceDescriptorHeap[P[0].x];
+    RWByteAddressBuffer stats = ResourceDescriptorHeap[P[0].y];
+    dirty.Store2(0, uint2(0, 0));
+    stats.Store4(0, uint4(0, 0, 0, 0));
+    stats.Store4(16, uint4(0, 0, 0, 0));
+}

@@ -1,9 +1,16 @@
 # Owner: S. ARCHITECTURE 2.3, 2.4, 2.11.
 [shadow.vsm]
-virtual_resolution = 16384
-page_texels = 128
-clipmap_levels = 12
+virtual_resolution = 16384      # per clipmap level (compiled into the S kernels)
+page_texels = 128               # (compiled)
+clipmap_levels = 12             # level k covers 2^(k+4) m, texel 2^(k-10) m (compiled)
+pool_pages = 3072               # physical 128^2 R32 pages: 192 MB (ARCHITECTURE 4.2)
+cache_frames = 120              # a page not requested for this many frames is released
+lod_bias = 0.0                  # level = floor(log2(pixel footprint / level-0 texel)) + bias: texel <= footprint
+receiver_bias_texels = 1.0      # receiver-plane tolerance, texels of the compared level (x (1 + plane slope)); no lateral shift
+max_receiver_slope = 8.0        # clamp of the receiver plane's light-space gradient (surfaces within ~7 deg of grazing)
+height_margin_m = 500.0         # caster height range margin (dynamic casters) around the scene's bounds
+wind_texels = 1                 # wind moves a caster beyond this many texels of a page's level -> the page re-renders
+search_taps = 5                 # blocker-height taps (2 x 2 texels each) over the reach disk
+filter_taps = 16                # penumbra occupancy taps over the disk of radius d_b tan(theta_s); 16 = knee of the measured error (VsmTests)
 local_lights_max = 128
-smrt_taps = 5
-penumbra_extra_taps = 4
 page_sort_tile_px = 64
