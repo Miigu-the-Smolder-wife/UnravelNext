@@ -8,3 +8,4 @@
 *.nupkg binary
 # Measurement evidence is stored byte-exact (the benchmark writes CRLF on Windows)
 Tools/Microbench/Results/** -text
+Results/** -text
