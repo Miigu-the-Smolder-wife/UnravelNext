@@ -1,0 +1,61 @@
+# C 트랙 (기준·콘텐츠) 상태 — 2026-09-25
+
+표기는 설계서와 같다: [실측]은 이 기계(i9-13900KF 32스레드, 다른 세션 빌드와 공유)에서 실제 실행한 값, [예상]은 그 실측에서 외삽한 값.
+
+## 명령
+
+```text
+powershell -File Tools/CI/Build.ps1 -Track C                       build/C (코어 + C)
+build/C/bin/unx_test_scenegen.exe                                  장면 결정성·검증·게이트 부하 (≈35 s)
+build/C/bin/unx_test_reference.exe [이름]                          기준 경로추적기 닫힌 해 검사 (전체 ≈4 min)
+build/C/bin/unx_test_census_replica.exe thin|card grass|nograss    인구조사 도구 ↔ 마이크로벤치 GPU 인구조사
+build/C/bin/unx_scenegen.exe --scene <이름|all> --out <폴더>       .unxscene 생성
+build/C/bin/unx_reference.exe render|census|compare|selfcheck ...  기준 영상(캐시)·인구조사·비교 (도구 머리말 참조)
+powershell -File Reference/Tools/RenderQueue.ps1                   게이트 기준 영상 대기열 (BelowNormal, 재개 가능)
+```
+
+## 완료
+
+| 항목 | 내용 | 검증 |
+|---|---|---|
+| 장면 생성기 | CityBlock, ForestThin(잎 6 cm 기하·풀잎 4 mm), ForestCard(잎 35 cm·풀 카드 30 cm, 알파), Waterside(잔잔한 평면 + 파도 만, 젖은 바위, 갈대 3 mm), Interior(거칠기 0.15/0.25/0.35/0.5 바닥 띠, 거울, 크롬 구, 면광원 6, 창 햇빛), CityNight(광원 512, 그림자 128, 젖은 도로 0.15~0.35). 정지·이동 경로 | 결정성(같은 요청 = 같은 해시), `validate`, 광원 수·수목/클럼프 수 [실측, 테스트 통과]. 생성 1~2 s/장면 |
+| 기준 경로추적기 | Embree 4.4.1, INTERFACES 8 모델 전체, 편향 없음(러시안 룰렛), 절반 두 장 독립, 체크포인트 재개, 캐시 `Cache/Reference/...` | 아래 표 |
+| 지표 | 코어 골격(PFM, relMSE, HDR/LDR-FLIP, 시간 불안정도) + 16-부표본 인구조사(`.unxids` 엔진 캡처 형식, 1표본 기준선) | 인구조사: 마이크로벤치 장면 CPU 복제가 GPU 값과 마지막 자리까지 일치 [실측, `Results/C/Census/`] |
+
+### 기준 경로추적기 검사 [실측, `unx_test_reference`]
+
+| 검사 | 결과 |
+|---|---|
+| 점광원 / 사각 / 구 / 원판 면광원 조도 (닫힌 해) | 상대 오차 −1.7e-5 / −4.4e-5 / −7.0e-5 / −4.9e-5 |
+| 그림자 (검은 판) | 점광원 1.2e-5, 태양 2.1e-4 × 직접광 (잔여는 판의 스침각 Schlick 반사) |
+| 흡수만 있는 대기를 지난 태양 | −1.1e-5 |
+| 얇은 대기(계수 × 0.01) 하늘 = 단일 산란 적분 | +0.6% (다중 산란 몫, 예상 ~τ) |
+| 전체 대기: 강제 내산란 NEE ↔ 충돌 NEE 두 추정기 | 차이 0.06~0.16% (허용 0.7~1.3%) |
+| 대기 광학 깊이 표(2048 × 1024, 삼차) | 최대 투과율 상대 오차 5.8e-5 (T > 1e-4, 20000 표본) |
+| BSDF 표본·pdf 일관성, 재질 모델(double) ↔ `scene::model::evaluate` | 통과; 거칠기 ≥ 0.2에서 7.6e-5 |
+
+### 처리량 [실측, 다른 세션과 CPU 공유] 과 게이트 기준 영상 시간 [예상]
+
+- city_block/street: 3.7 M 경로/s → 1440p·4096 spp ≈ 1.1 h, 4K ≈ 2.6 h.
+- forest_thin/forest(1.1 M 인스턴스): 2.1 M 경로/s → 1440p ≈ 2 h, 4K ≈ 4.5 h.
+- 대기열은 BelowNormal 우선순위로 돈다(다른 세션 빌드·CPU 측정이 선점). 실행 파일 스냅샷 `Cache/Reference/bin`에서 돌아 build/C 재빌드를 막지 않는다.
+
+## 설계 결정과 한계 (기록)
+
+- **대기:** 모든 경로 구간의 참여 매질. 짧은 구간은 Gauss-Legendre(패널 = 고도 폭 2 km당 1), 긴 구간은 검증된 표. 하늘빛 분산은 강제 내산란 NEE로 줄인다(편향 없음). 행성 지면은 장면 기하가 없는 광선만 맞는다(골짜기가 행성 반지름 아래로 내려가도 가려지지 않게).
+- **해석 광원은 카메라 광선에 보이지 않고 가리지 않는다**(실시간과 같은 의미). 반사로는 보인다(표면 정점의 NEE/MIS). 그림자를 끈 광원은 NEE만(가시성 1).
+- **바람:** 변형 기하를 인스턴스별로 만든다(한도 1.5억 삼각형). ForestThin/Card(수목 10만 + 클럼프 100만)는 한도를 넘으므로 `--no-wind`로 그린다(장면 해시가 바뀌고 `--write-scene`으로 같은 장면을 엔진에 준다). 정지 품질 비교는 바람 없는 장면이 맞다(시간 안정성 지표도 정지 장면 정의). 바람 잎 위치 오차 측정(설계서 3절 식생)은 도시·수변(변형 기하 가능)에서 한다. 숲 규모의 정확한 바람은 순회 중 인스턴스별 변형(Embree 사용자 기하)이 필요하다 — 미구현.
+- **물·유리:** INTERFACES 8.1에 Water/Glass 모델이 없어 Standard(물 f0 0.02, 창 f0 0.04)로 만들었다. 모델이 정의되면(P4) 장면을 바꾼다.
+- **숲 인구조사 값이 마이크로벤치보다 크다**(얇은 식생 놓침 23% vs 13%): 도구는 복제 장면으로 일치를 확인했으므로 장면 차이(수평 카메라 vs 10° 아래, 기하 잎 6 × 3 cm 전체 면적 vs 알파 37% 쿼드)다. P1 게이트("놓침 ≤ 0.1%")는 엔진 캡처로 판정하므로 영향 없다.
+
+## 요청 (Docs/Design/Requests)
+
+- `20260925_C_embree.md` — Embree를 `Unx::Embree`로 고정. 대기 중(C 폴더에서 같은 URL·SHA-256으로 임시 처리).
+- `20260925_C_wind_direction.md` — `windOffset`의 M·d → Mᵀ·d. 코어 반영(v1.1).
+- `20260925_C_ggx_precision.md` — GGX D의 float 소거(거울에서 1/0). 코어 반영(v1.4).
+
+## 남은 일
+
+1. 게이트 기준 영상 렌더(대기열 진행 중) → 장면별 기준 잡음(절반 relMSE, 절반 간 FLIP) 실측.
+2. 그 잡음 위에 `Config/quality/reference.toml`의 장면별 임계값(FLIP 평균·P99, relMSE, 시간 안정성) 결정. `unx_reference compare`가 이 키를 읽는다(지금은 키가 없어 비교가 실패한다 — 값 없이 기본값을 두지 않는다).
+3. 숲 규모의 정확한 바람(순회 중 변형).
