@@ -16,3 +16,6 @@ jacobi_updates = 8                 # after a reset (new entry, lighting epoch ch
 history_updates_max = 32           # then the running mean over at most this many updates (static scenes converge; slow
                                    # changes such as a moving sun are followed with this window)
 ray_length_m = 10000
+hit_update_share = 0.25            # share of the hemisphere updates guaranteed to entries that GI rays hit (bounce cells)
+hit_cell_footprint_scale = 4.0     # bounce cells (2nd+ bounce irradiance at ray hits) = this x the ray footprint (~0.36 t);
+                                   # direct sun at hits is an exact shadow ray

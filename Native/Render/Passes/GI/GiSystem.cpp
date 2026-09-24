@@ -34,7 +34,7 @@ struct Layout
 Layout layoutOf(const GiSettings& s)
 {
     Layout l{};
-    l.table = 512;  // header 256 B + age histogram 256 B
+    l.table = 1024;  // header 256 B + age histograms 512 B (2 tiers x 64) + spare
     l.freeList = l.table + s.tableSlots * 16;
     l.meta = l.freeList + s.capacity * 4;
     l.anchor = l.meta + s.capacity * 16;
@@ -94,6 +94,8 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.cellMin = (float)q.number("gi.cache_cell_min_m");
     s.nearRadius = (float)q.number("gi.near_occlusion_radius_m");
     s.rayLength = (float)q.number("gi.ray_length_m");
+    s.hitUpdateShare = (float)q.number("gi.hit_update_share");
+    s.hitCellFootprintScale = (float)q.number("gi.hit_cell_footprint_scale");
     // Fixed by the kernels (GiCache.hlsli, GiProbeGather.hlsl, GiInternal.hlsli probe offsets).
     if (q.integer("gi.cache_octahedral_texels") != 8) fail("gi.cache_octahedral_texels must be 8 (GI_TEXELS)");
     if (q.integer("gi.near_occlusion_taps") != 16) fail("gi.near_occlusion_taps must be 16 (GiProbeGather)");
@@ -240,29 +242,38 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
               });
     compute("r.gi.carry", "Passes/GI/GiCarry", groups(s.capacity), {});
-    compute("r.gi.age", "Passes/GI/GiAgeHistogram", groups(s.capacity), {});
-    compute("r.gi.setup", "Passes/GI/GiUpdateSetup", 1, { s.updatesPerFrame });
+    compute("r.gi.age", "Passes/GI/GiAgeHistogram", (s.capacity + 127) / 128, {});
+    compute("r.gi.setup", "Passes/GI/GiUpdateSetup", 1, { s.updatesPerFrame, asU(s.hitUpdateShare) });
     compute("r.gi.select", "Passes/GI/GiSelect", groups(s.capacity), {});
 
     uint32_t scene[8];
     rays.rootConstants(scene);
-    rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline("Passes/GI/GiTrace.SKY1", { "GiTraceGen" }));
+    // Escaping rays see S's sky and sun when the atmosphere LUTs exist this frame (variant SKY0); otherwise the constant
+    // sky of setConstantSky (SKY1: tests, and builds without the S track).
+    const FrameResources& fr = fc.resources;
+    const bool atmosphere = fr.transmittanceLut.valid() && fr.multiScatterLut.valid() && fr.skyViewLut.valid() && fr.aerialPerspective.valid();
+    const TextureRef luts[4] = { fr.transmittanceLut, fr.multiScatterLut, fr.skyViewLut, fr.aerialPerspective };
+    rt::RayPipeline& pipeline =
+        rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(atmosphere ? "Passes/GI/GiTrace.SKY0" : "Passes/GI/GiTrace.SKY1", { "GiTraceGen" }));
     const float3 sky = m_skyRadiance, sun = m_sunIlluminance;
     const uint32_t rayCount = s.updatesPerFrame * 64;
     g.addPass("r.gi.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::UavGraphics);
                   rays.declareTraversal(b);
+                  if (atmosphere)
+                      for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
-              [&pipeline, cache, rayCount, s, sky, sun, scene, frameConstants](PassContext& c) {
+              [&pipeline, cache, rayCount, s, sky, sun, scene, frameConstants, atmosphere, luts](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = c.uav(cache);
                   k[1] = rayCount;
+                  k[2] = asU(s.hitCellFootprintScale);
                   k[4] = asU(sky.x);
                   k[5] = asU(sky.y);
                   k[6] = asU(sky.z);
                   k[7] = asU(s.rayLength);
-                  k[8] = k[9] = k[10] = k[11] = 0xFFFFFFFFu;  // atmosphere SRVs (variant SKY0)
+                  for (int i = 0; i < 4; ++i) k[8 + i] = atmosphere ? c.srv(luts[i]) : 0xFFFFFFFFu;
                   k[12] = asU(sun.x);
                   k[13] = asU(sun.y);
                   k[14] = asU(sun.z);

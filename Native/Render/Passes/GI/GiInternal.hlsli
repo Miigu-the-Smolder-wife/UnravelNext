@@ -20,25 +20,34 @@
 #define GI_H_STAT_TABLE_FULL 136
 #define GI_H_STAT_EVICTED 140
 #define GI_H_STAT_RESETS 144
-#define GI_H_SELECT_THRESHOLD 148  // age bucket at the budget boundary
-#define GI_H_SELECT_QUOTA 152      // entries still to take from that bucket
-#define GI_H_SELECT_FILL 156       // atomic counter within that bucket
-// Age histogram of the requested entries (64 buckets: frames since the last update, 63 = 63 or more / never).
+// Selection of this frame, per tier (0 = screen, 1 = hit): age bucket at the tier's budget boundary, entries still to
+// take from that bucket, atomic counter within it (tier t at GI_H_SELECT + 16 t).
+#define GI_H_SELECT 160
+// Age histograms of the requested entries, one per tier (64 buckets each: frames since the last update, 63 = 63 or more
+// or never updated). Tier 0 = entries the screen probes read, tier 1 = entries last frame's GI rays read (bounces).
 #define GI_HISTOGRAM 256
 #define GI_AGE_BUCKETS 64u
+#define GI_TIER_HIT 0x80000000u  // flag on update-list entries requested by hits
 
 // Meta (16 B): keyLo, keyHi (0 = free), last used frame, frame of the last update-list insertion.
 void giTouch(RWByteAddressBuffer b, GiHeader h, uint entry) { b.Store(h.offMeta + entry * 16 + 8, h.frame); }
 
-// Appends the entry to this frame's request list once (screen-used entries and entries carried from last frame's hits).
-void giRequestUpdate(RWByteAddressBuffer b, GiHeader h, uint entry)
+// Appends the entry to this frame's request list once, in tier 0 (screen) or 1 (hit). Screen requests are made first, so
+// an entry both on screen and hit stays in tier 0.
+void giRequestUpdate(RWByteAddressBuffer b, GiHeader h, uint entry, uint tier)
 {
     uint previous;
     b.InterlockedExchange(h.offMeta + entry * 16 + 12, h.frame, previous);
     if (previous == h.frame) return;
     uint slot;
     b.InterlockedAdd(GI_H_UPDATE_COUNT, 1u, slot);
-    if (slot < h.capacity) b.Store(h.offUpdate + slot * 4, entry);
+    if (slot < h.capacity) b.Store(h.offUpdate + slot * 4, entry | (tier != 0 ? GI_TIER_HIT : 0u));
+}
+
+uint giAgeBucket(RWByteAddressBuffer b, GiHeader h, uint entry)
+{
+    const uint last = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_LAST_UPDATE);
+    return last == 0 ? GI_AGE_BUCKETS - 1 : min(h.frame - last, GI_AGE_BUCKETS - 1);
 }
 
 // Records an entry that a GI ray hit this frame (its irradiance fed a bounce): requested for update next frame.
@@ -157,7 +166,7 @@ float giCacheShAt(B b, GiHeader h, float3 p, float3 normal, out float3 c[9])
         {
             const int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
             const uint entry = giFind(b, h, giKey(level, nc, c0 + o));
-            if (entry == GI_ENTRY_PENDING) continue;
+            if (entry == GI_ENTRY_PENDING || b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0) continue;  // no information yet
             const float3 wt = lerp(1 - t, t, float3(o));
             const float w = wt.x * wt.y * wt.z;
             float3 e[9];

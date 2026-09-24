@@ -13,5 +13,5 @@ void main(uint i : SV_DispatchThreadID)
     if (i >= count) return;
     const uint entry = b.Load(h.offHitList + (parity * h.capacity + i) * 4);
     if (b.Load(h.offMeta + entry * 16 + 4) == 0) return;  // freed since
-    giRequestUpdate(b, h, entry);
+    giRequestUpdate(b, h, entry, 1);
 }

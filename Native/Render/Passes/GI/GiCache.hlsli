@@ -186,7 +186,7 @@ float3 giShIrradiance(B b, GiHeader h, uint entry, float3 n, out float sunVisibi
 }
 
 // Irradiance (indirect + sky, no direct sun) at a surface point: trilinear over the 8 cells of the point's level and
-// normal class, entries that exist only (renormalised); the next coarser level when none exists.
+// normal class, entries that exist and have been updated at least once (renormalised); the next coarser level when none.
 template <typename B>
 float3 giCacheIrradianceAt(B b, GiHeader h, float3 worldPos, float3 normal, out float weight)
 {
@@ -204,7 +204,7 @@ float3 giCacheIrradianceAt(B b, GiHeader h, float3 worldPos, float3 normal, out 
         {
             const int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
             const uint entry = giFind(b, h, giKey(level, nc, c0 + o));
-            if (entry == GI_ENTRY_PENDING) continue;
+            if (entry == GI_ENTRY_PENDING || b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0) continue;  // no information yet
             const float3 wt = lerp(1 - t, t, float3(o));
             const float w = wt.x * wt.y * wt.z;
             float sv;

@@ -1,32 +1,44 @@
 // unx-kernel: cs_6_6 main
-// Splits this frame's fixed ray budget into whole-hemisphere updates (64 rays each): the stalest requested entries first
-// (age histogram scanned from the oldest bucket: every bucket above the threshold is taken, the threshold bucket up to
-// its quota), leftover updates go to background entries round-robin over the pool.
-// P[0] = { cache UAV, updates per frame (budget / 64), 0, 0 }
+// Splits this frame's fixed ray budget into whole-hemisphere updates (64 rays each). Two tiers: entries the screen probes
+// read (tier 0) and entries last frame's GI rays read for bounces (tier 1). Tier 1 is guaranteed a share of the updates
+// (gi.hit_update_share) when it needs them, tier 0 takes the rest; a tier's unused budget goes to the other. Within a
+// tier the stalest entries go first: the tier's age histogram is accumulated from the oldest bucket, every bucket above
+// the threshold is taken and the threshold bucket up to its quota. Updates left over go to background entries.
+// One group of 128 threads = 2 tiers x 64 buckets (suffix sums in groupshared memory).
+// P[0] = { cache UAV, updates per frame (budget / 64), hit share (float bits), 0 }
 #include "Passes/GI/GiInternal.hlsli"
 
-[numthreads(1, 1, 1)]
-void main()
+groupshared uint g_count[2 * GI_AGE_BUCKETS];
+groupshared uint g_suffix[2 * GI_AGE_BUCKETS];  // entries in buckets >= k of the tier
+groupshared uint g_budget[2];
+
+[numthreads(128, 1, 1)]
+void main(uint lane : SV_GroupIndex)
 {
     RWByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
-    const GiHeader h = giHeader(b);
-    const uint updates = P[0].y;
-    uint taken = 0, threshold = 0, quota = 0;
-    [loop] for (int bucket = GI_AGE_BUCKETS - 1; bucket >= 0; --bucket)
+    const uint tier = lane / GI_AGE_BUCKETS, k = lane % GI_AGE_BUCKETS;
+    g_count[lane] = b.Load(GI_HISTOGRAM + lane * 4);
+    GroupMemoryBarrierWithGroupSync();
+    uint suffix = 0;
+    [loop] for (uint j = k; j < GI_AGE_BUCKETS; ++j) suffix += g_count[tier * GI_AGE_BUCKETS + j];
+    g_suffix[lane] = suffix;
+    GroupMemoryBarrierWithGroupSync();
+    if (lane == 0)
     {
-        const uint n = b.Load(GI_HISTOGRAM + bucket * 4);
-        if (taken + n >= updates)
-        {
-            threshold = bucket;
-            quota = updates - taken;
-            taken = updates;
-            break;
-        }
-        taken += n;
-        threshold = bucket;
-        quota = n;
+        const GiHeader h = giHeader(b);
+        const uint updates = P[0].y;
+        const uint screen = g_suffix[0], hit = g_suffix[GI_AGE_BUCKETS];
+        const uint hitUpdates = min(hit, max((uint)(updates * asfloat(P[0].z)), updates - min(screen, updates)));
+        const uint screenUpdates = min(screen, updates - hitUpdates);
+        g_budget[0] = screenUpdates;
+        g_budget[1] = hitUpdates;
+        b.Store(GI_H_BG_COUNT, updates - screenUpdates - hitUpdates);
+        b.Store(GI_H_LIVE_COUNT, h.capacity - h.freeCount);
     }
-    b.Store3(GI_H_SELECT_THRESHOLD, uint3(threshold, quota, 0));
-    b.Store(GI_H_BG_COUNT, updates - min(taken, updates));
-    b.Store(GI_H_LIVE_COUNT, h.capacity - h.freeCount);
+    GroupMemoryBarrierWithGroupSync();
+    // The threshold bucket of a tier is the k whose suffix reaches the budget while suffix(k + 1) does not.
+    const uint budget = g_budget[tier];
+    const uint above = k + 1 < GI_AGE_BUCKETS ? g_suffix[lane + 1] : 0;
+    const bool threshold = budget > 0 ? (suffix >= budget && above < budget) || (k == 0 && suffix < budget) : k == GI_AGE_BUCKETS - 1;
+    if (threshold) b.Store4(GI_H_SELECT + tier * 16, uint4(k, budget > 0 ? min(budget - above, g_count[lane]) : 0, 0, 0));
 }

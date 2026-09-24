@@ -24,7 +24,7 @@ void main(uint2 probe : SV_DispatchThreadID)
     if (own != GI_ENTRY_PENDING)
     {
         giTouch(b, h, own);
-        giRequestUpdate(b, h, own);
+        giRequestUpdate(b, h, own, 0);
     }
     // The other cells of the trilinear footprint (same level and normal class) that exist.
     const uint nc = giNormalClass(n);
@@ -36,6 +36,6 @@ void main(uint2 probe : SV_DispatchThreadID)
         const uint e = giFind(b, h, giKey(level, nc, c0 + int3(k & 1, (k >> 1) & 1, k >> 2)));
         if (e == GI_ENTRY_PENDING || e == own) continue;
         giTouch(b, h, e);
-        giRequestUpdate(b, h, e);
+        giRequestUpdate(b, h, e, 0);
     }
 }

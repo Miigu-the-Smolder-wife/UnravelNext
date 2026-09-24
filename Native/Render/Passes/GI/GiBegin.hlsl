@@ -4,11 +4,11 @@
 // P[0] = { cache UAV, frame, epoch, 0 }, P[1] = { camera xyz (float bits), 0 }
 #include "Passes/GI/GiInternal.hlsli"
 
-[numthreads(64, 1, 1)]
+[numthreads(128, 1, 1)]
 void main(uint lane : SV_GroupIndex)
 {
     RWByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
-    b.Store(GI_HISTOGRAM + lane * 4, 0u);
+    b.Store(GI_HISTOGRAM + lane * 4, 0u);  // 2 tiers x 64 buckets
     if (lane != 0) return;
     const GiHeader h = giHeader(b);
     b.Store(GI_H_FRAME, P[0].y);
@@ -20,5 +20,7 @@ void main(uint lane : SV_GroupIndex)
     b.Store(GI_H_BG_COUNT, 0u);
     b.Store(GI_H_HIT_COUNT + 4 * (P[0].y & 1u), 0u);  // this frame's hit list; last frame's is carried by GiCarry
     b.Store4(GI_H_STAT_CREATED, uint4(0, 0, 0, 0));
-    b.Store4(GI_H_STAT_RESETS, uint4(0, 0, 0, 0));
+    b.Store(GI_H_STAT_RESETS, 0u);
+    b.Store4(GI_H_SELECT, uint4(0, 0, 0, 0));
+    b.Store4(GI_H_SELECT + 16, uint4(0, 0, 0, 0));
 }
