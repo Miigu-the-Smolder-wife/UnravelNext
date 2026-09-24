@@ -21,10 +21,11 @@ struct ModelSurface
 float modelAlpha(float roughness) { return max(roughness * roughness, MODEL_MIN_ALPHA); }
 float3 modelF0(ModelSurface s) { return lerp((0.08 * s.specular).xxx, s.baseColor, s.metallic); }
 
-float modelD(float NoH, float alpha)
+// sinSqNH = |n x h|^2: the direct form avoids NoH^2 (a^2 - 1) + 1 cancelling to 0 at a = 1e-4 (mirror).
+float modelD(float NoH, float sinSqNH, float alpha)
 {
     const float a2 = alpha * alpha;
-    const float t = NoH * NoH * (a2 - 1) + 1;
+    const float t = sinSqNH + a2 * NoH * NoH;
     return a2 / (MODEL_PI * t * t);
 }
 
@@ -62,7 +63,8 @@ float3 modelEvaluate(ModelSurface s, float3 n, float3 v, float3 l)
     const float NoH = saturate(dot(n, h)), VoH = saturate(dot(v, h));
     const float alpha = modelAlpha(s.roughness);
     const float3 f0 = modelF0(s);
-    const float3 single = modelFresnel(f0, VoH) * (modelD(NoH, alpha) * modelV(NoV, NoL, alpha));
+    const float3 nxh = cross(n, h);
+    const float3 single = modelFresnel(f0, VoH) * (modelD(NoH, dot(nxh, nxh), alpha) * modelV(NoV, NoL, alpha));
     const float e = modelDirectionalAlbedo(NoV, s.roughness);
     const float3 compensation = 1 + f0 * (1 / e - 1);
     const float3 diffuse = s.cls == MATERIAL_FOLIAGE ? albedo * (1 - s.transmission) : albedo;

@@ -69,10 +69,10 @@ float3 f0(const Surface& s)
     return lerp3({ d, d, d }, s.baseColor, s.metallic);
 }
 
-float distributionGgx(float NoH, float alpha)
+float distributionGgx(float NoH, float sinSqNH, float alpha)
 {
     const float a2 = alpha * alpha;
-    const float t = NoH * NoH * (a2 - 1) + 1;
+    const float t = sinSqNH + a2 * NoH * NoH;  // = NoH^2 (a2 - 1) + 1 without cancellation (C request, INTERFACES 8.1)
     return a2 / (kPi * t * t);
 }
 
@@ -119,7 +119,8 @@ float3 evaluate(const Surface& s, float3 n, float3 v, float3 l)
     const float NoH = saturate(dot(n, h)), VoH = saturate(dot(v, h));
     const float alpha = alphaFromRoughness(s.roughness);
     const float3 f = f0(s);
-    const float3 single = fresnelSchlick(f, VoH) * (distributionGgx(NoH, alpha) * visibilitySmithGgxCorrelated(NoV, NoL, alpha));
+    const float3 nxh = cross(n, h);
+    const float3 single = fresnelSchlick(f, VoH) * (distributionGgx(NoH, dot(nxh, nxh), alpha) * visibilitySmithGgxCorrelated(NoV, NoL, alpha));
     const float e = directionalAlbedo(NoV, s.roughness);
     const float3 compensation = float3{ 1, 1, 1 } + f * (1 / e - 1);
     const float3 diffuse = s.cls == MaterialClass::Foliage ? albedo * (1 - s.transmission) : albedo;

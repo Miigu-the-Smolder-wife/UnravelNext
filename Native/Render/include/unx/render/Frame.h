@@ -169,6 +169,8 @@ struct FramePassContext
     // Frame constants for a view (allocates a 1 KB slot of this frame): bind with PassContext::bindFrameConstants.
     std::function<D3D12_GPU_VIRTUAL_ADDRESS(const ViewDesc&)> frameConstantsFor;
     TrackState* trackState = nullptr;  // FrameRenderer's; null in contexts built without a renderer
+    uint32_t framesInFlight = 2;       // per-frame CPU-written resources of frame f live in slot f % framesInFlight;
+                                       // the caller waits for that slot's fences before recording frame f
 
     template <typename T>
     T& state(const std::string& key)

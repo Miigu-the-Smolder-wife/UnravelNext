@@ -40,7 +40,8 @@ struct Surface
 
 float alphaFromRoughness(float roughness);
 float3 f0(const Surface& s);
-float distributionGgx(float NoH, float alpha);
+// GGX D. sinSqNH = |n x h|^2 = 1 - NoH^2 computed directly: NoH^2 (a^2 - 1) + 1 cancels to 0 in float at a = 1e-4 (mirror).
+float distributionGgx(float NoH, float sinSqNH, float alpha);
 float visibilitySmithGgxCorrelated(float NoV, float NoL, float alpha);
 float3 fresnelSchlick(float3 f0, float VoH);
 

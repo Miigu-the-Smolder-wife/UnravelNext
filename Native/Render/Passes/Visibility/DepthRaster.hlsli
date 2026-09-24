@@ -17,6 +17,7 @@ struct DepthRasterPixel
     float2 uv : TEXCOORD0;                   // material uv (alpha test)
     nointerpolation uint userData : USERDATA; // RasterView::userData of the view being rasterised
     nointerpolation uint material : MATERIAL; // scene material of the triangle (instance overrides applied)
+    nointerpolation uint instance : INSTANCE; // scene instance of the triangle (loadInstance)
 };
 
 // False where an alpha-tested material is transparent (baseColor texture alpha < alphaCutoff), as in the main view and

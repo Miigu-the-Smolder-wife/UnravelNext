@@ -30,3 +30,9 @@ return a2 / (kPi * t * t);
 기준 경로추적기는 같은 모델을 double + 위 형태로 평가한다(`Reference/PathTracer/src/Bsdf.h evaluateModel`). 테스트
 `unx_test_reference model`이 거칠기 ≥ 0.05에서 `scene::model::evaluate`와의 상대 차이 ≤ 2e-4, 거칠기 0 반사 방향에서
 유한값임을 확인한다.
+
+## 처리 결과 (코어, 2026-09-25, INTERFACES v1.4)
+
+- 반영: `distributionGgx(float NoH, float sinSqNH, float alpha)`(C++)와 `modelD(float NoH, float sinSqNH, float alpha)`(HLSL 미러)가
+  t = sinSqNH + α²·NoH²로 평가하고, `evaluate`/`modelEvaluate`가 |n×h|²를 넘긴다. 수학적으로 같은 함수이고 거칠기 0 반사 방향에서
+  D = 1/(πα²) = 3.2e7로 유한하다(INTERFACES 8.1). 단위 테스트 `material_model_table`에 거칠기 0 반사 방향의 유한성 검사를 더했다.

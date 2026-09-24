@@ -40,3 +40,11 @@
 - 코어/V: 픽셀 입력 필드 1개, Deformation.hlsli 함수 1개. 다른 트랙에는 영향이 없다(필드 추가).
 - 이동·스킨 캐스터(규칙 a)는 인스턴스 쪽 판정을 유지하되, 그 프레임에 바뀐 인스턴스만 모아(압축 목록) 인스턴스 × 단마다 스레드
   그룹 하나로 경계 사각형을 병렬로 훑는다(S 내부 변경).
+
+## 처리 결과 (코어/V, 2026-09-25, INTERFACES v1.4)
+
+- 반영: `DepthRasterPixel`에 `nointerpolation uint instance : INSTANCE`를 추가했고(`DepthRaster.hlsli`), V 서비스의 메시 셰이더
+  (`Passes/Visibility/DepthRaster.ms`)가 삼각형의 장면 인스턴스 번호를 이 이름으로 낸다.
+- 반영: `float windChangeFactor(float t0, float t1)`를 `Passes/Common/Deformation.hlsli`에 두었다. v1 식은 요청대로 `0.4 * min(2, 1.7 |t1 − t0|)`이고,
+  조건(장면 바람의 방향·속도와 인스턴스 변환이 그대로일 때)을 주석과 INTERFACES 6.4에 적었다. 바람 모델이 바뀌면 `windOffset`,
+  `windOffsetBound`, `windChangeFactor`를 코어가 같이 바꾼다. S의 사본(`vsmWindChangeFactor`)은 이 함수로 바꾸면 된다.

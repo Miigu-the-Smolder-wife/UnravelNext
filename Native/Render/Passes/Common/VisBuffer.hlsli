@@ -11,7 +11,7 @@
 #define VIS_TRIANGLE_BITS 7u
 #define VIS_TRIANGLE_MASK 0x7Fu
 
-uint packVisId(uint visibleCluster, uint triangle) { return (visibleCluster << VIS_TRIANGLE_BITS) | triangle; }
+uint packVisId(uint visibleCluster, uint tri) { return (visibleCluster << VIS_TRIANGLE_BITS) | tri; }  // "triangle" is a mesh-shader keyword
 uint visVisibleCluster(uint visId) { return visId >> VIS_TRIANGLE_BITS; }
 uint visTriangle(uint visId) { return visId & VIS_TRIANGLE_MASK; }
 

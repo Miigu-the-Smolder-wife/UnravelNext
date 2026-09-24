@@ -451,6 +451,19 @@ UNX_TEST(material_model_table)
         }
     const double albedo = sum / (n * n);
     CHECK(albedo > 0.97 && albedo < 1.03);
+
+    // Mirror (roughness 0, alpha 1e-4): the specular peak in the reflection direction is finite (GGX D without the
+    // NoH^2 (a^2 - 1) + 1 cancellation, INTERFACES 8.1) and equals 1 / (pi alpha^2) there.
+    scene::model::Surface mirror;
+    mirror.baseColor = { 1, 1, 1 };
+    mirror.roughness = 0;
+    mirror.metallic = 1;
+    const float3 view = normalize(float3{ 0.3f, 0, 1 });
+    const float3 reflected{ -view.x, -view.y, view.z };
+    const float peak = evaluate(mirror, { 0, 0, 1 }, view, reflected).x;
+    CHECK(std::isfinite(peak) && peak > 1e6f);
+    const float d = distributionGgx(1.0f, 0.0f, 1e-4f);
+    CHECK(std::fabs(d * kPi * 1e-8f - 1.0f) < 1e-4f);
 }
 
 UNX_TEST(reflection_view_geometry)

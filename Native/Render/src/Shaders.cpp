@@ -105,7 +105,7 @@ ID3D12PipelineState* ShaderLibrary::mesh(const std::string& name, const MeshPipe
     s.ps.value = { ps.empty() ? nullptr : ps.data(), ps.size() };
     s.raster.value.FillMode = D3D12_FILL_MODE_SOLID;
     s.raster.value.CullMode = desc.cull;
-    s.raster.value.FrontCounterClockwise = TRUE;
+    s.raster.value.FrontCounterClockwise = desc.frontCounterClockwise ? TRUE : FALSE;
     s.raster.value.DepthClipEnable = TRUE;
     s.raster.value.ConservativeRaster = desc.conservative ? D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON : D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
     s.depth.value.DepthEnable = desc.depthFormat != DXGI_FORMAT_UNKNOWN;

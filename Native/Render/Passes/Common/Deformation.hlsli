@@ -62,6 +62,11 @@ float windOffsetBound(GpuInstance inst, float3 centre, float radius)
     return g_windSpeed * g_windSpeed * 0.002 / inst.windStiffness * h * h;
 }
 
+// |windOffset(t1) - windOffset(t0)| <= windOffsetBound(...) * windChangeFactor(t0, t1) for every instance and vertex,
+// while the scene wind (direction, speed) and the instance transform are unchanged (S request: page-side VSM dirty
+// rule). v1: amplitude x (0.6 + 0.4 sin(1.7 t + phase)), and |sin a - sin b| <= min(2, |a - b|).
+float windChangeFactor(float t0, float t1) { return 0.4 * min(2.0, 1.7 * abs(t1 - t0)); }
+
 DeformedVertex deformVertex(GpuInstance inst, GpuMesh mesh, uint meshVertex)
 {
     const VertexData v = loadVertex(mesh, meshVertex);

@@ -18,6 +18,7 @@ struct MeshPipelineDesc
     bool depthWrite = true;
     D3D12_COMPARISON_FUNC depthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;  // reversed Z
     D3D12_CULL_MODE cull = D3D12_CULL_MODE_BACK;
+    bool frontCounterClockwise = true;  // false for mirrored (planar reflection) views
     bool conservative = false;
 };
 
