@@ -150,9 +150,11 @@ void giLoadSh(B b, GiHeader h, uint entry, out float3 c[9])
 // Trilinear SH coefficients at a surface point (the cells of its level and normal class that exist; next coarser level
 // when none does). Returns the total weight (0 = nothing cached).
 template <typename B>
-float giCacheShAt(B b, GiHeader h, float3 p, float3 normal, out float3 c[9])
+float giCacheShAt(B b, GiHeader h, float3 p, float3 normal, out float3 c[9], out uint bestEntry)
 {
     [unroll] for (uint k = 0; k < 9; ++k) c[k] = 0;
+    bestEntry = GI_ENTRY_PENDING;
+    float bestWeight = 0;
     const uint nc = giNormalClass(normal);
     uint level = giLevel(h, p);
     float weight = 0;
@@ -173,6 +175,11 @@ float giCacheShAt(B b, GiHeader h, float3 p, float3 normal, out float3 c[9])
             giLoadSh(b, h, entry, e);
             [unroll] for (uint j = 0; j < 9; ++j) c[j] += w * e[j];
             weight += w;
+            if (w > bestWeight)
+            {
+                bestWeight = w;
+                bestEntry = entry;
+            }
         }
     }
     if (weight > 0)
@@ -223,7 +230,24 @@ bool giProbePixel(Texture2D<float> depth, uint2 tile, uint spacing, uint2 size, 
 
 uint giPackHalf2(float a, float b) { return f32tof16(a) | (f32tof16(b) << 16); }
 
-// Probe record (ScreenProbes.hlsli decodes it).
+// Shared-exponent RGB (5-bit exponent, bias 15, 9-bit mantissas), non-negative.
+uint giPackRgb9e5(float3 c)
+{
+    c = clamp(c, 0.0, 65408.0);
+    const float m = max(c.r, max(c.g, c.b));
+    int e = max(-16, (int)floor(log2(max(m, 1e-30)))) + 16;  // biased exponent of the largest component + 1
+    float scale = exp2((float)e - 24.0);
+    uint3 q = (uint3)round(c / scale);
+    if (max(q.r, max(q.g, q.b)) >= 512u)
+    {
+        ++e;
+        scale *= 2;
+        q = (uint3)round(c / scale);
+    }
+    return min(q.r, 511u) | (min(q.g, 511u) << 9) | (min(q.b, 511u) << 18) | ((uint)clamp(e, 0, 31) << 27);
+}
+
+// Probe record (ScreenProbes.hlsli decodes it): block (8i .. 8i+7, 4j .. 4j+3), record in row 0 texels 0-3.
 void giStoreProbe(RWTexture2D<uint4> t, uint2 probe, float3 c[9], float linearDepth, float3 normal, float occlusion, uint2 offset, bool valid)
 {
     float v[28];
@@ -238,11 +262,62 @@ void giStoreProbe(RWTexture2D<uint4> t, uint2 probe, float3 c[9], float linearDe
     [unroll] for (uint i = 0; i < 14; ++i) w[i] = giPackHalf2(v[2 * i], v[2 * i + 1]);
     w[14] = giPackNormal(normal);
     w[15] = (uint(round(saturate(occlusion) * 65535.0)) & 0xFFFFu) | ((offset.x & 7u) << 16) | ((offset.y & 7u) << 19) | (valid ? (1u << 22) : 0u);
-    const uint x = probe.x * 4;
-    t[uint2(x, probe.y)] = uint4(w[0], w[1], w[2], w[3]);
-    t[uint2(x + 1, probe.y)] = uint4(w[4], w[5], w[6], w[7]);
-    t[uint2(x + 2, probe.y)] = uint4(w[8], w[9], w[10], w[11]);
-    t[uint2(x + 3, probe.y)] = uint4(w[12], w[13], w[14], w[15]);
+    const uint x = probe.x * 8, y = probe.y * 4;
+    t[uint2(x, y)] = uint4(w[0], w[1], w[2], w[3]);
+    t[uint2(x + 1, y)] = uint4(w[4], w[5], w[6], w[7]);
+    t[uint2(x + 2, y)] = uint4(w[8], w[9], w[10], w[11]);
+    t[uint2(x + 3, y)] = uint4(w[12], w[13], w[14], w[15]);
+}
+
+// Solid angle weight of texel (x, y) of an n x n hemispherical octahedral map (midpoint of 2 dA_uv / |v|^3).
+float giMapTexelWeight(uint2 texel, uint n)
+{
+    const float2 uv = (float2(texel) + 0.5) / n;
+    const float2 q = uv * 2 - 1;
+    const float2 p = float2(q.x + q.y, q.x - q.y) * 0.5;
+    const float l = length(float3(p, 1 - abs(p.x) - abs(p.y)));
+    return 1.0 / (l * l * l);
+}
+
+// Probe radiance map: the 64 texels of a cache entry (x GI_STORE_SCALE, as stored) around the entry's normal, with the
+// 4 x 4 and 2 x 2 solid-angle-weighted mips (ScreenProbes.hlsli layout). entry = GI_ENTRY_PENDING stores zeros.
+template <typename B>
+void giStoreProbeMap(RWTexture2D<uint4> t, uint2 probe, B b, GiHeader h, uint entry)
+{
+    const uint x = probe.x * 8, y = probe.y * 4;
+    float3 m1[16], m2[4];
+    float w1[16], w2[4];
+    [unroll] for (uint i = 0; i < 16; ++i) { m1[i] = 0; w1[i] = 0; }
+    [unroll] for (uint i = 0; i < 4; ++i) { m2[i] = 0; w2[i] = 0; }
+    uint row[4];
+    [loop] for (uint k = 0; k < 16; ++k)  // 16 RGBA32 texels of the 8 x 8 map, 4 radiance texels each
+    {
+        [unroll] for (uint j = 0; j < 4; ++j)
+        {
+            const uint index = 4 * k + j;
+            const uint2 texel = uint2(index % 8, index / 8);
+            float3 radiance = 0;
+            if (entry != GI_ENTRY_PENDING)
+            {
+                const uint2 v = b.Load2(h.offTexels + (entry * GI_TEXEL_COUNT + index) * 8);
+                radiance = float3(f16tof32(v.x), f16tof32(v.x >> 16), f16tof32(v.y));
+            }
+            row[j] = giPackRgb9e5(radiance);
+            const float w = giMapTexelWeight(texel, 8);
+            const uint c1 = (texel.y / 2) * 4 + texel.x / 2, c2 = (texel.y / 4) * 2 + texel.x / 4;
+            m1[c1] += w * radiance;
+            w1[c1] += w;
+            m2[c2] += w * radiance;
+            w2[c2] += w;
+        }
+        t[uint2(x + k % 8, y + 1 + k / 8)] = uint4(row[0], row[1], row[2], row[3]);
+    }
+    [unroll] for (uint k = 0; k < 4; ++k)
+        t[uint2(x + k, y + 3)] = uint4(giPackRgb9e5(m1[4 * k] / w1[4 * k]), giPackRgb9e5(m1[4 * k + 1] / w1[4 * k + 1]), giPackRgb9e5(m1[4 * k + 2] / w1[4 * k + 2]),
+                                       giPackRgb9e5(m1[4 * k + 3] / w1[4 * k + 3]));
+    t[uint2(x + 4, y)] = uint4(giPackRgb9e5(m2[0] / w2[0]), giPackRgb9e5(m2[1] / w2[1]), giPackRgb9e5(m2[2] / w2[2]), giPackRgb9e5(m2[3] / w2[3]));
+    const float3 n = entry != GI_ENTRY_PENDING ? giAnchorNormal(b, h, entry) : float3(0, 0, 1);
+    t[uint2(x + 4, y + 3)] = uint4(giPackNormal(n), 0, 0, 0);
 }
 
 #endif

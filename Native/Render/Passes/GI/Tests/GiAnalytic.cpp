@@ -131,13 +131,14 @@ Buffer createBuffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE type, bool u
 struct Outcome
 {
     double mean = 0, minimum = 0, maximum = 0, worst = 0;  // worst = max |E / expected - 1| over valid probes
+    double radianceMean = 0, radianceWorst = 0;              // screenProbeRadiance against the uniform radiance
     uint32_t probes = 0;
     int converged = -1;  // first frame whose mean is within 1 %
     gi::GiStats stats;
 };
 
-Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky, double expected, uint32_t frames, uint32_t width,
-            uint32_t height)
+Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky, double expected, double expectedRadiance,
+            uint32_t frames, uint32_t width, uint32_t height)
 {
     GpuScene gpuScene(device);
     gpuScene.upload(s);
@@ -151,9 +152,10 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
         D3D12_RANGE none{ 0, 0 };
         check(constants.resource->Map(0, &none, reinterpret_cast<void**>(&mapped)), "map constants");
         const uint32_t probesX = (width + 7) / 8, probesY = (height + 7) / 8;
-        Buffer result = createBuffer(device, (uint64_t)probesX * probesY * 16, D3D12_HEAP_TYPE_DEFAULT, true);
-        Buffer readback = createBuffer(device, (uint64_t)probesX * probesY * 16, D3D12_HEAP_TYPE_READBACK, false);
-        std::vector<float> values((size_t)probesX * probesY * 4);
+        const uint64_t resultBytes = (uint64_t)probesX * probesY * 32;
+        Buffer result = createBuffer(device, resultBytes, D3D12_HEAP_TYPE_DEFAULT, true);
+        Buffer readback = createBuffer(device, resultBytes, D3D12_HEAP_TYPE_READBACK, false);
+        std::vector<float> values((size_t)probesX * probesY * 8);
         gi::GiSystem* giSystem = nullptr;
 
         for (uint32_t f = 0; f < frames; ++f)
@@ -221,7 +223,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             giSystem = &gi;
             gi.setConstantSky(sky, { 0, 0, 0 });
             gi.record(fc, main, rays);
-            const BufferRef resultRef = graph.importBuffer(result.resource.Get(), { "test result", (uint64_t)probesX * probesY * 16, 16 });
+            const BufferRef resultRef = graph.importBuffer(result.resource.Get(), { "test result", resultBytes, 16 });
             const TextureRef probes = main.screenProbes;
             graph.addPass("test.eval", QueueType::Compute,
                           [&](PassBuilder& b) {
@@ -242,7 +244,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             device.queue(QueueType::Graphics).waitCpu(graph.lastFence(QueueType::Graphics));
 
             CommandList cl = device.acquireCommandList(QueueType::Graphics);
-            cl.list->CopyBufferRegion(readback.resource.Get(), 0, result.resource.Get(), 0, (uint64_t)probesX * probesY * 16);
+            cl.list->CopyBufferRegion(readback.resource.Get(), 0, result.resource.Get(), 0, resultBytes);
             device.queue(QueueType::Graphics).waitCpu(device.submit(cl));
             void* rb = nullptr;
             D3D12_RANGE all{ 0, (SIZE_T)values.size() * 4 };
@@ -250,18 +252,23 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             std::memcpy(values.data(), rb, values.size() * 4);
             readback.resource->Unmap(0, &none);
 
-            double sum = 0, lo = 1e30, hi = -1e30, worst = 0;
+            double sum = 0, lo = 1e30, hi = -1e30, worst = 0, rsum = 0, rworst = 0;
             uint32_t n = 0;
-            for (size_t i = 0; i < values.size() / 4; ++i)
+            for (size_t i = 0; i < values.size() / 8; ++i)
             {
-                if (values[4 * i + 3] < 0) continue;
-                const double e = (values[4 * i] + values[4 * i + 1] + values[4 * i + 2]) / 3.0;
+                if (values[8 * i + 3] < 0) continue;
+                const double e = (values[8 * i] + values[8 * i + 1] + values[8 * i + 2]) / 3.0;
                 sum += e;
                 lo = std::min(lo, e);
                 hi = std::max(hi, e);
                 worst = std::max(worst, std::fabs(e / expected - 1));
+                const double r = (values[8 * i + 4] + values[8 * i + 5] + values[8 * i + 6]) / 3.0;
+                rsum += r;
+                rworst = std::max(rworst, std::fabs(r / expectedRadiance - 1));
                 ++n;
             }
+            out.radianceMean = n ? rsum / n : 0;
+            out.radianceWorst = rworst;
             out.probes = n;
             out.mean = n ? sum / n : 0;
             out.minimum = lo;
@@ -269,8 +276,8 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             out.worst = worst;
             if (out.converged < 0 && n && std::fabs(out.mean / expected - 1) < 0.01) out.converged = (int)f;
             if (f == frames - 1 || (f & (f - 1)) == 0)
-                logf("  frame %3u: mean E %.4f (expected %.4f, %+.2f %%), min %.4f max %.4f, worst probe %.2f %%\n", f, out.mean, expected, 100 * (out.mean / expected - 1), lo, hi,
-                     100 * worst);
+                logf("  frame %3u: mean E %.4f (expected %.4f, %+.2f %%), min %.4f max %.4f, worst probe %.2f %%; K radiance mean %.4f (expected %.4f), worst %.2f %%\n", f,
+                     out.mean, expected, 100 * (out.mean / expected - 1), lo, hi, 100 * worst, out.radianceMean, expectedRadiance, 100 * rworst);
         }
         if (giSystem) out.stats = giSystem->readStats();
         logf("  cache after the last frame: %u live, %u free, %u requested, %u selected + %u background updates, %u hit entries, %u created, %u resets, "
@@ -306,17 +313,17 @@ int main(int argc, char** argv)
 
         const float le = 1.0f, rho = 0.5f;
         logf("white furnace: Le %.2f, albedo %.2f, expected E = pi Le / (1 - rho) = %.4f\n", le, rho, kPi * le / (1 - rho));
-        const Outcome a = run(device, shaders, quality, furnace(le, rho), { 0, 0, 0 }, kPi * le / (1 - rho), frames, 1920, 1080);
-        const bool okA = std::fabs(a.mean / (kPi * le / (1 - rho)) - 1) < 0.01 && a.worst < 0.03;
-        logf("white furnace: %u probes, mean %+.3f %%, worst probe %.3f %%, within 1 %% from frame %d -> %s\n", a.probes, 100 * (a.mean / (kPi * le / (1 - rho)) - 1), 100 * a.worst,
-             a.converged, okA ? "PASS" : "FAIL");
+        const Outcome a = run(device, shaders, quality, furnace(le, rho), { 0, 0, 0 }, kPi * le / (1 - rho), le / (1 - rho), frames, 1920, 1080);
+        const bool okA = std::fabs(a.mean / (kPi * le / (1 - rho)) - 1) < 0.01 && a.worst < 0.03 && a.radianceWorst < 0.03;
+        logf("white furnace: %u probes, mean %+.3f %%, worst probe %.3f %%, within 1 %% from frame %d; K radiance worst %.3f %% -> %s\n", a.probes,
+             100 * (a.mean / (kPi * le / (1 - rho)) - 1), 100 * a.worst, a.converged, 100 * a.radianceWorst, okA ? "PASS" : "FAIL");
         pass = pass && okA;
 
         logf("open sky: L 1, ground albedo 0.5, expected E = pi\n");
-        const Outcome b = run(device, shaders, quality, openSky(0.5f), { 1, 1, 1 }, kPi, frames, 1920, 1080);
-        const bool okB = std::fabs(b.mean / kPi - 1) < 0.01 && b.worst < 0.03;
-        logf("open sky: %u probes, mean %+.3f %%, worst probe %.3f %%, within 1 %% from frame %d -> %s\n", b.probes, 100 * (b.mean / kPi - 1), 100 * b.worst, b.converged,
-             okB ? "PASS" : "FAIL");
+        const Outcome b = run(device, shaders, quality, openSky(0.5f), { 1, 1, 1 }, kPi, 1.0, frames, 1920, 1080);
+        const bool okB = std::fabs(b.mean / kPi - 1) < 0.01 && b.worst < 0.03 && b.radianceWorst < 0.03;
+        logf("open sky: %u probes, mean %+.3f %%, worst probe %.3f %%, within 1 %% from frame %d; K radiance worst %.3f %% -> %s\n", b.probes, 100 * (b.mean / kPi - 1),
+             100 * b.worst, b.converged, 100 * b.radianceWorst, okB ? "PASS" : "FAIL");
         pass = pass && okB;
 
         rt::RayPipeline::releaseDevice(device);

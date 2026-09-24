@@ -1,5 +1,6 @@
 // unx-kernel: cs_6_6 main
-// Screen probe fill (no rays): trilinear cache SH at the probe's surface point, and near occlusion there: 16 fixed
+// Screen probe fill (no rays): trilinear cache SH at the probe's surface point, the radiance map of the cache entry with
+// the largest trilinear weight (K reflection path, ScreenProbes.hlsli), and near occlusion there: 16 fixed
 // cosine-distributed hemisphere points within r = min(gi.near_occlusion_radius_m, cache cell edge) — occlusion below
 // the cache's own resolution only, so the cache (whose rays already see larger occluders) is not darkened twice.
 // A point is occluded when the depth buffer shows a surface in front of it closer than r along the view ray.
@@ -42,7 +43,7 @@ void main(uint2 probe : SV_DispatchThreadID)
     const uint2 count = P[1].xy, size = P[1].zw;
     const uint spacing = P[2].x;
     RWTexture2D<uint4> probes = ResourceDescriptorHeap[P[0].w];
-    if (all(probe == 0)) probes[uint2(0, count.y)] = uint4(spacing, count.x, count.y, 0);
+    if (all(probe == 0)) probes[uint2(0, count.y * 4)] = uint4(spacing, count.x, count.y, 0);
     if (probe.x >= count.x || probe.y >= count.y) return;
     ByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].y];
@@ -55,12 +56,15 @@ void main(uint2 probe : SV_DispatchThreadID)
     {
         [unroll] for (uint k = 0; k < 9; ++k) c[k] = 0;
         giStoreProbe(probes, probe, c, 0, float3(0, 0, 1), 1, offset, false);
+        giStoreProbeMap(probes, probe, b, h, GI_ENTRY_PENDING);
         return;
     }
     const uint2 pixel = probe * spacing + offset;
     const float3 p = worldFromDepth(float2(pixel), d);
     const float3 n = decodeGBuffer(gbuffer.Load(int3(pixel, 0))).normal;
-    giCacheShAt(b, h, p, n, c);
+    uint mapEntry;
+    giCacheShAt(b, h, p, n, c, mapEntry);
+    giStoreProbeMap(probes, probe, b, h, mapEntry);
     const float radius = min(asfloat(P[2].y), giCellSize(h, giLevel(h, p)));
     const float occlusion = nearOcclusion(depth, p + n * (1e-3 * linearDepth(d)), n, radius, probe.x * 7919u + probe.y * 104729u, size);
     giStoreProbe(probes, probe, c, linearDepth(d), n, occlusion, offset, true);

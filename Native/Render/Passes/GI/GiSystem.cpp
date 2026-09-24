@@ -203,7 +203,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     fc.resources.giCache = cache;
     const uint32_t probesX = (main.view.width + s.probeSpacing - 1) / s.probeSpacing;
     const uint32_t probesY = (main.view.height + s.probeSpacing - 1) / s.probeSpacing;
-    main.screenProbes = g.createTexture({ "GI screen probes", probesX * 4, probesY + 1, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT });
+    main.screenProbes = g.createTexture({ "GI screen probes", probesX * 8, probesY * 4 + 1, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT });
     const TextureRef probes = main.screenProbes, depth = main.depth, gbuffer = main.gbuffer;
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = main.frameConstants;
     const uint32_t frame = (uint32_t)fc.frame.frameIndex + 1;  // 0 never matches a stamp
