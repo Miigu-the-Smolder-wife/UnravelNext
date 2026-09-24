@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.4, 2026-09-25)
+# UnravelNext 인터페이스 (v1.5, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -153,7 +153,7 @@ void RenderGraph::addPass(std::string_view name, QueueType, SetupFn setup, Execu
 | depth | D32_FLOAT reversed-Z | V | M, S, R |
 | visId | R32_UINT (7.1) | V | M, R |
 | visibleClusters | `gpu::VisibleCluster[]` | V | M, R |
-| hiz | R32_FLOAT 반해상도 전 밉. 밉 k 텍셀 = 2^(k+1)×2^(k+1) 픽셀 블록의 가장 먼 깊이(reversed-Z 최솟값) | V | S(페이지 표시), R |
+| hiz | R32_FLOAT 전 밉. 밉 k 텍셀 (i, j) = 픽셀 [i·2^(k+1), (i+1)·2^(k+1)) 블록의 가장 먼 깊이(reversed-Z 최솟값). 유효 크기 ⌈W/2^(k+1)⌉×⌈H/2^(k+1)⌉, 할당은 2의 거듭제곱(D3D 밉 크기는 내림이라 올림 체인을 담기 위함; 유효 영역 밖 텍셀은 정의되지 않음) | V | S(페이지 표시), R |
 | coverageFragments / coverageHeads | 7.1 | V | M |
 | gbuffer | RG32_UINT (7.2) | M | S, R |
 | shadowVisibility | R32_UINT (7.3) | S | M |
@@ -254,7 +254,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 ## 7. 화면 버퍼 배치
 
 ### 7.1 vis id · depth · coverage 층 (`VisBuffer.hlsli`)
-- vis id R32_UINT = `visibleCluster << 7 | triangle`, `0xFFFFFFFF` = 하늘. visibleCluster는 그 뷰의 `VisibleCluster` 목록 인덱스(< 2^25).
+- vis id R32_UINT = `(visibleCluster << 7 | triangle) + 1`, `VIS_NONE = 0` = 하늘(v1.5). visibleCluster는 그 뷰의 `VisibleCluster` 목록 인덱스(< 2^25 − 1). 소비자는 `packVisId`·`visVisibleCluster`·`visTriangle`·`VIS_NONE`(VisBuffer.hlsli)만 쓰고 비트 연산을 직접 하지 않는다. 0인 이유: UINT 렌더 타깃은 float 클리어 값만 받으므로 0xFFFFFFFF(float로 표현 불가, 실측으로 0이 된다)로 지울 수 없고, 지우기 패스를 따로 두면 대상 전체를 한 번 더 쓴다(4K 33 MB).
 - depth D32_FLOAT, reversed-Z, 무한 원평면.
 - coverage 층: `coverageHeads` R32_UINT = 첫 fragment 인덱스(하위 24 bit) | 개수 << 24, `coverageFragments`는 픽셀별 깊이 순 정렬된 16 B `{ uint visId; float depth; uint coverageMask32; float area; }`. 대역 C 브릭 fragment는 visId의 삼각형 필드가 `0x7F`.
 
@@ -341,3 +341,5 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **S 요청 `20260925_S_raster_instance_and_wind_change.md` 반영**: `DepthRasterPixel::instance : INSTANCE`(V의 서비스 메시 셰이더가 낸다), `windChangeFactor(t0, t1)`(`Deformation.hlsli`, 6.4). 페이지 쪽 바람 dirty 판정(페이지당 O(1))에 쓴다.
   - **C 요청 `20260925_C_ggx_precision.md` 반영**: GGX D를 `|n×h|²`로 쓰는 소거 없는 형태로 바꿨다(C++ `distributionGgx(NoH, sinSqNH, alpha)`, HLSL `modelD(NoH, sinSqNH, alpha)`; 8.1). 거칠기 0 거울의 반사 방향에서 D가 유한(1/(πα²))하다.
   - 코어 추가: `FramePassContext::framesInFlight`(트랙이 CPU로 쓰는 프레임별 자원의 슬롯 수), `MeshPipelineDesc::frontCounterClockwise`(미러 뷰의 앞면 방향), `VisBuffer.hlsli`의 `packVisId` 인자 이름(`triangle`은 메시 셰이더 예약어).
+- v1.5 (2026-09-25):
+  - **vis id 인코딩**(7.1): `VIS_NONE = 0`, vis id = `(visibleCluster << 7 | triangle) + 1`. V의 vis buffer 렌더 타깃을 0으로 fast clear한다(0xFFFFFFFF는 float 클리어 값으로 표현되지 않아 실측으로 0이 되었다). 접근자(`packVisId`, `visVisibleCluster`, `visTriangle`)를 쓰는 코드는 바뀌지 않는다. M 테스트의 가짜 vis buffer처럼 비트를 직접 조합하는 코드는 `packVisId`로 바꾸고 `VIS_NONE`(0)으로 지운다.

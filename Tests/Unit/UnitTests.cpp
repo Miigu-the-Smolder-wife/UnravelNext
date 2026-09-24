@@ -10,6 +10,9 @@
 #include "unx/render/FrameRenderer.h"
 #include "unx/render/Harness.h"
 #include "unx/scene/MaterialModel.h"
+#if UNX_HAS_CLUSTERBUILDER
+#include "unx/clusterbuilder/ClusterBuilder.h"
+#endif
 
 #include <atomic>
 #include <cmath>
@@ -498,6 +501,9 @@ UNX_TEST(frame_renderer_records_with_track_stubs)
     scene::Scene s = tinyScene();
     GpuScene gpuScene(testDevice());
     gpuScene.upload(s);
+#if UNX_HAS_CLUSTERBUILDER
+    gpuScene.setClusters(clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(q)));
+#endif
     gpu::FrameConstants fc{};
     gpuScene.fill(fc);
     CHECK(fc.instanceCount == 1 && fc.meshCount == 1 && fc.materialModelLut != gpu::kNone);

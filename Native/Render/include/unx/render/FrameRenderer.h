@@ -19,6 +19,10 @@ public:
     // Declares the whole frame into 'graph'; 'output' is the main view's colour target (imported by the caller:
     // RGB10A2 display output, or RGBA32F linear radiance when frame.outputLinearHdr). Returns the main view products.
     ViewResources record(RenderGraph& graph, const FrameContext& frame, TextureRef output);
+    // Persistent track state (tests and gates read track statistics through it, e.g. unx::visibility::latestStats).
+    TrackState& trackState() { return m_trackState; }
+    // The b1 constants of a view (what every view's frameConstants slot holds); for tests that build their own context.
+    static gpu::FrameConstants frameConstants(const GpuScene& scene, const FrameContext& frame, const ViewDesc& view);
 
 private:
     D3D12_GPU_VIRTUAL_ADDRESS allocateFrameConstants(const FrameContext& frame, const ViewDesc& view);

@@ -99,7 +99,13 @@ D3D12_GPU_VIRTUAL_ADDRESS FrameRenderer::allocateFrameConstants(const FrameConte
     }
     if (m_slotViews >= kMaxViewsPerFrame) fail("FrameRenderer: more than %u views in one frame", kMaxViewsPerFrame);
     const uint64_t offset = ((frame.frameIndex % m_framesInFlight) * kMaxViewsPerFrame + m_slotViews++) * 1024;
+    const gpu::FrameConstants c = frameConstants(m_scene, frame, view);
+    std::memcpy(m_mapped + offset, &c, sizeof c);
+    return m_constants->GetGPUVirtualAddress() + offset;
+}
 
+gpu::FrameConstants FrameRenderer::frameConstants(const GpuScene& scene, const FrameContext& frame, const ViewDesc& view)
+{
     gpu::FrameConstants c{};
     c.viewProj = view.viewProj;
     c.prevViewProj = view.prevViewProj;
@@ -117,7 +123,7 @@ D3D12_GPU_VIRTUAL_ADDRESS FrameRenderer::allocateFrameConstants(const FrameConte
     c.deltaTime = frame.deltaTime;
     c.exposure = 1.0f / (1.2f * std::exp2(view.ev100));
     c.tanHalfFovY = std::tan(view.verticalFov * 0.5f);
-    if (const scene::Scene* s = m_scene.source())
+    if (const scene::Scene* s = scene.source())
     {
         c.sunDirection = s->sun.direction;
         c.sunIlluminance = s->sun.illuminance;
@@ -126,9 +132,8 @@ D3D12_GPU_VIRTUAL_ADDRESS FrameRenderer::allocateFrameConstants(const FrameConte
         c.windDirection = s->windDirection;
         c.windSpeed = s->windSpeed;
     }
-    m_scene.fill(c);
-    std::memcpy(m_mapped + offset, &c, sizeof c);
-    return m_constants->GetGPUVirtualAddress() + offset;
+    scene.fill(c);
+    return c;
 }
 
 ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& frame, TextureRef output)

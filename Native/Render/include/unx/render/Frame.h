@@ -49,8 +49,10 @@ struct ViewResources
     TextureRef depth;              // D32_FLOAT reversed Z                                   [V]
     TextureRef visId;              // R32_UINT (VisBuffer.hlsli)                             [V]
     BufferRef visibleClusters;     // gpu::VisibleCluster list indexed by the vis id         [V]
-    TextureRef hiz;                // R32_FLOAT, half resolution, full mip chain: farthest depth [V]
-                                   // (minimum reversed-Z value) of the 2^(mip+1) square pixel block
+    TextureRef hiz;                // R32_FLOAT, full mip chain: texel (i, j) of mip m = farthest   [V]
+                                   // depth (minimum reversed-Z value) of the pixels [i 2^(m+1), ...);
+                                   // valid mip size ceil(W / 2^(m+1)) x ceil(H / 2^(m+1)) inside a
+                                   // power-of-two allocation (texels beyond it are undefined)
     BufferRef coverageFragments;   // coverage layer fragments, sorted per pixel            [V]
     TextureRef coverageHeads;      // R32_UINT per pixel: first fragment | count << 24       [V]
     TextureRef gbuffer;            // RG32_UINT (GBuffer.hlsli)                              [M]
