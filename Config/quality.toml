@@ -1,0 +1,7 @@
+# UnravelNext quality parameters (ARCHITECTURE_KO.md 6, 7.0).
+# The only place sample counts, evaluation rates, update periods and resolutions live. Code has no defaults for
+# these keys: a missing key is an error. Every performance report records the SHA-256 of the effective values.
+
+[output]
+# Measurement and gate resolutions. The harness refuses anything else.
+resolutions = ["3840x2160", "2560x1440"]

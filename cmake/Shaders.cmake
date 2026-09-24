@@ -1,0 +1,78 @@
+# Build-time HLSL compilation. One kernel per file; each file declares itself in its first lines:
+#   // unx-kernel: <profile> <entry>            e.g. // unx-kernel: cs_6_6 main
+#   // unx-variants: NAME=a,b OTHER=x,y         optional; one DXIL per combination (compile constants, no runtime modes)
+# Output: <out>/<path relative to root, without .hlsl>[.NAMEa.OTHERx].dxil (+ .pdb). The compiler fails the build
+# when a DXIL exceeds UNX_DXIL_LIMIT_KB (ARCHITECTURE_KO.md 4.4: cold PSO creation <= 0.8 s).
+include_guard(GLOBAL)
+
+set(UNX_DXIL_LIMIT_KB 200 CACHE STRING "Largest allowed DXIL per kernel in KB")
+
+function(unx_add_shaders target)
+  cmake_parse_arguments(ARG "" "ROOT;OUTPUT" "INCLUDES" ${ARGN})
+  file(GLOB_RECURSE sources CONFIGURE_DEPENDS "${ARG_ROOT}/*.hlsl")
+  set(outputs)
+  foreach(src ${sources})
+    file(STRINGS "${src}" kernel_line LIMIT_COUNT 1 REGEX "^// unx-kernel:")
+    if(NOT kernel_line)
+      continue()  # include-only file
+    endif()
+    string(REGEX REPLACE "^// unx-kernel:[ ]*" "" kernel_line "${kernel_line}")
+    separate_arguments(kernel_args UNIX_COMMAND "${kernel_line}")
+    list(GET kernel_args 0 profile)
+    list(GET kernel_args 1 entry)
+    file(STRINGS "${src}" variant_line LIMIT_COUNT 1 REGEX "^// unx-variants:")
+    set(combos "")  # list of ";"-free strings "NAME=a|OTHER=x"
+    if(variant_line)
+      string(REGEX REPLACE "^// unx-variants:[ ]*" "" variant_line "${variant_line}")
+      separate_arguments(axes UNIX_COMMAND "${variant_line}")
+      set(combos "_")
+      foreach(axis ${axes})
+        string(REPLACE "=" ";" parts "${axis}")
+        list(GET parts 0 name)
+        list(GET parts 1 values)
+        string(REPLACE "," ";" values "${values}")
+        set(next)
+        foreach(c ${combos})
+          foreach(v ${values})
+            if(c STREQUAL "_")
+              list(APPEND next "${name}=${v}")
+            else()
+              list(APPEND next "${c}|${name}=${v}")
+            endif()
+          endforeach()
+        endforeach()
+        set(combos ${next})
+      endforeach()
+    else()
+      set(combos "_")
+    endif()
+    file(RELATIVE_PATH rel "${ARG_ROOT}" "${src}")
+    string(REGEX REPLACE "\\.hlsl$" "" rel "${rel}")
+    foreach(c ${combos})
+      set(suffix "")
+      set(defs)
+      if(NOT c STREQUAL "_")
+        string(REPLACE "|" ";" pairs "${c}")
+        foreach(p ${pairs})
+          string(REPLACE "=" "" tag "${p}")
+          string(APPEND suffix ".${tag}")
+          list(APPEND defs -D "${p}")
+        endforeach()
+      endif()
+      set(out "${ARG_OUTPUT}/${rel}${suffix}.dxil")
+      set(incs)
+      foreach(i ${ARG_INCLUDES})
+        list(APPEND incs -I "${i}")
+      endforeach()
+      add_custom_command(OUTPUT "${out}"
+        COMMAND $<TARGET_FILE:unx_shaderc> --src "${src}" --profile ${profile} --entry ${entry}
+                --out "${out}" --depfile "${out}.d" --max-kb ${UNX_DXIL_LIMIT_KB} ${incs} ${defs}
+        DEPENDS "${src}" unx_shaderc
+        DEPFILE "${out}.d"
+        COMMENT "HLSL ${rel}${suffix}"
+        VERBATIM)
+      list(APPEND outputs "${out}")
+    endforeach()
+  endforeach()
+  add_custom_target(${target} ALL DEPENDS ${outputs})
+endfunction()

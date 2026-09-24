@@ -1,0 +1,86 @@
+#pragma once
+#include "unx/render/Device.h"
+
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace unx::render
+{
+struct PassTiming
+{
+    std::string name;
+    QueueType queue = QueueType::Graphics;
+    double beginMs = 0;  // relative to the frame's first timestamp, on a common (CPU-calibrated) timeline
+    double endMs = 0;
+    double durationMs() const { return endMs - beginMs; }
+};
+
+struct FrameTiming
+{
+    uint64_t frame = 0;
+    double gpuFrameMs = 0;  // first to last timestamp over all queues
+    std::vector<PassTiming> passes;
+};
+
+// GPU timestamps for every pass, on by default (ARCHITECTURE_KO.md 6, 7.0). One timestamp per pass boundary: a pass
+// spans from the previous mark on its queue (frame begin or the previous pass's end) to its own end mark, so its
+// time includes the barriers that prepare its inputs. (A begin/end pair per pass cost 0.26 us per pass [measured].)
+// Each queue owns its own query index range per frame slot and resolves it at the end of its last command list;
+// results are read back once the slot's fences have completed. Timestamps from different queues are placed on one
+// timeline with each queue's clock calibration against QueryPerformanceCounter.
+class GpuProfiler
+{
+public:
+    GpuProfiler(Device& device, uint32_t framesInFlight, uint32_t maxPassesPerFrame);
+    ~GpuProfiler();
+
+    // Starts frame 'frame' in slot frame % framesInFlight. The caller has already waited for that slot's fences.
+    // Returns the timing of the frame that previously used the slot (if any) through lastCompleted().
+    void beginFrame(uint64_t frame);
+    const FrameTiming* lastCompleted() const { return m_hasCompleted ? &m_completed : nullptr; }
+
+    // Recording interface used by the render graph.
+    void frameMark(ID3D12GraphicsCommandList* cmd, QueueType queue);  // frame begin/end markers
+    void passBegin(ID3D12GraphicsCommandList* cmd, QueueType queue, std::string_view name);
+    void passEnd(ID3D12GraphicsCommandList* cmd, QueueType queue);
+    void resolve(ID3D12GraphicsCommandList* cmd, QueueType queue);  // once per queue per frame, last
+
+    bool enabled() const { return m_passTimestamps; }
+    // Per-pass timestamps can be switched off to measure their own cost (frame markers stay).
+    void setPassTimestamps(bool on) { m_passTimestamps = on; }
+
+private:
+    struct Event
+    {
+        std::string name;
+        QueueType queue;
+        uint32_t begin, end;
+    };
+    struct Slot
+    {
+        uint64_t frame = UINT64_MAX;
+        std::vector<Event> events;
+        uint32_t used[kQueueTypeCount] = {};
+        std::vector<uint32_t> frameMarks[kQueueTypeCount];
+    };
+    uint32_t allocate(QueueType queue);
+    void read(Slot& slot);
+
+    Device& m_device;
+    uint32_t m_framesInFlight;
+    uint32_t m_perQueue;  // query indices per queue per slot
+    ComPtr<ID3D12QueryHeap> m_heap;
+    ComPtr<ID3D12Resource> m_readback;
+    uint64_t* m_mapped = nullptr;
+    std::vector<Slot> m_slots;
+    Slot* m_current = nullptr;
+    std::vector<uint32_t> m_open[kQueueTypeCount];  // stack of open events per queue
+    uint32_t m_lastMark[kQueueTypeCount] = { UINT32_MAX, UINT32_MAX, UINT32_MAX };
+    double m_calibrationOffsetMs[kQueueTypeCount] = {};  // gpu tick -> ms on the CPU timeline
+    double m_msPerTick[kQueueTypeCount] = {};
+    bool m_passTimestamps = true;
+    bool m_hasCompleted = false;
+    FrameTiming m_completed;
+};
+} // namespace unx::render
