@@ -1,7 +1,7 @@
 param(
-  [string]$Track = "core",     # core | S | R | C | all | ... : each session builds in its own folder build/<Track>
-  [string]$Tracks = "",        # enabled tracks (cmake/Tracks.cmake); default from -Track: core -> V;M, S -> S, R -> R,
-                               # C -> C, V -> V, M -> M, all -> all (integrated build for gate measurements)
+  [string]$Track = "core",     # core | M | S | R | C | all : each session builds in its own folder build/<Track>
+  [string]$Tracks = "",        # enabled tracks (cmake/Tracks.cmake); default from -Track: core -> V, M -> M, S -> S, R -> R,
+                               # C -> C, V -> V, all -> all (integrated build for gate measurements)
   [string]$Config = "Release",
   [string]$Target = ""         # optional single target, e.g. unx_unit_tests
 )
@@ -23,7 +23,7 @@ foreach ($sub in @("External/nvapi", "External/flip", "External/meshoptimizer"))
   }
 }
 if (-not $Tracks) {
-  $Tracks = switch ($Track) { "core" { "V;M" } "all" { "all" } default { $Track } }
+  $Tracks = switch ($Track) { "core" { "V" } "all" { "all" } default { $Track } }
 }
 New-Item -ItemType Directory -Force $buildDir | Out-Null
 $sw = [Diagnostics.Stopwatch]::StartNew()

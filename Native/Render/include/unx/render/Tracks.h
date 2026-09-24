@@ -8,14 +8,14 @@ namespace unx::render::tracks
 // Entry points a track has not implemented yet call this: it logs once per entry and the entry declares no passes.
 void pending(const char* entry);
 
-// ---- V: visibility (core session) - Native/Render/Passes/Visibility
+// ---- V: visibility (core session) - Native/Render/Passes/Visibility, Tools/ClusterBuilder
 // Culling (two phase), band A/B/C classification, band A vis buffer + depth, HiZ, coverage layer (bands B/C).
 // Writes view.depth, visId, visibleClusters, hiz, coverageFragments, coverageHeads.
 void visibility(FramePassContext& fc, ViewResources& view);
 // Service behind FrameServices::rasterizeDepth.
 void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request);
 
-// ---- M: material and shading (core session) - Passes/Material, Passes/Shading
+// ---- M: material and shading (M session) - Passes/Material, Passes/Shading
 void materialResolve(FramePassContext& fc, ViewResources& view);  // writes view.gbuffer
 void shading(FramePassContext& fc, ViewResources& view);          // writes view.color (+ edge/coverage composite)
 
