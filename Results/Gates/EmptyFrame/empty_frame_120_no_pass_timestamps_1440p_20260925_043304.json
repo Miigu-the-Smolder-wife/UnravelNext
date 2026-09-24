@@ -1,0 +1,20 @@
+{
+ "label": "empty_frame_120_no_pass_timestamps",
+ "resolution": "2560x1440",
+ "quality_sha256": "0cedbceceed6f77cfc4e5fcf74219722c9010429b3191e8b4bf2bb16271733d3",
+ "quality_file": "C:/Users/USER/UnravelNext/Config/quality.toml",
+ "build": {"commit": "40b30b5fd91f195ad69be9186155f090cc695f8e", "dirty": false, "diff_sha256": ""},
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186",
+ "d3d12core": "1.618.5.0", "agility_package": "1.618.5",
+ "nvapi": "NVidia Complete Version 1.10 / driver branch r590_00",
+ "queue_priority": "high",
+ "warmup_s": 1.5, "frames": 600, "frames_in_flight": 2, "pass_timestamps": false, "async_compute": false,
+ "gpu_frame_ms": {"count": 600, "median": 0.142334, "p95": 0.145508, "p99": 0.149414, "mean": 0.143268, "min": 0.140381, "max": 0.401367},
+ "cpu_frame_ms": {"count": 600, "median": 0.254150, "p95": 0.330200, "p99": 0.384800, "mean": 0.243046, "min": 0.116700, "max": 0.471600},
+ "cpu_record_ms": {"count": 600, "median": 0.135900, "p95": 0.179000, "p99": 0.202200, "mean": 0.128838, "min": 0.059700, "max": 0.257100},
+ "cpu_submit_ms": {"count": 600, "median": 0.041550, "p95": 0.069100, "p99": 0.089900, "mean": 0.043228, "min": 0.016000, "max": 0.162800},
+ "sm_clock_mhz": {"count": 37, "median": 2820.000000, "p95": 2820.000000, "p99": 2820.000000, "mean": 2820.000000, "min": 2820.000000, "max": 2820.000000},
+ "graph": {"declared_passes": 120, "live_passes": 120, "transients": 46, "barrier_batches": 99, "barriers": 149, "cross_queue_syncs": 0, "command_lists": 1, "transient_bytes_aliased": 277544960, "transient_bytes_unaliased": 540868608},
+ "passes": {
+ }
+}

@@ -1,0 +1,18 @@
+queue priority HIGH
+adapter NVIDIA GeForce RTX 4080, driver 32.0.15.9186, D3D12Core 1.618.5.0 (C:\Users\USER\UnravelNext\build\Release\bin\D3D12\D3D12Core.dll), NVAPI NVidia Complete Version 1.10 branch r590_00, OMM 1, SER 1, quality 0cedbceceed6f77c
+hardware-accelerated GPU scheduling: supported 1, enabled 1
+
+== render-graph cost decomposition (120 passes, one 64-thread group each)
+  Dispatch(1), no barrier                                                            9.22 us total,  0.077 us per pass
+  Dispatch(1) + legacy UAV barrier                                                 102.40 us total,  0.853 us per pass
+  Dispatch(1) + enhanced global barrier (compute UAV -> UAV)                       102.40 us total,  0.853 us per pass
+  Dispatch(1) + enhanced texture barrier, 4K R32F, UAV -> UAV                      102.40 us total,  0.853 us per pass
+  Dispatch(1) + 4K layout change UAV <-> SHADER_RESOURCE every pass                102.40 us total,  0.853 us per pass
+  Dispatch(1) + global barrier + timestamp pair                                    129.02 us total,  1.075 us per pass
+  Dispatch(1) + global barrier, split into 11 command lists (Signal between)       265.22 us total,  2.210 us per pass
+  Dispatch(1) + global barrier in  1 lists (+2 timestamp lists), one ExecuteCommandLists call     103.42 us
+  Dispatch(1) + global barrier in 11 lists (+2 timestamp lists), one ExecuteCommandLists call     139.26 us
+  Dispatch(1) + global barrier in 11 lists (+2 timestamp lists), separate calls                   287.55 us
+  Dispatch(1) + global barrier in 11 lists (+2 timestamp lists), separate calls + Signal each     295.68 us
+  1 cross-queue round trip(s): graphics signal -> compute wait + Dispatch(1) + signal -> graphics wait    78.53 us total,  78.53 us per round trip
+  3 cross-queue round trip(s): graphics signal -> compute wait + Dispatch(1) + signal -> graphics wait   185.34 us total,  61.78 us per round trip
