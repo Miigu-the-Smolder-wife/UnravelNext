@@ -1,0 +1,10 @@
+* text=auto eol=lf
+*.png binary
+*.exr binary
+*.dds binary
+*.dll binary
+*.lib binary
+*.exe binary
+*.nupkg binary
+# Measurement evidence is stored byte-exact (the benchmark writes CRLF on Windows)
+Tools/Microbench/Results/** -text

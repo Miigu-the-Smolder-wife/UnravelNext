@@ -1,0 +1,33 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "dxc": "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64", "timestamp": "20260925_021222",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "env", "name": "raytracing tier", "value": 11, "unit": "tier", "note": ""},
+  {"section": "env", "name": "mesh shader tier", "value": 10, "unit": "tier", "note": ""},
+  {"section": "env", "name": "highest shader model", "value": 104, "unit": "hex", "note": ""},
+  {"section": "pso", "name": "mesh+pixel graphics PSO create (cpu)", "value": 1.4737, "unit": "ms", "note": ""},
+  {"section": "pso", "name": "mesh depth-only graphics PSO create (cpu)", "value": 0.00949997, "unit": "ms", "note": ""},
+  {"section": "raster", "name": "meshlet launch only (174k meshlets, zero output)", "value": 1148.65, "unit": "Mmeshlets/s", "note": "0.151552 ms incl. depth clear"},
+  {"section": "raster", "name": "4K depth clear alone", "value": 0.004096, "unit": "ms", "note": ""},
+  {"section": "raster", "name": "16.7M tris, edge 0.5 px, vis id + depth", "value": 28.43, "unit": "Gtris/s", "note": "0.600064 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 0.5 px, depth only", "value": 33.1213, "unit": "Gtris/s", "note": "0.515072 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 1.0 px, vis id + depth", "value": 22.5135, "unit": "Gtris/s", "note": "0.757760 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 1.0 px, depth only", "value": 23.0748, "unit": "Gtris/s", "note": "0.739328 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 2.0 px, vis id + depth", "value": 12.9047, "unit": "Gtris/s", "note": "1.321984 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 2.0 px, depth only", "value": 12.9348, "unit": "Gtris/s", "note": "1.318912 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 4.0 px, vis id + depth", "value": 9.12377, "unit": "Gtris/s", "note": "1.869824 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 4.0 px, depth only", "value": 9.3438, "unit": "Gtris/s", "note": "1.825792 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 8.0 px, vis id + depth", "value": 5.97133, "unit": "Gtris/s", "note": "2.856960 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 8.0 px, depth only", "value": 6.07364, "unit": "Gtris/s", "note": "2.808832 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 16.0 px, vis id + depth", "value": 3.3711, "unit": "Gtris/s", "note": "5.060608 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 16.0 px, depth only", "value": 3.42235, "unit": "Gtris/s", "note": "4.984832 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 32.0 px, vis id + depth", "value": 2.36178, "unit": "Gtris/s", "note": "7.223296 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 32.0 px, depth only", "value": 2.40476, "unit": "Gtris/s", "note": "7.094208 ms"},
+  {"section": "raster", "name": "16.7M tris, edge 2 px, 50% culled by SV_CullPrimitive", "value": 21.6083, "unit": "Gtris/s (emitted)", "note": "0.789504 ms"},
+  {"section": "raster", "name": "174k meshlets x 1 triangle (edge 2 px)", "value": 1148.65, "unit": "Mtris/s", "note": "per-meshlet overhead bound"},
+  {"section": "raster", "name": "32 full-screen layers back-to-front (all pass, vis id + depth write)", "value": 279.914, "unit": "Gpix/s", "note": "0.948224 ms"},
+  {"section": "raster", "name": "32 full-screen layers back-to-front, depth only", "value": 1112.45, "unit": "Gpix/s", "note": "0.238592 ms"},
+  {"section": "raster", "name": "32 full-screen layers front-to-back (early-z reject)", "value": 3013.95, "unit": "Gpix/s", "note": "0.088064 ms"},
+  {"section": "raster", "name": "32 full-screen layers front-to-back, depth only (early-z reject)", "value": 3868.66, "unit": "Gpix/s", "note": "0.068608 ms"}
+ ]
+}

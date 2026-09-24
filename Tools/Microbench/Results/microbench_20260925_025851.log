@@ -1,0 +1,37 @@
+Adapter: NVIDIA GeForce RTX 4080, VRAM 15.7 GB, driver 32.0.15.9186
+D3D12Core.dll: C:\Users\USER\UnravelNext\Tools\Microbench\build\D3D12\D3D12Core.dll
+Raytracing tier 11 (12 = DXR 1.2/OMM), mesh shader tier 10, shader model 0x68, work graphs tier 10
+NVAPI: initialized; opacity micromap cap 1 (status 0), thread reordering cap 1 (status 0)
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
+  [env] timestamp frequency                                        1000000000.0000 Hz         
+  [env] raytracing tier                                                 11.0000 tier       
+  [env] mesh shader tier                                                10.0000 tier       
+  [env] highest shader model                                           104.0000 hex        
+
+== Sub-pixel coverage layer (conservative raster + exact pixel area + fragment append, 4K) (after 1.5 s warm-up)
+  [coverage] 262k slivers 0.25 px x 20 px (0.5M tris): conservative raster + exact area + append       5.1917 ms         15.198736 M fragments (28.989288 per tri), 2.927518 G frags/s
+  [coverage] 0.5M tris 0.25 px: conservative raster, trivial PS               0.6052 ms         
+  [coverage] 0.5M tris 0.25 px: standard raster + area + append (centre-sample pixels only)       1.9917 ms         1.304510 M pixels touched by centre sampling vs 15.198736 M true fragments
+  [coverage] 1049k slivers 0.25 px x 20 px (2.1M tris): conservative raster + exact area + append      20.7319 ms         60.784325 M fragments (28.984225 per tri), 2.931922 G frags/s
+  [coverage] 2.1M tris 0.25 px: conservative raster, trivial PS               2.4218 ms         
+  [coverage] 2.1M tris 0.25 px: standard raster + area + append (centre-sample pixels only)       7.9500 ms         5.220250 M pixels touched by centre sampling vs 60.784325 M true fragments
+  [coverage] 262k slivers 0.50 px x 20 px (0.5M tris): conservative raster + exact area + append       5.6166 ms         16.588649 M fragments (31.640337 per tri), 2.953483 G frags/s
+  [coverage] 0.5M tris 0.50 px: conservative raster, trivial PS               0.6318 ms         
+  [coverage] 0.5M tris 0.50 px: standard raster + area + append (centre-sample pixels only)       2.6284 ms         2.609021 M pixels touched by centre sampling vs 16.588649 M true fragments
+  [coverage] 1049k slivers 0.50 px x 20 px (2.1M tris): conservative raster + exact area + append      22.3372 ms         66.343889 M fragments (31.635231 per tri), 2.970110 G frags/s
+  [coverage] 2.1M tris 0.50 px: conservative raster, trivial PS               2.5180 ms         
+  [coverage] 2.1M tris 0.50 px: standard raster + area + append (centre-sample pixels only)      10.4387 ms         10.439807 M pixels touched by centre sampling vs 66.343889 M true fragments
+  [coverage] 262k slivers 1.00 px x 20 px (0.5M tris): conservative raster + exact area + append       6.2819 ms         19.369003 M fragments (36.943441 per tri), 3.083325 G frags/s
+  [coverage] 0.5M tris 1.00 px: conservative raster, trivial PS               0.6779 ms         
+  [coverage] 0.5M tris 1.00 px: standard raster + area + append (centre-sample pixels only)       3.7137 ms         5.217903 M pixels touched by centre sampling vs 19.369003 M true fragments
+  [coverage] 1049k slivers 1.00 px x 20 px (2.1M tris): conservative raster + exact area + append      24.9805 ms         77.468990 M fragments (36.940093 per tri), 3.101181 G frags/s
+  [coverage] 2.1M tris 1.00 px: conservative raster, trivial PS               2.7020 ms         
+  [coverage] 2.1M tris 1.00 px: standard raster + area + append (centre-sample pixels only)      14.7528 ms         20.873505 M pixels touched by centre sampling vs 77.468990 M true fragments
+
+== Virtual shadow map lookup and fused shading floors (3840x2160) (after 1.5 s warm-up)
+
+FAILED: shader compile failed: hlsl.hlsl:126:51: error: condition for short-circuiting ternary operator must be scalar, for non-scalar types use 'select'
+    float t = saturate(-n.z); n.xy += n.xy >= 0.0 ? -t : t;
+                                      ~~~~~~~~~~~~^~~~~~~~
+                                      select(n.xy >= 0., -t, t)
+

@@ -1,0 +1,11 @@
+# Build trees and caches
+build/
+/out/
+Tools/Microbench/build/
+External/.cache/
+__pycache__/
+*.pyc
+
+# Local run outputs that are not evidence
+*.pix
+*.etl

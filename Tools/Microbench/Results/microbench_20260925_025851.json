@@ -1,0 +1,27 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "dxc": "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64", "timestamp": "20260925_025851",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "env", "name": "raytracing tier", "value": 11, "unit": "tier", "note": ""},
+  {"section": "env", "name": "mesh shader tier", "value": 10, "unit": "tier", "note": ""},
+  {"section": "env", "name": "highest shader model", "value": 104, "unit": "hex", "note": ""},
+  {"section": "coverage", "name": "262k slivers 0.25 px x 20 px (0.5M tris): conservative raster + exact area + append", "value": 5.19168, "unit": "ms", "note": "15.198736 M fragments (28.989288 per tri), 2.927518 G frags/s"},
+  {"section": "coverage", "name": "0.5M tris 0.25 px: conservative raster, trivial PS", "value": 0.605184, "unit": "ms", "note": ""},
+  {"section": "coverage", "name": "0.5M tris 0.25 px: standard raster + area + append (centre-sample pixels only)", "value": 1.99168, "unit": "ms", "note": "1.304510 M pixels touched by centre sampling vs 15.198736 M true fragments"},
+  {"section": "coverage", "name": "1049k slivers 0.25 px x 20 px (2.1M tris): conservative raster + exact area + append", "value": 20.7319, "unit": "ms", "note": "60.784325 M fragments (28.984225 per tri), 2.931922 G frags/s"},
+  {"section": "coverage", "name": "2.1M tris 0.25 px: conservative raster, trivial PS", "value": 2.42176, "unit": "ms", "note": ""},
+  {"section": "coverage", "name": "2.1M tris 0.25 px: standard raster + area + append (centre-sample pixels only)", "value": 7.95005, "unit": "ms", "note": "5.220250 M pixels touched by centre sampling vs 60.784325 M true fragments"},
+  {"section": "coverage", "name": "262k slivers 0.50 px x 20 px (0.5M tris): conservative raster + exact area + append", "value": 5.61664, "unit": "ms", "note": "16.588649 M fragments (31.640337 per tri), 2.953483 G frags/s"},
+  {"section": "coverage", "name": "0.5M tris 0.50 px: conservative raster, trivial PS", "value": 0.631808, "unit": "ms", "note": ""},
+  {"section": "coverage", "name": "0.5M tris 0.50 px: standard raster + area + append (centre-sample pixels only)", "value": 2.62845, "unit": "ms", "note": "2.609021 M pixels touched by centre sampling vs 16.588649 M true fragments"},
+  {"section": "coverage", "name": "1049k slivers 0.50 px x 20 px (2.1M tris): conservative raster + exact area + append", "value": 22.3372, "unit": "ms", "note": "66.343889 M fragments (31.635231 per tri), 2.970110 G frags/s"},
+  {"section": "coverage", "name": "2.1M tris 0.50 px: conservative raster, trivial PS", "value": 2.51795, "unit": "ms", "note": ""},
+  {"section": "coverage", "name": "2.1M tris 0.50 px: standard raster + area + append (centre-sample pixels only)", "value": 10.4387, "unit": "ms", "note": "10.439807 M pixels touched by centre sampling vs 66.343889 M true fragments"},
+  {"section": "coverage", "name": "262k slivers 1.00 px x 20 px (0.5M tris): conservative raster + exact area + append", "value": 6.28186, "unit": "ms", "note": "19.369003 M fragments (36.943441 per tri), 3.083325 G frags/s"},
+  {"section": "coverage", "name": "0.5M tris 1.00 px: conservative raster, trivial PS", "value": 0.677888, "unit": "ms", "note": ""},
+  {"section": "coverage", "name": "0.5M tris 1.00 px: standard raster + area + append (centre-sample pixels only)", "value": 3.7137, "unit": "ms", "note": "5.217903 M pixels touched by centre sampling vs 19.369003 M true fragments"},
+  {"section": "coverage", "name": "1049k slivers 1.00 px x 20 px (2.1M tris): conservative raster + exact area + append", "value": 24.9805, "unit": "ms", "note": "77.468990 M fragments (36.940093 per tri), 3.101181 G frags/s"},
+  {"section": "coverage", "name": "2.1M tris 1.00 px: conservative raster, trivial PS", "value": 2.70205, "unit": "ms", "note": ""},
+  {"section": "coverage", "name": "2.1M tris 1.00 px: standard raster + area + append (centre-sample pixels only)", "value": 14.7528, "unit": "ms", "note": "20.873505 M pixels touched by centre sampling vs 77.468990 M true fragments"}
+ ]
+}

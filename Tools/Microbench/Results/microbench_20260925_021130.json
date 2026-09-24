@@ -1,0 +1,11 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "dxc": "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64", "timestamp": "20260925_021130",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "env", "name": "raytracing tier", "value": 11, "unit": "tier", "note": ""},
+  {"section": "env", "name": "mesh shader tier", "value": 10, "unit": "tier", "note": ""},
+  {"section": "env", "name": "highest shader model", "value": 104, "unit": "hex", "note": ""},
+  {"section": "pso", "name": "mesh+pixel graphics PSO create (cpu)", "value": 17.4086, "unit": "ms", "note": ""},
+  {"section": "pso", "name": "mesh depth-only graphics PSO create (cpu)", "value": 0.0156, "unit": "ms", "note": ""}
+ ]
+}

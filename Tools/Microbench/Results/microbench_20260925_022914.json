@@ -1,0 +1,31 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "dxc": "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64", "timestamp": "20260925_022914",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "env", "name": "raytracing tier", "value": 11, "unit": "tier", "note": ""},
+  {"section": "env", "name": "mesh shader tier", "value": 10, "unit": "tier", "note": ""},
+  {"section": "env", "name": "highest shader model", "value": 104, "unit": "hex", "note": ""},
+  {"section": "pso", "name": "raytracing state object create, 5 shaders (cpu)", "value": 64.1654, "unit": "ms", "note": "dxc 14.682400 ms"},
+  {"section": "rtas", "name": "BLAS build terrain 2.1M tris (fast trace)", "value": 3.24506, "unit": "ms", "note": "139 MB"},
+  {"section": "rtas", "name": "BLAS build city 36k tris", "value": 0.314368, "unit": "ms", "note": ""},
+  {"section": "rtas", "name": "BLAS build tree 3.3k tris (fast trace)", "value": 0.249856, "unit": "ms", "note": "229 KB"},
+  {"section": "rtas", "name": "BLAS build tree with OMM leaves (fast trace)", "value": 0.264192, "unit": "ms", "note": "260 KB"},
+  {"section": "rtas", "name": "BLAS full build 60k-tri skinned mesh (allow update), per mesh, 64 in flight", "value": 97.344, "unit": "us", "note": "3710 KB each"},
+  {"section": "rtas", "name": "BLAS refit 60k-tri skinned mesh, per mesh, 64 in flight", "value": 15.28, "unit": "us", "note": "256 characters = 3.911680 ms (expected, linear)"},
+  {"section": "rtas", "name": "TLAS build 100k instances (fast trace)", "value": 0.293888, "unit": "ms", "note": "28 MB"},
+  {"section": "rtas", "name": "TLAS build 100k instances (fast build)", "value": 0.29184, "unit": "ms", "note": ""},
+  {"section": "rtas", "name": "TLAS build 100k instances (fast trace + allow update)", "value": 0.29696, "unit": "ms", "note": ""},
+  {"section": "rtas", "name": "TLAS refit 100k instances", "value": 0.053248, "unit": "ms", "note": ""},
+  {"section": "rays", "name": "sanity: primary alpha-tested hit fraction", "value": 1, "unit": "fraction", "note": ""},
+  {"section": "rays", "name": "DispatchRays opaque trivial hit (reference) | incoherent long (canopy origins, sphere dirs, 2 km)", "value": 2.09193, "unit": "Grays/s", "note": "2.004992 ms"},
+  {"section": "rays", "name": "DispatchRays opaque trivial hit (reference) | primary 3840x2160 camera", "value": 3.30612, "unit": "Grays/s", "note": "2.508800 ms"},
+  {"section": "rays", "name": "DispatchRays opaque trivial hit (reference) | incoherent short (same, tMax 2 m)", "value": 3.39073, "unit": "Grays/s", "note": "1.236992 ms"},
+  {"section": "rays", "name": "DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | incoherent long (canopy origins, sphere dirs, 2 km)", "value": 1.71596, "unit": "Grays/s", "note": "2.444288 ms"},
+  {"section": "rays", "name": "DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | primary 3840x2160 camera", "value": 2.97139, "unit": "Grays/s", "note": "2.791424 ms"},
+  {"section": "rays", "name": "DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | incoherent short (same, tMax 2 m)", "value": 3.23028, "unit": "Grays/s", "note": "1.298432 ms"},
+  {"section": "rays", "name": "DispatchRays divergent hit shading, NVAPI SER (reorder by material) | incoherent long (canopy origins, sphere dirs, 2 km)", "value": 1.63644, "unit": "Grays/s", "note": "2.563072 ms"},
+  {"section": "rays", "name": "DispatchRays divergent hit shading, NVAPI SER (reorder by material) | primary 3840x2160 camera", "value": 2.6982, "unit": "Grays/s", "note": "3.074048 ms"},
+  {"section": "rays", "name": "DispatchRays divergent hit shading, NVAPI SER (reorder by material) | incoherent short (same, tMax 2 m)", "value": 2.86233, "unit": "Grays/s", "note": "1.465344 ms"},
+  {"section": "rays", "name": "DispatchRays trivial hit, NVAPI SER (reorder overhead) | incoherent long (canopy origins, sphere dirs, 2 km)", "value": 1.92844, "unit": "Grays/s", "note": "2.174976 ms"}
+ ]
+}

@@ -1,0 +1,37 @@
+Adapter: NVIDIA GeForce RTX 4080, VRAM 15.7 GB, driver 32.0.15.9186
+D3D12Core.dll: C:\Users\USER\UnravelNext\Tools\Microbench\build\D3D12\D3D12Core.dll
+Raytracing tier 11 (12 = DXR 1.2/OMM), mesh shader tier 10, shader model 0x68, work graphs tier 10
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
+  [env] timestamp frequency                                        1000000000.0000 Hz         
+  [env] raytracing tier                                                 11.0000 tier       
+  [env] mesh shader tier                                                10.0000 tier       
+  [env] highest shader model                                           104.0000 hex        
+
+== Raster (mesh shader, 3840x2160 R32_UINT visibility + D32) (after 1.5 s warm-up)
+
+FAILED: shader compile failed: error: validation errors
+hlsl.hlsl:59:9: error: SetMeshOUtputCounts cannot be called multiple times.
+note: at 'call void @dx.op.setMeshOutputCounts(i32 168, i32 4, i32 2)' in block '#3' of function 'MS'.
+hlsl.hlsl:76:9: error: SetMeshOUtputCounts cannot be called multiple times.
+note: at 'call void @dx.op.setMeshOutputCounts(i32 168, i32 3, i32 1)' in block '#7' of function 'MS'.
+hlsl.hlsl:88:5: error: SetMeshOUtputCounts cannot be called multiple times.
+note: at 'call void @dx.op.setMeshOutputCounts(i32 168, i32 64, i32 98)' in block '#10' of function 'MS'.
+hlsl.hlsl:65:29: error: Non-Dominating SetMeshOutputCounts call.
+note: at 'call void @dx.op.storeVertexOutput.f32(i32 171, i32 0, i32 0, i8 0, float %42, i32 %5)' in block '#4' of function 'MS'.
+hlsl.hlsl:69:24: error: Non-Dominating SetMeshOutputCounts call.
+note: at 'call void @dx.op.emitIndices(i32 169, i32 %5, i32 %48, i32 1, i32 %49)' in block '#5' of function 'MS'.
+hlsl.hlsl:70:28: error: Non-Dominating SetMeshOutputCounts call.
+note: at 'call void @dx.op.storePrimitiveOutput.i32(i32 172, i32 0, i32 0, i8 0, i32 %9, i32 %5)' in block '#5' of function 'MS'.
+hlsl.hlsl:70:52: error: Non-Dominating SetMeshOutputCounts call.
+note: at 'call void @dx.op.storePrimitiveOutput.i32(i32 172, i32 1, i32 0, i8 0, i32 0, i32 %5)' in block '#5' of function 'MS'.
+hlsl.hlsl:83:29: error: Non-Dominating SetMeshOutputCounts call.
+note: at 'call void @dx.op.storeVertexOutput.f32(i32 171, i32 0, i32 0, i8 0, float %113, i32 %5)' in block '#8' of function 'MS'.
+hlsl.hlsl:85:34: error: Non-Dominating SetMeshOutputCounts call.
+note: at 'call void @dx.op.emitIndices(i32 169, i32 0, i32 0, i32 1, i32 2)' in block '#9' of function 'MS'.
+hlsl.hlsl:85:64: error: Non-Dominating SetMeshOutputCounts call.
+note: at 'call void @dx.op.storePrimitiveOutput.i32(i32 172, i32 0, i32 0, i8 0, i32 %9, i32 0)' in block '#9' of function 'MS'.
+hlsl.hlsl:85:85: error: Non-Dominating SetMeshOutputCounts call.
+note: at 'call void @dx.op.storePrimitiveOutput.i32(i32 172, i32 1, i32 0, i8 0, i32 0, i32 0)' in block '#9' of function 'MS'.
+Validation failed.
+
+

@@ -1,0 +1,15 @@
+Adapter: NVIDIA GeForce RTX 4080, VRAM 15.7 GB, driver 32.0.15.9186
+D3D12Core.dll: C:\Users\USER\UnravelNext\Tools\Microbench\build\D3D12\D3D12Core.dll
+Raytracing tier 11 (12 = DXR 1.2/OMM), mesh shader tier 10, shader model 0x68, work graphs tier 10
+NVAPI: initialized; opacity micromap cap 1 (status 0), thread reordering cap 1 (status 0)
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
+  [env] timestamp frequency                                        1000000000.0000 Hz         
+  [env] raytracing tier                                                 11.0000 tier       
+  [env] mesh shader tier                                                10.0000 tier       
+  [env] highest shader model                                           104.0000 hex        
+
+== Raster (mesh shader, 3840x2160 R32_UINT visibility + D32) (after 1.5 s warm-up)
+  [pso] mesh+pixel graphics PSO create (cpu)                             1.4384 ms         
+  [pso] mesh depth-only graphics PSO create (cpu)                        0.0092 ms         
+
+FAILED: CreatePipelineState(mesh) failed: 0x80070057

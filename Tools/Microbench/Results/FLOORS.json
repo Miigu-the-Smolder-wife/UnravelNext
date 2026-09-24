@@ -1,0 +1,2490 @@
+{
+ "meta": {
+  "adapter": "NVIDIA GeForce RTX 4080",
+  "driver": "32.0.15.9186",
+  "agility_sdk": 618,
+  "dxc": "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64"
+ },
+ "rows": [
+  {
+   "section": "env",
+   "name": "timestamp frequency",
+   "value": 1000000000.0,
+   "unit": "Hz",
+   "note": "",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "env",
+   "name": "raytracing tier",
+   "value": 11,
+   "unit": "tier",
+   "note": "",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "env",
+   "name": "mesh shader tier",
+   "value": 10,
+   "unit": "tier",
+   "note": "",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "env",
+   "name": "highest shader model",
+   "value": 104,
+   "unit": "hex",
+   "note": "",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "compute",
+   "name": "fp32 fma throughput (512 iters, 8 chains)",
+   "value": 13.8255,
+   "unit": "TFLOPS",
+   "note": "median of 5, min 15.595832",
+   "run": "20260925_015010"
+  },
+  {
+   "section": "compute",
+   "name": "fp32 fma throughput (2048 iters, 8 chains)",
+   "value": 13.4231,
+   "unit": "TFLOPS",
+   "note": "median of 5, min 13.821917",
+   "run": "20260925_015010"
+  },
+  {
+   "section": "memory",
+   "name": "sequential write 1 GiB (uint4 stores)",
+   "value": 659.897,
+   "unit": "GB/s",
+   "note": "",
+   "run": "20260925_015010"
+  },
+  {
+   "section": "memory",
+   "name": "sequential read 1 GiB (uint4 loads)",
+   "value": 184.673,
+   "unit": "GB/s",
+   "note": "",
+   "run": "20260925_015010"
+  },
+  {
+   "section": "memory",
+   "name": "copy 512 MiB read + 512 MiB write",
+   "value": 608.576,
+   "unit": "GB/s",
+   "note": "read+write bytes summed",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "read 1 GiB traffic inside 4 MiB window",
+   "value": 12945.4,
+   "unit": "GB/s",
+   "note": "L2 = 64 MB on AD103",
+   "run": "20260925_020109"
+  },
+  {
+   "section": "memory",
+   "name": "read 1 GiB traffic inside 16 MiB window",
+   "value": 12945.4,
+   "unit": "GB/s",
+   "note": "L2 = 64 MB on AD103",
+   "run": "20260925_020109"
+  },
+  {
+   "section": "memory",
+   "name": "read 1 GiB traffic inside 32 MiB window",
+   "value": 12945.4,
+   "unit": "GB/s",
+   "note": "L2 = 64 MB on AD103",
+   "run": "20260925_020109"
+  },
+  {
+   "section": "memory",
+   "name": "read 1 GiB traffic inside 48 MiB window",
+   "value": 12945.4,
+   "unit": "GB/s",
+   "note": "L2 = 64 MB on AD103",
+   "run": "20260925_020109"
+  },
+  {
+   "section": "memory",
+   "name": "read 1 GiB traffic inside 96 MiB window",
+   "value": 12633.4,
+   "unit": "GB/s",
+   "note": "L2 = 64 MB on AD103",
+   "run": "20260925_020109"
+  },
+  {
+   "section": "memory",
+   "name": "random 4 B loads, 1024 MiB window",
+   "value": 4.97351,
+   "unit": "Gloads/s",
+   "note": "159.152463 GB/s at 32 B sectors",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "random 4 B loads, 32 MiB window",
+   "value": 64.7589,
+   "unit": "Gloads/s",
+   "note": "2072.284585 GB/s at 32 B sectors",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "random 4 B loads, 2 MiB window",
+   "value": 66.332,
+   "unit": "Gloads/s",
+   "note": "2122.623482 GB/s at 32 B sectors",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "random 64 B loads, 1024 MiB window",
+   "value": 4.96522,
+   "unit": "Gloads/s",
+   "note": "317.774377 GB/s useful",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "random 64 B loads, 32 MiB window",
+   "value": 55.3514,
+   "unit": "Gloads/s",
+   "note": "3542.486486 GB/s useful",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "random 64 B loads, 2 MiB window",
+   "value": 57.0374,
+   "unit": "Gloads/s",
+   "note": "3650.395126 GB/s useful",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "dependent load latency, 262144 KiB working set",
+   "value": 243.141,
+   "unit": "ns/load",
+   "note": "single thread pointer chase",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "dependent load latency, 4096 KiB working set",
+   "value": 123.375,
+   "unit": "ns/load",
+   "note": "single thread pointer chase",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "dependent load latency, 64 KiB working set",
+   "value": 35.4375,
+   "unit": "ns/load",
+   "note": "single thread pointer chase",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "texture",
+   "name": "RGBA8 4096^2 coherent bilinear lod0",
+   "value": 814.112,
+   "unit": "Gsamples/s",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "texture",
+   "name": "RGBA8 4096^2 incoherent bilinear lod0",
+   "value": 24.789,
+   "unit": "Gsamples/s",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "texture",
+   "name": "RGBA8 4096^2 coherent trilinear SampleGrad",
+   "value": 361.578,
+   "unit": "Gsamples/s",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "texture",
+   "name": "RGBA8 4096^2 coherent point lod0",
+   "value": 652.1,
+   "unit": "Gsamples/s",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "atomics",
+   "name": "InterlockedAdd, single address",
+   "value": 2.18148,
+   "unit": "Gatomics/s",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "atomics",
+   "name": "InterlockedAdd, 256 addresses",
+   "value": 3.03576,
+   "unit": "Gatomics/s",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "atomics",
+   "name": "InterlockedAdd, 1048576 addresses",
+   "value": 63.381,
+   "unit": "Gatomics/s",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "dispatch",
+   "name": "1000 x Dispatch(1) no barrier",
+   "value": 0.038912,
+   "unit": "us/dispatch",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "dispatch",
+   "name": "1000 x Dispatch(1) + UAV barrier",
+   "value": 0.884736,
+   "unit": "us/dispatch",
+   "note": "fixed cost floor of one dependent pass",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "dispatch",
+   "name": "1000 x (PSO switch + constants + Dispatch(1) + UAV barrier)",
+   "value": 0.88576,
+   "unit": "us/dispatch",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "dispatch",
+   "name": "1000 x Dispatch(1024 groups of 64) + UAV barrier",
+   "value": 1.41722,
+   "unit": "us/dispatch",
+   "note": "65k-thread pass with real work",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "experiment",
+   "name": "fma variant 0",
+   "value": 26.0036,
+   "unit": "TFLOPS",
+   "note": "10.570752 ms, DXIL 3304 B",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "fma variant 1",
+   "value": 42.8948,
+   "unit": "TFLOPS",
+   "note": "6.408192 ms, DXIL 6600 B",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "fma variant 2",
+   "value": 27.6225,
+   "unit": "TFLOPS",
+   "note": "9.951232 ms, DXIL 6932 B",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "fma variant 3",
+   "value": 40.4392,
+   "unit": "TFLOPS",
+   "note": "6.797312 ms, DXIL 4012 B",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "fma variant 4",
+   "value": 43.905,
+   "unit": "TFLOPS",
+   "note": "6.260736 ms, DXIL 6572 B",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "fma variant 5",
+   "value": 14.5077,
+   "unit": "TFLOPS",
+   "note": "18.947072 ms, DXIL 7464 B",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "read variant 0, per-thread 16 x 16 B, 1 GiB",
+   "value": 693.503,
+   "unit": "GB/s",
+   "note": "1.548288 ms",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "read variant 0, per-thread 64 x 16 B, 1 GiB",
+   "value": 606.113,
+   "unit": "GB/s",
+   "note": "1.771520 ms",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "read variant 1, per-thread 16 x 16 B, 1 GiB",
+   "value": 555.979,
+   "unit": "GB/s",
+   "note": "1.931264 ms",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "read variant 1, per-thread 64 x 16 B, 1 GiB",
+   "value": 693.044,
+   "unit": "GB/s",
+   "note": "1.549312 ms",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "read variant 2, per-thread 16 x 16 B, 1 GiB",
+   "value": 693.044,
+   "unit": "GB/s",
+   "note": "1.549312 ms",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "read variant 2, per-thread 64 x 16 B, 1 GiB",
+   "value": 692.587,
+   "unit": "GB/s",
+   "note": "1.550336 ms",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "read variant 3, per-thread 16 x 16 B, 1 GiB",
+   "value": 556.274,
+   "unit": "GB/s",
+   "note": "1.930240 ms",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "read variant 3, per-thread 64 x 16 B, 1 GiB",
+   "value": 667.458,
+   "unit": "GB/s",
+   "note": "1.608704 ms",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "read variant 4, per-thread 16 x 16 B, 1 GiB",
+   "value": 680.452,
+   "unit": "GB/s",
+   "note": "1.577984 ms",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "read variant 4, per-thread 64 x 16 B, 1 GiB",
+   "value": 687.591,
+   "unit": "GB/s",
+   "note": "1.561600 ms",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "read variant 5, per-thread 16 x 16 B, 1 GiB",
+   "value": 557.16,
+   "unit": "GB/s",
+   "note": "1.927168 ms",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "experiment",
+   "name": "read variant 5, per-thread 64 x 16 B, 1 GiB",
+   "value": 692.587,
+   "unit": "GB/s",
+   "note": "1.550336 ms",
+   "run": "20260925_015612"
+  },
+  {
+   "section": "compute",
+   "name": "fp32 fma throughput (512 iters, 8 float4 chains, unroll 8)",
+   "value": 49.2,
+   "unit": "TFLOPS",
+   "note": "median of 9, best 49.218089, peak 48.7 at 2.5 GHz",
+   "run": "20260925_020109"
+  },
+  {
+   "section": "compute",
+   "name": "fp32 fma throughput (2048 iters, 8 float4 chains, unroll 8)",
+   "value": 44.107,
+   "unit": "TFLOPS",
+   "note": "median of 9, best 46.587202, peak 48.7 at 2.5 GHz",
+   "run": "20260925_020109"
+  },
+  {
+   "section": "memory",
+   "name": "sequential write 1 GiB, hashed (incompressible) data",
+   "value": 638.986,
+   "unit": "GB/s",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "sequential read 1 GiB of hashed data",
+   "value": 688.494,
+   "unit": "GB/s",
+   "note": "true DRAM read floor",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "sequential write 1 GiB, structured (compressible) data",
+   "value": 622.67,
+   "unit": "GB/s",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "sequential read 1 GiB of structured data",
+   "value": 694.881,
+   "unit": "GB/s",
+   "note": "compression inflated",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "pso",
+   "name": "mesh+pixel graphics PSO create (cpu)",
+   "value": 1.4247,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "pso",
+   "name": "mesh depth-only graphics PSO create (cpu)",
+   "value": 0.00929999,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "meshlet launch only (174k meshlets, zero output)",
+   "value": 1148.65,
+   "unit": "Mmeshlets/s",
+   "note": "0.151552 ms incl. depth clear",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "4K depth clear alone",
+   "value": 0.004096,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 0.5 px, vis id + depth",
+   "value": 28.43,
+   "unit": "Gtris/s",
+   "note": "0.600064 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 0.5 px, depth only",
+   "value": 32.929,
+   "unit": "Gtris/s",
+   "note": "0.518080 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 1.0 px, vis id + depth",
+   "value": 22.5135,
+   "unit": "Gtris/s",
+   "note": "0.757760 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 1.0 px, depth only",
+   "value": 23.0748,
+   "unit": "Gtris/s",
+   "note": "0.739328 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 2.0 px, vis id + depth",
+   "value": 12.9047,
+   "unit": "Gtris/s",
+   "note": "1.321984 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 2.0 px, depth only",
+   "value": 12.9247,
+   "unit": "Gtris/s",
+   "note": "1.319936 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 4.0 px, vis id + depth",
+   "value": 9.11877,
+   "unit": "Gtris/s",
+   "note": "1.870848 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 4.0 px, depth only",
+   "value": 9.33857,
+   "unit": "Gtris/s",
+   "note": "1.826816 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 8.0 px, vis id + depth",
+   "value": 5.96919,
+   "unit": "Gtris/s",
+   "note": "2.857984 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 8.0 px, depth only",
+   "value": 6.07143,
+   "unit": "Gtris/s",
+   "note": "2.809856 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 16.0 px, vis id + depth",
+   "value": 3.3677,
+   "unit": "Gtris/s",
+   "note": "5.065728 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 16.0 px, depth only",
+   "value": 3.42024,
+   "unit": "Gtris/s",
+   "note": "4.987904 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 32.0 px, vis id + depth",
+   "value": 2.36078,
+   "unit": "Gtris/s",
+   "note": "7.226368 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 32.0 px, depth only",
+   "value": 2.40231,
+   "unit": "Gtris/s",
+   "note": "7.101440 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "16.7M tris, edge 2 px, 50% culled by SV_CullPrimitive",
+   "value": 21.5803,
+   "unit": "Gtris/s (emitted)",
+   "note": "0.790528 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "174k meshlets x 1 triangle (edge 2 px)",
+   "value": 1148.65,
+   "unit": "Mtris/s",
+   "note": "per-meshlet overhead bound",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "32 full-screen layers back-to-front (all pass, vis id + depth write)",
+   "value": 279.914,
+   "unit": "Gpix/s",
+   "note": "0.948224 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "32 full-screen layers back-to-front, depth only",
+   "value": 1112.45,
+   "unit": "Gpix/s",
+   "note": "0.238592 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "32 full-screen layers front-to-back (early-z reject)",
+   "value": 3016.15,
+   "unit": "Gpix/s",
+   "note": "0.088000 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "raster",
+   "name": "32 full-screen layers front-to-back, depth only (early-z reject)",
+   "value": 3868.66,
+   "unit": "Gpix/s",
+   "note": "0.068608 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "pso",
+   "name": "raytracing state object create, 5 shaders (cpu)",
+   "value": 26.2375,
+   "unit": "ms",
+   "note": "dxc 13.304600 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rtas",
+   "name": "BLAS build terrain 2.1M tris (fast trace)",
+   "value": 3.59526,
+   "unit": "ms",
+   "note": "139 MB",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rtas",
+   "name": "BLAS build city 36k tris",
+   "value": 0.309248,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rtas",
+   "name": "BLAS build tree 3.3k tris (fast trace)",
+   "value": 0.249856,
+   "unit": "ms",
+   "note": "229 KB",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "rtas",
+   "name": "BLAS build tree with OMM leaves (fast trace)",
+   "value": 0.459776,
+   "unit": "ms",
+   "note": "6265 KB",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rtas",
+   "name": "BLAS full build 60k-tri skinned mesh (allow update), per mesh, 64 in flight",
+   "value": 93.44,
+   "unit": "us",
+   "note": "3710 KB each",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rtas",
+   "name": "BLAS refit 60k-tri skinned mesh, per mesh, 64 in flight",
+   "value": 15.312,
+   "unit": "us",
+   "note": "256 characters = 3.919872 ms (expected, linear)",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rtas",
+   "name": "TLAS build 100k instances (fast trace)",
+   "value": 0.294912,
+   "unit": "ms",
+   "note": "28 MB",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rtas",
+   "name": "TLAS build 100k instances (fast build)",
+   "value": 0.294912,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rtas",
+   "name": "TLAS build 100k instances (fast trace + allow update)",
+   "value": 0.295936,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rtas",
+   "name": "TLAS refit 100k instances",
+   "value": 0.052224,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rtas",
+   "name": "TLAS build 1.1M instances (fast trace)",
+   "value": 3.41299,
+   "unit": "ms",
+   "note": "212 MB",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rtas",
+   "name": "TLAS build 1.1M instances (fast trace + allow update)",
+   "value": 2.9737,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rtas",
+   "name": "TLAS refit 1.1M instances",
+   "value": 1.40595,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "sanity: primary alpha-tested hit fraction",
+   "value": 1,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque closest | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 1.80282,
+   "unit": "Grays/s",
+   "note": "2.326528 ms for 4 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha-test any-hit loop | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 1.04623,
+   "unit": "Grays/s",
+   "note": "4.008960 ms for 4 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays opaque | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 2.01476,
+   "unit": "Grays/s",
+   "note": "2.081792 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays alpha any-hit shader | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 1.80919,
+   "unit": "Grays/s",
+   "note": "2.318336 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM 4-state (unknown -> any-hit) | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 1.99125,
+   "unit": "Grays/s",
+   "note": "2.106368 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM forced 2-state (no any-hit) | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 1.81319,
+   "unit": "Grays/s",
+   "note": "2.313216 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque closest | incoherent short (same, tMax 2 m)",
+   "value": 3.18012,
+   "unit": "Grays/s",
+   "note": "1.318912 ms for 4 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha-test any-hit loop | incoherent short (same, tMax 2 m)",
+   "value": 1.9194,
+   "unit": "Grays/s",
+   "note": "2.185216 ms for 4 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays opaque | incoherent short (same, tMax 2 m)",
+   "value": 3.23283,
+   "unit": "Grays/s",
+   "note": "1.297408 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays alpha any-hit shader | incoherent short (same, tMax 2 m)",
+   "value": 2.91738,
+   "unit": "Grays/s",
+   "note": "1.437696 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM 4-state (unknown -> any-hit) | incoherent short (same, tMax 2 m)",
+   "value": 3.53103,
+   "unit": "Grays/s",
+   "note": "1.187840 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM forced 2-state (no any-hit) | incoherent short (same, tMax 2 m)",
+   "value": 3.63121,
+   "unit": "Grays/s",
+   "note": "1.155072 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque closest | primary 3840x2160 camera",
+   "value": 2.8481,
+   "unit": "Grays/s",
+   "note": "2.912256 ms for 8 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha-test any-hit loop | primary 3840x2160 camera",
+   "value": 3.24519,
+   "unit": "Grays/s",
+   "note": "2.555904 ms for 8 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays opaque | primary 3840x2160 camera",
+   "value": 2.97466,
+   "unit": "Grays/s",
+   "note": "2.788352 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays alpha any-hit shader | primary 3840x2160 camera",
+   "value": 2.99778,
+   "unit": "Grays/s",
+   "note": "2.766848 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM 4-state (unknown -> any-hit) | primary 3840x2160 camera",
+   "value": 2.96053,
+   "unit": "Grays/s",
+   "note": "2.801664 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM forced 2-state (no any-hit) | primary 3840x2160 camera",
+   "value": 2.95297,
+   "unit": "Grays/s",
+   "note": "2.808832 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque closest | sun shadow from terrain (0.25 deg jitter)",
+   "value": 1.35226,
+   "unit": "Grays/s",
+   "note": "3.101696 ms for 4 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque first-hit | sun shadow from terrain (0.25 deg jitter)",
+   "value": 3.11483,
+   "unit": "Grays/s",
+   "note": "1.346560 ms for 4 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha-test any-hit loop | sun shadow from terrain (0.25 deg jitter)",
+   "value": 0.808368,
+   "unit": "Grays/s",
+   "note": "5.188608 ms for 4 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha-test first-hit | sun shadow from terrain (0.25 deg jitter)",
+   "value": 1.52665,
+   "unit": "Grays/s",
+   "note": "2.747392 ms for 4 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays opaque | sun shadow from terrain (0.25 deg jitter)",
+   "value": 3.09834,
+   "unit": "Grays/s",
+   "note": "1.353728 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays alpha any-hit shader | sun shadow from terrain (0.25 deg jitter)",
+   "value": 3.14835,
+   "unit": "Grays/s",
+   "note": "1.332224 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM 4-state (unknown -> any-hit) | sun shadow from terrain (0.25 deg jitter)",
+   "value": 2.97242,
+   "unit": "Grays/s",
+   "note": "1.411072 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM forced 2-state (no any-hit) | sun shadow from terrain (0.25 deg jitter)",
+   "value": 2.67363,
+   "unit": "Grays/s",
+   "note": "1.568768 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays alpha any-hit shader, OMM-enabled pipeline (flag cost) | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 1.61006,
+   "unit": "Grays/s",
+   "note": "2.605056 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque closest, +1M grass | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 1.91223,
+   "unit": "Grays/s",
+   "note": "2.193408 ms for 4 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha any-hit loop, +1M grass | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 0.9858,
+   "unit": "Grays/s",
+   "note": "4.254720 ms for 4 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque first-hit, +1M grass | sun shadow from terrain (0.25 deg jitter)",
+   "value": 2.81126,
+   "unit": "Grays/s",
+   "note": "1.491968 ms for 4 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha first-hit, +1M grass | sun shadow from terrain (0.25 deg jitter)",
+   "value": 1.46181,
+   "unit": "Grays/s",
+   "note": "2.869248 ms for 4 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque closest, +1M grass | primary 3840x2160 camera",
+   "value": 2.63758,
+   "unit": "Grays/s",
+   "note": "3.144704 ms for 8 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery no-flags, non-opaque leaves ignored (traversal only) | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 2.90496,
+   "unit": "Grays/s",
+   "note": "1.443840 ms for 4 M rays",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays heavy divergent hit shading (8 textures), no SER | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 1.91312,
+   "unit": "Grays/s",
+   "note": "2.192384 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays heavy divergent hit shading (8 textures), no SER | primary 3840x2160 camera",
+   "value": 2.9703,
+   "unit": "Grays/s",
+   "note": "2.792448 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays heavy divergent hit shading, NVAPI SER (reorder by instance) | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 1.56336,
+   "unit": "Grays/s",
+   "note": "2.682880 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays heavy divergent hit shading, NVAPI SER (reorder by instance) | primary 3840x2160 camera",
+   "value": 2.86421,
+   "unit": "Grays/s",
+   "note": "2.895872 ms",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays trivial hit, NVAPI SER (reorder overhead) | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 1.92844,
+   "unit": "Grays/s",
+   "note": "2.174976 ms",
+   "run": "20260925_022914"
+  },
+  {
+   "section": "memory",
+   "name": "cached loads, each group re-reads its own 4 KB (L1-resident)",
+   "value": 13107.2,
+   "unit": "GB/s",
+   "note": "SM load-path ceiling",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "random 4 KB chunk reads, 1 GiB traffic, 8 MiB window",
+   "value": 4032.98,
+   "unit": "GB/s",
+   "note": "L2 resident (64 MB L2)",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "random 4 KB chunk reads, 1 GiB traffic, 32 MiB window",
+   "value": 3986.98,
+   "unit": "GB/s",
+   "note": "L2 resident (64 MB L2)",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "random 4 KB chunk reads, 1 GiB traffic, 64 MiB window",
+   "value": 3971.88,
+   "unit": "GB/s",
+   "note": "beyond L2",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "random 4 KB chunk reads, 1 GiB traffic, 128 MiB window",
+   "value": 1385.17,
+   "unit": "GB/s",
+   "note": "beyond L2",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "memory",
+   "name": "random 4 KB chunk reads, 1 GiB traffic, 512 MiB window",
+   "value": 789.59,
+   "unit": "GB/s",
+   "note": "beyond L2",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "pso",
+   "name": "compute PSO, 32 stages, DXIL 14 KB: cold create",
+   "value": 28.987,
+   "unit": "ms",
+   "note": "dxc 28.302800 ms, warm recreate 1.586100 ms, 2.065889 ms/KB",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "pso",
+   "name": "compute PSO, 128 stages, DXIL 53 KB: cold create",
+   "value": 167.916,
+   "unit": "ms",
+   "note": "dxc 128.784700 ms, warm recreate 3.899400 ms, 3.190339 ms/KB",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "pso",
+   "name": "compute PSO, 512 stages, DXIL 205 KB: cold create",
+   "value": 775.266,
+   "unit": "ms",
+   "note": "dxc 633.993000 ms, warm recreate 15.453000 ms, 3.785247 ms/KB",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "pso",
+   "name": "compute PSO, 2048 stages, DXIL 871 KB: cold create",
+   "value": 4863.31,
+   "unit": "ms",
+   "note": "dxc 3485.903300 ms, warm recreate 102.026900 ms, 5.585626 ms/KB",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "pso",
+   "name": "compute PSO, 8192 stages, DXIL 3501 KB: cold create",
+   "value": 17917.8,
+   "unit": "ms",
+   "note": "dxc 27027.723300 ms, warm recreate 296.495500 ms, 5.117318 ms/KB",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "pso",
+   "name": "compute PSO, 32768 stages, DXIL 14098 KB: cold create",
+   "value": 136490,
+   "unit": "ms",
+   "note": "dxc 382049.666800 ms, warm recreate 1729.920900 ms, 9.681428 ms/KB",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "async",
+   "name": "raster 16.7M tris alone (wall)",
+   "value": 1.6252,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "async",
+   "name": "fma compute alone (wall)",
+   "value": 6.0737,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "async",
+   "name": "raster + fma concurrent (wall)",
+   "value": 7.5381,
+   "unit": "ms",
+   "note": "serial sum 7.698900 ms, overlap gain 2.088610 %",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "async",
+   "name": "bandwidth read alone (wall)",
+   "value": 1.8329,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "async",
+   "name": "raster + bandwidth read concurrent (wall)",
+   "value": 3.2363,
+   "unit": "ms",
+   "note": "serial sum 3.458100 ms, overlap gain 6.413926 %",
+   "run": "20260925_022638"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays opaque trivial hit (reference) | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 2.09193,
+   "unit": "Grays/s",
+   "note": "2.004992 ms",
+   "run": "20260925_022914"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays opaque trivial hit (reference) | primary 3840x2160 camera",
+   "value": 3.30612,
+   "unit": "Grays/s",
+   "note": "2.508800 ms",
+   "run": "20260925_022914"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays opaque trivial hit (reference) | incoherent short (same, tMax 2 m)",
+   "value": 3.39073,
+   "unit": "Grays/s",
+   "note": "1.236992 ms",
+   "run": "20260925_022914"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 1.71596,
+   "unit": "Grays/s",
+   "note": "2.444288 ms",
+   "run": "20260925_022914"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | primary 3840x2160 camera",
+   "value": 2.97139,
+   "unit": "Grays/s",
+   "note": "2.791424 ms",
+   "run": "20260925_022914"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | incoherent short (same, tMax 2 m)",
+   "value": 3.23028,
+   "unit": "Grays/s",
+   "note": "1.298432 ms",
+   "run": "20260925_022914"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays divergent hit shading, NVAPI SER (reorder by material) | incoherent long (canopy origins, sphere dirs, 2 km)",
+   "value": 1.63644,
+   "unit": "Grays/s",
+   "note": "2.563072 ms",
+   "run": "20260925_022914"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays divergent hit shading, NVAPI SER (reorder by material) | primary 3840x2160 camera",
+   "value": 2.6982,
+   "unit": "Grays/s",
+   "note": "3.074048 ms",
+   "run": "20260925_022914"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays divergent hit shading, NVAPI SER (reorder by material) | incoherent short (same, tMax 2 m)",
+   "value": 2.86233,
+   "unit": "Grays/s",
+   "note": "1.465344 ms",
+   "run": "20260925_022914"
+  },
+  {
+   "section": "coverage",
+   "name": "262k slivers 0.25 px x 20 px (0.5M tris): conservative raster + exact area + append",
+   "value": 0.773056,
+   "unit": "ms",
+   "note": "15.230712 M fragments (29.050278 per tri), 19.701952 G frags/s, area check 0.195306",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "0.5M tris 0.25 px: conservative raster, trivial PS",
+   "value": 0.606208,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "0.5M tris 0.25 px: standard raster + area + append (centre-sample pixels only)",
+   "value": 0.334784,
+   "unit": "ms",
+   "note": "1.304510 M pixels touched by centre sampling vs 15.230712 M true fragments",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "1049k slivers 0.25 px x 20 px (2.1M tris): conservative raster + exact area + append",
+   "value": 3.05254,
+   "unit": "ms",
+   "note": "60.912056 M fragments (29.045132 per tri), 19.954522 G frags/s, area check 0.195374",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "2.1M tris 0.25 px: conservative raster, trivial PS",
+   "value": 2.42461,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "2.1M tris 0.25 px: standard raster + area + append (centre-sample pixels only)",
+   "value": 1.32608,
+   "unit": "ms",
+   "note": "5.220250 M pixels touched by centre sampling vs 60.912056 M true fragments",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "262k slivers 0.50 px x 20 px (0.5M tris): conservative raster + exact area + append",
+   "value": 0.80896,
+   "unit": "ms",
+   "note": "16.620044 M fragments (31.700218 per tri), 20.544952 G frags/s, area check 0.195307",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "0.5M tris 0.50 px: conservative raster, trivial PS",
+   "value": 0.632832,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "0.5M tris 0.50 px: standard raster + area + append (centre-sample pixels only)",
+   "value": 0.398336,
+   "unit": "ms",
+   "note": "2.609021 M pixels touched by centre sampling vs 16.620044 M true fragments",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "1049k slivers 0.50 px x 20 px (2.1M tris): conservative raster + exact area + append",
+   "value": 3.20205,
+   "unit": "ms",
+   "note": "66.470106 M fragments (31.695416 per tri), 20.758623 G frags/s, area check 0.095375",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "2.1M tris 0.50 px: conservative raster, trivial PS",
+   "value": 2.58528,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "2.1M tris 0.50 px: standard raster + area + append (centre-sample pixels only)",
+   "value": 1.6128,
+   "unit": "ms",
+   "note": "10.439807 M pixels touched by centre sampling vs 66.470106 M true fragments",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "262k slivers 1.00 px x 20 px (0.5M tris): conservative raster + exact area + append",
+   "value": 0.874496,
+   "unit": "ms",
+   "note": "19.400160 M fragments (37.002869 per tri), 22.184390 G frags/s, area check 0.195305",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "0.5M tris 1.00 px: conservative raster, trivial PS",
+   "value": 0.678592,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "0.5M tris 1.00 px: standard raster + area + append (centre-sample pixels only)",
+   "value": 0.509952,
+   "unit": "ms",
+   "note": "5.217903 M pixels touched by centre sampling vs 19.400160 M true fragments",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "1049k slivers 1.00 px x 20 px (2.1M tris): conservative raster + exact area + append",
+   "value": 3.45702,
+   "unit": "ms",
+   "note": "77.593619 M fragments (36.999521 per tri), 22.445207 G frags/s, area check 0.045374",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "2.1M tris 1.00 px: conservative raster, trivial PS",
+   "value": 2.69414,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "coverage",
+   "name": "2.1M tris 1.00 px: standard raster + area + append (centre-sample pixels only)",
+   "value": 2.01082,
+   "unit": "ms",
+   "note": "20.873505 M pixels touched by centre sampling vs 77.593619 M true fragments",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "vsm",
+   "name": "VSM lookup 4K, coherent scene depth, sun, 1 taps",
+   "value": 0.086016,
+   "unit": "ms",
+   "note": "0.010370 ns per light lookup, 0.010370 ns per tap",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "vsm",
+   "name": "VSM lookup 4K, coherent scene depth, sun + 1.5 local lights, 1 taps",
+   "value": 0.186368,
+   "unit": "ms",
+   "note": "0.008988 ns per light lookup, 0.008988 ns per tap",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "vsm",
+   "name": "VSM lookup 4K, coherent scene depth, sun, 5 taps",
+   "value": 0.169984,
+   "unit": "ms",
+   "note": "0.020494 ns per light lookup, 0.004099 ns per tap",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "vsm",
+   "name": "VSM lookup 4K, coherent scene depth, sun + 1.5 local lights, 5 taps",
+   "value": 0.607232,
+   "unit": "ms",
+   "note": "0.029284 ns per light lookup, 0.005857 ns per tap",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "vsm",
+   "name": "VSM lookup 4K, coherent scene depth, sun, 9 taps",
+   "value": 0.2816,
+   "unit": "ms",
+   "note": "0.033951 ns per light lookup, 0.003772 ns per tap",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "vsm",
+   "name": "VSM lookup 4K, coherent scene depth, sun + 1.5 local lights, 9 taps",
+   "value": 1.0455,
+   "unit": "ms",
+   "note": "0.050420 ns per light lookup, 0.005602 ns per tap",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "vsm",
+   "name": "VSM lookup 4K, scattered (worst) depth, sun, 5 taps",
+   "value": 0.766976,
+   "unit": "ms",
+   "note": "0.092469 ns per light lookup, 0.018494 ns per tap",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "vsm",
+   "name": "VSM lookup 4K, scattered (worst) depth, sun + 1.5 local lights, 5 taps",
+   "value": 2.0695,
+   "unit": "ms",
+   "note": "0.099802 ns per light lookup, 0.019960 ns per tap",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "shade",
+   "name": "fused shading 4K: sun + 4 local lights (GGX), 3 shadowed x 5 VSM taps, 4 probes, froxel, 16 B in / 8 B out",
+   "value": 2.47603,
+   "unit": "ms",
+   "note": "0.298519 ns per pixel",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "shade",
+   "name": "fused shading 4K: sun + 8 local lights (GGX), 3 shadowed x 5 VSM taps, 4 probes, froxel, 16 B in / 8 B out",
+   "value": 2.56512,
+   "unit": "ms",
+   "note": "0.309259 ns per pixel",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "shade",
+   "name": "fused shading 4K: sun + 16 local lights (GGX), 3 shadowed x 5 VSM taps, 4 probes, froxel, 16 B in / 8 B out",
+   "value": 2.34701,
+   "unit": "ms",
+   "note": "0.282963 ns per pixel",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "1M particles: grid clear (128^3 x 16 B dense)",
+   "value": 0.070656,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "1M particles: block sort (histogram + prefix + scatter, 64 B particles)",
+   "value": 0.968704,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "1M particles: P2G via global atomics (27 nodes x 4 channels), incl. clear",
+   "value": 2.25997,
+   "unit": "ms",
+   "note": "2.087891 ns per particle",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "1M particles: P2G via groupshared block accumulation + halo atomics, incl. clear",
+   "value": 0.226304,
+   "unit": "ms",
+   "note": "0.148438 ns per particle",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "1M particles: grid update (dense 128^3)",
+   "value": 0.03584,
+   "unit": "ms",
+   "note": "sparse grids scale with active nodes (131072 here)",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "1M particles: G2P (27-node gather, APIC, 64 B write)",
+   "value": 0.360448,
+   "unit": "ms",
+   "note": "0.343750 ns per particle",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "1M particles: full step (clear + sort + block P2G + grid + G2P)",
+   "value": 1.81146,
+   "unit": "ms",
+   "note": "1.727539 ns per particle-step",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "2M particles: grid clear (128^3 x 16 B dense)",
+   "value": 0.07168,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "2M particles: block sort (histogram + prefix + scatter, 64 B particles)",
+   "value": 2.38797,
+   "unit": "ms",
+   "note": "",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "2M particles: P2G via global atomics (27 nodes x 4 channels), incl. clear",
+   "value": 4.79949,
+   "unit": "ms",
+   "note": "2.254395 ns per particle",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "2M particles: P2G via groupshared block accumulation + halo atomics, incl. clear",
+   "value": 0.365568,
+   "unit": "ms",
+   "note": "0.140137 ns per particle",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "2M particles: grid update (dense 128^3)",
+   "value": 0.036864,
+   "unit": "ms",
+   "note": "sparse grids scale with active nodes (262144 here)",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "2M particles: G2P (27-node gather, APIC, 64 B write)",
+   "value": 0.726016,
+   "unit": "ms",
+   "note": "0.346191 ns per particle",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "mpm",
+   "name": "2M particles: full step (clear + sort + block P2G + grid + G2P)",
+   "value": 3.73862,
+   "unit": "ms",
+   "note": "1.782715 ns per particle-step",
+   "run": "20260925_025946"
+  },
+  {
+   "section": "shade",
+   "name": "shading 4K, fused: sun + 4 locals GGX, 3 shadowed x 5 VSM taps (in-kernel), 4 probes, froxel",
+   "value": 2.47398,
+   "unit": "ms",
+   "note": "0.298272 ns per pixel",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "shade",
+   "name": "shading 4K, fused: same, page-table entries prefetched before atlas taps",
+   "value": 2.26202,
+   "unit": "ms",
+   "note": "0.272716 ns per pixel",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "shade",
+   "name": "shading 4K, split: visibility from a 4 B/pixel buffer (separate VSM pass), sun + 4 locals, probes, froxel",
+   "value": 0.369664,
+   "unit": "ms",
+   "note": "0.044568 ns per pixel",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "shade",
+   "name": "shading 4K, split, no light loop (sun only) + probes + froxel",
+   "value": 0.371712,
+   "unit": "ms",
+   "note": "0.044815 ns per pixel",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "shade",
+   "name": "shading 4K, split, sun only + froxel (no probes)",
+   "value": 0.361472,
+   "unit": "ms",
+   "note": "0.043580 ns per pixel",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "shade",
+   "name": "shading 4K, G-buffer in / out + sun only (memory floor of the kernel)",
+   "value": 0.359424,
+   "unit": "ms",
+   "note": "0.043333 ns per pixel",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "shade",
+   "name": "shading 4K, split: sun + 8 locals",
+   "value": 0.423936,
+   "unit": "ms",
+   "note": "0.051111 ns per pixel",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "shade",
+   "name": "shading 4K, split: sun + 16 locals",
+   "value": 0.718848,
+   "unit": "ms",
+   "note": "0.086667 ns per pixel",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "shade",
+   "name": "shading 4K, fused: sun + 8 locals (3 shadowed in-kernel)",
+   "value": 2.35008,
+   "unit": "ms",
+   "note": "0.283333 ns per pixel",
+   "run": "20260925_030411"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass: pixels with >=2 identities in 16 sub-samples",
+   "value": 0.0771892,
+   "unit": "fraction",
+   "note": "40.594432 ms for 133M rays",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass: >=3 identities",
+   "value": 0.0101325,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass: >=5 identities",
+   "value": 0.000271267,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass: >=9 identities",
+   "value": 1.20563e-07,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass: pixels with sub-samples missed by the 3x3 centre set (>=1 of 16)",
+   "value": 0.0056045,
+   "unit": "fraction",
+   "note": "invisible to a 1-spp visibility buffer + 3x3 identity test",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass: missed >=4 of 16 (>=25% pixel area)",
+   "value": 0.0023628,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass: missed >=8 of 16 (>=50% pixel area)",
+   "value": 0.000259934,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees: pixels with >=2 identities in 16 sub-samples",
+   "value": 0.0718744,
+   "unit": "fraction",
+   "note": "36.802560 ms for 133M rays",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees: >=3 identities",
+   "value": 0.0100121,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees: >=5 identities",
+   "value": 0.000285494,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees: >=9 identities",
+   "value": 1.20563e-07,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees: pixels with sub-samples missed by the 3x3 centre set (>=1 of 16)",
+   "value": 0.00564224,
+   "unit": "fraction",
+   "note": "invisible to a 1-spp visibility buffer + 3x3 identity test",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees: missed >=4 of 16 (>=25% pixel area)",
+   "value": 0.00239246,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees: missed >=8 of 16 (>=50% pixel area)",
+   "value": 0.000259934,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass: pixels with >=2 identities in 16 sub-samples",
+   "value": 0.00159481,
+   "unit": "fraction",
+   "note": "50.741248 ms for 133M rays",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass: >=3 identities",
+   "value": 7.11323e-06,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass: >=5 identities",
+   "value": 1.20563e-07,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass: >=9 identities",
+   "value": 0,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass: pixels with sub-samples missed by the 3x3 centre set (>=1 of 16)",
+   "value": 7.47492e-06,
+   "unit": "fraction",
+   "note": "invisible to a 1-spp visibility buffer + 3x3 identity test",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass: missed >=4 of 16 (>=25% pixel area)",
+   "value": 4.5814e-06,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass: missed >=8 of 16 (>=50% pixel area)",
+   "value": 4.82253e-07,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees: pixels with >=2 identities in 16 sub-samples",
+   "value": 0.00119828,
+   "unit": "fraction",
+   "note": "46.853120 ms for 133M rays",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees: >=3 identities",
+   "value": 9.64506e-07,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees: >=5 identities",
+   "value": 1.20563e-07,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees: >=9 identities",
+   "value": 0,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees: pixels with sub-samples missed by the 3x3 centre set (>=1 of 16)",
+   "value": 1.20563e-07,
+   "unit": "fraction",
+   "note": "invisible to a 1-spp visibility buffer + 3x3 identity test",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees: missed >=4 of 16 (>=25% pixel area)",
+   "value": 0,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees: missed >=8 of 16 (>=50% pixel area)",
+   "value": 0,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_030659"
+  },
+  {
+   "section": "rtas",
+   "name": "BLAS build tree 80k tris (fast trace)",
+   "value": 0.433152,
+   "unit": "ms",
+   "note": "5484 KB",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: pixels with >=2 identities in 16 sub-samples",
+   "value": 0.226606,
+   "unit": "fraction",
+   "note": "56.796160 ms for 133M rays",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: >=3 identities",
+   "value": 0.141953,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: >=5 identities",
+   "value": 0.0565074,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: >=9 identities",
+   "value": 0.00801276,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: pixels with sub-samples missed by the 3x3 centre set (>=1 of 16)",
+   "value": 0.132927,
+   "unit": "fraction",
+   "note": "invisible to a 1-spp visibility buffer + 3x3 identity test",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: missed >=4 of 16 (>=25% pixel area)",
+   "value": 0.0836217,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: missed >=8 of 16 (>=50% pixel area)",
+   "value": 0.0319552,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees [thin foliage]: pixels with >=2 identities in 16 sub-samples",
+   "value": 0.182868,
+   "unit": "fraction",
+   "note": "49.253376 ms for 133M rays",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees [thin foliage]: >=3 identities",
+   "value": 0.11944,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees [thin foliage]: >=5 identities",
+   "value": 0.0538686,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees [thin foliage]: >=9 identities",
+   "value": 0.00797731,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees [thin foliage]: pixels with sub-samples missed by the 3x3 centre set (>=1 of 16)",
+   "value": 0.101354,
+   "unit": "fraction",
+   "note": "invisible to a 1-spp visibility buffer + 3x3 identity test",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees [thin foliage]: missed >=4 of 16 (>=25% pixel area)",
+   "value": 0.0624054,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "forest view (camera 600,600 looking +x), 100k trees [thin foliage]: missed >=8 of 16 (>=50% pixel area)",
+   "value": 0.027518,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass [thin foliage]: pixels with >=2 identities in 16 sub-samples",
+   "value": 0.00939682,
+   "unit": "fraction",
+   "note": "43.800576 ms for 133M rays",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass [thin foliage]: >=3 identities",
+   "value": 0.00206272,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass [thin foliage]: >=5 identities",
+   "value": 1.08507e-05,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass [thin foliage]: >=9 identities",
+   "value": 0,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass [thin foliage]: pixels with sub-samples missed by the 3x3 centre set (>=1 of 16)",
+   "value": 0.00223657,
+   "unit": "fraction",
+   "note": "invisible to a 1-spp visibility buffer + 3x3 identity test",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass [thin foliage]: missed >=4 of 16 (>=25% pixel area)",
+   "value": 0.00116283,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees + 1M grass [thin foliage]: missed >=8 of 16 (>=50% pixel area)",
+   "value": 0.000136478,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees [thin foliage]: pixels with >=2 identities in 16 sub-samples",
+   "value": 0.00119828,
+   "unit": "fraction",
+   "note": "37.839872 ms for 133M rays",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees [thin foliage]: >=3 identities",
+   "value": 9.64506e-07,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees [thin foliage]: >=5 identities",
+   "value": 1.20563e-07,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees [thin foliage]: >=9 identities",
+   "value": 0,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees [thin foliage]: pixels with sub-samples missed by the 3x3 centre set (>=1 of 16)",
+   "value": 1.20563e-07,
+   "unit": "fraction",
+   "note": "invisible to a 1-spp visibility buffer + 3x3 identity test",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees [thin foliage]: missed >=4 of 16 (>=25% pixel area)",
+   "value": 0,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "edges",
+   "name": "city view (camera 0,0), 100k trees [thin foliage]: missed >=8 of 16 (>=50% pixel area)",
+   "value": 0,
+   "unit": "fraction",
+   "note": "",
+   "run": "20260925_031725"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque closest | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]",
+   "value": 1.17532,
+   "unit": "Grays/s",
+   "note": "3.568640 ms for 4 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha-test any-hit loop | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]",
+   "value": 0.691658,
+   "unit": "Grays/s",
+   "note": "6.064128 ms for 4 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays opaque | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]",
+   "value": 1.33594,
+   "unit": "Grays/s",
+   "note": "3.139584 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays alpha any-hit shader | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]",
+   "value": 1.28442,
+   "unit": "Grays/s",
+   "note": "3.265536 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM 4-state (unknown -> any-hit) | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]",
+   "value": 1.00269,
+   "unit": "Grays/s",
+   "note": "4.183040 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM forced 2-state (no any-hit) | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]",
+   "value": 1.03018,
+   "unit": "Grays/s",
+   "note": "4.071424 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque closest | incoherent short (same, tMax 2 m) [thin foliage]",
+   "value": 2.78639,
+   "unit": "Grays/s",
+   "note": "1.505280 ms for 4 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha-test any-hit loop | incoherent short (same, tMax 2 m) [thin foliage]",
+   "value": 2.44246,
+   "unit": "Grays/s",
+   "note": "1.717248 ms for 4 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays opaque | incoherent short (same, tMax 2 m) [thin foliage]",
+   "value": 2.94253,
+   "unit": "Grays/s",
+   "note": "1.425408 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays alpha any-hit shader | incoherent short (same, tMax 2 m) [thin foliage]",
+   "value": 2.78261,
+   "unit": "Grays/s",
+   "note": "1.507328 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM 4-state (unknown -> any-hit) | incoherent short (same, tMax 2 m) [thin foliage]",
+   "value": 2.91323,
+   "unit": "Grays/s",
+   "note": "1.439744 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM forced 2-state (no any-hit) | incoherent short (same, tMax 2 m) [thin foliage]",
+   "value": 2.9574,
+   "unit": "Grays/s",
+   "note": "1.418240 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque closest | primary 3840x2160 camera [thin foliage]",
+   "value": 3.73272,
+   "unit": "Grays/s",
+   "note": "2.222080 ms for 8 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha-test any-hit loop | primary 3840x2160 camera [thin foliage]",
+   "value": 3.91683,
+   "unit": "Grays/s",
+   "note": "2.117632 ms for 8 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays opaque | primary 3840x2160 camera [thin foliage]",
+   "value": 3.8756,
+   "unit": "Grays/s",
+   "note": "2.140160 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays alpha any-hit shader | primary 3840x2160 camera [thin foliage]",
+   "value": 3.88303,
+   "unit": "Grays/s",
+   "note": "2.136064 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM 4-state (unknown -> any-hit) | primary 3840x2160 camera [thin foliage]",
+   "value": 3.87745,
+   "unit": "Grays/s",
+   "note": "2.139136 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM forced 2-state (no any-hit) | primary 3840x2160 camera [thin foliage]",
+   "value": 3.87745,
+   "unit": "Grays/s",
+   "note": "2.139136 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque closest | sun shadow from terrain (0.25 deg jitter) [thin foliage]",
+   "value": 0.878216,
+   "unit": "Grays/s",
+   "note": "4.775936 ms for 4 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque first-hit | sun shadow from terrain (0.25 deg jitter) [thin foliage]",
+   "value": 1.4755,
+   "unit": "Grays/s",
+   "note": "2.842624 ms for 4 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha-test any-hit loop | sun shadow from terrain (0.25 deg jitter) [thin foliage]",
+   "value": 0.559716,
+   "unit": "Grays/s",
+   "note": "7.493632 ms for 4 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha-test first-hit | sun shadow from terrain (0.25 deg jitter) [thin foliage]",
+   "value": 0.71334,
+   "unit": "Grays/s",
+   "note": "5.879808 ms for 4 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays opaque | sun shadow from terrain (0.25 deg jitter) [thin foliage]",
+   "value": 1.39986,
+   "unit": "Grays/s",
+   "note": "2.996224 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays alpha any-hit shader | sun shadow from terrain (0.25 deg jitter) [thin foliage]",
+   "value": 1.55387,
+   "unit": "Grays/s",
+   "note": "2.699264 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM 4-state (unknown -> any-hit) | sun shadow from terrain (0.25 deg jitter) [thin foliage]",
+   "value": 1.1525,
+   "unit": "Grays/s",
+   "note": "3.639296 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays OMM forced 2-state (no any-hit) | sun shadow from terrain (0.25 deg jitter) [thin foliage]",
+   "value": 1.02837,
+   "unit": "Grays/s",
+   "note": "4.078592 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays alpha any-hit shader, OMM-enabled pipeline (flag cost) | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]",
+   "value": 1.12188,
+   "unit": "Grays/s",
+   "note": "3.738624 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque closest, +1M grass | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]",
+   "value": 1.01386,
+   "unit": "Grays/s",
+   "note": "4.136960 ms for 4 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha any-hit loop, +1M grass | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]",
+   "value": 0.618544,
+   "unit": "Grays/s",
+   "note": "6.780928 ms for 4 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque first-hit, +1M grass | sun shadow from terrain (0.25 deg jitter) [thin foliage]",
+   "value": 1.17701,
+   "unit": "Grays/s",
+   "note": "3.563520 ms for 4 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery alpha first-hit, +1M grass | sun shadow from terrain (0.25 deg jitter) [thin foliage]",
+   "value": 0.650262,
+   "unit": "Grays/s",
+   "note": "6.450176 ms for 4 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery opaque closest, +1M grass | primary 3840x2160 camera [thin foliage]",
+   "value": 3.06586,
+   "unit": "Grays/s",
+   "note": "2.705408 ms for 8 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "RayQuery no-flags, non-opaque leaves ignored (traversal only) | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]",
+   "value": 1.46233,
+   "unit": "Grays/s",
+   "note": "2.868224 ms for 4 M rays",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]",
+   "value": 1.27324,
+   "unit": "Grays/s",
+   "note": "3.294208 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | primary 3840x2160 camera [thin foliage]",
+   "value": 3.87745,
+   "unit": "Grays/s",
+   "note": "2.139136 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | incoherent short (same, tMax 2 m) [thin foliage]",
+   "value": 2.86233,
+   "unit": "Grays/s",
+   "note": "1.465344 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays divergent hit shading, NVAPI SER (reorder by material) | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]",
+   "value": 1.04597,
+   "unit": "Grays/s",
+   "note": "4.009984 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays divergent hit shading, NVAPI SER (reorder by material) | primary 3840x2160 camera [thin foliage]",
+   "value": 3.34296,
+   "unit": "Grays/s",
+   "note": "2.481152 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays divergent hit shading, NVAPI SER (reorder by material) | incoherent short (same, tMax 2 m) [thin foliage]",
+   "value": 2.51752,
+   "unit": "Grays/s",
+   "note": "1.666048 ms",
+   "run": "20260925_031731"
+  },
+  {
+   "section": "rays",
+   "name": "DispatchRays trivial hit, NVAPI SER (reorder overhead) | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]",
+   "value": 1.15315,
+   "unit": "Grays/s",
+   "note": "3.637248 ms",
+   "run": "20260925_031731"
+  }
+ ]
+}

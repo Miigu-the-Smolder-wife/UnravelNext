@@ -1,0 +1,27 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "dxc": "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64", "timestamp": "20260925_015612",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "env", "name": "raytracing tier", "value": 11, "unit": "tier", "note": ""},
+  {"section": "env", "name": "mesh shader tier", "value": 10, "unit": "tier", "note": ""},
+  {"section": "env", "name": "highest shader model", "value": 104, "unit": "hex", "note": ""},
+  {"section": "experiment", "name": "fma variant 0", "value": 26.0036, "unit": "TFLOPS", "note": "10.570752 ms, DXIL 3304 B"},
+  {"section": "experiment", "name": "fma variant 1", "value": 42.8948, "unit": "TFLOPS", "note": "6.408192 ms, DXIL 6600 B"},
+  {"section": "experiment", "name": "fma variant 2", "value": 27.6225, "unit": "TFLOPS", "note": "9.951232 ms, DXIL 6932 B"},
+  {"section": "experiment", "name": "fma variant 3", "value": 40.4392, "unit": "TFLOPS", "note": "6.797312 ms, DXIL 4012 B"},
+  {"section": "experiment", "name": "fma variant 4", "value": 43.905, "unit": "TFLOPS", "note": "6.260736 ms, DXIL 6572 B"},
+  {"section": "experiment", "name": "fma variant 5", "value": 14.5077, "unit": "TFLOPS", "note": "18.947072 ms, DXIL 7464 B"},
+  {"section": "experiment", "name": "read variant 0, per-thread 16 x 16 B, 1 GiB", "value": 693.503, "unit": "GB/s", "note": "1.548288 ms"},
+  {"section": "experiment", "name": "read variant 0, per-thread 64 x 16 B, 1 GiB", "value": 606.113, "unit": "GB/s", "note": "1.771520 ms"},
+  {"section": "experiment", "name": "read variant 1, per-thread 16 x 16 B, 1 GiB", "value": 555.979, "unit": "GB/s", "note": "1.931264 ms"},
+  {"section": "experiment", "name": "read variant 1, per-thread 64 x 16 B, 1 GiB", "value": 693.044, "unit": "GB/s", "note": "1.549312 ms"},
+  {"section": "experiment", "name": "read variant 2, per-thread 16 x 16 B, 1 GiB", "value": 693.044, "unit": "GB/s", "note": "1.549312 ms"},
+  {"section": "experiment", "name": "read variant 2, per-thread 64 x 16 B, 1 GiB", "value": 692.587, "unit": "GB/s", "note": "1.550336 ms"},
+  {"section": "experiment", "name": "read variant 3, per-thread 16 x 16 B, 1 GiB", "value": 556.274, "unit": "GB/s", "note": "1.930240 ms"},
+  {"section": "experiment", "name": "read variant 3, per-thread 64 x 16 B, 1 GiB", "value": 667.458, "unit": "GB/s", "note": "1.608704 ms"},
+  {"section": "experiment", "name": "read variant 4, per-thread 16 x 16 B, 1 GiB", "value": 680.452, "unit": "GB/s", "note": "1.577984 ms"},
+  {"section": "experiment", "name": "read variant 4, per-thread 64 x 16 B, 1 GiB", "value": 687.591, "unit": "GB/s", "note": "1.561600 ms"},
+  {"section": "experiment", "name": "read variant 5, per-thread 16 x 16 B, 1 GiB", "value": 557.16, "unit": "GB/s", "note": "1.927168 ms"},
+  {"section": "experiment", "name": "read variant 5, per-thread 64 x 16 B, 1 GiB", "value": 692.587, "unit": "GB/s", "note": "1.550336 ms"}
+ ]
+}

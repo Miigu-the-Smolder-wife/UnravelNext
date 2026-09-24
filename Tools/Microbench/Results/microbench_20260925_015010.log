@@ -1,0 +1,45 @@
+Adapter: NVIDIA GeForce RTX 4080, VRAM 15.7 GB, driver 32.0.15.9186
+Raytracing tier 11 (12 = DXR 1.2/OMM), mesh shader tier 10, shader model 0x68, work graphs tier 10
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
+  [env] timestamp frequency                                        1000000000.0000 Hz         
+  [env] raytracing tier                                                 11.0000 tier       
+  [env] mesh shader tier                                                10.0000 tier       
+  [env] highest shader model                                           104.0000 hex        
+
+== Compute
+  [compute] fp32 fma throughput (512 iters, 8 chains)                       13.8255 TFLOPS     median of 5, min 15.595832
+  [compute] fp32 fma throughput (2048 iters, 8 chains)                      13.4231 TFLOPS     median of 5, min 13.821917
+
+== Memory
+  [memory] sequential write 1 GiB (uint4 stores)                          659.8968 GB/s       
+  [memory] sequential read 1 GiB (uint4 loads)                            184.6735 GB/s       
+  [memory] copy 512 MiB read + 512 MiB write                              180.4778 GB/s       read+write bytes summed
+  [memory] read 1 GiB traffic inside 4 MiB window                        4002.1985 GB/s       L2 = 64 MB on AD103
+  [memory] read 1 GiB traffic inside 16 MiB window                       3956.8906 GB/s       L2 = 64 MB on AD103
+  [memory] read 1 GiB traffic inside 32 MiB window                       3971.8788 GB/s       L2 = 64 MB on AD103
+  [memory] read 1 GiB traffic inside 48 MiB window                       3956.8906 GB/s       L2 = 64 MB on AD103
+  [memory] read 1 GiB traffic inside 96 MiB window                       3758.3369 GB/s       L2 = 64 MB on AD103
+  [memory] random 4 B loads, 1024 MiB window                                2.0917 Gloads/s   66.935368 GB/s at 32 B sectors
+  [memory] random 4 B loads, 32 MiB window                                 10.8003 Gloads/s   345.608438 GB/s at 32 B sectors
+  [memory] random 4 B loads, 2 MiB window                                  65.7332 Gloads/s   2103.462387 GB/s at 32 B sectors
+  [memory] random 64 B loads, 1024 MiB window                               1.7744 Gloads/s   113.559063 GB/s useful
+  [memory] random 64 B loads, 32 MiB window                                11.0871 Gloads/s   709.576045 GB/s useful
+  [memory] random 64 B loads, 2 MiB window                                 11.6737 Gloads/s   747.115069 GB/s useful
+  [memory] dependent load latency, 262144 KiB working set                 317.7969 ns/load    single thread pointer chase
+  [memory] dependent load latency, 4096 KiB working set                   266.0469 ns/load    single thread pointer chase
+  [memory] dependent load latency, 64 KiB working set                      37.4531 ns/load    single thread pointer chase
+
+== Texture
+  [texture] RGBA8 4096^2 coherent bilinear lod0                            809.0864 Gsamples/s 
+  [texture] RGBA8 4096^2 incoherent bilinear lod0                           11.5157 Gsamples/s 
+  [texture] RGBA8 4096^2 coherent trilinear SampleGrad                     360.0879 Gsamples/s 
+  [texture] RGBA8 4096^2 coherent point lod0                               650.4814 Gsamples/s 
+
+== Atomics / dispatch overhead
+  [atomics] InterlockedAdd, single address                                   1.1518 Gatomics/s 
+  [atomics] InterlockedAdd, 256 addresses                                    1.4260 Gatomics/s 
+  [atomics] InterlockedAdd, 1048576 addresses                               50.7637 Gatomics/s 
+  [dispatch] 1000 x Dispatch(1) no barrier                                    0.0399 us/dispatch 
+  [dispatch] 1000 x Dispatch(1) + UAV barrier                                 0.8827 us/dispatch fixed cost floor of one dependent pass
+  [dispatch] 1000 x (PSO switch + constants + Dispatch(1) + UAV barrier)       0.8847 us/dispatch 
+  [dispatch] 1000 x Dispatch(1024 groups of 64) + UAV barrier                 5.3309 us/dispatch 65k-thread pass with real work

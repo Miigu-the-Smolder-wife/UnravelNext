@@ -1,0 +1,48 @@
+Adapter: NVIDIA GeForce RTX 4080, VRAM 15.7 GB, driver 32.0.15.9186
+D3D12Core.dll: C:\Users\USER\UnravelNext\Tools\Microbench\build\D3D12\D3D12Core.dll
+Raytracing tier 11 (12 = DXR 1.2/OMM), mesh shader tier 10, shader model 0x68, work graphs tier 10
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
+  [env] timestamp frequency                                        1000000000.0000 Hz         
+  [env] raytracing tier                                                 11.0000 tier       
+  [env] mesh shader tier                                                10.0000 tier       
+  [env] highest shader model                                           104.0000 hex        
+
+== Compute (after 1.5 s warm-up)
+  [compute] fp32 fma throughput (512 iters, 8 float4 chains, unroll 8)      49.2000 TFLOPS     median of 9, best 49.218089, peak 48.7 at 2.5 GHz
+  [compute] fp32 fma throughput (2048 iters, 8 float4 chains, unroll 8)      44.1070 TFLOPS     median of 9, best 46.587202, peak 48.7 at 2.5 GHz
+
+== Memory (after 1.5 s warm-up)
+  [memory] sequential write 1 GiB, hashed (incompressible) data           631.6723 GB/s       
+  [memory] sequential read 1 GiB of hashed data                           695.8036 GB/s       true DRAM read floor
+  [memory] sequential write 1 GiB, structured (compressible) data         577.4097 GB/s       
+  [memory] sequential read 1 GiB of structured data                       694.4212 GB/s       compression inflated
+  [memory] copy 512 MiB read + 512 MiB write                              605.4134 GB/s       read+write bytes summed
+  [memory] read 1 GiB traffic inside 4 MiB window                       12945.3827 GB/s       L2 = 64 MB on AD103
+  [memory] read 1 GiB traffic inside 16 MiB window                      12945.3827 GB/s       L2 = 64 MB on AD103
+  [memory] read 1 GiB traffic inside 32 MiB window                      12945.3827 GB/s       L2 = 64 MB on AD103
+  [memory] read 1 GiB traffic inside 48 MiB window                      12945.3827 GB/s       L2 = 64 MB on AD103
+  [memory] read 1 GiB traffic inside 96 MiB window                      12633.4458 GB/s       L2 = 64 MB on AD103
+  [memory] random 4 B loads, 1024 MiB window                                4.9006 Gloads/s   156.819861 GB/s at 32 B sectors
+  [memory] random 4 B loads, 32 MiB window                                 64.7589 Gloads/s   2072.284585 GB/s at 32 B sectors
+  [memory] random 4 B loads, 2 MiB window                                  66.2649 Gloads/s   2120.477250 GB/s at 32 B sectors
+  [memory] random 64 B loads, 1024 MiB window                               5.0443 Gloads/s   322.837438 GB/s useful
+  [memory] random 64 B loads, 32 MiB window                                55.3046 Gloads/s   3539.497046 GB/s useful
+  [memory] random 64 B loads, 2 MiB window                                 57.1369 Gloads/s   3656.760244 GB/s useful
+  [memory] dependent load latency, 262144 KiB working set                 131.2969 ns/load    single thread pointer chase
+  [memory] dependent load latency, 4096 KiB working set                   128.1250 ns/load    single thread pointer chase
+  [memory] dependent load latency, 64 KiB working set                      35.3906 ns/load    single thread pointer chase
+
+== Texture (after 1.5 s warm-up)
+  [texture] RGBA8 4096^2 coherent bilinear lod0                            811.5913 Gsamples/s 
+  [texture] RGBA8 4096^2 incoherent bilinear lod0                           25.6752 Gsamples/s 
+  [texture] RGBA8 4096^2 coherent trilinear SampleGrad                     361.0799 Gsamples/s 
+  [texture] RGBA8 4096^2 coherent point lod0                               652.0995 Gsamples/s 
+
+== Atomics / dispatch overhead (after 1.5 s warm-up)
+  [atomics] InterlockedAdd, single address                                   2.1590 Gatomics/s 
+  [atomics] InterlockedAdd, 256 addresses                                    3.0198 Gatomics/s 
+  [atomics] InterlockedAdd, 1048576 addresses                               63.3810 Gatomics/s 
+  [dispatch] 1000 x Dispatch(1) no barrier                                    0.0399 us/dispatch 
+  [dispatch] 1000 x Dispatch(1) + UAV barrier                                 0.8847 us/dispatch fixed cost floor of one dependent pass
+  [dispatch] 1000 x (PSO switch + constants + Dispatch(1) + UAV barrier)       0.8847 us/dispatch 
+  [dispatch] 1000 x Dispatch(1024 groups of 64) + UAV barrier                 1.4182 us/dispatch 65k-thread pass with real work

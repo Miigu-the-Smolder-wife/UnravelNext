@@ -1,0 +1,22 @@
+Adapter: NVIDIA GeForce RTX 4080, VRAM 15.7 GB, driver 32.0.15.9186
+Raytracing tier 11 (12 = DXR 1.2/OMM), mesh shader tier 10, shader model 0x68, work graphs tier 10
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
+  [env] timestamp frequency                                        1000000000.0000 Hz         
+  [env] raytracing tier                                                 11.0000 tier       
+  [env] mesh shader tier                                                10.0000 tier       
+  [env] highest shader model                                           104.0000 hex        
+
+== Experiments (kernel formulation check)
+  [experiment] fma variant 0                                                   15.4718 TFLOPS     17.766400 ms, DXIL 3304 B
+  [experiment] fma variant 1                                                   19.0759 TFLOPS     14.409728 ms, DXIL 6600 B
+  [experiment] fma variant 2                                                   13.1483 TFLOPS     20.905984 ms, DXIL 6932 B
+  [experiment] fma variant 3                                                   27.8056 TFLOPS     9.885696 ms, DXIL 4012 B
+  [experiment] fma variant 4                                                   27.1476 TFLOPS     10.125312 ms, DXIL 6572 B
+  [experiment] fma variant 5                                                    8.0039 TFLOPS     34.342912 ms, DXIL 7464 B
+  [experiment] read variant 0, per-thread 16 x 16 B, 1 GiB                    607.5180 GB/s       1.767424 ms
+  [experiment] read variant 0, per-thread 64 x 16 B, 1 GiB                    592.7507 GB/s       1.811456 ms
+
+FAILED: shader compile failed: hlsl.hlsl:119:18: error: too few elements in vector initialization (expected 32 elements, have 8)
+    uint4 a[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+                 ^
+

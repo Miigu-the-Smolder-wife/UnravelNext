@@ -1,0 +1,48 @@
+Adapter: NVIDIA GeForce RTX 4080, VRAM 15.7 GB, driver 32.0.15.9186
+D3D12Core.dll: C:\Users\USER\UnravelNext\Tools\Microbench\build\D3D12\D3D12Core.dll
+Raytracing tier 11 (12 = DXR 1.2/OMM), mesh shader tier 10, shader model 0x68, work graphs tier 10
+NVAPI: initialized; opacity micromap cap 1 (status 0), thread reordering cap 1 (status 0)
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
+  [env] timestamp frequency                                        1000000000.0000 Hz         
+  [env] raytracing tier                                                 11.0000 tier       
+  [env] mesh shader tier                                                10.0000 tier       
+  [env] highest shader model                                           104.0000 hex        
+
+== Sub-pixel coverage layer (conservative raster + exact pixel area + fragment append, 4K) (after 1.5 s warm-up)
+  [coverage] 262k slivers 0.25 px x 20 px (0.5M tris): conservative raster + exact area + append       0.7731 ms         15.230712 M fragments (29.050278 per tri), 19.701952 G frags/s, area check 0.195306
+  [coverage] 0.5M tris 0.25 px: conservative raster, trivial PS               0.6062 ms         
+  [coverage] 0.5M tris 0.25 px: standard raster + area + append (centre-sample pixels only)       0.3348 ms         1.304510 M pixels touched by centre sampling vs 15.230712 M true fragments
+  [coverage] 1049k slivers 0.25 px x 20 px (2.1M tris): conservative raster + exact area + append       3.0525 ms         60.912056 M fragments (29.045132 per tri), 19.954522 G frags/s, area check 0.195374
+  [coverage] 2.1M tris 0.25 px: conservative raster, trivial PS               2.4246 ms         
+  [coverage] 2.1M tris 0.25 px: standard raster + area + append (centre-sample pixels only)       1.3261 ms         5.220250 M pixels touched by centre sampling vs 60.912056 M true fragments
+  [coverage] 262k slivers 0.50 px x 20 px (0.5M tris): conservative raster + exact area + append       0.8090 ms         16.620044 M fragments (31.700218 per tri), 20.544952 G frags/s, area check 0.195307
+  [coverage] 0.5M tris 0.50 px: conservative raster, trivial PS               0.6328 ms         
+  [coverage] 0.5M tris 0.50 px: standard raster + area + append (centre-sample pixels only)       0.3983 ms         2.609021 M pixels touched by centre sampling vs 16.620044 M true fragments
+  [coverage] 1049k slivers 0.50 px x 20 px (2.1M tris): conservative raster + exact area + append       3.2020 ms         66.470106 M fragments (31.695416 per tri), 20.758623 G frags/s, area check 0.095375
+  [coverage] 2.1M tris 0.50 px: conservative raster, trivial PS               2.5853 ms         
+  [coverage] 2.1M tris 0.50 px: standard raster + area + append (centre-sample pixels only)       1.6128 ms         10.439807 M pixels touched by centre sampling vs 66.470106 M true fragments
+  [coverage] 262k slivers 1.00 px x 20 px (0.5M tris): conservative raster + exact area + append       0.8745 ms         19.400160 M fragments (37.002869 per tri), 22.184390 G frags/s, area check 0.195305
+  [coverage] 0.5M tris 1.00 px: conservative raster, trivial PS               0.6786 ms         
+  [coverage] 0.5M tris 1.00 px: standard raster + area + append (centre-sample pixels only)       0.5100 ms         5.217903 M pixels touched by centre sampling vs 19.400160 M true fragments
+  [coverage] 1049k slivers 1.00 px x 20 px (2.1M tris): conservative raster + exact area + append       3.4570 ms         77.593619 M fragments (36.999521 per tri), 22.445207 G frags/s, area check 0.045374
+  [coverage] 2.1M tris 1.00 px: conservative raster, trivial PS               2.6941 ms         
+  [coverage] 2.1M tris 1.00 px: standard raster + area + append (centre-sample pixels only)       2.0108 ms         20.873505 M pixels touched by centre sampling vs 77.593619 M true fragments
+
+== Virtual shadow map lookup and fused shading floors (3840x2160) (after 1.5 s warm-up)
+  [vsm] VSM lookup 4K, coherent scene depth, sun, 1 taps                 0.0860 ms         0.010370 ns per light lookup, 0.010370 ns per tap
+  [vsm] VSM lookup 4K, coherent scene depth, sun + 1.5 local lights, 1 taps       0.1864 ms         0.008988 ns per light lookup, 0.008988 ns per tap
+  [vsm] VSM lookup 4K, coherent scene depth, sun, 5 taps                 0.1700 ms         0.020494 ns per light lookup, 0.004099 ns per tap
+  [vsm] VSM lookup 4K, coherent scene depth, sun + 1.5 local lights, 5 taps       0.6072 ms         0.029284 ns per light lookup, 0.005857 ns per tap
+  [vsm] VSM lookup 4K, coherent scene depth, sun, 9 taps                 0.2816 ms         0.033951 ns per light lookup, 0.003772 ns per tap
+  [vsm] VSM lookup 4K, coherent scene depth, sun + 1.5 local lights, 9 taps       1.0455 ms         0.050420 ns per light lookup, 0.005602 ns per tap
+  [vsm] VSM lookup 4K, scattered (worst) depth, sun, 5 taps              0.7670 ms         0.092469 ns per light lookup, 0.018494 ns per tap
+  [vsm] VSM lookup 4K, scattered (worst) depth, sun + 1.5 local lights, 5 taps       2.0695 ms         0.099802 ns per light lookup, 0.019960 ns per tap
+  [shade] shading 4K, fused: sun + 4 locals GGX, 3 shadowed x 5 VSM taps (in-kernel), 4 probes, froxel       2.4740 ms         0.298272 ns per pixel
+  [shade] shading 4K, fused: same, page-table entries prefetched before atlas taps       2.2620 ms         0.272716 ns per pixel
+  [shade] shading 4K, split: visibility from a 4 B/pixel buffer (separate VSM pass), sun + 4 locals, probes, froxel       0.3697 ms         0.044568 ns per pixel
+  [shade] shading 4K, split, no light loop (sun only) + probes + froxel       0.3717 ms         0.044815 ns per pixel
+  [shade] shading 4K, split, sun only + froxel (no probes)                 0.3615 ms         0.043580 ns per pixel
+  [shade] shading 4K, G-buffer in / out + sun only (memory floor of the kernel)       0.3594 ms         0.043333 ns per pixel
+  [shade] shading 4K, split: sun + 8 locals                                0.4239 ms         0.051111 ns per pixel
+  [shade] shading 4K, split: sun + 16 locals                               0.7188 ms         0.086667 ns per pixel
+  [shade] shading 4K, fused: sun + 8 locals (3 shadowed in-kernel)         2.3501 ms         0.283333 ns per pixel

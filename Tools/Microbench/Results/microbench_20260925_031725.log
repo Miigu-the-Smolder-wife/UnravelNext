@@ -1,0 +1,59 @@
+Adapter: NVIDIA GeForce RTX 4080, VRAM 15.7 GB, driver 32.0.15.9186
+D3D12Core.dll: C:\Users\USER\UnravelNext\Tools\Microbench\build\D3D12\D3D12Core.dll
+Raytracing tier 11 (12 = DXR 1.2/OMM), mesh shader tier 10, shader model 0x68, work graphs tier 10
+NVAPI: initialized; opacity micromap cap 1 (status 0), thread reordering cap 1 (status 0)
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
+  [env] timestamp frequency                                        1000000000.0000 Hz         
+  [env] raytracing tier                                                 11.0000 tier       
+  [env] mesh shader tier                                                10.0000 tier       
+  [env] highest shader model                                           104.0000 hex        
+
+== Ray tracing (after 1.5 s warm-up)
+  [pso] raytracing state object create, 5 shaders (cpu)                 26.8553 ms         dxc 13.749500 ms
+  OMM path: NVAPI (driver exposes OMM without DXR 1.2)
+
+== Building ray-tracing scene (2 km terrain, 100k trees, 3k buildings, 1M grass; THIN foliage: 6 cm leaves x 40k, 4 mm grass blades)
+  [rtas] BLAS build terrain 2.1M tris (fast trace)                        3.5994 ms         139 MB
+  [rtas] BLAS build city 36k tris                                         0.3133 ms         
+  bird-curve decode: 256 indices, 0 missing, 256 distinct cells
+  leaf alpha coverage 0.37, OMM level 4: 15.6% microtriangles unknown (need any-hit), 84.4% resolved
+  [rtas] BLAS build tree 80k tris (fast trace)                            0.4362 ms         5484 KB
+  [rtas] BLAS build tree with OMM leaves (fast trace)                     0.4618 ms         6265 KB
+  [rtas] BLAS full build 60k-tri skinned mesh (allow update), per mesh, 64 in flight      93.5840 us         3710 KB each
+  [rtas] BLAS refit 60k-tri skinned mesh, per mesh, 64 in flight         15.2800 us         256 characters = 3.911680 ms (expected, linear)
+  [rtas] TLAS build 100k instances (fast trace)                           0.2949 ms         28 MB
+  [rtas] TLAS build 100k instances (fast build)                           0.2939 ms         
+  [rtas] TLAS build 100k instances (fast trace + allow update)            0.2959 ms         
+  [rtas] TLAS refit 100k instances                                        0.0532 ms         
+  [rtas] TLAS build 1.1M instances (fast trace)                           3.1662 ms         212 MB
+  [rtas] TLAS build 1.1M instances (fast trace + allow update)            3.1171 ms         
+  [rtas] TLAS refit 1.1M instances                                        1.4080 ms         
+  [rays] sanity: primary alpha-tested hit fraction                        1.0000 fraction   
+  [edges] forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: pixels with >=2 identities in 16 sub-samples       0.2266 fraction   56.796160 ms for 133M rays
+  [edges] forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: >=3 identities       0.1420 fraction   
+  [edges] forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: >=5 identities       0.0565 fraction   
+  [edges] forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: >=9 identities       0.0080 fraction   
+  [edges] forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: pixels with sub-samples missed by the 3x3 centre set (>=1 of 16)       0.1329 fraction   invisible to a 1-spp visibility buffer + 3x3 identity test
+  [edges] forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: missed >=4 of 16 (>=25% pixel area)       0.0836 fraction   
+  [edges] forest view (camera 600,600 looking +x), 100k trees + 1M grass [thin foliage]: missed >=8 of 16 (>=50% pixel area)       0.0320 fraction   
+  [edges] forest view (camera 600,600 looking +x), 100k trees [thin foliage]: pixels with >=2 identities in 16 sub-samples       0.1829 fraction   49.253376 ms for 133M rays
+  [edges] forest view (camera 600,600 looking +x), 100k trees [thin foliage]: >=3 identities       0.1194 fraction   
+  [edges] forest view (camera 600,600 looking +x), 100k trees [thin foliage]: >=5 identities       0.0539 fraction   
+  [edges] forest view (camera 600,600 looking +x), 100k trees [thin foliage]: >=9 identities       0.0080 fraction   
+  [edges] forest view (camera 600,600 looking +x), 100k trees [thin foliage]: pixels with sub-samples missed by the 3x3 centre set (>=1 of 16)       0.1014 fraction   invisible to a 1-spp visibility buffer + 3x3 identity test
+  [edges] forest view (camera 600,600 looking +x), 100k trees [thin foliage]: missed >=4 of 16 (>=25% pixel area)       0.0624 fraction   
+  [edges] forest view (camera 600,600 looking +x), 100k trees [thin foliage]: missed >=8 of 16 (>=50% pixel area)       0.0275 fraction   
+  [edges] city view (camera 0,0), 100k trees + 1M grass [thin foliage]: pixels with >=2 identities in 16 sub-samples       0.0094 fraction   43.800576 ms for 133M rays
+  [edges] city view (camera 0,0), 100k trees + 1M grass [thin foliage]: >=3 identities       0.0021 fraction   
+  [edges] city view (camera 0,0), 100k trees + 1M grass [thin foliage]: >=5 identities       0.0000 fraction   
+  [edges] city view (camera 0,0), 100k trees + 1M grass [thin foliage]: >=9 identities       0.0000 fraction   
+  [edges] city view (camera 0,0), 100k trees + 1M grass [thin foliage]: pixels with sub-samples missed by the 3x3 centre set (>=1 of 16)       0.0022 fraction   invisible to a 1-spp visibility buffer + 3x3 identity test
+  [edges] city view (camera 0,0), 100k trees + 1M grass [thin foliage]: missed >=4 of 16 (>=25% pixel area)       0.0012 fraction   
+  [edges] city view (camera 0,0), 100k trees + 1M grass [thin foliage]: missed >=8 of 16 (>=50% pixel area)       0.0001 fraction   
+  [edges] city view (camera 0,0), 100k trees [thin foliage]: pixels with >=2 identities in 16 sub-samples       0.0012 fraction   37.839872 ms for 133M rays
+  [edges] city view (camera 0,0), 100k trees [thin foliage]: >=3 identities       0.0000 fraction   
+  [edges] city view (camera 0,0), 100k trees [thin foliage]: >=5 identities       0.0000 fraction   
+  [edges] city view (camera 0,0), 100k trees [thin foliage]: >=9 identities       0.0000 fraction   
+  [edges] city view (camera 0,0), 100k trees [thin foliage]: pixels with sub-samples missed by the 3x3 centre set (>=1 of 16)       0.0000 fraction   invisible to a 1-spp visibility buffer + 3x3 identity test
+  [edges] city view (camera 0,0), 100k trees [thin foliage]: missed >=4 of 16 (>=25% pixel area)       0.0000 fraction   
+  [edges] city view (camera 0,0), 100k trees [thin foliage]: missed >=8 of 16 (>=50% pixel area)       0.0000 fraction   

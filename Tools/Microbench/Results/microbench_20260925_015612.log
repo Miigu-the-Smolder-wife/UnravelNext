@@ -1,0 +1,28 @@
+Adapter: NVIDIA GeForce RTX 4080, VRAM 15.7 GB, driver 32.0.15.9186
+D3D12Core.dll: C:\Users\USER\UnravelNext\Tools\Microbench\build\D3D12\D3D12Core.dll
+Raytracing tier 11 (12 = DXR 1.2/OMM), mesh shader tier 10, shader model 0x68, work graphs tier 10
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
+  [env] timestamp frequency                                        1000000000.0000 Hz         
+  [env] raytracing tier                                                 11.0000 tier       
+  [env] mesh shader tier                                                10.0000 tier       
+  [env] highest shader model                                           104.0000 hex        
+
+== Experiments (kernel formulation check)
+  [experiment] fma variant 0                                                   26.0036 TFLOPS     10.570752 ms, DXIL 3304 B
+  [experiment] fma variant 1                                                   42.8948 TFLOPS     6.408192 ms, DXIL 6600 B
+  [experiment] fma variant 2                                                   27.6225 TFLOPS     9.951232 ms, DXIL 6932 B
+  [experiment] fma variant 3                                                   40.4392 TFLOPS     6.797312 ms, DXIL 4012 B
+  [experiment] fma variant 4                                                   43.9050 TFLOPS     6.260736 ms, DXIL 6572 B
+  [experiment] fma variant 5                                                   14.5077 TFLOPS     18.947072 ms, DXIL 7464 B
+  [experiment] read variant 0, per-thread 16 x 16 B, 1 GiB                    693.5026 GB/s       1.548288 ms
+  [experiment] read variant 0, per-thread 64 x 16 B, 1 GiB                    606.1133 GB/s       1.771520 ms
+  [experiment] read variant 1, per-thread 16 x 16 B, 1 GiB                    555.9788 GB/s       1.931264 ms
+  [experiment] read variant 1, per-thread 64 x 16 B, 1 GiB                    693.0443 GB/s       1.549312 ms
+  [experiment] read variant 2, per-thread 16 x 16 B, 1 GiB                    693.0443 GB/s       1.549312 ms
+  [experiment] read variant 2, per-thread 64 x 16 B, 1 GiB                    692.5865 GB/s       1.550336 ms
+  [experiment] read variant 3, per-thread 16 x 16 B, 1 GiB                    556.2737 GB/s       1.930240 ms
+  [experiment] read variant 3, per-thread 64 x 16 B, 1 GiB                    667.4577 GB/s       1.608704 ms
+  [experiment] read variant 4, per-thread 16 x 16 B, 1 GiB                    680.4517 GB/s       1.577984 ms
+  [experiment] read variant 4, per-thread 64 x 16 B, 1 GiB                    687.5908 GB/s       1.561600 ms
+  [experiment] read variant 5, per-thread 16 x 16 B, 1 GiB                    557.1605 GB/s       1.927168 ms
+  [experiment] read variant 5, per-thread 64 x 16 B, 1 GiB                    692.5865 GB/s       1.550336 ms

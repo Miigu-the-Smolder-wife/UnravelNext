@@ -1,0 +1,17 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "dxc": "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64", "timestamp": "20260925_015315",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "env", "name": "raytracing tier", "value": 11, "unit": "tier", "note": ""},
+  {"section": "env", "name": "mesh shader tier", "value": 10, "unit": "tier", "note": ""},
+  {"section": "env", "name": "highest shader model", "value": 104, "unit": "hex", "note": ""},
+  {"section": "experiment", "name": "fma variant 0", "value": 15.4718, "unit": "TFLOPS", "note": "17.766400 ms, DXIL 3304 B"},
+  {"section": "experiment", "name": "fma variant 1", "value": 19.0759, "unit": "TFLOPS", "note": "14.409728 ms, DXIL 6600 B"},
+  {"section": "experiment", "name": "fma variant 2", "value": 13.1483, "unit": "TFLOPS", "note": "20.905984 ms, DXIL 6932 B"},
+  {"section": "experiment", "name": "fma variant 3", "value": 27.8056, "unit": "TFLOPS", "note": "9.885696 ms, DXIL 4012 B"},
+  {"section": "experiment", "name": "fma variant 4", "value": 27.1476, "unit": "TFLOPS", "note": "10.125312 ms, DXIL 6572 B"},
+  {"section": "experiment", "name": "fma variant 5", "value": 8.00392, "unit": "TFLOPS", "note": "34.342912 ms, DXIL 7464 B"},
+  {"section": "experiment", "name": "read variant 0, per-thread 16 x 16 B, 1 GiB", "value": 607.518, "unit": "GB/s", "note": "1.767424 ms"},
+  {"section": "experiment", "name": "read variant 0, per-thread 64 x 16 B, 1 GiB", "value": 592.751, "unit": "GB/s", "note": "1.811456 ms"}
+ ]
+}
