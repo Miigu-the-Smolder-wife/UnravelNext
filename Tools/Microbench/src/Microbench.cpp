@@ -29,9 +29,11 @@
 #include <string>
 #include <vector>
 
+static_assert(D3D12_SDK_VERSION == UNX_AGILITY_SDK_VERSION, "d3d12.h must come from the pinned Agility SDK package");
+
 using Microsoft::WRL::ComPtr;
 extern "C" {
-__declspec(dllexport) extern const UINT D3D12SDKVersion = 618;
+__declspec(dllexport) extern const UINT D3D12SDKVersion = UNX_AGILITY_SDK_VERSION;
 __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
 }
 
@@ -185,6 +187,9 @@ struct Gpu
         if (NvAPI_Initialize() == NVAPI_OK)
         {
             g_nvapi = true;
+            NvAPI_ShortString iface = "?", branch = "?"; NvU32 drv = 0;
+            NvAPI_GetInterfaceVersionString(iface); NvAPI_SYS_GetDriverAndBranchVersion(&drv, branch);
+            logf("NVAPI: SDK interface %s, driver %u.%02u branch %s\n", iface, drv / 100, drv % 100, branch);
             NVAPI_D3D12_RAYTRACING_OPACITY_MICROMAP_CAPS oc = NVAPI_D3D12_RAYTRACING_OPACITY_MICROMAP_CAP_NONE;
             NVAPI_D3D12_RAYTRACING_THREAD_REORDERING_CAPS tc = NVAPI_D3D12_RAYTRACING_THREAD_REORDERING_CAP_NONE;
             NvAPI_Status s1 = NvAPI_D3D12_GetRaytracingCaps(dev.Get(), NVAPI_D3D12_RAYTRACING_CAPS_TYPE_OPACITY_MICROMAP, &oc, sizeof oc);
@@ -1324,13 +1329,16 @@ static std::string generateKernel(int stages, uint32_t seed)
 }
 static void testPsoCompile()
 {
-    logf("\n== PSO compile time vs DXIL size (unique constants defeat the driver cache; 'warm' recreates the same blob)\n");
+    // The constants must differ between runs as well as between sizes: the driver keeps a disk cache keyed by
+    // the DXIL, so a fixed seed makes every run after the first a disk-cache hit (measured 20-75x faster).
+    const uint32_t nonce = std::random_device{}() ^ (uint32_t)GetTickCount64();
+    logf("\n== PSO compile time vs DXIL size (per-run nonce %08x in the constants defeats the driver's memory and disk caches; 'warm' recreates the same blob)\n", nonce);
     for (int stages : { 32, 128, 512, 2048, 8192, 32768 })
     {
         double dxcMs = 0, cold = 0, warm = 0; size_t bytes = 0;
         try
         {
-            auto blob = dxc.compile(generateKernel(stages, 1000 + stages), L"CS", L"cs_6_6", {}, &dxcMs, true);
+            auto blob = dxc.compile(generateKernel(stages, nonce * 2654435761u + (uint32_t)stages), L"CS", L"cs_6_6", {}, &dxcMs, true);
             bytes = blob->GetBufferSize();
             g.computePso(blob.Get(), &cold);
             g.computePso(blob.Get(), &warm);
