@@ -5,7 +5,9 @@
 #   NVAPI        git submodule External/nvapi (github.com/NVIDIA/nvapi), pinned to the R590 SDK commit,
 #                the branch of the measured driver 591.86. Used for OMM on drivers without DXR 1.2.
 #   FLIP         git submodule External/flip (github.com/NVlabs/flip, BSD-3), pinned to v1.7: image metric.
-# Track-specific libraries (Embree, meshoptimizer, ...) are added here by core on request (INTERFACES_KO.md 2.3).
+#   meshoptimizer git submodule External/meshoptimizer (github.com/zeux/meshoptimizer, MIT), pinned to v1.2: cluster
+#                LOD hierarchy (demo/clusterlod.h), meshlets, simplification. Unx::meshoptimizer, used by V's builder.
+# Track-specific libraries (Embree, ...) are added here by core on request (INTERFACES_KO.md 2.3).
 #
 # Changing a version here changes measured floors: re-run Tools/Microbench and record the result.
 
@@ -88,6 +90,26 @@ if(NOT TARGET Unx::FLIP)
   endif()
   add_library(Unx::FLIP INTERFACE IMPORTED GLOBAL)
   set_target_properties(Unx::FLIP PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${flip}/src/cpp")
+endif()
+
+set(UNX_MESHOPTIMIZER_COMMIT "9d9890c73011d75920af614485296d1e03e95448")  # zeux/meshoptimizer v1.2 (MIT)
+if(NOT TARGET Unx::meshoptimizer)
+  set(mo "${UNX_EXTERNAL_DIR}/meshoptimizer")
+  if(NOT EXISTS "${mo}/src/meshoptimizer.h" OR NOT EXISTS "${mo}/demo/clusterlod.h")
+    message(FATAL_ERROR "External/meshoptimizer is missing. Run: git submodule update --init External/meshoptimizer")
+  endif()
+  if(EXISTS "${mo}/.git")
+    execute_process(COMMAND git -C "${mo}" rev-parse HEAD OUTPUT_VARIABLE head OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(head AND NOT head STREQUAL UNX_MESHOPTIMIZER_COMMIT)
+      message(FATAL_ERROR "External/meshoptimizer is at ${head}, expected ${UNX_MESHOPTIMIZER_COMMIT}. Run: git submodule update External/meshoptimizer")
+    endif()
+  endif()
+  file(GLOB mo_sources CONFIGURE_DEPENDS "${mo}/src/*.cpp")
+  add_library(unx_meshoptimizer STATIC ${mo_sources})
+  # demo/ holds clusterlod.h (header-only, CLUSTERLOD_IMPLEMENTATION in one translation unit of the user).
+  target_include_directories(unx_meshoptimizer PUBLIC "${mo}/src" "${mo}/demo")
+  set_target_properties(unx_meshoptimizer PROPERTIES FOLDER External)
+  add_library(Unx::meshoptimizer ALIAS unx_meshoptimizer)
 endif()
 
 # Copies the Agility runtime next to an executable (D3D12/ subfolder, matching D3D12SDKPath ".\\D3D12\\").

@@ -13,7 +13,7 @@ $vs = "C:\Program Files\Microsoft Visual Studio\18\Community"
 $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
 $cmake = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
 $ninja = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
-foreach ($sub in @("External/nvapi", "External/flip")) {
+foreach ($sub in @("External/nvapi", "External/flip", "External/meshoptimizer")) {
   if ((Test-Path (Join-Path $root ".gitmodules")) -and -not (Test-Path (Join-Path $root "$sub\.git"))) {
     & git -C $root submodule update --init $sub
     if ($LASTEXITCODE -ne 0) { throw "submodule init failed: $sub" }

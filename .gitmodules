@@ -4,3 +4,6 @@
 [submodule "External/flip"]
 	path = External/flip
 	url = https://github.com/NVlabs/flip.git
+[submodule "External/meshoptimizer"]
+	path = External/meshoptimizer
+	url = https://github.com/zeux/meshoptimizer.git
