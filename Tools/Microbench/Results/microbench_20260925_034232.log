@@ -1,0 +1,18 @@
+Adapter: NVIDIA GeForce RTX 4080, VRAM 15.7 GB, driver 32.0.15.9186
+D3D12Core.dll: C:\Users\USER\UnravelNext\Tools\Microbench\build\D3D12\D3D12Core.dll
+Raytracing tier 11 (12 = DXR 1.2/OMM), mesh shader tier 10, shader model 0x68, work graphs tier 10
+NVAPI: SDK interface NVidia Complete Version 1.10, driver 591.86 branch r590_00
+NVAPI: initialized; opacity micromap cap 1 (status 0), thread reordering cap 1 (status 0)
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
+  [env] timestamp frequency                                        1000000000.0000 Hz         
+  [env] raytracing tier                                                 11.0000 tier       
+  [env] mesh shader tier                                                10.0000 tier       
+  [env] highest shader model                                           104.0000 hex        
+
+== PSO compile time vs DXIL size (per-run nonce cb208405 in the constants defeats the driver's memory and disk caches; 'warm' recreates the same blob)
+  [pso] compute PSO, 32 stages, DXIL 14 KB: cold create                 27.7165 ms         dxc 24.003700 ms, warm recreate 1.435700 ms, 1.976441 ms/KB
+  [pso] compute PSO, 128 stages, DXIL 53 KB: cold create               126.2829 ms         dxc 93.714900 ms, warm recreate 3.998900 ms, 2.397539 ms/KB
+  [pso] compute PSO, 512 stages, DXIL 205 KB: cold create              612.6019 ms         dxc 537.550100 ms, warm recreate 15.498800 ms, 2.991437 ms/KB
+  [pso] compute PSO, 2048 stages, DXIL 871 KB: cold create            3679.8905 ms         dxc 4085.325600 ms, warm recreate 70.908100 ms, 4.226344 ms/KB
+  [pso] compute PSO, 8192 stages, DXIL 3501 KB: cold create          17834.9591 ms         dxc 37805.380300 ms, warm recreate 292.970200 ms, 5.094236 ms/KB
+  stopping: dxc + cold create exceeded 15 s (the next size would take minutes)

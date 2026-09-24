@@ -1,0 +1,72 @@
+Adapter: NVIDIA GeForce RTX 4080, VRAM 15.7 GB, driver 32.0.15.9186
+D3D12Core.dll: C:\Users\USER\UnravelNext\Tools\Microbench\build\D3D12\D3D12Core.dll
+Raytracing tier 11 (12 = DXR 1.2/OMM), mesh shader tier 10, shader model 0x68, work graphs tier 10
+NVAPI: SDK interface NVidia Complete Version 1.10, driver 591.86 branch r590_00
+NVAPI: initialized; opacity micromap cap 1 (status 0), thread reordering cap 1 (status 0)
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
+  [env] timestamp frequency                                        1000000000.0000 Hz         
+  [env] raytracing tier                                                 11.0000 tier       
+  [env] mesh shader tier                                                10.0000 tier       
+  [env] highest shader model                                           104.0000 hex        
+
+== Ray tracing (after 1.5 s warm-up)
+  [pso] raytracing state object create, 5 shaders (cpu)                 26.7886 ms         dxc 13.495300 ms
+  OMM path: NVAPI (driver exposes OMM without DXR 1.2)
+
+== Building ray-tracing scene (2 km terrain, 100k trees, 3k buildings, 1M grass; THIN foliage: 6 cm leaves x 40k, 4 mm grass blades)
+  [rtas] BLAS build terrain 2.1M tris (fast trace)                        3.2410 ms         139 MB
+  [rtas] BLAS build city 36k tris                                         0.3103 ms         
+  bird-curve decode: 256 indices, 0 missing, 256 distinct cells
+  leaf alpha coverage 0.37, OMM level 4: 15.6% microtriangles unknown (need any-hit), 84.4% resolved
+  [rtas] BLAS build tree 80k tris (fast trace)                            0.4372 ms         5484 KB
+  [rtas] BLAS build tree with OMM leaves (fast trace)                     0.4618 ms         6265 KB
+  [rtas] BLAS full build 60k-tri skinned mesh (allow update), per mesh, 64 in flight      94.3840 us         3710 KB each
+  [rtas] BLAS refit 60k-tri skinned mesh, per mesh, 64 in flight         15.3600 us         256 characters = 3.932160 ms (expected, linear)
+  [rtas] TLAS build 100k instances (fast trace)                           0.2949 ms         28 MB
+  [rtas] TLAS build 100k instances (fast build)                           0.2929 ms         
+  [rtas] TLAS build 100k instances (fast trace + allow update)            0.2939 ms         
+  [rtas] TLAS refit 100k instances                                        0.0522 ms         
+  [rtas] TLAS build 1.1M instances (fast trace)                           3.3444 ms         212 MB
+  [rtas] TLAS build 1.1M instances (fast trace + allow update)            3.2655 ms         
+  [rtas] TLAS refit 1.1M instances                                        1.4008 ms         
+  [rays] sanity: primary alpha-tested hit fraction                        1.0000 fraction   
+  [rays] RayQuery opaque closest | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]       1.1949 Grays/s    3.510272 ms for 4 M rays
+  [rays] RayQuery alpha-test any-hit loop | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]       0.6960 Grays/s    6.026240 ms for 4 M rays
+  [rays] DispatchRays opaque | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]       1.3434 Grays/s    3.122176 ms
+  [rays] DispatchRays alpha any-hit shader | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]       1.2893 Grays/s    3.253248 ms
+  [rays] DispatchRays OMM 4-state (unknown -> any-hit) | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]       1.0253 Grays/s    4.090880 ms
+  [rays] DispatchRays OMM forced 2-state (no any-hit) | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]       1.0438 Grays/s    4.018176 ms
+  [rays] RayQuery opaque closest | incoherent short (same, tMax 2 m) [thin foliage]       2.7732 Grays/s    1.512448 ms for 4 M rays
+  [rays] RayQuery alpha-test any-hit loop | incoherent short (same, tMax 2 m) [thin foliage]       2.2010 Grays/s    1.905664 ms for 4 M rays
+  [rays] DispatchRays opaque | incoherent short (same, tMax 2 m) [thin foliage]       2.9489 Grays/s    1.422336 ms
+  [rays] DispatchRays alpha any-hit shader | incoherent short (same, tMax 2 m) [thin foliage]       2.7826 Grays/s    1.507328 ms
+  [rays] DispatchRays OMM 4-state (unknown -> any-hit) | incoherent short (same, tMax 2 m) [thin foliage]       2.9174 Grays/s    1.437696 ms
+  [rays] DispatchRays OMM forced 2-state (no any-hit) | incoherent short (same, tMax 2 m) [thin foliage]       2.9595 Grays/s    1.417216 ms
+  [rays] RayQuery opaque closest | primary 3840x2160 camera [thin foliage]       3.4527 Grays/s    2.402304 ms for 8 M rays
+  [rays] RayQuery alpha-test any-hit loop | primary 3840x2160 camera [thin foliage]       3.9074 Grays/s    2.122752 ms for 8 M rays
+  [rays] DispatchRays opaque | primary 3840x2160 camera [thin foliage]       3.8756 Grays/s    2.140160 ms
+  [rays] DispatchRays alpha any-hit shader | primary 3840x2160 camera [thin foliage]       3.5762 Grays/s    2.319360 ms
+  [rays] DispatchRays OMM 4-state (unknown -> any-hit) | primary 3840x2160 camera [thin foliage]       3.5809 Grays/s    2.316288 ms
+  [rays] DispatchRays OMM forced 2-state (no any-hit) | primary 3840x2160 camera [thin foliage]       3.8793 Grays/s    2.138112 ms
+  [rays] RayQuery opaque closest | sun shadow from terrain (0.25 deg jitter) [thin foliage]       0.8916 Grays/s    4.704256 ms for 4 M rays
+  [rays] RayQuery opaque first-hit | sun shadow from terrain (0.25 deg jitter) [thin foliage]       1.4692 Grays/s    2.854912 ms for 4 M rays
+  [rays] RayQuery alpha-test any-hit loop | sun shadow from terrain (0.25 deg jitter) [thin foliage]       0.5612 Grays/s    7.474176 ms for 4 M rays
+  [rays] RayQuery alpha-test first-hit | sun shadow from terrain (0.25 deg jitter) [thin foliage]       0.7182 Grays/s    5.839872 ms for 4 M rays
+  [rays] DispatchRays opaque | sun shadow from terrain (0.25 deg jitter) [thin foliage]       1.4407 Grays/s    2.911232 ms
+  [rays] DispatchRays alpha any-hit shader | sun shadow from terrain (0.25 deg jitter) [thin foliage]       1.5527 Grays/s    2.701312 ms
+  [rays] DispatchRays OMM 4-state (unknown -> any-hit) | sun shadow from terrain (0.25 deg jitter) [thin foliage]       1.0622 Grays/s    3.948544 ms
+  [rays] DispatchRays OMM forced 2-state (no any-hit) | sun shadow from terrain (0.25 deg jitter) [thin foliage]       1.0967 Grays/s    3.824640 ms
+  [rays] DispatchRays alpha any-hit shader, OMM-enabled pipeline (flag cost) | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]       1.2151 Grays/s    3.451904 ms
+  [rays] RayQuery opaque closest, +1M grass | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]       1.0703 Grays/s    3.918848 ms for 4 M rays
+  [rays] RayQuery alpha any-hit loop, +1M grass | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]       0.6321 Grays/s    6.635520 ms for 4 M rays
+  [rays] RayQuery opaque first-hit, +1M grass | sun shadow from terrain (0.25 deg jitter) [thin foliage]       1.1489 Grays/s    3.650560 ms for 4 M rays
+  [rays] RayQuery alpha first-hit, +1M grass | sun shadow from terrain (0.25 deg jitter) [thin foliage]       0.6570 Grays/s    6.383616 ms for 4 M rays
+  [rays] RayQuery opaque closest, +1M grass | primary 3840x2160 camera [thin foliage]       3.2569 Grays/s    2.546688 ms for 8 M rays
+  [rays] RayQuery no-flags, non-opaque leaves ignored (traversal only) | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]       1.5081 Grays/s    2.781184 ms for 4 M rays
+  [rays] DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]       1.2033 Grays/s    3.485696 ms
+  [rays] DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | primary 3840x2160 camera [thin foliage]       3.8756 Grays/s    2.140160 ms
+  [rays] DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | incoherent short (same, tMax 2 m) [thin foliage]       2.8704 Grays/s    1.461248 ms
+  [rays] DispatchRays divergent hit shading, NVAPI SER (reorder by material) | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]       1.1225 Grays/s    3.736576 ms
+  [rays] DispatchRays divergent hit shading, NVAPI SER (reorder by material) | primary 3840x2160 camera [thin foliage]       3.1274 Grays/s    2.652160 ms
+  [rays] DispatchRays divergent hit shading, NVAPI SER (reorder by material) | incoherent short (same, tMax 2 m) [thin foliage]       2.2605 Grays/s    1.855488 ms
+  [rays] DispatchRays trivial hit, NVAPI SER (reorder overhead) | incoherent long (canopy origins, sphere dirs, 2 km) [thin foliage]       1.1807 Grays/s    3.552256 ms

@@ -1,0 +1,72 @@
+Adapter: NVIDIA GeForce RTX 4080, VRAM 15.7 GB, driver 32.0.15.9186
+D3D12Core.dll: C:\Users\USER\UnravelNext\Tools\Microbench\build\D3D12\D3D12Core.dll
+Raytracing tier 11 (12 = DXR 1.2/OMM), mesh shader tier 10, shader model 0x68, work graphs tier 10
+NVAPI: SDK interface NVidia Complete Version 1.10, driver 591.86 branch r590_00
+NVAPI: initialized; opacity micromap cap 1 (status 0), thread reordering cap 1 (status 0)
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
+  [env] timestamp frequency                                        1000000000.0000 Hz         
+  [env] raytracing tier                                                 11.0000 tier       
+  [env] mesh shader tier                                                10.0000 tier       
+  [env] highest shader model                                           104.0000 hex        
+
+== Ray tracing (after 1.5 s warm-up)
+  [pso] raytracing state object create, 5 shaders (cpu)                 27.6811 ms         dxc 13.524500 ms
+  OMM path: NVAPI (driver exposes OMM without DXR 1.2)
+
+== Building ray-tracing scene (2 km terrain, 100k trees, 3k buildings, 1M grass; card foliage: 35 cm leaves x 1.5k, 30 cm grass cards)
+  [rtas] BLAS build terrain 2.1M tris (fast trace)                        3.4304 ms         139 MB
+  [rtas] BLAS build city 36k tris                                         0.3164 ms         
+  bird-curve decode: 256 indices, 0 missing, 256 distinct cells
+  leaf alpha coverage 0.37, OMM level 4: 15.6% microtriangles unknown (need any-hit), 84.4% resolved
+  [rtas] BLAS build tree 3k tris (fast trace)                             0.2509 ms         229 KB
+  [rtas] BLAS build tree with OMM leaves (fast trace)                     0.2642 ms         260 KB
+  [rtas] BLAS full build 60k-tri skinned mesh (allow update), per mesh, 64 in flight      94.6560 us         3710 KB each
+  [rtas] BLAS refit 60k-tri skinned mesh, per mesh, 64 in flight         15.3600 us         256 characters = 3.932160 ms (expected, linear)
+  [rtas] TLAS build 100k instances (fast trace)                           0.2959 ms         28 MB
+  [rtas] TLAS build 100k instances (fast build)                           0.2939 ms         
+  [rtas] TLAS build 100k instances (fast trace + allow update)            0.2949 ms         
+  [rtas] TLAS refit 100k instances                                        0.0532 ms         
+  [rtas] TLAS build 1.1M instances (fast trace)                           2.9870 ms         212 MB
+  [rtas] TLAS build 1.1M instances (fast trace + allow update)            3.3239 ms         
+  [rtas] TLAS refit 1.1M instances                                        1.4162 ms         
+  [rays] sanity: primary alpha-tested hit fraction                        1.0000 fraction   
+  [rays] RayQuery opaque closest | incoherent long (canopy origins, sphere dirs, 2 km)       2.0984 Grays/s    1.998848 ms for 4 M rays
+  [rays] RayQuery alpha-test any-hit loop | incoherent long (canopy origins, sphere dirs, 2 km)       1.1673 Grays/s    3.593216 ms for 4 M rays
+  [rays] DispatchRays opaque | incoherent long (canopy origins, sphere dirs, 2 km)       2.0511 Grays/s    2.044928 ms
+  [rays] DispatchRays alpha any-hit shader | incoherent long (canopy origins, sphere dirs, 2 km)       1.8559 Grays/s    2.259968 ms
+  [rays] DispatchRays OMM 4-state (unknown -> any-hit) | incoherent long (canopy origins, sphere dirs, 2 km)       1.8076 Grays/s    2.320384 ms
+  [rays] DispatchRays OMM forced 2-state (no any-hit) | incoherent long (canopy origins, sphere dirs, 2 km)       1.8937 Grays/s    2.214912 ms
+  [rays] RayQuery opaque closest | incoherent short (same, tMax 2 m)       3.4276 Grays/s    1.223680 ms for 4 M rays
+  [rays] RayQuery alpha-test any-hit loop | incoherent short (same, tMax 2 m)       2.0656 Grays/s    2.030592 ms for 4 M rays
+  [rays] DispatchRays opaque | incoherent short (same, tMax 2 m)          3.3355 Grays/s    1.257472 ms
+  [rays] DispatchRays alpha any-hit shader | incoherent short (same, tMax 2 m)       2.9660 Grays/s    1.414144 ms
+  [rays] DispatchRays OMM 4-state (unknown -> any-hit) | incoherent short (same, tMax 2 m)       3.3879 Grays/s    1.238016 ms
+  [rays] DispatchRays OMM forced 2-state (no any-hit) | incoherent short (same, tMax 2 m)       3.5961 Grays/s    1.166336 ms
+  [rays] RayQuery opaque closest | primary 3840x2160 camera               2.9444 Grays/s    2.817024 ms for 8 M rays
+  [rays] RayQuery alpha-test any-hit loop | primary 3840x2160 camera       3.0881 Grays/s    2.685952 ms for 8 M rays
+  [rays] DispatchRays opaque | primary 3840x2160 camera                   3.1481 Grays/s    2.634752 ms
+  [rays] DispatchRays alpha any-hit shader | primary 3840x2160 camera       3.3877 Grays/s    2.448384 ms
+  [rays] DispatchRays OMM 4-state (unknown -> any-hit) | primary 3840x2160 camera       3.3540 Grays/s    2.472960 ms
+  [rays] DispatchRays OMM forced 2-state (no any-hit) | primary 3840x2160 camera       3.1238 Grays/s    2.655232 ms
+  [rays] RayQuery opaque closest | sun shadow from terrain (0.25 deg jitter)       1.4489 Grays/s    2.894848 ms for 4 M rays
+  [rays] RayQuery opaque first-hit | sun shadow from terrain (0.25 deg jitter)       2.8744 Grays/s    1.459200 ms for 4 M rays
+  [rays] RayQuery alpha-test any-hit loop | sun shadow from terrain (0.25 deg jitter)       0.8949 Grays/s    4.686848 ms for 4 M rays
+  [rays] RayQuery alpha-test first-hit | sun shadow from terrain (0.25 deg jitter)       1.6590 Grays/s    2.528256 ms for 4 M rays
+  [rays] DispatchRays opaque | sun shadow from terrain (0.25 deg jitter)       3.1172 Grays/s    1.345536 ms
+  [rays] DispatchRays alpha any-hit shader | sun shadow from terrain (0.25 deg jitter)       2.7978 Grays/s    1.499136 ms
+  [rays] DispatchRays OMM 4-state (unknown -> any-hit) | sun shadow from terrain (0.25 deg jitter)       2.9404 Grays/s    1.426432 ms
+  [rays] DispatchRays OMM forced 2-state (no any-hit) | sun shadow from terrain (0.25 deg jitter)       2.9383 Grays/s    1.427456 ms
+  [rays] DispatchRays alpha any-hit shader, OMM-enabled pipeline (flag cost) | incoherent long (canopy origins, sphere dirs, 2 km)       1.7196 Grays/s    2.439168 ms
+  [rays] RayQuery opaque closest, +1M grass | incoherent long (canopy origins, sphere dirs, 2 km)       1.8669 Grays/s    2.246656 ms for 4 M rays
+  [rays] RayQuery alpha any-hit loop, +1M grass | incoherent long (canopy origins, sphere dirs, 2 km)       1.0836 Grays/s    3.870720 ms for 4 M rays
+  [rays] RayQuery opaque first-hit, +1M grass | sun shadow from terrain (0.25 deg jitter)       2.7108 Grays/s    1.547264 ms for 4 M rays
+  [rays] RayQuery alpha first-hit, +1M grass | sun shadow from terrain (0.25 deg jitter)       1.4868 Grays/s    2.821120 ms for 4 M rays
+  [rays] RayQuery opaque closest, +1M grass | primary 3840x2160 camera       2.7000 Grays/s    3.072000 ms for 8 M rays
+  [rays] RayQuery no-flags, non-opaque leaves ignored (traversal only) | incoherent long (canopy origins, sphere dirs, 2 km)       3.0341 Grays/s    1.382400 ms for 4 M rays
+  [rays] DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | incoherent long (canopy origins, sphere dirs, 2 km)       1.9113 Grays/s    2.194432 ms
+  [rays] DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | primary 3840x2160 camera       3.1628 Grays/s    2.622464 ms
+  [rays] DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | incoherent short (same, tMax 2 m)       3.1752 Grays/s    1.320960 ms
+  [rays] DispatchRays divergent hit shading, NVAPI SER (reorder by material) | incoherent long (canopy origins, sphere dirs, 2 km)       1.6171 Grays/s    2.593792 ms
+  [rays] DispatchRays divergent hit shading, NVAPI SER (reorder by material) | primary 3840x2160 camera       2.5854 Grays/s    3.208192 ms
+  [rays] DispatchRays divergent hit shading, NVAPI SER (reorder by material) | incoherent short (same, tMax 2 m)       2.8036 Grays/s    1.496064 ms
+  [rays] DispatchRays trivial hit, NVAPI SER (reorder overhead) | incoherent long (canopy origins, sphere dirs, 2 km)       1.7327 Grays/s    2.420736 ms

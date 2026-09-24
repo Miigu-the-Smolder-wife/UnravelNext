@@ -1,0 +1,209 @@
+Adapter: NVIDIA GeForce RTX 4080, VRAM 15.7 GB, driver 32.0.15.9186
+D3D12Core.dll: C:\Users\USER\UnravelNext\Tools\Microbench\build\D3D12\D3D12Core.dll
+Raytracing tier 11 (12 = DXR 1.2/OMM), mesh shader tier 10, shader model 0x68, work graphs tier 10
+NVAPI: SDK interface NVidia Complete Version 1.10, driver 591.86 branch r590_00
+NVAPI: initialized; opacity micromap cap 1 (status 0), thread reordering cap 1 (status 0)
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64
+  [env] timestamp frequency                                        1000000000.0000 Hz         
+  [env] raytracing tier                                                 11.0000 tier       
+  [env] mesh shader tier                                                10.0000 tier       
+  [env] highest shader model                                           104.0000 hex        
+
+== Compute (after 1.5 s warm-up)
+  [compute] fp32 fma throughput (512 iters, 8 float4 chains, unroll 8)      46.2023 TFLOPS     median of 9, best 49.038264, peak 48.7 at 2.5 GHz
+  [compute] fp32 fma throughput (2048 iters, 8 float4 chains, unroll 8)      46.2142 TFLOPS     median of 9, best 47.632944, peak 48.7 at 2.5 GHz
+
+== Memory (after 1.5 s warm-up)
+  [memory] sequential write 1 GiB, hashed (incompressible) data           675.1938 GB/s       
+  [memory] sequential read 1 GiB of hashed data                           697.6554 GB/s       true DRAM read floor
+  [memory] sequential write 1 GiB, structured (compressible) data         662.3980 GB/s       
+  [memory] sequential read 1 GiB of structured data                       697.6554 GB/s       compression inflated
+  [memory] copy 512 MiB read + 512 MiB write                              621.9312 GB/s       read+write bytes summed
+  [memory] cached loads, each group re-reads its own 4 KB (L1-resident)   12945.3827 GB/s       SM load-path ceiling
+  [memory] random 4 KB chunk reads, 1 GiB traffic, 8 MiB window          4032.9846 GB/s       L2 resident (64 MB L2)
+  [memory] random 4 KB chunk reads, 1 GiB traffic, 32 MiB window         3986.9810 GB/s       L2 resident (64 MB L2)
+  [memory] random 4 KB chunk reads, 1 GiB traffic, 64 MiB window         3971.8788 GB/s       beyond L2
+  [memory] random 4 KB chunk reads, 1 GiB traffic, 128 MiB window        1390.6844 GB/s       beyond L2
+  [memory] random 4 KB chunk reads, 1 GiB traffic, 512 MiB window         793.7744 GB/s       beyond L2
+  [memory] random 4 B loads, 1024 MiB window                                5.1401 Gloads/s   164.482510 GB/s at 32 B sectors
+  [memory] random 4 B loads, 32 MiB window                                 64.6950 Gloads/s   2070.238894 GB/s at 32 B sectors
+  [memory] random 4 B loads, 2 MiB window                                  66.3320 Gloads/s   2122.623482 GB/s at 32 B sectors
+  [memory] random 64 B loads, 1024 MiB window                               5.1385 Gloads/s   328.861847 GB/s useful
+  [memory] random 64 B loads, 32 MiB window                                55.2580 Gloads/s   3536.512648 GB/s useful
+  [memory] random 64 B loads, 2 MiB window                                 57.0374 Gloads/s   3650.395126 GB/s useful
+  [memory] dependent load latency, 262144 KiB working set                 238.2969 ns/load    single thread pointer chase
+  [memory] dependent load latency, 4096 KiB working set                   116.0938 ns/load    single thread pointer chase
+  [memory] dependent load latency, 64 KiB working set                      35.5312 ns/load    single thread pointer chase
+
+== Texture (after 1.5 s warm-up)
+  [texture] RGBA8 4096^2 coherent bilinear lod0                            811.5913 Gsamples/s 
+  [texture] RGBA8 4096^2 incoherent bilinear lod0                           26.4045 Gsamples/s 
+  [texture] RGBA8 4096^2 coherent trilinear SampleGrad                     361.5779 Gsamples/s 
+  [texture] RGBA8 4096^2 coherent point lod0                               652.0995 Gsamples/s 
+
+== Atomics / dispatch overhead (after 1.5 s warm-up)
+  [atomics] InterlockedAdd, single address                                   2.2537 Gatomics/s 
+  [atomics] InterlockedAdd, 256 addresses                                    3.1709 Gatomics/s 
+  [atomics] InterlockedAdd, 1048576 addresses                               63.4424 Gatomics/s 
+  [dispatch] 1000 x Dispatch(1) no barrier                                    0.0399 us/dispatch 
+  [dispatch] 1000 x Dispatch(1) + UAV barrier                                 0.8858 us/dispatch fixed cost floor of one dependent pass
+  [dispatch] 1000 x (PSO switch + constants + Dispatch(1) + UAV barrier)       0.8858 us/dispatch 
+  [dispatch] 1000 x Dispatch(1024 groups of 64) + UAV barrier                 1.4172 us/dispatch 65k-thread pass with real work
+
+== Raster (mesh shader, 3840x2160 R32_UINT visibility + D32) (after 1.5 s warm-up)
+  [pso] mesh+pixel graphics PSO create (cpu)                             1.4463 ms         
+  [pso] mesh depth-only graphics PSO create (cpu)                        0.0088 ms         
+  [raster] meshlet launch only (174k meshlets, zero output)              1148.6486 Mmeshlets/s 0.151552 ms incl. depth clear
+  [raster] 4K depth clear alone                                             0.0041 ms         
+  [raster] 16.7M tris, edge 0.5 px, vis id + depth                         28.3831 Gtris/s    0.601056 ms
+  [raster] 16.7M tris, edge 0.5 px, depth only                             32.9249 Gtris/s    0.518144 ms
+  [raster] 16.7M tris, edge 1.0 px, vis id + depth                         22.3643 Gtris/s    0.762816 ms
+  [raster] 16.7M tris, edge 1.0 px, depth only                             22.9477 Gtris/s    0.743424 ms
+  [raster] 16.7M tris, edge 2.0 px, vis id + depth                         12.8351 Gtris/s    1.329152 ms
+  [raster] 16.7M tris, edge 2.0 px, depth only                             12.8947 Gtris/s    1.323008 ms
+  [raster] 16.7M tris, edge 4.0 px, vis id + depth                          9.0945 Gtris/s    1.875840 ms
+  [raster] 16.7M tris, edge 4.0 px, depth only                              9.3177 Gtris/s    1.830912 ms
+  [raster] 16.7M tris, edge 8.0 px, vis id + depth                          5.9606 Gtris/s    2.862080 ms
+  [raster] 16.7M tris, edge 8.0 px, depth only                              6.0582 Gtris/s    2.816000 ms
+  [raster] 16.7M tris, edge 16.0 px, vis id + depth                         3.3663 Gtris/s    5.067776 ms
+  [raster] 16.7M tris, edge 16.0 px, depth only                             3.4167 Gtris/s    4.993024 ms
+  [raster] 16.7M tris, edge 32.0 px, vis id + depth                         2.3578 Gtris/s    7.235584 ms
+  [raster] 16.7M tris, edge 32.0 px, depth only                             2.4002 Gtris/s    7.107584 ms
+  [raster] 16.7M tris, edge 2 px, 50% culled by SV_CullPrimitive           21.6083 Gtris/s (emitted) 0.789504 ms
+  [raster] 174k meshlets x 1 triangle (edge 2 px)                        1148.6486 Mtris/s    per-meshlet overhead bound
+  [raster] 32 full-screen layers back-to-front (all pass, vis id + depth write)     279.9136 Gpix/s     0.948224 ms
+  [raster] 32 full-screen layers back-to-front, depth only               1112.4464 Gpix/s     0.238592 ms
+  [raster] 32 full-screen layers front-to-back (early-z reject)          3013.9535 Gpix/s     0.088064 ms
+  [raster] 32 full-screen layers front-to-back, depth only (early-z reject)    3868.6567 Gpix/s     0.068608 ms
+
+== Sub-pixel coverage layer (conservative raster + exact pixel area + fragment append, 4K) (after 1.5 s warm-up)
+  [coverage] 262k slivers 0.25 px x 20 px (0.5M tris): conservative raster + exact area + append       0.7752 ms         15.230712 M fragments (29.050278 per tri), 19.648272 G frags/s, area check 0.976637
+  [coverage] 0.5M tris 0.25 px: conservative raster, trivial PS               0.6079 ms         
+  [coverage] 0.5M tris 0.25 px: standard raster + area + append (centre-sample pixels only)       0.3369 ms         1.304510 M pixels touched by centre sampling vs 15.230712 M true fragments
+  [coverage] 1049k slivers 0.25 px x 20 px (2.1M tris): conservative raster + exact area + append       3.0618 ms         60.912056 M fragments (29.045132 per tri), 19.894458 G frags/s, area check 0.976702
+  [coverage] 2.1M tris 0.25 px: conservative raster, trivial PS               2.4484 ms         
+  [coverage] 2.1M tris 0.25 px: standard raster + area + append (centre-sample pixels only)       1.3292 ms         5.220250 M pixels touched by centre sampling vs 60.912056 M true fragments
+  [coverage] 262k slivers 0.50 px x 20 px (0.5M tris): conservative raster + exact area + append       0.8079 ms         16.620044 M fragments (31.700218 per tri), 20.570991 G frags/s, area check 0.987257
+  [coverage] 0.5M tris 0.50 px: conservative raster, trivial PS               0.6308 ms         
+  [coverage] 0.5M tris 0.50 px: standard raster + area + append (centre-sample pixels only)       0.3991 ms         2.609021 M pixels touched by centre sampling vs 16.620044 M true fragments
+  [coverage] 1049k slivers 0.50 px x 20 px (2.1M tris): conservative raster + exact area + append       3.1976 ms         66.470106 M fragments (31.695416 per tri), 20.787499 G frags/s, area check 0.987319
+  [coverage] 2.1M tris 0.50 px: conservative raster, trivial PS               2.5948 ms         
+  [coverage] 2.1M tris 0.50 px: standard raster + area + append (centre-sample pixels only)       1.5800 ms         10.439807 M pixels touched by centre sampling vs 66.470106 M true fragments
+  [coverage] 262k slivers 1.00 px x 20 px (0.5M tris): conservative raster + exact area + append       0.8735 ms         19.400160 M fragments (37.002869 per tri), 22.210397 G frags/s, area check 0.991489
+  [coverage] 0.5M tris 1.00 px: conservative raster, trivial PS               0.6758 ms         
+  [coverage] 0.5M tris 1.00 px: standard raster + area + append (centre-sample pixels only)       0.5110 ms         5.217903 M pixels touched by centre sampling vs 19.400160 M true fragments
+  [coverage] 1049k slivers 1.00 px x 20 px (2.1M tris): conservative raster + exact area + append       3.4580 ms         77.593619 M fragments (36.999521 per tri), 22.438768 G frags/s, area check 0.991564
+  [coverage] 2.1M tris 1.00 px: conservative raster, trivial PS               2.7003 ms         
+  [coverage] 2.1M tris 1.00 px: standard raster + area + append (centre-sample pixels only)       2.0183 ms         20.873505 M pixels touched by centre sampling vs 77.593619 M true fragments
+
+== Virtual shadow map lookup and fused shading floors (3840x2160) (after 1.5 s warm-up)
+  [vsm] VSM lookup 4K, coherent scene depth, sun, 1 taps                 0.0850 ms         0.010247 ns per light lookup, 0.010247 ns per tap
+  [vsm] VSM lookup 4K, coherent scene depth, sun + 1.5 local lights, 1 taps       0.1864 ms         0.008988 ns per light lookup, 0.008988 ns per tap
+  [vsm] VSM lookup 4K, coherent scene depth, sun, 5 taps                 0.1710 ms         0.020617 ns per light lookup, 0.004123 ns per tap
+  [vsm] VSM lookup 4K, coherent scene depth, sun + 1.5 local lights, 5 taps       0.6093 ms         0.029383 ns per light lookup, 0.005877 ns per tap
+  [vsm] VSM lookup 4K, coherent scene depth, sun, 9 taps                 0.2826 ms         0.034074 ns per light lookup, 0.003786 ns per tap
+  [vsm] VSM lookup 4K, coherent scene depth, sun + 1.5 local lights, 9 taps       1.0547 ms         0.050864 ns per light lookup, 0.005652 ns per tap
+  [vsm] VSM lookup 4K, scattered (worst) depth, sun, 5 taps              0.7762 ms         0.093580 ns per light lookup, 0.018716 ns per tap
+  [vsm] VSM lookup 4K, scattered (worst) depth, sun + 1.5 local lights, 5 taps       2.0716 ms         0.099901 ns per light lookup, 0.019980 ns per tap
+  [shade] shading 4K, fused: sun + 4 locals GGX, 3 shadowed x 5 VSM taps (in-kernel), 4 probes, froxel       2.4852 ms         0.299630 ns per pixel
+  [shade] shading 4K, fused: same, page-table entries prefetched before atlas taps       2.2804 ms         0.274938 ns per pixel
+  [shade] shading 4K, split: visibility from a 4 B/pixel buffer (separate VSM pass), sun + 4 locals, probes, froxel       0.3727 ms         0.044938 ns per pixel
+  [shade] shading 4K, split, no light loop (sun only) + probes + froxel       0.3799 ms         0.045802 ns per pixel
+  [shade] shading 4K, split, sun only + froxel (no probes)                 0.3574 ms         0.043086 ns per pixel
+  [shade] shading 4K, G-buffer in / out + sun only (memory floor of the kernel)       0.3471 ms         0.041852 ns per pixel
+  [shade] shading 4K, split: sun + 8 locals                                0.4260 ms         0.051358 ns per pixel
+  [shade] shading 4K, split: sun + 16 locals                               0.7209 ms         0.086914 ns per pixel
+  [shade] shading 4K, fused: sun + 8 locals (3 shadowed in-kernel)         2.3460 ms         0.282840 ns per pixel
+
+== MPM step floors (128^3 grid, quadratic B-spline, APIC, 8 particles per cell) (after 1.5 s warm-up)
+  [mpm] 1M particles: grid clear (128^3 x 16 B dense)                    0.0717 ms         
+  [mpm] 1M particles: block sort (histogram + prefix + scatter, 64 B particles)       0.9738 ms         
+  [mpm] 1M particles: P2G via global atomics (27 nodes x 4 channels), incl. clear       2.0562 ms         1.892578 ns per particle
+  [mpm] 1M particles: P2G via groupshared block accumulation + halo atomics, incl. clear       0.2263 ms         0.147461 ns per particle
+  [mpm] 1M particles: grid update (dense 128^3)                          0.0338 ms         sparse grids scale with active nodes (131072 here)
+  [mpm] 1M particles: G2P (27-node gather, APIC, 64 B write)             0.3604 ms         0.343750 ns per particle
+  [mpm] 1M particles: full step (clear + sort + block P2G + grid + G2P)       1.6271 ms         1.551758 ns per particle-step
+  [mpm] 2M particles: grid clear (128^3 x 16 B dense)                    0.0717 ms         
+  [mpm] 2M particles: block sort (histogram + prefix + scatter, 64 B particles)       2.1985 ms         
+  [mpm] 2M particles: P2G via global atomics (27 nodes x 4 channels), incl. clear       4.4237 ms         2.075195 ns per particle
+  [mpm] 2M particles: P2G via groupshared block accumulation + halo atomics, incl. clear       0.3656 ms         0.140137 ns per particle
+  [mpm] 2M particles: grid update (dense 128^3)                          0.0287 ms         sparse grids scale with active nodes (262144 here)
+  [mpm] 2M particles: G2P (27-node gather, APIC, 64 B write)             0.7281 ms         0.347168 ns per particle
+  [mpm] 2M particles: full step (clear + sort + block P2G + grid + G2P)       3.6219 ms         1.727051 ns per particle-step
+
+== Ray tracing (after 1.5 s warm-up)
+  [pso] raytracing state object create, 5 shaders (cpu)                 27.1168 ms         dxc 13.648000 ms
+  OMM path: NVAPI (driver exposes OMM without DXR 1.2)
+
+== Building ray-tracing scene (2 km terrain, 100k trees, 3k buildings, 1M grass; card foliage: 35 cm leaves x 1.5k, 30 cm grass cards)
+  [rtas] BLAS build terrain 2.1M tris (fast trace)                        3.4396 ms         139 MB
+  [rtas] BLAS build city 36k tris                                         0.3144 ms         
+  bird-curve decode: 256 indices, 0 missing, 256 distinct cells
+  leaf alpha coverage 0.37, OMM level 4: 15.6% microtriangles unknown (need any-hit), 84.4% resolved
+  [rtas] BLAS build tree 3k tris (fast trace)                             0.2540 ms         229 KB
+  [rtas] BLAS build tree with OMM leaves (fast trace)                     0.2591 ms         260 KB
+  [rtas] BLAS full build 60k-tri skinned mesh (allow update), per mesh, 64 in flight      91.8720 us         3710 KB each
+  [rtas] BLAS refit 60k-tri skinned mesh, per mesh, 64 in flight         18.4640 us         256 characters = 4.726784 ms (expected, linear)
+  [rtas] TLAS build 100k instances (fast trace)                           0.2939 ms         28 MB
+  [rtas] TLAS build 100k instances (fast build)                           0.2949 ms         
+  [rtas] TLAS build 100k instances (fast trace + allow update)            0.2959 ms         
+  [rtas] TLAS refit 100k instances                                        0.0532 ms         
+  [rtas] TLAS build 1.1M instances (fast trace)                           2.9757 ms         212 MB
+  [rtas] TLAS build 1.1M instances (fast trace + allow update)            3.2276 ms         
+  [rtas] TLAS refit 1.1M instances                                        1.4080 ms         
+  [rays] sanity: primary alpha-tested hit fraction                        1.0000 fraction   
+  [rays] RayQuery opaque closest | incoherent long (canopy origins, sphere dirs, 2 km)       1.9312 Grays/s    2.171904 ms for 4 M rays
+  [rays] RayQuery alpha-test any-hit loop | incoherent long (canopy origins, sphere dirs, 2 km)       1.1643 Grays/s    3.602432 ms for 4 M rays
+  [rays] DispatchRays opaque | incoherent long (canopy origins, sphere dirs, 2 km)       2.0348 Grays/s    2.061312 ms
+  [rays] DispatchRays alpha any-hit shader | incoherent long (canopy origins, sphere dirs, 2 km)       1.6801 Grays/s    2.496512 ms
+  [rays] DispatchRays OMM 4-state (unknown -> any-hit) | incoherent long (canopy origins, sphere dirs, 2 km)       1.8459 Grays/s    2.272256 ms
+  [rays] DispatchRays OMM forced 2-state (no any-hit) | incoherent long (canopy origins, sphere dirs, 2 km)       2.0792 Grays/s    2.017280 ms
+  [rays] RayQuery opaque closest | incoherent short (same, tMax 2 m)       3.3879 Grays/s    1.238016 ms for 4 M rays
+  [rays] RayQuery alpha-test any-hit loop | incoherent short (same, tMax 2 m)       2.2630 Grays/s    1.853440 ms for 4 M rays
+  [rays] DispatchRays opaque | incoherent short (same, tMax 2 m)          3.3166 Grays/s    1.264640 ms
+  [rays] DispatchRays alpha any-hit shader | incoherent short (same, tMax 2 m)       2.5826 Grays/s    1.624064 ms
+  [rays] DispatchRays OMM 4-state (unknown -> any-hit) | incoherent short (same, tMax 2 m)       3.5250 Grays/s    1.189888 ms
+  [rays] DispatchRays OMM forced 2-state (no any-hit) | incoherent short (same, tMax 2 m)       3.6280 Grays/s    1.156096 ms
+  [rays] RayQuery opaque closest | primary 3840x2160 camera               2.9573 Grays/s    2.804736 ms for 8 M rays
+  [rays] RayQuery alpha-test any-hit loop | primary 3840x2160 camera       3.0999 Grays/s    2.675712 ms for 8 M rays
+  [rays] DispatchRays opaque | primary 3840x2160 camera                   3.1530 Grays/s    2.630656 ms
+  [rays] DispatchRays alpha any-hit shader | primary 3840x2160 camera       3.1653 Grays/s    2.620416 ms
+  [rays] DispatchRays OMM 4-state (unknown -> any-hit) | primary 3840x2160 camera       3.1383 Grays/s    2.642944 ms
+  [rays] DispatchRays OMM forced 2-state (no any-hit) | primary 3840x2160 camera       3.1310 Grays/s    2.649088 ms
+  [rays] RayQuery opaque closest | sun shadow from terrain (0.25 deg jitter)       1.4577 Grays/s    2.877440 ms for 4 M rays
+  [rays] RayQuery opaque first-hit | sun shadow from terrain (0.25 deg jitter)       3.2151 Grays/s    1.304576 ms for 4 M rays
+  [rays] RayQuery alpha-test any-hit loop | sun shadow from terrain (0.25 deg jitter)       0.8605 Grays/s    4.874240 ms for 4 M rays
+  [rays] RayQuery alpha-test first-hit | sun shadow from terrain (0.25 deg jitter)       1.6417 Grays/s    2.554880 ms for 4 M rays
+  [rays] DispatchRays opaque | sun shadow from terrain (0.25 deg jitter)       2.7307 Grays/s    1.536000 ms
+  [rays] DispatchRays alpha any-hit shader | sun shadow from terrain (0.25 deg jitter)       3.1387 Grays/s    1.336320 ms
+  [rays] DispatchRays OMM 4-state (unknown -> any-hit) | sun shadow from terrain (0.25 deg jitter)       2.9876 Grays/s    1.403904 ms
+  [rays] DispatchRays OMM forced 2-state (no any-hit) | sun shadow from terrain (0.25 deg jitter)       2.9553 Grays/s    1.419264 ms
+  [rays] DispatchRays alpha any-hit shader, OMM-enabled pipeline (flag cost) | incoherent long (canopy origins, sphere dirs, 2 km)       1.8092 Grays/s    2.318336 ms
+  [rays] RayQuery opaque closest, +1M grass | incoherent long (canopy origins, sphere dirs, 2 km)       1.7060 Grays/s    2.458624 ms for 4 M rays
+  [rays] RayQuery alpha any-hit loop, +1M grass | incoherent long (canopy origins, sphere dirs, 2 km)       1.0380 Grays/s    4.040704 ms for 4 M rays
+  [rays] RayQuery opaque first-hit, +1M grass | sun shadow from terrain (0.25 deg jitter)       2.6273 Grays/s    1.596416 ms for 4 M rays
+  [rays] RayQuery alpha first-hit, +1M grass | sun shadow from terrain (0.25 deg jitter)       1.4792 Grays/s    2.835456 ms for 4 M rays
+  [rays] RayQuery opaque closest, +1M grass | primary 3840x2160 camera       2.7163 Grays/s    3.053568 ms for 8 M rays
+  [rays] RayQuery no-flags, non-opaque leaves ignored (traversal only) | incoherent long (canopy origins, sphere dirs, 2 km)       2.9876 Grays/s    1.403904 ms for 4 M rays
+  [rays] DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | incoherent long (canopy origins, sphere dirs, 2 km)       1.8998 Grays/s    2.207744 ms
+  [rays] DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | primary 3840x2160 camera       3.1070 Grays/s    2.669568 ms
+  [rays] DispatchRays divergent hit shading (16 paths, 256 MB textures), no SER | incoherent short (same, tMax 2 m)       3.1654 Grays/s    1.325056 ms
+  [rays] DispatchRays divergent hit shading, NVAPI SER (reorder by material) | incoherent long (canopy origins, sphere dirs, 2 km)       1.7210 Grays/s    2.437120 ms
+  [rays] DispatchRays divergent hit shading, NVAPI SER (reorder by material) | primary 3840x2160 camera       2.7654 Grays/s    2.999296 ms
+  [rays] DispatchRays divergent hit shading, NVAPI SER (reorder by material) | incoherent short (same, tMax 2 m)       2.7902 Grays/s    1.503232 ms
+  [rays] DispatchRays trivial hit, NVAPI SER (reorder overhead) | incoherent long (canopy origins, sphere dirs, 2 km)       1.7217 Grays/s    2.436096 ms
+
+== PSO compile time vs DXIL size (unique constants defeat the driver cache; 'warm' recreates the same blob)
+  [pso] compute PSO, 32 stages, DXIL 14 KB: cold create                  1.5547 ms         dxc 21.967400 ms, warm recreate 1.322300 ms, 0.110803 ms/KB
+  [pso] compute PSO, 128 stages, DXIL 53 KB: cold create                 4.0253 ms         dxc 93.280300 ms, warm recreate 3.607200 ms, 0.076479 ms/KB
+  [pso] compute PSO, 512 stages, DXIL 205 KB: cold create               17.3499 ms         dxc 529.837700 ms, warm recreate 15.269700 ms, 0.084711 ms/KB
+  [pso] compute PSO, 2048 stages, DXIL 871 KB: cold create              63.5380 ms         dxc 4023.389100 ms, warm recreate 66.319900 ms, 0.072975 ms/KB
+  [pso] compute PSO, 8192 stages, DXIL 3501 KB: cold create            302.4972 ms         dxc 36963.284100 ms, warm recreate 297.356300 ms, 0.086393 ms/KB
+  stopping: dxc + cold create exceeded 15 s (the next size would take minutes)
+
+== Async compute overlap (wall clock; raster on direct queue, compute on compute queue) (after 1.5 s warm-up)
+  [async] raster 16.7M tris alone (wall)                                   1.4356 ms         
+  [async] fma compute alone (wall)                                         5.8348 ms         
+  [async] raster + fma concurrent (wall)                                   6.8701 ms         serial sum 7.270400 ms, overlap gain 5.505887 %
+  [async] bandwidth read alone (wall)                                      1.6135 ms         
+  [async] raster + bandwidth read concurrent (wall)                        3.0518 ms         serial sum 3.049100 ms, overlap gain -0.088550 %
