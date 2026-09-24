@@ -72,3 +72,9 @@ target_include_directories(unx_test_reference PRIVATE PathTracer/src)
 target_link_libraries(unx_test_reference PRIVATE unx_reference unx_scenegen Unx::Embree)
 target_compile_definitions(unx_test_reference PRIVATE UNX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 c_deploy_embree(unx_test_reference)
+
+# Census cross-check against the microbench's GPU census (same scene rebuilt from the same RNG stream).
+add_executable(unx_test_census_replica PathTracer/Tests/CensusReplica.cpp)
+unx_target_defaults(unx_test_census_replica)
+target_link_libraries(unx_test_census_replica PRIVATE unx_reference)
+c_deploy_embree(unx_test_census_replica)
