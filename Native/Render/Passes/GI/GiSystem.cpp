@@ -28,7 +28,7 @@ uint32_t asU(float f)
 // Cache buffer layout (GiCache.hlsli header fields 4..11, 24..27).
 struct Layout
 {
-    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, end;
+    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, end;
 };
 
 Layout layoutOf(const GiSettings& s)
@@ -45,7 +45,8 @@ Layout layoutOf(const GiSettings& s)
     l.hitStamp = l.selected + s.capacity * 4;
     l.hitList = l.hitStamp + s.capacity * 4;
     l.shTable = l.hitList + 2 * s.capacity * 4;
-    l.end = l.shTable + 64 * 36;
+    l.mapOwner = l.shTable + 64 * 36;
+    l.end = l.mapOwner + s.capacity * 4;
     return l;
 }
 
@@ -99,6 +100,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     // Fixed by the kernels (GiCache.hlsli, GiProbeGather.hlsl, GiInternal.hlsli probe offsets).
     if (q.integer("gi.cache_octahedral_texels") != 8) fail("gi.cache_octahedral_texels must be 8 (GI_TEXELS)");
     if (q.integer("gi.near_occlusion_taps") != 16) fail("gi.near_occlusion_taps must be 16 (GiProbeGather)");
+    if (s.tableSlots < s.capacity) fail("gi.cache table slots (%u) must be >= capacity (%u): GiTableClear resets the map owners", s.tableSlots, s.capacity);
     if (s.probeSpacing != 8) fail("gi.screen_probe_spacing_px must be 8 (3-bit probe offsets, 4 candidate points)");
     if (s.capacity == 0 || s.raysPerFrame < 64 || s.historyMax == 0) fail("gi: zero capacity, rays or history");
     if (s.maxLevel > 31) fail("gi.cache_levels_max must be <= 31 (5-bit key field)");
@@ -160,6 +162,7 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[27] = l.shTable;
     h[30] = m_settings.jacobiUpdates;
     h[31] = m_settings.historyMax;
+    h[37] = l.mapOwner;  // GI_H_MAP_OWNER
     for (uint32_t e = 0; e < m_settings.capacity; ++e) head[l.freeList / 4 + e] = m_settings.capacity - 1 - e;  // pops 0, 1, 2 ...
     for (uint32_t t = 0; t < m_settings.tableSlots; ++t) head[l.table / 4 + t * 4 + 2] = 0xFFFFFFFFu;
     std::memcpy(&tail[(l.shTable - l.hitStamp) / 4], shTable.data(), shTable.size() * 4);
@@ -187,7 +190,11 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
          m_settings.raysPerFrame, m_settings.updatesPerFrame);
 }
 
-GiSystem::~GiSystem() { m_device.deferRelease(m_cache); }
+GiSystem::~GiSystem()
+{
+    m_device.deferRelease(m_cache);
+    m_device.deferRelease(m_dispatchSignature);
+}
 
 void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& rays)
 {
@@ -284,32 +291,68 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
               });
     compute("r.gi.integrate", "Passes/GI/GiIntegrate", groups(s.updatesPerFrame), { s.updatesPerFrame });
 
+    // Map owner list (count, then probe indices) and its indirect dispatch arguments, reset by the gather.
+    const BufferRef owners = g.createBuffer({ "GI map owners", 4ull + 4ull * probesX * probesY, 0 });
+    const BufferRef mapArgs = g.createBuffer({ "GI map dispatch args", 16, 0 });
     g.addPass("r.gi.gather", QueueType::Compute,
               [&](PassBuilder& b) {
-                  b.use(cache, Use::SrvCompute);
+                  b.use(cache, Use::UavCompute);  // radiance map owners
                   b.use(depth, Use::SrvCompute);
                   b.use(gbuffer, Use::SrvCompute);
                   b.use(probes, Use::UavCompute);
+                  b.use(owners, Use::UavCompute);
+                  b.use(mapArgs, Use::UavCompute);
               },
-              [&shaders, cache, depth, gbuffer, probes, probesX, probesY, frameConstants, s, main](PassContext& c) {
-                  const uint32_t k[12] = { c.srv(cache), c.srv(depth), c.srv(gbuffer), c.uav(probes), probesX, probesY, main.view.width, main.view.height,
-                                           s.probeSpacing, asU(s.nearRadius), 0, 0 };
+              [&shaders, cache, depth, gbuffer, probes, owners, mapArgs, probesX, probesY, frameConstants, s, main](PassContext& c) {
+                  const uint32_t k[12] = { c.uav(cache), c.srv(depth), c.srv(gbuffer), c.uav(probes), probesX, probesY, main.view.width, main.view.height,
+                                           s.probeSpacing, asU(s.nearRadius), c.uav(owners), c.uav(mapArgs) };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiProbeGather"));
                   c.computeConstants(k, 12);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
               });
+    g.addPass("r.gi.mapowners", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(cache, Use::SrvCompute);
+                  b.use(probes, Use::UavCompute);
+                  b.use(owners, Use::UavCompute);
+                  b.use(mapArgs, Use::UavCompute);
+              },
+              [&shaders, cache, probes, owners, mapArgs, probesX, probesY](PassContext& c) {
+                  const uint32_t k[8] = { c.srv(cache), c.uav(probes), probesX, probesY, c.uav(owners), c.uav(mapArgs), 0, 0 };
+                  c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiProbeMapOwners"));
+                  c.computeConstants(k, 8);
+                  c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
+              });
+    ID3D12CommandSignature* signature = dispatchSignature();
     g.addPass("r.gi.maps", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::SrvCompute);
                   b.use(probes, Use::UavCompute);
+                  b.use(owners, Use::SrvCompute);
+                  b.use(mapArgs, Use::IndirectArgs);
               },
-              [&shaders, cache, probes, probesX, probesY](PassContext& c) {
-                  const uint32_t k[4] = { c.srv(cache), c.uav(probes), probesX, probesY };
+              [&shaders, cache, probes, owners, mapArgs, probesX, probesY, signature](PassContext& c) {
+                  const uint32_t k[8] = { c.srv(cache), c.uav(probes), probesX, probesY, c.srv(owners), 0, 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiProbeMaps"));
-                  c.computeConstants(k, 4);
-                  c.cmd->Dispatch(probesX, probesY, 1);
+                  c.computeConstants(k, 8);
+                  c.cmd->ExecuteIndirect(signature, 1, c.resource(mapArgs), 0, nullptr, 0);
               });
+}
+
+ID3D12CommandSignature* GiSystem::dispatchSignature()
+{
+    if (!m_dispatchSignature)
+    {
+        D3D12_INDIRECT_ARGUMENT_DESC a{};
+        a.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        D3D12_COMMAND_SIGNATURE_DESC d{};
+        d.ByteStride = 16;
+        d.NumArgumentDescs = 1;
+        d.pArgumentDescs = &a;
+        check(m_device.d3d()->CreateCommandSignature(&d, nullptr, IID_PPV_ARGS(&m_dispatchSignature)), "GI dispatch signature");
+    }
+    return m_dispatchSignature.Get();
 }
 
 GiStats GiSystem::readStats()

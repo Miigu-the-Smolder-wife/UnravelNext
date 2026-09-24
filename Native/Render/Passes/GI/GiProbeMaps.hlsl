@@ -1,9 +1,9 @@
 // unx-kernel: cs_6_6 main
-// Screen probe radiance maps (K reflection path, ScreenProbes.hlsli), one 64-thread group per probe, thread = texel:
-// the 8 x 8 incident radiance of the cache entry GiProbeGather chose (block texel (5, 3).x), RGB9E5, with the 4 x 4 and
-// 2 x 2 solid-angle-weighted mips and the map's frame normal. Texel-parallel so every load of the entry is in flight at
-// once (the per-probe serial copy cost 0.18 ms at 4K [measured]).
-// P[0] = { cache SRV (raw), probes UAV, probesX, probesY }
+// Screen probe radiance maps (K reflection path, ScreenProbes.hlsli), one 64-thread group per map owner
+// (GiProbeMapOwners' list, indirect dispatch 512 x n), thread = texel: the 8 x 8 incident radiance of the cache entry
+// GiProbeGather chose (block texel (5, 3).x), RGB9E5, with the 4 x 4 and 2 x 2 solid-angle-weighted mips, and the
+// header texel (4, 3) = { map frame normal, own block }. A copy per probe cost 0.17 ms at 4K, bandwidth-bound [measured].
+// P[0] = { cache SRV (raw), probes UAV, probesX, probesY }, P[1] = { owner list SRV (raw: count, probe indices), 0, 0, 0 }
 #include "Passes/GI/GiInternal.hlsli"
 
 groupshared float3 g_radiance[64];
@@ -11,9 +11,13 @@ groupshared float g_weight[64];
 groupshared uint g_packed[64];
 
 [numthreads(64, 1, 1)]
-void main(uint2 probe : SV_GroupID, uint texel : SV_GroupIndex)
+void main(uint2 group : SV_GroupID, uint texel : SV_GroupIndex)
 {
-    if (probe.x >= P[0].z || probe.y >= P[0].w) return;
+    ByteAddressBuffer list = ResourceDescriptorHeap[P[1].x];
+    const uint index = group.y * 512 + group.x;
+    if (index >= list.Load(0)) return;
+    const uint probeIndex = list.Load(4 + index * 4);
+    const uint2 probe = uint2(probeIndex % P[0].z, probeIndex / P[0].z);
     ByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
     RWTexture2D<uint4> t = ResourceDescriptorHeap[P[0].y];
     const GiHeader h = giHeader(b);
@@ -65,6 +69,6 @@ void main(uint2 probe : SV_GroupID, uint texel : SV_GroupIndex)
     if (texel == 5)
     {
         const float3 n = entry != GI_ENTRY_PENDING ? giAnchorNormal(b, h, entry) : float3(0, 0, 1);
-        t[uint2(x + 4, y + 3)] = uint4(giPackNormal(n), 0, 0, 0);
+        t[uint2(x + 4, y + 3)] = uint4(giPackNormal(n), probe.x | (probe.y << 16), 0, 0);
     }
 }

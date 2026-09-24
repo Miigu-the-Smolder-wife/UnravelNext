@@ -59,6 +59,8 @@ private:
     Device& m_device;
     GiSettings m_settings;
     ComPtr<ID3D12Resource> m_cache;
+    ComPtr<ID3D12CommandSignature> m_dispatchSignature;  // one D3D12_DISPATCH_ARGUMENTS, 16 B stride (radiance maps)
+    ID3D12CommandSignature* dispatchSignature();
     uint64_t m_bytes = 0;
     float3 m_skyRadiance{}, m_sunIlluminance{};
     uint32_t m_epoch = 1, m_sceneRevision = 0;

@@ -13,7 +13,9 @@
 //   row 0: texels 0-3 = record (27 fp16 irradiance SH coefficients x GI_STORE_SCALE + fp16 linear depth, octahedral
 //          normal, occlusion unorm16 | pixel offset in the tile (3+3 bits) | valid), texel 4 = the 2 x 2 mip (RGB9E5 x 4)
 //   rows 1-2: the 8 x 8 map, 4 RGB9E5 texels per RGBA32 texel, row-major
-//   row 3: texels 0-3 = the 4 x 4 mip, texel 4.x = the map's frame normal (octahedral)
+//   row 3: texels 0-3 = the 4 x 4 mip, texel 4 = { the map's frame normal (octahedral), map block: probe x | y << 16 }
+// The map (rows 1-2, row 3 texels 0-3, row 0 texel 4) is written once per cache entry, in the block of the lowest probe
+// reading that entry; other probes' map texels are stale and are reached through texel (4, 3).y.
 // Last row, texel 0 = { spacing px, probesX, probesY, 0 }. Radiance values are x GI_STORE_SCALE (1/64).
 #ifndef UNX_GI_SCREENPROBES_HLSLI
 #define UNX_GI_SCREENPROBES_HLSLI
@@ -206,7 +208,9 @@ float3 screenProbeRadiance(ProbeSrvs s, uint2 pixel, float3 normal, float linear
     {
         if (fp.weight[k] <= 0) continue;
         const uint2 p = uint2(fp.probe[k]);
-        const float3 n = giProbeOctDecode(t.Load(int3(p.x * 8 + 4, p.y * 4 + 3, 0)).x);
+        const uint2 frame = t.Load(int3(p.x * 8 + 4, p.y * 4 + 3, 0)).xy;
+        const float3 n = giProbeOctDecode(frame.x);
+        const uint2 block = uint2(frame.y & 0xFFFFu, frame.y >> 16);
         const float sgn = n.z >= 0 ? 1.0 : -1.0;  // Duff et al. 2017 basis (GiCache.hlsli giBasis)
         const float a = -1.0 / (sgn + n.z);
         const float c = n.x * n.y * a;
@@ -215,7 +219,7 @@ float3 screenProbeRadiance(ProbeSrvs s, uint2 pixel, float3 normal, float linear
         const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
         const float3 v = local / (abs(local.x) + abs(local.y) + local.z);
         const float2 uv = float2(v.x + v.y, v.x - v.y) * 0.5 + 0.5;
-        const float3 r0 = giProbeMapBilinear(t, p, l0, uv), r1 = giProbeMapBilinear(t, p, l1, uv);
+        const float3 r0 = giProbeMapBilinear(t, block, l0, uv), r1 = giProbeMapBilinear(t, block, l1, uv);
         sum += fp.weight[k] * lerp(r0, r1, fl);
     }
     return sum * 64.0;  // GI_LOAD_SCALE

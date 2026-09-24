@@ -1,11 +1,13 @@
 // unx-kernel: cs_6_6 main
 // Screen probe fill (no rays): trilinear cache SH at the probe's surface point, the choice of the cache entry with the
-// largest trilinear weight as the probe's radiance map source (copied by GiProbeMaps), and near occlusion there: 16 fixed
+// largest trilinear weight as the probe's radiance map source (copied by GiProbeMaps once per entry: the lowest probe
+// index reading it owns the copy), and near occlusion there: 16 fixed
 // cosine-distributed hemisphere points within r = min(gi.near_occlusion_radius_m, cache cell edge) — occlusion below
 // the cache's own resolution only, so the cache (whose rays already see larger occluders) is not darkened twice.
 // A point is occluded when the depth buffer shows a surface in front of it closer than r along the view ray.
-// P[0] = { cache SRV (raw), depth SRV, gbuffer SRV, probes UAV }, P[1] = { probesX, probesY, width, height },
-// P[2] = { spacing, near occlusion radius (float bits), 0, 0 }; frame constants b1 = main view.
+// P[0] = { cache UAV (raw), depth SRV, gbuffer SRV, probes UAV }, P[1] = { probesX, probesY, width, height },
+// P[2] = { spacing, near occlusion radius (float bits), map owner list UAV, map dispatch args UAV } (reset here for
+// GiProbeMapOwners); frame constants b1 = main view.
 #include "GBuffer.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
 
@@ -43,9 +45,16 @@ void main(uint2 probe : SV_DispatchThreadID)
     const uint2 count = P[1].xy, size = P[1].zw;
     const uint spacing = P[2].x;
     RWTexture2D<uint4> probes = ResourceDescriptorHeap[P[0].w];
-    if (all(probe == 0)) probes[uint2(0, count.y * 4)] = uint4(spacing, count.x, count.y, 0);
+    if (all(probe == 0))
+    {
+        probes[uint2(0, count.y * 4)] = uint4(spacing, count.x, count.y, 0);
+        RWByteAddressBuffer list = ResourceDescriptorHeap[P[2].z];
+        RWByteAddressBuffer args = ResourceDescriptorHeap[P[2].w];
+        list.Store(0, 0u);
+        args.Store4(0, uint4(512, 0, 1, 0));
+    }
     if (probe.x >= count.x || probe.y >= count.y) return;
-    ByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
+    RWByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].y];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].z];
     const GiHeader h = giHeader(b);
@@ -65,6 +74,7 @@ void main(uint2 probe : SV_DispatchThreadID)
     uint mapEntry;
     giCacheShAt(b, h, p, n, c, mapEntry);
     probes[uint2(probe.x * 8 + 5, probe.y * 4 + 3)] = uint4(mapEntry, 0, 0, 0);  // radiance map source (GiProbeMaps)
+    if (mapEntry != GI_ENTRY_PENDING) b.InterlockedMin(b.Load(GI_H_MAP_OWNER) + mapEntry * 4, probe.y * count.x + probe.x);
     const float radius = min(asfloat(P[2].y), giCellSize(h, giLevel(h, p)));
     const float occlusion = nearOcclusion(depth, p + n * (1e-3 * linearDepth(d)), n, radius, probe.x * 7919u + probe.y * 104729u, size);
     giStoreProbe(probes, probe, c, linearDepth(d), n, occlusion, offset, true);
