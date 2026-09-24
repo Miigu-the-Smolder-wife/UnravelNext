@@ -6,3 +6,6 @@ g_sample_spacing_px = [1, 16]
 mirror_roughness_max = 0.14
 exact_set_min_hits = 64
 planar_max_wave_slope_deg = 2.0
+planar_views_max = 4                   # reflection cameras per frame (largest pixel counts); others use rays
+planar_min_pixels = 110000             # a plane gets a reflection camera from this many mirror pixels on it: design 2.6
+                                       # C_planar = A_r * 2.14 ms + 0.05 ms vs rays A_r * 6.0 ms -> 0.05 / 3.86 * 8.3 M px [expected]

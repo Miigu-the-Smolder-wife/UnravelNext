@@ -9,12 +9,35 @@
 #define REFL_K 0u
 #define REFL_M 1u
 #define REFL_G 2u
+#define REFL_PLANAR 3u  // planar mirror pixel: the reflection camera's colour (plane index in the spacing bits)
 #define REFL_NO_JOB 0xFFFFFFu
 
 uint reflPackMode(uint mode, uint spacingLog2, uint job) { return mode | (spacingLog2 << 2) | (job << 8); }
 uint reflMode(uint v) { return v & 3u; }
 uint reflSpacing(uint v) { return 1u << ((v >> 2) & 7u); }
 uint reflJob(uint v) { return v >> 8; }
+
+// Planar reflector candidates of this frame (ReflectionSystem's upload ring, raw SRV at a byte offset):
+// { candidates, views, pad x 2, 64 x { float4 plane, uint4 rect (x, y, width, height) } }; candidates [0, views) have a
+// reflection camera.
+struct ReflPlanar
+{
+    float4 plane;
+    uint4 rect;
+};
+uint2 reflPlanarCounts(uint srv, uint offset)  // candidates, views
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[srv];
+    return b.Load2(offset);
+}
+ReflPlanar reflPlanar(uint srv, uint offset, uint index)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[srv];
+    ReflPlanar p;
+    p.plane = asfloat(b.Load4(offset + 16 + index * 32));
+    p.rect = b.Load4(offset + 32 + index * 32);
+    return p;
+}
 
 // A job = a pixel that traces: an M pixel (1 ray) or a G sample (4 rays). Encoded as x | y << 16.
 uint reflPackPixel(uint2 p) { return p.x | (p.y << 16); }

@@ -279,45 +279,4 @@ float giMapTexelWeight(uint2 texel, uint n)
     return 1.0 / (l * l * l);
 }
 
-// Probe radiance map: the 64 texels of a cache entry (x GI_STORE_SCALE, as stored) around the entry's normal, with the
-// 4 x 4 and 2 x 2 solid-angle-weighted mips (ScreenProbes.hlsli layout). entry = GI_ENTRY_PENDING stores zeros.
-template <typename B>
-void giStoreProbeMap(RWTexture2D<uint4> t, uint2 probe, B b, GiHeader h, uint entry)
-{
-    const uint x = probe.x * 8, y = probe.y * 4;
-    float3 m1[16], m2[4];
-    float w1[16], w2[4];
-    [unroll] for (uint i = 0; i < 16; ++i) { m1[i] = 0; w1[i] = 0; }
-    [unroll] for (uint i = 0; i < 4; ++i) { m2[i] = 0; w2[i] = 0; }
-    uint row[4];
-    [loop] for (uint k = 0; k < 16; ++k)  // 16 RGBA32 texels of the 8 x 8 map, 4 radiance texels each
-    {
-        [unroll] for (uint j = 0; j < 4; ++j)
-        {
-            const uint index = 4 * k + j;
-            const uint2 texel = uint2(index % 8, index / 8);
-            float3 radiance = 0;
-            if (entry != GI_ENTRY_PENDING)
-            {
-                const uint2 v = b.Load2(h.offTexels + (entry * GI_TEXEL_COUNT + index) * 8);
-                radiance = float3(f16tof32(v.x), f16tof32(v.x >> 16), f16tof32(v.y));
-            }
-            row[j] = giPackRgb9e5(radiance);
-            const float w = giMapTexelWeight(texel, 8);
-            const uint c1 = (texel.y / 2) * 4 + texel.x / 2, c2 = (texel.y / 4) * 2 + texel.x / 4;
-            m1[c1] += w * radiance;
-            w1[c1] += w;
-            m2[c2] += w * radiance;
-            w2[c2] += w;
-        }
-        t[uint2(x + k % 8, y + 1 + k / 8)] = uint4(row[0], row[1], row[2], row[3]);
-    }
-    [unroll] for (uint k = 0; k < 4; ++k)
-        t[uint2(x + k, y + 3)] = uint4(giPackRgb9e5(m1[4 * k] / w1[4 * k]), giPackRgb9e5(m1[4 * k + 1] / w1[4 * k + 1]), giPackRgb9e5(m1[4 * k + 2] / w1[4 * k + 2]),
-                                       giPackRgb9e5(m1[4 * k + 3] / w1[4 * k + 3]));
-    t[uint2(x + 4, y)] = uint4(giPackRgb9e5(m2[0] / w2[0]), giPackRgb9e5(m2[1] / w2[1]), giPackRgb9e5(m2[2] / w2[2]), giPackRgb9e5(m2[3] / w2[3]));
-    const float3 n = entry != GI_ENTRY_PENDING ? giAnchorNormal(b, h, entry) : float3(0, 0, 1);
-    t[uint2(x + 4, y + 3)] = uint4(giPackNormal(n), 0, 0, 0);
-}
-
 #endif

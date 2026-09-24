@@ -12,10 +12,13 @@
 // P[0] = { depth SRV, gbuffer SRV, lobe tiles SRV (UNX_NONE = none), distance history SRV }
 // P[1] = { mode UAV, jobs UAV, counter UAV (uint at 0), reflection UAV }
 // P[2] = { K threshold (float radians), mirror roughness max (float), focal length px (float), rows H }
-// P[3] = { width, height, 0, 0 }; frame constants b1 = main view.
+// P[3] = { width, height, planar SRV (raw), planar byte offset }, P[4].x = planar counts UAV; frame constants b1 = main view.
+// Mirror-smooth pixels on a planar candidate (inside its rectangle, on its plane, facing along its normal) are counted per
+// candidate (the CPU's raster-or-rays choice framesInFlight frames later) and are REFL_PLANAR (no job) when it has a camera.
 #include "Passes/Reflection/ReflectionInternal.hlsli"
 
 groupshared uint g_any;
+groupshared uint g_planarCounts[64];
 
 [numthreads(8, 8, 1)]
 void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : SV_GroupIndex)
@@ -28,6 +31,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
         if (lobes.Load(int3(tile, 0)) * 3.14159265 - 3.14159265 / 255.0 >= kThreshold) return;
     }
     if (lane == 0) g_any = 0;
+    g_planarCounts[lane] = 0;
     GroupMemoryBarrierWithGroupSync();
     const uint2 size = P[3].xy;
     const uint2 pixel = tile * 8 + local;
@@ -43,7 +47,21 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
     if (all(pixel < size))
     {
         const ReflSurface s = reflSurface(depth, gbuffer, pixel);
-        if (s.valid)
+        const uint2 planar = s.valid && s.roughness <= asfloat(P[2].y) ? reflPlanarCounts(P[3].z, P[3].w) : uint2(0, 0);
+        [loop] for (uint k = 0; k < planar.x; ++k)
+        {
+            const ReflPlanar pl = reflPlanar(P[3].z, P[3].w, k);
+            if (any(pixel < pl.rect.xy) || any(pixel >= pl.rect.xy + pl.rect.zw)) continue;
+            if (abs(dot(pl.plane.xyz, s.position) + pl.plane.w) > 2e-3 * s.linearDepth + 1e-3 || dot(pl.plane.xyz, s.normal) < 0.999) continue;
+            InterlockedAdd(g_planarCounts[k], 1u);
+            if (k < planar.y)
+            {
+                mode = REFL_PLANAR;
+                spacingLog2 = k;
+            }
+            break;
+        }
+        if (s.valid && mode == REFL_K)
         {
             const float lobe = reflectionLobeHalfAngle(s.roughness, dot(s.normal, s.view));
             if (lobe < kThreshold)
@@ -71,10 +89,23 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
     if (WaveIsFirstLane() && count > 0) counter.InterlockedAdd(0, count, base);
     base = WaveReadLaneFirst(base);
     const uint index = job ? base + WavePrefixCountBits(job) : REFL_NO_JOB;
+    // Statistics (bytes 4, 8, 12 of the argument buffer): M jobs, G jobs, G pixels.
+    const uint mJobs = WaveActiveCountBits(job && mode == REFL_M), gJobs = WaveActiveCountBits(job && mode == REFL_G), gPixels = WaveActiveCountBits(mode == REFL_G);
+    if (WaveIsFirstLane())
+    {
+        if (mJobs) counter.InterlockedAdd(4, mJobs);
+        if (gJobs) counter.InterlockedAdd(8, gJobs);
+        if (gPixels) counter.InterlockedAdd(12, gPixels);
+    }
     if (job) jobs[index] = reflPackPixel(pixel);
     if (all(pixel < size)) modes[pixel] = reflPackMode(mode, spacingLog2, index);
     if (mode != REFL_K) g_any = 1;
     GroupMemoryBarrierWithGroupSync();
+    if (g_planarCounts[lane] != 0)
+    {
+        RWByteAddressBuffer counts = ResourceDescriptorHeap[P[4].x];
+        counts.InterlockedAdd(lane * 4, g_planarCounts[lane]);
+    }
     if (lane == 0 && g_any != 0)
     {
         RWTexture2D<float4> reflection = ResourceDescriptorHeap[P[1].w];

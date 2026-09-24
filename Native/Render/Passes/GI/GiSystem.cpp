@@ -299,6 +299,17 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
               });
+    g.addPass("r.gi.maps", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(cache, Use::SrvCompute);
+                  b.use(probes, Use::UavCompute);
+              },
+              [&shaders, cache, probes, probesX, probesY](PassContext& c) {
+                  const uint32_t k[4] = { c.srv(cache), c.uav(probes), probesX, probesY };
+                  c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiProbeMaps"));
+                  c.computeConstants(k, 4);
+                  c.cmd->Dispatch(probesX, probesY, 1);
+              });
 }
 
 GiStats GiSystem::readStats()

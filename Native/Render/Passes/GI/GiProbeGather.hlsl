@@ -1,6 +1,6 @@
 // unx-kernel: cs_6_6 main
-// Screen probe fill (no rays): trilinear cache SH at the probe's surface point, the radiance map of the cache entry with
-// the largest trilinear weight (K reflection path, ScreenProbes.hlsli), and near occlusion there: 16 fixed
+// Screen probe fill (no rays): trilinear cache SH at the probe's surface point, the choice of the cache entry with the
+// largest trilinear weight as the probe's radiance map source (copied by GiProbeMaps), and near occlusion there: 16 fixed
 // cosine-distributed hemisphere points within r = min(gi.near_occlusion_radius_m, cache cell edge) — occlusion below
 // the cache's own resolution only, so the cache (whose rays already see larger occluders) is not darkened twice.
 // A point is occluded when the depth buffer shows a surface in front of it closer than r along the view ray.
@@ -56,7 +56,7 @@ void main(uint2 probe : SV_DispatchThreadID)
     {
         [unroll] for (uint k = 0; k < 9; ++k) c[k] = 0;
         giStoreProbe(probes, probe, c, 0, float3(0, 0, 1), 1, offset, false);
-        giStoreProbeMap(probes, probe, b, h, GI_ENTRY_PENDING);
+        probes[uint2(probe.x * 8 + 5, probe.y * 4 + 3)] = uint4(GI_ENTRY_PENDING, 0, 0, 0);  // radiance map source (GiProbeMaps)
         return;
     }
     const uint2 pixel = probe * spacing + offset;
@@ -64,7 +64,7 @@ void main(uint2 probe : SV_DispatchThreadID)
     const float3 n = decodeGBuffer(gbuffer.Load(int3(pixel, 0))).normal;
     uint mapEntry;
     giCacheShAt(b, h, p, n, c, mapEntry);
-    giStoreProbeMap(probes, probe, b, h, mapEntry);
+    probes[uint2(probe.x * 8 + 5, probe.y * 4 + 3)] = uint4(mapEntry, 0, 0, 0);  // radiance map source (GiProbeMaps)
     const float radius = min(asfloat(P[2].y), giCellSize(h, giLevel(h, p)));
     const float occlusion = nearOcclusion(depth, p + n * (1e-3 * linearDepth(d)), n, radius, probe.x * 7919u + probe.y * 104729u, size);
     giStoreProbe(probes, probe, c, linearDepth(d), n, occlusion, offset, true);

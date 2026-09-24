@@ -97,6 +97,7 @@ int main(int argc, char** argv)
             Constants constants = createConstants(device, opt.framesInFlight);
             const ViewDesc view = ViewDesc::fromCamera(s.cameras[cameraIndex], res.width, res.height, float4x4{});
             gi::GiSystem* giSystem = nullptr;
+            refl::ReflectionSystem* reflSystem = nullptr;
             HarnessResult r = harness.run(res, opt, [&](RenderGraph& graph, const Resolution&, uint64_t f) {
                 FrameContext frame;
                 frame.frameIndex = f;
@@ -163,7 +164,8 @@ int main(int argc, char** argv)
                 gi::GiSystem& gi = gi::GiSystem::get(fc);
                 giSystem = &gi;
                 gi.record(fc, main, rays);
-                refl::ReflectionSystem::get(fc).record(fc, main, rays);
+                reflSystem = &refl::ReflectionSystem::get(fc);
+                reflSystem->record(fc, main, rays);
                 const TextureRef probes = main.screenProbes, reflection = main.reflection;
                 graph.addPass("standin.consume", QueueType::Compute, [&](PassBuilder& b) {
                     b.use(probes, Use::SrvCompute);
@@ -179,6 +181,14 @@ int main(int argc, char** argv)
             logf("R %s: GI %.3f ms (trace %.3f ms = %.2f G rays/s incl. hit shading), acceleration structures %.3f ms; stand-in primary visibility %.3f ms (not R)\n",
                  res.name.c_str(), giMs, traceMs, traceMs > 0 ? gi::GiSettings::fromQuality(quality).updatesPerFrame * 64 / (traceMs * 1e-3) / 1e9 : 0, asMs,
                  r.passMs.count("standin.primary") ? r.passMs.at("standin.primary").median : 0);
+            if (reflSystem)
+            {
+                const refl::ReflectionSystem::Stats rs = reflSystem->readStats();
+                logf("R %s: reflection jobs %u (M %u = rays %u; G samples %u = rays %u), G pixels %u\n", res.name.c_str(), rs.jobs, rs.mirrorJobs, rs.mirrorJobs, rs.glossyJobs,
+                     rs.glossyJobs * reflSystem->settings().raysPerSample, rs.glossyPixels);
+                logf("R %s: planar candidates %u visible, largest plane %u mirror pixels (camera from %u), %u views (no renderView in this gate), CPU %.3f ms\n",
+                     res.name.c_str(), rs.planarCandidates, rs.planarLargestPixels, reflSystem->settings().planarMinPixels, rs.planarViews, rs.planarSelectMs);
+            }
             if (giSystem)
             {
                 const gi::GiStats st = giSystem->readStats();

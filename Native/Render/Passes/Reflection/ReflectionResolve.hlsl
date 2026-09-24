@@ -5,8 +5,9 @@
 //   G: the samples of its spacing's global grid around it (up to 4, in any marked tile), weighted by bilinear position,
 //      distance to the pixel's tangent plane and normal agreement; a = 0 when none agrees (K fallback, counted).
 // Also stores the reflection hit distance for next frame's G spacing (distance history, R16F).
-// P[0] = { mode SRV, results SRV, depth SRV, gbuffer SRV }, P[1] = { reflection UAV, history UAV, rows H, 0 }
-// P[2] = { width, height, 0, 0 }; frame constants b1 = main view.
+// Planar mirror pixels read their reflection camera's colour at (pixel - rectangle origin), divided by the exposure.
+// P[0] = { mode SRV, results SRV, depth SRV, gbuffer SRV }, P[1] = { reflection UAV, history UAV, rows H, planar SRV }
+// P[2] = { width, height, planar byte offset, 0 }, P[3] = planar colour SRVs; frame constants b1 = main view.
 #include "Passes/Reflection/ReflectionInternal.hlsli"
 
 [numthreads(8, 8, 1)]
@@ -28,6 +29,14 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     if (mode == REFL_K)
     {
         reflection[pixel] = float4(0, 0, 0, 0);
+        return;
+    }
+    if (mode == REFL_PLANAR)
+    {
+        const uint k = (m >> 2) & 7u;
+        const ReflPlanar pl = reflPlanar(P[1].w, P[2].z, k);
+        Texture2D<float4> colour = ResourceDescriptorHeap[P[3][k]];
+        reflection[pixel] = float4(colour.Load(int3(pixel - pl.rect.xy, 0)).rgb / g_exposure, 1);
         return;
     }
     if (mode == REFL_M)
