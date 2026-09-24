@@ -13,10 +13,16 @@ namespace unx::render
 {
 class GpuProfiler;
 
-// How a pass touches a resource. Write uses (Uav*, RenderTarget, DepthWrite, CopyDst) are read-modify-write.
+// How a pass touches a resource. Write uses (Uav*, RenderTarget, DepthWrite, CopyDst, AccelerationStructureWrite,
+// AccelerationStructureScratch) are read-modify-write.
 // UavComputeDisjoint: the pass writes a region no other pass of the same run touches (tile-classified per-class
 // material/shading dispatches, per-cascade ranges). Consecutive disjoint writers of a resource need no barrier between
 // them; the first one still waits for earlier accesses and the next other access waits for all of them.
+// SrvGraphics/UavGraphics synchronise with every shader stage (D3D12_BARRIER_SYNC_ALL_SHADING), which includes ray
+// tracing shaders: DispatchRays passes declare their textures and buffers with them.
+// AccelerationStructure*: buffers only, no views (the owner creates the AS SRV). The result buffers are created by
+// their owner with D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE and imported; a pass may declare Write and
+// Read of the same AS buffer (in-place refit).
 enum class Use : uint8_t
 {
     SrvCompute,
@@ -30,6 +36,10 @@ enum class Use : uint8_t
     IndirectArgs,
     CopySrc,
     CopyDst,
+    AccelerationStructureWrite,    // build / refit destination (BLAS, TLAS)
+    AccelerationStructureRead,     // traversal (DispatchRays, RayQuery), BLAS read by a TLAS build, refit source
+    AccelerationStructureInput,    // build inputs: deformed vertices, index buffers, instance descriptors
+    AccelerationStructureScratch,  // build scratch (transients get ALLOW_UNORDERED_ACCESS)
 };
 
 struct TextureDesc

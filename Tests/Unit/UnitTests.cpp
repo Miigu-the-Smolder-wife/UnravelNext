@@ -232,6 +232,127 @@ UNX_TEST(graph_single_queue_is_one_list)
     CHECK(g.stats().commandLists == 1);
 }
 
+UNX_TEST(graph_acceleration_structure_uses)
+{
+    // GPU-written build inputs -> BLAS build -> TLAS build -> inline ray, all in one frame with graph barriers only
+    // (Use::AccelerationStructure*, INTERFACES_KO.md 4). The ray hits the triangle at t = 5 only if every step waited.
+    Device& dev = testDevice();
+    ID3D12Device5* d5 = nullptr;
+    check(dev.d3d()->QueryInterface(IID_PPV_ARGS(&d5)), "ID3D12Device5");
+    D3D12_RAYTRACING_GEOMETRY_DESC geom{};
+    geom.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+    geom.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+    geom.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+    geom.Triangles.VertexCount = 3;
+    geom.Triangles.VertexBuffer.StrideInBytes = 12;
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blasIn{};
+    blasIn.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+    blasIn.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    blasIn.NumDescs = 1;
+    blasIn.pGeometryDescs = &geom;
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tlasIn{};
+    tlasIn.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    tlasIn.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    tlasIn.NumDescs = 1;
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO blasInfo{}, tlasInfo{};
+    d5->GetRaytracingAccelerationStructurePrebuildInfo(&blasIn, &blasInfo);
+    d5->GetRaytracingAccelerationStructurePrebuildInfo(&tlasIn, &tlasInfo);
+    d5->Release();
+
+    auto buffer = [&](uint64_t bytes, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_FLAGS flags, const wchar_t* name) {
+        D3D12_HEAP_PROPERTIES hp{ heapType };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = bytes;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        rd.Flags = flags;
+        ComPtr<ID3D12Resource> r;
+        check(dev.d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&r)), "test buffer");
+        r->SetName(name);
+        return r;
+    };
+    const D3D12_RESOURCE_FLAGS asFlags = D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    ComPtr<ID3D12Resource> blas = buffer(blasInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, asFlags, L"test blas");
+    ComPtr<ID3D12Resource> tlas = buffer(tlasInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, asFlags, L"test tlas");
+    ComPtr<ID3D12Resource> readback = buffer(256, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, L"test readback");
+    const uint32_t tlasSrv = dev.descriptors().allocateResource();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.RaytracingAccelerationStructure.Location = tlas->GetGPUVirtualAddress();
+    dev.d3d()->CreateShaderResourceView(nullptr, &sd, dev.descriptors().resourceCpu(tlasSrv));
+
+    ID3D12PipelineState* writePso = shaders().compute("Passes/Test/AsTestWrite");
+    ID3D12PipelineState* tracePso = shaders().compute("Passes/Test/AsTestTrace");
+    RenderGraph g(dev);
+    runFrames(g, [&](RenderGraph& graph) {
+        BufferRef blasRef = graph.importBuffer(blas.Get(), { "blas", blasInfo.ResultDataMaxSizeInBytes, 0 });
+        BufferRef tlasRef = graph.importBuffer(tlas.Get(), { "tlas", tlasInfo.ResultDataMaxSizeInBytes, 0 });
+        BufferRef vertices = graph.createBuffer({ "vertices", 48, 0 });
+        BufferRef instances = graph.createBuffer({ "instances", 64, 0 });
+        BufferRef blasScratch = graph.createBuffer({ "blas scratch", blasInfo.ScratchDataSizeInBytes, 0 });
+        BufferRef tlasScratch = graph.createBuffer({ "tlas scratch", tlasInfo.ScratchDataSizeInBytes, 0 });
+        BufferRef result = graph.createBuffer({ "result", 16, 0 });
+        graph.addPass("write inputs", QueueType::Graphics, [&](PassBuilder& p) { p.use(vertices, Use::UavCompute); p.use(instances, Use::UavCompute); },
+                      [&, vertices, instances](PassContext& c) {
+                          const D3D12_GPU_VIRTUAL_ADDRESS a = blas->GetGPUVirtualAddress();
+                          const uint32_t k[4] = { c.uav(vertices), c.uav(instances), (uint32_t)a, (uint32_t)(a >> 32) };
+                          c.cmd->SetPipelineState(writePso);
+                          c.computeConstants(k, 4);
+                          c.cmd->Dispatch(1, 1, 1);
+                      });
+        graph.addPass("build blas", QueueType::Graphics,
+                      [&](PassBuilder& p) { p.use(vertices, Use::AccelerationStructureInput); p.use(blasRef, Use::AccelerationStructureWrite); p.use(blasScratch, Use::AccelerationStructureScratch); },
+                      [=](PassContext& c) {
+                          D3D12_RAYTRACING_GEOMETRY_DESC gd = geom;
+                          gd.Triangles.VertexBuffer.StartAddress = c.address(vertices);
+                          D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC b{};
+                          b.Inputs = blasIn;
+                          b.Inputs.pGeometryDescs = &gd;
+                          b.DestAccelerationStructureData = c.address(blasRef);
+                          b.ScratchAccelerationStructureData = c.address(blasScratch);
+                          c.cmd->BuildRaytracingAccelerationStructure(&b, 0, nullptr);
+                      });
+        graph.addPass("build tlas", QueueType::Graphics,
+                      [&](PassBuilder& p) {
+                          p.use(instances, Use::AccelerationStructureInput);
+                          p.use(blasRef, Use::AccelerationStructureRead);
+                          p.use(tlasRef, Use::AccelerationStructureWrite);
+                          p.use(tlasScratch, Use::AccelerationStructureScratch);
+                      },
+                      [=](PassContext& c) {
+                          D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC b{};
+                          b.Inputs = tlasIn;
+                          b.Inputs.InstanceDescs = c.address(instances);
+                          b.DestAccelerationStructureData = c.address(tlasRef);
+                          b.ScratchAccelerationStructureData = c.address(tlasScratch);
+                          c.cmd->BuildRaytracingAccelerationStructure(&b, 0, nullptr);
+                      });
+        graph.addPass("trace", QueueType::Graphics, [&](PassBuilder& p) { p.use(tlasRef, Use::AccelerationStructureRead); p.use(result, Use::UavCompute); },
+                      [=](PassContext& c) {
+                          const uint32_t k[2] = { tlasSrv, c.uav(result) };
+                          c.cmd->SetPipelineState(tracePso);
+                          c.computeConstants(k, 2);
+                          c.cmd->Dispatch(1, 1, 1);
+                      });
+        graph.addPass("readback", QueueType::Graphics, [&](PassBuilder& p) { p.use(result, Use::CopySrc); p.keep(); },
+                      [&, result](PassContext& c) { c.cmd->CopyBufferRegion(readback.Get(), 0, c.resource(result), 0, 16); });
+    });
+    float t = 0;
+    void* mapped = nullptr;
+    D3D12_RANGE range{ 0, 4 };
+    check(readback->Map(0, &range, &mapped), "map readback");
+    std::memcpy(&t, mapped, 4);
+    readback->Unmap(0, nullptr);
+    logf("    inline ray hit distance %.6f (expected 5)\n", t);
+    CHECK(std::fabs(t - 5.0f) < 1e-4f);
+    dev.deferRelease(blas);
+    dev.deferRelease(tlas);
+    dev.deferRelease(readback);
+}
+
 UNX_TEST(graph_empty_frame_scene_is_valid)
 {
     // The full 120-pass gate graph at 4K with the debug layer: no errors, plan reuse, aliasing effective.

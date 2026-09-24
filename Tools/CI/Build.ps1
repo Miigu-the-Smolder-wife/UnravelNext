@@ -1,11 +1,14 @@
 param(
-  [string]$Track = "core",     # core | V | M | S | R | C | ... : each session builds in its own folder build/<Track>
+  [string]$Track = "core",     # core | S | R | C | all | ... : each session builds in its own folder build/<Track>
+  [string]$Tracks = "",        # enabled tracks (cmake/Tracks.cmake); default from -Track: core -> V;M, S -> S, R -> R,
+                               # C -> C, V -> V, M -> M, all -> all (integrated build for gate measurements)
   [string]$Config = "Release",
   [string]$Target = ""         # optional single target, e.g. unx_unit_tests
 )
 # Configure (CMake + Ninja, VS 18 MSVC) and build: native libraries, the shader compiler, every kernel (DXIL size limit
-# enforced), every auto-registered module, tool, test and gate. Incremental builds only redo what changed.
-# Parallel sessions never share a build folder (INTERFACES_KO.md 3.1).
+# enforced), every auto-registered module, tool, test and gate of the enabled tracks. Disabled tracks' entry points are
+# core's empty stubs, so one session's unfinished files never break another session's build. Incremental builds only
+# redo what changed. Parallel sessions never share a build folder (INTERFACES_KO.md 3.1).
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 $buildDir = Join-Path $root "build\$Track"
@@ -19,10 +22,13 @@ foreach ($sub in @("External/nvapi", "External/flip", "External/meshoptimizer"))
     if ($LASTEXITCODE -ne 0) { throw "submodule init failed: $sub" }
   }
 }
+if (-not $Tracks) {
+  $Tracks = switch ($Track) { "core" { "V;M" } "all" { "all" } default { $Track } }
+}
 New-Item -ItemType Directory -Force $buildDir | Out-Null
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $targetArg = if ($Target) { "--target $Target" } else { "" }
-$cmd = "`"$vcvars`" >nul 2>&1 && `"$cmake`" -G Ninja -DCMAKE_MAKE_PROGRAM=`"$ninja`" -DCMAKE_BUILD_TYPE=$Config -S `"$root`" -B `"$buildDir`" >nul && `"$cmake`" --build `"$buildDir`" $targetArg"
+$cmd = "`"$vcvars`" >nul 2>&1 && `"$cmake`" -G Ninja -DCMAKE_MAKE_PROGRAM=`"$ninja`" -DCMAKE_BUILD_TYPE=$Config -DUNX_TRACKS=`"$Tracks`" -S `"$root`" -B `"$buildDir`" >nul && `"$cmake`" --build `"$buildDir`" $targetArg"
 cmd /c $cmd
 if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
-"build ok in {0:N1} s -> {1}" -f $sw.Elapsed.TotalSeconds, $buildDir
+"build ok in {0:N1} s -> {1} (tracks: core;{2})" -f $sw.Elapsed.TotalSeconds, $buildDir, $Tracks

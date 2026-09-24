@@ -31,5 +31,6 @@ private:
     uint8_t* m_mapped = nullptr;
     uint32_t m_slotViews = 0;
     uint64_t m_slotFrame = UINT64_MAX;
+    TrackState m_trackState;
 };
 } // namespace unx::render

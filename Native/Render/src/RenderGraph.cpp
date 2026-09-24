@@ -37,8 +37,24 @@ UseInfo useInfo(Use u)
     case Use::IndirectArgs: return { false, D3D12_BARRIER_SYNC_EXECUTE_INDIRECT, D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT, D3D12_BARRIER_LAYOUT_GENERIC_READ };
     case Use::CopySrc: return { false, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COPY_SOURCE, D3D12_BARRIER_LAYOUT_COPY_SOURCE };
     case Use::CopyDst: return { true, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COPY_DEST, D3D12_BARRIER_LAYOUT_COPY_DEST };
+    // Buffers only (layouts unused).
+    case Use::AccelerationStructureWrite:
+        return { true, D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE, D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE, D3D12_BARRIER_LAYOUT_UNDEFINED };
+    case Use::AccelerationStructureRead:
+        return { false, D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE | D3D12_BARRIER_SYNC_ALL_SHADING, D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ,
+                 D3D12_BARRIER_LAYOUT_UNDEFINED };
+    case Use::AccelerationStructureInput:
+        return { false, D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE, D3D12_BARRIER_ACCESS_SHADER_RESOURCE, D3D12_BARRIER_LAYOUT_UNDEFINED };
+    case Use::AccelerationStructureScratch:
+        return { true, D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, D3D12_BARRIER_LAYOUT_UNDEFINED };
     }
     return {};
+}
+
+bool isAccelerationStructureUse(Use u)
+{
+    return u == Use::AccelerationStructureWrite || u == Use::AccelerationStructureRead || u == Use::AccelerationStructureInput ||
+           u == Use::AccelerationStructureScratch;
 }
 
 // Layouts only the direct queue may hold or transition.
@@ -276,7 +292,10 @@ struct RenderGraph::Impl
                 bool bothUav = (it->access == D3D12_BARRIER_ACCESS_UNORDERED_ACCESS && info.access == D3D12_BARRIER_ACCESS_UNORDERED_ACCESS);
                 bool depthPair = (it->layout == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE || info.layout == D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE) &&
                                  (it->access | info.access) == (D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ);
-                if (!bothUav && !depthPair) fail("render graph: pass '%s' uses resource '%s' in conflicting ways", p.name.c_str(), resources[u.resource].name.c_str());
+                // In-place refit: the same AS buffer is source (read) and destination (write).
+                const D3D12_BARRIER_ACCESS asBits = D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ | D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE;
+                bool asPair = it->access != D3D12_BARRIER_ACCESS_NO_ACCESS && (it->access & ~asBits) == 0 && (info.access & ~asBits) == 0;
+                if (!bothUav && !depthPair && !asPair) fail("render graph: pass '%s' uses resource '%s' in conflicting ways", p.name.c_str(), resources[u.resource].name.c_str());
                 it->write = true;
                 it->disjoint = it->disjoint && info.disjoint;
                 it->sync |= info.sync;
@@ -326,7 +345,7 @@ struct RenderGraph::Impl
         // 2. Resource summaries over live passes.
         struct Summary
         {
-            bool used = false, srv = false, uav = false, rt = false, ds = false, dsRead = false, async = false;
+            bool used = false, srv = false, uav = false, uavFlag = false, rt = false, ds = false, dsRead = false, async = false;
             uint32_t first = UINT32_MAX, last = 0;
         };
         std::vector<Summary> sum(resourceCount);
@@ -346,7 +365,8 @@ struct RenderGraph::Impl
                 case Use::SrvGraphics: s.srv = true; break;
                 case Use::UavCompute:
                 case Use::UavComputeDisjoint:
-                case Use::UavGraphics: s.uav = true; break;
+                case Use::UavGraphics: s.uav = s.uavFlag = true; break;
+                case Use::AccelerationStructureScratch: s.uavFlag = true; break;  // no view
                 case Use::RenderTarget: s.rt = true; break;
                 case Use::DepthWrite: s.ds = true; break;
                 case Use::DepthRead: s.ds = s.dsRead = true; break;
@@ -383,7 +403,7 @@ struct RenderGraph::Impl
                 d.Format = isDepthFormat(n.tdesc.format) && sum[r].srv ? typelessDepth(n.tdesc.format) : n.tdesc.format;
                 d.SampleDesc.Count = 1;
                 d.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-                if (sum[r].uav) d.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+                if (sum[r].uavFlag) d.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
                 if (sum[r].rt) d.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
                 if (sum[r].ds)
                 {
@@ -398,7 +418,7 @@ struct RenderGraph::Impl
                 d.Height = d.DepthOrArraySize = d.MipLevels = 1;
                 d.SampleDesc.Count = 1;
                 d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-                if (sum[r].uav) d.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+                if (sum[r].uavFlag) d.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
             }
             descs[r] = d;
             infos[r] = device.d3d()->GetResourceAllocationInfo2(0, 1, &d, nullptr);
@@ -889,6 +909,7 @@ void PassBuilder::use(TextureRef texture, Use use)
 {
     auto& impl = *m_graph.m_impl;
     if (!texture.valid() || texture.id >= impl.resources.size() || !impl.resources[texture.id].texture) fail("render graph: invalid texture in pass '%s'", impl.passes[m_pass].name.c_str());
+    if (isAccelerationStructureUse(use)) fail("render graph: texture used as an acceleration structure in pass '%s'", impl.passes[m_pass].name.c_str());
     impl.passes[m_pass].uses.push_back({ texture.id, use });
 }
 

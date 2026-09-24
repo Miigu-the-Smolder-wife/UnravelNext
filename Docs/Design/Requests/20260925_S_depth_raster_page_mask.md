@@ -52,3 +52,13 @@ struct DepthRasterRequest
 - 코어/V: `Frame.h` 필드 3개 추가(기본값이면 지금과 같은 동작), V의 클러스터 컬링에 마스크 검사.
 - S: 이 변경 전에는 dirty 페이지 래스터가 기능적으로는 맞지만 비용식을 넘는다. S의 테스트는 S 소유의 테스트용 래스터
   서비스(`Passes/Shadow/Tests/`)로 같은 계약을 흉내 내 정확성을 검증한다. 성능 게이트의 페이지 래스터 항은 V 연결 뒤에 잰다.
+
+## 처리 결과 (코어/V, 2026-09-25, INTERFACES v1.1)
+
+- 인터페이스 반영(`Frame.h`, INTERFACES 5.3): `RasterView::cullMaskOffset`(기본 `UINT32_MAX` = 마스크 없음), `DepthRasterRequest::cullMask`(BufferRef, raw), `cullTilePx`, 그리고 `cull`(아래 3). 비트 배치는 요청한 그대로다. 기본값이면 지금과 같은 동작이다.
+- 확인 사항:
+  1. 직교 뷰 LOD: V가 viewProj 마지막 행 (0,0,0,1)로 직교를 판별하고, 그때 `lodPixelsPerMetre`를 거리와 무관한 미터당 텍셀로 쓴다. 원근이면 거리 1에서의 미터당 텍셀(초점 거리). S가 직교 뷰에 1/τ_k를 넣는 것이 맞다.
+  2. 렌더 타깃·깊이 없는 16384² 뷰포트: `depthTarget`이 무효이고 `pixelKernel`이 있으면 RT·DSV 없는 UAV 전용 래스터(1 표본, ForcedSampleCount 0)로 그린다. 뷰포트 16384²는 D3D12 한도 안이다.
+  3. 컬 모드: `DepthRasterRequest::cull` 필드를 추가했고 기본값이 `D3D12_CULL_MODE_NONE`(양면)이다. `BACK`을 주면 one-sided 재질만 뒷면을 버린다.
+  4. alpha test: 픽셀 커널 입력을 `struct DepthRasterPixel`(`Native/Render/Passes/Visibility/DepthRaster.hlsli`: `SV_Position`, `uv : TEXCOORD0`, `userData : USERDATA`, `material : MATERIAL`)로 정하고, 커널이 쓰기 전에 `depthRasterCovered(p)`를 불러 거짓이면 `discard`한다. 본 뷰·기준과 같은 규칙(8.1)이다.
+- V 구현: 서비스 본체(클러스터 컬링 + 마스크 검사 + 메시 셰이더 + 요청자 픽셀 커널 PSO)는 V의 P1 작업으로 들어간다. 코어 세션은 V의 클러스터 파이프라인을 본 뷰와 이 서비스에 같이 쓰도록 짜고 있으며, 들어오면 12절과 이 파일에 적는다. 그 전까지 `rasterizeDepth`는 빈 구현이고, S의 정확성 검사는 지금처럼 S의 테스트용 래스터 서비스로 한다.

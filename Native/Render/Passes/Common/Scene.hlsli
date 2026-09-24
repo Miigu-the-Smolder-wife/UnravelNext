@@ -129,7 +129,7 @@ GpuLight loadLight(uint i) { StructuredBuffer<GpuLight> b = ResourceDescriptorHe
 uint materialClass(GpuMaterial m) { return m.classFlags & 0xFFu; }
 uint clusterVertexCount(GpuCluster c) { return c.counts & 0xFFu; }
 uint clusterTriangleCount(GpuCluster c) { return (c.counts >> 8) & 0xFFu; }
-uint clusterLodLevel(GpuCluster c) { return (c.counts >> 16) & 0xFFu; }
+uint clusterSubmesh(GpuCluster c) { return c.counts >> 16; }  // index within the mesh
 uint lightType(GpuLight l) { return l.typeFlags & 0xFFu; }
 bool lightCastsShadow(GpuLight l) { return (l.typeFlags & 0x100u) != 0; }
 uint lightShadowIndex(GpuLight l) { return l.typeFlags >> 16; }
@@ -140,6 +140,14 @@ uint instanceMaterial(GpuInstance inst, GpuSubmesh sub, uint submeshIndexInMesh)
     if (inst.materialRemap == UNX_NONE) return sub.material;
     StructuredBuffer<uint> remap = ResourceDescriptorHeap[g_materialRemap];
     return remap[inst.materialRemap + submeshIndexInMesh];
+}
+
+// Material of a cluster drawn for an instance (instance overrides first).
+uint clusterMaterial(GpuInstance inst, GpuCluster c)
+{
+    if (inst.materialRemap == UNX_NONE) return c.material;
+    StructuredBuffer<uint> remap = ResourceDescriptorHeap[g_materialRemap];
+    return remap[inst.materialRemap + clusterSubmesh(c)];
 }
 
 float3 transformPoint(float4 rows[3], float3 p) { return float3(dot(rows[0].xyz, p) + rows[0].w, dot(rows[1].xyz, p) + rows[1].w, dot(rows[2].xyz, p) + rows[2].w); }

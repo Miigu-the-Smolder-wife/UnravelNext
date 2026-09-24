@@ -10,7 +10,9 @@
 #include "unx/scene/SceneData.h"
 
 #include <functional>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -47,7 +49,8 @@ struct ViewResources
     TextureRef depth;              // D32_FLOAT reversed Z                                   [V]
     TextureRef visId;              // R32_UINT (VisBuffer.hlsli)                             [V]
     BufferRef visibleClusters;     // gpu::VisibleCluster list indexed by the vis id         [V]
-    TextureRef hiz;                // R32_FLOAT, half resolution, full mip chain (max-depth) [V]
+    TextureRef hiz;                // R32_FLOAT, half resolution, full mip chain: farthest depth [V]
+                                   // (minimum reversed-Z value) of the 2^(mip+1) square pixel block
     BufferRef coverageFragments;   // coverage layer fragments, sorted per pixel            [V]
     TextureRef coverageHeads;      // R32_UINT per pixel: first fragment | count << 24       [V]
     TextureRef gbuffer;            // RG32_UINT (GBuffer.hlsli)                              [M]
@@ -87,9 +90,13 @@ struct FrameContext
 struct RasterView
 {
     float4x4 viewProj;
-    uint32_t viewportX = 0, viewportY = 0, viewportWidth = 0, viewportHeight = 0;  // in the target
-    float lodPixelsPerMetre = 0;   // screen-space scale for LOD selection (texels per metre at distance 1)
+    uint32_t viewportX = 0, viewportY = 0, viewportWidth = 0, viewportHeight = 0;  // in the target (up to 16384^2)
+    // LOD scale. Perspective viewProj: texels per metre at distance 1 (focal length in texels). Orthographic viewProj
+    // (last row 0,0,0,1; V detects it): texels per metre, independent of distance.
+    float lodPixelsPerMetre = 0;
     uint32_t userData = 0;         // passed to the pixel kernel (e.g. clipmap level / page group)
+    uint32_t cullMaskOffset = UINT32_MAX;  // first uint32 word of this view's tile mask in DepthRasterRequest::cullMask;
+                                           // UINT32_MAX = no mask (the whole viewport is rasterised)
 };
 
 struct DepthRasterRequest
@@ -98,15 +105,43 @@ struct DepthRasterRequest
     std::vector<RasterView> views;
     uint32_t instanceMask = scene::InstanceCastShadow;  // instances with (flags & mask) != 0
     TextureRef depthTarget;                        // hardware depth (D32); invalid when pixelKernel writes storage
-    std::string pixelKernel;                       // requester's pixel shader kernel; empty = depth only. Inputs:
-                                                   // float4 position : SV_Position, nointerpolation uint userData : USERDATA
+                                                   // (then no render target and no depth: UAV-only raster, 1 sample)
+    std::string pixelKernel;                       // requester's pixel shader kernel; empty = depth only. Its input is
+                                                   // struct DepthRasterPixel (Passes/Visibility/DepthRaster.hlsli); it
+                                                   // calls depthRasterCovered(p) first (alpha-tested materials)
     std::vector<std::pair<TextureRef, Use>> textureUses;  // resources the pixel kernel touches
     std::vector<std::pair<BufferRef, Use>> bufferUses;
     uint32_t pixelConstants[16] = {};              // root constants 16..31 for the pixel kernel
     bool conservative = false;
+    D3D12_CULL_MODE cull = D3D12_CULL_MODE_NONE;   // default both faces (shadows); BACK culls back faces of one-sided
+                                                   // materials only (two-sided materials are never culled)
+    // Tile mask (performance only; the pixel kernel still decides what it writes): raw buffer, per view
+    // ceil(viewportWidth / cullTilePx) x ceil(viewportHeight / cullTilePx) bits, row major, bit i = bit (i & 31) of word
+    // cullMaskOffset + (i >> 5); 1 = the tile needs rasterisation. Written on the GPU earlier in the same frame. V skips
+    // clusters (and meshlet triangles) whose viewport rectangle covers no set bit.
+    BufferRef cullMask;
+    uint32_t cullTilePx = 0;
 };
 
 struct FramePassContext;
+
+// Persistent state of a track (history buffers, pools, caches) owned by the FrameRenderer: created on first use,
+// destroyed with the renderer after the GPU is idle. Keys are "<track>.<name>"; one key always holds one type.
+class TrackState
+{
+public:
+    template <typename T>
+    T& get(const std::string& key)
+    {
+        std::shared_ptr<void>& p = m_entries[key];
+        if (!p) p = std::make_shared<T>();
+        return *static_cast<T*>(p.get());
+    }
+    void clear() { m_entries.clear(); }
+
+private:
+    std::unordered_map<std::string, std::shared_ptr<void>> m_entries;
+};
 
 // Cross-track services, provided by core (unx_frame) so modules never link each other.
 struct FrameServices
@@ -129,5 +164,13 @@ struct FramePassContext
     FrameServices& services;
     // Frame constants for a view (allocates a 1 KB slot of this frame): bind with PassContext::bindFrameConstants.
     std::function<D3D12_GPU_VIRTUAL_ADDRESS(const ViewDesc&)> frameConstantsFor;
+    TrackState* trackState = nullptr;  // FrameRenderer's; null in contexts built without a renderer
+
+    template <typename T>
+    T& state(const std::string& key)
+    {
+        if (!trackState) fail("FramePassContext::state('%s'): no track state in this context", key.c_str());
+        return trackState->get<T>(key);
+    }
 };
 } // namespace unx::render

@@ -57,9 +57,10 @@ GpuScene::GpuScene(Device& device) : m_device(device) {}
 GpuScene::~GpuScene()
 {
     for (Buffer* b : { &m_instanceBuffer, &m_meshBuffer, &m_submeshBuffer, &m_vertexBuffer, &m_indexBuffer, &m_materialBuffer, &m_materialRemapBuffer, &m_lightBuffer,
-                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_clusterBuffer, &m_lodLevelBuffer, &m_clusterVertexIndexBuffer,
-                       &m_clusterTriangleBuffer })
+                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_clusterBuffer, &m_lodLevelBuffer, &m_lodLevelClusterBuffer,
+                       &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer })
         release(*b);
+    for (auto& [name, b] : m_named) release(b);
 }
 
 void GpuScene::release(Buffer& b)
@@ -283,14 +284,26 @@ void GpuScene::upload(const scene::Scene& s)
     if (!m_clusterBuffer.resource) setClusters(ClusterData{});
 }
 
-void GpuScene::setClusters(const ClusterData& c)
+void GpuScene::setClusters(ClusterData data)
 {
-    for (Buffer* b : { &m_clusterBuffer, &m_lodLevelBuffer, &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer }) release(*b);
+    m_clusterData = std::move(data);
+    const ClusterData& c = m_clusterData;
+    for (Buffer* b : { &m_clusterBuffer, &m_lodLevelBuffer, &m_lodLevelClusterBuffer, &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer }) release(*b);
+    for (auto& [name, b] : m_named) release(b);
+    m_named.clear();
     m_clusterBuffer = createStructured(c.clusters.data(), sizeof(gpu::Cluster), c.clusters.size(), L"scene clusters");
     m_lodLevelBuffer = createStructured(c.lodLevels.data(), sizeof(gpu::LodLevel), c.lodLevels.size(), L"scene lod levels");
+    m_lodLevelClusterBuffer = createStructured(c.lodLevelClusters.data(), sizeof(uint32_t), c.lodLevelClusters.size(), L"lod level clusters");
     m_clusterVertexIndexBuffer = createStructured(c.clusterVertexIndices.data(), sizeof(uint32_t), c.clusterVertexIndices.size(), L"cluster vertex indices");
     m_clusterTriangleBuffer = createStructured(c.clusterTriangles.data(), sizeof(uint32_t), c.clusterTriangles.size(), L"cluster triangles");
     m_clusterBuffer.count = (uint32_t)c.clusters.size();
+    for (const ClusterData::Named& n : c.named)
+    {
+        if (n.stride == 0 || n.bytes.size() % n.stride != 0)
+            fail("GpuScene::setClusters: buffer '%s' size %zu is not a multiple of stride %u", n.name.c_str(), n.bytes.size(), n.stride);
+        const std::wstring wide(n.name.begin(), n.name.end());
+        m_named.emplace_back(n.name, createStructured(n.bytes.data(), n.stride, n.bytes.size() / n.stride, wide.c_str()));
+    }
     if (!c.meshes.empty())
     {
         if (c.meshes.size() != m_meshes.size()) fail("GpuScene::setClusters: %zu mesh ranges for %zu meshes", c.meshes.size(), m_meshes.size());
@@ -317,6 +330,7 @@ void GpuScene::fill(gpu::FrameConstants& f) const
     f.clusterVertexIndices = m_clusterVertexIndexBuffer.srv;
     f.clusterTriangles = m_clusterTriangleBuffer.srv;
     f.lodLevels = m_lodLevelBuffer.srv;
+    f.lodLevelClusters = m_lodLevelClusterBuffer.srv;
     f.materials = m_materialBuffer.srv;
     f.materialRemap = m_materialRemapBuffer.srv;
     f.lights = m_lightBuffer.srv;
@@ -344,6 +358,23 @@ ID3D12Resource* GpuScene::buffer(const char* name) const
     if (n == "clusterTriangles") return m_clusterTriangleBuffer.resource.Get();
     if (n == "skin") return m_skinBuffer.resource.Get();
     if (n == "bonePalette") return m_bonePalette.resource.Get();
+    if (n == "lodLevels") return m_lodLevelBuffer.resource.Get();
+    if (n == "lodLevelClusters") return m_lodLevelClusterBuffer.resource.Get();
+    for (const auto& [key, b] : m_named)
+        if (key == n) return b.resource.Get();
     fail("GpuScene::buffer: unknown buffer '%s'", name);
+}
+
+uint32_t GpuScene::srv(const char* name) const
+{
+    const std::string n = name;
+    for (const auto& [key, b] : m_named)
+        if (key == n) return b.srv;
+    if (n == "clusters") return m_clusterBuffer.srv;
+    if (n == "lodLevels") return m_lodLevelBuffer.srv;
+    if (n == "lodLevelClusters") return m_lodLevelClusterBuffer.srv;
+    if (n == "clusterVertexIndices") return m_clusterVertexIndexBuffer.srv;
+    if (n == "clusterTriangles") return m_clusterTriangleBuffer.srv;
+    fail("GpuScene::srv: unknown buffer '%s'", name);
 }
 } // namespace unx::render

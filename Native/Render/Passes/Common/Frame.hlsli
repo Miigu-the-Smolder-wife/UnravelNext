@@ -29,7 +29,7 @@ cbuffer FrameConstants : register(b1)
     uint g_lodLevels, g_materials, g_materialRemap, g_lights;
     uint g_skinVertices, g_bonePalette, g_prevBonePalette, g_materialModelLut;
     uint g_instanceCount, g_meshCount, g_clusterCount, g_lightCount;
-    uint g_materialCount, g_sceneRevision, g_framePad0, g_framePad1;
+    uint g_materialCount, g_sceneRevision, g_lodLevelClusters, g_framePad1;
 };
 
 // Reversed-Z infinite projection: device depth d = near / viewDistance (1 at the near plane, 0 = sky).

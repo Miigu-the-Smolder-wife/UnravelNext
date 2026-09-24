@@ -75,23 +75,28 @@ static_assert(sizeof(SkinVertex) == 16);
 // geometry from a LOD level) and S through V's raster service.
 struct Cluster  // 64 B
 {
-    float4 boundsSphere;     // object space
-    float4 normalCone;       // axis xyz, cos(cutoff) in w (w = -1: no cone culling)
+    float4 boundsSphere;     // object space, tight (culling)
+    float4 normalCone;       // axis xyz; w = cutoff (meshoptimizer cone_cutoff = sin of the normal spread half-angle).
+                             // Every triangle faces away from p when dot(c - p, axis) >= w * |c - p| + radius (c, radius:
+                             // boundsSphere). w >= 1: no cone
     uint32_t vertexOffset;   // first entry in the cluster vertex-index pool (uint32 mesh-relative vertex indices)
     uint32_t triangleOffset; // first entry in the cluster triangle pool (uint32 = 3 x uint8 local indices)
-    uint32_t counts;         // vertexCount | triangleCount << 8 | lodLevel << 16 | clusterFlags << 24
-    uint32_t material;       // scene material; a cluster never spans submeshes
-    float lodError;          // object-space error of this cluster
-    float parentLodError;    // error of the group that replaces it (render when parent > threshold >= own)
-    float minFeatureWidth;   // object-space metres: narrowest feature (ARCHITECTURE 2.1 bands A/B/C)
+    uint32_t counts;         // vertexCount | triangleCount << 8 | submesh << 16 (index within the mesh; a cluster never
+                             // spans submeshes). Material with instance overrides: clusterMaterial() (Scene.hlsli)
+    uint32_t material;       // scene material of the submesh (before instance overrides)
+    float lodError;          // object-space error of this cluster's geometry (0 = source geometry)
+    float parentLodError;    // error of the group that replaces it (FLT_MAX: never replaced)
+    float minFeatureWidth;   // object-space metres, narrowest feature (ARCHITECTURE 2.1 bands A/B/C). > 0: solid
+                             // (projected width is view independent); < 0: flat sheet of width |w| whose projected width
+                             // shrinks with |cos| between the view direction and the sheet normals (normalCone)
     uint32_t brick;          // band C voxel brick, kNone if none
 };
 static_assert(sizeof(Cluster) == 64);
 
-struct LodLevel  // 16 B: one cut of the hierarchy, used for ray tracing geometry and diagnostics
+struct LodLevel  // 16 B: one uniform-error cut of a mesh's hierarchy (ray tracing geometry, diagnostics)
 {
-    uint32_t clusterOffset, clusterCount;
-    float error;             // object-space error of this level
+    uint32_t clusterOffset, clusterCount;  // range in lodLevelClusters (FrameConstants), which holds cluster indices
+    float error;             // object-space error of this cut (0 = source geometry)
     uint32_t triangleCount;
 };
 static_assert(sizeof(LodLevel) == 16);
@@ -174,7 +179,7 @@ struct FrameConstants
     uint32_t lodLevels, materials, materialRemap, lights;
     uint32_t skinVertices, bonePalette, prevBonePalette, materialModelLut;  // materialModelLut: E(mu, r) table (8.1)
     uint32_t instanceCount, meshCount, clusterCount, lightCount;
-    uint32_t materialCount, sceneRevision, pad0, pad1;
+    uint32_t materialCount, sceneRevision, lodLevelClusters, pad1;  // lodLevelClusters: cluster indices of LodLevel cuts
 };
 static_assert(sizeof(FrameConstants) == 528);
 } // namespace unx::render::gpu

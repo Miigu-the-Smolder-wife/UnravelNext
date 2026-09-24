@@ -18,6 +18,7 @@ include(External/Dependencies.cmake)
 include(cmake/Toolchain.cmake)
 include(cmake/BuildIdentity.cmake)
 include(cmake/Shaders.cmake)
+include(cmake/Tracks.cmake)
 include(cmake/Modules.cmake)
 
 add_subdirectory(Tools/ShaderCompiler)

@@ -84,6 +84,8 @@ FrameRenderer::FrameRenderer(Device& device, ShaderLibrary& shaders, const Quali
 
 FrameRenderer::~FrameRenderer()
 {
+    m_device.waitIdle();  // track state may hold resources of frames in flight
+    m_trackState.clear();
     if (m_constants) m_constants->Unmap(0, nullptr);
     m_device.deferRelease(m_constants);
 }
@@ -134,7 +136,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& fram
     FrameResources resources;
     FrameServices services;
     FramePassContext fc{ m_device, graph, m_shaders, m_quality, m_scene, frame, resources, services,
-                         [this, &frame](const ViewDesc& v) { return allocateFrameConstants(frame, v); } };
+                         [this, &frame](const ViewDesc& v) { return allocateFrameConstants(frame, v); }, &m_trackState };
     services.rasterizeDepth = [](FramePassContext& c, const DepthRasterRequest& r) { tracks::rasterizeDepth(c, r); };
     services.renderView = [](FramePassContext& c, const ViewDesc& v) {
         if (v.kind == gpu::ViewKind::Main) fail("renderView is for secondary views");
