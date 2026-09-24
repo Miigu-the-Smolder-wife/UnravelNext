@@ -46,9 +46,20 @@ float3 windOffset(GpuInstance inst, float3 p, float time)
     if (inst.windStiffness <= 0 || g_windSpeed <= 0) return 0;
     const float h = max(p.y - inst.windAnchor, 0.0);
     const float amplitude = g_windSpeed * g_windSpeed * 0.002 / inst.windStiffness * h * h;
+    // World -> object direction: transpose of the object -> world rotation (rows of objectToWorld weighted by the world
+    // components; rotation + uniform scale, so the normalised result is R^-1 * dirWorld).
     const float3 dirWorld = g_windDirection;
-    const float3 dirObject = normalize(float3(dot(inst.objectToWorld[0].xyz, dirWorld), dot(inst.objectToWorld[1].xyz, dirWorld), dot(inst.objectToWorld[2].xyz, dirWorld)));
+    const float3 dirObject = normalize(inst.objectToWorld[0].xyz * dirWorld.x + inst.objectToWorld[1].xyz * dirWorld.y + inst.objectToWorld[2].xyz * dirWorld.z);
     return dirObject * amplitude * (0.6 + 0.4 * sin(time * 1.7 + inst.windPhase));
+}
+
+// Upper bound of |windOffset| (object space) for any point of an object-space sphere and any time. Culling inflates
+// bounds by it so geometry moved by the wind is never culled. Changes together with windOffset.
+float windOffsetBound(GpuInstance inst, float3 centre, float radius)
+{
+    if ((inst.flags & INSTANCE_WIND) == 0 || inst.windStiffness <= 0 || g_windSpeed <= 0) return 0;
+    const float h = max(centre.y + radius - inst.windAnchor, 0.0);
+    return g_windSpeed * g_windSpeed * 0.002 / inst.windStiffness * h * h;
 }
 
 DeformedVertex deformVertex(GpuInstance inst, GpuMesh mesh, uint meshVertex)
