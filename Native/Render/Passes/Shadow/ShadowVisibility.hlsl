@@ -8,7 +8,7 @@
 // (ShadowPenumbra.hlsl, indirect).
 // PATHS=1 (diagnostics): writes each pixel's VSM_PATH_* (0xFF = sky) instead of the visibility.
 // P[0].x depth SRV, P[0].y G-buffer SRV (RG32_UINT), P[0].z output UAV (R32_UINT), P[0].w VSM constants CBV
-// P[1].x unused, P[1].y page table SRV (raw), P[1].z pool SRV (Texture2D<uint>), P[1].w search bound SRV (raw)
+// P[1].x unused, P[1].y page table SRV (raw), P[1].z pool SRV (raw), P[1].w search bound SRV (raw)
 // P[2].x penumbra list UAV (raw: count, then pixel y << 16 | x), P[2].y blocks SRV (raw), P[2].z statistics UAV (raw,
 // words 8.. of the VSM stats: pixels per VSM_PATH_*). Frame constants of the view.
 #include "Frame.hlsli"

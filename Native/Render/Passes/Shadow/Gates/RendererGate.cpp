@@ -1,0 +1,165 @@
+// S performance gate through the real renderer (FrameRenderer: V's cluster pipeline and depth raster service, M's
+// material resolve, S; other tracks as built): per-pass GPU time of every S pass at 4K / 1440p on a C-track scene, with
+// a static or a moving camera (the scene's first camera path), and the quantities the design's cost formulas use:
+// dirty pages and the triangles V rasterised into them (T_sun), page requests and pool use, visibility paths.
+// Needs a build with tracks V, M, S and C (Build.ps1 -Track S -Tracks "V;M;S;C", or -Track all). GPU lock required:
+//   powershell -File Tools/CI/GpuLock.ps1 -Track S -- build/S/bin/unx_gate_shadow_renderergate.exe
+//       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--moving] [--out DIR] [--set k=v]
+#if __has_include("unx/clusterbuilder/ClusterBuilder.h") && defined(UNX_HAS_SCENEGEN)
+#define S_RENDERER_GATE 1
+#include "unx/clusterbuilder/ClusterBuilder.h"
+#include "unx/scenegen/SceneGen.h"
+#include "unx/visibility/Visibility.h"
+#endif
+#include "VsmSystem.h"
+
+#include "unx/core/Config.h"
+#include "unx/core/File.h"
+#include "unx/render/FrameRenderer.h"
+#include "unx/render/GpuLock.h"
+#include "unx/render/GpuScene.h"
+#include "unx/render/Harness.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <string>
+#include <vector>
+
+using namespace unx;
+using namespace unx::render;
+
+#if S_RENDERER_GATE
+namespace
+{
+scene::Camera cameraAt(const scene::Scene& s, bool moving, double time)
+{
+    scene::Camera c = s.cameras.at(0);
+    if (!moving || s.paths.empty() || s.paths[0].keys.size() < 2) return c;
+    const auto& keys = s.paths[0].keys;
+    const double span = keys.back().time - keys.front().time;
+    const float t = (float)(keys.front().time + std::fmod(time, span));
+    size_t k = 0;
+    while (k + 2 < keys.size() && keys[k + 1].time < t) ++k;
+    const float u = std::clamp((t - keys[k].time) / std::max(keys[k + 1].time - keys[k].time, 1e-6f), 0.0f, 1.0f);
+    c.position = keys[k].position + (keys[k + 1].position - keys[k].position) * u;
+    c.forward = normalize(keys[k].forward + (keys[k + 1].forward - keys[k].forward) * u);
+    c.up = normalize(keys[k].up + (keys[k + 1].up - keys[k].up) * u);
+    return c;
+}
+} // namespace
+#endif
+
+int main(int argc, char** argv)
+{
+    try
+    {
+#if !S_RENDERER_GATE
+        (void)argc;
+        (void)argv;
+        fail("this build lacks V's cluster builder or C's scene generator: Build.ps1 -Track S -Tracks \"V;M;S;C\" (or -Track all)");
+#else
+        std::string sceneName = "city_block", resolutionArg = "both", out;
+        uint32_t frames = 600;
+        bool moving = false;
+        std::vector<std::string> overrides;
+        for (int i = 1; i < argc; ++i)
+        {
+            const std::string a = argv[i];
+            auto next = [&]() -> std::string {
+                if (i + 1 >= argc) fail("missing value after %s", a.c_str());
+                return argv[++i];
+            };
+            if (a == "--scene") sceneName = next();
+            else if (a == "--resolution") resolutionArg = next();
+            else if (a == "--frames") frames = (uint32_t)std::stoul(next());
+            else if (a == "--moving") moving = true;
+            else if (a == "--out") out = next();
+            else if (a == "--set") overrides.push_back(next());
+            else fail("unknown argument %s", a.c_str());
+        }
+        requireGpuLock("unx_gate_shadow_renderergate");
+        QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+        for (const std::string& o : overrides) quality.applyOverride(o);
+        scenegen::Request request;
+        bool found = false;
+        for (scenegen::SceneId id : scenegen::allScenes())
+            if (sceneName == scenegen::sceneName(id))
+            {
+                request.id = id;
+                found = true;
+            }
+        if (!found) fail("unknown scene %s", sceneName.c_str());
+        const scene::Scene s = scenegen::generate(request);
+        ClusterData clusters = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality));
+        logf("scene %s (%s), %zu instances, %zu clusters, camera %s\n", sceneName.c_str(), scene::contentHash(s).substr(0, 16).c_str(), s.instances.size(),
+             clusters.clusters.size(), moving ? "path 0 (moving)" : "0 (static)");
+        Device device({});
+        ShaderLibrary shaders(device, executableDirectory() / "shaders");
+        GpuScene gpuScene(device);
+        gpuScene.upload(s);
+        gpuScene.setClusters(std::move(clusters));
+        Harness harness(device, quality);
+        const std::vector<std::string> resolutions = resolutionArg == "both" ? std::vector<std::string>{ "4K", "1440p" } : std::vector<std::string>{ resolutionArg };
+        for (const std::string& rs : resolutions)
+        {
+            const Resolution res = resolutionFromString(rs, quality);
+            FrameRenderer renderer(device, shaders, quality, gpuScene, 2);
+            HarnessOptions options;
+            options.frames = frames;
+            options.label = "S " + sceneName + (moving ? " moving " : " static ") + rs;
+            if (!out.empty()) options.outputDirectory = out;
+            float4x4 prev = ViewDesc::fromCamera(cameraAt(s, moving, 0), res.width, res.height, {}).viewProj;
+            // Dirty pages and T_sun averaged over the measured frames (the counters lag the frame by two).
+            double dirtySum = 0, trianglesSum = 0, requestedSum = 0;
+            uint32_t samples = 0, exhausted = 0, requestedMax = 0;
+            uint64_t lastStatsFrame = 0;
+            const HarnessResult r = harness.run(res, options, [&](RenderGraph& g, const Resolution& rr, uint64_t frame) {
+                FrameContext fc;
+                fc.frameIndex = frame;
+                fc.time = frame / 60.0;
+                fc.deltaTime = 1.0f / 60;
+                fc.mainView = ViewDesc::fromCamera(cameraAt(s, moving, fc.time), rr.width, rr.height, prev);
+                prev = fc.mainView.viewProj;
+                const TextureRef output = g.createTexture({ "gate output", rr.width, rr.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
+                renderer.record(g, fc, output);
+                const shadow::VsmStats& st = shadow::stats(renderer.trackState());
+                if (frame > 8 && st.frame != lastStatsFrame)
+                {
+                    lastStatsFrame = st.frame;
+                    const visibility::Stats vs = visibility::latestStats(renderer.trackState(), "s.vsm.raster");
+                    dirtySum += st.dirty;
+                    trianglesSum += (double)vs.triangles[0] + vs.triangles[1] + vs.triangles[2];
+                    requestedSum += st.requested;
+                    requestedMax = std::max(requestedMax, st.requested);
+                    exhausted += st.exhausted;
+                    ++samples;
+                }
+            });
+            harness.printSummary(r);
+            const shadow::VsmStats& st = shadow::stats(renderer.trackState());
+            double sPasses = 0, raster = 0;
+            for (const auto& [name, d] : r.passMs)
+                if (name.rfind("s.", 0) == 0)
+                {
+                    logf("  %-32s median %.4f ms  P95 %.4f ms\n", name.c_str(), d.median, d.p95);
+                    sPasses += d.median;
+                    if (name.rfind("s.vsm.raster", 0) == 0) raster += d.median;
+                }
+            const double n = std::max(samples, 1u);
+            logf("%s: S passes %.4f ms (page raster %.4f ms) of GPU frame %.4f ms | pages requested mean %.0f max %u, dirty mean %.1f, T_sun mean %.2f M, pool exhausted %u\n",
+                 rs.c_str(), sPasses, raster, r.gpuFrameMs.median, requestedSum / n, requestedMax, dirtySum / n, trianglesSum / n / 1e6, exhausted);
+            const double px = st.pathNoCaster + st.pathRegionLit + st.pathRegionUmbra + st.pathSearchLit + st.pathFiltered + st.pathDiskLit + st.pathDiskUmbra;
+            logf("  visibility paths (%% of %.2f M pixels): no caster %.1f, reach lit %.1f, reach umbra %.1f, search lit %.1f, disk lit %.1f, disk umbra %.1f, filtered %.1f\n",
+                 px / 1e6, 100 * st.pathNoCaster / px, 100 * st.pathRegionLit / px, 100 * st.pathRegionUmbra / px, 100 * st.pathSearchLit / px, 100 * st.pathDiskLit / px,
+                 100 * st.pathDiskUmbra / px, 100 * st.pathFiltered / px);
+        }
+        return 0;
+#endif
+    }
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr, "FAIL %s\n", e.what());
+        return 1;
+    }
+}

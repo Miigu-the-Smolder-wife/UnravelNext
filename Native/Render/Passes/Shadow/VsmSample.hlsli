@@ -10,7 +10,7 @@
 struct VsmResources
 {
     ByteAddressBuffer table;
-    Texture2D<uint> pool;
+    ByteAddressBuffer pool;
     ByteAddressBuffer searchBound;  // VsmSearchGrid MODE 1: per slot, highest caster over its 3 x 3 pages
     ByteAddressBuffer blocks;       // VsmPageMax: min/max hierarchy per physical page
     uint cbv;  // VsmConstants constant buffer view (a ConstantBuffer member makes DXC fail; bound per function)
@@ -34,7 +34,7 @@ uint vsmHeightAt(VsmResources r, int2 texel, uint k)
     {
         const int2 t = texel >> (int)(j - k);
         const uint e = vsmEntry(r, t >> (int)VSM_PAGE_SHIFT, j);
-        if (e != 0) return r.pool.Load(int3(vsmPhysBase(vc, e & VSM_PHYS_MASK) + uint2(t & (int)(VSM_PAGE - 1)), 0));
+        if (e != 0) return r.pool.Load(vsmPoolAddress(e & VSM_PHYS_MASK, uint2(t & (int)(VSM_PAGE - 1))));
     }
     return VSM_EMPTY;
 }
@@ -58,7 +58,8 @@ float vsmPlaneHeight(ConstantBuffer<VsmConstants> c, VsmReceiver rc, int2 tj, ui
 }
 
 // The 2 x 2 texels around uv on the finest resident level at or above k: one page-table walk per tap and one gather
-// when the four texels share a page (127 of 128 positions per axis); across a page border each texel is looked up.
+// when the four texels share a page (127 of 128 positions per axis: two 8-byte loads); across a page border each
+// texel is looked up.
 struct VsmQuad
 {
     uint4 h;      // encoded heights of t0, t0 + (1,0), t0 + (0,1), t0 + (1,1)
@@ -87,14 +88,14 @@ VsmQuad vsmFetchQuad(VsmResources r, float2 uv, uint k)
         const uint2 local = uint2(t0 & (int)(VSM_PAGE - 1));
         if (all(local < VSM_PAGE - 1))
         {
-            const float2 poolSize = float2(vc.poolPagesX, vc.poolPagesY) * VSM_PAGE;
-            const float2 at = (float2(vsmPhysBase(vc, e & VSM_PHYS_MASK) + local) + 1.0) / poolSize;
-            const uint4 g = r.pool.GatherRed(g_pointClamp, at);  // (0,1), (1,1), (1,0), (0,0)
-            q.h = uint4(g.w, g.z, g.x, g.y);
+            // Two rows of two adjacent texels.
+            const uint2 row0 = r.pool.Load2(vsmPoolAddress(e & VSM_PHYS_MASK, local));
+            const uint2 row1 = r.pool.Load2(vsmPoolAddress(e & VSM_PHYS_MASK, local + uint2(0, 1)));
+            q.h = uint4(row0.x, row0.y, row1.x, row1.y);
         }
         else
         {
-            q.h.x = r.pool.Load(int3(vsmPhysBase(vc, e & VSM_PHYS_MASK) + local, 0));
+            q.h.x = r.pool.Load(vsmPoolAddress(e & VSM_PHYS_MASK, local));
             q.h.y = vsmHeightAt(r, t0 + int2(1, 0), j);
             q.h.z = vsmHeightAt(r, t0 + int2(0, 1), j);
             q.h.w = vsmHeightAt(r, t0 + int2(1, 1), j);

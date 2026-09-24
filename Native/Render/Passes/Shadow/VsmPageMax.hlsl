@@ -9,7 +9,7 @@
 // Receivers lying on a caster surface are then proven lit (the block plane minus the receiver plane is linear, so its
 // maximum over a block is at a corner) without per-texel taps. The page maximum also goes to the page metadata.
 // Entry layout: VsmBlock (VsmCommon.hlsli), VSM_BLOCK_ENTRIES per physical page, offsets VSM_BLOCK_OFFSET_*.
-// P[0].x dirty list SRV (raw), P[0].y pool SRV (Texture2D<uint>), P[0].z page metadata UAV, P[0].w VSM constants CBV,
+// P[0].x dirty list SRV (raw), P[0].y pool SRV (raw), P[0].z page metadata UAV, P[0].w VSM constants CBV,
 // P[1].x unused, P[1].y blocks UAV (raw)
 #include "Passes/Shadow/VsmCommon.hlsli"
 
@@ -52,11 +52,10 @@ float3 fitPlane(Moments m)
 void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
     ByteAddressBuffer dirty = ResourceDescriptorHeap[P[0].x];
-    Texture2D<uint> pool = ResourceDescriptorHeap[P[0].y];
+    ByteAddressBuffer pool = ResourceDescriptorHeap[P[0].y];
     RWByteAddressBuffer blocks = ResourceDescriptorHeap[P[1].y];
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[P[0].w];
     const uint phys = dirty.Load(8 + group.x * 8 + 4);
-    const uint2 base = vsmPhysBase(c, phys);
     const uint pageBase = phys * VSM_BLOCK_ENTRIES * VSM_BLOCK_BYTES;
     const uint2 b = uint2(lane % 16, lane / 16);
 
@@ -65,7 +64,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     [loop] for (uint y = 0; y < 8; ++y)
         [unroll] for (uint x = 0; x < 8; ++x)
         {
-            const uint h = pool.Load(int3(base + b * 8 + uint2(x, y), 0));
+            const uint h = pool.Load(vsmPoolAddress(phys, b * 8 + uint2(x, y)));
             lo = min(lo, h);
             hi = max(hi, h);
         }
@@ -81,7 +80,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     [loop] for (uint y2 = 0; y2 < 8; ++y2)
         [unroll] for (uint x2 = 0; x2 < 8; ++x2)
         {
-            const uint e = pool.Load(int3(base + b * 8 + uint2(x2, y2), 0));
+            const uint e = pool.Load(vsmPoolAddress(phys, b * 8 + uint2(x2, y2)));
             if (e == VSM_EMPTY) continue;
             const float px = b.x * 8 + x2 + 0.5, py = b.y * 8 + y2 + 0.5, h = vsmDecode(e) - ref;
             m.n += 1; m.sx += px; m.sy += py; m.sh += h;
@@ -92,7 +91,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     [loop] for (uint y3 = 0; y3 < 8; ++y3)
         [unroll] for (uint x3 = 0; x3 < 8; ++x3)
         {
-            const uint e = pool.Load(int3(base + b * 8 + uint2(x3, y3), 0));
+            const uint e = pool.Load(vsmPoolAddress(phys, b * 8 + uint2(x3, y3)));
             if (e == VSM_EMPTY) continue;
             const float r = vsmDecode(e) - ref - (plane.x * (b.x * 8 + x3 + 0.5) + plane.y * (b.y * 8 + y3 + 0.5) + plane.z);
             rlo = min(rlo, r);

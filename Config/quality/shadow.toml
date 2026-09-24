@@ -3,7 +3,7 @@
 virtual_resolution = 16384      # per clipmap level (compiled into the S kernels)
 page_texels = 128               # (compiled)
 clipmap_levels = 12             # level k covers 2^(k+4) m, texel 2^(k-10) m (compiled)
-pool_pages = 3072               # physical 128^2 R32 pages: 192 MB (ARCHITECTURE 4.2)
+pool_pages = 4096               # physical 128^2 R32 pages: 256 MB; city_block 4K requests 3248 (texel <= pixel footprint), S_STATUS_KO.md
 cache_frames = 120              # a page not requested for this many frames is released
 lod_bias = 0.0                  # level = floor(log2(pixel footprint / level-0 texel)) + bias: texel <= footprint
 receiver_bias_texels = 1.0      # receiver-plane tolerance, texels of the compared level (x (1 + plane slope)); no lateral shift

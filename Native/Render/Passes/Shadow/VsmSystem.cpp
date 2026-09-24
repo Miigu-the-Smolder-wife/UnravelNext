@@ -53,7 +53,7 @@ struct State
     uint32_t constantsOffset = 0;
     // This frame's graph handles (valid between shadowPages and the end of the frame's recording).
     uint64_t recordedFrame = UINT64_MAX;
-    TextureRef poolRef;
+    BufferRef poolRef;
     BufferRef tableRef, metaRef, boundRef, blocksRef, statsRef;
     bool pagesRecorded = false;
     bool debugPaths = false;
@@ -64,8 +64,10 @@ void createViews(Device& device, State& s)
     DescriptorHeaps& h = device.descriptors();
     if (s.poolUav == UINT32_MAX) s.poolUav = h.allocateResource();
     D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
-    ud.Format = DXGI_FORMAT_R32_UINT;
-    ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    ud.Format = DXGI_FORMAT_R32_TYPELESS;
+    ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    ud.Buffer.NumElements = s.poolPagesX * s.poolPagesY * kPage * kPage;
+    ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
     device.d3d()->CreateUnorderedAccessView(s.pool.Get(), nullptr, &ud, h.resourceCpu(s.poolUav));
     auto raw = [&](ID3D12Resource* r, uint64_t bytes, uint32_t& index) {
         if (index == UINT32_MAX) index = h.allocateResource();
@@ -106,8 +108,7 @@ void createState(FramePassContext& fc, State& s)
     Device& d = fc.device;
     s.poolPagesX = perRow;
     s.poolPagesY = pages / perRow;
-    s.pool = createTexture(d, L"S VSM pool", D3D12_RESOURCE_DIMENSION_TEXTURE2D, s.poolPagesX * kPage, s.poolPagesY * kPage, 1, DXGI_FORMAT_R32_UINT,
-                           D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+    s.pool = createBuffer(d, L"S VSM pool", (uint64_t)pages * kPage * kPage * 4);
     s.table = createBuffer(d, L"S VSM page table", (uint64_t)kSlots * 8);
     s.requests = createBuffer(d, L"S VSM requests", (uint64_t)kSlots * 4);
     s.meta = createBuffer(d, L"S VSM page metadata", (uint64_t)pages * kMetaBytes);
@@ -277,8 +278,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     }
 
     RenderGraph& g = fc.graph;
-    const TextureRef pool = g.importTexture(s.pool.Get(), TextureDesc{ "S VSM pool", s.poolPagesX * kPage, s.poolPagesY * kPage, 1, 1, DXGI_FORMAT_R32_UINT },
-                                            D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+    const BufferRef pool = g.importBuffer(s.pool.Get(), BufferDesc{ "S VSM pool", (uint64_t)pages * kPage * kPage * 4, 0 });
     const BufferRef table = g.importBuffer(s.table.Get(), BufferDesc{ "S VSM page table", (uint64_t)kSlots * 8, 0 });
     const BufferRef requests = g.importBuffer(s.requests.Get(), BufferDesc{ "S VSM requests", (uint64_t)kSlots * 4, 0 });
     const BufferRef meta = g.importBuffer(s.meta.Get(), BufferDesc{ "S VSM page metadata", (uint64_t)pages * kMetaBytes, kMetaBytes });
@@ -297,7 +297,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     s.tableRef = table;
     s.metaRef = meta;
     s.pagesRecorded = true;
-    fc.resources.vsmPool = pool;
+    // FrameResources::vsmPool is a TextureRef; the pool is a raw buffer (no layout transitions): left unset, readers use
+    // S's HLSL API (S_STATUS_KO.md).
     fc.resources.vsmPageTable = table;
 
     ShaderLibrary& sh = fc.shaders;
@@ -527,7 +528,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         r.name = "s.vsm.raster";
         r.instanceMask = scene::InstanceCastShadow;
         r.pixelKernel = "Passes/Shadow/VsmPagePixel";
-        r.textureUses.push_back({ pool, Use::UavGraphics });
+        r.bufferUses.push_back({ pool, Use::UavGraphics });
         r.bufferUses.push_back({ table, Use::SrvGraphics });
         r.bufferUses.push_back({ meta, Use::UavGraphics });
         r.pixelConstants[0] = s.poolUav;
@@ -617,7 +618,8 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     const uint32_t w = view.view.width, h = view.view.height;
     const TextureRef out = g.createTexture(TextureDesc{ "S shadow visibility", w, h, 1, 1, DXGI_FORMAT_R32_UINT });
     view.shadowVisibility = out;
-    const TextureRef depth = view.depth, gbuffer = view.gbuffer, pool = s.poolRef;
+    const TextureRef depth = view.depth, gbuffer = view.gbuffer;
+    const BufferRef pool = s.poolRef;
     const BufferRef table = s.tableRef, bound = s.boundRef, blocks = s.blocksRef, statsBuf = s.statsRef;
     const uint32_t ring = s.ringCbv[s.constantsOffset / kRingStride], off = 0;
     const uint32_t rays = (uint32_t)fc.quality.integer("shadow.vsm.search_taps"), steps = (uint32_t)fc.quality.integer("shadow.vsm.filter_taps");

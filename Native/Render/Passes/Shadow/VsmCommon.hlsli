@@ -134,6 +134,8 @@ int2 vsmSlotAbsPage(ConstantBuffer<VsmConstants> c, uint slotInLevel, uint k)
     return o + ((s - (o & (int)(VSM_TABLE - 1))) & (int)(VSM_TABLE - 1));
 }
 
-uint2 vsmPhysBase(ConstantBuffer<VsmConstants> c, uint phys) { return uint2(phys % c.poolPagesX, phys / c.poolPagesX) * VSM_PAGE; }
+// Physical pool: a raw buffer (no texture layouts to transition between the raster's writes and the lookups' reads),
+// pages of VSM_PAGE^2 texels, row-major inside a page. Byte address of texel 'local' of physical page 'phys'.
+uint vsmPoolAddress(uint phys, uint2 local) { return ((phys << 14) + local.y * VSM_PAGE + local.x) * 4; }
 
 #endif

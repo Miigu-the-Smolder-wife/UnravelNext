@@ -4,7 +4,7 @@
 // InterlockedMax (the surface nearest the sun wins); pixels of pages that are not dirty write nothing. It also records,
 // per page, whether wind-affected casters were drawn and their largest displacement bound (wind dirty rule, VsmRelease).
 // userData: level (bits 0-3) | window origin x mod 128 (bits 4-10) | origin y mod 128 (bits 11-17)
-// P[4].x pool UAV (RWTexture2D<uint>), P[4].y page table SRV (raw), P[4].z hMin (float bits), P[4].w hMax (float bits)
+// P[4].x pool UAV (raw), P[4].y page table SRV (raw), P[4].z hMin (float bits), P[4].w hMax (float bits)
 // P[5].x pool pages per row, P[5].y page metadata UAV (VsmPageMeta)
 #include "Passes/Visibility/DepthRaster.hlsli"
 #include "Deformation.hlsli"
@@ -23,9 +23,8 @@ void main(DepthRasterPixel p)
     const float hMin = asfloat(P[4].z), hMax = asfloat(P[4].w);
     const float h = hMax - p.position.z * (hMax - hMin);
     const uint phys = e & VSM_PHYS_MASK;
-    const uint2 base = uint2(phys % P[5].x, phys / P[5].x) * VSM_PAGE;
-    RWTexture2D<uint> pool = ResourceDescriptorHeap[P[4].x];
-    InterlockedMax(pool[base + (px & (VSM_PAGE - 1))], vsmEncode(h));
+    RWByteAddressBuffer pool = ResourceDescriptorHeap[P[4].x];
+    pool.InterlockedMax(vsmPoolAddress(phys, px & (VSM_PAGE - 1)), vsmEncode(h));
     const GpuInstance inst = loadInstance(p.instance);
     if ((inst.flags & INSTANCE_WIND) != 0)
     {
