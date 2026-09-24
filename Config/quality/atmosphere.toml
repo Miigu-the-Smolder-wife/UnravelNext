@@ -1,9 +1,17 @@
-# Owner: S. ARCHITECTURE 2.3 (LUT sizes from the previous engine), 2.4 (froxels).
+# Owner: S. ARCHITECTURE 2.3 (LUT sizes and quadratures), 2.4 (froxels).
 [atmosphere]
-transmittance_lut = [256, 64]
-multiscatter_lut = [32, 32]
-sky_view_lut = [192, 108]
-aerial_perspective = [32, 32, 32]
+transmittance_lut = [256, 64]        # Bruneton parameterisation, optical depth RGBA32F
+transmittance_steps = 128            # Gauss-Legendre-4 segments per texel (convergence: Tests/AtmosphereTests)
+multiscatter_lut = [32, 32]          # (sun cosine, altitude)
+multiscatter_directions = 1024       # Fibonacci sphere directions per texel (sun at the horizon: planet-shadow boundary)
+multiscatter_steps = 64              # quadratic-spaced exact-exponential steps per direction
+# Sky view = the previous engine's far-field table at the camera altitude: 192 azimuths over [0, pi], 128 elevations
+# (64 per side of the true horizon, as the previous engine's 64 per half; the first draft's 108 was coarser).
+sky_view_lut = [192, 128]
+sky_view_segments = 128              # quadratic segments x Gauss-Legendre 4 along each sky ray
+aerial_perspective = [64, 64, 32]    # screen columns x, y (64: the near-horizon rows change fast at long range), quadratic depth slices
+aerial_max_distance_m = 64000        # depth of the last slice
+aerial_steps_per_slice = 4
 
 [atmosphere.froxels]
 tile_px = 24

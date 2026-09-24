@@ -1,13 +1,13 @@
-// Track entry points of S (atmosphere) (INTERFACES_KO.md 5.2). Owned by that track: replace the bodies with the real
-// passes; keep the signatures (Tracks.h). Until then each entry declares no passes and logs once.
+// Track entry points of S (atmosphere) (INTERFACES_KO.md 5.2).
+#include "AtmosphereSystem.h"
+
 #include "unx/render/Tracks.h"
 
 namespace unx::render::tracks
 {
 void atmosphere(FramePassContext& fc)
 {
-    (void)fc;
-    pending("S.atmosphere");
+    atmosphere::record(fc);
 }
 
 void froxels(FramePassContext& fc, const ViewResources& main)
