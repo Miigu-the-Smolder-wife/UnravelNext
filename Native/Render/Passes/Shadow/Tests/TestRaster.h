@@ -77,13 +77,14 @@ public:
                                  k[0] = c.srv(chunkBuf);
                                  k[1] = c.srv(viewBuf);
                                  k[2] = i;
+                                 k[3] = groups;
                                  for (int j = 0; j < 16; ++j) k[16 + j] = req.pixelConstants[j];
                                  c.graphicsConstants(k, 32);
                                  D3D12_VIEWPORT vp{ (float)v.viewportX, (float)v.viewportY, (float)v.viewportWidth, (float)v.viewportHeight, 0, 1 };
                                  D3D12_RECT sc{ (LONG)v.viewportX, (LONG)v.viewportY, (LONG)(v.viewportX + v.viewportWidth), (LONG)(v.viewportY + v.viewportHeight) };
                                  c.cmd->RSSetViewports(1, &vp);
                                  c.cmd->RSSetScissorRects(1, &sc);
-                                 c.cmd->DispatchMesh(groups, 1, 1);
+                                 c.cmd->DispatchMesh(std::min(65535u, groups), (groups + 65534) / 65535, 1);
                              }
                          });
     }
@@ -123,13 +124,13 @@ public:
                              c.cmd->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
                              c.cmd->SetPipelineState(pso);
                              c.bindFrameConstants(constants);
-                             uint32_t k[4] = { c.srv(chunkBuf), c.srv(viewBuf), 0, 0 };
+                             uint32_t k[4] = { c.srv(chunkBuf), c.srv(viewBuf), 0, groups };
                              c.graphicsConstants(k, 4);
                              D3D12_VIEWPORT vp{ 0, 0, (float)w, (float)h, 0, 1 };
                              D3D12_RECT sc{ 0, 0, (LONG)w, (LONG)h };
                              c.cmd->RSSetViewports(1, &vp);
                              c.cmd->RSSetScissorRects(1, &sc);
-                             c.cmd->DispatchMesh(groups, 1, 1);
+                             c.cmd->DispatchMesh(std::min(65535u, groups), (groups + 65534) / 65535, 1);
                          });
     }
 

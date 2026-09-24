@@ -1,11 +1,13 @@
 // unx-kernel: ps_6_6 main
 // Pixel kernel of the VSM page raster through V's depth raster service (INTERFACES 5.3): one raster view per clipmap
 // level, viewport = the level's 16384^2 window. Writes the caster height into the physical page of a dirty slot with
-// InterlockedMax (the surface nearest the sun wins); pixels of pages that are not dirty write nothing.
+// InterlockedMax (the surface nearest the sun wins); pixels of pages that are not dirty write nothing. It also records,
+// per page, whether wind-affected casters were drawn and their largest displacement bound (wind dirty rule, VsmRelease).
 // userData: level (bits 0-3) | window origin x mod 128 (bits 4-10) | origin y mod 128 (bits 11-17)
 // P[4].x pool UAV (RWTexture2D<uint>), P[4].y page table SRV (raw), P[4].z hMin (float bits), P[4].w hMax (float bits)
-// P[5].x pool pages per row
+// P[5].x pool pages per row, P[5].y page metadata UAV (VsmPageMeta)
 #include "Passes/Visibility/DepthRaster.hlsli"
+#include "Deformation.hlsli"
 #include "Passes/Shadow/VsmCommon.hlsli"
 
 void main(DepthRasterPixel p)
@@ -24,4 +26,13 @@ void main(DepthRasterPixel p)
     const uint2 base = uint2(phys % P[5].x, phys / P[5].x) * VSM_PAGE;
     RWTexture2D<uint> pool = ResourceDescriptorHeap[P[4].x];
     InterlockedMax(pool[base + (px & (VSM_PAGE - 1))], vsmEncode(h));
+    const GpuInstance inst = loadInstance(p.instance);
+    if ((inst.flags & INSTANCE_WIND) != 0)
+    {
+        RWStructuredBuffer<VsmPageMeta> meta = ResourceDescriptorHeap[P[5].y];
+        const GpuMesh mesh = loadMesh(inst.mesh);
+        const float amplitude = windOffsetBound(inst, mesh.boundsSphere.xyz, mesh.boundsSphere.w) * length(inst.objectToWorld[0].xyz);
+        InterlockedMax(meta[phys].windAmplitude, asuint(amplitude));  // non-negative floats order as uints
+        InterlockedMax(meta[phys].windCaster, 1u);
+    }
 }

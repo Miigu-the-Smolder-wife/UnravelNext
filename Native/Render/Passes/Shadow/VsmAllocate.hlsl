@@ -3,9 +3,10 @@
 // page stays absent, lookups then fall back to coarser levels), turn requested stale or new pages dirty (rendered this
 // frame: dirty list for clear, raster and page max), and consume the request.
 // P[0].x page table UAV (raw), P[0].y requests UAV (raw), P[0].z page metadata UAV, P[0].w free list UAV (raw)
-// P[1].x dirty list UAV (raw: count, pad, then (slot, phys) pairs), P[1].y stats UAV (raw), P[1].z VSM constants SRV,
-// P[1].w constants offset
-// Stats words: 0 requested, 1 allocated, 2 dirty, 3 pool exhausted, 4 free pages after allocation (VsmFinalize)
+// P[1].x dirty list UAV (raw: count, pad, then (slot, phys) pairs), P[1].y stats UAV (raw), P[1].z VSM constants CBV,
+// P[1].w unused
+// Stats words: 0 requested, 1 allocated, 2 dirty, 3 pool exhausted, 4 free pages after allocation (VsmFinalize),
+// 5 requested by pixels (the rest by propagation)
 #include "Passes/Shadow/VsmCommon.hlsli"
 
 [numthreads(256, 1, 1)]
@@ -17,10 +18,11 @@ void main(uint slot : SV_DispatchThreadID)
     if (req == 0) return;
     requests.Store(slot * 4, 0);
     RWByteAddressBuffer table = ResourceDescriptorHeap[P[0].x];
-    RWStructuredBuffer<uint4> meta = ResourceDescriptorHeap[P[0].z];
+    RWStructuredBuffer<VsmPageMeta> meta = ResourceDescriptorHeap[P[0].z];
     RWByteAddressBuffer stats = ResourceDescriptorHeap[P[1].y];
-    const VsmConstants c = vsmLoadConstants(P[1].z, P[1].w);
+    ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[P[1].z];
     stats.InterlockedAdd(0, 1);
+    if (req & VSM_REQ_PIXEL) stats.InterlockedAdd(20, 1);
     const uint k = slot / VSM_SLOTS_PER_LEVEL;
     const int2 page = vsmSlotAbsPage(c, slot % VSM_SLOTS_PER_LEVEL, k);
     uint2 e = table.Load2(slot * 8);
@@ -40,14 +42,16 @@ void main(uint slot : SV_DispatchThreadID)
         stats.InterlockedAdd(4, 1);
     }
     const uint phys = e.x & VSM_PHYS_MASK;
-    uint4 m = meta[phys];
-    m.x = slot | 0x80000000u;  // owner
-    m.y = c.frame;             // last requested
+    VsmPageMeta m = meta[phys];
+    m.owner = slot | 0x80000000u;
+    m.lastRequested = c.frame;
     if (e.x & VSM_FLAG_STALE)
     {
         e.x = (e.x & ~VSM_FLAG_STALE) | VSM_FLAG_DIRTY;
-        m.z = asuint(c.time);  // render time (wind rule)
-        m.w = VSM_EMPTY;       // page max, rebuilt after the raster
+        m.renderTime = asuint(c.time);
+        m.maxHeight = VSM_EMPTY;  // rebuilt after the raster (VsmPageMax)
+        m.windAmplitude = 0;      // rebuilt by the raster (VsmPagePixel)
+        m.windCaster = 0;
         RWByteAddressBuffer dirty = ResourceDescriptorHeap[P[1].x];
         uint at;
         dirty.InterlockedAdd(0, 1, at);

@@ -146,7 +146,9 @@ int main(int argc, char** argv)
         setCamera(cam.position);
         tf.frame.deltaTime = 1.0f / 60;
 
+        uint64_t recorded = 0;  // frames recorded so far = the VSM's frame number of the last one
         auto runFrame = [&](bool read) {
+            ++recorded;
             Frame f;
             std::shared_ptr<std::vector<uint8_t>> vis, depth, gb, table;
             tf.run([&](FramePassContext& fc) {
@@ -180,9 +182,14 @@ int main(int argc, char** argv)
             logf("%-62s %.4g (limit %.4g) %s\n", what, value, limit, ok ? "ok" : "FAIL");
             if (!ok) ++failures;
         };
+        // Counters of the last recorded frame: they are copied at the start of the next frame and read back once the
+        // GPU has passed it, so a few steady frames follow (the camera and scene do not change in between).
         auto statsAfter = [&]() {
-            runFrame(false);  // harvests the previous frame's counters
-            return shadow::stats(tf.trackState);
+            const uint64_t target = recorded;
+            for (int i = 0; i < 4 && shadow::stats(tf.trackState).frame < target; ++i) runFrame(false);
+            const shadow::VsmStats st = shadow::stats(tf.trackState);
+            if (st.frame != target) fail("VSM statistics of frame %llu not available (latest %llu)", (unsigned long long)target, (unsigned long long)st.frame);
+            return st;
         };
 
         // Compares one frame's visibility against the reference on a pixel grid.

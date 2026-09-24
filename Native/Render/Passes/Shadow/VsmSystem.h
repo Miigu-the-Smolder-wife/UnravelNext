@@ -25,10 +25,11 @@ struct VsmConstantsCpu
     float tanSunRadius;
     uint32_t poolPagesX, poolPagesY, frame, sceneInvalidate;
     float time, lodBias, receiverBiasTexels, maxReceiverSlope;
-    uint32_t cacheFrames, instanceCount, windTexels, pad0;
+    uint32_t cacheFrames, instanceCount, windTexels, windChanged;
+    float cameraUV[2], pad1[2];
     VsmLevelCpu level[12];
 };
-static_assert(sizeof(VsmConstantsCpu) == 64 + 16 * 2 + 12 * 16);
+static_assert(sizeof(VsmConstantsCpu) == 64 + 16 * 3 + 12 * 16);
 
 constexpr uint32_t kLevels = 12, kPage = 128, kTable = 128, kVirtual = 16384;
 constexpr uint32_t kSlots = kLevels * kTable * kTable;
@@ -36,13 +37,18 @@ constexpr uint32_t kSlots = kLevels * kTable * kTable;
 struct VsmStats
 {
     uint64_t frame = 0;          // frame the counters belong to
-    uint32_t requested = 0, allocated = 0, dirty = 0, exhausted = 0, freePages = 0;
+    uint32_t requested = 0, allocated = 0, dirty = 0, exhausted = 0, freePages = 0, pixelRequested = 0;
+    // Visibility passes (all views of the frame): pixels per path (VsmSample.hlsli VSM_PATH_*).
+    uint32_t pathNoCaster = 0, pathRegionLit = 0, pathRegionUmbra = 0, pathSearchLit = 0, pathFiltered = 0, pathDiskLit = 0, pathDiskUmbra = 0;
 };
 
 // shadowPages: requests, dirty rules, allocation and the dirty-page raster for this frame.
 void recordPages(FramePassContext& fc, const ViewResources& main);
 // shadowVisibility: 4 B per pixel (INTERFACES 7.3) for any view whose depth and G-buffer are in 'view'.
 void recordVisibility(FramePassContext& fc, ViewResources& view);
+
+// Diagnostics: the visibility pass writes each pixel's VSM_PATH_* (0xFF = sky) instead of the visibility.
+void setDebugPaths(TrackState& state, bool enabled);
 
 // Counters of the most recent frame whose GPU work has completed (read back without stalling).
 const VsmStats& stats(TrackState& state);

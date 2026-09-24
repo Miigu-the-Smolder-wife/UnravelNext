@@ -22,6 +22,24 @@
 #define VSM_SLOTS_PER_LEVEL (VSM_TABLE * VSM_TABLE)
 #define VSM_SUN_SLOTS (VSM_LEVELS * VSM_SLOTS_PER_LEVEL)
 
+// Block hierarchy per physical page (VsmPageMax): VsmBlock entries for blocks of 8, 16, 32, 64 and 128 texels; level m
+// has (16 >> m)^2 blocks starting at VSM_BLOCK_OFFSET(m).
+struct VsmBlock
+{
+    uint2 range;      // min, max encoded height (min = VSM_EMPTY: the block has a texel without caster)
+    float3 plane;     // least-squares plane of the casters: h - ref ~ a x + b y + c, x, y in page texels
+    float2 residual;  // bounds of h - ref - plane over the block's non-empty texels
+    float ref;        // the page's highest caster
+};
+#define VSM_BLOCK_BYTES 32u
+#define VSM_BLOCK_OFFSET_8 0u
+#define VSM_BLOCK_OFFSET_16 256u
+#define VSM_BLOCK_OFFSET_32 320u
+#define VSM_BLOCK_OFFSET_64 336u
+#define VSM_BLOCK_OFFSET_128 340u
+#define VSM_BLOCK_ENTRIES 341u
+uint vsmBlockOffset(uint m) { return m == 0 ? 0u : m == 1 ? 256u : m == 2 ? 320u : m == 3 ? 336u : 340u; }
+
 // Page table entry .x
 #define VSM_PHYS_MASK 0x003FFFFFu
 #define VSM_FLAG_DIRTY (1u << 29)      // rendered this frame
@@ -38,7 +56,9 @@ struct VsmLevel
     float pad;
 };
 
-// Per-frame constants (VsmSystem.cpp mirrors this layout), read from an upload ring with ByteAddressBuffer::Load.
+// Per-frame constants (VsmSystem.cpp mirrors this layout): a constant buffer view of the frame's slot of an upload
+// ring, read as ConstantBuffer<VsmConstants> (dynamic level indexing is a native constant load; the layout follows the
+// cbuffer packing rules: every float3 is followed by a scalar, VsmLevel is 16 B).
 struct VsmConstants
 {
     float3 lightX;
@@ -55,15 +75,24 @@ struct VsmConstants
     uint cacheFrames;        // unrequested pages are released after this many frames
     uint instanceCount;
     uint windTexels;         // wind moves a caster "beyond a texel" at windTexels texels (normally 1)
-    uint pad0;
-    VsmLevel level[VSM_LEVELS];
+    uint windChanged;        // wind speed or direction changed: pages holding wind casters are stale
+    float2 cameraUV;         // camera in light space: the level windows derive from it (vsmOrigin)
+    float2 pad1;
+    VsmLevel level[VSM_LEVELS];  // CPU copy of the windows (raster views); kernels use vsmTexel / vsmOrigin
 };
 
-VsmConstants vsmLoadConstants(uint buffer, uint offset)
+// Physical page metadata (32 B).
+struct VsmPageMeta
 {
-    ByteAddressBuffer b = ResourceDescriptorHeap[buffer];
-    return b.Load<VsmConstants>(offset);
-}
+    uint owner;          // slot | 0x80000000 while allocated
+    uint lastRequested;  // frame
+    uint renderTime;     // float bits: scene time of the last render (wind rule)
+    uint maxHeight;      // encoded height of the highest caster in the page (blocker search bound)
+    uint windAmplitude;  // float bits: largest wind displacement bound (windOffsetBound x scale) of the casters drawn
+    uint windCaster;     // 1 when a wind-affected caster was drawn into the page
+    uint pad0, pad1;
+};
+
 
 uint vsmEncode(float h)
 {
@@ -73,31 +102,38 @@ uint vsmEncode(float h)
 float vsmDecode(uint e) { return asfloat((e & 0x80000000u) ? (e & 0x7FFFFFFFu) : ~e); }
 #define VSM_EMPTY 0u
 
-float3 vsmLightSpace(VsmConstants c, float3 world) { return float3(dot(world, c.lightX), dot(world, c.lightY), dot(world, c.lightZ)); }
+// Level geometry by arithmetic (a per-pixel level index into the constant buffer would serialise divergent waves):
+// texel 2^(k-10) m and page 2^(k-3) m as exact powers of two; window origin = floor(camera / page) - VSM_TABLE / 2,
+// the same float operations as VsmSystem.cpp.
+float vsmTexel(uint k) { return asfloat((117u + k) << 23); }
+float vsmPageSize(uint k) { return asfloat((124u + k) << 23); }
+int2 vsmOrigin(ConstantBuffer<VsmConstants> c, uint k) { return int2(floor(c.cameraUV / vsmPageSize(k))) - (int)(VSM_TABLE / 2); }
+
+float3 vsmLightSpace(ConstantBuffer<VsmConstants> c, float3 world) { return float3(dot(world, c.lightX), dot(world, c.lightY), dot(world, c.lightZ)); }
 
 // Finest level whose texel is not larger than the receiver's pixel footprint (ARCHITECTURE 2.3: page texel <= pixel).
-uint vsmLevelForFootprint(VsmConstants c, float footprint)
+uint vsmLevelForFootprint(ConstantBuffer<VsmConstants> c, float footprint)
 {
     const float k = floor(log2(max(footprint, 1e-30) * 1024.0) + c.lodBias);  // tau_0 = 2^-10 m
     return (uint)clamp(k, 0.0, float(VSM_LEVELS - 1));
 }
 
 // Absolute texel (integer) of a light-space position at level k; floor division keeps negative coordinates exact.
-int2 vsmAbsTexel(VsmConstants c, float2 uv, uint k) { return int2(floor(uv / c.level[k].texel)); }
+int2 vsmAbsTexel(ConstantBuffer<VsmConstants> c, float2 uv, uint k) { return int2(floor(uv / vsmTexel(k))); }
 int2 vsmAbsPage(int2 absTexel) { return absTexel >> (int)VSM_PAGE_SHIFT; }  // arithmetic shift = floor division
-bool vsmInWindow(VsmConstants c, int2 absPage, uint k) { return all(absPage >= c.level[k].origin) && all(absPage < c.level[k].origin + (int)VSM_TABLE); }
+bool vsmInWindow(ConstantBuffer<VsmConstants> c, int2 absPage, uint k) { return all(absPage >= vsmOrigin(c, k)) && all(absPage < vsmOrigin(c, k) + (int)VSM_TABLE); }
 uint vsmSlot(int2 absPage, uint k) { return k * VSM_SLOTS_PER_LEVEL + (uint(absPage.y) & (VSM_TABLE - 1)) * VSM_TABLE + (uint(absPage.x) & (VSM_TABLE - 1)); }
 uint vsmTag(int2 absPage) { return (uint(absPage.x >> (int)VSM_TABLE_SHIFT) & 0xFFFFu) | (uint(absPage.y >> (int)VSM_TABLE_SHIFT) << 16); }
 
 // Absolute page held by a slot of level k under the level's current window.
-int2 vsmSlotAbsPage(VsmConstants c, uint slotInLevel, uint k)
+int2 vsmSlotAbsPage(ConstantBuffer<VsmConstants> c, uint slotInLevel, uint k)
 {
     const int2 s = int2(slotInLevel & (VSM_TABLE - 1), slotInLevel >> VSM_TABLE_SHIFT);
-    const int2 o = c.level[k].origin;
+    const int2 o = vsmOrigin(c, k);
     // The unique a in [o, o + TABLE) with a = s (mod TABLE).
     return o + ((s - (o & (int)(VSM_TABLE - 1))) & (int)(VSM_TABLE - 1));
 }
 
-uint2 vsmPhysBase(VsmConstants c, uint phys) { return uint2(phys % c.poolPagesX, phys / c.poolPagesX) * VSM_PAGE; }
+uint2 vsmPhysBase(ConstantBuffer<VsmConstants> c, uint phys) { return uint2(phys % c.poolPagesX, phys / c.poolPagesX) * VSM_PAGE; }
 
 #endif

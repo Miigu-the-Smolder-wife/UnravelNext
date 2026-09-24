@@ -11,14 +11,16 @@ struct VsmResources
 {
     ByteAddressBuffer table;
     Texture2D<uint> pool;
-    StructuredBuffer<uint4> meta;
-    VsmConstants c;
+    ByteAddressBuffer searchBound;  // VsmSearchGrid MODE 1: per slot, highest caster over its 3 x 3 pages
+    ByteAddressBuffer blocks;       // VsmPageMax: min/max hierarchy per physical page
+    uint cbv;  // VsmConstants constant buffer view (a ConstantBuffer member makes DXC fail; bound per function)
 };
 
 // Page entry of an absolute page at level k, or 0 when not resident or out of the window.
 uint vsmEntry(VsmResources r, int2 page, uint k)
 {
-    if (!vsmInWindow(r.c, page, k)) return 0;
+    ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
+    if (!vsmInWindow(vc, page, k)) return 0;
     const uint2 e = r.table.Load2(vsmSlot(page, k) * 8);
     return ((e.x & VSM_FLAG_RESIDENT) != 0 && e.y == vsmTag(page)) ? e.x : 0;
 }
@@ -27,11 +29,12 @@ uint vsmEntry(VsmResources r, int2 page, uint k)
 // the same height field at a coarser texel). Returns VSM_EMPTY when no level holds it.
 uint vsmHeightAt(VsmResources r, int2 texel, uint k)
 {
+    ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
     [loop] for (uint j = k; j < VSM_LEVELS; ++j)
     {
         const int2 t = texel >> (int)(j - k);
         const uint e = vsmEntry(r, t >> (int)VSM_PAGE_SHIFT, j);
-        if (e != 0) return r.pool.Load(int3(vsmPhysBase(r.c, e & VSM_PHYS_MASK) + uint2(t & (int)(VSM_PAGE - 1)), 0));
+        if (e != 0) return r.pool.Load(int3(vsmPhysBase(vc, e & VSM_PHYS_MASK) + uint2(t & (int)(VSM_PAGE - 1)), 0));
     }
     return VSM_EMPTY;
 }
@@ -48,46 +51,149 @@ struct VsmReceiver
 };
 
 // Height the receiver's plane has under texel tj of level k, plus the level's tolerance.
-float vsmPlaneHeight(VsmConstants c, VsmReceiver rc, int2 tj, uint k)
+float vsmPlaneHeight(ConstantBuffer<VsmConstants> c, VsmReceiver rc, int2 tj, uint k)
 {
-    const float2 centre = (float2(tj) + 0.5) * c.level[k].texel;
-    return rc.h + dot(rc.slope, centre - rc.uv) + rc.bias * c.level[k].texel * (1 + length(rc.slope));
+    const float2 centre = (float2(tj) + 0.5) * vsmTexel(k);
+    return rc.h + dot(rc.slope, centre - rc.uv) + rc.bias * vsmTexel(k) * (1 + length(rc.slope));
 }
 
-// Fraction (bilinear over the 2 x 2 texels around uv, level k) of columns that rise above the receiver's plane.
+// The 2 x 2 texels around uv on the finest resident level at or above k: one page-table walk per tap and one gather
+// when the four texels share a page (127 of 128 positions per axis); across a page border each texel is looked up.
+struct VsmQuad
+{
+    uint4 h;      // encoded heights of t0, t0 + (1,0), t0 + (0,1), t0 + (1,1)
+    int2 t0;
+    float2 f;     // bilinear weights
+    uint level;   // level the texels come from
+};
+
+VsmQuad vsmFetchQuad(VsmResources r, float2 uv, uint k)
+{
+    ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
+    VsmQuad q;
+    q.h = VSM_EMPTY;
+    q.level = k;
+    q.t0 = 0;
+    q.f = 0;
+    [loop] for (uint j = k; j < VSM_LEVELS; ++j)
+    {
+        const float2 t = uv / vsmTexel(j) - 0.5;
+        const int2 t0 = int2(floor(t));
+        const uint e = vsmEntry(r, t0 >> (int)VSM_PAGE_SHIFT, j);
+        if (e == 0) continue;
+        q.t0 = t0;
+        q.f = t - float2(t0);
+        q.level = j;
+        const uint2 local = uint2(t0 & (int)(VSM_PAGE - 1));
+        if (all(local < VSM_PAGE - 1))
+        {
+            const float2 poolSize = float2(vc.poolPagesX, vc.poolPagesY) * VSM_PAGE;
+            const float2 at = (float2(vsmPhysBase(vc, e & VSM_PHYS_MASK) + local) + 1.0) / poolSize;
+            const uint4 g = r.pool.GatherRed(g_pointClamp, at);  // (0,1), (1,1), (1,0), (0,0)
+            q.h = uint4(g.w, g.z, g.x, g.y);
+        }
+        else
+        {
+            q.h.x = r.pool.Load(int3(vsmPhysBase(vc, e & VSM_PHYS_MASK) + local, 0));
+            q.h.y = vsmHeightAt(r, t0 + int2(1, 0), j);
+            q.h.z = vsmHeightAt(r, t0 + int2(0, 1), j);
+            q.h.w = vsmHeightAt(r, t0 + int2(1, 1), j);
+        }
+        return q;
+    }
+    return q;
+}
+
+// Fraction (bilinear over the 2 x 2 texels around uv, finest resident level at or above k) of columns that rise above
+// the receiver's plane.
 float vsmOccupancy(VsmResources r, VsmReceiver rc, float2 uv, uint k)
 {
-    const float2 t = uv / r.c.level[k].texel - 0.5;
-    const int2 t0 = int2(floor(t));
-    const float2 f = t - float2(t0);
+    ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
+    const VsmQuad q = vsmFetchQuad(r, uv, k);
     float o[4];
     [unroll] for (uint j = 0; j < 4; ++j)
-    {
-        const int2 tj = t0 + int2(j & 1, j >> 1);
-        o[j] = vsmHeightAt(r, tj, k) > vsmEncode(vsmPlaneHeight(r.c, rc, tj, k)) ? 1.0 : 0.0;
-    }
-    return lerp(lerp(o[0], o[1], f.x), lerp(o[2], o[3], f.x), f.y);
+        o[j] = q.h[j] > vsmEncode(vsmPlaneHeight(vc, rc, q.t0 + int2(j & 1, j >> 1), q.level)) ? 1.0 : 0.0;
+    return lerp(lerp(o[0], o[1], q.f.x), lerp(o[2], o[3], q.f.x), q.f.y);
 }
 
-// Highest caster over the 3 x 3 pages around uv at level k (resident ones; coarser level where absent).
+// Highest caster the blocker search of a receiver at uv (level k) can meet: one read of the search bound grid.
 float vsmSearchHeight(VsmResources r, float2 uv, uint k)
 {
-    uint m = VSM_EMPTY;
-    const int2 page = vsmAbsPage(vsmAbsTexel(r.c, uv, k));
-    [unroll] for (int dy = -1; dy <= 1; ++dy)
-        [unroll] for (int dx = -1; dx <= 1; ++dx)
+    ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
+    const int2 page = vsmAbsPage(vsmAbsTexel(vc, uv, k));
+    [loop] for (uint j = k; j < VSM_LEVELS; ++j)
+    {
+        const int2 a = page >> (int)(j - k);
+        if (vsmInWindow(vc, a, j))
         {
-            [loop] for (uint j = k; j < VSM_LEVELS; ++j)
-            {
-                const uint e = vsmEntry(r, (page + int2(dx, dy)) >> (int)(j - k), j);
-                if (e != 0)
-                {
-                    m = max(m, r.meta[e & VSM_PHYS_MASK].w);
-                    break;
-                }
-            }
+            const uint m = r.searchBound.Load(vsmSlot(a, j) * 4);
+            return m == VSM_EMPTY ? -3.0e38 : vsmDecode(m);
         }
-    return m == VSM_EMPTY ? -3.0e38 : vsmDecode(m);
+    }
+    return -3.0e38;
+}
+
+// Exact classification of the texels in the square [uv - radius, uv + radius] against the receiver's plane, from the
+// finest level at or above k on which the square fits 2 x 2 blocks and every page it touches is resident:
+//   VSM_REGION_LIT: no caster texel rises above the plane (+ tolerance); VSM_REGION_UMBRA: every texel is a caster above
+//   it; VSM_REGION_MIXED otherwise. Per block, texel height <= block plane + residual max; the block plane minus the
+//   receiver plane is linear, so its extremes over the block are at the block's corners.
+#define VSM_REGION_MIXED 0u
+#define VSM_REGION_LIT 1u
+#define VSM_REGION_UMBRA 2u
+
+uint vsmRegionClassify(VsmResources r, VsmReceiver rc, float2 uv, float radius, uint k)
+{
+    ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
+    [loop] for (uint j = k; j < VSM_LEVELS; ++j)
+    {
+        const float texel = vsmTexel(j);
+        const int2 t0 = int2(floor((uv - radius) / texel)), t1 = int2(floor((uv + radius) / texel));
+        const uint size = (uint)max(t1.x - t0.x, t1.y - t0.y) + 1;
+        const uint m = size <= 8 ? 0u : (uint)ceil(log2(size / 8.0));
+        if (m > 4) continue;                    // wider than two pages here: the next level (texel x 2)
+        const int shift = 3 + (int)m;           // texel -> block
+        const int perPage = (int)(16u >> m);    // blocks per page axis
+        const int2 b0 = t0 >> shift, b1 = t1 >> shift;
+        uint e[4];
+        bool resident = true;
+        [unroll] for (uint i = 0; i < 4; ++i)
+        {
+            const int2 b = int2((i & 1) ? b1.x : b0.x, (i & 2) ? b1.y : b0.y);
+            e[i] = vsmEntry(r, b >> (int)(4 - m), j);
+            resident = resident && e[i] != 0;
+        }
+        if (!resident) continue;
+        const float tolerance = rc.bias * texel * (1 + length(rc.slope));
+        const float blockTexels = float(8u << m);
+        bool lit = true, umbra = true;
+        [unroll] for (uint i2 = 0; i2 < 4; ++i2)
+        {
+            const int2 b = int2((i2 & 1) ? b1.x : b0.x, (i2 & 2) ? b1.y : b0.y);
+            const int2 page = b >> (int)(4 - m);
+            const uint2 local = uint2(b & (perPage - 1));
+            const VsmBlock blk = r.blocks.Load<VsmBlock>(((e[i2] & VSM_PHYS_MASK) * VSM_BLOCK_ENTRIES + vsmBlockOffset(m) + local.y * perPage + local.x) * VSM_BLOCK_BYTES);
+            if (blk.range.y == VSM_EMPTY)
+            {
+                umbra = false;  // no caster at all: lit block
+                continue;
+            }
+            // D(x, y) = block plane - receiver plane at page texel coordinates (x, y), over the block's corners.
+            float dlo = 3.0e38, dhi = -3.0e38;
+            [unroll] for (uint q = 0; q < 4; ++q)
+            {
+                const float2 xy = (float2(local) + float2(q & 1, q >> 1)) * blockTexels;               // page texels
+                const float2 world = (float2(page * (int)VSM_PAGE) + xy) * texel;                        // light-space lateral
+                const float d = blk.ref + dot(blk.plane.xy, xy) + blk.plane.z - (rc.h + dot(rc.slope, world - rc.uv) + tolerance);
+                dlo = min(dlo, d);
+                dhi = max(dhi, d);
+            }
+            lit = lit && dhi + blk.residual.y <= 0;
+            umbra = umbra && blk.range.x != VSM_EMPTY && dlo + blk.residual.x > 0;
+        }
+        return lit ? VSM_REGION_LIT : umbra ? VSM_REGION_UMBRA : VSM_REGION_MIXED;
+    }
+    return VSM_REGION_MIXED;
 }
 
 // Sunflower point i of n in the unit disk (equal area).
@@ -99,26 +205,35 @@ float2 vsmDiskPoint(uint i, uint n)
 }
 
 // Level at or above k whose texel is closest to (not above) 'size' metres.
-uint vsmLevelForSize(VsmConstants c, uint k, float size)
+uint vsmLevelForSize(ConstantBuffer<VsmConstants> c, uint k, float size)
 {
-    return min(k + (uint)max(0.0, floor(log2(max(size / c.level[k].texel, 1.0)))), VSM_LEVELS - 1);
+    return min(k + (uint)max(0.0, floor(log2(max(size / vsmTexel(k), 1.0)))), VSM_LEVELS - 1);
 }
 
-// Sun visibility in [0, 1] of a receiver at world position p with shading normal n and pixel footprint (m).
+// Sun visibility in [0, 1] of a receiver at world position p with geometric normal n and pixel footprint (m).
 // A column of the height field at lateral offset q from the receiver, at height d above it, blocks exactly the disk
 // directions within one texel of q / (d tan theta_s): an occluder at a single height d_b blocks the part of the disk
 // that its footprint covers inside the lateral disk of radius d_b tan theta_s. So:
-//  1. reach: the highest caster over the neighbouring pages (page maxima) bounds d; nothing above -> lit;
+//  1. reach: the highest caster over the neighbouring pages (search bound grid) bounds d; nothing above -> lit; the block
+//     hierarchy over the square around the reach disk settles lit (no caster texel above the receiver's plane) or
+//     umbra (every texel above it) exactly (vsmSunClassify);
 //  2. blocker height: `searchTaps` bilinear taps over the reach disk, on the level whose texel matches their spacing;
 //     d_b = mean height above the receiver of the texels that can block some sun direction; none -> lit;
 //  3. visibility = 1 - mean occupancy of `filterTaps` bilinear taps (sunflower) over the disk of radius d_b tan theta_s,
-//     taken from the level whose texel matches their spacing, so the result is continuous in the receiver position.
+//     taken from the level whose texel matches their spacing (continuous in the receiver position), unless the block
+//     hierarchy settles the disk's square (vsmSunPenumbra).
 // Exact for an occluder at one height above the receiver when the taps resolve its footprint; with blockers at several
 // heights d_b is their mean (contact hardening follows the nearest dominant blocker). No noise, no per-pixel pattern.
-float vsmSunVisibility(VsmResources r, float3 p, float3 n, float footprint, float tanSun, uint searchTaps, uint filterTaps)
+#define VSM_PATH_NO_CASTER 0u      // nothing above the receiver within reach
+#define VSM_PATH_REGION_LIT 1u     // block hierarchy over the reach square: no texel above the plane
+#define VSM_PATH_REGION_UMBRA 2u   // block hierarchy over the reach square: every texel above the plane
+#define VSM_PATH_SEARCH_LIT 3u     // blocker search found no blocker that can shade
+#define VSM_PATH_FILTERED 4u       // penumbra filter
+#define VSM_PATH_DISK_LIT 5u       // block hierarchy over the penumbra disk: no texel above the plane
+#define VSM_PATH_DISK_UMBRA 6u     // block hierarchy over the penumbra disk: every texel above the plane
+
+VsmReceiver vsmMakeReceiver(ConstantBuffer<VsmConstants> c, float3 p, float3 n)
 {
-    const VsmConstants c = r.c;
-    const uint k = vsmLevelForFootprint(c, footprint);
     const float3 ls = vsmLightSpace(c, p);
     const float3 nl = vsmLightSpace(c, n);
     VsmReceiver rc;
@@ -127,40 +242,84 @@ float vsmSunVisibility(VsmResources r, float3 p, float3 n, float footprint, floa
     const float2 slope = -nl.xy / max(abs(nl.z), 1e-4);
     rc.slope = slope * min(1.0, c.maxReceiverSlope / max(length(slope), 1e-6));
     rc.bias = c.receiverBiasTexels;
-    const float dmax = vsmSearchHeight(r, ls.xy, k) - ls.z;
-    if (dmax <= 0) return 1;
-    // 2. Blocker height over the reach disk.
-    const float reach = dmax * tanSun;
+    return rc;
+}
+
+// Steps 1: VSM_REGION_LIT / VSM_REGION_UMBRA when settled, else VSM_REGION_MIXED with the level and reach for step 2.
+uint vsmSunClassify(VsmResources r, VsmReceiver rc, float footprint, float tanSun, out uint k, out float reach, out uint path)
+{
+    ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
+    k = vsmLevelForFootprint(vc, footprint);
+    reach = 0;
+    path = VSM_PATH_NO_CASTER;
+    const float dmax = vsmSearchHeight(r, rc.uv, k) - rc.h;
+    if (dmax <= 0) return VSM_REGION_LIT;
+    reach = dmax * tanSun;
+    const uint cls = vsmRegionClassify(r, rc, rc.uv, reach, k);
+    path = cls == VSM_REGION_LIT ? VSM_PATH_REGION_LIT : cls == VSM_REGION_UMBRA ? VSM_PATH_REGION_UMBRA : VSM_PATH_FILTERED;
+    return cls;
+}
+
+// Steps 2 and 3 for a receiver vsmSunClassify left mixed.
+float vsmSunPenumbra(VsmResources r, VsmReceiver rc, uint k, float reach, float tanSun, uint searchTaps, uint filterTaps, out uint path)
+{
+    ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[r.cbv];
     const uint ks = vsmLevelForSize(c, k, reach * sqrt(ATMO_PI_FOR_VSM / searchTaps));
     float sum = 0, count = 0;
     [loop] for (uint i = 0; i < searchTaps; ++i)
     {
-        const float2 t = (ls.xy + vsmDiskPoint(i, searchTaps) * reach) / c.level[ks].texel - 0.5;
-        const int2 t0 = int2(floor(t));
+        const VsmQuad q = vsmFetchQuad(r, rc.uv + vsmDiskPoint(i, searchTaps) * reach, ks);
+        const float texel = vsmTexel(q.level);
         [unroll] for (uint j = 0; j < 4; ++j)
         {
-            const int2 tj = t0 + int2(j & 1, j >> 1);
-            const uint e = vsmHeightAt(r, tj, ks);
-            const float plane = vsmPlaneHeight(c, rc, tj, ks);
-            if (e <= vsmEncode(plane)) continue;
-            const float d = vsmDecode(e) - plane;
+            const int2 tj = q.t0 + int2(j & 1, j >> 1);
+            const float plane = vsmPlaneHeight(c, rc, tj, q.level);
+            if (q.h[j] <= vsmEncode(plane)) continue;
+            const float d = vsmDecode(q.h[j]) - plane;
             // Lateral distance of the texel from the receiver (less half a texel diagonal) within the cone it can shade.
-            const float2 centre = (float2(tj) + 0.5) * c.level[ks].texel - ls.xy;
-            if (length(centre) - 0.7071 * c.level[ks].texel <= d * tanSun)
+            const float2 centre = (float2(tj) + 0.5) * texel - rc.uv;
+            if (length(centre) - 0.7071 * texel <= d * tanSun)
             {
                 sum += d;
                 count += 1;
             }
         }
     }
-    if (count == 0) return 1;
-    // 3. Occupancy over the penumbra disk.
+    if (count == 0)
+    {
+        path = VSM_PATH_SEARCH_LIT;
+        return 1;
+    }
     const float radius = (sum / count) * tanSun;
+    const uint diskClass = vsmRegionClassify(r, rc, rc.uv, radius, k);
+    if (diskClass == VSM_REGION_LIT)
+    {
+        path = VSM_PATH_DISK_LIT;
+        return 1;
+    }
+    if (diskClass == VSM_REGION_UMBRA)
+    {
+        path = VSM_PATH_DISK_UMBRA;
+        return 0;
+    }
+    path = VSM_PATH_FILTERED;
     const uint kf = vsmLevelForSize(c, k, radius * sqrt(ATMO_PI_FOR_VSM / filterTaps));
     float occ = 0;
-    [loop] for (uint i = 0; i < filterTaps; ++i)
-        occ += vsmOccupancy(r, rc, ls.xy + vsmDiskPoint(i, filterTaps) * radius, kf);
+    [loop] for (uint i2 = 0; i2 < filterTaps; ++i2)
+        occ += vsmOccupancy(r, rc, rc.uv + vsmDiskPoint(i2, filterTaps) * radius, kf);
     return 1 - occ / filterTaps;
+}
+
+float vsmSunVisibility(VsmResources r, float3 p, float3 n, float footprint, float tanSun, uint searchTaps, uint filterTaps, out uint path)
+{
+    ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
+    const VsmReceiver rc = vsmMakeReceiver(vc, p, n);
+    uint k;
+    float reach;
+    const uint cls = vsmSunClassify(r, rc, footprint, tanSun, k, reach, path);
+    if (cls == VSM_REGION_LIT) return 1;
+    if (cls == VSM_REGION_UMBRA) return 0;
+    return vsmSunPenumbra(r, rc, k, reach, tanSun, searchTaps, filterTaps, path);
 }
 
 #endif
