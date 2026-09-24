@@ -46,7 +46,7 @@ void main(uint tid : SV_GroupThreadID, uint3 gid : SV_GroupID, out vertices Fake
         const bool front = dot(cross(w1 - w0, w2 - w0), g_cameraPosition - w0) > 0;
         const uint material = clusterMaterial(inst, c);
         const GpuMaterial m = loadMaterial(material);
-        prims[tid].visId = (vcIndex << VIS_TRIANGLE_BITS) | tid;
+        prims[tid].visId = packVisId(vcIndex, tid);
         prims[tid].material = material;
         prims[tid].cull = !front && (m.classFlags & MATERIAL_TWO_SIDED) == 0;
     }

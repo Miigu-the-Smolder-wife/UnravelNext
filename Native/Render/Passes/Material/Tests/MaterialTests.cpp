@@ -153,9 +153,9 @@ void pixelRay(const ViewDesc& v, double px, double py, D3& D, D3& Dx, D3& Dy)
 
 Replica replicate(const TestFrame& tf, const ViewDesc& view, uint32_t visId, uint32_t px, uint32_t py)
 {
-    const gpu::VisibleCluster vc = tf.vis.visible.at(visId >> 7);
+    const gpu::VisibleCluster vc = tf.vis.visible.at((visId - 1) >> 7);  // INTERFACES 7.1 v1.5: stored + 1
     const gpu::Cluster& c = tf.vis.clusters.clusters.at(vc.cluster);
-    const uint32_t packed = tf.vis.clusters.clusterTriangles.at(c.triangleOffset + (visId & 127));
+    const uint32_t packed = tf.vis.clusters.clusterTriangles.at(c.triangleOffset + ((visId - 1) & 127));
     const scene::Instance& inst = tf.sceneData.instances.at(vc.instance);
     const scene::Mesh& mesh = tf.sceneData.meshes.at(inst.mesh);
     D3 P[3], N[3];
@@ -394,7 +394,7 @@ void testResolve(TestFrame& tf, Report& report)
             for (uint32_t x = 0; x < W; ++x)
             {
                 const uint32_t id = texelOf<uint32_t>(*vis, W, x, y);
-                if (id == 0xFFFFFFFFu) continue;
+                if (id == 0) continue;  // VIS_NONE
                 ++surfaces;
                 const Replica r = replicate(tf, viewDesc, id, x, y);
                 float4 g[3];
@@ -412,7 +412,7 @@ void testResolve(TestFrame& tf, Report& report)
                 ePos = std::max(ePos, pe);
                 if ((g[2].w > 0.5f) != r.front) ++frontMismatch;
 
-                const gpu::VisibleCluster vc = tf.vis.visible[id >> 7];
+                const gpu::VisibleCluster vc = tf.vis.visible[(id - 1) >> 7];
                 const uint32_t matIndex = tf.vis.clusters.clusters[vc.cluster].material;
                 const scene::Material& mat = s.materials[matIndex];
                 const double alpha = std::max((double)mat.roughness * mat.roughness, 1e-4);
@@ -471,12 +471,12 @@ void testResolve(TestFrame& tf, Report& report)
                     for (uint32_t x = tx * 8; x < std::min(W, tx * 8 + 8); ++x)
                     {
                         const uint32_t id = texelOf<uint32_t>(*vis, W, x, y);
-                        if (id == 0xFFFFFFFFu)
+                        if (id == 0)
                         {
                             mask |= 1u << (uint32_t)material::ShadeClass::Sky;
                             continue;
                         }
-                        const scene::Material& mat = s.materials[tf.vis.clusters.clusters[tf.vis.visible[id >> 7].cluster].material];
+                        const scene::Material& mat = s.materials[tf.vis.clusters.clusters[tf.vis.visible[(id - 1) >> 7].cluster].material];
                         mask |= 1u << (uint32_t)(mat.cls == scene::MaterialClass::Subsurface ? material::ShadeClass::Subsurface : material::ShadeClass::Opaque);
                         const uint2 packed = texelOf<uint2>(*gb, W, x, y);
                         D3 D, Dx, Dy;

@@ -12,10 +12,7 @@
 // determinant.
 #ifndef UNX_M_MATERIAL_SURFACE_HLSLI
 #define UNX_M_MATERIAL_SURFACE_HLSLI
-// VisBuffer.hlsli (core) names a parameter 'triangle', an HLSL keyword; rename it for the include until core fixes it.
-#define triangle visTriangleParameter
 #include "VisBuffer.hlsli"
-#undef triangle
 #include "Deformation.hlsli"
 
 // World direction of the ray through a pixel position (pixel units, centre = +0.5) and its derivatives per pixel.

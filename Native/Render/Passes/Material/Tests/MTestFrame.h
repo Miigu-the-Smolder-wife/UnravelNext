@@ -153,7 +153,8 @@ public:
         list = uploadStatic(device, v.data(), v.size() * sizeof(gpu::VisibleCluster), L"M fake visible clusters");
     }
 
-    // Creates view.depth / visId / visibleClusters and records the clear + raster passes.
+    // Creates view.depth / visId / visibleClusters and records the raster pass (targets cleared to VIS_NONE = 0 and
+    // reversed-Z far = 0, INTERFACES 7.1 v1.5).
     void record(FramePassContext& fc, ViewResources& view)
     {
         const uint32_t W = view.view.width, H = view.view.height;
@@ -172,21 +173,6 @@ public:
         const BufferRef vcl = view.visibleClusters;
         const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
         const uint32_t groups = (uint32_t)visible.size();
-        // VIS_NONE (0xFFFFFFFF) has no float clear colour (a UINT clear converts 2^32 to 0), so a compute pass writes it;
-        // the render-target clear before it is the initialisation the debug layer requires of aliased render targets.
-        ID3D12PipelineState* clear = fc.shaders.compute("Passes/Material/Tests/FakeVisClear");
-        fc.graph.addPass("m.test.fakevis.init", QueueType::Graphics, [&](PassBuilder& b) { b.use(vis, Use::RenderTarget); },
-                         [=](PassContext& c) {
-                             const float zero[4] = {};
-                             c.cmd->ClearRenderTargetView(c.rtv(vis), zero, 0, nullptr);
-                         });
-        fc.graph.addPass("m.test.fakevis.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(vis, Use::UavCompute); },
-                         [=](PassContext& c) {
-                             const uint32_t k[4] = { c.uav(vis), W, H, 0 };
-                             c.cmd->SetPipelineState(clear);
-                             c.computeConstants(k, 4);
-                             c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
-                         });
         fc.graph.addPass("m.test.fakevis.raster", QueueType::Graphics,
                          [&](PassBuilder& b) {
                              b.use(vis, Use::RenderTarget);
@@ -195,6 +181,8 @@ public:
                          },
                          [=](PassContext& c) {
                              const D3D12_CPU_DESCRIPTOR_HANDLE rtv = c.rtv(vis), dsv = c.dsv(depth);
+                             const float zero[4] = {};
+                             c.cmd->ClearRenderTargetView(rtv, zero, 0, nullptr);
                              c.cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
                              c.cmd->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
                              D3D12_VIEWPORT vp{ 0, 0, (float)W, (float)H, 0, 1 };
@@ -294,6 +282,9 @@ public:
         v.frameConstants = fc.frameConstantsFor(v.view);
         return v;
     }
+
+    // Keeps a resource alive until the current frame has finished on the GPU (staging buffers of test passes).
+    void keep(ComPtr<ID3D12Resource> r) { keepAlive.push_back(std::move(r)); }
 
     static uint32_t rowPitch(uint32_t width, uint32_t bytesPerTexel) { return (width * bytesPerTexel + 255) & ~255u; }
 
