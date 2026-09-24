@@ -5,9 +5,16 @@ cluster_vertices = 64             # meshlet vertex limit (mesh shader output; ma
 lod_max_relative_width_error = 0.25  # a group may simplify only with error <= this x its narrowest feature width;
                                      # thin geometry is never thinned by LOD (far thin geometry goes to band C bricks)
 lod_error_px = 1.0                # projected LOD error threshold
+occlusion_culling = true          # main view two-phase HiZ occlusion (false only for conservativeness tests)
 band_a_min_width_px = 1.5         # w_px >= this: vis buffer + analytic edge coverage
 band_c_max_width_px = 0.25        # w_px < this (or too many fragments): aggregate bricks
 band_c_max_fragments_per_pixel = 8
 coverage_subsamples = 32          # in-pixel fragment overlap ordering mask
 brick_resolution = 16             # band C voxel brick edge
 strands_per_pixel_max = 2         # hair/grass LOD: blades or strands per pixel width before switching to bricks
+# Capacities of one cull run (a view or a raster-service request). Exceeding one drops geometry and is reported in
+# unx::visibility::Stats::overflow (tests and gates fail on it); they are sizes, not quality settings.
+max_visible_clusters = 1048576    # visible-list entries (each draw list has the same capacity)
+max_node_items = 4194304          # hierarchy traversal work items (instance, node) of both phases
+max_group_items = 1048576         # hierarchy leaves reached (instance, group)
+max_deferred_items = 1048576      # phase-1 occluded instances / nodes / clusters retested in phase 2
