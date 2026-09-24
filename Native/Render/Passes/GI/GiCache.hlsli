@@ -185,16 +185,18 @@ float3 giShIrradiance(B b, GiHeader h, uint entry, float3 n, out float sunVisibi
     return max(e * GI_LOAD_SCALE, 0.0);
 }
 
-// Irradiance (indirect + sky, no direct sun) at a surface point: trilinear over the 8 cells of the point's level and
-// normal class, entries that exist and have been updated at least once (renormalised); the next coarser level when none.
+// Irradiance (indirect + sky, no direct sun) at a surface point: trilinear over the 8 cells of the point's level (at least
+// minLevel) and normal class, entries that exist and have been updated at least once (renormalised); coarser levels when
+// none does (up to GI_LEVEL_CLIMB more: points no probe sees only have the coarse cells GI rays created there).
+#define GI_LEVEL_CLIMB 6u
 template <typename B>
-float3 giCacheIrradianceAt(B b, GiHeader h, float3 worldPos, float3 normal, out float weight)
+float3 giCacheIrradianceAt(B b, GiHeader h, float3 worldPos, float3 normal, uint minLevel, out float weight)
 {
     const uint nc = giNormalClass(normal);
-    uint level = giLevel(h, worldPos);
+    uint level = max(giLevel(h, worldPos), minLevel);
     float3 sum = 0;
     weight = 0;
-    [loop] for (uint attempt = 0; attempt < 2 && weight <= 0; ++attempt, ++level)
+    [loop] for (uint attempt = 0; attempt < GI_LEVEL_CLIMB && weight <= 0 && level <= h.maxLevel; ++attempt, ++level)
     {
         const float s = giCellSize(h, level);
         const float3 f = worldPos / s - 0.5;
@@ -220,7 +222,7 @@ float3 giCacheIrradiance(GiSrvs s, float3 worldPos, float3 normal)
     ByteAddressBuffer b = ResourceDescriptorHeap[s.cache];
     const GiHeader h = giHeader(b);
     float w;
-    return giCacheIrradianceAt(b, h, worldPos, normal, w);
+    return giCacheIrradianceAt(b, h, worldPos, normal, 0, w);
 }
 
 // Anchor: float3 position, uint normal (octahedral snorm16 x 2), 16 B.

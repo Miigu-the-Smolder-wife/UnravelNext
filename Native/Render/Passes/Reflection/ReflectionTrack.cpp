@@ -1,13 +1,17 @@
-// Track entry points of R (reflection) (INTERFACES_KO.md 5.2). Owned by that track: replace the bodies with the real
-// passes; keep the signatures (Tracks.h). Until then each entry declares no passes and logs once.
+// Track entry point of R (reflections, INTERFACES_KO.md 5.2; ARCHITECTURE 2.6, 4.1 C4).
+#include "unx/refl/ReflectionSystem.h"
 #include "unx/render/Tracks.h"
 
 namespace unx::render::tracks
 {
 void reflections(FramePassContext& fc, ViewResources& main)
 {
-    (void)fc;
-    (void)main;
-    pending("R.reflections");
+    // Inputs: V's depth, M's G-buffer (and reflection lobe tiles when M provides them), R's GI of this frame.
+    if (!main.depth.valid() || !main.gbuffer.valid() || !main.screenProbes.valid() || !fc.resources.giCache.valid())
+    {
+        pending("R.reflections (waits for V depth, M G-buffer and R GI)");
+        return;
+    }
+    refl::ReflectionSystem::get(fc).record(fc, main, rt::RayScene::get(fc));
 }
 } // namespace unx::render::tracks

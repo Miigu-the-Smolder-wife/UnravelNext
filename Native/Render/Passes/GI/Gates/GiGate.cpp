@@ -1,4 +1,4 @@
-// R gate: GI and ray tracing structures at 4K and 1440p (ARCHITECTURE 2.5 GI 0.45-0.54 ms at 4K [expected], 2.12 dynamic
+// R gate: GI, reflections and ray tracing structures at 4K and 1440p (ARCHITECTURE 2.5 GI 0.45-0.54 ms at 4K [expected], 2.12 dynamic
 // TLAS 0.06 ms). Loads a generated scene (.unxscene from C's unx_scenegen), and per frame declares R's acceleration
 // structure passes, a ray-traced primary visibility pass standing in for V/M (reported separately, not part of the R
 // budget), and the GI passes; the harness times every pass (1.5 s warm-up, medians, P95).
@@ -8,6 +8,7 @@
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/gi/GiSystem.h"
+#include "unx/refl/ReflectionSystem.h"
 #include "unx/render/GpuScene.h"
 #include "unx/render/Harness.h"
 #include "unx/rt/RayPipeline.h"
@@ -162,13 +163,18 @@ int main(int argc, char** argv)
                 gi::GiSystem& gi = gi::GiSystem::get(fc);
                 giSystem = &gi;
                 gi.record(fc, main, rays);
-                const TextureRef probes = main.screenProbes;
+                refl::ReflectionSystem::get(fc).record(fc, main, rays);
+                const TextureRef probes = main.screenProbes, reflection = main.reflection;
                 graph.addPass("standin.consume", QueueType::Compute, [&](PassBuilder& b) {
                     b.use(probes, Use::SrvCompute);
+                    b.use(reflection, Use::SrvCompute);
                     b.keep();
                 }, [](PassContext&) {});
             });
             harness.printSummary(r);
+            const double reflMs = passSum(r, "r.refl."), traceReflMs = r.passMs.count("r.refl.trace") ? r.passMs.at("r.refl.trace").median : 0;
+            logf("R %s: reflections %.3f ms (trace %.3f ms, classify %.3f, resolve %.3f)\n", res.name.c_str(), reflMs, traceReflMs,
+                 r.passMs.count("r.refl.classify") ? r.passMs.at("r.refl.classify").median : 0, r.passMs.count("r.refl.resolve") ? r.passMs.at("r.refl.resolve").median : 0);
             const double giMs = passSum(r, "r.gi."), asMs = passSum(r, "r.as."), traceMs = r.passMs.count("r.gi.trace") ? r.passMs.at("r.gi.trace").median : 0;
             logf("R %s: GI %.3f ms (trace %.3f ms = %.2f G rays/s incl. hit shading), acceleration structures %.3f ms; stand-in primary visibility %.3f ms (not R)\n",
                  res.name.c_str(), giMs, traceMs, traceMs > 0 ? gi::GiSettings::fromQuality(quality).updatesPerFrame * 64 / (traceMs * 1e-3) / 1e9 : 0, asMs,

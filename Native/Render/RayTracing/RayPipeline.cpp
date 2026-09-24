@@ -135,6 +135,10 @@ RayPipeline::RayPipeline(Device& device, ShaderLibrary& shaders, const RayPipeli
     cl.list->CopyBufferRegion(m_table.Get(), 0, staging.Get(), 0, table.size());
     device.queue(QueueType::Graphics).waitCpu(device.submit(cl));
 
+    D3D12_INDIRECT_ARGUMENT_DESC argument{ D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS };
+    D3D12_COMMAND_SIGNATURE_DESC signature{ sizeof(D3D12_DISPATCH_RAYS_DESC), 1, &argument, 0 };
+    check(device.d3d()->CreateCommandSignature(&signature, nullptr, IID_PPV_ARGS(&m_indirect)), "DispatchRays command signature");
+
     const D3D12_GPU_VIRTUAL_ADDRESS base = m_table->GetGPUVirtualAddress();
     for (uint64_t at : rayGenAt) m_rayGen.push_back(base + at);
     m_miss = base + missAt;
@@ -148,11 +152,9 @@ RayPipeline::RayPipeline(Device& device, ShaderLibrary& shaders, const RayPipeli
 // Pipelines live until releaseDevice() or process exit; D3D objects keep their device alive, so no deferred release.
 RayPipeline::~RayPipeline() = default;
 
-void RayPipeline::dispatch(ID3D12GraphicsCommandList7* cmd, uint32_t rayGen, uint32_t width, uint32_t height, uint32_t depth) const
+D3D12_DISPATCH_RAYS_DESC RayPipeline::dispatchDesc(uint32_t rayGen, uint32_t width, uint32_t height, uint32_t depth) const
 {
-    if (rayGen >= m_rayGen.size()) fail("RayPipeline::dispatch: ray generation %u of %zu", rayGen, m_rayGen.size());
-    if (width == 0 || height == 0 || depth == 0) return;
-    cmd->SetPipelineState1(m_state.Get());
+    if (rayGen >= m_rayGen.size()) fail("RayPipeline: ray generation %u of %zu", rayGen, m_rayGen.size());
     D3D12_DISPATCH_RAYS_DESC d{};
     d.RayGenerationShaderRecord = { m_rayGen[rayGen], D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES };
     d.MissShaderTable = { m_miss, m_missBytes, m_missStride };
@@ -160,7 +162,21 @@ void RayPipeline::dispatch(ID3D12GraphicsCommandList7* cmd, uint32_t rayGen, uin
     d.Width = width;
     d.Height = height;
     d.Depth = depth;
+    return d;
+}
+
+void RayPipeline::dispatch(ID3D12GraphicsCommandList7* cmd, uint32_t rayGen, uint32_t width, uint32_t height, uint32_t depth) const
+{
+    const D3D12_DISPATCH_RAYS_DESC d = dispatchDesc(rayGen, width, height, depth);
+    if (width == 0 || height == 0 || depth == 0) return;
+    cmd->SetPipelineState1(m_state.Get());
     cmd->DispatchRays(&d);
+}
+
+void RayPipeline::dispatchIndirect(ID3D12GraphicsCommandList7* cmd, ID3D12Resource* arguments, uint64_t offset) const
+{
+    cmd->SetPipelineState1(m_state.Get());
+    cmd->ExecuteIndirect(m_indirect.Get(), 1, arguments, offset, nullptr, 0);
 }
 
 namespace

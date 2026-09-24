@@ -9,63 +9,14 @@
 // Texels blend with the entry's history weight (GiInternal giHistoryAlpha).
 //
 // P[0] = { cache UAV, ray budget (dispatch width), hit cell footprint scale (float bits), 0 }
-// P[1] = { constant sky radiance rgb (SKY1), ray length }
-// P[2] = { atmosphere: transmittance, multiScatter, skyView, aerial SRVs (SKY0) }
-// P[3] = { constant sun illuminance rgb (SKY1, lux), 0 }
+// P[1], P[2], P[3] = sky and sun (GiSky.hlsli: SKY0 atmosphere LUTs, SKY1 constants), ray length
 // P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view (sun, scene buffers).
-#define SKY_ATMOSPHERE 0  // variant .SKY0: the frame's sky and sun (S's atmosphere LUTs, Atmosphere.hlsli)
-#define SKY_CONSTANT 1    // variant .SKY1: constant sky radiance and sun illuminance from root constants (tests)
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
-#if SKY == SKY_ATMOSPHERE
-#include "Passes/Atmosphere/Atmosphere.hlsli"
-#endif
+#include "Passes/GI/GiSky.hlsli"
 
 // Texel cone of an 8 x 8 hemispherical texel (2 pi / 64 sr ~ 10.1 deg half-angle): footprint diameter ~0.36 t.
 #define GI_FOOTPRINT_PER_METRE 0.36
-
-uint giRandom(uint x)
-{
-    x ^= x >> 16;
-    x *= 0x7feb352du;
-    x ^= x >> 15;
-    x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return x;
-}
-float giUnit(uint x) { return (giRandom(x) >> 8) * (1.0 / 16777216.0); }
-
-float3 giSkyRadiance(float3 dir)
-{
-#if SKY == SKY_ATMOSPHERE
-    AtmosphereSrvs a = { P[2].x, P[2].y, P[2].z, P[2].w };
-    return P[2].z == UNX_NONE ? 0 : atmosphereSkyRadiance(a, dir);
-#else
-    return asfloat(P[1].xyz);
-#endif
-}
-
-// Direct solar illuminance on a surface facing the sun at p (without shadowing).
-float3 giSunIlluminance(float3 p)
-{
-#if SKY == SKY_ATMOSPHERE
-    AtmosphereSrvs a = { P[2].x, P[2].y, P[2].z, P[2].w };
-    return P[2].x == UNX_NONE ? 0 : atmosphereSunIlluminance(a, p);
-#else
-    return asfloat(P[3].xyz);
-#endif
-}
-
-// Uniform direction within the solar disk.
-float3 giSunDirection(uint seed)
-{
-    const float3 l = normalize(g_sunDirection);
-    float3 t, b;
-    giBasis(l, t, b);
-    const float r = tan(g_sunAngularRadius) * sqrt(giUnit(seed));
-    const float phi = 6.28318530718 * giUnit(seed ^ 0x9e3779b9u);
-    return normalize(l + (t * cos(phi) + b * sin(phi)) * r);
-}
 
 float giBias(GiHeader h, float3 p) { return 1e-3 + 2e-4 * distance(p, h.camera); }
 
@@ -96,7 +47,7 @@ void GiTraceGen()
     r.Origin = anchor + n * giBias(h, anchor);
     r.Direction = normalize(t * local.x + bt * local.y + n * local.z);
     r.TMin = 0;
-    r.TMax = asfloat(P[1].w);
+    r.TMax = giRayLength();
     const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI);
 
     float3 radiance;
@@ -145,7 +96,7 @@ void GiTraceGen()
                     sr.Origin = s.position + s.normal * giBias(h, s.position);
                     sr.Direction = giSunDirection(seed + 7);
                     sr.TMin = 0;
-                    sr.TMax = asfloat(P[1].w);
+                    sr.TMax = giRayLength();
                     if (rtVisible(scene, sr, RT_MASK_GI)) sun = e0 * cosSun;
                 }
             }

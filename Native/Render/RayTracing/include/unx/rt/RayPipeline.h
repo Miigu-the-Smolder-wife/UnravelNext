@@ -42,6 +42,11 @@ public:
     // Binds the state object and dispatches ray generation shader 'rayGen'. Root constants and the frame CBV are the
     // caller's (PassContext::computeConstants / bindFrameConstants); DispatchRays uses the compute root arguments.
     void dispatch(ID3D12GraphicsCommandList7* cmd, uint32_t rayGen, uint32_t width, uint32_t height, uint32_t depth = 1) const;
+    // The dispatch description of ray generation shader 'rayGen' (shader table records) for indirect dispatches whose
+    // size a kernel writes: the caller stores it once in an argument buffer and a kernel rewrites Width/Height/Depth.
+    D3D12_DISPATCH_RAYS_DESC dispatchDesc(uint32_t rayGen, uint32_t width, uint32_t height, uint32_t depth) const;
+    // ExecuteIndirect of one D3D12_DISPATCH_RAYS_DESC at 'offset' of 'arguments' (the pass declares it IndirectArgs).
+    void dispatchIndirect(ID3D12GraphicsCommandList7* cmd, ID3D12Resource* arguments, uint64_t offset) const;
     double createMs() const { return m_createMs; }
 
     // Pipelines are created once per (device, library) and live as long as the device.
@@ -52,6 +57,7 @@ public:
 private:
     Device& m_device;
     ComPtr<ID3D12StateObject> m_state;
+    ComPtr<ID3D12CommandSignature> m_indirect;
     ComPtr<ID3D12Resource> m_table;
     std::vector<D3D12_GPU_VIRTUAL_ADDRESS> m_rayGen;
     D3D12_GPU_VIRTUAL_ADDRESS m_miss = 0, m_hit = 0;
