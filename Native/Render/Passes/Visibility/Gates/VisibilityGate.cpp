@@ -30,6 +30,7 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -247,7 +248,15 @@ int main(int argc, char** argv)
                 if (serviceMode != "whole" && serviceMode != "local" && serviceMode != "both") fail("--service whole|local|both");
             }
             else if (a == "--out") out = next();
-            else if (a == "--set") overrides.push_back(next());
+            else if (a == "--set")
+            {
+                // key=value in TOML syntax; a bare word (no quotes survive nested shells) is taken as a string.
+                std::string o = next();
+                const size_t eq = o.find('=');
+                if (eq != std::string::npos && eq + 1 < o.size() && std::isalpha((unsigned char)o[eq + 1]) && o.substr(eq + 1) != "true" && o.substr(eq + 1) != "false")
+                    o = o.substr(0, eq + 1) + "\"" + o.substr(eq + 1) + "\"";
+                overrides.push_back(o);
+            }
             else if (a == "--cluster-stats") clusterStats = next();
             else fail("unknown argument %s", a.c_str());
         }
