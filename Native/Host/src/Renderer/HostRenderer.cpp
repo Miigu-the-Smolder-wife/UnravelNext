@@ -32,8 +32,14 @@ HostRenderer::HostRenderer(const HostRendererOptions& options) : m_options(optio
     if (!options.standalone && (!options.hostDevice || !options.hostQueue)) fail("a host renderer needs the host's device and graphics queue");
     m_quality = QualityConfig::loadDirectory(options.qualityDirectory);
     DeviceOptions d;
-    if (!options.standalone)
+    if (options.standalone)
     {
+        d.debugLayer = options.debugLayer;
+        d.gpuValidation = options.gpuValidation;
+    }
+    else
+    {
+        if (options.debugLayer || options.gpuValidation) fail("the debug layer is for standalone renderers (enabling it removes the host's device)");
         d.externalDevice = options.hostDevice;
         d.externalGraphicsQueue = options.hostQueue;
     }
@@ -256,6 +262,8 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
     overlay(p, m_applied);
     return p;
 }
+
+uint32_t HostRenderer::debugErrors() { return m_device->drainDebugMessages(); }
 
 FrameStats HostRenderer::latestStats() const
 {

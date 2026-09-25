@@ -41,6 +41,8 @@ struct HostRendererOptions
     ID3D12Device* hostDevice = nullptr;            // Unity's device (standalone = false)
     ID3D12CommandQueue* hostQueue = nullptr;       // Unity's graphics queue (standalone = false)
     uint32_t framesInFlight = 2;
+    bool debugLayer = false;                       // standalone only: D3D12 debug layer (correctness runs)
+    bool gpuValidation = false;                    // standalone only: GPU-based validation (implies debugLayer)
     std::filesystem::path shaderDirectory;
     std::filesystem::path qualityDirectory;
 };
@@ -130,6 +132,8 @@ public:
     // the RGB10A2 pixels.
     void renderStandalone(uint64_t ticket, void* readback, size_t readbackBytes);
     FrameStats latestStats() const;
+    // Debug-layer errors reported so far (standalone renderers with debugLayer; 0 otherwise).
+    uint32_t debugErrors();
 
     // The scene as the host shows it now: the content with the latest transforms, poses, sun and visibility the host
     // set (rendered, queued and pending updates, newest last); hidden instances are left out. Main thread (UnxSceneSave).
