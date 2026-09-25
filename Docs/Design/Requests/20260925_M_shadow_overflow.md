@@ -77,3 +77,9 @@ S의 가시성 패스가 슬롯 1~3을 채울 때 리스트를 계속 따라가,
    `shadowOverflowFallbackTiles`(BufferRef raw: 워드 0 = 개수, 워드 1..3 = 디스패치 인자(개수, 1, 1), 워드 4.. = 타일 좌표 y << 16 | x).
    M의 fallback이 인자를 바로 ExecuteIndirect에 쓸 수 있도록 인자를 오프셋 4에 둔다.
 8. 메인 뷰 전용이다(프록셀 리스트가 메인 뷰 것). 평면 반사 뷰의 슬롯 1~3·오버플로는 S의 다음 항목(반사 뷰용 리스트)과 함께 한다.
+
+## 결과 (코어, 2026-09-25, INTERFACES v1.20)
+
+- `ViewResources`에 `shadowOverflowTiles`(TextureRef R32_UINT ⌈W/8⌉×⌈H/8⌉), `shadowOverflow`(BufferRef raw), `shadowOverflowFallbackTiles`(BufferRef raw: 워드 0 개수, 1..3 DispatchIndirect 인자, 4.. 타일 `y << 16 | x`)를 추가했다. 생산 S(메인 뷰), 소비 M.
+- INTERFACES 7.3: 넷째 이후 그림자 광원 = 오버플로 목록의 같은 가시성 계산. 머리 값(0 / 0xFFFFFFFF / 1 + 블록 시작), 블록 형식(픽셀 워드 64 + 8비트 런), 할당(타일당 원자 1회), fallback(M 커널이 VSM 직접 탭), overage 통계 0 게이트. 5.1 표에 한 줄.
+- 검증: 헤더 추가뿐이다. core;S 빌드가 통과했다(코어 워크트리, 실행 없음).

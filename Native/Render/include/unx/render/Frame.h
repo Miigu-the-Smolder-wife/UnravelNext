@@ -57,6 +57,14 @@ struct ViewResources
     TextureRef coverageHeads;      // R32_UINT per pixel: first fragment | count << 24       [V]
     TextureRef gbuffer;            // RG32_UINT (GBuffer.hlsli)                              [M]
     TextureRef shadowVisibility;   // R32_UINT, 4 light slots x 8 bit (7.3)                 [S]
+    TextureRef shadowOverflowTiles;  // R32_UINT ceil(W/8) x ceil(H/8) (main view, 7.3, v1.20): [S]
+                                     // 0 = no shadow-casting light past the third in the tile,
+                                     // 0xFFFFFFFF = over capacity (fallback list), else 1 + the
+                                     // tile's block start word in shadowOverflow
+    BufferRef shadowOverflow;      // raw: per overflow tile 64 pixel words (count << 24 | run  [S]
+                                   // start) + runs of 8-bit visibilities, list order (7.3)
+    BufferRef shadowOverflowFallbackTiles;  // raw: word 0 count, words 1..3 DispatchIndirect  [S]
+                                            // args (count, 1, 1), words 4.. tiles (y << 16 | x)
     TextureRef screenProbes;       // GI screen probes (main view only)                     [R]
     TextureRef screenProbeMaps;    // atlas of the K-path radiance maps of the cache entries  [R]
                                    // the screen probes use, hardware-filterable (M: SrvCompute; R's

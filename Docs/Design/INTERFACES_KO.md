@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.19, 2026-09-25)
+# UnravelNext 인터페이스 (v1.20, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -183,6 +183,7 @@ void RenderGraph::addPass(std::string_view name, QueueType, SetupFn setup, Execu
 | coverageFragments / coverageHeads | 7.1 | V | M |
 | gbuffer | RG32_UINT (7.2) | M | S, R |
 | shadowVisibility | R32_UINT (7.3) | S | M |
+| shadowOverflowTiles / shadowOverflow / shadowOverflowFallbackTiles | 7.3 (v1.20, 메인 뷰) | S | M |
 | screenProbes | R 내부 형식, HLSL API로 읽음(5.6) | R | M |
 | screenProbeMaps | 화면 프로브가 쓰는 캐시 항목의 K 경로 지도 아틀라스, 하드웨어 필터 가능(형식·배치는 R의 `ScreenProbes.hlsli`가 정한다; 권장: UAV R32_UINT로 쓰고 SRV R9G9B9E5_SHAREDEXP로 읽기, texel 4 B) (v1.13) | R | M(`SrvCompute`) |
 | reflection | RGBA16F (5.6) | R | M |
@@ -301,7 +302,18 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 `.x` 월드 셰이딩 법선(팔면체 snorm16×2), `.y` baseColor sRGB8×3 | 지각 거칠기 unorm8(상위 8 bit). metallic·specular·클래스·플래그는 재질 테이블(vis id → 클러스터 → 재질). 픽셀별 metallic/occlusion 맵은 M의 셰이딩 커널이 vis id로 다시 평가한다.
 
 ### 7.3 그림자 가시성 (S) — R32_UINT
-4 슬롯 × 8 bit unorm(0 = 완전 그림자, 255 = 완전 빛). 슬롯 0 = 태양, 슬롯 1~3 = 그 픽셀 프록셀 광원 리스트 순서에서 그림자를 던지는 첫 세 국소광. 넷째 이후 그림자 광원은 `shadowVisibilityDirect`(5.6)로 평가하고, 발생 수를 S가 통계로 낸다.
+4 슬롯 × 8 bit unorm(0 = 완전 그림자, 255 = 완전 빛). 슬롯 0 = 태양, 슬롯 1~3 = 그 픽셀 프록셀 광원 리스트 순서에서 그림자를 던지는 첫 세 국소광. 넷째 이후 그림자 광원은 오버플로 목록에 같은 방법으로 계산한 가시성이 있다(v1.20, M 요청 `20260925_M_shadow_overflow.md`, S 검토 d18e9ec, 메인 뷰).
+- `shadowOverflowTiles` R32_UINT ⌈W/8⌉ × ⌈H/8⌉(8×8 타일 = M의 셰이딩 타일). 값은 셋 중 하나다. 매 프레임 0으로 지운다.
+  - 0 = 타일에 넷째 이후 그림자 광원이 없다.
+  - 0xFFFFFFFF = 용량 초과(fallback).
+  - 그 밖 = 1 + `shadowOverflow` 안 타일 블록의 시작 워드.
+- `shadowOverflow` raw uint: 오버플로 타일마다 블록 하나다.
+  - 워드 0~63: 픽셀(행 우선 8×8)마다 `count << 24 | 런 시작`(블록 기준 워드 오프셋). count는 넷째 이후 그림자 광원 수(≤ 29)이고, 0 = 없음이다.
+  - 런: 8비트 unorm 가시성(이 절과 같은 부호화). uint 하나에 4개, 하위 바이트부터, 프록셀 리스트 순서다.
+- 할당: 블록은 타일당 원자 가산 1회다. 같은 프레임 안에서 정확하고, 블록 위치만 비결정적이다. 용량은 S가 직전 필요량으로 관리한다.
+- 넘친 타일은 `shadowOverflowFallbackTiles`(raw: 워드 0 = 개수, 워드 1..3 = DispatchIndirect 인자(개수, 1, 1), 워드 4.. = 타일 `y << 16 | x`)에 오른다. M 주 셰이딩 커널은 넘친 타일을 건너뛴다. M fallback 커널이 이 목록 위에서(바이트 오프셋 4의 인자) 슬롯 밖 광원을 `shadowVisibilityDirect`로 VSM에서 직접 탭한다. 결과는 정확하다.
+- S는 overage(넘친 타일 수·픽셀 수)를 통계로 낸다. 게이트는 0을 요구한다.
+- 평면 반사 뷰의 슬롯 1~3과 오버플로는 S의 다음 항목(반사 뷰용 리스트)이다.
 
 ### 7.4 프록셀 광원 리스트 (S)
 프록셀(24 px × 64 깊이 슬라이스) 당 광원 인덱스 목록, 최대 `atmosphere.froxels.lights_max`개. 초과 시 중요도 상위 `shading.analytic_lights_max`개를 해석 평가하고 나머지는 프록셀 조도로 합친다(합친 에너지를 통계로 기록). 소비자는 `froxelLightRange/froxelLight`로만 읽는다. 항목의 bit 15는 "그 광원에 S의 그림자 슬롯이 있음"이다(v1.19, `froxelLightShadowed`). `froxelLight`는 그 비트를 뺀 광원 인덱스를 돌려주고, 장면 광원 한도는 32767이다.
@@ -416,3 +428,5 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.19 (2026-09-25):
   - **S 요청 `20260925_S_local_shadow_lookups.md` 반영**: `FrameResources::vsmLocalLights`(StructuredBuffer<VsmLocalLight>, 48 B × 그림자 슬롯 128)와 `vsmSlotOfLight`(StructuredBuffer<uint>, 장면 광원마다 그림자 슬롯 또는 0xFFFF)를 추가했다. 둘 다 이번 프레임의 SRV 디스크립터 인덱스다(S 업로드 링, 그래프 자원 아님). 생산은 S `shadowPages`. 5.6의 `shadowVisibilityDirect`는 `ShadowSrvs.lights` = `vsmLocalLights`, `.pad0` = `vsmSlotOfLight`로 읽는다(S 구현 1faa52e). 시그니처는 그대로다. footprint 인자(픽셀 발자국에 맞는 mip)는 소비자가 필요하다고 할 때 추가한다.
   - 프록셀 리스트 항목의 bit 15 = S 그림자 슬롯 유무(`froxelLightShadowed`), `froxelLight`는 마스크된 인덱스, 광원 한도 32767(7.4, 5.6 `Froxel.hlsli` 행). 반사 뷰의 슬롯 1~3은 아직 255다(리스트가 메인 뷰 것, S의 다음 항목).
+- v1.20 (2026-09-25):
+  - **M 요청 `20260925_M_shadow_overflow.md` 반영(S 검토 d18e9ec)**: 슬롯 밖(넷째 이후) 그림자 광원의 오버플로 목록. `ViewResources::shadowOverflowTiles`(R32_UINT ⌈W/8⌉×⌈H/8⌉), `shadowOverflow`(raw), `shadowOverflowFallbackTiles`(raw, 인자 워드 1..3)를 추가했다. 생산 S(메인 뷰 가시성 패스: 세기 → 타일당 원자 할당 → 평가), 소비 M(광원 루프의 순번 > 3 로드, 넘친 타일 건너뛰기, fallback 커널). 7.3 문구와 5.1 표를 바꿨다. 셰이딩 커널 안 VSM 탭 금지를 지키면서 리스트의 그림자 광원 전부(≤ 32)가 같은 가시성 계산을 받는다.
