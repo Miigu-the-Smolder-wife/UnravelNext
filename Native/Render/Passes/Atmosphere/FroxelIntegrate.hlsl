@@ -23,6 +23,9 @@
 // 1 - T (optical depth blended in altitude across that kink): 30 km horizon query at 1080p 3.1 % -> 0.9 % against
 // the reference (FroxelTests 4). Nodes without air yet (node 0; planar views before the mirror) take the first node
 // with air (the limit of the ratio). No local media in scenes v1 (their optical depth adds to part 1).
+// Slice 3 (S + 1), one per tile: the sky correction, pre-exposed and signed: along the tile ray to far_m, the local
+// lights' in-scattering minus the single scattering the casters' shadows remove, each attenuated to the camera. Sky
+// pixels add it to the far-field sky (atmosphereSkyRadianceView): the sky LUT has neither.
 // Planar reflection views (clip plane in the view's frame constants, v1.22): each tile ray's air starts where it crosses
 // the mirror (airViewStart); the slices before it hold nothing (the main view's mirror pixel applies that air), the sun
 // transmittance of their nodes is taken at the nodes' mirror images (the real path).
@@ -45,6 +48,7 @@
 groupshared float3 gs_tau[64];
 groupshared float3 gs_source[64];
 groupshared float4 gs_hat[64];  // L / (1 - T) of node s + 1, .w = 1 where the node has air
+groupshared float3 gs_sky[64];  // slice s's sky correction attenuated to the camera
 
 static const float kGaussX[8] = { -0.9602898564975363, -0.7966664774136267, -0.5255324099163290, -0.1834346424956498,
                                   0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363 };
@@ -110,7 +114,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     const float phaseR = airRayleighPhase(nu), phaseM = airMiePhase(nu, a.mieG);
     const float stepAltitude = asfloat(P[2].z);
     const uint experiment = P[2].w;
-    float3 tau = 0, source = 0;
+    float3 tau = 0, source = 0, skyTerm = 0;
     const float tStart = airViewStart(g_clipPlane, g_cameraPosition, dir);
     const float zs0 = froxelNodeDepth(g, s), zs1 = froxelNodeDepth(g, s + 1);
     if (s < g.slices && zs1 * toRay > tStart)
@@ -148,6 +152,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             if (vsmAirLevel(vc, froxelTileWidth(g, 0.5 * (z0 + z1)), asfloat(P[2].y), k)) f = vsmAirShadowFraction(r, o, o + dir * len, k);
         }
         source = E * (single * (1 - f) + multi);
+        skyTerm = -E * single * f;  // what the sky LUT has and the shadows remove
         // Local lights of the froxel's list (air at the segment's midpoint).
         const float3 pm = airLiftToSurface(a, o + dir * (0.5 * len));
         const AirCoefficients cm = airCoefficients(a, max(0.0, airAltitude(a, pm)));
@@ -179,7 +184,9 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
                 slot = slotOf[li];
                 if (slot != VSM_LOCAL_NONE) sl = locals[slot];
             }
-            source += airLocalLight(loadLight(li), o, dir, len, cm, a.mieG, lr, sl, slot, width, biasTexels);
+            const float3 local = airLocalLight(loadLight(li), o, dir, len, cm, a.mieG, lr, sl, slot, width, biasTexels);
+            source += local;
+            skyTerm += local;
         }
     }
     // Exclusive scan of the optical depth, inclusive scan of the attenuated sources (Hillis-Steele over 64 slices).
@@ -193,6 +200,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         GroupMemoryBarrierWithGroupSync();
     }
     gs_source[s] = exp(-(gs_tau[s] - tau)) * source;
+    gs_sky[s] = exp(-(gs_tau[s] - tau)) * skyTerm;
     GroupMemoryBarrierWithGroupSync();
     [unroll] for (uint d2 = 1; d2 < 64; d2 <<= 1)
     {
@@ -241,6 +249,9 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             volume[uint3(tile, N)] = 0;
             const float3 camera = tStart > 0 ? airMirror(g_clipPlane, g_cameraPosition) : g_cameraPosition;
             volume[uint3(tile, 2 * N)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, camera), sun), 0);
+            float3 sky = 0;
+            for (uint j = 0; j < g.slices; ++j) sky += gs_sky[j];
+            volume[uint3(tile, 3 * N)] = float4(clamp(sky * g_exposure, -65504.0, 65504.0), 0);
         }
     }
 }

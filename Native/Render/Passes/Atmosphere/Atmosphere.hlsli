@@ -77,7 +77,7 @@ float4 airVolumeCoord(Texture3D<float4> v, Texture2D<float4> p, float2 uv, float
     const float farM = p.Load(int3(4, ph - 1, 0)).w;
     const float4 q8 = p.Load(int3(8, ph - 1, 0));
     const float tilePx = asuint(q8.z), nearM = q8.w;
-    N = depth / 3;  // nodes per part (S + 1)
+    N = (depth - 1) / 3;  // nodes per part (S + 1); the last slice is the sky correction
     d = depth;
     const float z = min(linearDepth, farM);
     const float c = airNodeCoord(nearM, farM, N - 1, z);
@@ -167,6 +167,29 @@ void airViewLookup(AtmosphereSrvs s, float2 uv, float linearDepth, bool wantSun,
     }
     // The sun at the (lifted) surface point itself.
     if (wantSun) sunTransmittance = airSunTransmittance(ap, s.transmittance, airLiftToSurface(ap, g_cameraPosition + dir * min(tDepth, ap.froxelFarM * toRay)), sun);
+}
+
+// Sky pixels of a view with an air volume (ShadeSky; INTERFACES 5.6): the far-field sky (atmosphereSkyRadiance) plus
+// the volume's sky correction at the pixel (bilinear across tiles, like the surface lookups): the local lights'
+// in-scattering by the air (a street lamp's glow against the night sky) and the single scattering the casters' shadows
+// remove from it (shafts from a ridge in front of a low sun), both along the tile rays to atmosphere.froxels.far_m.
+// Beyond far_m (65 km) the air is the LUT's (no casters or local lights reach it). uv: the pixel centre over the view.
+// Without a volume (s.aerial = UNX_NONE) it is atmosphereSkyRadiance.
+float3 atmosphereSkyRadianceView(AtmosphereSrvs s, float3 worldDir, float2 uv)
+{
+    float3 radiance = atmosphereSkyRadiance(s, worldDir);
+    if (s.aerial == 0xFFFFFFFFu) return radiance;
+    Texture3D<float4> v = ResourceDescriptorHeap[s.aerial];
+    Texture2D<float4> p = ResourceDescriptorHeap[s.multiScatter];
+    uint w, h, depth;
+    v.GetDimensions(w, h, depth);
+    uint pw, ph;
+    p.GetDimensions(pw, ph);
+    const float tilePx = asuint(p.Load(int3(8, ph - 1, 0)).z);
+    const float2 cell = uv * float2(g_viewWidth, g_viewHeight) / tilePx - 0.5;
+    const float2 t = (clamp(cell, 0.0, float2(w, h) - 1) + 0.5) / float2(w, h);
+    const float3 correction = v.SampleLevel(g_linearClamp, float3(t, (depth - 0.5) / depth), 0).rgb / g_exposure;
+    return max(radiance + correction, 0.0);
 }
 
 // Air between the main camera and the surface at screen uv (main view, [0,1]^2) and view-space depth linearDepth

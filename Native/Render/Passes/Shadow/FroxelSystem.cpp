@@ -101,7 +101,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height);
     RenderGraph& g = fc.graph;
     // Air volume: in-scattering, optical depth, sun transmittance; nodes 0..S each (FroxelIntegrate.hlsl).
-    const TextureRef volume = g.createTexture(TextureDesc{ suffix.empty() ? "S air volume" : "S air volume (planar view)", grid.gridX, grid.gridY, (uint16_t)(3 * (grid.slices + 1)), 1,
+    const TextureRef volume = g.createTexture(TextureDesc{ suffix.empty() ? "S air volume" : "S air volume (planar view)", grid.gridX, grid.gridY, (uint16_t)(3 * (grid.slices + 1) + 1), 1,
                                                            DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D });
     const float stepAltitude = (float)q.number("atmosphere.froxels.air_step_altitude_m");
     const uint32_t experiment = (uint32_t)q.integer("atmosphere.froxels.experiment_disable");  // cost attribution only
