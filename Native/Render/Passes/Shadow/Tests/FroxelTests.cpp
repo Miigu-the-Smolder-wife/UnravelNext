@@ -172,7 +172,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, debug = false, keepFroxels = false;
+        bool debugLayer = true, debug = false, keepFroxels = false, uploadFirst = false;
         uint32_t W = 1920, H = 1080;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
@@ -184,6 +184,7 @@ int main(int argc, char** argv)
             else if (a == "--set") overrides.push_back(argv[++i]);
             else if (a == "--debug") debug = true;
             else if (a == "--keep") keepFroxels = true;
+            else if (a == "--upload-first") uploadFirst = true;  // diagnostic: probe input declared before the froxel passes
         }
         TestFrame tf(debugLayer);
         for (const std::string& o : overrides) tf.quality.applyOverride(o);
@@ -628,11 +629,13 @@ int main(int argc, char** argv)
                 ViewResources main;
                 main.view = fc.frame.mainView;
                 main.frameConstants = fc.frameConstantsFor(main.view);
+                BufferRef early;
+                if (uploadFirst) early = tf.uploadBuffer(fc, queries.data(), queries.size() * 16, 16, "probe queries");  // diagnostic
                 tracks::atmosphere(fc);
                 raster.mainView(fc, main);
                 tracks::shadowPages(fc, main);
                 tracks::froxels(fc, main);
-                BufferRef in = tf.uploadBuffer(fc, queries.data(), queries.size() * 16, 16, "probe queries");
+                BufferRef in = uploadFirst ? early : tf.uploadBuffer(fc, queries.data(), queries.size() * 16, 16, "probe queries");
                 BufferRef o = fc.graph.createBuffer(BufferDesc{ "probe out", 3ull * n * 16, 16 });
                 ID3D12PipelineState* pso = fc.shaders.compute("Passes/Atmosphere/Tests/AtmosphereProbe.MODE2");
                 const FrameResources r = fc.resources;
