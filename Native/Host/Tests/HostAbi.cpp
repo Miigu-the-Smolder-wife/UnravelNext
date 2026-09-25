@@ -57,6 +57,7 @@ struct Api
     UNX_FN(UnxFrameQueue)
     UNX_FN(UnxSceneSave)
     UNX_FN(UnxFrameSetSun)
+    UNX_FN(UnxFrameSetEnvironment)
     UNX_FN(UnxFrameSetInstanceVisible)
     UNX_FN(UnxFrameSetSkeletons)
     UNX_FN(UnxFrameSetTransforms)
@@ -87,6 +88,7 @@ struct Api
         UNX_FN(UnxFrameQueue)
         UNX_FN(UnxSceneSave)
         UNX_FN(UnxFrameSetSun)
+        UNX_FN(UnxFrameSetEnvironment)
         UNX_FN(UnxFrameSetInstanceVisible)
         UNX_FN(UnxFrameSetSkeletons)
         UNX_FN(UnxFrameSetTransforms)
@@ -511,6 +513,19 @@ int main(int argc, char** argv)
             api.ok(api.UnxFrameSetSkeletons(r, 2, skeletons, poseB, 4), "UnxFrameSetSkeletons");
             const float sunDir[3] = { 0, 0.8f, 0.6f }, sunColor[3] = { 1, 0.9f, 0.8f };
             api.ok(api.UnxFrameSetSun(r, sunDir, 90000, sunColor, 0.005f), "UnxFrameSetSun");
+            // Then weather: a later sun and a hazier atmosphere through UnxFrameSetEnvironment (the committed wind).
+            UnxEnvironmentDesc env{};
+            api.ok(api.UnxEnvironmentDefaults(&env), "UnxEnvironmentDefaults");
+            put3(env.sunDirection, { 0, 0.6f, 0.8f });
+            env.sunIlluminance = 95000;
+            put3(env.mieScattering, { 2.1e-5f, 2.1e-5f, 2.1e-5f });
+            put3(env.windDirection, s.windDirection);
+            env.windSpeed = s.windSpeed;
+            api.ok(api.UnxFrameSetEnvironment(r, &env), "UnxFrameSetEnvironment");
+            // A wind change after commit is refused (no wind-change contract for the deformation bounds yet).
+            UnxEnvironmentDesc windy = env;
+            windy.windSpeed = s.windSpeed + 3;
+            if (api.UnxFrameSetEnvironment(r, &windy) == UNX_OK) fail("UnxFrameSetEnvironment accepted a wind change after commit");
             // A pose buffer of the wrong length is refused before anything is recorded.
             if (api.UnxFrameSetSkeletons(r, 2, skeletons, poseA, 3) == UNX_OK) fail("UnxFrameSetSkeletons accepted a short pose buffer");
             const std::filesystem::path saved = bin / "host_abi_live.unxscene";
@@ -522,10 +537,11 @@ int main(int argc, char** argv)
             for (int k = 0; k < 2 && ok; ++k)
                 for (int j = 0; j < 2 && ok; ++j)
                     for (int e = 0; e < 12 && ok; ++e) ok = live.skeletons[skeletons[k]].jointToModel[j].m[e / 4][e % 4] == poseB[12 * (2 * k + j) + e];
-            ok = ok && live.sun.illuminance == 90000 && live.sun.direction.y == sunDir[1] && live.sun.color.z == sunColor[2];
+            ok = ok && live.sun.illuminance == 95000 && live.sun.direction.y == 0.6f && live.sun.direction.z == 0.8f;
+            ok = ok && live.atmosphere.mieScattering.x == 2.1e-5f && live.atmosphere.rayleighScaleHeight == env.rayleighScaleHeight;
             // Instance 1 was hidden: the saved list is the host's list without it (instance 2 comes next).
             ok = ok && live.instances[1].mesh == s.instances[2].mesh;
-            logf("live scene save: %zu of %zu instances (1 hidden), newest transform, bulk poses, sun: %s\n", live.instances.size(), s.instances.size(),
+            logf("live scene save: %zu of %zu instances (1 hidden), newest transform, bulk poses, sun and atmosphere: %s\n", live.instances.size(), s.instances.size(),
                  ok ? "as set" : "DIFFERS");
             if (!ok) ++failures;
         }

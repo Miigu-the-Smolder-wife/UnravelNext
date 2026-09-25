@@ -346,32 +346,63 @@ UNX_API int32_t UNX_CALL UnxEnvironmentDefaults(UnxEnvironmentDesc* d)
     });
 }
 
+static scene::Sun sunOf(const UnxEnvironmentDesc* d)
+{
+    scene::Sun sun;
+    sun.direction = f3(d->sunDirection);
+    sun.illuminance = d->sunIlluminance;
+    sun.color = f3(d->sunColor);
+    sun.angularRadius = d->sunAngularRadius;
+    return sun;
+}
+
+static scene::Atmosphere atmosphereOf(const UnxEnvironmentDesc* d)
+{
+    scene::Atmosphere a;
+    a.bottomRadius = d->bottomRadius;
+    a.topRadius = d->topRadius;
+    a.rayleighScaleHeight = d->rayleighScaleHeight;
+    a.mieScaleHeight = d->mieScaleHeight;
+    a.rayleighScattering = f3(d->rayleighScattering);
+    a.mieG = d->mieG;
+    a.mieScattering = f3(d->mieScattering);
+    a.ozoneCenter = d->ozoneCenter;
+    a.mieAbsorption = f3(d->mieAbsorption);
+    a.ozoneWidth = d->ozoneWidth;
+    a.ozoneAbsorption = f3(d->ozoneAbsorption);
+    a.groundAlbedo = f3(d->groundAlbedo);
+    return a;
+}
+
 UNX_API int32_t UNX_CALL UnxSceneSetEnvironment(UnxRenderer r, const UnxEnvironmentDesc* d)
 {
     return call([&] {
         requireStruct(d, "UnxEnvironmentDesc");
         auto h = find(r);
-        if (h->committed()) fail("the scene is committed; the environment is set before UnxSceneCommit");
+        if (h->committed()) fail("the scene is committed; the environment is set before UnxSceneCommit (per frame: UnxFrameSetEnvironment)");
         scene::Scene& s = h->scene();
-        s.sun.direction = f3(d->sunDirection);
-        s.sun.illuminance = d->sunIlluminance;
-        s.sun.color = f3(d->sunColor);
-        s.sun.angularRadius = d->sunAngularRadius;
+        s.sun = sunOf(d);
+        s.atmosphere = atmosphereOf(d);
         s.windDirection = f3(d->windDirection);
         s.windSpeed = d->windSpeed;
-        scene::Atmosphere& a = s.atmosphere;
-        a.bottomRadius = d->bottomRadius;
-        a.topRadius = d->topRadius;
-        a.rayleighScaleHeight = d->rayleighScaleHeight;
-        a.mieScaleHeight = d->mieScaleHeight;
-        a.rayleighScattering = f3(d->rayleighScattering);
-        a.mieG = d->mieG;
-        a.mieScattering = f3(d->mieScattering);
-        a.ozoneCenter = d->ozoneCenter;
-        a.mieAbsorption = f3(d->mieAbsorption);
-        a.ozoneWidth = d->ozoneWidth;
-        a.ozoneAbsorption = f3(d->ozoneAbsorption);
-        a.groundAlbedo = f3(d->groundAlbedo);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameSetEnvironment(UnxRenderer r, const UnxEnvironmentDesc* d)
+{
+    return call([&] {
+        requireStruct(d, "UnxEnvironmentDesc");
+        auto h = find(r);
+        if (!h->committed()) fail("UnxFrameSetEnvironment changes a committed scene; before UnxSceneCommit use UnxSceneSetEnvironment");
+        const scene::Scene& s = h->scene();  // wind is never written after commit
+        const float3 wind = f3(d->windDirection);
+        if (wind.x != s.windDirection.x || wind.y != s.windDirection.y || wind.z != s.windDirection.z || d->windSpeed != s.windSpeed)
+            fail("the scene wind cannot change after commit yet: the deformation bounds (INTERFACES 6.4) assume a constant wind "
+                 "(request Docs/Design/Requests/20260925_I_wind_change.md); pass the committed wind");
+        const scene::Sun sun = sunOf(d);
+        const float len = length(sun.direction);
+        if (std::abs(len - 1.0f) > 1e-3f) fail("sun direction is not unit length (%f)", len);
+        h->setEnvironment(sun, atmosphereOf(d));
     });
 }
 

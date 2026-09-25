@@ -24,7 +24,8 @@ enum UnxResult
     UNX_ERROR_BUFFER = -3,     // output buffer too small; *required holds the size
 };
 
-#define UNX_ABI_VERSION 3u  // 1: probe; 2: + renderer; 3: + UnxFrameSetSkeletons, UnxSceneSave writes the current state
+#define UNX_ABI_VERSION 4u  // 1: probe; 2: + renderer; 3: + UnxFrameSetSkeletons, UnxSceneSave writes the current state;
+                            // 4: + UnxFrameSetEnvironment
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -300,6 +301,10 @@ UNX_API int32_t UNX_CALL UnxFrameSetSkeletons(UnxRenderer r, uint32_t count, con
 UNX_API int32_t UNX_CALL UnxFrameSetInstanceVisible(UnxRenderer r, uint32_t instance, uint32_t visible);
 // Sun of the following frames (time of day): unit direction ground -> sun, lux at the top of the atmosphere.
 UNX_API int32_t UNX_CALL UnxFrameSetSun(UnxRenderer r, const float direction[3], float illuminance, const float color[3], float angularRadius);
+// Sun and atmosphere of the following frames (time of day, weather); the atmosphere track rebuilds its LUTs when they
+// change. The wind fields must equal the committed wind: a wind change after commit is refused until the deformation
+// bounds have a wind-change contract (Docs/Design/Requests/20260925_I_wind_change.md).
+UNX_API int32_t UNX_CALL UnxFrameSetEnvironment(UnxRenderer r, const UnxEnvironmentDesc* desc);
 
 // Snapshot of one frame's inputs and the changes set since the previous queue; *ticket goes into UNX_EVENT_RENDER's
 // data. A ticket that is never rendered is dropped after framesInFlight + 2 newer ones; its changes move to the next.

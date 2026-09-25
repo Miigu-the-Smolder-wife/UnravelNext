@@ -88,6 +88,7 @@ SceneCommitInfo HostRenderer::commit()
     for (const scene::Skeleton& k : m_scene.skeletons) m_applied.poses.push_back(std::make_shared<const std::vector<float3x4>>(k.jointToModel));
     m_applied.visible.assign(m_scene.instances.size(), 1);
     m_applied.sun = m_scene.sun;
+    m_applied.atmosphere = m_scene.atmosphere;
     info.contentHash = scene::contentHash(m_scene);
     info.buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     logf("UnravelNext host: scene committed, %zu meshes, %zu instances, %llu triangles, %llu clusters, %.1f ms, hash %s\n", m_scene.meshes.size(),
@@ -125,6 +126,7 @@ uint32_t HostRenderer::jointCount(uint32_t skeleton) const
 void HostRenderer::overlay(const FramePacket& p, HostState& state)
 {
     if (p.sun) state.sun = *p.sun;
+    if (p.atmosphere) state.atmosphere = *p.atmosphere;
     for (const InstanceTransformUpdate& u : p.transforms) state.transforms[u.instance] = u.objectToWorld;
     for (const SkeletonPose& s : p.skeletons) state.poses[s.skeleton] = s.jointToModel;
     for (const auto& [instance, visible] : p.visibility) state.visible[instance] = visible ? 1 : 0;
@@ -146,6 +148,7 @@ scene::Scene HostRenderer::currentScene() const
         overlay(m_pending, state);
     }
     s.sun = state.sun;
+    s.atmosphere = state.atmosphere;
     std::vector<scene::Instance> shown;
     for (size_t i = 0; i < s.instances.size(); ++i)
     {
@@ -172,6 +175,14 @@ void HostRenderer::setSun(const scene::Sun& sun)
     m_pending.sun = sun;
 }
 
+void HostRenderer::setEnvironment(const scene::Sun& sun, const scene::Atmosphere& atmosphere)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    m_pending.sun = sun;
+    m_pending.atmosphere = atmosphere;
+}
+
 uint64_t HostRenderer::queueFrame(FramePacket packet)
 {
     requireCommitted();
@@ -180,6 +191,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     const uint64_t ticket = m_nextTicket++;
     packet.ticket = ticket;
     packet.sun = std::move(m_pending.sun);
+    packet.atmosphere = std::move(m_pending.atmosphere);
     packet.transforms = std::move(m_pending.transforms);
     packet.skeletons = std::move(m_pending.skeletons);
     packet.visibility = std::move(m_pending.visibility);
@@ -193,6 +205,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
         m_packets.pop_front();
         FramePacket& next = m_packets.front();
         if (!next.sun) next.sun = dropped.sun;
+        if (!next.atmosphere) next.atmosphere = dropped.atmosphere;
         next.transforms.insert(next.transforms.begin(), dropped.transforms.begin(), dropped.transforms.end());
         next.skeletons.insert(next.skeletons.begin(), dropped.skeletons.begin(), dropped.skeletons.end());
         next.visibility.insert(next.visibility.begin(), dropped.visibility.begin(), dropped.visibility.end());
@@ -210,6 +223,7 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
     {
         FramePacket& old = m_packets.front();
         if (old.sun) carried.sun = old.sun;
+        if (old.atmosphere) carried.atmosphere = old.atmosphere;
         carried.transforms.insert(carried.transforms.end(), old.transforms.begin(), old.transforms.end());
         carried.skeletons.insert(carried.skeletons.end(), std::make_move_iterator(old.skeletons.begin()), std::make_move_iterator(old.skeletons.end()));
         carried.visibility.insert(carried.visibility.end(), old.visibility.begin(), old.visibility.end());
@@ -222,6 +236,7 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
     if (haveCarried)
     {
         if (!p.sun) p.sun = carried.sun;
+        if (!p.atmosphere) p.atmosphere = carried.atmosphere;
         p.transforms.insert(p.transforms.begin(), carried.transforms.begin(), carried.transforms.end());
         p.skeletons.insert(p.skeletons.begin(), std::make_move_iterator(carried.skeletons.begin()), std::make_move_iterator(carried.skeletons.end()));
         p.visibility.insert(p.visibility.begin(), carried.visibility.begin(), carried.visibility.end());
@@ -256,10 +271,11 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
     }
     m_slotHostFrame[slot] = p.frameIndex;
     // Scene changes of this frame (GpuScene uploads them at the start of FrameRenderer::record).
-    if (p.sun)
+    if (p.sun || p.atmosphere)
     {
         std::lock_guard lock(m_appliedMutex);
-        m_scene.sun = *p.sun;
+        if (p.sun) m_scene.sun = *p.sun;
+        if (p.atmosphere) m_scene.atmosphere = *p.atmosphere;
     }
     if (!p.transforms.empty()) m_gpuScene->updateTransforms(frame, p.transforms);
     for (const SkeletonPose& s : p.skeletons) m_gpuScene->updateSkeleton(frame, s.skeleton, *s.jointToModel);

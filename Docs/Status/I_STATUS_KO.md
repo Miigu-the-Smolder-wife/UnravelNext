@@ -84,7 +84,7 @@ Unity 쪽 코드는 `Assets/UnravelNextBridge`(이전 저장소 커밋 0125b960)
 Agility 1.618.5 기능은 1.618.1에서도 모두 있다(SDK 618).
 필요한 코어 변경은 `Docs/Design/Requests/20260925_I_unity_queue_device.md`에 요청했다: 외부 디바이스·큐로 `Device`를 만들고, 큐 실행 훅을 둔다.
 
-## 2. C ABI (`Native/Host/include/unx/host/UnravelNextHost.h`, ABI 3)
+## 2. C ABI (`Native/Host/include/unx/host/UnravelNextHost.h`, ABI 4)
 
 - 규칙: 앞에 `{size, version}`이 있는 고정 크기 구조체만 넘긴다. 크기는 헤더의 `static_assert`와 C#의 `RequireLayouts`가 같이 확인한다.
   반환은 결과 코드와 `UnxLastError()`다. C++ 객체는 넘기지 않는다.
@@ -95,6 +95,11 @@ Agility 1.618.5 기능은 1.618.1에서도 모두 있다(SDK 618).
 - 프레임: `UnxFrameSetTransforms`·`SetSkeleton`·`SetSkeletons`(ABI 3: 모든 스켈레톤을 호출 한 번에, 포즈를 목록 순서로 이어 붙인 버퍼)·
   `SetInstanceVisible`·`SetSun`(코어 v1.8 GpuScene 갱신)으로 다음 프레임에 쓸 값을 모은다. 애니메이션 재설계의 `na_present_batch`가
   `SetSkeletons`의 버퍼를 그대로 채운다(ANIMATION_DESIGN_KO.md 3.6.2, 7.2).
+- 시간대·날씨(ABI 4): `UnxFrameSetEnvironment`가 다음 프레임부터의 태양과 대기를 바꾼다(태양만이면 `UnxFrameSetSun`). 제출 스레드가 프레임
+  기록 전에 `GpuScene::source()`의 태양·대기를 고치고, 대기 트랙은 파라미터·태양이 바뀌면 LUT를 다시 만든다. 떨어진 패킷의 환경은 다음
+  패킷으로 넘어가고 현재 장면 저장에도 들어간다. 바람은 커밋 뒤 바꾸면 거부한다: 변형 상한(INTERFACES 6.4)이 바람 고정을 전제한다.
+  코어에 `Requests/20260925_I_wind_change.md`(바람 revision과 바람 변화까지 담는 변화 인자)를 요청했다.
+  정확성 시험(현재 장면 저장에 환경·바람 거부 추가)은 게임이 끝난 뒤 돌린다.
   `UnxFrameQueue`는 카메라·시각·출력 텍스처를 스냅숏으로 떠서 티켓을 돌려준다. `UNX_EVENT_RENDER`(Unity 제출 스레드)가 그 티켓의
   프레임을 `FrameRenderer`로 기록한다. 실행은 `Queue::setExecuteHook`(코어 v1.9)으로 Unity의 `ExecuteCommandList`에 보내며, 이때 출력의
   상태를 `UNORDERED_ACCESS`로 선언한다. 결과 조회는 `UnxFrameStatsLatest`다.
@@ -247,6 +252,7 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
   기판 1.5 / 2)은 모두 담긴다. 이전 엔진은 기판 η·κ가 RGB라 float3를 제안했다(금속 기판의 색). 이전 엔진은 막 바깥을 늘 공기로 봤고 RGB 세 대역
   평균 Airy를 썼으므로 외형이 달라질 수 있다(정의는 설계대로). 설계 밖 이전 기능(유전체 경계 막, sheen, 이방성, 디테일 층)은 기록만 했다.
   I 몫: `UnxMaterialDesc` version 2(필드 추가, v1 152 B도 받음), `.unxscene` v2 적재·내보내기.
+- `20260925_I_wind_change.md`(대기): 커밋 뒤 장면 바람 변경의 신호(revision)와 변화 상한. 그때까지 호스트는 바람 변경을 거부한다.
 - `20260925_I_skin_normals.md`(대기): 스킨 법선을 관절 3×3의 여인수로 변환하는 것이다. 데이터 월드 캐릭터의 비균일 스케일(0.6, 0.8, 0.6)을 관절에 접으면 필요하다.
 
 ## 4. 이전 저장소 변경
