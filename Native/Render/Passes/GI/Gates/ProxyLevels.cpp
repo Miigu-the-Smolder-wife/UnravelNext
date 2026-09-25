@@ -262,7 +262,7 @@ int main(int argc, char** argv)
                 const Stats plost = distances(posedSourcePoints, TriangleGrid(posedCut)), padded = distances(samplePoints(posedCut, 20000, 4), posedSourceGrid);
                 const float posedMax = std::max(plost.max, padded.max);
                 logf("          bind pose max %.5f m (P99 %.5f); stored pose: measured %.5f m (P99 %.5f), bound %.5f m -> a 4K pixel beyond %.1f m\n",
-                     std::max(lost.max, added.max), std::max(lost.p99, added.p99), posedMax, std::max(plost.p99, padded.p99), render::rt::proxyPoseError(pc, terms),
+                     std::max(lost.max, added.max), std::max(lost.p99, added.p99), posedMax, std::max(plost.p99, padded.p99), render::rt::proxyPoseError(pc, sk, terms),
                      posedMax / pixel4K);
             };
             for (uint32_t l = range.lodLevelOffset; l < range.lodLevelOffset + range.lodLevelCount; ++l)

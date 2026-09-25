@@ -147,7 +147,7 @@ int main()
         const float measured = std::max(nearestMax(source, posed, cut), nearestMax(coarse, posed, m.indices));
         rt::ProxyPoseTerms terms;
         rt::proxyPoseTerms(skeleton, pal, terms);
-        const float bound = rt::proxyPoseError(coefficients, terms);
+        const float bound = rt::proxyPoseError(coefficients, skeleton, terms);
         const bool ok = bound + 1e-4f >= measured;  // 0.1 mm: the float rounding of the measurement
         logf("  bend %5.1f deg: measured Hausdorff %.4f m, bound %.4f m (ratio %.2f) -> %s\n", degrees, measured, bound, measured > 0 ? bound / measured : 0.0f,
              ok ? "PASS" : "FAIL");

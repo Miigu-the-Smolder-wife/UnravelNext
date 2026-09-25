@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
 
 namespace unx::render::rt
 {
@@ -252,16 +253,21 @@ float3 pointOf(const scene::Mesh& m, const Combination& c)
     return p;
 }
 
-// Per (joint, reference) maxima of one cut while its pairs are added.
-struct PairMaxima
+// One sampled pair: q (the cut side's point), its reference joint and per other joint (d_i, h_i).
+struct PairRecord
 {
-    std::vector<int32_t> slot;  // joint * joints + reference -> index in terms, -1 = none
-    std::vector<ProxyPoseCoefficients::Term> terms;
-    std::vector<std::pair<uint32_t, uint32_t>> keys;
+    float3 q;
+    uint32_t reference, first, count;  // entries
+};
+struct PairEntry
+{
+    uint32_t joint;
+    float d, h;
 };
 
-// Adds one pair's terms.
-void addPair(const scene::Mesh& m, const ProxyPoseSkeleton& sk, const Combination& x, const Combination& q, ProxyPoseCoefficients& out, PairMaxima& acc)
+// Adds one pair's record.
+void addPair(const scene::Mesh& m, const ProxyPoseSkeleton& sk, const Combination& x, const Combination& q, ProxyPoseCoefficients& out,
+             std::vector<PairRecord>& records, std::vector<PairEntry>& entries)
 {
     const float3 px = pointOf(m, x), pq = pointOf(m, q);
     out.bindError = std::max(out.bindError, length(px - pq));
@@ -282,6 +288,7 @@ void addPair(const scene::Mesh& m, const ProxyPoseSkeleton& sk, const Combinatio
     for (uint32_t i = 0; i < nx; ++i) list[nj++] = wx[i].joint;
     for (uint32_t i = 0; i < nq; ++i)
         if (std::find(list, list + nj, wq[i].joint) == list + nj) list[nj++] = wq[i].joint;
+    PairRecord rec{ pq, r, (uint32_t)entries.size(), 0 };
     for (uint32_t a = 0; a < nj; ++a)
     {
         const uint32_t i = list[a];
@@ -295,19 +302,11 @@ void addPair(const scene::Mesh& m, const ProxyPoseSkeleton& sk, const Combinatio
                 const uint32_t nv = vertexWeights(m, c->vertex[k], wv);
                 h += c->weight[k] * std::fabs(weightOf(wv, nv, i) - weightOf(wc, nc, i)) * length(m.positions[c->vertex[k]] - pc);
             }
-        const float k1 = std::fabs(d) * length(pq - sk.centres[i]) + h, k2 = std::fabs(d);
-        if (k1 <= 0 && k2 <= 0) continue;
-        int32_t& slot = acc.slot[(size_t)i * joints + r];
-        if (slot < 0)
-        {
-            slot = (int32_t)acc.terms.size();
-            acc.terms.push_back({ 0, r, 0, 0 });
-            acc.keys.push_back({ i, r });
-        }
-        ProxyPoseCoefficients::Term& t = acc.terms[slot];
-        t.k1 = std::max(t.k1, k1);
-        t.k2 = std::max(t.k2, k2);
+        if (d == 0 && h == 0) continue;
+        entries.push_back({ i, d, h });
+        ++rec.count;
     }
+    if (rec.count) records.push_back(rec);
 }
 } // namespace
 
@@ -339,8 +338,8 @@ ProxyPoseCoefficients proxyPoseCoefficients(const scene::Mesh& m, ProxyPoseSkele
 {
     ProxyPoseCoefficients out;
     const bool skinned = !sk.centres.empty() && m.skin.weights.size() >= 4 * m.positions.size();
-    PairMaxima acc;
-    if (skinned) acc.slot.assign(sk.centres.size() * sk.centres.size(), -1);
+    std::vector<PairRecord> records;
+    std::vector<PairEntry> entries;
     if (cut.size() < 3 || m.indices.size() < 3) return out;
     const TriangleGrid cutGrid(m.positions, cut), sourceGrid(m.positions, std::span<const uint32_t>(m.indices));
     auto triangleCombination = [](std::span<const uint32_t> indices, uint32_t t, float3 bary) {
@@ -353,7 +352,7 @@ ProxyPoseCoefficients proxyPoseCoefficients(const scene::Mesh& m, ProxyPoseSkele
         return c;
     };
     auto pair = [&](const Combination& x, const Combination& q) {
-        if (skinned) addPair(m, sk, x, q, out, acc);
+        if (skinned) addPair(m, sk, x, q, out, records, entries);
         else out.bindError = std::max(out.bindError, length(pointOf(m, x) - pointOf(m, q)));
     };
     // The correspondence: any point of the other surface gives a valid bound, so among the points within a tolerance of
@@ -411,15 +410,63 @@ ProxyPoseCoefficients proxyPoseCoefficients(const scene::Mesh& m, ProxyPoseSkele
             const Combination q = triangleCombination(cut, t, b);
             pair(correspond(sourceGrid, std::span<const uint32_t>(m.indices), q), q);
         }
-    // Register the pairs in the skeleton (shared by every cut of the mesh), terms sorted by reference joint.
-    for (size_t k = 0; k < acc.terms.size(); ++k)
+    // Spatial clusters of the pairs by q (cells of 1/16 of the extent), centre = mean q; per cluster, per (joint,
+    // reference) the maxima of |d| |q - centre| + h and |d|.
+    const float cell = 16.0f / std::max(tolerance * 1e4f, 1e-6f);  // 1 / (extent / 16)
+    std::unordered_map<uint64_t, uint32_t> clusterOf;
+    std::vector<uint32_t> recordCluster(records.size());
+    std::vector<float3> sum;
+    std::vector<uint32_t> members;
+    for (size_t k = 0; k < records.size(); ++k)
     {
-        const auto it = std::find(sk.pairs.begin(), sk.pairs.end(), acc.keys[k]);
-        acc.terms[k].pair = (uint32_t)(it - sk.pairs.begin());
-        if (it == sk.pairs.end()) sk.pairs.push_back(acc.keys[k]);
-        out.terms.push_back(acc.terms[k]);
+        const float3 f = (records[k].q - lo) * cell;
+        const uint64_t key = ((uint64_t)(uint32_t)std::max(0.0f, f.x) << 42) | ((uint64_t)(uint32_t)std::max(0.0f, f.y) << 21) | (uint64_t)(uint32_t)std::max(0.0f, f.z);
+        const auto [it, added] = clusterOf.try_emplace(key, (uint32_t)sum.size());
+        if (added)
+        {
+            sum.push_back(float3{});
+            members.push_back(0);
+        }
+        recordCluster[k] = it->second;
+        sum[it->second] = sum[it->second] + records[k].q;
+        ++members[it->second];
     }
-    std::sort(out.terms.begin(), out.terms.end(), [](const auto& a, const auto& b) { return a.reference < b.reference; });
+    std::vector<std::vector<ProxyPoseCoefficients::Term>> perCluster(sum.size());
+    std::vector<std::vector<std::pair<uint32_t, uint32_t>>> perClusterKeys(sum.size());
+    for (size_t k = 0; k < records.size(); ++k)
+    {
+        const uint32_t c = recordCluster[k];
+        const float3 centre = sum[c] * (1.0f / members[c]);
+        const PairRecord& rec = records[k];
+        for (uint32_t e = rec.first; e < rec.first + rec.count; ++e)
+        {
+            const PairEntry& pe = entries[e];
+            const std::pair<uint32_t, uint32_t> key{ pe.joint, rec.reference };
+            auto& keys = perClusterKeys[c];
+            size_t slot = std::find(keys.begin(), keys.end(), key) - keys.begin();
+            if (slot == keys.size())
+            {
+                keys.push_back(key);
+                perCluster[c].push_back({ 0, 0, 0 });
+            }
+            ProxyPoseCoefficients::Term& t = perCluster[c][slot];
+            t.k1 = std::max(t.k1, std::fabs(pe.d) * length(rec.q - centre) + pe.h);
+            t.k2 = std::max(t.k2, std::fabs(pe.d));
+        }
+    }
+    // Register the (joint, reference) pairs in the skeleton (shared by every cut of the mesh).
+    for (size_t c = 0; c < perCluster.size(); ++c)
+    {
+        ProxyPoseCoefficients::Cluster cl{ sum[c] * (1.0f / members[c]), (uint32_t)out.terms.size(), (uint32_t)perCluster[c].size() };
+        for (size_t k = 0; k < perCluster[c].size(); ++k)
+        {
+            const auto it = std::find(sk.pairs.begin(), sk.pairs.end(), perClusterKeys[c][k]);
+            perCluster[c][k].pair = (uint32_t)(it - sk.pairs.begin());
+            if (it == sk.pairs.end()) sk.pairs.push_back(perClusterKeys[c][k]);
+            out.terms.push_back(perCluster[c][k]);
+        }
+        out.clusters.push_back(cl);
+    }
     return out;
 }
 
@@ -427,7 +474,7 @@ void proxyPoseTerms(const ProxyPoseSkeleton& sk, std::span<const float4> palette
 {
     const uint32_t joints = (uint32_t)std::min<size_t>(sk.centres.size(), palette.size() / 3);
     out.alpha.assign(sk.pairs.size(), 0.0f);
-    out.beta.assign(sk.pairs.size(), 0.0f);
+    out.palette = palette;
     out.s = 1;
     if (joints == 0) return;
     auto row = [&](uint32_t j, int r) { return palette[3 * j + r]; };
@@ -474,27 +521,35 @@ void proxyPoseTerms(const ProxyPoseSkeleton& sk, std::span<const float4> palette
             d[k][0] = a.x - b.x, d[k][1] = a.y - b.y, d[k][2] = a.z - b.z;
         }
         out.alpha[p] = norm2(d);
-        out.beta[p] = length(apply(i, sk.centres[i]) - apply(r, sk.centres[i]));
     }
 }
 
-float proxyPoseError(const ProxyPoseCoefficients& c, const ProxyPoseTerms& t)
+float proxyPoseError(const ProxyPoseCoefficients& c, const ProxyPoseSkeleton& sk, const ProxyPoseTerms& t)
 {
-    // Terms are grouped by reference joint: one sum per reference (every pair is in one group), the largest bounds all.
-    float worst = 0, sum = 0;
-    uint32_t reference = 0xFFFFFFFFu;
-    for (const ProxyPoseCoefficients::Term& term : c.terms)
+    // Every pair is in one cluster: the largest cluster sum bounds them all.
+    const std::span<const float4> pal = t.palette;
+    auto apply = [&](uint32_t j, float3 p) {
+        const float4 a = pal[3 * j], b = pal[3 * j + 1], cc = pal[3 * j + 2];
+        return float3{ a.x * p.x + a.y * p.y + a.z * p.z + a.w, b.x * p.x + b.y * p.y + b.z * p.z + b.w, cc.x * p.x + cc.y * p.y + cc.z * p.z + cc.w };
+    };
+    const size_t joints = pal.size() / 3;
+    float worst = 0;
+    for (const ProxyPoseCoefficients::Cluster& cl : c.clusters)
     {
-        if (term.reference != reference)
+        float sum = 0;
+        for (uint32_t k = cl.first; k < cl.first + cl.count; ++k)
         {
-            reference = term.reference;
-            sum = 0;
+            const ProxyPoseCoefficients::Term& term = c.terms[k];
+            if (term.pair >= t.alpha.size()) continue;
+            const auto [i, r] = sk.pairs[term.pair];
+            if (i >= joints || r >= joints) continue;
+            sum += t.alpha[term.pair] * term.k1 + length(apply(i, cl.centre) - apply(r, cl.centre)) * term.k2;
         }
-        if (term.pair < t.alpha.size()) sum += t.alpha[term.pair] * term.k1 + t.beta[term.pair] * term.k2;
         worst = std::max(worst, sum);
     }
     return t.s * c.bindError + worst;
 }
+
 std::vector<std::vector<std::vector<uint32_t>>> skinAwareCuts(const scene::Mesh& m, const ProxyPoseSkeleton& sk, uint32_t budget, float attributeWeight)
 {
     std::vector<std::vector<std::vector<uint32_t>>> levels;

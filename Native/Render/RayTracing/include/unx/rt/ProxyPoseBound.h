@@ -6,12 +6,12 @@
 // (palette M_i = [A_i | t_i], object space): for a source point x and a cut point q that correspond in the bind pose,
 // each an affine combination of mesh vertices x_k with weights beta_k (vertex joint weights w_ki, blended w_i),
 //
-//   |x' - q'| <= s |x - q| + sum_{i != r} [ alpha_ir (|d_i| |q - o_i| + h_i) + beta_ir |d_i| ]
+//   |x' - q'| <= s |x - q| + sum_{i != r} [ alpha_ir (|d_i| |q - o| + h_i) + beta_ir(o) |d_i| ]
 //
 //   d_i      = w_i(x) - w_i(q)                                  joint i's blended weight difference
 //   h_i      = sum over both combinations of beta_k |w_ki - w_i| |x_k - y|   (y = x or q: the corners' weight spread)
 //   r        = the pair's dominant joint (largest blended weight at q): any joint works, a local one keeps it tight
-//   alpha_ir = ||A_i - A_r||_2, beta_ir = |M_i(o_i) - M_r(o_i)|  joint i against r, at joint i's centre o_i
+//   alpha_ir = ||A_i - A_r||_2, beta_ir(o) = |M_i(o) - M_r(o)|  joint i against r, at any point o (a cluster centre)
 //   s        = max_i ||A_i||
 //
 // (sum_i d_i = 0 lets every joint term be taken relative to r; sum_k beta_k (x_k - y) = 0 lets the corner terms be
@@ -19,11 +19,13 @@
 // its closest cut point (geometry the cut loses) and each cut triangle's corners, edge midpoints and centroid with its
 // closest source point (geometry the cut adds). A pair's joints differ in weight only across neighbouring joints, so
 // alpha_ir is a local relative rotation (small), not a joint's rotation against one global joint (large along a chain).
-// Per cut, per (joint i, reference r): K1 = max(|d_i| |q - o_i| + h_i), K2 = max |d_i| over the pairs whose reference
-// is r, with e = max |x - q|. Per frame the bound is s e + max over r of sum_i (alpha_ir K1 + beta_ir K2): the pairs of
-// one reference share one sum, and every pair is in exactly one. alpha_ir uses min(||D||_F, sqrt(||D||_1 ||D||_inf)) >=
-// ||D||_2 (cheap and exact for small rotations). A few operations per (i, r) on the CPU palette (GpuScene::palette,
-// INTERFACES v1.34).
+// The pairs are grouped in spatial clusters by q (cells of 1/16 of the mesh extent), o = the cluster's centre: weights
+// blend only near a joint's pivot, where neighbouring joints move nearly together, so beta at the pairs' own place is
+// small where a joint centroid far away would make it large. Per cut, per cluster, per (joint i, reference r):
+// K1 = max(|d_i| |q - o| + h_i), K2 = max |d_i|, with e = max |x - q|. Per frame the bound is s e + max over clusters of
+// sum over its terms (alpha_ir K1 + beta_ir(o) K2): every pair is in exactly one cluster. alpha_ir uses
+// min(||D||_F, sqrt(||D||_1 ||D||_inf)) >= ||D||_2 (cheap, exact for small rotations). Per frame: alpha per (i, r) and
+// two affine transforms per term on the CPU palette (GpuScene::palette, INTERFACES v1.34).
 #include "unx/core/Math.h"
 
 #include <cstdint>
@@ -42,11 +44,16 @@ struct ProxyPoseCoefficients
     float bindError = 0;  // max |x - q| over the sampled pairs (object space)
     struct Term
     {
-        uint32_t pair;       // index into ProxyPoseSkeleton::pairs
-        uint32_t reference;  // the pair's reference joint (terms are grouped by it)
+        uint32_t pair;       // index into ProxyPoseSkeleton::pairs (joint i, reference r)
         float k1, k2;
     };
-    std::vector<Term> terms;  // sorted by reference joint (empty: rigid mesh, the bind error alone)
+    struct Cluster
+    {
+        float3 centre;
+        uint32_t first, count;  // its terms
+    };
+    std::vector<Term> terms;        // grouped by cluster (empty: rigid mesh, the bind error alone)
+    std::vector<Cluster> clusters;
 };
 
 struct ProxyPoseSkeleton
@@ -66,7 +73,8 @@ ProxyPoseCoefficients proxyPoseCoefficients(const scene::Mesh& mesh, ProxyPoseSk
 struct ProxyPoseTerms
 {
     float s = 1;
-    std::vector<float> alpha, beta;  // per ProxyPoseSkeleton::pairs entry
+    std::vector<float> alpha;            // per ProxyPoseSkeleton::pairs entry
+    std::span<const float4> palette;     // the pose (beta per cluster centre is evaluated by proxyPoseError)
 };
 void proxyPoseTerms(const ProxyPoseSkeleton& skeleton, std::span<const float4> palette, ProxyPoseTerms& out);
 
@@ -83,5 +91,5 @@ void proxyPoseTerms(const ProxyPoseSkeleton& skeleton, std::span<const float4> p
 std::vector<std::vector<std::vector<uint32_t>>> skinAwareCuts(const scene::Mesh& mesh, const ProxyPoseSkeleton& skeleton, uint32_t budget, float attributeWeight);
 
 // The cut's error bound in this pose (object space).
-float proxyPoseError(const ProxyPoseCoefficients& c, const ProxyPoseTerms& t);
+float proxyPoseError(const ProxyPoseCoefficients& c, const ProxyPoseSkeleton& skeleton, const ProxyPoseTerms& t);
 } // namespace unx::render::rt

@@ -1070,7 +1070,7 @@ void RayScene::selectProxyLevels(FramePassContext& fc)
             // Cut errors in this pose (object space); 16 (attribution): V's bind-pose error alone.
             const bool posed = (m_experiment & 16) == 0;
             if (posed) proxyPoseTerms(m_proxySkeletons[d.mesh], m_scene.palette(d.sceneInstance), m_poseTerms);
-            auto cutError = [&](uint32_t l) { return !levels[l].reduced ? 0.0f : posed ? proxyPoseError(levels[l].pose, m_poseTerms) : levels[l].error; };
+            auto cutError = [&](uint32_t l) { return !levels[l].reduced ? 0.0f : posed ? proxyPoseError(levels[l].pose, m_proxySkeletons[d.mesh], m_poseTerms) : levels[l].error; };
             // The reflection exact set's criterion (selectExactSet): the finest cut's error over this bound.
             const float finest = cutError(0) * scale;
             d.exactNeed = finest > 0 ? (bound > 0 ? finest / bound : FLT_MAX) : 0.0f;
