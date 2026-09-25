@@ -13,7 +13,7 @@ constexpr uint32_t kNone = 0xFFFFFFFFu;
 struct Instance  // 144 B
 {
     float4 objectToWorld[3];      // rows of the affine object -> world transform (this tick)
-    float4 prevObjectToWorld[3];  // previous tick (motion, VSM invalidation); equal when static
+    float4 prevObjectToWorld[3];  // previous rendered frame's objectToWorld (motion, HiZ phase 1, VSM invalidation); equal when static
     uint32_t mesh;
     uint32_t flags;               // scene::InstanceFlags
     uint32_t materialRemap;       // first entry in the material remap buffer (one per submesh) or kNone = mesh materials

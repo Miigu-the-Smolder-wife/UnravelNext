@@ -66,3 +66,9 @@ void GpuScene::setInstanceVisible(uint32_t instance, bool visible);
 
 - A: 공유 파일 3개(Tracks.cmake, 최상위 CMakeLists, Build.ps1) 몇 줄. 다른 트랙 빌드는 바뀌지 않는다(I 폴더는 I가 켜졌을 때만 구성).
 - B: GpuScene 공개 함수 추가, 주석 한 줄. 트랙 코드는 바뀌지 않는다.
+
+## 결과 (코어, v1.6)
+
+- **A 반영**: `cmake/Tracks.cmake`(`UNX_ALL_TRACKS`에 I, `UNX_TRACK_OF_Host I`), 최상위 `CMakeLists.txt`(도구 폴더 뒤 = `unx_renderer`·`unx_add_executable`·도구 타깃이 모두 정의된 뒤, I가 켜졌고 `Native/Host/CMakeLists.txt`가 있을 때만 `add_subdirectory(Native/Host)`), `Tools/CI/Build.ps1 -Track I` → `build/I`, 트랙 `V;M;S;R;I`. INTERFACES 1절 표 I 행, 2.5절. `-Tracks "I"`(나머지는 코어 빈 진입점)도 된다. 코어 빌드(`-Track core`)로 구성·빌드 확인.
+- **B 첫 항목 반영**: `GpuInstance::prevObjectToWorld` = 직전 렌더 프레임의 objectToWorld(`GpuSceneLayout.h` 주석, INTERFACES 12절 v1.6).
+- **B의 API(`updateTransforms`, `updateSkeleton`, `setInstanceVisible`)**: S의 급한 요청(타일 국소 래스터) 다음에 넣는다. 그 전까지 호스트는 `upload`만으로 정적 장면을 그릴 수 있다.
