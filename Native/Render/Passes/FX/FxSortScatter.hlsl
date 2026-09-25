@@ -14,10 +14,7 @@
 //      run (about 16 keys per digit per group), so the stores are coalesced instead of one 32 B sector per 4 B key; the
 //      keys are re-read from the group's 16 KB block (cache resident).
 // Lanes past the key count carry digit 256 (no position) and still take part in every wave operation.
-// While writing, each key is counted into the next pass's histogram at its destination (group dest >> FX_SORT_GROUP_SHIFT, next digit)
-// with atomic adds (order independent), so no separate histogram pass reads the keys again.
-// P[0].x digit shift, P[0].y ping-pong (0: A -> B, 1: B -> A), P[0].z this pass's histogram region, P[0].w the next
-// pass's region (NONE after the last pass)
+// P[0].x digit shift, P[0].y ping-pong (0: A -> B, 1: B -> A), P[0].z this pass's histogram region (FxSortHist)
 #include "Passes/FX/Particles.hlsli"
 
 #define ROW 128u
@@ -40,7 +37,7 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     FX_RWBUFFER(uint, valsA, g_valsA);
     FX_RWBUFFER(uint, keysB, g_keysB);
     FX_RWBUFFER(uint, valsB, g_valsB);
-    const uint n = counters[FX_COUNTER_ALIVE], shift = P[0].x, flip = P[0].y, t = gtid.x, groups = g_numSortGroups, region = P[0].z, nextRegion = P[0].w;
+    const uint n = counters[FX_COUNTER_ALIVE], shift = P[0].x, flip = P[0].y, t = gtid.x, groups = g_numSortGroups, region = P[0].z;
     const uint lane = WaveGetLaneIndex(), lanes = WaveGetLaneCount(), wave = t / lanes, waves = ROW / lanes;
     const uint base = gid.x * KEYS;
     for (uint i = t; i < 32u * 64u; i += ROW) gs_counts[i] = 0u;
@@ -134,6 +131,5 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         const uint dest = gs_base[digit] + (i - gs_local[digit]);
         if (flip != 0u) { keysA[dest] = key; valsA[dest] = val; }
         else { keysB[dest] = key; valsB[dest] = val; }
-        if (nextRegion != FX_NONE) InterlockedAdd(hist[nextRegion + (dest >> FX_SORT_GROUP_SHIFT) * 256u + ((key >> (shift + 8u)) & 255u)], 1u);
     }
 }

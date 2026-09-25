@@ -877,8 +877,7 @@ void ParticleSystem::record(FramePassContext& fc)
             device.deferRelease(grownFrom.resource);
         }
         dispatch("fx.particles.emitters", "Passes/FX/FxEmitters", {}, std::max<uint32_t>(groups(h.emitter_count + h.emitter_patch_count, 64), 1), true);
-        const uint32_t beginThreads = std::max<uint32_t>(std::max<uint32_t>(std::max<uint32_t>(std::max<uint32_t>(tableRows, 1), reset ? capacity : 0),
-                                                                            m_sortPasses * histRegion),  // + histogram clear
+        const uint32_t beginThreads = std::max<uint32_t>(std::max<uint32_t>(std::max<uint32_t>(tableRows, 1), reset ? capacity : 0),
                                                          collide ? gridBuckets : 0);  // + grid clear
         dispatch("fx.particles.begin", reset ? "Passes/FX/FxBegin.RESET1" : "Passes/FX/FxBegin.RESET0", {}, groups(beginThreads, 256));
         if (reset) compaction(".reset", 0);
@@ -913,7 +912,8 @@ void ParticleSystem::record(FramePassContext& fc)
         {
             // grid counts cleared by begin; surfaces = transform + count; one-group scan; fill
             dispatch("fx.particles.surfaces", "Passes/FX/FxSurfaces", {}, groups(surfaceTotal, 64));
-            dispatch("fx.particles.grid.scan", "Passes/FX/FxGrid.STEP2", {}, 1);
+            dispatch("fx.particles.grid.scan", "Passes/FX/FxGrid.STEP2", {}, groups(gridBuckets, 1024));
+            dispatch("fx.particles.grid.blocks", "Passes/FX/FxGrid.STEP4", {}, 1);
             dispatch("fx.particles.grid.fill", "Passes/FX/FxGrid.STEP3", {}, groups(surfaceTotal, 64));
         }
 
@@ -960,7 +960,8 @@ void ParticleSystem::record(FramePassContext& fc)
         // sort of the alive list by the 24-bit key
         for (uint32_t pass = 0; pass < ((m_experimentDisable & 4u) ? 0u : m_sortPasses); ++pass)
         {
-            const std::array<uint32_t, 8> p = { pass * 8, pass & 1u, pass * histRegion, pass + 1 < m_sortPasses ? (pass + 1) * histRegion : NV_STREAM_NONE };
+            const std::array<uint32_t, 8> p = { pass * 8, pass & 1u, pass * histRegion };
+            dispatch(format("fx.particles.sort.hist%u", pass).c_str(), "Passes/FX/FxSortHist", p, sortGroups);
             dispatch(format("fx.particles.sort.scan%u", pass).c_str(), "Passes/FX/FxSortScan", p, 1);
             dispatch(format("fx.particles.sort.scatter%u", pass).c_str(), "Passes/FX/FxSortScatter", p, sortGroups);
         }

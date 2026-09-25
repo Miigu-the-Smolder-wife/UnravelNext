@@ -1,30 +1,30 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: STEP=2,3
+// unx-variants: STEP=2,3,4
 // Collision candidate grid of the tick's surfaces (Particles.hlsli, fxSurfaceQuery): a spatial hash of cell g_gridCell
 // with g_gridMask + 1 buckets. FxBegin clears the counts and fills, FxSurfaces writes each tick surface and counts its
 // cells (or lists it as large).
-//   STEP=2 scan: one group; thread t sums its run of buckets/1024 consecutive counts, a 1024-wide scan of the run totals,
-//          then each run is written as an exclusive prefix -> start. (One dispatch for any bucket count.)
+//   STEP=2 scan: group per 1024 buckets, exclusive prefix of the counts inside the block -> start, block total -> blocks.
+//   STEP=4 block offsets: one group, exclusive prefix of the block totals (a bucket's start = start + blocks[b >> 10]).
+//          (A single-group scan of all buckets measured 19 us against 7 + 4 us for these two.)
 //   STEP=3 fill: thread per surface of the grid: entries[start + atomic fill] = surface (order inside a bucket is free:
 //          the candidates' order never changes a result).
 // Every loop is bounded by the counts; entries beyond the capacity (surfaces x 64) cannot occur.
 #include "Passes/FX/Particles.hlsli"
 
-#if STEP == 2
+#if STEP == 2 || STEP == 4
 groupshared uint gs_partial[1024];
 #endif
 
-[numthreads(STEP == 2 ? 1024 : 64, 1, 1)]
+[numthreads(STEP == 2 || STEP == 4 ? 1024 : 64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
 {
     FX_RWBUFFER(uint, counts, g_gridCount);
 #if STEP == 2
     FX_RWBUFFER(uint, starts, g_gridStart);
-    const uint t = gtid.x, buckets = g_gridMask + 1u, run = (buckets + 1023u) / 1024u, first = t * run;
-    uint total = 0u;
-    for (uint k = 0u; k < run; ++k)
-        if (first + k < buckets) total += counts[first + k];
-    gs_partial[t] = total;
+    FX_RWBUFFER(uint, blocks, g_gridBlocks);
+    const uint t = gtid.x, b = id.x, buckets = g_gridMask + 1u;
+    const uint v = b < buckets ? counts[b] : 0u;
+    gs_partial[t] = v;
     GroupMemoryBarrierWithGroupSync();
     for (uint s = 1u; s < 1024u; s <<= 1)
     {
@@ -33,9 +33,22 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
         gs_partial[t] += o;
         GroupMemoryBarrierWithGroupSync();
     }
-    uint at = gs_partial[t] - total;
-    for (uint k2 = 0u; k2 < run; ++k2)
-        if (first + k2 < buckets) { starts[first + k2] = at; at += counts[first + k2]; }
+    if (b < buckets) starts[b] = gs_partial[t] - v;
+    if (t == 1023u) blocks[b >> 10] = gs_partial[t];
+#elif STEP == 4
+    FX_RWBUFFER(uint, blocks, g_gridBlocks);
+    const uint t = gtid.x, count = ((g_gridMask + 1u) + 1023u) / 1024u;
+    const uint v = t < count ? blocks[t] : 0u;
+    gs_partial[t] = v;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint s = 1u; s < 1024u; s <<= 1)
+    {
+        const uint o = t >= s ? gs_partial[t - s] : 0u;
+        GroupMemoryBarrierWithGroupSync();
+        gs_partial[t] += o;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (t < count) blocks[t] = gs_partial[t] - v;
 #else
     if (id.x >= g_surfaceCount) return;
     FX_RWBUFFER(uint, fills, g_gridFill);

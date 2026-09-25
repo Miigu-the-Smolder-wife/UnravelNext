@@ -1,7 +1,7 @@
 // unx-kernel: cs_6_6 main
 // Radix sort, pass scan: one group; thread d scans column d (digit d over the groups) with 16 independent coalesced row
 // loads in flight, then a 256-wide scan of the digit totals gives the digit bases: hist[groups * 256 + d]. The pass's
-// histogram region starts at P[0].z (counted by the compaction or the previous pass's scatter).
+// histogram region starts at P[0].z (FxSortHist).
 #include "Passes/FX/Particles.hlsli"
 
 groupshared uint gs_total[256];

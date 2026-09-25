@@ -295,11 +295,12 @@ struct FxSurfaceQuery
     uint cell, cells; // next cell index, cell count
     uint visited;     // candidates so far (watchdog)
 };
-// Bucket start: exclusive prefix of the bucket counts (FxGrid STEP 2).
+// Bucket start: exclusive prefix inside its block of 1024 buckets + the block's offset (FxGrid STEP 2 and 4).
 uint fxGridStart(uint b)
 {
     FX_RWBUFFER(uint, starts, g_gridStart);
-    return starts[b];
+    FX_RWBUFFER(uint, blocks, g_gridBlocks);
+    return starts[b] + blocks[b >> 10];
 }
 // The AABB is inflated by max(1 mm, 1e-5 |coordinate|), so a point the float hit test accepts is inside it, and by the
 // surface's motion over the tick (moving surfaces above); a surface turning by >= 1/2 rad in a tick is large.

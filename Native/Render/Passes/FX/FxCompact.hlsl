@@ -3,9 +3,7 @@
 // Compaction (stream step 4), 1024 slots per group, deterministic (prefix sums, no atomics):
 //   SCATTER=0: per block the number of alive slots and of slots that died in this tick -> blockSums[group] (uint2)
 //   SCATTER=1: with the exclusive block offsets (FxScanSums): alive list + sort keys/values (slot order), dead list
-//              (slot order), dying list (slot order); a dying slot becomes dead. P[0].x != 0 (the tick's final
-//              compaction): each key is also counted into the first sort pass's histogram (its sort group, digit 0)
-//              - atomic adds, so the counts do not depend on their order.
+//              (slot order), dying list (slot order); a dying slot becomes dead.
 // Wave intrinsics give the in-wave ranks; the per-wave totals live in group memory sized for the smallest wave (4 lanes),
 // so the result does not depend on the wave size (WARP runs 4-lane waves).
 #include "Passes/FX/Particles.hlsli"
@@ -43,15 +41,9 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3 g
         FX_RWBUFFER(uint, keysA, g_keysA);
         FX_RWBUFFER(uint, valsA, g_valsA);
         FX_RWBUFFER(uint, keyBySlot, g_keyBySlot);
-        const uint key = keyBySlot[i];
         aliveList[at.x] = i;
-        keysA[at.x] = key;
+        keysA[at.x] = keyBySlot[i];
         valsA[at.x] = i;
-        if (P[0].x != 0u && g_sortPasses != 0u)
-        {
-            FX_RWBUFFER(uint, hist, g_hist);
-            InterlockedAdd(hist[(at.x >> FX_SORT_GROUP_SHIFT) * 256u + (key & 255u)], 1u);
-        }
     }
     else
     {

@@ -26,12 +26,6 @@ void main(uint3 id : SV_DispatchThreadID)
         counters[FX_COUNTER_TURN] = 0u;
         counters[FX_COUNTER_CARRY] = 0u;
     }
-    if (i < g_sortPasses * g_histRegion)
-    {
-        // sort histograms of the tick: counted by the final compaction (pass 0) and each scatter (the next pass)
-        FX_RWBUFFER(uint, hist, g_hist);
-        hist[i] = 0u;
-    }
     if (i <= g_gridMask && g_surfaceCount != 0u)
     {
         FX_RWBUFFER(uint, counts, g_gridCount);
