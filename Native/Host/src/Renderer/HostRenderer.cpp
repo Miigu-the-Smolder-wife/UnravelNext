@@ -316,6 +316,7 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
         std::lock_guard lock(m_mutex);
         m_stats.frameIndex = m_slotHostFrame[t->frame % m_options.framesInFlight];
         m_stats.graph = m_slotGraph[t->frame % m_options.framesInFlight];
+        for (uint32_t q = 0; q < 2; ++q) m_stats.queues[q] = { t->queues[q].lists, t->queues[q].headMs, t->queues[q].tailMs, t->queues[q].gapMs };
         m_stats.gpuMs = t->gpuFrameMs;
         m_stats.passes = (uint32_t)t->passes.size();
         m_stats.passMs.clear();

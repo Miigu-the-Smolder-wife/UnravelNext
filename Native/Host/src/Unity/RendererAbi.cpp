@@ -685,9 +685,16 @@ void renderEvent(uint64_t ticket)
 UNX_API int32_t UNX_CALL UnxFrameGraphStatsLatest(UnxRenderer r, UnxFrameGraphStats* stats)
 {
     return call([&] {
-        requireStruct(stats, "UnxFrameGraphStats");
+        if (!stats) fail("UnxFrameGraphStats is null");
+        const bool v2 = stats->size == sizeof(UnxFrameGraphStats) && stats->version == 2;
+        if (!v2 && !(stats->size == offsetof(UnxFrameGraphStats, queues) && stats->version == 1))
+            fail("UnxFrameGraphStats ABI mismatch: size %u version %u, native %zu version 2 (or %zu version 1)", stats->size, stats->version, sizeof(UnxFrameGraphStats),
+                 offsetof(UnxFrameGraphStats, queues));
         const FrameStats s = find(r)->latestStats();
         const GraphFrameStats& g = s.graph;
+        if (v2)
+            for (uint32_t q = 0; q < 2; ++q)
+                stats->queues[q] = { s.queues[q].lists, 0, s.queues[q].headMs, s.queues[q].tailMs, s.queues[q].gapMs };
         stats->frameIndex = s.frameIndex;
         stats->livePasses = g.livePasses;
         stats->commandLists = g.commandLists;

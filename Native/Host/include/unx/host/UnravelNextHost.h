@@ -6,6 +6,7 @@
 //     UnxLastError() returns the message of the calling thread's last failure.
 //   - A struct whose size or version does not match is refused (UNX_ERROR_ABI), so a stale managed side fails loudly.
 //   - Render work happens on Unity's submission thread through the plugin event returned by UnxRenderEventFunc().
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -357,17 +358,28 @@ typedef struct UnxFrameStats
 } UnxFrameStats;
 UNX_API int32_t UNX_CALL UnxFrameStatsLatest(UnxRenderer r, UnxFrameStats* stats);
 
+// The frame's time on one queue outside its passes (the profiler's list marks, INTERFACES v1.39): frame span on that
+// queue = head + passes + tail + gap.
+typedef struct UnxQueueTiming
+{
+    uint32_t lists, reserved;   // command lists of the frame on this queue (boundaries = lists - 1)
+    double headMs;              // the frame's first timestamp to this queue's first list
+    double tailMs;              // per list, last pass end to list end (the closing barriers), summed
+    double gapMs;               // list end to the next list's begin (other work on the queue, or idle), summed
+} UnxQueueTiming;
+
 // What the renderer submitted for the frame UnxFrameStatsLatest reports (its render graph): passes, command lists,
-// barriers, queue synchronisation, transient memory, plan compile time. Optional export within ABI 6 (a bridge probes for
-// it); the frame's GPU span beyond its passes' sum is time between the renderer's submissions, which these explain.
+// barriers, queue synchronisation, transient memory, plan compile time, and (version 2) per queue the time outside the
+// passes. Optional export within ABI 6 (a bridge probes for it). Version 1 (64 B, without 'queues') is still accepted.
 typedef struct UnxFrameGraphStats
 {
-    uint32_t size, version;     // sizeof, 1
+    uint32_t size, version;     // sizeof, 2
     uint64_t frameIndex;        // the same frame as UnxFrameStats::frameIndex
     uint32_t livePasses, commandLists, barrierBatches, barriers;
     uint32_t crossQueueSyncs, transientResources, planReused, reserved;
     uint64_t transientBytesAliased;
     double cpuCompileMs;        // plan build (0 when the cached plan was reused)
+    UnxQueueTiming queues[2];   // graphics, compute (version 2)
 } UnxFrameGraphStats;
 UNX_API int32_t UNX_CALL UnxFrameGraphStatsLatest(UnxRenderer r, UnxFrameGraphStats* stats);
 
@@ -395,7 +407,9 @@ static_assert(sizeof(UnxSceneInfo) == 128);
 static_assert(sizeof(UnxCameraDesc) == 48);
 static_assert(sizeof(UnxFrameDesc) == 96);
 static_assert(sizeof(UnxFrameStats) == 48);
-static_assert(sizeof(UnxFrameGraphStats) == 64);
+static_assert(sizeof(UnxQueueTiming) == 32);
+static_assert(sizeof(UnxFrameGraphStats) == 128);
+static_assert(offsetof(UnxFrameGraphStats, queues) == 64);  // version 1 is the first 64 bytes
 static_assert(sizeof(UnxTransformUpdate) == 56);
 static_assert(sizeof(UnxPassTiming) == 56);
 #endif

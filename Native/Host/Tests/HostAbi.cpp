@@ -630,7 +630,7 @@ int main(int argc, char** argv)
              kFrames, (unsigned long long)stats.frameIndex, stats.gpuMs, stats.passes, stats.cpuRecordMs, stats.cpuSubmitMs);
         UnxFrameGraphStats graph{};
         graph.size = sizeof graph;
-        graph.version = 1;
+        graph.version = 2;
         api.ok(api.UnxFrameGraphStatsLatest(r, &graph), "UnxFrameGraphStatsLatest");
         logf("ABI graph of frame %llu: %u live passes, %u command lists, %u barriers in %u batches, %u cross-queue syncs, %u transients (%.1f MB aliased), plan %s\n",
              (unsigned long long)graph.frameIndex, graph.livePasses, graph.commandLists, graph.barriers, graph.barrierBatches, graph.crossQueueSyncs,
@@ -638,6 +638,15 @@ int main(int argc, char** argv)
         // The graph numbers belong to the frame the timings report, and that frame recorded passes and lists.
         if (graph.frameIndex != stats.frameIndex) fail("UnxFrameGraphStatsLatest: frame %llu, stats frame %llu", (unsigned long long)graph.frameIndex, (unsigned long long)stats.frameIndex);
         if (graph.livePasses == 0 || graph.commandLists == 0) fail("UnxFrameGraphStatsLatest: %u live passes, %u command lists", graph.livePasses, graph.commandLists);
+        logf("ABI queue timing of frame %llu: graphics %u lists, head %.4f tail %.4f gap %.4f ms; compute %u lists (correctness run, not a measurement)\n",
+             (unsigned long long)graph.frameIndex, graph.queues[0].lists, graph.queues[0].headMs, graph.queues[0].tailMs, graph.queues[0].gapMs, graph.queues[1].lists);
+        if (graph.queues[0].lists == 0) fail("UnxFrameGraphStatsLatest: no graphics list in the queue timing");
+        // Version 1 (the first 64 bytes) is still served.
+        UnxFrameGraphStats v1{};
+        v1.size = (uint32_t)offsetof(UnxFrameGraphStats, queues);
+        v1.version = 1;
+        api.ok(api.UnxFrameGraphStatsLatest(r, &v1), "UnxFrameGraphStatsLatest v1");
+        if (v1.commandLists != graph.commandLists || v1.queues[0].lists != 0) fail("UnxFrameGraphStatsLatest v1 wrote past its 64 bytes or lost fields");
         api.ok(api.UnxRendererDestroy(r), "UnxRendererDestroy");
 
         const QualityConfig q = QualityConfig::loadDirectory(testQuality);

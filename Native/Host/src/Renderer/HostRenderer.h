@@ -102,6 +102,11 @@ struct FrameStats
     double gpuMs = 0, cpuRecordMs = 0, cpuSubmitMs = 0;
     uint32_t passes = 0;
     GraphFrameStats graph;                         // the same frame's render graph
+    struct QueueGaps
+    {
+        uint32_t lists = 0;
+        double headMs = 0, tailMs = 0, gapMs = 0;
+    } queues[2];                                   // graphics, compute: time outside the passes (profiler list marks)
     std::vector<std::pair<std::string, double>> passMs;  // the same frame's passes in graph order
 };
 
