@@ -137,6 +137,7 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
   - **HOLD**: `.gpulock/HOLD`가 있으면 아무도 새로 얻지 않는다(사용자가 게임할 때 두는 표지, 내용 = 사유; 조율 규칙).
   - **프로세스 안 조각**(C의 GPU 기준 경로추적기 등 수 분짜리 correctness 작업): 같은 규약(뮤텍스 이름, current.json 원자 교체, history 줄, 대기자·양보·HOLD)을 프로세스 안에서 조각마다 따른다. history 줄은 `acquire C (correctness) :: slice k/N <what>` / `release C (correctness) exit 0 slice k/N <ms> ms`, 조각이 15 s를 넘으면 `LONG_SLICE`. core가 C++ API(`GpuLock.h`의 `GpuLockSlice`)를 낸다. 그 전까지는 C의 임시 구현이 같은 규약을 따른다.
   - [실측] 자체 시험(작업 트리 사본, 진짜 뮤텍스): HOLD가 있으면 얻지 않고 사유를 알린다. 살아 있는 가짜 timing 대기자가 있으면 correctness가 양보한다. 그 프로세스가 끝나면 파일이 지워지고 곧 얻는다.
+  - [실측] CPU 시험(9 s 명령, 잡 밖에서 powershell 바쁜 루프 5개 8 s): release 줄 `background: cpu 7 s >= 4 cores, peak 5.2 cores`(바쁜 루프 = 배경)와 `cpu-contended: 9 s >= 4 cores, peak 26.9 cores; top: unx_reference.exe 159 core-s, unx_study_material_layers.exe 18, cl.exe 9, unx_test_fx_particletests.exe 9`(같은 시각 다른 세션들의 실제 CPU 작업)가 나왔다. 짧은 끝 구간 규칙 전에는 0.1 s 구간이 "peak 58.1 cores"를 만들었다.
 - 사용자의 다른 GPU 앱은 닫지 않는다. 측정은 4K·1440p만(하네스가 강제), 1.5초 워밍업, 중앙값·P95·P99.
 
 ### 3.4 결과·상태

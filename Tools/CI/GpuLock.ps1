@@ -25,6 +25,22 @@
 # UNX_GPU_CONTENTION for the command) lets Harness::run put the samples inside its measurement window into its result
 # JSON ("gpu_contention"), so a contaminated timing is marked where it is judged. The sampler runs in this wrapper,
 # outside the measured process (a sample costs 1-2 ms of CPU; no GPU work).
+# v1.40 (FX report: WARP's virtual engine read as GPU use; coordination: the user's own apps are part of the normal
+# measurement environment): only the hardware adapters' engines count (DXGI adapters without the software flag, matched
+# by the LUID in the counter instance name), and only our processes contend: the repository's builds and tools (an image
+# under an Unravel* checkout or Claude's scratch folders, or named unx_*, pd_*, DesignBench*, GpuPathTracer*), Unity and
+# its workers, and the toolchain (cl, link, ninja, cmake, dxc). Everything else (browser, chat, launchers, overlays, the
+# Claude app) is "background": reported on the release line only past 200 ms/s for more than 5 s ("background: ..."),
+# never as contention. CPU is sampled beside the GPU: a second in which our processes outside the tree use >= 4 cores
+# (summed user + kernel time) is "cpu-contended" ("cpu-contended: N s >= 4 cores, peak P cores; top: name (pid) C core-s")
+# and in the live summary ("cpu_contended_seconds", "cpu_over"), since CPU-heavy work (WARP runs, builds) blurs CPU tick
+# timings; background processes past 4 cores for more than 5 s are reported as "background-cpu".
+#
+# Waiting (v1.40, INTERFACES 3.3; C's in-process slices follow the same protocol): a waiter writes
+# .gpulock/waiting/<pid>.json ({track, kind, pid, since, command}) before it waits and removes it when it acquires or gives
+# up. A correctness acquirer yields to every live timing waiter (re-checked every 250 ms, and once more right after the
+# mutex is taken: it releases the mutex again if a timing waiter or HOLD appeared). No one acquires while .gpulock/HOLD
+# exists (the user's "I am playing" sign; its content is the reason). Waiter files of dead processes are removed.
 # Arguments are parsed by hand (no param block) so everything after "--" reaches the command unchanged.
 $ErrorActionPreference = "Stop"
 $Track = $null
@@ -148,6 +164,96 @@ public static class UnxGpuLockJob
     static extern uint PdhGetRawCounterArray(IntPtr counter, ref uint bufferSize, out uint itemCount, IntPtr buffer);
     [DllImport("pdh.dll")]
     static extern uint PdhCloseQuery(IntPtr query);
+    [DllImport("ntdll.dll")]
+    static extern int NtQuerySystemInformation(int infoClass, IntPtr buffer, int length, out int returned);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct DXGI_ADAPTER_DESC1
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string Description;
+        public uint VendorId, DeviceId, SubSysId, Revision;
+        public UIntPtr DedicatedVideoMemory, DedicatedSystemMemory, SharedSystemMemory;
+        public uint LuidLow;
+        public int LuidHigh;
+        public uint Flags;
+    }
+    // Vtable order only; the placeholders are never called.
+    [ComImport, Guid("29038f61-3839-4626-91fd-086879011a05"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IDXGIAdapter1
+    {
+        void SetPrivateData(); void SetPrivateDataInterface(); void GetPrivateData(); void GetParent();
+        void EnumOutputs(); void GetDesc(); void CheckInterfaceSupport();
+        [PreserveSig] int GetDesc1(out DXGI_ADAPTER_DESC1 desc);
+    }
+    [ComImport, Guid("770aae78-f26f-4dba-a829-253c83d1b387"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IDXGIFactory1
+    {
+        void SetPrivateData(); void SetPrivateDataInterface(); void GetPrivateData(); void GetParent();
+        void EnumAdapters(); void MakeWindowAssociation(); void GetWindowAssociation(); void CreateSwapChain(); void CreateSoftwareAdapter();
+        [PreserveSig] int EnumAdapters1(uint index, out IDXGIAdapter1 adapter);
+    }
+    [DllImport("dxgi.dll")]
+    static extern int CreateDXGIFactory1(ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out IDXGIFactory1 factory);
+
+    // "luid_0x<high>_0x<low>" of every hardware adapter (the GPU Engine counter instance names carry it); empty if DXGI
+    // could not be asked (then every adapter counts, as before v1.40).
+    public static HashSet<string> HardwareLuids()
+    {
+        HashSet<string> luids = new HashSet<string>();
+        try
+        {
+            Guid iid = new Guid("770aae78-f26f-4dba-a829-253c83d1b387");
+            IDXGIFactory1 factory;
+            if (CreateDXGIFactory1(ref iid, out factory) != 0) return luids;
+            for (uint i = 0; ; ++i)
+            {
+                IDXGIAdapter1 adapter;
+                if (factory.EnumAdapters1(i, out adapter) != 0) break;
+                DXGI_ADAPTER_DESC1 d;
+                if (adapter.GetDesc1(out d) == 0 && (d.Flags & 2) == 0)  // DXGI_ADAPTER_FLAG_SOFTWARE
+                    luids.Add(string.Format("luid_0x{0:x8}_0x{1:x8}", (uint)d.LuidHigh, d.LuidLow));
+                Marshal.ReleaseComObject(adapter);
+            }
+            Marshal.ReleaseComObject(factory);
+        }
+        catch (Exception) { }
+        return luids;
+    }
+
+    // Per process: user + kernel time (100 ns) and image name, from one SystemProcessInformation snapshot (x64 layout).
+    public static Dictionary<int, KeyValuePair<long, string>> ProcessTimes()
+    {
+        Dictionary<int, KeyValuePair<long, string>> times = new Dictionary<int, KeyValuePair<long, string>>();
+        int size = 1 << 20;
+        for (int attempt = 0; attempt < 4; ++attempt)
+        {
+            IntPtr buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                int returned;
+                int status = NtQuerySystemInformation(5, buffer, size, out returned);
+                if (status == unchecked((int)0xC0000004)) { size = Math.Max(size * 2, returned + 65536); continue; }  // STATUS_INFO_LENGTH_MISMATCH
+                if (status != 0) return times;
+                int offset = 0;
+                while (true)
+                {
+                    IntPtr e = buffer + offset;
+                    long user = Marshal.ReadInt64(e, 40), kernel = Marshal.ReadInt64(e, 48);
+                    int nameLength = Marshal.ReadInt16(e, 56);
+                    IntPtr nameBuffer = Marshal.ReadIntPtr(e, 64);
+                    int pid = (int)Marshal.ReadInt64(e, 80);
+                    string name = nameBuffer == IntPtr.Zero ? "Idle" : Marshal.PtrToStringUni(nameBuffer, nameLength / 2);
+                    times[pid] = new KeyValuePair<long, string>(user + kernel, name);
+                    int next = Marshal.ReadInt32(e, 0);
+                    if (next == 0) break;
+                    offset += next;
+                }
+                return times;
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+        return times;
+    }
 
     const uint WAIT_TIMEOUT = 0x102;
     const uint KILL_ON_JOB_CLOSE = 0x2000, BREAKAWAY_OK = 0x800;
@@ -160,6 +266,9 @@ public static class UnxGpuLockJob
         public int Survivors;          // processes that did not end after termination
         public double ContendedSeconds;  // seconds in which some process outside the tree kept the GPU busy >= the threshold
         public string Contention = "";   // "name (pid) N s >= T ms/s, peak P ms/s; ..." for those processes
+        public double CpuContendedSeconds;  // seconds in which our processes outside the tree used >= CpuThresholdCores
+        public string CpuContention = "";   // "N s >= 4 cores, peak P cores; top: name (pid) C core-s, ..."
+        public string Background = "";      // the user's software past the background thresholds (not contention)
         public string UnityWaited = "";  // Unity processes still running when the command exited (waited for, not ended)
         public double UnityWaitSeconds;  // how long they took to end on their own
     }
@@ -169,7 +278,18 @@ public static class UnxGpuLockJob
     {
         public const int IntervalMs = 1000;
         public const double ThresholdMsPerS = 50;
-        class Other { public string Name; public double BusyMs, PeakMsPerS, SecondsOver; }
+        public const double CpuThresholdCores = 4;
+        public const double BackgroundMsPerS = 200, BackgroundSeconds = 5;
+        class Other { public string Name; public bool Ours; public double BusyMs, PeakMsPerS, SecondsOver; }
+        Dictionary<int, bool> oursCache = new Dictionary<int, bool>();
+        double backgroundCpuSeconds, backgroundCpuPeak;
+        readonly HashSet<string> luids = HardwareLuids();
+        readonly int self = Process.GetCurrentProcess().Id;
+        Dictionary<int, long> lastCpu = new Dictionary<int, long>();
+        Dictionary<int, double> cpuCoreSeconds = new Dictionary<int, double>();  // per process outside the tree, in contended seconds
+        Dictionary<int, string> cpuNames = new Dictionary<int, string>();
+        double cpuContendedSeconds, cpuPeakCores;
+        List<string> cpuOver = new List<string>();
         readonly IntPtr job;
         readonly string path;
         IntPtr query, counter;
@@ -190,6 +310,7 @@ public static class UnxGpuLockJob
             if (PdhOpenQuery(null, IntPtr.Zero, out query) != 0) { query = IntPtr.Zero; return; }
             if (PdhAddEnglishCounter(query, @"\GPU Engine(*)\Running Time", IntPtr.Zero, out counter) != 0) { PdhCloseQuery(query); query = IntPtr.Zero; return; }
             Read();  // baseline
+            foreach (KeyValuePair<int, KeyValuePair<long, string>> kv in ProcessTimes()) lastCpu[kv.Key] = kv.Value.Key;
             lastMs = clock.Elapsed.TotalMilliseconds;
             thread = new System.Threading.Thread(Loop);
             thread.IsBackground = true;
@@ -215,6 +336,11 @@ public static class UnxGpuLockJob
                     string name = Marshal.PtrToStringUni(Marshal.ReadIntPtr(item));
                     string lower = name == null ? "" : name.ToLowerInvariant();
                     if (!(lower.EndsWith("engtype_3d") || lower.Contains("engtype_compute") || lower.Contains("engtype_copy"))) continue;
+                    if (luids.Count > 0)
+                    {
+                        int l = lower.IndexOf("luid_0x");
+                        if (l < 0 || l + 26 > lower.Length || !luids.Contains(lower.Substring(l, 26))) continue;  // a software adapter (WARP)
+                    }
                     values[name] = Marshal.ReadInt64(item + IntPtr.Size + 16);
                 }
             }
@@ -239,6 +365,24 @@ public static class UnxGpuLockJob
             return pids;
         }
 
+        // Ours (see the header): decided once per process from its image path.
+        bool Ours(int pid)
+        {
+            bool v;
+            if (oursCache.TryGetValue(pid, out v)) return v;
+            v = false;
+            string full = ImagePath(pid).ToLowerInvariant();
+            if (full.Length > 0)
+            {
+                string file = System.IO.Path.GetFileName(full);
+                foreach (string prefix in new string[] { "unx", "pd_", "designbench", "gpupathtracer", "unity", "bee_backend", "cl.exe", "link.exe", "ninja", "cmake", "dxc" })
+                    if (file.StartsWith(prefix)) v = true;
+                if (full.Contains("\\unravel") || full.Contains("\\temp\\claude\\") || full.Contains("\\editor\\data\\")) v = true;
+            }
+            oursCache[pid] = v;
+            return v;
+        }
+
         void Sample()
         {
             Dictionary<string, long> now = Read();
@@ -259,6 +403,9 @@ public static class UnxGpuLockJob
                 busy[pid] = Math.Max(v, Math.Min((kv.Value - before) / 10000.0, dt));
             }
             last = now;
+            // A short interval (the last one, cut by the command's end) is kept in the totals but decides nothing: busy time
+            // and CPU time are counted in scheduler ticks, which a few tens of milliseconds magnify into false peaks.
+            bool decides = dt >= IntervalMs / 2.0;
             ++samples;
             bool contended = false;
             long unixMs = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
@@ -270,20 +417,66 @@ public static class UnxGpuLockJob
                     o = new Other();
                     o.Name = "pid " + kv.Key;
                     try { o.Name = Process.GetProcessById(kv.Key).ProcessName; } catch (Exception) { }
+                    o.Ours = Ours(kv.Key);
                     others[kv.Key] = o;
                 }
                 double perS = kv.Value * 1000.0 / dt;
                 o.BusyMs += kv.Value;
                 o.PeakMsPerS = Math.Max(o.PeakMsPerS, perS);
-                if (perS >= ThresholdMsPerS && kv.Key != 4)  // pid 4 (System): residency paging, which the measured process itself causes
+                if (kv.Key == 4 || !decides) continue;  // System: residency paging, which the measured process itself causes
+                if (o.Ours && perS >= ThresholdMsPerS)
                 {
                     o.SecondsOver += dt / 1000.0;
                     contended = true;
                     over.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture,
                         "  {{\"t_ms\": {0}, \"pid\": {1}, \"ms_per_s\": {2:F1}, \"name\": \"{3}\"}}", unixMs, kv.Key, perS, Escape(o.Name)));
                 }
+                else if (!o.Ours && perS >= BackgroundMsPerS) o.SecondsOver += dt / 1000.0;
             }
             if (contended) contendedSeconds += dt / 1000.0;
+            // CPU: summed user + kernel time of our processes outside the tree (the idle process and this wrapper excluded);
+            // the others' sum is background.
+            Dictionary<int, KeyValuePair<long, string>> cpuNow = ProcessTimes();
+            Dictionary<int, double> cpuMs = new Dictionary<int, double>();
+            double cpuTotalMs = 0, backgroundMs = 0;
+            foreach (KeyValuePair<int, KeyValuePair<long, string>> kv in cpuNow)
+            {
+                long before;
+                if (kv.Key == 0 || kv.Key == self || mine.Contains(kv.Key) || !lastCpu.TryGetValue(kv.Key, out before) || kv.Value.Key <= before) continue;
+                double v = (kv.Value.Key - before) / 10000.0;
+                if (kv.Key == 4 || !Ours(kv.Key))
+                {
+                    backgroundMs += v;
+                    continue;
+                }
+                cpuMs[kv.Key] = v;
+                cpuTotalMs += v;
+                cpuNames[kv.Key] = kv.Value.Value;
+            }
+            lastCpu.Clear();
+            foreach (KeyValuePair<int, KeyValuePair<long, string>> kv in cpuNow) lastCpu[kv.Key] = kv.Value.Key;
+            double cores = decides ? cpuTotalMs / dt : 0, backgroundCores = decides ? backgroundMs / dt : 0;
+            if (backgroundCores >= CpuThresholdCores)
+            {
+                backgroundCpuSeconds += dt / 1000.0;
+                backgroundCpuPeak = Math.Max(backgroundCpuPeak, backgroundCores);
+            }
+            if (cores >= CpuThresholdCores)
+            {
+                cpuContendedSeconds += dt / 1000.0;
+                cpuPeakCores = Math.Max(cpuPeakCores, cores);
+                int topPid = -1;
+                double topMs = 0;
+                foreach (KeyValuePair<int, double> kv in cpuMs)
+                {
+                    double c;
+                    cpuCoreSeconds.TryGetValue(kv.Key, out c);
+                    cpuCoreSeconds[kv.Key] = c + kv.Value / 1000.0;
+                    if (kv.Value > topMs) { topMs = kv.Value; topPid = kv.Key; }
+                }
+                cpuOver.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture, "  {{\"cpu_t_ms\": {0}, \"cores\": {1:F2}, \"top\": \"{2} ({3})\"}}", unixMs,
+                                          cores, topPid >= 0 ? Escape(cpuNames[topPid]) : "", topPid));
+            }
             Write();
         }
 
@@ -296,13 +489,16 @@ public static class UnxGpuLockJob
             StringBuilder b = new StringBuilder();
             b.AppendFormat(System.Globalization.CultureInfo.InvariantCulture, "{{\"interval_ms\": {0}, \"threshold_ms_per_s\": {1}, \"samples\": {2}, \"contended_seconds\": {3:F1},\n",
                            IntervalMs, ThresholdMsPerS, samples, contendedSeconds);
+            b.AppendFormat(System.Globalization.CultureInfo.InvariantCulture, "\"hardware_adapters\": {0}, \"cpu_threshold_cores\": {1}, \"cpu_contended_seconds\": {2:F1},\n",
+                           luids.Count, CpuThresholdCores, cpuContendedSeconds);
+            b.Append("\"cpu_over\": [\n").Append(string.Join(",\n", cpuOver.ToArray())).Append("\n],\n");
             b.Append("\"over\": [\n").Append(string.Join(",\n", over.ToArray())).Append("\n],\n\"others\": [\n");
             List<string> rows = new List<string>();
             foreach (KeyValuePair<int, Other> kv in others)
                 if (kv.Value.BusyMs >= 10)
                     rows.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                        "  {{\"pid\": {0}, \"name\": \"{1}\", \"busy_ms\": {2:F1}, \"peak_ms_per_s\": {3:F1}, \"seconds_over\": {4:F1} }}", kv.Key, Escape(kv.Value.Name),
-                        kv.Value.BusyMs, kv.Value.PeakMsPerS, kv.Value.SecondsOver));
+                        "  {{\"pid\": {0}, \"name\": \"{1}\", \"ours\": {5}, \"busy_ms\": {2:F1}, \"peak_ms_per_s\": {3:F1}, \"seconds_over\": {4:F1} }}", kv.Key,
+                        Escape(kv.Value.Name), kv.Value.BusyMs, kv.Value.PeakMsPerS, kv.Value.SecondsOver, kv.Value.Ours ? "true" : "false"));
             b.Append(string.Join(",\n", rows.ToArray())).Append("\n]}\n");
             string tmp = path + ".tmp";
             try
@@ -329,12 +525,32 @@ public static class UnxGpuLockJob
             try { Sample(); } catch (Exception) { }  // the last partial interval
             PdhCloseQuery(query);
             r.ContendedSeconds = contendedSeconds;
-            List<string> parts = new List<string>();
+            List<string> parts = new List<string>(), background = new List<string>();
             foreach (KeyValuePair<int, Other> kv in others)
-                if (kv.Value.SecondsOver > 0)
+            {
+                if (kv.Value.Ours && kv.Value.SecondsOver > 0)
                     parts.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0} ({1}) {2:F0} s >= {3:F0} ms/s, peak {4:F0} ms/s", kv.Value.Name, kv.Key,
                                             kv.Value.SecondsOver, ThresholdMsPerS, kv.Value.PeakMsPerS));
+                if (!kv.Value.Ours && kv.Value.SecondsOver > BackgroundSeconds)
+                    background.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0} ({1}) {2:F0} s >= {3:F0} ms/s, peak {4:F0} ms/s", kv.Value.Name,
+                                                 kv.Key, kv.Value.SecondsOver, BackgroundMsPerS, kv.Value.PeakMsPerS));
+            }
+            if (backgroundCpuSeconds > BackgroundSeconds)
+                background.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture, "cpu {0:F0} s >= {1:F0} cores, peak {2:F1} cores", backgroundCpuSeconds,
+                                             CpuThresholdCores, backgroundCpuPeak));
             r.Contention = string.Join("; ", parts.ToArray());
+            r.Background = string.Join("; ", background.ToArray());
+            r.CpuContendedSeconds = cpuContendedSeconds;
+            if (cpuContendedSeconds > 0)
+            {
+                List<KeyValuePair<int, double>> top = new List<KeyValuePair<int, double>>(cpuCoreSeconds);
+                top.Sort((x, y) => y.Value.CompareTo(x.Value));
+                List<string> names = new List<string>();
+                for (int k = 0; k < Math.Min(4, top.Count); ++k)
+                    names.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0} ({1}) {2:F0} core-s", cpuNames[top[k].Key], top[k].Key, top[k].Value));
+                r.CpuContention = string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0:F0} s >= {1:F0} cores, peak {2:F1} cores; top: {3}", cpuContendedSeconds,
+                                                CpuThresholdCores, cpuPeakCores, string.Join(", ", names.ToArray()));
+            }
         }
     }
 
@@ -371,6 +587,19 @@ public static class UnxGpuLockJob
     // Unity editor processes in the job: the editor, its import workers and helpers (Unity*, bee_backend) and anything
     // run from an editor install's Data folder (its bundled dotnet for Bee/ILPP). An editor that is still shutting down
     // writes Library (artifact database, Bee state); ending it there risks a damaged Library, so these are waited for.
+    static string ImagePath(int pid)
+    {
+        IntPtr h = OpenProcess(0x1000, false, pid);  // PROCESS_QUERY_LIMITED_INFORMATION
+        if (h == IntPtr.Zero) return "";
+        try
+        {
+            StringBuilder path = new StringBuilder(1024);
+            uint size = (uint)path.Capacity;
+            return QueryFullProcessImageNameW(h, 0, path, ref size) ? path.ToString() : "";
+        }
+        finally { CloseHandle(h); }
+    }
+
     static string UnityProcesses(IntPtr job)
     {
         const int capacity = 256;
@@ -573,18 +802,74 @@ function Add-History([string]$line) {
   Write-Warning "GpuLock.ps1: could not append to $history"
 }
 
+# Waiters (v1.40): .gpulock/waiting/<pid>.json while waiting; correctness yields to live timing waiters; HOLD stops all.
+$waitDir = Join-Path $lockDir "waiting"
+New-Item -ItemType Directory -Force $waitDir | Out-Null
+$waitFile = Join-Path $waitDir ("{0}.json" -f $PID)
+function Write-Waiting {
+  $w = [ordered]@{ track = $Track; kind = $Kind; pid = $PID; since = (Get-Date).ToString("s"); command = ($Command -join " ") }
+  $tmp = "$waitFile.tmp"
+  [IO.File]::WriteAllText($tmp, ($w | ConvertTo-Json -Compress), $utf8)
+  if (-not [UnxGpuLockJob]::ReplaceFile($tmp, $waitFile)) { Remove-Item $tmp -ErrorAction SilentlyContinue }
+}
+function Get-TimingWaiter {
+  foreach ($f in @(Get-ChildItem $waitDir -Filter *.json -ErrorAction SilentlyContinue)) {
+    $w = $null
+    try { $w = [IO.File]::ReadAllText($f.FullName) | ConvertFrom-Json } catch { continue }
+    if (-not $w -or [int]$w.pid -eq $PID) { continue }
+    if (-not (Get-Process -Id ([int]$w.pid) -ErrorAction SilentlyContinue)) { Remove-Item $f.FullName -ErrorAction SilentlyContinue; continue }
+    if ($w.kind -eq "timing") { return $w }
+  }
+  return $null
+}
+function Get-Hold {
+  $h = Join-Path $lockDir "HOLD"
+  if (-not (Test-Path $h)) { return $null }
+  $t = $null
+  try { $t = [IO.File]::ReadAllText($h).Trim() } catch { }
+  if (-not $t) { $t = "(no reason given)" }
+  return $t
+}
+# Why this process must not take the lock now (null: it may).
+function Get-Blocker {
+  $hold = Get-Hold
+  if ($hold) { return "HOLD: $hold" }
+  if ($Kind -eq "correctness") {
+    $w = Get-TimingWaiter
+    if ($w) { return "yielding to the timing waiter {0} (pid {1}) :: {2}" -f $w.track, $w.pid, $w.command }
+  }
+  return $null
+}
+
 $mutex = New-Object System.Threading.Mutex($false, "Local\UnravelNext.GpuMeasurement")
 $acquired = $false
 $waitStart = Get-Date
 $code = 1
+$lastBlocker = $null
 try {
+  Write-Waiting
   while (-not $acquired) {
+    $blocker = Get-Blocker
+    if ($blocker) {
+      if ($blocker -ne $lastBlocker) { Write-Host "waiting for the GPU measurement lock: $blocker" }
+      $lastBlocker = $blocker
+      if (((Get-Date) - $waitStart).TotalMinutes -ge $WaitMinutes) { throw "GPU lock not acquired within $WaitMinutes minutes ($blocker)" }
+      Start-Sleep -Milliseconds 250
+      continue
+    }
+    $lastBlocker = $null
     $abandoned = $false
     try {
       $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(10))
     } catch [System.Threading.AbandonedMutexException] {
       $acquired = $true   # the previous holder died without releasing; the lock is ours
       $abandoned = $true
+    }
+    if ($acquired -and (Get-Blocker)) {
+      # A timing waiter or HOLD appeared while this one waited on the mutex: give it back (before any stale handling).
+      $mutex.ReleaseMutex()
+      $acquired = $false
+      continue
     }
     if ($acquired) {
       # A holder that died without its release: the mutex comes back abandoned when someone was waiting for it, and
@@ -608,6 +893,7 @@ try {
       if (((Get-Date) - $waitStart).TotalMinutes -ge $WaitMinutes) { throw "GPU lock not acquired within $WaitMinutes minutes" }
     }
   }
+  Remove-Item $waitFile -ErrorAction SilentlyContinue
   $launch = Resolve-Launch $Command
   $info = [ordered]@{ track = $Track; kind = $Kind; pid = $PID; started = (Get-Date).ToString("s"); timeoutMinutes = $TimeoutMinutes; command = ($Command -join " ") }
   Write-Current ($info | ConvertTo-Json -Compress)
@@ -626,9 +912,12 @@ try {
   if ($r.Leftover) { $tag += " (ended leftover descendants: $($r.Leftover))" }
   if ($r.Survivors -gt 0) { $tag += " ($($r.Survivors) processes did not end)" }
   if ($r.ContendedSeconds -gt 0) { $tag += " contended: $($r.Contention)" }
+  if ($r.CpuContendedSeconds -gt 0) { $tag += " cpu-contended: $($r.CpuContention)" }
+  if ($r.Background) { $tag += " background: $($r.Background)" }
   Add-History ("{0} release {1} ({2}) exit {3}{4}" -f (Get-Date).ToString("s"), $Track, $Kind, $code, $tag)
   if ($tag) { Write-Host "GpuLock.ps1:$tag" }
 } finally {
+  Remove-Item $waitFile, "$waitFile.tmp" -ErrorAction SilentlyContinue
   Remove-Item Env:\UNX_GPU_LOCK -ErrorAction SilentlyContinue
   Remove-Item Env:\UNX_GPU_CONTENTION -ErrorAction SilentlyContinue
   if ($contention) { Remove-Item $contention, "$contention.tmp" -ErrorAction SilentlyContinue }
