@@ -147,7 +147,7 @@ void createState(FramePassContext& fc, State& s, uint32_t pages)
         s.requests = createBuffer(d, L"S VSM requests", (uint64_t)kTotalSlots * 4);
         s.localMask = createBuffer(d, L"S VSM local cull mask", (uint64_t)kLocalLights * kLocalViewsPerLight * 512 * 4);
         s.cullMask = createBuffer(d, L"S VSM cull mask", (uint64_t)kSlots / 8);
-        s.args = createBuffer(d, L"S VSM indirect args", 32);  // dirty pages at 0, moved instances x levels at 16
+        s.args = createBuffer(d, L"S VSM indirect args", 48);  // dirty pages at 0, moved x levels at 16, moved x local lights at 32
         s.stats = createBuffer(d, L"S VSM stats", 80);
         s.ring = createBuffer(d, L"S VSM constants ring", (uint64_t)kRingSlots * kRingStride, D3D12_HEAP_TYPE_UPLOAD);
         s.statsReadback = createBuffer(d, L"S VSM stats readback", (uint64_t)kStatsSlots * 80, D3D12_HEAP_TYPE_READBACK);
@@ -557,6 +557,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     // Slots the per-slot passes cover: the sun's and those of the assigned local lights.
     const uint32_t slotsUsed = kSlots + s.localUsed * kLocalLightSlots;
     const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow, activeSrv = s.activeNow;
+    const uint32_t activeLocal = (uint32_t)s.localActive.size();
     // Froxel light lists (with each entry's shadow-slot bit): the local page marks and the visibility slots read them.
     recordFroxelLists(fc, main, slotOfSrv);
     const BufferRef froxelLists = fc.resources.froxelLights;
@@ -566,7 +567,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const BufferRef freeList = g.importBuffer(s.freeList.Get(), BufferDesc{ "S VSM free list", 4 + (uint64_t)pages * 4, 0 });
     const BufferRef dirty = g.importBuffer(s.dirtyList.Get(), BufferDesc{ "S VSM dirty list", 8 + (uint64_t)pages * 8, 0 });
     const BufferRef mask = g.importBuffer(s.cullMask.Get(), BufferDesc{ "S VSM cull mask", (uint64_t)kSlots / 8, 0 });
-    const BufferRef args = g.importBuffer(s.args.Get(), BufferDesc{ "S VSM indirect args", 32, 0 });
+    const BufferRef args = g.importBuffer(s.args.Get(), BufferDesc{ "S VSM indirect args", 48, 0 });
     const BufferRef moved = g.importBuffer(s.movedList.Get(), BufferDesc{ "S VSM moved instances", 4 + (uint64_t)s.instanceCapacity * 8, 0 });
     const BufferRef motion = g.importBuffer(s.motion.Get(), BufferDesc{ "S VSM instance motion", (uint64_t)s.instanceCapacity * kLevels * 16, 16 });
     const BufferRef joints = g.importBuffer(s.jointCounts.Get(), BufferDesc{ "S VSM joint counts", (uint64_t)s.instanceCapacity * 4, 4 });
@@ -757,7 +758,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.srv(moved), ctx.uav(args), 0, 0 };
+                      const uint32_t k[4] = { ctx.srv(moved), ctx.uav(args), activeLocal, 0 };
                       ctx.cmd->SetPipelineState(pa);
                       ctx.computeConstants(k, 4);
                       ctx.cmd->Dispatch(1, 1, 1);
@@ -778,6 +779,24 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 16, nullptr, 0);
                   });
     }
+        if (activeLocal > 0)
+        {
+            ID3D12PipelineState* pl = sh.compute("Passes/Shadow/VsmLocalInvalidate");
+            g.addPass("s.vsm.localinvalidate", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(table, Use::UavCompute);
+                          b.use(moved, Use::SrvCompute);
+                          b.use(args, Use::IndirectArgs);
+                          b.keep();
+                      },
+                      [=](PassContext& ctx) {
+                          const uint32_t k[8] = { ctx.uav(table), ctx.srv(moved), localLightsSrv, activeSrv, activeLocal, 0, 0, 0 };
+                          ctx.cmd->SetPipelineState(pl);
+                          ctx.bindFrameConstants(mainConstants);
+                          ctx.computeConstants(k, 8);
+                          ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 32, nullptr, 0);
+                      });
+        }
     {
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmRelease");
         g.addPass("s.vsm.release", QueueType::Compute,

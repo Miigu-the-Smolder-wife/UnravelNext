@@ -7,6 +7,7 @@
 // accumulates per (instance, level); where the sum reaches the level's threshold the level's bit is set and the sum
 // restarts (VsmInvalidate marks the pages and moves the level's anchor). Sub-texel motion therefore never re-renders a
 // coarse page, and accumulated motion does once it matters. Newly seen instances and scene invalidation reset.
+// Every moved caster is listed with bit 31 set (the local lights' pages, VsmLocalInvalidate), with or without levels.
 // P[0].x last revisions UAV (uint2 per instance), P[0].y moved list UAV (raw: count, then (instance, level mask) pairs),
 // P[0].z instance count, P[0].w motion state UAV (float4 per instance x level: anchor centre, accumulated displacement)
 // P[1].x joint counts SRV (uint per instance; 0 = rigid), P[1].y VSM constants CBV. Frame constants (scene buffers).
@@ -67,9 +68,8 @@ void main(uint i : SV_DispatchThreadID)
         }
         motion[i * VSM_LEVELS + k] = s;
     }
-    if (mask == 0) return;
     RWByteAddressBuffer moved = ResourceDescriptorHeap[P[0].y];
     uint at;
     moved.InterlockedAdd(0, 1, at);
-    moved.Store2(4 + at * 8, uint2(i, mask));
+    moved.Store2(4 + at * 8, uint2(i, mask | 0x80000000u));
 }

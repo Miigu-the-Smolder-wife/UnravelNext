@@ -2,6 +2,8 @@
 // (TestRaster.h). A box over a ground plane lit by shadow-casting local lights (a sphere light of radius 0.1 m and a
 // point light): visibility slot 1 of each pixel against the exact reference, the visible fraction of the light's disk
 // seen from the receiver (stratified directions, ray-cast against the same boxes); hard and soft shadows; debug layer.
+// Then the box moves 0.3 m: the local pages under its old and new bounds re-render (VsmLocalInvalidate) and the result
+// matches the reference at the new position.
 //   unx_test_shadow_localshadowtests [--no-debug-layer] [--width W --height H] [--verbose N]
 #include "TestRaster.h"
 
@@ -127,7 +129,7 @@ int main(int argc, char** argv)
             sc.meshes.push_back(boxMesh("box", { 0.4f, 0.4f, 0.4f }));
             sc.instances.push_back(instanceAt(0, { 0, -0.05f, 0 }));
             sc.instances.push_back(instanceAt(1, { 0, 0.9f, 0 }));
-            const std::vector<Box> boxes = { { { 0, -0.05f, 0 }, { 6, 0.05f, 6 } }, { { 0, 0.9f, 0 }, { 0.4f, 0.4f, 0.4f } } };
+            std::vector<Box> boxes = { { { 0, -0.05f, 0 }, { 6, 0.05f, 6 } }, { { 0, 0.9f, 0 }, { 0.4f, 0.4f, 0.4f } } };
             sc.sun.direction = normalize(float3{ 0.3f, -0.6f, 0.2f });  // below the horizon: only the local light
             scene::Light l;
             l.type = cs.type;
@@ -146,11 +148,12 @@ int main(int argc, char** argv)
             tf.frame.mainView = ViewDesc::fromCamera(cam, W, H, float4x4{});
             tf.frame.mainView.prevViewProj = tf.frame.mainView.viewProj;
             tf.frame.deltaTime = 1.0f / 60;
+            auto compareFrame = [&](const std::string& label, int frames) {
             std::vector<uint8_t> vis, depth, gbuffer;
-            for (int frame = 0; frame < 2; ++frame)
+            for (int frame = 0; frame < frames; ++frame)
             {
                 std::shared_ptr<std::vector<uint8_t>> rv, rd, rg;
-                const bool read = frame == 1;
+                const bool read = frame + 1 == frames;
                 tf.run([&](FramePassContext& fc) {
                     ViewResources main;
                     main.view = fc.frame.mainView;
@@ -174,8 +177,8 @@ int main(int argc, char** argv)
                 }
             }
             const shadow::VsmStats& st = shadow::stats(tf.trackState);
-            logf("%s: local shadow slots %u, raster-active %u, casting lights without a slot %u\n", cs.label, st.localAssigned, st.localActive, st.localWithoutSlot);
-            report(st.localAssigned == 1 && st.localActive == 1, (std::string(cs.label) + ": one shadow slot, raster-active").c_str(), st.localAssigned, 1);
+            logf("%s: local shadow slots %u, raster-active %u, casting lights without a slot %u\n", label.c_str(), st.localAssigned, st.localActive, st.localWithoutSlot);
+            report(st.localAssigned == 1 && st.localActive == 1, (label + ": one shadow slot, raster-active").c_str(), st.localAssigned, 1);
 
             const uint32_t pv = TestFrame::rowPitch(W, 4), pg = TestFrame::rowPitch(W, 8);
             const ViewDesc& v = tf.frame.mainView;
@@ -220,12 +223,33 @@ int main(int argc, char** argv)
             for (double e : errors) mean += e;
             mean /= std::max<size_t>(errors.size(), 1);
             const double grossFraction = (double)gross / std::max<size_t>(errors.size(), 1);
-            logf("%s: %zu pixels (%d in shadow), penumbra %d (mean |e| %.4f), mean |e| %.5f, |e| > 0.25: %.4f %%\n", cs.label, errors.size(), shadowed, penCount,
+            logf("%s: %zu pixels (%d in shadow), penumbra %d (mean |e| %.4f), mean |e| %.5f, |e| > 0.25: %.4f %%\n", label.c_str(), errors.size(), shadowed, penCount,
                  penCount ? penSum / penCount : 0.0, mean, 100 * grossFraction);
-            report(shadowed > 100, (std::string(cs.label) + ": pixels in the box's shadow").c_str(), shadowed, 100);
-            report(mean < 0.01, (std::string(cs.label) + ": mean |V - V_ref|").c_str(), mean, 0.01);
-            report(grossFraction < 2e-3, (std::string(cs.label) + ": fraction |V - V_ref| > 0.25").c_str(), grossFraction, 2e-3);
-            report(penCount == 0 || penSum / penCount < 0.06, (std::string(cs.label) + ": penumbra mean |V - V_ref|").c_str(), penCount ? penSum / penCount : 0, 0.06);
+            report(shadowed > 100, (label + ": pixels in the box's shadow").c_str(), shadowed, 100);
+            report(mean < 0.01, (label + ": mean |V - V_ref|").c_str(), mean, 0.01);
+            report(grossFraction < 2e-3, (label + ": fraction |V - V_ref| > 0.25").c_str(), grossFraction, 2e-3);
+            report(penCount == 0 || penSum / penCount < 0.06, (label + ": penumbra mean |V - V_ref|").c_str(), penCount ? penSum / penCount : 0, 0.06);
+            };
+            compareFrame(cs.label, 2);
+            // The box moves: its old and new bounds' local pages re-render.
+            {
+                std::vector<gpu::Instance> inst = tf.gpuScene.instances();
+                gpu::Instance& box = inst[1];
+                for (int r = 0; r < 3; ++r) box.prevObjectToWorld[r] = box.objectToWorld[r];
+                box.objectToWorld[0].w += 0.3f;
+                box.transformRevision += 1;
+                ComPtr<ID3D12Resource> staging = tf.makeBuffer(sizeof(gpu::Instance) * inst.size(), D3D12_HEAP_TYPE_UPLOAD);
+                void* p = nullptr;
+                D3D12_RANGE nothing{ 0, 0 };
+                check(staging->Map(0, &nothing, &p), "map instances");
+                std::memcpy(p, inst.data(), sizeof(gpu::Instance) * inst.size());
+                staging->Unmap(0, nullptr);
+                CommandList cl = tf.device.acquireCommandList(QueueType::Graphics);
+                cl.list->CopyBufferRegion(tf.gpuScene.buffer("instances"), 0, staging.Get(), 0, sizeof(gpu::Instance) * inst.size());
+                tf.device.queue(QueueType::Graphics).waitCpu(tf.device.submit(cl));
+                boxes[1].centre.x += 0.3f;
+            }
+            compareFrame(std::string(cs.label) + ", box moved", 1);
         }
         const uint32_t debugErrors = tf.device.drainDebugMessages();
         report(debugErrors == 0, "D3D12 debug layer errors", debugErrors, 0);
