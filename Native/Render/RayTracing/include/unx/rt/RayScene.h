@@ -41,7 +41,6 @@ struct DeformJob  // 16 B (Deform.hlsl)
     uint32_t sceneInstance, deformedBase, vertexMap, vertexCount;
 };
 constexpr uint32_t kRtInstanceDeformed = 1u;
-constexpr uint32_t kRtInstanceCrowd = 2u;  // RayScene.hlsli RT_INSTANCE_CROWD
 constexpr uint32_t kRtGeometryProxyIndices = 1u;
 constexpr uint32_t kRtMaskGi = 1u, kRtMaskReflection = 2u, kRtMaskAll = 0xFFu;
 
@@ -60,8 +59,6 @@ struct RaySceneStats
     uint32_t exactOccupied = 0, exactBuilds = 0;  // last frame: slots in use, slots (re)built
     uint64_t exactVertices = 0;            // vertices deformed per occupied slot's owner (last frame)
     uint32_t proxySwitches = 0;            // last frame: deformed instances whose proxy cut changed (BLAS rebuilt)
-    uint32_t crowdInstances = 0;           // last frame: deformed instances in the crowd BLAS (built whole, one call)
-    uint64_t crowdTriangles = 0;
 };
 
 class RayScene
@@ -138,7 +135,6 @@ private:
     // Refit (refit = true) or build every deformed BLAS; 'rebuild' (per deformed instance, optional) builds those whose proxy
     // cut changed this frame.
     void recordRefit(ID3D12GraphicsCommandList7* cmd, bool refit, const std::vector<uint8_t>* rebuild = nullptr) const;
-    void recordCrowdBuild(ID3D12GraphicsCommandList7* cmd, const std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>& geometries) const;
     void recordExactBuilds(ID3D12GraphicsCommandList7* cmd, const std::vector<uint8_t>& rebuild) const;
     void selectExactSet(FramePassContext& fc);
     uint32_t maxMeshVertices() const;
@@ -197,19 +193,6 @@ private:
     std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> proxyGeometry(uint32_t sceneInstance, uint32_t mesh, const ProxyMesh& p, uint32_t vertexBase) const;
     std::vector<uint8_t> m_deformedRebuild;  // per deformed instance: build instead of refit this frame
 
-    // Crowd BLAS (ARCHITECTURE 2.8): beyond the raytracing.near_characters_with_proxy nearest, the deformed instances'
-    // proxies are one BLAS built each frame (one build call instead of one refit call each: the refit's fixed cost per
-    // call, ~1.25 us [measured], dominated 256 small proxies). Its TLAS instance resolves hits through a per-frame table
-    // of { geometry record, owning instance record } (RtCrowdEntry, RtSceneSrvs.crowd); members' own instances are masked.
-    void selectCrowd(FramePassContext& fc);
-    uint32_t m_nearCharacters = 64;
-    uint32_t m_crowdRecord = 0xFFFFFFFFu, m_crowdDesc = 0xFFFFFFFFu, m_crowdMaxGeometries = 0, m_crowdSrv = 0;
-    uint64_t m_crowdBlasOffset = 0, m_crowdScratchOffset = 0;
-    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> m_crowdGeometries;  // this frame's
-    ComPtr<ID3D12Resource> m_crowdRing;  // kDescSlots x m_crowdMaxGeometries x 32 B
-    uint8_t* m_crowdRingMapped = nullptr;
-    uint32_t m_crowdRingSrv[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };  // kDescSlots
-
     struct Deformed
     {
         uint32_t sceneInstance = 0, mesh = 0;
@@ -218,8 +201,6 @@ private:
         uint64_t blasOffset = 0, scratchOffset = 0;
         uint32_t geometryBase = 0;
         uint32_t level = 0, record = 0;  // current proxy cut (index into proxyLevels), RtInstance record
-        float distance = 0;              // from the eye to its bounding sphere (this frame)
-        bool crowd = false, stale = false;  // in the crowd BLAS this frame; own BLAS not refit since (build it on return)
         std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;
     };
     std::vector<Deformed> m_deformed;
