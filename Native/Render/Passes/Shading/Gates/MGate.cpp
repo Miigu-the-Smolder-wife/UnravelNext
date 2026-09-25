@@ -7,7 +7,8 @@
 //   m.edge.args + m.edge          edge (E) composite
 // Performance runs only under the GPU lock (INTERFACES 3.3), in the integrated build (V's clusters, C's scenes):
 //   powershell -File Tools/CI/GpuLock.ps1 -Track M -- build/all/bin/unx_gate_shading_mgate.exe
-//       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--scale 1] [--moving] [--out DIR]
+//       --scene city_block|forest_thin|... [--camera NAME] [--resolution 4K|1440p|both] [--frames 600] [--scale 1]
+//       [--moving] [--out DIR]    (--camera: one of the scene's cameras, e.g. forest_combat eye|up|edge; default the first)
 //       [--set key=value ...]   (e.g. shading.experiment_disable=1 for cost attribution; never in a gate verdict)
 //       [--hash]                (FNV-1a of the last frame's display output; copies the output every frame, so hashed
 //                                runs are not timing runs)
@@ -38,9 +39,18 @@ using namespace unx::render;
 
 namespace
 {
-scene::Camera cameraAt(const scene::Scene& s, bool moving, double time)
+// The scene's camera by name (default: the first); the path of the moving run is path 0 whichever camera is named.
+scene::Camera cameraAt(const scene::Scene& s, bool moving, double time, const std::string& name)
 {
     scene::Camera c = s.cameras.at(0);
+    bool found = name.empty();
+    for (const scene::Camera& k : s.cameras)
+        if (k.name == name)
+        {
+            c = k;
+            found = true;
+        }
+    if (!found) fail("scene %s has no camera %s", s.name.c_str(), name.c_str());
     if (!moving || s.paths.empty() || s.paths[0].keys.size() < 2) return c;
     const auto& keys = s.paths[0].keys;
     const double span = keys.back().time - keys.front().time;
@@ -67,7 +77,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        std::string sceneName = "city_block", resolutionArg = "both", out, dumpPath;
+        std::string sceneName = "city_block", cameraName, resolutionArg = "both", out, dumpPath;
         uint32_t frames = 600;
         float scale = 1.0f;
         bool moving = false, hashOutput = false;
@@ -80,6 +90,7 @@ int main(int argc, char** argv)
                 return argv[++i];
             };
             if (a == "--scene") sceneName = next();
+            else if (a == "--camera") cameraName = next();
             else if (a == "--resolution") resolutionArg = next();
             else if (a == "--frames") frames = (uint32_t)std::stoul(next());
             else if (a == "--scale") scale = std::stof(next());
@@ -107,6 +118,7 @@ int main(int argc, char** argv)
         if (!found) fail("unknown scene %s", sceneName.c_str());
         request.scale = scale;
         const scene::Scene s = scenegen::generate(request);
+        const std::string label = cameraName.empty() ? sceneName : sceneName + "/" + cameraName;  // result lines
         ClusterData clusters = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality));
         logf("scene %s (scale %.2f): %zu meshes, %zu instances, %zu materials, %zu textures, %zu clusters\n", sceneName.c_str(), scale, s.meshes.size(), s.instances.size(),
              s.materials.size(), s.textures.size(), clusters.clusters.size());
@@ -157,13 +169,13 @@ int main(int argc, char** argv)
             options.frames = frames;
             options.label = "M " + sceneName + (moving ? " moving" : " static");
             if (!out.empty()) options.outputDirectory = out;
-            float4x4 prev = ViewDesc::fromCamera(cameraAt(s, moving, 0), res.width, res.height, {}).viewProj;
+            float4x4 prev = ViewDesc::fromCamera(cameraAt(s, moving, 0, cameraName), res.width, res.height, {}).viewProj;
             const HarnessResult r = harness.run(res, options, [&](RenderGraph& g, const Resolution& rr, uint64_t frame) {
                 FrameContext fc;
                 fc.frameIndex = frame;
                 fc.time = frame / 60.0;
                 fc.deltaTime = 1.0f / 60;
-                fc.mainView = ViewDesc::fromCamera(cameraAt(s, moving, fc.time), rr.width, rr.height, prev);
+                fc.mainView = ViewDesc::fromCamera(cameraAt(s, moving, fc.time, cameraName), rr.width, rr.height, prev);
                 prev = fc.mainView.viewProj;
                 const TextureRef output = g.importTexture(outputTexture.Get(), { "display output", rr.width, rr.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM }, D3D12_BARRIER_LAYOUT_COMMON);
                 renderer.record(g, fc, output);
@@ -215,7 +227,7 @@ int main(int argc, char** argv)
                 }
                 D3D12_RANGE none{ 0, 0 };
                 readback->Unmap(0, &none);
-                logf("M %s %s: display output hash %016llx (last frame)\n", sceneName.c_str(), rs.c_str(), (unsigned long long)hash);
+                logf("M %s %s: display output hash %016llx (last frame)\n", label.c_str(), rs.c_str(), (unsigned long long)hash);
             }
             // Planar reflection views (R's renderView) run M's passes under ".planar" names: their cost is R's reflection
             // budget (ARCHITECTURE 2.6 C_planar), reported apart.
@@ -250,11 +262,11 @@ int main(int argc, char** argv)
             }
             logf("M %s %s: edge detection %.3f ms (design %.2f) | edge composite %.3f ms (design %.2f) on %u edge pixels (%.2f %% of the view) | class tiles sky %u "
                  "opaque %u subsurface %u water %u of %u\n",
-                 sceneName.c_str(), rs.c_str(), detect, d.detect, edge, d.composite, st.edgePixels, 100.0 * st.edgePixels / pixels, st.classTiles[0], st.classTiles[1],
+                 label.c_str(), rs.c_str(), detect, d.detect, edge, d.composite, st.edgePixels, 100.0 * st.edgePixels / pixels, st.classTiles[0], st.classTiles[1],
                  st.classTiles[2], st.classTiles[3], st.tiles);
             logf("M %s %s: material resolve %.3f ms (design %.2f) | shading %.3f ms (design %.2f before bands) | design kind: %s | planar views, M passes %.3f ms | "
                  "frame %.3f ms\n",
-                 sceneName.c_str(), rs.c_str(), resolve, d.resolve, shade, d.shade, kind, planarM, r.gpuFrameMs.median);
+                 label.c_str(), rs.c_str(), resolve, d.resolve, shade, d.shade, kind, planarM, r.gpuFrameMs.median);
         }
         return 0;
 #endif
