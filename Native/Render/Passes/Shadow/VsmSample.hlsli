@@ -250,26 +250,57 @@ uint vsmRegionClassify(VsmResources r, VsmReceiver rcIn, float radius, uint k)
 // One piece of a segment (vsmSegmentClassify): the reach square of any of its points lies inside the square around its
 // endpoints' reach squares; its light-space height is linear along its projection: the plane h(uv) = h_a + g . (uv - uv_a),
 // g = (h_b - h_a) d / |d|^2 (d = uv_b - uv_a), bounds every point whose reach square holds a texel to within
-// sqrt 2 |g| reach of the texel's plane height. No texel of the square above plane - margin -> lit, every texel above
-// plane + margin -> umbra, both exact (conservative). A piece nearly along the sun (projection shorter than 2 sqrt 2 reach)
-// uses the flat bounds [h_lo, h_hi].
-uint vsmPieceClassify(VsmResources r, ConstantBuffer<VsmConstants> vc, VsmReceiver a, VsmReceiver b, float reach, uint k)
+// sqrt 2 |g| reach of the texel's plane height. Texels farther than reach from the piece's line concern no point, so the
+// comparison plane may also tilt across the line: by the surface's light-space slope (side, from the band A surface the
+// fragments stand on; 0 in free air), which keeps a surface rising beside the line below it; texels within reach of the
+// line stay within |side_perp| reach more. No texel of the square above plane - margin -> lit, every texel above
+// plane + margin -> umbra, both exact (conservative). A piece nearly along the sun (projection shorter than 2 sqrt 2
+// reach) uses the flat bounds [h_lo, h_hi] tilted the same way.
+// Near a surface (surface: its plane h = surface.z + side . (uv - surface.xy); valid = the fragments stand on it) first
+// against that plane raised by the piece's least height above it: every point of the piece is at least delta_min above
+// the plane beside it, so no texel above plane + delta_min - sqrt 2 |side| reach -> lit (the surface itself and any
+// texel behind the piece pass), every texel above plane + delta_max + sqrt 2 |side| reach -> umbra.
+uint vsmPieceClassify(VsmResources r, ConstantBuffer<VsmConstants> vc, VsmReceiver a, VsmReceiver b, float reach, uint k, float2 side, float3 surface,
+                      bool onSurface)
 {
     const float3 axis = vc.level[k].lightZ;
     const float2 lo = min(a.uv, b.uv) - reach, hi = max(a.uv, b.uv) + reach;
     VsmReceiver c = a;
     c.uv = 0.5 * (lo + hi);
     const float radius = 0.5 * max(hi.x - lo.x, hi.y - lo.y);
+    if (onSurface)
+    {
+        const float da = a.h - surface.z - dot(side, a.uv - surface.xy), db = b.h - surface.z - dot(side, b.uv - surface.xy);
+        const float base = surface.z + dot(side, c.uv - surface.xy), margin = 1.4142136 * length(side) * reach;
+        c.slope = side;
+        c.h = base + min(da, db) - margin;
+        c.world = vc.level[k].lightX * c.uv.x + vc.level[k].lightY * c.uv.y + axis * c.h;
+        if (vsmRegionClassify(r, c, radius, k) == VSM_REGION_LIT) return VSM_REGION_LIT;
+        c.h = base + max(da, db) + margin;
+        c.world = vc.level[k].lightX * c.uv.x + vc.level[k].lightY * c.uv.y + axis * c.h;
+        if (vsmRegionClassify(r, c, radius, k) == VSM_REGION_UMBRA) return VSM_REGION_UMBRA;
+    }
     const float2 d = b.uv - a.uv;
     const float len = length(d);
-    float hLit = min(a.h, b.h), hUmbra = max(a.h, b.h);
-    c.slope = 0;
+    const float2 dir = len > 0 ? d / len : float2(1, 0);
+    const float2 sidePerp = side - dot(side, dir) * dir;  // the surface slope across the line
+    const float sideMargin = length(sidePerp) * reach;
+    float hLit = min(a.h, b.h) - sideMargin, hUmbra = max(a.h, b.h) + sideMargin;
+    c.slope = sidePerp;
     if (len > 2.8284271 * reach)
     {
-        c.slope = (b.h - a.h) * d / (len * len);
-        const float centre = a.h + dot(c.slope, c.uv - a.uv), margin = 1.4142136 * length(c.slope) * reach;
+        const float2 along = (b.h - a.h) * d / (len * len);
+        c.slope = along + sidePerp;
+        const float centre = a.h + dot(c.slope, c.uv - a.uv), margin = 1.4142136 * length(along) * reach + sideMargin;
         hLit = centre - margin;
         hUmbra = centre + margin;
+    }
+    else
+    {
+        // Flat along the line: the bounds are taken at the square's centre of the tilted plane.
+        const float shift = dot(sidePerp, c.uv - a.uv);
+        hLit += shift;
+        hUmbra += shift;
     }
     c.h = hLit;
     c.world = vc.level[k].lightX * c.uv.x + vc.level[k].lightY * c.uv.y + axis * hLit;
@@ -282,18 +313,24 @@ uint vsmPieceClassify(VsmResources r, ConstantBuffer<VsmConstants> vc, VsmReceiv
 
 // Segment p0 -> p1 (world; a pixel's fragment depth range, COVERAGE_REDESIGN 4.3): VSM_REGION_LIT when every point of it
 // sees the whole sun disk, VSM_REGION_UMBRA when none sees any of it, VSM_REGION_MIXED otherwise. Points are receivers
-// without a surface plane (flat in light space). The segment is cut into pieces whose projection is at most 8 texels or
+// without a surface plane (flat in light space); surfacePoint / surfaceNormal: the band A surface the fragments stand on
+// (normal 0 = free air): each piece is tried against that surface's plane first (vsmPieceClassify). The segment is cut into pieces whose projection is at most 8 texels or
 // 2 sqrt 2 reach (at most VSM_SEGMENT_PIECES; each piece's square then stays near its line), each classified exactly
 // (vsmPieceClassify): lit / umbra when every piece is. Level: the pixel's, coarser while the segment is longer than a
 // page (so the search bound of its endpoints covers it).
 #define VSM_SEGMENT_PIECES 8u
-uint vsmSegmentClassify(VsmResources r, float3 p0, float3 p1, float footprint, float tanSun)
+uint vsmSegmentClassify(VsmResources r, float3 p0, float3 p1, float footprint, float tanSun, float3 surfacePoint, float3 surfaceNormal)
 {
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
     uint k = vsmLevelForFootprint(vc, footprint);
     [loop] while (k + 1 < VSM_LEVELS && length(vsmLightSpaceAt(vc, p1, k).xy - vsmLightSpaceAt(vc, p0, k).xy) > vsmPageSize(k)) ++k;
     const float3 axis = vc.level[k].lightZ;
     const VsmReceiver a = vsmMakeReceiver(vc, p0, axis, k), b = vsmMakeReceiver(vc, p1, axis, k);
+    // The surface's light-space slope (vsmMakeReceiver's plane of the normal; 0 for no surface).
+    const bool onSurface = dot(surfaceNormal, surfaceNormal) > 0;
+    const VsmReceiver sr = vsmMakeReceiver(vc, onSurface ? surfacePoint : p0, onSurface ? surfaceNormal : axis, k);
+    const float2 side = onSurface ? sr.slope : float2(0, 0);
+    const float3 surface = float3(sr.uv, sr.h);
     const float dmax = max(vsmSearchHeight(r, a, k), vsmSearchHeight(r, b, k)) - min(a.h, b.h);
     if (dmax <= 0) return VSM_REGION_LIT;
     const float reach = dmax * tanSun;
@@ -310,7 +347,7 @@ uint vsmSegmentClassify(VsmResources r, float3 p0, float3 p1, float footprint, f
         pb.uv = lerp(a.uv, b.uv, t1);
         pb.h = lerp(a.h, b.h, t1);
         pb.world = lerp(p0, p1, t1);
-        const uint cls = vsmPieceClassify(r, vc, pa, pb, reach, k);
+        const uint cls = vsmPieceClassify(r, vc, pa, pb, reach, k, side, surface, onSurface);
         if (cls == VSM_REGION_MIXED) return VSM_REGION_MIXED;
         lit += cls == VSM_REGION_LIT ? 1u : 0u;
         umbra += cls == VSM_REGION_UMBRA ? 1u : 0u;

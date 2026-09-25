@@ -386,7 +386,10 @@ int main(int argc, char** argv)
             const uint32_t pv = TestFrame::rowPitch(W, 4), pg = TestFrame::rowPitch(W, 8);
             const ViewDesc& v = tf.frame.mainView;
             std::vector<float4> segments;
-            for (float lift : { 0.02f, 0.5f })
+            // Groups: 0 near a surface (2 cm off, towards the camera), 1 free air (0.5 m off), 2 grass (from 5 mm off, along the
+            // surface normal: the fragment range of a blade standing on the surface).
+            std::vector<uint32_t> groupOf;
+            for (int group = 0; group < 3; ++group)
             for (float len : { 0.05f, 0.5f, 2.0f })
                 for (uint32_t y = 3; y < H; y += 8)
                     for (uint32_t x = 3; x < W; x += 8)
@@ -401,13 +404,19 @@ int main(int argc, char** argv)
                         for (int r = 0; r < 4; ++r)
                             for (int c = 0; c < 4; ++c) wp[r] += v.invViewProj.m[r][c] * ndc[c];
                         const float3 p{ wp[0] / wp[3], wp[1] / wp[3], wp[2] / wp[3] };
-                        const float3 p0 = p + octDecodeCpu(g[0]) * lift;
-                        const float3 p1 = p0 + normalize(v.position - p0) * len;
+                        if (group == 2 && len > 1) continue;
+                        const float3 nrm = octDecodeCpu(g[0]);
+                        const float lift = group == 0 ? 0.02f : group == 1 ? 0.5f : 0.005f;
+                        const float3 p0 = p + nrm * lift;
+                        const float3 p1 = p0 + (group == 2 ? nrm * (len * 0.6f) : normalize(v.position - p0) * len);
+                        groupOf.push_back((uint32_t)group);
                         const float z = v.nearPlane / d;
                         segments.push_back({ p0.x, p0.y, p0.z, 2 * z * std::tan(0.5f * v.verticalFov) / H });
                         segments.push_back({ p1.x, p1.y, p1.z, 0 });
+                        segments.push_back({ nrm.x, nrm.y, nrm.z, 0 });
+                        segments.push_back({ p.x, p.y, p.z, 0 });
                     }
-            const uint32_t count = (uint32_t)segments.size() / 2;
+            const uint32_t count = (uint32_t)segments.size() / 4;
             std::shared_ptr<std::vector<uint8_t>> out;
             ++recorded;
             tf.run([&](FramePassContext& fc) {
@@ -441,10 +450,9 @@ int main(int argc, char** argv)
                 out = tf.readbackBuffer(fc, o, (uint64_t)count * 17 * 4);
             });
             tf.frame.time += tf.frame.deltaTime;
-            uint32_t classes[3] = {}, violations = 0, mixedUniform = 0, airSettled = 0, airCount = 0;
+            uint32_t classes[3] = {}, violations = 0, mixedUniform = 0, settled[3] = {}, total[3] = {};
             for (uint32_t i = 0; i < count; ++i)
             {
-                const bool air = i >= count / 2;  // the second half: 0.5 m off the surface
                 float vals[17];
                 std::memcpy(vals, out->data() + i * 17ull * 4, 17 * 4);
                 const uint32_t cls = (uint32_t)vals[0];
@@ -456,11 +464,8 @@ int main(int argc, char** argv)
                     allDark = allDark && vals[j] <= 1e-6f;
                 }
                 if (cls == 0 && (allLit || allDark)) ++mixedUniform;
-                if (air)
-                {
-                    ++airCount;
-                    airSettled += cls != 0 ? 1u : 0u;
-                }
+                ++total[groupOf[i]];
+                settled[groupOf[i]] += cls != 0 ? 1u : 0u;
                 for (int j = 1; j < 17; ++j)
                     if ((cls == 1 && vals[j] < 1 - 1e-6f) || (cls == 2 && vals[j] > 1e-6f))
                     {
@@ -470,8 +475,8 @@ int main(int argc, char** argv)
             }
             logf("segment classification: %u segments, lit %u, umbra %u, mixed %u (of those uniform at 16 points: %u)\n", count, classes[1], classes[2], classes[0], mixedUniform);
             report(violations == 0, "segment classification: lit / umbra contradicted by a point", violations, 0);
-            logf("  segments 0.5 m off surfaces: %u of %u settled" "\n", airSettled, airCount);
-            report(airSettled > airCount / 2, "segment classification: settles most free-air segments", (double)airSettled / std::max(airCount, 1u), 0.5);
+            logf("  settled: near surface %u / %u, free air %u / %u, grass %u / %u" "\n", settled[0], total[0], settled[1], total[1], settled[2], total[2]);
+            report(settled[1] > total[1] / 2, "segment classification: settles most free-air segments", (double)settled[1] / std::max(total[1], 1u), 0.5);
         }
 
         // 2. Small camera move: only newly visible pages render.
