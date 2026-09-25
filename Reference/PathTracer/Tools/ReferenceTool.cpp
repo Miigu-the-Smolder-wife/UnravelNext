@@ -11,6 +11,8 @@
 //       Metrics against the cached reference and the scene thresholds of Config/quality/reference.toml.
 //   unx_reference selfcheck
 //       Measured error of the atmosphere optical-depth table against direct quadrature.
+// render and census pause while another session holds the GPU measurement lock (.gpulock/current.json with a live
+// holder) or while the manual marker .gpulock/HOLD exists (e.g. the user plays a game); --no-hold disables.
 // Scenes by name come from Tools/SceneGen (seed 1, scale 1 unless given). --no-wind sets the wind speed to 0 before
 // hashing (a different scene identity); --write-scene saves the exact scene that was rendered for the engine to use.
 #include "unx/core/Config.h"
@@ -45,6 +47,7 @@ struct Args
     uint32_t width = 0, height = 0, spp = 0;
     bool noWind = false, force = false;
     float sunIlluminance = -1;
+    bool noHold = false;
 };
 
 Args parse(int argc, char** argv)
@@ -72,6 +75,7 @@ Args parse(int argc, char** argv)
         }
         else if (k == "--spp") a.spp = (uint32_t)std::stoul(next());
         else if (k == "--no-wind") a.noWind = true;
+        else if (k == "--no-hold") a.noHold = true;
         else if (k == "--sun-illuminance") a.sunIlluminance = std::stof(next());
         else if (k == "--force") a.force = true;
         else if (k == "--out") a.out = next();
@@ -118,6 +122,13 @@ reference::ResolvedCamera pickCamera(const scene::Scene& s, const Args& a, std::
 
 std::filesystem::path root() { return std::filesystem::path(UNX_SOURCE_DIR); }
 
+// Files that pause render/census workers (see RenderSettings::pauseWhileExists).
+std::vector<std::filesystem::path> holdFiles(const Args& a)
+{
+    if (a.noHold) return {};
+    return { root() / ".gpulock" / "current.json", root() / ".gpulock" / "HOLD" };
+}
+
 struct ReferenceKeys
 {
     uint32_t spp = 0, rrStart = 0;
@@ -162,6 +173,7 @@ std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const s
         return pfm;
     }
     logf("reference: rendering %s camera %s %ux%u at %u spp (quality %s) -> %s\n", s.name.c_str(), label.c_str(), a.width, a.height, k.spp, k.hash16.c_str(), pfm.string().c_str());
+    reference::waitWhileHeld(holdFiles(a));
     const auto t0 = std::chrono::steady_clock::now();
     reference::PathTracer pt(s);
     const double buildSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -172,10 +184,11 @@ std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const s
     rs.russianRouletteStart = k.rrStart;
     rs.samplesPerPass = std::max(1u, std::min(32u, k.spp / 64));
     rs.checkpoint = pfm.string() + ".checkpoint";
+    rs.pauseWhileExists = holdFiles(a);
     const reference::RenderOutput out = pt.render(cam, rs, [&](const reference::RenderStats& st) {
         const double rate = st.seconds > 0 ? st.rays / st.seconds / 1e6 : 0;
         const double eta = st.samplesDone ? st.seconds * (k.spp - st.samplesDone) / st.samplesDone : 0;
-        logf("  %u/%u spp  %.0f s  %.1f Mrays/s  ETA %.0f s\n", st.samplesDone, k.spp, st.seconds, rate, eta);
+        logf("  %u/%u spp  %.0f s (paused %.0f s)  %.1f Mrays/s  ETA %.0f s\n", st.samplesDone, k.spp, st.seconds, st.pausedSeconds, rate, eta);
     });
     metrics::writePfm(pfm, out.image);
     const std::string stem = pfm.string().substr(0, pfm.string().size() - 4);
@@ -231,9 +244,10 @@ int main(int argc, char** argv)
         }
         if (a.command == "census")
         {
+            reference::waitWhileHeld(holdFiles(a));
             const auto t0 = std::chrono::steady_clock::now();
             reference::PathTracer pt(s);
-            const std::vector<uint64_t> ids = pt.primaryIdentities(cam, a.width, a.height);
+            const std::vector<uint64_t> ids = pt.primaryIdentities(cam, a.width, a.height, holdFiles(a));
             const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             std::string json;
             if (a.engine.empty())

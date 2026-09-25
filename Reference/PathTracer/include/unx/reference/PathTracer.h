@@ -40,6 +40,10 @@ struct ResolvedCamera
 };
 ResolvedCamera resolveCamera(const scene::Scene& scene, const CameraSelection& selection);
 
+// Blocks while any of the hold files is in place (same rule as RenderSettings::pauseWhileExists); callers use it before
+// heavy setup (BVH and atmosphere-table builds run on every core).
+void waitWhileHeld(const std::vector<std::filesystem::path>& files);
+
 struct RenderSettings
 {
     uint32_t width = 0, height = 0;
@@ -49,6 +53,12 @@ struct RenderSettings
     uint64_t seed = 0x5EED;
     std::filesystem::path checkpoint;      // optional: resumable accumulation state
     double checkpointSeconds = 600;        // write the checkpoint at most this often
+    // Pause all render workers while any of these files exists: the GPU measurement lock's holder record
+    // (.gpulock/current.json; a record whose holder process is gone is stale and ignored) and a manual hold marker
+    // (.gpulock/HOLD, e.g. while the user plays a game). Performance measurements and the user's foreground work must
+    // not share the CPU with a reference render. Polled every 200 ms; workers check before every pixel row. Paused
+    // time is excluded from RenderStats::seconds.
+    std::vector<std::filesystem::path> pauseWhileExists;
     // Testing only: false replaces forced in-scattering NEE with NEE at the tracked collision points. Both estimators
     // have the same expectation; the reference always uses the forced one (lower variance for sky light).
     bool forcedInScattering = true;
@@ -56,7 +66,8 @@ struct RenderSettings
 
 struct RenderStats
 {
-    double seconds = 0;
+    double seconds = 0;        // rendering time, pauses excluded
+    double pausedSeconds = 0;  // time spent paused (GPU measurement lock, manual hold)
     uint64_t paths = 0, rays = 0, truncatedPaths = 0, nanSamples = 0;
     uint32_t samplesDone = 0;  // per pixel, both halves together
 };
@@ -86,7 +97,8 @@ public:
 
     // 16 stratified (4 x 4) primary sub-samples per pixel plus the pixel-centre sample (index 16), with alpha test.
     // Returns width * height * 17 identities.
-    std::vector<uint64_t> primaryIdentities(const ResolvedCamera& camera, uint32_t width, uint32_t height);
+    std::vector<uint64_t> primaryIdentities(const ResolvedCamera& camera, uint32_t width, uint32_t height,
+                                            const std::vector<std::filesystem::path>& pauseWhileExists = {});
 
     struct Impl;
 

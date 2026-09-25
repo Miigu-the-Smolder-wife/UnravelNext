@@ -33,6 +33,8 @@
 #include <mutex>
 #include <thread>
 
+#include <windows.h>
+
 namespace unx::reference
 {
 namespace
@@ -559,6 +561,98 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
     return L;
 }
 
+namespace
+{
+// Pauses render workers while any of the given files exists. One watcher thread polls every 200 ms; workers only read
+// an atomic flag. A file that names a holder process ("pid": N, the GPU lock record) counts only while that process
+// is alive, so a holder killed without its cleanup cannot stop renders forever; files without a pid (manual HOLD)
+// count while they exist.
+class PauseGate
+{
+public:
+    explicit PauseGate(std::vector<std::filesystem::path> files) : m_files(std::move(files))
+    {
+        if (m_files.empty()) return;
+        m_paused.store(held());  // pause before the first row if a hold is already in place
+        m_thread = std::thread([this] {
+            bool was = m_paused.load();
+            auto pauseStart = std::chrono::steady_clock::now();
+            if (was) logf("reference: hold in place (%s) - render paused\n", m_reason.c_str());
+            while (!m_stop.load())
+            {
+                const bool now = held();
+                if (now && !was)
+                {
+                    pauseStart = std::chrono::steady_clock::now();
+                    logf("reference: hold in place (%s) - render paused\n", m_reason.c_str());
+                }
+                if (!now && was)
+                {
+                    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - pauseStart).count();
+                    m_pausedMs.fetch_add((uint64_t)(sec * 1000));
+                    logf("reference: hold released - resumed after %.1f s\n", sec);
+                }
+                m_paused.store(now);
+                was = now;
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+            if (was) m_pausedMs.fetch_add((uint64_t)(std::chrono::duration<double>(std::chrono::steady_clock::now() - pauseStart).count() * 1000));
+            m_paused.store(false);
+        });
+    }
+    ~PauseGate()
+    {
+        m_stop.store(true);
+        if (m_thread.joinable()) m_thread.join();
+    }
+    PauseGate(const PauseGate&) = delete;
+    PauseGate& operator=(const PauseGate&) = delete;
+    void wait() const
+    {
+        while (m_paused.load()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    uint64_t pausedMs() const { return m_pausedMs.load(); }
+
+private:
+    bool held()
+    {
+        for (const std::filesystem::path& f : m_files)
+        {
+            std::error_code ec;
+            if (!std::filesystem::exists(f, ec)) continue;
+            std::ifstream in(f);
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            const size_t k = text.find("\"pid\"");
+            const size_t c = k == std::string::npos ? std::string::npos : text.find(':', k);
+            const unsigned long pid = c == std::string::npos ? 0 : std::strtoul(text.c_str() + c + 1, nullptr, 10);
+            if (pid != 0)
+            {
+                HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+                if (!h) continue;  // holder gone: stale record
+                DWORD code = 0;
+                const bool alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+                CloseHandle(h);
+                if (!alive) continue;
+            }
+            m_reason = f.string();
+            return true;
+        }
+        return false;
+    }
+    std::vector<std::filesystem::path> m_files;
+    std::string m_reason;
+    std::atomic<bool> m_paused{ false }, m_stop{ false };
+    std::atomic<uint64_t> m_pausedMs{ 0 };
+    std::thread m_thread;
+};
+} // namespace
+
+void waitWhileHeld(const std::vector<std::filesystem::path>& files)
+{
+    const PauseGate gate(files);
+    gate.wait();
+}
+
 PathTracer::PathTracer(const scene::Scene& scene, uint32_t threads) : m_impl(std::make_unique<Impl>(scene, threads)) {}
 PathTracer::~PathTracer() = default;
 
@@ -637,16 +731,20 @@ RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings&
     const uint32_t tile = 16, tilesX = (W + tile - 1) / tile, tilesY = (H + tile - 1) / tile;
     const float tnear0 = cam.nearPlane;
     auto lastCheckpoint = std::chrono::steady_clock::now();
+    const PauseGate gate(st.pauseWhileExists);
     while (done < halfSpp)
     {
         const uint32_t begin = done, end = std::min(halfSpp, done + std::max(1u, st.samplesPerPass));
         const auto t0 = std::chrono::steady_clock::now();
+        const uint64_t paused0 = gate.pausedMs();
         std::atomic<uint64_t> rays{ 0 }, truncated{ 0 }, nans{ 0 };
         Jobs::instance().parallelFor(tilesX * tilesY, [&](uint32_t ti) {
             const uint32_t tx = ti % tilesX, ty = ti / tilesX;
             Impl::Counters cnt;
             uint64_t localNans = 0;
             for (uint32_t y = ty * tile; y < std::min(H, (ty + 1) * tile); ++y)
+            {
+                gate.wait();
                 for (uint32_t x = tx * tile; x < std::min(W, (tx + 1) * tile); ++x)
                 {
                     const size_t pi = (size_t)y * W + x;
@@ -676,6 +774,7 @@ RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings&
                         sum[half][3 * pi + 2] += acc[2];
                     }
                 }
+            }
             rays += cnt.rays;
             truncated += cnt.truncated;
             nans += localNans;
@@ -685,7 +784,9 @@ RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings&
         stats.rays += rays;
         stats.truncatedPaths += truncated;
         stats.nanSamples += nans;
-        stats.seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        const double pausedPass = (gate.pausedMs() - paused0) / 1000.0;
+        stats.seconds += std::max(0.0, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() - pausedPass);
+        stats.pausedSeconds += pausedPass;
         stats.samplesDone = 2 * done;
         if (progress) progress(stats);
         const bool finished = done >= halfSpp;
@@ -734,12 +835,15 @@ RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings&
     return out;
 }
 
-std::vector<uint64_t> PathTracer::primaryIdentities(const ResolvedCamera& cam, uint32_t W, uint32_t H)
+std::vector<uint64_t> PathTracer::primaryIdentities(const ResolvedCamera& cam, uint32_t W, uint32_t H,
+                                                    const std::vector<std::filesystem::path>& pauseWhileExists)
 {
+    const PauseGate gate(pauseWhileExists);
     Impl& im = *m_impl;
     im.build(cam.time);
     std::vector<uint64_t> ids((size_t)W * H * 17);
     Jobs::instance().parallelFor(H, [&](uint32_t y) {
+        gate.wait();
         for (uint32_t x = 0; x < W; ++x)
             for (uint32_t s = 0; s < 17; ++s)
             {

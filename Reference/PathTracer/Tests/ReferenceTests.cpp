@@ -20,7 +20,11 @@
 
 #include <cmath>
 #include <cstdio>
+#include <chrono>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <thread>
 
 using namespace unx;
 
@@ -488,6 +492,32 @@ void testModelAgreement()
     if (!m.finite() || m.g <= 0) fail("evaluateModel is not finite for a mirror");
 }
 
+void testHold()
+{
+    // waitWhileHeld: a record naming a dead process is stale (returns at once); a pid-less marker holds until removed.
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "unx_hold_test";
+    fs::create_directories(dir);
+    const fs::path stale = dir / "current.json", marker = dir / "HOLD";
+    { std::ofstream(stale) << "{\"track\":\"X\",\"pid\":4294967,\"started\":\"t\"}"; }
+    auto t0 = std::chrono::steady_clock::now();
+    reference::waitWhileHeld({ stale });
+    const double staleSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    { std::ofstream(marker) << "hold"; }
+    std::thread remover([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        fs::remove(marker);
+    });
+    t0 = std::chrono::steady_clock::now();
+    reference::waitWhileHeld({ stale, marker });
+    const double heldSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    remover.join();
+    fs::remove(stale);
+    logf("  hold: stale record released in %.2f s, marker held %.2f s (removed at 0.70 s)\n", staleSec, heldSec);
+    if (staleSec > 0.5) fail("stale GPU lock record held the render");
+    if (heldSec < 0.65 || heldSec > 1.5) fail("manual hold marker not honoured");
+}
+
 void testAtmosphereTable()
 {
     scene::Atmosphere atm;
@@ -509,6 +539,7 @@ int main(int argc, char** argv)
             logf("[%s]\n", name);
             fn();
         };
+        run("hold", testHold);
         run("atmosphere", testAtmosphereTable);
         run("model", testModelAgreement);
         run("bsdf", testBsdfSampling);
