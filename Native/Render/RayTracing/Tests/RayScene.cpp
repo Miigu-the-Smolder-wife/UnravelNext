@@ -500,6 +500,57 @@ int main(int argc, char** argv)
                  ok ? "PASS" : "FAIL");
             pass = pass && ok;
         }
+        {
+            // Round 3 (INTERFACES 6.3, v1.8): hide one static, one dynamic rigid and one skinned instance and record a frame
+            // through RayScene::record (per-frame descriptors, in-frame static TLAS rebuild): the rays must match the CPU
+            // reference without them, and no ray may hit a hidden instance.
+            std::vector<uint32_t> hidden;
+            auto pick = [&](auto match) {
+                for (uint32_t i = 1; i < (uint32_t)s.instances.size(); ++i)
+                    if (match(s.instances[i].flags))
+                    {
+                        hidden.push_back(i);
+                        return;
+                    }
+            };
+            pick([](uint32_t f) { return (f & (scene::InstanceDynamic | scene::InstanceSkinned)) == 0; });
+            pick([](uint32_t f) { return (f & scene::InstanceDynamic) != 0 && (f & scene::InstanceSkinned) == 0; });
+            pick([](uint32_t f) { return (f & scene::InstanceSkinned) != 0; });
+            for (uint32_t i : hidden) gpuScene.setInstanceVisible(i, false);
+            RenderGraph graph(device);
+            FrameContext frame;
+            frame.frameIndex = 1;
+            FrameResources resources;
+            FrameServices services;
+            TrackState state;
+            FramePassContext fctx{ device, graph, shaders, quality, gpuScene, frame, resources, services,
+                                   [&](const ViewDesc&) { return constants.resource->GetGPUVirtualAddress(); }, &state };
+            rs.record(fctx);
+            graph.execute(nullptr);
+            device.queue(QueueType::Graphics).waitCpu(graph.lastFence(QueueType::Graphics));
+            std::vector<CpuTri> shown;
+            for (const CpuTri& t : tris)
+                if (std::find(hidden.begin(), hidden.end(), t.instance) == hidden.end()) shown.push_back(t);
+            std::vector<CpuHit> cpuShown(rayCount);
+            std::vector<uint8_t> visibleShown(rayCount, 0);
+            for (uint32_t i = 0; i < rayCount; ++i)
+            {
+                cpuShown[i] = intersect(shown, rays[i].origin, rays[i].direction, rays[i].tMax);
+                if (rays[i].visibleTMax > 0) visibleShown[i] = intersect(shown, rays[i].origin, rays[i].direction, rays[i].visibleTMax).t < 0 ? 1 : 0;
+            }
+            const std::vector<TestResult> gpu = trace(device, shaders, rs, constants.resource->GetGPUVirtualAddress(), rays);
+            uint32_t hiddenHits = 0;
+            for (const TestResult& r : gpu)
+                if (r.t >= 0 && std::find(hidden.begin(), hidden.end(), r.sceneInstance) != hidden.end()) ++hiddenHits;
+            const Check c = compare(s, shown, rays, gpu, cpuShown, visibleShown);
+            const bool ok = hidden.size() == 3 && hiddenHits == 0 && c.hitMismatch == 0 && c.tMismatch == 0 && c.faceMismatch == 0 && c.normalMismatch == 0 &&
+                            c.visibilityMismatch == 0 && c.coincident <= std::max<uint32_t>(2, c.hits / 2000);
+            logf("hidden (instances %u %u %u): %u hits; hits on hidden instances %u, hit/miss mismatches %u, t mismatches %u, identity ties %u, facing %u, normal %u, "
+                 "visibility %u -> %s\n",
+                 hidden.size() > 0 ? hidden[0] : 0, hidden.size() > 1 ? hidden[1] : 0, hidden.size() > 2 ? hidden[2] : 0, c.hits, hiddenHits, c.hitMismatch, c.tMismatch,
+                 c.coincident, c.faceMismatch, c.normalMismatch, c.visibilityMismatch, ok ? "PASS" : "FAIL");
+            pass = pass && ok;
+        }
         rt::RayPipeline::releaseDevice(device);
         rt::RayScene::releaseDevice(device);
         device.waitIdle();

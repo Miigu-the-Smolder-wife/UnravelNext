@@ -105,7 +105,11 @@ private:
     void buildStaticTlas();
     void recordDeform(ID3D12GraphicsCommandList7* cmd) const;
     void recordRefit(ID3D12GraphicsCommandList7* cmd, bool refit) const;
-    void recordDynamicTlas(ID3D12GraphicsCommandList7* cmd);
+    void recordDynamicTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs);
+    void recordStaticTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs);
+    // INTERFACES 6.3 (v1.8): the instance's current transform and visibility (hidden = mask 0: no ray can hit it).
+    void refreshDesc(D3D12_RAYTRACING_INSTANCE_DESC& d, const gpu::Instance& in, bool worldSpace) const;
+    static uint64_t staticKey(const gpu::Instance& in) { return ((uint64_t)(in.flags & gpu::kInstanceHidden) << 32) | in.transformRevision; }
 
     struct Frame  // graph references of the current frame
     {
@@ -145,7 +149,15 @@ private:
     std::vector<D3D12_RAYTRACING_INSTANCE_DESC> m_staticDescs, m_dynamicDescs;
     std::vector<uint32_t> m_dynamicRecord;  // RtInstance index of each dynamic TLAS instance
     Buffer m_instanceBuffer, m_geometryBuffer, m_indexPool, m_vertexMap;
-    Buffer m_tlasStatic, m_tlasDynamic, m_tlasScratch, m_staticDescBuffer, m_dynamicDescBuffer;
+    Buffer m_tlasStatic, m_tlasDynamic, m_tlasScratch, m_staticDescBuffer, m_dynamicDescBuffer, m_staticScratch;
+    // Per-frame instance descriptors (upload ring, kDescSlots slots >= frames in flight): dynamic ones every frame, static
+    // ones when a static instance's visibility or transform changed (rare; the static TLAS is then rebuilt in the frame).
+    static constexpr uint32_t kDescSlots = 4;
+    ComPtr<ID3D12Resource> m_descRing;
+    uint8_t* m_descRingMapped = nullptr;
+    uint64_t m_descSlotBytes = 0;
+    std::vector<uint32_t> m_staticScene;   // scene instance of each static descriptor
+    std::vector<uint64_t> m_staticKeys;    // visibility + transform revision the static TLAS was built with
     uint32_t m_tlasStaticSrv = gpu::kNone, m_tlasDynamicSrv = gpu::kNone;
     RaySceneStats m_stats;
 };

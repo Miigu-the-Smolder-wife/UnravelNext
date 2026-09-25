@@ -159,8 +159,13 @@ void RayScene::release(Buffer& b)
 RayScene::~RayScene()
 {
     for (Buffer* b : { &m_meshBlasPool, &m_deformedPool, &m_deformedBlasPool, &m_deformedScratch, &m_deformJobs, &m_deformGroups, &m_instanceBuffer, &m_geometryBuffer,
-                       &m_indexPool, &m_vertexMap, &m_tlasStatic, &m_tlasDynamic, &m_tlasScratch, &m_staticDescBuffer, &m_dynamicDescBuffer })
+                       &m_indexPool, &m_vertexMap, &m_tlasStatic, &m_tlasDynamic, &m_tlasScratch, &m_staticDescBuffer, &m_dynamicDescBuffer, &m_staticScratch })
         release(*b);
+    if (m_descRing)
+    {
+        m_descRing->Unmap(0, nullptr);
+        m_device.deferRelease(m_descRing);
+    }
     DescriptorHeaps* h = &m_device.descriptors();
     for (uint32_t srv : { m_tlasStaticSrv, m_tlasDynamicSrv, m_deformedPoolUav })
         if (srv != gpu::kNone) m_device.deferCall([h, srv] { h->freeResource(srv); });
@@ -237,14 +242,19 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         D3D12_RAYTRACING_INSTANCE_DESC d{};
         transformOf(in, d);
         d.InstanceID = (UINT)m_instances.size();
-        d.InstanceMask = kRtMaskAll;
+        d.InstanceMask = (in.flags & gpu::kInstanceHidden) ? 0 : kRtMaskAll;
         d.InstanceContributionToHitGroupIndex = 0;
         d.Flags = instanceFlags(i);  // DXR's default winding = CCW front in our right-handed frame (verified by Tests/RayScene)
         d.AccelerationStructure = meshPool + m_meshBlas[in.mesh].offset;
         m_instances.push_back({ i, m_meshBlas[in.mesh].geometryBase, gpu::kNone, 0 });
         return d;
     };
-    for (uint32_t i : staticList) m_staticDescs.push_back(rigidDesc(i));
+    for (uint32_t i : staticList)
+    {
+        m_staticDescs.push_back(rigidDesc(i));
+        m_staticScene.push_back(i);
+        m_staticKeys.push_back(staticKey(instances[i]));
+    }
     for (uint32_t i : dynamicRigid)
     {
         m_dynamicRecord.push_back((uint32_t)m_instances.size());
@@ -276,7 +286,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         D3D12_RAYTRACING_INSTANCE_DESC desc{};
         desc.Transform[0][0] = desc.Transform[1][1] = desc.Transform[2][2] = 1;  // world-space vertices
         desc.InstanceID = (UINT)m_instances.size();
-        desc.InstanceMask = kRtMaskAll;
+        desc.InstanceMask = (instances[d.sceneInstance].flags & gpu::kInstanceHidden) ? 0 : kRtMaskAll;
         desc.Flags = instanceFlags(d.sceneInstance);
         desc.AccelerationStructure = m_deformedBlasPool.address() + d.blasOffset;
         m_dynamicRecord.push_back((uint32_t)m_instances.size());
@@ -294,6 +304,22 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     m_vertexMap = createStructured(nullptr, sizeof(uint32_t), 0, L"RT vertex map");
 
     buildStaticTlas();
+    {
+        m_descSlotBytes = (uint64_t)(m_dynamicDescs.size() + m_staticDescs.size() + 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+        m_descSlotBytes = (m_descSlotBytes + 255) / 256 * 256;
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_UPLOAD };
+        D3D12_RESOURCE_DESC1 d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        d.Width = m_descSlotBytes * kDescSlots;
+        d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+        d.SampleDesc.Count = 1;
+        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_descRing)),
+              "RT instance descriptor ring");
+        m_descRing->SetName(L"RT instance descriptor ring");
+        D3D12_RANGE none{ 0, 0 };
+        check(m_descRing->Map(0, &none, reinterpret_cast<void**>(&m_descRingMapped)), "map RT descriptor ring");
+    }
     // Dynamic TLAS and deformed BLASes: first full build at load.
     {
         CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
@@ -565,7 +591,7 @@ void RayScene::buildStaticTlas()
     d.ScratchAccelerationStructureData = scratch.address();
     cl.list->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
     m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(cl));
-    release(scratch);
+    m_staticScratch = scratch;  // kept for in-frame rebuilds (visibility or transform changes of static instances)
 }
 
 void RayScene::recordDeform(ID3D12GraphicsCommandList7* cmd) const
@@ -611,8 +637,22 @@ void RayScene::updateDynamic(ID3D12GraphicsCommandList7* cmd, bool refit)
         recordRefit(cmd, refit);
         globalBarrier(cmd, kSyncBuild, kAsWrite, kSyncBuild, kAsRead);
     }
-    recordDynamicTlas(cmd);
+    if (!m_tlasDynamic.resource) recordDynamicTlas(cmd, 0);  // sizes the TLAS and uploads the load-time descriptors
+    else recordDynamicTlas(cmd, m_dynamicDescBuffer.address());
     globalBarrier(cmd, kSyncBuild, kAsWrite, kSyncTrace | kSyncBuild, kAsRead);
+}
+
+void RayScene::refreshDesc(D3D12_RAYTRACING_INSTANCE_DESC& d, const gpu::Instance& in, bool worldSpace) const
+{
+    if (!worldSpace)
+        for (int r = 0; r < 3; ++r)
+        {
+            d.Transform[r][0] = in.objectToWorld[r].x;
+            d.Transform[r][1] = in.objectToWorld[r].y;
+            d.Transform[r][2] = in.objectToWorld[r].z;
+            d.Transform[r][3] = in.objectToWorld[r].w;
+        }
+    d.InstanceMask = (in.flags & gpu::kInstanceHidden) ? 0 : kRtMaskAll;
 }
 
 void RayScene::record(FramePassContext& fc)
@@ -624,7 +664,27 @@ void RayScene::record(FramePassContext& fc)
     fc.resources.tlasStatic = m_frame.tlasStatic;
     fc.resources.tlasDynamic = m_frame.tlasDynamic;
     const BufferRef scratch = g.importBuffer(m_tlasScratch.resource.Get(), { "RT dynamic TLAS scratch", m_tlasScratch.bytes, 0 });
-    const BufferRef descs = g.importBuffer(m_dynamicDescBuffer.resource.Get(), { "RT dynamic instance descs", m_dynamicDescBuffer.bytes, 0 });
+    // This frame's instance descriptors (GpuScene's CPU mirror is current, INTERFACES 6.3 v1.8).
+    if (fc.framesInFlight > kDescSlots) fail("RayScene: %u frames in flight exceed %u descriptor slots", fc.framesInFlight, kDescSlots);
+    const uint64_t slotOffset = (fc.frame.frameIndex % kDescSlots) * m_descSlotBytes;
+    auto* slotDescs = reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(m_descRingMapped + slotOffset);
+    const auto& sceneInstances = m_scene.instances();
+    for (size_t k = 0; k < m_dynamicDescs.size(); ++k)
+    {
+        const RtInstance& ri = m_instances[m_dynamicRecord[k]];
+        refreshDesc(m_dynamicDescs[k], sceneInstances[ri.sceneInstance], (ri.flags & kRtInstanceDeformed) != 0);
+        slotDescs[k] = m_dynamicDescs[k];
+    }
+    const D3D12_GPU_VIRTUAL_ADDRESS dynamicDescs = m_descRing->GetGPUVirtualAddress() + slotOffset;
+    bool staticChanged = false;
+    for (size_t k = 0; k < m_staticDescs.size(); ++k)
+    {
+        const gpu::Instance& in = sceneInstances[m_staticScene[k]];
+        if (staticKey(in) == m_staticKeys[k]) continue;
+        m_staticKeys[k] = staticKey(in);
+        refreshDesc(m_staticDescs[k], in, false);
+        staticChanged = true;
+    }
     if (!m_deformed.empty())
     {
         const BufferRef pool = g.importBuffer(m_deformedPool.resource.Get(), { "RT deformed vertices", m_deformedPool.bytes, 0 });
@@ -648,14 +708,26 @@ void RayScene::record(FramePassContext& fc)
                   [this](PassContext& c) { recordRefit(c.cmd, true); });
     }
     const Frame frame = m_frame;
+    if (staticChanged)
+    {
+        const uint64_t staticOffset = slotOffset + m_dynamicDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+        std::memcpy(m_descRingMapped + staticOffset, m_staticDescs.data(), m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
+        const D3D12_GPU_VIRTUAL_ADDRESS staticDescs = m_descRing->GetGPUVirtualAddress() + staticOffset;
+        const BufferRef staticScratch = g.importBuffer(m_staticScratch.resource.Get(), { "RT static TLAS scratch", m_staticScratch.bytes, 0 });
+        g.addPass("r.as.tlas.static", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(frame.tlasStatic, Use::AccelerationStructureWrite);
+                      b.use(staticScratch, Use::AccelerationStructureScratch);
+                  },
+                  [this, staticDescs](PassContext& c) { recordStaticTlas(c.cmd, staticDescs); });
+    }
     g.addPass("r.as.tlas.dynamic", QueueType::Compute,
               [&](PassBuilder& b) {
                   if (frame.deformedBlas.valid()) b.use(frame.deformedBlas, Use::AccelerationStructureRead);
-                  b.use(descs, Use::AccelerationStructureInput);
                   b.use(frame.tlasDynamic, Use::AccelerationStructureWrite);
                   b.use(scratch, Use::AccelerationStructureScratch);
               },
-              [this](PassContext& c) { recordDynamicTlas(c.cmd); });
+              [this, dynamicDescs](PassContext& c) { recordDynamicTlas(c.cmd, dynamicDescs); });
 }
 
 void RayScene::declareTraversal(PassBuilder& b) const
@@ -666,7 +738,20 @@ void RayScene::declareTraversal(PassBuilder& b) const
     if (m_frame.deformedVertices.valid()) b.use(m_frame.deformedVertices, Use::SrvGraphics);
 }
 
-void RayScene::recordDynamicTlas(ID3D12GraphicsCommandList7* cmd)
+void RayScene::recordStaticTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs)
+{
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
+    d.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    d.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    d.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    d.Inputs.NumDescs = (UINT)m_staticDescs.size();
+    d.Inputs.InstanceDescs = descs;
+    d.DestAccelerationStructureData = m_tlasStatic.address();
+    d.ScratchAccelerationStructureData = m_staticScratch.address();
+    cmd->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
+}
+
+void RayScene::recordDynamicTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs)
 {
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
     inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
@@ -681,11 +766,10 @@ void RayScene::recordDynamicTlas(ID3D12GraphicsCommandList7* cmd)
         m_tlasScratch = createBuffer(sizes.ScratchDataSizeInBytes, true, false, L"RT dynamic TLAS scratch");
         m_dynamicDescBuffer = createBuffer(std::max<size_t>(m_dynamicDescs.size(), 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), false, false, L"RT dynamic instance descs");
         m_stats.tlasDynamicBytes = m_tlasDynamic.bytes;
-        // Instance descriptors come from the GPU scene's transforms; until core updates instance transforms per tick
-        // (P6) they are the load-time values, uploaded once.
+        // Load-time descriptors for the out-of-graph path (tests); frames use the per-frame ring (record).
         upload(m_dynamicDescBuffer, m_dynamicDescs.data(), m_dynamicDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
     }
-    inputs.InstanceDescs = m_dynamicDescBuffer.address();
+    inputs.InstanceDescs = descs ? descs : m_dynamicDescBuffer.address();
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
     d.Inputs = inputs;
     d.DestAccelerationStructureData = m_tlasDynamic.address();
