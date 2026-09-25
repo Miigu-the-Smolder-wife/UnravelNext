@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <set>
 
 using namespace unx;
 using namespace unx::render;
@@ -432,6 +433,45 @@ int main(int argc, char** argv)
             report(nOverflow && sumOverflow / nOverflow < 0.01, "overflow scene: lights past the third mean |V - V_ref|", nOverflow ? sumOverflow / nOverflow : 1, 0.01);
             report((double)grossOverflow / std::max(nOverflow, 1) < 2e-3, "overflow scene: fraction |V - V_ref| > 0.25 past the third",
                    (double)grossOverflow / std::max(nOverflow, 1), 2e-3);
+
+            // Forced capacity 1 word (M's fallback test): every overflow tile is over it, listed once in the fallback tiles.
+            {
+                tf.quality.applyOverride("shadow.vsm.overflow_capacity_words=1");
+                std::shared_ptr<std::vector<uint8_t>> rh, rf;
+                const uint32_t tiles = tilesX * ((H + 7) / 8);
+                tf.run([&](FramePassContext& fc) {
+                    ViewResources main;
+                    main.view = fc.frame.mainView;
+                    main.frameConstants = fc.frameConstantsFor(main.view);
+                    raster.mainView(fc, main);
+                    tracks::shadowPages(fc, main);
+                    tracks::shadowVisibility(fc, main);
+                    rh = tf.readback(fc, main.shadowOverflowTiles);
+                    rf = tf.readbackBuffer(fc, main.shadowOverflowFallbackTiles, 16 + (uint64_t)tiles * 4);
+                });
+                tf.frame.time += tf.frame.deltaTime;
+                tf.quality.applyOverride("shadow.vsm.overflow_capacity_words=0");
+                uint32_t over = 0, blocks = 0, listedWrong = 0;
+                std::set<uint32_t> listed;
+                const uint32_t count = word(*rf, 0);
+                for (uint32_t i = 0; i < count; ++i) listed.insert(word(*rf, 16 + i * 4ull));
+                for (uint32_t ty = 0; ty < (H + 7) / 8; ++ty)
+                    for (uint32_t tx = 0; tx < tilesX; ++tx)
+                    {
+                        const uint32_t hd = word(*rh, ty * ph + tx * 4ull);
+                        if (hd == 0xFFFFFFFFu)
+                        {
+                            ++over;
+                            listedWrong += listed.count(ty << 16 | tx) ? 0 : 1;
+                        }
+                        else if (hd != 0) ++blocks;
+                    }
+                logf("overflow, capacity 1 word: %u tiles over capacity, %u with a block, fallback list %u (args %u %u %u)\n", over, blocks, count, word(*rf, 4),
+                     word(*rf, 8), word(*rf, 12));
+                report(over > 100 && blocks == 0, "overflow, capacity 1: every overflow tile over capacity", blocks, 0);
+                report(count == over && listedWrong == 0 && word(*rf, 4) == count && word(*rf, 8) == 1 && word(*rf, 12) == 1,
+                       "overflow, capacity 1: fallback list = the tiles over capacity, args (n, 1, 1)", (double)count - over + listedWrong, 0);
+            }
         }
         const uint32_t debugErrors = tf.device.drainDebugMessages();
         report(debugErrors == 0, "D3D12 debug layer errors", debugErrors, 0);

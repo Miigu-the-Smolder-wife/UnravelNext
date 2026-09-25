@@ -1100,9 +1100,11 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
             s.overflowCapacity = (uint32_t)target;
         }
         capacity = s.overflowCapacity;
+        const uint32_t forced = (uint32_t)fc.quality.integer("shadow.vsm.overflow_capacity_words");
+        if (forced > 0) capacity = forced;  // tests (M's fallback against the list): every tile over it goes to the fallback
         s.latest.overflowCapacity = capacity;
         heads = g.createTexture(TextureDesc{ "S shadow overflow tiles", tilesX, tilesY, 1, 1, DXGI_FORMAT_R32_UINT });
-        overflow = g.createBuffer(BufferDesc{ "S shadow overflow", (uint64_t)capacity * 4, 0 });
+        overflow = g.createBuffer(BufferDesc{ "S shadow overflow", (uint64_t)std::max(capacity, 64u) * 4, 0 });
         overflowTiles = g.createBuffer(BufferDesc{ "S shadow overflow tile list", 16 + (uint64_t)tiles * 4, 0 });
         fallback = g.createBuffer(BufferDesc{ "S shadow overflow fallback tiles", 16 + (uint64_t)tiles * 4, 0 });
         counter = g.createBuffer(BufferDesc{ "S shadow overflow counter", 16, 0 });
