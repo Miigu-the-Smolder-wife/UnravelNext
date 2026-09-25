@@ -1274,6 +1274,40 @@ void RayScene::record(FramePassContext& fc)
                 slotDescs[k].AccelerationStructure = m_deformedBlasPool.address() + e.blasOffset;
             }
     }
+    // Diagnostics (every 64 frames): what the dynamic TLAS builder is given.
+    if (fc.frame.frameIndex % 64 == 0)
+    {
+        DynamicTlasCensus& c = m_stats.dynamicCensus;
+        c = {};
+        std::vector<uint64_t> blases;
+        float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+        for (size_t k = 0; k < m_dynamicDescs.size(); ++k)
+        {
+            const D3D12_RAYTRACING_INSTANCE_DESC& d = slotDescs[k];
+            bool finite = true;
+            float scale = 0;
+            for (int r = 0; r < 3; ++r)
+            {
+                for (int col = 0; col < 4; ++col) finite = finite && std::isfinite(d.Transform[r][col]);
+                scale = std::max(scale, std::fabs(d.Transform[r][0]) + std::fabs(d.Transform[r][1]) + std::fabs(d.Transform[r][2]));
+            }
+            if (!finite) ++c.nonFinite;
+            if (d.InstanceMask == 0) ++c.maskZero;
+            if (d.AccelerationStructure == 0) ++c.nullBlas;
+            c.maxScale = std::max(c.maxScale, scale);
+            for (int r = 0; r < 3; ++r)
+                if (finite)
+                {
+                    lo[r] = std::min(lo[r], d.Transform[r][3]);
+                    hi[r] = std::max(hi[r], d.Transform[r][3]);
+                }
+            blases.push_back(d.AccelerationStructure);
+        }
+        std::sort(blases.begin(), blases.end());
+        c.distinctBlas = (uint32_t)(std::unique(blases.begin(), blases.end()) - blases.begin());
+        c.instances = (uint32_t)m_dynamicDescs.size();
+        for (int r = 0; r < 3; ++r) c.extent[r] = hi[r] - lo[r];
+    }
     D3D12_GPU_VIRTUAL_ADDRESS dynamicDescs = m_descRing->GetGPUVirtualAddress() + slotOffset;
     std::optional<BufferRef> dynamicDescCopy;
     if ((m_experiment & 4) != 0 && m_dynamicDescBuffer.resource && !m_dynamicDescs.empty())

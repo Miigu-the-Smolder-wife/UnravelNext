@@ -450,6 +450,9 @@ int main(int argc, char** argv)
                      res.name.c_str(), (unsigned long long)as.framesRecorded, as.exactOccupiedTotal / recorded, as.exactSlots, as.exactBuildsTotal / recorded,
                      (unsigned long long)as.exactBuildsTotal, as.exactVerticesTotal / recorded, as.proxySwitchesTotal / recorded, (unsigned long long)as.proxySwitchesTotal,
                      as.exactWantedTotal / recorded, as.exactWithinBoundTotal / recorded);
+                const rt::DynamicTlasCensus& dc = as.dynamicCensus;
+                logf("R %s: dynamic TLAS input: %u instances, %u distinct BLAS, %u non-finite transforms, %u mask 0, %u null BLAS, max scale %.3f, translation span %.1f x %.1f x %.1f m%s",
+                     res.name.c_str(), dc.instances, dc.distinctBlas, dc.nonFinite, dc.maskZero, dc.nullBlas, dc.maxScale, dc.extent[0], dc.extent[1], dc.extent[2], "\n");
                 logf("R %s: last frame: proxy cuts %llu triangles refit, %llu vertices deformed; finest cut's posed error bound up to %.1f x V's bind-pose error\n",
                      res.name.c_str(), (unsigned long long)as.deformedTriangles, (unsigned long long)as.deformedVertices, as.posedErrorOverBindMax);
             }

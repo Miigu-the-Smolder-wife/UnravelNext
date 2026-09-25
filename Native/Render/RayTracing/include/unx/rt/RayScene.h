@@ -45,6 +45,13 @@ constexpr uint32_t kRtInstanceDeformed = 1u;
 constexpr uint32_t kRtGeometryProxyIndices = 1u;
 constexpr uint32_t kRtMaskGi = 1u, kRtMaskReflection = 2u, kRtMaskAll = 0xFFu;
 
+struct DynamicTlasCensus  // the dynamic TLAS's instance descriptors (sampled every 64 frames)
+{
+    uint32_t instances = 0, distinctBlas = 0, nonFinite = 0, maskZero = 0, nullBlas = 0;
+    float maxScale = 0;          // largest row sum of |linear part|
+    float extent[3] = {};        // span of the translations (m)
+};
+
 struct RaySceneStats
 {
     uint32_t staticInstances = 0, dynamicInstances = 0, deformedInstances = 0;
@@ -61,6 +68,7 @@ struct RaySceneStats
     uint64_t exactVertices = 0;            // vertices deformed per occupied slot's owner (last frame)
     uint32_t proxySwitches = 0;            // last frame: deformed instances whose proxy cut changed (BLAS rebuilt)
     float posedErrorOverBindMax = 0;       // last frame: largest finest-cut error bound in its pose over V's bind-pose error
+    DynamicTlasCensus dynamicCensus;
     // Since load (measurement summaries): frames recorded, and over them exact slots (re)built, exact slots occupied, exact
     // vertices deformed and proxy cut switches.
     uint64_t framesRecorded = 0, exactBuildsTotal = 0, exactOccupiedTotal = 0, exactVerticesTotal = 0, proxySwitchesTotal = 0;
