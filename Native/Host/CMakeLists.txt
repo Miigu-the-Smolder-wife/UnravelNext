@@ -30,7 +30,7 @@ if(unity_sources)
   set_target_properties(unx_host PROPERTIES OUTPUT_NAME UnravelNext)
   target_include_directories(unx_host PRIVATE "${UNX_UNITY_PLUGIN_API}")
   target_link_libraries(unx_host PRIVATE unx_host_core)
-  add_dependencies(unx_host unx_render_shaders unx_host_shaders)
+  add_dependencies(unx_host unx_render_shaders unx_host_shaders unx_build_identity)
 endif()
 
 foreach(kind Tests Gates)
