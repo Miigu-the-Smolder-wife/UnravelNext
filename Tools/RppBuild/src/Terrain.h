@@ -1,9 +1,7 @@
 #pragma once
 // RPP-1 world terrain (Content/RPP1/rpp1_manifest.json "world.terrain"). One heightfield over the 2 x 2 km zone:
 // C's rollingTerrain outside the districts, each district's own ground (city flat core, lakeFloor, lodge pad) inside,
-// smoothstep rings between. The district grounds are copies of C's SceneGen formulas (Tools/SceneGen/src/Common.cpp,
-// C's private code); checkAgainstSceneGen() compares them with the generated C terrain meshes and fails beyond 1 mm, so a C
-// change stops the build instead of drifting.
+// smoothstep rings between. The district grounds come from C's public query scenegen::terrainHeight (INTERFACES 10.1).
 #include "unx/core/Math.h"
 #include "unx/scene/SceneData.h"
 
@@ -36,7 +34,7 @@ struct Layout
     float padRadius = 12.0f, padRing = 20.0f;
 };
 
-namespace sg  // copies of C's formulas (SceneGen Common.cpp); checked by checkAgainstSceneGen
+namespace sg  // C's terrains through scenegen::terrainHeight (NaN outside a scene's terrain)
 {
 float rollingTerrain(float x, float z);
 float cityTerrain(float x, float z);
@@ -68,7 +66,4 @@ private:
     Layout m_layout;
 };
 
-// Compares sg:: with the terrain meshes of C's generated scenes (every vertex of the mesh named "terrain"); throws on
-// a difference > 1 mm. forest = forest_combat (rollingTerrain), city = city_night (cityTerrain), lake = waterside.
-void checkAgainstSceneGen(const scene::Scene& forest, const scene::Scene& city, const scene::Scene& lake);
 } // namespace unx::rpp

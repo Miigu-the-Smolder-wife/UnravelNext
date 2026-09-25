@@ -1,6 +1,7 @@
 #include "World.h"
 
 #include "Environment.h"
+#include "Meshes.h"
 #include "Rng.h"
 
 #include "unx/core/Log.h"
@@ -134,33 +135,6 @@ float4 quatMul(float4 a, float4 b)
 }
 bool startsWith(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
 
-// A box with flat normals, tangents (u axis) and planar UVs (0.5 per metre, as C's solid()).
-Mesh boxMesh(const std::string& name, float3 lo, float3 hi, uint32_t material)
-{
-    Mesh m;
-    m.name = name;
-    const float3 c = (lo + hi) * 0.5f, e = (hi - lo) * 0.5f;
-    const float3 axes[6] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
-    for (const float3& a : axes)
-    {
-        const float3 u = a.x != 0 ? float3{ 0, 0, a.x } : float3{ 1, 0, 0 };
-        const float3 wv = cross(a, u);
-        const uint32_t base = (uint32_t)m.positions.size();
-        for (int k = 0; k < 4; ++k)
-        {
-            const float su = (k == 1 || k == 2) ? 1.0f : -1.0f, sw = k >= 2 ? 1.0f : -1.0f;
-            const float3 p = c + float3{ (a.x + u.x * su + wv.x * sw) * e.x, (a.y + u.y * su + wv.y * sw) * e.y, (a.z + u.z * su + wv.z * sw) * e.z };
-            m.positions.push_back(p);
-            m.normals.push_back(a);
-            m.tangents.push_back({ u.x, u.y, u.z, 1.0f });
-            m.uv0.push_back({ dot(p, u) * 0.5f, dot(p, wv) * 0.5f });
-        }
-        m.indices.insert(m.indices.end(), { base, base + 1, base + 2, base, base + 2, base + 3 });
-    }
-    m.submeshes.push_back({ 0, (uint32_t)m.indices.size(), material });
-    return m;
-}
-
 scene::Light pointLight(scene::LightType type, float3 p, float3 colour, float intensity, float range, bool shadow)
 {
     scene::Light l;
@@ -194,7 +168,6 @@ World buildWorld(const Layout& layoutIn, uint64_t seed)
         logf("source %-13s %zu instances, %zu meshes, %zu lights, hash %.16s\n", src[s].name.c_str(), src[s].instances.size(), src[s].meshes.size(), src[s].lights.size(),
              world.sourceHashes[s].c_str());
     }
-    checkAgainstSceneGen(src[SectionForest], src[SectionCity], src[SectionWaterside]);
 
     // ---- the lodge anchor: lake-local (110, 157) (r 192, 30 m above the waterline), floor 0.2 m above the lake ground,
     // window (+Z) towards the sun at 105 s ----

@@ -1,6 +1,7 @@
 #include "Terrain.h"
 
 #include "unx/core/Log.h"
+#include "unx/scenegen/SceneGen.h"
 
 #include <algorithm>
 #include <cmath>
@@ -37,25 +38,14 @@ float smoothstep(float a, float b, float x)
     const float t = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
     return t * t * (3 - 2 * t);
 }
+// C's public terrain query (SceneGen 4a322b2): the analytic function each C terrain mesh samples.
+// The zone's edge normals sample 0.5 m outside it; C's query is NaN there, so the forest terrain is clamped to the zone.
 float rollingTerrain(float x, float z)
 {
-    return 6.f * std::sin(x / 70.f) * std::cos(z / 90.f) + 2.f * std::sin(x / 13.f + z / 17.f) + 0.7f * std::sin(x / 3.1f - z / 2.7f);
+    return scenegen::terrainHeight(scenegen::SceneId::ForestCombat, std::clamp(x, -1000.0f, 1000.0f), std::clamp(z, -1000.0f, 1000.0f));
 }
-float cityTerrain(float x, float z)
-{
-    const float d = std::max(std::fabs(x), std::fabs(z));
-    const float w = smoothstep(260.0f, 420.0f, d);
-    return w * (8.f * std::sin(x / 110.f) * std::cos(z / 130.f) + 3.f * std::sin(x / 37.f + z / 53.f) + 4.f);
-}
-float lakeFloor(float x, float z)
-{
-    const float r = std::sqrt(x * x + z * z);
-    const float lake = 1.0f - smoothstep(120.0f, 190.0f, r);
-    const float bay = (1.0f - smoothstep(90.0f, 140.0f, std::fabs(z))) * smoothstep(60.0f, 120.0f, x) * (1.0f - smoothstep(430.0f, 470.0f, x));
-    const float basin = std::max(lake, bay);
-    const float land = 0.5f * rollingTerrain(x, z) + 3.0f;
-    return land + (-4.0f - land) * basin;
-}
+float cityTerrain(float x, float z) { return scenegen::terrainHeight(scenegen::SceneId::CityNight, x, z); }
+float lakeFloor(float x, float z) { return scenegen::terrainHeight(scenegen::SceneId::Waterside, x, z); }
 } // namespace sg
 
 float Terrain::cityWeight(float x, float z) const
@@ -146,32 +136,10 @@ scene::Mesh Terrain::buildMesh(uint32_t material) const
             m.indices.insert(m.indices.end(), { a, c, dd, a, dd, b });
         }
     m.submeshes.push_back({ 0, (uint32_t)m.indices.size(), material });
+    for (size_t k = 0; k < m.positions.size(); ++k)
+        if (!std::isfinite(m.positions[k].y) || !std::isfinite(m.normals[k].x) || !std::isfinite(m.normals[k].z))
+            fail("rppbuild: terrain vertex %zu at (%.2f, %.2f) is not finite", k, m.positions[k].x, m.positions[k].z);
     return m;
 }
 
-namespace
-{
-const scene::Mesh& terrainMesh(const scene::Scene& s)
-{
-    for (const scene::Mesh& m : s.meshes)
-        if (m.name == "terrain") return m;
-    fail("rppbuild: %s has no mesh named 'terrain'", s.name.c_str());
-}
-template <class F>
-void compare(const scene::Scene& s, F f)
-{
-    const scene::Mesh& m = terrainMesh(s);
-    double worst = 0;
-    for (const float3& p : m.positions) worst = std::max(worst, (double)std::fabs(p.y - f(p.x, p.z)));
-    if (worst > 1e-3) fail("rppbuild: %s terrain differs from RppBuild's copy of C's formula by %.4f m (C changed SceneGen: update Tools/RppBuild/src/Terrain.cpp)", s.name.c_str(), worst);
-    logf("terrain check %s: %zu vertices, worst %.2e m\n", s.name.c_str(), m.positions.size(), worst);
-}
-} // namespace
-
-void checkAgainstSceneGen(const scene::Scene& forest, const scene::Scene& city, const scene::Scene& lake)
-{
-    compare(forest, sg::rollingTerrain);
-    compare(city, sg::cityTerrain);
-    compare(lake, sg::lakeFloor);
-}
 } // namespace unx::rpp

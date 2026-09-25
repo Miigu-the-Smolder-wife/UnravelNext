@@ -1371,5 +1371,133 @@
       "asset import tools (step 2) not started; asset gap list stands (slots 'missing')",
       "asset packaging for the 3-tier streaming (64 MB region chunks, per-species brick files; user decision 09:45 relayed by design) not started"
     ]
+  },
+  "assets_approved_2026_09_26": {
+    "decision": "user, relayed by coordination 2026-09-26: approved for development and the game bench; import only what the game bench needs (RPP-1 full import stays deferred)",
+    "items": [
+      {
+        "asset": "MotusMan v55 + 58 mocap FBX",
+        "path": "C:/Users/USER/Downloads/MCO_Demo_Pack_v2",
+        "licence": "personal use (MoCap Online demo pack)",
+        "use": "ragdoll/characters, view-model arms",
+        "distribution": "recheck before shipping a game"
+      },
+      {
+        "asset": "M4_Rifle_01",
+        "path": "C:/Users/USER/Downloads/MCO_Demo_Pack_v2/CryEngine/FBX_Character",
+        "licence": "personal use (MoCap Online demo pack)",
+        "use": "view-model tool",
+        "distribution": "recheck before shipping a game"
+      },
+      {
+        "asset": "Action Adventure Pack (23 animations + rig)",
+        "path": "C:/Users/USER/Desktop/Action Adventure Pack (1)",
+        "licence": "approved by the user",
+        "use": "first-person and character motion"
+      },
+      {
+        "asset": "BlenderKit materials (2K)",
+        "path": "C:/Users/USER/blenderkit_data/materials",
+        "licence": "approved by the user",
+        "use": "warehouse, wood, concrete, asphalt textures"
+      }
+    ]
+  },
+  "game_bench": {
+    "spec": "Content/RPP1/GameBench/GAMEBENCH_KO.md",
+    "tool": "Tools/RppBuild: unx_gamebench --out <dir> --preset standard|fluid|all",
+    "variants": [
+      "fp_250",
+      "fp_500",
+      "fp_1000",
+      "fp_1000_fluid32k",
+      "fp_1000_fluid64k",
+      "fp_1000_fluid128k",
+      "fp_1000_fluid250k"
+    ],
+    "camera_cases": {
+      "shutter": "180 deg = 1/330 s at 165 fps (user 11:20)",
+      "aperture": "pinhole in every case except aim",
+      "cases": [
+        {
+          "name": "static",
+          "ticks": [
+            0,
+            300
+          ],
+          "focalMm": 18,
+          "fNumber": 0
+        },
+        {
+          "name": "walk",
+          "ticks": [
+            300,
+            780
+          ],
+          "focalMm": 18,
+          "fNumber": 0,
+          "speedMps": 1.5
+        },
+        {
+          "name": "gameplay",
+          "ticks": [
+            780,
+            2400
+          ],
+          "focalMm": 18,
+          "fNumber": 0,
+          "note": "flicks 180 deg in 0.25 s, sprint 6 m/s"
+        },
+        {
+          "name": "spin360",
+          "ticks": [
+            2400,
+            2700
+          ],
+          "focalMm": 18,
+          "fNumber": 0,
+          "yawRateDegPerS": 360
+        },
+        {
+          "name": "aim",
+          "ticks": [
+            2700,
+            3000
+          ],
+          "focalMm": "18 -> 24",
+          "fNumber": 2.8,
+          "focusM": 21.852
+        },
+        {
+          "name": "vehicle60",
+          "ticks": [
+            3000,
+            3210
+          ],
+          "focalMm": 18,
+          "fNumber": 0,
+          "speedMps": 60
+        },
+        {
+          "name": "brake",
+          "ticks": [
+            3210,
+            3600
+          ],
+          "focalMm": 18,
+          "fNumber": 0
+        },
+        {
+          "name": "water",
+          "ticks": [
+            3600,
+            4080
+          ],
+          "focalMm": 18,
+          "fNumber": 0,
+          "note": "submerge to eye -1.2 m, Snell window"
+        }
+      ]
+    }
   }
 }
