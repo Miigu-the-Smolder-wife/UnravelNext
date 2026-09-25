@@ -222,8 +222,17 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
   `na_present_batch`가 `SetSkeletons` 버퍼를 네이티브에서 채우므로 이 관절 단위 관리 작업은 없어진다(프레임당 호출 2번).
 - 루트도 같은 방식으로 옮길 수 있다: World의 `nw_snapshot_read_components`로 모은 두 tick의 `WorldAffine`을 네이티브에서 보간·변환한다.
   지금 0.35 ms라 메인 스레드 1 ms 할당 안이지만, 인스턴스가 늘면 비례해서 는다.
-- **풀리지 않은 것:** 4K에서 Unity 프레임 주기 중앙값이 13.4 ms로, GPU 6.5 ms + 동기화 0.74 ms로 설명되지 않는다. 1440p는 5.0 ms로
-  정상이다. 복제는 World 개체를 늘리지 않으므로 tick 쪽은 아닐 가능성이 크다. 프로파일러 캡처(Unity 프로파일러 또는 PIX)로 볼 일이다.
+- **4K Unity 프레임 주기 13.4 ms의 원인[실측]: 데이터 월드 tick.** 측정기에 Unity `FrameTimingManager`(메인·렌더 스레드, GPU, present
+  대기; 빌드 때만 Frame Timing Stats를 켠다)와 고정 스텝 시간(FixedUpdate 맨 앞·맨 뒤 훅)을 넣어 다시 쟀다(13:50, 13:55).
+  4K: 메인 스레드 12.96 ms 중앙값(주기 12.98), 렌더 스레드 1.41, Unity GPU 프레임 7.02(렌더러 6.44), present 대기 0.007 ms.
+  **고정 스텝(= `NativeDataWorldHost.FixedUpdate` tick)이 스텝당 12.57 ms**(P95 18.5, 최대 23.0, 556 스텝, fixedDeltaTime 0.02 s)다.
+  4K는 GPU 쪽 프레임이 7 ms라 61 %의 프레임에 tick이 들어가 중앙값이 tick 프레임이 된다. 1440p는 메인 스레드 중앙값 1.49 ms,
+  P95 13.9 ms(tick 프레임)이고 present 대기 2.75 ms로 GPU 쪽이 경계다. GC(Gen0)는 프레임당 약 1회(4K 10.2 s에 843회)다.
+  렌더러(GPU, 렌더 스레드, 내 동기화 0.74 ms)가 원인이 아니다. tick 비용은 감사 세션 영역이라 전달했다. 원본 `player_scale_20260925_135022.json`,
+  `player_scale_20260925_135522_4K_partial.json`(아래 TDR 때문에 로그에서 되살린 4K 창).
+- **TDR (13:56:45):** 두 번째 실행에서 4K 창과 캡처가 끝나고 1440p로 바꾸는 순간 Player의 D3D12 장치가 제거됐다(887a0005, 이유 887a0006
+  DEVICE_HUNG). 잠금은 I만 잡고 있었다. 먼저 알아챈 곳은 tick 안의 NativeVfx(`PrepareCohortBatch`: DeviceFailed)이고 원인은 아직 모른다.
+  같은 DLL로 13:23에는 전환이 정상이었다. 규칙대로 GPU 실행을 멈추고 조율 세션에 알렸다. 덤프 `Crash_2026-09-25_045643944`.
 - GPU: 4K 6.51 ms는 목표 6.06 ms를 넘는다. 가장 큰 항은 `m.shade` 2.38 ms(4K). 캐릭터 256체와 상자 1,024개가 화면을 많이 덮는다.
 
 ## 2.5 설계 동적 규모의 호스트 경로 [실측]
