@@ -5,6 +5,8 @@
 //   unx_study_material_layers clearcoat_r1_ms <out.md> [photons] the same against a multiple-scattering coat
 //   unx_study_material_layers clearcoat_r1a <out.md> [photons]   R1 and candidate A (coat MS term) vs the MS coat
 //   unx_study_material_layers clearcoat_r1b <out.md> [photons]   R1+A and candidate B (metal base path) vs the MS coat
+//   unx_study_material_layers clearcoat_r1c <out.md> [photons]   R1+A2 and A2+B2 (scaled coat term, Sinkhorn base path)
+//   unx_study_material_layers clearcoat_r1d <out.md> [photons]   R1+A2 and A2+B3 (single-hit lobe + separable multi-hit term)
 //   unx_study_material_layers clearcoat_diag <out.md> [photons]  energy split by base interactions (failure diagnosis)
 //   unx_study_material_layers clearcoat_specpath <out.md> [photons] lossless GGX base under the coat: energy per base-hit count
 //   unx_study_material_layers coatfilm     <out.md> [photons]   R1 + film under the coat vs the layer model
@@ -196,7 +198,7 @@ int main(int argc, char** argv)
     try
     {
         SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
-        if (argc < 3) fail("usage: unx_study_material_layers thinfilm|metals|clearcoat_r1|clearcoat_r1_ms|clearcoat_r1a|clearcoat_r1b|clearcoat_diag|clearcoat_specpath|coatfilm|tables <out> [photons]");
+        if (argc < 3) fail("usage: unx_study_material_layers thinfilm|metals|clearcoat_r1|clearcoat_r1_ms|clearcoat_r1a|clearcoat_r1b|clearcoat_r1c|clearcoat_r1d|clearcoat_diag|clearcoat_specpath|coatfilm|tables <out> [photons]");
         const std::string cmd = argv[1], out = argv[2];
         const uint32_t photons = argc > 3 ? (uint32_t)std::stoul(argv[3]) : (1u << 21);
         if (cmd == "thinfilm") study::thinFilmStudy(out);
@@ -205,6 +207,8 @@ int main(int argc, char** argv)
         else if (cmd == "clearcoat_r1_ms") study::clearcoatR1Study(out, photons, true);
         else if (cmd == "clearcoat_r1a") study::clearcoatR1Study(out, photons, true, true);
         else if (cmd == "clearcoat_r1b") study::clearcoatR1Study(out, photons, true, true, true);
+        else if (cmd == "clearcoat_r1c") study::clearcoatR1Study(out, photons, true, true, false, true);
+        else if (cmd == "clearcoat_r1d") study::clearcoatR1Study(out, photons, true, true, false, false, true);
         else if (cmd == "clearcoat_diag") study::clearcoatDiag(out, photons);
         else if (cmd == "clearcoat_specpath") study::clearcoatSpecPath(out, photons);
         else if (cmd == "coatfilm") study::coatFilmStudy(out, photons);

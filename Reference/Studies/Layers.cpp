@@ -24,6 +24,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -249,6 +250,11 @@ struct SpecPath
 {
     std::vector<std::array<double, kSplit>> S;
     std::vector<Rgb> f1E;
+    std::vector<Rgb> g;  // B2: symmetric per-angle scale (Sinkhorn), f_path = f_1 g(mu_i) g(mu_o); empty = B (sqrt Gamma)
+    // B3: g matches only the single-hit energy S_1 rho; the >= 2-hit energy E2 = sum_{k>=2} S_k rho^k is a separable
+    // term E2(mu_i) E2(mu_o) / (pi E2-bar) (exact per incidence, reciprocal; by reciprocity E2 is also its exit profile).
+    std::vector<Rgb> E2;
+    Rgb E2bar;
 };
 
 struct Definitions
@@ -256,6 +262,7 @@ struct Definitions
     const Config& cfg;
     Integrals in;
     const SpecPath* sp = nullptr;
+    int coatForm = 0;  // candidate A's multiple-scattering coat term: 0 = Kulla-Conty additive (A), 1 = scaled f_c (A2)
     scene::model::Surface baseR1;  // base with alpha'_b
     double ac, ab;
     explicit Definitions(const Config& c) : cfg(c)
@@ -293,6 +300,15 @@ struct Definitions
         };
         return g(i0) + t * (g(i1) - g(i0));
     }
+    static double binLerp(const std::vector<Rgb>& v, double mu, int ch)  // linear in theta between incidence bin centres
+    {
+        const double th = std::acos(std::clamp(mu, 0.0, 1.0)) * 180 / kPi - 0.5;
+        const int i0 = std::clamp((int)std::floor(th), 0, NI - 1), i1 = std::min(i0 + 1, NI - 1);
+        const double t = std::clamp(th - i0, 0.0, 1.0);
+        const double a = (&v[i0].r)[ch], b = (&v[i1].r)[ch];
+        return a + t * (b - a);
+    }
+    double gAt(double mu, int ch) const { return binLerp(sp->g, mu, ch); }
     Rgb r1(float3 wo, float3 wi, Rgb* parts = nullptr, bool candA = false, bool candB = false) const
     {
         if (wo.z <= 0 || wi.z <= 0) return {};
@@ -302,8 +318,18 @@ struct Definitions
         if (candA)
         {
             const double Ei = in.at(in.RcMs, wi.z), Eo = in.at(in.RcMs, wo.z);
-            const double di = std::max(0.0, Ei - in.at(in.Rc, wi.z)), dout = std::max(0.0, Eo - in.at(in.Rc, wo.z));
-            if (in.DeltaBar > 0) fc += di * dout / (kPi * in.DeltaBar);
+            const double Ci = in.at(in.Rc, wi.z), Co = in.at(in.Rc, wo.z);
+            if (coatForm == 1)
+            {
+                // A2: the single-scattering lobe scaled reciprocally to the multiple-scattering energy (the coat's
+                // multiply scattered reflection stays near the specular direction at grazing).
+                if (Ci > 0 && Co > 0) fc *= std::sqrt(Ei * Eo / (Ci * Co));
+            }
+            else
+            {
+                const double di = std::max(0.0, Ei - Ci), dout = std::max(0.0, Eo - Co);
+                if (in.DeltaBar > 0) fc += di * dout / (kPi * in.DeltaBar);
+            }
             Ti = 1 - Ei;
             To = 1 - Eo;
             K = in.KMs;
@@ -319,7 +345,12 @@ struct Definitions
         if (candB && sp && cfg.base.metallic > 0)
         {
             Rgb path;
-            for (int c = 0; c < 3; ++c) (&path.r)[c] = (float)((&f1.r)[c] * std::sqrt(gammaAt(wi.z, c) * gammaAt(wo.z, c)));
+            for (int c = 0; c < 3; ++c)
+            {
+                (&path.r)[c] = (float)((&f1.r)[c] * (sp->g.empty() ? std::sqrt(gammaAt(wi.z, c) * gammaAt(wo.z, c)) : gAt(wi.z, c) * gAt(wo.z, c)));
+                const double e2b = (&sp->E2bar.r)[c];
+                if (!sp->E2.empty() && e2b > 0) (&path.r)[c] += (float)(binLerp(sp->E2, wi.z, c) * binLerp(sp->E2, wo.z, c) / (kPi * e2b));
+            }
             if (parts)
             {
                 parts[0] = Rgb((float)fc);
@@ -612,8 +643,9 @@ enum class Which { R1, Old, R1A, R1B };
 // parts (R1 only, optional): energy (luminance) of f_c, f_1, f_ms per incidence bin.
 using Parts = std::vector<std::array<double, 3>>;
 // f1E (optional): energy of the f_1 part per incidence bin, per channel.
+// f1Only: T receives only the f_1 part (the transfer table B2 solves its scale on).
 void definitionTable(const Config& c, const Definitions& d, Which which, uint32_t samples, Table& T, const std::vector<uint8_t>* mask = nullptr, Parts* parts = nullptr,
-                     std::vector<Rgb>* f1E = nullptr)
+                     std::vector<Rgb>* f1E = nullptr, bool f1Only = false)
 {
     if (parts) parts->assign(NI, { 0, 0, 0 });
     if (f1E) f1E->assign(NI, Rgb());
@@ -662,7 +694,7 @@ void definitionTable(const Config& c, const Definitions& d, Which which, uint32_
             int bt, bp;
             binOf(wo, bt, bp);
             const double wgt = wo.z / pdf / samples;
-            T.at((int)ii, bt, bp) += f * (float)wgt;
+            T.at((int)ii, bt, bp) += (f1Only ? pr[1] : f) * (float)wgt;
             if (which != Which::Old)
             {
                 for (int k = 0; k < 3; ++k) pp[k] += pr[k].luminance() * wgt;
@@ -681,6 +713,7 @@ struct Metrics
     double albedoRel[5] = {};                                                // at 0/30/60/75/85 deg
     double l1Max = 0, l1WorstTheta = 0, l1Noise = 0;
     double furnaceMean = 0, furnaceP99 = 0, skyMean = 0, skyP99 = 0;
+    double furnaceNoiseP99 = 0, skyNoiseP99 = 0;  // physical half-table render vs full (MC floor of one table)
     bool pass() const { return albedoRelMax <= 0.02 && l1Max <= 0.05 && furnaceMean <= 1.0 && furnaceP99 <= 2.3 && skyMean <= 1.0 && skyP99 <= 2.3; }
 };
 
@@ -828,6 +861,9 @@ Metrics compare(const Table& def, const Table& phys, const Table& physHalf, cons
     const std::vector<Rgb3> fd = renderSphere(def, furnace, 64), sd = renderSphere(def, sky, 64);
     renderError(fd, *physFurnace, 1.0, m.furnaceMean, m.furnaceP99);
     renderError(sd, *physSky, skyWhite, m.skyMean, m.skyP99);
+    double unused = 0;
+    renderError(renderSphere(physHalf, furnace, 64), *physFurnace, 1.0, unused, m.furnaceNoiseP99);
+    renderError(renderSphere(physHalf, sky, 64), *physSky, skyWhite, unused, m.skyNoiseP99);
     return m;
 }
 
@@ -845,14 +881,14 @@ FilmTable makeFilm(bool reference, double n0, double nf, double d, const Substra
 std::string row(const std::string& name, double rc, const char* def, const Metrics& m)
 {
     char b[512];
-    std::snprintf(b, sizeof b, "| %s | %.2f | %s | %.1f%% @%.0f° (%+.3f) | %+.1f / %+.1f / %+.1f / %+.1f / %+.1f %% | %.3f @%.0f° | %.3f | %.2f / %.2f | %.2f / %.2f | %s |\n",
+    std::snprintf(b, sizeof b, "| %s | %.2f | %s | %.1f%% @%.0f° (%+.3f) | %+.1f / %+.1f / %+.1f / %+.1f / %+.1f %% | %.3f @%.0f° | %.3f | %.2f / %.2f | %.2f / %.2f | %.2f / %.2f | %s |\n",
                   name.c_str(), rc, def, 100 * m.albedoRelMax, m.albedoWorstTheta, m.albedoAbsAtRelMax, 100 * m.albedoRel[0], 100 * m.albedoRel[1], 100 * m.albedoRel[2],
-                  100 * m.albedoRel[3], 100 * m.albedoRel[4], m.l1Max, m.l1WorstTheta, m.l1Noise, m.furnaceMean, m.furnaceP99, m.skyMean, m.skyP99, m.pass() ? "PASS" : "FAIL");
+                  100 * m.albedoRel[3], 100 * m.albedoRel[4], m.l1Max, m.l1WorstTheta, m.l1Noise, m.furnaceMean, m.furnaceP99, m.skyMean, m.skyP99, m.furnaceNoiseP99, m.skyNoiseP99, m.pass() ? "PASS" : "FAIL");
     return b;
 }
 } // namespace
 
-void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, bool candA, bool candB)
+void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, bool candA, bool candB, bool candC, bool candD)
 {
     struct BaseDef
     {
@@ -880,17 +916,29 @@ void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, boo
     }
     std::ostringstream md, eq;
     md << "# Clearcoat R1 vs physical layer model [measured]\n\n"
-          "`unx_study_material_layers " << (candB ? "clearcoat_r1b" : candA ? "clearcoat_r1a" : msCoat ? "clearcoat_r1_ms" : "clearcoat_r1") << "`. Physical coat: "
+          "`unx_study_material_layers " << (candD ? "clearcoat_r1d" : candC ? "clearcoat_r1c" : candB ? "clearcoat_r1b" : candA ? "clearcoat_r1a" : msCoat ? "clearcoat_r1_ms" : "clearcoat_r1") << "`. Physical coat: "
        << (msCoat ? "microsurface multiple scattering (Heitz et al. 2016, energy conserving)" : "single-scattering microfacets (energy lost at grazing)")
        << ". Criteria (MATERIAL_LAYERS 3): albedo rel <= 2 % (or abs <= 0.005), L1 <= 0.05, "
           "render dE76 mean <= 1.0 and P99 <= 2.3 (white furnace / sun + sky sphere, 64 x 64). Photons per incidence bin: "
           << photons << " (physical), " << photons << " (definition). 'L1 noise' = physical half vs full (MC floor).\n\n"
-          "| base | r_c | definition | worst albedo (rel @theta, abs) | albedo rel at 0/30/60/75/85° | worst L1 | L1 noise | furnace dE mean / P99 | sun+sky dE mean / P99 | criteria |\n"
-          "|---|---|---|---|---|---|---|---|---|---|\n";
+          "| base | r_c | definition | worst albedo (rel @theta, abs) | albedo rel at 0/30/60/75/85° | worst L1 | L1 noise | furnace dE mean / P99 | sun+sky dE mean / P99 | render noise P99 furnace / sky | criteria |\n"
+          "|---|---|---|---|---|---|---|---|---|---|---|\n";
     eq << "\n## Equivalent roughness of the base lobe outside (alpha_eq ~ eta alpha'_b)\n\n| base | r_c | alpha'_b | eta alpha'_b | physical 75 % half-angle | GGX(eta alpha'_b) 75 % half-angle |\n|---|---|---|---|---|---|\n";
+    // Optional filters (rerunning part of the grid): UNX_STUDY_RC = one r_c value, UNX_STUDY_BASE = base name substring.
+    auto env = [](const char* name) {
+        char* v = nullptr;
+        size_t n = 0;
+        std::string r;
+        if (_dupenv_s(&v, &n, name) == 0 && v) r = v;
+        free(v);
+        return r;
+    };
+    const std::string onlyRc = env("UNX_STUDY_RC"), onlyBase = env("UNX_STUDY_BASE");
     for (double rc : coats)
         for (const BaseDef& b : bases)
         {
+            if (!onlyRc.empty() && std::fabs(std::stod(onlyRc) - rc) > 1e-6) continue;
+            if (!onlyBase.empty() && std::string(b.name).find(onlyBase) == std::string::npos) continue;
             Config c;
             c.name = b.name;
             c.base = b.s;
@@ -899,7 +947,59 @@ void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, boo
             Definitions d(c);
             computeIntegrals(c, d);
             SpecPath spd;
-            if (candB)
+            if (candC || candD)
+            {
+                // A2 + B2: scaled coat term; base path scaled by g(mu_i) g(mu_o) so that every incidence bin's base-path
+                // energy equals the census value sum_k S_k rho^k (rho = a(mu') per channel), solved by symmetric
+                // Sinkhorn iteration on R1+A2's f_1 transfer table (energy from incidence bin to exit theta bin).
+                d.coatForm = 1;
+                Config lossless = c;
+                lossless.base.baseColor = { 1, 1, 1 };
+                lossless.base.metallic = 1;
+                Table t0, t1, tf;
+                physicalTable(lossless, d, photons / 2, t0, t1, nullptr, &spd.S);
+                definitionTable(c, d, Which::R1A, photons / 2, tf, nullptr, nullptr, nullptr, true);
+                spd.g.assign(NI, Rgb(1.0f));
+                if (candD) spd.E2.assign(NI, Rgb());
+                for (int ch = 0; ch < 3; ++ch)
+                {
+                    std::vector<double> M((size_t)NI * NT, 0.0), E(NI, 0.0), g(NI, 1.0), E2(NI, 0.0);
+                    for (int i = 0; i < NI; ++i)
+                    {
+                        for (int t = 0; t < NT; ++t)
+                            for (int q = 0; q < NP; ++q) M[(size_t)i * NT + t] += (&tf.at(i, t, q).r)[ch];
+                        const Rgb a = d.in.atRgb(d.in.a, refractIn(incident(i)).z);
+                        const double rho = (&a.r)[ch];
+                        double rk = 1;
+                        for (int k = 1; k < kSplit; ++k)
+                        {
+                            rk *= rho;
+                            (candD && k >= 2 ? E2[i] : E[i]) += spd.S[i][k] * rk;
+                        }
+                    }
+                    if (candD)
+                    {
+                        double bar = 0;  // E2-bar = 2 int E2 mu dmu over the incidence bins (1 deg in theta)
+                        for (int i = 0; i < NI; ++i)
+                        {
+                            const double th0 = i * kPi / 180, th1 = (i + 1) * kPi / 180;
+                            bar += E2[i] * (std::sin(th1) * std::sin(th1) - std::sin(th0) * std::sin(th0));
+                            (&spd.E2[i].r)[ch] = (float)E2[i];
+                        }
+                        (&spd.E2bar.r)[ch] = (float)bar;
+                    }
+                    for (int it = 0; it < 500; ++it)
+                        for (int i = 0; i < NI; ++i)
+                        {
+                            double m = 0;
+                            for (int t = 0; t < NT; ++t) m += M[(size_t)i * NT + t] * g[t];
+                            if (m > 1e-9 && E[i] > 0) g[i] = std::sqrt(g[i] * E[i] / m);
+                        }
+                    for (int i = 0; i < NI; ++i) (&spd.g[i].r)[ch] = (float)g[i];
+                }
+                d.sp = &spd;
+            }
+            else if (candB)
             {
                 // Candidate B inputs: lossless base-path census and R1+A's f_1 energy per incidence bin.
                 Config lossless = c;
@@ -912,12 +1012,12 @@ void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, boo
             }
             Table phys, half, r1, old;
             physicalTable(c, d, photons, phys, half);
-            definitionTable(c, d, candB ? Which::R1A : Which::R1, photons, r1);
-            definitionTable(c, d, candB ? Which::R1B : candA ? Which::R1A : Which::Old, photons, old);
+            definitionTable(c, d, (candC || candD || candB) ? Which::R1A : Which::R1, photons, r1);
+            definitionTable(c, d, (candB || candC || candD) ? Which::R1B : candA ? Which::R1A : Which::Old, photons, old);
             const std::vector<Rgb3> pf = renderSphere(phys, furnace, 64), ps = renderSphere(phys, sky, 64);
             const Metrics m1 = compare(r1, phys, half, furnace, sky, skyWhite, &pf, &ps), m0 = compare(old, phys, half, furnace, sky, skyWhite, &pf, &ps);
-            const char* first = candB ? "R1 + A" : "R1";
-            const char* second = candB ? "R1 + A + B" : candA ? "R1 + A (coat MS)" : "1.1 original";
+            const char* first = (candC || candD) ? "R1 + A2" : candB ? "R1 + A" : "R1";
+            const char* second = candD ? "R1 + A2 + B3" : candC ? "R1 + A2 + B2" : candB ? "R1 + A + B" : candA ? "R1 + A (coat MS)" : "1.1 original";
             md << row(b.name, rc, first, m1) << row(b.name, rc, second, m0);
             logf("%s%s", row(b.name, rc, first, m1).c_str(), row(b.name, rc, second, m0).c_str());
             logf("   K %.4f (out %.4f), rho-bar (%.3f %.3f %.3f)\n", d.in.K, d.in.Kout, d.in.rhoBar.r, d.in.rhoBar.g, d.in.rhoBar.b);
@@ -1137,8 +1237,8 @@ void coatFilmStudy(const std::string& out, uint32_t photons)
           "Coat r_c 0.12 over a filmed base (outer index 1.5). Physical: layer model (coat with microsurface multiple scattering) "
           "with the exact spectral film reflectance in "
           "the base specular; definition: R1 with film method (a). Same metrics and criteria as clearcoat_r1.md.\n\n"
-          "| case | r_c | definition | worst albedo (rel @theta, abs) | albedo rel at 0/30/60/75/85° | worst L1 | L1 noise | furnace dE mean / P99 | sun+sky dE mean / P99 | criteria |\n"
-          "|---|---|---|---|---|---|---|---|---|---|\n";
+          "| case | r_c | definition | worst albedo (rel @theta, abs) | albedo rel at 0/30/60/75/85° | worst L1 | L1 noise | furnace dE mean / P99 | sun+sky dE mean / P99 | render noise P99 furnace / sky | criteria |\n"
+          "|---|---|---|---|---|---|---|---|---|---|---|\n";
     for (const Case& k : cases)
     {
         const FilmTable fp = makeFilm(true, kEta, k.nf, k.d, k.sub), fd = makeFilm(false, kEta, k.nf, k.d, k.sub);
