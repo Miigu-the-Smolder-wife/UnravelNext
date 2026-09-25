@@ -44,12 +44,13 @@ struct CullView
 #define VS_DEFER_CLUSTERS 8u
 #define VS_LIST_COUNT 9u      // + list (VS_LISTS lists): entries appended so far (both phases)
 #define VS_LIST_PHASE1 15u    // + list: entries of phase 1 (snapshot)
-#define VS_OVERFLOW 21u       // bits: capacity exceeded (1 nodes, 2 groups, 4 visible, 8 deferred instances, 16 deferred nodes, 32 deferred clusters)
+#define VS_OVERFLOW 21u       // bits: capacity exceeded (OVERFLOW_*, CullShared.hlsli)
 #define VS_STAT_INSTANCES 22u // instances that reached the node pass
 #define VS_STAT_NODES 23u     // node items processed
 #define VS_STAT_CLUSTERS 24u  // clusters tested
 #define VS_STAT_TRIANGLES 25u // + band (3): triangles of visible clusters per band A, B, C
 #define VS_GROUP_END 28u      // group items of the current cluster pass: [VS_GROUP_BEGIN, VS_GROUP_END)
+#define VS_TILE_PAIRS 29u     // tile-local raster: (cluster, tile rectangle) pairs appended
 #define VS_WORDS 32u
 
 #define VS_LISTS 6u
@@ -155,27 +156,146 @@ bool hizOccluded(uint hizSrv, uint hizMips, uint2 hizSize, row_major float4x4 vi
     return nearest < farthest;
 }
 
-// Tile mask of a raster-service view: true when the sphere's viewport rectangle covers a set bit (or no mask).
-bool tileMaskCovered(CullView v, uint maskSrv, float4 s)
+// Tile range [a, b] (inclusive tiles) of a sphere in a raster-service view: the whole viewport when the sphere reaches
+// the eye plane; false when its rectangle misses the viewport.
+bool tileRange(CullView v, float4 s, out uint2 a, out uint2 b)
 {
-    if (v.cullMaskOffset == UNX_NONE) return true;
+    const uint tilesY = ((uint)v.viewportSize.y + v.tilePx - 1) / v.tilePx;
+    a = 0;
+    b = uint2(v.tilesX, tilesY) - 1;
     float4 rect;
     float nearest;
     if (!projectSphere(v.viewProj, v.viewportSize, s, rect, nearest)) return true;
     rect = clamp(rect, 0, float4(v.viewportSize, v.viewportSize) - 1);
     if (rect.z < rect.x || rect.w < rect.y) return false;
-    const uint tilesY = ((uint)v.viewportSize.y + v.tilePx - 1) / v.tilePx;
-    const uint2 a = uint2(rect.xy) / v.tilePx, b = min(uint2(rect.zw) / v.tilePx, uint2(v.tilesX, tilesY) - 1);
-    // Performance filter only: a rectangle over more than 64 tiles is drawn without looking (conservative).
-    if ((b.x - a.x + 1) * (b.y - a.y + 1) > 64) return true;
-    ByteAddressBuffer mask = ResourceDescriptorHeap[maskSrv];
-    for (uint y = a.y; y <= b.y; ++y)
-        for (uint x = a.x; x <= b.x; ++x)
+    a = uint2(rect.xy) / v.tilePx;
+    b = min(uint2(rect.zw) / v.tilePx, b);
+    return true;
+}
+
+// Set bits of word w of a bit mask starting at word 'offset', restricted to bit positions [lo, hi]; 0 for words
+// outside the range.
+uint tileMaskBits(ByteAddressBuffer mask, uint offset, uint w, uint lo, uint hi)
+{
+    if (w * 32 > hi || w * 32 + 31 < lo) return 0;
+    const uint first = max(lo, w * 32) - w * 32, last = min(hi, w * 32 + 31) - w * 32;
+    return mask.Load(4 * (offset + w)) & (0xFFFFFFFFu >> (31 - last)) & (0xFFFFFFFFu << first);
+}
+
+// Tile rectangle of a tile-local pair: x0 | y0 << 16, x1 | y1 << 16 (inclusive tiles).
+uint2 packTileRect(uint2 a, uint2 b) { return uint2(a.x | (a.y << 16), b.x | (b.y << 16)); }
+
+// Tile mask of one run (DepthRasterRequest::cullMask) and its coarse summary (TileMaskCoarse.hlsl: bit per 8 x 8
+// tiles, coarseWords words per view).
+struct TileMasks
+{
+    uint fine, coarse, coarseWords;
+};
+
+#define TILE_VISIT_COUNT 0u
+#define TILE_VISIT_WRITE 1u
+
+// Visits the set tiles of the range [a, b] of view 'view': coarse cells with a set bit, then the row segments of each
+// such cell. Pairs (tile-local raster, DepthRasterRequest::tileLocal) are the runs of consecutive set tiles of a row
+// segment, or one pair for the whole range when every tile of it is set.
+//   TILE_VISIT_COUNT: returns the pair count (0 = no set tile under the range) and sets 'whole'.
+//   TILE_VISIT_WRITE: writes the pairs counted before ('whole' as counted): pair j = uint3(visibleIndex, tile rectangle)
+//                     at pairBase + j, and list slot + j points at it (entries at or beyond capacity are dropped: the
+//                     appends already flagged the overflow).
+uint tileVisit(uint mode, CullView v, uint view, TileMasks masks, uint2 a, uint2 b, inout bool whole, uint visibleIndex, uint pairBase, uint slot, uint list,
+               uint capacity, uint pairsUav, uint listsUav)
+{
+    if (mode == TILE_VISIT_COUNT)
+    {
+        whole = true;
+        if (v.cullMaskOffset == UNX_NONE) return 1;  // no mask: the whole range
+    }
+    if (mode == TILE_VISIT_WRITE && whole)
+    {
+        if (pairBase < capacity && slot < capacity)
         {
-            const uint bit = y * v.tilesX + x;
-            if (mask.Load(4 * (v.cullMaskOffset + (bit >> 5))) & (1u << (bit & 31))) return true;
+            RWStructuredBuffer<uint3> pairs = ResourceDescriptorHeap[pairsUav];
+            RWByteAddressBuffer lists = ResourceDescriptorHeap[listsUav];
+            pairs[pairBase] = uint3(visibleIndex, packTileRect(a, b));
+            lists.Store(4 * (list * capacity + slot), pairBase);
         }
-    return false;
+        return 1;
+    }
+    ByteAddressBuffer mask = ResourceDescriptorHeap[masks.fine];
+    ByteAddressBuffer coarse = ResourceDescriptorHeap[masks.coarse];
+    const uint coarseX = (v.tilesX + 7) / 8;
+    const uint2 ca = a >> 3, cb = b >> 3;
+    uint set = 0, pairs = 0;
+    for (uint cy = ca.y; cy <= cb.y; ++cy)
+    {
+        const uint cl = cy * coarseX + ca.x, ch = cy * coarseX + cb.x;
+        for (uint cw = cl >> 5; cw <= (ch >> 5); ++cw)
+        {
+            uint cells = tileMaskBits(coarse, view * masks.coarseWords, cw, cl, ch);
+            while (cells != 0)
+            {
+                const uint cx = cw * 32 + firstbitlow(cells) - cy * coarseX;
+                cells &= cells - 1;
+                const uint2 lo = max(a, uint2(cx, cy) * 8), hi = min(b, uint2(cx, cy) * 8 + 7);
+                for (uint y = lo.y; y <= hi.y; ++y)
+                {
+                    const uint l = y * v.tilesX + lo.x, h = y * v.tilesX + hi.x;
+                    uint previous = 0, start = 0;
+                    for (uint w = l >> 5; w <= (h >> 5); ++w)
+                    {
+                        const uint m = tileMaskBits(mask, v.cullMaskOffset, w, l, h);
+                        const uint starts = m & ~((m << 1) | (previous >> 31));  // set bits whose predecessor is clear
+                        if (mode == TILE_VISIT_COUNT)
+                        {
+                            set += countbits(m);
+                            pairs += countbits(starts);
+                        }
+                        else
+                        {
+                            const uint next = tileMaskBits(mask, v.cullMaskOffset, w + 1, l, h);
+                            const uint ends = m & ~((m >> 1) | (next << 31));  // set bits whose successor is clear
+                            uint events = starts | ends;
+                            while (events != 0)
+                            {
+                                const uint bit = firstbitlow(events);
+                                events &= events - 1;
+                                const uint x = w * 32 + bit - y * v.tilesX;
+                                if (starts & (1u << bit)) start = x;
+                                if (ends & (1u << bit))
+                                {
+                                    if (pairBase + pairs < capacity && slot + pairs < capacity)
+                                    {
+                                        RWStructuredBuffer<uint3> pairBuffer = ResourceDescriptorHeap[pairsUav];
+                                        RWByteAddressBuffer lists = ResourceDescriptorHeap[listsUav];
+                                        pairBuffer[pairBase + pairs] = uint3(visibleIndex, packTileRect(uint2(start, y), uint2(x, y)));
+                                        lists.Store(4 * (list * capacity + slot + pairs), pairBase + pairs);
+                                    }
+                                    ++pairs;
+                                }
+                            }
+                        }
+                        previous = m;
+                    }
+                }
+            }
+        }
+    }
+    if (mode == TILE_VISIT_COUNT)
+    {
+        whole = set == (b.x - a.x + 1) * (b.y - a.y + 1);
+        if (whole) pairs = 1;
+    }
+    return pairs;
+}
+
+// Tile mask of a raster-service view: true when the sphere's viewport rectangle covers a set tile (or no mask).
+bool tileMaskCovered(CullView v, uint view, TileMasks masks, float4 s)
+{
+    if (v.cullMaskOffset == UNX_NONE) return true;
+    uint2 a, b;
+    if (!tileRange(v, s, a, b)) return false;
+    bool whole;
+    return tileVisit(TILE_VISIT_COUNT, v, view, masks, a, b, whole, 0, 0, 0, 0, 0, UNX_NONE, UNX_NONE) > 0;
 }
 
 #endif

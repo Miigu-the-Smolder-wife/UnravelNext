@@ -5,8 +5,10 @@
 //   P[3] HiZ mips, HiZ width, HiZ height, instance mask
 //   P[4] cluster nodes SRV, mesh roots SRV, cluster LOD spheres SRV, tile mask SRV (UNX_NONE = none)
 //   P[5] capacity: node items, group items, visible (= each list), deferred items
-//   P[6] view count, instance count, band mode (0: everything band A, 1: classify), unused
-//   P[7] asfloat: band A minimum width px, band C maximum width px, unused, unused
+//   P[6] view count, instance count, band mode (0: everything band A, 1: classify), tile pairs UAV (uint3; UNX_NONE =
+//        not tile-local: list entries are visible indices; else they index the pairs, VisibilityCommon.hlsli)
+//   P[7] asfloat: band A minimum width px, band C maximum width px; coarse tile mask SRV (TileMaskCoarse.hlsl), its words
+//        per view
 #ifndef UNX_CULL_SHARED_HLSLI
 #define UNX_CULL_SHARED_HLSLI
 #include "Passes/Visibility/VisibilityCommon.hlsli"
@@ -37,8 +39,11 @@
 #define VIEW_COUNT P[6].x
 #define INSTANCE_COUNT P[6].y
 #define BAND_MODE P[6].z
+#define TILE_PAIRS_UAV P[6].w
 #define BAND_A_MIN_PX asfloat(P[7].x)
 #define BAND_C_MAX_PX asfloat(P[7].y)
+#define TILE_COARSE_SRV P[7].z
+#define TILE_COARSE_WORDS P[7].w
 
 #define OVERFLOW_NODES 1u
 #define OVERFLOW_GROUPS 2u
@@ -47,12 +52,25 @@
 #define OVERFLOW_DEFER_NODES 16u
 #define OVERFLOW_DEFER_CLUSTERS 32u
 #define OVERFLOW_NODE_DEPTH 64u  // node items left unprocessed after the last traversal iteration
+#define OVERFLOW_TILE_PAIRS 128u
 
 CullView loadView(uint view)
 {
     StructuredBuffer<CullView> views = ResourceDescriptorHeap[VIEWS_SRV];
     return views[view];
 }
+
+TileMasks tileMasks()
+{
+    TileMasks m;
+    m.fine = TILE_MASK_SRV;
+    m.coarse = TILE_COARSE_SRV;
+    m.coarseWords = TILE_COARSE_WORDS;
+    return m;
+}
+
+// Raster-service tile mask test of a bounding sphere (true without a mask).
+bool tileVisible(CullView v, uint view, float4 s) { return TILE_MASK_SRV == UNX_NONE || tileMaskCovered(v, view, tileMasks(), s); }
 
 // Wave-aggregated append of 'n' entries per lane to a counter word; returns this lane's first index. Must be called
 // from uniform control flow (every lane of the wave). Entries at or beyond 'capacity' set 'overflowBit'.

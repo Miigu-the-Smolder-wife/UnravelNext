@@ -1,8 +1,9 @@
 // unx-kernel: cs_6_6 main
 // unx-variants: PHASE=1,2
-// Instance culling. PHASE=1: every instance x every view (dispatch y = view); frustum + clip plane, and for views with
-// occlusion the previous frame's HiZ with previous transforms: occluded instances are deferred to phase 2, visible
-// ones push their per-depth hierarchy roots as node items. PHASE=2: the deferred instances against this frame's HiZ.
+// Instance culling. PHASE=1: every instance x every view (dispatch y = view); frustum + clip plane, raster-service tile
+// mask, and for views with occlusion the previous frame's HiZ with previous transforms: occluded instances are deferred
+// to phase 2, visible ones push their per-depth hierarchy roots as node items. PHASE=2: the deferred instances against
+// this frame's HiZ.
 #include "Passes/Visibility/CullShared.hlsli"
 
 [numthreads(64, 1, 1)]
@@ -38,7 +39,8 @@ void main(uint3 id : SV_DispatchThreadID)
         const bool skinned = (inst.flags & INSTANCE_SKINNED) != 0;  // bind-pose bounds do not bound skinned vertices (P3)
         if ((inst.flags & INSTANCE_MASK) != 0 || INSTANCE_MASK == 0)
         {
-            visible = roots.rootCount > 0 && (skinned || frustumVisible(v, worldSphere(inst, inst.objectToWorld, mesh.boundsSphere)));
+            const float4 bounds = worldSphere(inst, inst.objectToWorld, mesh.boundsSphere);
+            visible = roots.rootCount > 0 && (skinned || (frustumVisible(v, bounds) && tileVisible(v, view, bounds)));
             if (visible && !skinned && (v.flags & CULL_VIEW_OCCLUSION) != 0)
             {
 #if PHASE == 1

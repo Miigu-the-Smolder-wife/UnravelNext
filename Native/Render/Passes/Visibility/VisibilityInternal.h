@@ -34,7 +34,7 @@ constexpr uint32_t kViewCullBack = 2;
 // Cull state words.
 constexpr uint32_t kStateNodeWrite = 0, kStateNodeEnd = 2, kStateGroupWrite = 3, kStateVisible = 5, kStateDeferInstances = 6, kStateDeferNodes = 7,
                    kStateDeferClusters = 8, kStateListCount = 9, kStateOverflow = 21, kStateStatInstances = 22, kStateStatNodes = 23, kStateStatClusters = 24,
-                   kStateStatTriangles = 25, kStateWords = 32;
+                   kStateStatTriangles = 25, kStateTilePairs = 29, kStateWords = 32;
 constexpr uint32_t kLists = 6;
 constexpr uint32_t kListABack = 0, kListANone = 1, kListAAlphaBack = 2, kListAAlphaNone = 3, kListB = 4, kListC = 5;
 

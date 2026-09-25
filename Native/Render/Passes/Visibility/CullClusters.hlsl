@@ -7,7 +7,8 @@
 //   MODE=1: one thread per cluster deferred by phase 1 (phase 2 only). The phase is the root constant (CULL_PHASE).
 // Tests: own error <= threshold, frustum + clip plane, normal cone (one-sided, undeformed), HiZ occlusion (phase 1:
 // previous frame, occluded clusters deferred; phase 2: this frame), tile mask (raster service). Visible clusters get a
-// visible-list entry (the vis id's cluster index) and an entry in their band / pipeline list.
+// visible-list entry (the vis id's cluster index) and an entry in their band / pipeline list; in a tile-local raster
+// run (TILE_PAIRS_UAV) one entry per (cluster, tile rectangle) pair instead (tileVisit).
 // Bands (ARCHITECTURE 2.1): w_face = projected minimum feature width seen face-on, w_min = w_face x (flat sheets) the
 // smallest |cos| between the view direction and the cluster's normals. A: w_min >= band A minimum; C: w_face < band C
 // maximum; B otherwise. BAND_MODE 0 puts every cluster in band A (until the coverage layer draws bands B and C).
@@ -17,8 +18,9 @@
 
 struct ClusterResult
 {
-    bool visible, defer;
-    uint list, band, triangles;
+    bool visible, defer, wholeRange;
+    uint list, band, triangles, pairs;
+    uint2 tileA, tileB;
 };
 
 ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
@@ -61,7 +63,14 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
         else if (hizOccluded(HIZ_SRV, HIZ_MIPS, HIZ_SIZE, v.viewProj, v.viewportSize, s))
             return r;
     }
-    if (TILE_MASK_SRV != UNX_NONE && !tileMaskCovered(v, TILE_MASK_SRV, s)) return r;
+    if (TILE_PAIRS_UAV != UNX_NONE)
+    {
+        if (!tileRange(v, s, r.tileA, r.tileB)) return r;
+        r.pairs = tileVisit(TILE_VISIT_COUNT, v, view, tileMasks(), r.tileA, r.tileB, r.wholeRange, 0, 0, 0, 0, 0, UNX_NONE, UNX_NONE);
+        if (r.pairs == 0) return r;
+    }
+    else if (!tileVisible(v, view, s))
+        return r;
 
     // Band.
     const float w = cl.minFeatureWidth;
@@ -90,10 +99,13 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
 void emit(RWByteAddressBuffer state, bool active, uint instance, uint clusterIndex, uint view, ClusterResult r)
 {
     const bool visible = active && r.visible, defer = active && r.defer;
+    const bool tileLocal = TILE_PAIRS_UAV != UNX_NONE;
+    const uint entries = visible ? (tileLocal ? r.pairs : 1) : 0;
     const uint idx = waveAppend(state, VS_VISIBLE, visible ? 1 : 0, CAP_VISIBLE, OVERFLOW_VISIBLE);
     uint slot[VS_LISTS];
     [unroll] for (uint k = 0; k < VS_LISTS; ++k)
-        slot[k] = waveAppend(state, VS_LIST_COUNT + k, (visible && r.list == k) ? 1 : 0, CAP_VISIBLE, OVERFLOW_VISIBLE);
+        slot[k] = waveAppend(state, VS_LIST_COUNT + k, r.list == k ? entries : 0, CAP_VISIBLE, OVERFLOW_VISIBLE);
+    const uint pairBase = waveAppend(state, VS_TILE_PAIRS, tileLocal ? entries : 0, CAP_VISIBLE, OVERFLOW_TILE_PAIRS);
     if (visible && idx < CAP_VISIBLE)
     {
         RWStructuredBuffer<uint2> visibleList = ResourceDescriptorHeap[VISIBLE_UAV];
@@ -102,7 +114,11 @@ void emit(RWByteAddressBuffer state, bool active, uint instance, uint clusterInd
         uint s = 0;
         [unroll] for (uint k = 0; k < VS_LISTS; ++k)
             if (r.list == k) s = slot[k];
-        if (s < CAP_VISIBLE) lists.Store(4 * (r.list * CAP_VISIBLE + s), idx);
+        if (tileLocal)
+            tileVisit(TILE_VISIT_WRITE, loadView(view), view, tileMasks(), r.tileA, r.tileB, r.wholeRange, idx, pairBase, s, r.list, CAP_VISIBLE, TILE_PAIRS_UAV,
+                      LISTS_UAV);
+        else if (s < CAP_VISIBLE)
+            lists.Store(4 * (r.list * CAP_VISIBLE + s), idx);
     }
     const uint d = waveAppend(state, VS_DEFER_CLUSTERS, defer ? 1 : 0, CAP_DEFERRED, OVERFLOW_DEFER_CLUSTERS);
     if (defer && d < CAP_DEFERRED)

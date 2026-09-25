@@ -3,7 +3,8 @@
 //   vis_id_decodes_to_the_covering_triangle   every vis id names a triangle that covers the pixel centre at its depth
 //   lod_cut_has_no_holes           the DAG cut covers every pixel the source geometry covers (away from silhouettes)
 //   raster_service                 rasterizeDepth: hardware depth and a requester pixel kernel (DepthRasterPixel),
-//                                  orthographic LOD, tile mask
+//                                  orthographic LOD, tile mask, tile-local raster (same fragments inside set tiles,
+//                                  none outside)
 //   unx_test_visibility_visibilitytests [filter]        (UNX_GPU_VALIDATION=1: GPU-based validation as well)
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/core/Config.h"
@@ -550,9 +551,20 @@ UNX_TEST(raster_service)
         return u;
     };
     const Uav bitsUav = persistentUav(L"test bits"), idsUav = persistentUav(L"test ids");
+    // Sparse irregular mask (runs, full rows, empty rows), drawn twice: whole-view raster and tile-local raster.
+    const Uav sparseBits[2] = { persistentUav(L"test sparse bits"), persistentUav(L"test local bits") };
+    const Uav sparseIds[2] = { persistentUav(L"test sparse ids"), persistentUav(L"test local ids") };
+    const Uav sparseCount[2] = { persistentUav(L"test sparse fragments"), persistentUav(L"test local fragments") };
+    const uint8_t sparseRows[8] = { 0x36, 0xFF, 0x00, 0x81, 0x5A, 0xE7, 0x18, 0xF0 };  // bit x = tile column x
+    auto sparseTile = [&](uint32_t x, uint32_t y) { return (sparseRows[y / 128] >> (x / 128)) & 1; };
+    const uint32_t sparseWords[2] = { sparseRows[0] | sparseRows[1] << 8 | sparseRows[2] << 16 | (uint32_t)sparseRows[3] << 24,
+                                      sparseRows[4] | sparseRows[5] << 8 | sparseRows[6] << 16 | (uint32_t)sparseRows[7] << 24 };
     ComPtr<ID3D12Resource> rbDepth = readbackBuffer((uint64_t)rowPitch(size) * size), rbBits = readbackBuffer((uint64_t)rowPitch(size) * size),
                            rbIds = readbackBuffer((uint64_t)rowPitch(size) * size), rbFine = readbackBuffer((uint64_t)rowPitch(size) * size);
     ID3D12Resource *pd = rbDepth.Get(), *pb = rbBits.Get(), *pi = rbIds.Get(), *pf = rbFine.Get();
+    ComPtr<ID3D12Resource> rbSparse[2][3];
+    for (auto& run : rbSparse)
+        for (auto& t : run) t = readbackBuffer((uint64_t)rowPitch(size) * size);
     ID3D12PipelineState* clear = shaders().compute("Passes/Visibility/Tests/TestClear");
 
     // Three frames: statistics of frame 0 are read back when its slot comes round (frame 2).
@@ -623,7 +635,50 @@ UNX_TEST(raster_service)
         pk.cullTilePx = 128;
         pk.pixelConstants[0] = bitsUav.index;
         pk.pixelConstants[1] = idsUav.index;
+        pk.pixelConstants[2] = gpu::kNone;
         services.rasterizeDepth(fc, pk);
+
+        // 3. Sparse mask: whole-view raster (run 0) and tile-local raster (run 1), both counting fragments.
+        const BufferRef sparseMask = graph.createBuffer({ "test.mask.sparse", 64 * 4, 0 });
+        TextureRef sparse[2][3];
+        for (uint32_t k = 0; k < 2; ++k)
+        {
+            const Uav* uavs[3] = { &sparseBits[k], &sparseIds[k], &sparseCount[k] };
+            for (uint32_t t = 0; t < 3; ++t)
+                sparse[k][t] = graph.importTexture(uavs[t]->texture.Get(), { "test.sparse", size, size, 1, 1, DXGI_FORMAT_R32_UINT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        }
+        const uint32_t sparseIndices[6] = { sparseBits[0].index, sparseIds[0].index, sparseCount[0].index, sparseBits[1].index, sparseIds[1].index, sparseCount[1].index };
+        graph.addPass("test.clear.sparse", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          for (auto& run : sparse)
+                              for (TextureRef t : run) b.use(t, Use::UavCompute);
+                          b.use(sparseMask, Use::CopyDst);
+                      },
+                      [=](PassContext& c) {
+                          c.cmd->SetPipelineState(clear);
+                          for (uint32_t index : sparseIndices)
+                          {
+                              const uint32_t k[4] = { index, size, size, 0 };
+                              c.computeConstants(k, 4);
+                              c.cmd->Dispatch(size / 8, size / 8, 1);
+                          }
+                          D3D12_WRITEBUFFERIMMEDIATE_PARAMETER words[2];
+                          for (uint32_t w = 0; w < 2; ++w) words[w] = { c.address(sparseMask) + 4 * w, sparseWords[w] };
+                          c.cmd->WriteBufferImmediate(2, words, nullptr);
+                      });
+        for (uint32_t k = 0; k < 2; ++k)
+        {
+            DepthRasterRequest sp = pk;
+            sp.name = k == 0 ? "test.sparse" : "test.local";
+            sp.textureUses = { { sparse[k][0], Use::UavGraphics }, { sparse[k][1], Use::UavGraphics }, { sparse[k][2], Use::UavGraphics } };
+            sp.cullMask = sparseMask;
+            sp.tileLocal = k == 1;
+            sp.pixelConstants[0] = sparseIndices[3 * k];
+            sp.pixelConstants[1] = sparseIndices[3 * k + 1];
+            sp.pixelConstants[2] = sparseIndices[3 * k + 2];
+            services.rasterizeDepth(fc, sp);
+        }
+        ID3D12Resource* rs[2][3] = { { rbSparse[0][0].Get(), rbSparse[0][1].Get(), rbSparse[0][2].Get() }, { rbSparse[1][0].Get(), rbSparse[1][1].Get(), rbSparse[1][2].Get() } };
 
         graph.addPass("test.readback", QueueType::Graphics,
                       [&](PassBuilder& b) {
@@ -631,6 +686,8 @@ UNX_TEST(raster_service)
                           b.use(fineDepth, Use::CopySrc);
                           b.use(bits, Use::CopySrc);
                           b.use(ids, Use::CopySrc);
+                          for (auto& run : sparse)
+                              for (TextureRef t : run) b.use(t, Use::CopySrc);
                           b.keep();
                       },
                       [=](PassContext& c) {
@@ -638,6 +695,8 @@ UNX_TEST(raster_service)
                           copyTexture(c, fineDepth, pf, size, size);
                           copyTexture(c, bits, pb, size, size);
                           copyTexture(c, ids, pi, size, size);
+                          for (uint32_t k = 0; k < 2; ++k)
+                              for (uint32_t t = 0; t < 3; ++t) copyTexture(c, sparse[k][t], rs[k][t], size, size);
                       });
         graph.execute(nullptr);
         device().waitIdle();
@@ -646,6 +705,8 @@ UNX_TEST(raster_service)
     logStats("service, hardware depth", visibility::latestStats(trackState, "test.hw"));
     logStats("service, pixel kernel  ", visibility::latestStats(trackState, "test.kernel"));
     logStats("service, source detail ", visibility::latestStats(trackState, "test.fine"));
+    logStats("service, sparse mask   ", visibility::latestStats(trackState, "test.sparse"));
+    logStats("service, tile-local    ", visibility::latestStats(trackState, "test.local"));
     const auto hwDepth = readTexture<float>(pd, size, size);
     const auto fineDepthCpu = readTexture<float>(pf, size, size);
     const auto kernelDepth = readTexture<uint32_t>(pb, size, size);
@@ -701,6 +762,77 @@ UNX_TEST(raster_service)
          "%zu depth mismatches, %zu bad instance/userData\n",
          uncovered, terrainCompared, silhouettes, worst, worst / pixel, beyondOnePixel, left, mismatch, badIds);
     CHECK(uncovered == 0 && terrainCompared > 100000 && worst <= 2 * pixel && mismatch == 0 && badIds == 0);
+
+    // Tile-local raster: inside set tiles the same fragments per pixel as the whole-view raster, outside set tiles no
+    // fragment at all. Depth: the hardware clips triangles at the tile edges and snaps the new vertices to its 1/256 px
+    // grid, so a clipped triangle's depth plane differs from the whole triangle's by that snapping. Checked as an
+    // equivalent lateral displacement (depth difference / local depth slope) of at most 1/64 px; ids may differ only
+    // where the depth differs (ties between coincident surfaces).
+    std::vector<uint32_t> sp[2][3];
+    for (uint32_t k = 0; k < 2; ++k)
+        for (uint32_t t = 0; t < 3; ++t) sp[k][t] = readTexture<uint32_t>(rbSparse[k][t].Get(), size, size);
+    uint64_t fragmentsInside[2] = {}, fragmentsOutside[2] = {};
+    size_t countDiff = 0, depthDiff = 0, idDiff = 0, hwDiff = 0, setPixels = 0, outsideWritten = 0;
+    uint32_t worstUlps = 0;
+    float worstDepth = 0;
+    float worstSnapRatio = 0;
+    size_t beyondSnap = 0;
+    for (uint32_t y = 0; y < size; ++y)
+        for (uint32_t x = 0; x < size; ++x)
+        {
+            const size_t i = (size_t)y * size + x;
+            const bool set = sparseTile(x, y) != 0;
+            for (uint32_t k = 0; k < 2; ++k) (set ? fragmentsInside[k] : fragmentsOutside[k]) += sp[k][2][i];
+            if (set)
+            {
+                ++setPixels;
+                if (sp[0][2][i] != sp[1][2][i]) ++countDiff;
+                if (sp[0][0][i] != sp[1][0][i]) ++depthDiff;
+                if (sp[0][0][i] && sp[1][0][i])
+                {
+                    const uint32_t ulps = sp[0][0][i] > sp[1][0][i] ? sp[0][0][i] - sp[1][0][i] : sp[1][0][i] - sp[0][0][i];
+                    float a, b;
+                    std::memcpy(&a, &sp[0][0][i], 4);
+                    std::memcpy(&b, &sp[1][0][i], 4);
+                    worstUlps = std::max(worstUlps, ulps);
+                    worstDepth = std::max(worstDepth, std::fabs(a - b));
+                    // Against the rasteriser's vertex snapping (1/256 px): the local depth slope per pixel on the smooth
+                    // side of each axis (forward or backward difference, whichever is smaller) times 1/256.
+                    auto depthAt = [&](int u, int v) {
+                        float d;
+                        std::memcpy(&d, &sp[0][0][(size_t)std::clamp(v, 0, (int)size - 1) * size + std::clamp(u, 0, (int)size - 1)], 4);
+                        return d;
+                    };
+                    const int xi = (int)x, yi = (int)y;
+                    const float gx = std::min(std::fabs(depthAt(xi + 1, yi) - a), std::fabs(a - depthAt(xi - 1, yi)));
+                    const float gy = std::min(std::fabs(depthAt(xi, yi + 1) - a), std::fabs(a - depthAt(xi, yi - 1)));
+                    const float snap = (gx + gy) / 256 + 4 * std::max(std::nextafter(a, 2.0f) - a, 1e-12f);
+                    worstSnapRatio = std::max(worstSnapRatio, std::fabs(a - b) / snap);
+                    if (std::fabs(a - b) > 4 * snap) ++beyondSnap;
+                }
+                if (sp[0][1][i] != sp[1][1][i] && sp[0][0][i] == sp[1][0][i]) ++idDiff;
+                float kd;
+                std::memcpy(&kd, &sp[0][0][i], 4);
+                if (kd != hwDepth[i]) ++hwDiff;
+            }
+            else if (sp[1][0][i] != 0 || sp[1][2][i] != 0)
+                ++outsideWritten;
+        }
+    const visibility::Stats local = visibility::latestStats(trackState, "test.local");
+    logf("    tile-local vs whole-view raster, sparse mask (%zu px in set tiles): fragments inside %llu vs %llu, outside %llu vs %llu; "
+         "per-pixel differences in set tiles: fragments %zu, depth %zu, ids at equal depth %zu, whole-view vs hardware depth %zu; pixels written outside %zu; %u pairs; depth difference worst %u ulp = %.3g = %.4f px lateral (%zu px beyond 1/64 px)\n",
+         setPixels, (unsigned long long)fragmentsInside[1], (unsigned long long)fragmentsInside[0], (unsigned long long)fragmentsOutside[1],
+         (unsigned long long)fragmentsOutside[0], countDiff, depthDiff, idDiff, hwDiff, outsideWritten, local.tilePairs, worstUlps, worstDepth, worstSnapRatio / 256, beyondSnap);
+    CHECK(fragmentsInside[0] > 0 && fragmentsOutside[0] > 0 && fragmentsOutside[1] == 0 && outsideWritten == 0 && countDiff == 0 && beyondSnap == 0 && idDiff == 0 &&
+          hwDiff == 0 && local.tilePairs > 0 && local.overflow == 0);
+    for (uint32_t k = 0; k < 2; ++k)
+        for (const Uav* u : { &sparseBits[k], &sparseIds[k], &sparseCount[k] })
+        {
+            device().descriptors().freeResource(u->index);
+            device().deferRelease(u->texture);
+        }
+    for (auto& run : rbSparse)
+        for (auto& t : run) device().deferRelease(t);
     device().descriptors().freeResource(bitsUav.index);
     device().descriptors().freeResource(idsUav.index);
     device().deferRelease(bitsUav.texture);

@@ -3,8 +3,8 @@
 // One level of the cluster hierarchy traversal: node items [VS_NODE_BEGIN, VS_NODE_END). A node is skipped when its
 // worst group error projects to at most the threshold (every group below is replaced by a coarser one that is drawn
 // instead); otherwise a leaf passes its group to cluster culling and an internal node pushes its children.
-// Frustum + clip plane on the node's sphere (encloses all geometry below); HiZ occlusion as in CullInstances
-// (PHASE=1: previous frame, occluded nodes deferred; PHASE=2: this frame, occluded nodes dropped).
+// Frustum + clip plane on the node's sphere (encloses all geometry below), raster-service tile mask; HiZ occlusion as
+// in CullInstances (PHASE=1: previous frame, occluded nodes deferred; PHASE=2: this frame, occluded nodes dropped).
 #include "Passes/Visibility/CullShared.hlsli"
 
 [numthreads(64, 1, 1)]
@@ -30,6 +30,7 @@ void main(uint i : SV_DispatchThreadID)
         const float4 s = worldSphere(inst, inst.objectToWorld, node.lodSphere);
         bool keep = skinned || frustumVisible(v, s);
         keep = keep && projectedError(v, s, node.lodError * instanceScale(inst)) > v.lodThreshold;
+        keep = keep && (skinned || tileVisible(v, itemView(packed), s));
         if (keep && !skinned && (v.flags & CULL_VIEW_OCCLUSION) != 0)
         {
 #if PHASE == 1

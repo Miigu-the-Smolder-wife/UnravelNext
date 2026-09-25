@@ -3,9 +3,14 @@
 // V term with the design formula evaluated on the measured quantities:
 //   cull (instances, hierarchy, clusters) + HiZ     design: I x 32 B / 600 GB/s + C x 64 B / 600 GB/s x 1.5 + 0.02 ms
 //   band A raster                                    design: M x 0.87 ns + T_A / 17 G/s
+// --service adds the depth raster service in a VSM page-raster setting (S's clipmap: 12 orthographic sun views of
+// 16384^2, level k texel 2^(k-10) m, centred on the camera; the camera's page dirty in levels 0-5; pixel kernel
+// ServicePagePixel), drawn per frame as whole-view raster, tile-local raster (DepthRasterRequest::tileLocal) or both
+// (--service whole|local|both; separate runs keep one request's tail out of the other's first pass).
 // Performance runs only under the GPU lock (INTERFACES 3.3):
 //   powershell -File Tools/CI/GpuLock.ps1 -Track core -- build/<t>/bin/unx_gate_visibility_visibilitygate.exe
-//       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--scale 1] [--moving] [--out DIR]
+//       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--scale 1] [--moving] [--service whole|local|both]
+//       [--out DIR]
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
@@ -14,6 +19,7 @@
 #include "unx/render/GpuLock.h"
 #include "unx/render/GpuScene.h"
 #include "unx/render/Harness.h"
+#include "unx/render/Tracks.h"
 #include "unx/visibility/Visibility.h"
 #if UNX_HAS_SCENEGEN
 #include "unx/scenegen/SceneGen.h"
@@ -55,6 +61,97 @@ double sumPasses(const HarnessResult& r, const std::function<bool(const std::str
 }
 
 bool startsWith(const std::string& s, const char* prefix) { return s.rfind(prefix, 0) == 0; }
+
+// Persistent raw buffer with its own bindless descriptor (the service's pixel constants are fixed at request time).
+struct RawBuffer
+{
+    ComPtr<ID3D12Resource> resource;
+    uint32_t descriptor = gpu::kNone;
+    uint64_t bytes = 0;
+};
+
+RawBuffer rawBuffer(Device& device, uint64_t bytes, bool uav, const wchar_t* name)
+{
+    RawBuffer b;
+    b.bytes = bytes;
+    D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC1 rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = bytes;
+    rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    rd.Flags = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
+    check(device.d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&b.resource)),
+          "gate buffer");
+    b.resource->SetName(name);
+    b.descriptor = device.descriptors().allocateResource();
+    if (uav)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = DXGI_FORMAT_R32_TYPELESS;
+        ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = (UINT)(bytes / 4);
+        ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        device.d3d()->CreateUnorderedAccessView(b.resource.Get(), nullptr, &ud, device.descriptors().resourceCpu(b.descriptor));
+    }
+    else
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = DXGI_FORMAT_R32_TYPELESS;
+        sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Buffer.NumElements = (UINT)(bytes / 4);
+        sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        device.d3d()->CreateShaderResourceView(b.resource.Get(), &sd, device.descriptors().resourceCpu(b.descriptor));
+    }
+    return b;
+}
+
+// S's clipmap geometry (VsmSystem.cpp): light basis z towards the sun, x horizontal; level k texel 2^(k-10) m over
+// 16384 texels, window origin in 128-texel pages with the camera's page at tile (64, 64); height range = casters'
+// bounding spheres along z +- 500 m.
+constexpr uint32_t kServiceLevels = 12, kServiceVirtual = 16384, kServicePage = 128, kServiceTable = 128;
+
+std::vector<RasterView> serviceViews(const GpuScene& scene, float3 sun, float3 camera)
+{
+    const float3 z = normalize(sun);
+    const float3 up = std::abs(z.y) < 0.999f ? float3{ 0, 1, 0 } : float3{ 1, 0, 0 };
+    const float3 x = normalize(cross(up, z)), y = cross(z, x);
+    float lo = 1e30f, hi = -1e30f;
+    for (const gpu::Instance& i : scene.instances())
+    {
+        if ((i.flags & scene::InstanceCastShadow) == 0) continue;
+        const gpu::Mesh& m = scene.meshes()[i.mesh];
+        const float3 c{ m.boundsSphere.x, m.boundsSphere.y, m.boundsSphere.z };
+        const float3 w{ i.objectToWorld[0].x * c.x + i.objectToWorld[0].y * c.y + i.objectToWorld[0].z * c.z + i.objectToWorld[0].w,
+                        i.objectToWorld[1].x * c.x + i.objectToWorld[1].y * c.y + i.objectToWorld[1].z * c.z + i.objectToWorld[1].w,
+                        i.objectToWorld[2].x * c.x + i.objectToWorld[2].y * c.y + i.objectToWorld[2].z * c.z + i.objectToWorld[2].w };
+        const float r = m.boundsSphere.w * length(float3{ i.objectToWorld[0].x, i.objectToWorld[0].y, i.objectToWorld[0].z });
+        lo = std::min(lo, dot(w, z) - r);
+        hi = std::max(hi, dot(w, z) + r);
+    }
+    const float hMin = lo - 500, hMax = hi + 500, range = hMax - hMin, V = (float)kServiceVirtual;
+    std::vector<RasterView> views;
+    for (uint32_t k = 0; k < kServiceLevels; ++k)
+    {
+        const float t = std::ldexp(1.0f, (int)k - 10), pageSize = t * kServicePage;
+        const float ox = (float)((int32_t)std::floor(dot(camera, x) / pageSize) - (int32_t)kServiceTable / 2) * kServicePage;
+        const float oy = (float)((int32_t)std::floor(dot(camera, y) / pageSize) - (int32_t)kServiceTable / 2) * kServicePage;
+        RasterView v;
+        float4x4& m = v.viewProj;
+        m.m[0][0] = 2 * x.x / (t * V); m.m[0][1] = 2 * x.y / (t * V); m.m[0][2] = 2 * x.z / (t * V); m.m[0][3] = -2 * ox / V - 1;
+        m.m[1][0] = -2 * y.x / (t * V); m.m[1][1] = -2 * y.y / (t * V); m.m[1][2] = -2 * y.z / (t * V); m.m[1][3] = 1 + 2 * oy / V;
+        m.m[2][0] = -z.x / range; m.m[2][1] = -z.y / range; m.m[2][2] = -z.z / range; m.m[2][3] = hMax / range;
+        m.m[3][0] = 0; m.m[3][1] = 0; m.m[3][2] = 0; m.m[3][3] = 1;
+        v.viewportWidth = v.viewportHeight = kServiceVirtual;
+        v.lodPixelsPerMetre = 1.0f / t;
+        v.userData = k;
+        v.cullMaskOffset = k * (kServiceTable * kServiceTable / 32);
+        views.push_back(v);
+    }
+    return views;
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -64,7 +161,8 @@ int main(int argc, char** argv)
         std::string sceneName = "city_block", resolutionArg = "both", out;
         uint32_t frames = 600;
         float scale = 1.0f;
-        bool moving = false;
+        bool moving = false, service = false;
+        std::string serviceMode;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -77,6 +175,12 @@ int main(int argc, char** argv)
             else if (a == "--frames") frames = (uint32_t)std::stoul(next());
             else if (a == "--scale") scale = std::stof(next());
             else if (a == "--moving") moving = true;
+            else if (a == "--service")
+            {
+                serviceMode = next();
+                service = true;
+                if (serviceMode != "whole" && serviceMode != "local" && serviceMode != "both") fail("--service whole|local|both");
+            }
             else if (a == "--out") out = next();
             else fail("unknown argument %s", a.c_str());
         }
@@ -113,6 +217,11 @@ int main(int argc, char** argv)
         gpuScene.upload(s);
         gpuScene.setClusters(std::move(clusters));
         Harness harness(device, quality);
+        // Service measurement resources: tile mask (12 views x 128^2 tiles; committed buffers start zeroed) and one page.
+        const RawBuffer serviceMask = rawBuffer(device, (uint64_t)kServiceLevels * kServiceTable * kServiceTable / 8, false, L"gate service mask");
+        const RawBuffer servicePage = rawBuffer(device, (uint64_t)kServicePage * kServicePage * 4, true, L"gate service page");
+        FrameResources serviceResources;
+        FrameServices serviceServices;
         std::vector<std::string> resolutions = resolutionArg == "both" ? std::vector<std::string>{ "4K", "1440p" } : std::vector<std::string>{ resolutionArg };
         int status = 0;
         for (const std::string& rs : resolutions)
@@ -133,6 +242,36 @@ int main(int argc, char** argv)
                 prev = fc.mainView.viewProj;
                 const TextureRef output = g.createTexture({ "gate output", rr.width, rr.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
                 renderer.record(g, fc, output);
+                if (!service) return;
+                // The camera's page (tile 64, 64) dirty in levels 0-5: six 128^2 pages, as S measured (5.5 per frame).
+                const BufferRef mask = g.importBuffer(serviceMask.resource.Get(), { "gate.service.mask", serviceMask.bytes, 0 });
+                const BufferRef page = g.importBuffer(servicePage.resource.Get(), { "gate.service.page", servicePage.bytes, 0 });
+                g.addPass("gate.service.mask", QueueType::Graphics, [&](PassBuilder& b) { b.use(mask, Use::CopyDst); },
+                          [=](PassContext& c) {
+                              D3D12_WRITEBUFFERIMMEDIATE_PARAMETER words[6];
+                              const uint32_t bit = 64 * kServiceTable + 64;
+                              for (uint32_t k = 0; k < 6; ++k)
+                                  words[k] = { c.address(mask) + 4 * (k * (kServiceTable * kServiceTable / 32) + bit / 32), 1u << (bit & 31) };
+                              c.cmd->WriteBufferImmediate(6, words, nullptr);
+                          });
+                FramePassContext sc{ device, g, shaders, quality, gpuScene, fc, serviceResources, serviceServices,
+                                     [](const ViewDesc&) -> D3D12_GPU_VIRTUAL_ADDRESS { fail("gate: no frame constants for service views"); }, &renderer.trackState(), 2 };
+                const float3 sun = s.sun.direction;
+                DepthRasterRequest req;
+                req.views = serviceViews(gpuScene, sun, fc.mainView.position);
+                req.pixelKernel = "Passes/Visibility/Gates/ServicePagePixel";
+                req.bufferUses = { { mask, Use::SrvGraphics }, { page, Use::UavGraphics } };
+                req.pixelConstants[0] = serviceMask.descriptor;
+                req.pixelConstants[1] = servicePage.descriptor;
+                req.cullMask = mask;
+                req.cullTilePx = kServicePage;
+                for (const bool local : { false, true })
+                {
+                    if (serviceMode != "both" && local != (serviceMode == "local")) continue;
+                    req.name = local ? "svc.local" : "svc.whole";
+                    req.tileLocal = local;
+                    tracks::rasterizeDepth(sc, req);
+                }
             });
             harness.printSummary(r);
             const visibility::Stats st = visibility::latestStats(renderer.trackState());
@@ -151,6 +290,18 @@ int main(int argc, char** argv)
             logf("  nodes tested %u, triangles by band A/B/C %u/%u/%u, deferred %u/%u/%u, overflow 0x%x (stats of frame %llu)\n", st.nodesTested, st.triangles[0],
                  st.triangles[1], st.triangles[2], st.deferredInstances, st.deferredNodes, st.deferredClusters, st.overflow, (unsigned long long)st.frameIndex);
             if (st.overflow) status = 1;
+            if (service)
+                for (const char* run : { "svc.whole", "svc.local" })
+                {
+                    if (serviceMode != "both" && serviceMode != std::string(run).substr(4)) continue;
+                    const std::string p = std::string(run) + ".";
+                    const double rasterMs = sumPasses(r, [&](const std::string& n) { return n == p + "raster"; });
+                    const double cullMs = sumPasses(r, [&](const std::string& n) { return startsWith(n, p.c_str()) && n != p + "raster" && n != p + "stats"; });
+                    const visibility::Stats ss = visibility::latestStats(renderer.trackState(), run);
+                    logf("  service %s: raster %.3f ms, cull %.3f ms | %u clusters visible, %u triangles, %u tile pairs, overflow 0x%x\n", run, rasterMs, cullMs,
+                         ss.visibleClusters, ss.triangles[0] + ss.triangles[1] + ss.triangles[2], ss.tilePairs, ss.overflow);
+                    if (ss.overflow) status = 1;
+                }
         }
         return status;
 #endif

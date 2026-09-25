@@ -127,6 +127,11 @@ struct DepthRasterRequest
     // clusters (and meshlet triangles) whose viewport rectangle covers no set bit.
     BufferRef cullMask;
     uint32_t cullTilePx = 0;
+    // Tile-local raster (v1.7; needs cullMask): each cluster is drawn once per run of set tiles it covers (one draw
+    // when all tiles under it are set), clipped to that run's rectangle, so the rasteriser makes fragments only inside
+    // set tiles (fragments = sum of triangle area inside set tiles). Pixel positions, depth and DepthRasterPixel are
+    // the same as without it. For sparse masks over large viewports (VSM dirty pages in a 16384^2 level).
+    bool tileLocal = false;
 };
 
 struct FramePassContext;

@@ -359,6 +359,9 @@ void ensureHiz(Device& device, Hiz& h, uint32_t width, uint32_t height)
 struct Run
 {
     BufferRef state, args, nodeItems, groupItems, visible, lists, deferInstances, deferNodes, deferClusters, tileMask;
+    BufferRef tilePairs;  // tile-local raster runs: uint3 (visible index, tile rectangle) per list entry
+    BufferRef tileCoarse;  // runs with a tile mask: bit per 8 x 8 tiles (TileMaskCoarse.hlsl)
+    uint32_t tileCoarseWords = 0;  // per view
     TextureRef hiz;
     uint32_t hizSrv = kNone, hizMips = 0, hizWidth = 0, hizHeight = 0;
     uint32_t viewsSrv = kNone, viewCount = 0, instanceMask = 0;
@@ -396,6 +399,8 @@ void declareCull(PassBuilder& b, const Run& r, Use argsUse)
     b.use(r.args, argsUse);
     if (r.hiz.valid()) b.use(r.hiz, Use::SrvCompute);
     if (r.tileMask.valid()) b.use(r.tileMask, Use::SrvCompute);
+    if (r.tilePairs.valid()) b.use(r.tilePairs, Use::UavCompute);
+    if (r.tileCoarse.valid()) b.use(r.tileCoarse, Use::SrvCompute);
 }
 
 void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t k[32], uint32_t instanceCount)
@@ -428,8 +433,11 @@ void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t 
     k[24] = r.viewCount;
     k[25] = instanceCount;
     k[26] = kBandMode;
+    k[27] = r.tilePairs.valid() ? c.uav(r.tilePairs) : kNone;
     std::memcpy(&k[28], &r.cfg.bandAMinPx, 4);
     std::memcpy(&k[29], &r.cfg.bandCMaxPx, 4);
+    k[30] = r.tileCoarse.valid() ? c.srv(r.tileCoarse) : kNone;
+    k[31] = r.tileCoarseWords;
 }
 
 // A cull kernel pass: direct dispatch (groupsX > 0) or indirect through the run's args at 'argWord'. Prepare and
@@ -597,6 +605,7 @@ void recordStats(FramePassContext& fc, State& s, const Run& r, const std::string
         st.visibleClusters = w[kStateVisible];
         for (uint32_t b = 0; b < 3; ++b) st.triangles[b] = w[kStateStatTriangles + b];
         for (uint32_t l = 0; l < kLists; ++l) st.listEntries[l] = w[kStateListCount + l];
+        st.tilePairs = w[kStateTilePairs];
         st.deferredInstances = w[kStateDeferInstances];
         st.deferredNodes = w[kStateDeferNodes];
         st.deferredClusters = w[kStateDeferClusters];
@@ -681,6 +690,8 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     if (s.mainFrameConstantsFrame != fc.frame.frameIndex)
         fail("rasterizeDepth '%s': called before V's main view of this frame (it reads the frame's scene indices and time)", request.name.c_str());
     if (request.views.size() >= 256) fail("rasterizeDepth '%s': %zu views (limit 255, 8-bit view field)", request.name.c_str(), request.views.size());
+    if (request.tileLocal && (!request.cullMask.valid() || request.cullTilePx == 0))
+        fail("rasterizeDepth '%s': tileLocal needs a tile mask (cullMask, cullTilePx)", request.name.c_str());
 
     // One viewport for all views when they agree; else SV_ViewportArrayIndex (at most 16).
     bool sameViewport = true;
@@ -693,11 +704,40 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
 
     Run r = createRun(fc, cfg, request.name + ".", s.mainFrameConstants);
     r.tileMask = request.cullMask;
+    if (request.tileLocal) r.tilePairs = fc.graph.createBuffer({ "v.cull.tilePairs", (uint64_t)cfg.capVisible * 12, 12 });
     r.instanceMask = request.instanceMask;
     std::vector<CullView> views;
     for (const RasterView& v : request.views) views.push_back(viewOf(v, request, cfg));
     r.viewCount = (uint32_t)views.size();
     r.viewsSrv = uploadViews(s, fc, views);
+    if (r.tileMask.valid())
+    {
+        // Coarse summary of the tile mask (8 x 8 tiles per bit, 64 cells = two words per group): the cull kernels visit
+        // only the set cells under a bounding rectangle.
+        uint32_t cells = 1;
+        for (const CullView& v : views)
+        {
+            const uint32_t tilesY = ((uint32_t)v.viewportSize.y + v.tilePx - 1) / v.tilePx;
+            cells = std::max(cells, ((v.tilesX + 7) / 8) * ((tilesY + 7) / 8));
+        }
+        const uint32_t groups = (cells + 63) / 64;
+        r.tileCoarseWords = groups * 2;
+        r.tileCoarse = fc.graph.createBuffer({ "v.cull.tileCoarse", (uint64_t)r.tileCoarseWords * r.viewCount * 4, 0 });
+        ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/TileMaskCoarse");
+        const BufferRef mask = r.tileMask, coarse = r.tileCoarse;
+        const uint32_t viewsSrv = r.viewsSrv, words = r.tileCoarseWords, viewCount = r.viewCount;
+        fc.graph.addPass(r.prefix + "tilemask", QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             b.use(mask, Use::SrvCompute);
+                             b.use(coarse, Use::UavComputeDisjoint);
+                         },
+                         [=](PassContext& c) {
+                             const uint32_t k[4] = { viewsSrv, c.srv(mask), c.uav(coarse), words };
+                             c.cmd->SetPipelineState(pso);
+                             c.computeConstants(k, 4);
+                             c.cmd->Dispatch(groups, viewCount, 1);
+                         });
+    }
     cullPhase(fc, s, r, 1);
 
     // Back-face lists exist only when BACK was requested; shadow casters need every band (kBandMode puts all visible
@@ -708,13 +748,14 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     {
         const bool back = request.cull == D3D12_CULL_MODE_BACK && (l == kListABack || l == kListAAlphaBack);
         MeshPipelineDesc d;
-        d.meshShader = "Passes/Visibility/DepthRaster.ms";
+        d.meshShader = request.tileLocal ? "Passes/Visibility/DepthRaster.ms.TILE1" : "Passes/Visibility/DepthRaster.ms.TILE0";
         d.pixelShader = request.pixelKernel;
         d.depthFormat = depthOut ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
         d.depthWrite = depthOut;
         d.cull = back ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
         d.conservative = request.conservative;
-        pso[l] = fc.shaders.mesh("v.depth|" + request.pixelKernel + (back ? "|back" : "|none") + (depthOut ? "|d32" : "|uav") + (request.conservative ? "|cons" : ""), d);
+        pso[l] = fc.shaders.mesh("v.depth|" + request.pixelKernel + (back ? "|back" : "|none") + (depthOut ? "|d32" : "|uav") + (request.conservative ? "|cons" : "") +
+                                     (request.tileLocal ? "|tile" : ""), d);
     }
     std::vector<D3D12_VIEWPORT> viewports;
     std::vector<D3D12_RECT> scissors;
@@ -732,6 +773,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          b.use(r.visible, Use::SrvGraphics);
                          b.use(r.lists, Use::SrvGraphics);
                          b.use(r.state, Use::SrvGraphics);
+                         if (r.tilePairs.valid()) b.use(r.tilePairs, Use::SrvGraphics);
                          if (req.depthTarget.valid()) b.use(req.depthTarget, Use::DepthWrite);
                          for (const auto& [t, u] : req.textureUses) b.use(t, u);
                          for (const auto& [bu, u] : req.bufferUses) b.use(bu, u);
@@ -749,7 +791,8 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          c.bindFrameConstants(r.frameConstants);
                          for (uint32_t l = 0; l < kLists; ++l)
                          {
-                             uint32_t k[32] = { c.srv(r.visible), c.srv(r.lists), c.srv(r.state), l, 1, r.cfg.capVisible, r.viewsSrv, sameViewport ? 0u : 1u };
+                             uint32_t k[32] = { c.srv(r.visible), c.srv(r.lists), c.srv(r.state), l, 1, r.cfg.capVisible, r.viewsSrv, sameViewport ? 0u : 1u,
+                                                r.tilePairs.valid() ? c.srv(r.tilePairs) : kNone };
                              std::memcpy(&k[16], req.pixelConstants, sizeof req.pixelConstants);
                              c.cmd->SetPipelineState(pso[l]);
                              c.graphicsConstants(k, 32);
