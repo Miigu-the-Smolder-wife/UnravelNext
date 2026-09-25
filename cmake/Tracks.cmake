@@ -7,8 +7,8 @@
 # passes. Tools/CI/Build.ps1 -Track <name> selects the tracks of that session.
 include_guard(GLOBAL)
 
-set(UNX_TRACKS "all" CACHE STRING "Enabled tracks: all, or a list of V;M;S;R;C;I;FX (core is always on)")
-set(UNX_ALL_TRACKS V M S R C I FX)
+set(UNX_TRACKS "all" CACHE STRING "Enabled tracks: all, or a list of V;M;S;R;C;I;FX;RPP (core is always on)")
+set(UNX_ALL_TRACKS V M S R C I FX RPP)
 
 if(NOT UNX_TRACKS STREQUAL "all")
   foreach(t ${UNX_TRACKS})
@@ -33,6 +33,7 @@ set(UNX_TRACK_OF_SceneGen C)
 set(UNX_TRACK_OF_Reference C)
 set(UNX_TRACK_OF_Host I)
 set(UNX_TRACK_OF_FX FX)
+set(UNX_TRACK_OF_RppBuild RPP)  # RPP-1 scene build (CPU tool; links unx_scenegen, so its builds enable C too)
 
 function(unx_track_of folder out)
   if(NOT DEFINED UNX_TRACK_OF_${folder})

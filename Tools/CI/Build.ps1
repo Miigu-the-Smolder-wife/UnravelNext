@@ -2,9 +2,10 @@
 # param block dropped into $args, and the build went on with the default -Track core in another session's folder).
 [CmdletBinding()]
 param(
-  [string]$Track = "core",     # core | M | S | R | C | I | FX | all : each session builds in its own folder build/<Track>
+  [string]$Track = "core",     # core | M | S | R | C | I | FX | RPP | all : each session builds in its own folder build/<Track>
   [string]$Tracks = "",        # enabled tracks (cmake/Tracks.cmake); default from -Track: core -> V, M -> M, S -> S, R -> R,
-                               # C -> C, V -> V, I -> V;M;S;R;I (the host links the whole renderer),
+                               # C -> C, V -> V, I -> V;M;S;R;I (the host links the whole renderer), RPP -> C;RPP (the
+                               # RPP-1 scene build links SceneGen),
                                # all -> all (integrated build for gate measurements)
   [string]$Config = "Release",
   [string]$Target = "",        # optional single target, e.g. unx_unit_tests
@@ -88,7 +89,7 @@ foreach ($sub in $submodules) {
   }
 }
 if (-not $Tracks) {
-  $Tracks = switch ($Track) { "core" { "V" } "I" { "V;M;S;R;I" } "all" { "all" } default { $Track } }
+  $Tracks = switch ($Track) { "core" { "V" } "I" { "V;M;S;R;I" } "RPP" { "C;RPP" } "all" { "all" } default { $Track } }
 }
 # A build folder is configured for one track set: Ninja's dyndep state from another set can abort the build
 # (edge->outputs_ready assertion, reported by I). A different set starts the folder over.

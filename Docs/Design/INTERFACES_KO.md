@@ -22,6 +22,7 @@
 | C 기준·콘텐츠 | C 세션 | `Reference/`, `Tools/SceneGen/`, `Config/quality/reference.toml` |
 | I 통합 | I 세션 (v1.6) | `Native/Host/`, `Config/quality/host.toml` (이전 저장소 쪽 `Assets/UnravelNextBridge/`) |
 | FX GPU 시뮬레이션 | FX 세션 (v1.24) | `Native/Render/Passes/FX/`, `Config/quality/fx.toml` |
+| RPP RPP-1 장면 | RPP 세션 (v1.40) | `Content/RPP1/`, `Tools/RppBuild/`, `Docs/Status/RPP_STATUS_KO.md`, `Results/RPP/` (이전 저장소 쪽 `Assets/RPP1/`) |
 | 모두 | — | `Docs/Design/Requests/`(새 파일만), `Results/<트랙>/`(자기 결과), `Docs/Status/<트랙>_STATUS_KO.md`(자기 상태) |
 
 - 소유 폴더 밖은 읽기만 한다. 다른 트랙의 공개 HLSL 헤더(5.6)는 `#include`해서 쓴다.
@@ -61,7 +62,7 @@
 ### 2.4 명령
 
 ```text
-powershell -File Tools/CI/Build.ps1 -Track <core|M|S|R|C|I> [-Target <타깃>]      → build/<트랙>, 코어 + 그 트랙만 (2.5; I는 V;M;S;R;I)
+powershell -File Tools/CI/Build.ps1 -Track <core|M|S|R|C|I|FX|RPP> [-Target <타깃>] → build/<트랙>, 코어 + 그 트랙만 (2.5; I는 V;M;S;R;I, RPP는 C;RPP)
 powershell -File Tools/CI/Build.ps1 -Track all                                    → build/all, 모든 트랙(통합: 게이트 측정용)
 build/<트랙>/bin/unx_unit_tests.exe                                               코어 단위 테스트(디버그 레이어)
 build/<트랙>/bin/unx_gate_empty_frame.exe --validate                              debug layer + GPU-based validation
@@ -70,8 +71,8 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
 
 ### 2.5 트랙 선택 빌드 (v1.1)
 네 세션이 작업 트리 하나를 같이 쓰므로, 한 트랙의 작성 중 파일이 다른 트랙의 빌드를 깨면 안 된다.
-- CMake 캐시 변수 `UNX_TRACKS`: `all` 또는 `V;M;S;R;C;I`의 부분집합(코어는 항상 켜짐). 꺼진 트랙의 렌더 모듈(`*.cpp`), 커널(`*.hlsl`), 도구(`Tools/<폴더>`, `Reference`), Tests·Gates 실행 파일은 구성하지 않는다. 꺼진 트랙의 진입점(`Tracks.h`)은 코어의 빈 구현(`Native/Render/Frame/Stubs/Track<트랙>.cpp`, 패스 없음, 로그 한 번)이 대신한다.
-- `Build.ps1 -Track <이름>`이 기본 선택을 정한다: `core` → V(코어 세션, v1.2), `M` → M, `S` → S, `R` → R, `C` → C, `V` → V, `I` → V;M;S;R;I(호스트 DLL은 렌더러 전체를 링크, v1.6), `all` → 전부. I 폴더(`Native/Host`)는 I가 켜졌을 때만 최상위 `CMakeLists.txt`가 `add_subdirectory`한다(그 안의 `CMakeLists.txt`는 I 소유). 다른 조합은 `-Tracks "S;V"`처럼 준다.
+- CMake 캐시 변수 `UNX_TRACKS`: `all` 또는 `V;M;S;R;C;I;FX;RPP`의 부분집합(코어는 항상 켜짐). 꺼진 트랙의 렌더 모듈(`*.cpp`), 커널(`*.hlsl`), 도구(`Tools/<폴더>`, `Reference`), Tests·Gates 실행 파일은 구성하지 않는다. 꺼진 트랙의 진입점(`Tracks.h`)은 코어의 빈 구현(`Native/Render/Frame/Stubs/Track<트랙>.cpp`, 패스 없음, 로그 한 번)이 대신한다.
+- `Build.ps1 -Track <이름>`이 기본 선택을 정한다: `core` → V(코어 세션, v1.2), `M` → M, `S` → S, `R` → R, `C` → C, `V` → V, `I` → V;M;S;R;I(호스트 DLL은 렌더러 전체를 링크, v1.6), `RPP` → C;RPP(v1.40: RPP-1 장면 빌드 CPU 도구 `Tools/RppBuild`가 `unx_scenegen`·`unx_scene`만 링크), `all` → 전부. I 폴더(`Native/Host`)는 I가 켜졌을 때만 최상위 `CMakeLists.txt`가 `add_subdirectory`한다(그 안의 `CMakeLists.txt`는 I 소유). 다른 조합은 `-Tracks "S;V"`처럼 준다.
 - 트랙 세션의 개발·정확성 검사는 자기 선택 빌드(`build/<트랙>`)로 한다. **모든 트랙을 켜는 통합 빌드(`-Track all`, `build/all`)는 게이트 측정 때만** 쓰고, 통합 빌드가 실패하면 원인 파일의 소유 트랙이 고친다.
 - 꺼진 트랙의 공개 HLSL 헤더(5.6)는 소스 트리에 있으면 include할 수 있다(커널만 컴파일하지 않는다). 다른 트랙 헤더는 그 트랙이 커밋한 뒤에 쓴다.
 
@@ -662,6 +663,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
     - 통계: `visibility::Stats::mixedClusters`, `mixedTriangles`(상태 워드 40, 41; `VS_WORDS` 48).
   - **coverage 래스터 측정 단계 3, 4**: `visibility.coverage_debug_stage` 3 = 픽셀 커널이 바로 반환(메시 + 래스터 + 호출), 4 = 면적·깊이·대역 A 판정 뒤 반환. 측정 변형은 커널 호출 수를 센다(`Stats::coverageInvocations`, 상태 워드 31).
   - **TDR 재현 금지 규칙(3.6, 조율 결정)**과 10.1 동적 강체 메모(C 195fda3).
+  - **RPP 트랙 등록(요청 `20260926_RPP_track_registration.md`)**: 1절 표의 RPP 행, `cmake/Tracks.cmake`의 `RPP`와 `RppBuild → RPP`, `Build.ps1 -Track RPP` → `build/RPP`, 트랙 `C;RPP`(2.5). `Content/`는 빌드 대상이 아니다(데이터). 큰 생성물은 `Cache/RPP1/`(무시 목록).
   - V 게이트: `--scene deep_tile --deep-tile-cards N`(한 타일에 카드 N장을 겹친 합성 장면; 성장 곡선용), 거리대(62·187·374 m)별 픽셀·레코드·나무 레코드, 픽셀당 레코드 P50/P99/최대.
   - [실측] 삼각형 단위 판정의 첫 하드웨어 실행(잠금 안, `UNX_FENCE_TIMEOUT_S=10`): visibility 8/8, D3D12 디버그 층 오류 0.
   - [실측, deep_tile 4K, 한 타일에 fragment 10 k / 30 k / 100 k / 300 k, 단계 0] 타일 패스(타일당 그룹 1개) 0.057 / 0.188 / 0.670 / 2.052 ms, 래스터 2.98 / 2.29 / 2.00 / 1.93 ns/f, CAS에 진 청크 81 %. 선형이지만 한 그룹이 타일 전체를 걷는 형태라 3.6의 dispatch 상한 규칙에 맞지 않는다 → v1.41에서 배치를 바꾼다.
