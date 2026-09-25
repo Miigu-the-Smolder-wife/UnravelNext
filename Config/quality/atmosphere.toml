@@ -15,5 +15,8 @@ aerial_steps_per_slice = 4
 
 [atmosphere.froxels]
 tile_px = 24
-depth_slices = 64
-lights_max = 32
+depth_slices = 64                    # exponential in view depth between near_m and far_m (<= 64: one thread per slice)
+lights_max = 32                      # per froxel list (<= 32, FROXEL_LIST_MAX); more reaching a froxel are counted
+near_m = 0.5                         # slice 0 spans the camera .. near_m (far / near)^(1/64)
+far_m = 4096                         # the air's shadowing beyond it is not held (Froxel.hlsli)
+shadow_texels_per_tile = 4           # air shadows: VSM level with texel <= tile width / 4 (boundary placement, VsmAir.hlsli)

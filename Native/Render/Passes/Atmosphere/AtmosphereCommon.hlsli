@@ -116,10 +116,12 @@ float2 airInterval(AtmosphereParams a, float3 p, float3 d, float limit)
     return shell;
 }
 
+// A point on the surface (lifted, airLiftToSurface) may land a rounding error inside the sphere (near < 0 < far): it is
+// blocked when the ray heads below its local horizon.
 bool airHitsGround(AtmosphereParams a, float3 p, float3 d)
 {
     const float2 ground = airSphere(a, p, d, a.bottomRadius);
-    return ground.y > 0 && ground.x >= 0;
+    return ground.y > 0 && (ground.x >= 0 || dot(airUp(a, p), d) < 0);
 }
 
 float airRayleighPhase(float cosine) { return 0.05968310365946075 * (1 + cosine * cosine); }  // 3 / (16 pi)

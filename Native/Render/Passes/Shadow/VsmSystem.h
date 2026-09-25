@@ -47,6 +47,15 @@ void recordPages(FramePassContext& fc, const ViewResources& main);
 // shadowVisibility: 4 B per pixel (INTERFACES 7.3) for any view whose depth and G-buffer are in 'view'.
 void recordVisibility(FramePassContext& fc, ViewResources& view);
 
+// This frame's page structures for the other S passes (froxel integration, VsmAir.hlsli); false when shadowPages was
+// not recorded this frame.
+struct VsmFrameRefs
+{
+    BufferRef pool, table, blocks, bound;
+    uint32_t constantsCbv = UINT32_MAX;  // ConstantBuffer<VsmConstants> of this frame
+};
+bool frameRefs(FramePassContext& fc, VsmFrameRefs& out);
+
 // Diagnostics: the visibility pass writes each pixel's VSM_PATH_* (0xFF = sky) instead of the visibility.
 void setDebugPaths(TrackState& state, bool enabled);
 

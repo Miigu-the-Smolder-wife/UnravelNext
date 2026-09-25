@@ -1,5 +1,6 @@
 #include "VsmSystem.h"
 
+#include "FroxelSystem.h"
 #include "SResources.h"
 
 #include "unx/render/GpuScene.h"
@@ -190,6 +191,18 @@ void setDebugPaths(TrackState& state, bool enabled) { state.get<State>(kStateKey
 
 const VsmConstantsCpu& lastConstants(TrackState& state) { return state.get<State>(kStateKey).constants; }
 
+bool frameRefs(FramePassContext& fc, VsmFrameRefs& out)
+{
+    State& s = fc.state<State>(kStateKey);
+    if (!s.pagesRecorded || s.recordedFrame != fc.frame.frameIndex) return false;
+    out.pool = s.poolRef;
+    out.table = s.tableRef;
+    out.blocks = s.blocksRef;
+    out.bound = s.boundRef;
+    out.constantsCbv = s.ringCbv[s.constantsOffset / kRingStride];
+    return true;
+}
+
 void recordPages(FramePassContext& fc, const ViewResources& main)
 {
     State& s = fc.state<State>(kStateKey);
@@ -373,6 +386,27 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 4);
                       ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                  });
+    }
+    {
+        // Air of the froxel integration (VsmMarkAir, VsmAir.hlsli): after the pixel marks, which store plainly.
+        ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmMarkAir");
+        const FroxelGridCpu grid = froxelGridFor(q, main.view.width, main.view.height);
+        uint32_t nearBits, farBits, texelBits;
+        std::memcpy(&nearBits, &grid.nearM, 4);
+        std::memcpy(&farBits, &grid.farM, 4);
+        std::memcpy(&texelBits, &grid.shadowTexelsPerTile, 4);
+        g.addPass("s.vsm.markair", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(requests, Use::UavCompute);
+                      b.keep();
+                  },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[8] = { ctx.uav(requests), ring, grid.gridX | grid.gridY << 16, grid.slices | grid.tilePx << 16, nearBits, farBits, texelBits, 0 };
+                      ctx.cmd->SetPipelineState(pso);
+                      ctx.bindFrameConstants(mainConstants);
+                      ctx.computeConstants(k, 8);
+                      ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
                   });
     }
     {
