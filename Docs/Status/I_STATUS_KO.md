@@ -356,7 +356,7 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
   ABI 5: `DeviceRemovedError`는 `UNX_DEVICE_REMOVED`(−4)가 되고, 그 뒤 모든 렌더러 호출이 같은 코드를 돌려준다(파괴는 된다). 렌더 이벤트는
   제거 뒤 아무것도 하지 않는다. 시험 `unx_test_host_hostdeviceremoved`(RemoveDevice로 이 프로세스의 장치만 제거; TDR 아님)[실측, 커밋 빌드
   ff07562, GpuLock]: 제거 뒤 다음 프레임이 `DeviceRemovedError`("map VSM stats", hr 0x887A0005)를 던지고, `Queue::waitCpu`는 제거를 기록하고
-  돌아오며, 렌더러 파괴가 끝나고 프로세스는 0으로 끝난다(87이 아니다). 통과.
+  돌아오며, 렌더러 파괴가 끝나고 프로세스는 0으로 끝난다(87이 아니다). 통과. 같은 빌드에서 `unx_test_host_hostabi --live`(ABI 5)도 통과했다.
   **한계:** 장치 제거 뒤 다시 적재하지 않는다. C#은 렌더러를 버리고 배경만 지우며, 그 프로세스에서는 다시 만들지 않는다. 코어의
   `deviceWasRemoved()`가 프로세스 전역이고 되돌릴 수 없어서, Unity가 새 장치를 만들어도 모든 호출이 `UNX_DEVICE_REMOVED`를 돌려준다.
   13:56에는 Unity 자신도 D3D12 제거를 복구 불가로 처리했다. 복구(드라이버 재설정·TDR 뒤 새 장치로 다시 적재)는 재구축 계획 13.6
