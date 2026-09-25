@@ -483,6 +483,26 @@ UNX_API int32_t UNX_CALL UnxFrameSetSun(UnxRenderer r, const float direction[3],
 
 namespace unx::host::plugin
 {
+void destroyDeviceRenderers()
+{
+    std::vector<std::shared_ptr<HostRenderer>> doomed;
+    {
+        std::lock_guard lock(g_renderersMutex);
+        for (auto it = g_renderers.begin(); it != g_renderers.end();)
+        {
+            if (!it->second->options().standalone)
+            {
+                doomed.push_back(std::move(it->second));
+                it = g_renderers.erase(it);
+            }
+            else
+                ++it;
+        }
+    }
+    if (!doomed.empty()) logf("UnravelNext: Unity's device is going away; destroying %zu renderer(s) bound to it\n", doomed.size());
+    doomed.clear();  // waits for the GPU while the device still exists
+}
+
 // UNX_EVENT_RENDER on Unity's submission thread (queue-access event, Unity flushed its command buffers first). Each of
 // the frame's lists goes through Unity's ExecuteCommandList with the output texture declared UNORDERED_ACCESS before and
 // after, so Unity's state tracker transitions it for the list and knows its state for the following blit.

@@ -16,4 +16,7 @@ const std::string& lastError();
 IUnityGraphicsD3D12v8* unityD3D12();
 // UNX_EVENT_RENDER on Unity's submission thread (RendererAbi.cpp); the ticket names the renderer and its frame.
 void renderEvent(uint64_t ticket);
+// Unity's device is going away (shutdown or reset): every renderer bound to it is destroyed now, while the device and
+// queue still exist (their destructors wait for the GPU). Managed handles then report "unknown renderer".
+void destroyDeviceRenderers();
 } // namespace unx::host::plugin

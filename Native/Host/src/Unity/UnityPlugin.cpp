@@ -465,6 +465,7 @@ void UNITY_INTERFACE_API onDeviceEvent(UnityGfxDeviceEventType type)
     else if (type == kUnityGfxDeviceEventShutdown || type == kUnityGfxDeviceEventBeforeReset)
     {
         g_probe.reset();
+        unx::host::plugin::destroyDeviceRenderers();
         g_d3d = nullptr;
     }
 }
@@ -524,6 +525,7 @@ extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UnityPluginUnload()
     if (g_graphics) g_graphics->UnregisterDeviceEventCallback(onDeviceEvent);
     std::lock_guard lock(g_gate);
     g_probe.reset();
+    unx::host::plugin::destroyDeviceRenderers();
     g_d3d = nullptr;
     g_graphics = nullptr;
     g_interfaces = nullptr;
