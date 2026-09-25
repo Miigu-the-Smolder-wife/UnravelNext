@@ -407,6 +407,8 @@ GiStats GiSystem::readStats()
     st.resets = h[36];
     st.hitLookups = h[38];  // GI_H_STAT_HIT_LOOKUPS
     st.hitMisses = h[39];
+    st.gSamples = h[48];  // GI_H_STAT_G_SAMPLES
+    st.gRatio = h[49];
     return st;
 }
 } // namespace unx::render::gi

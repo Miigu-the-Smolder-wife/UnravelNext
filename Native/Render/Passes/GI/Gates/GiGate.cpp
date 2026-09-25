@@ -77,6 +77,20 @@ float halfToFloat(uint16_t h)
     return sign ? -v : v;
 }
 
+uint16_t floatToHalf(float v)
+{
+    uint32_t x;
+    std::memcpy(&x, &v, 4);
+    const uint32_t sign = (x >> 16) & 0x8000u;
+    const int exponent = (int)((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t mantissa = x & 0x7FFFFFu;
+    if (exponent <= 0) return (uint16_t)sign;  // flush tiny values to zero (diagnostic dumps)
+    if (exponent >= 31) return (uint16_t)(sign | 0x7C00u);
+    mantissa += 0x1000u;  // round to nearest
+    if (mantissa & 0x800000u) return (uint16_t)(sign | ((exponent + 1) << 10));
+    return (uint16_t)(sign | (exponent << 10) | (mantissa >> 13));
+}
+
 // Per 8 x 8 tile mean luminance of the valid pixels (a = 1) of a dumped reflection; tiles without any: -1.
 std::vector<double> tileMeans(const std::vector<uint16_t>& texels, uint32_t width, uint32_t height, const std::vector<uint16_t>* other)
 {
@@ -101,7 +115,7 @@ int main(int argc, char** argv)
     try
     {
         std::string scenePath, resolutions = "both", out, qualityPath = std::string(UNX_SOURCE_DIR) + "/Config/quality", dumpPath, comparePath;
-        uint32_t frames = 600, cameraIndex = 0;
+        uint32_t frames = 600, cameraIndex = 0, averageFrames = 1;
         bool integrated = false, planarForced = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
@@ -118,6 +132,7 @@ int main(int argc, char** argv)
             else if (a == "--planar-forced") planarForced = true;  // every counted plane gets a camera (view cost breakdown)
             else if (a == "--set") overrides.push_back(next());
             else if (a == "--dump") dumpPath = next();
+            else if (a == "--average") averageFrames = std::max(1u, (uint32_t)std::stoul(next()));  // --dump/--compare over N frames
             else if (a == "--compare") comparePath = next();
             else fail("unknown argument %s", a.c_str());
         }
@@ -323,19 +338,44 @@ int main(int argc, char** argv)
             harness.printSummary(r);
             if (keepReflection)
             {
+                // --average N: the per-pixel mean over N untimed frames (valid where valid in at least half of them), so an
+                // estimator's per-frame noise averages out and its bias remains.
                 device.waitIdle();
-                dumpFrame = true;
-                RenderGraph dumpGraph(device);
-                frameBody(dumpGraph, res, lastFrame + 1);
-                dumpGraph.execute(nullptr);
-                device.waitIdle();
-                dumpFrame = false;
-                std::vector<uint16_t> texels((size_t)res.width * res.height * 4);
-                void* mapped = nullptr;
+                const size_t pixels = (size_t)res.width * res.height;
+                std::vector<float> sum(pixels * 3, 0.0f);
+                std::vector<uint32_t> validCount(pixels, 0);
+                std::vector<uint16_t> texels(pixels * 4);
                 D3D12_RANGE all{ 0, (SIZE_T)dumpPitch * res.height }, none{ 0, 0 };
-                check(dumpBuffer->Map(0, &all, &mapped), "map reflection dump");
-                for (uint32_t y = 0; y < res.height; ++y) std::memcpy(&texels[(size_t)y * res.width * 4], (uint8_t*)mapped + (size_t)y * dumpPitch, res.width * 8);
-                dumpBuffer->Unmap(0, &none);
+                for (uint32_t k = 0; k < averageFrames; ++k)
+                {
+                    dumpFrame = true;
+                    RenderGraph dumpGraph(device);
+                    frameBody(dumpGraph, res, lastFrame + 1 + k);
+                    dumpGraph.execute(nullptr);
+                    device.waitIdle();
+                    dumpFrame = false;
+                    void* mapped = nullptr;
+                    check(dumpBuffer->Map(0, &all, &mapped), "map reflection dump");
+                    for (uint32_t y = 0; y < res.height; ++y)
+                    {
+                        const uint16_t* row = (const uint16_t*)((const uint8_t*)mapped + (size_t)y * dumpPitch);
+                        for (uint32_t x = 0; x < res.width; ++x)
+                        {
+                            const size_t i = (size_t)y * res.width + x;
+                            if (halfToFloat(row[4 * x + 3]) < 0.5f) continue;
+                            for (int c = 0; c < 3; ++c) sum[3 * i + c] += halfToFloat(row[4 * x + c]);
+                            ++validCount[i];
+                        }
+                    }
+                    dumpBuffer->Unmap(0, &none);
+                }
+                for (size_t i = 0; i < pixels; ++i)
+                {
+                    const bool valid = 2 * validCount[i] >= averageFrames && validCount[i] > 0;
+                    for (int c = 0; c < 3; ++c) texels[4 * i + c] = floatToHalf(valid ? sum[3 * i + c] / validCount[i] : 0.0f);
+                    texels[4 * i + 3] = floatToHalf(valid ? 1.0f : 0.0f);
+                }
+                if (averageFrames > 1) logf("R %s: reflection averaged over %u untimed frames\n", res.name.c_str(), averageFrames);
                 if (!dumpPath.empty())
                 {
                     std::ofstream f(dumpPath, std::ios::binary);
@@ -417,6 +457,8 @@ int main(int argc, char** argv)
                      res.name.c_str(), st.live, st.requested, st.selected, st.background, st.hits, st.created, st.allocationFailures, st.tableFull);
                 logf("R %s: reflection hits' cache lookups %u, with no data at any level searched %u (%.3f %%)\n", res.name.c_str(), st.hitLookups, st.hitMisses,
                      st.hitLookups ? 100.0 * st.hitMisses / st.hitLookups : 0.0);
+                logf("R %s: reflection G samples %u, estimated by the ratio branch (beta < 1) %u (%.2f %%)\n", res.name.c_str(), st.gSamples, st.gRatio,
+                     st.gSamples ? 100.0 * st.gRatio / st.gSamples : 0.0);
             }
         }
         rt::RayPipeline::releaseDevice(device);

@@ -47,6 +47,14 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
     const float3 gbar = j.mode == REFL_G ? reflLobeControl(j, probeTexture, footprint, probeCount)
                                          : valid == 0 ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w) : 0;
     results[job] = reflPackResult(reflLobeEstimate(sumL, sumG, valid, gbar), valid > 0 ? distSum / valid : 0);
+    // Diagnostics: G samples and those estimated by the ratio branch, one atomic per wave (GI header).
+    const uint gSamples = WaveActiveCountBits(j.mode == REFL_G), gRatio = WaveActiveCountBits(j.mode == REFL_G && reflLobeRatio(sumL, sumG, valid));
+    if (WaveIsFirstLane() && gSamples)
+    {
+        RWByteAddressBuffer statCache = ResourceDescriptorHeap[P[4].z];
+        statCache.InterlockedAdd(GI_H_STAT_G_SAMPLES, gSamples);
+        if (gRatio) statCache.InterlockedAdd(GI_H_STAT_G_RATIO, gRatio);
+    }
 }
 
 [shader("raygeneration")]

@@ -56,6 +56,9 @@ float3 reflLobeEstimate(float3 sumL, float3 sumG, uint n, float3 gbar)
     return max(meanL + beta * (gbar - meanG), 0.0);
 }
 
+// True when reflLobeEstimate takes the ratio branch in some channel (diagnostics).
+bool reflLobeRatio(float3 sumL, float3 sumG, uint n) { return n > 0 && any(and(sumG > 1e-8 * n, sumL < sumG)); }
+
 // A job = a pixel that traces: an M pixel (1 ray) or a G sample (4 rays). Encoded as x | y << 16.
 uint reflPackPixel(uint2 p) { return p.x | (p.y << 16); }
 uint2 reflUnpackPixel(uint v) { return uint2(v & 0xFFFFu, v >> 16); }

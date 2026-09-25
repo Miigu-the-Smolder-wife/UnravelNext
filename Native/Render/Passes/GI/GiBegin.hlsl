@@ -22,6 +22,7 @@ void main(uint lane : SV_GroupIndex)
     b.Store4(GI_H_STAT_CREATED, uint4(0, 0, 0, 0));
     b.Store(GI_H_STAT_RESETS, 0u);
     b.Store2(GI_H_STAT_HIT_LOOKUPS, uint2(0, 0));
+    b.Store2(GI_H_STAT_G_SAMPLES, uint2(0, 0));
     b.Store4(GI_H_SELECT, uint4(0, 0, 0, 0));
     b.Store4(GI_H_SELECT + 16, uint4(0, 0, 0, 0));
 }
