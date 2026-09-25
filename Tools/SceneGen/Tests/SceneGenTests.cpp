@@ -8,6 +8,7 @@
 #include "unx/scenegen/SceneGen.h"
 
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 #include <string>
 
@@ -42,6 +43,21 @@ int main(int argc, char** argv)
             }
             CHECK(staticPath && movingPath);
             CHECK(a.name == scenegen::sceneName(id));
+            // terrainHeight: every vertex of the terrain (or interior ground) mesh lies on it.
+            {
+                size_t checked = 0;
+                for (const scene::Mesh& m : a.meshes)
+                {
+                    if (m.name != "terrain" && m.name != "ground") continue;
+                    for (const float3& v : m.positions)
+                    {
+                        const float h = scenegen::terrainHeight(id, v.x, v.z);
+                        CHECK(std::fabs(v.y - h) <= 1e-3f);
+                        ++checked;
+                    }
+                }
+                CHECK(checked > 0);
+            }
             // RPP-1 dynamic content: 1,024 InstanceDynamic bodies in the section scenes, none elsewhere; the exported content
             // maps each body to its instance with the same t0 position.
             {

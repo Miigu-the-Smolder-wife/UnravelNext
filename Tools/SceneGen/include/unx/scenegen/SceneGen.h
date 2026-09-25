@@ -66,6 +66,12 @@ std::string dynamicContentJson(const Request& request, const DynamicContent& con
 // generate() and the scene's dynamic content with instance indices filled in.
 scene::Scene generateWithContent(const Request& request, DynamicContent& content);
 
+// Ground height of a scene's terrain at scene-local (x, z) (RPP-1 world assembly): the analytic function its terrain
+// mesh samples (the mesh vertices lie on it exactly; between them the mesh is linear over its grid: city 2 m, forest
+// 1.95 m, waterside 2 m, ridge 20 m). City scenes: 0 over the city square, which the street plane covers. Interior:
+// the outside ground at -0.2 m. NaN outside the terrain's extent. Independent of the seed and scale.
+float terrainHeight(SceneId id, float x, float z);
+
 // Throws unx::Error for unknown ids. The returned scene passes scene::validate() and contains at least one camera and
 // one camera path (static and moving) for gates and temporal-stability tests.
 scene::Scene generate(const Request& request);

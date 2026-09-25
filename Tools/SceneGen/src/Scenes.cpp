@@ -612,6 +612,23 @@ scene::Scene generateWithContent(const Request& rq, DynamicContent& content)
     return s;
 }
 
+float terrainHeight(SceneId id, float x, float z)
+{
+    auto inside = [&](float half) { return std::fabs(x) <= half && std::fabs(z) <= half; };
+    switch (id)
+    {
+    case SceneId::CityBlock:
+    case SceneId::CityNight: return inside(1000.0f) ? cityTerrain(x, z) : NAN;  // 0 over the city square (street plane)
+    case SceneId::ForestThin:
+    case SceneId::ForestCard:
+    case SceneId::ForestCombat: return inside(1000.0f) ? rollingTerrain(x, z) : NAN;
+    case SceneId::Waterside: return inside(600.0f) ? lakeFloor(x, z) : NAN;
+    case SceneId::Interior: return inside(100.0f) ? -0.2f : NAN;
+    case SceneId::RidgeSunset: return inside(10000.0f) ? ridgeTerrain(x, z) : NAN;
+    }
+    fail("scenegen: unknown scene id %u", (uint32_t)id);
+}
+
 std::vector<SceneId> allScenes()
 {
     return { SceneId::CityBlock, SceneId::ForestThin, SceneId::ForestCard, SceneId::Waterside, SceneId::Interior, SceneId::CityNight, SceneId::RidgeSunset, SceneId::ForestCombat };
