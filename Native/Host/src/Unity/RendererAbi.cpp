@@ -90,13 +90,26 @@ uint32_t texelBytes(scene::TextureFormat f)
     return 0;
 }
 
+// Device removal (INTERFACES v1.27): the plugin runs with DeviceRemovedPolicy::Throw, so a removed device surfaces as
+// DeviceRemovedError instead of ending the host process. From then on every renderer call answers UNX_DEVICE_REMOVED
+// (the device cannot be used again); destroying a renderer still works, its waits return on a removed device.
 template <typename F>
-int32_t call(F&& f)
+int32_t call(F&& f, bool afterRemoval = false)
 {
+    if (!afterRemoval && render::deviceWasRemoved())
+    {
+        plugin::failWith("the D3D12 device was removed; destroy the renderer (UnxRendererDestroy)");
+        return UNX_DEVICE_REMOVED;
+    }
     try
     {
         f();
         return UNX_OK;
+    }
+    catch (const render::DeviceRemovedError& e)
+    {
+        plugin::failWith(e.what());
+        return UNX_DEVICE_REMOVED;
     }
     catch (const std::exception& e)
     {
@@ -143,8 +156,8 @@ UNX_API int32_t UNX_CALL UnxRendererDestroy(UnxRenderer renderer)
             r = std::move(it->second);
             g_renderers.erase(it);
         }
-        r.reset();  // waits for the GPU (HostRenderer destructor)
-    });
+        r.reset();  // waits for the GPU (HostRenderer destructor); returns at once on a removed device
+    }, true);
 }
 
 UNX_API int32_t UNX_CALL UnxSceneAddTexture(UnxRenderer r, const UnxTextureDesc* d, uint32_t* index)
@@ -609,7 +622,7 @@ void renderEvent(uint64_t ticket)
     try
     {
         IUnityGraphicsD3D12v8* d3d = unityD3D12();
-        if (!d3d) return;
+        if (!d3d || render::deviceWasRemoved()) return;  // after a removal the main thread's next call reports UNX_DEVICE_REMOVED
         std::shared_ptr<HostRenderer> renderer = find(ticketRenderer(ticket));
         renderer->renderOnHost(ticketLocal(ticket), [d3d](ID3D12CommandList* list, ID3D12Resource* output) {
             ComPtr<ID3D12GraphicsCommandList> graphics;

@@ -265,6 +265,13 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
 
 uint32_t HostRenderer::debugErrors() { return m_device->drainDebugMessages(); }
 
+void HostRenderer::removeDeviceForTest()
+{
+    ComPtr<ID3D12Device5> device;
+    check(m_device->d3d()->QueryInterface(IID_PPV_ARGS(&device)), "ID3D12Device5 for RemoveDevice");
+    device->RemoveDevice();
+}
+
 FrameStats HostRenderer::latestStats() const
 {
     std::lock_guard lock(m_mutex);

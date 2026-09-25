@@ -22,10 +22,12 @@ enum UnxResult
     UNX_ERROR_ABI = -1,        // size/version mismatch between managed and native structs
     UNX_ERROR_NO_DEVICE = -2,  // Unity's D3D12 device is not available (other graphics API, device lost)
     UNX_ERROR_BUFFER = -3,     // output buffer too small; *required holds the size
+    UNX_DEVICE_REMOVED = -4,   // the D3D12 device was removed (TDR, driver reset): every renderer is unusable; destroy
+                               // them (UnxRendererDestroy still works) and create new ones once the host has a device
 };
 
-#define UNX_ABI_VERSION 4u  // 1: probe; 2: + renderer; 3: + UnxFrameSetSkeletons, UnxSceneSave writes the current state;
-                            // 4: + UnxFrameSetEnvironment
+#define UNX_ABI_VERSION 5u  // 1: probe; 2: + renderer; 3: + UnxFrameSetSkeletons, UnxSceneSave writes the current state;
+                            // 4: + UnxFrameSetEnvironment; 5: UNX_DEVICE_REMOVED (the process survives a device removal)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);

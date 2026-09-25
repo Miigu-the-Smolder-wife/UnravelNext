@@ -84,7 +84,7 @@ Unity 쪽 코드는 `Assets/UnravelNextBridge`(이전 저장소 커밋 0125b960)
 Agility 1.618.5 기능은 1.618.1에서도 모두 있다(SDK 618).
 필요한 코어 변경은 `Docs/Design/Requests/20260925_I_unity_queue_device.md`에 요청했다: 외부 디바이스·큐로 `Device`를 만들고, 큐 실행 훅을 둔다.
 
-## 2. C ABI (`Native/Host/include/unx/host/UnravelNextHost.h`, ABI 4)
+## 2. C ABI (`Native/Host/include/unx/host/UnravelNextHost.h`, ABI 5)
 
 - 규칙: 앞에 `{size, version}`이 있는 고정 크기 구조체만 넘긴다. 크기는 헤더의 `static_assert`와 C#의 `RequireLayouts`가 같이 확인한다.
   반환은 결과 코드와 `UnxLastError()`다. C++ 객체는 넘기지 않는다.
@@ -347,8 +347,13 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
   상한은 I 초안보다 좁은 K·[s1²·0.4·min(2, 1.7|Δt|) + |s1² − s0²| + 2 sin(Δθ/2)·s0²]를 제안했다. R도 같은 의견이다(revision 불필요;
   바람 잎 정확 집합은 매 프레임 현재 바람으로 변형하고, refit을 건너뛸 때만 같은 끝점 상한을 쓴다). 합의: windRevision 없이 끝점 상한
   `windChangeBound`와 windOffset 무기억 계약. 코어가 INTERFACES를 올리면 커밋 뒤 바람 변경 거부를 푼다.
-- `20260925_I_device_removed_policy.md`(대기): v1.26의 장치 제거 처리(`_Exit(87)`)를 프로세스별로 정하게(호스트 DLL은 던지고 ABI가
-  `UNX_DEVICE_REMOVED`를 돌려준다. 소멸자 경로는 기다리지 않고 돌아온다). 반영 전까지 feb9595 이후 DLL은 Unity에 배포하지 않는다.
+- `20260925_I_device_removed_policy.md`(반영, 코어 67b5508 v1.27): 플러그인이 `UnityPluginLoad`에서 `DeviceRemovedPolicy::Throw`를 둔다.
+  ABI 5: `DeviceRemovedError`는 `UNX_DEVICE_REMOVED`(−4)가 되고, 그 뒤 모든 렌더러 호출이 같은 코드를 돌려준다(파괴는 된다). 렌더 이벤트는
+  제거 뒤 아무것도 하지 않는다. 시험 `unx_test_host_hostdeviceremoved`(RemoveDevice로 이 프로세스의 장치만 제거; TDR 아님).
+- 알려진 실패(VFX 세션, V3까지, 회귀 아님): NativeVfx V2가 설치되면 `NativeDataWorldPlayerValidation`의 "Data VFX did not execute on the shared
+  GPU" 단언(EnableVfxGpu = true)이 실패한다. TitanNative 공유 GPU VFX 실행기가 퇴역했고, GPU 입자 모듈 연결은 V3(I가 FX 모듈을
+  `VfxStreamExecutors.Provider` / `NV_StreamExecutor`로 잇는 일)다. EnableVfxGpu = false(`-unxVfxCpu`) 조건의 Player에는 영향이 없다.
+  설치 뒤 TitanNative VFX 렌더러는 CPU 투영으로 그린다. `Docs/Rebuild/WORLD_VFX_DESIGN_KO.md` 9.4(a81466e5).
 - `20260925_I_skin_normals.md`(대기): 스킨 법선을 관절 3×3의 여인수로 변환하는 것이다. 데이터 월드 캐릭터의 비균일 스케일(0.6, 0.8, 0.6)을 관절에 접으면 필요하다.
 
 ## 3.1 호스트 쪽 설계 조건 (날씨·시간대)

@@ -8,6 +8,7 @@
 
 #include "Probe/Probe.h"
 #include "Unity/PluginState.h"
+#include "unx/render/D3D12.h"
 #include "unx/render/Harness.h"
 
 #include "IUnityGraphics.h"
@@ -513,6 +514,8 @@ void UNITY_INTERFACE_API onRenderEvent(int eventId, void* data)
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UnityPluginLoad(IUnityInterfaces* interfaces)
 {
+    // Inside Unity a device removal must not end the process (v1.27): renderer calls report UNX_DEVICE_REMOVED instead.
+    unx::render::setDeviceRemovedPolicy(unx::render::DeviceRemovedPolicy::Throw);
     g_interfaces = interfaces;
     g_graphics = interfaces->Get<IUnityGraphics>();
     g_eventBase = g_graphics->ReserveEventIDRange(UNX_EVENT_COUNT);

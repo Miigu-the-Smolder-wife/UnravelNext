@@ -139,6 +139,9 @@ public:
     // the old one's address, so views cached by resource pointer would point at a destroyed texture.
     void setRecreateStandaloneOutput(bool recreate) { m_recreateOutput = recreate; }
     uint32_t outputAddressReuses() const { return m_outputReuses; }
+    // Test hook: removes this renderer's D3D12 device (ID3D12Device5::RemoveDevice: this process only, no GPU reset), as a
+    // TDR would, so the device-removal path can be exercised.
+    void removeDeviceForTest();
     uint32_t outputRecreations() const { return m_outputRecreations; }
 
     // The scene as the host shows it now: the content with the latest transforms, poses, sun and visibility the host
