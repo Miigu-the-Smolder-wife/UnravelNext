@@ -34,3 +34,10 @@ v1.26(feb9595)에서 `check()`와 `Queue::waitCpu`가 장치 제거(DEVICE_REMOV
 
 - 코어: `Device.cpp`의 `deviceRemoved`와 처리 방식 저장, 소멸자 경로의 기다림. 도구·게이트의 동작은 바뀌지 않는다(기본값 Exit).
 - I: 위 처리.
+
+## 결과 (코어, 2026-09-25, INTERFACES v1.27)
+
+- `setDeviceRemovedPolicy(DeviceRemovedPolicy::Exit | Throw)`, `deviceRemovedPolicy()`, `deviceWasRemoved()`, `struct DeviceRemovedError : Error { where, hr, reason }`(`D3D12.h`)를 넣었다.
+- Throw: `check()` 경로는 `DeviceRemovedError`를 던진다. `Queue::signal/waitCpu`, `Device::waitIdle`은 제거를 기록하고 던지지 않고 돌아온다. `UNX_DEVICE_REMOVED ...` 줄은 로그에 한 번 남는다.
+- 호스트 장치(`externalDevice`) 위의 첫 장치는 명시 설정이 없으면 Throw다. 호스트는 `UnityPluginLoad`에서 명시해도 된다.
+- [실측] 단위 테스트 `device_removed_exit_policy`(자식 종료 코드 87과 마지막 줄), `zz_device_removed_throw_policy`(예외 필드, 이어진 waitIdle은 던지지 않음). 30/30, debug layer 0.

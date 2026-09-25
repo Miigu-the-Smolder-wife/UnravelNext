@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.26, 2026-09-25)
+# UnravelNext 인터페이스 (v1.27, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -102,7 +102,9 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
 - 코드가 강제한다: `Harness::run`과 `requireGpuLock()`을 부르는 도구는 `UNX_GPU_LOCK`이 없으면 측정을 거부한다. 트랙의 게이트도 측정 전에 `unx::render::requireGpuLock("<게이트 이름>")`을 부른다.
 - 정확성 실행(단위 테스트, 디버그 레이어·GPU 검증, 기준 영상 비교, 디버그 캡처)은 잠금 없이 동시에 해도 된다. (조율 세션이 임시 규칙을 알리는 동안은 모든 하드웨어 GPU 실행이 잠금 안이다.)
 - (v1.26) GUI 서브시스템 실행 파일(Unity.exe)은 `&`가 곧바로 반환하므로, GpuLock.ps1은 PE 헤더로 판별해 `Start-Process -Wait`로 그 프로세스와 자손을 기다린 뒤 종료 코드를 돌려준다.
-- (v1.26) **장치 제거(TDR)**: `check()`가 DEVICE_REMOVED/HUNG/RESET/DRIVER_INTERNAL_ERROR를 만나거나 `Queue::waitCpu`의 펜스가 UINT64_MAX(제거된 장치)를 읽으면 `deviceRemoved`가 표준 출력 마지막 줄에 `UNX_DEVICE_REMOVED <what> hr 0x.. reason 0x..`(GetDeviceRemovedReason)을 쓰고 종료 코드 **87**(`kDeviceRemovedExitCode`, `D3D12.h`)로 곧바로 끝낸다. 정적 소멸자는 돌지 않는다. GpuLock.ps1은 87을 `history.log`에 `release <트랙> exit 87 DEVICE_REMOVED`로 남긴다. `unx_render`를 링크하는 모든 실행 파일(테스트·게이트·도구)에 해당한다.
+- (v1.26, v1.27) **장치 제거(TDR)**: `check()`가 DEVICE_REMOVED/HUNG/RESET/DRIVER_INTERNAL_ERROR를 만나거나 제거된 장치의 펜스(UINT64_MAX)를 읽으면 정책(`setDeviceRemovedPolicy`, `D3D12.h`)을 따른다.
+  - `Exit`(기본: 테스트·게이트·도구): 표준 출력 마지막 줄 `UNX_DEVICE_REMOVED <what> hr 0x.. reason 0x..`(GetDeviceRemovedReason) + 종료 코드 **87**(`kDeviceRemovedExitCode`). 곧바로 끝내고 정적 소멸자는 돌지 않는다. GpuLock.ps1은 `history.log`에 `release <트랙> exit 87 DEVICE_REMOVED`로 남긴다.
+  - `Throw`(호스트 프로세스: Unity 편집기·Player가 살아남아야 한다. 호스트는 장치를 만들기 전에 설정한다. 호스트 장치(`externalDevice`) 위의 첫 장치는 명시 설정이 없으면 Throw다): 같은 줄을 로그에 남기고 `check()`가 `DeviceRemovedError{ where, hr, reason }`를 던진다. `Queue::signal/waitCpu`, `Device::waitIdle`(소멸자에서도 불린다)는 던지지 않는다. 제거를 기록하고 바로 돌아온다(기다릴 작업이 없다). `deviceWasRemoved()`로 확인한다.
 - 사용자의 다른 GPU 앱은 닫지 않는다. 측정은 4K·1440p만(하네스가 강제), 1.5초 워밍업, 중앙값·P95·P99.
 
 ### 3.4 결과·상태
@@ -493,3 +495,5 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **코어 도구·장치**(조율 요청):
     - 장치 제거 보고: 종료 코드 87, `UNX_DEVICE_REMOVED` 마지막 줄, GpuLock `DEVICE_REMOVED` 기록(3.3).
     - GpuLock.ps1이 GUI 서브시스템 실행 파일을 기다린다(3.3).
+- v1.27 (2026-09-25):
+  - **I 요청 `20260925_I_device_removed_policy.md` 반영**: 장치 제거 정책 `setDeviceRemovedPolicy(Exit | Throw)`, `DeviceRemovedError`, `deviceWasRemoved()`(3.3). 호스트 DLL은 Throw다(`UnityPluginLoad`에서 설정, 호스트 장치 위의 첫 장치도 Throw). 신호·대기·waitIdle은 제거 뒤 던지지 않고 돌아온다. [실측] 단위 테스트: Exit 자식 프로세스는 종료 코드 87, 마지막 줄 `UNX_DEVICE_REMOVED test.child hr 0x887A0006 ...`. Throw는 `DeviceRemovedError`(where, hr)를 던지고, 이어진 `waitIdle`은 던지지 않는다(30/30).

@@ -2,6 +2,7 @@
 
 #include <nvapi.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -98,18 +99,33 @@ uint64_t Queue::signal()
 {
     std::lock_guard lock(m_mutex);
     ++m_lastSignaled;
-    check(m_queue->Signal(m_fence.Get(), m_lastSignaled), "Signal");
+    const HRESULT hr = m_queue->Signal(m_fence.Get(), m_lastSignaled);
+    if (FAILED(hr))
+    {
+        if (!isDeviceRemoved(hr)) check(hr, "Signal");
+        noteDeviceRemoved("Queue::signal", hr);  // (Throw: returns; waits then return at once)
+    }
     return m_lastSignaled;
 }
 
 void Queue::waitCpu(uint64_t value)
 {
     const uint64_t done = m_fence->GetCompletedValue();
-    if (done == UINT64_MAX) deviceRemoved("Queue::waitCpu", DXGI_ERROR_DEVICE_REMOVED);  // a removed device's fence
-    if (done >= value) return;
-    check(m_fence->SetEventOnCompletion(value, m_event), "SetEventOnCompletion");
+    if (done == UINT64_MAX)  // a removed device's fence
+    {
+        noteDeviceRemoved("Queue::waitCpu", DXGI_ERROR_DEVICE_REMOVED);
+        return;
+    }
+    if (done >= value || deviceWasRemoved()) return;
+    const HRESULT hr = m_fence->SetEventOnCompletion(value, m_event);
+    if (FAILED(hr))
+    {
+        if (!isDeviceRemoved(hr)) check(hr, "SetEventOnCompletion");
+        noteDeviceRemoved("Queue::waitCpu", hr);
+        return;
+    }
     WaitForSingleObject(m_event, INFINITE);
-    if (m_fence->GetCompletedValue() == UINT64_MAX) deviceRemoved("Queue::waitCpu", DXGI_ERROR_DEVICE_REMOVED);
+    if (m_fence->GetCompletedValue() == UINT64_MAX) noteDeviceRemoved("Queue::waitCpu", DXGI_ERROR_DEVICE_REMOVED);
 }
 
 void Queue::waitGpu(const Queue& other, uint64_t value)
@@ -132,17 +148,51 @@ void Queue::execute(ID3D12CommandList* list)
 namespace
 {
 ID3D12Device* g_reasonDevice = nullptr;  // the first device created: GetDeviceRemovedReason for deviceRemoved()
+DeviceRemovedPolicy g_removedPolicy = DeviceRemovedPolicy::Exit;
+bool g_policySet = false;
+std::atomic<bool> g_removed{ false };
+
+std::string removedLine(const char* what, HRESULT hr, HRESULT reason)
+{
+    char b[256];
+    std::snprintf(b, sizeof b, "UNX_DEVICE_REMOVED %s hr 0x%08X reason 0x%08X", what, (unsigned)hr, (unsigned)reason);
+    return b;
+}
+
+[[noreturn]] void exitRemoved(const std::string& line)
+{
+    std::fflush(stdout);
+    std::fprintf(stderr, "%s\n", line.c_str());
+    std::fprintf(stdout, "%s\n", line.c_str());
+    std::fflush(stderr);
+    std::fflush(stdout);
+    std::_Exit(kDeviceRemovedExitCode);
+}
 } // namespace
+
+void setDeviceRemovedPolicy(DeviceRemovedPolicy policy)
+{
+    g_removedPolicy = policy;
+    g_policySet = true;
+}
+DeviceRemovedPolicy deviceRemovedPolicy() { return g_removedPolicy; }
+bool deviceWasRemoved() { return g_removed.load(); }
 
 void deviceRemoved(const char* what, HRESULT hr)
 {
     const HRESULT reason = g_reasonDevice ? g_reasonDevice->GetDeviceRemovedReason() : S_OK;
-    std::fflush(stdout);
-    std::fprintf(stderr, "%s: device removed (hr 0x%08X, reason 0x%08X)\n", what, (unsigned)hr, (unsigned)reason);
-    std::fprintf(stdout, "UNX_DEVICE_REMOVED %s hr 0x%08X reason 0x%08X\n", what, (unsigned)hr, (unsigned)reason);
-    std::fflush(stderr);
-    std::fflush(stdout);
-    std::_Exit(kDeviceRemovedExitCode);
+    const std::string line = removedLine(what, hr, reason);
+    if (g_removedPolicy == DeviceRemovedPolicy::Exit) exitRemoved(line);
+    if (!g_removed.exchange(true)) logf("%s\n", line.c_str());
+    throw DeviceRemovedError(line, what, hr, reason);
+}
+
+void noteDeviceRemoved(const char* what, HRESULT hr)
+{
+    const HRESULT reason = g_reasonDevice ? g_reasonDevice->GetDeviceRemovedReason() : S_OK;
+    const std::string line = removedLine(what, hr, reason);
+    if (g_removedPolicy == DeviceRemovedPolicy::Exit) exitRemoved(line);
+    if (!g_removed.exchange(true)) logf("%s\n", line.c_str());
 }
 
 Device::Device(const DeviceOptions& options) : m_options(options)
@@ -191,7 +241,11 @@ Device::Device(const DeviceOptions& options) : m_options(options)
         break;
     }
     if (!m_device) fail("no hardware adapter supports D3D12 feature level 12_2");
-    if (!g_reasonDevice) g_reasonDevice = m_device.Get();
+    if (!g_reasonDevice)
+    {
+        g_reasonDevice = m_device.Get();
+        if (!g_policySet && m_options.externalDevice) g_removedPolicy = DeviceRemovedPolicy::Throw;  // a host's process
+    }
 
     if (HMODULE core = GetModuleHandleW(L"D3D12Core.dll"))
     {

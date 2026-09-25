@@ -1365,9 +1365,65 @@ UNX_TEST(frame_renderer_records_with_track_stubs)
     testDevice().waitIdle();
 }
 
+UNX_TEST(device_removed_exit_policy)
+{
+    // Exit policy (tests, gates, tools): a child process of this binary reports a removal and must end with exit code
+    // kDeviceRemovedExitCode and "UNX_DEVICE_REMOVED ..." as its last line of output.
+    wchar_t self[MAX_PATH];
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring cmd = std::wstring(L"\"") + self + L"\" --device-removed-exit-child";
+    SECURITY_ATTRIBUTES sa{ sizeof sa, nullptr, TRUE };
+    HANDLE readEnd = nullptr, writeEnd = nullptr;
+    CHECK(CreatePipe(&readEnd, &writeEnd, &sa, 0));
+    SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW si{ sizeof si };
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = writeEnd;
+    si.hStdError = writeEnd;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION pi{};
+    CHECK(CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi));
+    CloseHandle(writeEnd);
+    std::string output;
+    char buffer[4096];
+    DWORD got = 0;
+    while (ReadFile(readEnd, buffer, sizeof buffer, &got, nullptr) && got > 0) output.append(buffer, got);
+    WaitForSingleObject(pi.hProcess, 60000);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(readEnd);
+    while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) output.pop_back();
+    const std::string last = output.substr(output.find_last_of('\n') == std::string::npos ? 0 : output.find_last_of('\n') + 1);
+    logf("    child exit %lu, last line '%s'\n", code, last.c_str());
+    CHECK(code == (DWORD)kDeviceRemovedExitCode && last.rfind("UNX_DEVICE_REMOVED test.child hr 0x887A0006", 0) == 0);
+}
+
+// Last test (it leaves this process's device marked removed): the Throw policy of a host process.
+UNX_TEST(zz_device_removed_throw_policy)
+{
+    testDevice();  // a device exists (the reason query has one)
+    setDeviceRemovedPolicy(DeviceRemovedPolicy::Throw);
+    bool thrown = false;
+    try
+    {
+        check(DXGI_ERROR_DEVICE_HUNG, "test.throw");
+    }
+    catch (const DeviceRemovedError& e)
+    {
+        thrown = e.where == "test.throw" && e.hr == DXGI_ERROR_DEVICE_HUNG && std::string(e.what()).rfind("UNX_DEVICE_REMOVED test.throw", 0) == 0;
+    }
+    CHECK(thrown && deviceWasRemoved());
+    // Paths that also run in destructors return instead of throwing once the device is removed.
+    testDevice().waitIdle();
+    setDeviceRemovedPolicy(DeviceRemovedPolicy::Exit);
+}
+
 int main(int argc, char** argv)
 {
     const char* filter = argc > 1 ? argv[1] : nullptr;
+    if (filter && std::string(filter) == "--device-removed-exit-child") deviceRemoved("test.child", DXGI_ERROR_DEVICE_HUNG);
     int failed = 0, run = 0;
     for (const TestCase& t : registry())
     {
