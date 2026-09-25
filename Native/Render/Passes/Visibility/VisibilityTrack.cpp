@@ -262,6 +262,11 @@ float3 eyeOf(const float4x4& m)
     return { x, y, z };
 }
 
+// Planar reflection views' tile cull mask (PlanarMask.hlsl). A performance filter: mirror pixels stay exact through the
+// depth fill. 64 px tiles keep the cull kernels' coarse-cell walk short (8 px tiles at 4K walked up to ~2000 cells per
+// instance, node and cluster test: 3 ms per view [R, measured]).
+constexpr uint32_t kPlanarTilePx = 64;
+
 CullView viewOf(const ViewDesc& view, const Settings& cfg, bool occlusion)
 {
     CullView v{};
@@ -280,8 +285,8 @@ CullView viewOf(const ViewDesc& view, const Settings& cfg, bool occlusion)
     if (view.planarMask.valid())  // PlanarMask.hlsl: the view's tile cull mask
     {
         v.cullMaskOffset = 0;
-        v.tilePx = 8;
-        v.tilesX = (view.width + 7) / 8;
+        v.tilePx = kPlanarTilePx;
+        v.tilesX = (view.width + kPlanarTilePx - 1) / kPlanarTilePx;
     }
     return v;
 }
@@ -528,8 +533,7 @@ void tileCoarsePass(FramePassContext& fc, Run& r, const std::vector<CullView>& v
                      });
 }
 
-// Planar reflection view mask (ViewDesc::planarMask) -> the run's tile cull mask (8 x 8 tiles; PlanarMask.hlsl).
-constexpr uint32_t kPlanarTilePx = 8;
+// Planar reflection view mask (ViewDesc::planarMask) -> the run's tile cull mask (kPlanarTilePx tiles; PlanarMask.hlsl).
 
 void planarTileMask(FramePassContext& fc, Run& r, const ViewDesc& view)
 {
@@ -548,7 +552,7 @@ void planarTileMask(FramePassContext& fc, Run& r, const ViewDesc& view)
                              b.use(bits, Use::UavCompute);
                          },
                          [=](PassContext& c) {
-                             const uint32_t k[8] = { mode == 1 ? c.srv(mask) : kNone, c.uav(bits), width, height, tilesX, words, 0, 0 };
+                             const uint32_t k[8] = { mode == 1 ? c.srv(mask) : kNone, c.uav(bits), width, height, tilesX, words, kPlanarTilePx, 0 };
                              c.cmd->SetPipelineState(pso);
                              c.computeConstants(k, 8);
                              if (mode == 0) c.cmd->Dispatch((words + 63) / 64, 1, 1);
