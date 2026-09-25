@@ -126,6 +126,22 @@ Agility 1.618.5 기능은 1.618.1에서도 모두 있다(SDK 618).
 - 배포: `Native/Host/Deploy.ps1`이 DLL, 커널, 품질 파일을 `Native~`에 놓는다. DLL이 로드돼 있으면 거부한다.
   빌드 identity는 링크가 성공한 뒤 DLL 옆에 쓴 사본에서 읽는다. Player 빌드 후처리는 커널과 품질 파일을 `<Game>_Data/UnravelNext`로 복사한다.
 
+## 2.2 실행 절차 (재현)
+
+```text
+1. build:   powershell -File Tools/CI/Build.ps1 -Track I -Target unx_host            (UnravelNext.dll, 커널)
+2. deploy:  powershell -File Native/Host/Deploy.ps1                                   (Unity가 DLL을 싣고 있으면 거부)
+3. Unity:   감사 세션에 알리고, tasklist로 Unity.exe가 없는지 확인한 뒤
+            Unity.exe -batchmode -quit -projectPath C:\Users\USER\Unravel -buildTarget Win64
+                      -executeMethod UnravelNextBridge.DataWorld.Editor.UnravelNextDataWorldScene.BuildPlayer
+            (원본 NativeDataWorld.unity는 두고 Assets/UnravelNextBridge/DataWorld/NativeDataWorld_UnravelNext.unity 사본 + Player)
+4. 측정:   GpuLock.ps1 -Track I -- powershell -NoProfile -Command "Start-Process -Wait <Player>.exe
+            '-screen-fullscreen 0 -screen-width 1280 -screen-height 720 -unxMeasureOut <json> -unxMeasureFrames 600'"
+            (GUI exe라 Start-Process -Wait로 잠금을 실행 내내 잡는다)
+5. 편집기: Unity.exe -projectPath ... -executeMethod UnravelNextBridge.DataWorld.Editor.UnravelNextEditorRun.Play -unxMeasureOut <json>
+            (창 있는 편집기, Play 모드에서 같은 측정을 하고 스스로 종료)
+```
+
 ## 3. 요청
 
 - `20260925_I_host_module.md`: A(등록)는 반영됐다(코어 3b0c049, v1.6). B(GpuScene 프레임 갱신)도 반영됐다(6af7de8, v1.8).
