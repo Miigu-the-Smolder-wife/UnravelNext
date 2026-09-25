@@ -115,7 +115,8 @@ int main(int argc, char** argv)
     try
     {
         std::string scenePath, resolutions = "both", out, qualityPath = std::string(UNX_SOURCE_DIR) + "/Config/quality", dumpPath, comparePath;
-        uint32_t frames = 600, cameraIndex = 0, averageFrames = 1;
+        uint32_t frames = 600, cameraIndex = 0, averageFrames = 1, noiseFrames = 0;
+        std::string noiseMapPath;
         bool integrated = false, planarForced = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
@@ -134,6 +135,11 @@ int main(int argc, char** argv)
             else if (a == "--dump") dumpPath = next();
             else if (a == "--average") averageFrames = std::max(1u, (uint32_t)std::stoul(next()));  // --dump/--compare over N frames
             else if (a == "--compare") comparePath = next();
+            // --noise N (with --integrated): the displayed image (the tone-mapped output) of N consecutive untimed frames after
+            // the harness; per pixel the temporal standard deviation of R, G, B (display units, 1 = full scale), i.e. what a
+            // single displayed frame deviates by. --noise-map writes it as a PGM (255 = 8/255 or more).
+            else if (a == "--noise") noiseFrames = (uint32_t)std::stoul(next());
+            else if (a == "--noise-map") noiseMapPath = next();
             else fail("unknown argument %s", a.c_str());
         }
         if (scenePath.empty()) fail("--scene <file.unxscene> is required (Tools/SceneGen: unx_scenegen --scene <name> --out Cache/Scenes)");
@@ -191,6 +197,22 @@ int main(int argc, char** argv)
                 check(device.d3d()->CreateCommittedResource3(&rb, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&dumpBuffer)),
                       "reflection dump");
             }
+            const uint32_t noisePitch = (res.width * 4 + 255) & ~255u;
+            ComPtr<ID3D12Resource> noiseBuffer;
+            if (noiseFrames > 0)
+            {
+                if (!integrated) fail("--noise needs --integrated (the displayed image)");
+                D3D12_HEAP_PROPERTIES rb{ D3D12_HEAP_TYPE_READBACK };
+                D3D12_RESOURCE_DESC1 d{};
+                d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                d.Width = (uint64_t)noisePitch * res.height;
+                d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+                d.SampleDesc.Count = 1;
+                d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                check(device.d3d()->CreateCommittedResource3(&rb, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&noiseBuffer)),
+                      "noise read-back");
+            }
+            bool noiseFrame = false;
             bool dumpFrame = false;  // the extra untimed frame after the harness
             uint64_t lastFrame = 0;
             auto copyReflection = [&](RenderGraph& graph, TextureRef reflection) {
@@ -227,6 +249,26 @@ int main(int argc, char** argv)
                         if (refl::ReflectionSystem* rs = refl::ReflectionSystem::find(renderer->trackState())) rs->setPlanarForced(true);
                     const ViewResources mainView = renderer->record(graph, frame, output);
                     copyReflection(graph, mainView.reflection);
+                    if (noiseFrame)
+                    {
+                        const BufferRef dst = graph.importBuffer(noiseBuffer.Get(), { "gate noise read-back", (uint64_t)noisePitch * res.height, 0 });
+                        graph.addPass("gate.noise", QueueType::Graphics,
+                                      [&](PassBuilder& b) {
+                                          b.use(output, Use::CopySrc);
+                                          b.use(dst, Use::CopyDst);
+                                          b.keep();
+                                      },
+                                      [output, dst, noisePitch, res](PassContext& c) {
+                                          D3D12_TEXTURE_COPY_LOCATION to{}, from{};
+                                          to.pResource = c.resource(dst);
+                                          to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                                          to.PlacedFootprint.Footprint = { DXGI_FORMAT_R10G10B10A2_UNORM, res.width, res.height, 1, noisePitch };
+                                          from.pResource = c.resource(output);
+                                          from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                                          const D3D12_BOX box{ 0, 0, 0, res.width, res.height, 1 };
+                                          c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
+                                      });
+                    }
                     // The output has no reader in a gate: keep its producers (shading) alive like a present would.
                     graph.addPass("gate.present", QueueType::Graphics, [&](PassBuilder& b) {
                         b.use(output, Use::SrvCompute);
@@ -338,6 +380,80 @@ int main(int argc, char** argv)
             };
             HarnessResult r = harness.run(res, opt, frameBody);
             harness.printSummary(r);
+            if (noiseFrames > 0)
+            {
+                device.waitIdle();
+                const size_t pixels = (size_t)res.width * res.height;
+                std::vector<double> sum(pixels * 3, 0.0), sum2(pixels * 3, 0.0);
+                D3D12_RANGE all{ 0, (SIZE_T)noisePitch * res.height }, none{ 0, 0 };
+                for (uint32_t k = 0; k < noiseFrames; ++k)
+                {
+                    noiseFrame = true;
+                    RenderGraph noiseGraph(device);
+                    frameBody(noiseGraph, res, lastFrame + 1);
+                    noiseGraph.execute(nullptr);
+                    device.waitIdle();
+                    noiseFrame = false;
+                    void* mapped = nullptr;
+                    check(noiseBuffer->Map(0, &all, &mapped), "map noise read-back");
+                    for (uint32_t y = 0; y < res.height; ++y)
+                    {
+                        const uint32_t* row = (const uint32_t*)((const uint8_t*)mapped + (size_t)y * noisePitch);
+                        for (uint32_t x = 0; x < res.width; ++x)
+                        {
+                            const size_t i = (size_t)y * res.width + x;
+                            for (int c = 0; c < 3; ++c)
+                            {
+                                const double v = ((row[x] >> (10 * c)) & 1023u) / 1023.0;
+                                sum[3 * i + c] += v;
+                                sum2[3 * i + c] += v * v;
+                            }
+                        }
+                    }
+                    noiseBuffer->Unmap(0, &none);
+                }
+                std::vector<float> sigma(pixels);
+                double imageMean = 0, sigmaMean = 0;
+                size_t over1 = 0, over4 = 0;
+                for (size_t i = 0; i < pixels; ++i)
+                {
+                    double var = 0;
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        const double m = sum[3 * i + c] / noiseFrames;
+                        var += std::max(0.0, sum2[3 * i + c] / noiseFrames - m * m) / 3;
+                        imageMean += m / 3;
+                    }
+                    sigma[i] = (float)std::sqrt(var);
+                    sigmaMean += sigma[i];
+                    over1 += sigma[i] > 1.0 / 255;
+                    over4 += sigma[i] > 4.0 / 255;
+                }
+                std::vector<float> sorted = sigma;
+                std::sort(sorted.begin(), sorted.end());
+                auto q = [&](double f) { return 255.0 * sorted[std::min(pixels - 1, (size_t)(f * pixels))]; };
+                // 8 x 8 tile means of sigma: where the noise is (a tile P99 well above the pixel P99 = clustered noise).
+                const uint32_t tx = (res.width + 7) / 8, ty = (res.height + 7) / 8;
+                std::vector<double> tiles(tx * ty, 0.0);
+                for (uint32_t y = 0; y < res.height; ++y)
+                    for (uint32_t x = 0; x < res.width; ++x) tiles[(y / 8) * tx + x / 8] += sigma[(size_t)y * res.width + x] / 64.0;
+                std::sort(tiles.begin(), tiles.end());
+                logf("R %s: displayed-image noise over %u frames (temporal sigma per pixel, 1/255 units): mean %.3f, P50 %.3f, P95 %.3f, P99 %.3f, max %.2f; "
+                     "pixels over 1/255 %.3f %%, over 4/255 %.4f %%; 8x8 tile mean P95 %.3f, P99 %.3f, max %.2f; image mean %.4f\n",
+                     res.name.c_str(), noiseFrames, 255.0 * sigmaMean / pixels, q(0.5), q(0.95), q(0.99), 255.0 * sorted.back(), 100.0 * over1 / pixels,
+                     100.0 * over4 / pixels, 255.0 * tiles[tiles.size() * 95 / 100], 255.0 * tiles[tiles.size() * 99 / 100], 255.0 * tiles.back(), imageMean / pixels);
+                if (!noiseMapPath.empty())
+                {
+                    std::ofstream f(noiseMapPath, std::ios::binary);
+                    const std::string header = "P5\n" + std::to_string(res.width) + " " + std::to_string(res.height) + "\n255\n";
+                    f.write(header.data(), (std::streamsize)header.size());
+                    std::vector<uint8_t> px(pixels);
+                    for (size_t i = 0; i < pixels; ++i) px[i] = (uint8_t)std::min(255.0, sigma[i] * 255.0 * 255.0 / 8.0);
+                    f.write((const char*)px.data(), (std::streamsize)px.size());
+                    if (!f) fail("cannot write %s", noiseMapPath.c_str());
+                    logf("R %s: noise map written to %s\n", res.name.c_str(), noiseMapPath.c_str());
+                }
+            }
             if (keepReflection)
             {
                 // --average N: the per-pixel mean over N untimed frames (valid where valid in at least half of them), so an
