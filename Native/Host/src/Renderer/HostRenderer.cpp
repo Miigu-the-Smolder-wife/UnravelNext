@@ -96,6 +96,8 @@ SceneCommitInfo HostRenderer::commit()
     m_applied.sun = m_scene.sun;
     m_applied.atmosphere = m_scene.atmosphere;
     m_applied.wind = { m_scene.windDirection, m_scene.windSpeed };
+    m_gpuTransforms = m_applied.transforms;
+    m_gpuPoses = m_applied.poses;
     info.contentHash = scene::contentHash(m_scene);
     info.buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     logf("UnravelNext host: scene committed, %zu meshes, %zu instances, %llu triangles, %llu clusters, %.1f ms, hash %s\n", m_scene.meshes.size(),
@@ -330,8 +332,34 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
             m_scene.windSpeed = p.wind->speed;
         }
     }
-    if (!p.transforms.empty()) m_gpuScene->updateTransforms(frame, p.transforms);
-    for (const SkeletonPose& s : p.skeletons) m_gpuScene->updateSkeleton(frame, s.skeleton, *s.jointToModel);
+    // Only changes reach the GPU scene. A host sends every visible instance and pose each frame (a body at rest included),
+    // and the GPU scene counts every update as motion (transformRevision / deformRevision += 1): the caster would be
+    // listed for the local lights' shadow pages and the static TLAS rebuilt every frame. A bit-identical update changes
+    // nothing else: without it the settling rule (GpuScene.h) gives prev = current, as the update itself would, and a
+    // teleport to where the instance already is has no motion either way.
+    m_changedTransforms.clear();
+    for (const InstanceTransformUpdate& u : p.transforms)
+    {
+        if (std::memcmp(&m_gpuTransforms[u.instance], &u.objectToWorld, sizeof(float3x4)) == 0)
+        {
+            ++m_droppedTransforms;
+            continue;
+        }
+        m_gpuTransforms[u.instance] = u.objectToWorld;
+        m_changedTransforms.push_back(u);
+    }
+    if (!m_changedTransforms.empty()) m_gpuScene->updateTransforms(frame, m_changedTransforms);
+    for (const SkeletonPose& s : p.skeletons)
+    {
+        std::shared_ptr<const std::vector<float3x4>>& last = m_gpuPoses[s.skeleton];
+        if (last == s.jointToModel || std::memcmp(last->data(), s.jointToModel->data(), last->size() * sizeof(float3x4)) == 0)
+        {
+            ++m_droppedPoses;
+            continue;
+        }
+        last = s.jointToModel;
+        m_gpuScene->updateSkeleton(frame, s.skeleton, *s.jointToModel);
+    }
     for (const auto& [instance, visible] : p.visibility) m_gpuScene->setInstanceVisible(instance, visible);
     return slot;
 }

@@ -93,6 +93,26 @@ int main()
             const auto& g = h.gpuInstanceForTest(0);
             expect("teleport: previous transform equals the new one (no motion)", sameRows(g.objectToWorld, g.prevObjectToWorld) && g.objectToWorld[0].w == 7.0f);
         }
+        // A body at rest: the host sends its transform every frame, bit-identical. The GPU scene must not see motion
+        // (no revision: no shadow re-listing, no static TLAS rebuild); a real change still does.
+        {
+            const uint32_t revision = h.gpuInstanceForTest(0).transformRevision;
+            const uint64_t dropped = h.droppedUpdatesForTest().first;
+            InstanceTransformUpdate rest = jump;
+            rest.flags = 0;
+            for (int i = 0; i < 3; ++i)
+            {
+                h.setTransforms({ &rest, 1 });
+                render(queue());
+            }
+            const auto& g = h.gpuInstanceForTest(0);
+            expect("identical transform x3: no revision, no motion, all dropped",
+                   g.transformRevision == revision && sameRows(g.objectToWorld, g.prevObjectToWorld) && h.droppedUpdatesForTest().first == dropped + 3);
+            rest.objectToWorld.m[1][3] = 0.25f;
+            h.setTransforms({ &rest, 1 });
+            render(queue());
+            expect("changed transform after rest: one revision, motion", g.transformRevision == revision + 1 && !sameRows(g.objectToWorld, g.prevObjectToWorld));
+        }
         logf(failures ? "HOST FRAME FLAGS TEST FAILED (%u)\n" : "HOST FRAME FLAGS TEST PASSED\n", failures);
         return failures ? 1 : 0;
     }

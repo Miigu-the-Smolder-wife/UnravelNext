@@ -148,6 +148,8 @@ public:
     // Test hooks: the flags of the last recorded frame, and the GPU scene's CPU mirror of an instance.
     std::pair<uint32_t, uint32_t> lastFrameFlags() const { return { m_lastDiscontinuity, m_lastGpuSimulation }; }
     const render::gpu::Instance& gpuInstanceForTest(uint32_t instance) const { return m_gpuScene->instances().at(instance); }
+    // Test hook: transform and pose updates that matched the GPU scene bit for bit and were not applied (beginFrame).
+    std::pair<uint64_t, uint64_t> droppedUpdatesForTest() const { return { m_droppedTransforms, m_droppedPoses }; }
     // Test hook: removes this renderer's D3D12 device (ID3D12Device5::RemoveDevice: this process only, no GPU reset), as a
     // TDR would, so the device-removal path can be exercised.
     void removeDeviceForTest();
@@ -215,6 +217,11 @@ private:
     std::unique_ptr<Standalone> m_standalone;
     bool m_recreateOutput = false;
     uint32_t m_lastDiscontinuity = 0, m_lastGpuSimulation = 0;  // submission thread (test hook)
+    // What the GPU scene last received per instance and per skeleton (submission thread): bit-identical updates stop here.
+    std::vector<float3x4> m_gpuTransforms;
+    std::vector<std::shared_ptr<const std::vector<float3x4>>> m_gpuPoses;
+    std::vector<render::InstanceTransformUpdate> m_changedTransforms;
+    uint64_t m_droppedTransforms = 0, m_droppedPoses = 0;
     uint32_t m_outputReuses = 0, m_outputRecreations = 0;
 };
 } // namespace unx::host
