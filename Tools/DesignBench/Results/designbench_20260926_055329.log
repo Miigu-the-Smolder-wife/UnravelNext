@@ -1,0 +1,11 @@
+Adapter: NVIDIA GeForce RTX 4080, driver 32.0.15.9186, D3D12Core: C:\Users\USER\UnravelNext\Tools\DesignBench\build\D3D12\D3D12Core.dll
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64, shaders: C:/Users/USER/UnravelNext/Tools/DesignBench/Bench/shaders, resolution 3840x2160, reps 9
+  [env] timestamp frequency                                                    1000000000.0000 Hz       
+
+== Upload: copy queue RAM -> VRAM, alone and overlapped with render kernels (after 1.5 s warm-up)
+  [upload] copy queue alone: 16 x 256 MB in one submission                            194.6176 ms       22.068751 GB/s
+  [upload] copy queue alone: 16 submissions of 256 MB in 64 MB pieces, fence each     347.6847 ms       12.353052 GB/s (includes per-submission sync)
+  [upload] kernel alone: DRAM streaming read 512 MB                                     0.8172 ms       657.002506 GB/s
+  [upload] overlapped: DRAM streaming read 512 MB while the copy queue uploads 17.2 GB       0.8745 ms       kernel x1.070175 (72 dispatches); copy 23.780584 GB/s during overlap
+  [upload] kernel alone: L2-resident ALU (WarmCS 2048 iterations)                       4.5332 ms       
+  [upload] overlapped: L2-resident ALU (WarmCS 2048 iterations) while the copy queue uploads 17.2 GB       4.8220 ms       kernel x1.063700 (70 dispatches); copy 23.894544 GB/s during overlap

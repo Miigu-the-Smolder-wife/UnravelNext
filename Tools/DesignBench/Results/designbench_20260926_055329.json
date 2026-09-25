@@ -1,0 +1,12 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "resolution": "3840x2160", "reps": 9, "timestamp": "20260926_055329",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "upload", "name": "copy queue alone: 16 x 256 MB in one submission", "value": 194.618, "unit": "ms", "note": "22.068751 GB/s"},
+  {"section": "upload", "name": "copy queue alone: 16 submissions of 256 MB in 64 MB pieces, fence each", "value": 347.685, "unit": "ms", "note": "12.353052 GB/s (includes per-submission sync)"},
+  {"section": "upload", "name": "kernel alone: DRAM streaming read 512 MB", "value": 0.817152, "unit": "ms", "note": "657.002506 GB/s"},
+  {"section": "upload", "name": "overlapped: DRAM streaming read 512 MB while the copy queue uploads 17.2 GB", "value": 0.874496, "unit": "ms", "note": "kernel x1.070175 (72 dispatches); copy 23.780584 GB/s during overlap"},
+  {"section": "upload", "name": "kernel alone: L2-resident ALU (WarmCS 2048 iterations)", "value": 4.53325, "unit": "ms", "note": ""},
+  {"section": "upload", "name": "overlapped: L2-resident ALU (WarmCS 2048 iterations) while the copy queue uploads 17.2 GB", "value": 4.82202, "unit": "ms", "note": "kernel x1.063700 (70 dispatches); copy 23.894544 GB/s during overlap"}
+ ]
+}
