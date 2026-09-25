@@ -77,7 +77,8 @@ struct VsmConstants
     uint windTexels;         // wind moves a caster "beyond a texel" at windTexels texels (normally 1)
     uint windChanged;        // wind speed or direction changed: pages holding wind casters are stale
     float2 cameraUV;         // camera in light space: the level windows derive from it (vsmOrigin)
-    float2 pad1;
+    uint searchTaps;         // shadow.vsm.search_taps / filter_taps: the estimator's tap counts for every caller
+    uint filterTaps;
     VsmLevel level[VSM_LEVELS];  // CPU copy of the windows (raster views); kernels use vsmTexel / vsmOrigin
 };
 

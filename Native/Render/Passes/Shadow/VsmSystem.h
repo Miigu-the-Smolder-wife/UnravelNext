@@ -26,7 +26,8 @@ struct VsmConstantsCpu
     uint32_t poolPagesX, poolPagesY, frame, sceneInvalidate;
     float time, lodBias, receiverBiasTexels, maxReceiverSlope;
     uint32_t cacheFrames, instanceCount, windTexels, windChanged;
-    float cameraUV[2], pad1[2];
+    float cameraUV[2];
+    uint32_t searchTaps, filterTaps;
     VsmLevelCpu level[20];
 };
 constexpr uint32_t kLevels = 20, kPage = 128, kTable = 128, kVirtual = 16384;

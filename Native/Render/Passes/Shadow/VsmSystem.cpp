@@ -292,6 +292,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     c.cacheFrames = (uint32_t)q.integer("shadow.vsm.cache_frames");
     c.instanceCount = (uint32_t)fc.scene.instances().size();
     c.windTexels = (uint32_t)q.integer("shadow.vsm.wind_texels");
+    c.searchTaps = (uint32_t)q.integer("shadow.vsm.search_taps");
+    c.filterTaps = (uint32_t)q.integer("shadow.vsm.filter_taps");
     const float3 cam = main.view.position;
     const float cu = dot(cam, c.lightX), cv = dot(cam, c.lightY);
     c.cameraUV[0] = cu;
