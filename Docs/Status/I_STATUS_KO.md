@@ -321,6 +321,18 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
 > **정정(2026-09-25 밤):** 이 문서의 Player는 모두 **IL2CPP**다(프로젝트 Standalone 스크립팅 백엔드 = 1, `GameAssembly.dll`·`il2cpp_data`).
 > 앞서 "Mono"로 적은 것은 틀렸다. 관리 코드 비용(루트 0.27 µs/개, 관절 약 0.1 µs, `AcquirePose` 1.3 µs/체)은 IL2CPP, 곧 출시 백엔드의 값이다.
 
+### 2.2.4 60 Hz 데이터 월드 (2026-09-25 23:29) [실측]
+
+World 세션의 수정(TimeManager 1/60, 호스트가 `Time.fixedDeltaTime`을 맞추고 매 tick 검사) 뒤, ABI 6 Player(렌더러 f8d09d3, 브리지 a756b0f5,
+보간 alpha는 Unity 실제 fixed step으로 나눔, 옛 VFX CPU). 원본 `player_tick60_f8d09d3_20260925_232942.json`(+ identity).
+- **tick 주파수 확인:** committed World tick이 초당 60.04(4K 창)·60.02(1440p)이고, World 시간(Δtick × 1/60)이 실시간의 1.0007·1.0003배다.
+  고정 스텝 `fixedDeltaTime` = 0.01667. 50 Hz·83 % 속도 결함은 풀렸다.
+- GPU 프레임 중앙값: **4K 4.11 ms**(P95 6.22), **1440p 2.22 ms**(P95 2.68). 트랙 합(4K) M 1.61, S 1.19, R 0.88, V 0.16.
+- 4K P99 44 ms·최대 78 ms는 렌더러가 아니다. 같은 프레임에서 3 µs짜리 패스(`v.cull.instances.p2`, `r.gi.rehash`)까지 모든 패스가 최대 약 19 ms로
+  늘었으니, 다른 프로세스가 GPU를 나눠 쓴 것이다(정확성 실행은 이제 잠금 밖). 꼬리 판정에는 쓰지 않는다.
+- 고정 스텝(데이터 월드 tick) 중앙값 6.21 ms(4K 창)·8.41 ms(1440p 창)로 50 Hz 때 12.6 ms보다 짧다(World W2 충돌 표면 수정 포함).
+  Unity 프레임 주기 중앙값 4K 5.07·1440p 3.02 ms. 메인 스레드 중앙값 1.06·0.90 ms. 호스트 동기화 0.044·0.036 ms.
+
 ## 2.3 실행 절차 (재현)
 
 ```text
