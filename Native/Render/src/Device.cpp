@@ -3,6 +3,7 @@
 #include <nvapi.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #pragma comment(lib, "version.lib")
@@ -103,9 +104,12 @@ uint64_t Queue::signal()
 
 void Queue::waitCpu(uint64_t value)
 {
-    if (m_fence->GetCompletedValue() >= value) return;
+    const uint64_t done = m_fence->GetCompletedValue();
+    if (done == UINT64_MAX) deviceRemoved("Queue::waitCpu", DXGI_ERROR_DEVICE_REMOVED);  // a removed device's fence
+    if (done >= value) return;
     check(m_fence->SetEventOnCompletion(value, m_event), "SetEventOnCompletion");
     WaitForSingleObject(m_event, INFINITE);
+    if (m_fence->GetCompletedValue() == UINT64_MAX) deviceRemoved("Queue::waitCpu", DXGI_ERROR_DEVICE_REMOVED);
 }
 
 void Queue::waitGpu(const Queue& other, uint64_t value)
@@ -123,6 +127,22 @@ void Queue::execute(ID3D12CommandList* list)
     }
     if (hook) hook(list);
     else m_queue->ExecuteCommandLists(1, &list);
+}
+
+namespace
+{
+ID3D12Device* g_reasonDevice = nullptr;  // the first device created: GetDeviceRemovedReason for deviceRemoved()
+} // namespace
+
+void deviceRemoved(const char* what, HRESULT hr)
+{
+    const HRESULT reason = g_reasonDevice ? g_reasonDevice->GetDeviceRemovedReason() : S_OK;
+    std::fflush(stdout);
+    std::fprintf(stderr, "%s: device removed (hr 0x%08X, reason 0x%08X)\n", what, (unsigned)hr, (unsigned)reason);
+    std::fprintf(stdout, "UNX_DEVICE_REMOVED %s hr 0x%08X reason 0x%08X\n", what, (unsigned)hr, (unsigned)reason);
+    std::fflush(stderr);
+    std::fflush(stdout);
+    std::_Exit(kDeviceRemovedExitCode);
 }
 
 Device::Device(const DeviceOptions& options) : m_options(options)
@@ -171,6 +191,7 @@ Device::Device(const DeviceOptions& options) : m_options(options)
         break;
     }
     if (!m_device) fail("no hardware adapter supports D3D12 feature level 12_2");
+    if (!g_reasonDevice) g_reasonDevice = m_device.Get();
 
     if (HMODULE core = GetModuleHandleW(L"D3D12Core.dll"))
     {

@@ -105,6 +105,9 @@ struct FrameResources
     BufferRef vsmPageTable;        //                                                       [S]
     BufferRef vsmBlocks;           // per-page block hierarchy (persistent; v1.18)          [S]
     BufferRef vsmSearchBound;      // blocker-search bound grid of this frame (v1.18)       [S]
+    BufferRef vsmLayers;           // VSM transmittance layer (raw; v1.26, S request): per physical [S]
+                                   // page its layer + 1 (0 = none, T = 1), then the layer pages (4
+                                   // knots per texel) and block profiles; ShadowSrvs.layers
     uint32_t vsmConstants = UINT32_MAX;  // CBV descriptor of this frame's VSM constants    [S]
                                          // (upload ring, not a graph resource; v1.18). With
                                          // the four buffers: ShadowSrvs (ShadowVisibility.hlsli),
@@ -173,6 +176,14 @@ struct DepthRasterRequest
     // set tiles (fragments = sum of triangle area inside set tiles). Pixel positions, depth and DepthRasterPixel are
     // the same as without it. For sparse masks over large viewports (VSM dirty pages in a 16384^2 level).
     bool tileLocal = false;
+    // Coverage mode (v1.26; S's VSM transmittance layer): conservative raster of band B clusters only, the pixel kernel
+    // (compiled with DEPTH_RASTER_COVERAGE 1) gets the exact area, mask and centroid depth per texel
+    // (depthRasterCoverage, DepthRaster.hlsli). Needs a pixel kernel and no depth target. Bands are judged in each
+    // view's texels (RasterView::lodPixelsPerMetre): A >= 1.5 texels, B 0.25..1.5, C < 0.25 (the requester's brick march).
+    bool coverage = false;
+    // Which bands a request draws (1 = A, 2 = B, 4 = C; default all, every band as depth). A transmittance-layer VSM
+    // draws A as depth, B in coverage mode and marches C.
+    uint32_t bands = 7;
 };
 
 struct FramePassContext;

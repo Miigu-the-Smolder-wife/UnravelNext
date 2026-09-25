@@ -18,3 +18,8 @@
 ## 비용 [예상]
 - 조회: 테이블 엔트리는 이미 읽는다. 층 번호 로드 1회(L1/L2)를 더하고, 층이 있을 때만 매듭 로드 2×2 × 16 B를 더한다.
 - 도시(얇은 캐스터 없음): 층 번호 로드만 더해진다. 픽셀당 1회, 4K 8.3 M × 4 B는 무시할 만하다.
+
+## 결과 (코어, 2026-09-25, INTERFACES v1.26)
+
+- `FrameResources::vsmLayers`(BufferRef raw, 생산 S `shadowPages`), `ShadowSrvs.pad1` → `layers`(5.6 표기), `shadowSunTransmittanceAt(ShadowSrvs, worldPos, footprint, reach)`(5.6 S 행)를 넣었다. `shadowSunVisibilityAt`과 가시성 슬롯 0 = V_opaque × T.
+- 층을 채우는 V coverage 모드의 시그니처는 5.3(v1.26)에 있다: `DEPTH_RASTER_COVERAGE 1`, `DepthRasterCoverage depthRasterCoverage(DepthRasterPixel)`, `DepthRasterRequest::coverage/bands`. V 구현은 새 coverage 층 다음이다.

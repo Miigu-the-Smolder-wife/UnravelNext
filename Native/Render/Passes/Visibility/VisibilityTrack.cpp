@@ -978,6 +978,8 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     if (s.mainFrameConstantsFrame != fc.frame.frameIndex)
         fail("rasterizeDepth '%s': called before V's main view of this frame (it reads the frame's scene indices and time)", request.name.c_str());
     if (request.views.size() >= 256) fail("rasterizeDepth '%s': %zu views (limit 255, 8-bit view field)", request.name.c_str(), request.views.size());
+    if (request.coverage || request.bands != 7)
+        fail("rasterizeDepth '%s': coverage mode and band selection (v1.26) are not implemented yet (V)", request.name.c_str());
     if (request.tileLocal && (!request.cullMask.valid() || request.cullTilePx == 0))
         fail("rasterizeDepth '%s': tileLocal needs a tile mask (cullMask, cullTilePx)", request.name.c_str());
 

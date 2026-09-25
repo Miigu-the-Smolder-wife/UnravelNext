@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.25, 2026-09-25)
+# UnravelNext 인터페이스 (v1.26, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -100,7 +100,9 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
 ### 3.3 GPU 잠금 (성능 측정만)
 - 성능 측정(하네스 `Harness::run`, 마이크로벤치, 게이트, 타임스탬프 비교 실험)은 `Tools/CI/GpuLock.ps1 -Track <트랙> -- <명령>`으로만 실행한다. 잠금은 세션 전체에서 한 번에 하나다(이름 있는 mutex `Local\UnravelNext.GpuMeasurement`). 현재 보유자 `.gpulock/current.json`, 기록 `.gpulock/history.log`.
 - 코드가 강제한다: `Harness::run`과 `requireGpuLock()`을 부르는 도구는 `UNX_GPU_LOCK`이 없으면 측정을 거부한다. 트랙의 게이트도 측정 전에 `unx::render::requireGpuLock("<게이트 이름>")`을 부른다.
-- 정확성 실행(단위 테스트, 디버그 레이어·GPU 검증, 기준 영상 비교, 디버그 캡처)은 잠금 없이 동시에 해도 된다.
+- 정확성 실행(단위 테스트, 디버그 레이어·GPU 검증, 기준 영상 비교, 디버그 캡처)은 잠금 없이 동시에 해도 된다. (조율 세션이 임시 규칙을 알리는 동안은 모든 하드웨어 GPU 실행이 잠금 안이다.)
+- (v1.26) GUI 서브시스템 실행 파일(Unity.exe)은 `&`가 곧바로 반환하므로, GpuLock.ps1은 PE 헤더로 판별해 `Start-Process -Wait`로 그 프로세스와 자손을 기다린 뒤 종료 코드를 돌려준다.
+- (v1.26) **장치 제거(TDR)**: `check()`가 DEVICE_REMOVED/HUNG/RESET/DRIVER_INTERNAL_ERROR를 만나거나 `Queue::waitCpu`의 펜스가 UINT64_MAX(제거된 장치)를 읽으면 `deviceRemoved`가 표준 출력 마지막 줄에 `UNX_DEVICE_REMOVED <what> hr 0x.. reason 0x..`(GetDeviceRemovedReason)을 쓰고 종료 코드 **87**(`kDeviceRemovedExitCode`, `D3D12.h`)로 곧바로 끝낸다. 정적 소멸자는 돌지 않는다. GpuLock.ps1은 87을 `history.log`에 `release <트랙> exit 87 DEVICE_REMOVED`로 남긴다. `unx_render`를 링크하는 모든 실행 파일(테스트·게이트·도구)에 해당한다.
 - 사용자의 다른 GPU 앱은 닫지 않는다. 측정은 4K·1440p만(하네스가 강제), 1.5초 워밍업, 중앙값·P95·P99.
 
 ### 3.4 결과·상태
@@ -215,6 +217,14 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 구현 전의 진입점은 `tracks::pending("<트랙>.<함수>")`만 부르고 패스를 내지 않는다(한 번 로그).
 
 ### 5.3 S → V: 깊이 래스터 서비스
+- **coverage 모드(v1.26, 설계 개정 1 요청 4절; 시그니처 확정, V 구현은 새 coverage 층 뒤)**: `DepthRasterRequest::coverage = true`는 보존 래스터이고, 요청의 뷰에서 대역 B인 클러스터만 그린다. 대역은 뷰의 텍셀로 판정한다(`RasterView::lodPixelsPerMetre`): A ≥ 1.5텍셀, B 0.25~1.5, C < 0.25(요청자의 브릭 march). 픽셀 커널은 `DEPTH_RASTER_COVERAGE 1`을 정의하고 `DepthRaster.hlsli`를 include한다. `DepthRasterCoverage depthRasterCoverage(DepthRasterPixel p)` = `{ float area; uint mask; float depth; }`다.
+  - area: 가까운 평면으로 자른 삼각형∩텍셀의 정확 면적(텍셀 단위). 알파 테스트 재질은 cutout coverage를 곱한다(통과 부표본 비율).
+  - mask: 32 부표본(`coverageSample`).
+  - depth: 덮인 영역 무게중심의 device depth.
+  - area 0이면 그 텍셀에 기여가 없다(쓰지 않고 반환).
+  - 알파 판정이 안에 있어 `depthRasterCovered`는 필요 없다. 깊이 대상은 쓰지 않는다(픽셀 커널 필수).
+  - `DepthRasterRequest::bands`(1 = A, 2 = B, 4 = C, 기본 7 = 지금처럼 모든 대역을 깊이로)는 투과율 층 VSM이 A를 깊이로, B를 coverage 모드로, C는 march로 나눌 때 쓴다.
+  - V 구현 전에는 `coverage = true`나 `bands != 7`이 fail한다(조용히 빈 결과를 내지 않는다). V 컴파일 검사 커널은 `Passes/Visibility/Tests/TestCoveragePixel.hlsl`이다.
 
 `fc.services.rasterizeDepth(fc, DepthRasterRequest)`: V가 자기 클러스터 경로(컬링·LOD·변형·메시 셰이더)로 `instanceMask`에 맞는 인스턴스를 `views`마다 래스터한다. 출력은 요청자가 정한다:
 - `depthTarget`에 하드웨어 depth(D32, GREATER_EQUAL, reversed-Z) — 뷰포트는 `RasterView::viewport*`.
@@ -254,7 +264,7 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 |---|---|---|
 | `Passes/Atmosphere/Atmosphere.hlsli` | S | `struct AtmosphereSrvs { uint transmittance, multiScatter, skyView, aerial; };` `float3 atmosphereSkyRadiance(AtmosphereSrvs, float3 worldDir)`(태양 원반 제외) · `float3 atmosphereSunRadiance(AtmosphereSrvs, float3 worldPos)`(원반 복사휘도, 투과 포함) · `void atmosphereAerial(AtmosphereSrvs, float2 uv, float linearDepth, out float3 inscatter, out float3 transmittance)`(v1.15: 완성된 공기 합성 — 대기 단일·다중 산란, 캐스터가 그림자를 드리운 공기, 국소광의 공기 산란; 공기 볼륨 3D fetch 2회) · `void atmosphereAirView(AtmosphereSrvs, float2 uv, float linearDepth, out float3 inscatter, out float3 transmittance, out float3 sunIlluminance)`(v1.15: 위에 더해 표면점의 비차폐 태양 조도 lux, fetch 1회 더; 메인 뷰 픽셀용) · `atmosphereSunIlluminance`(임의 위치용, R) |
 | `Passes/Atmosphere/Froxel.hlsli` | S | `struct FroxelSrvs { uint lights, lightIndices, scattering, pad; };` `uint2 froxelLightRange(FroxelSrvs, uint2 pixel, float linearDepth)`(offset, count) · `uint froxelLight(FroxelSrvs, uint i)`(v1.19: 마스크된 광원 인덱스; 항목의 bit 15는 S의 그림자 슬롯 유무 — `froxelLightShadowed`, 광원 한도 32767) (v1.15: `froxelScattering` 삭제 — 공기 산란은 `atmosphereAerial`/`atmosphereAirView`에 포함) |
-| `Passes/Shadow/ShadowVisibility.hlsli` | S | `float shadowSlot(uint packed, uint slot)`(7.3 해독) · `uint shadowSlotOfLight(FroxelSrvs, uint2 pixel, float linearDepth, uint lightIndex)`(1~3 또는 0xFFFFFFFF) · `struct ShadowSrvs { uint pageTable, pool, blocks, searchBound; uint constants, lights, pad0, pad1; };`(v1.18) · `float shadowSunVisibilityAt(ShadowSrvs, float3 worldPos, float3 normal, float footprint, out bool resident)`(v1.18: 광선 hit의 태양 가시성, 직접 뷰 가시성 패스와 같은 추정량, footprint에 맞는 단 또는 세 단 더 촘촘한 단의 상주 페이지; 없으면 resident = false로 R이 그림자 광선; 채우는 값은 `FrameResources::vsmPageTable/vsmPool/vsmBlocks/vsmSearchBound/vsmConstants`) `float shadowVisibilityDirect(ShadowSrvs, uint lightIndex, float3 worldPos, float3 normal)`(뷰 픽셀이 없는 호출자용 느린 경로; v1.19: 가시성 슬롯과 같은 추정량을 가장 촘촘한 상주 mip으로 계산하고, `ShadowSrvs.lights` = `FrameResources::vsmLocalLights`, `.pad0` = `vsmSlotOfLight`) · v1.21 픽셀 기준(오버플로 fallback이 슬롯·오버플로 값과 비트 단위로 같다): `struct ShadowPixelReceiver { float3 world; float footprint; float3 normal; uint valid; };` `ShadowPixelReceiver shadowPixelReceiver(uint2 pixel, uint depthSrv, uint gbufferSrv)`(바인딩된 프레임 상수의 뷰, 깊이에서 위치·기하 법선, 픽셀 footprint m; 하늘·뷰 밖 valid = 0) `float shadowLocalVisibilityAtReceiver(ShadowSrvs, uint lightIndex, ShadowPixelReceiver)`(슬롯 1~3·오버플로와 같은 계산, 같은 양자화 `round(saturate(v)·255)/255`; 그림자 슬롯 없는 광원 1; `searchBound`는 읽지 않음) `float shadowLocalVisibilityAtPixel(ShadowSrvs, uint lightIndex, uint2 pixel, uint depthSrv, uint gbufferSrv)`(둘을 합친 것) |
+| `Passes/Shadow/ShadowVisibility.hlsli` | S | `float shadowSlot(uint packed, uint slot)`(7.3 해독) · `uint shadowSlotOfLight(FroxelSrvs, uint2 pixel, float linearDepth, uint lightIndex)`(1~3 또는 0xFFFFFFFF) · `struct ShadowSrvs { uint pageTable, pool, blocks, searchBound; uint constants, lights, pad0, pad1; };`(v1.18) · `float shadowSunVisibilityAt(ShadowSrvs, float3 worldPos, float3 normal, float footprint, out bool resident)`(v1.18: 광선 hit의 태양 가시성, 직접 뷰 가시성 패스와 같은 추정량, footprint에 맞는 단 또는 세 단 더 촘촘한 단의 상주 페이지; 없으면 resident = false로 R이 그림자 광선; 채우는 값은 `FrameResources::vsmPageTable/vsmPool/vsmBlocks/vsmSearchBound/vsmConstants`) `float shadowSunTransmittanceAt(ShadowSrvs, float3 worldPos, float footprint, float reach)`(v1.26: VSM 투과율 층. 단 k = footprint의 단, 밉 = log2(reach / 텍셀)의 블록 프로파일 1탭(2×2, 높이 보간). 층 없는 페이지와 페이지 없는 곳은 1이다. `shadowSunVisibilityAt`과 가시성 슬롯 0은 V_opaque × T를 돌려준다. `ShadowSrvs.pad1` → `layers` = `FrameResources::vsmLayers`) · `float shadowVisibilityDirect(ShadowSrvs, uint lightIndex, float3 worldPos, float3 normal)`(뷰 픽셀이 없는 호출자용 느린 경로; v1.19: 가시성 슬롯과 같은 추정량을 가장 촘촘한 상주 mip으로 계산하고, `ShadowSrvs.lights` = `FrameResources::vsmLocalLights`, `.pad0` = `vsmSlotOfLight`) · v1.21 픽셀 기준(오버플로 fallback이 슬롯·오버플로 값과 비트 단위로 같다): `struct ShadowPixelReceiver { float3 world; float footprint; float3 normal; uint valid; };` `ShadowPixelReceiver shadowPixelReceiver(uint2 pixel, uint depthSrv, uint gbufferSrv)`(바인딩된 프레임 상수의 뷰, 깊이에서 위치·기하 법선, 픽셀 footprint m; 하늘·뷰 밖 valid = 0) `float shadowLocalVisibilityAtReceiver(ShadowSrvs, uint lightIndex, ShadowPixelReceiver)`(슬롯 1~3·오버플로와 같은 계산, 같은 양자화 `round(saturate(v)·255)/255`; 그림자 슬롯 없는 광원 1; `searchBound`는 읽지 않음) `float shadowLocalVisibilityAtPixel(ShadowSrvs, uint lightIndex, uint2 pixel, uint depthSrv, uint gbufferSrv)`(둘을 합친 것) |
 | `Passes/GI/GiCache.hlsli` | R | `struct GiSrvs { uint cache, hash, pad0, pad1; };` `float3 giCacheIrradiance(GiSrvs, float3 worldPos, float3 normal)` · `float3 giCacheRadiance(GiSrvs, float3 worldPos, float3 dir, float coneHalfAngle)` |
 | `Passes/GI/ScreenProbes.hlsli` | R | `struct ProbeSrvs { uint probes, occlusion, pad0, pad1; };` `float4 screenProbeIrradiance(ProbeSrvs, uint2 pixel, float3 normal, float linearDepth)`(rgb 조도, a 근거리 가림 0~1) · `float3 screenProbeRadiance(ProbeSrvs, uint2 pixel, float3 normal, float linearDepth, float3 dir, float coneHalfAngle)`(v1.2: 4프로브 보간, 반각 coneHalfAngle 원뿔로 prefilter한 입사 복사휘도, nit) |
 | `Passes/Material/MaterialTextures.hlsli` | M (v1.11) | 게시된 텍스처 형식(6.3) · `MATERIAL_TEXTURE_*` 비트 · `float4 materialBaseColorGrad(GpuMaterial, float2 uv, float2 duvdx, float2 duvdy)` · `float4 materialBaseColorLevel(GpuMaterial, float2 uv, float lod)`(선형 rgb, a = coverage, 텍스처 없으면 1; clamp 비트에 따라 `g_anisoClamp`/`g_anisoWrap`). V의 알파 테스트(`AlphaTest.hlsli`)가 이것으로 읽는다 |
@@ -473,3 +483,13 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
     - 하드웨어가 잘라 조각으로 래스터한 프리미티브는 보존 래스터가 절단선 픽셀을 두 번 셰이딩한다. 그 fragment들은 같은 값이라 하나만 남긴다.
     - [실측] `coverage_layer_is_exact`: 3프레임 약 13.8k fragment 전부가 정확 클리핑과 일치했다(면적 최대 오차 5.7e-5 px², 깊이 3.9e-6 상대, 마스크는 가장자리 2e-4 px 밖에서 일치). 누락 0, 남은 heads 0이었다. 뒷면 컬링과 대역 A 가림도 맞았다.
   - **평면 마스크 V 구현(v1.22 계약)**: 거울 픽셀이 없는 8×8 타일의 클러스터 컬링과 깊이 채움을 넣었다. 보조 뷰 통계는 `visibility::latestStats(state, "secondary")`(그 프레임의 마지막 보조 뷰)로 읽는다. [실측] `planar_mask_draws_only_mirror_pixels`: 거울 픽셀은 마스크 없는 뷰와 같다(95,982 픽셀 중 0 차이). 나머지는 VIS_NONE·깊이 1이다. 화면 1/3에만 거울이 있을 때 보이는 클러스터가 654에서 206으로, 삼각형이 38.9k에서 12.7k로 줄었다.
+- v1.26 (2026-09-25):
+  - **설계 개정 1(`COVERAGE_REDESIGN_KO.md`, 요청 `20260925_D_coverage_redesign.md`) 기록.** 인터페이스 시그니처가 확정된 것부터 넣고, 구현이 들어올 때 각 절을 갱신한다.
+    - 요청 4절(5.3 coverage 모드): 시그니처를 확정했다. `DepthRasterRequest::coverage/bands`, `DepthRasterCoverage depthRasterCoverage(DepthRasterPixel)`. V 구현은 새 coverage 층 다음이고, 그때까지는 fail한다.
+    - 요청 3절(5.6 S): `shadowSunTransmittanceAt`, `ShadowSrvs.layers`, `FrameResources::vsmLayers`(S 요청 `20260925_S_transmittance_layer_lookup.md`). 층이 채워지기 전에는 T = 1이다.
+    - 요청 1절(7.1 새 coverage 층: 24 B fragment, 8×8 타일 청크 목록 + 타일 헤더 zMin/zMax·opaqueCovered, bDepth, 집합체 레코드 32 B)은 V가 구현하면서 7.1과 `ViewResources`를 바꾼다. 그때 옛 16 B 정렬 목록(v1.25)과 "브릭 fragment 0x7F"를 폐기한다. 그 전까지 v1.25 층은 기본 꺼짐 그대로다.
+    - 요청 2절(7.3 fragment·집합체 가시성, S), 5절(8.1 Aggregate, M), 6절(6.5 클러스터 메타데이터, V), 8절(`FrameResources::rayHits/rayHitVisibility`, S `shadowHitVisibility`, R·S)은 해당 트랙이 구현할 때 이 문서에 넣는다(순서: 요청 10절).
+    - 요청 7절(코어 밴드 패스 그룹 `RenderGraph::addBandedGroup`, `output.band_count`)은 마이크로벤치 3(`--only-bands`) 결과 뒤에 확정한다. 요청 9절 마이크로벤치 4개는 설계 개정 세션이 자기 폴더에서 만든다(조율 결정).
+  - **코어 도구·장치**(조율 요청):
+    - 장치 제거 보고: 종료 코드 87, `UNX_DEVICE_REMOVED` 마지막 줄, GpuLock `DEVICE_REMOVED` 기록(3.3).
+    - GpuLock.ps1이 GUI 서브시스템 실행 파일을 기다린다(3.3).
