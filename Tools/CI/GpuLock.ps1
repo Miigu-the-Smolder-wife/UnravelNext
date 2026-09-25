@@ -1,12 +1,15 @@
 # GPU measurement lock (INTERFACES_KO.md 3.3). Performance measurements from all sessions run one at a time:
 #   powershell -File Tools/CI/GpuLock.ps1 -Track S -- build/S/bin/unx_gate_shadow_vsm.exe --resolution 4K
 # Holds the named mutex "Local\UnravelNext.GpuMeasurement" while the command runs and sets UNX_GPU_LOCK=<track> for it
-# (Harness::run and every gate refuse to measure without it). Correctness runs (tests, validation, reference
-# comparisons) never take the lock. The current holder is in .gpulock/current.json, the history in .gpulock/history.log.
+# (Harness::run and every gate refuse to measure without it). -Kind says what the holder does: timing (default: a
+# measurement; CPU-heavy background jobs pause for it) or correctness (tests and validation serialised on the GPU, e.g.
+# under the coordination session's temporary rule; background CPU jobs need not pause). The current holder is in
+# .gpulock/current.json (with "kind"), the history in .gpulock/history.log ("acquire <track> (<kind>) :: ...").
 # Arguments are parsed by hand (no param block) so everything after "--" reaches the command unchanged.
 $ErrorActionPreference = "Stop"
 $Track = $null
 $TimeoutMinutes = 120
+$Kind = "timing"
 $Command = @()
 for ($i = 0; $i -lt $args.Count; $i++) {
   $a = [string]$args[$i]
@@ -17,8 +20,11 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     $Track = [string]$args[++$i]
   } elseif ($a -eq "-TimeoutMinutes") {
     $TimeoutMinutes = [int]$args[++$i]
+  } elseif ($a -eq "-Kind") {
+    $Kind = [string]$args[++$i]
+    if ($Kind -ne "timing" -and $Kind -ne "correctness") { throw "GpuLock.ps1: -Kind timing|correctness" }
   } else {
-    throw "GpuLock.ps1: unexpected argument '$a'. Usage: GpuLock.ps1 -Track <name> [-TimeoutMinutes N] -- <command> [args...]"
+    throw "GpuLock.ps1: unexpected argument '$a'. Usage: GpuLock.ps1 -Track <name> [-Kind timing|correctness] [-TimeoutMinutes N] -- <command> [args...]"
   }
 }
 if (-not $Track) { throw "GpuLock.ps1: -Track <name> is required" }
@@ -73,9 +79,9 @@ try {
       if (((Get-Date) - $waitStart).TotalMinutes -ge $TimeoutMinutes) { throw "GPU lock not acquired within $TimeoutMinutes minutes" }
     }
   }
-  $info = [ordered]@{ track = $Track; pid = $PID; started = (Get-Date).ToString("s"); command = ($Command -join " ") }
+  $info = [ordered]@{ track = $Track; kind = $Kind; pid = $PID; started = (Get-Date).ToString("s"); command = ($Command -join " ") }
   ($info | ConvertTo-Json -Compress) | Set-Content -Encoding utf8 $current
-  Add-Content -Encoding utf8 $history ("{0} acquire {1} :: {2}" -f $info.started, $Track, $info.command)
+  Add-Content -Encoding utf8 $history ("{0} acquire {1} ({2}) :: {3}" -f $info.started, $Track, $Kind, $info.command)
   $env:UNX_GPU_LOCK = $Track
   $exe = $Command[0]
   $rest = @()
@@ -92,7 +98,7 @@ try {
   }
   # Exit 87 = the device was removed (TDR) inside the run (D3D12.h kDeviceRemovedExitCode): say so in the log.
   $tag = if ($code -eq 87) { " DEVICE_REMOVED" } else { "" }
-  Add-Content -Encoding utf8 $history ("{0} release {1} exit {2}{3}" -f (Get-Date).ToString("s"), $Track, $code, $tag)
+  Add-Content -Encoding utf8 $history ("{0} release {1} ({2}) exit {3}{4}" -f (Get-Date).ToString("s"), $Track, $Kind, $code, $tag)
 } finally {
   Remove-Item Env:\UNX_GPU_LOCK -ErrorAction SilentlyContinue
   if ($acquired) {

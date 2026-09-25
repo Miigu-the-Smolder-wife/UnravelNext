@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.27, 2026-09-25)
+# UnravelNext 인터페이스 (v1.28, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -101,6 +101,7 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
 - 성능 측정(하네스 `Harness::run`, 마이크로벤치, 게이트, 타임스탬프 비교 실험)은 `Tools/CI/GpuLock.ps1 -Track <트랙> -- <명령>`으로만 실행한다. 잠금은 세션 전체에서 한 번에 하나다(이름 있는 mutex `Local\UnravelNext.GpuMeasurement`). 현재 보유자 `.gpulock/current.json`, 기록 `.gpulock/history.log`.
 - 코드가 강제한다: `Harness::run`과 `requireGpuLock()`을 부르는 도구는 `UNX_GPU_LOCK`이 없으면 측정을 거부한다. 트랙의 게이트도 측정 전에 `unx::render::requireGpuLock("<게이트 이름>")`을 부른다.
 - 정확성 실행(단위 테스트, 디버그 레이어·GPU 검증, 기준 영상 비교, 디버그 캡처)은 잠금 없이 동시에 해도 된다. (조율 세션이 임시 규칙을 알리는 동안은 모든 하드웨어 GPU 실행이 잠금 안이다.)
+- (v1.28) `-Kind timing|correctness`(기본 timing): 잠금을 잡은 실행의 종류다. `current.json`의 `kind`와 `history.log`의 `acquire <트랙> (<종류>) :: ...`, `release <트랙> (<종류>) exit N`에 남는다. CPU를 많이 쓰는 백그라운드 작업(C 기준 렌더 대기열, WARP 실행)은 `kind`가 timing일 때만 멈춘다(정확성 실행을 잠금 안에서 직렬화하는 동안 25분씩 멈추지 않게).
 - (v1.26) GUI 서브시스템 실행 파일(Unity.exe)은 `&`가 곧바로 반환하므로, GpuLock.ps1은 PE 헤더로 판별해 `Start-Process -Wait`로 그 프로세스와 자손을 기다린 뒤 종료 코드를 돌려준다.
 - (v1.26, v1.27) **장치 제거(TDR)**: `check()`가 DEVICE_REMOVED/HUNG/RESET/DRIVER_INTERNAL_ERROR를 만나거나 제거된 장치의 펜스(UINT64_MAX)를 읽으면 정책(`setDeviceRemovedPolicy`, `D3D12.h`)을 따른다.
   - `Exit`(기본: 테스트·게이트·도구): 표준 출력 마지막 줄 `UNX_DEVICE_REMOVED <what> hr 0x.. reason 0x..`(GetDeviceRemovedReason) + 종료 코드 **87**(`kDeviceRemovedExitCode`). 곧바로 끝내고 정적 소멸자는 돌지 않는다. GpuLock.ps1은 `history.log`에 `release <트랙> exit 87 DEVICE_REMOVED`로 남긴다.
@@ -497,3 +498,6 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
     - GpuLock.ps1이 GUI 서브시스템 실행 파일을 기다린다(3.3).
 - v1.27 (2026-09-25):
   - **I 요청 `20260925_I_device_removed_policy.md` 반영**: 장치 제거 정책 `setDeviceRemovedPolicy(Exit | Throw)`, `DeviceRemovedError`, `deviceWasRemoved()`(3.3). 호스트 DLL은 Throw다(`UnityPluginLoad`에서 설정, 호스트 장치 위의 첫 장치도 Throw). 신호·대기·waitIdle은 제거 뒤 던지지 않고 돌아온다. [실측] 단위 테스트: Exit 자식 프로세스는 종료 코드 87, 마지막 줄 `UNX_DEVICE_REMOVED test.child hr 0x887A0006 ...`. Throw는 `DeviceRemovedError`(where, hr)를 던지고, 이어진 `waitIdle`은 던지지 않는다(30/30).
+- v1.28 (2026-09-25):
+  - **GpuLock `-Kind timing|correctness`**(조율 요청, 3.3): 종류를 `current.json`과 `history.log`에 기록한다. 백그라운드 CPU 작업의 멈춤 규칙은 timing만 대상이다(C의 PauseGate는 `kind`를 읽도록 C가 맞춘다). history 줄의 형식이 `acquire <트랙> (<종류>) :: ...`로 바뀌었다.
+  - **M 요청 `20260925_M_planar_mask_apron.md`(R 동의)**: `ViewDesc::planarMask` 값이 1 = 거울 픽셀(R이 읽음), 2 = 에이프런(거울 픽셀의 3×3 이웃, 그리고 셰이딩하지만 R은 읽지 않음), 0 = 건너뜀이 됐다. `planarTileMask`는 팽창된 마스크 기준이다. V·S·M은 "0 아님 = 그림" 그대로라 바뀌는 것이 없다(V의 64 px 컬링 마스크와 깊이 채움은 이미 0 아님으로 판정한다). R의 resolve만 "== 1"로 읽는다. 마스크 생성은 R 몫이다.

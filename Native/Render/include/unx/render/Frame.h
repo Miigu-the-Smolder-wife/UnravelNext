@@ -33,12 +33,14 @@ struct ViewDesc
                                         // V honours it with SV_ClipDistance0 and in cluster culling.
     bool mirrored = false;              // reflection views: front faces wind clockwise (V swaps cull mode)
     float ev100 = 14.0f;
-    // Planar reflection views (v1.22, R request): which pixels are mirror pixels. R8_UINT, width x height, nonzero =
-    // mirror pixel (drawn); invalid = every pixel. V culls clusters over 8 x 8 tiles without mirror pixels and fills
-    // the other pixels' depth with the nearest value before the raster (they stay VIS_NONE); M and S skip them.
+    // Planar reflection views (v1.22, R request; v1.28 apron, M request): which pixels are drawn. R8_UINT, width x
+    // height: 1 = mirror pixel (R reads it), 2 = apron (the 3 x 3 neighbourhood of mirror pixels: drawn and shaded so
+    // edge detection and composite at the mirror's border see the real reflected surfaces; R does not read it), 0 =
+    // skipped; invalid = every pixel. V, M and S draw every nonzero pixel: V culls clusters over tiles without drawn
+    // pixels and fills the others' depth with the nearest value before the raster (they stay VIS_NONE).
     TextureRef planarMask;              // [R]
-    TextureRef planarTileMask;          // optional R8_UINT ceil(W/8) x ceil(H/8), nonzero = the tile has mirror [R]
-                                        // pixels (M and S tile classification in one load)
+    TextureRef planarTileMask;          // optional R8_UINT ceil(W/8) x ceil(H/8), nonzero = the tile has drawn [R]
+                                        // pixels of the dilated mask (M and S tile classification in one load)
 
     // Main view from a scene camera (reversed-Z infinite projection, Math.h).
     static ViewDesc fromCamera(const scene::Camera& camera, uint32_t width, uint32_t height, const float4x4& prevViewProj);
