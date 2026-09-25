@@ -1,6 +1,7 @@
 #include "unx/rt/RayScene.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <chrono>
 #include <cstring>
 #include <map>
@@ -905,8 +906,20 @@ void RayScene::selectExactSet(FramePassContext& fc)
     if (m_exactSlotFrame[oldSlot] != UINT64_MAX && fc.frame.frameIndex >= m_exactSlotFrame[oldSlot] + fc.framesInFlight)
     {
         const uint32_t* counts = m_exactReadbackMapped + (size_t)oldSlot * n;
+        // Only instances whose finest proxy cut exceeds the error bound where the rays meet them: a reflection ray's
+        // footprint at its hit is coneWidth + t x spread >= pixelAngle x (eye-to-reflector + t) >= pixelAngle x the
+        // direct distance (triangle inequality; flat and convex reflectors, ReflectionShade.hlsli), and the cut is chosen
+        // so its error is at most raytracing.proxy_error_px of those footprints at the direct distance. So a proxy that
+        // meets its bound is within the bound along every such reflection path, and its original mesh would change
+        // nothing above it. Members stay until the ratio falls below 0.8 (the proxies' hysteresis).
         for (uint32_t k = 0; k < n; ++k)
-            if (counts[k] >= m_exactMinHits) wanted.push_back(k);
+        {
+            if (counts[k] < m_exactMinHits) continue;
+            const bool member = std::any_of(m_exact.begin(), m_exact.end(), [&](const ExactSlot& e) { return e.owner == k; });
+            if (m_deformed[k].exactNeed > (member ? 0.8f : 1.0f)) wanted.push_back(k);
+            else ++m_stats.exactWithinBoundTotal;
+        }
+        m_stats.exactWantedTotal += wanted.size();
         std::sort(wanted.begin(), wanted.end(), [&](uint32_t a, uint32_t b) { return counts[a] != counts[b] ? counts[a] > counts[b] : a < b; });
         if (wanted.size() > m_exact.size()) wanted.resize(m_exact.size());
     }
@@ -1001,7 +1014,6 @@ void RayScene::selectProxyLevels(FramePassContext& fc)
     {
         Deformed& d = m_deformed[k];
         const std::vector<ProxyMesh>& levels = m_proxyLevels[d.mesh];
-        if (levels.size() > 1 && patches.size() + 2 <= patchCapacity)
         {
             const gpu::Instance& in = instances[d.sceneInstance];
             const gpu::Mesh& gm = meshes[d.mesh];
@@ -1019,6 +1031,13 @@ void RayScene::selectProxyLevels(FramePassContext& fc)
             // A skinned pose can leave the bind-pose sphere: the distance is from its doubled radius (conservative).
             const float distance = std::max(std::sqrt(toEye.x * toEye.x + toEye.y * toEye.y + toEye.z * toEye.z) - 2 * gm.boundsSphere.w * scale, 0.0f);
             const float bound = m_proxyErrorPx * pixelAngle * distance;
+            // The reflection exact set's criterion (selectExactSet): the finest cut's error over this bound.
+            d.exactNeed = levels[0].error * scale > 0 ? (bound > 0 ? levels[0].error * scale / bound : FLT_MAX) : 0.0f;
+            if (levels.size() < 2 || patches.size() + 2 > patchCapacity)
+            {
+                triangles += levels[d.level].triangles;
+                continue;
+            }
             uint32_t level = d.level;
             while (level > 0 && levels[level].error * scale > bound) --level;  // finer at once
             while (level + 1 < levels.size() && levels[level + 1].error * scale <= 0.8f * bound) ++level;  // coarser with margin

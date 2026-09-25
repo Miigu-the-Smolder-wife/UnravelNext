@@ -446,9 +446,10 @@ int main(int argc, char** argv)
                 const rt::RaySceneStats& as = rayScene->stats();
                 const double recorded = (double)as.framesRecorded;
                 logf("R %s: over %llu frames: exact set %.2f of %u slots occupied, %.3f slot builds / frame (%llu), %.0f exact vertices deformed / frame; "
-                     "proxy cut switches %.3f / frame (%llu)\n", res.name.c_str(), (unsigned long long)as.framesRecorded, as.exactOccupiedTotal / recorded, as.exactSlots,
-                     as.exactBuildsTotal / recorded, (unsigned long long)as.exactBuildsTotal, as.exactVerticesTotal / recorded, as.proxySwitchesTotal / recorded,
-                     (unsigned long long)as.proxySwitchesTotal);
+                     "proxy cut switches %.3f / frame (%llu); per frame %.2f instances wanted, %.2f hit often but within their proxy's error bound\n",
+                     res.name.c_str(), (unsigned long long)as.framesRecorded, as.exactOccupiedTotal / recorded, as.exactSlots, as.exactBuildsTotal / recorded,
+                     (unsigned long long)as.exactBuildsTotal, as.exactVerticesTotal / recorded, as.proxySwitchesTotal / recorded, (unsigned long long)as.proxySwitchesTotal,
+                     as.exactWantedTotal / recorded, as.exactWithinBoundTotal / recorded);
             }
             if (reflSystem)
             {

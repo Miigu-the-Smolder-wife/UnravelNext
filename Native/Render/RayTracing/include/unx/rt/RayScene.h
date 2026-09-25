@@ -62,6 +62,9 @@ struct RaySceneStats
     // Since load (measurement summaries): frames recorded, and over them exact slots (re)built, exact slots occupied, exact
     // vertices deformed and proxy cut switches.
     uint64_t framesRecorded = 0, exactBuildsTotal = 0, exactOccupiedTotal = 0, exactVerticesTotal = 0, proxySwitchesTotal = 0;
+    // Since load, over the exact set selections: instances with enough hits whose finest proxy is within its error bound
+    // (left out), and instances wanted (before the slot limit).
+    uint64_t exactWithinBoundTotal = 0, exactWantedTotal = 0;
 };
 
 class RayScene
@@ -206,6 +209,7 @@ private:
         uint64_t blasOffset = 0, scratchOffset = 0;
         uint32_t geometryBase = 0;
         uint32_t level = 0, record = 0;  // current proxy cut (index into proxyLevels), RtInstance record
+        float exactNeed = 0;  // the finest cut's error over its bound at the last view (> 1: the exact set may help)
         std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;
     };
     std::vector<Deformed> m_deformed;
