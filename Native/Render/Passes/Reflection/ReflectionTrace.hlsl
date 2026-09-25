@@ -79,6 +79,9 @@ void ReflectionTraceGen()
     rays.InterlockedAdd(0, j.rays, base);
     if (base + j.rays > capacity)
     {
+        // Slots of this job below the capacity stay allocated: mark them empty so the shade pass skips them (their
+        // memory holds another frame's records).
+        [loop] for (uint i = 0; i < j.rays && base + i < capacity; ++i) rays.Store4(reflRaysHitOffset(base + i), uint4(REFL_RAY_NONE, 0, 0, 0));
         reflTraceInline(j, job, scene, cache, h);
         return;
     }
