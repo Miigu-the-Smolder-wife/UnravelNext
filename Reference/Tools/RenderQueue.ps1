@@ -23,6 +23,13 @@ if (Get-Process unx_reference -ErrorAction SilentlyContinue | Where-Object { $_.
 New-Item -ItemType Directory -Force $bin | Out-Null
 foreach ($f in @("unx_reference.exe", "embree4.dll", "tbb12.dll", "tbbmalloc.dll")) { Copy-Item (Join-Path $root "build\$Track\bin\$f") $bin -Force }
 $exe = Join-Path $bin "unx_reference.exe"
+# Queue log lines: a reader holding the file (e.g. a tail) must not stop the queue, so writes retry briefly and then
+# give up on that line only.
+function Write-QueueLog([string]$line) {
+  for ($i = 0; $i -lt 20; $i++) {
+    try { Add-Content -Path $log -Value $line -ErrorAction Stop; return } catch { Start-Sleep -Milliseconds 250 }
+  }
+}
 $jobs = @(
   @{ scene = "ridge_sunset"; camera = "ridge";   res = "2560x1440"; wind = $false },
   @{ scene = "ridge_sunset"; camera = "ridge";   res = "3840x2160"; wind = $false },
@@ -44,9 +51,9 @@ foreach ($j in $jobs) {
     $args2 += "--no-wind"
     $args2 += @("--write-scene", (Join-Path $root "Cache\Scenes\$($j.scene)_nowind.unxscene"))
   }
-  "[{0}] start {1}" -f (Get-Date -Format s), $key | Add-Content $log
+  Write-QueueLog ("[{0}] start {1}" -f (Get-Date -Format s), $key)
   $p = Start-Process -FilePath $exe -ArgumentList $args2 -NoNewWindow -PassThru -RedirectStandardError "$log.$($j.scene).$($j.camera).$($j.res).txt"
   $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
   $p.WaitForExit()
-  "[{0}] end {1} exit {2}" -f (Get-Date -Format s), $key, $p.ExitCode | Add-Content $log
+  Write-QueueLog ("[{0}] end {1} exit {2}" -f (Get-Date -Format s), $key, $p.ExitCode)
 }
