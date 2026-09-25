@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: DEBUG=0,1
+// unx-variants: DEBUG=0,1 PLANAR_MASK=0,1
 // Material resolve (ARCHITECTURE 2.2), one 8 x 8 tile per group:
 //   vis id -> surface (MaterialSurface.hlsli: exact pixel-centre barycentrics and their screen derivatives)
 //   -> footprint-filtered textures (SampleGrad, anisotropic 16x) -> shading normal and band-limited roughness
@@ -12,7 +12,12 @@
 // P[0] = { visId SRV, visibleClusters SRV, gbuffer UAV, material word UAV }
 // P[1] = { emissive UAV or UNX_NONE, lobe tiles UAV, tile lists UAV (raw), tile args UAV (raw) }
 // P[2] = { texture table SRV, tilesX, tilesY, tileCount }
-// P[3].y experiment mask (material.experiment_disable: cost attribution only, 0 otherwise), P[3].z tile flags UAV (raw)
+// P[3].y experiment mask (material.experiment_disable: cost attribution only, 0 otherwise)
+// PLANAR_MASK=1 (planar reflection views with R's mask; views without one compile none of it):
+// P[3].z R's planar tile mask (R8_UINT per 8 x 8 tile, nonzero = mirror pixels; UNX_NONE = absent), P[3].w R's planar
+//        pixel mask (R8_UINT, read when there is no tile mask; UNX_NONE = absent). A planar reflection view's tile without
+//        mirror pixels (V left them VIS_NONE) goes to no class list, so no shading kernel runs there (v1.22); its pixels
+//        still get the sky word the neighbours' edge detection reads.
 // P[3].x (DEBUG=1) RWStructuredBuffer<float4>, 3 per pixel: (uv, duv/dx), (duv/dy, variance, roughness'),
 //        (camera-relative hit, front)
 #include "Bindless.hlsli"
@@ -25,6 +30,9 @@
 
 groupshared uint gs_classMask;
 groupshared uint gs_minLobe;
+#if PLANAR_MASK
+groupshared uint gs_mirror;
+#endif
 
 [numthreads(8, 8, 1)]
 void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_GroupIndex)
@@ -33,6 +41,15 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
     {
         gs_classMask = 0;
         gs_minLobe = asuint(1.0);
+#if PLANAR_MASK
+        gs_mirror = 1;
+        if (P[3].z != UNX_NONE)
+        {
+            Texture2D<uint> tileMask = ResourceDescriptorHeap[P[3].z];
+            gs_mirror = tileMask[gid] != 0 ? 1 : 0;
+        }
+        else if (P[3].w != UNX_NONE) gs_mirror = 0;  // any mirror pixel of the tile sets it below
+#endif
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -126,6 +143,13 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
         }
     }
 
+#if PLANAR_MASK
+    if (P[3].z == UNX_NONE && P[3].w != UNX_NONE && all(pixel < uint2(g_viewWidth, g_viewHeight)))
+    {
+        Texture2D<uint> pixelMask = ResourceDescriptorHeap[P[3].w];
+        if (WaveActiveAnyTrue(pixelMask[pixel] != 0) && WaveIsFirstLane()) InterlockedOr(gs_mirror, 1u);
+    }
+#endif
     const uint waveMask = WaveActiveBitOr(classBit);
     const float waveMin = WaveActiveMin(lobe);
     if (WaveIsFirstLane())
@@ -136,13 +160,15 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
     GroupMemoryBarrierWithGroupSync();
     if (gi == 0)
     {
-        RWByteAddressBuffer tileFlags = ResourceDescriptorHeap[P[3].z];
-        tileFlags.Store(4 * (gid.y * P[2].y + gid.x), 0);
         RWTexture2D<unorm float> lobeTiles = ResourceDescriptorHeap[P[1].y];
         lobeTiles[gid] = floor(saturate(asfloat(gs_minLobe)) * 255.0) / 255.0;  // rounded down: never above the minimum
         RWByteAddressBuffer tiles = ResourceDescriptorHeap[P[1].z];
         RWByteAddressBuffer args = ResourceDescriptorHeap[P[1].w];
+#if PLANAR_MASK
+        const uint mask = gs_mirror != 0 ? gs_classMask : 0u;
+#else
         const uint mask = gs_classMask;
+#endif
         [unroll] for (uint c = 0; c < M_CLASS_COUNT; ++c)
         {
             if ((mask & (1u << c)) == 0) continue;

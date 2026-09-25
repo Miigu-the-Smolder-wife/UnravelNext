@@ -27,7 +27,6 @@ struct ResolveOutputs
     TextureRef emissive;      // RGBA16F, only when the scene has emissive textures (else invalid)
     BufferRef tiles;          // raw: per class, tileCount entries (x | y << 16)
     BufferRef tileArgs;       // raw: per class D3D12_DISPATCH_ARGUMENTS (12 B), x = tile count
-    BufferRef tileFlags;      // raw: one uint per tile, zeroed by the resolve (edge-tile de-duplication)
     uint32_t tilesX = 0, tilesY = 0;
     uint32_t textureTableSrv = 0;
 };

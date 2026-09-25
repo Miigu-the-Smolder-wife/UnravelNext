@@ -6,7 +6,8 @@
 // neighbours, then corners; the sky is a group without triangles): a neighbour on a triangle an earlier neighbour showed
 // joins that neighbour's group (one triangle is one surface), any other joins the first group whose representative sees
 // the same surface or opens a group. A group's coverage of the pixel square is the exact area of its distinct triangles
-// inside it (edgeTriangleArea, deformed vertices projected camera-relative; each triangle is fetched once), times, for
+// inside it (edgeTriangleArea, deformed vertices projected camera-relative; each triangle is fetched once, and only for
+// groups nearer than the farthest, whose share is the remainder), times, for
 // an alpha-tested material, the part of the pixel its cut-out covers (edgeCutoutCoverage: the triangle's uv under the
 // pixel centre). Groups hide each other in depth order at the pixel centre by their 32-subsample masks (V's
 // coverageTriangleMask; error <= 1/32 of the overlap); a cut-out group hides the subsamples of its mask in proportion to
@@ -18,7 +19,8 @@
 // P[1] = { gbuffer SRV, edge radiance SRV, colour UAV, edge pixel list SRV (raw) }
 // P[2] = { cos angle, footprint tolerance, distance tolerance (floats), groups max }
 // P[3] = { experiment mask (shading.experiment_disable; cost attribution only: 64 = one triangle per group, its
-//        representative's; 128 = no coverage geometry, the centre's radiance), M texture table SRV, 0, 0 }
+//        representative's; 128 = no coverage geometry, the centre's radiance; 512 = no subsample masks; 1024 = no
+//        cut-out coverage), M texture table SRV, 0, 0 }
 #include "Bindless.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/Edge.hlsli"
@@ -140,9 +142,23 @@ void main(uint i : SV_DispatchThreadID)
     }
     if (P[3].x & 64) triangles &= representatives;
 
-    // Coverage and 32-subsample mask per group, one triangle fetch per distinct triangle.
+    // Depth of each group's plane along the centre ray. The farthest group takes whatever the nearer ones leave, so its
+    // own area and mask are never used: only the nearer groups' triangles are fetched.
     float3 D, Dx, Dy;
     mPixelRay(float2(pixel) + 0.5, D, Dx, Dy);
+    float z[EDGE_GROUPS];
+    uint farthest = 0;
+    [unroll] for (uint g0z = 0; g0z < EDGE_GROUPS; ++g0z)
+    {
+        const EdgePixel r = rep[g0z];
+        const float nD = dot(r.normal, D);
+        z[g0z] = g0z >= groups ? 3.0e38 : r.sky ? 1e30 : nD < -1e-6 ? dot(r.normal, r.position) / nD : linearDepth(depth[repPixel[g0z]]);
+        if (g0z < groups && z[g0z] > z[farthest]) farthest = g0z;
+    }
+    [unroll] for (uint k2 = 0; k2 < 9; ++k2)
+        if (((groupOf >> (2 * k2)) & 3u) == farthest) triangles &= ~(1u << k2);
+
+    // Coverage and 32-subsample mask per nearer group, one triangle fetch per distinct triangle.
     float area[EDGE_GROUPS] = { 0, 0, 0 }, geometric[EDGE_GROUPS] = { 0, 0, 0 };
     uint mask[EDGE_GROUPS] = { 0, 0, 0 };
     while (triangles != 0)
@@ -156,10 +172,10 @@ void main(uint i : SV_DispatchThreadID)
         const float3 c = edgeProject(t.w2 - g_cameraPosition);
         if (min(a.z, min(b.z, c.z)) <= g_nearPlane * 0.5) continue;  // crosses the camera plane: left to the remainder
         const float ar = edgeTriangleArea(a.xy, b.xy, c.xy, float2(pixel));
-        const uint m = coverageTriangleMask(a.xy, b.xy, c.xy, float2(pixel));
+        const uint m = (P[3].x & 512) ? 0xFFFFFFFFu : coverageTriangleMask(a.xy, b.xy, c.xy, float2(pixel));
         float cut = 1;
         const MTextureSet ts = mLoadTextureSet(P[3].y, t.material);
-        if (ts.coverage != UNX_NONE)
+        if (ts.coverage != UNX_NONE && (P[3].x & 1024) == 0)
         {
             float2 uv, duvdx, duvdy;
             mPlaneUv(t, D, Dx, Dy, uv, duvdx, duvdy);
@@ -174,13 +190,11 @@ void main(uint i : SV_DispatchThreadID)
             }
     }
 
-    // Depth of each group's plane along the centre ray, then front to back (sorting network on registers).
+    // Front to back (sorting network on registers).
     EdgeGroup grp[EDGE_GROUPS];
     [unroll] for (uint g1 = 0; g1 < EDGE_GROUPS; ++g1)
     {
-        const EdgePixel r = rep[g1];
-        const float nD = dot(r.normal, D);
-        grp[g1].z = g1 >= groups ? 3.0e38 : r.sky ? 1e30 : nD < -1e-6 ? dot(r.normal, r.position) / nD : linearDepth(depth[repPixel[g1]]);
+        grp[g1].z = z[g1];
         grp[g1].area = area[g1];
         grp[g1].density = geometric[g1] > 0 ? area[g1] / geometric[g1] : 1;
         grp[g1].mask = mask[g1];

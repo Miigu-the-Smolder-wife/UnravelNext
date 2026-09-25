@@ -96,11 +96,13 @@ void resolve(FramePassContext& fc, ViewResources& view)
     if (textures.anyEmissiveTexture()) o.emissive = fc.graph.createTexture({ "m.emissive", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     o.tiles = fc.graph.createBuffer({ "m.tiles", (uint64_t)kShadeClassCount * tileCount * 4, 0 });
     o.tileArgs = fc.graph.createBuffer({ "m.tile args", (uint64_t)kShadeClassCount * sizeof(D3D12_DISPATCH_ARGUMENTS), 0 });
-    o.tileFlags = fc.graph.createBuffer({ "m.tile flags", (uint64_t)tileCount * 4, 0 });
 
     ID3D12PipelineState* begin = fc.shaders.compute("Passes/Material/ResolveBegin");
     const ResolveDebug& debug = fc.state<ResolveDebug>("M.resolveDebug");
-    ID3D12PipelineState* kernel = fc.shaders.compute(debug.buffer.valid() ? "Passes/Material/Resolve.DEBUG1" : "Passes/Material/Resolve.DEBUG0");
+    // Planar reflection views with R's mirror mask (v1.22) use the PLANAR_MASK variant; other views compile none of it.
+    const bool planarMask = view.view.planarTileMask.valid() || view.view.planarMask.valid();
+    const std::string kernelName = std::string("Passes/Material/Resolve.DEBUG") + (debug.buffer.valid() ? "1" : "0") + ".PLANAR_MASK" + (planarMask ? "1" : "0");
+    ID3D12PipelineState* kernel = fc.shaders.compute(kernelName.c_str());
     const BufferRef debugBuffer = debug.buffer;
     const BufferRef args = o.tileArgs;
     // Planar reflection views (R, through FrameServices::renderView) are timed apart: their cost is the reflection
@@ -126,16 +128,21 @@ void resolve(FramePassContext& fc, ViewResources& view)
                          if (o.emissive.valid()) b.use(o.emissive, Use::UavCompute);
                          b.use(o.tiles, Use::UavCompute);
                          b.use(o.tileArgs, Use::UavCompute);
-                         b.use(o.tileFlags, Use::UavCompute);
                          if (debugBuffer.valid()) b.use(debugBuffer, Use::UavCompute);
+                         // Planar reflection views (v1.22): tiles without mirror pixels go to no class list.
+                         if (v.view.planarTileMask.valid()) b.use(v.view.planarTileMask, Use::SrvCompute);
+                         else if (v.view.planarMask.valid()) b.use(v.view.planarMask, Use::SrvCompute);
                      },
                      [kernel, v, o, cb, tileCount, debugBuffer, experiment](PassContext& c) {
-                         const uint32_t k[15] = { c.srv(v.visId), c.srv(v.visibleClusters), c.uav(v.gbuffer), c.uav(o.materialWord),
+                         const uint32_t tileMask = v.view.planarTileMask.valid() ? c.srv(v.view.planarTileMask) : gpu::kNone;
+                         const uint32_t pixelMask = !v.view.planarTileMask.valid() && v.view.planarMask.valid() ? c.srv(v.view.planarMask) : gpu::kNone;
+                         const uint32_t k[16] = { c.srv(v.visId), c.srv(v.visibleClusters), c.uav(v.gbuffer), c.uav(o.materialWord),
                                                   o.emissive.valid() ? c.uav(o.emissive) : gpu::kNone, c.uav(v.reflectionLobeTiles), c.uav(o.tiles), c.uav(o.tileArgs),
-                                                  o.textureTableSrv, o.tilesX, o.tilesY, tileCount, debugBuffer.valid() ? c.uav(debugBuffer) : gpu::kNone, experiment, c.uav(o.tileFlags) };
+                                                  o.textureTableSrv, o.tilesX, o.tilesY, tileCount, debugBuffer.valid() ? c.uav(debugBuffer) : gpu::kNone, experiment,
+                                                  tileMask, pixelMask };
                          c.cmd->SetPipelineState(kernel);
                          c.bindFrameConstants(cb);
-                         c.computeConstants(k, 15);
+                         c.computeConstants(k, 16);
                          c.cmd->Dispatch(o.tilesX, o.tilesY, 1);
                      });
 

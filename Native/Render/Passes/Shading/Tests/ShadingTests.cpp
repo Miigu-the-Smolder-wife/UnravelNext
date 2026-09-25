@@ -10,7 +10,10 @@
 //   7. the edge composite's exact triangle area (edgeTriangleArea) against double-precision clipping, and the composite
 //      of two overlapping quads against their exact visible areas;
 //   8. the edge composite over an alpha-tested (cut-out) quad against the supersampled cut shape (the pixel's share
-//      where the bilinear alpha passes the cutoff), so cut edges keep their width.
+//      where the bilinear alpha passes the cutoff), so cut edges keep their width;
+//   9. area lights (AreaLight.hlsli): the diffuse integrals (front, back) and the LTC integral over the true light shape
+//      against surface-grid integration in double (exactness of the region integration), and the LTC specular against
+//      the model BRDF integrated over the light (the fit error, reported by roughness).
 //   unx_test_shading_shadingtests [--no-debug-layer]
 #include "../../Material/Tests/MTestFrame.h"
 
@@ -20,6 +23,7 @@
 #include <array>
 #include <cstdio>
 #include <random>
+#include <thread>
 
 using namespace unx;
 using namespace unx::render;
@@ -742,7 +746,9 @@ void testLocalLights(TestFrame& tf, Report& report)
     light(scene::LightType::Spot, { -1.5f, 3, 0.5f }, { 0.2f, -1, -0.1f }, 2000, 12, true);  // caster 2 -> slot 2
     light(scene::LightType::Point, { 0, 0.4f, 2.5f }, { 0, -1, 0 }, 80, 6, false);
     light(scene::LightType::Spot, { 2, 1.5f, -1 }, { -1, -0.3f, 0.5f }, 1500, 8, true);   // caster 3 -> slot 3
-    light(scene::LightType::Point, { -1.6f, 1.2f, -1.5f }, { 0, -1, 0 }, 300, 7, true);   // caster 4: beyond the slots
+    light(scene::LightType::Point, { -1.6f, 1.2f, -1.5f }, { 0, -1, 0 }, 300, 7, true);   // casters 4-6: S's overflow list
+    light(scene::LightType::Point, { 1.8f, 0.9f, 1.4f }, { 0, -1, 0 }, 250, 7, true);
+    light(scene::LightType::Spot, { -0.4f, 2.6f, 2.2f }, { 0.1f, -1, -0.6f }, 1200, 9, true);
     scene::Camera cam;
     cam.name = "lights";
     cam.position = { 0.5f, 2.2f, 5 };
@@ -751,7 +757,7 @@ void testLocalLights(TestFrame& tf, Report& report)
     s.cameras.push_back(cam);
     tf.setScene(s);
 
-    // S's froxel list buffer: header, one froxel (first entry 0, count 5), indices 0..4 as 16-bit pairs.
+    // S's froxel list buffer: header, one froxel (first entry 0, count 7), indices 0..6 as 16-bit pairs.
     std::vector<uint32_t> list(64, 0);
     const float nearM = 0.01f, farM = 1000.0f, logRatio = std::log2(farM / nearM);
     list[0] = 1;
@@ -764,16 +770,50 @@ void testLocalLights(TestFrame& tf, Report& report)
     list[8] = 64;   // headerBase
     list[9] = 128;  // indexBase
     list[10] = 64;  // indexStride
-    list[11] = 5;   // indexCount
-    list[16] = (0u << 6) | 5u;
+    list[11] = 7;   // indexCount
+    list[16] = (0u << 6) | 7u;
     list[32] = 0 | (1u << 16);
     list[33] = 2 | (3u << 16);
-    list[34] = 4;
+    list[34] = 4 | (5u << 16);
+    list[35] = 6;
     ComPtr<ID3D12Resource> listBuffer = uploadStatic(tf.device, list.data(), list.size() * 4, L"test froxel list");
     const uint32_t slot[4] = { 255, 128, 255, 64 };
-    const double slotVisibility[5] = { 128 / 255.0, 1.0, 1.0, 64 / 255.0, 1.0 };  // per light, list order
+    // Per light, list order: slots 1-3, a light without shadows, then the three casters past the third (overflow runs).
+    const uint32_t overflowRun[3] = { 200, 100, 30 };
+    const double slotVisibility[7] = { 128 / 255.0, 1.0, 1.0, 64 / 255.0, 200 / 255.0, 100 / 255.0, 30 / 255.0 };
 
     const uint32_t W = 960, H = 540;
+    // S's overflow list (INTERFACES 7.3, v1.20): every tile has the three casters past the third; every fifth tile column is
+    // over the list's capacity and goes to the fallback kernel (no VSM in this build: those lights shade unshadowed there).
+    const uint32_t tilesX = (W + 7) / 8, tilesY = (H + 7) / 8;
+    auto fallbackTile = [](uint32_t tx) { return tx % 5 == 2; };
+    std::vector<uint32_t> heads((size_t)TestFrame::rowPitch(tilesX, 4) / 4 * tilesY, 0), overflowWords, fallbackList(4, 0);
+    for (uint32_t ty = 0; ty < tilesY; ++ty)
+        for (uint32_t tx = 0; tx < tilesX; ++tx)
+        {
+            uint32_t& head = heads[(size_t)ty * (TestFrame::rowPitch(tilesX, 4) / 4) + tx];
+            if (fallbackTile(tx))
+            {
+                head = 0xFFFFFFFFu;
+                fallbackList.push_back((ty << 16) | tx);
+                continue;
+            }
+            head = 1 + (uint32_t)overflowWords.size();
+            for (uint32_t p = 0; p < 64; ++p) overflowWords.push_back((3u << 24) | 64u);
+            overflowWords.push_back(overflowRun[0] | (overflowRun[1] << 8) | (overflowRun[2] << 16));
+        }
+    fallbackList[0] = fallbackList[1] = (uint32_t)(fallbackList.size() - 4);
+    fallbackList[2] = fallbackList[3] = 1;
+    ComPtr<ID3D12Resource> overflowBuffer = uploadStatic(tf.device, overflowWords.data(), overflowWords.size() * 4, L"test shadow overflow");
+    ComPtr<ID3D12Resource> fallbackBuffer = uploadStatic(tf.device, fallbackList.data(), fallbackList.size() * 4, L"test shadow overflow fallback");
+    ComPtr<ID3D12Resource> headsStaging = makeBuffer(tf.device, heads.size() * 4, D3D12_HEAP_TYPE_UPLOAD);
+    {
+        void* p = nullptr;
+        D3D12_RANGE none{ 0, 0 };
+        check(headsStaging->Map(0, &none, &p), "map overflow heads staging");
+        std::memcpy(p, heads.data(), heads.size() * 4);
+        headsStaging->Unmap(0, nullptr);
+    }
     const uint32_t packed = slot[0] | (slot[1] << 8) | (slot[2] << 16) | (slot[3] << 24);
     std::vector<uint32_t> shadowTexels((size_t)TestFrame::rowPitch(W, 4) / 4 * H, packed);
     ComPtr<ID3D12Resource> shadowStaging = makeBuffer(tf.device, shadowTexels.size() * 4, D3D12_HEAP_TYPE_UPLOAD);
@@ -794,6 +834,7 @@ void testLocalLights(TestFrame& tf, Report& report)
         tf.vis.record(fc, v);
         tracks::materialResolve(fc, v);
         fc.resources.froxelLights = fc.graph.importBuffer(listBuffer.Get(), { "test froxel lists", list.size() * 4, 0 });
+        v.froxelLights = fc.resources.froxelLights;  // the main view's lists are the frame's (FrameRenderer, v1.22)
         v.shadowVisibility = fc.graph.createTexture({ "test shadow visibility", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
         const TextureRef sv = v.shadowVisibility;
         fc.graph.addPass("m.test.shadow.upload", QueueType::Graphics, [&](PassBuilder& b) { b.use(sv, Use::CopyDst); },
@@ -805,6 +846,19 @@ void testLocalLights(TestFrame& tf, Report& report)
                              src.PlacedFootprint.Footprint = { DXGI_FORMAT_R32_UINT, W, H, 1, TestFrame::rowPitch(W, 4) };
                              c.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
                          });
+        v.shadowOverflowTiles = fc.graph.createTexture({ "test shadow overflow tiles", tilesX, tilesY, 1, 1, DXGI_FORMAT_R32_UINT });
+        v.shadowOverflow = fc.graph.importBuffer(overflowBuffer.Get(), { "test shadow overflow", overflowWords.size() * 4, 0 });
+        v.shadowOverflowFallbackTiles = fc.graph.importBuffer(fallbackBuffer.Get(), { "test shadow overflow fallback", fallbackList.size() * 4, 0 });
+        const TextureRef ht = v.shadowOverflowTiles;
+        fc.graph.addPass("m.test.overflow.upload", QueueType::Graphics, [&](PassBuilder& b) { b.use(ht, Use::CopyDst); },
+                         [&, ht, tilesX, tilesY](PassContext& c) {
+                             D3D12_TEXTURE_COPY_LOCATION dst{ c.resource(ht), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                             dst.SubresourceIndex = 0;
+                             D3D12_TEXTURE_COPY_LOCATION src{ headsStaging.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+                             src.PlacedFootprint.Offset = 0;
+                             src.PlacedFootprint.Footprint = { DXGI_FORMAT_R32_UINT, tilesX, tilesY, 1, TestFrame::rowPitch(tilesX, 4) };
+                             c.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                         });
         tracks::shading(fc, v);
         gb = tf.readback(fc, v.gbuffer);
         words = tf.readback(fc, material::resolveOutputs(fc, v).materialWord);
@@ -814,6 +868,7 @@ void testLocalLights(TestFrame& tf, Report& report)
     tf.frame.outputLinearHdr = false;
 
     const double exposure = 1.0 / (1.2 * std::exp2(5.0));
+    uint32_t fallbackPixels = 0;
     double worst = 0;
     uint32_t checked = 0, lit = 0, back = 0;
     for (uint32_t y = 0; y < H; y += 3)
@@ -838,9 +893,12 @@ void testLocalLights(TestFrame& tf, Report& report)
             const double z = desc.nearPlane / std::max((double)texelOf<float>(*depth, W, x, y), 1e-30);
             const double P[3] = { desc.position.x + D[0] * z, desc.position.y + D[1] * z, desc.position.z + D[2] * z };
             double sum[3] = {};
+            const bool inFallback = fallbackTile(x / 8);
+            if (inFallback) ++fallbackPixels;
             for (size_t i = 0; i < s.lights.size(); ++i)
             {
                 const scene::Light& l = s.lights[i];
+                const double visibility = (inFallback && i >= 4) ? 1.0 : slotVisibility[i];
                 const double t[3] = { l.position.x - P[0], l.position.y - P[1], l.position.z - P[2] };
                 const double d2 = t[0] * t[0] + t[1] * t[1] + t[2] * t[2], d = std::sqrt(d2);
                 const float3 L{ (float)(t[0] / d), (float)(t[1] / d), (float)(t[2] / d) };
@@ -858,7 +916,7 @@ void testLocalLights(TestFrame& tf, Report& report)
                 const float3 f = model::evaluate(su, n, v, L);
                 if (NoV * cosL < 0) ++back;
                 else ++lit;
-                for (int k = 0; k < 3; ++k) sum[k] += (&f.x)[k] * (&l.color.x)[k] * I * std::fabs(cosL) * slotVisibility[i];
+                for (int k = 0; k < 3; ++k) sum[k] += (&f.x)[k] * (&l.color.x)[k] * I * std::fabs(cosL) * visibility;
             }
             const float4 got = texelOf<float4>(*lin, W, x, y);
             const double e[3] = { sum[0] * exposure, sum[1] * exposure, sum[2] * exposure };
@@ -868,8 +926,9 @@ void testLocalLights(TestFrame& tf, Report& report)
             worst = std::max(worst, err);
             ++checked;
         }
-    logf("local lights: %u pixels, %u light-surface pairs reflected, %u transmitted through leaves \n", checked, lit, back);
-    report(worst < 5e-3, "local lights [point, spot, shadow slots by list order] vs CPU model (rel.)", worst, 5e-3);
+    logf("local lights: %u pixels (%u in fallback tiles), %u light-surface pairs reflected, %u transmitted through leaves \n", checked, fallbackPixels, lit, back);
+    report(worst < 5e-3, "local lights [point, spot, shadow slots 1-3, overflow list, fallback tiles] vs CPU model (rel.)", worst, 5e-3);
+    report(fallbackPixels > 100, "local lights: pixels in overflow fallback tiles checked", fallbackPixels, 100);
     report(back > 50, "local lights: back-lit leaf pairs present", back, 50);
 }
 
@@ -1214,6 +1273,322 @@ void testEdgeCutout(TestFrame& tf, Report& report)
     report(std::fabs(sumRed - sumTruth) / sumTruth < 3e-3, "edge cut-out: total covered area vs truth (rel.)", std::fabs(sumRed - sumTruth) / sumTruth, 3e-3);
 }
 
+// ---------------------------------------------------------------- 9
+struct AlVec
+{
+    double x = 0, y = 0, z = 0;
+};
+AlVec operator+(AlVec a, AlVec b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
+AlVec operator-(AlVec a, AlVec b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
+AlVec operator*(AlVec a, double k) { return { a.x * k, a.y * k, a.z * k }; }
+double alDot(AlVec a, AlVec b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+AlVec alCross(AlVec a, AlVec b) { return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x }; }
+AlVec alNorm(AlVec a) { return a * (1 / std::sqrt(alDot(a, a))); }
+AlVec alVec(float3 v) { return { v.x, v.y, v.z }; }
+float3 alF(AlVec v) { return { (float)v.x, (float)v.y, (float)v.z }; }
+
+struct AlMat  // rows
+{
+    AlVec r[3];
+    AlVec operator*(AlVec v) const { return { alDot(r[0], v), alDot(r[1], v), alDot(r[2], v) }; }
+    double det() const { return alDot(r[0], alCross(r[1], r[2])); }
+};
+
+struct AlCase
+{
+    uint32_t type;  // LIGHT_RECT 2, DISK 3, SPHERE 4, TUBE 5
+    AlVec p, forward, right;
+    double sx, sy;
+    AlVec n, v;
+    float roughness, f0;
+};
+
+// The shading kernel's frame (AreaLight.hlsli shShadingFrame) and LTC inverse (shLtcInverse: bilinear in float).
+AlMat alFrame(AlVec n, AlVec v)
+{
+    const double NoV = alDot(n, v);
+    AlVec t = v - n * NoV;
+    if (alDot(t, t) < 1e-12) t = std::fabs(n.x) < 0.9 ? alCross(n, { 1, 0, 0 }) : alCross(n, { 0, 1, 0 });
+    t = alNorm(t);
+    return { { t, alCross(n, t), n } };
+}
+AlMat alLtcInverse(double NoV, double roughness)
+{
+    const std::vector<float>& t = shading::ltcTable();
+    const float cx = std::sqrt(std::clamp(1.0f - (float)NoV, 0.0f, 1.0f)) * 63, cy = std::clamp((float)roughness, 0.0f, 1.0f) * 63;
+    const uint32_t ix = std::min((uint32_t)cx, 62u), iy = std::min((uint32_t)cy, 62u);
+    const float fx = cx - ix, fy = cy - iy;
+    float m[4];
+    for (int k = 0; k < 4; ++k)
+    {
+        auto at = [&](uint32_t x, uint32_t y) { return t[(y * 64 + x) * 4 + k]; };
+        m[k] = (at(ix, iy) * (1 - fx) + at(ix + 1, iy) * fx) * (1 - fy) + (at(ix, iy + 1) * (1 - fx) + at(ix + 1, iy + 1) * fx) * fy;
+    }
+    return { { { m[0], 0, m[1] }, { 0, 1, 0 }, { m[2], 0, m[3] } } };
+}
+AlMat alMul(const AlMat& a, const AlMat& b)
+{
+    AlMat r;
+    for (int i = 0; i < 3; ++i)
+    {
+        const AlVec& row = a.r[i];
+        r.r[i] = b.r[0] * row.x + b.r[1] * row.y + b.r[2] * row.z;
+    }
+    return r;
+}
+
+// Visits the light's surface as patches (point relative to the shading point, outward normal x area); N x N per part.
+template <typename F>
+void alSurface(const AlCase& c, int N, F visit)
+{
+    const AlVec up = alCross(c.forward, c.right);
+    auto orthonormal = [](AlVec d, AlVec& e1, AlVec& e2) {
+        e1 = alNorm(std::fabs(d.x) < 0.9 ? alCross(d, { 1, 0, 0 }) : alCross(d, { 0, 1, 0 }));
+        e2 = alCross(d, e1);
+    };
+    if (c.type == 2)
+        for (int j = 0; j < N; ++j)
+            for (int i = 0; i < N; ++i)
+            {
+                const double a = (i + 0.5) / N - 0.5, b = (j + 0.5) / N - 0.5;
+                visit(c.p + c.right * (a * c.sx) + up * (b * c.sy), c.forward * (c.sx * c.sy / (double(N) * N)));
+            }
+    else if (c.type == 3)
+        for (int j = 0; j < N; ++j)
+            for (int i = 0; i < N; ++i)
+            {
+                const double rho = (i + 0.5) / N, phi = 2 * kPi * (j + 0.5) / N, R = c.sx;
+                visit(c.p + (c.right * std::cos(phi) + up * std::sin(phi)) * (R * rho), c.forward * (R * R * rho * (1.0 / N) * (2 * kPi / N)));
+            }
+    else
+    {
+        // Sphere (radius sx) or capsule (axis along right, length sx, radius sy): cylinder + end hemispheres.
+        const bool tube = c.type == 5;
+        const double r = tube ? c.sy : c.sx;
+        const AlVec ax = c.right, a = c.p - c.right * (tube ? 0.5 * c.sx : 0), b = c.p + c.right * (tube ? 0.5 * c.sx : 0);
+        AlVec e1, e2;
+        orthonormal(ax, e1, e2);
+        auto cap = [&](AlVec centre, AlVec pole, double thetaMax) {
+            for (int j = 0; j < N; ++j)
+                for (int i = 0; i < N; ++i)
+                {
+                    const double th = thetaMax * (i + 0.5) / N, phi = 2 * kPi * (j + 0.5) / N;
+                    const AlVec s = e1 * (std::sin(th) * std::cos(phi)) + e2 * (std::sin(th) * std::sin(phi)) + pole * std::cos(th);
+                    visit(centre + s * r, s * (r * r * std::sin(th) * (thetaMax / N) * (2 * kPi / N)));
+                }
+        };
+        if (!tube)
+        {
+            cap(c.p, ax, kPi);
+            return;
+        }
+        for (int j = 0; j < N; ++j)
+            for (int i = 0; i < N; ++i)
+            {
+                const double t = (i + 0.5) / N, phi = 2 * kPi * (j + 0.5) / N;
+                const AlVec s = e1 * std::cos(phi) + e2 * std::sin(phi);
+                visit(a + ax * (c.sx * t) + s * r, s * (r * c.sx * (1.0 / N) * (2 * kPi / N)));
+            }
+        cap(b, ax, kPi / 2);
+        cap(a, ax * -1, kPi / 2);
+    }
+}
+
+// I of the light under T: sum over front-facing patches of |det T| (N.(-y)) dA (Ty).z_+ / (pi |Ty|^4).
+double alIntegral(const AlCase& c, const AlMat& T, int N)
+{
+    const double det = std::fabs(T.det());
+    double sum = 0;
+    alSurface(c, N, [&](AlVec y, AlVec ndA) {
+        const double facing = -alDot(ndA, y);
+        if (facing <= 0) return;
+        const AlVec x = T * y;
+        if (x.z <= 0) return;
+        const double l2 = alDot(x, x);
+        sum += det * facing * x.z / (kPi * l2 * l2);
+    });
+    return sum;
+}
+
+// int f_s cos dw of the model BRDF (metallic, baseColor f0) over the light.
+double alBrdfIntegral(const AlCase& c, int N)
+{
+    model::Surface surf;
+    surf.metallic = 1;
+    surf.baseColor = { c.f0, c.f0, c.f0 };
+    surf.roughness = c.roughness;
+    const float3 n = alF(c.n), v = alF(c.v);
+    double sum = 0;
+    alSurface(c, N, [&](AlVec y, AlVec ndA) {
+        const double facing = -alDot(ndA, y);
+        if (facing <= 0) return;
+        const double d2 = alDot(y, y), d = std::sqrt(d2);
+        const AlVec l = y * (1 / d);
+        const double cosN = alDot(c.n, l);
+        if (cosN <= 0) return;
+        sum += model::evaluate(surf, n, v, alF(l)).x * cosN * facing / (d2 * d);
+    });
+    return sum;
+}
+
+void testAreaLights(TestFrame& tf, Report& report)
+{
+    std::mt19937 rng(8202);
+    std::uniform_real_distribution<double> u01(0, 1);
+    auto unit = [&]() {
+        for (;;)
+        {
+            const AlVec d{ 2 * u01(rng) - 1, 2 * u01(rng) - 1, 2 * u01(rng) - 1 };
+            const double l = alDot(d, d);
+            if (l > 1e-4 && l <= 1) return d * (1 / std::sqrt(l));
+        }
+    };
+    const float roughnesses[] = { 0.1f, 0.2f, 0.35f, 0.5f, 0.7f, 1.0f };
+    std::vector<AlCase> cases;
+    for (int k = 0; k < 240; ++k)
+    {
+        AlCase c;
+        c.type = 2 + k % 4;
+        c.n = unit();
+        do c.v = unit();
+        while (alDot(c.n, c.v) < 0.05);
+        const AlVec dir = unit();
+        const double dist = 0.4 + 5.6 * u01(rng) * u01(rng);
+        c.p = dir * dist;
+        c.forward = alNorm(dir * -1 + unit() * 0.8);
+        c.right = alNorm(alCross(c.forward, unit()));
+        if (c.type == 2) c.sx = 0.2 + 2.3 * u01(rng), c.sy = 0.2 + 2.3 * u01(rng);
+        if (c.type == 3) c.sx = 0.1 + 1.1 * u01(rng), c.sy = 0;
+        if (c.type == 4) c.sx = std::min(0.05 + 0.95 * u01(rng), 0.8 * dist), c.sy = 0;
+        if (c.type == 5)
+        {
+            c.sx = 0.3 + 2.2 * u01(rng);
+            c.sy = 0.02 + 0.13 * u01(rng);
+            // Keep the shading point outside the capsule.
+            const AlVec a = c.p - c.right * (0.5 * c.sx);
+            const double t = std::clamp(alDot(a * -1, c.right) / c.sx, 0.0, 1.0);
+            const AlVec q = a + c.right * (t * c.sx);
+            if (alDot(q, q) < 4 * c.sy * c.sy) c.p = c.p + alNorm(q) * (3 * c.sy);
+        }
+        c.roughness = roughnesses[k % 6];
+        c.f0 = 0.9f;
+        cases.push_back(c);
+    }
+
+    std::vector<gpu::Light> lights;
+    std::vector<float4> q;
+    for (const AlCase& c : cases)
+    {
+        gpu::Light l{};
+        l.position = alF(c.p);
+        l.typeFlags = c.type;
+        l.forward = alF(c.forward);
+        l.range = 1e6f;
+        l.right = alF(c.right);
+        l.intensity = 1;
+        l.color = { 1, 1, 1 };
+        l.size = { (float)c.sx, (float)c.sy };
+        lights.push_back(l);
+        q.push_back({ (float)c.n.x, (float)c.n.y, (float)c.n.z, c.roughness });
+        q.push_back({ (float)c.v.x, (float)c.v.y, (float)c.v.z, c.f0 });
+    }
+    const std::vector<float>& ltc = shading::ltcTable();
+    const std::vector<float>& lutData = shading::specularAlbedoTable();
+    ComPtr<ID3D12Resource> ltcBuf = uploadStatic(tf.device, ltc.data(), ltc.size() * 4, L"test LTC table");
+    ComPtr<ID3D12Resource> lutBuf = uploadStatic(tf.device, lutData.data(), lutData.size() * 4, L"test specular LUT");
+    ComPtr<ID3D12Resource> lightBuf = uploadStatic(tf.device, lights.data(), lights.size() * sizeof(gpu::Light), L"test area lights");
+    ComPtr<ID3D12Resource> queryBuf = uploadStatic(tf.device, q.data(), q.size() * 16, L"test area queries");
+    auto srvOf = [&](ID3D12Resource* r, uint32_t count, uint32_t stride) {
+        const uint32_t srv = tf.device.descriptors().allocateResource();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Buffer.NumElements = count;
+        sd.Buffer.StructureByteStride = stride;
+        tf.device.d3d()->CreateShaderResourceView(r, &sd, tf.device.descriptors().resourceCpu(srv));
+        return srv;
+    };
+    const uint32_t ltcSrv = srvOf(ltcBuf.Get(), (uint32_t)(ltc.size() / 4), 16), lutSrv = srvOf(lutBuf.Get(), (uint32_t)(lutData.size() / 2), 8);
+    const uint32_t lightSrv = srvOf(lightBuf.Get(), (uint32_t)lights.size(), sizeof(gpu::Light)), querySrv = srvOf(queryBuf.Get(), (uint32_t)q.size(), 16);
+    std::shared_ptr<std::vector<uint8_t>> out;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, 64, 64);
+        BufferRef res = fc.graph.createBuffer({ "m.test.area light results", cases.size() * 16, 16 });
+        ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shading/Tests/AreaLightProbe");
+        const D3D12_GPU_VIRTUAL_ADDRESS cb = v.frameConstants;
+        const uint32_t count = (uint32_t)cases.size();
+        fc.graph.addPass("m.test.area lights", QueueType::Graphics, [&](PassBuilder& b) { b.use(res, Use::UavCompute); },
+                         [=](PassContext& c) {
+                             const uint32_t k[8] = { lightSrv, querySrv, c.uav(res), count, ltcSrv, lutSrv, 0, 0 };
+                             c.cmd->SetPipelineState(pso);
+                             c.bindFrameConstants(cb);
+                             c.computeConstants(k, 8);
+                             c.cmd->Dispatch((count + 63) / 64, 1, 1);
+                         });
+        out = tf.readbackBuffer(fc, res, cases.size() * 16);
+    });
+    for (uint32_t srv : { ltcSrv, lutSrv, lightSrv, querySrv }) tf.device.descriptors().freeResource(srv);
+
+    // CPU references, cases in parallel.
+    struct Ref
+    {
+        double front, back, ltc, brdf;
+    };
+    std::vector<Ref> refs(cases.size());
+    std::atomic<size_t> next{ 0 };
+    auto worker = [&]() {
+        for (size_t i; (i = next++) < cases.size();)
+        {
+            const AlCase& c = cases[i];
+            constexpr int N = 400;
+            const AlMat frame = alFrame(c.n, c.v);
+            const AlMat back{ { frame.r[0], frame.r[1] * -1, frame.r[2] * -1 } };
+            const AlMat spec = alMul(alLtcInverse(std::max(alDot(c.n, c.v), 1e-4), c.roughness), frame);
+            refs[i] = { alIntegral(c, frame, N), alIntegral(c, back, N), alIntegral(c, spec, N), alBrdfIntegral(c, N) };
+        }
+    };
+    std::vector<std::thread> threads;
+    for (unsigned t = 0; t < 4; ++t) threads.emplace_back(worker);  // 4 threads: the machine is shared
+    for (auto& t : threads) t.join();
+
+    const char* names[] = { "rect", "disk", "sphere", "tube" };
+    double worstExact[4] = {}, worstLtc[4] = {}, fitSum[6] = {}, fitWorst[6] = {};
+    int fitCount[6] = {};
+    for (size_t i = 0; i < cases.size(); ++i)
+    {
+        const AlCase& c = cases[i];
+        float4 g;
+        std::memcpy(&g, out->data() + i * 16, 16);
+        const Ref& r = refs[i];
+        auto rel = [](double got, double ref) { return std::fabs(got - ref) / std::max(ref, 1e-3); };
+        const double eDiffuse = std::max(rel(g.x, r.front), rel(g.z, r.back)), eLtc = rel(g.y, r.ltc);
+        const int t = (int)c.type - 2;
+        if (eDiffuse > 5e-3 || eLtc > 5e-3)
+            logf("  %s (%.2f %.2f) at %.2f m, rough %.2f: diffuse %.5f / %.5f back %.5f / %.5f ltc %.5f / %.5f\n", names[t], c.sx, c.sy, std::sqrt(alDot(c.p, c.p)),
+                 c.roughness, g.x, r.front, g.z, r.back, g.y, r.ltc);
+        worstExact[t] = std::max(worstExact[t], eDiffuse);
+        worstLtc[t] = std::max(worstLtc[t], eLtc);
+        const int ri = (int)(std::find(std::begin(roughnesses), std::end(roughnesses), c.roughness) - std::begin(roughnesses));
+        if (r.brdf > 1e-3)
+        {
+            const double e = std::fabs(g.w * g.y - r.brdf) / r.brdf;
+            fitSum[ri] += e;
+            fitWorst[ri] = std::max(fitWorst[ri], e);
+            ++fitCount[ri];
+        }
+    }
+    for (int t = 0; t < 4; ++t)
+        logf("area lights, %-6s: diffuse (front, back) worst %.2e, LTC integral over the shape worst %.2e (rel. to max(I, 1e-3))\n", names[t], worstExact[t], worstLtc[t]);
+    for (int ri = 0; ri < 6; ++ri)
+        logf("area lights, LTC fit vs model BRDF over the light, roughness %.2f: mean %.3f, worst %.3f (%d cases, rel.)\n", roughnesses[ri], fitSum[ri] / std::max(fitCount[ri], 1),
+             fitWorst[ri], fitCount[ri]);
+    report(std::max({ worstExact[0], worstExact[1], worstExact[2] }) < 5e-3, "area lights: diffuse integrals, rect/disk/sphere vs surface grid (rel.)",
+           std::max({ worstExact[0], worstExact[1], worstExact[2] }), 5e-3);
+    report(std::max({ worstLtc[0], worstLtc[1], worstLtc[2] }) < 5e-3, "area lights: LTC integral over rect/disk/sphere vs surface grid (rel.)",
+           std::max({ worstLtc[0], worstLtc[1], worstLtc[2] }), 5e-3);
+    report(std::max(worstExact[3], worstLtc[3]) < 5e-3, "area lights: tube (exact outline, polyline caps) vs the capsule (rel.)", std::max(worstExact[3], worstLtc[3]), 5e-3);
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1232,6 +1607,7 @@ int main(int argc, char** argv)
         testEdgeArea(tf, report);
         testEdgeComposite(tf, report);
         testEdgeCutout(tf, report);
+        testAreaLights(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

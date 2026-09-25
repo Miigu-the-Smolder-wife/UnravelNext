@@ -10,6 +10,9 @@ namespace unx::render::shading
 // Specular directional albedo split by f0 (ShadingCommon.hlsli shSpecularAB): 32 x 32 (A, B) on the model's E grid,
 // same visible-normal samples as scene::model::directionalAlbedoTable, so A + B = E to float rounding.
 const std::vector<float>& specularAlbedoTable();
+// LTC inverse matrices of the model's specular lobe for area lights (AreaLight.hlsli): 64 x 64 float4, fitted by
+// Tests/LtcFit.cpp (LtcTable.inl).
+const std::vector<float>& ltcTable();
 
 void shade(FramePassContext& fc, ViewResources& view);
 
