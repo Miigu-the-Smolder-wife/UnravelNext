@@ -245,7 +245,7 @@ Device::Device(const DeviceOptions& options) : m_options(options)
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[1].Descriptor = { 1, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE };
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    D3D12_STATIC_SAMPLER_DESC samplers[5]{};
+    D3D12_STATIC_SAMPLER_DESC samplers[6]{};
     auto sampler = [&](uint32_t reg, D3D12_FILTER filter, D3D12_TEXTURE_ADDRESS_MODE mode, uint32_t aniso = 1, D3D12_COMPARISON_FUNC cmp = D3D12_COMPARISON_FUNC_NONE) {
         D3D12_STATIC_SAMPLER_DESC& s = samplers[reg];
         s.Filter = filter;
@@ -261,11 +261,12 @@ Device::Device(const DeviceOptions& options) : m_options(options)
     sampler(2, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP);
     sampler(3, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_WRAP, 16);
     sampler(4, D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, 1, D3D12_COMPARISON_FUNC_GREATER_EQUAL);
+    sampler(5, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, 16);
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC rs{};
     rs.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     rs.Desc_1_1.NumParameters = 2;
     rs.Desc_1_1.pParameters = params;
-    rs.Desc_1_1.NumStaticSamplers = 5;
+    rs.Desc_1_1.NumStaticSamplers = 6;
     rs.Desc_1_1.pStaticSamplers = samplers;
     rs.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
     ComPtr<ID3DBlob> blob, error;

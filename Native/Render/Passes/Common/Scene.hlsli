@@ -72,7 +72,7 @@ struct GpuMaterial
     float metallic;
     float specular, alphaCutoff, transmission, ior;
     uint classFlags, baseColorTexture, normalTexture, roughMetalTexture;
-    uint emissiveTexture, occlusionTexture, revision, pad0;
+    uint emissiveTexture, occlusionTexture, revision, textureClamp;  // textureClamp: bit per texture, 1 = g_anisoClamp
 };
 
 struct GpuLight

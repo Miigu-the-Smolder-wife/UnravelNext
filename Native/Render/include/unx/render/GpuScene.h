@@ -70,6 +70,12 @@ public:
     void updateTransforms(uint64_t frameIndex, std::span<const InstanceTransformUpdate> updates);
     void updateSkeleton(uint64_t frameIndex, uint32_t skeleton, std::span<const float3x4> jointToModel);
     void setInstanceVisible(uint32_t instance, bool visible);
+    // Material textures published by M's texture system (INTERFACES_KO.md 6.3, v1.10): one entry per scene material.
+    // Rewrites the material buffer (new SRV; the old one is released when the GPU is done) and bumps the revision of the
+    // materials whose textures changed and the scene revision. Call before any frame constants of the frame are
+    // allocated (tracks::prepareScene), since they carry the material buffer's SRV.
+    void setMaterialTextures(const std::vector<gpu::MaterialTextures>& perMaterial);
+    const std::vector<gpu::Material>& materials() const { return m_materials; }
     // Uploads the changes for 'frameIndex': a scatter kernel on the graphics queue, submitted before the frame's graph;
     // the other queues wait for it. Upload slot frameIndex % framesInFlight (the caller waited for that slot's frame).
     void flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, ShaderLibrary& shaders);
@@ -105,6 +111,7 @@ private:
     const scene::Scene* m_source = nullptr;
     std::vector<gpu::Instance> m_instances;
     std::vector<gpu::Mesh> m_meshes;
+    std::vector<gpu::Material> m_materials;
     Buffer m_instanceBuffer, m_meshBuffer, m_submeshBuffer, m_vertexBuffer, m_indexBuffer, m_materialBuffer, m_materialRemapBuffer,
         m_lightBuffer, m_skinBuffer, m_bonePalette, m_prevBonePalette, m_albedoTable;
     Buffer m_clusterBuffer, m_lodLevelBuffer, m_lodLevelClusterBuffer, m_clusterVertexIndexBuffer, m_clusterTriangleBuffer;

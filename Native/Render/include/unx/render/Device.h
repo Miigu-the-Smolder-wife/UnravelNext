@@ -108,7 +108,7 @@ public:
     const DeviceOptions& options() const { return m_options; }
     Queue& queue(QueueType type) { return *m_queues[(size_t)type]; }
     DescriptorHeaps& descriptors() { return *m_descriptors; }
-    // The single bindless root signature: 32 root constants (b0), a root CBV (b1), static samplers s0-s4,
+    // The single bindless root signature: 32 root constants (b0), a root CBV (b1), static samplers s0-s5,
     // heaps directly indexed. Every compute and mesh pipeline uses it.
     ID3D12RootSignature* rootSignature() const { return m_rootSignature.Get(); }
     static constexpr uint32_t kRootConstantCount = 32;

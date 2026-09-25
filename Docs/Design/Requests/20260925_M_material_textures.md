@@ -41,3 +41,12 @@
 - R: 원하면 hit 셰이딩에서 `baseColorTexture`를 쓸 수 있다(선택).
 - M: `TextureSystem`이 (2)로 게시하고, 재질 해석은 M 내부 표 대신 `gpu::Material`의 필드를 읽는다(내부 표 제거). 클램프 텍스처는 s5로.
 - 테스트 프레임(코어·트랙 테스트)이 `FramePassContext`를 직접 만들 때도 `prepareScene`을 한 번 부르면 된다.
+
+## 결과 (코어, v1.10)
+
+- **반영**:
+  - 2) `GpuScene::setMaterialTextures(const std::vector<gpu::MaterialTextures>&)`. 재질마다 `{baseColor, normal, roughMetal, emissive, occlusion, clamp}`이다. 바뀐 것이 있으면 재질 버퍼를 새로 올리고, 옛 버퍼와 SRV는 GPU가 끝낸 뒤 해제한다. 바뀐 재질의 `revision`과 장면 `revision()`을 올린다.
+  - 3) wrap/clamp 비트는 제안대로 `gpu::Material::textureClamp`(이전 `pad0`, 비트 = `MaterialTextureBit`)다. `MaterialTextures.hlsli`는 M 소유 공개 헤더로 5.6 표에 들어간다(M이 파일을 커밋하면 표에 적는다).
+  - 4) 정적 샘플러 s5 `g_anisoClamp`(aniso 16, clamp)를 추가했다.
+  - 검증 [실측]: 단위 테스트 `gpu_scene_material_textures`(GPU 판독: 필드·clamp 비트, 새 SRV, 리비전, 같은 입력이면 변경 없음). 단위 20/20, V 4/4, 디버그 레이어 오류 0.
+- **1) `tracks::prepareScene(FramePassContext&)`는 순서를 나눈다**: 코어가 `Tracks.h`에 선언하고 `FrameRenderer`가 부르게 한 순간, M이 켜진 빌드(`build/M`, `build/all`)는 M 모듈에 정의가 없으면 링크가 끊긴다. 그래서 M이 먼저 `MaterialTrack.cpp`(네임스페이스 `unx::render::tracks`)에 `void prepareScene(FramePassContext& fc)`를 정의해 커밋하면(선언 없이도 컴파일된다), 코어가 이어서 선언·호출·꺼진 M의 빈 구현을 넣는다.

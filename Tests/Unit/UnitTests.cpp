@@ -561,6 +561,47 @@ UNX_TEST(device_on_host_device_and_queue)
     CHECK(throws([&] { Device d(bad); }));
 }
 
+UNX_TEST(gpu_scene_material_textures)
+{
+    // M's texture system publishes texture SRVs into the material records (INTERFACES_KO.md 6.3 v1.10): new material
+    // buffer and SRV, revisions bumped, GPU contents match; an unchanged set rewrites nothing.
+    scene::Scene s = tinyScene();
+    GpuScene gs(testDevice());
+    gs.upload(s);
+    gpu::FrameConstants before{};
+    gs.fill(before);
+    const uint32_t sceneRevision = gs.revision();
+    std::vector<gpu::MaterialTextures> t(1);
+    t[0].baseColor = 1234;
+    t[0].clamp = gpu::MaterialTextureBaseColor;
+    gs.setMaterialTextures(t);
+    gpu::FrameConstants after{};
+    gs.fill(after);
+    CHECK(after.materials != before.materials && gs.revision() == sceneRevision + 1 && gs.materials()[0].revision == gs.revision());
+    D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+    D3D12_RESOURCE_DESC1 rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = sizeof(gpu::Material);
+    rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> rb;
+    check(testDevice().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)), "readback");
+    CommandList cl = testDevice().acquireCommandList(QueueType::Graphics);
+    cl.list->CopyBufferRegion(rb.Get(), 0, gs.buffer("materials"), 0, sizeof(gpu::Material));
+    testDevice().queue(QueueType::Graphics).waitCpu(testDevice().submit(cl));
+    gpu::Material m{};
+    void* p = nullptr;
+    check(rb->Map(0, nullptr, &p), "map");
+    std::memcpy(&m, p, sizeof m);
+    rb->Unmap(0, nullptr);
+    CHECK(m.baseColorTexture == 1234 && m.normalTexture == gpu::kNone && m.textureClamp == gpu::MaterialTextureBaseColor);
+    gs.setMaterialTextures(t);  // same set: nothing changes
+    gpu::FrameConstants again{};
+    gs.fill(again);
+    CHECK(again.materials == after.materials && gs.revision() == sceneRevision + 1);
+}
+
 UNX_TEST(gpu_scene_frame_updates)
 {
     // GpuScene per-frame updates (INTERFACES_KO.md 6.3 v1.8): previous = the previous rendered frame, settling to

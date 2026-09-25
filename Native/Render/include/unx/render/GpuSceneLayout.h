@@ -119,9 +119,26 @@ struct Material  // 80 B
     uint32_t emissiveTexture;
     uint32_t occlusionTexture;
     uint32_t revision;
-    uint32_t pad0;
+    uint32_t textureClamp;   // bit per texture (MaterialTextureBit): 1 = clamp addressing (g_anisoClamp), 0 = wrap
 };
 static_assert(sizeof(Material) == 80);
+
+// Textures of one material as M's texture system publishes them (GpuScene::setMaterialTextures, INTERFACES 6.3 v1.10):
+// bindless SRV indices (kNone = none; the SRVs belong to M) and clamp bits (MaterialTextureBit).
+struct MaterialTextures
+{
+    uint32_t baseColor = kNone, normal = kNone, roughMetal = kNone, emissive = kNone, occlusion = kNone;
+    uint32_t clamp = 0;
+};
+
+enum MaterialTextureBit : uint32_t
+{
+    MaterialTextureBaseColor = 1u << 0,
+    MaterialTextureNormal = 1u << 1,
+    MaterialTextureRoughMetal = 1u << 2,
+    MaterialTextureEmissive = 1u << 3,
+    MaterialTextureOcclusion = 1u << 4,
+};
 
 enum MaterialFlags : uint32_t
 {

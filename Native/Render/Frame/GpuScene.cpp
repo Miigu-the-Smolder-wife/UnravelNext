@@ -200,7 +200,8 @@ void GpuScene::upload(const scene::Scene& s)
     }
 
     // Materials (textures are bound by M's texture system; until then no texture indices are published).
-    std::vector<gpu::Material> materials;
+    std::vector<gpu::Material>& materials = m_materials;
+    materials.clear();
     for (const scene::Material& m : s.materials)
     {
         gpu::Material g{};
@@ -213,7 +214,8 @@ void GpuScene::upload(const scene::Scene& s)
         g.transmission = m.transmission;
         g.ior = m.ior;
         g.classFlags = (uint32_t)m.cls | ((m.twoSided ? gpu::MaterialTwoSided : 0u) | (m.alphaCutoff > 0 ? gpu::MaterialAlphaTested : 0u)) << 8;
-        g.baseColorTexture = g.normalTexture = g.roughMetalTexture = g.emissiveTexture = g.occlusionTexture = gpu::kNone;
+        g.baseColorTexture = g.normalTexture = g.roughMetalTexture = g.emissiveTexture = g.occlusionTexture = gpu::kNone;  // setMaterialTextures
+        g.textureClamp = 0;
         g.revision = m_revision;
         materials.push_back(g);
     }
@@ -353,6 +355,33 @@ void GpuScene::setClusters(ClusterData data)
         m_meshBuffer = createStructured(m_meshes.data(), sizeof(gpu::Mesh), m_meshes.size(), L"scene meshes");
     }
     ++m_revision;
+}
+
+void GpuScene::setMaterialTextures(const std::vector<gpu::MaterialTextures>& perMaterial)
+{
+    if (perMaterial.size() != m_materials.size()) fail("GpuScene::setMaterialTextures: %zu entries for %zu materials", perMaterial.size(), m_materials.size());
+    const uint32_t revision = m_revision + 1;
+    bool changed = false;
+    for (size_t i = 0; i < m_materials.size(); ++i)
+    {
+        gpu::Material& g = m_materials[i];
+        const gpu::MaterialTextures& t = perMaterial[i];
+        if (g.baseColorTexture == t.baseColor && g.normalTexture == t.normal && g.roughMetalTexture == t.roughMetal && g.emissiveTexture == t.emissive &&
+            g.occlusionTexture == t.occlusion && g.textureClamp == t.clamp)
+            continue;
+        g.baseColorTexture = t.baseColor;
+        g.normalTexture = t.normal;
+        g.roughMetalTexture = t.roughMetal;
+        g.emissiveTexture = t.emissive;
+        g.occlusionTexture = t.occlusion;
+        g.textureClamp = t.clamp;
+        g.revision = revision;
+        changed = true;
+    }
+    if (!changed) return;
+    m_revision = revision;
+    release(m_materialBuffer);
+    m_materialBuffer = createStructured(m_materials.data(), sizeof(gpu::Material), m_materials.size(), L"scene materials");
 }
 
 void GpuScene::markRecord(uint32_t instance)
@@ -582,6 +611,7 @@ ID3D12Resource* GpuScene::buffer(const char* name) const
     if (n == "indices") return m_indexBuffer.resource.Get();
     if (n == "instances") return m_instanceBuffer.resource.Get();
     if (n == "meshes") return m_meshBuffer.resource.Get();
+    if (n == "materials") return m_materialBuffer.resource.Get();
     if (n == "clusters") return m_clusterBuffer.resource.Get();
     if (n == "clusterVertexIndices") return m_clusterVertexIndexBuffer.resource.Get();
     if (n == "clusterTriangles") return m_clusterTriangleBuffer.resource.Get();
