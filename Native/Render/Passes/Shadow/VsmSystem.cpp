@@ -33,7 +33,6 @@ struct State
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     uint32_t poolUav = UINT32_MAX, tableSrv = UINT32_MAX, ringSrv = UINT32_MAX, metaUav = UINT32_MAX;
     uint32_t ringCbv[kRingSlots] = {};  // constant buffer view of each ring slot (ConstantBuffer<VsmConstants>)
-    bool ringCbvs = false;
     uint32_t instanceCapacity = 0;
     uint8_t* ringMapped = nullptr;
     // Stats readback ring: slot i holds the counters of frame statsFrame[i], complete once the graphics queue passes
@@ -58,79 +57,91 @@ struct State
     BufferRef tableRef, metaRef, boundRef, blocksRef, statsRef;
     bool pagesRecorded = false;
     bool debugPaths = false;
+    // Pool growth: a frame whose requests exhausted the pool sets the next size (never shrinks while running).
+    uint32_t poolTarget = 0;
+    uint64_t grownAtFrame = 0;
 };
 
-void createViews(Device& device, State& s)
+// Views of the page-count-dependent resources: new descriptor indices each time (frames in flight keep the old ones).
+void createPoolViews(Device& device, State& s)
 {
     DescriptorHeaps& h = device.descriptors();
-    if (s.poolUav == UINT32_MAX) s.poolUav = h.allocateResource();
+    s.poolUav = h.allocateResource();
     D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
     ud.Format = DXGI_FORMAT_R32_TYPELESS;
     ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
     ud.Buffer.NumElements = s.poolPagesX * s.poolPagesY * kPage * kPage;
     ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
     device.d3d()->CreateUnorderedAccessView(s.pool.Get(), nullptr, &ud, h.resourceCpu(s.poolUav));
-    auto raw = [&](ID3D12Resource* r, uint64_t bytes, uint32_t& index) {
-        if (index == UINT32_MAX) index = h.allocateResource();
-        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
-        sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sd.Format = DXGI_FORMAT_R32_TYPELESS;
-        sd.Buffer.NumElements = (UINT)(bytes / 4);
-        sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-        device.d3d()->CreateShaderResourceView(r, &sd, h.resourceCpu(index));
-    };
-    raw(s.table.Get(), (uint64_t)kSlots * 8, s.tableSrv);
-    if (s.metaUav == UINT32_MAX) s.metaUav = h.allocateResource();
+    s.metaUav = h.allocateResource();
     D3D12_UNORDERED_ACCESS_VIEW_DESC md{};
     md.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
     md.Format = DXGI_FORMAT_UNKNOWN;
     md.Buffer.NumElements = s.poolPagesX * s.poolPagesY;
     md.Buffer.StructureByteStride = kMetaBytes;
     device.d3d()->CreateUnorderedAccessView(s.meta.Get(), nullptr, &md, h.resourceCpu(s.metaUav));
-    raw(s.ring.Get(), (uint64_t)kRingSlots * kRingStride, s.ringSrv);
+}
+
+// Views of the resources created once (page table, constants ring).
+void createFixedViews(Device& device, State& s)
+{
+    DescriptorHeaps& h = device.descriptors();
+    s.tableSrv = h.allocateResource();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Format = DXGI_FORMAT_R32_TYPELESS;
+    sd.Buffer.NumElements = (UINT)((uint64_t)kSlots * 8 / 4);
+    sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+    device.d3d()->CreateShaderResourceView(s.table.Get(), &sd, h.resourceCpu(s.tableSrv));
     for (uint32_t i = 0; i < kRingSlots; ++i)
     {
-        if (!s.ringCbvs) s.ringCbv[i] = h.allocateResource();
+        s.ringCbv[i] = h.allocateResource();
         D3D12_CONSTANT_BUFFER_VIEW_DESC cd{ s.ring->GetGPUVirtualAddress() + (uint64_t)i * kRingStride, kRingStride };
         device.d3d()->CreateConstantBufferView(&cd, h.resourceCpu(s.ringCbv[i]));
     }
-    s.ringCbvs = true;
 }
 
-void createState(FramePassContext& fc, State& s)
+// Page-count-dependent resources (pool, metadata, blocks, free and dirty lists); the first call also creates the fixed
+// ones. A regrown pool starts empty: the next frame resets the page table and free list (VsmInit) and re-renders.
+void createState(FramePassContext& fc, State& s, uint32_t pages)
 {
     const QualityConfig& q = fc.quality;
     if (q.integer("shadow.vsm.virtual_resolution") != kVirtual || q.integer("shadow.vsm.page_texels") != kPage || q.integer("shadow.vsm.clipmap_levels") != kLevels)
-        fail("shadow.vsm: virtual_resolution / page_texels / clipmap_levels are compiled into the S kernels (16384 / 128 / 12)");
-    const uint32_t pages = (uint32_t)q.integer("shadow.vsm.pool_pages");
+        fail("shadow.vsm: virtual_resolution / page_texels / clipmap_levels are compiled into the S kernels (16384 / 128 / 20)");
     const uint32_t perRow = 64;  // 8192 texels
-    if (pages == 0 || pages % perRow) fail("shadow.vsm.pool_pages must be a positive multiple of %u", perRow);
+    if (pages == 0 || pages % perRow) fail("VSM pool: %u pages is not a positive multiple of %u", pages, perRow);
     Device& d = fc.device;
+    for (ComPtr<ID3D12Resource>* r : { std::addressof(s.pool), std::addressof(s.meta), std::addressof(s.blocks), std::addressof(s.freeList), std::addressof(s.dirtyList) })
+        if (*r) d.deferRelease(*r);
     s.poolPagesX = perRow;
     s.poolPagesY = pages / perRow;
     s.pool = createBuffer(d, L"S VSM pool", (uint64_t)pages * kPage * kPage * 4);
-    s.table = createBuffer(d, L"S VSM page table", (uint64_t)kSlots * 8);
-    s.requests = createBuffer(d, L"S VSM requests", (uint64_t)kSlots * 4);
     s.meta = createBuffer(d, L"S VSM page metadata", (uint64_t)pages * kMetaBytes);
     s.blocks = createBuffer(d, L"S VSM page blocks", (uint64_t)pages * kBlockBytes);
     s.freeList = createBuffer(d, L"S VSM free list", 4 + (uint64_t)pages * 4);
     s.dirtyList = createBuffer(d, L"S VSM dirty list", 8 + (uint64_t)pages * 8);
-    s.cullMask = createBuffer(d, L"S VSM cull mask", (uint64_t)kSlots / 8);
-    s.args = createBuffer(d, L"S VSM indirect args", 32);  // dirty pages at 0, moved instances x levels at 16
-    s.stats = createBuffer(d, L"S VSM stats", 80);
-    s.ring = createBuffer(d, L"S VSM constants ring", (uint64_t)kRingSlots * kRingStride, D3D12_HEAP_TYPE_UPLOAD);
-    s.statsReadback = createBuffer(d, L"S VSM stats readback", (uint64_t)kStatsSlots * 80, D3D12_HEAP_TYPE_READBACK);
-    D3D12_RANGE none{ 0, 0 };
-    check(s.ring->Map(0, &none, reinterpret_cast<void**>(&s.ringMapped)), "map VSM ring");
-    D3D12_INDIRECT_ARGUMENT_DESC arg{};
-    arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-    D3D12_COMMAND_SIGNATURE_DESC sig{};
-    sig.ByteStride = 12;
-    sig.NumArgumentDescs = 1;
-    sig.pArgumentDescs = &arg;
-    check(d.d3d()->CreateCommandSignature(&sig, nullptr, IID_PPV_ARGS(&s.dispatchSignature)), "VSM dispatch signature");
-    createViews(d, s);
+    createPoolViews(d, s);
+    if (!s.table)
+    {
+        s.table = createBuffer(d, L"S VSM page table", (uint64_t)kSlots * 8);
+        s.requests = createBuffer(d, L"S VSM requests", (uint64_t)kSlots * 4);
+        s.cullMask = createBuffer(d, L"S VSM cull mask", (uint64_t)kSlots / 8);
+        s.args = createBuffer(d, L"S VSM indirect args", 32);  // dirty pages at 0, moved instances x levels at 16
+        s.stats = createBuffer(d, L"S VSM stats", 80);
+        s.ring = createBuffer(d, L"S VSM constants ring", (uint64_t)kRingSlots * kRingStride, D3D12_HEAP_TYPE_UPLOAD);
+        s.statsReadback = createBuffer(d, L"S VSM stats readback", (uint64_t)kStatsSlots * 80, D3D12_HEAP_TYPE_READBACK);
+        D3D12_RANGE none{ 0, 0 };
+        check(s.ring->Map(0, &none, reinterpret_cast<void**>(&s.ringMapped)), "map VSM ring");
+        D3D12_INDIRECT_ARGUMENT_DESC arg{};
+        arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        D3D12_COMMAND_SIGNATURE_DESC sig{};
+        sig.ByteStride = 12;
+        sig.NumArgumentDescs = 1;
+        sig.pArgumentDescs = &arg;
+        check(d.d3d()->CreateCommandSignature(&sig, nullptr, IID_PPV_ARGS(&s.dispatchSignature)), "VSM dispatch signature");
+        createFixedViews(d, s);
+    }
     s.initialized = false;
     s.needsInit = true;
 }
@@ -207,13 +218,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
 {
     State& s = fc.state<State>(kStateKey);
     const QualityConfig& q = fc.quality;
-    const uint32_t pages = (uint32_t)q.integer("shadow.vsm.pool_pages");
-    if (!s.pool || s.poolPagesX * s.poolPagesY != pages) createState(fc, s);
 
     // Harvest completed stats (no stall): the newest slot whose frame the GPU has finished.
     const uint64_t completed = fc.device.queue(QueueType::Graphics).completed();
     if (s.lastStatsSlot >= 0) s.statsFence[s.lastStatsSlot] = fc.graph.lastFence(QueueType::Graphics);
-    for (uint32_t i = 0; i < kStatsSlots; ++i)
+    for (uint32_t i = 0; s.statsReadback && i < kStatsSlots; ++i)
     {
         if (s.statsFence[i] == 0 || s.statsFence[i] > completed || s.statsFrame[i] <= s.latest.frame) continue;
         uint32_t* p = nullptr;
@@ -224,6 +233,22 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         D3D12_RANGE none{ 0, 0 };
         s.statsReadback->Unmap(0, &none);
     }
+
+    // Pool size: shadow.vsm.pool_pages_per_mpixel of the main view (at least pool_pages), grown to 1.25 x the requests
+    // of a completed frame that exhausted it, so requests are not dropped in steady state (a dropped page is a missing
+    // shadow). The frame that exhausts renders without those pages; the frames after the growth have them.
+    if (s.latest.exhausted > 0 && s.latest.frame > s.grownAtFrame)
+    {
+        const uint32_t current = s.poolPagesX * s.poolPagesY;
+        s.poolTarget = std::max(current + 64, (uint32_t)((uint64_t)s.latest.requested * 5 / 4));
+        s.grownAtFrame = s.frames + 1;  // stats of frames recorded with the old pool do not count
+        logf("S VSM: %u page requests exhausted the %u-page pool (frame %llu): pool grows to %u pages\n", s.latest.exhausted, current,
+             (unsigned long long)s.latest.frame, (s.poolTarget + 63) / 64 * 64);
+    }
+    const double mpixels = (double)main.view.width * main.view.height / 1e6;
+    uint32_t pages = std::max((uint32_t)q.integer("shadow.vsm.pool_pages"), (uint32_t)(mpixels * q.number("shadow.vsm.pool_pages_per_mpixel")));
+    pages = (std::max(pages, s.poolTarget) + 63) / 64 * 64;
+    if (!s.pool || s.poolPagesX * s.poolPagesY < pages) createState(fc, s, pages);
 
     // Light basis, caster range, scene-wide invalidation.
     const scene::Scene* src = fc.scene.source();
@@ -582,7 +607,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             v.viewportX = v.viewportY = 0;
             v.viewportWidth = v.viewportHeight = kVirtual;
             v.lodPixelsPerMetre = 1.0f / c.level[k].texel;
-            v.userData = k | ((uint32_t)(c.level[k].origin[0] & 127) << 4) | ((uint32_t)(c.level[k].origin[1] & 127) << 11);
+            v.userData = k | ((uint32_t)(c.level[k].origin[0] & 127) << 5) | ((uint32_t)(c.level[k].origin[1] & 127) << 12);
             v.cullMaskOffset = k * (kTable * kTable / 32);
             r.views.push_back(v);
         }

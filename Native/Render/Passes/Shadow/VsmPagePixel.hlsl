@@ -3,7 +3,7 @@
 // level, viewport = the level's 16384^2 window. Writes the caster height into the physical page of a dirty slot with
 // InterlockedMax (the surface nearest the sun wins); pixels of pages that are not dirty write nothing. It also records,
 // per page, whether wind-affected casters were drawn and their largest displacement bound (wind dirty rule, VsmRelease).
-// userData: level (bits 0-3) | window origin x mod 128 (bits 4-10) | origin y mod 128 (bits 11-17)
+// userData: level (bits 0-4) | window origin x mod 128 (bits 5-11) | origin y mod 128 (bits 12-18)
 // P[4].x pool UAV (raw), P[4].y page table SRV (raw), P[4].z hMin (float bits), P[4].w hMax (float bits)
 // P[5].x pool pages per row, P[5].y page metadata UAV (VsmPageMeta)
 #include "Passes/Visibility/DepthRaster.hlsli"
@@ -13,8 +13,8 @@
 void main(DepthRasterPixel p)
 {
     if (!depthRasterCovered(p)) discard;
-    const uint level = p.userData & 15u;
-    const uint2 origin = uint2((p.userData >> 4) & 127u, (p.userData >> 11) & 127u);
+    const uint level = p.userData & 31u;
+    const uint2 origin = uint2((p.userData >> 5) & 127u, (p.userData >> 12) & 127u);
     const uint2 px = uint2(p.position.xy);
     const uint2 slot2 = ((px >> VSM_PAGE_SHIFT) + origin) & (VSM_TABLE - 1);
     ByteAddressBuffer table = ResourceDescriptorHeap[P[4].y];

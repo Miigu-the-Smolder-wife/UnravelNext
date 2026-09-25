@@ -27,11 +27,10 @@ struct VsmConstantsCpu
     float time, lodBias, receiverBiasTexels, maxReceiverSlope;
     uint32_t cacheFrames, instanceCount, windTexels, windChanged;
     float cameraUV[2], pad1[2];
-    VsmLevelCpu level[12];
+    VsmLevelCpu level[20];
 };
-static_assert(sizeof(VsmConstantsCpu) == 64 + 16 * 3 + 12 * 16);
-
-constexpr uint32_t kLevels = 12, kPage = 128, kTable = 128, kVirtual = 16384;
+constexpr uint32_t kLevels = 20, kPage = 128, kTable = 128, kVirtual = 16384;
+static_assert(sizeof(VsmConstantsCpu) == 64 + 16 * 3 + kLevels * 16 && sizeof(VsmConstantsCpu) <= 1024);
 constexpr uint32_t kSlots = kLevels * kTable * kTable;
 
 struct VsmStats

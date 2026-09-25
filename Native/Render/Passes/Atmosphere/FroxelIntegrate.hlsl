@@ -19,7 +19,7 @@
 // P[1].x VSM page table SRV (raw), .y pool SRV (raw), .z blocks SRV (raw), .w VSM constants CBV (0xFFFFFFFF: no VSM)
 // P[2].x VSM search bound SRV (raw), P[2].y shadow texels per tile (float bits), P[2].z air step altitude m (float bits),
 // P[2].w experiment mask (atmosphere.froxels.experiment_disable; 0; cost attribution only: 1 air shadows, 2 local lights,
-// 4 air integration)
+// 4 air integration, 8 sun transmittance per substep, 16 multiple scattering per substep)
 // Frame constants of the main view.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -93,8 +93,8 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             const float3 p = airLiftToSurface(a, o + dir * ((k + 0.5) * dt));
             const AirCoefficients c = airCoefficients(a, max(0.0, airAltitude(a, p)));
             const float3 w = exp(-tau) * airIntegral(c.extinction, dt);
-            single += w * (c.rayleigh * phaseR + c.mie * phaseM) * airSunTransmittance(a, tlut, p, sun);
-            multi += w * (c.rayleigh + c.mie) * airMultipleScattering(a, mlut, p, sun);
+            single += w * (c.rayleigh * phaseR + c.mie * phaseM) * ((experiment & 8) ? 1.0 : airSunTransmittance(a, tlut, p, sun));
+            multi += w * (c.rayleigh + c.mie) * ((experiment & 16) ? 1.0 : airMultipleScattering(a, mlut, p, sun));
             tau += c.extinction * dt;
         }
         // Casters' shadows in the air: the shadowed fraction of the segment removes that part of the single scattering.

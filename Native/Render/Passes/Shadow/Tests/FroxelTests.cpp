@@ -458,23 +458,33 @@ int main(int argc, char** argv)
             report(worst < 0.03, "air in-scattering of local lights vs reference (largest node)", worst, 0.03);
         }
 
-        // ---- 3. Sun shadows in the air (roof, no local lights).
-        {
-            scene::Scene sc = base;
-            sc.sun.direction = normalize(float3{ 0.35f, 0.85f, -0.4f });
-            scene::Scene open = sc;
-            open.instances.resize(1);  // ground only
-            run(open, 1);
+        // ---- 3. Sun shadows in the air: the in-scattering a caster removes (volume with it minus without it) against the
+        //         exact integral with the casters ray-cast towards the sun, slice by slice up to maxT along the ray.
+        auto airShadows = [&](const scene::Scene& sc, const scene::Scene& open, const std::vector<Box>& casters, double maxT, int steps, uint32_t stride,
+                              const char* label) {
+            // Steady state: a pool that the view exhausts grows once (its statistics arrive two frames later).
+            run(open, 6);
             const std::vector<uint8_t> without = lastVolume;
-            run(sc, 1);
+            run(sc, 6);
+            {
+                // Page statistics of that frame (read back a few frames later; the scene and camera stay).
+                const std::vector<uint8_t> keep = lastVolume;
+                const uint64_t frame = shadow::lastConstants(tf.trackState).frame;
+                for (int i = 0; i < 6 && shadow::stats(tf.trackState).frame < frame; ++i) run(sc, 1);
+                lastVolume = keep;
+                const shadow::VsmStats st = shadow::stats(tf.trackState);
+                logf("%s: VSM pages requested %u (by pixels %u), allocated %u, pool exhausted %u, free %u\n", label, st.requested, st.pixelRequested, st.allocated,
+                     st.exhausted, st.freePages);
+                report(st.exhausted == 0, (std::string(label) + ": VSM pool not exhausted (requests dropped)").c_str(), st.exhausted, 0);
+            }
             const ref::D3 sun = d3(sc.sun.direction), camPos = d3(grid.view.position);
             const double E = sc.sun.illuminance;
             const shadow::VsmConstantsCpu& vc = shadow::lastConstants(tf.trackState);
             const ref::D3 lx = d3(vc.lightX), ly = d3(vc.lightY);
             double worstExact = 0, sumErr = 0, sumRef = 0;
             uint32_t exactSlices = 0, mixedSlices = 0, mixedOver = 0;
-            for (uint32_t ty = 1; ty < fg.gridY; ty += 4)
-                for (uint32_t tx = 2; tx < fg.gridX; tx += 5)
+            for (uint32_t ty = 1; ty < fg.gridY; ty += stride)
+                for (uint32_t tx = 2; tx < fg.gridX; tx += stride + 1)
                 {
                     const ref::D3 ray = grid.tileRay(tx, ty);
                     const double toRay = std::sqrt(ref::dot(ray, ray));
@@ -485,8 +495,7 @@ int main(int argc, char** argv)
                     {
                         const double z0 = grid.node(n - 1), z1 = grid.node(n);
                         const double t0 = z0 * toRay, t1 = z1 * toRay;
-                        if (t1 > 400) break;  // the roof's shadow and the view's ground are nearer
-                        const int steps = 256;
+                        if (t1 > maxT) break;  // the casters' shadows and the view's ground are nearer
                         const double dt = (t1 - t0) / steps;
                         ref::D3 slice{};
                         int shadowed = 0, belowGround = 0, nearBoundary = 0;
@@ -494,7 +503,7 @@ int main(int argc, char** argv)
                         // Texel of the air level at this slice (vsmAirLevel): a slice is 'exact' when no point of it lies
                         // within 1.5 texels (laterally, seen from the sun) of a shadow boundary.
                         const double width = fg.tilePx * 2 * 0.5 * (z0 + z1) * std::tan(grid.view.verticalFov * 0.5) / H / fg.shadowTexelsPerTile;
-                        const int level = std::clamp((int)std::floor(std::log2(std::max(width, 1e-30) * 1024.0) + vc.lodBias), 0, 11);
+                        const int level = std::clamp((int)std::floor(std::log2(std::max(width, 1e-30) * 1024.0) + vc.lodBias), 0, (int)shadow::kLevels - 1);
                         const double texel = std::ldexp(1.0, level - 10);
                         for (int k = 0; k < steps; ++k)
                         {
@@ -505,7 +514,7 @@ int main(int argc, char** argv)
                             tau = tau + c.extinction * dt;
                             if (p.y < 0) ++belowGround;
                             auto blockedAt = [&](ref::D3 q) {
-                                for (const Box& b : boxes)
+                                for (const Box& b : casters)
                                     if (hitBox(b, q, sun)) return true;
                                 return false;
                             };
@@ -556,10 +565,39 @@ int main(int argc, char** argv)
                         sumRef += r;
                     }
                 }
-            logf("sun shadows in the air: %u slices entirely lit or shadowed, %u with a boundary\n", exactSlices, mixedSlices);
-            report(exactSlices > 100 && worstExact == 0, "entirely lit / shadowed slices beyond storage precision (worst rel.)", worstExact, 0);
-            report(mixedSlices > 20 && mixedOver == 0, "slices with a shadow boundary outside the texel bound", mixedOver, 0);
-            report(sumErr / std::max(sumRef, 1e-30) < 0.03, "shadowed air in-scattering vs reference (mean relative)", sumErr / std::max(sumRef, 1e-30), 0.03);
+            logf("%s: sun shadows in the air: %u slices entirely lit or shadowed, %u with a boundary\n", label, exactSlices, mixedSlices);
+            report(exactSlices > 100 && worstExact == 0, (std::string(label) + ": uniform slices beyond storage precision (worst rel.)").c_str(), worstExact, 0);
+            report(mixedSlices > 20 && mixedOver == 0, (std::string(label) + ": slices with a shadow boundary outside the texel bound").c_str(), mixedOver, 0);
+            report(sumRef > 0 && sumErr / std::max(sumRef, 1e-30) < 0.03, (std::string(label) + ": shadowed air in-scattering vs reference (mean rel.)").c_str(),
+                   sumErr / std::max(sumRef, 1e-30), 0.03);
+        };
+        {
+            scene::Scene sc = base;  // roof 24 x 16 m at 7 m, sun high
+            sc.sun.direction = normalize(float3{ 0.35f, 0.85f, -0.4f });
+            scene::Scene open = sc;
+            open.instances.resize(1);  // ground only
+            airShadows(sc, open, boxes, 400, 256, 4, "roof");
+        }
+        {
+            // A ridge 2 km wide and 800 m high, 3 km ahead; low sun behind it: its shadow fills the air 0.3 - 3 km away
+            // (god rays against the sun, where only the coarse clipmap levels reach).
+            scene::Scene sc;
+            sc.name = "ridge";
+            sc.materials.push_back({});
+            sc.meshes.push_back(boxMesh("ground", { 10000, 0.05f, 10000 }));
+            sc.meshes.push_back(boxMesh("ridge", { 1000, 400, 100 }));
+            sc.instances.push_back(instanceAt(0, { 0, -0.05f, 0 }));
+            sc.instances.push_back(instanceAt(1, { 0, 400, 3000 }));
+            sc.sun.direction = normalize(float3{ 0.1f, 0.3f, 1 });
+            scene::Camera c;
+            c.name = "main";
+            c.position = { 0, 2, 0 };
+            c.forward = normalize(float3{ 0, 0.05f, 1 });
+            sc.cameras.push_back(c);
+            scene::Scene open = sc;
+            open.instances.resize(1);
+            const std::vector<Box> ridge = { { { 0, -0.05f, 0 }, { 10000, 0.05f, 10000 } }, { { 0, 400, 3000 }, { 1000, 400, 100 } } };
+            airShadows(sc, open, ridge, 6000, 128, 6, "ridge 3 km");
         }
 
         // ---- 4. Air perspective at arbitrary (uv, depth) vs the atmosphere reference (no casters, no lights).

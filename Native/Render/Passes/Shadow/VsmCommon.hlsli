@@ -13,7 +13,7 @@
 #define UNX_VSM_COMMON_HLSLI
 #include "Bindless.hlsli"
 
-#define VSM_LEVELS 12u
+#define VSM_LEVELS 20u  // texel 1 mm .. 512 m: pixels and air to 64 km get their own level (not the 2 m level clamped)
 #define VSM_PAGE 128u
 #define VSM_PAGE_SHIFT 7u
 #define VSM_TABLE 128u          // virtual pages per level axis (VSM_VIRTUAL / VSM_PAGE)

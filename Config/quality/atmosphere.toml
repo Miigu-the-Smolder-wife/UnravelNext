@@ -16,6 +16,7 @@ depth_slices = 64                    # exponential in view depth between near_m 
 lights_max = 32                      # per froxel list (<= 32, FROXEL_LIST_MAX); more reaching a froxel are counted
 near_m = 0.5                         # slice 0 spans the camera .. near_m (far / near)^(1/64)
 far_m = 65536                        # last node of the air volume (air perspective to 64 km; depths beyond clamp)
-experiment_disable = 0               # cost attribution only (never in a verdict): 1 air shadows, 2 local lights, 4 air integration
+experiment_disable = 0               # cost attribution only (never in a verdict): 1 air shadows, 2 local lights, 4 air integration,
+                                     # 8 sun transmittance per substep, 16 multiple scattering per substep
 air_step_altitude_m = 100            # air integration substeps: at most this altitude change per step (midpoint error (dh/H_mie)^2/24)
 shadow_texels_per_tile = 4           # air shadows: VSM level with texel <= tile width / 4 (boundary placement, VsmAir.hlsli)
