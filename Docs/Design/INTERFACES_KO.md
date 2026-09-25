@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.12, 2026-09-25)
+# UnravelNext 인터페이스 (v1.13, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -107,6 +107,9 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
 
 ```cpp
 TextureRef RenderGraph::createTexture(const TextureDesc&);        // 트랜지언트: 수명 = 첫 사용 ~ 마지막 사용, 메모리 aliasing
+                                                                   // TextureDesc::srvFormat/uavFormat(v1.13): 형식과 다른 뷰 형식
+                                                                   // (texel당 비트가 같은 relaxed format casting, 예: UAV R32_UINT로
+                                                                   // 쓰고 SRV R9G9B9E5_SHAREDEXP로 하드웨어 필터)
 BufferRef  RenderGraph::createBuffer(const BufferDesc&);          // size > 0, stride 0 = raw (ByteAddressBuffer)
 TextureRef RenderGraph::importTexture(ID3D12Resource*, const TextureDesc&, D3D12_BARRIER_LAYOUT);  // 지속 자원; 프레임 시작·끝 레이아웃
 BufferRef  RenderGraph::importBuffer(ID3D12Resource*, const BufferDesc&);
@@ -172,6 +175,7 @@ void RenderGraph::addPass(std::string_view name, QueueType, SetupFn setup, Execu
 | gbuffer | RG32_UINT (7.2) | M | S, R |
 | shadowVisibility | R32_UINT (7.3) | S | M |
 | screenProbes | R 내부 형식, HLSL API로 읽음(5.6) | R | M |
+| screenProbeMaps | 화면 프로브가 쓰는 캐시 항목의 K 경로 지도 아틀라스, 하드웨어 필터 가능(형식·배치는 R의 `ScreenProbes.hlsli`가 정한다; 권장: UAV R32_UINT로 쓰고 SRV R9G9B9E5_SHAREDEXP로 읽기, texel 4 B) (v1.13) | R | M(`SrvCompute`) |
 | reflection | RGBA16F (5.6) | R | M |
 | reflectionLobeTiles | R8_UNORM ⌈W/8⌉×⌈H/8⌉: 8×8 타일 안 표면 픽셀의 min `reflectionLobeHalfAngle(지각 거칠기, NoV)` / π (R의 `Reflection.hlsli`와 같은 식, 하늘만인 타일 = 1), 재질 해석의 부산물 (v1.3; v1.2의 roughnessTiles 대체) | M | R |
 | color | 메인: 7.5 출력, 보조 뷰: RGBA16F 선형 | M | 호출자 / R |
@@ -387,3 +391,5 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.12 (2026-09-25):
   - **통합 게이트는 커밋 기준 빌드(3.5, 사용자 지시)**: `Build.ps1 -Committed [-Ref]` → `..\UnravelNext-gate` worktree. 트랙 집합이 바뀐 빌드 폴더는 새로 구성한다(I 신고, Ninja dyndep 단언).
   - 렌더 그래프: 과도 버퍼의 첫 사용은 항상 활성화 배리어를 받는다. 앞 프레임에 앨리어스 선행자로 비활성화(NO_ACCESS)된 버퍼가 접근 불가로 남던 결함을 고쳤다(S 신고, 디버그 레이어 1332).
+- v1.13 (2026-09-25):
+  - **R 요청 `20260925_R_probe_lookup_structure.md` 반영(코어 부분)**: `ViewResources::screenProbeMaps`(5.1 표). `TextureDesc::srvFormat/uavFormat`는 캐스팅 가능한 뷰 형식이다(4절; `DeviceCaps::relaxedFormatCasting`, 지원 안 하면 실패). 선택지 (a)가 이 장치에서 된다 [실측]: 단위 테스트 `graph_castable_view_formats`에서 R32_UINT UAV로 쓰고 R9G9B9E5_SHAREDEXP SRV로 읽었고 4,096 texel 중 틀린 것 0. RGBA16F 아틀라스(8 B/texel)의 절반 대역이다. `screenProbeGather`는 R의 헤더(5.6)다.

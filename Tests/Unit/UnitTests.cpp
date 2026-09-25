@@ -451,6 +451,80 @@ UNX_TEST(graph_aliased_buffers_keep_their_writes)
     CHECK(wrong[0] == 0 && wrong[1] == 0);
 }
 
+UNX_TEST(graph_castable_view_formats)
+{
+    // TextureDesc::srvFormat/uavFormat: written as R32_UINT through the UAV, read as R9G9B9E5_SHAREDEXP through the SRV
+    // (the hardware decodes). Every texel must decode to what the packed bits say (R's filterable K-path maps).
+    if (!testDevice().caps().relaxedFormatCasting)
+    {
+        logf("    relaxed format casting not supported: skipped\n");
+        return;
+    }
+    RenderGraph g(testDevice());
+    ID3D12PipelineState* write = shaders().compute("Passes/Test/CastFormat.MODE0");
+    ID3D12PipelineState* read = shaders().compute("Passes/Test/CastFormat.MODE1");
+    const uint32_t n = 64;
+    ComPtr<ID3D12Resource> rb = [&] {
+        D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = (uint64_t)n * n * 16;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> r;
+        check(testDevice().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&r)),
+              "readback");
+        return r;
+    }();
+    TextureDesc td{ "cast", n, n, 1, 1, DXGI_FORMAT_R32_UINT };
+    td.srvFormat = DXGI_FORMAT_R9G9B9E5_SHAREDEXP;
+    const TextureRef t = g.createTexture(td);
+    const BufferRef out = g.createBuffer({ "decoded", (uint64_t)n * n * 16, 0 });
+    g.addPass("write", QueueType::Graphics, [&](PassBuilder& b) { b.use(t, Use::UavCompute); },
+              [=](PassContext& c) {
+                  const uint32_t k[4] = { c.uav(t), n, 0, 0 };
+                  c.cmd->SetPipelineState(write);
+                  c.computeConstants(k, 4);
+                  c.cmd->Dispatch(n / 8, n / 8, 1);
+              });
+    g.addPass("read", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(t, Use::SrvCompute);
+                  b.use(out, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[4] = { c.srv(t), n, c.uav(out), 0 };
+                  c.cmd->SetPipelineState(read);
+                  c.computeConstants(k, 4);
+                  c.cmd->Dispatch(n / 8, n / 8, 1);
+              });
+    ID3D12Resource* dst = rb.Get();
+    g.addPass("readback", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(out, Use::CopySrc);
+                  b.keep();
+              },
+              [=](PassContext& c) { c.cmd->CopyBufferRegion(dst, 0, c.resource(out), 0, (uint64_t)n * n * 16); });
+    g.execute(nullptr);
+    for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+    const float* v = nullptr;
+    check(rb->Map(0, nullptr, (void**)&v), "map");
+    size_t wrong = 0;
+    for (uint32_t y = 0; y < n; ++y)
+        for (uint32_t x = 0; x < n; ++x)
+        {
+            const uint32_t bits = ((x * 37) & 511) | (((y * 59) & 511) << 9) | ((((x + y) * 13) & 511) << 18) | ((10 + ((x + y) & 7)) << 27);
+            const int e = (int)(bits >> 27) - 15 - 9;
+            const float expect[3] = { std::ldexp((float)(bits & 511), e), std::ldexp((float)((bits >> 9) & 511), e), std::ldexp((float)((bits >> 18) & 511), e) };
+            const float* got = v + 4 * (y * n + x);
+            if (got[0] != expect[0] || got[1] != expect[1] || got[2] != expect[2] || got[3] != 1.0f) ++wrong;
+        }
+    rb->Unmap(0, nullptr);
+    logf("    R32_UINT written, R9G9B9E5 read: %zu of %u texels wrong\n", wrong, n * n);
+    CHECK(wrong == 0);
+}
+
 UNX_TEST(graph_single_queue_is_one_list)
 {
     // Default policy: compute-queue passes run on the graphics queue; the frame is one command list.

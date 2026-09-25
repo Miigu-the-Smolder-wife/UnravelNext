@@ -251,6 +251,8 @@ struct RenderGraph::Impl
                 h = mix(h, r.tdesc.mipLevels);
                 h = mix(h, r.tdesc.format);
                 h = mix(h, r.tdesc.dimension);
+                h = mix(h, r.tdesc.srvFormat);
+                h = mix(h, r.tdesc.uavFormat);
             }
             else
             {
@@ -386,6 +388,7 @@ struct RenderGraph::Impl
         std::vector<Placed> aliased;
         std::vector<uint32_t> placeOrder;
         std::vector<D3D12_RESOURCE_DESC1> descs(resourceCount);
+        std::vector<std::vector<DXGI_FORMAT>> castable(resourceCount);
         std::vector<D3D12_RESOURCE_ALLOCATION_INFO> infos(resourceCount);
         uint64_t unaliasedBytes = 0;
         for (uint32_t r = 0; r < resourceCount; ++r)
@@ -421,7 +424,17 @@ struct RenderGraph::Impl
                 if (sum[r].uavFlag) d.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
             }
             descs[r] = d;
-            infos[r] = device.d3d()->GetResourceAllocationInfo2(0, 1, &d, nullptr);
+            castable[r] = castableFormats(n);
+            if (castable[r].empty())
+                infos[r] = device.d3d()->GetResourceAllocationInfo2(0, 1, &d, nullptr);
+            else
+            {
+                ComPtr<ID3D12Device12> d12;
+                check(device.d3d()->QueryInterface(IID_PPV_ARGS(&d12)), "ID3D12Device12 (castable formats)");
+                const UINT32 count = (UINT32)castable[r].size();
+                const DXGI_FORMAT* list = castable[r].data();
+                infos[r] = d12->GetResourceAllocationInfo3(0, 1, &d, &count, &list, nullptr);
+            }
             unaliasedBytes += infos[r].SizeInBytes;
             placeOrder.push_back(r);
         }
@@ -507,7 +520,7 @@ struct RenderGraph::Impl
             // Buffer views also depend on the declared stride (structured or raw), which the D3D12 desc does not carry.
             ph.descKey = mix(mix(mix(std::hash<std::string_view>{}(std::string_view(reinterpret_cast<const char*>(&descs[r]), sizeof(D3D12_RESOURCE_DESC1))), ph.offset),
                                  heapSize),
-                             n.texture ? 0u : n.bdesc.stride);
+                             n.texture ? ((uint64_t)n.tdesc.srvFormat << 32 | n.tdesc.uavFormat) : n.bdesc.stride);
             // Reuse an identical placed resource from the previous plan, with its views plus any view this plan's uses
             // need that the previous plan's did not (a consumer culled before, live now).
             if (plan && r < plan->physical.size() && plan->physical[r].resource && plan->physical[r].descKey == ph.descKey)
@@ -525,7 +538,8 @@ struct RenderGraph::Impl
                 clear.Format = n.tdesc.format;
                 clearPtr = &clear;  // zero colour / reversed-Z far plane
             }
-            check(device.d3d()->CreatePlacedResource2(heap.Get(), ph.offset, &descs[r], D3D12_BARRIER_LAYOUT_UNDEFINED, clearPtr, 0, nullptr, IID_PPV_ARGS(&ph.resource)),
+            check(device.d3d()->CreatePlacedResource2(heap.Get(), ph.offset, &descs[r], D3D12_BARRIER_LAYOUT_UNDEFINED, clearPtr, (UINT32)castable[r].size(),
+                                                      castable[r].empty() ? nullptr : castable[r].data(), IID_PPV_ARGS(&ph.resource)),
                   "CreatePlacedResource2(render graph transient)");
             std::wstring wname(n.name.begin(), n.name.end());
             ph.resource->SetName(wname.c_str());
@@ -845,7 +859,7 @@ struct RenderGraph::Impl
             if (srv && v.srv == UINT32_MAX)
             {
                 D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
-                sd.Format = depth ? depthSrvFormat(n.tdesc.format) : n.tdesc.format;
+                sd.Format = depth ? depthSrvFormat(n.tdesc.format) : (n.tdesc.srvFormat != DXGI_FORMAT_UNKNOWN ? n.tdesc.srvFormat : n.tdesc.format);
                 sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 if (volume) { sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D; sd.Texture3D.MipLevels = n.tdesc.mipLevels; }
                 else if (array) { sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY; sd.Texture2DArray.MipLevels = n.tdesc.mipLevels; sd.Texture2DArray.ArraySize = n.tdesc.depthOrArraySize; }
@@ -856,7 +870,7 @@ struct RenderGraph::Impl
             if (uav && v.uav == UINT32_MAX)
             {
                 D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
-                ud.Format = n.tdesc.format;
+                ud.Format = n.tdesc.uavFormat != DXGI_FORMAT_UNKNOWN ? n.tdesc.uavFormat : n.tdesc.format;
                 if (volume) { ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D; ud.Texture3D.WSize = n.tdesc.depthOrArraySize; }
                 else if (array) { ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY; ud.Texture2DArray.ArraySize = n.tdesc.depthOrArraySize; }
                 else ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
@@ -921,6 +935,18 @@ struct RenderGraph::Impl
         const ResourceNode& n = resources[r];
         if (n.imported) return importedViews.at(n.importedResource);
         return plan->physical[r].views;
+    }
+
+    // View formats a texture is created castable to (TextureDesc::srvFormat/uavFormat); empty when it has none.
+    std::vector<DXGI_FORMAT> castableFormats(const ResourceNode& n) const
+    {
+        std::vector<DXGI_FORMAT> out;
+        if (!n.texture) return out;
+        for (DXGI_FORMAT f : { n.tdesc.srvFormat, n.tdesc.uavFormat })
+            if (f != DXGI_FORMAT_UNKNOWN && f != n.tdesc.format && std::find(out.begin(), out.end(), f) == out.end()) out.push_back(f);
+        if (!out.empty() && !device.caps().relaxedFormatCasting)
+            fail("render graph: '%s' needs castable view formats, which this device does not support (relaxed format casting)", n.name.c_str());
+        return out;
     }
 
     // UNX_GRAPH_NO_ALIAS=1: every transient gets its own memory (diagnosis: aliasing or an undeclared use).

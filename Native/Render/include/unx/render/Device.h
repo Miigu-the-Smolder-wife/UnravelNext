@@ -43,6 +43,7 @@ struct DeviceCaps
     D3D12_RESOURCE_BINDING_TIER bindingTier = D3D12_RESOURCE_BINDING_TIER_1;
     D3D12_RESOURCE_HEAP_TIER heapTier = D3D12_RESOURCE_HEAP_TIER_1;
     bool enhancedBarriers = false;
+    bool relaxedFormatCasting = false;  // castable view formats (TextureDesc::srvFormat/uavFormat)
     // NVAPI (R590 SDK): opacity micromaps and thread reordering on drivers without DXR 1.2 (ARCHITECTURE 7.1-6).
     bool nvapi = false;
     bool nvapiOpacityMicromap = false;

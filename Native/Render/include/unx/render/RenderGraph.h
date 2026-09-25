@@ -51,6 +51,11 @@ struct TextureDesc
     uint16_t mipLevels = 1;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     D3D12_RESOURCE_DIMENSION dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    // View formats other than 'format' (INTERFACES_KO.md 4, v1.13): the texture is created castable to them (relaxed
+    // format casting, same bits per texel), e.g. written as R32_UINT through its UAV and filtered as
+    // R9G9B9E5_SHAREDEXP through its SRV. UNKNOWN = 'format'.
+    DXGI_FORMAT srvFormat = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT uavFormat = DXGI_FORMAT_UNKNOWN;
 };
 
 struct BufferDesc

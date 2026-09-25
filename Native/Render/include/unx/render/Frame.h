@@ -58,6 +58,9 @@ struct ViewResources
     TextureRef gbuffer;            // RG32_UINT (GBuffer.hlsli)                              [M]
     TextureRef shadowVisibility;   // R32_UINT, 4 light slots x 8 bit (7.3)                 [S]
     TextureRef screenProbes;       // GI screen probes (main view only)                     [R]
+    TextureRef screenProbeMaps;    // atlas of the K-path radiance maps of the cache entries  [R]
+                                   // the screen probes use, hardware-filterable (M: SrvCompute; R's
+                                   // ScreenProbes.hlsli defines the layout; v1.13)
     TextureRef reflection;         // RGBA16F reflection radiance + weight (main view only) [R]
     TextureRef reflectionLobeTiles;  // R8_UNORM ceil(W/8) x ceil(H/8): min over the tile's      [M]
                                      // surface pixels of reflectionLobeHalfAngle(r, NoV) / pi

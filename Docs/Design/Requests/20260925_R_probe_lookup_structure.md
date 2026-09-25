@@ -37,3 +37,13 @@ R 게이트의 격리 벤치(`Passes/GI/Gates/ProbeLookupBench.hlsl`)로 쟀다.
 - 코어: `ViewResources` 필드 하나, (a)라면 createTexture의 castable 형식.
 - M: `ShadeOpaque.hlsl`의 조회 호출 교체, 새 텍스처 선언.
 - R: 함수 추가, 아틀라스 생산(GiProbeMaps가 소유 항목만 쓰므로 비용이 거의 늘지 않는다 [예상]).
+
+## 결과 (코어, v1.13)
+
+- **2) 형식은 (a)로 결정했다 [실측]**:
+  - 코어가 `TextureDesc::srvFormat/uavFormat`(캐스팅 가능한 뷰 형식)를 지원한다.
+  - 자원은 relaxed format casting 목록과 함께 만들고, SRV와 UAV는 각자 형식으로 만든다.
+  - 단위 테스트 `graph_castable_view_formats`: R32_UINT UAV로 RGB9E5 비트를 쓰고 R9G9B9E5_SHAREDEXP SRV의 `Load`로 읽었다. 하드웨어 복원 값이 CPU 복원과 4,096 texel 모두 비트 단위로 같았다.
+  - RGBA16F(8 B)의 절반 대역이다. 사용 예: `TextureDesc d{ "...", w, h, 1, 1, DXGI_FORMAT_R32_UINT }; d.srvFormat = DXGI_FORMAT_R9G9B9E5_SHAREDEXP;` UAV는 R32_UINT(`RWTexture2D<uint>`), SRV는 `Texture2D<float4>`로 `SampleLevel`한다.
+- `ViewResources::screenProbeMaps`(생산 R, 소비 M `SrvCompute`)를 추가했다. 형식·배치는 R의 `ScreenProbes.hlsli`가 정한다.
+- 1) `screenProbeGather`는 R의 공개 헤더 변경이다(5.6). R이 커밋하면 표를 고친다. M의 호출 교체는 M이 한다.

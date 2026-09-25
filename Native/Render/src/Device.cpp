@@ -200,6 +200,7 @@ Device::Device(const DeviceOptions& options) : m_options(options)
     D3D12_FEATURE_DATA_D3D12_OPTIONS12 o12{};
     m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &o12, sizeof o12);
     m_caps.enhancedBarriers = o12.EnhancedBarriersSupported;
+    m_caps.relaxedFormatCasting = o12.RelaxedFormatCastingSupported;
 
     if (m_caps.shaderModel < D3D_SHADER_MODEL_6_6) fail("shader model 6.6 (bindless) is required");
     if (m_caps.meshShaderTier < D3D12_MESH_SHADER_TIER_1) fail("mesh shaders are required");
