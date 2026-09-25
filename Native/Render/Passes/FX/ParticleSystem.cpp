@@ -223,7 +223,8 @@ struct ParticleSystem::Impl
     std::vector<uint32_t> programOutput;  // output kind per program (the last NV_STREAM_PROGRAMS table)
     Buf surfaceBoxes{ "fx.surfaceBoxes", 16 };
     Buf colliders{ "fx.colliders", 60 };
-    Buf trace{ "fx.trace", 544 };  // TraceRecord of the traced particle (diagnostic)  // colliding slots after their motion (FxIntegrate -> FxCollide)
+    Buf trace{ "fx.trace", 544 };
+    Buf rowMotion{ "fx.rowMotion", 112 };  // RowMotion per emitter row (FxBegin; Particles.hlsli)  // TraceRecord of the traced particle (diagnostic)  // colliding slots after their motion (FxIntegrate -> FxCollide)
     Buf overflowRecords{ "fx.overflowRecords", kOverflowRecordBytes };  // IMPACT_OVERFLOW inputs (diagnostic, readState "overflow")
     // local volume particles: record16 + side8 per live volume particle (Particles.hlsli; render rules request 3b)
     Buf volumeRecords{ "fx.volumeRecords", 16 }, volumeSide{ "fx.volumeSide", 8 }, volumeRanges{ "fx.volumeRanges", 32 }, gridBlocks{ "fx.gridBlocks", 4 };
@@ -506,6 +507,7 @@ void ParticleSystem::record(FramePassContext& fc)
         m.emitterUpdateRows.ensure(device, (uint64_t)h.emitter_count * 4);
         m.emitterPatches.ensure(device, (uint64_t)h.emitter_patch_count * sizeof(NV_StreamEmitterPatch));
         m.dynamic[cur].ensure(device, (uint64_t)tableRows * sizeof(EmitterDynamic));
+        m.rowMotion.ensure(device, (uint64_t)std::max<uint32_t>(tableRows, 1) * 112);
         m.spawns.ensure(device, (uint64_t)h.spawn_count * sizeof(NV_StreamSpawn));
         m.explicitBirths.ensure(device, (uint64_t)h.explicit_count * sizeof(NV_StreamExplicitBirth));
         m.fields.ensure(device, (uint64_t)h.field_count * sizeof(NV_StreamField));
@@ -680,7 +682,7 @@ void ParticleSystem::record(FramePassContext& fc)
                                     &m.spawnedSlots, &m.dynamic[cur], &m.counters,
                                     &m.report, &slot.events, &m.tickSurfaces, &m.gridCount, &m.gridStart, &m.gridFill, &m.gridEntries, &m.gridLarge,
                                     &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.volumeRecords, &m.volumeSide,
-                                    &m.ribbonRunStart, &m.ribbonTangents, &m.gridBlocks, &m.surfaceBoxes, &m.overflowRecords, &m.colliders, &m.trace,
+                                    &m.ribbonRunStart, &m.ribbonTangents, &m.gridBlocks, &m.surfaceBoxes, &m.overflowRecords, &m.colliders, &m.trace, &m.rowMotion,
                                     &m.emitterTable, &m.emitterStamp };
         std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitterUpdates, &m.emitterUpdateRows, &m.emitterPatches, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
                                      &m.restore, &m.slotBase, &m.bodies, &m.dynamicSurfaces, &m.ribbonRanges, &m.volumeRanges };
@@ -830,6 +832,7 @@ void ParticleSystem::record(FramePassContext& fc)
             tc.surfaceBoxes = c.uav(m.surfaceBoxes.ref);
             tc.colliders = c.uav(m.colliders.ref);
             tc.trace = c.uav(m.trace.ref);
+            tc.rowMotion = c.uav(m.rowMotion.ref);
             tc.overflowRecords = c.uav(m.overflowRecords.ref);
             tc.overflowCapacity = kOverflowRecords;
             tc.gridBlocks = c.uav(m.gridBlocks.ref);

@@ -41,21 +41,20 @@ void main(uint3 id : SV_DispatchThreadID)
     FX_RWBUFFER(float4, posAge, g_posAge);
     FX_RWBUFFER(float4, velocity, g_velocity);
     FX_RWBUFFER(uint2, meta, g_meta);
-    FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
-    FX_BUFFER(StreamProgram, programs, g_programs);
     FX_RWBUFFER(EmitterDynamic, dynamic, g_emitterDynamic);
+    FX_RWBUFFER(RowMotion, rowMotion, g_rowMotion);
     const float4 pa = posAge[slot];
     const float4 vv = velocity[slot];
     const uint2 m = meta[slot];
     const uint row = m.x, birth = m.y;
     if (row >= g_emitterCount) { fxStatus(FX_STATUS_RANGE); alive[slot] = FX_SLOT_DEAD; return; }
-    const StreamEmitter e = emitters[row];
-    const StreamProgram p = programs[e.program];
+    const RowMotion rm = rowMotion[row];
     const EmitterDynamic dyn = dynamic[row];
+    const uint ef = fxRowEmitterFlags(rm);
     NvState s;
     s.position = pa.xyz; s.velocity = vv.xyz; s.age = pa.w;
     // A KILLED row's slots vanish (no event, no dying record), new births included.
-    if ((e.flags & FX_EMITTER_KILLED) != 0u) { alive[slot] = FX_SLOT_DEAD; return; }
+    if ((ef & FX_EMITTER_KILLED) != 0u) { alive[slot] = FX_SLOT_DEAD; return; }
     const bool born = fxNegative(pa.w);
     float h;
     NvDrag drag;
@@ -66,49 +65,52 @@ void main(uint3 id : SV_DispatchThreadID)
         FX_RWBUFFER(float4, velocityOut, g_velocityOut);
         posAgeOut[slot] = float4(s.position, s.age);
         velocityOut[slot] = float4(s.velocity, 0);
-        fxWriteOutputs(slot, birth, s, e, p, dyn);
+        fxWriteOutputs(slot, row, birth, s, rm, dyn);
         return;
     }
     if (born)
     {
         h = -pa.w;
         s.age = 0;
-        drag = nv_linear_drag(p.drag, h);
+        drag = nv_linear_drag(rm.drag, h);
     }
     else
     {
         // a. rebase, transport (every existing slot, dying ones too: event positions are in this tick's origin space)
-        s.position -= e.rebase;
-        if ((e.flags & FX_EMITTER_TRANSPORT) != 0u)
+        s.position -= rm.rebase;
+        if ((ef & FX_EMITTER_TRANSPORT) != 0u)
         {
+            FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
+            const StreamEmitter e = emitters[row];
             s.position = nv_affine_point(e.transport[0], e.transport[1], e.transport[2], s.position);
             s.velocity = nv_affine_vector(e.transport[0], e.transport[1], e.transport[2], s.velocity);
         }
-        if (birth - e.dyingBirth < e.deathBirth - e.dyingBirth)
+        if (birth - rm.dyingBirth < rm.deathBirth - rm.dyingBirth)
         {
-            if ((e.flags & FX_EMITTER_DEATH_EVENTS) != 0u && e.deathEvent != FX_NONE)
+            if ((ef & FX_EMITTER_DEATH_EVENTS) != 0u && rm.deathEvent != FX_NONE)
             {
-                const float rest = max(0.0f, p.lifetime - s.age);
+                const float rest = max(0.0f, rm.lifetime - s.age);
                 NvImpact impact;
-                nv_integrate(fxMotion(p, e, dyn, birth), rest, nv_linear_drag(p.drag, rest), s, impact);
-                fxWriteEvent(e.deathEvent + (birth - e.dyingBirth), fxEvent(row, birth, FX_EVENT_DEATH, s));
+                nv_integrate(fxMotionRow(rm, dyn, birth), rest, nv_linear_drag(rm.drag, rest), s, impact);
+                fxWriteEvent(rm.deathEvent + (birth - rm.dyingBirth), fxEvent(row, birth, FX_EVENT_DEATH, s));
             }
             die(slot);
             return;
         }
         h = g_dt;
-        drag.velocity = e.dragVelocity; drag.position = e.dragPosition; drag.acceleration = e.dragAcceleration;
+        drag.velocity = rm.dragVelocity; drag.position = rm.dragPosition; drag.acceleration = rm.dragAcceleration;
     }
-    const NvMotion mo = fxMotion(p, e, dyn, birth);
+    const NvMotion mo = fxMotionRow(rm, dyn, birth);
     if (fxTraced(row, birth))
     {
         // diagnostic: the inputs of this particle's integrate call (the end is written by fxFinishSlot)
+        FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
         FX_RWBUFFER(TraceRecord, trace, g_trace);
         TraceRecord r = (TraceRecord)0;
         r.inputs.row = row; r.inputs.birth = birth; r.inputs.newborn = born ? 1u : 0u; r.inputs.depth = 0u;
         r.inputs.position = s.position; r.inputs.age = s.age; r.inputs.velocity = s.velocity; r.inputs.h = h;
         r.inputs.drag = float4(drag.velocity, drag.position, drag.acceleration, 0);
-        r.inputs.emitter = e; r.inputs.dynamic = dyn;
+        r.inputs.emitter = emitters[row]; r.inputs.dynamic = dyn;
         trace[0] = r;
     }
     float3 start, move, accel;
@@ -129,5 +131,5 @@ void main(uint3 id : SV_DispatchThreadID)
         else fxStatus(FX_STATUS_CAPACITY);
         return;
     }
-    fxFinishSlot(slot, row, birth, e, p, dyn, mo, h, start, move, accel, s);
+    fxFinishSlot(slot, row, birth, rm, dyn, mo, h, start, move, accel, s);
 }

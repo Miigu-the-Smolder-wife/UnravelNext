@@ -15,16 +15,14 @@ void main(uint3 id : SV_DispatchThreadID)
     const ColliderRecord c = colliders[id.x];
     if (c.slot >= g_capacity) { fxStatus(FX_STATUS_RANGE); return; }
     FX_RWBUFFER(uint2, meta, g_meta);
-    FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
-    FX_BUFFER(StreamProgram, programs, g_programs);
+    FX_RWBUFFER(RowMotion, rowMotion, g_rowMotion);
     FX_RWBUFFER(EmitterDynamic, dynamic, g_emitterDynamic);
     const uint2 m = meta[c.slot];
     const uint row = m.x, birth = m.y;
     if (row >= g_emitterCount) { fxStatus(FX_STATUS_RANGE); return; }
-    const StreamEmitter e = emitters[row];
-    const StreamProgram p = programs[e.program];
+    const RowMotion rm = rowMotion[row];
     const EmitterDynamic dyn = dynamic[row];
     NvState s;
     s.position = c.start; s.velocity = c.velocity; s.age = c.age;
-    fxFinishSlot(c.slot, row, birth, e, p, dyn, fxMotion(p, e, dyn, birth), c.h, c.start, c.move, c.accel, s);
+    fxFinishSlot(c.slot, row, birth, rm, dyn, fxMotionRow(rm, dyn, birth), c.h, c.start, c.move, c.accel, s);
 }

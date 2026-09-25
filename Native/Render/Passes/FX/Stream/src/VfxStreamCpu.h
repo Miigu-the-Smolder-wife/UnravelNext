@@ -313,6 +313,11 @@ private:
         const auto& parent=origin_[e.parent_row];
         origin_[row]={double(float(parent.x)+ev.position[0]),double(float(parent.y)+ev.position[1]),double(float(parent.z)+ev.position[2])};
         inherited_[row]=Real3{ev.velocity[0],ev.velocity[1],ev.velocity[2]}*double(e.inherited[0]);
+        // The resolved values stay in the table for the ticks that do not resend the
+        // row (NativeVfxStream.h, parent_event): the float sum and the float product.
+        const float fraction=e.inherited[0];
+        e.origin_anchor[0]=float(origin_[row].x);e.origin_anchor[1]=float(origin_[row].y);e.origin_anchor[2]=float(origin_[row].z);
+        for(size_t a=0;a<3;++a)e.inherited[a]=fraction*ev.velocity[a];
     }
     void advance(const NV_StreamHeader& h,Slot& s,bool existing,uint32_t& status){
         if(!s.alive)return;

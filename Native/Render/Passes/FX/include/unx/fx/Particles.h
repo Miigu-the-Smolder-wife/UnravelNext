@@ -46,7 +46,7 @@ struct TickConstants
     uint32_t surfaceBoxes, velocityOut, overflowRecords, overflowCapacity;
     uint32_t reserved25, reserved26, experiment, colliders;  // experiment_disable (timing only); collider queue
     uint32_t emitterPatches, patchCount, traceRow, traceBirth;  // patches of the tick (FxEmitters); traced particle
-    uint32_t trace, pad17, pad18, pad19;  // TraceRecord buffer (diagnostic, setTrace)
+    uint32_t trace, rowMotion, pad18, pad19;  // TraceRecord buffer (diagnostic, setTrace); RowMotion per row
 };
 static_assert(sizeof(TickConstants) == 416);
 

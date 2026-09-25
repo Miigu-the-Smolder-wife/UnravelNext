@@ -53,10 +53,17 @@ void main(uint3 id : SV_DispatchThreadID)
             emitters[i].parentEvent = FX_NONE;
             emitters[i].parentRow = FX_NONE;
         }
+        const StreamEmitter e = emitters[i];
         EmitterDynamic d;
-        d.originAnchor = emitters[i].originAnchor; d.pad0 = 0u;
-        d.inherited = emitters[i].inherited; d.pad1 = 0u;
+        d.originAnchor = e.originAnchor; d.pad0 = 0u;
+        d.inherited = e.inherited; d.pad1 = 0u;
         dynamic[i] = d;
+        {
+            // the row's values of this tick, read by every slot of the row (Particles.hlsli RowMotion)
+            FX_BUFFER(StreamProgram, programs, g_programs);
+            FX_RWBUFFER(RowMotion, rowMotion, g_rowMotion);
+            rowMotion[i] = fxRowMotion(e, programs[e.program]);
+        }
     }
 #if RESET
     if (i < g_capacity)

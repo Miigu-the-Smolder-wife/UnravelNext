@@ -134,8 +134,8 @@ enum {
                                   parent_row and rebase of the row the executor holds (the per-tick
                                   ones are this tick's, as in a block); every other field keeps the
                                   held block. The CPU sends a patch only when the held block with the
-                                  patch applied equals the block it would send, so a patch and a
-                                  block give the same table. TRANSPORT and SOURCE never appear in a
+                                  patch applied equals the block it would send (except `origin`, which
+                                  no executor reads), so a patch and a block give the same table. TRANSPORT and SOURCE never appear in a
                                   patch (those rows send blocks). */
 };
 /* Program flags. Kinematic outputs (beams, decals) never enter the stream. */
@@ -237,7 +237,9 @@ typedef struct NV_StreamProgram {
    numbers are the low 32 bits of the emitter's 64-bit counter; all interval
    comparisons are mod 2^32 (live spans are far below 2^31). */
 typedef struct NV_StreamEmitter {
-    double origin[3];            /* world origin (renderer) */
+    double origin[3];            /* world origin, for CPU-side consumers only: executors never read it, and
+                                    their copy may lag for chain-child rows (a patch leaves it; renderers
+                                    form world positions as anchor + origin_anchor + position) */
     uint32_t program,flags;      /* program index, NV_STREAM_EMITTER_* */
     float origin_anchor[3];      /* origin - anchor */
     uint32_t rng_key;            /* birth RNG key (CPU hash of seed, instance, asset) */
@@ -257,7 +259,11 @@ typedef struct NV_StreamEmitter {
                                     table value, or for a parent itself created in this tick (depth >= 2)
                                     the value the GPU resolved at the previous depth. The CPU defines the
                                     child's double origin as anchor + (double)that float, so later ticks
-                                    send the identical value. */
+                                    send the identical value. After the tick the executor keeps both
+                                    resolved values in the row (origin_anchor = that float sum,
+                                    inherited = fraction x event velocity, float product, all three
+                                    components): a later packet that sends no block for the row reads
+                                    them. */
     float transport[12];         /* attached source motion, row-major 3x4 [R|t] in origin space */
     float source_previous[12];   /* source map at tick start, [R|t - origin] */
     float source_current[12];    /* source map at tick end */

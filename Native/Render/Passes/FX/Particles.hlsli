@@ -87,7 +87,7 @@ cbuffer FxTick : register(b1)
     uint g_reserved25, g_reserved26, g_experiment, g_colliders;  // sort: pass p's histogram is hist[p * g_histRegion + group * 256
                                                                   // + digit]; g_colliders: queue of colliding slots (FxCollide)
     uint g_emitterPatches, g_patchCount, g_traceRow, g_traceBirth;  // patches of the tick (FxEmitters); traced particle
-    uint g_trace, g_pad17, g_pad18, g_pad19;                         // TraceRecord buffer (diagnostic)
+    uint g_trace, g_rowMotion, g_pad18, g_pad19;                     // TraceRecord buffer (diagnostic); RowMotion per row
     // The tick's fields, uniform for every particle: read through the constant path (one broadcast load per row) instead of
     // per-particle buffer loads. Filled by the CPU when the counts fit (else the structured buffers are read).
     uint4 g_fieldRows[FX_CB_FIELDS * 2];             // context fields (StreamField, 32 B each)
@@ -427,6 +427,57 @@ NvMotion fxMotion(StreamProgram p, StreamEmitter e, EmitterDynamic dyn, uint bir
     return m;
 }
 
+// Per-row values of the tick that every slot of the row reads (filled by FxBegin after the per-tick clears): one contiguous
+// 112 B record instead of scattered fields of the 336 B emitter row and, through a second dependent load, the 320 B
+// program. Exact copies of the same fields, so every result is unchanged.
+struct RowMotion
+{
+    float3 acceleration; float drag;                  // program
+    float3 noise; float noiseFrequency;               // program
+    float dragVelocity, dragPosition, dragAcceleration, lifetime;  // emitter (full-dt drag factors), program
+    uint noiseKey, program, dyingBirth, deathBirth;   // emitter
+    float3 rebase; uint deathEvent;                   // emitter (per-tick)
+    float restitution, friction, separation; uint flags;  // program; flags: emitter flags | program flags << 8 | output << 24
+    uint entity0, entity1, generation0, generation1;  // emitter (self-collision exclusion)
+};
+#define FX_ROW_PROGRAM_SHIFT 8u
+#define FX_ROW_OUTPUT_SHIFT 24u
+RowMotion fxRowMotion(StreamEmitter e, StreamProgram p)
+{
+    RowMotion r;
+    r.acceleration = p.acceleration; r.drag = p.drag;
+    r.noise = p.noise; r.noiseFrequency = p.noiseFrequency;
+    r.dragVelocity = e.dragVelocity; r.dragPosition = e.dragPosition; r.dragAcceleration = e.dragAcceleration; r.lifetime = p.lifetime;
+    r.noiseKey = e.noiseKey; r.program = e.program; r.dyingBirth = e.dyingBirth; r.deathBirth = e.deathBirth;
+    r.rebase = e.rebase; r.deathEvent = e.deathEvent;
+    r.restitution = p.restitution; r.friction = p.friction; r.separation = p.separation;
+    r.flags = (e.flags & 0xFFu) | ((p.flags & 0xFFFFu) << FX_ROW_PROGRAM_SHIFT) | ((p.output & 0xFFu) << FX_ROW_OUTPUT_SHIFT);
+    r.entity0 = e.entity.x; r.entity1 = e.entity.y; r.generation0 = e.generation.x; r.generation1 = e.generation.y;
+    return r;
+}
+uint fxRowEmitterFlags(RowMotion r) { return r.flags & 0xFFu; }
+uint fxRowProgramFlags(RowMotion r) { return (r.flags >> FX_ROW_PROGRAM_SHIFT) & 0xFFFFu; }
+uint fxRowOutput(RowMotion r) { return r.flags >> FX_ROW_OUTPUT_SHIFT; }
+// NvMotion of a slot from its row's RowMotion (identical to fxMotion(p, e, dyn, birth)).
+NvMotion fxMotionRow(RowMotion r, EmitterDynamic dyn, uint birth)
+{
+    NvMotion m;
+    const uint pf = fxRowProgramFlags(r);
+    m.acceleration = r.acceleration;
+    m.drag = r.drag;
+    m.noise = r.noise;
+    m.noise_frequency = r.noiseFrequency;
+    m.noise_seed = nv_noise_seed(r.noiseKey, birth);
+    m.wind = (pf & FX_PROGRAM_WIND) != 0u ? 1u : 0u;
+    m.collision = (pf & FX_PROGRAM_COLLISION) != 0u ? 1u : 0u;
+    m.self = (pf & FX_PROGRAM_COLLIDE_SELF) != 0u ? 1u : 0u;
+    m.entity0 = r.entity0; m.entity1 = r.entity1; m.generation0 = r.generation0; m.generation1 = r.generation1;
+    m.restitution = r.restitution; m.friction = r.friction; m.separation = r.separation;
+    if ((g_experiment & 32u) != 0u) m.noise = float3(0, 0, 0);  // timing attribution only (fx.toml experiment_disable)
+    m.origin_anchor = dyn.originAnchor;
+    return m;
+}
+
 
 
 bool fxFinite(NvState s) { return all(isfinite(s.position)) && all(isfinite(s.velocity)) && isfinite(s.age); }
@@ -503,8 +554,14 @@ uint fxPackR11G11B10(float3 c)
     return r | (g << 11) | (b << 22);
 }
 // Integrate epilogue: a ribbon particle writes its point; a volume particle writes its record16 + side8.
-void fxWriteOutputs(uint slot, uint birth, NvState s, StreamEmitter e, StreamProgram p, EmitterDynamic dyn)
+void fxWriteOutputs(uint slot, uint row, uint birth, NvState s, RowMotion rm, EmitterDynamic dyn)
 {
+    const uint output = fxRowOutput(rm);
+    if (output != FX_OUTPUT_RIBBON && output != FX_OUTPUT_VOLUME) return;
+    FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
+    FX_BUFFER(StreamProgram, programs, g_programs);
+    const StreamEmitter e = emitters[row];
+    const StreamProgram p = programs[rm.program];
     if (p.output == FX_OUTPUT_RIBBON)
     {
         const float u = saturate(s.age / p.lifetime);
@@ -546,7 +603,7 @@ void fxWriteOutputs(uint slot, uint birth, NvState s, StreamEmitter e, StreamPro
 // nv_integrate_finish (the sweep or start + move, age += h) and everything after it: status, the IMPACT_OVERFLOW
 // diagnostic record (the finish inputs: position = start, velocity = velocity after the motion, drag.xyz = move,
 // accel = effective acceleration, newborn = 2 marks this layout), the collision event, this tick's state, the sort key and the outputs.
-void fxFinishSlot(uint slot, uint row, uint birth, StreamEmitter e, StreamProgram p, EmitterDynamic dyn, NvMotion mo, float h, float3 start, float3 move,
+void fxFinishSlot(uint slot, uint row, uint birth, RowMotion rm, EmitterDynamic dyn, NvMotion mo, float h, float3 start, float3 move,
                   float3 accel, NvState s)
 {
     const NvState before = s;
@@ -567,7 +624,8 @@ void fxFinishSlot(uint slot, uint row, uint birth, StreamEmitter e, StreamProgra
             r.velocity = before.velocity; r.h = h;
             r.drag = float4(move, 0);
             r.accel = float4(accel, 0);
-            r.emitter = e;
+            FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
+            r.emitter = emitters[row];
             r.dynamic = dyn;
             records[at] = r;
         }
@@ -580,7 +638,7 @@ void fxFinishSlot(uint slot, uint row, uint birth, StreamEmitter e, StreamProgra
         return;
     }
     fxStatus(status);
-    if (impact.count != 0u && (p.flags & FX_PROGRAM_COLLISION_EVENTS) != 0u)
+    if (impact.count != 0u && (fxRowProgramFlags(rm) & FX_PROGRAM_COLLISION_EVENTS) != 0u)
     {
         uint n;
         InterlockedAdd(counters[FX_COUNTER_COLLISIONS], 1u, n);
@@ -598,7 +656,7 @@ void fxFinishSlot(uint slot, uint row, uint birth, StreamEmitter e, StreamProgra
     FX_RWBUFFER(float4, velocityOut, g_velocityOut);
     posAgeOut[slot] = float4(s.position, s.age);
     velocityOut[slot] = float4(s.velocity, 0);
-    fxWriteOutputs(slot, birth, s, e, p, dyn);
+    fxWriteOutputs(slot, row, birth, s, rm, dyn);
     if (fxTraced(row, birth))
     {
         FX_RWBUFFER(TraceRecord, trace, g_trace);
