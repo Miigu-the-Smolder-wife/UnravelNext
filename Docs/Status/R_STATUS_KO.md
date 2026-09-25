@@ -153,7 +153,12 @@
 
 ## 4. 인터페이스 사용 메모
 
-- `view.screenProbes`: RGBA32_UINT, (probesX·8) × (probesY·4 + 1)(SH + RGB9E5 방향 지도 8×8·4×4·2×2), 형식은 `ScreenProbes.hlsli` 주석. M은 `ProbeSrvs{ srv, srv, 0, 0 }`(두 필드 모두 같은 텍스처)로 채우고 `SrvCompute`로 선언한다.
+- `view.screenProbes`: RGBA32_UINT, (probesX·8) × (probesY·5 + 1). 행 0–3은 옛 블록 지도(M 커밋 뒤 제거), 행 4·probesY부터 평면 0–5(위치·법선, SH + 가림, 프레임 법선·소유 블록), 마지막 행은 헤더. 형식은 `ScreenProbes.hlsli` 주석. 방향 지도(K 경로)는 `view.screenProbeMaps` 아틀라스(R32_UINT UAV, R9G9B9E5 SRV)에 있다. 셰이딩 쪽 진입점은 `screenProbeGather`이다.
+- 바람(I 요청 `20260925_I_wind_change.md`, S 검토 bbf2575): R은 revision이 필요 없다.
+  - 광선에서 바람 인스턴스는 정지 포즈다. 바람 잎 정확 집합은 집합 안 인스턴스를 매 프레임 현재 바람으로 변형하고 refit하므로 바람 변경이 그 프레임에 반영된다.
+  - refit을 건너뛰는 최적화를 넣으면 S와 같은 끝점 상한 `windOffsetScale × windChangeBound(t0, s0, d0, t1, s1, d1)` ≤ hit 발자국 허용치로 판정한다. windOffset이 무기억 함수라는 계약에 의존한다.
+  - 정지 포즈 광선 기하와 바람 래스터의 차이는 `windOffsetBound`가 상한이다. 강한 바람에서는 반사·GI 속 잎 위치 오차가 이만큼 커진다.
+- 평면 뷰 마스크(v1.22, 5868a56): `ViewDesc::planarMask`와 `planarTileMask`가 계약에 들어갔다. V 구현의 GPU 검증은 게임이 끝난 뒤다. 그 전의 평면 뷰 실측은 마스크 없는 비용이라 과대다. 게임이 끝나면 R이 마스크를 채워 다시 잰다.
 - `FrameResources::giCache`: raw 버퍼 하나(헤더에 구역 오프셋). `GiSrvs{ srv, srv, 0, 0 }`.
 - DispatchRays 패스의 자원은 `SrvGraphics`/`UavGraphics`, TLAS·변형 BLAS는 `AccelerationStructureRead`(`RayScene::declareTraversal`).
 - 평면 반사: `ViewDesc::planarReflection(main, plane, x, y, w, h)`로 만든 뷰를 `FrameServices::renderView`에 넘기고, 돌려받은 `color`(노출 곱해진 HDR)를 해결 단계가 노출로 나눠 쓴다.
