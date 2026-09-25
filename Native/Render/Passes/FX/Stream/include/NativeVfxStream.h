@@ -290,12 +290,16 @@ typedef struct NV_StreamWorldField {
 } NV_StreamWorldField;
 
 /* Collision surface. kind 0 sphere (a, radius), 1 capsule (a, b, radius), 2
-   double-sided triangle (a, b, c). body == NV_STREAM_NONE: a, b, c, velocity,
-   angular_velocity and origin are anchor space (deformable surfaces written per
-   tick). Otherwise a, b, c are body-local and the tick's body frame gives the
-   world: p = R(q) p_local + position, surface velocity at a point x =
-   velocity + cross(angular_velocity, x - center) with the body's centre of
-   mass `center` (velocity/angular/origin of the record are then unused).
+   double-sided triangle (a, b, c). body == NV_STREAM_NONE: origin is an anchor-
+   space reference point of the surface (its motion centre when it moves, else an
+   interior point such as the centroid) and a, b, c are offsets from it; velocity
+   and angular_velocity are about origin (deformable surfaces written per tick).
+   Otherwise a, b, c are body-local and the tick's body frame gives the tick
+   surface: origin = the body's centre of mass `center`, offsets R(q) p_local +
+   (position - center), surface velocity at a point x = velocity +
+   cross(angular_velocity, x - center) (velocity/angular/origin of the record are
+   then unused). Geometry is thus only small offsets from a nearby point: its
+   float precision is eps x surface size, not eps x distance from the anchor.
    Two sections: the static table (`surfaces`, replaced only with
    NV_STREAM_SURFACES, typically the body-local rigid surfaces) and this tick's
    dynamic world-space surfaces (`dynamic_surfaces`, deforming bodies, every

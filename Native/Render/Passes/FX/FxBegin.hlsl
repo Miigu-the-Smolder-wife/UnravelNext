@@ -19,6 +19,7 @@ void main(uint3 id : SV_DispatchThreadID)
         counters[FX_COUNTER_STATUS] = 0u;
         counters[FX_COUNTER_DYING] = 0u;
         counters[FX_COUNTER_VOLUMES] = 0u;
+        counters[FX_COUNTER_OVERFLOWS] = 0u;
     }
     if (i < g_emitterCount)
     {

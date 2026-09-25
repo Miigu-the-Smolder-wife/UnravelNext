@@ -1,9 +1,10 @@
 // unx-kernel: cs_6_6 main
-// Collision surfaces of the tick in anchor space (NV_StreamSurface): thread per surface. Surface n < static count is
-// row n of the persistent static table, the others are this tick's dynamic rows (static count + dynamic index is the
-// surface number of the shared tie rule, NativeVfxStream.h). A
-// surface on a rigid body (body != NONE) is body-local: p = R(q) p_local + position with this tick's body frame, and its
-// velocity field is the body's (velocity of the centre of mass, angular velocity about it); the other surfaces are copied.
+// Collision surfaces of the tick (NV_StreamSurface): thread per surface. Surface n < static count is row n of the
+// persistent static table, the others are this tick's dynamic rows (static count + dynamic index is the surface number
+// of the shared tie rule, NativeVfxStream.h). A tick surface is an anchor-space reference point `origin` and small
+// offsets a, b, c from it. A surface on a rigid body (body != NONE) is body-local: origin = the body's centre of mass,
+// offsets = R(q) p_local + (position - center) (all terms of body size, so the float precision does not depend on the
+// distance from the anchor), and its velocity field is the body's; the other surfaces are copied.
 // Quaternion rotation as the CPU reference: t = 2 cross(u, v), v + w t + cross(u, t).
 #include "Passes/FX/Particles.hlsli"
 
@@ -27,12 +28,13 @@ void main(uint3 id : SV_DispatchThreadID)
     {
         FX_BUFFER(StreamBody, bodies, g_bodies);
         const StreamBody b = bodies[s.body];
-        s.a = rotateQ(b.rotation, s.a) + b.position;
-        s.b = rotateQ(b.rotation, s.b) + b.position;
-        s.c = rotateQ(b.rotation, s.c) + b.position;
+        const float3 shift = b.position - b.center;
+        s.a = rotateQ(b.rotation, s.a) + shift;
+        s.b = rotateQ(b.rotation, s.b) + shift;
+        s.c = rotateQ(b.rotation, s.c) + shift;
         s.velocity = b.velocity;
         s.angular = b.angular;
-        s.origin = b.center;  // the surface velocity field turns about the centre of mass
+        s.origin = b.center;  // reference point of the offsets and centre of the velocity field
     }
     surfaces[id.x] = s;
 }

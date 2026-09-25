@@ -211,8 +211,10 @@ bool nv_hit_sphere(nv_real3 p, nv_real3 offset, nv_real3 d, nv_real3 center, nv_
     if (!(size > NV_R(0))) return false;
     t = candidate; normal = normal * (NV_R(1) / size); return true;
 }
+// p is emitter-origin space; the surface's a, b, c are offsets from s.origin.
 bool nv_hit(NvSurface s, nv_real3 p, nv_real3 offset, nv_real3 d, NV_OUT(nv_real) t, NV_OUT(nv_real3) normal) {
     t = NV_R(0); normal = nv_make3(NV_R(0), NV_R(0), NV_R(0));
+    p = p - s.origin;   // the segment start relative to the surface's reference point
     if (s.kind == 0u) return nv_hit_sphere(p, offset, d, s.a, s.radius, t, normal);
     if (s.kind == 2u) {
         nv_real3 e1 = s.b - s.a, e2 = s.c - s.a, h = cross(d, e2);
@@ -288,8 +290,9 @@ bool nv_surface_moves(NvSurface s) {
 // the fourth contact, separated). A candidate query must return every surface
 // whose motion over the interval can meet the segment (bounds grown by the motion).
 // A surface moved into emitter-origin space (points and its velocity centre).
+// (a, b, c are offsets from the surface's origin: only the origin moves.)
 NvSurface nv_surface_local(NvSurface s, nv_real3 origin) {
-    s.a = s.a - origin; s.b = s.b - origin; s.c = s.c - origin; s.origin = s.origin - origin;
+    s.origin = s.origin - origin;
     return s;
 }
 bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(NvState) s, NV_OUT(NvImpact) first) {

@@ -20,10 +20,13 @@ bool surfaceBox(uint i, out float3 lo, out float3 hi, out float turn, out float 
 {
     FX_RWBUFFER(StreamSurface, surfaces, g_tickSurfaces);
     const StreamSurface s = surfaces[i];
+    // a, b, c are offsets from the anchor-space reference point s.origin (NativeVfxStream.h)
     float r;
-    if (s.kind == 0u) { lo = s.a - s.radius; hi = s.a + s.radius; r = length(s.a - s.origin) + s.radius; }
-    else if (s.kind == 1u) { lo = min(s.a, s.b) - s.radius; hi = max(s.a, s.b) + s.radius; r = max(length(s.a - s.origin), length(s.b - s.origin)) + s.radius; }
-    else { lo = min(s.a, min(s.b, s.c)); hi = max(s.a, max(s.b, s.c)); r = max(length(s.a - s.origin), max(length(s.b - s.origin), length(s.c - s.origin))); }
+    if (s.kind == 0u) { lo = s.a - s.radius; hi = s.a + s.radius; r = length(s.a) + s.radius; }
+    else if (s.kind == 1u) { lo = min(s.a, s.b) - s.radius; hi = max(s.a, s.b) + s.radius; r = max(length(s.a), length(s.b)) + s.radius; }
+    else { lo = min(s.a, min(s.b, s.c)); hi = max(s.a, max(s.b, s.c)); r = max(length(s.a), max(length(s.b), length(s.c))); }
+    lo += s.origin;
+    hi += s.origin;
     turn = 0.0f;
     carry = 0.0f;
     float grow = 0.0f;

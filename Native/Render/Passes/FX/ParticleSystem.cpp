@@ -21,6 +21,7 @@ namespace
 constexpr uint32_t kScanBlock = 1024;
 constexpr uint32_t kSortGroupKeys = 4096;  // 256 threads x 16 keys
 constexpr uint32_t kReportBytes = 64;
+constexpr uint32_t kOverflowRecords = 1024, kOverflowRecordBytes = 432;  // IMPACT_OVERFLOW diagnostic records (Particles.hlsli)
 constexpr float kKeyFar = 1.0e6f;          // metres: log range of the sort key (keyNear .. 1000 km)
 
 uint32_t groups(uint64_t n, uint32_t size) { return (uint32_t)((n + size - 1) / size); }
@@ -174,11 +175,12 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
 struct ParticleSystem::Impl
 {
     // state (capacity sized)
-    Buf posAge{ "fx.posAge", 16 }, velocity{ "fx.velocity", 16 }, meta{ "fx.meta", 8 }, alive{ "fx.alive", 4 };
+    // state pair by tick parity: [cur] = this tick's output, [cur ^ 1] = its input (the last tick's output + births)
+    Buf posAge[2] = { { "fx.posAge0", 16 }, { "fx.posAge1", 16 } }, velocity[2] = { { "fx.velocity0", 16 }, { "fx.velocity1", 16 } };
+    Buf meta{ "fx.meta", 8 }, alive{ "fx.alive", 4 };
     Buf aliveList{ "fx.aliveList", 4 }, deadList{ "fx.deadList", 4 }, dyingList{ "fx.dyingList", 4 };
     Buf blockSums{ "fx.blockSums", 8 }, keyBySlot{ "fx.keyBySlot", 4 }, spawnedSlots{ "fx.spawnedSlots", 4 };
     Buf keysA{ "fx.keysA", 4 }, valsA{ "fx.valsA", 4 }, keysB{ "fx.keysB", 4 }, valsB{ "fx.valsB", 4 }, hist{ "fx.hist", 4 };
-    Buf records[2] = { { "fx.records0", 32 }, { "fx.records1", 32 } };
     Buf emitterTable{ "fx.emitterTable", sizeof(NV_StreamEmitter) }, emitterStamp{ "fx.emitterStamp", 4 };  // persistent (delta updates)
     Buf emitterUpdates{ "fx.emitterUpdates", sizeof(NV_StreamEmitter) }, emitterUpdateRows{ "fx.emitterUpdateRows", 4 };
     std::vector<NV_StreamEmitter> table;  // CPU mirror of the persistent table (ribbon and volume ranges)
@@ -197,11 +199,12 @@ struct ParticleSystem::Impl
     Buf surfaces{ "fx.surfaces", sizeof(NV_StreamSurface) }, restore{ "fx.restore", sizeof(NV_StreamParticle) }, slotBase{ "fx.slotBase", 4 };
     Buf dynamicSurfaces{ "fx.dynamicSurfaces", sizeof(NV_StreamSurface) };
     Buf bodies{ "fx.bodies", sizeof(NV_StreamBody) }, tickSurfaces{ "fx.tickSurfaces", sizeof(NV_StreamSurface) };
-    Buf ribbonPoints{ "fx.ribbonPoints", 32 }, ribbonLinks{ "fx.ribbonLinks", 4 }, ribbonVertices{ "fx.ribbonVertices", 32 }, mediumCells{ "fx.mediumCells", 96 };
+    Buf ribbonPoints{ "fx.ribbonPoints", 32 }, ribbonLinks{ "fx.ribbonLinks", 4 }, ribbonVertices{ "fx.ribbonVertices", 32 }, mediumCells{ "fx.mediumCells", 16 };  // NV_MediumCell rows (96 B) viewed as float4 (FxCells writes whole rows of a group)
     Buf ribbonRanges{ "fx.ribbonRanges", 16 }, ribbonScanA{ "fx.ribbonScanA", 4 }, ribbonScanB{ "fx.ribbonScanB", 32 }, ribbonRunStart{ "fx.ribbonRunStart", 4 },
         ribbonTangents{ "fx.ribbonTangents", 16 }, ribbonTotalsA{ "fx.ribbonTotalsA", 4 }, ribbonTotalsB{ "fx.ribbonTotalsB", 32 };
     std::vector<uint32_t> programOutput;  // output kind per program (the last NV_STREAM_PROGRAMS table)
     Buf surfaceBoxes{ "fx.surfaceBoxes", 16 };
+    Buf overflowRecords{ "fx.overflowRecords", kOverflowRecordBytes };  // IMPACT_OVERFLOW inputs (diagnostic, readState "overflow")
     Buf volumeList{ "fx.volumeRecords", 48 }, volumeRanges{ "fx.volumeRanges", 16 }, gridBlocks{ "fx.gridBlocks", 4 };
     uint32_t lastCollisions = 0;  // collision events of the last tick the CPU read (readback prefix size)
     Buf gridCount{ "fx.gridCount", 4 }, gridStart{ "fx.gridStart", 4 }, gridFill{ "fx.gridFill", 4 }, gridEntries{ "fx.gridEntries", 4 }, gridLarge{ "fx.gridLarge", 4 };
@@ -324,22 +327,22 @@ void ParticleSystem::record(FramePassContext& fc)
         const bool reset = (h.flags & NV_STREAM_RESET) != 0 || !m.started;  // (a capacity of 0 is valid: no live slot)
         m.started = true;
         const bool repack = !reset && capacity != m_capacity;
-        struct Old { Buf list, posAge, velocity, meta, records; } old;
+        struct Old { Buf list, posAge, velocity, meta; } old;
         if (capacity != m_capacity)
         {
             if (repack)
             {
-                const uint32_t prev = m.parity ^ 1u;  // records of the last recorded tick
-                old = { m.aliveList, m.posAge, m.velocity, m.meta, m.records[prev] };
-                for (Buf* b : { &old.list, &old.posAge, &old.velocity, &old.meta, &old.records })
+                const uint32_t prev = m.parity ^ 1u;  // output of the last recorded tick = this tick's input
+                old = { m.aliveList, m.posAge[prev], m.velocity[prev], m.meta };
+                for (Buf* b : { &old.list, &old.posAge, &old.velocity, &old.meta })
                 {
                     m.graveyard.push_back(b->resource);
                     b->importedGraph = nullptr;  // import this frame under its own name
                 }
             }
             // every capacity-sized buffer is allocated for the new capacity (a shrink frees memory too)
-            for (Buf* b : { &m.posAge, &m.velocity, &m.meta, &m.alive, &m.aliveList, &m.deadList, &m.dyingList, &m.keyBySlot, &m.spawnedSlots, &m.keysA,
-                            &m.valsA, &m.keysB, &m.valsB, &m.records[0], &m.records[1] })
+            for (Buf* b : { &m.posAge[0], &m.posAge[1], &m.velocity[0], &m.velocity[1], &m.meta, &m.alive, &m.aliveList, &m.deadList, &m.dyingList,
+                            &m.keyBySlot, &m.spawnedSlots, &m.keysA, &m.valsA, &m.keysB, &m.valsB })
             {
                 if (b->resource && !repack) device.deferRelease(b->resource);
                 else if (b->resource && std::find(m.graveyard.begin(), m.graveyard.end(), b->resource) == m.graveyard.end()) m.graveyard.push_back(b->resource);
@@ -350,8 +353,8 @@ void ParticleSystem::record(FramePassContext& fc)
             m.graveyardFrame = fc.frame.frameIndex;
         }
         const uint32_t scanBlocks = groups(capacity, kScanBlock), sortGroups = groups(capacity, kSortGroupKeys);
-        for (Buf* b : { &m.posAge, &m.velocity, &m.meta, &m.alive, &m.aliveList, &m.deadList, &m.dyingList, &m.keyBySlot, &m.spawnedSlots, &m.keysA, &m.valsA,
-                        &m.keysB, &m.valsB, &m.records[0], &m.records[1] })
+        for (Buf* b : { &m.posAge[0], &m.posAge[1], &m.velocity[0], &m.velocity[1], &m.meta, &m.alive, &m.aliveList, &m.deadList, &m.dyingList,
+                        &m.keyBySlot, &m.spawnedSlots, &m.keysA, &m.valsA, &m.keysB, &m.valsB })
             b->ensure(device, (uint64_t)capacity * b->stride);
         m.gridBlocks.ensure(device, 1024 * 4);
         m.blockSums.ensure(device, (uint64_t)scanBlocks * 8);
@@ -489,6 +492,7 @@ void ParticleSystem::record(FramePassContext& fc)
         m.gridEntries.ensure(device, (uint64_t)gridEntryCapacity * 4);
         m.gridLarge.ensure(device, (uint64_t)std::max<uint32_t>(surfaceTotal, 1) * 4);
         m.surfaceBoxes.ensure(device, (uint64_t)std::max<uint32_t>(surfaceTotal, 1) * 32);
+        m.overflowRecords.ensure(device, (uint64_t)kOverflowRecords * kOverflowRecordBytes);
         m.ribbonPoints.ensure(device, (uint64_t)h.ribbon_points * 32);
         m.ribbonLinks.ensure(device, (uint64_t)h.ribbon_points * 4);
         m.ribbonVertices.ensure(device, (uint64_t)h.ribbon_points * 64);
@@ -629,11 +633,11 @@ void ParticleSystem::record(FramePassContext& fc)
 
         // Graph imports of this frame.
         RenderGraph& g = fc.graph;
-        std::vector<Buf*> state = { &m.posAge, &m.velocity, &m.meta, &m.alive, &m.aliveList, &m.deadList, &m.dyingList, &m.blockSums, &m.keyBySlot,
-                                    &m.spawnedSlots, &m.keysA, &m.valsA, &m.keysB, &m.valsB, &m.hist, &m.records[cur], &m.dynamic[cur], &m.counters,
+        std::vector<Buf*> state = { &m.posAge[0], &m.posAge[1], &m.velocity[0], &m.velocity[1], &m.meta, &m.alive, &m.aliveList, &m.deadList, &m.dyingList, &m.blockSums, &m.keyBySlot,
+                                    &m.spawnedSlots, &m.keysA, &m.valsA, &m.keysB, &m.valsB, &m.hist, &m.dynamic[cur], &m.counters,
                                     &m.report, &slot.events, &m.tickSurfaces, &m.gridCount, &m.gridStart, &m.gridFill, &m.gridEntries, &m.gridLarge,
                                     &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.mediumCells, &m.ribbonScanA, &m.ribbonScanB,
-                                    &m.ribbonRunStart, &m.ribbonTangents, &m.ribbonTotalsA, &m.ribbonTotalsB, &m.volumeList, &m.gridBlocks, &m.surfaceBoxes,
+                                    &m.ribbonRunStart, &m.ribbonTangents, &m.ribbonTotalsA, &m.ribbonTotalsB, &m.volumeList, &m.gridBlocks, &m.surfaceBoxes, &m.overflowRecords,
                                     &m.emitterTable, &m.emitterStamp };
         std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitterUpdates, &m.emitterUpdateRows, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
                                      &m.restore, &m.slotBase, &m.bodies, &m.dynamicSurfaces, &m.ribbonRanges, &m.volumeRanges };
@@ -734,8 +738,10 @@ void ParticleSystem::record(FramePassContext& fc)
             for (Buf* x : inputs) b.use(x->ref, Use::SrvCompute);
         };
         auto fillConstants = [&m, cur, constantsCpu, tc, sp = &slot](PassContext& c) mutable {
-            tc.posAge = c.uav(m.posAge.ref);
-            tc.velocity = c.uav(m.velocity.ref);
+            tc.posAge = c.uav(m.posAge[cur ^ 1u].ref);
+            tc.velocity = c.uav(m.velocity[cur ^ 1u].ref);
+            tc.posAgeOut = c.uav(m.posAge[cur].ref);
+            tc.velocityOut = c.uav(m.velocity[cur].ref);
             tc.meta = c.uav(m.meta.ref);
             tc.alive = c.uav(m.alive.ref);
             tc.aliveList = c.uav(m.aliveList.ref);
@@ -743,7 +749,6 @@ void ParticleSystem::record(FramePassContext& fc)
             tc.dyingList = c.uav(m.dyingList.ref);
             tc.counters = c.uav(m.counters.ref);
             tc.blockSums = c.uav(m.blockSums.ref);
-            tc.records = c.uav(m.records[cur].ref);
             tc.keyBySlot = c.uav(m.keyBySlot.ref);
             tc.events = c.uav(sp->events.ref);
             tc.keysA = c.uav(m.keysA.ref);
@@ -780,6 +785,8 @@ void ParticleSystem::record(FramePassContext& fc)
             tc.volumeList = c.uav(m.volumeList.ref);
             tc.volumeRanges = c.srv(m.volumeRanges.ref);
             tc.surfaceBoxes = c.uav(m.surfaceBoxes.ref);
+            tc.overflowRecords = c.uav(m.overflowRecords.ref);
+            tc.overflowCapacity = kOverflowRecords;
             tc.gridBlocks = c.uav(m.gridBlocks.ref);
             std::memcpy(constantsCpu, &tc, sizeof tc);
         };
@@ -824,25 +831,22 @@ void ParticleSystem::record(FramePassContext& fc)
         {
             Old* o = new Old(old);  // lives until the frame's passes are recorded
             std::shared_ptr<Old> keep(o);
-            const char* oldNames[5] = { "fx.old.aliveList", "fx.old.posAge", "fx.old.velocity", "fx.old.meta", "fx.old.records" };
-            Buf* olds[5] = { &keep->list, &keep->posAge, &keep->velocity, &keep->meta, &keep->records };
-            for (int k = 0; k < 5; ++k)
+            const char* oldNames[4] = { "fx.old.aliveList", "fx.old.posAge", "fx.old.velocity", "fx.old.meta" };
+            Buf* olds[4] = { &keep->list, &keep->posAge, &keep->velocity, &keep->meta };
+            for (int k = 0; k < 4; ++k)
             {
                 olds[k]->name = oldNames[k];
                 olds[k]->import(g, fc.frame.frameIndex);
             }
-            Buf* newPrev = &m.records[cur ^ 1u];
-            newPrev->import(g, fc.frame.frameIndex);
             ID3D12PipelineState* pso = shaders.compute("Passes/FX/FxRepack");
             g.addPass("fx.particles.repack", QueueType::Graphics,
                       [=](PassBuilder& b) {
                           declare(b);
-                          for (int k = 0; k < 5; ++k) b.use(olds[k]->ref, Use::UavCompute);
-                          b.use(newPrev->ref, Use::UavCompute);
+                          for (int k = 0; k < 4; ++k) b.use(olds[k]->ref, Use::UavCompute);
                       },
                       [=](PassContext& c) {
                           const std::array<uint32_t, 8> p = { c.uav(keep->list.ref), c.uav(keep->posAge.ref), c.uav(keep->velocity.ref), c.uav(keep->meta.ref),
-                                                              c.uav(keep->records.ref), c.uav(newPrev->ref), 0, 0 };
+                                                              0, 0, 0, 0 };
                           c.cmd->SetPipelineState(pso);
                           c.bindFrameConstants(constants);
                           c.computeConstants(p.data(), 8);
@@ -1013,8 +1017,9 @@ std::vector<uint8_t> ParticleSystem::readState(const char* name)
     const uint32_t last = m.parity ^ 1u;  // parity of the latest recorded tick
     Buf* b = nullptr;
     uint64_t bytes = (uint64_t)m_capacity * 4;
-    if (n == "posAge") b = &m.posAge, bytes = (uint64_t)m_capacity * 16;
-    else if (n == "velocity") b = &m.velocity, bytes = (uint64_t)m_capacity * 16;
+    if (n == "posAge") b = &m.posAge[last], bytes = (uint64_t)m_capacity * 16;
+    else if (n == "velocity") b = &m.velocity[last], bytes = (uint64_t)m_capacity * 16;
+    else if (n == "posAgePrev") b = &m.posAge[last ^ 1u], bytes = (uint64_t)m_capacity * 16;  // the renderer's previous tick
     else if (n == "meta") b = &m.meta, bytes = (uint64_t)m_capacity * 8;
     else if (n == "alive") b = &m.alive;
     else if (n == "aliveList") b = &m.aliveList;
@@ -1022,7 +1027,6 @@ std::vector<uint8_t> ParticleSystem::readState(const char* name)
     else if (n == "dyingList") b = &m.dyingList;
     else if (n == "keyBySlot") b = &m.keyBySlot;
     else if (n == "counters") b = &m.counters, bytes = kCounterWords * 4;
-    else if (n == "records") b = &m.records[last], bytes = (uint64_t)m_capacity * 32;
     else if (n == "keysSorted") b = (m_sortPasses & 1) ? &m.keysB : &m.keysA;
     else if (n == "valsSorted") b = (m_sortPasses & 1) ? &m.valsB : &m.valsA;
     else if (n == "emitterDynamic") b = &m.dynamic[last], bytes = m.dynamic[last].bytes;
@@ -1030,6 +1034,7 @@ std::vector<uint8_t> ParticleSystem::readState(const char* name)
     else if (n == "ribbonVertices") b = &m.ribbonVertices, bytes = m.ribbonVertices.bytes;
     else if (n == "ribbonLinks") b = &m.ribbonLinks, bytes = m.ribbonLinks.bytes;
     else if (n == "mediumCells") b = &m.mediumCells, bytes = m.mediumCells.bytes;
+    else if (n == "overflow") b = &m.overflowRecords, bytes = m.overflowRecords.bytes;
     else if (n == "tickSurfaces") b = &m.tickSurfaces, bytes = m.tickSurfaces.bytes;
     else fail("FX particles: no state buffer '%s'", name);
     return copyOut(m_device, b->resource.Get(), bytes, b->stride, b->name);

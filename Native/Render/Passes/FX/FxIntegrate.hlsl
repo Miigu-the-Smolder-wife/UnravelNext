@@ -7,7 +7,9 @@
 // events (event slot death_event + (birth - dying_birth)), after a. rebase / transport (existing slots), else b-f.
 // nv_integrate over h = dt (full-dt drag factors of the row) or, for a new birth (age sign bit), h = elapsed from age 0.
 // The first impact of a colliding program with collision events appends a collision event after the CPU slots.
-// Writes the state, the tick's render record and the slot's sort key; a dead slot is marked DYING (dying list).
+// Reads the input state (last tick's output, with this tick's births) and writes this tick's state into the other
+// buffer of the pair, so the renderer interpolates the two ticks of a slot from the state itself (no render record copy);
+// writes the slot's sort key; a dead slot is marked DYING (dying list).
 #include "Passes/FX/Particles.hlsli"
 
 void die(uint slot)
@@ -52,11 +54,11 @@ void main(uint3 id : SV_DispatchThreadID)
     NvDrag drag;
     if (g_dt == 0)
     {
-        // State packet (restore, same-tick population change): no motion; the key and record describe the state.
-        FX_RWBUFFER(RenderRecord, records, g_records);
-        RenderRecord rr;
-        rr.position = s.position; rr.age = s.age; rr.velocity = s.velocity; rr.emitter = row;
-        records[slot] = rr;
+        // State packet (restore, same-tick population change): no motion; the output state and key are the state.
+        FX_RWBUFFER(float4, posAgeOut, g_posAgeOut);
+        FX_RWBUFFER(float4, velocityOut, g_velocityOut);
+        posAgeOut[slot] = float4(s.position, s.age);
+        velocityOut[slot] = float4(s.velocity, 0);
         FX_RWBUFFER(uint, keys, g_keyBySlot);
         keys[slot] = fxSortKey(dyn.originAnchor + s.position);
         fxWriteOutputs(slot, birth, s, e, p, dyn);
@@ -93,8 +95,28 @@ void main(uint3 id : SV_DispatchThreadID)
         drag.velocity = e.dragVelocity; drag.position = e.dragPosition; drag.acceleration = e.dragAcceleration;
     }
     NvImpact impact;
+    const NvState start = s;
     const bool complete = nv_integrate(fxMotion(p, e, dyn, birth), h, drag, s, impact);
     uint status = complete ? 0u : FX_STATUS_IMPACT_OVERFLOW;
+    if (!complete && g_overflowCapacity != 0u)
+    {
+        // the exact inputs of this nv_integrate call, so the sweep can be replayed with a trace (IMPACT_OVERFLOW rule)
+        FX_RWBUFFER(uint, counters, g_counters);
+        uint at;
+        InterlockedAdd(counters[FX_COUNTER_OVERFLOWS], 1u, at);
+        if (at < g_overflowCapacity)
+        {
+            FX_RWBUFFER(OverflowRecord, records, g_overflowRecords);
+            OverflowRecord r;
+            r.row = row; r.birth = birth; r.newborn = born ? 1u : 0u; r.depth = 0u;
+            r.position = start.position; r.age = start.age;
+            r.velocity = start.velocity; r.h = h;
+            r.drag = float4(drag.velocity, drag.position, drag.acceleration, 0);
+            r.emitter = e;
+            r.dynamic = dyn;
+            records[at] = r;
+        }
+    }
     if (!fxFinite(s))
     {
         fxStatus(status | FX_STATUS_NONFINITE);
@@ -117,12 +139,10 @@ void main(uint3 id : SV_DispatchThreadID)
             events[g_eventSlots + n] = ev;
         }
     }
-    posAge[slot] = float4(s.position, s.age);
-    velocity[slot] = float4(s.velocity, 0);
-    FX_RWBUFFER(RenderRecord, records, g_records);
-    RenderRecord rr;
-    rr.position = s.position; rr.age = s.age; rr.velocity = s.velocity; rr.emitter = row;
-    records[slot] = rr;
+    FX_RWBUFFER(float4, posAgeOut, g_posAgeOut);
+    FX_RWBUFFER(float4, velocityOut, g_velocityOut);
+    posAgeOut[slot] = float4(s.position, s.age);
+    velocityOut[slot] = float4(s.velocity, 0);
     FX_RWBUFFER(uint, keys, g_keyBySlot);
     keys[slot] = fxSortKey(dyn.originAnchor + s.position);
     fxWriteOutputs(slot, birth, s, e, p, dyn);

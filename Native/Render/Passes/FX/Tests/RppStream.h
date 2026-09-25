@@ -636,11 +636,14 @@ private:
         t.body = NV_STREAM_NONE;
         t.entity[0] = 99999;
         t.generation0 = 1;
+        // world-space surfaces: origin = centroid (anchor space), a, b, c = offsets from it (NativeVfxStream.h)
         auto tri = [&](float ax, float az, float bx, float bz, float cx, float cz) {
             NV_StreamSurface s = t;
-            s.a[0] = ax; s.a[1] = y; s.a[2] = az;
-            s.b[0] = bx; s.b[1] = y; s.b[2] = bz;
-            s.c[0] = cx; s.c[1] = y; s.c[2] = cz;
+            const double ox = ((double)ax + bx + cx) / 3, oz = ((double)az + bz + cz) / 3;
+            s.origin[0] = (float)ox; s.origin[1] = y; s.origin[2] = (float)oz;
+            s.a[0] = (float)(ax - (double)s.origin[0]); s.a[1] = 0; s.a[2] = (float)(az - (double)s.origin[2]);
+            s.b[0] = (float)(bx - (double)s.origin[0]); s.b[1] = 0; s.b[2] = (float)(bz - (double)s.origin[2]);
+            s.c[0] = (float)(cx - (double)s.origin[0]); s.c[1] = 0; s.c[2] = (float)(cz - (double)s.origin[2]);
             m_surfaces.push_back(s);
         };
         tri(x0, z0, x1, z0, x1, z1);
@@ -674,10 +677,10 @@ private:
     std::vector<NV_StreamSurface> dynamicSurfaces(double t) const
     {
         std::vector<NV_StreamSurface> out;
-        auto point = [&](int i, int j, float* p, float* v) {
+        auto point = [&](int i, int j, double* p, double* v) {
             const double x = 40.0 + 2.0 * i, z = 16.0 + 2.0 * j, w = 1.7, k = 0.35;
-            p[0] = (float)(x - m_c.anchorShift[0]); p[1] = (float)(2.8 + 0.4 * std::sin(k * x + w * t) - m_c.anchorShift[1]); p[2] = (float)(z - m_c.anchorShift[2]);
-            v[0] = 0; v[1] = (float)(0.4 * w * std::cos(k * x + w * t)); v[2] = 0;
+            p[0] = x - m_c.anchorShift[0]; p[1] = 2.8 + 0.4 * std::sin(k * x + w * t) - m_c.anchorShift[1]; p[2] = z - m_c.anchorShift[2];
+            v[0] = 0; v[1] = 0.4 * w * std::cos(k * x + w * t); v[2] = 0;
         };
         for (int i = 0; i < 4; ++i)
             for (int j = 0; j < 4; ++j)
@@ -688,11 +691,19 @@ private:
                     s.body = NV_STREAM_NONE;
                     s.entity[0] = 200000;
                     s.generation0 = 1;
-                    float va[3], vb[3], vc[3];
-                    point(i, j, s.a, va);
-                    if (half == 0) { point(i + 1, j, s.b, vb); point(i + 1, j + 1, s.c, vc); }
-                    else { point(i + 1, j + 1, s.b, vb); point(i, j + 1, s.c, vc); }
-                    for (int a = 0; a < 3; ++a) { s.velocity[a] = (va[a] + vb[a] + vc[a]) / 3; s.origin[a] = (s.a[a] + s.b[a] + s.c[a]) / 3; }
+                    // origin = centroid (anchor space), offsets formed in double (NativeVfxStream.h)
+                    double pa[3], pb[3], pc[3], va[3], vb[3], vc[3];
+                    point(i, j, pa, va);
+                    if (half == 0) { point(i + 1, j, pb, vb); point(i + 1, j + 1, pc, vc); }
+                    else { point(i + 1, j + 1, pb, vb); point(i, j + 1, pc, vc); }
+                    for (int a = 0; a < 3; ++a)
+                    {
+                        s.velocity[a] = (float)((va[a] + vb[a] + vc[a]) / 3);
+                        s.origin[a] = (float)((pa[a] + pb[a] + pc[a]) / 3);
+                        s.a[a] = (float)(pa[a] - (double)s.origin[a]);
+                        s.b[a] = (float)(pb[a] - (double)s.origin[a]);
+                        s.c[a] = (float)(pc[a] - (double)s.origin[a]);
+                    }
                     out.push_back(s);
                 }
         return out;

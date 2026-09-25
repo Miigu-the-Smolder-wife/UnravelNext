@@ -201,8 +201,10 @@ private:
             x.basis0=real3(w.inverse_basis);x.basis1=real3(w.inverse_basis+3);x.basis2=real3(w.inverse_basis+6);x.value=real3(w.value);world_.push_back(x);}
         surfaces_.clear();for(const auto& s:surfaces){Math::NvSurface x{};x.kind=s.kind;x.entity0=s.entity[0];x.entity1=s.entity[1];x.generation0=s.generation0;x.generation1=s.generation1;
             x.radius=s.radius;x.a=real3(s.a);x.b=real3(s.b);x.c=real3(s.c);x.velocity=real3(s.velocity);x.angular=real3(s.angular_velocity);x.origin=real3(s.origin);
-            if(s.body!=NV_STREAM_NONE){require(s.body<bodies.size(),"surface body");const auto& b=bodies[s.body];const Real3 at=real3(b.position);
-                x.a=rotate(b.rotation,x.a)+at;x.b=rotate(b.rotation,x.b)+at;x.c=rotate(b.rotation,x.c)+at;x.velocity=real3(b.velocity);x.angular=real3(b.angular_velocity);x.origin=real3(b.center);}
+            if(s.body!=NV_STREAM_NONE){require(s.body<bodies.size(),"surface body");const auto& b=bodies[s.body];
+                // Offsets from the centre of mass: R p_local + (position - center).
+                const Real3 lever=real3(b.position)-real3(b.center);
+                x.a=rotate(b.rotation,x.a)+lever;x.b=rotate(b.rotation,x.b)+lever;x.c=rotate(b.rotation,x.c)+lever;x.velocity=real3(b.velocity);x.angular=real3(b.angular_velocity);x.origin=real3(b.center);}
             surfaces_.push_back(x);}
         math_.field_data=fields_.data();math_.field_count=uint32_t(fields_.size());
         math_.world_data=world_.data();math_.world_count=uint32_t(world_.size());

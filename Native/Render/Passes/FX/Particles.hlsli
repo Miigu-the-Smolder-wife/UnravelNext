@@ -46,6 +46,7 @@
 #define FX_COUNTER_VOLUMES 7u        // live volume particles listed for FxCells this tick
 #define FX_COUNTER_TURN 8u           // asuint(max |w| dt over the grid's surfaces) (FxGrid, motion bound of the queries)
 #define FX_COUNTER_CARRY 9u          // asuint(max carrier displacement bound over all surfaces)
+#define FX_COUNTER_OVERFLOWS 10u     // slots of this tick whose sweep needed a fifth impact (diagnostic records)
 
 // alive[] values: 0 dead, 1 alive, 2 died in this tick (dying list; compaction clears it to 0)
 #define FX_SLOT_DEAD 0u
@@ -64,7 +65,7 @@ cbuffer FxTick : register(b1)
     float3 g_forward; uint g_bodyCount;
     uint g_posAge, g_velocity, g_meta, g_alive;
     uint g_aliveList, g_deadList, g_dyingList, g_counters;
-    uint g_blockSums, g_records, g_keyBySlot, g_events;
+    uint g_blockSums, g_posAgeOut, g_keyBySlot, g_events;  // g_posAge / g_velocity: input state (last tick's output)
     uint g_keysA, g_valsA, g_keysB, g_valsB;
     uint g_hist, g_programs, g_curveKeys, g_emitters;
     uint g_spawns, g_explicitBirths, g_fields, g_worldFields;
@@ -76,7 +77,7 @@ cbuffer FxTick : register(b1)
     uint g_ribbonCapacity, g_cellCapacity, g_volumeList, g_gridBlocks;  // header ribbon_points, medium_cells; grid block offsets
     uint g_emitterUpdates, g_emitterUpdateRows, g_emitterStamp, g_updateCount;  // emitter table delta (FxEmitters.hlsl)
     uint g_serial; float g_separationMax; uint g_volumeRanges, g_volumeRangeCount;
-    uint g_surfaceBoxes, g_pad8, g_pad9, g_pad10;  // grown box per surface (FxGrid STEP 1), candidate filter  // packet serial (stamps of the rows
+    uint g_surfaceBoxes, g_velocityOut, g_overflowRecords, g_overflowCapacity;  // IMPACT_OVERFLOW inputs (diagnostic)  // g_*Out: this tick's state (double buffered by tick parity)  // grown box per surface (FxGrid STEP 1), candidate filter  // packet serial (stamps of the rows
                                                                                   // sent); largest separation; FxCells ranges
 };
 
@@ -152,7 +153,6 @@ struct StreamEvent { uint emitter, birth, kind, impacts; float3 position; float 
 // gets origin = float(parent origin_anchor + event position) and inherited = ratio x event velocity at its depth.
 struct EmitterDynamic { float3 originAnchor; uint pad0; float3 inherited; uint pad1; };  // 32 B
 // Render record of a slot for one tick (request 20260925_FX_particle_render_rules.md).
-struct RenderRecord { float3 position; float age; float3 velocity; uint emitter; };  // 32 B
 
 // ---- buffers ----------------------------------------------------------------------------------------------------------
 #define FX_BUFFER(T, name, index) StructuredBuffer<T> name = ResourceDescriptorHeap[index]
@@ -402,6 +402,16 @@ float fxTentMass(uint k, uint n)
     const float cb = b <= 0 ? 0.5f * (b + 1) * (b + 1) : 1 - 0.5f * (1 - b) * (1 - b);
     return cb - ca;
 }
+// Inputs of an nv_integrate call whose sweep needed a fifth impact (diagnostic, FxIntegrate): 432 B.
+struct OverflowRecord
+{
+    uint row, birth, newborn, depth;
+    float3 position; float age;       // state passed to nv_integrate (after rebase / transport; age 0 for a new birth)
+    float3 velocity; float h;         // and its interval
+    float4 drag;                      // NvDrag velocity, position, acceleration
+    StreamEmitter emitter;            // the row as the kernel read it (per-tick fields included)
+    EmitterDynamic dynamic;           // origin_anchor, inherited velocity of this tick
+};
 // Per-particle values of a live volume particle's cells (48 B), written by the integrate kernel at the index of its first
 // cell; FxCells (thread per cell) reads it. serial = the tick's packet serial, so a record of a slot that is not live this
 // tick (a stale index) is never used.

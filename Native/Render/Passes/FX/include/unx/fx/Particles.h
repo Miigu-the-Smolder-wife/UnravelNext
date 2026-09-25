@@ -29,7 +29,7 @@ struct TickConstants
     float forward[3]; uint32_t bodyCount;
     uint32_t posAge, velocity, meta, alive;
     uint32_t aliveList, deadList, dyingList, counters;
-    uint32_t blockSums, records, keyBySlot, events;
+    uint32_t blockSums, posAgeOut, keyBySlot, events;  // posAge/velocity: input state; *Out: this tick's state
     uint32_t keysA, valsA, keysB, valsB;
     uint32_t hist, programs, curveKeys, emitters;
     uint32_t spawns, explicitBirths, fields, worldFields;
@@ -43,15 +43,13 @@ struct TickConstants
     uint32_t serial;
     float separationMax;  // largest program separation (collision grid motion bound)
     uint32_t volumeRanges, volumeRangeCount;
-    uint32_t surfaceBoxes, pad8, pad9, pad10;
+    uint32_t surfaceBoxes, velocityOut, overflowRecords, overflowCapacity;
 };
 static_assert(sizeof(TickConstants) == 368);
 
 // counters[] words (Particles.hlsli)
 enum : uint32_t { kCounterAlive = 0, kCounterDead = 1, kCounterCollisions = 2, kCounterStatus = 3, kCounterDying = 4, kCounterWords = 16 };
 // Render record of a slot for one tick (request 20260925_FX_particle_render_rules.md).
-struct RenderRecord { float position[3], age, velocity[3]; uint32_t emitter; };
-static_assert(sizeof(RenderRecord) == 32);
 struct EmitterDynamic { float originAnchor[3]; uint32_t pad0; float inherited[3]; uint32_t pad1; };
 static_assert(sizeof(EmitterDynamic) == 32);
 

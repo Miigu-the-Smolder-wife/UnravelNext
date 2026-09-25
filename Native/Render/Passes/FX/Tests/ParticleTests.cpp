@@ -61,7 +61,7 @@ struct Options
 {
     uint32_t ticks = 600, compareEvery = 60;
     fx::test::RppConfig rpp;
-    std::string record, replay;
+    std::string record, replay, overflowDump;
     bool reference = true, determinism = false, warp = false, debugLayer = true, gbv = false, yield = false, strictCopies = true;
 };
 
@@ -76,15 +76,15 @@ std::string sha(const std::vector<uint8_t>& bytes)
 }
 
 // 1. byte-identical stream copies of the pinned NativeVfx commit (the copies are updated together with this pin)
-constexpr const char* kStreamCommit = "f2cdf56a";
+constexpr const char* kStreamCommit = "768e7e16";
 void checkStreamCopies(bool strict)
 {
     const fs::path mine = fs::path(UNX_SOURCE_DIR) / "Native/Render/Passes/FX/Stream";
     const fs::path original = fs::path(UNX_SOURCE_DIR) / "../Unravel/Native/NativeVfx";
     struct Pin { const char* file; const char* sha; };
-    const Pin pins[] = { { "include/NativeVfxStream.h", "63165ed5d5dc6f0965f0ed00a2a2f4d691604bbaece5f1933c92b3ee0f9850f1" },
-                         { "shaders/VfxParticleMath.hlsli", "85bae72843562b4224df88a7aed06aeff9e53a59576615b9feef09211c8123d2" },
-                         { "src/VfxStreamCpu.h", "45a9158c4a0d5ec01fe9946ccea5fc5b04f9153f5a538477c8b4e3b43919a693" } };
+    const Pin pins[] = { { "include/NativeVfxStream.h", "937fa6a7095b01c39f10abb4f4b38030c4989d6765b10e89f7ea1f7b1cef3c3b" },
+                         { "shaders/VfxParticleMath.hlsli", "f738443189ed9ac746548ca3c988128a5d0fcf53c21c7b2a6d486bdabe4796e1" },
+                         { "src/VfxStreamCpu.h", "d1379b26278bb407995aa1290848285cdeebd67f5b80355659beb1f3e4c23780" } };
     for (const Pin& pin : pins)
     {
         const std::string a = sha(readBinaryFile(mine / pin.file));
@@ -294,6 +294,18 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
         // is a defect.
         FX_CHECK((rb.counters.status & ~1u) == 0, "tick %u: GPU status 0x%x (1 impact overflow, 2 nonfinite, 4 alive mismatch, 8 capacity, 16 range, 32 watchdog)", t, rb.counters.status);
         if (rb.counters.status & 1u) ++impactOverflowTicks;
+        if ((rb.counters.status & 1u) && !o.overflowDump.empty())
+        {
+            // the inputs of every overflowing nv_integrate call of this tick (Particles.hlsli OverflowRecord, 432 B each)
+            const auto counters = ps.readState("counters"), records = ps.readState("overflow");
+            const uint32_t n = std::min<uint32_t>(at<uint32_t>(counters, 10), (uint32_t)(records.size() / 432));
+            std::vector<uint8_t> b(4 + (size_t)n * 432);
+            std::memcpy(b.data(), &n, 4);
+            std::memcpy(b.data() + 4, records.data(), (size_t)n * 432);
+            fs::create_directories(o.overflowDump);
+            writeFile(tickFile(o.overflowDump, "overflow", t), b.data(), b.size());
+            FX_LOG("tick %u: IMPACT_OVERFLOW in %u slots (inputs dumped)", t, at<uint32_t>(counters, 10));
+        }
         FX_CHECK(rb.counters.alive == h.alive_after, "tick %u: GPU alive %u != alive_after %u", t, rb.counters.alive, h.alive_after);
         previous = rb.events;
         if (!o.record.empty())
@@ -344,7 +356,7 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
             const auto alive = ps.readState("alive"), aliveList = ps.readState("aliveList"), deadList = ps.readState("deadList");
             const auto counters = ps.readState("counters"), keys = ps.readState("keysSorted"), vals = ps.readState("valsSorted");
             const auto keyBySlot = ps.readState("keyBySlot"), posAge = ps.readState("posAge"), velocity = ps.readState("velocity"), meta = ps.readState("meta");
-            const auto dying = ps.readState("dyingList"), records = ps.readState("records");
+            const auto dying = ps.readState("dyingList"), posAgePrev = ps.readState("posAgePrev");
             const uint32_t cap = ps.capacity(), nAlive = at<uint32_t>(counters, 0), nDead = at<uint32_t>(counters, 1), nDying = at<uint32_t>(counters, 4);
             uint32_t flags = 0;
             for (uint32_t i = 0; i < cap; ++i) flags += at<uint32_t>(alive, i) == 1u;
@@ -383,8 +395,12 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                 const uint32_t s = at<uint32_t>(aliveList, i);
                 const float4 pa = at<float4>(posAge, s);
                 FX_CHECK(std::isfinite(pa.x) && std::isfinite(pa.y) && std::isfinite(pa.z) && std::isfinite(pa.w) && pa.w >= 0, "tick %u: slot %u state not finite", t, s);
-                const fx::RenderRecord rr = at<fx::RenderRecord>(records, s);
-                FX_CHECK(rr.position[0] == pa.x && rr.age == pa.w && rr.emitter == at<uint32_t>(meta, s * 2), "tick %u: record of slot %u", t, s);
+                // interpolation pair: a slot that existed in the previous tick (its input age is not a new birth's -elapsed)
+                // is one dt older now
+                const float4 pv = at<float4>(posAgePrev, s);
+                if (h.dt > 0 && !std::signbit(pv.w))
+                    FX_CHECK(std::abs(((double)pa.w - (double)pv.w) - h.dt) <= 1e-5 * std::max<double>(pa.w, 1.0), "tick %u: slot %u previous age %.9g, age %.9g, dt %.9g",
+                             t, s, pv.w, pa.w, h.dt);
             }
 
             if (!o.record.empty())
@@ -462,12 +478,14 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                         const float* gpuPoint = v == 0 ? g.a : v == 1 ? g.b : g.c;
                         const D3 u = { qx, qy, qz }, x = { local[0], local[1], local[2] };
                         const D3 tq = crossd(u, x) * 2.0, r = x + tq * qw + crossd(u, tq);
-                        const D3 p = { r.x + b.position[0], r.y + b.position[1], r.z + b.position[2] };
+                        // tick surface = offsets from the centre of mass (NativeVfxStream.h)
+                        const D3 p = { r.x + ((double)b.position[0] - b.center[0]), r.y + ((double)b.position[1] - b.center[1]),
+                                       r.z + ((double)b.position[2] - b.center[2]) };
                         const double e = lend(D3{ gpuPoint[0] - p.x, gpuPoint[1] - p.y, gpuPoint[2] - p.z });
-                        if (e > worstAbs) { worstAbs = e; worstAt = lend(p); }
+                        if (e > worstAbs) { worstAbs = e; worstAt = std::max(lend(p), 1e-30); }
                     }
                 }
-                FX_LOG("tick %u: body surfaces GPU float vs double transform: max vertex error %.3g m at |p| %.1f m (%.2f ulp of |p|)", t, worstAbs, worstAt,
+                FX_LOG("tick %u: body surface offsets GPU float vs double: max error %.3g m at |offset| %.3f m (%.2f ulp of |offset|)", t, worstAbs, worstAt,
                        worstAt > 0 ? worstAbs / std::ldexp(1.0, std::ilogb(worstAt) - 23) : 0.0);
             }
             // geometry outputs: every live ribbon particle's point sits at output_base + (birth - death_birth) with its state;
@@ -550,7 +568,7 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
             }
             // 4. state hash
             Sha256 hs;
-            for (const auto* b : { &posAge, &velocity, &meta, &alive, &aliveList, &deadList, &dying, &keys, &vals, &records }) hs.update(b->data(), b->size());
+            for (const auto* b : { &posAge, &velocity, &meta, &alive, &aliveList, &deadList, &dying, &keys, &vals, &posAgePrev }) hs.update(b->data(), b->size());
             std::vector<NV_StreamEvent> ev = rb.events;
             std::sort(ev.begin() + h.event_slots, ev.end(), [](const NV_StreamEvent& a, const NV_StreamEvent& b) { return std::tie(a.emitter, a.birth) < std::tie(b.emitter, b.birth); });
             hs.update(ev.data(), ev.size() * sizeof(NV_StreamEvent));
@@ -674,6 +692,7 @@ int main(int argc, char** argv)
             else if (a == "--no-box") o.rpp.boxShape = false;
             else if (a == "--no-child-noise") o.rpp.childNoise = false;
             else if (a == "--fields") o.rpp.fields = (uint32_t)std::stoul(next());
+            else if (a == "--overflow-dump") o.overflowDump = next();
             else if (a == "--watch") { g_watchEmitter = (uint32_t)std::stoul(next()); g_watchBirth = (uint32_t)std::stoul(next()); }
             else if (a == "--anchor-shift") { o.rpp.anchorShift[0] = std::stod(next()); o.rpp.anchorShift[1] = std::stod(next()); o.rpp.anchorShift[2] = std::stod(next()); }
             else fail("unknown option %s", a.c_str());
