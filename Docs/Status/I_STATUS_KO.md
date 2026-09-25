@@ -84,22 +84,55 @@ Unity 쪽 코드는 `Assets/UnravelNextBridge`(이전 저장소 커밋 0125b960)
 Agility 1.618.5 기능은 1.618.1에서도 모두 있다(SDK 618).
 필요한 코어 변경은 `Docs/Design/Requests/20260925_I_unity_queue_device.md`에 요청했다: 외부 디바이스·큐로 `Device`를 만들고, 큐 실행 훅을 둔다.
 
-## 2. C ABI (`Native/Host/include/unx/host/UnravelNextHost.h`)
+## 2. C ABI (`Native/Host/include/unx/host/UnravelNextHost.h`, ABI 2)
 
-- v1: 버전·크기 필드가 앞에 있는 고정 크기 구조체만, 반환은 결과 코드 + `UnxLastError()`. 지금은 프로브 부분만 있다.
-- 다음: 렌더러 생성·파괴, 장면 적재(텍스처·재질(INTERFACES 8.1)·메시·스켈레톤·인스턴스·광원·태양/대기 → `scene::Scene` → V 클러스터
-  빌더 → `GpuScene`), 프레임 갱신(카메라, 태양), 렌더 이벤트(Unity 출력 텍스처로). 프레임 변환·본 갱신은 코어의 GpuScene 갱신 API(요청 B,
-  코어 대기열) 뒤.
-- World 어댑터 방향: 이전 World가 표시 보간용 직전 committed 스냅숏(`nw_snapshot_previous`)과 형식별 수집(`nw_snapshot_read_components`:
-  `NW_COMPONENT_WORLD_AFFINE`, `NW_COMPONENT_SKIN_MATRIX`)을 준다. 호스트가 이것을 네이티브에서 직접 읽어 두 tick 사이를 보간하고(권위 상태에는
-  쓰지 않는다), C#은 프레임마다 World 핸들·렌더 시각·카메라만 넘긴다.
-  - 주의: `NW_Affine`은 비균일 스케일·전단을 담을 수 있다. 렌더러 인스턴스 변환은 회전·균일 스케일·이동만 허용하므로(INTERFACES 6.1),
-    적재 때 비균일 스케일을 메시에 굽는다(정적). 스킨은 인스턴스 변환 = 캐릭터 루트, 팔레트 = 루트⁻¹ × SKIN_MATRIX.
+- 규칙: 앞에 `{size, version}`이 있는 고정 크기 구조체만 넘긴다. 크기는 헤더의 `static_assert`와 C#의 `RequireLayouts`가 같이 확인한다.
+  반환은 결과 코드와 `UnxLastError()`다. C++ 객체는 넘기지 않는다.
+- 렌더러: `UnxRendererCreate`(Unity 디바이스·큐, 또는 `UNX_RENDERER_STANDALONE`), `UnxRendererDestroy`.
+- 장면 적재: 텍스처, 재질(INTERFACES 8.1), 메시(스킨 스트림 포함), 스켈레톤, 인스턴스, 광원, 환경(태양·대기·바람)을 `scene::Scene`으로 모은다.
+  `UnxSceneCommit`이 검증하고, V의 클러스터 빌더를 돌리고, `GpuScene`에 올리고, `FrameRenderer`를 만든다.
+  `UnxSceneContentHash`는 장면 identity다.
+- 프레임: `UnxFrameSetTransforms`·`SetSkeleton`·`SetInstanceVisible`·`SetSun`(코어 v1.8 GpuScene 갱신)으로 다음 프레임에 쓸 값을 모은다.
+  `UnxFrameQueue`는 카메라·시각·출력 텍스처를 스냅숏으로 떠서 티켓을 돌려준다. `UNX_EVENT_RENDER`(Unity 제출 스레드)가 그 티켓의
+  프레임을 `FrameRenderer`로 기록한다. 실행은 `Queue::setExecuteHook`(코어 v1.9)으로 Unity의 `ExecuteCommandList`에 보내며, 이때 출력의
+  상태를 `UNORDERED_ACCESS`로 선언한다. 결과 조회는 `UnxFrameStatsLatest`다.
+  렌더러 코드: `src/Renderer/HostRenderer.*`. ABI 변환: `src/Unity/RendererAbi.cpp`.
+- **검증 [실측]** `unx_test_host_hostabi`(정확성 실행, 잠금 없음, `-Tracks "V;M;S;R;C;I"` 빌드):
+  - 왕복: SceneGen 여섯 장면(도시 354 인스턴스, 숲 1.1 M 인스턴스, 수변, 실내, 야간 도시 광원 512)에 스킨 캐릭터를 하나 더했다.
+    DLL의 export(LoadLibrary + GetProcAddress, Unity P/Invoke와 같은 입구)로 넘긴 뒤 렌더러의 `scene::contentHash`가 원본과 **모두 같다**.
+    ABI는 장면 이름·seed·카메라·경로를 싣지 않으므로 그것을 뺀 해시를 비교한다.
+  - 프레임: 실내 장면 1440p, 64프레임(정지 카메라)이다. ABI 경로와 `FrameRenderer` 직접 경로의 마지막 프레임이 **비트 단위로 같다**(동일 픽셀 100 %).
+    두 경로 모두 셰이딩의 확률 항 두 개(GI 프로브, 반사; `shading.experiment_disable = 6`)를 뺀 시험용 품질 사본을 쓴다.
+    이 항을 넣으면 직접 경로 두 번끼리도 P99 ~300/1023만큼 다르다(아래 R 참고).
+    이 검사는 호스트의 프레임 준비(카메라, 시각, 출력, 페이싱)를 확인하는 것이고, 화질 검증은 각 트랙이 기준 영상으로 한다.
+  - 참고(R 트랙에 알릴 것): GI 캐시는 실행마다 결정적이지 않고 64프레임에서 아직 수렴하지 않는다(실내 천장의 얼룩, 직접 경로끼리 평균 차 33~50/1023).
+    프레임당 갱신은 200k 항목 중 7.8k, 항목당 이력은 최대 32회다. 품질·시간 안정성 게이트의 대상이다.
+
+## 2.1 Unity 쪽 (`Assets/UnravelNextBridge`, 이전 저장소)
+
+- `Runtime`: P/Invoke(`UnravelNextNative`, `UnravelNextRendererNative` — 구조체는 blittable, 크기 검사), `UnravelNextRenderer`(관리 래퍼,
+  Unity 왼손 → 렌더러 오른손: Z 반전. 반전하면 Unity의 시계방향 앞면이 반시계가 되므로 인덱스 순서는 그대로 둔다), SRP 에셋·파이프라인
+  (게임 카메라마다 프레임을 큐에 넣고 렌더 이벤트 → Unity blit), 호스트 경계 프로브.
+- `DataWorld`: `UnravelNextDataWorld`는 이전 데이터 월드(`NativeDataWorldHost`)를 새 렌더러로 보인다.
+  - 읽는 것: 호스트의 시작 개체군, 레시피의 비주얼 파트, `TitanMaterialLibrary`. 비균일 스케일은 강체 메시에 굽고, 스킨은 관절에 접는다.
+    스킨 메시는 Titan cooked 형식(`FoliageProduct`)에서 가져온다.
+  - 매 프레임: committed World의 `WorldAffine`과 직전 tick을 렌더 시각으로 보간한다(회전 slerp, 이동 lerp). 스킨 포즈는 committed Animation
+    포즈 원본(`AcquirePose`)에서 가져오고, 포즈 원본이 실제로 쓴 alpha를 루트에도 쓴다. 권위 상태에는 쓰지 않는다.
+  - `UnravelNextFrameMeter`(명령줄로 켜는 측정), 편집기 도구 `UnravelNextDataWorldScene`(원본 장면은 두고 사본에 컴포넌트를 더해 저장, Player 빌드).
+  - 아직 못 보이는 것(로그로 알림, 조용히 빼지 않음): 소프트 바디(tick마다 변형되는 정점), Matter, 파괴 조각, VFX(FX 트랙), cooked solid 비주얼, 텍스처 배열 층.
+  - 데이터 월드 캐릭터 [실측, cooked 파일 파싱]: 정점 550개, 삼각형 832개, 정점당 가중치 1개, 뼈 2개, morph 없음(형식 v7). 손실 없이 옮겨진다.
+- C# 오프라인 컴파일 검사: Unity의 Roslyn(`DotNetSdk/.../csc.dll`)으로 프로젝트의 컴파일된 스크립트 어셈블리를 참조해 브리지 네 어셈블리를 컴파일한다.
+  Unity 시간을 잡기 전에 컴파일 오류를 잡는다.
+- 배포: `Native/Host/Deploy.ps1`이 DLL, 커널, 품질 파일을 `Native~`에 놓는다. DLL이 로드돼 있으면 거부한다.
+  빌드 identity는 링크가 성공한 뒤 DLL 옆에 쓴 사본에서 읽는다. Player 빌드 후처리는 커널과 품질 파일을 `<Game>_Data/UnravelNext`로 복사한다.
 
 ## 3. 요청
 
-- `Docs/Design/Requests/20260925_I_host_module.md`: A(등록) 반영됨(코어 3b0c049, v1.6). B(GpuScene 프레임 갱신)는 코어 대기열
-  (`prevObjectToWorld` = 직전 렌더 프레임은 반영됨).
+- `20260925_I_host_module.md`: A(등록)는 반영됐다(코어 3b0c049, v1.6). B(GpuScene 프레임 갱신)도 반영됐다(6af7de8, v1.8).
+- `20260925_I_unity_queue_device.md`: Unity 디바이스·큐 위의 `Device`와 실행 훅이 반영됐다(2238b68, v1.9).
+- `20260925_I_material_layers.md`(대기): clearcoat와 박막 간섭. 데이터 월드 재질 1(모든 동적 상자와 캐릭터)이 둘 다 쓴다.
+  반영 전까지는 기저 층만 옮기고 로그에 남긴다. 측정 결과에도 이 차이를 함께 적는다.
+- `20260925_I_skin_normals.md`(대기): 스킨 법선을 관절 3×3의 여인수로 변환하는 것이다. 데이터 월드 캐릭터의 비균일 스케일(0.6, 0.8, 0.6)을 관절에 접으면 필요하다.
 
 ## 4. 이전 저장소 변경
 
