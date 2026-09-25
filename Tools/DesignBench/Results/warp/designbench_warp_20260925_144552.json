@@ -1,0 +1,10 @@
+{
+ "adapter": "WARP", "driver": "", "agility_sdk": 618, "resolution": "256x144", "reps": 1, "timestamp": "20260925_144552",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+07, "unit": "Hz", "note": ""},
+  {"section": "bands", "name": "256x144 resolve + shade (32 B/px read in shade), 1 band (full screen)", "value": 4.5675, "unit": "ms", "note": "123.901367 ns/pixel"},
+  {"section": "bands", "name": "256x144 resolve + shade (32 B/px read in shade), 4 bands", "value": 0.9408, "unit": "ms", "note": "25.520833 ns/pixel"},
+  {"section": "bands", "name": "256x144 resolve + shade (48 B/px read in shade), 1 band (full screen)", "value": 1.0748, "unit": "ms", "note": "29.155816 ns/pixel"},
+  {"section": "bands", "name": "256x144 resolve + shade (48 B/px read in shade), 4 bands", "value": 1.3554, "unit": "ms", "note": "36.767578 ns/pixel"}
+ ]
+}

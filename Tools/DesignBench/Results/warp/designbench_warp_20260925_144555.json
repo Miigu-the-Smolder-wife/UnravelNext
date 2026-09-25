@@ -1,0 +1,15 @@
+{
+ "adapter": "WARP", "driver": "", "agility_sdk": 618, "resolution": "256x144", "reps": 1, "timestamp": "20260925_144555",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+07, "unit": "Hz", "note": ""},
+  {"section": "shade", "name": "4K-class shading kernel: full: tile SH + air 3 + K + 8 lights", "value": 4.5729, "unit": "ms", "note": "124.047852 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: per-pixel 4 probe loads instead of tile SH", "value": 7.9577, "unit": "ms", "note": "215.866428 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: no air fetches", "value": 14.0304, "unit": "ms", "note": "380.598958 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: no K tap", "value": 12.7165, "unit": "ms", "note": "344.957140 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: no local lights", "value": 10.5516, "unit": "ms", "note": "286.230469 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: inputs and sun only (no SH, air, K, lights)", "value": 3.5756, "unit": "ms", "note": "96.994358 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: full + 32 extra live values", "value": 16.391, "unit": "ms", "note": "444.634332 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: full + 64 extra live values", "value": 15.1827, "unit": "ms", "note": "411.857096 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: full + 128 extra live values", "value": 21.2416, "unit": "ms", "note": "576.215278 ns/pixel"}
+ ]
+}

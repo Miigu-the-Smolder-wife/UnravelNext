@@ -1,0 +1,16 @@
+{
+ "adapter": "WARP", "driver": "", "agility_sdk": 618, "resolution": "256x144", "reps": 1, "timestamp": "20260925_144649",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+07, "unit": "Hz", "note": ""},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px: count pass (conservative raster, tile atomics only)", "value": 55.3078, "unit": "ms", "note": "0.009704 M fragments, max/tile 50, tiles > 1024: 0"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px: raster + area + mask + 24 B append (global list, one atomic per wave)", "value": 77.0459, "unit": "ms", "note": "0.019408 M appended, 0 overflow, 3969.801113 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px: raster + area + mask + 24 B append (tile segments, one atomic per fragment)", "value": 77.1988, "unit": "ms", "note": "0.009704 M appended, 0 overflow, 7955.358615 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))", "value": 80.7529, "unit": "ms", "note": "0.009704 M appended, 0 overflow, 8321.609646 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)", "value": 2.6677, "unit": "ms", "note": "274.907255 ns/fragment, 72.365994 ns/pixel (all pixels)"},
+  {"section": "coverage", "name": "cards 4 px: count pass (conservative raster, tile atomics only)", "value": 8.0351, "unit": "ms", "note": "0.015996 M fragments, max/tile 93, tiles > 1024: 0"},
+  {"section": "coverage", "name": "cards 4 px: raster + area + mask + 24 B append (global list, one atomic per wave)", "value": 10.4156, "unit": "ms", "note": "0.031992 M appended, 0 overflow, 325.568892 ns/fragment"},
+  {"section": "coverage", "name": "cards 4 px: raster + area + mask + 24 B append (tile segments, one atomic per fragment)", "value": 9.9372, "unit": "ms", "note": "0.015996 M appended, 0 overflow, 621.230308 ns/fragment"},
+  {"section": "coverage", "name": "cards 4 px: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))", "value": 7.5539, "unit": "ms", "note": "0.015996 M appended, 0 overflow, 472.236809 ns/fragment"},
+  {"section": "coverage", "name": "cards 4 px: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)", "value": 1.3933, "unit": "ms", "note": "87.103026 ns/fragment, 37.795681 ns/pixel (all pixels)"}
+ ]
+}

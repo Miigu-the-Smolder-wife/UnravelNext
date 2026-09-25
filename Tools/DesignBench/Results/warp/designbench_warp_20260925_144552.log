@@ -1,0 +1,10 @@
+D3D12 debug layer enabled
+Adapter: WARP, driver , D3D12Core: C:\Users\USER\UnravelNext\Tools\DesignBench\build\D3D12\D3D12Core.dll
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64, shaders: C:/Users/USER/UnravelNext/Tools/DesignBench/Bench/shaders, resolution 256x144, reps 1 (WARP)
+  [env] timestamp frequency                                                    10000000.0000 Hz       
+
+== Banded pixel passes (resolve 8 B in / 12 B out, shade 32-48 B in / 4 B out) (WARP dry run, no warm-up)
+  [bands] 256x144 resolve + shade (32 B/px read in shade), 1 band (full screen)        4.5675 ms       123.901367 ns/pixel
+  [bands] 256x144 resolve + shade (32 B/px read in shade), 4 bands                     0.9408 ms       25.520833 ns/pixel
+  [bands] 256x144 resolve + shade (48 B/px read in shade), 1 band (full screen)        1.0748 ms       29.155816 ns/pixel
+  [bands] 256x144 resolve + shade (48 B/px read in shade), 4 bands                     1.3554 ms       36.767578 ns/pixel
