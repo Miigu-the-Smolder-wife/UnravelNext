@@ -1,0 +1,59 @@
+{
+  "gate": "host_boundary_standalone",
+  "resolution": "4K",
+  "width": 3840,
+  "height": 2160,
+  "workload": {"heavyPasses": 18, "tinyPasses": 102, "outputPass": 1},
+  "framesPerRun": 600,
+  "reps": 3,
+  "warmupSeconds": 1.50,
+  "framesInFlight": 2,
+  "hostQueuePriority": "high",
+  "rendererQueuePriority": "high",
+  "gpuLock": "I",
+  "deviceSingleton": true,
+  "independentDevice": "created (factory flag DISALLOW_STORING_NEW_DEVICE_AS_SINGLETON)",
+  "device": {"adapter": "NVIDIA GeForce RTX 4080", "adapterLuid": "000000000000b055", "runtimePath": "C:\\Users\\USER\\UnravelNext\\build\\I\\bin\\D3D12\\D3D12Core.dll", "runtimeVersion": "1.618.5.0", "shaderModel": "6.8", "meshShaderTier": 10, "raytracingTier": 11, "resourceBindingTier": 3, "resourceHeapTier": 2, "enhancedBarriers": true, "typedUavLoadAdditionalFormats": true},
+  "modes": {
+    "fused_list": {
+      "periodMs": {"count": 1797, "median": 2.65830, "p95": 3.06893, "p99": 3.35360, "mean": 2.68923, "min": 2.13914, "max": 4.96845},
+      "periodMedianPerRepMs": [2.66342, 2.65421, 2.65011],
+      "workMs": {"count": 1800, "median": 2.59686, "p95": 3.00442, "p99": 3.23174, "mean": 2.62126, "min": 2.09510, "max": 3.54509},
+      "hostPreMs": {"count": 1800, "median": 0.00307, "p95": 0.00410, "p99": 0.00410, "mean": 0.00311, "min": 0.00205, "max": 0.01024},
+      "hostPostMs": {"count": 1800, "median": 0.03994, "p95": 0.04813, "p99": 0.21299, "mean": 0.04534, "min": 0.02662, "max": 0.54170},
+      "gapBeforeWorkMs": {"count": 1800, "median": 0.00000, "p95": 0.00102, "p99": 0.00102, "mean": 0.00006, "min": 0.00000, "max": 0.00102},
+      "gapAfterWorkMs": {"count": 1800, "median": 0.00000, "p95": 0.00102, "p99": 0.00102, "mean": 0.00006, "min": 0.00000, "max": 0.00102},
+      "cpuSubmitMs": {"count": 1806, "median": 0.26015, "p95": 0.37100, "p99": 0.50290, "mean": 0.27161, "min": 0.14230, "max": 1.22540}
+    },
+    "host_queue_lists": {
+      "periodMs": {"count": 1797, "median": 2.69926, "p95": 3.10170, "p99": 3.30240, "mean": 2.72142, "min": 2.46784, "max": 3.64646},
+      "periodMedianPerRepMs": [2.70643, 2.69414, 2.69619],
+      "workMs": {"count": 1800, "median": 2.59789, "p95": 3.00032, "p99": 3.17645, "mean": 2.61675, "min": 2.37261, "max": 3.54816},
+      "hostPreMs": {"count": 1800, "median": 0.00307, "p95": 0.00307, "p99": 0.00410, "mean": 0.00297, "min": 0.00205, "max": 0.01024},
+      "hostPostMs": {"count": 1800, "median": 0.04096, "p95": 0.04915, "p99": 0.20992, "mean": 0.04463, "min": 0.02970, "max": 0.64410},
+      "gapBeforeWorkMs": {"count": 1800, "median": 0.01741, "p95": 0.01843, "p99": 0.02355, "mean": 0.01740, "min": 0.01536, "max": 0.20173},
+      "gapAfterWorkMs": {"count": 1800, "median": 0.01741, "p95": 0.02150, "p99": 0.19354, "mean": 0.02081, "min": 0.01536, "max": 0.52941},
+      "cpuSubmitMs": {"count": 1806, "median": 0.32560, "p95": 0.45810, "p99": 0.56900, "mean": 0.33830, "min": 0.20790, "max": 2.21850}
+    },
+    "own_queue": {
+      "periodMs": {"count": 1797, "median": 2.99622, "p95": 6.30784, "p99": 62.99750, "mean": 5.16097, "min": 2.12685, "max": 199.74861},
+      "periodMedianPerRepMs": [2.99110, 3.05664, 2.89178],
+      "workMs": {"count": 1800, "median": 2.94810, "p95": 4.53325, "p99": 5.12102, "mean": 3.06268, "min": 2.27430, "max": 5.62688},
+      "hostPreMs": {"count": 1800, "median": 0.00307, "p95": 0.00410, "p99": 0.00512, "mean": 0.00319, "min": 0.00205, "max": 0.00819},
+      "hostPostMs": {"count": 1800, "median": 0.06144, "p95": 0.08909, "p99": 0.11162, "mean": 0.06376, "min": 0.03584, "max": 0.12493},
+      "gapBeforeWorkMs": {"count": 1800, "median": -0.54172, "p95": 0.09523, "p99": 0.19251, "mean": -0.48686, "min": -1.19706, "max": 0.50176},
+      "gapAfterWorkMs": {"count": 1800, "median": 0.48028, "p95": 0.72602, "p99": 0.88476, "mean": 0.61093, "min": 0.14029, "max": 195.82259},
+      "cpuSubmitMs": {"count": 1806, "median": 0.34925, "p95": 0.56110, "p99": 1.18910, "mean": 0.54882, "min": 0.16870, "max": 204.36310}
+    },
+    "independent_device": {
+      "periodMs": {"count": 1797, "median": 2.97165, "p95": 3.41094, "p99": 3.61882, "mean": 2.95320, "min": 2.12992, "max": 4.01408},
+      "periodMedianPerRepMs": [2.97882, 2.97370, 2.93786],
+      "workMs": {"count": 1800, "median": 2.94093, "p95": 3.25734, "p99": 3.49184, "mean": 2.93532, "min": 2.16371, "max": 3.80928},
+      "hostPreMs": {"count": 1800, "median": 0.00307, "p95": 0.00307, "p99": 0.00410, "mean": 0.00306, "min": 0.00205, "max": 0.00717},
+      "hostPostMs": {"count": 1800, "median": 0.06042, "p95": 0.07270, "p99": 0.07885, "mean": 0.06160, "min": 0.03277, "max": 0.08192},
+      "gapBeforeWorkMs": {"count": 1800, "median": -0.54282, "p95": -0.27550, "p99": -0.26936, "mean": -0.52191, "min": -1.22787, "max": 0.09115},
+      "gapAfterWorkMs": {"count": 1800, "median": 0.48126, "p95": 0.64107, "p99": 0.74341, "mean": 0.45948, "min": 0.19045, "max": 1.16336},
+      "cpuSubmitMs": {"count": 1806, "median": 0.36005, "p95": 0.46960, "p99": 0.56500, "mean": 0.36940, "min": 0.21390, "max": 0.90090}
+    }
+  }
+}
