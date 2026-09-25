@@ -23,7 +23,7 @@ const char* const kStateKey = "s.vsm";
 constexpr uint32_t kRingSlots = 16, kRingStride = 1024;  // per-frame constants; frames in flight must be < kRingSlots
 constexpr uint32_t kStatsSlots = 4;
 constexpr uint64_t kOverflowMinWords = 1u << 18;  // 1 MB overflow list at least (INTERFACES 7.3)
-constexpr uint32_t kMetaBytes = 32;  // VsmPageMeta
+constexpr uint32_t kMetaBytes = 48;  // VsmPageMeta
 constexpr uint32_t kBlockBytes = 341 * 32;  // VSM_BLOCK_ENTRIES x VsmBlock
 
 struct State
@@ -488,6 +488,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     VsmConstantsCpu& c = s.constants;
     c = {};
     c.windChanged = windChanged ? 1u : 0u;
+    c.windSpeed = std::max(windSpeed, 0.0f);
+    c.windDirection = c.windSpeed > 0 ? normalize(windDir) : float3{};
     c.lightZ = sunDir;
     lightBasis(sunDir, c.lightX, c.lightY);
     c.hMin = s.hMin;

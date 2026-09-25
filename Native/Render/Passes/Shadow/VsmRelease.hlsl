@@ -56,8 +56,15 @@ void main(uint slot : SV_DispatchThreadID)
     }
     e.x &= ~VSM_FLAG_DIRTY;
     if (c.sceneInvalidate) e.x |= VSM_FLAG_STALE;
-    if (m.windCaster != 0 &&
-        (c.windChanged != 0 || asfloat(m.windAmplitude) * windChangeFactor(asfloat(m.renderTime), c.time) > c.windTexels * texel))
-        e.x |= VSM_FLAG_STALE;
+    if (m.windCaster != 0)
+    {
+        // Wind rule (b), v1.23: the casters' largest displacement since the render, bounded from the two ends (the wind
+        // the page was drawn with and this frame's; windOffset is memoryless), against windTexels texels. The stored
+        // direction's octahedral rounding (< 1e-4) goes to the bound.
+        const float s0 = asfloat(m.windSpeed), s1 = c.windSpeed, scale = asfloat(m.windScale);
+        const float3 d0 = octDecode(m.windDirection), d1 = s1 > 0 ? c.windDirection : d0;
+        const float bound = windChangeBound(scale, asfloat(m.renderTime), s0, d0, c.time, s1, d1) + scale * s0 * s0 * 2e-4;
+        if (bound > c.windTexels * texel) e.x |= VSM_FLAG_STALE;
+    }
     table.Store(slot * 8, e.x);
 }

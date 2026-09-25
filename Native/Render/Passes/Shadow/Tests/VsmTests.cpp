@@ -497,6 +497,70 @@ int main(int argc, char** argv)
             logf("wind (sway range %.4f m) dirty pages over 20 frames by level:%s\n", sway, line.c_str());
             report(coarseDirty == 0, "wind: no re-render on levels with texel >= sway", coarseDirty, 0);
             report(fineDirty > 0, "wind: fine levels re-render (pages)", fineDirty, 1);
+
+            // 6. Wind change after commit (v1.23): the source scene's wind is edited before a frame (the host's path, no
+            //    scene reload). (a) The endpoint bound holds for the v1 model over random transitions (C++ twin of
+            //    windOffset / windChangeBound, Deformation.hlsli). (b) A gust (6 -> 6.3 m/s, direction +3 degrees)
+            //    re-renders no level whose texel exceeds the bound; the pages were drawn with the old wind.
+            {
+                // Double precision: the twin checks the bound's algebra, not float rounding of sin at large times.
+                struct D3v
+                {
+                    double x, y, z;
+                };
+                auto offset = [](D3v d, double K, double speed, double t, double phase) {
+                    const double m = K * speed * speed * (0.6 + 0.4 * std::sin(1.7 * t + phase));
+                    return D3v{ d.x * m, d.y * m, d.z * m };
+                };
+                auto dist = [](D3v a, D3v b) { return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z)); };
+                auto bound = [&](double K, double t0, double ws0, D3v d0, double t1, double ws1, D3v d1) {
+                    return K * (ws1 * ws1 * 0.4 * std::min(2.0, 1.7 * std::abs(t1 - t0)) + std::abs(ws1 * ws1 - ws0 * ws0) + dist(d1, d0) * ws0 * ws0);
+                };
+                uint32_t violations = 0;
+                double worstRatio = 0;
+                uint32_t seed = 12345;
+                auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+                for (int i = 0; i < 200000; ++i)
+                {
+                    const float K = 0.001f + rnd() * 0.01f, t0 = rnd() * 100, t1 = t0 + rnd() * rnd() * 5, phase = rnd() * 6.2832f;
+                    const float ws0 = rnd() * 20, ws1 = rnd() < 0.3f ? ws0 : rnd() * 20;
+                    const float a0 = rnd() * 6.2832f, a1 = rnd() < 0.3f ? a0 : a0 + (rnd() - 0.5f) * 3;
+                    const D3v d0{ std::cos((double)a0), 0, std::sin((double)a0) }, d1{ std::cos((double)a1), 0, std::sin((double)a1) };
+                    const double moved = dist(offset(d1, K, ws1, t1, phase), offset(d0, K, ws0, t0, phase));
+                    const double b = bound(K, t0, ws0, d0, t1, ws1, d1);
+                    if (moved > b * (1 + 1e-9) + 1e-15) ++violations;
+                    if (b > 0) worstRatio = std::max(worstRatio, (double)moved / b);
+                }
+                logf("wind change bound: 200000 random transitions, %u violations, largest |displacement| / bound %.4f" "\n", violations, worstRatio);
+                report(violations == 0, "wind change: endpoint bound holds (v1 model, random transitions)", violations, 0);
+
+                // Steady pages with the old wind, then the gust (no reload: the source scene is edited in place).
+                for (int i = 0; i < 4; ++i) runFrame(false);
+                const float ws0 = tf.sceneData.windSpeed, ws1 = 6.3f;
+                const float3 d0 = normalize(tf.sceneData.windDirection);
+                const float a = 3.0f * 0.0174533f;
+                const float3 d1 = normalize(float3{ d0.x * std::cos(a) - d0.z * std::sin(a), 0, d0.x * std::sin(a) + d0.z * std::cos(a) });
+                tf.sceneData.windSpeed = ws1;
+                tf.sceneData.windDirection = d1;
+                const Frame fg = runFrame(true);
+                const std::vector<uint32_t> n = dirtyByLevel(fg);
+                // Largest bound any page can reach at this frame: time term over a full period, speed and direction terms.
+                const float K = 0.002f / 40 * 10 * 10;
+                const float worst = K * (ws1 * ws1 * 0.8f + std::abs(ws1 * ws1 - ws0 * ws0) + length(d1 - d0) * ws0 * ws0 + ws0 * ws0 * 2e-4f);
+                const float change = K * (std::abs(ws1 * ws1 - ws0 * ws0) + length(d1 - d0) * ws0 * ws0);  // the gust alone
+                uint32_t coarse = 0, fine = 0;
+                std::string gustLine;
+                for (uint32_t k = 0; k < shadow::kLevels; ++k)
+                {
+                    const float texel = std::ldexp(1.0f, (int)k - 10);
+                    if (texel > worst) coarse += n[k];
+                    if (texel < change) fine += n[k];
+                    gustLine += format(" L%u:%u", k, n[k]);
+                }
+                logf("wind gust %.1f -> %.1f m/s, +3 deg (bound <= %.4f m, gust term %.4f m): dirty pages by level:%s" "\n", ws0, ws1, worst, change, gustLine.c_str());
+                report(coarse == 0, "wind change: no re-render on levels with texel > the bound", coarse, 0);
+                report(fine > 0, "wind change: levels finer than the gust's displacement re-render", fine, 1);
+            }
         }
 
         const uint32_t debugErrors = tf.device.drainDebugMessages();

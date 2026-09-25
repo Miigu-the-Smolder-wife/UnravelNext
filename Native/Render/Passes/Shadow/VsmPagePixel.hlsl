@@ -30,8 +30,8 @@ void main(DepthRasterPixel p)
     {
         RWStructuredBuffer<VsmPageMeta> meta = ResourceDescriptorHeap[P[5].y];
         const GpuMesh mesh = loadMesh(inst.mesh);
-        const float amplitude = windOffsetBound(inst, mesh.boundsSphere.xyz, mesh.boundsSphere.w) * length(inst.objectToWorld[0].xyz);
-        InterlockedMax(meta[phys].windAmplitude, asuint(amplitude));  // non-negative floats order as uints
+        const float scale = windOffsetScale(inst, mesh.boundsSphere.xyz, mesh.boundsSphere.w) * length(inst.objectToWorld[0].xyz);
+        InterlockedMax(meta[phys].windScale, asuint(scale));  // non-negative floats order as uints
         InterlockedMax(meta[phys].windCaster, 1u);
     }
 }

@@ -75,10 +75,12 @@ struct VsmConstants
     uint cacheFrames;        // unrequested pages are released after this many frames
     uint instanceCount;
     uint windTexels;         // wind moves a caster "beyond a texel" at windTexels texels (normally 1)
-    uint windChanged;        // wind speed or direction changed: pages holding wind casters are stale
+    uint windChanged;        // wind speed or direction changed this frame (statistics; the page rule uses the bound)
     float2 cameraUV;         // camera in light space: the level windows derive from it (vsmOrigin)
     uint searchTaps;         // shadow.vsm.search_taps / filter_taps: the estimator's tap counts for every caller
     uint filterTaps;
+    float3 windDirection;    // this frame's scene wind (unit; zero without wind) and speed (m/s): pages store the wind
+    float windSpeed;         // they were drawn with, the rule bounds the change (windChangeBound, v1.23)
     VsmLevel level[VSM_LEVELS];  // CPU copy of the windows (raster views); kernels use vsmTexel / vsmOrigin
 };
 
@@ -89,10 +91,13 @@ struct VsmPageMeta
     uint lastRequested;  // frame
     uint renderTime;     // float bits: scene time of the last render (wind rule)
     uint maxHeight;      // encoded height of the highest caster in the page (blocker search bound)
-    uint windAmplitude;  // float bits: largest wind displacement bound (windOffsetBound x scale) of the casters drawn
+    uint windScale;      // float bits: largest speed-free wind bound (windOffsetScale x instance scale) of the casters drawn
     uint windCaster;     // 1 when a wind-affected caster was drawn into the page
-    uint pad0, pad1;
-};
+    uint windSpeed;      // float bits: the scene wind speed the page was drawn with (v1.23)
+    uint windDirection;  // octahedral snorm16 x 2 of the scene wind direction the page was drawn with
+    uint layer;          // transmittance layer (revision 1, 4.2): its page + 1; 0 = no thin casters (T = 1)
+    uint pad0, pad1, pad2;
+};  // 48 B (VsmSystem.cpp kMetaBytes)
 
 
 uint vsmEncode(float h)

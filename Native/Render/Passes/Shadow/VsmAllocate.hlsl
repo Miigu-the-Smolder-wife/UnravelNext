@@ -7,6 +7,7 @@
 // P[1].w local lights SRV (StructuredBuffer<VsmLocalLight>; local slots take their light's generation as tag)
 // Stats words: 0 requested, 1 allocated, 2 dirty, 3 pool exhausted, 4 free pages after allocation (VsmFinalize),
 // 5 requested by pixels (the rest by propagation)
+#include "Scene.hlsli"
 #include "Passes/Shadow/VsmLocal.hlsli"
 
 [numthreads(256, 1, 1)]
@@ -59,8 +60,11 @@ void main(uint slot : SV_DispatchThreadID)
         e.x = (e.x & ~VSM_FLAG_STALE) | VSM_FLAG_DIRTY;
         m.renderTime = asuint(c.time);
         m.maxHeight = VSM_EMPTY;  // rebuilt after the raster (VsmPageMax)
-        m.windAmplitude = 0;      // rebuilt by the raster (VsmPagePixel)
+        m.windScale = 0;          // rebuilt by the raster (VsmPagePixel)
         m.windCaster = 0;
+        m.windSpeed = asuint(c.windSpeed);  // the wind this render sees (the rule bounds the change from it)
+        m.windDirection = octEncode(c.windSpeed > 0 ? c.windDirection : float3(1, 0, 0));
+        m.layer = 0;
         RWByteAddressBuffer dirty = ResourceDescriptorHeap[P[1].x];
         uint at;
         dirty.InterlockedAdd(0, 1, at);

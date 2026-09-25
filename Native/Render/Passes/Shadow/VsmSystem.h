@@ -28,6 +28,8 @@ struct VsmConstantsCpu
     uint32_t cacheFrames, instanceCount, windTexels, windChanged;
     float cameraUV[2];
     uint32_t searchTaps, filterTaps;
+    float3 windDirection;
+    float windSpeed;
     VsmLevelCpu level[20];
 };
 constexpr uint32_t kLevels = 20, kPage = 128, kTable = 128, kVirtual = 16384;
@@ -45,7 +47,7 @@ struct VsmLocalLightCpu
     uint32_t active;
 };
 static_assert(sizeof(VsmLocalLightCpu) == 48);
-static_assert(sizeof(VsmConstantsCpu) == 64 + 16 * 3 + kLevels * 16 && sizeof(VsmConstantsCpu) <= 1024);
+static_assert(sizeof(VsmConstantsCpu) == 64 + 16 * 4 + kLevels * 16 && sizeof(VsmConstantsCpu) <= 1024);
 constexpr uint32_t kSlots = kLevels * kTable * kTable;  // the sun's
 constexpr uint32_t kTotalSlots = kSlots + kLocalLights * kLocalLightSlots;
 
