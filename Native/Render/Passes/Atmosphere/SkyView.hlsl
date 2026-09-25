@@ -4,6 +4,9 @@
 // single scattering with LUT sun transmittance + the LUT multiple-scattering source + the Lambertian ground.
 // skySegments quadratic segments (dense near the camera) x Gauss-Legendre 4 points; within a segment the
 // transmittance uses the segment-midpoint extinction. Rebuilt when the sun or the camera altitude changes.
+// One group per texel: its SKY_THREADS threads take contiguous runs of segments, integrate them with the transmittance
+// from their run's start, and a scan of the runs' optical depths joins them (fixed order: deterministic).
+// Dispatch: size.x x size.y groups.
 // P[0].x params, P[0].y transmittance LUT, P[0].z multi-scatter LUT, P[0].w output UAV (RWTexture2D<float4>)
 // Frame constants: g_cameraPosition, g_sunDirection.
 #include "Bindless.hlsli"
@@ -13,11 +16,15 @@
 static const float4 kGlPoints = float4(-0.8611363115940526, -0.3399810435848563, 0.3399810435848563, 0.8611363115940526);
 static const float4 kGlWeights = float4(0.3478548451374539, 0.6521451548625461, 0.6521451548625461, 0.3478548451374539);
 
-[numthreads(8, 8, 1)]
-void main(uint2 id : SV_DispatchThreadID)
+#define SKY_THREADS 32u
+groupshared float3 gs_tau[SKY_THREADS];
+groupshared float3 gs_radiance[SKY_THREADS];
+
+[numthreads(SKY_THREADS, 1, 1)]
+void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
 {
     const AtmosphereParams a = airLoadParams(P[0].x);
-    if (any(id >= a.skyViewSize)) return;
+    const uint2 id = gid.xy;
     const uint tlut = P[0].y, mlut = P[0].z;
     const uint half = a.skyViewSize.y / 2;
     const uint side = id.y / half, row = id.y % half;
@@ -35,12 +42,16 @@ void main(uint2 id : SV_DispatchThreadID)
     const float nu = dot(d, sun), rayleighPhase = airRayleighPhase(nu), miePhase = airMiePhase(nu, a.mieG);
     const float extent = max(0.0, span.y - span.x);
     const float n2 = float(a.skySegments * a.skySegments);
-    float3 radiance = 0, transmittance = 1;
-    [loop] for (uint n = 0; n < a.skySegments && extent > 0; ++n)
+    // This thread's run of segments; radiance and optical depth relative to the run's start.
+    const uint perThread = (a.skySegments + SKY_THREADS - 1) / SKY_THREADS;
+    const uint first = lane * perThread, last = min(first + perThread, a.skySegments);
+    float3 radiance = 0, tau = 0;
+    [loop] for (uint n = first; n < last && extent > 0; ++n)
     {
         const float s0 = span.x + extent * float(n * n) / n2, s1 = span.x + extent * float((n + 1) * (n + 1)) / n2;
         const float width = s1 - s0;
         const AirCoefficients middle = airCoefficients(a, airAltitude(a, origin + d * (s0 + width * 0.5)));
+        const float3 transmittance = exp(-tau);
         [unroll] for (uint j = 0; j < 4; ++j)
         {
             const float t = width * 0.5 * (1 + kGlPoints[j]);
@@ -50,14 +61,34 @@ void main(uint2 id : SV_DispatchThreadID)
                                   (c.rayleigh + c.mie) * airMultipleScattering(a, mlut, p, sun);
             radiance += transmittance * exp(-middle.extinction * t) * source * (width * 0.5 * kGlWeights[j]);
         }
-        transmittance *= exp(-middle.extinction * width);
+        tau += middle.extinction * width;
     }
+    // Exclusive scan of the runs' optical depths (Hillis-Steele), then the runs' radiance summed in lane order.
+    gs_tau[lane] = tau;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint w = 1; w < SKY_THREADS; w <<= 1)
+    {
+        const float3 add = lane >= w ? gs_tau[lane - w] : 0;
+        GroupMemoryBarrierWithGroupSync();
+        gs_tau[lane] += add;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    gs_radiance[lane] = exp(-(gs_tau[lane] - tau)) * radiance;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint width2 = SKY_THREADS / 2; width2 > 0; width2 >>= 1)
+    {
+        if (lane < width2) gs_radiance[lane] += gs_radiance[lane + width2];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane != 0) return;
+    float3 total = gs_radiance[0];
     if (airHitsGround(a, origin, d))
     {
+        const float3 transmittance = exp(-gs_tau[SKY_THREADS - 1]);
         const float3 p = origin + d * span.y, gup = airUp(a, p);
-        radiance += transmittance * a.groundAlbedo *
-                    (saturate(dot(gup, sun)) * airSunTransmittance(a, tlut, p + gup * 0.01, sun) / ATMO_PI + airMultipleScattering(a, mlut, p, sun));
+        total += transmittance * a.groundAlbedo *
+                 (saturate(dot(gup, sun)) * airSunTransmittance(a, tlut, p + gup * 0.01, sun) / ATMO_PI + airMultipleScattering(a, mlut, p, sun));
     }
     RWTexture2D<float4> output = ResourceDescriptorHeap[P[0].w];
-    output[id] = float4(radiance, 0);
+    output[id] = float4(total, 0);
 }

@@ -209,7 +209,7 @@ void record(FramePassContext& fc)
                       c.cmd->SetPipelineState(ps);
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(groups(p.skyViewSize[0], 8), groups(p.skyViewSize[1], 8), 1);
+                      c.cmd->Dispatch(p.skyViewSize[0], p.skyViewSize[1], 1);  // one group per texel (SkyView.hlsl)
                   });
         s.skySun = sun;
         s.skyAltitude = altitude;
