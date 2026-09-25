@@ -19,7 +19,20 @@ float3x4 loadJoint(uint palette, uint joint)
     return float3x4(rows[3 * joint], rows[3 * joint + 1], rows[3 * joint + 2]);
 }
 
-// Linear blend skinning in object space (jointToModel * inverseBind are pre-multiplied into the palette).
+// Normal transform of a joint's 3x3 A: the cofactor matrix det(A) A^-T (columns cross products of A's columns), times
+// sign(det A) so a mirroring joint keeps the normal on the outer side. Exact for any invertible joint (non-uniform
+// scale, shear: squash and stretch, the host's part scales folded into joints); for rotation + uniform scale it is a
+// positive multiple of A, so the normalised result is unchanged.
+float3 cofactorNormal(float3x3 a, float3 n)
+{
+    const float3x3 at = transpose(a);  // rows = columns of a
+    const float3 c0 = cross(at[1], at[2]), c1 = cross(at[2], at[0]), c2 = cross(at[0], at[1]);
+    const float det = dot(at[0], c0);
+    return (det < 0 ? -1.0 : 1.0) * (n.x * c0 + n.y * c1 + n.z * c2);
+}
+
+// Linear blend skinning in object space (jointToModel * inverseBind are pre-multiplied into the palette). Positions and
+// tangents by the joint matrices, normals by their cofactors (cofactorNormal), each blended by the weights.
 void skin(GpuMesh mesh, GpuInstance inst, uint meshVertex, uint palette, inout float3 p, inout float3 n, inout float3 t)
 {
     StructuredBuffer<GpuSkinVertex> sv = ResourceDescriptorHeap[g_skinVertices];
@@ -31,7 +44,7 @@ void skin(GpuMesh mesh, GpuInstance inst, uint meshVertex, uint palette, inout f
     {
         const float3x4 m = loadJoint(palette, inst.bonePalette + j[k]);
         sp += w[k] * mul(m, float4(p, 1));
-        sn += w[k] * mul((float3x3)m, n);
+        sn += w[k] * cofactorNormal((float3x3)m, n);
         st += w[k] * mul((float3x3)m, t);
     }
     p = sp;

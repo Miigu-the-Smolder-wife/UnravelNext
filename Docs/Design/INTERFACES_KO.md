@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.13, 2026-09-25)
+# UnravelNext 인터페이스 (v1.14, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -393,3 +393,5 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - 렌더 그래프: 과도 버퍼의 첫 사용은 항상 활성화 배리어를 받는다. 앞 프레임에 앨리어스 선행자로 비활성화(NO_ACCESS)된 버퍼가 접근 불가로 남던 결함을 고쳤다(S 신고, 디버그 레이어 1332).
 - v1.13 (2026-09-25):
   - **R 요청 `20260925_R_probe_lookup_structure.md` 반영(코어 부분)**: `ViewResources::screenProbeMaps`(5.1 표). `TextureDesc::srvFormat/uavFormat`는 캐스팅 가능한 뷰 형식이다(4절; `DeviceCaps::relaxedFormatCasting`, 지원 안 하면 실패). 선택지 (a)가 이 장치에서 된다 [실측]: 단위 테스트 `graph_castable_view_formats`에서 R32_UINT UAV로 쓰고 R9G9B9E5_SHAREDEXP SRV로 읽었고 4,096 texel 중 틀린 것 0. RGBA16F 아틀라스(8 B/texel)의 절반 대역이다. `screenProbeGather`는 R의 헤더(5.6)다.
+- v1.14 (2026-09-25):
+  - **I 요청 `20260925_I_skin_normals.md` 반영**: `Deformation.hlsli`의 `skin()`이 법선을 관절 3×3의 여인수 × sign(det)으로 변환한다(`cofactorNormal`: 역전치 방향, 비균일 스케일·전단·거울 관절에서도 정확). 위치·탄젠트는 관절 행렬 그대로다. 회전 + 균일 스케일에서는 결과가 같다. V 래스터, S 페이지(V 서비스), R refit이 한 번에 바뀐다. C의 기준 경로추적기가 스킨을 지원할 때도 같은 식을 쓴다. 단위 테스트 `skin_normals_use_the_cofactor`.

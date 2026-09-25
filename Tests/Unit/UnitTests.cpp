@@ -525,6 +525,89 @@ UNX_TEST(graph_castable_view_formats)
     CHECK(wrong == 0);
 }
 
+UNX_TEST(skin_normals_use_the_cofactor)
+{
+    // Deformation.hlsli cofactorNormal (I request, skin normals): the GPU result equals the inverse transpose of the joint
+    // 3x3 applied to the normal (normalised), for rotation + uniform scale, non-uniform scale, shear and a mirror.
+    ID3D12PipelineState* pso = shaders().compute("Passes/Test/CofactorNormal");
+    RenderGraph g(testDevice());
+    struct Case
+    {
+        float a[3][3];
+        float3 n;
+    };
+    const float c = std::cos(0.7f), s = std::sin(0.7f);
+    const Case cases[] = {
+        { { { 2 * c, -2 * s, 0 }, { 2 * s, 2 * c, 0 }, { 0, 0, 2 } }, normalize(float3{ 0.3f, 0.5f, 0.8f }) },  // rotation x uniform scale
+        { { { 0.6f, 0, 0 }, { 0, 0.8f, 0 }, { 0, 0, 0.6f } }, normalize(float3{ 1, 1, 0 }) },                  // host part scale
+        { { { 1, 0.7f, 0 }, { 0, 1, 0 }, { 0, 0, 1 } }, normalize(float3{ 0, 1, 0.2f }) },                    // shear
+        { { { -1, 0, 0 }, { 0, 1.5f, 0 }, { 0, 0, 1 } }, normalize(float3{ 0.6f, 0.8f, 0 }) },                // mirror
+    };
+    std::vector<float3> gpu(std::size(cases));
+    for (size_t k = 0; k < std::size(cases); ++k)
+    {
+        const Case& cs = cases[k];
+        const BufferRef out = g.createBuffer({ "cofactor out", 256, 0 });
+        auto rb = std::make_shared<ComPtr<ID3D12Resource>>();
+        {
+            D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+            D3D12_RESOURCE_DESC1 rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            rd.Width = 256;
+            rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            check(testDevice().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&*rb)),
+                  "readback");
+        }
+        g.addPass("cofactor", QueueType::Graphics, [&](PassBuilder& b) { b.use(out, Use::UavCompute); },
+                  [=](PassContext& ctx) {
+                      uint32_t k[16] = {};
+                      for (int r = 0; r < 3; ++r) std::memcpy(&k[4 * r], cs.a[r], 12);
+                      std::memcpy(&k[12], &cs.n, 12);
+                      k[15] = ctx.uav(out);
+                      ctx.cmd->SetPipelineState(pso);
+                      ctx.computeConstants(k, 16);
+                      ctx.cmd->Dispatch(1, 1, 1);
+                  });
+        ID3D12Resource* dst = rb->Get();
+        g.addPass("cofactor readback", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(out, Use::CopySrc);
+                      b.keep();
+                  },
+                  [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(dst, 0, ctx.resource(out), 0, 12); });
+        g.execute(nullptr);
+        for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+        float* v = nullptr;
+        check((*rb)->Map(0, nullptr, (void**)&v), "map");
+        gpu[k] = { v[0], v[1], v[2] };
+        (*rb)->Unmap(0, nullptr);
+    }
+    float worst = 0;
+    for (size_t k = 0; k < std::size(cases); ++k)
+    {
+        // CPU: inverse transpose of the 3x3 (cofactor / det) applied to n.
+        const auto& a = cases[k].a;
+        const double det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+        double cof[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int col = 0; col < 3; ++col)
+            {
+                const int r1 = (r + 1) % 3, r2 = (r + 2) % 3, c1 = (col + 1) % 3, c2 = (col + 2) % 3;
+                cof[r][col] = a[r1][c1] * a[r2][c2] - a[r1][c2] * a[r2][c1];
+            }
+        const float3 n = cases[k].n;
+        double e[3];
+        for (int r = 0; r < 3; ++r) e[r] = (cof[r][0] * n.x + cof[r][1] * n.y + cof[r][2] * n.z) / det;  // (A^-T n)_r = cof[r] . n / det
+        const double len = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+        const float3 expect{ (float)(e[0] / len), (float)(e[1] / len), (float)(e[2] / len) };
+        worst = std::max({ worst, std::fabs(gpu[k].x - expect.x), std::fabs(gpu[k].y - expect.y), std::fabs(gpu[k].z - expect.z) });
+    }
+    logf("    skin normal (cofactor) vs inverse transpose: worst component difference %.2e over %zu joints\n", worst, std::size(cases));
+    CHECK(worst < 1e-5f);
+}
+
 UNX_TEST(graph_single_queue_is_one_list)
 {
     // Default policy: compute-queue passes run on the graphics queue; the frame is one command list.
