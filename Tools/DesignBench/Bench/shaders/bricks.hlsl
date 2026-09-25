@@ -17,6 +17,12 @@
 #ifndef SPARSE
 #define SPARSE 0  // 1: brick table entry 0xFFFFFFFF = empty brick, the march jumps to the brick exit (revision 1 14.4 item 1)
 #endif
+#ifndef TILE_TABLE
+#define TILE_TABLE 0  // 1: the 8x8 group loads a 4x4x4 brick-table window into groupshared once (floor decomposition, 14.5 A/E)
+#endif
+#ifndef NO_WRITE
+#define NO_WRITE 0  // 1: skip the 4 B T write (floor decomposition); a never-taken store keeps the march alive
+#endif
 #ifndef OUT_T
 #define OUT_T 0  // 1: write only the 4 B transmittance (receiver sun march, revision 1 11.4 (5)); 0: the 32 B aggregate record
 #endif
@@ -38,12 +44,30 @@ float densityAt(ByteAddressBuffer voxels, uint brick, int3 local, inout float ex
 #endif
 }
 
+#if TILE_TABLE
+groupshared uint gsTable[64];
+groupshared uint3 gsBase;
+#endif
 [numthreads(8, 8, 1)]
-void MarchCS(uint2 pixel : SV_DispatchThreadID)
+void MarchCS(uint2 pixel : SV_DispatchThreadID, uint gtid : SV_GroupIndex, uint2 gid : SV_GroupID)
 {
     const uint W = P[0].x, H = P[0].y;
-    if (any(pixel >= uint2(W, H))) return;
     StructuredBuffer<uint> brickTable = ResourceDescriptorHeap[P[1].x];
+#if TILE_TABLE
+    {
+        // Window origin: the brick of the tile's first receiver (ground up, mode 2), minus one in x/z for the tilt.
+        const uint3 Bw = P[2].xyz;
+        const float3 boxw = float3(Bw * 16);
+        const float2 g0 = (float2(gid * 8) + 0.5) / float2(W, H);
+        const int3 b0 = int3(max((int)floor(g0.x * boxw.x) / 16 - 1, 0), 0, max((int)floor(g0.y * boxw.z) / 16 - 1, 0));
+        if (gtid == 0) gsBase = (uint3)b0;
+        const uint3 o = uint3(gtid & 3, (gtid >> 2) & 3, gtid >> 4);
+        const uint3 bc = (uint3)b0 + o;
+        gsTable[gtid] = all(bc < Bw) ? brickTable[(bc.z * Bw.y + bc.y) * Bw.x + bc.x] : 0xFFFFFFFFu;
+        GroupMemoryBarrierWithGroupSync();
+    }
+#endif
+    if (any(pixel >= uint2(W, H))) return;
     ByteAddressBuffer voxels = ResourceDescriptorHeap[P[1].y];
     RWStructuredBuffer<Aggregate> output = ResourceDescriptorHeap[P[1].z];
     const uint3 B = P[2].xyz;
@@ -88,7 +112,12 @@ void MarchCS(uint2 pixel : SV_DispatchThreadID)
         const uint brickIndex = (bc.z * B.y + bc.y) * B.x + bc.x;
         if (brickIndex != brickIndexPrev)
         {
+#if TILE_TABLE
+            const uint3 rel = bc - gsBase;
+            brick = all(rel < 4u) ? gsTable[rel.x + rel.y * 4 + rel.z * 16] : brickTable[brickIndex];
+#else
             brick = brickTable[brickIndex];  // the indirection (octree node / page table)
+#endif
             brickIndexPrev = brickIndex;
             ++entries;
         }
@@ -116,7 +145,11 @@ void MarchCS(uint2 pixel : SV_DispatchThreadID)
         if (T < 1.0 / 32.0) break;
     }
 #if OUT_T
+#if NO_WRITE
+    if (T == 12345.0) output[pixel.y * W + pixel.x].T = T + extra * 0.0 + (float)entries * 0.0 + sumW * 0.0;
+#else
     output[pixel.y * W + pixel.x].T = T + extra * 0.0 + (float)entries * 0.0 + sumW * 0.0;
+#endif
     return;
 #endif
     Aggregate a;

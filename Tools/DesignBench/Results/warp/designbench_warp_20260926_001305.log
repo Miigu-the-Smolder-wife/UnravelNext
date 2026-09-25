@@ -1,0 +1,51 @@
+Adapter: WARP, driver , D3D12Core: C:\Users\USER\UnravelNext\Tools\DesignBench\build\D3D12\D3D12Core.dll
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64, shaders: C:/Users/USER/UnravelNext/Tools/DesignBench/Bench/shaders, resolution 256x144, reps 1 (WARP)
+  [env] timestamp frequency                                                    10000000.0000 Hz       
+
+== Band C brick DDA (16^3 bricks, table indirection, camera and sun marches, entry maps) (WARP dry run, no warm-up)
+  [bricks] camera march, 1 B voxels (1 MB), 16 steps, 32 B record                       2.0093 ms       54.505751 ns/pixel, 3.406609 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (1 MB), 16 steps, 32 B record           1.2455 ms       33.786350 ns/pixel, 2.111647 ns/step (upper bound: early exits)
+  [bricks] sun texel march (top face down), 1 B voxels, 16 steps, 4 B T only            1.8250 ms       49.506293 ns/pixel (receiver)
+  [bricks] receiver sun march (ground up toward the sun), 1 B voxels, 16 steps, 4 B T only       1.1841 ms       32.120768 ns/pixel (receiver)
+  [bricks] receiver sun march, sparse skip, brick occupancy 100 %, 1 B voxels, 16 steps, 4 B T only       1.8974 ms       51.470269 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 60 %, 1 B voxels, 16 steps, 4 B T only       1.0425 ms       28.279622 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 40 %, 1 B voxels, 16 steps, 4 B T only       0.7762 ms       21.055773 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 20 %, 1 B voxels, 16 steps, 4 B T only       0.5578 ms       15.131293 ns/receiver
+  [bricks] receiver sun march, sparse skip 40 %, brick table in groupshared per 8x8 tile, 1 B voxels, 16 steps       2.7711 ms       75.170898 ns/receiver
+  [bricks] receiver sun march, sparse skip 40 %, no T write, 1 B voxels, 16 steps       1.7381 ms       47.148980 ns/receiver
+  [bricks] camera march, 1 B voxels (1 MB), 32 steps, 32 B record                       2.0816 ms       56.467014 ns/pixel, 1.764594 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (1 MB), 32 steps, 32 B record           2.2949 ms       62.253147 ns/pixel, 1.945411 ns/step (upper bound: early exits)
+  [bricks] sun texel march (top face down), 1 B voxels, 32 steps, 4 B T only            2.5516 ms       69.216580 ns/pixel (receiver)
+  [bricks] receiver sun march (ground up toward the sun), 1 B voxels, 32 steps, 4 B T only       1.4349 ms       38.924154 ns/pixel (receiver)
+  [bricks] receiver sun march, sparse skip, brick occupancy 100 %, 1 B voxels, 32 steps, 4 B T only       3.1923 ms       86.596680 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 60 %, 1 B voxels, 32 steps, 4 B T only       1.0370 ms       28.130425 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 40 %, 1 B voxels, 32 steps, 4 B T only       0.7472 ms       20.269097 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 20 %, 1 B voxels, 32 steps, 4 B T only       0.7303 ms       19.810655 ns/receiver
+  [bricks] receiver sun march, sparse skip 40 %, brick table in groupshared per 8x8 tile, 1 B voxels, 32 steps       3.6328 ms       98.546007 ns/receiver
+  [bricks] receiver sun march, sparse skip 40 %, no T write, 1 B voxels, 32 steps       0.7657 ms       20.770942 ns/receiver
+  [bricks] camera march, 1 B voxels (1 MB), 48 steps, 32 B record                       3.2382 ms       87.841797 ns/pixel, 1.830037 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (1 MB), 48 steps, 32 B record           2.3051 ms       62.529839 ns/pixel, 1.302705 ns/step (upper bound: early exits)
+  [bricks] sun texel march (top face down), 1 B voxels, 48 steps, 4 B T only            2.7343 ms       74.172635 ns/pixel (receiver)
+  [bricks] receiver sun march (ground up toward the sun), 1 B voxels, 48 steps, 4 B T only       2.4012 ms       65.136719 ns/pixel (receiver)
+  [bricks] receiver sun march, sparse skip, brick occupancy 100 %, 1 B voxels, 48 steps, 4 B T only       3.4465 ms       93.492296 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 60 %, 1 B voxels, 48 steps, 4 B T only       1.7554 ms       47.618273 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 40 %, 1 B voxels, 48 steps, 4 B T only       1.0502 ms       28.488498 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 20 %, 1 B voxels, 48 steps, 4 B T only       0.8320 ms       22.569444 ns/receiver
+  [bricks] receiver sun march, sparse skip 40 %, brick table in groupshared per 8x8 tile, 1 B voxels, 48 steps       3.2646 ms       88.557943 ns/receiver
+  [bricks] receiver sun march, sparse skip 40 %, no T write, 1 B voxels, 48 steps       1.5718 ms       42.637804 ns/receiver
+  [bricks] entry maps: 144 bricks x 256 cells x 16 steps, 1 B voxels                    1.2400 ms       8611.111111 ns/brick
+  WARP check: first record T=1 depth=13.3162 entries=3
+  [bricks] camera march, 8 B voxels (4 MB), 16 steps, 32 B record                       3.7997 ms       103.073459 ns/pixel, 6.442091 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (4 MB), 16 steps, 32 B record           1.1997 ms       32.543945 ns/pixel, 2.033997 ns/step (upper bound: early exits)
+  [bricks] sun texel march (top face down), 8 B voxels, 16 steps, 4 B T only            1.1848 ms       32.139757 ns/pixel (receiver)
+  [bricks] receiver sun march (ground up toward the sun), 8 B voxels, 16 steps, 4 B T only       1.0506 ms       28.499349 ns/pixel (receiver)
+  [bricks] camera march, 8 B voxels (4 MB), 32 steps, 32 B record                       4.2117 ms       114.249674 ns/pixel, 3.570302 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (4 MB), 32 steps, 32 B record           1.8720 ms       50.781250 ns/pixel, 1.586914 ns/step (upper bound: early exits)
+  [bricks] sun texel march (top face down), 8 B voxels, 32 steps, 4 B T only            1.6629 ms       45.109049 ns/pixel (receiver)
+  [bricks] receiver sun march (ground up toward the sun), 8 B voxels, 32 steps, 4 B T only       1.6507 ms       44.778103 ns/pixel (receiver)
+  [bricks] camera march, 8 B voxels (4 MB), 48 steps, 32 B record                       4.7357 ms       128.464084 ns/pixel, 2.676335 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (4 MB), 48 steps, 32 B record           2.5556 ms       69.325087 ns/pixel, 1.444273 ns/step (upper bound: early exits)
+  [bricks] sun texel march (top face down), 8 B voxels, 48 steps, 4 B T only            3.0660 ms       83.170573 ns/pixel (receiver)
+  [bricks] receiver sun march (ground up toward the sun), 8 B voxels, 48 steps, 4 B T only       2.4082 ms       65.326606 ns/pixel (receiver)
+  [bricks] entry maps: 144 bricks x 256 cells x 16 steps, 8 B voxels                    1.3422 ms       9320.833333 ns/brick
+  WARP check: first record T=0.0802577 depth=13.3162 entries=3

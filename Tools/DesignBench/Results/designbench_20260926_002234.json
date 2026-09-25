@@ -1,0 +1,30 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "resolution": "3840x2160", "reps": 9, "timestamp": "20260926_002234",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "bricks", "name": "camera march, 1 B voxels (18 MB), 16 steps, 32 B record", "value": 0.79872, "unit": "ms", "note": "0.096296 ns/pixel, 0.006019 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun (orthographic) march, 1 B voxels (18 MB), 16 steps, 32 B record", "value": 0.451584, "unit": "ms", "note": "0.054444 ns/pixel, 0.003403 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "camera march, 1 B voxels (18 MB), 32 steps, 32 B record", "value": 0.913408, "unit": "ms", "note": "0.110123 ns/pixel, 0.003441 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun (orthographic) march, 1 B voxels (18 MB), 32 steps, 32 B record", "value": 0.753664, "unit": "ms", "note": "0.090864 ns/pixel, 0.002840 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun texel march (top face down), 1 B voxels, 32 steps, 4 B T only", "value": 0.68608, "unit": "ms", "note": "0.082716 ns/pixel (receiver)"},
+  {"section": "bricks", "name": "receiver sun march (ground up toward the sun), 1 B voxels, 32 steps, 4 B T only", "value": 0.689152, "unit": "ms", "note": "0.083086 ns/pixel (receiver)"},
+  {"section": "bricks", "name": "receiver sun march, sparse skip, brick occupancy 100 %, 1 B voxels, 32 steps, 4 B T only", "value": 0.731136, "unit": "ms", "note": "0.088148 ns/receiver"},
+  {"section": "bricks", "name": "receiver sun march, sparse skip, brick occupancy 60 %, 1 B voxels, 32 steps, 4 B T only", "value": 0.51712, "unit": "ms", "note": "0.062346 ns/receiver"},
+  {"section": "bricks", "name": "receiver sun march, sparse skip, brick occupancy 40 %, 1 B voxels, 32 steps, 4 B T only", "value": 0.498688, "unit": "ms", "note": "0.060123 ns/receiver"},
+  {"section": "bricks", "name": "receiver sun march, sparse skip, brick occupancy 20 %, 1 B voxels, 32 steps, 4 B T only", "value": 0.48128, "unit": "ms", "note": "0.058025 ns/receiver"},
+  {"section": "bricks", "name": "receiver sun march, sparse skip 40 %, brick table in groupshared per 8x8 tile, 1 B voxels, 32 steps", "value": 0.493568, "unit": "ms", "note": "0.059506 ns/receiver"},
+  {"section": "bricks", "name": "receiver sun march, sparse skip 40 %, no T write, 1 B voxels, 32 steps", "value": 0.366592, "unit": "ms", "note": "0.044198 ns/receiver"},
+  {"section": "bricks", "name": "camera march, 1 B voxels (18 MB), 48 steps, 32 B record", "value": 1.34042, "unit": "ms", "note": "0.161605 ns/pixel, 0.003367 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun (orthographic) march, 1 B voxels (18 MB), 48 steps, 32 B record", "value": 1.25952, "unit": "ms", "note": "0.151852 ns/pixel, 0.003164 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "entry maps: 4608 bricks x 256 cells x 16 steps, 1 B voxels", "value": 0.045056, "unit": "ms", "note": "9.777778 ns/brick"},
+  {"section": "bricks", "name": "camera march, 8 B voxels (144 MB), 16 steps, 32 B record", "value": 0.95232, "unit": "ms", "note": "0.114815 ns/pixel, 0.007176 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun (orthographic) march, 8 B voxels (144 MB), 16 steps, 32 B record", "value": 0.616448, "unit": "ms", "note": "0.074321 ns/pixel, 0.004645 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "camera march, 8 B voxels (144 MB), 32 steps, 32 B record", "value": 0.953344, "unit": "ms", "note": "0.114938 ns/pixel, 0.003592 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun (orthographic) march, 8 B voxels (144 MB), 32 steps, 32 B record", "value": 0.979968, "unit": "ms", "note": "0.118148 ns/pixel, 0.003692 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun texel march (top face down), 8 B voxels, 32 steps, 4 B T only", "value": 0.910336, "unit": "ms", "note": "0.109753 ns/pixel (receiver)"},
+  {"section": "bricks", "name": "receiver sun march (ground up toward the sun), 8 B voxels, 32 steps, 4 B T only", "value": 0.894976, "unit": "ms", "note": "0.107901 ns/pixel (receiver)"},
+  {"section": "bricks", "name": "camera march, 8 B voxels (144 MB), 48 steps, 32 B record", "value": 1.15302, "unit": "ms", "note": "0.139012 ns/pixel, 0.002896 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun (orthographic) march, 8 B voxels (144 MB), 48 steps, 32 B record", "value": 1.38035, "unit": "ms", "note": "0.166420 ns/pixel, 0.003467 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "entry maps: 4608 bricks x 256 cells x 16 steps, 8 B voxels", "value": 0.272384, "unit": "ms", "note": "59.111111 ns/brick"}
+ ]
+}

@@ -1,0 +1,31 @@
+D3D12 debug layer enabled + GPU-based validation
+Adapter: NVIDIA GeForce RTX 4080, driver 32.0.15.9186, D3D12Core: C:\Users\USER\UnravelNext\Tools\DesignBench\build\D3D12\D3D12Core.dll
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64, shaders: C:/Users/USER/UnravelNext/Tools/DesignBench/Bench/shaders, resolution 256x144, reps 1
+  [env] timestamp frequency                                                    1000000000.0000 Hz       
+  d3d12[4]: Device Debug Layer Startup Options: GPU-Based Validation is enabled (disabled by default). This results in new validation not possible during API calls on the CPU, by creating patched shaders that have validation added directly to the shader. However, it can slow things down a lot, especially for applications with numerous PSOs. Time to see the first render frame may take several minutes.
+
+== Band C brick DDA (16^3 bricks, table indirection, camera and sun marches, entry maps) (after 1.5 s warm-up)
+  [bricks] camera march, 1 B voxels (18 MB), 16 steps, 32 B record                      0.0133 ms       0.361111 ns/pixel, 0.022569 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (18 MB), 16 steps, 32 B record          0.0154 ms       0.416667 ns/pixel, 0.026042 ns/step (upper bound: early exits)
+  [bricks] camera march, 1 B voxels (18 MB), 32 steps, 32 B record                      0.0184 ms       0.500000 ns/pixel, 0.015625 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (18 MB), 32 steps, 32 B record          0.0195 ms       0.527778 ns/pixel, 0.016493 ns/step (upper bound: early exits)
+  [bricks] sun texel march (top face down), 1 B voxels, 32 steps, 4 B T only            0.0164 ms       0.444444 ns/pixel (receiver)
+  [bricks] receiver sun march (ground up toward the sun), 1 B voxels, 32 steps, 4 B T only       0.0164 ms       0.444444 ns/pixel (receiver)
+  [bricks] receiver sun march, sparse skip, brick occupancy 100 %, 1 B voxels, 32 steps, 4 B T only       0.0174 ms       0.472222 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 60 %, 1 B voxels, 32 steps, 4 B T only       0.0174 ms       0.472222 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 40 %, 1 B voxels, 32 steps, 4 B T only       0.0164 ms       0.444444 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 20 %, 1 B voxels, 32 steps, 4 B T only       0.0164 ms       0.444444 ns/receiver
+  [bricks] receiver sun march, sparse skip 40 %, brick table in groupshared per 8x8 tile, 1 B voxels, 32 steps       0.0184 ms       0.500000 ns/receiver
+  [bricks] receiver sun march, sparse skip 40 %, no T write, 1 B voxels, 32 steps       0.0154 ms       0.416667 ns/receiver
+  [bricks] camera march, 1 B voxels (18 MB), 48 steps, 32 B record                      0.0236 ms       0.638889 ns/pixel, 0.013310 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (18 MB), 48 steps, 32 B record          0.0236 ms       0.638889 ns/pixel, 0.013310 ns/step (upper bound: early exits)
+  [bricks] entry maps: 4608 bricks x 256 cells x 16 steps, 1 B voxels                   0.0471 ms       10.222222 ns/brick
+  [bricks] camera march, 8 B voxels (144 MB), 16 steps, 32 B record                     0.0164 ms       0.444444 ns/pixel, 0.027778 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (144 MB), 16 steps, 32 B record         0.0236 ms       0.638889 ns/pixel, 0.039931 ns/step (upper bound: early exits)
+  [bricks] camera march, 8 B voxels (144 MB), 32 steps, 32 B record                     0.0225 ms       0.611111 ns/pixel, 0.019097 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (144 MB), 32 steps, 32 B record         0.0358 ms       0.972222 ns/pixel, 0.030382 ns/step (upper bound: early exits)
+  [bricks] sun texel march (top face down), 8 B voxels, 32 steps, 4 B T only            0.0348 ms       0.944444 ns/pixel (receiver)
+  [bricks] receiver sun march (ground up toward the sun), 8 B voxels, 32 steps, 4 B T only       0.0389 ms       1.055556 ns/pixel (receiver)
+  [bricks] camera march, 8 B voxels (144 MB), 48 steps, 32 B record                     0.0307 ms       0.833333 ns/pixel, 0.017361 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (144 MB), 48 steps, 32 B record         0.0492 ms       1.333333 ns/pixel, 0.027778 ns/step (upper bound: early exits)
+  [bricks] entry maps: 4608 bricks x 256 cells x 16 steps, 8 B voxels                   0.2724 ms       59.111111 ns/brick

@@ -1,0 +1,29 @@
+Adapter: NVIDIA GeForce RTX 4080, driver 32.0.15.9186, D3D12Core: C:\Users\USER\UnravelNext\Tools\DesignBench\build\D3D12\D3D12Core.dll
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64, shaders: C:/Users/USER/UnravelNext/Tools/DesignBench/Bench/shaders, resolution 3840x2160, reps 9
+  [env] timestamp frequency                                                    1000000000.0000 Hz       
+
+== Band C brick DDA (16^3 bricks, table indirection, camera and sun marches, entry maps) (after 1.5 s warm-up)
+  [bricks] camera march, 1 B voxels (18 MB), 16 steps, 32 B record                      0.7987 ms       0.096296 ns/pixel, 0.006019 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (18 MB), 16 steps, 32 B record          0.4516 ms       0.054444 ns/pixel, 0.003403 ns/step (upper bound: early exits)
+  [bricks] camera march, 1 B voxels (18 MB), 32 steps, 32 B record                      0.9134 ms       0.110123 ns/pixel, 0.003441 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (18 MB), 32 steps, 32 B record          0.7537 ms       0.090864 ns/pixel, 0.002840 ns/step (upper bound: early exits)
+  [bricks] sun texel march (top face down), 1 B voxels, 32 steps, 4 B T only            0.6861 ms       0.082716 ns/pixel (receiver)
+  [bricks] receiver sun march (ground up toward the sun), 1 B voxels, 32 steps, 4 B T only       0.6892 ms       0.083086 ns/pixel (receiver)
+  [bricks] receiver sun march, sparse skip, brick occupancy 100 %, 1 B voxels, 32 steps, 4 B T only       0.7311 ms       0.088148 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 60 %, 1 B voxels, 32 steps, 4 B T only       0.5171 ms       0.062346 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 40 %, 1 B voxels, 32 steps, 4 B T only       0.4987 ms       0.060123 ns/receiver
+  [bricks] receiver sun march, sparse skip, brick occupancy 20 %, 1 B voxels, 32 steps, 4 B T only       0.4813 ms       0.058025 ns/receiver
+  [bricks] receiver sun march, sparse skip 40 %, brick table in groupshared per 8x8 tile, 1 B voxels, 32 steps       0.4936 ms       0.059506 ns/receiver
+  [bricks] receiver sun march, sparse skip 40 %, no T write, 1 B voxels, 32 steps       0.3666 ms       0.044198 ns/receiver
+  [bricks] camera march, 1 B voxels (18 MB), 48 steps, 32 B record                      1.3404 ms       0.161605 ns/pixel, 0.003367 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (18 MB), 48 steps, 32 B record          1.2595 ms       0.151852 ns/pixel, 0.003164 ns/step (upper bound: early exits)
+  [bricks] entry maps: 4608 bricks x 256 cells x 16 steps, 1 B voxels                   0.0451 ms       9.777778 ns/brick
+  [bricks] camera march, 8 B voxels (144 MB), 16 steps, 32 B record                     0.9523 ms       0.114815 ns/pixel, 0.007176 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (144 MB), 16 steps, 32 B record         0.6164 ms       0.074321 ns/pixel, 0.004645 ns/step (upper bound: early exits)
+  [bricks] camera march, 8 B voxels (144 MB), 32 steps, 32 B record                     0.9533 ms       0.114938 ns/pixel, 0.003592 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (144 MB), 32 steps, 32 B record         0.9800 ms       0.118148 ns/pixel, 0.003692 ns/step (upper bound: early exits)
+  [bricks] sun texel march (top face down), 8 B voxels, 32 steps, 4 B T only            0.9103 ms       0.109753 ns/pixel (receiver)
+  [bricks] receiver sun march (ground up toward the sun), 8 B voxels, 32 steps, 4 B T only       0.8950 ms       0.107901 ns/pixel (receiver)
+  [bricks] camera march, 8 B voxels (144 MB), 48 steps, 32 B record                     1.1530 ms       0.139012 ns/pixel, 0.002896 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (144 MB), 48 steps, 32 B record         1.3804 ms       0.166420 ns/pixel, 0.003467 ns/step (upper bound: early exits)
+  [bricks] entry maps: 4608 bricks x 256 cells x 16 steps, 8 B voxels                   0.2724 ms       59.111111 ns/brick
