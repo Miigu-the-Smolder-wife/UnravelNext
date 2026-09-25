@@ -107,11 +107,71 @@ float4 airVolumeCoord(Texture3D<float4> v, Texture2D<float4> p, float2 uv, float
     return float4(x, (r0 + fy + 0.5) / h, (c + 0.5) / d, (r0 + fyAir + 0.5) / h);
 }
 
+// The air of the main view's pixel at uv up to view depth linearDepth (see atmosphereAerial). The volume is read at the
+// depth itself, or, when the pixel's ray passes below the model's surface first (terrain below the origin's altitude:
+// the reference takes the surface air there, homogeneous), at the depth where it crosses the surface, and the rest of
+// the path is integrated with the surface air (exact transmittance), the pixel's own phase, and the sun transmittance and
+// multiple scattering of the lifted points at 8 midpoints. No tile interpolation spans the crossing, at any resolution.
+void airViewLookup(AtmosphereSrvs s, float2 uv, float linearDepth, bool wantSun, out float3 inscatter, out float3 transmittance, out float3 sunTransmittance)
+{
+    Texture3D<float4> v = ResourceDescriptorHeap[s.aerial];
+    Texture2D<float4> p = ResourceDescriptorHeap[s.multiScatter];
+    uint pw, ph;
+    p.GetDimensions(pw, ph);
+    const float bottom = p.Load(int3(0, ph - 1, 0)).x;
+    // The pixel's ray, its distance per unit view depth and where it enters the model's surface (if before the depth).
+    const float2 ndc = float2(uv.x * 2 - 1, 1 - uv.y * 2);
+    const float4 q = mul(g_invViewProj, float4(ndc, 1, 1));
+    const float3 dir = normalize(q.xyz / q.w - g_cameraPosition);
+    const float toRay = 1.0 / max(dot(dir, airViewForward()), 1e-4);
+    const float3 o = g_cameraPosition;
+    const float h2 = dot(o, o) + 2 * bottom * o.y;  // (r^2 - R^2) of the camera
+    float kink = 3.0e38;                            // ray distance to the surface crossing
+    if (h2 <= 0) kink = 0;
+    else
+    {
+        const float b = dot(o, dir) + bottom * dir.y, disc = b * b - h2;
+        if (disc >= 0 && b < 0) kink = h2 / (-b + sqrt(disc));  // nearer root, stable form
+    }
+    const float tDepth = linearDepth * toRay;
+    const bool lifted = kink < tDepth;
+    float N, d;
+    const float4 t = airVolumeCoord(v, p, uv, lifted ? kink / toRay : linearDepth, N, d);
+    const float4 a = v.SampleLevel(g_linearClamp, t.xyz, 0);
+    const float4 od = v.SampleLevel(g_linearClamp, float3(t.x, t.w, t.z + N / d), 0);
+    inscatter = a.rgb / g_exposure;  // stored pre-exposed
+    transmittance = exp(-od.rgb);
+    sunTransmittance = 0;
+    if (wantSun || lifted) sunTransmittance = v.SampleLevel(g_linearClamp, float3(t.x, t.w, t.z + 2 * N / d), 0).rgb;
+    if (!lifted) return;
+    const AtmosphereParams ap = airParamsFromTexels(s.multiScatter);
+    const AirCoefficients c = airCoefficients(ap, 0.0);
+    const float3 sun = normalize(g_sunDirection);
+    const float nu = dot(dir, sun);
+    const float3 phase = c.rayleigh * airRayleighPhase(nu) + c.mie * airMiePhase(nu, ap.mieG);
+    const float L = max(min(tDepth, ap.froxelFarM * toRay) - kink, 0.0);
+    // Homogeneous surface air: exact transmittance; the sun and multiple scattering of the lifted points (their surface
+    // normal turns along the path) at LIFTED_STEPS midpoints.
+    const uint LIFTED_STEPS = 8;
+    const float dt = L / LIFTED_STEPS;
+    const float3 step = airIntegral(c.extinction, dt), decay = exp(-c.extinction * dt);
+    [unroll] for (uint k = 0; k < LIFTED_STEPS; ++k)
+    {
+        const float3 x = airLiftToSurface(ap, o + dir * (kink + (k + 0.5) * dt));
+        const float3 source = phase * airSunTransmittance(ap, s.transmittance, x, sun) + (c.rayleigh + c.mie) * airMultipleScattering(ap, s.multiScatter, x, sun);
+        inscatter += transmittance * source * step * (g_sunIlluminance * g_sunColor);
+        transmittance *= decay;
+    }
+    // The sun at the (lifted) surface point itself.
+    if (wantSun) sunTransmittance = airSunTransmittance(ap, s.transmittance, airLiftToSurface(ap, o + dir * min(tDepth, ap.froxelFarM * toRay)), sun);
+}
+
 // Air between the main camera and the surface at screen uv (main view, [0,1]^2) and view-space depth linearDepth
 // (Frame.hlsli linearDepth): in-scattered radiance (nits) and chromatic transmittance of everything in the air of the
 // main view, from the air volume S's froxels() builds on the froxel grid (tile_px x depth_slices, FroxelIntegrate.hlsl):
 // the atmosphere's single scattering (with the casters' shadows in the air, VSM) and multiple scattering, and the local
-// lights' in-scattering by the air. Two trilinear fetches; the frame constants bound must be the main view's.
+// lights' in-scattering by the air. Two trilinear fetches (plus the closed-form tail of a ray below the model's surface,
+// airViewLookup); the frame constants bound must be the main view's.
 //  - Depth: nodes exponential in view depth to atmosphere.froxels.far_m (clamped beyond), interpolated linearly in depth
 //    (hardware weight, 1/256 of a node step).
 //  - Across tiles: bilinear (airVolumeCoord; optical depth across a row lifted below the surface: in altitude).
@@ -119,14 +179,8 @@ float4 airVolumeCoord(Texture3D<float4> v, Texture2D<float4> p, float2 uv, float
 //    (g = 0.8, 0.67 deg tiles at 4K; S_STATUS_KO.md), Rayleigh exact to 1e-5.
 void atmosphereAerial(AtmosphereSrvs s, float2 uv, float linearDepth, out float3 inscatter, out float3 transmittance)
 {
-    Texture3D<float4> v = ResourceDescriptorHeap[s.aerial];
-    Texture2D<float4> p = ResourceDescriptorHeap[s.multiScatter];
-    float N, d;
-    const float4 t = airVolumeCoord(v, p, uv, linearDepth, N, d);
-    const float4 a = v.SampleLevel(g_linearClamp, t.xyz, 0);
-    const float4 o = v.SampleLevel(g_linearClamp, float3(t.x, t.w, t.z + N / d), 0);
-    inscatter = a.rgb / g_exposure;  // stored pre-exposed
-    transmittance = exp(-o.rgb);
+    float3 sunT;
+    airViewLookup(s, uv, linearDepth, false, inscatter, transmittance, sunT);
 }
 
 // atmosphereAerial plus the unshadowed solar illuminance (lux) at the surface point (main view): the air volume's sun
@@ -134,16 +188,9 @@ void atmosphereAerial(AtmosphereSrvs s, float2 uv, float linearDepth, out float3
 // Three trilinear fetches; replaces atmosphereAerial + atmosphereSunIlluminance for main-view pixels.
 void atmosphereAirView(AtmosphereSrvs s, float2 uv, float linearDepth, out float3 inscatter, out float3 transmittance, out float3 sunIlluminance)
 {
-    Texture3D<float4> v = ResourceDescriptorHeap[s.aerial];
-    Texture2D<float4> p = ResourceDescriptorHeap[s.multiScatter];
-    float N, d;
-    const float4 t = airVolumeCoord(v, p, uv, linearDepth, N, d);
-    const float4 a = v.SampleLevel(g_linearClamp, t.xyz, 0);
-    const float4 o = v.SampleLevel(g_linearClamp, float3(t.x, t.w, t.z + N / d), 0);
-    const float4 e = v.SampleLevel(g_linearClamp, float3(t.x, t.w, t.z + 2 * N / d), 0);
-    inscatter = a.rgb / g_exposure;
-    transmittance = exp(-o.rgb);
-    sunIlluminance = e.rgb * (g_sunIlluminance * g_sunColor);
+    float3 sunT;
+    airViewLookup(s, uv, linearDepth, true, inscatter, transmittance, sunT);
+    sunIlluminance = sunT * (g_sunIlluminance * g_sunColor);
 }
 
 #endif

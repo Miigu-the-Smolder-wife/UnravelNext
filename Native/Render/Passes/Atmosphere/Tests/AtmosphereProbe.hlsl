@@ -28,7 +28,9 @@ void main(uint id : SV_DispatchThreadID)
     float3 inscatter, transmittance, sunIlluminance, inscatter2, transmittance2;
     atmosphereAirView(s, q.xy, q.z, inscatter, transmittance, sunIlluminance);
     atmosphereAerial(s, q.xy, q.z, inscatter2, transmittance2);  // same fetches: must agree bit for bit
-    output[3 * id] = float4(inscatter, any(inscatter != inscatter2) || any(transmittance != transmittance2) ? 1 : 0);
+    // Same air (the two inline differently: compare to 1e-5 relative).
+    const bool same = all(abs(inscatter - inscatter2) <= 1e-5 * abs(inscatter) + 1e-30) && all(abs(transmittance - transmittance2) <= 1e-5 * transmittance + 1e-30);
+    output[3 * id] = float4(inscatter, same ? 0 : 1);
     output[3 * id + 1] = float4(transmittance, 0);
     output[3 * id + 2] = float4(sunIlluminance, 0);
 #endif

@@ -724,7 +724,7 @@ int main(int argc, char** argv)
                     logf("  air uv (%.2f %.2f) z %.0f: L gpu %.4e %.4e %.4e ref %.4e %.4e %.4e  T gpu %.5f ref %.5f  Esun gpu %.5f ref %.5f\n", q.x, q.y, q.z,
                          gi.x / sc.sun.illuminance, gi.y / sc.sun.illuminance, gi.z / sc.sun.illuminance, L.x, L.y, L.z, gt.y, Tr.y, ge.y / sc.sun.illuminance, Es.y);
             }
-            report(mismatch == 0, "atmosphereAerial and atmosphereAirView agree bit for bit (queries differing)", mismatch, 0);
+            report(mismatch == 0, "atmosphereAerial and atmosphereAirView agree to 1e-5 (queries differing)", mismatch, 0);
             report(nearL < 1e-2, "air in-scattering, depth <= 700 m (rel.)", nearL, 1e-2);
             report(nearT < 1e-4, "air transmittance, depth <= 700 m (rel.)", nearT, 1e-4);
             report(worstL < 2e-2, "air in-scattering, all depths to 30 km (rel.)", worstL, 2e-2);
