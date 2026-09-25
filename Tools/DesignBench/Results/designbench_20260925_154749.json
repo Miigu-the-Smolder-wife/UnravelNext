@@ -1,0 +1,22 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "resolution": "3840x2160", "reps": 9, "timestamp": "20260925_154749",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "bands", "name": "3840x2160 resolve + shade (32 B/px read in shade), 1 band (full screen)", "value": 0.740352, "unit": "ms", "note": "0.089259 ns/pixel"},
+  {"section": "bands", "name": "3840x2160 resolve + shade (32 B/px read in shade), 4 bands", "value": 0.510976, "unit": "ms", "note": "0.061605 ns/pixel"},
+  {"section": "bands", "name": "3840x2160 resolve + shade (32 B/px read in shade), 8 bands", "value": 0.470016, "unit": "ms", "note": "0.056667 ns/pixel"},
+  {"section": "bands", "name": "3840x2160 resolve + shade (32 B/px read in shade), 16 bands", "value": 0.458752, "unit": "ms", "note": "0.055309 ns/pixel"},
+  {"section": "bands", "name": "3840x2160 resolve + shade (48 B/px read in shade), 1 band (full screen)", "value": 0.941056, "unit": "ms", "note": "0.113457 ns/pixel"},
+  {"section": "bands", "name": "3840x2160 resolve + shade (48 B/px read in shade), 4 bands", "value": 0.795648, "unit": "ms", "note": "0.095926 ns/pixel"},
+  {"section": "bands", "name": "3840x2160 resolve + shade (48 B/px read in shade), 8 bands", "value": 0.67072, "unit": "ms", "note": "0.080864 ns/pixel"},
+  {"section": "bands", "name": "3840x2160 resolve + shade (48 B/px read in shade), 16 bands", "value": 0.683008, "unit": "ms", "note": "0.082346 ns/pixel"},
+  {"section": "bands", "name": "2560x1440 resolve + shade (32 B/px read in shade), 1 band (full screen)", "value": 0.32256, "unit": "ms", "note": "0.087500 ns/pixel"},
+  {"section": "bands", "name": "2560x1440 resolve + shade (32 B/px read in shade), 4 bands", "value": 0.200704, "unit": "ms", "note": "0.054444 ns/pixel"},
+  {"section": "bands", "name": "2560x1440 resolve + shade (32 B/px read in shade), 8 bands", "value": 0.200704, "unit": "ms", "note": "0.054444 ns/pixel"},
+  {"section": "bands", "name": "2560x1440 resolve + shade (32 B/px read in shade), 16 bands", "value": 0.223232, "unit": "ms", "note": "0.060556 ns/pixel"},
+  {"section": "bands", "name": "2560x1440 resolve + shade (48 B/px read in shade), 1 band (full screen)", "value": 0.431104, "unit": "ms", "note": "0.116944 ns/pixel"},
+  {"section": "bands", "name": "2560x1440 resolve + shade (48 B/px read in shade), 4 bands", "value": 0.303104, "unit": "ms", "note": "0.082222 ns/pixel"},
+  {"section": "bands", "name": "2560x1440 resolve + shade (48 B/px read in shade), 8 bands", "value": 0.3072, "unit": "ms", "note": "0.083333 ns/pixel"},
+  {"section": "bands", "name": "2560x1440 resolve + shade (48 B/px read in shade), 16 bands", "value": 0.3328, "unit": "ms", "note": "0.090278 ns/pixel"}
+ ]
+}

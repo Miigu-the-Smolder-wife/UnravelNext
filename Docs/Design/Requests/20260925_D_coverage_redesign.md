@@ -66,3 +66,16 @@
 2. V: 24 B 레코드·타일 청크·헤더·bDepth(1절) → M 합성 커널(4.5) → S fragment 가시성(2절). 브릭 옥트리(6절)·coverage 모드 서비스(4절)는 그 뒤.
 3. S: 투과율 층(3절)은 V의 coverage 모드가 있어야 채워진다; 그 전에는 층 없음(= 1)으로 동작하고 조회 함수는 먼저 만든다(R·M이 곧바로 쓸 수 있게).
 4. R·S: 8절은 R이 hit 목록 경로를 만든 뒤.
+
+## 11. 개정 1 9~10절 뒤의 추가 (2026-09-25 15:55; 마이크로벤치 실측으로 확정한 품질 불변 변경 a~f)
+
+| | 변경 | 인터페이스 |
+|---|---|---|
+| a | `coverageFragments` 레코드 **16 B** `{ uint visId; float depth; uint mask32; uint normalOct16_area16; }` (1절의 24 B를 대체). 절차 색은 `GpuInstance` 예비 칸의 인스턴스 색 RGB8(I·코어), 재질 상수는 visId → 클러스터 → 재질 | 7.1, 6.3(GpuInstance 색), 5.5.1 |
+| b | `Passes/Visibility/Coverage.hlsli`에 `uint coverageTriangleMaskLut(float2 a, float2 b, float2 c, float2 pixel, StructuredBuffer<uint> lut)` — 변마다 (각 64 × 거리 64) 마스크 표 AND; 표는 V가 만들어 `FrameConstants` 예비 칸의 SRV로 게시. `coverageTriangleMask`(32 판정)는 검증용으로 남긴다 | 5.5.1, 5.5 |
+| c | `coverageAggregate` 레코드 **16 B** `{ half T; half pad; float depthRep; half entry[3]; ushort brickMaterial; }` (6절 32 B를 대체); SGGX 모멘트는 브릭 머리(V `aggregateBrickHeader(brick)`)에서 | 7.1, 5.6 V |
+| d | 8절 그대로(hit 목록 → S 컴퓨트 가시성 → 컴퓨트 hit 셰이딩). R 실측(raygen 안 VSM 0.87 > 그림자 광선 0.51 ns)이 근거 | 8절 |
+| e | 브릭 진입 맵 재생성은 태양 방향 변화 > (텍셀 / 브릭 높이)일 때만; 바람은 맵 좌표 이동. S 내부 | 없음 |
+| f | 프록셀 분류 단가·c_texel 분리 실측(S) 뒤 설계서 5.3 갱신 | 없음 |
+| 10.3 | **GI 광선 예산의 프레임 배분**: `gi.rays_per_frame`을 tick당 총량 `gi.rays_per_tick`으로 바꾸고, 프레임 몫은 렌더러가 프레임 상수(예비 칸 `giRaysThisFrame`)로 준다: 강체 프레임 −0.04, soft+VFX 프레임 −0.11, 그 밖 +0.21 ms 상당(광선 0.5 → 0.75 M). 총량·항목 갱신 주기는 불변이라 결과가 같다 | 9절 품질 키, 5.5 프레임 상수 |
+| 9.4 | `Coverage.hlsli`의 `coverageTriangleArea`를 Green 정리 스트리밍 클립으로(시그니처 불변; DesignBench `triangleAreaGreen`): 삼각형당 −0.13 ns [실측] | 없음(V 구현) |

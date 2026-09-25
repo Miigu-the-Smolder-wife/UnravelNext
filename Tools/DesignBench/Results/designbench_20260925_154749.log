@@ -1,0 +1,21 @@
+Adapter: NVIDIA GeForce RTX 4080, driver 32.0.15.9186, D3D12Core: C:\Users\USER\UnravelNext\Tools\DesignBench\build\D3D12\D3D12Core.dll
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64, shaders: C:/Users/USER/UnravelNext/Tools/DesignBench/Bench/shaders, resolution 3840x2160, reps 9
+  [env] timestamp frequency                                                    1000000000.0000 Hz       
+
+== Banded pixel passes (resolve 8 B in / 12 B out, shade 32-48 B in / 4 B out) (after 1.5 s warm-up)
+  [bands] 3840x2160 resolve + shade (32 B/px read in shade), 1 band (full screen)       0.7404 ms       0.089259 ns/pixel
+  [bands] 3840x2160 resolve + shade (32 B/px read in shade), 4 bands                   0.5110 ms       0.061605 ns/pixel
+  [bands] 3840x2160 resolve + shade (32 B/px read in shade), 8 bands                   0.4700 ms       0.056667 ns/pixel
+  [bands] 3840x2160 resolve + shade (32 B/px read in shade), 16 bands                  0.4588 ms       0.055309 ns/pixel
+  [bands] 3840x2160 resolve + shade (48 B/px read in shade), 1 band (full screen)       0.9411 ms       0.113457 ns/pixel
+  [bands] 3840x2160 resolve + shade (48 B/px read in shade), 4 bands                   0.7956 ms       0.095926 ns/pixel
+  [bands] 3840x2160 resolve + shade (48 B/px read in shade), 8 bands                   0.6707 ms       0.080864 ns/pixel
+  [bands] 3840x2160 resolve + shade (48 B/px read in shade), 16 bands                  0.6830 ms       0.082346 ns/pixel
+  [bands] 2560x1440 resolve + shade (32 B/px read in shade), 1 band (full screen)       0.3226 ms       0.087500 ns/pixel
+  [bands] 2560x1440 resolve + shade (32 B/px read in shade), 4 bands                   0.2007 ms       0.054444 ns/pixel
+  [bands] 2560x1440 resolve + shade (32 B/px read in shade), 8 bands                   0.2007 ms       0.054444 ns/pixel
+  [bands] 2560x1440 resolve + shade (32 B/px read in shade), 16 bands                  0.2232 ms       0.060556 ns/pixel
+  [bands] 2560x1440 resolve + shade (48 B/px read in shade), 1 band (full screen)       0.4311 ms       0.116944 ns/pixel
+  [bands] 2560x1440 resolve + shade (48 B/px read in shade), 4 bands                   0.3031 ms       0.082222 ns/pixel
+  [bands] 2560x1440 resolve + shade (48 B/px read in shade), 8 bands                   0.3072 ms       0.083333 ns/pixel
+  [bands] 2560x1440 resolve + shade (48 B/px read in shade), 16 bands                  0.3328 ms       0.090278 ns/pixel
