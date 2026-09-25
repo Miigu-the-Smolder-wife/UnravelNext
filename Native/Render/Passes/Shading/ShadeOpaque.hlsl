@@ -54,7 +54,7 @@ struct ShadedPixel
     float3 radiance;  // linear, before exposure
 };
 
-ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, Texture2D<uint2> gbuffer, Texture2D<float> depthTex,
+ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, uint2 gbPacked, float depthValue,
                          uint overflowHead);
 
 
@@ -65,6 +65,30 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     const uint tile = tiles.Load(4 * (P[1].y + gid.x));
     const uint2 tileCoord = uint2(tile & 0xFFFFu, tile >> 16);
     const uint2 pixel = tileCoord * M_TILE + tid;
+    // The group's independent reads go out together before any of them is waited on: the tile's 3 x 3 screen probe records
+    // (R's tile cache, split form: the counts are ceil(view / 8) with the fixed 8 px spacing, so no header read comes
+    // first), S's overflow tile head, and the pixel's material word, G-buffer and depth. The records then go to groupshared
+    // [measured, city 4K: shading 1.257 -> 1.191 ms against loading the tile, then the pixel]. The probe condition is
+    // uniform (root constants), so the whole group reaches the barrier.
+    const uint lane = tid.y * M_TILE + tid.x;
+#if !PLANAR
+    const bool probeTile = P[2].y != UNX_NONE && (P[4].z & 6) != 6;
+    ProbeSrvs probes;
+    probes.probes = P[2].y;
+    probes.occlusion = P[2].y;
+    probes.pad0 = P[7].y;
+    probes.pad1 = 0;
+    uint4 probeRecord = 0;
+    if (probeTile) probeRecord = giProbeTileFetch(probes, tileCoord, lane, int2((g_viewWidth + 7) / 8, (g_viewHeight + 7) / 8));
+#endif
+    Texture2D<uint> words = ResourceDescriptorHeap[P[0].z];
+    Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].x];
+    Texture2D<float> depthTex = ResourceDescriptorHeap[P[0].y];
+    const bool inView = all(pixel < uint2(g_viewWidth, g_viewHeight));
+    const uint2 readPixel = min(pixel, uint2(g_viewWidth, g_viewHeight) - 1);
+    const uint wordRead = words[readPixel];
+    const uint2 gbPacked = gbuffer[readPixel];
+    const float depthValue = depthTex[readPixel];
     uint overflowHead = 0;  // S's overflow tile head (7.3): 0 none, 1 + block start
 #if !FALLBACK
     if (P[3].z != UNX_NONE)
@@ -75,30 +99,19 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     }
 #endif
 #if !PLANAR
-    // The tile's 3 x 3 screen probes (R's tile cache): every lane of the group takes part, before any per-pixel work. The
-    // condition is uniform (root constants), so the whole group reaches the barrier.
-    if (P[2].y != UNX_NONE && (P[4].z & 6) != 6)
+    if (probeTile)
     {
-        ProbeSrvs probes;
-        probes.probes = P[2].y;
-        probes.occlusion = P[2].y;
-        probes.pad0 = P[7].y;
-        probes.pad1 = 0;
-        giProbeTileLoad(probes, tileCoord, tid.y * M_TILE + tid.x);
+        giProbeTileStore(lane, probeRecord);
         GroupMemoryBarrierWithGroupSync();
     }
 #endif
-    Texture2D<uint> words = ResourceDescriptorHeap[P[0].z];
-    Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].x];
-    Texture2D<float> depthTex = ResourceDescriptorHeap[P[0].y];
-    const bool inView = all(pixel < uint2(g_viewWidth, g_viewHeight));
-    const uint word = inView ? words[pixel] : M_MATERIAL_SKY;
+    const uint word = inView ? wordRead : M_MATERIAL_SKY;
     const uint materialIndex = mWordMaterial(word);
     bool active = inView && materialIndex != M_MATERIAL_SKY;
     const GpuMaterial m = loadMaterial(active ? materialIndex : 0);
     active = active && (P[1].z == 0xFFFFFFFFu || mShadeClass(materialClass(m)) == P[1].z);
     ShadedPixel sp = (ShadedPixel)0;
-    if (active) sp = shadeSurface(pixel, word, materialIndex, m, words, gbuffer, depthTex, overflowHead);
+    if (active) sp = shadeSurface(pixel, word, materialIndex, m, words, gbPacked, depthValue, overflowHead);
 
     // ---- edge (E) pixels (EdgeDetect.hlsl marked them in the tile's mask) keep their exposed linear radiance for the
     // composite (EdgeComposite.hlsl).
@@ -153,11 +166,11 @@ float shOverflowVisibility(uint2 pixel, uint ordinal, uint overflowHead, inout u
 #endif
 }
 
-ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, Texture2D<uint2> gbuffer, Texture2D<float> depthTex,
+ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, uint2 gbPacked, float depthValue,
                          uint overflowHead)
 {
-    const GBufferSample g = decodeGBuffer(gbuffer[pixel]);
-    const float linearZ = linearDepth(depthTex[pixel]);
+    const GBufferSample g = decodeGBuffer(gbPacked);
+    const float linearZ = linearDepth(depthValue);
     float3 D, Dx, Dy;
     mPixelRay(float2(pixel) + 0.5, D, Dx, Dy);
     const float3 offset = D * linearZ;  // camera-relative position (D has unit depth along the view axis)

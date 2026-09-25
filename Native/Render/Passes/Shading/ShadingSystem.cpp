@@ -615,13 +615,11 @@ void shadingComposite(FramePassContext& fc, ViewResources& view) { record(fc, vi
 
 void shade(FramePassContext& fc, ViewResources& view)
 {
-    // M's own banded group until the frame assembles S's visibility and M's passes into one (INTERFACES v1.29), over
-    // shading.pass_bands bands (shading.toml: one, measured; 0 = the resolve's split). The banded part checks the view first.
+    // Views the frame does not record as the lighting group (planar reflection views through renderView, tests): M's own
+    // group over the frame's bands (output.band_pixels; one band by default, v1.31). The banded part checks the view first.
     const std::vector<RenderGraph::BandedPass> passes = shadingPasses(fc, view);
     const material::ResolveOutputs& o = material::resolveOutputs(fc, view);
-    const int64_t passBands = fc.quality.integer("shading.pass_bands");
-    if (passBands != 0 && passBands != 1) fail("shading.pass_bands must be 0 (the frame's bands) or 1 (one band)");
-    fc.graph.addBandedGroup(view.view.kind != gpu::ViewKind::Main ? "m.lit.planar" : "m.lit", o.height, passBands == 0 ? o.bands : 1, passes);
+    fc.graph.addBandedGroup(view.view.kind != gpu::ViewKind::Main ? "m.lit.planar" : "m.lit", o.height, o.bands, passes);
     shadingComposite(fc, view);
 }
 } // namespace unx::render::shading

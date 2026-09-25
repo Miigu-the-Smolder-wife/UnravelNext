@@ -20,14 +20,9 @@ enum class ShadeClass : uint32_t
 constexpr uint32_t kShadeClassCount = (uint32_t)ShadeClass::Count;
 constexpr uint32_t kTile = 8;
 
-// First row of screen band b of 'bands' over 'height' rows: RenderGraph::addBandedGroup's split (8-row aligned; b = bands
-// gives the height). M's banded shading passes check it against PassContext::band.
-inline uint32_t bandRow(uint32_t height, uint32_t bands, uint32_t b)
-{
-    if (b >= bands) return height;
-    const uint32_t r = (uint32_t)((uint64_t)height * b / bands) & ~7u;
-    return r < height ? r : height;
-}
+// First row of screen band b of 'bands' over 'height' rows: the render graph's split (passBand, v1.31; b = bands gives the
+// height). Resolve.hlsl and ShadeBegin.hlsl repeat the same formula on the GPU.
+inline uint32_t bandRow(uint32_t height, uint32_t bands, uint32_t b) { return b >= bands ? height : passBand(height, bands, b).y0; }
 
 // Per-view products of the resolve that only M reads (MaterialInternal.hlsli formats). The class tile lists are split by
 // screen band (passBandCount of the view), so a banded shading pass dispatches its band's tiles only.

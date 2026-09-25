@@ -8,4 +8,17 @@ void shading(FramePassContext& fc, ViewResources& view)
 {
     shading::shade(fc, view);
 }
+
+// The banded lighting group (v1.31): M's edge detection and shading kernels, band by band after S's visibility passes.
+// Neither lags: the detection's neighbours are the material resolve's (complete before the group) and S's visibility
+// has no screen-space filter, so a band reads only its own rows of the group's products.
+std::vector<RenderGraph::BandedPass> shadingPasses(FramePassContext& fc, ViewResources& view)
+{
+    return shading::shadingPasses(fc, view);
+}
+
+void shadingComposite(FramePassContext& fc, ViewResources& view)
+{
+    shading::shadingComposite(fc, view);
+}
 } // namespace unx::render::tracks
