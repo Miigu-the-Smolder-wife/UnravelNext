@@ -38,6 +38,7 @@ struct PlanarGpu  // ReflectionInternal.hlsli: candidates [0, views) have a refl
     } planes[kCandidatesMax];
 };
 static_assert(sizeof(PlanarGpu) <= kPlanarSlotBytes);
+static_assert(kPlanarMax == 4, "ReflectionSystem::m_viewRects and ReflectionClassify's mask constants hold 4 views");
 
 float3 xform(const float4 rows[3], float3 p)
 {
@@ -401,6 +402,12 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     }
     PlanarGpu planar{};
     TextureRef planarColor[kPlanarMax];
+    // Views chosen this frame: recorded after the classification, which writes their mirror masks (INTERFACES v1.22).
+    struct PlanarView
+    {
+        ViewDesc desc;
+        TextureRef mask, tileMask;
+    } planarViews[kPlanarMax];
     m_lastPlanarViews = m_lastPlanarPixels = m_lastCandidates = m_lastRectPixels = 0;
     std::vector<uint32_t>& slotPlanes = m_slotPlanes[ringSlot];
     slotPlanes.clear();
@@ -460,7 +467,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             }
             if (!visible && !behind) return;
             if (behind) x0 = y0 = 0, x1 = (float)width, y1 = (float)height;  // crosses the near plane: whole view
-            const uint32_t ix0 = (uint32_t)std::clamp(std::floor(x0) - 1, 0.0f, (float)width), iy0 = (uint32_t)std::clamp(std::floor(y0) - 1, 0.0f, (float)height);
+            // The origin on the 8 x 8 grid: a classification tile is one tile of the view's tile mask (ReflectionClassify).
+            const uint32_t ix0 = (uint32_t)std::clamp(std::floor(x0) - 1, 0.0f, (float)width) & ~7u, iy0 = (uint32_t)std::clamp(std::floor(y0) - 1, 0.0f, (float)height) & ~7u;
             const uint32_t ix1 = (uint32_t)std::clamp(std::ceil(x1) + 1, 0.0f, (float)width), iy1 = (uint32_t)std::clamp(std::ceil(y1) + 1, 0.0f, (float)height);
             const uint64_t rect = (uint64_t)(ix1 - ix0) * (iy1 - iy0);
             if (ix1 <= ix0 || iy1 <= iy0 || (double)rect < minPixels) return;  // the rectangle bounds the count too
@@ -506,15 +514,13 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             slotData.rect[3] = c.h;
             if (view)
             {
-                const ViewDesc v = ViewDesc::planarReflection(main.view, m_planes[c.plane].plane, c.x, c.y, c.w, c.h);
-                const uint32_t index = planar.views;
-                ID3D12QueryHeap* heap = m_timestamps.Get();
-                const uint32_t tick = ringSlot * kTicks + 2 + 2 * index;
-                g.addPass("r.refl.view.begin", QueueType::Graphics, [&](PassBuilder& b) { b.keep(); },
-                          [heap, tick](PassContext& pc) { pc.cmd->EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, tick); });
-                planarColor[index] = fc.services.renderView(fc, v).color;
-                g.addPass("r.refl.view.end", QueueType::Graphics, [&](PassBuilder& b) { b.keep(); },
-                          [heap, tick](PassContext& pc) { pc.cmd->EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, tick + 1); });
+                PlanarView& pv = planarViews[planar.views];
+                pv.desc = ViewDesc::planarReflection(main.view, m_planes[c.plane].plane, c.x, c.y, c.w, c.h);
+                pv.mask = g.createTexture({ "R planar mirror mask", c.w, c.h, 1, 1, DXGI_FORMAT_R8_UINT });
+                pv.tileMask = g.createTexture({ "R planar mirror tile mask", (c.w + 7) / 8, (c.h + 7) / 8, 1, 1, DXGI_FORMAT_R8_UINT });
+                pv.desc.planarMask = pv.mask;
+                pv.desc.planarTileMask = pv.tileMask;
+                m_viewRects[planar.views] = { c.x, c.y, c.w, c.h };
                 m_slotViewPlanes[ringSlot].push_back(c.plane);
                 m_slotViewRects[ringSlot].push_back(c.w * c.h);
                 m_planeCameraFrame[c.plane] = frame;
@@ -574,18 +580,39 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   b.use(args, Use::UavCompute);
                   b.use(reflection, Use::UavCompute);
                   b.use(planarCounts, Use::UavCompute);
+                  for (uint32_t v = 0; v < planar.views; ++v)
+                  {
+                      b.use(planarViews[v].mask, Use::UavCompute);
+                      b.use(planarViews[v].tileMask, Use::UavCompute);
+                  }
               },
               [&shaders, depth, gbuffer, lobes, history, modes, jobs, args, reflection, s, focal, width, height, tilesX, tilesY, frameConstants, planarSrv,
-               planarOffset, planarCounts](PassContext& c) {
-                  const uint32_t k[20] = { c.srv(depth), c.srv(gbuffer), lobes.valid() ? c.srv(lobes) : 0xFFFFFFFFu, c.srv(history),
-                                           c.uav(modes), c.uav(jobs), c.uav(args), c.uav(reflection),
-                                           asU(s.kHalfAngle), asU(s.mirrorRoughness), asU(focal), height,
-                                           width, height, planarSrv, planarOffset, c.uav(planarCounts), 0, 0, 0 };
+               planarOffset, planarCounts, planarViews, viewCount = planar.views](PassContext& c) {
+                  uint32_t k[28] = { c.srv(depth), c.srv(gbuffer), lobes.valid() ? c.srv(lobes) : 0xFFFFFFFFu, c.srv(history),
+                                     c.uav(modes), c.uav(jobs), c.uav(args), c.uav(reflection),
+                                     asU(s.kHalfAngle), asU(s.mirrorRoughness), asU(focal), height,
+                                     width, height, planarSrv, planarOffset, c.uav(planarCounts), 0, 0, 0 };
+                  for (uint32_t v = 0; v < kPlanarMax; ++v)
+                  {
+                      k[20 + v] = v < viewCount ? c.uav(planarViews[v].mask) : 0xFFFFFFFFu;
+                      k[24 + v] = v < viewCount ? c.uav(planarViews[v].tileMask) : 0xFFFFFFFFu;
+                  }
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionClassify"));
-                  c.computeConstants(k, 20);
+                  c.computeConstants(k, 28);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch(tilesX, tilesY, 1);
               });
+    // The reflection cameras (their masks come from the classification above).
+    for (uint32_t v = 0; v < planar.views; ++v)
+    {
+        ID3D12QueryHeap* heap = m_timestamps.Get();
+        const uint32_t tick = ringSlot * kTicks + 2 + 2 * v;
+        g.addPass("r.refl.view.begin", QueueType::Graphics, [&](PassBuilder& b) { b.keep(); },
+                  [heap, tick](PassContext& pc) { pc.cmd->EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, tick); });
+        planarColor[v] = fc.services.renderView(fc, planarViews[v].desc).color;
+        g.addPass("r.refl.view.end", QueueType::Graphics, [&](PassBuilder& b) { b.keep(); },
+                  [heap, tick](PassContext& pc) { pc.cmd->EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, tick + 1); });
+    }
     g.addPass("r.refl.args", QueueType::Compute, [&](PassBuilder& b) { b.use(args, Use::UavCompute); },
               [&shaders, args](PassContext& c) {
                   const uint32_t k[4] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width) };

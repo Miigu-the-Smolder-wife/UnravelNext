@@ -76,6 +76,13 @@ public:
     Stats readStats();
     // This frame's per-pixel mode texture (ReflectionInternal.hlsli), for tests and diagnostics.
     TextureRef modes() const { return m_modes; }
+    // Main-view pixel rectangle of this frame's reflection camera 'view' (0 .. planar_views_max - 1), from the camera
+    // choice until the next record: tests map a view pixel to its main-view pixel (view pixel + origin).
+    struct Rect
+    {
+        uint32_t x = 0, y = 0, width = 0, height = 0;
+    };
+    Rect planarViewRect(uint32_t view) const { return m_viewRects[view]; }
 
 private:
     void ensureHistory(uint32_t width, uint32_t height);
@@ -86,6 +93,7 @@ private:
     ComPtr<ID3D12Resource> m_arguments;  // raw: job counter, then the two indirect dispatch descriptions (SKY0, SKY1)
     float3 m_skyRadiance{}, m_sunIlluminance{};
     TextureRef m_modes;
+    Rect m_viewRects[4];  // kPlanarMax (ReflectionSystem.cpp)
 
     struct PlanarReflector
     {

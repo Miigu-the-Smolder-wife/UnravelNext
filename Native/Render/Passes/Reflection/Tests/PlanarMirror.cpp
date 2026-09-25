@@ -8,7 +8,9 @@
 // reflection differs by the checker contrast); fewer than 1 % may (checker edges, sub-pixel ray jitter), and the mean
 // signed difference must stay under 0.5 % (no bias). Run B forces the camera (setPlanarForced) to test the path; run C
 // leaves the choice to the cost formula with a view prior of 1 s (reflection.planar_view_fixed_ms): every mirror pixel
-// must then stay on rays.
+// must then stay on rays. In run B every mirror mask texel of the view (ViewDesc::planarMask, INTERFACES v1.22) must be 1
+// exactly where the main pixel is a planar pixel of the view in a tile R wrote, and every tile mask texel must be the OR
+// of its 8 x 8 mask texels (PlanarMaskCheck).
 //
 //   unx_test_reflection_planarmirror [--validate]
 #include "unx/core/Config.h"
@@ -128,8 +130,13 @@ enum class Planar
     Cost
 };
 
+struct MaskCheck
+{
+    uint32_t pixelErrors = 0, tileErrors = 0, mirrorTexels = 0, viewTexels = 0;
+};
+
 std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, Planar planar, uint32_t width, uint32_t height,
-                       uint32_t& planarViews)
+                       uint32_t& planarViews, MaskCheck* maskCheck = nullptr)
 {
     GpuScene gpuScene(device);
     gpuScene.upload(s);
@@ -145,6 +152,8 @@ std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConf
     const uint64_t resultBytes = (uint64_t)countX * countY * 16;
     Buffer result = createBuffer(device, resultBytes, D3D12_HEAP_TYPE_DEFAULT, true);
     Buffer readback = createBuffer(device, resultBytes, D3D12_HEAP_TYPE_READBACK, false);
+    Buffer maskResult = createBuffer(device, 16, D3D12_HEAP_TYPE_DEFAULT, true);
+    Buffer maskReadback = createBuffer(device, 16, D3D12_HEAP_TYPE_READBACK, false);
     refl::ReflectionSystem* reflSystem = nullptr;
     const uint32_t frames = 64;  // the hits read the GI cache (specular term): both runs compare converged caches (~14 frames)
     for (uint32_t f = 0; f < frames; ++f)
@@ -187,7 +196,15 @@ std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConf
         uint32_t scene[8];
         rays.rootConstants(scene);
         rt::RayPipeline& standIn = rt::RayPipeline::get(device, shaders, rt::standardRayPipeline("Passes/Reflection/Tests/PlanarTestView", { "PlanarTestViewGen" }));
+        struct PendingMask
+        {
+            TextureRef mask, tileMask;
+            refl::ReflectionSystem::Rect rect;
+        } pendingMask;
+        uint32_t viewsThisFrame = 0;
         services.renderView = [&](FramePassContext& c, const ViewDesc& v) {
+            if (viewsThisFrame++ == 0 && v.planarMask.valid())
+                pendingMask = { v.planarMask, v.planarTileMask, refl::ReflectionSystem::get(c).planarViewRect(0) };
             ViewResources rv;
             rv.view = v;
             rv.frameConstants = c.frameConstantsFor(v);
@@ -248,6 +265,33 @@ std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConf
         reflSystem->record(fc, main, rays);
         const TextureRef reflection = main.reflection, modes = reflSystem->modes();
         const BufferRef resultRef = graph.importBuffer(result.resource.Get(), { "test result", resultBytes, 16 });
+        if (maskCheck && f + 1 == frames && pendingMask.mask.valid())
+        {
+            const BufferRef maskRef = graph.importBuffer(maskResult.resource.Get(), { "test mask result", 16, 0 });
+            const PendingMask pm = pendingMask;
+            graph.addPass("test.mask.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(maskRef, Use::CopyDst); },
+                          [maskRef](PassContext& c) {
+                              D3D12_WRITEBUFFERIMMEDIATE_PARAMETER p[4];
+                              for (int i = 0; i < 4; ++i) p[i] = { c.resource(maskRef)->GetGPUVirtualAddress() + 4 * i, 0 };
+                              c.cmd->WriteBufferImmediate(4, p, nullptr);
+                          });
+            graph.addPass("test.mask.check", QueueType::Compute,
+                          [&](PassBuilder& b) {
+                              b.use(pm.mask, Use::SrvCompute);
+                              b.use(pm.tileMask, Use::SrvCompute);
+                              b.use(modes, Use::SrvCompute);
+                              b.use(reflection, Use::SrvCompute);
+                              b.use(maskRef, Use::UavCompute);
+                              b.keep();
+                          },
+                          [&shaders, pm, modes, reflection, maskRef](PassContext& c) {
+                              const uint32_t k[12] = { c.srv(pm.mask), c.srv(pm.tileMask), c.srv(modes), c.srv(reflection), pm.rect.x, pm.rect.y, pm.rect.width,
+                                                       pm.rect.height, c.uav(maskRef), 0, 0, 0 };
+                              c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/Tests/PlanarMaskCheck"));
+                              c.computeConstants(k, 12);
+                              c.cmd->Dispatch((pm.rect.width + 7) / 8, (pm.rect.height + 7) / 8, 1);
+                          });
+        }
         graph.addPass("test.eval", QueueType::Compute,
                       [&](PassBuilder& b) {
                           b.use(reflection, Use::SrvCompute);
@@ -268,6 +312,7 @@ std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConf
     planarViews = reflSystem ? reflSystem->readStats().planarViews : 0;
     CommandList cl = device.acquireCommandList(QueueType::Graphics);
     cl.list->CopyBufferRegion(readback.resource.Get(), 0, result.resource.Get(), 0, resultBytes);
+    cl.list->CopyBufferRegion(maskReadback.resource.Get(), 0, maskResult.resource.Get(), 0, 16);
     device.queue(QueueType::Graphics).waitCpu(device.submit(cl));
     std::vector<float> values((size_t)countX * countY * 4);
     void* rb = nullptr;
@@ -275,6 +320,13 @@ std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConf
     check(readback.resource->Map(0, &all, &rb), "map result");
     std::memcpy(values.data(), rb, resultBytes);
     readback.resource->Unmap(0, &none);
+    if (maskCheck)
+    {
+        D3D12_RANGE maskRange{ 0, 16 };
+        check(maskReadback.resource->Map(0, &maskRange, &rb), "map mask result");
+        std::memcpy(maskCheck, rb, 16);
+        maskReadback.resource->Unmap(0, &none);
+    }
     device.waitIdle();
     return values;
 }
@@ -300,7 +352,8 @@ int main(int argc, char** argv)
         const scene::Scene s = checkerRoom();
         uint32_t viewsA = 0, viewsB = 0;
         const std::vector<float> a = run(device, shaders, quality, s, Planar::Off, 1920, 1080, viewsA);
-        const std::vector<float> b = run(device, shaders, quality, s, Planar::Forced, 1920, 1080, viewsB);
+        MaskCheck mask;
+        const std::vector<float> b = run(device, shaders, quality, s, Planar::Forced, 1920, 1080, viewsB, &mask);
         // Run C: the cost formula with a view that costs more than any ray count: every mirror pixel M as in run A.
         QualityConfig costly = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
         costly.applyOverride("reflection.planar_view_fixed_ms=1000");
@@ -331,8 +384,11 @@ int main(int argc, char** argv)
         uint32_t mirrorPixelsA = 0;
         for (size_t i = 0; i < a.size() / 4; ++i) mirrorPixelsA += a[4 * i + 3] == 1 ? 1u : 0u;
         const double bias = compared ? sumSigned / compared : 1;
+        const bool maskPass = mask.viewTexels > 0 && mask.mirrorTexels > 1000 && mask.pixelErrors == 0 && mask.tileErrors == 0;
         const bool pass = viewsA == 0 && viewsB == 1 && compared > 1000 && mismatchFraction < 0.01 && std::fabs(bias) < 0.005 && viewsC == 0 &&
-                          rayPixelsC == mirrorPixelsA;
+                          rayPixelsC == mirrorPixelsA && maskPass;
+        logf("planar mirror: run B mirror mask %u of %u view texels, %u texels and %u tiles disagree with the classification -> %s\n", mask.mirrorTexels,
+             mask.viewTexels, mask.pixelErrors, mask.tileErrors, maskPass ? "PASS" : "FAIL");
         logf("planar mirror: run A (rays) %u M pixels, run B %u planar view(s), %u planar pixels; %u compared, %u differ by > 10 %% (%.3f %%, checker "
              "edges), mean relative difference %.4f %% -> %s\n",
              mirrorPixels, viewsB, planarPixels, compared, mismatched, 100 * mismatchFraction, compared ? 100 * sumDiff / compared : 0.0, pass ? "PASS" : "FAIL");
