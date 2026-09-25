@@ -852,6 +852,139 @@ UNX_TEST(brick_model_error_by_elements)
     }
 }
 
+UNX_TEST(brick_canopy_occupancy)
+{
+    // Design revision 14.4 item 1 input: along sun rays from receivers inside the forest's tree crowns and grass clumps
+    // (forest_thin's meshes; forest_combat places the same meshes),
+    // the fraction of the brick cells (16 v), 4^3 cells (4 v) and voxels a receiver march crosses that hold geometry, at
+    // level 0 (the receiver footprint ~ v0) and level 1. Occupancy is exact triangle-box overlap without the transmittance
+    // fit (the bake's occupancy-only mode); alpha cut-outs and fully transparent overlaps could only empty more cells.
+    // Rays start at uniform points in the mesh bounds and run to the bounds' exit; sun elevations 15, 30, 45, 70 degrees,
+    // random azimuths. Report only.
+#if !UNX_HAS_SCENEGEN
+    logf("    (no scene generator in this build: skipped)\n");
+#else
+    scenegen::Request req;
+    req.id = scenegen::SceneId::ForestThin;
+    const scene::Scene s = scenegen::generate(req);
+    QualityConfig q = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+    BrickSettings bs = BrickSettings::fromQuality(q);
+    bs.maxFeatureWidth = 0.1f;  // leaves (6 cm) and blades (4 mm)
+    bs.residualMax = 0;
+    bs.occupancyOnly = true;
+    std::vector<BrickMeshStats> stats;
+    const auto t0 = std::chrono::steady_clock::now();
+    const BrickData bd = bakeBricks(s, bs, "", &stats);
+    logf("    occupancy bake of %zu meshes: %.1f s\n", stats.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    std::vector<uint64_t> instancesOf(s.meshes.size(), 0);
+    for (const auto& inst : s.instances) ++instancesOf[inst.mesh];
+    const uint32_t edge = bs.brickEdge;
+    // 3D DDA over cells of size 'cell' from 'lo' with 'dims' cells, along o + t d for t in [t0, t1]: visit(cx, cy, cz, ta, tb).
+    auto dda = [](float3 lo, float cell, const uint32_t dims[3], float3 o, float3 d, float ta, float tb, const std::function<void(int, int, int, float, float)>& visit) {
+        const float3 p = o + d * (ta + 1e-6f) - lo;
+        int c[3] = { (int)std::floor(p.x / cell), (int)std::floor(p.y / cell), (int)std::floor(p.z / cell) };
+        const float dv[3] = { d.x, d.y, d.z }, pv[3] = { p.x, p.y, p.z };
+        int step[3];
+        float tNext[3], tDelta[3];
+        for (int a = 0; a < 3; ++a)
+        {
+            c[a] = std::clamp(c[a], 0, (int)dims[a] - 1);
+            step[a] = dv[a] > 0 ? 1 : -1;
+            tDelta[a] = dv[a] != 0 ? cell / std::fabs(dv[a]) : FLT_MAX;
+            const float boundary = (c[a] + (dv[a] > 0 ? 1 : 0)) * cell;
+            tNext[a] = dv[a] != 0 ? ta + (boundary - pv[a]) / dv[a] : FLT_MAX;
+        }
+        float t = ta;
+        while (t < tb)
+        {
+            const int a = tNext[0] < tNext[1] ? (tNext[0] < tNext[2] ? 0 : 2) : (tNext[1] < tNext[2] ? 1 : 2);
+            const float te = std::min(tNext[a], tb);
+            visit(c[0], c[1], c[2], t, te);
+            t = te;
+            c[a] += step[a];
+            tNext[a] += tDelta[a];
+            if (c[a] < 0 || c[a] >= (int)dims[a]) break;
+        }
+    };
+    for (size_t bm = 0; bm < bd.meshes.size(); ++bm)
+    {
+        uint32_t sceneMesh = 0;
+        for (uint32_t m = 0; m < bd.meshOf.size(); ++m)
+            if (bd.meshOf[m] == bm) sceneMesh = m;
+        const gpu::BrickMesh& mesh = bd.meshes[bm];
+        const scene::Mesh& sm = s.meshes[sceneMesh];
+        float3 hi = mesh.boundsMin;
+        for (const float3& v : sm.positions) hi = { std::max(hi.x, v.x), std::max(hi.y, v.y), std::max(hi.z, v.z) };
+        for (uint32_t level = 0; level < std::min(mesh.levelCount, 2u); ++level)
+        {
+            const gpu::BrickLevel& L = bd.levels[mesh.firstLevel + level];
+            const float voxel = L.voxel, brickSize = voxel * edge;
+            std::mt19937 rng(17 + (uint32_t)bm * 7 + level);
+            std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+            std::vector<float> brickRatio, cellRatio, voxelRatio;
+            double voxelsCrossed = 0, voxelsInBricks = 0, voxelsInCells = 0, bricksCrossed = 0;
+            for (const float elevation : { 15.0f, 30.0f, 45.0f, 70.0f })
+                for (int r = 0; r < 500; ++r)
+                {
+                    const float az = 6.2831853f * uni(rng), el = elevation * 0.01745329f;
+                    const float3 d{ std::cos(el) * std::cos(az), std::sin(el), std::cos(el) * std::sin(az) };
+                    const float3 o = mesh.boundsMin + float3{ uni(rng) * (hi.x - mesh.boundsMin.x), uni(rng) * (hi.y - mesh.boundsMin.y), uni(rng) * (hi.z - mesh.boundsMin.z) };
+                    // Exit of the bounds.
+                    float tExit = FLT_MAX;
+                    const float ov[3] = { o.x, o.y, o.z }, dv[3] = { d.x, d.y, d.z }, lov[3] = { mesh.boundsMin.x, mesh.boundsMin.y, mesh.boundsMin.z }, hv[3] = { hi.x, hi.y, hi.z };
+                    for (int a = 0; a < 3; ++a)
+                        if (dv[a] != 0) tExit = std::min(tExit, ((dv[a] > 0 ? hv[a] : lov[a]) - ov[a]) / dv[a]);
+                    if (!(tExit > 0)) continue;
+                    uint32_t nBricks = 0, nOccupied = 0, nCells = 0, nCellsOccupied = 0, nVoxels = 0, nVoxelsOccupied = 0;
+                    dda(mesh.boundsMin, brickSize, L.dims, o, d, 0, tExit, [&](int bx, int by, int bz, float ta, float tb) {
+                        ++nBricks;
+                        const uint32_t brick = bd.grid[L.gridOffset + bx + L.dims[0] * (by + L.dims[1] * bz)];
+                        const float3 bLo = mesh.boundsMin + float3{ bx * brickSize, by * brickSize, bz * brickSize };
+                        const uint32_t four[3] = { 4, 4, 4 }, sixteen[3] = { edge, edge, edge };
+                        uint32_t cellsHere = 0, voxelsHere = 0;
+                        dda(bLo, 4 * voxel, four, o, d, ta, tb, [&](int, int, int, float, float) { ++cellsHere; });
+                        dda(bLo, voxel, sixteen, o, d, ta, tb, [&](int, int, int, float, float) { ++voxelsHere; });
+                        nCells += cellsHere;
+                        nVoxels += voxelsHere;
+                        if (brick == UINT32_MAX) return;
+                        ++nOccupied;
+                        const uint64_t occ = bd.occupancy[brick];
+                        dda(bLo, 4 * voxel, four, o, d, ta, tb, [&](int cx, int cy, int cz, float ca, float cb) {
+                            if (((occ >> (cx + 4 * (cy + 4 * cz))) & 1) == 0) return;
+                            ++nCellsOccupied;
+                            const float3 cLo = bLo + float3{ cx * 4 * voxel, cy * 4 * voxel, cz * 4 * voxel };
+                            dda(cLo, voxel, four, o, d, ca, cb, [&](int vx, int vy, int vz, float, float) {
+                                const uint32_t v = (cx * 4 + vx) + edge * ((cy * 4 + vy) + edge * (cz * 4 + vz));
+                                voxelsInCells += 1;
+                                if (bd.density[(size_t)brick * edge * edge * edge + v] != 0) ++nVoxelsOccupied;
+                            });
+                        });
+                        voxelsInBricks += voxelsHere;
+                    });
+                    if (nBricks == 0 || nVoxels == 0) continue;
+                    brickRatio.push_back((float)nOccupied / nBricks);
+                    cellRatio.push_back((float)nCellsOccupied / nCells);
+                    voxelRatio.push_back((float)nVoxelsOccupied / nVoxels);
+                    voxelsCrossed += nVoxels;
+                    bricksCrossed += nBricks;
+                }
+            auto pct = [](std::vector<float> v, double q) {
+                if (v.empty()) return 0.0f;
+                std::sort(v.begin(), v.end());
+                return v[std::min(v.size() - 1, (size_t)(q * v.size()))];
+            };
+            logf("    %-14s (%llu inst) level %u (voxel %.3f m, %u x %u x %u bricks): per ray occupied bricks P10/P50/P90 %.2f/%.2f/%.2f, 4^3 cells %.2f/%.2f/%.2f, "
+                 "voxels %.3f/%.3f/%.3f | mean voxels crossed %.1f, in occupied bricks %.1f, in occupied cells %.1f (%zu rays)\n",
+                 sm.name.c_str(), (unsigned long long)instancesOf[sceneMesh], level, voxel, L.dims[0], L.dims[1], L.dims[2], pct(brickRatio, 0.1), pct(brickRatio, 0.5),
+                 pct(brickRatio, 0.9), pct(cellRatio, 0.1), pct(cellRatio, 0.5), pct(cellRatio, 0.9), pct(voxelRatio, 0.1), pct(voxelRatio, 0.5), pct(voxelRatio, 0.9),
+                 brickRatio.empty() ? 0.0 : voxelsCrossed / brickRatio.size(), brickRatio.empty() ? 0.0 : voxelsInBricks / brickRatio.size(),
+                 brickRatio.empty() ? 0.0 : voxelsInCells / brickRatio.size(), brickRatio.size());
+            (void)bricksCrossed;
+        }
+    }
+#endif
+}
+
 int main(int argc, char** argv)
 {
     const char* filter = argc > 1 ? argv[1] : nullptr;

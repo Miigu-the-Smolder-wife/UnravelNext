@@ -465,6 +465,12 @@ MeshBake bakeMesh(const scene::Scene& scene, uint32_t meshIndex, const BrickSett
                                 voxelTris.push_back(i);
                         if (voxelTris.empty()) continue;
                         const uint32_t vIndex = vx + edge * (vy + edge * vz);
+                        if (settings.occupancyOnly)
+                        {
+                            b.density[vIndex] = 255;
+                            b.occupancy |= 1ull << ((vx / 4) + 4 * ((vy / 4) + 4 * (vz / 4)));
+                            continue;
+                        }
                         float tFull[kDirections], tHalf[kDirections];
                         double rows[kDirections][6], targets[kDirections];
                         bool opaque = false;
@@ -616,6 +622,13 @@ MeshBake bakeMesh(const scene::Scene& scene, uint32_t meshIndex, const BrickSett
                         b.rHalf.push_back(rh);
                         fits.push_back(f);
                     }
+            if (settings.occupancyOnly)
+            {
+                if (b.occupancy == 0) return;
+                b.header.cell = sx | (sy << 10) | (sz << 20);
+                used[slot] = 1;
+                return;
+            }
             if (fits.empty())
             {
                 bricks[slot].density.clear();
@@ -694,7 +707,7 @@ std::string cacheKey(const scene::Scene& scene, uint32_t meshIndex, const BrickS
 {
     const scene::Mesh& m = scene.meshes[meshIndex];
     Sha256 h;
-    const uint32_t header[4] = { kCacheVersion, settings.brickEdge, settings.bakeRays, 0 };
+    const uint32_t header[4] = { kCacheVersion, settings.brickEdge, settings.bakeRays, settings.occupancyOnly ? 1u : 0u };
     h.update(header, sizeof header);
     h.update(&width, sizeof width);
     h.update(m.positions.data(), m.positions.size() * sizeof(float3));

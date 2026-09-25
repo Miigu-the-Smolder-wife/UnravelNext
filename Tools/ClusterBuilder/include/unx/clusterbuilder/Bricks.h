@@ -72,6 +72,7 @@ struct BrickSettings
     float maxFeatureWidth = 0;     // visibility.brick_max_feature_width (m); 0 = no bricks
     uint32_t bakeRays = 64;        // visibility.brick_bake_rays: rays per voxel cross-section and direction
     float residualMax = 0;         // visibility.brick_residual_max: largest allowed r P99 of a mesh
+    bool occupancyOnly = false;    // analysis: voxels that geometry overlaps get density 255 and no shape; no rays, no fit
     static BrickSettings fromQuality(const QualityConfig& quality);
 };
 
