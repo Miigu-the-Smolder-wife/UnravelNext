@@ -335,6 +335,12 @@ MeshOut buildMesh(const scene::Mesh& m, const Settings& settings)
 
     clodConfig config = clodDefaultConfig(settings.clusterTriangles);
     config.max_vertices = settings.clusterVertices;
+    // Disconnected geometry (a leaf, a blade per component): the flex builder ends a meshlet at min_triangles when the
+    // best next triangle is not connected, so min_triangles sets the fill of foliage clusters (v1.36).
+    config.min_triangles = settings.clusterMinTriangles;
+#if MESHOPTIMIZER_VERSION < 1000
+    config.min_triangles &= ~3;
+#endif
     config.simplify_fallback_sloppy = false;   // never merge disconnected geometry into blobs
     config.simplify_error_edge_limit = 0.0f;   // error is geometric only
     config.optimize_bounds = false;            // cluster.bounds = the LOD sphere; tight culling bounds computed below
@@ -346,7 +352,10 @@ MeshOut buildMesh(const scene::Mesh& m, const Settings& settings)
         const float w = widths.componentWidth(vertex);
         return w >= FLT_MAX ? INT32_MAX : (int32_t)std::floor(std::log(std::max(w, 1e-9f)) / std::log(4.0f));
     };
-    // Orientation class per connected component (orientationClass): planar components are split by orientation.
+    // Orientation class per connected component (orientationClass): planar components are split by orientation, so a
+    // cluster's sheet spread stays small and only the sheets seen edge-on leave band A. Components narrower than
+    // sheetOrientationMinWidth (grass blades: band B beyond a few metres whatever their orientation) are clustered
+    // across orientations: one class per blade would leave a blade per cluster (v1.36).
     std::unordered_map<uint32_t, std::vector<uint32_t>> componentTriangles;
     for (size_t i = 0; i + 2 < m.indices.size(); i += 3)
     {
@@ -354,7 +363,9 @@ MeshOut buildMesh(const scene::Mesh& m, const Settings& settings)
         t.insert(t.end(), { m.indices[i], m.indices[i + 1], m.indices[i + 2] });
     }
     std::unordered_map<uint32_t, int32_t> componentOrientation;
-    for (const auto& [component, tris] : componentTriangles) componentOrientation[component] = orientationClass(sheetOrientation(m.positions, tris.data(), tris.size()));
+    for (const auto& [component, tris] : componentTriangles)
+        componentOrientation[component] =
+            widths.componentWidth(tris[0]) < settings.sheetOrientationMinWidth ? 0 : orientationClass(sheetOrientation(m.positions, tris.data(), tris.size()));
     componentTriangles.clear();
     for (uint32_t s = 0; s < (uint32_t)m.submeshes.size(); ++s)
     {
@@ -455,8 +466,12 @@ Settings Settings::fromQuality(const QualityConfig& q)
     s.clusterTriangles = (uint32_t)q.integer("visibility.cluster_triangles");
     s.clusterVertices = (uint32_t)q.integer("visibility.cluster_vertices");
     s.maxRelativeWidthError = (float)q.number("visibility.lod_max_relative_width_error");
+    s.clusterMinTriangles = (uint32_t)q.integer("visibility.cluster_min_triangles");
+    s.sheetOrientationMinWidth = (float)q.number("visibility.sheet_orientation_min_width");
     if (s.clusterTriangles < 4 || s.clusterTriangles > 128) fail("visibility.cluster_triangles must be 4..128 (vis id triangle field is 7 bits)");
-    if (s.clusterVertices < 3 || s.clusterVertices > 255) fail("visibility.cluster_vertices must be 3..255");
+    if (s.clusterVertices < 3 || s.clusterVertices > 128) fail("visibility.cluster_vertices must be 3..128 (V's mesh shaders output at most 128 vertices)");
+    if (s.clusterMinTriangles < 1 || s.clusterMinTriangles > s.clusterTriangles) fail("visibility.cluster_min_triangles must be 1..cluster_triangles");
+    if (!(s.sheetOrientationMinWidth >= 0)) fail("visibility.sheet_orientation_min_width must be >= 0");
     return s;
 }
 

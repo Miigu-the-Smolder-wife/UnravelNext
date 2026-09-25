@@ -1,7 +1,15 @@
 # Owner: V (core session). ARCHITECTURE 2.1.
 [visibility]
 cluster_triangles = 64            # meshlet size (max 128: vis id triangle field is 7 bits)
-cluster_vertices = 64             # meshlet vertex limit (mesh shader output; max 255)
+cluster_vertices = 64             # meshlet vertex limit (V's mesh shaders output at most 128)
+# Fill of disconnected geometry (v1.36; measured fill per source cluster, 64 max: forest_thin 20.3, forest_card 13.2,
+# waterside 19.7, city 41.4). Defaults keep the previous clustering until the GPU A/B (cull, raster, band counts)
+# decides; the CPU fill with cluster_vertices 128, cluster_min_triangles 64, sheet_orientation_min_width 0.016 is
+# forest_thin 42.2 (trees 21 -> 42, grass 6 -> 64), waterside 26.5, city 48.4.
+cluster_min_triangles = 21        # a meshlet ends at a disconnected neighbour only with at least this many triangles
+                                  # (meshoptimizer's default triangles / 3; 64 fills foliage clusters)
+sheet_orientation_min_width = 0.0 # m: planar components at least this wide are clustered per orientation class (band A
+                                  # classification of sheets); narrower ones are clustered across orientations
 lod_max_relative_width_error = 0.25  # a group may simplify only with error <= this x its narrowest feature width;
                                      # thin geometry is never thinned by LOD (far thin geometry goes to band C bricks)
 lod_error_px = 1.0                # projected LOD error threshold

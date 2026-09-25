@@ -85,6 +85,10 @@ struct ViewResources
     TextureRef screenProbeMaps;    // atlas of the K-path radiance maps of the cache entries  [R]
                                    // the screen probes use, hardware-filterable (M: SrvCompute; R's
                                    // ScreenProbes.hlsli defines the layout; v1.13)
+    BufferRef screenProbeBlocks;   // GI screen probe blocks, 640 B per corner probe (main view   [R]
+                                   // only; v1.36): (ceil(W/8) + 1) x (ceil(H/8) + 1) probes, each
+                                   // contiguous: records 0..79, mips 0/1/2 fp16 RGB 80..583, spare
+                                   // (the table R and M agreed); M reads SrvCompute (ProbeSrvs)
     TextureRef reflection;         // RGBA16F reflection radiance + weight (main view only) [R]
     TextureRef reflectionLobeTiles;  // R8_UNORM ceil(W/8) x ceil(H/8): min over the tile's      [M]
                                      // surface pixels of reflectionLobeHalfAngle(r, NoV) / pi

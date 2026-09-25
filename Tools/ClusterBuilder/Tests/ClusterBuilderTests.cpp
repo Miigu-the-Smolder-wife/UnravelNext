@@ -6,6 +6,9 @@
 #include "unx/clusterbuilder/ClusterHierarchy.h"
 #include "unx/core/Config.h"
 #include "unx/core/Log.h"
+#if UNX_HAS_SCENEGEN
+#include "unx/scenegen/SceneGen.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -461,6 +464,72 @@ UNX_TEST(build_is_deterministic)
     CHECK(a.data.lodLevelClusters == b.data.lodLevelClusters);
     CHECK(a.data.named.size() == b.data.named.size());
     for (size_t i = 0; i < a.data.named.size(); ++i) CHECK(a.data.named[i].bytes == b.data.named[i].bytes);
+}
+
+UNX_TEST(cluster_fill_of_scene_meshes)
+{
+    // Source clusters of C's generated scenes (with track C): triangles per source cluster (the meshlet limit is
+    // visibility.cluster_triangles) and bounding radius, per mesh and weighted by instances -- the load V's culling and
+    // raster carry per triangle. Low fill multiplies the per-cluster costs (culling, meshlet launches, pairs).
+#if !UNX_HAS_SCENEGEN
+    logf("    (no scene generator in this build: skipped)\n");
+#else
+    const Settings st = settings();
+    for (scenegen::SceneId id : { scenegen::SceneId::ForestThin, scenegen::SceneId::ForestCard, scenegen::SceneId::Waterside, scenegen::SceneId::CityBlock })
+    {
+        scenegen::Request req;
+        req.id = id;
+        const scene::Scene s = scenegen::generate(req);
+        BuildStats bs;
+        const render::ClusterData cd = build(s, st, &bs);
+        std::vector<uint64_t> instancesOf(s.meshes.size(), 0);
+        for (const auto& inst : s.instances) ++instancesOf[inst.mesh];
+        uint64_t weightedClusters = 0, weightedTriangles = 0;
+        std::vector<std::pair<uint32_t, uint64_t>> fillWeighted;  // (triangles of a source cluster, instances)
+        logf("    %s: per mesh (instances): source clusters, triangles per source cluster median / P10, bounding radius median (m)\n", scenegen::sceneName(id));
+        for (uint32_t m = 0; m < cd.meshes.size(); ++m)
+        {
+            const auto& range = cd.meshes[m];
+            std::vector<uint32_t> tris;
+            std::vector<float> radius;
+            for (uint32_t c = range.clusterOffset; c < range.clusterOffset + range.clusterCount; ++c)
+            {
+                const render::gpu::Cluster& cl = cd.clusters[c];
+                if (cl.lodError != 0) continue;
+                tris.push_back((cl.counts >> 8) & 0xFFu);
+                radius.push_back(cl.boundsSphere.w);
+            }
+            if (tris.empty()) continue;
+            std::vector<uint32_t> sorted = tris;
+            std::sort(sorted.begin(), sorted.end());
+            std::sort(radius.begin(), radius.end());
+            uint64_t sum = 0;
+            for (uint32_t t : tris)
+            {
+                sum += t;
+                fillWeighted.push_back({ t, instancesOf[m] });
+            }
+            weightedClusters += tris.size() * instancesOf[m];
+            weightedTriangles += sum * instancesOf[m];
+            if (instancesOf[m] * tris.size() >= 1000 || tris.size() >= 64)
+                logf("      %-24s (%7llu): %6zu, %3u / %3u, %.3g\n", s.meshes[m].name.c_str(), (unsigned long long)instancesOf[m], tris.size(), sorted[sorted.size() / 2],
+                     sorted[sorted.size() / 10], radius[radius.size() / 2]);
+        }
+        std::sort(fillWeighted.begin(), fillWeighted.end());
+        uint64_t total = 0, acc = 0;
+        for (const auto& [t, w] : fillWeighted) total += w;
+        uint32_t median = 0;
+        for (const auto& [t, w] : fillWeighted)
+            if ((acc += w) * 2 >= total)
+            {
+                median = t;
+                break;
+            }
+        logf("    %s: instance-weighted source clusters %llu, triangles %llu, %.1f triangles per cluster (median %u of %u)\n", scenegen::sceneName(id),
+             (unsigned long long)weightedClusters, (unsigned long long)weightedTriangles, weightedClusters ? (double)weightedTriangles / weightedClusters : 0.0, median,
+             st.clusterTriangles);
+    }
+#endif
 }
 
 int main(int argc, char** argv)

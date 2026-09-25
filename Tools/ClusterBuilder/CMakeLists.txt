@@ -11,3 +11,6 @@ unx_target_defaults(unx_test_clusterbuilder)
 target_link_libraries(unx_test_clusterbuilder PRIVATE unx_clusterbuilder unx_agility_exports)
 target_include_directories(unx_test_clusterbuilder PRIVATE src)
 target_compile_definitions(unx_test_clusterbuilder PRIVATE UNX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# With track C: the fill report over C's generated scenes (cluster_fill_of_scene_meshes).
+target_link_libraries(unx_test_clusterbuilder PRIVATE $<TARGET_NAME_IF_EXISTS:unx_scenegen>)
+target_compile_definitions(unx_test_clusterbuilder PRIVATE $<$<TARGET_EXISTS:unx_scenegen>:UNX_HAS_SCENEGEN=1>)

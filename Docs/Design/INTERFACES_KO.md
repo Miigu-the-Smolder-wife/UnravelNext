@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.35, 2026-09-25)
+# UnravelNext 인터페이스 (v1.36, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -330,7 +330,10 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 
 - **같음의 수준(계약)**:
   1. 같은 GPU·드라이버에서 Restore 신호 뒤 입력 열이 같으면 결정적 부분집합(아래 결정성 항의 원천을 뺀 것)은 비트 동일하다. M·S는 지금 그렇다(M 확인, S는 VsmTests의 discontinuity 절로 실측 예정).
-  2. 전체 렌더러의 비트 동일은 **결정성 결정에 달렸다(결정 대기)**. R GI의 비결정 원천은 세 가지다: 원자 free list 순서에서 나온 광선 seed, 갱신 선택의 원자 선착순, 용량 압박 때 할당 순서. 결정적 대안(64-bit 키 seed, hash 우선순위 radix select)의 비용은 평시 +0.03~0.05 ms, 압박 장면 +0.08 ms[R 예상]이다. 평면 뷰 대 광선 선택은 실측 GPU 시간 적합을 결정 모드에서 기기별 고정 계수로 바꾼다. 선택지: (i) 늘 켬, (ii) 결정 모드 스위치(시험·재생 기록에서 켬). 합계표의 여유(숲·수변 목표선 ±0.06)와 함께 설계 개정·사용자 결정으로 정한다.
+  2. 전체 렌더러의 비트 동일(**사용자 결정, v1.36**: 결정 모드 스위치로 두고, 합계표에 여유가 확인되면 늘 켬으로 올린다):
+     - 결정 모드(R의 품질 키 `gi.deterministic` 등, 시험과 재생 기록)에서는 Restore 뒤 입력 열이 같으면 전체 렌더러가 비트 동일하다.
+     - 결정 모드가 꺼진 게임 중 Restore는 재설정 뒤 K(≤ 13)프레임 재수렴으로 같아진다(아래 3). 영상 품질은 두 모드에서 같고, 동률 처리의 결정성만 다르다.
+     - 배경: R GI의 비결정 원천은 세 가지다: 원자 free list 순서에서 나온 광선 seed, 갱신 선택의 원자 선착순, 용량 압박 때 할당 순서. 결정적 대안(64-bit 키 seed, hash 우선순위 radix select)의 비용은 평시 +0.03~0.05 ms, 압박 장면 +0.08 ms[R 예상]이다. 평면 뷰 대 광선 선택은 실측 GPU 시간 적합을 결정 모드에서 기기별 고정 계수로 바꾼다. 선택지: (i) 늘 켬, (ii) 결정 모드 스위치(시험·재생 기록에서 켬). 합계표의 여유(숲·수변 목표선 ±0.06)와 함께 설계 개정·사용자 결정으로 정한다.
   3. 신호 뒤 K프레임이 지나면 영상은 신호 없이 이어진 실행과 기준 비교 한도(3.4) 안이다. K = 트랙 재수렴의 최댓값이다(지금 R GI 13).
 
 ### 5.5.1 V ↔ M 경계 (v1.2)
@@ -594,11 +597,22 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.28 (2026-09-25):
   - **GpuLock `-Kind timing|correctness`**(조율 요청, 3.3): 종류를 `current.json`과 `history.log`에 기록한다. 백그라운드 CPU 작업의 멈춤 규칙은 timing만 대상이다(C의 PauseGate는 `kind`를 읽도록 C가 맞춘다). history 줄의 형식이 `acquire <트랙> (<종류>) :: ...`로 바뀌었다.
   - **M 요청 `20260925_M_planar_mask_apron.md`(R 동의)**: `ViewDesc::planarMask` 값이 1 = 거울 픽셀(R이 읽음), 2 = 에이프런(거울 픽셀의 3×3 이웃, 그리고 셰이딩하지만 R은 읽지 않음), 0 = 건너뜀이 됐다. `planarTileMask`는 팽창된 마스크 기준이다. V·S·M은 "0 아님 = 그림" 그대로라 바뀌는 것이 없다(V의 64 px 컬링 마스크와 깊이 채움은 이미 0 아님으로 판정한다). R의 resolve만 "== 1"로 읽는다. 마스크 생성은 R 몫이다.
+  - **클러스터 채움 품질 키(V, 6.5)**: `visibility.cluster_min_triangles`(메시렛이 연결되지 않은 이웃에서 끝날 수 있는 최소 삼각형 수), `visibility.sheet_orientation_min_width`(m, 이보다 좁은 평판 성분은 방향 부류로 나누지 않는다). `cluster_vertices`의 상한은 128이다(V 메시 셰이더 출력).
+    - 기본값은 이전 클러스터링과 같다(21, 0, 64). [실측, CPU, 인스턴스 가중 소스 클러스터당 삼각형, 64 기준] forest_thin 20.3(수목 21, 풀 6), forest_card 13.2, waterside 19.7, city 41.4.
+    - 원인: 수목 21 = min_triangles다(흩어진 잎마다 flex 빌더가 min에서 끊는다). 풀 6과 카드 2는 성분마다 144칸 방향 부류로 나뉜 것이다.
+    - 후보(128 정점, min 64, 폭 0.016 m)는 CPU로 forest_thin 42.2(수목 42, 풀 64), waterside 26.5, city 48.4다. 가는 전선처럼 경계 구가 커지는 메시(1.9 → 7.5 m)가 있어, 기본값은 GPU A/B(컬링, 래스터, 대역 수, 번갈아 중앙값·P95) 뒤에 정한다.
+    - 테스트 `cluster_fill_of_scene_meshes`(C 트랙이 있는 빌드)가 채움을 보고한다.
 - v1.35 (2026-09-25):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
-- v1.34 (2026-09-25):
+- v1.36 (2026-09-25):
+  - **결정성(5.5.2, 사용자 결정)**: 결정 모드 스위치(R `gi.deterministic` 등)로 두고, 합계표 여유가 확인되면 늘 켬으로 올린다.
+  - **`ViewResources::screenProbeBlocks`(R 요청, 설계 개정 12.3)**: GI 화면 프로브 블록, 프로브당 640 B 연속, 메인 뷰 전용. R이 쓰고 M이 읽는다.
+  - **Build.ps1 헤더 의존성 검사(VFX 신고)**: 빌드 뒤 프로젝트 헤더를 include하는데 Ninja가 헤더를 하나도 기록하지 않은 오브젝트가 있으면 실패한다. 다른 코드페이지의 셸에서 `cmake --build`를 돌리면 /showIncludes 접두어가 설정 때 것과 달라 의존성이 기록되지 않고, 그러면 헤더만 바꾼 변경이 다시 빌드되지 않는다. Build.ps1은 설정과 빌드를 한 cmd에서 하므로 일치한다. **빌드는 Build.ps1로만 한다.**
+    - `Build.ps1 -Jobs N -LowPriority`: 병렬 수와 BelowNormal 우선순위를 준다(사용자 게임 중의 가벼운 모드). 20:40대의 기계 정지 때는 -j4 BelowNormal 빌드로도 부담이 컸다. 조율이 멈추라고 하면 빌드도 멈춘다.
+    - [실측, 모든 build 폴더의 `ninja -t deps`] Build.ps1로 만든 폴더(core, S, M*, R*, FX, I, all, gate)에는 없다. `build/C`의 오브젝트 3개(ReferenceTests, PathTracer, ReferenceTool)에 기록이 없다. 그 셋은 C가 오브젝트를 지우고 Build.ps1로 다시 빌드해야 한다. 그 바이너리로 잰 결과는 헤더 변경 뒤의 것인지 C가 확인한다.
+- v1.35 (2026-09-25):
   - **FrameConstants 544 B(5.5)**: `coverageMaskLut`, `giRaysThisFrame`, 예비 2칸.
   - **coverage 마스크 LUT(5.5.1, 설계 개정 11 b)**: `coverageTriangleMaskLut`, `coverageMaskTable()`. 게이트 결과는 5.5.1에 있다.
   - **기준 비교 한도 형식(3.4, C 합의)**.

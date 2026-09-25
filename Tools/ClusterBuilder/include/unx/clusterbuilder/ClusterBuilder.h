@@ -24,6 +24,11 @@ struct Settings
     uint32_t clusterVertices = 0;      // visibility.cluster_vertices
     float maxRelativeWidthError = 0;   // visibility.lod_max_relative_width_error
     float widthAreaPercentile = 0;     // visibility.feature_width_area_percentile
+    // Fill of disconnected geometry (leaves, blades, cards, wires; v1.36): a meshlet may end at a disconnected
+    // neighbour only once it has clusterMinTriangles (meshoptimizer's flex builder), and planar components narrower
+    // than sheetOrientationMinWidth are clustered across orientations instead of one DAG per orientation class.
+    uint32_t clusterMinTriangles = 0;       // visibility.cluster_min_triangles
+    float sheetOrientationMinWidth = 0;     // visibility.sheet_orientation_min_width (m)
 
     static Settings fromQuality(const QualityConfig& quality);
 };
