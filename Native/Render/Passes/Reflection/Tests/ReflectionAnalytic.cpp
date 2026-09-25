@@ -810,6 +810,7 @@ int main(int argc, char** argv)
         {
             QualityConfig proxyQuality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
             proxyQuality.applyOverride("raytracing.character_proxy_triangles=100");
+            proxyQuality.applyOverride("raytracing.skinned_proxy_cuts=\"cluster_lod\"");  // the test's holed proxy is a V cut
             const scene::Scene t = skinnedPanelInMirror();
             const ClusterData cuts = panelCuts(t);
             const ViewDesc tv = ViewDesc::fromCamera(t.cameras[0], 1920, 1080, float4x4{});
@@ -844,6 +845,7 @@ int main(int argc, char** argv)
             QualityConfig noExact = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
             noExact.applyOverride("raytracing.character_proxy_triangles=100");
             noExact.applyOverride("raytracing.exact_set_max=0");
+            noExact.applyOverride("raytracing.skinned_proxy_cuts=\"cluster_lod\"");
             const Outcome control = run(device, shaders, noExact, t, { 0, 0, 0 }, expected, 16, 1920, 1080, nullptr, &cuts);
             logf("exact set control (no exact set, proxy with holes): mean value / expected %.4f\n", control.meanM);
             const bool okD = c.exactSlots == 1 && c.exactOccupied == 1 && c.mirror > 1000 && std::fabs(c.meanM - 1) < 0.02 && c.excessM <= 0 && control.meanM < 0.8;

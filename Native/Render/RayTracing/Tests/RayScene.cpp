@@ -720,6 +720,7 @@ int main(int argc, char** argv)
             // instance (the cut has its own triangle order), everything else as in round 1.
             QualityConfig proxyQuality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
             proxyQuality.applyOverride("raytracing.character_proxy_triangles=300");
+            proxyQuality.applyOverride("raytracing.skinned_proxy_cuts=\"cluster_lod\"");  // this round tests V's cut as the proxy
             const uint32_t tubeMesh = 3;
             GpuScene proxyScene(device);
             proxyScene.upload(s);

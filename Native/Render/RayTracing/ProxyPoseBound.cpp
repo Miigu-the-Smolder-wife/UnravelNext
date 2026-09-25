@@ -2,6 +2,8 @@
 
 #include "unx/scene/SceneData.h"
 
+#include "meshoptimizer.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -438,5 +440,70 @@ float proxyPoseError(const ProxyPoseCoefficients& c, const ProxyPoseTerms& t)
         worst = std::max(worst, sum);
     }
     return t.s * c.bindError + worst;
+}
+std::vector<std::vector<std::vector<uint32_t>>> skinAwareCuts(const scene::Mesh& m, const ProxyPoseSkeleton& sk, uint32_t budget, float attributeWeight)
+{
+    std::vector<std::vector<std::vector<uint32_t>>> levels;
+    const size_t vertices = m.positions.size();
+    if (vertices == 0 || m.skin.weights.size() < 4 * vertices || sk.centres.empty()) return levels;
+    float3 lo = m.positions[0], hi = m.positions[0];
+    for (const float3& p : m.positions)
+    {
+        lo = { std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z) };
+        hi = { std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z) };
+    }
+    // meshoptimizer measures positional error in units of the mesh extent: the attribute uses the same units.
+    const float extent = std::max({ hi.x - lo.x, hi.y - lo.y, hi.z - lo.z, 1e-6f });
+    std::vector<float> attributes(vertices * 3, 0.0f);
+    for (uint32_t v = 0; v < (uint32_t)vertices; ++v)
+    {
+        JointWeight w[4];
+        const uint32_t n = vertexWeights(m, v, w);
+        float3 e{};
+        for (uint32_t i = 0; i < n; ++i)
+            if (w[i].joint < sk.centres.size()) e = e + sk.centres[w[i].joint] * w[i].weight;
+        attributes[3 * v] = e.x / extent;
+        attributes[3 * v + 1] = e.y / extent;
+        attributes[3 * v + 2] = e.z / extent;
+    }
+    const float weights[3] = { attributeWeight, attributeWeight, attributeWeight };
+    const size_t sourceTriangles = m.indices.size() / 3;
+    auto cut = [&](double ratio) {
+        std::vector<std::vector<uint32_t>> lists(m.submeshes.size());
+        for (size_t s = 0; s < m.submeshes.size(); ++s)
+        {
+            const scene::Submesh& sub = m.submeshes[s];
+            const uint32_t* indices = m.indices.data() + sub.indexOffset;
+            if (ratio >= 1)
+            {
+                lists[s].assign(indices, indices + sub.indexCount);
+                continue;
+            }
+            const size_t target = std::max<size_t>(3, (size_t)(sub.indexCount / 3 * ratio) * 3);
+            lists[s].resize(sub.indexCount);
+            float error = 0;
+            lists[s].resize(meshopt_simplifyWithAttributes(lists[s].data(), indices, sub.indexCount, &m.positions[0].x, vertices, sizeof(float3), attributes.data(),
+                                                           3 * sizeof(float), weights, 3, nullptr, target, 1.0f, meshopt_SimplifyLockBorder, &error));
+        }
+        return lists;
+    };
+    auto triangles = [](const std::vector<std::vector<uint32_t>>& lists) {
+        size_t n = 0;
+        for (const auto& l : lists) n += l.size() / 3;
+        return n;
+    };
+    double ratio = sourceTriangles <= budget ? 1.0 : (double)budget / sourceTriangles;
+    size_t previous = 0;
+    for (int guard = 0; guard < 24; ++guard)
+    {
+        std::vector<std::vector<uint32_t>> lists = cut(ratio);
+        const size_t n = triangles(lists);
+        if (n == 0 || (previous && n * 10 > previous * 9)) break;  // no longer reducing
+        levels.push_back(std::move(lists));
+        previous = n;
+        if (n <= 16) break;
+        ratio *= 0.5;
+    }
+    return levels;
 }
 } // namespace unx::render::rt

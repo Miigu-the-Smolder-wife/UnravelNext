@@ -203,6 +203,12 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     m_sceneRevision = scene.revision();
     const uint32_t proxyBudget = (uint32_t)quality.integer("raytracing.character_proxy_triangles");
     m_proxyErrorPx = (float)quality.number("raytracing.proxy_error_px");
+    m_proxySkinWeight = (float)quality.number("raytracing.proxy_skin_weight");
+    {
+        const std::string cuts = quality.string("raytracing.skinned_proxy_cuts");
+        if (cuts != "skin_aware" && cuts != "cluster_lod") fail("raytracing.skinned_proxy_cuts must be \"skin_aware\" or \"cluster_lod\" (got \"%s\")", cuts.c_str());
+        m_skinAwareCuts = cuts == "skin_aware";
+    }
     m_experiment = (uint32_t)quality.integer("raytracing.experiment_disable");
     const uint64_t dynamicMax = (uint64_t)quality.integer("raytracing.dynamic_tlas_instances_max");
 
@@ -588,6 +594,14 @@ const std::vector<RayScene::ProxyMesh>& RayScene::proxyLevels(uint32_t mesh)
     m_proxyLevelsBuilt[mesh] = 1;
     if (m_proxySkeletons.size() < m_proxyLevels.size()) m_proxySkeletons.resize(m_proxyLevels.size());
     m_proxySkeletons[mesh] = proxyPoseSkeleton(m_scene.source()->meshes[mesh]);
+    // Skinned meshes: R's skin-aware cuts (ProxyPoseBound.h) unless raytracing.skinned_proxy_cuts = "cluster_lod".
+    if (m_skinAwareCuts)
+    {
+        const scene::Mesh& sm = m_scene.source()->meshes[mesh];
+        const auto cuts = skinAwareCuts(sm, m_proxySkeletons[mesh], m_proxyBudget, m_proxySkinWeight);
+        for (size_t l = 0; l < cuts.size(); ++l) levels.push_back(buildProxyFromLists(mesh, cuts[l], !(l == 0 && sm.indices.size() / 3 <= m_proxyBudget)));
+        if (!levels.empty()) return levels;
+    }
     const ClusterData& cd = m_scene.clusters();
     if (mesh < cd.meshes.size() && cd.meshes[mesh].lodLevelCount > 0)
     {
@@ -604,16 +618,15 @@ const std::vector<RayScene::ProxyMesh>& RayScene::proxyLevels(uint32_t mesh)
 
 RayScene::ProxyMesh RayScene::buildProxy(uint32_t mesh, uint32_t lodLevel)
 {
-    ProxyMesh p;
     const scene::Mesh& sm = m_scene.source()->meshes[mesh];
     const ClusterData& cd = m_scene.clusters();
     // Per-submesh index lists in mesh vertex indices, from the cut or the full mesh.
     std::vector<std::vector<uint32_t>> perSubmesh(sm.submeshes.size());
+    bool reduced = false;
     if (lodLevel != gpu::kNone)
     {
         const gpu::LodLevel& level = cd.lodLevels[lodLevel];
-        p.reduced = level.error > 0;
-        p.error = level.error;
+        reduced = level.error > 0;
         for (uint32_t k = level.clusterOffset; k < level.clusterOffset + level.clusterCount; ++k)
         {
             const gpu::Cluster& c = cd.clusters[cd.lodLevelClusters[k]];
@@ -629,6 +642,18 @@ RayScene::ProxyMesh RayScene::buildProxy(uint32_t mesh, uint32_t lodLevel)
     else
         for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size(); ++s)
             perSubmesh[s].assign(sm.indices.begin() + sm.submeshes[s].indexOffset, sm.indices.begin() + sm.submeshes[s].indexOffset + sm.submeshes[s].indexCount);
+    ProxyMesh p = buildProxyFromLists(mesh, perSubmesh, reduced);
+    if (lodLevel != gpu::kNone) p.error = cd.lodLevels[lodLevel].error;
+    return p;
+}
+
+// A proxy from per-submesh triangle lists (mesh vertex indices); 'reduced' = not the source mesh. Its error is the
+// measured bind-pose Hausdorff distance (ProxyPoseCoefficients::bindError), its pose terms bound it in any pose.
+RayScene::ProxyMesh RayScene::buildProxyFromLists(uint32_t mesh, const std::vector<std::vector<uint32_t>>& perSubmesh, bool reduced)
+{
+    ProxyMesh p;
+    p.reduced = reduced;
+    const scene::Mesh& sm = m_scene.source()->meshes[mesh];
     // Compact vertices (first use order) and R's pools.
     std::unordered_map<uint32_t, uint32_t> compact;
     p.vertexMap = (uint32_t)m_vertexMapData.size();
@@ -654,6 +679,7 @@ RayScene::ProxyMesh RayScene::buildProxy(uint32_t mesh, uint32_t lodLevel)
         std::vector<uint32_t> cut;
         for (const std::vector<uint32_t>& list : perSubmesh) cut.insert(cut.end(), list.begin(), list.end());
         p.pose = proxyPoseCoefficients(sm, m_proxySkeletons[mesh], cut);
+        p.error = p.pose.bindError;
     }
     return p;
 }

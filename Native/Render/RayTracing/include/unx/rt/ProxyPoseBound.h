@@ -70,6 +70,18 @@ struct ProxyPoseTerms
 };
 void proxyPoseTerms(const ProxyPoseSkeleton& skeleton, std::span<const float4> palette, ProxyPoseTerms& out);
 
+// Skin-aware RT proxy cuts of a skinned mesh, finest first: per level a triangle list per submesh (mesh vertex indices).
+// Cuts from V's cluster LOD ignore skin weights, so their triangles span joints and cut the corner of a bent limb (measured:
+// 4-7 cm in a pose for cuts of 0.03-3 mm bind-pose error). Here every level is simplified from the source mesh with
+// meshopt_simplifyWithAttributes, the attribute being the vertex's skin-weight centroid sum_i w_i o_i (joint centres
+// blended by its weights): collapsing an edge whose ends move with different joints costs about |dw| x the joints'
+// spacing, so triangles do not stretch across a bendable region, while edges within one joint's region collapse freely.
+// 'attributeWeight' scales that cost against the positional error. Submesh borders are locked. The first level is the
+// source itself when it has at most 'budget' triangles, else a cut of 'budget'; each next level halves the target until
+// the simplifier cannot reduce further or 16 triangles remain. Each cut's error in a pose is still bounded by
+// proxyPoseCoefficients / proxyPoseError: the attribute shapes the cut, it does not certify it.
+std::vector<std::vector<std::vector<uint32_t>>> skinAwareCuts(const scene::Mesh& mesh, const ProxyPoseSkeleton& skeleton, uint32_t budget, float attributeWeight);
+
 // The cut's error bound in this pose (object space).
 float proxyPoseError(const ProxyPoseCoefficients& c, const ProxyPoseTerms& t);
 } // namespace unx::render::rt

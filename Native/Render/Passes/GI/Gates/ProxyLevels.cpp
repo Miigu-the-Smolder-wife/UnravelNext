@@ -7,6 +7,7 @@
 // area-weighted points each way, next to the error the cut claims.
 //
 //   unx_gate_gi_proxylevels --scene <file.unxscene>
+// Also R's skin-aware cuts (skinAwareCuts) at several attribute weights, measured the same way.
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/render/GpuScene.h"
@@ -206,28 +207,68 @@ int main(int argc, char** argv)
                 source.push_back({ sm.positions[sm.indices[i]], sm.positions[sm.indices[i + 1]], sm.positions[sm.indices[i + 2]] });
             const TriangleGrid sourceGrid(source);
             const std::vector<float3> sourcePoints = samplePoints(source, 20000, 1);
+            // The first skinned instance's stored pose (palette = jointToModel x inverseBind).
+            std::vector<float4> palette;
+            for (const scene::Instance& in : s.instances)
+            {
+                if (in.mesh != m || in.skeleton >= s.skeletons.size()) continue;
+                const scene::Skeleton& skel = s.skeletons[in.skeleton];
+                for (size_t j = 0; j < sm.skin.inverseBind.size() && j < skel.jointToModel.size(); ++j)
+                {
+                    const float3x4& a = skel.jointToModel[j];
+                    const float3x4& b = sm.skin.inverseBind[j];
+                    float r[3][4];
+                    for (int y = 0; y < 3; ++y)
+                        for (int x = 0; x < 4; ++x)
+                            r[y][x] = a.m[y][0] * b.m[0][x] + a.m[y][1] * b.m[1][x] + a.m[y][2] * b.m[2][x] + (x == 3 ? a.m[y][3] : 0.0f);
+                    for (int y = 0; y < 3; ++y) palette.push_back({ r[y][0], r[y][1], r[y][2], r[y][3] });
+                }
+                break;
+            }
+            std::vector<float3> posed(sm.positions.size());
+            for (size_t v = 0; v < sm.positions.size(); ++v)
+            {
+                float3 out{};
+                const float3 p = sm.positions[v];
+                float sum = 0;
+                for (int k = 0; k < 4; ++k) sum += sm.skin.weights[4 * v + k];
+                for (int k = 0; k < 4; ++k)
+                {
+                    const float w = sum > 0 ? sm.skin.weights[4 * v + k] / sum : 0;
+                    const uint32_t j = sm.skin.joints[4 * v + k];
+                    if (w <= 0 || 3 * j + 2 >= palette.size()) continue;
+                    const float4 a = palette[3 * j], b = palette[3 * j + 1], c = palette[3 * j + 2];
+                    out = out + float3{ a.x * p.x + a.y * p.y + a.z * p.z + a.w, b.x * p.x + b.y * p.y + b.z * p.z + b.w, c.x * p.x + c.y * p.y + c.z * p.z + c.w } * w;
+                }
+                posed[v] = palette.empty() ? p : out;
+            }
+            std::vector<Tri> posedSource;
+            for (size_t t = 0; t + 2 < sm.indices.size(); t += 3) posedSource.push_back({ posed[sm.indices[t]], posed[sm.indices[t + 1]], posed[sm.indices[t + 2]] });
+            const TriangleGrid posedSourceGrid(posedSource);
+            const std::vector<float3> posedSourcePoints = samplePoints(posedSource, 20000, 3);
+            render::rt::ProxyPoseSkeleton sk = render::rt::proxyPoseSkeleton(sm);
+            // One cut (mesh vertex indices): bind-pose Hausdorff both ways, the posed bound and the true posed Hausdorff.
+            auto report = [&](const std::vector<uint32_t>& cutIndices) {
+                std::vector<Tri> cut, posedCut;
+                for (size_t t = 0; t + 2 < cutIndices.size(); t += 3)
+                {
+                    cut.push_back({ sm.positions[cutIndices[t]], sm.positions[cutIndices[t + 1]], sm.positions[cutIndices[t + 2]] });
+                    posedCut.push_back({ posed[cutIndices[t]], posed[cutIndices[t + 1]], posed[cutIndices[t + 2]] });
+                }
+                const Stats lost = distances(sourcePoints, TriangleGrid(cut)), added = distances(samplePoints(cut, 20000, 2), sourceGrid);
+                const render::rt::ProxyPoseCoefficients pc = render::rt::proxyPoseCoefficients(sm, sk, cutIndices);
+                render::rt::ProxyPoseTerms terms;
+                render::rt::proxyPoseTerms(sk, palette, terms);
+                const Stats plost = distances(posedSourcePoints, TriangleGrid(posedCut)), padded = distances(samplePoints(posedCut, 20000, 4), posedSourceGrid);
+                const float posedMax = std::max(plost.max, padded.max);
+                logf("          bind pose max %.5f m (P99 %.5f); stored pose: measured %.5f m (P99 %.5f), bound %.5f m -> a 4K pixel beyond %.1f m\n",
+                     std::max(lost.max, added.max), std::max(lost.p99, added.p99), posedMax, std::max(plost.p99, padded.p99), render::rt::proxyPoseError(pc, terms),
+                     posedMax / pixel4K);
+            };
             for (uint32_t l = range.lodLevelOffset; l < range.lodLevelOffset + range.lodLevelCount; ++l)
             {
                 const gpu::LodLevel& level = cd.lodLevels[l];
-                logf("  cut %2u: %7u triangles, error %.5f m -> below a 4K pixel beyond %.2f m, a 1440p pixel beyond %.2f m\n", l - range.lodLevelOffset,
-                     level.triangleCount, level.error, level.error / pixel4K, level.error / pixel1440);
-                std::vector<Tri> cut;
-                for (uint32_t k = level.clusterOffset; k < level.clusterOffset + level.clusterCount; ++k)
-                {
-                    const gpu::Cluster& c = cd.clusters[cd.lodLevelClusters[k]];
-                    const uint32_t triangles = (c.counts >> 8) & 0xFFu;
-                    for (uint32_t t = 0; t < triangles; ++t)
-                    {
-                        const uint32_t packed = cd.clusterTriangles[c.triangleOffset + t];
-                        auto vertex = [&](uint32_t local) { return sm.positions[cd.clusterVertexIndices[c.vertexOffset + local]]; };
-                        cut.push_back({ vertex(packed & 0xFFu), vertex((packed >> 8) & 0xFFu), vertex((packed >> 16) & 0xFFu) });
-                    }
-                }
-                const Stats lost = distances(sourcePoints, TriangleGrid(cut)), added = distances(samplePoints(cut, 20000, 2), sourceGrid);
-                logf("          measured (bind pose): source -> cut max %.5f P99 %.5f mean %.6f m; cut -> source max %.5f P99 %.5f mean %.6f m; "
-                     "max / claimed %.1f\n", lost.max, lost.p99, lost.mean, added.max, added.p99, added.mean,
-                     level.error > 0 ? std::max(lost.max, added.max) / level.error : 0.0f);
-                // Posed error bound (RayScene's cut rule) in each skeleton pose stored in the scene.
+                logf("  V cut %2u: %7u triangles, claimed error %.5f m\n", l - range.lodLevelOffset, level.triangleCount, level.error);
                 std::vector<uint32_t> cutIndices;
                 for (uint32_t k = level.clusterOffset; k < level.clusterOffset + level.clusterCount; ++k)
                 {
@@ -238,59 +279,18 @@ int main(int argc, char** argv)
                         for (uint32_t v : { packed & 0xFFu, (packed >> 8) & 0xFFu, (packed >> 16) & 0xFFu }) cutIndices.push_back(cd.clusterVertexIndices[c.vertexOffset + v]);
                     }
                 }
-                render::rt::ProxyPoseSkeleton sk = render::rt::proxyPoseSkeleton(sm);
-                const render::rt::ProxyPoseCoefficients pc = render::rt::proxyPoseCoefficients(sm, sk, cutIndices);
-                logf("          pose coefficients: bind error %.5f m, %zu joints, %zu terms:", pc.bindError, sk.centres.size(), pc.terms.size());
-                for (const auto& t : pc.terms) logf(" (j%u|r%u) K1 %.3f K2 %.3f", sk.pairs[t.pair].first, t.reference, t.k1, t.k2);
-                logf("\n");
-                for (const scene::Instance& in : s.instances)
+                report(cutIndices);
+            }
+            const uint32_t budget = (uint32_t)quality.integer("raytracing.character_proxy_triangles");
+            for (const float weight : { 0.0f, 1.0f, 4.0f, 16.0f })
+            {
+                const auto cuts = render::rt::skinAwareCuts(sm, sk, budget, weight);
+                for (size_t l = 0; l < cuts.size(); ++l)
                 {
-                    if (in.mesh != m || in.skeleton >= s.skeletons.size()) continue;
-                    const scene::Skeleton& skel = s.skeletons[in.skeleton];
-                    std::vector<float4> palette;
-                    for (size_t j = 0; j < sm.skin.inverseBind.size() && j < skel.jointToModel.size(); ++j)
-                    {
-                        const float3x4& a = skel.jointToModel[j];
-                        const float3x4& b = sm.skin.inverseBind[j];
-                        float r[3][4];
-                        for (int y = 0; y < 3; ++y)
-                            for (int x = 0; x < 4; ++x)
-                                r[y][x] = a.m[y][0] * b.m[0][x] + a.m[y][1] * b.m[1][x] + a.m[y][2] * b.m[2][x] + (x == 3 ? a.m[y][3] : 0.0f);
-                        for (int y = 0; y < 3; ++y) palette.push_back({ r[y][0], r[y][1], r[y][2], r[y][3] });
-                    }
-                    render::rt::ProxyPoseTerms terms;
-                    render::rt::proxyPoseTerms(sk, palette, terms);
-                    logf("          stored pose of skeleton %u: s %.3f, bound %.5f m;", in.skeleton, terms.s, render::rt::proxyPoseError(pc, terms));
-                    logf("\n");
-                    // The true posed distance: skin the source and the cut with this palette (linear blend, normalised weights).
-                    std::vector<float3> posed(sm.positions.size());
-                    float3 lo = sm.positions[0], hi = sm.positions[0];
-                    for (size_t v = 0; v < sm.positions.size(); ++v)
-                    {
-                        float3 out{};
-                        const float3 p = sm.positions[v];
-                        float sum = 0;
-                        for (int k = 0; k < 4; ++k) sum += sm.skin.weights[4 * v + k];
-                        for (int k = 0; k < 4; ++k)
-                        {
-                            const float w = sum > 0 ? sm.skin.weights[4 * v + k] / sum : 0;
-                            const uint32_t j = sm.skin.joints[4 * v + k];
-                            if (w <= 0 || 3 * j + 2 >= palette.size()) continue;
-                            const float4 a = palette[3 * j], b = palette[3 * j + 1], c = palette[3 * j + 2];
-                            out = out + float3{ a.x * p.x + a.y * p.y + a.z * p.z + a.w, b.x * p.x + b.y * p.y + b.z * p.z + b.w, c.x * p.x + c.y * p.y + c.z * p.z + c.w } * w;
-                        }
-                        posed[v] = out;
-                        lo = { std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z) };
-                        hi = { std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z) };
-                    }
-                    std::vector<Tri> posedSource, posedCut;
-                    for (size_t t = 0; t + 2 < sm.indices.size(); t += 3) posedSource.push_back({ posed[sm.indices[t]], posed[sm.indices[t + 1]], posed[sm.indices[t + 2]] });
-                    for (size_t t = 0; t + 2 < cutIndices.size(); t += 3) posedCut.push_back({ posed[cutIndices[t]], posed[cutIndices[t + 1]], posed[cutIndices[t + 2]] });
-                    const Stats plost = distances(samplePoints(posedSource, 20000, 3), TriangleGrid(posedCut)),
-                                padded = distances(samplePoints(posedCut, 20000, 4), TriangleGrid(posedSource));
-                    logf("          stored pose measured: source -> cut max %.5f, cut -> source max %.5f m (bind-pose mesh extent %.3f x %.3f x %.3f m)\n", plost.max,
-                         padded.max, hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
-                    break;  // one instance per mesh
+                    std::vector<uint32_t> cutIndices;
+                    for (const auto& list : cuts[l]) cutIndices.insert(cutIndices.end(), list.begin(), list.end());
+                    logf("  R skin-aware cut %zu (attribute weight %.0f): %zu triangles\n", l, weight, cutIndices.size() / 3);
+                    report(cutIndices);
                 }
             }
         }

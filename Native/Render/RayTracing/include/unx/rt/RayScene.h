@@ -189,6 +189,7 @@ private:
     };
     const std::vector<ProxyMesh>& proxyLevels(uint32_t mesh);
     ProxyMesh buildProxy(uint32_t mesh, uint32_t lodLevel);  // lodLevel = kNone: the full mesh
+    ProxyMesh buildProxyFromLists(uint32_t mesh, const std::vector<std::vector<uint32_t>>& perSubmesh, bool reduced);
     std::vector<std::vector<ProxyMesh>> m_proxyLevels;      // per scene mesh (built on demand)
     std::vector<ProxyPoseSkeleton> m_proxySkeletons;        // per scene mesh: joint centres, reference joint
     ProxyPoseTerms m_poseTerms;                             // scratch: this frame's palette terms of one instance
@@ -196,6 +197,8 @@ private:
     std::vector<uint32_t> m_indexPoolData, m_vertexMapData;
     uint32_t m_proxyBudget = 0;
     float m_proxyErrorPx = 1;  // raytracing.proxy_error_px
+    float m_proxySkinWeight = 1;  // raytracing.proxy_skin_weight (skinAwareCuts)
+    bool m_skinAwareCuts = true;  // raytracing.skinned_proxy_cuts
     uint32_t m_experiment = 0; // raytracing.experiment_disable (cost attribution only): 1 = build the deformed BLASes every frame
     // Per frame: each deformed instance's cut, the coarsest whose error in the instance's current pose (ProxyPoseBound.h:
     // bind-pose error plus the joints' relative motion times the cut's weight mismatch; raytracing.experiment_disable 16:
