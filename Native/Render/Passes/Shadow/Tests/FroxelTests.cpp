@@ -51,6 +51,29 @@ struct Box
     float3 centre, half;
 };
 
+// Segment o -> o + d (t in (0, 1)).
+bool hitSegment(const Box& b, ref::D3 o, ref::D3 d)
+{
+    double t0 = 1e-6, t1 = 1 - 1e-6;
+    const double oc[3] = { o.x, o.y, o.z }, dc[3] = { d.x, d.y, d.z };
+    const double c[3] = { b.centre.x, b.centre.y, b.centre.z }, h[3] = { b.half.x, b.half.y, b.half.z };
+    for (int a = 0; a < 3; ++a)
+    {
+        const double lo = c[a] - h[a], hi = c[a] + h[a];
+        if (std::abs(dc[a]) < 1e-15)
+        {
+            if (oc[a] < lo || oc[a] > hi) return false;
+            continue;
+        }
+        double ta = (lo - oc[a]) / dc[a], tb = (hi - oc[a]) / dc[a];
+        if (ta > tb) std::swap(ta, tb);
+        t0 = std::max(t0, ta);
+        t1 = std::min(t1, tb);
+        if (t0 > t1) return false;
+    }
+    return true;
+}
+
 bool hitBox(const Box& b, ref::D3 o, ref::D3 d)
 {
     double t0 = 0, t1 = 1e30;
@@ -375,8 +398,11 @@ int main(int argc, char** argv)
             report(disorder == 0, "lists out of importance order (entries)", disorder, 0);
         }
 
-        // ---- 2. Local lights in the air (sun below the horizon: no sun term).
+        // ---- 2. Local lights in the air (sun below the horizon: no sun term); then the same lights casting shadows (their
+        //         VSM shadows their air: the roof above them cuts their glow above it).
+        for (const bool shadowed : { false, true })
         {
+            const std::string what = shadowed ? "shadowed air of local lights" : "air in-scattering of local lights";
             scene::Scene sc = base;
             sc.sun.direction = normalize(float3{ 0.3f, -0.5f, 0.2f });
             for (int i = 0; i < 24; ++i)
@@ -391,17 +417,28 @@ int main(int argc, char** argv)
                 l.spotInner = 0.3f;
                 l.spotOuter = 0.7f;
                 l.size = { uni(0.01f, 0.05f), uni(0.01f, 0.03f) };  // small: the line-distance floor rarely applies
+                l.castShadow = shadowed;
                 sc.lights.push_back(l);
             }
             scene::Scene dark = sc;
             dark.lights.clear();
             run(dark, 1, -2.0f);  // night exposure: the lights' air glow is displayed
             const std::vector<uint8_t> without = lastVolume;
-            run(sc, 1, -2.0f);
+            run(sc, shadowed ? 6 : 1, -2.0f);  // shadowed: steady state (a pool the local pages exhaust grows once)
+            if (shadowed)
+            {
+                const std::vector<uint8_t> keep = lastVolume;
+                const uint64_t frame = shadow::lastConstants(tf.trackState).frame;
+                for (int i = 0; i < 6 && shadow::stats(tf.trackState).frame < frame; ++i) run(sc, 1, -2.0f);
+                lastVolume = keep;
+                const shadow::VsmStats st = shadow::stats(tf.trackState);
+                logf("%s: VSM pages requested %u, allocated %u, exhausted %u; local slots %u, active %u\n", what.c_str(), st.requested, st.allocated, st.exhausted,
+                     st.localAssigned, st.localActive);
+            }
             const Lists lists{ lastLists };
             report(lists.word(48) == 0, "local-light scene: no truncated list", lists.word(48), 0);
             // Reference: fine midpoint integration of every light along the tile-centre ray, continuous air coefficients.
-            double worst = 0, sumErr = 0, sumRef = 0;
+            double worst = 0, sumErr = 0, sumRef = 0, sumGpu = 0;
             uint32_t compared = 0;
             const ref::D3 camPos = d3(grid.view.position);
             for (uint32_t ty = 2; ty < fg.gridY; ty += 7)
@@ -434,6 +471,13 @@ int main(int argc, char** argv)
                                 const double dd = std::sqrt(std::max(d * d, d * d - h2 + hmin * hmin));
                                 const double nu = ref::dot(w, dir * -1.0);
                                 const ref::D3 ph = c.rayleigh * ref::rayleighPhase(nu) + c.mie * ref::miePhase(nu, model.g);
+                                if (L.castShadow)
+                                {
+                                    bool blocked = false;
+                                    for (const Box& bx : boxes)
+                                        if (hitSegment(bx, p, d3(L.position) - p)) blocked = true;
+                                    if (blocked) continue;
+                                }
                                 acc = acc + T * ph * (intensity(L, w) * window(L, d) / (dd * dd) * dt) * d3(L.color);
                             }
                             tau = tau + c.extinction * dt;
@@ -448,15 +492,18 @@ int main(int argc, char** argv)
                             if (e / r > worst && debug)
                                 logf("  worse: tile (%u,%u) node %u z %.2f gpu %.4g %.4g %.4g ref %.4g %.4g %.4g\n", tx, ty, n, grid.node(n), g.x, g.y, g.z, acc.x, acc.y, acc.z);
                             worst = std::max(worst, e / r);
+                            sumGpu += g.x + g.y + g.z;
                             sumErr += e;
                             sumRef += r;
                             ++compared;
                         }
                     }
                 }
-            logf("local lights: %u nodes compared, largest relative error %.3g\n", compared, worst);
-            report(compared > 100 && sumErr / sumRef < 0.01, "air in-scattering of local lights vs reference (mean relative)", sumErr / std::max(sumRef, 1e-30), 0.01);
-            report(worst < 0.03, "air in-scattering of local lights vs reference (largest node)", worst, 0.03);
+            logf("%s: %u nodes compared, largest relative error %.3g; sum of compared GPU nodes %.6g, reference %.6g\n", what.c_str(), compared, worst, sumGpu, sumRef);
+            // Shadowed: the air's shadow boundaries are resolved to the froxel (slice length, tile width).
+            const double meanLimit = shadowed ? 0.03 : 0.01, worstLimit = shadowed ? 0.25 : 0.03;
+            report(compared > 100 && sumErr / sumRef < meanLimit, (what + " vs reference (mean relative)").c_str(), sumErr / std::max(sumRef, 1e-30), meanLimit);
+            report(worst < worstLimit, (what + " vs reference (largest node)").c_str(), worst, worstLimit);
         }
 
         // ---- 3. Sun shadows in the air: the in-scattering a caster removes (volume with it minus without it) against the

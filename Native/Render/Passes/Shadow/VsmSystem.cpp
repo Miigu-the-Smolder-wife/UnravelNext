@@ -595,6 +595,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     fc.resources.vsmPool = pool;
     fc.resources.vsmBlocks = blocks;
     fc.resources.vsmConstants = s.ringCbv[s.constantsOffset / kRingStride];
+    fc.resources.vsmLocalLights = s.localLightsNow;  // v1.19: ShadowSrvs.lights / .pad0 (shadowVisibilityDirect)
+    fc.resources.vsmSlotOfLight = s.slotOfNow;
     fc.resources.vsmPageTable = table;
 
     ShaderLibrary& sh = fc.shaders;
@@ -712,6 +714,27 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 8);
                       ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                  });
+    }
+    if (s.localUsed > 0)
+    {
+        // The air the froxel integration shadows with the local lights (VsmLocalMarkAir).
+        ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmLocalMarkAir");
+        const FroxelGridCpu grid = froxelGridFor(q, main.view.width, main.view.height);
+        uint32_t texelBits;
+        std::memcpy(&texelBits, &grid.shadowTexelsPerTile, 4);
+        g.addPass("s.vsm.localmarkair", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(froxelLists, Use::SrvCompute);
+                      b.use(requests, Use::UavCompute);
+                      b.keep();
+                  },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[8] = { ctx.uav(requests), ctx.srv(froxelLists), localLightsSrv, slotOfSrv, texelBits, 0, 0, 0 };
+                      ctx.cmd->SetPipelineState(pso);
+                      ctx.bindFrameConstants(mainConstants);
+                      ctx.computeConstants(k, 8);
+                      ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
                   });
     }
     {

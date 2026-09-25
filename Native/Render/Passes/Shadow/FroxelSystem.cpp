@@ -135,6 +135,7 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     const bool shadows = frameRefs(fc, vsm);
     const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;
     const bool keepVolume = s.keep;
+    const uint32_t localLights = fc.resources.vsmLocalLights, slotOfLight = fc.resources.vsmSlotOfLight;
     ShaderLibrary& sh = fc.shaders;
     ID3D12PipelineState* pi = sh.compute("Passes/Atmosphere/FroxelIntegrate");
     g.addPass("s.froxel.integrate", QueueType::Compute,
@@ -153,7 +154,7 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
                   }
               },
               [=](PassContext& ctx) {
-                  uint32_t k[12] = { ctx.srv(lights), ctx.uav(volume), ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0 };
+                  uint32_t k[16] = { ctx.srv(lights), ctx.uav(volume), ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight, 0, 0 };
                   if (shadows)
                   {
                       k[4] = ctx.srv(vsm.table);
@@ -167,7 +168,7 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
                   k[11] = experiment;
                   ctx.cmd->SetPipelineState(pi);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 12);
+                  ctx.computeConstants(k, 16);
                   ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
               });
     if (!shadows) tracks::pending("S.froxels: sun shadows of the air (shadowPages not recorded this frame)");

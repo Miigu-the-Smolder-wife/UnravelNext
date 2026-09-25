@@ -31,7 +31,17 @@ void main(uint id : SV_DispatchThreadID)
     // Same air (the two inline differently: compare to 1e-5 relative).
     const bool same = all(abs(inscatter - inscatter2) <= 1e-5 * abs(inscatter) + 1e-30) && all(abs(transmittance - transmittance2) <= 1e-5 * transmittance + 1e-30);
     output[3 * id] = float4(inscatter, same ? 0 : 1);
-    output[3 * id + 1] = float4(transmittance, 0);
-    output[3 * id + 2] = float4(sunIlluminance, 0);
+    // Diagnostics (.w): the ray's distance to the model surface crossing and to the queried depth (airViewLookup).
+    Texture2D<float4> pt = ResourceDescriptorHeap[s.multiScatter];
+    uint pw, ph;
+    pt.GetDimensions(pw, ph);
+    const float bottom = pt.Load(int3(0, ph - 1, 0)).x;
+    const float4 nq = mul(g_invViewProj, float4(q.x * 2 - 1, 1 - q.y * 2, 1, 1));
+    const float3 dir = normalize(nq.xyz / nq.w - g_cameraPosition);
+    const float3 o = g_cameraPosition;
+    const float h2 = dot(o, o) + 2 * bottom * o.y, b = dot(o, dir) + bottom * dir.y, disc = b * b - h2;
+    const float kink = h2 <= 0 ? 0 : (disc >= 0 && b < 0 ? h2 / (-b + sqrt(disc)) : -1);
+    output[3 * id + 1] = float4(transmittance, kink);
+    output[3 * id + 2] = float4(sunIlluminance, q.z / max(dot(dir, airViewForward()), 1e-4));
 #endif
 }

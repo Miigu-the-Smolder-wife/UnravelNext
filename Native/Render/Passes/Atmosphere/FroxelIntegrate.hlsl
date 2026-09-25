@@ -9,7 +9,10 @@
 //  - local lights of the froxel's list: in-scattering by the air, int e^(-sigma_t t) (sigma_R P_R + sigma_M P_M) I(w)
 //    window(d) / d^2 dt, integrated in the angle subtended at the light (t = t_c + h tan theta, dt / d^2 = dtheta / h:
 //    the integrand is smooth in theta) with 8-point Gauss-Legendre. Area lights act as point sources of their
-//    projected intensity (froxelIntensity). No local-light shadows in the air yet (S_STATUS_KO.md);
+//    projected intensity (froxelIntensity). A light with a shadow slot (list entry bit 15) shadows its air: its
+//    integral takes AIR_SHADOW_POINTS uniform midpoints in the angle instead (the visibility is a step function there,
+//    which Gauss-Legendre points bias), each tested against the light's VSM at the mip whose texel matches the froxel's
+//    lateral resolution (lit where no page holds it; VsmLocalMarkAir requests the same points' pages);
 //  - optical depth.
 // A group scan gives node n = sum over slices j < n of e^(-tau before j) x source_j. Volume (RGBA16F, gridX x gridY x
 // 3 (S + 1)): part 0 in-scattering x exposure of the main view (fp16 keeps the relative precision of what is displayed,
@@ -17,6 +20,7 @@
 // the node. No local media in scenes v1 (their optical depth adds to part 1).
 // P[0].x froxelLights SRV (raw), P[0].y volume UAV (RWTexture3D<float4>), P[0].z transmittance LUT, P[0].w multi-scatter LUT
 // P[1].x VSM page table SRV (raw), .y pool SRV (raw), .z blocks SRV (raw), .w VSM constants CBV (0xFFFFFFFF: no VSM)
+// P[3].x local lights SRV (StructuredBuffer<VsmLocalLight>; 0xFFFFFFFF: none), P[3].y slot of light SRV
 // P[2].x VSM search bound SRV (raw), P[2].y shadow texels per tile (float bits), P[2].z air step altitude m (float bits),
 // P[2].w experiment mask (atmosphere.froxels.experiment_disable; 0; cost attribution only: 1 air shadows, 2 local lights,
 // 4 air integration, 8 sun transmittance per substep, 16 multiple scattering per substep)
@@ -27,7 +31,9 @@
 #include "Passes/Atmosphere/AtmosphereCommon.hlsli"
 #include "Passes/Atmosphere/FroxelCommon.hlsli"
 #include "Passes/Shadow/VsmAir.hlsli"
+#include "Passes/Shadow/VsmLocalSample.hlsli"
 
+#define AIR_SHADOW_POINTS 24u
 groupshared float3 gs_tau[64];
 groupshared float3 gs_source[64];
 
@@ -36,8 +42,22 @@ static const float kGaussX[8] = { -0.9602898564975363, -0.7966664774136267, -0.5
 static const float kGaussW[8] = { 0.1012285362903763, 0.2223810344533745, 0.3137066458778873, 0.3626837833783620,
                                   0.3626837833783620, 0.3137066458778873, 0.2223810344533745, 0.1012285362903763 };
 
-// Air in-scattering of light l along o + dir t, t in [0, len] (nits), relative to the segment's start.
-float3 airLocalLight(GpuLight l, float3 o, float3 dir, float len, AirCoefficients c, float mieG)
+// Visibility of point p from local light slot 'slot' (hard test at the mip of texel <= width at p's face depth).
+float airLocalShadow(VsmLocalResources r, VsmLocalLight l, uint slot, float3 p, float width, float biasTexels)
+{
+    const VsmLocalPoint q = vsmLocalProject(l, p);
+    if (q.z <= l.nearM) return 1;
+    float3 right, up, axis;
+    vsmCubeBasis(q.face, right, up, axis);
+    uint mu;
+    const uint key = vsmLocalKeyAt(r, l, slot, axis + q.xy.x * right + q.xy.y * up, vsmLocalMip(width, q.z), mu);
+    return key == VSM_EMPTY || -vsmDecode(key) >= q.z - biasTexels * 2 * q.z / vsmLocalRes(mu) ? 1.0 : 0.0;
+}
+
+// Air in-scattering of light l along o + dir t, t in [0, len] (nits), relative to the segment's start; shadowed by its
+// VSM when slot != VSM_LOCAL_NONE.
+float3 airLocalLight(GpuLight l, float3 o, float3 dir, float len, AirCoefficients c, float mieG, VsmLocalResources r, VsmLocalLight sl, uint slot,
+                     float width, float biasTexels)
 {
     const float tc = dot(l.position - o, dir);
     // Distance of the line from the light, not below the emitter's size (1 cm for points): the point-source integrand
@@ -46,16 +66,21 @@ float3 airLocalLight(GpuLight l, float3 o, float3 dir, float len, AirCoefficient
     const float th0 = atan(-tc / h), th1 = atan((len - tc) / h);
     const float mid = 0.5 * (th0 + th1), half = 0.5 * (th1 - th0);
     float3 sum = 0;
-    [unroll] for (uint i = 0; i < 8; ++i)
+    const bool shadowed = slot != VSM_LOCAL_NONE;
+    const uint points = shadowed ? AIR_SHADOW_POINTS : 8u;
+    [loop] for (uint i = 0; i < points; ++i)
     {
-        const float th = mid + half * kGaussX[i];
+        const float x = shadowed ? (i + 0.5) / AIR_SHADOW_POINTS * 2 - 1 : kGaussX[i];
+        const float weight = shadowed ? 2.0 / AIR_SHADOW_POINTS : kGaussW[i];
+        const float th = mid + half * x;
         const float t = tc + h * tan(th);
         const float3 v = o + dir * t - l.position;
         const float d = h / cos(th);
         const float3 w = v / max(length(v), 1e-6);
         const float nu = -sin(th);  // cosine between the light's propagation (w) and the path to the camera (-dir)
         const float3 phase = c.rayleigh * airRayleighPhase(nu) + c.mie * airMiePhase(nu, mieG);
-        sum += kGaussW[i] * froxelIntensity(l, w) * froxelWindow(l, d) * phase * exp(-c.extinction * max(t, 0.0));
+        const float visible = shadowed ? airLocalShadow(r, sl, slot, o + dir * t, width, biasTexels) : 1.0;
+        sum += visible * weight * froxelIntensity(l, w) * froxelWindow(l, d) * phase * exp(-c.extinction * max(t, 0.0));
     }
     return sum * (half / h) * l.color;
 }
@@ -118,11 +143,32 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].x];
         const uint h = lists.Load(g.headerBase + froxelIndex(g, tile, s) * 4);
         const uint first = h >> 6, count = (experiment & 2) ? 0u : h & 63u;
+        VsmLocalResources lr;
+        lr.table = ResourceDescriptorHeap[P[1].x];
+        lr.pool = ResourceDescriptorHeap[P[1].y];
+        lr.blocks = ResourceDescriptorHeap[P[1].z];
+        const bool localShadows = P[3].x != 0xFFFFFFFFu && P[1].w != 0xFFFFFFFFu;
+        const float width = froxelTileWidth(g, 0.5 * (z0 + z1)) / asfloat(P[2].y);
+        float biasTexels = 1;
+        if (P[1].w != 0xFFFFFFFFu)
+        {
+            ConstantBuffer<VsmConstants> vcl = ResourceDescriptorHeap[P[1].w];
+            biasTexels = vcl.receiverBiasTexels;
+        }
         for (uint i = 0; i < count; ++i)
         {
             const uint w = lists.Load(g.indexBase + ((first + i) >> 1) * 4);
-            const uint li = (((first + i) & 1) ? w >> 16 : w & 0xFFFFu) & 0x7FFFu;
-            source += airLocalLight(loadLight(li), o, dir, len, cm, a.mieG);
+            const uint entry = ((first + i) & 1) ? w >> 16 : w & 0xFFFFu, li = entry & 0x7FFFu;
+            uint slot = VSM_LOCAL_NONE;
+            VsmLocalLight sl = (VsmLocalLight)0;
+            if (localShadows && (entry & 0x8000u) != 0)
+            {
+                StructuredBuffer<uint> slotOf = ResourceDescriptorHeap[P[3].y];
+                StructuredBuffer<VsmLocalLight> locals = ResourceDescriptorHeap[P[3].x];
+                slot = slotOf[li];
+                if (slot != VSM_LOCAL_NONE) sl = locals[slot];
+            }
+            source += airLocalLight(loadLight(li), o, dir, len, cm, a.mieG, lr, sl, slot, width, biasTexels);
         }
     }
     // Exclusive scan of the optical depth, inclusive scan of the attenuated sources (Hillis-Steele over 64 slices).
