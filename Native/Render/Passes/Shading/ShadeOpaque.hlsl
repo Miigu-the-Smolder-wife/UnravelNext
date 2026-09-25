@@ -120,7 +120,7 @@ float shOverflowVisibility(uint2 pixel, uint ordinal, uint overflowHead, inout u
     vsm.constants = c.x;
     vsm.lights = c.y;
     vsm.pad0 = c.z;
-    vsm.pad1 = c.w;
+    vsm.layers = c.w;
     return round(saturate(shadowLocalVisibilityAtReceiver(vsm, lightIndex, receiver)) * 255.0) / 255.0;
 #else
     if (overflowHead == 0 || P[7].z == UNX_NONE) return 1;
