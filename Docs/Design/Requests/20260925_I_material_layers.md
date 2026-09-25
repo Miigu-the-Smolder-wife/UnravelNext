@@ -40,3 +40,8 @@ INTERFACES 8.1에 재질 층을 추가하는 것이다. 코어가 인터페이�
 - M: 셰이딩 커널의 재질 평가(층 추가, 셰이딩 비용에 lobe 하나 추가 [예상 ALU 소폭, 메모리 불변]).
 - C: 기준 경로추적기 재질 샘플링(코팅 lobe 선택 확률).
 - R: hit 셰이딩의 재질 평가(같은 함수 사용).
+
+## 결과 (코어, 설계 단계)
+
+- 설계 문서 `Docs/Design/MATERIAL_LAYERS_KO.md`: 모델 정의(clearcoat: 코팅 GGX lobe + 방향별 코팅 투과 T_c(μ_o)T_c(μ_i)로 기저 감쇠, 박막: Belcour–Barla Airy Fresnel을 덮임으로 섞음), 데이터(`scene::Material` 7필드, `.unxscene` v2, `gpu::Material` 112 B), 비용식 [예상](가장 큰 항은 코팅 lobe의 간접 반사, R 확정 필요), 품질 정의(실시간 = 정의, 정의와 물리 차이는 C가 측정해 기록).
+- 구현은 C·M·R 확인 뒤에 한다(조율 세션 경유로 요청).
