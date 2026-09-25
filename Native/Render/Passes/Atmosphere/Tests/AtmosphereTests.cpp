@@ -406,6 +406,98 @@ int main(int argc, char** argv)
                 logf("  J_ms 2x %s: texels %.3e\n", axes[axis], e);
                 compareRadiance(radiance(F, *lastTransmittance, pf), format("J_ms: 2x %s resolution", axes[axis]).c_str(), 3e-3, 4e-3);
             }
+            // 2c. Weather transitions (measurement for design 2.3 lever 3, --cases weather): exact tables at the two ends of a
+            //     trajectory (log-space line in the medium parameters) and at a point between, against the log-domain blend
+            //     of the end tables (the UNORM log texels blend linearly; the ground irradiance row in ln). Radiance with the
+            //     middle medium along the same rays. States of RPP-1 (Content/RPP1/rpp1_manifest.json "environment" draft):
+            //     coefficients and g in log space, ground albedo linear; the middle of each transition (t = 1/2).
+            struct Weather
+            {
+                const char* name;
+                double mie, absorption, height, g;
+                float3 albedo;
+            };
+            const Weather clearState{ "clear", 3.996e-6, 0.444e-6, 1200, 0.8, float3{ 0.060f, 0.090f, 0.050f } };
+            const Weather targets[] = { { "rain", 9.27e-4, 2.7e-5, 1200, 0.829, float3{ 0.050f, 0.078f, 0.042f } },
+                                        { "mist", 9.76e-4, 2.0e-6, 300, 0.85, float3{ 0.055f, 0.085f, 0.046f } } };
+            if (casesFilter.find("weather") != std::string::npos)
+            for (const Weather& target : targets)
+            {
+                auto along = [&](double t) {
+                    scene::Atmosphere a = sc.atmosphere;
+                    auto lg = [&](double x0, double x1) { return std::exp((1 - t) * std::log(x0) + t * std::log(x1)); };
+                    const double mie = lg(clearState.mie, target.mie), absorption = lg(clearState.absorption, target.absorption);
+                    a.mieScattering = float3{ (float)mie, (float)mie, (float)mie };
+                    a.mieAbsorption = float3{ (float)absorption, (float)absorption, (float)absorption };
+                    a.mieScaleHeight = (float)lg(clearState.height, target.height);
+                    a.mieG = (float)lg(clearState.g, target.g);
+                    a.groundAlbedo = clearState.albedo * (float)(1 - t) + target.albedo * (float)t;
+                    return a;
+                };
+                const double tMid = 0.5;
+                auto tableAt = [&](double t, std::shared_ptr<std::vector<uint8_t>>& trans, atmosphere::AtmosphereParams& pp) {
+                    scene::Scene w = sc;
+                    w.atmosphere = along(t);
+                    tf.setScene(w);
+                    auto out = buildTable({}, pp);
+                    trans = lastTransmittance;
+                    return out;
+                };
+                std::shared_ptr<std::vector<uint8_t>> t0, t1, tm;
+                atmosphere::AtmosphereParams p0, p1, pm;
+                const auto j0 = tableAt(0, t0, p0), j1 = tableAt(1, t1, p1), jm = tableAt(tMid, tm, pm);
+                tf.setScene(sc);
+                // Blend: UNORM16 log texels linearly (exact log-domain interpolation up to rounding), E_ind row in ln.
+                std::vector<uint8_t> jb(*j0), tb(*tm);
+                for (size_t i = 0; i + 1 < jb.size(); i += 2)
+                {
+                    uint16_t a, b;
+                    std::memcpy(&a, j0->data() + i, 2);
+                    std::memcpy(&b, j1->data() + i, 2);
+                    const uint16_t v = (uint16_t)std::lround((1 - tMid) * a + tMid * b);
+                    std::memcpy(jb.data() + i, &v, 2);
+                }
+                const uint32_t tw = pm.transmittanceSize[0], row = pm.transmittanceSize[1], pitch = TestFrame::rowPitch(tw, 16);
+                for (uint32_t x = 0; x < tw; ++x)
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        float a, b;
+                        std::memcpy(&a, t0->data() + (size_t)row * pitch + x * 16 + c * 4, 4);
+                        std::memcpy(&b, t1->data() + (size_t)row * pitch + x * 16 + c * 4, 4);
+                        const float v = (float)std::exp((1 - tMid) * std::log(std::max(a, 1e-30f)) + tMid * std::log(std::max(b, 1e-30f)));
+                        std::memcpy(tb.data() + (size_t)row * pitch + x * 16 + c * 4, &v, 4);
+                    }
+                const ref::Model mm = ref::fromScene(along(tMid));
+                const ref::MsTable M = msTable(*jm, pm), Bl = msTable(jb, pm);
+                auto radianceWith = [&](const ref::MsTable& t, const std::vector<uint8_t>& tl) {
+                    std::vector<ref::D3> out(rays.size() * 3);
+                    std::vector<std::thread> workers;
+                    const unsigned threads = std::max(1u, std::thread::hardware_concurrency() / 2);
+                    for (unsigned w = 0; w < threads; ++w)
+                        workers.emplace_back([&, w] {
+                            auto ms = [&](ref::D3 q, ref::D3 dd, ref::D3 sd) { return msAt(mm, t, q, dd, sd); };
+                            auto ground = [&](double mus) { return ref::groundIndirectLookup(tl, pm.transmittanceSize[0], pm.transmittanceSize[1], mus); };
+                            for (size_t i = w; i < rays.size(); i += threads)
+                            {
+                                const Ray& ry = rays[i];
+                                out[3 * i] = ref::skyRadiance(mm, ry.p, ry.d, ry.sun, ms, ground, 192);
+                                ref::D3 tr;
+                                ref::aerial(mm, ry.p, ry.d, 2000, ry.sun, ms, out[3 * i + 1], tr, 64);
+                                ref::aerial(mm, ry.p, ry.d, 20000, ry.sun, ms, out[3 * i + 2], tr, 128);
+                            }
+                        });
+                    for (auto& w : workers) w.join();
+                    return out;
+                };
+                const std::vector<ref::D3> exact = radianceWith(M, *tm), blended = radianceWith(Bl, tb);
+                double worstRad[3][3] = {};  // [band][path: sky, 2 km, 20 km]
+                for (size_t i = 0; i < exact.size(); ++i)
+                    worstRad[rays[i / 3].band][i % 3] = std::max(worstRad[rays[i / 3].band][i % 3], relErr(blended[i], exact[i], 1e-12));
+                logf("  weather clear -> %s, t %.2f, Mie %.2e: log blend vs exact table\n", target.name, tMid, mm.mieScattering.x);
+                for (int band = 0; band < 3; ++band)
+                    logf("    %s: sky %.2e, air 2 km %.2e, 20 km %.2e\n", band == 0 ? "daylight" : band == 1 ? "civil twilight" : "deeper", worstRad[band][0],
+                         worstRad[band][1], worstRad[band][2]);
+            }
             setQuality({});
             tf.run([&](FramePassContext& fc) { tracks::atmosphere(fc); });  // the configured table again for what follows
         }
