@@ -2,7 +2,7 @@
 // Screen probe radiance maps (K reflection path, ScreenProbes.hlsli), one 64-thread group per map owner
 // (GiProbeMapOwners' list, indirect dispatch 512 x n), thread = texel: the 8 x 8 incident radiance of the cache entry
 // GiProbeGather chose (block texel (5, 3).x), RGB9E5, with the 4 x 4 and 2 x 2 solid-angle-weighted mips, and the
-// header texel (4, 3) = { map frame normal, own block }. A copy per probe cost 0.17 ms at 4K, bandwidth-bound [measured].
+// frame texel (plane 5) = { map frame normal, own block }. A copy per probe cost 0.17 ms at 4K, bandwidth-bound [measured].
 // P[0] = { cache SRV (raw), probes UAV, probesX, probesY }, P[1] = { owner list SRV (raw: count, probe indices), 0, 0, 0 }
 #include "Passes/GI/GiInternal.hlsli"
 
@@ -69,6 +69,6 @@ void main(uint2 group : SV_GroupID, uint texel : SV_GroupIndex)
     if (texel == 5)
     {
         const float3 n = entry != GI_ENTRY_PENDING ? giAnchorNormal(b, h, entry) : float3(0, 0, 1);
-        t[uint2(x + 4, y + 3)] = uint4(giPackNormal(n), probe.x | (probe.y << 16), 0, 0);
+        t[uint2(probe.x + 5 * P[0].z, P[0].w * 4 + probe.y)] = uint4(giPackNormal(n), probe.x | (probe.y << 16), 0, 0);  // plane 5
     }
 }

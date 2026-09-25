@@ -131,7 +131,13 @@ int main(int argc, char** argv)
                     frame.time = f / 165.0;
                     frame.deltaTime = 1 / 165.0f;
                     frame.mainView = view;
-                    renderer->record(graph, frame, graph.createTexture({ "gate output", res.width, res.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM }));
+                    const TextureRef output = graph.createTexture({ "gate output", res.width, res.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
+                    renderer->record(graph, frame, output);
+                    // The output has no reader in a gate: keep its producers (shading) alive like a present would.
+                    graph.addPass("gate.present", QueueType::Graphics, [&](PassBuilder& b) {
+                        b.use(output, Use::SrvCompute);
+                        b.keep();
+                    }, [](PassContext&) {});
                     return;
                 }
                 FrameContext frame;
@@ -201,6 +207,31 @@ int main(int argc, char** argv)
                 gi.record(fc, main, rays);
                 reflSystem = &refl::ReflectionSystem::get(fc);
                 reflSystem->record(fc, main, rays);
+                // The M-facing screen-probe lookups at every pixel, timed alone (ProbeLookupBench.hlsl).
+                {
+                    const TextureRef probesIn = main.screenProbes;
+                    const TextureRef benchOut = graph.createTexture({ "bench probe lookups", res.width, res.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+                    const D3D12_GPU_VIRTUAL_ADDRESS benchConstants = main.frameConstants;
+                    for (uint32_t mode : { 0u, 1u, 2u, 3u, 4u })
+                    {
+                        static const char* const names[5] = { "bench.probe.none", "bench.probe.irradiance", "bench.probe.radiance", "bench.probe.both", "bench.probe.footprint" };
+                        graph.addPass(names[mode], QueueType::Compute,
+                                      [&](PassBuilder& b) {
+                                          b.use(probesIn, Use::SrvCompute);
+                                          b.use(depth, Use::SrvCompute);
+                                          b.use(gbuffer, Use::SrvCompute);
+                                          b.use(benchOut, Use::UavCompute);
+                                          b.keep();
+                                      },
+                                      [&shaders, probesIn, depth, gbuffer, benchOut, benchConstants, mode, res](PassContext& c) {
+                                          const uint32_t k[8] = { c.srv(probesIn), c.srv(depth), c.srv(gbuffer), c.uav(benchOut), mode, res.width, res.height, 0 };
+                                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/Gates/ProbeLookupBench"));
+                                          c.computeConstants(k, 8);
+                                          c.bindFrameConstants(benchConstants);
+                                          c.cmd->Dispatch((res.width + 7) / 8, (res.height + 7) / 8, 1);
+                                      });
+                    }
+                }
                 const TextureRef probes = main.screenProbes, reflection = main.reflection;
                 graph.addPass("standin.consume", QueueType::Compute, [&](PassBuilder& b) {
                     b.use(probes, Use::SrvCompute);
@@ -222,6 +253,13 @@ int main(int argc, char** argv)
             logf("R %s: GI %.3f ms (trace %.3f ms = %.2f G rays/s incl. hit shading), acceleration structures %.3f ms; stand-in primary visibility %.3f ms (not R)\n",
                  res.name.c_str(), giMs, traceMs, traceMs > 0 ? gi::GiSettings::fromQuality(quality).updatesPerFrame * 64 / (traceMs * 1e-3) / 1e9 : 0, asMs,
                  r.passMs.count("standin.primary") ? r.passMs.at("standin.primary").median : 0);
+            if (!renderer)
+                logf("R %s: M-facing probe lookups at every pixel: irradiance %.3f ms, K radiance %.3f ms, both %.3f ms, footprint alone %.3f ms (lookup-free kernel %.3f ms)\n", res.name.c_str(),
+                     r.passMs.count("bench.probe.irradiance") ? r.passMs.at("bench.probe.irradiance").median : 0,
+                     r.passMs.count("bench.probe.radiance") ? r.passMs.at("bench.probe.radiance").median : 0,
+                     r.passMs.count("bench.probe.both") ? r.passMs.at("bench.probe.both").median : 0,
+                     r.passMs.count("bench.probe.footprint") ? r.passMs.at("bench.probe.footprint").median : 0,
+                     r.passMs.count("bench.probe.none") ? r.passMs.at("bench.probe.none").median : 0);
             if (reflSystem)
             {
                 const refl::ReflectionSystem::Stats rs = reflSystem->readStats();

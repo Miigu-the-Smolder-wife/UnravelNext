@@ -251,25 +251,27 @@ uint giPackRgb9e5(float3 c)
 }
 
 // Probe record (ScreenProbes.hlsli decodes it): block (8i .. 8i+7, 4j .. 4j+3), record in row 0 texels 0-3.
-void giStoreProbe(RWTexture2D<uint4> t, uint2 probe, float3 c[9], float linearDepth, float3 normal, float occlusion, uint2 offset, bool valid)
+// Probe record (ScreenProbes.hlsli): plane 0 = { world position (fp32 x 3), octahedral normal (0 = no surface) }, the
+// footprint's only read; planes 1-4 = 27 fp16 SH coefficients x GI_STORE_SCALE and unorm16 occlusion.
+void giStoreProbe(RWTexture2D<uint4> t, uint2 probe, uint2 count, float3 c[9], float3 position, float3 normal, float occlusion, bool valid)
 {
-    float v[28];
+    float v[27];
     [unroll] for (uint k = 0; k < 9; ++k)
     {
         v[3 * k] = c[k].r * GI_STORE_SCALE;
         v[3 * k + 1] = c[k].g * GI_STORE_SCALE;
         v[3 * k + 2] = c[k].b * GI_STORE_SCALE;
     }
-    v[27] = linearDepth;
-    uint w[16];
-    [unroll] for (uint i = 0; i < 14; ++i) w[i] = giPackHalf2(v[2 * i], v[2 * i + 1]);
-    w[14] = giPackNormal(normal);
-    w[15] = (uint(round(saturate(occlusion) * 65535.0)) & 0xFFFFu) | ((offset.x & 7u) << 16) | ((offset.y & 7u) << 19) | (valid ? (1u << 22) : 0u);
-    const uint x = probe.x * 8, y = probe.y * 4;
-    t[uint2(x, y)] = uint4(w[0], w[1], w[2], w[3]);
-    t[uint2(x + 1, y)] = uint4(w[4], w[5], w[6], w[7]);
-    t[uint2(x + 2, y)] = uint4(w[8], w[9], w[10], w[11]);
-    t[uint2(x + 3, y)] = uint4(w[12], w[13], w[14], w[15]);
+    uint w[14];
+    [unroll] for (uint i = 0; i < 13; ++i) w[i] = giPackHalf2(v[2 * i], v[2 * i + 1]);
+    w[13] = (f32tof16(v[26]) & 0xFFFFu) | (uint(round(saturate(occlusion) * 65535.0)) << 16);
+    const uint normalWord = valid ? max(giPackNormal(normal), 1u) : 0u;
+    const uint y = count.y * 4 + probe.y;
+    t[uint2(probe.x, y)] = uint4(asuint(position.x), asuint(position.y), asuint(position.z), normalWord);
+    t[uint2(probe.x + count.x, y)] = uint4(w[0], w[1], w[2], w[3]);
+    t[uint2(probe.x + 2 * count.x, y)] = uint4(w[4], w[5], w[6], w[7]);
+    t[uint2(probe.x + 3 * count.x, y)] = uint4(w[8], w[9], w[10], w[11]);
+    t[uint2(probe.x + 4 * count.x, y)] = uint4(w[12], w[13], 0, 0);
 }
 
 // Solid angle weight of texel (x, y) of an n x n hemispherical octahedral map (midpoint of 2 dA_uv / |v|^3).

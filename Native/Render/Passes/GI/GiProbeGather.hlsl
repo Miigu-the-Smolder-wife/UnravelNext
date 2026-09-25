@@ -47,7 +47,7 @@ void main(uint2 probe : SV_DispatchThreadID)
     RWTexture2D<uint4> probes = ResourceDescriptorHeap[P[0].w];
     if (all(probe == 0))
     {
-        probes[uint2(0, count.y * 4)] = uint4(spacing, count.x, count.y, 0);
+        probes[uint2(0, count.y * 5)] = uint4(spacing, count.x, count.y, 0);
         RWByteAddressBuffer list = ResourceDescriptorHeap[P[2].z];
         RWByteAddressBuffer args = ResourceDescriptorHeap[P[2].w];
         list.Store(0, 0u);
@@ -64,7 +64,7 @@ void main(uint2 probe : SV_DispatchThreadID)
     if (!giProbePixel(depth, probe, spacing, size, offset, d))
     {
         [unroll] for (uint k = 0; k < 9; ++k) c[k] = 0;
-        giStoreProbe(probes, probe, c, 0, float3(0, 0, 1), 1, offset, false);
+        giStoreProbe(probes, probe, count, c, float3(0, 0, 0), float3(0, 0, 1), 1, false);
         probes[uint2(probe.x * 8 + 5, probe.y * 4 + 3)] = uint4(GI_ENTRY_PENDING, 0, 0, 0);  // radiance map source (GiProbeMaps)
         return;
     }
@@ -77,5 +77,5 @@ void main(uint2 probe : SV_DispatchThreadID)
     if (mapEntry != GI_ENTRY_PENDING) b.InterlockedMin(b.Load(GI_H_MAP_OWNER) + mapEntry * 4, probe.y * count.x + probe.x);
     const float radius = min(asfloat(P[2].y), giCellSize(h, giLevel(h, p)));
     const float occlusion = nearOcclusion(depth, p + n * (1e-3 * linearDepth(d)), n, radius, probe.x * 7919u + probe.y * 104729u, size);
-    giStoreProbe(probes, probe, c, linearDepth(d), n, occlusion, offset, true);
+    giStoreProbe(probes, probe, count, c, p, n, occlusion, true);
 }

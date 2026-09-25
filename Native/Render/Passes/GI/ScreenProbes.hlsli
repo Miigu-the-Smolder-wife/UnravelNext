@@ -9,14 +9,19 @@
 // Use: ProbeSrvs{ c.srv(view.screenProbes), c.srv(view.screenProbes), 0, 0 } (both fields: the one texture; the pass
 // declares view.screenProbes SrvCompute) with the main view's frame constants bound (b1).
 //
-// Texture: RGBA32_UINT, (probesX * 8) x (probesY * 4 + 1). Probe (i, j) is the block of texels (8i .. 8i+7, 4j .. 4j+3):
-//   row 0: texels 0-3 = record (27 fp16 irradiance SH coefficients x GI_STORE_SCALE + fp16 linear depth, octahedral
-//          normal, occlusion unorm16 | pixel offset in the tile (3+3 bits) | valid), texel 4 = the 2 x 2 mip (RGB9E5 x 4)
-//   rows 1-2: the 8 x 8 map, 4 RGB9E5 texels per RGBA32 texel, row-major
-//   row 3: texels 0-3 = the 4 x 4 mip, texel 4 = { the map's frame normal (octahedral), map block: probe x | y << 16 }
-// The map (rows 1-2, row 3 texels 0-3, row 0 texel 4) is written once per cache entry, in the block of the lowest probe
-// reading that entry; other probes' map texels are stale and are reached through texel (4, 3).y.
-// Last row, texel 0 = { spacing px, probesX, probesY, 0 }. Radiance values are x GI_STORE_SCALE (1/64).
+// Texture: RGBA32_UINT, (probesX * 8) x (probesY * 5 + 1).
+//   Records in five planes of probesX x probesY texels (rows 4 probesY .. 5 probesY - 1, plane k at columns
+//   k probesX ..), so a pixel's four neighbouring probes are neighbouring texels:
+//     plane 0: { world position (fp32 x 3), octahedral normal, 0 = no surface } (the footprint's only read)
+//     planes 1-4: 27 fp16 irradiance SH coefficients x GI_STORE_SCALE, then unorm16 occlusion (words 0-13)
+//     plane 5: { the radiance map's frame normal (octahedral), map block: probe x | y << 16 }
+//   Radiance maps, probe (i, j) = the block of texels (8i .. 8i+7, 4j .. 4j+3):
+//     row 0: texel 4 = the 2 x 2 mip (RGB9E5 x 4)
+//     rows 1-2: the 8 x 8 map, 4 RGB9E5 texels per RGBA32 texel, row-major
+//     row 3: texels 0-3 = the 4 x 4 mip, texel 5 = the cache entry the map comes from (GiProbeGather -> GiProbeMaps)
+//   The map is written once per cache entry, in the block of the lowest probe reading that entry; other probes' map
+//   texels are stale and are reached through plane 5's block.
+// Last row (5 probesY), texel 0 = { spacing px, probesX, probesY, 0 }. Radiance values are x GI_STORE_SCALE (1/64).
 #ifndef UNX_GI_SCREENPROBES_HLSLI
 #define UNX_GI_SCREENPROBES_HLSLI
 #include "Bindless.hlsli"
@@ -30,12 +35,9 @@ struct ProbeSrvs
 struct GiProbeRecord
 {
     float3 sh[9];
-    float linearDepth;
-    float3 normal;
     float occlusion;
-    uint2 offset;  // probe pixel within its tile
-    bool valid;
 };
+
 
 float3 giProbeOctDecode(uint packed)
 {
@@ -47,26 +49,32 @@ float3 giProbeOctDecode(uint packed)
 
 float3 giUnpackRgb9e5(uint v)
 {
-    const float scale = exp2((float)(v >> 27) - 24.0);  // bias 15, 9-bit mantissa
+    const float scale = asfloat(((v >> 27) + 103u) << 23);  // 2^(e - 24) exactly (bias 15, 9-bit mantissa): no exp2
     return float3(v & 0x1FFu, (v >> 9) & 0x1FFu, (v >> 18) & 0x1FFu) * scale;
 }
 
-GiProbeRecord giLoadProbeRecord(Texture2D<uint4> t, uint2 probe)
+// The footprint's part of a probe record: world position and normal; false when the probe has no surface.
+bool giLoadProbeSurface(Texture2D<uint4> t, uint2 probe, int2 count, out float3 position, out float3 normal)
 {
-    const uint x = probe.x * 8, y = probe.y * 4;
-    const uint4 a = t.Load(int3(x, y, 0)), b = t.Load(int3(x + 1, y, 0)), c = t.Load(int3(x + 2, y, 0)), d = t.Load(int3(x + 3, y, 0));
-    const uint w[16] = { a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w, c.x, c.y, c.z, c.w, d.x, d.y, d.z, d.w };
+    const uint4 a = t.Load(int3(probe.x, count.y * 4 + probe.y, 0));
+    position = asfloat(a.xyz);
+    normal = giProbeOctDecode(a.w);
+    return a.w != 0;
+}
+
+GiProbeRecord giLoadProbeRecord(Texture2D<uint4> t, uint2 probe, int2 count)
+{
+    const int y = count.y * 4 + probe.y;
+    const uint4 a = t.Load(int3(probe.x + count.x, y, 0)), b = t.Load(int3(probe.x + 2 * count.x, y, 0)), c = t.Load(int3(probe.x + 3 * count.x, y, 0)),
+                d = t.Load(int3(probe.x + 4 * count.x, y, 0));
+    const uint w[14] = { a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w, c.x, c.y, c.z, c.w, d.x, d.y };
     GiProbeRecord r;
     [unroll] for (uint k = 0; k < 9; ++k)
     {
         const uint i0 = 3 * k, i1 = 3 * k + 1, i2 = 3 * k + 2;
         r.sh[k] = float3(f16tof32(w[i0 >> 1] >> ((i0 & 1) * 16)), f16tof32(w[i1 >> 1] >> ((i1 & 1) * 16)), f16tof32(w[i2 >> 1] >> ((i2 & 1) * 16))) * 64.0;  // GI_LOAD_SCALE
     }
-    r.linearDepth = f16tof32(w[13] >> 16);
-    r.normal = giProbeOctDecode(w[14]);
-    r.occlusion = (w[15] & 0xFFFFu) / 65535.0;
-    r.offset = uint2((w[15] >> 16) & 7u, (w[15] >> 19) & 7u);
-    r.valid = (w[15] & (1u << 22)) != 0;
+    r.occlusion = (w[13] >> 16) / 65535.0;
     return r;
 }
 
@@ -79,47 +87,47 @@ float3 giEvalShIrradiance(float3 sh[9], float3 n)
     return max(e, 0.0);
 }
 
-// Radiance texel (tx, ty) of mip 'level' (0 = 8 x 8, 1 = 4 x 4, 2 = 2 x 2) of a probe, x GI_STORE_SCALE.
-float3 giProbeMapTexel(Texture2D<uint4> t, uint2 probe, uint level, uint2 texel)
+// Bilinear radiance of a probe's map at mip 'level' for hemispherical octahedral coordinates uv (clamp to edge),
+// x GI_STORE_SCALE. Each packed RGBA32 texel is loaded once: mip 2 (2 x 2) is one texel, a mip 1 row (4 texels) is one
+// texel, a mip 0 row (8 texels) two; the taps pick their components.
+float3 giProbeMapBilinear(Texture2D<uint4> t, uint2 probe, uint level, float2 uv)
 {
     const uint x = probe.x * 8, y = probe.y * 4;
-    uint index, packed;
-    if (level == 0)
+    const uint n = 8u >> level;
+    const float2 f0 = uv * n - 0.5;
+    const int2 i0 = int2(floor(f0));
+    const float2 f = f0 - floor(f0);
+    const uint2 a = uint2(clamp(i0, 0, int(n) - 1)), b = uint2(clamp(i0 + 1, 0, int(n) - 1));
+    uint p00, p10, p01, p11;
+    if (level == 2)
     {
-        index = texel.y * 8 + texel.x;
-        const uint4 v = t.Load(int3(x + (index >> 2) % 8, y + 1 + (index >> 5), 0));
-        packed = v[index & 3];
+        const uint4 v = t.Load(int3(x + 4, y, 0));  // texel index ty * 2 + tx
+        p00 = v[a.y * 2 + a.x];
+        p10 = v[a.y * 2 + b.x];
+        p01 = v[b.y * 2 + a.x];
+        p11 = v[b.y * 2 + b.x];
     }
     else if (level == 1)
     {
-        index = texel.y * 4 + texel.x;
-        const uint4 v = t.Load(int3(x + (index >> 2), y + 3, 0));
-        packed = v[index & 3];
+        const uint4 r0 = t.Load(int3(x + a.y, y + 3, 0)), r1 = t.Load(int3(x + b.y, y + 3, 0));  // row ty, component tx
+        p00 = r0[a.x];
+        p10 = r0[b.x];
+        p01 = r1[a.x];
+        p11 = r1[b.x];
     }
     else
     {
-        index = texel.y * 2 + texel.x;
-        const uint4 v = t.Load(int3(x + 4, y, 0));
-        packed = v[index & 3];
+        // Row ty is the two packed texels (x + 2 ty % 8 + g, y + 1 + ty / 4), g = tx / 4, component tx % 4.
+        const uint4 r0a = t.Load(int3(x + (a.y * 2) % 8 + (a.x >> 2), y + 1 + (a.y >> 2), 0));
+        const uint4 r0b = t.Load(int3(x + (a.y * 2) % 8 + (b.x >> 2), y + 1 + (a.y >> 2), 0));
+        const uint4 r1a = t.Load(int3(x + (b.y * 2) % 8 + (a.x >> 2), y + 1 + (b.y >> 2), 0));
+        const uint4 r1b = t.Load(int3(x + (b.y * 2) % 8 + (b.x >> 2), y + 1 + (b.y >> 2), 0));
+        p00 = r0a[a.x & 3];
+        p10 = r0b[b.x & 3];
+        p01 = r1a[a.x & 3];
+        p11 = r1b[b.x & 3];
     }
-    return giUnpackRgb9e5(packed);
-}
-
-// Bilinear radiance of a probe's map at mip 'level' for hemispherical octahedral coordinates uv.
-float3 giProbeMapBilinear(Texture2D<uint4> t, uint2 probe, uint level, float2 uv)
-{
-    const uint n = 8u >> level;
-    const float2 x = uv * n - 0.5;
-    const int2 i0 = int2(floor(x));
-    const float2 f = x - floor(x);
-    float3 r = 0;
-    [unroll] for (uint k = 0; k < 4; ++k)
-    {
-        const int2 o = int2(k & 1, k >> 1);
-        const uint2 tx = uint2(clamp(i0 + o, 0, int(n) - 1));
-        r += ((o.x ? f.x : 1 - f.x) * (o.y ? f.y : 1 - f.y)) * giProbeMapTexel(t, probe, level, tx);
-    }
-    return r;
+    return lerp(lerp(giUnpackRgb9e5(p00), giUnpackRgb9e5(p10), f.x), lerp(giUnpackRgb9e5(p01), giUnpackRgb9e5(p11), f.x), f.y);
 }
 
 // Four surrounding probes and their weights for a pixel (plane distance and normal agreement); false when none agrees
@@ -149,21 +157,20 @@ GiProbeFootprint giProbeFootprint(Texture2D<uint4> t, uint2 pixel, float3 normal
         const int2 p = clamp(i0 + o, int2(0, 0), count - 1);
         fp.probe[k] = p;
         fp.weight[k] = 0;
-        const GiProbeRecord r = giLoadProbeRecord(t, uint2(p));
-        if (!r.valid) continue;
-        const float2 probePixel = float2(p) * spacing + float2(r.offset);
-        const float3 probeWorld = worldFromDepth(probePixel, g_nearPlane / max(r.linearDepth, 1e-6));
-        const float plane = abs(dot(normal, probeWorld - pixelWorld)) / max(linearDepth, 1e-6);
-        const float wPlane = pow(saturate(1 - plane / 0.02), 2);
-        const float wNormal = pow(saturate(dot(normal, r.normal)), 4);
-        fp.weight[k] = (o.x ? fr.x : 1 - fr.x) * (o.y ? fr.y : 1 - fr.y) * wPlane * wNormal;
+        float3 probeWorld, probeNormal;
+        if (!giLoadProbeSurface(t, uint2(p), count, probeWorld, probeNormal)) continue;
+        const float plane = saturate(1 - abs(dot(normal, probeWorld - pixelWorld)) / max(linearDepth, 1e-6) / 0.02);
+        const float agree = saturate(dot(normal, probeNormal));
+        const float agree2 = agree * agree;
+        fp.weight[k] = (o.x ? fr.x : 1 - fr.x) * (o.y ? fr.y : 1 - fr.y) * (plane * plane) * (agree2 * agree2);
         total += fp.weight[k];
     }
     if (total < 1e-4)
     {
         const int2 own = clamp(int2(pixel / (uint)spacing), int2(0, 0), count - 1);
         fp.probe[0] = own;
-        fp.weight[0] = giLoadProbeRecord(t, uint2(own)).valid ? 1 : 0;
+        float3 ownWorld, ownNormal;
+        fp.weight[0] = giLoadProbeSurface(t, uint2(own), count, ownWorld, ownNormal) ? 1 : 0;
         fp.weight[1] = fp.weight[2] = fp.weight[3] = 0;
         total = fp.weight[0];
     }
@@ -183,11 +190,49 @@ float4 screenProbeIrradiance(ProbeSrvs s, uint2 pixel, float3 normal, float line
     [unroll] for (uint k = 0; k < 4; ++k)
     {
         if (fp.weight[k] <= 0) continue;
-        const GiProbeRecord r = giLoadProbeRecord(t, uint2(fp.probe[k]));
+        const GiProbeRecord r = giLoadProbeRecord(t, uint2(fp.probe[k]), count);
         sum += fp.weight[k] * float4(giEvalShIrradiance(r.sh, normal), r.occlusion);
         any = true;
     }
     return any ? sum : float4(0, 0, 0, 1);
+}
+
+// The K path over a footprint. Probes that read the same cache entry share one map block (GiProbeMapOwners): their
+// weights are merged and each distinct block is looked up once. The second mip is read only when it differs from the
+// first (fractional level below the top mip).
+float3 giProbeFootprintRadiance(Texture2D<uint4> t, GiProbeFootprint fp, int2 count, float3 dir, float coneHalfAngle)
+{
+    const float lod = clamp(log2(max(coneHalfAngle, 1e-3) / (1.5 * 0.1763)), 0.0, 2.0);  // 0.1763 rad = 10.1 deg
+    const uint l0 = (uint)floor(lod), l1 = min(l0 + 1, 2u);
+    const float fl = lod - l0;
+    uint2 frame[4];
+    [unroll] for (uint k = 0; k < 4; ++k)
+        frame[k] = fp.weight[k] > 0 ? t.Load(int3(fp.probe[k].x + 5 * count.x, count.y * 4 + fp.probe[k].y, 0)).xy : uint2(0, 0xFFFFFFFFu);
+    float3 sum = 0;
+    [unroll] for (uint k = 0; k < 4; ++k)
+    {
+        if (fp.weight[k] <= 0) continue;
+        bool seen = false;
+        [unroll] for (uint j = 0; j < k; ++j) seen = seen || (fp.weight[j] > 0 && frame[j].y == frame[k].y);
+        if (seen) continue;
+        float w = fp.weight[k];
+        [unroll] for (uint j = k + 1; j < 4; ++j)
+            if (fp.weight[j] > 0 && frame[j].y == frame[k].y) w += fp.weight[j];
+        const float3 n = giProbeOctDecode(frame[k].x);
+        const uint2 block = uint2(frame[k].y & 0xFFFFu, frame[k].y >> 16);
+        const float sgn = n.z >= 0 ? 1.0 : -1.0;  // Duff et al. 2017 basis (GiCache.hlsli giBasis)
+        const float a = -1.0 / (sgn + n.z);
+        const float c = n.x * n.y * a;
+        const float3 tb = float3(1 + sgn * n.x * n.x * a, sgn * c, -sgn * n.x);
+        const float3 bb = float3(c, sgn + n.y * n.y * a, -n.y);
+        const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
+        const float3 v = local / (abs(local.x) + abs(local.y) + local.z);
+        const float2 uv = float2(v.x + v.y, v.x - v.y) * 0.5 + 0.5;
+        float3 r = giProbeMapBilinear(t, block, l0, uv);
+        if (fl > 0 && l1 != l0) r = lerp(r, giProbeMapBilinear(t, block, l1, uv), fl);
+        sum += w * r;
+    }
+    return sum * 64.0;  // GI_LOAD_SCALE
 }
 
 // Incident radiance (nits) from 'dir' prefiltered by a cone of half-angle coneHalfAngle (radians): the K reflection path
@@ -200,29 +245,7 @@ float3 screenProbeRadiance(ProbeSrvs s, uint2 pixel, float3 normal, float linear
     float spacing;
     int2 count;
     const GiProbeFootprint fp = giProbeFootprint(t, pixel, normal, linearDepth, spacing, count);
-    const float lod = clamp(log2(max(coneHalfAngle, 1e-3) / (1.5 * 0.1763)), 0.0, 2.0);  // 0.1763 rad = 10.1 deg
-    const uint l0 = (uint)floor(lod), l1 = min(l0 + 1, 2u);
-    const float fl = lod - l0;
-    float3 sum = 0;
-    [unroll] for (uint k = 0; k < 4; ++k)
-    {
-        if (fp.weight[k] <= 0) continue;
-        const uint2 p = uint2(fp.probe[k]);
-        const uint2 frame = t.Load(int3(p.x * 8 + 4, p.y * 4 + 3, 0)).xy;
-        const float3 n = giProbeOctDecode(frame.x);
-        const uint2 block = uint2(frame.y & 0xFFFFu, frame.y >> 16);
-        const float sgn = n.z >= 0 ? 1.0 : -1.0;  // Duff et al. 2017 basis (GiCache.hlsli giBasis)
-        const float a = -1.0 / (sgn + n.z);
-        const float c = n.x * n.y * a;
-        const float3 tb = float3(1 + sgn * n.x * n.x * a, sgn * c, -sgn * n.x);
-        const float3 bb = float3(c, sgn + n.y * n.y * a, -n.y);
-        const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
-        const float3 v = local / (abs(local.x) + abs(local.y) + local.z);
-        const float2 uv = float2(v.x + v.y, v.x - v.y) * 0.5 + 0.5;
-        const float3 r0 = giProbeMapBilinear(t, block, l0, uv), r1 = giProbeMapBilinear(t, block, l1, uv);
-        sum += fp.weight[k] * lerp(r0, r1, fl);
-    }
-    return sum * 64.0;  // GI_LOAD_SCALE
+    return giProbeFootprintRadiance(t, fp, count, dir, coneHalfAngle);
 }
 
 #endif

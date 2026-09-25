@@ -1,6 +1,6 @@
 // unx-kernel: cs_6_6 main
 // Radiance map owners (ScreenProbes.hlsli): thread per probe. Neighbouring probes mostly share a cache entry; the entry's
-// owner (lowest probe index reading it, GiProbeGather) gets the map copy, every other probe only its header texel (4, 3) =
+// owner (lowest probe index reading it, GiProbeGather) gets the map copy, every other probe only its frame texel (plane 5) =
 // { map frame normal, owner probe x | y << 16 }. Owners (and probes without an entry, whose map is zero) are appended
 // (one atomic per wave) to the list GiProbeMaps runs over indirectly: args = { 512, ceil(owners / 512), 1 }.
 // P[0] = { cache SRV (raw), probes UAV, probesX, probesY }, P[1] = { owner list UAV (raw: count, then probe indices),
@@ -21,7 +21,7 @@ void main(uint2 probe : SV_DispatchThreadID)
         const uint self = probe.y * P[0].z + probe.x;
         const uint owner = entry != GI_ENTRY_PENDING ? b.Load(b.Load(GI_H_MAP_OWNER) + entry * 4) : self;
         owns = owner == self;
-        if (!owns) t[uint2(probe.x * 8 + 4, probe.y * 4 + 3)] = uint4(giPackNormal(giAnchorNormal(b, h, entry)), (owner % P[0].z) | ((owner / P[0].z) << 16), 0, 0);
+        if (!owns) t[uint2(probe.x + 5 * P[0].z, P[0].w * 4 + probe.y)] = uint4(giPackNormal(giAnchorNormal(b, h, entry)), (owner % P[0].z) | ((owner / P[0].z) << 16), 0, 0);
     }
     const uint n = WaveActiveCountBits(owns);
     if (n == 0) return;
