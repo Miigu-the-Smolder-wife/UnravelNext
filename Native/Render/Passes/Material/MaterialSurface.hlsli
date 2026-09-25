@@ -44,26 +44,62 @@ struct MSurface
     float3 bary, baryDx, baryDy;
 };
 
-MSurface mSurfaceFromVis(uint visId, uint visibleClustersSrv, float2 pixelPos)
+// One deformed vertex of the triangle a vis id names (camera-relative position, world normal and tangent, uv).
+struct MVertex
 {
-    MSurface s;
+    float3 world;        // world position (edges are differences of these; the camera enters once, in r0)
+    float3 normal;       // world, unit
+    float3 tangent;      // world, unit
+    float2 uv;
+    float tangentSign;
+};
+
+struct MTriangleIdentity
+{
+    uint instance, cluster, material;
+};
+
+MTriangleIdentity mTriangleIdentity(uint visId, uint visibleClustersSrv)
+{
+    const GpuVisibleCluster vc = loadVisibleCluster(visibleClustersSrv, visVisibleCluster(visId));
+    MTriangleIdentity id;
+    id.instance = vc.instance;
+    id.cluster = vc.cluster;
+    id.material = clusterMaterial(loadInstance(vc.instance), loadCluster(vc.cluster));
+    return id;
+}
+
+MVertex mTriangleVertex(uint visId, uint visibleClustersSrv, uint corner)
+{
     const GpuVisibleCluster vc = loadVisibleCluster(visibleClustersSrv, visVisibleCluster(visId));
     const GpuInstance inst = loadInstance(vc.instance);
     const GpuCluster c = loadCluster(vc.cluster);
     const GpuMesh mesh = loadMesh(inst.mesh);
-    s.instance = vc.instance;
-    s.cluster = vc.cluster;
-    s.material = clusterMaterial(inst, c);
     const uint3 tri = loadClusterTriangle(c, visTriangle(visId));
-    const DeformedVertex d0 = deformVertex(inst, mesh, tri.x);
-    const DeformedVertex d1 = deformVertex(inst, mesh, tri.y);
-    const DeformedVertex d2 = deformVertex(inst, mesh, tri.z);
-    const VertexData v0 = loadVertex(mesh, tri.x), v1 = loadVertex(mesh, tri.y), v2 = loadVertex(mesh, tri.z);
+    const uint meshVertex = corner == 0 ? tri.x : (corner == 1 ? tri.y : tri.z);
+    const DeformedVertex d = deformVertex(inst, mesh, meshVertex);
+    const VertexData v = loadVertex(mesh, meshVertex);
+    MVertex o;
+    o.world = d.world;
+    o.normal = d.normal;
+    o.tangent = d.tangent;
+    o.uv = v.uv;
+    o.tangentSign = v.tangentSign;
+    return o;
+}
+
+// The surface of a triangle (three deformed vertices) under the pixel-centre ray.
+MSurface mSurfaceFromVertices(MTriangleIdentity id, MVertex v0, MVertex v1, MVertex v2, float2 pixelPos)
+{
+    MSurface s;
+    s.instance = id.instance;
+    s.cluster = id.cluster;
+    s.material = id.material;
 
     float3 D, Dx, Dy;
     mPixelRay(pixelPos, D, Dx, Dy);
-    const float3 r0 = d0.world - g_cameraPosition;
-    const float3 e1 = d1.world - d0.world, e2 = d2.world - d0.world;
+    const float3 r0 = v0.world - g_cameraPosition;
+    const float3 e1 = v1.world - v0.world, e2 = v2.world - v0.world;
     const float3 n = cross(e1, e2);
     const float nD = dot(n, D);
     const float t = dot(n, r0) / nD;
@@ -85,17 +121,23 @@ MSurface mSurfaceFromVis(uint visId, uint visibleClustersSrv, float2 pixelPos)
     s.duvdx = s.baryDx.x * v0.uv + s.baryDx.y * v1.uv + s.baryDx.z * v2.uv;
     s.duvdy = s.baryDy.x * v0.uv + s.baryDy.y * v1.uv + s.baryDy.z * v2.uv;
 
-    s.normal = s.bary.x * d0.normal + s.bary.y * d1.normal + s.bary.z * d2.normal;
-    const float3 nx = s.baryDx.x * d0.normal + s.baryDx.y * d1.normal + s.baryDx.z * d2.normal;
-    const float3 ny = s.baryDy.x * d0.normal + s.baryDy.y * d1.normal + s.baryDy.z * d2.normal;
+    s.normal = s.bary.x * v0.normal + s.bary.y * v1.normal + s.bary.z * v2.normal;
+    const float3 nx = s.baryDx.x * v0.normal + s.baryDx.y * v1.normal + s.baryDx.z * v2.normal;
+    const float3 ny = s.baryDy.x * v0.normal + s.baryDy.y * v1.normal + s.baryDy.z * v2.normal;
     const float len = length(s.normal);
     const float3 nh = s.normal / len;
     s.dndx = (nx - nh * dot(nh, nx)) / len;
     s.dndy = (ny - nh * dot(nh, ny)) / len;
 
-    s.tangent = s.bary.x * d0.tangent + s.bary.y * d1.tangent + s.bary.z * d2.tangent;
+    s.tangent = s.bary.x * v0.tangent + s.bary.y * v1.tangent + s.bary.z * v2.tangent;
     s.tangentSign = v0.tangentSign;
     return s;
+}
+
+MSurface mSurfaceFromVis(uint visId, uint visibleClustersSrv, float2 pixelPos)
+{
+    return mSurfaceFromVertices(mTriangleIdentity(visId, visibleClustersSrv), mTriangleVertex(visId, visibleClustersSrv, 0),
+                                mTriangleVertex(visId, visibleClustersSrv, 1), mTriangleVertex(visId, visibleClustersSrv, 2), pixelPos);
 }
 
 #endif
