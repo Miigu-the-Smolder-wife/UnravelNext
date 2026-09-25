@@ -139,7 +139,11 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     // Air volume: in-scattering, optical depth, sun transmittance; nodes 0..S each (FroxelIntegrate.hlsl).
     const TextureRef volume = g.createTexture(TextureDesc{ suffix.empty() ? "S air volume" : "S air volume (planar view)", grid.gridX, grid.gridY, (uint16_t)(3 * (grid.slices + 1) + 1), 1,
                                                            DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D });
-    const float stepAltitude = (float)q.number("atmosphere.froxels.air_step_altitude_m");
+    // Substep altitude: the configured bound, and at most 1/12 of the medium's shortest scale height (midpoint error
+    // (dh / H)^2 / 24 <= 0.03 %: mist with H_Mie 300 m steps at 25 m).
+    const scene::Atmosphere medium = fc.scene.source() ? fc.scene.source()->atmosphere : scene::Atmosphere{};
+    const float stepAltitude = std::min((float)q.number("atmosphere.froxels.air_step_altitude_m"),
+                                        std::min(medium.rayleighScaleHeight, medium.mieScaleHeight) / 12.0f);
     const uint32_t experiment = (uint32_t)q.integer("atmosphere.froxels.experiment_disable");  // cost attribution only
     if (!(stepAltitude > 0)) fail("atmosphere.froxels.air_step_altitude_m must be > 0");
     const bool walkStats = q.integer("atmosphere.froxels.walk_stats") != 0;  // measurement only

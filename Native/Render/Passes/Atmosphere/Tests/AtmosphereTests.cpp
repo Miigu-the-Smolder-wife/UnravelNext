@@ -1,7 +1,8 @@
 // S atmosphere correctness (no GPU lock): every LUT and every public lookup against the double-precision reference
 // (AtmosphereReference.h), quadrature convergence of the configured counts, determinism, and the rebuild policy.
 //   unx_test_atmosphere_atmospheretests [--no-debug-layer] [--set key=value ...] [--cases TEXT]
-//   --set: the configuration under test; --cases: only the J_ms convergence cases whose name contains TEXT (experiments)
+//   --set: the configuration under test; --cases: only the J_ms convergence cases whose name contains TEXT (experiments);
+//   --medium clear|rain|mist: the medium under test (RPP-1 draft weather states)
 #include "TestFrame.h"
 
 #include "AtmosphereReference.h"
@@ -61,13 +62,14 @@ int main(int argc, char** argv)
     {
         bool debugLayer = true;
         std::vector<std::string> baseOverrides;
-        std::string casesFilter;
+        std::string casesFilter, medium = "clear";  // --medium rain|mist: the RPP-1 draft states as the medium under test
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
             if (a == "--no-debug-layer") debugLayer = false;
             else if (a == "--set" && i + 1 < argc) baseOverrides.push_back(argv[++i]);
             else if (a == "--cases" && i + 1 < argc) casesFilter = argv[++i];
+            else if (a == "--medium" && i + 1 < argc) medium = argv[++i];
             else fail("unknown argument %s", a.c_str());
         }
         TestFrame tf(debugLayer);
@@ -76,6 +78,17 @@ int main(int argc, char** argv)
         scene::Scene sc;
         sc.name = "atmosphere test";
         sc.sun.direction = normalize(float3{ 0.55f, 0.25f, 0.2f });  // low sun: long paths, strong horizon gradients
+        if (medium == "rain" || medium == "mist")
+        {
+            const bool rain = medium == "rain";
+            const float mie = rain ? 9.27e-4f : 9.76e-4f, absorption = rain ? 2.7e-5f : 2.0e-6f;
+            sc.atmosphere.mieScattering = float3{ mie, mie, mie };
+            sc.atmosphere.mieAbsorption = float3{ absorption, absorption, absorption };
+            sc.atmosphere.mieScaleHeight = rain ? 1200.0f : 300.0f;
+            sc.atmosphere.mieG = rain ? 0.829f : 0.85f;
+            sc.atmosphere.groundAlbedo = rain ? float3{ 0.050f, 0.078f, 0.042f } : float3{ 0.055f, 0.085f, 0.046f };
+        }
+        else if (medium != "clear") fail("--medium clear|rain|mist");
         scene::Camera cam;
         cam.name = "main";
         cam.position = { 3, 1.7f, -2 };
