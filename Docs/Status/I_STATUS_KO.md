@@ -189,8 +189,22 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
 
 | | GPU 프레임 중앙값 | P95 | 호스트 갱신 호출(변환 1,024 + 포즈 256 + 큐) | CPU 기록 / 제출 |
 |---|---|---|---|---|
-| 4K | **8.27 ms** | 10.77 | 0.140 ms | 0.69 / 0.08 ms |
-| 1440p | **5.79 ms** | 6.51 | 0.134 ms | 0.69 / 0.08 ms |
+| 4K (11:23, 프록시 전) | 8.27 ms | 10.77 | 0.140 ms | 0.69 / 0.08 ms |
+| 1440p (11:23) | 5.79 ms | 6.51 | 0.134 ms | 0.69 / 0.08 ms |
+| **4K (13:04, d3701c7 커밋 빌드)** | **4.69 ms** | 5.26 (P99 5.56, 최대 6.15) | 0.165 ms | 0.80 / 0.09 ms |
+| **1440p (13:04)** | **3.08 ms** | 3.55 (P99 3.78) | 0.143 ms | 0.70 / 0.07 ms |
+
+13:04 실행[실측]: 커밋 기준 빌드(`-Track all -Committed`, 다른 트랙의 작업 중 파일 없음), 게임 종료 뒤, 첫 프레임 제외 수정 뒤, 호스트는
+`UnxFrameSetSkeletons` 한 번. 원본 `Results/I/HostDynamic/host_dynamic_20260925_130428.json`.
+- R 캐릭터 프록시(2c10e34): RayScene "deformed 763,392 tris (0 above proxy budget)" = 256 × 2,982. `r.as.refit` 1.61 → **0.355 ms**,
+  `r.as.deform` 0.26 → 0.034 ms(4K). R 예상 약 0.5 ms보다 작다. 설계 2.8 할당 0.13 ms(근거리 64체만 refit, 군중 192체는 캡슐)와는 아직
+  2.7배다. 지금은 256체 모두 프록시를 refit한다(체당 1.39 µs). 군중 캡슐 판단은 R 몫이다.
+- S VSM 변위 경계(dc6d35d): `s.vsm.raster.raster` 0.81 → **0.16 ms**, `s.shadow.visibility` 0.36 → 0.14 ms(4K).
+- M: `m.shade` 1.32 → 0.78, `m.resolve` 0.38 → 0.24 ms(4K).
+- 트랙 합(4K, 프레임당): R 1.63, S 1.51, M 1.12, V 0.17. 큰 항: `m.shade` 0.78, `s.froxel.integrate` 0.55, `r.refl.trace` 0.36,
+  `r.as.refit` 0.36, `r.gi.trace` 0.29, `m.resolve` 0.24.
+- 판정: 이 부하(설계 동적 규모, 인스턴스 삼각형 1,540만)에서 4K 4.69 ms, 1440p 3.08 ms로 목표(6.06 / 5.00 ms) 안이다. 장면에 수목·물·
+  광원·VFX가 없으므로 RPP-1 전체 부하의 판정은 아니다.
 
 - 큰 항(4K): `r.as.refit` **1.61 ms**(캐릭터 256 × 60k 원본 refit. RayScene이 "256 above proxy budget"을 보고한다. V의 클러스터 LOD 절단이
   생기면 8k 프록시로 간다, 설계 0.13 ms), `m.shade` 1.32, `s.vsm.raster.raster` 0.81, `s.froxel.integrate` 0.45, `m.resolve` 0.38,
