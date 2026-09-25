@@ -273,9 +273,12 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
 
 13:04 실행[실측]: 커밋 기준 빌드(`-Track all -Committed`, 다른 트랙의 작업 중 파일 없음), 게임 종료 뒤, 첫 프레임 제외 수정 뒤, 호스트는
 `UnxFrameSetSkeletons` 한 번. 원본 `Results/I/HostDynamic/host_dynamic_20260925_130428.json`.
+- **정정(R, 이후 실측):** 13:04의 `r.as.refit` 0.355 ms는 캐릭터 프록시 refit이 아니라 반사 정확 집합(원본 60k 삼각형 × 8 슬롯)이다. 정확 집합을
+  끄면 프록시 256체 refit은 0.012 ms다. 군중 캡슐 BLAS는 오히려 느려 되돌렸다(5ec722c). 다음 과제는 정확 집합 비용과 동적 TLAS(1,281 인스턴스)다.
+  아래 줄의 "프록시 refit" 해석은 이 정정으로 바뀐다.
 - R 캐릭터 프록시(2c10e34): RayScene "deformed 763,392 tris (0 above proxy budget)" = 256 × 2,982. `r.as.refit` 1.61 → **0.355 ms**,
   `r.as.deform` 0.26 → 0.034 ms(4K). R 예상 약 0.5 ms보다 작다. 설계 2.8 할당 0.13 ms(근거리 64체만 refit, 군중 192체는 캡슐)와는 아직
-  2.7배다. 지금은 256체 모두 프록시를 refit한다(체당 1.39 µs). 군중 캡슐 판단은 R 몫이다.
+  2.7배다(위 정정 참고: 이 값은 정확 집합이다).
 - S VSM 변위 경계(dc6d35d): `s.vsm.raster.raster` 0.81 → **0.16 ms**, `s.shadow.visibility` 0.36 → 0.14 ms(4K).
 - M: `m.shade` 1.32 → 0.78, `m.resolve` 0.38 → 0.24 ms(4K).
 - 트랙 합(4K, 프레임당): R 1.63, S 1.51, M 1.12, V 0.17. 큰 항: `m.shade` 0.78, `s.froxel.integrate` 0.55, `r.refl.trace` 0.36,
