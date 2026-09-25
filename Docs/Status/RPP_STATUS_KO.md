@@ -1,0 +1,16 @@
+# RPP 트랙 상태 (RPP-1 장면 제작)
+
+소유: `Content/RPP1/`, `Tools/RppBuild/`(등록 요청 중), `Results/RPP/`, 이 문서, 이전 저장소 `Assets/RPP1/`.
+표기: [실측] 실행·파일 해시, [예상] 유도 값.
+
+## 2026-09-26
+
+| 할 일 (프롬프트 순서) | 상태 |
+|---|---|
+| 1. manifest 초안 | **초안 완료** `Content/RPP1/rpp1_manifest.json` + `RPP1_MANIFEST_KO.md`. 부하 합 검사: 효과 128, 입자 524,288, ribbon 256, 볼륨 16, 광원 512/128, soft 32 [실측: json 합산 스크립트]. 날씨·태양 값을 S에 전달, S 확인(태양 궤적은 매 프레임 전부 다시 그리기 최악 경우를 잰다; mist 고도 해상도 3항목은 S 구현) |
+| 2. 자산 연결 도구 | 시작 전. 이전 Unity 프로젝트에 캐릭터 메시·groom·저작 클립·텍스처가 없다 [실측]. 출처는 사용자 결정 |
+| 3. 구간 장면 | 시작 전. 한 세계(forest_combat 틀 + 구간 앵커)로 설계. RppBuild 등록 대기 |
+| 4. 120 s 경로 | 경유점·사건 초안만(manifest). 생성·재생은 RppBuild·I 형식 합의 뒤 |
+| 5. 기준 스냅샷 | 시작 전. C 기준 도구가 `.unxscene` 경로를 받으므로(`--scene <파일>`) 대기열 항목 = {장면 파일, 카메라, 해상도} |
+
+막힌 것: `Tools/RppBuild` 등록(코어, 요청 `20260926_RPP_track_registration.md`) — 등록 전 CMakeLists를 만들면 모든 세션 구성이 깨진다.

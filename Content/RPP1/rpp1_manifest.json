@@ -1,0 +1,323 @@
+{
+  "profile": "RPP-1",
+  "revision": "1.0-draft.1",
+  "date": "2026-09-26",
+  "status": "draft: not sealed. Sealing (RPP-1.0) needs every required slot filled with an accepted asset, every hash filled, the 120 s path replayed with equal scene hashes in the native gate and the Unity Player, and the section snapshots queued (Content/RPP1/RPP1_MANIFEST_KO.md 9).",
+  "owner": "RPP-1 scene track (Content/RPP1, Tools/RppBuild; old repository Assets/RPP1)",
+  "spec_source": "Unravel Docs/Handoff/FINAL_EXECUTION_PLAN_KO.md 'Reference Performance Profile: RPP-1'; REBUILD_PLAN_20260925_KO.md 1, 14.3 (13)",
+
+  "system": {
+    "cpu": "i9-13900KF", "ram_gb": 128, "gpu": "RTX 4080 16GB",
+    "record": ["os build", "driver", "Unity version", "power plan", "D3D12Core / Agility", "quality config SHA-256"]
+  },
+  "output": {
+    "resolutions": [[3840, 2160], [2560, 1440]],
+    "vsync": false, "fps_cap": false, "frame_synthesis": false,
+    "targets_ms": { "4K": 6.06, "1440p": 5.00, "1440p_extended": 3.33 }
+  },
+  "time": {
+    "authority_tick_hz": 60,
+    "path_seconds": 120,
+    "sections_seconds": 30,
+    "verdict": "per resolution: 30 s warm-up, then the same 120 s path 3 times; mean FPS and whole-frame P95 (P99, max, stalls reported); cold launch, PSO and first streaming measured separately",
+    "render_time_rule": "render frames interpolate the two committed ticks around the render time; path time t = tick / 60 exactly (the path is keyed on ticks, not on wall time)"
+  },
+
+  "load": {
+    "_rule": "fixed by FINAL_EXECUTION_PLAN RPP-1; never lowered. Counts are what exists and runs; active/visible/submitted counts are recorded per frame next to them.",
+    "space_km": [2, 2],
+    "characters": { "total": 256, "near_combat": 64, "crowd": 192, "strand_hair": 8 },
+    "rigid_bodies_dynamic": 1024,
+    "cloth_rope_soft": 32,
+    "lights": { "total": 512, "shadowed": 128 },
+    "trees_and_shrubs": 100000,
+    "grass": 1000000,
+    "vfx": { "effects_peak": 128, "particles_peak": 524288, "ribbons_peak": 256, "local_volumes_peak": 16 },
+    "environment_features": ["water", "hair", "volumes", "GI", "reflections", "dynamic shadows", "materials, lights and optics on real surfaces"],
+    "unspecified_by_rpp1_open_decision": {
+      "matter_particles": { "draft": 250000, "source": "ARCHITECTURE 2.14 allocation (0.24 ms/frame at 250k)", "status": "user decision (design 2.14: 'Matter 규모는 RPP-1 개정 때 사용자가 정한다')" }
+    }
+  },
+
+  "world": {
+    "conventions": "INTERFACES 6.1: right-handed, +Y up, metres; compass +X east, -Z north (+Z south); SceneGen sunDirection azimuth a = compass azimuth - 90 deg",
+    "extent": { "x": [-1000, 1000], "z": [-1000, 1000] },
+    "frame": "C forest_combat (SceneId 7, seed 1): the forest base and the combat stand keep C's coordinates exactly",
+    "terrain": {
+      "rule": "h(x,z) = rollingTerrain(x,z) (C Common.cpp) outside the districts; inside a district h = anchor.y + the district's local ground (city: cityTerrain flat core; lake: lakeFloor; lodge pad: flat); the blend ring mixes the two with smoothstep over the ring width. One heightfield mesh, 2 m grid (1000 x 1000 cells), city square cut out under the street plane (as C's city_block).",
+      "self_check": "RppBuild samples the generated C terrains at their grid vertices and fails if its copy of rollingTerrain / cityTerrain / lakeFloor differs by more than 1 mm (C source is the authority; a C change fails the build instead of drifting)"
+    },
+    "districts": [
+      { "id": "forest", "source_scene": "forest_combat", "anchor": { "translation": [0, 0, 0], "yaw_deg": 0 },
+        "footprint": "combat stand: centre (300, -200), radius 110; kept exactly as C generates it", "keep_out_radius_m": 150 },
+      { "id": "city", "source_scene": "city_night (geometry, wet palette and light anchors; seed 1)", "anchor": { "translation": [-450, 0, -420], "yaw_deg": 0 },
+        "footprint": "local flat core |x|,|z| <= 260, blend ring 260..420 (cityTerrain's own ring); street plane and buildings inside the square (extent 195)",
+        "drop_from_source": ["terrain (replaced by the world heightfield)"] },
+      { "id": "lake", "source_scene": "waterside (seed 1)", "anchor": { "translation": [200, -3, 420], "yaw_deg": 0 },
+        "footprint": "local basin r <= 190, bay x 60..470 |z| < 140 (lakeFloor), blend ring to r_footprint + 70",
+        "drop_from_source": ["terrain", "bank trees farther than 300 m (local) from the basin (the forest base covers that ground)"] },
+      { "id": "lodge", "source_scene": "interior (seed 1)", "anchor": { "translation": "lake-local (190, 0, 170) + lake anchor; y = lakeFloor there + lake anchor y + 0.2 (floor above the pad)", "yaw_deg": "window (local +Z) faces the horizontal sun direction at t = 105 s: -82.4 (draft; RppBuild computes)" },
+        "footprint": "room x [-4.2, 4.2], z [-3.2, 3.2]; flat pad radius 12 m",
+        "drop_from_source": ["ground (100 x 100 m outside plane)"],
+        "add": ["door opening 1.0 x 2.2 m in wall_px (the room is entered on foot at t ~ 92 s; C's room has no door)", "window glass (Glass class, P4) in the +Z opening once the Glass class exists"] }
+    ],
+    "vegetation_rule": "exactly 100,000 tree/shrub instances and 1,000,000 grass instances in the zone: C's stand trees, city street trees and lake bank trees (within 300 m) are all kept; the forest base (C forest_combat's uniform 100k / 1M in C's order) fills the rest, skipping positions inside district cores (city core, water where lakeFloor < 1.0 for trees / < 0.3 for grass, lodge pad); reeds count as grass. Skipped base instances are not relocated one by one: the fill continues with RppBuild's own deterministic sampler (seed stream 'vegetation') over the allowed ground until the totals are exact. Trees and grass are re-seated on the world terrain (y = h(x,z) + the source's offset)."
+  },
+
+  "sections": [
+    { "id": "city", "name": "도시/군중", "window_s": [0, 30], "district": "city",
+      "weather": "rain -> clear transition from 24 s", "ev100": 13.0,
+      "gate_cameras_local": ["street", "wet_road", "aerial"],
+      "content": { "bodies": "C dynamicContent(city_night) 1,024 (vehicles, crate piles, collapse debris, falling)", "characters": "C slots (city) 256: hot street and cross streets",
+                   "lights": 416, "lights_shadowed": 104, "soft": 12, "vfx_kinds": ["rain", "rain_splash", "steam_vent", "sparks", "exhaust", "neon_flicker (light animation)"] } },
+    { "id": "forest", "name": "숲/전투", "window_s": [30, 60], "district": "forest",
+      "weather": "clear (air after rain), transition ends at 38 s", "ev100": 12.5,
+      "gate_cameras_local": ["eye", "up", "edge", "vista"],
+      "content": { "bodies": "C dynamicContent(forest_combat) 1,024 (log stacks, rocks, branches, supply cache, falling)", "characters": "C slots (forest) 256 around the combat point (4..90 m)",
+                   "lights": 24, "lights_shadowed": 8, "soft": 8, "vfx_kinds": ["muzzle_flash (+ light)", "tracer (ribbon)", "impact_dust", "explosion", "fire (persists to 100 s)", "smoke_column (local volume)", "embers", "falling_leaves"] } },
+    { "id": "waterside", "name": "수변/중력·VFX", "window_s": [60, 90], "district": "lake",
+      "weather": "clear -> mist from 52 s (ends 66 s), mist -> clear from 86 s", "ev100": 13.0,
+      "gate_cameras_local": ["lake", "waves", "grazing", "glint"],
+      "content": { "bodies": "C dynamicContent(waterside) 1,024 (drifting, falling, shore debris)", "characters": "C slots (waterside) 256 on the shore (150..230 m from the lake centre)",
+                   "lights": 48, "lights_shadowed": 8, "soft": 8, "vfx_kinds": ["gravity_droplets", "gravity_debris_dust", "vortex (ribbons)", "arc_bolt (ribbons)", "boat_wake_spray", "water_splash", "mist_wisps (local volumes)", "color_flare", "character_trail (ribbons)"],
+                   "gravity_event": "70..80 s", "vfx_peak_window_s": [72, 78] } },
+    { "id": "interior", "name": "실내/반사·투과", "window_s": [90, 120], "district": "lodge",
+      "weather": "mist -> clear (ends 100 s), clear", "ev100": 9.5,
+      "gate_cameras_local": ["overview", "mirror", "floor_0", "floor_60", "floor_75"],
+      "content": { "bodies": "C dynamicContent(interior) 1,024 (box piles, table, wall scatter, falling)", "characters": "C slots (interior) 256 outside the lodge (8..60 m), re-seated off the water",
+                   "lights": 24, "lights_shadowed": 8, "soft": 4, "vfx_kinds": ["dust_motes (sun beam)", "fireplace_fire", "candle"] } }
+  ],
+
+  "section_swap_rule": "1,024 bodies and 256 characters exist at all times. At each section boundary the previous section's set despawns and the next section's set spawns at C's t0 placement (tick-exact, one tick), scheduled in the transit where the camera is > 200 m from both sets. Swap ticks: city->forest 1500 (25 s), forest->waterside 3300 (55 s), waterside->interior 5220 (87 s). The 256 x 1,024 swap is the path's spawn/despawn and streaming load; it is never skipped.",
+
+  "slots": [
+    { "id": "char.mesh", "category": "character", "count": 8, "instances": 256,
+      "spec": "humanoid, LOD0 ~60,000 triangles (ARCHITECTURE 2.6/2.8: original BLAS 60k), <= 4 influences per vertex, body ~70 joints incl. fingers, eyes, jaw (audit rig class); >= 4 material slots (skin = Subsurface class P4, cloth, leather, metal); textures 2K..4K baseColor/normal/roughMetal/occlusion; RT proxies built by R (skin-aware cut)",
+      "source": null, "status": "missing", "hash": null,
+      "old_project": "none: Assets/NativeEngine/DataWorld/CharacterMesh.asset is a 550-vertex capsule (sha256 11c30a05...), audit rigs are code-built bone hierarchies without meshes" },
+    { "id": "char.groom", "category": "hair", "count": 8,
+      "spec": "strand groom per hero character: ~100,000 rendered strands at LOD0, 16..32 segments; simulation guides 2,500 x 12 nodes (ARCHITECTURE 2.14); LOD by the design rule (<= 2 strands per pixel width, beyond that band C strand bricks)",
+      "source": null, "status": "missing", "hash": null },
+    { "id": "char.clips", "category": "animation", "count": ">= 40",
+      "spec": "Humanoid clips with fingers, 30 Hz: locomotion (idle, walk, jog, run, sprint, starts, stops, turns), rifle combat (aim, fire, reload, cover), melee, hit reactions and falls, crowd idles (talk, gesture, phone, look around), seated (boat), interior (sit, lean); converted by the NativeAnimation Mecanim converter",
+      "source": null, "status": "missing", "hash": null,
+      "old_project": "none authored: CharacterMotion.anim (sha256 4796be79...) is a generated test motion; audit clips are generated muscle curves" },
+    { "id": "rigid.bodies", "category": "physics", "count": 1024, "per_section": true,
+      "source": "C SceneGen dynamicContent (195fda3), seed 1, per section scene; kinds crate, debris, chunk, car, log, branch, barrel, rock, smallbox",
+      "status": "available (generator)", "hash": "RppBuild records sha256 of each <scene>_bodies.json" },
+    { "id": "soft.city.banner", "category": "cloth", "count": 8, "section": "city", "source": "old ClothRecipe.asset (template) sha256 378f1c88...", "status": "template available, slot geometry to author", "spec": "banners 1.2 x 4 m on facades" },
+    { "id": "soft.city.awning", "category": "cloth", "count": 4, "section": "city", "source": "old ClothRecipe.asset (template)", "status": "template available, slot geometry to author", "spec": "shop awnings 3 x 1.5 m, rain-loaded" },
+    { "id": "soft.forest.tarp", "category": "cloth", "count": 4, "section": "forest", "source": "old ClothRecipe.asset (template)", "status": "template available, slot geometry to author", "spec": "supply-cache tarps 3 x 3 m" },
+    { "id": "soft.forest.rope", "category": "rope", "count": 4, "section": "forest", "source": "old RopeRecipe.asset (template) sha256 e6737658...", "status": "template available, slot geometry to author", "spec": "tarp guy lines 4..6 m" },
+    { "id": "soft.lake.mooring", "category": "rope", "count": 4, "section": "waterside", "source": "old RopeRecipe.asset (template)", "status": "template available, slot geometry to author", "spec": "boat and dock mooring lines 5..8 m" },
+    { "id": "soft.lake.fender", "category": "soft", "count": 4, "section": "waterside", "source": "old SoftVolumeRecipe.asset (template) sha256 a60cf373...", "status": "template available, slot geometry to author", "spec": "dock fenders 0.3 x 0.8 m" },
+    { "id": "soft.lodge.curtain", "category": "cloth", "count": 2, "section": "interior", "source": "old ClothRecipe.asset (template)", "status": "template available, slot geometry to author", "spec": "window curtains 1.2 x 2.4 m" },
+    { "id": "soft.lodge.cushion", "category": "soft", "count": 2, "section": "interior", "source": "old SoftVolumeRecipe.asset (template)", "status": "template available, slot geometry to author", "spec": "sofa cushions 0.6 x 0.6 x 0.15 m" },
+    { "id": "lights.city", "category": "light", "count": 416, "shadowed": 104, "source": "C city_night light anchors: 104 street-light spots (shadowed), 208 shop rect panels, 52 neon tubes, 52 bulb spheres (the first N of each C list)", "status": "available (generator)" },
+    { "id": "lights.forest", "category": "light", "count": 24, "shadowed": 8, "source": "RppBuild: 8 shadowed flare/lantern points at the supply cache, 16 unshadowed muzzle-flash lights (VFX-driven, intensity keyed by the event script)", "status": "to author (RppBuild)" },
+    { "id": "lights.lake", "category": "light", "count": 48, "shadowed": 8, "source": "RppBuild: 8 shadowed dock and boat lamps (spots), 40 unshadowed shore and path lamps (spheres)", "status": "to author (RppBuild)" },
+    { "id": "lights.lodge", "category": "light", "count": 24, "shadowed": 8, "source": "C interior lights (2 rect + disk + 2 spheres shadowed, 1 tube) + RppBuild: 3 shadowed porch/hall spots, 15 unshadowed (fireplace glow rect, candles, porch bulbs)", "status": "partly available (C interior), rest to author" },
+    { "id": "veg.trees", "category": "vegetation", "count": 100000, "source": "C forest_combat tree meshes (thin: 6 cm leaves), stand, city street trees (card), lake bank trees (card)", "status": "available (generator)" },
+    { "id": "veg.grass", "category": "vegetation", "count": 1000000, "source": "C forest_combat grass clumps (4 mm blades) + lake reeds (3 mm)", "status": "available (generator)" },
+    { "id": "water.lake", "category": "water", "count": 1, "source": "C waterside calm plane + wave bay (Standard dielectric until the Water class, P4)", "status": "available (generator); Water class pending (P4)" },
+    { "id": "matter.lake", "category": "matter", "count": 1, "source": "old MatterRecipe.asset (template) sha256 86c94cdf...", "status": "template available; particle count is a user decision (load.unspecified_by_rpp1_open_decision)" },
+    { "id": "vfx.kinds", "category": "vfx", "count": 16, "source": "see vfx.effects; old-project authored graphs cover 7 kinds", "status": "7 available, 9 to author" },
+    { "id": "materials.textured", "category": "material", "count": "city facades, asphalt, sidewalk, lodge wood/plaster/fabric, rock, bark, leaves",
+      "source": "C palette (procedural textures) today; authored texture sets missing", "status": "procedural available; authored texture sets missing",
+      "old_project": "Assets/NativeEngine/DataWorld/Materials.asset (TitanMaterialLibrary, sha256 9f923e7f...) has parameter-only materials, no textures (0 image files in Assets)" }
+  ],
+
+  "vfx": {
+    "_rule": "the peak window 72..78 s holds 128 live effects, >= 524,288 live particles in every tick (target exactly 524,288 at steady state: rate x lifetime per effect), 256 live ribbons and 16 local volumes; counts are the VFX counters' measured values, recorded per tick",
+    "effects": [
+      { "kind": "gravity_droplets", "section": "waterside", "instances_peak": 8, "particles_each": 16384, "old_source": null },
+      { "kind": "gravity_debris_dust", "section": "waterside", "instances_peak": 8, "particles_each": 4096, "old_source": "DestructionBurst.asset sha256 a01b74a3..." },
+      { "kind": "boat_wake_spray", "section": "waterside", "instances_peak": 8, "particles_each": 8192, "old_source": null },
+      { "kind": "water_splash", "section": "waterside", "instances_peak": 8, "particles_each": 2048, "old_source": null },
+      { "kind": "mist_wisps", "section": "waterside", "instances_peak": 8, "particles_each": 4096, "local_volumes_total": 8, "old_source": null },
+      { "kind": "vortex", "section": "waterside", "instances_peak": 8, "particles_each": 4096, "ribbons_each": 16, "old_source": "VisualTwirl.unrvfx sha256 87acbacb..." },
+      { "kind": "color_flare", "section": "waterside", "instances_peak": 8, "particles_each": 512, "old_source": "ColorFlare.unrvfx sha256 b184a6ee..." },
+      { "kind": "sparks", "section": "waterside (dock) / city", "instances_peak": 8, "particles_each": 1024, "old_source": "CollisionSparks.unrvfx sha256 8ada0ce7...; MeshSurfaceSparks.unrvfx sha256 4d109a32..." },
+      { "kind": "embers", "section": "forest (still burning)", "instances_peak": 8, "particles_each": 2048, "old_source": "TurbulentEmbers.unrvfx sha256 2d3213ad..." },
+      { "kind": "smoke_column", "section": "forest (still burning)", "instances_peak": 8, "particles_each": 4096, "local_volumes_total": 4, "old_source": null },
+      { "kind": "fire", "section": "forest (fires lit by the 45 s / 48 s explosions, burning to 100 s)", "instances_peak": 8, "particles_each": 4096, "local_volumes_total": 4, "old_source": "CharacterIgnition.asset sha256 959aba7b... (ignition part)" },
+      { "kind": "impact_dust", "section": "waterside shore", "instances_peak": 8, "particles_each": 2048, "old_source": "CharacterJump.unrvfx sha256 7a91be76..." },
+      { "kind": "character_trail", "section": "waterside (heroes)", "instances_peak": 8, "particles_each": 2048, "ribbons_each": 8, "old_source": "CharacterTrail.unrvfx sha256 9448c91c..." },
+      { "kind": "falling_leaves", "section": "lake banks", "instances_peak": 8, "particles_each": 2048, "old_source": null },
+      { "kind": "arc_bolt", "section": "waterside (gravity event, ribbons)", "instances_peak": 8, "particles_each": 4096, "ribbons_each": 8, "old_source": null },
+      { "kind": "steam_vent", "section": "city (residual) / lodge chimney", "instances_peak": 8, "particles_each": 4608, "old_source": null },
+      { "kind": "rain", "section": "city (0..38 s only)", "instances_peak": 0, "particles_outside_peak": 262144, "old_source": null },
+      { "kind": "rain_splash", "section": "city (0..38 s only)", "instances_peak": 0, "particles_outside_peak": 65536, "old_source": null },
+      { "kind": "exhaust", "section": "city", "instances_peak": 0, "old_source": null },
+      { "kind": "muzzle_flash", "section": "forest (42..50 s)", "instances_peak": 0, "old_source": null },
+      { "kind": "tracer", "section": "forest (42..50 s, ribbons)", "instances_peak": 0, "old_source": null },
+      { "kind": "explosion", "section": "forest (45 s, 48 s)", "instances_peak": 0, "old_source": "CharacterIgnition.asset (ignition part)" },
+      { "kind": "dust_motes", "section": "interior", "instances_peak": 0, "old_source": null },
+      { "kind": "fireplace_fire", "section": "interior", "instances_peak": 0, "old_source": null }
+    ],
+    "peak_check": { "effects": 128, "particles": 524288, "ribbons": 256, "local_volumes": 16 }
+  },
+
+  "environment": {
+    "sun": {
+      "model": "astronomical: latitude 37.5 N, day 269 (2026-09-26), declination -0.9193 deg (NOAA series), local solar time 15:30 + t minutes (60x time-lapse); no refraction",
+      "illuminance_toa_lux": 128000, "angular_radius_rad": 0.004654, "color": [1, 1, 1],
+      "angular_speed_deg_per_s": "0.19..0.21 (continuous every tick; the VSM budget row is 'every page redrawn every frame' for any motion)",
+      "keys_every_5s": [
+        { "t": 0, "elevation_deg": 28.2379, "azimuth_compass_deg": 244.2118, "direction": [-0.793251, 0.473133, 0.383272] },
+        { "t": 5, "elevation_deg": 27.3413, "azimuth_compass_deg": 245.1961, "direction": [-0.806341, 0.45929, 0.372649] },
+        { "t": 10, "elevation_deg": 26.4376, "azimuth_compass_deg": 246.1641, "direction": [-0.819047, 0.445223, 0.361855] },
+        { "t": 15, "elevation_deg": 25.5272, "azimuth_compass_deg": 247.1167, "direction": [-0.831363, 0.430939, 0.350895] },
+        { "t": 20, "elevation_deg": 24.6104, "azimuth_compass_deg": 248.0546, "direction": [-0.843283, 0.416446, 0.339774] },
+        { "t": 25, "elevation_deg": 23.6876, "azimuth_compass_deg": 248.9784, "direction": [-0.854802, 0.40175, 0.328498] },
+        { "t": 30, "elevation_deg": 22.7592, "azimuth_compass_deg": 249.8889, "direction": [-0.865914, 0.386858, 0.317071] },
+        { "t": 35, "elevation_deg": 21.8253, "azimuth_compass_deg": 250.7866, "direction": [-0.876614, 0.371778, 0.305499] },
+        { "t": 40, "elevation_deg": 20.8863, "azimuth_compass_deg": 251.6724, "direction": [-0.886897, 0.356515, 0.293788] },
+        { "t": 45, "elevation_deg": 19.9426, "azimuth_compass_deg": 252.5467, "direction": [-0.896757, 0.341079, 0.281943] },
+        { "t": 50, "elevation_deg": 18.9944, "azimuth_compass_deg": 253.4103, "direction": [-0.906191, 0.325475, 0.26997] },
+        { "t": 55, "elevation_deg": 18.0419, "azimuth_compass_deg": 254.2638, "direction": [-0.915194, 0.309712, 0.257874] },
+        { "t": 60, "elevation_deg": 17.0854, "azimuth_compass_deg": 255.1076, "direction": [-0.923761, 0.293797, 0.245662] },
+        { "t": 65, "elevation_deg": 16.1252, "azimuth_compass_deg": 255.9425, "direction": [-0.931888, 0.277737, 0.233339] },
+        { "t": 70, "elevation_deg": 15.1615, "azimuth_compass_deg": 256.769, "direction": [-0.939572, 0.261541, 0.220911] },
+        { "t": 75, "elevation_deg": 14.1945, "azimuth_compass_deg": 257.5876, "direction": [-0.946808, 0.245215, 0.208384] },
+        { "t": 80, "elevation_deg": 13.2245, "azimuth_compass_deg": 258.3989, "direction": [-0.953594, 0.228768, 0.195764] },
+        { "t": 85, "elevation_deg": 12.2517, "azimuth_compass_deg": 259.2034, "direction": [-0.959926, 0.212207, 0.183056] },
+        { "t": 90, "elevation_deg": 11.2763, "azimuth_compass_deg": 260.0017, "direction": [-0.965801, 0.195541, 0.170268] },
+        { "t": 95, "elevation_deg": 10.2985, "azimuth_compass_deg": 260.7942, "direction": [-0.971217, 0.178777, 0.157404] },
+        { "t": 100, "elevation_deg": 9.3186, "azimuth_compass_deg": 261.5814, "direction": [-0.97617, 0.161924, 0.144472] },
+        { "t": 105, "elevation_deg": 8.3366, "azimuth_compass_deg": 262.3639, "direction": [-0.980659, 0.144988, 0.131477] },
+        { "t": 110, "elevation_deg": 7.3528, "azimuth_compass_deg": 263.1421, "direction": [-0.984681, 0.127979, 0.118426] },
+        { "t": 115, "elevation_deg": 6.3675, "azimuth_compass_deg": 263.9165, "direction": [-0.988234, 0.110905, 0.105324] },
+        { "t": 120, "elevation_deg": 5.3807, "azimuth_compass_deg": 264.6876, "direction": [-0.991317, 0.093773, 0.092178] }
+      ],
+      "interpolation": "evaluate the model at every tick (not the keys); keys are check values"
+    },
+    "atmosphere_fixed": {
+      "_note": "SceneData.h Atmosphere defaults (previous engine / Hillaire 2020); unchanged by weather",
+      "bottom_radius_m": 6360000, "top_radius_m": 6460000,
+      "rayleigh_scattering_per_m": [5.802e-6, 13.558e-6, 33.1e-6], "rayleigh_scale_height_m": 8000,
+      "ozone_absorption_per_m": [0.65e-6, 1.881e-6, 0.085e-6], "ozone_center_m": 25000, "ozone_width_m": 15000
+    },
+    "weather_states": {
+      "clear": {
+        "description": "clean air after rain (Hillaire 2020 aerosol); ground-level visibility from aerosol alone ~880 km",
+        "mie_scattering_per_m": [3.996e-6, 3.996e-6, 3.996e-6], "mie_absorption_per_m": [0.444e-6, 0.444e-6, 0.444e-6],
+        "mie_scale_height_m": 1200, "mie_g": 0.8,
+        "ground_albedo": [0.060, 0.090, 0.050],
+        "ground_albedo_basis": "visible-band area mix of the zone seen from above: canopy 70 % (0.045, 0.075, 0.035), grass 15 % (0.08, 0.14, 0.05), urban 10 % (0.15), water 5 % (0.03, 0.04, 0.05) [expected]; RppBuild replaces it with the measured top-down mean of the world's ground and canopy materials"
+      },
+      "rain": {
+        "description": "light rain R = 2 mm/h lit by a weak sun (horizontally uniform medium; no cloud deck in atmosphere v1): Marshall-Palmer drops plus humid haze; visibility ~4.1 km",
+        "derivation": "drops: N0 = 8000 m^-3 mm^-1, Lambda = 4.1 R^-0.21 = 3.545 mm^-1, beta_ext = pi N0 / Lambda^3 (Q_ext 2) = 5.64e-4 /m, albedo ~1, g 0.88; haze: beta 3.9e-4 /m (V 10 km), albedo 0.93, g 0.75; one layer: beta_s = 5.64e-4 + 3.63e-4, beta_a = 2.7e-5, g = scattering-weighted mean",
+        "mie_scattering_per_m": [9.27e-4, 9.27e-4, 9.27e-4], "mie_absorption_per_m": [2.7e-5, 2.7e-5, 2.7e-5],
+        "mie_scale_height_m": 1200, "mie_g": 0.829,
+        "ground_albedo": [0.050, 0.078, 0.042],
+        "ground_albedo_basis": "clear mix with wet soil and urban surfaces darkened to ~0.65x and wet vegetation ~0.95x [expected]",
+        "sun_transmittance_check": "vertical Mie optical depth 1.14; at 28 deg elevation direct sun x ~0.09 (Mie only) [expected]"
+      },
+      "mist": {
+        "description": "evaporation mist over the lake after rain: shallow fog layer, ground visibility 4 km",
+        "mie_scattering_per_m": [9.76e-4, 9.76e-4, 9.76e-4], "mie_absorption_per_m": [2.0e-6, 2.0e-6, 2.0e-6],
+        "mie_scale_height_m": 300, "mie_g": 0.85,
+        "ground_albedo": [0.055, 0.085, 0.046],
+        "ground_albedo_basis": "dew-wet surfaces [expected]",
+        "derivation": "Koschmieder beta_ext = 3.912 / 4000 m; fog droplets r ~ 5 um: albedo 0.998, g 0.85",
+        "sun_transmittance_check": "vertical optical depth 0.29; at 15 deg direct sun x ~0.32 (Mie only) [expected]",
+        "resolution_note": "a 300 m scale height is shorter than the J_ms / transmittance altitude spacing near the ground (Bruneton rho grid: first samples ~ 100 m, ~ 380 m): S decides the altitude resolution that keeps the table exact for this state (quality gap = implementation item)"
+      }
+    },
+    "weather_track": [
+      { "t": [0, 24], "state": "rain" },
+      { "t": [24, 38], "transition": ["rain", "clear"], "shape": "smoothstep on every parameter (log-space for coefficients)" },
+      { "t": [38, 52], "state": "clear" },
+      { "t": [52, 66], "transition": ["clear", "mist"], "shape": "smoothstep (log-space for coefficients)" },
+      { "t": [66, 86], "state": "mist" },
+      { "t": [86, 100], "transition": ["mist", "clear"], "shape": "smoothstep (log-space for coefficients)" },
+      { "t": [100, 120], "state": "clear" }
+    ],
+    "weather_requirements": "transitions last 14 s (>= the design's T_w 10 s); the renderer's tables may lag the medium by <= 1 s (ARCHITECTURE 2.3); the reference renders snapshots at the medium of their tick exactly",
+    "wind_track": [
+      { "t": [0, 24], "direction": [0.8, 0, 0.6], "speed_mps": 5.0, "note": "rain gusts" },
+      { "t": [24, 38], "transition": true },
+      { "t": [38, 52], "direction": [0.8, 0, 0.6], "speed_mps": 3.0, "note": "C forest value" },
+      { "t": [52, 66], "transition": true },
+      { "t": [66, 100], "direction": [0.6, 0, 0.8], "speed_mps": 1.5, "note": "calm for the mist and the mirror lake" },
+      { "t": [100, 120], "direction": [0.6, 0, 0.8], "speed_mps": 2.0 }
+    ]
+  },
+
+  "camera_track": {
+    "_rule": "a transform track keyed per tick (position, forward, up, vertical FOV 60 deg, near 0.05 m, EV100); RppBuild generates it from these waypoints with collision clearance >= 0.5 m from every instance bound and writes Content/RPP1/Generated/rpp1_camera.json; render frames interpolate between tick keys (position linear, orientation slerp)",
+    "waypoints": [
+      { "t": 0,  "section": "city", "at": "city street camera (local (-31.5, 1.7, 120) = world (-481.5, 1.7, -300)), looking -Z", "speed_mps": 1.4, "note": "walk north through the crowd and the collapse debris" },
+      { "t": 12, "section": "city", "at": "local (-31.5, 1.7, 103)", "action": "turn east onto the cross street at local z = 119" },
+      { "t": 16, "section": "city", "action": "vehicle: accelerate east, 0 -> 60 m/s by 24 s (ARCHITECTURE 2.3 fast-camera case)" },
+      { "t": 30, "section": "forest", "at": "forest edge camera (150, h + 1.7, -200) looking +X, speed falling to 6 m/s" },
+      { "t": 42, "section": "forest", "at": "combat point (300, h + 1.7, -200): eye camera view, then look up into the canopy (up camera) 46..50 s" },
+      { "t": 50, "section": "forest", "action": "rise to 40 m (vista camera view) 50..53 s" },
+      { "t": 53, "section": "forest", "action": "fly south-west over the canopy, up to 60 m/s, descend to the lake's west shore" },
+      { "t": 64, "section": "waterside", "at": "lake camera (world (25, h + 1.7, 420)) looking +X across the calm lake" },
+      { "t": 66, "section": "waterside", "action": "board: boat at 15 m/s, 0.8 m above the water, across the lake towards the south-east shore; gravity event and VFX peak ahead at 70..80 s" },
+      { "t": 86, "section": "waterside", "at": "dock at the lodge (lake-local (175, 1.7, 150))" },
+      { "t": 92, "section": "interior", "at": "through the lodge door (1.0 x 2.2 m) into the room: overview camera view" },
+      { "t": 100, "section": "interior", "action": "walk to the mirror camera view, then the floor_60 view with the sun patch through the window" },
+      { "t": 120, "section": "interior", "at": "end" }
+    ],
+    "ev100_track": "section values with 2 s smoothstep ramps at the waypoints where the light level changes (city 13.0, forest 12.5 in the stand / 14 above the canopy, waterside 13.0, interior 9.5)"
+  },
+
+  "events": [
+    { "tick": 0, "event": "spawn", "set": "city" },
+    { "tick": [0, 2280], "event": "vfx", "kinds": ["rain", "rain_splash"], "note": "rain effects fade with the rain -> clear transition (24..38 s)" },
+    { "tick": [0, 1800], "event": "light_animation", "lights": "city neon tubes (52)", "pattern": "deterministic flicker (seed stream 'lights')" },
+    { "tick": 1500, "event": "swap", "from": "city", "to": "forest" },
+    { "tick": [2520, 3000], "event": "combat", "note": "64 near characters fire (muzzle_flash + light, tracer ribbons, impact_dust), 2 explosions at 2700 and 2880 (explosion_fire, smoke_column, rigid-body impulses)" },
+    { "tick": 3300, "event": "swap", "from": "forest", "to": "waterside" },
+    { "tick": [4200, 4800], "event": "gravity", "shape": "sphere, lake-local centre (0, 12, 0), radius 40 m", "field": "attractor 9.81 m/s^2 towards the centre replacing gravity inside the sphere (bodies, Matter water, particles)", "release_tick": 4800, "note": "bodies and water fall back at 80 s: splashes" },
+    { "tick": [4320, 4680], "event": "vfx_peak", "check": "128 effects, >= 524,288 particles, 256 ribbons, 16 local volumes live in every tick" },
+    { "tick": 5220, "event": "swap", "from": "waterside", "to": "interior" },
+    { "tick": [5400, 7200], "event": "vfx", "kinds": ["dust_motes", "fireplace_fire"] }
+  ],
+
+  "inputs": {
+    "character_commands": "per character: speed, direction, aim parameters every 0.5..1.2 s (the animation audit's controller: Idle <-> Move 2D freeform, upper-body Hold <-> Aim layer), from seed stream 'animation'; commands are World inputs applied at their tick",
+    "physics_commands": "gravity field (events), explosion impulses (events); nothing else",
+    "camera": "camera_track (no player input)"
+  },
+
+  "seeds": {
+    "master": 1,
+    "scenegen_request_seed": 1,
+    "streams": "SplitMix64(master, fnv1a64(name)) for 'vegetation', 'lights', 'animation', 'vfx', 'camera', 'swap'"
+  },
+
+  "hashes": {
+    "_rule": "sha256 of every source file and every generated output; the settings hash is sha256 over this manifest's canonical JSON (keys sorted, no whitespace) + the quality config SHA-256 of the build + C's scene content hashes",
+    "old_project_sources": {
+      "commit": "Unravel f9ae92a03f5a32909ba86c85f713cd0c938a5ce7 (last change under Assets/NativeEngine/DataWorld)",
+      "Assets/NativeEngine/DataWorld/ClothRecipe.asset": "378f1c8852aa04a48163a3d33d441697e3a615abab394c052e00e513e0f381d1",
+      "Assets/NativeEngine/DataWorld/RopeRecipe.asset": "e67376589d0dd8e577763191da613a2c3d1cfdac9bbe1fb087b5819307f778fa",
+      "Assets/NativeEngine/DataWorld/SoftVolumeRecipe.asset": "a60cf3730ff797c36fdee0ad5005dc7e1897d45eac13843706780a81839de921",
+      "Assets/NativeEngine/DataWorld/MatterRecipe.asset": "86c94cdfbe3d7e3e28228567ac49ac85402794e2e67cce85ccdf93385b97923a",
+      "Assets/NativeEngine/DataWorld/DestructionBurst.asset": "a01b74a3ba43e5f35b98d35ae04705c6388e0b5318eb00cb0d3a69ad9b3d4562",
+      "Assets/NativeEngine/DataWorld/CharacterIgnition.asset": "959aba7b19c7e7966fdf8461154614851dad89cf170771ae34ff662f39ae6493",
+      "Assets/NativeEngine/DataWorld/CharacterJump.unrvfx": "7a91be76b05a8bdd655adb31f4de30d971d5caa8f23bf5c033813eab847b5f99",
+      "Assets/NativeEngine/DataWorld/CharacterTrail.unrvfx": "9448c91c4e822ef11e29544d721cf32c7b977f1078c1060fbca728a4ebedf814",
+      "Assets/NativeEngine/DataWorld/CollisionSparks.unrvfx": "8ada0ce7f43c9988370c8f8f00b56d78410d6346932c412e42acdf06212158cf",
+      "Assets/NativeEngine/DataWorld/ColorFlare.unrvfx": "b184a6ee42feee3c0f17a1359b8483bc8377de04ec462f1b6729980fd088178d",
+      "Assets/NativeEngine/DataWorld/MeshSurfaceSparks.unrvfx": "4d109a32d7acb8a1711ba060f88af35bcb606ddab2e8db7fa9ee9e991dce9eaa",
+      "Assets/NativeEngine/DataWorld/TurbulentEmbers.unrvfx": "2d3213ad8f46c6acb99b154a0aa8f51fdf02a95f9c9eaac4c96bc7ca03b55f1d",
+      "Assets/NativeEngine/DataWorld/VisualTwirl.unrvfx": "87acbacb1a8699ccb74019fac4fd0cfeb61ca9494930ed72a16534880d641aab",
+      "Assets/NativeEngine/DataWorld/Materials.asset": "9f923e7f79e745a4682eb929e4bb478f3cb781622ad40ba2a9813d01a22ed9b5",
+      "Assets/NativeEngine/DataWorld/CharacterMesh.asset": "11c30a05681916bebe7fc5f906ec033e7714389197a4d63691bb4958b1155847",
+      "Assets/NativeAnimation/DataWorld/CharacterMotion.anim": "4796be79ab8cb5a91f8f6cd12470bac19b5fb9f418982115b085fac529e6d82d"
+    },
+    "generated": {
+      "rpp1_world.unxscene": null,
+      "bodies per section (4 files)": null,
+      "rpp1_camera.json": null,
+      "rpp1_events.json": null,
+      "settings_hash": null
+    }
+  }
+}
