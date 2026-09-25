@@ -30,7 +30,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     uint k;
     if (!vsmAirLevel(c, froxelTileWidth(g, 0.5 * (z0 + z1)), asfloat(P[1].z), k)) return;
     // The pages the segment crosses (the lookup's own page walk).
-    const float3 p0 = vsmLightSpace(c, g_cameraPosition + ray * z0), p1 = vsmLightSpace(c, g_cameraPosition + ray * z1);
+    const float3 p0 = vsmLightSpaceAt(c, g_cameraPosition + ray * z0, k), p1 = vsmLightSpaceAt(c, g_cameraPosition + ray * z1, k);
     const float texel = vsmTexel(k);
     const float2 A = p0.xy / texel, D = (p1.xy - p0.xy) / texel;
     VsmAirWalk w = vsmAirWalkBegin(A, D, VSM_PAGE, 0, 1);

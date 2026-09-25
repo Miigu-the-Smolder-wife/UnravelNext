@@ -29,13 +29,16 @@ void main(uint i : SV_DispatchThreadID)
     const float3 centre = transformPoint(inst.objectToWorld, mesh.boundsSphere.xyz);
     const uint2 rev = uint2(inst.transformRevision, inst.deformRevision);
     const uint2 last = lastRevision[i];
-    if (c.sceneInvalidate != 0)
+    if ((c.sceneInvalidate & 0x80000000u) != 0)
     {
         // Every page re-renders: every level's anchor is here now.
         lastRevision[i] = rev;
         [loop] for (uint k = 0; k < VSM_LEVELS; ++k) motion[i * VSM_LEVELS + k] = float4(centre, 0);
         return;
     }
+    // Levels whose basis refreshed re-render every page: their anchors are here now.
+    [loop] for (uint kr = 0; kr < VSM_LEVELS; ++kr)
+        if ((c.sceneInvalidate >> kr & 1u) != 0) motion[i * VSM_LEVELS + kr] = float4(centre, 0);
     if (all(last == rev)) return;
     lastRevision[i] = rev;
     if ((inst.flags & INSTANCE_CAST_SHADOW) == 0) return;

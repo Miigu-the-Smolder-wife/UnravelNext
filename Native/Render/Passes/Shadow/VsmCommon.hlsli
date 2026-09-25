@@ -49,16 +49,26 @@ uint vsmBlockOffset(uint m) { return m == 0 ? 0u : m == 1 ? 256u : m == 2 ? 320u
 #define VSM_REQ_PIXEL 1u
 #define VSM_REQ_PROPAGATED 2u
 
+// A clipmap level (64 B). Each level keeps the sun basis its pages were rendered with (moving sun: levels refresh to the
+// current sun in turn, S_STATUS_KO.md 7; the lookup error of a basis Delta theta old is <= 2 Delta theta / (pi tan
+// theta_s) in visibility, kept below shadow.vsm.sun_refresh_error). Levels with the same basis id share one light-space
+// grid (their texels nest), so walks to coarser levels reuse coordinates only then.
 struct VsmLevel
 {
-    int2 origin;    // absolute page coordinate of the window's first page
-    float texel;    // tau_k (m)
-    float pad;
+    float3 lightX;   // the level's light basis (lightZ towards the sun it was rendered with)
+    float cameraU;   // the camera in this basis: the window derives from it (vsmOrigin)
+    float3 lightY;
+    float cameraV;
+    float3 lightZ;
+    uint basis;      // basis id (changes when the level refreshes)
+    int2 origin;     // absolute page coordinate of the window's first page (CPU copy)
+    float hMin, hMax;  // light-space height range of the casters in this basis (raster depth mapping)
 };
 
 // Per-frame constants (VsmSystem.cpp mirrors this layout): a constant buffer view of the frame's slot of an upload
 // ring, read as ConstantBuffer<VsmConstants> (dynamic level indexing is a native constant load; the layout follows the
-// cbuffer packing rules: every float3 is followed by a scalar, VsmLevel is 16 B).
+// cbuffer packing rules: every float3 is followed by a scalar, VsmLevel is 64 B). lightX..Z, hMin/hMax and cameraUV
+// are the current sun's (the newest basis); lookups use their level's (vsmLightSpaceAt).
 struct VsmConstants
 {
     float3 lightX;
@@ -67,7 +77,8 @@ struct VsmConstants
     float hMax;
     float3 lightZ;           // towards the sun
     float tanSunRadius;
-    uint poolPagesX, poolPagesY, frame, sceneInvalidate;  // sceneInvalidate: every resident page is stale
+    uint poolPagesX, poolPagesY, frame, sceneInvalidate;  // bits 0..19: the level's pages are stale (its basis refreshed);
+                                                          // bit 31: every resident page is stale (scene reload)
     float time;
     float lodBias;
     float receiverBiasTexels;   // tolerance above the receiver's plane, in texels of the compared level (x (1 + slope))
@@ -113,9 +124,16 @@ float vsmDecode(uint e) { return asfloat((e & 0x80000000u) ? (e & 0x7FFFFFFFu) :
 // the same float operations as VsmSystem.cpp.
 float vsmTexel(uint k) { return asfloat((117u + k) << 23); }
 float vsmPageSize(uint k) { return asfloat((124u + k) << 23); }
-int2 vsmOrigin(ConstantBuffer<VsmConstants> c, uint k) { return int2(floor(c.cameraUV / vsmPageSize(k))) - (int)(VSM_TABLE / 2); }
+int2 vsmOrigin(ConstantBuffer<VsmConstants> c, uint k) { return int2(floor(float2(c.level[k].cameraU, c.level[k].cameraV) / vsmPageSize(k))) - (int)(VSM_TABLE / 2); }
 
+// Light space of the current sun (the newest basis; the levels' may be older): for callers that pick no level.
 float3 vsmLightSpace(ConstantBuffer<VsmConstants> c, float3 world) { return float3(dot(world, c.lightX), dot(world, c.lightY), dot(world, c.lightZ)); }
+// Light space of level k's basis: every lookup and mark on level k.
+float3 vsmLightSpaceAt(ConstantBuffer<VsmConstants> c, float3 world, uint k)
+{
+    return float3(dot(world, c.level[k].lightX), dot(world, c.level[k].lightY), dot(world, c.level[k].lightZ));
+}
+bool vsmSameBasis(ConstantBuffer<VsmConstants> c, uint k, uint j) { return c.level[k].basis == c.level[j].basis; }
 
 // Finest level whose texel is not larger than the receiver's pixel footprint (ARCHITECTURE 2.3: page texel <= pixel).
 uint vsmLevelForFootprint(ConstantBuffer<VsmConstants> c, float footprint)

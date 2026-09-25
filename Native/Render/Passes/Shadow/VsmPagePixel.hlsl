@@ -4,7 +4,7 @@
 // InterlockedMax (the surface nearest the sun wins); pixels of pages that are not dirty write nothing. It also records,
 // per page, whether wind-affected casters were drawn and their largest displacement bound (wind dirty rule, VsmRelease).
 // userData: level (bits 0-4) | window origin x mod 128 (bits 5-11) | origin y mod 128 (bits 12-18)
-// P[4].x pool UAV (raw), P[4].y page table SRV (raw), P[4].z hMin (float bits), P[4].w hMax (float bits)
+// P[4].x pool UAV (raw), P[4].y page table SRV (raw), P[4].z VSM constants CBV (the level's hMin / hMax: its basis)
 // P[5].x pool pages per row, P[5].y page metadata UAV (VsmPageMeta)
 #include "Passes/Visibility/DepthRaster.hlsli"
 #include "Deformation.hlsli"
@@ -20,7 +20,8 @@ void main(DepthRasterPixel p)
     ByteAddressBuffer table = ResourceDescriptorHeap[P[4].y];
     const uint e = table.Load((level * VSM_SLOTS_PER_LEVEL + slot2.y * VSM_TABLE + slot2.x) * 8);
     if ((e & (VSM_FLAG_RESIDENT | VSM_FLAG_DIRTY)) != (VSM_FLAG_RESIDENT | VSM_FLAG_DIRTY)) return;
-    const float hMin = asfloat(P[4].z), hMax = asfloat(P[4].w);
+    ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[P[4].z];
+    const float hMin = c.level[level].hMin, hMax = c.level[level].hMax;
     const float h = hMax - p.position.z * (hMax - hMin);
     const uint phys = e & VSM_PHYS_MASK;
     RWByteAddressBuffer pool = ResourceDescriptorHeap[P[4].x];

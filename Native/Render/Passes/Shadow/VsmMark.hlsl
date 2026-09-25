@@ -17,7 +17,7 @@ void main(uint2 px : SV_DispatchThreadID)
     const float3 world = worldFromDepth(float2(px), depth);
     const float footprint = 2 * linearDepth(depth) * g_tanHalfFovY / g_viewHeight;
     const uint k = vsmLevelForFootprint(c, footprint);
-    const float3 ls = vsmLightSpace(c, world);
+    const float3 ls = vsmLightSpaceAt(c, world, k);
     const int2 page = vsmAbsPage(vsmAbsTexel(c, ls.xy, k));
     if (!vsmInWindow(c, page, k)) return;
     const uint slot = vsmSlot(page, k);

@@ -94,7 +94,7 @@ struct VsmAirWalkCount
 float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k, inout VsmAirWalkCount count, bool pageOnly = false)
 {
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
-    const float3 pa = vsmLightSpace(vc, a), pb = vsmLightSpace(vc, b);
+    const float3 pa = vsmLightSpaceAt(vc, a, k), pb = vsmLightSpaceAt(vc, b, k);
     const float texel = vsmTexel(k);
     const float2 A = pa.xy / texel, D = (pb.xy - pa.xy) / texel;
     const float h0 = pa.z, dh = pb.z - pa.z;

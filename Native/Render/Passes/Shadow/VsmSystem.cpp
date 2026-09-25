@@ -20,7 +20,7 @@ using namespace s_detail;
 namespace
 {
 const char* const kStateKey = "s.vsm";
-constexpr uint32_t kRingSlots = 16, kRingStride = 1024;  // per-frame constants; frames in flight must be < kRingSlots
+constexpr uint32_t kRingSlots = 16, kRingStride = 2048;  // per-frame constants; frames in flight must be < kRingSlots
 constexpr uint32_t kStatsSlots = 4, kStatsBytes = 128;  // VSM stats words (VsmBegin clears them)
 constexpr uint64_t kOverflowMinWords = 1u << 18;  // 1 MB overflow list at least (INTERFACES 7.3)
 constexpr uint32_t kMetaBytes = 48;  // VsmPageMeta
@@ -51,6 +51,11 @@ struct State
     VsmStats latest;
     // CPU view of the clipmap.
     float3 sun{};
+    // Moving sun (S_STATUS_KO.md 7): each level's basis (the sun it was rendered with), id and caster height range.
+    float3 levelSun[kLevels] = {};
+    uint32_t levelBasis[kLevels] = {};
+    float levelHMin[kLevels] = {}, levelHMax[kLevels] = {};
+    uint32_t basisCounter = 0;
     float3 windDirection{};
     float windSpeed = -1;
     uint32_t sceneRevision = UINT32_MAX;
@@ -208,12 +213,13 @@ void casterHeightRange(const GpuScene& scene, float3 z, float& lo, float& hi)
 
 float4x4 levelViewProj(const VsmConstantsCpu& c, uint32_t k)
 {
-    const float t = c.level[k].texel, V = (float)kVirtual, range = c.hMax - c.hMin;
-    const float ox = (float)c.level[k].origin[0] * kPage, oy = (float)c.level[k].origin[1] * kPage;
+    const VsmLevelCpu& L = c.level[k];
+    const float t = std::ldexp(1.0f, (int)k - 10), V = (float)kVirtual, range = L.hMax - L.hMin;
+    const float ox = (float)L.origin[0] * kPage, oy = (float)L.origin[1] * kPage;
     float4x4 m;
-    m.m[0][0] = 2 * c.lightX.x / (t * V); m.m[0][1] = 2 * c.lightX.y / (t * V); m.m[0][2] = 2 * c.lightX.z / (t * V); m.m[0][3] = -2 * ox / V - 1;
-    m.m[1][0] = -2 * c.lightY.x / (t * V); m.m[1][1] = -2 * c.lightY.y / (t * V); m.m[1][2] = -2 * c.lightY.z / (t * V); m.m[1][3] = 1 + 2 * oy / V;
-    m.m[2][0] = -c.lightZ.x / range; m.m[2][1] = -c.lightZ.y / range; m.m[2][2] = -c.lightZ.z / range; m.m[2][3] = c.hMax / range;
+    m.m[0][0] = 2 * L.lightX.x / (t * V); m.m[0][1] = 2 * L.lightX.y / (t * V); m.m[0][2] = 2 * L.lightX.z / (t * V); m.m[0][3] = -2 * ox / V - 1;
+    m.m[1][0] = -2 * L.lightY.x / (t * V); m.m[1][1] = -2 * L.lightY.y / (t * V); m.m[1][2] = -2 * L.lightY.z / (t * V); m.m[1][3] = 1 + 2 * oy / V;
+    m.m[2][0] = -L.lightZ.x / range; m.m[2][1] = -L.lightZ.y / range; m.m[2][2] = -L.lightZ.z / range; m.m[2][3] = L.hMax / range;
     m.m[3][0] = 0; m.m[3][1] = 0; m.m[3][2] = 0; m.m[3][3] = 1;
     return m;
 }
@@ -480,18 +486,63 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     // Light basis, caster range, scene-wide invalidation.
     const scene::Scene* src = fc.scene.source();
     const float3 sunDir = normalize(src ? src->sun.direction : scene::Sun{}.direction);
-    bool invalidate = !s.initialized;
-    if (std::memcmp(&sunDir, &s.sun, sizeof sunDir) != 0 || fc.scene.revision() != s.sceneRevision)
-    {
-        invalidate = true;
-        s.sun = sunDir;
-        s.sceneRevision = fc.scene.revision();
+    // Scene reload (or first frame): every page stale, every level on the current sun. A moving sun: each level keeps the
+    // basis its pages were rendered with and refreshes to the current sun before its age exceeds
+    // dthetaMax = (pi / 2) tan(theta_s) e (visibility error e = shadow.vsm.sun_refresh_error: a basis dtheta old shifts
+    // a shadow by d dtheta under a penumbra of width 2 d tan(theta_s), slope <= 4 / (pi w), so |dV| <= 2 dtheta /
+    // (pi tan(theta_s)), independent of d and the level); besides the levels that must refresh, ceil(20 x
+    // (sun change this frame) / dthetaMax) of the oldest refresh every frame so the load spreads evenly.
+    const bool sceneChanged = !s.initialized || fc.scene.revision() != s.sceneRevision;
+    const float margin = (float)q.number("shadow.vsm.height_margin_m");
+    uint32_t invalidateMask = 0;
+    // Angles between unit vectors by atan2(|a x b|, a . b): acos(a . b) is 0 in float below ~3e-4 rad.
+    auto angleBetween = [](float3 a, float3 b) { return std::atan2(length(cross(a, b)), dot(a, b)); };
+    const float sunAngle = angleBetween(sunDir, s.sun);  // this frame's change
+    const float tanSun = std::tan(src ? src->sun.angularRadius : scene::Sun{}.angularRadius);
+    const float dthetaMax = 1.5707963f * tanSun * (float)q.number("shadow.vsm.sun_refresh_error");
+    auto refresh = [&](uint32_t k) {
+        s.levelSun[k] = sunDir;
+        s.levelBasis[k] = ++s.basisCounter;
         float lo, hi;
         casterHeightRange(fc.scene, sunDir, lo, hi);
-        const float margin = (float)q.number("shadow.vsm.height_margin_m");
-        s.hMin = lo - margin;
-        s.hMax = hi + margin;
+        s.levelHMin[k] = lo - margin;
+        s.levelHMax[k] = hi + margin;
+        invalidateMask |= 1u << k;
+    };
+    uint32_t refreshed = 0;
+    float oldest = 0;
+    if (sceneChanged)
+    {
+        s.sceneRevision = fc.scene.revision();
+        for (uint32_t k = 0; k < kLevels; ++k) refresh(k);
+        invalidateMask = 0x80000000u;
+        refreshed = kLevels;
     }
+    else if (sunAngle > 0)
+    {
+        float age[kLevels];
+        for (uint32_t k = 0; k < kLevels; ++k) age[k] = angleBetween(s.levelSun[k], sunDir);
+        const uint32_t spread = std::min<uint32_t>(kLevels, (uint32_t)std::ceil(kLevels * sunAngle / std::max(dthetaMax, 1e-12f)));
+        uint32_t order[kLevels];
+        for (uint32_t k = 0; k < kLevels; ++k) order[k] = k;
+        std::sort(order, order + kLevels, [&](uint32_t a, uint32_t b) { return age[a] > age[b]; });
+        for (uint32_t i = 0; i < kLevels; ++i)
+        {
+            const uint32_t k = order[i];
+            // Must: by the next frame the basis would be older than the bound; spread: the oldest ones.
+            if (age[k] + sunAngle > dthetaMax || i < spread) refresh(k);
+        }
+        for (uint32_t k = 0; k < kLevels; ++k)
+        {
+            if (invalidateMask >> k & 1u) ++refreshed;
+            else oldest = std::max(oldest, age[k]);
+        }
+    }
+    s.sun = sunDir;
+    s.latest.levelsRefreshed = refreshed;
+    s.latest.largestBasisAge = oldest;
+    s.hMin = s.levelHMin[0];
+    s.hMax = s.levelHMax[0];
     const float3 windDir = src ? src->windDirection : float3{};
     const float windSpeed = src ? src->windSpeed : 0.0f;
     const bool windChanged = std::memcmp(&windDir, &s.windDirection, sizeof windDir) != 0 || windSpeed != s.windSpeed;
@@ -504,13 +555,17 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     c.windDirection = c.windSpeed > 0 ? normalize(windDir) : float3{};
     c.lightZ = sunDir;
     lightBasis(sunDir, c.lightX, c.lightY);
-    c.hMin = s.hMin;
-    c.hMax = s.hMax;
-    c.tanSunRadius = std::tan(src ? src->sun.angularRadius : scene::Sun{}.angularRadius);
+    {
+        float lo, hi;
+        casterHeightRange(fc.scene, sunDir, lo, hi);
+        c.hMin = lo - margin;
+        c.hMax = hi + margin;
+    }
+    c.tanSunRadius = tanSun;
     c.poolPagesX = s.poolPagesX;
     c.poolPagesY = s.poolPagesY;
     c.frame = (uint32_t)++s.frames;
-    c.sceneInvalidate = invalidate ? 1u : 0u;
+    c.sceneInvalidate = invalidateMask;
     c.time = (float)fc.frame.time;
     c.lodBias = (float)q.number("shadow.vsm.lod_bias");
     c.receiverBiasTexels = (float)q.number("shadow.vsm.receiver_bias_texels");
@@ -521,16 +576,21 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     c.searchTaps = (uint32_t)q.integer("shadow.vsm.search_taps");
     c.filterTaps = (uint32_t)q.integer("shadow.vsm.filter_taps");
     const float3 cam = main.view.position;
-    const float cu = dot(cam, c.lightX), cv = dot(cam, c.lightY);
-    c.cameraUV[0] = cu;
-    c.cameraUV[1] = cv;
+    c.cameraUV[0] = dot(cam, c.lightX);
+    c.cameraUV[1] = dot(cam, c.lightY);
     for (uint32_t k = 0; k < kLevels; ++k)
     {
-        const float texel = std::ldexp(1.0f, (int)k - 10);
-        const float pageSize = texel * kPage;
-        c.level[k].texel = texel;
-        c.level[k].origin[0] = (int32_t)std::floor(cu / pageSize) - (int32_t)kTable / 2;
-        c.level[k].origin[1] = (int32_t)std::floor(cv / pageSize) - (int32_t)kTable / 2;
+        VsmLevelCpu& L = c.level[k];
+        L.lightZ = s.levelSun[k];
+        lightBasis(L.lightZ, L.lightX, L.lightY);
+        L.basis = s.levelBasis[k];
+        L.hMin = s.levelHMin[k];
+        L.hMax = s.levelHMax[k];
+        L.cameraU = dot(cam, L.lightX);
+        L.cameraV = dot(cam, L.lightY);
+        const float pageSize = std::ldexp(1.0f, (int)k - 10) * kPage;
+        L.origin[0] = (int32_t)std::floor(L.cameraU / pageSize) - (int32_t)kTable / 2;
+        L.origin[1] = (int32_t)std::floor(L.cameraV / pageSize) - (int32_t)kTable / 2;
     }
     s.constantsOffset = (uint32_t)(fc.frame.frameIndex % kRingSlots) * kRingStride;
     std::memcpy(s.ringMapped + s.constantsOffset, &c, sizeof c);
@@ -942,8 +1002,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         r.bufferUses.push_back({ meta, Use::UavGraphics });
         r.pixelConstants[0] = s.poolUav;
         r.pixelConstants[1] = s.tableSrv;
-        std::memcpy(&r.pixelConstants[2], &c.hMin, 4);
-        std::memcpy(&r.pixelConstants[3], &c.hMax, 4);
+        r.pixelConstants[2] = s.ringCbv[s.constantsOffset / kRingStride];  // each level's hMin / hMax (its basis)
+        r.pixelConstants[3] = 0;
         r.pixelConstants[4] = s.poolPagesX;
         r.pixelConstants[5] = s.metaUav;
         r.cullMask = mask;
@@ -956,7 +1016,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             v.viewProj = levelViewProj(c, k);
             v.viewportX = v.viewportY = 0;
             v.viewportWidth = v.viewportHeight = kVirtual;
-            v.lodPixelsPerMetre = 1.0f / c.level[k].texel;
+            v.lodPixelsPerMetre = 1.0f / std::ldexp(1.0f, (int)k - 10);
             v.userData = k | ((uint32_t)(c.level[k].origin[0] & 127) << 5) | ((uint32_t)(c.level[k].origin[1] & 127) << 12);
             v.cullMaskOffset = k * (kTable * kTable / 32);
             r.views.push_back(v);

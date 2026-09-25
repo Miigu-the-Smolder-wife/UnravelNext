@@ -12,7 +12,7 @@
 
 void markRect(ConstantBuffer<VsmConstants> c, RWByteAddressBuffer table, float3 centre, float radius, uint k, uint lane)
 {
-    const float3 ls = vsmLightSpace(c, centre);
+    const float3 ls = vsmLightSpaceAt(c, centre, k);
     const float pageSize = vsmTexel(k) * VSM_PAGE;
     const int2 lo = max(int2(floor((ls.xy - radius) / pageSize)), vsmOrigin(c, k));
     const int2 hi = min(int2(floor((ls.xy + radius) / pageSize)), vsmOrigin(c, k) + (int)VSM_TABLE - 1);

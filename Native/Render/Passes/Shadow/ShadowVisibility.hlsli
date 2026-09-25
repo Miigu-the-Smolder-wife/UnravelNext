@@ -119,8 +119,8 @@ float shadowSunTransmittanceAt(ShadowSrvs s, float3 worldPos, float footprint, f
     r.blocks = ResourceDescriptorHeap[s.blocks];
     r.searchBound = ResourceDescriptorHeap[s.searchBound];
     r.cbv = s.constants;
-    const float3 ls = vsmLightSpace(c, worldPos);
     const uint k = vsmLevelForFootprint(c, footprint);
+    const float3 ls = vsmLightSpaceAt(c, worldPos, k);
     const int2 page = vsmAbsPage(vsmAbsTexel(c, ls.xy, k));
     ByteAddressBuffer layers = ResourceDescriptorHeap[s.layers];
     return vsmLayerTransmittance(layers, c.poolPagesX * c.poolPagesY, vsmEntry(r, page, k), page, ls.xy, k, reach, ls.z);
@@ -140,11 +140,10 @@ float shadowSunVisibilityAt(ShadowSrvs s, float3 worldPos, float3 normal, float 
     r.searchBound = ResourceDescriptorHeap[s.searchBound];
     r.cbv = s.constants;
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[s.constants];
-    const float2 uv = vsmLightSpace(c, worldPos).xy;
     const uint k = vsmLevelForFootprint(c, footprint);
     uint level = 0xFFFFFFFFu;
     [loop] for (uint j = 0; j < 4 && j <= k; ++j)
-        if (vsmEntry(r, vsmAbsPage(vsmAbsTexel(c, uv, k - j)), k - j) != 0)
+        if (vsmEntry(r, vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, k - j).xy, k - j)), k - j) != 0)
         {
             level = k - j;
             break;

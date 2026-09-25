@@ -11,10 +11,16 @@ namespace unx::render::shadow
 // Mirror of VsmConstants (VsmCommon.hlsli).
 struct VsmLevelCpu
 {
+    float3 lightX;
+    float cameraU;
+    float3 lightY;
+    float cameraV;
+    float3 lightZ;
+    uint32_t basis;
     int32_t origin[2];
-    float texel;
-    float pad;
+    float hMin, hMax;
 };
+static_assert(sizeof(VsmLevelCpu) == 64);
 struct VsmConstantsCpu
 {
     float3 lightX;
@@ -47,7 +53,7 @@ struct VsmLocalLightCpu
     uint32_t active;
 };
 static_assert(sizeof(VsmLocalLightCpu) == 48);
-static_assert(sizeof(VsmConstantsCpu) == 64 + 16 * 4 + kLevels * 16 && sizeof(VsmConstantsCpu) <= 1024);
+static_assert(sizeof(VsmConstantsCpu) == 64 + 16 * 4 + kLevels * 64 && sizeof(VsmConstantsCpu) <= 2048);
 constexpr uint32_t kSlots = kLevels * kTable * kTable;  // the sun's
 constexpr uint32_t kTotalSlots = kSlots + kLocalLights * kLocalLightSlots;
 
@@ -59,6 +65,9 @@ struct VsmStats
     uint32_t pathNoCaster = 0, pathRegionLit = 0, pathRegionUmbra = 0, pathSearchLit = 0, pathFiltered = 0, pathDiskLit = 0, pathDiskUmbra = 0;
     // Local lights of the latest recorded frame (CPU): shadow slots in use, raster-active, casting lights without a slot.
     uint32_t localAssigned = 0, localActive = 0, localWithoutSlot = 0;
+    // Moving sun (CPU, latest recorded frame): levels whose basis refreshed this frame, largest basis age (rad).
+    uint32_t levelsRefreshed = 0;
+    float largestBasisAge = 0;
     // Overflow list of the main view (INTERFACES 7.3, v1.20): words the frame's tiles needed, tiles over the capacity
     // (fallback) and their overflow pixels (overage: 0 in steady state), shadow-casting lights past the third over all
     // pixels (N_ovf), and the capacity in words the frame ran with (CPU).

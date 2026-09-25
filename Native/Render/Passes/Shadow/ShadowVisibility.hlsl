@@ -54,7 +54,7 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
     float3 normal;
     const float3 world = shadowReceiver(depthTex, P[0].y, px, depth, normal);
     const float footprint = 2 * linearDepth(depth) * g_tanHalfFovY / g_viewHeight;
-    const VsmReceiver rc = vsmMakeReceiver(vc, world, normal);
+    const VsmReceiver rc = vsmMakeReceiver(vc, world, normal, vsmLevelForFootprint(vc, footprint));
     uint k;
     float reach;
     const uint cls = vsmSunClassify(r, rc, footprint, tan(g_sunAngularRadius), k, reach, path);

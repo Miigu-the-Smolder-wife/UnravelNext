@@ -55,7 +55,9 @@ void main(uint slot : SV_DispatchThreadID)
         return;
     }
     e.x &= ~VSM_FLAG_DIRTY;
-    if (c.sceneInvalidate) e.x |= VSM_FLAG_STALE;
+    // Scene reload (bit 31) or the level's basis refreshed (bit k, sun slots).
+    if ((c.sceneInvalidate & 0x80000000u) != 0 || (slot < VSM_SUN_SLOTS && (c.sceneInvalidate >> (slot / VSM_SLOTS_PER_LEVEL) & 1u) != 0))
+        e.x |= VSM_FLAG_STALE;
     if (m.windCaster != 0)
     {
         // Wind rule (b), v1.23: the casters' largest displacement since the render, bounded from the two ends (the wind

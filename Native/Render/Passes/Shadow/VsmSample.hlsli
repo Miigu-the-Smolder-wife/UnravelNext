@@ -25,30 +25,66 @@ uint vsmEntry(VsmResources r, int2 page, uint k)
     return ((e.x & VSM_FLAG_RESIDENT) != 0 && e.y == vsmTag(page)) ? e.x : 0;
 }
 
-// Encoded height at an absolute texel of level k, from the finest resident level at or above k (a coarser level stores
-// the same height field at a coarser texel). Returns VSM_EMPTY when no level holds it.
-uint vsmHeightAt(VsmResources r, int2 texel, uint k)
-{
-    ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
-    [loop] for (uint j = k; j < VSM_LEVELS; ++j)
-    {
-        const int2 t = texel >> (int)(j - k);
-        const uint e = vsmEntry(r, t >> (int)VSM_PAGE_SHIFT, j);
-        if (e != 0) return r.pool.Load(vsmPoolAddress(e & VSM_PHYS_MASK, uint2(t & (int)(VSM_PAGE - 1))));
-    }
-    return VSM_EMPTY;
-}
-
 // The receiver's plane in light space: its height above a lateral offset q from the receiver is hr + dot(slope, q).
 // Comparing every texel with the plane at the texel's own centre removes self-shadowing on any planar receiver without
 // moving the lookup point (a normal offset shifts the whole penumbra laterally by about a texel).
 struct VsmReceiver
 {
+    float3 world;   // world position and geometric normal (re-projection onto another level's basis)
+    float3 normal;
+    uint level;     // the level whose basis uv, h and slope are in
     float2 uv;      // light-space lateral position
     float h;        // light-space height (towards the sun)
     float2 slope;   // height gradient of the receiver's plane, clamped
     float bias;     // texel-scale tolerance (the stored height is the surface at the texel centre)
 };
+
+VsmReceiver vsmMakeReceiver(ConstantBuffer<VsmConstants> c, float3 p, float3 n, uint k)
+{
+    const float3 ls = vsmLightSpaceAt(c, p, k);
+    const float3 nl = vsmLightSpaceAt(c, n, k);
+    VsmReceiver rc;
+    rc.world = p;
+    rc.normal = n;
+    rc.level = k;
+    rc.uv = ls.xy;
+    rc.h = ls.z;
+    const float2 slope = -nl.xy / max(abs(nl.z), 1e-4);
+    rc.slope = slope * min(1.0, c.maxReceiverSlope / max(length(slope), 1e-6));
+    rc.bias = c.receiverBiasTexels;
+    return rc;
+}
+// The receiver in level j's basis: the same numbers when j shares the basis of the receiver's level (nested grids).
+VsmReceiver vsmReceiverAt(ConstantBuffer<VsmConstants> c, VsmReceiver rc, uint j)
+{
+    if (vsmSameBasis(c, rc.level, j))
+    {
+        rc.level = j;
+        return rc;
+    }
+    return vsmMakeReceiver(c, rc.world, rc.normal, j);
+}
+
+// Encoded height at an absolute texel of level k, from the finest resident level at or above k (a coarser level stores
+// the same height field at a coarser texel). Returns VSM_EMPTY when no level holds it. A coarser level with another
+// basis takes the texel centre at the receiver's height into its own grid (rc: the receiver at level k).
+uint vsmHeightAt(VsmResources r, VsmReceiver rc, int2 texel, uint k)
+{
+    ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
+    [loop] for (uint j = k; j < VSM_LEVELS; ++j)
+    {
+        int2 t = texel >> (int)(j - k);
+        if (!vsmSameBasis(vc, k, j))
+        {
+            const float2 centre = (float2(texel) + 0.5) * vsmTexel(k);
+            const float3 w = vc.level[k].lightX * centre.x + vc.level[k].lightY * centre.y + vc.level[k].lightZ * rc.h;
+            t = int2(floor(vsmLightSpaceAt(vc, w, j).xy / vsmTexel(j)));
+        }
+        const uint e = vsmEntry(r, t >> (int)VSM_PAGE_SHIFT, j);
+        if (e != 0) return r.pool.Load(vsmPoolAddress(e & VSM_PHYS_MASK, uint2(t & (int)(VSM_PAGE - 1))));
+    }
+    return VSM_EMPTY;
+}
 
 // Height the receiver's plane has under texel tj of level k, plus the level's tolerance.
 float vsmPlaneHeight(ConstantBuffer<VsmConstants> c, VsmReceiver rc, int2 tj, uint k)
@@ -68,7 +104,8 @@ struct VsmQuad
     uint level;   // level the texels come from
 };
 
-VsmQuad vsmFetchQuad(VsmResources r, float2 uv, uint k)
+// At the receiver's position plus a lateral offset (m, in the light plane).
+VsmQuad vsmFetchQuad(VsmResources r, VsmReceiver rc, float2 offset, uint k)
 {
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
     VsmQuad q;
@@ -78,7 +115,8 @@ VsmQuad vsmFetchQuad(VsmResources r, float2 uv, uint k)
     q.f = 0;
     [loop] for (uint j = k; j < VSM_LEVELS; ++j)
     {
-        const float2 t = uv / vsmTexel(j) - 0.5;
+        const VsmReceiver rj = vsmReceiverAt(vc, rc, j);
+        const float2 t = (rj.uv + offset) / vsmTexel(j) - 0.5;
         const int2 t0 = int2(floor(t));
         const uint e = vsmEntry(r, t0 >> (int)VSM_PAGE_SHIFT, j);
         if (e == 0) continue;
@@ -96,9 +134,9 @@ VsmQuad vsmFetchQuad(VsmResources r, float2 uv, uint k)
         else
         {
             q.h.x = r.pool.Load(vsmPoolAddress(e & VSM_PHYS_MASK, local));
-            q.h.y = vsmHeightAt(r, t0 + int2(1, 0), j);
-            q.h.z = vsmHeightAt(r, t0 + int2(0, 1), j);
-            q.h.w = vsmHeightAt(r, t0 + int2(1, 1), j);
+            q.h.y = vsmHeightAt(r, rj, t0 + int2(1, 0), j);
+            q.h.z = vsmHeightAt(r, rj, t0 + int2(0, 1), j);
+            q.h.w = vsmHeightAt(r, rj, t0 + int2(1, 1), j);
         }
         return q;
     }
@@ -107,24 +145,27 @@ VsmQuad vsmFetchQuad(VsmResources r, float2 uv, uint k)
 
 // Fraction (bilinear over the 2 x 2 texels around uv, finest resident level at or above k) of columns that rise above
 // the receiver's plane.
-float vsmOccupancy(VsmResources r, VsmReceiver rc, float2 uv, uint k)
+float vsmOccupancy(VsmResources r, VsmReceiver rc, float2 offset, uint k)
 {
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
-    const VsmQuad q = vsmFetchQuad(r, uv, k);
+    const VsmQuad q = vsmFetchQuad(r, rc, offset, k);
+    const VsmReceiver rq = vsmReceiverAt(vc, rc, q.level);
     float o[4];
     [unroll] for (uint j = 0; j < 4; ++j)
-        o[j] = q.h[j] > vsmEncode(vsmPlaneHeight(vc, rc, q.t0 + int2(j & 1, j >> 1), q.level)) ? 1.0 : 0.0;
+        o[j] = q.h[j] > vsmEncode(vsmPlaneHeight(vc, rq, q.t0 + int2(j & 1, j >> 1), q.level)) ? 1.0 : 0.0;
     return lerp(lerp(o[0], o[1], q.f.x), lerp(o[2], o[3], q.f.x), q.f.y);
 }
 
 // Highest caster the blocker search of a receiver at uv (level k) can meet: one read of the search bound grid.
-float vsmSearchHeight(VsmResources r, float2 uv, uint k)
+// rc: the receiver at level k (heights in level k's basis; a coarser level with another basis differs from it by less
+// than the refresh bound, like its pages' content).
+float vsmSearchHeight(VsmResources r, VsmReceiver rc, uint k)
 {
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
-    const int2 page = vsmAbsPage(vsmAbsTexel(vc, uv, k));
+    const int2 page = vsmAbsPage(vsmAbsTexel(vc, rc.uv, k));
     [loop] for (uint j = k; j < VSM_LEVELS; ++j)
     {
-        const int2 a = page >> (int)(j - k);
+        const int2 a = vsmSameBasis(vc, k, j) ? page >> (int)(j - k) : vsmAbsPage(vsmAbsTexel(vc, vsmReceiverAt(vc, rc, j).uv, j));
         if (vsmInWindow(vc, a, j))
         {
             const uint m = r.searchBound.Load(vsmSlot(a, j) * 4);
@@ -143,11 +184,13 @@ float vsmSearchHeight(VsmResources r, float2 uv, uint k)
 #define VSM_REGION_LIT 1u
 #define VSM_REGION_UMBRA 2u
 
-uint vsmRegionClassify(VsmResources r, VsmReceiver rc, float2 uv, float radius, uint k)
+uint vsmRegionClassify(VsmResources r, VsmReceiver rcIn, float radius, uint k)
 {
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
     [loop] for (uint j = k; j < VSM_LEVELS; ++j)
     {
+        const VsmReceiver rc = vsmReceiverAt(vc, rcIn, j);
+        const float2 uv = rc.uv;
         const float texel = vsmTexel(j);
         const int2 t0 = int2(floor((uv - radius) / texel)), t1 = int2(floor((uv + radius) / texel));
         const uint size = (uint)max(t1.x - t0.x, t1.y - t0.y) + 1;
@@ -233,19 +276,6 @@ uint vsmLevelForSize(ConstantBuffer<VsmConstants> c, uint k, float size)
 #define VSM_PATH_DISK_LIT 5u       // block hierarchy over the penumbra disk: no texel above the plane
 #define VSM_PATH_DISK_UMBRA 6u     // block hierarchy over the penumbra disk: every texel above the plane
 
-VsmReceiver vsmMakeReceiver(ConstantBuffer<VsmConstants> c, float3 p, float3 n)
-{
-    const float3 ls = vsmLightSpace(c, p);
-    const float3 nl = vsmLightSpace(c, n);
-    VsmReceiver rc;
-    rc.uv = ls.xy;
-    rc.h = ls.z;
-    const float2 slope = -nl.xy / max(abs(nl.z), 1e-4);
-    rc.slope = slope * min(1.0, c.maxReceiverSlope / max(length(slope), 1e-6));
-    rc.bias = c.receiverBiasTexels;
-    return rc;
-}
-
 // Steps 1: VSM_REGION_LIT / VSM_REGION_UMBRA when settled, else VSM_REGION_MIXED with the level and reach for step 2.
 uint vsmSunClassify(VsmResources r, VsmReceiver rc, float footprint, float tanSun, out uint k, out float reach, out uint path)
 {
@@ -253,10 +283,11 @@ uint vsmSunClassify(VsmResources r, VsmReceiver rc, float footprint, float tanSu
     k = vsmLevelForFootprint(vc, footprint);
     reach = 0;
     path = VSM_PATH_NO_CASTER;
-    const float dmax = vsmSearchHeight(r, rc.uv, k) - rc.h;
+    const VsmReceiver rk = vsmReceiverAt(vc, rc, k);
+    const float dmax = vsmSearchHeight(r, rk, k) - rk.h;
     if (dmax <= 0) return VSM_REGION_LIT;
     reach = dmax * tanSun;
-    const uint cls = vsmRegionClassify(r, rc, rc.uv, reach, k);
+    const uint cls = vsmRegionClassify(r, rk, reach, k);
     path = cls == VSM_REGION_LIT ? VSM_PATH_REGION_LIT : cls == VSM_REGION_UMBRA ? VSM_PATH_REGION_UMBRA : VSM_PATH_FILTERED;
     return cls;
 }
@@ -265,20 +296,22 @@ uint vsmSunClassify(VsmResources r, VsmReceiver rc, float footprint, float tanSu
 float vsmSunPenumbra(VsmResources r, VsmReceiver rc, uint k, float reach, float tanSun, uint searchTaps, uint filterTaps, out uint path)
 {
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[r.cbv];
+    rc = vsmReceiverAt(c, rc, k);
     const uint ks = vsmLevelForSize(c, k, reach * sqrt(ATMO_PI_FOR_VSM / searchTaps));
     float sum = 0, count = 0;
     [loop] for (uint i = 0; i < searchTaps; ++i)
     {
-        const VsmQuad q = vsmFetchQuad(r, rc.uv + vsmDiskPoint(i, searchTaps) * reach, ks);
+        const VsmQuad q = vsmFetchQuad(r, rc, vsmDiskPoint(i, searchTaps) * reach, ks);
+        const VsmReceiver rq = vsmReceiverAt(c, rc, q.level);
         const float texel = vsmTexel(q.level);
         [unroll] for (uint j = 0; j < 4; ++j)
         {
             const int2 tj = q.t0 + int2(j & 1, j >> 1);
-            const float plane = vsmPlaneHeight(c, rc, tj, q.level);
+            const float plane = vsmPlaneHeight(c, rq, tj, q.level);
             if (q.h[j] <= vsmEncode(plane)) continue;
             const float d = vsmDecode(q.h[j]) - plane;
             // Lateral distance of the texel from the receiver (less half a texel diagonal) within the cone it can shade.
-            const float2 centre = (float2(tj) + 0.5) * texel - rc.uv;
+            const float2 centre = (float2(tj) + 0.5) * texel - rq.uv;
             if (length(centre) - 0.7071 * texel <= d * tanSun)
             {
                 sum += d;
@@ -292,7 +325,7 @@ float vsmSunPenumbra(VsmResources r, VsmReceiver rc, uint k, float reach, float 
         return 1;
     }
     const float radius = (sum / count) * tanSun;
-    const uint diskClass = vsmRegionClassify(r, rc, rc.uv, radius, k);
+    const uint diskClass = vsmRegionClassify(r, rc, radius, k);
     if (diskClass == VSM_REGION_LIT)
     {
         path = VSM_PATH_DISK_LIT;
@@ -307,14 +340,14 @@ float vsmSunPenumbra(VsmResources r, VsmReceiver rc, uint k, float reach, float 
     const uint kf = vsmLevelForSize(c, k, radius * sqrt(ATMO_PI_FOR_VSM / filterTaps));
     float occ = 0;
     [loop] for (uint i2 = 0; i2 < filterTaps; ++i2)
-        occ += vsmOccupancy(r, rc, rc.uv + vsmDiskPoint(i2, filterTaps) * radius, kf);
+        occ += vsmOccupancy(r, rc, vsmDiskPoint(i2, filterTaps) * radius, kf);
     return 1 - occ / filterTaps;
 }
 
 float vsmSunVisibility(VsmResources r, float3 p, float3 n, float footprint, float tanSun, uint searchTaps, uint filterTaps, out uint path)
 {
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
-    const VsmReceiver rc = vsmMakeReceiver(vc, p, n);
+    const VsmReceiver rc = vsmMakeReceiver(vc, p, n, vsmLevelForFootprint(vc, footprint));
     uint k;
     float reach;
     const uint cls = vsmSunClassify(r, rc, footprint, tanSun, k, reach, path);

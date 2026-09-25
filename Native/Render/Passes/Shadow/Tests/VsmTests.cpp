@@ -467,6 +467,42 @@ int main(int argc, char** argv)
             compare(f, "after sun change", 2);
         }
 
+        // 4b. Moving sun (time of day): each level keeps the basis it was rendered with and refreshes before its age
+        //     exceeds dthetaMax = (pi / 2) tan(theta_s) shadow.vsm.sun_refresh_error; the refreshes spread over frames.
+        {
+            const float tanSun = std::tan(tf.sceneData.sun.angularRadius);
+            const float dthetaMax = 1.5707963f * tanSun * (float)tf.quality.number("shadow.vsm.sun_refresh_error");
+            const float3 axis = normalize(cross(normalize(tf.sceneData.sun.direction), float3{ 0, 1, 0 }));
+            auto turn = [&](float angle) {
+                const float3 d = normalize(tf.sceneData.sun.direction);
+                tf.sceneData.sun.direction = normalize(d * std::cos(angle) + cross(axis, d) * std::sin(angle));
+            };
+            for (const float step : { 0.3f, 3.0f })
+            {
+                uint32_t maxRefreshed = 0, minRefreshed = 1000;
+                float maxAge = 0;
+                Frame last;
+                for (int i = 0; i < 40; ++i)
+                {
+                    turn(step * dthetaMax);
+                    last = runFrame(i == 39);
+                    const shadow::VsmStats& st = shadow::stats(tf.trackState);
+                    maxRefreshed = std::max(maxRefreshed, st.levelsRefreshed);
+                    minRefreshed = std::min(minRefreshed, st.levelsRefreshed);
+                    maxAge = std::max(maxAge, st.largestBasisAge);
+                }
+                logf("moving sun %.1f x dthetaMax per frame (dthetaMax %.3g rad): levels refreshed per frame %u .. %u, largest basis age %.3g rad"
+                     "\n", step, dthetaMax, minRefreshed, maxRefreshed, maxAge);
+                report(maxAge <= dthetaMax * 1.0001f, format("moving sun x%.1f: no level older than dthetaMax", step).c_str(), maxAge, dthetaMax);
+                if (step < 1)
+                    report(maxRefreshed <= (uint32_t)std::ceil(shadow::kLevels * step) + 2 && minRefreshed >= 1,
+                           "moving sun x0.3: refreshes spread (levels per frame <= 20 x step + 2)", maxRefreshed, std::ceil(shadow::kLevels * step) + 2);
+                else
+                    report(minRefreshed == shadow::kLevels, "moving sun x3: every level refreshes every frame", minRefreshed, shadow::kLevels);
+                compare(last, step < 1 ? "moving sun (slow)" : "moving sun (fast)", 2);
+            }
+        }
+
         // 5. Wind: levels whose texel exceeds the sway never re-render; finer levels do.
         {
             scene::Scene windy = tf.sceneData;

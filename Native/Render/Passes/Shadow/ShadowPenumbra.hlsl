@@ -35,10 +35,10 @@ void main(uint i : SV_DispatchThreadID)
         float3 normal;
         const float3 world = shadowReceiver(depthTex, P[0].y, px, depth, normal);
         const float footprint = 2 * linearDepth(depth) * g_tanHalfFovY / g_viewHeight;
-        const VsmReceiver rc = vsmMakeReceiver(vc, world, normal);
         const float tanSun = tan(g_sunAngularRadius);
         const uint k = vsmLevelForFootprint(vc, footprint);
-        const float reach = (vsmSearchHeight(r, rc.uv, k) - rc.h) * tanSun;
+        const VsmReceiver rc = vsmMakeReceiver(vc, world, normal, k);
+        const float reach = (vsmSearchHeight(r, rc, k) - rc.h) * tanSun;
         float sun = vsmSunPenumbra(r, rc, k, reach, tanSun, P[3].x, P[3].y, path);
         if (P[3].z != 0xFFFFFFFFu && sun > 0)
         {
