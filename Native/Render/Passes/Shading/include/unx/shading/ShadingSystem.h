@@ -14,6 +14,12 @@ const std::vector<float>& specularAlbedoTable();
 // Tests/LtcFit.cpp (LtcTable.inl).
 const std::vector<float>& ltcTable();
 
+// The shading of 'view' in two parts around a banded pass group (INTERFACES v1.29): shadingPasses records the passes
+// before the group (ShadeBegin) and returns the banded ones (edge detection, then the shading kernels over the band's
+// tiles; neither needs a lag), shadingComposite records what reads the whole view after the group (overflow fallback
+// tiles, statistics, edge composite). shade() is both around M's own group ("m.lit").
+std::vector<RenderGraph::BandedPass> shadingPasses(FramePassContext& fc, ViewResources& view);
+void shadingComposite(FramePassContext& fc, ViewResources& view);
 void shade(FramePassContext& fc, ViewResources& view);
 
 // Tile counts of the main view's latest recorded frame (read back through a ring; valid once that frame completed,

@@ -10,6 +10,12 @@ edge_normal_angle_deg = 30.0
 edge_footprint_tolerance = 1.5
 edge_distance_tolerance = 0.3
 edge_groups_max = 3
+# Screen bands of M's own group of edge detection and shading kernels (INTERFACES v1.29), used until the frame assembles
+# S's visibility and M's passes into one group: 1 = one band over the view, 0 = the frame's passBandCount
+# (output.band_pixels). One band: at city 4K 8 bands measured detection +0.055 ms and shading -0.006 ms (the shading
+# kernel is latency-bound at 1.33 ms, far above its 0.2-0.25 ms DRAM floor, so L2 hits barely help while 8x more
+# dispatches and barriers cost). The class tile lists are split by the frame's bands either way (exact).
+pass_bands = 1
 # Cost attribution only (gate --set): bit mask of shading terms left out, 0 in every gate and image. 1 = sun disk
 # regimes below point evaluation (point instead), 2 = GI probe irradiance, 4 = reflection / K-path radiance,
 # 8 = S's air volume lookup (aerial perspective, air shadows, local lights' air; sun illuminance then unattenuated),

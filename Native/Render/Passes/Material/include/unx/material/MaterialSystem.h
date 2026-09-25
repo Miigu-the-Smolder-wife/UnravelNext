@@ -20,15 +20,30 @@ enum class ShadeClass : uint32_t
 constexpr uint32_t kShadeClassCount = (uint32_t)ShadeClass::Count;
 constexpr uint32_t kTile = 8;
 
-// Per-view products of the resolve that only M reads (MaterialInternal.hlsli formats).
+// First row of screen band b of 'bands' over 'height' rows: RenderGraph::addBandedGroup's split (8-row aligned; b = bands
+// gives the height). M's banded shading passes check it against PassContext::band.
+inline uint32_t bandRow(uint32_t height, uint32_t bands, uint32_t b)
+{
+    if (b >= bands) return height;
+    const uint32_t r = (uint32_t)((uint64_t)height * b / bands) & ~7u;
+    return r < height ? r : height;
+}
+
+// Per-view products of the resolve that only M reads (MaterialInternal.hlsli formats). The class tile lists are split by
+// screen band (passBandCount of the view), so a banded shading pass dispatches its band's tiles only.
 struct ResolveOutputs
 {
     TextureRef materialWord;  // R32_UINT: material 16 | metallic 8
     TextureRef emissive;      // RGBA16F, only when the scene has emissive textures (else invalid)
-    BufferRef tiles;          // raw: per class, tileCount entries (x | y << 16)
-    BufferRef tileArgs;       // raw: per class D3D12_DISPATCH_ARGUMENTS (12 B), x = tile count
+    BufferRef tiles;          // raw: class c, band b at entry c * tileCount + tilesX * (bandRow(b) / 8), (x | y << 16)
+    BufferRef tileArgs;       // raw: D3D12_DISPATCH_ARGUMENTS (12 B) per (class, band) at 12 (c * bands + b), x = tile
+                              // count; then one uint per class, the class's clamped total (ShadeBegin, statistics)
     uint32_t tilesX = 0, tilesY = 0;
+    uint32_t bands = 1, height = 0;
     uint32_t textureTableSrv = 0;
+    uint32_t firstTile(uint32_t shadeClass, uint32_t band) const { return shadeClass * tilesX * tilesY + tilesX * (bandRow(height, bands, band) / 8); }
+    uint32_t argsOffset(uint32_t shadeClass, uint32_t band) const { return 12 * (shadeClass * bands + band); }
+    uint32_t totalsOffset() const { return 12 * kShadeClassCount * bands; }
 };
 
 // Tests: when fc.state<ResolveDebug>("M.resolveDebug").buffer is valid, the resolve runs its DEBUG variant and writes

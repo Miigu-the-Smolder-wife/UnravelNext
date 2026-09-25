@@ -15,6 +15,7 @@
 // P[1] = { edge tile mask UAV (R32G32_UINT, tilesX x tilesY), edge pixel list UAV (raw), edge args UAV (raw),
 //          planar tile mask SRV (R8_UINT; UNX_NONE = every tile of the view is shaded) }
 // P[2] = { edge cos angle, edge footprint tolerance, edge distance tolerance (floats), experiment mask (bit 256: none) }
+// P[3].x first tile row of this dispatch (the screen band's, M's banded shading passes; groups cover its tile rows)
 #include "Bindless.hlsli"
 #include "Passes/Common/VisBuffer.hlsli"
 #include "Passes/Shading/Edge.hlsli"
@@ -65,8 +66,9 @@ bool edgeDetect(uint2 pixel)
 }
 
 [numthreads(8, 8, 1)]
-void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_GroupIndex)
+void main(uint2 group : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_GroupIndex)
 {
+    const uint2 gid = uint2(group.x, group.y + P[3].x);
     if (gi < 2) gs_mask[gi] = 0;
     if (gi == 0) gs_count = 0;
     GroupMemoryBarrierWithGroupSync();

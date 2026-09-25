@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: OUTPUT=0,1 FALLBACK=0,1 AREA=0,1
+// unx-variants: OUTPUT=0,1 FALLBACK=0,1 AREA=0,1 PLANAR=0,1
 // Shading kernel of the opaque classes (ARCHITECTURE 2.11; INTERFACES 5.6, 7, 8): one 8 x 8 tile of the class's tile
 // list per group (ExecuteIndirect), pixels of other classes skipped. Per pixel, from the G-buffer, depth and material
 // word (no vis-buffer re-derivation):
@@ -18,7 +18,9 @@
 // tile list, shades every non-sky class there and evaluates the lights past the third with S's VSM directly (outside
 // the main kernel, so its registers stay as they are). Area lights: AreaLight.hlsli, compiled in (AREA=1) only for scenes
 // that have area lights (their registers lowered occupancy for every pixel otherwise: +0.23 ms at city 4K, measured). Every view uses its own froxel lists
-// and air volume (v1.22; planar reflection views get them from S), taken by whether the SRVs are present.
+// and air volume (v1.22; planar reflection views get them from S), taken by whether the SRVs are present. Indirect light
+// comes from R's screen probes in the main view (PLANAR=0) and from R's world cache in planar reflection views (PLANAR=1);
+// each kernel compiles only its own path.
 // P[0] = { gbuffer, depth, material word, color UAV }
 // P[1] = { tile lists (raw), list offset (entries), shade class (FALLBACK: 0xFFFFFFFF, every non-sky class), emissive or
 //        UNX_NONE }
@@ -40,6 +42,9 @@
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
+#if !PLANAR
+#define GI_PROBE_TILE_CACHE  // R's screen probes around the group's tile, loaded once (design revision 1 4.4)
+#endif
 #include "Passes/GI/ScreenProbes.hlsli"
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
@@ -67,6 +72,20 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
         Texture2D<uint> heads = ResourceDescriptorHeap[P[3].z];
         overflowHead = heads[tileCoord];
         if (overflowHead == 0xFFFFFFFFu) return;  // over the list's capacity: the fallback kernel shades this tile
+    }
+#endif
+#if !PLANAR
+    // The tile's 3 x 3 screen probes (R's tile cache): every lane of the group takes part, before any per-pixel work. The
+    // condition is uniform (root constants), so the whole group reaches the barrier.
+    if (P[2].y != UNX_NONE && (P[4].z & 6) != 6)
+    {
+        ProbeSrvs probes;
+        probes.probes = P[2].y;
+        probes.occlusion = P[2].y;
+        probes.pad0 = P[7].y;
+        probes.pad1 = 0;
+        giProbeTileLoad(probes, tileCoord, tid.y * M_TILE + tid.x);
+        GroupMemoryBarrierWithGroupSync();
     }
 #endif
     Texture2D<uint> words = ResourceDescriptorHeap[P[0].z];
@@ -289,10 +308,11 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     const float3 r = reflect(-v, n);
     const float halfAngle = reflectionLobeHalfAngle(s.roughness, NoV);
     float3 irradiance = 0, irradianceBack = 0, incident = 0;
-    if (g_viewKind == VIEW_MAIN && P[2].y != UNX_NONE && (experiment & 6) != 6)
+#if !PLANAR
+    if (P[2].y != UNX_NONE && (experiment & 6) != 6)
     {
         // One probe footprint for the irradiance (both sides for Foliage) and, where R's reflection has no G/M result,
-        // the K-path radiance of the lobe (R's hardware-filtered maps).
+        // the K-path radiance of the lobe (R's hardware-filtered maps); records from the tile cache loaded in main.
         ProbeSrvs probes;
         probes.probes = P[2].y;
         probes.occlusion = P[2].y;
@@ -303,7 +323,8 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         const bool wantRadiance = specular && refl.a <= 0;
         if ((experiment & 2) == 0 || wantRadiance)
         {
-            const ScreenProbeLighting g = screenProbeGather(probes, pixel, worldPos, nv, linearZ, foliage && (experiment & 2) == 0, wantRadiance, r, halfAngle);
+            const ScreenProbeLighting g =
+                screenProbeGatherTile(probes, pixel / M_TILE, pixel, worldPos, nv, linearZ, foliage && (experiment & 2) == 0, wantRadiance, r, halfAngle);
             if ((experiment & 2) == 0)
             {
                 irradiance = g.irradiance * g.occlusion;
@@ -313,7 +334,8 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         }
         if (specular && refl.a > 0) incident = refl.rgb;
     }
-    else if (g_viewKind == VIEW_PLANAR_REFLECTION && P[2].w != UNX_NONE)
+#else
+    if (P[2].w != UNX_NONE)
     {
         GiSrvs gi;
         gi.cache = P[2].w;
@@ -323,6 +345,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         if (foliage) irradianceBack = giCacheIrradiance(gi, worldPos, -nv);
         if (NoV > 0) incident = giCacheRadiance(gi, worldPos, n, r, halfAngle);  // looked up in this surface's normal class
     }
+#endif
     if (NoV > 0) radiance += front * irradiance + incident * shSpecularAlbedo(f0, NoV, s.roughness);
     radiance += back * irradianceBack;
 

@@ -12,6 +12,9 @@
 // P[0] = { visId SRV, visibleClusters SRV, gbuffer UAV, material word UAV }
 // P[1] = { emissive UAV or UNX_NONE, lobe tiles UAV, tile lists UAV (raw), tile args UAV (raw) }
 // P[2] = { texture table SRV, tilesX, tilesY, tileCount }
+// P[4] = { screen bands, view height, 0, 0 }: the class tile lists are split by band (MaterialSystem.h ResolveOutputs):
+//        class c, band b at entry c * tileCount + tilesX * (row(b) / 8), arguments at 12 (c * bands + b), where row(b) is
+//        RenderGraph::addBandedGroup's split min(H, floor(H b / bands) & ~7).
 // P[3].y experiment mask (material.experiment_disable: cost attribution only, 0 otherwise)
 // PLANAR_MASK=1 (planar reflection views with R's mask; views without one compile none of it):
 // P[3].z R's planar tile mask (R8_UINT per 8 x 8 tile, nonzero = mirror pixels; UNX_NONE = absent), P[3].w R's planar
@@ -169,12 +172,24 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
 #else
         const uint mask = gs_classMask;
 #endif
+        // The tile's band: the last band whose first row is at or above the tile's.
+        const uint bands = P[4].x, height = P[4].y;
+        uint band = 0, bandRow = 0;
+        for (uint b = 1; b < bands; ++b)
+        {
+            const uint row = min(height, (height * b / bands) & ~7u);
+            if (row <= gid.y * 8)
+            {
+                band = b;
+                bandRow = row;
+            }
+        }
         [unroll] for (uint c = 0; c < M_CLASS_COUNT; ++c)
         {
             if ((mask & (1u << c)) == 0) continue;
             uint slot;
-            args.InterlockedAdd(12 * c, 1, slot);
-            tiles.Store(4 * (c * P[2].w + slot), gid.x | (gid.y << 16));
+            args.InterlockedAdd(12 * (c * bands + band), 1, slot);
+            tiles.Store(4 * (c * P[2].w + P[2].y * (bandRow / 8) + slot), gid.x | (gid.y << 16));
         }
     }
 }

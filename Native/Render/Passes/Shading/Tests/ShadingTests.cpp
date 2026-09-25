@@ -14,7 +14,8 @@
 //   9. area lights (AreaLight.hlsli): the diffuse integrals (front, back) and the LTC integral over the true light shape
 //      against surface-grid integration in double (exactness of the region integration), and the LTC specular against
 //      the model BRDF integrated over the light (the fit error, reported by roughness).
-//   unx_test_shading_shadingtests [--no-debug-layer] [--gbv]   (--gbv: GPU-based validation)
+//   unx_test_shading_shadingtests [--no-debug-layer] [--gbv] [--set key=value ...]   (--gbv: GPU-based validation;
+//   --set output.band_pixels=65536 runs the banded passes with 8 bands at the tests' 960 x 540)
 #include "../../Material/Tests/MTestFrame.h"
 
 #include "unx/scene/MaterialModel.h"
@@ -1609,14 +1610,17 @@ int main(int argc, char** argv)
     try
     {
         bool debugLayer = true, gpuValidation = false;
+        std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
             if (std::string(argv[i]) == "--no-debug-layer") debugLayer = false;
             if (std::string(argv[i]) == "--gbv") gpuValidation = true;
+            if (std::string(argv[i]) == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
         }
         Report report;
         testTable(report);
         TestFrame tf(debugLayer, gpuValidation);
+        for (const std::string& o : overrides) tf.quality.applyOverride(o);
         testScene(tf, report);
         testSunSpecular(tf, report);
         testLocalLights(tf, report);

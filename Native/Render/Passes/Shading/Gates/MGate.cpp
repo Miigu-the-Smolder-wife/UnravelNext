@@ -9,6 +9,11 @@
 //   powershell -File Tools/CI/GpuLock.ps1 -Track M -- build/all/bin/unx_gate_shading_mgate.exe
 //       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--scale 1] [--moving] [--out DIR]
 //       [--set key=value ...]   (e.g. shading.experiment_disable=1 for cost attribution; never in a gate verdict)
+//       [--hash]                (FNV-1a of the last frame's display output; copies the output every frame, so hashed
+//                                runs are not timing runs)
+//       [--dump PATH]           (as --hash, and writes the last frame's output to PATH_<resolution>.mgd for image A/Bs)
+#include <fstream>
+
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/core/Log.h"
@@ -62,10 +67,10 @@ int main(int argc, char** argv)
 {
     try
     {
-        std::string sceneName = "city_block", resolutionArg = "both", out;
+        std::string sceneName = "city_block", resolutionArg = "both", out, dumpPath;
         uint32_t frames = 600;
         float scale = 1.0f;
-        bool moving = false;
+        bool moving = false, hashOutput = false;
         std::vector<std::string> overrides;  // quality overrides (recorded in the quality hash), e.g. cost attribution
         for (int i = 1; i < argc; ++i)
         {
@@ -81,6 +86,8 @@ int main(int argc, char** argv)
             else if (a == "--moving") moving = true;
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
+            else if (a == "--hash") hashOutput = true;
+            else if (a == "--dump") hashOutput = !(dumpPath = next()).empty();
             else fail("unknown argument %s", a.c_str());
         }
         requireGpuLock("unx_gate_shading_mgate");
@@ -131,6 +138,21 @@ int main(int argc, char** argv)
                 check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_COMMON, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&outputTexture)),
                       "M gate output");
             }
+            // --hash: the display output of every frame is copied to this readback buffer (the last frame's copy remains).
+            ComPtr<ID3D12Resource> readback;
+            const uint32_t pitch = (res.width * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+            if (hashOutput)
+            {
+                D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_READBACK };
+                D3D12_RESOURCE_DESC1 d{};
+                d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                d.Width = (uint64_t)pitch * res.height;
+                d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+                d.SampleDesc.Count = 1;
+                d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&readback)),
+                      "M gate hash readback");
+            }
             HarnessOptions options;
             options.frames = frames;
             options.label = "M " + sceneName + (moving ? " moving" : " static");
@@ -145,17 +167,67 @@ int main(int argc, char** argv)
                 prev = fc.mainView.viewProj;
                 const TextureRef output = g.importTexture(outputTexture.Get(), { "display output", rr.width, rr.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM }, D3D12_BARRIER_LAYOUT_COMMON);
                 renderer.record(g, fc, output);
+                if (hashOutput)
+                {
+                    const BufferRef rb = g.importBuffer(readback.Get(), { "M gate hash readback", (uint64_t)pitch * rr.height, 0 });
+                    const uint32_t w = rr.width, h = rr.height;
+                    ID3D12Resource* dst = readback.Get();
+                    ID3D12Resource* src = outputTexture.Get();
+                    g.addPass("m.gate.hash", QueueType::Graphics,
+                              [&](PassBuilder& b) {
+                                  b.use(output, Use::CopySrc);
+                                  b.use(rb, Use::CopyDst);
+                                  b.keep();
+                              },
+                              [=](PassContext& c) {
+                                  D3D12_TEXTURE_COPY_LOCATION to{ dst, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+                                  to.PlacedFootprint.Footprint = { DXGI_FORMAT_R10G10B10A2_UNORM, w, h, 1, pitch };
+                                  D3D12_TEXTURE_COPY_LOCATION from{ src, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                                  from.SubresourceIndex = 0;
+                                  c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+                              });
+                }
             });
             harness.printSummary(r);
+            if (hashOutput)
+            {
+                void* p = nullptr;
+                check(readback->Map(0, nullptr, &p), "map M gate hash readback");
+                uint64_t hash = 1469598103934665603ull;
+                for (uint32_t y = 0; y < res.height; ++y)
+                {
+                    const uint8_t* row = static_cast<const uint8_t*>(p) + (size_t)y * pitch;
+                    for (uint32_t x = 0; x < res.width * 4; ++x) hash = (hash ^ row[x]) * 1099511628211ull;
+                }
+                if (!dumpPath.empty())
+                {
+                    // Raw rows of the last frame's display output (RGB10A2, width x 4 bytes each), after a 16-byte header
+                    // { 'MGD1', width, height, 0 }: for image comparisons between builds (the frame is not bit-deterministic
+                    // run to run: other tracks' atomics and accumulations).
+                    std::vector<uint8_t> file(16 + (size_t)res.width * 4 * res.height);
+                    const uint32_t header[4] = { 0x3144474Du, res.width, res.height, 0 };
+                    std::memcpy(file.data(), header, 16);
+                    for (uint32_t y = 0; y < res.height; ++y)
+                        std::memcpy(file.data() + 16 + (size_t)y * res.width * 4, static_cast<const uint8_t*>(p) + (size_t)y * pitch, (size_t)res.width * 4);
+                    std::ofstream f(dumpPath + "_" + rs + ".mgd", std::ios::binary);
+                    f.write(reinterpret_cast<const char*>(file.data()), (std::streamsize)file.size());
+                    if (!f) fail("cannot write %s_%s.mgd", dumpPath.c_str(), rs.c_str());
+                }
+                D3D12_RANGE none{ 0, 0 };
+                readback->Unmap(0, &none);
+                logf("M %s %s: display output hash %016llx (last frame)\n", sceneName.c_str(), rs.c_str(), (unsigned long long)hash);
+            }
             // Planar reflection views (R's renderView) run M's passes under ".planar" names: their cost is R's reflection
             // budget (ARCHITECTURE 2.6 C_planar), reported apart.
-            auto planar = [](const std::string& n) { return n.size() > 7 && n.compare(n.size() - 7, 7, ".planar") == 0; };
+            // Banded passes are "m.lit.<pass>.b<band>" ("m.lit.planar.<pass>.b<band>" in planar views).
+            auto planar = [](const std::string& n) { return n.find(".planar") != std::string::npos; };
             const double resolve = sumPasses(r, [&](const std::string& n) { return n.rfind("m.resolve", 0) == 0 && !planar(n); });
-            const double shade = sumPasses(r, [&](const std::string& n) { return n.rfind("m.shade", 0) == 0 && !planar(n); });
+            const double shade =
+                sumPasses(r, [&](const std::string& n) { return (n.rfind("m.shade", 0) == 0 || n.rfind("m.lit.shade.", 0) == 0) && !planar(n); });
             const double planarM = sumPasses(r, [&](const std::string& n) { return n.rfind("m.", 0) == 0 && planar(n); });
             const bool is4k = res.width == 3840;
-            const double detect = sumPasses(r, [&](const std::string& n) { return n.rfind("m.edge.detect", 0) == 0 && !planar(n); });
-            const double edge = sumPasses(r, [&](const std::string& n) { return n.rfind("m.edge", 0) == 0 && n.rfind("m.edge.detect", 0) != 0 && !planar(n); });
+            const double detect = sumPasses(r, [&](const std::string& n) { return n.rfind("m.lit.edge.detect.", 0) == 0 && !planar(n); });
+            const double edge = sumPasses(r, [&](const std::string& n) { return n.rfind("m.edge", 0) == 0 && !planar(n); });
             const shading::Stats st = shading::latestStats(renderer.trackState());
             const double pixels = (double)res.width * res.height;
             // Design terms (ARCHITECTURE 4.2 table, revision 1): resolve and shading kernel before band scheduling, edge

@@ -218,8 +218,8 @@ Stats latestStats(TrackState& state)
     uint32_t w[16];
     std::memcpy(w, ring.mapped + slot * StatsRing::kBytes, sizeof w);
     st.frameIndex = ring.frame[slot];
-    for (uint32_t c = 0; c < 4; ++c) st.classTiles[c] = w[3 * c];
-    st.edgePixels = w[12];
+    for (uint32_t c = 0; c < 4; ++c) st.classTiles[c] = w[c];
+    st.edgePixels = w[4];
     st.tiles = ring.tiles[slot];
     return st;
 }
@@ -232,7 +232,27 @@ const std::vector<float>& ltcTable()
     return t;
 }
 
-void shade(FramePassContext& fc, ViewResources& view)
+namespace
+{
+// What the banded part creates for the composite part of the same view in this frame (keyed like the resolve's table).
+struct ShadingResources
+{
+    TextureRef edgeRadiance, edgeTiles;
+    BufferRef edgePixels, edgeArgs, fallbackArgs;
+};
+struct ShadingTable
+{
+    uint64_t frame = UINT64_MAX;
+    std::vector<std::pair<D3D12_GPU_VIRTUAL_ADDRESS, ShadingResources>> views;
+};
+
+enum class Part
+{
+    Banded,     // ShadeBegin (before the group) and the banded passes: edge detection, shading
+    Composite,  // after the group: overflow fallback tiles, statistics, edge composite
+};
+
+std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources& view, Part part)
 {
     if (!view.color.valid()) fail("M.shading: the view has no colour target");
     // Planar reflection views get S's own froxel lists and air volume (v1.22, FroxelSystem recordPlanarFroxels). Without
@@ -241,6 +261,8 @@ void shade(FramePassContext& fc, ViewResources& view)
         fail("M.shading: planar view without S's froxel lists while the main view has them (INTERFACES v1.22)");
     if (view.view.kind != gpu::ViewKind::Main && view.froxelLights.valid() && fc.resources.transmittanceLut.valid() && !view.airVolume.valid())
         fail("M.shading: planar view with S's froxel lists but without its air volume (INTERFACES v1.22)");
+    // The shading kernel reads R's screen probes through the tile cache, whose K-path radiance comes from the atlas.
+    if (view.screenProbes.valid() && !view.screenProbeMaps.valid()) fail("M.shading: R's screen probes without their K-path atlas (screenProbeMaps, v1.13)");
     checkQuality(fc.quality);
     const material::ResolveOutputs& o = material::resolveOutputs(fc, view);
     StaticTable& ltc = fc.state<StaticTable>("M.ltcTable");
@@ -254,7 +276,7 @@ void shade(FramePassContext& fc, ViewResources& view)
         for (const scene::Light& l : src->lights) areaLights = areaLights || l.type > scene::LightType::Spot;
     auto opaqueKernel = [&](bool fallbackVariant) {
         const std::string name = std::string("Passes/Shading/ShadeOpaque.OUTPUT") + (linear ? "1" : "0") + ".FALLBACK" + (fallbackVariant ? "1" : "0") +
-                                 ".AREA" + (areaLights ? "1" : "0");
+                                 ".AREA" + (areaLights ? "1" : "0") + ".PLANAR" + (view.view.kind != gpu::ViewKind::Main ? "1" : "0");
         return fc.shaders.compute(name.c_str());
     };
     ID3D12PipelineState* opaque = opaqueKernel(false);
@@ -277,123 +299,187 @@ void shade(FramePassContext& fc, ViewResources& view)
     const bool fallback = v.shadowOverflowFallbackTiles.valid();
     const bool vsm = r.vsmPageTable.valid() && r.vsmPool.valid() && r.vsmBlocks.valid() && r.vsmSearchBound.valid() && r.vsmConstants != gpu::kNone &&
                      r.vsmLocalLights != gpu::kNone && r.vsmSlotOfLight != gpu::kNone;
-    const BufferRef fallbackArgs = fallback ? fc.graph.createBuffer({ "m.shade fallback args", 12, 0 }) : BufferRef{};
-
-    // Edge pixels' exposed linear radiance, the edge tile list and its dispatch arguments (M internal, this view).
-    const TextureRef edgeRadiance = fc.graph.createTexture({ "m.edge radiance", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
-    const BufferRef edgePixels = fc.graph.createBuffer({ "m.edge pixels", ((uint64_t)v.view.width * v.view.height + 1) * 4, 0 });
-    const BufferRef edgeArgs = fc.graph.createBuffer({ "m.edge args", 24, 0 });  // dispatch args + pixel count (Edge.hlsli)
-    const TextureRef edgeTiles = fc.graph.createTexture({ "m.edge tile mask", o.tilesX, o.tilesY, 1, 1, DXGI_FORMAT_R32G32_UINT });  // 64 bits per tile
+    // Edge pixels' exposed linear radiance, the edge tile masks, the edge pixel list and its dispatch arguments, and the
+    // fallback kernel's dispatch arguments (M internal, this view): made by the banded part, used by both.
+    ShadingTable& table = fc.state<ShadingTable>("M.shadingViews");
+    if (table.frame != fc.frame.frameIndex)
+    {
+        table.frame = fc.frame.frameIndex;
+        table.views.clear();
+    }
+    ShadingResources res;
+    if (part == Part::Banded)
+    {
+        res.fallbackArgs = fallback ? fc.graph.createBuffer({ "m.shade fallback args", 12, 0 }) : BufferRef{};
+        res.edgeRadiance = fc.graph.createTexture({ "m.edge radiance", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        res.edgePixels = fc.graph.createBuffer({ "m.edge pixels", ((uint64_t)v.view.width * v.view.height + 1) * 4, 0 });
+        res.edgeArgs = fc.graph.createBuffer({ "m.edge args", 24, 0 });  // dispatch args + pixel count (Edge.hlsli)
+        res.edgeTiles = fc.graph.createTexture({ "m.edge tile mask", o.tilesX, o.tilesY, 1, 1, DXGI_FORMAT_R32G32_UINT });  // 64 bits per tile
+        table.views.push_back({ view.frameConstants, res });
+    }
+    else
+    {
+        bool found = false;
+        for (const auto& [key, rs] : table.views)
+            if (key == view.frameConstants)
+            {
+                res = rs;
+                found = true;
+            }
+        if (!found) fail("M.shading: composite part without the banded part for this view in frame %llu", (unsigned long long)fc.frame.frameIndex);
+    }
+    const BufferRef fallbackArgs = res.fallbackArgs, edgePixels = res.edgePixels, edgeArgs = res.edgeArgs;
+    const TextureRef edgeRadiance = res.edgeRadiance, edgeTiles = res.edgeTiles;
     // Planar views: tiles without mirror pixels are never shaded; edge detection and the composite treat their pixels as
     // outside the view (R always gives the tile mask with the pixel mask, v1.22).
     const TextureRef planarTiles = v.view.planarTileMask;
     if (v.view.planarMask.valid() && !planarTiles.valid()) fail("M.shading: a planar view has a pixel mask without its tile mask");
-    ID3D12PipelineState* begin = fc.shaders.compute("Passes/Shading/ShadeBegin");
-    const uint32_t viewTiles = o.tilesX * o.tilesY;
-    fc.graph.addPass(planar ? "m.shade.begin.planar" : "m.shade.begin", QueueType::Graphics,
-                     [&](PassBuilder& b) {
-                         b.use(edgeArgs, Use::UavCompute);
-                         b.use(o.tileArgs, Use::UavCompute);
-                         if (fallback)
-                         {
-                             b.use(v.shadowOverflowFallbackTiles, Use::SrvCompute);
-                             b.use(fallbackArgs, Use::UavCompute);
-                         }
-                     },
-                     [begin, edgeArgs, tileArgs = o.tileArgs, viewTiles, fallback, fallbackList = v.shadowOverflowFallbackTiles, fallbackArgs](PassContext& c) {
-                         const uint32_t k[8] = { c.uav(edgeArgs), c.uav(tileArgs), (uint32_t)material::ShadeClass::Count, viewTiles,
-                                                 fallback ? c.srv(fallbackList) : gpu::kNone, fallback ? c.uav(fallbackArgs) : gpu::kNone, 0, 0 };
-                         c.cmd->SetPipelineState(begin);
-                         c.computeConstants(k, 8);
-                         c.cmd->Dispatch(1, 1, 1);
-                     });
+    if (part == Part::Banded)
+    {
+        ID3D12PipelineState* begin = fc.shaders.compute("Passes/Shading/ShadeBegin");
+        fc.graph.addPass(planar ? "m.shade.begin.planar" : "m.shade.begin", QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             b.use(edgeArgs, Use::UavCompute);
+                             b.use(o.tileArgs, Use::UavCompute);
+                             if (fallback)
+                             {
+                                 b.use(v.shadowOverflowFallbackTiles, Use::SrvCompute);
+                                 b.use(fallbackArgs, Use::UavCompute);
+                             }
+                         },
+                         [begin, edgeArgs, tileArgs = o.tileArgs, bands = o.bands, tilesX = o.tilesX, height = o.height, fallback, fallbackList = v.shadowOverflowFallbackTiles,
+                          fallbackArgs](PassContext& c) {
+                             const uint32_t k[8] = { c.uav(edgeArgs), c.uav(tileArgs), (uint32_t)material::ShadeClass::Count, bands,
+                                                     fallback ? c.srv(fallbackList) : gpu::kNone, fallback ? c.uav(fallbackArgs) : gpu::kNone, tilesX, height };
+                             c.cmd->SetPipelineState(begin);
+                             c.computeConstants(k, 8);
+                             c.cmd->Dispatch(1, 1, 1);
+                         });
 
-    // Edge pixels (EdgeDetect.hlsl): a thin kernel before shading marks them per tile and lists them for the composite.
-    ID3D12PipelineState* detect = fc.shaders.compute("Passes/Shading/EdgeDetect");
-    fc.graph.addPass(planar ? "m.edge.detect.planar" : "m.edge.detect", QueueType::Graphics,
-                     [&](PassBuilder& b) {
-                         b.use(v.visId, Use::SrvCompute);
-                         b.use(o.materialWord, Use::SrvCompute);
-                         b.use(v.depth, Use::SrvCompute);
-                         b.use(v.gbuffer, Use::SrvCompute);
-                         if (planarTiles.valid()) b.use(planarTiles, Use::SrvCompute);
-                         b.use(edgeTiles, Use::UavCompute);
-                         b.use(edgePixels, Use::UavCompute);
-                         b.use(edgeArgs, Use::UavCompute);
-                     },
-                     [=](PassContext& c) {
-                         const uint32_t k[12] = { c.srv(v.visId), c.srv(o.materialWord), c.srv(v.depth), c.srv(v.gbuffer),
-                                                  c.uav(edgeTiles), c.uav(edgePixels), c.uav(edgeArgs), planarTiles.valid() ? c.srv(planarTiles) : gpu::kNone,
-                                                  asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), experiment };
-                         c.cmd->SetPipelineState(detect);
-                         c.bindFrameConstants(cb);
-                         c.computeConstants(k, 12);
-                         c.cmd->Dispatch(o.tilesX, o.tilesY, 1);
-                     });
+        // Edge detection and shading are banded passes (INTERFACES v1.29, design revision 1 4.8): in a band the detection
+        // kernel reads the band's material words, depth and G-buffer and the shading kernels read them again while they are
+        // in L2. Neither needs rows below its band (the detection's neighbours are the resolve's, complete before the group;
+        // S's visibility has no screen-space filter), so no band is lagged. A pass band covers whole list bands of the
+        // resolve's split (o.bands, passBandCount of the view): the shading pass dispatches every list band inside its rows,
+        // the detection pass its tile rows. One pass band over the view dispatches all of them.
+        ID3D12PipelineState* detect = fc.shaders.compute("Passes/Shading/EdgeDetect");
+        const uint32_t bands = o.bands, height = o.height;
+        auto passTileRows = [height, tilesY = o.tilesY](const PassContext& c) {
+            const uint32_t y1 = std::min(c.band.y1, height);
+            return std::pair<uint32_t, uint32_t>{ c.band.y0 / 8, y1 >= height ? tilesY : y1 / 8 };
+        };
+        // The list bands inside the pass band's rows (fails when one straddles its edge).
+        auto listBands = [bands, height](const PassContext& c) {
+            const uint32_t y0 = c.band.y0, y1 = std::min(c.band.y1, height);
+            uint32_t first = UINT32_MAX, last = 0;
+            for (uint32_t b = 0; b < bands; ++b)
+            {
+                const uint32_t r0 = material::bandRow(height, bands, b), r1 = material::bandRow(height, bands, b + 1);
+                if (r1 <= y0 || r0 >= y1) continue;
+                if (r0 < y0 || r1 > y1)
+                    fail("M.shading: pass band %u of %u, rows [%u, %u), cuts the resolve's list band %u of %u [%u, %u)", c.band.index, c.band.count, y0, y1, b, bands,
+                         r0, r1);
+                first = std::min(first, b);
+                last = b + 1;
+            }
+            return std::pair<uint32_t, uint32_t>{ first == UINT32_MAX ? 0 : first, last };
+        };
+        RenderGraph::BandedPass detectPass;
+        detectPass.name = "edge.detect";
+        detectPass.setup = [=](PassBuilder& b) {
+            b.use(v.visId, Use::SrvCompute);
+            b.use(o.materialWord, Use::SrvCompute);
+            b.use(v.depth, Use::SrvCompute);
+            b.use(v.gbuffer, Use::SrvCompute);
+            if (planarTiles.valid()) b.use(planarTiles, Use::SrvCompute);
+            b.use(edgeTiles, Use::UavCompute);
+            b.use(edgePixels, Use::UavCompute);
+            b.use(edgeArgs, Use::UavCompute);
+        };
+        detectPass.execute = [=](PassContext& c) {
+            const auto [row0, row1] = passTileRows(c);
+            if (row1 <= row0) return;
+            const uint32_t k[16] = { c.srv(v.visId), c.srv(o.materialWord), c.srv(v.depth), c.srv(v.gbuffer),
+                                     c.uav(edgeTiles), c.uav(edgePixels), c.uav(edgeArgs), planarTiles.valid() ? c.srv(planarTiles) : gpu::kNone,
+                                     asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), experiment,
+                                     row0, 0, 0, 0 };
+            c.cmd->SetPipelineState(detect);
+            c.bindFrameConstants(cb);
+            c.computeConstants(k, 16);
+            c.cmd->Dispatch(o.tilesX, row1 - row0, 1);
+        };
 
-    // Planar reflection views are timed apart (their cost is R's reflection budget, ARCHITECTURE 2.6 C_planar).
-    fc.graph.addPass(planar ? "m.shade.planar" : "m.shade", QueueType::Graphics,
-                     [&](PassBuilder& b) {
-                         b.use(v.gbuffer, Use::SrvCompute);
-                         b.use(v.depth, Use::SrvCompute);
-                         b.use(o.materialWord, Use::SrvCompute);
-                         if (o.emissive.valid()) b.use(o.emissive, Use::SrvCompute);
-                         b.use(o.tiles, Use::SrvCompute);
-                         b.use(o.tileArgs, Use::IndirectArgs);
-                         b.use(v.color, Use::UavComputeDisjoint);
-                         if (v.shadowVisibility.valid()) b.use(v.shadowVisibility, Use::SrvCompute);
-                         if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
-                         if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
-                         if (v.reflection.valid()) b.use(v.reflection, Use::SrvCompute);
-                         if (r.giCache.valid() && v.view.kind == gpu::ViewKind::PlanarReflection) b.use(r.giCache, Use::SrvCompute);
-                         if (atmosphere)
-                             for (TextureRef t : { r.transmittanceLut, r.multiScatterLut, r.skyViewLut }) b.use(t, Use::SrvCompute);
-                         if (air) b.use(v.airVolume, Use::SrvCompute);
-                         if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
-                         if (overflow)
-                         {
-                             b.use(v.shadowOverflowTiles, Use::SrvCompute);
-                             b.use(v.shadowOverflow, Use::SrvCompute);
-                         }
-                         b.use(edgeRadiance, Use::UavCompute);
-                         b.use(edgeTiles, Use::SrvCompute);
-                     },
-                     [=](PassContext& c) {
-                         const uint32_t none = gpu::kNone;
-                         const uint32_t atm[4] = { atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none,
-                                                   atmosphere ? c.srv(r.skyViewLut) : none, air ? c.srv(v.airVolume) : none };
-                         const uint32_t fx[2] = { froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
-                         c.bindFrameConstants(cb);
-                         ID3D12Resource* args = c.resource(o.tileArgs);
-                         const uint32_t edge[8] = { c.srv(edgeTiles), 0, 0, 0, c.uav(edgeRadiance), v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, 0, 0 };
-                         // Sky tiles.
-                         {
-                             uint32_t k[32] = { c.srv(o.materialWord), c.uav(v.color), c.srv(o.tiles), (uint32_t)material::ShadeClass::Sky * tileCount,
-                                                atm[0], atm[1], atm[2], atm[3], experiment, 0, 0, 0, 0, 0, c.srv(edgeTiles), 0 };
-                             std::memcpy(k + 24, edge, sizeof edge);
-                             c.cmd->SetPipelineState(sky);
-                             c.computeConstants(k, 32);
-                             c.cmd->ExecuteIndirect(signature, 1, args, (uint32_t)material::ShadeClass::Sky * sizeof(D3D12_DISPATCH_ARGUMENTS), nullptr, 0);
-                         }
-                         // Surface classes (Subsurface and Water use the opaque model until theirs are defined).
-                         c.cmd->SetPipelineState(opaque);
-                         for (material::ShadeClass cls : { material::ShadeClass::Opaque, material::ShadeClass::Subsurface, material::ShadeClass::Water })
-                         {
-                             const uint32_t k[22] = { c.srv(v.gbuffer), c.srv(v.depth), c.srv(o.materialWord), c.uav(v.color),
-                                                      c.srv(o.tiles), (uint32_t)cls * tileCount, (uint32_t)cls, o.emissive.valid() ? c.srv(o.emissive) : none,
-                                                      v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
-                                                      v.reflection.valid() ? c.srv(v.reflection) : none,
-                                                      (r.giCache.valid() && v.view.kind == gpu::ViewKind::PlanarReflection) ? c.srv(r.giCache) : none,
-                                                      atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], 0, o.textureTableSrv, experiment,
-                                                      0, fx[0], fx[1] };
-                             uint32_t k32[32] = {};
-                             std::memcpy(k32, k, sizeof k);
-                             std::memcpy(k32 + 24, edge, sizeof edge);
-                             k32[30] = overflow ? c.srv(v.shadowOverflow) : none;  // P[7].z
-                             c.computeConstants(k32, 32);
-                             c.cmd->ExecuteIndirect(signature, 1, args, (uint32_t)cls * sizeof(D3D12_DISPATCH_ARGUMENTS), nullptr, 0);
-                         }
-                     });
+        // Planar reflection views are timed apart (their cost is R's reflection budget, ARCHITECTURE 2.6 C_planar).
+        RenderGraph::BandedPass shadePass;
+        shadePass.name = "shade";
+        shadePass.setup = [=](PassBuilder& b) {
+            b.use(v.gbuffer, Use::SrvCompute);
+            b.use(v.depth, Use::SrvCompute);
+            b.use(o.materialWord, Use::SrvCompute);
+            if (o.emissive.valid()) b.use(o.emissive, Use::SrvCompute);
+            b.use(o.tiles, Use::SrvCompute);
+            b.use(o.tileArgs, Use::IndirectArgs);
+            b.use(v.color, Use::UavComputeDisjoint);
+            if (v.shadowVisibility.valid()) b.use(v.shadowVisibility, Use::SrvCompute);
+            if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
+            if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
+            if (v.reflection.valid()) b.use(v.reflection, Use::SrvCompute);
+            if (r.giCache.valid() && v.view.kind == gpu::ViewKind::PlanarReflection) b.use(r.giCache, Use::SrvCompute);
+            if (atmosphere)
+                for (TextureRef t : { r.transmittanceLut, r.multiScatterLut, r.skyViewLut }) b.use(t, Use::SrvCompute);
+            if (air) b.use(v.airVolume, Use::SrvCompute);
+            if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
+            if (overflow)
+            {
+                b.use(v.shadowOverflowTiles, Use::SrvCompute);
+                b.use(v.shadowOverflow, Use::SrvCompute);
+            }
+            b.use(edgeRadiance, Use::UavCompute);
+            b.use(edgeTiles, Use::SrvCompute);
+        };
+        shadePass.execute = [=](PassContext& c) {
+            const auto [firstBand, lastBand] = listBands(c);
+            const uint32_t none = gpu::kNone;
+            const uint32_t atm[4] = { atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none,
+                                      atmosphere ? c.srv(r.skyViewLut) : none, air ? c.srv(v.airVolume) : none };
+            const uint32_t fx[2] = { froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
+            c.bindFrameConstants(cb);
+            ID3D12Resource* args = c.resource(o.tileArgs);
+            const uint32_t edge[8] = { c.srv(edgeTiles), 0, 0, 0, c.uav(edgeRadiance), v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, 0, 0 };
+            // Sky tiles of the list bands in this pass band.
+            c.cmd->SetPipelineState(sky);
+            for (uint32_t band = firstBand; band < lastBand; ++band)
+            {
+                const uint32_t cls = (uint32_t)material::ShadeClass::Sky;
+                uint32_t k[32] = { c.srv(o.materialWord), c.uav(v.color), c.srv(o.tiles), o.firstTile(cls, band),
+                                   atm[0], atm[1], atm[2], atm[3], experiment, 0, 0, 0, 0, 0, c.srv(edgeTiles), 0 };
+                std::memcpy(k + 24, edge, sizeof edge);
+                c.computeConstants(k, 32);
+                c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
+            }
+            // Surface classes (Subsurface and Water use the opaque model until theirs are defined).
+            c.cmd->SetPipelineState(opaque);
+            for (material::ShadeClass shadeClass : { material::ShadeClass::Opaque, material::ShadeClass::Subsurface, material::ShadeClass::Water })
+            for (uint32_t band = firstBand; band < lastBand; ++band)
+            {
+                const uint32_t cls = (uint32_t)shadeClass;
+                const uint32_t k[22] = { c.srv(v.gbuffer), c.srv(v.depth), c.srv(o.materialWord), c.uav(v.color),
+                                         c.srv(o.tiles), o.firstTile(cls, band), cls, o.emissive.valid() ? c.srv(o.emissive) : none,
+                                         v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
+                                         v.reflection.valid() ? c.srv(v.reflection) : none,
+                                         (r.giCache.valid() && v.view.kind == gpu::ViewKind::PlanarReflection) ? c.srv(r.giCache) : none,
+                                         atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], 0, o.textureTableSrv, experiment,
+                                         0, fx[0], fx[1] };
+                uint32_t k32[32] = {};
+                std::memcpy(k32, k, sizeof k);
+                std::memcpy(k32 + 24, edge, sizeof edge);
+                k32[30] = overflow ? c.srv(v.shadowOverflow) : none;  // P[7].z
+                c.computeConstants(k32, 32);
+                c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
+            }
+        };
+        return { detectPass, shadePass };
+    }
 
     // Tiles over S's overflow capacity (INTERFACES 7.3): every non-sky class of the tile, lights past the third from S's
     // VSM directly (FALLBACK=1; its extra registers stay out of the main kernel). An empty list costs one argument read.
@@ -473,9 +559,10 @@ void shade(FramePassContext& fc, ViewResources& view)
                              b.use(edgeArgs, Use::CopySrc);
                              b.keep();
                          },
-                         [dst, slot, classArgs, edgeArgs](PassContext& c) {
-                             c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes, c.resource(classArgs), 0, 48);
-                             c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 48, c.resource(edgeArgs), 12, 4);
+                         [dst, slot, classArgs, edgeArgs, totals = o.totalsOffset()](PassContext& c) {
+                             // Per-class tile totals (ShadeBegin sums the bands) and the edge pixel count.
+                             c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes, c.resource(classArgs), totals, 16);
+                             c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 16, c.resource(edgeArgs), 12, 4);
                          });
     }
 
@@ -518,5 +605,23 @@ void shade(FramePassContext& fc, ViewResources& view)
                          c.computeConstants(k, 16);
                          c.cmd->ExecuteIndirect(signature, 1, c.resource(edgeArgs), 0, nullptr, 0);
                      });
+    return {};
+}
+} // namespace
+
+std::vector<RenderGraph::BandedPass> shadingPasses(FramePassContext& fc, ViewResources& view) { return record(fc, view, Part::Banded); }
+
+void shadingComposite(FramePassContext& fc, ViewResources& view) { record(fc, view, Part::Composite); }
+
+void shade(FramePassContext& fc, ViewResources& view)
+{
+    // M's own banded group until the frame assembles S's visibility and M's passes into one (INTERFACES v1.29), over
+    // shading.pass_bands bands (shading.toml: one, measured; 0 = the resolve's split). The banded part checks the view first.
+    const std::vector<RenderGraph::BandedPass> passes = shadingPasses(fc, view);
+    const material::ResolveOutputs& o = material::resolveOutputs(fc, view);
+    const int64_t passBands = fc.quality.integer("shading.pass_bands");
+    if (passBands != 0 && passBands != 1) fail("shading.pass_bands must be 0 (the frame's bands) or 1 (one band)");
+    fc.graph.addBandedGroup(view.view.kind != gpu::ViewKind::Main ? "m.lit.planar" : "m.lit", o.height, passBands == 0 ? o.bands : 1, passes);
+    shadingComposite(fc, view);
 }
 } // namespace unx::render::shading
