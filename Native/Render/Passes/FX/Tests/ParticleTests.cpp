@@ -508,7 +508,23 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
             if (h.ribbon_points || h.medium_cells)
             {
                 const NV_StreamEmitter* table = emitterTable.data();
-                const auto points = ps.readState("ribbonPoints"), cellsBuf = ps.readState("mediumCells"), vertices = ps.readState("ribbonVertices");
+                const auto points = ps.readState("ribbonPoints"), vertices = ps.readState("ribbonVertices");
+                const auto volumeRecords = ps.readState("volumeRecords"), volumeSide = ps.readState("volumeSide"), dynamicRows = ps.readState("emitterDynamic");
+                const auto* programTable0 = reinterpret_cast<const NV_StreamProgram*>(firstPacket.data() + reinterpret_cast<const NV_StreamHeader*>(firstPacket.data())->programs);
+                // volume record index: particle base of the row (prefix over the active volume rows in output_base order)
+                std::vector<std::pair<uint32_t, uint32_t>> volumeRows;  // (output_base, row)
+                for (uint32_t r = 0; r < h.emitter_table; ++r)
+                {
+                    const NV_StreamEmitter& x = table[r];
+                    if ((x.flags & NV_STREAM_EMITTER_ACTIVE) && x.next_birth != x.death_birth && programTable0[x.program].output == 3)
+                        volumeRows.push_back({ x.output_base, r });
+                }
+                std::sort(volumeRows.begin(), volumeRows.end());
+                std::vector<uint32_t> volumeBase(h.emitter_table, UINT32_MAX);
+                uint32_t volumeTotal = 0;
+                for (const auto& [base, r] : volumeRows) { volumeBase[r] = volumeTotal; volumeTotal += table[r].next_birth - table[r].death_birth; }
+                FX_CHECK(volumeRecords.size() >= (size_t)volumeTotal * 16 && volumeSide.size() >= (size_t)volumeTotal * 8, "tick %u: %u volume particles, record buffers too small", t, volumeTotal);
+                auto half = [](uint16_t hbits) { const uint32_t e = (hbits >> 10) & 31u, m = hbits & 1023u; return e == 0 ? std::ldexp((double)m, -24) : std::ldexp(1.0 + m / 1024.0, (int)e - 15); };
                 uint32_t checkedPoints = 0, checkedCells = 0;
                 for (uint32_t i = 0; i < nAlive; ++i)
                 {
@@ -531,20 +547,33 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                     }
                     if (outProgram.output == 3)
                     {
-                        const uint32_t g = outProgram.medium_grid, cellsPer = g * g * g;
-                        const uint32_t k = e.output_base + (birth - e.death_birth) * cellsPer;
-                        for (uint32_t c = 0; c < cellsPer; ++c)
+                        // record16 { centre = origin_anchor + position, half2(r = size/2, m = alpha) }, side8 { emission factor, kind }
+                        // (the fixture's curves are constant: size = size x size_scale, alpha = color.a x color_scale.a)
+                        FX_CHECK(volumeBase[row] != UINT32_MAX, "tick %u: volume particle (%u,%u) of a row without a volume range", t, row, birth);
+                        const uint32_t k = volumeBase[row] + (birth - e.death_birth);
+                        uint32_t rec[4], side[2];
+                        std::memcpy(rec, volumeRecords.data() + (size_t)k * 16, 16);
+                        std::memcpy(side, volumeSide.data() + (size_t)k * 8, 8);
+                        float centre[3], origin[3];
+                        std::memcpy(centre, rec, 12);
+                        std::memcpy(origin, dynamicRows.data() + (size_t)row * 32, 12);
+                        const double r = half((uint16_t)(rec[3] & 0xFFFFu)), m = half((uint16_t)(rec[3] >> 16));
+                        const double rExpect = 0.5 * outProgram.size * e.size_scale, mExpect = (double)outProgram.color[3] * e.color_scale[3];
+                        const bool centreOk = centre[0] == origin[0] + pa.x && centre[1] == origin[1] + pa.y && centre[2] == origin[2] + pa.z;
+                        FX_CHECK(centreOk && std::abs(r - rExpect) <= 1e-3 * rExpect && std::abs(m - mExpect) <= 1e-3 * std::max(mExpect, 1e-6) && side[1] == e.program,
+                                 "tick %u: volume record %u of (%u,%u): centre %g %g %g (expected %g %g %g), r %g (%g), m %g (%g), kind %u (%u)", t, k, row, birth,
+                                 centre[0], centre[1], centre[2], origin[0] + pa.x, origin[1] + pa.y, origin[2] + pa.z, r, rExpect, m, mExpect, side[1], e.program);
+                        for (int c = 0; c < 3; ++c)
                         {
-                            float cell[24];
-                            std::memcpy(cell, cellsBuf.data() + ((size_t)k + c) * 96, 96);
-                            FX_CHECK(cell[4] < cell[8] && cell[5] < cell[9] && cell[6] < cell[10] && std::isfinite(cell[12]) && cell[16] >= 0,
-                                     "tick %u: medium cell %u of (%u,%u) (first cell %u; row output_base %u death %u next %u; header cells %u) is not a finite cuboid: low %g %g %g high %g %g %g absorption %g scattering %g",
-                                     t, c, row, birth, k, e.output_base, e.death_birth, e.next_birth, h.medium_cells, cell[4], cell[5], cell[6], cell[8], cell[9], cell[10], cell[12], cell[16]);
+                            const uint32_t bits = c < 2 ? (side[0] >> (11 * c)) & 0x7FFu : (side[0] >> 22) & 0x3FFu;
+                            const double got = c < 2 ? half((uint16_t)(bits << 4)) : half((uint16_t)(bits << 5));
+                            const double expect = (double)outProgram.medium_emission[c] * outProgram.color[c] * e.color_scale[c];
+                            FX_CHECK(std::abs(got - expect) <= 0.04 * std::max(expect, 1e-6), "tick %u: volume emission %d of (%u,%u): %g, expected %g", t, c, row, birth, got, expect);
                         }
                         ++checkedCells;
                     }
                 }
-                FX_LOG("tick %u: outputs checked: %u ribbon points (of %u), %u volume particles (%u cells)", t, checkedPoints, h.ribbon_points, checkedCells, h.medium_cells);
+                FX_LOG("tick %u: outputs checked: %u ribbon points (of %u), %u volume particles (records of %u)", t, checkedPoints, h.ribbon_points, checkedCells, volumeTotal);
                 // strips: the parallel scan against the sequential walk in double, per ribbon range
                 const auto links = ps.readState("ribbonLinks");
                 const auto* programTable = reinterpret_cast<const NV_StreamProgram*>(firstPacket.data() + reinterpret_cast<const NV_StreamHeader*>(firstPacket.data())->programs);

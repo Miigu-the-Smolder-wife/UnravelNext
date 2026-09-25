@@ -43,7 +43,7 @@
 #define FX_COUNTER_DYING 4u
 #define FX_COUNTER_LARGE 5u      // surfaces in the collision grid's large list
 #define FX_COUNTER_GRID_ENTRIES 6u
-#define FX_COUNTER_VOLUMES 7u        // live volume particles listed for FxCells this tick
+#define FX_COUNTER_VOLUMES 7u        // (unused)
 #define FX_COUNTER_TURN 8u           // asuint(max |w| dt over the grid's surfaces) (FxGrid, motion bound of the queries)
 #define FX_COUNTER_CARRY 9u          // asuint(max carrier displacement bound over all surfaces)
 #define FX_COUNTER_COLLIDERS 11u     // colliding slots queued by integrate for FxCollide this tick
@@ -76,11 +76,12 @@ cbuffer FxTick : register(b1)
     uint g_report, g_emitterDynamic, g_bodies, g_tickSurfaces;
     float g_gridCell; uint g_gridMask, g_gridCount, g_gridStart;     // collision grid (FxGrid.hlsl)
     uint g_gridFill, g_gridEntries, g_gridLarge, g_gridEntryCapacity;
-    uint g_staticSurfaceCount, g_dynamicSurfaces, g_ribbonPoints, g_mediumCells;  // g_surfaceCount = static + dynamic
-    uint g_ribbonCapacity, g_cellCapacity, g_volumeList, g_gridBlocks;  // header ribbon_points, medium_cells; grid block offsets
+    uint g_staticSurfaceCount, g_dynamicSurfaces, g_ribbonPoints, g_volumeSide;  // g_surfaceCount = static + dynamic; side8
+    uint g_ribbonCapacity, g_cellCapacity, g_volumeRecords, g_gridBlocks;  // header ribbon_points, medium_cells; record16;
+                                                                           // grid block offsets
     uint g_emitterUpdates, g_emitterUpdateRows, g_emitterStamp, g_updateCount;  // emitter table delta (FxEmitters.hlsl)
     uint g_serial; float g_separationMax; uint g_volumeRanges, g_volumeRangeCount;  // packet serial; largest separation;
-                                                                                  // FxCells ranges
+                                                                                  // volume ranges (record index)
     uint g_surfaceBoxes, g_velocityOut, g_overflowRecords, g_overflowCapacity;  // grown box per surface (candidate filter);
                                                                                 // this tick's velocity; IMPACT_OVERFLOW inputs
     uint g_reserved25, g_reserved26, g_experiment, g_colliders;  // sort: pass p's histogram is hist[p * g_histRegion + group * 256
@@ -458,16 +459,8 @@ StreamEvent fxEvent(uint emitter, uint birth, uint kind, NvState s)
 #define FX_OUTPUT_RIBBON 2u
 #define FX_OUTPUT_VOLUME 3u
 struct RibbonPoint { float3 position; float width; float age; uint valid; uint pad0, pad1; };  // 32 B
-struct MediumCell { int4 cell; float4 low, high, absorption, scattering, emission; };           // 96 B (NV_MediumCell)
 float fxCurve1(uint first, uint count, float u) { return count >= 2u ? nv_curve(first, count, u).y : 1.0f; }
 float3 fxCurve3(uint first, uint count, float u) { return count >= 2u ? nv_curve(first, count, u).yzw : float3(1, 1, 1); }
-float fxTentMass(uint k, uint n)
-{
-    const float a = (float)k / (float)n * 2.0f - 1.0f, b = (float)(k + 1u) / (float)n * 2.0f - 1.0f;
-    const float ca = a <= 0 ? 0.5f * (a + 1) * (a + 1) : 1 - 0.5f * (1 - a) * (1 - a);
-    const float cb = b <= 0 ? 0.5f * (b + 1) * (b + 1) : 1 - 0.5f * (1 - b) * (1 - b);
-    return cb - ca;
-}
 // Inputs of an nv_integrate call whose sweep needed a fifth impact (diagnostic, FxIntegrate): 432 B.
 struct OverflowRecord
 {
@@ -491,12 +484,24 @@ struct TraceRecord
 bool fxTraced(uint row, uint birth) { return g_traceRow != FX_NONE && row == g_traceRow && birth == g_traceBirth; }
 // A colliding slot after its motion (nv_integrate_motion), waiting for its sweep in FxCollide: 48 B.
 struct ColliderRecord { float3 start; uint slot; float3 move; float h; float3 velocity; float age; };
-// Per-particle values of a live volume particle's cells (48 B), written by the integrate kernel at the index of its first
-// cell; FxCells (thread per cell) reads it. serial = the tick's packet serial, so a record of a slot that is not live this
-// tick (a stale index) is never used.
-struct VolumeRecord { float3 centre; float size; float4 colour; int3 cell; uint serial; };
-// Integrate epilogue: a ribbon particle writes its point; a volume particle writes its record (its grid^3 cells are
-// written by FxCells, thread per cell, so the integrate waves neither diverge on the cell loop nor scatter 96 B rows).
+// Local volume particles (render rules request 3b; design 14.8 decision 2): the froxel pass evaluates each particle's
+// medium directly from two records per live volume particle (no medium cells):
+//   record16 = { float3 centre (anchor space), uint half2(r, m) }: the density field is
+//              rho(x) = m * prod_i max(0, 1 - |x_i - c_i| / r) / r^3   (a tent of radius r per axis; its integral is m),
+//              r = size(u) / 2, m = alpha(u) (u = age / lifetime; the cell totals of the former NV_MediumCell grid);
+//   side8    = { uint emission factor mediumEmission * colour(u) as R11G11B10F (HDR, not saturated), uint program (kind) }.
+//   The medium of a particle is sigma_a = medium_absorption * rho, sigma_s = medium_scattering * rho (RGB, per kind),
+//   emission = side8.emission * rho, phase g per kind: the stream's cell formula (colour(u) tints the emission only).
+// Index: the row's particle base (prefix over the tick's volume ranges, CPU) + birth - death_birth; ranges are found from
+// the row's first cell (output_base counts cells, NativeVfxStream.h) by a bounded binary search.
+struct VolumeRange { uint first, cells, grid, program, particleBase, pad0, pad1, pad2; };  // 32 B
+uint fxPackR11G11B10(float3 c)
+{
+    c = max(c, 0.0f);
+    const uint r = (f32tof16(c.r) >> 4) & 0x7FFu, g = (f32tof16(c.g) >> 4) & 0x7FFu, b = (f32tof16(c.b) >> 5) & 0x3FFu;
+    return r | (g << 11) | (b << 22);
+}
+// Integrate epilogue: a ribbon particle writes its point; a volume particle writes its record16 + side8.
 void fxWriteOutputs(uint slot, uint birth, NvState s, StreamEmitter e, StreamProgram p, EmitterDynamic dyn)
 {
     if (p.output == FX_OUTPUT_RIBBON)
@@ -515,17 +520,25 @@ void fxWriteOutputs(uint slot, uint birth, NvState s, StreamEmitter e, StreamPro
         const float u = saturate(s.age / p.lifetime);
         const uint n = clamp(p.mediumGrid, 1u, 32u), cells = n * n * n;
         const uint first = e.outputBase + (birth - e.deathBirth) * cells;
-        if (cells > g_cellCapacity || first > g_cellCapacity - cells) { fxStatus(FX_STATUS_RANGE); return; }
-        VolumeRecord r;
-        r.size = p.size * e.sizeScale * fxCurve1(p.sizeKeys, p.sizeCount, u);
-        r.colour = float4(p.color.rgb * e.colorScale.rgb * fxCurve3(p.colorKeys, p.colorCount, u),
-                          p.color.a * e.colorScale.a * fxCurve1(p.alphaKeys, p.alphaCount, u));
-        const float3 q = dyn.originAnchor + s.position;
-        r.cell = (int3)floor(q / 1024.0f);
-        r.centre = q - (float3)r.cell * 1024.0f;
-        r.serial = g_serial;
-        FX_RWBUFFER(VolumeRecord, records, g_volumeList);
-        records[first] = r;
+        if (cells > g_cellCapacity || first > g_cellCapacity - cells || g_volumeRangeCount == 0u) { fxStatus(FX_STATUS_RANGE); return; }
+        // the range holding this first cell (last range with first <= cell)
+        FX_BUFFER(VolumeRange, ranges, g_volumeRanges);
+        uint lo = 0u, hi = g_volumeRangeCount;
+        [loop] for (uint guard = 0u; guard < 32u && hi - lo > 1u; ++guard)
+        {
+            const uint mid = (lo + hi) >> 1;
+            if (ranges[mid].first <= first) lo = mid; else hi = mid;
+        }
+        const VolumeRange range = ranges[lo];
+        if (first < range.first || first - range.first >= range.cells) { fxStatus(FX_STATUS_RANGE); return; }
+        const uint index = range.particleBase + (first - range.first) / cells;
+        const float size = p.size * e.sizeScale * fxCurve1(p.sizeKeys, p.sizeCount, u);
+        const float mass = p.color.a * e.colorScale.a * fxCurve1(p.alphaKeys, p.alphaCount, u);
+        const float3 colour = p.color.rgb * e.colorScale.rgb * fxCurve3(p.colorKeys, p.colorCount, u);
+        FX_RWBUFFER(uint4, records, g_volumeRecords);
+        FX_RWBUFFER(uint2, side, g_volumeSide);
+        records[index] = uint4(asuint(dyn.originAnchor + s.position), f32tof16(0.5f * size) | (f32tof16(mass) << 16));
+        side[index] = uint2(fxPackR11G11B10(p.mediumEmission * colour), e.program);
     }
 }
 // ---- end of a slot's tick (FxIntegrate for non-colliding slots, FxCollide for colliding ones) --------------------------

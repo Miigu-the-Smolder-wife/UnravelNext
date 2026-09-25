@@ -37,8 +37,8 @@ struct TickConstants
     uint32_t report, emitterDynamic, bodies, tickSurfaces;
     float gridCell; uint32_t gridMask, gridCount, gridStart;  // collision candidate grid (FxGrid.hlsl)
     uint32_t gridFill, gridEntries, gridLarge, gridEntryCapacity;
-    uint32_t staticSurfaceCount, dynamicSurfaces, ribbonPoints, mediumCells;  // surfaceCount = static + dynamic
-    uint32_t ribbonCapacity, cellCapacity, volumeList, gridBlocks;
+    uint32_t staticSurfaceCount, dynamicSurfaces, ribbonPoints, volumeSide;  // surfaceCount = static + dynamic
+    uint32_t ribbonCapacity, cellCapacity, volumeRecords, gridBlocks;
     uint32_t emitterUpdates, emitterUpdateRows, emitterStamp, updateCount;
     uint32_t serial;
     float separationMax;  // largest program separation (collision grid motion bound)
@@ -89,7 +89,7 @@ public:
     std::vector<NV_StreamParticle> checkpoint(render::ShaderLibrary& shaders);
 
     // Raw state for tests (waits for the GPU): the bytes of a named buffer ("posAge", "velocity", "meta", "alive",
-    // "aliveList", "deadList", "dyingList", "counters", "posAgePrev", "overflow", "trace").
+    // "aliveList", "deadList", "dyingList", "counters", "posAgePrev", "volumeRecords", "volumeSide", "overflow", "trace").
     std::vector<uint8_t> readState(const char* name);
 
     uint32_t capacity() const { return m_capacity; }
@@ -105,6 +105,7 @@ private:
     uint32_t m_chainDepthMax = 4, m_readbackSlots = 4, m_collisionReadback = 4096;
     float m_gridCell = 1.0f;
     uint32_t m_traceRow = UINT32_MAX, m_traceBirth = 0;
+    uint32_t m_volumeParticles = 0;  // live volume particles of the last recorded tick (records)
     uint32_t m_experimentDisable = 0;  // timing attribution only (fx.toml experiment_disable); 0 in every product run
     uint32_t m_capacity = 0;
     uint64_t m_latestTick = 0;
