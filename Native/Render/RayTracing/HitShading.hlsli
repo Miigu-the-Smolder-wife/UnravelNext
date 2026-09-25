@@ -62,7 +62,7 @@ struct RtHitLighting
 
 // n faces the ray origin side (RtSurface); v = unit vector toward the ray origin; pixelAngle = the ray cone's angular
 // width at the hit (filters a mirror hit's sun-disk edge like the direct view's pixel).
-float3 rtHitRadiance(GpuMaterial m, uint specularLut, float3 n, float3 v, RtHitLighting L, float pixelAngle)
+float3 rtHitRadiance(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle)
 {
     ModelSurface s;
     s.cls = m.classFlags & 0xFFu;
@@ -84,11 +84,11 @@ float3 rtHitRadiance(GpuMaterial m, uint specularLut, float3 n, float3 v, RtHitL
     if (L.sunVisibility > 0 && any(L.sunIlluminance > 0))
     {
         if (NoL > 0)
-            sun = diffuseAlbedo * L.sunIlluminance * NoL + shSunSpecular(specularLut, f0, s.roughness, alpha, compensation, n, v, NoV, l0, L.sunIlluminance, pixelAngle);
+            sun = diffuseAlbedo * L.sunIlluminance * NoL + shSunSpecular(f0, s.roughness, alpha, compensation, n, v, NoV, l0, L.sunIlluminance, pixelAngle);
         else if (foliage)
             sun = albedo * s.transmission * L.sunIlluminance * -NoL;  // transmitted through the leaf (model v1)
     }
-    return m.emissive + sun + diffuseAlbedo * L.irradiance + shSpecularAlbedo(specularLut, f0, NoV, s.roughness) * L.specularRadiance;
+    return m.emissive + sun + diffuseAlbedo * L.irradiance + shSpecularAlbedo(f0, NoV, s.roughness) * L.specularRadiance;
 }
 
 #endif

@@ -7,7 +7,7 @@ mirror_roughness_max = 0.14
 exact_set_min_hits = 64
 planar_max_wave_slope_deg = 2.0
 planar_views_max = 4                   # reflection cameras per frame (largest pixel counts); others use rays
-planar_view_fixed_ms = 0.05             # prior cost of a planar reflection view: a + b x its screen rectangle (b per pixel, ns);
+planar_view_fixed_ms = 0.05             # prior cost of a planar reflection view: a + b x its mirror pixels (b per pixel, ns; the view draws only them, planarMask);
 planar_view_ns_per_px = 0.34            # replaced online by the view's own measured cost. Design 2.6: 2.14 ms per 8.3 M px (0.26)
                                        # + S's per-view products (froxel lists, air from the mirror, local-light shadow
                                        # slots; S request 20260925_S_planar_view_products) 0.08 [expected]

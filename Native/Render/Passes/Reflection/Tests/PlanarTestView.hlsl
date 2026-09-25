@@ -4,7 +4,7 @@
 // (the mirror), so it is traced from there and shaded exactly like the ray path's hits (ReflectionHit.hlsli: the same
 // cache cells at the same footprint level, created and requested the same way), x exposure.
 // Root constants as ReflectionTrace's constant-sky variant: P[0].x = colour UAV, P[1] = { sky rgb, ray length },
-// P[3].xyz = sun illuminance, P[4].z = GI cache UAV (raw), P[5].y = specular albedo LUT SRV, P[6], P[7] = RtSceneSrvs;
+// P[3].xyz = sun illuminance, P[4].z = GI cache UAV (raw), P[6], P[7] = RtSceneSrvs;
 // frame constants b1 = the reflection view (its clip plane = the mirror, mirror roughness 0).
 #define SKY 1
 #include "Passes/Reflection/ReflectionHit.hlsli"

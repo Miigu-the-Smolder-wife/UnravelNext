@@ -13,7 +13,7 @@
 //
 // P[0] = { jobs SRV, results UAV (uint2 per job), mode SRV, probes SRV }
 // P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli), ray length in P[1].w, P[3].w = view.screenProbeMaps SRV
-// P[4] = { depth SRV, gbuffer SRV, GI cache UAV (raw), rays per G sample }, P[5] = { frame | experiment << 24, specular albedo LUT SRV, ShadowSrvs buffer (ReflectionHit.hlsli), exact set counts }
+// P[4] = { depth SRV, gbuffer SRV, GI cache UAV (raw), rays per G sample }, P[5] = { frame | experiment << 24, 0, ShadowSrvs buffer (ReflectionHit.hlsli), exact set counts }
 // P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view.
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionInternal.hlsli"

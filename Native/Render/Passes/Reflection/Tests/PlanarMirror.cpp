@@ -20,7 +20,6 @@
 #include "unx/render/GpuScene.h"
 #include "unx/rt/RayPipeline.h"
 #include "unx/rt/RayScene.h"
-#include "unx/rt/SpecularAlbedo.h"
 
 #include <algorithm>
 #include <cmath>
@@ -211,7 +210,6 @@ std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConf
             rv.color = c.graph.createTexture({ "stand-in reflection view", v.width, v.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
             const TextureRef colour = rv.color;
             const BufferRef cache = c.resources.giCache;
-            const uint32_t lut = rt::specularAlbedoSrv(device);
             const float rayLength = gi::GiSettings::fromQuality(quality).rayLength;
             const D3D12_GPU_VIRTUAL_ADDRESS address = rv.frameConstants;
             const uint32_t w = v.width, h = v.height;
@@ -221,12 +219,11 @@ std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConf
                                 b.use(cache, Use::UavGraphics);
                                 rays.declareTraversal(b);
                             },
-                            [&standIn, colour, cache, lut, rayLength, address, w, h, scene](PassContext& pc) {
+                            [&standIn, colour, cache, rayLength, address, w, h, scene](PassContext& pc) {
                                 uint32_t k[32] = {};
                                 k[0] = pc.uav(colour);
                                 k[7] = asU(rayLength);
                                 k[18] = pc.uav(cache);
-                                k[21] = lut;
                                 k[22] = k[23] = 0xFFFFFFFFu;  // no VSM, no exact set counts
                                 std::memcpy(&k[24], scene, sizeof scene);
                                 pc.computeConstants(k, 32);

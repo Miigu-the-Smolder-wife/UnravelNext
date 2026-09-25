@@ -278,23 +278,18 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
         rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(atmosphere ? "Passes/GI/GiTrace.SKY0" : "Passes/GI/GiTrace.SKY1", { "GiTraceGen" }));
     const float3 sky = m_skyRadiance, sun = m_sunIlluminance;
     const uint32_t rayCount = s.updatesPerFrame * 64;
-    const rt::RayScene::VsmRefs vsm = rt::RayScene::vsmRefs(fc.resources);  // S's shadowPages recorded before
-    rt::RayScene* rayScene = &rays;
-    const uint64_t frameIndex = fc.frame.frameIndex;
     g.addPass("r.gi.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::UavGraphics);
-                  rt::RayScene::declareVsm(b, vsm);
                   rays.declareTraversal(b);
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
-              [&pipeline, cache, rayCount, s, sky, sun, scene, frameConstants, atmosphere, luts, vsm, rayScene, frameIndex](PassContext& c) {
+              [&pipeline, cache, rayCount, s, sky, sun, scene, frameConstants, atmosphere, luts](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = c.uav(cache);
                   k[1] = rayCount;
                   k[2] = asU(s.hitCellFootprintScale);
-                  k[3] = rayScene->vsmSrvs(c, vsm, frameIndex, 0);  // S's VSM for sun visibility at hits (UNX_NONE: rays)
                   k[4] = asU(sky.x);
                   k[5] = asU(sky.y);
                   k[6] = asU(sky.z);

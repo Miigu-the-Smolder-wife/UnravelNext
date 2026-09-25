@@ -15,7 +15,7 @@
 // Frame path: RayScene::record -> ray-traced primary visibility standing in for V/M -> GI -> reflections; the check reads
 // reflectionRadiance (M's API) and the per-pixel mode.
 //
-//   unx_test_reflection_reflectionanalytic [--frames N] [--validate]
+//   unx_test_reflection_reflectionanalytic [--frames N] [--set key=value ...] [--validate]
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/gi/GiSystem.h"
@@ -23,7 +23,6 @@
 #include "unx/render/GpuScene.h"
 #include "unx/rt/RayPipeline.h"
 #include "unx/rt/RayScene.h"
-#include "unx/rt/SpecularAlbedo.h"
 #include "unx/scene/MaterialModel.h"
 
 #include <algorithm>
@@ -137,7 +136,7 @@ Buffer createBuffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE type, bool u
 // HitShading.hlsli's indirect specular albedo: (f0 A + B)(1 + f0 (1 / (A + B) - 1)), bilinear on the 32 x 32 table.
 double specularAlbedo(double f0, double NoV, double roughness)
 {
-    const std::vector<float>& t = rt::specularAlbedoTable();
+    const std::vector<float>& t = scene::model::specularAlbedoTable();  // the frame constant's table (v1.25)
     const uint32_t n = scene::model::kAlbedoTableSize;
     const double x = std::clamp(NoV, 0.0, 1.0) * (n - 1), y = std::clamp(roughness, 0.0, 1.0) * (n - 1);
     const uint32_t x0 = (uint32_t)x, y0 = (uint32_t)y, x1 = std::min(x0 + 1, n - 1), y1 = std::min(y0 + 1, n - 1);
@@ -643,14 +642,17 @@ int main(int argc, char** argv)
     {
         uint32_t frames = 128;  // cold cache: cells only reflections reach converge in ~100 frames (48: 4 of 38962 M pixels still 4 % low)
         bool validate = false;
+        std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
             if (a == "--frames" && i + 1 < argc) frames = (uint32_t)std::stoul(argv[++i]);
+            else if (a == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
             else if (a == "--validate") validate = true;
             else fail("unknown argument %s", a.c_str());
         }
         QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+        for (const std::string& o : overrides) quality.applyOverride(o);
         DeviceOptions options;
         options.debugLayer = validate;
         options.gpuValidation = validate;

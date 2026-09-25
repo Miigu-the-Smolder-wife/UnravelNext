@@ -1,7 +1,6 @@
 #include "unx/refl/ReflectionSystem.h"
 
 #include "unx/rt/RayPipeline.h"
-#include "unx/rt/SpecularAlbedo.h"
 
 #include <algorithm>
 #include <cmath>
@@ -373,7 +372,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                 // Only counts of the plane's current run of consecutive candidate frames (its view may have changed).
                 if (p < m_planePixels.size() && m_planeRunStart[p] <= m_slotFrame[oldSlot]) m_planePixels[p] = counts[c];
             }
-            // Costs: the trace per ray, each view per rectangle pixel (running averages over ~16 frames).
+            // Costs: the trace per ray, each view per mirror pixel it drew (running averages over ~16 frames).
             const uint64_t* ticks = reinterpret_cast<const uint64_t*>(slot + kTicksOffset);
             const uint32_t* counters = reinterpret_cast<const uint32_t*>(slot + kJobsOffset);  // total jobs, M, G samples, G pixels
             const double traced = (double)counters[1] + (double)counters[2] * m_settings.raysPerSample;
@@ -389,13 +388,13 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                 if (t1 <= t0) continue;  // not bracketed (the view's passes ran on another queue): no measurement
                 const float ms = (float)((t1 - t0) * m_tickMs);
                 m_lastViewMs += ms;
-                const uint32_t p = m_slotViewPlanes[oldSlot][v], rect = m_slotViewRects[oldSlot][v];
+                const uint32_t p = m_slotViewPlanes[oldSlot][v], mirror = m_slotViewPixels[oldSlot][v];
                 if (p < m_planeViewMs.size())
                 {
                     m_planeViewMs[p] = ms;
                     m_planeViewFrame[p] = m_slotFrame[oldSlot];
                 }
-                const float perPixel = std::max(ms - m_settings.planarViewFixedMs, 0.0f) * 1e6f / std::max(rect, 1u);
+                const float perPixel = std::max(ms - m_settings.planarViewFixedMs, 0.0f) * 1e6f / std::max(mirror, 1u);
                 m_viewNsPerPixel += (perPixel - m_viewNsPerPixel) / 4;
             }
         }
@@ -412,7 +411,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     std::vector<uint32_t>& slotPlanes = m_slotPlanes[ringSlot];
     slotPlanes.clear();
     m_slotViewPlanes[ringSlot].clear();
-    m_slotViewRects[ringSlot].clear();
+    m_slotViewPixels[ringSlot].clear();
     // Exact threshold of the cost choice: a view costs at least a + b x pixels, rays c x pixels, so a plane can pay off
     // only when c > b and pixels > a / (c - b). Until the trace has been measured no plane is chosen.
     const float rayNs = m_rayNs, viewNs = m_viewNsPerPixel, viewFixedNs = s.planarViewFixedMs * 1e6f;
@@ -473,9 +472,10 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             const uint64_t rect = (uint64_t)(ix1 - ix0) * (iy1 - iy0);
             if (ix1 <= ix0 || iy1 <= iy0 || (double)rect < minPixels) return;  // the rectangle bounds the count too
             const bool current = m_planeLastSeen[k] + 1 == frame && m_planeRunStart[k] + fc.framesInFlight <= frame;
-            // The view's cost: measured within the last second, else the model a + b x rectangle.
+            // The view's cost: measured within the last second, else the model a + b x mirror pixels (the rectangle, an
+            // upper bound, until the plane has a current count; it is not eligible before).
             const bool measured = m_planeViewFrame[k] != UINT64_MAX && frame < m_planeViewFrame[k] + 60;
-            const double viewCost = measured ? m_planeViewMs[k] * 1e6 : viewFixedNs + (double)viewNs * rect;
+            const double viewCost = measured ? m_planeViewMs[k] * 1e6 : viewFixedNs + (double)viewNs * (current ? m_planePixels[k] : rect);
             const double rayCost = (double)rayNs * m_planePixels[k];
             const bool hadCamera = m_planeCameraFrame[k] + 1 == frame;
             const bool cheaper = hadCamera ? viewCost < rayCost * 1.1 : viewCost * 1.1 < rayCost;  // hysteresis
@@ -522,7 +522,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                 pv.desc.planarTileMask = pv.tileMask;
                 m_viewRects[planar.views] = { c.x, c.y, c.w, c.h };
                 m_slotViewPlanes[ringSlot].push_back(c.plane);
-                m_slotViewRects[ringSlot].push_back(c.w * c.h);
+                m_slotViewPixels[ringSlot].push_back(m_planePixels[c.plane]);
                 m_planeCameraFrame[c.plane] = frame;
                 m_lastPlanarPixels += m_planePixels[c.plane];
                 m_lastRectPixels += c.w * c.h;
@@ -632,7 +632,6 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const float rayLength = (float)fc.quality.number("gi.ray_length_m");
     const uint32_t frame = (uint32_t)fc.frame.frameIndex;
     ID3D12Resource* argumentResource = m_arguments.Get();
-    const uint32_t specularLut = rt::specularAlbedoSrv(fc.device);
     const uint32_t experiment = s.experimentDisable;
     const BufferRef exactCounts = rays.exactHitCounts();
     const TextureRef probeMaps = main.screenProbeMaps;
@@ -659,7 +658,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
               [&pipeline, jobs, results, modes, probes, depth, gbuffer, cache, luts, atmosphere, sky, sun, rayLength, s, frame, scene, frameConstants, argumentResource,
-               variant, specularLut, timestamps, firstTick, experiment, exactCounts, probeMaps, vsm, rayScene, frameIndex](PassContext& c) {
+               variant, timestamps, firstTick, experiment, exactCounts, probeMaps, vsm, rayScene, frameIndex](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = c.srv(jobs);
                   k[1] = c.uav(results);
@@ -679,7 +678,6 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   k[18] = c.uav(cache);
                   k[19] = s.raysPerSample;
                   k[20] = (frame & 0xFFFFFFu) | (experiment << 24);
-                  k[21] = specularLut;
                   k[22] = rayScene->vsmSrvs(c, vsm, frameIndex, 1);  // S's VSM for sun visibility at hits (UNX_NONE: rays)
                   k[23] = exactCounts.valid() ? c.uav(exactCounts) : 0xFFFFFFFFu;
                   std::memcpy(&k[24], scene, sizeof scene);

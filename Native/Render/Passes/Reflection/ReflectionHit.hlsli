@@ -1,7 +1,7 @@
 // Radiance arriving along a reflection ray (R-internal; ReflectionTrace and the planar test's stand-in view): sky on a
 // miss, else the hit's radiance toward the ray origin (RayTracing/HitShading.hlsli). Needs GiSky.hlsli's root constants
 // (P[1] to P[3]), the GI cache (RW), P[5].x = frame (low 24 bits) | reflection.experiment_disable << 24,
-// P[5].y = the specular albedo LUT SRV, P[5].z = a raw buffer holding this frame's ShadowSrvs (UNX_NONE: no VSM, every
+// P[5].y unused, P[5].z = a raw buffer holding this frame's ShadowSrvs (UNX_NONE: no VSM, every
 // sunlit hit traces a shadow ray) and P[5].w = RayScene's exact set hit counts UAV (UNX_NONE: none).
 // (cost attribution only, 0 in the shipped configuration: bit 1 = sun shadow rays without any-hit, bit 2 = no sun
 // visibility, the sun taken as visible, bit 4 = sun visibility by shadow rays only, bit 8 = hit materials without textures).
@@ -91,7 +91,7 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
             }
         }
     }
-    return rtHitRadiance(m, P[5].y, s.normal, v, L, coneSpread);
+    return rtHitRadiance(m, s.normal, v, L, coneSpread);
 }
 
 #endif
