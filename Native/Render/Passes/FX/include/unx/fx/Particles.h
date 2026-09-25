@@ -44,9 +44,11 @@ struct TickConstants
     float separationMax;  // largest program separation (collision grid motion bound)
     uint32_t volumeRanges, volumeRangeCount;
     uint32_t surfaceBoxes, velocityOut, overflowRecords, overflowCapacity;
-    uint32_t sortPasses, histRegion, experiment, colliders;  // experiment: fx.particles.experiment_disable (timing only)  // sort histograms: sortPasses regions of histRegion words
+    uint32_t sortPasses, histRegion, experiment, colliders;  // sort histograms: sortPasses regions of histRegion words;
+                                                             // experiment_disable (timing only); collider queue
+    uint32_t emitterPatches, patchCount, pad14, pad15;  // NV_StreamEmitterPatch rows of the tick (FxEmitters)
 };
-static_assert(sizeof(TickConstants) == 384);
+static_assert(sizeof(TickConstants) == 400);
 
 // counters[] words (Particles.hlsli)
 enum : uint32_t { kCounterAlive = 0, kCounterDead = 1, kCounterCollisions = 2, kCounterStatus = 3, kCounterDying = 4, kCounterWords = 16 };

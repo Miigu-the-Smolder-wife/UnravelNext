@@ -47,7 +47,7 @@ int main(int argc, char** argv)
     {
         std::string load = "both", resolution = "both", out = std::string(UNX_SOURCE_DIR) + "/Results/FX/ParticleGate";
         uint32_t frames = 600;
-        bool delta = true;
+        bool delta = true, patchesOn = true;
         bool passTimestamps = true;  // --no-pass-timestamps: frame timing only (the per-pass queries serialise the queue)  // emitter table as NV_STREAM_EMITTER_DELTA packets (--no-delta: whole table every tick, A/B)
         // --packets DIR: submit a recorded stream (ParticleTests --record: packet_NNNN.bin) open loop. The GPU tick is then
         // timed without the stand-in authority's CPU in the loop (a closed-loop features run leaves the GPU idle while the
@@ -65,6 +65,7 @@ int main(int argc, char** argv)
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
             else if (a == "--no-delta") delta = false;
+            else if (a == "--no-patches") patchesOn = false;
             else if (a == "--no-pass-timestamps") passTimestamps = false;
             else if (a == "--packets") packets = next();
             else fail("unknown option %s", a.c_str());
@@ -90,6 +91,7 @@ int main(int argc, char** argv)
                 cfg.features = l == "features";
                 cfg.killTick = UINT32_MAX;  // the population stays at the RPP load
                 cfg.delta = delta;
+                cfg.patches = patchesOn;
                 fx::test::RppStream stream(cfg);
                 TrackState state;
                 fx::ParticleSystem& ps = fx::particles(state, device, quality);
@@ -100,7 +102,7 @@ int main(int argc, char** argv)
                 frame.mainView = ViewDesc::fromCamera(cam, res.width, res.height, float4x4{});
                 FrameServices services;
                 std::vector<NV_StreamEvent> previous;
-                std::vector<double> cpuStream, cpuSubmit, cpuRecord, packetKB, blocks;
+                std::vector<double> cpuStream, cpuSubmit, cpuRecord, packetKB, blocks, patchesPerTick;
                 uint64_t lastTick = 0, lastStream = 0, lastGeneration = 0, overflowTicks = 0, firstOverflow = 0;
                 uint32_t tableRows = 0;
 
@@ -138,6 +140,7 @@ int main(int argc, char** argv)
                     lastGeneration = h.generation;
                     packetKB.push_back(packet.size() / 1024.0);
                     blocks.push_back(h.emitter_count);
+                    patchesPerTick.push_back(h.emitter_patch_count);
                     tableRows = h.emitter_table;
                     ps.submit(packet.data(), packet.size());
                     const auto c2 = std::chrono::steady_clock::now();
@@ -152,9 +155,9 @@ int main(int argc, char** argv)
                     cpuRecord.push_back(std::chrono::duration<double, std::milli>(c3 - c2).count());
                 });
                 auto median = [](std::vector<double> v) { if (v.empty()) return 0.0; std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
-                std::printf("FX_PARTICLE_GATE_CPU load=%s resolution=%s delta=%d fixture_ms=%.3f submit_ms=%.3f record_ms=%.3f packet_kb=%.1f emitter_blocks=%.0f of %u rows "
+                std::printf("FX_PARTICLE_GATE_CPU load=%s resolution=%s delta=%d fixture_ms=%.3f submit_ms=%.3f record_ms=%.3f packet_kb=%.1f emitter_blocks=%.0f patches=%.0f of %u rows "
                             "(medians; the fixture stands in for the VFX authority)\n",
-                            l.c_str(), rn.c_str(), delta ? 1 : 0, median(cpuStream), median(cpuSubmit), median(cpuRecord), median(packetKB), median(blocks), tableRows);
+                            l.c_str(), rn.c_str(), delta ? 1 : 0, median(cpuStream), median(cpuSubmit), median(cpuRecord), median(packetKB), median(blocks), median(patchesPerTick), tableRows);
                 {
                     const double* sm = stream.sectionMs();
                     const double n = (double)std::max<uint64_t>(lastTick, 1);

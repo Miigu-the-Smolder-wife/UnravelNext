@@ -126,7 +126,17 @@ enum {
                                   Its [dying_birth, death_birth) range was already applied (no live
                                   birth is below death_birth), so it kills nothing and writes no event.
                                   The CPU sends a whole table on RESET, the first packet, a new dt
-                                  (drag factors) and a new anchor (WORLD_VFX_DESIGN_KO.md 9.6). */
+                                  (drag factors) and a new anchor (WORLD_VFX_DESIGN_KO.md 9.6).
+                                  With it, emitter_patches[] (NV_StreamEmitterPatch) update other
+                                  listed rows' per-tick fields only: a row gets at most one of a
+                                  block, a patch or nothing in a packet. A patch writes flags,
+                                  next/death/dying births, death_event, output_base, parent_event,
+                                  parent_row and rebase of the row the executor holds (the per-tick
+                                  ones are this tick's, as in a block); every other field keeps the
+                                  held block. The CPU sends a patch only when the held block with the
+                                  patch applied equals the block it would send, so a patch and a
+                                  block give the same table. TRANSPORT and SOURCE never appear in a
+                                  patch (those rows send blocks). */
 };
 /* Program flags. Kinematic outputs (beams, decals) never enter the stream. */
 enum {
@@ -185,7 +195,10 @@ typedef struct NV_StreamHeader {
     uint32_t emitter_table;    /* rows of the persistent emitter table after this packet */
     uint64_t emitter_rows;     /* NV_STREAM_EMITTER_DELTA: byte offset of uint32 rows[emitter_count]
                                   (ascending, section padded to 16 B), row of each emitters[] block */
-    uint64_t reserved[4];
+    uint64_t emitter_patches;  /* NV_STREAM_EMITTER_DELTA: byte offset of NV_StreamEmitterPatch[emitter_patch_count]
+                                  (rows ascending, none also in emitter_rows) */
+    uint32_t emitter_patch_count,reserved0;
+    uint64_t reserved[2];
 } NV_StreamHeader;
 
 /* Static per program (index = program number). Curves are piecewise linear
@@ -253,6 +266,13 @@ typedef struct NV_StreamEmitter {
     uint32_t entity[2],generation[2]; /* owner lifetime (self-collision exclusion) */
     uint32_t output_base,reserved3,reserved4,reserved5;
 } NV_StreamEmitter;
+/* Per-tick fields of a row whose block the executor already holds (NV_STREAM_EMITTER_DELTA). */
+typedef struct NV_StreamEmitterPatch {
+    uint32_t row,flags;          /* flags: the row's whole flags word this tick (never TRANSPORT or SOURCE) */
+    uint32_t next_birth,death_birth,dying_birth,death_event;
+    uint32_t output_base,parent_event,parent_row;
+    float rebase[3];
+} NV_StreamEmitterPatch;
 
 /* A block of consecutive births of one emitter. Birth r (0 <= r < count) has
    number first_birth + r and elapsed (seconds from its birth to the tick end):
@@ -377,6 +397,7 @@ typedef struct NV_StreamExecutor {
 static_assert(sizeof(NV_StreamHeader)==320,"stream header");
 static_assert(sizeof(NV_StreamProgram)==320,"stream program");
 static_assert(sizeof(NV_StreamEmitter)==336,"stream emitter");
+static_assert(sizeof(NV_StreamEmitterPatch)==48,"stream emitter patch");
 static_assert(sizeof(NV_StreamSpawn)==48&&sizeof(NV_StreamExplicitBirth)==48&&sizeof(NV_StreamCurveKey)==16,"stream births");
 static_assert(sizeof(NV_StreamField)==32&&sizeof(NV_StreamWorldField)==64&&sizeof(NV_StreamSurface)==128&&sizeof(NV_StreamBody)==80,"stream inputs");
 static_assert(sizeof(NV_StreamParticle)==48&&sizeof(NV_StreamEvent)==64&&sizeof(NV_StreamCounters)==48,"stream outputs");

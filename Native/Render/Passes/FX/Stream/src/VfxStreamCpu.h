@@ -87,9 +87,44 @@ struct ExactParticle {
     double position[3],velocity[3],age;
 };
 
+struct StreamFailure:std::runtime_error {using std::runtime_error::runtime_error;};
+inline void stream_require(bool ok,const char* message){if(!ok)throw StreamFailure(message);}
+template<class T> std::vector<T> stream_section(const uint8_t* data,uint64_t bytes,uint64_t offset,uint32_t count){
+    std::vector<T> out(count);if(!count)return out;
+    stream_require(offset%16==0&&offset>=sizeof(NV_StreamHeader)&&offset<=bytes&&uint64_t(count)*sizeof(T)<=bytes-offset,"stream section bounds");
+    std::memcpy(out.data(),data+offset,size_t(count)*sizeof(T));return out;
+}
+// The per-tick fields of a row this tick (NV_StreamEmitterPatch).
+inline void apply_emitter_patch(NV_StreamEmitter& e,const NV_StreamEmitterPatch& p){
+    e.flags=p.flags;e.next_birth=p.next_birth;e.death_birth=p.death_birth;e.dying_birth=p.dying_birth;e.death_event=p.death_event;
+    e.output_base=p.output_base;e.parent_event=p.parent_event;e.parent_row=p.parent_row;for(size_t a=0;a<3;++a)e.rebase[a]=p.rebase[a];
+}
+// The persistent emitter table after one packet (NV_STREAM_EMITTER_DELTA and patches).
+// The CPU executor applies it, and the authority keeps the same table for what an
+// executor holds (the patch decision), so both follow one rule.
+inline void apply_emitter_table(std::vector<NV_StreamEmitter>& table,const NV_StreamHeader& h,const uint8_t* data,uint64_t bytes){
+    if(h.flags&NV_STREAM_EMITTER_DELTA){
+        // Persistent table: per-tick fields of unsent rows read as absent, then the listed rows.
+        stream_require(!(h.flags&NV_STREAM_RESET)&&h.emitter_table>=table.size(),"emitter delta");
+        const auto rows=stream_section<uint32_t>(data,bytes,h.emitter_rows,h.emitter_count);
+        const auto blocks=stream_section<NV_StreamEmitter>(data,bytes,h.emitters,h.emitter_count);
+        const auto patches=stream_section<NV_StreamEmitterPatch>(data,bytes,h.emitter_patches,h.emitter_patch_count);
+        table.resize(h.emitter_table,NV_StreamEmitter{});
+        for(auto& e:table){e.rebase[0]=e.rebase[1]=e.rebase[2]=0;e.flags&=~uint32_t(NV_STREAM_EMITTER_TRANSPORT|NV_STREAM_EMITTER_SOURCE|NV_STREAM_EMITTER_KILLED);e.parent_event=e.parent_row=NV_STREAM_NONE;}
+        for(size_t n=0;n<rows.size();++n){stream_require(rows[n]<h.emitter_table&&(n==0||rows[n]>rows[n-1]),"emitter delta rows");table[rows[n]]=blocks[n];}
+        for(size_t n=0;n<patches.size();++n){const auto& p=patches[n];
+            stream_require(p.row<h.emitter_table&&(n==0||p.row>patches[n-1].row)&&!(p.flags&(NV_STREAM_EMITTER_TRANSPORT|NV_STREAM_EMITTER_SOURCE))&&
+                           !std::binary_search(rows.begin(),rows.end(),p.row),"emitter patch rows");
+            apply_emitter_patch(table[p.row],p);}
+    }else{
+        stream_require(h.emitter_count==h.emitter_table&&h.emitter_patch_count==0,"whole emitter table");
+        table=stream_section<NV_StreamEmitter>(data,bytes,h.emitters,h.emitter_count);
+    }
+}
+
 class CpuExecutor {
 public:
-    struct Failure:std::runtime_error {using std::runtime_error::runtime_error;};
+    using Failure=StreamFailure;
     // exact: double restore states replacing the packet's float restore records
     // (same order and count), for in-process restore without float rounding.
     void submit(const uint8_t* data,uint64_t bytes,const std::vector<ExactParticle>* exact=nullptr){
@@ -103,18 +138,7 @@ public:
             const auto keys=section<NV_StreamCurveKey>(data,bytes,h.curve_keys,h.curve_key_count);
             keys_.resize(keys.size());for(size_t k=0;k<keys.size();++k)keys_[k]={keys[k].t,keys[k].value[0],keys[k].value[1],keys[k].value[2]};
         }
-        if(h.flags&NV_STREAM_EMITTER_DELTA){
-            // Persistent table: per-tick fields of unsent rows read as absent, then the listed rows.
-            require(!(h.flags&NV_STREAM_RESET)&&h.emitter_table>=emitters_.size(),"emitter delta");
-            const auto rows=section<uint32_t>(data,bytes,h.emitter_rows,h.emitter_count);
-            const auto blocks=section<NV_StreamEmitter>(data,bytes,h.emitters,h.emitter_count);
-            emitters_.resize(h.emitter_table,NV_StreamEmitter{});
-            for(auto& e:emitters_){e.rebase[0]=e.rebase[1]=e.rebase[2]=0;e.flags&=~uint32_t(NV_STREAM_EMITTER_TRANSPORT|NV_STREAM_EMITTER_SOURCE|NV_STREAM_EMITTER_KILLED);e.parent_event=e.parent_row=NV_STREAM_NONE;}
-            for(size_t n=0;n<rows.size();++n){require(rows[n]<h.emitter_table&&(n==0||rows[n]>rows[n-1]),"emitter delta rows");emitters_[rows[n]]=blocks[n];}
-        }else{
-            require(h.emitter_count==h.emitter_table,"whole emitter table");
-            emitters_=section<NV_StreamEmitter>(data,bytes,h.emitters,h.emitter_count);
-        }
+        apply_emitter_table(emitters_,h,data,bytes);
         for(const auto& e:emitters_)require(!(e.flags&NV_STREAM_EMITTER_ACTIVE)||e.program<programs_.size(),"emitter program");
         const auto spawns=section<NV_StreamSpawn>(data,bytes,h.spawns,h.spawn_count);
         const auto explicits=section<NV_StreamExplicitBirth>(data,bytes,h.explicit_births,h.explicit_count);
@@ -186,12 +210,8 @@ public:
     }
 private:
     struct Slot {uint32_t row=0,birth=0;Math::NvState state{};bool alive=true,fresh=false;double pending=0;};
-    static void require(bool ok,const char* message){if(!ok)throw Failure(message);}
-    template<class T> static std::vector<T> section(const uint8_t* data,uint64_t bytes,uint64_t offset,uint32_t count){
-        std::vector<T> out(count);if(!count)return out;
-        require(offset%16==0&&offset>=sizeof(NV_StreamHeader)&&offset<=bytes&&uint64_t(count)*sizeof(T)<=bytes-offset,"stream section bounds");
-        std::memcpy(out.data(),data+offset,size_t(count)*sizeof(T));return out;
-    }
+    static void require(bool ok,const char* message){stream_require(ok,message);}
+    template<class T> static std::vector<T> section(const uint8_t* data,uint64_t bytes,uint64_t offset,uint32_t count){return stream_section<T>(data,bytes,offset,count);}
     static Real3 rotate(const float* q,Real3 v){
         const Real3 u{q[0],q[1],q[2]};const double w=q[3];
         const Real3 t=Math::cross(u,v)*2.0;return v+t*w+Math::cross(u,t);

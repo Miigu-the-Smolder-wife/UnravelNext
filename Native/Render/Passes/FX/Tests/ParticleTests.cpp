@@ -76,15 +76,15 @@ std::string sha(const std::vector<uint8_t>& bytes)
 }
 
 // 1. byte-identical stream copies of the pinned NativeVfx commit (the copies are updated together with this pin)
-constexpr const char* kStreamCommit = "49e83889";
+constexpr const char* kStreamCommit = "92aada32";
 void checkStreamCopies(bool strict)
 {
     const fs::path mine = fs::path(UNX_SOURCE_DIR) / "Native/Render/Passes/FX/Stream";
     const fs::path original = fs::path(UNX_SOURCE_DIR) / "../Unravel/Native/NativeVfx";
     struct Pin { const char* file; const char* sha; };
-    const Pin pins[] = { { "include/NativeVfxStream.h", "041b39a0a88b7717f4cbb6c0e76fcd92d6a90ebe2659282f56d07c8dd795851a" },
+    const Pin pins[] = { { "include/NativeVfxStream.h", "6c7a6ce17dcf1bbe3a2743aad25b1f7b2275b785a01fb4e4d14465678d236201" },
                          { "shaders/VfxParticleMath.hlsli", "54cee51763671e0742087c1eabc294b77e86359211b0f3369004ee1ba81efb64" },
-                         { "src/VfxStreamCpu.h", "28372b9142fa28f46308b2b6dfd5d59f5e0ba56981c60ee781d6c6ea70ae057b" } };
+                         { "src/VfxStreamCpu.h", "dfb1165d13171b95b10e72ab91fbcf5a86f65b78632e775b9e00349f8e07b3ee" } };
     for (const Pin& pin : pins)
     {
         const std::string a = sha(readBinaryFile(mine / pin.file));
@@ -230,22 +230,9 @@ std::vector<RibbonRef> ribbonReference(const std::vector<D3>& p, const std::vect
 // Whole emitter table after a packet (a delta updates the listed rows; unsent rows lose their per-tick fields).
 void applyEmitters(std::vector<NV_StreamEmitter>& table, const std::vector<uint8_t>& packet)
 {
+    // the stream's own table model (blocks, patches, per-tick fields of unsent rows read as absent)
     const NV_StreamHeader& h = *reinterpret_cast<const NV_StreamHeader*>(packet.data());
-    const auto* blocks = reinterpret_cast<const NV_StreamEmitter*>(packet.data() + h.emitters);
-    if (!(h.flags & NV_STREAM_EMITTER_DELTA))
-    {
-        table.assign(blocks, blocks + h.emitter_count);
-        return;
-    }
-    const auto* rows = reinterpret_cast<const uint32_t*>(packet.data() + h.emitter_rows);
-    table.resize(h.emitter_table);
-    for (auto& e : table)
-    {
-        e.rebase[0] = e.rebase[1] = e.rebase[2] = 0;
-        e.flags &= ~uint32_t(NV_STREAM_EMITTER_TRANSPORT | NV_STREAM_EMITTER_SOURCE | NV_STREAM_EMITTER_KILLED);
-        e.parent_event = e.parent_row = NV_STREAM_NONE;
-    }
-    for (uint32_t k = 0; k < h.emitter_count; ++k) table[rows[k]] = blocks[k];
+    nv_stream::apply_emitter_table(table, h, packet.data(), packet.size());
 }
 
 template <typename T> T at(const std::vector<uint8_t>& b, size_t i) { T v; std::memcpy(&v, b.data() + i * sizeof(T), sizeof(T)); return v; }

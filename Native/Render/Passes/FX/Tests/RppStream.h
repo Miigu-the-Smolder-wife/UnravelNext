@@ -43,6 +43,7 @@ struct RppConfig
     uint32_t bodies = 1728;
     double anchorShift[3] = { 0, 0, 0 };  // diagnostic: the anchor moved by this much (world stays the same)
     bool delta = true;            // emitter table as NV_STREAM_EMITTER_DELTA packets (rows that changed since they were last sent)
+    bool patches = true;          // with delta: a row whose only changes are its per-tick fields goes as a 48 B patch
     bool childNoise = true;       // diagnostic switch: noise on the cascade children's programs
     // RPP outputs (WORLD_VFX 3.3/3.5: "ribbon 256, 국소 볼륨 16") as their own emitters beside the 128 x 4096 roots:
     // 256 ribbons of `ribbonPoints` live points and 16 local volumes of `volumeParticles` live particles (grid 2^3 cells
@@ -114,7 +115,8 @@ public:
     uint32_t capacityChanges() const { return m_capacityChanges; }
     const double* sectionMs() const { return m_sectionMs; }  // accumulated: 1 children, 2 rows, 3 deaths, 4 births, 5 cascade,
                                                              // 6 totals, 7 packet, 8 row ends
-    uint32_t sentBlocks() const { return m_sentBlocks; }  // emitter blocks of the last packet (delta)
+    uint32_t sentBlocks() const { return m_sentBlocks; }
+    uint32_t sentPatches() const { return m_sentPatches; }  // emitter row patches of the last packet  // emitter blocks of the last packet (delta)
 
     // Packet of the next tick. 'previous' = the readback events of the previous tick (the CPU authority reads the
     // GPU's event states: child origins and inherited velocities).
@@ -323,6 +325,7 @@ public:
         // holds (the last sent block with its per-tick fields read as absent, NativeVfxStream.h NV_STREAM_EMITTER_DELTA).
         std::vector<NV_StreamEmitter> blocks;
         std::vector<uint32_t> blockRows;
+        std::vector<NV_StreamEmitterPatch> patches;
         const bool delta = m_c.delta && !first;
         if (delta)
         {
@@ -348,8 +351,27 @@ public:
                 }
                 if (e >= sentRows || std::memcmp(&held, &record, sizeof held) != 0)
                 {
-                    blocks.push_back(record);
-                    blockRows.push_back(e);
+                    // a patch when the held block with the record's per-tick fields is the record (NativeVfxStream.h)
+                    NV_StreamEmitterPatch p{};
+                    p.row = e; p.flags = record.flags;
+                    p.next_birth = record.next_birth; p.death_birth = record.death_birth; p.dying_birth = record.dying_birth;
+                    p.death_event = record.death_event; p.output_base = record.output_base;
+                    p.parent_event = record.parent_event; p.parent_row = record.parent_row;
+                    std::memcpy(p.rebase, record.rebase, sizeof p.rebase);
+                    NV_StreamEmitter patched = held;
+                    patched.flags = p.flags;
+                    patched.next_birth = p.next_birth; patched.death_birth = p.death_birth; patched.dying_birth = p.dying_birth;
+                    patched.death_event = p.death_event; patched.output_base = p.output_base;
+                    patched.parent_event = p.parent_event; patched.parent_row = p.parent_row;
+                    std::memcpy(patched.rebase, p.rebase, sizeof p.rebase);
+                    if (m_c.patches && e < sentRows && !(record.flags & (NV_STREAM_EMITTER_TRANSPORT | NV_STREAM_EMITTER_SOURCE)) &&
+                        std::memcmp(&patched, &record, sizeof record) == 0)
+                        patches.push_back(p);
+                    else
+                    {
+                        blocks.push_back(record);
+                        blockRows.push_back(e);
+                    }
                 }
                 m_sent[e] = record;
             }
@@ -361,6 +383,7 @@ public:
             m_sent = blocks;
         }
         m_sentBlocks = (uint32_t)blocks.size();
+        m_sentPatches = (uint32_t)patches.size();
         std::vector<NV_StreamSpawn> all;
         NV_StreamHeader h{};
         for (uint32_t d = 0; d <= NV_STREAM_MAX_DEPTH; ++d)
@@ -401,7 +424,7 @@ public:
         h.medium_cells = mediumCells;
 
         std::vector<uint8_t> packet(sizeof(NV_StreamHeader));
-        packet.reserve(sizeof(NV_StreamHeader) + 16 * 16 + blocks.size() * sizeof(NV_StreamEmitter) + blockRows.size() * 4 + all.size() * sizeof(NV_StreamSpawn) +
+        packet.reserve(sizeof(NV_StreamHeader) + 16 * 16 + blocks.size() * sizeof(NV_StreamEmitter) + blockRows.size() * 4 + patches.size() * sizeof(NV_StreamEmitterPatch) + all.size() * sizeof(NV_StreamSpawn) +
                        explicitBirths.size() * sizeof(NV_StreamExplicitBirth) + m_fields.size() * sizeof(NV_StreamField) + m_world.size() * sizeof(NV_StreamWorldField) +
                        (first ? m_programs.size() * sizeof(NV_StreamProgram) + m_keys.size() * sizeof(NV_StreamCurveKey) + m_surfaces.size() * sizeof(NV_StreamSurface) : 0) +
                        bodies.size() * sizeof(NV_StreamBody) + dynamicRows.size() * sizeof(NV_StreamSurface));
@@ -421,6 +444,8 @@ public:
         }
         h.emitters = section(blocks.data(), blocks.size() * sizeof(NV_StreamEmitter));
         if (delta) h.emitter_rows = section(blockRows.data(), blockRows.size() * 4);
+        h.emitter_patches = section(patches.data(), patches.size() * sizeof(NV_StreamEmitterPatch));
+        h.emitter_patch_count = (uint32_t)patches.size();
         h.spawns = section(all.data(), all.size() * sizeof(NV_StreamSpawn));
         h.explicit_births = section(explicitBirths.data(), explicitBirths.size() * sizeof(NV_StreamExplicitBirth));
         h.fields = section(m_fields.data(), m_fields.size() * sizeof(NV_StreamField));
@@ -824,7 +849,7 @@ private:
     std::vector<uint32_t> m_live;          // active rows, ascending after the cascade
     std::vector<uint32_t> m_ended;         // rows that ended last tick (their inactive block is sent once)
     double m_sectionMs[9] = {};      // inactive child rows (min-heap)
-    uint32_t m_sentBlocks = 0;
+    uint32_t m_sentBlocks = 0, m_sentPatches = 0;
     uint32_t m_capacity = 0, m_aliveAfter = 0, m_eventSlots = 0, m_childRows = 0, m_maxDepth = 0, m_capacityChanges = 0;
     std::vector<Program> m_programs;
     std::vector<NV_StreamCurveKey> m_keys;

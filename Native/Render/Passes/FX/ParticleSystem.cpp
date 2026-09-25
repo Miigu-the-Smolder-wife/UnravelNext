@@ -104,12 +104,14 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
     section(h.programs, h.program_count, sizeof(NV_StreamProgram), "programs");
     section(h.curve_keys, h.curve_key_count, sizeof(NV_StreamCurveKey), "curve keys");
     section(h.emitters, h.emitter_count, sizeof(NV_StreamEmitter), "emitters");
+    section(h.emitter_patches, h.emitter_patch_count, sizeof(NV_StreamEmitterPatch), "emitter patches");
     if (h.flags & NV_STREAM_EMITTER_DELTA)
     {
         section(h.emitter_rows, h.emitter_count, 4, "emitter rows");
         if (h.flags & NV_STREAM_RESET) fail("FX particles: a RESET packet sends the whole emitter table");
     }
-    else if (h.emitter_count != h.emitter_table) fail("FX particles: whole emitter table of %u blocks for %u rows", h.emitter_count, h.emitter_table);
+    else if (h.emitter_count != h.emitter_table || h.emitter_patch_count)
+        fail("FX particles: whole emitter table of %u blocks (%u patches) for %u rows", h.emitter_count, h.emitter_patch_count, h.emitter_table);
     section(h.spawns, h.spawn_count, sizeof(NV_StreamSpawn), "spawns");
     section(h.explicit_births, h.explicit_count, sizeof(NV_StreamExplicitBirth), "explicit births");
     section(h.fields, h.field_count, sizeof(NV_StreamField), "fields");
@@ -147,6 +149,18 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
         if (x.program >= programTable) fail("FX particles: emitter row %u names program %u of %u", e, x.program, programTable);
         if (x.parent_event != NV_STREAM_NONE && (x.parent_event >= h.event_slots || x.parent_row >= h.emitter_table))
             fail("FX particles: emitter row %u: parent event %u / row %u outside %u events, %u rows", e, x.parent_event, x.parent_row, h.event_slots, h.emitter_table);
+    }
+    // patches: ascending rows inside the table, none also sent as a block, no transport/source (those rows send blocks)
+    const auto* patches = reinterpret_cast<const NV_StreamEmitterPatch*>(packet + h.emitter_patches);
+    for (uint32_t k = 0, b = 0; k < h.emitter_patch_count; ++k)
+    {
+        const NV_StreamEmitterPatch& x = patches[k];
+        if (x.row >= h.emitter_table || (k && patches[k - 1].row >= x.row) || (x.flags & (NV_STREAM_EMITTER_TRANSPORT | NV_STREAM_EMITTER_SOURCE)))
+            fail("FX particles: emitter patch %u (row %u, flags 0x%x) out of order, outside %u rows or with transport/source", k, x.row, x.flags, h.emitter_table);
+        while (b < h.emitter_count && rows[b] < x.row) ++b;
+        if (b < h.emitter_count && rows[b] == x.row) fail("FX particles: row %u has both a block and a patch", x.row);
+        if (x.parent_event != NV_STREAM_NONE && (x.parent_event >= h.event_slots || x.parent_row >= h.emitter_table))
+            fail("FX particles: emitter patch of row %u: parent event %u / row %u outside %u events, %u rows", x.row, x.parent_event, x.parent_row, h.event_slots, h.emitter_table);
     }
     for (uint32_t k = 0; k < h.spawn_count; ++k)
     {
@@ -189,6 +203,7 @@ struct ParticleSystem::Impl
     Buf keysA{ "fx.keysA", 4 }, valsA{ "fx.valsA", 4 }, keysB{ "fx.keysB", 4 }, valsB{ "fx.valsB", 4 }, hist{ "fx.hist", 4 };
     Buf emitterTable{ "fx.emitterTable", sizeof(NV_StreamEmitter) }, emitterStamp{ "fx.emitterStamp", 4 };  // persistent (delta updates)
     Buf emitterUpdates{ "fx.emitterUpdates", sizeof(NV_StreamEmitter) }, emitterUpdateRows{ "fx.emitterUpdateRows", 4 };
+    Buf emitterPatches{ "fx.emitterPatches", sizeof(NV_StreamEmitterPatch) };
     std::vector<NV_StreamEmitter> table;  // CPU mirror of the persistent table (ribbon and volume ranges)
     uint32_t tableRows = 0, serial = 0;
     float separationMax = 0;  // largest program separation (collision grid motion bound)
@@ -416,7 +431,7 @@ void ParticleSystem::record(FramePassContext& fc)
         m.emitterStamp.ensure(device, (m.emitterTable.bytes / sizeof(NV_StreamEmitter)) * 4);
         const auto* emitterBlocks = reinterpret_cast<const NV_StreamEmitter*>(base + h.emitters);
         const auto* blockRows = reinterpret_cast<const uint32_t*>(base + h.emitter_rows);
-        std::vector<uint32_t> updateRows(std::max<uint32_t>(h.emitter_count, 1));
+        std::vector<uint32_t> updateRows(std::max<uint32_t>(h.emitter_count, 1)), patchedRows;
         // The mirror costs O(blocks + rows with per-tick fields), not O(rows): only the rows whose last block carried a
         // per-tick field are cleared, and the ribbon/volume rows are kept as a list (a row joins when a block makes it an
         // output row; inactive or changed rows leave when the ranges are built).
@@ -433,6 +448,17 @@ void ParticleSystem::record(FramePassContext& fc)
             }
             m.tickRows.clear();
             for (uint32_t k = 0; k < h.emitter_count; ++k) { m.table[blockRows[k]] = emitterBlocks[k]; updateRows[k] = blockRows[k]; }
+            const auto* patches = reinterpret_cast<const NV_StreamEmitterPatch*>(base + h.emitter_patches);
+            for (uint32_t k = 0; k < h.emitter_patch_count; ++k)
+            {
+                const NV_StreamEmitterPatch& p = patches[k];
+                NV_StreamEmitter& x = m.table[p.row];
+                x.flags = p.flags;
+                x.next_birth = p.next_birth; x.death_birth = p.death_birth; x.dying_birth = p.dying_birth; x.death_event = p.death_event;
+                x.output_base = p.output_base; x.parent_event = p.parent_event; x.parent_row = p.parent_row;
+                std::memcpy(x.rebase, p.rebase, sizeof x.rebase);
+                patchedRows.push_back(p.row);
+            }
         }
         else
         {
@@ -442,9 +468,9 @@ void ParticleSystem::record(FramePassContext& fc)
             m.tickRows.clear();
             for (uint32_t k = 0; k < h.emitter_count; ++k) updateRows[k] = k;
         }
-        for (uint32_t k = 0; k < h.emitter_count; ++k)
+        for (uint32_t k = 0; k < h.emitter_count + (uint32_t)patchedRows.size(); ++k)
         {
-            const uint32_t row = updateRows[k];
+            const uint32_t row = k < h.emitter_count ? updateRows[k] : patchedRows[k - h.emitter_count];
             const NV_StreamEmitter& x = m.table[row];
             if (x.rebase[0] != 0 || x.rebase[1] != 0 || x.rebase[2] != 0 || (x.flags & (NV_STREAM_EMITTER_TRANSPORT | NV_STREAM_EMITTER_SOURCE | NV_STREAM_EMITTER_KILLED)) ||
                 x.parent_event != NV_STREAM_NONE || x.parent_row != NV_STREAM_NONE)
@@ -482,6 +508,7 @@ void ParticleSystem::record(FramePassContext& fc)
         const uint32_t serialNow = ++m.serial;
         m.emitterUpdates.ensure(device, (uint64_t)h.emitter_count * sizeof(NV_StreamEmitter));
         m.emitterUpdateRows.ensure(device, (uint64_t)h.emitter_count * 4);
+        m.emitterPatches.ensure(device, (uint64_t)h.emitter_patch_count * sizeof(NV_StreamEmitterPatch));
         m.dynamic[cur].ensure(device, (uint64_t)tableRows * sizeof(EmitterDynamic));
         m.spawns.ensure(device, (uint64_t)h.spawn_count * sizeof(NV_StreamSpawn));
         m.explicitBirths.ensure(device, (uint64_t)h.explicit_count * sizeof(NV_StreamExplicitBirth));
@@ -657,7 +684,7 @@ void ParticleSystem::record(FramePassContext& fc)
                                     &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.mediumCells,
                                     &m.ribbonRunStart, &m.ribbonTangents, &m.volumeList, &m.gridBlocks, &m.surfaceBoxes, &m.overflowRecords, &m.colliders,
                                     &m.emitterTable, &m.emitterStamp };
-        std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitterUpdates, &m.emitterUpdateRows, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
+        std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitterUpdates, &m.emitterUpdateRows, &m.emitterPatches, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
                                      &m.restore, &m.slotBase, &m.bodies, &m.dynamicSurfaces, &m.ribbonRanges, &m.volumeRanges };
         for (Buf* b : state) b->import(g, fc.frame.frameIndex);
         for (Buf* b : inputs) b->import(g, fc.frame.frameIndex);
@@ -689,6 +716,7 @@ void ParticleSystem::record(FramePassContext& fc)
             add(m.curveKeys, h.curve_keys, (uint64_t)h.curve_key_count * 16);
         }
         add(m.emitterUpdates, h.emitters, (uint64_t)h.emitter_count * sizeof(NV_StreamEmitter));
+        add(m.emitterPatches, h.emitter_patches, (uint64_t)h.emitter_patch_count * sizeof(NV_StreamEmitterPatch));
         if (h.emitter_count) copies.push_back({ &m.emitterUpdateRows, rowsOffset, (uint64_t)h.emitter_count * 4 });
         add(m.spawns, h.spawns, (uint64_t)h.spawn_count * sizeof(NV_StreamSpawn));
         add(m.explicitBirths, h.explicit_births, (uint64_t)h.explicit_count * sizeof(NV_StreamExplicitBirth));
@@ -722,6 +750,7 @@ void ParticleSystem::record(FramePassContext& fc)
         tc.staticSurfaceCount = m.surfaceCount;
         tc.emitterCount = tableRows;
         tc.updateCount = h.emitter_count;
+        tc.patchCount = h.emitter_patch_count;
         tc.separationMax = m.separationMax;
         tc.sortPasses = (m_experimentDisable & 4u) ? 0u : m_sortPasses;
         tc.histRegion = histRegion;
@@ -783,6 +812,7 @@ void ParticleSystem::record(FramePassContext& fc)
             tc.emitters = c.uav(m.emitterTable.ref);
             tc.emitterUpdates = c.srv(m.emitterUpdates.ref);
             tc.emitterUpdateRows = c.srv(m.emitterUpdateRows.ref);
+            tc.emitterPatches = c.srv(m.emitterPatches.ref);
             tc.emitterStamp = c.uav(m.emitterStamp.ref);
             tc.spawns = c.srv(m.spawns.ref);
             tc.explicitBirths = c.srv(m.explicitBirths.ref);
@@ -846,7 +876,7 @@ void ParticleSystem::record(FramePassContext& fc)
                       [=](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(to), 0, c.resource(from), 0, bytes); });
             device.deferRelease(grownFrom.resource);
         }
-        dispatch("fx.particles.emitters", "Passes/FX/FxEmitters", {}, std::max<uint32_t>(groups(h.emitter_count, 64), 1), true);
+        dispatch("fx.particles.emitters", "Passes/FX/FxEmitters", {}, std::max<uint32_t>(groups(h.emitter_count + h.emitter_patch_count, 64), 1), true);
         const uint32_t beginThreads = std::max<uint32_t>(std::max<uint32_t>(std::max<uint32_t>(std::max<uint32_t>(tableRows, 1), reset ? capacity : 0),
                                                                             m_sortPasses * histRegion),  // + histogram clear
                                                          collide ? gridBuckets : 0);  // + grid clear

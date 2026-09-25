@@ -87,6 +87,7 @@ cbuffer FxTick : register(b1)
                                                                                 // this tick's velocity; IMPACT_OVERFLOW inputs
     uint g_sortPasses, g_histRegion, g_experiment, g_colliders;  // sort: pass p's histogram is hist[p * g_histRegion + group * 256
                                                                   // + digit]; g_colliders: queue of colliding slots (FxCollide)
+    uint g_emitterPatches, g_patchCount, g_pad14, g_pad15;  // NV_StreamEmitterPatch rows of the tick (FxEmitters)
     // The tick's fields, uniform for every particle: read through the constant path (one broadcast load per row) instead of
     // per-particle buffer loads. Filled by the CPU when the counts fit (else the structured buffers are read).
     uint4 g_fieldRows[FX_CB_FIELDS * 2];             // context fields (StreamField, 32 B each)
@@ -134,6 +135,12 @@ struct StreamEmitter  // 336 B
     float3 spawnOffset; uint parentRow;
     uint2 entity; uint2 generation;
     uint outputBase, reserved3, reserved4, reserved5;
+};
+struct StreamEmitterPatch  // 48 B (NV_StreamEmitterPatch): the per-tick fields of a row whose block the GPU holds
+{
+    uint row, flags, nextBirth, deathBirth;
+    uint dyingBirth, deathEvent, outputBase, parentEvent;
+    uint parentRow; float3 rebase;
 };
 struct StreamSpawn  // 48 B
 {
