@@ -72,6 +72,12 @@ struct FramePacket
     ID3D12Resource* output = nullptr;              // host-owned RGB10A2 random-write texture; null standalone
     std::optional<scene::Sun> sun;                 // changed sun (time of day)
     std::optional<scene::Atmosphere> atmosphere;   // changed atmosphere (weather); the atmosphere track rebuilds its LUTs
+    struct Wind
+    {
+        float3 direction;
+        float speed = 0;
+    };
+    std::optional<Wind> wind;                      // changed scene wind (INTERFACES 6.4 v1.23: memoryless model, endpoint bound)
     std::vector<render::InstanceTransformUpdate> transforms;
     std::vector<SkeletonPose> skeletons;
     std::vector<std::pair<uint32_t, bool>> visibility;
@@ -114,7 +120,8 @@ public:
     uint32_t jointCount(uint32_t skeleton) const;
     void setInstanceVisible(uint32_t instance, bool visible);
     void setSun(const scene::Sun& sun);
-    void setEnvironment(const scene::Sun& sun, const scene::Atmosphere& atmosphere);
+    // Sun, atmosphere and (when set) wind of the following frames.
+    void setEnvironment(const scene::Sun& sun, const scene::Atmosphere& atmosphere, std::optional<FramePacket::Wind> wind);
     uint64_t queueFrame(FramePacket packet);
 
     // Submission thread (Unity's render event): records the queued frame and executes it through 'execute'.
@@ -143,6 +150,7 @@ private:
         std::vector<uint8_t> visible;
         scene::Sun sun;
         scene::Atmosphere atmosphere;
+        FramePacket::Wind wind;
     };
     static void overlay(const FramePacket& p, HostState& state);
     void ensureStandaloneOutput(uint32_t width, uint32_t height);
@@ -166,8 +174,9 @@ private:
     std::deque<FramePacket> m_packets;
     FramePacket m_pending;       // updates for the next queued frame
     // Latest state of every packet taken for rendering (takePacket, under m_mutex then m_appliedMutex): with the queued
-    // packets and m_pending on top it is the host's current scene. m_appliedMutex also guards m_scene.sun and
-    // m_scene.atmosphere, which the submission thread writes (the renderer reads them from GpuScene::source()).
+    // packets and m_pending on top it is the host's current scene. m_appliedMutex also guards m_scene.sun,
+    // m_scene.atmosphere and the scene wind, which the submission thread writes (the renderer reads them from
+    // GpuScene::source()).
     mutable std::mutex m_appliedMutex;
     HostState m_applied;
     uint64_t m_nextTicket = 1;

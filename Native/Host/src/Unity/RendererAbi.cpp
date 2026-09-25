@@ -402,7 +402,7 @@ UNX_API int32_t UNX_CALL UnxFrameSetEnvironment(UnxRenderer r, const UnxEnvironm
         const scene::Sun sun = sunOf(d);
         const float len = length(sun.direction);
         if (std::abs(len - 1.0f) > 1e-3f) fail("sun direction is not unit length (%f)", len);
-        h->setEnvironment(sun, atmosphereOf(d));
+        h->setEnvironment(sun, atmosphereOf(d), std::nullopt);
     });
 }
 
