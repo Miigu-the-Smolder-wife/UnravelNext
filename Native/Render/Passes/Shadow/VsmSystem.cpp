@@ -1068,18 +1068,22 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     view.shadowVisibility = out;
     const TextureRef depth = view.depth, gbuffer = view.gbuffer;
     const BufferRef pool = s.poolRef;
-    // Local slots (1-3) from the froxel lists: the main view only (the lists are the main view's).
-    const bool localSlots = view.view.kind == gpu::ViewKind::Main && fc.resources.froxelLights.valid() && s.localLightsNow != UINT32_MAX;
-    const BufferRef froxelLists = fc.resources.froxelLights;
+    // Local slots (1-3) and the overflow list from the view's froxel lists (INTERFACES 7.3, 7.4, v1.22): the main view's
+    // (FrameRenderer sets them after froxels; tests without froxels: shadowPages' lists), a planar reflection view's own
+    // (recorded here with its air volume from the mirror plane on).
+    const bool mainView = view.view.kind == gpu::ViewKind::Main;
+    if (view.view.kind == gpu::ViewKind::PlanarReflection && !view.froxelLights.valid()) recordPlanarFroxels(fc, view);
+    const BufferRef froxelLists = view.froxelLights.valid() ? view.froxelLights : (mainView ? fc.resources.froxelLights : BufferRef{});
+    const bool localSlots = froxelLists.valid() && s.localLightsNow != UINT32_MAX;
     const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow;
     const BufferRef table = s.tableRef, bound = s.boundRef, blocks = s.blocksRef, statsBuf = s.statsRef;
     // Overflow list (INTERFACES 7.3, v1.20): the main view's shadow-casting lights past the third. Capacity = 1.5 x the
     // need of the last completed frame (the counter keeps counting past the capacity, so an overage frame reports its
     // full need), a power of two of words, at least 1 MB; shrinks only below a quarter (no plan churn around a boundary).
-    const bool overflowList = view.view.kind == gpu::ViewKind::Main;
+    const bool overflowList = true;  // every view (its own lists; empty without local slots)
     const uint32_t tilesX = groups(w, 8), tilesY = groups(h, 8), tiles = tilesX * tilesY;
     TextureRef heads;
-    BufferRef overflow, overflowTiles, fallback;
+    BufferRef overflow, overflowTiles, fallback, counter;
     uint32_t capacity = 0;
     if (overflowList)
     {
@@ -1101,6 +1105,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
         overflow = g.createBuffer(BufferDesc{ "S shadow overflow", (uint64_t)capacity * 4, 0 });
         overflowTiles = g.createBuffer(BufferDesc{ "S shadow overflow tile list", 16 + (uint64_t)tiles * 4, 0 });
         fallback = g.createBuffer(BufferDesc{ "S shadow overflow fallback tiles", 16 + (uint64_t)tiles * 4, 0 });
+        counter = g.createBuffer(BufferDesc{ "S shadow overflow counter", 16, 0 });
         view.shadowOverflowTiles = heads;
         view.shadowOverflow = overflow;
         view.shadowOverflowFallbackTiles = fallback;
@@ -1125,10 +1130,12 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   {
                       b.use(overflowTiles, Use::UavCompute);
                       b.use(fallback, Use::UavCompute);
+                      b.use(counter, Use::UavCompute);
                   }
               },
               [=](PassContext& ctx) {
-                  const uint32_t k[4] = { ctx.uav(list), overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu, overflowList ? ctx.uav(fallback) : 0xFFFFFFFFu, 0 };
+                  const uint32_t k[4] = { ctx.uav(list), overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu, overflowList ? ctx.uav(fallback) : 0xFFFFFFFFu,
+                                          overflowList ? ctx.uav(counter) : 0xFFFFFFFFu };
                   ctx.cmd->SetPipelineState(pc);
                   ctx.computeConstants(k, 4);
                   ctx.cmd->Dispatch(1, 1, 1);
@@ -1208,13 +1215,14 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   b.use(heads, Use::UavCompute);
                   b.use(overflow, Use::UavCompute);
                   b.use(fallback, Use::UavCompute);
+                  b.use(counter, Use::UavCompute);
                   b.use(statsBuf, Use::UavCompute);
                   if (localSlots) b.use(froxelLists, Use::SrvCompute);
               },
               [=](PassContext& ctx) {
                   const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(heads), ring, ctx.srv(overflowTiles), ctx.srv(table), ctx.srv(pool),
                                            ctx.srv(blocks), ctx.uav(overflow), capacity, ctx.uav(fallback), ctx.uav(statsBuf),
-                                           localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv, 0 };
+                                           localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv, ctx.uav(counter) };
                   ctx.cmd->SetPipelineState(po);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 16);

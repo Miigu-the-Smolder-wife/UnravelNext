@@ -124,14 +124,16 @@ void airViewLookup(AtmosphereSrvs s, float2 uv, float linearDepth, bool wantSun,
     const float4 q = mul(g_invViewProj, float4(ndc, 1, 1));
     const float3 dir = normalize(q.xyz / q.w - g_cameraPosition);
     const float toRay = 1.0 / max(dot(dir, airViewForward()), 1e-4);
-    const float3 o = g_cameraPosition;
-    const float h2 = dot(o, o) + 2 * bottom * o.y;  // (r^2 - R^2) of the camera
+    // Planar reflection views: the air starts at the mirror (airViewStart); the surface crossing is searched from there.
+    const float tStart = min(airViewStart(g_clipPlane, g_cameraPosition, dir), 1.0e30);
+    const float3 o = g_cameraPosition + dir * tStart;
+    const float h2 = dot(o, o) + 2 * bottom * o.y;  // (r^2 - R^2) of the path's start
     float kink = 3.0e38;                            // ray distance to the surface crossing
-    if (h2 <= 0) kink = 0;
+    if (h2 <= 0) kink = tStart;
     else
     {
         const float b = dot(o, dir) + bottom * dir.y, disc = b * b - h2;
-        if (disc >= 0 && b < 0) kink = h2 / (-b + sqrt(disc));  // nearer root, stable form
+        if (disc >= 0 && b < 0) kink = tStart + h2 / (-b + sqrt(disc));  // nearer root, stable form
     }
     const float tDepth = linearDepth * toRay;
     const bool lifted = kink < tDepth;
@@ -157,13 +159,13 @@ void airViewLookup(AtmosphereSrvs s, float2 uv, float linearDepth, bool wantSun,
     const float3 step = airIntegral(c.extinction, dt), decay = exp(-c.extinction * dt);
     [unroll] for (uint k = 0; k < LIFTED_STEPS; ++k)
     {
-        const float3 x = airLiftToSurface(ap, o + dir * (kink + (k + 0.5) * dt));
+        const float3 x = airLiftToSurface(ap, g_cameraPosition + dir * (kink + (k + 0.5) * dt));
         const float3 source = phase * airSunTransmittance(ap, s.transmittance, x, sun) + (c.rayleigh + c.mie) * airMultipleScattering(ap, s.multiScatter, x, sun);
         inscatter += transmittance * source * step * (g_sunIlluminance * g_sunColor);
         transmittance *= decay;
     }
     // The sun at the (lifted) surface point itself.
-    if (wantSun) sunTransmittance = airSunTransmittance(ap, s.transmittance, airLiftToSurface(ap, o + dir * min(tDepth, ap.froxelFarM * toRay)), sun);
+    if (wantSun) sunTransmittance = airSunTransmittance(ap, s.transmittance, airLiftToSurface(ap, g_cameraPosition + dir * min(tDepth, ap.froxelFarM * toRay)), sun);
 }
 
 // Air between the main camera and the surface at screen uv (main view, [0,1]^2) and view-space depth linearDepth

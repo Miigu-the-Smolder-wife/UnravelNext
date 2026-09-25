@@ -253,4 +253,24 @@ void airSkyCoordinates(AtmosphereParams a, float altitude, float3 up, float3 sun
     coord = float2(azimuth / ATMO_PI * (a.skyViewSize.x - 1), u * (half - 1));
 }
 
+// Planar reflection views (INTERFACES 7.4, v1.22): the virtual camera sits behind the mirror (clip plane of the view's
+// frame constants); the air of the reflected path starts where the ray crosses the mirror, the part before it being the
+// main view's (its mirror pixel applies it). Distance along the unit ray dir from the camera to that crossing: 0 without
+// a clip plane or with the camera on the kept side, +inf when the ray never reaches the plane.
+float airViewStart(float4 clipPlane, float3 camera, float3 dir)
+{
+    if (all(clipPlane == 0)) return 0;
+    const float nl = length(clipPlane.xyz);
+    const float side = (dot(clipPlane.xyz, camera) + clipPlane.w) / nl;
+    if (side >= 0) return 0;
+    const float dn = dot(clipPlane.xyz, dir) / nl;
+    return dn > 0 ? -side / dn : 3.0e38;
+}
+// Mirror image of p across the plane (the real point of a virtual-space point before the crossing).
+float3 airMirror(float4 clipPlane, float3 p)
+{
+    const float nl2 = dot(clipPlane.xyz, clipPlane.xyz);
+    return p - clipPlane.xyz * (2 * (dot(clipPlane.xyz, p) + clipPlane.w) / nl2);
+}
+
 #endif

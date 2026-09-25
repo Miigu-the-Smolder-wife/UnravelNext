@@ -54,56 +54,36 @@ const FroxelStats& froxelStats(TrackState& state) { return state.get<State>(kSta
 
 void setKeepFroxels(TrackState& state, bool keep) { state.get<State>(kStateKey).keep = keep; }
 
-void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t slotOfLightSrv)
+namespace
 {
-    State& s = fc.state<State>(kStateKey);
+// Lists of one view (its frame constants): begin (header) + lists. Pass names get 'suffix'.
+BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t slotOfLightSrv, const std::string& suffix)
+{
     const QualityConfig& q = fc.quality;
-    const FroxelGridCpu grid = froxelGridFor(q, main.view.width, main.view.height);
+    const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height);
     const uint32_t listMax = (uint32_t)q.integer("atmosphere.froxels.lights_max");
     if (listMax == 0 || listMax > kListMax) fail("atmosphere.froxels.lights_max must be in [1, %u] (FROXEL_LIST_MAX)", kListMax);
-    const scene::Scene* src = fc.scene.source();
-    if (src && src->lights.size() > 0x7FFF) fail("froxel lists hold 15-bit light indices (bit 15: shadow slot): %zu lights", src->lights.size());
     const uint64_t froxels = (uint64_t)grid.gridX * grid.gridY * grid.slices;
     const uint32_t stride = (listMax + 1) & ~1u;  // entries per froxel: every list fits (FroxelCommon.hlsli)
     const uint64_t bytes = kHeaderBytes + froxels * 4 + froxels * stride * 2;
     if (froxels * stride >= (1ull << 26)) fail("froxel lists: %llu entries exceed the header's 26-bit first entry", (unsigned long long)(froxels * stride));
-
-    // Harvest completed stats (no stall).
-    if (!s.statsReadback) s.statsReadback = createBuffer(fc.device, L"S froxel stats readback", (uint64_t)kStatsSlots * kHeaderBytes, D3D12_HEAP_TYPE_READBACK);
-    const uint64_t completed = fc.device.queue(QueueType::Graphics).completed();
-    if (s.lastStatsSlot >= 0) s.statsFence[s.lastStatsSlot] = fc.graph.lastFence(QueueType::Graphics);
-    for (uint32_t i = 0; i < kStatsSlots; ++i)
-    {
-        if (s.statsFence[i] == 0 || s.statsFence[i] > completed || s.statsFrame[i] <= s.latest.frame) continue;
-        uint32_t* p = nullptr;
-        D3D12_RANGE r{ i * kHeaderBytes, (i + 1) * kHeaderBytes };
-        check(s.statsReadback->Map(0, &r, reinterpret_cast<void**>(&p)), "map froxel stats");
-        const uint32_t* w = reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(p) + i * kHeaderBytes);
-        s.latest = { s.statsFrame[i], w[11], w[12], w[13], w[14], w[15] };
-        D3D12_RANGE none{ 0, 0 };
-        s.statsReadback->Unmap(0, &none);
-    }
-
     RenderGraph& g = fc.graph;
-    const BufferRef lights = g.createBuffer(BufferDesc{ "S froxel light lists", bytes, 0 });
-    fc.resources.froxelLights = lights;
-    s.lists = lights;
-    s.listsFrame = fc.frame.frameIndex;
-    const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;
+    const BufferRef lights = g.createBuffer(BufferDesc{ suffix.empty() ? "S froxel light lists" : "S froxel light lists (planar view)", bytes, 0 });
+    const D3D12_GPU_VIRTUAL_ADDRESS constants = view.frameConstants;
     ShaderLibrary& sh = fc.shaders;
     ID3D12PipelineState* pb = sh.compute("Passes/Atmosphere/FroxelBegin");
     ID3D12PipelineState* pl = sh.compute("Passes/Atmosphere/FroxelLists");
     uint32_t nearBits, farBits;
     std::memcpy(&nearBits, &grid.nearM, 4);
     std::memcpy(&farBits, &grid.farM, 4);
-    g.addPass("s.froxel.begin", QueueType::Compute, [&](PassBuilder& b) { b.use(lights, Use::UavCompute); },
+    g.addPass("s.froxel.begin" + suffix, QueueType::Compute, [&](PassBuilder& b) { b.use(lights, Use::UavCompute); },
               [=](PassContext& ctx) {
                   const uint32_t k[8] = { ctx.uav(lights), grid.gridX, grid.gridY, grid.slices, grid.tilePx, nearBits, farBits, stride };
                   ctx.cmd->SetPipelineState(pb);
                   ctx.computeConstants(k, 8);
                   ctx.cmd->Dispatch(1, 1, 1);
               });
-    g.addPass("s.froxel.lists", QueueType::Compute, [&](PassBuilder& b) { b.use(lights, Use::UavCompute); },
+    g.addPass("s.froxel.lists" + suffix, QueueType::Compute, [&](PassBuilder& b) { b.use(lights, Use::UavCompute); },
               [=](PassContext& ctx) {
                   const uint32_t k[4] = { ctx.uav(lights), listMax, slotOfLightSrv, 0 };
                   ctx.cmd->SetPipelineState(pl);
@@ -111,21 +91,18 @@ void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t
                   ctx.computeConstants(k, 4);
                   ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
               });
+    return lights;
 }
 
-void recordFroxels(FramePassContext& fc, const ViewResources& main)
+// Air volume of one view from its lists (FroxelIntegrate.hlsl; a view with a clip plane integrates from the plane on).
+TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, BufferRef lights, bool keepVolume, const std::string& suffix)
 {
-    State& s = fc.state<State>(kStateKey);
-    if (s.listsFrame != fc.frame.frameIndex) recordFroxelLists(fc, main, 0xFFFFFFFFu);  // no shadowPages this frame
     const QualityConfig& q = fc.quality;
-    const FroxelGridCpu grid = froxelGridFor(q, main.view.width, main.view.height);
+    const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height);
     RenderGraph& g = fc.graph;
-    const BufferRef lights = s.lists;
     // Air volume: in-scattering, optical depth, sun transmittance; nodes 0..S each (FroxelIntegrate.hlsl).
-    const TextureRef volume = g.createTexture(TextureDesc{ "S air volume", grid.gridX, grid.gridY, (uint16_t)(3 * (grid.slices + 1)), 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                                                           D3D12_RESOURCE_DIMENSION_TEXTURE3D });
-    fc.resources.froxels = volume;
-    fc.resources.aerialPerspective = volume;  // atmosphereAerial / atmosphereAirView read it (Atmosphere.hlsli)
+    const TextureRef volume = g.createTexture(TextureDesc{ suffix.empty() ? "S air volume" : "S air volume (planar view)", grid.gridX, grid.gridY, (uint16_t)(3 * (grid.slices + 1)), 1,
+                                                           DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D });
     const float stepAltitude = (float)q.number("atmosphere.froxels.air_step_altitude_m");
     const uint32_t experiment = (uint32_t)q.integer("atmosphere.froxels.experiment_disable");  // cost attribution only
     if (!(stepAltitude > 0)) fail("atmosphere.froxels.air_step_altitude_m must be > 0");
@@ -133,12 +110,10 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     if (!tlut.valid() || !mlut.valid()) fail("S.froxels: the atmosphere LUTs were not recorded this frame");
     VsmFrameRefs vsm;
     const bool shadows = frameRefs(fc, vsm);
-    const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;
-    const bool keepVolume = s.keep;
+    const D3D12_GPU_VIRTUAL_ADDRESS constants = view.frameConstants;
     const uint32_t localLights = fc.resources.vsmLocalLights, slotOfLight = fc.resources.vsmSlotOfLight;
-    ShaderLibrary& sh = fc.shaders;
-    ID3D12PipelineState* pi = sh.compute("Passes/Atmosphere/FroxelIntegrate");
-    g.addPass("s.froxel.integrate", QueueType::Compute,
+    ID3D12PipelineState* pi = fc.shaders.compute("Passes/Atmosphere/FroxelIntegrate");
+    g.addPass("s.froxel.integrate" + suffix, QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(lights, Use::SrvCompute);
                   b.use(tlut, Use::SrvCompute);
@@ -172,6 +147,64 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
                   ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
               });
     if (!shadows) tracks::pending("S.froxels: sun shadows of the air (shadowPages not recorded this frame)");
+    return volume;
+}
+} // namespace
+
+void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t slotOfLightSrv)
+{
+    State& s = fc.state<State>(kStateKey);
+    const QualityConfig& q = fc.quality;
+    const uint32_t listMax = (uint32_t)q.integer("atmosphere.froxels.lights_max");
+    if (listMax == 0 || listMax > kListMax) fail("atmosphere.froxels.lights_max must be in [1, %u] (FROXEL_LIST_MAX)", kListMax);
+    const scene::Scene* src = fc.scene.source();
+    if (src && src->lights.size() > 0x7FFF) fail("froxel lists hold 15-bit light indices (bit 15: shadow slot): %zu lights", src->lights.size());
+
+    // Harvest completed stats (no stall).
+    if (!s.statsReadback) s.statsReadback = createBuffer(fc.device, L"S froxel stats readback", (uint64_t)kStatsSlots * kHeaderBytes, D3D12_HEAP_TYPE_READBACK);
+    const uint64_t completed = fc.device.queue(QueueType::Graphics).completed();
+    if (s.lastStatsSlot >= 0) s.statsFence[s.lastStatsSlot] = fc.graph.lastFence(QueueType::Graphics);
+    for (uint32_t i = 0; i < kStatsSlots; ++i)
+    {
+        if (s.statsFence[i] == 0 || s.statsFence[i] > completed || s.statsFrame[i] <= s.latest.frame) continue;
+        uint32_t* p = nullptr;
+        D3D12_RANGE r{ i * kHeaderBytes, (i + 1) * kHeaderBytes };
+        check(s.statsReadback->Map(0, &r, reinterpret_cast<void**>(&p)), "map froxel stats");
+        const uint32_t* w = reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(p) + i * kHeaderBytes);
+        s.latest = { s.statsFrame[i], w[11], w[12], w[13], w[14], w[15] };
+        D3D12_RANGE none{ 0, 0 };
+        s.statsReadback->Unmap(0, &none);
+    }
+
+    const BufferRef lights = recordLists(fc, main, slotOfLightSrv, "");
+    fc.resources.froxelLights = lights;
+    s.lists = lights;
+    s.listsFrame = fc.frame.frameIndex;
+}
+
+void recordPlanarFroxels(FramePassContext& fc, ViewResources& view)
+{
+    if (!fc.resources.transmittanceLut.valid() || !fc.resources.multiScatterLut.valid())
+    {
+        tracks::pending("S.froxels: planar view without the atmosphere LUTs");
+        return;
+    }
+    // Lists of the view's own frustum (the virtual camera's; froxels before the mirror hold lights too, conservatively),
+    // then the air from the mirror plane on (FroxelIntegrate.hlsl: g_clipPlane of the view's frame constants).
+    const BufferRef lists = recordLists(fc, view, fc.resources.vsmSlotOfLight, ".planar");
+    view.froxelLights = lists;
+    view.airVolume = recordIntegration(fc, view, lists, false, ".planar");
+}
+
+void recordFroxels(FramePassContext& fc, const ViewResources& main)
+{
+    State& s = fc.state<State>(kStateKey);
+    if (s.listsFrame != fc.frame.frameIndex) recordFroxelLists(fc, main, 0xFFFFFFFFu);  // no shadowPages this frame
+    RenderGraph& g = fc.graph;
+    const BufferRef lights = s.lists;
+    const TextureRef volume = recordIntegration(fc, main, lights, s.keep, "");
+    fc.resources.froxels = volume;
+    fc.resources.aerialPerspective = volume;  // atmosphereAerial / atmosphereAirView read it (Atmosphere.hlsli)
 
     // Header (counters) to the readback ring; harvested at a later record once the GPU passed this frame.
     const uint32_t slot = (uint32_t)(fc.frame.frameIndex % kStatsSlots);

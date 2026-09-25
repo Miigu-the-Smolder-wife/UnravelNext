@@ -3,15 +3,18 @@
 // pixel's froxel list, for the tiles ShadowVisibility.hlsl listed (indirect, one 64-thread group per 8x8 tile).
 // Each pixel recounts its lights past the third (list only); a groupshared scan gives the runs' offsets in the tile
 // block (64 pixel words, then ceil(count/4) words per pixel, in pixel order); one atomic per tile takes the block from
-// the capacity (the counter holds the frame's need). A tile that fits writes its head 1 + block start and evaluates
+// the capacity (the view's counter keeps counting past it: its final value is the view's need). A tile that fits writes
+// its head 1 + block start and evaluates
 // each light with shadowLocalVisibilityAtReceiver (ShadowVisibility.hlsli), the computation of slots 1-3; a tile past the
 // capacity writes 0xFFFFFFFF and goes to the fallback list (M evaluates it with the same function).
 // P[0].x depth SRV, P[0].y G-buffer SRV, P[0].z tile heads UAV (R32_UINT), P[0].w VSM constants CBV
 // P[1].x overflow tile list SRV (raw: count, args, tiles y << 16 | x), P[1].y page table SRV (raw), P[1].z pool SRV,
 // P[1].w blocks SRV (raw)
 // P[2].x overflow UAV (raw), P[2].y capacity (words), P[2].z fallback tile list UAV (raw), P[2].w statistics UAV (raw:
-// word 16 need in words, 17 tiles over capacity, 18 their overflow pixels, 19 lights past the third over all pixels)
-// P[3].x froxel lists SRV (raw), P[3].y local lights SRV, P[3].z slot of light SRV. Frame constants of the main view.
+// word 16 need in words summed over the frame's views (capacity), 17 tiles over capacity, 18 their overflow pixels, 19
+// lights past the third over all pixels)
+// P[3].x froxel lists SRV (raw), P[3].y local lights SRV, P[3].z slot of light SRV, P[3].w the view's allocation counter
+// UAV (raw). Frame constants of the view.
 #include "Frame.hlsli"
 #include "Scene.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
@@ -75,8 +78,10 @@ void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
         RWByteAddressBuffer stats = ResourceDescriptorHeap[P[2].w];
         RWTexture2D<uint> heads = ResourceDescriptorHeap[P[0].z];
         const uint need = 64 + gs_scan[63];
+        RWByteAddressBuffer counter = ResourceDescriptorHeap[P[3].w];
         uint start;
-        stats.InterlockedAdd(64, need, start);
+        counter.InterlockedAdd(0, need, start);
+        stats.InterlockedAdd(64, need);
         stats.InterlockedAdd(76, gs_lights);
         uint head = 1 + start;
         if (start + need > P[2].y)

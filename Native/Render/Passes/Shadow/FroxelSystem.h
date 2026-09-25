@@ -35,6 +35,9 @@ void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t
 // froxels(fc, main): the air volume (FrameResources::froxels, ::aerialPerspective); records the lists itself when
 // shadowPages did not.
 void recordFroxels(FramePassContext& fc, const ViewResources& main);
+// Planar reflection views (INTERFACES 7.4, v1.22): the view's own lists and air volume (from the mirror plane on) into
+// view.froxelLights / view.airVolume. Called by shadowVisibility before the view's slots.
+void recordPlanarFroxels(FramePassContext& fc, ViewResources& view);
 // Counters of the most recent frame whose GPU work has completed (read back without stalling).
 const FroxelStats& froxelStats(TrackState& state);
 // Gates: keep the integration live when no consumer reads the volume yet (the graph culls unread passes).

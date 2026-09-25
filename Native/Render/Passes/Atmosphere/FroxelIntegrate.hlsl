@@ -18,13 +18,16 @@
 // 3 (S + 1)): part 0 in-scattering x exposure of the main view (fp16 keeps the relative precision of what is displayed,
 // also at night exposures where local lights' air glow is 1e-4 nits), part 1 optical depth, part 2 sun transmittance at
 // the node. No local media in scenes v1 (their optical depth adds to part 1).
+// Planar reflection views (clip plane in the view's frame constants, v1.22): each tile ray's air starts where it crosses
+// the mirror (airViewStart); the slices before it hold nothing (the main view's mirror pixel applies that air), the sun
+// transmittance of their nodes is taken at the nodes' mirror images (the real path).
 // P[0].x froxelLights SRV (raw), P[0].y volume UAV (RWTexture3D<float4>), P[0].z transmittance LUT, P[0].w multi-scatter LUT
 // P[1].x VSM page table SRV (raw), .y pool SRV (raw), .z blocks SRV (raw), .w VSM constants CBV (0xFFFFFFFF: no VSM)
 // P[3].x local lights SRV (StructuredBuffer<VsmLocalLight>; 0xFFFFFFFF: none), P[3].y slot of light SRV
 // P[2].x VSM search bound SRV (raw), P[2].y shadow texels per tile (float bits), P[2].z air step altitude m (float bits),
 // P[2].w experiment mask (atmosphere.froxels.experiment_disable; 0; cost attribution only: 1 air shadows, 2 local lights,
 // 4 air integration, 8 sun transmittance per substep, 16 multiple scattering per substep)
-// Frame constants of the main view.
+// Frame constants of the view (main, or a planar reflection view).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "Scene.hlsli"
@@ -102,10 +105,12 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     const float stepAltitude = asfloat(P[2].z);
     const uint experiment = P[2].w;
     float3 tau = 0, source = 0;
-    if (s < g.slices)
+    const float tStart = airViewStart(g_clipPlane, g_cameraPosition, dir);
+    const float zs0 = froxelNodeDepth(g, s), zs1 = froxelNodeDepth(g, s + 1);
+    if (s < g.slices && zs1 * toRay > tStart)
     {
-        const float z0 = froxelNodeDepth(g, s), z1 = froxelNodeDepth(g, s + 1);
-        const float t0 = z0 * toRay, len = (z1 - z0) * toRay;
+        const float z0 = zs0, z1 = zs1;
+        const float t0 = max(z0 * toRay, tStart), len = z1 * toRay - t0;
         const float3 o = g_cameraPosition + dir * t0;
         // Substeps: the air's density is exponential in altitude; midpoint steps of at most stepAltitude.
         const float h0 = airAltitude(a, o), h1 = airAltitude(a, o + dir * len), hm = airAltitude(a, o + dir * (0.5 * len));
@@ -195,7 +200,9 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         // Node s + 1 of the three parts; thread 0 also writes node 0 (the camera).
         RWTexture3D<float4> volume = ResourceDescriptorHeap[P[0].y];
         const uint N = g.slices + 1;
-        const float3 node = g_cameraPosition + dir * (froxelNodeDepth(g, s + 1) * toRay);
+        const float tn = froxelNodeDepth(g, s + 1) * toRay;
+        float3 node = g_cameraPosition + dir * tn;
+        if (tn < tStart) node = airMirror(g_clipPlane, node);  // before the mirror: the real path's point
         volume[uint3(tile, s + 1)] = float4(min(gs_source[s] * g_exposure, 65504.0), 0);  // pre-exposed: fp16 precision follows the display
         volume[uint3(tile, N + s + 1)] = float4(gs_tau[s], 0);
         volume[uint3(tile, 2 * N + s + 1)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, node), sun), 0);
@@ -203,7 +210,8 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         {
             volume[uint3(tile, 0)] = 0;
             volume[uint3(tile, N)] = 0;
-            volume[uint3(tile, 2 * N)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, g_cameraPosition), sun), 0);
+            const float3 camera = tStart > 0 ? airMirror(g_clipPlane, g_cameraPosition) : g_cameraPosition;
+            volume[uint3(tile, 2 * N)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, camera), sun), 0);
         }
     }
 }
