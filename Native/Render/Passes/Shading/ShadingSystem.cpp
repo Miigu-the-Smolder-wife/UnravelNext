@@ -15,59 +15,6 @@ namespace
 {
 namespace model = scene::model;
 
-float radicalInverse(uint32_t bits)
-{
-    bits = (bits << 16u) | (bits >> 16u);
-    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
-    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
-    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
-    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
-    return (float)bits * 2.3283064365386963e-10f;
-}
-
-// The model's E table integrator (MaterialModel.cpp buildTable) with each sample split by its Schlick weight
-// w = (1 - VoH)^5: A accumulates (1 - w), B accumulates w.
-std::vector<float> buildSpecularTable()
-{
-    const uint32_t n = model::kAlbedoTableSize, samples = 4096;
-    std::vector<float> table(2 * n * n);
-    for (uint32_t ri = 0; ri < n; ++ri)
-        for (uint32_t mi = 0; mi < n; ++mi)
-        {
-            const float r = (float)ri / (n - 1);
-            const float mu = std::max((float)mi / (n - 1), 1e-4f);
-            const float alpha = model::alphaFromRoughness(r);
-            const float3 v{ std::sqrt(1 - mu * mu), 0, mu };
-            const float3 vh = normalize(float3{ alpha * v.x, alpha * v.y, v.z });
-            const float lensq = vh.x * vh.x + vh.y * vh.y;
-            const float3 t1 = lensq > 0 ? float3{ -vh.y, vh.x, 0 } / std::sqrt(lensq) : float3{ 1, 0, 0 };
-            const float3 t2 = cross(vh, t1);
-            const float g1v = 2 * mu / (mu + std::sqrt(alpha * alpha + (1 - alpha * alpha) * mu * mu));
-            double a = 0, b = 0;
-            for (uint32_t s = 0; s < samples; ++s)
-            {
-                const float u1 = (s + 0.5f) / samples, u2 = radicalInverse(s);
-                const float radius = std::sqrt(u1), phi = 2 * model::kPi * u2;
-                const float p1 = radius * std::cos(phi);
-                const float sBlend = 0.5f * (1 + vh.z);
-                const float p2 = (1 - sBlend) * std::sqrt(std::max(0.0f, 1 - p1 * p1)) + sBlend * radius * std::sin(phi);
-                const float3 nh = t1 * p1 + t2 * p2 + vh * std::sqrt(std::max(0.0f, 1 - p1 * p1 - p2 * p2));
-                const float3 h = normalize(float3{ alpha * nh.x, alpha * nh.y, std::max(0.0f, nh.z) });
-                const float VoH = dot(v, h);
-                const float3 l = h * (2 * VoH) - v;
-                const float NoL = l.z;
-                if (NoL <= 0) continue;
-                const double weight = 4.0 * model::visibilitySmithGgxCorrelated(mu, NoL, alpha) * NoL * mu / g1v;
-                const double w = std::pow(1.0 - std::clamp((double)VoH, 0.0, 1.0), 5.0);
-                a += weight * (1 - w);
-                b += weight * w;
-            }
-            table[2 * (ri * n + mi)] = (float)(a / samples);
-            table[2 * (ri * n + mi) + 1] = (float)(b / samples);
-        }
-    return table;
-}
-
 #include "LtcTable.inl"  // kLtcTable
 
 // A table uploaded once as a StructuredBuffer (the f0-split specular albedo LUT, the LTC table).
@@ -277,11 +224,7 @@ Stats latestStats(TrackState& state)
     return st;
 }
 
-const std::vector<float>& specularAlbedoTable()
-{
-    static const std::vector<float> t = buildSpecularTable();
-    return t;
-}
+const std::vector<float>& specularAlbedoTable() { return scene::model::specularAlbedoTable(); }
 
 const std::vector<float>& ltcTable()
 {
@@ -294,8 +237,6 @@ void shade(FramePassContext& fc, ViewResources& view)
     if (!view.color.valid()) fail("M.shading: the view has no colour target");
     checkQuality(fc.quality);
     const material::ResolveOutputs& o = material::resolveOutputs(fc, view);
-    StaticTable& lut = fc.state<StaticTable>("M.specularLut");
-    lut.ensure(fc.device, specularAlbedoTable(), 2, L"M specular albedo LUT");
     StaticTable& ltc = fc.state<StaticTable>("M.ltcTable");
     ltc.ensure(fc.device, ltcTable(), 4, L"M LTC table");
     ID3D12CommandSignature* signature = material::dispatchSignature(fc);
@@ -320,7 +261,7 @@ void shade(FramePassContext& fc, ViewResources& view)
     // The froxel grid is the main view's: planar reflection views read neither its lists nor its air volume.
     const bool froxelLists = view.froxelLights.valid();
     const ViewResources v = view;
-    const uint32_t tileCount = o.tilesX * o.tilesY, lutSrv = lut.srv, ltcSrv = ltc.srv, experiment = experimentMask(fc.quality);
+    const uint32_t tileCount = o.tilesX * o.tilesY, ltcSrv = ltc.srv, experiment = experimentMask(fc.quality);
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
     const EdgeConfig ec = edgeConfig(fc.quality);
     const bool planar = view.view.kind != gpu::ViewKind::Main;
@@ -412,7 +353,7 @@ void shade(FramePassContext& fc, ViewResources& view)
                                                       v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                                       v.reflection.valid() ? c.srv(v.reflection) : none,
                                                       (r.giCache.valid() && v.view.kind == gpu::ViewKind::PlanarReflection) ? c.srv(r.giCache) : none,
-                                                      atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], lutSrv, o.textureTableSrv, experiment,
+                                                      atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], 0, o.textureTableSrv, experiment,
                                                       c.srv(v.visId), fx[0], fx[1] };
                              uint32_t k32[32] = {};
                              std::memcpy(k32, k, sizeof k);
@@ -470,7 +411,7 @@ void shade(FramePassContext& fc, ViewResources& view)
                                                       v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                                       v.reflection.valid() ? c.srv(v.reflection) : none, none,
                                                       atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none, none,
-                                                      air ? c.srv(v.airVolume) : none, lutSrv, o.textureTableSrv, experiment, c.srv(v.visId),
+                                                      air ? c.srv(v.airVolume) : none, 0, o.textureTableSrv, experiment, c.srv(v.visId),
                                                       froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
                              const uint32_t edge[8] = { asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), c.uav(edgeArgs),
                                                         c.uav(edgeRadiance), v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, shadowSrvs,

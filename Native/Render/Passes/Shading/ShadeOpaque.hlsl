@@ -25,7 +25,8 @@
 // P[2] = { shadow visibility, screen probes, reflection, GI cache (planar views) } (UNX_NONE = absent)
 // P[3] = { atmosphere transmittance, multi-scatter, S's shadow overflow tile heads (main kernel; UNX_NONE = absent), this
 //        view's air volume } (this kernel reads no sky view)
-// P[4] = { specular albedo LUT (float2 per grid point), texture table, experiment mask (0; shading.toml), vis id SRV }
+// P[4] = { 0 (the specular albedo LUT is the frame constant g_specularAlbedoLut, v1.25), texture table, experiment mask (0;
+//        shading.toml), vis id SRV }
 // P[5] = { froxel lights (raw) (UNX_NONE = absent), LTC table (StructuredBuffer<float4>, AreaLight.hlsli) }
 // P[6] = { edge cos angle, edge footprint tolerance, edge distance tolerance (floats), edge args UAV (raw) }
 // P[7] = { edge radiance UAV (RGBA16F), R's screen probe maps (K path; UNX_NONE = absent), S's shadow overflow list (raw;
@@ -258,7 +259,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 const float3 compensation = 1 + f0 * (1 / e - 1);
                 sun = front * above * cap;
                 if (experiment & 1) sun += NoL > 0 ? shSpecular(f0, alpha, compensation, n, v, l0, NoV, NoL) * NoL * cap : 0;
-                else sun += shSunSpecular(P[4].x, f0, s.roughness, alpha, compensation, n, v, NoV, l0, E, shPixelAngle(D, Dx));
+                else sun += shSunSpecular(f0, s.roughness, alpha, compensation, n, v, NoV, l0, E, shPixelAngle(D, Dx));
             }
             if (foliage) sun += back * below * cap;
         }
@@ -289,7 +290,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         const float3x3 frame = shShadingFrame(n, v, NoV);
         const float3x3 frameBack = float3x3(frame[0], -frame[1], -frame[2]);
         const float3x3 specular = mul(shLtcInverse(P[5].y, max(NoV, 1e-4), s.roughness), frame);
-        const float3 specularAlbedo = shSpecularAlbedo(P[4].x, f0, max(NoV, 1e-4), s.roughness);
+        const float3 specularAlbedo = shSpecularAlbedo(f0, max(NoV, 1e-4), s.roughness);
 #endif
         uint shadowOrdinal = 0, overflowRecord = 0xFFFFFFFFu;
         ShadowPixelReceiver overflowReceiver = (ShadowPixelReceiver)0;
@@ -372,7 +373,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         if (foliage) irradianceBack = giCacheIrradiance(gi, worldPos, -nv);
         if (NoV > 0) incident = giCacheRadiance(gi, worldPos, n, r, halfAngle);  // looked up in this surface's normal class
     }
-    if (NoV > 0) radiance += front * irradiance + incident * shSpecularAlbedo(P[4].x, f0, NoV, s.roughness);
+    if (NoV > 0) radiance += front * irradiance + incident * shSpecularAlbedo(f0, NoV, s.roughness);
     radiance += back * irradianceBack;
 
     // ---- air between the camera and the surface (S's air volume: atmosphere, shadowed air, local lights' air)
