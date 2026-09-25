@@ -31,6 +31,18 @@ void checkQuality(const QualityConfig& q)
     if (q.integer("material.max_anisotropy") != 16) fail("material.max_anisotropy must be 16 (the aniso sampler s3 of the root signature)");
     if (q.string("material.normal_filter") != "lean") fail("material.normal_filter: only \"lean\" (slope moments + footprint variance) is implemented");
 }
+
+uint32_t experimentMask(const QualityConfig& q)
+{
+    const int64_t m = q.integer("material.experiment_disable");
+    static bool logged = false;
+    if (m != 0 && !logged)
+    {
+        logf("M material: experiment mask %lld leaves resolve work out (cost attribution run, not an image)\n", (long long)m);
+        logged = true;
+    }
+    return (uint32_t)m;
+}
 } // namespace
 
 uint32_t textureTable(FramePassContext& fc)
@@ -69,7 +81,7 @@ void resolve(FramePassContext& fc, ViewResources& view)
     o.tilesX = (W + kTile - 1) / kTile;
     o.tilesY = (H + kTile - 1) / kTile;
     o.textureTableSrv = textures.tableSrv();
-    const uint32_t tileCount = o.tilesX * o.tilesY;
+    const uint32_t tileCount = o.tilesX * o.tilesY, experiment = experimentMask(fc.quality);
     view.gbuffer = fc.graph.createTexture({ "m.gbuffer", W, H, 1, 1, DXGI_FORMAT_R32G32_UINT });
     view.reflectionLobeTiles = fc.graph.createTexture({ "m.reflection lobe tiles", o.tilesX, o.tilesY, 1, 1, DXGI_FORMAT_R8_UNORM });
     o.materialWord = fc.graph.createTexture({ "m.material word", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
@@ -107,13 +119,13 @@ void resolve(FramePassContext& fc, ViewResources& view)
                          b.use(o.tileArgs, Use::UavCompute);
                          if (debugBuffer.valid()) b.use(debugBuffer, Use::UavCompute);
                      },
-                     [kernel, v, o, cb, tileCount, debugBuffer](PassContext& c) {
-                         const uint32_t k[13] = { c.srv(v.visId), c.srv(v.visibleClusters), c.uav(v.gbuffer), c.uav(o.materialWord),
+                     [kernel, v, o, cb, tileCount, debugBuffer, experiment](PassContext& c) {
+                         const uint32_t k[14] = { c.srv(v.visId), c.srv(v.visibleClusters), c.uav(v.gbuffer), c.uav(o.materialWord),
                                                   o.emissive.valid() ? c.uav(o.emissive) : gpu::kNone, c.uav(v.reflectionLobeTiles), c.uav(o.tiles), c.uav(o.tileArgs),
-                                                  o.textureTableSrv, o.tilesX, o.tilesY, tileCount, debugBuffer.valid() ? c.uav(debugBuffer) : gpu::kNone };
+                                                  o.textureTableSrv, o.tilesX, o.tilesY, tileCount, debugBuffer.valid() ? c.uav(debugBuffer) : gpu::kNone, experiment };
                          c.cmd->SetPipelineState(kernel);
                          c.bindFrameConstants(cb);
-                         c.computeConstants(k, 13);
+                         c.computeConstants(k, 14);
                          c.cmd->Dispatch(o.tilesX, o.tilesY, 1);
                      });
 

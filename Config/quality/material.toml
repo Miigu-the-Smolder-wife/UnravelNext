@@ -1,4 +1,7 @@
-# Owner: M (core session). ARCHITECTURE 2.2.
+# Owner: M (M session, INTERFACES v1.2). ARCHITECTURE 2.2.
 [material]
 max_anisotropy = 16
 normal_filter = "lean"            # normal-map to roughness filtering (LEAN/Toksvig family)
+# Cost attribution only (gate --set): bit mask of resolve work left out, 0 in every gate and image. 1 = base colour and
+# roughness/metallic textures, 2 = normal-map moments, 4 = the whole surface reconstruction (constant G-buffer).
+experiment_disable = 0

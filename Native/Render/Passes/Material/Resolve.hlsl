@@ -12,6 +12,7 @@
 // P[0] = { visId SRV, visibleClusters SRV, gbuffer UAV, material word UAV }
 // P[1] = { emissive UAV or UNX_NONE, lobe tiles UAV, tile lists UAV (raw), tile args UAV (raw) }
 // P[2] = { texture table SRV, tilesX, tilesY, tileCount }
+// P[3].y experiment mask (material.experiment_disable: cost attribution only, 0 otherwise)
 // P[3].x (DEBUG=1) RWStructuredBuffer<float4>, 3 per pixel: (uv, duv/dx), (duv/dy, variance, roughness'),
 //        (camera-relative hit, front)
 #include "Bindless.hlsli"
@@ -50,6 +51,13 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             words[pixel] = M_MATERIAL_SKY;
             classBit = 1u << M_CLASS_SKY;
         }
+        else if ((P[3].y & 4) != 0)
+        {
+            gbuffer[pixel] = uint2(0x7FFF0000u, 0x80808080u);
+            words[pixel] = 0;
+            classBit = 1u << M_CLASS_OPAQUE;
+            lobe = 0.5;
+        }
         else
         {
             const MSurface s = mSurfaceFromVis(visId, P[0].y, float2(pixel) + 0.5);
@@ -57,13 +65,13 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             const MTextureSet ts = mLoadTextureSet(P[2].x, s.material);
 
             float3 baseColor = m.baseColor;
-            if (ts.baseColor != UNX_NONE)
+            if (ts.baseColor != UNX_NONE && (P[3].y & 1) == 0)
             {
                 Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
                 baseColor *= t.SampleGrad(g_anisoWrap, s.uv, s.duvdx, s.duvdy).rgb;
             }
             float roughness = m.roughness, metallic = m.metallic;
-            if (ts.roughMetal != UNX_NONE)
+            if (ts.roughMetal != UNX_NONE && (P[3].y & 1) == 0)
             {
                 Texture2D<float2> t = ResourceDescriptorHeap[ts.roughMetal];
                 const float2 rm = t.SampleGrad(g_anisoWrap, s.uv, s.duvdx, s.duvdy);
@@ -75,7 +83,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             // normalised) and the footprint's slope variance trace.
             float variance = (dot(s.dndx, s.dndx) + dot(s.dndy, s.dndy)) / 12.0;
             float3 n;
-            if (ts.moments != UNX_NONE)
+            if (ts.moments != UNX_NONE && (P[3].y & 2) == 0)
             {
                 Texture2D<float4> t = ResourceDescriptorHeap[ts.moments];
                 const MSlopeMoments mm = mNormalMoments(t, s.uv, s.duvdx, s.duvdy, ts.slopeRange);
