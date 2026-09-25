@@ -3,3 +3,15 @@
 samples_per_pixel = 4096
 russian_roulette_start_bounce = 4
 census_subsamples = 16
+
+# Scene thresholds for `unx_reference compare` (ARCHITECTURE 3: FLIP mean / P99, relMSE against the 4096 spp reference).
+# Rule (provisional until the core's quality policy fixes one): threshold = 2 x the reference's own floor, the metric
+# between its two independent 2048 spp halves at the same resolution. An engine frame passes only when it differs from
+# the reference by at most twice what two halves of the reference differ from each other. A scene gets thresholds only
+# once its floor is small: city_block street 1440p measures floor FLIP 0.045 / P99 0.416, relMSE 0.0063 (firefly paths
+# not converged at 4096 spp), which would make the limit meaningless; that reference is being improved first.
+[reference.threshold.ridge_sunset]
+# floor 1440p: FLIP 0.01403 / P99 0.04957, relMSE 0.000255; 4K: 0.01401 / 0.04945, 0.000254
+flip_mean = 0.028
+flip_p99 = 0.099
+relmse = 0.00051

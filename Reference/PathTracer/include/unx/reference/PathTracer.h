@@ -62,6 +62,10 @@ struct RenderSettings
     // Testing only: false replaces forced in-scattering NEE with NEE at the tracked collision points. Both estimators
     // have the same expectation; the reference always uses the forced one (lower variance for sky light).
     bool forcedInScattering = true;
+    // Diagnostics only: keep the light that underwent between volumeOrderMin and volumeOrderMax atmosphere scattering
+    // events (1 = single scattering). The default keeps everything; the reference tool puts a non-default window in the
+    // cache key.
+    uint32_t volumeOrderMin = 0, volumeOrderMax = 0xFFFFFFFFu;
 };
 
 struct RenderStats

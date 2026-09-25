@@ -294,6 +294,8 @@ struct PathTracer::Impl
 
     Rgb radiance(float3 origin, float3 dir, float tnear, Sampler& smp, Counters& cnt, uint32_t rrStart) const;
     bool forced = true;
+    uint32_t orderMin = 0, orderMax = 0xFFFFFFFFu;  // RenderSettings::volumeOrderMin/Max
+    float orderWeight(uint32_t k) const { return k >= orderMin && k <= orderMax ? 1.0f : 0.0f; }
     // Direct light (sun + one local light) scattered at y towards -d, per unit throughput.
     Rgb mediumNee(float3 yf, const AtmosphereModel::Coefficients& c, float3 d, Sampler& smp, Counters& cnt, LightCandidates& cands) const;
 };
@@ -343,6 +345,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
     float prevBsdfPdf = 0;
     float3 prevPos{};
     LightCandidates cands, prevCands;
+    uint32_t nVol = 0;  // atmosphere scattering events so far (order diagnostics)
 
     for (uint32_t bounce = 0;; ++bounce)
     {
@@ -395,7 +398,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                 if (!lights.intersect(li, prevPos, d, (float)segLen, t, Le, pdfSA)) continue;
                 const float pSel = (prevCands.cumulative[k] - (k ? prevCands.cumulative[k - 1] : 0.0f)) / prevCands.total;
                 const float w = powerHeuristic(prevBsdfPdf, pSel * pdfSA);
-                L += beta * expNeg(atm.opticalDepth(od, d, t)) * Le * w;
+                L += beta * expNeg(atm.opticalDepth(od, d, t)) * Le * (w * orderWeight(nVol));
             }
         }
 
@@ -415,7 +418,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                 const Double3 y{ od.x + d.x * t, od.y + d.y * t, od.z + d.z * t };
                 const Rgb T = expNeg(atm.opticalDepth(od, d, t));
                 const AtmosphereModel::Coefficients c = atm.at(atm.altitude(y));
-                L += beta * T * mediumNee(toF(y), c, d, smp, cnt, cands) * (1.0f / (pt * pForce));
+                L += beta * T * mediumNee(toF(y), c, d, smp, cnt, cands) * (orderWeight(nVol + 1) / (pt * pForce));
             }
             else if (forced)
             {
@@ -438,7 +441,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                 const float uMix = smp.get1D();
                 // Absorption-only point: this branch carries zero weight (the path ends; unbiased).
                 if (c.scatteringRayleigh.max() + c.scatteringMie.max() <= 0) break;
-                if (!forced) L += beta * T * mediumNee(toF(y), c, d, smp, cnt, cands) * (1.0f / (pt * pScatter));
+                if (!forced) L += beta * T * mediumNee(toF(y), c, d, smp, cnt, cands) * (orderWeight(nVol + 1) / (pt * pScatter));
                 float pdfDir;
                 const float3 w = atm.samplePhase(d, c.scatteringRayleigh.avg(), c.scatteringMie.avg(), uMix, u1, u2, pdfDir);
                 const float cw = dot(w, d);
@@ -448,6 +451,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                 d = w;
                 tmin = 0;
                 prev = Prev::Medium;
+                if (++nVol > orderMax) break;  // no later contribution can be inside the order window
                 if (bounce + 1 >= rrStart)
                 {
                     const float q = std::min(1.0f, beta.max());
@@ -465,7 +469,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
             if (prev != Prev::Medium && inSun(d))
             {
                 const float w = prev == Prev::Camera ? 1.0f : powerHeuristic(prevBsdfPdf, 1.0f / sunSolidAngle);
-                L += beta * sunRadiance * w;
+                L += beta * sunRadiance * (w * orderWeight(nVol));
             }
             break;
         }
@@ -474,7 +478,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
         if (end == End::Surface)
         {
             s = rt->surface(hit, d);
-            if (!s.emission.isZero()) L += beta * s.emission;
+            if (!s.emission.isZero()) L += beta * s.emission * orderWeight(nVol);
             if (!s.frontFacing) break;  // back of a one-sided surface: the BRDF is zero for this view
         }
         else
@@ -504,7 +508,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                 if (!Ls.isZero())
                 {
                     const float pl = 1.0f / sunSolidAngle;
-                    L += beta * f * Ls * (bsdf.cosine(ws) * powerHeuristic(pl, bsdf.pdf(ws)) / pl);
+                    L += beta * f * Ls * (bsdf.cosine(ws) * powerHeuristic(pl, bsdf.pdf(ws)) * orderWeight(nVol) / pl);
                 }
             }
         }
@@ -531,7 +535,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                             const float pl = pSel * ls.pdf;
                             const bool mis = !ls.delta && lights.light(li).castShadow;
                             const float w = mis ? powerHeuristic(pl, bsdf.pdf(ls.wi)) : 1.0f;
-                            L += beta * f * Ll * (bsdf.cosine(ls.wi) * w / pl);
+                            L += beta * f * Ll * (bsdf.cosine(ls.wi) * w * orderWeight(nVol) / pl);
                         }
                     }
                 }
@@ -671,6 +675,8 @@ RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings&
     if (st.russianRouletteStart == 0) fail("reference: russian roulette start bounce must be >= 1");
     im.build(cam.time);
     im.forced = st.forcedInScattering;
+    im.orderMin = st.volumeOrderMin;
+    im.orderMax = st.volumeOrderMax;
     const uint32_t W = st.width, H = st.height, halfSpp = st.samplesPerPixel / 2;
     const size_t pixels = (size_t)W * H;
     std::vector<double> sum[2] = { std::vector<double>(pixels * 3, 0.0), std::vector<double>(pixels * 3, 0.0) };

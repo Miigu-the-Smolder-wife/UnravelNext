@@ -48,6 +48,7 @@ struct Args
     bool noWind = false, force = false;
     float sunIlluminance = -1;
     bool noHold = false;
+    uint32_t orderMin = 0, orderMax = 0xFFFFFFFFu;  // --volume-order MIN:MAX (diagnostics)
 };
 
 Args parse(int argc, char** argv)
@@ -82,6 +83,15 @@ Args parse(int argc, char** argv)
         else if (k == "--engine") a.engine = next();
         else if (k == "--test") a.test = next();
         else if (k == "--write-scene") a.writeScene = next();
+        else if (k == "--volume-order")
+        {
+            const std::string r = next();
+            const size_t c = r.find(':');
+            if (c == std::string::npos) fail("--volume-order expects MIN:MAX (MAX may be 'inf')");
+            a.orderMin = (uint32_t)std::stoul(r.substr(0, c));
+            const std::string mx = r.substr(c + 1);
+            a.orderMax = mx == "inf" ? 0xFFFFFFFFu : (uint32_t)std::stoul(mx);
+        }
         else fail("unknown argument %s", k.c_str());
     }
     return a;
@@ -134,13 +144,15 @@ struct ReferenceKeys
     uint32_t spp = 0, rrStart = 0;
     std::string hash16;
 };
-ReferenceKeys referenceKeys(const QualityConfig& q, uint32_t sppOverride)
+ReferenceKeys referenceKeys(const QualityConfig& q, uint32_t sppOverride, uint32_t orderMin = 0, uint32_t orderMax = 0xFFFFFFFFu)
 {
     ReferenceKeys k;
     k.spp = sppOverride ? sppOverride : (uint32_t)q.integer("reference.samples_per_pixel");
     k.rrStart = (uint32_t)q.integer("reference.russian_roulette_start_bounce");
     // Only what changes the image: estimator version, sample count, Russian-roulette start.
-    const std::string canonical = format("%s\nreference.samples_per_pixel = %u\nreference.russian_roulette_start_bounce = %u\n", kEstimatorVersion, k.spp, k.rrStart);
+    std::string canonical = format("%s\nreference.samples_per_pixel = %u\nreference.russian_roulette_start_bounce = %u\n", kEstimatorVersion, k.spp, k.rrStart);
+    // A diagnostic scattering-order window changes the image, so it is part of the key (absent for full references).
+    if (orderMin != 0 || orderMax != 0xFFFFFFFFu) canonical += format("diagnostic.volume_order = %u:%u\n", orderMin, orderMax);
     k.hash16 = Sha256::hex(canonical).substr(0, 16);
     return k;
 }
@@ -165,7 +177,7 @@ std::string nowIso()
 
 std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const std::string& label, const reference::ResolvedCamera& cam, const QualityConfig& q)
 {
-    const ReferenceKeys k = referenceKeys(q, a.spp);
+    const ReferenceKeys k = referenceKeys(q, a.spp, a.orderMin, a.orderMax);
     const std::filesystem::path pfm = cachePath(s, label, a.width, a.height, k);
     if (std::filesystem::exists(pfm) && !a.force)
     {
@@ -185,6 +197,9 @@ std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const s
     rs.samplesPerPass = std::max(1u, std::min(32u, k.spp / 64));
     rs.checkpoint = pfm.string() + ".checkpoint";
     rs.pauseWhileExists = holdFiles(a);
+    rs.volumeOrderMin = a.orderMin;
+    rs.volumeOrderMax = a.orderMax;
+    if (a.orderMin != 0 || a.orderMax != 0xFFFFFFFFu) logf("reference: diagnostic volume scattering order window %u:%u\n", a.orderMin, a.orderMax);
     const reference::RenderOutput out = pt.render(cam, rs, [&](const reference::RenderStats& st) {
         const double rate = st.seconds > 0 ? st.rays / st.seconds / 1e6 : 0;
         const double eta = st.samplesDone ? st.seconds * (k.spp - st.samplesDone) / st.samplesDone : 0;
