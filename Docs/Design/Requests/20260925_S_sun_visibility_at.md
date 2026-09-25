@@ -40,3 +40,8 @@ float shadowSunVisibilityAt(ShadowSrvs s, float3 worldPos, float3 normal, float 
 
 - 주 뷰가 요청한 페이지만 상주한다(화면 밖 hit는 `resident = false`). 반사로 보이는 영역의 페이지를 미리 요청하는 것(반사 뷰의 페이지
   요청)은 S의 다음 항목이다(S_STATUS_KO.md 5절).
+
+## 결과 (코어, v1.18)
+
+- 반영: `Frame.h`의 `FrameResources`: `BufferRef vsmPool`(raw, 이전 `TextureRef` 대체), `vsmBlocks`, `vsmSearchBound`, `uint32_t vsmConstants`. INTERFACES 5.6의 `ShadowSrvs`와 `shadowSunVisibilityAt` 행, 12절 v1.18.
+- 컴파일 확인 [실측]: 코어 + V + C 빌드, 코어 + S 빌드. GPU 실행은 사용자 게임이 끝난 뒤에 한다.

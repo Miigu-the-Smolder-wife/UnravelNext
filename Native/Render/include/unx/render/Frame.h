@@ -79,8 +79,14 @@ struct FrameResources
                                    // camera -> node (x exposure; atmosphere, caster-shadowed air, local
                                    // lights), part 1 optical depth, part 2 sun transmittance at the node;
                                    // read with atmosphereAerial / atmosphereAirView (Atmosphere.hlsli)
-    TextureRef vsmPool;            // physical page pool                                    [S]
+    BufferRef vsmPool;             // physical page pool (raw buffer; v1.18)                [S]
     BufferRef vsmPageTable;        //                                                       [S]
+    BufferRef vsmBlocks;           // per-page block hierarchy (persistent; v1.18)          [S]
+    BufferRef vsmSearchBound;      // blocker-search bound grid of this frame (v1.18)       [S]
+    uint32_t vsmConstants = UINT32_MAX;  // CBV descriptor of this frame's VSM constants    [S]
+                                         // (upload ring, not a graph resource; v1.18). With
+                                         // the four buffers: ShadowSrvs (ShadowVisibility.hlsli),
+                                         // filled by shadowPages for shadowSunVisibilityAt (R)
     TextureRef froxels;            // the same air volume as aerialPerspective (v1.15)      [S]
     BufferRef froxelLights;        // per-froxel light lists (7.4)                          [S]
     BufferRef tlasStatic, tlasDynamic;  // acceleration structures                          [R]
