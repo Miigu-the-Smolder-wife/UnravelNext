@@ -186,7 +186,7 @@ int main(int argc, char** argv)
         const scene::Scene s = scene::load(scenePath);
         const ClusterData cd = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality));
         const double tanHalf = std::tan(60.0 * 3.14159265358979 / 360.0);
-        const double pixel4K = 2 * tanHalf / 2160, pixel1440 = 2 * tanHalf / 1440;
+        const double pixel4K = 2 * tanHalf / 2160;
         std::vector<bool> skinned(s.meshes.size(), false);
         std::vector<uint32_t> users(s.meshes.size(), 0);
         for (const scene::Instance& in : s.instances)
