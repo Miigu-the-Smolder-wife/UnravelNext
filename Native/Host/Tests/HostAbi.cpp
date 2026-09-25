@@ -3,8 +3,10 @@
 //     GetProcAddress, the same entry points Unity's P/Invoke calls) and the renderer's scene::contentHash must equal the
 //     hash of the source scene: every field of textures, materials, meshes, skins, skeletons, instances, lights, sun,
 //     atmosphere and wind crosses the boundary unchanged.
+//  1b. Live save: after commit, UnxSceneSave writes the latest transforms, bulk poses, sun and visibility the host set.
 //  2. Frame: one scene is committed and rendered through the ABI (standalone renderer, readback) and through
 //     FrameRenderer directly in this process; the two RGB10A2 images must match.
+// --content runs part 1 only (no frames rendered).
 // Needs the C track for scenes: Tools/CI/Build.ps1 -Track I -Tracks "V;M;S;R;C;I".
 #include "unx/host/UnravelNextHost.h"
 
@@ -53,6 +55,11 @@ struct Api
     UNX_FN(UnxSceneCommit)
     UNX_FN(UnxSceneContentHash)
     UNX_FN(UnxFrameQueue)
+    UNX_FN(UnxSceneSave)
+    UNX_FN(UnxFrameSetSun)
+    UNX_FN(UnxFrameSetInstanceVisible)
+    UNX_FN(UnxFrameSetSkeletons)
+    UNX_FN(UnxFrameSetTransforms)
     UNX_FN(UnxFrameRenderStandalone)
     UNX_FN(UnxFrameStatsLatest)
 #undef UNX_FN
@@ -78,6 +85,11 @@ struct Api
         UNX_FN(UnxSceneCommit)
         UNX_FN(UnxSceneContentHash)
         UNX_FN(UnxFrameQueue)
+        UNX_FN(UnxSceneSave)
+        UNX_FN(UnxFrameSetSun)
+        UNX_FN(UnxFrameSetInstanceVisible)
+        UNX_FN(UnxFrameSetSkeletons)
+        UNX_FN(UnxFrameSetTransforms)
         UNX_FN(UnxFrameRenderStandalone)
         UNX_FN(UnxFrameStatsLatest)
 #undef UNX_FN
@@ -140,7 +152,7 @@ void addSkinnedCharacter(scene::Scene& s)
         for (uint32_t c = 0; c < 4; ++c)
         {
             const uint32_t a = ring * 4 + c, b = ring * 4 + (c + 1) % 4, a2 = a + 4, b2 = b + 4;
-            m.indices.insert(m.indices.end(), { a, b, b2, a, b2, a2 });
+            m.indices.insert(m.indices.end(), { a, b2, b, a, a2, b2 });  // counter-clockwise from outside
         }
     m.submeshes.push_back({ 0, (uint32_t)m.indices.size(), material });
     float3x4 bind0, bind1;
@@ -383,7 +395,7 @@ std::vector<uint32_t> renderDirect(const scene::Scene& s, const QualityConfig& q
 } // namespace
 #endif
 
-int main()
+int main(int argc, char** argv)
 {
     try
     {
@@ -397,6 +409,7 @@ int main()
         if (api.UnxAbiVersion() != UNX_ABI_VERSION) fail("DLL ABI %u, header %u", api.UnxAbiVersion(), UNX_ABI_VERSION);
         const UnxRendererDesc desc = rendererDesc(bin / "shaders", quality);
         uint32_t failures = 0;
+        const bool contentOnly = argc > 1 && std::string(argv[1]) == "--content";
 
         // 1. Round trip of every scene (+ a skinned character).
         for (scenegen::SceneId id : scenegen::allScenes())
@@ -424,6 +437,96 @@ int main()
                  s.textures.size(), s.lights.size(), same ? "hash equal" : "HASH DIFFERS");
             if (!same) ++failures;
             api.ok(api.UnxRendererDestroy(r), "UnxRendererDestroy");
+        }
+        if (contentOnly)
+        {
+            logf(failures ? "HOST ABI CONTENT TEST FAILED (%u)\n" : "HOST ABI CONTENT TEST PASSED\n", failures);
+            return failures ? 1 : 0;
+        }
+
+        // 1b. After commit, UnxSceneSave writes the scene as the host shows it: rendered, queued and pending updates
+        // (newest last), poses set in one call (UnxFrameSetSkeletons), hidden instances left out.
+        {
+            scenegen::Request request;
+            request.id = scenegen::allScenes().front();
+            scene::Scene s = scenegen::generate(request);
+            addSkinnedCharacter(s);
+            addSkinnedCharacter(s);
+            scene::validate(s);
+            UnxRenderer r = 0;
+            api.ok(api.UnxRendererCreate(&desc, &r), "UnxRendererCreate");
+            pushScene(api, r, s);
+            UnxSceneInfo info{};
+            info.size = sizeof info;
+            info.version = 1;
+            api.ok(api.UnxSceneCommit(r, &info), "UnxSceneCommit");
+            const uint32_t k0 = (uint32_t)s.skeletons.size() - 2, k1 = k0 + 1;
+            auto moved = [](float x) {
+                UnxTransformUpdate u{};
+                u.instance = 0;
+                const float m[12] = { 0, 0, 1, x, 0, 1, 0, 0.5f, -1, 0, 0, -3 };  // yaw 90 degrees
+                std::memcpy(u.transform, m, sizeof m);
+                return u;
+            };
+            auto frame = [&](uint64_t index) {
+                UnxFrameDesc f{};
+                f.size = sizeof f;
+                f.version = 1;
+                f.frameIndex = index;
+                f.deltaTime = 1.0f / 60;
+                f.outputWidth = 2560;
+                f.outputHeight = 1440;
+                put3(f.camera.position, { 0, 2, 8 });
+                put3(f.camera.forward, { 0, 0, -1 });
+                put3(f.camera.up, { 0, 1, 0 });
+                f.camera.verticalFov = 1.0471976f;
+                f.camera.nearPlane = 0.05f;
+                f.camera.ev100 = 14;
+                uint64_t ticket = 0;
+                api.ok(api.UnxFrameQueue(r, &f, &ticket), "UnxFrameQueue");
+                return ticket;
+            };
+            // Frame 0, rendered: instance 0 moves, instance 1 hides, both characters get pose A.
+            UnxTransformUpdate a = moved(1.5f);
+            api.ok(api.UnxFrameSetTransforms(r, &a, 1), "UnxFrameSetTransforms");
+            api.ok(api.UnxFrameSetInstanceVisible(r, 1, 0), "UnxFrameSetInstanceVisible");
+            const uint32_t skeletons[2] = { k0, k1 };
+            float poseA[48] = {}, poseB[48] = {};
+            for (int j = 0; j < 4; ++j)
+            {
+                poseA[12 * j + 0] = poseA[12 * j + 5] = poseA[12 * j + 10] = 1;
+                poseA[12 * j + 7] = (float)(j % 2);
+                poseA[12 * j + 3] = 0.1f * j;
+                std::memcpy(poseB + 12 * j, poseA + 12 * j, 48);
+                poseB[12 * j + 3] = -0.25f * j - 0.5f;
+            }
+            api.ok(api.UnxFrameSetSkeletons(r, 2, skeletons, poseA, 4), "UnxFrameSetSkeletons");
+            api.ok(api.UnxFrameRenderStandalone(r, frame(0), nullptr, 0), "UnxFrameRenderStandalone");
+            // Frame 1, queued, not rendered: instance 0 moves again.
+            UnxTransformUpdate b = moved(-2.25f);
+            api.ok(api.UnxFrameSetTransforms(r, &b, 1), "UnxFrameSetTransforms");
+            frame(1);
+            // Pending: pose B and a new sun.
+            api.ok(api.UnxFrameSetSkeletons(r, 2, skeletons, poseB, 4), "UnxFrameSetSkeletons");
+            const float sunDir[3] = { 0, 0.8f, 0.6f }, sunColor[3] = { 1, 0.9f, 0.8f };
+            api.ok(api.UnxFrameSetSun(r, sunDir, 90000, sunColor, 0.005f), "UnxFrameSetSun");
+            // A pose buffer of the wrong length is refused before anything is recorded.
+            if (api.UnxFrameSetSkeletons(r, 2, skeletons, poseA, 3) == UNX_OK) fail("UnxFrameSetSkeletons accepted a short pose buffer");
+            const std::filesystem::path saved = bin / "host_abi_live.unxscene";
+            api.ok(api.UnxSceneSave(r, saved.string().c_str(), "live", nullptr), "UnxSceneSave");
+            api.ok(api.UnxRendererDestroy(r), "UnxRendererDestroy");
+            const scene::Scene live = scene::load(saved);
+            bool ok = live.instances.size() + 1 == s.instances.size();
+            for (int i = 0; i < 12 && ok; ++i) ok = live.instances[0].transform.m[i / 4][i % 4] == b.transform[i];
+            for (int k = 0; k < 2 && ok; ++k)
+                for (int j = 0; j < 2 && ok; ++j)
+                    for (int e = 0; e < 12 && ok; ++e) ok = live.skeletons[skeletons[k]].jointToModel[j].m[e / 4][e % 4] == poseB[12 * (2 * k + j) + e];
+            ok = ok && live.sun.illuminance == 90000 && live.sun.direction.y == sunDir[1] && live.sun.color.z == sunColor[2];
+            // Instance 1 was hidden: the saved list is the host's list without it (instance 2 comes next).
+            ok = ok && live.instances[1].mesh == s.instances[2].mesh;
+            logf("live scene save: %zu of %zu instances (1 hidden), newest transform, bulk poses, sun: %s\n", live.instances.size(), s.instances.size(),
+                 ok ? "as set" : "DIFFERS");
+            if (!ok) ++failures;
         }
 
         // 2. Frames through the ABI vs FrameRenderer directly (1440p). This checks the host's frame setup (camera, time,

@@ -84,6 +84,10 @@ SceneCommitInfo HostRenderer::commit()
     m_graph = std::make_unique<RenderGraph>(*m_device);
     m_profiler = std::make_unique<GpuProfiler>(*m_device, m_options.framesInFlight, 1024);
     m_committed = true;
+    for (const scene::Instance& i : m_scene.instances) m_applied.transforms.push_back(i.transform);
+    for (const scene::Skeleton& k : m_scene.skeletons) m_applied.poses.push_back(std::make_shared<const std::vector<float3x4>>(k.jointToModel));
+    m_applied.visible.assign(m_scene.instances.size(), 1);
+    m_applied.sun = m_scene.sun;
     info.contentHash = scene::contentHash(m_scene);
     info.buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     logf("UnravelNext host: scene committed, %zu meshes, %zu instances, %llu triangles, %llu clusters, %.1f ms, hash %s\n", m_scene.meshes.size(),
@@ -107,8 +111,51 @@ void HostRenderer::setSkeleton(uint32_t skeleton, std::vector<float3x4> jointToM
     if (skeleton >= m_scene.skeletons.size()) fail("skeleton %u of %zu", skeleton, m_scene.skeletons.size());
     if (jointToModel.size() != m_scene.skeletons[skeleton].jointToModel.size())
         fail("skeleton %u has %zu joints, pose has %zu", skeleton, m_scene.skeletons[skeleton].jointToModel.size(), jointToModel.size());
+    auto pose = std::make_shared<const std::vector<float3x4>>(std::move(jointToModel));
     std::lock_guard lock(m_mutex);
-    m_pending.skeletons.push_back({ skeleton, std::move(jointToModel) });
+    m_pending.skeletons.push_back({ skeleton, std::move(pose) });
+}
+
+uint32_t HostRenderer::jointCount(uint32_t skeleton) const
+{
+    if (skeleton >= m_scene.skeletons.size()) fail("skeleton %u of %zu", skeleton, m_scene.skeletons.size());
+    return (uint32_t)m_scene.skeletons[skeleton].jointToModel.size();
+}
+
+void HostRenderer::overlay(const FramePacket& p, HostState& state)
+{
+    if (p.sun) state.sun = *p.sun;
+    for (const InstanceTransformUpdate& u : p.transforms) state.transforms[u.instance] = u.objectToWorld;
+    for (const SkeletonPose& s : p.skeletons) state.poses[s.skeleton] = s.jointToModel;
+    for (const auto& [instance, visible] : p.visibility) state.visible[instance] = visible ? 1 : 0;
+}
+
+scene::Scene HostRenderer::currentScene() const
+{
+    requireCommitted();
+    scene::Scene s;
+    HostState state;
+    {
+        std::lock_guard lock(m_mutex);
+        {
+            std::lock_guard applied(m_appliedMutex);
+            s = m_scene;
+            state = m_applied;
+        }
+        for (const FramePacket& p : m_packets) overlay(p, state);
+        overlay(m_pending, state);
+    }
+    s.sun = state.sun;
+    std::vector<scene::Instance> shown;
+    for (size_t i = 0; i < s.instances.size(); ++i)
+    {
+        if (!state.visible[i]) continue;
+        shown.push_back(std::move(s.instances[i]));
+        shown.back().transform = state.transforms[i];
+    }
+    s.instances = std::move(shown);
+    for (size_t k = 0; k < s.skeletons.size(); ++k) s.skeletons[k].jointToModel = *state.poses[k];
+    return s;
 }
 
 void HostRenderer::setInstanceVisible(uint32_t instance, bool visible)
@@ -179,6 +226,10 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         p.skeletons.insert(p.skeletons.begin(), std::make_move_iterator(carried.skeletons.begin()), std::make_move_iterator(carried.skeletons.end()));
         p.visibility.insert(p.visibility.begin(), carried.visibility.begin(), carried.visibility.end());
     }
+    // Leaving the queue: its updates join the applied state here, under the queue's lock, so currentScene never misses
+    // a packet between the queue and the GPU.
+    std::lock_guard applied(m_appliedMutex);
+    overlay(p, m_applied);
     return p;
 }
 
@@ -205,9 +256,13 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
     }
     m_slotHostFrame[slot] = p.frameIndex;
     // Scene changes of this frame (GpuScene uploads them at the start of FrameRenderer::record).
-    if (p.sun) m_scene.sun = *p.sun;
+    if (p.sun)
+    {
+        std::lock_guard lock(m_appliedMutex);
+        m_scene.sun = *p.sun;
+    }
     if (!p.transforms.empty()) m_gpuScene->updateTransforms(frame, p.transforms);
-    for (const SkeletonPose& s : p.skeletons) m_gpuScene->updateSkeleton(frame, s.skeleton, s.jointToModel);
+    for (const SkeletonPose& s : p.skeletons) m_gpuScene->updateSkeleton(frame, s.skeleton, *s.jointToModel);
     for (const auto& [instance, visible] : p.visibility) m_gpuScene->setInstanceVisible(instance, visible);
     return slot;
 }

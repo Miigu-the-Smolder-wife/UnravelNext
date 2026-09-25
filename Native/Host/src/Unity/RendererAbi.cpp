@@ -230,6 +230,23 @@ UNX_API int32_t UNX_CALL UnxSceneAddMesh(UnxRenderer r, const UnxMeshDesc* d, ui
             m.skin.weights.assign(d->weights, d->weights + 4ull * n);
             for (uint32_t j = 0; j < d->jointCount; ++j) m.skin.inverseBind.push_back(affine(d->inverseBind + 12ull * j));
         }
+        // Front faces are counter-clockwise: cross(b - a, c - a) points along the vertex normals. A mesh whose winding
+        // opposes its own normals almost everywhere is an exporter convention error (e.g. a handedness mirror without
+        // reversing the triangle order), and every renderer path would shade it from behind.
+        uint64_t agree = 0, oppose = 0;
+        for (size_t t = 0; t + 2 < m.indices.size(); t += 3)
+        {
+            const uint32_t a = m.indices[t], b = m.indices[t + 1], c = m.indices[t + 2];
+            if (a >= n || b >= n || c >= n) fail("mesh '%s': index out of range (%u vertices)", m.name.c_str(), n);
+            const float3 g = cross(m.positions[b] - m.positions[a], m.positions[c] - m.positions[a]);
+            const float s = dot(g, m.normals[a] + m.normals[b] + m.normals[c]);
+            if (s > 0) ++agree;
+            else if (s < 0) ++oppose;
+        }
+        if (oppose > 0 && oppose >= 99 * agree)
+            fail("mesh '%s': %llu of %llu triangles wind against their vertex normals; front faces are counter-clockwise in renderer space (a Z-mirrored "
+                 "exporter reverses each triangle: a, c, b)",
+                 m.name.c_str(), (unsigned long long)oppose, (unsigned long long)(agree + oppose));
         auto h = find(r);
         const uint32_t i = h->add(h->scene().meshes, std::move(m));
         if (index) *index = i;
@@ -396,7 +413,8 @@ UNX_API int32_t UNX_CALL UnxSceneSave(UnxRenderer r, const char* utf8Path, const
 {
     return call([&] {
         if (!utf8Path || !*utf8Path) fail("scene path is empty");
-        scene::Scene copy = find(r)->scene();
+        const auto h = find(r);
+        scene::Scene copy = h->committed() ? h->currentScene() : h->scene();
         copy.name = utf8Name ? utf8Name : "";
         if (camera)
         {
@@ -483,6 +501,29 @@ UNX_API int32_t UNX_CALL UnxFrameSetSkeleton(UnxRenderer r, uint32_t skeleton, c
         std::vector<float3x4> joints(jointCount);
         for (uint32_t j = 0; j < jointCount; ++j) joints[j] = affine(jointToModel + 12ull * j);
         find(r)->setSkeleton(skeleton, std::move(joints));
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameSetSkeletons(UnxRenderer r, uint32_t count, const uint32_t* skeletons, const float* jointToModel, uint64_t jointCount)
+{
+    return call([&] {
+        if (count && (!skeletons || !jointToModel)) fail("skeleton list or poses are null");
+        const auto h = find(r);
+        // Validate the whole batch before any update is recorded (a failed call changes nothing).
+        uint64_t total = 0;
+        for (uint32_t i = 0; i < count; ++i) total += h->jointCount(skeletons[i]);
+        if (total != jointCount) fail("%u skeletons hold %llu joints, the pose buffer %llu", count, (unsigned long long)total, (unsigned long long)jointCount);
+        const float* at = jointToModel;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            std::vector<float3x4> joints(h->jointCount(skeletons[i]));
+            for (float3x4& j : joints)
+            {
+                j = affine(at);
+                at += 12;
+            }
+            h->setSkeleton(skeletons[i], std::move(joints));
+        }
     });
 }
 

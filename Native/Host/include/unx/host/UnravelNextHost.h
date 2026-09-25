@@ -24,7 +24,7 @@ enum UnxResult
     UNX_ERROR_BUFFER = -3,     // output buffer too small; *required holds the size
 };
 
-#define UNX_ABI_VERSION 2u  // 1: probe; 2: + renderer
+#define UNX_ABI_VERSION 3u  // 1: probe; 2: + renderer; 3: + UnxFrameSetSkeletons, UnxSceneSave writes the current state
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -264,8 +264,10 @@ typedef struct UnxCameraDesc
     float up[3], ev100;
 } UnxCameraDesc;
 
-// Saves the content added so far as a .unxscene file (INTERFACES 6.2), with 'camera' (nullable) as its camera 0 and 'name'
-// as the scene name: host scenes become test scenes for every track and for standalone gates.
+// Saves the scene as a .unxscene file (INTERFACES 6.2), with 'camera' (nullable) as its camera 0 and 'name' as the scene
+// name: host scenes become test scenes for every track and for standalone gates. Before UnxSceneCommit: the content
+// added so far. After: the scene as the host shows it now (the latest transforms, poses, sun and visibility it set,
+// including the ones not yet rendered), hidden instances left out.
 UNX_API int32_t UNX_CALL UnxSceneSave(UnxRenderer r, const char* utf8Path, const char* utf8Name, const UnxCameraDesc* camera);
 
 typedef struct UnxFrameDesc
@@ -292,6 +294,9 @@ typedef struct UnxTransformUpdate
 UNX_API int32_t UNX_CALL UnxFrameSetTransforms(UnxRenderer r, const UnxTransformUpdate* updates, uint32_t count);
 // jointToModel: 12 floats per joint, the skeleton's model-space joints (the palette is jointToModel x inverseBind).
 UNX_API int32_t UNX_CALL UnxFrameSetSkeleton(UnxRenderer r, uint32_t skeleton, const float* jointToModel, uint32_t jointCount);
+// Every listed skeleton's pose in one call: jointToModel holds the poses back to back in list order, each with its
+// skeleton's joint count (12 floats per joint); jointCount is the buffer's total, checked before anything is recorded.
+UNX_API int32_t UNX_CALL UnxFrameSetSkeletons(UnxRenderer r, uint32_t count, const uint32_t* skeletons, const float* jointToModel, uint64_t jointCount);
 UNX_API int32_t UNX_CALL UnxFrameSetInstanceVisible(UnxRenderer r, uint32_t instance, uint32_t visible);
 // Sun of the following frames (time of day): unit direction ground -> sun, lux at the top of the atmosphere.
 UNX_API int32_t UNX_CALL UnxFrameSetSun(UnxRenderer r, const float direction[3], float illuminance, const float color[3], float angularRadius);

@@ -1,5 +1,6 @@
 param(
-  [string]$Build = "",                                      # default: build/I of this repository
+  [string]$Build = "",                                      # default: build/I of this repository; a committed build:
+                                                            # ..\UnravelNext-gate\build\all (Build.ps1 -Track all -Committed)
   [string]$Bridge = "C:\Users\USER\Unravel\Assets\UnravelNextBridge"   # Unity bridge folder (old repository)
 )
 # Deploys UnravelNext.dll and the compiled kernels into the Unity bridge (I track):
@@ -10,6 +11,8 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 if (-not $Build) { $Build = Join-Path $root "build\I" }
+# The source tree the build came from (<tree>\build\<name>): its quality files go with its DLL and kernels.
+$sourceRoot = Split-Path -Parent (Split-Path -Parent (Resolve-Path $Build).Path)
 $dll = Join-Path $Build "bin\UnravelNext.dll"
 $shaders = Join-Path $Build "bin\shaders"
 if (-not (Test-Path $dll)) { throw "missing $dll (Tools/CI/Build.ps1 -Track I -Target unx_host)" }
@@ -46,6 +49,6 @@ Get-ChildItem $shaders -Recurse -Filter *.dxil | ForEach-Object {
 $qualityDest = Join-Path $Bridge "Native~\quality"
 if (Test-Path $qualityDest) { Remove-Item -Recurse -Force $qualityDest }
 New-Item -ItemType Directory -Force $qualityDest | Out-Null
-Copy-Item (Join-Path $root "Config\quality\*.toml") $qualityDest
+Copy-Item (Join-Path $sourceRoot "Config\quality\*.toml") $qualityDest
 $qualityCount = (Get-ChildItem $qualityDest -Filter *.toml).Count
 "deployed UnravelNext.dll ($commit$(if ($dirty) { ', dirty' })), $count kernels and $qualityCount quality files -> $Bridge"

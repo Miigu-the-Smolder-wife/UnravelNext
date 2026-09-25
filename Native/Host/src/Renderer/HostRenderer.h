@@ -52,10 +52,12 @@ struct SceneCommitInfo
     std::string contentHash;
 };
 
+// Shared, immutable once set: the queued packet and the renderer's latest-state record (currentScene) hold the same
+// joints without a copy.
 struct SkeletonPose
 {
     uint32_t skeleton = 0;
-    std::vector<float3x4> jointToModel;
+    std::shared_ptr<const std::vector<float3x4>> jointToModel;
 };
 
 // Everything one frame needs, copied on the main thread.
@@ -108,6 +110,7 @@ public:
     // Per-frame changes (main thread) collected into the next queued frame.
     void setTransforms(std::span<const render::InstanceTransformUpdate> updates);
     void setSkeleton(uint32_t skeleton, std::vector<float3x4> jointToModel);
+    uint32_t jointCount(uint32_t skeleton) const;
     void setInstanceVisible(uint32_t instance, bool visible);
     void setSun(const scene::Sun& sun);
     uint64_t queueFrame(FramePacket packet);
@@ -119,6 +122,10 @@ public:
     void renderStandalone(uint64_t ticket, void* readback, size_t readbackBytes);
     FrameStats latestStats() const;
 
+    // The scene as the host shows it now: the content with the latest transforms, poses, sun and visibility the host
+    // set (rendered, queued and pending updates, newest last); hidden instances are left out. Main thread (UnxSceneSave).
+    scene::Scene currentScene() const;
+
     const HostRendererOptions& options() const { return m_options; }
     const QualityConfig& quality() const { return m_quality; }
 
@@ -126,6 +133,15 @@ private:
     void requireOpen() const;
     void requireCommitted() const;
     std::optional<FramePacket> takePacket(uint64_t ticket);
+    // Per-instance and per-skeleton values the host set (poses shared with the packets, not copied).
+    struct HostState
+    {
+        std::vector<float3x4> transforms;
+        std::vector<std::shared_ptr<const std::vector<float3x4>>> poses;
+        std::vector<uint8_t> visible;
+        scene::Sun sun;
+    };
+    static void overlay(const FramePacket& p, HostState& state);
     void ensureStandaloneOutput(uint32_t width, uint32_t height);
     // Paces the frame slot, applies the packet's scene updates, declares the frame; returns the frame slot.
     uint32_t beginFrame(const FramePacket& packet);
@@ -146,6 +162,11 @@ private:
     mutable std::mutex m_mutex;  // packets, pending updates, stats
     std::deque<FramePacket> m_packets;
     FramePacket m_pending;       // updates for the next queued frame
+    // Latest state of every packet taken for rendering (takePacket, under m_mutex then m_appliedMutex): with the queued
+    // packets and m_pending on top it is the host's current scene. m_appliedMutex also guards m_scene.sun, which the
+    // submission thread writes (GpuScene reads the sun from m_scene).
+    mutable std::mutex m_appliedMutex;
+    HostState m_applied;
     uint64_t m_nextTicket = 1;
     FrameStats m_stats;
 
