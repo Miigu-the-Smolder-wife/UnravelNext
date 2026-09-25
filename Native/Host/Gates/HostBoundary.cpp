@@ -123,9 +123,8 @@ struct Fence
     }
     void waitCpu(uint64_t value)
     {
-        if (fence->GetCompletedValue() >= value) return;
-        check(fence->SetEventOnCompletion(value, event), "SetEventOnCompletion");
-        WaitForSingleObject(event, INFINITE);
+        // Core's wait rules (v1.30): device removal and the fence limit (UNX_FENCE_TIMEOUT_S) instead of an unbounded wait.
+        unx::render::waitFenceCpu(fence.Get(), event, value, "host boundary gate fence");
     }
     ~Fence()
     {

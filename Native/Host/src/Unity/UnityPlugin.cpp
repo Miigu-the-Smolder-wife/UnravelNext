@@ -291,9 +291,8 @@ private:
 
     void waitCpu(uint64_t value)
     {
-        if (!value || m_unityFence->GetCompletedValue() >= value) return;
-        check(m_unityFence->SetEventOnCompletion(value, m_event), "SetEventOnCompletion");
-        WaitForSingleObject(m_event, 10000);
+        // Core's wait rules (v1.30): device removal and the fence limit (UNX_FENCE_TIMEOUT_S) end the wait as a lost device.
+        if (value) unx::render::waitFenceCpu(m_unityFence.Get(), m_event, value, "host boundary probe: Unity fence");
     }
 
     // Reads the timestamps of the frame that last used this slot (its lists are about to be reset).
