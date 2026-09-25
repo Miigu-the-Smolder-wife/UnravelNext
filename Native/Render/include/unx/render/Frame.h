@@ -156,8 +156,9 @@ struct DepthRasterRequest
     std::string name;                              // pass names: "<name>.<step>"
     std::vector<RasterView> views;
     uint32_t instanceMask = scene::InstanceCastShadow;  // instances with (flags & mask) != 0
-    TextureRef depthTarget;                        // hardware depth (D32); invalid when pixelKernel writes storage
-                                                   // (then no render target and no depth: UAV-only raster, 1 sample)
+    TextureRef depthTarget;                        // hardware depth (D32_FLOAT or D16_UNORM); invalid when pixelKernel
+                                                   // writes storage (then no render target and no depth: UAV-only
+                                                   // raster, 1 sample)
     std::string pixelKernel;                       // requester's pixel shader kernel; empty = depth only. Its input is
                                                    // struct DepthRasterPixel (Passes/Visibility/DepthRaster.hlsli); it
                                                    // calls depthRasterCovered(p) first (alpha-tested materials)
@@ -178,6 +179,17 @@ struct DepthRasterRequest
     // set tiles (fragments = sum of triangle area inside set tiles). Pixel positions, depth and DepthRasterPixel are
     // the same as without it. For sparse masks over large viewports (VSM dirty pages in a 16384^2 level).
     bool tileLocal = false;
+    // Tile atlas (v1.32, S request 20260925_S_vsm_depth_atlas.md; needs tileLocal, cullMask and depthTarget): every set
+    // tile is drawn on its own into its slot of the atlas 'depthTarget' (hardware depth, D32_FLOAT or D16_UNORM: the
+    // requester picks per request, e.g. VSM D16 while the sun's zenith angle is below 76 degrees). The slot of tile i of
+    // a view (bit i of its mask) is word cullMaskOffset * 32 + i of 'atlasSlots' (raw buffer, one uint per mask bit);
+    // it sits at pixel (slot % atlasTilesPerRow, slot / atlasTilesPerRow) * cullTilePx of the atlas. The tile's pixels
+    // move to the slot's by a whole-pixel shift in clip space (depth and perspective unchanged; the shift's float
+    // rounding is below the rasteriser's 1/256 px snap), clipped to the tile, so fragments land only inside the slots of
+    // set tiles. The views' viewport positions are ignored (their sizes give the tile grids); the pass viewport is the
+    // whole atlas and a pixel kernel (optional; [earlydepthstencil] runs it after the depth test) sees atlas pixels.
+    BufferRef atlasSlots;
+    uint32_t atlasTilesPerRow = 0;
     // Coverage mode (v1.26; S's VSM transmittance layer): conservative raster of band B clusters only, the pixel kernel
     // (compiled with DEPTH_RASTER_COVERAGE 1) gets the exact area, mask and centroid depth per texel
     // (depthRasterCoverage, DepthRaster.hlsli). Needs a pixel kernel and no depth target. Bands are judged in each

@@ -30,6 +30,7 @@ static_assert(sizeof(CullView) == 320);
 
 constexpr uint32_t kViewOcclusion = 1;
 constexpr uint32_t kViewCullBack = 2;
+constexpr uint32_t kViewTileSingle = 4;  // tile-local pairs are single tiles (atlas mode)
 
 // Cull state words.
 constexpr uint32_t kStateNodeWrite = 0, kStateNodeEnd = 2, kStateGroupWrite = 3, kStateVisible = 5, kStateDeferInstances = 6, kStateDeferNodes = 7,

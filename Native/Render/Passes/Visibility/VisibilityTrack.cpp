@@ -315,6 +315,7 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
     v.viewportSize = { (float)r.viewportWidth, (float)r.viewportHeight };
     v.viewportOffset = { (float)r.viewportX, (float)r.viewportY };
     v.cullMaskOffset = req.cullMask.valid() ? r.cullMaskOffset : kNone;
+    if (req.atlasSlots.valid()) v.flags |= kViewTileSingle;
     v.userData = r.userData;
     v.tilePx = std::max(req.cullTilePx, 1u);
     v.tilesX = (r.viewportWidth + v.tilePx - 1) / v.tilePx;
@@ -982,12 +983,27 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
         fail("rasterizeDepth '%s': coverage mode and band selection (v1.26) are not implemented yet (V)", request.name.c_str());
     if (request.tileLocal && (!request.cullMask.valid() || request.cullTilePx == 0))
         fail("rasterizeDepth '%s': tileLocal needs a tile mask (cullMask, cullTilePx)", request.name.c_str());
+    const DXGI_FORMAT depthFormat = request.depthTarget.valid() ? fc.graph.desc(request.depthTarget).format : DXGI_FORMAT_UNKNOWN;
+    if (request.depthTarget.valid() && depthFormat != DXGI_FORMAT_D32_FLOAT && depthFormat != DXGI_FORMAT_D16_UNORM)
+        fail("rasterizeDepth '%s': depth target format %u (D32_FLOAT or D16_UNORM)", request.name.c_str(), (unsigned)depthFormat);
+    const bool atlas = request.atlasSlots.valid();
+    uint32_t atlasWidth = 0, atlasHeight = 0;
+    if (atlas)
+    {
+        if (!request.tileLocal || !request.depthTarget.valid() || request.atlasTilesPerRow == 0)
+            fail("rasterizeDepth '%s': the tile atlas needs tileLocal, a tile mask, a depth target and atlasTilesPerRow", request.name.c_str());
+        atlasWidth = fc.graph.desc(request.depthTarget).width;
+        atlasHeight = fc.graph.desc(request.depthTarget).height;
+        if (request.atlasTilesPerRow * request.cullTilePx > atlasWidth || atlasWidth > 0xFFFF || atlasHeight > 0xFFFF)
+            fail("rasterizeDepth '%s': atlas %ux%u for %u tiles of %u px per row", request.name.c_str(), atlasWidth, atlasHeight, request.atlasTilesPerRow, request.cullTilePx);
+    }
 
-    // One viewport for all views when they agree; else SV_ViewportArrayIndex (at most 16).
+    // One viewport for all views when they agree; else SV_ViewportArrayIndex (at most 16). The atlas is one viewport.
     bool sameViewport = true;
     for (const RasterView& v : request.views)
         sameViewport = sameViewport && v.viewportX == request.views[0].viewportX && v.viewportY == request.views[0].viewportY &&
                        v.viewportWidth == request.views[0].viewportWidth && v.viewportHeight == request.views[0].viewportHeight;
+    if (atlas) sameViewport = true;
     if (!sameViewport && request.views.size() > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE)
         fail("rasterizeDepth '%s': %zu views with different viewports (limit %u)", request.name.c_str(), request.views.size(),
              (unsigned)D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE);
@@ -1011,20 +1027,28 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     {
         const bool back = request.cull == D3D12_CULL_MODE_BACK && (l == kListABack || l == kListAAlphaBack);
         MeshPipelineDesc d;
-        d.meshShader = request.tileLocal ? "Passes/Visibility/DepthRaster.ms.TILE1" : "Passes/Visibility/DepthRaster.ms.TILE0";
+        d.meshShader = atlas ? "Passes/Visibility/DepthRaster.ms.TILE2"
+                             : request.tileLocal ? "Passes/Visibility/DepthRaster.ms.TILE1" : "Passes/Visibility/DepthRaster.ms.TILE0";
         d.pixelShader = request.pixelKernel;
-        d.depthFormat = depthOut ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
+        d.depthFormat = depthOut ? depthFormat : DXGI_FORMAT_UNKNOWN;
         d.depthWrite = depthOut;
         d.cull = back ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
         d.conservative = request.conservative;
-        pso[l] = fc.shaders.mesh("v.depth|" + request.pixelKernel + (back ? "|back" : "|none") + (depthOut ? "|d32" : "|uav") + (request.conservative ? "|cons" : "") +
-                                     (request.tileLocal ? "|tile" : ""), d);
+        pso[l] = fc.shaders.mesh("v.depth|" + request.pixelKernel + (back ? "|back" : "|none") +
+                                     (depthOut ? (depthFormat == DXGI_FORMAT_D16_UNORM ? "|d16" : "|d32") : "|uav") + (request.conservative ? "|cons" : "") +
+                                     (atlas ? "|atlas" : request.tileLocal ? "|tile" : ""), d);
     }
     std::vector<D3D12_VIEWPORT> viewports;
     std::vector<D3D12_RECT> scissors;
     for (size_t i = 0; i < (sameViewport ? 1 : request.views.size()); ++i)
     {
         const RasterView& v = request.views[i];
+        if (atlas)
+        {
+            viewports.push_back({ 0, 0, (float)atlasWidth, (float)atlasHeight, 0, 1 });
+            scissors.push_back({ 0, 0, (LONG)atlasWidth, (LONG)atlasHeight });
+            continue;
+        }
         viewports.push_back({ (float)v.viewportX, (float)v.viewportY, (float)v.viewportWidth, (float)v.viewportHeight, 0, 1 });
         scissors.push_back({ (LONG)v.viewportX, (LONG)v.viewportY, (LONG)(v.viewportX + v.viewportWidth), (LONG)(v.viewportY + v.viewportHeight) });
     }
@@ -1037,6 +1061,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          b.use(r.lists, Use::SrvGraphics);
                          b.use(r.state, Use::SrvGraphics);
                          if (r.tilePairs.valid()) b.use(r.tilePairs, Use::SrvGraphics);
+                         if (req.atlasSlots.valid()) b.use(req.atlasSlots, Use::SrvGraphics);
                          if (req.depthTarget.valid()) b.use(req.depthTarget, Use::DepthWrite);
                          for (const auto& [t, u] : req.textureUses) b.use(t, u);
                          for (const auto& [bu, u] : req.bufferUses) b.use(bu, u);
@@ -1055,7 +1080,8 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          for (uint32_t l = 0; l < kLists; ++l)
                          {
                              uint32_t k[32] = { c.srv(r.visible), c.srv(r.lists), c.srv(r.state), l, 1, r.cfg.capVisible, r.viewsSrv, sameViewport ? 0u : 1u,
-                                                r.tilePairs.valid() ? c.srv(r.tilePairs) : kNone };
+                                                r.tilePairs.valid() ? c.srv(r.tilePairs) : kNone, req.atlasSlots.valid() ? c.srv(req.atlasSlots) : kNone,
+                                                req.atlasTilesPerRow, atlasWidth | atlasHeight << 16 };
                              std::memcpy(&k[16], req.pixelConstants, sizeof req.pixelConstants);
                              c.cmd->SetPipelineState(pso[l]);
                              c.graphicsConstants(k, 32);

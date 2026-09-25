@@ -5,6 +5,9 @@
 //   raster_service                 rasterizeDepth: hardware depth and a requester pixel kernel (DepthRasterPixel),
 //                                  orthographic LOD, tile mask, tile-local raster (same fragments inside set tiles,
 //                                  none outside)
+//   raster_service_tile_atlas      tile atlas (DepthRasterRequest::atlasSlots): each set tile's slot of a D32 atlas holds
+//                                  the tile-local raster of that tile up to the rasteriser's vertex snap, a D16 atlas the
+//                                  D32 one to one step, unused slots stay cleared
 //   planar_mask_draws_only_mirror_pixels   ViewDesc::planarMask: mirror pixels bit-identical to the unmasked view, the
 //                                  others VIS_NONE at the nearest depth, clusters over mirror-free tiles culled
 //   coverage_layer_is_exact        band B/C coverage layer: every fragment's area, depth and 32-subsample mask match the
@@ -849,6 +852,212 @@ UNX_TEST(raster_service)
     device().deferRelease(rbBits);
     device().deferRelease(rbIds);
     device().deferRelease(rbFine);
+}
+
+UNX_TEST(raster_service_tile_atlas)
+{
+    // S's VSM depth atlas (v1.32, request 20260925_S_vsm_depth_atlas.md): the sparse mask of raster_service over the
+    // orthographic 1024^2 terrain view, drawn tile-local into a view-sized D32 target (the reference) and in atlas mode
+    // into D32 and D16 atlases of 3 x 11 slots of 128 px, the 30 set tiles in scrambled slots and 3 slots unused.
+    const QualityConfig q = quality();
+    const scene::Scene s = makeScene();
+    GpuScene gs(device());
+    gs.upload(s);
+    gs.setClusters(clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(q)));
+    RenderGraph graph(device());
+    TrackState trackState;
+    FrameResources resources;
+    FrameServices services;
+    services.rasterizeDepth = [](FramePassContext& c, const DepthRasterRequest& r) { tracks::rasterizeDepth(c, r); };
+    ViewDesc mainView = ViewDesc::fromCamera(camera({ 40, 5, 2 }, { 40, 0, 40 }), 2560, 1440, {});
+    mainView.prevViewProj = mainView.viewProj;
+    D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_UPLOAD };
+    D3D12_RESOURCE_DESC1 rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = 1024;
+    rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> constants;
+    check(device().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&constants)), "constants");
+    uint8_t* mapped = nullptr;
+    check(constants->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "map");
+
+    const uint32_t size = 1024, tilePx = 128, tiles = size / tilePx;
+    RasterView rv;
+    rv.viewProj = {};
+    rv.viewProj.m[1][1] = rv.viewProj.m[2][2] = 0;
+    rv.viewProj.m[0][0] = 1.0f / 40;
+    rv.viewProj.m[0][3] = -1;
+    rv.viewProj.m[1][2] = -1.0f / 40;
+    rv.viewProj.m[1][3] = 1;
+    rv.viewProj.m[2][1] = 1.0f / 30;
+    rv.viewProj.m[2][3] = 10.0f / 30;
+    rv.viewProj.m[3][3] = 1;
+    rv.viewportWidth = rv.viewportHeight = size;
+    rv.lodPixelsPerMetre = size / 80.0f;
+    rv.cullMaskOffset = 0;
+
+    const uint8_t rows[8] = { 0x36, 0xFF, 0x00, 0x81, 0x5A, 0xE7, 0x18, 0xF0 };  // bit x = tile column x
+    const uint32_t words[2] = { rows[0] | rows[1] << 8 | rows[2] << 16 | (uint32_t)rows[3] << 24, rows[4] | rows[5] << 8 | rows[6] << 16 | (uint32_t)rows[7] << 24 };
+    const uint32_t perRow = 3, slotCount = 33;
+    std::vector<uint32_t> slotOf(tiles * tiles, UINT32_MAX);
+    std::vector<bool> slotUsed(slotCount, false);
+    uint32_t set = 0;
+    for (uint32_t t = 0; t < tiles * tiles; ++t)
+        if ((rows[t / tiles] >> (t % tiles)) & 1)
+        {
+            slotOf[t] = (set * 7 + 3) % slotCount;  // 7 is prime to 33: distinct slots
+            slotUsed[slotOf[t]] = true;
+            ++set;
+        }
+    CHECK(set == 30);
+    const uint32_t atlasW = perRow * tilePx, atlasH = (slotCount + perRow - 1) / perRow * tilePx;
+
+    ComPtr<ID3D12Resource> rbRef = readbackBuffer((uint64_t)rowPitch(size) * size), rb32 = readbackBuffer((uint64_t)rowPitch(atlasW) * atlasH),
+                           rb16 = readbackBuffer((uint64_t)rowPitch(atlasW) * atlasH);
+    ID3D12Resource *pr = rbRef.Get(), *p32 = rb32.Get(), *p16 = rb16.Get();
+    {
+        FrameContext frame;
+        frame.frameIndex = 0;
+        frame.mainView = mainView;
+        const gpu::FrameConstants fcData = FrameRenderer::frameConstants(gs, frame, mainView);
+        std::memcpy(mapped, &fcData, sizeof fcData);
+        const D3D12_GPU_VIRTUAL_ADDRESS constantsAddress = constants->GetGPUVirtualAddress();
+        FramePassContext fc{ device(), graph, shaders(), q, gs, frame, resources, services, [=](const ViewDesc&) { return constantsAddress; }, &trackState, 2 };
+        ViewResources main;
+        main.view = mainView;
+        main.frameConstants = constantsAddress;
+        tracks::visibility(fc, main);
+
+        const TextureRef ref = graph.createTexture({ "test.atlas.ref", size, size, 1, 1, DXGI_FORMAT_D32_FLOAT });
+        const TextureRef atlas32 = graph.createTexture({ "test.atlas.d32", atlasW, atlasH, 1, 1, DXGI_FORMAT_D32_FLOAT });
+        const TextureRef atlas16 = graph.createTexture({ "test.atlas.d16", atlasW, atlasH, 1, 1, DXGI_FORMAT_D16_UNORM });
+        const BufferRef mask = graph.createBuffer({ "test.atlas.mask", 64 * 4, 0 });
+        const BufferRef slots = graph.createBuffer({ "test.atlas.slots", tiles * tiles * 4, 0 });
+        graph.addPass("test.atlas.clear", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(ref, Use::DepthWrite);
+                          b.use(atlas32, Use::DepthWrite);
+                          b.use(atlas16, Use::DepthWrite);
+                          b.use(mask, Use::CopyDst);
+                          b.use(slots, Use::CopyDst);
+                      },
+                      [=](PassContext& c) {
+                          for (TextureRef t : { ref, atlas32, atlas16 }) c.cmd->ClearDepthStencilView(c.dsv(t), D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
+                          D3D12_WRITEBUFFERIMMEDIATE_PARAMETER w[2 + 64];
+                          for (uint32_t i = 0; i < 2; ++i) w[i] = { c.address(mask) + 4 * i, words[i] };
+                          for (uint32_t i = 0; i < 64; ++i) w[2 + i] = { c.address(slots) + 4 * i, slotOf[i] };
+                          c.cmd->WriteBufferImmediate(66, w, nullptr);
+                      });
+        DepthRasterRequest local;
+        local.name = "test.atlas.local";
+        local.views = { rv };
+        local.depthTarget = ref;
+        local.cullMask = mask;
+        local.cullTilePx = tilePx;
+        local.tileLocal = true;
+        services.rasterizeDepth(fc, local);
+        for (uint32_t k = 0; k < 2; ++k)
+        {
+            DepthRasterRequest at = local;
+            at.name = k == 0 ? "test.atlas.d32" : "test.atlas.d16";
+            at.depthTarget = k == 0 ? atlas32 : atlas16;
+            at.atlasSlots = slots;
+            at.atlasTilesPerRow = perRow;
+            services.rasterizeDepth(fc, at);
+        }
+        graph.addPass("test.atlas.readback", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(ref, Use::CopySrc);
+                          b.use(atlas32, Use::CopySrc);
+                          b.use(atlas16, Use::CopySrc);
+                          b.keep();
+                      },
+                      [=](PassContext& c) {
+                          copyTexture(c, ref, pr, size, size);
+                          copyTexture(c, atlas32, p32, atlasW, atlasH);
+                          copyTexture(c, atlas16, p16, atlasW, atlasH);
+                      });
+        graph.execute(nullptr);
+        device().waitIdle();
+    }
+    constants->Unmap(0, nullptr);
+    const auto refDepth = readTexture<float>(pr, size, size);
+    const auto a32 = readTexture<float>(p32, atlasW, atlasH);
+    std::vector<uint16_t> a16((size_t)atlasW * atlasH);
+    {
+        const uint8_t* m = nullptr;
+        check(rb16->Map(0, nullptr, (void**)&m), "map");
+        for (uint32_t y = 0; y < atlasH; ++y) std::memcpy(&a16[(size_t)y * atlasW], m + (size_t)y * rowPitch(atlasW), atlasW * 2);
+        rb16->Unmap(0, nullptr);
+    }
+
+    // Set tiles: the slot holds the same geometry rasterised at pixel coordinates shifted by whole pixels. The
+    // rasteriser snaps vertices to 1/256 px of the float coordinate it gets, and the float of p + k is not the float of
+    // p shifted, so a vertex may land one snap step away: a texel then differs from the reference by at most its local
+    // depth gradient G (largest 3 x 3 neighbour step, per pixel) x 2/256 px. Where an edge between different surfaces
+    // passes within that distance of the pixel centre the texel takes the other side's depth, a value of its 3 x 3
+    // neighbourhood ("edge flip"); those are counted and must stay rare. The D16 slot is the D32 slot to one step (round
+    // to nearest; depth ties decided at 16 bits).
+    size_t texels = 0, exact = 0, withinSnap = 0, edgeFlips = 0, bad = 0, covered = 0, bad16 = 0;
+    float worst16 = 0, worstSnap = 0;  // worstSnap: |d - r| / (G / 256) over the texels within the snap bound
+    for (uint32_t t = 0; t < tiles * tiles; ++t)
+    {
+        if (slotOf[t] == UINT32_MAX) continue;
+        const uint32_t tx = t % tiles * tilePx, ty = t / tiles * tilePx;
+        const uint32_t sx = slotOf[t] % perRow * tilePx, sy = slotOf[t] / perRow * tilePx;
+        for (uint32_t y = 0; y < tilePx; ++y)
+            for (uint32_t x = 0; x < tilePx; ++x)
+            {
+                const float r = refDepth[(size_t)(ty + y) * size + tx + x];
+                const float d = a32[(size_t)(sy + y) * atlasW + sx + x];
+                ++texels;
+                if (r > 0) ++covered;
+                if (d == r) ++exact;
+                else
+                {
+                    float gradient = 0;
+                    bool neighbour = false;
+                    for (int dy = -1; dy <= 1; ++dy)
+                        for (int dx = -1; dx <= 1; ++dx)
+                        {
+                            const int u = (int)(tx + x) + dx, v = (int)(ty + y) + dy;
+                            if (u < 0 || v < 0 || u >= (int)size || v >= (int)size) continue;
+                            const float n = refDepth[(size_t)v * size + u];
+                            gradient = std::max(gradient, std::fabs(n - r));
+                            neighbour = neighbour || std::fabs(n - d) <= 1e-6f;
+                        }
+                    const float e = std::fabs(d - r);
+                    if (e <= gradient * (2.0f / 256) + 1e-7f)
+                    {
+                        ++withinSnap;
+                        if (gradient > 0) worstSnap = std::max(worstSnap, e / (gradient / 256));
+                    }
+                    else if (neighbour)
+                        ++edgeFlips;
+                    else
+                        ++bad;
+                }
+                const float e16 = std::fabs(a16[(size_t)(sy + y) * atlasW + sx + x] / 65535.0f - d);
+                worst16 = std::max(worst16, e16);
+                if (e16 > 1.0f / 65535 + 1e-7f) ++bad16;
+            }
+    }
+    // Unused slots: no fragment (the clear value 0) in either atlas.
+    size_t leaked = 0;
+    for (uint32_t slot = 0; slot < slotCount; ++slot)
+    {
+        if (slotUsed[slot]) continue;
+        const uint32_t sx = slot % perRow * tilePx, sy = slot / perRow * tilePx;
+        for (uint32_t y = 0; y < tilePx; ++y)
+            for (uint32_t x = 0; x < tilePx; ++x)
+                if (a32[(size_t)(sy + y) * atlasW + sx + x] != 0 || a16[(size_t)(sy + y) * atlasW + sx + x] != 0) ++leaked;
+    }
+    logf("    %zu texels in %u set tiles (%zu covered): %zu exact, %zu within the snap bound (worst %.2f snap steps x G), %zu edge flips, %zu other; "
+         "D16 worst %.3g (1 step %.3g), %zu beyond; %zu texels written in unused slots\n",
+         texels, set, covered, exact, withinSnap, worstSnap, edgeFlips, bad, worst16, 1.0 / 65535, bad16, leaked);
+    CHECK(covered == texels && bad == 0 && edgeFlips * 1000 <= texels && bad16 == 0 && leaked == 0);
 }
 
 UNX_TEST(planar_mask_draws_only_mirror_pixels)

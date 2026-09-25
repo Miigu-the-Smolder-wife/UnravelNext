@@ -1,5 +1,5 @@
 // unx-kernel: ms_6_6 main
-// unx-variants: TILE=0,1
+// unx-variants: TILE=0,1,2
 // Depth raster service (FrameServices::rasterizeDepth, INTERFACES 5.3): one mesh-shader group per draw-list entry,
 // any number of views (the visible entry carries the view). Outputs match struct DepthRasterPixel (DepthRaster.hlsli)
 // for the requester's pixel kernel: position, uv (alpha test), userData, material, instance.
@@ -7,9 +7,11 @@
 // TILE=1 (DepthRasterRequest::tileLocal): the entry is a (cluster, tile rectangle) pair (CullClusters,
 // writeTilePairs). Triangles outside the rectangle are culled and the rest are clipped to it by four clip distances,
 // so the rasteriser makes fragments only inside the requested tiles; positions are unchanged (same pixels, same depth).
+// TILE=2 (atlas mode, DepthRasterRequest::atlasSlots): pairs are single tiles (CULL_VIEW_TILE_SINGLE); the tile moves to
+// its atlas slot by a whole-pixel shift in clip space, the viewport being the whole atlas.
 //   P[0] visible SRV (uint2), lists SRV (raw), state SRV (raw), list
 //   P[1] phase (always 1: the service culls in one phase), list capacity, views SRV, viewport per view (0 = one viewport)
-//   P[2] tile pairs SRV (uint3, TILE=1)
+//   P[2] tile pairs SRV (uint3, TILE=1,2), atlas slots SRV (raw, TILE=2), atlas tiles per row, atlas size (w | h << 16)
 #include "Passes/Visibility/VisibilityCommon.hlsli"
 
 struct VertexOut
@@ -72,6 +74,18 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     const float2 ndcLo = float2(2 * lo.x / v.viewportSize.x - 1, 1 - 2 * lo.y / v.viewportSize.y);
     const float2 ndcHi = float2(2 * hi.x / v.viewportSize.x - 1, 1 - 2 * hi.y / v.viewportSize.y);
 #endif
+#if TILE == 2
+    // Tile -> slot by the whole-pixel shift d: x' = x s.x + w (s.x - 1 + 2 d.x / A.x), y' = y s.y + w (1 - s.y - 2 d.y /
+    // A.y) with s = viewport / atlas size; z and w unchanged (same depth, same perspective). The clip distances stay in
+    // the view's clip space: they cut the same tile edges.
+    ByteAddressBuffer slots = ResourceDescriptorHeap[P[2].y];
+    const uint tile = (pair.y >> 16) * v.tilesX + (pair.y & 0xFFFFu);
+    const uint slot = valid ? slots.Load(4 * (v.cullMaskOffset * 32 + tile)) : 0;
+    const float2 atlasSize = float2(P[2].w & 0xFFFFu, P[2].w >> 16);
+    const float2 shift = float2(slot % P[2].z, slot / P[2].z) * v.tilePx - lo;
+    const float2 scale = v.viewportSize / atlasSize;
+    const float2 offset = float2(scale.x - 1 + 2 * shift.x / atlasSize.x, 1 - scale.y - 2 * shift.y / atlasSize.y);
+#endif
     SetMeshOutputCounts(vertexCount, triangleCount);
     StructuredBuffer<uint> clusterVertices = ResourceDescriptorHeap[g_clusterVertexIndices];
     for (uint i = lane; i < vertexCount; i += 64)
@@ -79,7 +93,11 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         const uint meshVertex = clusterVertices[cl.vertexOffset + i];
         const DeformedVertex d = deformVertex(inst, mesh, meshVertex);
         const float4 p = mul(v.viewProj, float4(d.world, 1));
+#if TILE == 2
+        verts[i].position = float4(p.x * scale.x + p.w * offset.x, p.y * scale.y + p.w * offset.y, p.z, p.w);
+#else
         verts[i].position = p;
+#endif
         verts[i].uv = loadVertex(mesh, meshVertex).uv;
 #if TILE
         verts[i].clip = float4(p.x - ndcLo.x * p.w, ndcHi.x * p.w - p.x, ndcLo.y * p.w - p.y, p.y - ndcHi.y * p.w);

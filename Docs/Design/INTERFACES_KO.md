@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.31, 2026-09-25)
+# UnravelNext 인터페이스 (v1.32, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -263,6 +263,13 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 - **컬 모드(v1.1)**: `DepthRasterRequest::cull`, 기본 `D3D12_CULL_MODE_NONE`(양면; 그림자). `BACK`이면 one-sided 재질만 뒷면을 버린다(two-sided 재질은 늘 양면).
 - **타일 마스크 컬링(v1.1, S 요청)**: `DepthRasterRequest::cullMask`(raw 버퍼, 같은 프레임의 앞선 패스가 GPU로 씀)와 `cullTilePx`, 뷰마다 `RasterView::cullMaskOffset`(단어 위치, `UINT32_MAX` = 마스크 없음). 뷰마다 ⌈w/tile⌉×⌈h/tile⌉ 비트, 행 우선, 비트 i = 단어 `offset + (i >> 5)`의 `(i & 31)`번째, 1 = 래스터 필요. V는 뷰포트 투영 사각형이 켜진 비트를 하나도 덮지 않는 클러스터(가능하면 메시렛 삼각형)를 버리고, 필요하면 내부에서 계층 마스크를 만든다. **성능용 필터**이고 정확성은 요청자의 픽셀 커널이 지킨다(V가 보수적으로 더 그려도 결과는 같다). V는 `cullMask`를 `SrvCompute`/`SrvGraphics`로 선언한다. v1.7부터 V는 8×8 타일 요약 마스크를 만들어 인스턴스·계층 노드·클러스터 모두를 마스크로 정확히 거른다(이전의 "64 타일 넘는 사각형은 그린다" 생략 없음).
 - **타일 국소 래스터(v1.7, S 요청 `20260925_S_page_local_raster.md`)**: `DepthRasterRequest::tileLocal = true`(마스크 필요). 클러스터마다 그 사각형 아래 켜진 타일의 행별 연속 구간마다 한 번(사각형 아래 타일이 모두 켜졌으면 한 번) 그리고, 메시 셰이더가 그 구간 사각형 밖 삼각형을 버리고 나머지를 클립 거리 4개로 잘라 래스터한다. 래스터라이저는 켜진 타일 안에서만 fragment를 만든다(fragment 수 = Σ 삼각형 ∩ 켜진 타일 면적). 픽셀 위치·`DepthRasterPixel`은 같고, 켜진 타일 안의 fragment 집합(픽셀별 개수)은 마스크만 쓴 래스터와 같다. **깊이**는 하드웨어가 타일 경계에서 만든 꼭짓점을 1/256 px 격자에 맞추므로 그 삼각형의 깊이 평면이 반올림 수준으로 다르다: 실측 최대 차이는 깊이 기울기 × 0.0068 px(측면 변위로 1/64 px 이내, V 테스트 `raster_service`). 비용식: 쌍 수 × 메시렛 launch + 삼각형 수 / 래스터 처리율 + Σ(삼각형 ∩ 켜진 타일 면적) fragment.
+- **타일 아틀라스(v1.32, S 요청 `20260925_S_vsm_depth_atlas.md`, 설계 개정 11.4 (6))**: `DepthRasterRequest::atlasSlots`(raw 버퍼, 마스크 비트마다 uint 하나)와 `atlasTilesPerRow`. 조건은 `tileLocal`, `cullMask`, `depthTarget`이다.
+  - 켜진 타일마다 따로 그린다(쌍 = (클러스터, 타일 하나)). 뷰의 타일 i(마스크 비트 i)의 슬롯은 `atlasSlots`의 단어 `cullMaskOffset × 32 + i`이다. 슬롯의 아틀라스 위치는 (슬롯 % `atlasTilesPerRow`, 슬롯 / `atlasTilesPerRow`) × `cullTilePx` 픽셀이다.
+  - 메시 셰이더가 타일의 픽셀을 슬롯의 픽셀로 옮긴다. 옮기는 양은 정수 픽셀이고, 클립 공간의 선형식 x' = x·s + w·o다. z와 w는 그대로여서 깊이와 원근은 같다. 클립 거리 4개가 타일 경계를 자른다. 패스 뷰포트는 아틀라스 전체이고, 뷰의 뷰포트 위치는 무시한다(뷰포트 크기가 타일 격자를 정한다).
+  - 깊이 대상 형식은 `D32_FLOAT` 또는 `D16_UNORM`이고 요청자가 요청마다 고른다(VSM: 천정각 < 76°면 D16, 설계 개정 11.4 (6)). 이 규칙은 모든 요청에 적용된다(v1.32부터 서비스가 대상의 형식으로 파이프라인을 고른다). 아틀라스를 지우는 것(깊이 fast clear)은 요청자가 한다.
+  - 픽셀 커널은 선택이다. `[earlydepthstencil]`이면 깊이 테스트 뒤에 돈다(바람 메타 같은 것). 커널이 보는 `SV_Position`은 아틀라스 픽셀이다.
+  - 정확도 [실측, V 테스트 `raster_service_tile_atlas`, 1024² 직교 지형, 128 px 타일 30개를 3 × 11 슬롯에 섞어 배치]: 슬롯의 깊이는 타일 국소 래스터와 텍셀마다 같다. 491,520텍셀 중 87.1 %가 비트 단위로 같고, 나머지는 모두 국소 깊이 기울기 × 2/256 px 안이다(최대 0.67 스냅 단계; 래스터라이저가 p + k의 float 좌표를 1/256 px로 스냅하므로 p를 옮긴 것과 반올림이 다르다). 가장자리 뒤집힘 0, 그 밖 0. D16 슬롯은 D32 슬롯과 최대 8.6e-6(반 단계) 차이다. 쓰지 않은 슬롯에 쓰인 텍셀은 0이다.
+  - 비용식: 쌍 수 × 메시렛 launch + Σ(삼각형 ∩ 켜진 타일 면적) fragment × c_rop(설계 벤치 0.010 ns/fragment, D32, PS 없음). 실제 VSM 부하(매 프레임 전부 다시 그리기)의 c_rop와 블록 계층은 S가 잰다(설계 개정 12절).
 
 ### 5.4 R → V·M·S: 평면 반사 뷰
 
@@ -527,6 +534,9 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.28 (2026-09-25):
   - **GpuLock `-Kind timing|correctness`**(조율 요청, 3.3): 종류를 `current.json`과 `history.log`에 기록한다. 백그라운드 CPU 작업의 멈춤 규칙은 timing만 대상이다(C의 PauseGate는 `kind`를 읽도록 C가 맞춘다). history 줄의 형식이 `acquire <트랙> (<종류>) :: ...`로 바뀌었다.
   - **M 요청 `20260925_M_planar_mask_apron.md`(R 동의)**: `ViewDesc::planarMask` 값이 1 = 거울 픽셀(R이 읽음), 2 = 에이프런(거울 픽셀의 3×3 이웃, 그리고 셰이딩하지만 R은 읽지 않음), 0 = 건너뜀이 됐다. `planarTileMask`는 팽창된 마스크 기준이다. V·S·M은 "0 아님 = 그림" 그대로라 바뀌는 것이 없다(V의 64 px 컬링 마스크와 깊이 채움은 이미 0 아님으로 판정한다). R의 resolve만 "== 1"로 읽는다. 마스크 생성은 R 몫이다.
+- v1.32 (2026-09-25):
+  - **깊이 래스터 서비스 타일 아틀라스(5.3, S 요청 04a8f70)**: `DepthRasterRequest::atlasSlots/atlasTilesPerRow`. 깊이 대상은 D32 또는 D16이다. 컬링은 아틀라스 모드에서 켜진 타일마다 쌍 하나를 내고(`CULL_VIEW_TILE_SINGLE`), 메시 셰이더 변형 `DepthRaster.ms.TILE2`가 타일을 슬롯으로 옮긴다. `RenderGraph::desc(TextureRef)`를 기록 시점에 쓸 수 있다(코어). [실측] `raster_service_tile_atlas` 통과, 시각화 테스트 7/7. 새 커널의 첫 하드웨어 실행은 GPU 잠금 안(correctness)에서 했다.
+  - 바람 메타: S가 설계 개정 14.2 ④(한 경로: 매 프레임 전부 다시 그리기, 바람 메타 삭제)를 정하기 전까지 V는 따로 만들지 않는다. 필요하면 `[earlydepthstencil]` 픽셀 커널로 지금 쓸 수 있다.
 - v1.31 (2026-09-25):
   - **조명 그룹과 밴드 도구(4절, M·S 요청)**: `tracks::shadowVisibilityPasses/shadingPasses/shadingComposite` 선언(`Tracks.h`)과 코어 스텁, `PassBand::lagged(rows)`, `passBand(height, count, index)`. FrameRenderer 전환은 S·M 구현 뒤에 한다. [실측] 34/34.
   - **`output.band_pixels` 기본 0 = 한 밴드(M 실측 순손실 6.725 → 6.800 ms)**. 틀과 도구는 그대로 두고, 셰이딩이 바닥에 가까워지면 다시 잰다.

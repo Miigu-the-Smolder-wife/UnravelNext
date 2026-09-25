@@ -31,6 +31,7 @@ struct CullView
 
 #define CULL_VIEW_OCCLUSION 1u   // HiZ occlusion (two-phase) for this view
 #define CULL_VIEW_CULL_BACK 2u   // back faces of one-sided materials are culled (cone test allowed)
+#define CULL_VIEW_TILE_SINGLE 4u // tile-local pairs are single tiles (DepthRasterRequest atlas mode: one slot per tile)
 
 // Cull state words (RWByteAddressBuffer, 4 B each).
 #define VS_NODE_WRITE 0u
@@ -229,7 +230,8 @@ struct TileMasks
 
 // Visits the set tiles of the range [a, b] of view 'view': coarse cells with a set bit, then the row segments of each
 // such cell. Pairs (tile-local raster, DepthRasterRequest::tileLocal) are the runs of consecutive set tiles of a row
-// segment, or one pair for the whole range when every tile of it is set.
+// segment, or one pair for the whole range when every tile of it is set; with CULL_VIEW_TILE_SINGLE (atlas mode) every
+// set tile is a pair of its own.
 //   TILE_VISIT_COUNT: returns the pair count (0 = no set tile under the range) and sets 'whole'.
 //   TILE_VISIT_WRITE: writes the pairs counted before ('whole' as counted): pair j = uint3(visibleIndex, tile rectangle)
 //                     at pairBase + j, and list slot + j points at it (entries at or beyond capacity are dropped: the
@@ -255,6 +257,7 @@ uint tileVisit(uint mode, CullView v, uint view, TileMasks masks, uint2 a, uint2
     }
     ByteAddressBuffer mask = ResourceDescriptorHeap[masks.fine];
     ByteAddressBuffer coarse = ResourceDescriptorHeap[masks.coarse];
+    const bool single = (v.flags & CULL_VIEW_TILE_SINGLE) != 0;
     const uint coarseX = (v.tilesX + 7) / 8;
     const uint2 ca = a >> 3, cb = b >> 3;
     uint set = 0, pairs = 0;
@@ -280,19 +283,19 @@ uint tileVisit(uint mode, CullView v, uint view, TileMasks masks, uint2 a, uint2
                         if (mode == TILE_VISIT_COUNT)
                         {
                             set += countbits(m);
-                            pairs += countbits(starts);
+                            pairs += countbits(single ? m : starts);
                         }
                         else
                         {
                             const uint next = tileMaskBits(mask, v.cullMaskOffset, w + 1, l, h);
-                            const uint ends = m & ~((m >> 1) | (next << 31));  // set bits whose successor is clear
+                            const uint ends = single ? m : m & ~((m >> 1) | (next << 31));  // set bits whose successor is clear
                             uint events = starts | ends;
                             while (events != 0)
                             {
                                 const uint bit = firstbitlow(events);
                                 events &= events - 1;
                                 const uint x = w * 32 + bit - y * v.tilesX;
-                                if (starts & (1u << bit)) start = x;
+                                if (single || (starts & (1u << bit)) != 0) start = x;
                                 if (ends & (1u << bit))
                                 {
                                     if (pairBase + pairs < capacity && slot + pairs < capacity)
@@ -314,7 +317,7 @@ uint tileVisit(uint mode, CullView v, uint view, TileMasks masks, uint2 a, uint2
     }
     if (mode == TILE_VISIT_COUNT)
     {
-        whole = set == (b.x - a.x + 1) * (b.y - a.y + 1);
+        whole = !single && set == (b.x - a.x + 1) * (b.y - a.y + 1);
         if (whole) pairs = 1;
     }
     return pairs;

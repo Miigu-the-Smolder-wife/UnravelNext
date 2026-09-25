@@ -184,6 +184,7 @@ public:
     // Transient resources: memory and views come from the graph; the lifetime spans the first to the last live use.
     TextureRef createTexture(const TextureDesc& desc);
     BufferRef createBuffer(const BufferDesc& desc);
+    const TextureDesc& desc(TextureRef t) const;  // at record time (e.g. a service choosing its pipeline by format)
 
     void addPass(std::string_view name, QueueType queue, const SetupFn& setup, ExecuteFn execute);
 
