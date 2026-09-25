@@ -1,0 +1,7 @@
+{
+ "adapter": "WARP", "driver": "", "agility_sdk": 618, "resolution": "256x144", "reps": 1, "timestamp": "20260925_163939",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+07, "unit": "Hz", "note": ""},
+  {"section": "vsm", "name": "6x6 pages, 64 tris/page, edge 8 px: UAV InterlockedMax into the raw pool (current S path)", "value": 4.0048, "unit": "ms", "note": "0.073728 M texel fragments, 54.318576 ns/fragment, 111244.444444 ns/page"}
+ ]
+}

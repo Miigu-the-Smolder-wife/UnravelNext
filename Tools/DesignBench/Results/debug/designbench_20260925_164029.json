@@ -1,0 +1,10 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "resolution": "256x144", "reps": 1, "timestamp": "20260925_164029",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "vsm", "name": "6x6 pages, 64 tris/page, edge 8 px: UAV InterlockedMax into the raw pool (current S path)", "value": 0.007168, "unit": "ms", "note": "0.073728 M texel fragments, 0.097222 ns/fragment, 199.111111 ns/page"},
+  {"section": "vsm", "name": "6x6 pages, 64 tris/page, edge 8 px: hardware depth (ROP) into a D32 page atlas, no pixel shader", "value": 0.003072, "unit": "ms", "note": "0.041667 ns/fragment (c_rop), 85.333333 ns/page"},
+  {"section": "vsm", "name": "6x6 pages, 64 tris/page, edge 8 px: encode atlas -> pool (4 B read + 4 B write per texel) + 8^2/32^2 block min/max", "value": 0.014336, "unit": "ms", "note": "0.024306 ns/texel, 329.142857 GB/s, 398.222222 ns/page"},
+  {"section": "vsm", "name": "6x6 pages, 64 tris/page, edge 8 px: ROP + encode total", "value": 0.017408, "unit": "ms", "note": "2.428571 x the UAV path"}
+ ]
+}

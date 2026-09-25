@@ -1,0 +1,11 @@
+D3D12 debug layer enabled + GPU-based validation
+Adapter: NVIDIA GeForce RTX 4080, driver 32.0.15.9186, D3D12Core: C:\Users\USER\UnravelNext\Tools\DesignBench\build\D3D12\D3D12Core.dll
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64, shaders: C:/Users/USER/UnravelNext/Tools/DesignBench/Bench/shaders, resolution 256x144, reps 1
+  [env] timestamp frequency                                                    1000000000.0000 Hz       
+  d3d12[4]: Device Debug Layer Startup Options: GPU-Based Validation is enabled (disabled by default). This results in new validation not possible during API calls on the CPU, by creating patched shaders that have validation added directly to the shader. However, it can slow things down a lot, especially for applications with numerous PSOs. Time to see the first render frame may take several minutes.
+
+== VSM dirty-page raster: UAV InterlockedMax pool vs hardware depth atlas + encode/pagemax pass (after 1.5 s warm-up)
+  [vsm] 6x6 pages, 64 tris/page, edge 8 px: UAV InterlockedMax into the raw pool (current S path)       0.0072 ms       0.073728 M texel fragments, 0.097222 ns/fragment, 199.111111 ns/page
+  [vsm] 6x6 pages, 64 tris/page, edge 8 px: hardware depth (ROP) into a D32 page atlas, no pixel shader       0.0031 ms       0.041667 ns/fragment (c_rop), 85.333333 ns/page
+  [vsm] 6x6 pages, 64 tris/page, edge 8 px: encode atlas -> pool (4 B read + 4 B write per texel) + 8^2/32^2 block min/max       0.0143 ms       0.024306 ns/texel, 329.142857 GB/s, 398.222222 ns/page
+  [vsm] 6x6 pages, 64 tris/page, edge 8 px: ROP + encode total                       0.0174 ms       2.428571 x the UAV path
