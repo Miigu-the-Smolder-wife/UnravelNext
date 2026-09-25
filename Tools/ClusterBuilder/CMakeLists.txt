@@ -1,6 +1,6 @@
 # Owner: V (core session). Added automatically (cmake/Modules.cmake) when track V is enabled.
 # Cluster LOD builder: meshes -> clusters, LOD DAG, hierarchy nodes, LOD cuts, minimum feature widths (ClusterData).
-add_library(unx_clusterbuilder STATIC src/ClusterBuilder.cpp src/FeatureWidth.cpp)
+add_library(unx_clusterbuilder STATIC src/ClusterBuilder.cpp src/FeatureWidth.cpp src/BrickBaker.cpp)
 unx_target_defaults(unx_clusterbuilder)
 target_include_directories(unx_clusterbuilder PUBLIC include PRIVATE src)
 target_link_libraries(unx_clusterbuilder PUBLIC unx_render unx_scene unx_core PRIVATE Unx::meshoptimizer)

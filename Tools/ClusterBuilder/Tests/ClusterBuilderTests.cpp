@@ -4,6 +4,7 @@
 //   unx_test_clusterbuilder [filter]
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/clusterbuilder/ClusterHierarchy.h"
+#include "unx/clusterbuilder/Bricks.h"
 #include "unx/core/Config.h"
 #include "unx/core/Log.h"
 #if UNX_HAS_SCENEGEN
@@ -11,6 +12,8 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
+#include <filesystem>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -530,6 +533,252 @@ UNX_TEST(cluster_fill_of_scene_meshes)
              st.clusterTriangles);
     }
 #endif
+}
+
+namespace
+{
+// A clump of n flat blades (width 4 mm, height 0.3 m, 3 segments, random yaw and lean) in a 0.3 m disc: separate
+// components, the thin geometry band C bricks are for. Material 0: opaque; the optional alpha texture is applied to
+// material 1 when 'alphaValue' >= 0.
+scene::Scene bladeClump(uint32_t blades, uint32_t seed, int alphaValue = -1)
+{
+    scene::Scene s;
+    scene::Mesh m;
+    m.name = "clump";
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+    for (uint32_t b = 0; b < blades; ++b)
+    {
+        const float r = 0.15f * std::sqrt(uni(rng)), phi = 6.2831853f * uni(rng), yaw = 6.2831853f * uni(rng), lean = 0.4f * uni(rng);
+        const float3 base{ r * std::cos(phi), 0, r * std::sin(phi) };
+        const float3 side{ std::cos(yaw) * 0.002f, 0, std::sin(yaw) * 0.002f };
+        const float3 up = normalize(float3{ std::cos(yaw + 1.5708f) * lean, 1, std::sin(yaw + 1.5708f) * lean });
+        const uint32_t first = (uint32_t)m.positions.size();
+        for (uint32_t k = 0; k <= 3; ++k)
+        {
+            const float3 c = base + up * (0.1f * k);
+            for (int sgn : { -1, 1 })
+            {
+                m.positions.push_back(c + side * (float)sgn);
+                m.normals.push_back(normalize(cross(side, up)));
+                m.uv0.push_back({ sgn < 0 ? 0.0f : 1.0f, k / 3.0f });
+            }
+        }
+        for (uint32_t k = 0; k < 3; ++k)
+        {
+            const uint32_t i = first + 2 * k;
+            m.indices.insert(m.indices.end(), { i, i + 1, i + 3, i, i + 3, i + 2 });
+        }
+    }
+    const uint32_t material = alphaValue >= 0 ? 1u : 0u;
+    m.submeshes.push_back({ 0, (uint32_t)m.indices.size(), material });
+    s.meshes.push_back(std::move(m));
+    s.materials.resize(2);
+    if (alphaValue >= 0)
+    {
+        scene::Texture t;
+        t.width = t.height = 4;
+        t.texels.assign(4 * 4 * 4, 255);
+        for (size_t i = 3; i < t.texels.size(); i += 4) t.texels[i] = (uint8_t)alphaValue;
+        s.textures.push_back(t);
+        s.materials[1].baseColorTexture = 0;
+        s.materials[1].alphaCutoff = 0.5f;
+        s.materials[1].twoSided = true;
+    }
+    return s;
+}
+
+// Transmittance of a ray through the brick model of level 'level': the product over the voxels it crosses of
+// exp(-sigma(w) x length) (the march S's receiver function and the camera march implement).
+float marchTransmittance(const BrickData& d, uint32_t meshIndex, uint32_t level, float3 o, float3 w, float tMax, bool trilinear = false)
+{
+    const gpu::BrickMesh& bm = d.meshes[meshIndex];
+    const gpu::BrickLevel& lv = d.levels[bm.firstLevel + level];
+    const float voxel = lv.voxel;
+    const uint32_t edge = 16;
+    double tau = 0;
+    const int n = 4096;  // fine sampling of the segment (the test's reference march, not the GPU's DDA)
+    const float dt = tMax / n;
+    auto sigmaAt = [&](int vx, int vy, int vz) -> double {  // extinction of one voxel along w (0 outside)
+        if (vx < 0 || vy < 0 || vz < 0) return 0;
+        const uint32_t bx = vx / edge, by = vy / edge, bz = vz / edge;
+        if (bx >= lv.dims[0] || by >= lv.dims[1] || bz >= lv.dims[2]) return 0;
+        const uint32_t brick = d.grid[lv.gridOffset + bx + lv.dims[0] * (by + lv.dims[1] * bz)];
+        if (brick == UINT32_MAX) return 0;
+        const uint32_t local = (vx % edge) + edge * ((vy % edge) + edge * (vz % edge));
+        const uint8_t q = d.density[(size_t)brick * edge * edge * edge + local];
+        if (q == 0) return 0;
+        const uint8_t* c = &d.shape[((size_t)brick * edge * edge * edge + local) * 6];
+        const double sx = c[0] / 255.0, sy = c[1] / 255.0, sz = c[2] / 255.0;
+        const double rxy = c[3] / 255.0 * 2 - 1, rxz = c[4] / 255.0 * 2 - 1, ryz = c[5] / 255.0 * 2 - 1;
+        const double quad = sx * sx * w.x * w.x + sy * sy * w.y * w.y + sz * sz * w.z * w.z +
+                            2 * (rxy * sx * sy * w.x * w.y + rxz * sx * sz * w.x * w.z + ryz * sy * sz * w.y * w.z);
+        return brickDecodeDepth(q) / voxel * std::sqrt(std::max(quad, 0.0));
+    };
+    for (int i = 0; i < n; ++i)
+    {
+        const float3 p = o + w * ((i + 0.5f) * dt) - bm.boundsMin;
+        if (!trilinear)
+        {
+            tau += sigmaAt((int)std::floor(p.x / voxel), (int)std::floor(p.y / voxel), (int)std::floor(p.z / voxel)) * dt;
+            continue;
+        }
+        const float fx = p.x / voxel - 0.5f, fy = p.y / voxel - 0.5f, fz = p.z / voxel - 0.5f;
+        const int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy), z0 = (int)std::floor(fz);
+        const float ax = fx - x0, ay = fy - y0, az = fz - z0;
+        double sigma = 0;
+        for (int c = 0; c < 8; ++c)
+        {
+            const float wgt = ((c & 1) ? ax : 1 - ax) * ((c & 2) ? ay : 1 - ay) * ((c & 4) ? az : 1 - az);
+            if (wgt > 0) sigma += wgt * sigmaAt(x0 + (c & 1), y0 + ((c >> 1) & 1), z0 + ((c >> 2) & 1));
+        }
+        tau += sigma * dt;
+    }
+    return (float)std::exp(-tau);
+}
+
+// Exact: does the segment o + t w, t in (0, tMax), miss every triangle?
+bool clearPath(const scene::Mesh& m, float3 o, float3 w, float tMax)
+{
+    for (size_t i = 0; i + 2 < m.indices.size(); i += 3)
+    {
+        const float3 a = m.positions[m.indices[i]], b = m.positions[m.indices[i + 1]], c = m.positions[m.indices[i + 2]];
+        const float3 e1 = b - a, e2 = c - a, p = cross(w, e2);
+        const float det = dot(e1, p);
+        if (std::fabs(det) < 1e-20f) continue;
+        const float inv = 1 / det;
+        const float3 s0 = o - a;
+        const float u = dot(s0, p) * inv;
+        if (u < 0 || u > 1) continue;
+        const float3 q = cross(s0, e1);
+        const float v = dot(w, q) * inv;
+        if (v < 0 || u + v > 1) continue;
+        const float t = dot(e2, q) * inv;
+        if (t > 0 && t < tMax) return false;
+    }
+    return true;
+}
+} // namespace
+
+UNX_TEST(brick_depth_encoding)
+{
+    // Log coding of a voxel's optical depth: monotone, round trip within half a step (2^(1/48) - 1 = 1.45 %).
+    for (int q = 1; q < 255; ++q) CHECK(brickDecodeDepth((uint8_t)q) < brickDecodeDepth((uint8_t)(q + 1)));
+    for (float tau = 0.006f; tau < 8; tau *= 1.07f)
+    {
+        const float back = brickDecodeDepth(brickEncodeDepth(tau));
+        CHECK(std::fabs(back / tau - 1) <= 0.0146f);
+    }
+    CHECK(brickEncodeDepth(0) == 0 && brickDecodeDepth(0) == 0 && brickEncodeDepth(100) == 255);
+}
+
+UNX_TEST(brick_bake_of_a_blade_clump)
+{
+    // Bake, cache round trip, cut-out alpha, and the model against exact ray casting: ray bundles of one voxel's width
+    // (the footprint the march is used at) through the clump, mean transmittance of the bundle, per level.
+    QualityConfig q = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+    BrickSettings bs = BrickSettings::fromQuality(q);
+    bs.maxFeatureWidth = 1.0f;  // the clump's blades are 4 mm wide
+    bs.residualMax = 0;         // reported here; the gate value is set from these measurements
+    const scene::Scene s = bladeClump(60, 7);
+    std::vector<BrickMeshStats> st;
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::filesystem::path cache = std::filesystem::temp_directory_path() / "unx_brick_test_cache";
+    std::error_code ec;
+    std::filesystem::remove_all(cache, ec);
+    const BrickData d = bakeBricks(s, bs, cache.string(), &st);
+    const double bakeMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    CHECK(st.size() == 1 && d.meshOf[0] == 0 && !d.headers.empty());
+    const BrickMeshStats& m = st[0];
+    logf("    clump of 60 blades: width %.4f m, v0 %.4f m, %u levels, %u bricks, %u voxels; residual P99/max r %.4f/%.4f, half %.4f/%.4f, brick shape %.4f/%.4f; "
+         "bake %.0f ms\n",
+         m.featureWidth, m.voxel0, m.levels, m.bricks, m.voxels, m.rP99, m.rMax, m.rHalfP99, m.rHalfMax, m.rBrickP99, m.rBrickMax, bakeMs);
+
+    // Cache: the second bake loads the file and is byte-identical.
+    std::vector<BrickMeshStats> st2;
+    const BrickData d2 = bakeBricks(s, bs, cache.string(), &st2);
+    CHECK(st2.size() == 1 && st2[0].cached);
+    CHECK(d2.grid == d.grid && d2.density == d.density && d2.shape == d.shape && d2.occupancy == d.occupancy);
+    CHECK(d2.headers.size() == d.headers.size() && std::memcmp(d2.headers.data(), d.headers.data(), d.headers.size() * sizeof(gpu::BrickHeader)) == 0);
+    std::filesystem::remove_all(cache, ec);
+
+    // Cut-out: a texture with alpha 0 under the cutoff leaves nothing to bake; alpha 255 bakes like opaque.
+    std::vector<BrickMeshStats> cut, solid;
+    CHECK(bakeBricks(bladeClump(60, 7, 0), bs, "", &cut).headers.empty());
+    CHECK(bakeBricks(bladeClump(60, 7, 255), bs, "", &solid).headers.size() == d.headers.size());
+
+    // Model against exact: per clump density and level, 200 bundles of 8 x 8 parallel rays across 1 or 2 voxels,
+    // random directions and offsets through the clump's middle; mean transmittance of the bundle, modelled vs exact.
+    for (uint32_t blades : { 60u, 240u, 960u })
+    {
+    const scene::Scene sd = bladeClump(blades, 7);
+    const BrickData dd = bakeBricks(sd, bs, "", nullptr);
+    const scene::Mesh& mesh = sd.meshes[0];
+    logf("    clump of %u blades:\n", blades);
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+    for (uint32_t variant = 0; variant < 2; ++variant)
+    for (uint32_t level = 0; level < dd.levels.size(); ++level)
+    {
+        const float ratio = (float)(1u << (variant % 3));  // bundle width / voxel
+        const bool trilinear = variant >= 3;
+        const float voxel = dd.levels[level].voxel;
+        std::vector<float> err;
+        double meanExact = 0, signedSum = 0;
+        double byVoxels[4] = {}, countByVoxels[4] = {};  // |error| by occupied voxels crossed: 1, 2-3, 4-7, 8+
+        for (int bundle = 0; bundle < 200; ++bundle)
+        {
+            const float z = uni(rng) * 2 - 1, a = 6.2831853f * uni(rng);
+            const float3 w{ std::sqrt(1 - z * z) * std::cos(a), z, std::sqrt(1 - z * z) * std::sin(a) };
+            const float3 helper = std::fabs(w.x) < 0.9f ? float3{ 1, 0, 0 } : float3{ 0, 1, 0 };
+            const float3 u = normalize(cross(helper, w)), v = cross(w, u);
+            const float3 centre{ (uni(rng) - 0.5f) * 0.2f, 0.05f + uni(rng) * 0.2f, (uni(rng) - 0.5f) * 0.2f };
+            const float reach = 1.0f;
+            double exact = 0, model = 0;
+            for (int i = 0; i < 8; ++i)
+                for (int j = 0; j < 8; ++j)
+                {
+                    const float3 o = centre + u * ((i + 0.5f) / 8 - 0.5f) * voxel * ratio + v * ((j + 0.5f) / 8 - 0.5f) * voxel * ratio - w * reach;
+                    exact += clearPath(mesh, o, w, 2 * reach) ? 1 : 0;
+                    model += marchTransmittance(dd, 0, level, o, w, 2 * reach, trilinear);
+                }
+            exact /= 64;
+            model /= 64;
+            meanExact += exact;
+            err.push_back((float)std::fabs(model - exact));
+            signedSum += model - exact;
+            // Occupied voxels the bundle's centre ray crosses (the path's composition length).
+            uint32_t crossed = 0;
+            {
+                const gpu::BrickMesh& bm = dd.meshes[0];
+                const gpu::BrickLevel& lv = dd.levels[bm.firstLevel + level];
+                int last = -1;
+                for (int k = 0; k < 4096; ++k)
+                {
+                    const float3 p = centre - w * reach + w * ((k + 0.5f) * 2 * reach / 4096) - bm.boundsMin;
+                    const int vx = (int)std::floor(p.x / lv.voxel), vy = (int)std::floor(p.y / lv.voxel), vz = (int)std::floor(p.z / lv.voxel);
+                    if (vx < 0 || vy < 0 || vz < 0 || (uint32_t)vx / 16 >= lv.dims[0] || (uint32_t)vy / 16 >= lv.dims[1] || (uint32_t)vz / 16 >= lv.dims[2]) continue;
+                    const int id = vx + 4096 * (vy + 4096 * vz);
+                    if (id == last) continue;
+                    last = id;
+                    const uint32_t brick = dd.grid[lv.gridOffset + vx / 16 + lv.dims[0] * (vy / 16 + lv.dims[1] * (vz / 16))];
+                    if (brick != UINT32_MAX && dd.density[(size_t)brick * 4096 + (vx % 16) + 16 * ((vy % 16) + 16 * (vz % 16))] != 0) ++crossed;
+                }
+            }
+            const int bin = crossed <= 1 ? 0 : crossed <= 3 ? 1 : crossed <= 7 ? 2 : 3;
+            byVoxels[bin] += std::fabs(model - exact);
+            countByVoxels[bin] += 1;
+        }
+        std::sort(err.begin(), err.end());
+        double mean = 0;
+        for (float e : err) mean += e;
+        logf("    %s bundle %gx: level %u (voxel %.4f m): bundle transmittance |model - exact| mean %.4f, P90 %.4f, P99 %.4f, max %.4f; signed mean %+.4f (mean exact T %.3f); "
+             "by occupied voxels crossed 1 / 2-3 / 4-7 / 8+: %.3f (%g) / %.3f (%g) / %.3f (%g) / %.3f (%g)\n",
+             trilinear ? "trilinear" : "nearest  ", ratio, level, voxel, mean / err.size(), err[err.size() * 9 / 10], err[err.size() * 99 / 100], err.back(), signedSum / err.size(), meanExact / 200,
+             countByVoxels[0] ? byVoxels[0] / countByVoxels[0] : 0.0, countByVoxels[0], countByVoxels[1] ? byVoxels[1] / countByVoxels[1] : 0.0, countByVoxels[1],
+             countByVoxels[2] ? byVoxels[2] / countByVoxels[2] : 0.0, countByVoxels[2], countByVoxels[3] ? byVoxels[3] / countByVoxels[3] : 0.0, countByVoxels[3]);
+    }
+    }
 }
 
 int main(int argc, char** argv)

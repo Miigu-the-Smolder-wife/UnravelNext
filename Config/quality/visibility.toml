@@ -22,6 +22,10 @@ coverage_layer = false            # main view: bands B and C drawn in the covera
                                   # them in the vis buffer, which loses sub-pixel geometry. true once M composites the
                                   # coverage fragments (without it thin geometry would leave M's image)
 brick_resolution = 16             # band C voxel brick edge
+brick_max_feature_width = 0.0     # m: meshes whose thin width (area-weighted P10 of component widths) is at most this get
+                                  # band C bricks (Bricks.h); 0 = none until the bake and the march are gated
+brick_bake_rays = 64              # rays per voxel cross-section and direction (13 directions) of the transmittance bake
+brick_residual_max = 0.05         # largest allowed residual P99 of a mesh's voxels (|exp(-l sigma) - T_exact|), gate 1
 strands_per_pixel_max = 2         # hair/grass LOD: blades or strands per pixel width before switching to bricks
 # Capacities of one cull run (a view or a raster-service request). Exceeding one drops geometry and is reported in
 # unx::visibility::Stats::overflow (tests and gates fail on it); they are sizes, not quality settings.
