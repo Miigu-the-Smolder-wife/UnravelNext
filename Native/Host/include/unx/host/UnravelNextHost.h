@@ -301,9 +301,9 @@ UNX_API int32_t UNX_CALL UnxFrameSetSkeletons(UnxRenderer r, uint32_t count, con
 UNX_API int32_t UNX_CALL UnxFrameSetInstanceVisible(UnxRenderer r, uint32_t instance, uint32_t visible);
 // Sun of the following frames (time of day): unit direction ground -> sun, lux at the top of the atmosphere.
 UNX_API int32_t UNX_CALL UnxFrameSetSun(UnxRenderer r, const float direction[3], float illuminance, const float color[3], float angularRadius);
-// Sun and atmosphere of the following frames (time of day, weather); the atmosphere track rebuilds its LUTs when they
-// change. The wind fields must equal the committed wind: a wind change after commit is refused until the deformation
-// bounds have a wind-change contract (Docs/Design/Requests/20260925_I_wind_change.md).
+// Sun, atmosphere and wind of the following frames (time of day, weather); the atmosphere track rebuilds its LUTs when
+// they change. Wind changes follow INTERFACES 6.4 (v1.23): the wind model is memoryless and the tracks bound a change by
+// its endpoints, so a host may change the wind every frame.
 UNX_API int32_t UNX_CALL UnxFrameSetEnvironment(UnxRenderer r, const UnxEnvironmentDesc* desc);
 
 // Snapshot of one frame's inputs and the changes set since the previous queue; *ticket goes into UNX_EVENT_RENDER's

@@ -522,10 +522,14 @@ int main(int argc, char** argv)
             put3(env.windDirection, s.windDirection);
             env.windSpeed = s.windSpeed;
             api.ok(api.UnxFrameSetEnvironment(r, &env), "UnxFrameSetEnvironment");
-            // A wind change after commit is refused (no wind-change contract for the deformation bounds yet).
+            // Then the wind turns and strengthens (INTERFACES 6.4 v1.23); a malformed wind is refused.
             UnxEnvironmentDesc windy = env;
+            put3(windy.windDirection, { 0.6f, 0, -0.8f });
             windy.windSpeed = s.windSpeed + 3;
-            if (api.UnxFrameSetEnvironment(r, &windy) == UNX_OK) fail("UnxFrameSetEnvironment accepted a wind change after commit");
+            api.ok(api.UnxFrameSetEnvironment(r, &windy), "UnxFrameSetEnvironment (wind)");
+            UnxEnvironmentDesc bad = windy;
+            bad.windSpeed = -1;
+            if (api.UnxFrameSetEnvironment(r, &bad) == UNX_OK) fail("UnxFrameSetEnvironment accepted a negative wind speed");
             // A pose buffer of the wrong length is refused before anything is recorded.
             if (api.UnxFrameSetSkeletons(r, 2, skeletons, poseA, 3) == UNX_OK) fail("UnxFrameSetSkeletons accepted a short pose buffer");
             const std::filesystem::path saved = bin / "host_abi_live.unxscene";
@@ -539,9 +543,10 @@ int main(int argc, char** argv)
                     for (int e = 0; e < 12 && ok; ++e) ok = live.skeletons[skeletons[k]].jointToModel[j].m[e / 4][e % 4] == poseB[12 * (2 * k + j) + e];
             ok = ok && live.sun.illuminance == 95000 && live.sun.direction.y == 0.6f && live.sun.direction.z == 0.8f;
             ok = ok && live.atmosphere.mieScattering.x == 2.1e-5f && live.atmosphere.rayleighScaleHeight == env.rayleighScaleHeight;
+            ok = ok && live.windSpeed == windy.windSpeed && live.windDirection.x == 0.6f && live.windDirection.z == -0.8f;
             // Instance 1 was hidden: the saved list is the host's list without it (instance 2 comes next).
             ok = ok && live.instances[1].mesh == s.instances[2].mesh;
-            logf("live scene save: %zu of %zu instances (1 hidden), newest transform, bulk poses, sun and atmosphere: %s\n", live.instances.size(), s.instances.size(),
+            logf("live scene save: %zu of %zu instances (1 hidden), newest transform, bulk poses, sun, atmosphere and wind: %s\n", live.instances.size(), s.instances.size(),
                  ok ? "as set" : "DIFFERS");
             if (!ok) ++failures;
         }

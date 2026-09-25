@@ -394,15 +394,15 @@ UNX_API int32_t UNX_CALL UnxFrameSetEnvironment(UnxRenderer r, const UnxEnvironm
         requireStruct(d, "UnxEnvironmentDesc");
         auto h = find(r);
         if (!h->committed()) fail("UnxFrameSetEnvironment changes a committed scene; before UnxSceneCommit use UnxSceneSetEnvironment");
-        const scene::Scene& s = h->scene();  // wind is never written after commit
-        const float3 wind = f3(d->windDirection);
-        if (wind.x != s.windDirection.x || wind.y != s.windDirection.y || wind.z != s.windDirection.z || d->windSpeed != s.windSpeed)
-            fail("the scene wind cannot change after commit yet: the deformation bounds (INTERFACES 6.4) assume a constant wind "
-                 "(request Docs/Design/Requests/20260925_I_wind_change.md); pass the committed wind");
         const scene::Sun sun = sunOf(d);
         const float len = length(sun.direction);
         if (std::abs(len - 1.0f) > 1e-3f) fail("sun direction is not unit length (%f)", len);
-        h->setEnvironment(sun, atmosphereOf(d), std::nullopt);
+        // Wind changes after commit follow INTERFACES 6.4 v1.23: the wind model is memoryless, and the tracks judge a
+        // change by its endpoints (windChangeBound); the scene wind of the frame is all they need.
+        const float3 wind = f3(d->windDirection);
+        if (!(d->windSpeed >= 0) || (d->windSpeed > 0 && std::abs(length(wind) - 1.0f) > 1e-3f))
+            fail("wind needs a speed >= 0 and a unit direction (speed %f, |direction| %f)", d->windSpeed, length(wind));
+        h->setEnvironment(sun, atmosphereOf(d), FramePacket::Wind{ wind, d->windSpeed });
     });
 }
 

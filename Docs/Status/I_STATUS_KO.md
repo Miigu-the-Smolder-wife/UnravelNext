@@ -98,7 +98,7 @@ Agility 1.618.5 기능은 1.618.1에서도 모두 있다(SDK 618).
 - 시간대·날씨(ABI 4): `UnxFrameSetEnvironment`가 다음 프레임부터의 태양과 대기를 바꾼다(태양만이면 `UnxFrameSetSun`). 제출 스레드가 프레임
   기록 전에 `GpuScene::source()`의 태양·대기를 고치고, 대기 트랙은 파라미터·태양이 바뀌면 LUT를 다시 만든다. 떨어진 패킷의 환경은 다음
   패킷으로 넘어가고 현재 장면 저장에도 들어간다. 바람은 커밋 뒤 바꾸면 거부한다: 변형 상한(INTERFACES 6.4)이 바람 고정을 전제한다.
-  코어에 `Requests/20260925_I_wind_change.md`(바람 revision과 바람 변화까지 담는 변화 인자)를 요청했다.
+  코어에 `Requests/20260925_I_wind_change.md`를 요청했고 v1.23으로 반영됐다. S의 페이지 규칙 뒤 바람 거부를 풀었다(프레임마다 바람도 바뀐다).
   정확성 시험(현재 장면 저장에 환경·바람 거부 추가)은 게임이 끝난 뒤 돌린다.
   `UnxFrameQueue`는 카메라·시각·출력 텍스처를 스냅숏으로 떠서 티켓을 돌려준다. `UNX_EVENT_RENDER`(Unity 제출 스레드)가 그 티켓의
   프레임을 `FrameRenderer`로 기록한다. 실행은 `Queue::setExecuteHook`(코어 v1.9)으로 Unity의 `ExecuteCommandList`에 보내며, 이때 출력의
@@ -341,7 +341,7 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
   기판 1.5 / 2)은 모두 담긴다. 이전 엔진은 기판 η·κ가 RGB라 float3를 제안했다(금속 기판의 색). 이전 엔진은 막 바깥을 늘 공기로 봤고 RGB 세 대역
   평균 Airy를 썼으므로 외형이 달라질 수 있다(정의는 설계대로). 설계 밖 이전 기능(유전체 경계 막, sheen, 이방성, 디테일 층)은 기록만 했다.
   I 몫: `UnxMaterialDesc` version 2(필드 추가, v1 152 B도 받음), `.unxscene` v2 적재·내보내기.
-- `20260925_I_wind_change.md`(대기): 커밋 뒤 장면 바람 변경의 신호(revision)와 변화 상한. 그때까지 호스트는 바람 변경을 거부한다.
+- `20260925_I_wind_change.md`(반영): 코어 v1.23(bf897d9), S의 페이지 규칙(그린 순간의 바람을 페이지 메타에 기록, `windChangeBound` 판정)이 들어간 뒤 `UnxFrameSetEnvironment`의 바람 거부를 풀었다. 이제 바람 속도 >= 0과 단위 방향만 검사한다.
   S 검토(bbf2575, `20260925_S_wind_change_review.md`): 구조에 동의한다. windOffset이 무기억 상태 함수라 페이지를 그린 순간과 지금의
   바람 끝점만 비교하면 되고(P3 모델도 무기억이어야 한다는 조건을 계약에 넣자는 제안), revision 없이 페이지 메타에 그 순간의 바람을 저장한다.
   상한은 I 초안보다 좁은 K·[s1²·0.4·min(2, 1.7|Δt|) + |s1² − s0²| + 2 sin(Δθ/2)·s0²]를 제안했다. R도 같은 의견이다(revision 불필요;
