@@ -102,7 +102,7 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
     section(h.surfaces, h.surface_count, sizeof(NV_StreamSurface), "surfaces");
     section(h.restore, h.restore_count, sizeof(NV_StreamParticle), "restore");
     section(h.bodies, h.body_count, sizeof(NV_StreamBody), "bodies");
-    if (h.slot_capacity == 0) fail("FX particles: slot capacity 0");
+    section(h.dynamic_surfaces, h.dynamic_surface_count, sizeof(NV_StreamSurface), "dynamic surfaces");
     if (h.alive_after > h.slot_capacity) fail("FX particles: alive_after %u > capacity %u", h.alive_after, h.slot_capacity);
     if (h.restore_count > h.slot_capacity) fail("FX particles: %u restore records > capacity %u", h.restore_count, h.slot_capacity);
     if (h.depth[0] != 0 || h.depth[NV_STREAM_MAX_DEPTH + 1] != h.spawn_count) fail("FX particles: spawn depth ranges do not cover the records");
@@ -151,6 +151,9 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
         for (uint32_t k = 0; k < h.surface_count; ++k)
             if (surfaces[k].body != NV_STREAM_NONE) bodyMax = std::max(bodyMax, surfaces[k].body + 1);
     }
+    const auto* dynamicRows = reinterpret_cast<const NV_StreamSurface*>(packet + h.dynamic_surfaces);
+    for (uint32_t k = 0; k < h.dynamic_surface_count; ++k)
+        if (dynamicRows[k].body != NV_STREAM_NONE) bodyMax = std::max(bodyMax, dynamicRows[k].body + 1);
     if (bodyMax > h.body_count) fail("FX particles: surfaces reference body %u, the packet has %u bodies", bodyMax - 1, h.body_count);
     (void)programs;
 }
@@ -172,10 +175,13 @@ struct ParticleSystem::Impl
     Buf spawns{ "fx.spawns", sizeof(NV_StreamSpawn) }, explicitBirths{ "fx.explicitBirths", sizeof(NV_StreamExplicitBirth) };
     Buf fields{ "fx.fields", sizeof(NV_StreamField) }, worldFields{ "fx.worldFields", sizeof(NV_StreamWorldField) };
     Buf surfaces{ "fx.surfaces", sizeof(NV_StreamSurface) }, restore{ "fx.restore", sizeof(NV_StreamParticle) }, slotBase{ "fx.slotBase", 4 };
+    Buf dynamicSurfaces{ "fx.dynamicSurfaces", sizeof(NV_StreamSurface) };
     Buf bodies{ "fx.bodies", sizeof(NV_StreamBody) }, tickSurfaces{ "fx.tickSurfaces", sizeof(NV_StreamSurface) };
     Buf ribbonPoints{ "fx.ribbonPoints", 32 }, ribbonLinks{ "fx.ribbonLinks", 4 }, ribbonVertices{ "fx.ribbonVertices", 32 }, mediumCells{ "fx.mediumCells", 96 };
     Buf gridCount{ "fx.gridCount", 4 }, gridStart{ "fx.gridStart", 4 }, gridFill{ "fx.gridFill", 4 }, gridEntries{ "fx.gridEntries", 4 }, gridLarge{ "fx.gridLarge", 4 };
-    bool programsValid = false;
+    bool programsValid = false, started = false;
+    std::vector<ComPtr<ID3D12Resource>> graveyard;  // buffers a repack of the last recorded frame still read
+    uint64_t graveyardFrame = UINT64_MAX;
     uint32_t parity = 0;
     uint32_t surfaceCount = 0;                           // persistent surface table (NV_STREAM_SURFACES)
     uint32_t submittedPrograms = 0, submittedBodyMax = 0;  // tables as of the last submitted packet (validation)
@@ -262,13 +268,43 @@ void ParticleSystem::record(FramePassContext& fc)
         const NV_StreamHeader& h = headerOf(packet);
         const uint8_t* base = packet.data();
 
-        // Capacity: a change reallocates the state, which is only valid with a RESET packet.
+        // Buffers the previous frame's repack read are released now (after that frame's fence).
+        if (m.graveyardFrame != fc.frame.frameIndex)
+        {
+            for (auto& r : m.graveyard) device.deferRelease(r);
+            m.graveyard.clear();
+        }
+
+        // Capacity: the stream sizes it for each tick's need (NativeVfxStream.h). A change without RESET moves the live
+        // slots into new buffers (FxRepack) and keeps every particle; with RESET the state starts over anyway.
         const uint32_t capacity = h.slot_capacity;
-        const bool reset = (h.flags & NV_STREAM_RESET) != 0 || m_capacity == 0;
+        const bool reset = (h.flags & NV_STREAM_RESET) != 0 || !m.started;  // (a capacity of 0 is valid: no live slot)
+        m.started = true;
+        const bool repack = !reset && capacity != m_capacity;
+        struct Old { Buf list, posAge, velocity, meta, records; } old;
         if (capacity != m_capacity)
         {
-            if (!(h.flags & NV_STREAM_RESET) && m_capacity != 0) fail("FX particles: slot capacity changed %u -> %u without RESET", m_capacity, capacity);
+            if (repack)
+            {
+                const uint32_t prev = m.parity ^ 1u;  // records of the last recorded tick
+                old = { m.aliveList, m.posAge, m.velocity, m.meta, m.records[prev] };
+                for (Buf* b : { &old.list, &old.posAge, &old.velocity, &old.meta, &old.records })
+                {
+                    m.graveyard.push_back(b->resource);
+                    b->importedGraph = nullptr;  // import this frame under its own name
+                }
+            }
+            // every capacity-sized buffer is allocated for the new capacity (a shrink frees memory too)
+            for (Buf* b : { &m.posAge, &m.velocity, &m.meta, &m.alive, &m.aliveList, &m.deadList, &m.dyingList, &m.keyBySlot, &m.spawnedSlots, &m.keysA,
+                            &m.valsA, &m.keysB, &m.valsB, &m.records[0], &m.records[1] })
+            {
+                if (b->resource && !repack) device.deferRelease(b->resource);
+                else if (b->resource && std::find(m.graveyard.begin(), m.graveyard.end(), b->resource) == m.graveyard.end()) m.graveyard.push_back(b->resource);
+                b->resource.Reset();
+                b->bytes = 0;
+            }
             m_capacity = capacity;
+            m.graveyardFrame = fc.frame.frameIndex;
         }
         const uint32_t scanBlocks = groups(capacity, kScanBlock), sortGroups = groups(capacity, kSortGroupKeys);
         for (Buf* b : { &m.posAge, &m.velocity, &m.meta, &m.alive, &m.aliveList, &m.deadList, &m.dyingList, &m.keyBySlot, &m.spawnedSlots, &m.keysA, &m.valsA,
@@ -301,16 +337,18 @@ void ParticleSystem::record(FramePassContext& fc)
             m.surfaces.ensure(device, (uint64_t)h.surface_count * sizeof(NV_StreamSurface));
             m.surfaceCount = h.surface_count;
         }
-        m.tickSurfaces.ensure(device, (uint64_t)m.surfaceCount * sizeof(NV_StreamSurface));
+        const uint32_t surfaceTotal = m.surfaceCount + h.dynamic_surface_count;  // static table + this tick's dynamic rows
+        m.dynamicSurfaces.ensure(device, (uint64_t)h.dynamic_surface_count * sizeof(NV_StreamSurface));
+        m.tickSurfaces.ensure(device, (uint64_t)surfaceTotal * sizeof(NV_StreamSurface));
         // Collision grid: buckets = the power of two >= 2 x surfaces (>= 1024); at most 64 cells per listed surface.
         uint32_t gridBuckets = 1024;
-        while (gridBuckets < 2 * m.surfaceCount) gridBuckets <<= 1;
-        const uint32_t gridEntryCapacity = std::max<uint32_t>(m.surfaceCount, 1) * 64;
+        while (gridBuckets < 2 * surfaceTotal) gridBuckets <<= 1;
+        const uint32_t gridEntryCapacity = std::max<uint32_t>(surfaceTotal, 1) * 64;
         m.gridCount.ensure(device, (uint64_t)gridBuckets * 4);
         m.gridStart.ensure(device, (uint64_t)gridBuckets * 4);
         m.gridFill.ensure(device, (uint64_t)gridBuckets * 4);
         m.gridEntries.ensure(device, (uint64_t)gridEntryCapacity * 4);
-        m.gridLarge.ensure(device, (uint64_t)std::max<uint32_t>(m.surfaceCount, 1) * 4);
+        m.gridLarge.ensure(device, (uint64_t)std::max<uint32_t>(surfaceTotal, 1) * 4);
         m.ribbonPoints.ensure(device, (uint64_t)h.ribbon_points * 32);
         m.ribbonLinks.ensure(device, (uint64_t)h.ribbon_points * 4);
         m.ribbonVertices.ensure(device, (uint64_t)h.ribbon_points * 64);
@@ -404,7 +442,7 @@ void ParticleSystem::record(FramePassContext& fc)
                                     &m.report, &slot.events, &m.tickSurfaces, &m.gridCount, &m.gridStart, &m.gridFill, &m.gridEntries, &m.gridLarge,
                                     &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.mediumCells };
         std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitters[cur], &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
-                                     &m.restore, &m.slotBase, &m.bodies };
+                                     &m.restore, &m.slotBase, &m.bodies, &m.dynamicSurfaces };
         for (Buf* b : state) b->import(g, fc.frame.frameIndex);
         for (Buf* b : inputs) b->import(g, fc.frame.frameIndex);
 
@@ -441,6 +479,7 @@ void ParticleSystem::record(FramePassContext& fc)
         add(m.worldFields, h.world_fields, (uint64_t)h.world_field_count * sizeof(NV_StreamWorldField));
         if (h.flags & (NV_STREAM_SURFACES | NV_STREAM_RESET)) add(m.surfaces, h.surfaces, (uint64_t)h.surface_count * sizeof(NV_StreamSurface));
         add(m.bodies, h.bodies, (uint64_t)h.body_count * sizeof(NV_StreamBody));
+        add(m.dynamicSurfaces, h.dynamic_surfaces, (uint64_t)h.dynamic_surface_count * sizeof(NV_StreamSurface));
         add(m.restore, h.restore, (uint64_t)h.restore_count * sizeof(NV_StreamParticle));
         if (h.spawn_count) copies.push_back({ &m.slotBase, rankOffset, (uint64_t)h.spawn_count * 4 });
         g.addPass("fx.particles.upload", QueueType::Graphics,
@@ -460,7 +499,8 @@ void ParticleSystem::record(FramePassContext& fc)
         tc.flags = h.flags;
         tc.fieldCount = h.field_count;
         tc.worldFieldCount = h.world_field_count;
-        tc.surfaceCount = m.surfaceCount;
+        tc.surfaceCount = surfaceTotal;
+        tc.staticSurfaceCount = m.surfaceCount;
         tc.emitterCount = h.emitter_count;
         tc.eventSlots = h.event_slots;
         tc.collisionCapacity = h.collision_capacity;
@@ -522,6 +562,7 @@ void ParticleSystem::record(FramePassContext& fc)
             tc.report = c.uav(m.report.ref);
             tc.emitterDynamic = c.uav(m.dynamic[cur].ref);
             tc.bodies = c.srv(m.bodies.ref);
+            tc.dynamicSurfaces = c.srv(m.dynamicSurfaces.ref);
             tc.tickSurfaces = c.uav(m.tickSurfaces.ref);
             tc.gridCount = c.uav(m.gridCount.ref);
             tc.gridStart = c.uav(m.gridStart.ref);
@@ -552,13 +593,43 @@ void ParticleSystem::record(FramePassContext& fc)
         const uint32_t beginThreads = std::max<uint32_t>(std::max<uint32_t>(h.emitter_count, 1), reset ? capacity : 0);
         dispatch("fx.particles.begin", reset ? "Passes/FX/FxBegin.RESET1" : "Passes/FX/FxBegin.RESET0", {}, groups(beginThreads, 256), true);
         if (reset) compaction(".reset", 0);
-        if (m.surfaceCount)
+        if (repack)
         {
-            dispatch("fx.particles.surfaces", "Passes/FX/FxSurfaces", {}, groups(m.surfaceCount, 64));
+            Old* o = new Old(old);  // lives until the frame's passes are recorded
+            std::shared_ptr<Old> keep(o);
+            const char* oldNames[5] = { "fx.old.aliveList", "fx.old.posAge", "fx.old.velocity", "fx.old.meta", "fx.old.records" };
+            Buf* olds[5] = { &keep->list, &keep->posAge, &keep->velocity, &keep->meta, &keep->records };
+            for (int k = 0; k < 5; ++k)
+            {
+                olds[k]->name = oldNames[k];
+                olds[k]->import(g, fc.frame.frameIndex);
+            }
+            Buf* newPrev = &m.records[cur ^ 1u];
+            newPrev->import(g, fc.frame.frameIndex);
+            ID3D12PipelineState* pso = shaders.compute("Passes/FX/FxRepack");
+            g.addPass("fx.particles.repack", QueueType::Graphics,
+                      [=](PassBuilder& b) {
+                          declare(b);
+                          for (int k = 0; k < 5; ++k) b.use(olds[k]->ref, Use::UavCompute);
+                          b.use(newPrev->ref, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          const std::array<uint32_t, 8> p = { c.uav(keep->list.ref), c.uav(keep->posAge.ref), c.uav(keep->velocity.ref), c.uav(keep->meta.ref),
+                                                              c.uav(keep->records.ref), c.uav(newPrev->ref), 0, 0 };
+                          c.cmd->SetPipelineState(pso);
+                          c.bindFrameConstants(constants);
+                          c.computeConstants(p.data(), 8);
+                          c.cmd->Dispatch(groups(capacity, 256), 1, 1);
+                      });
+            compaction(".repack", 0);
+        }
+        if (surfaceTotal)
+        {
+            dispatch("fx.particles.surfaces", "Passes/FX/FxSurfaces", {}, groups(surfaceTotal, 64));
             dispatch("fx.particles.grid.clear", "Passes/FX/FxGrid.STEP0", {}, groups(gridBuckets, 64));
-            dispatch("fx.particles.grid.count", "Passes/FX/FxGrid.STEP1", {}, groups(m.surfaceCount, 64));
+            dispatch("fx.particles.grid.count", "Passes/FX/FxGrid.STEP1", {}, groups(surfaceTotal, 64));
             dispatch("fx.particles.grid.scan", "Passes/FX/FxGrid.STEP2", {}, 1);
-            dispatch("fx.particles.grid.fill", "Passes/FX/FxGrid.STEP3", {}, groups(m.surfaceCount, 64));
+            dispatch("fx.particles.grid.fill", "Passes/FX/FxGrid.STEP3", {}, groups(surfaceTotal, 64));
         }
 
         // 3. depth 0: spawn (generated + explicit), integrate every slot; depths 1..4: child setup, spawn, integrate
@@ -721,6 +792,10 @@ std::vector<uint8_t> ParticleSystem::readState(const char* name)
     else if (n == "keysSorted") b = (m_sortPasses & 1) ? &m.keysB : &m.keysA;
     else if (n == "valsSorted") b = (m_sortPasses & 1) ? &m.valsB : &m.valsA;
     else if (n == "emitterDynamic") b = &m.dynamic[last], bytes = m.dynamic[last].bytes;
+    else if (n == "ribbonPoints") b = &m.ribbonPoints, bytes = m.ribbonPoints.bytes;
+    else if (n == "ribbonVertices") b = &m.ribbonVertices, bytes = m.ribbonVertices.bytes;
+    else if (n == "ribbonLinks") b = &m.ribbonLinks, bytes = m.ribbonLinks.bytes;
+    else if (n == "mediumCells") b = &m.mediumCells, bytes = m.mediumCells.bytes;
     else fail("FX particles: no state buffer '%s'", name);
     return copyOut(m_device, b->resource.Get(), bytes, b->stride, b->name);
 }

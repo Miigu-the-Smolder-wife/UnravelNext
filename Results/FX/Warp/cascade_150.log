@@ -1,0 +1,26 @@
+stream copy include/NativeVfxStream.h = NativeVfx eca421d7 (sha256 af9a7e0a475f9b4e)
+stream copy shaders/VfxParticleMath.hlsli = NativeVfx eca421d7 (sha256 6586633b3e631f2c)
+stream copy src/VfxStreamCpu.h = NativeVfx eca421d7 (sha256 fea7de8484e0fd44)
+device: Microsoft Basic Render Driver (WARP)
+tick 25: 1664 particles, rows 128, event slots 0, collisions 0; position error max 1.28e-06 p99 9.53e-07, velocity 1.39e-06, age 1.09e-07
+tick 25: outputs checked: 104 ribbon points (of 104), 104 volume particles (832 cells)
+tick 50: 3328 particles, rows 128, event slots 0, collisions 0; position error max 1.37e-06 p99 9.82e-07, velocity 1.65e-06, age 1.89e-07
+tick 50: outputs checked: 208 ribbon points (of 208), 208 volume particles (1664 cells)
+tick 75: 4992 particles, rows 128, event slots 0, collisions 9; position error max 2.03e-06 p99 1.24e-06, velocity 2.47e-06, age 4.03e-07
+tick 75: outputs checked: 312 ribbon points (of 312), 312 volume particles (2496 cells)
+tick 100: 6784 particles, rows 128, event slots 0, collisions 14; position error max 2.05e-06 p99 1.36e-06, velocity 2.47e-06, age 5.46e-07
+tick 100: outputs checked: 424 ribbon points (of 424), 424 volume particles (3392 cells)
+  particle (142,0): GPU p (-0.242292 0.000448 -0.255632) v (0.565590 5.174224 -0.679999) age 0.048083 | ref p (-0.242290 0.000568 -0.255621) v (0.565628 5.177168 -0.679733) age 0.048083
+  particle (143,0): GPU p (-0.030240 0.314596 0.189748) v (-1.034997 4.578339 -0.272257) age 0.048083 | ref p (-0.030239 0.314716 0.189759) v (-1.034955 4.581298 -0.271991) age 0.048083
+  particle (146,0): GPU p (0.143390 0.097379 -0.372096) v (0.440335 4.582525 -0.684052) age 0.048083 | ref p (0.143391 0.097497 -0.372085) v (0.440357 4.585440 -0.683786) age 0.048083
+  particle (147,0): GPU p (0.115758 -0.030811 -0.143324) v (-0.284713 4.793124 -0.427657) age 0.048083 | ref p (0.115759 -0.030691 -0.143314) v (-0.284677 4.796075 -0.427403) age 0.048083
+  particle (158,0): GPU p (-0.141581 0.039722 -0.333646) v (-0.613204 4.932723 -0.650520) age 0.040083 | ref p (-0.141580 0.039787 -0.333641) v (-0.613187 4.934460 -0.650382) age 0.040083
+tick 125: 8240 particles, rows 190, event slots 24, collisions 26; position error max 0.000121 p99 1.35e-06, velocity 0.000632, age 6.08e-07
+tick 125: outputs checked: 512 ribbon points (of 512), 512 volume particles (4096 cells)
+tick 150: 8380 particles, rows 464, event slots 32, collisions 18; position error max 0.000781 p99 0.000121, velocity 0.0017, age 6.16e-07
+tick 150: outputs checked: 504 ribbon points (of 504), 504 volume particles (4032 cells)
+stream: capacity changes 13 (repacks without RESET), final capacity 9280
+run: 150 ticks in 22.2 s, CPU-assigned events 1052, collision events 1249 (GPU vs reference count difference 0), child rows 572, max cascade depth 4
+reference comparison: 33388 particle states, position error max 0.000781 (p99 0.000121, mean 1.43e-06), velocity 0.0017, age 6.16e-07
+FAIL C:\Users\USER\UnravelNext\Native\Render\Passes\FX\Tests\ParticleTests.cpp:536: position error 0.000781 exceeds 1e-5
+exit 1

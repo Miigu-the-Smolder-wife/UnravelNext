@@ -153,7 +153,9 @@ typedef struct NV_StreamHeader {
     uint32_t depth[NV_STREAM_MAX_DEPTH+2]; /* spawn records of depth d: [depth[d], depth[d+1]) */
     uint32_t body_count;       /* rigid body frames of this tick (surfaces reference them) */
     uint64_t programs,curve_keys,emitters,spawns,explicit_births,fields,world_fields,surfaces,restore,bodies; /* byte offsets */
-    uint64_t reserved[7];
+    uint64_t dynamic_surfaces; /* byte offset of this tick's world-space surfaces */
+    uint32_t dynamic_surface_count,reserved0b;
+    uint64_t reserved[5];
 } NV_StreamHeader;
 
 /* Static per program (index = program number). Curves are piecewise linear
@@ -263,8 +265,12 @@ typedef struct NV_StreamWorldField {
    tick). Otherwise a, b, c are body-local and the tick's body frame gives the
    world: p = R(q) p_local + position, surface velocity at a point x =
    velocity + cross(angular_velocity, x - center) with the body's centre of
-   mass `center` (velocity/angular/origin of the record are then unused). The table is sent only with
-   NV_STREAM_SURFACES; body frames every tick. */
+   mass `center` (velocity/angular/origin of the record are then unused).
+   Two sections: the static table (`surfaces`, replaced only with
+   NV_STREAM_SURFACES, typically the body-local rigid surfaces) and this tick's
+   dynamic world-space surfaces (`dynamic_surfaces`, deforming bodies, every
+   tick). A surface's index for the collision tie rule is its static index, or
+   surface_count + its dynamic index. Body frames come every tick. */
 typedef struct NV_StreamSurface {
     uint32_t kind,entity[2],generation0;
     uint32_t generation1;float radius;uint32_t body,reserved1;

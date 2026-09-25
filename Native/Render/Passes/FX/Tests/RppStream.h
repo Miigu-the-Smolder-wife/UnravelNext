@@ -37,7 +37,8 @@ struct RppConfig
     bool features = true;         // cascades, source, transport, rebase, explicit births, kill
     uint32_t killRow = 10, killTick = 400;
     bool boxShape = true;         // program 2 emits from a box (development switch while the shared box draws are fixed)
-    uint32_t bodies = 1728;       // rigid bodies with 4 collision surfaces each (RPP: 6,912 surfaces), moving and rotating
+    uint32_t bodies = 1728;
+    bool childNoise = true;       // diagnostic switch: noise on the cascade children's programs       // rigid bodies with 4 collision surfaces each (RPP: 6,912 surfaces), moving and rotating
 };
 
 class RppStream
@@ -70,8 +71,6 @@ public:
             m_rows[0].program = 16;  // death rule -> C1 cascade
             m_rows[64].program = 16;
         }
-        // Slots: the steady-state population plus the tick's births and the cascades, with the design's 1.25 headroom.
-        m_capacity = (uint32_t)std::ceil(c.particles * 1.25) + 65536;
     }
 
     uint64_t tick() const { return m_tick; }
@@ -81,6 +80,7 @@ public:
     uint32_t eventSlots() const { return m_eventSlots; }
     uint32_t childRowsCreated() const { return m_childRows; }
     uint32_t maxDepth() const { return m_maxDepth; }
+    uint32_t capacityChanges() const { return m_capacityChanges; }
 
     // Packet of the next tick. 'previous' = the readback events of the previous tick (the CPU authority reads the
     // GPU's event states: child origins and inherited velocities).
@@ -238,17 +238,30 @@ public:
         }
 
         // Totals.
-        uint32_t alive = 0, collisionCapacity = 0, slotBirths = (uint32_t)explicitBirths.size();
+        uint32_t alive = 0, collisionCapacity = 0, slotBirths = (uint32_t)explicitBirths.size(), ribbonPoints = 0, mediumCells = 0;
         for (uint32_t d = 0; d <= NV_STREAM_MAX_DEPTH; ++d)
             for (const auto& s : spawns[d]) slotBirths += s.count - s.expired;
         for (auto& r : m_rows)
         {
             if (!r.active) continue;
             alive += r.nextBirth - r.deathBirth;
+            // output bases: ribbon points and medium cells of the live births [death_birth, next_birth)
+            const NV_StreamProgram& pr = m_programs[r.program].record;
+            r.outputBase = 0;
+            if (pr.output == 2) { r.outputBase = ribbonPoints; ribbonPoints += r.nextBirth - r.deathBirth; }
+            if (pr.output == 3) { const uint32_t g = pr.medium_grid; r.outputBase = mediumCells; mediumCells += (r.nextBirth - r.deathBirth) * g * g * g; }
             if (m_programs[r.program].collisionEvents) collisionCapacity += r.nextBirth - r.dyingBirth;
         }
         m_aliveAfter = alive;
-        if (aliveBefore + slotBirths > m_capacity) throw std::runtime_error("RppStream: slot capacity exceeded");
+        // Slot capacity as the VFX authority sizes it: need = live at the tick start + slot-taking births; grow when the
+        // need exceeds the capacity, shrink when it falls below a quarter; new capacity = need x 1.25 rounded up to 64.
+        const uint32_t need = aliveBefore + slotBirths;
+        if (need > m_capacity || need < m_capacity / 4)
+        {
+            const uint32_t target = std::max<uint32_t>((uint32_t)((uint64_t)need * 5 / 4), 64);
+            m_capacity = (target + 63) / 64 * 64;
+            ++m_capacityChanges;
+        }
         m_eventSlots = (uint32_t)m_events.size();
 
         // Packet.
@@ -285,8 +298,12 @@ public:
         h.surface_count = first ? (uint32_t)m_surfaces.size() : 0;
         const std::vector<NV_StreamBody> bodies = bodyFrames(tEnd);
         h.body_count = (uint32_t)bodies.size();
+        const std::vector<NV_StreamSurface> dynamicRows = dynamicSurfaces(tEnd);
+        h.dynamic_surface_count = (uint32_t)dynamicRows.size();
         h.event_slots = m_eventSlots;
         h.collision_capacity = collisionCapacity;
+        h.ribbon_points = ribbonPoints;
+        h.medium_cells = mediumCells;
 
         std::vector<uint8_t> packet(sizeof(NV_StreamHeader));
         auto section = [&](const void* data, size_t bytes) -> uint64_t {
@@ -310,6 +327,7 @@ public:
         h.world_fields = section(m_world.data(), m_world.size() * sizeof(NV_StreamWorldField));
         if (first) h.surfaces = section(m_surfaces.data(), m_surfaces.size() * sizeof(NV_StreamSurface));
         h.bodies = section(bodies.data(), bodies.size() * sizeof(NV_StreamBody));
+        h.dynamic_surfaces = section(dynamicRows.data(), dynamicRows.size() * sizeof(NV_StreamSurface));
         packet.resize((packet.size() + 15) & ~size_t(15));
         h.bytes = packet.size();
         std::memcpy(packet.data(), &h, sizeof h);
@@ -343,7 +361,7 @@ private:
     {
         bool active = false, childRow = false, killed = false, explicitBirths = false, source = false, transport = false, rebase = false;
         uint32_t program = 0, parent = NV_STREAM_NONE, parentEvent = NV_STREAM_NONE;
-        uint32_t nextBirth = 0, deathBirth = 0, dyingBirth = 0, deathEvent = NV_STREAM_NONE;
+        uint32_t nextBirth = 0, deathBirth = 0, dyingBirth = 0, deathEvent = NV_STREAM_NONE, outputBase = 0;
         double rate = 0, carry = 0, age = 0, duration = 0, rebaseNow = 0;
         double origin[3] = {};
         float originAnchor[3] = {}, originAnchorTick[3] = {}, inheritedNow[3] = {};
@@ -451,7 +469,7 @@ private:
         }
         x.entity[0] = e + 1;
         x.generation[0] = 1;
-        x.output_base = 0;
+        x.output_base = r.outputBase;
         return x;
     }
 
@@ -490,6 +508,20 @@ private:
             r.columns = r.rows = 1;
             r.medium_grid = 1;
             r.ribbon_break = 3.4e38f;
+            if (p == 13)  // ribbon trails: strips break at 1 m
+            {
+                r.output = 2;
+                r.ribbon_normal[1] = 1; r.ribbon_uv = 1; r.ribbon_break = 1.0f;
+            }
+            if (p == 14)  // volume puffs: 2^3 medium cells per particle
+            {
+                r.output = 3;
+                r.medium_grid = 2;
+                r.medium_absorption[0] = r.medium_absorption[1] = r.medium_absorption[2] = 0.02f;
+                r.medium_scattering[0] = r.medium_scattering[1] = r.medium_scattering[2] = 0.3f;
+                r.medium_emission[0] = 0.1f;
+                r.medium_phase = 0.4f;
+            }
             x.lifetime = r.lifetime;
             m_programs.push_back(x);
         }
@@ -502,6 +534,7 @@ private:
             x.record.lifetime = (float)lifetime;
             x.record.flags = NV_STREAM_PROGRAM_NOISE | NV_STREAM_PROGRAM_WIND;
             x.record.velocity_radius = 1.0f;
+            if (!m_c.childNoise) { x.record.noise[0] = x.record.noise[1] = x.record.noise[2] = 0; }
             x.lifetime = x.record.lifetime;
             x.collisionEvents = false;
             x.deathRule = deathChild != NV_STREAM_NONE;
@@ -578,6 +611,35 @@ private:
         }
     }
 
+    // Deformable surfaces written in anchor space every tick (soft bodies, ropes): a waving 8 x 8 m sheet of 32
+    // triangles over the middle of the emitter field, with the sheet's local velocity.
+    std::vector<NV_StreamSurface> dynamicSurfaces(double t) const
+    {
+        std::vector<NV_StreamSurface> out;
+        auto point = [&](int i, int j, float* p, float* v) {
+            const double x = 40.0 + 2.0 * i, z = 16.0 + 2.0 * j, w = 1.7, k = 0.35;
+            p[0] = (float)x; p[1] = (float)(2.8 + 0.4 * std::sin(k * x + w * t)); p[2] = (float)z;
+            v[0] = 0; v[1] = (float)(0.4 * w * std::cos(k * x + w * t)); v[2] = 0;
+        };
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                for (int half = 0; half < 2; ++half)
+                {
+                    NV_StreamSurface s{};
+                    s.kind = 2;
+                    s.body = NV_STREAM_NONE;
+                    s.entity[0] = 200000;
+                    s.generation0 = 1;
+                    float va[3], vb[3], vc[3];
+                    point(i, j, s.a, va);
+                    if (half == 0) { point(i + 1, j, s.b, vb); point(i + 1, j + 1, s.c, vc); }
+                    else { point(i + 1, j + 1, s.b, vb); point(i, j + 1, s.c, vc); }
+                    for (int a = 0; a < 3; ++a) { s.velocity[a] = (va[a] + vb[a] + vc[a]) / 3; s.origin[a] = (s.a[a] + s.b[a] + s.c[a]) / 3; }
+                    out.push_back(s);
+                }
+        return out;
+    }
+
     // Body b: a slow orbit around its home point and a spin about y (anchor space).
     std::vector<NV_StreamBody> bodyFrames(double t) const
     {
@@ -605,7 +667,7 @@ private:
     RppConfig m_c;
     double m_anchor[3];
     uint64_t m_tick = 0;
-    uint32_t m_capacity = 0, m_aliveAfter = 0, m_eventSlots = 0, m_childRows = 0, m_maxDepth = 0;
+    uint32_t m_capacity = 0, m_aliveAfter = 0, m_eventSlots = 0, m_childRows = 0, m_maxDepth = 0, m_capacityChanges = 0;
     std::vector<Program> m_programs;
     std::vector<NV_StreamCurveKey> m_keys;
     std::vector<NV_StreamField> m_fields;

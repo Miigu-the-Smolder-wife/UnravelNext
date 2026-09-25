@@ -37,8 +37,9 @@ struct TickConstants
     uint32_t report, emitterDynamic, bodies, tickSurfaces;
     float gridCell; uint32_t gridMask, gridCount, gridStart;  // collision candidate grid (FxGrid.hlsl)
     uint32_t gridFill, gridEntries, gridLarge, gridEntryCapacity;
+    uint32_t staticSurfaceCount, dynamicSurfaces, pad3, pad4;  // surfaceCount = static + dynamic
 };
-static_assert(sizeof(TickConstants) == 288);
+static_assert(sizeof(TickConstants) == 304);
 
 // counters[] words (Particles.hlsli)
 enum : uint32_t { kCounterAlive = 0, kCounterDead = 1, kCounterCollisions = 2, kCounterStatus = 3, kCounterDying = 4, kCounterWords = 16 };

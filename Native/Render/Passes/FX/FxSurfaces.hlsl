@@ -1,5 +1,7 @@
 // unx-kernel: cs_6_6 main
-// Collision surfaces of the tick in anchor space (NV_StreamSurface): thread per surface of the persistent table. A
+// Collision surfaces of the tick in anchor space (NV_StreamSurface): thread per surface. Surface n < static count is
+// row n of the persistent static table, the others are this tick's dynamic rows (static count + dynamic index is the
+// surface number of the shared tie rule, NativeVfxStream.h). A
 // surface on a rigid body (body != NONE) is body-local: p = R(q) p_local + position with this tick's body frame, and its
 // velocity field is the body's (velocity of the centre of mass, angular velocity about it); the other surfaces are copied.
 // Quaternion rotation as the CPU reference: t = 2 cross(u, v), v + w t + cross(u, t).
@@ -16,8 +18,11 @@ void main(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= g_surfaceCount) return;
     FX_BUFFER(StreamSurface, table, g_surfaces);
+    FX_BUFFER(StreamSurface, dynamicRows, g_dynamicSurfaces);
     FX_RWBUFFER(StreamSurface, surfaces, g_tickSurfaces);
-    StreamSurface s = table[id.x];
+    StreamSurface s;
+    if (id.x < g_staticSurfaceCount) s = table[id.x];
+    else s = dynamicRows[id.x - g_staticSurfaceCount];
     if (s.body != FX_NONE)
     {
         FX_BUFFER(StreamBody, bodies, g_bodies);

@@ -241,6 +241,11 @@ nv_real3 nv_bounce(nv_real3 value, nv_real3 normal, nv_real restitution, nv_real
 }
 // Sweeps origin-space start -> s.position. Returns false when a fifth impact
 // was needed (the state then stays at the fourth contact, separated).
+// A surface moved into emitter-origin space (points and its velocity centre).
+NvSurface nv_surface_local(NvSurface s, nv_real3 origin) {
+    s.a = s.a - origin; s.b = s.b - origin; s.c = s.c - origin; s.origin = s.origin - origin;
+    return s;
+}
 bool nv_collide(NvMotion m, nv_real3 start, NV_INOUT(NvState) s, NV_OUT(NvImpact) first) {
     first.count = 0u; first.contact = nv_make3(NV_R(0), NV_R(0), NV_R(0)); first.velocity = first.contact; first.normal = first.contact; first.fraction = NV_R(0);
     // Positions stay in origin space; the anchor-space point is formed only for
@@ -250,22 +255,22 @@ bool nv_collide(NvMotion m, nv_real3 start, NV_INOUT(NvState) s, NV_OUT(NvImpact
     bool complete = true;
     NV_LOOP for (uint bounce = 0u; bounce <= 4u; ++bounce) {
         nv_real earliest = NV_R(2); uint selected = 0xffffffffu; nv_real3 normal = nv_make3(NV_R(0), NV_R(0), NV_R(0));
-        nv_real3 p = origin + local;
         // Candidates may come from an acceleration structure (duplicates allowed):
-        // the tie rule makes the result independent of their order.
-        NV_SURFACE_QUERY_TYPE query = NV_SURFACE_QUERY(p, displacement); uint n = 0u;
+        // the tie rule makes the result independent of their order. The query is
+        // anchor space; the hit test is emitter-origin space (error ~ D 2^-24 with
+        // D the distance from the emitter origin, not from the anchor).
+        NV_SURFACE_QUERY_TYPE query = NV_SURFACE_QUERY(origin + local, displacement); uint n = 0u;
         NV_LOOP while (NV_SURFACE_NEXT(query, n)) {
-            NvSurface surface = NV_SURFACE(n);
+            NvSurface surface = nv_surface_local(NV_SURFACE(n), origin);
             if (m.self == 0u && surface.entity0 == m.entity0 && surface.entity1 == m.entity1 && surface.generation0 == m.generation0 && surface.generation1 == m.generation1) continue;
             nv_real t; nv_real3 direction;
-            if (nv_hit(surface, p, displacement, t, direction) && (t < earliest || (t == earliest && n < selected))) { earliest = t; selected = n; normal = direction; }
+            if (nv_hit(surface, local, displacement, t, direction) && (t < earliest || (t == earliest && n < selected))) { earliest = t; selected = n; normal = direction; }
         }
         if (selected == 0xffffffffu) { local = local + displacement; break; }
         if (bounce == 4u) { complete = false; break; }
-        NvSurface hitSurface = NV_SURFACE(selected);
+        NvSurface hitSurface = nv_surface_local(NV_SURFACE(selected), origin);
         nv_real3 contactLocal = local + displacement * earliest;
-        nv_real3 contact = origin + contactLocal;
-        nv_real3 surfaceVelocity = hitSurface.velocity + cross(hitSurface.angular, contact - hitSurface.origin);
+        nv_real3 surfaceVelocity = hitSurface.velocity + cross(hitSurface.angular, contactLocal - hitSurface.origin);
         velocity = surfaceVelocity + nv_bounce(velocity - surfaceVelocity, normal, m.restitution, m.friction);
         first.count = first.count + 1u;
         if (first.count == 1u) { first.contact = contactLocal; first.velocity = velocity; first.normal = normal; first.fraction = earliest; }

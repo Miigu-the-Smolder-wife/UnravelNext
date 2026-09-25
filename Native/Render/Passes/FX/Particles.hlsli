@@ -69,6 +69,7 @@ cbuffer FxTick : register(b1)
     uint g_report, g_emitterDynamic, g_bodies, g_tickSurfaces;
     float g_gridCell; uint g_gridMask, g_gridCount, g_gridStart;     // collision grid (FxGrid.hlsl)
     uint g_gridFill, g_gridEntries, g_gridLarge, g_gridEntryCapacity;
+    uint g_staticSurfaceCount, g_dynamicSurfaces, g_pad3, g_pad4;  // g_surfaceCount = static + dynamic
 };
 
 // ---- stream records (StructuredBuffer layouts: 4-byte packing, same order as NativeVfxStream.h) ------------------

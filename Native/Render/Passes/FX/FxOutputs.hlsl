@@ -5,7 +5,8 @@
 // (NativeVfxStream.h): no sort.
 //   STEP=0 thread per alive-list entry:
 //     NV_RIBBON: ribbon point {origin-space position, width = size (full), age} at its index;
-//     NV_VOLUME: grid^3 medium cells (NV_MediumCell layout, 96 B) at index x grid^3: cuboid of side = size around the
+//     NV_VOLUME: grid^3 medium cells (NV_MediumCell layout, 96 B) at cell index x grid^3 (output_base counts medium
+//                cells: first cell = output_base + (birth - death_birth) x grid^3): cuboid of side = size around the
 //                particle, separable tent mass over the grid, coefficients = program coefficients x density (colour alpha
 //                scales mass, RGB tints emission) divided by the published support volume (the old VfxMediaShader rules,
 //                in float). Cell coordinates: integer 1024 m cells of the anchor space + float offsets inside the cell.
@@ -53,7 +54,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const float4 pa = posAge[slot];
     const float u = saturate(pa.w / p.lifetime);
     const float size = p.size * e.sizeScale * fxCurve1(p.sizeKeys, p.sizeCount, u);
-    const uint index = e.outputBase + (m.y - e.deathBirth);
+    uint index = e.outputBase + (m.y - e.deathBirth);
     if (p.output == FX_OUTPUT_RIBBON)
     {
         if (index >= P[1].x) { fxStatus(FX_STATUS_RANGE); return; }
@@ -64,7 +65,8 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
     }
     const uint n = clamp(p.mediumGrid, 1u, 32u), cells = n * n * n;
-    if (index >= P[1].y / cells) { fxStatus(FX_STATUS_RANGE); return; }
+    const uint first = e.outputBase + (m.y - e.deathBirth) * cells;  // output_base counts medium cells (NativeVfxStream.h)
+    if (cells > P[1].y || first > P[1].y - cells) { fxStatus(FX_STATUS_RANGE); return; }
     const float4 colour = float4(p.color.rgb * e.colorScale.rgb * fxCurve3(p.colorKeys, p.colorCount, u),
                                  p.color.a * e.colorScale.a * fxCurve1(p.alphaKeys, p.alphaCount, u));
     const float3 q = dynamic[m.x].originAnchor + pa.xyz;
@@ -84,7 +86,7 @@ void main(uint3 id : SV_DispatchThreadID)
         mc.absorption = float4(p.mediumAbsorption * density, p.mediumPhase);
         mc.scattering = float4(p.mediumScattering * density, 0);
         mc.emission = float4(p.mediumEmission * density * colour.rgb, 0);
-        cellsOut[index * cells + k] = mc;
+        cellsOut[first + k] = mc;
     }
 }
 #else

@@ -107,8 +107,9 @@ public:
         const auto world=section<NV_StreamWorldField>(data,bytes,h.world_fields,h.world_field_count);
         if(h.flags&(NV_STREAM_SURFACES|NV_STREAM_RESET))surface_table_=section<NV_StreamSurface>(data,bytes,h.surfaces,h.surface_count);
         const auto bodies=section<NV_StreamBody>(data,bytes,h.bodies,h.body_count);
+        const auto dynamic=section<NV_StreamSurface>(data,bytes,h.dynamic_surfaces,h.dynamic_surface_count);
         const auto restore=section<NV_StreamParticle>(data,bytes,h.restore,h.restore_count);
-        load_inputs(fields,world,bodies);
+        load_inputs(fields,world,bodies,dynamic);
         // A state packet (dt == 0) keeps its tick's readback; only alive/status change.
         const bool simulate=h.dt>0;
         if(simulate||(h.flags&NV_STREAM_RESET)){
@@ -178,8 +179,8 @@ private:
         const Real3 u{q[0],q[1],q[2]};const double w=q[3];
         const Real3 t=Math::cross(u,v)*2.0;return v+t*w+Math::cross(u,t);
     }
-    void load_inputs(const std::vector<NV_StreamField>& fields,const std::vector<NV_StreamWorldField>& world,const std::vector<NV_StreamBody>& bodies){
-        const auto& surfaces=surface_table_;
+    void load_inputs(const std::vector<NV_StreamField>& fields,const std::vector<NV_StreamWorldField>& world,const std::vector<NV_StreamBody>& bodies,const std::vector<NV_StreamSurface>& dynamic){
+        std::vector<NV_StreamSurface> surfaces=surface_table_;surfaces.insert(surfaces.end(),dynamic.begin(),dynamic.end());
         fields_.clear();for(const auto& f:fields)fields_.push_back({real3(f.position),f.kind,real3(f.value),f.radius});
         world_.clear();for(const auto& w:world){Math::NvWorldField x{};x.origin=real3(w.origin);x.quantity=w.packed&255u;x.shape=(w.packed>>8)&255u;x.operation=(w.packed>>16)&255u;
             x.basis0=real3(w.inverse_basis);x.basis1=real3(w.inverse_basis+3);x.basis2=real3(w.inverse_basis+6);x.value=real3(w.value);world_.push_back(x);}

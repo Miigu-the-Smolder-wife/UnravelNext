@@ -1,0 +1,10 @@
+stream copy include/NativeVfxStream.h = NativeVfx eca421d7 (sha256 af9a7e0a475f9b4e)
+stream copy shaders/VfxParticleMath.hlsli = NativeVfx eca421d7 (sha256 6586633b3e631f2c)
+stream copy src/VfxStreamCpu.h = NativeVfx eca421d7 (sha256 fea7de8484e0fd44)
+device: Microsoft Basic Render Driver (WARP)
+yield: a GPU measurement or HOLD is active; pausing
+yield: a GPU measurement or HOLD is active; pausing
+yield: a GPU measurement or HOLD is active; pausing
+tick 10: 640 particles, rows 128, event slots 0, collisions 0; position error max 1.12e-06 p99 9.94e-07, velocity 4.75e-07, age 4.86e-09
+FAIL C:\Users\USER\UnravelNext\Native\Render\Passes\FX\Tests\ParticleTests.cpp:342: tick 10: medium cell 5 of (126,0) is not a finite cuboid
+exit 1
