@@ -479,6 +479,33 @@ UNX_API int32_t UNX_CALL UnxSceneSave(UnxRenderer r, const char* utf8Path, const
     });
 }
 
+UNX_API int32_t UNX_CALL UnxSceneLoad(UnxRenderer r, const char* utf8Path, UnxCameraDesc* camera0, uint32_t* instances, uint32_t* skeletons)
+{
+    return call([&] {
+        if (!utf8Path || !*utf8Path) fail("scene path is empty");
+        const auto h = find(r);
+        if (h->committed()) fail("UnxSceneLoad after UnxSceneCommit");
+        const scene::Scene& now = h->scene();
+        if (!now.meshes.empty() || !now.materials.empty() || !now.textures.empty() || !now.instances.empty() || !now.skeletons.empty() || !now.lights.empty())
+            fail("UnxSceneLoad needs an empty scene (content was already added)");
+        const std::string path(utf8Path);
+        scene::Scene loaded = scene::load(std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(path.data()), path.size())));
+        if (camera0)
+        {
+            if (loaded.cameras.empty()) fail("%s has no camera", path.c_str());
+            const scene::Camera& c = loaded.cameras[0];
+            const float v[12] = { c.position.x, c.position.y, c.position.z, c.verticalFov, c.forward.x, c.forward.y, c.forward.z, c.nearPlane,
+                                  c.up.x, c.up.y, c.up.z, c.ev100 };
+            std::memcpy(camera0, v, sizeof v);
+        }
+        if (instances) *instances = (uint32_t)loaded.instances.size();
+        if (skeletons) *skeletons = (uint32_t)loaded.skeletons.size();
+        logf("UnravelNext: loaded scene '%s' (%zu meshes, %zu instances, %zu skeletons) from %s, hash %s\n", loaded.name.c_str(), loaded.meshes.size(),
+             loaded.instances.size(), loaded.skeletons.size(), path.c_str(), scene::contentHash(loaded).substr(0, 16).c_str());
+        h->scene() = std::move(loaded);
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxFrameQueue(UnxRenderer r, const UnxFrameDesc* d, uint64_t* ticket)
 {
     return call([&] {

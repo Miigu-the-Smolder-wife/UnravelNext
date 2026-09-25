@@ -29,7 +29,8 @@ enum UnxResult
 #define UNX_ABI_VERSION 6u  // 1: probe; 2: + renderer; 3: + UnxFrameSetSkeletons, UnxSceneSave writes the current state;
                             // 4: + UnxFrameSetEnvironment; 5: UNX_DEVICE_REMOVED (the process survives a device removal);
                             // 6: + UnxFrameSetDiscontinuity, UnxFrameSetSimulation, UnxTransformUpdate::flags (teleport);
-                            //    later additions within 6 (optional exports, bridges probe for them): UnxFrameGraphStatsLatest
+                            //    later additions within 6 (optional exports, bridges probe for them): UnxFrameGraphStatsLatest,
+                            //    UnxSceneLoad
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -274,6 +275,11 @@ typedef struct UnxCameraDesc
 // added so far. After: the scene as the host shows it now (the latest transforms, poses, sun and visibility it set,
 // including the ones not yet rendered), hidden instances left out.
 UNX_API int32_t UNX_CALL UnxSceneSave(UnxRenderer r, const char* utf8Path, const char* utf8Name, const UnxCameraDesc* camera);
+// Loads a .unxscene file (INTERFACES 6.2) as the renderer's content: textures, materials, meshes, skeletons, instances
+// (their flags included), lights, sun, atmosphere and wind, with the file's indices. Only before any content was added and
+// before UnxSceneCommit; content added afterwards appends. 'camera0' (nullable) receives the file's camera 0 (fails when
+// the file has none), 'instances' / 'skeletons' (nullable) the counts. Optional export within ABI 6.
+UNX_API int32_t UNX_CALL UnxSceneLoad(UnxRenderer r, const char* utf8Path, UnxCameraDesc* camera0, uint32_t* instances, uint32_t* skeletons);
 
 typedef struct UnxFrameDesc
 {

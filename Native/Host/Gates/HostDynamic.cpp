@@ -1,12 +1,20 @@
 // Host dynamic-load gate (I track): the per-frame path a Unity host drives, at RPP-1 dynamic scale, through the exported
-// ABI (UnravelNext.dll, standalone renderer): every frame N rigid bodies move (UnxFrameSetTransforms) and M skinned
-// characters get a new pose (UnxFrameSetSkeletons, one call), then the frame is queued and rendered. Reports the host-side CPU cost
-// of the updates, the renderer's CPU record/submit and the GPU frame (per pass) at 4K and 1440p. GPU lock required:
-//   GpuLock.ps1 -Track I -- build/I/bin/unx_gate_host_hostdynamic.exe [--bodies 1024] [--characters 256] [--bones 64]
-//       [--triangles 60000] [--frames 600] [--resolution 4K|1440p|both]
-//   unx_gate_host_hostdynamic.exe --save-scene <file.unxscene> [counts]   (content only, no lock; inspect with
+// ABI (UnravelNext.dll, standalone renderer), in an RPP-1 scene: the scene (UnxSceneLoad; C's generator, unx_scenegen
+// --scene <s> --out <dir> --bodies <dir>/<s>_bodies.json) with its rigid bodies moving as the placement file says
+// (BodiesFile.h: resting, falling, rolling, replayed kinematically; UnxFrameSetTransforms every frame) and skinned
+// characters (a 64-bone tube stand-in, no character assets yet) on the file's character slots, posed every frame
+// (UnxFrameSetSkeletons, one call); camera 0 of the scene. Reports the host-side CPU cost of the updates, the renderer's
+// CPU record/submit and the GPU frame (per pass) at 4K and 1440p. GPU lock required:
+//   GpuLock.ps1 -Track I -- build/I/bin/unx_gate_host_hostdynamic.exe --scene <dir>/<s>.unxscene [--bodies-file <json>]
+//       [--characters 256] [--bones 64] [--triangles 60000] [--frames 600] [--resolution 4K|1440p|both]
+//   unx_gate_host_hostdynamic.exe --scene ... --save-scene <file.unxscene>   (content only, no lock; inspect with
 //       unx_gate_host_hostscene --scene <file> --describe)
+// The bodies file must come from the same generator build as the scene (every body's instance is dynamic and starts at the
+// file's position); a missing or mismatched file stops the gate (no fallback placement).
+#include "BodiesFile.h"
+
 #include "unx/host/UnravelNextHost.h"
+#include "unx/scene/SceneData.h"
 
 #include "unx/core/File.h"
 #include "unx/render/GpuLock.h"
@@ -26,6 +34,7 @@
 
 using namespace unx;
 using render::Distribution;
+namespace gate = unx::host::gate;
 
 namespace
 {
@@ -44,6 +53,7 @@ struct Api
     UNX_FN(UnxEnvironmentDefaults)
     UNX_FN(UnxSceneCommit)
     UNX_FN(UnxSceneSave)
+    UNX_FN(UnxSceneLoad)
     UNX_FN(UnxFrameSetTransforms)
     UNX_FN(UnxFrameSetSkeletons)
     UNX_FN(UnxFrameQueue)
@@ -69,6 +79,7 @@ struct Api
         UNX_FN(UnxEnvironmentDefaults)
         UNX_FN(UnxSceneCommit)
         UNX_FN(UnxSceneSave)
+        UNX_FN(UnxSceneLoad)
         UNX_FN(UnxFrameSetTransforms)
         UNX_FN(UnxFrameSetSkeletons)
         UNX_FN(UnxFrameQueue)
@@ -232,8 +243,8 @@ int main(int argc, char** argv)
 {
     try
     {
-        uint32_t bodies = 1024, characters = 256, bones = 64, triangles = 60000, frames = 600;
-        std::string resolutionArg = "both", saveScene;
+        uint32_t characters = 256, bones = 64, triangles = 60000, frames = 600;
+        std::string resolutionArg = "both", saveScene, scenePath, bodiesPath;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -241,7 +252,8 @@ int main(int argc, char** argv)
                 if (i + 1 >= argc) fail("missing value after %s", a.c_str());
                 return argv[++i];
             };
-            if (a == "--bodies") bodies = (uint32_t)std::stoul(next());
+            if (a == "--scene") scenePath = next();
+            else if (a == "--bodies-file") bodiesPath = next();
             else if (a == "--characters") characters = (uint32_t)std::stoul(next());
             else if (a == "--bones") bones = (uint32_t)std::stoul(next());
             else if (a == "--triangles") triangles = (uint32_t)std::stoul(next());
@@ -250,12 +262,40 @@ int main(int argc, char** argv)
             else if (a == "--save-scene") saveScene = next();
             else fail("unknown argument %s", a.c_str());
         }
+        if (scenePath.empty()) fail("--scene <dir>/<s>.unxscene is required (unx_scenegen --scene <s> --out <dir> --bodies <dir>/<s>_bodies.json)");
+        if (bodiesPath.empty())
+        {
+            const std::filesystem::path sp(scenePath);
+            bodiesPath = (sp.parent_path() / (sp.stem().string() + "_bodies.json")).string();
+        }
+        gate::BodiesFile placement = gate::loadBodies(bodiesPath);
+        const uint32_t bodies = (uint32_t)placement.bodies.size();
+        std::vector<uint32_t> bodyInstance(bodies);
+        {
+            // The file belongs to this scene: every body's instance is dynamic, not skinned, and starts where the file says.
+            const scene::Scene check = scene::load(scenePath);
+            for (uint32_t k = 0; k < bodies; ++k)
+            {
+                gate::Body& b = placement.bodies[k];
+                if (b.instance >= check.instances.size()) fail("%s: body %u names instance %u of %zu", bodiesPath.c_str(), k, b.instance, check.instances.size());
+                const scene::Instance& in = check.instances[b.instance];
+                if (!(in.flags & scene::InstanceDynamic) || (in.flags & scene::InstanceSkinned))
+                    fail("%s: body %u's instance %u is not a dynamic rigid instance of %s (stale scene?)", bodiesPath.c_str(), k, b.instance, scenePath.c_str());
+                const float d = std::fabs(in.transform.m[0][3] - b.position[0]) + std::fabs(in.transform.m[1][3] - b.position[1]) + std::fabs(in.transform.m[2][3] - b.position[2]);
+                if (d > 1e-3f) fail("%s: body %u starts %g m away from instance %u of %s (stale scene?)", bodiesPath.c_str(), k, d, b.instance, scenePath.c_str());
+                bodyInstance[k] = b.instance;
+                std::memcpy(placement.bodies[k].base, in.transform.m, sizeof placement.bodies[k].base);
+            }
+            if (characters > placement.characters.size()) fail("%u characters, the file has %zu slots", characters, placement.characters.size());
+        }
         // --save-scene writes the content and stops before commit: a correctness/content tool, no measurement, no lock.
         const std::string lockHolder = saveScene.empty() ? render::requireGpuLock("unx_gate_host_hostdynamic") : std::string();
         const std::filesystem::path bin = executableDirectory();
         Api api;
         api.load(bin / "UnravelNext.dll");
         std::string json = "{\n  \"gate\": \"host_dynamic\",\n";
+        json += format("  \"scene\": \"%s\", \"section\": \"%s\", \"bodiesFile\": \"%s\", \"mix\": {\"resting\": %u, \"falling\": %u, \"rolling\": %u},\n", placement.scene.c_str(),
+                       placement.section.c_str(), std::filesystem::path(bodiesPath).filename().string().c_str(), placement.resting, placement.falling, placement.rolling);
         json += format("  \"bodies\": %u, \"characters\": %u, \"bonesPerCharacter\": %u, \"trianglesPerCharacter\": %u, \"frames\": %u, \"gpuLock\": \"%s\",\n", bodies, characters,
                        bones, triangles, frames, lockHolder.c_str());
         json += "  \"hostUpdateMs\": \"UnxFrameSetTransforms (every body) + UnxFrameSetSkeletons (every character, one call) + UnxFrameQueue; values precomputed\",\n  \"runs\": [\n";
@@ -274,7 +314,10 @@ int main(int argc, char** argv)
             copyName(desc.qualityDirectory, (std::filesystem::path(UNX_SOURCE_DIR) / "Config/quality").string());
             UnxRenderer r = 0;
             api.ok(api.UnxRendererCreate(&desc, &r), "UnxRendererCreate");
-            // Materials: floor, bodies, characters.
+            // The RPP-1 scene (its bodies included), then the characters: one tube material and mesh.
+            UnxCameraDesc camera{};
+            uint32_t sceneInstances = 0, sceneSkeletons = 0;
+            api.ok(api.UnxSceneLoad(r, scenePath.c_str(), &camera, &sceneInstances, &sceneSkeletons), "UnxSceneLoad");
             auto material = [&](float r0, float g0, float b0, float rough, float metal) {
                 UnxMaterialDesc m{};
                 m.size = sizeof m;
@@ -289,29 +332,14 @@ int main(int argc, char** argv)
                 api.ok(api.UnxSceneAddMaterial(r, &m, &index), "UnxSceneAddMaterial");
                 return index;
             };
-            const uint32_t floorMat = material(0.18f, 0.2f, 0.23f, 0.65f, 0), bodyMat = material(0.04f, 0.32f, 0.65f, 0.3f, 0.85f), charMat = material(0.75f, 0.12f, 0.035f, 0.8f, 0);
-            const uint32_t floorMesh = addBox(api, r, floorMat, 60, 0.5f, 60), boxMesh = addBox(api, r, bodyMat, 0.25f, 0.25f, 0.25f);
+            const uint32_t charMat = material(0.75f, 0.12f, 0.035f, 0.8f, 0);
             const float segment = 1.8f / bones;
             uint64_t characterTriangles = 0;
             const uint32_t tubeMesh = addTube(api, r, charMat, bones, triangles, 0.25f, segment, characterTriangles);
-            const uint64_t instancedTriangles = 12ull + 12ull * bodies + characterTriangles * characters;
             UnxInstanceDesc inst{};
             inst.size = sizeof inst;
             inst.version = 1;
-            inst.skeleton = UNX_NONE;
-            inst.mesh = floorMesh;
-            inst.flags = UNX_INSTANCE_CAST_SHADOW;
-            identity(inst.transform);
-            inst.transform[7] = -0.5f;
-            api.ok(api.UnxSceneAddInstance(r, &inst, nullptr), "floor");
-            std::vector<uint32_t> bodyIndex(bodies), skeletons(characters);
-            for (uint32_t b = 0; b < bodies; ++b)
-            {
-                inst.mesh = boxMesh;
-                inst.flags = UNX_INSTANCE_CAST_SHADOW | UNX_INSTANCE_DYNAMIC;
-                yaw(inst.transform, 0, 0, 0.25f, 0);
-                api.ok(api.UnxSceneAddInstance(r, &inst, &bodyIndex[b]), "body");
-            }
+            std::vector<uint32_t> skeletons(characters);
             std::vector<float> joints(12ull * bones);
             for (uint32_t c = 0; c < characters; ++c)
             {
@@ -320,17 +348,12 @@ int main(int argc, char** argv)
                 inst.mesh = tubeMesh;
                 inst.flags = UNX_INSTANCE_CAST_SHADOW | UNX_INSTANCE_DYNAMIC | UNX_INSTANCE_SKINNED;
                 inst.skeleton = skeletons[c];
-                const float a = 6.2831853f * c / characters, rad = 8 + 6 * (float)(c % 4);
-                yaw(inst.transform, a, rad * std::cos(a), 0, rad * std::sin(a));
+                const gate::CharacterSlot& slot = placement.characters[c];
+                yaw(inst.transform, slot.yaw, slot.position[0], slot.position[1], slot.position[2]);
                 api.ok(api.UnxSceneAddInstance(r, &inst, nullptr), "character");
-                inst.skeleton = UNX_NONE;
             }
-            UnxEnvironmentDesc env{};
-            api.ok(api.UnxEnvironmentDefaults(&env), "UnxEnvironmentDefaults");
-            api.ok(api.UnxSceneSetEnvironment(r, &env), "UnxSceneSetEnvironment");
             if (!saveScene.empty())
             {
-                const UnxCameraDesc camera{ { 0, 9, 34 }, 1.0471976f, { 0, -0.25f, -0.968f }, 0.05f, { 0, 0.968f, -0.25f }, 15.0f };
                 api.ok(api.UnxSceneSave(r, saveScene.c_str(), "host_dynamic", &camera), "UnxSceneSave");
                 api.ok(api.UnxRendererDestroy(r), "UnxRendererDestroy");
                 logf("saved %s\n", saveScene.c_str());
@@ -342,6 +365,7 @@ int main(int argc, char** argv)
             api.ok(api.UnxSceneCommit(r, &info), "UnxSceneCommit");
 
             std::vector<UnxTransformUpdate> updates(bodies);
+            uint64_t teleports = 0;
             std::vector<float> poses(12ull * bones * characters);
             std::vector<double> updateMs, gpuMs, recordMs, submitMs;
             std::map<std::string, std::vector<double>> passMs;
@@ -359,9 +383,10 @@ int main(int argc, char** argv)
                 // only the calls are timed.
                 for (uint32_t b = 0; b < bodies; ++b)
                 {
-                    const float a = 0.7f * t + 6.2831853f * b / bodies, rad = 3 + 0.02f * (b % 97);
-                    updates[b].instance = bodyIndex[b];
-                    yaw(updates[b].transform, a, rad * std::cos(a), 0.25f + 0.2f * (b % 5), rad * std::sin(a));
+                    updates[b].instance = bodyInstance[b];
+                    const bool restart = gate::bodyAt(placement.bodies[b], placement.gravity, t, frame == 0 ? -1.0 : (double)(frame - 1) / 60.0, updates[b].transform);
+                    updates[b].flags = restart ? UNX_TRANSFORM_TELEPORT : 0u;
+                    teleports += restart ? 1 : 0;
                 }
                 for (uint32_t c = 0; c < characters; ++c) pose(poses.data() + 12ull * bones * c, bones, segment, t, (float)c);
                 const auto u0 = std::chrono::steady_clock::now();
@@ -375,8 +400,7 @@ int main(int argc, char** argv)
                 f.deltaTime = 1.0f / 60;
                 f.outputWidth = w;
                 f.outputHeight = h;
-                const float cam[12] = { 0, 9, 34, 1.0471976f, 0, -0.25f, -0.968f, 0.05f, 0, 0.968f, -0.25f, 15.0f };
-                std::memcpy(&f.camera, cam, sizeof cam);
+                f.camera = camera;
                 uint64_t ticket = 0;
                 api.ok(api.UnxFrameQueue(r, &f, &ticket), "UnxFrameQueue");
                 const double upd = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - u0).count();
@@ -406,14 +430,14 @@ int main(int argc, char** argv)
             }
             api.ok(api.UnxRendererDestroy(r), "UnxRendererDestroy");
             const Distribution g = Distribution::of(gpuMs), u = Distribution::of(updateMs);
-            logf("%s: %u bodies + %u characters x %u bones, %llu instanced triangles: GPU frame median %.3f ms (P95 %.3f, P99 %.3f) | host updates %.3f ms | record %.3f submit %.3f ms\n",
-                 rs.c_str(), bodies, characters, bones, (unsigned long long)instancedTriangles, g.median, g.p95, g.p99, u.median, Distribution::of(recordMs).median,
+            logf("%s: %s, %u bodies (%llu restarts) + %u characters x %u bones, %u instances: GPU frame median %.3f ms (P95 %.3f, P99 %.3f) | host updates %.3f ms | record %.3f submit %.3f ms\n",
+                 rs.c_str(), placement.scene.c_str(), bodies, (unsigned long long)teleports, characters, bones, info.instances, g.median, g.p95, g.p99, u.median, Distribution::of(recordMs).median,
                  Distribution::of(submitMs).median);
             std::string passJson;
             // Per pass over the frames it ran in (passes that run only on some frames, e.g. LUT rebuilds, have count < frames).
             for (const std::string& name : order) passJson += format("%s\n      \"%s\": %s", passJson.empty() ? "" : ",", name.c_str(), distJson(passMs[name]).c_str());
-            json += format("%s    {\"resolution\": \"%s\", \"meshTriangles\": %llu, \"instancedTriangles\": %llu, \"clusters\": %llu, \"sceneBuildMs\": %.1f, \"gpuFrameMs\": %s, \"hostUpdateMs\": %s, \"cpuRecordMs\": %s, \"cpuSubmitMs\": %s, \"passMs\": {%s}}",
-                           firstRun ? "" : ",\n", rs.c_str(), (unsigned long long)info.triangles, (unsigned long long)instancedTriangles, (unsigned long long)info.clusters,
+            json += format("%s    {\"resolution\": \"%s\", \"meshTriangles\": %llu, \"instances\": %u, \"bodyRestarts\": %llu, \"clusters\": %llu, \"sceneBuildMs\": %.1f, \"gpuFrameMs\": %s, \"hostUpdateMs\": %s, \"cpuRecordMs\": %s, \"cpuSubmitMs\": %s, \"passMs\": {%s}}",
+                           firstRun ? "" : ",\n", rs.c_str(), (unsigned long long)info.triangles, info.instances, (unsigned long long)teleports, (unsigned long long)info.clusters,
                            info.buildMs, distJson(gpuMs).c_str(), distJson(updateMs).c_str(), distJson(recordMs).c_str(),
                            distJson(submitMs).c_str(), passJson.c_str());
             firstRun = false;
