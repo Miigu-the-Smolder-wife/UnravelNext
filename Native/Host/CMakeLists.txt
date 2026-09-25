@@ -29,7 +29,7 @@ if(unity_sources)
   unx_target_defaults(unx_host)
   set_target_properties(unx_host PROPERTIES OUTPUT_NAME UnravelNext)
   target_include_directories(unx_host PRIVATE "${UNX_UNITY_PLUGIN_API}")
-  target_link_libraries(unx_host PRIVATE unx_host_core)
+  target_link_libraries(unx_host PRIVATE unx_host_core shell32)  # shell32: CommandLineToArgvW (-unxLogFile)
   add_dependencies(unx_host unx_render_shaders unx_host_shaders unx_build_identity)
   # The identity of the source this DLL was linked from travels with it (Deploy.ps1 records it next to the plugin):
   # copied after a successful link only, so a later failed build cannot relabel an older DLL.

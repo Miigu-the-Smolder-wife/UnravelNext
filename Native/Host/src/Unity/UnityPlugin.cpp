@@ -15,6 +15,8 @@
 #include "IUnityGraphicsD3D12.h"
 #include "IUnityInterface.h"
 
+#include <shellapi.h>
+
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -512,8 +514,31 @@ void UNITY_INTERFACE_API onRenderEvent(int eventId, void* data)
 }
 } // namespace
 
+namespace
+{
+// "-unxLogFile <path>" on the host's command line (Player or editor): the renderer's log (unx::logf; stderr is not
+// captured by Unity) also goes to that file, e.g. track statistics lines (reflection.stats_log_frames).
+void openLogFileFromCommandLine()
+{
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return;
+    for (int i = 0; i + 1 < argc; ++i)
+    {
+        if (std::wstring(argv[i]) != L"-unxLogFile") continue;
+        const int bytes = WideCharToMultiByte(CP_UTF8, 0, argv[i + 1], -1, nullptr, 0, nullptr, nullptr);
+        std::string path(bytes > 0 ? (size_t)bytes - 1 : 0, '\0');
+        if (bytes > 1) WideCharToMultiByte(CP_UTF8, 0, argv[i + 1], -1, path.data(), bytes, nullptr, nullptr);
+        if (!path.empty()) unx::logOpenFile(path);
+        break;
+    }
+    LocalFree(argv);
+}
+} // namespace
+
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API UnityPluginLoad(IUnityInterfaces* interfaces)
 {
+    openLogFileFromCommandLine();
     // Inside Unity a device removal must not end the process (v1.27): renderer calls report UNX_DEVICE_REMOVED instead.
     unx::render::setDeviceRemovedPolicy(unx::render::DeviceRemovedPolicy::Throw);
     g_interfaces = interfaces;
