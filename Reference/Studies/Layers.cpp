@@ -1275,6 +1275,277 @@ void v1Albedo(const std::string& out)
     logf("%s", md.str().c_str());
 }
 
+// v1 metal multiple-scattering compensation candidates (core request after 289ac6a): uncoated GGX conductor with the v1
+// Schlick Fresnel, measured against the microsurface multiple-scattering conductor (Heitz et al. 2016 random walk, the
+// same Fresnel at every microfacet bounce). Definitions:
+//   v1  F D V (1 + F0 (1/E(mu_v) - 1))                                  (current, not reciprocal)
+//   K   F D V + F_ms (1 - E(mu_i)) (1 - E(mu_o)) / (pi (1 - E_avg)),     F_ms = F_avg^2 E_avg / (1 - F_avg (1 - E_avg)),
+//       F_avg = F0 + (1 - F0) / 21 (cosine-weighted Schlick mean)       (additive Kulla-Conty)
+//   G   F D V g(mu_i) g(mu_o), g solved per channel by symmetric Sinkhorn so every incidence bin's energy equals the
+//       reference albedo                                                (multiplicative symmetric scale)
+// E is the core single-scattering table (scene::model::directionalAlbedo). Metrics: adjoint albedo (fixed light,
+// from the tables), forward albedo (fixed view, direct integration), lobe L1, white furnace / sun + sky sphere dE.
+namespace cond
+{
+Rgb schlick(const Rgb& f0, double c)
+{
+    const float w = (float)std::pow(1 - std::clamp(c, 0.0, 1.0), 5.0);
+    return f0 + (Rgb(1.0f) - f0) * w;
+}
+// Heitz conductor walk: arrival propagation direction wr (z < 0); returns the leaving direction (z > 0) and the
+// Fresnel throughput. False when the order cap is hit.
+bool walk(float3 wr, double a, const Rgb& f0, reference::Pcg32& rng, float3& out, Rgb& w)
+{
+    double hr = 1 + ms::invC1(0.999);
+    w = Rgb(1.0f);
+    for (int order = 0; order < 4096; ++order)
+    {
+        hr = ms::sampleHeight(wr, hr, rng.uniform(), a);
+        if (std::isinf(hr))
+        {
+            out = wr;
+            return wr.z > 0;
+        }
+        const float3 wi = -wr;
+        const float3 m = ms::vndfAny(wi, a, rng.uniform(), rng.uniform());
+        const double c = std::max(0.0, (double)dot(wi, m));
+        w *= schlick(f0, c);
+        wr = m * (float)(2 * c) - wi;
+    }
+    return false;
+}
+
+struct Def
+{
+    double a = 0, r = 0, Eavg = 0;
+    Rgb f0, Fms;
+    const std::vector<Rgb>* g = nullptr;
+    int kind = 0;  // 0 v1, 1 K, 2 G, 3 single scattering only (f_1)
+    double E(double mu) const { return scene::model::directionalAlbedo((float)mu, (float)r); }
+    // f(v = wo, l = wi)
+    Rgb eval(float3 wo, float3 wi) const
+    {
+        if (wo.z <= 0 || wi.z <= 0) return {};
+        if (kind == 0)
+        {
+            scene::model::Surface s;
+            s.baseColor = { f0.r, f0.g, f0.b };
+            s.metallic = 1;
+            s.roughness = (float)r;
+            return reference::evaluateModel(s, { 0, 0, 1 }, wo, wi);
+        }
+        const float3 h = normalize(wo + wi);
+        const double dv = ggxD({ 0, 0, 1 }, h, a) * g2(wi.z, wo.z, a) / (4.0 * wi.z * wo.z);
+        Rgb f = schlick(f0, dot(wo, h)) * (float)dv;
+        if (kind == 1 && Eavg < 1)
+            f += Fms * (float)((1 - E(wi.z)) * (1 - E(wo.z)) / (kPi * (1 - Eavg)));
+        if (kind == 2 && g)
+            for (int c = 0; c < 3; ++c) (&f.r)[c] *= (float)(Definitions::binLerp(*g, wi.z, c) * Definitions::binLerp(*g, wo.z, c));
+        return f;
+    }
+};
+
+// Table of f(v = exit, l = incidence) cos dω per (incidence bin, exit bin), by mixture sampling of the exit direction.
+void defTable(const Def& d, uint32_t samples, Table& T)
+{
+    parallelFor(NI, [&](uint32_t ii) {
+        const float3 wi = incident((int)ii);
+        reference::Pcg32 rng(0x3E7A + ii, 17 + (uint64_t)d.kind);
+        for (uint32_t s = 0; s < samples; ++s)
+        {
+            float3 wo;
+            if (rng.uniform() < 0.75)
+            {
+                const float3 h = vndf(wi, d.a, rng.uniform(), rng.uniform());
+                wo = h * (2 * dot(wi, h)) - wi;
+            }
+            else wo = cosineDir(rng.uniform(), rng.uniform());
+            if (wo.z <= 1e-6f) continue;
+            const float3 h = normalize(wo + wi);
+            const double pdf = 0.75 * g1(wi.z, d.a) * ggxD({ 0, 0, 1 }, h, d.a) / (4 * wi.z) + 0.25 * wo.z / kPi;
+            if (!(pdf > 0)) continue;
+            int bt, bp;
+            binOf(wo, bt, bp);
+            T.at((int)ii, bt, bp) += d.eval(wo, wi) * (float)(wo.z / pdf / samples);
+        }
+    });
+}
+
+// Forward albedo: fixed view v = incident(i), integral over the light direction.
+std::vector<Rgb> forwardAlbedo(const Def& d, uint32_t samples)
+{
+    std::vector<Rgb> out(NI);
+    parallelFor(NI, [&](uint32_t ii) {
+        const float3 v = incident((int)ii);
+        reference::Pcg32 rng(0x4F0D + ii, 19 + (uint64_t)d.kind);
+        Rgb sum;
+        for (uint32_t s = 0; s < samples; ++s)
+        {
+            float3 l;
+            if (rng.uniform() < 0.75)
+            {
+                const float3 h = vndf(v, d.a, rng.uniform(), rng.uniform());
+                l = h * (2 * dot(v, h)) - v;
+            }
+            else l = cosineDir(rng.uniform(), rng.uniform());
+            if (l.z <= 1e-6f) continue;
+            const float3 h = normalize(l + v);
+            const double pdf = 0.75 * g1(v.z, d.a) * ggxD({ 0, 0, 1 }, h, d.a) / (4 * v.z) + 0.25 * l.z / kPi;
+            if (!(pdf > 0)) continue;
+            sum += d.eval(v, l) * (float)(l.z / pdf / samples);
+        }
+        out[ii] = sum;
+    });
+    return out;
+}
+} // namespace cond
+
+void metalMsStudy(const std::string& out, uint32_t photons)
+{
+    struct Col
+    {
+        const char* name;
+        Rgb f0;
+    };
+    // Gold and copper F0 from the fitted presets (metal_presets.md), normal-incidence reflectance in air.
+    const Col cols[] = { { "white (F0 1)", Rgb(1.0f) }, { "gold F0 (0.996, 0.733, 0.359)", Rgb(0.996f, 0.733f, 0.359f) }, { "copper F0 (0.912, 0.623, 0.518)", Rgb(0.912f, 0.623f, 0.518f) } };
+    const double rs[] = { 0.05, 0.1, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0 };
+    const std::vector<EnvSample> furnace = environment(true), sky = environment(false);
+    double skyWhite = 0;
+    {
+        const float3 s = normalize(float3{ 0.45f, 0.62f, 0.64f });
+        for (const EnvSample& e : sky)
+            if (dot(e.dir, s) > 0) skyWhite += e.L.luminance() * dot(e.dir, s) * e.dw / kPi;
+    }
+    std::ostringstream md;
+    md << "# v1 metal multiple-scattering compensation: candidates K and G vs the MS conductor [measured]\n\n"
+          "`unx_study_material_layers metalms`. Uncoated GGX conductor, Schlick Fresnel with the given F0 in every definition and in "
+          "the reference (so only the multiple-scattering handling differs). Reference: microsurface multiple-scattering walk (Heitz "
+          "2016), reciprocal, forward = adjoint. Photons per incidence bin: "
+       << photons
+       << ". Adjoint albedo = fixed light, energy over all exit directions (from the tables); forward albedo = fixed view, "
+          "integral over the light (direct integration). Worst relative error over theta 0-89.5 deg (@theta); '(<=85°)' = worst "
+          "over theta <= 85 deg, excluding the grazing bins where the E table resolution limits. Criteria as the layer study: "
+          "albedo rel <= 1 % (core, this request), L1 <= 0.05, dE mean <= 1.0 / P99 <= 2.3.\n\n"
+          "| F0 | r | def | adjoint albedo err (all / <=85°) | forward albedo err (all / <=85°) | worst L1 | L1 noise | furnace dE mean / P99 | sun+sky dE mean / P99 | render noise P99 furnace / sky | reference albedo 0 / 60 / 85 / 89.5° |\n"
+          "|---|---|---|---|---|---|---|---|---|---|---|\n";
+    for (const Col& col : cols)
+        for (double r : rs)
+        {
+            const double a = scene::model::alphaFromRoughness((float)r);
+            // Reference tables.
+            Table phys, half;
+            parallelFor(NI, [&](uint32_t ii) {
+                const float3 wi = incident((int)ii);
+                reference::Pcg32 rng(0x7A11 + ii, 23 + (uint64_t)(r * 1000));
+                for (uint32_t s = 0; s < photons; ++s)
+                {
+                    float3 o;
+                    Rgb w;
+                    if (!cond::walk(-wi, a, col.f0, rng, o, w)) continue;
+                    int bt, bp;
+                    binOf(o, bt, bp);
+                    const Rgb add = w * (1.0f / photons);
+                    phys.at((int)ii, bt, bp) += add;
+                    if (s & 1) half.at((int)ii, bt, bp) += add * 2.0f;
+                }
+            });
+            std::vector<Rgb> refAlb(NI);
+            for (int i = 0; i < NI; ++i)
+                for (int t = 0; t < NT; ++t)
+                    for (int p = 0; p < NP; ++p) refAlb[i] += phys.at(i, t, p);
+            const std::vector<Rgb3> pf = renderSphere(phys, furnace, 64), ps = renderSphere(phys, sky, 64);
+            // Definitions.
+            cond::Def base;
+            base.a = a;
+            base.r = r;
+            base.f0 = col.f0;
+            {
+                double e = 0;
+                for (int i = 0; i < 1024; ++i)
+                {
+                    const double mu = (i + 0.5) / 1024;
+                    e += base.E(mu) * 2 * mu / 1024;
+                }
+                base.Eavg = e;
+                const Rgb favg = col.f0 + (Rgb(1.0f) - col.f0) * (1.0f / 21);
+                for (int c = 0; c < 3; ++c)
+                {
+                    const double f = (&favg.r)[c];
+                    (&base.Fms.r)[c] = (float)(f * f * e / (1 - f * (1 - e)));
+                }
+            }
+            std::vector<Rgb> g(NI, Rgb(1.0f));
+            {
+                cond::Def ss = base;
+                ss.kind = 3;
+                Table tf;
+                cond::defTable(ss, photons / 2, tf);
+                for (int c = 0; c < 3; ++c)
+                {
+                    std::vector<double> M((size_t)NI * NT, 0.0), gg(NI, 1.0);
+                    for (int i = 0; i < NI; ++i)
+                        for (int t = 0; t < NT; ++t)
+                            for (int p = 0; p < NP; ++p) M[(size_t)i * NT + t] += (&tf.at(i, t, p).r)[c];
+                    for (int it = 0; it < 500; ++it)
+                        for (int i = 0; i < NI; ++i)
+                        {
+                            double m = 0;
+                            for (int t = 0; t < NT; ++t) m += M[(size_t)i * NT + t] * gg[t];
+                            const double target = (&refAlb[i].r)[c];
+                            if (m > 1e-9 && target > 0) gg[i] = std::sqrt(gg[i] * target / m);
+                        }
+                    for (int i = 0; i < NI; ++i) (&g[i].r)[c] = (float)gg[i];
+                }
+            }
+            const char* names[3] = { "v1", "K", "G" };
+            for (int kind = 0; kind < 3; ++kind)
+            {
+                cond::Def d = base;
+                d.kind = kind;
+                d.g = &g;
+                Table T;
+                cond::defTable(d, photons, T);
+                const Metrics m = compare(T, phys, half, furnace, sky, skyWhite, &pf, &ps);
+                const std::vector<Rgb> fwd = cond::forwardAlbedo(d, photons);
+                double adjAll = 0, adjIn = 0, fwdAll = 0, fwdIn = 0;
+                int adjAt = 0, fwdAt = 0;
+                for (int i = 0; i < NI; ++i)
+                {
+                    double adjSum = 0;
+                    for (int t = 0; t < NT; ++t)
+                        for (int p = 0; p < NP; ++p) adjSum += T.at(i, t, p).luminance();
+                    const double ref = refAlb[i].luminance();
+                    const double ea = std::fabs(adjSum - ref) / ref, ef = std::fabs(fwd[i].luminance() - ref) / ref;
+                    if (ea > adjAll)
+                    {
+                        adjAll = ea;
+                        adjAt = i;
+                    }
+                    if (ef > fwdAll)
+                    {
+                        fwdAll = ef;
+                        fwdAt = i;
+                    }
+                    if (i + 0.5 <= 85)
+                    {
+                        adjIn = std::max(adjIn, ea);
+                        fwdIn = std::max(fwdIn, ef);
+                    }
+                }
+                char b[640];
+                std::snprintf(b, sizeof b,
+                              "| %s | %.2f | %s | %.1f%% @%.0f° / %.1f%% | %.1f%% @%.0f° / %.1f%% | %.3f @%.0f° | %.3f | %.2f / %.2f | %.2f / %.2f | %.2f / %.2f | %.3f / %.3f / %.3f / %.3f |\n",
+                              col.name, r, names[kind], 100 * adjAll, adjAt + 0.5, 100 * adjIn, 100 * fwdAll, fwdAt + 0.5, 100 * fwdIn, m.l1Max, m.l1WorstTheta, m.l1Noise, m.furnaceMean,
+                              m.furnaceP99, m.skyMean, m.skyP99, m.furnaceNoiseP99, m.skyNoiseP99, refAlb[0].luminance(), refAlb[60].luminance(), refAlb[85].luminance(),
+                              refAlb[89].luminance());
+                md << b;
+                logf("%s", b);
+            }
+            writeTextFile(out, md.str());
+        }
+}
+
 // Coat + film (design 3, item 3): film under the coat (outer index 1.5); the physical base uses the exact spectral film
 // reflectance, the definition method (a).
 void coatFilmStudy(const std::string& out, uint32_t photons)
