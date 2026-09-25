@@ -7,6 +7,7 @@
 //       + .halfA.pfm / .halfB.pfm). --spp overrides reference.samples_per_pixel (recorded in the name and the hash);
 //       cached references (the ones gates read) use the configured value (>= 4096). Checkpoints every 10 min and resumes.
 //       --threads N: logical processors to use (default 3/4, the highest-numbered; the rest stay free for other sessions).
+//       While Cache/Reference/LIGHT exists (the user is gaming but work may continue lightly): 8 processors, idle priority.
 //       --also-hold <file>: an extra pause file (the render queue passes Cache/Reference/PAUSE_QUEUE so ad-hoc renders can
 //       pause it instead of running beside it).
 //       --volume-order MIN:MAX (diagnostics, MAX may be inf) keeps only light with MIN..MAX atmosphere scattering events;
@@ -166,7 +167,10 @@ void limitProcessors(const Args& a)
 {
     const unsigned hw = std::thread::hardware_concurrency();
     if (hw < 2 || hw > 64) return;
-    const unsigned n = std::clamp(a.threads ? a.threads : hw * 3 / 4, 1u, hw);
+    // Light mode (Cache/Reference/LIGHT exists, e.g. while the user plays a game): 8 processors at idle priority.
+    const bool light = std::filesystem::exists(root() / "Cache" / "Reference" / "LIGHT");
+    if (light) SetPriorityClass(GetCurrentProcess(), IDLE_PRIORITY_CLASS);
+    const unsigned n = std::clamp(a.threads ? a.threads : light ? 8u : hw * 3 / 4, 1u, hw);
     if (n == hw) return;
     const unsigned long long all = hw == 64 ? ~0ull : ((1ull << hw) - 1), low = (1ull << (hw - n)) - 1;
     if (SetProcessAffinityMask(GetCurrentProcess(), (DWORD_PTR)(all & ~low))) logf("reference: using %u of %u logical processors (%u..%u)\n", n, hw, hw - n, hw - 1);
