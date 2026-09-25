@@ -96,6 +96,9 @@ float3 giAnchorAtHit(GiHeader h, float3 hitPosition, float3 rayDirection)
 uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anchor, float3 normal, out bool created)
 {
     created = false;
+    // Existing entries (nearly every call) by plain loads; the compare-exchange probe below only when the key is absent.
+    const uint existing = giFind(b, h, key);
+    if (existing != GI_ENTRY_PENDING) return existing;
     uint slot = giHash(key) & (h.tableSlots - 1);
     [loop] for (uint i = 0; i < GI_PROBE_LIMIT; ++i)
     {
