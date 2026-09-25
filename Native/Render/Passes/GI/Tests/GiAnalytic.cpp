@@ -3,6 +3,10 @@
 //     so the irradiance on every wall is E = pi Le / (1 - rho). Exercises multi-bounce through cached hit irradiance,
 //     the hash grid over several cell levels, texel stratification, SH projection, probe gather and interpolation.
 //  2. Open sky: a ground plane (albedo 0.5) under constant sky radiance L. The plane cannot see itself: E = pi L.
+//  3. Sunlit ground and a black wall: a ground plane (albedo rho) lit by the sun alone (no sky), a vertical wall of albedo
+//     0 facing the sun's side. The wall's indirect irradiance is the ground's single bounce, E = rho E_sun cos(theta_sun) F,
+//     F = the view factor from the probe to the (unshadowed) ground in front of the wall, exact by Lambert's contour
+//     integral per probe. Exercises the sun at GI hits (illuminance, cosine, shadow ray) that 1 and 2 do not.
 // Each runs the frame path (RayScene::record -> ray-traced primary visibility standing in for V/M -> GiSystem::record)
 // for N frames and evaluates screenProbeIrradiance (M's API) at every probe pixel. Also reports the frames needed to
 // come within 1 % (reconvergence, gi.relight_frames_max).
@@ -18,6 +22,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 
 using namespace unx;
 using namespace unx::render;
@@ -108,6 +113,65 @@ scene::Scene openSky(float albedo)
     return s;
 }
 
+// Ground plane (albedo rho, 400 x 400 m) and a wall of albedo 0 in the plane x = 0 facing +x (60 m wide, 20 m tall),
+// sun from the +x side: the ground in front of the wall is fully lit.
+scene::Scene sunWall(float albedo, float3 sunDirection)
+{
+    scene::Scene s;
+    s.name = "gi_sun_wall";
+    scene::Material ground, wall;
+    ground.name = "ground";
+    ground.baseColor = { albedo, albedo, albedo };
+    wall.name = "wall";
+    wall.baseColor = { 0, 0, 0 };
+    s.materials.push_back(ground);
+    s.materials.push_back(wall);
+    scene::Mesh mesh;
+    mesh.name = "ground_and_wall";
+    for (auto [x, z] : { std::pair{ -200.f, -200.f }, { 200.f, -200.f }, { 200.f, 200.f }, { -200.f, 200.f } })
+    {
+        mesh.positions.push_back({ x, 0, z });
+        mesh.normals.push_back({ 0, 1, 0 });
+        mesh.uv0.push_back({ x, z });
+    }
+    for (auto [y, z] : { std::pair{ 0.f, -30.f }, { 20.f, -30.f }, { 20.f, 30.f }, { 0.f, 30.f } })
+    {
+        mesh.positions.push_back({ 0, y, z });
+        mesh.normals.push_back({ 1, 0, 0 });
+        mesh.uv0.push_back({ z, y });
+    }
+    mesh.indices = { 0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7 };
+    mesh.submeshes.push_back({ 0, 6, 0 });
+    mesh.submeshes.push_back({ 6, 6, 1 });
+    s.meshes.push_back(mesh);
+    s.instances.push_back({});
+    s.sun.direction = sunDirection;
+    s.sun.illuminance = 0;  // GI's sun comes from setConstantSky
+    scene::Camera cam;
+    cam.name = "facing the wall";
+    cam.position = { 14, 5, 0 };
+    cam.forward = normalize(float3{ -1, -0.2f, 0 });
+    cam.up = normalize(cross(cross(cam.forward, float3{ 0, 1, 0 }), cam.forward));
+    s.cameras.push_back(cam);
+    return s;
+}
+
+// View factor from a point p with unit normal n to a planar polygon (all of it in front of p), Lambert's contour
+// integral: F = |sum_i angle(R_i, R_i+1) n . unit(R_i x R_i+1)| / (2 pi), R_i = unit(q_i - p).
+double viewFactor(float3 p, float3 n, const std::vector<float3>& polygon)
+{
+    double sum = 0;
+    for (size_t i = 0; i < polygon.size(); ++i)
+    {
+        const float3 a = normalize(polygon[i] - p), b = normalize(polygon[(i + 1) % polygon.size()] - p);
+        const float3 c = cross(a, b);
+        const double len = std::sqrt((double)c.x * c.x + (double)c.y * c.y + (double)c.z * c.z);
+        if (len < 1e-12) continue;
+        sum += std::atan2(len, (double)dot(a, b)) * ((double)n.x * c.x + (double)n.y * c.y + (double)n.z * c.z) / len;
+    }
+    return std::fabs(sum) / (2 * kPi);
+}
+
 struct Buffer
 {
     ComPtr<ID3D12Resource> resource;
@@ -131,6 +195,7 @@ Buffer createBuffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE type, bool u
 struct Outcome
 {
     double mean = 0, minimum = 0, maximum = 0, worst = 0;  // worst = max |E / expected - 1| over valid probes
+    double expectedMean = 0;                                 // mean expected E over the same probes
     double radianceMean = 0, radianceWorst = 0;              // screenProbeRadiance against the uniform radiance
     uint32_t probes = 0;
     int converged = -1;  // first frame whose mean is within 1 %
@@ -138,8 +203,10 @@ struct Outcome
     uint32_t tilePixels = 0, tileMismatches = 0;  // screenProbeGatherTile vs screenProbeGather (ProbeTileCompare), all frames
 };
 
-Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky, double expected, double expectedRadiance,
-            uint32_t frames, uint32_t width, uint32_t height)
+// expected(position, normal): the analytic irradiance at a probe, < 0 to leave the probe out. expectedRadiance <= 0: the K
+// radiance is not checked (not uniform).
+Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky, float3 sun,
+            const std::function<double(float3, float3)>& expected, double expectedRadiance, uint32_t frames, uint32_t width, uint32_t height)
 {
     GpuScene gpuScene(device);
     gpuScene.upload(s);
@@ -155,10 +222,10 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
         D3D12_RANGE none{ 0, 0 };
         check(constants.resource->Map(0, &none, reinterpret_cast<void**>(&mapped)), "map constants");
         const uint32_t probesX = (width + 7) / 8, probesY = (height + 7) / 8;
-        const uint64_t resultBytes = (uint64_t)probesX * probesY * 32;
+        const uint64_t resultBytes = (uint64_t)probesX * probesY * 64;
         Buffer result = createBuffer(device, resultBytes, D3D12_HEAP_TYPE_DEFAULT, true);
         Buffer readback = createBuffer(device, resultBytes, D3D12_HEAP_TYPE_READBACK, false);
-        std::vector<float> values((size_t)probesX * probesY * 8);
+        std::vector<float> values((size_t)probesX * probesY * 16);
         gi::GiSystem* giSystem = nullptr;
 
         for (uint32_t f = 0; f < frames; ++f)
@@ -224,7 +291,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
                           });
             gi::GiSystem& gi = gi::GiSystem::get(fc);
             giSystem = &gi;
-            gi.setConstantSky(sky, { 0, 0, 0 });
+            gi.setConstantSky(sky, sun);
             gi.record(fc, main, rays);
             const BufferRef resultRef = graph.importBuffer(result.resource.Get(), { "test result", resultBytes, 16 });
             const TextureRef probes = main.screenProbes, maps = main.screenProbeMaps;
@@ -292,21 +359,26 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             std::memcpy(values.data(), rb, values.size() * 4);
             readback.resource->Unmap(0, &none);
 
-            double sum = 0, lo = 1e30, hi = -1e30, worst = 0, rsum = 0, rworst = 0;
+            double sum = 0, esum = 0, lo = 1e30, hi = -1e30, worst = 0, rsum = 0, rworst = 0;
             uint32_t n = 0;
-            for (size_t i = 0; i < values.size() / 8; ++i)
+            for (size_t i = 0; i < values.size() / 16; ++i)
             {
-                if (values[8 * i + 3] < 0) continue;
-                const double e = (values[8 * i] + values[8 * i + 1] + values[8 * i + 2]) / 3.0;
+                const float* v = &values[16 * i];
+                if (v[3] < 0) continue;
+                const double x = expected({ v[8], v[9], v[10] }, { v[12], v[13], v[14] });
+                if (x < 0) continue;
+                const double e = (v[0] + v[1] + v[2]) / 3.0;
                 sum += e;
+                esum += x;
                 lo = std::min(lo, e);
                 hi = std::max(hi, e);
-                worst = std::max(worst, std::fabs(e / expected - 1));
-                const double r = (values[8 * i + 4] + values[8 * i + 5] + values[8 * i + 6]) / 3.0;
+                worst = std::max(worst, std::fabs(e / x - 1));
+                const double r = (v[4] + v[5] + v[6]) / 3.0;
                 rsum += r;
-                rworst = std::max(rworst, std::fabs(r / expectedRadiance - 1));
+                if (expectedRadiance > 0) rworst = std::max(rworst, std::fabs(r / expectedRadiance - 1));
                 ++n;
             }
+            out.expectedMean = n ? esum / n : 0;
             out.radianceMean = n ? rsum / n : 0;
             out.radianceWorst = rworst;
             out.probes = n;
@@ -314,10 +386,10 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             out.minimum = lo;
             out.maximum = hi;
             out.worst = worst;
-            if (out.converged < 0 && n && std::fabs(out.mean / expected - 1) < 0.01) out.converged = (int)f;
+            if (out.converged < 0 && n && std::fabs(out.mean / out.expectedMean - 1) < 0.01) out.converged = (int)f;
             if (f == frames - 1 || (f & (f - 1)) == 0)
                 logf("  frame %3u: mean E %.4f (expected %.4f, %+.2f %%), min %.4f max %.4f, worst probe %.2f %%; K radiance mean %.4f (expected %.4f), worst %.2f %%\n", f,
-                     out.mean, expected, 100 * (out.mean / expected - 1), lo, hi, 100 * worst, out.radianceMean, expectedRadiance, 100 * rworst);
+                     out.mean, out.expectedMean, 100 * (out.mean / out.expectedMean - 1), lo, hi, 100 * worst, out.radianceMean, expectedRadiance, 100 * rworst);
         }
         if (giSystem) out.stats = giSystem->readStats();
         logf("  cache after the last frame: %u live, %u free, %u requested, %u selected + %u background updates, %u hit entries, %u created, %u resets, "
@@ -353,18 +425,36 @@ int main(int argc, char** argv)
 
         const float le = 1.0f, rho = 0.5f;
         logf("white furnace: Le %.2f, albedo %.2f, expected E = pi Le / (1 - rho) = %.4f\n", le, rho, kPi * le / (1 - rho));
-        const Outcome a = run(device, shaders, quality, furnace(le, rho), { 0, 0, 0 }, kPi * le / (1 - rho), le / (1 - rho), frames, 1920, 1080);
+        const Outcome a = run(device, shaders, quality, furnace(le, rho), { 0, 0, 0 }, { 0, 0, 0 }, [&](float3, float3) { return (double)kPi * le / (1 - rho); },
+                              le / (1 - rho), frames, 1920, 1080);
         const bool okA = std::fabs(a.mean / (kPi * le / (1 - rho)) - 1) < 0.01 && a.worst < 0.03 && a.radianceWorst < 0.03 && a.tilePixels > 0 && a.tileMismatches == 0;
         logf("white furnace: %u probes, mean %+.3f %%, worst probe %.3f %%, within 1 %% from frame %d; K radiance worst %.3f %% -> %s\n", a.probes,
              100 * (a.mean / (kPi * le / (1 - rho)) - 1), 100 * a.worst, a.converged, 100 * a.radianceWorst, okA ? "PASS" : "FAIL");
         pass = pass && okA;
 
         logf("open sky: L 1, ground albedo 0.5, expected E = pi\n");
-        const Outcome b = run(device, shaders, quality, openSky(0.5f), { 1, 1, 1 }, kPi, 1.0, frames, 1920, 1080);
+        const Outcome b = run(device, shaders, quality, openSky(0.5f), { 1, 1, 1 }, { 0, 0, 0 }, [](float3, float3) { return (double)kPi; }, 1.0, frames, 1920, 1080);
         const bool okB = std::fabs(b.mean / kPi - 1) < 0.01 && b.worst < 0.03 && b.radianceWorst < 0.03 && b.tilePixels > 0 && b.tileMismatches == 0;
         logf("open sky: %u probes, mean %+.3f %%, worst probe %.3f %%, within 1 %% from frame %d; K radiance worst %.3f %% -> %s\n", b.probes, 100 * (b.mean / kPi - 1),
              100 * b.worst, b.converged, 100 * b.radianceWorst, okB ? "PASS" : "FAIL");
         pass = pass && okB;
+        {
+            const float groundAlbedo = 0.5f;
+            const float3 l = normalize(float3{ 1, 1.2f, 0.4f });
+            logf("sunlit ground and a black wall: ground albedo %.2f, sun E 1 at elevation %.1f deg, no sky; wall probes expect rho E cos F (Lambert per probe)\n",
+                 groundAlbedo, std::asin(l.y) * 180 / kPi);
+            const std::vector<float3> lit = { { 0, 0, -200 }, { 200, 0, -200 }, { 200, 0, 200 }, { 0, 0, 200 } };  // ground in front of the wall
+            // Wall probes only (normal +x, on the wall: |z| < 30, y < 20); the ground's own probes see a black wall and no sky.
+            auto wallExpected = [&](float3 p, float3 n) -> double {
+                if (n.x < 0.99f || std::fabs(p.x) > 0.05f || std::fabs(p.z) > 29.5f || p.y > 19.5f || p.y < 0.05f) return -1;
+                return groundAlbedo * l.y * viewFactor(p, { 1, 0, 0 }, lit);
+            };
+            const Outcome c = run(device, shaders, quality, sunWall(groundAlbedo, l), { 0, 0, 0 }, { 1, 1, 1 }, wallExpected, 0, frames, 1920, 1080);
+            const bool okC = c.probes > 1000 && std::fabs(c.mean / c.expectedMean - 1) < 0.01 && c.worst < 0.03 && c.tileMismatches == 0;
+            logf("sunlit ground and a black wall: %u wall probes, mean E %.5f against %.5f (%+.3f %%), worst probe %.3f %%, within 1 %% from frame %d -> %s\n", c.probes,
+                 c.mean, c.expectedMean, 100 * (c.mean / c.expectedMean - 1), 100 * c.worst, c.converged, okC ? "PASS" : "FAIL");
+            pass = pass && okC;
+        }
         logf("probe tile cache: screenProbeGatherTile vs screenProbeGather, %u + %u pixel evaluations, %u + %u not bit-identical (2 cones each)\n", a.tilePixels,
              b.tilePixels, a.tileMismatches, b.tileMismatches);
 
