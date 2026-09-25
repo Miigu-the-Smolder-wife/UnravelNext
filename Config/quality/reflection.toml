@@ -11,6 +11,8 @@ planar_view_fixed_ms = 0.05             # prior cost of a planar reflection view
 planar_view_ns_per_px = 0.34            # replaced online by the view's own measured cost. Design 2.6: 2.14 ms per 8.3 M px (0.26)
                                        # + S's per-view products (froxel lists, air from the mirror, local-light shadow
                                        # slots; S request 20260925_S_planar_view_products) 0.08 [expected]
+stats_log_frames = 0                   # diagnostics: every N frames the log gets the reflection hits' cache lookups and
+                                       # misses and the G samples' estimator branch and mean L / mean g histogram (0 = off)
 experiment_disable = 0                 # cost attribution only (recorded in the quality hash): 1 = sun shadow rays at hits without
                                        # any-hit, 2 = no sun visibility at hits (neither VSM nor rays), 4 = sun visibility at hits
                                        # by shadow rays only (no VSM lookup), 8 = hit materials without textures, 16 = no cache

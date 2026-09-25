@@ -67,6 +67,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     if (s.planarViewsMax > kPlanarMax) fail("reflection.planar_views_max must be <= %u", kPlanarMax);
     s.planarViewFixedMs = (float)q.number("reflection.planar_view_fixed_ms");
     s.experimentDisable = (uint32_t)q.integer("reflection.experiment_disable");
+    s.statsLogFrames = (uint32_t)q.integer("reflection.stats_log_frames");
     s.planarViewNsPerPixel = (float)q.number("reflection.planar_view_ns_per_px");
     return s;
 }
@@ -338,6 +339,8 @@ uint32_t ReflectionSystem::buildPlaneNodes(uint32_t begin, uint32_t end)
 ReflectionSystem::~ReflectionSystem()
 {
     m_device.deferRelease(m_arguments);
+    if (m_statsReadback) m_statsReadback->Unmap(0, nullptr);
+    m_device.deferRelease(m_statsReadback);
     m_device.deferRelease(m_history);
     if (m_planarRing) m_planarRing->Unmap(0, nullptr);
     m_device.deferRelease(m_planarRing);
@@ -863,6 +866,41 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.cmd->ResolveQueryData(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick, tickCount, c.resource(planarReadback), readbackOffset + kTicksOffset);
                   c.cmd->CopyBufferRegion(c.resource(planarReadback), readbackOffset + kJobsOffset, c.resource(args), 0, 16);
               });
+    // Counters for runs without the gate (Player, host gates): the GI header's reflection statistics (GI_H_STAT_HIT_*,
+    // GI_H_STAT_G_*) of the frame framesInFlight ago, every reflection.stats_log_frames frames.
+    if (s.statsLogFrames > 0)
+    {
+        if (!m_statsReadback)
+        {
+            D3D12_HEAP_PROPERTIES rb{ D3D12_HEAP_TYPE_READBACK };
+            D3D12_RESOURCE_DESC1 d{};
+            d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            d.Width = kPlanarSlots * 256;
+            d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+            d.SampleDesc.Count = 1;
+            d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            check(m_device.d3d()->CreateCommittedResource3(&rb, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_statsReadback)),
+                  "reflection stats readback");
+            D3D12_RANGE all{ 0, (SIZE_T)d.Width };
+            check(m_statsReadback->Map(0, &all, reinterpret_cast<void**>(const_cast<uint32_t**>(&m_statsMapped))), "map reflection stats");
+        }
+        const uint64_t statsFrame = fc.frame.frameIndex;
+        if (statsFrame >= fc.framesInFlight && (statsFrame - fc.framesInFlight) % s.statsLogFrames == 0)
+        {
+            const uint32_t* h = m_statsMapped + ((statsFrame - fc.framesInFlight) % kPlanarSlots) * 64;
+            logf("R stats frame %llu: reflection hit cache lookups %u, no data %u; G samples %u, ratio branch %u; mean L / mean g log2 bins [<-3 .. >=4] %u %u %u %u %u %u %u %u %u\n",
+                 (unsigned long long)(statsFrame - fc.framesInFlight), h[38], h[39], h[48], h[49], h[50], h[51], h[52], h[53], h[54], h[55], h[56], h[57], h[58]);
+        }
+        const BufferRef statsRef = g.importBuffer(m_statsReadback.Get(), { "R reflection stats readback", kPlanarSlots * 256, 0 });
+        const uint64_t statsOffset = (statsFrame % kPlanarSlots) * 256;
+        g.addPass("r.refl.stats", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(cache, Use::CopySrc);
+                      b.use(statsRef, Use::CopyDst);
+                      b.keep();
+                  },
+                  [cache, statsRef, statsOffset](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(statsRef), statsOffset, c.resource(cache), 0, 256); });
+    }
 }
 } // namespace unx::render::refl
 

@@ -33,6 +33,7 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     float planarViewFixedMs = 0;     // prior fixed cost of a reflection view (a)
     float planarViewNsPerPixel = 0;  // prior cost per mirror pixel of a view (b)
     uint32_t experimentDisable = 0;  // cost attribution only (ReflectionHit.hlsli); 0 in the shipped configuration
+    uint32_t statsLogFrames = 0;     // reflection.stats_log_frames: log the GI/reflection counters every N frames (0 = off)
     static ReflectionSettings fromQuality(const QualityConfig& q);
 };
 
@@ -96,6 +97,8 @@ private:
     ComPtr<ID3D12Resource> m_arguments;  // raw: job counters, the trace descriptions (SKY0, SKY1), the shadow description,
                                          // the shade and combine Dispatch arguments (ReflectionSystem.cpp offsets)
     ComPtr<ID3D12CommandSignature> m_dispatchSignature;  // one D3D12_DISPATCH_ARGUMENTS
+    ComPtr<ID3D12Resource> m_statsReadback;  // 4 slots x 256 B of the GI header (reflection.stats_log_frames)
+    const uint32_t* m_statsMapped = nullptr;
     uint32_t m_rayCapacity = 1u << 20;   // ray slots of the rays buffer (grows with the traced rays read back)
     float3 m_skyRadiance{}, m_sunIlluminance{};
     TextureRef m_modes;
