@@ -90,7 +90,8 @@ struct VsmAirWalkCount
 {
     uint slices, mixedPages, blocks32, blocks8, texels;  // slices: filled by the caller
 };
-float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k, inout VsmAirWalkCount count)
+// pageOnly (cost attribution only, atmosphere.froxels.experiment_disable 32): mixed pages are not descended.
+float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k, inout VsmAirWalkCount count, bool pageOnly = false)
 {
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
     const float3 pa = vsmLightSpace(vc, a), pb = vsmLightSpace(vc, b);
@@ -111,6 +112,7 @@ float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k, inout Vsm
         if (cls == VSM_REGION_UMBRA) shadowed += tb - ta;
         if (cls != VSM_REGION_MIXED) continue;
         ++count.mixedPages;
+        if (pageOnly) continue;
         VsmAirWalk w32 = vsmAirWalkBegin(A, D, 32, ta, tb);
         float ua, ub;
         int2 c32;

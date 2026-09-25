@@ -42,7 +42,8 @@
 // VSM stats, words 20..24; 0xFFFFFFFF: none; atmosphere.froxels.walk_stats, measurement only)
 // P[2].x VSM search bound SRV (raw), P[2].y shadow texels per tile (float bits), P[2].z air step altitude m (float bits),
 // P[2].w experiment mask (atmosphere.froxels.experiment_disable; 0; cost attribution only: 1 air shadows, 2 local lights,
-// 4 air integration, 8 sun transmittance per substep, 16 multiple scattering per substep)
+// 4 air integration, 8 sun transmittance per substep, 16 multiple scattering per substep, 32 air shadow walk stops at
+// the page level)
 // Frame constants of the view (main, or a planar reflection view).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -194,7 +195,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             uint k;
             if (vsmAirLevel(vc, froxelTileWidth(g, 0.5 * (z0 + z1)), asfloat(P[2].y), k))
             {
-                f = vsmAirShadowFraction(r, o, o + dir * len, k, walk);
+                f = vsmAirShadowFraction(r, o, o + dir * len, k, walk, (experiment & 32) != 0);
                 ++walk.slices;
             }
         }
