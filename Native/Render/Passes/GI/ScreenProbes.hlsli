@@ -289,6 +289,58 @@ float3 giProbeFootprintRadiance(Src t, GiProbeFootprint fp, int2 count, float3 d
     uint2 frame[4];
     [unroll] for (uint k = 0; k < 4; ++k)
         frame[k] = fp.weight[k] > 0 ? giProbePlane(t, uint2(fp.probe[k]), 5, count).xy : uint2(0, 0xFFFFFFFFu);
+    if (atlasSrv != UNX_NONE)
+    {
+        // Atlas: every coordinate first, then every sample (in flight together: one memory round trip per pixel instead
+        // of one per distinct block and mip), then the same sum in the same order over the same distinct blocks. The
+        // coordinates are giProbeAtlasBilinear's ('precise', see below), so the result is unchanged bit for bit. Probes
+        // without weight sample a clamped coordinate whose value is not used. [M measurement, city 4K: shading 1.330 ->
+        // 1.259 ms, 3 alternating rounds.] Verified with this path in the tile variant only against the per-block path
+        // in screenProbeGather (GiAnalytic ProbeTileCompare): 0 of 663,552,000 evaluations differ.
+        Texture2D<float4> atlas = ResourceDescriptorHeap[atlasSrv];
+        uint aw, ah;
+        atlas.GetDimensions(aw, ah);
+        const float nA = (float)(8u >> l0), nB = (float)(8u >> l1);
+        const float xA = l0 == 0 ? 0.0 : (l0 == 1 ? 8.0 * count.x : 12.0 * count.x);
+        const float xB = l1 == 0 ? 0.0 : (l1 == 1 ? 8.0 * count.x : 12.0 * count.x);
+        float wk[4];
+        float2 cA[4], cB[4];
+        [unroll] for (uint k = 0; k < 4; ++k)
+        {
+            bool seen = false;
+            [unroll] for (uint j = 0; j < k; ++j) seen = seen || (fp.weight[j] > 0 && frame[j].y == frame[k].y);
+            float w = (fp.weight[k] > 0 && !seen) ? fp.weight[k] : 0;
+            [unroll] for (uint j = k + 1; j < 4; ++j)
+                if (w > 0 && fp.weight[j] > 0 && frame[j].y == frame[k].y) w += fp.weight[j];
+            wk[k] = w;
+            precise const float3 n = giProbeOctDecode(frame[k].x);
+            const uint2 block = uint2(frame[k].y & 0xFFFFu, frame[k].y >> 16);
+            const float sgn = n.z >= 0 ? 1.0 : -1.0;  // Duff et al. 2017 basis (GiCache.hlsli giBasis)
+            precise const float a = -1.0 / (sgn + n.z);
+            precise const float c = n.x * n.y * a;
+            precise const float3 tb = float3(1 + sgn * n.x * n.x * a, sgn * c, -sgn * n.x);
+            precise const float3 bb = float3(c, sgn + n.y * n.y * a, -n.y);
+            precise const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
+            precise const float3 v = local / (abs(local.x) + abs(local.y) + local.z);
+            precise const float2 uv = float2(v.x + v.y, v.x - v.y) * 0.5 + 0.5;
+            precise const float2 ca = (float2(xA + block.x * nA, block.y * nA) + clamp(uv * nA, 0.5, nA - 0.5)) / float2(aw, ah);
+            precise const float2 cb = (float2(xB + block.x * nB, block.y * nB) + clamp(uv * nB, 0.5, nB - 0.5)) / float2(aw, ah);
+            cA[k] = ca;
+            cB[k] = cb;
+        }
+        float3 rA[4], rB[4];
+        [unroll] for (uint k2 = 0; k2 < 4; ++k2) rA[k2] = atlas.SampleLevel(g_linearClamp, cA[k2], 0).rgb;
+        const bool two = fl > 0 && l1 != l0;
+        [unroll] for (uint k3 = 0; k3 < 4; ++k3) rB[k3] = two ? atlas.SampleLevel(g_linearClamp, cB[k3], 0).rgb : rA[k3];
+        float3 total = 0;
+        [unroll] for (uint k4 = 0; k4 < 4; ++k4)
+        {
+            float3 r = rA[k4];
+            if (two) r = lerp(r, rB[k4], fl);
+            if (wk[k4] > 0) total += wk[k4] * r;
+        }
+        return total * 64.0;  // GI_LOAD_SCALE
+    }
     float3 sum = 0;
     [unroll] for (uint k = 0; k < 4; ++k)
     {
@@ -312,18 +364,8 @@ float3 giProbeFootprintRadiance(Src t, GiProbeFootprint fp, int2 count, float3 d
         precise const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
         precise const float3 v = local / (abs(local.x) + abs(local.y) + local.z);
         precise const float2 uv = float2(v.x + v.y, v.x - v.y) * 0.5 + 0.5;
-        float3 r;
-        if (atlasSrv != UNX_NONE)
-        {
-            Texture2D<float4> atlas = ResourceDescriptorHeap[atlasSrv];
-            r = giProbeAtlasBilinear(atlas, count, block, l0, uv);
-            if (fl > 0 && l1 != l0) r = lerp(r, giProbeAtlasBilinear(atlas, count, block, l1, uv), fl);
-        }
-        else
-        {
-            r = giProbeMapBilinearFrom(t, block, l0, uv);
-            if (fl > 0 && l1 != l0) r = lerp(r, giProbeMapBilinearFrom(t, block, l1, uv), fl);
-        }
+        float3 r = giProbeMapBilinearFrom(t, block, l0, uv);  // in-block maps (the atlas case returned above)
+        if (fl > 0 && l1 != l0) r = lerp(r, giProbeMapBilinearFrom(t, block, l1, uv), fl);
         sum += w * r;
     }
     return sum * 64.0;  // GI_LOAD_SCALE
