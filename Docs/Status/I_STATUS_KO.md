@@ -240,6 +240,10 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
 - 포즈: `AcquirePose`(Animation의 보간 평가·접촉·물리 오버레이)가 캐릭터당 1.3 µs(뼈 2개 캐릭터). 관절 변환은 관절당 약 0.1 µs다.
   설계 캐릭터(64본 × 256체 = 16k 관절)에서는 관리 코드 변환만 약 1.6 ms가 된다[예상, 위 실측으로 계산]. 애니메이션 재설계의
   `na_present_batch`가 `SetSkeletons` 버퍼를 네이티브에서 채우므로 이 관절 단위 관리 작업은 없어진다(프레임당 호출 2번).
+- **일괄 표시 연결(스테이징, 다음 편집기 차례):** 어댑터가 애니메이션의 `NativeDataAnimation.Present(목록)`(A5, 400997db)을 쓴다. 스킨 파트는 개체가
+  처음 보일 때 팔레트를 한 번 풀어 `NativeDataPresentation`에 들어가고(영역 개체는 적재 때 World에 없다), 프레임마다 활성·alpha를 둔 뒤
+  호출 한 번으로 모든 캐릭터의 관절이 `UnxFrameSetSkeletons` 버퍼에 채워진다. 루트는 항목별 `PresentedAlpha`로 보간한다. 관절 단위 관리 작업이 없다.
+  검증 스위치 `-unxPoseCheck N`: N프레임 동안 옛 경로(AcquirePose + 관리 변환)와 관절별 최대 차를 로그에 남긴다.
 - 루트도 같은 방식으로 옮길 수 있다: World의 `nw_snapshot_read_components`로 모은 두 tick의 `WorldAffine`을 네이티브에서 보간·변환한다.
   지금 0.35 ms라 메인 스레드 1 ms 할당 안이지만, 인스턴스가 늘면 비례해서 는다.
 - **4K Unity 프레임 주기 13.4 ms의 원인[실측]: 데이터 월드 tick.** 측정기에 Unity `FrameTimingManager`(메인·렌더 스레드, GPU, present
