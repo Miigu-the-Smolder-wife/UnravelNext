@@ -220,6 +220,41 @@ UNX_TEST(graph_cross_queue_sync)
     CHECK(g.stats().commandLists == 3);
 }
 
+UNX_TEST(graph_views_of_reused_transients)
+{
+    // A transient whose consumer was culled in earlier frames: when the consumer is live again, the recompiled plan
+    // reuses the placed resource and must still create the views the new uses need (S froxel light lists).
+    RenderGraph g(testDevice());
+    uint32_t bufferSrv = gpu::kNone, textureSrv = gpu::kNone;
+    for (int f = 0; f < 4; ++f)
+    {
+        const bool consumer = f >= 2;
+        const BufferRef x = g.createBuffer({ "x", 4096, 16 });
+        const TextureRef t = g.createTexture({ "t", 64, 64, 1, 1, DXGI_FORMAT_R32_FLOAT });
+        g.addPass("write", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(x, Use::UavCompute);
+                      b.use(t, Use::UavCompute);
+                      b.keep();
+                  },
+                  [](PassContext&) {});
+        if (consumer)
+            g.addPass("read", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(x, Use::SrvCompute);
+                          b.use(t, Use::SrvCompute);
+                          b.keep();
+                      },
+                      [&](PassContext& c) {
+                          bufferSrv = c.srv(x);
+                          textureSrv = c.srv(t);
+                      });
+        g.execute(nullptr);
+        for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+    }
+    CHECK(bufferSrv != gpu::kNone && textureSrv != gpu::kNone);
+}
+
 UNX_TEST(graph_single_queue_is_one_list)
 {
     // Default policy: compute-queue passes run on the graphics queue; the frame is one command list.

@@ -491,13 +491,18 @@ struct RenderGraph::Impl
         {
             const ResourceNode& n = resources[r];
             Physical& ph = pl.physical[r];
-            ph.descKey = mix(mix(std::hash<std::string_view>{}(std::string_view(reinterpret_cast<const char*>(&descs[r]), sizeof(D3D12_RESOURCE_DESC1))), ph.offset), heapSize);
-            // Reuse an identical placed resource from the previous plan.
+            // Buffer views also depend on the declared stride (structured or raw), which the D3D12 desc does not carry.
+            ph.descKey = mix(mix(mix(std::hash<std::string_view>{}(std::string_view(reinterpret_cast<const char*>(&descs[r]), sizeof(D3D12_RESOURCE_DESC1))), ph.offset),
+                                 heapSize),
+                             n.texture ? 0u : n.bdesc.stride);
+            // Reuse an identical placed resource from the previous plan, with its views plus any view this plan's uses
+            // need that the previous plan's did not (a consumer culled before, live now).
             if (plan && r < plan->physical.size() && plan->physical[r].resource && plan->physical[r].descKey == ph.descKey)
             {
                 ph.resource = std::move(plan->physical[r].resource);
                 ph.views = plan->physical[r].views;
                 plan->physical[r].views = {};
+                createViews(r, ph.resource.Get(), sum[r].srv, sum[r].uav, sum[r].rt, sum[r].ds, sum[r].dsRead, ph.views);
                 continue;
             }
             D3D12_CLEAR_VALUE clear{};
