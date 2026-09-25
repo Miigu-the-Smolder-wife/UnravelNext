@@ -76,18 +76,43 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
     const float w = cl.minFeatureWidth;
     const float wFace = projectedLength(v, s, abs(w) * scale);
     float wMin = wFace;
-    if (w < 0)
+    if (w < 0 && !skinned)
     {
+        // Flat sheet of width r: its projected width shrinks with the view angle. The builder's sheet orientation
+        // (clusterSheets: winding-independent axis, spread, slab) bounds it:
+        //   orthographic, or perspective with r <= 2R (the cluster spans the sheet's width: cards, blades): the
+        //     smallest |cos| between a view ray and a sheet normal, cos(alpha + spread), where alpha is the largest
+        //     angle between a ray and the axis (orthographic: the view direction; perspective: cos alpha >=
+        //     (eye's distance to the slab) / (d + R));
+        //   perspective with r > 2R (wide sheets: terrain): the width chord foreshortened by (eye's distance to the
+        //     slab) / (d + R + r); far wide sheets at grazing become thin near the horizon, as they are on screen.
+        // Spread >= 90 degrees (no sheet axis): 0. A planar sheet with the eye in its plane: 0.
+        StructuredBuffer<float4> sheets = ResourceDescriptorHeap[SHEETS_SRV];
+        const float4 sheet = sheets[clusterIndex];
+        const float cosSpread = length(sheet.xyz);
         float factor = 0;
-        if (cl.normalCone.w < 1 && !skinned)
+        if (cosSpread > 1e-4)
         {
-            const float3 dir = v.orthographic ? v.viewDirection.xyz : toCluster / max(dist, 1e-6);
-            const float spread = asin(saturate(cl.normalCone.w)) + (v.orthographic ? 0.0 : asin(saturate(s.w / max(dist, 1e-6))));
-            const float total = acos(saturate(abs(dot(dir, axis)))) + spread;
-            factor = total >= 0.5 * PI ? 0.0 : cos(total);
+            const float3 sheetAxis = normalize(transformVector(inst.objectToWorld, sheet.xyz));
+            const float spread = acos(saturate(cosSpread)), r = abs(w) * scale;
+            float cosAlpha;
+            if (v.orthographic) cosAlpha = abs(dot(v.viewDirection.xyz, sheetAxis));
+            else
+            {
+                const float h = max(abs(dot(sheetAxis, toCluster)) - sheet.w * scale, 0.0);
+                cosAlpha = r <= 2 * s.w ? h / (dist + s.w) : h / (dist + s.w + r);
+            }
+            if (!v.orthographic && r > 2 * s.w) factor = cosAlpha;
+            else
+            {
+                const float total = acos(saturate(cosAlpha)) + spread;
+                factor = total >= 0.5 * PI ? 0.0 : cos(total);
+            }
         }
         wMin = wFace * factor;
     }
+    else if (w < 0)
+        wMin = 0;  // skinned sheets: bind-pose normals do not bound the posed ones
     r.band = wMin >= BAND_A_MIN_PX ? 0u : (wFace < BAND_C_MAX_PX ? 2u : 1u);
     const uint drawBand = BAND_MODE == 0 ? 0u : r.band;
     r.list = drawBand == 1 ? LIST_B : (drawBand == 2 ? LIST_C : (alpha ? (cullBack ? LIST_A_ALPHA_BACK : LIST_A_ALPHA_NONE) : (cullBack ? LIST_A_BACK : LIST_A_NONE)));

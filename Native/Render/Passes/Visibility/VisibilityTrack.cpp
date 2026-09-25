@@ -104,6 +104,19 @@ struct State
     }
 };
 
+// IEEE half bits of a positive normal float (round to nearest even): band thresholds share one root constant.
+uint32_t halfBits(float f)
+{
+    if (!(f >= 6.2e-5f && f <= 65504.0f)) fail("V: band threshold %g outside the half-float normal range", f);
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    const uint32_t exponent = ((u >> 23) & 0xFF) - 127 + 15, mantissa = u & 0x7FFFFF;
+    uint32_t h = exponent << 10 | mantissa >> 13;
+    const uint32_t rest = mantissa & 0x1FFF;
+    if (rest > 0x1000 || (rest == 0x1000 && (h & 1))) ++h;
+    return h;
+}
+
 ComPtr<ID3D12Resource> createBuffer(Device& d, uint64_t bytes, D3D12_HEAP_TYPE type, const wchar_t* name)
 {
     D3D12_HEAP_PROPERTIES hp{ type };
@@ -365,7 +378,7 @@ struct Run
     TextureRef hiz;
     uint32_t hizSrv = kNone, hizMips = 0, hizWidth = 0, hizHeight = 0;
     uint32_t viewsSrv = kNone, viewCount = 0, instanceMask = 0;
-    uint32_t nodesSrv = kNone, rootsSrv = kNone, spheresSrv = kNone;
+    uint32_t nodesSrv = kNone, rootsSrv = kNone, spheresSrv = kNone, sheetsSrv = kNone;
     D3D12_GPU_VIRTUAL_ADDRESS frameConstants = 0;  // scene indices, time and wind for the kernels (b1)
     Settings cfg;
     std::string prefix;
@@ -390,6 +403,7 @@ Run createRun(FramePassContext& fc, const Settings& cfg, const std::string& pref
     r.nodesSrv = fc.scene.srv(clusterbuilder::kClusterNodes);
     r.rootsSrv = fc.scene.srv(clusterbuilder::kMeshClusterRoots);
     r.spheresSrv = fc.scene.srv(clusterbuilder::kClusterLodSpheres);
+    r.sheetsSrv = fc.scene.srv(clusterbuilder::kClusterSheets);
     return r;
 }
 
@@ -434,8 +448,8 @@ void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t 
     k[25] = instanceCount;
     k[26] = kBandMode;
     k[27] = r.tilePairs.valid() ? c.uav(r.tilePairs) : kNone;
-    std::memcpy(&k[28], &r.cfg.bandAMinPx, 4);
-    std::memcpy(&k[29], &r.cfg.bandCMaxPx, 4);
+    k[28] = halfBits(r.cfg.bandAMinPx) | halfBits(r.cfg.bandCMaxPx) << 16;
+    k[29] = r.sheetsSrv;
     k[30] = r.tileCoarse.valid() ? c.srv(r.tileCoarse) : kNone;
     k[31] = r.tileCoarseWords;
 }

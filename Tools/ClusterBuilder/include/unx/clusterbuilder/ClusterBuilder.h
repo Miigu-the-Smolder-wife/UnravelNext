@@ -58,4 +58,9 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
 constexpr const char* kClusterNodes = "clusterNodes";
 constexpr const char* kMeshClusterRoots = "meshClusterRoots";
 constexpr const char* kClusterLodSpheres = "clusterLodSpheres";
+// float4 per cluster: sheet orientation for band classification (ARCHITECTURE 2.1), independent of winding:
+// xyz = axis x cos(spread), where axis is the principal direction of sum(area n n^T) over its triangles and spread the
+// largest angle between the axis and a triangle normal up to sign (xyz = 0: spread >= 90 degrees); w = half-thickness
+// of the slab around its bounds centre along the axis (max |dot(axis, p - centre)|). Object space.
+constexpr const char* kClusterSheets = "clusterSheets";
 } // namespace unx::clusterbuilder

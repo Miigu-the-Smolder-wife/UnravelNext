@@ -60,6 +60,8 @@ public:
     const std::vector<uint32_t>& weld() const { return m_weld; }
     // Width of the connected component a mesh vertex belongs to (FLT_MAX = unbounded).
     float componentWidth(uint32_t vertex) const { return m_componentWidth[m_component[m_weld[vertex]]]; }
+    // Connected component (vertex connectivity through welded positions) of a mesh vertex: a canonical vertex id.
+    uint32_t component(uint32_t vertex) const { return m_component[m_weld[vertex]]; }
 
 private:
     float thickness(float3 origin, float3 dir, uint32_t component) const;

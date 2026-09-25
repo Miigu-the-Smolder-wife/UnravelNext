@@ -220,6 +220,74 @@ void buildSubmesh(const Settings& settings, const clodConfig& config, const clod
     }
 }
 
+// Sign-agnostic orientation of sheet triangles (a two-sided sheet's winding does not matter): the principal direction
+// of sum(area n n^T) and cos of the largest angle between it and a triangle's normal line (0: 90 degrees or more).
+struct SheetOrientation
+{
+    float3 axis{ 0, 0, 1 };
+    float cosSpread = 0;
+};
+
+SheetOrientation sheetOrientation(const std::vector<float3>& positions, const uint32_t* indices, size_t indexCount)
+{
+    double s[3][3] = {};
+    bool any = false;
+    for (size_t i = 0; i + 2 < indexCount; i += 3)
+    {
+        float3 n = cross(positions[indices[i + 1]] - positions[indices[i]], positions[indices[i + 2]] - positions[indices[i]]);
+        const float area2 = length(n);
+        if (!(area2 > 0)) continue;
+        n = n * (1.0f / area2);
+        const double w = area2, v[3] = { n.x, n.y, n.z };
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) s[r][c] += w * v[r] * v[c];
+        any = true;
+    }
+    SheetOrientation out;
+    if (!any) return out;
+    // Power iteration from the column of the largest diagonal (never orthogonal to the dominant eigenvector unless the
+    // matrix is isotropic, where every axis is as good).
+    int start = 0;
+    for (int k = 1; k < 3; ++k)
+        if (s[k][k] > s[start][start]) start = k;
+    double v[3] = { s[0][start], s[1][start], s[2][start] };
+    for (int it = 0; it < 64; ++it)
+    {
+        double u[3];
+        for (int r = 0; r < 3; ++r) u[r] = s[r][0] * v[0] + s[r][1] * v[1] + s[r][2] * v[2];
+        const double len = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+        if (!(len > 0)) break;
+        for (int r = 0; r < 3; ++r) v[r] = u[r] / len;
+    }
+    out.axis = normalize(float3{ (float)v[0], (float)v[1], (float)v[2] });
+    float minDot = 1;
+    for (size_t i = 0; i + 2 < indexCount; i += 3)
+    {
+        const float3 n = cross(positions[indices[i + 1]] - positions[indices[i]], positions[indices[i + 2]] - positions[indices[i]]);
+        const float area2 = length(n);
+        if (area2 > 0) minDot = std::min(minDot, std::fabs(dot(n, out.axis)) / area2);
+    }
+    out.cosSpread = std::max(minDot, 0.0f);
+    return out;
+}
+
+// Orientation class of a planar component (spread within 5 degrees): one of 144 cells of an octahedral map of the
+// axis hemisphere; 0 for curved or solid components. Components share no vertices, so building each class as its own
+// DAG needs no locks, and a cluster never mixes sheets of different orientations (crossed cards): its sheet spread stays
+// small, so only the sheets seen edge-on go to band B.
+int32_t orientationClass(const SheetOrientation& o)
+{
+    constexpr float kPlanarCos = 0.9961947f;  // cos 5 degrees
+    constexpr int32_t kCells = 12;             // cells of about 8 degrees
+    if (o.cosSpread < kPlanarCos) return 0;
+    float3 a = o.axis;
+    if (a.z < 0 || (a.z == 0 && (a.y < 0 || (a.y == 0 && a.x < 0)))) a = a * -1.0f;
+    const float l1 = std::fabs(a.x) + std::fabs(a.y) + a.z;
+    const float px = a.x / l1, py = a.y / l1;  // |px| + |py| <= 1
+    const float u = std::clamp((px + py + 1) * 0.5f, 0.0f, 0.999999f), w = std::clamp((py - px + 1) * 0.5f, 0.0f, 0.999999f);
+    return 1 + (int32_t)(u * kCells) + kCells * (int32_t)(w * kCells);
+}
+
 MeshOut buildMesh(const scene::Mesh& m, const Settings& settings)
 {
     const auto t0 = std::chrono::steady_clock::now();
@@ -278,17 +346,28 @@ MeshOut buildMesh(const scene::Mesh& m, const Settings& settings)
         const float w = widths.componentWidth(vertex);
         return w >= FLT_MAX ? INT32_MAX : (int32_t)std::floor(std::log(std::max(w, 1e-9f)) / std::log(4.0f));
     };
+    // Orientation class per connected component (orientationClass): planar components are split by orientation.
+    std::unordered_map<uint32_t, std::vector<uint32_t>> componentTriangles;
+    for (size_t i = 0; i + 2 < m.indices.size(); i += 3)
+    {
+        std::vector<uint32_t>& t = componentTriangles[widths.component(m.indices[i])];
+        t.insert(t.end(), { m.indices[i], m.indices[i + 1], m.indices[i + 2] });
+    }
+    std::unordered_map<uint32_t, int32_t> componentOrientation;
+    for (const auto& [component, tris] : componentTriangles) componentOrientation[component] = orientationClass(sheetOrientation(m.positions, tris.data(), tris.size()));
+    componentTriangles.clear();
     for (uint32_t s = 0; s < (uint32_t)m.submeshes.size(); ++s)
     {
         const scene::Submesh& sm = m.submeshes[s];
         // Degenerate triangles (repeated welded vertex or zero area) cover nothing and are dropped.
-        std::map<int32_t, std::vector<unsigned int>> byClass;
+        std::map<std::pair<int32_t, int32_t>, std::vector<unsigned int>> byClass;  // (width class, orientation class)
         for (uint32_t i = sm.indexOffset; i + 2 < sm.indexOffset + sm.indexCount; i += 3)
         {
             const uint32_t a = m.indices[i], b = m.indices[i + 1], c = m.indices[i + 2];
             if (remap[a] == remap[b] || remap[b] == remap[c] || remap[a] == remap[c]) continue;
             if (length(cross(m.positions[b] - m.positions[a], m.positions[c] - m.positions[a])) <= 0) continue;
-            byClass[widthClass(a)].insert(byClass[widthClass(a)].end(), { a, b, c });
+            std::vector<unsigned int>& target = byClass[{ widthClass(a), componentOrientation[widths.component(a)] }];
+            target.insert(target.end(), { a, b, c });
         }
         for (const auto& [cls, indices] : byClass)
         {
@@ -393,6 +472,7 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
     appendNamed(data, kClusterNodes, nullptr, 0, sizeof(gpu::ClusterNode));
     appendNamed(data, kMeshClusterRoots, nullptr, 0, sizeof(gpu::MeshClusterRoots));
     appendNamed(data, kClusterLodSpheres, nullptr, 0, sizeof(float4));
+    appendNamed(data, kClusterSheets, nullptr, 0, sizeof(float4));
     uint32_t nodeBase = 0;
     for (size_t mi = 0; mi < meshes.size(); ++mi)
     {
@@ -434,6 +514,13 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
                 data.clusters.push_back(rc);
                 const float4 sphere{ c.lod.center[0], c.lod.center[1], c.lod.center[2], c.lod.radius };
                 appendNamed(data, kClusterLodSpheres, &sphere, sizeof sphere, sizeof(float4));
+                const SheetOrientation sheet = sheetOrientation(m.positions, c.indices.data(), indexCount);
+                const float3 centre{ b.center[0], b.center[1], b.center[2] };
+                float slab = 0;
+                for (size_t v = 0; v < vertexCount; ++v) slab = std::max(slab, std::fabs(dot(sheet.axis, m.positions[localVertices[v]] - centre)));
+                const float3 scaled = sheet.cosSpread > 0 ? sheet.axis * sheet.cosSpread : float3{ 0, 0, 0 };
+                const float4 sheetData{ scaled.x, scaled.y, scaled.z, slab };
+                appendNamed(data, kClusterSheets, &sheetData, sizeof sheetData, sizeof(float4));
             }
         }
 

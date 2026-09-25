@@ -7,8 +7,8 @@
 //   P[5] capacity: node items, group items, visible (= each list), deferred items
 //   P[6] view count, instance count, band mode (0: everything band A, 1: classify), tile pairs UAV (uint3; UNX_NONE =
 //        not tile-local: list entries are visible indices; else they index the pairs, VisibilityCommon.hlsli)
-//   P[7] asfloat: band A minimum width px, band C maximum width px; coarse tile mask SRV (TileMaskCoarse.hlsl), its words
-//        per view
+//   P[7] band A minimum width px | band C maximum width px << 16 (f16 each), cluster sheets SRV (float4), coarse tile mask
+//        SRV (TileMaskCoarse.hlsl), its words per view
 #ifndef UNX_CULL_SHARED_HLSLI
 #define UNX_CULL_SHARED_HLSLI
 #include "Passes/Visibility/VisibilityCommon.hlsli"
@@ -40,8 +40,9 @@
 #define INSTANCE_COUNT P[6].y
 #define BAND_MODE P[6].z
 #define TILE_PAIRS_UAV P[6].w
-#define BAND_A_MIN_PX asfloat(P[7].x)
-#define BAND_C_MAX_PX asfloat(P[7].y)
+#define BAND_A_MIN_PX f16tof32(P[7].x)
+#define BAND_C_MAX_PX f16tof32(P[7].x >> 16)
+#define SHEETS_SRV P[7].y
 #define TILE_COARSE_SRV P[7].z
 #define TILE_COARSE_WORDS P[7].w
 
