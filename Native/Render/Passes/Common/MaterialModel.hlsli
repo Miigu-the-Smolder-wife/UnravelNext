@@ -53,6 +53,21 @@ float modelDirectionalAlbedo(float NoV, float roughness)
     return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
 }
 
+// Split specular directional albedo (A, B): f0 A + B = the lobe's albedo with Schlick Fresnel (specularAlbedo() in C++,
+// same addressing as modelDirectionalAlbedo).
+float2 modelSpecularAlbedo(float NoV, float roughness)
+{
+    StructuredBuffer<float2> t = ResourceDescriptorHeap[g_specularAlbedoLut];
+    const float last = MODEL_ALBEDO_TABLE_SIZE - 1;
+    const float x = saturate(NoV) * last, y = saturate(roughness) * last;
+    const uint x0 = uint(x), y0 = uint(y);
+    const uint x1 = min(x0 + 1, MODEL_ALBEDO_TABLE_SIZE - 1), y1 = min(y0 + 1, MODEL_ALBEDO_TABLE_SIZE - 1);
+    const float fx = x - x0, fy = y - y0;
+    const float2 a = t[y0 * MODEL_ALBEDO_TABLE_SIZE + x0], b = t[y0 * MODEL_ALBEDO_TABLE_SIZE + x1];
+    const float2 c = t[y1 * MODEL_ALBEDO_TABLE_SIZE + x0], d = t[y1 * MODEL_ALBEDO_TABLE_SIZE + x1];
+    return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+}
+
 float3 modelEvaluate(ModelSurface s, float3 n, float3 v, float3 l)
 {
     const float NoV = dot(n, v), NoL = dot(n, l);

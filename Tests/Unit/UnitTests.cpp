@@ -716,6 +716,31 @@ UNX_TEST(skin_normals_use_the_cofactor)
     CHECK(worst < 1e-5f);
 }
 
+UNX_TEST(material_specular_albedo_split)
+{
+    // scene::model::specularAlbedoTable (8.1, v1.25): the split (A, B) of the same samples as E, so A + B = E per grid
+    // point, both non-negative, and the bilinear reads agree with E's.
+    using namespace scene::model;
+    const auto& e = directionalAlbedoTable();
+    const auto& ab = specularAlbedoTable();
+    CHECK(ab.size() == 2 * e.size());
+    float worst = 0, worstRead = 0;
+    bool negative = false;
+    for (size_t i = 0; i < e.size(); ++i)
+    {
+        worst = std::max(worst, std::fabs(ab[2 * i] + ab[2 * i + 1] - e[i]));
+        negative = negative || ab[2 * i] < 0 || ab[2 * i + 1] < 0;
+    }
+    for (float mu = 0.013f; mu < 1; mu += 0.071f)
+        for (float r = 0.007f; r < 1; r += 0.093f)
+        {
+            const float2 v = specularAlbedo(mu, r);
+            worstRead = std::max(worstRead, std::fabs(v.x + v.y - directionalAlbedo(mu, r)));
+        }
+    logf("    (A, B) vs E: worst |A + B - E| %.2e per grid point, %.2e in bilinear reads\n", worst, worstRead);
+    CHECK(!negative && worst < 1e-5f && worstRead < 1e-5f);
+}
+
 UNX_TEST(graph_single_queue_is_one_list)
 {
     // Default policy: compute-queue passes run on the graphics queue; the frame is one command list.
@@ -1160,6 +1185,73 @@ UNX_TEST(gpu_scene_frame_updates)
     CHECK(same(translationOf(g.instances[0].objectToWorld), { 3, 0, 0 }) && same(translationOf(g.instances[0].prevObjectToWorld), { 1, 0, 0 }));
     CHECK(g.instances[0].transformRevision == revision0 + 2);
     CHECK(same(translationOf(gs.instances()[0].objectToWorld), { 3, 0, 0 }));  // CPU mirror
+}
+
+UNX_TEST(material_tables_on_the_gpu)
+{
+    // GpuScene uploads the E and (A, B) tables and FrameConstants carries their SRVs (materialModelLut,
+    // specularAlbedoLut); MaterialModel.hlsli's bilinear reads equal scene::model's at a grid off the table nodes.
+    const scene::Scene s = tinyScene();
+    GpuScene gs(testDevice());
+    gs.upload(s);
+    gpu::FrameConstants fc{};
+    gs.fill(fc);
+    CHECK(fc.materialModelLut != gpu::kNone && fc.specularAlbedoLut != gpu::kNone);
+    ComPtr<ID3D12Resource> constants, rb;
+    const uint32_t n = 45, bytes = n * n * 20;
+    {
+        D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD }, rp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = (sizeof(gpu::FrameConstants) + 255) / 256 * 256;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(testDevice().d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&constants)),
+              "constants");
+        void* mapped = nullptr;
+        check(constants->Map(0, nullptr, &mapped), "map constants");
+        std::memcpy(mapped, &fc, sizeof fc);
+        constants->Unmap(0, nullptr);
+        rd.Width = bytes;
+        check(testDevice().d3d()->CreateCommittedResource3(&rp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)), "readback");
+    }
+    ID3D12PipelineState* pso = shaders().compute("Passes/Test/SpecularAlbedo");
+    RenderGraph g(testDevice());
+    const BufferRef out = g.createBuffer({ "tables out", bytes, 0 });
+    const D3D12_GPU_VIRTUAL_ADDRESS address = constants->GetGPUVirtualAddress();
+    g.addPass("tables", QueueType::Graphics, [&](PassBuilder& b) { b.use(out, Use::UavCompute); },
+              [=](PassContext& ctx) {
+                  const uint32_t k[4] = { ctx.uav(out), n, 0, 0 };
+                  ctx.cmd->SetPipelineState(pso);
+                  ctx.bindFrameConstants(address);
+                  ctx.computeConstants(k, 4);
+                  ctx.cmd->Dispatch((n * n + 63) / 64, 1, 1);
+              });
+    ID3D12Resource* dst = rb.Get();
+    g.addPass("tables readback", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(out, Use::CopySrc);
+                  b.keep();
+              },
+              [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(dst, 0, ctx.resource(out), 0, bytes); });
+    g.execute(nullptr);
+    for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+    const float* v = nullptr;
+    check(rb->Map(0, nullptr, (void**)&v), "map readback");
+    float worstAB = 0, worstE = 0;
+    for (uint32_t i = 0; i < n * n; ++i)
+    {
+        const float* p = v + 5 * i;
+        const float2 ab = scene::model::specularAlbedo(p[0], p[1]);
+        worstAB = std::max({ worstAB, std::fabs(p[2] - ab.x), std::fabs(p[3] - ab.y) });
+        worstE = std::max(worstE, std::fabs(p[4] - scene::model::directionalAlbedo(p[0], p[1])));
+    }
+    rb->Unmap(0, nullptr);
+    logf("    GPU table reads vs scene::model over %u points: worst |dA|, |dB| %.2e, |dE| %.2e\n", n * n, worstAB, worstE);
+    CHECK(worstAB < 1e-6f && worstE < 1e-6f);
+    testDevice().deferRelease(constants);
+    testDevice().deferRelease(rb);
 }
 
 UNX_TEST(frame_renderer_records_with_track_stubs)

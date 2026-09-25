@@ -7,7 +7,9 @@
 // tests against the previous frame's HiZ with previous transforms and defers what it rejects; after the phase-1
 // raster the HiZ is rebuilt and phase 2 retests the deferred instances, nodes and clusters against it. Only geometry
 // that the current frame's own depth hides is ever dropped. Visible clusters are classified into bands A/B/C and
-// pipeline lists; the band A lists are drawn by mesh shaders (vis id + depth).
+// pipeline lists; the band A lists are drawn by mesh shaders (vis id + depth). With visibility.coverage_layer the main
+// view draws bands B and C into the coverage layer instead (CoverageLayer.hlsli): conservative raster with exact pixel
+// areas into per-pixel lists, then per pixel a sorted fragment range (INTERFACES 7.1).
 #include "unx/render/Tracks.h"
 
 #include "VisibilityInternal.h"
@@ -35,9 +37,9 @@ constexpr uint32_t kReadbackBytes = 256;
 
 struct Settings
 {
-    uint32_t capVisible = 0, capNodes = 0, capGroups = 0, capDeferred = 0;
+    uint32_t capVisible = 0, capNodes = 0, capGroups = 0, capDeferred = 0, capCoverageFragments = 0;
     float lodErrorPx = 0, bandAMinPx = 0, bandCMaxPx = 0;
-    bool occlusion = true;
+    bool occlusion = true, coverageLayer = false;
 
     static Settings load(const QualityConfig& q)
     {
@@ -50,6 +52,10 @@ struct Settings
         s.bandAMinPx = (float)q.number("visibility.band_a_min_width_px");
         s.bandCMaxPx = (float)q.number("visibility.band_c_max_width_px");
         s.occlusion = q.boolean("visibility.occlusion_culling");
+        s.coverageLayer = q.boolean("visibility.coverage_layer");
+        const int64_t coverage = q.integer("visibility.max_coverage_fragments");
+        if (coverage < 1 || coverage >= (1 << 24)) fail("visibility.max_coverage_fragments = %lld: 1 .. 2^24 - 1 (24-bit first-fragment field of the heads)", (long long)coverage);
+        s.capCoverageFragments = (uint32_t)coverage;
         return s;
     }
 };
@@ -63,6 +69,14 @@ struct Hiz
     uint32_t srv = kNone;
     std::vector<uint32_t> uavs;                // one per mip
     bool history = false;                      // holds a complete HiZ of the previous frame
+};
+
+// Persistent coverage layer resources of the main view (CoverageLayer.hlsli): heads and the pixel buffer (header + list).
+struct Coverage
+{
+    ComPtr<ID3D12Resource> heads, pixels;
+    uint32_t width = 0, height = 0;
+    bool fresh = true;  // heads and header still to be zeroed (CoverageBuild MODE 4)
 };
 
 struct State
@@ -85,6 +99,7 @@ struct State
     };
     std::map<std::string, StatsRun> stats;
     Hiz mainHiz;
+    Coverage mainCoverage;
     D3D12_GPU_VIRTUAL_ADDRESS mainFrameConstants = 0;  // this frame's main view constants (scene indices, time, wind)
     uint64_t mainFrameConstantsFrame = UINT64_MAX;
     uint32_t sceneRevision = UINT32_MAX;
@@ -261,6 +276,12 @@ CullView viewOf(const ViewDesc& view, const Settings& cfg, bool occlusion)
     v.flags = kViewCullBack | (occlusion ? kViewOcclusion : 0);
     v.viewportSize = { (float)view.width, (float)view.height };
     v.cullMaskOffset = kNone;
+    if (view.planarMask.valid())  // PlanarMask.hlsl: the view's tile cull mask
+    {
+        v.cullMaskOffset = 0;
+        v.tilePx = 8;
+        v.tilesX = (view.width + 7) / 8;
+    }
     return v;
 }
 
@@ -382,6 +403,7 @@ struct Run
     uint32_t viewsSrv = kNone, viewCount = 0, instanceMask = 0;
     uint32_t nodesSrv = kNone, rootsSrv = kNone, spheresSrv = kNone, sheetsSrv = kNone;
     D3D12_GPU_VIRTUAL_ADDRESS frameConstants = 0;  // scene indices, time and wind for the kernels (b1)
+    uint32_t bandMode = kBandModeA;
     Settings cfg;
     std::string prefix;
 };
@@ -448,7 +470,7 @@ void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t 
     k[23] = r.cfg.capDeferred;
     k[24] = r.viewCount;
     k[25] = instanceCount;
-    k[26] = kBandMode;
+    k[26] = r.bandMode;
     k[27] = r.tilePairs.valid() ? c.uav(r.tilePairs) : kNone;
     k[28] = halfBits(r.cfg.bandAMinPx) | halfBits(r.cfg.bandCMaxPx) << 16;
     k[29] = r.sheetsSrv;
@@ -474,6 +496,64 @@ void cullPass(FramePassContext& fc, State& s, const Run& r, const std::string& n
                          if (groupsX > 0) c.cmd->Dispatch(groupsX, groupsY, 1);
                          else c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), argWord * 4, nullptr, 0);
                      });
+}
+
+// Coarse summary of a run's tile mask (8 x 8 tiles per bit, 64 cells = two words per group): the cull kernels visit
+// only the set cells under a bounding rectangle.
+void tileCoarsePass(FramePassContext& fc, Run& r, const std::vector<CullView>& views)
+{
+    uint32_t cells = 1;
+    for (const CullView& v : views)
+    {
+        const uint32_t tilesY = ((uint32_t)v.viewportSize.y + v.tilePx - 1) / v.tilePx;
+        cells = std::max(cells, ((v.tilesX + 7) / 8) * ((tilesY + 7) / 8));
+    }
+    const uint32_t groups = (cells + 63) / 64;
+    r.tileCoarseWords = groups * 2;
+    r.tileCoarse = fc.graph.createBuffer({ "v.cull.tileCoarse", (uint64_t)r.tileCoarseWords * r.viewCount * 4, 0 });
+    ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/TileMaskCoarse");
+    const BufferRef mask = r.tileMask, coarse = r.tileCoarse;
+    const uint32_t viewsSrv = r.viewsSrv, words = r.tileCoarseWords, viewCount = r.viewCount;
+    fc.graph.addPass(r.prefix + "tilemask", QueueType::Graphics,
+                     [&](PassBuilder& b) {
+                         b.use(mask, Use::SrvCompute);
+                         b.use(coarse, Use::UavComputeDisjoint);
+                     },
+                     [=](PassContext& c) {
+                         const uint32_t k[4] = { viewsSrv, c.srv(mask), c.uav(coarse), words };
+                         c.cmd->SetPipelineState(pso);
+                         c.computeConstants(k, 4);
+                         c.cmd->Dispatch(groups, viewCount, 1);
+                     });
+}
+
+// Planar reflection view mask (ViewDesc::planarMask) -> the run's tile cull mask (8 x 8 tiles; PlanarMask.hlsl).
+constexpr uint32_t kPlanarTilePx = 8;
+
+void planarTileMask(FramePassContext& fc, Run& r, const ViewDesc& view)
+{
+    const uint32_t tilesX = (view.width + kPlanarTilePx - 1) / kPlanarTilePx, tilesY = (view.height + kPlanarTilePx - 1) / kPlanarTilePx;
+    const uint32_t words = (tilesX * tilesY + 31) / 32;
+    r.tileMask = fc.graph.createBuffer({ "v.cull.planarTiles", (uint64_t)words * 4, 0 });
+    const BufferRef bits = r.tileMask;
+    const TextureRef mask = view.planarMask;
+    const uint32_t width = view.width, height = view.height;
+    for (uint32_t mode = 0; mode < 2; ++mode)
+    {
+        ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/PlanarMask.MODE" + std::to_string(mode));
+        fc.graph.addPass(r.prefix + (mode == 0 ? "planar.clear" : "planar.tiles"), QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             if (mode == 1) b.use(mask, Use::SrvCompute);
+                             b.use(bits, Use::UavCompute);
+                         },
+                         [=](PassContext& c) {
+                             const uint32_t k[8] = { mode == 1 ? c.srv(mask) : kNone, c.uav(bits), width, height, tilesX, words, 0, 0 };
+                             c.cmd->SetPipelineState(pso);
+                             c.computeConstants(k, 8);
+                             if (mode == 0) c.cmd->Dispatch((words + 63) / 64, 1, 1);
+                             else c.cmd->Dispatch(tilesX, tilesY, 1);
+                         });
+    }
 }
 
 // One cull phase: instances (phase 1: all x views; phase 2: deferred), the traversal levels, the cluster pass(es) and
@@ -520,12 +600,27 @@ ID3D12PipelineState* visPipeline(FramePassContext& fc, uint32_t list, bool mirro
 
 void rasterPass(FramePassContext& fc, State& s, const Run& r, ViewResources& view, uint32_t phase)
 {
-    ID3D12PipelineState* pso[kLists];
-    for (uint32_t l = 0; l < kLists; ++l) pso[l] = visPipeline(fc, l, view.view.mirrored);
+    ID3D12PipelineState* pso[kAListCount];
+    for (uint32_t l = 0; l < kAListCount; ++l) pso[l] = visPipeline(fc, l, view.view.mirrored);
     ID3D12CommandSignature* sig = s.meshSignature.Get();
     const uint32_t width = view.view.width, height = view.view.height;
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = view.frameConstants;
     const TextureRef depth = view.depth, visId = view.visId;
+    // Planar reflection views: pixels that are not mirror pixels get the nearest depth first (PlanarFill), so every
+    // fragment there fails the early depth test and they stay VIS_NONE.
+    const TextureRef planarMask = phase == 1 ? view.view.planarMask : TextureRef{};
+    ID3D12PipelineState* fillPso = nullptr;
+    if (planarMask.valid())
+    {
+        MeshPipelineDesc d;
+        d.meshShader = "Passes/Visibility/PlanarFill.ms";
+        d.pixelShader = "Passes/Visibility/PlanarFill.ps";
+        d.renderTargets = { DXGI_FORMAT_R32_UINT };
+        d.depthFormat = DXGI_FORMAT_D32_FLOAT;
+        d.depthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        d.cull = D3D12_CULL_MODE_NONE;
+        fillPso = fc.shaders.mesh("v.planarfill", d);
+    }
     fc.graph.addPass(r.prefix + "raster.p" + std::to_string(phase), QueueType::Graphics,
                      [&](PassBuilder& b) {
                          b.use(r.args, Use::IndirectArgs);
@@ -534,6 +629,7 @@ void rasterPass(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
                          b.use(r.state, Use::SrvGraphics);
                          b.use(depth, Use::DepthWrite);
                          b.use(visId, Use::RenderTarget);
+                         if (planarMask.valid()) b.use(planarMask, Use::SrvGraphics);
                      },
                      [=](PassContext& c) {
                          const D3D12_CPU_DESCRIPTOR_HANDLE rtv = c.rtv(visId), dsv = c.dsv(depth);
@@ -548,8 +644,15 @@ void rasterPass(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
                          const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
                          c.cmd->RSSetViewports(1, &vp);
                          c.cmd->RSSetScissorRects(1, &sc);
+                         if (fillPso)
+                         {
+                             const uint32_t k[4] = { c.srv(planarMask), 0, 0, 0 };
+                             c.cmd->SetPipelineState(fillPso);
+                             c.graphicsConstants(k, 4);
+                             c.cmd->DispatchMesh(1, 1, 1);
+                         }
                          c.bindFrameConstants(frameConstants);
-                         for (uint32_t l = 0; l < kLists; ++l)
+                         for (uint32_t l = 0; l < kAListCount; ++l)  // bands B and C: empty lists or the coverage layer
                          {
                              const uint32_t k[8] = { c.srv(r.visible), c.srv(r.lists), c.srv(r.state), l, phase, r.cfg.capVisible, r.viewsSrv, 0 };
                              c.cmd->SetPipelineState(pso[l]);
@@ -597,6 +700,152 @@ void hizPasses(FramePassContext& fc, const Hiz& h, TextureRef hizRef, TextureRef
     }
 }
 
+void ensureCoverage(Device& device, Coverage& cv, uint32_t width, uint32_t height)
+{
+    if (cv.heads && cv.width == width && cv.height == height) return;
+    if (cv.heads) device.deferRelease(cv.heads);
+    if (cv.pixels) device.deferRelease(cv.pixels);
+    D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC1 rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = width;
+    rd.Height = height;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels = 1;
+    rd.Format = DXGI_FORMAT_R32_UINT;
+    rd.SampleDesc.Count = 1;
+    rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    check(device.d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&cv.heads)),
+          "V coverage heads");
+    cv.heads->SetName(L"V coverage heads (main view)");
+    rd = {};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = (uint64_t)(kCovPixelList + (uint64_t)width * height) * 4;
+    rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    check(device.d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&cv.pixels)),
+          "V coverage pixels");
+    cv.pixels->SetName(L"V coverage pixels (main view)");
+    cv.width = width;
+    cv.height = height;
+    cv.fresh = true;
+}
+
+// Coverage layer of the main view (bands B and C until the bricks exist; CoverageLayer.hlsli), after the final HiZ:
+// clear last frame's heads, conservative raster with exact pixel areas into per-pixel linked lists, then per pixel a
+// sorted range. Products: ViewResources::coverageHeads, coverageFragments, coveragePixels (INTERFACES 7.1).
+void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources& view)
+{
+    const uint32_t width = view.view.width, height = view.view.height;
+    Coverage& cv = s.mainCoverage;
+    ensureCoverage(fc.device, cv, width, height);
+    RenderGraph& g = fc.graph;
+    const uint32_t capFragments = r.cfg.capCoverageFragments, capPixels = width * height;
+    const TextureRef heads = g.importTexture(cv.heads.Get(), { "v.coverage.heads", width, height, 1, 1, DXGI_FORMAT_R32_UINT }, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+    const BufferRef pixels = g.importBuffer(cv.pixels.Get(), { "v.coverage.pixels", (uint64_t)(kCovPixelList + (uint64_t)capPixels) * 4, 0 });
+    const BufferRef raw = g.createBuffer({ "v.coverage.raw", (uint64_t)capFragments * kCoverageRawBytes, kCoverageRawBytes });
+    const BufferRef sorted = g.createBuffer({ "v.coverage.fragments", (uint64_t)capFragments * kCoverageFragmentBytes, kCoverageFragmentBytes });
+    view.coverageHeads = heads;
+    view.coverageFragments = sorted;
+    view.coveragePixels = pixels;
+    const uint32_t hizSrv = s.mainHiz.srv, hizSize = s.mainHiz.width | s.mainHiz.height << 16;
+    const float frontSign = view.view.mirrored ? -1.0f : 1.0f;
+    const Run run = r;
+    // Root constants (CoverageLayer.hlsli); resources a pass does not declare are kNone.
+    auto constants = [=](const PassContext& c, uint32_t k[20], bool rawUsed, bool sortedUsed, bool raster) {
+        std::memset(k, 0, 20 * 4);
+        k[0] = c.uav(run.state);
+        k[1] = raster ? kNone : c.uav(run.args);
+        k[2] = rawUsed ? c.uav(raw) : kNone;
+        k[3] = sortedUsed ? c.uav(sorted) : kNone;
+        k[4] = c.uav(heads);
+        k[5] = c.uav(pixels);
+        k[6] = capFragments;
+        k[7] = capPixels;
+        k[8] = hizSrv;
+        k[9] = width;
+        k[10] = height;
+        k[11] = hizSize;
+        k[12] = raster ? c.srv(run.visible) : kNone;
+        k[13] = raster ? c.srv(run.lists) : kNone;
+        k[14] = run.cfg.capVisible;
+        k[15] = run.viewsSrv;
+        std::memcpy(&k[16], &frontSign, 4);
+    };
+    ID3D12CommandSignature* dispatchSig = s.dispatchSignature.Get();
+    ID3D12CommandSignature* meshSig = s.meshSignature.Get();
+    // Compute pass of CoverageBuild: direct (groupsX > 0) or indirect at argWord.
+    auto build = [&](const char* name, uint32_t mode, uint32_t groupsX, uint32_t groupsY, uint32_t argWord, bool rawUsed, bool sortedUsed) {
+        ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/CoverageBuild.MODE" + std::to_string(mode));
+        const bool indirect = groupsX == 0;
+        g.addPass(std::string("v.coverage.") + name, QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(run.state, Use::UavCompute);
+                      b.use(run.args, indirect ? Use::IndirectArgs : Use::UavCompute);
+                      b.use(heads, Use::UavCompute);
+                      b.use(pixels, Use::UavCompute);
+                      if (rawUsed) b.use(raw, Use::UavCompute);
+                      if (sortedUsed) b.use(sorted, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      uint32_t k[20];
+                      constants(c, k, rawUsed, sortedUsed, false);
+                      if (indirect) k[1] = kNone;  // the args are read as indirect arguments here
+                      c.cmd->SetPipelineState(pso);
+                      c.computeConstants(k, 20);
+                      if (indirect) c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(run.args), argWord * 4, nullptr, 0);
+                      else c.cmd->Dispatch(groupsX, groupsY, 1);
+                  });
+    };
+    if (cv.fresh)
+    {
+        build("init", 4, (width + 7) / 8, (height + 7) / 8, 0, false, false);
+        cv.fresh = false;
+    }
+    build("prepare", 0, 1, 1, 0, false, false);
+    build("clear", 1, 0, 0, kArgCovReset, false, false);
+
+    MeshPipelineDesc d;
+    d.meshShader = "Passes/Visibility/CoverageRaster.ms";
+    d.pixelShader = "Passes/Visibility/CoverageRaster.ps";
+    d.depthFormat = DXGI_FORMAT_UNKNOWN;
+    d.depthWrite = false;
+    d.cull = D3D12_CULL_MODE_NONE;  // one-sided back faces are culled by the mesh kernel (with the near clip)
+    d.conservative = true;
+    ID3D12PipelineState* rasterPso = fc.shaders.mesh("v.coverage", d);
+    const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = view.frameConstants;
+    const TextureRef hiz = r.hiz;
+    g.addPass("v.coverage.raster", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(run.args, Use::IndirectArgs);
+                  b.use(run.visible, Use::SrvGraphics);
+                  b.use(run.lists, Use::SrvGraphics);
+                  b.use(run.state, Use::UavGraphics);
+                  b.use(heads, Use::UavGraphics);
+                  b.use(pixels, Use::UavGraphics);
+                  b.use(raw, Use::UavGraphics);
+                  if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
+              },
+              [=](PassContext& c) {
+                  uint32_t k[20];
+                  constants(c, k, true, false, true);
+                  if (!hiz.valid()) k[8] = kNone;
+                  c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+                  const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
+                  const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
+                  c.cmd->RSSetViewports(1, &vp);
+                  c.cmd->RSSetScissorRects(1, &sc);
+                  c.bindFrameConstants(frameConstants);
+                  c.cmd->SetPipelineState(rasterPso);
+                  c.graphicsConstants(k, 20);
+                  c.cmd->ExecuteIndirect(meshSig, 1, c.resource(run.args), kArgCovMesh * 4, nullptr, 0);
+              });
+    build("args", 2, 1, 1, 0, false, false);
+    build("build", 3, 0, 0, kArgCovPixels, true, true);
+}
+
 // Reads the named run's statistics of the frame that last used this frame's slot (complete: the caller waited for
 // that slot before recording, FrameRenderer contract), then records this frame's copy into the slot.
 void recordStats(FramePassContext& fc, State& s, const Run& r, const std::string& name)
@@ -625,11 +874,14 @@ void recordStats(FramePassContext& fc, State& s, const Run& r, const std::string
         st.deferredInstances = w[kStateDeferInstances];
         st.deferredNodes = w[kStateDeferNodes];
         st.deferredClusters = w[kStateDeferClusters];
+        st.coverageFragments = w[kStateCovFragments];
+        st.coveragePixels = w[kStateCovPixels];
         st.overflow = w[kStateOverflow];
         if (st.overflow && !run.overflowReported)
         {
-            logf("V: cull capacity exceeded in '%s', frame %llu (bits 0x%x): raise visibility.max_* (Stats::overflow)\n", name.c_str(), (unsigned long long)st.frameIndex,
-                 st.overflow);
+            logf("V: capacity exceeded in '%s', frame %llu (bits 0x%x): raise visibility.max_* (Stats::overflow; 0x200: a pixel with more than 255 coverage "
+                 "fragments)\n",
+                 name.c_str(), (unsigned long long)st.frameIndex, st.overflow);
             run.overflowReported = true;
         }
         run.latest = st;
@@ -664,6 +916,9 @@ void visibility(FramePassContext& fc, ViewResources& view)
     Run r = createRun(fc, cfg, main ? "v.cull." : "v.cull.secondary.", view.frameConstants);
     view.visibleClusters = r.visible;
     r.viewCount = 1;
+    // Secondary views (planar reflections) still draw every band in the vis buffer: their coverage layer needs its own
+    // persistent heads and M's composite in that view (V status).
+    r.bandMode = main && cfg.coverageLayer ? kBandModeCoverage : kBandModeA;
 
     // Main view: two-phase occlusion against its persistent HiZ once a previous frame produced one. Secondary views
     // (planar reflections) have no history: one phase without occlusion, no HiZ.
@@ -680,11 +935,22 @@ void visibility(FramePassContext& fc, ViewResources& view)
         r.hizWidth = s.mainHiz.width;
         r.hizHeight = s.mainHiz.height;
     }
-    r.viewsSrv = uploadViews(s, fc, { viewOf(view.view, cfg, occlusion) });
+    const CullView cullView = viewOf(view.view, cfg, occlusion);
+    r.viewsSrv = uploadViews(s, fc, { cullView });
+    if (view.view.planarMask.valid())
+    {
+        if (main) fail("V: ViewDesc::planarMask is for planar reflection views");
+        planarTileMask(fc, r, view.view);
+        tileCoarsePass(fc, r, { cullView });
+    }
 
     cullPhase(fc, s, r, 1);
     rasterPass(fc, s, r, view, 1);
-    if (!main) return;
+    if (!main)
+    {
+        recordStats(fc, s, r, "secondary");  // the frame's last secondary view (R's planar reflection costs)
+        return;
+    }
     hizPasses(fc, s.mainHiz, r.hiz, view.depth, width, height, occlusion ? "p1" : "final");
     if (occlusion)
     {
@@ -692,6 +958,7 @@ void visibility(FramePassContext& fc, ViewResources& view)
         rasterPass(fc, s, r, view, 2);
         hizPasses(fc, s.mainHiz, r.hiz, view.depth, width, height, "final");
     }
+    if (r.bandMode != kBandModeA) coveragePasses(fc, s, r, view);
     recordStats(fc, s, r, "main");
     s.mainHiz.history = true;  // complete for the next frame once this frame's passes run
 }
@@ -726,37 +993,10 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     for (const RasterView& v : request.views) views.push_back(viewOf(v, request, cfg));
     r.viewCount = (uint32_t)views.size();
     r.viewsSrv = uploadViews(s, fc, views);
-    if (r.tileMask.valid())
-    {
-        // Coarse summary of the tile mask (8 x 8 tiles per bit, 64 cells = two words per group): the cull kernels visit
-        // only the set cells under a bounding rectangle.
-        uint32_t cells = 1;
-        for (const CullView& v : views)
-        {
-            const uint32_t tilesY = ((uint32_t)v.viewportSize.y + v.tilePx - 1) / v.tilePx;
-            cells = std::max(cells, ((v.tilesX + 7) / 8) * ((tilesY + 7) / 8));
-        }
-        const uint32_t groups = (cells + 63) / 64;
-        r.tileCoarseWords = groups * 2;
-        r.tileCoarse = fc.graph.createBuffer({ "v.cull.tileCoarse", (uint64_t)r.tileCoarseWords * r.viewCount * 4, 0 });
-        ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/TileMaskCoarse");
-        const BufferRef mask = r.tileMask, coarse = r.tileCoarse;
-        const uint32_t viewsSrv = r.viewsSrv, words = r.tileCoarseWords, viewCount = r.viewCount;
-        fc.graph.addPass(r.prefix + "tilemask", QueueType::Graphics,
-                         [&](PassBuilder& b) {
-                             b.use(mask, Use::SrvCompute);
-                             b.use(coarse, Use::UavComputeDisjoint);
-                         },
-                         [=](PassContext& c) {
-                             const uint32_t k[4] = { viewsSrv, c.srv(mask), c.uav(coarse), words };
-                             c.cmd->SetPipelineState(pso);
-                             c.computeConstants(k, 4);
-                             c.cmd->Dispatch(groups, viewCount, 1);
-                         });
-    }
+    if (r.tileMask.valid()) tileCoarsePass(fc, r, views);
     cullPhase(fc, s, r, 1);
 
-    // Back-face lists exist only when BACK was requested; shadow casters need every band (kBandMode puts all visible
+    // Back-face lists exist only when BACK was requested; shadow casters need every band (band mode A puts all visible
     // clusters in band A lists).
     const bool depthOut = request.depthTarget.valid();
     ID3D12PipelineState* pso[kLists];

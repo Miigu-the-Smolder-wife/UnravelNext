@@ -20,10 +20,17 @@ float radicalInverse(uint32_t bits)
     return (float)bits * 2.3283064365386963e-10f;
 }
 
-std::vector<float> buildTable()
+struct Tables
+{
+    std::vector<float> e, ab;  // E (n * n), (A, B) (2 * n * n)
+};
+
+Tables buildTables()
 {
     const uint32_t n = kAlbedoTableSize, samples = 4096;
-    std::vector<float> table(n * n);
+    Tables out;
+    out.e.resize(n * n);
+    out.ab.resize(2 * n * n);
     for (uint32_t ri = 0; ri < n; ++ri)
         for (uint32_t mi = 0; mi < n; ++mi)
         {
@@ -38,7 +45,7 @@ std::vector<float> buildTable()
             const float3 t1 = lensq > 0 ? float3{ -vh.y, vh.x, 0 } / std::sqrt(lensq) : float3{ 1, 0, 0 };
             const float3 t2 = cross(vh, t1);
             const float g1v = 2 * mu / (mu + std::sqrt(alpha * alpha + (1 - alpha * alpha) * mu * mu));
-            double sum = 0;
+            double sum = 0, a = 0, b = 0;
             for (uint32_t s = 0; s < samples; ++s)
             {
                 const float u1 = (s + 0.5f) / samples, u2 = radicalInverse(s);
@@ -53,11 +60,23 @@ std::vector<float> buildTable()
                 const float NoL = l.z;
                 if (NoL <= 0) continue;
                 // f * NoL / pdf(l) with F = 1 and pdf(l) = G1(v) VoH D / (NoV 4 VoH)  ->  4 V NoL NoV / G1(v)
-                sum += 4.0 * visibilitySmithGgxCorrelated(mu, NoL, alpha) * NoL * mu / g1v;
+                const double weight = 4.0 * visibilitySmithGgxCorrelated(mu, NoL, alpha) * NoL * mu / g1v;
+                const double w = std::pow(1.0 - std::clamp((double)VoH, 0.0, 1.0), 5.0);  // Schlick weight
+                sum += weight;
+                a += weight * (1 - w);
+                b += weight * w;
             }
-            table[ri * n + mi] = (float)(sum / samples);
+            out.e[ri * n + mi] = (float)(sum / samples);
+            out.ab[2 * (ri * n + mi)] = (float)(a / samples);
+            out.ab[2 * (ri * n + mi) + 1] = (float)(b / samples);
         }
-    return table;
+    return out;
+}
+
+const Tables& tables()
+{
+    static const Tables t = buildTables();
+    return t;
 }
 } // namespace
 
@@ -90,10 +109,21 @@ float3 fresnelSchlick(float3 f, float VoH)
     return f + (float3{ 1, 1, 1 } - f) * w;
 }
 
-const std::vector<float>& directionalAlbedoTable()
+const std::vector<float>& directionalAlbedoTable() { return tables().e; }
+
+const std::vector<float>& specularAlbedoTable() { return tables().ab; }
+
+float2 specularAlbedo(float NoV, float roughness)
 {
-    static const std::vector<float> table = buildTable();
-    return table;
+    const auto& t = specularAlbedoTable();
+    const float last = (float)(kAlbedoTableSize - 1);
+    const float x = std::clamp(NoV, 0.0f, 1.0f) * last, y = std::clamp(roughness, 0.0f, 1.0f) * last;
+    const uint32_t x0 = (uint32_t)x, y0 = (uint32_t)y;
+    const uint32_t x1 = std::min(x0 + 1, kAlbedoTableSize - 1), y1 = std::min(y0 + 1, kAlbedoTableSize - 1);
+    const float fx = x - x0, fy = y - y0;
+    auto at = [&](uint32_t xi, uint32_t yi) { return float2{ t[2 * (yi * kAlbedoTableSize + xi)], t[2 * (yi * kAlbedoTableSize + xi) + 1] }; };
+    const float2 a = at(x0, y0), b = at(x1, y0), c = at(x0, y1), d = at(x1, y1);
+    return { (a.x * (1 - fx) + b.x * fx) * (1 - fy) + (c.x * (1 - fx) + d.x * fx) * fy, (a.y * (1 - fx) + b.y * fx) * (1 - fy) + (c.y * (1 - fx) + d.y * fx) * fy };
 }
 
 float directionalAlbedo(float NoV, float roughness)

@@ -21,10 +21,13 @@ struct Stats
                                        // tile-local raster runs: (cluster, tile rectangle) pairs
     uint32_t tilePairs = 0;            // tile-local raster runs: pairs drawn (DepthRasterRequest::tileLocal)
     uint32_t deferredInstances = 0, deferredNodes = 0, deferredClusters = 0;  // phase 1 -> phase 2
+    uint32_t coverageFragments = 0;    // coverage layer fragments appended (main view; may exceed the capacity)
+    uint32_t coveragePixels = 0;       // pixels with coverage fragments
     uint32_t overflow = 0;             // capacity bits (0 = every list fit); nonzero means geometry was dropped
 };
 
 // Statistics of the latest frame whose readback has completed (frameIndex = UINT64_MAX before the first): "main" for
-// the main view, or a depth-raster request's name (DepthRasterRequest::name) for that request's cull run.
+// the main view, "secondary" for the last secondary view (planar reflection) of the frame, or a depth-raster
+// request's name (DepthRasterRequest::name) for that request's cull run.
 Stats latestStats(render::TrackState& state, const std::string& run = "main");
 } // namespace unx::visibility

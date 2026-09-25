@@ -44,14 +44,17 @@ struct CullView
 #define VS_DEFER_CLUSTERS 8u
 #define VS_LIST_COUNT 9u      // + list (VS_LISTS lists): entries appended so far (both phases)
 #define VS_LIST_PHASE1 15u    // + list: entries of phase 1 (snapshot)
-#define VS_OVERFLOW 21u       // bits: capacity exceeded (OVERFLOW_*, CullShared.hlsli)
+#define VS_OVERFLOW 21u       // bits: capacity exceeded (OVERFLOW_*)
 #define VS_STAT_INSTANCES 22u // instances that reached the node pass
 #define VS_STAT_NODES 23u     // node items processed
 #define VS_STAT_CLUSTERS 24u  // clusters tested
 #define VS_STAT_TRIANGLES 25u // + band (3): triangles of visible clusters per band A, B, C
 #define VS_GROUP_END 28u      // group items of the current cluster pass: [VS_GROUP_BEGIN, VS_GROUP_END)
 #define VS_TILE_PAIRS 29u     // tile-local raster: (cluster, tile rectangle) pairs appended
-#define VS_WORDS 32u
+#define VS_COV_FRAGMENTS 32u  // coverage layer (CoverageLayer.hlsli): fragments appended by the raster
+#define VS_COV_PIXELS 33u     // pixels with fragments (pixel list entries)
+#define VS_COV_ALLOC 34u      // sorted fragments allocated by the build
+#define VS_WORDS 40u
 
 #define VS_LISTS 6u
 #define LIST_A_BACK 0u        // band A, opaque, back faces culled
@@ -60,6 +63,7 @@ struct CullView
 #define LIST_A_ALPHA_NONE 3u
 #define LIST_B 4u             // coverage layer
 #define LIST_C 5u             // aggregate bricks
+#define VS_A_LISTS 4u         // lists drawn by the vis buffer raster: 0 .. VS_A_LISTS - 1
 
 // Indirect argument words (3 per dispatch).
 #define VA_NODES 0u
@@ -68,7 +72,35 @@ struct CullView
 #define VA_DEFERRED_INSTANCES 9u
 #define VA_SEED_NODES 12u
 #define VA_MESH 15u           // + 3 * list
-#define VA_WORDS 33u
+#define VA_COV_MESH 33u       // coverage raster: every band B list entry (both phases)
+#define VA_COV_RESET 36u      // heads reset over last frame's coverage pixels
+#define VA_COV_PIXELS 39u     // build over this frame's coverage pixels
+#define VA_WORDS 42u
+
+// Overflow bits (VS_OVERFLOW): a capacity was exceeded; the run's statistics report them (Stats::overflow).
+#define OVERFLOW_NODES 1u
+#define OVERFLOW_GROUPS 2u
+#define OVERFLOW_VISIBLE 4u
+#define OVERFLOW_DEFER_INSTANCES 8u
+#define OVERFLOW_DEFER_NODES 16u
+#define OVERFLOW_DEFER_CLUSTERS 32u
+#define OVERFLOW_NODE_DEPTH 64u        // node items left unprocessed after the last traversal iteration
+#define OVERFLOW_TILE_PAIRS 128u
+#define OVERFLOW_COVERAGE 256u         // coverage fragments beyond visibility.max_coverage_fragments
+#define OVERFLOW_COVERAGE_DEPTH 512u   // a pixel with more than 255 coverage fragments (the nearest-listed 255 kept)
+
+// Wave-aggregated append of 'n' entries per lane to a counter word; returns this lane's first index. Must be called
+// from uniform control flow (every active lane of the wave). Entries at or beyond 'capacity' set 'overflowBit'.
+uint waveAppend(RWByteAddressBuffer state, uint word, uint n, uint capacity, uint overflowBit)
+{
+    const uint total = WaveActiveSum(n);
+    const uint prefix = WavePrefixSum(n);
+    uint base = 0;
+    if (total > 0 && WaveIsFirstLane()) state.InterlockedAdd(4 * word, total, base);
+    base = WaveReadLaneFirst(base);
+    if (total > 0 && base + total > capacity && WaveIsFirstLane()) state.InterlockedOr(4 * VS_OVERFLOW, overflowBit);
+    return base + prefix;
+}
 
 uint packItem(uint index, uint view) { return index | (view << 24); }
 uint itemIndex(uint packed) { return packed & 0xFFFFFFu; }

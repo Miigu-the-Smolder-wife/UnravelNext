@@ -58,7 +58,7 @@ GpuScene::GpuScene(Device& device) : m_device(device) {}
 GpuScene::~GpuScene()
 {
     for (Buffer* b : { &m_instanceBuffer, &m_meshBuffer, &m_submeshBuffer, &m_vertexBuffer, &m_indexBuffer, &m_materialBuffer, &m_materialRemapBuffer, &m_lightBuffer,
-                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_clusterBuffer, &m_lodLevelBuffer, &m_lodLevelClusterBuffer,
+                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable, &m_clusterBuffer, &m_lodLevelBuffer, &m_lodLevelClusterBuffer,
                        &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer })
         release(*b);
     for (auto& [name, b] : m_named) release(b);
@@ -279,7 +279,7 @@ void GpuScene::upload(const scene::Scene& s)
     }
 
     for (Buffer* b : { &m_instanceBuffer, &m_meshBuffer, &m_submeshBuffer, &m_vertexBuffer, &m_indexBuffer, &m_materialBuffer, &m_materialRemapBuffer, &m_lightBuffer,
-                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable })
+                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable })
         release(*b);
     m_instanceBuffer = createStructured(m_instances.data(), sizeof(gpu::Instance), m_instances.size(), L"scene instances", true);
     m_meshBuffer = createStructured(m_meshes.data(), sizeof(gpu::Mesh), m_meshes.size(), L"scene meshes");
@@ -319,6 +319,8 @@ void GpuScene::upload(const scene::Scene& s)
     rawUav(m_prevPaletteUav, m_prevBonePalette, (uint64_t)m_prevBonePalette.count * sizeof(float4));
     const std::vector<float>& table = scene::model::directionalAlbedoTable();
     m_albedoTable = createStructured(table.data(), sizeof(float), table.size(), L"material model E table");
+    const std::vector<float>& specular = scene::model::specularAlbedoTable();
+    m_specularTable = createStructured(specular.data(), 2 * sizeof(float), specular.size() / 2, L"material model (A, B) table");
     if (!m_clusterBuffer.resource) setClusters(ClusterData{});
 }
 
@@ -596,6 +598,7 @@ void GpuScene::fill(gpu::FrameConstants& f) const
     f.bonePalette = m_bonePalette.srv;
     f.prevBonePalette = m_prevBonePalette.srv;
     f.materialModelLut = m_albedoTable.srv;
+    f.specularAlbedoLut = m_specularTable.srv;
     f.instanceCount = (uint32_t)m_instances.size();
     f.meshCount = (uint32_t)m_meshes.size();
     f.clusterCount = m_clusterBuffer.count;

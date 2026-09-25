@@ -113,7 +113,7 @@ private:
     std::vector<gpu::Mesh> m_meshes;
     std::vector<gpu::Material> m_materials;
     Buffer m_instanceBuffer, m_meshBuffer, m_submeshBuffer, m_vertexBuffer, m_indexBuffer, m_materialBuffer, m_materialRemapBuffer,
-        m_lightBuffer, m_skinBuffer, m_bonePalette, m_prevBonePalette, m_albedoTable;
+        m_lightBuffer, m_skinBuffer, m_bonePalette, m_prevBonePalette, m_albedoTable, m_specularTable;
     Buffer m_clusterBuffer, m_lodLevelBuffer, m_lodLevelClusterBuffer, m_clusterVertexIndexBuffer, m_clusterTriangleBuffer;
     std::vector<std::pair<std::string, Buffer>> m_named;
     ClusterData m_clusterData;

@@ -61,6 +61,9 @@ struct ViewResources
                                    // power-of-two allocation (texels beyond it are undefined)
     BufferRef coverageFragments;   // coverage layer fragments, sorted per pixel            [V]
     TextureRef coverageHeads;      // R32_UINT per pixel: first fragment | count << 24       [V]
+    BufferRef coveragePixels;      // raw: words 0..2 DispatchIndirect args over the coverage  [V]
+                                   // pixels (64 per group), 3 pixel count, 4 fragment count,
+                                   // 8.. pixel list (x | y << 16) (7.1, v1.25; invalid = no layer)
     TextureRef gbuffer;            // RG32_UINT (GBuffer.hlsli)                              [M]
     TextureRef shadowVisibility;   // R32_UINT, 4 light slots x 8 bit (7.3)                 [S]
     TextureRef shadowOverflowTiles;  // R32_UINT ceil(W/8) x ceil(H/8) (main view, 7.3, v1.20): [S]

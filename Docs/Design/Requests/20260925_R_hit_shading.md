@@ -39,3 +39,9 @@ R은 2026-09-25에 hit 셰이딩을 모델 v1 전체로 바꿨다(`Native/Render
 
 - `unx_test_reflection_reflectionanalytic`(백색로, 벽 f0 0.04): hit 스펙큘러를 넣은 모델 기대값 대비 M 평균 −0.29 %, G −0.15 %, 전 픽셀이 3 % + 4σ 안이다. 하늘 거울은 최악 0.00 %다.
 - 비용: 도시 4K 반사 trace 0.724 → 0.857 ms(조도·복사 조회를 한 번의 셀 순회로 합친 뒤).
+
+## 결과 (코어, 2026-09-25, INTERFACES v1.25): 1번
+
+- `scene::model::specularAlbedoTable()`(32×32 float2, E와 같은 격자·표본, A + B = E)과 `specularAlbedo(μ, r)`을 넣었다. `GpuScene`이 올리고 `FrameConstants::specularAlbedoLut`(`g_specularAlbedoLut`)에 싣는다. `MaterialModel.hlsli`의 `modelSpecularAlbedo(NoV, r)`로 읽는다.
+- [실측] CPU A + B − E 최대 6e-8, GPU 읽기 대 C++ 1.2e-7.
+- M·R은 복사본을 지우고 이것을 쓰면 된다. 2~4번(공용 헤더 이동, `giCacheRadiance` 법선, 표면 셰이딩 공용화)은 M·R 소유다.

@@ -10,6 +10,9 @@ band_a_min_width_px = 1.5         # w_px >= this: vis buffer + analytic edge cov
 band_c_max_width_px = 0.25        # w_px < this (or too many fragments): aggregate bricks
 band_c_max_fragments_per_pixel = 8
 coverage_subsamples = 32          # in-pixel fragment overlap ordering mask
+coverage_layer = false            # main view: bands B and C drawn in the coverage layer (INTERFACES 7.1); false draws
+                                  # them in the vis buffer, which loses sub-pixel geometry. true once M composites the
+                                  # coverage fragments (without it thin geometry would leave M's image)
 brick_resolution = 16             # band C voxel brick edge
 strands_per_pixel_max = 2         # hair/grass LOD: blades or strands per pixel width before switching to bricks
 # Capacities of one cull run (a view or a raster-service request). Exceeding one drops geometry and is reported in
@@ -18,3 +21,4 @@ max_visible_clusters = 1048576    # visible-list entries (each draw list has the
 max_node_items = 4194304          # hierarchy traversal work items (instance, node) of both phases
 max_group_items = 1048576         # hierarchy leaves reached (instance, group)
 max_deferred_items = 1048576      # phase-1 occluded instances / nodes / clusters retested in phase 2
+max_coverage_fragments = 12582912 # coverage layer fragments per frame (20 B raw + 16 B sorted each; < 2^24)

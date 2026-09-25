@@ -197,7 +197,8 @@ struct FrameConstants
     uint32_t lodLevels, materials, materialRemap, lights;
     uint32_t skinVertices, bonePalette, prevBonePalette, materialModelLut;  // materialModelLut: E(mu, r) table (8.1)
     uint32_t instanceCount, meshCount, clusterCount, lightCount;
-    uint32_t materialCount, sceneRevision, lodLevelClusters, pad1;  // lodLevelClusters: cluster indices of LodLevel cuts
+    uint32_t materialCount, sceneRevision, lodLevelClusters, specularAlbedoLut;  // lodLevelClusters: cluster indices of LodLevel cuts;
+                                                                                 // specularAlbedoLut: (A, B) table (8.1, v1.25)
 };
 static_assert(sizeof(FrameConstants) == 528);
 } // namespace unx::render::gpu

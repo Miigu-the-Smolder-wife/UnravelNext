@@ -11,7 +11,7 @@
 // run (TILE_PAIRS_UAV) one entry per (cluster, tile rectangle) pair instead (tileVisit).
 // Bands (ARCHITECTURE 2.1): w_face = projected minimum feature width seen face-on, w_min = w_face x (flat sheets) the
 // smallest |cos| between the view direction and the cluster's normals. A: w_min >= band A minimum; C: w_face < band C
-// maximum; B otherwise. BAND_MODE 0 puts every cluster in band A (until the coverage layer draws bands B and C).
+// maximum; B otherwise. The run's band mode picks the list of each band (BAND_MODE_*, CullShared.hlsli).
 #include "Passes/Visibility/CullShared.hlsli"
 
 #define PI 3.14159265
@@ -114,7 +114,7 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
     else if (w < 0)
         wMin = 0;  // skinned sheets: bind-pose normals do not bound the posed ones
     r.band = wMin >= BAND_A_MIN_PX ? 0u : (wFace < BAND_C_MAX_PX ? 2u : 1u);
-    const uint drawBand = BAND_MODE == 0 ? 0u : r.band;
+    const uint drawBand = BAND_MODE == BAND_MODE_A ? 0u : (BAND_MODE == BAND_MODE_COVERAGE ? min(r.band, 1u) : r.band);
     r.list = drawBand == 1 ? LIST_B : (drawBand == 2 ? LIST_C : (alpha ? (cullBack ? LIST_A_ALPHA_BACK : LIST_A_ALPHA_NONE) : (cullBack ? LIST_A_BACK : LIST_A_NONE)));
     r.triangles = clusterTriangleCount(cl);
     r.visible = true;

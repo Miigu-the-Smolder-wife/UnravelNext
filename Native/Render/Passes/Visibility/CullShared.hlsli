@@ -5,8 +5,8 @@
 //   P[3] HiZ mips, HiZ width, HiZ height, instance mask
 //   P[4] cluster nodes SRV, mesh roots SRV, cluster LOD spheres SRV, tile mask SRV (UNX_NONE = none)
 //   P[5] capacity: node items, group items, visible (= each list), deferred items
-//   P[6] view count, instance count, band mode (0: everything band A, 1: classify), tile pairs UAV (uint3; UNX_NONE =
-//        not tile-local: list entries are visible indices; else they index the pairs, VisibilityCommon.hlsli)
+//   P[6] view count, instance count, band mode (BAND_MODE_*), tile pairs UAV (uint3; UNX_NONE = not tile-local: list
+//        entries are visible indices; else they index the pairs, VisibilityCommon.hlsli)
 //   P[7] band A minimum width px | band C maximum width px << 16 (f16 each), cluster sheets SRV (float4), coarse tile mask
 //        SRV (TileMaskCoarse.hlsl), its words per view
 #ifndef UNX_CULL_SHARED_HLSLI
@@ -46,14 +46,10 @@
 #define TILE_COARSE_SRV P[7].z
 #define TILE_COARSE_WORDS P[7].w
 
-#define OVERFLOW_NODES 1u
-#define OVERFLOW_GROUPS 2u
-#define OVERFLOW_VISIBLE 4u
-#define OVERFLOW_DEFER_INSTANCES 8u
-#define OVERFLOW_DEFER_NODES 16u
-#define OVERFLOW_DEFER_CLUSTERS 32u
-#define OVERFLOW_NODE_DEPTH 64u  // node items left unprocessed after the last traversal iteration
-#define OVERFLOW_TILE_PAIRS 128u
+// Band modes of a cull run: which list a cluster of each band is drawn from.
+#define BAND_MODE_A 0u         // every band in the band A lists (raster service, secondary views)
+#define BAND_MODE_COVERAGE 1u  // bands B and C in the coverage layer list (LIST_B) until the band C bricks exist
+#define BAND_MODE_FULL 2u      // band B in LIST_B, band C in LIST_C
 
 CullView loadView(uint view)
 {
@@ -72,18 +68,5 @@ TileMasks tileMasks()
 
 // Raster-service tile mask test of a bounding sphere (true without a mask).
 bool tileVisible(CullView v, uint view, float4 s) { return TILE_MASK_SRV == UNX_NONE || tileMaskCovered(v, view, tileMasks(), s); }
-
-// Wave-aggregated append of 'n' entries per lane to a counter word; returns this lane's first index. Must be called
-// from uniform control flow (every lane of the wave). Entries at or beyond 'capacity' set 'overflowBit'.
-uint waveAppend(RWByteAddressBuffer state, uint word, uint n, uint capacity, uint overflowBit)
-{
-    const uint total = WaveActiveSum(n);
-    const uint prefix = WavePrefixSum(n);
-    uint base = 0;
-    if (total > 0 && WaveIsFirstLane()) state.InterlockedAdd(4 * word, total, base);
-    base = WaveReadLaneFirst(base);
-    if (total > 0 && base + total > capacity && WaveIsFirstLane()) state.InterlockedOr(4 * VS_OVERFLOW, overflowBit);
-    return base + prefix;
-}
 
 #endif

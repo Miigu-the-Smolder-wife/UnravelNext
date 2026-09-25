@@ -3,6 +3,7 @@
 //   coverageTriangleArea: area of triangle (a, b, c) inside the pixel square [pixel, pixel + 1)^2, exact up to float
 //                         rounding (Sutherland-Hodgman clip against the four pixel edges, shoelace area). Screen pixels,
 //                         either winding.
+//   coverageTriangleAreaCentroid: the same area and the clipped polygon's centroid (coverage-layer fragment depth).
 //   coverageTriangleMask: which of the 32 subsamples (kCoverageSamples, stratified in x and y) lie inside the triangle;
 //                         orders overlapping fragments inside one pixel (ARCHITECTURE 2.1: error <= 1/32 of the pixel).
 #ifndef UNX_COVERAGE_HLSLI
@@ -59,6 +60,34 @@ float coverageTriangleArea(float2 a, float2 b, float2 c, float2 pixel)
         const float2 u = p[i], v = p[(i + 1) % n];
         twice += u.x * v.y - v.x * u.y;
     }
+    return 0.5 * abs(twice);
+}
+
+// Area and centroid (screen pixels) of the same clipped polygon: the covered region's centre of mass, where the
+// coverage layer evaluates a fragment's depth (always inside the triangle, unlike the pixel centre).
+float coverageTriangleAreaCentroid(float2 a, float2 b, float2 c, float2 pixel, out float2 regionCentre)
+{
+    float2 p[COVERAGE_MAX_CLIPPED];
+    p[0] = a - pixel;
+    p[1] = b - pixel;
+    p[2] = c - pixel;
+    [unroll] for (uint k = 3; k < COVERAGE_MAX_CLIPPED; ++k) p[k] = 0;
+    uint n = 3;
+    coverageClip(p, n, 0, 0.0, -1.0);
+    coverageClip(p, n, 0, 1.0, 1.0);
+    coverageClip(p, n, 1, 0.0, -1.0);
+    coverageClip(p, n, 1, 1.0, 1.0);
+    float twice = 0;
+    float2 moment = 0;
+    [unroll] for (uint i = 0; i < COVERAGE_MAX_CLIPPED; ++i)
+    {
+        if (i >= n) break;
+        const float2 u = p[i], v = p[(i + 1) % n];
+        const float cr = u.x * v.y - v.x * u.y;
+        twice += cr;
+        moment += (u + v) * cr;
+    }
+    regionCentre = pixel + (abs(twice) > 1e-12 ? moment / (3.0 * twice) : float2(0.5, 0.5));
     return 0.5 * abs(twice);
 }
 

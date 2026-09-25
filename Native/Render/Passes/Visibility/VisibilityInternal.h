@@ -34,14 +34,22 @@ constexpr uint32_t kViewCullBack = 2;
 // Cull state words.
 constexpr uint32_t kStateNodeWrite = 0, kStateNodeEnd = 2, kStateGroupWrite = 3, kStateVisible = 5, kStateDeferInstances = 6, kStateDeferNodes = 7,
                    kStateDeferClusters = 8, kStateListCount = 9, kStateOverflow = 21, kStateStatInstances = 22, kStateStatNodes = 23, kStateStatClusters = 24,
-                   kStateStatTriangles = 25, kStateTilePairs = 29, kStateWords = 32;
+                   kStateStatTriangles = 25, kStateTilePairs = 29, kStateCovFragments = 32, kStateCovPixels = 33, kStateCovAlloc = 34,
+                   kStateWords = 40;
 constexpr uint32_t kLists = 6;
 constexpr uint32_t kListABack = 0, kListANone = 1, kListAAlphaBack = 2, kListAAlphaNone = 3, kListB = 4, kListC = 5;
+constexpr uint32_t kAListCount = 4;  // lists drawn by the vis buffer raster
 
 // Indirect argument words.
-constexpr uint32_t kArgNodes = 0, kArgGroups = 3, kArgDeferredClusters = 6, kArgDeferredInstances = 9, kArgSeedNodes = 12, kArgMesh = 15, kArgWords = 33;
+constexpr uint32_t kArgNodes = 0, kArgGroups = 3, kArgDeferredClusters = 6, kArgDeferredInstances = 9, kArgSeedNodes = 12, kArgMesh = 15, kArgCovMesh = 33,
+                   kArgCovReset = 36, kArgCovPixels = 39, kArgWords = 42;
 
-// Until the coverage layer draws bands B and C, every visible cluster is drawn in band A (classification still runs
-// and is reported in Stats::triangles).
-constexpr uint32_t kBandMode = 0;
+// Band modes of a cull run (CullShared.hlsli BAND_MODE_*): A = every band in the band A lists (raster service, secondary
+// views; classification still runs and is reported in Stats::triangles); Coverage = bands B and C in the coverage layer
+// list until the band C bricks exist; Full = band C in its own list.
+constexpr uint32_t kBandModeA = 0, kBandModeCoverage = 1, kBandModeFull = 2;
+
+// Coverage layer (CoverageLayer.hlsli): record sizes and the pixel buffer header.
+constexpr uint32_t kCoverageRawBytes = 20, kCoverageFragmentBytes = 16;
+constexpr uint32_t kCovPixelArgs = 0, kCovPixelCount = 3, kCovPixelFragments = 4, kCovPixelList = 8;
 } // namespace unx::visibility::detail

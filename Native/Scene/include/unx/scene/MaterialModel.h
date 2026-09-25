@@ -49,6 +49,12 @@ float3 fresnelSchlick(float3 f0, float VoH);
 // per grid point, visible-normal sampling). Uploaded unchanged as the renderer's materialModelLut (StructuredBuffer<float>).
 const std::vector<float>& directionalAlbedoTable();
 float directionalAlbedo(float NoV, float roughness);
+// Split specular directional albedo (INTERFACES 8.1, v1.25): the same visible-normal samples as E split by the Schlick
+// weight w = (1 - v.h)^5, A = mean(weight (1 - w)), B = mean(weight w), so f0 A + B is the lobe's albedo with Schlick
+// Fresnel and A + B = E (to float rounding). 2 values per grid point (A, B), same grid and addressing as E. Uploaded
+// unchanged as the renderer's specularAlbedoLut (StructuredBuffer<float2>).
+const std::vector<float>& specularAlbedoTable();
+float2 specularAlbedo(float NoV, float roughness);
 
 // BRDF value (without the cosine), world-space unit vectors: n shading normal, v towards the viewer, l towards the light.
 float3 evaluate(const Surface& s, float3 n, float3 v, float3 l);

@@ -33,3 +33,8 @@
   - 보조 뷰 통계를 `visibility::latestStats(state, "secondary")`로 낸다(그 프레임의 마지막 보조 뷰). R의 평면 뷰 비용 측정에 쓸 수 있다.
   - 테스트 `planar_mask_draws_only_mirror_pixels`: 거울 픽셀은 마스크 없는 뷰와 vis id·깊이가 비트 단위로 같고, 나머지는 VIS_NONE·깊이 1이며, 보이는 클러스터가 줄어든다.
 - 게임이 끝나 GPU 검증을 통과하면 공유 트리에 넣고 알린다. 그 전까지 V는 마스크를 무시한다(결과 같음, 비용만 큼).
+
+## 결과 2 (코어, 2026-09-25, INTERFACES v1.25): V 구현
+
+- V 구현을 공유 트리에 넣었다(타일 컬링, 깊이 채움, 보조 뷰 통계 "secondary").
+- [실측] `planar_mask_draws_only_mirror_pixels`: 거울 픽셀은 마스크 없는 뷰와 같고(95,982 픽셀 중 0 차이), 나머지는 VIS_NONE·깊이 1이다. 화면 1/3에만 거울이 있을 때 보이는 클러스터가 654에서 206, 삼각형이 38.9k에서 12.7k다.

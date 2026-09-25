@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.24, 2026-09-25)
+# UnravelNext 인터페이스 (v1.25, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -181,7 +181,7 @@ void RenderGraph::addPass(std::string_view name, QueueType, SetupFn setup, Execu
 | visId | R32_UINT (7.1) | V | M, R |
 | visibleClusters | `gpu::VisibleCluster[]` | V | M, R |
 | hiz | R32_FLOAT 전 밉. 밉 k 텍셀 (i, j) = 픽셀 [i·2^(k+1), (i+1)·2^(k+1)) 블록의 가장 먼 깊이(reversed-Z 최솟값). 유효 크기 ⌈W/2^(k+1)⌉×⌈H/2^(k+1)⌉, 할당은 2의 거듭제곱(D3D 밉 크기는 내림이라 올림 체인을 담기 위함; 유효 영역 밖 텍셀은 정의되지 않음) | V | S(페이지 표시), R |
-| coverageFragments / coverageHeads | 7.1 | V | M |
+| coverageFragments / coverageHeads / coveragePixels | 7.1 (v1.25) | V | M |
 | gbuffer | RG32_UINT (7.2) | M | S, R |
 | shadowVisibility | R32_UINT (7.3) | S | M |
 | shadowOverflowTiles / shadowOverflow / shadowOverflowFallbackTiles | 7.3 (v1.20; v1.22부터 평면 뷰도 그 뷰 리스트 기준) | S | M |
@@ -306,6 +306,9 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - vis id R32_UINT = `(visibleCluster << 7 | triangle) + 1`, `VIS_NONE = 0` = 하늘(v1.5). visibleCluster는 그 뷰의 `VisibleCluster` 목록 인덱스(< 2^25 − 1). 소비자는 `packVisId`·`visVisibleCluster`·`visTriangle`·`VIS_NONE`(VisBuffer.hlsli)만 쓰고 비트 연산을 직접 하지 않는다. 0인 이유: UINT 렌더 타깃은 float 클리어 값만 받으므로 0xFFFFFFFF(float로 표현 불가, 실측으로 0이 된다)로 지울 수 없고, 지우기 패스를 따로 두면 대상 전체를 한 번 더 쓴다(4K 33 MB).
 - depth D32_FLOAT, reversed-Z, 무한 원평면.
 - coverage 층: `coverageHeads` R32_UINT = 첫 fragment 인덱스(하위 24 bit) | 개수 << 24, `coverageFragments`는 픽셀별 깊이 순 정렬된 16 B `{ uint visId; float depth; uint coverageMask32; float area; }`. 대역 C 브릭 fragment는 visId의 삼각형 필드가 `0x7F`.
+  - (v1.25, V 구현) 정렬은 가까운 것부터다(reversed-Z depth 큰 것 먼저, 같으면 visId 큰 것 먼저; 결정적). `depth`는 덮인 영역 무게중심의 device depth, `area`는 삼각형(가까운 평면으로 잘린 다각형)∩픽셀의 정확 면적(px², 알파 테스트 재질은 통과 부표본 비율을 곱함), `coverageMask32`는 `coverageSample(i)` 32 부표본이다. 한 픽셀에서 visId는 한 번만 나온다. 픽셀당 최대 255개이고, 넘치면 `Stats::overflow` 0x200이 선다.
+  - `coverageHeads`는 전 화면에서 유효하다(fragment 없는 픽셀 0). `ViewResources::coveragePixels`(raw): 워드 0..2 = fragment가 있는 픽셀 위의 DispatchIndirect 인자(그룹당 64 픽셀), 3 = 픽셀 수, 4 = fragment 수, 8.. = 픽셀 목록(`x | y << 16`). M의 coverage 합성은 이 목록 위에서 ExecuteIndirect(바이트 오프셋 0)로 돈다.
+  - 켜기: `visibility.coverage_layer = true`(메인 뷰의 대역 B·C가 coverage 층으로 가고 vis buffer에는 없다). 기본값은 false다. M이 coverage fragment를 합성하게 되면 켠다(그 전에 켜면 얇은 기하가 M 이미지에서 빠진다). 용량 `visibility.max_coverage_fragments`(12 M, < 2^24). 평면 반사 뷰는 아직 vis buffer로 그린다(V 다음 항목).
 
 ### 7.2 G-buffer (`GBuffer.hlsli`) — RG32_UINT 8 B
 `.x` 월드 셰이딩 법선(팔면체 snorm16×2), `.y` baseColor sRGB8×3 | 지각 거칠기 unorm8(상위 8 bit). metallic·specular·클래스·플래그는 재질 테이블(vis id → 클러스터 → 재질). 픽셀별 metallic/occlusion 맵은 M의 셰이딩 커널이 vis id로 다시 평가한다.
@@ -335,6 +338,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 ### 8.1 재질 v1 (`Native/Scene/include/unx/scene/MaterialModel.h` 권위, `MaterialModel.hlsli` 미러)
 - α = max(r², 1e-4), f0 = lerp(0.08·specular, baseColor, metallic).
 - D = GGX, V = Smith 높이 상관, F = Schlick. D는 소거 없는 형태 `α² / (π (|n×h|² + α² (n·h)²)²)`로 평가한다(v1.4: `(n·h)²(α²−1)+1`은 α = 1e-4에서 float로 0이 되어 거울 반사 방향에서 ∞). 다중 산란 보정 f_s = D V F · (1 + f0 (1/E(μ, r) − 1)) (Turquin 2019). E는 32×32 격자(끝점 포함, μ=0은 1e-4에서 평가) 가시 법선 표본 4096개로 만든 방향 알베도 표, 쌍선형.
+- **스펙큘러 방향 알베도 분할 (A, B)** (v1.25, R 요청 `20260925_R_hit_shading.md` 1번): `scene::model::specularAlbedoTable()`(32×32 float2, E와 같은 격자·같은 가시 법선 표본을 Schlick F로 나눔, A + B = E), `specularAlbedo(μ, r)`(쌍선형). f0·A + B가 Schlick lobe의 알베도다. GPU: `FrameConstants::specularAlbedoLut`(`g_specularAlbedoLut`, StructuredBuffer<float2>, `GpuScene`이 올림)와 `MaterialModel.hlsli`의 `modelSpecularAlbedo(NoV, r)`. M·R은 각자의 복사본(`ShadingSystem`의 표, R `SpecularAlbedo.cpp`)을 지우고 이것을 쓴다.
 - f_d = (1 − metallic) baseColor / π (Lambert). f = f_d + f_s (n·l > 0, n·v > 0).
 - Foliage: 앞면 f_d × (1 − transmission), 뒷면으로 가는 빛 transmission × (1 − metallic) baseColor / π.
 - two-sided: 뒷면에서 법선을 뒤집는다. alpha test: baseColor 텍스처 alpha ≥ alphaCutoff면 불투명(광선 any-hit도 같다).
@@ -462,3 +466,10 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
     - `Build.ps1 -Track FX`: `build/FX`, 트랙 "FX"(코어 + FX). V·M과 함께 돌릴 때는 `-Tracks "V;M;FX"`.
     - 진입점 `tracks::simulation(fc)`(`Tracks.h`): C0 슬롯(설계 4.1)이다. `FrameRenderer::record`가 `prepareScene`과 메인 뷰 프레임 상수 다음, `atmosphere` 앞에서 부른다. 코어가 만든 빈 구현(`Passes/FX/FxTrack.cpp`)과 꺼진 빌드용 스텁(`Frame/Stubs/TrackFX.cpp`)을 넣었다.
     - `GpuScene::setParticleBuffers` 계약은 FX 요청 파일로 받는다.
+- v1.25 (2026-09-25):
+  - **스펙큘러 (A, B) 표(8.1, R 요청 `20260925_R_hit_shading.md` 1번)**: `scene::model::specularAlbedoTable/specularAlbedo`, `FrameConstants::specularAlbedoLut`(이전 예비 칸, 크기 528 B 그대로), `MaterialModel.hlsli`의 `modelSpecularAlbedo`(M 파일에 E 조회 옆으로 넣었다. M 확인 요청). [실측] CPU A + B − E 최대 6e-8, GPU 읽기 대 C++ 1.2e-7(`material_specular_albedo_split`, `material_tables_on_the_gpu`).
+  - **대역 B coverage 층(V, 7.1)**: `ViewResources::coveragePixels`, 정렬·면적·깊이·마스크의 정의, 켜기 설정 `visibility.coverage_layer`(기본 false, M 합성 전까지)와 `visibility.max_coverage_fragments`.
+    - 구현: 보존 래스터 + 정확 면적. 메시 셰이더가 가까운 평면 클리핑과 한쪽 면 뒷면 컬링을 한다. 픽셀별 연결 목록에 쌓고, 빌드에서 할당·정렬·중복 제거를 한다.
+    - 하드웨어가 잘라 조각으로 래스터한 프리미티브는 보존 래스터가 절단선 픽셀을 두 번 셰이딩한다. 그 fragment들은 같은 값이라 하나만 남긴다.
+    - [실측] `coverage_layer_is_exact`: 3프레임 약 13.8k fragment 전부가 정확 클리핑과 일치했다(면적 최대 오차 5.7e-5 px², 깊이 3.9e-6 상대, 마스크는 가장자리 2e-4 px 밖에서 일치). 누락 0, 남은 heads 0이었다. 뒷면 컬링과 대역 A 가림도 맞았다.
+  - **평면 마스크 V 구현(v1.22 계약)**: 거울 픽셀이 없는 8×8 타일의 클러스터 컬링과 깊이 채움을 넣었다. 보조 뷰 통계는 `visibility::latestStats(state, "secondary")`(그 프레임의 마지막 보조 뷰)로 읽는다. [실측] `planar_mask_draws_only_mirror_pixels`: 거울 픽셀은 마스크 없는 뷰와 같다(95,982 픽셀 중 0 차이). 나머지는 VIS_NONE·깊이 1이다. 화면 1/3에만 거울이 있을 때 보이는 클러스터가 654에서 206으로, 삼각형이 38.9k에서 12.7k로 줄었다.
