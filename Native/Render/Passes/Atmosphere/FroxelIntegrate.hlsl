@@ -15,9 +15,14 @@
 //    lateral resolution (lit where no page holds it; VsmLocalMarkAir requests the same points' pages);
 //  - optical depth.
 // A group scan gives node n = sum over slices j < n of e^(-tau before j) x source_j. Volume (RGBA16F, gridX x gridY x
-// 3 (S + 1)): part 0 in-scattering x exposure of the main view (fp16 keeps the relative precision of what is displayed,
-// also at night exposures where local lights' air glow is 1e-4 nits), part 1 optical depth, part 2 sun transmittance at
-// the node. No local media in scenes v1 (their optical depth adds to part 1).
+// 3 (S + 1)): part 0 the in-scattering normalised by the node's 1 - T, L / (1 - T), x exposure of the view (fp16 keeps
+// the relative precision of what is displayed, also at night exposures where local lights' air glow is 1e-4 nits),
+// part 1 optical depth, part 2 sun transmittance at the node. L / (1 - T) is the transmittance-weighted mean source of
+// the path: it varies slowly across tiles where L itself peaks between two tile rows (rays grazing the horizon, one of
+// them lifted below the model's surface), so the lookup blends it across tiles and multiplies by the pixel's own
+// 1 - T (optical depth blended in altitude across that kink): 30 km horizon query at 1080p 3.1 % -> 0.9 % against
+// the reference (FroxelTests 4). Nodes without air yet (node 0; planar views before the mirror) take the first node
+// with air (the limit of the ratio). No local media in scenes v1 (their optical depth adds to part 1).
 // Planar reflection views (clip plane in the view's frame constants, v1.22): each tile ray's air starts where it crosses
 // the mirror (airViewStart); the slices before it hold nothing (the main view's mirror pixel applies that air), the sun
 // transmittance of their nodes is taken at the nodes' mirror images (the real path).
@@ -39,6 +44,7 @@
 #define AIR_SHADOW_POINTS 24u
 groupshared float3 gs_tau[64];
 groupshared float3 gs_source[64];
+groupshared float4 gs_hat[64];  // L / (1 - T) of node s + 1, .w = 1 where the node has air
 
 static const float kGaussX[8] = { -0.9602898564975363, -0.7966664774136267, -0.5255324099163290, -0.1834346424956498,
                                   0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363 };
@@ -195,6 +201,29 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         gs_source[s] += add;
         GroupMemoryBarrierWithGroupSync();
     }
+    // L / (1 - T) per node; nodes without air take the first node that has it.
+    {
+        const float3 tauN = gs_tau[s];
+        const bool air = s < g.slices && all(tauN > 0);
+        gs_hat[s] = air ? float4(gs_source[s] / airOneMinusExp(tauN), 1) : float4(0, 0, 0, 0);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    float3 hat = gs_hat[s].xyz;
+    if (gs_hat[s].w == 0)
+        for (uint j = s + 1; j < g.slices; ++j)
+            if (gs_hat[j].w != 0)
+            {
+                hat = gs_hat[j].xyz;
+                break;
+            }
+    float3 hat0 = 0;
+    if (s == 0)
+        for (uint j0 = 0; j0 < g.slices; ++j0)
+            if (gs_hat[j0].w != 0)
+            {
+                hat0 = gs_hat[j0].xyz;
+                break;
+            }
     if (s < g.slices)
     {
         // Node s + 1 of the three parts; thread 0 also writes node 0 (the camera).
@@ -203,12 +232,12 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         const float tn = froxelNodeDepth(g, s + 1) * toRay;
         float3 node = g_cameraPosition + dir * tn;
         if (tn < tStart) node = airMirror(g_clipPlane, node);  // before the mirror: the real path's point
-        volume[uint3(tile, s + 1)] = float4(min(gs_source[s] * g_exposure, 65504.0), 0);  // pre-exposed: fp16 precision follows the display
+        volume[uint3(tile, s + 1)] = float4(min(hat * g_exposure, 65504.0), 0);  // pre-exposed: fp16 precision follows the display
         volume[uint3(tile, N + s + 1)] = float4(gs_tau[s], 0);
         volume[uint3(tile, 2 * N + s + 1)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, node), sun), 0);
         if (s == 0)
         {
-            volume[uint3(tile, 0)] = 0;
+            volume[uint3(tile, 0)] = float4(min(hat0 * g_exposure, 65504.0), 0);
             volume[uint3(tile, N)] = 0;
             const float3 camera = tStart > 0 ? airMirror(g_clipPlane, g_cameraPosition) : g_cameraPosition;
             volume[uint3(tile, 2 * N)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, camera), sun), 0);

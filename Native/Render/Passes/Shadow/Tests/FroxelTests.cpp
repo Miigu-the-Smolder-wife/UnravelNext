@@ -275,13 +275,19 @@ int main(int argc, char** argv)
             }
         };
         const uint32_t volumePitch = TestFrame::rowPitch(fg.gridX, 8);
-        // Air volume: part 0 in-scattering (pre-exposed), 1 optical depth, 2 sun transmittance; node n = 0..S at slice
-        // part (S + 1) + n.
+        // Air volume: part 0 in-scattering as L / (1 - T) (pre-exposed), 1 optical depth, 2 sun transmittance; node n = 0..S
+        // at slice part (S + 1) + n. Part 0 is returned as the in-scattering L itself (times the node's 1 - T).
         auto nodeOf = [&](const std::vector<uint8_t>& vol, uint32_t tx, uint32_t ty, uint32_t n, uint32_t part = 0) -> ref::D3 {
-            uint16_t h[4];
-            std::memcpy(h, vol.data() + (size_t)(part * (fg.slices + 1) + n) * volumePitch * fg.gridY + (size_t)ty * volumePitch + (size_t)tx * 8, 8);
-            const double e = part == 0 ? 1.0 / (1.2 * std::exp2(grid.view.ev100)) : 1.0;  // part 0 stored pre-exposed
-            return { halfToFloat(h[0]) / e, halfToFloat(h[1]) / e, halfToFloat(h[2]) / e };
+            auto raw = [&](uint32_t pt) {
+                uint16_t h[4];
+                std::memcpy(h, vol.data() + (size_t)(pt * (fg.slices + 1) + n) * volumePitch * fg.gridY + (size_t)ty * volumePitch + (size_t)tx * 8, 8);
+                return ref::D3{ halfToFloat(h[0]), halfToFloat(h[1]), halfToFloat(h[2]) };
+            };
+            if (part != 0) return raw(part);
+            const double e = 1.0 / (1.2 * std::exp2(grid.view.ev100));  // part 0 stored pre-exposed
+            const ref::D3 hat = raw(0), tau = raw(1);
+            auto omt = [](double t) { return t < 1e-3 ? t * (1 - t * (0.5 - t / 6)) : 1 - std::exp(-t); };  // airOneMinusExp
+            return { hat.x / e * omt(tau.x), hat.y / e * omt(tau.y), hat.z / e * omt(tau.z) };
         };
         auto node = [&](uint32_t tx, uint32_t ty, uint32_t n) { return nodeOf(lastVolume, tx, ty, n); };
         const ref::Model model = ref::fromScene(base.atmosphere);
@@ -770,6 +776,48 @@ int main(int argc, char** argv)
                 if (eL > 5e-3 || eT > 1e-3 || eE > 1e-3 || debug)
                     logf("  air uv (%.2f %.2f) z %.0f: L gpu %.4e %.4e %.4e ref %.4e %.4e %.4e  T gpu %.5f ref %.5f  Esun gpu %.5f ref %.5f\n", q.x, q.y, q.z,
                          gi.x / sc.sun.illuminance, gi.y / sc.sun.illuminance, gi.z / sc.sun.illuminance, L.x, L.y, L.z, gt.y, Tr.y, ge.y / sc.sun.illuminance, Es.y);
+                if (eL > 5e-3)
+                {
+                    // Diagnosis: the exact air of the four surrounding tile-centre rays, blended as the lookup blends the
+                    // volume (bilinear across tiles), against the pixel's own; the rows' blend alone (pixel column).
+                    auto exactAt = [&](double px, double py, ref::D3& Lx, ref::D3& Tx) {
+                        const double nd[4] = { px / W * 2.0 - 1, 1 - py / H * 2.0, 1, 1 };
+                        double wp[4] = {};
+                        for (int r = 0; r < 4; ++r)
+                            for (int cc = 0; cc < 4; ++cc) wp[r] += v.invViewProj.m[r][cc] * nd[cc];
+                        const ref::D3 d = ref::normalize(ref::D3{ wp[0] / wp[3], wp[1] / wp[3], wp[2] / wp[3] } - camPos);
+                        ref::aerial(model, camPos, d, q.z / ref::dot(d, d3(fwd)), sun, psi, Lx, Tx, 4096);
+                    };
+                    const double px = q.x * W, py = q.y * H, tp = fg.tilePx;
+                    const double cx = px / tp - 0.5, cy = py / tp - 0.5, x0 = std::floor(cx), y0 = std::floor(cy), fx = cx - x0, fy = cy - y0;
+                    ref::D3 l00, l10, l01, l11, lr0, lr1, t;
+                    exactAt((x0 + 0.5) * tp, (y0 + 0.5) * tp, l00, t);
+                    exactAt((x0 + 1.5) * tp, (y0 + 0.5) * tp, l10, t);
+                    exactAt((x0 + 0.5) * tp, (y0 + 1.5) * tp, l01, t);
+                    exactAt((x0 + 1.5) * tp, (y0 + 1.5) * tp, l11, t);
+                    ref::D3 tr0, tr1, lp, tpx;
+                    exactAt(px, (y0 + 0.5) * tp, lr0, tr0);
+                    exactAt(px, (y0 + 1.5) * tp, lr1, tr1);
+                    exactAt(px, py, lp, tpx);
+                    // Candidates: blend of L / (1 - T) times the pixel's own 1 - T; blend in log L.
+                    auto hat = [](ref::D3 l, ref::D3 tt) { return ref::D3{ l.x / (1 - tt.x), l.y / (1 - tt.y), l.z / (1 - tt.z) }; };
+                    const ref::D3 hb = hat(lr0, tr0) * (1 - fy) + hat(lr1, tr1) * fy;
+                    const ref::D3 hatL{ hb.x * (1 - tpx.x), hb.y * (1 - tpx.y), hb.z * (1 - tpx.z) };
+                    const ref::D3 logL{ std::exp(std::log(lr0.x) * (1 - fy) + std::log(lr1.x) * fy), std::exp(std::log(lr0.y) * (1 - fy) + std::log(lr1.y) * fy),
+                                        std::exp(std::log(lr0.z) * (1 - fy) + std::log(lr1.z) * fy) };
+                    // The GPU's pixel transmittance: optical depth blended across the rows.
+                    auto odBlend = [&](double t0, double t1) { return std::exp(-(-std::log(t0) * (1 - fy) - std::log(t1) * fy)); };
+                    const ref::D3 tb{ odBlend(tr0.x, tr1.x), odBlend(tr0.y, tr1.y), odBlend(tr0.z, tr1.z) };
+                    const ref::D3 hatB{ hb.x * (1 - tb.x), hb.y * (1 - tb.y), hb.z * (1 - tb.z) };
+                    logf("    candidate with the blended optical depth: rel %.4f (T %.4f)%c", relErr(hatB, L, 1e-6), tb.y, (char)10);
+                    const char nl[2] = { (char)10, 0 };
+                    logf("    candidates: L/(1-T) blend x (1 - T pixel) rel %.4f; log blend rel %.4f; T rows %.4f / %.4f pixel %.4f%s", relErr(hatL, L, 1e-6),
+                         relErr(logL, L, 1e-6), tr0.y, tr1.y, tpx.y, nl);
+                    const ref::D3 bl = (l00 * (1 - fx) + l10 * fx) * (1 - fy) + (l01 * (1 - fx) + l11 * fx) * fy;
+                    const ref::D3 rows = lr0 * (1 - fy) + lr1 * fy;
+                    logf("    exact tile blend: bilinear %.4e (rel %.4f), rows at the pixel column %.4e (rel %.4f); rows %.4e / %.4e, fy %.3f\n", bl.y,
+                         relErr(bl, L, 1e-6), rows.y, relErr(rows, L, 1e-6), lr0.y, lr1.y, fy);
+                }
             }
             report(mismatch == 0, "atmosphereAerial and atmosphereAirView agree to 1e-5 (queries differing)", mismatch, 0);
             report(nearL < 1e-2, "air in-scattering, depth <= 700 m (rel.)", nearL, 1e-2);

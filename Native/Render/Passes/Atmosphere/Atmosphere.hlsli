@@ -141,7 +141,8 @@ void airViewLookup(AtmosphereSrvs s, float2 uv, float linearDepth, bool wantSun,
     const float4 t = airVolumeCoord(v, p, uv, lifted ? kink / toRay : linearDepth, N, d);
     const float4 a = v.SampleLevel(g_linearClamp, t.xyz, 0);
     const float4 od = v.SampleLevel(g_linearClamp, float3(t.x, t.w, t.z + N / d), 0);
-    inscatter = a.rgb / g_exposure;  // stored pre-exposed
+    // Stored pre-exposed as L / (1 - T), blended across tiles; times the pixel's own 1 - T (FroxelIntegrate.hlsl).
+    inscatter = a.rgb / g_exposure * airOneMinusExp(od.rgb);
     transmittance = exp(-od.rgb);
     sunTransmittance = 0;
     if (wantSun || lifted) sunTransmittance = v.SampleLevel(g_linearClamp, float3(t.x, t.w, t.z + 2 * N / d), 0).rgb;
