@@ -22,7 +22,8 @@ int main(int argc, char** argv)
         const bool full = argc > 1 && std::strcmp(argv[1], "--full") == 0;  // scale-1 forests (1.1 M instances)
         for (scenegen::SceneId id : scenegen::allScenes())
         {
-            const bool forest = id == scenegen::SceneId::ForestThin || id == scenegen::SceneId::ForestCard;
+            const bool combat = id == scenegen::SceneId::ForestCombat;
+            const bool forest = id == scenegen::SceneId::ForestThin || id == scenegen::SceneId::ForestCard || combat;
             scenegen::Request rq{ id, 7, forest && !full ? 0.01f : 1.0f };
             const scene::Scene a = scenegen::generate(rq);
             const scene::Scene b = scenegen::generate(rq);
@@ -57,8 +58,10 @@ int main(int argc, char** argv)
                     trees += n.rfind("tree_", 0) == 0;
                     clumps += n.rfind("grass_", 0) == 0;
                 }
-                CHECK(trees == (size_t)std::lround(100000 * rq.scale) && clumps == (size_t)std::lround(1000000 * rq.scale));
-                const bool thin = id == scenegen::SceneId::ForestThin;
+                // forest_combat adds its closed-canopy stand (a fixed ~3000 trees, not scaled) to the forest_thin base.
+                CHECK((combat ? trees > (size_t)std::lround(100000 * rq.scale) + 2500 : trees == (size_t)std::lround(100000 * rq.scale)) &&
+                      clumps == (size_t)std::lround(1000000 * rq.scale));
+                const bool thin = id == scenegen::SceneId::ForestThin || combat;
                 for (const scene::Mesh& m : a.meshes)
                 {
                     if (m.name.rfind("tree_", 0) == 0) CHECK(m.submeshes.back().indexCount / 3 == (thin ? 80000u : 3000u));

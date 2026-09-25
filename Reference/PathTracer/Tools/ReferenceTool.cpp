@@ -18,6 +18,8 @@
 //       16-sub-sample identity census; without --engine the 1-sample (pixel centre) + 3x3 baseline.
 //   unx_reference compare --scene ... (--camera|--path/--time) --res <WxH> --test <engine.pfm> [--out report.json]
 //       Metrics against the cached reference and the scene thresholds of Config/quality/reference.toml.
+//   unx_reference scenemeta --scene ... --res <WxH> [--out meta.md]
+//       Per camera: surface pixels, triangles per visibility band (frustum, before occlusion), light counts.
 //   unx_reference selfcheck
 //       Measured error of the atmosphere optical-depth table against direct quadrature.
 // render and census pause while another session holds the GPU measurement lock (.gpulock/current.json with a live
@@ -35,7 +37,10 @@
 
 #include "../src/Atmosphere.h"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <sstream>
 #include <cstdio>
 #include <ctime>
 #include <string>
@@ -269,6 +274,160 @@ std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const s
     return pfm;
 }
 
+// Scene metadata for gate scenes (per camera): surface pixels (pixel-centre primary ray hits geometry), triangles per
+// visibility band by projected minimum feature width (ARCHITECTURE 2.1 band rule: w_px = the triangle's smallest
+// altitude x instance scale x focal / distance of the instance centre; flat features (Foliage class or two-sided
+// materials) are band B up to 8 px, solid ones up to 1.5 px; below 0.25 px band C), counted over instances whose
+// bounding sphere meets the view frustum (before occlusion), and light counts.
+std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t W, uint32_t H, const std::vector<std::filesystem::path>& hold)
+{
+    // Per mesh: object-space bounding sphere and a histogram of triangle minimum altitudes (log bins) split flat / solid.
+    constexpr int kBins = 96;
+    auto binOf = [](double w) { return std::clamp((int)std::floor((std::log2(std::max(w, 1e-6)) + 20.0) * 4.0), 0, kBins - 1); };
+    auto binCentre = [](int b) { return std::exp2((b + 0.5) / 4.0 - 20.0); };
+    struct MeshInfo
+    {
+        float3 centre;
+        double radius = 0;
+        std::array<double, kBins> flat{}, solid{};
+        uint64_t tris = 0;
+        std::vector<float> alt;        // per triangle: smallest altitude (object space)
+        std::vector<uint8_t> isFlat;   // per triangle
+    };
+    std::vector<MeshInfo> mi(s.meshes.size());
+    for (size_t m = 0; m < s.meshes.size(); ++m)
+    {
+        const scene::Mesh& mesh = s.meshes[m];
+        float3 lo{ 1e30f, 1e30f, 1e30f }, hi{ -1e30f, -1e30f, -1e30f };
+        for (const float3& q : mesh.positions)
+        {
+            lo = { std::min(lo.x, q.x), std::min(lo.y, q.y), std::min(lo.z, q.z) };
+            hi = { std::max(hi.x, q.x), std::max(hi.y, q.y), std::max(hi.z, q.z) };
+        }
+        mi[m].centre = (lo + hi) * 0.5f;
+        mi[m].radius = 0.5 * std::sqrt((double)dot(hi - lo, hi - lo));
+        mi[m].alt.assign(mesh.indices.size() / 3, 0.0f);
+        mi[m].isFlat.assign(mesh.indices.size() / 3, 0);
+        for (const scene::Submesh& sub : mesh.submeshes)
+        {
+            const scene::Material& mat = s.materials[sub.material];
+            const bool flat = mat.cls == scene::MaterialClass::Foliage || mat.twoSided;
+            for (uint32_t k = sub.indexOffset; k + 2 < sub.indexOffset + sub.indexCount; k += 3)
+            {
+                const float3 a = mesh.positions[mesh.indices[k]], b = mesh.positions[mesh.indices[k + 1]], c = mesh.positions[mesh.indices[k + 2]];
+                const float3 cr = cross(b - a, c - a);
+                const double area2 = std::sqrt((double)dot(cr, cr));
+                const double lmax = std::sqrt(std::max({ (double)dot(b - a, b - a), (double)dot(c - b, c - b), (double)dot(a - c, a - c) }));
+                const double alt = lmax > 0 ? area2 / lmax : 0;  // smallest altitude = 2 area / longest edge
+                (flat ? mi[m].flat : mi[m].solid)[binOf(alt)] += 1;
+                mi[m].alt[k / 3] = (float)alt;
+                mi[m].isFlat[k / 3] = flat ? 1 : 0;
+                ++mi[m].tris;
+            }
+        }
+    }
+    std::ostringstream md;
+    md << format("## %s at %ux%u\n\n", s.name.c_str(), W, H);
+    md << format("Lights: sun %s, local lights %zu (%zu casting shadows).\n\n", s.sun.illuminance > 0 ? "on" : "off", s.lights.size(),
+                 (size_t)std::count_if(s.lights.begin(), s.lights.end(), [](const scene::Light& l) { return l.castShadow; }));
+    md << "Band of a triangle: w_px = smallest altitude x instance scale x focal / distance to the instance centre; flat (Foliage or "
+          "two-sided) B below 8 px, solid B below 1.5 px, C below 0.25 px. Visible = hit by one of 16 stratified sub-samples per pixel "
+          "(no wind). P_A / P_B / P_C = pixels whose sub-samples include a triangle of that band (ARCHITECTURE 2 table: P_B, P_C). "
+          "Frustum counts include occluded triangles.\n\n"
+          "| camera | surface px (centre ray) | surface % | P_A / P_B / P_C (M px) | P_B or P_C | visible triangles A / B / C | instances in frustum | frustum triangles A / B / C |\n"
+          "|---|---|---|---|---|---|---|---|\n";
+    for (const scene::Camera& c : s.cameras)
+    {
+        reference::CameraSelection sel;
+        sel.camera = c.name;
+        const reference::ResolvedCamera cam = reference::resolveCamera(s, sel);
+        const std::vector<uint64_t> ids = pt.primaryIdentities(cam, W, H, hold);
+        uint64_t surf = 0;
+        for (size_t i = 0; i < (size_t)W * H; ++i)
+            if (ids[i * 17 + 16] != reference::kSkyIdentity) ++surf;
+        const float3 fw = normalize(cam.forward), right = normalize(cross(fw, cam.up)), up = cross(right, fw);
+        const double th = std::tan(0.5 * cam.verticalFov), aspect = (double)W / H, focal = 0.5 * H / th;
+        // Visible triangles by band (distinct ids over the 16 sub-samples) and band pixel coverage.
+        auto bandOfId = [&](uint64_t id) {
+            const uint32_t instIdx = (uint32_t)(id >> 32), tri = (uint32_t)id;
+            const scene::Instance& in = s.instances[instIdx];
+            const MeshInfo& m = mi[in.mesh];
+            if (tri >= m.alt.size()) return 0;
+            const float3 col0{ in.transform.m[0][0], in.transform.m[1][0], in.transform.m[2][0] };
+            const double scale = std::sqrt((double)dot(col0, col0));
+            const float3 v = in.transform.transformPoint(m.centre) - cam.position;
+            const double d = std::max((double)std::sqrt(dot(v, v)), (double)cam.nearPlane);
+            const double w = m.alt[tri] * scale * focal / d;
+            if (w < 0.25) return 2;
+            return w < (m.isFlat[tri] ? 8.0 : 1.5) ? 1 : 0;
+        };
+        uint64_t pxBand[3] = {}, pxBC = 0;
+        std::vector<uint64_t> seen;
+        seen.reserve((size_t)W * H);
+        for (size_t i = 0; i < (size_t)W * H; ++i)
+        {
+            bool has[3] = {};
+            for (int k = 0; k < 16; ++k)
+            {
+                const uint64_t id = ids[i * 17 + k];
+                if (id == reference::kSkyIdentity) continue;
+                has[bandOfId(id)] = true;
+                seen.push_back(id);
+            }
+            for (int b = 0; b < 3; ++b) pxBand[b] += has[b];
+            pxBC += has[1] || has[2];
+        }
+        std::sort(seen.begin(), seen.end());
+        seen.erase(std::unique(seen.begin(), seen.end()), seen.end());
+        uint64_t visBand[3] = {};
+        for (uint64_t id : seen) ++visBand[bandOfId(id)];
+        // Frustum side-plane normals (inward) for the sphere test.
+        const double tx = th * aspect;
+        const float3 nL = normalize(right * 1.0f + fw * (float)tx), nR = normalize(right * -1.0f + fw * (float)tx);
+        const float3 nB = normalize(up * 1.0f + fw * (float)th), nT = normalize(up * -1.0f + fw * (float)th);
+        double bandA = 0, bandB = 0, bandBflat = 0, bandC = 0;
+        uint64_t inst = 0;
+        for (const scene::Instance& in : s.instances)
+        {
+            const MeshInfo& m = mi[in.mesh];
+            const float3 col0{ in.transform.m[0][0], in.transform.m[1][0], in.transform.m[2][0] };
+            const double scale = std::sqrt((double)dot(col0, col0));
+            const float3 wc = in.transform.transformPoint(m.centre);
+            const double r = m.radius * scale;
+            const float3 v = wc - cam.position;
+            if (dot(v, fw) < -r) continue;
+            if (dot(v, nL) < -r || dot(v, nR) < -r || dot(v, nB) < -r || dot(v, nT) < -r) continue;
+            ++inst;
+            const double d = std::max((double)std::sqrt(dot(v, v)), (double)cam.nearPlane);
+            for (int b = 0; b < kBins; ++b)
+            {
+                const double w = binCentre(b) * scale * focal / d;
+                if (m.flat[b] > 0)
+                {
+                    if (w < 0.25) bandC += m.flat[b];
+                    else if (w < 8.0) { bandB += m.flat[b]; bandBflat += m.flat[b]; }
+                    else bandA += m.flat[b];
+                }
+                if (m.solid[b] > 0)
+                {
+                    if (w < 0.25) bandC += m.solid[b];
+                    else if (w < 1.5) bandB += m.solid[b];
+                    else bandA += m.solid[b];
+                }
+            }
+        }
+        const double tot = bandA + bandB + bandC;
+        (void)bandBflat;
+        (void)tot;
+        md << format("| %s | %.2f M | %.1f %% | %.2f / %.2f / %.2f | %.2f M | %.2f M / %.2f M / %.2f M | %llu | %.1f M / %.1f M / %.1f M |\n", c.name.c_str(), surf / 1e6,
+                     100.0 * surf / ((double)W * H), pxBand[0] / 1e6, pxBand[1] / 1e6, pxBand[2] / 1e6, pxBC / 1e6, visBand[0] / 1e6, visBand[1] / 1e6, visBand[2] / 1e6,
+                     (unsigned long long)inst, bandA / 1e6, bandB / 1e6, bandC / 1e6);
+        logf("  scenemeta %s/%s: surface %.2f M px (%.1f %%), P_A %.2f P_B %.2f P_C %.2f M px, visible triangles A %.2f B %.2f C %.2f M\n", s.name.c_str(), c.name.c_str(),
+             surf / 1e6, 100.0 * surf / ((double)W * H), pxBand[0] / 1e6, pxBand[1] / 1e6, pxBand[2] / 1e6, visBand[0] / 1e6, visBand[1] / 1e6, visBand[2] / 1e6);
+    }
+    return md.str();
+}
+
 std::string censusJson(const char* kind, const metrics::CensusResult& r)
 {
     return format("{\"kind\": \"%s\", \"pixels\": %llu, \"distinct_ge2\": %.6f, \"distinct_ge3\": %.6f, \"distinct_ge5\": %.6f, \"distinct_ge9\": %.6f, "
@@ -297,6 +456,16 @@ int main(int argc, char** argv)
         }
         if (a.width == 0 || a.height == 0) fail("--res is required");
         const scene::Scene s = loadScene(a);
+        if (a.command == "scenemeta")
+        {
+            if (a.width == 0 || a.height == 0) fail("--res is required");
+            reference::waitWhileHeld(holdFiles(a));
+            reference::PathTracer pt(s);
+            const std::string md = sceneMeta(s, pt, a.width, a.height, holdFiles(a));
+            if (!a.out.empty()) writeTextFile(a.out, md);
+            logf("%s", md.c_str());
+            return 0;
+        }
         std::string label;
         const reference::ResolvedCamera cam = pickCamera(s, a, label);
         if (a.command == "render")

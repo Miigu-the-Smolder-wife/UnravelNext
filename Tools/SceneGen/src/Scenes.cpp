@@ -539,6 +539,49 @@ Scene ridgeSunset(const Request& rq)
     (void)rq;
     return s;
 }
+// Forest combat (gate scene for the RPP-1 "forest / combat" section, 2026-09-26): the forest_thin base (2 x 2 km,
+// 100k trees, 1M grass clumps, 6 cm leaves, 4 mm blades, wind 3 m/s) plus a closed-canopy stand around the combat point
+// (jittered grid, kStandSpacing, radius kStandRadius, crowns overlapping so no sky shows overhead), so the eye-level
+// view is the section's heavy side: trunks, grass and canopy fill the screen. Grass keeps the base density. Cameras:
+// eye (1.7 m, level), up (into the canopy: leaf coverage and transmission at their heaviest), edge (from outside the
+// stand, looking in: the band B/C transition distances). Combat slots (characters, VFX) are empty until those assets
+// exist; the scene's measured metadata (surface pixels, band counts, lights) is in Results/C/Scenes/forest_combat.md.
+Scene forestCombat(const Request& rq)
+{
+    Scene s = forest(rq, true);
+    s.name = "forest_combat";
+    s.cameras.clear();
+    s.paths.clear();
+    const float kStandSpacing = 3.5f, kStandRadius = 110.0f;
+    const float cx = 300.0f, cz = -200.0f;
+    // Tree meshes of the base forest: instances 1..4 (after the terrain) use treeMeshes[i & 3] for i = 0..3.
+    uint32_t treeMesh[4];
+    for (int k = 0; k < 4; ++k) treeMesh[k] = s.instances[1 + k].mesh;
+    Rng rs(rq.seed, 70);
+    const int n = (int)std::ceil(kStandRadius / kStandSpacing);
+    uint32_t count = 0;
+    for (int iz = -n; iz <= n; ++iz)
+        for (int ix = -n; ix <= n; ++ix)
+        {
+            const float x = cx + (ix + rs.range(-0.35f, 0.35f)) * kStandSpacing, z = cz + (iz + rs.range(-0.35f, 0.35f)) * kStandSpacing;
+            const float yaw = rs.range(0, 2 * kPi), sc = rs.range(1.0f, 1.4f);
+            const float d2 = (x - cx) * (x - cx) + (z - cz) * (z - cz);
+            if (d2 > kStandRadius * kStandRadius) continue;
+            if (d2 < 2.0f * 2.0f) continue;  // a small clearing so the eye is not inside a trunk
+            Instance& in = addInstance(s, treeMesh[count++ & 3], placement({ x, rollingTerrain(x, z) - 0.2f, z }, yaw, sc), scene::InstanceCastShadow | scene::InstanceWind);
+            in.wind = { 20.0f, rs.range(0, 2 * kPi), 1.0f };
+        }
+    const float3 eye{ cx, rollingTerrain(cx, cz) + 1.7f, cz };
+    s.cameras.push_back(camera("eye", eye, eye + f3(100, 0, 20), 12.0f));
+    s.cameras.push_back(camera("up", eye, eye + f3(8, 14, 3), 13.0f));
+    const float ex = cx - kStandRadius - 40.0f;
+    const float3 edge{ ex, rollingTerrain(ex, cz) + 1.7f, cz };
+    s.cameras.push_back(camera("edge", edge, edge + f3(100, 0, 0), 14.0f));
+    for (const auto& c : s.cameras) s.paths.push_back(staticPath(c));
+    s.paths.push_back(linearPath("patrol", eye, eye + f3(60, 0, 25), 1.4f));
+    s.paths.push_back(linearPath("sprint", eye - f3(40, 0, 0), eye + f3(60, 0, 10), 6.0f));
+    return s;
+}
 } // namespace
 
 scene::Scene generate(const Request& rq)
@@ -553,6 +596,7 @@ scene::Scene generate(const Request& rq)
     case SceneId::Interior: s = interior(rq); break;
     case SceneId::CityNight: s = cityNight(rq); break;
     case SceneId::RidgeSunset: s = ridgeSunset(rq); break;
+    case SceneId::ForestCombat: s = forestCombat(rq); break;
     default: fail("scenegen: unknown scene id %u", (uint32_t)rq.id);
     }
     s.seed = rq.seed;
@@ -562,7 +606,7 @@ scene::Scene generate(const Request& rq)
 
 std::vector<SceneId> allScenes()
 {
-    return { SceneId::CityBlock, SceneId::ForestThin, SceneId::ForestCard, SceneId::Waterside, SceneId::Interior, SceneId::CityNight, SceneId::RidgeSunset };
+    return { SceneId::CityBlock, SceneId::ForestThin, SceneId::ForestCard, SceneId::Waterside, SceneId::Interior, SceneId::CityNight, SceneId::RidgeSunset, SceneId::ForestCombat };
 }
 
 const char* sceneName(SceneId id)
@@ -576,6 +620,7 @@ const char* sceneName(SceneId id)
     case SceneId::Interior: return "interior";
     case SceneId::CityNight: return "city_night";
     case SceneId::RidgeSunset: return "ridge_sunset";
+    case SceneId::ForestCombat: return "forest_combat";
     }
     fail("scenegen: unknown scene id %u", (uint32_t)id);
 }
