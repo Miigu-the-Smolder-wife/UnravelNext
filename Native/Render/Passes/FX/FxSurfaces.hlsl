@@ -5,8 +5,9 @@
 // offsets a, b, c from it. A surface on a rigid body (body != NONE) is body-local: origin = the body's centre of mass,
 // offsets = R(q) p_local + (position - center) (all terms of body size, so the float precision does not depend on the
 // distance from the anchor), and its velocity field is the body's; the other surfaces are copied.
-// The same thread then enters the surface into the collision grid's counts (the counts were cleared by FxBegin): its
-// grown box (candidate filter), the tick's motion maxima, and either the large list or count[bucket of each cell] += 1.
+// The same thread then enters the surface into the collision grid (counts and chain heads cleared by FxBegin): its grown
+// box (candidate filter), the tick's motion maxima, and either the large list or, per cell, bucket slot
+// count[bucket]++ (the first FX_GRID_SLOTS) or an overflow node pushed on the bucket's chain (Particles.hlsli).
 // Quaternion rotation as the CPU reference: t = 2 cross(u, v), v + w t + cross(u, t).
 #include "Passes/FX/Particles.hlsli"
 
@@ -67,5 +68,20 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
     }
     InterlockedAdd(counters[FX_COUNTER_GRID_ENTRIES], cells);
-    for (uint k = 0u; k < cells; ++k) InterlockedAdd(counts[fxGridHash(fxGridCellOf(a, span, k)) & g_gridMask], 1u);
+    FX_RWBUFFER(uint, slots, g_gridEntries);
+    for (uint k = 0u; k < cells; ++k)
+    {
+        const uint bucket = fxGridHash(fxGridCellOf(a, span, k)) & g_gridMask;
+        uint j;
+        InterlockedAdd(counts[bucket], 1u, j);
+        if (j < FX_GRID_SLOTS) { slots[bucket * FX_GRID_SLOTS + j] = id.x; continue; }
+        uint node;
+        InterlockedAdd(counters[FX_COUNTER_GRID_NODES], 1u, node);
+        if (node >= g_gridEntryCapacity) { fxStatus(FX_STATUS_RANGE); continue; }
+        FX_RWBUFFER(uint, heads, g_gridHeads);
+        FX_RWBUFFER(uint2, nodes, g_gridNodes);
+        uint next;
+        InterlockedExchange(heads[bucket], node, next);
+        nodes[node] = uint2(id.x, next);  // read only by a later pass (FxCollide)
+    }
 }

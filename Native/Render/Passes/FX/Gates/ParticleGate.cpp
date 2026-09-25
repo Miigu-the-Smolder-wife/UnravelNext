@@ -178,6 +178,14 @@ int main(int argc, char** argv)
                             passSum(r, "fx.particles.grid") + passSum(r, "fx.particles.surfaces"),
                             passSum(r, "fx.particles.upload") + passSum(r, "fx.particles.begin") + passSum(r, "fx.particles.readback"),
                             r.gpuFrameMs.median <= 0.2 ? "PASS" : "FAIL");
+                {
+                    // the last tick's work counts (cost attribution): colliders queued, grid entries, large-list surfaces
+                    const std::vector<uint8_t> counters = ps.readState("counters");
+                    auto word = [&](size_t k) { uint32_t v = 0; if (counters.size() >= (k + 1) * 4) std::memcpy(&v, counters.data() + k * 4, 4); return v; };
+                    std::printf("FX_PARTICLE_GATE_WORK load=%s colliders=%u grid_entries=%u large_surfaces=%u collide_ms=%.4f ribbon_ms=%.4f begin_ms=%.4f readback_ms=%.4f\n",
+                                l.c_str(), word(11), word(6), word(5), passSum(r, "fx.particles.collide"), passSum(r, "fx.particles.ribbon"),
+                                passSum(r, "fx.particles.begin"), passSum(r, "fx.particles.readback"));
+                }
             }
         return 0;
     }

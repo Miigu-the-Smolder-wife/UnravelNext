@@ -36,17 +36,17 @@ struct TickConstants
     uint32_t spawns, explicitBirths, fields, worldFields;
     uint32_t surfaces, restore, birthIndex, reserved32;  // birthIndex: layout indices of the births (ParticleSystem.cpp)
     uint32_t report, emitterDynamic, bodies, tickSurfaces;
-    float gridCell; uint32_t gridMask, gridCount, gridStart;  // collision candidate grid (FxGrid.hlsl)
-    uint32_t gridFill, gridEntries, gridLarge, gridEntryCapacity;
+    float gridCell; uint32_t gridMask, gridCount, gridHeads;  // collision candidate grid (FxSurfaces.hlsl, Particles.hlsli)
+    uint32_t reserved33, gridEntries, gridLarge, gridEntryCapacity;
     uint32_t staticSurfaceCount, dynamicSurfaces, ribbonPoints, volumeSide;  // surfaceCount = static + dynamic
-    uint32_t ribbonCapacity, cellCapacity, volumeRecords, gridBlocks;
-    uint32_t emitterUpdates, emitterUpdateRows, emitterStamp, updateCount;
+    uint32_t ribbonCapacity, cellCapacity, volumeRecords, gridNodes;
+    uint32_t emitterUpdates, emitterUpdateRows, rowWindows, updateCount;
     uint32_t serial;
     float separationMax;  // largest program separation (collision grid motion bound)
     uint32_t volumeRanges, volumeRangeCount;
     uint32_t surfaceBoxes, velocityOut, overflowRecords, overflowCapacity;
     uint32_t reserved25, reserved26, experiment, colliders;  // experiment_disable (timing only); collider queue
-    uint32_t emitterPatches, patchCount, traceRow, traceBirth;  // patches of the tick (FxEmitters); traced particle
+    uint32_t emitterPatches, patchCount, traceRow, traceBirth;  // patches of the tick (FxBegin); traced particle
     uint32_t trace, rowMotion, pad18, pad19;  // TraceRecord buffer (diagnostic, setTrace); RowMotion per row
 };
 static_assert(sizeof(TickConstants) == 416);
