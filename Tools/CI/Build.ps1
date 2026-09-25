@@ -15,6 +15,19 @@ param(
 # redo what changed. Parallel sessions never share a build folder (INTERFACES_KO.md 3.1).
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
+# git writes progress and notes ("Previous HEAD position ...") to stderr; run it with stderr as text and judge by exit
+# code, so calling this script from PowerShell (& .\Build.ps1) under "Stop" does not end on a note.
+function Invoke-Git {
+  $saved = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try { $out = & git @args 2>&1 | ForEach-Object { "$_" } } finally { $ErrorActionPreference = $saved }
+  $out | Where-Object { $_ } | ForEach-Object { Write-Host $_ }
+}
+function Get-GitOutput {
+  $saved = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try { return (& git @args 2>$null) } finally { $ErrorActionPreference = $saved }
+}
 $submodules = @("External/nvapi", "External/flip", "External/meshoptimizer")
 
 if ($Committed) {
@@ -26,20 +39,20 @@ if ($Committed) {
   $mutex = New-Object System.Threading.Mutex($false, "Global\UnravelNextCommittedBuild")
   [void]$mutex.WaitOne()
   try {
-    $sha = (& git -C $root rev-parse --verify "$Ref^{commit}")
+    $sha = Get-GitOutput -C $root rev-parse --verify "$Ref^{commit}"
     if ($LASTEXITCODE -ne 0 -or -not $sha) { throw "unknown commit: $Ref" }
     $sha = $sha.Trim()
     if (-not (Test-Path (Join-Path $gate ".git"))) {
-      & git -C $root worktree add --detach $gate $sha
+      Invoke-Git -C $root worktree add --detach $gate $sha
       if ($LASTEXITCODE -ne 0) { throw "git worktree add failed" }
     } else {
-      & git -C $gate checkout --detach --force $sha
+      Invoke-Git -C $gate checkout --detach --force $sha
       if ($LASTEXITCODE -ne 0) { throw "checkout $sha in $gate failed" }
-      & git -C $gate clean -fdq  # untracked files that are not ignored; build\ and External\.cache stay
+      Invoke-Git -C $gate clean -fdq  # untracked files that are not ignored; build\ and External\.cache stay
     }
     # Submodules from the main checkout's objects (no network); the dependency cache is copied once.
     foreach ($sub in $submodules) {
-      & git -C $gate submodule update --init --reference (Join-Path $root $sub) -- $sub
+      Invoke-Git -C $gate submodule update --init --reference (Join-Path $root $sub) -- $sub
       if ($LASTEXITCODE -ne 0) { throw "submodule $sub in $gate failed" }
     }
     $cache = Join-Path $root "External\.cache"
@@ -63,7 +76,7 @@ $cmake = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\c
 $ninja = Join-Path $vs "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
 foreach ($sub in $submodules) {
   if ((Test-Path (Join-Path $root ".gitmodules")) -and -not (Test-Path (Join-Path $root "$sub\.git"))) {
-    & git -C $root submodule update --init $sub
+    Invoke-Git -C $root submodule update --init $sub
     if ($LASTEXITCODE -ne 0) { throw "submodule init failed: $sub" }
   }
 }
