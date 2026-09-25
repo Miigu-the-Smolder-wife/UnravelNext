@@ -293,6 +293,7 @@ std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t
         uint64_t tris = 0;
         std::vector<float> alt;        // per triangle: smallest altitude (object space)
         std::vector<uint8_t> isFlat;   // per triangle
+        std::vector<float3> nrm, ctr;  // per triangle: unit normal and centroid (object space)
     };
     std::vector<MeshInfo> mi(s.meshes.size());
     for (size_t m = 0; m < s.meshes.size(); ++m)
@@ -308,6 +309,8 @@ std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t
         mi[m].radius = 0.5 * std::sqrt((double)dot(hi - lo, hi - lo));
         mi[m].alt.assign(mesh.indices.size() / 3, 0.0f);
         mi[m].isFlat.assign(mesh.indices.size() / 3, 0);
+        mi[m].nrm.assign(mesh.indices.size() / 3, float3{ 0, 0, 1 });
+        mi[m].ctr.assign(mesh.indices.size() / 3, float3{ 0, 0, 0 });
         for (const scene::Submesh& sub : mesh.submeshes)
         {
             const scene::Material& mat = s.materials[sub.material];
@@ -322,6 +325,8 @@ std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t
                 (flat ? mi[m].flat : mi[m].solid)[binOf(alt)] += 1;
                 mi[m].alt[k / 3] = (float)alt;
                 mi[m].isFlat[k / 3] = flat ? 1 : 0;
+                if (area2 > 0) mi[m].nrm[k / 3] = cr * (float)(1.0 / area2);
+                mi[m].ctr[k / 3] = (a + b + c) * (1.0f / 3.0f);
                 ++mi[m].tris;
             }
         }
@@ -330,12 +335,13 @@ std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t
     md << format("## %s at %ux%u\n\n", s.name.c_str(), W, H);
     md << format("Lights: sun %s, local lights %zu (%zu casting shadows).\n\n", s.sun.illuminance > 0 ? "on" : "off", s.lights.size(),
                  (size_t)std::count_if(s.lights.begin(), s.lights.end(), [](const scene::Light& l) { return l.castShadow; }));
-    md << "Band of a triangle: w_px = smallest altitude x instance scale x focal / distance to the instance centre; flat (Foliage or "
-          "two-sided) B below 8 px, solid B below 1.5 px, C below 0.25 px. Visible = hit by one of 16 stratified sub-samples per pixel "
-          "(no wind). P_A / P_B / P_C = pixels whose sub-samples include a triangle of that band (ARCHITECTURE 2 table: P_B, P_C). "
-          "Frustum counts include occluded triangles.\n\n"
-          "| camera | surface px (centre ray) | surface % | P_A / P_B / P_C (M px) | P_B or P_C | visible triangles A / B / C | instances in frustum | frustum triangles A / B / C |\n"
-          "|---|---|---|---|---|---|---|---|\n";
+    md << "Band of a visible triangle (COVERAGE_REDESIGN 14.9): w_px = smallest altitude x instance scale x focal / distance to the "
+          "triangle centroid; C below 0.25 px; solid B below 1.5 px; flat (Foliage or two-sided) B only when |cos theta| x w_px < 1.5 px "
+          "(theta between the view ray and the sheet normal), else A. Visible = hit by one of 16 stratified sub-samples per pixel (no "
+          "wind). P_A / P_B / P_C = pixels whose sub-samples include a triangle of that band (ARCHITECTURE 2 table: P_B, P_C); T_A / T_B "
+          "/ T_C = distinct visible triangles per band (before any LOD).\n\n"
+          "| camera | surface px (centre ray) | surface % | P_A / P_B / P_C (M px) | P_B or P_C | T_A / T_B / T_C (visible) | instances in frustum |\n"
+          "|---|---|---|---|---|---|---|\n";
     for (const scene::Camera& c : s.cameras)
     {
         reference::CameraSelection sel;
@@ -348,6 +354,9 @@ std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t
         const float3 fw = normalize(cam.forward), right = normalize(cross(fw, cam.up)), up = cross(right, fw);
         const double th = std::tan(0.5 * cam.verticalFov), aspect = (double)W / H, focal = 0.5 * H / th;
         // Visible triangles by band (distinct ids over the 16 sub-samples) and band pixel coverage.
+        // Band of a visible triangle (COVERAGE_REDESIGN 14.9 rule): w_px = smallest altitude x scale x focal / distance to
+        // the triangle centroid; C below 0.25 px; solid B below 1.5 px; flat (sheet) B only when |cos theta| x w_px < 1.5 px
+        // (theta between the view ray and the sheet normal: a sheet seen face-on is band A whatever its size).
         auto bandOfId = [&](uint64_t id) {
             const uint32_t instIdx = (uint32_t)(id >> 32), tri = (uint32_t)id;
             const scene::Instance& in = s.instances[instIdx];
@@ -355,11 +364,14 @@ std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t
             if (tri >= m.alt.size()) return 0;
             const float3 col0{ in.transform.m[0][0], in.transform.m[1][0], in.transform.m[2][0] };
             const double scale = std::sqrt((double)dot(col0, col0));
-            const float3 v = in.transform.transformPoint(m.centre) - cam.position;
+            const float3 v = in.transform.transformPoint(m.ctr[tri]) - cam.position;
             const double d = std::max((double)std::sqrt(dot(v, v)), (double)cam.nearPlane);
             const double w = m.alt[tri] * scale * focal / d;
             if (w < 0.25) return 2;
-            return w < (m.isFlat[tri] ? 8.0 : 1.5) ? 1 : 0;
+            if (!m.isFlat[tri]) return w < 1.5 ? 1 : 0;
+            const float3 n = normalize(in.transform.transformVector(m.nrm[tri]));
+            const double cosT = std::fabs((double)dot(n, v)) / d;
+            return cosT * w < 1.5 ? 1 : 0;
         };
         uint64_t pxBand[3] = {}, pxBC = 0;
         std::vector<uint64_t> seen;
@@ -419,9 +431,11 @@ std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t
         const double tot = bandA + bandB + bandC;
         (void)bandBflat;
         (void)tot;
-        md << format("| %s | %.2f M | %.1f %% | %.2f / %.2f / %.2f | %.2f M | %.2f M / %.2f M / %.2f M | %llu | %.1f M / %.1f M / %.1f M |\n", c.name.c_str(), surf / 1e6,
-                     100.0 * surf / ((double)W * H), pxBand[0] / 1e6, pxBand[1] / 1e6, pxBand[2] / 1e6, pxBC / 1e6, visBand[0] / 1e6, visBand[1] / 1e6, visBand[2] / 1e6,
-                     (unsigned long long)inst, bandA / 1e6, bandB / 1e6, bandC / 1e6);
+        (void)bandA;
+        (void)bandB;
+        (void)bandC;
+        md << format("| %s | %.2f M | %.1f %% | %.2f / %.2f / %.2f | %.2f M | %.2f M / %.2f M / %.2f M | %llu |\n", c.name.c_str(), surf / 1e6, 100.0 * surf / ((double)W * H),
+                     pxBand[0] / 1e6, pxBand[1] / 1e6, pxBand[2] / 1e6, pxBC / 1e6, visBand[0] / 1e6, visBand[1] / 1e6, visBand[2] / 1e6, (unsigned long long)inst);
         logf("  scenemeta %s/%s: surface %.2f M px (%.1f %%), P_A %.2f P_B %.2f P_C %.2f M px, visible triangles A %.2f B %.2f C %.2f M\n", s.name.c_str(), c.name.c_str(),
              surf / 1e6, 100.0 * surf / ((double)W * H), pxBand[0] / 1e6, pxBand[1] / 1e6, pxBand[2] / 1e6, visBand[0] / 1e6, visBand[1] / 1e6, visBand[2] / 1e6);
     }

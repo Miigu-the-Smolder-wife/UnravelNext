@@ -544,7 +544,7 @@ Scene ridgeSunset(const Request& rq)
 // (jittered grid, kStandSpacing, radius kStandRadius, crowns overlapping so no sky shows overhead), so the eye-level
 // view is the section's heavy side: trunks, grass and canopy fill the screen. Grass keeps the base density. Cameras:
 // eye (1.7 m, level), up (into the canopy: leaf coverage and transmission at their heaviest), edge (from outside the
-// stand, looking in: the band B/C transition distances). Combat slots (characters, VFX) are empty until those assets
+// stand, looking in: the band B/C transition distances), vista (40 m up, across the forest: band C). Combat slots (characters, VFX) are empty until those assets
 // exist; the scene's measured metadata (surface pixels, band counts, lights) is in Results/C/Scenes/forest_combat.md.
 Scene forestCombat(const Request& rq)
 {
@@ -577,6 +577,10 @@ Scene forestCombat(const Request& rq)
     const float ex = cx - kStandRadius - 40.0f;
     const float3 edge{ ex, rollingTerrain(ex, cz) + 1.7f, cz };
     s.cameras.push_back(camera("edge", edge, edge + f3(100, 0, 0), 14.0f));
+    // Vista: above the canopy, looking across the forest towards the horizon; distant crowns and far grass (band C)
+    // fill most of the frame.
+    const float3 vista{ cx, rollingTerrain(cx, cz) + 40.0f, cz };
+    s.cameras.push_back(camera("vista", vista, vista + f3(100, -18, 30), 14.0f));
     for (const auto& c : s.cameras) s.paths.push_back(staticPath(c));
     s.paths.push_back(linearPath("patrol", eye, eye + f3(60, 0, 25), 1.4f));
     s.paths.push_back(linearPath("sprint", eye - f3(40, 0, 0), eye + f3(60, 0, 10), 6.0f));

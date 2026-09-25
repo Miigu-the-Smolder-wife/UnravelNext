@@ -37,6 +37,7 @@ $jobs = @(
   @{ scene = "forest_combat"; camera = "eye";    res = "2560x1440"; wind = $true },
   @{ scene = "forest_combat"; camera = "up";     res = "2560x1440"; wind = $true },
   @{ scene = "forest_combat"; camera = "edge";   res = "2560x1440"; wind = $true },
+  @{ scene = "forest_combat"; camera = "vista";  res = "2560x1440"; wind = $true },
   @{ scene = "forest_thin"; camera = "forest";   res = "2560x1440"; wind = $true },
   @{ scene = "forest_card"; camera = "forest";   res = "2560x1440"; wind = $true },
   @{ scene = "city_block";  camera = "street";   res = "3840x2160"; wind = $true },
@@ -47,7 +48,8 @@ $jobs = @(
   @{ scene = "waterside";   camera = "lake";     res = "2560x1440"; wind = $true },
   @{ scene = "forest_combat"; camera = "eye";    res = "3840x2160"; wind = $true },
   @{ scene = "forest_combat"; camera = "up";     res = "3840x2160"; wind = $true },
-  @{ scene = "forest_combat"; camera = "edge";   res = "3840x2160"; wind = $true }
+  @{ scene = "forest_combat"; camera = "edge";   res = "3840x2160"; wind = $true },
+  @{ scene = "forest_combat"; camera = "vista";  res = "3840x2160"; wind = $true }
 )
 foreach ($j in $jobs) {
   $key = "$($j.scene)/$($j.camera)/$($j.res)"
