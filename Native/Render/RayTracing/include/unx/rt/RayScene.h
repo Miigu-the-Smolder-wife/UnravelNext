@@ -66,6 +66,9 @@ public:
     // Device-keyed registry for tests that trace without a frame context; releaseDevice drops a device's scenes.
     static RayScene& get(Device& device, ShaderLibrary& shaders, GpuScene& scene, const QualityConfig& quality);
     static void releaseDevice(Device& device);
+    // Drops the registry's scene built for 'scene' (call before a GpuScene it was built from is destroyed: the registry
+    // is keyed by address, and a later GpuScene at the same address must not receive it).
+    static void release(Device& device, GpuScene& scene);
 
     RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, const QualityConfig& quality);
     ~RayScene();
@@ -131,9 +134,25 @@ private:
     std::vector<MeshBlas> m_meshBlas;  // per scene mesh (geometryBase kNone = unused)
     Buffer m_meshBlasPool;
 
+    // RT proxy of a skinned mesh (ARCHITECTURE 2.8): the finest of V's uniform-error LOD cuts (ClusterData::lodLevels)
+    // with at most raytracing.character_proxy_triangles triangles (the coarsest when none fits); the full mesh when the
+    // scene has no cluster data. Shared by every instance of the mesh: per-submesh ranges of compact indices in R's index
+    // pool, a vertex map (compact -> mesh vertex) so only the proxy's vertices are deformed, and RtGeometry records.
+    struct ProxyMesh
+    {
+        bool built = false, reduced = false;
+        uint32_t vertexMap = 0, vertexCount = 0, geometryBase = 0, triangles = 0;
+        std::vector<uint32_t> indexOffset, indexCount;  // per geometry (non-empty submesh), in R's index pool
+        std::vector<uint32_t> submesh;
+    };
+    const ProxyMesh& proxyOf(uint32_t mesh);
+    std::vector<ProxyMesh> m_proxies;               // per scene mesh (built on demand)
+    std::vector<uint32_t> m_indexPoolData, m_vertexMapData;
+    uint32_t m_proxyBudget = 0;
+
     struct Deformed
     {
-        uint32_t sceneInstance = 0;
+        uint32_t sceneInstance = 0, mesh = 0;
         uint32_t vertexBase = 0, vertexCount = 0;
         uint64_t blasOffset = 0, scratchOffset = 0;
         uint32_t geometryBase = 0;

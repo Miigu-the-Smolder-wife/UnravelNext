@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 
 namespace unx::render::rt
 {
@@ -57,6 +58,13 @@ RayScene& RayScene::get(Device& device, ShaderLibrary& shaders, GpuScene& scene,
     if (slot && slot->sceneRevision() != scene.revision()) slot.reset();  // re-uploaded scene: rebuild (streaming boundary)
     if (!slot) slot = std::make_unique<RayScene>(device, shaders, scene, quality);
     return *slot;
+}
+
+void RayScene::release(Device& device, GpuScene& scene)
+{
+    device.waitIdle();
+    std::lock_guard lock(g_sceneMutex);
+    g_scenes.erase({ &device, &scene });
 }
 
 void RayScene::releaseDevice(Device& device)
@@ -261,24 +269,30 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         m_dynamicDescs.push_back(rigidDesc(i));
     }
 
-    // Deformed instances: per-instance BLAS over the full mesh until V's cluster LOD cuts exist (the proxy cut of
-    // raytracing.character_proxy_triangles is taken from them, ARCHITECTURE 2.8); counted in the stats meanwhile.
+    // Deformed instances: per-instance BLAS over the mesh's RT proxy (ProxyMesh: V's LOD cut within
+    // raytracing.character_proxy_triangles, ARCHITECTURE 2.8), deformed through the proxy's vertex map.
+    m_proxyBudget = proxyBudget;
+    m_proxies.assign(meshes.size(), {});
     uint32_t vertexBase = 0;
     for (uint32_t i : deformed)
     {
         const gpu::Instance& in = instances[i];
-        const gpu::Mesh& m = meshes[in.mesh];
+        const ProxyMesh& p = proxyOf(in.mesh);
         Deformed d;
         d.sceneInstance = i;
         d.vertexBase = vertexBase;
-        d.vertexCount = m.vertexCount;
-        d.geometryBase = geometryBase(in.mesh);
-        vertexBase += m.vertexCount;
-        if (m.triangleCount > proxyBudget) ++m_stats.deformedAboveProxyBudget;
-        m_stats.deformedTriangles += m.triangleCount;
+        d.vertexCount = p.vertexCount;
+        d.geometryBase = p.geometryBase;
+        d.mesh = in.mesh;
+        vertexBase += p.vertexCount;
+        if (p.triangles > proxyBudget) ++m_stats.deformedAboveProxyBudget;
+        m_stats.deformedTriangles += p.triangles;
         m_deformed.push_back(std::move(d));
     }
     m_stats.deformedVertices = vertexBase;
+    // R's index pool and vertex map (proxy cuts) are needed by the deformed BLAS geometry below.
+    m_indexPool = createStructured(m_indexPoolData.data(), sizeof(uint32_t), (uint32_t)m_indexPoolData.size(), L"RT proxy indices");
+    m_vertexMap = createStructured(m_vertexMapData.data(), sizeof(uint32_t), (uint32_t)m_vertexMapData.size(), L"RT vertex map");
     buildDeformed();
     for (size_t k = 0; k < m_deformed.size(); ++k)
     {
@@ -299,9 +313,6 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
 
     m_instanceBuffer = createStructured(m_instances.data(), sizeof(RtInstance), (uint32_t)m_instances.size(), L"RT instances");
     m_geometryBuffer = createStructured(m_geometries.data(), sizeof(RtGeometry), (uint32_t)m_geometries.size(), L"RT geometries");
-    // R's own index pool and vertex map hold proxy cuts (empty until cluster LOD cuts exist); valid descriptors regardless.
-    m_indexPool = createStructured(nullptr, sizeof(uint32_t), 0, L"RT proxy indices");
-    m_vertexMap = createStructured(nullptr, sizeof(uint32_t), 0, L"RT vertex map");
 
     buildStaticTlas();
     {
@@ -487,12 +498,69 @@ void RayScene::buildMeshBlas()
     release(sizes);
 }
 
+const RayScene::ProxyMesh& RayScene::proxyOf(uint32_t mesh)
+{
+    ProxyMesh& p = m_proxies[mesh];
+    if (p.built) return p;
+    p.built = true;
+    const scene::Mesh& sm = m_scene.source()->meshes[mesh];
+    const ClusterData& cd = m_scene.clusters();
+    // Per-submesh index lists in mesh vertex indices, from the chosen cut or the full mesh.
+    std::vector<std::vector<uint32_t>> perSubmesh(sm.submeshes.size());
+    const bool haveCuts = mesh < cd.meshes.size() && cd.meshes[mesh].lodLevelCount > 0;
+    if (haveCuts)
+    {
+        const auto& range = cd.meshes[mesh];
+        uint32_t chosen = range.lodLevelOffset + range.lodLevelCount - 1;  // coarsest when none fits
+        for (uint32_t l = range.lodLevelOffset; l < range.lodLevelOffset + range.lodLevelCount; ++l)
+            if (cd.lodLevels[l].triangleCount <= m_proxyBudget)
+            {
+                chosen = l;  // levels run finest to coarsest: the first that fits
+                break;
+            }
+        const gpu::LodLevel& level = cd.lodLevels[chosen];
+        p.reduced = level.error > 0;
+        for (uint32_t k = level.clusterOffset; k < level.clusterOffset + level.clusterCount; ++k)
+        {
+            const gpu::Cluster& c = cd.clusters[cd.lodLevelClusters[k]];
+            const uint32_t triangles = (c.counts >> 8) & 0xFFu, submesh = c.counts >> 16;
+            for (uint32_t t = 0; t < triangles; ++t)
+            {
+                const uint32_t packed = cd.clusterTriangles[c.triangleOffset + t];
+                for (uint32_t v : { packed & 0xFFu, (packed >> 8) & 0xFFu, (packed >> 16) & 0xFFu })
+                    perSubmesh[submesh].push_back(cd.clusterVertexIndices[c.vertexOffset + v]);
+            }
+        }
+    }
+    else
+        for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size(); ++s)
+            perSubmesh[s].assign(sm.indices.begin() + sm.submeshes[s].indexOffset, sm.indices.begin() + sm.submeshes[s].indexOffset + sm.submeshes[s].indexCount);
+    // Compact vertices (first use order) and R's pools.
+    std::unordered_map<uint32_t, uint32_t> compact;
+    p.vertexMap = (uint32_t)m_vertexMapData.size();
+    p.geometryBase = (uint32_t)m_geometries.size();
+    for (uint32_t s = 0; s < (uint32_t)perSubmesh.size(); ++s)
+    {
+        if (perSubmesh[s].empty()) continue;
+        p.submesh.push_back(s);
+        p.indexOffset.push_back((uint32_t)m_indexPoolData.size());
+        p.indexCount.push_back((uint32_t)perSubmesh[s].size());
+        m_geometries.push_back({ p.indexOffset.back(), s, kRtGeometryProxyIndices, p.vertexMap });
+        for (uint32_t v : perSubmesh[s])
+        {
+            auto [it, added] = compact.try_emplace(v, (uint32_t)(m_vertexMapData.size() - p.vertexMap));
+            if (added) m_vertexMapData.push_back(v);
+            m_indexPoolData.push_back(it->second);
+        }
+        p.triangles += (uint32_t)perSubmesh[s].size() / 3;
+    }
+    p.vertexCount = (uint32_t)(m_vertexMapData.size() - p.vertexMap);
+    return p;
+}
+
 void RayScene::buildDeformed()
 {
     const scene::Scene* src = m_scene.source();
-    const auto& instances = m_scene.instances();
-    const auto& meshes = m_scene.meshes();
-    const D3D12_GPU_VIRTUAL_ADDRESS indices = m_scene.buffer("indices")->GetGPUVirtualAddress();
     m_deformedPool = createBuffer(std::max<uint64_t>(m_stats.deformedVertices, 1) * sizeof(RtDeformedVertex), true, false, L"RT deformed vertices");
     {
         DescriptorHeaps& h = m_device.descriptors();
@@ -516,23 +584,22 @@ void RayScene::buildDeformed()
     uint64_t poolBytes = 0, scratchBytes = 0;
     for (Deformed& d : m_deformed)
     {
-        const gpu::Instance& in = instances[d.sceneInstance];
-        const gpu::Mesh& gm = meshes[in.mesh];
-        const scene::Mesh& sm = src->meshes[in.mesh];
+        const ProxyMesh& p = m_proxies[d.mesh];
+        const scene::Mesh& sm = src->meshes[d.mesh];
         const scene::Instance& si = src->instances[d.sceneInstance];
-        for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size(); ++s)
+        for (size_t k = 0; k < p.submesh.size(); ++k)
         {
-            if (sm.submeshes[s].indexCount == 0) continue;
+            const uint32_t s = p.submesh[k];
             const uint32_t material = s < si.materialOverrides.size() ? si.materialOverrides[s] : sm.submeshes[s].material;
             D3D12_RAYTRACING_GEOMETRY_DESC g{};
             g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
             g.Flags = materialAlpha(material) ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
             g.Triangles.VertexBuffer = { 0, sizeof(RtDeformedVertex) };  // pool address patched below
             g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-            g.Triangles.VertexCount = gm.vertexCount;
-            g.Triangles.IndexBuffer = indices + ((uint64_t)gm.indexOffset + sm.submeshes[s].indexOffset) * sizeof(uint32_t);
+            g.Triangles.VertexCount = p.vertexCount;
+            g.Triangles.IndexBuffer = m_indexPool.address() + (uint64_t)p.indexOffset[k] * sizeof(uint32_t);
             g.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
-            g.Triangles.IndexCount = sm.submeshes[s].indexCount;
+            g.Triangles.IndexCount = p.indexCount[k];
             d.geometries.push_back(g);
         }
         for (auto& g : d.geometries) g.Triangles.VertexBuffer.StartAddress = m_deformedPool.address() + (uint64_t)d.vertexBase * sizeof(RtDeformedVertex);
@@ -550,7 +617,7 @@ void RayScene::buildDeformed()
         scratchBytes += alignUp(std::max(sizes.ScratchDataSizeInBytes, sizes.UpdateScratchDataSizeInBytes), kAsAlign);
 
         const uint32_t job = (uint32_t)jobs.size();
-        jobs.push_back({ d.sceneInstance, d.vertexBase, gpu::kNone, d.vertexCount });
+        jobs.push_back({ d.sceneInstance, d.vertexBase, m_proxies[d.mesh].vertexMap, d.vertexCount });
         for (uint32_t first = 0; first < d.vertexCount; first += 64) groups.insert(groups.end(), { job, first });
     }
     m_deformedBlasPool = createBuffer(poolBytes, false, true, L"RT deformed BLAS pool");

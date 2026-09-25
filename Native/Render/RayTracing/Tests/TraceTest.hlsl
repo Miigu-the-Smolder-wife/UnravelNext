@@ -17,7 +17,7 @@ struct TestResult
     float t;
     uint sceneInstance;
     uint meshTriangle;
-    uint flags;          // bit 0 front face, bit 1 visibility ray unoccluded
+    uint flags;          // bit 0 front face, bit 1 visibility ray unoccluded, bit 2 proxy geometry (no mesh triangle)
     float3 normal;       // RtSurface shading normal (world)
     float pad;
 };
@@ -50,7 +50,9 @@ void TraceTestGen()
         const RtGeometry g = rtLoadGeometry(s, ri.geometryBase + h.geometry);
         const GpuMesh mesh = loadMesh(loadInstance(ri.sceneInstance).mesh);
         o.sceneInstance = ri.sceneInstance;
-        o.meshTriangle = (g.indexOffset - mesh.indexOffset) / 3 + h.primitive;
+        // Proxy geometry (R's index pool): its primitive index is the cut's, not the mesh's (flag bit 2).
+        o.meshTriangle = (g.flags & RT_GEOMETRY_PROXY_INDICES) ? UNX_NONE : (g.indexOffset - mesh.indexOffset) / 3 + h.primitive;
+        if (g.flags & RT_GEOMETRY_PROXY_INDICES) o.flags |= 4u;
         o.flags |= h.frontFace;
         o.normal = rtSurface(s, h, r.origin, r.direction).normal;
     }

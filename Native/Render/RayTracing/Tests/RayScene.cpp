@@ -361,6 +361,7 @@ std::vector<TestResult> trace(Device& device, ShaderLibrary& shaders, rt::RaySce
 struct Check
 {
     uint32_t hitMismatch = 0, tMismatch = 0, identityMismatch = 0, coincident = 0, faceMismatch = 0, normalMismatch = 0, visibilityMismatch = 0, hits = 0;
+    uint32_t proxyHits = 0;
     double maxTError = 0;
 };
 
@@ -395,7 +396,9 @@ Check compare(const scene::Scene& s, const std::vector<CpuTri>& tris, const std:
             continue;
         }
         const CpuTri& t = tris[h.tri];
-        if (t.instance != r.sceneInstance || t.triangle != r.meshTriangle)
+        const bool proxy = (r.flags & 4u) != 0;  // RT proxy geometry: identity by instance only (the cut's own triangle order)
+        if (proxy) ++c.proxyHits;
+        if (t.instance != r.sceneInstance || (!proxy && t.triangle != r.meshTriangle))
         {
             ++c.coincident;  // same t within tolerance: shared edge or coplanar faces
             continue;
@@ -519,6 +522,56 @@ uint32_t createAlphaTexture(Device& device, const std::vector<uint8_t>& alpha, u
     sd.Texture2D.MipLevels = 1;
     device.d3d()->CreateShaderResourceView(texture.Get(), &sd, device.descriptors().resourceCpu(srv));
     return srv;
+}
+
+// Hand-made V cluster data for the proxy round: the skinned tube (mesh 3) gets two uniform-error cuts, the full mesh
+// (error 0) and a coarser cut of its even triangles (error 0.1), in clusters of at most 64 triangles; every other mesh
+// has none. With raytracing.character_proxy_triangles = 300, R must choose the 240-triangle cut.
+ClusterData tubeCuts(const scene::Scene& s, uint32_t tubeMesh)
+{
+    ClusterData cd;
+    cd.meshes.resize(s.meshes.size());
+    const scene::Mesh& m = s.meshes[tubeMesh];
+    auto addCut = [&](float error, uint32_t stride) {
+        gpu::LodLevel level{};
+        level.clusterOffset = (uint32_t)cd.lodLevelClusters.size();
+        level.error = error;
+        std::vector<uint32_t> tris;
+        for (uint32_t t = 0; t < (uint32_t)m.indices.size() / 3; t += stride) tris.push_back(t);
+        for (size_t first = 0; first < tris.size(); first += 64)
+        {
+            gpu::Cluster c{};
+            c.vertexOffset = (uint32_t)cd.clusterVertexIndices.size();
+            c.triangleOffset = (uint32_t)cd.clusterTriangles.size();
+            std::vector<uint32_t> local;
+            auto localOf = [&](uint32_t v) {
+                for (uint32_t k = 0; k < (uint32_t)local.size(); ++k)
+                    if (local[k] == v) return k;
+                local.push_back(v);
+                return (uint32_t)local.size() - 1;
+            };
+            const size_t last = std::min(first + 64, tris.size());
+            for (size_t k = first; k < last; ++k)
+            {
+                const uint32_t t = tris[k];
+                const uint32_t a = localOf(m.indices[3 * t]), b = localOf(m.indices[3 * t + 1]), cc = localOf(m.indices[3 * t + 2]);
+                cd.clusterTriangles.push_back(a | (b << 8) | (cc << 16));
+            }
+            cd.clusterVertexIndices.insert(cd.clusterVertexIndices.end(), local.begin(), local.end());
+            c.counts = (uint32_t)local.size() | ((uint32_t)(last - first) << 8) | (0u << 16);
+            c.material = m.submeshes[0].material;
+            cd.lodLevelClusters.push_back((uint32_t)cd.clusters.size());
+            cd.clusters.push_back(c);
+            level.triangleCount += (uint32_t)(last - first);
+        }
+        level.clusterCount = (uint32_t)cd.lodLevelClusters.size() - level.clusterOffset;
+        cd.lodLevels.push_back(level);
+    };
+    cd.meshes[tubeMesh].lodLevelOffset = (uint32_t)cd.lodLevels.size();
+    addCut(0.0f, 1);
+    addCut(0.1f, 2);
+    cd.meshes[tubeMesh].lodLevelCount = 2;
+    return cd;
 }
 
 int main(int argc, char** argv)
@@ -662,6 +715,45 @@ int main(int argc, char** argv)
             pass = pass && ok;
         }
         {
+            // Round 5 (ARCHITECTURE 2.8): the skinned tube traced through a reduced RT proxy taken from V's LOD cuts. The
+            // CPU reference holds exactly the cut's triangles (the even ones of the tube); proxy hits are identified by
+            // instance (the cut has its own triangle order), everything else as in round 1.
+            QualityConfig proxyQuality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            proxyQuality.applyOverride("raytracing.character_proxy_triangles=300");
+            const uint32_t tubeMesh = 3;
+            GpuScene proxyScene(device);
+            proxyScene.upload(s);
+            proxyScene.setClusters(tubeCuts(s, tubeMesh));
+            rt::RayScene& prs = rt::RayScene::get(device, shaders, proxyScene, proxyQuality);
+            gpu::FrameConstants pfc{};
+            proxyScene.fill(pfc);
+            GpuBuffer pconstants = createBuffer(device, 1024, D3D12_HEAP_TYPE_UPLOAD, false);
+            check(pconstants.resource->Map(0, &none, &mapped), "map proxy constants");
+            std::memcpy(mapped, &pfc, sizeof pfc);
+            pconstants.resource->Unmap(0, nullptr);
+            std::vector<CpuTri> cut;
+            for (const CpuTri& t : tris)
+                if (s.instances[t.instance].mesh != tubeMesh || (t.triangle % 2) == 0) cut.push_back(t);
+            std::vector<CpuHit> cpuCut(rayCount);
+            std::vector<uint8_t> visibleCut(rayCount, 0);
+            for (uint32_t i = 0; i < rayCount; ++i)
+            {
+                cpuCut[i] = intersect(cut, rays[i].origin, rays[i].direction, rays[i].tMax);
+                if (rays[i].visibleTMax > 0) visibleCut[i] = intersect(cut, rays[i].origin, rays[i].direction, rays[i].visibleTMax).t < 0 ? 1 : 0;
+            }
+            const std::vector<TestResult> got = trace(device, shaders, prs, pconstants.resource->GetGPUVirtualAddress(), rays);
+            const Check c = compare(s, cut, rays, got, cpuCut, visibleCut);
+            const rt::RaySceneStats& st = prs.stats();
+            const bool ok = st.deformedTriangles == 240 && c.proxyHits > 0 && c.hitMismatch == 0 && c.tMismatch == 0 && c.faceMismatch == 0 &&
+                            c.normalMismatch == 0 && c.visibilityMismatch == 0 && c.coincident <= std::max<uint32_t>(2, c.hits / 2000);
+            logf("proxy cut: %u deformed triangles (cut of 240 expected), %u hits (%u on the proxy); hit/miss mismatches %u, t mismatches %u, identity ties %u, "
+                 "facing %u, normal %u, visibility %u -> %s\n",
+                 st.deformedTriangles, c.hits, c.proxyHits, c.hitMismatch, c.tMismatch, c.coincident, c.faceMismatch, c.normalMismatch, c.visibilityMismatch,
+                 ok ? "PASS" : "FAIL");
+            pass = pass && ok;
+            rt::RayScene::release(device, proxyScene);
+        }
+        {
             // Round 4: the any-hit alpha test reads M's published texture like V's raster (INTERFACES v1.11).
             const uint32_t n = 16;
             std::vector<uint8_t> alpha(n * n);
@@ -710,7 +802,7 @@ int main(int argc, char** argv)
             const bool ok = wrong == 0 && cut > judged / 4 && cut < judged * 3 / 4;
             logf("alpha texture: %u rays judged (%u cut through the quad), %u disagree with the CPU alpha test -> %s\n", judged, cut, wrong, ok ? "PASS" : "FAIL");
             pass = pass && ok;
-            device.waitIdle();
+            rt::RayScene::release(device, alphaScene);
             device.descriptors().freeResource(published[1].baseColor);
         }
         rt::RayPipeline::releaseDevice(device);
