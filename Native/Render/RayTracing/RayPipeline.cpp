@@ -23,7 +23,9 @@ RayPipelineDesc standardRayPipeline(std::string library, std::vector<std::string
     d.library = std::move(library);
     d.rayGen = std::move(rayGen);
     d.miss = { "RtMiss", "RtMissVisible" };
-    d.hitGroups = { { "RtHitGroup", "RtClosestHit", "RtAnyHit" } };
+    // Hit group 0: triangles (alpha-tested any-hit). Hit group 1: the analytic area lights (RayScene's emitter instance,
+    // InstanceContributionToHitGroupIndex 1; RayShaders.hlsli).
+    d.hitGroups = { { "RtHitGroup", "RtClosestHit", "RtAnyHit", "" }, { "RtEmitterGroup", "RtEmitterClosestHit", "", "RtEmitterIntersect" } };
     return d;
 }
 
@@ -42,6 +44,7 @@ RayPipeline::RayPipeline(Device& device, ShaderLibrary& shaders, const RayPipeli
     {
         add(g.closestHit);
         add(g.anyHit);
+        add(g.intersection);
     }
     std::vector<std::wstring> exportNames, groupNames;
     for (const auto& n : unique) exportNames.push_back(wide(n));
@@ -57,9 +60,10 @@ RayPipeline::RayPipeline(Device& device, ShaderLibrary& shaders, const RayPipeli
     {
         D3D12_HIT_GROUP_DESC h{};
         h.HitGroupExport = groupNames[i].c_str();
-        h.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
+        h.Type = desc.hitGroups[i].intersection.empty() ? D3D12_HIT_GROUP_TYPE_TRIANGLES : D3D12_HIT_GROUP_TYPE_PROCEDURAL_PRIMITIVE;
         h.ClosestHitShaderImport = import(desc.hitGroups[i].closestHit);
         h.AnyHitShaderImport = import(desc.hitGroups[i].anyHit);
+        h.IntersectionShaderImport = import(desc.hitGroups[i].intersection);
         groups.push_back(h);
     }
 

@@ -239,6 +239,8 @@ struct Outcome
     double expectedMean = 0;                                 // mean expected E over the same probes
     double mapMean = 0, mapWorst = 0, mapExpectedMean = 0;   // the cache's irradiance maps at the probe points (giCacheIrradianceAt)
     uint32_t mapProbes = 0;
+    double mapP99 = 0, mapWorstExpected = 0, mapWorstValue = 0;  // 99th percentile relative error; the worst probe's E pair
+    float3 mapWorstAt{}, mapWorstNormal{};
     double radianceMean = 0, radianceWorst = 0;              // screenProbeRadiance against the uniform radiance
     uint32_t probes = 0;
     int converged = -1;  // first frame whose mean is within 1 %
@@ -430,6 +432,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             {
                 double msum = 0, mexp = 0, mworst = 0;
                 uint32_t mn = 0;
+                std::vector<double> rel;
                 for (size_t i = 0; i < values.size() / 16; ++i)
                 {
                     const float* v = &values[16 * i];
@@ -438,13 +441,27 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
                     if (x < 0) continue;
                     msum += v[11];
                     mexp += x;
-                    mworst = std::max(mworst, x > 0 ? std::fabs(v[11] / x - 1) : std::fabs((double)v[11]));
+                    const double r = x > 0 ? std::fabs(v[11] / x - 1) : std::fabs((double)v[11]);
+                    if (r > mworst)
+                    {
+                        out.mapWorstAt = { v[8], v[9], v[10] };
+                        out.mapWorstNormal = { v[12], v[13], v[14] };
+                        out.mapWorstExpected = x;
+                        out.mapWorstValue = v[11];
+                    }
+                    mworst = std::max(mworst, r);
+                    rel.push_back(r);
                     ++mn;
                 }
                 out.mapMean = mn ? msum / mn : 0;
                 out.mapExpectedMean = mn ? mexp / mn : 0;
                 out.mapWorst = mworst;
                 out.mapProbes = mn;
+                if (!rel.empty())
+                {
+                    std::sort(rel.begin(), rel.end());
+                    out.mapP99 = rel[std::min(rel.size() - 1, (size_t)(0.99 * rel.size()))];
+                }
             }
             out.radianceMean = n ? rsum / n : 0;
             out.radianceWorst = rworst;
@@ -461,6 +478,8 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
         }
         logf("  cache maps at %u probe points: mean E %.5f (expected %.5f, %+.3f %%), worst %.3f %%\n", out.mapProbes, out.mapMean, out.mapExpectedMean,
              out.mapExpectedMean > 0 ? 100 * (out.mapMean / out.mapExpectedMean - 1) : 0.0, 100 * out.mapWorst);
+        logf("    P99 %.3f %%; worst at (%.3f, %.3f, %.3f) n (%.2f, %.2f, %.2f): %.5f against %.5f\n", 100 * out.mapP99, out.mapWorstAt.x, out.mapWorstAt.y,
+             out.mapWorstAt.z, out.mapWorstNormal.x, out.mapWorstNormal.y, out.mapWorstNormal.z, out.mapWorstValue, out.mapWorstExpected);
         if (giSystem) out.stats = giSystem->readStats();
         logf("  cache after the last frame: %u live, %u free, %u requested, %u selected + %u background updates, %u hit entries, %u created, %u resets, "
              "%u allocation failures, %u table overflows\n",

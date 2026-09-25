@@ -43,7 +43,8 @@ struct DeformJob  // 16 B (Deform.hlsl)
 };
 constexpr uint32_t kRtInstanceDeformed = 1u;
 constexpr uint32_t kRtGeometryProxyIndices = 1u;
-constexpr uint32_t kRtMaskGi = 1u, kRtMaskReflection = 2u, kRtMaskAll = 0xFFu;
+constexpr uint32_t kRtMaskGi = 1u, kRtMaskReflection = 2u, kRtMaskEmitter = 4u, kRtMaskAll = 0xFFu;
+constexpr uint32_t kRtInstanceEmitter = 0xFFFFFEu;  // RT_INSTANCE_EMITTER (RayScene.hlsli)
 
 struct DynamicTlasCensus  // the dynamic TLAS's instance descriptors (sampled every 64 frames)
 {
@@ -148,6 +149,13 @@ private:
 
     void buildMeshBlas();
     void buildDeformed();
+    // Analytic area lights as ray geometry (design 12.4 structure 2): one procedural AABB BLAS over the scene's lights
+    // (inactive boxes for point and spot lights, so PrimitiveIndex = light index), one dynamic TLAS instance with
+    // InstanceID RT_INSTANCE_EMITTER, mask kRtMaskEmitter and hit group 1 (RayShaders.hlsli: RtEmitterIntersect).
+    void buildEmitters();
+    Buffer m_emitterAabbs, m_emitterBlas;
+    uint32_t m_emitterLights = 0;
+    bool m_emittersEnabled = false;  // raytracing.emitters
     void buildStaticTlas();
     void recordDeform(ID3D12GraphicsCommandList7* cmd) const;
     // Refit (refit = true) or build every deformed BLAS; 'rebuild' (per deformed instance, optional) builds those whose proxy

@@ -19,7 +19,7 @@ float reflSunVisibility(RtSceneSrvs scene, float3 origin, uint seed)
 
 float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RayDesc r, float coneWidth, float coneSpread, uint seed, out float hitDistance)
 {
-    const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION);
+    const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER);
     if (hit.t < 0)
     {
         hitDistance = 65000;

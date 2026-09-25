@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <limits>
 #include <chrono>
 #include <cstring>
 #include <map>
@@ -169,7 +170,7 @@ void RayScene::release(Buffer& b)
 
 RayScene::~RayScene()
 {
-    for (Buffer* b : { &m_meshBlasPool, &m_deformedPool, &m_deformedBlasPool, &m_deformedScratch, &m_deformJobs, &m_deformGroups, &m_instanceBuffer, &m_geometryBuffer,
+    for (Buffer* b : { &m_meshBlasPool, &m_emitterAabbs, &m_emitterBlas, &m_deformedPool, &m_deformedBlasPool, &m_deformedScratch, &m_deformJobs, &m_deformGroups, &m_instanceBuffer, &m_geometryBuffer,
                        &m_indexPool, &m_vertexMap, &m_tlasStatic, &m_tlasDynamic, &m_tlasScratch, &m_staticDescBuffer, &m_dynamicDescBuffer, &m_staticScratch,
                        &m_exactCounts, &m_exactZero })
         release(*b);
@@ -205,6 +206,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     m_proxyErrorPx = (float)quality.number("raytracing.proxy_error_px");
     m_proxySkinWeight = (float)quality.number("raytracing.proxy_skin_weight");
     m_proxyPosedFactor = (float)quality.number("raytracing.proxy_posed_factor");
+    m_emittersEnabled = quality.boolean("raytracing.emitters");
     {
         const std::string model = quality.string("raytracing.proxy_error_model");
         if (model != "measured" && model != "bound") fail("raytracing.proxy_error_model must be \"measured\" or \"bound\" (got \"%s\")", model.c_str());
@@ -360,6 +362,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         e.record = (uint32_t)m_instances.size();
         m_instances.push_back({ 0, 0, e.vertexBase, kRtInstanceDeformed | (0xFFFFFFu << 8) });
     }
+    buildEmitters();
     m_stats.staticInstances = (uint32_t)m_staticDescs.size();
     m_stats.dynamicInstances = (uint32_t)m_dynamicDescs.size();
     m_stats.deformedInstances = (uint32_t)m_deformed.size();
@@ -848,6 +851,84 @@ void RayScene::buildDeformed()
     m_device.d3d()->CreateUnorderedAccessView(m_deformedPool.resource.Get(), nullptr, &ud, h.resourceCpu(m_deformedPoolUav));
 }
 
+void RayScene::buildEmitters()
+{
+    const scene::Scene* src = m_scene.source();
+    if (!src || src->lights.empty()) return;
+    std::vector<D3D12_RAYTRACING_AABB> boxes;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (const scene::Light& l : src->lights)
+    {
+        const float3 c = l.position, f = l.forward, r = l.right, u = cross(l.forward, l.right);
+        float3 lo{ nan, nan, nan }, hi{ nan, nan, nan };  // NaN: an inactive primitive (point, spot)
+        auto grow = [&](float3 p, float pad) {
+            if (std::isnan(lo.x)) lo = hi = p;
+            lo = { std::min(lo.x, p.x - pad), std::min(lo.y, p.y - pad), std::min(lo.z, p.z - pad) };
+            hi = { std::max(hi.x, p.x + pad), std::max(hi.y, p.y + pad), std::max(hi.z, p.z + pad) };
+        };
+        switch (l.type)
+        {
+        case scene::LightType::Rect:
+            for (float a : { -0.5f, 0.5f })
+                for (float b : { -0.5f, 0.5f }) grow(c + r * (a * l.size.x) + u * (b * l.size.y), 1e-3f * std::max(l.size.x, l.size.y) + 1e-5f);
+            break;
+        case scene::LightType::Disk:
+        {
+            // A disk's box: per axis the radius times the in-plane extent sqrt(1 - n_axis^2).
+            const float R = l.size.x;
+            const float3 e{ R * std::sqrt(std::max(0.0f, 1 - f.x * f.x)), R * std::sqrt(std::max(0.0f, 1 - f.y * f.y)), R * std::sqrt(std::max(0.0f, 1 - f.z * f.z)) };
+            grow(c - e, 1e-3f * R + 1e-5f);
+            grow(c + e, 1e-3f * R + 1e-5f);
+            break;
+        }
+        case scene::LightType::Sphere:
+            grow(c, l.size.x);
+            break;
+        case scene::LightType::Tube:
+            grow(c - r * (0.5f * l.size.x), l.size.y);
+            grow(c + r * (0.5f * l.size.x), l.size.y);
+            break;
+        default:
+            break;
+        }
+        if (!std::isnan(lo.x)) ++m_emitterLights;
+        boxes.push_back({ lo.x, lo.y, lo.z, hi.x, hi.y, hi.z });
+    }
+    if (m_emitterLights == 0) return;
+    m_emitterAabbs = createBuffer(boxes.size() * sizeof(D3D12_RAYTRACING_AABB), false, false, L"RT emitter AABBs");
+    upload(m_emitterAabbs, boxes.data(), boxes.size() * sizeof(D3D12_RAYTRACING_AABB));
+    D3D12_RAYTRACING_GEOMETRY_DESC g{};
+    g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
+    g.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+    g.AABBs.AABBCount = boxes.size();
+    g.AABBs.AABBs = { m_emitterAabbs.address(), sizeof(D3D12_RAYTRACING_AABB) };
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+    inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+    inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    inputs.NumDescs = 1;
+    inputs.pGeometryDescs = &g;
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
+    m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &sizes);
+    m_emitterBlas = createBuffer(sizes.ResultDataMaxSizeInBytes, false, true, L"RT emitter BLAS");
+    Buffer scratch = createBuffer(sizes.ScratchDataSizeInBytes, true, false, L"RT emitter BLAS scratch");
+    CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
+    d.Inputs = inputs;
+    d.DestAccelerationStructureData = m_emitterBlas.address();
+    d.ScratchAccelerationStructureData = scratch.address();
+    cl.list->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
+    m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(cl));
+    D3D12_RAYTRACING_INSTANCE_DESC desc{};
+    desc.Transform[0][0] = desc.Transform[1][1] = desc.Transform[2][2] = 1;  // world-space boxes
+    desc.InstanceID = kRtInstanceEmitter;
+    desc.InstanceMask = m_emittersEnabled ? kRtMaskEmitter : 0;  // raytracing.emitters (off until structure 2 is gated)
+    desc.InstanceContributionToHitGroupIndex = 1;  // RtEmitterGroup
+    desc.AccelerationStructure = m_emitterBlas.address();
+    m_dynamicRecord.push_back(0xFFFFFFFFu);
+    m_dynamicDescs.push_back(desc);
+}
+
 void RayScene::buildStaticTlas()
 {
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
@@ -1261,6 +1342,11 @@ void RayScene::record(FramePassContext& fc)
     const auto& sceneInstances = m_scene.instances();
     for (size_t k = 0; k < m_dynamicDescs.size(); ++k)
     {
+        if (m_dynamicRecord[k] == 0xFFFFFFFFu)  // the emitter instance: world-space boxes, nothing to refresh
+        {
+            slotDescs[k] = m_dynamicDescs[k];
+            continue;
+        }
         const RtInstance& ri = m_instances[m_dynamicRecord[k]];
         refreshDesc(m_dynamicDescs[k], sceneInstances[ri.sceneInstance], (ri.flags & kRtInstanceDeformed) != 0);
         slotDescs[k] = m_dynamicDescs[k];

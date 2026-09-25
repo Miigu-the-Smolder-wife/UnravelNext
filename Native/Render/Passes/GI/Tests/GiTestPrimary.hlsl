@@ -18,7 +18,7 @@ void GiTestPrimaryGen()
     r.TMin = 0;
     r.TMax = 1e5;
     const RtSceneSrvs s = rtScene();
-    const RtHit h = rtTraceClosest(s, r, RAY_FLAG_NONE, RT_MASK_ALL);
+    const RtHit h = rtTraceClosest(s, r, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_REFLECTION);  // not the area lights (no body)
     if (h.t < 0)
     {
         depth[pixel] = 0;

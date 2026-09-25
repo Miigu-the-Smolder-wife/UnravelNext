@@ -44,26 +44,38 @@ void GiTraceGen()
     // gi.deterministic (P[0].w bit 0): seeds from the entry's key, not its index (allocation order).
     const uint identity = (P[0].w & 1u) != 0 ? giDetPriority(b, h, entry) : entry;
     const uint seed = giRandom(identity * 9781u + h.frame * 6271u + texel * 26699u);
-    const float2 uv = (float2(texel % GI_TEXELS, texel / GI_TEXELS) + float2(giUnit(seed), giUnit(seed + 1))) / GI_TEXELS;
+    // The point inside the texel: the entry's successive updates walk the R2 sequence (Roberts 2018) from a per-texel
+    // rotation, so the history (a running mean over <= history_updates_max updates) averages well-spread points of every
+    // texel instead of independent ones: same rays, lower error (the texel's integrand is smooth or has one edge, where
+    // independent jitter converges as 1/sqrt(N) and a low-discrepancy set faster). Experiment bit 64: independent jitter.
+    float2 jitter;
+    if ((P[3].w & 64u) != 0) jitter = float2(giUnit(seed), giUnit(seed + 1));
+    else
+    {
+        const uint rotation = giRandom(identity * 9781u + texel * 26699u + 0x9E3779B9u);
+        const uint updates = b.Load(shAddress + GI_SH_UPDATES);
+        jitter = frac(float2(giUnit(rotation), giUnit(rotation + 1)) + (float)(updates & 0xFFFFu) * float2(0.7548776662, 0.5698402910));
+    }
+    const float2 uv = (float2(texel % GI_TEXELS, texel / GI_TEXELS) + jitter) / GI_TEXELS;
     const float3 local = giHemiOctDecode(uv);
     RayDesc r;
     r.Origin = anchor + n * giBias(h, anchor);
     r.Direction = normalize(t * local.x + bt * local.y + n * local.z);
     r.TMin = 0;
     r.TMax = giRayLength();
-    RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI);
+    RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_EMITTER);
     // A back face closer than the origin's own offset is a surface the origin lies on, not closed geometry around it:
     // anchors on a crease (a hit exactly on the edge where two faces meet) start their rays on the other face's plane, and
     // counting those as "inside" (radiance 0) turned such cells black (a live ceiling cell on a furnace room's edge read
     // 1.6 % of its true irradiance). The ray continues from just past that plane.
     const float onSurface = 2 * giBias(h, anchor);
-    if (hit.t >= 0 && hit.t < onSurface)
+    if (hit.t >= 0 && hit.t < onSurface && hit.instance != RT_INSTANCE_EMITTER)
     {
         const RtSurface s0 = rtSurface(scene, hit, r.Origin, r.Direction);
         if (!s0.frontFace && (loadMaterial(s0.material).classFlags & MATERIAL_TWO_SIDED) == 0)
         {
             r.TMin = onSurface;
-            hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI);
+            hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_EMITTER);
         }
     }
 
@@ -77,6 +89,13 @@ void GiTraceGen()
         if (r.Direction.y > asfloat(P[4].x)) radiance = 0;  // tests: the constant sky in a band above the horizon (P[4].x = 1: all)
 #endif
         distanceToHit = 65000;
+    }
+    else if (hit.instance == RT_INSTANCE_EMITTER)
+    {
+        // An analytic area light (raytracing.emitters): its direct light is LTC's (M), so it adds nothing to the
+        // indirect irradiance; the cache's emissive channel (design 12.4 structure 2) will keep it for the K path.
+        distanceToHit = hit.t;
+        radiance = 0;
     }
     else
     {

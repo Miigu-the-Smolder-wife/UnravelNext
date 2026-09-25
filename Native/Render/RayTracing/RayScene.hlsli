@@ -15,7 +15,11 @@
 // Instance masks. Rays of a consumer select what they may see; the exact set swaps proxies for originals (2.6).
 #define RT_MASK_GI 0x1u          // GI cache rays and visibility rays of the cache
 #define RT_MASK_REFLECTION 0x2u  // reflection M/G rays
+#define RT_MASK_EMITTER 0x4u     // the analytic area lights (RayScene's emitter instance): GI and reflection rays only,
+                                 // never visibility rays (the lights have no body; LTC ignores their occlusion)
 #define RT_MASK_ALL 0xFFu
+// InstanceID of the emitter instance (RtHit.instance; RtHit.primitive = the light's index in the scene's light buffer).
+#define RT_INSTANCE_EMITTER 0xFFFFFEu
 
 // RtInstance.flags
 #define RT_INSTANCE_DEFORMED 0x1u  // vertices come from the deformed pool (world space), not the scene vertex pool
@@ -225,6 +229,17 @@ bool rtAlphaOpaque(RtSceneSrvs s, uint instance, uint geometry, uint primitive, 
     // The raster's alpha test (V AlphaTest.hlsli) at the texture's level 0 (the scene texture unchanged, M keeps coverage
     // equal across levels): M's published texture and addressing (MaterialTextures.hlsli, INTERFACES v1.11).
     return materialBaseColorLevel(m, uv, 0).a >= m.alphaCutoff;
+}
+
+// Radiance of an area light seen from 'receiver' (the ray origin): L = intensity x colour x the light's range window
+// (INTERFACES 8.3; the same w(distance to the light's centre) as M's shAreaWindow, so LTC and rays see one light).
+float3 rtEmitterRadiance(uint light, float3 receiver)
+{
+    StructuredBuffer<GpuLight> lights = ResourceDescriptorHeap[g_lights];
+    const GpuLight l = lights[light];
+    const float x = length(l.position - receiver) / max(l.range, 1e-6), x2 = x * x;
+    const float w = saturate(1 - x2 * x2);
+    return l.intensity * l.color * (w * w);
 }
 
 #endif

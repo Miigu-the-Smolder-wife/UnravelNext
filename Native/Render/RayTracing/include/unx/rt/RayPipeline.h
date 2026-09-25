@@ -15,6 +15,7 @@ struct RayHitGroup
     std::string name;
     std::string closestHit;  // empty = none
     std::string anyHit;      // empty = none
+    std::string intersection;  // non-empty: a procedural-primitive hit group with this intersection shader
 };
 
 struct RayPipelineDesc

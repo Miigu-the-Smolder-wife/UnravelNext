@@ -1,6 +1,8 @@
 // unx-kernel: lib_6_6 main
 // RayScene correctness test (Tests/RayScene.cpp): closest hit over both TLASes, hit identity, surface reconstruction and
-// visibility rays, compared with a CPU brute-force intersector.
+// visibility rays, compared with a CPU brute-force intersector. Closest-hit rays include the emitter instance (only
+// present with raytracing.emitters; its hit reports RT_INSTANCE_EMITTER, the light index and flag bit 3); visibility
+// rays never see it (the lights have no body).
 // P[0] = { rays SRV (TestRay), results UAV (TestResult), ray count, 0 }; P[6], P[7] = RtSceneSrvs.
 #include "RayTracing/RayShaders.hlsli"
 
@@ -17,7 +19,8 @@ struct TestResult
     float t;
     uint sceneInstance;
     uint meshTriangle;
-    uint flags;          // bit 0 front face, bit 1 visibility ray unoccluded, bit 2 proxy geometry (no mesh triangle)
+    uint flags;          // bit 0 front face, bit 1 visibility ray unoccluded, bit 2 proxy geometry (no mesh triangle),
+                         // bit 3 an area light (sceneInstance RT_INSTANCE_EMITTER, meshTriangle = light index)
     float3 normal;       // RtSurface shading normal (world)
     float pad;
 };
@@ -44,7 +47,13 @@ void TraceTestGen()
     o.flags = 0;
     o.normal = 0;
     o.pad = 0;
-    if (h.t >= 0)
+    if (h.t >= 0 && h.instance == RT_INSTANCE_EMITTER)
+    {
+        o.sceneInstance = RT_INSTANCE_EMITTER;
+        o.meshTriangle = h.primitive;
+        o.flags = 8u;
+    }
+    else if (h.t >= 0)
     {
         RtGeometry g;
         const RtInstance ri = rtResolve(s, h, g);
@@ -59,7 +68,7 @@ void TraceTestGen()
     if (r.visibleTMax > 0)
     {
         d.TMax = r.visibleTMax;
-        if (rtVisible(s, d, RT_MASK_ALL)) o.flags |= 2u;
+        if (rtVisible(s, d, RT_MASK_ALL & ~RT_MASK_EMITTER)) o.flags |= 2u;
     }
     results[i] = o;
 }

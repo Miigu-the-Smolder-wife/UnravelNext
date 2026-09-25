@@ -28,6 +28,95 @@ void RtAnyHit(inout RtHit p, in BuiltInTriangleIntersectionAttributes a)
     if (!rtAlphaOpaque(rtScene(), InstanceID(), GeometryIndex(), PrimitiveIndex(), a.barycentrics)) IgnoreHit();
 }
 
+// ---- analytic area lights (INTERFACES 8.2: rect and disk one-sided along +forward, up = forward x right; sphere radius
+// size.x; tube = capsule along right, length size.x, radius size.y). The emitter BLAS holds one AABB per scene light
+// (inactive for point and spot lights), so PrimitiveIndex() is the light's index.
+struct RtEmitterAttributes
+{
+    float2 unused;
+};
+
+float rtCapsuleT(float3 o, float3 d, float3 a, float3 b, float r)
+{
+    // Ray-capsule, nearest entry (Quilez); -1 when missed.
+    const float3 ba = b - a, oa = o - a;
+    const float baba = dot(ba, ba), bard = dot(ba, d), baoa = dot(ba, oa), rdoa = dot(d, oa), oaoa = dot(oa, oa);
+    const float A = baba - bard * bard, B = baba * rdoa - baoa * bard, C = baba * oaoa - baoa * baoa - r * r * baba;
+    float h = B * B - A * C;
+    if (h >= 0 && A > 1e-12)
+    {
+        const float t = (-B - sqrt(h)) / A;
+        const float y = baoa + t * bard;
+        if (y > 0 && y < baba) return t;
+        const float3 oc = y <= 0 ? oa : o - b;
+        const float bb = dot(d, oc), cc = dot(oc, oc) - r * r;
+        h = bb * bb - cc;
+        if (h > 0) return -bb - sqrt(h);
+    }
+    else
+    {
+        // Parallel to the axis: the end caps.
+        [unroll] for (uint k = 0; k < 2; ++k)
+        {
+            const float3 oc = o - (k == 0 ? a : b);
+            const float bb = dot(d, oc), cc = dot(oc, oc) - r * r;
+            const float hh = bb * bb - cc;
+            if (hh > 0 && -bb - sqrt(hh) > 0) return -bb - sqrt(hh);
+        }
+    }
+    return -1;
+}
+
+[shader("intersection")]
+void RtEmitterIntersect()
+{
+    StructuredBuffer<GpuLight> lights = ResourceDescriptorHeap[g_lights];
+    const GpuLight l = lights[PrimitiveIndex()];
+    const uint type = l.typeFlags & 0xFFu;
+    const float3 o = WorldRayOrigin(), d = WorldRayDirection();
+    float t = -1;
+    if (type == 2 || type == 3)
+    {
+        const float dn = dot(d, l.forward);
+        if (dn < 0)  // emitting side only
+        {
+            const float tp = dot(l.position - o, l.forward) / dn;
+            const float3 q = o + d * tp - l.position;
+            const float3 up = cross(l.forward, l.right);
+            const bool inside = type == 2 ? abs(dot(q, l.right)) <= 0.5 * l.size.x && abs(dot(q, up)) <= 0.5 * l.size.y : dot(q, q) <= l.size.x * l.size.x;
+            if (inside) t = tp;
+        }
+    }
+    else if (type == 4)
+    {
+        const float3 oc = o - l.position;
+        const float b = dot(d, oc), c = dot(oc, oc) - l.size.x * l.size.x, h = b * b - c;
+        if (h >= 0) t = -b - sqrt(h);
+    }
+    else if (type == 5)
+    {
+        const float3 half = l.right * (0.5 * l.size.x);
+        t = rtCapsuleT(o, d, l.position - half, l.position + half, l.size.y);
+    }
+    if (t >= RayTMin() && t <= RayTCurrent())
+    {
+        RtEmitterAttributes a;
+        a.unused = 0;
+        ReportHit(t, 0, a);
+    }
+}
+
+[shader("closesthit")]
+void RtEmitterClosestHit(inout RtHit p, in RtEmitterAttributes a)
+{
+    p.t = RayTCurrent();
+    p.instance = RT_INSTANCE_EMITTER;
+    p.geometry = 0;
+    p.primitive = PrimitiveIndex();
+    p.barycentrics = 0;
+    p.frontFace = 1;
+}
+
 [shader("miss")]
 void RtMiss(inout RtHit p)
 {

@@ -37,6 +37,12 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     o.radiance = o.sunTerm = o.shadowOrigin = 0;
     o.needsShadowRay = false;
     const uint experiment = P[5].x >> 24;
+    if (hit.instance == RT_INSTANCE_EMITTER)
+    {
+        // An analytic area light (raytracing.emitters, design 12.4 structure 2): its radiance, seen from the reflector.
+        o.radiance = rtEmitterRadiance(hit.primitive, origin);
+        return o;
+    }
     if (experiment & 32)
     {
         o.radiance = 1;  // attribution: traversal only

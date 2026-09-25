@@ -23,4 +23,5 @@ deterministic = false              # same inputs -> bit-identical GI: update sel
                                    # ray seeds by key (user decision: a mode switch until the budget shows the margin)
 experiment_disable = 0             # cost attribution only (recorded in the quality hash): 8 = hit materials without
                                    # textures, 16 = no sun at GI hits, 32 = GI rays that leave the scene below the
-                                   # horizon get 0 (not the sky LUT's lit planet ground). Never nonzero outside measurements.
+                                   # horizon get 0 (not the sky LUT's lit planet ground), 64 = independent ray jitter per
+                                   # update (not the R2 sequence over the entry's updates). Never nonzero outside measurements.

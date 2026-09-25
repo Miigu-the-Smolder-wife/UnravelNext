@@ -2,7 +2,9 @@
 // identity (scene instance, mesh triangle), facing, surface normal and visibility rays against a CPU brute-force
 // intersector, on a scene with rotated/scaled static instances, a dynamic rigid instance, a skinned (deformed) instance
 // and a two-submesh mesh with an alpha-tested (untextured, hence opaque) submesh. Also refits the deformed BLASes and
-// rebuilds the dynamic TLAS, then traces again.
+// rebuilds the dynamic TLAS, then traces again. Round 6: the analytic area lights as ray geometry (raytracing.emitters):
+// closest hits on rect, disk, sphere and tube lights (one-sided rect and disk, point lights absent) against a CPU
+// intersector.
 //
 //   unx_test_raytracing_rayscene [--rays N] [--validate]     --validate: debug layer + GPU-based validation
 #include "unx/core/Config.h"
@@ -447,6 +449,113 @@ scene::Scene makeAlphaScene()
     return s;
 }
 
+// Round 6: the lights and a backstop quad; CPU nearest hit (light index, or kQuad for the quad), size scaled by 'grow'
+// (ambiguity test: a ray whose answer changes between 0.999 x and 1.001 x the lights' size is not judged).
+constexpr uint32_t kQuad = 1000, kMissed = 1001;
+scene::Scene makeEmitterScene()
+{
+    scene::Scene s;
+    s.name = "rt_emitters";
+    s.materials.push_back({});
+    scene::Mesh m;
+    m.name = "backstop";
+    for (auto [x, y] : { std::pair{ -2.f, -2.f }, { 2.f, -2.f }, { 2.f, 2.f }, { -2.f, 2.f } })
+    {
+        m.positions.push_back({ x, y, -5 });
+        m.normals.push_back({ 0, 0, 1 });
+        m.uv0.push_back({ 0, 0 });
+    }
+    m.indices = { 0, 1, 2, 0, 2, 3 };
+    m.submeshes.push_back({ 0, 6, 0 });
+    s.meshes.push_back(m);
+    scene::Instance in;
+    in.mesh = 0;
+    s.instances.push_back(in);
+    auto light = [&](scene::LightType type, float3 p, float3 forward, float3 right, float2 size) {
+        scene::Light l;
+        l.type = type;
+        l.position = p;
+        l.forward = normalize(forward);
+        l.right = normalize(right);
+        l.size = size;
+        s.lights.push_back(l);
+    };
+    light(scene::LightType::Point, { 0, 5, 0 }, { 0, -1, 0 }, { 1, 0, 0 }, { 0, 0 });                  // absent (no body)
+    light(scene::LightType::Rect, { 0, 0, 3 }, { 0, 0.3f, -1 }, { 1, 0, 0 }, { 1.0f, 0.5f });           // tilted, emits toward -z
+    light(scene::LightType::Disk, { 3, 0, 3 }, { 0, 0, -1 }, { 1, 0, 0 }, { 0.4f, 0 });
+    light(scene::LightType::Sphere, { -3, 0, 2 }, { 0, 0, -1 }, { 1, 0, 0 }, { 0.5f, 0 });
+    light(scene::LightType::Tube, { 0, 3, 2 }, { 0, 0, -1 }, normalize(float3{ 1, 0.2f, 0.1f }), { 1.2f, 0.2f });
+    light(scene::LightType::Spot, { 2, 3, 0 }, { 0, -1, 0 }, { 1, 0, 0 }, { 0, 0 });                   // absent
+    return s;
+}
+
+float sphereT(float3 o, float3 d, float3 c, float r)
+{
+    const float3 oc = o - c;
+    const float b = dot(d, oc), h = b * b - (dot(oc, oc) - r * r);
+    return h >= 0 ? -b - std::sqrt(h) : -1.0f;
+}
+
+float capsuleT(float3 o, float3 d, float3 a, float3 b, float r)
+{
+    // Exact nearest entry: the cylinder body between the caps, and both end spheres.
+    float best = -1;
+    auto take = [&](float t) {
+        if (t > 0 && (best < 0 || t < best)) best = t;
+    };
+    take(sphereT(o, d, a, r));
+    take(sphereT(o, d, b, r));
+    const float3 axis = normalize(b - a), oa = o - a;
+    const float len = std::sqrt(dot(b - a, b - a));
+    const float3 dp = d - axis * dot(d, axis), op = oa - axis * dot(oa, axis);
+    const float A = dot(dp, dp), B = dot(dp, op), C = dot(op, op) - r * r, h = B * B - A * C;
+    if (A > 1e-12f && h >= 0)
+    {
+        const float t = (-B - std::sqrt(h)) / A, y = dot(oa + d * t, axis);
+        if (y >= 0 && y <= len) take(t);
+    }
+    return best;
+}
+
+std::pair<uint32_t, float> emitterNearest(const scene::Scene& s, float3 o, float3 d, float grow)
+{
+    uint32_t id = kMissed;
+    float best = 1e30f;
+    auto take = [&](uint32_t which, float t) {
+        if (t > 0 && t < best) best = t, id = which;
+    };
+    if (std::fabs(d.z) > 1e-9f)
+    {
+        const float t = (-5 - o.z) / d.z;
+        const float3 p = o + d * t;
+        if (std::fabs(p.x) <= 2 && std::fabs(p.y) <= 2) take(kQuad, t);
+    }
+    for (uint32_t k = 0; k < s.lights.size(); ++k)
+    {
+        const scene::Light& l = s.lights[k];
+        const float2 sz{ l.size.x * grow, l.size.y * grow };
+        switch (l.type)
+        {
+        case scene::LightType::Rect:
+        case scene::LightType::Disk:
+        {
+            const float dn = dot(d, l.forward);
+            if (dn >= 0) break;  // the back side does not emit
+            const float t = dot(l.position - o, l.forward) / dn;
+            const float3 q = o + d * t - l.position, up = cross(l.forward, l.right);
+            const bool inside = l.type == scene::LightType::Rect ? std::fabs(dot(q, l.right)) <= 0.5f * sz.x && std::fabs(dot(q, up)) <= 0.5f * sz.y
+                                                                 : dot(q, q) <= sz.x * sz.x;
+            if (inside) take(k, t);
+            break;
+        }
+        case scene::LightType::Sphere: take(k, sphereT(o, d, l.position, sz.x)); break;
+        case scene::LightType::Tube: take(k, capsuleT(o, d, l.position - l.right * (0.5f * l.size.x), l.position + l.right * (0.5f * l.size.x), sz.y)); break;
+        default: break;
+        }
+    }
+    return { id, id == kMissed ? -1.0f : best };
+}
+
 // The CPU replica of materialBaseColorLevel(m, uv, 0).a: bilinear on texel centres, wrap addressing, unorm8.
 float alphaAt(const std::vector<uint8_t>& alpha, uint32_t n, float u, float v)
 {
@@ -805,6 +914,75 @@ int main(int argc, char** argv)
             pass = pass && ok;
             rt::RayScene::release(device, alphaScene);
             device.descriptors().freeResource(published[1].baseColor);
+        }
+        {
+            // Round 6 (design 12.4 structure 2): the area lights as procedural ray geometry, raytracing.emitters on.
+            const scene::Scene es = makeEmitterScene();
+            QualityConfig emitterQuality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            emitterQuality.applyOverride("raytracing.emitters=true");
+            GpuScene emitterScene(device);
+            emitterScene.upload(es);
+            rt::RayScene& ers = rt::RayScene::get(device, shaders, emitterScene, emitterQuality);
+            gpu::FrameConstants efc{};
+            emitterScene.fill(efc);
+            GpuBuffer econstants = createBuffer(device, 1024, D3D12_HEAP_TYPE_UPLOAD, false);
+            check(econstants.resource->Map(0, &none, &mapped), "map emitter constants");
+            std::memcpy(mapped, &efc, sizeof efc);
+            econstants.resource->Unmap(0, nullptr);
+            // Two sheets of slightly slanted rays over x in [-4.5, 4.5], y in [-1.5, 4.5]: from z = 6 down (the rect and disk
+            // show their back: only sphere, tube and the backstop), from z = -0.5 up (every light's emitting side); each also
+            // a visibility ray, which the lights never occlude.
+            const uint32_t gx = 384, gy = 256;
+            std::vector<TestRay> erays;
+            for (uint32_t side = 0; side < 2; ++side)
+                for (uint32_t j = 0; j < gy; ++j)
+                    for (uint32_t i = 0; i < gx; ++i)
+                    {
+                        TestRay r;
+                        const float x = -4.5f + 9.0f * (i + 0.5f) / gx, y = -1.5f + 6.0f * (j + 0.5f) / gy;
+                        r.origin = { x, y, side == 0 ? 6.0f : -0.5f };
+                        r.direction = normalize(float3{ 0.03f, -0.02f, side == 0 ? -1.0f : 1.0f });
+                        r.tMax = 100;
+                        r.visibleTMax = 20;
+                        erays.push_back(r);
+                    }
+            const std::vector<TestResult> got = trace(device, shaders, ers, econstants.resource->GetGPUVirtualAddress(), erays);
+            uint32_t judged = 0, wrong = 0, tWrong = 0, visibilityWrong = 0, perLight[8] = {};
+            float maxDt = 0;
+            for (size_t k = 0; k < erays.size(); ++k)
+            {
+                const TestRay& r = erays[k];
+                // Visibility rays ignore the lights: occluded only by the backstop.
+                const float tq = (-5 - r.origin.z) / r.direction.z;
+                const float3 pq = r.origin + r.direction * tq;
+                const bool quadInRange = tq > 0 && tq < r.visibleTMax && std::fabs(pq.x) <= 2 && std::fabs(pq.y) <= 2;
+                if (((got[k].flags & 2u) != 0) == quadInRange) ++visibilityWrong;
+                const auto shrunk = emitterNearest(es, r.origin, r.direction, 0.999f), grown = emitterNearest(es, r.origin, r.direction, 1.001f);
+                if (shrunk.first != grown.first) continue;
+                const auto exact = emitterNearest(es, r.origin, r.direction, 1.0f);
+                ++judged;
+                const uint32_t gotId = got[k].t < 0 ? kMissed : (got[k].flags & 8u) ? got[k].meshTriangle : (got[k].sceneInstance == 0 ? kQuad : 9999u);
+                if (gotId != exact.first)
+                {
+                    ++wrong;
+                    continue;
+                }
+                if (exact.first < 8) ++perLight[exact.first];
+                if (exact.first != kMissed)
+                {
+                    const float dt = std::fabs(got[k].t - exact.second) / std::max(1.0f, exact.second);
+                    maxDt = std::max(maxDt, dt);
+                    if (dt > 1e-4f) ++tWrong;
+                }
+            }
+            const bool ok = wrong == 0 && tWrong == 0 && visibilityWrong == 0 && perLight[1] > 100 && perLight[2] > 100 && perLight[3] > 100 &&
+                            perLight[4] > 100 && perLight[0] == 0 && perLight[5] == 0 && judged > erays.size() * 9 / 10;
+            logf("emitters: %zu rays, %u judged; hits rect %u, disk %u, sphere %u, tube %u, point %u, spot %u; identity mismatches %u, t mismatches %u (max rel %.2e), "
+                 "visibility mismatches %u -> %s\n",
+                 erays.size(), judged, perLight[1], perLight[2], perLight[3], perLight[4], perLight[0], perLight[5], wrong, tWrong, maxDt, visibilityWrong,
+                 ok ? "PASS" : "FAIL");
+            pass = pass && ok;
+            rt::RayScene::release(device, emitterScene);
         }
         rt::RayPipeline::releaseDevice(device);
         rt::RayScene::releaseDevice(device);
