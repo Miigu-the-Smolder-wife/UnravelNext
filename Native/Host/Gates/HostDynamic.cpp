@@ -4,6 +4,8 @@
 // of the updates, the renderer's CPU record/submit and the GPU frame (per pass) at 4K and 1440p. GPU lock required:
 //   GpuLock.ps1 -Track I -- build/I/bin/unx_gate_host_hostdynamic.exe [--bodies 1024] [--characters 256] [--bones 64]
 //       [--triangles 60000] [--frames 600] [--resolution 4K|1440p|both]
+//   unx_gate_host_hostdynamic.exe --save-scene <file.unxscene> [counts]   (content only, no lock; inspect with
+//       unx_gate_host_hostscene --scene <file> --describe)
 #include "unx/host/UnravelNextHost.h"
 
 #include "unx/core/File.h"
@@ -41,6 +43,7 @@ struct Api
     UNX_FN(UnxSceneSetEnvironment)
     UNX_FN(UnxEnvironmentDefaults)
     UNX_FN(UnxSceneCommit)
+    UNX_FN(UnxSceneSave)
     UNX_FN(UnxFrameSetTransforms)
     UNX_FN(UnxFrameSetSkeletons)
     UNX_FN(UnxFrameQueue)
@@ -65,6 +68,7 @@ struct Api
         UNX_FN(UnxSceneSetEnvironment)
         UNX_FN(UnxEnvironmentDefaults)
         UNX_FN(UnxSceneCommit)
+        UNX_FN(UnxSceneSave)
         UNX_FN(UnxFrameSetTransforms)
         UNX_FN(UnxFrameSetSkeletons)
         UNX_FN(UnxFrameQueue)
@@ -229,7 +233,7 @@ int main(int argc, char** argv)
     try
     {
         uint32_t bodies = 1024, characters = 256, bones = 64, triangles = 60000, frames = 600;
-        std::string resolutionArg = "both";
+        std::string resolutionArg = "both", saveScene;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -243,9 +247,11 @@ int main(int argc, char** argv)
             else if (a == "--triangles") triangles = (uint32_t)std::stoul(next());
             else if (a == "--frames") frames = (uint32_t)std::stoul(next());
             else if (a == "--resolution") resolutionArg = next();
+            else if (a == "--save-scene") saveScene = next();
             else fail("unknown argument %s", a.c_str());
         }
-        const std::string lockHolder = render::requireGpuLock("unx_gate_host_hostdynamic");
+        // --save-scene writes the content and stops before commit: a correctness/content tool, no measurement, no lock.
+        const std::string lockHolder = saveScene.empty() ? render::requireGpuLock("unx_gate_host_hostdynamic") : std::string();
         const std::filesystem::path bin = executableDirectory();
         Api api;
         api.load(bin / "UnravelNext.dll");
@@ -322,6 +328,14 @@ int main(int argc, char** argv)
             UnxEnvironmentDesc env{};
             api.ok(api.UnxEnvironmentDefaults(&env), "UnxEnvironmentDefaults");
             api.ok(api.UnxSceneSetEnvironment(r, &env), "UnxSceneSetEnvironment");
+            if (!saveScene.empty())
+            {
+                const UnxCameraDesc camera{ { 0, 9, 34 }, 1.0471976f, { 0, -0.25f, -0.968f }, 0.05f, { 0, 0.968f, -0.25f }, 15.0f };
+                api.ok(api.UnxSceneSave(r, saveScene.c_str(), "host_dynamic", &camera), "UnxSceneSave");
+                api.ok(api.UnxRendererDestroy(r), "UnxRendererDestroy");
+                logf("saved %s\n", saveScene.c_str());
+                return 0;
+            }
             UnxSceneInfo info{};
             info.size = sizeof info;
             info.version = 1;

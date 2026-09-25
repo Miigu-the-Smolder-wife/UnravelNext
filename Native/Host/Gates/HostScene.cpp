@@ -30,7 +30,7 @@ namespace
 // --describe: CPU-only check of a host-saved scene (no GPU, no lock): sun, camera, materials, and per mesh the values
 // that turn shading into NaN or black (non-finite or zero-length normals/tangents, degenerate triangles) and whether
 // the winding agrees with the vertex normals (counter-clockwise front faces).
-void describe(const scene::Scene& s)
+void describe(const scene::Scene& s, const QualityConfig& quality)
 {
     auto finite3 = [](float3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
     logf("sun direction (%.4f, %.4f, %.4f) %.0f lux, colour (%.3f, %.3f, %.3f), angular radius %.5f\n", s.sun.direction.x, s.sun.direction.y, s.sun.direction.z,
@@ -80,6 +80,28 @@ void describe(const scene::Scene& s)
              mi, m.name.c_str(), m.positions.size(), m.indices.size() / 3, lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, badPos, badNormal, m.tangents.size(), badTangent, degenerate,
              agree, disagree, m.skin.joints.empty() ? "" : " (skinned)");
     }
+#if HOST_SCENE_GATE
+    // V's cluster LOD cuts (CPU): R traces a skinned mesh with its finest cut within raytracing.character_proxy_triangles,
+    // the full mesh when no cut fits.
+    const uint32_t proxyBudget = (uint32_t)quality.integer("raytracing.character_proxy_triangles");
+    const ClusterData clusters = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality));
+    for (size_t mi = 0; mi < s.meshes.size() && mi < clusters.meshes.size(); ++mi)
+    {
+        const ClusterData::MeshRange& r = clusters.meshes[mi];
+        std::string cuts;
+        uint32_t proxy = 0;
+        for (uint32_t l = 0; l < r.lodLevelCount; ++l)
+        {
+            const gpu::LodLevel& level = clusters.lodLevels[r.lodLevelOffset + l];
+            cuts += format("%s%u", cuts.empty() ? "" : " ", level.triangleCount);
+            if (!proxy && level.triangleCount <= proxyBudget) proxy = level.triangleCount;
+        }
+        logf("mesh %zu '%s' LOD cuts (triangles): %s -> RT proxy %s%s\n", mi, s.meshes[mi].name.c_str(), cuts.c_str(),
+             proxy ? format("%u triangles", proxy).c_str() : "none (full mesh)", s.meshes[mi].skin.joints.empty() ? "" : " [skinned]");
+    }
+#else
+    (void)quality;
+#endif
     for (size_t i = 0; i < s.instances.size(); ++i)
     {
         const scene::Instance& in = s.instances[i];
@@ -120,7 +142,7 @@ int main(int argc, char** argv)
         if (scenePath.empty()) fail("--scene <file.unxscene> is required");
         if (describeOnly)
         {
-            describe(scene::load(scenePath));
+            describe(scene::load(scenePath), QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality"));
             return 0;
         }
         requireGpuLock("unx_gate_host_hostscene");
