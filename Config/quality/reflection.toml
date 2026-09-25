@@ -16,4 +16,5 @@ experiment_disable = 0                 # cost attribution only (recorded in the 
                                        # by shadow rays only (no VSM lookup), 8 = hit materials without textures, 16 = no cache
                                        # lookup at hits, 32 = traversal only (a hit returns 1), 64 = every job traced and shaded
                                        # in the ray generation shader (no compute split), 128 = G jobs by the difference estimator alone
-                                       # (reflLobeEstimate). Never nonzero outside measurements.
+                                       # (reflLobeEstimate), 256 = reflection hits read the GI cache only (no cells created,
+                                       # touched or requested). Never nonzero outside measurements.

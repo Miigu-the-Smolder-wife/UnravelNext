@@ -77,8 +77,10 @@ void giRequestHit(RWByteAddressBuffer b, GiHeader h, uint entry)
 
 // Cache lookups by ray hits (GiCache.hlsli giKeepRead): each contributing entry is touched and requested once per frame
 // (a plain load of its hit stamp first, so entries shared by many rays cost one load after the first).
+static bool g_giKeepReads = true;  // per thread; false: lookups read only (attribution runs, reflection experiment 256)
 void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry)
 {
+    if (!g_giKeepReads) return;
     if (b.Load(h.offHitStamp + entry * 4) == h.frame) return;
     giTouch(b, h, entry);
     giRequestHit(b, h, entry);

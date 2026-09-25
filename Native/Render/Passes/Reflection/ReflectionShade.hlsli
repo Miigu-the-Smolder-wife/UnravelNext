@@ -64,13 +64,17 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     L.irradiance = L.specularRadiance = 0;
     if ((experiment & 16) == 0)
     {
-        bool created;
-        const uint e = giFindOrCreate(cache, h, giSurfaceKey(h, s.position, s.normal, footprintLevel), giAnchorAtHit(h, s.position, direction), s.normal, created);
-        if (e != GI_ENTRY_PENDING)
+        if ((experiment & 256) == 0)  // 256: reflection hits read the cache only (the estimator's bias apart from cache feedback)
         {
-            giTouch(cache, h, e);
-            giRequestHit(cache, h, e);
+            bool created;
+            const uint e = giFindOrCreate(cache, h, giSurfaceKey(h, s.position, s.normal, footprintLevel), giAnchorAtHit(h, s.position, direction), s.normal, created);
+            if (e != GI_ENTRY_PENDING)
+            {
+                giTouch(cache, h, e);
+                giRequestHit(cache, h, e);
+            }
         }
+        g_giKeepReads = (experiment & 256) == 0;
         float3 sumE, sumL;
         float weight;
         giCacheLevels(cache, h, s.position, s.normal, reflect(direction, s.normal), true, footprintLevel, sumE, sumL, weight);
