@@ -1,8 +1,12 @@
 // Output-size switches on one host renderer (I track), the Unity Player's path when the camera target changes size: a
 // device hang (DXGI DEVICE_HUNG) happened at a 4K -> 1440p switch in the data World Player on 2026-09-25. A host-saved
 // scene is committed on a standalone HostRenderer and rendered through 4K -> 1440p -> 4K -> 1440p phases with the D3D12
-// debug layer and GPU-based validation (--no-gbv: debug layer only). Each phase ends with a blocking readback, so a hang
-// surfaces as a device-removed failure in that phase. Fails on any debug-layer error. Correctness run, no GPU lock:
+// debug layer and GPU-based validation (--no-gbv: debug layer only), then a phase in which every frame gets a newly
+// created output of the same size (the old one released after the GPU is done): the allocator tends to give the new
+// texture the old address, which is how a view cache keyed by resource pointer ends up using a destroyed texture (the
+// suspected cause of the Player's DEVICE_HUNG). Each phase ends with a blocking readback, so a hang surfaces as a
+// device-removed failure in that phase. Fails on any debug-layer error. Hardware GPU run: GpuLock -Track I while the
+// temporary lock rule is in force (2026-09-25):
 //   unx_test_host_hostswitch.exe --scene <file.unxscene> [--frames 16] [--no-gbv]
 #include "Renderer/HostRenderer.h"
 
@@ -81,6 +85,32 @@ int main(int argc, char** argv)
             logf("  %-5s %ux%u: %u frames done, %.1f %% non-black pixels, debug-layer errors so far %u\n", ph.name, ph.width, ph.height, frames,
                  100.0 * lit / pixels.size(), e);
             errors = e;
+        }
+        // Same-size recreation with address reuse.
+        h.setRecreateStandaloneOutput(true);
+        {
+            const Phase ph{ "reuse", 2560, 1440 };
+            pixels.assign((size_t)ph.width * ph.height, 0);
+            for (uint32_t f = 0; f < frames; ++f, ++frame)
+            {
+                FramePacket p;
+                p.frameIndex = frame;
+                p.time = frame / 60.0;
+                p.deltaTime = 1.0f / 60;
+                p.width = ph.width;
+                p.height = ph.height;
+                p.camera = camera;
+                const uint64_t ticket = h.queueFrame(std::move(p));
+                const bool last = f + 1 == frames;
+                h.renderStandalone(ticket, last ? pixels.data() : nullptr, last ? pixels.size() * 4 : 0);
+            }
+            h.setRecreateStandaloneOutput(false);
+            size_t lit = 0;
+            for (uint32_t px : pixels) lit += (px & 0x3FFFFFFFu) != 0;
+            errors = h.debugErrors();
+            logf("  reuse %ux%u: %u frames, each with a new output (address reused %u of %u), %.1f %% non-black pixels, debug-layer errors so far %u\n",
+                 ph.width, ph.height, frames, h.outputAddressReuses(), h.outputRecreations(), 100.0 * lit / pixels.size(), errors);
+            if (h.outputAddressReuses() == 0) logf("  note: no address reuse happened; the reuse case did not exercise pointer-keyed caches\n");
         }
         logf(errors ? "HOST SWITCH TEST FAILED (%u debug-layer errors)\n" : "HOST SWITCH TEST PASSED\n", errors);
         return errors ? 1 : 0;

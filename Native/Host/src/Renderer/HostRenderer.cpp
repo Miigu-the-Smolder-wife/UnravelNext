@@ -409,7 +409,19 @@ void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t read
     if (!packet) fail("frame ticket %llu is not queued (dropped or already rendered)", (unsigned long long)ticket);
     const FramePacket& p = *packet;
     if (readback && readbackBytes < (size_t)p.width * p.height * 4) fail("readback buffer holds %zu bytes, needs %u", readbackBytes, p.width * p.height * 4);
+    const void* previousOutput = m_standalone->output.Get();
+    if (m_recreateOutput && m_standalone->output)
+    {
+        m_device->waitIdle();  // the host releases a render target only after the GPU is done with it
+        m_standalone->output.Reset();
+        m_standalone->width = m_standalone->height = 0;
+    }
     ensureStandaloneOutput(p.width, p.height);
+    if (m_recreateOutput && previousOutput)
+    {
+        ++m_outputRecreations;
+        if (m_standalone->output.Get() == previousOutput) ++m_outputReuses;
+    }
     const uint32_t slot = beginFrame(p);
 
     Standalone& s = *m_standalone;

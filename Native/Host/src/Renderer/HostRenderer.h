@@ -134,6 +134,12 @@ public:
     FrameStats latestStats() const;
     // Debug-layer errors reported so far (standalone renderers with debugLayer; 0 otherwise).
     uint32_t debugErrors();
+    // Test hook (standalone): every following frame gets a newly created output texture, the old one released after the
+    // GPU finishes with it, as a host recreates its render target on resize. The allocator tends to hand the new texture
+    // the old one's address, so views cached by resource pointer would point at a destroyed texture.
+    void setRecreateStandaloneOutput(bool recreate) { m_recreateOutput = recreate; }
+    uint32_t outputAddressReuses() const { return m_outputReuses; }
+    uint32_t outputRecreations() const { return m_outputRecreations; }
 
     // The scene as the host shows it now: the content with the latest transforms, poses, sun and visibility the host
     // set (rendered, queued and pending updates, newest last); hidden instances are left out. Main thread (UnxSceneSave).
@@ -195,5 +201,7 @@ private:
 
     struct Standalone;
     std::unique_ptr<Standalone> m_standalone;
+    bool m_recreateOutput = false;
+    uint32_t m_outputReuses = 0, m_outputRecreations = 0;
 };
 } // namespace unx::host
