@@ -4,7 +4,8 @@
 // (depth 0, reversed Z: the sky correction slice is read there). One 64-thread group per tile.
 // Planar reflection views: only mirror pixels (ViewDesc::planarMask, v1.22) are read; the others are neither surface nor sky.
 // P[0].x depth SRV, P[0].y output UAV (RWTexture2D<float2>: max linear depth, 1 = sky), P[0].z tile px, P[0].w planar
-// mask SRV (R8_UINT; 0xFFFFFFFF: every pixel).
+// mask SRV (R8_UINT; 0xFFFFFFFF: every pixel), P[1].x planar tile mask SRV (R8_UINT per 8 x 8 pixels, optional: pixels
+// of tiles without mirror pixels are not read).
 // Frame constants of the view.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -28,6 +29,11 @@ void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
     {
         const uint2 px = gid.xy * tp + uint2(i % tp, i / tp);
         if (px.x >= g_viewWidth || px.y >= g_viewHeight) continue;
+        if (P[1].x != 0xFFFFFFFFu)
+        {
+            Texture2D<uint> tiles = ResourceDescriptorHeap[P[1].x];
+            if (tiles.Load(int3(px / 8, 0)) == 0) continue;
+        }
         if (P[0].w != 0xFFFFFFFFu)
         {
             Texture2D<uint> mask = ResourceDescriptorHeap[P[0].w];

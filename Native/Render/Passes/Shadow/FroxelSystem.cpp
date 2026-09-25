@@ -108,7 +108,7 @@ TextureRef recordReaders(FramePassContext& fc, const ViewResources& view, bool f
     const FroxelGridCpu grid = froxelGridFor(fc.quality, view.view.width, view.view.height);
     RenderGraph& g = fc.graph;
     const TextureRef readers = g.createTexture(TextureDesc{ "S froxel tile readers", grid.gridX, grid.gridY, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
-    const TextureRef depth = view.depth, mask = view.view.planarMask;
+    const TextureRef depth = view.depth, mask = view.view.planarMask, tileMask = view.view.planarTileMask;
     const D3D12_GPU_VIRTUAL_ADDRESS constants = view.frameConstants;
     ID3D12PipelineState* pd = fc.shaders.compute("Passes/Atmosphere/FroxelTileDepth");
     const uint32_t tilePx = grid.tilePx;
@@ -116,13 +116,15 @@ TextureRef recordReaders(FramePassContext& fc, const ViewResources& view, bool f
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
                   if (mask.valid()) b.use(mask, Use::SrvCompute);
+                  if (tileMask.valid()) b.use(tileMask, Use::SrvCompute);
                   b.use(readers, Use::UavCompute);
               },
               [=](PassContext& ctx) {
-                  const uint32_t k[4] = { ctx.srv(depth), ctx.uav(readers), tilePx, mask.valid() ? ctx.srv(mask) : 0xFFFFFFFFu };
+                  const uint32_t k[8] = { ctx.srv(depth), ctx.uav(readers), tilePx, mask.valid() ? ctx.srv(mask) : 0xFFFFFFFFu,
+                                          tileMask.valid() ? ctx.srv(tileMask) : 0xFFFFFFFFu, 0, 0, 0 };
                   ctx.cmd->SetPipelineState(pd);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 4);
+                  ctx.computeConstants(k, 8);
                   ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
               });
     return readers;

@@ -4,7 +4,9 @@
 //  2. page cache and dirty rules: steady camera renders nothing, a small camera move renders only new pages, a moved
 //     caster re-renders the pages under its old and new bounds (and the result matches the reference again), a sun
 //     change re-renders everything, wind re-renders only levels whose texel is smaller than the sway;
-//  3. D3D12 debug layer clean.
+//  3. shadowSunVisibilityAt (ray hits, R) at the static frame's receivers with footprints 1, 4 and 16 pixels: against the
+//     same reference, mean error and signed bias (a lookup that leaks light shows as a positive bias);
+//  4. D3D12 debug layer clean.
 //   unx_test_shadow_vsmtests [--no-debug-layer] [--width W --height H] [--dump DIR] [--verbose N] [--set key=value]
 #include "TestRaster.h"
 
@@ -282,6 +284,98 @@ int main(int argc, char** argv)
         report(s2.requested == s1.requested && s2.dirty == 0 && s2.allocated == 0, "steady camera: nothing rendered (dirty pages)", s2.dirty, 0);
         Frame f2 = runFrame(true);
         compare(f2, "static", 2);
+
+        // shadowSunVisibilityAt at the receivers of f2, footprints of 1, 4 and 16 pixels (ray cones wider than a pixel).
+        {
+            const uint32_t pv = TestFrame::rowPitch(W, 4), pg = TestFrame::rowPitch(W, 8);
+            const ViewDesc& v = tf.frame.mainView;
+            const float3 sun = normalize(tf.sceneData.sun.direction);
+            const float tanTheta = std::tan(tf.sceneData.sun.angularRadius);
+            std::vector<float4> points, normals;
+            std::vector<float> refs, direct;
+            const float factors[3] = { 1, 4, 16 };
+            for (float factor : factors)
+                for (uint32_t y = 0; y < H; y += 6)
+                    for (uint32_t x = 0; x < W; x += 6)
+                    {
+                        float d;
+                        std::memcpy(&d, f2.depth.data() + y * pv + x * 4, 4);
+                        if (d <= 0) continue;
+                        uint32_t packed, g[2];
+                        std::memcpy(&packed, f2.vis.data() + y * pv + x * 4, 4);
+                        std::memcpy(g, f2.gbuffer.data() + y * pg + x * 8, 8);
+                        const float ndc[4] = { (x + 0.5f) / W * 2 - 1, 1 - (y + 0.5f) / H * 2, d, 1 };
+                        float wp[4] = {};
+                        for (int r = 0; r < 4; ++r)
+                            for (int c = 0; c < 4; ++c) wp[r] += v.invViewProj.m[r][c] * ndc[c];
+                        const float3 p{ wp[0] / wp[3], wp[1] / wp[3], wp[2] / wp[3] };
+                        const float3 n = octDecodeCpu(g[0]);
+                        const float z = v.nearPlane / d;
+                        const float footprint = 2 * z * std::tan(0.5f * v.verticalFov) / H * factor;
+                        points.push_back({ p.x, p.y, p.z, footprint });
+                        normals.push_back({ n.x, n.y, n.z, 0 });
+                        refs.push_back(referenceVisibility(boxes, p + n * 2e-4f, sun, tanTheta));
+                        direct.push_back((packed & 0xFF) / 255.0f);
+                    }
+            const uint32_t count = (uint32_t)points.size(), perFactor = count / 3;
+            std::shared_ptr<std::vector<uint8_t>> out;
+            ++recorded;  // a VSM frame like runFrame's (the statistics checks count them)
+            tf.run([&](FramePassContext& fc) {
+                ViewResources main;
+                main.view = fc.frame.mainView;
+                main.frameConstants = fc.frameConstantsFor(main.view);
+                raster.mainView(fc, main);
+                tracks::shadowPages(fc, main);
+                const BufferRef pts = tf.uploadBuffer(fc, points.data(), points.size() * 16, 16, "probe points");
+                const BufferRef nrm = tf.uploadBuffer(fc, normals.data(), normals.size() * 16, 16, "probe normals");
+                const BufferRef o = fc.graph.createBuffer(BufferDesc{ "probe out", (uint64_t)count * 8, 8 });
+                const FrameResources r = fc.resources;
+                ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shadow/Tests/ShadowAtProbe");
+                const D3D12_GPU_VIRTUAL_ADDRESS cb = main.frameConstants;
+                fc.graph.addPass("s.test.atprobe", QueueType::Graphics,
+                                 [&](PassBuilder& b) {
+                                     b.use(pts, Use::SrvCompute);
+                                     b.use(nrm, Use::SrvCompute);
+                                     b.use(o, Use::UavCompute);
+                                     b.use(r.vsmPageTable, Use::SrvCompute);
+                                     b.use(r.vsmPool, Use::SrvCompute);
+                                     b.use(r.vsmBlocks, Use::SrvCompute);
+                                     b.use(r.vsmSearchBound, Use::SrvCompute);
+                                 },
+                                 [=](PassContext& ctx) {
+                                     const uint32_t k[12] = { ctx.srv(pts), ctx.srv(nrm), ctx.uav(o), count, ctx.srv(r.vsmPageTable), ctx.srv(r.vsmPool),
+                                                              ctx.srv(r.vsmBlocks), ctx.srv(r.vsmSearchBound), r.vsmConstants, r.vsmLocalLights, r.vsmSlotOfLight, 0 };
+                                     ctx.cmd->SetPipelineState(pso);
+                                     ctx.bindFrameConstants(cb);
+                                     ctx.computeConstants(k, 12);
+                                     ctx.cmd->Dispatch((count + 63) / 64, 1, 1);
+                                 });
+                out = tf.readbackBuffer(fc, o, (uint64_t)count * 8);
+            });
+            tf.frame.time += tf.frame.deltaTime;
+            for (uint32_t fi = 0; fi < 3; ++fi)
+            {
+                double sumAbs = 0, sumSigned = 0, sumDirect = 0;
+                uint32_t resident = 0;
+                for (uint32_t i = fi * perFactor; i < (fi + 1) * perFactor; ++i)
+                {
+                    float g[2];
+                    std::memcpy(g, out->data() + i * 8ull, 8);
+                    if (g[1] == 0) continue;
+                    ++resident;
+                    sumAbs += std::abs(g[0] - refs[i]);
+                    sumSigned += g[0] - refs[i];
+                    sumDirect += std::abs(g[0] - direct[i]);
+                }
+                const double n = std::max(resident, 1u);
+                logf("shadowSunVisibilityAt, footprint x%.0f: %u of %u resident, mean |V - V_ref| %.5f, bias %+.5f, mean |V - direct view| %.5f" "\n", factors[fi],
+                     resident, perFactor, sumAbs / n, sumSigned / n, sumDirect / n);
+                const double absLimit = fi == 0 ? 0.005 : fi == 1 ? 0.01 : 0.02;
+                report(resident > perFactor * 0.9, format("shadowSunVisibilityAt x%.0f: resident fraction", factors[fi]).c_str(), (double)resident / std::max(perFactor, 1u), 0.9);
+                report(sumAbs / n < absLimit, format("shadowSunVisibilityAt x%.0f: mean |V - V_ref|", factors[fi]).c_str(), sumAbs / n, absLimit);
+                report(std::abs(sumSigned / n) < 0.002, format("shadowSunVisibilityAt x%.0f: |bias|", factors[fi]).c_str(), std::abs(sumSigned / n), 0.002);
+            }
+        }
 
         // 2. Small camera move: only newly visible pages render.
         setCamera(cam.position + float3{ 0.3f, 0, 0.1f });
