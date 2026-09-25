@@ -5,8 +5,8 @@ param(
 # Renders the gate references into Cache/Reference (INTERFACES_KO.md 10.2) one after another, CPU only, at
 # below-normal priority so builds and CPU measurements of other sessions preempt it. Each render checkpoints every
 # 10 minutes and resumes after an interruption; finished references are reused (the tool skips cached ones).
-# Every render pauses (within ~0.3 s, no CPU used) while another session holds the GPU measurement lock
-# (.gpulock/current.json with a live holder) or while the manual marker .gpulock/HOLD exists — create HOLD to stop the
+# Every render pauses (within ~0.3 s, no CPU used) while another session holds the GPU lock for a timing run
+# (.gpulock/current.json with a live holder and "kind": "timing" or no kind; correctness runs do not pause it) or while the manual marker .gpulock/HOLD exists — create HOLD to stop the
 # queue's CPU use (e.g. while the user plays a game), delete it to resume. Setup (BVH, atmosphere table) waits too.
 # Scenes with wind render with --no-wind: the reference does not trace 1.1 M wind-deformed instances (the engine's
 # quality comparison then uses the same wind-free scene, written next to the reference with --write-scene).

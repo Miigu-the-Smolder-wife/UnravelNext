@@ -16,6 +16,7 @@
 
 #include "Atmosphere.h"
 #include "Bsdf.h"
+#include "HoldRecord.h"
 #include "Lights.h"
 #include "RtScene.h"
 #include "Sampler.h"
@@ -563,10 +564,8 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
 
 namespace
 {
-// Pauses render workers while any of the given files exists. One watcher thread polls every 200 ms; workers only read
-// an atomic flag. A file that names a holder process ("pid": N, the GPU lock record) counts only while that process
-// is alive, so a holder killed without its cleanup cannot stop renders forever; files without a pid (manual HOLD)
-// count while they exist.
+// Pauses render workers while any of the given hold files is active (HoldRecord.h: a live timing GPU lock record, or
+// a manual marker). One watcher thread polls every 200 ms; workers only read an atomic flag.
 class PauseGate
 {
 public:
@@ -618,22 +617,7 @@ private:
     {
         for (const std::filesystem::path& f : m_files)
         {
-            std::error_code ec;
-            if (!std::filesystem::exists(f, ec)) continue;
-            std::ifstream in(f);
-            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-            const size_t k = text.find("\"pid\"");
-            const size_t c = k == std::string::npos ? std::string::npos : text.find(':', k);
-            const unsigned long pid = c == std::string::npos ? 0 : std::strtoul(text.c_str() + c + 1, nullptr, 10);
-            if (pid != 0)
-            {
-                HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
-                if (!h) continue;  // holder gone: stale record
-                DWORD code = 0;
-                const bool alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
-                CloseHandle(h);
-                if (!alive) continue;
-            }
+            if (!holdActive(f)) continue;
             m_reason = f.string();
             return true;
         }

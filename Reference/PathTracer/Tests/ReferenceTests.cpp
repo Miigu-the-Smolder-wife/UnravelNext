@@ -16,6 +16,7 @@
 
 #include "Atmosphere.h"
 #include "Bsdf.h"
+#include "HoldRecord.h"
 #include "Sampler.h"
 
 #include <cmath>
@@ -516,6 +517,22 @@ void testHold()
     logf("  hold: stale record released in %.2f s, marker held %.2f s (removed at 0.70 s)\n", staleSec, heldSec);
     if (staleSec > 0.5) fail("stale GPU lock record held the render");
     if (heldSec < 0.65 || heldSec > 1.5) fail("manual hold marker not honoured");
+    // Live holder (this process): "correctness" does not hold; "timing" and the older kind-less record do.
+    const fs::path live = dir / "live.json";
+    const unsigned long self = GetCurrentProcessId();
+    auto write = [&](const char* kind) {
+        std::ofstream o(live);
+        o << "{\"track\":\"X\"," << (kind ? std::string("\"kind\":\"") + kind + "\"," : std::string()) << "\"pid\":" << self << ",\"started\":\"t\"}";
+    };
+    write("correctness");
+    const bool corr = reference::holdActive(live);
+    write("timing");
+    const bool timing = reference::holdActive(live);
+    write(nullptr);
+    const bool legacy = reference::holdActive(live);
+    fs::remove(live);
+    logf("  hold kinds (live holder): correctness %d, timing %d, no kind %d\n", corr, timing, legacy);
+    if (corr || !timing || !legacy) fail("GPU lock kind not honoured (correctness must not hold; timing and kind-less must)");
 }
 
 void testAtmosphereTable()

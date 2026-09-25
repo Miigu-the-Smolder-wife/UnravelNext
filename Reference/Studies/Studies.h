@@ -10,15 +10,18 @@
 #include <thread>
 #include <vector>
 
+#include "HoldRecord.h"
+
 namespace unx::study
 {
 constexpr unsigned kThreads = 4;
 
-// Workers wait before each item while a GPU measurement lock is held (.gpulock/current.json relative to the working
-// directory, the UnravelNext root), so studies never load the CPU during another session's timing run.
+// Workers wait before each item while a timing GPU lock is held (.gpulock/current.json relative to the working
+// directory, the UnravelNext root; HoldRecord.h), so studies never load the CPU during another session's performance
+// measurement. Correctness runs and the manual HOLD marker do not stop these light 4-thread studies.
 inline void waitForMeasurementLock()
 {
-    while (std::filesystem::exists(".gpulock/current.json")) std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    while (reference::holdActive(".gpulock/current.json")) std::this_thread::sleep_for(std::chrono::milliseconds(250));
 }
 
 inline void parallelFor(uint32_t count, const std::function<void(uint32_t)>& fn)
