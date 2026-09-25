@@ -14,6 +14,9 @@
 #ifndef STEPS
 #define STEPS 32
 #endif
+#ifndef SPARSE
+#define SPARSE 0  // 1: brick table entry 0xFFFFFFFF = empty brick, the march jumps to the brick exit (revision 1 14.4 item 1)
+#endif
 #ifndef OUT_T
 #define OUT_T 0  // 1: write only the 4 B transmittance (receiver sun march, revision 1 11.4 (5)); 0: the 32 B aggregate record
 #endif
@@ -89,6 +92,20 @@ void MarchCS(uint2 pixel : SV_DispatchThreadID)
             brickIndexPrev = brickIndex;
             ++entries;
         }
+#if SPARSE
+        if (brick == 0xFFFFFFFFu)
+        {
+            // Empty brick: jump to its exit along d. The step budget is charged for the skipped unit steps so the
+            // path length matches the dense march (upper bound on the skip cost).
+            const float3 lo = float3(bc * 16u), hi = lo + 16.0;
+            const float3 tb = (select(d > 0, hi, lo) - pos) / d;  // d has no zero component in the bench directions
+            const float tExit = max(min(tb.x, min(tb.y, tb.z)), 0.0) + 1e-3;
+            const uint skipped = max((uint)ceil(tExit), 1u);
+            pos += d * tExit;
+            s += skipped - 1;
+            continue;
+        }
+#endif
         const float sigma = densityAt(voxels, brick, vox & 15, extra);
         const float dT = T * (1 - exp2(-sigma * 2.0));
         if (firstDepth < 0 && dT > 0) firstDepth = s;

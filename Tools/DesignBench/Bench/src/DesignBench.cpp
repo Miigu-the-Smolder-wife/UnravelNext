@@ -672,6 +672,25 @@ static void benchBricks()
                     snprintf(name, sizeof name, "%s, %u B voxels, %u steps, 4 B T only", mode == 1 ? "sun texel march (top face down)" : "receiver sun march (ground up toward the sun)", voxelBytes, steps);
                     record("bricks", name, st.median, "ms", std::to_string(st.median * 1e6 / ((double)W * H)) + " ns/pixel (receiver)");
                 }
+                // Revision 1 14.4 item 1: sparse octree with empty bricks skipped. Occupancy = fraction of bricks that hold
+                // voxels; the rest are marked empty in the table and the march jumps to their exit.
+                if (voxelBytes == 1)
+                {
+                    auto psoS = g.computePso(dxc.compile(s, L"MarchCS", L"cs_6_6", { wdef("VOXEL_BYTES", voxelBytes), wdef("STEPS", steps), L"OUT_T=1", L"SPARSE=1" }).Get());
+                    for (float occupancy : { 1.0f, 0.6f, 0.4f, 0.2f })
+                    {
+                        std::vector<uint32_t> sparse(table);
+                        { std::mt19937 rng(17); for (uint32_t i = 0; i < bricks; ++i) if ((rng() % 1000) >= (uint32_t)(occupancy * 1000)) sparse[i] = 0xFFFFFFFFu; }
+                        auto sparseBuf = g.buffer((UINT64)bricks * 4); g.upload(sparseBuf.Get(), sparse.data(), (UINT64)bricks * 4);
+                        const UINT sparseSrv = g.srvStructured(sparseBuf.Get(), bricks, 4);
+                        Consts c; c(0, 0) = W; c(0, 1) = H; c(0, 2) = steps; c(0, 3) = 2;
+                        c(1, 0) = sparseSrv; c(1, 1) = voxSrv; c(1, 2) = outUav; c(1, 3) = mapsUav; c(2, 0) = Bx; c(2, 1) = By; c(2, 2) = Bz; c(2, 3) = bricks;
+                        Stat st = g.time([&](ID3D12GraphicsCommandList6* l) { g.setConstants(l, c.v); l->SetPipelineState(psoS.Get()); l->Dispatch((W + 7) / 8, (H + 7) / 8, 1); Gpu::uavBarrier(l); }, flushL2);
+                        char name[200];
+                        snprintf(name, sizeof name, "receiver sun march, sparse skip, brick occupancy %.0f %%, %u B voxels, %u steps, 4 B T only", occupancy * 100, voxelBytes, steps);
+                        record("bricks", name, st.median, "ms", std::to_string(st.median * 1e6 / ((double)W * H)) + " ns/receiver");
+                    }
+                }
             }
         }
         {
