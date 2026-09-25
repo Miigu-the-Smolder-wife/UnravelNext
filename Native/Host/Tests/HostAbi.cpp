@@ -6,7 +6,7 @@
 //  1b. Live save: after commit, UnxSceneSave writes the latest transforms, bulk poses, sun and visibility the host set.
 //  2. Frame: one scene is committed and rendered through the ABI (standalone renderer, readback) and through
 //     FrameRenderer directly in this process; the two RGB10A2 images must match.
-// --content runs part 1 only (no frames rendered).
+// --content runs part 1 only (no frames rendered); --live runs parts 1 and 1b (one frame rendered).
 // Needs the C track for scenes: Tools/CI/Build.ps1 -Track I -Tracks "V;M;S;R;C;I".
 #include "unx/host/UnravelNextHost.h"
 
@@ -410,6 +410,7 @@ int main(int argc, char** argv)
         const UnxRendererDesc desc = rendererDesc(bin / "shaders", quality);
         uint32_t failures = 0;
         const bool contentOnly = argc > 1 && std::string(argv[1]) == "--content";
+        const bool liveOnly = argc > 1 && std::string(argv[1]) == "--live";
 
         // 1. Round trip of every scene (+ a skinned character).
         for (scenegen::SceneId id : scenegen::allScenes())
@@ -527,6 +528,11 @@ int main(int argc, char** argv)
             logf("live scene save: %zu of %zu instances (1 hidden), newest transform, bulk poses, sun: %s\n", live.instances.size(), s.instances.size(),
                  ok ? "as set" : "DIFFERS");
             if (!ok) ++failures;
+        }
+        if (liveOnly)
+        {
+            logf(failures ? "HOST ABI LIVE TEST FAILED (%u)\n" : "HOST ABI LIVE TEST PASSED\n", failures);
+            return failures ? 1 : 0;
         }
 
         // 2. Frames through the ABI vs FrameRenderer directly (1440p). This checks the host's frame setup (camera, time,
