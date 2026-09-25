@@ -21,6 +21,6 @@ void main(uint i : SV_DispatchThreadID)
     const float3x3 frame = shShadingFrame(n, v, NoV);
     const float3x3 back = float3x3(frame[0], -frame[1], -frame[2]);
     const float3x3 spec = mul(shLtcInverse(P[1].x, max(NoV, 1e-4), a.w), frame);
-    o[i] = float4(shAreaIntegral(l, l.position, frame), shAreaIntegral(l, l.position, spec), shAreaIntegral(l, l.position, back),
+    o[i] = float4(shAreaIntegral(l, l.position, frame, true), shAreaIntegral(l, l.position, spec, false), shAreaIntegral(l, l.position, back, true),
                   shSpecularAlbedo(b.www, max(NoV, 1e-4), a.w).x);
 }

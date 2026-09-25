@@ -14,6 +14,8 @@
 //   9. area lights (AreaLight.hlsli): the diffuse integrals (front, back) and the LTC integral over the true light shape
 //      against surface-grid integration in double (exactness of the region integration), and the LTC specular against
 //      the model BRDF integrated over the light (the fit error, reported by roughness).
+//  10. area lights: the closed forms against each light's outline as a dense polygon in double, 6,000 cases (random
+//      shapes, the scenes' sizes, the horizon through the light): P99 and worst relative error of every integral.
 //   unx_test_shading_shadingtests [--no-debug-layer] [--gbv] [--set key=value ...]   (--gbv: GPU-based validation;
 //   --set output.band_pixels=65536 runs the banded passes with 8 bands at the tests' 960 x 540)
 #include "../../Material/Tests/MTestFrame.h"
@@ -22,6 +24,7 @@
 #include "unx/shading/ShadingSystem.h"
 
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <random>
 #include <thread>
@@ -34,6 +37,7 @@ namespace model = unx::scene::model;
 namespace
 {
 constexpr double kPi = 3.14159265358979323846;
+bool g_areaDump = false;  // --area-dump: print test 10's failing cases in full precision
 
 struct Report
 {
@@ -1419,50 +1423,10 @@ double alBrdfIntegral(const AlCase& c, int N)
     return sum;
 }
 
-void testAreaLights(TestFrame& tf, Report& report)
+// Runs Tests/AreaLightProbe.hlsl over the cases: per case (I front diffuse, I specular LTC, I back diffuse,
+// shSpecularAlbedo(f0)).
+std::vector<float4> alProbe(TestFrame& tf, const std::vector<AlCase>& cases)
 {
-    std::mt19937 rng(8202);
-    std::uniform_real_distribution<double> u01(0, 1);
-    auto unit = [&]() {
-        for (;;)
-        {
-            const AlVec d{ 2 * u01(rng) - 1, 2 * u01(rng) - 1, 2 * u01(rng) - 1 };
-            const double l = alDot(d, d);
-            if (l > 1e-4 && l <= 1) return d * (1 / std::sqrt(l));
-        }
-    };
-    const float roughnesses[] = { 0.1f, 0.2f, 0.35f, 0.5f, 0.7f, 1.0f };
-    std::vector<AlCase> cases;
-    for (int k = 0; k < 240; ++k)
-    {
-        AlCase c;
-        c.type = 2 + k % 4;
-        c.n = unit();
-        do c.v = unit();
-        while (alDot(c.n, c.v) < 0.05);
-        const AlVec dir = unit();
-        const double dist = 0.4 + 5.6 * u01(rng) * u01(rng);
-        c.p = dir * dist;
-        c.forward = alNorm(dir * -1 + unit() * 0.8);
-        c.right = alNorm(alCross(c.forward, unit()));
-        if (c.type == 2) c.sx = 0.2 + 2.3 * u01(rng), c.sy = 0.2 + 2.3 * u01(rng);
-        if (c.type == 3) c.sx = 0.1 + 1.1 * u01(rng), c.sy = 0;
-        if (c.type == 4) c.sx = std::min(0.05 + 0.95 * u01(rng), 0.8 * dist), c.sy = 0;
-        if (c.type == 5)
-        {
-            c.sx = 0.3 + 2.2 * u01(rng);
-            c.sy = 0.02 + 0.13 * u01(rng);
-            // Keep the shading point outside the capsule.
-            const AlVec a = c.p - c.right * (0.5 * c.sx);
-            const double t = std::clamp(alDot(a * -1, c.right) / c.sx, 0.0, 1.0);
-            const AlVec q = a + c.right * (t * c.sx);
-            if (alDot(q, q) < 4 * c.sy * c.sy) c.p = c.p + alNorm(q) * (3 * c.sy);
-        }
-        c.roughness = roughnesses[k % 6];
-        c.f0 = 0.9f;
-        cases.push_back(c);
-    }
-
     std::vector<gpu::Light> lights;
     std::vector<float4> q;
     for (const AlCase& c : cases)
@@ -1514,6 +1478,56 @@ void testAreaLights(TestFrame& tf, Report& report)
         out = tf.readbackBuffer(fc, res, cases.size() * 16);
     });
     for (uint32_t srv : { ltcSrv, lightSrv, querySrv }) tf.device.descriptors().freeResource(srv);
+    std::vector<float4> r(cases.size());
+    std::memcpy(r.data(), out->data(), cases.size() * 16);
+    return r;
+}
+
+void testAreaLights(TestFrame& tf, Report& report)
+{
+    std::mt19937 rng(8202);
+    std::uniform_real_distribution<double> u01(0, 1);
+    auto unit = [&]() {
+        for (;;)
+        {
+            const AlVec d{ 2 * u01(rng) - 1, 2 * u01(rng) - 1, 2 * u01(rng) - 1 };
+            const double l = alDot(d, d);
+            if (l > 1e-4 && l <= 1) return d * (1 / std::sqrt(l));
+        }
+    };
+    const float roughnesses[] = { 0.1f, 0.2f, 0.35f, 0.5f, 0.7f, 1.0f };
+    std::vector<AlCase> cases;
+    for (int k = 0; k < 240; ++k)
+    {
+        AlCase c;
+        c.type = 2 + k % 4;
+        c.n = unit();
+        do c.v = unit();
+        while (alDot(c.n, c.v) < 0.05);
+        const AlVec dir = unit();
+        const double dist = 0.4 + 5.6 * u01(rng) * u01(rng);
+        c.p = dir * dist;
+        c.forward = alNorm(dir * -1 + unit() * 0.8);
+        c.right = alNorm(alCross(c.forward, unit()));
+        if (c.type == 2) c.sx = 0.2 + 2.3 * u01(rng), c.sy = 0.2 + 2.3 * u01(rng);
+        if (c.type == 3) c.sx = 0.1 + 1.1 * u01(rng), c.sy = 0;
+        if (c.type == 4) c.sx = std::min(0.05 + 0.95 * u01(rng), 0.8 * dist), c.sy = 0;
+        if (c.type == 5)
+        {
+            c.sx = 0.3 + 2.2 * u01(rng);
+            c.sy = 0.02 + 0.13 * u01(rng);
+            // Keep the shading point outside the capsule.
+            const AlVec a = c.p - c.right * (0.5 * c.sx);
+            const double t = std::clamp(alDot(a * -1, c.right) / c.sx, 0.0, 1.0);
+            const AlVec q = a + c.right * (t * c.sx);
+            if (alDot(q, q) < 4 * c.sy * c.sy) c.p = c.p + alNorm(q) * (3 * c.sy);
+        }
+        c.roughness = roughnesses[k % 6];
+        c.f0 = 0.9f;
+        cases.push_back(c);
+    }
+
+    const std::vector<float4> gpuOut = alProbe(tf, cases);
 
     // CPU references, cases in parallel.
     struct Ref
@@ -1543,8 +1557,7 @@ void testAreaLights(TestFrame& tf, Report& report)
     for (size_t i = 0; i < cases.size(); ++i)
     {
         const AlCase& c = cases[i];
-        float4 g;
-        std::memcpy(&g, out->data() + i * 16, 16);
+        const float4 g = gpuOut[i];
         const Ref& r = refs[i];
         auto rel = [](double got, double ref) { return std::fabs(got - ref) / std::max(ref, 1e-3); };
         const double eDiffuse = std::max(rel(g.x, r.front), rel(g.z, r.back)), eLtc = rel(g.y, r.ltc);
@@ -1572,7 +1585,259 @@ void testAreaLights(TestFrame& tf, Report& report)
            std::max({ worstExact[0], worstExact[1], worstExact[2] }), 5e-3);
     report(std::max({ worstLtc[0], worstLtc[1], worstLtc[2] }) < 5e-3, "area lights: LTC integral over rect/disk/sphere vs surface grid (rel.)",
            std::max({ worstLtc[0], worstLtc[1], worstLtc[2] }), 5e-3);
-    report(std::max(worstExact[3], worstLtc[3]) < 5e-3, "area lights: tube (exact outline, polyline caps) vs the capsule (rel.)", std::max(worstExact[3], worstLtc[3]), 5e-3);
+    report(std::max(worstExact[3], worstLtc[3]) < 5e-3, "area lights: tube (exact outline) vs the capsule (rel.)", std::max(worstExact[3], worstLtc[3]), 5e-3);
+}
+
+// ---------------------------------------------------------------- 10
+// The kernel's closed forms against the light's outline as a dense polygon in double (the quality definition: the form
+// factor is exact up to float rounding, design revision 1 12.4). The outline: rect corners; the disk's circle; the circle
+// a sphere subtends; the capsule's generators and end-sphere silhouette arcs (the end sphere's circle when seen end-on);
+// curves inscribed with n points, transformed, clipped to z >= 0 and closed on the horizon (I = |sum| / 2 pi).
+double alEdge(AlVec a, AlVec b)
+{
+    const AlVec c = alCross(a, b);
+    const double s = std::sqrt(alDot(c, c));
+    return s > 0 ? std::atan2(s, alDot(a, b)) * (c.z / s) : 0;
+}
+
+double alPolygon(const std::vector<AlVec>& P)
+{
+    double sum = 0;
+    AlVec exitPoint, entryPoint;
+    bool exits = false, enters = false;
+    for (size_t i = 0; i < P.size(); ++i)
+    {
+        const AlVec a = P[i], b = P[(i + 1) % P.size()];
+        if (a.z < 0 && b.z < 0) continue;
+        AlVec p = a, q = b;
+        if (a.z < 0)
+        {
+            p = a + (b - a) * (a.z / (a.z - b.z));
+            p.z = 0;
+            entryPoint = p;
+            enters = true;
+        }
+        else if (b.z < 0)
+        {
+            q = a + (b - a) * (a.z / (a.z - b.z));
+            q.z = 0;
+            exitPoint = q;
+            exits = true;
+        }
+        sum += alEdge(p, q);
+    }
+    if (exits && enters) sum += alEdge(exitPoint, entryPoint);
+    return std::fabs(sum) / (2 * kPi);
+}
+
+// The outline relative to the shading point (empty: behind a one-sided light or inside the emitter).
+std::vector<AlVec> alOutline(const AlCase& c, int n)
+{
+    std::vector<AlVec> P;
+    const AlVec up = alCross(c.forward, c.right);
+    if ((c.type == 2 || c.type == 3) && alDot(c.p * -1, c.forward) <= 0) return P;
+    if (c.type == 2)
+    {
+        const AlVec ex = c.right * (0.5 * c.sx), ey = up * (0.5 * c.sy);
+        return { c.p - ex - ey, c.p + ex - ey, c.p + ex + ey, c.p - ex + ey };
+    }
+    auto circle = [&](AlVec centre, AlVec u, AlVec w) {
+        for (int i = 0; i < n; ++i)
+            P.push_back(centre + u * std::cos(2 * kPi * i / n) + w * std::sin(2 * kPi * i / n));
+    };
+    auto subtended = [&](AlVec q, double r) {
+        const double d2 = alDot(q, q), k = r * r / d2, rc = r * std::sqrt(1 - k);
+        const AlVec dir = q * (1 / std::sqrt(d2));
+        const AlVec t1 = alNorm(std::fabs(dir.x) < 0.9 ? alCross(dir, { 1, 0, 0 }) : alCross(dir, { 0, 1, 0 }));
+        circle(q * (1 - k), t1 * rc, alCross(dir, t1) * rc);
+    };
+    if (c.type == 3)
+    {
+        circle(c.p, c.right * c.sx, up * c.sx);
+        return P;
+    }
+    const double r = c.type == 5 ? c.sy : c.sx;
+    if (c.type == 4)
+    {
+        if (alDot(c.p, c.p) > r * r) subtended(c.p, r);
+        return P;
+    }
+    const AlVec a = c.p - c.right * (0.5 * c.sx), b = c.p + c.right * (0.5 * c.sx);
+    const AlVec aPerp = a - c.right * alDot(a, c.right);
+    const double dPerp = std::sqrt(alDot(aPerp, aPerp));
+    if (dPerp <= r * 1.0001)
+    {
+        const AlVec e = alDot(a, a) < alDot(b, b) ? a : b;
+        if (alDot(e, e) > r * r) subtended(e, r);
+        return P;
+    }
+    if (std::min(alDot(a, a), alDot(b, b)) <= r * r) return P;
+    const AlVec ah = aPerp * (1 / dPerp), uh = alNorm(alCross(c.right, ah));
+    const double along = std::sqrt(1 - r * r / (dPerp * dPerp));
+    const AlVec mp = ah * (-r / dPerp) + uh * along, mm = ah * (-r / dPerp) - uh * along;
+    const AlVec a0 = a + mp * r, b0 = b + mp * r, b1 = b + mm * r, a1 = a + mm * r;
+    auto arc = [&](AlVec end, AlVec p0, AlVec p1, AlVec outward) {  // interior points of the outer arc p0 -> p1
+        const double d2 = alDot(end, end), k = r * r / d2, rc = r * std::sqrt(1 - k);
+        const AlVec cc = end * (1 - k), e1 = alNorm(p0 - cc);
+        AlVec e2 = alNorm(alCross(end, e1));
+        if (alDot(e2, outward) < 0) e2 = e2 * -1;
+        const AlVec q = p1 - cc;
+        double span = std::atan2(alDot(q, e2), alDot(q, e1));
+        if (span <= 0) span += 2 * kPi;
+        for (int i = 1; i < n; ++i) P.push_back(cc + (e1 * std::cos(span * i / n) + e2 * std::sin(span * i / n)) * rc);
+    };
+    P.push_back(a0);
+    P.push_back(b0);
+    arc(b, b0, b1, c.right);
+    P.push_back(b1);
+    P.push_back(a1);
+    arc(a, a1, a0, c.right * -1);
+    return P;
+}
+
+double alContour(const AlCase& c, const AlMat& T, int n)
+{
+    std::vector<AlVec> P = alOutline(c, n);
+    for (AlVec& x : P) x = T * x;
+    return P.empty() ? 0 : alPolygon(P);
+}
+
+void testAreaLightContours(TestFrame& tf, Report& report)
+{
+    std::mt19937 rng(1224);
+    std::uniform_real_distribution<double> u01(0, 1);
+    auto unit = [&]() {
+        for (;;)
+        {
+            const AlVec d{ 2 * u01(rng) - 1, 2 * u01(rng) - 1, 2 * u01(rng) - 1 };
+            const double l = alDot(d, d);
+            if (l > 1e-4 && l <= 1) return d * (1 / std::sqrt(l));
+        }
+    };
+    const float roughnesses[] = { 0.1f, 0.2f, 0.35f, 0.5f, 0.7f, 1.0f };
+    // Three populations of 2,000: random shapes as in 9; the scenes' sizes (interior, city_night) out to 15 m; and the
+    // horizon through the light (the shading normal tilted from the light's direction by at most its angular radius).
+    std::vector<AlCase> cases;
+    for (int k = 0; k < 6000; ++k)
+    {
+        AlCase c;
+        c.type = 2 + k % 4;
+        c.roughness = roughnesses[(k / 4) % 6];
+        c.f0 = 0.9f;
+        const int mode = k / 2000;
+        const double dist = mode == 1 ? 0.3 + 14.7 * u01(rng) * u01(rng) : 0.4 + 5.6 * u01(rng) * u01(rng);
+        const AlVec dir = unit();
+        c.p = dir * dist;
+        c.forward = alNorm(dir * -1 + unit() * 0.8);
+        c.right = alNorm(alCross(c.forward, unit()));
+        if (mode == 1)
+        {
+            if (c.type == 2) c.sx = u01(rng) < 0.5 ? 1.2 : 1.6, c.sy = c.sx == 1.2 ? 0.6 : 1.8;
+            if (c.type == 3) c.sx = 0.1, c.sy = 0;
+            if (c.type == 4) c.sx = 0.05 + 0.01 * u01(rng), c.sy = 0;
+            if (c.type == 5) c.sx = 1.2 + 0.4 * u01(rng), c.sy = 0.015 + 0.005 * u01(rng);
+        }
+        else
+        {
+            if (c.type == 2) c.sx = 0.2 + 2.3 * u01(rng), c.sy = 0.2 + 2.3 * u01(rng);
+            if (c.type == 3) c.sx = 0.1 + 1.1 * u01(rng), c.sy = 0;
+            if (c.type == 4) c.sx = std::min(0.05 + 0.95 * u01(rng), 0.8 * dist), c.sy = 0;
+            if (c.type == 5) c.sx = 0.3 + 2.2 * u01(rng), c.sy = 0.02 + 0.13 * u01(rng);
+        }
+        if (c.type == 5)
+        {
+            // Keep the shading point outside the capsule.
+            const AlVec a = c.p - c.right * (0.5 * c.sx);
+            const double t = std::clamp(alDot(a * -1, c.right) / c.sx, 0.0, 1.0);
+            const AlVec q = a + c.right * (t * c.sx);
+            if (alDot(q, q) < 4 * c.sy * c.sy) c.p = c.p + alNorm(q) * (3 * c.sy);
+        }
+        if (mode == 2)
+        {
+            const AlVec d = alNorm(c.p);
+            const double bound = c.type == 2 ? 0.5 * std::sqrt(c.sx * c.sx + c.sy * c.sy) : (c.type == 5 ? 0.5 * c.sx + c.sy : c.sx);
+            const double theta = std::asin(std::min(bound / std::sqrt(alDot(c.p, c.p)), 1.0));
+            const AlVec side = alNorm(alCross(d, unit()));
+            c.n = alNorm(side + d * std::tan(theta * (2 * u01(rng) - 1)));
+        }
+        else c.n = unit();
+        do c.v = unit();
+        while (alDot(c.n, c.v) < 0.05);
+        cases.push_back(c);
+    }
+    const std::vector<float4> gpuOut = alProbe(tf, cases);
+
+    std::vector<std::array<double, 3>> refs(cases.size());
+    std::atomic<size_t> next{ 0 };
+    auto worker = [&]() {
+        for (size_t i; (i = next++) < cases.size();)
+        {
+            const AlCase& c = cases[i];
+            const AlMat frame = alFrame(c.n, c.v);
+            const AlMat back{ { frame.r[0], frame.r[1] * -1, frame.r[2] * -1 } };
+            const AlMat spec = alMul(alLtcInverse(std::max(alDot(c.n, c.v), 1e-4), c.roughness), frame);
+            refs[i] = { alContour(c, frame, 8192), alContour(c, spec, 8192), alContour(c, back, 8192) };
+        }
+    };
+    std::vector<std::thread> threads;
+    for (unsigned t = 0; t < 4; ++t) threads.emplace_back(worker);  // 4 threads: the machine is shared
+    for (auto& t : threads) t.join();
+
+    // Errors of each integral: relative where I >= 1e-3 (P99), and against max(I, 1e-3) for all (as 9: slivers and lights
+    // below the horizon count by their absolute error). The LTC transform's condition number kappa (M^-1: its xz block's
+    // singular values and 1) amplifies fp32 rounding in the transformed geometry: kappa <= 100 everywhere at roughness
+    // >= 0.2 (NoV >= 0.15) and >= 0.3, up to ~1000 at roughness 0.1 and grazing view, where the LTC fit's own L1 error
+    // reaches 0.9; cases above 100 are reported apart.
+    auto kappa = [&](const AlCase& c) {
+        const AlMat m = alLtcInverse(std::max(alDot(c.n, c.v), 1e-4), c.roughness);
+        const double a = m.r[0].x, b = m.r[0].z, cc = m.r[2].x, d = m.r[2].z;
+        const double f = a * a + b * b + cc * cc + d * d, det = std::fabs(a * d - b * cc);
+        const double smax = std::sqrt(0.5 * (f + std::sqrt(std::max(f * f - 4 * det * det, 0.0)))), smin = det / smax;
+        return std::max(smax, 1.0) / std::min(smin, 1.0);
+    };
+    const char* names[] = { "rect", "disk", "sphere", "tube" };
+    const char* kinds[] = { "diffuse", "LTC", "back" };
+    double p99All = 0, worstAll = 0, worstIll = 0;
+    size_t ill = 0;
+    for (int t = 0; t < 4; ++t)
+        for (int j = 0; j < 3; ++j)
+        {
+            std::vector<double> e;
+            double worst = 0, worstK = 0;
+            for (size_t i = 0; i < cases.size(); ++i)
+            {
+                const AlCase& c = cases[i];
+                if ((int)c.type != t + 2) continue;
+                const double g = j == 0 ? gpuOut[i].x : (j == 1 ? gpuOut[i].y : gpuOut[i].z), r = refs[i][j];
+                const double err = std::fabs(g - r) / std::max(r, 1e-3);
+                const bool illConditioned = j == 1 && kappa(c) > 100;
+                if (g_areaDump && err > 1e-3)
+                    logf("DUMP %d %d %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\n", t + 2, j, c.p.x, c.p.y, c.p.z, c.forward.x,
+                         c.forward.y, c.forward.z, c.right.x, c.right.y, c.right.z, c.sx, c.sy, c.n.x, c.n.y, c.n.z, c.v.x, c.v.y, c.v.z, (double)c.roughness, g, r);
+                if (illConditioned)
+                {
+                    ++ill;
+                    worstK = std::max(worstK, err);
+                    continue;
+                }
+                if (r >= 1e-3) e.push_back(std::fabs(g - r) / r);
+                worst = std::max(worst, err);
+                if (err > 1e-3)
+                    logf("  %s %s (%.3f %.3f) at %.2f m, rough %.2f, n.l %.3f: %.7f / %.7f\n", names[t], kinds[j], c.sx, c.sy, std::sqrt(alDot(c.p, c.p)), c.roughness,
+                         alDot(c.n, alNorm(c.p)), g, r);
+            }
+            std::sort(e.begin(), e.end());
+            const double p50 = e.empty() ? 0 : e[e.size() / 2], p99 = e.empty() ? 0 : e[std::min(e.size() - 1, e.size() * 99 / 100)];
+            logf("area light contours, %-6s %-7s: %4zu with I >= 1e-3, rel. error p50 %.1e p99 %.1e max %.1e; all (kappa <= 100) vs max(I, 1e-3) worst %.1e", names[t], kinds[j],
+                 e.size(), p50, p99, e.empty() ? 0 : e.back(), worst);
+            logf(j == 1 ? "; kappa > 100 worst %.1e\n" : "\n", worstK);
+            p99All = std::max(p99All, p99);
+            worstAll = std::max(worstAll, worst);
+            worstIll = std::max(worstIll, worstK);
+        }
+    logf("area light contours: %zu LTC integrals with kappa(M^-1) > 100 (roughness 0.1, grazing), worst vs max(I, 1e-3) %.1e (reported, not gated)\n", ill, worstIll);
+    report(p99All < 1e-4, "area lights: closed forms vs dense outline, P99 where I >= 1e-3 (rel.)", p99All, 1e-4);
+    report(worstAll < 1e-3, "area lights: closed forms vs dense outline, worst for kappa <= 100 (rel. to max(I, 1e-3))", worstAll, 1e-3);
 }
 
 } // namespace
@@ -1615,6 +1880,7 @@ int main(int argc, char** argv)
         {
             if (std::string(argv[i]) == "--no-debug-layer") debugLayer = false;
             if (std::string(argv[i]) == "--gbv") gpuValidation = true;
+            if (std::string(argv[i]) == "--area-dump") g_areaDump = true;
             if (std::string(argv[i]) == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
         }
         Report report;
@@ -1628,6 +1894,7 @@ int main(int argc, char** argv)
         testEdgeComposite(tf, report);
         testEdgeCutout(tf, report);
         testAreaLights(tf, report);
+        testAreaLightContours(tf, report);
         testPlanarProducts(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;

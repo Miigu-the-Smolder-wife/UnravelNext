@@ -43,7 +43,7 @@
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
 #if !PLANAR
-#define GI_PROBE_TILE_CACHE  // R's screen probes around the group's tile, loaded once (design revision 1 4.4)
+#define GI_PROBE_TILE_CACHE  // R's screen probes at the group's tile corners, loaded once (design revision 1 4.4, 12.3)
 #endif
 #include "Passes/GI/ScreenProbes.hlsli"
 #include "Passes/GI/GiCache.hlsli"
@@ -65,8 +65,8 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     const uint tile = tiles.Load(4 * (P[1].y + gid.x));
     const uint2 tileCoord = uint2(tile & 0xFFFFu, tile >> 16);
     const uint2 pixel = tileCoord * M_TILE + tid;
-    // The group's independent reads go out together before any of them is waited on: the tile's 3 x 3 screen probe records
-    // (R's tile cache, split form: the counts are ceil(view / 8) with the fixed 8 px spacing, so no header read comes
+    // The group's independent reads go out together before any of them is waited on: the records of the tile's 2 x 2 corner
+    // screen probes (R's tile cache, split form: the probe counts come from the frame constants, so no header read comes
     // first), S's overflow tile head, and the pixel's material word, G-buffer and depth. The records then go to groupshared
     // [measured, city 4K: shading 1.257 -> 1.191 ms against loading the tile, then the pixel]. The probe condition is
     // uniform (root constants), so the whole group reaches the barrier.
@@ -79,7 +79,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     probes.pad0 = P[7].y;
     probes.pad1 = 0;
     uint4 probeRecord = 0;
-    if (probeTile) probeRecord = giProbeTileFetch(probes, tileCoord, lane, int2((g_viewWidth + 7) / 8, (g_viewHeight + 7) / 8));
+    if (probeTile) probeRecord = giProbeTileFetch(probes, tileCoord, lane, giProbeCountOfView());
 #endif
     Texture2D<uint> words = ResourceDescriptorHeap[P[0].z];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].x];
@@ -292,14 +292,18 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             {
 #if AREA
                 // L w (f_d pi I + E_s I_ltc) on the viewer's side of n; Foliage transmits what arrives on the other.
+                // Lights whose window is 0 here (the froxel's lists hold every light reaching the froxel) add exactly 0.
                 const float3 p = (light.position - g_cameraPosition) - offset;
-                const float3 Lw = light.color * (light.intensity * shAreaWindow(light, p) * visibility);
-                // Integrals in order: front diffuse, specular, back (Foliage) -- one inlined evaluator.
+                const float window = shAreaWindow(light, p);
+                if (window <= 0) continue;
+                const float3 Lw = light.color * (light.intensity * window * visibility);
+                // Integrals in order: front diffuse, specular, back (Foliage) -- one inlined evaluator (the diffuse frames
+                // are rotations: closed forms on circular cones).
                 const uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
                 [loop] for (uint j = first; j < last; ++j)
                 {
                     const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (NoV > 0 ? frameBack : frame));
-                    const float I = shAreaIntegral(light, p, T);
+                    const float I = shAreaIntegral(light, p, T, j != 1);
                     radiance += Lw * (j == 0 ? front * (SH_PI * I) : (j == 1 ? specularAlbedo * I : back * (SH_PI * I)));
                 }
 #endif
