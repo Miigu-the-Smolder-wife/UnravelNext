@@ -84,7 +84,7 @@ Unity 쪽 코드는 `Assets/UnravelNextBridge`(이전 저장소 커밋 0125b960)
 Agility 1.618.5 기능은 1.618.1에서도 모두 있다(SDK 618).
 필요한 코어 변경은 `Docs/Design/Requests/20260925_I_unity_queue_device.md`에 요청했다: 외부 디바이스·큐로 `Device`를 만들고, 큐 실행 훅을 둔다.
 
-## 2. C ABI (`Native/Host/include/unx/host/UnravelNextHost.h`, ABI 5)
+## 2. C ABI (`Native/Host/include/unx/host/UnravelNextHost.h`, ABI 6)
 
 - 규칙: 앞에 `{size, version}`이 있는 고정 크기 구조체만 넘긴다. 크기는 헤더의 `static_assert`와 C#의 `RequireLayouts`가 같이 확인한다.
   반환은 결과 코드와 `UnxLastError()`다. C++ 객체는 넘기지 않는다.
@@ -387,7 +387,9 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
   GPU" 단언(EnableVfxGpu = true)이 실패한다. TitanNative 공유 GPU VFX 실행기가 퇴역했고, GPU 입자 모듈 연결은 V3(I가 FX 모듈을
   `VfxStreamExecutors.Provider` / `NV_StreamExecutor`로 잇는 일)다. EnableVfxGpu = false(`-unxVfxCpu`) 조건의 Player에는 영향이 없다.
   설치 뒤 TitanNative VFX 렌더러는 CPU 투영으로 그린다. `Docs/Rebuild/WORLD_VFX_DESIGN_KO.md` 9.4(a81466e5).
-- `20260925_I_history_discontinuity.md`(대기): World 복원·카메라 컷의 렌더 이력 계약. 호스트가 복원을 감지해(NW_Info epoch·branch, tick 역행)
+- `20260925_I_history_discontinuity.md`(반영, 코어 v1.35 8636d11; I ABI 6 b7d93ed): `UnxFrameSetDiscontinuity`(RESTORE | CUT; 두 비트 모두 이전 뷰 없음),
+  `UnxFrameSetSimulation`(GPU 시뮬 비트, 지금은 0), `UnxTransformUpdate::flags`의 `UNX_TRANSFORM_TELEPORT`. 떨어진 패킷의 비트는 다음 것으로 OR.
+  `unx_test_host_hostframeflags` 통과(커밋 빌드 b7d93ed). 어댑터 연결은 World의 StateGeneration·teleport 표시를 기다린다. 원래 설명: World 복원·카메라 컷의 렌더 이력 계약. 호스트가 복원을 감지해(NW_Info epoch·branch, tick 역행)
   불연속 비트를 넘기고, 렌더러는 모든 시간 상태를 재설정한다. 같음의 수준을 정해야 한다: 확률 항을 뺀 부분집합은 비트 동일,
   전체는 (i) 결정적 누적(I 권장) 또는 (ii) 실측 바닥 이하. 옛 시험 `WorldHierarchySkinAndVfxReachRealRenderedPixelsAcrossRestore`를 이 경로로 옮긴다.
 - `20260925_I_skin_normals.md`(대기): 스킨 법선을 관절 3×3의 여인수로 변환하는 것이다. 데이터 월드 캐릭터의 비균일 스케일(0.6, 0.8, 0.6)을 관절에 접으면 필요하다.
