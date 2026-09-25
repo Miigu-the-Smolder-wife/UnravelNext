@@ -1,0 +1,161 @@
+#pragma once
+// The renderer behind UnravelNext.dll's C ABI (I track): builds a scene::Scene from the host's content, commits it
+// (validate, V's cluster builder, GpuScene upload), and records frames through FrameRenderer.
+//
+// Threads: the host's main thread adds content, commits, and queues frame packets (camera, time, output, per-frame
+// scene updates); frames are recorded later on the host's submission thread (Unity's render event), so the main thread
+// prepares frame N+1 while N is recorded. The packet is the only thing the two threads share.
+//
+// Devices (host boundary decision, Docs/Status/I_STATUS_KO.md 1.4): on Unity, the Device is built on Unity's device and
+// graphics queue (DeviceOptions::externalDevice / externalGraphicsQueue) and each frame's lists execute through the
+// host's ExecuteCommandList, which declares the output texture's state to Unity. Standalone (tests, tools): own device.
+#include "unx/core/Config.h"
+#include "unx/render/Frame.h"
+#include "unx/render/GpuScene.h"
+#include "unx/scene/SceneData.h"
+
+#include <array>
+#include <deque>
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace unx::render
+{
+class Device;
+class ShaderLibrary;
+class FrameRenderer;
+class RenderGraph;
+class GpuProfiler;
+} // namespace unx::render
+
+namespace unx::host
+{
+struct HostRendererOptions
+{
+    bool standalone = true;                        // own device and queue (tests, tools)
+    ID3D12Device* hostDevice = nullptr;            // Unity's device (standalone = false)
+    ID3D12CommandQueue* hostQueue = nullptr;       // Unity's graphics queue (standalone = false)
+    uint32_t framesInFlight = 2;
+    std::filesystem::path shaderDirectory;
+    std::filesystem::path qualityDirectory;
+};
+
+struct SceneCommitInfo
+{
+    uint64_t triangles = 0, clusters = 0;
+    double buildMs = 0;
+    std::string contentHash;
+};
+
+struct SkeletonPose
+{
+    uint32_t skeleton = 0;
+    std::vector<float3x4> jointToModel;
+};
+
+// Everything one frame needs, copied on the main thread.
+struct FramePacket
+{
+    uint64_t ticket = 0;
+    uint64_t frameIndex = 0;                       // the host's frame number (reports)
+    double time = 0;
+    float deltaTime = 0;
+    uint32_t width = 0, height = 0;
+    scene::Camera camera;
+    ID3D12Resource* output = nullptr;              // host-owned RGB10A2 random-write texture; null standalone
+    std::optional<scene::Sun> sun;                 // changed sun (time of day)
+    std::vector<render::InstanceTransformUpdate> transforms;
+    std::vector<SkeletonPose> skeletons;
+    std::vector<std::pair<uint32_t, bool>> visibility;
+};
+
+struct FrameStats
+{
+    uint64_t frameIndex = UINT64_MAX;              // host frame number the GPU numbers belong to
+    double gpuMs = 0, cpuRecordMs = 0, cpuSubmitMs = 0;
+    uint32_t passes = 0;
+};
+
+// Executes one of the frame's command lists on the host queue; 'output' is the host texture the list may touch.
+using HostExecute = std::function<void(ID3D12CommandList* list, ID3D12Resource* output)>;
+
+class HostRenderer
+{
+public:
+    explicit HostRenderer(const HostRendererOptions& options);
+    ~HostRenderer();
+    HostRenderer(const HostRenderer&) = delete;
+    HostRenderer& operator=(const HostRenderer&) = delete;
+
+    // Scene content (main thread, before commit). The returned index is the element's position in its scene array.
+    scene::Scene& scene() { return m_scene; }
+    template <typename T>
+    uint32_t add(std::vector<T>& list, T value)
+    {
+        requireOpen();
+        list.push_back(std::move(value));
+        return (uint32_t)(list.size() - 1);
+    }
+    SceneCommitInfo commit();
+    bool committed() const { return m_committed; }
+
+    // Per-frame changes (main thread) collected into the next queued frame.
+    void setTransforms(std::span<const render::InstanceTransformUpdate> updates);
+    void setSkeleton(uint32_t skeleton, std::vector<float3x4> jointToModel);
+    void setInstanceVisible(uint32_t instance, bool visible);
+    void setSun(const scene::Sun& sun);
+    uint64_t queueFrame(FramePacket packet);
+
+    // Submission thread (Unity's render event): records the queued frame and executes it through 'execute'.
+    void renderOnHost(uint64_t ticket, const HostExecute& execute);
+    // Standalone: records and executes on the renderer's own queue into its own output; optional blocking readback of
+    // the RGB10A2 pixels.
+    void renderStandalone(uint64_t ticket, void* readback, size_t readbackBytes);
+    FrameStats latestStats() const;
+
+    const HostRendererOptions& options() const { return m_options; }
+    const QualityConfig& quality() const { return m_quality; }
+
+private:
+    void requireOpen() const;
+    void requireCommitted() const;
+    std::optional<FramePacket> takePacket(uint64_t ticket);
+    void ensureStandaloneOutput(uint32_t width, uint32_t height);
+    // Paces the frame slot, applies the packet's scene updates, declares the frame; returns the frame slot.
+    uint32_t beginFrame(const FramePacket& packet);
+    void recordFrame(const FramePacket& packet, render::TextureRef output);
+    void endFrame(uint32_t slot, uint64_t hostFrameIndex);
+
+    HostRendererOptions m_options;
+    QualityConfig m_quality;
+    scene::Scene m_scene;
+    bool m_committed = false;
+    std::unique_ptr<render::Device> m_device;
+    std::unique_ptr<render::ShaderLibrary> m_shaders;
+    std::unique_ptr<render::GpuScene> m_gpuScene;
+    std::unique_ptr<render::FrameRenderer> m_frameRenderer;
+    std::unique_ptr<render::RenderGraph> m_graph;
+    std::unique_ptr<render::GpuProfiler> m_profiler;
+
+    mutable std::mutex m_mutex;  // packets, pending updates, stats
+    std::deque<FramePacket> m_packets;
+    FramePacket m_pending;       // updates for the next queued frame
+    uint64_t m_nextTicket = 1;
+    FrameStats m_stats;
+
+    // Submission thread only.
+    std::vector<std::array<uint64_t, 3>> m_slotFence;
+    std::vector<uint64_t> m_slotHostFrame;
+    uint64_t m_recordedFrames = 0;
+    float4x4 m_prevViewProj{};
+    bool m_havePrev = false;
+
+    struct Standalone;
+    std::unique_ptr<Standalone> m_standalone;
+};
+} // namespace unx::host

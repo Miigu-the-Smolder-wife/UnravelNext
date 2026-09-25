@@ -7,6 +7,7 @@
 #include "unx/host/UnravelNextHost.h"
 
 #include "Probe/Probe.h"
+#include "Unity/PluginState.h"
 #include "unx/render/Harness.h"
 
 #include "IUnityGraphics.h"
@@ -34,8 +35,11 @@ IUnityGraphicsD3D12v8* g_d3d = nullptr;
 int32_t g_eventBase = -1;
 thread_local std::string g_lastError;
 std::string g_facts;
+} // namespace
 
-int32_t failWith(const char* message, int32_t code = UNX_ERROR)
+namespace unx::host::plugin
+{
+int32_t failWith(const char* message, int32_t code)
 {
     g_lastError = message;
     std::string line = std::string("UnravelNext: ") + message + "\n";
@@ -44,6 +48,13 @@ int32_t failWith(const char* message, int32_t code = UNX_ERROR)
     std::fflush(stderr);
     return code;
 }
+const std::string& lastError() { return g_lastError; }
+IUnityGraphicsD3D12v8* unityD3D12() { return g_d3d; }
+} // namespace unx::host::plugin
+
+namespace
+{
+using unx::host::plugin::failWith;
 
 template <typename F>
 int32_t guarded(F&& f)
@@ -466,6 +477,11 @@ void UNITY_INTERFACE_API onRenderEvent(int eventId, void* data)
     try
     {
         if (!g_d3d) return;
+        if (e == UNX_EVENT_RENDER)
+        {
+            unx::host::plugin::renderEvent(frame);
+            return;
+        }
         if (e == UNX_EVENT_PROBE_FACTS)
         {
             g_facts = collectFacts();
