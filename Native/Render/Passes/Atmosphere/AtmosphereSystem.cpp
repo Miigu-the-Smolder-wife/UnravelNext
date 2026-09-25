@@ -264,7 +264,7 @@ void record(FramePassContext& fc)
             s.transmittance = createTexture(fc.device, L"S transmittance LUT", T2, p.transmittanceSize[0], p.transmittanceSize[1] + 2, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, L);
             s.multiScatter = createTexture(fc.device, L"S multiple-scattering table", T3, p.multiScatterSize[1], p.multiScatterSize[2],
                                            (uint16_t)(p.multiScatterSize[0] * p.multiScatterSize[3]), DXGI_FORMAT_R16G16B16A16_UNORM, L);
-            s.skyView = createTexture(fc.device, L"S sky view LUT", T2, p.skyViewSize[0], p.skyViewSize[1], 1, DXGI_FORMAT_R32G32B32A32_FLOAT, L);
+            s.skyView = createTexture(fc.device, L"S sky view LUT", T2, p.skyViewSize[0], 3 * p.skyViewSize[1], 1, DXGI_FORMAT_R32G32B32A32_FLOAT, L);
         }
         if (!s.paramsBuffer) s.paramsBuffer = createBuffer(fc.device, L"S atmosphere params", 256);
         if (s.staging) fc.device.deferRelease(s.staging);
@@ -287,7 +287,7 @@ void record(FramePassContext& fc)
     const uint16_t msD = (uint16_t)(p.multiScatterSize[0] * p.multiScatterSize[3]);
     const TextureRef tlut = g.importTexture(s.transmittance.Get(), desc("S transmittance LUT", p.transmittanceSize[0], p.transmittanceSize[1] + 2, 1, D3D12_RESOURCE_DIMENSION_TEXTURE2D), L);
     const TextureRef mlut = g.importTexture(s.multiScatter.Get(), desc("S multiple-scattering table", msW, msH, msD, D3D12_RESOURCE_DIMENSION_TEXTURE3D, DXGI_FORMAT_R16G16B16A16_UNORM), L);
-    const TextureRef sky = g.importTexture(s.skyView.Get(), desc("S sky view LUT", p.skyViewSize[0], p.skyViewSize[1], 1, D3D12_RESOURCE_DIMENSION_TEXTURE2D), L);
+    const TextureRef sky = g.importTexture(s.skyView.Get(), desc("S sky view LUT", p.skyViewSize[0], 3 * p.skyViewSize[1], 1, D3D12_RESOURCE_DIMENSION_TEXTURE2D), L);
     const BufferRef params = g.importBuffer(s.paramsBuffer.Get(), BufferDesc{ "S atmosphere params", 256, 0 });
     fc.resources.transmittanceLut = tlut;
     fc.resources.multiScatterLut = mlut;
