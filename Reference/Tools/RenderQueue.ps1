@@ -7,7 +7,9 @@ param(
 # 10 minutes and resumes after an interruption; finished references are reused (the tool skips cached ones).
 # Every render pauses (within ~0.3 s, no CPU used) while another session holds the GPU lock for a timing run
 # (.gpulock/current.json with a live holder and "kind": "timing" or no kind; correctness runs do not pause it) or while the manual marker .gpulock/HOLD exists — create HOLD to stop the
-# queue's CPU use (e.g. while the user plays a game), delete it to resume. Setup (BVH, atmosphere table) waits too.
+# queue's CPU use (e.g. while the user plays a game), delete it to resume.
+# Cache/Reference/PAUSE_QUEUE pauses only the queue (for a one-off render that must not run beside it). Each render uses
+# 3/4 of the logical processors (unx_reference default) so other sessions' builds and tests keep their share. Setup (BVH, atmosphere table) waits too.
 # Scenes with wind render with --no-wind: the reference does not trace 1.1 M wind-deformed instances (the engine's
 # quality comparison then uses the same wind-free scene, written next to the reference with --write-scene).
 $ErrorActionPreference = "Stop"
@@ -37,7 +39,7 @@ $jobs = @(
 foreach ($j in $jobs) {
   $key = "$($j.scene)/$($j.camera)/$($j.res)"
   if ($Only -and -not $key.Contains($Only)) { continue }
-  $args2 = @("render", "--scene", $j.scene, "--camera", $j.camera, "--res", $j.res)
+  $args2 = @("render", "--scene", $j.scene, "--camera", $j.camera, "--res", $j.res, "--also-hold", (Join-Path $root "Cache\Reference\PAUSE_QUEUE"))
   if ($j.wind) {
     $args2 += "--no-wind"
     $args2 += @("--write-scene", (Join-Path $root "Cache\Scenes\$($j.scene)_nowind.unxscene"))

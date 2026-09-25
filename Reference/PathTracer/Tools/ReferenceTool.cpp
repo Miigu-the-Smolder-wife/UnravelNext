@@ -6,6 +6,9 @@
 //       Renders into / reuses Cache/Reference/<scene>/<camera>_<W>x<H>_<spp>_<sceneHash16>_<qualityHash16>.pfm (+ .json,
 //       + .halfA.pfm / .halfB.pfm). --spp overrides reference.samples_per_pixel (recorded in the name and the hash);
 //       cached references (the ones gates read) use the configured value (>= 4096). Checkpoints every 10 min and resumes.
+//       --threads N: logical processors to use (default 3/4, the highest-numbered; the rest stay free for other sessions).
+//       --also-hold <file>: an extra pause file (the render queue passes Cache/Reference/PAUSE_QUEUE so ad-hoc renders can
+//       pause it instead of running beside it).
 //       --volume-order MIN:MAX (diagnostics, MAX may be inf) keeps only light with MIN..MAX atmosphere scattering events;
 //       surface and ground bounces are not counted (pure single scattering needs black surfaces and ground).
 //   unx_reference census  --scene ... (--camera|--path/--time) --res <WxH> [--engine <capture.unxids>] [--out report.json]
@@ -35,6 +38,8 @@
 #include <string>
 #include <thread>
 
+#include <windows.h>
+
 using namespace unx;
 
 namespace
@@ -52,6 +57,8 @@ struct Args
     float sunIlluminance = -1;
     bool noHold = false;
     uint32_t orderMin = 0, orderMax = 0xFFFFFFFFu;  // --volume-order MIN:MAX (diagnostics)
+    uint32_t threads = 0;                            // --threads N (0 = 3/4 of the logical processors)
+    std::vector<std::string> alsoHold;               // --also-hold <file> (repeatable)
 };
 
 Args parse(int argc, char** argv)
@@ -86,6 +93,8 @@ Args parse(int argc, char** argv)
         else if (k == "--engine") a.engine = next();
         else if (k == "--test") a.test = next();
         else if (k == "--write-scene") a.writeScene = next();
+        else if (k == "--threads") a.threads = (uint32_t)std::stoul(next());
+        else if (k == "--also-hold") a.alsoHold.push_back(next());
         else if (k == "--volume-order")
         {
             const std::string r = next();
@@ -138,8 +147,24 @@ std::filesystem::path root() { return std::filesystem::path(UNX_SOURCE_DIR); }
 // Files that pause render/census workers (see RenderSettings::pauseWhileExists).
 std::vector<std::filesystem::path> holdFiles(const Args& a)
 {
-    if (a.noHold) return {};
-    return { root() / ".gpulock" / "current.json", root() / ".gpulock" / "HOLD" };
+    std::vector<std::filesystem::path> f;
+    if (!a.noHold) f = { root() / ".gpulock" / "current.json", root() / ".gpulock" / "HOLD" };
+    for (const std::string& h : a.alsoHold) f.push_back(h);
+    return f;
+}
+
+// The machine is shared with other sessions' builds and correctness tests (they run without the GPU lock): a render
+// takes at most 3/4 of the logical processors (--threads overrides), the highest-numbered ones, leaving the lowest
+// (P-cores on this machine) to the others. Applied as the process affinity, so the job pool, Embree's BVH builder and
+// the atmosphere table all stay inside it.
+void limitProcessors(const Args& a)
+{
+    const unsigned hw = std::thread::hardware_concurrency();
+    if (hw < 2 || hw > 64) return;
+    const unsigned n = std::clamp(a.threads ? a.threads : hw * 3 / 4, 1u, hw);
+    if (n == hw) return;
+    const unsigned long long all = hw == 64 ? ~0ull : ((1ull << hw) - 1), low = (1ull << (hw - n)) - 1;
+    if (SetProcessAffinityMask(GetCurrentProcess(), (DWORD_PTR)(all & ~low))) logf("reference: using %u of %u logical processors (%u..%u)\n", n, hw, hw - n, hw - 1);
 }
 
 struct ReferenceKeys
@@ -239,6 +264,7 @@ int main(int argc, char** argv)
     try
     {
         const Args a = parse(argc, argv);
+        limitProcessors(a);
         const QualityConfig q = QualityConfig::loadDirectory(root() / "Config" / "quality");
         if (a.command == "selfcheck")
         {
