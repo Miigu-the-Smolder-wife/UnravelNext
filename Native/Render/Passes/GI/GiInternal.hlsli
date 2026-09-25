@@ -23,6 +23,9 @@
 // Byte offset of the per-entry radiance map owner (lowest probe index reading the entry this frame; ~0 = none), written by
 // GiProbeGather, read by GiProbeMaps, reset by GiTableClear.
 #define GI_H_MAP_OWNER 148
+// Reflection hits' cache lookups this frame, and those that found no updated cell at any level (diagnostics).
+#define GI_H_STAT_HIT_LOOKUPS 152
+#define GI_H_STAT_HIT_MISSES 156
 // Selection of this frame, per tier (0 = screen, 1 = hit): age bucket at the tier's budget boundary, entries still to
 // take from that bucket, atomic counter within it (tier t at GI_H_SELECT + 16 t).
 #define GI_H_SELECT 160

@@ -4,9 +4,9 @@
 // indirectly with this frame's job count. The value is the lobe-normalised incident radiance (VNDF samples of the GGX
 // lobe, so the normalised integral is the mean of the samples):
 //   M job: one sample;
-//   G job: reflection.g_rays_per_sample (4) samples with the screen-probe cache as control variate:
-//          I = gbar + mean(L_i - g_i), g_i = screenProbeRadiance in direction w_i (texel cone), gbar = the same over the
-//          whole lobe (reflectionLobeHalfAngle). The variance left is that of L - g: small where the cache is good.
+//   G job: reflection.g_rays_per_sample (4) samples with the screen-probe cache as control variate g_i =
+//          screenProbeRadiance in direction w_i (texel cone), gbar = its mean over the lobe (reflLobeControl, quadrature):
+//          reflLobeEstimate (difference estimator where the rays are as bright as the cache, ratio estimator where darker).
 // Traversal only (ARCHITECTURE 2.6 revision 1): the job's rays get slots in the rays buffer and their hit records; the
 // hit shading runs in compute (ReflectionShade.hlsl, then ReflectionShadow for off-screen sun visibility, then
 // ReflectionCombine for the job's value). A job whose rays do not fit this frame's capacity is traced, shaded and
@@ -24,7 +24,7 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
     int2 probeCount;
     const GiProbeFootprint footprint = giProbeFootprint(probeTexture, j.pixel, j.s.normal, j.s.linearDepth, probeSpacing, probeCount);
     uint seed = j.seed;
-    float3 sum = 0;
+    float3 sumL = 0, sumG = 0;
     float distSum = 0;
     uint valid = 0;
     [loop] for (uint i = 0; i < j.rays; ++i)
@@ -39,12 +39,14 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
         float d;
         const float3 L = reflHitRadiance(scene, cache, h, r, j.coneWidth, j.coneSpread, seed, d);
         const float3 g = j.mode == REFL_G ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, dir, 0.1763, P[3].w) : 0;
-        sum += L - g;
+        sumL += L;
+        sumG += g;
         distSum += d;
         ++valid;
     }
-    const float3 gbar = j.mode == REFL_G || valid == 0 ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w) : 0;
-    results[job] = reflPackResult(max((valid > 0 ? sum / valid : 0) + gbar, 0.0), valid > 0 ? distSum / valid : 0);
+    const float3 gbar = j.mode == REFL_G ? reflLobeControl(j, probeTexture, footprint, probeCount)
+                                         : valid == 0 ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w) : 0;
+    results[job] = reflPackResult(reflLobeEstimate(sumL, sumG, valid, gbar), valid > 0 ? distSum / valid : 0);
 }
 
 [shader("raygeneration")]

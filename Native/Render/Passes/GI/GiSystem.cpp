@@ -405,6 +405,8 @@ GiStats GiSystem::readStats()
     st.tableFull = h[34];
     st.evicted = h[35];
     st.resets = h[36];
+    st.hitLookups = h[38];  // GI_H_STAT_HIT_LOOKUPS
+    st.hitMisses = h[39];
     return st;
 }
 } // namespace unx::render::gi

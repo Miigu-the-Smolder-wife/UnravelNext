@@ -70,7 +70,18 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
             giTouch(cache, h, e);
             giRequestHit(cache, h, e);
         }
-        giCacheLightingAt(cache, h, s.position, s.normal, reflect(direction, s.normal), footprintLevel, L.irradiance, L.specularRadiance);
+        float3 sumE, sumL;
+        float weight;
+        giCacheLevels(cache, h, s.position, s.normal, reflect(direction, s.normal), true, footprintLevel, sumE, sumL, weight);
+        L.irradiance = weight > 0 ? sumE / weight : 0;
+        L.specularRadiance = weight > 0 ? sumL / weight : 0;
+        // Diagnostics: lookups and misses (no updated cell at any level searched), one atomic per wave.
+        const uint lookups = WaveActiveCountBits(true), misses = WaveActiveCountBits(weight <= 0);
+        if (WaveIsFirstLane())
+        {
+            cache.InterlockedAdd(GI_H_STAT_HIT_LOOKUPS, lookups);
+            if (misses) cache.InterlockedAdd(GI_H_STAT_HIT_MISSES, misses);
+        }
     }
     const float3 v = -direction;
     L.sunIlluminance = 0;

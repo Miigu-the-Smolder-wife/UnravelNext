@@ -26,6 +26,7 @@ struct GiStats  // header counters of the last completed frame (tests, diagnosti
 {
     uint32_t live = 0, free = 0, requested = 0, selected = 0, background = 0, hits = 0;
     uint32_t created = 0, allocationFailures = 0, tableFull = 0, evicted = 0, resets = 0;
+    uint32_t hitLookups = 0, hitMisses = 0;  // reflection hits' cache lookups and those with no data at any level
 };
 
 class GiSystem

@@ -530,7 +530,7 @@ struct Outcome
     double worstM = 0, worstG = 0, meanM = 0, meanG = 0;
     double excessM = -1, excessG = -1;  // largest deviation beyond the pixel's allowance (<= 0: all within)
     uint32_t exactOccupied = 0, exactSlots = 0;  // RayScene's reflection exact set after the last frame
-    uint32_t outliersM = 0;
+    uint32_t outliersM = 0, outliersG = 0;
 };
 
 Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky,
@@ -690,6 +690,9 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             sumG += v / expected;
             out.excessG = std::max(out.excessG, std::fabs(v / expected - 1) - allowG);
             out.worstG = std::max(out.worstG, std::fabs(v / expected - 1));
+            if (std::fabs(v / expected - 1) > allowG && out.outliersG++ < 6)
+                logf("  G outlier at pixel (%u, %u): %.4f (expected %.4f, sigma %.4f, allowance %.2f %%; surface (%.3f, %.3f, %.3f) roughness %.2f)\n", px, py, v, expected,
+                     e.sigma, 100 * allowG, e.surface.x, e.surface.y, e.surface.z, e.roughness);
         }
     }
     out.meanM = out.mirror ? sumM / out.mirror : 0;

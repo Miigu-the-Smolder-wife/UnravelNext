@@ -415,6 +415,8 @@ int main(int argc, char** argv)
                 const gi::GiStats st = giSystem->readStats();
                 logf("R %s: cache %u live, %u requested, %u selected + %u background updates, %u hit entries, %u created, %u allocation failures, %u table overflows\n",
                      res.name.c_str(), st.live, st.requested, st.selected, st.background, st.hits, st.created, st.allocationFailures, st.tableFull);
+                logf("R %s: reflection hits' cache lookups %u, with no data at any level searched %u (%.3f %%)\n", res.name.c_str(), st.hitLookups, st.hitMisses,
+                     st.hitLookups ? 100.0 * st.hitMisses / st.hitLookups : 0.0);
             }
         }
         rt::RayPipeline::releaseDevice(device);

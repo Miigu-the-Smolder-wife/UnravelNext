@@ -39,6 +39,23 @@ ReflPlanar reflPlanar(uint srv, uint offset, uint index)
     return p;
 }
 
+// A job's value from its n unmasked samples: sumL = sum of the rays' radiance, sumG = sum of the control variate g (the
+// screen-probe cache in each ray's direction; 0 for M jobs), gbar = the control variate's lobe integral. The estimate is
+// mean(L) + beta (gbar - mean(g)) per channel with beta = min(1, mean(L) / mean(g)): where the rays are at least as bright
+// as the cache predicts it is the difference estimator gbar + mean(L - g) (beta = 1, >= gbar); where they are darker
+// (the cache sees past an occluder near the surface: probe parallax, contact shadows) it is the ratio estimator
+// gbar mean(L) / mean(g), never negative. The difference estimator alone went negative there and was clamped to 0: black
+// G samples spread over their spacing (dark blocks and dots on glossy surfaces near contacts). Both agree at
+// mean(L) = mean(g); no samples: gbar.
+float3 reflLobeEstimate(float3 sumL, float3 sumG, uint n, float3 gbar)
+{
+    if (n == 0) return gbar;
+    const float3 meanL = sumL / n, meanG = sumG / n;
+    if ((P[5].x >> 24) & 128) return max(gbar + meanL - meanG, 0.0);  // attribution: the difference estimator alone
+    const float3 beta = select(meanG > 1e-8, min(meanL / max(meanG, 1e-8), 1.0), 1.0);
+    return max(meanL + beta * (gbar - meanG), 0.0);
+}
+
 // A job = a pixel that traces: an M pixel (1 ray) or a G sample (4 rays). Encoded as x | y << 16.
 uint reflPackPixel(uint2 p) { return p.x | (p.y << 16); }
 uint2 reflUnpackPixel(uint v) { return uint2(v & 0xFFFFu, v >> 16); }

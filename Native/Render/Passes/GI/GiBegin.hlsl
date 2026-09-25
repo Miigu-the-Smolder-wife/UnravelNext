@@ -21,6 +21,7 @@ void main(uint lane : SV_GroupIndex)
     b.Store(GI_H_HIT_COUNT + 4 * (P[0].y & 1u), 0u);  // this frame's hit list; last frame's is carried by GiCarry
     b.Store4(GI_H_STAT_CREATED, uint4(0, 0, 0, 0));
     b.Store(GI_H_STAT_RESETS, 0u);
+    b.Store2(GI_H_STAT_HIT_LOOKUPS, uint2(0, 0));
     b.Store4(GI_H_SELECT, uint4(0, 0, 0, 0));
     b.Store4(GI_H_SELECT + 16, uint4(0, 0, 0, 0));
 }

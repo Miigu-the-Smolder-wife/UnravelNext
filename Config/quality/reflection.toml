@@ -15,4 +15,5 @@ experiment_disable = 0                 # cost attribution only (recorded in the 
                                        # any-hit, 2 = no sun visibility at hits (neither VSM nor rays), 4 = sun visibility at hits
                                        # by shadow rays only (no VSM lookup), 8 = hit materials without textures, 16 = no cache
                                        # lookup at hits, 32 = traversal only (a hit returns 1), 64 = every job traced and shaded
-                                       # in the ray generation shader (no compute split). Never nonzero outside measurements.
+                                       # in the ray generation shader (no compute split), 128 = G jobs by the difference estimator alone
+                                       # (reflLobeEstimate). Never nonzero outside measurements.

@@ -96,6 +96,26 @@ uint reflPackBarycentrics(float2 b)
 }
 float2 reflUnpackBarycentrics(uint v) { return float2(v & 0xFFFFu, v >> 16) / 65535.0; }
 
+// The control variate's lobe integral for a G job: the mean of g (the screen-probe cache at texel resolution, the same
+// function the rays' g_i sample) over a fixed 4 x 4 stratified VNDF quadrature of the lobe, masked directions excluded as
+// the rays exclude them. The control variate is then consistent: E[g_i] = gbar up to the quadrature's error, also where
+// the probe maps vary across the lobe (corners, contacts). The prefiltered map at the mirror direction (the K path's
+// value) differs from that mean where they vary, and biased the G estimate there. No unmasked direction: the K value.
+float3 reflLobeControl(ReflJob j, Texture2D<uint4> probes, GiProbeFootprint footprint, int2 probeCount)
+{
+    float3 sum = 0;
+    uint n = 0;
+    [loop] for (uint k = 0; k < 16; ++k)
+    {
+        const float2 u = (float2(k & 3u, k >> 2) + 0.5) / 4.0;
+        const float3 dir = reflSampleGgx(j.s.normal, j.s.view, j.alpha, u);
+        if (dot(dir, j.s.normal) <= 0) continue;
+        sum += giProbeFootprintRadiance(probes, footprint, probeCount, dir, 0.1763, P[3].w);
+        ++n;
+    }
+    return n > 0 ? sum / n : giProbeFootprintRadiance(probes, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w);
+}
+
 float3 reflRayOrigin(ReflSurface s) { return s.position + s.normal * (1e-3 + 2e-4 * s.linearDepth); }
 
 #endif
