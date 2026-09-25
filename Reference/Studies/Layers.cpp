@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <sstream>
@@ -1856,6 +1857,165 @@ void metalMixStudy(const std::string& out, uint32_t photons)
             writeTextFile(out, md.str());
         }
     }
+}
+
+// Final check of the metal multiple-scattering term as it ships: f = (1 - w(r)) F D V g(mu_v) g(mu_l) + w(r) (F D V + F_ms
+// (1 - E(mu_v))(1 - E(mu_l)) / (pi (1 - E_avg))), with g from the published table (read back from the .inc file,
+// trilinear per channel, rho = channel F0), E / E_avg from the core table, F_avg = F0 + (1 - F0) / 21, and w(r)
+// piecewise linear through the points given as "r:w,r:w,..." (UNX_W_POINTS). Against the MS conductor at off-grid
+// roughness and colours: adjoint and forward albedo, L1, white furnace and sun + sky dE.
+void metalFinal(const std::string& out, uint32_t photons)
+{
+    // Table.
+    std::vector<float> table;
+    {
+        const std::string incPath = "Results/C/MaterialLayers/tables/metal_scatter_scale.inc";
+        std::ifstream f(incPath);
+        if (!f) fail("metalfinal: cannot read %s", incPath.c_str());
+        const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        size_t p = text.find('{');
+        while (p != std::string::npos && p < text.size())
+        {
+            const size_t q = text.find_first_of("-0123456789.", p);
+            if (q == std::string::npos || text.find('}', p) < q) break;
+            char* end = nullptr;
+            table.push_back(std::strtof(text.c_str() + q, &end));
+            p = (size_t)(end - text.c_str());
+        }
+        if (table.size() != (size_t)gtab::NRHO * gtab::NR * gtab::NMU) fail("metalfinal: table has %zu values", table.size());
+    }
+    // w(r).
+    std::vector<std::pair<double, double>> wp;
+    {
+        char* v = nullptr;
+        size_t n = 0;
+        std::string spec;
+        if (_dupenv_s(&v, &n, "UNX_W_POINTS") == 0 && v) spec = v;
+        free(v);
+        if (spec.empty()) fail("metalfinal: set UNX_W_POINTS=r:w,r:w,...");
+        std::stringstream ss(spec);
+        std::string item;
+        while (std::getline(ss, item, ','))
+        {
+            const size_t c = item.find(':');
+            wp.push_back({ std::stod(item.substr(0, c)), std::stod(item.substr(c + 1)) });
+        }
+        std::sort(wp.begin(), wp.end());
+    }
+    auto wOf = [&](double r) {
+        if (r <= wp.front().first) return wp.front().second;
+        if (r >= wp.back().first) return wp.back().second;
+        for (size_t i = 1; i < wp.size(); ++i)
+            if (r <= wp[i].first)
+            {
+                const double t = (r - wp[i - 1].first) / (wp[i].first - wp[i - 1].first);
+                return wp[i - 1].second + t * (wp[i].second - wp[i - 1].second);
+            }
+        return wp.back().second;
+    };
+    const double rs[] = { 0.03, 0.1, 0.25, 0.4, 0.55, 0.7, 0.9 };
+    const Rgb cols[] = { Rgb(1.0f), Rgb(0.996f, 0.733f, 0.359f), Rgb(0.912f, 0.623f, 0.518f), Rgb(0.04f) };
+    const char* colNames[] = { "white", "gold", "copper", "dielectric F0 0.04 (specular lobe only)" };
+    const std::vector<EnvSample> furnace = environment(true), sky = environment(false);
+    double skyWhite = 0;
+    {
+        const float3 sd = normalize(float3{ 0.45f, 0.62f, 0.64f });
+        for (const EnvSample& e : sky)
+            if (dot(e.dir, sd) > 0) skyWhite += e.L.luminance() * dot(e.dir, sd) * e.dw / kPi;
+    }
+    std::ostringstream md;
+    md << "# Metal multiple scattering as shipped: (1 - w) G(table) + w K vs the MS conductor [measured]\n\n"
+          "`unx_study_material_layers metalfinal` with UNX_W_POINTS as below. g: published kMetalScatterScale (trilinear, "
+          "per channel, rho = F0); E: core table. Off-grid roughness. Photons per incidence bin: "
+       << photons << ".\n\nw(r) points:";
+    for (auto& q : wp) md << format(" (%.2f, %.2f)", q.first, q.second);
+    md << "\n\n| F0 | r | w | adjoint albedo worst (all / <=85°) | forward worst (all / <=85°) | worst L1 | L1 noise | furnace dE | sun+sky dE | render noise P99 |\n"
+          "|---|---|---|---|---|---|---|---|---|---|\n";
+    for (int c = 0; c < 4; ++c)
+        for (double r : rs)
+        {
+            const double a = scene::model::alphaFromRoughness((float)r);
+            const Rgb f0 = cols[c];
+            Table phys, half;
+            parallelFor(NI, [&](uint32_t ii) {
+                const float3 wi = incident((int)ii);
+                reference::Pcg32 rng(0x51A1 + ii, 61 + (uint64_t)(r * 1000) + 7 * (uint64_t)c);
+                for (uint32_t k = 0; k < photons; ++k)
+                {
+                    float3 o;
+                    Rgb wt;
+                    if (!cond::walk(-wi, a, f0, rng, o, wt)) continue;
+                    int bt, bp;
+                    binOf(o, bt, bp);
+                    const Rgb add = wt * (1.0f / photons);
+                    phys.at((int)ii, bt, bp) += add;
+                    if (k & 1) half.at((int)ii, bt, bp) += add * 2.0f;
+                }
+            });
+            std::vector<double> refAlb(NI, 0.0);
+            for (int i = 0; i < NI; ++i)
+                for (int t = 0; t < NT; ++t)
+                    for (int q = 0; q < NP; ++q) refAlb[i] += phys.at(i, t, q).luminance();
+            const std::vector<Rgb3> pf = renderSphere(phys, furnace, 64), ps = renderSphere(phys, sky, 64);
+            cond::Def d;
+            d.a = a;
+            d.r = r;
+            d.f0 = f0;
+            d.kind = 4;
+            d.w = wOf(r);
+            {
+                double e = 0;
+                for (int i = 0; i < 1024; ++i)
+                {
+                    const double mu = (i + 0.5) / 1024;
+                    e += d.E(mu) * 2 * mu / 1024;
+                }
+                d.Eavg = e;
+                for (int ch = 0; ch < 3; ++ch)
+                {
+                    const double f = (&f0.r)[ch] + (1 - (&f0.r)[ch]) / 21.0;
+                    (&d.Fms.r)[ch] = (float)(f * f * e / (1 - f * (1 - e)));
+                }
+            }
+            std::vector<Rgb> g(NI);
+            for (int i = 0; i < NI; ++i)
+                for (int ch = 0; ch < 3; ++ch) (&g[i].r)[ch] = (float)gtab::lookup(table, incident(i).z, r, (&f0.r)[ch]);
+            d.g = &g;
+            Table T;
+            cond::defTable(d, photons, T);
+            const Metrics m = compare(T, phys, half, furnace, sky, skyWhite, &pf, &ps);
+            const std::vector<Rgb> fwd = cond::forwardAlbedo(d, photons);
+            double adj = 0, fw = 0, adj85 = 0, fw85 = 0;
+            int adjAt = 0, fwAt = 0;
+            for (int i = 0; i < NI; ++i)
+            {
+                double sumT = 0;
+                for (int t = 0; t < NT; ++t)
+                    for (int q = 0; q < NP; ++q) sumT += T.at(i, t, q).luminance();
+                const double ea = std::fabs(sumT / refAlb[i] - 1), ef = std::fabs(fwd[i].luminance() / refAlb[i] - 1);
+                if (ea > adj)
+                {
+                    adj = ea;
+                    adjAt = i;
+                }
+                if (ef > fw)
+                {
+                    fw = ef;
+                    fwAt = i;
+                }
+                if (i + 0.5 <= 85)
+                {
+                    adj85 = std::max(adj85, ea);
+                    fw85 = std::max(fw85, ef);
+                }
+            }
+            const std::string row = format("| %s | %.2f | %.2f | %.1f%% @%.0f° / %.1f%% | %.1f%% @%.0f° / %.1f%% | %.3f @%.0f° | %.3f | %.2f / %.2f | %.2f / %.2f | %.2f / %.2f |\n",
+                                           colNames[c], r, d.w, 100 * adj, adjAt + 0.5, 100 * adj85, 100 * fw, fwAt + 0.5, 100 * fw85, m.l1Max, m.l1WorstTheta, m.l1Noise,
+                                           m.furnaceMean, m.furnaceP99, m.skyMean, m.skyP99, m.furnaceNoiseP99, m.skyNoiseP99);
+            md << row;
+            logf("%s", row.c_str());
+            writeTextFile(out, md.str());
+        }
 }
 
 // Coat + film (design 3, item 3): film under the coat (outer index 1.5); the physical base uses the exact spectral film
