@@ -28,7 +28,12 @@ struct FroxelStats
     uint32_t candidateOverflow = 0;              // tiles whose frustum held more than 1024 lights
 };
 
-// froxels(fc, main): fills FrameResources::froxelLights and ::froxels. Needs shadowPages of the same frame.
+// shadowPages: the froxel light lists of the main view (FrameResources::froxelLights) with each entry's shadow-slot bit
+// (slotOfLightSrv: StructuredBuffer<uint> scene light -> shadow slot, or 0xFFFFFFFF: none). The local-light page marks
+// and the visibility slots read them.
+void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t slotOfLightSrv);
+// froxels(fc, main): the air volume (FrameResources::froxels, ::aerialPerspective); records the lists itself when
+// shadowPages did not.
 void recordFroxels(FramePassContext& fc, const ViewResources& main);
 // Counters of the most recent frame whose GPU work has completed (read back without stalling).
 const FroxelStats& froxelStats(TrackState& state);

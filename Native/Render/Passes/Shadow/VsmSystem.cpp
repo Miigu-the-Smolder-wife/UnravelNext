@@ -11,6 +11,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace unx::render::shadow
 {
@@ -63,6 +64,21 @@ struct State
     // Pool growth: a frame whose requests exhausted the pool sets the next size (never shrinks while running).
     uint32_t poolTarget = 0;
     uint64_t grownAtFrame = 0;
+    // Local-light shadows: shadow slot -> scene light + 1 (0 = free), generation, geometry signature; per-frame uploads.
+    uint32_t localLight[kLocalLights] = {};
+    uint32_t localGen[kLocalLights] = {};
+    float localSig[kLocalLights][6] = {};
+    VsmLocalLightCpu localData[kLocalLights] = {};
+    std::vector<uint32_t> slotOfLight;   // scene light -> shadow slot or 0xFFFF
+    std::vector<uint32_t> localActive;   // shadow slots whose light meets the main view (raster views this frame)
+    uint32_t localUsed = 0;              // highest assigned slot + 1
+    uint32_t localSceneRevision = UINT32_MAX;
+    uint32_t localWithoutSlot = 0;
+    ComPtr<ID3D12Resource> localRing, localMask;
+    uint8_t* localMapped = nullptr;
+    uint32_t localStride = 0, localCap = 0;
+    uint32_t localLightsSrv[kRingSlots] = {}, localSlotOfSrv[kRingSlots] = {}, localActiveSrv[kRingSlots] = {};
+    uint32_t localLightsNow = UINT32_MAX, slotOfNow = UINT32_MAX, activeNow = UINT32_MAX;
 };
 
 // Views of the page-count-dependent resources: new descriptor indices each time (frames in flight keep the old ones).
@@ -94,7 +110,7 @@ void createFixedViews(Device& device, State& s)
     sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
     sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sd.Format = DXGI_FORMAT_R32_TYPELESS;
-    sd.Buffer.NumElements = (UINT)((uint64_t)kSlots * 8 / 4);
+    sd.Buffer.NumElements = (UINT)((uint64_t)kTotalSlots * 8 / 4);
     sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
     device.d3d()->CreateShaderResourceView(s.table.Get(), &sd, h.resourceCpu(s.tableSrv));
     for (uint32_t i = 0; i < kRingSlots; ++i)
@@ -127,8 +143,9 @@ void createState(FramePassContext& fc, State& s, uint32_t pages)
     createPoolViews(d, s);
     if (!s.table)
     {
-        s.table = createBuffer(d, L"S VSM page table", (uint64_t)kSlots * 8);
-        s.requests = createBuffer(d, L"S VSM requests", (uint64_t)kSlots * 4);
+        s.table = createBuffer(d, L"S VSM page table", (uint64_t)kTotalSlots * 8);
+        s.requests = createBuffer(d, L"S VSM requests", (uint64_t)kTotalSlots * 4);
+        s.localMask = createBuffer(d, L"S VSM local cull mask", (uint64_t)kLocalLights * kLocalViewsPerLight * 512 * 4);
         s.cullMask = createBuffer(d, L"S VSM cull mask", (uint64_t)kSlots / 8);
         s.args = createBuffer(d, L"S VSM indirect args", 32);  // dirty pages at 0, moved instances x levels at 16
         s.stats = createBuffer(d, L"S VSM stats", 80);
@@ -193,6 +210,68 @@ float4x4 levelViewProj(const VsmConstantsCpu& c, uint32_t k)
 }
 
 uint32_t groups(uint64_t n, uint32_t size) { return (uint32_t)((n + size - 1) / size); }
+
+// Cube face bases (VsmLocal.hlsli vsmCubeBasis): right = up x axis.
+void cubeBasis(uint32_t face, float3& right, float3& up, float3& axis)
+{
+    static const float3 axes[6] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+    static const float3 ups[6] = { { 0, 1, 0 }, { 0, 1, 0 }, { 0, 0, -1 }, { 0, 0, 1 }, { 0, 1, 0 }, { 0, 1, 0 } };
+    axis = axes[face];
+    up = ups[face];
+    right = cross(up, axis);
+}
+
+// View-projection of a local face at a mip: the face's tangent square [-1, 1]^2 onto the top-left res x res pixels of
+// the 16384^2 viewport (s = res / 16384), depth d = f (z - n) / ((f - n) z) (VsmLocalPixel.hlsl inverts it).
+float4x4 localViewProj(const VsmLocalLightCpu& l, uint32_t face, uint32_t mip)
+{
+    float3 right, up, axis;
+    cubeBasis(face, right, up, axis);
+    const float sc = (float)(kPage << mip) / kVirtual;
+    const float n = l.nearM, f = l.farM, A = f / (f - n), B = -f * n / (f - n);
+    const float3 r0 = right * sc + axis * (sc - 1), r1 = up * sc + axis * (1 - sc), r2 = axis * A, r3 = axis;
+    float4x4 m;
+    const float3 rows[4] = { r0, r1, r2, r3 };
+    for (int i = 0; i < 4; ++i)
+    {
+        m.m[i][0] = rows[i].x;
+        m.m[i][1] = rows[i].y;
+        m.m[i][2] = rows[i].z;
+        m.m[i][3] = -dot(rows[i], l.position);
+    }
+    m.m[2][3] += B;
+    return m;
+}
+
+// Radius of the light's emitter seen from receivers (VsmLocal.hlsli): sphere/disk radius, rect half-diagonal, tube half
+// length plus radius; 0 for points and spots.
+float emitterRadius(const scene::Light& l)
+{
+    switch (l.type)
+    {
+    case scene::LightType::Sphere:
+    case scene::LightType::Disk: return l.size.x;
+    case scene::LightType::Rect: return 0.5f * std::sqrt(l.size.x * l.size.x + l.size.y * l.size.y);
+    case scene::LightType::Tube: return 0.5f * l.size.x + l.size.y;
+    default: return 0.0f;
+    }
+}
+
+// Sphere against the main view's frustum (clip = viewProj x p: -w <= x, y <= w, z <= w for reversed-Z near).
+bool sphereInView(const float4x4& vp, float3 c, float radius)
+{
+    // Planes w + x, w - x, w + y, w - y, w - z (rows of viewProj combined).
+    const int rowA[5] = { 3, 3, 3, 3, 3 }, rowB[5] = { 0, 0, 1, 1, 2 };
+    const float sign[5] = { 1, -1, 1, -1, -1 };
+    for (int i = 0; i < 5; ++i)
+    {
+        float p[4];
+        for (int j = 0; j < 4; ++j) p[j] = vp.m[rowA[i]][j] + sign[i] * vp.m[rowB[i]][j];
+        const float len = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+        if (p[0] * c.x + p[1] * c.y + p[2] * c.z + p[3] < -radius * len) return false;
+    }
+    return true;
+}
 } // namespace
 
 const VsmStats& stats(TrackState& state)
@@ -216,6 +295,129 @@ bool frameRefs(FramePassContext& fc, VsmFrameRefs& out)
     out.constantsCbv = s.ringCbv[s.constantsOffset / kRingStride];
     return true;
 }
+
+namespace
+{
+// Local lights of this frame: shadow slots (persistent while a light keeps casting; a slot's generation changes when its
+// light changes or moves, which releases its pages), the lights meeting the main view (raster views), and the uploads
+// (local lights, scene light -> slot, active slots) in this frame's ring slice.
+void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main)
+{
+    const scene::Scene* src = fc.scene.source();
+    const std::vector<scene::Light> none;
+    const std::vector<scene::Light>& lights = src ? src->lights : none;
+    const uint32_t n = (uint32_t)lights.size();
+    if (fc.scene.revision() != s.localSceneRevision)
+    {
+        // A new scene: every slot's light may be another now.
+        for (uint32_t i = 0; i < kLocalLights; ++i)
+            if (s.localLight[i] != 0) ++s.localGen[i];
+        std::fill(std::begin(s.localLight), std::end(s.localLight), 0u);
+        s.localSceneRevision = fc.scene.revision();
+    }
+    s.slotOfLight.assign(n, 0xFFFFu);
+    for (uint32_t i = 0; i < kLocalLights; ++i)
+    {
+        const uint32_t li = s.localLight[i];
+        if (li == 0) continue;
+        if (li - 1 < n && lights[li - 1].castShadow) s.slotOfLight[li - 1] = i;
+        else
+        {
+            s.localLight[i] = 0;
+            ++s.localGen[i];
+        }
+    }
+    s.localWithoutSlot = 0;
+    uint32_t freeSlot = 0;
+    for (uint32_t li = 0; li < n; ++li)
+    {
+        if (!lights[li].castShadow || s.slotOfLight[li] != 0xFFFFu) continue;
+        while (freeSlot < kLocalLights && s.localLight[freeSlot] != 0) ++freeSlot;
+        if (freeSlot == kLocalLights)
+        {
+            ++s.localWithoutSlot;
+            continue;
+        }
+        s.localLight[freeSlot] = li + 1;
+        ++s.localGen[freeSlot];
+        s.slotOfLight[li] = freeSlot;
+    }
+    s.localUsed = 0;
+    s.localActive.clear();
+    for (uint32_t i = 0; i < kLocalLights; ++i)
+    {
+        VsmLocalLightCpu& d = s.localData[i];
+        d = {};
+        if (s.localLight[i] == 0) continue;
+        const scene::Light& l = lights[s.localLight[i] - 1];
+        const float radius = emitterRadius(l);
+        const float sig[6] = { l.position.x, l.position.y, l.position.z, l.range, radius, (float)l.type };
+        if (std::memcmp(sig, s.localSig[i], sizeof sig) != 0)
+        {
+            ++s.localGen[i];  // moved or reshaped: its pages are released and rendered anew
+            std::memcpy(s.localSig[i], sig, sizeof sig);
+        }
+        d.position = l.position;
+        d.radius = radius;
+        d.nearM = std::max(0.05f, radius);
+        d.farM = l.range + radius;
+        d.lightIndex = s.localLight[i] - 1;
+        d.generation = s.localGen[i];
+        d.active = 1;
+        s.localUsed = i + 1;
+        const float3 eye = main.view.position;
+        const float3 toLight = { d.position.x - eye.x, d.position.y - eye.y, d.position.z - eye.z };
+        if (dot(toLight, toLight) <= d.farM * d.farM || sphereInView(main.view.viewProj, d.position, d.farM)) s.localActive.push_back(i);
+    }
+    s.latest.localAssigned = 0;
+    for (uint32_t i = 0; i < kLocalLights; ++i) s.latest.localAssigned += s.localLight[i] != 0 ? 1u : 0u;
+    s.latest.localActive = (uint32_t)s.localActive.size();
+    s.latest.localWithoutSlot = s.localWithoutSlot;
+
+    // Upload ring: [local lights 128 x 48 B][active slots 128 x 4 B][scene light -> slot, cap x 4 B].
+    const uint32_t cap = std::max(n, 1u);
+    if (!s.localRing || cap > s.localCap)
+    {
+        if (s.localRing) fc.device.deferRelease(s.localRing);
+        s.localCap = std::max(cap, 256u);
+        s.localStride = (kLocalLights * 48 + kLocalLights * 4 + s.localCap * 4 + 255) & ~255u;
+        s.localRing = createBuffer(fc.device, L"S VSM local lights ring", (uint64_t)kRingSlots * s.localStride, D3D12_HEAP_TYPE_UPLOAD);
+        D3D12_RANGE nothing{ 0, 0 };
+        check(s.localRing->Map(0, &nothing, reinterpret_cast<void**>(&s.localMapped)), "map VSM local ring");
+        DescriptorHeaps& h = fc.device.descriptors();
+        for (uint32_t r = 0; r < kRingSlots; ++r)
+        {
+            auto view = [&](uint64_t offset, uint32_t elements, uint32_t stride) {
+                const uint32_t index = h.allocateResource();
+                D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+                sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                sd.Format = DXGI_FORMAT_UNKNOWN;
+                sd.Buffer.FirstElement = (UINT64)(r * (uint64_t)s.localStride + offset) / stride;
+                sd.Buffer.NumElements = elements;
+                sd.Buffer.StructureByteStride = stride;
+                fc.device.d3d()->CreateShaderResourceView(s.localRing.Get(), &sd, h.resourceCpu(index));
+                return index;
+            };
+            s.localLightsSrv[r] = view(0, kLocalLights, 48);
+            s.localActiveSrv[r] = view(kLocalLights * 48, kLocalLights, 4);
+            s.localSlotOfSrv[r] = view(kLocalLights * 52, s.localCap, 4);
+        }
+    }
+    const uint32_t r = (uint32_t)(fc.frame.frameIndex % kRingSlots);
+    uint8_t* base = s.localMapped + (uint64_t)r * s.localStride;
+    std::memcpy(base, s.localData, sizeof s.localData);
+    std::vector<uint32_t> active(kLocalLights, 0);
+    std::copy(s.localActive.begin(), s.localActive.end(), active.begin());
+    std::memcpy(base + kLocalLights * 48, active.data(), kLocalLights * 4);
+    std::vector<uint32_t> slotOf(s.localCap, 0xFFFFu);
+    std::copy(s.slotOfLight.begin(), s.slotOfLight.end(), slotOf.begin());
+    std::memcpy(base + kLocalLights * 52, slotOf.data(), (uint64_t)s.localCap * 4);
+    s.localLightsNow = s.localLightsSrv[r];
+    s.activeNow = s.localActiveSrv[r];
+    s.slotOfNow = s.localSlotOfSrv[r];
+}
+} // namespace
 
 void recordPages(FramePassContext& fc, const ViewResources& main)
 {
@@ -345,10 +547,19 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.jointsPending = true;
     }
 
+    updateLocalLights(fc, s, main);
+
     RenderGraph& g = fc.graph;
     const BufferRef pool = g.importBuffer(s.pool.Get(), BufferDesc{ "S VSM pool", (uint64_t)pages * kPage * kPage * 4, 0 });
-    const BufferRef table = g.importBuffer(s.table.Get(), BufferDesc{ "S VSM page table", (uint64_t)kSlots * 8, 0 });
-    const BufferRef requests = g.importBuffer(s.requests.Get(), BufferDesc{ "S VSM requests", (uint64_t)kSlots * 4, 0 });
+    const BufferRef table = g.importBuffer(s.table.Get(), BufferDesc{ "S VSM page table", (uint64_t)kTotalSlots * 8, 0 });
+    const BufferRef requests = g.importBuffer(s.requests.Get(), BufferDesc{ "S VSM requests", (uint64_t)kTotalSlots * 4, 0 });
+    const BufferRef localMask = g.importBuffer(s.localMask.Get(), BufferDesc{ "S VSM local cull mask", (uint64_t)kLocalLights * kLocalViewsPerLight * 512 * 4, 0 });
+    // Slots the per-slot passes cover: the sun's and those of the assigned local lights.
+    const uint32_t slotsUsed = kSlots + s.localUsed * kLocalLightSlots;
+    const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow, activeSrv = s.activeNow;
+    // Froxel light lists (with each entry's shadow-slot bit): the local page marks and the visibility slots read them.
+    recordFroxelLists(fc, main, slotOfSrv);
+    const BufferRef froxelLists = fc.resources.froxelLights;
     const BufferRef meta = g.importBuffer(s.meta.Get(), BufferDesc{ "S VSM page metadata", (uint64_t)pages * kMetaBytes, kMetaBytes });
     const BufferRef blocks = g.importBuffer(s.blocks.Get(), BufferDesc{ "S VSM page blocks", (uint64_t)pages * kBlockBytes, 0 });
     s.blocksRef = blocks;
@@ -401,10 +612,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.uav(table), ctx.uav(requests), ctx.uav(meta), ctx.uav(freeList), kSlots, pages, 0, 0 };
+                      const uint32_t k[8] = { ctx.uav(table), ctx.uav(requests), ctx.uav(meta), ctx.uav(freeList), kTotalSlots, pages, 0, 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(std::max(kSlots, pages), 256), 1, 1);
+                      ctx.cmd->Dispatch(groups(std::max(kTotalSlots, pages), 256), 1, 1);
                   });
         s.needsInit = false;
     }
@@ -478,6 +689,28 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 8);
                       ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+                  });
+    }
+    if (s.localUsed > 0 && main.depth.valid())
+    {
+        // Local-light page requests (VsmLocalMark) through the froxel lists.
+        ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmLocalMark");
+        const TextureRef depth = main.depth;
+        const uint32_t w = main.view.width, h = main.view.height;
+        g.addPass("s.vsm.localmark", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(depth, Use::SrvCompute);
+                      b.use(froxelLists, Use::SrvCompute);
+                      b.use(requests, Use::UavCompute);
+                      b.keep();
+                  },
+                  [=](PassContext& ctx) {
+                      const uint32_t lists = ctx.srv(froxelLists);
+                      const uint32_t k[8] = { ctx.srv(depth), ctx.uav(requests), localLightsSrv, slotOfSrv, lists, lists, 0, 0 };
+                      ctx.cmd->SetPipelineState(pso);
+                      ctx.bindFrameConstants(mainConstants);
+                      ctx.computeConstants(k, 8);
+                      ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
                   });
     }
     {
@@ -556,10 +789,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.uav(table), ctx.srv(requests), ctx.uav(meta), ctx.uav(freeList), ring, off, 0, 0 };
+                      const uint32_t k[8] = { ctx.uav(table), ctx.srv(requests), ctx.uav(meta), ctx.uav(freeList), ring, localLightsSrv, 0, 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(kSlots, 256), 1, 1);
+                      ctx.cmd->Dispatch(groups(slotsUsed, 256), 1, 1);
                   });
     }
     {
@@ -575,10 +808,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.uav(table), ctx.uav(requests), ctx.uav(meta), ctx.uav(freeList), ctx.uav(dirty), ctx.uav(statsBuf), ring, off };
+                      const uint32_t k[8] = { ctx.uav(table), ctx.uav(requests), ctx.uav(meta), ctx.uav(freeList), ctx.uav(dirty), ctx.uav(statsBuf), ring, localLightsSrv };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(kSlots, 256), 1, 1);
+                      ctx.cmd->Dispatch(groups(slotsUsed, 256), 1, 1);
                   });
     }
     {
@@ -661,6 +894,61 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             r.views.push_back(v);
         }
         fc.services.rasterizeDepth(fc, r);
+    }
+    if (fc.services.rasterizeDepth && !s.localActive.empty())
+    {
+        // Local lights: tile masks of the (light, face, mip) views, then the raster of their dirty pages; one request per
+        // 6 lights (42 views each, V's 255-view limit), all views in one 16384^2 viewport (VsmLocalPixel.hlsl).
+        const uint32_t views = (uint32_t)s.localActive.size() * kLocalViewsPerLight;
+        ID3D12PipelineState* pm = sh.compute("Passes/Shadow/VsmLocalCullMask");
+        g.addPass("s.vsm.localcullmask", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(table, Use::SrvCompute);
+                      b.use(localMask, Use::UavCompute);
+                      b.keep();
+                  },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.srv(table), ctx.uav(localMask), views, activeSrv };
+                      ctx.cmd->SetPipelineState(pm);
+                      ctx.computeConstants(k, 4);
+                      ctx.cmd->Dispatch(groups(views * 512, 64), 1, 1);
+                  });
+        for (uint32_t first = 0; first < s.localActive.size(); first += 6)
+        {
+            DepthRasterRequest r;
+            r.name = "s.vsm.localraster" + std::to_string(first / 6);
+            r.instanceMask = scene::InstanceCastShadow;
+            r.pixelKernel = "Passes/Shadow/VsmLocalPixel";
+            r.bufferUses.push_back({ pool, Use::UavGraphics });
+            r.bufferUses.push_back({ table, Use::SrvGraphics });
+            r.bufferUses.push_back({ meta, Use::UavGraphics });
+            r.pixelConstants[0] = s.poolUav;
+            r.pixelConstants[1] = s.tableSrv;
+            r.pixelConstants[2] = localLightsSrv;
+            r.pixelConstants[5] = s.metaUav;
+            r.cullMask = localMask;
+            r.cullTilePx = kPage;
+            r.tileLocal = true;
+            r.cull = D3D12_CULL_MODE_NONE;
+            for (uint32_t a = first; a < std::min<uint32_t>(first + 6, (uint32_t)s.localActive.size()); ++a)
+            {
+                const uint32_t slot = s.localActive[a];
+                const VsmLocalLightCpu& l = s.localData[slot];
+                for (uint32_t face = 0; face < 6; ++face)
+                    for (uint32_t mip = 0; mip < kLocalMips; ++mip)
+                    {
+                        RasterView v;
+                        v.viewProj = localViewProj(l, face, mip);
+                        v.viewportX = v.viewportY = 0;
+                        v.viewportWidth = v.viewportHeight = kVirtual;
+                        v.lodPixelsPerMetre = 0.5f * (float)(kPage << mip);  // focal length in texels (90 degree face)
+                        v.userData = slot | face << 7 | mip << 10;
+                        v.cullMaskOffset = (a * kLocalViewsPerLight + face * kLocalMips + mip) * 512;
+                        r.views.push_back(v);
+                    }
+            }
+            fc.services.rasterizeDepth(fc, r);
+        }
     }
 
     {

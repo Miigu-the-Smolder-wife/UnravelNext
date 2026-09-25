@@ -31,8 +31,23 @@ struct VsmConstantsCpu
     VsmLevelCpu level[20];
 };
 constexpr uint32_t kLevels = 20, kPage = 128, kTable = 128, kVirtual = 16384;
+// Local-light shadows (VsmLocal.hlsli): 128 shadow slots x 6 cube faces x 7 mips (128 .. 8192 texels).
+constexpr uint32_t kLocalLights = 128, kLocalMips = 7, kLocalFaceSlots = 5461, kLocalLightSlots = 6 * kLocalFaceSlots;
+constexpr uint32_t kLocalViewsPerLight = 6 * kLocalMips;
+// Mirror of VsmLocalLight (48 B).
+struct VsmLocalLightCpu
+{
+    float3 position;
+    float nearM;
+    float farM, radius;
+    uint32_t lightIndex, generation;
+    float pad[3];
+    uint32_t active;
+};
+static_assert(sizeof(VsmLocalLightCpu) == 48);
 static_assert(sizeof(VsmConstantsCpu) == 64 + 16 * 3 + kLevels * 16 && sizeof(VsmConstantsCpu) <= 1024);
-constexpr uint32_t kSlots = kLevels * kTable * kTable;
+constexpr uint32_t kSlots = kLevels * kTable * kTable;  // the sun's
+constexpr uint32_t kTotalSlots = kSlots + kLocalLights * kLocalLightSlots;
 
 struct VsmStats
 {
@@ -40,6 +55,8 @@ struct VsmStats
     uint32_t requested = 0, allocated = 0, dirty = 0, exhausted = 0, freePages = 0, pixelRequested = 0;
     // Visibility passes (all views of the frame): pixels per path (VsmSample.hlsli VSM_PATH_*).
     uint32_t pathNoCaster = 0, pathRegionLit = 0, pathRegionUmbra = 0, pathSearchLit = 0, pathFiltered = 0, pathDiskLit = 0, pathDiskUmbra = 0;
+    // Local lights of the latest recorded frame (CPU): shadow slots in use, raster-active, casting lights without a slot.
+    uint32_t localAssigned = 0, localActive = 0, localWithoutSlot = 0;
 };
 
 // shadowPages: requests, dirty rules, allocation and the dirty-page raster for this frame.

@@ -28,6 +28,9 @@ struct State
     int lastStatsSlot = -1;
     FroxelStats latest;
     bool keep = false;
+    // This frame's lists (recordFroxelLists, called by shadowPages).
+    uint64_t listsFrame = UINT64_MAX;
+    BufferRef lists;
 };
 } // namespace
 
@@ -51,7 +54,7 @@ const FroxelStats& froxelStats(TrackState& state) { return state.get<State>(kSta
 
 void setKeepFroxels(TrackState& state, bool keep) { state.get<State>(kStateKey).keep = keep; }
 
-void recordFroxels(FramePassContext& fc, const ViewResources& main)
+void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t slotOfLightSrv)
 {
     State& s = fc.state<State>(kStateKey);
     const QualityConfig& q = fc.quality;
@@ -59,7 +62,7 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     const uint32_t listMax = (uint32_t)q.integer("atmosphere.froxels.lights_max");
     if (listMax == 0 || listMax > kListMax) fail("atmosphere.froxels.lights_max must be in [1, %u] (FROXEL_LIST_MAX)", kListMax);
     const scene::Scene* src = fc.scene.source();
-    if (src && src->lights.size() > 0xFFFF) fail("froxel lists hold 16-bit light indices: %zu lights", src->lights.size());
+    if (src && src->lights.size() > 0x7FFF) fail("froxel lists hold 15-bit light indices (bit 15: shadow slot): %zu lights", src->lights.size());
     const uint64_t froxels = (uint64_t)grid.gridX * grid.gridY * grid.slices;
     const uint32_t stride = (listMax + 1) & ~1u;  // entries per froxel: every list fits (FroxelCommon.hlsli)
     const uint64_t bytes = kHeaderBytes + froxels * 4 + froxels * stride * 2;
@@ -83,10 +86,44 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
 
     RenderGraph& g = fc.graph;
     const BufferRef lights = g.createBuffer(BufferDesc{ "S froxel light lists", bytes, 0 });
+    fc.resources.froxelLights = lights;
+    s.lists = lights;
+    s.listsFrame = fc.frame.frameIndex;
+    const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;
+    ShaderLibrary& sh = fc.shaders;
+    ID3D12PipelineState* pb = sh.compute("Passes/Atmosphere/FroxelBegin");
+    ID3D12PipelineState* pl = sh.compute("Passes/Atmosphere/FroxelLists");
+    uint32_t nearBits, farBits;
+    std::memcpy(&nearBits, &grid.nearM, 4);
+    std::memcpy(&farBits, &grid.farM, 4);
+    g.addPass("s.froxel.begin", QueueType::Compute, [&](PassBuilder& b) { b.use(lights, Use::UavCompute); },
+              [=](PassContext& ctx) {
+                  const uint32_t k[8] = { ctx.uav(lights), grid.gridX, grid.gridY, grid.slices, grid.tilePx, nearBits, farBits, stride };
+                  ctx.cmd->SetPipelineState(pb);
+                  ctx.computeConstants(k, 8);
+                  ctx.cmd->Dispatch(1, 1, 1);
+              });
+    g.addPass("s.froxel.lists", QueueType::Compute, [&](PassBuilder& b) { b.use(lights, Use::UavCompute); },
+              [=](PassContext& ctx) {
+                  const uint32_t k[4] = { ctx.uav(lights), listMax, slotOfLightSrv, 0 };
+                  ctx.cmd->SetPipelineState(pl);
+                  ctx.bindFrameConstants(constants);
+                  ctx.computeConstants(k, 4);
+                  ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+              });
+}
+
+void recordFroxels(FramePassContext& fc, const ViewResources& main)
+{
+    State& s = fc.state<State>(kStateKey);
+    if (s.listsFrame != fc.frame.frameIndex) recordFroxelLists(fc, main, 0xFFFFFFFFu);  // no shadowPages this frame
+    const QualityConfig& q = fc.quality;
+    const FroxelGridCpu grid = froxelGridFor(q, main.view.width, main.view.height);
+    RenderGraph& g = fc.graph;
+    const BufferRef lights = s.lists;
     // Air volume: in-scattering, optical depth, sun transmittance; nodes 0..S each (FroxelIntegrate.hlsl).
     const TextureRef volume = g.createTexture(TextureDesc{ "S air volume", grid.gridX, grid.gridY, (uint16_t)(3 * (grid.slices + 1)), 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                                            D3D12_RESOURCE_DIMENSION_TEXTURE3D });
-    fc.resources.froxelLights = lights;
     fc.resources.froxels = volume;
     fc.resources.aerialPerspective = volume;  // atmosphereAerial / atmosphereAirView read it (Atmosphere.hlsli)
     const float stepAltitude = (float)q.number("atmosphere.froxels.air_step_altitude_m");
@@ -99,28 +136,7 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;
     const bool keepVolume = s.keep;
     ShaderLibrary& sh = fc.shaders;
-    ID3D12PipelineState* pb = sh.compute("Passes/Atmosphere/FroxelBegin");
-    ID3D12PipelineState* pl = sh.compute("Passes/Atmosphere/FroxelLists");
     ID3D12PipelineState* pi = sh.compute("Passes/Atmosphere/FroxelIntegrate");
-    uint32_t nearBits, farBits;
-    std::memcpy(&nearBits, &grid.nearM, 4);
-    std::memcpy(&farBits, &grid.farM, 4);
-
-    g.addPass("s.froxel.begin", QueueType::Compute, [&](PassBuilder& b) { b.use(lights, Use::UavCompute); },
-              [=](PassContext& ctx) {
-                  const uint32_t k[8] = { ctx.uav(lights), grid.gridX, grid.gridY, grid.slices, grid.tilePx, nearBits, farBits, stride };
-                  ctx.cmd->SetPipelineState(pb);
-                  ctx.computeConstants(k, 8);
-                  ctx.cmd->Dispatch(1, 1, 1);
-              });
-    g.addPass("s.froxel.lists", QueueType::Compute, [&](PassBuilder& b) { b.use(lights, Use::UavCompute); },
-              [=](PassContext& ctx) {
-                  const uint32_t k[4] = { ctx.uav(lights), listMax, 0, 0 };
-                  ctx.cmd->SetPipelineState(pl);
-                  ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 4);
-                  ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
-              });
     g.addPass("s.froxel.integrate", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(lights, Use::SrvCompute);

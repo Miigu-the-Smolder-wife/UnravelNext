@@ -26,14 +26,18 @@ uint2 froxelLightRange(FroxelSrvs f, uint2 pixel, float linearDepth)
     return uint2(h >> 6, h & 63u);
 }
 
-// Scene light index of list entry i.
-uint froxelLight(FroxelSrvs f, uint i)
+// Scene light index of list entry i (bits 0-14; bit 15 of the stored entry: the light has a local shadow slot).
+uint froxelEntry(FroxelSrvs f, uint i)
 {
     ByteAddressBuffer b = ResourceDescriptorHeap[f.lightIndices];
     const uint indexBase = b.Load(36);  // FroxelGrid::indexBase
     const uint w = b.Load(indexBase + (i >> 1) * 4);
     return (i & 1) ? (w >> 16) : (w & 0xFFFFu);
 }
+uint froxelLight(FroxelSrvs f, uint i) { return froxelEntry(f, i) & 0x7FFFu; }
+// True when list entry i's light casts local shadows through S's VSM (it takes one of the visibility slots 1-3 in list
+// order, ShadowVisibility.hlsli shadowSlotOfLight).
+bool froxelLightShadowed(FroxelSrvs f, uint i) { return (froxelEntry(f, i) & 0x8000u) != 0; }
 
 // Deprecated (see above): neutral.
 float4 froxelScattering(FroxelSrvs f, float2 uv, float linearDepth) { return float4(0, 0, 0, 1); }

@@ -121,7 +121,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         for (uint i = 0; i < count; ++i)
         {
             const uint w = lists.Load(g.indexBase + ((first + i) >> 1) * 4);
-            const uint li = ((first + i) & 1) ? w >> 16 : w & 0xFFFFu;
+            const uint li = (((first + i) & 1) ? w >> 16 : w & 0xFFFFu) & 0x7FFFu;
             source += airLocalLight(loadLight(li), o, dir, len, cm, a.mieG);
         }
     }

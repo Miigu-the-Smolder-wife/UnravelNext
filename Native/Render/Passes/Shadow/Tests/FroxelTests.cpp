@@ -161,7 +161,7 @@ struct Lists
         for (uint32_t i = 0; i < count; ++i)
         {
             const uint32_t w = word(indexBase + ((first + i) >> 1) * 4);
-            out.push_back((first + i) & 1 ? w >> 16 : w & 0xFFFF);
+            out.push_back(((first + i) & 1 ? w >> 16 : w & 0xFFFF) & 0x7FFF);  // bit 15: shadow slot
         }
         return out;
     }

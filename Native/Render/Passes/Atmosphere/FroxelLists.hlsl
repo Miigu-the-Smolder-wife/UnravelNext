@@ -8,7 +8,9 @@
 //     (FROXEL_LIST_MAX compiled); ties by light index, so the lists do not depend on the candidates' order;
 //  4. header words and 16-bit indices into the froxel's fixed run (FroxelCommon.hlsli).
 // Truncation (more than lights_max lights reach a froxel) is counted in the header.
-// P[0].x froxelLights UAV (raw; header written by FroxelBegin), P[0].y lights_max
+// P[0].x froxelLights UAV (raw; header written by FroxelBegin), P[0].y lights_max, P[0].z slot of light SRV
+// (StructuredBuffer<uint>: shadow slot or VSM_LOCAL_NONE per scene light; 0xFFFFFFFF: no local shadows): entries carry
+// bit 15 when their light has a shadow slot (froxelLightShadowed).
 // Frame constants of the main view.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -161,8 +163,14 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     const uint keys = s * FROXEL_LIST_MAX;
     for (uint e = 0; e < count; e += 2)
     {
-        const uint a = 0xFFFFu - (gs_keys[keys + e] & 0xFFFFu);
-        const uint b = e + 1 < count ? 0xFFFFu - (gs_keys[keys + e + 1] & 0xFFFFu) : 0u;
+        uint a = 0xFFFFu - (gs_keys[keys + e] & 0xFFFFu);
+        uint b = e + 1 < count ? 0xFFFFu - (gs_keys[keys + e + 1] & 0xFFFFu) : 0u;
+        if (P[0].z != 0xFFFFFFFFu)
+        {
+            StructuredBuffer<uint> slotOf = ResourceDescriptorHeap[P[0].z];
+            a |= slotOf[a] != 0xFFFFu ? 0x8000u : 0u;
+            if (e + 1 < count) b |= slotOf[b] != 0xFFFFu ? 0x8000u : 0u;
+        }
         buffer.Store(g.indexBase + (first + e) * 2, a | b << 16);
     }
 }
