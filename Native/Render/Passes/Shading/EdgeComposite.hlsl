@@ -20,7 +20,9 @@
 // P[2] = { cos angle, footprint tolerance, distance tolerance (floats), groups max }
 // P[3] = { experiment mask (shading.experiment_disable; cost attribution only: 64 = one triangle per group, its
 //        representative's; 128 = no coverage geometry, the centre's radiance; 512 = no subsample masks; 1024 = no
-//        cut-out coverage), M texture table SRV, planar tile mask SRV (R8_UINT; UNX_NONE = every tile is shaded), 0 }
+//        cut-out coverage), M texture table SRV, planar tile mask SRV (R8_UINT; UNX_NONE = every tile is shaded),
+//        resolved radiance UAV (RGBA16F; UNX_NONE = no coverage layer): the pixel's exposed linear sum, the band A layer
+//        of the coverage composite on edge pixels (CoverageComposite.hlsl) }
 // Planar reflection views: pixels of tiles without mirror pixels were never shaded (R's tile mask, v1.22) and count as
 // outside the view, as in EdgeDetect.
 #include "Bindless.hlsli"
@@ -85,6 +87,11 @@ void main(uint i : SV_DispatchThreadID)
     if (P[3].x & 128)
     {
         color[pixel] = shEncodeExposed(edgeRadiance[pixel].rgb);
+        if (P[3].w != UNX_NONE)
+        {
+            RWTexture2D<float4> resolved = ResourceDescriptorHeap[P[3].w];
+            resolved[pixel] = float4(edgeRadiance[pixel].rgb, 1);
+        }
         return;
     }
 
@@ -235,4 +242,9 @@ void main(uint i : SV_DispatchThreadID)
         sum += w * grp[g2].radiance;
     }
     color[pixel] = shEncodeExposed(sum);
+    if (P[3].w != UNX_NONE)
+    {
+        RWTexture2D<float4> resolved = ResourceDescriptorHeap[P[3].w];
+        resolved[pixel] = float4(sum, 1);
+    }
 }

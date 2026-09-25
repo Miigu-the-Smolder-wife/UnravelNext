@@ -293,6 +293,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
     const EdgeConfig ec = edgeConfig(fc.quality);
     const bool planar = view.view.kind != gpu::ViewKind::Main;
+    // V's coverage layer (INTERFACES 7.1 v1.37/v1.38; main view): its fragments are composited over band A
+    // (CoverageComposite.hlsl, design COVERAGE_REDESIGN 4.5). The fragments' shadows come from S's fragment visibility
+    // (4.3); until S publishes it, the layer is shaded only in frames without S's shadows (shading bit 8192 allows it for
+    // cost attribution, never an image).
+    const bool coverage = !planar && v.coverageTiles.valid() && v.coverageChunkTable.valid() && v.coverageChunks.valid() && v.coverageTileList.valid();
+    if (coverage && v.shadowVisibility.valid() && (experiment & 8192) == 0)
+        fail("M.shading: V's coverage layer with S's shadows but without S's fragment visibility (COVERAGE_REDESIGN 4.3): its fragments would be unshadowed");
     // S's shadow overflow (INTERFACES 7.3, v1.20; main view): the list the main kernel loads, and the fallback tiles over
     // its capacity, shaded by the fallback kernel with S's VSM.
     const bool overflow = v.shadowOverflowTiles.valid() && v.shadowOverflow.valid();
@@ -436,6 +443,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             }
             b.use(edgeRadiance, Use::UavCompute);
             b.use(edgeTiles, Use::SrvCompute);
+            if (coverage) b.use(v.coverageTiles, Use::SrvCompute);
         };
         shadePass.execute = [=](PassContext& c) {
             const auto [firstBand, lastBand] = listBands(c);
@@ -445,7 +453,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             const uint32_t fx[2] = { froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
             c.bindFrameConstants(cb);
             ID3D12Resource* args = c.resource(o.tileArgs);
-            const uint32_t edge[8] = { c.srv(edgeTiles), 0, 0, 0, c.uav(edgeRadiance), v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, 0, 0 };
+            const uint32_t edge[8] = { c.srv(edgeTiles), coverage ? c.srv(v.coverageTiles) : none, 0, 0, c.uav(edgeRadiance),
+                                       v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, 0, 0 };
             // Sky tiles of the list bands in this pass band.
             c.cmd->SetPipelineState(sky);
             for (uint32_t band = firstBand; band < lastBand; ++band)
@@ -512,6 +521,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              if (vsm && r.vsmLayers.valid()) b.use(r.vsmLayers, Use::SrvCompute);
                              b.use(edgeRadiance, Use::UavCompute);
                              b.use(edgeTiles, Use::SrvCompute);
+                             if (coverage) b.use(v.coverageTiles, Use::SrvCompute);
                          },
                          [=](PassContext& c) {
                              const uint32_t none = gpu::kNone;
@@ -530,7 +540,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                                       atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none, none,
                                                       air ? c.srv(v.airVolume) : none, 0, o.textureTableSrv, experiment, 0,
                                                       froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
-                             const uint32_t edge[8] = { c.srv(edgeTiles), 0, 0, 0, c.uav(edgeRadiance),
+                             const uint32_t edge[8] = { c.srv(edgeTiles), coverage ? c.srv(v.coverageTiles) : none, 0, 0, c.uav(edgeRadiance),
                                                         v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, shadowSrvs, 0 };
                              uint32_t k32[32] = {};
                              std::memcpy(k32, k, sizeof k);
@@ -580,7 +590,10 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                          c.cmd->Dispatch(1, 1, 1);
                      });
 
-    // Edge composite over the edge pixels (analytic coverage of the pixel square by the neighbourhood's surfaces).
+    // Edge composite over the edge pixels (analytic coverage of the pixel square by the neighbourhood's surfaces). With the
+    // coverage layer it also keeps its linear sum, the band A layer under the fragments of edge pixels.
+    const TextureRef edgeResolved =
+        coverage ? fc.graph.createTexture({ "m.edge resolved", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT }) : TextureRef{};
     ID3D12PipelineState* composite = fc.shaders.compute(linear ? "Passes/Shading/EdgeComposite.OUTPUT1" : "Passes/Shading/EdgeComposite.OUTPUT0");
     fc.graph.addPass(planar ? "m.edge.planar" : "m.edge", QueueType::Graphics,
                      [&](PassBuilder& b) {
@@ -594,17 +607,70 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                          b.use(edgePixels, Use::SrvCompute);
                          b.use(edgeArgs, Use::IndirectArgs);
                          if (planarTiles.valid()) b.use(planarTiles, Use::SrvCompute);
+                         if (coverage) b.use(edgeResolved, Use::UavCompute);
                      },
                      [=](PassContext& c) {
                          const uint32_t k[16] = { c.srv(v.visId), c.srv(v.visibleClusters), c.srv(o.materialWord), c.srv(v.depth),
                                                   c.srv(v.gbuffer), c.srv(edgeRadiance), c.uav(v.color), c.srv(edgePixels),
                                                   asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), ec.groupsMax,
-                                                  experiment, o.textureTableSrv, planarTiles.valid() ? c.srv(planarTiles) : gpu::kNone, 0 };
+                                                  experiment, o.textureTableSrv, planarTiles.valid() ? c.srv(planarTiles) : gpu::kNone,
+                                                  coverage ? c.uav(edgeResolved) : gpu::kNone };
                          c.cmd->SetPipelineState(composite);
                          c.bindFrameConstants(cb);
                          c.computeConstants(k, 16);
                          c.cmd->ExecuteIndirect(signature, 1, c.resource(edgeArgs), 0, nullptr, 0);
                      });
+
+    // Coverage composite (design COVERAGE_REDESIGN 4.5): one group per tile of V's tile list (heavy tiles included: the
+    // records are sorted through M's scratch, pixel-major, so no tile size limit), fragments shaded and composited over
+    // the band A radiance the shading kernels kept for coverage tiles.
+    if (coverage)
+    {
+        const BufferRef scratch = fc.graph.createBuffer({ "m.coverage scratch", (fc.graph.desc(v.coverageChunks).size / 16 + 1) * 4, 0 });
+        ID3D12PipelineState* begin = fc.shaders.compute("Passes/Shading/CoverageBegin");
+        fc.graph.addPass("m.coverage.begin", QueueType::Graphics, [&](PassBuilder& b) { b.use(scratch, Use::UavCompute); },
+                         [begin, scratch](PassContext& c) {
+                             const uint32_t k[4] = { c.uav(scratch), 0, 0, 0 };
+                             c.cmd->SetPipelineState(begin);
+                             c.computeConstants(k, 4);
+                             c.cmd->Dispatch(1, 1, 1);
+                         });
+        ID3D12PipelineState* kernel = fc.shaders.compute(
+            (std::string("Passes/Shading/CoverageComposite.OUTPUT") + (linear ? "1" : "0") + ".AREA" + (areaLights ? "1" : "0")).c_str());
+        fc.graph.addPass("m.coverage", QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             for (BufferRef cb2 : { v.coverageTiles, v.coverageChunkTable, v.coverageChunks }) b.use(cb2, Use::SrvCompute);
+                             b.use(v.coverageTileList, Use::SrvCompute);
+                             b.use(v.coverageTileList, Use::IndirectArgs);
+                             b.use(v.visibleClusters, Use::SrvCompute);
+                             b.use(v.depth, Use::SrvCompute);
+                             b.use(v.color, Use::UavCompute);
+                             b.use(edgeRadiance, Use::SrvCompute);
+                             b.use(edgeResolved, Use::SrvCompute);
+                             b.use(edgeTiles, Use::SrvCompute);
+                             b.use(scratch, Use::UavCompute);
+                             if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
+                             if (atmosphere)
+                                 for (TextureRef t : { r.transmittanceLut, r.multiScatterLut }) b.use(t, Use::SrvCompute);
+                             if (air) b.use(v.airVolume, Use::SrvCompute);
+                             if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
+                             if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
+                         },
+                         [=](PassContext& c) {
+                             const uint32_t none = gpu::kNone;
+                             const uint32_t k[24] = { c.srv(v.coverageTiles), c.srv(v.coverageChunkTable), c.srv(v.coverageChunks), c.srv(v.coverageTileList),
+                                                      c.srv(v.visibleClusters), o.textureTableSrv, c.srv(v.depth), c.uav(v.color),
+                                                      c.srv(edgeRadiance), c.srv(edgeResolved), c.srv(edgeTiles), c.uav(scratch),
+                                                      froxelLists ? c.srv(v.froxelLights) : none, ltcSrv, experiment, none,
+                                                      atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none,
+                                                      air ? c.srv(v.airVolume) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
+                                                      v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, 0, 0, 0 };
+                             c.cmd->SetPipelineState(kernel);
+                             c.bindFrameConstants(cb);
+                             c.computeConstants(k, 24);
+                             c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
+                         });
+    }
     return {};
 }
 } // namespace

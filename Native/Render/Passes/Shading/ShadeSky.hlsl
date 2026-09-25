@@ -9,12 +9,15 @@
 // P[1] = { atmosphere transmittance, multi-scatter, sky view, this view's air volume } (UNX_NONE = absent)
 // P[2] = { experiment mask (shading.experiment_disable; not read here since edge detection moved to EdgeDetect), 0, 0, 0 }
 // P[3] = { 0, 0, edge tile mask SRV (EdgeDetect.hlsl; UNX_NONE = no edge pixels), 0 }, P[7].x edge radiance UAV
-// (RGBA16F): a sky edge pixel (a neighbour shows a surface) keeps its exposed linear radiance for the composite.
+// (RGBA16F): a sky edge pixel (a neighbour shows a surface) keeps its exposed linear radiance for the composite, and so
+// does every pixel of a tile with coverage fragments (P[6].y: V's coverage tiles, UNX_NONE = no coverage layer), whose
+// band A remainder the coverage composite adds (CoverageComposite.hlsl).
 #include "Bindless.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
+#include "Passes/Visibility/CoverageTiles.hlsli"
 
 float3 shadeSky(uint2 pixel, Texture2D<uint> words);
 
@@ -28,11 +31,21 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     const bool active = all(pixel < uint2(g_viewWidth, g_viewHeight)) && mWordMaterial(words[min(pixel, uint2(g_viewWidth, g_viewHeight) - 1)]) == M_MATERIAL_SKY;
     if (!active) return;
     const float3 radiance = shadeSky(pixel, words);
-    if (P[3].z == UNX_NONE) return;
-    Texture2D<uint2> edgeTiles = ResourceDescriptorHeap[P[3].z];
-    const uint2 edgeMask = edgeTiles[uint2(tile & 0xFFFFu, tile >> 16)];
-    const uint bit = tid.y * M_TILE + tid.x;
-    if ((((bit < 32 ? edgeMask.x : edgeMask.y) >> (bit & 31)) & 1u) != 0)
+    const uint2 tileCoord = uint2(tile & 0xFFFFu, tile >> 16);
+    bool keep = false;
+    if (P[6].y != UNX_NONE)
+    {
+        ByteAddressBuffer coverage = ResourceDescriptorHeap[P[6].y];
+        keep = coverage.Load(4 * ((tileCoord.x + tileCoord.y * ((g_viewWidth + 7) / 8)) * COV_TILE_WORDS + COV_TILE_COUNT)) != 0;
+    }
+    if (!keep && P[3].z != UNX_NONE)
+    {
+        Texture2D<uint2> edgeTiles = ResourceDescriptorHeap[P[3].z];
+        const uint2 edgeMask = edgeTiles[tileCoord];
+        const uint bit = tid.y * M_TILE + tid.x;
+        keep = (((bit < 32 ? edgeMask.x : edgeMask.y) >> (bit & 31)) & 1u) != 0;
+    }
+    if (keep)
     {
         RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];
         edgeRadiance[pixel] = float4(radiance * g_exposure, 1);

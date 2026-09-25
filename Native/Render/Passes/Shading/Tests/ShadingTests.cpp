@@ -16,6 +16,8 @@
 //      the model BRDF integrated over the light (the fit error, reported by roughness).
 //  10. area lights: the closed forms against each light's outline as a dense polygon in double, 6,000 cases (random
 //      shapes, the scenes' sizes, the horizon through the light): P99 and worst relative error of every integral.
+//  11. coverage composite: band B triangles as V's coverage records (exact area, subsample masks, centroid depth) over
+//      a band A ground, each pixel with fragments against a CPU composite of CPU-shaded fragments, the rest unchanged.
 //   unx_test_shading_shadingtests [--no-debug-layer] [--gbv] [--set key=value ...]   (--gbv: GPU-based validation;
 //   --set output.band_pixels=65536 runs the banded passes with 8 bands at the tests' 960 x 540)
 #include "../../Material/Tests/MTestFrame.h"
@@ -415,6 +417,65 @@ void testSunSpecular(TestFrame& tf, Report& report)
 }
 
 // ---------------------------------------------------------------- 3-5
+// Sun radiance of a surface point by the CPU model for a unit-illuminance sun (times E by the caller): cap averages of
+// the clipped cosines (the point value away from the terminator, a dense disk quadrature within two disk radii of it:
+// the model integrated over the disk, as the reference path tracer does), the specular by the model at the disk centre
+// for wide lobes and by sunSpecularReference otherwise, Foliage transmission from the other side. Counts glint (narrow
+// lobe dominating) and back-lit pixels when asked.
+float3 cpuSun(const model::Surface& su, float3 n, float3 v, float3 l0, double thetaS, uint32_t* glint = nullptr, uint32_t* backlit = nullptr)
+{
+    const double cap = 2 / (1 + std::cos(thetaS));
+    const float NoV = dot(n, v), NoL = dot(n, l0);
+    const float3 diffuse = su.baseColor * ((1 - su.metallic) / model::kPi);
+    const float3 front = su.cls == scene::MaterialClass::Foliage ? diffuse * (1 - su.transmission) : diffuse;
+    const float3 back = su.cls == scene::MaterialClass::Foliage ? diffuse * su.transmission : float3{};
+    auto capCos = [&](float sign) {
+        const double nl = sign * NoL;
+        if (nl >= 2 * std::sin(thetaS)) return nl;
+        if (nl <= -2 * std::sin(thetaS)) return 0.0;
+        const float3 t = normalize(std::fabs(l0.y) < 0.99f ? cross(float3{ 0, 1, 0 }, l0) : cross(float3{ 1, 0, 0 }, l0));
+        const float3 b = cross(l0, t);
+        double sum = 0;
+        const uint32_t nr = 64, na = 128;
+        for (uint32_t i = 0; i < nr; ++i)
+        {
+            const double c = 1 - (i + 0.5) / nr * (1 - std::cos(thetaS)), sn = std::sqrt(std::max(1 - c * c, 0.0));
+            for (uint32_t k = 0; k < na; ++k)
+            {
+                const double ph = (k + 0.5) / na * 2 * kPi;
+                const float3 l = l0 * (float)c + (t * (float)std::cos(ph) + b * (float)std::sin(ph)) * (float)sn;
+                sum += std::max(0.0, (double)sign * dot(n, l));
+            }
+        }
+        return sum / (nr * na);
+    };
+    float3 sun{};
+    const double above = capCos(1), below = capCos(-1);
+    if (NoV > 0)
+    {
+        if (above > 0)
+        {
+            const double alpha = model::alphaFromRoughness(su.roughness);
+            const bool terminator = std::fabs(NoL) < 2 * std::sin(thetaS);
+            const float3 spec = (alpha >= 16 * thetaS && !terminator) ? (model::evaluate(su, n, v, l0) - front) * NoL * (float)cap
+                                                                       : sunSpecularReference(su, n, v, l0, thetaS, terminator ? 200 : 24, terminator ? 400 : 48);
+            sun = front * (float)(above * cap) + spec;
+            if (glint && alpha < 16 * thetaS && spec.y > 10 * front.y * NoL) ++*glint;
+        }
+        if (su.cls == scene::MaterialClass::Foliage && below > 0)
+        {
+            sun = sun + back * (float)(below * cap);
+            if (backlit) ++*backlit;
+        }
+    }
+    else if (su.cls == scene::MaterialClass::Foliage && above > 0)
+    {
+        sun = back * (float)(above * cap);
+        if (backlit) ++*backlit;
+    }
+    return sun;
+}
+
 void testScene(TestFrame& tf, Report& report)
 {
     scene::Scene s;
@@ -503,7 +564,6 @@ void testScene(TestFrame& tf, Report& report)
     tf.frame.outputLinearHdr = false;
     const double exposure = 1.0 / (1.2 * std::exp2(13.0));
     const float3 E = s.sun.color * s.sun.illuminance;
-    const double cap = 2 / (1 + std::cos(thetaS));
     double worst = 0;
     uint32_t checked = 0, glint = 0, backlit = 0, edgeSkipped = 0;
     for (uint32_t y = 0; y < H; y += 3)
@@ -532,57 +592,7 @@ void testScene(TestFrame& tf, Report& report)
                 double D[3], Dx[3];
                 pixelRay(desc, x + 0.5, y + 0.5, D, Dx);
                 const float3 v = normalize(float3{ (float)-D[0], (float)-D[1], (float)-D[2] });
-                const float NoV = dot(n, v), NoL = dot(n, l0);
-                const float3 diffuse = su.baseColor * ((1 - su.metallic) / model::kPi);
-                const float3 front = su.cls == scene::MaterialClass::Foliage ? diffuse * (1 - su.transmission) : diffuse;
-                const float3 back = su.cls == scene::MaterialClass::Foliage ? diffuse * su.transmission : float3{};
-                // Cap averages of the clipped cosines: the point value away from the terminator, a dense disk quadrature
-                // within two disk radii of it (the model integrated over the disk, as the reference path tracer does).
-                auto capCos = [&](float sign) {
-                    const double nl = sign * NoL;
-                    if (nl >= 2 * std::sin(thetaS)) return nl;
-                    if (nl <= -2 * std::sin(thetaS)) return 0.0;
-                    const float3 t = normalize(std::fabs(l0.y) < 0.99f ? cross(float3{ 0, 1, 0 }, l0) : cross(float3{ 1, 0, 0 }, l0));
-                    const float3 b = cross(l0, t);
-                    double sum = 0;
-                    const uint32_t nr = 64, na = 128;
-                    for (uint32_t i = 0; i < nr; ++i)
-                    {
-                        const double c = 1 - (i + 0.5) / nr * (1 - std::cos(thetaS)), sn = std::sqrt(std::max(1 - c * c, 0.0));
-                        for (uint32_t k = 0; k < na; ++k)
-                        {
-                            const double ph = (k + 0.5) / na * 2 * kPi;
-                            const float3 l = l0 * (float)c + (t * (float)std::cos(ph) + b * (float)std::sin(ph)) * (float)sn;
-                            sum += std::max(0.0, (double)sign * dot(n, l));
-                        }
-                    }
-                    return sum / (nr * na);
-                };
-                float3 sun{};
-                const double above = capCos(1), below = capCos(-1);
-                if (NoV > 0)
-                {
-                    if (above > 0)
-                    {
-                        const double alpha = model::alphaFromRoughness(su.roughness);
-                        const bool terminator = std::fabs(NoL) < 2 * std::sin(thetaS);
-                        const float3 spec = (alpha >= 16 * thetaS && !terminator) ? (model::evaluate(su, n, v, l0) - front) * NoL * (float)cap
-                                                                                   : sunSpecularReference(su, n, v, l0, thetaS, terminator ? 200 : 24, terminator ? 400 : 48);
-                        sun = front * (float)(above * cap) + spec;
-                        if (alpha < 16 * thetaS && spec.y > 10 * front.y * NoL) ++glint;
-                    }
-                    if (su.cls == scene::MaterialClass::Foliage && below > 0)
-                    {
-                        sun = sun + back * (float)(below * cap);
-                        ++backlit;
-                    }
-                }
-                else if (su.cls == scene::MaterialClass::Foliage && above > 0)
-                {
-                    sun = back * (float)(above * cap);
-                    ++backlit;
-                }
-                expected = (sun * E + mat.emissive) * (float)exposure;
+                expected = (cpuSun(su, n, v, l0, thetaS, &glint, &backlit) * E + mat.emissive) * (float)exposure;
             }
             // Relative to the pixel, floored at 1 % of a sunlit surface (~1 after exposure here): the disk integrators are exact
             // relative to the lobe's peak, so at grazing light (values 1e-3 of lit) their error is judged on that scale.
@@ -1840,6 +1850,366 @@ void testAreaLightContours(TestFrame& tf, Report& report)
     report(worstAll < 1e-3, "area lights: closed forms vs dense outline, worst for kappa <= 100 (rel. to max(I, 1e-3))", worstAll, 1e-3);
 }
 
+// ---------------------------------------------------------------- 11. coverage composite (CoverageComposite.hlsl)
+// A ground plane in band A and 90 small triangles (diffuse, rough metal, two-sided leaf with transmission and emission)
+// in band B: the stand-in raster leaves them out of band A, and their coverage records are made here as V defines them
+// (INTERFACES 7.1 v1.38): exact area of the pixel square clipped by the projected triangle, the 32 subsamples of
+// coverageSample inside it, the device depth at the covered region's centroid (z/w is affine in screen space), tile
+// chunks of 64 records. The frame is rendered without the layer (band A alone) and with it; every pixel with fragments
+// is checked against a CPU composite (front to back, mask union, band A taking the rest with the first frame's value)
+// whose fragments are shaded by the CPU model at the centroid (cpuSun), and every other pixel must be unchanged.
+void testCoverageComposite(TestFrame& tf, Report& report)
+{
+    scene::Scene s;
+    s.name = "coverage composite test";
+    scene::Material ground;
+    ground.name = "ground";
+    ground.baseColor = { 0.5f, 0.45f, 0.4f };
+    ground.roughness = 0.6f;
+    s.materials.push_back(ground);
+    scene::Material grass;
+    grass.name = "grass";
+    grass.baseColor = { 0.25f, 0.55f, 0.15f };
+    grass.roughness = 0.5f;
+    s.materials.push_back(grass);
+    scene::Material metal;
+    metal.name = "rough metal";
+    metal.baseColor = { 0.9f, 0.8f, 0.6f };
+    metal.roughness = 0.35f;
+    metal.metallic = 1;
+    s.materials.push_back(metal);
+    scene::Material leaf;
+    leaf.name = "leaf";
+    leaf.cls = scene::MaterialClass::Foliage;
+    leaf.baseColor = { 0.2f, 0.5f, 0.1f };
+    leaf.roughness = 0.45f;
+    leaf.transmission = 0.4f;
+    leaf.twoSided = true;
+    leaf.emissive = { 0.3f, 0.1f, 0.05f };
+    s.materials.push_back(leaf);
+    const uint32_t plane = addPlane(s, 40, 0);
+    // Band B: 90 triangles over three materials in a box in front of the camera, some against the sky.
+    std::mt19937 rng(4501);
+    std::uniform_real_distribution<float> u01(0, 1);
+    scene::Mesh bm;
+    bm.name = "blades";
+    for (uint32_t m = 1; m <= 3; ++m)
+    {
+        const uint32_t first = (uint32_t)bm.indices.size();
+        for (uint32_t k = 0; k < 30; ++k)
+        {
+            const float3 c{ -1.6f + 3.2f * u01(rng), 0.15f + 1.9f * u01(rng), -1.5f - 2.5f * u01(rng) };
+            const float size = 0.04f + 0.25f * u01(rng);
+            float3 p[3];
+            for (int i = 0; i < 3; ++i) p[i] = c + float3{ size * (2 * u01(rng) - 1), size * (2 * u01(rng) - 1), size * (2 * u01(rng) - 1) };
+            const float3 fn = normalize(cross(p[1] - p[0], p[2] - p[0]));
+            for (int i = 0; i < 3; ++i)
+            {
+                bm.indices.push_back((uint32_t)bm.positions.size());
+                bm.positions.push_back(p[i]);
+                bm.normals.push_back(fn);
+                bm.tangents.push_back({ 1, 0, 0, 1 });
+                bm.uv0.push_back({ 0, 0 });
+            }
+        }
+        bm.submeshes.push_back({ first, (uint32_t)bm.indices.size() - first, m });
+    }
+    s.meshes.push_back(bm);
+    const uint32_t blades = (uint32_t)s.meshes.size() - 1;
+    scene::Instance a;
+    a.mesh = plane;
+    s.instances.push_back(a);
+    scene::Instance b;
+    b.mesh = blades;
+    s.instances.push_back(b);
+    s.sun.direction = normalize(float3{ 0.3f, 0.6f, -0.75f });
+    scene::Camera cam;
+    cam.name = "coverage";
+    cam.position = { 0, 1.1f, 1.5f };
+    cam.forward = normalize(float3{ 0, -0.12f, -1 });
+    cam.ev100 = 13;
+    s.cameras.push_back(cam);
+    tf.setScene(s, { 1 });
+
+    const uint32_t W = 320, H = 180, tilesX = (W + 7) / 8, tilesY = (H + 7) / 8;
+    ViewDesc desc;
+    tf.run([&](FramePassContext& fc) { desc = tf.mainView(fc, W, H, 0).view; });
+    // Screen position (pixels) and device depth of a world point.
+    auto project = [&](float3 w, double& px, double& py, double& z) {
+        const double o[3] = { (double)w.x - desc.position.x, (double)w.y - desc.position.y, (double)w.z - desc.position.z };
+        double vv[3];
+        for (int r = 0; r < 3; ++r) vv[r] = desc.view.m[r][0] * o[0] + desc.view.m[r][1] * o[1] + desc.view.m[r][2] * o[2];
+        double clip[4];
+        for (int r = 0; r < 4; ++r) clip[r] = desc.proj.m[r][0] * vv[0] + desc.proj.m[r][1] * vv[1] + desc.proj.m[r][2] * vv[2] + desc.proj.m[r][3];
+        px = (clip[0] / clip[3] * 0.5 + 0.5) * W;
+        py = (0.5 - clip[1] / clip[3] * 0.5) * H;
+        z = clip[2] / clip[3];
+    };
+    auto sample = [](uint32_t i) {
+        uint32_t r = 0;
+        for (int bit = 0; bit < 5; ++bit) r |= ((i >> bit) & 1u) << (4 - bit);
+        return std::array<double, 2>{ (i + 0.5) / 32.0, r / 32.0 + 1.0 / 64.0 };
+    };
+    auto encodeNormal = [](float3 n) {
+        const float l1 = std::fabs(n.x) + std::fabs(n.y) + std::fabs(n.z);
+        float ex = n.x / l1, ey = n.y / l1;
+        if (n.z < 0)
+        {
+            const float ox = (1 - std::fabs(ey)) * (ex >= 0 ? 1.f : -1.f), oy = (1 - std::fabs(ex)) * (ey >= 0 ? 1.f : -1.f);
+            ex = ox;
+            ey = oy;
+        }
+        const uint32_t qx = (uint32_t)std::lround(std::clamp(ex * 0.5f + 0.5f, 0.f, 1.f) * 255), qy = (uint32_t)std::lround(std::clamp(ey * 0.5f + 0.5f, 0.f, 1.f) * 255);
+        return qx | (qy << 8);
+    };
+
+    // Records per tile. The blades' cluster follows the ground's in the visible list (FakeVisibility, not rasterised).
+    struct Frag
+    {
+        uint32_t tri, visId, depthBits, mask, packed;
+        double cx, cy;  // centroid (pixels)
+    };
+    std::vector<std::vector<Frag>> tileFrags(tilesX * tilesY);
+    const uint32_t visibleBlades = tf.vis.rasterised;
+    M_CHECK(tf.vis.visible.size() == visibleBlades + 3, "blades expected in three clusters (one per submesh) after the ground's");
+    uint32_t fragments = 0;
+    for (uint32_t t = 0; t < (uint32_t)bm.indices.size() / 3; ++t)
+    {
+        double sx[3], sy[3], sz[3];
+        for (int i = 0; i < 3; ++i) project(bm.positions[bm.indices[3 * t + i]], sx[i], sy[i], sz[i]);
+        const Poly tri{ { sx[0], sy[0] }, { sx[1], sy[1] }, { sx[2], sy[2] } };
+        const double det = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
+        if (std::fabs(det) < 1e-9) continue;
+        const int x0 = std::max(0, (int)std::floor(std::min({ sx[0], sx[1], sx[2] }))), x1 = std::min((int)W - 1, (int)std::floor(std::max({ sx[0], sx[1], sx[2] })));
+        const int y0 = std::max(0, (int)std::floor(std::min({ sy[0], sy[1], sy[2] }))), y1 = std::min((int)H - 1, (int)std::floor(std::max({ sy[0], sy[1], sy[2] })));
+        // chunkClusters: one cluster per 30-triangle submesh (<= 64), triangles in index order.
+        const uint32_t sub = t / 30, inSub = t % 30;
+        const uint32_t visId = (((visibleBlades + sub) << 7) | inSub) + 1;
+        const float3 fn = bm.normals[bm.indices[3 * t]];
+        for (int py = y0; py <= y1; ++py)
+            for (int px = x0; px <= x1; ++px)
+            {
+                const Poly square{ { (double)px, (double)py }, { px + 1.0, (double)py }, { px + 1.0, py + 1.0 }, { (double)px, py + 1.0 } };
+                const Poly in = polyClip(square, tri);
+                if (in.size() < 3) continue;
+                const double area = polyArea(in);
+                if (area <= 1e-9) continue;
+                double cx = 0, cy = 0, a2 = 0;
+                for (size_t i = 0; i < in.size(); ++i)
+                {
+                    const auto& u = in[i];
+                    const auto& v = in[(i + 1) % in.size()];
+                    const double cr = u[0] * v[1] - v[0] * u[1];
+                    a2 += cr;
+                    cx += (u[0] + v[0]) * cr;
+                    cy += (u[1] + v[1]) * cr;
+                }
+                cx /= 3 * a2;
+                cy /= 3 * a2;
+                uint32_t mask = 0;
+                for (uint32_t i = 0; i < 32; ++i)
+                {
+                    const auto sp = sample(i);
+                    const double qx = px + sp[0], qy = py + sp[1];
+                    double w[3];
+                    for (int e = 0; e < 3; ++e)
+                    {
+                        const int e1 = (e + 1) % 3, e2 = (e + 2) % 3;
+                        w[e] = ((sx[e2] - sx[e1]) * (qy - sy[e1]) - (sy[e2] - sy[e1]) * (qx - sx[e1])) / det;
+                    }
+                    if (w[0] >= 0 && w[1] >= 0 && w[2] >= 0) mask |= 1u << i;
+                }
+                // Screen barycentrics of the centroid: z/w is affine in screen space.
+                double bc[3];
+                for (int e = 0; e < 3; ++e)
+                {
+                    const int e1 = (e + 1) % 3, e2 = (e + 2) % 3;
+                    bc[e] = ((sx[e2] - sx[e1]) * (cy - sy[e1]) - (sy[e2] - sy[e1]) * (cx - sx[e1])) / det;
+                }
+                const float depth = (float)(bc[0] * sz[0] + bc[1] * sz[1] + bc[2] * sz[2]);
+                if (!(depth > 0)) continue;
+                Frag f;
+                f.tri = t;
+                f.visId = visId;
+                std::memcpy(&f.depthBits, &depth, 4);
+                f.mask = mask;
+                const uint32_t pixelInTile = (px % 8) + 8 * (py % 8);
+                f.packed = encodeNormal(fn) | ((uint32_t)std::lround(std::min(area, 1.0) * 1023) << 16) | (pixelInTile << 26);
+                f.cx = cx;
+                f.cy = cy;
+                tileFrags[(py / 8) * tilesX + px / 8].push_back(f);
+                ++fragments;
+            }
+    }
+    // Buffers (CoverageTiles.hlsli layout; chunk table only, no extension tables).
+    const uint32_t slots = 16;
+    std::vector<uint32_t> headers(tilesX * tilesY * 8, 0), table(tilesX * tilesY * slots, 0), list(16, 0);
+    std::vector<uint32_t> pool;  // uint4 records
+    uint32_t chunks = 0, listed = 0;
+    for (uint32_t tile = 0; tile < tilesX * tilesY; ++tile)
+    {
+        const auto& fr = tileFrags[tile];
+        if (fr.empty()) continue;
+        M_CHECK(fr.size() <= slots * 64, "test tile over its chunk table");
+        headers[tile * 8] = (uint32_t)fr.size();
+        for (size_t i = 0; i < fr.size(); ++i)
+        {
+            if (i % 64 == 0)
+            {
+                table[tile * slots + i / 64] = ++chunks;
+                pool.resize((size_t)chunks * 64 * 4, 0);
+            }
+            const size_t e = ((size_t)(chunks - 1) * 64 + i % 64) * 4;
+            pool[e] = fr[i].visId;
+            pool[e + 1] = fr[i].depthBits;
+            pool[e + 2] = fr[i].mask;
+            pool[e + 3] = fr[i].packed;
+        }
+        list.push_back(tile);
+        ++listed;
+    }
+    list[0] = listed;
+    list[1] = 1;
+    list[2] = 1;
+    list[3] = listed;
+    list[4] = fragments;
+    list[5] = chunks;
+    list[6] = slots;
+    list[7] = tilesX;
+    list[12] = 1024;
+    list[13] = 16 + listed;
+    if (pool.empty()) pool.resize(64 * 4, 0);
+    ComPtr<ID3D12Resource> hdrBuf = uploadStatic(tf.device, headers.data(), headers.size() * 4, L"test coverage tiles");
+    ComPtr<ID3D12Resource> tblBuf = uploadStatic(tf.device, table.data(), table.size() * 4, L"test coverage chunk table");
+    ComPtr<ID3D12Resource> poolBuf = uploadStatic(tf.device, pool.data(), pool.size() * 4, L"test coverage chunks");
+    ComPtr<ID3D12Resource> listBuf = uploadStatic(tf.device, list.data(), list.size() * 4, L"test coverage tile list");
+
+    // Band A alone, then with the layer (linear output).
+    std::shared_ptr<std::vector<uint8_t>> base, withLayer, depthRb;
+    tf.frame.outputLinearHdr = true;
+    for (int pass = 0; pass < 2; ++pass)
+        tf.run([&](FramePassContext& fc) {
+            ViewResources v = tf.mainView(fc, W, H, 0);
+            v.color = fc.graph.createTexture({ "m.test.coverage color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+            tf.vis.record(fc, v);
+            tracks::materialResolve(fc, v);
+            if (pass == 1)
+            {
+                v.coverageTiles = fc.graph.importBuffer(hdrBuf.Get(), { "test coverage tiles", headers.size() * 4, 0 });
+                v.coverageChunkTable = fc.graph.importBuffer(tblBuf.Get(), { "test coverage chunk table", table.size() * 4, 0 });
+                v.coverageChunks = fc.graph.importBuffer(poolBuf.Get(), { "test coverage chunks", pool.size() * 4, 16 });
+                v.coverageTileList = fc.graph.importBuffer(listBuf.Get(), { "test coverage tile list", list.size() * 4, 0 });
+            }
+            tracks::shading(fc, v);
+            if (pass == 0)
+            {
+                base = tf.readback(fc, v.color);
+                depthRb = tf.readback(fc, v.depth);
+            }
+            else withLayer = tf.readback(fc, v.color);
+        });
+    tf.frame.outputLinearHdr = false;
+
+    // CPU composite.
+    auto bitCount = [](uint32_t v) {
+        uint32_t c = 0;
+        for (; v; v &= v - 1) ++c;
+        return c;
+    };
+    const double exposure = 1.0 / (1.2 * std::exp2(13.0));
+    const float3 l0 = normalize(s.sun.direction);
+    const float3 E = s.sun.color * s.sun.illuminance;
+    double worst = 0, worstOther = 0;
+    uint32_t checked = 0, layered = 0, hidden = 0, sky = 0;
+    std::vector<bool> hasFrags(W * H, false);
+    for (uint32_t tile = 0; tile < tilesX * tilesY; ++tile)
+        for (const Frag& f : tileFrags[tile])
+            hasFrags[((tile / tilesX) * 8 + (f.packed >> 26) / 8) * W + (tile % tilesX) * 8 + (f.packed >> 26) % 8] = true;
+    for (uint32_t tile = 0; tile < tilesX * tilesY; ++tile)
+    {
+        const auto& fr = tileFrags[tile];
+        if (fr.empty()) continue;
+        for (uint32_t p = 0; p < 64; ++p)
+        {
+            const uint32_t x = (tile % tilesX) * 8 + p % 8, y = (tile / tilesX) * 8 + p / 8;
+            if (x >= W || y >= H) continue;
+            std::vector<const Frag*> px;
+            for (const Frag& f : fr)
+                if ((f.packed >> 26) == p) px.push_back(&f);
+            if (px.empty()) continue;
+            std::sort(px.begin(), px.end(), [](const Frag* a, const Frag* b) { return a->depthBits > b->depthBits || (a->depthBits == b->depthBits && a->visId < b->visId); });
+            const float bandDepth = texelOf<float>(*depthRb, W, x, y);
+            if (bandDepth == 0) ++sky;
+            double sum[3] = {}, used = 0;
+            uint32_t covered = 0, visible = 0;
+            for (const Frag* f : px)
+            {
+                float d;
+                std::memcpy(&d, &f->depthBits, 4);
+                if (d < bandDepth)
+                {
+                    ++hidden;
+                    break;
+                }
+                const uint32_t bits = bitCount(f->mask);
+                const double seen = bits > 0 ? bitCount(f->mask & ~covered) / (double)bits : 1 - bitCount(covered) / 32.0;
+                const double w = std::min(((f->packed >> 16) & 0x3FF) / 1023.0 * seen, std::max(1 - used, 0.0));
+                if (w > 0)
+                {
+                    ++visible;
+                    // The fragment's point: the centroid ray on the triangle's plane; interpolated (flat) normal.
+                    double D[3], Dx[3];
+                    pixelRay(desc, f->cx, f->cy, D, Dx);
+                    const float3 fn = bm.normals[bm.indices[3 * f->tri]];
+                    const scene::Material& mat = s.materials[f->tri / 30 + 1];
+                    const double nD = fn.x * D[0] + fn.y * D[1] + fn.z * D[2];
+                    float3 n = fn;
+                    if (!(nD < 0) && mat.twoSided) n = n * -1.0f;
+                    model::Surface su;
+                    su.cls = mat.cls;
+                    su.baseColor = mat.baseColor;
+                    su.roughness = mat.roughness;
+                    su.metallic = mat.metallic;
+                    su.specular = mat.specular;
+                    su.transmission = mat.transmission;
+                    const float3 v = normalize(float3{ (float)-D[0], (float)-D[1], (float)-D[2] });
+                    const float3 L = (cpuSun(su, n, v, l0, s.sun.angularRadius) * E + mat.emissive) * (float)exposure;
+                    sum[0] += w * L.x;
+                    sum[1] += w * L.y;
+                    sum[2] += w * L.z;
+                }
+                used += w;
+                covered |= f->mask;
+                if (covered == 0xFFFFFFFFu) break;
+            }
+            layered += visible > 1;
+            const float4 A = texelOf<float4>(*base, W, x, y);
+            const double wA = std::max(1 - used, 0.0);
+            const double want[3] = { sum[0] + wA * A.x, sum[1] + wA * A.y, sum[2] + wA * A.z };
+            const float4 got = texelOf<float4>(*withLayer, W, x, y);
+            const double scale = std::max({ want[0], want[1], want[2], 1e-2 });
+            const double e = std::max({ std::fabs(got.x - want[0]), std::fabs(got.y - want[1]), std::fabs(got.z - want[2]) }) / scale;
+            if (e > 5e-3 && e > worst)
+                logf("  coverage px (%u,%u): %zu fragments, used %.4f: got (%.5f %.5f %.5f) want (%.5f %.5f %.5f)\n", x, y, px.size(), used, got.x, got.y, got.z, want[0], want[1],
+                     want[2]);
+            worst = std::max(worst, e);
+            ++checked;
+        }
+    }
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+            if (!hasFrags[y * W + x])
+            {
+                const float4 g = texelOf<float4>(*withLayer, W, x, y), a0 = texelOf<float4>(*base, W, x, y);
+                worstOther = std::max({ worstOther, (double)std::fabs(g.x - a0.x), (double)std::fabs(g.y - a0.y), (double)std::fabs(g.z - a0.z) });
+            }
+    logf("coverage composite: %u fragments in %u tiles, %u pixels checked (%u with several visible fragments, %u over the sky), %u walks ended by the band A surface\n",
+         fragments, listed, checked, layered, sky, hidden);
+    report(checked > 500 && layered > 50, "coverage composite: pixels with fragments and with overlapping fragments present", std::min(checked / 10, layered), 50);
+    report(worst < 5e-3, "coverage composite: pixels with fragments vs CPU composite of CPU-shaded fragments (rel.)", worst, 5e-3);
+    report(worstOther == 0, "coverage composite: pixels without fragments unchanged (abs.)", worstOther, 0);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------- planar view products (v1.22)
@@ -1895,6 +2265,7 @@ int main(int argc, char** argv)
         testEdgeCutout(tf, report);
         testAreaLights(tf, report);
         testAreaLightContours(tf, report);
+        testCoverageComposite(tf, report);
         testPlanarProducts(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;

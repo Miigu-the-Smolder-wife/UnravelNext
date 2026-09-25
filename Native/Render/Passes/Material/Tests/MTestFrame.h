@@ -136,16 +136,24 @@ inline ClusterData chunkClusters(const scene::Scene& s)
 class FakeVisibility
 {
 public:
-    // Installs the clusters into the GPU scene and builds the visible cluster list (all instances x clusters).
-    void install(Device& device, GpuScene& gpuScene, const scene::Scene& s)
+    // Installs the clusters into the GPU scene and builds the visible cluster list (all instances x clusters). Instances
+    // in 'notRasterised' stay in the list (their vis ids decode, e.g. for coverage fragments) but come after the others
+    // and the band-A raster skips them.
+    void install(Device& device, GpuScene& gpuScene, const scene::Scene& s, const std::vector<uint32_t>& notRasterised = {})
     {
         ClusterData d = chunkClusters(s);
         const ClusterData::MeshRange* ranges = d.meshes.data();
         visible.clear();
-        for (uint32_t i = 0; i < (uint32_t)s.instances.size(); ++i)
+        for (int pass = 0; pass < 2; ++pass)
         {
-            const ClusterData::MeshRange& r = ranges[s.instances[i].mesh];
-            for (uint32_t c = 0; c < r.clusterCount; ++c) visible.push_back({ i, r.clusterOffset + c });
+            for (uint32_t i = 0; i < (uint32_t)s.instances.size(); ++i)
+            {
+                const bool skipped = std::find(notRasterised.begin(), notRasterised.end(), i) != notRasterised.end();
+                if (skipped != (pass == 1)) continue;
+                const ClusterData::MeshRange& r = ranges[s.instances[i].mesh];
+                for (uint32_t c = 0; c < r.clusterCount; ++c) visible.push_back({ i, r.clusterOffset + c });
+            }
+            if (pass == 0) rasterised = (uint32_t)visible.size();
         }
         clusters = d;
         gpuScene.setClusters(std::move(d));
@@ -172,7 +180,7 @@ public:
         const TextureRef vis = view.visId, depth = view.depth;
         const BufferRef vcl = view.visibleClusters;
         const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
-        const uint32_t groups = (uint32_t)visible.size();
+        const uint32_t groups = rasterised;
         fc.graph.addPass("m.test.fakevis.raster", QueueType::Graphics,
                          [&](PassBuilder& b) {
                              b.use(vis, Use::RenderTarget);
@@ -198,6 +206,7 @@ public:
     }
 
     std::vector<gpu::VisibleCluster> visible;
+    uint32_t rasterised = 0;  // the first 'rasterised' entries of 'visible' are drawn
     ClusterData clusters;
     ComPtr<ID3D12Resource> list;
 };
@@ -217,12 +226,12 @@ public:
         check(constants->Map(0, &none, reinterpret_cast<void**>(&mapped)), "map M test constants");
     }
 
-    // Uploads the scene and installs the stand-in visibility's clusters.
-    void setScene(const scene::Scene& s)
+    // Uploads the scene and installs the stand-in visibility's clusters ('notRasterised': FakeVisibility::install).
+    void setScene(const scene::Scene& s, const std::vector<uint32_t>& notRasterised = {})
     {
         sceneData = s;
         gpuScene.upload(sceneData);
-        vis.install(device, gpuScene, sceneData);
+        vis.install(device, gpuScene, sceneData, notRasterised);
     }
 
     D3D12_GPU_VIRTUAL_ADDRESS frameConstantsFor(const ViewDesc& view)

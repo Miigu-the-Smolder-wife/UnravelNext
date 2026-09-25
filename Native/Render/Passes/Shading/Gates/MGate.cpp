@@ -243,6 +243,8 @@ int main(int argc, char** argv)
             const bool is4k = res.width == 3840;
             const double detect = sumPasses(r, [&](const std::string& n) { return banded(n, "edge.detect") && !planar(n); });
             const double edge = sumPasses(r, [&](const std::string& n) { return n.rfind("m.edge", 0) == 0 && !planar(n); });
+            // Coverage composite over V's band B fragments (design COVERAGE_REDESIGN 4.5; with visibility.coverage_layer).
+            const double coverage = sumPasses(r, [&](const std::string& n) { return n.rfind("m.coverage", 0) == 0 && !planar(n); });
             const shading::Stats st = shading::latestStats(renderer.trackState());
             const double pixels = (double)res.width * res.height;
             // Design terms (ARCHITECTURE 4.2 table, revision 1): resolve and shading kernel before band scheduling, edge
@@ -267,6 +269,7 @@ int main(int argc, char** argv)
             logf("M %s %s: material resolve %.3f ms (design %.2f) | shading %.3f ms (design %.2f before bands) | design kind: %s | planar views, M passes %.3f ms | "
                  "frame %.3f ms\n",
                  label.c_str(), rs.c_str(), resolve, d.resolve, shade, d.shade, kind, planarM, r.gpuFrameMs.median);
+            if (coverage > 0) logf("M %s %s: coverage composite %.3f ms\n", label.c_str(), rs.c_str(), coverage);
         }
         return 0;
 #endif

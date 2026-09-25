@@ -30,7 +30,9 @@
 // P[4] = { 0 (the specular albedo LUT is the frame constant g_specularAlbedoLut, v1.25), texture table, experiment mask (0;
 //        shading.toml), 0 }
 // P[5] = { froxel lights (raw) (UNX_NONE = absent), LTC table (StructuredBuffer<float4>, AreaLight.hlsli) }
-// P[6] = { edge tile mask SRV (EdgeDetect.hlsl, R32G32_UINT per tile; UNX_NONE = no edge pixels), 0, 0, 0 }
+// P[6] = { edge tile mask SRV (EdgeDetect.hlsl, R32G32_UINT per tile; UNX_NONE = no edge pixels), V's coverage tiles
+//        (raw; UNX_NONE = no coverage layer: a tile with coverage fragments keeps every pixel's exposed radiance for the
+//        coverage composite, CoverageComposite.hlsl), 0, 0 }
 // P[7] = { edge radiance UAV (RGBA16F), R's screen probe maps (K path; UNX_NONE = absent), S's shadow overflow list (raw;
 //        FALLBACK: a raw buffer holding this frame's ShadowSrvs), 0 }
 #include "Bindless.hlsli"
@@ -42,6 +44,7 @@
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
+#include "Passes/Visibility/CoverageTiles.hlsli"
 #if !PLANAR
 #define GI_PROBE_TILE_CACHE  // R's screen probes at the group's tile corners, loaded once (design revision 1 4.4, 12.3)
 #endif
@@ -89,6 +92,12 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     const uint wordRead = words[readPixel];
     const uint2 gbPacked = gbuffer[readPixel];
     const float depthValue = depthTex[readPixel];
+    uint coverageFragments = 0;  // V's coverage fragments of this tile (the band A radiance is kept for the composite)
+    if (P[6].y != UNX_NONE)
+    {
+        ByteAddressBuffer coverage = ResourceDescriptorHeap[P[6].y];
+        coverageFragments = coverage.Load(4 * ((tileCoord.x + tileCoord.y * ((g_viewWidth + 7) / 8)) * COV_TILE_WORDS + COV_TILE_COUNT));
+    }
     uint overflowHead = 0;  // S's overflow tile head (7.3): 0 none, 1 + block start
 #if !FALLBACK
     if (P[3].z != UNX_NONE)
@@ -113,13 +122,18 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     ShadedPixel sp = (ShadedPixel)0;
     if (active) sp = shadeSurface(pixel, word, materialIndex, m, words, gbPacked, depthValue, overflowHead);
 
-    // ---- edge (E) pixels (EdgeDetect.hlsl marked them in the tile's mask) keep their exposed linear radiance for the
-    // composite (EdgeComposite.hlsl).
-    if (!active || P[6].x == UNX_NONE) return;
-    Texture2D<uint2> edgeTiles = ResourceDescriptorHeap[P[6].x];
-    const uint2 edgeMask = edgeTiles[tileCoord];
-    const uint bit = tid.y * M_TILE + tid.x;
-    if ((((bit < 32 ? edgeMask.x : edgeMask.y) >> (bit & 31)) & 1u) != 0)
+    // ---- edge (E) pixels (EdgeDetect.hlsl marked them in the tile's mask) and the pixels of coverage tiles keep their
+    // exposed linear radiance for the composites (EdgeComposite.hlsl, CoverageComposite.hlsl).
+    if (!active) return;
+    bool keep = coverageFragments != 0;
+    if (!keep && P[6].x != UNX_NONE)
+    {
+        Texture2D<uint2> edgeTiles = ResourceDescriptorHeap[P[6].x];
+        const uint2 edgeMask = edgeTiles[tileCoord];
+        const uint bit = tid.y * M_TILE + tid.x;
+        keep = (((bit < 32 ? edgeMask.x : edgeMask.y) >> (bit & 31)) & 1u) != 0;
+    }
+    if (keep)
     {
         RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];
         edgeRadiance[pixel] = float4(sp.radiance * g_exposure, 1);
