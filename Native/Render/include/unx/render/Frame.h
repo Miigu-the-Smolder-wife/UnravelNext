@@ -33,6 +33,12 @@ struct ViewDesc
                                         // V honours it with SV_ClipDistance0 and in cluster culling.
     bool mirrored = false;              // reflection views: front faces wind clockwise (V swaps cull mode)
     float ev100 = 14.0f;
+    // Planar reflection views (v1.22, R request): which pixels are mirror pixels. R8_UINT, width x height, nonzero =
+    // mirror pixel (drawn); invalid = every pixel. V culls clusters over 8 x 8 tiles without mirror pixels and fills
+    // the other pixels' depth with the nearest value before the raster (they stay VIS_NONE); M and S skip them.
+    TextureRef planarMask;              // [R]
+    TextureRef planarTileMask;          // optional R8_UINT ceil(W/8) x ceil(H/8), nonzero = the tile has mirror [R]
+                                        // pixels (M and S tile classification in one load)
 
     // Main view from a scene camera (reversed-Z infinite projection, Math.h).
     static ViewDesc fromCamera(const scene::Camera& camera, uint32_t width, uint32_t height, const float4x4& prevViewProj);
@@ -65,6 +71,11 @@ struct ViewResources
                                    // start) + runs of 8-bit visibilities, list order (7.3)
     BufferRef shadowOverflowFallbackTiles;  // raw: word 0 count, words 1..3 DispatchIndirect  [S]
                                             // args (count, 1, 1), words 4.. tiles (y << 16 | x)
+    BufferRef froxelLights;        // this view's froxel light lists (7.4; v1.22): main view =      [S]
+                                   // FrameResources::froxelLights, planar views: S shadowVisibility
+    TextureRef airVolume;          // this view's air volume (v1.15 layout; v1.22): main view =     [S]
+                                   // FrameResources::aerialPerspective; planar views integrate from
+                                   // the mirror plane on (the main view's mirror pixel has the rest)
     TextureRef screenProbes;       // GI screen probes (main view only)                     [R]
     TextureRef screenProbeMaps;    // atlas of the K-path radiance maps of the cache entries  [R]
                                    // the screen probes use, hardware-filterable (M: SrvCompute; R's

@@ -53,3 +53,9 @@
   - 평면 뷰의 mark가 비상주 페이지를 압축 목록으로 낸다.
   - 작은 allocate와 래스터를 그 목록에 대해서만 돌린다.
   - 인터페이스 변경은 없다.
+
+## 결과 (코어, 2026-09-25, INTERFACES v1.22)
+
+- `ViewResources::froxelLights`(BufferRef, 7.4 형식)와 `airVolume`(TextureRef, v1.15 형식)을 추가했다. 메인 뷰는 `FrameRenderer`가 `tracks::froxels` 직후 `FrameResources::froxelLights/aerialPerspective`와 같은 참조를 넣는다. 평면 뷰는 S `shadowVisibility`가 채운다.
+- INTERFACES: 5.1 표 한 줄, 7.3(슬롯·오버플로는 그 뷰 리스트 기준, "메인 뷰 전용" 삭제, 평면 반사 뷰 항목 삭제), 7.4(뷰 단위 리스트), 버전 기록에 공기 볼륨의 정확 조건(t_p부터 적분, 두 구간의 곱).
+- 검증: 필드 추가와 참조 대입뿐이다. core 빌드가 통과했다(실행 없음).

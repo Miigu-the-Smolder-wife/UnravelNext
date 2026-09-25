@@ -172,6 +172,8 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& fram
     tracks::materialResolve(fc, main);
     tracks::shadowPages(fc, main);
     tracks::froxels(fc, main);
+    main.froxelLights = resources.froxelLights;  // the main view's per-view S products (v1.22)
+    main.airVolume = resources.aerialPerspective;
     tracks::globalIllumination(fc, main);
     tracks::reflections(fc, main);
     tracks::shadowVisibility(fc, main);
