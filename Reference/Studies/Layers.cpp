@@ -1564,12 +1564,12 @@ void metalMsStudy(const std::string& out, uint32_t photons)
 
 // Table for candidate G (v1 metal): f = F D V g(mu_v) g(mu_l), g(mu; r, rho) solved per grid cell by symmetric Sinkhorn so
 // that the energy leaving every incidence equals the multiple-scattering conductor's albedo (Heitz walk) for Schlick
-// Fresnel with F0 = rho. Grid: mu = (k / 15)^2 (k = 0 at 1e-4), r = j / 7 (alpha = r^2), rho = 0.04 + 0.96 i / 7; row-major
+// Fresnel with F0 = rho. Grid: mu = (k / 15)^2 (k = 0 at 1e-4), r = (j / 15)^2 (alpha = r^2), rho = 0.04 + 0.96 i / 7; row-major
 // [rho][r][mu]. r = 0 is a mirror (no multiple scattering): g = 1. Validation: the published table looked up
 // trilinearly (as a shader would) at off-grid roughness and colour, against the reference.
 namespace gtab
 {
-constexpr int NMU = 16, NR = 8, NRHO = 8;
+constexpr int NMU = 16, NR = 16, NRHO = 8;
 // rho axis from 0.04 (the common dielectric F0): as F0 -> 0 the single-scattering energy near normal incidence vanishes
 // faster than the multiple-scattering part, so g is ill-conditioned there (g(mu 1) ~ 2-3 at F0 = 0), and a grid point at
 // 0 would pull F0 = 0.04 far off under linear interpolation. Lookups clamp rho below 0.04 to the first row.
@@ -1577,9 +1577,12 @@ constexpr double kRho0 = 0.04;
 // mu axis uniform in sqrt(mu) (mu_k = (k / 15)^2): g changes fastest at grazing incidence, where a uniform mu grid has a
 // single interval over 86-90 deg (validation: 5.9 % albedo error at r 0.07, 89.5 deg).
 double muAt(int k) { const double t = (double)k / (NMU - 1); return std::max(t * t, 1e-4); }
+// r axis uniform in sqrt(r) (r_j = (j / 15)^2): between the mirror (g = 1) and slightly rough metal, g at grazing grows
+// non-linearly (shadowing goes with alpha tan(theta)); validation with uniform r: 4.8 % at r 0.07, 2.8 % at r 0.2 (87.5 deg).
+double rAt(int j) { const double t = (double)j / (NR - 1); return t * t; }
 double lookup(const std::vector<float>& t, double mu, double r, double rho)
 {
-    const double x = std::sqrt(std::clamp(mu, 0.0, 1.0)) * (NMU - 1), y = std::clamp(r, 0.0, 1.0) * (NR - 1), z = std::clamp((rho - kRho0) / (1 - kRho0), 0.0, 1.0) * (NRHO - 1);
+    const double x = std::sqrt(std::clamp(mu, 0.0, 1.0)) * (NMU - 1), y = std::sqrt(std::clamp(r, 0.0, 1.0)) * (NR - 1), z = std::clamp((rho - kRho0) / (1 - kRho0), 0.0, 1.0) * (NRHO - 1);
     const int x0 = std::min((int)x, NMU - 2), y0 = std::min((int)y, NR - 2), z0 = std::min((int)z, NRHO - 2);
     const double fx = x - x0, fy = y - y0, fz = z - z0;
     auto at = [&](int k, int j, int i) { return (double)t[((size_t)i * NR + j) * NMU + k]; };
@@ -1645,7 +1648,7 @@ void metalGTable(const std::string& out, uint32_t photons)
     for (int i = 0; i < NRHO; ++i)
         for (int j = 0; j < NR; ++j)
         {
-            const double rho = kRho0 + (1 - kRho0) * i / (NRHO - 1), r = (double)j / (NR - 1);
+            const double rho = kRho0 + (1 - kRho0) * i / (NRHO - 1), r = rAt(j);
             const std::vector<double> g = solveCell(r, rho, photons);
             for (int k = 0; k < NMU; ++k)
             {
@@ -1661,9 +1664,9 @@ void metalGTable(const std::string& out, uint32_t photons)
          "// F0 + (1 - F0)(1 - v.h)^5; with Schlick the whole Fresnel curve is set by F0, so rho = F0 exactly). g is solved so\n"
          "// the energy leaving every incidence equals the multiple-scattering GGX conductor (Heitz 2016 walk, same Fresnel\n"
          "// at every bounce): reciprocal, forward and adjoint albedo equal to the reference.\n"
-         "// Layout: row-major [rho][r][mu], 8 x 8 x 16. mu = cos(theta) = (k / 15)^2 (uniform in sqrt(mu); k = 0 evaluated at\n"
-         "// 1e-4), r = perceptual\n"
-         "// roughness j / 7 (alpha = r^2), rho = 0.04 + 0.96 i / 7. Lookup: trilinear in (sqrt(mu), r, (rho - 0.04) / 0.96), clamped\n"
+         "// Layout: row-major [rho][r][mu], 8 x 16 x 16. mu = cos(theta) = (k / 15)^2 (uniform in sqrt(mu); k = 0 evaluated at\n"
+         "// 1e-4), r = perceptual roughness (j / 15)^2 (uniform in sqrt(r); alpha = r^2),\n"
+         "// rho = 0.04 + 0.96 i / 7. Lookup: trilinear in (sqrt(mu), sqrt(r), (rho - 0.04) / 0.96), clamped\n"
          "// to the grid (rho < 0.04 uses the first row: g is ill-conditioned as F0 -> 0). r = 0: g = 1.\n";
     s << "const float kMetalScatterScale[" << table.size() << "] = {";
     for (size_t i = 0; i < table.size(); ++i) s << (i % 8 == 0 ? "\n    " : " ") << format("%.6ff,", table[i]);
@@ -1671,14 +1674,14 @@ void metalGTable(const std::string& out, uint32_t photons)
     writeTextFile(out, s.str());
 
     // Validation: the published table, trilinear, at off-grid roughness and colours.
-    const double rs[] = { 0.07, 0.2, 0.45, 0.7, 0.93 };
+    const double rs[] = { 0.03, 0.07, 0.2, 0.45, 0.7, 0.871, 0.93 };  // 0.871 = (14/15)^2 is on the grid
     const Rgb cols[] = { Rgb(1.0f), Rgb(0.996f, 0.733f, 0.359f), Rgb(0.912f, 0.623f, 0.518f), Rgb(0.04f), Rgb(0.02f) };
     const char* colNames[] = { "white", "gold", "copper", "dielectric F0 0.04", "water F0 0.02 (below the grid)" };
     std::ostringstream md;
     md << "# kMetalScatterScale validation [measured]\n\nThe published table (" << out
        << ") looked up trilinearly per channel (rho = channel F0) vs the MS conductor. Worst relative luminance albedo error "
           "over incidence 0-89.5 deg (forward = fixed view, adjoint = fixed light). Validation photons "
-       << photons << " per incidence bin.\n\n| F0 | r | adjoint worst | forward worst |\n|---|---|---|---|\n";
+       << photons << " per incidence bin.\n\n| F0 | r | adjoint worst (all / <=85°) | forward worst (all / <=85°) |\n|---|---|---|---|\n";
     for (int c = 0; c < 5; ++c)
         for (double r : rs)
         {
@@ -1711,7 +1714,7 @@ void metalGTable(const std::string& out, uint32_t photons)
             Table T;
             cond::defTable(d, photons, T);
             const std::vector<Rgb> fwd = cond::forwardAlbedo(d, photons);
-            double adj = 0, fw = 0;
+            double adj = 0, fw = 0, adj85 = 0, fw85 = 0;
             int adjAt = 0, fwAt = 0;
             for (int i = 0; i < NI; ++i)
             {
@@ -1719,6 +1722,11 @@ void metalGTable(const std::string& out, uint32_t photons)
                 for (int t = 0; t < NT; ++t)
                     for (int p = 0; p < NP; ++p) sumT += T.at(i, t, p).luminance();
                 const double ea = std::fabs(sumT / refAlb[i] - 1), ef = std::fabs(fwd[i].luminance() / refAlb[i] - 1);
+                if (i + 0.5 <= 85)
+                {
+                    adj85 = std::max(adj85, ea);
+                    fw85 = std::max(fw85, ef);
+                }
                 if (ea > adj)
                 {
                     adj = ea;
@@ -1730,8 +1738,9 @@ void metalGTable(const std::string& out, uint32_t photons)
                     fwAt = i;
                 }
             }
-            md << format("| %s | %.2f | %.2f%% @%.1f° | %.2f%% @%.1f° |\n", colNames[c], r, 100 * adj, adjAt + 0.5, 100 * fw, fwAt + 0.5);
-            logf("  validate %s r %.2f: adjoint %.2f%% @%.1f, forward %.2f%% @%.1f\n", colNames[c], r, 100 * adj, adjAt + 0.5, 100 * fw, fwAt + 0.5);
+            md << format("| %s | %.2f | %.2f%% @%.1f° / %.2f%% | %.2f%% @%.1f° / %.2f%% |\n", colNames[c], r, 100 * adj, adjAt + 0.5, 100 * adj85, 100 * fw, fwAt + 0.5, 100 * fw85);
+            logf("  validate %s r %.2f: adjoint %.2f%% @%.1f (<=85: %.2f%%), forward %.2f%% @%.1f (<=85: %.2f%%)\n", colNames[c], r, 100 * adj, adjAt + 0.5, 100 * adj85,
+                 100 * fw, fwAt + 0.5, 100 * fw85);
         }
     const std::string mdPath = out.substr(0, out.find_last_of('.')) + "_validation.md";
     writeTextFile(mdPath, md.str());
