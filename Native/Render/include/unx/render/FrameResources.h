@@ -85,7 +85,14 @@ struct FrameResources
                                    // camera -> node (x exposure; atmosphere, caster-shadowed air, local
                                    // lights), part 1 optical depth, part 2 sun transmittance at the node;
                                    // read with atmosphereAerial / atmosphereAirView (Atmosphere.hlsli)
-    BufferRef vsmPool;             // physical page pool (raw buffer; v1.18)                [S]
+    BufferRef vsmPool;             // physical page pool (raw buffer; v1.18); replaced by vsmAtlas [S]
+                                   // (v1.43): invalid once S publishes the atlas
+    TextureRef vsmAtlas;           // v1.43 (S request 20260926_S_vsm_one_path): the page atlas,  [S]
+                                   // D32_FLOAT, SRV R32_FLOAT, page p at ((p % 128), (p / 128)) x
+                                   // 128 px, 0 = no caster; ShadowSrvs.pool carries its SRV. Readers
+                                   // move to it while vsmPool is still valid; S switches when M, R
+                                   // and FX read it, then vsmPool goes (no window where a buffer
+                                   // descriptor is read as a texture)
     BufferRef vsmPageTable;        //                                                       [S]
     BufferRef vsmBlocks;           // per-page block hierarchy (persistent; v1.18)          [S]
     BufferRef vsmSearchBound;      // blocker-search bound grid of this frame (v1.18)       [S]

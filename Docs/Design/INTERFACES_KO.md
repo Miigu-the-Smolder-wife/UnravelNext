@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.42, 2026-09-26)
+# UnravelNext 인터페이스 (v1.43, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -683,6 +683,8 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.43 (2026-09-26):
+  - **`FrameResources::vsmAtlas`(S 요청 `20260926_S_vsm_one_path.md`)**: VSM 한 경로의 페이지 아틀라스(D32_FLOAT, SRV R32_FLOAT, 페이지 p는 ((p % 128), (p / 128)) × 128 px, 0 = 캐스터 없음). `ShadowSrvs.pool`이 그 SRV를 담는다. 전환 순서: 필드를 먼저 더했다(`vsmPool`과 함께). M·R·FX가 `vsmAtlas`를 읽도록 옮긴 뒤 S가 아틀라스를 게시하고 `vsmPool`을 무효로 둔다. 그다음 코어가 `vsmPool`을 지운다. 버퍼 서술자를 텍스처로 읽는 창은 생기지 않는다.
 - v1.42 (2026-09-26):
   - **`GpuLockSlice`(3.3, C 요청)**: 프로세스 안 조각 잠금 C++ API. GpuLock.ps1과 같은 규약이다.
   - **공용 헤더 분리(5절, 인프라 요청 `20260926_Infra_header_split.md`)**: 내용 변경 없이 위치만 옮겼다. `Frame.h`는 호환 include를 유지한다. 코어 파일 가운데 `src/GpuLock.cpp`는 `TrackPending.h`만 include한다. 인프라가 적용 뒤 증분 빌드 시간을 다시 잰다.
