@@ -19,6 +19,7 @@ struct GiSettings  // from Config/quality/gi.toml
     uint32_t updatesPerFrame = 0;  // raysPerFrame / 64 whole-hemisphere updates
     float cellAngleDeg = 0, cellMin = 0, nearRadius = 0, rayLength = 0, hitUpdateShare = 0, hitCellFootprintScale = 0;
     uint32_t experimentDisable = 0;  // gi.experiment_disable (cost attribution only)
+    bool deterministic = false;      // gi.deterministic: same inputs -> bit-identical cache (selection by key priority, seeds by key)
     static GiSettings fromQuality(const QualityConfig& q);
 };
 
@@ -56,6 +57,12 @@ public:
         m_skyRadiance = radiance;
         m_sunIlluminance = sunIlluminance;
     }
+    // Tests: the constant sky only in directions up to this sine of elevation (1 = the whole sky; SKY1 variant only).
+    void setConstantSkyBand(float maxSinElevation)
+    {
+        if (maxSinElevation != m_skyBand) ++m_epoch;
+        m_skyBand = maxSinElevation;
+    }
     const GiSettings& settings() const { return m_settings; }
     // Blocking readback of the cache header (waits for the GPU).
     GiStats readStats();
@@ -70,6 +77,7 @@ private:
     ID3D12CommandSignature* dispatchSignature();
     uint64_t m_bytes = 0;
     float3 m_skyRadiance{}, m_sunIlluminance{};
+    float m_skyBand = 1;
     uint32_t m_epoch = 1, m_sceneRevision = 0;
 };
 } // namespace unx::render::gi

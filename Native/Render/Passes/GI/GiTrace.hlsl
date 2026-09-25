@@ -41,7 +41,9 @@ void GiTraceGen()
     const uint shAddress = h.offSh + entry * GI_SH_STRIDE;
     const uint history = giHistory(b, h, entry);
     const float alpha = giHistoryAlpha(h, history);
-    const uint seed = giRandom(entry * 9781u + h.frame * 6271u + texel * 26699u);
+    // gi.deterministic (P[0].w bit 0): seeds from the entry's key, not its index (allocation order).
+    const uint identity = (P[0].w & 1u) != 0 ? giDetPriority(b, h, entry) : entry;
+    const uint seed = giRandom(identity * 9781u + h.frame * 6271u + texel * 26699u);
     const float2 uv = (float2(texel % GI_TEXELS, texel / GI_TEXELS) + float2(giUnit(seed), giUnit(seed + 1))) / GI_TEXELS;
     const float3 local = giHemiOctDecode(uv);
     RayDesc r;
@@ -71,6 +73,9 @@ void GiTraceGen()
     {
         radiance = giSkyRadiance(r.Direction);
         if ((P[3].w & 32) != 0 && r.Direction.y < 0) radiance = 0;  // attribution: nothing below the horizon (the sky LUT's lit ground)
+#if SKY != SKY_ATMOSPHERE
+        if (r.Direction.y > asfloat(P[4].x)) radiance = 0;  // tests: the constant sky in a band above the horizon (P[4].x = 1: all)
+#endif
         distanceToHit = 65000;
     }
     else

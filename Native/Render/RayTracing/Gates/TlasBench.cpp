@@ -156,10 +156,12 @@ int main()
         cases.push_back({ blasCount, 1280, 200, 50, "spread 400 m, scale 50 (overlapping)" });
         cases.push_back({ blasCount, 1280, 200, 1, "256 update-able BLAS refit before each build", true });
         cases.push_back({ blasCount, 1280, 200, 1, "refit, then timed as the frame's profiler does", true, true });
+        cases.push_back({ 1, 1024, 0, 1, "1,024 coincident instances (same position)" });
+        cases.push_back({ 1, 1280, 0, 1, "1,280 coincident instances (same position)" });
         for (const Case& cs : cases)
             {
                 const uint32_t distinct = cs.distinct, n = cs.n;
-                std::uniform_real_distribution<float> place(-cs.spread, cs.spread);
+                std::uniform_real_distribution<float> place(-std::max(cs.spread, 1e-6f), std::max(cs.spread, 1e-6f));  // spread 0: coincident
                 std::vector<D3D12_RAYTRACING_INSTANCE_DESC> inst(n);
                 for (uint32_t k = 0; k < n; ++k)
                 {

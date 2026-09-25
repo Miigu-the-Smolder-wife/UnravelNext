@@ -83,6 +83,11 @@ uint giDetPriority(RWByteAddressBuffer b, GiHeader h, uint entry)
     const uint2 key = b.Load2(h.offMeta + entry * 16);
     return giDetHash(key.x ^ giDetHash(key.y ^ (h.frame * 0x9E3779B9u)));
 }
+// A background candidate (deterministic mode): live and not updated this frame.
+bool giDetBackgroundCandidate(RWByteAddressBuffer b, GiHeader h, uint entry)
+{
+    return b.Load(h.offMeta + entry * 16 + 4) != 0 && b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_LAST_UPDATE) != h.frame;
+}
 
 uint giAgeBucket(RWByteAddressBuffer b, GiHeader h, uint entry)
 {
@@ -132,19 +137,52 @@ float3 giAnchorAtHit(GiHeader h, float3 hitPosition, float3 rayDirection)
 
 // Finds the entry of 'key' or creates it with the given anchor. Returns GI_ENTRY_PENDING when the entry is being
 // created by another thread in this pass, the pool is exhausted or the probe sequence is full (counted in the header).
+// Deterministic anchors (gi.deterministic): an entry's anchor is not its creator's point (which thread creates a cell
+// depends on arrival order) but the minimum of every candidate's packed point and normal while the entry has never been
+// updated; GiDetAnchors decodes it before the frame's rays leave anchors. 64 bits: position in [cell - s/2, cell + 3s/2]
+// per axis at 14 bits (2s / 16383), octahedral normal at 2 x 11 bits.
+uint64_t giPackAnchorCandidate(GiHeader h, uint64_t key, float3 p, float3 n)
+{
+    const uint level = (uint)(key & 31u);
+    const float s = giCellSize(h, level);
+    const int3 cell = (int3(uint3((uint)(key >> 8), (uint)(key >> 26), (uint)(key >> 44)) & 0x3FFFFu) << 14) >> 14;  // sign-extend 18 bits
+    const float3 origin = float3(cell) * s - 0.5 * s;
+    const uint3 q = (uint3)clamp(round((p - origin) / (2 * s) * 16383.0), 0.0, 16383.0);
+    float2 e = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
+    if (n.z < 0) e = (1.0 - abs(e.yx)) * select(e >= 0.0, 1.0, -1.0);
+    const uint2 u = (uint2)clamp(round((e * 0.5 + 0.5) * 2047.0), 0.0, 2047.0);
+    return ((uint64_t)q.x << 50) | ((uint64_t)q.y << 36) | ((uint64_t)q.z << 22) | ((uint64_t)u.x << 11) | (uint64_t)u.y;
+}
+void giDetAnchorCandidate(RWByteAddressBuffer b, GiHeader h, uint entry, uint64_t key, float3 p, float3 n)
+{
+    if ((h.flags & 1u) == 0 || entry == GI_ENTRY_PENDING) return;
+    if (b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) != 0) return;  // anchored for good once updated
+    uint64_t previous;
+    b.InterlockedMin64(h.offAnchorMin + entry * 8, giPackAnchorCandidate(h, key, p, n), previous);
+}
+
 uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anchor, float3 normal, out bool created)
 {
     created = false;
     // Existing entries (nearly every call) by plain loads; the compare-exchange probe below only when the key is absent.
     const uint existing = giFind(b, h, key);
-    if (existing != GI_ENTRY_PENDING) return existing;
+    if (existing != GI_ENTRY_PENDING)
+    {
+        giDetAnchorCandidate(b, h, existing, key, anchor, normal);
+        return existing;
+    }
     uint slot = giHash(key) & (h.tableSlots - 1);
     [loop] for (uint i = 0; i < GI_PROBE_LIMIT; ++i)
     {
         const uint address = h.offTable + slot * 16;
         uint64_t previous;
         b.InterlockedCompareExchange64(address, 0ull, key, previous);
-        if (previous == key) return b.Load(address + 8);
+        if (previous == key)
+        {
+            const uint found = b.Load(address + 8);
+            giDetAnchorCandidate(b, h, found, key, anchor, normal);
+            return found;
+        }
         if (previous == 0)
         {
             uint count;
@@ -161,6 +199,13 @@ uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anch
             [unroll] for (uint k = 0; k < GI_SH_STRIDE / 16; ++k) b.Store4(h.offSh + entry * GI_SH_STRIDE + k * 16, 0u);
             [loop] for (uint t = 0; t < GI_TEXEL_COUNT * 8 / 16; ++t) b.Store4(h.offTexels + entry * GI_TEXEL_COUNT * 8 + t * 16, 0u);
             b.Store(h.offHitStamp + entry * 4, 0u);
+            if (h.flags & 1u)
+            {
+                b.Store2(h.offAnchorMin + entry * 8, uint2(0xFFFFFFFFu, 0xFFFFFFFFu));
+                uint64_t previous;
+                b.InterlockedMin64(h.offAnchorMin + entry * 8, giPackAnchorCandidate(h, key, anchor, normal), previous);
+                DeviceMemoryBarrier();  // the candidate before the entry is published
+            }
             b.Store(address + 8, entry);
             b.InterlockedAdd(GI_H_STAT_CREATED, 1u);
             created = true;

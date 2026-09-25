@@ -4,14 +4,15 @@
 // the exact priority v of the quota-th entry: GiSelect takes every entry below v, and the entries equal to v only when
 // all of them fit (a hash tie at the boundary leaves those slots unused rather than picking by arrival order).
 // Level 0 also initialises the tier's state from GI_H_SELECT. The histogram is cleared for the next level.
-// P[0] = { cache UAV, selection state UAV (raw), level 0..3, 0 }
+// P[0] = { cache UAV, selection state UAV (raw), level 0..3, mode 0 (tiers 0, 1: groups 0, 1) | 1 (tier 2: group 0) }
 #include "Passes/GI/GiInternal.hlsli"
 
 groupshared uint g_scan[256];
 
 [numthreads(256, 1, 1)]
-void main(uint d : SV_GroupThreadID, uint tier : SV_GroupID)
+void main(uint d : SV_GroupThreadID, uint group : SV_GroupID)
 {
+    const uint tier = P[0].w == 0 ? group : 2;
     RWByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
     RWByteAddressBuffer state = ResourceDescriptorHeap[P[0].y];
     const uint level = P[0].z;
@@ -27,9 +28,17 @@ void main(uint d : SV_GroupThreadID, uint tier : SV_GroupID)
         GroupMemoryBarrierWithGroupSync();
     }
     const uint inclusive = g_scan[d], exclusive = inclusive - count;
-    const uint remaining = level == 0 ? b.Load(GI_H_SELECT + tier * 16 + 4) : state.Load(base + GI_DET_REMAINING);
+    const uint quota = tier < 2 ? b.Load(GI_H_SELECT + tier * 16 + 4) : b.Load(GI_H_BG_COUNT);
+    const uint remaining = level == 0 ? quota : state.Load(base + GI_DET_REMAINING);
     const uint prefix = level == 0 ? 0u : state.Load(base + GI_DET_PREFIX);
     GroupMemoryBarrierWithGroupSync();
+    if (level == 0 && d == 255 && remaining > inclusive)
+    {
+        // Fewer candidates than the quota (background with few live entries): take them all.
+        state.Store(base + GI_DET_PREFIX, 0xFFFFFFFFu);
+        state.Store(base + GI_DET_REMAINING, 0u);
+        state.Store(base + GI_DET_EQUAL, 1u);
+    }
     if (remaining > 0 && exclusive < remaining && remaining <= inclusive)
     {
         const uint left = remaining - exclusive;  // still needed from the entries with this digit

@@ -2,7 +2,9 @@
 // Deterministic update selection (gi.deterministic), one radix level: the requested entries in a tier's threshold age
 // bucket are ranked by a priority hash of their key and the frame (giDetPriority), not by the order their atomic fills
 // arrive in. Level L counts the entries whose priority matches the prefix resolved so far by their next 8 bits.
-// P[0] = { cache UAV, selection state UAV (raw, GI_DET_* layout), level 0..3, 0 }
+// Mode 1 (P[0].w): the background updates instead (tier 2): every live entry not updated this frame, quota =
+// GI_H_BG_COUNT (the index-range background of the default mode depends on allocation order).
+// P[0] = { cache UAV, selection state UAV (raw, GI_DET_* layout), level 0..3, mode 0 (update list) | 1 (background) }
 #include "Passes/GI/GiInternal.hlsli"
 
 [numthreads(64, 1, 1)]
@@ -11,11 +13,22 @@ void main(uint i : SV_DispatchThreadID)
     RWByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
     RWByteAddressBuffer state = ResourceDescriptorHeap[P[0].y];
     const GiHeader h = giHeader(b);
-    if (i >= min(h.updateCount, h.capacity)) return;
-    const uint item = b.Load(h.offUpdate + i * 4);
-    const uint tier = item >> 31, entry = item & ~GI_TIER_HIT;
-    const uint2 select = b.Load2(GI_H_SELECT + tier * 16);  // threshold bucket, quota
-    if (select.y == 0 || giAgeBucket(b, h, entry) != select.x) return;
+    uint tier, entry;
+    if (P[0].w == 0)
+    {
+        if (i >= min(h.updateCount, h.capacity)) return;
+        const uint item = b.Load(h.offUpdate + i * 4);
+        tier = item >> 31;
+        entry = item & ~GI_TIER_HIT;
+        const uint2 select = b.Load2(GI_H_SELECT + tier * 16);  // threshold bucket, quota
+        if (select.y == 0 || giAgeBucket(b, h, entry) != select.x) return;
+    }
+    else
+    {
+        tier = 2;
+        entry = i;
+        if (i >= h.capacity || !giDetBackgroundCandidate(b, h, entry)) return;
+    }
     const uint level = P[0].z;
     const uint p = giDetPriority(b, h, entry);
     const uint base = tier * GI_DET_TIER_BYTES;

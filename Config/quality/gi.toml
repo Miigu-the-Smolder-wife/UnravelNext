@@ -19,6 +19,8 @@ ray_length_m = 10000
 hit_update_share = 0.25            # share of the hemisphere updates guaranteed to entries that GI rays hit (bounce cells)
 hit_cell_footprint_scale = 4.0     # bounce cells (2nd+ bounce irradiance at ray hits) = this x the ray footprint (~0.36 t);
                                    # direct sun at hits is an exact shadow ray
+deterministic = false              # same inputs -> bit-identical GI: update selection by key priority (radix select),
+                                   # ray seeds by key (user decision: a mode switch until the budget shows the margin)
 experiment_disable = 0             # cost attribution only (recorded in the quality hash): 8 = hit materials without
                                    # textures, 16 = no sun at GI hits, 32 = GI rays that leave the scene below the
                                    # horizon get 0 (not the sky LUT's lit planet ground). Never nonzero outside measurements.

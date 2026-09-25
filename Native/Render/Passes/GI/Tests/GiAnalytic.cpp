@@ -7,6 +7,9 @@
 //     0 facing the sun's side. The wall's indirect irradiance is the ground's single bounce, E = rho E_sun cos(theta_sun) F,
 //     F = the view factor from the probe to the (unshadowed) ground in front of the wall, exact by Lambert's contour
 //     integral per probe. Exercises the sun at GI hits (illuminance, cosine, shadow ray) that 1 and 2 do not.
+//  5. Horizon band sky: a ground plane under a constant sky only between elevation 0 and 10 deg (a sunset sky is brightest
+//     there). E = pi L cos^2(80 deg) exactly. The cache's irradiance comes from order-2 SH, whose truncated cosine kernel
+//     overestimates light near the horizon (at 85 deg from the normal 0.141 against cos = 0.087): this measures it.
 //  4. A single sunlit plane (albedo 0.5, no sky), level and tilted 25 deg: a plane cannot see itself, so its indirect
 //     irradiance is exactly 0. Any light the cache gives it is spurious bounce (self-hits, cells that sample around the
 //     surface, directions below a record's hemisphere); reported as E over the plane's direct sun irradiance.
@@ -14,7 +17,8 @@
 // for N frames and evaluates screenProbeIrradiance (M's API) at every probe pixel. Also reports the frames needed to
 // come within 1 % (reconvergence, gi.relight_frames_max).
 //
-//   unx_test_gi_gianalytic [--frames N] [--validate]
+//   unx_test_gi_gianalytic [--frames N] [--validate] [--determinism]
+// --determinism: gi.deterministic off and on, two furnace runs each; on must be bit-identical.
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/gi/GiSystem.h"
@@ -238,12 +242,14 @@ struct Outcome
     int converged = -1;  // first frame whose mean is within 1 %
     gi::GiStats stats;
     uint32_t tilePixels = 0, tileMismatches = 0;  // screenProbeGatherTile vs screenProbeGather (ProbeTileCompare), all frames
+    std::vector<float> values;                    // the last frame's probe evaluations (GiTestEval), for determinism checks
 };
 
 // expected(position, normal): the analytic irradiance at a probe, < 0 to leave the probe out. expectedRadiance <= 0: the K
 // radiance is not checked (not uniform).
 Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky, float3 sun,
-            const std::function<double(float3, float3)>& expected, double expectedRadiance, uint32_t frames, uint32_t width, uint32_t height)
+            const std::function<double(float3, float3)>& expected, double expectedRadiance, uint32_t frames, uint32_t width, uint32_t height,
+            float skyBand = 1)
 {
     GpuScene gpuScene(device);
     gpuScene.upload(s);
@@ -329,6 +335,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             gi::GiSystem& gi = gi::GiSystem::get(fc);
             giSystem = &gi;
             gi.setConstantSky(sky, sun);
+            gi.setConstantSkyBand(skyBand);
             gi.record(fc, main, rays);
             const BufferRef resultRef = graph.importBuffer(result.resource.Get(), { "test result", resultBytes, 16 });
             const TextureRef probes = main.screenProbes, maps = main.screenProbeMaps;
@@ -419,6 +426,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             out.radianceMean = n ? rsum / n : 0;
             out.radianceWorst = rworst;
             out.probes = n;
+            out.values = values;
             out.mean = n ? sum / n : 0;
             out.minimum = lo;
             out.maximum = hi;
@@ -444,12 +452,13 @@ int main(int argc, char** argv)
     try
     {
         uint32_t frames = 160;
-        bool validate = false;
+        bool validate = false, determinism = false;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
             if (a == "--frames" && i + 1 < argc) frames = (uint32_t)std::stoul(argv[++i]);
             else if (a == "--validate") validate = true;
+            else if (a == "--determinism") determinism = true;
             else fail("unknown argument %s", a.c_str());
         }
         QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
@@ -459,6 +468,33 @@ int main(int argc, char** argv)
         Device device(options);
         ShaderLibrary shaders(device, executableDirectory() / "shaders");
         bool pass = true;
+
+        if (determinism)
+        {
+            // gi.deterministic: two runs of the furnace in one process must give bit-identical probe values; without it the
+            // atomic arrival order (selection, entry indices as seeds) makes them differ (shows the check can fail).
+            for (const bool on : { false, true })
+            {
+                QualityConfig q = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+                q.applyOverride(on ? "gi.deterministic=true" : "gi.deterministic=false");
+                const float le = 1.0f, rho = 0.5f;
+                auto expected = [&](float3, float3) { return (double)kPi * le / (1 - rho); };
+                const Outcome r1 = run(device, shaders, q, furnace(le, rho), { 0, 0, 0 }, { 0, 0, 0 }, expected, le / (1 - rho), frames, 1920, 1080);
+                const Outcome r2 = run(device, shaders, q, furnace(le, rho), { 0, 0, 0 }, { 0, 0, 0 }, expected, le / (1 - rho), frames, 1920, 1080);
+                size_t differ = 0, field[4] = { 0, 0, 0, 0 };  // irradiance + occlusion, K radiance, position, normal
+                for (size_t i = 0; i < std::min(r1.values.size(), r2.values.size()); ++i)
+                    if (std::memcmp(&r1.values[i], &r2.values[i], 4) != 0)
+                    {
+                        ++differ;
+                        ++field[(i % 16) / 4];
+                    }
+                logf("  differing values by field: irradiance/occlusion %zu, K radiance %zu, position %zu, normal %zu\n", field[0], field[1], field[2], field[3]);
+                logf("determinism %s: two furnace runs, %zu of %zu probe values not bit-identical\n", on ? "on" : "off", differ, r1.values.size());
+                if (on) pass = pass && differ == 0 && r1.values.size() == r2.values.size() && !r1.values.empty();
+            }
+            logf("RESULT %s\n", pass ? "PASS" : "FAIL");
+            return pass ? 0 : 1;
+        }
 
         const float le = 1.0f, rho = 0.5f;
         logf("white furnace: Le %.2f, albedo %.2f, expected E = pi Le / (1 - rho) = %.4f\n", le, rho, kPi * le / (1 - rho));
@@ -503,6 +539,16 @@ int main(int argc, char** argv)
             logf("single sunlit plane tilted %.0f deg: %u probes, mean indirect E %.6f (%.4f %% of the direct sun on it), worst probe %.6f -> %s\n", tilt, d.probes,
                  d.mean, 100 * d.mean / direct, d.worst, okD ? "PASS" : "FAIL");
             pass = pass && okD;
+        }
+        {
+            const double band = std::sin(10.0 * kPi / 180), exact = kPi * band * band;  // pi L cos^2(80 deg), L = 1
+            logf("horizon band sky: L 1 between elevation 0 and 10 deg, ground albedo 0.5; expected E = %.5f\n", exact);
+            const Outcome e = run(device, shaders, quality, openSky(0.5f), { 1, 1, 1 }, { 0, 0, 0 }, [&](float3, float3) { return exact; }, 0, frames, 1920, 1080,
+                                  (float)band);
+            const bool okE = e.probes > 1000 && std::fabs(e.mean / exact - 1) < 0.01;
+            logf("horizon band sky: %u probes, mean E %.5f against %.5f (%+.2f %%), worst probe %.2f %% -> %s\n", e.probes, e.mean, exact, 100 * (e.mean / exact - 1),
+                 100 * e.worst, okE ? "PASS" : "FAIL");
+            pass = pass && okE;
         }
         logf("probe tile cache: screenProbeGatherTile vs screenProbeGather, %u + %u pixel evaluations, %u + %u not bit-identical (2 cones each)\n", a.tilePixels,
              b.tilePixels, a.tileMismatches, b.tileMismatches);

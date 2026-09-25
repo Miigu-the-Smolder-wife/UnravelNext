@@ -4,6 +4,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <optional>
+#include <string_view>
 #include <memory>
 #include <vector>
 
@@ -28,7 +30,7 @@ uint32_t asU(float f)
 // Cache buffer layout (GiCache.hlsli header fields 4..11, 24..27).
 struct Layout
 {
-    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, end;
+    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, end;
 };
 
 Layout layoutOf(const GiSettings& s)
@@ -46,7 +48,8 @@ Layout layoutOf(const GiSettings& s)
     l.hitList = l.hitStamp + s.capacity * 4;
     l.shTable = l.hitList + 2 * s.capacity * 4;
     l.mapOwner = l.shTable + 64 * 36;
-    l.end = l.mapOwner + s.capacity * 4;
+    l.anchorMin = l.mapOwner + s.capacity * 4;
+    l.end = l.anchorMin + s.capacity * 8;
     return l;
 }
 
@@ -98,6 +101,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.hitUpdateShare = (float)q.number("gi.hit_update_share");
     s.hitCellFootprintScale = (float)q.number("gi.hit_cell_footprint_scale");
     s.experimentDisable = (uint32_t)q.integer("gi.experiment_disable");
+    s.deterministic = q.boolean("gi.deterministic");
     // Fixed by the kernels (GiCache.hlsli, GiProbeGather.hlsl, GiInternal.hlsli probe offsets).
     if (q.integer("gi.cache_octahedral_texels") != 8) fail("gi.cache_octahedral_texels must be 8 (GI_TEXELS)");
     if (q.integer("gi.near_occlusion_taps") != 16) fail("gi.near_occlusion_taps must be 16 (GiProbeGather)");
@@ -170,6 +174,7 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[30] = m_settings.jacobiUpdates;
     h[31] = m_settings.historyMax;
     h[37] = l.mapOwner;  // GI_H_MAP_OWNER
+    h[60] = l.anchorMin; // deterministic anchors (GiHeader.offAnchorMin)
     for (uint32_t e = 0; e < m_settings.capacity; ++e) head[l.freeList / 4 + e] = m_settings.capacity - 1 - e;  // pops 0, 1, 2 ...
     for (uint32_t t = 0; t < m_settings.tableSlots; ++t) head[l.table / 4 + t * 4 + 2] = 0xFFFFFFFFu;
     std::memcpy(&tail[(l.shTable - l.hitStamp) / 4], shTable.data(), shTable.size() * 4);
@@ -246,7 +251,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     };
     uint32_t cam[3];
     std::memcpy(cam, &camera, 12);
-    compute("r.gi.begin", "Passes/GI/GiBegin", 1, { frame, m_epoch, 0, cam[0], cam[1], cam[2] });
+    compute("r.gi.begin", "Passes/GI/GiBegin", 1, { frame, m_epoch, s.deterministic ? 1u : 0u, cam[0], cam[1], cam[2] });
     compute("r.gi.evict", "Passes/GI/GiEvict", groups(s.capacity), {});
     compute("r.gi.clear", "Passes/GI/GiTableClear", groups(s.tableSlots), {});
     compute("r.gi.rehash", "Passes/GI/GiRehash", groups(s.capacity), {});
@@ -263,10 +268,93 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
               });
+    if (s.deterministic) compute("r.gi.det.anchors", "Passes/GI/GiDetAnchors", groups(s.capacity), {});  // before any ray leaves an anchor
     compute("r.gi.carry", "Passes/GI/GiCarry", groups(s.capacity), {});
     compute("r.gi.age", "Passes/GI/GiAgeHistogram", (s.capacity + 127) / 128, {});
     compute("r.gi.setup", "Passes/GI/GiUpdateSetup", 1, { s.updatesPerFrame, asU(s.hitUpdateShare) });
-    compute("r.gi.select", "Passes/GI/GiSelect", groups(s.capacity), {});
+    // Selection: in deterministic mode the threshold bucket's quota goes by key priority (4-level radix select), not by
+    // the order of atomic fills; the state is a small transient buffer.
+    std::optional<BufferRef> detState;
+    if (s.deterministic)
+    {
+        const BufferRef state = g.createBuffer({ "GI deterministic selection", 3ull * 1040, 0 });
+        detState = state;
+        for (uint32_t level = 0; level < 4; ++level)
+        {
+            if (level == 0)
+                g.addPass("r.gi.det.clear", QueueType::Compute, [&](PassBuilder& b) { b.use(state, Use::UavCompute); },
+                          [&shaders, state](PassContext& c) {
+                              const uint32_t k[4] = { c.uav(state), 3 * 1040 / 4, 0, 0 };
+                              c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiDetClear"));
+                              c.computeConstants(k, 4);
+                              c.cmd->Dispatch((3 * 1040 / 4 + 63) / 64, 1, 1);
+                          });
+            for (const char* kernel : { "Passes/GI/GiDetDigits", "Passes/GI/GiDetResolve" })
+            {
+                const bool digits = std::string_view(kernel).ends_with("Digits");
+                g.addPass(digits ? "r.gi.det.digits" : "r.gi.det.resolve", QueueType::Compute,
+                          [&](PassBuilder& b) {
+                              b.use(cache, Use::UavCompute);
+                              b.use(state, Use::UavCompute);
+                          },
+                          [&shaders, cache, state, kernel, digits, level, dispatch = groups(s.capacity), frameConstants](PassContext& c) {
+                              const uint32_t k[4] = { c.uav(cache), c.uav(state), level, 0 };  // mode 0: tiers 0, 1
+                              c.cmd->SetPipelineState(shaders.compute(kernel));
+                              c.computeConstants(k, 4);
+                              c.bindFrameConstants(frameConstants);
+                              c.cmd->Dispatch(digits ? dispatch : 2, 1, 1);
+                          });
+            }
+        }
+    }
+    g.addPass("r.gi.select", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(cache, Use::UavCompute);
+                  if (detState) b.use(*detState, Use::UavCompute);
+              },
+              [&shaders, cache, detState, dispatch = groups(s.capacity), frameConstants](PassContext& c) {
+                  const uint32_t k[4] = { c.uav(cache), detState ? c.uav(*detState) : 0xFFFFFFFFu, 0, 0 };
+                  c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiSelect"));
+                  c.computeConstants(k, 4);
+                  c.bindFrameConstants(frameConstants);
+                  c.cmd->Dispatch(dispatch, 1, 1);
+              });
+    if (detState)
+    {
+        // Background updates by key priority among the live entries not selected (tier 2), then appended.
+        const BufferRef state = *detState;
+        for (uint32_t level = 0; level < 4; ++level)
+            for (const bool digits : { true, false })
+                g.addPass(digits ? "r.gi.det.bg.digits" : "r.gi.det.bg.resolve", QueueType::Compute,
+                          [&](PassBuilder& b) {
+                              b.use(cache, Use::UavCompute);
+                              b.use(state, Use::UavCompute);
+                          },
+                          [&shaders, cache, state, digits, level, dispatch = groups(s.capacity)](PassContext& c) {
+                              const uint32_t k[4] = { c.uav(cache), c.uav(state), level, 1 };  // mode 1: tier 2
+                              c.cmd->SetPipelineState(shaders.compute(digits ? "Passes/GI/GiDetDigits" : "Passes/GI/GiDetResolve"));
+                              c.computeConstants(k, 4);
+                              c.cmd->Dispatch(digits ? dispatch : 1, 1, 1);
+                          });
+        g.addPass("r.gi.det.bg", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(cache, Use::UavCompute);
+                      b.use(state, Use::UavCompute);
+                  },
+                  [&shaders, cache, state, dispatch = groups(s.capacity)](PassContext& c) {
+                      const uint32_t k[4] = { c.uav(cache), c.uav(state), 0, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiDetBackground"));
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(dispatch, 1, 1);
+                  });
+        g.addPass("r.gi.det.bg.done", QueueType::Compute, [&](PassBuilder& b) { b.use(cache, Use::UavCompute); },
+                  [&shaders, cache, state](PassContext& c) {
+                      const uint32_t k[4] = { c.uav(cache), 0, 1, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiDetBackground"));
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+    }
 
     uint32_t scene[8];
     rays.rootConstants(scene);
@@ -278,6 +366,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     rt::RayPipeline& pipeline =
         rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(atmosphere ? "Passes/GI/GiTrace.SKY0" : "Passes/GI/GiTrace.SKY1", { "GiTraceGen" }));
     const float3 sky = m_skyRadiance, sun = m_sunIlluminance;
+    const float skyBand = m_skyBand;
     const uint32_t rayCount = s.updatesPerFrame * 64;
     g.addPass("r.gi.trace", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -286,11 +375,12 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
-              [&pipeline, cache, rayCount, s, sky, sun, scene, frameConstants, atmosphere, luts](PassContext& c) {
+              [&pipeline, cache, rayCount, s, sky, sun, skyBand, scene, frameConstants, atmosphere, luts](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = c.uav(cache);
                   k[1] = rayCount;
                   k[2] = asU(s.hitCellFootprintScale);
+                  k[3] = s.deterministic ? 1u : 0u;  // bit 0: ray seeds from the entry's key
                   k[4] = asU(sky.x);
                   k[5] = asU(sky.y);
                   k[6] = asU(sky.z);
@@ -300,6 +390,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   k[13] = asU(sun.y);
                   k[14] = asU(sun.z);
                   k[15] = s.experimentDisable;
+                  k[16] = asU(skyBand);
                   std::memcpy(&k[24], scene, sizeof scene);
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
