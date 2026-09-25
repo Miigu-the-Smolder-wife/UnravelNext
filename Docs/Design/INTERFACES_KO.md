@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.14, 2026-09-25)
+# UnravelNext 인터페이스 (v1.15, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -240,8 +240,8 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 
 | 헤더 | 제공 | 필수 함수 |
 |---|---|---|
-| `Passes/Atmosphere/Atmosphere.hlsli` | S | `struct AtmosphereSrvs { uint transmittance, multiScatter, skyView, aerial; };` `float3 atmosphereSkyRadiance(AtmosphereSrvs, float3 worldDir)`(태양 원반 제외) · `float3 atmosphereSunRadiance(AtmosphereSrvs, float3 worldPos)`(원반 복사휘도, 투과 포함) · `void atmosphereAerial(AtmosphereSrvs, float2 uv, float linearDepth, out float3 inscatter, out float3 transmittance)` |
-| `Passes/Atmosphere/Froxel.hlsli` | S | `struct FroxelSrvs { uint lights, lightIndices, scattering, pad; };` `uint2 froxelLightRange(FroxelSrvs, uint2 pixel, float linearDepth)`(offset, count) · `uint froxelLight(FroxelSrvs, uint i)` · `float4 froxelScattering(FroxelSrvs, float2 uv, float linearDepth)`(inscatter rgb, 투과 a) |
+| `Passes/Atmosphere/Atmosphere.hlsli` | S | `struct AtmosphereSrvs { uint transmittance, multiScatter, skyView, aerial; };` `float3 atmosphereSkyRadiance(AtmosphereSrvs, float3 worldDir)`(태양 원반 제외) · `float3 atmosphereSunRadiance(AtmosphereSrvs, float3 worldPos)`(원반 복사휘도, 투과 포함) · `void atmosphereAerial(AtmosphereSrvs, float2 uv, float linearDepth, out float3 inscatter, out float3 transmittance)`(v1.15: 완성된 공기 합성 — 대기 단일·다중 산란, 캐스터가 그림자를 드리운 공기, 국소광의 공기 산란; 공기 볼륨 3D fetch 2회) · `void atmosphereAirView(AtmosphereSrvs, float2 uv, float linearDepth, out float3 inscatter, out float3 transmittance, out float3 sunIlluminance)`(v1.15: 위에 더해 표면점의 비차폐 태양 조도 lux, fetch 1회 더; 메인 뷰 픽셀용) · `atmosphereSunIlluminance`(임의 위치용, R) |
+| `Passes/Atmosphere/Froxel.hlsli` | S | `struct FroxelSrvs { uint lights, lightIndices, scattering, pad; };` `uint2 froxelLightRange(FroxelSrvs, uint2 pixel, float linearDepth)`(offset, count) · `uint froxelLight(FroxelSrvs, uint i)` (v1.15: `froxelScattering` 삭제 — 공기 산란은 `atmosphereAerial`/`atmosphereAirView`에 포함) |
 | `Passes/Shadow/ShadowVisibility.hlsli` | S | `float shadowSlot(uint packed, uint slot)`(7.3 해독) · `uint shadowSlotOfLight(FroxelSrvs, uint2 pixel, float linearDepth, uint lightIndex)`(1~3 또는 0xFFFFFFFF) · `struct ShadowSrvs { uint pool, pageTable, lights, pad; };` `float shadowVisibilityDirect(ShadowSrvs, uint lightIndex, float3 worldPos, float3 normal)`(슬롯 초과 광원용 느린 경로) |
 | `Passes/GI/GiCache.hlsli` | R | `struct GiSrvs { uint cache, hash, pad0, pad1; };` `float3 giCacheIrradiance(GiSrvs, float3 worldPos, float3 normal)` · `float3 giCacheRadiance(GiSrvs, float3 worldPos, float3 dir, float coneHalfAngle)` |
 | `Passes/GI/ScreenProbes.hlsli` | R | `struct ProbeSrvs { uint probes, occlusion, pad0, pad1; };` `float4 screenProbeIrradiance(ProbeSrvs, uint2 pixel, float3 normal, float linearDepth)`(rgb 조도, a 근거리 가림 0~1) · `float3 screenProbeRadiance(ProbeSrvs, uint2 pixel, float3 normal, float linearDepth, float3 dir, float coneHalfAngle)`(v1.2: 4프로브 보간, 반각 coneHalfAngle 원뿔로 prefilter한 입사 복사휘도, nit) |
@@ -395,3 +395,5 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **R 요청 `20260925_R_probe_lookup_structure.md` 반영(코어 부분)**: `ViewResources::screenProbeMaps`(5.1 표). `TextureDesc::srvFormat/uavFormat`는 캐스팅 가능한 뷰 형식이다(4절; `DeviceCaps::relaxedFormatCasting`, 지원 안 하면 실패). 선택지 (a)가 이 장치에서 된다 [실측]: 단위 테스트 `graph_castable_view_formats`에서 R32_UINT UAV로 쓰고 R9G9B9E5_SHAREDEXP SRV로 읽었고 4,096 texel 중 틀린 것 0. RGBA16F 아틀라스(8 B/texel)의 절반 대역이다. `screenProbeGather`는 R의 헤더(5.6)다.
 - v1.14 (2026-09-25):
   - **I 요청 `20260925_I_skin_normals.md` 반영**: `Deformation.hlsli`의 `skin()`이 법선을 관절 3×3의 여인수 × sign(det)으로 변환한다(`cofactorNormal`: 역전치 방향, 비균일 스케일·전단·거울 관절에서도 정확). 위치·탄젠트는 관절 행렬 그대로다. 회전 + 균일 스케일에서는 결과가 같다. V 래스터, S 페이지(V 서비스), R refit이 한 번에 바뀐다. C의 기준 경로추적기가 스킨을 지원할 때도 같은 식을 쓴다. 단위 테스트 `skin_normals_use_the_cofactor`.
+- v1.15 (2026-09-25):
+  - **S 요청 `20260925_S_air_volume.md` 반영(기록)**: 공기 볼륨 한 장(S `froxels()`, 프록셀 격자 위 Texture3D RGBA16F `gridX × gridY × 3(S+1)`; 부분 0 in-scattering × 노출, 1 광학 깊이, 2 노드의 태양 투과율). `FrameResources::aerialPerspective`와 `::froxels`가 이 볼륨이다. `atmosphere()`의 64×64×32 볼륨은 없어졌다. `atmosphereAerial`은 완성된 공기 합성을 돌려준다. `atmosphereAirView`는 새 함수다. `froxelScattering`은 삭제했다(5.6). 정확도 조건은 요청 파일 "정확도 조건" 절이다(방향 보간 Mie 0.1 %, 깊이 선형·가중 1/512, 대기 적분 3e-4, fp16 상대 1e-3 [예상]). 코드는 S f1f6f8a, M d3d6431이 사용한다.

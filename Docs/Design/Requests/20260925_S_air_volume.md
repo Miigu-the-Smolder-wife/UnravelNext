@@ -47,3 +47,8 @@ M의 요청 `20260925_M_shading_lookup_cost.md`(셰이딩 커널 안 `atmosphere
 
 셰이딩 커널에서는 깊이를 읽은 직후 `atmosphereAirView`를 부르고, 그 결과를 커널 끝의 합성에 쓰기를 권한다(fetch 지연이 나머지 작업과 겹친다).
 `atmosphereSunIlluminance`(픽셀마다 파라미터 9 Load + LUT 4 Load)는 메인 뷰에서 필요 없어진다.
+
+## 결과 (코어, v1.15)
+
+- 기록: INTERFACES 5.6 표(`atmosphereAerial`의 넓어진 의미, `atmosphereAirView`, `froxelScattering` 삭제), `Frame.h`의 `FrameResources::aerialPerspective`/`froxels` 주석(공기 볼륨의 배치와 부분), 12절 v1.15.
+- 4번 프레임 검증: 렌더 그래프 쪽 수정(e4f1ce8 깊이·렌더 타깃 풀 분리, f19bbb7 버퍼 첫 사용 활성화 배리어) 뒤 tau가 NO_ALIAS와 같다. 남은 in-scattering 차이는 S 확인을 기다린다(`probe queries`와 `S froxel light lists`의 앨리어싱에서만 나타남, 조율 세션 경유로 전달).

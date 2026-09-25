@@ -73,10 +73,15 @@ struct ViewResources
 // graph each frame by its owner.
 struct FrameResources
 {
-    TextureRef transmittanceLut, multiScatterLut, skyViewLut, aerialPerspective;  // [S]
+    TextureRef transmittanceLut, multiScatterLut, skyViewLut;  // [S]
+    TextureRef aerialPerspective;  // the air volume (froxels(), v1.15): Texture3D RGBA16F      [S]
+                                   // gridX x gridY x 3(S+1) on the froxel grid, part 0 in-scattering
+                                   // camera -> node (x exposure; atmosphere, caster-shadowed air, local
+                                   // lights), part 1 optical depth, part 2 sun transmittance at the node;
+                                   // read with atmosphereAerial / atmosphereAirView (Atmosphere.hlsli)
     TextureRef vsmPool;            // physical page pool                                    [S]
     BufferRef vsmPageTable;        //                                                       [S]
-    TextureRef froxels;            // scattering/transmittance volume                       [S]
+    TextureRef froxels;            // the same air volume as aerialPerspective (v1.15)      [S]
     BufferRef froxelLights;        // per-froxel light lists (7.4)                          [S]
     BufferRef tlasStatic, tlasDynamic;  // acceleration structures                          [R]
     BufferRef giCache;             // world radiance cache                                  [R]
