@@ -10,6 +10,7 @@
 #define UNX_RT_RAYSCENE_HLSLI
 #include "Bindless.hlsli"
 #include "Scene.hlsli"
+#include "Passes/Material/MaterialTextures.hlsli"
 
 // Instance masks. Rays of a consumer select what they may see; the exact set swaps proxies for originals (2.6).
 #define RT_MASK_GI 0x1u          // GI cache rays and visibility rays of the cache
@@ -209,8 +210,9 @@ bool rtAlphaOpaque(RtSceneSrvs s, uint instance, uint geometry, uint primitive, 
     if (m.alphaCutoff <= 0 || m.baseColorTexture == UNX_NONE) return true;
     const RtTriangle tri = rtTriangle(s, g, primitive);
     const float2 uv = rtUv(mesh, tri.meshVertex, barycentrics);
-    Texture2D<float4> tex = ResourceDescriptorHeap[m.baseColorTexture];
-    return tex.SampleLevel(g_linearWrap, uv, 0).a >= m.alphaCutoff;
+    // The raster's alpha test (V AlphaTest.hlsli) at the texture's level 0 (the scene texture unchanged, M keeps coverage
+    // equal across levels): M's published texture and addressing (MaterialTextures.hlsli, INTERFACES v1.11).
+    return materialBaseColorLevel(m, uv, 0).a >= m.alphaCutoff;
 }
 
 #endif

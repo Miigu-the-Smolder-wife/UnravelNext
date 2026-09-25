@@ -411,6 +411,116 @@ Check compare(const scene::Scene& s, const std::vector<CpuTri>& tris, const std:
 }
 } // namespace
 
+// Alpha round (INTERFACES v1.11): a 4 x 4 m quad at z = 0 facing +z with uv 0..2 (wrap addressing exercised) and an
+// alpha-tested material whose baseColor texture is a 16 x 16 random alpha pattern published through
+// GpuScene::setMaterialTextures, in front of an opaque backstop at z = -1.
+scene::Scene makeAlphaScene()
+{
+    scene::Scene s;
+    s.name = "rt_alpha";
+    s.materials.push_back({});
+    scene::Material leaf;
+    leaf.name = "alpha textured";
+    leaf.alphaCutoff = 0.5f;
+    s.materials.push_back(leaf);
+    auto quad = [&](float z, uint32_t material) {
+        scene::Mesh m;
+        m.name = "quad";
+        for (auto [x, y] : { std::pair{ -2.f, -2.f }, { 2.f, -2.f }, { 2.f, 2.f }, { -2.f, 2.f } })
+        {
+            m.positions.push_back({ x, y, z });
+            m.normals.push_back({ 0, 0, 1 });
+            m.uv0.push_back({ (x + 2) * 0.5f, (y + 2) * 0.5f });
+        }
+        m.indices = { 0, 1, 2, 0, 2, 3 };  // CCW seen from +z
+        m.submeshes.push_back({ 0, 6, material });
+        s.meshes.push_back(m);
+        scene::Instance in;
+        in.mesh = (uint32_t)s.meshes.size() - 1;
+        s.instances.push_back(in);
+    };
+    quad(0, 1);
+    quad(-1, 0);
+    return s;
+}
+
+// The CPU replica of materialBaseColorLevel(m, uv, 0).a: bilinear on texel centres, wrap addressing, unorm8.
+float alphaAt(const std::vector<uint8_t>& alpha, uint32_t n, float u, float v)
+{
+    const float x = u * n - 0.5f, y = v * n - 0.5f;
+    const int x0 = (int)std::floor(x), y0 = (int)std::floor(y);
+    const float fx = x - x0, fy = y - y0;
+    const int ni = (int)n;
+    auto at = [&](int i, int j) { return alpha[((j % ni + ni) % ni) * n + ((i % ni + ni) % ni)] / 255.0f; };
+    return (at(x0, y0) * (1 - fx) + at(x0 + 1, y0) * fx) * (1 - fy) + (at(x0, y0 + 1) * (1 - fx) + at(x0 + 1, y0 + 1) * fx) * fy;
+}
+
+// An n x n RGBA8 texture on the GPU with the given alpha (rgb white); returns its bindless SRV.
+uint32_t createAlphaTexture(Device& device, const std::vector<uint8_t>& alpha, uint32_t n, ComPtr<ID3D12Resource>& texture)
+{
+    D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT }, up{ D3D12_HEAP_TYPE_UPLOAD };
+    D3D12_RESOURCE_DESC1 d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    d.Width = n;
+    d.Height = n;
+    d.DepthOrArraySize = d.MipLevels = 1;
+    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.SampleDesc.Count = 1;
+    check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_COPY_DEST, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&texture)), "alpha texture");
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    UINT64 bytes = 0;
+    device.d3d()->GetCopyableFootprints1(&d, 0, 1, 0, &fp, nullptr, nullptr, &bytes);
+    D3D12_RESOURCE_DESC1 bd{};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = bytes;
+    bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
+    bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> staging;
+    check(device.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &bd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&staging)), "alpha staging");
+    uint8_t* mapped = nullptr;
+    D3D12_RANGE none{ 0, 0 };
+    check(staging->Map(0, &none, reinterpret_cast<void**>(&mapped)), "map alpha staging");
+    for (uint32_t y = 0; y < n; ++y)
+        for (uint32_t x = 0; x < n; ++x)
+        {
+            uint8_t* px = mapped + fp.Offset + y * fp.Footprint.RowPitch + x * 4;
+            px[0] = px[1] = px[2] = 255;
+            px[3] = alpha[y * n + x];
+        }
+    staging->Unmap(0, nullptr);
+    CommandList cl = device.acquireCommandList(QueueType::Graphics);
+    D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
+    dst.pResource = texture.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = 0;
+    src.pResource = staging.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint = fp;
+    cl.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    D3D12_TEXTURE_BARRIER tb{};
+    tb.SyncBefore = D3D12_BARRIER_SYNC_COPY;
+    tb.SyncAfter = D3D12_BARRIER_SYNC_NONE;
+    tb.AccessBefore = D3D12_BARRIER_ACCESS_COPY_DEST;
+    tb.AccessAfter = D3D12_BARRIER_ACCESS_NO_ACCESS;
+    tb.LayoutBefore = D3D12_BARRIER_LAYOUT_COPY_DEST;
+    tb.LayoutAfter = D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
+    tb.pResource = texture.Get();
+    tb.Subresources.IndexOrFirstMipLevel = 0xFFFFFFFFu;
+    D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_TEXTURE, 1 };
+    group.pTextureBarriers = &tb;
+    cl.list->Barrier(1, &group);
+    device.queue(QueueType::Graphics).waitCpu(device.submit(cl));
+    const uint32_t srv = device.descriptors().allocateResource();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.Texture2D.MipLevels = 1;
+    device.d3d()->CreateShaderResourceView(texture.Get(), &sd, device.descriptors().resourceCpu(srv));
+    return srv;
+}
+
 int main(int argc, char** argv)
 {
     try
@@ -550,6 +660,58 @@ int main(int argc, char** argv)
                  hidden.size() > 0 ? hidden[0] : 0, hidden.size() > 1 ? hidden[1] : 0, hidden.size() > 2 ? hidden[2] : 0, c.hits, hiddenHits, c.hitMismatch, c.tMismatch,
                  c.coincident, c.faceMismatch, c.normalMismatch, c.visibilityMismatch, ok ? "PASS" : "FAIL");
             pass = pass && ok;
+        }
+        {
+            // Round 4: the any-hit alpha test reads M's published texture like V's raster (INTERFACES v1.11).
+            const uint32_t n = 16;
+            std::vector<uint8_t> alpha(n * n);
+            std::mt19937 arng(5);
+            for (uint8_t& a : alpha) a = (arng() & 1) ? 255 : 0;
+            const scene::Scene as = makeAlphaScene();
+            GpuScene alphaScene(device);
+            alphaScene.upload(as);
+            ComPtr<ID3D12Resource> texture;
+            std::vector<gpu::MaterialTextures> published(as.materials.size());
+            published[1].baseColor = createAlphaTexture(device, alpha, n, texture);
+            alphaScene.setMaterialTextures(published);
+            rt::RayScene& ars = rt::RayScene::get(device, shaders, alphaScene, quality);
+            gpu::FrameConstants afc{};
+            alphaScene.fill(afc);
+            GpuBuffer aconstants = createBuffer(device, 1024, D3D12_HEAP_TYPE_UPLOAD, false);
+            check(aconstants.resource->Map(0, &none, &mapped), "map alpha constants");
+            std::memcpy(mapped, &afc, sizeof afc);
+            aconstants.resource->Unmap(0, nullptr);
+            const uint32_t grid = 512;
+            std::vector<TestRay> arays(grid * grid);
+            std::vector<int> expect(grid * grid);  // 1 = quad, 0 = backstop, -1 = within 2/255 of the cutoff (not judged)
+            for (uint32_t j = 0; j < grid; ++j)
+                for (uint32_t i = 0; i < grid; ++i)
+                {
+                    TestRay& r = arays[j * grid + i];
+                    const float x = -1.99f + 3.98f * (i + 0.5f) / grid, y = -1.99f + 3.98f * (j + 0.5f) / grid;
+                    r.origin = { x, y, 5 };
+                    r.direction = { 0, 0, -1 };
+                    r.tMax = 100;
+                    r.visibleTMax = 0;
+                    const float a = alphaAt(alpha, n, (x + 2) * 0.5f, (y + 2) * 0.5f);
+                    expect[j * grid + i] = std::fabs(a - 0.5f) < 2.0f / 255 ? -1 : (a >= 0.5f ? 1 : 0);
+                }
+            const std::vector<TestResult> got = trace(device, shaders, ars, aconstants.resource->GetGPUVirtualAddress(), arays);
+            uint32_t judged = 0, wrong = 0, cut = 0;
+            for (size_t k = 0; k < arays.size(); ++k)
+            {
+                if (expect[k] < 0) continue;
+                ++judged;
+                const bool quadHit = got[k].t >= 0 && std::fabs(got[k].t - 5) < 1e-3f;
+                const bool backstop = got[k].t >= 0 && std::fabs(got[k].t - 6) < 1e-3f;
+                if (expect[k] == 1 ? !quadHit : !backstop) ++wrong;
+                if (expect[k] == 0) ++cut;
+            }
+            const bool ok = wrong == 0 && cut > judged / 4 && cut < judged * 3 / 4;
+            logf("alpha texture: %u rays judged (%u cut through the quad), %u disagree with the CPU alpha test -> %s\n", judged, cut, wrong, ok ? "PASS" : "FAIL");
+            pass = pass && ok;
+            device.waitIdle();
+            device.descriptors().freeResource(published[1].baseColor);
         }
         rt::RayPipeline::releaseDevice(device);
         rt::RayScene::releaseDevice(device);
