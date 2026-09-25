@@ -45,7 +45,7 @@ RGB10A2 출력 UAV 패스 = 121패스, 패스 사이 전역 UAV 배리어)을 �
 (a) Unity 큐의 리스트: `IUnityGraphicsD3D12v8::ExecuteCommandList`, 출력 상태 `UNORDERED_ACCESS` 선언.
 (b) 자체 HIGH 큐 + fence 왕복.
 Unity 큐에는 앞뒤로 타임스탬프 리스트를 넣었다. 프레임 구조는 before 이벤트 → 작업 이벤트 → Unity `Blit`(출력 → 1280×720 백버퍼) → after 이벤트다.
-Player 빌드(Mono, 창 1280×720, vsync 끔), 4K·1440p, 600프레임 × 3회(회차마다 순서 반대), GpuLock. 원본: `Results/I/HostBoundary/unity_player_20260925_093059.json`.
+Player 빌드(IL2CPP, 창 1280×720, vsync 끔), 4K·1440p, 600프레임 × 3회(회차마다 순서 반대), GpuLock. 원본: `Results/I/HostBoundary/unity_player_20260925_093059.json`.
 Unity 쪽 코드는 `Assets/UnravelNextBridge`(이전 저장소 커밋 0125b960)이고, Player는 `Builds/UnravelNextProbe`다.
 
 | Unity 디바이스 위의 경계 | 4K 프레임 주기 (회차별) | 작업 | 1440p 주기 (회차별) | 작업 |
@@ -149,7 +149,7 @@ Agility 1.618.5 기능은 1.618.1에서도 모두 있다(SDK 618).
 > tick·시뮬·Unity 프레임 주기와 캐시 지연(움직임 속도)에 기대는 수치는 다시 재야 한다.
 
 **데이터 월드가 Unity Player에서 새 렌더러로 뜬다.** 장면은 원본 `NativeDataWorld.unity`의 사본이다(`Assets/UnravelNextBridge/DataWorld/
-NativeDataWorld_UnravelNext.unity`, 원본은 그대로). Player는 `Builds/UnravelNextDataWorld`(Mono, 창 1280×720, vsync 끔)이다.
+NativeDataWorld_UnravelNext.unity`, 원본은 그대로). Player는 `Builds/UnravelNextDataWorld`(IL2CPP, 창 1280×720, vsync 끔)이다.
 프레임은 Unity D3D12 큐에서 리스트 하나로 실행된다. 측정은 GpuLock, 1.5 s 워밍업, 해상도마다 서로 다른 완료 프레임 600개다.
 원본: `Results/I/DataWorld/player_20260925_102722.json`(측정기의 형식 버그로 `max`는 잃었고 null로 복구했다. 다른 값은 원래대로다).
 
@@ -224,19 +224,19 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
 - 오염: 11:17:51부터 `unx_reference.exe`가 잠금 없이 CPU 약 17코어를 썼다(8.5분에 CPU 8,700 s). Unity 프레임 주기가 Player 4K P95 363 ms,
   편집기 4K 중앙값 146 ms로 무너졌고 GPU 꼬리도 커졌다(Player 4K P99 54 ms). 조율 세션이 C에 잠금 중 기준 렌더 워커를 멈추도록 요청했다.
 - 참고로 남기는 GPU 중앙값[실측, 위 두 조건 아래]: Player 4K 5.60 / 1440p 4.11 ms(`s.froxel.integrate` 0.44 ms, 이전 2.76),
-  편집기 4K 5.95 / 1440p 2.85 ms. 호스트 동기화(Mono, 스킨 5체 + 강체 17개): 0.08 ms, 그중 `AcquirePose` 0.05 ms, 관절 변환+호출 0.006 ms.
+  편집기 4K 5.95 / 1440p 2.85 ms. 호스트 동기화(IL2CPP, 스킨 5체 + 강체 17개): 0.08 ms, 그중 `AcquirePose` 0.05 ms, 관절 변환+호출 0.006 ms.
 - 내보낸 장면은 인스턴스가 모두 원점이었다(`UnxSceneSave` 결함, 2절에서 고침). 고친 브리지는 첫 동기화 뒤에 저장한다.
 
 ### 2.2.2 Unity 안의 설계 규모 부하 (`-unxScale 1024,256`, 13:23) [실측]
 
-실제 개체의 committed 루트·포즈를 읽는 인스턴스를 더해 강체 1,024 + 스킨 256을 만든다(Player, Mono). 원본 `player_scale_20260925_132306.json`.
+실제 개체의 committed 루트·포즈를 읽는 인스턴스를 더해 강체 1,024 + 스킨 256을 만든다(Player, IL2CPP). 원본 `player_scale_20260925_132306.json`.
 
 | 해상도 | GPU 중앙값 (P95) | 호스트 동기화 중앙값 (P95, P99) | 그중 `AcquirePose` | 관절 변환 + `SetSkeletons` 한 번 | Unity 주기 중앙값 |
 |---|---|---|---|---|---|
 | 4K | 6.51 ms (7.02) | 0.735 ms (1.39, 1.80) | 0.333 ms | 0.055 ms | 13.4 ms |
 | 1440p | 3.56 ms (3.99) | 0.705 ms (1.26, 1.49) | 0.315 ms | 0.052 ms | 5.04 ms |
 
-- 루트(1,280개 World 모음·보간·변환·`SetTransforms`): 약 0.35 ms = 개당 0.27 µs(Mono).
+- 루트(1,280개 World 모음·보간·변환·`SetTransforms`): 약 0.35 ms = 개당 0.27 µs(IL2CPP).
 - 포즈: `AcquirePose`(Animation의 보간 평가·접촉·물리 오버레이)가 캐릭터당 1.3 µs(뼈 2개 캐릭터). 관절 변환은 관절당 약 0.1 µs다.
   설계 캐릭터(64본 × 256체 = 16k 관절)에서는 관리 코드 변환만 약 1.6 ms가 된다[예상, 위 실측으로 계산]. 애니메이션 재설계의
   `na_present_batch`가 `SetSkeletons` 버퍼를 네이티브에서 채우므로 이 관절 단위 관리 작업은 없어진다(프레임당 호출 2번).
@@ -317,6 +317,9 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
   Initialize에서 `Time.fixedDeltaTime`을 맞춤)와 조율(프로젝트 기본값)이다. 조율 세션에 알렸다.
 - I 결함: 어댑터의 렌더 보간 alpha가 `Host.FixedDeltaTime`으로 나눠서, 0.02 s tick 간격이면 매 tick 마지막 3.3 ms 동안 포즈가 멈췄다.
   Unity의 실제 fixed step으로 나누게 고쳤다(스테이징, 다음 편집기 차례에 넣는다). 측정기는 `fixedDeltaTime`을 기록하므로 조건에 tick 주파수가 남는다.
+
+> **정정(2026-09-25 밤):** 이 문서의 Player는 모두 **IL2CPP**다(프로젝트 Standalone 스크립팅 백엔드 = 1, `GameAssembly.dll`·`il2cpp_data`).
+> 앞서 "Mono"로 적은 것은 틀렸다. 관리 코드 비용(루트 0.27 µs/개, 관절 약 0.1 µs, `AcquirePose` 1.3 µs/체)은 IL2CPP, 곧 출시 백엔드의 값이다.
 
 ## 2.3 실행 절차 (재현)
 
