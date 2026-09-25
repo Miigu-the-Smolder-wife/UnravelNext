@@ -190,6 +190,10 @@ struct DepthRasterRequest
 
 struct FramePassContext;
 
+// Bands of a banded pass group for a view of width x height (RenderGraph::addBandedGroup): the view's pixels over
+// output.band_pixels (quality key, core; 4K / 8 = L2-sized intermediates), at least 1.
+uint32_t passBandCount(const QualityConfig& quality, uint32_t width, uint32_t height);
+
 // Persistent state of a track (history buffers, pools, caches) owned by the FrameRenderer: created on first use,
 // destroyed with the renderer after the GPU is idle. Keys are "<track>.<name>"; one key always holds one type.
 class TrackState

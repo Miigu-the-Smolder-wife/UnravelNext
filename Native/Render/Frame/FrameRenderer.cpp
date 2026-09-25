@@ -25,6 +25,13 @@ ViewDesc ViewDesc::fromCamera(const scene::Camera& camera, uint32_t width, uint3
     return v;
 }
 
+uint32_t passBandCount(const QualityConfig& quality, uint32_t width, uint32_t height)
+{
+    const double perBand = (double)quality.integer("output.band_pixels");
+    if (!(perBand > 0)) fail("output.band_pixels must be positive");
+    return std::max(1u, (uint32_t)std::lround((double)width * height / perBand));
+}
+
 ViewDesc ViewDesc::planarReflection(const ViewDesc& main, float4 plane, uint32_t rx, uint32_t ry, uint32_t rw, uint32_t rh)
 {
     // Normalise the plane and orient it so the main camera is on its positive side.

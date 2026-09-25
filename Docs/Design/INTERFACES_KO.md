@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.28, 2026-09-25)
+# UnravelNext 인터페이스 (v1.29, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -163,6 +163,15 @@ void RenderGraph::addPass(std::string_view name, QueueType, SetupFn setup, Execu
 6. 루트 시그니처는 하나(`Device::rootSignature`): 루트 상수 32 DWORD(b0, `P[8]` uint4), 루트 CBV b1 = 뷰 프레임 상수(5.5), 정적 샘플러 s0 point-clamp, s1 linear-clamp, s2 linear-wrap, s3 aniso16-wrap, s4 comparison(GREATER_EQUAL), s5 aniso16-clamp(`g_anisoClamp`, v1.10). 서술자는 bindless(`ResourceDescriptorHeap[]`).
 7. 파이프라인: `ShaderLibrary::compute("<커널 이름>")`, `ShaderLibrary::mesh("<이름>", MeshPipelineDesc)`. 파일당 커널 하나, 모드는 컴파일 변형으로.
 8. 지속 자원(VSM 풀, GI 캐시, TLAS 등)은 소유 트랙이 `Device`로 만들어 매 프레임 `import`한다. 해제는 `Device::deferRelease`(GPU가 끝낸 뒤).
+
+- **밴드 패스 그룹(v1.29, 설계 개정 1 요청 7절)**: `RenderGraph::addBandedGroup(group, height, bands, { BandedPass{ name, queue, setup, execute } ... })`는 그룹의 패스들을 밴드 순서로 선언한다(A(밴드 0) → B(밴드 0) → … → A(밴드 1) …). 패스 이름은 `<group>.<name>.b<밴드>`다.
+  - 같은 setup으로 밴드마다 선언되므로, 그래프가 밴드마다 같은 자원의 배리어를 보통 패스처럼 낸다.
+  - execute는 `PassContext::band`(`PassBand{ index, count, y0, y1 }`, 행 [y0, y1), y0은 8행 경계)를 읽고 그 행만 쓴다. 그룹 밖 패스는 band = {0, 1, 0, UINT32_MAX}다.
+  - 밴드 경계를 넘어 읽으면 이전 밴드의 끝난 행만 보인다. 다음 밴드의 행이 필요한 픽셀(3×3 이웃의 아래 경계)은 그 패스가 뒤 밴드로 미룬다(M).
+  - 밴드 수는 `passBandCount(quality, width, height)` = round(픽셀 수 / `output.band_pixels`), 최소 1이다. 기본 1036800(4K/8)이라 4K는 8밴드, 1440p는 4밴드다.
+  - 근거 [실측, 설계 벤치 `--only-bands`, UAV↔SRV 전환 포함]: 해석 → 셰이딩 4K 0.740 → 0.470 ms.
+  - 검증 [실측]: 단위 테스트 `graph_banded_group_covers_every_row`(1·3·8밴드, 999행, 모든 셀 일치, 밴드가 행을 빈틈없이 덮음, 패스 수 = 패스 × 밴드).
+  - M(해석·셰이딩·가장자리)과 S(가시성 패스)가 자기 픽셀 패스를 그룹으로 옮긴다.
 
 ### 4.1 디바이스와 호스트 통합 (v1.9, I 요청 `20260925_I_unity_queue_device.md`)
 `Device(DeviceOptions)`가 디바이스·큐 셋·서술자 힙·루트 서명을 만든다. 호스트(Unity) 안에서는 I가 다음을 쓴다:
@@ -501,3 +510,6 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.28 (2026-09-25):
   - **GpuLock `-Kind timing|correctness`**(조율 요청, 3.3): 종류를 `current.json`과 `history.log`에 기록한다. 백그라운드 CPU 작업의 멈춤 규칙은 timing만 대상이다(C의 PauseGate는 `kind`를 읽도록 C가 맞춘다). history 줄의 형식이 `acquire <트랙> (<종류>) :: ...`로 바뀌었다.
   - **M 요청 `20260925_M_planar_mask_apron.md`(R 동의)**: `ViewDesc::planarMask` 값이 1 = 거울 픽셀(R이 읽음), 2 = 에이프런(거울 픽셀의 3×3 이웃, 그리고 셰이딩하지만 R은 읽지 않음), 0 = 건너뜀이 됐다. `planarTileMask`는 팽창된 마스크 기준이다. V·S·M은 "0 아님 = 그림" 그대로라 바뀌는 것이 없다(V의 64 px 컬링 마스크와 깊이 채움은 이미 0 아님으로 판정한다). R의 resolve만 "== 1"로 읽는다. 마스크 생성은 R 몫이다.
+- v1.29 (2026-09-25):
+  - **밴드 패스 그룹(4절, 설계 개정 1 요청 7절)**: `RenderGraph::addBandedGroup`, `PassContext::band`, `passBandCount`, 품질 키 `output.band_pixels`(코어). M·S가 픽셀 패스를 옮긴다.
+  - **Coverage.hlsli 면적·무게중심을 Green 정리 스트리밍으로 바꿨다(V, 요청 11절 9.4, 4354627)**: 시그니처는 그대로다. 면적은 이전과 같은 정확도(최대 5.7e-5 px²)다. 무게중심 깊이는 면적 1e-2 px² 이상 fragment에서 1.3e-5 상대 이내이고, 더 작은 조각은 그 삼각형의 깊이 범위 안이다(순서 오차 ≤ 그 면적 < 1/32). M은 가장자리 합성 테스트를 다시 돌린다.

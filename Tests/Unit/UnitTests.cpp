@@ -647,6 +647,80 @@ UNX_TEST(graph_imported_views_follow_their_resource)
     CHECK(wrong == 0);
 }
 
+UNX_TEST(graph_banded_group_covers_every_row)
+{
+    // RenderGraph::addBandedGroup: a producer and a consumer pass over a W x H grid recorded band by band (A0 B0 A1 B1
+    // ...): every cell is produced and consumed exactly as in one full-screen pass pair, the bands tile the rows on
+    // 8-row boundaries, and the group declares passes x bands passes.
+    RenderGraph g(testDevice());
+    ID3D12PipelineState* produce = shaders().compute("Passes/Test/BandRows.MODE0");
+    ID3D12PipelineState* consume = shaders().compute("Passes/Test/BandRows.MODE1");
+    const uint32_t width = 257, height = 999, cells = width * height;
+    ComPtr<ID3D12Resource> rb;
+    {
+        D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = (uint64_t)cells * 4;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(testDevice().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)), "readback");
+    }
+    for (uint32_t bands : { 1u, 3u, 8u })
+    {
+        const BufferRef inter = g.createBuffer({ "inter", (uint64_t)cells * 4, 0 });
+        const BufferRef out = g.createBuffer({ "out", (uint64_t)cells * 4, 0 });
+        std::vector<std::pair<uint32_t, uint32_t>> rows;
+        RenderGraph::BandedPass a, b;
+        a.name = "produce";
+        a.setup = [&](PassBuilder& pb) { pb.use(inter, Use::UavCompute); };
+        a.execute = [=](PassContext& c) {
+            const uint32_t k[8] = { c.uav(inter), 0, width, height, c.band.y0, c.band.y1, 0, 0 };
+            c.cmd->SetPipelineState(produce);
+            c.computeConstants(k, 8);
+            c.cmd->Dispatch((width + 63) / 64, c.band.y1 - c.band.y0, 1);
+        };
+        b.name = "consume";
+        b.setup = [&](PassBuilder& pb) {
+            pb.use(inter, Use::SrvCompute);
+            pb.use(out, Use::UavCompute);
+        };
+        b.execute = [=, &rows](PassContext& c) {
+            rows.push_back({ c.band.y0, c.band.y1 });
+            const uint32_t k[8] = { c.srv(inter), c.uav(out), width, height, c.band.y0, c.band.y1, 0, 0 };
+            c.cmd->SetPipelineState(consume);
+            c.computeConstants(k, 8);
+            c.cmd->Dispatch((width + 63) / 64, c.band.y1 - c.band.y0, 1);
+        };
+        g.addBandedGroup("test", height, bands, { a, b });
+        ID3D12Resource* dst = rb.Get();
+        g.addPass("readback", QueueType::Graphics,
+                  [&](PassBuilder& pb) {
+                      pb.use(out, Use::CopySrc);
+                      pb.keep();
+                  },
+                  [=](PassContext& c) { c.cmd->CopyBufferRegion(dst, 0, c.resource(out), 0, (uint64_t)cells * 4); });
+        g.execute(nullptr);
+        for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+        CHECK(g.stats().livePasses == 2 * bands + 1);
+        CHECK(rows.size() == bands && rows.front().first == 0 && rows.back().second == height);
+        for (size_t k = 0; k < rows.size(); ++k)
+        {
+            CHECK(rows[k].first % 8 == 0 && rows[k].first < rows[k].second);
+            if (k > 0) CHECK(rows[k].first == rows[k - 1].second);
+        }
+        const uint32_t* r = nullptr;
+        check(rb->Map(0, nullptr, (void**)&r), "map");
+        size_t wrong = 0;
+        for (uint32_t i = 0; i < cells; ++i)
+            if (r[i] != ((i * 2654435761u) ^ 0x5A5A5A5Au)) ++wrong;
+        rb->Unmap(0, nullptr);
+        logf("    %u bands over %u rows: %zu wrong cells of %u\n", bands, height, wrong, cells);
+        CHECK(wrong == 0);
+    }
+}
+
 UNX_TEST(graph_castable_view_formats)
 {
     // TextureDesc::srvFormat/uavFormat: written as R32_UINT through the UAV, read as R9G9B9E5_SHAREDEXP through the SRV

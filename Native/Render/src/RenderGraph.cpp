@@ -176,6 +176,7 @@ struct RenderGraph::Impl
         ExecuteFn execute;
         std::vector<UseRecord> uses;
         bool keep = false;
+        PassBand band;
     };
 
     // Merged use of one resource by one pass.
@@ -1246,6 +1247,25 @@ void RenderGraph::addPass(std::string_view name, QueueType queue, const SetupFn&
     setup(b);
 }
 
+void RenderGraph::addBandedGroup(std::string_view group, uint32_t height, uint32_t bands, const std::vector<BandedPass>& passes)
+{
+    if (bands == 0 || height == 0) fail("render graph: banded group '%.*s' with %u bands over %u rows", (int)group.size(), group.data(), bands, height);
+    auto row = [&](uint32_t b) { return b >= bands ? height : std::min(height, (uint32_t)((uint64_t)height * b / bands) & ~7u); };
+    for (uint32_t b = 0; b < bands; ++b)
+    {
+        PassBand band;
+        band.index = b;
+        band.count = bands;
+        band.y0 = row(b);
+        band.y1 = row(b + 1);
+        for (const BandedPass& p : passes)
+        {
+            addPass(std::string(group) + "." + p.name + ".b" + std::to_string(b), p.queue, p.setup, p.execute);
+            m_impl->passes.back().band = band;
+        }
+    }
+}
+
 bool RenderGraph::sharesMemory(uint32_t a, uint32_t b) const
 {
     const Impl& impl = *m_impl;
@@ -1348,6 +1368,7 @@ void RenderGraph::execute(GpuProfiler* profiler)
                 if (profiler) profiler->passBegin(cmd, seg.queue, pass.name);
                 ctx.cmd = cmd;
                 ctx.queue = seg.queue;
+                ctx.band = pass.band;
                 pass.execute(ctx);
                 if (profiler) profiler->passEnd(cmd, seg.queue);
             }

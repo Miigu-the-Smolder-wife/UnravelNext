@@ -93,11 +93,20 @@ private:
     uint32_t m_pass;
 };
 
+// One screen band of a banded pass group (RenderGraph::addBandedGroup): rows [y0, y1) of the view, starting on an 8-row
+// tile boundary. A pass outside a group sees the whole view as band 0 of 1 (y1 = UINT32_MAX).
+struct PassBand
+{
+    uint32_t index = 0, count = 1;
+    uint32_t y0 = 0, y1 = UINT32_MAX;
+};
+
 class PassContext
 {
 public:
     ID3D12GraphicsCommandList7* cmd = nullptr;
     QueueType queue = QueueType::Graphics;
+    PassBand band;  // this pass's band (addBandedGroup); whole view otherwise
     uint32_t srv(TextureRef t) const;
     uint32_t uav(TextureRef t) const;
     uint32_t srv(BufferRef b) const;
@@ -160,6 +169,22 @@ public:
     BufferRef createBuffer(const BufferDesc& desc);
 
     void addPass(std::string_view name, QueueType queue, const SetupFn& setup, ExecuteFn execute);
+
+    // A group of per-pixel passes recorded band by band (design revision 1, 4.8; INTERFACES 4): pass A on band 0, pass B
+    // on band 0, ..., pass A on band 1, ..., so a band's intermediate data stays in L2 between producer and consumer
+    // [measured, design bench --only-bands: resolve -> shade 0.740 -> 0.470 ms at 4K with 8 bands, UAV/SRV transitions
+    // included]. Each pass is declared once per band with the same setup (the graph orders and synchronises each band's
+    // passes like any other, one barrier batch per pass and band) and runs with PassContext::band set; it touches only
+    // its band's rows. Reads across a band edge see finished rows of earlier bands only; a pass that needs the next
+    // band's rows (3 x 3 neighbourhoods at the bottom edge) defers those rows to a later band itself.
+    struct BandedPass
+    {
+        std::string name;  // pass names: "<group>.<name>.b<band>"
+        QueueType queue = QueueType::Graphics;
+        SetupFn setup;
+        ExecuteFn execute;  // reads PassContext::band
+    };
+    void addBandedGroup(std::string_view group, uint32_t height, uint32_t bands, const std::vector<BandedPass>& passes);
 
     // Async compute policy. Off (default): every pass runs on the graphics queue and a frame is one command list in
     // one ExecuteCommandLists call. Measured on the RTX 4080 (Tests/Gates, --experiments): a cross-queue fence round
