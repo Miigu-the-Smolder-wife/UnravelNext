@@ -573,6 +573,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         r.pixelConstants[5] = s.metaUav;
         r.cullMask = mask;
         r.cullTilePx = kPage;
+        r.tileLocal = true;  // fragments only inside dirty pages (INTERFACES 5.3 v1.7)
         r.cull = D3D12_CULL_MODE_NONE;
         for (uint32_t k = 0; k < kLevels; ++k)
         {

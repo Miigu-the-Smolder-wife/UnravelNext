@@ -32,4 +32,6 @@ struct FroxelStats
 void recordFroxels(FramePassContext& fc, const ViewResources& main);
 // Counters of the most recent frame whose GPU work has completed (read back without stalling).
 const FroxelStats& froxelStats(TrackState& state);
+// Gates: keep the integration live when no consumer reads the volume yet (the graph culls unread passes).
+void setKeepFroxels(TrackState& state, bool keep);
 } // namespace unx::render::shadow

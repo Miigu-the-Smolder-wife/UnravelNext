@@ -11,6 +11,7 @@
 #include "unx/scenegen/SceneGen.h"
 #include "unx/visibility/Visibility.h"
 #endif
+#include "FroxelSystem.h"
 #include "VsmSystem.h"
 
 #include "unx/core/Config.h"
@@ -105,6 +106,7 @@ int main(int argc, char** argv)
         {
             const Resolution res = resolutionFromString(rs, quality);
             FrameRenderer renderer(device, shaders, quality, gpuScene, 2);
+            shadow::setKeepFroxels(renderer.trackState(), true);  // no consumer of the volume yet (M): measure it anyway
             HarnessOptions options;
             options.frames = frames;
             options.label = "S " + sceneName + (moving ? " moving " : " static ") + rs;
@@ -149,6 +151,12 @@ int main(int argc, char** argv)
             const double n = std::max(samples, 1u);
             logf("%s: S passes %.4f ms (page raster %.4f ms) of GPU frame %.4f ms | pages requested mean %.0f max %u, dirty mean %.1f, T_sun mean %.2f M, pool exhausted %u\n",
                  rs.c_str(), sPasses, raster, r.gpuFrameMs.median, requestedSum / n, requestedMax, dirtySum / n, trianglesSum / n / 1e6, exhausted);
+            const shadow::FroxelStats& fs = shadow::froxelStats(renderer.trackState());
+            logf("  froxels: %u light entries (%.2f per froxel), %u truncated lists, %u lights dropped, max %u per froxel\n", fs.indexCount,
+                 (double)fs.indexCount / std::max(1.0, (double)shadow::froxelGridFor(quality, res.width, res.height).gridX *
+                                                       shadow::froxelGridFor(quality, res.width, res.height).gridY *
+                                                       shadow::froxelGridFor(quality, res.width, res.height).slices),
+                 fs.overflowLists, fs.droppedLights, fs.maxCount);
             const double px = st.pathNoCaster + st.pathRegionLit + st.pathRegionUmbra + st.pathSearchLit + st.pathFiltered + st.pathDiskLit + st.pathDiskUmbra;
             logf("  visibility paths (%% of %.2f M pixels): no caster %.1f, reach lit %.1f, reach umbra %.1f, search lit %.1f, disk lit %.1f, disk umbra %.1f, filtered %.1f\n",
                  px / 1e6, 100 * st.pathNoCaster / px, 100 * st.pathRegionLit / px, 100 * st.pathRegionUmbra / px, 100 * st.pathSearchLit / px, 100 * st.pathDiskLit / px,

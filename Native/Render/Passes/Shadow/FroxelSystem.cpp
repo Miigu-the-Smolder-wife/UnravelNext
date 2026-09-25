@@ -27,6 +27,7 @@ struct State
     uint64_t statsFence[kStatsSlots] = {};
     int lastStatsSlot = -1;
     FroxelStats latest;
+    bool keep = false;
 };
 } // namespace
 
@@ -47,6 +48,8 @@ FroxelGridCpu froxelGridFor(const QualityConfig& q, uint32_t width, uint32_t hei
 }
 
 const FroxelStats& froxelStats(TrackState& state) { return state.get<State>(kStateKey).latest; }
+
+void setKeepFroxels(TrackState& state, bool keep) { state.get<State>(kStateKey).keep = keep; }
 
 void recordFroxels(FramePassContext& fc, const ViewResources& main)
 {
@@ -89,6 +92,7 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     VsmFrameRefs vsm;
     const bool shadows = frameRefs(fc, vsm);
     const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;
+    const bool keepVolume = s.keep;
     ShaderLibrary& sh = fc.shaders;
     ID3D12PipelineState* pb = sh.compute("Passes/Atmosphere/FroxelBegin");
     ID3D12PipelineState* pl = sh.compute("Passes/Atmosphere/FroxelLists");
@@ -118,6 +122,7 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
                   b.use(tlut, Use::SrvCompute);
                   b.use(mlut, Use::SrvCompute);
                   b.use(volume, Use::UavCompute);
+                  if (keepVolume) b.keep();
                   if (shadows)
                   {
                       b.use(vsm.table, Use::SrvCompute);
