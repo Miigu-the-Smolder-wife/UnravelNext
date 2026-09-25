@@ -64,7 +64,7 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
             // camera); a shadow ray elsewhere (off-screen hits).
             const uint experiment = P[5].x >> 24;
             bool resident = false;
-            if (P[5].z != UNX_NONE && (experiment & 2) == 0)
+            if (P[5].z != UNX_NONE && (experiment & 6) == 0)  // 4: rays only (VSM attribution)
             {
                 ByteAddressBuffer b = ResourceDescriptorHeap[P[5].z];
                 const uint4 a = b.Load4(0), c = b.Load4(16);

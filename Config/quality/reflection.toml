@@ -12,4 +12,5 @@ planar_view_ns_per_px = 0.34            # replaced online by the view's own meas
                                        # + S's per-view products (froxel lists, air from the mirror, local-light shadow
                                        # slots; S request 20260925_S_planar_view_products) 0.08 [expected]
 experiment_disable = 0                 # cost attribution only (recorded in the quality hash): 1 = sun shadow rays at hits without
-                                       # any-hit, 2 = no sun shadow rays at hits. Never nonzero outside measurements.
+                                       # any-hit, 2 = no sun visibility at hits (neither VSM nor rays), 4 = sun visibility at hits
+                                       # by shadow rays only (no VSM lookup). Never nonzero outside measurements.

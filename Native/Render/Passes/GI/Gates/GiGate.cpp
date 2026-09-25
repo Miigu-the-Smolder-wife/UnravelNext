@@ -8,8 +8,14 @@
 // reflection views (FrameServices::renderView). Same-named passes of secondary views are summed into one median (Harness),
 // so a secondary view's cost is measured as a difference: e.g. --set reflection.planar_views_max=0.
 //
+// --dump FILE keeps the last frame's view.reflection (rows [0, H), RGBA16F) of the last resolution; --compare FILE compares
+// it with an earlier dump of the same camera and resolution: per 8 x 8 tile the mean luminance of the pixels valid in both
+// (a = 1), then over tiles whose reference mean is above 1e-3 of the image's mean the mean and P95 of |a - b| / b and the
+// signed bias sum(a - b) / sum(b). Tile means average the per-pixel ray noise (e.g. reflection.experiment_disable=4, sun
+// visibility at hits by shadow rays, against 0, by S's VSM). The copy runs every frame: dump runs are not measurements.
+//
 //   GpuLock.ps1 -Track R -- unx_gate_gi_gigate --scene <file.unxscene> [--camera N] [--resolution 4K|1440p|both] [--frames N]
-//                                                [--out DIR] [--integrated] [--set key=value ...]
+//                                                [--out DIR] [--integrated] [--set key=value ...] [--dump FILE] [--compare FILE]
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/gi/GiSystem.h"
@@ -20,8 +26,10 @@
 #include "unx/rt/RayPipeline.h"
 #include "unx/rt/RayScene.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <vector>
 #if UNX_HAS_CLUSTERBUILDER
 #include "unx/clusterbuilder/ClusterBuilder.h"
@@ -61,13 +69,37 @@ double passSum(const HarnessResult& r, const char* prefix)
         if (name.rfind(prefix, 0) == 0) sum += d.median;
     return sum;
 }
+float halfToFloat(uint16_t h)
+{
+    const uint32_t sign = (h >> 15) & 1, exponent = (h >> 10) & 31, mantissa = h & 1023;
+    float v = exponent == 0 ? std::ldexp((float)mantissa, -24) : exponent == 31 ? INFINITY : std::ldexp((float)(mantissa | 1024), (int)exponent - 25);
+    return sign ? -v : v;
+}
+
+// Per 8 x 8 tile mean luminance of the valid pixels (a = 1) of a dumped reflection; tiles without any: -1.
+std::vector<double> tileMeans(const std::vector<uint16_t>& texels, uint32_t width, uint32_t height, const std::vector<uint16_t>* other)
+{
+    const uint32_t tx = (width + 7) / 8, ty = (height + 7) / 8;
+    std::vector<double> sum((size_t)tx * ty, 0), count((size_t)tx * ty, 0);
+    for (uint32_t y = 0; y < height; ++y)
+        for (uint32_t x = 0; x < width; ++x)
+        {
+            const size_t i = ((size_t)y * width + x) * 4;
+            if (halfToFloat(texels[i + 3]) < 0.5f || (other && halfToFloat((*other)[i + 3]) < 0.5f)) continue;
+            const size_t t = (size_t)(y / 8) * tx + x / 8;
+            sum[t] += 0.2126 * halfToFloat(texels[i]) + 0.7152 * halfToFloat(texels[i + 1]) + 0.0722 * halfToFloat(texels[i + 2]);
+            count[t] += 1;
+        }
+    for (size_t t = 0; t < sum.size(); ++t) sum[t] = count[t] > 0 ? sum[t] / count[t] : -1;
+    return sum;
+}
 } // namespace
 
 int main(int argc, char** argv)
 {
     try
     {
-        std::string scenePath, resolutions = "both", out, qualityPath = std::string(UNX_SOURCE_DIR) + "/Config/quality";
+        std::string scenePath, resolutions = "both", out, qualityPath = std::string(UNX_SOURCE_DIR) + "/Config/quality", dumpPath, comparePath;
         uint32_t frames = 600, cameraIndex = 0;
         bool integrated = false;
         std::vector<std::string> overrides;
@@ -83,6 +115,8 @@ int main(int argc, char** argv)
             else if (a == "--quality") qualityPath = next();
             else if (a == "--integrated") integrated = true;
             else if (a == "--set") overrides.push_back(next());
+            else if (a == "--dump") dumpPath = next();
+            else if (a == "--compare") comparePath = next();
             else fail("unknown argument %s", a.c_str());
         }
         if (scenePath.empty()) fail("--scene <file.unxscene> is required (Tools/SceneGen: unx_scenegen --scene <name> --out Cache/Scenes)");
@@ -123,6 +157,42 @@ int main(int argc, char** argv)
             refl::ReflectionSystem* reflSystem = nullptr;
             std::unique_ptr<FrameRenderer> renderer;
             if (integrated) renderer = std::make_unique<FrameRenderer>(device, shaders, quality, gpuScene, opt.framesInFlight);
+            // --dump / --compare: the reflection rows of every frame into one read-back buffer (the last frame's copy stays).
+            const bool keepReflection = !dumpPath.empty() || !comparePath.empty();
+            const uint32_t dumpPitch = (res.width * 8 + 255) & ~255u;
+            ComPtr<ID3D12Resource> dumpBuffer;
+            if (keepReflection)
+            {
+                D3D12_HEAP_PROPERTIES rb{ D3D12_HEAP_TYPE_READBACK };
+                D3D12_RESOURCE_DESC1 d{};
+                d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                d.Width = (uint64_t)dumpPitch * res.height;
+                d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+                d.SampleDesc.Count = 1;
+                d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                check(device.d3d()->CreateCommittedResource3(&rb, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&dumpBuffer)),
+                      "reflection dump");
+            }
+            auto copyReflection = [&](RenderGraph& graph, TextureRef reflection) {
+                if (!keepReflection || !reflection.valid()) return;
+                const BufferRef dst = graph.importBuffer(dumpBuffer.Get(), { "gate reflection dump", (uint64_t)dumpPitch * res.height, 0 });
+                graph.addPass("gate.dump", QueueType::Graphics,
+                              [&](PassBuilder& b) {
+                                  b.use(reflection, Use::CopySrc);
+                                  b.use(dst, Use::CopyDst);
+                                  b.keep();
+                              },
+                              [reflection, dst, dumpPitch, res](PassContext& c) {
+                                  D3D12_TEXTURE_COPY_LOCATION to{}, from{};
+                                  to.pResource = c.resource(dst);
+                                  to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                                  to.PlacedFootprint.Footprint = { DXGI_FORMAT_R16G16B16A16_FLOAT, res.width, res.height, 1, dumpPitch };
+                                  from.pResource = c.resource(reflection);
+                                  from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                                  const D3D12_BOX box{ 0, 0, 0, res.width, res.height, 1 };
+                                  c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
+                              });
+            };
             HarnessResult r = harness.run(res, opt, [&](RenderGraph& graph, const Resolution&, uint64_t f) {
                 if (renderer)
                 {
@@ -132,7 +202,8 @@ int main(int argc, char** argv)
                     frame.deltaTime = 1 / 165.0f;
                     frame.mainView = view;
                     const TextureRef output = graph.createTexture({ "gate output", res.width, res.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
-                    renderer->record(graph, frame, output);
+                    const ViewResources mainView = renderer->record(graph, frame, output);
+                    copyReflection(graph, mainView.reflection);
                     // The output has no reader in a gate: keep its producers (shading) alive like a present would.
                     graph.addPass("gate.present", QueueType::Graphics, [&](PassBuilder& b) {
                         b.use(output, Use::SrvCompute);
@@ -234,6 +305,7 @@ int main(int argc, char** argv)
                     }
                 }
                 const TextureRef probes = main.screenProbes, reflection = main.reflection;
+                copyReflection(graph, reflection);
                 graph.addPass("standin.consume", QueueType::Compute, [&](PassBuilder& b) {
                     b.use(probes, Use::SrvCompute);
                     b.use(reflection, Use::SrvCompute);
@@ -241,6 +313,56 @@ int main(int argc, char** argv)
                 }, [](PassContext&) {});
             });
             harness.printSummary(r);
+            if (keepReflection)
+            {
+                device.waitIdle();
+                std::vector<uint16_t> texels((size_t)res.width * res.height * 4);
+                void* mapped = nullptr;
+                D3D12_RANGE all{ 0, (SIZE_T)dumpPitch * res.height }, none{ 0, 0 };
+                check(dumpBuffer->Map(0, &all, &mapped), "map reflection dump");
+                for (uint32_t y = 0; y < res.height; ++y) std::memcpy(&texels[(size_t)y * res.width * 4], (uint8_t*)mapped + (size_t)y * dumpPitch, res.width * 8);
+                dumpBuffer->Unmap(0, &none);
+                if (!dumpPath.empty())
+                {
+                    std::ofstream f(dumpPath, std::ios::binary);
+                    const uint32_t header[2] = { res.width, res.height };
+                    f.write((const char*)header, sizeof header);
+                    f.write((const char*)texels.data(), (std::streamsize)(texels.size() * 2));
+                    if (!f) fail("cannot write %s", dumpPath.c_str());
+                    logf("R %s: reflection dumped to %s\n", res.name.c_str(), dumpPath.c_str());
+                }
+                if (!comparePath.empty())
+                {
+                    std::ifstream f(comparePath, std::ios::binary);
+                    uint32_t header[2] = {};
+                    f.read((char*)header, sizeof header);
+                    if (!f || header[0] != res.width || header[1] != res.height) fail("%s: not a %ux%u reflection dump", comparePath.c_str(), res.width, res.height);
+                    std::vector<uint16_t> ref(texels.size());
+                    f.read((char*)ref.data(), (std::streamsize)(ref.size() * 2));
+                    if (!f) fail("%s: truncated", comparePath.c_str());
+                    const std::vector<double> a = tileMeans(texels, res.width, res.height, &ref), b = tileMeans(ref, res.width, res.height, &texels);
+                    double imageMean = 0, sumA = 0, sumB = 0;
+                    size_t valid = 0;
+                    for (size_t t = 0; t < b.size(); ++t)
+                        if (b[t] >= 0) imageMean += b[t], ++valid;
+                    imageMean /= std::max<size_t>(valid, 1);
+                    std::vector<double> rel;
+                    for (size_t t = 0; t < b.size(); ++t)
+                    {
+                        if (b[t] < 0 || a[t] < 0 || b[t] <= 1e-3 * imageMean) continue;
+                        rel.push_back(std::fabs(a[t] - b[t]) / b[t]);
+                        sumA += a[t];
+                        sumB += b[t];
+                    }
+                    std::sort(rel.begin(), rel.end());
+                    double mean = 0;
+                    for (double v : rel) mean += v;
+                    mean /= std::max<size_t>(rel.size(), 1);
+                    logf("R %s: reflection vs %s: %zu tiles compared (of %zu with valid pixels), tile mean |a - b| / b %.4f, P95 %.4f, max %.4f, "
+                         "signed bias %.4f\n", res.name.c_str(), comparePath.c_str(), rel.size(), valid, mean, rel.empty() ? 0.0 : rel[rel.size() * 95 / 100],
+                         rel.empty() ? 0.0 : rel.back(), sumB > 0 ? (sumA - sumB) / sumB : 0.0);
+                }
+            }
             if (renderer)
             {
                 giSystem = gi::GiSystem::find(renderer->trackState());
