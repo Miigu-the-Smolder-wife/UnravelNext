@@ -12,7 +12,7 @@
 // (sweep + finish), the others finish here (fxFinishSlot), so the collision sweeps run in waves of colliders only.
 // Reads the input state (last tick's output, with this tick's births) and writes this tick's state into the other
 // buffer of the pair, so the renderer interpolates the two ticks of a slot from the state itself (no render record copy);
-// writes the slot's sort key; a dead slot is marked DYING (dying list).
+// a dead slot is marked DYING (dying list).
 #include "Passes/FX/Particles.hlsli"
 
 void die(uint slot)
@@ -61,13 +61,11 @@ void main(uint3 id : SV_DispatchThreadID)
     NvDrag drag;
     if (g_dt == 0)
     {
-        // State packet (restore, same-tick population change): no motion; the output state and key are the state.
+        // State packet (restore, same-tick population change): no motion; the output state is the state.
         FX_RWBUFFER(float4, posAgeOut, g_posAgeOut);
         FX_RWBUFFER(float4, velocityOut, g_velocityOut);
         posAgeOut[slot] = float4(s.position, s.age);
         velocityOut[slot] = float4(s.velocity, 0);
-        FX_RWBUFFER(uint, keys, g_keyBySlot);
-        keys[slot] = fxSortKey(dyn.originAnchor + s.position);
         fxWriteOutputs(slot, birth, s, e, p, dyn);
         return;
     }
@@ -102,6 +100,17 @@ void main(uint3 id : SV_DispatchThreadID)
         drag.velocity = e.dragVelocity; drag.position = e.dragPosition; drag.acceleration = e.dragAcceleration;
     }
     const NvMotion mo = fxMotion(p, e, dyn, birth);
+    if (fxTraced(row, birth))
+    {
+        // diagnostic: the inputs of this particle's integrate call (the end is written by fxFinishSlot)
+        FX_RWBUFFER(TraceRecord, trace, g_trace);
+        TraceRecord r = (TraceRecord)0;
+        r.inputs.row = row; r.inputs.birth = birth; r.inputs.newborn = born ? 1u : 0u; r.inputs.depth = 0u;
+        r.inputs.position = s.position; r.inputs.age = s.age; r.inputs.velocity = s.velocity; r.inputs.h = h;
+        r.inputs.drag = float4(drag.velocity, drag.position, drag.acceleration, 0);
+        r.inputs.emitter = e; r.inputs.dynamic = dyn;
+        trace[0] = r;
+    }
     float3 start, move;
     nv_integrate_motion(mo, h, drag, s, start, move);
     if (mo.collision != 0u && g_surfaceCount != 0u)

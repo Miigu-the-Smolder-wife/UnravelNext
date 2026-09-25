@@ -2,7 +2,7 @@
 // unx-variants: SCATTER=0,1
 // Compaction (stream step 4), 1024 slots per group, deterministic (prefix sums, no atomics):
 //   SCATTER=0: per block the number of alive slots and of slots that died in this tick -> blockSums[group] (uint2)
-//   SCATTER=1: with the exclusive block offsets (FxScanSums): alive list + sort keys/values (slot order), dead list
+//   SCATTER=1: with the exclusive block offsets (FxScanSums): alive list (slot order), dead list
 //              (slot order), dying list (slot order); a dying slot becomes dead.
 // Wave intrinsics give the in-wave ranks; the per-wave totals live in group memory sized for the smallest wave (4 lanes),
 // so the result does not depend on the wave size (WARP runs 4-lane waves).
@@ -38,12 +38,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3 g
     if (live)
     {
         FX_RWBUFFER(uint, aliveList, g_aliveList);
-        FX_RWBUFFER(uint, keysA, g_keysA);
-        FX_RWBUFFER(uint, valsA, g_valsA);
-        FX_RWBUFFER(uint, keyBySlot, g_keyBySlot);
         aliveList[at.x] = i;
-        keysA[at.x] = keyBySlot[i];
-        valsA[at.x] = i;
     }
     else
     {

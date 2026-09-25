@@ -7,10 +7,11 @@
 //      collision event counts. Every --compare-every ticks and at the end: every live particle (identity exact),
 //      position error |dp| / max(|p|, 1 m), velocity, age;
 //   3. --check items (the reference kernel's): alive flags = counter, alive and dead lists a disjoint complete
-//      partition, dying list = slots that died, sort keys non-decreasing and the values a permutation of the alive
-//      slots with their keys, positions finite, age <= lifetime, spawn capacity never exhausted;
-//   4. --determinism: the whole run twice from a fresh module; the GPU state (every state buffer, lists, sorted
-//      keys/values, records) and the sorted events are bit identical at every compare tick.
+//      partition, dying list = slots that died, positions finite, age <= lifetime, interpolation pairs (age advances
+//      by dt), spawn capacity never exhausted; ribbon points/strips and volume cells against sequential references;
+//   4. --determinism: the whole run twice from a fresh module; the defined GPU state (live slots' state of both ticks,
+//      lists up to their counts) and the sorted events are bit identical at every compare tick.
+//      (The depth sort is the render pass's per-frame tile-local sort since 2026-09-26; the tick has no sort.)
 // Options: --ticks N (600) --compare-every K (60) --particles P --emitters E --no-features --no-reference
 //          --determinism --warp (WARP adapter: another implementation, 4-lane waves) --no-debug-layer --gbv
 //          --yield (pause while a GPU measurement lock or the user's HOLD is present: CPU-heavy runs)
@@ -55,7 +56,9 @@ namespace
         if (!(cond)) fail("%s:%d: %s", __FILE__, __LINE__, unx::format(__VA_ARGS__).c_str());                         \
     } while (0)
 
-uint32_t g_watchEmitter = UINT32_MAX, g_watchBirth = 0;  // diagnostic: --watch E B logs that particle's error at every compare
+uint32_t g_watchEmitter = UINT32_MAX, g_watchBirth = 0;
+uint32_t g_traceEmitter = UINT32_MAX, g_traceBirth = 0;  // diagnostic: --trace E B (with --overflow-dump DIR) dumps that
+                                                          // particle's integrate inputs and end every tick  // diagnostic: --watch E B logs that particle's error at every compare
 
 struct Options
 {
@@ -256,6 +259,7 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
     RenderGraph graph(device);
     TrackState state;
     fx::ParticleSystem& ps = fx::particles(state, device, quality);
+    if (g_traceEmitter != UINT32_MAX) ps.setTrace(g_traceEmitter, g_traceBirth);
     fx::test::RppStream stream(o.rpp);
     nv_stream::CpuExecutor cpu;
     FrameContext frame;
@@ -295,6 +299,26 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
         // is a defect.
         FX_CHECK((rb.counters.status & ~1u) == 0, "tick %u: GPU status 0x%x (1 impact overflow, 2 nonfinite, 4 alive mismatch, 8 capacity, 16 range, 32 watchdog)", t, rb.counters.status);
         if (rb.counters.status & 1u) ++impactOverflowTicks;
+        if (g_traceEmitter != UINT32_MAX && !o.overflowDump.empty())
+        {
+            // diagnostic: the traced particle's integrate inputs and end of this tick (TraceRecord, 528 B per tick)
+            const auto rec = ps.readState("trace");
+            uint32_t row, birth;
+            std::memcpy(&row, rec.data(), 4);
+            std::memcpy(&birth, rec.data() + 4, 4);
+            fs::create_directories(o.overflowDump);
+            if (row == g_traceEmitter && birth == g_traceBirth)
+            {
+                writeFile(tickFile(o.overflowDump, format("trace_%u_%u", row, birth).c_str(), t), rec.data(), rec.size());
+                float in[8], end[8];
+                std::memcpy(in, rec.data() + 16, 32);
+                std::memcpy(end, rec.data() + 432, 32);
+                uint32_t impacts;
+                std::memcpy(&impacts, rec.data() + 460, 4);
+                FX_LOG("trace tick %u (%u,%u): in p %.9g %.9g %.9g v %.9g %.9g %.9g age %.9g h %.9g | end p %.9g %.9g %.9g v %.9g %.9g %.9g impacts %u", t, row, birth,
+                       in[0], in[1], in[2], in[4], in[5], in[6], in[3], in[7], end[0], end[1], end[2], end[4], end[5], end[6], impacts);
+            }
+        }
         if ((rb.counters.status & 1u) && !o.overflowDump.empty())
         {
             // the inputs of every overflowing nv_integrate call of this tick (Particles.hlsli OverflowRecord, 432 B each)
@@ -355,8 +379,8 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
         {
             // 3. structural checks
             const auto alive = ps.readState("alive"), aliveList = ps.readState("aliveList"), deadList = ps.readState("deadList");
-            const auto counters = ps.readState("counters"), keys = ps.readState("keysSorted"), vals = ps.readState("valsSorted");
-            const auto keyBySlot = ps.readState("keyBySlot"), posAge = ps.readState("posAge"), velocity = ps.readState("velocity"), meta = ps.readState("meta");
+            const auto counters = ps.readState("counters");
+            const auto posAge = ps.readState("posAge"), velocity = ps.readState("velocity"), meta = ps.readState("meta");
             const auto dying = ps.readState("dyingList"), posAgePrev = ps.readState("posAgePrev");
             const uint32_t cap = ps.capacity(), nAlive = at<uint32_t>(counters, 0), nDead = at<uint32_t>(counters, 1), nDying = at<uint32_t>(counters, 4);
             uint32_t flags = 0;
@@ -380,16 +404,6 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
             {
                 const uint32_t s = at<uint32_t>(dying, i);
                 FX_CHECK(s < cap && at<uint32_t>(alive, s) == 0u, "tick %u: dying list slot %u not dead", t, s);
-            }
-            std::vector<uint8_t> seen2(cap, 0);
-            const uint32_t keyMask = ps.sortPasses() >= 3 ? 0xFFFFFFu : ((1u << (8 * ps.sortPasses())) - 1u);
-            for (uint32_t i = 0; i < nAlive; ++i)
-            {
-                const uint32_t k = at<uint32_t>(keys, i), s = at<uint32_t>(vals, i);
-                if (i) FX_CHECK((at<uint32_t>(keys, i - 1) & keyMask) <= (k & keyMask), "tick %u: sort keys decrease at %u", t, i);
-                FX_CHECK(s < cap && at<uint32_t>(alive, s) == 1u && !seen2[s] && at<uint32_t>(keyBySlot, s) == k, "tick %u: sorted value %u = slot %u", t, i, s);
-                seen2[s] = 1;
-                if (i && (at<uint32_t>(keys, i - 1) & keyMask) == (k & keyMask)) FX_CHECK(at<uint32_t>(vals, i - 1) < s, "tick %u: sort not stable at %u", t, i);
             }
             for (uint32_t i = 0; i < nAlive; ++i)
             {
@@ -587,14 +601,14 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
             }
             auto prefix = [](const std::vector<uint8_t>& b, uint32_t n) { return std::vector<uint8_t>(b.begin(), b.begin() + std::min<size_t>(b.size(), (size_t)n * 4)); };
             const std::vector<uint8_t> parts2[] = { live[0], live[1], live[2], prefix(alive, cap), prefix(aliveList, nAlive), prefix(deadList, nDead),
-                                                    prefix(dying, nDying), prefix(keys, nAlive), prefix(vals, nAlive), live[3] };
+                                                    prefix(dying, nDying), live[3] };
             for (const auto& b : parts2)
             {
                 hs.update(b.data(), b.size());
                 Sha256 one;
                 one.update(b.data(), b.size());
                 const auto d = one.finish();
-                parts += format(" %02x%02x", d[0], d[1]);  // per-part fingerprint (posAge velocity meta alive aliveList dead dying keys vals prev)
+                parts += format(" %02x%02x", d[0], d[1]);  // per-part fingerprint (posAge velocity meta alive aliveList dead dying prev)
             }
             if (o.determinism) FX_LOG("tick %u: buffer fingerprints%s", t, parts.c_str());
             std::vector<NV_StreamEvent> ev = rb.events;
@@ -723,6 +737,7 @@ int main(int argc, char** argv)
             else if (a == "--fields") o.rpp.fields = (uint32_t)std::stoul(next());
             else if (a == "--overflow-dump") o.overflowDump = next();
             else if (a == "--ribbon-points") ribbonPoints = (uint32_t)std::stoul(next());
+            else if (a == "--trace") { g_traceEmitter = (uint32_t)std::stoul(next()); g_traceBirth = (uint32_t)std::stoul(next()); }
             else if (a == "--watch") { g_watchEmitter = (uint32_t)std::stoul(next()); g_watchBirth = (uint32_t)std::stoul(next()); }
             else if (a == "--anchor-shift") { o.rpp.anchorShift[0] = std::stod(next()); o.rpp.anchorShift[1] = std::stod(next()); o.rpp.anchorShift[2] = std::stod(next()); }
             else fail("unknown option %s", a.c_str());

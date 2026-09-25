@@ -2,7 +2,6 @@
 # qualities: the simulated population (the VFX stream's slot capacity), the per-particle arithmetic and the sort are
 # never reduced by them.
 [fx.particles]
-sort_passes = 3              # 8-bit LSD passes over the 24-bit sort key (request 20260925_FX_particle_render_rules.md)
 chain_depth_max = 4          # same-tick GPU child cascade depth (user decision, design 8.1 (b); NV_STREAM_MAX_DEPTH)
 readback_slots = 4           # tick ring (upload, events, readback): ticks in flight before the CPU reads them
 collision_cell_m = 1.0       # collision candidate grid cell (m): a size (the candidates are always a superset of the
@@ -10,6 +9,6 @@ collision_cell_m = 1.0       # collision candidate grid cell (m): a size (the ca
 collision_readback = 4096    # collision events copied with the tick; more are fetched from the tick's GPU event buffer
                              # when the CPU reads the tick (exact either way)
 experiment_disable = 0       # timing attribution only, never a product setting: bit 1 medium cells, 2 ribbon strips,
-                             # 4 sort, 8 collisions (no surfaces, no grid), 16 context and world fields,
+                             # 4 (unused: the sort moved to the render pass), 8 collisions (no surfaces, no grid), 16 context and world fields,
                              # 32 noise, 64 fields read from buffers instead of the constant
                              # buffer (A/B); the outputs are then incomplete (not 64)

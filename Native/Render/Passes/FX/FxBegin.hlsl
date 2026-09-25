@@ -21,6 +21,13 @@ void main(uint3 id : SV_DispatchThreadID)
         counters[FX_COUNTER_VOLUMES] = 0u;
         counters[FX_COUNTER_OVERFLOWS] = 0u;
         counters[FX_COUNTER_COLLIDERS] = 0u;
+        if (g_traceRow != FX_NONE)
+        {
+            FX_RWBUFFER(TraceRecord, trace, g_trace);
+            TraceRecord r = trace[0];
+            r.inputs.row = FX_NONE;  // the traced particle's record of this tick (absent until integrate writes it)
+            trace[0] = r;
+        }
         counters[FX_COUNTER_LARGE] = 0u;           // collision grid of the tick (FxSurfaces, FxGrid)
         counters[FX_COUNTER_GRID_ENTRIES] = 0u;
         counters[FX_COUNTER_TURN] = 0u;

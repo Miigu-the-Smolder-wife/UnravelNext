@@ -46,8 +46,6 @@
 #define FX_COUNTER_VOLUMES 7u        // live volume particles listed for FxCells this tick
 #define FX_COUNTER_TURN 8u           // asuint(max |w| dt over the grid's surfaces) (FxGrid, motion bound of the queries)
 #define FX_COUNTER_CARRY 9u          // asuint(max carrier displacement bound over all surfaces)
-#define FX_SORT_GROUP_SHIFT 12u      // radix sort: keys per histogram / scatter group = 1 << shift (C++ kSortGroupKeys)
-#define FX_SORT_GROUP_KEYS (1u << FX_SORT_GROUP_SHIFT)
 #define FX_COUNTER_COLLIDERS 11u     // colliding slots queued by integrate for FxCollide this tick
 #define FX_COUNTER_OVERFLOWS 10u     // slots of this tick whose sweep needed a fifth impact (diagnostic records)
 
@@ -70,8 +68,8 @@ cbuffer FxTick : register(b1)
     float3 g_forward; uint g_bodyCount;
     uint g_posAge, g_velocity, g_meta, g_alive;
     uint g_aliveList, g_deadList, g_dyingList, g_counters;
-    uint g_blockSums, g_posAgeOut, g_keyBySlot, g_events;  // g_posAge / g_velocity: input state (last tick's output)
-    uint g_keysA, g_valsA, g_keysB, g_valsB;
+    uint g_blockSums, g_posAgeOut, g_reserved20, g_events;  // g_posAge / g_velocity: input state (last tick's output)
+    uint g_reserved21, g_reserved22, g_reserved23, g_reserved24;  // (the tick sort moved to the render pass)
     uint g_hist, g_programs, g_curveKeys, g_emitters;
     uint g_spawns, g_explicitBirths, g_fields, g_worldFields;
     uint g_surfaces, g_restore, g_slotBase, g_spawnedSlots;
@@ -85,9 +83,10 @@ cbuffer FxTick : register(b1)
                                                                                   // FxCells ranges
     uint g_surfaceBoxes, g_velocityOut, g_overflowRecords, g_overflowCapacity;  // grown box per surface (candidate filter);
                                                                                 // this tick's velocity; IMPACT_OVERFLOW inputs
-    uint g_sortPasses, g_histRegion, g_experiment, g_colliders;  // sort: pass p's histogram is hist[p * g_histRegion + group * 256
+    uint g_reserved25, g_reserved26, g_experiment, g_colliders;  // sort: pass p's histogram is hist[p * g_histRegion + group * 256
                                                                   // + digit]; g_colliders: queue of colliding slots (FxCollide)
-    uint g_emitterPatches, g_patchCount, g_pad14, g_pad15;  // NV_StreamEmitterPatch rows of the tick (FxEmitters)
+    uint g_emitterPatches, g_patchCount, g_traceRow, g_traceBirth;  // patches of the tick (FxEmitters); traced particle
+    uint g_trace, g_pad17, g_pad18, g_pad19;                         // TraceRecord buffer (diagnostic)
     // The tick's fields, uniform for every particle: read through the constant path (one broadcast load per row) instead of
     // per-particle buffer loads. Filled by the CPU when the counts fit (else the structured buffers are read).
     uint4 g_fieldRows[FX_CB_FIELDS * 2];             // context fields (StreamField, 32 B each)
@@ -427,15 +426,6 @@ NvMotion fxMotion(StreamProgram p, StreamEmitter e, EmitterDynamic dyn, uint bir
     return m;
 }
 
-// 24-bit sort key: back-to-front view depth (request 20260925_FX_particle_render_rules.md, option A). Log mapping from
-// g_keyNear; points behind the camera sort last.
-uint fxSortKey(float3 anchorPosition)
-{
-    const float depth = dot(anchorPosition - g_camera, g_forward);
-    if (!(depth > g_keyNear)) return depth > 0 ? 0xFFFFFEu : 0xFFFFFFu;
-    const float code = min(log2(depth / g_keyNear) * g_keyScale, 16777213.0);
-    return 0xFFFFFDu - (uint)code;
-}
 
 
 bool fxFinite(NvState s) { return all(isfinite(s.position)) && all(isfinite(s.velocity)) && isfinite(s.age); }
@@ -488,6 +478,17 @@ struct OverflowRecord
     StreamEmitter emitter;            // the row as the kernel read it (per-tick fields included)
     EmitterDynamic dynamic;           // origin_anchor, inherited velocity of this tick
 };
+// Diagnostic trace of one particle (g_traceRow, g_traceBirth): the inputs of its integrate call this tick in the
+// OverflowRecord form (position/velocity/age = state before the motion, after rebase/transport; h; drag), then the end:
+// state, impact count, the collision event (if any). 432 + 32 + 64 = 528 B.
+struct TraceRecord
+{
+    OverflowRecord inputs;
+    float3 endPosition; float endAge;
+    float3 endVelocity; uint impacts;
+    StreamEvent collision;
+};
+bool fxTraced(uint row, uint birth) { return g_traceRow != FX_NONE && row == g_traceRow && birth == g_traceBirth; }
 // A colliding slot after its motion (nv_integrate_motion), waiting for its sweep in FxCollide: 48 B.
 struct ColliderRecord { float3 start; uint slot; float3 move; float h; float3 velocity; float age; };
 // Per-particle values of a live volume particle's cells (48 B), written by the integrate kernel at the index of its first
@@ -582,8 +583,18 @@ void fxFinishSlot(uint slot, uint row, uint birth, StreamEmitter e, StreamProgra
     FX_RWBUFFER(float4, velocityOut, g_velocityOut);
     posAgeOut[slot] = float4(s.position, s.age);
     velocityOut[slot] = float4(s.velocity, 0);
-    FX_RWBUFFER(uint, keys, g_keyBySlot);
-    keys[slot] = fxSortKey(dyn.originAnchor + s.position);
     fxWriteOutputs(slot, birth, s, e, p, dyn);
+    if (fxTraced(row, birth))
+    {
+        FX_RWBUFFER(TraceRecord, trace, g_trace);
+        TraceRecord r = trace[0];
+        r.endPosition = s.position; r.endAge = s.age; r.endVelocity = s.velocity; r.impacts = impact.count;
+        StreamEvent ev;
+        ev.emitter = row; ev.birth = birth; ev.kind = FX_EVENT_COLLISION; ev.impacts = impact.count;
+        ev.position = impact.contact; ev.after = (1 - impact.fraction) * h;
+        ev.velocity = impact.velocity; ev.reserved0 = 0; ev.normal = impact.normal; ev.reserved1 = 0;
+        r.collision = ev;
+        trace[0] = r;
+    }
 }
 #endif

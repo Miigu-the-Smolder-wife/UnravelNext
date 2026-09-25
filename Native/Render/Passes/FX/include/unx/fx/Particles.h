@@ -29,8 +29,8 @@ struct TickConstants
     float forward[3]; uint32_t bodyCount;
     uint32_t posAge, velocity, meta, alive;
     uint32_t aliveList, deadList, dyingList, counters;
-    uint32_t blockSums, posAgeOut, keyBySlot, events;  // posAge/velocity: input state; *Out: this tick's state
-    uint32_t keysA, valsA, keysB, valsB;
+    uint32_t blockSums, posAgeOut, reserved20, events;  // posAge/velocity: input state; *Out: this tick's state
+    uint32_t reserved21, reserved22, reserved23, reserved24;  // (the tick sort moved to the render pass)
     uint32_t hist, programs, curveKeys, emitters;
     uint32_t spawns, explicitBirths, fields, worldFields;
     uint32_t surfaces, restore, slotBase, spawnedSlots;
@@ -44,11 +44,11 @@ struct TickConstants
     float separationMax;  // largest program separation (collision grid motion bound)
     uint32_t volumeRanges, volumeRangeCount;
     uint32_t surfaceBoxes, velocityOut, overflowRecords, overflowCapacity;
-    uint32_t sortPasses, histRegion, experiment, colliders;  // sort histograms: sortPasses regions of histRegion words;
-                                                             // experiment_disable (timing only); collider queue
-    uint32_t emitterPatches, patchCount, pad14, pad15;  // NV_StreamEmitterPatch rows of the tick (FxEmitters)
+    uint32_t reserved25, reserved26, experiment, colliders;  // experiment_disable (timing only); collider queue
+    uint32_t emitterPatches, patchCount, traceRow, traceBirth;  // patches of the tick (FxEmitters); traced particle
+    uint32_t trace, pad17, pad18, pad19;  // TraceRecord buffer (diagnostic, setTrace)
 };
-static_assert(sizeof(TickConstants) == 400);
+static_assert(sizeof(TickConstants) == 416);
 
 // counters[] words (Particles.hlsli)
 enum : uint32_t { kCounterAlive = 0, kCounterDead = 1, kCounterCollisions = 2, kCounterStatus = 3, kCounterDying = 4, kCounterWords = 16 };
@@ -89,19 +89,22 @@ public:
     std::vector<NV_StreamParticle> checkpoint(render::ShaderLibrary& shaders);
 
     // Raw state for tests (waits for the GPU): the bytes of a named buffer ("posAge", "velocity", "meta", "alive",
-    // "aliveList", "deadList", "dyingList", "counters", "keysSorted", "valsSorted", "records", "keyBySlot").
+    // "aliveList", "deadList", "dyingList", "counters", "posAgePrev", "overflow", "trace").
     std::vector<uint8_t> readState(const char* name);
 
     uint32_t capacity() const { return m_capacity; }
     uint64_t latestTick() const { return m_latestTick; }
-    uint32_t sortPasses() const { return m_sortPasses; }
+    // Diagnostic: every later tick writes the inputs and the end of this particle's integrate call into a TraceRecord
+    // (Particles.hlsli; readState("trace"), 528 B). row = UINT32_MAX switches it off.
+    void setTrace(uint32_t row, uint32_t birth) { m_traceRow = row; m_traceBirth = birth; }
 
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
     render::Device& m_device;
-    uint32_t m_sortPasses = 3, m_chainDepthMax = 4, m_readbackSlots = 4, m_collisionReadback = 4096;
+    uint32_t m_chainDepthMax = 4, m_readbackSlots = 4, m_collisionReadback = 4096;
     float m_gridCell = 1.0f;
+    uint32_t m_traceRow = UINT32_MAX, m_traceBirth = 0;
     uint32_t m_experimentDisable = 0;  // timing attribution only (fx.toml experiment_disable); 0 in every product run
     uint32_t m_capacity = 0;
     uint64_t m_latestTick = 0;
