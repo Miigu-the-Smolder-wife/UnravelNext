@@ -1,6 +1,8 @@
 // Screen probes (R track, ARCHITECTURE 2.5, 2.6; INTERFACES 5.6 public API: ProbeSrvs, screenProbeIrradiance,
 // screenProbeRadiance). Consumer: M's shading kernel (main view). One probe per gi.screen_probe_spacing_px square tile,
-// filled every frame from the world radiance cache (no rays):
+// at the tile corners (design revision 12.3): probe (i, j) at the pixel corner (8i, 8j), (ceil(W / 8) + 1) x
+// (ceil(H / 8) + 1) probes, so the pixels of tile (tx, ty) interpolate probes tx..tx+1, ty..ty+1 only. Filled every
+// frame from the world radiance cache (no rays):
 //   - irradiance: trilinear L2 SH of the cache (indirect + sky, no direct sun) at the probe's surface point;
 //   - near occlusion of that point (depth-buffer taps within the sub-cell radius, at probe resolution);
 //   - radiance: the incident radiance of the probe's cache entry as an 8 x 8 hemispherical octahedral map around that
@@ -66,7 +68,7 @@ float3 giUnpackRgb9e5(uint v)
     return float3(v & 0x1FFu, (v >> 9) & 0x1FFu, (v >> 18) & 0x1FFu) * scale;
 }
 
-// Record sources: the probes texture, or (GI_PROBE_TILE_CACHE) a tile's groupshared copy of its 3 x 3 probes.
+// Record sources: the probes texture, or (GI_PROBE_TILE_CACHE) a tile's groupshared copy of its 2 x 2 corner probes.
 uint4 giProbePlane(Texture2D<uint4> t, uint2 probe, uint plane, int2 count) { return t.Load(int3(probe.x + plane * count.x, count.y * 4 + probe.y, 0)); }
 uint4 giProbeHeader(Texture2D<uint4> t)
 {
@@ -76,55 +78,61 @@ uint4 giProbeHeader(Texture2D<uint4> t)
 }
 
 #ifdef GI_PROBE_TILE_CACHE
-groupshared uint4 gs_giProbe[9][6];  // planes 0..5 of the probes clamp(tile - 1 .. tile + 1, 0, count - 1), row-major
+groupshared uint4 gs_giProbe[4][6];  // planes 0..5 of the corner probes tile .. tile + 1, row-major
 groupshared uint4 gs_giHeader;       // { spacing, probesX, probesY, 0 }
 
 struct GiProbeTile
 {
-    int2 first;  // tile - 1: slot of a probe p = p - first (always 0..2 for the probes a tile's pixels read)
+    int2 first;  // the tile: slot of a probe p = p - first (0 or 1 for the probes a tile's pixels read)
 };
 
 uint4 giProbePlane(GiProbeTile t, uint2 probe, uint plane, int2 count)
 {
     const int2 slot = int2(probe) - t.first;
-    return gs_giProbe[slot.y * 3 + slot.x][plane];
+    return gs_giProbe[slot.y * 2 + slot.x][plane];
 }
+
+// Probe counts of the main view (b1): ceil(view / 8) + 1 each way (corner probes, spacing 8 enforced by GiSystem).
+int2 giProbeCountOfView() { return int2((uint2(g_viewWidth, g_viewHeight) + 7) / 8 + 1); }
 uint4 giProbeHeader(GiProbeTile t) { return gs_giHeader; }
 
 // Split form of giProbeTileLoad for kernels that issue their own reads in between (M's shading kernel: the pixel's
 // word, G-buffer and depth and S's overflow head go out together with the tile's records; the records are stored once
-// those are in flight). The probe counts come from the caller: with the fixed 8 px spacing they are ceil(view / 8)
-// (GiSystem), so no header read has to come first; lane 54 returns the header those counts define.
+// those are in flight). The probe counts are the main view's (giProbeCountOfView: frame constants), so no header read
+// has to come first; lane 24 returns the header they define. 'count' is ignored (kept for the callers of the 3 x 3
+// form; it was ceil(view / 8), which the corner grid no longer uses).
 // [M measurement, city 4K: shading 1.257 -> 1.191 ms, 3 alternating rounds, together with M's reordered kernel.]
 uint4 giProbeTileFetch(ProbeSrvs s, uint2 tile, uint lane, int2 count)
 {
-    if (lane > 54) return 0;
-    if (lane == 54) return uint4(8, count.x, count.y, 0);
+    count = giProbeCountOfView();
+    if (lane > 24) return 0;
+    if (lane == 24) return uint4(8, count.x, count.y, 0);
     Texture2D<uint4> t = ResourceDescriptorHeap[s.probes];
     const uint k = lane / 6, plane = lane % 6;
-    const int2 probe = clamp(int2(tile) - 1 + int2(k % 3, k / 3), int2(0, 0), count - 1);
+    const int2 probe = min(int2(tile) + int2(k & 1, k >> 1), count - 1);
     return giProbePlane(t, uint2(probe), plane, count);
 }
 void giProbeTileStore(uint lane, uint4 value)
 {
-    if (lane < 54) gs_giProbe[lane / 6][lane % 6] = value;
-    else if (lane == 54) gs_giHeader = value;
+    if (lane < 24) gs_giProbe[lane / 6][lane % 6] = value;
+    else if (lane == 24) gs_giHeader = value;
 }
 
-// Lanes 0..53 load (probe k = lane / 6, plane lane % 6), lane 54 the header; the caller then syncs the group.
+// Lanes 0..23 load (probe k = lane / 6 at tile + (k & 1, k >> 1), plane lane % 6), lane 24 the header; the caller then
+// syncs the group.
 void giProbeTileLoad(ProbeSrvs s, uint2 tile, uint lane)
 {
-    if (lane > 54) return;
+    if (lane > 24) return;
     Texture2D<uint4> t = ResourceDescriptorHeap[s.probes];
     const uint4 header = giProbeHeader(t);
-    if (lane == 54)
+    if (lane == 24)
     {
         gs_giHeader = header;
         return;
     }
     const int2 count = int2(header.y, header.z);
     const uint k = lane / 6, plane = lane % 6;
-    const int2 probe = clamp(int2(tile) - 1 + int2(k % 3, k / 3), int2(0, 0), count - 1);
+    const int2 probe = min(int2(tile) + int2(k & 1, k >> 1), count - 1);
     gs_giProbe[k][plane] = giProbePlane(t, uint2(probe), plane, count);
 }
 #endif
@@ -224,7 +232,7 @@ GiProbeFootprint giProbeFootprintAt(Src t, uint2 pixel, float3 pixelWorld, float
     const int2 probeCount = int2(header.y, header.z);
     spacing = probeSpacing;
     count = probeCount;
-    const float2 f = (float2(pixel) + 0.5) / probeSpacing - 0.5;
+    const float2 f = (float2(pixel) + 0.5) / probeSpacing;  // probe i at the pixel corner spacing i
     const int2 i0 = int2(floor(f));
     const float2 fr = f - floor(f);
     GiProbeFootprint fp;
@@ -245,7 +253,7 @@ GiProbeFootprint giProbeFootprintAt(Src t, uint2 pixel, float3 pixelWorld, float
     }
     if (total < 1e-4)
     {
-        const int2 own = clamp(int2(pixel / (uint)probeSpacing), int2(0, 0), probeCount - 1);
+        const int2 own = clamp(int2(floor(f + 0.5)), int2(0, 0), probeCount - 1);  // the nearest corner
         fp.probe[0] = own;
         float3 ownWorld, ownNormal;
         fp.weight[0] = giLoadProbeSurface(t, uint2(own), probeCount, ownWorld, ownNormal) ? 1 : 0;
@@ -465,7 +473,7 @@ ScreenProbeLighting screenProbeGatherTile(ProbeSrvs s, uint2 tile, uint2 pixel, 
                                           float3 dir, float coneHalfAngle)
 {
     GiProbeTile t;
-    t.first = int2(tile) - 1;
+    t.first = int2(tile);
     return giProbeGatherFrom(t, s, pixel, worldPos, normal, linearDepth, back, wantRadiance, dir, coneHalfAngle);
 }
 #endif

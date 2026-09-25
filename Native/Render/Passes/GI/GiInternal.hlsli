@@ -246,22 +246,25 @@ bool giUpdateSlot(RWByteAddressBuffer b, GiHeader h, uint slot, out uint entry, 
 
 // The probe pixel of a tile: its centre, else the first of four inner points that has geometry (stable while the
 // camera is still). Returns false when the tile shows only sky at those points.
-bool giProbePixel(Texture2D<float> depth, uint2 tile, uint spacing, uint2 size, out uint2 offset, out float deviceDepth)
+// Screen probe (i, j) sits at the pixel corner (spacing i, spacing j) (design revision 12.3: the four probes around a
+// tile are its corners, shared with its neighbours). Its surface point: the first candidate pixel around the corner
+// that is not sky (the pixel just below-right of the corner, then the four at +-spacing/4), clamped into the view.
+bool giProbePixel(Texture2D<float> depth, uint2 probe, uint spacing, uint2 size, out uint2 pixel, out float deviceDepth)
 {
-    const uint q = spacing / 4, c = spacing / 2;
-    const uint2 candidates[5] = { uint2(c, c), uint2(q, q), uint2(3 * q, q), uint2(q, 3 * q), uint2(3 * q, 3 * q) };
+    const int q = (int)spacing / 4;
+    const int2 candidates[5] = { int2(0, 0), int2(-q, -q), int2(q, -q), int2(-q, q), int2(q, q) };
     [unroll] for (uint i = 0; i < 5; ++i)
     {
-        const uint2 pixel = min(tile * spacing + candidates[i], size - 1);
-        const float d = depth.Load(int3(pixel, 0));
+        const uint2 p = (uint2)clamp(int2(probe * spacing) + candidates[i], int2(0, 0), int2(size) - 1);
+        const float d = depth.Load(int3(p, 0));
         if (d > 0)
         {
-            offset = pixel - tile * spacing;
+            pixel = p;
             deviceDepth = d;
             return true;
         }
     }
-    offset = uint2(c, c);
+    pixel = min(probe * spacing, size - 1);
     deviceDepth = 0;
     return false;
 }

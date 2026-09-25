@@ -14,7 +14,7 @@ void main(uint2 probe : SV_DispatchThreadID)
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].y];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].z];
     RWStructuredBuffer<float4> output = ResourceDescriptorHeap[P[0].w];
-    const uint2 pixel = min(probe * 8 + 4, P[1].zw - 1);
+    const uint2 pixel = min(probe * 8, P[1].zw - 1);  // the pixel just below-right of the probe's corner
     const float d = depth.Load(int3(pixel, 0));
     const uint index = 4 * (probe.y * P[1].x + probe.x);
     if (d <= 0)

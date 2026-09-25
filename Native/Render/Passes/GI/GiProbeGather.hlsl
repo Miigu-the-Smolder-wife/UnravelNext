@@ -58,17 +58,16 @@ void main(uint2 probe : SV_DispatchThreadID)
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].y];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].z];
     const GiHeader h = giHeader(b);
-    uint2 offset;
+    uint2 pixel;
     float d;
     float3 c[9];
-    if (!giProbePixel(depth, probe, spacing, size, offset, d))
+    if (!giProbePixel(depth, probe, spacing, size, pixel, d))
     {
         [unroll] for (uint k = 0; k < 9; ++k) c[k] = 0;
         giStoreProbe(probes, probe, count, c, float3(0, 0, 0), float3(0, 0, 1), 1, false);
         probes[uint2(probe.x * 8 + 5, probe.y * 4 + 3)] = uint4(GI_ENTRY_PENDING, 0, 0, 0);  // radiance map source (GiProbeMaps)
         return;
     }
-    const uint2 pixel = probe * spacing + offset;
     const float3 p = worldFromDepth(float2(pixel), d);
     const float3 n = decodeGBuffer(gbuffer.Load(int3(pixel, 0))).normal;
     uint mapEntry;

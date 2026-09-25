@@ -258,7 +258,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
         uint8_t* mapped = nullptr;
         D3D12_RANGE none{ 0, 0 };
         check(constants.resource->Map(0, &none, reinterpret_cast<void**>(&mapped)), "map constants");
-        const uint32_t probesX = (width + 7) / 8, probesY = (height + 7) / 8;
+        const uint32_t probesX = (width + 7) / 8 + 1, probesY = (height + 7) / 8 + 1;  // corner probes
         const uint64_t resultBytes = (uint64_t)probesX * probesY * 64;
         Buffer result = createBuffer(device, resultBytes, D3D12_HEAP_TYPE_DEFAULT, true);
         Buffer readback = createBuffer(device, resultBytes, D3D12_HEAP_TYPE_READBACK, false);

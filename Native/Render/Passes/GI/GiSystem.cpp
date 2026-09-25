@@ -215,8 +215,9 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     }
     const BufferRef cache = g.importBuffer(m_cache.Get(), { "GI cache", m_bytes, 0 });
     fc.resources.giCache = cache;
-    const uint32_t probesX = (main.view.width + s.probeSpacing - 1) / s.probeSpacing;
-    const uint32_t probesY = (main.view.height + s.probeSpacing - 1) / s.probeSpacing;
+    // Probes at the tile corners (design revision 12.3): one more column and row than tiles.
+    const uint32_t probesX = (main.view.width + s.probeSpacing - 1) / s.probeSpacing + 1;
+    const uint32_t probesY = (main.view.height + s.probeSpacing - 1) / s.probeSpacing + 1;
     main.screenProbes = g.createTexture({ "GI screen probes", probesX * 8, probesY * 5 + 1, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT });
     {
         // K-path maps atlas (INTERFACES v1.13, layout in ScreenProbes.hlsli): written as R32_UINT, filtered as RGB9E5.

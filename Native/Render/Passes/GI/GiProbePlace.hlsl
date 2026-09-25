@@ -13,10 +13,9 @@ void main(uint2 probe : SV_DispatchThreadID)
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].y];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].z];
     const GiHeader h = giHeader(b);
-    uint2 offset;
+    uint2 pixel;
     float d;
-    if (!giProbePixel(depth, probe, P[0].w, P[1].zw, offset, d)) return;
-    const uint2 pixel = probe * P[0].w + offset;
+    if (!giProbePixel(depth, probe, P[0].w, P[1].zw, pixel, d)) return;
     const float3 p = worldFromDepth(float2(pixel), d);
     const float3 n = decodeGBuffer(gbuffer.Load(int3(pixel, 0))).normal;
     bool created;
