@@ -1,7 +1,10 @@
 // Reflection correctness against analytic answers (R track, ARCHITECTURE 2.6):
 //  1. White furnace with a mirror floor half (roughness 0.05: M path) and a glossy half (0.3: G at grazing, K elsewhere):
-//     radiance is uniform (L = Le / (1 - rho)), so every M and G pixel must resolve to L; the G path's control variate
-//     cancels exactly in a uniform field, so any deviation is a transport or plumbing error.
+//     the GI cache converges to the uniform L = Le / (1 - rho) (its rays shade hits diffusely), and a reflection hit on
+//     a wall (roughness 0.5, f0 0.04) leaves Le + rho L + S(NoV_hit) L toward the floor, S = the model's specular
+//     albedo (HitShading.hlsli, M's shSpecularAlbedo). The expected value of a pixel is that radiance averaged over its
+//     floor lobe (256 VNDF samples, masked ones excluded as on the GPU, the walls intersected exactly); the G path's
+//     control variate cancels in the uniform cache, so any deviation is a transport, shading or plumbing error.
 //  2. A mirror ground under a constant sky L: M pixels see the sky, value L.
 // Frame path: RayScene::record -> ray-traced primary visibility standing in for V/M -> GI -> reflections; the check reads
 // reflectionRadiance (M's API) and the per-pixel mode.
@@ -14,10 +17,13 @@
 #include "unx/render/GpuScene.h"
 #include "unx/rt/RayPipeline.h"
 #include "unx/rt/RayScene.h"
+#include "unx/rt/SpecularAlbedo.h"
+#include "unx/scene/MaterialModel.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 
 using namespace unx;
 using namespace unx::render;
@@ -122,15 +128,128 @@ Buffer createBuffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE type, bool u
     return b;
 }
 
+// HitShading.hlsli's indirect specular albedo: (f0 A + B)(1 + f0 (1 / (A + B) - 1)), bilinear on the 32 x 32 table.
+double specularAlbedo(double f0, double NoV, double roughness)
+{
+    const std::vector<float>& t = rt::specularAlbedoTable();
+    const uint32_t n = scene::model::kAlbedoTableSize;
+    const double x = std::clamp(NoV, 0.0, 1.0) * (n - 1), y = std::clamp(roughness, 0.0, 1.0) * (n - 1);
+    const uint32_t x0 = (uint32_t)x, y0 = (uint32_t)y, x1 = std::min(x0 + 1, n - 1), y1 = std::min(y0 + 1, n - 1);
+    const double fx = x - x0, fy = y - y0;
+    double ab[2];
+    for (int c = 0; c < 2; ++c)
+    {
+        const double a = t[2 * (y0 * n + x0) + c], b = t[2 * (y0 * n + x1) + c], cc = t[2 * (y1 * n + x0) + c], d = t[2 * (y1 * n + x1) + c];
+        ab[c] = (a * (1 - fx) + b * fx) * (1 - fy) + (cc * (1 - fx) + d * fx) * fy;
+    }
+    return (f0 * ab[0] + ab[1]) * (1 + f0 * (1 / (ab[0] + ab[1]) - 1));
+}
+
+// ReflectionInternal.hlsli reflSampleGgx (Heitz 2018 visible normals), n = +Y here.
+float3 sampleGgx(float3 v, float alpha, float u1, float u2)
+{
+    // Frame of n = (0, 1, 0) as the HLSL builds it (Duff et al. 2017 with n.z = 0 -> s = 1).
+    const float3 n{ 0, 1, 0 };
+    const float sgn = 1.0f, a = -1.0f / (sgn + n.z), c = n.x * n.y * a;
+    const float3 t{ 1 + sgn * n.x * n.x * a, sgn * c, -sgn * n.x };
+    const float3 b{ c, sgn + n.y * n.y * a, -n.y };
+    const float3 ve{ dot(v, t), dot(v, b), dot(v, n) };
+    const float3 vh = normalize(float3{ alpha * ve.x, alpha * ve.y, std::max(ve.z, 1e-4f) });
+    const float lensq = vh.x * vh.x + vh.y * vh.y;
+    const float3 t1 = lensq > 0 ? float3{ -vh.y, vh.x, 0 } / std::sqrt(lensq) : float3{ 1, 0, 0 };
+    const float3 t2 = cross(vh, t1);
+    const float r = std::sqrt(u1), phi = 6.28318530718f * u2;
+    const float p1 = r * std::cos(phi);
+    const float sv = 0.5f * (1 + vh.z);
+    const float p2 = (1 - sv) * std::sqrt(std::max(0.0f, 1 - p1 * p1)) + sv * r * std::sin(phi);
+    const float3 nh = t1 * p1 + t2 * p2 + vh * std::sqrt(std::max(0.0f, 1 - p1 * p1 - p2 * p2));
+    const float3 he = normalize(float3{ alpha * nh.x, alpha * nh.y, std::max(0.0f, nh.z) });
+    const float3 h = t * he.x + b * he.y + n * he.z;
+    return h * (2 * dot(v, h)) - v;
+}
+
+// Expected reflection value of a pixel and the standard deviation of one lobe sample around it (a pixel's M value is one
+// sample, a G value the mean of reflection.g_rays_per_sample: the per-pixel tolerance adds 4 sigma / sqrt(n)).
+struct Expectation
+{
+    double mean = 0, sigma = 0;
+    double hitNoV = 1;  // mean cosine at the reflection hits (diagnostics)
+};
+
+// Expected reflection value of a pixel in furnaceWithMirrors (see the file comment).
+std::function<Expectation(uint32_t, uint32_t)> furnaceExpectation(const ViewDesc& view, uint32_t width, uint32_t height, double le, double rho)
+{
+    return [=](uint32_t px, uint32_t py) {
+        const float4x4& m = view.invViewProj;
+        auto unproject = [&](float z) {
+            const float x = (px + 0.5f) / width * 2 - 1, y = 1 - (py + 0.5f) / height * 2;
+            const float w = m.m[3][0] * x + m.m[3][1] * y + m.m[3][2] * z + m.m[3][3];
+            return float3{ (m.m[0][0] * x + m.m[0][1] * y + m.m[0][2] * z + m.m[0][3]) / w, (m.m[1][0] * x + m.m[1][1] * y + m.m[1][2] * z + m.m[1][3]) / w,
+                           (m.m[2][0] * x + m.m[2][1] * y + m.m[2][2] * z + m.m[2][3]) / w };
+        };
+        const float3 a = unproject(1.0f), b = unproject(0.5f);
+        // The room's six faces, normals inward; the floor's halves are 0.05 (x < 0) and 0.3, everything else 0.5.
+        struct Hit
+        {
+            float3 p, n;
+            float roughness;
+        };
+        auto trace = [](float3 o, float3 d) {
+            double tMin = 1e30;
+            float3 n{};
+            auto plane = [&](float dir, float origin, float bound, float3 normal) {
+                if (dir == 0) return;
+                const double t = (bound - origin) / dir;
+                if (t > 1e-4 && t < tMin) tMin = t, n = normal;
+            };
+            plane(d.x, o.x, d.x > 0 ? 6.0f : -6.0f, float3{ d.x > 0 ? -1.0f : 1.0f, 0, 0 });
+            plane(d.z, o.z, d.z > 0 ? 6.0f : -6.0f, float3{ 0, 0, d.z > 0 ? -1.0f : 1.0f });
+            plane(d.y, o.y, d.y > 0 ? 5.0f : 0.0f, float3{ 0, d.y > 0 ? -1.0f : 1.0f, 0 });
+            const float3 p = o + d * (float)tMin;
+            return Hit{ p, n, n.y > 0.5f ? (p.x < 0 ? 0.05f : 0.3f) : 0.5f };
+        };
+        const Hit primary = trace(a, normalize(b - a));
+        const float3 v = normalize(a - primary.p);
+        // The sampler's frame is built for n = +Y; rotate the problem so the surface normal is +Y.
+        const float3 n = primary.n;
+        const float3 tAxis = std::fabs(n.y) > 0.5f ? float3{ 1, 0, 0 } : float3{ 0, 1, 0 };
+        const float3 bx = normalize(cross(tAxis, n)), bz = cross(bx, n);  // world = bx * x + n * y + bz * z
+        auto toLocal = [&](float3 w) { return float3{ dot(w, bx), dot(w, n), dot(w, bz) }; };
+        auto toWorld = [&](float3 l) { return bx * l.x + n * l.y + bz * l.z; };
+        const float alpha = std::max(primary.roughness * primary.roughness, 1e-4f);
+        const double L = le / (1 - rho);
+        double sum = 0, sumSq = 0, sumNoV = 0;
+        uint32_t valid = 0;
+        const uint32_t k = 16;
+        for (uint32_t i = 0; i < k; ++i)
+            for (uint32_t j = 0; j < k; ++j)
+            {
+                const float3 r = toWorld(sampleGgx(toLocal(v), alpha, (i + 0.5f) / k, (j + 0.5f) / k));
+                if (dot(r, n) <= 0) continue;
+                const Hit h = trace(primary.p, r);
+                const double NoV = std::max(-dot(h.n, r), 1e-4f);
+                const double x = le + rho * L + specularAlbedo(0.04, NoV, h.roughness) * L;
+                sum += x;
+                sumSq += x * x;
+                sumNoV += NoV;
+                ++valid;
+            }
+        if (!valid) return Expectation{ L, 0 };
+        const double mean = sum / valid;
+        return Expectation{ mean, std::sqrt(std::max(sumSq / valid - mean * mean, 0.0)), sumNoV / valid };
+    };
+}
+
 struct Outcome
 {
     uint32_t surface = 0, k = 0, mirror = 0, glossy = 0;
     double worstM = 0, worstG = 0, meanM = 0, meanG = 0;
+    double excessM = -1, excessG = -1;  // largest deviation beyond the pixel's allowance (<= 0: all within)
     uint32_t outliersM = 0;
 };
 
-Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky, double expected, uint32_t frames, uint32_t width,
-            uint32_t height)
+Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky,
+            const std::function<Expectation(uint32_t, uint32_t)>& expectedAt, uint32_t frames, uint32_t width, uint32_t height)
 {
     GpuScene gpuScene(device);
     gpuScene.upload(s);
@@ -241,6 +360,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
     check(readback.resource->Map(0, &all, &rb), "map result");
     std::memcpy(values.data(), rb, resultBytes);
     readback.resource->Unmap(0, &none);
+    const uint32_t raysPerSample = (uint32_t)quality.integer("reflection.g_rays_per_sample");
     double sumM = 0, sumG = 0;
     for (size_t i = 0; i < values.size() / 4; ++i)
     {
@@ -248,19 +368,29 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
         if (w < 0) continue;
         ++out.surface;
         const double v = (values[4 * i] + values[4 * i + 1] + values[4 * i + 2]) / 3.0;
-        if (w == 0) ++out.k;
-        else if (w == 1)
+        if (w == 0)
+        {
+            ++out.k;
+            continue;
+        }
+        const uint32_t px = (uint32_t)(i % countX) * stride, py = (uint32_t)(i / countX) * stride;
+        const Expectation e = expectedAt(px, py);
+        const double expected = e.mean;
+        // Allowed relative deviation: 3 % plus 4 sigma of the pixel's sample mean (1 sample for M, g_rays_per_sample for G).
+        const double allowM = 0.03 + 4 * e.sigma / expected, allowG = 0.03 + 4 * e.sigma / std::sqrt((double)raysPerSample) / expected;
+        if (w == 1)
         {
             ++out.mirror;
-            sumM += v;
+            sumM += v / expected;
             out.worstM = std::max(out.worstM, std::fabs(v / expected - 1));
-            if (std::fabs(v / expected - 1) > 0.03 && out.outliersM++ < 6)
-                logf("  M outlier at pixel (%u, %u): %.4f\n", (uint32_t)(i % countX) * stride, (uint32_t)(i / countX) * stride, v);
+            out.excessM = std::max(out.excessM, std::fabs(v / expected - 1) - allowM);
+            if (std::fabs(v / expected - 1) > allowM && out.outliersM++ < 6) logf("  M outlier at pixel (%u, %u): %.4f (expected %.4f, hit NoV %.3f)\n", px, py, v, expected, e.hitNoV);
         }
         else
         {
             ++out.glossy;
-            sumG += v;
+            sumG += v / expected;
+            out.excessG = std::max(out.excessG, std::fabs(v / expected - 1) - allowG);
             out.worstG = std::max(out.worstG, std::fabs(v / expected - 1));
         }
     }
@@ -292,13 +422,15 @@ int main(int argc, char** argv)
         ShaderLibrary shaders(device, executableDirectory() / "shaders");
         bool pass = true;
 
-        const Outcome a = run(device, shaders, quality, furnaceWithMirrors(1, 0.5f), { 0, 0, 0 }, 2.0, frames, 1920, 1080);
-        const bool okA = a.mirror > 0 && a.glossy > 0 && std::fabs(a.meanM / 2 - 1) < 0.01 && std::fabs(a.meanG / 2 - 1) < 0.01 && a.worstM < 0.03 && a.worstG < 0.03;
-        logf("furnace (L = 2): %u surface samples: K %u, M %u (mean %.4f, worst %.2f %%, %u beyond 3 %%), G %u (mean %.4f, worst %.2f %%) -> %s\n", a.surface, a.k,
+        const scene::Scene furnace = furnaceWithMirrors(1, 0.5f);
+        const Outcome a = run(device, shaders, quality, furnace, { 0, 0, 0 },
+                              furnaceExpectation(ViewDesc::fromCamera(furnace.cameras[0], 1920, 1080, float4x4{}), 1920, 1080, 1.0, 0.5), frames, 1920, 1080);
+        const bool okA = a.mirror > 0 && a.glossy > 0 && std::fabs(a.meanM - 1) < 0.01 && std::fabs(a.meanG - 1) < 0.01 && a.excessM <= 0 && a.excessG <= 0;
+        logf("furnace (value / expected; cache L = 2): %u surface samples: K %u, M %u (mean %.4f, worst %.2f %%, %u beyond 3 %% + 4 sigma), G %u (mean %.4f, worst %.2f %%) -> %s\n", a.surface, a.k,
              a.mirror, a.meanM, 100 * a.worstM, a.outliersM, a.glossy, a.meanG, 100 * a.worstG, okA ? "PASS" : "FAIL");
         pass = pass && okA;
 
-        const Outcome b = run(device, shaders, quality, mirrorUnderSky(), { 1, 1, 1 }, 1.0, frames, 1920, 1080);
+        const Outcome b = run(device, shaders, quality, mirrorUnderSky(), { 1, 1, 1 }, [](uint32_t, uint32_t) { return Expectation{ 1.0, 0.0 }; }, frames, 1920, 1080);
         const bool okB = b.mirror > 0 && std::fabs(b.meanM - 1) < 0.01 && b.worstM < 0.03;
         logf("sky mirror (L = 1): %u surface samples: K %u, M %u (mean %.4f, worst %.2f %%), G %u -> %s\n", b.surface, b.k, b.mirror, b.meanM, 100 * b.worstM, b.glossy,
              okB ? "PASS" : "FAIL");

@@ -108,16 +108,22 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     return s;
 }
 
+namespace
+{
+struct GiSystemSlot
+{
+    std::unique_ptr<GiSystem> gi;
+};
+} // namespace
+
 GiSystem& GiSystem::get(FramePassContext& fc)
 {
-    struct Slot
-    {
-        std::unique_ptr<GiSystem> gi;
-    };
-    Slot& slot = fc.state<Slot>("R.gi");
+    GiSystemSlot& slot = fc.state<GiSystemSlot>("R.gi");
     if (!slot.gi) slot.gi = std::make_unique<GiSystem>(fc.device, fc.quality);
     return *slot.gi;
 }
+
+GiSystem* GiSystem::find(TrackState& state) { return state.get<GiSystemSlot>("R.gi").gi.get(); }
 
 GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(device), m_settings(GiSettings::fromQuality(quality))
 {

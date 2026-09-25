@@ -3,12 +3,18 @@
 // structure passes, a ray-traced primary visibility pass standing in for V/M (reported separately, not part of the R
 // budget), and the GI passes; the harness times every pass (1.5 s warm-up, medians, P95).
 //
+// --integrated renders the whole frame through FrameRenderer instead (V, M, S and R of an integrated build,
+// Tools/CI/Build.ps1 -Track all): R's passes then run on the real visibility, G-buffer, lobe tiles and planar
+// reflection views (FrameServices::renderView). Same-named passes of secondary views are summed into one median (Harness),
+// so a secondary view's cost is measured as a difference: e.g. --set reflection.planar_views_max=0.
+//
 //   GpuLock.ps1 -Track R -- unx_gate_gi_gigate --scene <file.unxscene> [--camera N] [--resolution 4K|1440p|both] [--frames N]
-//                                                [--out DIR]
+//                                                [--out DIR] [--integrated] [--set key=value ...]
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/gi/GiSystem.h"
 #include "unx/refl/ReflectionSystem.h"
+#include "unx/render/FrameRenderer.h"
 #include "unx/render/GpuScene.h"
 #include "unx/render/Harness.h"
 #include "unx/rt/RayPipeline.h"
@@ -16,6 +22,10 @@
 
 #include <cmath>
 #include <cstring>
+#include <vector>
+#if UNX_HAS_CLUSTERBUILDER
+#include "unx/clusterbuilder/ClusterBuilder.h"
+#endif
 
 using namespace unx;
 using namespace unx::render;
@@ -59,6 +69,8 @@ int main(int argc, char** argv)
     {
         std::string scenePath, resolutions = "both", out, qualityPath = std::string(UNX_SOURCE_DIR) + "/Config/quality";
         uint32_t frames = 600, cameraIndex = 0;
+        bool integrated = false;
+        std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -69,10 +81,13 @@ int main(int argc, char** argv)
             else if (a == "--frames") frames = (uint32_t)std::stoul(next());
             else if (a == "--out") out = next();
             else if (a == "--quality") qualityPath = next();
+            else if (a == "--integrated") integrated = true;
+            else if (a == "--set") overrides.push_back(next());
             else fail("unknown argument %s", a.c_str());
         }
         if (scenePath.empty()) fail("--scene <file.unxscene> is required (Tools/SceneGen: unx_scenegen --scene <name> --out Cache/Scenes)");
         QualityConfig quality = QualityConfig::loadDirectory(qualityPath);
+        for (const std::string& o : overrides) quality.applyOverride(o);
         const scene::Scene s = scene::load(scenePath);
         if (cameraIndex >= s.cameras.size()) fail("scene has %zu cameras", s.cameras.size());
         if (out.empty()) out = std::string(UNX_SOURCE_DIR) + "/Results/R/GiGate";
@@ -81,6 +96,14 @@ int main(int argc, char** argv)
         ShaderLibrary shaders(device, executableDirectory() / "shaders");
         GpuScene gpuScene(device);
         gpuScene.upload(s);
+        if (integrated)
+        {
+#if UNX_HAS_CLUSTERBUILDER
+            gpuScene.setClusters(clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality)));
+#else
+            fail("--integrated needs the integrated build (Tools/CI/Build.ps1 -Track all): V's cluster builder is not in this one");
+#endif
+        }
         Harness harness(device, quality);
         logf("scene %s (%s), camera '%s', %zu instances, quality %s\n", s.name.c_str(), scene::contentHash(s).substr(0, 16).c_str(), s.cameras[cameraIndex].name.c_str(),
              s.instances.size(), quality.shortHash().c_str());
@@ -93,12 +116,24 @@ int main(int argc, char** argv)
             HarnessOptions opt;
             opt.frames = frames;
             opt.outputDirectory = out;
-            opt.label = s.name + "_" + s.cameras[cameraIndex].name + "_" + res.name;
+            opt.label = s.name + "_" + s.cameras[cameraIndex].name + "_" + res.name + (integrated ? "_integrated" : "");
             Constants constants = createConstants(device, opt.framesInFlight);
             const ViewDesc view = ViewDesc::fromCamera(s.cameras[cameraIndex], res.width, res.height, float4x4{});
             gi::GiSystem* giSystem = nullptr;
             refl::ReflectionSystem* reflSystem = nullptr;
+            std::unique_ptr<FrameRenderer> renderer;
+            if (integrated) renderer = std::make_unique<FrameRenderer>(device, shaders, quality, gpuScene, opt.framesInFlight);
             HarnessResult r = harness.run(res, opt, [&](RenderGraph& graph, const Resolution&, uint64_t f) {
+                if (renderer)
+                {
+                    FrameContext frame;
+                    frame.frameIndex = f;
+                    frame.time = f / 165.0;
+                    frame.deltaTime = 1 / 165.0f;
+                    frame.mainView = view;
+                    renderer->record(graph, frame, graph.createTexture({ "gate output", res.width, res.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM }));
+                    return;
+                }
                 FrameContext frame;
                 frame.frameIndex = f;
                 frame.time = f / 165.0;
@@ -174,10 +209,16 @@ int main(int argc, char** argv)
                 }, [](PassContext&) {});
             });
             harness.printSummary(r);
+            if (renderer)
+            {
+                giSystem = gi::GiSystem::find(renderer->trackState());
+                reflSystem = refl::ReflectionSystem::find(renderer->trackState());
+            }
             const double reflMs = passSum(r, "r.refl."), traceReflMs = r.passMs.count("r.refl.trace") ? r.passMs.at("r.refl.trace").median : 0;
             logf("R %s: reflections %.3f ms (trace %.3f ms, classify %.3f, resolve %.3f)\n", res.name.c_str(), reflMs, traceReflMs,
                  r.passMs.count("r.refl.classify") ? r.passMs.at("r.refl.classify").median : 0, r.passMs.count("r.refl.resolve") ? r.passMs.at("r.refl.resolve").median : 0);
             const double giMs = passSum(r, "r.gi."), asMs = passSum(r, "r.as."), traceMs = r.passMs.count("r.gi.trace") ? r.passMs.at("r.gi.trace").median : 0;
+            if (renderer) logf("R %s: integrated frame %.3f ms GPU (median)\n", res.name.c_str(), r.gpuFrameMs.median);
             logf("R %s: GI %.3f ms (trace %.3f ms = %.2f G rays/s incl. hit shading), acceleration structures %.3f ms; stand-in primary visibility %.3f ms (not R)\n",
                  res.name.c_str(), giMs, traceMs, traceMs > 0 ? gi::GiSettings::fromQuality(quality).updatesPerFrame * 64 / (traceMs * 1e-3) / 1e9 : 0, asMs,
                  r.passMs.count("standin.primary") ? r.passMs.at("standin.primary").median : 0);
@@ -186,8 +227,9 @@ int main(int argc, char** argv)
                 const refl::ReflectionSystem::Stats rs = reflSystem->readStats();
                 logf("R %s: reflection jobs %u (M %u = rays %u; G samples %u = rays %u), G pixels %u\n", res.name.c_str(), rs.jobs, rs.mirrorJobs, rs.mirrorJobs, rs.glossyJobs,
                      rs.glossyJobs * reflSystem->settings().raysPerSample, rs.glossyPixels);
-                logf("R %s: planar candidates %u visible, largest plane %u mirror pixels (camera from %u), %u views (no renderView in this gate), CPU %.3f ms\n",
-                     res.name.c_str(), rs.planarCandidates, rs.planarLargestPixels, reflSystem->settings().planarMinPixels, rs.planarViews, rs.planarSelectMs);
+                logf("R %s: planar candidates %u visible, largest plane %u mirror pixels (camera from %u), %u views (%u px)%s, CPU %.3f ms\n", res.name.c_str(),
+                     rs.planarCandidates, rs.planarLargestPixels, reflSystem->settings().planarMinPixels, rs.planarViews, rs.planarPixels,
+                     renderer ? "" : " (no renderView in this gate)", rs.planarSelectMs);
             }
             if (giSystem)
             {

@@ -31,6 +31,8 @@ class GiSystem
 {
 public:
     static GiSystem& get(FramePassContext& fc);
+    // This renderer's instance, or null before its first frame (diagnostics, gates).
+    static GiSystem* find(TrackState& state);
     GiSystem(Device& device, const QualityConfig& quality);
     ~GiSystem();
     GiSystem(const GiSystem&) = delete;

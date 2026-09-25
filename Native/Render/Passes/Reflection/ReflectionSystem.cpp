@@ -1,6 +1,7 @@
 #include "unx/refl/ReflectionSystem.h"
 
 #include "unx/rt/RayPipeline.h"
+#include "unx/rt/SpecularAlbedo.h"
 
 #include <algorithm>
 #include <cmath>
@@ -61,16 +62,22 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     return s;
 }
 
+namespace
+{
+struct ReflectionSystemSlot
+{
+    std::unique_ptr<ReflectionSystem> system;
+};
+} // namespace
+
 ReflectionSystem& ReflectionSystem::get(FramePassContext& fc)
 {
-    struct Slot
-    {
-        std::unique_ptr<ReflectionSystem> system;
-    };
-    Slot& slot = fc.state<Slot>("R.reflection");
+    ReflectionSystemSlot& slot = fc.state<ReflectionSystemSlot>("R.reflection");
     if (!slot.system) slot.system = std::make_unique<ReflectionSystem>(fc.device, fc.shaders, fc.quality);
     return *slot.system;
 }
+
+ReflectionSystem* ReflectionSystem::find(TrackState& state) { return state.get<ReflectionSystemSlot>("R.reflection").system.get(); }
 
 ReflectionSystem::ReflectionSystem(Device& device, ShaderLibrary& shaders, const QualityConfig& quality)
     : m_device(device), m_settings(ReflectionSettings::fromQuality(quality))
@@ -534,6 +541,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const float rayLength = (float)fc.quality.number("gi.ray_length_m");
     const uint32_t frame = (uint32_t)fc.frame.frameIndex;
     ID3D12Resource* argumentResource = m_arguments.Get();
+    const uint32_t specularLut = rt::specularAlbedoSrv(fc.device);
     g.addPass("r.refl.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(args, Use::IndirectArgs);
@@ -549,7 +557,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
               [&pipeline, jobs, results, modes, probes, depth, gbuffer, cache, luts, atmosphere, sky, sun, rayLength, s, frame, scene, frameConstants, argumentResource,
-               variant](PassContext& c) {
+               variant, specularLut](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = c.srv(jobs);
                   k[1] = c.uav(results);
@@ -568,6 +576,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   k[18] = c.uav(cache);
                   k[19] = s.raysPerSample;
                   k[20] = frame;
+                  k[21] = specularLut;
                   std::memcpy(&k[24], scene, sizeof scene);
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);

@@ -257,6 +257,58 @@ float3 giTexelRadiance(B b, GiHeader h, uint entry, float2 uv)
     return r * GI_LOAD_SCALE;
 }
 
+// Irradiance and incident radiance from direction dir at a surface point, in one pass over the cells (ray hits need
+// both): trilinear over the 8 cells of the point's level (at least minLevel) and normal class like giCacheIrradianceAt;
+// each existing updated entry contributes its SH irradiance and its texel-resolution radiance toward dir (bilinear over
+// its 8 x 8 hemisphere, in its own frame); coarser levels when none exists; zeros when no level has one.
+template <typename B>
+void giCacheLightingAt(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, uint minLevel, out float3 irradiance, out float3 radiance)
+{
+    const uint nc = giNormalClass(normal);
+    uint level = max(giLevel(h, worldPos), minLevel);
+    float3 sumE = 0, sumL = 0;
+    float weight = 0;
+    [loop] for (uint attempt = 0; attempt < GI_LEVEL_CLIMB && weight <= 0 && level <= h.maxLevel; ++attempt, ++level)
+    {
+        const float s = giCellSize(h, level);
+        const float3 f = worldPos / s - 0.5;
+        const int3 c0 = int3(floor(f));
+        const float3 t = f - floor(f);
+        [loop] for (uint k = 0; k < 8; ++k)
+        {
+            const int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
+            const uint entry = giFind(b, h, giKey(level, nc, c0 + o));
+            if (entry == GI_ENTRY_PENDING || b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0) continue;
+            const float3 wt = lerp(1 - t, t, float3(o));
+            const float w = wt.x * wt.y * wt.z;
+            float sv;
+            sumE += w * giShIrradiance(b, h, entry, normal, sv);
+            const float3 n = giAnchorNormal(b, h, entry);
+            float3 tb, bb;
+            giBasis(n, tb, bb);
+            const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
+            sumL += w * giTexelRadiance(b, h, entry, giHemiOctEncode(local));
+            weight += w;
+        }
+    }
+    irradiance = weight > 0 ? sumE / weight : 0;
+    radiance = weight > 0 ? sumL / weight : 0;
+}
+
+// Incident radiance from direction dir at a surface point with normal 'normal' (v1.6 request 20260925_R_hit_shading.md):
+// the surface's own entries (its normal class), trilinear over 8 cells with level climbing (giCacheLightingAt), texel
+// resolution (8 x 8 hemisphere, ~22 deg texels; coneHalfAngle reserved for the lobe prefilter).
+float3 giCacheRadiance(GiSrvs s, float3 worldPos, float3 normal, float3 dir, float coneHalfAngle)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[s.cache];
+    const GiHeader h = giHeader(b);
+    float3 irradiance, radiance;
+    giCacheLightingAt(b, h, worldPos, normal, dir, 0, irradiance, radiance);
+    return radiance;
+}
+
+// Deprecated (v1): keys the entry by dir's normal class instead of the surface's, so it can read another surface's
+// entry or none; use the overload with the surface normal above.
 // Incident radiance from direction 'dir' at worldPos. v1 returns the texel-resolution radiance of the nearest-cell entry
 // of dir's normal class; the lobe prefilter by coneHalfAngle (ARCHITECTURE 2.6 K path) comes with the reflection work.
 float3 giCacheRadiance(GiSrvs s, float3 worldPos, float3 dir, float coneHalfAngle)

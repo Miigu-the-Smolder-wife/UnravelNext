@@ -31,6 +31,8 @@ class ReflectionSystem
 {
 public:
     static ReflectionSystem& get(FramePassContext& fc);
+    // This renderer's instance, or null before its first frame (diagnostics, gates).
+    static ReflectionSystem* find(TrackState& state);
     ReflectionSystem(Device& device, ShaderLibrary& shaders, const QualityConfig& quality);
     ~ReflectionSystem();
     ReflectionSystem(const ReflectionSystem&) = delete;

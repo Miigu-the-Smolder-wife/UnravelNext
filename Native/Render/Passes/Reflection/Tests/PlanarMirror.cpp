@@ -1,10 +1,13 @@
 // Planar reflection path (ARCHITECTURE 2.6, INTERFACES 5.4) against the M ray path on the same pixels. A room whose back
-// wall is a checkerboard of emissive tiles and whose other walls emit distinct colours (albedo 0: the radiance leaving a
-// wall is its emission, so the comparison needs no GI convergence), with a perfect mirror floor. Run A disables the
-// planar path (mirror pixels take one VNDF ray each at alpha 1e-4); run B enables it with a test renderView that
-// ray-traces the reflection camera (V/M/S are other tracks). Every pixel that is M in A and planar in B must match:
-// both are the exact mirror reflection, so only checker-edge pixels may differ (sub-pixel ray jitter). Run C raises
-// reflection.planar_min_pixels above the mirror's pixel count: the cost formula must then keep every mirror pixel on rays.
+// wall is a checkerboard of emissive tiles (10 : 1) and whose other walls emit distinct colours (albedo 0), with a
+// perfect mirror floor. Run A disables the planar path (mirror pixels take one VNDF ray each at alpha 1e-4); run B
+// enables it with a test renderView that ray-traces the reflection camera and shades its hits exactly like the ray
+// path (V/M/S are other tracks). Both are the exact mirror reflection of the same radiance: emission plus the walls'
+// specular reflection of the GI cache (f0 0.04), whose texels are Monte Carlo estimates that differ between the two
+// independent runs by ~1 % per pixel. So a pixel mismatches when it differs by more than 10 % (a misregistered
+// reflection differs by the checker contrast); fewer than 1 % may (checker edges, sub-pixel ray jitter), and the mean
+// signed difference must stay under 0.5 % (no bias). Run C raises reflection.planar_min_pixels above the mirror's pixel
+// count: the cost formula must then keep every mirror pixel on rays.
 //
 //   unx_test_reflection_planarmirror [--validate]
 #include "unx/core/Config.h"
@@ -14,6 +17,7 @@
 #include "unx/render/GpuScene.h"
 #include "unx/rt/RayPipeline.h"
 #include "unx/rt/RayScene.h"
+#include "unx/rt/SpecularAlbedo.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,6 +28,13 @@ using namespace unx::render;
 
 namespace
 {
+uint32_t asU(float f)
+{
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    return u;
+}
+
 void addQuad(scene::Mesh& m, float3 a, float3 b, float3 c, float3 d, float3 n)
 {
     const uint32_t base = (uint32_t)m.positions.size();
@@ -127,7 +138,7 @@ std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConf
     Buffer result = createBuffer(device, resultBytes, D3D12_HEAP_TYPE_DEFAULT, true);
     Buffer readback = createBuffer(device, resultBytes, D3D12_HEAP_TYPE_READBACK, false);
     refl::ReflectionSystem* reflSystem = nullptr;
-    const uint32_t frames = 6;  // planar views start once a frame's pixel counts are read back (framesInFlight later)
+    const uint32_t frames = 64;  // the hits read the GI cache (specular term): both runs compare converged caches (~14 frames)
     for (uint32_t f = 0; f < frames; ++f)
     {
         FrameContext frame;
@@ -174,16 +185,23 @@ std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConf
             rv.frameConstants = c.frameConstantsFor(v);
             rv.color = c.graph.createTexture({ "stand-in reflection view", v.width, v.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
             const TextureRef colour = rv.color;
+            const BufferRef cache = c.resources.giCache;
+            const uint32_t lut = rt::specularAlbedoSrv(device);
+            const float rayLength = gi::GiSettings::fromQuality(quality).rayLength;
             const D3D12_GPU_VIRTUAL_ADDRESS address = rv.frameConstants;
             const uint32_t w = v.width, h = v.height;
             c.graph.addPass("test.planar.view", QueueType::Compute,
                             [&](PassBuilder& b) {
                                 b.use(colour, Use::UavGraphics);
+                                b.use(cache, Use::UavGraphics);
                                 rays.declareTraversal(b);
                             },
-                            [&standIn, colour, address, w, h, scene](PassContext& pc) {
+                            [&standIn, colour, cache, lut, rayLength, address, w, h, scene](PassContext& pc) {
                                 uint32_t k[32] = {};
                                 k[0] = pc.uav(colour);
+                                k[7] = asU(rayLength);
+                                k[18] = pc.uav(cache);
+                                k[21] = lut;
                                 std::memcpy(&k[24], scene, sizeof scene);
                                 pc.computeConstants(k, 32);
                                 pc.bindFrameConstants(address);
@@ -282,7 +300,7 @@ int main(int argc, char** argv)
         for (size_t i = 0; i < runC.size() / 4; ++i)
             if (a[4 * i + 3] == 1 && runC[4 * i + 3] == 1) ++rayPixelsC;
         uint32_t compared = 0, mismatched = 0, planarPixels = 0, mirrorPixels = 0;
-        double sumDiff = 0;
+        double sumDiff = 0, sumSigned = 0;
         for (size_t i = 0; i < a.size() / 4; ++i)
         {
             if (a[4 * i + 3] == 1) ++mirrorPixels;
@@ -296,13 +314,17 @@ int main(int argc, char** argv)
                 ref += std::fabs(a[4 * i + c]);
             }
             sumDiff += diff / std::max(ref, 1e-3);
-            if (diff > 0.01 * ref + 1e-3) ++mismatched;
+            sumSigned += (b[4 * i] + b[4 * i + 1] + b[4 * i + 2] - a[4 * i] - a[4 * i + 1] - a[4 * i + 2]) / std::max(ref, 1e-3);
+            if (diff > 0.1 * ref + 1e-3) ++mismatched;
         }
+        logf("planar mirror: mean signed (planar - rays) / rays %.4f %%\n", compared ? 100 * sumSigned / compared : 0.0);
         const double mismatchFraction = compared ? (double)mismatched / compared : 1;
         uint32_t mirrorPixelsA = 0;
         for (size_t i = 0; i < a.size() / 4; ++i) mirrorPixelsA += a[4 * i + 3] == 1 ? 1u : 0u;
-        const bool pass = viewsA == 0 && viewsB == 1 && compared > 1000 && mismatchFraction < 0.01 && viewsC == 0 && rayPixelsC == mirrorPixelsA;
-        logf("planar mirror: run A (rays) %u M pixels, run B %u planar view(s), %u planar pixels; %u compared, %u differ by > 1 %% (%.3f %%, checker "
+        const double bias = compared ? sumSigned / compared : 1;
+        const bool pass = viewsA == 0 && viewsB == 1 && compared > 1000 && mismatchFraction < 0.01 && std::fabs(bias) < 0.005 && viewsC == 0 &&
+                          rayPixelsC == mirrorPixelsA;
+        logf("planar mirror: run A (rays) %u M pixels, run B %u planar view(s), %u planar pixels; %u compared, %u differ by > 10 %% (%.3f %%, checker "
              "edges), mean relative difference %.4f %% -> %s\n",
              mirrorPixels, viewsB, planarPixels, compared, mismatched, 100 * mismatchFraction, compared ? 100 * sumDiff / compared : 0.0, pass ? "PASS" : "FAIL");
         logf("planar mirror: run C (planar_min_pixels above the count) %u planar view(s), %u of %u mirror pixels on rays\n", viewsC, rayPixelsC, mirrorPixelsA);

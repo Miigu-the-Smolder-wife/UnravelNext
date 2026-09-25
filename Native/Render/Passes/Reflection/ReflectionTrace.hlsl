@@ -7,62 +7,22 @@
 //   G job: reflection.g_rays_per_sample (4) samples with the screen-probe cache as control variate:
 //          I = gbar + mean(L_i - g_i), g_i = screenProbeRadiance in direction w_i (texel cone), gbar = the same over the
 //          whole lobe (reflectionLobeHalfAngle). The variance left is that of L - g: small where the cache is good.
-// Radiance at a hit = emission + diffuse albedo / pi * (direct sun: one shadow ray in the solar disk + cache irradiance
-// (trilinear, indirect + sky)); sky on a miss. Specular reflection at the hit point is not included (see R status).
+// Radiance at a hit: RayTracing/HitShading.hlsli (model v1 with the direct view's sun terms; one shadow ray in the solar
+// disk; indirect diffuse = cache irradiance, indirect specular = cache radiance from the hit's mirror direction); sky on
+// a miss.
 //
 // P[0] = { jobs SRV, results UAV (uint2 per job), mode SRV, probes SRV }
 // P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli), ray length in P[1].w
-// P[4] = { depth SRV, gbuffer SRV, GI cache UAV (raw), rays per G sample }, P[5] = { frame, 0, 0, 0 }
+// P[4] = { depth SRV, gbuffer SRV, GI cache UAV (raw), rays per G sample }, P[5] = { frame, specular albedo LUT SRV, 0, 0 }
 // P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view.
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionInternal.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
 #include "Passes/GI/ScreenProbes.hlsli"
 #include "Passes/GI/GiSky.hlsli"
+#include "Passes/Reflection/ReflectionHit.hlsli"
 
-// A reflection hit consumes the cache like a GI hit: its cell (the lobe's footprint there, 2 t tan(lobe), at least) is
-// found or created and requested for update next frame (hit tier), so cells only reflections see are kept converged.
-// The irradiance read starts at that level and climbs until an updated cell exists.
-float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RayDesc r, float coneTan, uint seed, out float hitDistance)
-{
-    const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION);
-    if (hit.t < 0)
-    {
-        hitDistance = 65000;
-        return giSkyRadiance(r.Direction);
-    }
-    hitDistance = hit.t;
-    const RtSurface s = rtSurface(scene, hit, r.Origin, r.Direction);
-    const GpuMaterial m = loadMaterial(s.material);
-    if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return 0;
-    const uint footprintLevel = giLevelForSize(h, 2 * hit.t * coneTan);
-    bool created;
-    const uint e = giFindOrCreate(cache, h, giSurfaceKey(h, s.position, s.normal, footprintLevel), s.position, s.normal, created);
-    if (e != GI_ENTRY_PENDING)
-    {
-        giTouch(cache, h, e);
-        giRequestHit(cache, h, e);
-    }
-    float w;
-    const float3 indirect = giCacheIrradianceAt(cache, h, s.position, s.normal, footprintLevel, w);
-    float3 sun = 0;
-    const float3 l = normalize(g_sunDirection);
-    const float cosSun = dot(s.normal, l);
-    if (cosSun > 0)
-    {
-        const float3 e0 = giSunIlluminance(s.position);
-        if (any(e0 > 0))
-        {
-            RayDesc sr;
-            sr.Origin = s.position + s.normal * (1e-3 + 2e-4 * distance(s.position, g_cameraPosition));
-            sr.Direction = giSunDirection(seed);
-            sr.TMin = 0;
-            sr.TMax = giRayLength();
-            if (rtVisible(scene, sr, RT_MASK_REFLECTION)) sun = e0 * cosSun;
-        }
-    }
-    return m.emissive + m.baseColor * (1 - m.metallic) / 3.14159265 * (indirect + sun);
-}
+#define REFL_SAMPLE_ATTEMPTS 8u
 
 [shader("raygeneration")]
 void ReflectionTraceGen()
@@ -89,12 +49,19 @@ void ReflectionTraceGen()
     uint valid = 0;
     [loop] for (uint i = 0; i < rays; ++i)
     {
-        const float2 u = float2(giUnit(seed), giUnit(seed + 1));
-        seed = giRandom(seed + 2);
-        const float3 dir = reflSampleGgx(s.normal, s.view, alpha, u);
-        // Below the surface: a masked sample, outside both the numerator and the normaliser of the lobe average (the
-        // specular directional albedo M applies carries that loss).
-        if (dot(dir, s.normal) <= 0) continue;
+        // The lobe average is over unmasked directions (the specular directional albedo M applies carries the masked
+        // loss), so a direction below the surface is redrawn: rejection sampling draws exactly the unmasked part of the
+        // VNDF distribution. Only when all REFL_SAMPLE_ATTEMPTS draws are masked (extreme grazing) is the sample dropped.
+        float3 dir = 0;
+        bool found = false;
+        [loop] for (uint attempt = 0; attempt < REFL_SAMPLE_ATTEMPTS && !found; ++attempt)
+        {
+            const float2 u = float2(giUnit(seed), giUnit(seed + 1));
+            seed = giRandom(seed + 2);
+            dir = reflSampleGgx(s.normal, s.view, alpha, u);
+            found = dot(dir, s.normal) > 0;
+        }
+        if (!found) continue;
         RayDesc r;
         r.Origin = s.position + s.normal * (1e-3 + 2e-4 * s.linearDepth);
         r.Direction = dir;

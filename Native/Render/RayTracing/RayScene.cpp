@@ -1,4 +1,5 @@
 #include "unx/rt/RayScene.h"
+#include "unx/rt/SpecularAlbedo.h"
 
 #include <algorithm>
 #include <chrono>
@@ -63,6 +64,7 @@ void RayScene::releaseDevice(Device& device)
     device.waitIdle();
     std::lock_guard lock(g_sceneMutex);
     std::erase_if(g_scenes, [&](const auto& e) { return e.first.first == &device; });
+    releaseSpecularAlbedo(device);  // R's per-device tables go with the scene
 }
 
 RayScene::Buffer RayScene::createBuffer(uint64_t bytes, bool uav, bool accelerationStructure, const wchar_t* name)
