@@ -575,9 +575,16 @@ void testHold()
     const bool timing = reference::holdActive(live);
     write(nullptr);
     const bool legacy = reference::holdActive(live);
+    // A record written long before the process now using its pid was created (a reboot reused the pid) is stale.
+    {
+        std::ofstream o(live);
+        o << "{\"track\":\"X\",\"kind\":\"timing\",\"pid\":" << self << ",\"started\":\"2000-01-01T00:00:00\"}";
+    }
+    const bool reused = reference::holdActive(live);
     fs::remove(live);
-    logf("  hold kinds (live holder): correctness %d, timing %d, no kind %d\n", corr, timing, legacy);
+    logf("  hold kinds (live holder): correctness %d, timing %d, no kind %d, reused pid %d\n", corr, timing, legacy, reused);
     if (corr || !timing || !legacy) fail("GPU lock kind not honoured (correctness must not hold; timing and kind-less must)");
+    if (reused) fail("a lock record older than its pid's process (reused pid) held the render");
 }
 
 void testAtmosphereTable()
