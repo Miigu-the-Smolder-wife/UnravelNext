@@ -581,17 +581,28 @@ int main(int argc, char** argv)
                           "gate coverage readback");
                     return buffer;
                 };
-                ComPtr<ID3D12Resource> rbTiles = readback(tileBytes), rbTable = readback(tableBytes), rbList = readback(listBytes), rbRecords = readback(recordBytes);
-                ID3D12Resource *dTiles = rbTiles.Get(), *dTable = rbTable.Get(), *dList = rbList.Get(), *dRecords = rbRecords.Get();
+                const uint32_t visPitch = (res.width * 4 + 255) / 256 * 256;
+                ComPtr<ID3D12Resource> rbTiles = readback(tileBytes), rbTable = readback(tableBytes), rbList = readback(listBytes), rbRecords = readback(recordBytes),
+                                       rbVis = readback((uint64_t)visPitch * res.height);
+                ID3D12Resource *dTiles = rbTiles.Get(), *dTable = rbTable.Get(), *dList = rbList.Get(), *dRecords = rbRecords.Get(), *dVis = rbVis.Get();
+                const uint32_t visW = res.width, visH = res.height;
                 g.addPass("gate.coverage.readback", QueueType::Graphics,
                           [&](PassBuilder& b) {
                               b.use(main.coverageTiles, Use::CopySrc);
                               b.use(main.coverageChunkTable, Use::CopySrc);
                               b.use(main.coverageTileList, Use::CopySrc);
                               b.use(main.coverageChunks, Use::CopySrc);
+                              b.use(main.visId, Use::CopySrc);
                               b.keep();
                           },
                           [=](PassContext& c) {
+                              D3D12_TEXTURE_COPY_LOCATION to{}, from{};
+                              to.pResource = dVis;
+                              to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                              to.PlacedFootprint.Footprint = { DXGI_FORMAT_R32_UINT, visW, visH, 1, visPitch };
+                              from.pResource = c.resource(main.visId);
+                              from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                              c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
                               c.cmd->CopyBufferRegion(dTiles, 0, c.resource(main.coverageTiles), 0, tileBytes);
                               c.cmd->CopyBufferRegion(dTable, 0, c.resource(main.coverageChunkTable), 0, tableBytes);
                               c.cmd->CopyBufferRegion(dList, 0, c.resource(main.coverageTileList), 0, listBytes);
@@ -625,7 +636,7 @@ int main(int argc, char** argv)
                 // masks became full have weight zero under the composite's mask-union occlusion (what an exact cut behind
                 // opaque band B fragments could drop), and the pixels whose opaque union fills at all.
                 const uint64_t poolChunks = recordBytes / 1024;
-                uint64_t hidden = 0, stored = 0, fullPixels = 0, seeThrough = 0;
+                uint64_t hidden = 0, stored = 0, fullPixels = 0, seeThrough = 0, coveragePixels = 0;
                 std::vector<std::vector<std::pair<uint32_t, uint32_t>>> byPixel(64);  // (depth bits, mask | opaque flag in the depth word)
                 for (uint32_t k = 0; k < std::min(list[3], tileCount); ++k)
                 {
@@ -667,7 +678,20 @@ int main(int argc, char** argv)
                             full = full || u == 0xFFFFFFFFu;
                         }
                         fullPixels += full;
+                        coveragePixels += !v.empty();
                     }
+                }
+                // Band A pixels: a vis id in the vis buffer (sky and pixels covered only by the coverage layer have none).
+                uint64_t bandAPixels = 0;
+                {
+                    const uint8_t* vis = nullptr;
+                    check(rbVis->Map(0, nullptr, (void**)&vis), "map vis ids");
+                    for (uint32_t y = 0; y < visH; ++y)
+                    {
+                        const uint32_t* row = reinterpret_cast<const uint32_t*>(vis + (size_t)y * visPitch);
+                        for (uint32_t x = 0; x < visW; ++x) bandAPixels += row[x] != 0;
+                    }
+                    rbVis->Unmap(0, nullptr);
                 }
                 rbTiles->Unmap(0, nullptr);
                 rbTable->Unmap(0, nullptr);
@@ -683,11 +707,14 @@ int main(int argc, char** argv)
                 }
                 logf("  fragments per tile (one frame, %llu tiles, %llu fragments, deepest %u): %s | tiles over 1024 hold %.1f%% of the fragments\n",
                      (unsigned long long)tiles, (unsigned long long)fragments, deepest, hist.c_str(), fragments ? 100.0 * heavyFragments / fragments : 0.0);
+                logf("  pixels: P_A %.3f M (vis id), P_B+C %.3f M (coverage records), F_B+C %.3f M stored fragments (%.2f per coverage pixel); T_A %u band A "
+                     "triangles of visible clusters\n",
+                     bandAPixels / 1e6, coveragePixels / 1e6, stored / 1e6, coveragePixels ? (double)stored / coveragePixels : 0.0, st.triangles[0]);
                 logf("  opaque union: %llu pixels fill it, %llu opaqueCovered (band A behind the farthest opaque record) | %llu of %llu stored fragments (%.1f%%) lie "
                      "behind a filled union (weight zero) | %llu see-through records\n",
                      (unsigned long long)fullPixels, (unsigned long long)opaquePixels, (unsigned long long)hidden, (unsigned long long)stored,
                      stored ? 100.0 * hidden / stored : 0.0, (unsigned long long)seeThrough);
-                for (ComPtr<ID3D12Resource>* buffer : { std::addressof(rbTiles), std::addressof(rbTable), std::addressof(rbList), std::addressof(rbRecords) })
+                for (ComPtr<ID3D12Resource>* buffer : { std::addressof(rbTiles), std::addressof(rbTable), std::addressof(rbList), std::addressof(rbRecords), std::addressof(rbVis) })
                     device.deferRelease(*buffer);
             }
             if (service)
