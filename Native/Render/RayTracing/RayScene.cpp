@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 
 namespace unx::render::rt
@@ -1219,7 +1220,19 @@ void RayScene::record(FramePassContext& fc)
                 slotDescs[k].AccelerationStructure = m_deformedBlasPool.address() + e.blasOffset;
             }
     }
-    const D3D12_GPU_VIRTUAL_ADDRESS dynamicDescs = m_descRing->GetGPUVirtualAddress() + slotOffset;
+    D3D12_GPU_VIRTUAL_ADDRESS dynamicDescs = m_descRing->GetGPUVirtualAddress() + slotOffset;
+    std::optional<BufferRef> dynamicDescCopy;
+    if ((m_experiment & 4) != 0 && m_dynamicDescBuffer.resource && !m_dynamicDescs.empty())
+    {
+        // Attribution: the builder reads the descriptors from video memory (copied from the upload ring first).
+        const BufferRef copy = g.importBuffer(m_dynamicDescBuffer.resource.Get(), { "RT dynamic instance descs", m_dynamicDescBuffer.bytes, 0 });
+        ID3D12Resource* ring = m_descRing.Get();
+        const uint64_t bytes = m_dynamicDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+        g.addPass("r.as.tlas.descs", QueueType::Graphics, [&](PassBuilder& b) { b.use(copy, Use::CopyDst); },
+                  [copy, ring, slotOffset, bytes](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(copy), 0, ring, slotOffset, bytes); });
+        dynamicDescCopy = copy;
+        dynamicDescs = m_dynamicDescBuffer.address();
+    }
     bool staticChanged = false;
     for (size_t k = 0; k < m_staticDescs.size(); ++k)
     {
@@ -1278,6 +1291,7 @@ void RayScene::record(FramePassContext& fc)
                   if (frame.deformedBlas.valid()) b.use(frame.deformedBlas, Use::AccelerationStructureRead);
                   b.use(frame.tlasDynamic, Use::AccelerationStructureWrite);
                   b.use(scratch, Use::AccelerationStructureScratch);
+                  if (dynamicDescCopy) b.use(*dynamicDescCopy, Use::AccelerationStructureInput);
               },
               [this, dynamicDescs](PassContext& c) { recordDynamicTlas(c.cmd, dynamicDescs); });
 }
@@ -1323,6 +1337,8 @@ void RayScene::recordDynamicTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRT
         upload(m_dynamicDescBuffer, m_dynamicDescs.data(), m_dynamicDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
     }
     inputs.InstanceDescs = descs ? descs : m_dynamicDescBuffer.address();
+    if ((m_experiment & 8) != 0)  // attribution: fast build instead of fast trace
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
     d.Inputs = inputs;
     d.DestAccelerationStructureData = m_tlasDynamic.address();
