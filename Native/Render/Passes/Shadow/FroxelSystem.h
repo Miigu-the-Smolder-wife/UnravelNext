@@ -42,4 +42,7 @@ void recordPlanarFroxels(FramePassContext& fc, ViewResources& view);
 const FroxelStats& froxelStats(TrackState& state);
 // Gates: keep the integration live when no consumer reads the volume yet (the graph culls unread passes).
 void setKeepFroxels(TrackState& state, bool keep);
+// Tests: integrate every slice of every tile (no reader bound: nodes beyond the farthest surface and the sky
+// correction's range are then filled too, for node-by-node comparisons with the reference).
+void setFroxelFullDepth(TrackState& state, bool full);
 } // namespace unx::render::shadow

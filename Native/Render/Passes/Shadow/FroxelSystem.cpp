@@ -28,6 +28,7 @@ struct State
     int lastStatsSlot = -1;
     FroxelStats latest;
     bool keep = false;
+    bool fullDepth = false;  // tests: integrate every slice (no reader bound)
     // This frame's lists (recordFroxelLists, called by shadowPages).
     uint64_t listsFrame = UINT64_MAX;
     BufferRef lists;
@@ -53,11 +54,12 @@ FroxelGridCpu froxelGridFor(const QualityConfig& q, uint32_t width, uint32_t hei
 const FroxelStats& froxelStats(TrackState& state) { return state.get<State>(kStateKey).latest; }
 
 void setKeepFroxels(TrackState& state, bool keep) { state.get<State>(kStateKey).keep = keep; }
+void setFroxelFullDepth(TrackState& state, bool full) { state.get<State>(kStateKey).fullDepth = full; }
 
 namespace
 {
 // Lists of one view (its frame constants): begin (header) + lists. Pass names get 'suffix'.
-BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t slotOfLightSrv, const std::string& suffix)
+BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t slotOfLightSrv, TextureRef readers, const std::string& suffix)
 {
     const QualityConfig& q = fc.quality;
     const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height);
@@ -83,9 +85,13 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
                   ctx.computeConstants(k, 8);
                   ctx.cmd->Dispatch(1, 1, 1);
               });
-    g.addPass("s.froxel.lists" + suffix, QueueType::Compute, [&](PassBuilder& b) { b.use(lights, Use::UavCompute); },
+    g.addPass("s.froxel.lists" + suffix, QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(lights, Use::UavCompute);
+                  if (readers.valid()) b.use(readers, Use::SrvCompute);
+              },
               [=](PassContext& ctx) {
-                  const uint32_t k[4] = { ctx.uav(lights), listMax, slotOfLightSrv, 0 };
+                  const uint32_t k[4] = { ctx.uav(lights), listMax, slotOfLightSrv, readers.valid() ? ctx.srv(readers) : 0xFFFFFFFFu };
                   ctx.cmd->SetPipelineState(pl);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 4);
@@ -94,8 +100,36 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
     return lights;
 }
 
+// Readers per tile (farthest surface, sky; planar views: mirror pixels only), FroxelTileDepth.hlsl; invalid (every slice
+// and tile) for tests in full-depth mode or a view without depth.
+TextureRef recordReaders(FramePassContext& fc, const ViewResources& view, bool fullDepth, const std::string& suffix)
+{
+    if (fullDepth || !view.depth.valid()) return {};
+    const FroxelGridCpu grid = froxelGridFor(fc.quality, view.view.width, view.view.height);
+    RenderGraph& g = fc.graph;
+    const TextureRef readers = g.createTexture(TextureDesc{ "S froxel tile readers", grid.gridX, grid.gridY, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
+    const TextureRef depth = view.depth, mask = view.view.planarMask;
+    const D3D12_GPU_VIRTUAL_ADDRESS constants = view.frameConstants;
+    ID3D12PipelineState* pd = fc.shaders.compute("Passes/Atmosphere/FroxelTileDepth");
+    const uint32_t tilePx = grid.tilePx;
+    g.addPass("s.froxel.tiledepth" + suffix, QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(depth, Use::SrvCompute);
+                  if (mask.valid()) b.use(mask, Use::SrvCompute);
+                  b.use(readers, Use::UavCompute);
+              },
+              [=](PassContext& ctx) {
+                  const uint32_t k[4] = { ctx.srv(depth), ctx.uav(readers), tilePx, mask.valid() ? ctx.srv(mask) : 0xFFFFFFFFu };
+                  ctx.cmd->SetPipelineState(pd);
+                  ctx.bindFrameConstants(constants);
+                  ctx.computeConstants(k, 4);
+                  ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+              });
+    return readers;
+}
+
 // Air volume of one view from its lists (FroxelIntegrate.hlsl; a view with a clip plane integrates from the plane on).
-TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, BufferRef lights, bool keepVolume, const std::string& suffix)
+TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, BufferRef lights, bool keepVolume, TextureRef readers, const std::string& suffix)
 {
     const QualityConfig& q = fc.quality;
     const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height);
@@ -113,9 +147,12 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     const D3D12_GPU_VIRTUAL_ADDRESS constants = view.frameConstants;
     const uint32_t localLights = fc.resources.vsmLocalLights, slotOfLight = fc.resources.vsmSlotOfLight;
     ID3D12PipelineState* pi = fc.shaders.compute("Passes/Atmosphere/FroxelIntegrate");
+    // Readers per tile: the integration stops where no reader reaches (FroxelIntegrate.hlsl).
+    const bool bounded = readers.valid();
     g.addPass("s.froxel.integrate" + suffix, QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(lights, Use::SrvCompute);
+                  if (bounded) b.use(readers, Use::SrvCompute);
                   b.use(tlut, Use::SrvCompute);
                   b.use(mlut, Use::SrvCompute);
                   b.use(volume, Use::UavCompute);
@@ -129,7 +166,8 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
                   }
               },
               [=](PassContext& ctx) {
-                  uint32_t k[16] = { ctx.srv(lights), ctx.uav(volume), ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight, 0, 0 };
+                  uint32_t k[16] = { ctx.srv(lights), ctx.uav(volume), ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
+                                     bounded ? ctx.srv(readers) : 0xFFFFFFFFu, 0 };
                   if (shadows)
                   {
                       k[4] = ctx.srv(vsm.table);
@@ -176,7 +214,7 @@ void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t
         s.statsReadback->Unmap(0, &none);
     }
 
-    const BufferRef lights = recordLists(fc, main, slotOfLightSrv, "");
+    const BufferRef lights = recordLists(fc, main, slotOfLightSrv, TextureRef{}, "");
     fc.resources.froxelLights = lights;
     s.lists = lights;
     s.listsFrame = fc.frame.frameIndex;
@@ -191,9 +229,11 @@ void recordPlanarFroxels(FramePassContext& fc, ViewResources& view)
     }
     // Lists of the view's own frustum (the virtual camera's; froxels before the mirror hold lights too, conservatively),
     // then the air from the mirror plane on (FroxelIntegrate.hlsl: g_clipPlane of the view's frame constants).
-    const BufferRef lists = recordLists(fc, view, fc.resources.vsmSlotOfLight, ".planar");
+    // Readers first: tiles without mirror pixels around them get empty lists and no air.
+    const TextureRef readers = recordReaders(fc, view, fc.state<State>(kStateKey).fullDepth, ".planar");
+    const BufferRef lists = recordLists(fc, view, fc.resources.vsmSlotOfLight, readers, ".planar");
     view.froxelLights = lists;
-    view.airVolume = recordIntegration(fc, view, lists, false, ".planar");
+    view.airVolume = recordIntegration(fc, view, lists, false, readers, ".planar");
 }
 
 void recordFroxels(FramePassContext& fc, const ViewResources& main)
@@ -202,7 +242,7 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     if (s.listsFrame != fc.frame.frameIndex) recordFroxelLists(fc, main, 0xFFFFFFFFu);  // no shadowPages this frame
     RenderGraph& g = fc.graph;
     const BufferRef lights = s.lists;
-    const TextureRef volume = recordIntegration(fc, main, lights, s.keep, "");
+    const TextureRef volume = recordIntegration(fc, main, lights, s.keep, recordReaders(fc, main, s.fullDepth, ""), "");
     fc.resources.froxels = volume;
     fc.resources.aerialPerspective = volume;  // atmosphereAerial / atmosphereAirView read it (Atmosphere.hlsli)
 

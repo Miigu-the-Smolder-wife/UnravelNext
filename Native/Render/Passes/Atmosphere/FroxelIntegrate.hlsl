@@ -23,6 +23,12 @@
 // 1 - T (optical depth blended in altitude across that kink): 30 km horizon query at 1080p 3.1 % -> 0.9 % against
 // the reference (FroxelTests 4). Nodes without air yet (node 0; planar views before the mirror) take the first node
 // with air (the limit of the ratio). No local media in scenes v1 (their optical depth adds to part 1).
+// Only the slices a reader reaches are integrated (P[3].z, FroxelTileDepth.hlsl): surface pixels of the tile's 3 x 3
+// neighbourhood (the lookups blend across tiles) read nodes up to their depth; sky pixels there read the sky correction,
+// which is nonzero only in slices where a caster can shadow the air (some point below the casters' light-space top hMax)
+// or a local light is listed, and needs the optical depth before them. The other slices hold nothing (their nodes are
+// never read): upward and far slices of sky and near-wall tiles took the most substeps. Exact: the nodes a reader
+// reaches are the same numbers as with every slice integrated (FroxelTests 6).
 // Slice 3 (S + 1), one per tile: the sky correction, pre-exposed and signed: along the tile ray to far_m, the local
 // lights' in-scattering minus the single scattering the casters' shadows remove, each attenuated to the camera. Sky
 // pixels add it to the far-field sky (atmosphereSkyRadianceView): the sky LUT has neither.
@@ -31,7 +37,8 @@
 // transmittance of their nodes is taken at the nodes' mirror images (the real path).
 // P[0].x froxelLights SRV (raw), P[0].y volume UAV (RWTexture3D<float4>), P[0].z transmittance LUT, P[0].w multi-scatter LUT
 // P[1].x VSM page table SRV (raw), .y pool SRV (raw), .z blocks SRV (raw), .w VSM constants CBV (0xFFFFFFFF: no VSM)
-// P[3].x local lights SRV (StructuredBuffer<VsmLocalLight>; 0xFFFFFFFF: none), P[3].y slot of light SRV
+// P[3].x local lights SRV (StructuredBuffer<VsmLocalLight>; 0xFFFFFFFF: none), P[3].y slot of light SRV, P[3].z tile
+// readers SRV (Texture2D<float2>, FroxelTileDepth.hlsl; 0xFFFFFFFF: every slice, tests)
 // P[2].x VSM search bound SRV (raw), P[2].y shadow texels per tile (float bits), P[2].z air step altitude m (float bits),
 // P[2].w experiment mask (atmosphere.froxels.experiment_disable; 0; cost attribution only: 1 air shadows, 2 local lights,
 // 4 air integration, 8 sun transmittance per substep, 16 multiple scattering per substep)
@@ -49,6 +56,7 @@ groupshared float3 gs_tau[64];
 groupshared float3 gs_source[64];
 groupshared float4 gs_hat[64];  // L / (1 - T) of node s + 1, .w = 1 where the node has air
 groupshared float3 gs_sky[64];  // slice s's sky correction attenuated to the camera
+groupshared uint gs_lastSky;    // 1 + the last slice the sky correction needs
 
 static const float kGaussX[8] = { -0.9602898564975363, -0.7966664774136267, -0.5255324099163290, -0.1834346424956498,
                                   0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363 };
@@ -117,7 +125,40 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     float3 tau = 0, source = 0, skyTerm = 0;
     const float tStart = airViewStart(g_clipPlane, g_cameraPosition, dir);
     const float zs0 = froxelNodeDepth(g, s), zs1 = froxelNodeDepth(g, s + 1);
-    if (s < g.slices && zs1 * toRay > tStart)
+    const bool hasAir = s < g.slices && zs1 * toRay > tStart;
+    // Readers of this tile's nodes (3 x 3 tile neighbourhood).
+    float zSurface = 3.0e38;
+    bool skyRead = true;
+    if (P[3].z != 0xFFFFFFFFu)
+    {
+        Texture2D<float2> readers = ResourceDescriptorHeap[P[3].z];
+        zSurface = 0;
+        skyRead = false;
+        [unroll] for (int dy = -1; dy <= 1; ++dy)
+            [unroll] for (int dx = -1; dx <= 1; ++dx)
+            {
+                const float2 r = readers[clamp(int2(tile) + int2(dx, dy), 0, int2(g.gridX, g.gridY) - 1)];
+                zSurface = max(zSurface, r.x);
+                skyRead = skyRead || r.y > 0;
+            }
+    }
+    if (s == 0) gs_lastSky = 0;
+    GroupMemoryBarrierWithGroupSync();
+    if (skyRead && hasAir)
+    {
+        ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].x];
+        bool active = (lists.Load(g.headerBase + froxelIndex(g, tile, s) * 4) & 63u) != 0;
+        if (P[1].w != 0xFFFFFFFFu)
+        {
+            ConstantBuffer<VsmConstants> vcs = ResourceDescriptorHeap[P[1].w];
+            const float t0 = max(zs0 * toRay, tStart), t1 = zs1 * toRay;
+            const float h0 = dot(g_cameraPosition + dir * t0, vcs.lightZ), h1 = dot(g_cameraPosition + dir * t1, vcs.lightZ);
+            active = active || min(h0, h1) < vcs.hMax;
+        }
+        if (active) InterlockedMax(gs_lastSky, s + 1);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (hasAir && (zs0 < zSurface || s < gs_lastSky))
     {
         const float z0 = zs0, z1 = zs1;
         const float t0 = max(z0 * toRay, tStart), len = z1 * toRay - t0;

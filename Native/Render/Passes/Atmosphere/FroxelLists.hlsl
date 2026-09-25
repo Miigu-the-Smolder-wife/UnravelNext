@@ -11,7 +11,9 @@
 // P[0].x froxelLights UAV (raw; header written by FroxelBegin), P[0].y lights_max, P[0].z slot of light SRV
 // (StructuredBuffer<uint>: shadow slot or VSM_LOCAL_NONE per scene light; 0xFFFFFFFF: no local shadows): entries carry
 // bit 15 when their light has a shadow slot (froxelLightShadowed).
-// Frame constants of the main view.
+// P[0].w tile readers SRV (Texture2D<float2>, FroxelTileDepth.hlsl; 0xFFFFFFFF: every tile): a tile none of whose 3 x 3
+// neighbourhood holds a read pixel (planar views: tiles without mirror pixels) gets empty lists and no culling.
+// Frame constants of the view.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "Scene.hlsli"
@@ -36,6 +38,26 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     const FroxelGrid g = buffer.Load<FroxelGrid>(0);
     const uint listMax = min(P[0].y, FROXEL_LIST_MAX);
     const uint2 tile = gid.xy;
+    if (P[0].w != 0xFFFFFFFFu)
+    {
+        Texture2D<float2> readers = ResourceDescriptorHeap[P[0].w];
+        bool read = false;
+        [unroll] for (int dy = -1; dy <= 1; ++dy)
+            [unroll] for (int dx = -1; dx <= 1; ++dx)
+            {
+                const float2 r = readers[clamp(int2(tile) + int2(dx, dy), 0, int2(g.gridX, g.gridY) - 1)];
+                read = read || r.x > 0 || r.y > 0;
+            }
+        if (!read)
+        {
+            if (s < g.slices)
+            {
+                const uint froxel = froxelIndex(g, tile, s);
+                buffer.Store(g.headerBase + froxel * 4, (froxel * g.indexStride) << 6);
+            }
+            return;
+        }
+    }
     if (s == 0)
     {
         gs_candidateCount = 0;

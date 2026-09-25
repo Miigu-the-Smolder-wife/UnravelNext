@@ -240,7 +240,11 @@ int main(int argc, char** argv)
         const uint64_t listBytes = 64 + (uint64_t)F * 4 + (uint64_t)F * stride * 2;
         Grid grid{ fg, {}, std::log2((double)fg.farM / fg.nearM) };
 
-        std::vector<uint8_t> lastLists, lastVolume;
+        std::vector<uint8_t> lastLists, lastVolume, lastDepth;
+        bool wantDepth = false;
+        // Node-by-node comparisons need every slice integrated (production integrates only the slices a reader reaches;
+        // section 6 checks that those are the same numbers).
+        shadow::setFroxelFullDepth(tf.trackState, true);
         auto run = [&](const scene::Scene& sc, int frames, float ev100 = 14.0f) {
             tf.setScene(sc);
             tf.frame.mainView = ViewDesc::fromCamera(sc.cameras[0], W, H, float4x4{});
@@ -250,7 +254,7 @@ int main(int argc, char** argv)
             grid.view = tf.frame.mainView;
             for (int f = 0; f < frames; ++f)
             {
-                std::shared_ptr<std::vector<uint8_t>> lists, volume;
+                std::shared_ptr<std::vector<uint8_t>> lists, volume, depthRb;
                 const bool read = f + 1 == frames;  // earlier frames without readback: the plan changes (consumer culled)
                 tf.run([&](FramePassContext& fc) {
                     ViewResources main;
@@ -264,6 +268,7 @@ int main(int argc, char** argv)
                     {
                         lists = tf.readbackBuffer(fc, fc.resources.froxelLights, listBytes);
                         volume = tf.readback(fc, fc.resources.froxels);
+                        if (wantDepth) depthRb = tf.readback(fc, main.depth);
                     }
                 });
                 tf.frame.time += tf.frame.deltaTime;
@@ -271,6 +276,7 @@ int main(int argc, char** argv)
                 {
                     lastLists = *lists;
                     lastVolume = *volume;
+                    if (depthRb) lastDepth = *depthRb;
                 }
             }
         };
@@ -652,6 +658,70 @@ int main(int argc, char** argv)
             open.instances.resize(1);
             const std::vector<Box> ridge = { { { 0, -0.05f, 0 }, { 10000, 0.05f, 10000 } }, { { 0, 400, 3000 }, { 1000, 400, 100 } } };
             airShadows(sc, open, ridge, 6000, 128, 6, "ridge 3 km");
+
+            // ---- 6. Reader bound: production integrates only the slices a reader reaches (FroxelIntegrate.hlsl); every
+            //         node a surface pixel of the 3 x 3 tile neighbourhood reads, and the sky correction of tiles with
+            //         sky around them, must be the same bits as with every slice integrated.
+            wantDepth = true;
+            run(sc, 6);
+            const std::vector<uint8_t> full = lastVolume;
+            shadow::setFroxelFullDepth(tf.trackState, false);
+            run(sc, 6);
+            shadow::setFroxelFullDepth(tf.trackState, true);
+            wantDepth = false;
+            const std::vector<uint8_t> bounded = lastVolume;
+            const uint32_t pd = TestFrame::rowPitch(W, 4);
+            std::vector<float> tileZ(fg.gridX * fg.gridY, 0.0f);
+            std::vector<uint8_t> tileSky(fg.gridX * fg.gridY, 0);
+            for (uint32_t y = 0; y < H; ++y)
+                for (uint32_t x = 0; x < W; ++x)
+                {
+                    float d;
+                    std::memcpy(&d, lastDepth.data() + y * pd + x * 4, 4);
+                    const uint32_t t = (y / fg.tilePx) * fg.gridX + x / fg.tilePx;
+                    if (d <= 0) tileSky[t] = 1;
+                    else tileZ[t] = std::max(tileZ[t], tf.frame.mainView.nearPlane / d);
+                }
+            uint32_t compared = 0, differing = 0, skyCompared = 0, skyDiffering = 0, skipped = 0;
+            const uint32_t N = fg.slices + 1;
+            auto rawAt = [&](const std::vector<uint8_t>& vol, uint32_t tx, uint32_t ty, uint32_t slice) {
+                uint64_t v;
+                std::memcpy(&v, vol.data() + (size_t)slice * volumePitch * fg.gridY + (size_t)ty * volumePitch + (size_t)tx * 8, 8);
+                return v;
+            };
+            for (uint32_t ty = 0; ty < fg.gridY; ++ty)
+                for (uint32_t tx = 0; tx < fg.gridX; ++tx)
+                {
+                    float zs = 0;
+                    bool sky = false;
+                    for (int dy = -1; dy <= 1; ++dy)
+                        for (int dx = -1; dx <= 1; ++dx)
+                        {
+                            const int qx = std::clamp((int)tx + dx, 0, (int)fg.gridX - 1), qy = std::clamp((int)ty + dy, 0, (int)fg.gridY - 1);
+                            zs = std::max(zs, tileZ[qy * fg.gridX + qx]);
+                            sky = sky || tileSky[qy * fg.gridX + qx];
+                        }
+                    // Slices with z0 < zs are read; nodes 0 .. last read slice + 1.
+                    uint32_t lastNode = 0;
+                    for (uint32_t sl = 0; sl < fg.slices; ++sl)
+                        if (grid.node(sl) < zs) lastNode = sl + 1;
+                    skipped += fg.slices - lastNode;
+                    for (uint32_t part = 0; part < 3; ++part)
+                        for (uint32_t n = 0; n <= lastNode && zs > 0; ++n)
+                        {
+                            ++compared;
+                            differing += rawAt(full, tx, ty, part * N + n) != rawAt(bounded, tx, ty, part * N + n) ? 1 : 0;
+                        }
+                    if (sky)
+                    {
+                        ++skyCompared;
+                        skyDiffering += rawAt(full, tx, ty, 3 * N) != rawAt(bounded, tx, ty, 3 * N) ? 1 : 0;
+                    }
+                }
+            logf("reader bound: %u nodes read by surfaces compared (%u differ), %u sky corrections compared (%u differ), %u slices beyond the surfaces"
+                 "\n", compared, differing, skyCompared, skyDiffering, skipped);
+            report(compared > 1000 && differing == 0, "reader bound: nodes a surface reads equal every-slice integration (bits)", differing, 0);
+            report(skyCompared > 10 && skyDiffering == 0, "reader bound: sky corrections equal every-slice integration (bits)", skyDiffering, 0);
         }
 
         // ---- 4. Air perspective at arbitrary (uv, depth) vs the atmosphere reference (no casters, no lights).
