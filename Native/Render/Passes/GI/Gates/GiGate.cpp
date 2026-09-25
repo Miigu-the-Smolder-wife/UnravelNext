@@ -16,6 +16,7 @@
 //
 //   GpuLock.ps1 -Track R -- unx_gate_gi_gigate --scene <file.unxscene> [--camera N] [--resolution 4K|1440p|both] [--frames N]
 //                                                [--out DIR] [--integrated] [--set key=value ...] [--dump FILE] [--compare FILE]
+//                                                [--planar-forced]
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/gi/GiSystem.h"
@@ -101,7 +102,7 @@ int main(int argc, char** argv)
     {
         std::string scenePath, resolutions = "both", out, qualityPath = std::string(UNX_SOURCE_DIR) + "/Config/quality", dumpPath, comparePath;
         uint32_t frames = 600, cameraIndex = 0;
-        bool integrated = false;
+        bool integrated = false, planarForced = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -114,6 +115,7 @@ int main(int argc, char** argv)
             else if (a == "--out") out = next();
             else if (a == "--quality") qualityPath = next();
             else if (a == "--integrated") integrated = true;
+            else if (a == "--planar-forced") planarForced = true;  // every counted plane gets a camera (view cost breakdown)
             else if (a == "--set") overrides.push_back(next());
             else if (a == "--dump") dumpPath = next();
             else if (a == "--compare") comparePath = next();
@@ -205,6 +207,8 @@ int main(int argc, char** argv)
                     frame.deltaTime = 1 / 165.0f;
                     frame.mainView = view;
                     const TextureRef output = graph.createTexture({ "gate output", res.width, res.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
+                    if (planarForced)
+                        if (refl::ReflectionSystem* rs = refl::ReflectionSystem::find(renderer->trackState())) rs->setPlanarForced(true);
                     const ViewResources mainView = renderer->record(graph, frame, output);
                     copyReflection(graph, mainView.reflection);
                     // The output has no reader in a gate: keep its producers (shading) alive like a present would.

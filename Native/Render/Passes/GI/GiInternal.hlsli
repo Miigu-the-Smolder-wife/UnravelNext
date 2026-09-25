@@ -65,12 +65,30 @@ void giRequestHit(RWByteAddressBuffer b, GiHeader h, uint entry)
     if (slot < h.capacity) b.Store(h.offHitList + (parity * h.capacity + slot) * 4, entry);
 }
 
+// Cache lookups by ray hits (GiCache.hlsli giKeepRead): each contributing entry is touched and requested once per frame
+// (a plain load of its hit stamp first, so entries shared by many rays cost one load after the first).
+void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry)
+{
+    if (b.Load(h.offHitStamp + entry * 4) == h.frame) return;
+    giTouch(b, h, entry);
+    giRequestHit(b, h, entry);
+}
+
 uint giPackNormal(float3 n)
 {
     n /= abs(n.x) + abs(n.y) + abs(n.z);
     const float2 e = n.z >= 0 ? n.xy : (1.0 - abs(n.yx)) * select(n.xy >= 0.0, 1.0, -1.0);
     const int2 q = int2(round(clamp(e, -1.0, 1.0) * 32767.0));
     return (uint(q.x) & 0xFFFFu) | (uint(q.y) << 16);
+}
+
+// Anchor of an entry created at a ray hit: the hit point stepped back along the ray that found it (2 mm + 0.04 % of the
+// distance to the camera, twice the GI ray origin offset). The hit lies on the boundary of free space, possibly on a crease
+// where another face meets it; the ray came through free space, so the step moves the anchor off every face it touches,
+// and the entry's own rays (anchor + normal offset) no longer start on a neighbouring face's plane.
+float3 giAnchorAtHit(GiHeader h, float3 hitPosition, float3 rayDirection)
+{
+    return hitPosition - rayDirection * (2e-3 + 4e-4 * distance(hitPosition, h.camera));
 }
 
 // Finds the entry of 'key' or creates it with the given anchor. Returns GI_ENTRY_PENDING when the entry is being

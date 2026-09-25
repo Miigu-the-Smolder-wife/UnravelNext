@@ -179,6 +179,8 @@ struct Expectation
 {
     double mean = 0, sigma = 0;
     double hitNoV = 1;  // mean cosine at the reflection hits (diagnostics)
+    float3 surface{};   // the pixel's surface point and roughness (diagnostics)
+    double roughness = 0;
 };
 
 // Per-sample tolerance in sigmas for a check over 'samples' values that together may fail by chance with probability
@@ -255,7 +257,7 @@ std::function<Expectation(uint32_t, uint32_t)> furnaceExpectation(const ViewDesc
             }
         if (!valid) return Expectation{ L, 0 };
         const double mean = sum / valid;
-        return Expectation{ mean, std::sqrt(std::max(sumSq / valid - mean * mean, 0.0)), sumNoV / valid };
+        return Expectation{ mean, std::sqrt(std::max(sumSq / valid - mean * mean, 0.0)), sumNoV / valid, primary.p, primary.roughness };
     };
 }
 
@@ -467,6 +469,61 @@ ClusterData panelCuts(const scene::Scene& s)
     return cd;
 }
 
+// --scan-cache: after a run, every live GI cache entry against the furnace's uniform L = 2 (Passes/GI/Tests/GiCacheScan).
+bool g_scanCache = false;
+
+void scanCache(Device& device, ShaderLibrary& shaders, gi::GiSystem& gi, float L)
+{
+    constexpr uint64_t kBytes = 32 + 64 * 64;
+    Buffer result = createBuffer(device, kBytes, D3D12_HEAP_TYPE_DEFAULT, true);
+    Buffer readback = createBuffer(device, kBytes, D3D12_HEAP_TYPE_READBACK, false);
+    RenderGraph g(device);
+    const BufferRef cache = g.importBuffer(gi.cache(), { "scan cache", gi.cacheBytes(), 0 });
+    const BufferRef out = g.importBuffer(result.resource.Get(), { "scan result", kBytes, 0 });
+    g.addPass("test.scan.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(out, Use::CopyDst); },
+              [out](PassContext& c) {
+                  D3D12_WRITEBUFFERIMMEDIATE_PARAMETER p[5];
+                  for (int i = 0; i < 5; ++i) p[i] = { c.resource(out)->GetGPUVirtualAddress() + 4 * i, 0 };
+                  c.cmd->WriteBufferImmediate(5, p, nullptr);
+              });
+    const uint32_t capacity = gi.settings().capacity;
+    g.addPass("test.scan", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(cache, Use::SrvCompute);
+                  b.use(out, Use::UavCompute);
+                  b.keep();
+              },
+              [&shaders, cache, out, L, capacity](PassContext& c) {
+                  const float tolerance = 0.02f;
+                  uint32_t k[4] = { c.srv(cache), c.uav(out), 0, 0 };
+                  std::memcpy(&k[2], &L, 4);
+                  std::memcpy(&k[3], &tolerance, 4);
+                  c.cmd->SetPipelineState(shaders.compute("Passes/GI/Tests/GiCacheScan"));
+                  c.computeConstants(k, 4);
+                  c.cmd->Dispatch((capacity + 63) / 64, 1, 1);
+              });
+    g.execute(nullptr);
+    device.waitIdle();
+    CommandList cl = device.acquireCommandList(QueueType::Graphics);
+    cl.list->CopyBufferRegion(readback.resource.Get(), 0, result.resource.Get(), 0, kBytes);
+    device.queue(QueueType::Graphics).waitCpu(device.submit(cl));
+    std::vector<uint32_t> w(kBytes / 4);
+    void* mapped = nullptr;
+    D3D12_RANGE all{ 0, (SIZE_T)kBytes }, none{ 0, 0 };
+    check(readback.resource->Map(0, &all, &mapped), "map scan");
+    std::memcpy(w.data(), mapped, kBytes);
+    readback.resource->Unmap(0, &none);
+    logf("cache scan: %u live updated entries; off by > 2 %%: SH irradiance %u, texel mean %u, texel minimum %u (%u recorded)\n", w[0], w[1], w[2], w[3], w[4]);
+    auto f = [&](uint32_t i) { float v; std::memcpy(&v, &w[i], 4); return v; };
+    for (uint32_t r = 0; r < std::min(w[4], 64u); ++r)
+    {
+        const uint32_t a = 8 + r * 16;
+        logf("  entry %u level %u class %u at (%.3f, %.3f, %.3f) n (%.2f, %.2f, %.2f): E %.4f, texel mean %.4f min %.4f, updates %u history %u, used %u updated %u\n",
+             w[a + 11], w[a + 3] & 255, w[a + 3] >> 8, f(a), f(a + 1), f(a + 2), f(a + 12), f(a + 13), f(a + 14), f(a + 4), f(a + 5), f(a + 6), w[a + 7], w[a + 8], w[a + 9],
+             w[a + 10]);
+    }
+}
+
 struct Outcome
 {
     uint32_t surface = 0, k = 0, mirror = 0, glossy = 0;
@@ -584,6 +641,11 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
         graph.execute(nullptr);
         device.queue(QueueType::Graphics).waitCpu(graph.lastFence(QueueType::Graphics));
     }
+    if (g_scanCache)
+    {
+        g_scanCache = false;  // the furnace (first scene) only
+        if (gi::GiSystem* gi = gi::GiSystem::find(state)) scanCache(device, shaders, *gi, 2.0f);
+    }
     CommandList cl = device.acquireCommandList(QueueType::Graphics);
     cl.list->CopyBufferRegion(readback.resource.Get(), 0, result.resource.Get(), 0, resultBytes);
     device.queue(QueueType::Graphics).waitCpu(device.submit(cl));
@@ -619,7 +681,8 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             sumM += v / expected;
             out.worstM = std::max(out.worstM, std::fabs(v / expected - 1));
             out.excessM = std::max(out.excessM, std::fabs(v / expected - 1) - allowM);
-            if (std::fabs(v / expected - 1) > allowM && out.outliersM++ < 6) logf("  M outlier at pixel (%u, %u): %.4f (expected %.4f, hit NoV %.3f)\n", px, py, v, expected, e.hitNoV);
+            if (std::fabs(v / expected - 1) > allowM && out.outliersM++ < 6) logf("  M outlier at pixel (%u, %u): %.4f (expected %.4f, sigma %.4f, hit NoV %.3f; surface (%.3f, %.3f, %.3f) roughness %.2f)\n", px, py, v,
+                                                                           expected, e.sigma, e.hitNoV, e.surface.x, e.surface.y, e.surface.z, e.roughness);
         }
         else
         {
@@ -649,6 +712,7 @@ int main(int argc, char** argv)
             if (a == "--frames" && i + 1 < argc) frames = (uint32_t)std::stoul(argv[++i]);
             else if (a == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
             else if (a == "--validate") validate = true;
+            else if (a == "--scan-cache") g_scanCache = true;  // diagnostics: GI cache entries vs the furnace (first scene only)
             else fail("unknown argument %s", a.c_str());
         }
         QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");

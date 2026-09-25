@@ -49,7 +49,21 @@ void GiTraceGen()
     r.Direction = normalize(t * local.x + bt * local.y + n * local.z);
     r.TMin = 0;
     r.TMax = giRayLength();
-    const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI);
+    RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI);
+    // A back face closer than the origin's own offset is a surface the origin lies on, not closed geometry around it:
+    // anchors on a crease (a hit exactly on the edge where two faces meet) start their rays on the other face's plane, and
+    // counting those as "inside" (radiance 0) turned such cells black (a live ceiling cell on a furnace room's edge read
+    // 1.6 % of its true irradiance). The ray continues from just past that plane.
+    const float onSurface = 2 * giBias(h, anchor);
+    if (hit.t >= 0 && hit.t < onSurface)
+    {
+        const RtSurface s0 = rtSurface(scene, hit, r.Origin, r.Direction);
+        if (!s0.frontFace && (loadMaterial(s0.material).classFlags & MATERIAL_TWO_SIDED) == 0)
+        {
+            r.TMin = onSurface;
+            hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI);
+        }
+    }
 
     float3 radiance;
     float distanceToHit;
@@ -76,7 +90,7 @@ void GiTraceGen()
             float3 irradiance = 0;
             bool created;
             const uint bounceLevel = giLevelForSize(h, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z));
-            const uint e = giFindOrCreate(b, h, giSurfaceKey(h, s.position, s.normal, bounceLevel), s.position, s.normal, created);
+            const uint e = giFindOrCreate(b, h, giSurfaceKey(h, s.position, s.normal, bounceLevel), giAnchorAtHit(h, s.position, r.Direction), s.normal, created);
             bool known = false;
             if (e != GI_ENTRY_PENDING)
             {
@@ -102,6 +116,7 @@ void GiTraceGen()
                     if (c == GI_ENTRY_PENDING || b.Load(h.offSh + c * GI_SH_STRIDE + GI_SH_UPDATES) == 0) continue;
                     float unused;
                     irradiance = giShIrradiance(b, h, c, s.normal, unused);
+                    giKeepRead(b, h, c);
                     known = true;
                 }
             }

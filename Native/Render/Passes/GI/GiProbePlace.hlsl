@@ -20,7 +20,7 @@ void main(uint2 probe : SV_DispatchThreadID)
     const float3 p = worldFromDepth(float2(pixel), d);
     const float3 n = decodeGBuffer(gbuffer.Load(int3(pixel, 0))).normal;
     bool created;
-    const uint own = giFindOrCreate(b, h, giSurfaceKey(h, p, n, 0), p, n, created);
+    const uint own = giFindOrCreate(b, h, giSurfaceKey(h, p, n, 0), giAnchorAtHit(h, p, normalize(p - g_cameraPosition)), n, created);
     if (own != GI_ENTRY_PENDING)
     {
         giTouch(b, h, own);

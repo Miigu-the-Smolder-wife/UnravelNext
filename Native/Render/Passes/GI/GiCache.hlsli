@@ -189,6 +189,13 @@ float3 giShIrradiance(B b, GiHeader h, uint entry, float3 n, out float sunVisibi
 // minLevel) and normal class, entries that exist and have been updated at least once (renormalised); coarser levels when
 // none does (up to GI_LEVEL_CLIMB more: points no probe sees only have the coarse cells GI rays created there).
 #define GI_LEVEL_CLIMB 6u
+
+// Read hook of the lookups below, per contributing entry. Read-only readers (M's shading) do nothing; R's ray hits read
+// through the RW cache and keep what they read alive and requested (GiInternal.hlsli): an entry only readers see must not
+// be left at its first, unconverged update.
+void giKeepRead(ByteAddressBuffer b, GiHeader h, uint entry) {}
+void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry);
+
 template <typename B>
 float3 giCacheIrradianceAt(B b, GiHeader h, float3 worldPos, float3 normal, uint minLevel, out float weight)
 {
@@ -212,6 +219,7 @@ float3 giCacheIrradianceAt(B b, GiHeader h, float3 worldPos, float3 normal, uint
             float sv;
             sum += w * giShIrradiance(b, h, entry, normal, sv);
             weight += w;
+            giKeepRead(b, h, entry);
         }
     }
     return weight > 0 ? sum / weight : 0;
@@ -289,6 +297,7 @@ void giCacheLightingAt(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
             const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
             sumL += w * giTexelRadiance(b, h, entry, giHemiOctEncode(local));
             weight += w;
+            giKeepRead(b, h, entry);
         }
     }
     irradiance = weight > 0 ? sumE / weight : 0;

@@ -48,7 +48,7 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
     if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return 0;
     const uint footprintLevel = giLevelForSize(h, footprint);
     bool created;
-    const uint e = giFindOrCreate(cache, h, giSurfaceKey(h, s.position, s.normal, footprintLevel), s.position, s.normal, created);
+    const uint e = giFindOrCreate(cache, h, giSurfaceKey(h, s.position, s.normal, footprintLevel), giAnchorAtHit(h, s.position, r.Direction), s.normal, created);
     if (e != GI_ENTRY_PENDING)
     {
         giTouch(cache, h, e);
