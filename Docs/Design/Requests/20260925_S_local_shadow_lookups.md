@@ -26,3 +26,10 @@ float shadowVisibilityDirect(ShadowSrvs s, uint lightIndex, float3 worldPos, flo
 
 - 프록셀 리스트 항목의 bit 15는 "S의 그림자 슬롯이 있음"이다. 광원 수 한도가 32767로 바뀌었다(`froxelLight`는 마스크된 인덱스, `froxelLightShadowed` 추가).
 - 반사 뷰(평면 반사 카메라)의 슬롯 1~3은 아직 255다. 리스트가 메인 뷰 것이기 때문이며, S의 다음 항목이다.
+
+## 결과 (코어, 2026-09-25, INTERFACES v1.19)
+
+- `FrameResources::vsmLocalLights`, `vsmSlotOfLight`(uint32_t, 기본 `UINT32_MAX`)를 추가했다. 이번 프레임의 SRV 디스크립터 인덱스이고(S 업로드 링), 생산은 `shadowPages`다.
+- INTERFACES 5.6: `shadowVisibilityDirect`는 `ShadowSrvs.lights` = `vsmLocalLights`, `.pad0` = `vsmSlotOfLight`로 읽는다. 시그니처는 그대로다. footprint 인자는 소비자(M·R)가 필요하다고 할 때 추가한다.
+- INTERFACES 5.6 `Froxel.hlsli` 행과 7.4: 항목 bit 15 = 그림자 슬롯 유무(`froxelLightShadowed`), `froxelLight`는 마스크된 인덱스, 광원 한도 32767.
+- 검증: 헤더 추가뿐이다. core;S 빌드가 통과했다(코어 워크트리, 실행 없음).

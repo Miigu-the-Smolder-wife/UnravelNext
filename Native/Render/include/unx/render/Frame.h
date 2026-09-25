@@ -87,6 +87,11 @@ struct FrameResources
                                          // (upload ring, not a graph resource; v1.18). With
                                          // the four buffers: ShadowSrvs (ShadowVisibility.hlsli),
                                          // filled by shadowPages for shadowSunVisibilityAt (R)
+    uint32_t vsmLocalLights = UINT32_MAX;  // SRV descriptors of this frame's local-light shadow [S]
+    uint32_t vsmSlotOfLight = UINT32_MAX;  // records (VsmLocalLight, 48 B x shadow slots) and the
+                                           // scene light -> shadow slot table (uint, 0xFFFF = none)
+                                           // (upload ring; v1.19): ShadowSrvs.lights / .pad0 for
+                                           // shadowVisibilityDirect
     TextureRef froxels;            // the same air volume as aerialPerspective (v1.15)      [S]
     BufferRef froxelLights;        // per-froxel light lists (7.4)                          [S]
     BufferRef tlasStatic, tlasDynamic;  // acceleration structures                          [R]
