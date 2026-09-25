@@ -48,7 +48,7 @@ void main(uint i : SV_DispatchThreadID)
             ts.blocks = P[2].y;
             ts.searchBound = P[1].w;
             ts.constants = P[0].w;
-            ts.pad1 = P[3].z;
+            ts.layers = P[3].z;
             sun *= shadowSunTransmittanceAt(ts, world, footprint, max(reach, footprint));
         }
 #if PATHS

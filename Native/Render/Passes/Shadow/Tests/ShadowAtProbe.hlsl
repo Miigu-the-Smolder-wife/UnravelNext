@@ -22,7 +22,7 @@ void main(uint i : SV_DispatchThreadID)
     s.constants = P[2].x;
     s.lights = P[2].y;
     s.pad0 = P[2].z;
-    s.pad1 = P[2].w;  // transmittance layer (FrameResources::vsmLayers)
+    s.layers = P[2].w;  // transmittance layer (FrameResources::vsmLayers)
     const float4 p = points[i];
     bool resident;
     const float v = shadowSunVisibilityAt(s, p.xyz, normals[i].xyz, p.w, resident);

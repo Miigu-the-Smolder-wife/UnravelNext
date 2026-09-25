@@ -77,7 +77,7 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
         ss.constants = P[0].w;
         ss.lights = P[3].y;
         ss.pad0 = P[3].z;
-        ss.pad1 = 0xFFFFFFFFu;
+        ss.layers = 0xFFFFFFFFu;
         ShadowPixelReceiver pr;
         pr.world = world;
         pr.normal = normal;
@@ -108,7 +108,7 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
         ts.constants = P[0].w;
         ts.lights = P[3].y;
         ts.pad0 = P[3].z;
-        ts.pad1 = P[4].z;
+        ts.layers = P[4].z;
         sunT = shadowSunTransmittanceAt(ts, world, footprint, max(reach, footprint));
     }
     packed = (cls == VSM_REGION_UMBRA ? 0u : (uint)round(saturate(sunT) * 255.0)) | local;

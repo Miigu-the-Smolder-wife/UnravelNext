@@ -16,12 +16,12 @@ float shadowSlot(uint packed, uint slot) { return ((packed >> (8 * slot)) & 0xFF
 // table, the physical pool (raw buffers), the pages' block hierarchy, the search bound grid, the VSM constants CBV, and for
 // the local lights their shadow-slot records (lights: FrameResources::vsmLocalLights) and the scene light -> shadow slot
 // map (pad0: FrameResources::vsmSlotOfLight; Docs/Design/Requests/20260925_S_local_shadow_lookups.md), and the thin
-// casters' transmittance layer (pad1 = FrameResources::vsmLayers, INTERFACES 5.6 v1.26 "layers"; the field keeps its
-// old name until every caller fills it: 0xFFFFFFFF or 0 = no layer, T = 1).
+// casters' transmittance layer (layers = FrameResources::vsmLayers, INTERFACES 5.6 v1.26; 0xFFFFFFFF or 0 = no layer,
+// T = 1).
 struct ShadowSrvs
 {
     uint pageTable, pool, blocks, searchBound;
-    uint constants, lights, pad0, pad1;
+    uint constants, lights, pad0, layers;
 };
 
 // Visibility slot (1-3) of scene light lightIndex for the main-view pixel at view depth linearDepth: its ordinal among the
@@ -111,7 +111,7 @@ float shadowSunTransmittanceAt(ShadowSrvs s, float3 worldPos, float footprint, f
 {
     // No layer: 0xFFFFFFFF, or 0 from callers written before v1.26 (descriptor 0 is taken at device creation and is never
     // this frame's layer buffer).
-    if (s.pad1 == 0xFFFFFFFFu || s.pad1 == 0) return 1;
+    if (s.layers == 0xFFFFFFFFu || s.layers == 0) return 1;
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[s.constants];
     VsmResources r;
     r.table = ResourceDescriptorHeap[s.pageTable];
@@ -122,7 +122,7 @@ float shadowSunTransmittanceAt(ShadowSrvs s, float3 worldPos, float footprint, f
     const float3 ls = vsmLightSpace(c, worldPos);
     const uint k = vsmLevelForFootprint(c, footprint);
     const int2 page = vsmAbsPage(vsmAbsTexel(c, ls.xy, k));
-    ByteAddressBuffer layers = ResourceDescriptorHeap[s.pad1];
+    ByteAddressBuffer layers = ResourceDescriptorHeap[s.layers];
     return vsmLayerTransmittance(layers, c.poolPagesX * c.poolPagesY, vsmEntry(r, page, k), page, ls.xy, k, reach, ls.z);
 }
 
