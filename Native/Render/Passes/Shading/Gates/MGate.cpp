@@ -219,14 +219,17 @@ int main(int argc, char** argv)
             }
             // Planar reflection views (R's renderView) run M's passes under ".planar" names: their cost is R's reflection
             // budget (ARCHITECTURE 2.6 C_planar), reported apart.
-            // Banded passes are "m.lit.<pass>.b<band>" ("m.lit.planar.<pass>.b<band>" in planar views).
+            // Banded passes are "<group>.<pass>.b<band>": the frame's lighting group "lit" (v1.31, S's and M's passes) or M's
+            // own "m.lit" ("m.lit.planar" in planar views).
             auto planar = [](const std::string& n) { return n.find(".planar") != std::string::npos; };
+            auto banded = [](const std::string& n, const char* pass) {
+                return n.rfind(std::string("lit.") + pass + ".b", 0) == 0 || n.rfind(std::string("m.lit.") + pass + ".b", 0) == 0;
+            };
             const double resolve = sumPasses(r, [&](const std::string& n) { return n.rfind("m.resolve", 0) == 0 && !planar(n); });
-            const double shade =
-                sumPasses(r, [&](const std::string& n) { return (n.rfind("m.shade", 0) == 0 || n.rfind("m.lit.shade.", 0) == 0) && !planar(n); });
+            const double shade = sumPasses(r, [&](const std::string& n) { return (n.rfind("m.shade", 0) == 0 || banded(n, "shade")) && !planar(n); });
             const double planarM = sumPasses(r, [&](const std::string& n) { return n.rfind("m.", 0) == 0 && planar(n); });
             const bool is4k = res.width == 3840;
-            const double detect = sumPasses(r, [&](const std::string& n) { return n.rfind("m.lit.edge.detect.", 0) == 0 && !planar(n); });
+            const double detect = sumPasses(r, [&](const std::string& n) { return banded(n, "edge.detect") && !planar(n); });
             const double edge = sumPasses(r, [&](const std::string& n) { return n.rfind("m.edge", 0) == 0 && !planar(n); });
             const shading::Stats st = shading::latestStats(renderer.trackState());
             const double pixels = (double)res.width * res.height;
