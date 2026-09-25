@@ -450,8 +450,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         logf("S VSM: %u page requests exhausted the %u-page pool (frame %llu): pool grows to %u pages\n", s.latest.exhausted, current,
              (unsigned long long)s.latest.frame, (s.poolTarget + 63) / 64 * 64);
     }
+    // Local lights first: their count sizes the pool's initial budget with the view's pixels.
+    updateLocalLights(fc, s, main);
     const double mpixels = (double)main.view.width * main.view.height / 1e6;
-    uint32_t pages = std::max((uint32_t)q.integer("shadow.vsm.pool_pages"), (uint32_t)(mpixels * q.number("shadow.vsm.pool_pages_per_mpixel")));
+    const double budget = mpixels * q.number("shadow.vsm.pool_pages_per_mpixel") + s.latest.localAssigned * q.number("shadow.vsm.pool_pages_per_local_light");
+    uint32_t pages = std::max((uint32_t)q.integer("shadow.vsm.pool_pages"), (uint32_t)budget);
     pages = (std::max(pages, s.poolTarget) + 63) / 64 * 64;
     if (!s.pool || s.poolPagesX * s.poolPagesY < pages) createState(fc, s, pages);
 
@@ -546,8 +549,6 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.jointsRevision = fc.scene.revision();
         s.jointsPending = true;
     }
-
-    updateLocalLights(fc, s, main);
 
     RenderGraph& g = fc.graph;
     const BufferRef pool = g.importBuffer(s.pool.Get(), BufferDesc{ "S VSM pool", (uint64_t)pages * kPage * kPage * 4, 0 });

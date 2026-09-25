@@ -5,6 +5,7 @@ page_texels = 128               # (compiled)
 clipmap_levels = 20             # level k covers 2^(k+4) m, texel 2^(k-10) m (compiled): 1 mm .. 512 m, window 16 m .. 8192 km
 pool_pages = 4096               # minimum physical 128^2 R32 pages (64 KB + 11 KB blocks each)
 pool_pages_per_mpixel = 700     # initial pool per main-view megapixel (4K: 5824 pages); grows on exhaustion (VsmSystem.cpp)
+pool_pages_per_local_light = 160  # plus per shadow-casting local light (24 lights under a roof at 720p requested ~120 each)
 cache_frames = 120              # a page not requested for this many frames is released
 lod_bias = 0.0                  # level = floor(log2(pixel footprint / level-0 texel)) + bias: texel <= footprint
 receiver_bias_texels = 1.0      # receiver-plane tolerance, texels of the compared level (x (1 + plane slope)); no lateral shift
