@@ -40,3 +40,12 @@ SkinMatrix, 모프)은 5/5 비트 동일한데 픽셀이 다르다. 원인은 �
 - 시험 이전: 옛 시험을 UnravelNext 경로로 옮긴다. (1) Unity 없는 렌더러 시험: 장면 A로 N프레임 → 재설정 → 같은 입력 N프레임을 그리고 결정적
   부분집합이 비트 동일한지(그리고 (i)이면 전체가 비트 동일한지) 본다. (2) Unity EditMode 시험: 데이터 월드 스냅숏 → 변경 → 복원을 거쳐
   같은 tick 이미지가 같은지 본다. 수준은 3에서 정한 대로다. (2)의 World 고정물(fixture)은 NativeAnimation 시험의 것을 쓸 수 있는지 World와 맞춘다.
+
+## 종류 비트 (R 의견 반영, 2026-09-25)
+
+- `UnxFrameSetDiscontinuity(r, flags)`의 비트를 둘로 나눈다. `UNX_DISCONTINUITY_RESTORE`(World 복원·세이브 로드)와
+  `UNX_DISCONTINUITY_CUT`(카메라 컷·순간이동)이다.
+- Restore: 모든 시간 상태를 재설정한다(세계 공간 GI 캐시 포함). 계약 1(신호 뒤 같은 입력 열 → 같은 이미지; 수준은 위 3)은 Restore에만 적용한다.
+- Cut: 화면·시점에 묶인 이력(반사 이력, 화면 프로브, 움직임 벡터·이전 뷰, 시점 VSM 페이지)만 버린다. 세계 공간 GI 캐시(138.8 MB)는 유지한다.
+  컷마다 8~13프레임 재수렴이 보이지 않게 하려는 것이다(R).
+- 개체 순간이동은 전역 비트가 아니라 인스턴스별 `UNX_TRANSFORM_TELEPORT`(위 답)로 한다.
