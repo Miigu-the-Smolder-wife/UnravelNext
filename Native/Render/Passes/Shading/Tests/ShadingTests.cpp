@@ -5,7 +5,10 @@
 //   3. a lit scene end to end (stand-in V, M resolve, M shading, linear output): every sampled pixel against the model
 //      evaluated on the CPU from the read-back G-buffer and material word;
 //   4. the solar disk in the sky: per-pixel coverage against 32 x 32 supersampling and the total flux against E;
-//   5. the display encoding (PBR Neutral + sRGB OETF, RGB10A2) against the CPU on the linear image.
+//   5. the display encoding (PBR Neutral + sRGB OETF, RGB10A2) against the CPU on the linear image;
+//   6. local lights (froxel list, shadow slots) against the CPU;
+//   7. the edge composite's exact triangle area (edgeTriangleArea) against double-precision clipping, and the composite
+//      of two overlapping quads against their exact visible areas.
 //   unx_test_shading_shadingtests [--no-debug-layer]
 #include "../../Material/Tests/MTestFrame.h"
 
@@ -14,6 +17,7 @@
 
 #include <array>
 #include <cstdio>
+#include <random>
 
 using namespace unx;
 using namespace unx::render;
@@ -872,6 +876,110 @@ void testLocalLights(TestFrame& tf, Report& report)
 // pixel's exposed radiance must equal the exact visible areas of the quads in the pixel square (convex clipping of the
 // projected quads; the farther one minus its overlap with the nearer), within the 32-subsample overlap resolution where
 // both quads' edges cross the pixel.
+// ---------------------------------------------------------------- 7
+// edgeTriangleArea (closed-form column integrals) against double-precision clipping of the float inputs, over small
+// triangles around the pixel, triangles whose long edges cross it, triangles far larger than it, slivers, degenerate
+// ones and edges on the pixel's boundary. V's coverageTriangleArea (Sutherland-Hodgman) is reported alongside.
+void testEdgeArea(TestFrame& tf, Report& report)
+{
+    struct Case
+    {
+        std::array<float, 2> a, b, c, pixel;
+        bool large;
+    };
+    std::vector<Case> cases;
+    std::mt19937 rng(20260925);
+    std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+    const std::array<float, 2> pxA = { 731, 402 }, pxB = { 3517, 2011 };
+    auto at = [](const std::array<float, 2>& px, double x, double y) { return std::array<float, 2>{ (float)(px[0] + x), (float)(px[1] + y) }; };
+    for (int i = 0; i < 4000; ++i)  // vertices within 1.5 px of the pixel
+    {
+        const auto& px = i & 1 ? pxB : pxA;
+        cases.push_back({ at(px, 4 * u01(rng) - 1.5, 4 * u01(rng) - 1.5), at(px, 4 * u01(rng) - 1.5, 4 * u01(rng) - 1.5),
+                          at(px, 4 * u01(rng) - 1.5, 4 * u01(rng) - 1.5), px, false });
+    }
+    for (int i = 0; i < 2000; ++i)  // a long edge through the pixel, the triangle spreading to one side (up to 800 px)
+    {
+        const auto& px = i & 1 ? pxB : pxA;
+        const double mx = u01(rng), my = u01(rng), phi = 2 * kPi * u01(rng), len = 2 + 400 * u01(rng) * u01(rng);
+        const double dx = std::cos(phi), dy = std::sin(phi), side = i & 2 ? 1 : -1;
+        cases.push_back({ at(px, mx + dx * len, my + dy * len), at(px, mx - dx * len, my - dy * len), at(px, mx - dy * len * side, my + dx * len * side), px, true });
+    }
+    for (int i = 0; i < 500; ++i)  // large random triangles (covering, missing or cutting the pixel)
+        cases.push_back({ at(pxA, 600 * u01(rng) - 300, 600 * u01(rng) - 300), at(pxA, 600 * u01(rng) - 300, 600 * u01(rng) - 300),
+                          at(pxA, 600 * u01(rng) - 300, 600 * u01(rng) - 300), pxA, true });
+    for (int i = 0; i < 500; ++i)  // slivers and tiny triangles inside the pixel
+    {
+        const double x = u01(rng), y = u01(rng), s = i & 1 ? 1e-3 : 1.0, t = 1e-4 * u01(rng);
+        cases.push_back({ at(pxA, x, y), at(pxA, x + s * (u01(rng) - 0.5), y + s * (u01(rng) - 0.5)), at(pxA, x + t, y + s * (u01(rng) - 0.5)), pxA, false });
+    }
+    // Edges on the pixel boundary, vertical and horizontal edges, degenerate triangles.
+    const double fixed[][6] = { { 0, 0, 1, 0, 0, 1 },     { 0, 0, 1, 0, 1, 1 },    { 0, 0, 0, 1, 1, 1 },     { 0, -1, 0, 2, 2, 0.5 },  { 1, -1, 1, 2, -1, 0.5 },
+                                { -1, 0, 2, 0, 0.5, 2 },  { -1, 1, 2, 1, 0.5, -1 }, { 0.5, -5, 0.5, 5, 9, 0 }, { 0, 0, 0.5, 0.5, 1, 1 }, { -3, -3, 0.5, 0.5, 4, 4 },
+                                { 0.3, 0.3, 0.3, 0.3, 0.7, 0.2 }, { -2, -2, 3, -2, 0.5, 3 }, { 0.25, 0.25, 0.75, 0.25, 0.5, 0.75 } };
+    for (const auto& f : fixed) cases.push_back({ at(pxA, f[0], f[1]), at(pxA, f[2], f[3]), at(pxA, f[4], f[5]), pxA, false });
+
+    std::vector<float4> q;
+    for (const Case& c : cases)
+    {
+        q.push_back({ c.a[0], c.a[1], c.b[0], c.b[1] });
+        q.push_back({ c.c[0], c.c[1], c.pixel[0], c.pixel[1] });
+    }
+    std::shared_ptr<std::vector<uint8_t>> out;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, 64, 64);
+        BufferRef in = fc.graph.createBuffer({ "m.test.area queries", q.size() * 16, 16 });
+        BufferRef res = fc.graph.createBuffer({ "m.test.area results", cases.size() * 8, 8 });
+        ComPtr<ID3D12Resource> staging = makeBuffer(tf.device, q.size() * 16, D3D12_HEAP_TYPE_UPLOAD);
+        void* p = nullptr;
+        D3D12_RANGE none{ 0, 0 };
+        check(staging->Map(0, &none, &p), "map");
+        std::memcpy(p, q.data(), q.size() * 16);
+        staging->Unmap(0, nullptr);
+        tf.keep(staging);
+        fc.graph.addPass("m.test.area upload", QueueType::Graphics, [&](PassBuilder& b) { b.use(in, Use::CopyDst); },
+                         [staging, in, bytes = q.size() * 16](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(in), 0, staging.Get(), 0, bytes); });
+        ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shading/Tests/EdgeAreaProbe");
+        const D3D12_GPU_VIRTUAL_ADDRESS cb = v.frameConstants;
+        const uint32_t count = (uint32_t)cases.size();
+        fc.graph.addPass("m.test.area", QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             b.use(in, Use::SrvCompute);
+                             b.use(res, Use::UavCompute);
+                         },
+                         [=](PassContext& c) {
+                             const uint32_t k[4] = { c.srv(in), c.uav(res), count, 0 };
+                             c.cmd->SetPipelineState(pso);
+                             c.bindFrameConstants(cb);
+                             c.computeConstants(k, 4);
+                             c.cmd->Dispatch((count + 63) / 64, 1, 1);
+                         });
+        out = tf.readbackBuffer(fc, res, cases.size() * 8);
+    });
+    double worstSmall = 0, worstLarge = 0, worstVSmall = 0, worstVLarge = 0;
+    for (size_t i = 0; i < cases.size(); ++i)
+    {
+        const Case& c = cases[i];
+        float g[2];
+        std::memcpy(g, out->data() + i * 8, 8);
+        const double x = c.pixel[0], y = c.pixel[1];
+        const Poly px = { { x, y }, { x + 1, y }, { x + 1, y + 1 }, { x, y + 1 } };
+        const Poly tri = { { c.a[0], c.a[1] }, { c.b[0], c.b[1] }, { c.c[0], c.c[1] } };
+        const Poly in = polyArea(tri) > 0 ? polyClip(px, tri) : Poly{};  // the square clipped by the (convex) triangle
+        const double ref = in.empty() ? 0 : polyArea(in);
+        const double e = std::fabs(g[0] - ref), ev = std::fabs(g[1] - ref);
+        if (e > (c.large ? 2e-4 : 2e-6))
+            logf("  area (%.6f %.6f) (%.6f %.6f) (%.6f %.6f) px (%g %g): M %.7f V %.7f exact %.7f\n", c.a[0], c.a[1], c.b[0], c.b[1], c.c[0], c.c[1], x, y, g[0], g[1], ref);
+        double& w = c.large ? worstLarge : worstSmall;
+        double& wv = c.large ? worstVLarge : worstVSmall;
+        w = std::max(w, e);
+        wv = std::max(wv, ev);
+    }
+    logf("edge area: %zu triangles; V's coverageTriangleArea worst abs. error %.2e (near the pixel) / %.2e (long edges)\n", cases.size(), worstVSmall, worstVLarge);
+    report(worstSmall < 2e-6, "edge area: triangles near the pixel vs double clipping (abs.)", worstSmall, 2e-6);
+    report(worstLarge < 2e-4, "edge area: long edges up to 800 px vs double clipping (abs.)", worstLarge, 2e-4);
+}
+
 void testEdgeComposite(TestFrame& tf, Report& report)
 {
     scene::Scene s;
@@ -991,6 +1099,7 @@ int main(int argc, char** argv)
         testScene(tf, report);
         testSunSpecular(tf, report);
         testLocalLights(tf, report);
+        testEdgeArea(tf, report);
         testEdgeComposite(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;

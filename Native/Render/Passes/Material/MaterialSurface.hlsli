@@ -88,6 +88,19 @@ MVertex mTriangleVertex(uint visId, uint visibleClustersSrv, uint corner)
     return o;
 }
 
+// The three deformed world positions of the triangle a vis id names (records loaded once; coverage needs no attributes).
+void mTriangleWorld(uint visId, uint visibleClustersSrv, out float3 w0, out float3 w1, out float3 w2)
+{
+    const GpuVisibleCluster vc = loadVisibleCluster(visibleClustersSrv, visVisibleCluster(visId));
+    const GpuInstance inst = loadInstance(vc.instance);
+    const GpuCluster c = loadCluster(vc.cluster);
+    const GpuMesh mesh = loadMesh(inst.mesh);
+    const uint3 tri = loadClusterTriangle(c, visTriangle(visId));
+    w0 = deformVertex(inst, mesh, tri.x).world;
+    w1 = deformVertex(inst, mesh, tri.y).world;
+    w2 = deformVertex(inst, mesh, tri.z).world;
+}
+
 // The surface of a triangle (three deformed vertices) under the pixel-centre ray.
 MSurface mSurfaceFromVertices(MTriangleIdentity id, MVertex v0, MVertex v1, MVertex v2, float2 pixelPos)
 {

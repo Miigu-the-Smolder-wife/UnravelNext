@@ -205,7 +205,7 @@ Stats latestStats(TrackState& state)
     std::memcpy(w, ring.mapped + slot * StatsRing::kBytes, sizeof w);
     st.frameIndex = ring.frame[slot];
     for (uint32_t c = 0; c < 4; ++c) st.classTiles[c] = w[3 * c];
-    st.edgeTiles = w[12];
+    st.edgePixels = w[12];
     st.tiles = ring.tiles[slot];
     return st;
 }
@@ -230,9 +230,8 @@ void shade(FramePassContext& fc, ViewResources& view)
     ID3D12PipelineState* sky = fc.shaders.compute(linear ? "Passes/Shading/ShadeSky.OUTPUT1" : "Passes/Shading/ShadeSky.OUTPUT0");
     const FrameResources r = fc.resources;
     const bool atmosphere = r.transmittanceLut.valid() && r.multiScatterLut.valid() && r.skyViewLut.valid() && r.aerialPerspective.valid();
-    // The froxel grid is the main view's: planar reflection views read neither its lists nor its volume.
+    // The froxel grid is the main view's: planar reflection views read neither its lists nor its air volume.
     const bool froxelLists = r.froxelLights.valid() && view.view.kind == gpu::ViewKind::Main;
-    const bool froxelVolume = froxelLists && r.froxels.valid();
     const ViewResources v = view;
     const uint32_t tileCount = o.tilesX * o.tilesY, lutSrv = lut.srv, experiment = experimentMask(fc.quality);
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
@@ -241,12 +240,12 @@ void shade(FramePassContext& fc, ViewResources& view)
 
     // Edge pixels' exposed linear radiance, the edge tile list and its dispatch arguments (M internal, this view).
     const TextureRef edgeRadiance = fc.graph.createTexture({ "m.edge radiance", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
-    const BufferRef edgeTiles = fc.graph.createBuffer({ "m.edge tiles", (uint64_t)tileCount * 4, 0 });
-    const BufferRef edgeArgs = fc.graph.createBuffer({ "m.edge args", sizeof(D3D12_DISPATCH_ARGUMENTS), 0 });
+    const BufferRef edgePixels = fc.graph.createBuffer({ "m.edge pixels", ((uint64_t)v.view.width * v.view.height + 1) * 4, 0 });
+    const BufferRef edgeArgs = fc.graph.createBuffer({ "m.edge args", 24, 0 });  // dispatch args + pixel count (Edge.hlsli)
     ID3D12PipelineState* begin = fc.shaders.compute("Passes/Material/ResolveBegin");
     fc.graph.addPass(planar ? "m.shade.begin.planar" : "m.shade.begin", QueueType::Graphics, [&](PassBuilder& b) { b.use(edgeArgs, Use::UavCompute); },
                      [begin, edgeArgs](PassContext& c) {
-                         const uint32_t k[4] = { c.uav(edgeArgs), 1, 0, 0 };
+                         const uint32_t k[4] = { c.uav(edgeArgs), 2, 0, 0 };  // (0, 1, 1) and the pixel count 0
                          c.cmd->SetPipelineState(begin);
                          c.computeConstants(k, 4);
                          c.cmd->Dispatch(1, 1, 1);
@@ -269,26 +268,24 @@ void shade(FramePassContext& fc, ViewResources& view)
                          if (atmosphere)
                              for (TextureRef t : { r.transmittanceLut, r.multiScatterLut, r.skyViewLut, r.aerialPerspective }) b.use(t, Use::SrvCompute);
                          if (froxelLists) b.use(r.froxelLights, Use::SrvCompute);
-                         if (froxelVolume) b.use(r.froxels, Use::SrvCompute);
                          b.use(edgeRadiance, Use::UavCompute);
-                         b.use(edgeTiles, Use::UavCompute);
+                         b.use(edgePixels, Use::UavCompute);
                          b.use(edgeArgs, Use::UavCompute);
-                         b.use(o.tileFlags, Use::UavCompute);
                          b.use(v.visId, Use::SrvCompute);
                      },
                      [=](PassContext& c) {
                          const uint32_t none = gpu::kNone;
                          const uint32_t atm[4] = { atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none,
                                                    atmosphere ? c.srv(r.skyViewLut) : none, atmosphere ? c.srv(r.aerialPerspective) : none };
-                         const uint32_t fx[2] = { froxelLists ? c.srv(r.froxelLights) : none, froxelVolume ? c.srv(r.froxels) : none };
+                         const uint32_t fx[2] = { froxelLists ? c.srv(r.froxelLights) : none, none };
                          c.bindFrameConstants(cb);
                          ID3D12Resource* args = c.resource(o.tileArgs);
                          const uint32_t edge[8] = { asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), c.uav(edgeArgs),
-                                                    c.uav(edgeRadiance), o.tilesX, c.uav(o.tileFlags), c.uav(edgeTiles) };
+                                                    c.uav(edgeRadiance), 0, 0, c.uav(edgePixels) };
                          // Sky tiles.
                          {
                              uint32_t k[32] = { c.srv(o.materialWord), c.uav(v.color), c.srv(o.tiles), (uint32_t)material::ShadeClass::Sky * tileCount,
-                                                atm[0], atm[1], atm[2], atm[3], fx[0], fx[1], 0, 0, c.srv(v.depth), c.srv(v.gbuffer), c.uav(edgeArgs), c.srv(v.visId) };
+                                                atm[0], atm[1], atm[2], atm[3], experiment, 0, 0, 0, 0, 0, c.uav(edgeArgs), c.srv(v.visId) };
                              std::memcpy(k + 24, edge, sizeof edge);
                              c.cmd->SetPipelineState(sky);
                              c.computeConstants(k, 32);
@@ -331,11 +328,25 @@ void shade(FramePassContext& fc, ViewResources& view)
                          },
                          [dst, slot, classArgs, edgeArgs](PassContext& c) {
                              c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes, c.resource(classArgs), 0, 48);
-                             c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 48, c.resource(edgeArgs), 0, 12);
+                             c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 48, c.resource(edgeArgs), 12, 4);
                          });
     }
 
-    // Edge composite over the edge tiles (analytic coverage of the pixel square by the neighbourhood's surfaces).
+    // Composite dispatch size from the edge pixel count.
+    ID3D12PipelineState* edgeArgsKernel = fc.shaders.compute("Passes/Shading/EdgeArgs");
+    fc.graph.addPass(planar ? "m.edge.args.planar" : "m.edge.args", QueueType::Graphics,
+                     [&](PassBuilder& b) {
+                         b.use(edgeArgs, Use::UavCompute);
+                         b.use(edgePixels, Use::UavCompute);
+                     },
+                     [edgeArgsKernel, edgeArgs, edgePixels](PassContext& c) {
+                         const uint32_t k[4] = { c.uav(edgeArgs), c.uav(edgePixels), 0, 0 };
+                         c.cmd->SetPipelineState(edgeArgsKernel);
+                         c.computeConstants(k, 4);
+                         c.cmd->Dispatch(1, 1, 1);
+                     });
+
+    // Edge composite over the edge pixels (analytic coverage of the pixel square by the neighbourhood's surfaces).
     ID3D12PipelineState* composite = fc.shaders.compute(linear ? "Passes/Shading/EdgeComposite.OUTPUT1" : "Passes/Shading/EdgeComposite.OUTPUT0");
     fc.graph.addPass(planar ? "m.edge.planar" : "m.edge", QueueType::Graphics,
                      [&](PassBuilder& b) {
@@ -346,16 +357,16 @@ void shade(FramePassContext& fc, ViewResources& view)
                          b.use(v.gbuffer, Use::SrvCompute);
                          b.use(edgeRadiance, Use::SrvCompute);
                          b.use(v.color, Use::UavCompute);
-                         b.use(edgeTiles, Use::SrvCompute);
+                         b.use(edgePixels, Use::SrvCompute);
                          b.use(edgeArgs, Use::IndirectArgs);
                      },
                      [=](PassContext& c) {
-                         const uint32_t k[12] = { c.srv(v.visId), c.srv(v.visibleClusters), c.srv(o.materialWord), c.srv(v.depth),
-                                                  c.srv(v.gbuffer), c.srv(edgeRadiance), c.uav(v.color), c.srv(edgeTiles),
-                                                  asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), ec.groupsMax };
+                         const uint32_t k[13] = { c.srv(v.visId), c.srv(v.visibleClusters), c.srv(o.materialWord), c.srv(v.depth),
+                                                  c.srv(v.gbuffer), c.srv(edgeRadiance), c.uav(v.color), c.srv(edgePixels),
+                                                  asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), ec.groupsMax, experiment };
                          c.cmd->SetPipelineState(composite);
                          c.bindFrameConstants(cb);
-                         c.computeConstants(k, 12);
+                         c.computeConstants(k, 13);
                          c.cmd->ExecuteIndirect(signature, 1, c.resource(edgeArgs), 0, nullptr, 0);
                      });
 }

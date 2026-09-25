@@ -14,12 +14,12 @@ const std::vector<float>& specularAlbedoTable();
 void shade(FramePassContext& fc, ViewResources& view);
 
 // Tile counts of the main view's latest recorded frame (read back through a ring; valid once that frame completed,
-// e.g. after the device went idle): shade classes of the resolve and edge tiles of the shading kernels.
+// e.g. after the device went idle): shade classes of the resolve and edge pixels of the shading kernels.
 struct Stats
 {
     uint64_t frameIndex = UINT64_MAX;
     uint32_t classTiles[4] = {};
-    uint32_t edgeTiles = 0;
+    uint32_t edgePixels = 0;
     uint32_t tiles = 0;
 };
 Stats latestStats(TrackState& state);

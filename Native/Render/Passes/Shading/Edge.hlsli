@@ -60,49 +60,99 @@ bool edgeSameSurface(EdgePixel a, EdgePixel b, EdgeParams p)
     return abs(dot(d, a.normal)) <= tol && abs(dot(d, b.normal)) <= tol;
 }
 
-// Is 'pixel' an edge pixel: some in-view 3 x 3 neighbour sees another surface. A neighbour on the same triangle (same
-// vis id) is the same surface and one with another material is not, before any geometry is read.
-bool edgeIsEdge(uint2 pixel, Texture2D<uint> visIds, Texture2D<uint> words, Texture2D<float> depth, Texture2D<uint2> gbuffer, EdgeParams p)
+// The centre's sample from what the shading kernel already holds: material, pixel ray D (unit view depth) and its x
+// derivative, linear depth, shading normal.
+EdgePixel edgeCenter(uint material, float3 D, float3 Dx, float linearZ, float3 normal)
+{
+    EdgePixel e;
+    e.material = material;
+    e.sky = material == M_MATERIAL_SKY;
+    e.position = e.sky ? 0 : D * linearZ;
+    e.normal = e.sky ? 0 : normal;
+    e.footprint = e.sky ? 0 : length(Dx) * linearZ;
+    return e;
+}
+
+// Is 'pixel' (centre sample c, pixel ray D, Dx, Dy) an edge pixel: some in-view 3 x 3 neighbour sees another surface.
+// A neighbour on the same triangle (same vis id) is the same surface and one with another material is not, before any
+// geometry is read. A neighbour's ray is the centre's plus its offset times the ray's screen derivatives (the pixel ray
+// is affine in pixel position), so only its depth and normal are loaded.
+bool edgeIsEdge(uint2 pixel, EdgePixel c, float3 D, float3 Dx, float3 Dy, Texture2D<uint> visIds, Texture2D<uint> words, Texture2D<float> depth,
+                Texture2D<uint2> gbuffer, EdgeParams p)
 {
     const uint vc = visIds[pixel];
-    const uint mc = mWordMaterial(words[pixel]);
-    bool geometric = false;
     [unroll] for (uint k = 0; k < 9; ++k)
     {
         if (k == 4) continue;
-        const int2 q = int2(pixel) + int2(int(k % 3) - 1, int(k / 3) - 1);
-        if (any(q < 0) || q.x >= int(g_viewWidth) || q.y >= int(g_viewHeight)) continue;
-        const uint vq = visIds[uint2(q)];
-        if (vq == vc) continue;
-        if (mWordMaterial(words[uint2(q)]) != mc) return true;
-        geometric = true;
-    }
-    if (!geometric) return false;
-    const EdgePixel c = edgePixel(pixel, words, depth, gbuffer);
-    [unroll] for (uint k2 = 0; k2 < 9; ++k2)
-    {
-        if (k2 == 4) continue;
-        const int2 q = int2(pixel) + int2(int(k2 % 3) - 1, int(k2 / 3) - 1);
+        const int2 o = int2(int(k % 3) - 1, int(k / 3) - 1);
+        const int2 q = int2(pixel) + o;
         if (any(q < 0) || q.x >= int(g_viewWidth) || q.y >= int(g_viewHeight)) continue;
         if (visIds[uint2(q)] == vc) continue;
-        if (!edgeSameSurface(c, edgePixel(uint2(q), words, depth, gbuffer), p)) return true;
+        EdgePixel e;
+        e.material = mWordMaterial(words[uint2(q)]);
+        if (e.material != c.material) return true;
+        e.sky = c.sky;
+        if (e.sky) continue;  // the sky has one vis id (VIS_NONE); kept for completeness
+        const float z = linearDepth(depth[uint2(q)]);
+        e.position = (D + float(o.x) * Dx + float(o.y) * Dy) * z;
+        e.normal = octDecode(gbuffer[uint2(q)].x);
+        e.footprint = length(Dx) * z;
+        if (!edgeSameSurface(c, e, p)) return true;
     }
     return false;
 }
 
-// Marks an edge tile once and appends it to the edge list (tile flags zeroed by the resolve).
-void edgeAppendTile(uint2 tile, bool anyEdge, uint tilesX, uint flagsUav, uint listUav, uint argsUav)
+// Mean of clamp(y, 0, 1) over a linear ramp between ya and yb (either order): the ramp spends t0 below 0, t1 - t0
+// inside [0, 1] (linear there between the clamped end values) and 1 - t1 above 1.
+float edgeRampClampMean(float ya, float yb)
 {
-    if (!anyEdge) return;
-    RWByteAddressBuffer flags = ResourceDescriptorHeap[flagsUav];
-    uint old;
-    flags.InterlockedOr(4 * (tile.y * tilesX + tile.x), 1u, old);
-    if (old & 1u) return;
-    RWByteAddressBuffer args = ResourceDescriptorHeap[argsUav];
-    RWByteAddressBuffer list = ResourceDescriptorHeap[listUav];
-    uint slot;
-    args.InterlockedAdd(0, 1, slot);
-    list.Store(4 * slot, tile.x | (tile.y << 16));
+    const float lo = min(ya, yb), hi = max(ya, yb), s = max(hi - lo, 1e-30);
+    const float t0 = saturate(-lo / s), t1 = saturate((1 - lo) / s);
+    return (t1 - t0) * 0.5 * (saturate(lo) + saturate(hi)) + (1 - t1);
+}
+
+// Signed contribution of the directed edge p -> q (pixel-corner relative) to the area inside the unit square: its
+// overlap with the square's x range times the mean of clamp(y, 0, 1) along that part, signed by the x direction.
+float edgeColumnIntegral(float2 p, float2 q)
+{
+    const float dx = q.x - p.x, inv = dx != 0 ? 1 / dx : 0;
+    const float x0 = max(min(p.x, q.x), 0.0), x1 = min(max(p.x, q.x), 1.0);
+    const float ya = lerp(p.y, q.y, saturate((x0 - p.x) * inv)), yb = lerp(p.y, q.y, saturate((x1 - p.x) * inv));
+    return (dx > 0 ? 1.0 : -1.0) * max(x1 - x0, 0.0) * edgeRampClampMean(ya, yb);
+}
+
+// Exact area of triangle (a, b, c) (screen pixels, either winding) inside the pixel square [pixel, pixel + 1)^2, by
+// Green's theorem: on every vertical line through the square the boundary's crossings, signed by their x direction,
+// sum to the inside length clamp(y_upper, 0, 1) - clamp(y_lower, 0, 1), so the area is the sum over the three edges of
+// their column integrals (closed form above). Registers only, no clipping; the same quantity as V's
+// coverageTriangleArea (Coverage.hlsli) up to float rounding.
+float edgeTriangleArea(float2 a, float2 b, float2 c, float2 pixel)
+{
+    a -= pixel;
+    b -= pixel;
+    c -= pixel;
+    return abs(edgeColumnIntegral(a, b) + edgeColumnIntegral(b, c) + edgeColumnIntegral(c, a));
+}
+
+// Appends the wave's edge pixels to the edge pixel list (one atomic per wave). Edge args layout (raw, 24 B): bytes 0-11
+// the composite's D3D12_DISPATCH_ARGUMENTS (EdgeArgs.hlsl fills x), byte 12 the pixel count. The list holds the count in
+// entry 0 (EdgeArgs.hlsl copies it) and the pixels from entry 1.
+void edgeAppendPixel(uint2 pixel, bool isEdge, uint listUav, uint argsUav)
+{
+    const uint n = WaveActiveCountBits(isEdge);
+    if (n == 0) return;
+    uint base = 0;
+    if (WaveIsFirstLane())
+    {
+        RWByteAddressBuffer args = ResourceDescriptorHeap[argsUav];
+        args.InterlockedAdd(12, n, base);
+    }
+    base = WaveReadLaneFirst(base);
+    if (isEdge)
+    {
+        RWByteAddressBuffer list = ResourceDescriptorHeap[listUav];
+        list.Store(4 * (1 + base + WavePrefixCountBits(isEdge)), pixel.x | (pixel.y << 16));
+    }
 }
 
 #endif

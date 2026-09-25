@@ -5,15 +5,14 @@
 // Without S's atmosphere (tracks built alone) the sky is black and the disk has the top-of-atmosphere radiance.
 // P[0] = { material word, color UAV, tile lists (raw), list offset (entries) }
 // P[1] = { atmosphere transmittance, multi-scatter, sky view, aerial } (UNX_NONE = absent)
-// P[2] = { froxel lights (raw), froxel volume } (UNX_NONE = absent): shafts in front of the sky (depth clamps to far_m)
-// P[3] = { depth SRV, gbuffer SRV, edge args UAV (raw), vis id SRV }, P[6] = edge parameters (floats), P[7] as ShadeOpaque
+// P[2] = { experiment mask (shading.experiment_disable), 0, 0, 0 }
+// P[3] = { 0, 0, edge args UAV (raw), vis id SRV }, P[7] as ShadeOpaque
 #include "Bindless.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/Edge.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
-#include "Passes/Atmosphere/Froxel.hlsli"
 
 bool shadeSky(uint2 pixel, Texture2D<uint> words);
 
@@ -27,8 +26,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     const bool active = all(pixel < uint2(g_viewWidth, g_viewHeight)) && mWordMaterial(words[min(pixel, uint2(g_viewWidth, g_viewHeight) - 1)]) == M_MATERIAL_SKY;
     bool isEdgeLane = false;
     if (active) isEdgeLane = shadeSky(pixel, words);
-    const bool anyEdge = WaveActiveAnyTrue(isEdgeLane);
-    if (WaveIsFirstLane()) edgeAppendTile(uint2(tile & 0xFFFFu, tile >> 16), anyEdge, P[7].y, P[7].z, P[7].w, P[3].z);
+    edgeAppendPixel(pixel, isEdgeLane, P[7].w, P[3].z);
 }
 
 bool shadeSky(uint2 pixel, Texture2D<uint> words)
@@ -56,25 +54,17 @@ bool shadeSky(uint2 pixel, Texture2D<uint> words)
         sun = g_sunIlluminance * g_sunColor / (SH_PI * sinS * sinS);
     }
     radiance += sun * shSunDiskCoverage(D, Dx, Dy);
-    if (P[2].y != UNX_NONE && g_viewKind == VIEW_MAIN)
-    {
-        FroxelSrvs froxels;
-        froxels.lights = P[2].x;
-        froxels.lightIndices = P[2].x;
-        froxels.scattering = P[2].y;
-        froxels.pad = 0;
-        const float4 air = froxelScattering(froxels, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight), 1e30);
-        radiance = radiance * air.a + air.rgb;
-    }
-
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].y];
     color[pixel] = shEncodeOutput(radiance);
-    if (P[7].x == UNX_NONE) return false;
-    Texture2D<float> depthTex = ResourceDescriptorHeap[P[3].x];
-    Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[3].y];
-    const EdgeParams ep = { asfloat(P[6].x), asfloat(P[6].y), asfloat(P[6].z) };
+    // Edge: the sky has one vis id (VIS_NONE), so a neighbour with another shows a surface.
+    if (P[7].x == UNX_NONE || (P[2].x & 256)) return false;
     Texture2D<uint> visIds = ResourceDescriptorHeap[P[3].w];
-    const bool isEdge = edgeIsEdge(pixel, visIds, words, depthTex, gbuffer, ep);
+    bool isEdge = false;
+    [unroll] for (uint k = 0; k < 9; ++k)
+    {
+        const int2 q = int2(pixel) + int2(int(k % 3) - 1, int(k / 3) - 1);
+        if (k != 4 && all(q >= 0) && q.x < int(g_viewWidth) && q.y < int(g_viewHeight)) isEdge = isEdge || visIds[uint2(q)] != VIS_NONE;
+    }
     if (isEdge)
     {
         RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];

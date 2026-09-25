@@ -154,9 +154,10 @@ int main(int argc, char** argv)
             const bool is4k = res.width == 3840;
             const double edge = sumPasses(r, [&](const std::string& n) { return n.rfind("m.edge", 0) == 0 && !planar(n); });
             const shading::Stats st = shading::latestStats(renderer.trackState());
-            logf("M %s %s: edge composite %.3f ms on %u edge tiles of %u (%.1f %%) | class tiles sky %u opaque %u subsurface %u water %u\n", sceneName.c_str(),
-                 rs.c_str(), edge, st.edgeTiles, st.tiles, 100.0 * st.edgeTiles / std::max(st.tiles, 1u), st.classTiles[0], st.classTiles[1], st.classTiles[2],
-                 st.classTiles[3]);
+            const double pixels = (double)res.width * res.height;
+            logf("M %s %s: edge composite %.3f ms on %u edge pixels (%.2f %% of the view) | class tiles sky %u opaque %u subsurface %u water %u of %u\n",
+                 sceneName.c_str(), rs.c_str(), edge, st.edgePixels, 100.0 * st.edgePixels / pixels, st.classTiles[0], st.classTiles[1], st.classTiles[2],
+                 st.classTiles[3], st.tiles);
             logf("M %s %s: material resolve %.3f ms (design %.2f) | shading %.3f ms (design %s) | planar views, M passes %.3f ms | frame %.3f ms\n",
                  sceneName.c_str(), rs.c_str(), resolve, is4k ? 0.40 : 0.18, shade, is4k ? "0.37-0.42" : "0.18", planarM, r.gpuFrameMs.median);
         }

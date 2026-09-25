@@ -8,7 +8,8 @@
 //   specular R's reflection (G/M paths, planar mirrors) or the K path screenProbeRadiance with the lobe half-angle,
 //            times the model's specular directional albedo;
 //   emission material (x emissive texture, resolved per pixel);
-//   air      S's aerial perspective between the camera and the surface (main view);
+//   air      S's air volume between the camera and the surface (main view, atmosphereAirView: atmosphere, casters'
+//            shadows in the air, local lights' air) and the sun's illuminance at the surface;
 // then exposure, tone map and the final 4 B (OUTPUT=0) or linear radiance x exposure (OUTPUT=1).
 // Classes without their own model yet (Subsurface, Water: INTERFACES 8.1 defines them before P3/P4) use this kernel.
 // Local lights: the pixel's froxel list (S, Froxel.hlsli), punctual lights exactly (INTERFACES 8.2); shadow-casting
@@ -19,9 +20,9 @@
 // P[2] = { shadow visibility, screen probes, reflection, GI cache (planar views) } (UNX_NONE = absent)
 // P[3] = { atmosphere transmittance, multi-scatter, sky view, aerial } (UNX_NONE = absent)
 // P[4] = { specular albedo LUT (float2 per grid point), texture table, experiment mask (0; shading.toml), vis id SRV }
-// P[5] = { froxel lights (raw), froxel volume (Texture3D) } (UNX_NONE = absent)
+// P[5] = { froxel lights (raw), 0 } (UNX_NONE = absent)
 // P[6] = { edge cos angle, edge footprint tolerance, edge distance tolerance (floats), edge args UAV (raw) }
-// P[7] = { edge radiance UAV (RGBA16F), tilesX, tile flags UAV (raw), edge tile list UAV (raw) }
+// P[7] = { edge radiance UAV (RGBA16F), 0, 0, edge pixel list UAV (raw) }
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -57,8 +58,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     {
         isEdgeLane = shadeSurface(pixel, word, materialIndex, m, words, gbuffer, depthTex);
     }
-    const bool anyEdge = WaveActiveAnyTrue(isEdgeLane);
-    if (WaveIsFirstLane()) edgeAppendTile(uint2(tile & 0xFFFFu, tile >> 16), anyEdge, P[7].y, P[7].z, P[7].w, P[6].w);
+    edgeAppendPixel(pixel, isEdgeLane, P[7].w, P[6].w);
 }
 
 // Shades one pixel of this class; returns whether it is an edge pixel (its exposed radiance is then kept).
@@ -104,7 +104,15 @@ bool shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Tex
 
     // ---- sun (INTERFACES 8.1: reflection on the viewer's side of the shading normal, Foliage transmission across it)
     const float3 l0 = normalize(g_sunDirection);
-    const float3 E = haveAtmosphere ? atmosphereSunIlluminance(atm, worldPos) : g_sunIlluminance * g_sunColor;
+    // Main view: S's air volume gives the air between the camera and the surface and the sun's illuminance at it in one
+    // lookup (atmosphereAirView); secondary views have no air volume (the grid is the main view's).
+    float3 E = g_sunIlluminance * g_sunColor, airInscatter = 0, airTransmittance = 1;
+    if (haveAtmosphere)
+    {
+        if (g_viewKind == VIEW_MAIN && (P[4].z & 8) == 0)
+            atmosphereAirView(atm, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight), linearZ, airInscatter, airTransmittance, E);
+        else E = atmosphereSunIlluminance(atm, worldPos);
+    }
     float sunVisibility = 1;
     if (P[2].x != UNX_NONE)
     {
@@ -139,7 +147,7 @@ bool shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Tex
     FroxelSrvs froxels;
     froxels.lights = P[5].x;
     froxels.lightIndices = P[5].x;
-    froxels.scattering = P[5].y;
+    froxels.scattering = UNX_NONE;
     froxels.pad = 0;
     if (froxels.lights != UNX_NONE && g_viewKind == VIEW_MAIN && (experiment & 32) == 0)
     {
@@ -210,26 +218,16 @@ bool shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Tex
     if (NoV > 0) radiance += front * irradiance + incident * shSpecularAlbedo(P[4].x, f0, NoV, s.roughness);
     radiance += back * irradianceBack;
 
-    // ---- air between the camera and the surface (main view volume)
-    if (haveAtmosphere && g_viewKind == VIEW_MAIN && (experiment & 8) == 0)
-    {
-        float3 inscatter, transmittance;
-        atmosphereAerial(atm, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight), linearZ, inscatter, transmittance);
-        radiance = radiance * transmittance + inscatter;
-    }
-    // Shadowed sun air and local lights' air in front of the surface (S, Froxel.hlsli): (L T_air + L_air) a + rgb.
-    if (froxels.scattering != UNX_NONE && g_viewKind == VIEW_MAIN && (experiment & 8) == 0)
-    {
-        const float4 air = froxelScattering(froxels, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight), linearZ);
-        radiance = radiance * air.a + air.rgb;
-    }
+    // ---- air between the camera and the surface (S's air volume: atmosphere, shadowed air, local lights' air)
+    radiance = radiance * airTransmittance + airInscatter;
 
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].w];
     color[pixel] = shEncodeOutput(radiance);
     // Edge pixels keep their exposed linear radiance for the composite (EdgeComposite.hlsl).
     const EdgeParams ep = { asfloat(P[6].x), asfloat(P[6].y), asfloat(P[6].z) };
     Texture2D<uint> visIds = ResourceDescriptorHeap[P[4].w];
-    const bool isEdge = P[7].x != UNX_NONE && edgeIsEdge(pixel, visIds, words, depthTex, gbuffer, ep);
+    const bool isEdge = P[7].x != UNX_NONE && (experiment & 256) == 0 &&
+                        edgeIsEdge(pixel, edgeCenter(materialIndex, D, Dx, linearZ, n), D, Dx, Dy, visIds, words, depthTex, gbuffer, ep);
     if (isEdge)
     {
         RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];
