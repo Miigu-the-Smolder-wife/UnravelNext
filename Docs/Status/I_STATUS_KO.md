@@ -181,6 +181,9 @@ DLL: UnravelNext 커밋 빌드 51e331b(ABI 4, 다른 트랙의 미커밋 변경 
 M의 추가 분리[실측, 14:34~14:36, 같은 조건]: `reflection.cache_lobe_half_angle_min_deg=0`(모두 K 경로, 광선 없음)은 반점이 없고, `=90`(모두 광선)은
 반점이 남는다(거친 바닥의 firefly는 광선 강제 때의 1표본 잡음, 진단용). 그래서 R의 광선 hit 경로다. R은 광선 hit 발자국이 그 점의 모든 셀보다
 거칠면 조회가 0을 돌려주던 결함을 고쳤다(0ff332b: 더 고운 레벨까지 찾는다). `player_cap_lobe{0,90}_*_3840x2160.png`.
+0ff332b 뒤[실측, Player 렌더러 파일만 0ff332b, 앞 상자 정면에서 중앙값 절반보다 어두운 픽셀]: 기본 3.98 %(1371ac5는 4.15 %), `reflection.experiment_disable`
+16(hit 캐시 조회 끔) 4.66 %, 2(hit 태양 가시성 없음) 4.77 %, 32(순회만, hit이 1) 0.00 %, K만 0.00 %. 순회·원점은 원인이 아니고 hit 셰이딩이다.
+R에 보냈다(R이 반사 곱셈 수정을 준비 중).
 빌드된 Player의 렌더러 파일(DLL·커널·품질)은 Unity 재빌드 없이 커밋 빌드로 바꿀 수 있다(스크래치패드 `update_player_renderer.ps1`, 관리 코드와
 ABI가 그대로일 때만; `<Data>/UnravelNext/renderer.build.json`에 커밋을 적는다).
 
