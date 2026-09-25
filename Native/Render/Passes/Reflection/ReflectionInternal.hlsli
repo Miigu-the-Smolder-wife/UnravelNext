@@ -40,24 +40,24 @@ ReflPlanar reflPlanar(uint srv, uint offset, uint index)
 }
 
 // A job's value from its n unmasked samples: sumL = sum of the rays' radiance, sumG = sum of the control variate g (the
-// screen-probe cache in each ray's direction; 0 for M jobs), gbar = the control variate's lobe integral. The estimate is
-// mean(L) + beta (gbar - mean(g)) per channel with beta = min(1, mean(L) / mean(g)): where the rays are at least as bright
-// as the cache predicts it is the difference estimator gbar + mean(L - g) (beta = 1, >= gbar); where they are darker
-// (the cache sees past an occluder near the surface: probe parallax, contact shadows) it is the ratio estimator
-// gbar mean(L) / mean(g), never negative. The difference estimator alone went negative there and was clamped to 0: black
-// G samples spread over their spacing (dark blocks and dots on glossy surfaces near contacts). Both agree at
-// mean(L) = mean(g); no samples: gbar.
+// screen-probe cache in each ray's direction; 0 for M jobs), gbar = the control variate's lobe integral (the mean of g over
+// the lobe, reflLobeControl). Per channel the difference estimator gbar + mean(L - g) (unbiased) wherever it is not
+// negative; where it is (the cache sees past an occluder near the surface or lags a moving object: g far brighter than
+// L), the ratio estimator gbar mean(L) / mean(g), which is never negative (consistent, biased O(1/n) in that region only).
+// The difference estimator alone was clamped to 0 there: black G samples spread over their spacing (the dark blocks and
+// dots on glossy surfaces near contacts). With 4 samples mean(L) < mean(g) half the time where the cache is right, so
+// the choice is by the sign of the difference estimate, not by mean(L) < mean(g). No samples: gbar.
 float3 reflLobeEstimate(float3 sumL, float3 sumG, uint n, float3 gbar)
 {
     if (n == 0) return gbar;
     const float3 meanL = sumL / n, meanG = sumG / n;
-    if ((P[5].x >> 24) & 128) return max(gbar + meanL - meanG, 0.0);  // attribution: the difference estimator alone
-    const float3 beta = select(meanG > 1e-8, min(meanL / max(meanG, 1e-8), 1.0), 1.0);
-    return max(meanL + beta * (gbar - meanG), 0.0);
+    const float3 difference = gbar + meanL - meanG;
+    if ((P[5].x >> 24) & 128) return max(difference, 0.0);  // attribution: the difference estimator alone (clamped)
+    return select(difference >= 0, difference, gbar * meanL / max(meanG, 1e-8));  // difference < 0 implies meanG > gbar >= 0
 }
 
 // True when reflLobeEstimate takes the ratio branch in some channel (diagnostics).
-bool reflLobeRatio(float3 sumL, float3 sumG, uint n) { return n > 0 && any(and(sumG > 1e-8 * n, sumL < sumG)); }
+bool reflLobeRatio(float3 sumL, float3 sumG, uint n, float3 gbar) { return n > 0 && any(gbar + (sumL - sumG) / n < 0); }
 
 // A job = a pixel that traces: an M pixel (1 ray) or a G sample (4 rays). Encoded as x | y << 16.
 uint reflPackPixel(uint2 p) { return p.x | (p.y << 16); }
