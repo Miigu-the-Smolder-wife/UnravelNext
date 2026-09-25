@@ -197,6 +197,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     if (!src) fail("RayScene: GpuScene has no uploaded scene");
     m_sceneRevision = scene.revision();
     const uint32_t proxyBudget = (uint32_t)quality.integer("raytracing.character_proxy_triangles");
+    m_proxyErrorPx = (float)quality.number("raytracing.proxy_error_px");
     const uint64_t dynamicMax = (uint64_t)quality.integer("raytracing.dynamic_tlas_instances_max");
 
     const auto& instances = scene.instances();
@@ -282,12 +283,13 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     // Deformed instances: per-instance BLAS over the mesh's RT proxy (ProxyMesh: V's LOD cut within
     // raytracing.character_proxy_triangles, ARCHITECTURE 2.8), deformed through the proxy's vertex map.
     m_proxyBudget = proxyBudget;
-    m_proxies.assign(meshes.size(), {});
+    m_proxyLevels.assign(meshes.size(), {});
+    m_proxyLevelsBuilt.assign(meshes.size(), 0);
     uint32_t vertexBase = 0;
     for (uint32_t i : deformed)
     {
         const gpu::Instance& in = instances[i];
-        const ProxyMesh& p = proxyOf(in.mesh);
+        const ProxyMesh& p = proxyLevels(in.mesh)[0];  // the finest cut: the vertex region fits every coarser one
         Deformed d;
         d.sceneInstance = i;
         d.vertexBase = vertexBase;
@@ -322,7 +324,8 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     buildDeformed();
     for (size_t k = 0; k < m_deformed.size(); ++k)
     {
-        const Deformed& d = m_deformed[k];
+        Deformed& d = m_deformed[k];
+        d.record = (uint32_t)m_instances.size();
         D3D12_RAYTRACING_INSTANCE_DESC desc{};
         desc.Transform[0][0] = desc.Transform[1][1] = desc.Transform[2][2] = 1;  // world-space vertices
         desc.InstanceID = (UINT)m_instances.size();
@@ -562,28 +565,37 @@ void RayScene::buildMeshBlas()
     release(sizes);
 }
 
-const RayScene::ProxyMesh& RayScene::proxyOf(uint32_t mesh)
+const std::vector<RayScene::ProxyMesh>& RayScene::proxyLevels(uint32_t mesh)
 {
-    ProxyMesh& p = m_proxies[mesh];
-    if (p.built) return p;
-    p.built = true;
-    const scene::Mesh& sm = m_scene.source()->meshes[mesh];
+    std::vector<ProxyMesh>& levels = m_proxyLevels[mesh];
+    if (m_proxyLevelsBuilt[mesh]) return levels;
+    m_proxyLevelsBuilt[mesh] = 1;
     const ClusterData& cd = m_scene.clusters();
-    // Per-submesh index lists in mesh vertex indices, from the chosen cut or the full mesh.
-    std::vector<std::vector<uint32_t>> perSubmesh(sm.submeshes.size());
-    const bool haveCuts = mesh < cd.meshes.size() && cd.meshes[mesh].lodLevelCount > 0;
-    if (haveCuts)
+    if (mesh < cd.meshes.size() && cd.meshes[mesh].lodLevelCount > 0)
     {
         const auto& range = cd.meshes[mesh];
-        uint32_t chosen = range.lodLevelOffset + range.lodLevelCount - 1;  // coarsest when none fits
+        // Levels run finest to coarsest: every cut within the budget, else the coarsest alone.
         for (uint32_t l = range.lodLevelOffset; l < range.lodLevelOffset + range.lodLevelCount; ++l)
-            if (cd.lodLevels[l].triangleCount <= m_proxyBudget)
-            {
-                chosen = l;  // levels run finest to coarsest: the first that fits
-                break;
-            }
-        const gpu::LodLevel& level = cd.lodLevels[chosen];
+            if (cd.lodLevels[l].triangleCount <= m_proxyBudget) levels.push_back(buildProxy(mesh, l));
+        if (levels.empty()) levels.push_back(buildProxy(mesh, range.lodLevelOffset + range.lodLevelCount - 1));
+    }
+    else
+        levels.push_back(buildProxy(mesh, gpu::kNone));
+    return levels;
+}
+
+RayScene::ProxyMesh RayScene::buildProxy(uint32_t mesh, uint32_t lodLevel)
+{
+    ProxyMesh p;
+    const scene::Mesh& sm = m_scene.source()->meshes[mesh];
+    const ClusterData& cd = m_scene.clusters();
+    // Per-submesh index lists in mesh vertex indices, from the cut or the full mesh.
+    std::vector<std::vector<uint32_t>> perSubmesh(sm.submeshes.size());
+    if (lodLevel != gpu::kNone)
+    {
+        const gpu::LodLevel& level = cd.lodLevels[lodLevel];
         p.reduced = level.error > 0;
+        p.error = level.error;
         for (uint32_t k = level.clusterOffset; k < level.clusterOffset + level.clusterCount; ++k)
         {
             const gpu::Cluster& c = cd.clusters[cd.lodLevelClusters[k]];
@@ -620,6 +632,32 @@ const RayScene::ProxyMesh& RayScene::proxyOf(uint32_t mesh)
     }
     p.vertexCount = (uint32_t)(m_vertexMapData.size() - p.vertexMap);
     return p;
+}
+
+// BLAS geometry of a deformed instance's proxy cut (positions from the deformed pool at vertexBase).
+std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> RayScene::proxyGeometry(uint32_t sceneInstance, uint32_t mesh, const ProxyMesh& p, uint32_t vertexBase) const
+{
+    const scene::Scene* src = m_scene.source();
+    const scene::Mesh& sm = src->meshes[mesh];
+    const scene::Instance& si = src->instances[sceneInstance];
+    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> out;
+    for (size_t k = 0; k < p.submesh.size(); ++k)
+    {
+        const uint32_t s = p.submesh[k];
+        const uint32_t material = s < si.materialOverrides.size() ? si.materialOverrides[s] : sm.submeshes[s].material;
+        const bool alpha = material < src->materials.size() && src->materials[material].alphaCutoff > 0;
+        D3D12_RAYTRACING_GEOMETRY_DESC g{};
+        g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+        g.Flags = alpha ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        g.Triangles.VertexBuffer = { m_deformedPool.address() + (uint64_t)vertexBase * sizeof(RtDeformedVertex), sizeof(RtDeformedVertex) };
+        g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+        g.Triangles.VertexCount = p.vertexCount;
+        g.Triangles.IndexBuffer = m_indexPool.address() + (uint64_t)p.indexOffset[k] * sizeof(uint32_t);
+        g.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+        g.Triangles.IndexCount = p.indexCount[k];
+        out.push_back(g);
+    }
+    return out;
 }
 
 uint32_t RayScene::maxMeshVertices() const
@@ -659,7 +697,6 @@ std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> RayScene::originalGeometry(const Def
 
 void RayScene::buildDeformed()
 {
-    const scene::Scene* src = m_scene.source();
     m_deformedPool = createBuffer(m_poolVertices * sizeof(RtDeformedVertex), true, false, L"RT deformed vertices");
     {
         DescriptorHeaps& h = m_device.descriptors();
@@ -676,48 +713,38 @@ void RayScene::buildDeformed()
         m_deformedBlasPool = createBuffer(kAsAlign, false, true, L"RT deformed BLAS pool (empty)");
         return;
     }
-    auto materialAlpha = [&](uint32_t material) { return material < src->materials.size() && src->materials[material].alphaCutoff > 0; };
-
     std::vector<DeformJob> jobs;
     std::vector<uint32_t> groups;  // uint2 pairs
     uint64_t poolBytes = 0, scratchBytes = 0;
     for (Deformed& d : m_deformed)
     {
-        const ProxyMesh& p = m_proxies[d.mesh];
-        const scene::Mesh& sm = src->meshes[d.mesh];
-        const scene::Instance& si = src->instances[d.sceneInstance];
-        for (size_t k = 0; k < p.submesh.size(); ++k)
+        const std::vector<ProxyMesh>& levels = m_proxyLevels[d.mesh];
+        // BLAS and scratch ranges fit every cut of the mesh (the instance switches between them).
+        uint64_t result = 0, scratch = 0;
+        for (const ProxyMesh& p : levels)
         {
-            const uint32_t s = p.submesh[k];
-            const uint32_t material = s < si.materialOverrides.size() ? si.materialOverrides[s] : sm.submeshes[s].material;
-            D3D12_RAYTRACING_GEOMETRY_DESC g{};
-            g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-            g.Flags = materialAlpha(material) ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
-            g.Triangles.VertexBuffer = { 0, sizeof(RtDeformedVertex) };  // pool address patched below
-            g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-            g.Triangles.VertexCount = p.vertexCount;
-            g.Triangles.IndexBuffer = m_indexPool.address() + (uint64_t)p.indexOffset[k] * sizeof(uint32_t);
-            g.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
-            g.Triangles.IndexCount = p.indexCount[k];
-            d.geometries.push_back(g);
+            const std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometry = proxyGeometry(d.sceneInstance, d.mesh, p, d.vertexBase);
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+            inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+            inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+            inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+            inputs.NumDescs = (UINT)geometry.size();
+            inputs.pGeometryDescs = geometry.data();
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
+            m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &sizes);
+            result = std::max(result, sizes.ResultDataMaxSizeInBytes);
+            scratch = std::max(scratch, std::max(sizes.ScratchDataSizeInBytes, sizes.UpdateScratchDataSizeInBytes));
         }
-        for (auto& g : d.geometries) g.Triangles.VertexBuffer.StartAddress = m_deformedPool.address() + (uint64_t)d.vertexBase * sizeof(RtDeformedVertex);
-        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
-        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
-        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-        inputs.NumDescs = (UINT)d.geometries.size();
-        inputs.pGeometryDescs = d.geometries.data();
-        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
-        m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &sizes);
+        d.geometries = proxyGeometry(d.sceneInstance, d.mesh, levels[d.level], d.vertexBase);
         d.blasOffset = poolBytes;
-        poolBytes += alignUp(sizes.ResultDataMaxSizeInBytes, kAsAlign);
+        poolBytes += alignUp(result, kAsAlign);
         d.scratchOffset = scratchBytes;
-        scratchBytes += alignUp(std::max(sizes.ScratchDataSizeInBytes, sizes.UpdateScratchDataSizeInBytes), kAsAlign);
+        scratchBytes += alignUp(scratch, kAsAlign);
 
-        const uint32_t job = (uint32_t)jobs.size();
-        jobs.push_back({ d.sceneInstance, d.vertexBase, m_proxies[d.mesh].vertexMap, d.vertexCount });
-        for (uint32_t first = 0; first < d.vertexCount; first += 64) groups.insert(groups.end(), { job, first });
+        // One job per deformed instance (its index = the deformed index); groups cover the finest cut's vertices.
+        jobs.push_back({ d.sceneInstance, d.vertexBase, levels[d.level].vertexMap, d.vertexCount });
+        const uint32_t job = (uint32_t)jobs.size() - 1;
+        for (uint32_t first = 0; first < levels[0].vertexCount; first += 64) groups.insert(groups.end(), { job, first });
     }
     // Exact slots: BLAS and scratch for the largest full skinned mesh, a job (idle until owned) and groups for its capacity.
     {
@@ -800,11 +827,14 @@ void RayScene::recordDeform(ID3D12GraphicsCommandList7* cmd) const
     cmd->Dispatch(width, (m_deformGroupCount + width - 1) / width, 1);
 }
 
-void RayScene::recordRefit(ID3D12GraphicsCommandList7* cmd, bool refit) const
+void RayScene::recordRefit(ID3D12GraphicsCommandList7* cmd, bool refit, const std::vector<uint8_t>* rebuild) const
 {
-    // Refit (or first build) of every deformed BLAS; each has its own scratch range, so the builds run concurrently.
-    for (const Deformed& dd : m_deformed)
+    // Refit (or first build) of every deformed BLAS; each has its own scratch range, so the builds run concurrently. An
+    // instance whose proxy cut changed is built (its triangles changed).
+    for (size_t k = 0; k < m_deformed.size(); ++k)
     {
+        const Deformed& dd = m_deformed[k];
+        const bool update = refit && !(rebuild && k < rebuild->size() && (*rebuild)[k]);
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
         inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
         inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
@@ -814,7 +844,7 @@ void RayScene::recordRefit(ID3D12GraphicsCommandList7* cmd, bool refit) const
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
         d.Inputs = inputs;
         d.DestAccelerationStructureData = m_deformedBlasPool.address() + dd.blasOffset;
-        if (refit)
+        if (update)
         {
             d.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
             d.SourceAccelerationStructureData = d.DestAccelerationStructureData;
@@ -925,6 +955,84 @@ void RayScene::selectExactSet(FramePassContext& fc)
     const BufferRef instancesRef = m_frame.instances, jobsRef = m_frame.jobs;
     ID3D12Resource* ring = m_patchRing.Get();
     fc.graph.addPass("r.as.exact.patch", QueueType::Graphics,
+                     [&](PassBuilder& b) {
+                         b.use(instancesRef, Use::CopyDst);
+                         b.use(jobsRef, Use::CopyDst);
+                     },
+                     [patches, ring, ringOffset, instancesRef, jobsRef](PassContext& c) {
+                         for (size_t k = 0; k < patches.size(); ++k)
+                             c.cmd->CopyBufferRegion(c.resource(patches[k].job ? jobsRef : instancesRef), patches[k].dst, ring, ringOffset + k * 16, 16);
+                     });
+}
+
+void RayScene::selectProxyLevels(FramePassContext& fc)
+{
+    m_deformedRebuild.assign(m_deformed.size(), 0);
+    m_stats.proxySwitches = 0;
+    if (m_deformed.empty()) return;
+    const ViewDesc& view = fc.frame.mainView;
+    const float pixelAngle = 2 * std::tan(view.verticalFov * 0.5f) / (float)std::max(view.height, 1u);
+    const auto& instances = m_scene.instances();
+    const auto& meshes = m_scene.meshes();
+    struct Patch
+    {
+        uint64_t dst;
+        bool job;
+        uint32_t words[4];
+    };
+    std::vector<Patch> patches;
+    const size_t patchCapacity = (kPatchSlotBytes - kProxyPatchOffset) / 16;
+    uint64_t triangles = 0;
+    for (size_t k = 0; k < m_deformed.size(); ++k)
+    {
+        Deformed& d = m_deformed[k];
+        const std::vector<ProxyMesh>& levels = m_proxyLevels[d.mesh];
+        if (levels.size() > 1 && patches.size() + 2 <= patchCapacity)
+        {
+            const gpu::Instance& in = instances[d.sceneInstance];
+            const gpu::Mesh& gm = meshes[d.mesh];
+            float scale = 0;
+            auto at = [&](int r, int c) { const float4& v = in.objectToWorld[r]; return c == 0 ? v.x : c == 1 ? v.y : v.z; };
+            for (int c = 0; c < 3; ++c)
+            {
+                const float x = at(0, c), y = at(1, c), z = at(2, c);
+                scale = std::max(scale, std::sqrt(x * x + y * y + z * z));
+            }
+            const float3 centre{ in.objectToWorld[0].x * gm.boundsSphere.x + in.objectToWorld[0].y * gm.boundsSphere.y + in.objectToWorld[0].z * gm.boundsSphere.z + in.objectToWorld[0].w,
+                                 in.objectToWorld[1].x * gm.boundsSphere.x + in.objectToWorld[1].y * gm.boundsSphere.y + in.objectToWorld[1].z * gm.boundsSphere.z + in.objectToWorld[1].w,
+                                 in.objectToWorld[2].x * gm.boundsSphere.x + in.objectToWorld[2].y * gm.boundsSphere.y + in.objectToWorld[2].z * gm.boundsSphere.z + in.objectToWorld[2].w };
+            const float3 toEye{ centre.x - view.position.x, centre.y - view.position.y, centre.z - view.position.z };
+            // A skinned pose can leave the bind-pose sphere: the distance is from its doubled radius (conservative).
+            const float distance = std::max(std::sqrt(toEye.x * toEye.x + toEye.y * toEye.y + toEye.z * toEye.z) - 2 * gm.boundsSphere.w * scale, 0.0f);
+            const float bound = m_proxyErrorPx * pixelAngle * distance;
+            uint32_t level = d.level;
+            while (level > 0 && levels[level].error * scale > bound) --level;  // finer at once
+            while (level + 1 < levels.size() && levels[level + 1].error * scale <= 0.8f * bound) ++level;  // coarser with margin
+            if (level != d.level)
+            {
+                const ProxyMesh& p = levels[level];
+                d.level = level;
+                d.vertexCount = p.vertexCount;
+                d.geometryBase = p.geometryBase;
+                d.geometries = proxyGeometry(d.sceneInstance, d.mesh, p, d.vertexBase);
+                m_instances[d.record].geometryBase = p.geometryBase;
+                m_deformedRebuild[k] = 1;
+                ++m_stats.proxySwitches;
+                patches.push_back({ (uint64_t)d.record * sizeof(RtInstance), false, { d.sceneInstance, p.geometryBase, d.vertexBase, m_instances[d.record].flags } });
+                patches.push_back({ (uint64_t)k * 16, true, { d.sceneInstance, d.vertexBase, p.vertexMap, p.vertexCount } });
+            }
+        }
+        triangles += levels[d.level].triangles;
+    }
+    m_stats.deformedTriangles = triangles;
+    m_stats.deformedVertices = 0;
+    for (const Deformed& d : m_deformed) m_stats.deformedVertices += d.vertexCount;
+    if (patches.empty()) return;
+    const uint64_t ringOffset = (fc.frame.frameIndex % kDescSlots) * kPatchSlotBytes + kProxyPatchOffset;
+    for (size_t k = 0; k < patches.size(); ++k) std::memcpy(m_patchRingMapped + ringOffset + k * 16, patches[k].words, 16);
+    const BufferRef instancesRef = m_frame.instances, jobsRef = m_frame.jobs;
+    ID3D12Resource* ring = m_patchRing.Get();
+    fc.graph.addPass("r.as.proxy.patch", QueueType::Graphics,
                      [&](PassBuilder& b) {
                          b.use(instancesRef, Use::CopyDst);
                          b.use(jobsRef, Use::CopyDst);
@@ -1049,6 +1157,7 @@ void RayScene::record(FramePassContext& fc)
                   [zero, counts, bytes](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(counts), 0, c.resource(zero), 0, bytes); });
         selectExactSet(fc);
     }
+    selectProxyLevels(fc);
     // This frame's instance descriptors (GpuScene's CPU mirror is current, INTERFACES 6.3 v1.8).
     if (fc.framesInFlight > kDescSlots) fail("RayScene: %u frames in flight exceed %u descriptor slots", fc.framesInFlight, kDescSlots);
     const uint64_t slotOffset = (fc.frame.frameIndex % kDescSlots) * m_descSlotBytes;
@@ -1104,8 +1213,8 @@ void RayScene::record(FramePassContext& fc)
                       b.use(blas, Use::AccelerationStructureRead);
                       b.use(blasScratch, Use::AccelerationStructureScratch);
                   },
-                  [this, rebuild = m_exactRebuild](PassContext& c) {
-                      recordRefit(c.cmd, true);
+                  [this, rebuild = m_exactRebuild, deformedRebuild = m_deformedRebuild](PassContext& c) {
+                      recordRefit(c.cmd, true, &deformedRebuild);
                       recordExactBuilds(c.cmd, rebuild);
                   });
     }

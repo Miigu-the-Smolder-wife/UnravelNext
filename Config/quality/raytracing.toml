@@ -1,6 +1,8 @@
 # Owner: R. ARCHITECTURE 2.8, 2.12.
 [raytracing]
 character_proxy_triangles = 8000
+proxy_error_px = 1.0                   # a character's RT proxy cut: the coarsest whose error is at most this many pixel
+                                       # footprints at its distance (every R ray's footprint there is at least one pixel's)
 near_characters_with_proxy = 64
 dynamic_tlas_instances_max = 100000
 exact_set_max = 8                      # reflection exact set: skinned instances traced with their original mesh (ARCHITECTURE 2.6)

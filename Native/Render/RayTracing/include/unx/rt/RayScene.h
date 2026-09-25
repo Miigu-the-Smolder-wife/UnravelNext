@@ -49,7 +49,7 @@ struct RaySceneStats
     uint32_t staticInstances = 0, dynamicInstances = 0, deformedInstances = 0;
     uint32_t meshBlas = 0;
     uint64_t meshBlasTriangles = 0;        // unique triangles in mesh BLASes
-    uint64_t deformedTriangles = 0;        // triangles refit per frame
+    uint64_t deformedTriangles = 0;        // triangles refit per frame (the proxies' current cuts)
     uint64_t deformedVertices = 0;         // vertices deformed per frame
     uint64_t meshBlasBytes = 0, meshBlasBytesBeforeCompaction = 0;
     uint64_t deformedBlasBytes = 0, tlasStaticBytes = 0, tlasDynamicBytes = 0;
@@ -58,6 +58,7 @@ struct RaySceneStats
     uint32_t exactSlots = 0;               // reflection exact set capacity (original BLAS)
     uint32_t exactOccupied = 0, exactBuilds = 0;  // last frame: slots in use, slots (re)built
     uint64_t exactVertices = 0;            // vertices deformed per occupied slot's owner (last frame)
+    uint32_t proxySwitches = 0;            // last frame: deformed instances whose proxy cut changed (BLAS rebuilt)
 };
 
 class RayScene
@@ -131,7 +132,9 @@ private:
     void buildDeformed();
     void buildStaticTlas();
     void recordDeform(ID3D12GraphicsCommandList7* cmd) const;
-    void recordRefit(ID3D12GraphicsCommandList7* cmd, bool refit) const;
+    // Refit (refit = true) or build every deformed BLAS; 'rebuild' (per deformed instance, optional) builds those whose proxy
+    // cut changed this frame.
+    void recordRefit(ID3D12GraphicsCommandList7* cmd, bool refit, const std::vector<uint8_t>* rebuild = nullptr) const;
     void recordExactBuilds(ID3D12GraphicsCommandList7* cmd, const std::vector<uint8_t>& rebuild) const;
     void selectExactSet(FramePassContext& fc);
     uint32_t maxMeshVertices() const;
@@ -161,21 +164,33 @@ private:
     std::vector<MeshBlas> m_meshBlas;  // per scene mesh (geometryBase kNone = unused)
     Buffer m_meshBlasPool;
 
-    // RT proxy of a skinned mesh (ARCHITECTURE 2.8): the finest of V's uniform-error LOD cuts (ClusterData::lodLevels)
-    // with at most raytracing.character_proxy_triangles triangles (the coarsest when none fits); the full mesh when the
-    // scene has no cluster data. Shared by every instance of the mesh: per-submesh ranges of compact indices in R's index
-    // pool, a vertex map (compact -> mesh vertex) so only the proxy's vertices are deformed, and RtGeometry records.
+    // RT proxies of a skinned mesh (ARCHITECTURE 2.8): V's uniform-error LOD cuts (ClusterData::lodLevels) with at most
+    // raytracing.character_proxy_triangles triangles, finest first (the coarsest cut when none fits; the full mesh when
+    // the scene has no cluster data). Each: per-submesh ranges of compact indices in R's index pool, a vertex map (compact
+    // -> mesh vertex) so only its vertices are deformed, RtGeometry records, and the cut's object-space error.
     struct ProxyMesh
     {
-        bool built = false, reduced = false;
+        bool reduced = false;
+        float error = 0;
         uint32_t vertexMap = 0, vertexCount = 0, geometryBase = 0, triangles = 0;
         std::vector<uint32_t> indexOffset, indexCount;  // per geometry (non-empty submesh), in R's index pool
         std::vector<uint32_t> submesh;
     };
-    const ProxyMesh& proxyOf(uint32_t mesh);
-    std::vector<ProxyMesh> m_proxies;               // per scene mesh (built on demand)
+    const std::vector<ProxyMesh>& proxyLevels(uint32_t mesh);
+    ProxyMesh buildProxy(uint32_t mesh, uint32_t lodLevel);  // lodLevel = kNone: the full mesh
+    std::vector<std::vector<ProxyMesh>> m_proxyLevels;      // per scene mesh (built on demand)
+    std::vector<uint8_t> m_proxyLevelsBuilt;
     std::vector<uint32_t> m_indexPoolData, m_vertexMapData;
     uint32_t m_proxyBudget = 0;
+    float m_proxyErrorPx = 1;  // raytracing.proxy_error_px
+    // Per frame: each deformed instance's cut, the coarsest whose error (x the instance's scale) is at most
+    // proxy_error_px x the main view's pixel angle x the instance's distance from the eye (its bounding sphere's nearest
+    // point). A reflection or GI ray reaching the instance has a footprint of at least that width (the eye's pixel cone
+    // over a path no shorter than the straight distance), so the cut's error stays below every ray's footprint. Finer at
+    // once when the bound is exceeded, coarser only below 0.8 of it (hysteresis). A change rebuilds that BLAS.
+    void selectProxyLevels(FramePassContext& fc);
+    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> proxyGeometry(uint32_t sceneInstance, uint32_t mesh, const ProxyMesh& p, uint32_t vertexBase) const;
+    std::vector<uint8_t> m_deformedRebuild;  // per deformed instance: build instead of refit this frame
 
     struct Deformed
     {
@@ -184,6 +199,7 @@ private:
         uint32_t vertexBase = 0, vertexCount = 0;
         uint64_t blasOffset = 0, scratchOffset = 0;
         uint32_t geometryBase = 0;
+        uint32_t level = 0, record = 0;  // current proxy cut (index into proxyLevels), RtInstance record
         std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;
     };
     std::vector<Deformed> m_deformed;
@@ -205,7 +221,8 @@ private:
     std::vector<uint64_t> m_exactSlotFrame;  // frame whose counts each read-back slot holds
     std::vector<uint8_t> m_exactRebuild;     // per slot: build (new owner) instead of refit this frame
     uint64_t m_poolVertices = 1;             // deformed pool size (proxies + exact slots)
-    static constexpr uint64_t kPatchSlotBytes = 1024;
+    static constexpr uint64_t kPatchSlotBytes = 16384;       // per ring slot: exact set patches, then proxy cut patches
+    static constexpr uint64_t kProxyPatchOffset = 1024;
     ComPtr<ID3D12Resource> m_vsmRing;        // kDescSlots x 2 users x 32 B of ShadowSrvs
     uint8_t* m_vsmRingMapped = nullptr;
     uint32_t m_vsmRingSrv[8] = {};           // kDescSlots x 2 users (static_assert in RayScene.cpp)
