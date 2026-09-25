@@ -586,6 +586,8 @@ const std::vector<RayScene::ProxyMesh>& RayScene::proxyLevels(uint32_t mesh)
     std::vector<ProxyMesh>& levels = m_proxyLevels[mesh];
     if (m_proxyLevelsBuilt[mesh]) return levels;
     m_proxyLevelsBuilt[mesh] = 1;
+    if (m_proxySkeletons.size() < m_proxyLevels.size()) m_proxySkeletons.resize(m_proxyLevels.size());
+    m_proxySkeletons[mesh] = proxyPoseSkeleton(m_scene.source()->meshes[mesh]);
     const ClusterData& cd = m_scene.clusters();
     if (mesh < cd.meshes.size() && cd.meshes[mesh].lodLevelCount > 0)
     {
@@ -647,6 +649,12 @@ RayScene::ProxyMesh RayScene::buildProxy(uint32_t mesh, uint32_t lodLevel)
         p.triangles += (uint32_t)perSubmesh[s].size() / 3;
     }
     p.vertexCount = (uint32_t)(m_vertexMapData.size() - p.vertexMap);
+    if (p.reduced)
+    {
+        std::vector<uint32_t> cut;
+        for (const std::vector<uint32_t>& list : perSubmesh) cut.insert(cut.end(), list.begin(), list.end());
+        p.pose = proxyPoseCoefficients(sm, m_proxySkeletons[mesh], cut);
+    }
     return p;
 }
 
@@ -997,6 +1005,7 @@ void RayScene::selectProxyLevels(FramePassContext& fc)
 {
     m_deformedRebuild.assign(m_deformed.size(), 0);
     m_stats.proxySwitches = 0;
+    m_stats.posedErrorOverBindMax = 0;
     if (m_deformed.empty()) return;
     const ViewDesc& view = fc.frame.mainView;
     const float pixelAngle = 2 * std::tan(view.verticalFov * 0.5f) / (float)std::max(view.height, 1u);
@@ -1032,16 +1041,22 @@ void RayScene::selectProxyLevels(FramePassContext& fc)
             // A skinned pose can leave the bind-pose sphere: the distance is from its doubled radius (conservative).
             const float distance = std::max(std::sqrt(toEye.x * toEye.x + toEye.y * toEye.y + toEye.z * toEye.z) - 2 * gm.boundsSphere.w * scale, 0.0f);
             const float bound = m_proxyErrorPx * pixelAngle * distance;
+            // Cut errors in this pose (object space); 16 (attribution): V's bind-pose error alone.
+            const bool posed = (m_experiment & 16) == 0;
+            if (posed) proxyPoseTerms(m_proxySkeletons[d.mesh], m_scene.palette(d.sceneInstance), m_poseTerms);
+            auto cutError = [&](uint32_t l) { return !levels[l].reduced ? 0.0f : posed ? proxyPoseError(levels[l].pose, m_poseTerms) : levels[l].error; };
             // The reflection exact set's criterion (selectExactSet): the finest cut's error over this bound.
-            d.exactNeed = levels[0].error * scale > 0 ? (bound > 0 ? levels[0].error * scale / bound : FLT_MAX) : 0.0f;
+            const float finest = cutError(0) * scale;
+            d.exactNeed = finest > 0 ? (bound > 0 ? finest / bound : FLT_MAX) : 0.0f;
+            m_stats.posedErrorOverBindMax = std::max(m_stats.posedErrorOverBindMax, levels[0].error > 0 ? cutError(0) / levels[0].error : 0.0f);
             if (levels.size() < 2 || patches.size() + 2 > patchCapacity)
             {
                 triangles += levels[d.level].triangles;
                 continue;
             }
             uint32_t level = d.level;
-            while (level > 0 && levels[level].error * scale > bound) --level;  // finer at once
-            while (level + 1 < levels.size() && levels[level + 1].error * scale <= 0.8f * bound) ++level;  // coarser with margin
+            while (level > 0 && cutError(level) * scale > bound) --level;  // finer at once
+            while (level + 1 < levels.size() && cutError(level + 1) * scale <= 0.8f * bound) ++level;  // coarser with margin
             if (level != d.level)
             {
                 const ProxyMesh& p = levels[level];

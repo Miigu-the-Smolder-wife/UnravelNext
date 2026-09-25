@@ -450,6 +450,8 @@ int main(int argc, char** argv)
                      res.name.c_str(), (unsigned long long)as.framesRecorded, as.exactOccupiedTotal / recorded, as.exactSlots, as.exactBuildsTotal / recorded,
                      (unsigned long long)as.exactBuildsTotal, as.exactVerticesTotal / recorded, as.proxySwitchesTotal / recorded, (unsigned long long)as.proxySwitchesTotal,
                      as.exactWantedTotal / recorded, as.exactWithinBoundTotal / recorded);
+                logf("R %s: last frame: proxy cuts %llu triangles refit, %llu vertices deformed; finest cut's posed error bound up to %.1f x V's bind-pose error\n",
+                     res.name.c_str(), (unsigned long long)as.deformedTriangles, (unsigned long long)as.deformedVertices, as.posedErrorOverBindMax);
             }
             if (reflSystem)
             {

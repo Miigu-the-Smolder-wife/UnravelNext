@@ -10,6 +10,7 @@
 // Rays query the dynamic TLAS, then the static one with TMax clipped (RayShaders.hlsli).
 #include "unx/render/Frame.h"
 #include "unx/render/GpuScene.h"
+#include "unx/rt/ProxyPoseBound.h"
 
 #include <cstdint>
 #include <vector>
@@ -59,6 +60,7 @@ struct RaySceneStats
     uint32_t exactOccupied = 0, exactBuilds = 0;  // last frame: slots in use, slots (re)built
     uint64_t exactVertices = 0;            // vertices deformed per occupied slot's owner (last frame)
     uint32_t proxySwitches = 0;            // last frame: deformed instances whose proxy cut changed (BLAS rebuilt)
+    float posedErrorOverBindMax = 0;       // last frame: largest finest-cut error bound in its pose over V's bind-pose error
     // Since load (measurement summaries): frames recorded, and over them exact slots (re)built, exact slots occupied, exact
     // vertices deformed and proxy cut switches.
     uint64_t framesRecorded = 0, exactBuildsTotal = 0, exactOccupiedTotal = 0, exactVerticesTotal = 0, proxySwitchesTotal = 0;
@@ -179,7 +181,8 @@ private:
     struct ProxyMesh
     {
         bool reduced = false;
-        float error = 0;
+        float error = 0;                // V's cut error (bind pose, as claimed)
+        ProxyPoseCoefficients pose;     // the cut's error in any pose (ProxyPoseBound.h), measured at load
         uint32_t vertexMap = 0, vertexCount = 0, geometryBase = 0, triangles = 0;
         std::vector<uint32_t> indexOffset, indexCount;  // per geometry (non-empty submesh), in R's index pool
         std::vector<uint32_t> submesh;
@@ -187,12 +190,16 @@ private:
     const std::vector<ProxyMesh>& proxyLevels(uint32_t mesh);
     ProxyMesh buildProxy(uint32_t mesh, uint32_t lodLevel);  // lodLevel = kNone: the full mesh
     std::vector<std::vector<ProxyMesh>> m_proxyLevels;      // per scene mesh (built on demand)
+    std::vector<ProxyPoseSkeleton> m_proxySkeletons;        // per scene mesh: joint centres, reference joint
+    ProxyPoseTerms m_poseTerms;                             // scratch: this frame's palette terms of one instance
     std::vector<uint8_t> m_proxyLevelsBuilt;
     std::vector<uint32_t> m_indexPoolData, m_vertexMapData;
     uint32_t m_proxyBudget = 0;
     float m_proxyErrorPx = 1;  // raytracing.proxy_error_px
     uint32_t m_experiment = 0; // raytracing.experiment_disable (cost attribution only): 1 = build the deformed BLASes every frame
-    // Per frame: each deformed instance's cut, the coarsest whose error (x the instance's scale) is at most
+    // Per frame: each deformed instance's cut, the coarsest whose error in the instance's current pose (ProxyPoseBound.h:
+    // bind-pose error plus the joints' relative motion times the cut's weight mismatch; raytracing.experiment_disable 16:
+    // V's bind-pose error alone, the previous rule) x the instance's scale is at most
     // proxy_error_px x the main view's pixel angle x the instance's distance from the eye (its bounding sphere's nearest
     // point). A reflection or GI ray reaching the instance has a footprint of at least that width (the eye's pixel cone
     // over a path no shorter than the straight distance), so the cut's error stays below every ray's footprint. Finer at

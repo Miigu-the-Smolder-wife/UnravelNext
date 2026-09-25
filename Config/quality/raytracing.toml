@@ -10,5 +10,6 @@ exact_set_min_hits = 64                # M/G reflection hits in a frame for an i
 experiment_disable = 0                 # cost attribution only (recorded in the quality hash): 1 = build every deformed BLAS
                                        # every frame instead of refitting, 2 = reflection exact set by hit count alone
                                        # (without the proxy error criterion), 4 = dynamic TLAS descriptors copied to
-                                       # video memory before the build, 8 = dynamic TLAS built with PREFER_FAST_BUILD.
+                                       # video memory before the build, 8 = dynamic TLAS built with PREFER_FAST_BUILD,
+                                       # 16 = proxy cuts chosen by V's bind-pose error alone (not the posed bound).
                                        # Never nonzero outside measurements.
