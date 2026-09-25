@@ -41,7 +41,12 @@
 #define UNX_GI_SCREENPROBES_HLSLI
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
+#include "Passes/GI/GiCache.hlsli"
 
+// pad0 = the K-path maps atlas SRV (v1.13). pad1 = the GI cache SRV + 1 (0 = none): with it the irradiance comes from the
+// cache's per-ray 9 x 9 irradiance maps at the pixel's own position and normal (design 2.5 revision D, step 1: exact at
+// the entries' grid directions, Catmull-Rom between; FrameResources::giCache declared SrvCompute by the caller); without
+// it from the probes' SH (interim, L2 truncation).
 struct ProbeSrvs
 {
     uint probes, occlusion, pad0, pad1;
@@ -455,6 +460,20 @@ ScreenProbeLighting giProbeGatherFrom(Src t, ProbeSrvs s, uint2 pixel, float3 wo
     {
         const GiProbeFootprint fb = giProbeFootprintAt(t, pixel, worldPos, -normal, linearDepth, spacing, count);
         o.irradianceBack = giFootprintIrradiance(t, fb, count, -normal).rgb;
+    }
+    if (s.pad1 != 0)
+    {
+        // The cache's irradiance maps at this pixel (global loads; the tile LDS path is step 2 of revision D).
+        ByteAddressBuffer cache = ResourceDescriptorHeap[s.pad1 - 1];
+        const GiHeader h = giHeader(cache);
+        float weight;
+        const float3 front = giCacheIrradianceAt(cache, h, worldPos, normal, 0, weight);
+        if (weight > 0) o.irradiance = front;
+        if (back)
+        {
+            const float3 behind = giCacheIrradianceAt(cache, h, worldPos, -normal, 0, weight);
+            if (weight > 0) o.irradianceBack = behind;
+        }
     }
     o.radiance = wantRadiance ? giProbeFootprintRadiance(t, fp, count, dir, coneHalfAngle, s.pad0) : 0;
     return o;
