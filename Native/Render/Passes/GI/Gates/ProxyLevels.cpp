@@ -289,8 +289,7 @@ int main(int argc, char** argv)
                             logf(" (j%u|r%u K1 %.3f K2 %.3f a %.3f b %.3f)", i, r, pc.terms[t].k1, pc.terms[t].k2, terms.alpha[pc.terms[t].pair],
                                  length(apply(i, cl.centre) - apply(r, cl.centre)));
                         }
-                        logf("
-");
+                        logf("\n");
                     }
                 }
                 const Stats plost = distances(posedSourcePoints, TriangleGrid(posedCut)), padded = distances(samplePoints(posedCut, 20000, 4), posedSourceGrid);
