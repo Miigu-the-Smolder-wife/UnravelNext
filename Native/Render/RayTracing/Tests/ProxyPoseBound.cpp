@@ -133,10 +133,10 @@ int main()
         const uint32_t a = s, b = (s + 1) % sides, c = top + s, d = top + (s + 1) % sides;
         cut.insert(cut.end(), { a, c, b, b, c, d });
     }
-    const rt::ProxyPoseSkeleton skeleton = rt::proxyPoseSkeleton(m);
+    rt::ProxyPoseSkeleton skeleton = rt::proxyPoseSkeleton(m);
     const rt::ProxyPoseCoefficients coefficients = rt::proxyPoseCoefficients(m, skeleton, cut);
-    logf("tube %u triangles, cut %zu triangles: bind error %.5f m, reference joint %u\n", (uint32_t)(m.indices.size() / 3), cut.size() / 3, coefficients.bindError,
-         skeleton.reference);
+    logf("tube %u triangles, cut %zu triangles: bind error %.5f m, %zu (joint, reference) terms\n", (uint32_t)(m.indices.size() / 3), cut.size() / 3,
+         coefficients.bindError, coefficients.terms.size());
     bool pass = coefficients.bindError < 1e-4f;  // a cylinder's end rings span its straight sides exactly
     for (const float degrees : { 0.0f, 10.0f, 30.0f, 60.0f, 90.0f, 120.0f })
     {

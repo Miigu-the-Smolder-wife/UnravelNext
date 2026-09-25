@@ -228,22 +228,40 @@ float3 pointOf(const scene::Mesh& m, const Combination& c)
     return p;
 }
 
-// Adds one pair's terms to the per-joint maxima.
-void addPair(const scene::Mesh& m, const ProxyPoseSkeleton& sk, const Combination& x, const Combination& q, ProxyPoseCoefficients& out)
+// Per (joint, reference) maxima of one cut while its pairs are added.
+struct PairMaxima
+{
+    std::vector<int32_t> slot;  // joint * joints + reference -> index in terms, -1 = none
+    std::vector<ProxyPoseCoefficients::Term> terms;
+    std::vector<std::pair<uint32_t, uint32_t>> keys;
+};
+
+// Adds one pair's terms.
+void addPair(const scene::Mesh& m, const ProxyPoseSkeleton& sk, const Combination& x, const Combination& q, ProxyPoseCoefficients& out, PairMaxima& acc)
 {
     const float3 px = pointOf(m, x), pq = pointOf(m, q);
     out.bindError = std::max(out.bindError, length(px - pq));
     JointWeight wx[12], wq[12];
     const uint32_t nx = blended(m, x, wx), nq = blended(m, q, wq);
-    uint32_t joints[24];
-    uint32_t nj = 0;
-    for (uint32_t i = 0; i < nx; ++i) joints[nj++] = wx[i].joint;
+    const uint32_t joints = (uint32_t)sk.centres.size();
+    uint32_t r = joints;
+    float best = -1;
     for (uint32_t i = 0; i < nq; ++i)
-        if (std::find(joints, joints + nj, wq[i].joint) == joints + nj) joints[nj++] = wq[i].joint;
+        if (wq[i].joint < joints && wq[i].weight > best)
+        {
+            best = wq[i].weight;
+            r = wq[i].joint;
+        }
+    if (r == joints) return;
+    uint32_t list[24];
+    uint32_t nj = 0;
+    for (uint32_t i = 0; i < nx; ++i) list[nj++] = wx[i].joint;
+    for (uint32_t i = 0; i < nq; ++i)
+        if (std::find(list, list + nj, wq[i].joint) == list + nj) list[nj++] = wq[i].joint;
     for (uint32_t a = 0; a < nj; ++a)
     {
-        const uint32_t i = joints[a];
-        if (i >= out.k1.size()) continue;
+        const uint32_t i = list[a];
+        if (i >= joints || i == r) continue;
         const float d = weightOf(wx, nx, i) - weightOf(wq, nq, i);
         float h = 0;
         for (const auto& [c, pc, wc, nc] : { std::tuple{ &x, px, wx, nx }, std::tuple{ &q, pq, wq, nq } })
@@ -253,8 +271,18 @@ void addPair(const scene::Mesh& m, const ProxyPoseSkeleton& sk, const Combinatio
                 const uint32_t nv = vertexWeights(m, c->vertex[k], wv);
                 h += c->weight[k] * std::fabs(weightOf(wv, nv, i) - weightOf(wc, nc, i)) * length(m.positions[c->vertex[k]] - pc);
             }
-        out.k1[i] = std::max(out.k1[i], std::fabs(d) * length(pq - sk.centres[i]) + h);
-        out.k2[i] = std::max(out.k2[i], std::fabs(d));
+        const float k1 = std::fabs(d) * length(pq - sk.centres[i]) + h, k2 = std::fabs(d);
+        if (k1 <= 0 && k2 <= 0) continue;
+        int32_t& slot = acc.slot[(size_t)i * joints + r];
+        if (slot < 0)
+        {
+            slot = (int32_t)acc.terms.size();
+            acc.terms.push_back({ 0, r, 0, 0 });
+            acc.keys.push_back({ i, r });
+        }
+        ProxyPoseCoefficients::Term& t = acc.terms[slot];
+        t.k1 = std::max(t.k1, k1);
+        t.k2 = std::max(t.k2, k2);
     }
 }
 } // namespace
@@ -280,19 +308,15 @@ ProxyPoseSkeleton proxyPoseSkeleton(const scene::Mesh& m)
     }
     for (uint32_t i = 0; i < joints; ++i)
         if (total[i] > 0) sk.centres[i] = sum[i] * (float)(1.0 / total[i]);
-    sk.reference = (uint32_t)(std::max_element(total.begin(), total.end()) - total.begin());
     return sk;
 }
 
-ProxyPoseCoefficients proxyPoseCoefficients(const scene::Mesh& m, const ProxyPoseSkeleton& sk, std::span<const uint32_t> cut)
+ProxyPoseCoefficients proxyPoseCoefficients(const scene::Mesh& m, ProxyPoseSkeleton& sk, std::span<const uint32_t> cut)
 {
     ProxyPoseCoefficients out;
     const bool skinned = !sk.centres.empty() && m.skin.weights.size() >= 4 * m.positions.size();
-    if (skinned)
-    {
-        out.k1.assign(sk.centres.size(), 0.0f);
-        out.k2.assign(sk.centres.size(), 0.0f);
-    }
+    PairMaxima acc;
+    if (skinned) acc.slot.assign(sk.centres.size() * sk.centres.size(), -1);
     if (cut.size() < 3 || m.indices.size() < 3) return out;
     const TriangleGrid cutGrid(m.positions, cut), sourceGrid(m.positions, std::span<const uint32_t>(m.indices));
     auto triangleCombination = [](std::span<const uint32_t> indices, uint32_t t, float3 bary) {
@@ -305,7 +329,7 @@ ProxyPoseCoefficients proxyPoseCoefficients(const scene::Mesh& m, const ProxyPos
         return c;
     };
     auto pair = [&](const Combination& x, const Combination& q) {
-        if (skinned) addPair(m, sk, x, q, out);
+        if (skinned) addPair(m, sk, x, q, out, acc);
         else out.bindError = std::max(out.bindError, length(pointOf(m, x) - pointOf(m, q)));
     };
     // Source vertices -> the cut (geometry the cut loses).
@@ -331,44 +355,88 @@ ProxyPoseCoefficients proxyPoseCoefficients(const scene::Mesh& m, const ProxyPos
             sourceGrid.closest(pointOf(m, q), st, bary);
             pair(triangleCombination(std::span<const uint32_t>(m.indices), st, bary), q);
         }
+    // Register the pairs in the skeleton (shared by every cut of the mesh), terms sorted by reference joint.
+    for (size_t k = 0; k < acc.terms.size(); ++k)
+    {
+        const auto it = std::find(sk.pairs.begin(), sk.pairs.end(), acc.keys[k]);
+        acc.terms[k].pair = (uint32_t)(it - sk.pairs.begin());
+        if (it == sk.pairs.end()) sk.pairs.push_back(acc.keys[k]);
+        out.terms.push_back(acc.terms[k]);
+    }
+    std::sort(out.terms.begin(), out.terms.end(), [](const auto& a, const auto& b) { return a.reference < b.reference; });
     return out;
 }
 
 void proxyPoseTerms(const ProxyPoseSkeleton& sk, std::span<const float4> palette, ProxyPoseTerms& out)
 {
     const uint32_t joints = (uint32_t)std::min<size_t>(sk.centres.size(), palette.size() / 3);
-    out.alpha.assign(sk.centres.size(), 0.0f);
-    out.beta.assign(sk.centres.size(), 0.0f);
+    out.alpha.assign(sk.pairs.size(), 0.0f);
+    out.beta.assign(sk.pairs.size(), 0.0f);
     out.s = 1;
-    if (joints == 0 || sk.reference >= joints) return;
+    if (joints == 0) return;
     auto row = [&](uint32_t j, int r) { return palette[3 * j + r]; };
     auto apply = [&](uint32_t j, float3 p) {
         const float4 a = row(j, 0), b = row(j, 1), c = row(j, 2);
         return float3{ a.x * p.x + a.y * p.y + a.z * p.z + a.w, b.x * p.x + b.y * p.y + b.z * p.z + b.w, c.x * p.x + c.y * p.y + c.z * p.z + c.w };
     };
-    const uint32_t r = sk.reference;
+    // A bound on the spectral norm: min(Frobenius, sqrt(max column sum x max row sum)).
+    auto norm2 = [](const float d[3][3]) {
+        float frob = 0, rowMax = 0, col[3] = { 0, 0, 0 };
+        for (int k = 0; k < 3; ++k)
+        {
+            float rowSum = 0;
+            for (int c = 0; c < 3; ++c)
+            {
+                frob += d[k][c] * d[k][c];
+                rowSum += std::fabs(d[k][c]);
+                col[c] += std::fabs(d[k][c]);
+            }
+            rowMax = std::max(rowMax, rowSum);
+        }
+        return std::min(std::sqrt(frob), std::sqrt(rowMax * std::max({ col[0], col[1], col[2] })));
+    };
     float s = 0;
     for (uint32_t i = 0; i < joints; ++i)
     {
-        float d[3][3], m[3][3];
+        float m[3][3];
+        for (int k = 0; k < 3; ++k)
+        {
+            const float4 a = row(i, k);
+            m[k][0] = a.x, m[k][1] = a.y, m[k][2] = a.z;
+        }
+        s = std::max(s, norm2(m));
+    }
+    out.s = s;
+    for (size_t p = 0; p < sk.pairs.size(); ++p)
+    {
+        const auto [i, r] = sk.pairs[p];
+        if (i >= joints || r >= joints) continue;
+        float d[3][3];
         for (int k = 0; k < 3; ++k)
         {
             const float4 a = row(i, k), b = row(r, k);
-            m[k][0] = a.x, m[k][1] = a.y, m[k][2] = a.z;
             d[k][0] = a.x - b.x, d[k][1] = a.y - b.y, d[k][2] = a.z - b.z;
         }
-        out.alpha[i] = spectralNorm(d);
-        s = std::max(s, spectralNorm(m));
-        out.beta[i] = length(apply(i, sk.centres[i]) - apply(r, sk.centres[i]));
+        out.alpha[p] = norm2(d);
+        out.beta[p] = length(apply(i, sk.centres[i]) - apply(r, sk.centres[i]));
     }
-    out.s = s;
 }
 
 float proxyPoseError(const ProxyPoseCoefficients& c, const ProxyPoseTerms& t)
 {
-    float e = t.s * c.bindError;
-    const size_t n = std::min(c.k1.size(), t.alpha.size());
-    for (size_t i = 0; i < n; ++i) e += t.alpha[i] * c.k1[i] + t.beta[i] * c.k2[i];
-    return e;
+    // Terms are grouped by reference joint: one sum per reference (every pair is in one group), the largest bounds all.
+    float worst = 0, sum = 0;
+    uint32_t reference = 0xFFFFFFFFu;
+    for (const ProxyPoseCoefficients::Term& term : c.terms)
+    {
+        if (term.reference != reference)
+        {
+            reference = term.reference;
+            sum = 0;
+        }
+        if (term.pair < t.alpha.size()) sum += t.alpha[term.pair] * term.k1 + t.beta[term.pair] * term.k2;
+        worst = std::max(worst, sum);
+    }
+    return t.s * c.bindError + worst;
 }
 } // namespace unx::render::rt

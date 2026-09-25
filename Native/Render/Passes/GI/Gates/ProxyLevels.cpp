@@ -10,6 +10,7 @@
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/render/GpuScene.h"
+#include "unx/rt/ProxyPoseBound.h"
 
 #include <algorithm>
 #include <cmath>
@@ -226,6 +227,44 @@ int main(int argc, char** argv)
                 logf("          measured (bind pose): source -> cut max %.5f P99 %.5f mean %.6f m; cut -> source max %.5f P99 %.5f mean %.6f m; "
                      "max / claimed %.1f\n", lost.max, lost.p99, lost.mean, added.max, added.p99, added.mean,
                      level.error > 0 ? std::max(lost.max, added.max) / level.error : 0.0f);
+                // Posed error bound (RayScene's cut rule) in each skeleton pose stored in the scene.
+                std::vector<uint32_t> cutIndices;
+                for (uint32_t k = level.clusterOffset; k < level.clusterOffset + level.clusterCount; ++k)
+                {
+                    const gpu::Cluster& c = cd.clusters[cd.lodLevelClusters[k]];
+                    for (uint32_t t = 0; t < ((c.counts >> 8) & 0xFFu); ++t)
+                    {
+                        const uint32_t packed = cd.clusterTriangles[c.triangleOffset + t];
+                        for (uint32_t v : { packed & 0xFFu, (packed >> 8) & 0xFFu, (packed >> 16) & 0xFFu }) cutIndices.push_back(cd.clusterVertexIndices[c.vertexOffset + v]);
+                    }
+                }
+                render::rt::ProxyPoseSkeleton sk = render::rt::proxyPoseSkeleton(sm);
+                const render::rt::ProxyPoseCoefficients pc = render::rt::proxyPoseCoefficients(sm, sk, cutIndices);
+                logf("          pose coefficients: bind error %.5f m, %zu joints, %zu terms:", pc.bindError, sk.centres.size(), pc.terms.size());
+                for (const auto& t : pc.terms) logf(" (j%u|r%u) K1 %.3f K2 %.3f", sk.pairs[t.pair].first, t.reference, t.k1, t.k2);
+                logf("\n");
+                for (const scene::Instance& in : s.instances)
+                {
+                    if (in.mesh != m || in.skeleton >= s.skeletons.size()) continue;
+                    const scene::Skeleton& skel = s.skeletons[in.skeleton];
+                    std::vector<float4> palette;
+                    for (size_t j = 0; j < sm.skin.inverseBind.size() && j < skel.jointToModel.size(); ++j)
+                    {
+                        const float3x4& a = skel.jointToModel[j];
+                        const float3x4& b = sm.skin.inverseBind[j];
+                        float r[3][4];
+                        for (int y = 0; y < 3; ++y)
+                            for (int x = 0; x < 4; ++x)
+                                r[y][x] = a.m[y][0] * b.m[0][x] + a.m[y][1] * b.m[1][x] + a.m[y][2] * b.m[2][x] + (x == 3 ? a.m[y][3] : 0.0f);
+                        for (int y = 0; y < 3; ++y) palette.push_back({ r[y][0], r[y][1], r[y][2], r[y][3] });
+                    }
+                    render::rt::ProxyPoseTerms terms;
+                    render::rt::proxyPoseTerms(sk, palette, terms);
+                    logf("          stored pose of skeleton %u: s %.3f, bound %.5f m;", in.skeleton, terms.s, render::rt::proxyPoseError(pc, terms));
+                    for (size_t j = 0; j < terms.alpha.size(); ++j) logf(" (j%u|r%u) a %.3f b %.3f", sk.pairs[j].first, sk.pairs[j].second, terms.alpha[j], terms.beta[j]);
+                    logf("\n");
+                    break;  // one instance per mesh
+                }
             }
         }
         return 0;
