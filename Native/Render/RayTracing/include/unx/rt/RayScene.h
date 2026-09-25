@@ -55,6 +55,9 @@ struct RaySceneStats
     uint64_t deformedBlasBytes = 0, tlasStaticBytes = 0, tlasDynamicBytes = 0;
     double loadMs = 0;                     // CPU wall time of the load-time build (includes GPU waits)
     uint32_t deformedAboveProxyBudget = 0; // deformed meshes with more triangles than raytracing.character_proxy_triangles
+    uint32_t exactSlots = 0;               // reflection exact set capacity (original BLAS)
+    uint32_t exactOccupied = 0, exactBuilds = 0;  // last frame: slots in use, slots (re)built
+    uint64_t exactVertices = 0;            // vertices deformed per occupied slot's owner (last frame)
 };
 
 class RayScene
@@ -85,6 +88,13 @@ public:
     const RaySceneStats& stats() const { return m_stats; }
     uint32_t sceneRevision() const { return m_sceneRevision; }
 
+    // Reflection exact set (ARCHITECTURE 2.6): per skinned instance, the M/G reflection rays that hit it this frame. The
+    // reflection trace adds to it (ReflectionHit.hlsli, RtInstance flags >> 8 = deformed index) and calls
+    // recordExactReadback after its trace; the characters hit at least raytracing.exact_set_min_hits times (most first, at
+    // most raytracing.exact_set_max) are traced with their original mesh from framesInFlight frames later.
+    BufferRef exactHitCounts() const { return m_frame.exactCounts; }
+    void recordExactReadback(FramePassContext& fc);
+
     // Re-deforms the deformed instances, refits their BLASes and rebuilds the dynamic TLAS on 'cmd', with its own
     // barriers: the load-time path and tests that run outside a frame graph (the frame path is record()).
     void updateDynamic(ID3D12GraphicsCommandList7* cmd, bool refit);
@@ -108,6 +118,9 @@ private:
     void buildStaticTlas();
     void recordDeform(ID3D12GraphicsCommandList7* cmd) const;
     void recordRefit(ID3D12GraphicsCommandList7* cmd, bool refit) const;
+    void recordExactBuilds(ID3D12GraphicsCommandList7* cmd, const std::vector<uint8_t>& rebuild) const;
+    void selectExactSet(FramePassContext& fc);
+    uint32_t maxMeshVertices() const;
     void recordDynamicTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs);
     void recordStaticTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs);
     // INTERFACES 6.3 (v1.8): the instance's current transform and visibility (hidden = mask 0: no ray can hit it).
@@ -116,7 +129,7 @@ private:
 
     struct Frame  // graph references of the current frame
     {
-        BufferRef tlasStatic, tlasDynamic, deformedBlas, deformedVertices;
+        BufferRef tlasStatic, tlasDynamic, deformedBlas, deformedVertices, exactCounts, instances, jobs;
     };
     Frame m_frame;
 
@@ -153,12 +166,32 @@ private:
     struct Deformed
     {
         uint32_t sceneInstance = 0, mesh = 0;
+        uint32_t originalGeometryBase = 0;  // the mesh's own geometry records (scene indices): exact set
         uint32_t vertexBase = 0, vertexCount = 0;
         uint64_t blasOffset = 0, scratchOffset = 0;
         uint32_t geometryBase = 0;
         std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;
     };
     std::vector<Deformed> m_deformed;
+    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> originalGeometry(const Deformed& d, uint32_t vertexBase) const;
+    // Exact set slots: a vertex region (largest skinned mesh), BLAS and scratch each; owner = deformed index or kNone.
+    struct ExactSlot
+    {
+        uint32_t owner = 0xFFFFFFFFu, record = 0, job = 0, vertexBase = 0;
+        uint64_t blasOffset = 0, scratchOffset = 0;
+        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;  // the owner's full mesh
+    };
+    std::vector<ExactSlot> m_exact;
+    uint32_t m_exactMinHits = 0;
+    Buffer m_exactCounts, m_exactZero;     // uint per deformed instance (UAV), and zeros to clear it
+    uint32_t m_exactCountsUav = 0xFFFFFFFFu;
+    ComPtr<ID3D12Resource> m_exactReadback, m_patchRing;
+    const uint32_t* m_exactReadbackMapped = nullptr;
+    uint8_t* m_patchRingMapped = nullptr;
+    std::vector<uint64_t> m_exactSlotFrame;  // frame whose counts each read-back slot holds
+    std::vector<uint8_t> m_exactRebuild;     // per slot: build (new owner) instead of refit this frame
+    uint64_t m_poolVertices = 1;             // deformed pool size (proxies + exact slots)
+    static constexpr uint64_t kPatchSlotBytes = 1024;
     Buffer m_deformedPool, m_deformedBlasPool, m_deformedScratch, m_deformJobs, m_deformGroups;
     uint32_t m_deformGroupCount = 0;
     uint32_t m_deformedPoolUav = gpu::kNone;

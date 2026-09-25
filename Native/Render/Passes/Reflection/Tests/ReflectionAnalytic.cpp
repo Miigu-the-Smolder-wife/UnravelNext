@@ -6,6 +6,9 @@
 //     floor lobe (256 VNDF samples, masked ones excluded as on the GPU, the walls intersected exactly); the G path's
 //     control variate cancels in the uniform cache, so any deviation is a transport, shading or plumbing error.
 //  2. A mirror ground under a constant sky L: M pixels see the sky, value L.
+//  4. Reflection exact set (ARCHITECTURE 2.6): a mirror floor reflects a skinned emissive panel whose RT proxy (a
+//     hand-made LOD cut of its even triangles, budget 100) has a hole in half of every cell. Once the panel's reflection
+//     hits put it in the exact set it is traced with its original mesh: every reflected panel pixel reads its emission.
 //  3. Textures at hits (INTERFACES v1.11): a mirror floor reflects a wall whose emission is modulated by a published
 //     16 x 16 checker texture (black sky, black diffuse): an M pixel's value is the wall's emission x the texture's
 //     bilinear value at the reflected point, computed on the CPU from the mirror direction.
@@ -342,21 +345,132 @@ uint32_t createTexture(Device& device, const std::vector<uint8_t>& rgba, uint32_
     return srv;
 }
 
+// Scene 4: mirror floor and a skinned emissive panel (8 x 8 cells, x in [-2, 2], y in [0.5, 4.5], z = -4, facing +z).
+scene::Scene skinnedPanelInMirror()
+{
+    scene::Scene s;
+    s.name = "refl_exact_set";
+    scene::Material floorMaterial;
+    floorMaterial.name = "mirror";
+    floorMaterial.baseColor = { 1, 1, 1 };
+    floorMaterial.metallic = 1;
+    floorMaterial.roughness = 0;
+    s.materials.push_back(floorMaterial);
+    scene::Material panelMaterial;
+    panelMaterial.name = "emitter";
+    panelMaterial.baseColor = { 0, 0, 0 };
+    panelMaterial.emissive = { 5, 5, 5 };
+    s.materials.push_back(panelMaterial);
+    scene::Mesh floor;
+    floor.name = "floor";
+    addQuad(floor, { -40, 0, 20 }, { 40, 0, 20 }, { 40, 0, -8 }, { -40, 0, -8 }, { 0, 1, 0 });
+    floor.submeshes.push_back({ 0, 6, 0 });
+    s.meshes.push_back(floor);
+    scene::Mesh panel;
+    panel.name = "panel";
+    const int cells = 8;
+    for (int j = 0; j <= cells; ++j)
+        for (int i = 0; i <= cells; ++i)
+        {
+            panel.positions.push_back({ -2 + 4.0f * i / cells, 0.5f + 4.0f * j / cells, -4 });
+            panel.normals.push_back({ 0, 0, 1 });
+            panel.uv0.push_back({ (float)i / cells, (float)j / cells });
+            panel.skin.joints.insert(panel.skin.joints.end(), { 0, 0, 0, 0 });
+            panel.skin.weights.insert(panel.skin.weights.end(), { 1, 0, 0, 0 });
+        }
+    for (int j = 0; j < cells; ++j)
+        for (int i = 0; i < cells; ++i)
+        {
+            const uint32_t a = j * (cells + 1) + i, b = a + 1, c = a + cells + 1, d = c + 1;
+            panel.indices.insert(panel.indices.end(), { a, b, d, a, d, c });  // CCW seen from +z
+        }
+    panel.submeshes.push_back({ 0, (uint32_t)panel.indices.size(), 1 });
+    panel.skin.inverseBind = { float3x4{} };
+    s.meshes.push_back(panel);
+    scene::Skeleton skeleton;
+    skeleton.name = "panel";
+    skeleton.jointToModel = { float3x4{} };
+    s.skeletons.push_back(skeleton);
+    s.instances.push_back({});
+    scene::Instance p;
+    p.mesh = 1;
+    p.flags |= scene::InstanceSkinned | scene::InstanceDynamic;
+    p.skeleton = 0;
+    s.instances.push_back(p);
+    s.sun.illuminance = 0;
+    scene::Camera cam;
+    cam.name = "mirror";
+    cam.position = { 0.3f, 1.2f, 7.0f };
+    cam.forward = normalize(float3{ 0, -0.2f, -1 });
+    cam.up = normalize(cross(cross(cam.forward, float3{ 0, 1, 0 }), cam.forward));
+    s.cameras.push_back(cam);
+    return s;
+}
+
+// The panel's cuts (V's ClusterData format): the full mesh (error 0) and its even triangles (error 0.1).
+ClusterData panelCuts(const scene::Scene& s)
+{
+    ClusterData cd;
+    cd.meshes.resize(s.meshes.size());
+    const scene::Mesh& m = s.meshes[1];
+    auto addCut = [&](float error, uint32_t stride) {
+        gpu::LodLevel level{};
+        level.clusterOffset = (uint32_t)cd.lodLevelClusters.size();
+        level.error = error;
+        std::vector<uint32_t> tris;
+        for (uint32_t t = 0; t < (uint32_t)m.indices.size() / 3; t += stride) tris.push_back(t);
+        for (size_t first = 0; first < tris.size(); first += 64)
+        {
+            gpu::Cluster c{};
+            c.vertexOffset = (uint32_t)cd.clusterVertexIndices.size();
+            c.triangleOffset = (uint32_t)cd.clusterTriangles.size();
+            std::vector<uint32_t> local;
+            auto localOf = [&](uint32_t v) {
+                for (uint32_t k = 0; k < (uint32_t)local.size(); ++k)
+                    if (local[k] == v) return k;
+                local.push_back(v);
+                return (uint32_t)local.size() - 1;
+            };
+            const size_t last = std::min(first + 64, tris.size());
+            for (size_t k = first; k < last; ++k)
+            {
+                const uint32_t t = tris[k];
+                cd.clusterTriangles.push_back(localOf(m.indices[3 * t]) | (localOf(m.indices[3 * t + 1]) << 8) | (localOf(m.indices[3 * t + 2]) << 16));
+            }
+            cd.clusterVertexIndices.insert(cd.clusterVertexIndices.end(), local.begin(), local.end());
+            c.counts = (uint32_t)local.size() | ((uint32_t)(last - first) << 8);
+            c.material = 1;
+            cd.lodLevelClusters.push_back((uint32_t)cd.clusters.size());
+            cd.clusters.push_back(c);
+            level.triangleCount += (uint32_t)(last - first);
+        }
+        level.clusterCount = (uint32_t)cd.lodLevelClusters.size() - level.clusterOffset;
+        cd.lodLevels.push_back(level);
+    };
+    cd.meshes[1].lodLevelOffset = 0;
+    addCut(0.0f, 1);
+    addCut(0.1f, 2);
+    cd.meshes[1].lodLevelCount = 2;
+    return cd;
+}
+
 struct Outcome
 {
     uint32_t surface = 0, k = 0, mirror = 0, glossy = 0;
     double worstM = 0, worstG = 0, meanM = 0, meanG = 0;
     double excessM = -1, excessG = -1;  // largest deviation beyond the pixel's allowance (<= 0: all within)
+    uint32_t exactOccupied = 0, exactSlots = 0;  // RayScene's reflection exact set after the last frame
     uint32_t outliersM = 0;
 };
 
 Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky,
             const std::function<Expectation(uint32_t, uint32_t)>& expectedAt, uint32_t frames, uint32_t width, uint32_t height,
-            const std::vector<gpu::MaterialTextures>* textures = nullptr)
+            const std::vector<gpu::MaterialTextures>* textures = nullptr, const ClusterData* clusters = nullptr)
 {
     GpuScene gpuScene(device);
     gpuScene.upload(s);
     if (textures) gpuScene.setMaterialTextures(*textures);
+    if (clusters) gpuScene.setClusters(*clusters);
     Outcome out;
     TrackState state;
     RenderGraph graph(device);
@@ -409,6 +523,8 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
         main.depth = graph.createTexture({ "test depth", width, height, 1, 1, DXGI_FORMAT_R32_FLOAT });
         main.gbuffer = graph.createTexture({ "test gbuffer", width, height, 1, 1, DXGI_FORMAT_R32G32_UINT });
         rt::RayScene& rays = rt::RayScene::get(fc);
+        out.exactSlots = rays.stats().exactSlots;
+        out.exactOccupied = rays.stats().exactOccupied;
         rays.record(fc);
         uint32_t scene[8];
         rays.rootConstants(scene);
@@ -606,6 +722,50 @@ int main(int argc, char** argv)
             pass = pass && okC;
             device.waitIdle();
             device.descriptors().freeResource(published[1].emissive);
+        }
+        {
+            QualityConfig proxyQuality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            proxyQuality.applyOverride("raytracing.character_proxy_triangles=100");
+            const scene::Scene t = skinnedPanelInMirror();
+            const ClusterData cuts = panelCuts(t);
+            const ViewDesc tv = ViewDesc::fromCamera(t.cameras[0], 1920, 1080, float4x4{});
+            // Expected: the panel's emission (5) wherever the mirror direction meets the panel's rectangle, away from its
+            // silhouette by the GGX tail radius (as scene 3); other pixels are not judged.
+            auto expected = [tv](uint32_t px, uint32_t py) {
+                const float4x4& m = tv.invViewProj;
+                auto unproject = [&](float z) {
+                    const float x = (px + 0.5f) / 1920 * 2 - 1, y = 1 - (py + 0.5f) / 1080 * 2;
+                    const float w = m.m[3][0] * x + m.m[3][1] * y + m.m[3][2] * z + m.m[3][3];
+                    return float3{ (m.m[0][0] * x + m.m[0][1] * y + m.m[0][2] * z + m.m[0][3]) / w, (m.m[1][0] * x + m.m[1][1] * y + m.m[1][2] * z + m.m[1][3]) / w,
+                                   (m.m[2][0] * x + m.m[2][1] * y + m.m[2][2] * z + m.m[2][3]) / w };
+                };
+                const float3 a = unproject(1.0f), b = unproject(0.5f), d = normalize(b - a);
+                if (d.y >= 0) return Expectation{ 0, 0 };
+                if (d.z < 0)  // the panel itself in front of the floor
+                {
+                    const float3 w = a + d * ((-4 - a.z) / d.z);
+                    if (w.y >= 0.5f && w.y <= 4.5f && std::fabs(w.x) <= 2) return Expectation{ 0, 0 };
+                }
+                const float3 p = a + d * (-a.y / d.y);
+                const float3 r{ d.x, -d.y, d.z };
+                if (r.z >= 0 || p.z < -4) return Expectation{ 0, 0 };
+                const float tw = (-4 - p.z) / r.z;
+                const float3 q = p + r * tw;
+                const float margin = 2 * tw * 1e-4f * std::sqrt(1 / 1e-5f - 1);
+                if (q.x < -2 + margin || q.x > 2 - margin || q.y < 0.5f + margin || q.y > 4.5f - margin) return Expectation{ 0, 0 };
+                return Expectation{ 5, 0 };
+            };
+            const Outcome c = run(device, shaders, proxyQuality, t, { 0, 0, 0 }, expected, 16, 1920, 1080, nullptr, &cuts);
+            // Control: without the exact set the proxy's holes must show (the check above can fail).
+            QualityConfig noExact = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            noExact.applyOverride("raytracing.character_proxy_triangles=100");
+            noExact.applyOverride("raytracing.exact_set_max=0");
+            const Outcome control = run(device, shaders, noExact, t, { 0, 0, 0 }, expected, 16, 1920, 1080, nullptr, &cuts);
+            logf("exact set control (no exact set, proxy with holes): mean value / expected %.4f\n", control.meanM);
+            const bool okD = c.exactSlots == 1 && c.exactOccupied == 1 && c.mirror > 1000 && std::fabs(c.meanM - 1) < 0.02 && c.excessM <= 0 && control.meanM < 0.8;
+            logf("exact set: %u of %u slot(s) occupied; %u M pixels on the panel's reflection (mean value / expected %.4f, worst %.2f %%, %u beyond 3 %% + 4 sigma) -> %s\n",
+                 c.exactOccupied, c.exactSlots, c.mirror, c.meanM, 100 * c.worstM, c.outliersM, okD ? "PASS" : "FAIL");
+            pass = pass && okD;
         }
         rt::RayPipeline::releaseDevice(device);
         rt::RayScene::releaseDevice(device);

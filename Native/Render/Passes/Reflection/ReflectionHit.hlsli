@@ -1,6 +1,7 @@
 // Radiance arriving along a reflection ray (R-internal; ReflectionTrace and the planar test's stand-in view): sky on a
 // miss, else the hit's radiance toward the ray origin (RayTracing/HitShading.hlsli). Needs GiSky.hlsli's root constants
-// (P[1] to P[3]), the GI cache (RW), P[5].y = the specular albedo LUT SRV and P[5].z = reflection.experiment_disable
+// (P[1] to P[3]), the GI cache (RW), P[5].y = the specular albedo LUT SRV, P[5].w = RayScene's exact set hit counts UAV
+// (UNX_NONE: none) and P[5].z = reflection.experiment_disable
 // (cost attribution only, 0 in the shipped configuration: bit 1 = sun shadow rays without any-hit, bit 2 = no sun shadow
 // rays, the sun taken as visible).
 #ifndef UNX_REFLECTION_HIT_HLSLI
@@ -23,6 +24,17 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
         return giSkyRadiance(r.Direction);
     }
     hitDistance = hit.t;
+    // Reflection exact set: count this frame's M/G hits on skinned instances (RayScene selects the most-hit ones).
+    if (P[5].w != UNX_NONE)
+    {
+        const RtInstance ri = rtLoadInstance(scene, hit.instance);
+        const uint deformedIndex = ri.flags >> 8;
+        if ((ri.flags & RT_INSTANCE_DEFORMED) != 0 && deformedIndex != 0xFFFFFFu)
+        {
+            RWStructuredBuffer<uint> counts = ResourceDescriptorHeap[P[5].w];
+            InterlockedAdd(counts[deformedIndex], 1u);
+        }
+    }
     const RtSurface s = rtSurface(scene, hit, r.Origin, r.Direction);
     const GpuMaterial m = rtHitMaterial(loadMaterial(s.material), s, 2 * hit.t * coneTan, dot(s.normal, r.Direction));
     if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return 0;

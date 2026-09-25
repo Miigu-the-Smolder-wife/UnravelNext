@@ -167,15 +167,20 @@ void RayScene::release(Buffer& b)
 RayScene::~RayScene()
 {
     for (Buffer* b : { &m_meshBlasPool, &m_deformedPool, &m_deformedBlasPool, &m_deformedScratch, &m_deformJobs, &m_deformGroups, &m_instanceBuffer, &m_geometryBuffer,
-                       &m_indexPool, &m_vertexMap, &m_tlasStatic, &m_tlasDynamic, &m_tlasScratch, &m_staticDescBuffer, &m_dynamicDescBuffer, &m_staticScratch })
+                       &m_indexPool, &m_vertexMap, &m_tlasStatic, &m_tlasDynamic, &m_tlasScratch, &m_staticDescBuffer, &m_dynamicDescBuffer, &m_staticScratch,
+                       &m_exactCounts, &m_exactZero })
         release(*b);
+    if (m_exactReadback) m_exactReadback->Unmap(0, nullptr);
+    m_device.deferRelease(m_exactReadback);
+    if (m_patchRing) m_patchRing->Unmap(0, nullptr);
+    m_device.deferRelease(m_patchRing);
     if (m_descRing)
     {
         m_descRing->Unmap(0, nullptr);
         m_device.deferRelease(m_descRing);
     }
     DescriptorHeaps* h = &m_device.descriptors();
-    for (uint32_t srv : { m_tlasStaticSrv, m_tlasDynamicSrv, m_deformedPoolUav })
+    for (uint32_t srv : { m_tlasStaticSrv, m_tlasDynamicSrv, m_deformedPoolUav, m_exactCountsUav })
         if (srv != gpu::kNone) m_device.deferCall([h, srv] { h->freeResource(srv); });
 }
 
@@ -284,12 +289,28 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         d.vertexCount = p.vertexCount;
         d.geometryBase = p.geometryBase;
         d.mesh = in.mesh;
+        d.originalGeometryBase = geometryBase(in.mesh);
         vertexBase += p.vertexCount;
         if (p.triangles > proxyBudget) ++m_stats.deformedAboveProxyBudget;
         m_stats.deformedTriangles += p.triangles;
         m_deformed.push_back(std::move(d));
     }
     m_stats.deformedVertices = vertexBase;
+    // Reflection exact set slots after the proxies in the deformed pool (ARCHITECTURE 2.6).
+    m_exactMinHits = (uint32_t)quality.integer("raytracing.exact_set_min_hits");
+    {
+        const uint32_t slots = std::min<uint32_t>((uint32_t)quality.integer("raytracing.exact_set_max"), (uint32_t)m_deformed.size());
+        uint32_t capacity = 0;
+        for (const Deformed& d : m_deformed) capacity = std::max(capacity, meshes[d.mesh].vertexCount);
+        m_exact.resize(slots);
+        for (uint32_t s = 0; s < slots; ++s)
+        {
+            m_exact[s].vertexBase = vertexBase;
+            vertexBase += capacity;
+        }
+        m_stats.exactSlots = slots;
+        m_poolVertices = std::max<uint64_t>(vertexBase, 1);  // proxies, then the exact slots
+    }
     // R's index pool and vertex map (proxy cuts) are needed by the deformed BLAS geometry below.
     m_indexPool = createStructured(m_indexPoolData.data(), sizeof(uint32_t), (uint32_t)m_indexPoolData.size(), L"RT proxy indices");
     m_vertexMap = createStructured(m_vertexMapData.data(), sizeof(uint32_t), (uint32_t)m_vertexMapData.size(), L"RT vertex map");
@@ -304,14 +325,52 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         desc.Flags = instanceFlags(d.sceneInstance);
         desc.AccelerationStructure = m_deformedBlasPool.address() + d.blasOffset;
         m_dynamicRecord.push_back((uint32_t)m_instances.size());
-        m_instances.push_back({ d.sceneInstance, d.geometryBase, d.vertexBase, kRtInstanceDeformed });
+        m_instances.push_back({ d.sceneInstance, d.geometryBase, d.vertexBase, kRtInstanceDeformed | ((uint32_t)k << 8) });
         m_dynamicDescs.push_back(desc);
+    }
+    // Exact set slot records (patched when a slot changes owner).
+    for (ExactSlot& e : m_exact)
+    {
+        e.record = (uint32_t)m_instances.size();
+        m_instances.push_back({ 0, 0, e.vertexBase, kRtInstanceDeformed | (0xFFFFFFu << 8) });
     }
     m_stats.staticInstances = (uint32_t)m_staticDescs.size();
     m_stats.dynamicInstances = (uint32_t)m_dynamicDescs.size();
     m_stats.deformedInstances = (uint32_t)m_deformed.size();
 
     m_instanceBuffer = createStructured(m_instances.data(), sizeof(RtInstance), (uint32_t)m_instances.size(), L"RT instances");
+    if (!m_exact.empty())
+    {
+        const uint64_t bytes = (uint64_t)m_deformed.size() * 4;
+        m_exactCounts = createBuffer(bytes, true, false, L"RT exact set hit counts");
+        const std::vector<uint32_t> zeros(m_deformed.size(), 0);
+        m_exactZero = createBuffer(bytes, false, false, L"RT exact set zeros");
+        upload(m_exactZero, zeros.data(), bytes);
+        DescriptorHeaps& h = m_device.descriptors();
+        m_exactCountsUav = h.allocateResource();
+        D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = (UINT)m_deformed.size();
+        ud.Buffer.StructureByteStride = 4;
+        m_device.d3d()->CreateUnorderedAccessView(m_exactCounts.resource.Get(), nullptr, &ud, h.resourceCpu(m_exactCountsUav));
+        D3D12_HEAP_PROPERTIES readback{ D3D12_HEAP_TYPE_READBACK }, upHeap{ D3D12_HEAP_TYPE_UPLOAD };
+        D3D12_RESOURCE_DESC1 d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        d.Width = kDescSlots * bytes;
+        d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+        d.SampleDesc.Count = 1;
+        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(m_device.d3d()->CreateCommittedResource3(&readback, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_exactReadback)),
+              "RT exact set readback");
+        D3D12_RANGE all{ 0, (SIZE_T)d.Width };
+        check(m_exactReadback->Map(0, &all, reinterpret_cast<void**>(const_cast<uint32_t**>(&m_exactReadbackMapped))), "map exact readback");
+        d.Width = kDescSlots * kPatchSlotBytes;
+        check(m_device.d3d()->CreateCommittedResource3(&upHeap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_patchRing)),
+              "RT patch ring");
+        D3D12_RANGE none{ 0, 0 };
+        check(m_patchRing->Map(0, &none, reinterpret_cast<void**>(&m_patchRingMapped)), "map patch ring");
+        m_exactSlotFrame.assign(kDescSlots, UINT64_MAX);
+    }
     m_geometryBuffer = createStructured(m_geometries.data(), sizeof(RtGeometry), (uint32_t)m_geometries.size(), L"RT geometries");
 
     buildStaticTlas();
@@ -558,17 +617,52 @@ const RayScene::ProxyMesh& RayScene::proxyOf(uint32_t mesh)
     return p;
 }
 
+uint32_t RayScene::maxMeshVertices() const
+{
+    uint32_t v = 0;
+    for (const Deformed& d : m_deformed) v = std::max(v, m_scene.meshes()[d.mesh].vertexCount);
+    return v;
+}
+
+// The deformed instance's full mesh as BLAS geometry (scene indices, positions from the deformed pool at vertexBase).
+std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> RayScene::originalGeometry(const Deformed& d, uint32_t vertexBase) const
+{
+    const scene::Scene* src = m_scene.source();
+    const gpu::Mesh& gm = m_scene.meshes()[d.mesh];
+    const scene::Mesh& sm = src->meshes[d.mesh];
+    const scene::Instance& si = src->instances[d.sceneInstance];
+    const D3D12_GPU_VIRTUAL_ADDRESS indices = m_scene.buffer("indices")->GetGPUVirtualAddress();
+    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> out;
+    for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size(); ++s)
+    {
+        if (sm.submeshes[s].indexCount == 0) continue;
+        const uint32_t material = s < si.materialOverrides.size() ? si.materialOverrides[s] : sm.submeshes[s].material;
+        const bool alpha = material < src->materials.size() && src->materials[material].alphaCutoff > 0;
+        D3D12_RAYTRACING_GEOMETRY_DESC g{};
+        g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+        g.Flags = alpha ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        g.Triangles.VertexBuffer = { (m_deformedPool.resource ? m_deformedPool.address() : 0) + (uint64_t)vertexBase * sizeof(RtDeformedVertex), sizeof(RtDeformedVertex) };
+        g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+        g.Triangles.VertexCount = gm.vertexCount;
+        g.Triangles.IndexBuffer = indices + ((uint64_t)gm.indexOffset + sm.submeshes[s].indexOffset) * sizeof(uint32_t);
+        g.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+        g.Triangles.IndexCount = sm.submeshes[s].indexCount;
+        out.push_back(g);
+    }
+    return out;
+}
+
 void RayScene::buildDeformed()
 {
     const scene::Scene* src = m_scene.source();
-    m_deformedPool = createBuffer(std::max<uint64_t>(m_stats.deformedVertices, 1) * sizeof(RtDeformedVertex), true, false, L"RT deformed vertices");
+    m_deformedPool = createBuffer(m_poolVertices * sizeof(RtDeformedVertex), true, false, L"RT deformed vertices");
     {
         DescriptorHeaps& h = m_device.descriptors();
         m_deformedPool.srv = h.allocateResource();
         D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
         sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
         sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sd.Buffer.NumElements = (UINT)std::max<uint64_t>(m_stats.deformedVertices, 1);
+        sd.Buffer.NumElements = (UINT)m_poolVertices;
         sd.Buffer.StructureByteStride = sizeof(RtDeformedVertex);
         m_device.d3d()->CreateShaderResourceView(m_deformedPool.resource.Get(), &sd, h.resourceCpu(m_deformedPool.srv));
     }
@@ -620,6 +714,36 @@ void RayScene::buildDeformed()
         jobs.push_back({ d.sceneInstance, d.vertexBase, m_proxies[d.mesh].vertexMap, d.vertexCount });
         for (uint32_t first = 0; first < d.vertexCount; first += 64) groups.insert(groups.end(), { job, first });
     }
+    // Exact slots: BLAS and scratch for the largest full skinned mesh, a job (idle until owned) and groups for its capacity.
+    {
+        uint64_t result = 0, scratch = 0;
+        for (const Deformed& d : m_deformed)
+        {
+            const std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> full = originalGeometry(d, 0);
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+            inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+            inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+            inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+            inputs.NumDescs = (UINT)full.size();
+            inputs.pGeometryDescs = full.data();
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
+            m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &sizes);
+            result = std::max(result, sizes.ResultDataMaxSizeInBytes);
+            scratch = std::max(scratch, std::max(sizes.ScratchDataSizeInBytes, sizes.UpdateScratchDataSizeInBytes));
+        }
+        const uint32_t capacity = maxMeshVertices();
+        for (ExactSlot& e : m_exact)
+        {
+            e.blasOffset = poolBytes;
+            poolBytes += alignUp(result, kAsAlign);
+            e.scratchOffset = scratchBytes;
+            scratchBytes += alignUp(scratch, kAsAlign);
+            e.job = (uint32_t)jobs.size();
+            jobs.push_back({ 0, e.vertexBase, gpu::kNone, 0 });
+            for (uint32_t first = 0; first < capacity; first += 64) groups.insert(groups.end(), { e.job, first });
+        }
+        m_exactRebuild.assign(m_exact.size(), 0);
+    }
     m_deformedBlasPool = createBuffer(poolBytes, false, true, L"RT deformed BLAS pool");
     m_deformedScratch = createBuffer(scratchBytes, true, false, L"RT deformed BLAS scratch");
     m_deformJobs = createStructured(jobs.data(), sizeof(DeformJob), (uint32_t)jobs.size(), L"RT deform jobs");
@@ -631,7 +755,7 @@ void RayScene::buildDeformed()
     m_deformedPoolUav = h.allocateResource();
     D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
     ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-    ud.Buffer.NumElements = (UINT)m_stats.deformedVertices;
+    ud.Buffer.NumElements = (UINT)m_poolVertices;
     ud.Buffer.StructureByteStride = sizeof(RtDeformedVertex);
     m_device.d3d()->CreateUnorderedAccessView(m_deformedPool.resource.Get(), nullptr, &ud, h.resourceCpu(m_deformedPoolUav));
 }
@@ -695,6 +819,134 @@ void RayScene::recordRefit(ID3D12GraphicsCommandList7* cmd, bool refit) const
     }
 }
 
+void RayScene::recordExactBuilds(ID3D12GraphicsCommandList7* cmd, const std::vector<uint8_t>& rebuild) const
+{
+    // Occupied exact slots: full build for a new owner, refit otherwise (each its own scratch range).
+    for (size_t k = 0; k < m_exact.size(); ++k)
+    {
+        const ExactSlot& e = m_exact[k];
+        if (e.owner == 0xFFFFFFFFu) continue;
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
+        d.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        d.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+        d.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        d.Inputs.NumDescs = (UINT)e.geometries.size();
+        d.Inputs.pGeometryDescs = e.geometries.data();
+        d.DestAccelerationStructureData = m_deformedBlasPool.address() + e.blasOffset;
+        if (!rebuild[k])
+        {
+            d.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+            d.SourceAccelerationStructureData = d.DestAccelerationStructureData;
+        }
+        d.ScratchAccelerationStructureData = m_deformedScratch.address() + e.scratchOffset;
+        cmd->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
+    }
+}
+
+// Reads back the hit counts of the frame framesInFlight ago and assigns the exact slots (current owners keep theirs, so
+// a slot is rebuilt only when its owner changes). Patches go through a small upload ring copied in the frame.
+void RayScene::selectExactSet(FramePassContext& fc)
+{
+    std::fill(m_exactRebuild.begin(), m_exactRebuild.end(), 0);
+    m_stats.exactBuilds = 0;
+    if (m_exact.empty()) return;
+    const uint32_t n = (uint32_t)m_deformed.size();
+    const uint32_t oldSlot = (uint32_t)((fc.frame.frameIndex + kDescSlots - fc.framesInFlight) % kDescSlots);
+    std::vector<uint32_t> wanted;
+    if (m_exactSlotFrame[oldSlot] != UINT64_MAX && fc.frame.frameIndex >= m_exactSlotFrame[oldSlot] + fc.framesInFlight)
+    {
+        const uint32_t* counts = m_exactReadbackMapped + (size_t)oldSlot * n;
+        for (uint32_t k = 0; k < n; ++k)
+            if (counts[k] >= m_exactMinHits) wanted.push_back(k);
+        std::sort(wanted.begin(), wanted.end(), [&](uint32_t a, uint32_t b) { return counts[a] != counts[b] ? counts[a] > counts[b] : a < b; });
+        if (wanted.size() > m_exact.size()) wanted.resize(m_exact.size());
+    }
+    else
+        for (const ExactSlot& e : m_exact)
+            if (e.owner != 0xFFFFFFFFu) wanted.push_back(e.owner);  // no new counts yet: keep the set
+    // Keep owners still wanted; free the others; give free slots to the new ones.
+    std::vector<uint8_t> placed(wanted.size(), 0);
+    for (ExactSlot& e : m_exact)
+    {
+        const auto it = std::find(wanted.begin(), wanted.end(), e.owner);
+        if (e.owner != 0xFFFFFFFFu && it != wanted.end()) placed[it - wanted.begin()] = 1;
+        else e.owner = 0xFFFFFFFFu;
+    }
+    std::vector<std::pair<uint32_t, uint32_t>> changed;  // slot, new owner
+    for (size_t w = 0; w < wanted.size(); ++w)
+    {
+        if (placed[w]) continue;
+        for (size_t k = 0; k < m_exact.size(); ++k)
+            if (m_exact[k].owner == 0xFFFFFFFFu && std::none_of(changed.begin(), changed.end(), [&](const auto& c) { return c.first == k; }))
+            {
+                changed.push_back({ (uint32_t)k, wanted[w] });
+                break;
+            }
+    }
+    m_stats.exactOccupied = 0;
+    m_stats.exactVertices = 0;
+    // Patch records: RtInstance (16 B) and DeformJob (16 B) of each changed slot; a slot freed this frame keeps its data.
+    struct Patch
+    {
+        uint64_t dst;
+        bool job;
+        uint32_t words[4];
+    };
+    std::vector<Patch> patches;
+    for (const auto& [slot, owner] : changed)
+    {
+        ExactSlot& e = m_exact[slot];
+        const Deformed& d = m_deformed[owner];
+        e.owner = owner;
+        e.geometries = originalGeometry(d, e.vertexBase);
+        m_exactRebuild[slot] = 1;
+        ++m_stats.exactBuilds;
+        patches.push_back({ (uint64_t)e.record * sizeof(RtInstance), false, { d.sceneInstance, d.originalGeometryBase, e.vertexBase, kRtInstanceDeformed | (owner << 8) } });
+        patches.push_back({ (uint64_t)e.job * 16, true, { d.sceneInstance, e.vertexBase, gpu::kNone, m_scene.meshes()[d.mesh].vertexCount } });
+    }
+    for (const ExactSlot& e : m_exact)
+        if (e.owner != 0xFFFFFFFFu)
+        {
+            ++m_stats.exactOccupied;
+            m_stats.exactVertices += m_scene.meshes()[m_deformed[e.owner].mesh].vertexCount;
+        }
+    // Freed slots stop deforming: their job's vertex count is set to 0.
+    for (size_t k = 0; k < m_exact.size(); ++k)
+        if (m_exact[k].owner == 0xFFFFFFFFu) patches.push_back({ (uint64_t)m_exact[k].job * 16, true, { 0, m_exact[k].vertexBase, gpu::kNone, 0 } });
+    if (patches.empty()) return;
+    const uint64_t ringOffset = (fc.frame.frameIndex % kDescSlots) * kPatchSlotBytes;
+    if (patches.size() * 16 > kPatchSlotBytes) fail("RayScene: exact set patches exceed the patch ring");
+    for (size_t k = 0; k < patches.size(); ++k) std::memcpy(m_patchRingMapped + ringOffset + k * 16, patches[k].words, 16);
+    const BufferRef instancesRef = m_frame.instances, jobsRef = m_frame.jobs;
+    ID3D12Resource* ring = m_patchRing.Get();
+    fc.graph.addPass("r.as.exact.patch", QueueType::Graphics,
+                     [&](PassBuilder& b) {
+                         b.use(instancesRef, Use::CopyDst);
+                         b.use(jobsRef, Use::CopyDst);
+                     },
+                     [patches, ring, ringOffset, instancesRef, jobsRef](PassContext& c) {
+                         for (size_t k = 0; k < patches.size(); ++k)
+                             c.cmd->CopyBufferRegion(c.resource(patches[k].job ? jobsRef : instancesRef), patches[k].dst, ring, ringOffset + k * 16, 16);
+                     });
+}
+
+void RayScene::recordExactReadback(FramePassContext& fc)
+{
+    if (m_exact.empty()) return;
+    const uint32_t slot = (uint32_t)(fc.frame.frameIndex % kDescSlots);
+    const uint64_t bytes = (uint64_t)m_deformed.size() * 4;
+    m_exactSlotFrame[slot] = fc.frame.frameIndex;
+    const BufferRef counts = m_frame.exactCounts;
+    const BufferRef readback = fc.graph.importBuffer(m_exactReadback.Get(), { "RT exact set readback", kDescSlots * bytes, 0 });
+    fc.graph.addPass("r.as.exact.readback", QueueType::Graphics,
+                     [&](PassBuilder& b) {
+                         b.use(counts, Use::CopySrc);
+                         b.use(readback, Use::CopyDst);
+                         b.keep();
+                     },
+                     [counts, readback, slot, bytes](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(readback), slot * bytes, c.resource(counts), 0, bytes); });
+}
+
 void RayScene::updateDynamic(ID3D12GraphicsCommandList7* cmd, bool refit)
 {
     if (!m_deformed.empty())
@@ -731,6 +983,23 @@ void RayScene::record(FramePassContext& fc)
     fc.resources.tlasStatic = m_frame.tlasStatic;
     fc.resources.tlasDynamic = m_frame.tlasDynamic;
     const BufferRef scratch = g.importBuffer(m_tlasScratch.resource.Get(), { "RT dynamic TLAS scratch", m_tlasScratch.bytes, 0 });
+    m_frame.instances = g.importBuffer(m_instanceBuffer.resource.Get(), { "RT instances", m_instanceBuffer.bytes, sizeof(RtInstance) });
+    if (!m_deformed.empty()) m_frame.jobs = g.importBuffer(m_deformJobs.resource.Get(), { "RT deform jobs", m_deformJobs.bytes, 16 });
+    if (!m_exact.empty())
+    {
+        // Reflection exact set: this frame's hit counts start at 0; the slots follow the counts read back now.
+        const BufferRef counts = g.importBuffer(m_exactCounts.resource.Get(), { "RT exact set hit counts", m_exactCounts.bytes, 4 });
+        const BufferRef zero = g.importBuffer(m_exactZero.resource.Get(), { "RT exact set zeros", m_exactZero.bytes, 4 });
+        m_frame.exactCounts = counts;
+        const uint64_t bytes = (uint64_t)m_deformed.size() * 4;
+        g.addPass("r.as.exact.clear", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(zero, Use::CopySrc);
+                      b.use(counts, Use::CopyDst);
+                  },
+                  [zero, counts, bytes](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(counts), 0, c.resource(zero), 0, bytes); });
+        selectExactSet(fc);
+    }
     // This frame's instance descriptors (GpuScene's CPU mirror is current, INTERFACES 6.3 v1.8).
     if (fc.framesInFlight > kDescSlots) fail("RayScene: %u frames in flight exceed %u descriptor slots", fc.framesInFlight, kDescSlots);
     const uint64_t slotOffset = (fc.frame.frameIndex % kDescSlots) * m_descSlotBytes;
@@ -741,6 +1010,15 @@ void RayScene::record(FramePassContext& fc)
         const RtInstance& ri = m_instances[m_dynamicRecord[k]];
         refreshDesc(m_dynamicDescs[k], sceneInstances[ri.sceneInstance], (ri.flags & kRtInstanceDeformed) != 0);
         slotDescs[k] = m_dynamicDescs[k];
+        if ((ri.flags & kRtInstanceDeformed) == 0) continue;
+        // A skinned instance in the reflection exact set is traced with its original mesh (its slot's BLAS and record).
+        const uint32_t deformedIndex = ri.flags >> 8;
+        for (const ExactSlot& e : m_exact)
+            if (e.owner == deformedIndex)
+            {
+                slotDescs[k].InstanceID = e.record;
+                slotDescs[k].AccelerationStructure = m_deformedBlasPool.address() + e.blasOffset;
+            }
     }
     const D3D12_GPU_VIRTUAL_ADDRESS dynamicDescs = m_descRing->GetGPUVirtualAddress() + slotOffset;
     bool staticChanged = false;
@@ -760,7 +1038,12 @@ void RayScene::record(FramePassContext& fc)
         m_frame.deformedBlas = blas;
         m_frame.deformedVertices = pool;
         const D3D12_GPU_VIRTUAL_ADDRESS constants = fc.frameConstantsFor(fc.frame.mainView);
-        g.addPass("r.as.deform", QueueType::Compute, [&](PassBuilder& b) { b.use(pool, Use::UavCompute); },
+        const BufferRef jobs = m_frame.jobs;
+        g.addPass("r.as.deform", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(pool, Use::UavCompute);
+                      b.use(jobs, Use::SrvCompute);
+                  },
                   [this, constants](PassContext& c) {
                       c.bindFrameConstants(constants);
                       recordDeform(c.cmd);
@@ -772,7 +1055,10 @@ void RayScene::record(FramePassContext& fc)
                       b.use(blas, Use::AccelerationStructureRead);
                       b.use(blasScratch, Use::AccelerationStructureScratch);
                   },
-                  [this](PassContext& c) { recordRefit(c.cmd, true); });
+                  [this, rebuild = m_exactRebuild](PassContext& c) {
+                      recordRefit(c.cmd, true);
+                      recordExactBuilds(c.cmd, rebuild);
+                  });
     }
     const Frame frame = m_frame;
     if (staticChanged)
@@ -799,6 +1085,7 @@ void RayScene::record(FramePassContext& fc)
 
 void RayScene::declareTraversal(PassBuilder& b) const
 {
+    if (m_frame.instances.valid()) b.use(m_frame.instances, Use::SrvGraphics);  // after this frame's exact set patches
     b.use(m_frame.tlasStatic, Use::AccelerationStructureRead);
     b.use(m_frame.tlasDynamic, Use::AccelerationStructureRead);
     if (m_frame.deformedBlas.valid()) b.use(m_frame.deformedBlas, Use::AccelerationStructureRead);

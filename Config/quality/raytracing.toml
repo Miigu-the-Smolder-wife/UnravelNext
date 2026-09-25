@@ -3,3 +3,5 @@
 character_proxy_triangles = 8000
 near_characters_with_proxy = 64
 dynamic_tlas_instances_max = 100000
+exact_set_max = 8                      # reflection exact set: skinned instances traced with their original mesh (ARCHITECTURE 2.6)
+exact_set_min_hits = 64                # M/G reflection hits in a frame for an instance to enter it
