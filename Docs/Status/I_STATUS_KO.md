@@ -144,6 +144,10 @@ Agility 1.618.5 기능은 1.618.1에서도 모두 있다(SDK 618).
 
 ## 2.2 데이터 월드를 새 렌더러로 (Player) [실측]
 
+> **조건 표시(2026-09-25 저녁):** 이 절(2.2, 2.2.0~2.2.2)의 모든 Player·편집기 측정은 **50 Hz tick, World는 실시간의 83 % 속도** 조건이다
+> (2.2.3). World 세션이 호스트 `Time.fixedDeltaTime`과 프로젝트 기본값을 1/60으로 고친 뒤 다시 잰다. GPU 프레임 시간은 이 조건과 거의 무관하지만,
+> tick·시뮬·Unity 프레임 주기와 캐시 지연(움직임 속도)에 기대는 수치는 다시 재야 한다.
+
 **데이터 월드가 Unity Player에서 새 렌더러로 뜬다.** 장면은 원본 `NativeDataWorld.unity`의 사본이다(`Assets/UnravelNextBridge/DataWorld/
 NativeDataWorld_UnravelNext.unity`, 원본은 그대로). Player는 `Builds/UnravelNextDataWorld`(Mono, 창 1280×720, vsync 끔)이다.
 프레임은 Unity D3D12 큐에서 리스트 하나로 실행된다. 측정은 GpuLock, 1.5 s 워밍업, 해상도마다 서로 다른 완료 프레임 600개다.
