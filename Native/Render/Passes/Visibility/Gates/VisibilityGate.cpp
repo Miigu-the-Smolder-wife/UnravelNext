@@ -18,7 +18,7 @@
 // per-mesh summary of the band distances at the resolution (band C design input).
 // Performance runs only under the GPU lock (INTERFACES 3.3):
 //   powershell -File Tools/CI/GpuLock.ps1 -Track core -- build/<t>/bin/unx_gate_visibility_visibilitygate.exe
-//       --scene city_block|forest_thin|... [--camera NAME|INDEX] [--resolution 4K|1440p|both] [--frames 600] [--scale 1] [--moving]
+//       --scene city_block|forest_thin|...|deep_tile [--camera NAME|INDEX] [--deep-tile-cards N] [--resolution 4K|1440p|both] [--frames 600] [--scale 1] [--moving]
 //       [--service whole,local,atlas16,atlas32] [--service-pages camera|ring] [--service-levels 12] [--service-spacing 2]
 //       [--out DIR] [--set key=value ...] [--cluster-stats FILE]
 #include "unx/clusterbuilder/ClusterBuilder.h"
@@ -65,6 +65,45 @@ scene::Camera cameraAt(const scene::Scene& s, bool moving, double time)
     c.forward = normalize(keys[k].forward + (keys[k + 1].forward - keys[k].forward) * u);
     c.up = normalize(keys[k].up + (keys[k + 1].up - keys[k].up) * u);
     return c;
+}
+
+// Coverage layer growth curve (INTERFACES 3.6: diagnose superlinear work at sub-TDR sizes): 'cards' horizontal cards,
+// each about 11 x 0.5 px at 4K, stacked in depth over one 8 x 8 tile in the middle of the view (camera at the origin
+// looking along +z), so one tile receives about 12 fragments per card (two triangles over 6 pixels).
+scene::Scene deepTileScene(uint32_t cards)
+{
+    scene::Scene s;
+    s.name = "deep_tile";
+    s.materials.resize(1);
+    scene::Mesh m;
+    m.name = "card stack";
+    const float focal = 1080.0f / std::tan(0.5235988f);  // 4K height 2160, 60 degree vertical fov: pixels per unit at z = 1
+    for (uint32_t k = 0; k < cards; ++k)
+    {
+        const float z = 2.0f + 0.0004f * k, w = 6.0f / focal * z, h = 0.3f / focal * z;
+        const float x = 3.0f / focal * z, y = 0.5f / focal * z;  // inside the tile right of and above the centre
+        const uint32_t b = (uint32_t)m.positions.size();
+        const float3 p[4] = { { x - 0.5f * w, y - 0.5f * h, z }, { x + 0.5f * w, y - 0.5f * h, z }, { x + 0.5f * w, y + 0.5f * h, z }, { x - 0.5f * w, y + 0.5f * h, z } };
+        for (int v = 0; v < 4; ++v)
+        {
+            m.positions.push_back(p[v]);
+            m.normals.push_back({ 0, 0, -1 });
+            m.uv0.push_back({ (v == 1 || v == 2) ? 1.0f : 0.0f, v >= 2 ? 1.0f : 0.0f });
+        }
+        m.indices.insert(m.indices.end(), { b, b + 2, b + 1, b, b + 3, b + 2 });
+    }
+    m.submeshes.push_back({ 0, (uint32_t)m.indices.size(), 0 });
+    s.meshes.push_back(m);
+    scene::Instance inst;
+    inst.mesh = 0;
+    s.instances.push_back(inst);
+    scene::Camera c;
+    c.name = "main";
+    c.forward = { 0, 0, 1 };
+    c.nearPlane = 0.05f;
+    s.cameras.push_back(c);
+    scene::validate(s);
+    return s;
 }
 
 double sumPasses(const HarnessResult& r, const std::function<bool(const std::string&)>& match)
@@ -298,6 +337,7 @@ int main(int argc, char** argv)
     try
     {
         std::string sceneName = "city_block", resolutionArg = "both", out, clusterStats, cameraName;
+        uint32_t deepTileCards = 1000;
         std::vector<std::string> overrides;
         uint32_t frames = 600;
         float scale = 1.0f;
@@ -312,6 +352,7 @@ int main(int argc, char** argv)
             };
             if (a == "--scene") sceneName = next();
             else if (a == "--camera") cameraName = next();
+            else if (a == "--deep-tile-cards") deepTileCards = (uint32_t)std::stoul(next());
             else if (a == "--resolution") resolutionArg = next();
             else if (a == "--frames") frames = (uint32_t)std::stoul(next());
             else if (a == "--scale") scale = std::stof(next());
@@ -367,7 +408,7 @@ int main(int argc, char** argv)
         for (const std::string& o : overrides) quality.applyOverride(o);
         const bool coverage = quality.boolean("visibility.coverage_layer");
         scenegen::Request request;
-        bool found = false;
+        bool found = sceneName == "deep_tile";
         for (scenegen::SceneId id : scenegen::allScenes())
             if (sceneName == scenegen::sceneName(id))
             {
@@ -377,7 +418,7 @@ int main(int argc, char** argv)
         if (!found) fail("unknown scene %s", sceneName.c_str());
         request.scale = scale;
         auto t0 = std::chrono::steady_clock::now();
-        scene::Scene s = scenegen::generate(request);
+        scene::Scene s = sceneName == "deep_tile" ? deepTileScene(deepTileCards) : scenegen::generate(request);
         const double generateMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         if (!cameraName.empty())  // the named (or numbered) scene camera becomes camera 0
         {
@@ -541,7 +582,8 @@ int main(int argc, char** argv)
                  "(design %.3f on %u clusters, %u triangles) | total V %.3f ms of frame %.3f ms\n",
                  sceneName.c_str(), rs.c_str(), cull, designCull, st.instancesVisible, st.clustersTested, hiz, raster, designRaster, st.visibleClusters, trianglesA,
                  cull + hiz + raster, r.gpuFrameMs.median);
-            logf("  visible clusters by band A/B/C %u/%u/%u\n", st.bandClusters[0], st.bandClusters[1], st.bandClusters[2]);
+            logf("  visible clusters by band A/B/C %u/%u/%u (of B: %u mixed sheet clusters split per triangle, %u triangles)\n", st.bandClusters[0], st.bandClusters[1],
+                 st.bandClusters[2], st.mixedClusters, st.mixedTriangles);
             logf("  nodes tested %u, triangles by band A/B/C %u/%u/%u, deferred %u/%u/%u, overflow 0x%x (stats of frame %llu)\n", st.nodesTested, st.triangles[0],
                  st.triangles[1], st.triangles[2], st.deferredInstances, st.deferredNodes, st.deferredClusters, st.overflow, (unsigned long long)st.frameIndex);
             if (st.overflow) status = 1;
@@ -551,6 +593,9 @@ int main(int argc, char** argv)
                 const double covTiles = sumPasses(r, [](const std::string& n) { return n == "v.coverage.tiles"; });
                 const double covOther = sumPasses(r, [](const std::string& n) { return startsWith(n, "v.coverage.") && n != "v.coverage.raster" && n != "v.coverage.tiles"; });
                 const double F = st.coverageFragments;
+                if (st.coverageInvocations > 0)
+                    logf("  coverage pixel kernel invocations %u (%.2f per fragment; measurement stage)\n", st.coverageInvocations,
+                         st.coverageFragments ? (double)st.coverageInvocations / st.coverageFragments : 0.0);
                 logf("  coverage layer: %u fragments in %u tiles (%.2f per pixel of a listed tile), %u chunks of pool %u (%u lost to races), %u heavy tiles | raster "
                      "%.3f ms (%.3f ns/fragment; design F x 0.05 ns = %.3f ms) | clear/prepare/args %.3f ms, tiles (opaqueCovered, heavy) %.3f ms\n",
                      st.coverageFragments, st.coverageTiles, st.coverageTiles ? F / (64.0 * st.coverageTiles) : 0.0, st.coverageChunks, st.coveragePoolChunks,
@@ -568,6 +613,7 @@ int main(int argc, char** argv)
                 const uint64_t slots = (uint64_t)quality.integer("visibility.coverage_table_slots");
                 const uint64_t tileBytes = (uint64_t)tileCount * 32, tableBytes = (uint64_t)tileCount * slots * 4, listBytes = (16 + 2ull * tileCount) * 4;
                 const uint64_t recordBytes = g.desc(main.coverageChunks).size;
+                const uint64_t visibleBytes = g.desc(main.visibleClusters).size;
                 auto readback = [&](uint64_t bytes) {
                     D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
                     D3D12_RESOURCE_DESC1 rd{};
@@ -583,8 +629,9 @@ int main(int argc, char** argv)
                 };
                 const uint32_t visPitch = (res.width * 4 + 255) / 256 * 256;
                 ComPtr<ID3D12Resource> rbTiles = readback(tileBytes), rbTable = readback(tableBytes), rbList = readback(listBytes), rbRecords = readback(recordBytes),
-                                       rbVis = readback((uint64_t)visPitch * res.height);
-                ID3D12Resource *dTiles = rbTiles.Get(), *dTable = rbTable.Get(), *dList = rbList.Get(), *dRecords = rbRecords.Get(), *dVis = rbVis.Get();
+                                       rbVis = readback((uint64_t)visPitch * res.height), rbVisible = readback(visibleBytes);
+                ID3D12Resource *dTiles = rbTiles.Get(), *dTable = rbTable.Get(), *dList = rbList.Get(), *dRecords = rbRecords.Get(), *dVis = rbVis.Get(),
+                               *dVisible = rbVisible.Get();
                 const uint32_t visW = res.width, visH = res.height;
                 g.addPass("gate.coverage.readback", QueueType::Graphics,
                           [&](PassBuilder& b) {
@@ -593,6 +640,7 @@ int main(int argc, char** argv)
                               b.use(main.coverageTileList, Use::CopySrc);
                               b.use(main.coverageChunks, Use::CopySrc);
                               b.use(main.visId, Use::CopySrc);
+                              b.use(main.visibleClusters, Use::CopySrc);
                               b.keep();
                           },
                           [=](PassContext& c) {
@@ -607,10 +655,12 @@ int main(int argc, char** argv)
                               c.cmd->CopyBufferRegion(dTable, 0, c.resource(main.coverageChunkTable), 0, tableBytes);
                               c.cmd->CopyBufferRegion(dList, 0, c.resource(main.coverageTileList), 0, listBytes);
                               c.cmd->CopyBufferRegion(dRecords, 0, c.resource(main.coverageChunks), 0, recordBytes);
+                              c.cmd->CopyBufferRegion(dVisible, 0, c.resource(main.visibleClusters), 0, visibleBytes);
                           });
                 g.execute(nullptr);
                 device.waitIdle();
-                const uint32_t *p = nullptr, *table = nullptr, *list = nullptr, *records = nullptr;
+                const uint32_t *p = nullptr, *table = nullptr, *list = nullptr, *records = nullptr, *visible = nullptr;
+                check(rbVisible->Map(0, nullptr, (void**)&visible), "map visible clusters");
                 check(rbTiles->Map(0, nullptr, (void**)&p), "map tiles");
                 check(rbTable->Map(0, nullptr, (void**)&table), "map chunk table");
                 check(rbList->Map(0, nullptr, (void**)&list), "map tile list");
@@ -637,7 +687,35 @@ int main(int argc, char** argv)
                 // opaque band B fragments could drop), and the pixels whose opaque union fills at all.
                 const uint64_t poolChunks = recordBytes / 1024;
                 uint64_t hidden = 0, stored = 0, fullPixels = 0, seeThrough = 0, coveragePixels = 0;
-                std::vector<std::vector<std::pair<uint32_t, uint32_t>>> byPixel(64);  // (depth bits, mask | opaque flag in the depth word)
+                struct Rec
+                {
+                    uint32_t depth, mask, vis;  // depth word (see-through flag in the sign bit), mask, vis id
+                };
+                std::vector<std::vector<Rec>> byPixel(64);
+                // Distance bands (design 4.5, edge/vista request): view distance = near / depth (infinite reversed Z).
+                // Tree records: the record's instance draws a mesh named "tree..." (the forest scenes' crowns and trunks).
+                const float nearPlane = s.cameras.at(0).nearPlane;
+                const double bandEdges[] = { 62.0, 187.0, 374.0 };
+                auto bandOf = [&](uint32_t depthBits) {
+                    float d;
+                    const uint32_t bits = depthBits & 0x7FFFFFFFu;
+                    std::memcpy(&d, &bits, 4);
+                    const double z = d > 0 ? nearPlane / d : 1e30;
+                    uint32_t b = 0;
+                    while (b < 3 && z >= bandEdges[b]) ++b;
+                    return b;
+                };
+                std::vector<uint8_t> treeInstance(s.instances.size(), 0);
+                for (size_t i = 0; i < s.instances.size(); ++i) treeInstance[i] = s.meshes[s.instances[i].mesh].name.rfind("tree", 0) == 0;
+                const uint64_t visibleEntries = visibleBytes / 8;
+                auto isTree = [&](uint32_t vis) {
+                    const uint64_t entry = (vis - 1) >> 7;
+                    if (vis == 0 || entry >= visibleEntries) return false;
+                    const uint32_t instance = visible[2 * entry];
+                    return instance < treeInstance.size() && treeInstance[instance] != 0;
+                };
+                uint64_t recAll[4] = {}, recTree[4] = {}, keptAll[4] = {}, keptTree[4] = {}, pixAll[4] = {}, pixTree[4] = {};
+                std::vector<uint32_t> perPixel, untilFull;  // records per coverage pixel; records up to (and with) the one filling its union
                 for (uint32_t k = 0; k < std::min(list[3], tileCount); ++k)
                 {
                     const uint32_t tile = list[16 + k], n = p[8 * tile];
@@ -673,21 +751,47 @@ int main(int argc, char** argv)
                         for (uint32_t ri = 0; ri < 64 && c * 64 + ri < n; ++ri)
                         {
                             const uint32_t* rec = &records[((size_t)(chunk - 1) * 64 + ri) * 4];
-                            byPixel[rec[3] >> 26].push_back({ rec[1], rec[2] });
+                            byPixel[rec[3] >> 26].push_back({ rec[1], rec[2], rec[0] });
                             ++stored;
                         }
                     }
                     for (auto& v : byPixel)
                     {
-                        std::sort(v.begin(), v.end(), [](const auto& x, const auto& y) { return (x.first & 0x7FFFFFFFu) > (y.first & 0x7FFFFFFFu); });
+                        std::sort(v.begin(), v.end(), [](const Rec& x, const Rec& y) { return (x.depth & 0x7FFFFFFFu) > (y.depth & 0x7FFFFFFFu); });
                         uint32_t u = 0;
                         bool full = false;
-                        for (const auto& [depth, mask] : v)
+                        for (const Rec& rec : v)
                         {
+                            const uint32_t band = bandOf(rec.depth);
+                            const bool tree = isTree(rec.vis);
+                            ++recAll[band];
+                            recTree[band] += tree;
                             if (full) ++hidden;
-                            if (depth >> 31) ++seeThrough;
-                            else u |= mask;
+                            else
+                            {
+                                ++keptAll[band];
+                                keptTree[band] += tree;
+                            }
+                            if (rec.depth >> 31) ++seeThrough;
+                            else u |= rec.mask;
                             full = full || u == 0xFFFFFFFFu;
+                        }
+                        if (!v.empty())
+                        {
+                            perPixel.push_back((uint32_t)v.size());
+                            {
+                                uint32_t u2 = 0, needed = 0;
+                                for (const Rec& rec : v)
+                                {
+                                    ++needed;
+                                    if (!(rec.depth >> 31)) u2 |= rec.mask;
+                                    if (u2 == 0xFFFFFFFFu) break;
+                                }
+                                untilFull.push_back(needed);
+                            }
+                            const uint32_t band = bandOf(v.front().depth);
+                            ++pixAll[band];
+                            pixTree[band] += isTree(v.front().vis);
                         }
                         fullPixels += full;
                         coveragePixels += !v.empty();
@@ -709,6 +813,7 @@ int main(int argc, char** argv)
                 rbTable->Unmap(0, nullptr);
                 rbList->Unmap(0, nullptr);
                 rbRecords->Unmap(0, nullptr);
+                rbVisible->Unmap(0, nullptr);
                 std::string hist;
                 for (size_t k = 0; k < std::size(edges); ++k)
                 {
@@ -726,7 +831,31 @@ int main(int argc, char** argv)
                      "behind a filled union (weight zero) | %llu see-through records\n",
                      (unsigned long long)fullPixels, (unsigned long long)opaquePixels, (unsigned long long)hidden, (unsigned long long)stored,
                      stored ? 100.0 * hidden / stored : 0.0, (unsigned long long)seeThrough);
-                for (ComPtr<ID3D12Resource>* buffer : { std::addressof(rbTiles), std::addressof(rbTable), std::addressof(rbList), std::addressof(rbRecords), std::addressof(rbVis) })
+                {
+                    auto pct = [](std::vector<uint32_t>& v, double q) -> uint32_t {
+                        if (v.empty()) return 0;
+                        const size_t k = std::min(v.size() - 1, (size_t)(q * v.size()));
+                        std::nth_element(v.begin(), v.begin() + k, v.end());
+                        return v[k];
+                    };
+                    logf("  records per coverage pixel P50/P99/max %u/%u/%u | records up to the one filling the opaque union (all when it never fills) P50/P99/max %u/%u/%u\n",
+                         pct(perPixel, 0.5), pct(perPixel, 0.99), perPixel.empty() ? 0u : *std::max_element(perPixel.begin(), perPixel.end()), pct(untilFull, 0.5),
+                         pct(untilFull, 0.99), untilFull.empty() ? 0u : *std::max_element(untilFull.begin(), untilFull.end()));
+                }
+                {
+                    const char* names[4] = { "< 62 m", "62-187 m", "187-374 m", "> 374 m" };
+                    std::string line;
+                    for (uint32_t b = 0; b < 4; ++b)
+                    {
+                        char buf[256];
+                        snprintf(buf, sizeof buf, "%s%s: pixels %.3f M (tree %.3f M), records %.3f M (tree %.3f M), in front of a full union %.3f M (tree %.3f M)", b ? " | " : "",
+                                 names[b], pixAll[b] / 1e6, pixTree[b] / 1e6, recAll[b] / 1e6, recTree[b] / 1e6, keptAll[b] / 1e6, keptTree[b] / 1e6);
+                        line += buf;
+                    }
+                    logf("  by distance (nearest record per pixel; record's own distance): %s\n", line.c_str());
+                }
+                for (ComPtr<ID3D12Resource>* buffer : { std::addressof(rbTiles), std::addressof(rbTable), std::addressof(rbList), std::addressof(rbRecords), std::addressof(rbVis),
+                                                        std::addressof(rbVisible) })
                     device.deferRelease(*buffer);
             }
             if (service)

@@ -25,8 +25,12 @@ struct CullView  // 320 B
     uint32_t userData;
     uint32_t tilesX;
     uint32_t tilePx;
+    float3 prevPosition;
+    float bandAMinPx;
+    float bandAHysteresisPx;
+    float pad[3];
 };
-static_assert(sizeof(CullView) == 320);
+static_assert(sizeof(CullView) == 352);
 
 constexpr uint32_t kViewOcclusion = 1;
 constexpr uint32_t kViewCullBack = 2;
@@ -35,8 +39,9 @@ constexpr uint32_t kViewTileSingle = 4;  // tile-local pairs are single tiles (a
 // Cull state words.
 constexpr uint32_t kStateNodeWrite = 0, kStateNodeEnd = 2, kStateGroupWrite = 3, kStateVisible = 5, kStateDeferInstances = 6, kStateDeferNodes = 7,
                    kStateDeferClusters = 8, kStateListCount = 9, kStateOverflow = 21, kStateStatInstances = 22, kStateStatNodes = 23, kStateStatClusters = 24,
-                   kStateStatTriangles = 25, kStateTilePairs = 29, kStateCovPool = 30, kStateCovFragments = 32, kStateCovTiles = 33, kStateCovChunks = 34,
-                   kStateStatBandClusters = 35, kStateCovLost = 38, kStateCovHeavy = 39, kStateWords = 40;
+                   kStateStatTriangles = 25, kStateTilePairs = 29, kStateCovPool = 30, kStateCovInvocations = 31, kStateCovFragments = 32, kStateCovTiles = 33, kStateCovChunks = 34,
+                   kStateStatBandClusters = 35, kStateCovLost = 38, kStateCovHeavy = 39, kStateStatMixedClusters = 40,
+                   kStateStatMixedTriangles = 41, kStateWords = 48;
 constexpr uint32_t kLists = 6;
 constexpr uint32_t kListABack = 0, kListANone = 1, kListAAlphaBack = 2, kListAAlphaNone = 3, kListB = 4, kListC = 5;
 constexpr uint32_t kAListCount = 4;  // lists drawn by the vis buffer raster

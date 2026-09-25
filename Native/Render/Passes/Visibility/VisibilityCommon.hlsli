@@ -27,6 +27,10 @@ struct CullView
     uint userData;
     uint tilesX;                       // ceil(viewport width / tilePx)
     uint tilePx;
+    float3 prevPosition;               // the previous frame's camera position (band hysteresis; = position after a cut)
+    float bandAMinPx;                  // visibility.band_a_min_width_px
+    float bandAHysteresisPx;           // visibility.band_a_hysteresis_px: band B stays B below this if it was B last frame
+    float3 pad;
 };
 
 #define CULL_VIEW_OCCLUSION 1u   // HiZ occlusion (two-phase) for this view
@@ -53,13 +57,16 @@ struct CullView
 #define VS_GROUP_END 28u      // group items of the current cluster pass: [VS_GROUP_BEGIN, VS_GROUP_END)
 #define VS_TILE_PAIRS 29u     // tile-local raster: (cluster, tile rectangle) pairs appended
 #define VS_COV_POOL 30u       // coverage record pool of the frame (chunks; CoverageBuild MODE 2, for the statistics)
+#define VS_COV_INVOCATIONS 31u // coverage pixel kernel invocations (measurement stages only)
 #define VS_COV_FRAGMENTS 32u  // coverage layer (CoverageLayer.hlsli): fragments appended by the raster
 #define VS_COV_TILES 33u      // tiles with fragments (tile list entries)
 #define VS_COV_CHUNKS 34u     // record chunks taken from the pool (may exceed the pool: the need, for its sizing)
-#define VS_STAT_BAND_CLUSTERS 35u  // + band (3): visible clusters per band A, B, C
+#define VS_STAT_BAND_CLUSTERS 35u  // + band (3): visible clusters per band A, B, C (mixed sheet clusters count as B)
 #define VS_COV_LOST 38u       // chunks taken but not published (another wave published the slot's chunk first)
 #define VS_COV_HEAVY 39u      // heavy coverage tiles (tile list)
-#define VS_WORDS 40u
+#define VS_STAT_MIXED_CLUSTERS 40u  // sheet clusters drawn in both rasters, split per triangle by the mesh kernels
+#define VS_STAT_MIXED_TRIANGLES 41u // their triangles
+#define VS_WORDS 48u
 
 #define VS_LISTS 6u
 #define LIST_A_BACK 0u        // band A, opaque, back faces culled
@@ -140,6 +147,37 @@ float projectedError(CullView v, float4 s, float worldError)
 }
 
 // Distance-free projected size in pixels of a world length at the sphere (for bands).
+// Projected silhouette width of a sheet triangle seen from 'eye' (COVERAGE_REDESIGN 14.9 correction 3, request 16: the
+// band definition per element): the triangle's smallest altitude x pixels per metre / the centroid's distance x |cos| of
+// the angle between the view ray to the centroid and the triangle's normal.
+float sheetTriangleWidthPx(CullView v, float3 a, float3 b, float3 c, float3 eye)
+{
+    const float3 n = cross(b - a, c - a);
+    const float twiceArea = length(n);
+    const float longest = sqrt(max(dot(b - a, b - a), max(dot(c - b, c - b), dot(a - c, a - c))));
+    if (!(twiceArea > 0) || !(longest > 0)) return 0;
+    const float altitude = twiceArea / longest;
+    if (v.orthographic) return altitude * v.lodScale * abs(dot(n, v.viewDirection.xyz)) / twiceArea;
+    const float3 ray = (a + b + c) * (1.0 / 3.0) - eye;
+    const float d = max(length(ray), v.nearPlane);
+    return altitude * v.lodScale / d * abs(dot(n, ray)) / (twiceArea * d);
+}
+
+// Band B for a triangle of a mixed sheet cluster: narrower than band A's minimum, or (hysteresis (a)) narrower than the
+// hysteresis width and band B from the previous camera. Both mesh kernels call this with the same deformed vertices, so
+// every triangle is drawn by exactly one of them.
+bool sheetTriangleBandB(CullView v, float3 a, float3 b, float3 c)
+{
+    const float now = sheetTriangleWidthPx(v, a, b, c, v.position);
+    if (now < v.bandAMinPx) return true;
+    if (now >= v.bandAHysteresisPx) return false;
+    return sheetTriangleWidthPx(v, a, b, c, v.prevPosition) < v.bandAMinPx;
+}
+
+// List entries carry the visible index; a mixed sheet cluster (drawn in a band A list and in the coverage list, split
+// per triangle) has LIST_ENTRY_MIXED set.
+#define LIST_ENTRY_MIXED 0x80000000u
+
 float projectedLength(CullView v, float4 s, float worldLength)
 {
     if (v.orthographic) return worldLength * v.lodScale;

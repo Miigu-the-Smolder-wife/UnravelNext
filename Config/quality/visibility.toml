@@ -15,6 +15,8 @@ lod_max_relative_width_error = 0.25  # a group may simplify only with error <= t
 lod_error_px = 1.0                # projected LOD error threshold
 occlusion_culling = true          # main view two-phase HiZ occlusion (false only for conservativeness tests)
 band_a_min_width_px = 1.5         # w_px >= this: vis buffer + analytic edge coverage
+band_a_hysteresis_px = 2.0        # a cluster or sheet triangle that was band B from the previous camera stays B below this
+                                  # (COVERAGE_REDESIGN 14.9: 1.5 -> 2.0; sheets are classified per triangle)
 band_c_max_width_px = 0.25        # w_px < this (or too many fragments): aggregate bricks
 band_c_max_fragments_per_pixel = 8
 coverage_subsamples = 32          # in-pixel fragment overlap ordering mask
@@ -38,8 +40,8 @@ coverage_table_slots = 32         # coverage layer: chunk table slots per 8 x 8 
 coverage_pool_min_fragments_per_pixel = 1.0  # coverage record pool floor (4K: 8.3 M records, 133 MB); the pool is 1.5 x
                                   # the latest measured need when larger (16 B per record)
 coverage_heavy_tile_fragments = 1024  # tiles with more fragments go on the heavy list (M's block sort and merge)
-coverage_debug_stage = 0          # measurement only: 1 = the pixel kernel stops after the fragment's math, 2 = after the
-                                  # tile counters (no records); 0 = the layer
+coverage_debug_stage = 0          # measurement only: 3 = the pixel kernel returns at once, 4 = after area, depth and band A
+                                  # test, 1 = after the fragment's math, 2 = after the tile counters; 0 = the layer
 max_coverage_fragments = 12582912 # unused since INTERFACES v1.37 (coverage layer v2); kept so binaries built before it still
                                   # start; removed after the next integrated rebuild
 coverage_band_c = true            # with coverage_layer: band C clusters are drawn in the coverage layer until the band C

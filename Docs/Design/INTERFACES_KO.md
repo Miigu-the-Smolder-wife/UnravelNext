@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.39, 2026-09-26)
+# UnravelNext 인터페이스 (v1.40, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -148,6 +148,10 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
 - 반복 횟수가 데이터에 따라 정해지는 셰이더 루프에는 모두 **하드 반복 상한**을 둔다: 웨이브 집계 루프(웨이브 폭), 트리·사슬·목록 걷기(깊이나 용량), CAS 재시도, 타일·레코드 루프(풀 용량).
 - 상한에 닿으면 조용히 끊지 않는다. 트랙의 오류 비트를 세워(V: `Stats::overflow` 0x400 `OVERFLOW_ITERATION_LIMIT`) 게이트를 실패로 만든다. 그래야 livelock이 멈춤이 아니라 검출되는 결함이 된다.
 - 하드웨어 재현은 잠금 안에서 `UNX_FENCE_TIMEOUT_S`를 짧게(5~10 s) 하고 프레임 1~3개로 한다.
+- **TDR을 일부러 재현하지 않는다**(v1.40, 조율 결정). TDR은 GPU를 리셋해서 다른 세션의 실행과 사용자의 앱까지 끊는다.
+  - 멈춤이나 초선형 비용이 의심되면 부하를 1만 → 3만 → 10만 → 30만처럼 늘려 가며 dispatch 시간을 잰다. 성장 곡선(선형인지 제곱인지)으로 원인을 확정한다. 각 실행은 dispatch 하나가 약 0.2 s를 넘지 않는 크기에서 멈춘다.
+  - 수정 뒤에도 같은 곡선으로 선형을 확인한다. 전체 크기는 곡선이 선형이고 외삽값이 0.5 s보다 훨씬 작을 때만 한 번 돈다.
+  - 데이터 의존 루프 상한은 반복 수를 막을 뿐 dispatch 하나의 시간은 막지 못한다. 깊이·밀도에 따라 한 그룹의 일이 커지는 구조는 병렬화해야 한다(예: 무거운 타일을 블록 단위로 여러 그룹에 나눈다).
 
 ## 4. Render graph API (`Native/Render/include/unx/render/RenderGraph.h`)
 
@@ -521,7 +525,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 ## 10. C 트랙 API
 
 ### 10.1 테스트 장면 생성기 (`Tools/SceneGen/include/unx/scenegen/SceneGen.h`)
-`scene::Scene generate(const Request&)`, `allScenes()`, `sceneName(id)`. 장면: CityBlock, ForestThin(잎 6 cm·풀잎 4 mm), ForestCard(잎 35 cm·풀 카드 30 cm), Waterside(잔잔한 물·파도), Interior(거울·광택 바닥·면광원), CityNight(광원 512·그림자 128), RidgeSunset(v1.17: 능선·탑 그림자의 공기 산란, 낮은 태양 17°, 20 km, 바람 없음; 번호 6, 기존 번호 불변). ForestCombat(v1.38, C bb73ea1: RPP-1 숲·전투 게이트 장면, forest_thin 바탕 + 전투 지점 둘레의 닫힌 수관 숲, 카메라 eye·up·edge; 번호 7; 메타 `Results/C/Scenes/forest_combat_meta.md`). V 게이트는 `--camera NAME`으로 카메라를 고른다. 결정적(같은 요청 = 같은 `contentHash`), `validate` 통과, 카메라 하나 이상과 정지·이동 카메라 경로 포함. `scale`은 게이트 부하 배율(1 = 그 장면의 게이트 정의, 예: P1 장면 ≥ 1천만 삼각형).
+`scene::Scene generate(const Request&)`, `allScenes()`, `sceneName(id)`. 장면: CityBlock, ForestThin(잎 6 cm·풀잎 4 mm), ForestCard(잎 35 cm·풀 카드 30 cm), Waterside(잔잔한 물·파도), Interior(거울·광택 바닥·면광원), CityNight(광원 512·그림자 128), RidgeSunset(v1.17: 능선·탑 그림자의 공기 산란, 낮은 태양 17°, 20 km, 바람 없음; 번호 6, 기존 번호 불변). ForestCombat(v1.38, C bb73ea1: RPP-1 숲·전투 게이트 장면, forest_thin 바탕 + 전투 지점 둘레의 닫힌 수관 숲, 카메라 eye·up·edge·vista(8ba4247); 번호 7; 메타 `Results/C/Scenes/forest_combat_meta*.md`). (v1.40, C 195fda3) 게이트 장면 다섯 개(city_block, city_night, forest_combat, waterside, interior)에 RPP-1 동적 강체 1,024개가 들어갔다(`InstanceDynamic`, 장면 해시 바뀜). 공개 함수 `dynamicContent`·`dynamicContentJson`·`generateWithContent`와 구조체 `DynamicBody`·`CharacterSlot`·`DynamicContent`가 추가됐다. V 게이트는 `--camera NAME`으로 카메라를 고른다. 결정적(같은 요청 = 같은 `contentHash`), `validate` 통과, 카메라 하나 이상과 정지·이동 카메라 경로 포함. `scale`은 게이트 부하 배율(1 = 그 장면의 게이트 정의, 예: P1 장면 ≥ 1천만 삼각형).
 
 ### 10.2 기준 경로추적기 (C, `Reference/`)
 - 입력: `.unxscene`(또는 `generate` 결과), 카메라 이름 또는 경로 시각, 해상도(4K·1440p), 표본 수(`reference.samples_per_pixel`, ≥ 4096).
@@ -653,6 +657,14 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.40 (2026-09-26):
+  - **대역을 삼각형 단위로 판정(설계 개정 14.9 교정 3, 요청 16)**: 판 모양(sheet) 클러스터 중 최소 폭이 히스테리시스 폭(`visibility.band_a_hysteresis_px`, 2.0 px) 아래인 것(대역 C·스킨·`BAND_MODE_A` 제외)은 "혼합"이다. 혼합 클러스터는 대역 A 목록과 coverage 목록(LIST_B) 둘 다에 들어가고, 목록 항목 bit 31(`LIST_ENTRY_MIXED`)이 선다. 두 메시 커널이 같은 변형 정점으로 `sheetTriangleBandB`(최소 높이 × lodScale / 무게중심 거리 × |cos|)를 계산해 삼각형 하나를 정확히 한 쪽에서만 그린다: VisRaster는 B 삼각형을, CoverageRaster는 A 삼각형을 `SV_CullPrimitive`로 버린다. 히스테리시스 (a): 지금 폭이 A 최소와 히스테리시스 폭 사이이면 이전 카메라 위치(`CullView::prevPosition`, 컷 뒤에는 현재 위치)에서 B였을 때 B로 둔다. 판이 아닌 클러스터는 클러스터 규칙에 거리 비례 히스테리시스를 더한다. `CullView` 352 B.
+    - 통계: `visibility::Stats::mixedClusters`, `mixedTriangles`(상태 워드 40, 41; `VS_WORDS` 48).
+  - **coverage 래스터 측정 단계 3, 4**: `visibility.coverage_debug_stage` 3 = 픽셀 커널이 바로 반환(메시 + 래스터 + 호출), 4 = 면적·깊이·대역 A 판정 뒤 반환. 측정 변형은 커널 호출 수를 센다(`Stats::coverageInvocations`, 상태 워드 31).
+  - **TDR 재현 금지 규칙(3.6, 조율 결정)**과 10.1 동적 강체 메모(C 195fda3).
+  - V 게이트: `--scene deep_tile --deep-tile-cards N`(한 타일에 카드 N장을 겹친 합성 장면; 성장 곡선용), 거리대(62·187·374 m)별 픽셀·레코드·나무 레코드, 픽셀당 레코드 P50/P99/최대.
+  - [실측] 삼각형 단위 판정의 첫 하드웨어 실행(잠금 안, `UNX_FENCE_TIMEOUT_S=10`): visibility 8/8, D3D12 디버그 층 오류 0.
+  - [실측, deep_tile 4K, 한 타일에 fragment 10 k / 30 k / 100 k / 300 k, 단계 0] 타일 패스(타일당 그룹 1개) 0.057 / 0.188 / 0.670 / 2.052 ms, 래스터 2.98 / 2.29 / 2.00 / 1.93 ns/f, CAS에 진 청크 81 %. 선형이지만 한 그룹이 타일 전체를 걷는 형태라 3.6의 dispatch 상한 규칙에 맞지 않는다 → v1.41에서 배치를 바꾼다.
 - v1.39 (2026-09-26):
   - **coverage 확장 트리(7.1)와 셰이더 루프 상한 규칙(3.6)**: forest_combat edge V 게이트의 FENCE_TIMEOUT(조율 신고)이 원인이다. 확장 사슬 걷기가 깊은 타일에서 제곱 비용이 됐다. 트리로 바꿔 조회를 노드 4개 이하로 했고, M 합성의 `coverageChunkOf` 호출은 그대로 맞다(4변형 컴파일 확인). V의 웨이브 루프·타일 패스 루프에 상한 + 0x400을 넣었다. 새 overflow 비트: 0x200 트리 초과, 0x400 반복 상한.
     - [실측] `coverage_layer_is_exact`(두 설정 × 3프레임, 바뀐 커널의 첫 하드웨어 실행은 잠금 안에서 `UNX_FENCE_TIMEOUT_S=10`)가 통과했다. 트리 노드는 기본 설정에서 5개, 칸 1 설정에서 69~81개였고, 카드 더미 타일은 2단 하위 트리까지 갔다. unit 34/34, visibility 8/8, D3D12 디버그 층 오류 0. 래스터 단가 분해용 측정 키 `visibility.coverage_debug_stage`(1 = fragment 계산까지, 2 = + 타일 카운터, 0 = 층): waterside 4K 12.0 M fragment, A B C 두 번 교대. 1 = 7.63~7.69 ms(0.64 ns/f), 2 = 9.39~9.66(+0.16 ns/f), 0 = 11.95~12.03(+0.20 ns/f). 경합(카운터·청크)은 1/3이고, 가장 큰 몫은 픽셀 커널 계산과 메시·래스터 앞단이다(설계 목표 ≤ 0.3 ns/f).

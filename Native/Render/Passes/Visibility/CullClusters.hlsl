@@ -18,8 +18,8 @@
 
 struct ClusterResult
 {
-    bool visible, defer, wholeRange;
-    uint list, band, triangles, pairs;
+    bool visible, defer, wholeRange, mixed;
+    uint list, list2, band, triangles, pairs;  // list2: the coverage list of a mixed sheet cluster (else VS_LISTS)
     uint2 tileA, tileB;
 };
 
@@ -113,9 +113,22 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
     }
     else if (w < 0)
         wMin = 0;  // skinned sheets: bind-pose normals do not bound the posed ones
-    r.band = wMin >= BAND_A_MIN_PX ? 0u : (wFace < BAND_C_MAX_PX ? 2u : 1u);
-    const uint drawBand = BAND_MODE == BAND_MODE_A ? 0u : (BAND_MODE == BAND_MODE_COVERAGE ? min(r.band, 1u) : r.band);
+    // Sheet clusters that may hold band B triangles are split per triangle by the mesh kernels (the band is defined
+    // per element; the cluster bound above only says which clusters can be mixed). Others keep the cluster rule, with
+    // hysteresis (a): band B until the width reaches the hysteresis width if it was band B from the previous camera
+    // (solid clusters: the width scales with 1 / distance).
+    const bool sheet = w < 0 && !skinned;
+    r.mixed = BAND_MODE != BAND_MODE_A && sheet && wFace >= BAND_C_MAX_PX && wMin < v.bandAHysteresisPx;
+    bool bandB = wMin < BAND_A_MIN_PX;
+    if (!bandB && !sheet && wMin < v.bandAHysteresisPx && !v.orthographic)
+    {
+        const float dNow = max(length(s.xyz - v.position) - s.w, v.nearPlane), dPrev = max(length(s.xyz - v.prevPosition) - s.w, v.nearPlane);
+        bandB = wMin * dNow / dPrev < BAND_A_MIN_PX;
+    }
+    r.band = r.mixed ? 1u : (!bandB ? 0u : (wFace < BAND_C_MAX_PX ? 2u : 1u));
+    const uint drawBand = r.mixed ? 0u : (BAND_MODE == BAND_MODE_A ? 0u : (BAND_MODE == BAND_MODE_COVERAGE ? min(r.band, 1u) : r.band));
     r.list = drawBand == 1 ? LIST_B : (drawBand == 2 ? LIST_C : (alpha ? (cullBack ? LIST_A_ALPHA_BACK : LIST_A_ALPHA_NONE) : (cullBack ? LIST_A_BACK : LIST_A_NONE)));
+    r.list2 = r.mixed ? LIST_B : VS_LISTS;
     r.triangles = clusterTriangleCount(cl);
     r.visible = true;
     return r;
@@ -129,21 +142,28 @@ void emit(RWByteAddressBuffer state, bool active, uint instance, uint clusterInd
     const uint idx = waveAppend(state, VS_VISIBLE, visible ? 1 : 0, CAP_VISIBLE, OVERFLOW_VISIBLE);
     uint slot[VS_LISTS];
     [unroll] for (uint k = 0; k < VS_LISTS; ++k)
-        slot[k] = waveAppend(state, VS_LIST_COUNT + k, r.list == k ? entries : 0, CAP_VISIBLE, OVERFLOW_VISIBLE);
+        slot[k] = waveAppend(state, VS_LIST_COUNT + k, (r.list == k || r.list2 == k) ? entries : 0, CAP_VISIBLE, OVERFLOW_VISIBLE);
     const uint pairBase = waveAppend(state, VS_TILE_PAIRS, tileLocal ? entries : 0, CAP_VISIBLE, OVERFLOW_TILE_PAIRS);
     if (visible && idx < CAP_VISIBLE)
     {
         RWStructuredBuffer<uint2> visibleList = ResourceDescriptorHeap[VISIBLE_UAV];
         visibleList[idx] = uint2(instance, packItem(clusterIndex, view));
         RWByteAddressBuffer lists = ResourceDescriptorHeap[LISTS_UAV];
-        uint s = 0;
+        uint s = 0, s2 = 0;
         [unroll] for (uint k = 0; k < VS_LISTS; ++k)
+        {
             if (r.list == k) s = slot[k];
+            if (r.list2 == k) s2 = slot[k];
+        }
         if (tileLocal)
             tileVisit(TILE_VISIT_WRITE, loadView(view), view, tileMasks(), r.tileA, r.tileB, r.wholeRange, idx, pairBase, s, r.list, CAP_VISIBLE, TILE_PAIRS_UAV,
                       LISTS_UAV);
-        else if (s < CAP_VISIBLE)
-            lists.Store(4 * (r.list * CAP_VISIBLE + s), idx);
+        else
+        {
+            const uint e = idx | (r.mixed ? LIST_ENTRY_MIXED : 0u);
+            if (s < CAP_VISIBLE) lists.Store(4 * (r.list * CAP_VISIBLE + s), e);
+            if (r.mixed && s2 < CAP_VISIBLE) lists.Store(4 * (r.list2 * CAP_VISIBLE + s2), e);
+        }
     }
     const uint d = waveAppend(state, VS_DEFER_CLUSTERS, defer ? 1 : 0, CAP_DEFERRED, OVERFLOW_DEFER_CLUSTERS);
     if (defer && d < CAP_DEFERRED)
@@ -157,6 +177,12 @@ void emit(RWByteAddressBuffer state, bool active, uint instance, uint clusterInd
         if (WaveIsFirstLane() && t > 0) state.InterlockedAdd(4 * (VS_STAT_TRIANGLES + b), t);
         const uint n = WaveActiveCountBits(visible && r.band == b);
         if (WaveIsFirstLane() && n > 0) state.InterlockedAdd(4 * (VS_STAT_BAND_CLUSTERS + b), n);
+    }
+    const uint mixedClusters = WaveActiveCountBits(visible && r.mixed), mixedTriangles = WaveActiveSum((visible && r.mixed) ? r.triangles : 0);
+    if (WaveIsFirstLane() && mixedClusters > 0)
+    {
+        state.InterlockedAdd(4 * VS_STAT_MIXED_CLUSTERS, mixedClusters);
+        state.InterlockedAdd(4 * VS_STAT_MIXED_TRIANGLES, mixedTriangles);
     }
     const uint tested = WaveActiveCountBits(active);
     if (WaveIsFirstLane() && tested > 0) state.InterlockedAdd(4 * VS_STAT_CLUSTERS, tested);

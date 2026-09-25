@@ -40,7 +40,7 @@ struct Settings
     uint32_t capVisible = 0, capNodes = 0, capGroups = 0, capDeferred = 0;
     uint32_t coverageTableSlots = 0, coverageHeavyMin = 0, coverageDebugStage = 0;
     double coveragePoolMinPerPixel = 0;
-    float lodErrorPx = 0, bandAMinPx = 0, bandCMaxPx = 0;
+    float lodErrorPx = 0, bandAMinPx = 0, bandCMaxPx = 0, bandAHysteresisPx = 0;
     bool occlusion = true, coverageLayer = false, coverageBandC = true;
 
     static Settings load(const QualityConfig& q)
@@ -53,6 +53,8 @@ struct Settings
         s.lodErrorPx = (float)q.number("visibility.lod_error_px");
         s.bandAMinPx = (float)q.number("visibility.band_a_min_width_px");
         s.bandCMaxPx = (float)q.number("visibility.band_c_max_width_px");
+        s.bandAHysteresisPx = (float)q.number("visibility.band_a_hysteresis_px");
+        if (!(s.bandAHysteresisPx >= s.bandAMinPx)) fail("visibility.band_a_hysteresis_px = %g: at least band_a_min_width_px (%g)", s.bandAHysteresisPx, s.bandAMinPx);
         s.occlusion = q.boolean("visibility.occlusion_culling");
         s.coverageLayer = q.boolean("visibility.coverage_layer");
         s.coverageBandC = q.boolean("visibility.coverage_band_c");
@@ -60,7 +62,7 @@ struct Settings
         if (slots < 1 || slots > 4095) fail("visibility.coverage_table_slots = %lld: 1 .. 4095 (12-bit root constant field)", (long long)slots);
         s.coverageTableSlots = (uint32_t)slots;
         const int64_t stage = q.integer("visibility.coverage_debug_stage");
-        if (stage < 0 || stage > 2) fail("visibility.coverage_debug_stage = %lld: 0 (the layer), 1 or 2 (measurement variants)", (long long)stage);
+        if (stage < 0 || stage > 4) fail("visibility.coverage_debug_stage = %lld: 0 (the layer), 1 .. 4 (measurement variants)", (long long)stage);
         s.coverageDebugStage = (uint32_t)stage;
         const int64_t heavy = q.integer("visibility.coverage_heavy_tile_fragments");
         if (heavy < 64 || heavy >= (1 << 20)) fail("visibility.coverage_heavy_tile_fragments = %lld: 64 .. 2^20 - 1 (20-bit root constant field)", (long long)heavy);
@@ -95,6 +97,8 @@ struct Coverage
 struct State
 {
     Device* device = nullptr;
+    float3 prevMainPosition{};  // the main view's camera position of the previous frame (band hysteresis)
+    bool hasPrevMainPosition = false;
     ComPtr<ID3D12CommandSignature> dispatchSignature, meshSignature;
     ComPtr<ID3D12Resource> upload;
     uint8_t* uploadMapped = nullptr;
@@ -287,6 +291,9 @@ CullView viewOf(const ViewDesc& view, const Settings& cfg, bool occlusion)
     setPlanes(v);
     v.clipPlane = view.clipPlane;
     v.position = view.position;
+    v.prevPosition = view.position;  // the main view's caller sets the previous frame's
+    v.bandAMinPx = cfg.bandAMinPx;
+    v.bandAHysteresisPx = cfg.bandAHysteresisPx;
     v.lodScale = view.proj.m[1][1] * 0.5f * (float)view.height;  // pixels per metre at distance 1
     v.lodThreshold = cfg.lodErrorPx;
     v.orthographic = 0;
@@ -318,6 +325,9 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
     }
     else
         v.position = eyeOf(r.viewProj);
+    v.prevPosition = v.position;
+    v.bandAMinPx = cfg.bandAMinPx;
+    v.bandAHysteresisPx = cfg.bandAHysteresisPx;
     v.lodScale = r.lodPixelsPerMetre;
     v.lodThreshold = cfg.lodErrorPx;
     v.nearPlane = 1e-4f;
@@ -926,6 +936,9 @@ void recordStats(FramePassContext& fc, State& s, const Run& r, const std::string
         st.coverageChunksLost = w[kStateCovLost];
         st.coverageHeavyTiles = w[kStateCovHeavy];
         st.coveragePoolChunks = w[kStateCovPool];
+        st.coverageInvocations = w[kStateCovInvocations];
+        st.mixedClusters = w[kStateStatMixedClusters];
+        st.mixedTriangles = w[kStateStatMixedTriangles];
         st.overflow = w[kStateOverflow];
         if (st.overflow && !run.overflowReported)
         {
@@ -986,7 +999,15 @@ void visibility(FramePassContext& fc, ViewResources& view)
         r.hizWidth = s.mainHiz.width;
         r.hizHeight = s.mainHiz.height;
     }
-    const CullView cullView = viewOf(view.view, cfg, occlusion);
+    CullView cullView = viewOf(view.view, cfg, occlusion);
+    if (main)
+    {
+        // Band hysteresis (a) re-evaluates the band from the previous frame's camera; a history discontinuity (cut,
+        // restore) starts over from this frame's.
+        if (s.hasPrevMainPosition && fc.frame.discontinuity == 0) cullView.prevPosition = s.prevMainPosition;
+        s.prevMainPosition = view.view.position;
+        s.hasPrevMainPosition = true;
+    }
     r.viewsSrv = uploadViews(s, fc, { cullView });
     if (view.view.planarMask.valid())
     {

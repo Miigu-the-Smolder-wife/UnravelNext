@@ -28,6 +28,9 @@ struct Stats
     uint32_t coverageChunksLost = 0;   // chunks taken but not published (another wave published the slot first)
     uint32_t coverageHeavyTiles = 0;   // tiles over visibility.coverage_heavy_tile_fragments (M's heavy path)
     uint32_t coveragePoolChunks = 0;   // the frame's record pool (chunks of 64 records)
+    uint32_t coverageInvocations = 0;  // coverage pixel kernel invocations (visibility.coverage_debug_stage != 0 only)
+    uint32_t mixedClusters = 0;        // sheet clusters drawn in both rasters, split per triangle (counted in bandClusters[1])
+    uint32_t mixedTriangles = 0;       // their triangles (counted in triangles[1]'s cluster rule: see the mesh kernels)
     uint32_t overflow = 0;             // capacity bits (0 = every list fit); nonzero means geometry was dropped
                                        // (0x100: the coverage record pool ran out; it grows from the next
                                        // completed frame)

@@ -1,8 +1,9 @@
 // unx-kernel: ps_6_6 main
-// unx-variants: STAGE=0,1,2
+// unx-variants: STAGE=0,1,2,3,4
 // Coverage layer pixel kernel (band B, CoverageLayer.hlsli, CoverageTiles.hlsli), conservative rasterisation, no render
-// target or depth (STAGE 0; STAGE 1 and 2 are measurement variants, visibility.coverage_debug_stage: 1 stops after the
-// fragment's math, 2 after the tile counters, so the gate can split the kernel's cost):
+// target or depth (STAGE 0; the others are measurement variants, visibility.coverage_debug_stage, that split the
+// kernel's cost: 3 returns at once (mesh kernel + rasteriser), 4 after area, depth and the band A test, 1 after the
+// fragment's math, 2 after the tile counters; the measurement variants count the kernel's invocations):
 //  1. the exact area of the primitive's polygon (triangle, or the near-clipped quad as two triangles) inside this pixel
 //     and the covered region's centroid (Coverage.hlsli); zero area (conservative raster's touching pixels) writes
 //     nothing;
@@ -118,6 +119,16 @@ void main(float4 position : SV_Position, nointerpolation uint visId : VISID, noi
 {
     if (IsHelperLane()) return;  // no derivatives are taken (explicit gradients)
     const uint2 pixel = uint2(position.xy);
+#if STAGE != 0
+    {
+        RWByteAddressBuffer counters = ResourceDescriptorHeap[COV_STATE];
+        const uint invocations = WaveActiveCountBits(true);
+        if (WaveIsFirstLane()) counters.InterlockedAdd(4 * VS_COV_INVOCATIONS, invocations);
+    }
+#endif
+#if STAGE == 3
+    return;
+#endif
     CoveragePolygon poly;
     poly.a = a;
     poly.b = b;
@@ -138,6 +149,19 @@ void main(float4 position : SV_Position, nointerpolation uint visId : VISID, noi
         cs = coveragePolygonGeometry(poly, float2(pixel), mid);
         live = cs.area > 0 && coverageAboveBandA(pixel, cs.depth);
     }
+#if STAGE == 4
+    {
+        RWByteAddressBuffer counters = ResourceDescriptorHeap[COV_STATE];
+        const uint folded = WaveActiveBitXor(live ? asuint(cs.depth) ^ asuint(cs.area) ^ asuint(mid.x + mid.y) : 0u);
+        const uint counted = WaveActiveCountBits(live);
+        if (WaveIsFirstLane())
+        {
+            if (counted > 0) counters.InterlockedAdd(4 * VS_COV_FRAGMENTS, counted);
+            if (folded == 0x9E3779B9u) counters.InterlockedAdd(4 * VS_COV_LOST, 1);
+        }
+        return;
+    }
+#endif
     if (live)
     {
         cs.mask = coveragePolygonMask(poly, float2(pixel));

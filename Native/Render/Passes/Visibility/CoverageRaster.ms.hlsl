@@ -35,6 +35,7 @@ struct PrimitiveOut
 groupshared float4 gs_clip[128];
 groupshared float2 gs_uv[128];
 groupshared float3 gs_normal[128];
+groupshared float3 gs_world[128];  // mixed sheet clusters: the per-triangle band test
 
 float4 toScreen(float4 p, float2 viewport)
 {
@@ -53,7 +54,9 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     const uint count = min(state.Load(4 * (VS_LIST_COUNT + LIST_B)), capacity);
     const uint index = group.x + group.y * 65535;
     const bool valid = index < count;  // uniform over the group
-    const uint visibleIndex = valid ? lists.Load(4 * (LIST_B * capacity + index)) : 0;
+    const uint listEntry = valid ? lists.Load(4 * (LIST_B * capacity + index)) : 0;
+    const uint visibleIndex = listEntry & ~LIST_ENTRY_MIXED;
+    const bool mixed = (listEntry & LIST_ENTRY_MIXED) != 0;  // this raster keeps the cluster's band B triangles
     StructuredBuffer<uint2> visible = ResourceDescriptorHeap[COV_VISIBLE];
     const uint2 entry = valid ? visible[visibleIndex] : uint2(0, 0);
     StructuredBuffer<CullView> views = ResourceDescriptorHeap[COV_VIEWS];
@@ -81,6 +84,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         gs_clip[i] = p;
         gs_uv[i] = loadVertex(mesh, meshVertex).uv;
         gs_normal[i] = dv.normal;
+        gs_world[i] = dv.world;
     }
     GroupMemoryBarrierWithGroupSync();
     StructuredBuffer<uint> clusterTriangles = ResourceDescriptorHeap[g_clusterTriangles];
@@ -121,7 +125,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         PrimitiveOut o = (PrimitiveOut)0;
         o.visId = packVisId(visibleIndex, t);
         o.material = material;
-        bool cull = n < 3;
+        bool cull = n < 3 || (mixed && !sheetTriangleBandB(v, gs_world[tri.x], gs_world[tri.y], gs_world[tri.z]));
         if (!cull)
         {
             if (n == 3)
