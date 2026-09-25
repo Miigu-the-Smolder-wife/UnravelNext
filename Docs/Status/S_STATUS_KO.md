@@ -134,5 +134,6 @@
   - 다시 그리기 = 기저를 지금 L로 바꾸고 그 단의 페이지 전부를 stale로 표시하는 것이다(`sceneInvalidate`를 단 비트마스크로 바꾼다).
 - 국소광, dirty 규칙 (a)~(c), 공기 걷기(한 선분은 한 단)는 단 기저만 바뀌고 규칙은 그대로다.
 
-**인터페이스 공백.** 지금 호스트 ABI(`UnxSceneSetEnvironment`)는 커밋 전에만 태양을 바꾼다. 시간대는 프레임마다 태양을 바꿀 경로가 있어야 한다
-(I/코어 소관). 렌더러 내부는 `GpuScene::source()->sun`을 매 프레임 읽으므로 준비돼 있다.
+**호스트 경로.** I의 ABI 2 `UnxFrameSetSun`과 ABI 4 `UnxFrameSetEnvironment`(1cf9310)가 프레임마다 `GpuScene::source()`의 태양·대기를
+고친다. 렌더러는 그것을 매 프레임 읽는다. 커밋 뒤 바람 변경은 I 요청 `20260925_I_wind_change.md`에 대한 S 검토
+(`20260925_S_wind_change_review.md`: 끝점 상한, 속도 분리 scale)를 따른다.
