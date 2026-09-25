@@ -467,3 +467,21 @@ M0 순서(설계 → 트랙): 6절 자동 노출·톤맵·SDR(M), 0.A 입자(FX,
 | 프레임 합성(별도 출력) | 8절(렌더 텍스처 뷰) + core |
 | 지연·VRR·페이싱 | 16절 |
 | 사진·시네마틱 모드 | 17절 |
+
+---
+
+## 20. 설계 세션 상태 (2026-09-26 13:20) — 대기 중인 입력과 다음 일
+
+| 트랙 | 대기 중인 입력(실측·확인) | 이 문서의 어느 항이 바뀌나 |
+|---|---|---|
+| V·core | 삼각형 단위 대역 판정 뒤 up/eye P_B·F_B(브릭 뒤), 2w 브릭 베이크 메모리(1 B / 4-bit), vista march·VSM·GI 동시 실측, 파괴 사건 tick 행의 같은 프레임 확인, 3단 캐시 관리자 파일 리더 벤치(B_d), Unity 슬롯 VRAM(I) | COVERAGE 14.9 vista 열, ARCHITECTURE 2.13b, FEATURES 2 |
+| M | 합성 재설계 단가(waterside·city·vista), 필요 밉 바이트(city·forest), 노출·SDR 구현 | COVERAGE 4.5, 2.13b 텍스처 행, FEATURES 6 |
+| S | 4.3 mixed 몫(브릭 뒤), 대기 갭 ①②③ 뒤 J_ms 격자 크기(→ 2.13b·재구축 비용식), 레버 ① 실측, (c) 1회 측정 | ARCHITECTURE 2.3 |
+| R | 발광 중요도 표본·MIS 존재 확인, R VRAM 할당 바이트, 사건 BLAS 빌드 실측 | FEATURES 12·2, 2.13b |
+| C | vista 대역 B 거리 히스토그램(w/2 채택 비용식), 게임 벤치 기준 렌더, GPU 경로추적기 검증 | COVERAGE 14.9, FEATURES 17 |
+| FX | 입자 패스 단계 1 실측(c_setup·c_blend·정렬), 렌더 트랜지언트 바이트 | FEATURES 0.A, 2.13b |
+| RPP-1 | 자산 뒤 fp_1000 VRAM, 게임 벤치 첫 실측(케이스별) | 2.13 게임 벤치 열, 2.13b |
+| 물리 | soft 위치 링 구현 뒤 VRAM, MPM 상태 쌍 형식 확정 | 2.13b, FEATURES 0.B |
+| World·VFX | 노출도 맵 배치 확인(§2), 브릭 업로드 실측 | FEATURES 5·10 |
+
+**규칙 유지:** 부하·품질 정의 불변, 비용식은 실측 바닥 + 최악 dispatch 조건, 늦은 스트리밍은 저해상도 대체 없음, 메모리 구조는 일반 PC(16/8 GB) 기준 3단. 예산 맞추기(숲 vista 등)는 사용자 결정에 따라 게임 벤치·RPP-1 단계에서 재개한다.

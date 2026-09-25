@@ -13,7 +13,7 @@
 | 절 | 커널 | 잰 것 | 설계 항 |
 |---|---|---|---|
 | coverage | `coverage2.hlsl`: `SliverMS`(조각·카드 생성), `FragPS`(보존 래스터 + 정확 면적 + 32 부표본 마스크 + 24 B 레코드; APPEND_MODE 0 전역 목록·웨이브 원자 1회 / 1 타일 구간·fragment마다 원자 / 2 타일 구간·(웨이브, 타일)마다 원자; COUNT=1 세기 패스), `PrefixCS`(타일 오프셋·용량 = 직전 수 × 1.25 + 8), `CompositeCS`(타일 groupshared 정렬 (픽셀, 깊이) → 앞→뒤 합성, fragment당 텍스처 탭 2) | fragment당 ns: 세기, append(모드별), 합성; F ≈ 5/10/20 M, 0.25·0.5 px 조각과 4 px 카드 | 개정 1 4.1·4.5, 5.2 "대역 B 래스터 F_B × 0.050", "coverage 합성 F_B × 0.050 + P_cov × 0.030" |
-| bricks | `bricks.hlsl`: `MarchCS`(브릭 표 간접 + 복셀 raw 로드, 카메라/직교 태양 광선, 16·32·48 스텝, 32 B 레코드; VOXEL_BYTES 1·8), `EntryMapCS`(브릭당 16² 셀 × 16 스텝 투과 맵) | 픽셀당·스텝당 ns, L2 상주(19 MB) 대 초과(151 MB) | 개정 1 6.3·6.4, 5.2 "대역 C march P_C × 0.06" |
+| bricks (+ `--bricks-vista`) | `bricks.hlsl`: `MarchCS`(브릭 표 간접 + 복셀 raw 로드, 카메라/직교 태양/receiver 광선, 16·32·48 스텝, 32 B 레코드; VOXEL_BYTES 1·8, SPARSE, TILE_TABLE, NO_WRITE, OUT_T, SOA), `EntryMapCS`; vista 세계(1 px/복셀, 인스턴스 풀·배치 변형·1~2 GB 집합) | 픽셀당·스텝당 ns, L2 상주(19 MB) 대 초과(151 MB) | 개정 1 6.3·6.4, 5.2 "대역 C march P_C × 0.06" |
 | bands | `bands.hlsl`: `ResolveCS`(8 B 읽기 → 12 B 쓰기), `ShadeCS`(32 또는 48 B 읽기 → 4 B 쓰기); 전체 화면 대 4·8·16 밴드(밴드마다 해석 → 셰이딩), 매 반복 전 128 MB 쓰기로 L2 비움 | 픽셀당 ns, 4K·1440p | 개정 1 4.8 밴드 스케줄링 이득 |
 | shade | `shade2.hlsl`: 8×8 타일 그룹, TILE_SH(3×3 프로브 레코드 80 B를 groupshared에 1회 → 픽셀마다 4프로브 가중 SH 평가) 대 픽셀마다 4 프로브 로드, 공기 볼륨 3D trilinear 3회(RGBA16F 160×90×195), K 아틀라스 탭 1회(RGBA8 (probesX·14)×(probesY·8)), 국소광 8개, EXTRA 32·64·128 추가 생존 값(레지스터 압박) | 변형별 ms·픽셀당 ns | 개정 1 4.4 "셰이딩 커널 0.70 ms(도시), 점유율 조건" |
 
