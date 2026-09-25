@@ -7,16 +7,16 @@
 // Without S's atmosphere (tracks built alone) the sky is black and the disk has the top-of-atmosphere radiance.
 // P[0] = { material word, color UAV, tile lists (raw), list offset (entries) }
 // P[1] = { atmosphere transmittance, multi-scatter, sky view, this view's air volume } (UNX_NONE = absent)
-// P[2] = { experiment mask (shading.experiment_disable), 0, 0, 0 }
-// P[3] = { 0, 0, edge args UAV (raw), vis id SRV }, P[7] as ShadeOpaque
+// P[2] = { experiment mask (shading.experiment_disable; not read here since edge detection moved to EdgeDetect), 0, 0, 0 }
+// P[3] = { 0, 0, edge tile mask SRV (EdgeDetect.hlsl; UNX_NONE = no edge pixels), 0 }, P[7].x edge radiance UAV
+// (RGBA16F): a sky edge pixel (a neighbour shows a surface) keeps its exposed linear radiance for the composite.
 #include "Bindless.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
-#include "Passes/Shading/Edge.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 
-bool shadeSky(uint2 pixel, Texture2D<uint> words);
+float3 shadeSky(uint2 pixel, Texture2D<uint> words);
 
 [numthreads(8, 8, 1)]
 void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
@@ -26,12 +26,21 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     const uint2 pixel = uint2(tile & 0xFFFFu, tile >> 16) * M_TILE + tid;
     Texture2D<uint> words = ResourceDescriptorHeap[P[0].x];
     const bool active = all(pixel < uint2(g_viewWidth, g_viewHeight)) && mWordMaterial(words[min(pixel, uint2(g_viewWidth, g_viewHeight) - 1)]) == M_MATERIAL_SKY;
-    bool isEdgeLane = false;
-    if (active) isEdgeLane = shadeSky(pixel, words);
-    edgeAppendPixel(pixel, isEdgeLane, P[7].w, P[3].z);
+    if (!active) return;
+    const float3 radiance = shadeSky(pixel, words);
+    if (P[3].z == UNX_NONE) return;
+    Texture2D<uint2> edgeTiles = ResourceDescriptorHeap[P[3].z];
+    const uint2 edgeMask = edgeTiles[uint2(tile & 0xFFFFu, tile >> 16)];
+    const uint bit = tid.y * M_TILE + tid.x;
+    if ((((bit < 32 ? edgeMask.x : edgeMask.y) >> (bit & 31)) & 1u) != 0)
+    {
+        RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];
+        edgeRadiance[pixel] = float4(radiance * g_exposure, 1);
+    }
 }
 
-bool shadeSky(uint2 pixel, Texture2D<uint> words)
+// The pixel's sky radiance (linear, before exposure); writes the output.
+float3 shadeSky(uint2 pixel, Texture2D<uint> words)
 {
 
     float3 D, Dx, Dy;
@@ -58,19 +67,5 @@ bool shadeSky(uint2 pixel, Texture2D<uint> words)
     radiance += sun * shSunDiskCoverage(D, Dx, Dy);
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].y];
     color[pixel] = shEncodeOutput(radiance);
-    // Edge: the sky has one vis id (VIS_NONE), so a neighbour with another shows a surface.
-    if (P[7].x == UNX_NONE || (P[2].x & 256)) return false;
-    Texture2D<uint> visIds = ResourceDescriptorHeap[P[3].w];
-    bool isEdge = false;
-    [unroll] for (uint k = 0; k < 9; ++k)
-    {
-        const int2 q = int2(pixel) + int2(int(k % 3) - 1, int(k / 3) - 1);
-        if (k != 4 && all(q >= 0) && q.x < int(g_viewWidth) && q.y < int(g_viewHeight)) isEdge = isEdge || visIds[uint2(q)] != VIS_NONE;
-    }
-    if (isEdge)
-    {
-        RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];
-        edgeRadiance[pixel] = float4(radiance * g_exposure, 1);
-    }
-    return isEdge;
+    return radiance;
 }

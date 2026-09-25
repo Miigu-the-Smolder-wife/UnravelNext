@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// Edge composite dispatch arguments from the edge pixel count: x = ceil(count / 64) (Edge.hlsli edgeAppendPixel layout).
+// Edge composite dispatch arguments from the edge pixel count: x = ceil(count / 64) (Edge.hlsli list layout).
 // The count is bounded by the list's capacity (the view's pixels), which it cannot exceed by construction: a clobbered
 // count then costs at most one full-view composite instead of an unbounded dispatch.
 // P[0] = { edge args UAV (raw), edge pixel list UAV (raw): the count goes to entry 0 for the composite, capacity }

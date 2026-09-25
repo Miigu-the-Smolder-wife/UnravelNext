@@ -151,25 +151,8 @@ float edgeCutoutCoverage(MTextureSet ts, float cutoff, float2 uv, float2 dx, flo
     return rho <= 1 ? magnified : (rho >= 2 ? minified : lerp(magnified, minified, rho - 1));
 }
 
-// Appends the wave's edge pixels to the edge pixel list (one atomic per wave). Edge args layout (raw, 24 B): bytes 0-11
-// the composite's D3D12_DISPATCH_ARGUMENTS (EdgeArgs.hlsl fills x), byte 12 the pixel count. The list holds the count in
-// entry 0 (EdgeArgs.hlsl copies it) and the pixels from entry 1.
-void edgeAppendPixel(uint2 pixel, bool isEdge, uint listUav, uint argsUav)
-{
-    const uint n = WaveActiveCountBits(isEdge);
-    if (n == 0) return;
-    uint base = 0;
-    if (WaveIsFirstLane())
-    {
-        RWByteAddressBuffer args = ResourceDescriptorHeap[argsUav];
-        args.InterlockedAdd(12, n, base);
-    }
-    base = WaveReadLaneFirst(base);
-    if (isEdge)
-    {
-        RWByteAddressBuffer list = ResourceDescriptorHeap[listUav];
-        list.Store(4 * (1 + base + WavePrefixCountBits(isEdge)), pixel.x | (pixel.y << 16));
-    }
-}
+// Edge pixel list (raw; EdgeDetect.hlsl fills it with one atomic per tile): entry 0 the pixel count (EdgeArgs.hlsl copies
+// it from the edge args), entries from 1 the pixels (x | y << 16). Edge args (raw, 24 B): bytes 0-11 the composite's
+// D3D12_DISPATCH_ARGUMENTS (EdgeArgs.hlsl fills x), byte 12 the pixel count (ShadeBegin zeroes it).
 
 #endif

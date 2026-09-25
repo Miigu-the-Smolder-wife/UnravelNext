@@ -1576,6 +1576,34 @@ void testAreaLights(TestFrame& tf, Report& report)
 
 } // namespace
 
+// ---------------------------------------------------------------- planar view products (v1.22)
+// A planar reflection view shades with S's own froxel lists and air volume. When the frame's main view has lists and a
+// planar view has none, the shading fails instead of leaving local lights and air out of the reflection.
+void testPlanarProducts(TestFrame& tf, Report& report)
+{
+    const std::vector<uint32_t> words(64, 0);
+    ComPtr<ID3D12Resource> lists = uploadStatic(tf.device, words.data(), words.size() * 4, L"test main froxel lists");
+    std::string error;
+    tf.run([&](FramePassContext& fc) {
+        const ViewResources mainView = tf.mainView(fc, 64, 64, 0);
+        fc.resources.froxelLights = fc.graph.importBuffer(lists.Get(), { "test main froxel lists", words.size() * 4, 0 });
+        ViewResources v;
+        v.view = ViewDesc::planarReflection(mainView.view, float4{ 0, 1, 0, 0 }, 0, 0, 32, 32);
+        v.frameConstants = fc.frameConstantsFor(v.view);
+        v.color = fc.graph.createTexture({ "m.test.planar.color", 32, 32, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        try
+        {
+            tracks::shading(fc, v);
+        }
+        catch (const std::exception& e)
+        {
+            error = e.what();
+        }
+    });
+    logf("planar products: %s\n", error.empty() ? "no failure" : error.c_str());
+    report(error.find("froxel lists") != std::string::npos, "planar view without S's froxel lists while the main view has them fails", error.empty() ? 0 : 1, 1);
+}
+
 int main(int argc, char** argv)
 {
     try
@@ -1596,6 +1624,7 @@ int main(int argc, char** argv)
         testEdgeComposite(tf, report);
         testEdgeCutout(tf, report);
         testAreaLights(tf, report);
+        testPlanarProducts(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

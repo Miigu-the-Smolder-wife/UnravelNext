@@ -26,17 +26,16 @@
 // P[3] = { atmosphere transmittance, multi-scatter, S's shadow overflow tile heads (main kernel; UNX_NONE = absent), this
 //        view's air volume } (this kernel reads no sky view)
 // P[4] = { 0 (the specular albedo LUT is the frame constant g_specularAlbedoLut, v1.25), texture table, experiment mask (0;
-//        shading.toml), vis id SRV }
+//        shading.toml), 0 }
 // P[5] = { froxel lights (raw) (UNX_NONE = absent), LTC table (StructuredBuffer<float4>, AreaLight.hlsli) }
-// P[6] = { edge cos angle, edge footprint tolerance, edge distance tolerance (floats), edge args UAV (raw) }
+// P[6] = { edge tile mask SRV (EdgeDetect.hlsl, R32G32_UINT per tile; UNX_NONE = no edge pixels), 0, 0, 0 }
 // P[7] = { edge radiance UAV (RGBA16F), R's screen probe maps (K path; UNX_NONE = absent), S's shadow overflow list (raw;
-//        FALLBACK: a raw buffer holding this frame's ShadowSrvs), edge pixel list UAV (raw) }
+//        FALLBACK: a raw buffer holding this frame's ShadowSrvs), 0 }
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
-#include "Passes/Shading/Edge.hlsli"
 #include "Passes/Shading/AreaLight.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
@@ -48,8 +47,6 @@
 struct ShadedPixel
 {
     float3 radiance;  // linear, before exposure
-    float linearZ;
-    float3 normal;    // shading normal (G-buffer)
 };
 
 ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, Texture2D<uint2> gbuffer, Texture2D<float> depthTex,
@@ -75,7 +72,6 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     Texture2D<uint> words = ResourceDescriptorHeap[P[0].z];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].x];
     Texture2D<float> depthTex = ResourceDescriptorHeap[P[0].y];
-    Texture2D<uint> visIds = ResourceDescriptorHeap[P[4].w];
     const bool inView = all(pixel < uint2(g_viewWidth, g_viewHeight));
     const uint word = inView ? words[pixel] : M_MATERIAL_SKY;
     const uint materialIndex = mWordMaterial(word);
@@ -85,37 +81,20 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     ShadedPixel sp = (ShadedPixel)0;
     if (active) sp = shadeSurface(pixel, word, materialIndex, m, words, gbuffer, depthTex, overflowHead);
 
-    // ---- edge (E) pixels keep their exposed linear radiance for the composite (EdgeComposite.hlsl). Neighbours are read
-    // from the screen buffers (L1 hits within the tile): a groupshared exchange needs a group barrier after the shading,
-    // which makes both waves of a tile wait on each other's lookups.
-    if (P[7].x == UNX_NONE || (P[4].z & 256) != 0) return;
-    bool isEdge = false;
-    if (active)
+    // ---- edge (E) pixels (EdgeDetect.hlsl marked them in the tile's mask) keep their exposed linear radiance for the
+    // composite (EdgeComposite.hlsl).
+    if (!active || P[6].x == UNX_NONE) return;
+    Texture2D<uint2> edgeTiles = ResourceDescriptorHeap[P[6].x];
+    const uint2 edgeMask = edgeTiles[tileCoord];
+    const uint bit = tid.y * M_TILE + tid.x;
+    if ((((bit < 32 ? edgeMask.x : edgeMask.y) >> (bit & 31)) & 1u) != 0)
     {
-        const EdgeParams ep = { asfloat(P[6].x), asfloat(P[6].y), asfloat(P[6].z) };
-        const EdgePixel c = edgeSample(pixel, materialIndex, sp.linearZ, sp.normal);
-        const uint vc = visIds[pixel];
-        [unroll] for (uint k = 0; k < 9; ++k)
-        {
-            if (k == 4 || isEdge) continue;
-            const int2 q = int2(pixel) + int2(int(k % 3) - 1, int(k / 3) - 1);
-            if (any(q < 0) || q.x >= int(g_viewWidth) || q.y >= int(g_viewHeight)) continue;
-            if (visIds[uint2(q)] == vc) continue;
-            EdgePixel e = (EdgePixel)0;
-            e.material = mWordMaterial(words[uint2(q)]);
-            if (e.material == c.material) e = edgeSample(uint2(q), e.material, linearDepth(depthTex[uint2(q)]), octDecode(gbuffer[uint2(q)].x));
-            isEdge = e.material != c.material || !edgeSameSurface(c, e, ep);
-        }
-        if (isEdge)
-        {
-            RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];
-            edgeRadiance[pixel] = float4(sp.radiance * g_exposure, 1);
-        }
+        RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];
+        edgeRadiance[pixel] = float4(sp.radiance * g_exposure, 1);
     }
-    edgeAppendPixel(pixel, isEdge, P[7].w, P[6].w);
 }
 
-// Shades one pixel of this class (writes the output) and returns what edge detection needs.
+// Shades one pixel of this class (writes the output) and returns its linear radiance (kept for edge pixels).
 // Visibility of the shadow-casting light at 'ordinal' (> 3) of the pixel's list order: S's overflow run (main kernel) or
 // S's VSM estimator (fallback tiles). 1 without S's resources. 'record' caches the pixel's overflow record (main kernel)
 // or marks the receiver as built (fallback: 'receiver', built once per pixel).
@@ -354,7 +333,5 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     color[pixel] = (P[4].z & 4096) ? float4(radiance, 1) : shEncodeOutput(radiance);
     ShadedPixel o;
     o.radiance = radiance;
-    o.linearZ = linearZ;
-    o.normal = n;
     return o;
 }

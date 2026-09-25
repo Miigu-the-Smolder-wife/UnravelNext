@@ -1,7 +1,7 @@
 // unx-kernel: cs_6_6 main
 // unx-variants: OUTPUT=0,1
 // Edge (E) composite (ARCHITECTURE 2.10; INTERFACES 5.5.1), one thread per edge pixel of the list the shading kernels
-// filled (ExecuteIndirect; the list is compact, so every lane of a wave composites). For each edge pixel (Edge.hlsli) the
+// EdgeDetect.hlsl filled (ExecuteIndirect; the list is compact, so every lane of a wave composites). For each edge pixel (Edge.hlsli) the
 // 3 x 3 neighbourhood is split into surface groups (<= shading.edge_groups_max; the centre's first, then edge
 // neighbours, then corners; the sky is a group without triangles): a neighbour on a triangle an earlier neighbour showed
 // joins that neighbour's group (one triangle is one surface), any other joins the first group whose representative sees
@@ -20,7 +20,9 @@
 // P[2] = { cos angle, footprint tolerance, distance tolerance (floats), groups max }
 // P[3] = { experiment mask (shading.experiment_disable; cost attribution only: 64 = one triangle per group, its
 //        representative's; 128 = no coverage geometry, the centre's radiance; 512 = no subsample masks; 1024 = no
-//        cut-out coverage), M texture table SRV, 0, 0 }
+//        cut-out coverage), M texture table SRV, planar tile mask SRV (R8_UINT; UNX_NONE = every tile is shaded), 0 }
+// Planar reflection views: pixels of tiles without mirror pixels were never shaded (R's tile mask, v1.22) and count as
+// outside the view, as in EdgeDetect.
 #include "Bindless.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/Edge.hlsli"
@@ -92,6 +94,11 @@ void main(uint i : SV_DispatchThreadID)
     {
         const int2 q = int2(pixel) + edgeNeighbour(k);
         valid[k] = all(q >= 0) && q.x < int(g_viewWidth) && q.y < int(g_viewHeight);
+        if (valid[k] && P[3].z != UNX_NONE)
+        {
+            Texture2D<uint> planarTiles = ResourceDescriptorHeap[P[3].z];
+            valid[k] = planarTiles[uint2(q) / M_TILE] != 0;
+        }
         vis[k] = valid[k] ? visIds[uint2(q)] : VIS_NONE;
     }
 

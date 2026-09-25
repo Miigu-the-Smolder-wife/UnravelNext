@@ -1,8 +1,10 @@
-// M performance gate (ARCHITECTURE 2.2 material resolve 0.40 / 0.18 ms, 2.11 shading kernel 0.37-0.42 / 0.18 ms at
-// 4K / 1440p): renders one of C's procedural scenes through the whole frame (FrameRenderer: every track of this build)
-// and reports M's passes against the design terms:
+// M performance gate (ARCHITECTURE 4.2 table, design revision 1: per scene kind at 4K, the average column at 1440p):
+// renders one of C's procedural scenes through the whole frame (FrameRenderer: every track of this build) and reports
+// M's passes against the design terms:
 //   m.resolve.begin + m.resolve   vis buffer -> G-buffer 8 B, material word, tile classes, reflection lobe tiles
-//   m.shade                       sky + surface class kernels -> final 4 B
+//   m.shade*                      sky + surface class kernels -> final 4 B (design before band scheduling, 4.8)
+//   m.edge.detect                 edge pixel detection (thin kernel)
+//   m.edge.args + m.edge          edge (E) composite
 // Performance runs only under the GPU lock (INTERFACES 3.3), in the integrated build (V's clusters, C's scenes):
 //   powershell -File Tools/CI/GpuLock.ps1 -Track M -- build/all/bin/unx_gate_shading_mgate.exe
 //       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--scale 1] [--moving] [--out DIR]
@@ -152,14 +154,32 @@ int main(int argc, char** argv)
             const double shade = sumPasses(r, [&](const std::string& n) { return n.rfind("m.shade", 0) == 0 && !planar(n); });
             const double planarM = sumPasses(r, [&](const std::string& n) { return n.rfind("m.", 0) == 0 && planar(n); });
             const bool is4k = res.width == 3840;
-            const double edge = sumPasses(r, [&](const std::string& n) { return n.rfind("m.edge", 0) == 0 && !planar(n); });
+            const double detect = sumPasses(r, [&](const std::string& n) { return n.rfind("m.edge.detect", 0) == 0 && !planar(n); });
+            const double edge = sumPasses(r, [&](const std::string& n) { return n.rfind("m.edge", 0) == 0 && n.rfind("m.edge.detect", 0) != 0 && !planar(n); });
             const shading::Stats st = shading::latestStats(renderer.trackState());
             const double pixels = (double)res.width * res.height;
-            logf("M %s %s: edge composite %.3f ms on %u edge pixels (%.2f %% of the view) | class tiles sky %u opaque %u subsurface %u water %u of %u\n",
-                 sceneName.c_str(), rs.c_str(), edge, st.edgePixels, 100.0 * st.edgePixels / pixels, st.classTiles[0], st.classTiles[1], st.classTiles[2],
-                 st.classTiles[3], st.tiles);
-            logf("M %s %s: material resolve %.3f ms (design %.2f) | shading %.3f ms (design %s) | planar views, M passes %.3f ms | frame %.3f ms\n",
-                 sceneName.c_str(), rs.c_str(), resolve, is4k ? 0.40 : 0.18, shade, is4k ? "0.37-0.42" : "0.18", planarM, r.gpuFrameMs.median);
+            // Design terms (ARCHITECTURE 4.2 table, revision 1): resolve and shading kernel before band scheduling, edge
+            // detection, E composite with UI. 4K by scene kind; 1440p is the table's average column (shading scaled to
+            // before bands like 4K city: 0.24 x 0.70 / 0.55).
+            struct Design { double resolve, shade, detect, composite; };
+            Design d{ 0.19, 0.24 * 0.70 / 0.55, 0.05, 0.07 };
+            const char* kind = "1440p average";
+            if (is4k)
+            {
+                kind = "not in the table";
+                d = { 0, 0, 0.10, 0 };
+                if (sceneName.rfind("city", 0) == 0) { d = { 0.55, 0.70, 0.10, 0.15 }; kind = "city"; }
+                else if (sceneName.rfind("forest", 0) == 0) { d = { 0.33, 0.50, 0.10, 0.08 }; kind = "forest"; }
+                else if (sceneName.find("water") != std::string::npos || sceneName.find("lake") != std::string::npos) { d = { 0.45, 0.60, 0.10, 0.12 }; kind = "waterside"; }
+                else if (sceneName.rfind("interior", 0) == 0) { d = { 0.55, 0.70, 0.10, 0.12 }; kind = "interior"; }
+            }
+            logf("M %s %s: edge detection %.3f ms (design %.2f) | edge composite %.3f ms (design %.2f) on %u edge pixels (%.2f %% of the view) | class tiles sky %u "
+                 "opaque %u subsurface %u water %u of %u\n",
+                 sceneName.c_str(), rs.c_str(), detect, d.detect, edge, d.composite, st.edgePixels, 100.0 * st.edgePixels / pixels, st.classTiles[0], st.classTiles[1],
+                 st.classTiles[2], st.classTiles[3], st.tiles);
+            logf("M %s %s: material resolve %.3f ms (design %.2f) | shading %.3f ms (design %.2f before bands) | design kind: %s | planar views, M passes %.3f ms | "
+                 "frame %.3f ms\n",
+                 sceneName.c_str(), rs.c_str(), resolve, d.resolve, shade, d.shade, kind, planarM, r.gpuFrameMs.median);
         }
         return 0;
 #endif

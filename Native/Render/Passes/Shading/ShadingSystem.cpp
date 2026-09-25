@@ -235,6 +235,12 @@ const std::vector<float>& ltcTable()
 void shade(FramePassContext& fc, ViewResources& view)
 {
     if (!view.color.valid()) fail("M.shading: the view has no colour target");
+    // Planar reflection views get S's own froxel lists and air volume (v1.22, FroxelSystem recordPlanarFroxels). Without
+    // them while the frame's main view has lists, reflections would silently lose local lights and air.
+    if (view.view.kind != gpu::ViewKind::Main && fc.resources.froxelLights.valid() && !view.froxelLights.valid())
+        fail("M.shading: planar view without S's froxel lists while the main view has them (INTERFACES v1.22)");
+    if (view.view.kind != gpu::ViewKind::Main && view.froxelLights.valid() && fc.resources.transmittanceLut.valid() && !view.airVolume.valid())
+        fail("M.shading: planar view with S's froxel lists but without its air volume (INTERFACES v1.22)");
     checkQuality(fc.quality);
     const material::ResolveOutputs& o = material::resolveOutputs(fc, view);
     StaticTable& ltc = fc.state<StaticTable>("M.ltcTable");
@@ -277,6 +283,11 @@ void shade(FramePassContext& fc, ViewResources& view)
     const TextureRef edgeRadiance = fc.graph.createTexture({ "m.edge radiance", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     const BufferRef edgePixels = fc.graph.createBuffer({ "m.edge pixels", ((uint64_t)v.view.width * v.view.height + 1) * 4, 0 });
     const BufferRef edgeArgs = fc.graph.createBuffer({ "m.edge args", 24, 0 });  // dispatch args + pixel count (Edge.hlsli)
+    const TextureRef edgeTiles = fc.graph.createTexture({ "m.edge tile mask", o.tilesX, o.tilesY, 1, 1, DXGI_FORMAT_R32G32_UINT });  // 64 bits per tile
+    // Planar views: tiles without mirror pixels are never shaded; edge detection and the composite treat their pixels as
+    // outside the view (R always gives the tile mask with the pixel mask, v1.22).
+    const TextureRef planarTiles = v.view.planarTileMask;
+    if (v.view.planarMask.valid() && !planarTiles.valid()) fail("M.shading: a planar view has a pixel mask without its tile mask");
     ID3D12PipelineState* begin = fc.shaders.compute("Passes/Shading/ShadeBegin");
     const uint32_t viewTiles = o.tilesX * o.tilesY;
     fc.graph.addPass(planar ? "m.shade.begin.planar" : "m.shade.begin", QueueType::Graphics,
@@ -295,6 +306,29 @@ void shade(FramePassContext& fc, ViewResources& view)
                          c.cmd->SetPipelineState(begin);
                          c.computeConstants(k, 8);
                          c.cmd->Dispatch(1, 1, 1);
+                     });
+
+    // Edge pixels (EdgeDetect.hlsl): a thin kernel before shading marks them per tile and lists them for the composite.
+    ID3D12PipelineState* detect = fc.shaders.compute("Passes/Shading/EdgeDetect");
+    fc.graph.addPass(planar ? "m.edge.detect.planar" : "m.edge.detect", QueueType::Graphics,
+                     [&](PassBuilder& b) {
+                         b.use(v.visId, Use::SrvCompute);
+                         b.use(o.materialWord, Use::SrvCompute);
+                         b.use(v.depth, Use::SrvCompute);
+                         b.use(v.gbuffer, Use::SrvCompute);
+                         if (planarTiles.valid()) b.use(planarTiles, Use::SrvCompute);
+                         b.use(edgeTiles, Use::UavCompute);
+                         b.use(edgePixels, Use::UavCompute);
+                         b.use(edgeArgs, Use::UavCompute);
+                     },
+                     [=](PassContext& c) {
+                         const uint32_t k[12] = { c.srv(v.visId), c.srv(o.materialWord), c.srv(v.depth), c.srv(v.gbuffer),
+                                                  c.uav(edgeTiles), c.uav(edgePixels), c.uav(edgeArgs), planarTiles.valid() ? c.srv(planarTiles) : gpu::kNone,
+                                                  asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), experiment };
+                         c.cmd->SetPipelineState(detect);
+                         c.bindFrameConstants(cb);
+                         c.computeConstants(k, 12);
+                         c.cmd->Dispatch(o.tilesX, o.tilesY, 1);
                      });
 
     // Planar reflection views are timed apart (their cost is R's reflection budget, ARCHITECTURE 2.6 C_planar).
@@ -322,9 +356,7 @@ void shade(FramePassContext& fc, ViewResources& view)
                              b.use(v.shadowOverflow, Use::SrvCompute);
                          }
                          b.use(edgeRadiance, Use::UavCompute);
-                         b.use(edgePixels, Use::UavCompute);
-                         b.use(edgeArgs, Use::UavCompute);
-                         b.use(v.visId, Use::SrvCompute);
+                         b.use(edgeTiles, Use::SrvCompute);
                      },
                      [=](PassContext& c) {
                          const uint32_t none = gpu::kNone;
@@ -333,12 +365,11 @@ void shade(FramePassContext& fc, ViewResources& view)
                          const uint32_t fx[2] = { froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
                          c.bindFrameConstants(cb);
                          ID3D12Resource* args = c.resource(o.tileArgs);
-                         const uint32_t edge[8] = { asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), c.uav(edgeArgs),
-                                                    c.uav(edgeRadiance), v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, 0, c.uav(edgePixels) };
+                         const uint32_t edge[8] = { c.srv(edgeTiles), 0, 0, 0, c.uav(edgeRadiance), v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, 0, 0 };
                          // Sky tiles.
                          {
                              uint32_t k[32] = { c.srv(o.materialWord), c.uav(v.color), c.srv(o.tiles), (uint32_t)material::ShadeClass::Sky * tileCount,
-                                                atm[0], atm[1], atm[2], atm[3], experiment, 0, 0, 0, 0, 0, c.uav(edgeArgs), c.srv(v.visId) };
+                                                atm[0], atm[1], atm[2], atm[3], experiment, 0, 0, 0, 0, 0, c.srv(edgeTiles), 0 };
                              std::memcpy(k + 24, edge, sizeof edge);
                              c.cmd->SetPipelineState(sky);
                              c.computeConstants(k, 32);
@@ -354,7 +385,7 @@ void shade(FramePassContext& fc, ViewResources& view)
                                                       v.reflection.valid() ? c.srv(v.reflection) : none,
                                                       (r.giCache.valid() && v.view.kind == gpu::ViewKind::PlanarReflection) ? c.srv(r.giCache) : none,
                                                       atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], 0, o.textureTableSrv, experiment,
-                                                      c.srv(v.visId), fx[0], fx[1] };
+                                                      0, fx[0], fx[1] };
                              uint32_t k32[32] = {};
                              std::memcpy(k32, k, sizeof k);
                              std::memcpy(k32 + 24, edge, sizeof edge);
@@ -392,10 +423,9 @@ void shade(FramePassContext& fc, ViewResources& view)
                              if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
                              if (vsm)
                                  for (BufferRef vb : { r.vsmPageTable, r.vsmPool, r.vsmBlocks, r.vsmSearchBound }) b.use(vb, Use::SrvCompute);
+                             if (vsm && r.vsmLayers.valid()) b.use(r.vsmLayers, Use::SrvCompute);
                              b.use(edgeRadiance, Use::UavCompute);
-                             b.use(edgePixels, Use::UavCompute);
-                             b.use(edgeArgs, Use::UavCompute);
-                             b.use(v.visId, Use::SrvCompute);
+                             b.use(edgeTiles, Use::SrvCompute);
                          },
                          [=](PassContext& c) {
                              const uint32_t none = gpu::kNone;
@@ -403,7 +433,8 @@ void shade(FramePassContext& fc, ViewResources& view)
                              if (ringPtr)
                              {
                                  const uint32_t words[8] = { c.srv(r.vsmPageTable), c.srv(r.vsmPool), c.srv(r.vsmBlocks), c.srv(r.vsmSearchBound),
-                                                             r.vsmConstants, r.vsmLocalLights, r.vsmSlotOfLight, 0 };
+                                                             r.vsmConstants, r.vsmLocalLights, r.vsmSlotOfLight,
+                                                             r.vsmLayers.valid() ? c.srv(r.vsmLayers) : none };  // S's transmittance layer (v1.26)
                                  shadowSrvs = ringPtr->write(ringSlot, words);
                              }
                              const uint32_t k[22] = { c.srv(v.gbuffer), c.srv(v.depth), c.srv(o.materialWord), c.uav(v.color),
@@ -411,11 +442,10 @@ void shade(FramePassContext& fc, ViewResources& view)
                                                       v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                                       v.reflection.valid() ? c.srv(v.reflection) : none, none,
                                                       atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none, none,
-                                                      air ? c.srv(v.airVolume) : none, 0, o.textureTableSrv, experiment, c.srv(v.visId),
+                                                      air ? c.srv(v.airVolume) : none, 0, o.textureTableSrv, experiment, 0,
                                                       froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
-                             const uint32_t edge[8] = { asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), c.uav(edgeArgs),
-                                                        c.uav(edgeRadiance), v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, shadowSrvs,
-                                                        c.uav(edgePixels) };
+                             const uint32_t edge[8] = { c.srv(edgeTiles), 0, 0, 0, c.uav(edgeRadiance),
+                                                        v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, shadowSrvs, 0 };
                              uint32_t k32[32] = {};
                              std::memcpy(k32, k, sizeof k);
                              std::memcpy(k32 + 24, edge, sizeof edge);
@@ -476,15 +506,16 @@ void shade(FramePassContext& fc, ViewResources& view)
                          b.use(v.color, Use::UavCompute);
                          b.use(edgePixels, Use::SrvCompute);
                          b.use(edgeArgs, Use::IndirectArgs);
+                         if (planarTiles.valid()) b.use(planarTiles, Use::SrvCompute);
                      },
                      [=](PassContext& c) {
-                         const uint32_t k[14] = { c.srv(v.visId), c.srv(v.visibleClusters), c.srv(o.materialWord), c.srv(v.depth),
+                         const uint32_t k[16] = { c.srv(v.visId), c.srv(v.visibleClusters), c.srv(o.materialWord), c.srv(v.depth),
                                                   c.srv(v.gbuffer), c.srv(edgeRadiance), c.uav(v.color), c.srv(edgePixels),
                                                   asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), ec.groupsMax,
-                                                  experiment, o.textureTableSrv };
+                                                  experiment, o.textureTableSrv, planarTiles.valid() ? c.srv(planarTiles) : gpu::kNone, 0 };
                          c.cmd->SetPipelineState(composite);
                          c.bindFrameConstants(cb);
-                         c.computeConstants(k, 14);
+                         c.computeConstants(k, 16);
                          c.cmd->ExecuteIndirect(signature, 1, c.resource(edgeArgs), 0, nullptr, 0);
                      });
 }
