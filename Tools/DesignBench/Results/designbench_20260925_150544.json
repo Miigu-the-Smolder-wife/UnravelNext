@@ -1,0 +1,20 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "resolution": "3840x2160", "reps": 9, "timestamp": "20260925_150544",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "bricks", "name": "camera march, 1 B voxels (18 MB), 16 steps, 32 B record", "value": 0.794624, "unit": "ms", "note": "0.095802 ns/pixel, 0.005988 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun (orthographic) march, 1 B voxels (18 MB), 16 steps, 32 B record", "value": 0.45056, "unit": "ms", "note": "0.054321 ns/pixel, 0.003395 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "camera march, 1 B voxels (18 MB), 32 steps, 32 B record", "value": 0.912384, "unit": "ms", "note": "0.110000 ns/pixel, 0.003438 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun (orthographic) march, 1 B voxels (18 MB), 32 steps, 32 B record", "value": 0.748544, "unit": "ms", "note": "0.090247 ns/pixel, 0.002820 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "camera march, 1 B voxels (18 MB), 48 steps, 32 B record", "value": 1.09056, "unit": "ms", "note": "0.131481 ns/pixel, 0.002739 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun (orthographic) march, 1 B voxels (18 MB), 48 steps, 32 B record", "value": 1.08032, "unit": "ms", "note": "0.130247 ns/pixel, 0.002713 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "entry maps: 4608 bricks x 256 cells x 16 steps, 1 B voxels", "value": 0.044032, "unit": "ms", "note": "9.555556 ns/brick"},
+  {"section": "bricks", "name": "camera march, 8 B voxels (144 MB), 16 steps, 32 B record", "value": 0.779264, "unit": "ms", "note": "0.093951 ns/pixel, 0.005872 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun (orthographic) march, 8 B voxels (144 MB), 16 steps, 32 B record", "value": 0.608256, "unit": "ms", "note": "0.073333 ns/pixel, 0.004583 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "camera march, 8 B voxels (144 MB), 32 steps, 32 B record", "value": 0.95744, "unit": "ms", "note": "0.115432 ns/pixel, 0.003607 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun (orthographic) march, 8 B voxels (144 MB), 32 steps, 32 B record", "value": 0.97792, "unit": "ms", "note": "0.117901 ns/pixel, 0.003684 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "camera march, 8 B voxels (144 MB), 48 steps, 32 B record", "value": 1.15098, "unit": "ms", "note": "0.138765 ns/pixel, 0.002891 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "sun (orthographic) march, 8 B voxels (144 MB), 48 steps, 32 B record", "value": 1.37216, "unit": "ms", "note": "0.165432 ns/pixel, 0.003447 ns/step (upper bound: early exits)"},
+  {"section": "bricks", "name": "entry maps: 4608 bricks x 256 cells x 16 steps, 8 B voxels", "value": 0.269312, "unit": "ms", "note": "58.444444 ns/brick"}
+ ]
+}

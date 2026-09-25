@@ -233,7 +233,7 @@ struct Gpu
         d.Width = w; d.Height = h; d.DepthOrArraySize = (UINT16)depth; d.MipLevels = (UINT16)mips; d.Format = fmt; d.SampleDesc.Count = 1;
         d.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN; d.Flags = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
         ComPtr<ID3D12Resource> r;
-        check(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&r)), "CreateCommittedResource(texture)");
+        check(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, uav ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&r)), "CreateCommittedResource(texture)");
         return r;
     }
     ID3D12GraphicsCommandList6* begin()
@@ -291,9 +291,12 @@ struct Gpu
                 memcpy(p + fp.Offset + ((size_t)z * rows + y) * fp.Footprint.RowPitch, data + ((size_t)z * h + y) * w * bpp, (size_t)w * bpp);
         up->Unmap(0, nullptr);
         auto l = begin();
+        const bool isUav = (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
+        if (isUav) transition(l, tex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
         D3D12_TEXTURE_COPY_LOCATION dst{ tex, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, {} }; dst.SubresourceIndex = 0;
         D3D12_TEXTURE_COPY_LOCATION src{ up.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, {} }; src.PlacedFootprint = fp;
         l->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        if (isUav) transition(l, tex, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         submitAndWait();
     }
 
@@ -375,6 +378,11 @@ struct Gpu
     {
         if (graphics) { l->SetGraphicsRootSignature(rootSig.Get()); l->SetGraphicsRoot32BitConstants(0, 32, c, 0); }
         else { l->SetComputeRootSignature(rootSig.Get()); l->SetComputeRoot32BitConstants(0, 32, c, 0); }
+    }
+    static void transition(ID3D12GraphicsCommandList6* l, ID3D12Resource* r, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+    {
+        D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; b.Transition.pResource = r; b.Transition.StateBefore = before; b.Transition.StateAfter = after;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES; l->ResourceBarrier(1, &b);
     }
     static void uavBarrier(ID3D12GraphicsCommandList6* l)
     {
@@ -659,10 +667,14 @@ static void benchBands()
                     {
                         const uint32_t y0 = b * rowsPer, y1 = std::min(H, y0 + rowsPer);
                         Consts cr = c; cr(0, 2) = y0; cr(0, 3) = y1; cr(1, 2) = gbUav; cr(1, 3) = wdUav;
-                        g.setConstants(l, cr.v); l->SetPipelineState(psoResolve.Get()); l->Dispatch((W + 7) / 8, (y1 - y0 + 7) / 8, 1); Gpu::uavBarrier(l);
+                        g.setConstants(l, cr.v); l->SetPipelineState(psoResolve.Get()); l->Dispatch((W + 7) / 8, (y1 - y0 + 7) / 8, 1);
+                        Gpu::transition(l, gbuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                        Gpu::transition(l, word.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                         Consts csd = c; csd(0, 2) = y0; csd(0, 3) = y1; csd(1, 2) = gbSrv; csd(1, 3) = wdSrv;
-                        // The graph would transition gbuffer/word UAV -> SRV here; the bench keeps both as UAV-compatible resources in COMMON.
-                        g.setConstants(l, csd.v); l->SetPipelineState(psoShade.Get()); l->Dispatch((W + 7) / 8, (y1 - y0 + 7) / 8, 1); Gpu::uavBarrier(l);
+                        g.setConstants(l, csd.v); l->SetPipelineState(psoShade.Get()); l->Dispatch((W + 7) / 8, (y1 - y0 + 7) / 8, 1);
+                        Gpu::transition(l, gbuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                        Gpu::transition(l, word.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                        Gpu::uavBarrier(l);
                     } }, flushL2);
                 char name[200];
                 snprintf(name, sizeof name, "%ux%u resolve + shade (%u B/px read in shade), %u band%s", W, H, 32 + extra * 8, bands, bands == 1 ? " (full screen)" : "s");

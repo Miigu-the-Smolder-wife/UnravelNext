@@ -1,0 +1,19 @@
+Adapter: NVIDIA GeForce RTX 4080, driver 32.0.15.9186, D3D12Core: C:\Users\USER\UnravelNext\Tools\DesignBench\build\D3D12\D3D12Core.dll
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64, shaders: C:/Users/USER/UnravelNext/Tools/DesignBench/Bench/shaders, resolution 3840x2160, reps 9
+  [env] timestamp frequency                                                    1000000000.0000 Hz       
+
+== Band C brick DDA (16^3 bricks, table indirection, camera and sun marches, entry maps) (after 1.5 s warm-up)
+  [bricks] camera march, 1 B voxels (18 MB), 16 steps, 32 B record                      0.7946 ms       0.095802 ns/pixel, 0.005988 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (18 MB), 16 steps, 32 B record          0.4506 ms       0.054321 ns/pixel, 0.003395 ns/step (upper bound: early exits)
+  [bricks] camera march, 1 B voxels (18 MB), 32 steps, 32 B record                      0.9124 ms       0.110000 ns/pixel, 0.003438 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (18 MB), 32 steps, 32 B record          0.7485 ms       0.090247 ns/pixel, 0.002820 ns/step (upper bound: early exits)
+  [bricks] camera march, 1 B voxels (18 MB), 48 steps, 32 B record                      1.0906 ms       0.131481 ns/pixel, 0.002739 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (18 MB), 48 steps, 32 B record          1.0803 ms       0.130247 ns/pixel, 0.002713 ns/step (upper bound: early exits)
+  [bricks] entry maps: 4608 bricks x 256 cells x 16 steps, 1 B voxels                   0.0440 ms       9.555556 ns/brick
+  [bricks] camera march, 8 B voxels (144 MB), 16 steps, 32 B record                     0.7793 ms       0.093951 ns/pixel, 0.005872 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (144 MB), 16 steps, 32 B record         0.6083 ms       0.073333 ns/pixel, 0.004583 ns/step (upper bound: early exits)
+  [bricks] camera march, 8 B voxels (144 MB), 32 steps, 32 B record                     0.9574 ms       0.115432 ns/pixel, 0.003607 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (144 MB), 32 steps, 32 B record         0.9779 ms       0.117901 ns/pixel, 0.003684 ns/step (upper bound: early exits)
+  [bricks] camera march, 8 B voxels (144 MB), 48 steps, 32 B record                     1.1510 ms       0.138765 ns/pixel, 0.002891 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (144 MB), 48 steps, 32 B record         1.3722 ms       0.165432 ns/pixel, 0.003447 ns/step (upper bound: early exits)
+  [bricks] entry maps: 4608 bricks x 256 cells x 16 steps, 8 B voxels                   0.2693 ms       58.444444 ns/brick

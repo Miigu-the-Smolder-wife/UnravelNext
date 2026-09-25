@@ -1,0 +1,14 @@
+Adapter: NVIDIA GeForce RTX 4080, driver 32.0.15.9186, D3D12Core: C:\Users\USER\UnravelNext\Tools\DesignBench\build\D3D12\D3D12Core.dll
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64, shaders: C:/Users/USER/UnravelNext/Tools/DesignBench/Bench/shaders, resolution 3840x2160, reps 9
+  [env] timestamp frequency                                                    1000000000.0000 Hz       
+
+== Shading kernel: tile groupshared probe SH, in-kernel air fetches, K tap, 8 lights, register pressure (after 1.5 s warm-up)
+  [shade] 4K-class shading kernel: full: tile SH + air 3 + K + 8 lights                0.4803 ms       0.057901 ns/pixel
+  [shade] 4K-class shading kernel: per-pixel 4 probe loads instead of tile SH          0.5765 ms       0.069506 ns/pixel
+  [shade] 4K-class shading kernel: no air fetches                                      0.4157 ms       0.050123 ns/pixel
+  [shade] 4K-class shading kernel: no K tap                                            0.4598 ms       0.055432 ns/pixel
+  [shade] 4K-class shading kernel: no local lights                                     0.3584 ms       0.043210 ns/pixel
+  [shade] 4K-class shading kernel: inputs and sun only (no SH, air, K, lights)         0.3092 ms       0.037284 ns/pixel
+  [shade] 4K-class shading kernel: full + 32 extra live values                         0.5663 ms       0.068272 ns/pixel
+  [shade] 4K-class shading kernel: full + 64 extra live values                         0.5949 ms       0.071728 ns/pixel
+  [shade] 4K-class shading kernel: full + 128 extra live values                        0.6912 ms       0.083333 ns/pixel

@@ -1,0 +1,15 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "resolution": "3840x2160", "reps": 9, "timestamp": "20260925_153659",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "shade", "name": "4K-class shading kernel: full: tile SH + air 3 + K + 8 lights", "value": 0.480256, "unit": "ms", "note": "0.057901 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: per-pixel 4 probe loads instead of tile SH", "value": 0.576512, "unit": "ms", "note": "0.069506 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: no air fetches", "value": 0.415744, "unit": "ms", "note": "0.050123 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: no K tap", "value": 0.459776, "unit": "ms", "note": "0.055432 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: no local lights", "value": 0.3584, "unit": "ms", "note": "0.043210 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: inputs and sun only (no SH, air, K, lights)", "value": 0.309248, "unit": "ms", "note": "0.037284 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: full + 32 extra live values", "value": 0.566272, "unit": "ms", "note": "0.068272 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: full + 64 extra live values", "value": 0.594944, "unit": "ms", "note": "0.071728 ns/pixel"},
+  {"section": "shade", "name": "4K-class shading kernel: full + 128 extra live values", "value": 0.6912, "unit": "ms", "note": "0.083333 ns/pixel"}
+ ]
+}

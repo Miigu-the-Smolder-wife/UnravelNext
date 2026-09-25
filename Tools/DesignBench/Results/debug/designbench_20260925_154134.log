@@ -1,0 +1,94 @@
+D3D12 debug layer enabled + GPU-based validation
+Adapter: NVIDIA GeForce RTX 4080, driver 32.0.15.9186, D3D12Core: C:\Users\USER\UnravelNext\Tools\DesignBench\build\D3D12\D3D12Core.dll
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64, shaders: C:/Users/USER/UnravelNext/Tools/DesignBench/Bench/shaders, resolution 256x144, reps 1
+  [env] timestamp frequency                                                    1000000000.0000 Hz       
+  d3d12[4]: Device Debug Layer Startup Options: GPU-Based Validation is enabled (disabled by default). This results in new validation not possible during API calls on the CPU, by creating patched shaders that have validation added directly to the shader. However, it can slow things down a lot, especially for applications with numerous PSOs. Time to see the first render frame may take several minutes.
+
+== Band B fragment pipeline (conservative raster + exact area + mask + 24 B append, tile composite) (after 1.5 s warm-up)
+  compiling coverage kernels
+  creating mesh pipelines
+  pipelines ready
+  slivers 0.5 px x 20 px, F ~5 M: count pass
+  prefix done
+  [coverage] slivers 0.5 px x 20 px, F ~5 M: count pass (conservative raster, tile atomics only)       0.7035 ms       4.849659 M fragments, max/tile 10244, tiles > 1024: 576
+  [coverage] slivers 0.5 px x 20 px, F ~5 M: raster + area + mask + 24 B append (global list, one atomic per wave)       1.1244 ms       4.849659 M appended, 0 overflow, 0.231848 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~5 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)       1.1436 ms       4.849659 M appended, 0 overflow, 0.235820 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~5 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))       1.2681 ms       4.849659 M appended, 0 overflow, 0.261488 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~5 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)       0.3297 ms       0.067990 ns/fragment, 8.944444 ns/pixel (all pixels)
+  slivers 0.5 px x 20 px, F ~10 M: count pass
+  prefix done
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: count pass (conservative raster, tile atomics only)       4.3674 ms       9.701394 M fragments, max/tile 19783, tiles > 1024: 576
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: raster + area + mask + 24 B append (global list, one atomic per wave)       6.9668 ms       9.701394 M appended, 0 overflow, 0.718122 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)       7.0494 ms       9.701394 M appended, 0 overflow, 0.726642 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))       6.8196 ms       9.701394 M appended, 0 overflow, 0.702946 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: area: Green's theorem (register resident), mask 32 (tile segments, per-fragment atomic)       3.8001 ms       0.391709 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: area: Sutherland-Hodgman arrays, no mask (tile segments, per-fragment atomic)       7.1139 ms       0.733282 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: area: Green's theorem, no mask (tile segments, per-fragment atomic)       6.6829 ms       0.688858 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: count pass with Green's-theorem area        1.6467 ms       0.169737 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)       0.7977 ms       0.082225 ns/fragment, 21.638889 ns/pixel (all pixels)
+  slivers 0.5 px x 20 px, F ~20 M: count pass
+  prefix done
+  [coverage] slivers 0.5 px x 20 px, F ~20 M: count pass (conservative raster, tile atomics only)      11.3043 ms       18.435958 M fragments, max/tile 36758, tiles > 1024: 576
+  [coverage] slivers 0.5 px x 20 px, F ~20 M: raster + area + mask + 24 B append (global list, one atomic per wave)      10.8360 ms       18.435958 M appended, 0 overflow, 0.587763 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~20 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)       4.7350 ms       18.435958 M appended, 0 overflow, 0.256835 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~20 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))       5.1792 ms       18.435958 M appended, 0 overflow, 0.280929 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~20 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)       0.1321 ms       0.007165 ns/fragment, 3.583333 ns/pixel (all pixels)
+  slivers 0.25 px x 20 px, F ~10 M: count pass
+  prefix done
+  [coverage] slivers 0.25 px x 20 px, F ~10 M: count pass (conservative raster, tile atomics only)       1.4257 ms       8.890074 M fragments, max/tile 18200, tiles > 1024: 576
+  [coverage] slivers 0.25 px x 20 px, F ~10 M: raster + area + mask + 24 B append (global list, one atomic per wave)       2.3003 ms       8.890074 M appended, 0 overflow, 0.258748 ns/fragment
+  [coverage] slivers 0.25 px x 20 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)       2.3365 ms       8.890074 M appended, 0 overflow, 0.262819 ns/fragment
+  [coverage] slivers 0.25 px x 20 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))       2.5236 ms       8.890074 M appended, 0 overflow, 0.283862 ns/fragment
+  [coverage] slivers 0.25 px x 20 px, F ~10 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)       0.1362 ms       0.015320 ns/fragment, 3.694444 ns/pixel (all pixels)
+  cards 4 px, F ~10 M: count pass
+  prefix done
+  [coverage] cards 4 px, F ~10 M: count pass (conservative raster, tile atomics only)       1.8544 ms       13.082568 M fragments, max/tile 25376, tiles > 1024: 576
+  [coverage] cards 4 px, F ~10 M: raster + area + mask + 24 B append (global list, one atomic per wave)       2.9866 ms       13.082568 M appended, 0 overflow, 0.228285 ns/fragment
+  [coverage] cards 4 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)       3.0486 ms       13.082568 M appended, 0 overflow, 0.233026 ns/fragment
+  [coverage] cards 4 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))       3.4360 ms       13.082568 M appended, 0 overflow, 0.262640 ns/fragment
+  [coverage] cards 4 px, F ~10 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)       0.1157 ms       0.008845 ns/fragment, 3.138889 ns/pixel (all pixels)
+
+== Band C brick DDA (16^3 bricks, table indirection, camera and sun marches, entry maps) (after 1.5 s warm-up)
+  [bricks] camera march, 1 B voxels (18 MB), 16 steps, 32 B record                      0.0133 ms       0.361111 ns/pixel, 0.022569 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (18 MB), 16 steps, 32 B record          0.0164 ms       0.444444 ns/pixel, 0.027778 ns/step (upper bound: early exits)
+  [bricks] camera march, 1 B voxels (18 MB), 32 steps, 32 B record                      0.0184 ms       0.500000 ns/pixel, 0.015625 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (18 MB), 32 steps, 32 B record          0.0205 ms       0.555556 ns/pixel, 0.017361 ns/step (upper bound: early exits)
+  [bricks] camera march, 1 B voxels (18 MB), 48 steps, 32 B record                      0.0225 ms       0.611111 ns/pixel, 0.012731 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 1 B voxels (18 MB), 48 steps, 32 B record          0.0236 ms       0.638889 ns/pixel, 0.013310 ns/step (upper bound: early exits)
+  [bricks] entry maps: 4608 bricks x 256 cells x 16 steps, 1 B voxels                   0.0451 ms       9.777778 ns/brick
+  [bricks] camera march, 8 B voxels (144 MB), 16 steps, 32 B record                     0.0154 ms       0.416667 ns/pixel, 0.026042 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (144 MB), 16 steps, 32 B record         0.0215 ms       0.583333 ns/pixel, 0.036458 ns/step (upper bound: early exits)
+  [bricks] camera march, 8 B voxels (144 MB), 32 steps, 32 B record                     0.0236 ms       0.638889 ns/pixel, 0.019965 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (144 MB), 32 steps, 32 B record         0.0348 ms       0.944444 ns/pixel, 0.029514 ns/step (upper bound: early exits)
+  [bricks] camera march, 8 B voxels (144 MB), 48 steps, 32 B record                     0.0307 ms       0.833333 ns/pixel, 0.017361 ns/step (upper bound: early exits)
+  [bricks] sun (orthographic) march, 8 B voxels (144 MB), 48 steps, 32 B record         0.0492 ms       1.333333 ns/pixel, 0.027778 ns/step (upper bound: early exits)
+  [bricks] entry maps: 4608 bricks x 256 cells x 16 steps, 8 B voxels                   0.2714 ms       58.888889 ns/brick
+
+== Banded pixel passes (resolve 8 B in / 12 B out, shade 32-48 B in / 4 B out) (after 1.5 s warm-up)
+  [bands] 256x144 resolve + shade (32 B/px read in shade), 1 band (full screen)        0.0287 ms       0.777778 ns/pixel
+  [bands] 256x144 resolve + shade (32 B/px read in shade), 4 bands                     0.0666 ms       1.805556 ns/pixel
+  [bands] 256x144 resolve + shade (32 B/px read in shade), 8 bands                     0.1126 ms       3.055556 ns/pixel
+  [bands] 256x144 resolve + shade (32 B/px read in shade), 16 bands                    0.2099 ms       5.694444 ns/pixel
+  [bands] 256x144 resolve + shade (48 B/px read in shade), 1 band (full screen)        0.0317 ms       0.861111 ns/pixel
+  [bands] 256x144 resolve + shade (48 B/px read in shade), 4 bands                     0.0717 ms       1.944444 ns/pixel
+  [bands] 256x144 resolve + shade (48 B/px read in shade), 8 bands                     0.1249 ms       3.388889 ns/pixel
+  [bands] 256x144 resolve + shade (48 B/px read in shade), 16 bands                    0.2396 ms       6.500000 ns/pixel
+  [bands] 2560x1440 resolve + shade (32 B/px read in shade), 1 band (full screen)       0.3594 ms       0.097500 ns/pixel
+  [bands] 2560x1440 resolve + shade (32 B/px read in shade), 4 bands                   0.2601 ms       0.070556 ns/pixel
+  [bands] 2560x1440 resolve + shade (32 B/px read in shade), 8 bands                   0.3031 ms       0.082222 ns/pixel
+  [bands] 2560x1440 resolve + shade (32 B/px read in shade), 16 bands                  0.6851 ms       0.185833 ns/pixel
+  [bands] 2560x1440 resolve + shade (48 B/px read in shade), 1 band (full screen)      10.0997 ms       2.739722 ns/pixel
+  [bands] 2560x1440 resolve + shade (48 B/px read in shade), 4 bands                   6.5731 ms       1.783056 ns/pixel
+  [bands] 2560x1440 resolve + shade (48 B/px read in shade), 8 bands                   7.2120 ms       1.956389 ns/pixel
+  [bands] 2560x1440 resolve + shade (48 B/px read in shade), 16 bands                  7.1270 ms       1.933333 ns/pixel
+
+== Shading kernel: tile groupshared probe SH, in-kernel air fetches, K tap, 8 lights, register pressure (after 1.5 s warm-up)
+  [shade] 4K-class shading kernel: full: tile SH + air 3 + K + 8 lights                0.0317 ms       0.861111 ns/pixel
+  [shade] 4K-class shading kernel: per-pixel 4 probe loads instead of tile SH          0.0358 ms       0.972222 ns/pixel
+  [shade] 4K-class shading kernel: no air fetches                                      0.0215 ms       0.583333 ns/pixel
+  [shade] 4K-class shading kernel: no K tap                                            0.0584 ms       1.583333 ns/pixel
+  [shade] 4K-class shading kernel: no local lights                                     0.0512 ms       1.388889 ns/pixel
+  [shade] 4K-class shading kernel: inputs and sun only (no SH, air, K, lights)         0.0973 ms       2.638889 ns/pixel
+  [shade] 4K-class shading kernel: full + 32 extra live values                         0.2519 ms       6.833333 ns/pixel
+  [shade] 4K-class shading kernel: full + 64 extra live values                         0.2703 ms       7.333333 ns/pixel
+  [shade] 4K-class shading kernel: full + 128 extra live values                        0.3707 ms       10.055556 ns/pixel
