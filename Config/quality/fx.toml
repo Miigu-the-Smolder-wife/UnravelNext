@@ -1,0 +1,11 @@
+# Owner: FX. GPU simulation (ARCHITECTURE 2.9, 2.14; WORLD_VFX_DESIGN_KO.md 3.3). These are sizes and structure, not
+# qualities: the simulated population (the VFX stream's slot capacity), the per-particle arithmetic and the sort are
+# never reduced by them.
+[fx.particles]
+sort_passes = 3              # 8-bit LSD passes over the 24-bit sort key (request 20260925_FX_particle_render_rules.md)
+chain_depth_max = 4          # same-tick GPU child cascade depth (user decision, design 8.1 (b); NV_STREAM_MAX_DEPTH)
+readback_slots = 4           # tick ring (upload, events, readback): ticks in flight before the CPU reads them
+collision_cell_m = 1.0       # collision candidate grid cell (m): a size (the candidates are always a superset of the
+                             # surfaces a segment can hit, so the results do not depend on it)
+collision_readback = 4096    # collision events copied with the tick; more are fetched from the tick's GPU event buffer
+                             # when the CPU reads the tick (exact either way)

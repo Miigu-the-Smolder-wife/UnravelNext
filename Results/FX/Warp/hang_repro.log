@@ -1,0 +1,18 @@
+stream copy include/NativeVfxStream.h = original, sha256 a41b74e9b09f70d8e136ae4fe74d3502f85fd6d7c94c67b1a3c4ae0b1d3b36fd
+stream copy shaders/VfxParticleMath.hlsli = original, sha256 bbf9026f15010972e37310f4c02a2c3d96d3b71bdeb95672815e558aaf8adc78
+stream copy src/VfxStreamCpu.h = original, sha256 416fda88c562dc58a2298aa037d64cf113ff9d57b5d36f85c5833d153e9854db
+device: Microsoft Basic Render Driver (WARP)
+yield: a GPU measurement or HOLD is active; pausing
+yield: a GPU measurement or HOLD is active; pausing
+yield: a GPU measurement or HOLD is active; pausing
+tick 10: 640 particles, rows 128, event slots 0, collisions 0; position error max 1.12e-06 p99 9.94e-07, velocity 4.75e-07, age 4.86e-09
+tick 20: 1280 particles, rows 128, event slots 0, collisions 0; position error max 1.18e-06 p99 9.69e-07, velocity 1.08e-06, age 3.96e-08
+tick 30: 1920 particles, rows 128, event slots 0, collisions 0; position error max 1.28e-06 p99 9.26e-07, velocity 1.69e-06, age 1.79e-07
+tick 40: 2688 particles, rows 128, event slots 0, collisions 0; position error max 1.27e-06 p99 9.46e-07, velocity 1.69e-06, age 1.98e-07
+tick 50: 3328 particles, rows 128, event slots 0, collisions 0; position error max 1.37e-06 p99 9.82e-07, velocity 1.69e-06, age 1.98e-07
+tick 60: 3968 particles, rows 128, event slots 0, collisions 1; position error max 1.64e-06 p99 1.09e-06, velocity 1.85e-06, age 2.4e-07
+tick 70: 4736 particles, rows 128, event slots 0, collisions 12; position error max 6.38e-06 p99 1.19e-06, velocity 2.23e-05, age 3.61e-07
+run: 70 ticks in 70.1 s, CPU-assigned events 0, collision events 66 (GPU vs reference count difference 0), child rows 0, max cascade depth 0
+reference comparison: 18560 particle states, position error max 6.38e-06 (p99 1.19e-06, mean 2.58e-07), velocity 2.23e-05, age 3.61e-07
+FX particle tests PASS
+exit 0

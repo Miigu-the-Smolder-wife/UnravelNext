@@ -1,0 +1,16 @@
+--- --ticks 10 --reps 9 --check 13:24:16
+WV_GPU_SCENE adapter="NVIDIA GeForce RTX 4080" gpu_lock=FX particles=524288 capacity=655360 emitters=128 births_per_tick=4370 fields=16 fp64=0 sort_passes=3 sort_groups=160 events=1 max_events=2697 event_copy_KB=126
+WV_GPU kernel=fp32 ticks_per_list=10 reps=9 dispatches_per_tick=14 us_per_tick_median=169.61 us_min=150.93 us_max=190.74 us_per_frame_at_165fps=61.74 ns_per_particle_tick=0.32
+WV_GPU_CHECK alive_flags=524524 counter_alive=524524 counter_dead=130836 events_last_tick=1115 spawn_overflow=0 alive_list_ok=1 dead_list_ok=1 sort_nondecreasing=1 sort_permutation_ok=1 finite=1 max_age=2.00 ticks_run=7900
+--- --ticks 10 --reps 9 --breakdown 13:24:19
+WV_GPU_SCENE adapter="NVIDIA GeForce RTX 4080" gpu_lock=FX particles=524288 capacity=655360 emitters=128 births_per_tick=4370 fields=16 fp64=0 sort_passes=3 sort_groups=160 events=1 max_events=2697 event_copy_KB=126
+WV_GPU_PHASE phase=spawn us_median=5.12 us_min=5.12 us_max=6.14
+WV_GPU_PHASE phase=integrate us_median=54.27 us_min=53.25 us_max=54.27
+WV_GPU_PHASE phase=compaction us_median=17.41 us_min=16.38 us_max=17.41
+WV_GPU_PHASE phase=sort us_median=69.63 us_min=68.61 us_max=70.66
+WV_GPU_PHASE phase=event_copy us_median=6.98 us_min=6.37 us_max=7.46
+WV_GPU_BREAKDOWN_TOTAL us_per_tick=153.41 us_per_frame_at_165fps=55.84 dispatches_per_tick=14
+--- --ticks 10 --reps 9 --sort-passes 2 --check 13:24:21
+WV_GPU_SCENE adapter="NVIDIA GeForce RTX 4080" gpu_lock=FX particles=524288 capacity=655360 emitters=128 births_per_tick=4370 fields=16 fp64=0 sort_passes=2 sort_groups=160 events=1 max_events=2697 event_copy_KB=126
+WV_GPU kernel=fp32 ticks_per_list=10 reps=9 dispatches_per_tick=11 us_per_tick_median=133.89 us_min=131.63 us_max=183.23 us_per_frame_at_165fps=48.74 ns_per_particle_tick=0.26
+WV_GPU_CHECK alive_flags=524524 counter_alive=524524 counter_dead=130836 events_last_tick=1115 spawn_overflow=0 alive_list_ok=1 dead_list_ok=1 sort_nondecreasing=1 sort_permutation_ok=1 finite=1 max_age=2.00 ticks_run=8900

@@ -1,0 +1,49 @@
+// unx-kernel: cs_6_6 main
+// unx-variants: RESET=0,1
+// Tick start of the particle module. Thread per emitter row: the row's derived values start from the table (child rows
+// are overwritten at their depth by FxChildSetup). Thread 0 clears the per-tick counters (collision events, status,
+// dying). RESET=1 (NV_STREAM_RESET): additionally thread per slot: slots [0, restore_count) receive the restore records,
+// every other slot becomes dead (the compaction that follows rebuilds the lists).
+// P[0].x threads (max(emitters, RESET ? capacity : 0))
+#include "Passes/FX/Particles.hlsli"
+
+[numthreads(256, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    const uint i = id.x;
+    if (i == 0u)
+    {
+        FX_RWBUFFER(uint, counters, g_counters);
+        counters[FX_COUNTER_COLLISIONS] = 0u;
+        counters[FX_COUNTER_STATUS] = 0u;
+        counters[FX_COUNTER_DYING] = 0u;
+    }
+    if (i < g_emitterCount)
+    {
+        FX_BUFFER(StreamEmitter, emitters, g_emitters);
+        FX_RWBUFFER(EmitterDynamic, dynamic, g_emitterDynamic);
+        EmitterDynamic d;
+        d.originAnchor = emitters[i].originAnchor; d.pad0 = 0u;
+        d.inherited = emitters[i].inherited; d.pad1 = 0u;
+        dynamic[i] = d;
+    }
+#if RESET
+    if (i < g_capacity)
+    {
+        FX_RWBUFFER(float4, posAge, g_posAge);
+        FX_RWBUFFER(float4, velocity, g_velocity);
+        FX_RWBUFFER(uint2, meta, g_meta);
+        FX_RWBUFFER(uint, alive, g_alive);
+        if (i < g_restoreCount)
+        {
+            FX_BUFFER(StreamParticle, restore, g_restore);
+            const StreamParticle r = restore[i];
+            posAge[i] = float4(r.position, r.age);
+            velocity[i] = float4(r.velocity, 0);
+            meta[i] = uint2(r.emitter, r.birth);
+            alive[i] = FX_SLOT_ALIVE;
+        }
+        else alive[i] = FX_SLOT_DEAD;
+    }
+#endif
+}

@@ -1,0 +1,761 @@
+// GPU particle module (WORLD_VFX_DESIGN_KO.md 3.3, stream NativeVfxStream.h). See include/unx/fx/Particles.h.
+#include "unx/fx/Particles.h"
+
+#include "unx/core/Log.h"
+#include "unx/render/Shaders.h"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstring>
+#include <string>
+
+namespace unx::fx
+{
+using namespace unx::render;
+
+namespace
+{
+constexpr uint32_t kScanBlock = 1024;
+constexpr uint32_t kSortGroupKeys = 4096;  // 256 threads x 16 keys
+constexpr uint32_t kReportBytes = 64;
+constexpr float kKeyFar = 1.0e6f;          // metres: log range of the sort key (keyNear .. 1000 km)
+
+uint32_t groups(uint64_t n, uint32_t size) { return (uint32_t)((n + size - 1) / size); }
+uint64_t align(uint64_t v, uint64_t a) { return (v + a - 1) / a * a; }
+
+ComPtr<ID3D12Resource> makeBuffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE type, const wchar_t* name)
+{
+    D3D12_HEAP_PROPERTIES heap{ type };
+    D3D12_RESOURCE_DESC1 d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = std::max<uint64_t>(bytes, 256);
+    d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (type == D3D12_HEAP_TYPE_DEFAULT) d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    ComPtr<ID3D12Resource> r;
+    check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&r)),
+          "FX particle buffer");
+    r->SetName(name);
+    return r;
+}
+
+// A persistent default buffer, imported into each frame's graph.
+struct Buf
+{
+    const char* name = "";
+    uint32_t stride = 0;
+    uint64_t bytes = 0;
+    ComPtr<ID3D12Resource> resource;
+    BufferRef ref;
+    const RenderGraph* importedGraph = nullptr;  // imported once per frame: every tick of the frame uses the same ref
+    uint64_t importedFrame = UINT64_MAX;
+    ID3D12Resource* importedResource = nullptr;
+
+    void ensure(Device& device, uint64_t need)
+    {
+        need = std::max<uint64_t>(need, 256);
+        if (resource && bytes >= need) return;
+        if (resource) device.deferRelease(resource);
+        uint64_t size = 256;
+        while (size < need) size <<= 1;
+        bytes = size;
+        if (stride) bytes = align(bytes, stride);
+        std::wstring w(name, name + std::strlen(name));
+        resource = makeBuffer(device, bytes, D3D12_HEAP_TYPE_DEFAULT, (L"FX " + w).c_str());
+    }
+    BufferRef import(RenderGraph& graph, uint64_t frame)
+    {
+        if (importedGraph == &graph && importedFrame == frame && importedResource == resource.Get()) return ref;
+        ref = graph.importBuffer(resource.Get(), BufferDesc{ name, bytes, stride });
+        importedGraph = &graph;
+        importedFrame = frame;
+        importedResource = resource.Get();
+        return ref;
+    }
+};
+
+const NV_StreamHeader& headerOf(const std::vector<uint8_t>& packet) { return *reinterpret_cast<const NV_StreamHeader*>(packet.data()); }
+
+// Everything the CPU sends is checked here (counts, sections, indices into the packet and into the persistent
+// program and surface tables), so the kernels only meet indices the packet declares.
+void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uint32_t programCount, uint32_t surfaceBodyMax)
+{
+    if (!packet || bytes < sizeof(NV_StreamHeader)) fail("FX particles: stream packet of %llu bytes has no header", (unsigned long long)bytes);
+    const NV_StreamHeader& h = *reinterpret_cast<const NV_StreamHeader*>(packet);
+    if (h.magic != NV_STREAM_MAGIC || h.version != NV_STREAM_VERSION) fail("FX particles: stream packet magic/version %llx/%u", (unsigned long long)h.magic, h.version);
+    if (h.bytes != bytes) fail("FX particles: stream packet says %llu bytes, got %llu", (unsigned long long)h.bytes, (unsigned long long)bytes);
+    auto section = [&](uint64_t offset, uint64_t count, uint64_t stride, const char* what) {
+        if (count == 0) return;
+        if (offset % 16 != 0 || offset < sizeof(NV_StreamHeader) || offset + count * stride > bytes)
+            fail("FX particles: stream section %s (offset %llu, %llu x %llu B) outside the %llu-byte packet", what, (unsigned long long)offset,
+                 (unsigned long long)count, (unsigned long long)stride, (unsigned long long)bytes);
+    };
+    section(h.programs, h.program_count, sizeof(NV_StreamProgram), "programs");
+    section(h.curve_keys, h.curve_key_count, sizeof(NV_StreamCurveKey), "curve keys");
+    section(h.emitters, h.emitter_count, sizeof(NV_StreamEmitter), "emitters");
+    section(h.spawns, h.spawn_count, sizeof(NV_StreamSpawn), "spawns");
+    section(h.explicit_births, h.explicit_count, sizeof(NV_StreamExplicitBirth), "explicit births");
+    section(h.fields, h.field_count, sizeof(NV_StreamField), "fields");
+    section(h.world_fields, h.world_field_count, sizeof(NV_StreamWorldField), "world fields");
+    section(h.surfaces, h.surface_count, sizeof(NV_StreamSurface), "surfaces");
+    section(h.restore, h.restore_count, sizeof(NV_StreamParticle), "restore");
+    section(h.bodies, h.body_count, sizeof(NV_StreamBody), "bodies");
+    if (h.slot_capacity == 0) fail("FX particles: slot capacity 0");
+    if (h.alive_after > h.slot_capacity) fail("FX particles: alive_after %u > capacity %u", h.alive_after, h.slot_capacity);
+    if (h.restore_count > h.slot_capacity) fail("FX particles: %u restore records > capacity %u", h.restore_count, h.slot_capacity);
+    if (h.depth[0] != 0 || h.depth[NV_STREAM_MAX_DEPTH + 1] != h.spawn_count) fail("FX particles: spawn depth ranges do not cover the records");
+    for (uint32_t d = 0; d <= NV_STREAM_MAX_DEPTH; ++d)
+    {
+        if (h.depth[d] > h.depth[d + 1]) fail("FX particles: spawn depth ranges not ascending");
+        if (d > chainDepthMax && h.depth[d + 1] > h.depth[d]) fail("FX particles: depth %u records beyond fx.particles.chain_depth_max %u", d, chainDepthMax);
+    }
+    if (h.dt < 0 || !std::isfinite(h.dt)) fail("FX particles: dt %g", h.dt);
+    const auto* emitters = reinterpret_cast<const NV_StreamEmitter*>(packet + h.emitters);
+    const auto* programs = reinterpret_cast<const NV_StreamProgram*>(packet + h.programs);
+    const auto* spawns = reinterpret_cast<const NV_StreamSpawn*>(packet + h.spawns);
+    for (uint32_t k = 0; k < h.spawn_count; ++k)
+    {
+        if (spawns[k].emitter >= h.emitter_count) fail("FX particles: spawn record %u names emitter row %u of %u", k, spawns[k].emitter, h.emitter_count);
+        if (spawns[k].expired > spawns[k].count) fail("FX particles: spawn record %u expired %u > count %u", k, spawns[k].expired, spawns[k].count);
+    }
+    const uint32_t programTable = (h.flags & NV_STREAM_PROGRAMS) ? h.program_count : programCount;
+    for (uint32_t e = 0; e < h.emitter_count; ++e)
+    {
+        const NV_StreamEmitter& x = emitters[e];
+        if (!(x.flags & NV_STREAM_EMITTER_ACTIVE)) continue;
+        if (x.program >= programTable) fail("FX particles: emitter row %u names program %u of %u", e, x.program, programTable);
+        if (x.parent_event != NV_STREAM_NONE && (x.parent_event >= h.event_slots || x.parent_row >= h.emitter_count))
+            fail("FX particles: emitter row %u: parent event %u / row %u outside %u events, %u rows", e, x.parent_event, x.parent_row, h.event_slots, h.emitter_count);
+    }
+    for (uint32_t k = 0; k < h.spawn_count; ++k)
+    {
+        const NV_StreamSpawn& r = spawns[k];
+        if (r.birth_event != NV_STREAM_NONE && (uint64_t)r.birth_event + r.count > h.event_slots) fail("FX particles: spawn record %u birth events outside %u slots", k, h.event_slots);
+        if (r.death_event != NV_STREAM_NONE && (uint64_t)r.death_event + r.expired > h.event_slots) fail("FX particles: spawn record %u death events outside %u slots", k, h.event_slots);
+    }
+    const auto* explicits = reinterpret_cast<const NV_StreamExplicitBirth*>(packet + h.explicit_births);
+    for (uint32_t k = 0; k < h.explicit_count; ++k)
+    {
+        const NV_StreamExplicitBirth& x = explicits[k];
+        if (x.emitter >= h.emitter_count) fail("FX particles: explicit birth %u names row %u of %u", k, x.emitter, h.emitter_count);
+        if ((x.birth_event != NV_STREAM_NONE && x.birth_event >= h.event_slots) || (x.death_event != NV_STREAM_NONE && x.death_event >= h.event_slots))
+            fail("FX particles: explicit birth %u event slots outside %u", k, h.event_slots);
+    }
+    uint32_t bodyMax = surfaceBodyMax;  // largest body index + 1 of the surface table in use
+    if (h.flags & (NV_STREAM_SURFACES | NV_STREAM_RESET))
+    {
+        bodyMax = 0;
+        const auto* surfaces = reinterpret_cast<const NV_StreamSurface*>(packet + h.surfaces);
+        for (uint32_t k = 0; k < h.surface_count; ++k)
+            if (surfaces[k].body != NV_STREAM_NONE) bodyMax = std::max(bodyMax, surfaces[k].body + 1);
+    }
+    if (bodyMax > h.body_count) fail("FX particles: surfaces reference body %u, the packet has %u bodies", bodyMax - 1, h.body_count);
+    (void)programs;
+}
+} // namespace
+
+struct ParticleSystem::Impl
+{
+    // state (capacity sized)
+    Buf posAge{ "fx.posAge", 16 }, velocity{ "fx.velocity", 16 }, meta{ "fx.meta", 8 }, alive{ "fx.alive", 4 };
+    Buf aliveList{ "fx.aliveList", 4 }, deadList{ "fx.deadList", 4 }, dyingList{ "fx.dyingList", 4 };
+    Buf blockSums{ "fx.blockSums", 8 }, keyBySlot{ "fx.keyBySlot", 4 }, spawnedSlots{ "fx.spawnedSlots", 4 };
+    Buf keysA{ "fx.keysA", 4 }, valsA{ "fx.valsA", 4 }, keysB{ "fx.keysB", 4 }, valsB{ "fx.valsB", 4 }, hist{ "fx.hist", 4 };
+    Buf records[2] = { { "fx.records0", 32 }, { "fx.records1", 32 } };
+    Buf emitters[2] = { { "fx.emitters0", sizeof(NV_StreamEmitter) }, { "fx.emitters1", sizeof(NV_StreamEmitter) } };
+    Buf dynamic[2] = { { "fx.emitterDynamic0", 32 }, { "fx.emitterDynamic1", 32 } };
+    Buf counters{ "fx.counters", 4 }, report{ "fx.report", 4 };
+    // inputs
+    Buf programs{ "fx.programs", sizeof(NV_StreamProgram) }, curveKeys{ "fx.curveKeys", 16 };
+    Buf spawns{ "fx.spawns", sizeof(NV_StreamSpawn) }, explicitBirths{ "fx.explicitBirths", sizeof(NV_StreamExplicitBirth) };
+    Buf fields{ "fx.fields", sizeof(NV_StreamField) }, worldFields{ "fx.worldFields", sizeof(NV_StreamWorldField) };
+    Buf surfaces{ "fx.surfaces", sizeof(NV_StreamSurface) }, restore{ "fx.restore", sizeof(NV_StreamParticle) }, slotBase{ "fx.slotBase", 4 };
+    Buf bodies{ "fx.bodies", sizeof(NV_StreamBody) }, tickSurfaces{ "fx.tickSurfaces", sizeof(NV_StreamSurface) };
+    Buf ribbonPoints{ "fx.ribbonPoints", 32 }, ribbonLinks{ "fx.ribbonLinks", 4 }, ribbonVertices{ "fx.ribbonVertices", 32 }, mediumCells{ "fx.mediumCells", 96 };
+    Buf gridCount{ "fx.gridCount", 4 }, gridStart{ "fx.gridStart", 4 }, gridFill{ "fx.gridFill", 4 }, gridEntries{ "fx.gridEntries", 4 }, gridLarge{ "fx.gridLarge", 4 };
+    bool programsValid = false;
+    uint32_t parity = 0;
+    uint32_t surfaceCount = 0;                           // persistent surface table (NV_STREAM_SURFACES)
+    uint32_t submittedPrograms = 0, submittedBodyMax = 0;  // tables as of the last submitted packet (validation)
+
+    struct Slot
+    {
+        ComPtr<ID3D12Resource> upload;
+        uint64_t uploadBytes = 0;
+        uint8_t* mapped = nullptr;
+        Buf events{ "fx.events", sizeof(NV_StreamEvent) };
+        ComPtr<ID3D12Resource> readback;
+        uint64_t readbackBytes = 0;
+        // the tick it holds
+        bool recorded = false;
+        uint64_t stream = 0, generation = 0, tick = 0;
+        uint32_t eventSlots = 0, collisionCopy = 0, collisionCapacity = 0;
+        RenderGraph* graph = nullptr;
+        uint64_t fenceBase = 0, fence = 0;
+    };
+    std::vector<Slot> slots;
+    uint32_t nextSlot = 0;
+    int latestSlot = -1;
+
+    void resolveFence(Slot& s)
+    {
+        if (!s.recorded || s.fence != 0 || !s.graph) return;
+        const uint64_t f = s.graph->lastFence(QueueType::Graphics);
+        if (f > s.fenceBase) s.fence = f;
+    }
+    void waitSlot(Device& device, Slot& s)
+    {
+        if (!s.recorded) return;
+        resolveFence(s);
+        if (s.fence == 0) fail("FX particles: tick %llu was recorded but its frame was never executed", (unsigned long long)s.tick);
+        device.queue(QueueType::Graphics).waitCpu(s.fence);
+    }
+};
+
+ParticleSystem::ParticleSystem(Device& device, const QualityConfig& quality) : m_impl(std::make_unique<Impl>()), m_device(device)
+{
+    m_sortPasses = (uint32_t)quality.integer("fx.particles.sort_passes");
+    m_chainDepthMax = (uint32_t)quality.integer("fx.particles.chain_depth_max");
+    m_readbackSlots = (uint32_t)quality.integer("fx.particles.readback_slots");
+    m_collisionReadback = (uint32_t)quality.integer("fx.particles.collision_readback");
+    m_gridCell = (float)quality.number("fx.particles.collision_cell_m");
+    if (!(m_gridCell > 0)) fail("fx.particles.collision_cell_m must be > 0");
+    if (m_sortPasses > 3) fail("fx.particles.sort_passes must be 0..3 (24-bit key)");
+    if (m_chainDepthMax > NV_STREAM_MAX_DEPTH) fail("fx.particles.chain_depth_max must be <= %u", NV_STREAM_MAX_DEPTH);
+    if (m_readbackSlots < 2) fail("fx.particles.readback_slots must be >= 2");
+    m_impl->slots.resize(m_readbackSlots);
+}
+
+ParticleSystem::~ParticleSystem()
+{
+    m_device.waitIdle();
+    for (auto& s : m_impl->slots)
+        if (s.upload && s.mapped) s.upload->Unmap(0, nullptr);
+}
+
+void ParticleSystem::submit(const uint8_t* packet, uint64_t bytes)
+{
+    Impl& m = *m_impl;
+    validate(packet, bytes, m_chainDepthMax, m.submittedPrograms, m.submittedBodyMax);
+    const NV_StreamHeader& h = *reinterpret_cast<const NV_StreamHeader*>(packet);
+    if (h.flags & NV_STREAM_PROGRAMS) m.submittedPrograms = h.program_count;
+    if (h.flags & (NV_STREAM_SURFACES | NV_STREAM_RESET))
+    {
+        m.submittedBodyMax = 0;
+        const auto* surfaces = reinterpret_cast<const NV_StreamSurface*>(packet + h.surfaces);
+        for (uint32_t k = 0; k < h.surface_count; ++k)
+            if (surfaces[k].body != NV_STREAM_NONE) m.submittedBodyMax = std::max(m.submittedBodyMax, surfaces[k].body + 1);
+    }
+    m_pending.emplace_back(packet, packet + bytes);
+}
+
+void ParticleSystem::record(FramePassContext& fc)
+{
+    Impl& m = *m_impl;
+    Device& device = fc.device;
+    while (!m_pending.empty())
+    {
+        std::vector<uint8_t> packet = std::move(m_pending.front());
+        m_pending.pop_front();
+        const NV_StreamHeader& h = headerOf(packet);
+        const uint8_t* base = packet.data();
+
+        // Capacity: a change reallocates the state, which is only valid with a RESET packet.
+        const uint32_t capacity = h.slot_capacity;
+        const bool reset = (h.flags & NV_STREAM_RESET) != 0 || m_capacity == 0;
+        if (capacity != m_capacity)
+        {
+            if (!(h.flags & NV_STREAM_RESET) && m_capacity != 0) fail("FX particles: slot capacity changed %u -> %u without RESET", m_capacity, capacity);
+            m_capacity = capacity;
+        }
+        const uint32_t scanBlocks = groups(capacity, kScanBlock), sortGroups = groups(capacity, kSortGroupKeys);
+        for (Buf* b : { &m.posAge, &m.velocity, &m.meta, &m.alive, &m.aliveList, &m.deadList, &m.dyingList, &m.keyBySlot, &m.spawnedSlots, &m.keysA, &m.valsA,
+                        &m.keysB, &m.valsB, &m.records[0], &m.records[1] })
+            b->ensure(device, (uint64_t)capacity * b->stride);
+        m.blockSums.ensure(device, (uint64_t)scanBlocks * 8);
+        m.hist.ensure(device, (uint64_t)(sortGroups + 1) * 256 * 4);
+        m.counters.ensure(device, kCounterWords * 4);
+        m.report.ensure(device, kReportBytes);
+
+        // Programs persist until a packet replaces them.
+        if (h.flags & NV_STREAM_PROGRAMS)
+        {
+            m.programs.ensure(device, (uint64_t)h.program_count * sizeof(NV_StreamProgram));
+            m.curveKeys.ensure(device, (uint64_t)h.curve_key_count * 16);
+            m.programsValid = true;
+        }
+        if (!m.programsValid) fail("FX particles: the first packet of a stream must carry the program table (NV_STREAM_PROGRAMS)");
+
+        const uint32_t cur = m.parity;
+        m.parity ^= 1u;
+        m.emitters[cur].ensure(device, (uint64_t)h.emitter_count * sizeof(NV_StreamEmitter));
+        m.dynamic[cur].ensure(device, (uint64_t)h.emitter_count * sizeof(EmitterDynamic));
+        m.spawns.ensure(device, (uint64_t)h.spawn_count * sizeof(NV_StreamSpawn));
+        m.explicitBirths.ensure(device, (uint64_t)h.explicit_count * sizeof(NV_StreamExplicitBirth));
+        m.fields.ensure(device, (uint64_t)h.field_count * sizeof(NV_StreamField));
+        m.worldFields.ensure(device, (uint64_t)h.world_field_count * sizeof(NV_StreamWorldField));
+        if (h.flags & (NV_STREAM_SURFACES | NV_STREAM_RESET))
+        {
+            m.surfaces.ensure(device, (uint64_t)h.surface_count * sizeof(NV_StreamSurface));
+            m.surfaceCount = h.surface_count;
+        }
+        m.tickSurfaces.ensure(device, (uint64_t)m.surfaceCount * sizeof(NV_StreamSurface));
+        // Collision grid: buckets = the power of two >= 2 x surfaces (>= 1024); at most 64 cells per listed surface.
+        uint32_t gridBuckets = 1024;
+        while (gridBuckets < 2 * m.surfaceCount) gridBuckets <<= 1;
+        const uint32_t gridEntryCapacity = std::max<uint32_t>(m.surfaceCount, 1) * 64;
+        m.gridCount.ensure(device, (uint64_t)gridBuckets * 4);
+        m.gridStart.ensure(device, (uint64_t)gridBuckets * 4);
+        m.gridFill.ensure(device, (uint64_t)gridBuckets * 4);
+        m.gridEntries.ensure(device, (uint64_t)gridEntryCapacity * 4);
+        m.gridLarge.ensure(device, (uint64_t)std::max<uint32_t>(m.surfaceCount, 1) * 4);
+        m.ribbonPoints.ensure(device, (uint64_t)h.ribbon_points * 32);
+        m.ribbonLinks.ensure(device, (uint64_t)h.ribbon_points * 4);
+        m.ribbonVertices.ensure(device, (uint64_t)h.ribbon_points * 64);
+        m.mediumCells.ensure(device, (uint64_t)h.medium_cells * 96);
+        m.bodies.ensure(device, (uint64_t)h.body_count * sizeof(NV_StreamBody));
+        m.restore.ensure(device, (uint64_t)h.restore_count * sizeof(NV_StreamParticle));
+        m.slotBase.ensure(device, (uint64_t)h.spawn_count * 4);
+
+        // Birth threads per depth and slot ranks (births that take a slot, in record order; explicit births after the
+        // generated births of depth 0).
+        const auto* spawns = reinterpret_cast<const NV_StreamSpawn*>(base + h.spawns);
+        std::vector<uint32_t> slotBase(std::max<uint32_t>(h.spawn_count, 1));
+        uint32_t threads[NV_STREAM_MAX_DEPTH + 1] = {}, slotStart[NV_STREAM_MAX_DEPTH + 2] = {};
+        uint32_t rank = 0, explicitSlotBase = 0;
+        for (uint32_t d = 0; d <= NV_STREAM_MAX_DEPTH; ++d)
+        {
+            slotStart[d] = rank;
+            for (uint32_t k = h.depth[d]; k < h.depth[d + 1]; ++k)
+            {
+                if (spawns[k].thread_offset != threads[d]) fail("FX particles: spawn record %u thread_offset %u != prefix %u", k, spawns[k].thread_offset, threads[d]);
+                threads[d] += spawns[k].count;
+                slotBase[k] = rank;
+                rank += spawns[k].count - spawns[k].expired;
+            }
+            if (d == 0)
+            {
+                explicitSlotBase = rank;
+                rank += h.explicit_count;
+            }
+        }
+        slotStart[NV_STREAM_MAX_DEPTH + 1] = rank;
+        if (rank > capacity) fail("FX particles: %u births take slots, capacity %u", rank, capacity);
+
+        // Ring slot of this tick: upload (constants + packet + slot ranks), GPU events, readback. A state packet
+        // (dt == 0) without RESET keeps its tick: it reuses that tick's slot, keeps the tick's events and updates only
+        // counters.alive and status (NativeVfxStream.h).
+        const bool statePacket = h.dt == 0 && !(h.flags & NV_STREAM_RESET);
+        int thisSlot = -1;
+        if (statePacket)
+            for (size_t i = 0; i < m.slots.size(); ++i)
+                if (m.slots[i].recorded && m.slots[i].stream == h.stream && m.slots[i].generation == h.generation && m.slots[i].tick == h.tick) thisSlot = (int)i;
+        const bool keepEvents = thisSlot >= 0;
+        if (!keepEvents)
+        {
+            thisSlot = (int)m.nextSlot;
+            m.nextSlot = (m.nextSlot + 1) % (uint32_t)m.slots.size();
+        }
+        Impl::Slot& slot = m.slots[(size_t)thisSlot];
+        if (slot.recorded) m.waitSlot(device, slot);  // its upload is free; a replaced tick's readback can no longer be read
+        const uint64_t constOffset = 0, packetOffset = 512, rankOffset = align(packetOffset + packet.size(), 16);
+        const uint64_t uploadBytes = rankOffset + slotBase.size() * 4;
+        if (!slot.upload || slot.uploadBytes < uploadBytes)
+        {
+            if (slot.upload) { slot.upload->Unmap(0, nullptr); device.deferRelease(slot.upload); }
+            slot.uploadBytes = std::max<uint64_t>(align(uploadBytes, 65536), slot.uploadBytes * 3 / 2);
+            slot.upload = makeBuffer(device, slot.uploadBytes, D3D12_HEAP_TYPE_UPLOAD, L"FX particle upload");
+            D3D12_RANGE none{ 0, 0 };
+            check(slot.upload->Map(0, &none, reinterpret_cast<void**>(&slot.mapped)), "map FX upload");
+        }
+        std::memcpy(slot.mapped + packetOffset, packet.data(), packet.size());
+        std::memcpy(slot.mapped + rankOffset, slotBase.data(), slotBase.size() * 4);
+        const uint32_t collisionCopy = keepEvents ? slot.collisionCopy : std::min(h.collision_capacity, m_collisionReadback);
+        if (!keepEvents) slot.events.ensure(device, (uint64_t)(h.event_slots + h.collision_capacity) * sizeof(NV_StreamEvent));
+        const uint64_t readbackBytes = kReportBytes + (uint64_t)(h.event_slots + collisionCopy) * sizeof(NV_StreamEvent);
+        if (!keepEvents && (!slot.readback || slot.readbackBytes < readbackBytes))
+        {
+            if (slot.readback) device.deferRelease(slot.readback);
+            slot.readbackBytes = std::max<uint64_t>(align(readbackBytes, 4096), slot.readbackBytes * 3 / 2);
+            slot.readback = makeBuffer(device, slot.readbackBytes, D3D12_HEAP_TYPE_READBACK, L"FX particle readback");
+        }
+        slot.recorded = true;
+        slot.stream = h.stream;
+        slot.generation = h.generation;
+        slot.tick = h.tick;
+        if (!keepEvents)
+        {
+            slot.eventSlots = h.event_slots;
+            slot.collisionCopy = collisionCopy;
+            slot.collisionCapacity = h.collision_capacity;
+        }
+        slot.graph = &fc.graph;
+        slot.fenceBase = fc.graph.lastFence(QueueType::Graphics);
+        slot.fence = 0;
+        m.latestSlot = thisSlot;
+        m_latestTick = h.tick;
+
+        // Graph imports of this frame.
+        RenderGraph& g = fc.graph;
+        std::vector<Buf*> state = { &m.posAge, &m.velocity, &m.meta, &m.alive, &m.aliveList, &m.deadList, &m.dyingList, &m.blockSums, &m.keyBySlot,
+                                    &m.spawnedSlots, &m.keysA, &m.valsA, &m.keysB, &m.valsB, &m.hist, &m.records[cur], &m.dynamic[cur], &m.counters,
+                                    &m.report, &slot.events, &m.tickSurfaces, &m.gridCount, &m.gridStart, &m.gridFill, &m.gridEntries, &m.gridLarge,
+                                    &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.mediumCells };
+        std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitters[cur], &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
+                                     &m.restore, &m.slotBase, &m.bodies };
+        for (Buf* b : state) b->import(g, fc.frame.frameIndex);
+        for (Buf* b : inputs) b->import(g, fc.frame.frameIndex);
+
+        ID3D12Resource* upload = slot.upload.Get();
+        const D3D12_GPU_VIRTUAL_ADDRESS constants = upload->GetGPUVirtualAddress() + constOffset;
+        uint8_t* constantsCpu = slot.mapped + constOffset;
+
+        // Sort key frame: the main view of this frame, relative to the stream's anchor.
+        const ViewDesc& view = fc.frame.mainView;
+        float camera[3], forward[3];
+        for (int a = 0; a < 3; ++a)
+        {
+            camera[a] = (float)((double)(&view.position.x)[a] - h.anchor[a]);
+            forward[a] = -view.view.m[2][a];
+        }
+        const float keyNear = std::max(view.nearPlane, 1e-3f);
+        const float keyScale = 16777213.0f / std::log2(kKeyFar / keyNear);
+
+        // 1. upload: copies of this tick's sections
+        struct Copy { Buf* dst; uint64_t offset, bytes; };
+        std::vector<Copy> copies;
+        auto add = [&](Buf& dst, uint64_t sectionOffset, uint64_t bytes) {
+            if (bytes) copies.push_back({ &dst, packetOffset + sectionOffset, bytes });
+        };
+        if (h.flags & NV_STREAM_PROGRAMS)
+        {
+            add(m.programs, h.programs, (uint64_t)h.program_count * sizeof(NV_StreamProgram));
+            add(m.curveKeys, h.curve_keys, (uint64_t)h.curve_key_count * 16);
+        }
+        add(m.emitters[cur], h.emitters, (uint64_t)h.emitter_count * sizeof(NV_StreamEmitter));
+        add(m.spawns, h.spawns, (uint64_t)h.spawn_count * sizeof(NV_StreamSpawn));
+        add(m.explicitBirths, h.explicit_births, (uint64_t)h.explicit_count * sizeof(NV_StreamExplicitBirth));
+        add(m.fields, h.fields, (uint64_t)h.field_count * sizeof(NV_StreamField));
+        add(m.worldFields, h.world_fields, (uint64_t)h.world_field_count * sizeof(NV_StreamWorldField));
+        if (h.flags & (NV_STREAM_SURFACES | NV_STREAM_RESET)) add(m.surfaces, h.surfaces, (uint64_t)h.surface_count * sizeof(NV_StreamSurface));
+        add(m.bodies, h.bodies, (uint64_t)h.body_count * sizeof(NV_StreamBody));
+        add(m.restore, h.restore, (uint64_t)h.restore_count * sizeof(NV_StreamParticle));
+        if (h.spawn_count) copies.push_back({ &m.slotBase, rankOffset, (uint64_t)h.spawn_count * 4 });
+        g.addPass("fx.particles.upload", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      for (const Copy& c : copies) b.use(c.dst->ref, Use::CopyDst);
+                      b.keep();
+                  },
+                  [copies, upload](PassContext& c) {
+                      for (const Copy& cp : copies) c.cmd->CopyBufferRegion(c.resource(cp.dst->ref), 0, upload, cp.offset, cp.bytes);
+                  });
+
+        // Constants of the tick are written by the first compute pass (it holds every view index).
+        TickConstants tc{};
+        tc.capacity = capacity;
+        tc.numScanBlocks = scanBlocks;
+        tc.numSortGroups = sortGroups;
+        tc.flags = h.flags;
+        tc.fieldCount = h.field_count;
+        tc.worldFieldCount = h.world_field_count;
+        tc.surfaceCount = m.surfaceCount;
+        tc.emitterCount = h.emitter_count;
+        tc.eventSlots = h.event_slots;
+        tc.collisionCapacity = h.collision_capacity;
+        tc.aliveAfter = h.alive_after;
+        tc.restoreCount = h.restore_count;
+        tc.tickLo = (uint32_t)h.tick;
+        tc.tickHi = (uint32_t)(h.tick >> 32);
+        tc.streamLo = (uint32_t)h.stream;
+        tc.streamHi = (uint32_t)(h.stream >> 32);
+        tc.generationLo = (uint32_t)h.generation;
+        tc.generationHi = (uint32_t)(h.generation >> 32);
+        tc.recordCount = h.spawn_count;
+        tc.explicitCount = h.explicit_count;
+        tc.dt = h.dt_float;
+        tc.time = h.time_float;
+        tc.keyNear = keyNear;
+        tc.keyScale = keyScale;
+        std::memcpy(tc.camera, camera, 12);
+        tc.explicitSlotBase = explicitSlotBase;
+        std::memcpy(tc.forward, forward, 12);
+        tc.bodyCount = h.body_count;
+        tc.gridCell = m_gridCell;
+        tc.gridMask = gridBuckets - 1;
+        tc.gridEntryCapacity = gridEntryCapacity;
+
+        auto declare = [state, inputs](PassBuilder& b) {
+            for (Buf* x : state) b.use(x->ref, Use::UavCompute);
+            for (Buf* x : inputs) b.use(x->ref, Use::SrvCompute);
+        };
+        auto fillConstants = [&m, cur, constantsCpu, tc, sp = &slot](PassContext& c) mutable {
+            tc.posAge = c.uav(m.posAge.ref);
+            tc.velocity = c.uav(m.velocity.ref);
+            tc.meta = c.uav(m.meta.ref);
+            tc.alive = c.uav(m.alive.ref);
+            tc.aliveList = c.uav(m.aliveList.ref);
+            tc.deadList = c.uav(m.deadList.ref);
+            tc.dyingList = c.uav(m.dyingList.ref);
+            tc.counters = c.uav(m.counters.ref);
+            tc.blockSums = c.uav(m.blockSums.ref);
+            tc.records = c.uav(m.records[cur].ref);
+            tc.keyBySlot = c.uav(m.keyBySlot.ref);
+            tc.events = c.uav(sp->events.ref);
+            tc.keysA = c.uav(m.keysA.ref);
+            tc.valsA = c.uav(m.valsA.ref);
+            tc.keysB = c.uav(m.keysB.ref);
+            tc.valsB = c.uav(m.valsB.ref);
+            tc.hist = c.uav(m.hist.ref);
+            tc.programs = c.srv(m.programs.ref);
+            tc.curveKeys = c.srv(m.curveKeys.ref);
+            tc.emitters = c.srv(m.emitters[cur].ref);
+            tc.spawns = c.srv(m.spawns.ref);
+            tc.explicitBirths = c.srv(m.explicitBirths.ref);
+            tc.fields = c.srv(m.fields.ref);
+            tc.worldFields = c.srv(m.worldFields.ref);
+            tc.surfaces = c.srv(m.surfaces.ref);
+            tc.restore = c.srv(m.restore.ref);
+            tc.slotBase = c.srv(m.slotBase.ref);
+            tc.spawnedSlots = c.uav(m.spawnedSlots.ref);
+            tc.report = c.uav(m.report.ref);
+            tc.emitterDynamic = c.uav(m.dynamic[cur].ref);
+            tc.bodies = c.srv(m.bodies.ref);
+            tc.tickSurfaces = c.uav(m.tickSurfaces.ref);
+            tc.gridCount = c.uav(m.gridCount.ref);
+            tc.gridStart = c.uav(m.gridStart.ref);
+            tc.gridFill = c.uav(m.gridFill.ref);
+            tc.gridEntries = c.uav(m.gridEntries.ref);
+            tc.gridLarge = c.uav(m.gridLarge.ref);
+            std::memcpy(constantsCpu, &tc, sizeof tc);
+        };
+        ShaderLibrary& shaders = fc.shaders;
+        auto dispatch = [&](const char* name, const char* kernel, std::array<uint32_t, 8> p, uint32_t groupCount, bool first = false) {
+            if (groupCount == 0) return;
+            ID3D12PipelineState* pso = shaders.compute(kernel);
+            g.addPass(name, QueueType::Graphics, declare, [=](PassContext& c) mutable {
+                if (first) fillConstants(c);
+                c.cmd->SetPipelineState(pso);
+                c.bindFrameConstants(constants);
+                c.computeConstants(p.data(), 8);
+                c.cmd->Dispatch(groupCount, 1, 1);
+            });
+        };
+        auto compaction = [&](const char* suffix, uint32_t checkAlive) {
+            dispatch(format("fx.particles.compact.scan%s", suffix).c_str(), "Passes/FX/FxCompact.SCATTER0", {}, scanBlocks);
+            dispatch(format("fx.particles.compact.sums%s", suffix).c_str(), "Passes/FX/FxScanSums", { checkAlive }, 1);
+            dispatch(format("fx.particles.compact.scatter%s", suffix).c_str(), "Passes/FX/FxCompact.SCATTER1", {}, scanBlocks);
+        };
+
+        // 2. begin (+ reset and the compaction that rebuilds the dead list)
+        const uint32_t beginThreads = std::max<uint32_t>(std::max<uint32_t>(h.emitter_count, 1), reset ? capacity : 0);
+        dispatch("fx.particles.begin", reset ? "Passes/FX/FxBegin.RESET1" : "Passes/FX/FxBegin.RESET0", {}, groups(beginThreads, 256), true);
+        if (reset) compaction(".reset", 0);
+        if (m.surfaceCount)
+        {
+            dispatch("fx.particles.surfaces", "Passes/FX/FxSurfaces", {}, groups(m.surfaceCount, 64));
+            dispatch("fx.particles.grid.clear", "Passes/FX/FxGrid.STEP0", {}, groups(gridBuckets, 64));
+            dispatch("fx.particles.grid.count", "Passes/FX/FxGrid.STEP1", {}, groups(m.surfaceCount, 64));
+            dispatch("fx.particles.grid.scan", "Passes/FX/FxGrid.STEP2", {}, 1);
+            dispatch("fx.particles.grid.fill", "Passes/FX/FxGrid.STEP3", {}, groups(m.surfaceCount, 64));
+        }
+
+        // 3. depth 0: spawn (generated + explicit), integrate every slot; depths 1..4: child setup, spawn, integrate
+        // (a state packet, dt == 0, has no spawns and no motion: FxIntegrate applies kills only)
+        if (h.dt > 0)
+            dispatch("fx.particles.spawn.d0", "Passes/FX/FxSpawn", { h.depth[0], h.depth[1], threads[0], threads[0] + h.explicit_count }, groups(threads[0] + h.explicit_count, 64));
+        dispatch("fx.particles.integrate.d0", "Passes/FX/FxIntegrate.LIST0", {}, groups(capacity, 256));
+        for (uint32_t d = 1; d <= NV_STREAM_MAX_DEPTH && h.dt > 0; ++d)
+        {
+            if (h.depth[d + 1] == h.depth[d]) continue;
+            const uint32_t spawned = slotStart[d + 1] - slotStart[d];
+            dispatch(format("fx.particles.child.d%u", d).c_str(), "Passes/FX/FxChildSetup", { h.depth[d], h.depth[d + 1] }, groups(h.depth[d + 1] - h.depth[d], 64));
+            dispatch(format("fx.particles.spawn.d%u", d).c_str(), "Passes/FX/FxSpawn", { h.depth[d], h.depth[d + 1], threads[d], threads[d] }, groups(threads[d], 64));
+            dispatch(format("fx.particles.integrate.d%u", d).c_str(), "Passes/FX/FxIntegrate.LIST1", { slotStart[d], spawned }, groups(spawned, 256));
+        }
+
+        // 4. compaction (alive / dead / dying lists, report, alive_after check)
+        compaction("", 1);
+
+        // geometry outputs (ribbon points and strips, medium cells) at output_base + (birth - death_birth)
+        if (h.ribbon_points || h.medium_cells)
+        {
+            const uint32_t ribbonPoints = h.ribbon_points, mediumCells = h.medium_cells, rows = h.emitter_count;
+            Impl* mi = &m;
+            ID3D12PipelineState* points = shaders.compute("Passes/FX/FxOutputs.STEP0");
+            ID3D12PipelineState* strips = shaders.compute("Passes/FX/FxOutputs.STEP1");
+            auto outputs = [=](PassContext& c, ID3D12PipelineState* pso, uint32_t groupCount) {
+                const std::array<uint32_t, 8> p = { c.uav(mi->ribbonPoints.ref), c.uav(mi->ribbonLinks.ref), c.uav(mi->ribbonVertices.ref), c.uav(mi->mediumCells.ref),
+                                                    ribbonPoints, mediumCells, 0, 0 };
+                c.cmd->SetPipelineState(pso);
+                c.bindFrameConstants(constants);
+                c.computeConstants(p.data(), 8);
+                c.cmd->Dispatch(groupCount, 1, 1);
+            };
+            g.addPass("fx.particles.outputs.points", QueueType::Graphics, declare, [=](PassContext& c) { outputs(c, points, groups(capacity, 64)); });
+            if (ribbonPoints) g.addPass("fx.particles.outputs.ribbons", QueueType::Graphics, declare, [=](PassContext& c) { outputs(c, strips, groups(rows, 64)); });
+        }
+
+        // sort of the alive list by the 24-bit key
+        for (uint32_t pass = 0; pass < m_sortPasses; ++pass)
+        {
+            const std::array<uint32_t, 8> p = { pass * 8, pass & 1u };
+            dispatch(format("fx.particles.sort.hist%u", pass).c_str(), "Passes/FX/FxSortHist", p, sortGroups);
+            dispatch(format("fx.particles.sort.scan%u", pass).c_str(), "Passes/FX/FxSortScan", p, 1);
+            dispatch(format("fx.particles.sort.scatter%u", pass).c_str(), "Passes/FX/FxSortScatter", p, sortGroups);
+        }
+
+        // 5. readback: report + CPU-assigned event slots + a prefix of the collision events
+        ID3D12Resource* readback = slot.readback.Get();
+        const uint64_t eventBytes = (uint64_t)(h.event_slots + collisionCopy) * sizeof(NV_StreamEvent);
+        Buf* reportBuf = &m.report;
+        Buf* eventsBuf = &slot.events;
+        g.addPass("fx.particles.readback", QueueType::Graphics,
+                  [=](PassBuilder& b) {
+                      b.use(reportBuf->ref, Use::CopySrc);
+                      b.use(eventsBuf->ref, Use::CopySrc);
+                      b.keep();
+                  },
+                  [=](PassContext& c) {
+                      if (keepEvents)
+                      {
+                          // NV_StreamCounters.alive (byte 24) and .status (byte 32) of the state packet; the tick's events
+                          // and collision count stay
+                          c.cmd->CopyBufferRegion(readback, 24, c.resource(reportBuf->ref), 24, 4);
+                          c.cmd->CopyBufferRegion(readback, 32, c.resource(reportBuf->ref), 32, 4);
+                          return;
+                      }
+                      c.cmd->CopyBufferRegion(readback, 0, c.resource(reportBuf->ref), 0, kReportBytes);
+                      if (eventBytes) c.cmd->CopyBufferRegion(readback, kReportBytes, c.resource(eventsBuf->ref), 0, eventBytes);
+                  });
+    }
+}
+
+TickReadback ParticleSystem::readback(uint64_t stream, uint64_t generation, uint64_t tick)
+{
+    Impl& m = *m_impl;
+    Impl::Slot* found = nullptr;
+    for (auto& s : m.slots)
+        if (s.recorded && s.stream == stream && s.generation == generation && s.tick == tick) found = &s;
+    if (!found) fail("FX particles: tick %llu (stream %llu, generation %llu) is not in the readback ring (not recorded yet, or overwritten)",
+                     (unsigned long long)tick, (unsigned long long)stream, (unsigned long long)generation);
+    Impl::Slot& s = *found;
+    m.waitSlot(m_device, s);
+    TickReadback out;
+    const uint64_t bytes = kReportBytes + (uint64_t)(s.eventSlots + s.collisionCopy) * sizeof(NV_StreamEvent);
+    uint8_t* p = nullptr;
+    D3D12_RANGE r{ 0, (SIZE_T)bytes };
+    check(s.readback->Map(0, &r, reinterpret_cast<void**>(&p)), "map FX readback");
+    std::memcpy(&out.counters, p, sizeof(NV_StreamCounters));
+    std::memcpy(&out.dying, p + 48, 4);
+    const uint32_t collisions = std::min(out.counters.collision_events, s.collisionCapacity);
+    const uint32_t copied = std::min(collisions, s.collisionCopy);
+    out.events.resize((size_t)s.eventSlots + collisions);
+    std::memcpy(out.events.data(), p + kReportBytes, ((size_t)s.eventSlots + copied) * sizeof(NV_StreamEvent));
+    D3D12_RANGE none{ 0, 0 };
+    s.readback->Unmap(0, &none);
+    if (collisions > copied)
+    {
+        // The rest of the collision events from the tick's GPU event buffer (kept in the ring slot until reused).
+        const uint64_t offset = ((uint64_t)s.eventSlots + copied) * sizeof(NV_StreamEvent), rest = (uint64_t)(collisions - copied) * sizeof(NV_StreamEvent);
+        ComPtr<ID3D12Resource> rb = makeBuffer(m_device, rest, D3D12_HEAP_TYPE_READBACK, L"FX collision readback");
+        CommandList list = m_device.acquireCommandList(QueueType::Graphics);
+        list.list->CopyBufferRegion(rb.Get(), 0, s.events.resource.Get(), offset, rest);
+        const uint64_t fence = m_device.submit(list);
+        m_device.queue(QueueType::Graphics).waitCpu(fence);
+        uint8_t* q = nullptr;
+        D3D12_RANGE rr{ 0, (SIZE_T)rest };
+        check(rb->Map(0, &rr, reinterpret_cast<void**>(&q)), "map FX collision readback");
+        std::memcpy(out.events.data() + s.eventSlots + copied, q, rest);
+        rb->Unmap(0, &none);
+    }
+    return out;
+}
+
+namespace
+{
+// Copies persistent buffers into readback memory with a one-pass graph of its own (explicit readbacks only).
+std::vector<uint8_t> copyOut(Device& device, ID3D12Resource* resource, uint64_t bytes, uint32_t stride, const char* name)
+{
+    RenderGraph graph(device);
+    const BufferRef ref = graph.importBuffer(resource, BufferDesc{ name, std::max<uint64_t>(bytes, 256), stride });
+    ComPtr<ID3D12Resource> rb = makeBuffer(device, bytes, D3D12_HEAP_TYPE_READBACK, L"FX state readback");
+    graph.addPass("fx.readstate", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(ref, Use::CopySrc);
+                      b.keep();
+                  },
+                  [&](PassContext& c) { c.cmd->CopyBufferRegion(rb.Get(), 0, c.resource(ref), 0, bytes); });
+    graph.execute(nullptr);
+    device.queue(QueueType::Graphics).waitCpu(graph.lastFence(QueueType::Graphics));
+    std::vector<uint8_t> out((size_t)bytes);
+    uint8_t* p = nullptr;
+    D3D12_RANGE r{ 0, (SIZE_T)bytes };
+    check(rb->Map(0, &r, reinterpret_cast<void**>(&p)), "map FX state readback");
+    std::memcpy(out.data(), p, (size_t)bytes);
+    D3D12_RANGE none{ 0, 0 };
+    rb->Unmap(0, &none);
+    return out;
+}
+} // namespace
+
+std::vector<uint8_t> ParticleSystem::readState(const char* name)
+{
+    Impl& m = *m_impl;
+    if (m.latestSlot >= 0) m.waitSlot(m_device, m.slots[(size_t)m.latestSlot]);
+    const std::string n = name;
+    const uint32_t last = m.parity ^ 1u;  // parity of the latest recorded tick
+    Buf* b = nullptr;
+    uint64_t bytes = (uint64_t)m_capacity * 4;
+    if (n == "posAge") b = &m.posAge, bytes = (uint64_t)m_capacity * 16;
+    else if (n == "velocity") b = &m.velocity, bytes = (uint64_t)m_capacity * 16;
+    else if (n == "meta") b = &m.meta, bytes = (uint64_t)m_capacity * 8;
+    else if (n == "alive") b = &m.alive;
+    else if (n == "aliveList") b = &m.aliveList;
+    else if (n == "deadList") b = &m.deadList;
+    else if (n == "dyingList") b = &m.dyingList;
+    else if (n == "keyBySlot") b = &m.keyBySlot;
+    else if (n == "counters") b = &m.counters, bytes = kCounterWords * 4;
+    else if (n == "records") b = &m.records[last], bytes = (uint64_t)m_capacity * 32;
+    else if (n == "keysSorted") b = (m_sortPasses & 1) ? &m.keysB : &m.keysA;
+    else if (n == "valsSorted") b = (m_sortPasses & 1) ? &m.valsB : &m.valsA;
+    else if (n == "emitterDynamic") b = &m.dynamic[last], bytes = m.dynamic[last].bytes;
+    else fail("FX particles: no state buffer '%s'", name);
+    return copyOut(m_device, b->resource.Get(), bytes, b->stride, b->name);
+}
+
+std::vector<NV_StreamParticle> ParticleSystem::checkpoint(ShaderLibrary&)
+{
+    // Every live slot: the alive list names them in slot order; the records come from the state buffers.
+    const std::vector<uint8_t> counters = readState("counters");
+    uint32_t alive = 0;
+    std::memcpy(&alive, counters.data(), 4);
+    const std::vector<uint8_t> list = readState("aliveList"), posAge = readState("posAge"), vel = readState("velocity"), meta = readState("meta");
+    std::vector<NV_StreamParticle> out(alive);
+    for (uint32_t i = 0; i < alive; ++i)
+    {
+        uint32_t slot;
+        std::memcpy(&slot, list.data() + (size_t)i * 4, 4);
+        NV_StreamParticle& r = out[i];
+        std::memcpy(&r.emitter, meta.data() + (size_t)slot * 8, 4);
+        std::memcpy(&r.birth, meta.data() + (size_t)slot * 8 + 4, 4);
+        r.reserved0 = 0;
+        r.reserved1 = slot;
+        std::memcpy(r.position, posAge.data() + (size_t)slot * 16, 12);
+        std::memcpy(&r.age, posAge.data() + (size_t)slot * 16 + 12, 4);
+        std::memcpy(r.velocity, vel.data() + (size_t)slot * 16, 12);
+        r.reserved2 = 0;
+    }
+    return out;
+}
+
+ParticleSystem& particles(TrackState& state, Device& device, const QualityConfig& quality)
+{
+    auto& holder = state.get<std::unique_ptr<ParticleSystem>>("fx.particles");
+    if (!holder) holder = std::make_unique<ParticleSystem>(device, quality);
+    return *holder;
+}
+
+ParticleSystem* findParticles(TrackState& state) { return state.get<std::unique_ptr<ParticleSystem>>("fx.particles").get(); }
+} // namespace unx::fx
