@@ -5,6 +5,7 @@
 //                     segments with per-fragment or per-wave-tile atomics), tile composite (groupshared sort + shade)
 //   --only-bricks     band C brick DDA: 16^3 bricks, 1 B or 8 B voxels, camera and sun (orthographic) marches, entry maps
 //   --bricks-vista    only the vista world of the bricks bench (1 px per voxel, instanced pools 19..96 MB and unique, SoA, brick placement)
+//   --only-upload     copy queue RAM -> VRAM bandwidth alone and overlapped with render kernels (2.13b streaming terms)
 //   --only-bands      banded pixel passes: resolve (8 B in, 12 B out) + shade (32/48 B in, 4 B out), 1/4/8/16 bands
 //   --only-shade      shading kernel with tile-shared probe SH, in-kernel air fetches, K tap, 8 lights, register pressure
 // Hardware runs need the GPU lock (UNX_GPU_LOCK, Tools/CI/GpuLock.ps1). --warp runs everything on the WARP adapter at a
@@ -116,6 +117,9 @@ struct Gpu
     ComPtr<IDXGIFactory6> factory;
     ComPtr<ID3D12Device5> dev;
     ComPtr<ID3D12CommandQueue> direct;
+    // Copy queue (upload bench: RAM -> VRAM transfers overlapped with render kernels, 2.13b (b)(c)).
+    ComPtr<ID3D12CommandQueue> copyQ; ComPtr<ID3D12CommandAllocator> copyAlloc; ComPtr<ID3D12GraphicsCommandList> copyList;
+    ComPtr<ID3D12Fence> copyFence; UINT64 copyValue = 0; HANDLE copyEvent = nullptr;
     ComPtr<ID3D12CommandAllocator> alloc;
     ComPtr<ID3D12GraphicsCommandList6> list;
     ComPtr<ID3D12Fence> fence;
@@ -185,6 +189,11 @@ struct Gpu
 
         D3D12_COMMAND_QUEUE_DESC q{}; q.Type = D3D12_COMMAND_LIST_TYPE_DIRECT; q.Priority = warp ? D3D12_COMMAND_QUEUE_PRIORITY_NORMAL : D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
         check(dev->CreateCommandQueue(&q, IID_PPV_ARGS(&direct)), "direct queue");
+        { D3D12_COMMAND_QUEUE_DESC cq{}; cq.Type = D3D12_COMMAND_LIST_TYPE_COPY; check(dev->CreateCommandQueue(&cq, IID_PPV_ARGS(&copyQ)), "copy queue"); }
+        check(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&copyAlloc)), "copy alloc");
+        check(dev->CreateCommandList1(0, D3D12_COMMAND_LIST_TYPE_COPY, D3D12_COMMAND_LIST_FLAG_NONE, IID_PPV_ARGS(&copyList)), "copy list");
+        check(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&copyFence)), "copy fence");
+        copyEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         check(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc)), "alloc");
         check(dev->CreateCommandList1(0, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_FLAG_NONE, IID_PPV_ARGS(&list)), "list");
         check(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "fence");
@@ -658,6 +667,89 @@ static void benchCoverage()
     }
 }
 
+static const char* kStreamSource =
+    "#include \"common.hlsli\"\n"
+    "[numthreads(256,1,1)] void StreamCS(uint id : SV_DispatchThreadID) {\n"
+    "  ByteAddressBuffer b = ResourceDescriptorHeap[P[0].y]; RWStructuredBuffer<uint> o = ResourceDescriptorHeap[P[0].z];\n"
+    "  const uint n = P[0].x; uint4 s = 0; [unroll] for (uint k = 0; k < 8; ++k) { const uint i = id + k * P[0].w; if (i < n) s += b.Load4(i * 16u); }\n"
+    "  if (s.x + s.y + s.z + s.w == 0x7fc00123u) o[id & 1023] = 1; }\n";
+
+// ------------------------------------------------------------------------------------------ 6. upload: copy queue vs render
+// 2.13b (b)(c): RAM -> VRAM transfer on the copy queue, alone (256 MB and 64 MB submissions) and overlapped with a
+// DRAM-bound render kernel (streaming read of 512 MB) and an L2-resident ALU kernel; reports the copy GB/s in each case
+// and the kernel's slowdown. Sizes shrink on WARP.
+static void benchUpload()
+{
+    warmUp("Upload: copy queue RAM -> VRAM, alone and overlapped with render kernels");
+    const UINT64 chunk = g.warp ? (16ull << 20) : (256ull << 20), piece = g.warp ? (4ull << 20) : (64ull << 20);
+    const int chunks = g.warp ? 2 : 16;
+    auto srcBuf = g.buffer(chunk, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+    { const auto bytes = randomBytes((size_t)chunk, 5); void* p; check(srcBuf->Map(0, nullptr, &p), "map upload src"); memcpy(p, bytes.data(), (size_t)chunk); srcBuf->Unmap(0, nullptr); }
+    auto dstBuf = g.buffer(chunk, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_NONE);
+    const UINT64 streamBytes = g.warp ? (32ull << 20) : (512ull << 20);
+    auto sbuf = g.buffer(streamBytes); const UINT ssrv = g.srvRaw(sbuf.Get(), streamBytes);
+    auto streamPso = g.computePso(dxc.compile(std::string(kStreamSource), L"StreamCS", L"cs_6_6", {}).Get());
+    const uint32_t vec4s = (uint32_t)(streamBytes / 16), threads = vec4s / 8;
+    auto streamRec = [&](ID3D12GraphicsCommandList6* l) { Consts c; c(0, 0) = vec4s; c(0, 1) = ssrv; c(0, 2) = g_scratchUav; c(0, 3) = threads; g.setConstants(l, c.v); l->SetPipelineState(streamPso.Get()); l->Dispatch(threads / 256, 1, 1); Gpu::uavBarrier(l); };
+    auto aluRec = [&](ID3D12GraphicsCommandList6* l) { Consts c; c(0, 0) = 2048; c(0, 1) = g_scratchUav; g.setConstants(l, c.v); l->SetPipelineState(g_warmPso.Get()); l->Dispatch(8192, 1, 1); Gpu::uavBarrier(l); };
+    // Copy submissions: `count` copies of `bytesPer` (one command list each when fenceEach, one list otherwise). Returns wall ms.
+    auto copySubmit = [&](UINT64 bytesPer, int count, bool fenceEach) -> double
+    {
+        const double t0 = now();
+        auto submit = [&](int copies) {
+            check(g.copyAlloc->Reset(), "copy alloc reset"); check(g.copyList->Reset(g.copyAlloc.Get(), nullptr), "copy list reset");
+            for (int i = 0; i < copies; ++i) for (UINT64 off = 0; off < chunk; off += bytesPer) g.copyList->CopyBufferRegion(dstBuf.Get(), off, srcBuf.Get(), off, std::min(bytesPer, chunk - off));
+            check(g.copyList->Close(), "copy list close");
+            ID3D12CommandList* ls[] = { g.copyList.Get() }; g.copyQ->ExecuteCommandLists(1, ls);
+            check(g.copyQ->Signal(g.copyFence.Get(), ++g.copyValue), "copy signal");
+        };
+        auto wait = [&]() { if (g.copyFence->GetCompletedValue() < g.copyValue) { check(g.copyFence->SetEventOnCompletion(g.copyValue, g.copyEvent), "copy wait"); WaitForSingleObject(g.copyEvent, INFINITE); } };
+        if (fenceEach) { for (int i = 0; i < count; ++i) { submit(1); wait(); } }
+        else { submit(count); wait(); }
+        return now() - t0;
+    };
+    const double totalGB = (double)chunk * chunks / 1e9;
+    {
+        const double ms = copySubmit(chunk, chunks, false);
+        char n[200]; snprintf(n, sizeof n, "copy queue alone: %d x %.0f MB in one submission", chunks, chunk / 1048576.0);
+        record("upload", n, ms, "ms", std::to_string(totalGB / (ms / 1e3)) + " GB/s");
+    }
+    {
+        const double ms = copySubmit(piece, chunks, true);
+        char n[200]; snprintf(n, sizeof n, "copy queue alone: %d submissions of %.0f MB in %.0f MB pieces, fence each", chunks, chunk / 1048576.0, piece / 1048576.0);
+        record("upload", n, ms, "ms", std::to_string(totalGB / (ms / 1e3)) + " GB/s (includes per-submission sync)");
+    }
+    struct K { const char* name; std::function<void(ID3D12GraphicsCommandList6*)> rec; std::function<void(ID3D12GraphicsCommandList6*)> pre; };
+    const K kernels[] = { { "DRAM streaming read 512 MB", streamRec, flushL2 }, { "L2-resident ALU (WarmCS 2048 iterations)", aluRec, nullptr } };
+    for (const K& k : kernels)
+    {
+        Stat alone = g.time(k.rec, k.pre);
+        char n[200]; snprintf(n, sizeof n, "kernel alone: %s", k.name);
+        record("upload", n, alone.median, "ms", k.pre ? std::to_string(streamBytes / 1e9 / (alone.median / 1e3)) + " GB/s" : "");
+        // Overlap: a long copy batch (chunks x chunk, one submission) while the kernel runs back to back on the direct queue.
+        const int savedWarm = g.warm; g.warm = 0;
+        check(g.copyAlloc->Reset(), "copy alloc reset"); check(g.copyList->Reset(g.copyAlloc.Get(), nullptr), "copy list reset");
+        for (int i = 0; i < chunks * (g.warp ? 1 : 4); ++i) g.copyList->CopyBufferRegion(dstBuf.Get(), 0, srcBuf.Get(), 0, chunk);
+        check(g.copyList->Close(), "copy list close");
+        const double t0 = now();
+        { ID3D12CommandList* ls[] = { g.copyList.Get() }; g.copyQ->ExecuteCommandLists(1, ls); check(g.copyQ->Signal(g.copyFence.Get(), ++g.copyValue), "copy signal"); }
+        std::vector<double> v;
+        while (g.copyFence->GetCompletedValue() < g.copyValue) v.push_back(g.time(k.rec, k.pre, 1).median);
+        const double tEnd = now();
+        g.warm = savedWarm;
+        std::sort(v.begin(), v.end());
+        const double med = v.empty() ? 0 : v[v.size() / 2];
+        const double copyGB = (double)chunk * chunks * (g.warp ? 1 : 4) / 1e9;
+        snprintf(n, sizeof n, "overlapped: %s while the copy queue uploads %.1f GB", k.name, copyGB);
+        record("upload", n, med, "ms", "kernel x" + std::to_string(alone.median > 0 ? med / alone.median : 0) + " (" + std::to_string(v.size()) + " dispatches); copy " + std::to_string(copyGB / ((tEnd - t0) / 1e3)) + " GB/s during overlap");
+    }
+    if (g.warp)
+    {
+        const auto o = g.readback(dstBuf.Get(), 64);
+        logf("  WARP check: dst[0..3] = %08x %08x %08x %08x\n", ((const uint32_t*)o.data())[0], ((const uint32_t*)o.data())[1], ((const uint32_t*)o.data())[2], ((const uint32_t*)o.data())[3]);
+    }
+}
+
 // ------------------------------------------------------------------------------------------ 2. bricks: DDA march
 // Revision 1 14.9 (vista): the far canopy at the band C boundary projects one voxel to one pixel, so neighbouring rays read
 // neighbouring voxels (the dense box below gives 12 px per voxel). World = 240 x 136 x 2 bricks (3840 x 2176 x 32 voxels)
@@ -1020,13 +1112,14 @@ static void benchVsm()
 static std::string jsonEscape(const std::string& s) { std::string o; for (char c : s) { if (c == '"' || c == '\\') o += '\\'; if (c == '\n') { o += "\\n"; continue; } o += c; } return o; }
 int main(int argc, char** argv)
 {
-    bool doCoverage = true, doBricks = true, doBands = true, doShade = true, doVsm = true, warp = false, debug = false, gbv = false;
+    bool doCoverage = true, doBricks = true, doBands = true, doShade = true, doVsm = true, doUpload = true, warp = false, debug = false, gbv = false;
     std::string dxcDir = DB_DXC_DIR, outDir = DB_RESULT_DIR;
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
-        auto only = [&](bool& keep) { doCoverage = doBricks = doBands = doShade = doVsm = false; keep = true; };
+        auto only = [&](bool& keep) { doCoverage = doBricks = doBands = doShade = doVsm = doUpload = false; keep = true; };
         if (a == "--only-coverage") only(doCoverage); else if (a == "--only-bricks") only(doBricks); else if (a == "--only-bands") only(doBands); else if (a == "--only-shade") only(doShade); else if (a == "--only-vsm") only(doVsm);
+        else if (a == "--only-upload") only(doUpload);
         else if (a == "--warp") warp = true;
         else if (a == "--debug") debug = true;
         else if (a == "--gbv") { debug = true; gbv = true; }
@@ -1061,6 +1154,7 @@ int main(int argc, char** argv)
         if (doBands) benchBands();
         if (doShade) benchShade();
         if (doVsm) benchVsm();
+        if (doUpload) benchUpload();
     }
     catch (Failure& f)
     {
