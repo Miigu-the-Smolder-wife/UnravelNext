@@ -530,6 +530,37 @@ UNX_TEST(reflection_view_geometry)
     CHECK(std::fabs(c.y - ((b.y - yt) * 2 / (270.f / 1080 * 2) + 1)) < 1e-3f);
 }
 
+UNX_TEST(device_on_host_device_and_queue)
+{
+    // Host integration (DeviceOptions::externalDevice / externalGraphicsQueue, Queue::setExecuteHook): a Device built on
+    // an existing device and a host-owned DIRECT queue submits through the host's hook and signals its own fence there.
+    ComPtr<ID3D12CommandQueue> hostQueue;
+    D3D12_COMMAND_QUEUE_DESC qd{};
+    qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    check(testDevice().d3d()->CreateCommandQueue(&qd, IID_PPV_ARGS(&hostQueue)), "host queue");
+    DeviceOptions o;
+    o.externalDevice = testDevice().d3d();
+    o.externalGraphicsQueue = hostQueue.Get();
+    uint32_t hooked = 0;
+    {
+        Device host(o);
+        CHECK(host.d3d() == testDevice().d3d() && host.queue(QueueType::Graphics).get() == hostQueue.Get() && !host.caps().adapter.empty());
+        host.queue(QueueType::Graphics).setExecuteHook([&](ID3D12CommandList* list) {
+            ++hooked;
+            hostQueue->ExecuteCommandLists(1, &list);
+        });
+        CommandList cl = host.acquireCommandList(QueueType::Graphics);
+        const uint64_t fence = host.submit(cl);
+        host.queue(QueueType::Graphics).waitCpu(fence);
+        CHECK(host.queue(QueueType::Graphics).completed() >= fence);
+        host.queue(QueueType::Graphics).setExecuteHook({});
+    }
+    CHECK(hooked == 1);
+    DeviceOptions bad = o;
+    bad.debugLayer = true;
+    CHECK(throws([&] { Device d(bad); }));
+}
+
 UNX_TEST(gpu_scene_frame_updates)
 {
     // GpuScene per-frame updates (INTERFACES_KO.md 6.3 v1.8): previous = the previous rendered frame, settling to

@@ -61,3 +61,9 @@ Unity 6000.6 에디터·Player는 D3D12Core 1.618.1(SDK 618)을 싣는다 [실�
 
 - 코어: `DeviceOptions` 필드 2개, `Queue` 생성자 하나(외부 큐 감싸기)와 훅 하나. 기존 동작(둘 다 null)은 그대로다.
 - 트랙 코드: 바뀌지 않는다.
+
+## 결과 (코어, v1.9)
+
+- 요청 그대로 반영했다(INTERFACES 4.1, 12절 v1.9). `DeviceOptions::externalDevice`는 디버그 레이어 요청과 함께 쓰면 실패하고, LUID로 어댑터를 찾으며, 기능 검사는 그대로 한다. `DeviceOptions::externalGraphicsQueue`는 자기 fence를 쓰고 이름·우선순위를 바꾸지 않는다. `Queue::setExecuteHook`는 `execute`만 훅으로 보내고 signal·wait는 직접 한다.
+- 검증 [실측]: 단위 테스트 `device_on_host_device_and_queue`. 기존 디바이스와 별도로 만든 DIRECT 큐를 호스트로 삼았다. 같은 디바이스·같은 큐 확인, 훅 경유 제출 1회, fence 완료, 디버그 레이어 요청 거부를 확인했다. 단위 19/19, 디버그 레이어 오류 0.
+- `GpuScene::flushUpdates`(v1.8)는 그래픽스 큐에 리스트 하나를 `Device::submit`으로 낸다. 그래서 훅이 켜져 있으면 Unity 경로로 나간다. 렌더 이벤트 안에서 `FrameRenderer::record`를 부르면 순서가 맞다.

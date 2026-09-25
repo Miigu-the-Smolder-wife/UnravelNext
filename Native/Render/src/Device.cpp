@@ -78,6 +78,21 @@ Queue::Queue(ID3D12Device* device, QueueType type, D3D12_COMMAND_QUEUE_PRIORITY 
     m_queue->SetName(name.c_str());
 }
 
+Queue::Queue(ID3D12Device* device, QueueType type, ID3D12CommandQueue* external) : m_type(type)
+{
+    if (external->GetDesc().Type != listType(type)) fail("external queue: type %d does not match queue type %d", (int)external->GetDesc().Type, (int)listType(type));
+    m_queue = external;
+    check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)), "CreateFence");
+    m_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (type != QueueType::Copy) check(m_queue->GetTimestampFrequency(&m_timestampFrequency), "GetTimestampFrequency");
+}
+
+void Queue::setExecuteHook(std::function<void(ID3D12CommandList*)> hook)
+{
+    std::lock_guard lock(m_mutex);
+    m_executeHook = std::move(hook);
+}
+
 uint64_t Queue::signal()
 {
     std::lock_guard lock(m_mutex);
@@ -101,12 +116,21 @@ void Queue::waitGpu(const Queue& other, uint64_t value)
 
 void Queue::execute(ID3D12CommandList* list)
 {
-    m_queue->ExecuteCommandLists(1, &list);
+    std::function<void(ID3D12CommandList*)> hook;
+    {
+        std::lock_guard lock(m_mutex);
+        hook = m_executeHook;
+    }
+    if (hook) hook(list);
+    else m_queue->ExecuteCommandLists(1, &list);
 }
 
 Device::Device(const DeviceOptions& options) : m_options(options)
 {
     if (m_options.gpuValidation) m_options.debugLayer = true;
+    const bool external = m_options.externalDevice != nullptr;
+    if (external && m_options.debugLayer) fail("DeviceOptions: the debug layer cannot be enabled on an external (host) device");
+    if (m_options.externalGraphicsQueue && !external) fail("DeviceOptions: externalGraphicsQueue needs externalDevice");
     if (m_options.debugLayer)
     {
         ComPtr<ID3D12Debug1> debug;
@@ -115,15 +139,9 @@ Device::Device(const DeviceOptions& options) : m_options(options)
         if (m_options.gpuValidation) debug->SetEnableGPUBasedValidation(TRUE);
     }
     check(CreateDXGIFactory2(m_options.debugLayer ? DXGI_CREATE_FACTORY_DEBUG : 0, IID_PPV_ARGS(&m_factory)), "CreateDXGIFactory2");
-    for (UINT i = 0;; ++i)
-    {
-        ComPtr<IDXGIAdapter4> a;
-        if (FAILED(m_factory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&a)))) break;
+    auto describeAdapter = [&](IDXGIAdapter4* a) {
         DXGI_ADAPTER_DESC3 d{};
         a->GetDesc3(&d);
-        if (d.Flags & DXGI_ADAPTER_FLAG3_SOFTWARE) continue;
-        if (FAILED(D3D12CreateDevice(a.Get(), D3D_FEATURE_LEVEL_12_2, IID_PPV_ARGS(&m_device)))) continue;
-        m_adapter = a;
         m_caps.adapter = narrow(d.Description);
         m_caps.vramBytes = d.DedicatedVideoMemory;
         LARGE_INTEGER umd{};
@@ -133,6 +151,23 @@ Device::Device(const DeviceOptions& options) : m_options(options)
             std::snprintf(v, sizeof v, "%u.%u.%u.%u", HIWORD(umd.HighPart), LOWORD(umd.HighPart), HIWORD(umd.LowPart), LOWORD(umd.LowPart));
             m_caps.driver = v;
         }
+    };
+    if (external)
+    {
+        check(m_options.externalDevice->QueryInterface(IID_PPV_ARGS(&m_device)), "external device: ID3D12Device10");
+        check(m_factory->EnumAdapterByLuid(m_device->GetAdapterLuid(), IID_PPV_ARGS(&m_adapter)), "external device: adapter by LUID");
+        describeAdapter(m_adapter.Get());
+    }
+    for (UINT i = 0; !external; ++i)
+    {
+        ComPtr<IDXGIAdapter4> a;
+        if (FAILED(m_factory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&a)))) break;
+        DXGI_ADAPTER_DESC3 d{};
+        a->GetDesc3(&d);
+        if (d.Flags & DXGI_ADAPTER_FLAG3_SOFTWARE) continue;
+        if (FAILED(D3D12CreateDevice(a.Get(), D3D_FEATURE_LEVEL_12_2, IID_PPV_ARGS(&m_device)))) continue;
+        m_adapter = a;
+        describeAdapter(a.Get());
         break;
     }
     if (!m_device) fail("no hardware adapter supports D3D12 feature level 12_2");
@@ -197,7 +232,10 @@ Device::Device(const DeviceOptions& options) : m_options(options)
             m_caps.nvapiThreadReordering = (ser & NVAPI_D3D12_RAYTRACING_THREAD_REORDERING_CAP_STANDARD) != 0;
     }
 
-    for (uint32_t q = 0; q < kQueueTypeCount; ++q) m_queues[q] = std::make_unique<Queue>(m_device.Get(), (QueueType)q, m_options.queuePriority);
+    for (uint32_t q = 0; q < kQueueTypeCount; ++q)
+        m_queues[q] = q == (uint32_t)QueueType::Graphics && m_options.externalGraphicsQueue
+                          ? std::make_unique<Queue>(m_device.Get(), QueueType::Graphics, m_options.externalGraphicsQueue)
+                          : std::make_unique<Queue>(m_device.Get(), (QueueType)q, m_options.queuePriority);
     m_descriptors = std::make_unique<DescriptorHeaps>(m_device.Get());
 
     D3D12_ROOT_PARAMETER1 params[2]{};

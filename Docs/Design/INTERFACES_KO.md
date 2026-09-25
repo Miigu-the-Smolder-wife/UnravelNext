@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.8, 2026-09-25)
+# UnravelNext 인터페이스 (v1.9, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -139,6 +139,13 @@ void RenderGraph::addPass(std::string_view name, QueueType, SetupFn setup, Execu
 6. 루트 시그니처는 하나(`Device::rootSignature`): 루트 상수 32 DWORD(b0, `P[8]` uint4), 루트 CBV b1 = 뷰 프레임 상수(5.5), 정적 샘플러 s0 point-clamp, s1 linear-clamp, s2 linear-wrap, s3 aniso16-wrap, s4 comparison(GREATER_EQUAL). 서술자는 bindless(`ResourceDescriptorHeap[]`).
 7. 파이프라인: `ShaderLibrary::compute("<커널 이름>")`, `ShaderLibrary::mesh("<이름>", MeshPipelineDesc)`. 파일당 커널 하나, 모드는 컴파일 변형으로.
 8. 지속 자원(VSM 풀, GI 캐시, TLAS 등)은 소유 트랙이 `Device`로 만들어 매 프레임 `import`한다. 해제는 `Device::deferRelease`(GPU가 끝낸 뒤).
+
+### 4.1 디바이스와 호스트 통합 (v1.9, I 요청 `20260925_I_unity_queue_device.md`)
+`Device(DeviceOptions)`가 디바이스·큐 셋·서술자 힙·루트 서명을 만든다. 호스트(Unity) 안에서는 I가 다음을 쓴다:
+- `DeviceOptions::externalDevice`: 호스트 디바이스 위에 만든다. 디버그 레이어를 켜지 않는다(`debugLayer = true`면 실패한다. 디바이스가 있는 프로세스에서 켜면 그 디바이스가 제거된다). 어댑터를 열거하지 않고 디바이스 LUID로 찾는다. 기능 검사는 그대로 한다.
+- `DeviceOptions::externalGraphicsQueue`: 호스트의 DIRECT 큐를 그래픽스 `Queue`로 감싼다. fence는 `Device` 것이고 큐의 이름·우선순위는 바꾸지 않는다. compute·copy 큐는 디바이스에 새로 만든다(`queuePriority`는 그 둘에만 적용된다). 프레임은 호스트 큐 위의 리스트 하나이고 큐 사이 동기화가 없다.
+- `Queue::setExecuteHook(fn)`: `execute`만 호스트 경로(Unity `IUnityGraphicsD3D12v8::ExecuteCommandList`)로 보낸다. `signal`·`waitGpu`는 큐에 직접 한다. 호스트가 큐 접근을 허용하는 동안(렌더 이벤트)에만 설정한다.
+- 단위 테스트 `device_on_host_device_and_queue`.
 
 ## 5. 프레임 구성 (`Frame.h`, `Tracks.h`, `FrameRenderer.h`)
 
@@ -360,3 +367,5 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.8 (2026-09-25):
   - **I 요청 `20260925_I_host_module.md` B 반영**: `GpuScene::updateTransforms/updateSkeleton/setInstanceVisible`, `FrameRenderer`가 부르는 `flushUpdates`(6.3). 숨김 플래그 `gpu::kInstanceHidden` / `INSTANCE_HIDDEN`(V 인스턴스 컬링 반영, R은 TLAS에서 뺀다). 단위 테스트 `gpu_scene_frame_updates`(GPU 판독: 직전 프레임 규칙, 정착, 리비전, 숨김, 팔레트).
   - 코어 수정: 렌더 그래프가 재사용한 트랜지언트에 새 사용이 필요로 하는 뷰를 만든다(S 신고, 단위 테스트 `graph_views_of_reused_transients`). 버퍼 stride도 재사용 키에 넣었다.
+- v1.9 (2026-09-25):
+  - **I 요청 `20260925_I_unity_queue_device.md` 반영**: `DeviceOptions::externalDevice`, `DeviceOptions::externalGraphicsQueue`, `Queue::setExecuteHook`(4.1). 둘 다 null이면 기존 동작이다. 트랙 코드는 바뀌지 않는다.

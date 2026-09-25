@@ -20,6 +20,14 @@ struct DeviceOptions
     // work over other applications', which otherwise time-slice in and stall ~5 % of frames by 0.16-0.47 ms
     // (P0b empty-frame gate: P99 0.33-0.44 ms at NORMAL, 0.176-0.178 ms at HIGH in 4 of 5 runs [measured]).
     D3D12_COMMAND_QUEUE_PRIORITY queuePriority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+    // Host integration (I track, INTERFACES_KO.md 4.1, v1.9): build on the host's device instead of creating one. The
+    // Device then neither enables the debug layer (debugLayer must be false: enabling it in a process that has a device
+    // removes that device) nor enumerates adapters (the adapter comes from the device's LUID). Feature checks still run.
+    ID3D12Device* externalDevice = nullptr;
+    // The host's DIRECT queue (Unity's). The graphics Queue executes and signals on it with the Device's own fence, so a
+    // frame is one list on the host's queue with no cross-queue synchronisation. Compute and copy queues are still
+    // created on the device; queuePriority applies to them only (the host queue's priority is not changed).
+    ID3D12CommandQueue* externalGraphicsQueue = nullptr;
 };
 
 struct DeviceCaps
@@ -48,6 +56,9 @@ class Queue
 {
 public:
     Queue(ID3D12Device* device, QueueType type, D3D12_COMMAND_QUEUE_PRIORITY priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL);
+    // Wraps a queue the host owns (DeviceOptions::externalGraphicsQueue): its own fence, the host queue's name and
+    // priority unchanged.
+    Queue(ID3D12Device* device, QueueType type, ID3D12CommandQueue* external);
     ID3D12CommandQueue* get() const { return m_queue.Get(); }
     QueueType type() const { return m_type; }
     ID3D12Fence* fence() const { return m_fence.Get(); }
@@ -58,9 +69,14 @@ public:
     uint64_t lastSignaled() const { return m_lastSignaled; }
     uint64_t timestampFrequency() const { return m_timestampFrequency; }
     void execute(ID3D12CommandList* list);
+    // Routes execute() through the host (Unity: IUnityGraphicsD3D12v8::ExecuteCommandList, which also declares the
+    // states of host-owned textures the list touches). signal() and waitGpu() stay direct on the queue. Empty (default):
+    // ExecuteCommandLists on the queue. Set only while the host allows access to its queue (its render event).
+    void setExecuteHook(std::function<void(ID3D12CommandList*)> hook);
 
 private:
     QueueType m_type;
+    std::function<void(ID3D12CommandList*)> m_executeHook;
     ComPtr<ID3D12CommandQueue> m_queue;
     ComPtr<ID3D12Fence> m_fence;
     HANDLE m_event = nullptr;
