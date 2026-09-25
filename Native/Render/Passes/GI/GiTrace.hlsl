@@ -8,13 +8,15 @@
 // is gi.hit_cell_footprint_scale x the ray footprint (texel cone ~0.36 t) coarse, and is requested for update next frame.
 // Texels blend with the entry's history weight (GiInternal giHistoryAlpha).
 //
-// P[0] = { cache UAV, ray budget (dispatch width), hit cell footprint scale (float bits), 0 }
+// P[0] = { cache UAV, ray budget (dispatch width), hit cell footprint scale (float bits), ShadowSrvs buffer (raw; UNX_NONE =
+//          no VSM: every sunlit hit traces a shadow ray) }
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli: SKY0 atmosphere LUTs, SKY1 constants), ray length
 // P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view (sun, scene buffers).
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
 #include "Passes/GI/GiSky.hlsli"
+#include "Passes/Shadow/ShadowVisibility.hlsli"
 
 // Texel cone of an 8 x 8 hemispherical texel (2 pi / 64 sr ~ 10.1 deg half-angle): footprint diameter ~0.36 t.
 #define GI_FOOTPRINT_PER_METRE 0.36
@@ -94,12 +96,29 @@ void GiTraceGen()
                 const float3 e0 = giSunIlluminance(s.position);
                 if (any(e0 > 0))
                 {
-                    RayDesc sr;
-                    sr.Origin = s.position + s.normal * giBias(h, s.position);
-                    sr.Direction = giSunDirection(seed + 7);
-                    sr.TMin = 0;
-                    sr.TMax = giRayLength();
-                    if (rtVisible(scene, sr, RT_MASK_GI)) sun = e0 * cosSun;
+                    // S's VSM where it holds the hit at the GI ray's footprint (the direct view's estimator), else a
+                    // shadow ray (request 20260925_R_sun_visibility_at_hits.md).
+                    bool resident = false;
+                    float visibility = 0;
+                    if (P[0].w != UNX_NONE)
+                    {
+                        ByteAddressBuffer vb = ResourceDescriptorHeap[P[0].w];
+                        const uint4 a = vb.Load4(0), c = vb.Load4(16);
+                        ShadowSrvs vsm;
+                        vsm.pageTable = a.x; vsm.pool = a.y; vsm.blocks = a.z; vsm.searchBound = a.w;
+                        vsm.constants = c.x; vsm.lights = c.y; vsm.pad0 = c.z; vsm.pad1 = c.w;
+                        visibility = shadowSunVisibilityAt(vsm, s.position, s.geometricNormal, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z), resident);
+                    }
+                    if (!resident)
+                    {
+                        RayDesc sr;
+                        sr.Origin = s.position + s.normal * giBias(h, s.position);
+                        sr.Direction = giSunDirection(seed + 7);
+                        sr.TMin = 0;
+                        sr.TMax = giRayLength();
+                        visibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
+                    }
+                    sun = e0 * cosSun * visibility;
                 }
             }
             radiance = m.emissive + albedo / GI_PI * (irradiance + sun);

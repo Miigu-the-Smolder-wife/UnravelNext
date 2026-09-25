@@ -3,7 +3,9 @@
 // cost is measured in isolation (request 20260925_M_shading_lookup_cost.md). Per pixel: the G-buffer normal (viewer
 // side), the K path's reflection direction and lobe half-angle (reflectionLobeHalfAngle), then by P[1].x:
 //   1 = screenProbeIrradiance, 2 = screenProbeRadiance (K path; every pixel, as a worst case), 3 = both,
-//   4 = the four-probe footprint alone (its weights), 0 = none (the kernel's own reads and write).
+//   4 = the four-probe footprint alone (its weights), 0 = none (the kernel's own reads and write),
+//   8 = screenProbeGather (irradiance + K radiance in one footprint, maps atlas; v1.13).
+// P[1].w = view.screenProbeMaps SRV.
 // The sum is written to an RGBA16F target so nothing is optimised away.
 // P[0] = { probes SRV, depth SRV, gbuffer SRV, output UAV }, P[1] = { mode, width, height, 0 }; b1 = the main view.
 #include "GBuffer.hlsli"
@@ -39,6 +41,12 @@ void main(uint2 pixel : SV_DispatchThreadID)
         int2 count;
         const GiProbeFootprint fp = giProbeFootprint(t, pixel, n, z, spacing, count);
         result += float4(fp.weight[0], fp.weight[1], fp.weight[2], fp.weight[3]) + float4(fp.probe[0] + fp.probe[3], fp.probe[1] + fp.probe[2]);
+    }
+    if (P[1].x & 8)
+    {
+        const ProbeSrvs gs = { P[0].x, P[0].x, P[1].w, 0 };
+        const ScreenProbeLighting l = screenProbeGather(gs, pixel, position, n, z, false, true, reflect(-v, g.normal), reflectionLobeHalfAngle(g.roughness, abs(NoV)));
+        result += float4(l.irradiance + l.radiance, l.occlusion);
     }
     if (P[1].x & 2) result.rgb += screenProbeRadiance(probes, pixel, g.normal, z, reflect(-v, g.normal), reflectionLobeHalfAngle(g.roughness, abs(NoV)));
     output[pixel] = result;

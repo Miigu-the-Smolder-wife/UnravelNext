@@ -95,6 +95,20 @@ public:
     BufferRef exactHitCounts() const { return m_frame.exactCounts; }
     void recordExactReadback(FramePassContext& fc);
 
+    // Sun visibility at ray hits from S's VSM (v1.18, shadowSunVisibilityAt): the frame's VSM buffers, captured by the
+    // ray pass's recording (after S's shadowPages; invalid when S is not in the build). declareVsm adds their reads to the
+    // pass; vsmSrvs writes ShadowSrvs for 'user' (0 = GI, 1 = reflections) into R's upload ring from the pass's execution
+    // and returns the raw SRV the kernel loads it from (UNX_NONE without a VSM).
+    struct VsmRefs
+    {
+        BufferRef pageTable, pool, blocks, searchBound;
+        uint32_t constants = 0xFFFFFFFFu;
+        bool valid() const { return pageTable.valid() && pool.valid() && blocks.valid() && searchBound.valid() && constants != 0xFFFFFFFFu; }
+    };
+    static VsmRefs vsmRefs(const FrameResources& r) { return { r.vsmPageTable, r.vsmPool, r.vsmBlocks, r.vsmSearchBound, r.vsmConstants }; }
+    static void declareVsm(PassBuilder& b, const VsmRefs& v);
+    uint32_t vsmSrvs(PassContext& c, const VsmRefs& v, uint64_t frame, uint32_t user);
+
     // Re-deforms the deformed instances, refits their BLASes and rebuilds the dynamic TLAS on 'cmd', with its own
     // barriers: the load-time path and tests that run outside a frame graph (the frame path is record()).
     void updateDynamic(ID3D12GraphicsCommandList7* cmd, bool refit);
@@ -192,6 +206,9 @@ private:
     std::vector<uint8_t> m_exactRebuild;     // per slot: build (new owner) instead of refit this frame
     uint64_t m_poolVertices = 1;             // deformed pool size (proxies + exact slots)
     static constexpr uint64_t kPatchSlotBytes = 1024;
+    ComPtr<ID3D12Resource> m_vsmRing;        // kDescSlots x 2 users x 32 B of ShadowSrvs
+    uint8_t* m_vsmRingMapped = nullptr;
+    uint32_t m_vsmRingSrv[8] = {};           // kDescSlots x 2 users (static_assert in RayScene.cpp)
     Buffer m_deformedPool, m_deformedBlasPool, m_deformedScratch, m_deformJobs, m_deformGroups;
     uint32_t m_deformGroupCount = 0;
     uint32_t m_deformedPoolUav = gpu::kNone;

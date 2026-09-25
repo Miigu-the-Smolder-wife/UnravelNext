@@ -209,22 +209,23 @@ int main(int argc, char** argv)
                 reflSystem->record(fc, main, rays);
                 // The M-facing screen-probe lookups at every pixel, timed alone (ProbeLookupBench.hlsl).
                 {
-                    const TextureRef probesIn = main.screenProbes;
+                    const TextureRef probesIn = main.screenProbes, mapsIn = main.screenProbeMaps;
                     const TextureRef benchOut = graph.createTexture({ "bench probe lookups", res.width, res.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
                     const D3D12_GPU_VIRTUAL_ADDRESS benchConstants = main.frameConstants;
-                    for (uint32_t mode : { 0u, 1u, 2u, 3u, 4u })
+                    for (uint32_t mode : { 0u, 1u, 2u, 3u, 4u, 8u })
                     {
-                        static const char* const names[5] = { "bench.probe.none", "bench.probe.irradiance", "bench.probe.radiance", "bench.probe.both", "bench.probe.footprint" };
+                        static const char* const names[9] = { "bench.probe.none", "bench.probe.irradiance", "bench.probe.radiance", "bench.probe.both", "bench.probe.footprint", "", "", "", "bench.probe.gather" };
                         graph.addPass(names[mode], QueueType::Compute,
                                       [&](PassBuilder& b) {
                                           b.use(probesIn, Use::SrvCompute);
+                                          b.use(mapsIn, Use::SrvCompute);
                                           b.use(depth, Use::SrvCompute);
                                           b.use(gbuffer, Use::SrvCompute);
                                           b.use(benchOut, Use::UavCompute);
                                           b.keep();
                                       },
-                                      [&shaders, probesIn, depth, gbuffer, benchOut, benchConstants, mode, res](PassContext& c) {
-                                          const uint32_t k[8] = { c.srv(probesIn), c.srv(depth), c.srv(gbuffer), c.uav(benchOut), mode, res.width, res.height, 0 };
+                                      [&shaders, probesIn, mapsIn, depth, gbuffer, benchOut, benchConstants, mode, res](PassContext& c) {
+                                          const uint32_t k[8] = { c.srv(probesIn), c.srv(depth), c.srv(gbuffer), c.uav(benchOut), mode, res.width, res.height, c.srv(mapsIn) };
                                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/Gates/ProbeLookupBench"));
                                           c.computeConstants(k, 8);
                                           c.bindFrameConstants(benchConstants);
@@ -254,12 +255,13 @@ int main(int argc, char** argv)
                  res.name.c_str(), giMs, traceMs, traceMs > 0 ? gi::GiSettings::fromQuality(quality).updatesPerFrame * 64 / (traceMs * 1e-3) / 1e9 : 0, asMs,
                  r.passMs.count("standin.primary") ? r.passMs.at("standin.primary").median : 0);
             if (!renderer)
-                logf("R %s: M-facing probe lookups at every pixel: irradiance %.3f ms, K radiance %.3f ms, both %.3f ms, footprint alone %.3f ms (lookup-free kernel %.3f ms)\n", res.name.c_str(),
+                logf("R %s: M-facing probe lookups at every pixel: irradiance %.3f ms, K radiance %.3f ms, both %.3f ms, footprint alone %.3f ms (lookup-free kernel %.3f ms), screenProbeGather %.3f ms\n", res.name.c_str(),
                      r.passMs.count("bench.probe.irradiance") ? r.passMs.at("bench.probe.irradiance").median : 0,
                      r.passMs.count("bench.probe.radiance") ? r.passMs.at("bench.probe.radiance").median : 0,
                      r.passMs.count("bench.probe.both") ? r.passMs.at("bench.probe.both").median : 0,
                      r.passMs.count("bench.probe.footprint") ? r.passMs.at("bench.probe.footprint").median : 0,
-                     r.passMs.count("bench.probe.none") ? r.passMs.at("bench.probe.none").median : 0);
+                     r.passMs.count("bench.probe.none") ? r.passMs.at("bench.probe.none").median : 0,
+                     r.passMs.count("bench.probe.gather") ? r.passMs.at("bench.probe.gather").median : 0);
             if (reflSystem)
             {
                 const refl::ReflectionSystem::Stats rs = reflSystem->readStats();

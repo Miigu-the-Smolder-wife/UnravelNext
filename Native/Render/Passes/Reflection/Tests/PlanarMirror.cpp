@@ -210,6 +210,7 @@ std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConf
                                 k[7] = asU(rayLength);
                                 k[18] = pc.uav(cache);
                                 k[21] = lut;
+                                k[22] = k[23] = 0xFFFFFFFFu;  // no VSM, no exact set counts
                                 std::memcpy(&k[24], scene, sizeof scene);
                                 pc.computeConstants(k, 32);
                                 pc.bindFrameConstants(address);

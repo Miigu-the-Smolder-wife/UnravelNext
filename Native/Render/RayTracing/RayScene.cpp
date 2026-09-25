@@ -174,6 +174,13 @@ RayScene::~RayScene()
     m_device.deferRelease(m_exactReadback);
     if (m_patchRing) m_patchRing->Unmap(0, nullptr);
     m_device.deferRelease(m_patchRing);
+    if (m_vsmRing)
+    {
+        m_vsmRing->Unmap(0, nullptr);
+        m_device.deferRelease(m_vsmRing);
+        DescriptorHeaps* vh = &m_device.descriptors();
+        for (uint32_t srv : m_vsmRingSrv) m_device.deferCall([vh, srv] { vh->freeResource(srv); });
+    }
     if (m_descRing)
     {
         m_descRing->Unmap(0, nullptr);
@@ -928,6 +935,50 @@ void RayScene::selectExactSet(FramePassContext& fc)
                          for (size_t k = 0; k < patches.size(); ++k)
                              c.cmd->CopyBufferRegion(c.resource(patches[k].job ? jobsRef : instancesRef), patches[k].dst, ring, ringOffset + k * 16, 16);
                      });
+}
+
+void RayScene::declareVsm(PassBuilder& b, const VsmRefs& v)
+{
+    if (!v.valid()) return;
+    for (const BufferRef& r : { v.pageTable, v.pool, v.blocks, v.searchBound }) b.use(r, Use::SrvGraphics);
+}
+
+uint32_t RayScene::vsmSrvs(PassContext& c, const VsmRefs& v, uint64_t frame, uint32_t user)
+{
+    static_assert(sizeof(m_vsmRingSrv) / sizeof(uint32_t) == kDescSlots * 2);
+    if (!v.valid()) return 0xFFFFFFFFu;
+    if (!m_vsmRing)
+    {
+        D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
+        D3D12_RESOURCE_DESC1 d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        d.Width = kDescSlots * 2 * 32;
+        d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+        d.SampleDesc.Count = 1;
+        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(m_device.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_vsmRing)),
+              "RT VSM ring");
+        D3D12_RANGE none{ 0, 0 };
+        check(m_vsmRing->Map(0, &none, reinterpret_cast<void**>(&m_vsmRingMapped)), "map RT VSM ring");
+        DescriptorHeaps& h = m_device.descriptors();
+        for (uint32_t k = 0; k < kDescSlots * 2; ++k)
+        {
+            m_vsmRingSrv[k] = h.allocateResource();
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sd.Format = DXGI_FORMAT_R32_TYPELESS;
+            sd.Buffer.FirstElement = k * 8;
+            sd.Buffer.NumElements = 8;
+            sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+            m_device.d3d()->CreateShaderResourceView(m_vsmRing.Get(), &sd, h.resourceCpu(m_vsmRingSrv[k]));
+        }
+    }
+    // Slot of frame % kDescSlots: frame f - kDescSlots has completed (frames in flight <= kDescSlots, record()).
+    const uint32_t slot = (uint32_t)(frame % kDescSlots) * 2 + user;
+    const uint32_t words[8] = { c.srv(v.pageTable), c.srv(v.pool), c.srv(v.blocks), c.srv(v.searchBound), v.constants, 0xFFFFFFFFu, 0, 0 };
+    std::memcpy(m_vsmRingMapped + slot * 32, words, sizeof words);
+    return m_vsmRingSrv[slot];
 }
 
 void RayScene::recordExactReadback(FramePassContext& fc)

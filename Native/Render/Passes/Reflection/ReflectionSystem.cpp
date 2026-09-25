@@ -609,6 +609,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const uint32_t experiment = s.experimentDisable;
     const BufferRef exactCounts = rays.exactHitCounts();
     const TextureRef probeMaps = main.screenProbeMaps;
+    const rt::RayScene::VsmRefs vsm = rt::RayScene::vsmRefs(fc.resources);  // S's shadowPages recorded before
+    rt::RayScene* rayScene = &rays;
+    const uint64_t frameIndex = fc.frame.frameIndex;
     ID3D12QueryHeap* timestamps = m_timestamps.Get();
     const uint32_t firstTick = ringSlot * kTicks;
     g.addPass("r.refl.trace", QueueType::Compute,
@@ -623,12 +626,13 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   b.use(cache, Use::UavGraphics);
                   b.use(results, Use::UavGraphics);
                   if (exactCounts.valid()) b.use(exactCounts, Use::UavGraphics);
+                  rt::RayScene::declareVsm(b, vsm);
                   rays.declareTraversal(b);
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
               [&pipeline, jobs, results, modes, probes, depth, gbuffer, cache, luts, atmosphere, sky, sun, rayLength, s, frame, scene, frameConstants, argumentResource,
-               variant, specularLut, timestamps, firstTick, experiment, exactCounts, probeMaps](PassContext& c) {
+               variant, specularLut, timestamps, firstTick, experiment, exactCounts, probeMaps, vsm, rayScene, frameIndex](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = c.srv(jobs);
                   k[1] = c.uav(results);
@@ -647,9 +651,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   k[17] = c.srv(gbuffer);
                   k[18] = c.uav(cache);
                   k[19] = s.raysPerSample;
-                  k[20] = frame;
+                  k[20] = (frame & 0xFFFFFFu) | (experiment << 24);
                   k[21] = specularLut;
-                  k[22] = experiment;
+                  k[22] = rayScene->vsmSrvs(c, vsm, frameIndex, 1);  // S's VSM for sun visibility at hits (UNX_NONE: rays)
                   k[23] = exactCounts.valid() ? c.uav(exactCounts) : 0xFFFFFFFFu;
                   std::memcpy(&k[24], scene, sizeof scene);
                   c.computeConstants(k, 32);
