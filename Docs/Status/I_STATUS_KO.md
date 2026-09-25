@@ -195,6 +195,10 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
   (게이트와 Unity 측정기 모두). 이 LUT 최초 생성 23 ms 자체는 태양 변화 때 멈춤이 되므로 S에 전달했다.
 - P95 10.8 ms(4K)는 같은 시각 잠금 없이 돈 기준 렌더러의 영향이 섞였을 수 있다. 오염 없는 조건에서 다시 잰다.
 - 호스트 호출 비용은 스켈레톤마다 호출하던 때의 값이다. `UnxFrameSetSkeletons`(한 번)로 바꾼 뒤 다시 잰다.
+- R의 캐릭터 프록시(2c10e34)가 이 장면에 적용되는지[실측, CPU]: 관 메시(60,096 삼각형)의 V LOD 절단은
+  60096 / 2982 / 1274 / 932 / 466 / 232 / 116 / 58이고, `raytracing.character_proxy_triangles` 8000 안의 가장 고운 절단은 2,982 삼각형이다.
+  확인: `unx_gate_host_hostdynamic --save-scene <f>`(내용만, 커밋 전 저장) → `unx_gate_host_hostscene --scene <f> --describe`("LOD cuts" 줄).
+  R·S가 게임이 끝난 뒤 이 게이트로 refit·VSM 수정을 잰다(사용법을 두 세션에 보냈다).
 
 ## 2.3 실행 절차 (재현)
 
@@ -216,7 +220,8 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
             (GUI exe라 Start-Process -Wait로 잠금을 실행 내내 잡는다)
             추가 인자: -unxExportScene <file.unxscene>(첫 동기화 뒤 현재 장면 저장), -unxScale 1024,256(설계 규모 부하 복제:
             실제 개체의 committed 루트·포즈를 읽는 인스턴스를 격자에 더한다)
-   검사:   unx_gate_host_hostscene.exe --scene <file.unxscene> --describe      (CPU만: 태양·재질·메시별 NaN·감김·인스턴스)
+   검사:   unx_gate_host_hostscene.exe --scene <file.unxscene> --describe      (CPU만: 태양·재질·메시별 NaN·감김·LOD 절단·RT 프록시·인스턴스)
+            unx_gate_host_hostdynamic.exe --save-scene <file.unxscene>          (게이트 장면 내용 저장, 잠금 없음; 디바이스는 만든다)
 5. 편집기: Unity.exe -projectPath ... -executeMethod UnravelNextBridge.DataWorld.Editor.UnravelNextEditorRun.Play -unxMeasureOut <json>
             (창 있는 편집기, Play 모드에서 같은 측정을 하고 스스로 종료)
 ```
