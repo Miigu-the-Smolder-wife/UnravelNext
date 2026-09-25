@@ -6,11 +6,12 @@
 //      double). Per tick: status 0, alive = alive_after = reference, CPU-assigned events (identity exact, state close),
 //      collision event counts. Every --compare-every ticks and at the end: every live particle (identity exact),
 //      position error |dp| / max(|p|, 1 m), velocity, age;
-//   3. --check items (the reference kernel's): alive flags = counter, alive and dead lists a disjoint complete
-//      partition, dying list = slots that died, positions finite, age <= lifetime, interpolation pairs (age advances
-//      by dt), spawn capacity never exhausted; ribbon points/strips and volume cells against sequential references;
-//   4. --determinism: the whole run twice from a fresh module; the defined GPU state (live slots' state of both ticks,
-//      lists up to their counts) and the sorted events are bit identical at every compare tick.
+//   3. --check items: the particle layout is the table's live ranges (every live row once, [death_birth, next_birth),
+//      consecutive, volume rows first), its total = the GPU's written count = alive_after, states finite with age >= 0,
+//      interpolation pairs (a particle of the input layout is one dt older); ribbon points/strips and volume records
+//      against sequential references;
+//   4. --determinism: the whole run twice from a fresh module; the GPU state of both ticks of the pair (in their layouts),
+//      the layouts and the sorted events are bit identical at every compare tick.
 //      (The depth sort is the render pass's per-frame tile-local sort since 2026-09-26; the tick has no sort.)
 // Options: --ticks N (600) --compare-every K (60) --particles P --emitters E --no-features --no-reference
 //          --determinism --warp (WARP adapter: another implementation, 4-lane waves) --no-debug-layer --gbv
@@ -377,45 +378,59 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
 
         if (t % o.compareEvery == 0 || t == o.ticks)
         {
-            // 3. structural checks
-            const auto alive = ps.readState("alive"), aliveList = ps.readState("aliveList"), deadList = ps.readState("deadList");
+            // 3. structural checks: the layout (Particles.hlsli "Particle layout") against the table's live ranges
             const auto counters = ps.readState("counters");
-            const auto posAge = ps.readState("posAge"), velocity = ps.readState("velocity"), meta = ps.readState("meta");
-            const auto dying = ps.readState("dyingList"), posAgePrev = ps.readState("posAgePrev");
-            const uint32_t cap = ps.capacity(), nAlive = at<uint32_t>(counters, 0), nDead = at<uint32_t>(counters, 1), nDying = at<uint32_t>(counters, 4);
-            uint32_t flags = 0;
-            for (uint32_t i = 0; i < cap; ++i) flags += at<uint32_t>(alive, i) == 1u;
-            FX_CHECK(flags == nAlive && nAlive + nDead == cap, "tick %u: alive flags %u, counters alive %u dead %u, capacity %u", t, flags, nAlive, nDead, cap);
-            std::vector<uint8_t> seen(cap, 0);
-            for (uint32_t i = 0; i < nAlive; ++i)
+            const auto posAge = ps.readState("posAge"), velocity = ps.readState("velocity"), posAgePrev = ps.readState("posAgePrev");
+            const std::vector<unx::fx::LayoutRange>& layout = ps.layout();
+            const std::vector<unx::fx::LayoutRange>& layoutPrev = ps.layoutPrevious();
+            const uint32_t nAlive = at<uint32_t>(counters, 0);
             {
-                const uint32_t s = at<uint32_t>(aliveList, i);
-                FX_CHECK(s < cap && at<uint32_t>(alive, s) == 1u && !seen[s], "tick %u: alive list entry %u = slot %u", t, i, s);
-                seen[s] = 1;
-                if (i) FX_CHECK(at<uint32_t>(aliveList, i - 1) < s, "tick %u: alive list not in slot order", t);
-            }
-            for (uint32_t i = 0; i < nDead; ++i)
-            {
-                const uint32_t s = at<uint32_t>(deadList, i);
-                FX_CHECK(s < cap && at<uint32_t>(alive, s) == 0u && !seen[s], "tick %u: dead list entry %u = slot %u", t, i, s);
-                seen[s] = 1;
-            }
-            for (uint32_t i = 0; i < nDying; ++i)
-            {
-                const uint32_t s = at<uint32_t>(dying, i);
-                FX_CHECK(s < cap && at<uint32_t>(alive, s) == 0u, "tick %u: dying list slot %u not dead", t, s);
-            }
-            for (uint32_t i = 0; i < nAlive; ++i)
-            {
-                const uint32_t s = at<uint32_t>(aliveList, i);
-                const float4 pa = at<float4>(posAge, s);
-                FX_CHECK(std::isfinite(pa.x) && std::isfinite(pa.y) && std::isfinite(pa.z) && std::isfinite(pa.w) && pa.w >= 0, "tick %u: slot %u state not finite", t, s);
-                // interpolation pair: a slot that existed in the previous tick (its input age is not a new birth's -elapsed)
-                // is one dt older now
-                const float4 pv = at<float4>(posAgePrev, s);
-                if (h.dt > 0 && !std::signbit(pv.w))
-                    FX_CHECK(std::abs(((double)pa.w - (double)pv.w) - h.dt) <= 1e-5 * std::max<double>(pa.w, 1.0), "tick %u: slot %u previous age %.9g, age %.9g, dt %.9g",
-                             t, s, pv.w, pa.w, h.dt);
+                const NV_StreamEmitter* table = emitterTable.data();
+                const auto* programs = reinterpret_cast<const NV_StreamProgram*>(firstPacket.data() + reinterpret_cast<const NV_StreamHeader*>(firstPacket.data())->programs);
+                uint32_t liveRows = 0;
+                for (uint32_t r = 0; r < h.emitter_table; ++r)
+                    liveRows += !(table[r].flags & NV_STREAM_EMITTER_KILLED) && table[r].next_birth != table[r].death_birth;
+                FX_CHECK(layout.size() == liveRows, "tick %u: layout of %zu rows, table has %u live rows", t, layout.size(), liveRows);
+                std::vector<uint32_t> prevOf(h.emitter_table, UINT32_MAX);
+                for (uint32_t k = 0; k < layoutPrev.size(); ++k)
+                    if (layoutPrev[k].row < h.emitter_table) prevOf[layoutPrev[k].row] = k;
+                std::vector<uint8_t> seenRow(h.emitter_table, 0);
+                uint64_t total = 0;
+                bool volumePrefix = true;
+                for (const auto& r : layout)
+                {
+                    FX_CHECK(r.row < h.emitter_table && !seenRow[r.row], "tick %u: layout row %u repeated or outside the table", t, r.row);
+                    seenRow[r.row] = 1;
+                    const NV_StreamEmitter& x = table[r.row];
+                    FX_CHECK(r.base == total && r.first == x.death_birth && r.count == x.next_birth - x.death_birth && r.count > 0,
+                             "tick %u: layout row %u at %u births [%u, +%u) vs table [%u, %u) at %llu", t, r.row, r.base, r.first, r.count, x.death_birth, x.next_birth,
+                             (unsigned long long)total);
+                    const bool volume = (x.flags & NV_STREAM_EMITTER_ACTIVE) && programs[x.program].output == 3;
+                    FX_CHECK(volumePrefix || !volume, "tick %u: volume row %u after a non-volume row", t, r.row);
+                    volumePrefix = volumePrefix && volume;
+                    total += r.count;
+                    const uint32_t pk = prevOf[r.row];
+                    for (uint32_t k = 0; k < r.count; ++k)
+                    {
+                        const float4 pa = at<float4>(posAge, r.base + k);
+                        FX_CHECK(std::isfinite(pa.x) && std::isfinite(pa.y) && std::isfinite(pa.z) && std::isfinite(pa.w) && pa.w >= 0, "tick %u: particle (%u,%u) state not finite",
+                                 t, r.row, r.first + k);
+                        // interpolation pair: a particle of the input layout is one dt older now
+                        if (h.dt > 0 && pk != UINT32_MAX)
+                        {
+                            const auto& q = layoutPrev[pk];
+                            const uint32_t rel = r.first + k - q.first;
+                            if (rel < q.count)
+                            {
+                                const float4 pv = at<float4>(posAgePrev, q.base + rel);
+                                FX_CHECK(std::abs(((double)pa.w - (double)pv.w) - h.dt) <= 1e-5 * std::max<double>(pa.w, 1.0),
+                                         "tick %u: particle (%u,%u) previous age %.9g, age %.9g, dt %.9g", t, r.row, r.first + k, pv.w, pa.w, h.dt);
+                            }
+                        }
+                    }
+                }
+                FX_CHECK(total == nAlive && nAlive == h.alive_after, "tick %u: layout %llu particles, GPU wrote %u, alive_after %u", t, (unsigned long long)total, nAlive,
+                         h.alive_after);
             }
 
             if (!o.record.empty())
@@ -528,7 +543,8 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                 uint32_t checkedPoints = 0, checkedCells = 0;
                 for (uint32_t i = 0; i < nAlive; ++i)
                 {
-                    const uint32_t slot = at<uint32_t>(aliveList, i), row = at<uint32_t>(meta, slot * 2), birth = at<uint32_t>(meta, slot * 2 + 1);
+                    const auto range = std::upper_bound(layout.begin(), layout.end(), i, [](uint32_t v, const unx::fx::LayoutRange& r) { return v < r.base; }) - 1;
+                    const uint32_t slot = i, row = range->row, birth = range->first + (i - range->base);
                     const NV_StreamEmitter& e = table[row];
                     const float4 pa = at<float4>(posAge, slot);
                     const NV_StreamProgram& outProgram = reinterpret_cast<const NV_StreamProgram*>(
@@ -615,29 +631,20 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                        t, ambiguousBreaks, worstRibbon);
                 FX_CHECK(worstRibbon <= 1e-5, "tick %u: ribbon vertex error %.3g exceeds 1e-5", t, worstRibbon);
             }
-            // 4. state hash of the defined state: every slot's alive flag, the live slots' identity and state (this tick and
-            // the previous tick, in alive-list order), and each list up to its count. Bytes past a count (a list's stale
-            // tail, a dead slot's state) are undefined: they depend on the memory a buffer received and are never read.
+            // 4. state hash: both ticks of the pair in their layouts (every byte defined), the layouts
             Sha256 hs;
             std::string parts;
-            std::vector<uint8_t> live[4];
-            for (uint32_t i = 0; i < nAlive; ++i)
-            {
-                const uint32_t s = at<uint32_t>(aliveList, i);
-                const std::vector<uint8_t>* src[4] = { &posAge, &velocity, &meta, &posAgePrev };
-                const size_t stride[4] = { 16, 16, 8, 16 };
-                for (int k = 0; k < 4; ++k) live[k].insert(live[k].end(), src[k]->data() + s * stride[k], src[k]->data() + (s + 1) * stride[k]);
-            }
-            auto prefix = [](const std::vector<uint8_t>& b, uint32_t n) { return std::vector<uint8_t>(b.begin(), b.begin() + std::min<size_t>(b.size(), (size_t)n * 4)); };
-            const std::vector<uint8_t> parts2[] = { live[0], live[1], live[2], prefix(alive, cap), prefix(aliveList, nAlive), prefix(deadList, nDead),
-                                                    prefix(dying, nDying), live[3] };
+            auto bytesOf = [](const std::vector<unx::fx::LayoutRange>& l) {
+                return std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(l.data()), reinterpret_cast<const uint8_t*>(l.data() + l.size()));
+            };
+            const std::vector<uint8_t> parts2[] = { posAge, velocity, bytesOf(layout), posAgePrev, bytesOf(layoutPrev) };
             for (const auto& b : parts2)
             {
                 hs.update(b.data(), b.size());
                 Sha256 one;
                 one.update(b.data(), b.size());
                 const auto d = one.finish();
-                parts += format(" %02x%02x", d[0], d[1]);  // per-part fingerprint (posAge velocity meta alive aliveList dead dying prev)
+                parts += format(" %02x%02x", d[0], d[1]);  // per-part fingerprint (posAge velocity layout prev prevLayout)
             }
             if (o.determinism) FX_LOG("tick %u: buffer fingerprints%s", t, parts.c_str());
             std::vector<NV_StreamEvent> ev = rb.events;
@@ -650,7 +657,7 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
         }
     }
     childRows = stream.childRowsCreated();
-    FX_LOG("stream: capacity changes %u (repacks without RESET), final capacity %u, peak rows %u, ticks with impact overflow %llu", stream.capacityChanges(),
+    FX_LOG("stream: capacity changes %u (without RESET: no repack, the next layout is written into the new buffers), final capacity %u, peak rows %u, ticks with impact overflow %llu", stream.capacityChanges(),
            stream.capacity(), stream.rows(), (unsigned long long)impactOverflowTicks);
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     FX_LOG("run: %u ticks in %.1f s, CPU-assigned events %llu, collision events %llu (GPU vs reference count difference %llu), child rows %llu, max cascade depth %u",

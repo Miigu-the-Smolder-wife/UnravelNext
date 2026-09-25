@@ -1,8 +1,9 @@
 #pragma once
 // GPU particle module (FX track; WORLD_VFX_DESIGN_KO.md 3, V1). The VFX CPU authority (NativeVfx, Unravel) streams one
 // committed packet per tick (NativeVfxStream.h); this module owns every particle's state on the GPU and runs the tick in
-// the frame's C0 simulation slot (tracks::simulation): reset / spawn / integrate per cascade depth / compaction / sort,
-// then copies the tick's counters and events to a readback ring the CPU reads at its next tick.
+// the frame's C0 simulation slot (tracks::simulation) or on the host's simulation queue: restore / spawn + integrate per
+// cascade depth / collisions, in a per-row particle layout the CPU computes from the stream's tables (no slots, no
+// compaction), then copies the tick's counters and events to a readback ring the CPU reads at its next tick.
 //
 // Threading: submit, readback and checkpoint are called by the host thread between frames (the same thread that records
 // frames); record runs inside FrameRenderer::record.
@@ -19,21 +20,21 @@ namespace unx::fx
 // Per-tick constants (root CBV b1 of every particle kernel), mirror of cbuffer FxTick in Particles.hlsli.
 struct TickConstants
 {
-    uint32_t capacity, numScanBlocks, numSortGroups, flags;
+    uint32_t capacity, inCount, inRangeCount, flags;  // input layout: particles, ranges
     uint32_t fieldCount, worldFieldCount, surfaceCount, emitterCount;
     uint32_t eventSlots, collisionCapacity, aliveAfter, restoreCount;
     uint32_t tickLo, tickHi, streamLo, streamHi;
     uint32_t generationLo, generationHi, recordCount, explicitCount;
-    float dt, time, keyNear, keyScale;
-    float camera[3]; uint32_t explicitSlotBase;
-    float forward[3]; uint32_t bodyCount;
-    uint32_t posAge, velocity, meta, alive;
-    uint32_t aliveList, deadList, dyingList, counters;
-    uint32_t blockSums, posAgeOut, reserved20, events;  // posAge/velocity: input state; *Out: this tick's state
+    float dt, time; uint32_t outCount, volumeParticles;  // this tick's layout: particles, volume particles (its prefix)
+    float reserved27[3]; uint32_t explicitBase;          // birthIndex offset of the explicit births
+    float reserved28[3]; uint32_t bodyCount;
+    uint32_t posAge, velocity, inRanges, inBlocks;       // posAge/velocity: input state; its layout (InRange, group -> range)
+    uint32_t restoreBase, reserved29, reserved30, counters;  // birthIndex offset of the restore records
+    uint32_t reserved31, posAgeOut, reserved20, events;  // *Out: this tick's state
     uint32_t reserved21, reserved22, reserved23, reserved24;  // (the tick sort moved to the render pass)
     uint32_t hist, programs, curveKeys, emitters;
     uint32_t spawns, explicitBirths, fields, worldFields;
-    uint32_t surfaces, restore, slotBase, spawnedSlots;
+    uint32_t surfaces, restore, birthIndex, reserved32;  // birthIndex: layout indices of the births (ParticleSystem.cpp)
     uint32_t report, emitterDynamic, bodies, tickSurfaces;
     float gridCell; uint32_t gridMask, gridCount, gridStart;  // collision candidate grid (FxGrid.hlsl)
     uint32_t gridFill, gridEntries, gridLarge, gridEntryCapacity;
@@ -52,7 +53,10 @@ static_assert(sizeof(TickConstants) == 416);
 
 // counters[] words (Particles.hlsli)
 enum : uint32_t { kCounterAlive = 0, kCounterDead = 1, kCounterCollisions = 2, kCounterStatus = 3, kCounterDying = 4, kCounterWords = 16 };
-// Render record of a slot for one tick (request 20260925_FX_particle_render_rules.md).
+// One row of a particle layout (Particles.hlsli "Particle layout"): births [first, first + count) of emitter row 'row' are
+// the state at [base, base + count), in birth order.
+struct LayoutRange { uint32_t row, base, first, count; };
+// Per-row values of a tick (origin anchor, inherited velocity after chain resolution).
 struct EmitterDynamic { float originAnchor[3]; uint32_t pad0; float inherited[3]; uint32_t pad1; };
 static_assert(sizeof(EmitterDynamic) == 32);
 
@@ -60,7 +64,7 @@ struct TickReadback
 {
     NV_StreamCounters counters{};
     std::vector<NV_StreamEvent> events;  // event_slots CPU-assigned records, then the collision events (any order)
-    uint32_t dying = 0;                  // slots that died in the tick (module statistic)
+    uint32_t dying = 0;                  // particles that died in the tick by their row's dying range (module statistic)
 };
 
 // Per-tick GPU timing breakdown for the gate (pass name prefixes).
@@ -79,18 +83,26 @@ public:
 
     // C0: records every pending tick in order, in the graph of fc (one graphics queue, one list).
     void record(render::FramePassContext& fc);
+    // Independent submit (host simulation queue, WORLD_VFX 3.7): records every pending tick into the caller's graph on
+    // 'queue'; the caller executes the graph. tickIndex identifies the graph for buffer imports. Readbacks of these ticks
+    // wait on that queue's fence.
+    void record(render::RenderGraph& graph, render::ShaderLibrary& shaders, uint64_t tickIndex, render::QueueType queue);
 
     // NV_StreamExecutor::readback: counters and events of a recorded tick. Waits for the GPU when the frame that ran it
     // is still executing. Fails (throws) when the tick was never recorded or its ring slot was reused.
     TickReadback readback(uint64_t stream, uint64_t generation, uint64_t tick);
 
-    // NV_StreamExecutor::checkpoint: every live slot after the latest recorded tick (waits for the GPU; explicit use only:
-    // save, views, CPU projection, tests).
+    // NV_StreamExecutor::checkpoint: every live particle after the latest recorded tick, in layout order (waits for the
+    // GPU; explicit use only: save, views, CPU projection, tests). reserved1 = its layout index.
     std::vector<NV_StreamParticle> checkpoint(render::ShaderLibrary& shaders);
 
-    // Raw state for tests (waits for the GPU): the bytes of a named buffer ("posAge", "velocity", "meta", "alive",
-    // "aliveList", "deadList", "dyingList", "counters", "posAgePrev", "volumeRecords", "volumeSide", "overflow", "trace").
+    // Raw state for tests (waits for the GPU): the bytes of a named buffer ("posAge", "velocity" in layout(); "posAgePrev",
+    // "velocityPrev" in layoutPrevious(); "counters", "volumeRecords", "volumeSide", "overflow", "trace", ...).
     std::vector<uint8_t> readState(const char* name);
+    // Particle layout of the latest recorded tick (its output) and of its input (the previous tick's output, or the
+    // restore records' after RESET): the renderer's interpolation pair (render rules request 2).
+    const std::vector<LayoutRange>& layout() const;
+    const std::vector<LayoutRange>& layoutPrevious() const;
 
     uint32_t capacity() const { return m_capacity; }
     uint64_t latestTick() const { return m_latestTick; }
@@ -99,6 +111,7 @@ public:
     void setTrace(uint32_t row, uint32_t birth) { m_traceRow = row; m_traceBirth = birth; }
 
 private:
+    void recordPending(render::Device& device, render::RenderGraph& graph, render::ShaderLibrary& shaders, uint64_t importIndex, render::QueueType queue);
     struct Impl;
     std::unique_ptr<Impl> m_impl;
     render::Device& m_device;

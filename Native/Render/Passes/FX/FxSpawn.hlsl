@@ -1,14 +1,12 @@
 // unx-kernel: cs_6_6 main
-// Spawn of one depth (stream step 1 / 3): thread per birth of the spawn records [P[0].x, P[0].y) (thread_offset is the
-// exclusive prefix of count inside the depth), then at depth 0 the explicit births. A birth's slot is chosen by its rank
-// among the slot-taking births of the tick (slotBase, computed by the module on the CPU): dead[deadCount - 1 - rank],
-// so the slot of a particle depends only on the inputs (no atomics). Births with rank < expired take no slot: they
-// report their birth event, are integrated for their whole lifetime and report their death event (CPU-assigned slots).
-// A new particle stores age = -elapsed (sign bit set, also for 0): the integrate pass of this depth advances it.
-// Depth 0 (P[1].x != 0) also appends the slot after the live entries of the alive list (aliveList[alive + rank]), so the
-// depth-0 integrate walks one list: the last compaction's live slots, then this tick's births (the compaction at the end
-// of the tick rebuilds the list).
-// P[0] = (record begin, record end, generated threads, total threads), P[1].x = depth 0
+// Spawn of one depth (stream steps 1 / 3): thread per birth of the spawn records [P[0].x, P[0].y) (thread_offset is the
+// exclusive prefix of count inside the depth), then at depth 0 the explicit births. Births with rank < expired take no
+// place in the layout: they report their birth event, are integrated for their whole lifetime and report their death
+// event (CPU-assigned slots). Every other birth is integrated here from age 0 over its elapsed time (the stream's
+// "integrate the slots spawned at depth d", fxStep) and written at its index in this tick's layout: birthIndex[record] + r
+// for a generated birth (the CPU's index of the record's first birth), birthIndex[g_explicitBase + j] for an explicit
+// one (Particles.hlsli "Particle layout"). A birth of a KILLED row is not placed (FX_NONE).
+// P[0] = (record begin, record end, generated threads, total threads)
 #include "Passes/FX/Particles.hlsli"
 
 uint findRecord(uint t, uint begin, uint end)
@@ -16,7 +14,7 @@ uint findRecord(uint t, uint begin, uint end)
     FX_BUFFER(StreamSpawn, spawns, g_spawns);
     // last record with thread_offset <= t (records of count 0 share their successor's offset)
     uint lo = begin, hi = end;
-    while (hi - lo > 1u)
+    [loop] for (uint guard = 0u; guard < 32u && hi - lo > 1u; ++guard)  // halves each step: 32 bounds any uint range
     {
         const uint mid = (lo + hi) >> 1;
         if (spawns[mid].threadOffset <= t) lo = mid;
@@ -25,30 +23,17 @@ uint findRecord(uint t, uint begin, uint end)
     return lo;
 }
 
-void place(uint rank, uint row, uint birth, NvState s, float elapsed)
+// Integrates a new birth from age 0 over 'elapsed' and writes it at 'index' of this tick's layout.
+void place(uint index, uint row, uint birth, NvState s, float elapsed)
 {
-    FX_RWBUFFER(uint, counters, g_counters);
-    FX_RWBUFFER(uint, dead, g_deadList);
-    const uint deadCount = counters[FX_COUNTER_DEAD];
-    if (rank >= deadCount) { fxStatus(FX_STATUS_CAPACITY); return; }
-    const uint slot = dead[deadCount - 1u - rank];
-    FX_RWBUFFER(float4, posAge, g_posAge);
-    FX_RWBUFFER(float4, velocity, g_velocity);
-    FX_RWBUFFER(uint2, meta, g_meta);
-    FX_RWBUFFER(uint, alive, g_alive);
-    FX_RWBUFFER(uint, spawned, g_spawnedSlots);
-    posAge[slot] = float4(s.position, asfloat(asuint(elapsed) | 0x80000000u));
-    velocity[slot] = float4(s.velocity, 0);
-    meta[slot] = uint2(row, birth);
-    alive[slot] = FX_SLOT_ALIVE;
-    spawned[rank] = slot;
-    if (P[1].x != 0u)
-    {
-        FX_RWBUFFER(uint, aliveList, g_aliveList);
-        const uint at = counters[FX_COUNTER_ALIVE] + rank;
-        if (at < g_capacity) aliveList[at] = slot;
-        else fxStatus(FX_STATUS_CAPACITY);
-    }
+    if (index == FX_NONE) return;  // a KILLED row's birth vanishes (NativeVfxStream.h: new births included)
+    if (index >= g_outCount) { fxStatus(FX_STATUS_RANGE); return; }
+    FX_RWBUFFER(RowMotion, rowMotion, g_rowMotion);
+    FX_RWBUFFER(EmitterDynamic, dynamic, g_emitterDynamic);
+    const RowMotion rm = rowMotion[row];
+    if ((fxRowEmitterFlags(rm) & FX_EMITTER_KILLED) != 0u) return;
+    s.age = 0;
+    fxStep(index, row, birth, rm, dynamic[row], s, elapsed, nv_linear_drag(rm.drag, elapsed), true);
 }
 
 void writeEvent(uint index, StreamEvent ev) { fxWriteEvent(index, ev); }
@@ -64,7 +49,7 @@ void main(uint3 id : SV_DispatchThreadID)
     if (t < P[0].z)
     {
         FX_BUFFER(StreamSpawn, spawns, g_spawns);
-        FX_BUFFER(uint, slotBase, g_slotBase);
+        FX_BUFFER(uint, birthIndex, g_birthIndex);
         const uint k = findRecord(t, P[0].x, P[0].y);
         const StreamSpawn sp = spawns[k];
         const uint r = t - sp.threadOffset;
@@ -93,7 +78,8 @@ void main(uint3 id : SV_DispatchThreadID)
             }
             return;
         }
-        place(slotBase[k] + (r - sp.expired), row, birth, s, elapsed);
+        const uint first = birthIndex[k];
+        place(first == FX_NONE ? FX_NONE : first + r, row, birth, s, elapsed);
     }
     else
     {
@@ -115,6 +101,7 @@ void main(uint3 id : SV_DispatchThreadID)
             }
             return;
         }
-        place(g_explicitSlotBase + (t - P[0].z), x.emitter, x.birth, s, x.elapsed);
+        FX_BUFFER(uint, birthIndex, g_birthIndex);
+        place(birthIndex[g_explicitBase + (t - P[0].z)], x.emitter, x.birth, s, x.elapsed);
     }
 }

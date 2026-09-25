@@ -36,11 +36,11 @@
                                 // silent truncation; the structure (grid size, lists) must be redesigned, not the bound
 
 // counters[] words (ParticleGpu.h)
-#define FX_COUNTER_ALIVE 0u
-#define FX_COUNTER_DEAD 1u
+#define FX_COUNTER_ALIVE 0u        // particles written into this tick's layout (checked against alive_after on the CPU)
+#define FX_COUNTER_DEAD 1u         // (unused: the layout has no dead slots)
 #define FX_COUNTER_COLLISIONS 2u
 #define FX_COUNTER_STATUS 3u
-#define FX_COUNTER_DYING 4u
+#define FX_COUNTER_DYING 4u        // (unused: the dying particles are the rows' dying ranges of the input layout)
 #define FX_COUNTER_LARGE 5u      // surfaces in the collision grid's large list
 #define FX_COUNTER_GRID_ENTRIES 6u
 #define FX_COUNTER_VOLUMES 7u        // (unused)
@@ -49,30 +49,32 @@
 #define FX_COUNTER_COLLIDERS 11u     // colliding slots queued by integrate for FxCollide this tick
 #define FX_COUNTER_OVERFLOWS 10u     // slots of this tick whose sweep needed a fifth impact (diagnostic records)
 
-// alive[] values: 0 dead, 1 alive, 2 died in this tick (dying list; compaction clears it to 0)
-#define FX_SLOT_DEAD 0u
-#define FX_SLOT_ALIVE 1u
-#define FX_SLOT_DYING 2u
+// Particle layout (row ranges): the state of a tick holds, per live emitter row, the row's live births [death_birth,
+// next_birth) in birth order at [base, base + count) (NativeVfxStream.h: the live births of a row are exactly that range),
+// the rows one after the other (the CPU chooses the order: volume rows first in first-cell order, so a volume particle's
+// record index is its state index). A particle's index is base + (birth - first). Nothing marks slots alive or dead: the
+// layout of the tick (computed by the CPU from the stream's tables) is the population.
 
 #define FX_CB_FIELDS 64u        // context fields held in FxTick (C++ kCbFields)
 #define FX_CB_WORLD_FIELDS 16u  // world fields held in FxTick (C++ kCbWorldFields)
 cbuffer FxTick : register(b1)
 {
-    uint g_capacity, g_numScanBlocks, g_numSortGroups, g_flags;
+    uint g_capacity, g_inCount, g_inRangeCount, g_flags;  // input layout: particles (integrate threads), ranges
     uint g_fieldCount, g_worldFieldCount, g_surfaceCount, g_emitterCount;
     uint g_eventSlots, g_collisionCapacity, g_aliveAfter, g_restoreCount;
     uint g_tickLo, g_tickHi, g_streamLo, g_streamHi;
     uint g_generationLo, g_generationHi, g_recordCount, g_explicitCount;
-    float g_dt, g_time, g_keyNear, g_keyScale;
-    float3 g_camera; uint g_explicitSlotBase;   // camera - anchor (float): sort key origin
-    float3 g_forward; uint g_bodyCount;
-    uint g_posAge, g_velocity, g_meta, g_alive;
-    uint g_aliveList, g_deadList, g_dyingList, g_counters;
-    uint g_blockSums, g_posAgeOut, g_reserved20, g_events;  // g_posAge / g_velocity: input state (last tick's output)
+    float g_dt, g_time; uint g_outCount, g_volumeParticles;  // this tick's layout: particles; volume particles (its prefix)
+    float3 g_reserved27; uint g_explicitBase;   // birthIndex[g_explicitBase + j]: index of explicit birth j
+    float3 g_reserved28; uint g_bodyCount;
+    uint g_posAge, g_velocity, g_inRanges, g_inBlocks;  // input state (last tick's output) and its layout (InRange, blocks)
+    uint g_restoreBase, g_reserved29, g_reserved30, g_counters;  // birthIndex[g_restoreBase + j]: input index of restore j
+    uint g_reserved31, g_posAgeOut, g_reserved20, g_events;
     uint g_reserved21, g_reserved22, g_reserved23, g_reserved24;  // (the tick sort moved to the render pass)
     uint g_hist, g_programs, g_curveKeys, g_emitters;
     uint g_spawns, g_explicitBirths, g_fields, g_worldFields;
-    uint g_surfaces, g_restore, g_slotBase, g_spawnedSlots;
+    uint g_surfaces, g_restore, g_birthIndex, g_reserved32;  // birthIndex: CPU-computed layout indices (spawn records,
+                                                              // explicit births, restore records)
     uint g_report, g_emitterDynamic, g_bodies, g_tickSurfaces;
     float g_gridCell; uint g_gridMask, g_gridCount, g_gridStart;     // collision grid (FxGrid.hlsl)
     uint g_gridFill, g_gridEntries, g_gridLarge, g_gridEntryCapacity;
@@ -483,6 +485,34 @@ NvMotion fxMotionRow(RowMotion r, EmitterDynamic dyn, uint birth)
 bool fxFinite(NvState s) { return all(isfinite(s.position)) && all(isfinite(s.velocity)) && isfinite(s.age); }
 
 // Writes a CPU-assigned event slot; an index outside [0, event_slots) is reported, never written.
+// One row of the input layout (the last tick's output), in index order: births [first, first + (next base - base)) of
+// row at [base, ...); this tick's output range of the row: births [outFirst, outFirst + outCount) at outBase (outCount 0:
+// the row has no live particle after the tick). 32 B.
+struct InRange { uint base, first, row, outBase; uint outFirst, outCount, pad0, pad1; };
+// The input range holding input index i of dispatch group 'group' (256 threads): inBlocks[group] is the range holding the
+// group's first index, inBlocks[group + 1] the one holding the next group's, so the search covers one or a few ranges.
+InRange fxInRange(uint i, uint group)
+{
+    FX_BUFFER(uint, blocks, g_inBlocks);
+    FX_BUFFER(InRange, ranges, g_inRanges);
+    uint lo = blocks[group], hi = min(blocks[group + 1u] + 1u, g_inRangeCount);
+    [loop] for (uint guard = 0u; guard < 32u && hi - lo > 1u; ++guard)
+    {
+        const uint mid = (lo + hi) >> 1;
+        if (ranges[mid].base <= i) lo = mid; else hi = mid;
+    }
+    return ranges[lo];
+}
+// Counts particles written into this tick's layout (one atomic per wave; FX_COUNTER_ALIVE, checked against alive_after).
+void fxCountAlive()
+{
+    const uint n = WaveActiveCountBits(true);
+    if (WaveIsFirstLane())
+    {
+        FX_RWBUFFER(uint, counters, g_counters);
+        InterlockedAdd(counters[FX_COUNTER_ALIVE], n);
+    }
+}
 void fxWriteEvent(uint index, StreamEvent ev)
 {
     if (index >= g_eventSlots) { fxStatus(FX_STATUS_RANGE); return; }
@@ -534,8 +564,9 @@ struct TraceRecord
     StreamEvent collision;
 };
 bool fxTraced(uint row, uint birth) { return g_traceRow != FX_NONE && row == g_traceRow && birth == g_traceBirth; }
-// A colliding slot after its motion (nv_integrate_motion), waiting for its sweep in FxCollide: 60 B.
-struct ColliderRecord { float3 start; uint slot; float3 move; float h; float3 velocity; float age; float3 accel; };
+// A colliding particle after its motion (nv_integrate_motion), waiting for its sweep in FxCollide: 68 B (index = its
+// index in this tick's layout).
+struct ColliderRecord { float3 start; uint index; float3 move; float h; float3 velocity; float age; float3 accel; uint row; uint birth; };
 // Local volume particles (render rules request 3b; design 14.8 decision 2): the froxel pass evaluates each particle's
 // medium directly from two records per live volume particle (no medium cells):
 //   record16 = { float3 centre (anchor space), uint half2(r, m) }: the density field is
@@ -553,8 +584,9 @@ uint fxPackR11G11B10(float3 c)
     const uint r = (f32tof16(c.r) >> 4) & 0x7FFu, g = (f32tof16(c.g) >> 4) & 0x7FFu, b = (f32tof16(c.b) >> 5) & 0x3FFu;
     return r | (g << 11) | (b << 22);
 }
-// Integrate epilogue: a ribbon particle writes its point; a volume particle writes its record16 + side8.
-void fxWriteOutputs(uint slot, uint row, uint birth, NvState s, RowMotion rm, EmitterDynamic dyn)
+// Integrate epilogue: a ribbon particle writes its point; a volume particle writes its record16 + side8 at its layout
+// index (the volume rows are the layout's prefix, in first-cell order: the record index of the render rules request 3b).
+void fxWriteOutputs(uint index, uint row, uint birth, NvState s, RowMotion rm, EmitterDynamic dyn)
 {
     const uint output = fxRowOutput(rm);
     if (output != FX_OUTPUT_RIBBON && output != FX_OUTPUT_VOLUME) return;
@@ -566,30 +598,17 @@ void fxWriteOutputs(uint slot, uint row, uint birth, NvState s, RowMotion rm, Em
     {
         const float u = saturate(s.age / p.lifetime);
         const float size = p.size * e.sizeScale * fxCurve1(p.sizeKeys, p.sizeCount, u);
-        const uint index = e.outputBase + (birth - e.deathBirth);
-        if (index >= g_ribbonCapacity) { fxStatus(FX_STATUS_RANGE); return; }
+        const uint ribbonIndex = e.outputBase + (birth - e.deathBirth);
+        if (ribbonIndex >= g_ribbonCapacity) { fxStatus(FX_STATUS_RANGE); return; }
         FX_RWBUFFER(RibbonPoint, points, g_ribbonPoints);
         RibbonPoint rp;
         rp.position = s.position; rp.width = size; rp.age = s.age; rp.valid = 1u; rp.pad0 = rp.pad1 = 0u;
-        points[index] = rp;
+        points[ribbonIndex] = rp;
     }
     else if (p.output == FX_OUTPUT_VOLUME)
     {
         const float u = saturate(s.age / p.lifetime);
-        const uint n = clamp(p.mediumGrid, 1u, 32u), cells = n * n * n;
-        const uint first = e.outputBase + (birth - e.deathBirth) * cells;
-        if (cells > g_cellCapacity || first > g_cellCapacity - cells || g_volumeRangeCount == 0u) { fxStatus(FX_STATUS_RANGE); return; }
-        // the range holding this first cell (last range with first <= cell)
-        FX_BUFFER(VolumeRange, ranges, g_volumeRanges);
-        uint lo = 0u, hi = g_volumeRangeCount;
-        [loop] for (uint guard = 0u; guard < 32u && hi - lo > 1u; ++guard)
-        {
-            const uint mid = (lo + hi) >> 1;
-            if (ranges[mid].first <= first) lo = mid; else hi = mid;
-        }
-        const VolumeRange range = ranges[lo];
-        if (first < range.first || first - range.first >= range.cells) { fxStatus(FX_STATUS_RANGE); return; }
-        const uint index = range.particleBase + (first - range.first) / cells;
+        if (index >= g_volumeParticles) { fxStatus(FX_STATUS_RANGE); return; }
         const float size = p.size * e.sizeScale * fxCurve1(p.sizeKeys, p.sizeCount, u);
         const float mass = p.color.a * e.colorScale.a * fxCurve1(p.alphaKeys, p.alphaCount, u);
         const float3 colour = p.color.rgb * e.colorScale.rgb * fxCurve3(p.colorKeys, p.colorCount, u);
@@ -599,11 +618,12 @@ void fxWriteOutputs(uint slot, uint row, uint birth, NvState s, RowMotion rm, Em
         side[index] = uint2(fxPackR11G11B10(p.mediumEmission * colour), e.program);
     }
 }
-// ---- end of a slot's tick (FxIntegrate for non-colliding slots, FxCollide for colliding ones) --------------------------
+// ---- end of a particle's tick (FxIntegrate / FxSpawn for non-colliding particles, FxCollide for colliding ones) ---------
 // nv_integrate_finish (the sweep or start + move, age += h) and everything after it: status, the IMPACT_OVERFLOW
 // diagnostic record (the finish inputs: position = start, velocity = velocity after the motion, drag.xyz = move,
-// accel = effective acceleration, newborn = 2 marks this layout), the collision event, this tick's state, the sort key and the outputs.
-void fxFinishSlot(uint slot, uint row, uint birth, RowMotion rm, EmitterDynamic dyn, NvMotion mo, float h, float3 start, float3 move,
+// accel = effective acceleration, newborn = 2 marks this layout), the collision event, this tick's state at its layout
+// index and the outputs.
+void fxFinishSlot(uint index, uint row, uint birth, RowMotion rm, EmitterDynamic dyn, NvMotion mo, float h, float3 start, float3 move,
                   float3 accel, NvState s)
 {
     const NvState before = s;
@@ -630,11 +650,14 @@ void fxFinishSlot(uint slot, uint row, uint birth, RowMotion rm, EmitterDynamic 
             records[at] = r;
         }
     }
+    FX_RWBUFFER(float4, posAgeOut, g_posAgeOut);
+    FX_RWBUFFER(float4, velocityOut, g_velocityOut);
     if (!fxFinite(s))
     {
+        // a defect: the index keeps a NaN age (never drawn) and is not counted (alive mismatch)
         fxStatus(status | FX_STATUS_NONFINITE);
-        FX_RWBUFFER(uint, alive, g_alive);
-        alive[slot] = FX_SLOT_DEAD;  // a defect: removed without a dying record
+        posAgeOut[index] = float4(0, 0, 0, asfloat(0x7FC00000u));
+        velocityOut[index] = float4(0, 0, 0, 0);
         return;
     }
     fxStatus(status);
@@ -652,11 +675,10 @@ void fxFinishSlot(uint slot, uint row, uint birth, RowMotion rm, EmitterDynamic 
             events[g_eventSlots + n] = ev;
         }
     }
-    FX_RWBUFFER(float4, posAgeOut, g_posAgeOut);
-    FX_RWBUFFER(float4, velocityOut, g_velocityOut);
-    posAgeOut[slot] = float4(s.position, s.age);
-    velocityOut[slot] = float4(s.velocity, 0);
-    fxWriteOutputs(slot, row, birth, s, rm, dyn);
+    posAgeOut[index] = float4(s.position, s.age);
+    velocityOut[index] = float4(s.velocity, 0);
+    fxCountAlive();
+    fxWriteOutputs(index, row, birth, s, rm, dyn);
     if (fxTraced(row, birth))
     {
         FX_RWBUFFER(TraceRecord, trace, g_trace);
@@ -669,5 +691,45 @@ void fxFinishSlot(uint slot, uint row, uint birth, RowMotion rm, EmitterDynamic 
         r.collision = ev;
         trace[0] = r;
     }
+}
+// One particle's tick from its state s (after rebase / transport for an existing particle; the birth state with age 0 for
+// a new birth) over h with drag factors 'drag': the trace record, the motion (nv_integrate_motion), then either the
+// collider queue (a colliding program: FxCollide sweeps and finishes it) or the finish here. index = its index in this
+// tick's layout.
+void fxStep(uint index, uint row, uint birth, RowMotion rm, EmitterDynamic dyn, NvState s, float h, NvDrag drag, bool born)
+{
+    const NvMotion mo = fxMotionRow(rm, dyn, birth);
+    if (fxTraced(row, birth))
+    {
+        // diagnostic: the inputs of this particle's integrate call (the end is written by fxFinishSlot)
+        FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
+        FX_RWBUFFER(TraceRecord, trace, g_trace);
+        TraceRecord r = (TraceRecord)0;
+        r.inputs.row = row; r.inputs.birth = birth; r.inputs.newborn = born ? 1u : 0u; r.inputs.depth = 0u;
+        r.inputs.position = s.position; r.inputs.age = s.age; r.inputs.velocity = s.velocity; r.inputs.h = h;
+        r.inputs.drag = float4(drag.velocity, drag.position, drag.acceleration, 0);
+        r.inputs.emitter = emitters[row]; r.inputs.dynamic = dyn;
+        trace[0] = r;
+    }
+    float3 start, move, accel;
+    nv_integrate_motion(mo, h, drag, s, start, move, accel);
+    if (mo.collision != 0u && g_surfaceCount != 0u)
+    {
+        // the sweep runs in FxCollide, whose waves hold colliding particles only (they no longer stall the other lanes)
+        FX_RWBUFFER(uint, counters, g_counters);
+        uint at;
+        InterlockedAdd(counters[FX_COUNTER_COLLIDERS], 1u, at);
+        if (at < g_capacity)
+        {
+            FX_RWBUFFER(ColliderRecord, colliders, g_colliders);
+            ColliderRecord c;
+            c.start = start; c.index = index; c.move = move; c.h = h; c.velocity = s.velocity; c.age = s.age; c.accel = accel;
+            c.row = row; c.birth = birth;
+            colliders[at] = c;
+        }
+        else fxStatus(FX_STATUS_CAPACITY);
+        return;
+    }
+    fxFinishSlot(index, row, birth, rm, dyn, mo, h, start, move, accel, s);
 }
 #endif

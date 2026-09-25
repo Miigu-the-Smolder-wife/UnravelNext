@@ -3,9 +3,9 @@
 // Tick start of the particle module (after FxEmitters). Thread per emitter row: a row the packet did not send gets its
 // per-tick fields cleared; the row's derived values start from the table (child rows
 // are overwritten at their depth by FxChildSetup). Thread 0 clears the per-tick counters (collision events, status,
-// dying, volume list). RESET=1 (NV_STREAM_RESET): additionally thread per slot: slots [0, restore_count) receive the restore records,
-// every other slot becomes dead (the compaction that follows rebuilds the lists).
-// P[0].x threads (max(emitters, RESET ? capacity : 0))
+// dying, volume list, alive). RESET=1 (NV_STREAM_RESET): additionally thread per restore record: the record is the
+// particle at its index of the input layout (birthIndex[g_restoreBase + j], computed by the CPU from the records).
+// P[0].x threads (max(emitters, RESET ? restore_count : 0, grid buckets))
 #include "Passes/FX/Particles.hlsli"
 
 [numthreads(256, 1, 1)]
@@ -15,6 +15,7 @@ void main(uint3 id : SV_DispatchThreadID)
     if (i == 0u)
     {
         FX_RWBUFFER(uint, counters, g_counters);
+        counters[FX_COUNTER_ALIVE] = 0u;
         counters[FX_COUNTER_COLLISIONS] = 0u;
         counters[FX_COUNTER_STATUS] = 0u;
         counters[FX_COUNTER_DYING] = 0u;
@@ -66,22 +67,17 @@ void main(uint3 id : SV_DispatchThreadID)
         }
     }
 #if RESET
-    if (i < g_capacity)
+    if (i < g_restoreCount)
     {
         FX_RWBUFFER(float4, posAge, g_posAge);
         FX_RWBUFFER(float4, velocity, g_velocity);
-        FX_RWBUFFER(uint2, meta, g_meta);
-        FX_RWBUFFER(uint, alive, g_alive);
-        if (i < g_restoreCount)
-        {
-            FX_BUFFER(StreamParticle, restore, g_restore);
-            const StreamParticle r = restore[i];
-            posAge[i] = float4(r.position, r.age);
-            velocity[i] = float4(r.velocity, 0);
-            meta[i] = uint2(r.emitter, r.birth);
-            alive[i] = FX_SLOT_ALIVE;
-        }
-        else alive[i] = FX_SLOT_DEAD;
+        FX_BUFFER(StreamParticle, restore, g_restore);
+        FX_BUFFER(uint, birthIndex, g_birthIndex);
+        const StreamParticle r = restore[i];
+        const uint index = birthIndex[g_restoreBase + i];
+        if (index >= g_inCount) return;  // (the CPU validated the indices; thread 0 clears the status in this pass)
+        posAge[index] = float4(r.position, r.age);
+        velocity[index] = float4(r.velocity, 0);
     }
 #endif
 }

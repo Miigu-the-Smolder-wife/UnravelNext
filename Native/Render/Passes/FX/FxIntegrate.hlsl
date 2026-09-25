@@ -1,135 +1,70 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: LIST=0,1
-// Integrate (stream step 2 / 3). LIST=0 (depth 0): thread per live slot - the alive list holds the last compaction's
-// live slots (slot order) followed by this tick's P[0].x depth-0 births (appended by FxSpawn); dead slots get no thread.
-// LIST=1: thread per slot spawned at depth d >= 1 (spawned[P[0].x + t], t < P[0].y).
-// Per slot, in the stream's order: an existing slot of a KILLED row dies (no event); an existing slot whose birth is in
-// the row's dying range [dying_birth, death_birth) dies, integrated to its lifetime end first when the row writes death
-// events (event slot death_event + (birth - dying_birth)), after a. rebase / transport (existing slots), else b-f.
-// nv_integrate over h = dt (full-dt drag factors of the row) or, for a new birth (age sign bit), h = elapsed from age 0.
-// The first impact of a colliding program with collision events appends a collision event after the CPU slots.
-// The motion (nv_integrate_motion) runs here for every slot; a slot of a colliding program is then queued for FxCollide
-// (sweep + finish), the others finish here (fxFinishSlot), so the collision sweeps run in waves of colliders only.
-// Reads the input state (last tick's output, with this tick's births) and writes this tick's state into the other
-// buffer of the pair, so the renderer interpolates the two ticks of a slot from the state itself (no render record copy);
-// a dead slot is marked DYING (dying list).
+// Integrate of the existing particles (stream step 2): thread per particle of the input layout (the last tick's output:
+// per row its live births in birth order, InRange; Particles.hlsli "Particle layout"). New births are integrated by
+// FxSpawn at their depth. Per particle, in the stream's order: a particle of a KILLED row vanishes (no event); after
+// a. rebase / transport, one whose birth is in the row's dying range [dying_birth, death_birth) dies, integrated to its
+// lifetime end first when the row writes death events (event slot death_event + (birth - dying_birth)); every other one
+// runs b-f over h = dt with the row's full-dt drag factors (fxStep) and writes this tick's state at its output index
+// outBase + (birth - outFirst) in the other buffer of the pair (the renderer interpolates the two ticks of a particle from
+// the state itself). A state packet (dt == 0) only carries the state over (and applies KILLED).
 #include "Passes/FX/Particles.hlsli"
 
-void die(uint slot)
-{
-    FX_RWBUFFER(uint, alive, g_alive);
-    alive[slot] = FX_SLOT_DYING;
-}
-
 [numthreads(256, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
-    FX_RWBUFFER(uint, alive, g_alive);
-#if LIST
-    if (id.x >= P[0].y) return;
-    FX_RWBUFFER(uint, spawned, g_spawnedSlots);
-    const uint slot = spawned[P[0].x + id.x];
-#else
-    FX_RWBUFFER(uint, counters, g_counters);
-    const uint listed = min(counters[FX_COUNTER_ALIVE] + P[0].x, g_capacity);
-    if (id.x >= listed) return;
-    FX_RWBUFFER(uint, aliveList, g_aliveList);
-    const uint slot = aliveList[id.x];
-    if (slot >= g_capacity) { fxStatus(FX_STATUS_RANGE); return; }
-#endif
-    if (alive[slot] != FX_SLOT_ALIVE) return;
+    const uint i = id.x;
+    if (i >= g_inCount) return;
+    const InRange range = fxInRange(i, gid.x);
+    const uint row = range.row, birth = range.first + (i - range.base);
+    if (row >= g_emitterCount) { fxStatus(FX_STATUS_RANGE); return; }
+    FX_RWBUFFER(RowMotion, rowMotion, g_rowMotion);
+    const RowMotion rm = rowMotion[row];
+    const uint ef = fxRowEmitterFlags(rm);
+    // A KILLED row's particles vanish (no event, no dying range; the row has no output range).
+    if ((ef & FX_EMITTER_KILLED) != 0u) return;
     FX_RWBUFFER(float4, posAge, g_posAge);
     FX_RWBUFFER(float4, velocity, g_velocity);
-    FX_RWBUFFER(uint2, meta, g_meta);
     FX_RWBUFFER(EmitterDynamic, dynamic, g_emitterDynamic);
-    FX_RWBUFFER(RowMotion, rowMotion, g_rowMotion);
-    const float4 pa = posAge[slot];
-    const float4 vv = velocity[slot];
-    const uint2 m = meta[slot];
-    const uint row = m.x, birth = m.y;
-    if (row >= g_emitterCount) { fxStatus(FX_STATUS_RANGE); alive[slot] = FX_SLOT_DEAD; return; }
-    const RowMotion rm = rowMotion[row];
+    const float4 pa = posAge[i];
+    const float4 vv = velocity[i];
     const EmitterDynamic dyn = dynamic[row];
-    const uint ef = fxRowEmitterFlags(rm);
     NvState s;
     s.position = pa.xyz; s.velocity = vv.xyz; s.age = pa.w;
-    // A KILLED row's slots vanish (no event, no dying record), new births included.
-    if ((ef & FX_EMITTER_KILLED) != 0u) { alive[slot] = FX_SLOT_DEAD; return; }
-    const bool born = fxNegative(pa.w);
-    float h;
-    NvDrag drag;
+    const uint rank = birth - range.outFirst, index = range.outBase + rank;
     if (g_dt == 0)
     {
         // State packet (restore, same-tick population change): no motion; the output state is the state.
+        if (rank >= range.outCount || index >= g_outCount) { fxStatus(FX_STATUS_RANGE); return; }
         FX_RWBUFFER(float4, posAgeOut, g_posAgeOut);
         FX_RWBUFFER(float4, velocityOut, g_velocityOut);
-        posAgeOut[slot] = float4(s.position, s.age);
-        velocityOut[slot] = float4(s.velocity, 0);
-        fxWriteOutputs(slot, row, birth, s, rm, dyn);
+        posAgeOut[index] = float4(s.position, s.age);
+        velocityOut[index] = float4(s.velocity, 0);
+        fxCountAlive();
+        fxWriteOutputs(index, row, birth, s, rm, dyn);
         return;
     }
-    if (born)
+    // a. rebase, transport (every existing particle, dying ones too: event positions are in this tick's origin space)
+    s.position -= rm.rebase;
+    if ((ef & FX_EMITTER_TRANSPORT) != 0u)
     {
-        h = -pa.w;
-        s.age = 0;
-        drag = nv_linear_drag(rm.drag, h);
-    }
-    else
-    {
-        // a. rebase, transport (every existing slot, dying ones too: event positions are in this tick's origin space)
-        s.position -= rm.rebase;
-        if ((ef & FX_EMITTER_TRANSPORT) != 0u)
-        {
-            FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
-            const StreamEmitter e = emitters[row];
-            s.position = nv_affine_point(e.transport[0], e.transport[1], e.transport[2], s.position);
-            s.velocity = nv_affine_vector(e.transport[0], e.transport[1], e.transport[2], s.velocity);
-        }
-        if (birth - rm.dyingBirth < rm.deathBirth - rm.dyingBirth)
-        {
-            if ((ef & FX_EMITTER_DEATH_EVENTS) != 0u && rm.deathEvent != FX_NONE)
-            {
-                const float rest = max(0.0f, rm.lifetime - s.age);
-                NvImpact impact;
-                nv_integrate(fxMotionRow(rm, dyn, birth), rest, nv_linear_drag(rm.drag, rest), s, impact);
-                fxWriteEvent(rm.deathEvent + (birth - rm.dyingBirth), fxEvent(row, birth, FX_EVENT_DEATH, s));
-            }
-            die(slot);
-            return;
-        }
-        h = g_dt;
-        drag.velocity = rm.dragVelocity; drag.position = rm.dragPosition; drag.acceleration = rm.dragAcceleration;
-    }
-    const NvMotion mo = fxMotionRow(rm, dyn, birth);
-    if (fxTraced(row, birth))
-    {
-        // diagnostic: the inputs of this particle's integrate call (the end is written by fxFinishSlot)
         FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
-        FX_RWBUFFER(TraceRecord, trace, g_trace);
-        TraceRecord r = (TraceRecord)0;
-        r.inputs.row = row; r.inputs.birth = birth; r.inputs.newborn = born ? 1u : 0u; r.inputs.depth = 0u;
-        r.inputs.position = s.position; r.inputs.age = s.age; r.inputs.velocity = s.velocity; r.inputs.h = h;
-        r.inputs.drag = float4(drag.velocity, drag.position, drag.acceleration, 0);
-        r.inputs.emitter = emitters[row]; r.inputs.dynamic = dyn;
-        trace[0] = r;
+        const StreamEmitter e = emitters[row];
+        s.position = nv_affine_point(e.transport[0], e.transport[1], e.transport[2], s.position);
+        s.velocity = nv_affine_vector(e.transport[0], e.transport[1], e.transport[2], s.velocity);
     }
-    float3 start, move, accel;
-    nv_integrate_motion(mo, h, drag, s, start, move, accel);
-    if (mo.collision != 0u && g_surfaceCount != 0u)
+    if (birth - rm.dyingBirth < rm.deathBirth - rm.dyingBirth)
     {
-        // the sweep runs in FxCollide, whose waves hold colliding slots only (they no longer stall the other lanes)
-        FX_RWBUFFER(uint, counters, g_counters);
-        uint at;
-        InterlockedAdd(counters[FX_COUNTER_COLLIDERS], 1u, at);
-        if (at < g_capacity)
+        if ((ef & FX_EMITTER_DEATH_EVENTS) != 0u && rm.deathEvent != FX_NONE)
         {
-            FX_RWBUFFER(ColliderRecord, colliders, g_colliders);
-            ColliderRecord c;
-            c.start = start; c.slot = slot; c.move = move; c.h = h; c.velocity = s.velocity; c.age = s.age; c.accel = accel;
-            colliders[at] = c;
+            const float rest = max(0.0f, rm.lifetime - s.age);
+            NvImpact impact;
+            nv_integrate(fxMotionRow(rm, dyn, birth), rest, nv_linear_drag(rm.drag, rest), s, impact);
+            fxWriteEvent(rm.deathEvent + (birth - rm.dyingBirth), fxEvent(row, birth, FX_EVENT_DEATH, s));
         }
-        else fxStatus(FX_STATUS_CAPACITY);
         return;
     }
-    fxFinishSlot(slot, row, birth, rm, dyn, mo, h, start, move, accel, s);
+    if (rank >= range.outCount || index >= g_outCount) { fxStatus(FX_STATUS_RANGE); return; }
+    NvDrag drag;
+    drag.velocity = rm.dragVelocity; drag.position = rm.dragPosition; drag.acceleration = rm.dragAcceleration;
+    fxStep(index, row, birth, rm, dyn, s, g_dt, drag, false);
 }
