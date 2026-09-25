@@ -5,15 +5,21 @@
 //   band A raster                                    design: M x 0.87 ns + T_A / 17 G/s
 // --service adds the depth raster service in a VSM page-raster setting (S's clipmap: 12 orthographic sun views of
 // 16384^2, level k texel 2^(k-10) m, centred on the camera; the camera's page dirty in levels 0-5; pixel kernel
-// ServicePagePixel), drawn per frame as whole-view raster, tile-local raster (DepthRasterRequest::tileLocal) or both
-// (--service whole|local|both; separate runs keep one request's tail out of the other's first pass).
+// ServicePagePixel), drawn per frame as whole-view raster, tile-local raster (DepthRasterRequest::tileLocal), or depth
+// only into a tile atlas (DepthRasterRequest::atlasSlots, D16 or D32, 64 slots of 128 px per row) -- --service takes a
+// comma-separated list of whole, local, atlas16, atlas32 (or both = whole,local); each is its own request, so one
+// request's tail stays out of the next one's first pass. --service-pages picks the requested pages: camera (the
+// camera's page in levels 0-5, S's static-sun measurement) or ring (synthetic receiver-driven request of a moving sun:
+// in level k the pages whose ground point lies in the camera frustum at distance [d_k, 2 d_k), d_k = texel / pixel
+// angle; level 0 from the camera, level 11 to its window edge; about S's 3,744 pages at 4K).
 // With --set visibility.coverage_layer=true the coverage layer's passes are reported against the design formula
 // (ARCHITECTURE 2.1: F_cov x 0.05 ns raster + sort F_cov x 16 B x 2 / 600 GB/s) with the fragments-per-pixel
 // histogram of one extra frame. --cluster-stats FILE writes every cluster's width, size and LOD errors (CSV) and a
 // per-mesh summary of the band distances at the resolution (band C design input).
 // Performance runs only under the GPU lock (INTERFACES 3.3):
 //   powershell -File Tools/CI/GpuLock.ps1 -Track core -- build/<t>/bin/unx_gate_visibility_visibilitygate.exe
-//       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--scale 1] [--moving] [--service whole|local|both]
+//       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--scale 1] [--moving]
+//       [--service whole,local,atlas16,atlas32] [--service-pages camera|ring]
 //       [--out DIR] [--set key=value ...] [--cluster-stats FILE]
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/core/Config.h"
@@ -217,6 +223,68 @@ std::vector<RasterView> serviceViews(const GpuScene& scene, float3 sun, float3 c
     }
     return views;
 }
+
+// Requested pages of the ring pattern (see the header): one bit per page, 512 words per level.
+std::vector<uint32_t> ringPages(const GpuScene& scene, float3 sun, const ViewDesc& camera, uint32_t height)
+{
+    const std::vector<RasterView> views = serviceViews(scene, sun, camera.position);
+    const float3 z = normalize(sun);
+    const float3 up = std::abs(z.y) < 0.999f ? float3{ 0, 1, 0 } : float3{ 1, 0, 0 };
+    const float3 x = normalize(cross(up, z)), y = cross(z, x);
+    const float pixelAngle = 2.0f / (camera.proj.m[1][1] * (float)height);
+    std::vector<uint32_t> words(kServiceLevels * kServiceTable * kServiceTable / 32, 0);
+    for (uint32_t k = 0; k < kServiceLevels; ++k)
+    {
+        const float t = std::ldexp(1.0f, (int)k - 10), d = t / pixelAngle;
+        const float nearD = k == 0 ? 0.0f : d, farD = k + 1 == kServiceLevels ? 1e30f : 2 * d;
+        // Window origin in texels (serviceViews: texel u = dot(p, x) / t - ox).
+        const float ox = (1 + views[k].viewProj.m[0][3]) * kServiceVirtual / 2 * -1;
+        const float oy = (views[k].viewProj.m[1][3] - 1) * kServiceVirtual / 2;
+        for (uint32_t py = 0; py < kServiceTable; ++py)
+            for (uint32_t px = 0; px < kServiceTable; ++px)
+            {
+                const float lx = ((px + 0.5f) * kServicePage + ox) * t, ly = ((py + 0.5f) * kServicePage + oy) * t;
+                if (std::abs(z.y) < 1e-3f) continue;
+                const float lambda = -(lx * x.y + ly * y.y) / z.y;  // ground (y = 0) along the sun direction
+                const float3 g = x * lx + y * ly + z * lambda;
+                const float4x4& m = camera.viewProj;  // row-major: clip = M (g, 1)
+                const float cx = m.m[0][0] * g.x + m.m[0][1] * g.y + m.m[0][2] * g.z + m.m[0][3];
+                const float cy = m.m[1][0] * g.x + m.m[1][1] * g.y + m.m[1][2] * g.z + m.m[1][3];
+                const float cw = m.m[3][0] * g.x + m.m[3][1] * g.y + m.m[3][2] * g.z + m.m[3][3];
+                if (cw <= 0 || std::abs(cx) > cw || std::abs(cy) > cw) continue;
+                const float dist = length(g - camera.position);
+                if (dist < nearD || dist >= farD) continue;
+                const uint32_t bit = py * kServiceTable + px;
+                words[k * (kServiceTable * kServiceTable / 32) + bit / 32] |= 1u << (bit & 31);
+            }
+    }
+    return words;
+}
+
+// Persistent upload ring (one slot per frame in flight) for per-frame CPU data copied into a default-heap buffer.
+struct UploadRing
+{
+    ComPtr<ID3D12Resource> resource;
+    uint8_t* mapped = nullptr;
+    uint64_t slotBytes = 0;
+};
+
+UploadRing uploadRing(Device& device, uint64_t slotBytes, uint32_t slots)
+{
+    UploadRing u;
+    u.slotBytes = slotBytes;
+    D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_UPLOAD };
+    D3D12_RESOURCE_DESC1 rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = slotBytes * slots;
+    rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    check(device.d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&u.resource)),
+          "gate upload ring");
+    check(u.resource->Map(0, nullptr, reinterpret_cast<void**>(&u.mapped)), "map upload ring");
+    return u;
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -227,8 +295,8 @@ int main(int argc, char** argv)
         std::vector<std::string> overrides;
         uint32_t frames = 600;
         float scale = 1.0f;
-        bool moving = false, service = false;
-        std::string serviceMode;
+        bool moving = false, service = false, ringPattern = false;
+        std::vector<std::string> serviceModes;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -243,9 +311,27 @@ int main(int argc, char** argv)
             else if (a == "--moving") moving = true;
             else if (a == "--service")
             {
-                serviceMode = next();
+                std::string list = next() + ",";
+                for (size_t b = 0, e; (e = list.find(',', b)) != std::string::npos; b = e + 1)
+                {
+                    const std::string m = list.substr(b, e - b);
+                    if (m == "both")
+                    {
+                        serviceModes.push_back("whole");
+                        serviceModes.push_back("local");
+                    }
+                    else if (m == "whole" || m == "local" || m == "atlas16" || m == "atlas32")
+                        serviceModes.push_back(m);
+                    else
+                        fail("--service: a comma-separated list of whole, local, atlas16, atlas32 (or both)");
+                }
                 service = true;
-                if (serviceMode != "whole" && serviceMode != "local" && serviceMode != "both") fail("--service whole|local|both");
+            }
+            else if (a == "--service-pages")
+            {
+                const std::string m = next();
+                if (m != "camera" && m != "ring") fail("--service-pages camera|ring");
+                ringPattern = m == "ring";
             }
             else if (a == "--out") out = next();
             else if (a == "--set")
@@ -304,6 +390,12 @@ int main(int argc, char** argv)
         // Service measurement resources: tile mask (12 views x 128^2 tiles; committed buffers start zeroed) and one page.
         const RawBuffer serviceMask = rawBuffer(device, (uint64_t)kServiceLevels * kServiceTable * kServiceTable / 8, false, L"gate service mask");
         const RawBuffer servicePage = rawBuffer(device, (uint64_t)kServicePage * kServicePage * 4, true, L"gate service page");
+        // Ring pattern: the mask and the atlas slots (one word per tile) come from the CPU each frame.
+        const uint64_t maskBytes = serviceMask.bytes, slotBytes = (uint64_t)kServiceLevels * kServiceTable * kServiceTable * 4;
+        const RawBuffer serviceSlots = rawBuffer(device, slotBytes, false, L"gate service slots");
+        const UploadRing serviceUpload = uploadRing(device, maskBytes + slotBytes, 3);
+        uint64_t requestedPages = 0, requestedFrames = 0;
+        uint32_t maxPages = 0;
         FrameResources serviceResources;
         FrameServices serviceServices;
         std::vector<std::string> resolutions = resolutionArg == "both" ? std::vector<std::string>{ "4K", "1440p" } : std::vector<std::string>{ resolutionArg };
@@ -327,20 +419,49 @@ int main(int argc, char** argv)
                 const TextureRef output = g.createTexture({ "gate output", rr.width, rr.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
                 renderer.record(g, fc, output);
                 if (!service) return;
-                // The camera's page (tile 64, 64) dirty in levels 0-5: six 128^2 pages, as S measured (5.5 per frame).
                 const BufferRef mask = g.importBuffer(serviceMask.resource.Get(), { "gate.service.mask", serviceMask.bytes, 0 });
                 const BufferRef page = g.importBuffer(servicePage.resource.Get(), { "gate.service.page", servicePage.bytes, 0 });
-                g.addPass("gate.service.mask", QueueType::Graphics, [&](PassBuilder& b) { b.use(mask, Use::CopyDst); },
-                          [=](PassContext& c) {
-                              D3D12_WRITEBUFFERIMMEDIATE_PARAMETER words[6];
-                              const uint32_t bit = 64 * kServiceTable + 64;
-                              for (uint32_t k = 0; k < 6; ++k)
-                                  words[k] = { c.address(mask) + 4 * (k * (kServiceTable * kServiceTable / 32) + bit / 32), 1u << (bit & 31) };
-                              c.cmd->WriteBufferImmediate(6, words, nullptr);
-                          });
+                const BufferRef slots = g.importBuffer(serviceSlots.resource.Get(), { "gate.service.slots", serviceSlots.bytes, 0 });
+                const float3 sun = s.sun.direction;
+                uint32_t pages = 0;
+                if (!ringPattern)
+                {
+                    // The camera's page (tile 64, 64) dirty in levels 0-5: six 128^2 pages, as S measured (5.5 per frame).
+                    g.addPass("gate.service.mask", QueueType::Graphics, [&](PassBuilder& b) { b.use(mask, Use::CopyDst); },
+                              [=](PassContext& c) {
+                                  D3D12_WRITEBUFFERIMMEDIATE_PARAMETER words[6];
+                                  const uint32_t bit = 64 * kServiceTable + 64;
+                                  for (uint32_t k = 0; k < 6; ++k)
+                                      words[k] = { c.address(mask) + 4 * (k * (kServiceTable * kServiceTable / 32) + bit / 32), 1u << (bit & 31) };
+                                  c.cmd->WriteBufferImmediate(6, words, nullptr);
+                              });
+                    pages = 6;
+                }
+                else
+                {
+                    const std::vector<uint32_t> words = ringPages(gpuScene, sun, fc.mainView, rr.height);
+                    uint8_t* dst = serviceUpload.mapped + (frame % 3) * serviceUpload.slotBytes;
+                    std::memcpy(dst, words.data(), maskBytes);
+                    uint32_t* slotWords = reinterpret_cast<uint32_t*>(dst + maskBytes);
+                    for (uint32_t i = 0; i < kServiceLevels * kServiceTable * kServiceTable; ++i)
+                        slotWords[i] = (words[i / 32] >> (i & 31)) & 1 ? pages++ : UINT32_MAX;
+                    ID3D12Resource* upload = serviceUpload.resource.Get();
+                    const uint64_t offset = (frame % 3) * serviceUpload.slotBytes;
+                    g.addPass("gate.service.upload", QueueType::Graphics,
+                              [&](PassBuilder& b) {
+                                  b.use(mask, Use::CopyDst);
+                                  b.use(slots, Use::CopyDst);
+                              },
+                              [=](PassContext& c) {
+                                  c.cmd->CopyBufferRegion(c.resource(mask), 0, upload, offset, maskBytes);
+                                  c.cmd->CopyBufferRegion(c.resource(slots), 0, upload, offset + maskBytes, slotBytes);
+                              });
+                }
+                requestedPages += pages;
+                ++requestedFrames;
+                maxPages = std::max(maxPages, pages);
                 FramePassContext sc{ device, g, shaders, quality, gpuScene, fc, serviceResources, serviceServices,
                                      [](const ViewDesc&) -> D3D12_GPU_VIRTUAL_ADDRESS { fail("gate: no frame constants for service views"); }, &renderer.trackState(), 2 };
-                const float3 sun = s.sun.direction;
                 DepthRasterRequest req;
                 req.views = serviceViews(gpuScene, sun, fc.mainView.position);
                 req.pixelKernel = "Passes/Visibility/Gates/ServicePagePixel";
@@ -349,12 +470,36 @@ int main(int argc, char** argv)
                 req.pixelConstants[1] = servicePage.descriptor;
                 req.cullMask = mask;
                 req.cullTilePx = kServicePage;
-                for (const bool local : { false, true })
+                // Atlas: 64 slots of 128 px per row (8192 wide), rows for this frame's pages (at least one).
+                const uint32_t atlasRows = std::max(1u, (pages + 63) / 64);
+                for (const std::string& mode : serviceModes)
                 {
-                    if (serviceMode != "both" && local != (serviceMode == "local")) continue;
-                    req.name = local ? "svc.local" : "svc.whole";
-                    req.tileLocal = local;
-                    tracks::rasterizeDepth(sc, req);
+                    DepthRasterRequest one = req;
+                    one.name = "svc." + mode;
+                    one.tileLocal = mode != "whole";
+                    if (mode == "atlas16" || mode == "atlas32")
+                    {
+                        if (!ringPattern) fail("--service atlas16|atlas32 needs --service-pages ring (the camera pattern has no slots)");
+                        const TextureRef atlas = g.createTexture({ "gate.service.atlas", 8192, atlasRows * kServicePage, 1, 1,
+                                                                   mode == "atlas16" ? DXGI_FORMAT_D16_UNORM : DXGI_FORMAT_D32_FLOAT });
+                        g.addPass(one.name + ".clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(atlas, Use::DepthWrite); },
+                                  [=](PassContext& c) { c.cmd->ClearDepthStencilView(c.dsv(atlas), D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr); });
+                        one.pixelKernel.clear();
+                        one.bufferUses.clear();
+                        one.depthTarget = atlas;
+                        one.atlasSlots = slots;
+                        one.atlasTilesPerRow = 64;
+                        tracks::rasterizeDepth(sc, one);
+                        // S's lookups read the atlas; here nothing does, so a kept reader keeps the raster from being culled.
+                        g.addPass(one.name + ".keep", QueueType::Graphics,
+                                  [&](PassBuilder& b) {
+                                      b.use(atlas, Use::DepthRead);
+                                      b.keep();
+                                  },
+                                  [](PassContext&) {});
+                        continue;
+                    }
+                    tracks::rasterizeDepth(sc, one);
                 }
             });
             harness.printSummary(r);
@@ -462,17 +607,26 @@ int main(int argc, char** argv)
                 device.deferRelease(rb);
             }
             if (service)
-                for (const char* run : { "svc.whole", "svc.local" })
+            {
+                const double pagesPerFrame = requestedFrames ? (double)requestedPages / requestedFrames : 0;
+                logf("  service pages (%s): %.1f requested per frame (max %u) = %.1f M texels\n", ringPattern ? "ring" : "camera", pagesPerFrame, maxPages,
+                     pagesPerFrame * kServicePage * kServicePage / 1e6);
+                for (const std::string& mode : serviceModes)
                 {
-                    if (serviceMode != "both" && serviceMode != std::string(run).substr(4)) continue;
-                    const std::string p = std::string(run) + ".";
+                    const std::string run = "svc." + mode, p = run + ".";
                     const double rasterMs = sumPasses(r, [&](const std::string& n) { return n == p + "raster"; });
-                    const double cullMs = sumPasses(r, [&](const std::string& n) { return startsWith(n, p.c_str()) && n != p + "raster" && n != p + "stats"; });
+                    const double clearMs = sumPasses(r, [&](const std::string& n) { return n == p + "clear"; });
+                    const double cullMs = sumPasses(r, [&](const std::string& n) {
+                        return startsWith(n, p.c_str()) && n != p + "raster" && n != p + "stats" && n != p + "clear" && n != p + "keep";
+                    });
                     const visibility::Stats ss = visibility::latestStats(renderer.trackState(), run);
-                    logf("  service %s: raster %.3f ms, cull %.3f ms | %u clusters visible, %u triangles, %u tile pairs, overflow 0x%x\n", run, rasterMs, cullMs,
+                    logf("  service %s: raster %.3f ms (%.4f ns per requested texel), cull %.3f ms, clear %.3f ms | %u clusters visible, %u triangles, %u tile pairs, "
+                         "overflow 0x%x\n",
+                         run.c_str(), rasterMs, pagesPerFrame > 0 ? rasterMs * 1e6 / (pagesPerFrame * kServicePage * kServicePage) : 0.0, cullMs, clearMs,
                          ss.visibleClusters, ss.triangles[0] + ss.triangles[1] + ss.triangles[2], ss.tilePairs, ss.overflow);
                     if (ss.overflow) status = 1;
                 }
+            }
         }
         return status;
 #endif

@@ -565,6 +565,40 @@ UNX_TEST(raster_service)
     const Uav sparseBits[2] = { persistentUav(L"test sparse bits"), persistentUav(L"test local bits") };
     const Uav sparseIds[2] = { persistentUav(L"test sparse ids"), persistentUav(L"test local ids") };
     const Uav sparseCount[2] = { persistentUav(L"test sparse fragments"), persistentUav(L"test local fragments") };
+    // Order-independent ids of the two sparse runs (TestDepthPixel KEY=1): uint64 depth << 32 | id per pixel, cleared by
+    // copying from a buffer that is never written (committed buffers start zeroed).
+    struct RawUav
+    {
+        ComPtr<ID3D12Resource> buffer;
+        uint32_t index = 0;
+    };
+    const uint64_t keyBytes = (uint64_t)size * size * 8;
+    auto persistentRaw = [&](const wchar_t* name, bool uav) {
+        RawUav u;
+        D3D12_HEAP_PROPERTIES dh{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC1 bd{};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = keyBytes;
+        bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
+        bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        bd.Flags = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
+        check(device().d3d()->CreateCommittedResource3(&dh, D3D12_HEAP_FLAG_NONE, &bd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&u.buffer)),
+              "test raw");
+        u.buffer->SetName(name);
+        if (!uav) return u;
+        u.index = device().descriptors().allocateResource();
+        D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = DXGI_FORMAT_R32_TYPELESS;
+        ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = (UINT)(keyBytes / 4);
+        ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        device().d3d()->CreateUnorderedAccessView(u.buffer.Get(), nullptr, &ud, device().descriptors().resourceCpu(u.index));
+        return u;
+    };
+    const RawUav sparseKeys[2] = { persistentRaw(L"test sparse keys", true), persistentRaw(L"test local keys", true) };
+    const RawUav zeroKeys = persistentRaw(L"test zero keys", false);
+    ComPtr<ID3D12Resource> rbKeys[2] = { readbackBuffer(keyBytes), readbackBuffer(keyBytes) };
     const uint8_t sparseRows[8] = { 0x36, 0xFF, 0x00, 0x81, 0x5A, 0xE7, 0x18, 0xF0 };  // bit x = tile column x
     auto sparseTile = [&](uint32_t x, uint32_t y) { return (sparseRows[y / 128] >> (x / 128)) & 1; };
     const uint32_t sparseWords[2] = { sparseRows[0] | sparseRows[1] << 8 | sparseRows[2] << 16 | (uint32_t)sparseRows[3] << 24,
@@ -639,7 +673,7 @@ UNX_TEST(raster_service)
         pk.name = "test.kernel";
         pk.views = { rv };
         pk.views[0].cullMaskOffset = 0;
-        pk.pixelKernel = "Passes/Visibility/Tests/TestDepthPixel";
+        pk.pixelKernel = "Passes/Visibility/Tests/TestDepthPixel.KEY0";
         pk.textureUses = { { bits, Use::UavGraphics }, { ids, Use::UavGraphics } };
         pk.cullMask = mask;
         pk.cullTilePx = 128;
@@ -658,13 +692,18 @@ UNX_TEST(raster_service)
                 sparse[k][t] = graph.importTexture(uavs[t]->texture.Get(), { "test.sparse", size, size, 1, 1, DXGI_FORMAT_R32_UINT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
         }
         const uint32_t sparseIndices[6] = { sparseBits[0].index, sparseIds[0].index, sparseCount[0].index, sparseBits[1].index, sparseIds[1].index, sparseCount[1].index };
+        const BufferRef keys[2] = { graph.importBuffer(sparseKeys[0].buffer.Get(), { "test.keys.sparse", keyBytes, 0 }),
+                                    graph.importBuffer(sparseKeys[1].buffer.Get(), { "test.keys.local", keyBytes, 0 }) };
+        ID3D12Resource* zero = zeroKeys.buffer.Get();
         graph.addPass("test.clear.sparse", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           for (auto& run : sparse)
                               for (TextureRef t : run) b.use(t, Use::UavCompute);
                           b.use(sparseMask, Use::CopyDst);
+                          for (BufferRef k : keys) b.use(k, Use::CopyDst);
                       },
                       [=](PassContext& c) {
+                          for (BufferRef k : keys) c.cmd->CopyBufferRegion(c.resource(k), 0, zero, 0, keyBytes);
                           c.cmd->SetPipelineState(clear);
                           for (uint32_t index : sparseIndices)
                           {
@@ -680,15 +719,19 @@ UNX_TEST(raster_service)
         {
             DepthRasterRequest sp = pk;
             sp.name = k == 0 ? "test.sparse" : "test.local";
-            sp.textureUses = { { sparse[k][0], Use::UavGraphics }, { sparse[k][1], Use::UavGraphics }, { sparse[k][2], Use::UavGraphics } };
+            sp.pixelKernel = "Passes/Visibility/Tests/TestDepthPixel.KEY1";
+            sp.textureUses = { { sparse[k][0], Use::UavGraphics }, { sparse[k][2], Use::UavGraphics } };
+            sp.bufferUses = { { keys[k], Use::UavGraphics } };
             sp.cullMask = sparseMask;
             sp.tileLocal = k == 1;
             sp.pixelConstants[0] = sparseIndices[3 * k];
-            sp.pixelConstants[1] = sparseIndices[3 * k + 1];
+            sp.pixelConstants[1] = sparseKeys[k].index;
             sp.pixelConstants[2] = sparseIndices[3 * k + 2];
+            sp.pixelConstants[3] = size;
             services.rasterizeDepth(fc, sp);
         }
         ID3D12Resource* rs[2][3] = { { rbSparse[0][0].Get(), rbSparse[0][1].Get(), rbSparse[0][2].Get() }, { rbSparse[1][0].Get(), rbSparse[1][1].Get(), rbSparse[1][2].Get() } };
+        ID3D12Resource* rk[2] = { rbKeys[0].Get(), rbKeys[1].Get() };
 
         graph.addPass("test.readback", QueueType::Graphics,
                       [&](PassBuilder& b) {
@@ -698,6 +741,7 @@ UNX_TEST(raster_service)
                           b.use(ids, Use::CopySrc);
                           for (auto& run : sparse)
                               for (TextureRef t : run) b.use(t, Use::CopySrc);
+                          for (BufferRef k : keys) b.use(k, Use::CopySrc);
                           b.keep();
                       },
                       [=](PassContext& c) {
@@ -707,6 +751,7 @@ UNX_TEST(raster_service)
                           copyTexture(c, ids, pi, size, size);
                           for (uint32_t k = 0; k < 2; ++k)
                               for (uint32_t t = 0; t < 3; ++t) copyTexture(c, sparse[k][t], rs[k][t], size, size);
+                          for (uint32_t k = 0; k < 2; ++k) c.cmd->CopyBufferRegion(rk[k], 0, c.resource(keys[k]), 0, keyBytes);
                       });
         graph.execute(nullptr);
         device().waitIdle();
@@ -777,10 +822,17 @@ UNX_TEST(raster_service)
     // fragment at all. Depth: the hardware clips triangles at the tile edges and snaps the new vertices to its 1/256 px
     // grid, so a clipped triangle's depth plane differs from the whole triangle's by that snapping. Checked as an
     // equivalent lateral displacement (depth difference / local depth slope) of at most 1/64 px; ids may differ only
-    // where the depth differs (ties between coincident surfaces).
+    // where the depth differs (the ids come from the order-independent depth << 32 | id keys; equal depth from coincident
+    // surfaces resolves to the larger id in both runs).
     std::vector<uint32_t> sp[2][3];
     for (uint32_t k = 0; k < 2; ++k)
+    {
         for (uint32_t t = 0; t < 3; ++t) sp[k][t] = readTexture<uint32_t>(rbSparse[k][t].Get(), size, size);
+        const uint64_t* key = nullptr;
+        check(rbKeys[k]->Map(0, nullptr, (void**)&key), "map keys");
+        for (size_t i = 0; i < (size_t)size * size; ++i) sp[k][1][i] = (uint32_t)key[i];
+        rbKeys[k]->Unmap(0, nullptr);
+    }
     uint64_t fragmentsInside[2] = {}, fragmentsOutside[2] = {};
     size_t countDiff = 0, depthDiff = 0, idDiff = 0, hwDiff = 0, setPixels = 0, outsideWritten = 0;
     uint32_t worstUlps = 0;
@@ -843,6 +895,13 @@ UNX_TEST(raster_service)
         }
     for (auto& run : rbSparse)
         for (auto& t : run) device().deferRelease(t);
+    for (uint32_t k = 0; k < 2; ++k)
+    {
+        device().descriptors().freeResource(sparseKeys[k].index);
+        device().deferRelease(sparseKeys[k].buffer);
+        device().deferRelease(rbKeys[k]);
+    }
+    device().deferRelease(zeroKeys.buffer);
     device().descriptors().freeResource(bitsUav.index);
     device().descriptors().freeResource(idsUav.index);
     device().deferRelease(bitsUav.texture);

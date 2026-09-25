@@ -323,14 +323,47 @@ uint tileVisit(uint mode, CullView v, uint view, TileMasks masks, uint2 a, uint2
     return pairs;
 }
 
+// True when a tile of the range [a, b] of view 'view' is set. Stops at the first one: a set coarse cell that lies
+// wholly inside the range answers at once (its bit is the OR of its 8 x 8 tiles); a cell cut by the range edge is
+// checked row by row. Instance and node tests need only this, not tileVisit's pair count over every set tile.
+bool tileAnySet(CullView v, uint view, TileMasks masks, uint2 a, uint2 b)
+{
+    ByteAddressBuffer mask = ResourceDescriptorHeap[masks.fine];
+    ByteAddressBuffer coarse = ResourceDescriptorHeap[masks.coarse];
+    const uint coarseX = (v.tilesX + 7) / 8;
+    const uint2 ca = a >> 3, cb = b >> 3;
+    for (uint cy = ca.y; cy <= cb.y; ++cy)
+    {
+        const uint cl = cy * coarseX + ca.x, ch = cy * coarseX + cb.x;
+        for (uint cw = cl >> 5; cw <= (ch >> 5); ++cw)
+        {
+            uint cells = tileMaskBits(coarse, view * masks.coarseWords, cw, cl, ch);
+            while (cells != 0)
+            {
+                const uint cx = cw * 32 + firstbitlow(cells) - cy * coarseX;
+                cells &= cells - 1;
+                const uint2 cellLo = uint2(cx, cy) * 8, cellHi = cellLo + 7;
+                const uint2 lo = max(a, cellLo), hi = min(b, cellHi);
+                if (all(lo == cellLo) && all(hi == cellHi)) return true;
+                for (uint y = lo.y; y <= hi.y; ++y)
+                {
+                    const uint l = y * v.tilesX + lo.x, h = y * v.tilesX + hi.x;
+                    for (uint w = l >> 5; w <= (h >> 5); ++w)
+                        if (tileMaskBits(mask, v.cullMaskOffset, w, l, h) != 0) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 // Tile mask of a raster-service view: true when the sphere's viewport rectangle covers a set tile (or no mask).
 bool tileMaskCovered(CullView v, uint view, TileMasks masks, float4 s)
 {
     if (v.cullMaskOffset == UNX_NONE) return true;
     uint2 a, b;
     if (!tileRange(v, s, a, b)) return false;
-    bool whole;
-    return tileVisit(TILE_VISIT_COUNT, v, view, masks, a, b, whole, 0, 0, 0, 0, 0, UNX_NONE, UNX_NONE) > 0;
+    return tileAnySet(v, view, masks, a, b);
 }
 
 #endif
