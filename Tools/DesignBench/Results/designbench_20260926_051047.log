@@ -1,0 +1,30 @@
+Adapter: NVIDIA GeForce RTX 4080, driver 32.0.15.9186, D3D12Core: C:\Users\USER\UnravelNext\Tools\DesignBench\build\D3D12\D3D12Core.dll
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64, shaders: C:/Users/USER/UnravelNext/Tools/DesignBench/Bench/shaders, resolution 3840x2160, reps 9
+  [env] timestamp frequency                                                    1000000000.0000 Hz       
+
+== Band C brick DDA, vista world (1 px per voxel, instanced pools) (after 1.5 s warm-up)
+  [bricks] vista world 244x139x2 bricks, pool 4,608 bricks, random (18 MB), 1 B density: camera march (1 px per voxel), 32 B record       0.8694 ms       0.104815 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 4,608 bricks, random (18 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only       0.6564 ms       0.079136 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 4,608 bricks, random (144 MB), 8 B AoS: camera march (1 px per voxel), 32 B record       2.1248 ms       0.256173 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 4,608 bricks, random (162 MB), SoA 1 B density + 8 B attributes where density > 0: camera march (1 px per voxel), 32 B record       2.6061 ms       0.314198 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 4,608 bricks, random (162 MB), SoA 1 B density + 8 B attributes where density > 0: receiver sun march (1 px per voxel), 4 B T only       0.6543 ms       0.078889 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 16,384 bricks, random (64 MB), 1 B density: camera march (1 px per voxel), 32 B record       1.0281 ms       0.123951 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 16,384 bricks, random (64 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only       0.6543 ms       0.078889 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 16,384 bricks, random (512 MB), 8 B AoS: camera march (1 px per voxel), 32 B record       2.8191 ms       0.339877 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 16,384 bricks, random (576 MB), SoA 1 B density + 8 B attributes where density > 0: camera march (1 px per voxel), 32 B record       3.5738 ms       0.430864 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 16,384 bricks, random (576 MB), SoA 1 B density + 8 B attributes where density > 0: receiver sun march (1 px per voxel), 4 B T only       1.0527 ms       0.126914 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 24,576 bricks, random (96 MB), 1 B density: camera march (1 px per voxel), 32 B record       1.2462 ms       0.150247 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 24,576 bricks, random (96 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only       0.8335 ms       0.100494 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 24,576 bricks, random (768 MB), 8 B AoS: camera march (1 px per voxel), 32 B record       7.5991 ms       0.916173 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 24,576 bricks, random (864 MB), SoA 1 B density + 8 B attributes where density > 0: camera march (1 px per voxel), 32 B record       3.6229 ms       0.436790 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 24,576 bricks, random (864 MB), SoA 1 B density + 8 B attributes where density > 0: receiver sun march (1 px per voxel), 4 B T only       0.8325 ms       0.100370 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 24,576 bricks, tree blocks (96 MB), 1 B density: camera march (1 px per voxel), 32 B record       1.2841 ms       0.154815 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 24,576 bricks, tree blocks (96 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only       0.7004 ms       0.084444 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 24,576 bricks, contiguous (96 MB), 1 B density: camera march (1 px per voxel), 32 B record       1.3711 ms       0.165309 ns/pixel
+  [bricks] vista world 244x139x2 bricks, pool 24,576 bricks, contiguous (96 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only       0.7107 ms       0.085679 ns/pixel
+  [bricks] vista world 244x139x2 bricks, unique world, shuffled (265 MB), 1 B density: camera march (1 px per voxel), 32 B record       2.6235 ms       0.316296 ns/pixel
+  [bricks] vista world 244x139x2 bricks, unique world, shuffled (265 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only       1.5616 ms       0.188272 ns/pixel
+  [bricks] vista world 244x139x2 bricks, unique world, tree blocks (265 MB), 1 B density: camera march (1 px per voxel), 32 B record       1.1704 ms       0.141111 ns/pixel
+  [bricks] vista world 244x139x2 bricks, unique world, tree blocks (265 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only       0.7178 ms       0.086543 ns/pixel
+  [bricks] vista world 244x139x2 bricks, unique world, contiguous (265 MB), 1 B density: camera march (1 px per voxel), 32 B record       1.1817 ms       0.142469 ns/pixel
+  [bricks] vista world 244x139x2 bricks, unique world, contiguous (265 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only       0.7168 ms       0.086420 ns/pixel

@@ -1,0 +1,31 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "resolution": "3840x2160", "reps": 9, "timestamp": "20260926_051047",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 4,608 bricks, random (18 MB), 1 B density: camera march (1 px per voxel), 32 B record", "value": 0.869376, "unit": "ms", "note": "0.104815 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 4,608 bricks, random (18 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only", "value": 0.656384, "unit": "ms", "note": "0.079136 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 4,608 bricks, random (144 MB), 8 B AoS: camera march (1 px per voxel), 32 B record", "value": 2.1248, "unit": "ms", "note": "0.256173 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 4,608 bricks, random (162 MB), SoA 1 B density + 8 B attributes where density > 0: camera march (1 px per voxel), 32 B record", "value": 2.60608, "unit": "ms", "note": "0.314198 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 4,608 bricks, random (162 MB), SoA 1 B density + 8 B attributes where density > 0: receiver sun march (1 px per voxel), 4 B T only", "value": 0.654336, "unit": "ms", "note": "0.078889 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 16,384 bricks, random (64 MB), 1 B density: camera march (1 px per voxel), 32 B record", "value": 1.0281, "unit": "ms", "note": "0.123951 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 16,384 bricks, random (64 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only", "value": 0.654336, "unit": "ms", "note": "0.078889 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 16,384 bricks, random (512 MB), 8 B AoS: camera march (1 px per voxel), 32 B record", "value": 2.81907, "unit": "ms", "note": "0.339877 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 16,384 bricks, random (576 MB), SoA 1 B density + 8 B attributes where density > 0: camera march (1 px per voxel), 32 B record", "value": 3.57376, "unit": "ms", "note": "0.430864 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 16,384 bricks, random (576 MB), SoA 1 B density + 8 B attributes where density > 0: receiver sun march (1 px per voxel), 4 B T only", "value": 1.05267, "unit": "ms", "note": "0.126914 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks, random (96 MB), 1 B density: camera march (1 px per voxel), 32 B record", "value": 1.24621, "unit": "ms", "note": "0.150247 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks, random (96 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only", "value": 0.833536, "unit": "ms", "note": "0.100494 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks, random (768 MB), 8 B AoS: camera march (1 px per voxel), 32 B record", "value": 7.5991, "unit": "ms", "note": "0.916173 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks, random (864 MB), SoA 1 B density + 8 B attributes where density > 0: camera march (1 px per voxel), 32 B record", "value": 3.62291, "unit": "ms", "note": "0.436790 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks, random (864 MB), SoA 1 B density + 8 B attributes where density > 0: receiver sun march (1 px per voxel), 4 B T only", "value": 0.832512, "unit": "ms", "note": "0.100370 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks, tree blocks (96 MB), 1 B density: camera march (1 px per voxel), 32 B record", "value": 1.2841, "unit": "ms", "note": "0.154815 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks, tree blocks (96 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only", "value": 0.700416, "unit": "ms", "note": "0.084444 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks, contiguous (96 MB), 1 B density: camera march (1 px per voxel), 32 B record", "value": 1.37114, "unit": "ms", "note": "0.165309 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks, contiguous (96 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only", "value": 0.710656, "unit": "ms", "note": "0.085679 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, unique world, shuffled (265 MB), 1 B density: camera march (1 px per voxel), 32 B record", "value": 2.62349, "unit": "ms", "note": "0.316296 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, unique world, shuffled (265 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only", "value": 1.5616, "unit": "ms", "note": "0.188272 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, unique world, tree blocks (265 MB), 1 B density: camera march (1 px per voxel), 32 B record", "value": 1.17043, "unit": "ms", "note": "0.141111 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, unique world, tree blocks (265 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only", "value": 0.717824, "unit": "ms", "note": "0.086543 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, unique world, contiguous (265 MB), 1 B density: camera march (1 px per voxel), 32 B record", "value": 1.1817, "unit": "ms", "note": "0.142469 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, unique world, contiguous (265 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only", "value": 0.7168, "unit": "ms", "note": "0.086420 ns/pixel"}
+ ]
+}
