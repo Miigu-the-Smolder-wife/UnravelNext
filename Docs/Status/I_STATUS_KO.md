@@ -126,7 +126,32 @@ Agility 1.618.5 기능은 1.618.1에서도 모두 있다(SDK 618).
 - 배포: `Native/Host/Deploy.ps1`이 DLL, 커널, 품질 파일을 `Native~`에 놓는다. DLL이 로드돼 있으면 거부한다.
   빌드 identity는 링크가 성공한 뒤 DLL 옆에 쓴 사본에서 읽는다. Player 빌드 후처리는 커널과 품질 파일을 `<Game>_Data/UnravelNext`로 복사한다.
 
-## 2.2 실행 절차 (재현)
+## 2.2 데이터 월드를 새 렌더러로 (Player) [실측]
+
+**데이터 월드가 Unity Player에서 새 렌더러로 뜬다.** 장면은 원본 `NativeDataWorld.unity`의 사본이다(`Assets/UnravelNextBridge/DataWorld/
+NativeDataWorld_UnravelNext.unity`, 원본은 그대로). Player는 `Builds/UnravelNextDataWorld`(Mono, 창 1280×720, vsync 끔)이다.
+프레임은 Unity D3D12 큐에서 리스트 하나로 실행된다. 측정은 GpuLock, 1.5 s 워밍업, 해상도마다 서로 다른 완료 프레임 600개다.
+원본: `Results/I/DataWorld/player_20260925_102722.json`(측정기의 형식 버그로 `max`는 잃었고 null로 복구했다. 다른 값은 원래대로다).
+
+- 장면: 인스턴스 22(강체 상자·바닥·경첩·부표, 스킨 캐릭터, 영역 스트리밍 개체), 메시 10, 재질 6, 삼각형 2,584, 클러스터 89.
+- 표시하지 못한 것(로그로 알림): 재질 1의 clearcoat·박막(요청 대기), 재질 2의 unlit(발광만으로 옮김), 캐릭터 법선(비균일 스케일, 요청 대기),
+  소프트 바디·Matter·파괴 조각·VFX(렌더러 경로 없음).
+
+| | GPU 프레임 중앙값 | P95 | P99 | CPU 기록 / 제출 (Unity 제출 스레드) | Unity 프레임 주기 중앙값 / P95 |
+|---|---|---|---|---|---|
+| 4K | **7.25 ms** | 8.14 | 10.29 | 0.26 / 0.06 ms | 12.30 / 18.28 ms |
+| 1440p | **3.84 ms** | 4.53 | 4.82 | 0.30 / 0.07 ms | 5.49 / 16.67 ms |
+
+- 트랙별 패스 중앙값 합(4K): **S 3.92**(`s.froxel.integrate` **2.76**, 가시성 0.36, 반영 0.15, VSM 무효화 0.13, markair 0.13, 페이지 래스터 0.12),
+  **R 1.56**(반사 trace 0.76, 분류 0.26, GI 합 ~0.4), **M 1.21**(shade 0.69, resolve 0.29, edge 0.23), **V 0.17**. 합 6.87 ms, 나머지 ~0.4 ms는 배리어·틈이다.
+  1440p: S 2.07(froxel 1.27), R 0.86, M 0.62, V 0.13.
+- 판정: 4K 7.25 ms는 목표 6.06 ms를 넘는다. 이 장면은 삼각형 2.6k로 거의 비어 있으므로 초과분은 부하가 아니라 트랙 패스의 고정비다.
+  가장 큰 항은 프록셀 적분(설계 비용식 0.03 ms 대비 2.76 ms)이고 S 트랙에 알렸다.
+  호스트 경계의 비용은 따로 쟀다(프로브, 1.3절: Unity 큐 리스트 경계 11~17 µs × 2).
+- Unity 프레임 주기가 렌더러 GPU 시간보다 길다(4K 12.3 대 7.25 ms). 1440p P95는 16.7 ms로 tick 프레임에서 튀는 모양이다.
+  이것은 데이터 월드 시뮬레이션(CPU tick, VFX GPU 등) 쪽 비용이라 감사 세션에 전달했다.
+
+## 2.3 실행 절차 (재현)
 
 ```text
 1. build:   powershell -File Tools/CI/Build.ps1 -Track I -Target unx_host            (UnravelNext.dll, 커널)
