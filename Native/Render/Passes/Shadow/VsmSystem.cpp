@@ -30,6 +30,9 @@ struct State
     bool needsInit = false;  // pool (re)created: the next frame resets tables and free list
     uint32_t poolPagesX = 0, poolPagesY = 0;
     ComPtr<ID3D12Resource> pool, table, requests, meta, blocks, freeList, dirtyList, cullMask, args, stats, lastRevision, movedList, ring;
+    ComPtr<ID3D12Resource> motion, jointCounts, jointStaging;  // dirty rule (a): per instance x level motion state; joints
+    uint32_t jointsRevision = UINT32_MAX;
+    bool jointsPending = false;
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     uint32_t poolUav = UINT32_MAX, tableSrv = UINT32_MAX, ringSrv = UINT32_MAX, metaUav = UINT32_MAX;
     uint32_t ringCbv[kRingSlots] = {};  // constant buffer view of each ring slot (ConstantBuffer<VsmConstants>)
@@ -312,7 +315,32 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.instanceCapacity = std::max(c.instanceCount, 1u);
         s.lastRevision = createBuffer(fc.device, L"S VSM instance revisions", (uint64_t)s.instanceCapacity * 8);
         if (s.movedList) fc.device.deferRelease(s.movedList);
-        s.movedList = createBuffer(fc.device, L"S VSM moved instances", 4 + (uint64_t)s.instanceCapacity * 4);
+        s.movedList = createBuffer(fc.device, L"S VSM moved instances", 4 + (uint64_t)s.instanceCapacity * 8);
+        if (s.motion) fc.device.deferRelease(s.motion);
+        s.motion = createBuffer(fc.device, L"S VSM instance motion", (uint64_t)s.instanceCapacity * kLevels * 16);
+        if (s.jointCounts) fc.device.deferRelease(s.jointCounts);
+        s.jointCounts = createBuffer(fc.device, L"S VSM joint counts", (uint64_t)s.instanceCapacity * 4);
+        s.jointsRevision = UINT32_MAX;
+    }
+    // Joint counts of the skinned instances (displacement bound of their palettes), when the scene changes.
+    if (s.jointsRevision != fc.scene.revision())
+    {
+        std::vector<uint32_t> counts(s.instanceCapacity, 0);
+        if (const scene::Scene* scn = fc.scene.source())
+            for (uint32_t i = 0; i < c.instanceCount && i < scn->instances.size(); ++i)
+            {
+                const scene::Instance& in = scn->instances[i];
+                if ((in.flags & scene::InstanceSkinned) && in.skeleton < scn->skeletons.size()) counts[i] = (uint32_t)scn->skeletons[in.skeleton].jointToModel.size();
+            }
+        if (s.jointStaging) fc.device.deferRelease(s.jointStaging);
+        s.jointStaging = createBuffer(fc.device, L"S VSM joint counts staging", (uint64_t)s.instanceCapacity * 4, D3D12_HEAP_TYPE_UPLOAD);
+        void* p = nullptr;
+        D3D12_RANGE none{ 0, 0 };
+        check(s.jointStaging->Map(0, &none, &p), "map VSM joint counts");
+        std::memcpy(p, counts.data(), counts.size() * 4);
+        s.jointStaging->Unmap(0, nullptr);
+        s.jointsRevision = fc.scene.revision();
+        s.jointsPending = true;
     }
 
     RenderGraph& g = fc.graph;
@@ -326,7 +354,21 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const BufferRef dirty = g.importBuffer(s.dirtyList.Get(), BufferDesc{ "S VSM dirty list", 8 + (uint64_t)pages * 8, 0 });
     const BufferRef mask = g.importBuffer(s.cullMask.Get(), BufferDesc{ "S VSM cull mask", (uint64_t)kSlots / 8, 0 });
     const BufferRef args = g.importBuffer(s.args.Get(), BufferDesc{ "S VSM indirect args", 32, 0 });
-    const BufferRef moved = g.importBuffer(s.movedList.Get(), BufferDesc{ "S VSM moved instances", 4 + (uint64_t)s.instanceCapacity * 4, 0 });
+    const BufferRef moved = g.importBuffer(s.movedList.Get(), BufferDesc{ "S VSM moved instances", 4 + (uint64_t)s.instanceCapacity * 8, 0 });
+    const BufferRef motion = g.importBuffer(s.motion.Get(), BufferDesc{ "S VSM instance motion", (uint64_t)s.instanceCapacity * kLevels * 16, 16 });
+    const BufferRef joints = g.importBuffer(s.jointCounts.Get(), BufferDesc{ "S VSM joint counts", (uint64_t)s.instanceCapacity * 4, 4 });
+    if (s.jointsPending)
+    {
+        ID3D12Resource* staging = s.jointStaging.Get();
+        const uint64_t bytes = (uint64_t)s.instanceCapacity * 4;
+        g.addPass("s.vsm.joints", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(joints, Use::CopyDst);
+                      b.keep();
+                  },
+                  [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(ctx.resource(joints), 0, staging, 0, bytes); });
+        s.jointsPending = false;
+    }
     const BufferRef statsBuf = g.importBuffer(s.stats.Get(), BufferDesc{ "S VSM stats", 80, 0 });
     s.statsRef = statsBuf;
     const BufferRef revisions = g.importBuffer(s.lastRevision.Get(), BufferDesc{ "S VSM instance revisions", (uint64_t)s.instanceCapacity * 8, 8 });
@@ -460,13 +502,15 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                   [&](PassBuilder& b) {
                       b.use(revisions, Use::UavCompute);
                       b.use(moved, Use::UavCompute);
+                      b.use(motion, Use::UavCompute);
+                      b.use(joints, Use::SrvCompute);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.uav(revisions), ctx.uav(moved), n, 0 };
+                      const uint32_t k[8] = { ctx.uav(revisions), ctx.uav(moved), n, ctx.uav(motion), ctx.srv(joints), ring, 0, 0 };
                       ctx.cmd->SetPipelineState(pm);
                       ctx.bindFrameConstants(mainConstants);
-                      ctx.computeConstants(k, 4);
+                      ctx.computeConstants(k, 8);
                       ctx.cmd->Dispatch(groups(n, 64), 1, 1);
                   });
         g.addPass("s.vsm.movedargs", QueueType::Compute,
@@ -485,11 +529,12 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                   [&](PassBuilder& b) {
                       b.use(table, Use::UavCompute);
                       b.use(moved, Use::SrvCompute);
+                      b.use(motion, Use::UavCompute);
                       b.use(args, Use::IndirectArgs);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.uav(table), ctx.srv(moved), ring, off };
+                      const uint32_t k[4] = { ctx.uav(table), ctx.srv(moved), ring, ctx.uav(motion) };
                       ctx.cmd->SetPipelineState(pi);
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 4);

@@ -1,9 +1,11 @@
 // unx-kernel: cs_6_6 main
-// Dirty rule (a) of ARCHITECTURE 2.3, second half: for each moved instance (VsmMoved) and clipmap level, every resident
-// page under the instance's old or new bounds becomes stale. One group per (instance, level); its 64 threads split the
-// page rectangle, so a large instance near the camera costs a few iterations per thread, not one thread's serial walk.
+// Dirty rule (a) of ARCHITECTURE 2.3, second half: for each moved instance (VsmMoved) and each clipmap level of its mask,
+// every resident page under the instance's bounds where the level last rendered it (the level's anchor) or where it is
+// now becomes stale, and the anchor moves here. One group per (instance, level); its 64 threads split the page
+// rectangle, so a large instance near the camera costs a few iterations per thread, not one thread's serial walk.
 // Skinned bounds: the bind-pose sphere (see S_STATUS_KO.md). The wind rule (b) is per page in VsmRelease.
-// P[0].x page table UAV (raw), P[0].y moved list SRV (raw), P[0].z VSM constants CBV, P[0].w unused.
+// P[0].x page table UAV (raw), P[0].y moved list SRV (raw: count, then (instance, level mask) pairs), P[0].z VSM
+// constants CBV, P[0].w motion state UAV (VsmMoved).
 // Frame constants of the main view (scene buffers, wind).
 #include "Deformation.hlsli"
 #include "Passes/Shadow/VsmCommon.hlsli"
@@ -31,11 +33,17 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     ByteAddressBuffer moved = ResourceDescriptorHeap[P[0].y];
     RWByteAddressBuffer table = ResourceDescriptorHeap[P[0].x];
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[P[0].z];
-    const GpuInstance inst = loadInstance(moved.Load(4 + group.x * 4));
+    const uint2 entry = moved.Load2(4 + group.x * 8);
+    const uint k = group.y;
+    if ((entry.y >> k & 1u) == 0) return;
+    const GpuInstance inst = loadInstance(entry.x);
     const GpuMesh mesh = loadMesh(inst.mesh);
     const float scale = length(inst.objectToWorld[0].xyz);
     // Deformed extent: the bind-pose sphere grown by the largest wind displacement.
     const float radius = (mesh.boundsSphere.w + windOffsetBound(inst, mesh.boundsSphere.xyz, mesh.boundsSphere.w)) * scale;
-    markRect(c, table, transformPoint(inst.objectToWorld, mesh.boundsSphere.xyz), radius, group.y, lane);
-    markRect(c, table, transformPoint(inst.prevObjectToWorld, mesh.boundsSphere.xyz), radius, group.y, lane);
+    RWStructuredBuffer<float4> motion = ResourceDescriptorHeap[P[0].w];
+    const float3 centre = transformPoint(inst.objectToWorld, mesh.boundsSphere.xyz), anchor = motion[entry.x * VSM_LEVELS + k].xyz;
+    markRect(c, table, centre, radius, k, lane);
+    markRect(c, table, anchor, radius, k, lane);
+    if (lane == 0) motion[entry.x * VSM_LEVELS + k] = float4(centre, 0);
 }

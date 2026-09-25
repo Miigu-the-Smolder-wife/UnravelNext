@@ -321,6 +321,46 @@ int main(int argc, char** argv)
             report(sn.dirty == 0, "caster at rest again: nothing rendered", sn.dirty, 0);
         }
 
+        // 3b. Slow drift (2 mm per frame for 30 frames, 6 cm in all): a level re-renders the caster's pages only once
+        //     the accumulated motion reaches one of its texels, so levels with texels coarser than 6 cm never do, the
+        //     finest do often, and the shadow still matches the reference at the end.
+        {
+            std::vector<uint32_t> dirty(shadow::kLevels, 0);
+            Frame last;
+            for (int step = 0; step < 30; ++step)
+            {
+                std::vector<gpu::Instance> inst = tf.gpuScene.instances();
+                gpu::Instance& pole = inst[2];
+                pole.objectToWorld[0].w += 0.6f + 0.002f * (step + 1);  // instances() still holds the uploaded original
+                pole.objectToWorld[2].w -= 0.4f;
+                for (int r = 0; r < 3; ++r) pole.prevObjectToWorld[r] = pole.objectToWorld[r];
+                pole.prevObjectToWorld[0].w -= 0.002f;
+                pole.transformRevision += 2 + step;
+                ComPtr<ID3D12Resource> staging = tf.makeBuffer(sizeof(gpu::Instance) * inst.size(), D3D12_HEAP_TYPE_UPLOAD);
+                void* p = nullptr;
+                D3D12_RANGE none{ 0, 0 };
+                check(staging->Map(0, &none, &p), "map instances");
+                std::memcpy(p, inst.data(), sizeof(gpu::Instance) * inst.size());
+                staging->Unmap(0, nullptr);
+                CommandList cl = tf.device.acquireCommandList(QueueType::Graphics);
+                cl.list->CopyBufferRegion(tf.gpuScene.buffer("instances"), 0, staging.Get(), 0, sizeof(gpu::Instance) * inst.size());
+                tf.device.queue(QueueType::Graphics).waitCpu(tf.device.submit(cl));
+                last = runFrame(true);
+                const std::vector<uint32_t> n = dirtyByLevel(last);
+                for (uint32_t k = 0; k < shadow::kLevels; ++k) dirty[k] += n[k];
+            }
+            std::string line;
+            for (uint32_t k = 0; k < 10; ++k) line += format(" %u:%u", k, dirty[k]);
+            logf("slow drift 6 cm over 30 frames, dirty pages by level:%s\n", line.c_str());
+            uint32_t coarse = 0, fine = 0;
+            for (uint32_t k = 0; k < shadow::kLevels; ++k)
+                (std::ldexp(1.0, (int)k - 10) > 0.06 ? coarse : fine) += dirty[k];
+            report(coarse == 0, "slow drift: no re-render on levels with texel > the 6 cm drift", coarse, 0);
+            report(fine > 0, "slow drift: levels with texel <= the drift re-render", fine, 1);
+            boxes[2].centre = boxes[2].centre + float3{ 0.06f, 0, 0 };
+            compare(last, "after slow drift", 2);
+        }
+
         // 4. Sun direction change: every requested page re-renders.
         {
             // The GpuScene points at tf.sceneData: frame constants and the VSM light basis both see the new sun.
