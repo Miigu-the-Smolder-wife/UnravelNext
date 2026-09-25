@@ -19,6 +19,8 @@ New-Item -ItemType Directory -Force $bin | Out-Null
 foreach ($f in @("unx_reference.exe", "embree4.dll", "tbb12.dll", "tbbmalloc.dll")) { Copy-Item (Join-Path $root "build\$Track\bin\$f") $bin -Force }
 $exe = Join-Path $bin "unx_reference.exe"
 $jobs = @(
+  @{ scene = "ridge_sunset"; camera = "ridge";   res = "2560x1440"; wind = $false },
+  @{ scene = "ridge_sunset"; camera = "ridge";   res = "3840x2160"; wind = $false },
   @{ scene = "city_block";  camera = "street";   res = "2560x1440"; wind = $true },
   @{ scene = "forest_thin"; camera = "forest";   res = "2560x1440"; wind = $true },
   @{ scene = "forest_card"; camera = "forest";   res = "2560x1440"; wind = $true },
