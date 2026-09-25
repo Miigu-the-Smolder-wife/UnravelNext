@@ -9,8 +9,11 @@
 # Hold limit (v1.30): the command runs in a Job object (kill on close). After -TimeoutMinutes (default 45: the longest
 # legitimate hold on record is a 27.6 min Unity test run) the whole process tree is ended and the release line says
 # TIMEOUT (exit 124); a killed wrapper takes its command's tree with it (the job's last handle closes), so no orphaned
-# GPU process outlives the lock. Descendants still alive 5 s after the command itself exits are ended and named in the
-# release line. A holder that died without a release line (abandoned mutex, or its current.json left behind with its
+# GPU process outlives the lock. Unity processes still running when the command exits (an editor shutting down, its
+# import workers, licensing client, shader compiler, Bee) are waited for until they end on their own, within the same
+# hold limit, because ending an editor mid-shutdown can damage its Library; the release line, written after that wait,
+# says "(waited N s for Unity processes to end: ...)". Other descendants still alive 5 s after the command (and those
+# Unity processes) are ended and named in the release line. A holder that died without a release line (abandoned mutex, or its current.json left behind with its
 # process gone) is logged as "stale release" by the next acquirer. -WaitMinutes (default 120) bounds the wait for the
 # lock.
 #
@@ -130,6 +133,10 @@ public static class UnxGpuLockJob
     static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool MoveFileExW(string from, string to, uint flags);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder name, ref uint size);
 
     [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
     static extern uint PdhOpenQuery(string source, IntPtr user, out IntPtr query);
@@ -153,6 +160,8 @@ public static class UnxGpuLockJob
         public int Survivors;          // processes that did not end after termination
         public double ContendedSeconds;  // seconds in which some process outside the tree kept the GPU busy >= the threshold
         public string Contention = "";   // "name (pid) N s >= T ms/s, peak P ms/s; ..." for those processes
+        public string UnityWaited = "";  // Unity processes still running when the command exited (waited for, not ended)
+        public double UnityWaitSeconds;  // how long they took to end on their own
     }
 
     // GPU engine busy time per process outside the job (the command's tree), sampled every IntervalMs.
@@ -359,6 +368,40 @@ public static class UnxGpuLockJob
         finally { Marshal.FreeHGlobal(buffer); }
     }
 
+    // Unity editor processes in the job: the editor, its import workers and helpers (Unity*, bee_backend) and anything
+    // run from an editor install's Data folder (its bundled dotnet for Bee/ILPP). An editor that is still shutting down
+    // writes Library (artifact database, Bee state); ending it there risks a damaged Library, so these are waited for.
+    static string UnityProcesses(IntPtr job)
+    {
+        const int capacity = 256;
+        IntPtr buffer = Marshal.AllocHGlobal(8 + 8 * capacity);
+        try
+        {
+            if (!QueryInformationJobObject(job, 3, buffer, 8 + 8 * capacity, IntPtr.Zero)) return "";
+            int count = Marshal.ReadInt32(buffer, 4);
+            List<string> names = new List<string>();
+            for (int k = 0; k < count; ++k)
+            {
+                int id = (int)Marshal.ReadInt64(buffer, 8 + 8 * k);
+                IntPtr h = OpenProcess(0x1000, false, id);  // PROCESS_QUERY_LIMITED_INFORMATION
+                if (h == IntPtr.Zero) continue;
+                try
+                {
+                    StringBuilder path = new StringBuilder(1024);
+                    uint size = (uint)path.Capacity;
+                    if (!QueryFullProcessImageNameW(h, 0, path, ref size)) continue;
+                    string full = path.ToString().ToLowerInvariant();
+                    string file = System.IO.Path.GetFileName(full);
+                    if (file.StartsWith("unity") || file.StartsWith("bee_backend") || full.Contains("\\editor\\data\\"))
+                        names.Add(System.IO.Path.GetFileNameWithoutExtension(path.ToString()) + " (" + id + ")");
+                }
+                finally { CloseHandle(h); }
+            }
+            return string.Join(", ", names.ToArray());
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+    }
+
     static int Drain(IntPtr job, int milliseconds)
     {
         Stopwatch w = Stopwatch.StartNew();
@@ -404,8 +447,25 @@ public static class UnxGpuLockJob
                 ContentionSampler sampler = new ContentionSampler(job, contentionPath);
 
                 Result r = new Result();
+                Stopwatch held = Stopwatch.StartNew();
                 double ms = timeoutMinutes * 60000.0;
-                if (WaitForSingleObject(pi.hProcess, ms >= 4294967294.0 ? 4294967294u : (uint)ms) == WAIT_TIMEOUT)
+                bool exited = WaitForSingleObject(pi.hProcess, ms >= 4294967294.0 ? 4294967294u : (uint)ms) != WAIT_TIMEOUT;
+                // Unity processes that outlive the command (an editor still shutting down, its import workers and
+                // helpers) are waited for until they end on their own, inside the same hold limit, and never ended
+                // early (a shutdown cut short can damage Library). Only the hold limit ends them.
+                if (exited)
+                {
+                    string unity = UnityProcesses(job);
+                    if (unity.Length > 0)
+                    {
+                        Stopwatch w = Stopwatch.StartNew();
+                        r.UnityWaited = unity;
+                        while (UnityProcesses(job).Length > 0 && held.Elapsed.TotalMilliseconds < ms) System.Threading.Thread.Sleep(250);
+                        r.UnityWaitSeconds = w.Elapsed.TotalSeconds;
+                        exited = UnityProcesses(job).Length == 0;
+                    }
+                }
+                if (!exited)
                 {
                     r.TimedOut = true;
                     TerminateJobObject(job, 124);
@@ -562,6 +622,7 @@ try {
   if ($r.TimedOut) { $tag = " TIMEOUT after $TimeoutMinutes min (process tree ended)" }
   elseif ($code -eq 87) { $tag = " DEVICE_REMOVED" }
   elseif ($code -eq 88) { $tag = " FENCE_TIMEOUT" }
+  if ($r.UnityWaited) { $tag += " (waited {0:N0} s for Unity processes to end: {1})" -f $r.UnityWaitSeconds, $r.UnityWaited }
   if ($r.Leftover) { $tag += " (ended leftover descendants: $($r.Leftover))" }
   if ($r.Survivors -gt 0) { $tag += " ($($r.Survivors) processes did not end)" }
   if ($r.ContendedSeconds -gt 0) { $tag += " contended: $($r.Contention)" }
