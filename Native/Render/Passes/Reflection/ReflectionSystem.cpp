@@ -62,6 +62,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.planarViewsMax = (uint32_t)q.integer("reflection.planar_views_max");
     if (s.planarViewsMax > kPlanarMax) fail("reflection.planar_views_max must be <= %u", kPlanarMax);
     s.planarViewFixedMs = (float)q.number("reflection.planar_view_fixed_ms");
+    s.experimentDisable = (uint32_t)q.integer("reflection.experiment_disable");
     s.planarViewNsPerPixel = (float)q.number("reflection.planar_view_ns_per_px");
     return s;
 }
@@ -605,6 +606,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const uint32_t frame = (uint32_t)fc.frame.frameIndex;
     ID3D12Resource* argumentResource = m_arguments.Get();
     const uint32_t specularLut = rt::specularAlbedoSrv(fc.device);
+    const uint32_t experiment = s.experimentDisable;
     ID3D12QueryHeap* timestamps = m_timestamps.Get();
     const uint32_t firstTick = ringSlot * kTicks;
     g.addPass("r.refl.trace", QueueType::Compute,
@@ -622,7 +624,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
               [&pipeline, jobs, results, modes, probes, depth, gbuffer, cache, luts, atmosphere, sky, sun, rayLength, s, frame, scene, frameConstants, argumentResource,
-               variant, specularLut, timestamps, firstTick](PassContext& c) {
+               variant, specularLut, timestamps, firstTick, experiment](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = c.srv(jobs);
                   k[1] = c.uav(results);
@@ -642,6 +644,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   k[19] = s.raysPerSample;
                   k[20] = frame;
                   k[21] = specularLut;
+                  k[22] = experiment;
                   std::memcpy(&k[24], scene, sizeof scene);
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);

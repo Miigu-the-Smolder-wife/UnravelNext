@@ -9,3 +9,5 @@ planar_max_wave_slope_deg = 2.0
 planar_views_max = 4                   # reflection cameras per frame (largest pixel counts); others use rays
 planar_view_fixed_ms = 0.05             # prior cost of a planar reflection view: a + b x its screen rectangle (b per pixel, ns);
 planar_view_ns_per_px = 0.26            # replaced online by the view's own measured cost. Design 2.6: 2.14 ms per 8.3 M px [expected]
+experiment_disable = 0                 # cost attribution only (recorded in the quality hash): 1 = sun shadow rays at hits without
+                                       # any-hit, 2 = no sun shadow rays at hits. Never nonzero outside measurements.

@@ -30,6 +30,7 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     uint32_t planarViewsMax = 0; // reflection cameras per frame (largest pixel counts first; the rest use rays)
     float planarViewFixedMs = 0;     // prior fixed cost of a reflection view (a)
     float planarViewNsPerPixel = 0;  // prior cost per pixel of a view's screen rectangle (b)
+    uint32_t experimentDisable = 0;  // cost attribution only (ReflectionHit.hlsli); 0 in the shipped configuration
     static ReflectionSettings fromQuality(const QualityConfig& q);
 };
 

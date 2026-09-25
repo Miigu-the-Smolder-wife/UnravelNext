@@ -53,9 +53,9 @@ RtHit rtTraceClosest(RtSceneSrvs s, RayDesc ray, uint rayFlags, uint mask)
 }
 
 // True when nothing blocks the segment (any hit ends the search; the closest-hit shader is skipped).
-bool rtVisible(RtSceneSrvs s, RayDesc ray, uint mask)
+bool rtVisible(RtSceneSrvs s, RayDesc ray, uint mask, uint extraFlags = RAY_FLAG_NONE)
 {
-    const uint flags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
+    const uint flags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | extraFlags;
     RtHit h = rtMiss();
     h.t = 1;
     RaytracingAccelerationStructure staticTlas = ResourceDescriptorHeap[s.tlasStatic];
