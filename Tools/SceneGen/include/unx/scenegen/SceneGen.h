@@ -18,6 +18,7 @@ enum class SceneId : uint32_t
     Waterside = 3,    // P2/P4: calm water (planar mirror) + wave region, wet rocks
     Interior = 4,     // P2: mirror, glossy floor, area lights
     CityNight = 5,    // P2: 512 local lights (128 shadowed), wet road
+    RidgeSunset = 6,  // S: distant ridge and tower shadows in the air (god rays) against a low sun, 20 x 20 km
     // New scenes are appended (never renumbered) through the interface-change procedure.
 };
 

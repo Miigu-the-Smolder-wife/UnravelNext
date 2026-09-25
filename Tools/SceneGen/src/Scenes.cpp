@@ -491,6 +491,54 @@ Scene interior(const Request& rq)
     s.paths.push_back(linearPath("walk", { -3.0f, 1.7f, 2.5f }, { 2.0f, 1.7f, -1.0f }, 0.8f));
     return s;
 }
+// RidgeSunset (S: shadows in the atmosphere at distance). 20 x 20 km of gently rolling ground; a ridge 2 km wide and
+// 800 m high 3 km in front of the camera; the sun 17 deg high behind it, 10 deg left of the view axis, so the ridge's
+// shadow runs ~2.6 km towards the camera; 300 m towers at 1, 2, 5 and 8 km (right of the ridge, outside its shadow)
+// cast long shadow shafts through the air. The camera stands 2 m above the ground looking towards the sun, 8 deg up.
+// No wind (static reference).
+float ridgeTerrain(float x, float z)
+{
+    const float rolling = 3.0f * std::sin(x / 900.0f) * std::cos(z / 1100.0f) + 1.5f * std::sin(x / 310.0f + z / 270.0f);
+    const float dz = (z - 3000.0f) / 450.0f;
+    const float lateral = 1.0f - smoothstepf(800.0f, 1000.0f, std::fabs(x + 1000.0f));
+    const float crest = 1.0f + 0.06f * std::sin(x / 97.0f) + 0.04f * std::sin(x / 41.0f + 1.3f);
+    return rolling + 800.0f * crest * lateral * std::exp(-dz * dz);
+}
+
+Scene ridgeSunset(const Request& rq)
+{
+    Scene s;
+    s.name = "ridge_sunset";
+    commonSky(s, 17.0f, 100.0f);  // azimuth 100 deg: towards +Z, 10 deg to -X
+    s.windSpeed = 0.0f;
+    const Palette p = buildPalette(s, rq.seed, false);
+    {
+        MeshBuilder b("terrain");
+        b.material(p.grass);
+        b.heightfield(-10000, -10000, 10000, 10000, 1000, ridgeTerrain, 1.0f / 8.0f);  // 20 m grid
+        addInstance(s, addMesh(s, b.finish(false)), float3x4{});
+    }
+    {
+        MeshBuilder b("tower");
+        b.material(p.concrete);
+        b.box({ -10.0f, -5.0f, -10.0f }, { 10.0f, 300.0f, 10.0f }, 0.5f);
+        const uint32_t tower = addMesh(s, b.finish(true));
+        for (float z : { 1000.0f, 2000.0f, 5000.0f, 8000.0f })
+        {
+            const float x = 600.0f + 0.1f * (z - 1000.0f);
+            addInstance(s, tower, placement({ x, ridgeTerrain(x, z), z }, 0.0f));
+        }
+    }
+    const float3 eye{ 0.0f, ridgeTerrain(0, 0) + 2.0f, 0.0f };
+    const float3 flat = normalize(f3(s.sun.direction.x, 0, s.sun.direction.z));
+    const float ev = 14.0f;
+    s.cameras.push_back(camera("ridge", eye, eye + flat * 100.0f + f3(0, 100.0f * std::tan(8.0f * kPi / 180.0f), 0), ev));
+    s.cameras.push_back(camera("side", eye + f3(-2500.0f, 30.0f, 1500.0f), eye + f3(-1000.0f, 400.0f, 3000.0f), ev));
+    for (const auto& c : s.cameras) s.paths.push_back(staticPath(c));
+    s.paths.push_back(linearPath("drive", eye, eye + flat * 1200.0f, 30.0f, f3(0, 0.14f, 0)));
+    (void)rq;
+    return s;
+}
 } // namespace
 
 scene::Scene generate(const Request& rq)
@@ -504,6 +552,7 @@ scene::Scene generate(const Request& rq)
     case SceneId::Waterside: s = waterside(rq); break;
     case SceneId::Interior: s = interior(rq); break;
     case SceneId::CityNight: s = cityNight(rq); break;
+    case SceneId::RidgeSunset: s = ridgeSunset(rq); break;
     default: fail("scenegen: unknown scene id %u", (uint32_t)rq.id);
     }
     s.seed = rq.seed;
@@ -513,7 +562,7 @@ scene::Scene generate(const Request& rq)
 
 std::vector<SceneId> allScenes()
 {
-    return { SceneId::CityBlock, SceneId::ForestThin, SceneId::ForestCard, SceneId::Waterside, SceneId::Interior, SceneId::CityNight };
+    return { SceneId::CityBlock, SceneId::ForestThin, SceneId::ForestCard, SceneId::Waterside, SceneId::Interior, SceneId::CityNight, SceneId::RidgeSunset };
 }
 
 const char* sceneName(SceneId id)
@@ -526,6 +575,7 @@ const char* sceneName(SceneId id)
     case SceneId::Waterside: return "waterside";
     case SceneId::Interior: return "interior";
     case SceneId::CityNight: return "city_night";
+    case SceneId::RidgeSunset: return "ridge_sunset";
     }
     fail("scenegen: unknown scene id %u", (uint32_t)id);
 }
