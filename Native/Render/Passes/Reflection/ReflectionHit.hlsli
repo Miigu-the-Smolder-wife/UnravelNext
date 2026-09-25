@@ -22,7 +22,7 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
     }
     hitDistance = hit.t;
     const RtSurface s = rtSurface(scene, hit, r.Origin, r.Direction);
-    const GpuMaterial m = loadMaterial(s.material);
+    const GpuMaterial m = rtHitMaterial(loadMaterial(s.material), s, 2 * hit.t * coneTan, dot(s.normal, r.Direction));
     if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return 0;
     const uint footprintLevel = giLevelForSize(h, 2 * hit.t * coneTan);
     bool created;

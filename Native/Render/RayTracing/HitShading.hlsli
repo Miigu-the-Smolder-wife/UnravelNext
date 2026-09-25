@@ -11,10 +11,46 @@
 //                                                 resolution (8 x 8 hemisphere, ~22 deg texels): exact when the hit's
 //                                                 lobe is about a texel wide; narrower lobes see the texel average,
 //                                                 wider ones the bilinear texel instead of the lobe average.
-// Not yet: local lights (with S's light lists), material textures at hits (M's texture system).
+// Material textures at hits: rtHitMaterial (M's published textures, INTERFACES v1.11, at the ray cone's level of detail).
+// Not yet: local lights (with S's light lists).
 #ifndef UNX_RT_HIT_SHADING_HLSLI
 #define UNX_RT_HIT_SHADING_HLSLI
 #include "Passes/Shading/ShadingCommon.hlsli"
+
+// The material at a ray hit with its textures applied (baseColor x texture, roughness / metallic x the RG8 factors,
+// emissive x texture), each at the ray cone's level of detail (Akenine-Moller et al. 2019):
+//     lod = 0.5 log2(W H uvPerWorldArea) + log2(cone width at the hit / |cos|).
+float rtTextureLod(Texture2D t, float uvPerWorldArea, float footprintLog2)
+{
+    uint w, h;
+    t.GetDimensions(w, h);
+    return 0.5 * log2(max((float)w * h * uvPerWorldArea, 1e-20)) + footprintLog2;
+}
+
+GpuMaterial rtHitMaterial(GpuMaterial m, RtSurface s, float coneWidth, float cosTheta)
+{
+    const float footprint = log2(max(coneWidth, 1e-8) / max(abs(cosTheta), 1e-3));
+    if (m.baseColorTexture != UNX_NONE)
+    {
+        Texture2D t = ResourceDescriptorHeap[m.baseColorTexture];
+        m.baseColor *= materialBaseColorLevel(m, s.uv, rtTextureLod(t, s.uvPerWorldArea, footprint)).rgb;
+    }
+    if (m.roughMetalTexture != UNX_NONE)
+    {
+        Texture2D<float4> t = ResourceDescriptorHeap[m.roughMetalTexture];
+        const float lod = rtTextureLod(t, s.uvPerWorldArea, footprint);
+        const float2 rm = (m.textureClamp & MATERIAL_TEXTURE_ROUGH_METAL) ? t.SampleLevel(g_anisoClamp, s.uv, lod).rg : t.SampleLevel(g_anisoWrap, s.uv, lod).rg;
+        m.roughness *= rm.r;
+        m.metallic *= rm.g;
+    }
+    if (m.emissiveTexture != UNX_NONE)
+    {
+        Texture2D<float4> t = ResourceDescriptorHeap[m.emissiveTexture];
+        const float lod = rtTextureLod(t, s.uvPerWorldArea, footprint);
+        m.emissive *= (m.textureClamp & MATERIAL_TEXTURE_EMISSIVE) ? t.SampleLevel(g_anisoClamp, s.uv, lod).rgb : t.SampleLevel(g_anisoWrap, s.uv, lod).rgb;
+    }
+    return m;
+}
 
 struct RtHitLighting
 {

@@ -147,6 +147,7 @@ struct RtSurface
     float3 normal;         // shading normal (interpolated), facing the ray origin side for two-sided materials
     float3 geometricNormal;
     float2 uv;
+    float uvPerWorldArea;  // the triangle's uv area / world area: texture level of detail at hits (ray cones)
     uint material;
     uint sceneInstance;
     bool frontFace;
@@ -181,7 +182,10 @@ RtSurface rtSurface(RtSceneSrvs s, RtHit h, float3 origin, float3 direction)
     }
     o.position = origin + direction * h.t;
     o.geometricNormal = normalize(cross(p1 - p0, p2 - p0));
-    o.uv = rtUv(mesh, tri.meshVertex, h.barycentrics);
+    const float2 uv0 = loadVertex(mesh, tri.meshVertex.x).uv, uv1 = loadVertex(mesh, tri.meshVertex.y).uv, uv2 = loadVertex(mesh, tri.meshVertex.z).uv;
+    o.uv = uv0 * w.x + uv1 * w.y + uv2 * w.z;
+    const float2 du = uv1 - uv0, dv = uv2 - uv0;
+    o.uvPerWorldArea = abs(du.x * dv.y - du.y * dv.x) / max(length(cross(p1 - p0, p2 - p0)), 1e-20);
     o.frontFace = h.frontFace != 0;
     if (!o.frontFace)
     {

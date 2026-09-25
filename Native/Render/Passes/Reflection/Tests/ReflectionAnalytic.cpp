@@ -6,6 +6,9 @@
 //     floor lobe (256 VNDF samples, masked ones excluded as on the GPU, the walls intersected exactly); the G path's
 //     control variate cancels in the uniform cache, so any deviation is a transport, shading or plumbing error.
 //  2. A mirror ground under a constant sky L: M pixels see the sky, value L.
+//  3. Textures at hits (INTERFACES v1.11): a mirror floor reflects a wall whose emission is modulated by a published
+//     16 x 16 checker texture (black sky, black diffuse): an M pixel's value is the wall's emission x the texture's
+//     bilinear value at the reflected point, computed on the CPU from the mirror direction.
 // Frame path: RayScene::record -> ray-traced primary visibility standing in for V/M -> GI -> reflections; the check reads
 // reflectionRadiance (M's API) and the per-pixel mode.
 //
@@ -240,6 +243,105 @@ std::function<Expectation(uint32_t, uint32_t)> furnaceExpectation(const ViewDesc
     };
 }
 
+// Scene 3: a mirror floor and an emissive back wall (z = -6, facing +z, uv 0..1 over x in [-6, 6], y in [0, 6]) whose
+// emission (10) is multiplied by a checker texture; everything else black.
+scene::Scene texturedWallInMirror()
+{
+    scene::Scene s;
+    s.name = "refl_textured_wall";
+    scene::Material floorMaterial;
+    floorMaterial.name = "mirror";
+    floorMaterial.baseColor = { 1, 1, 1 };
+    floorMaterial.metallic = 1;
+    floorMaterial.roughness = 0;
+    s.materials.push_back(floorMaterial);
+    scene::Material wall;
+    wall.name = "textured emitter";
+    wall.baseColor = { 0, 0, 0 };
+    wall.emissive = { 10, 10, 10 };
+    s.materials.push_back(wall);
+    scene::Mesh floor;
+    floor.name = "floor";
+    addQuad(floor, { -40, 0, 20 }, { 40, 0, 20 }, { 40, 0, -6 }, { -40, 0, -6 }, { 0, 1, 0 });
+    floor.submeshes.push_back({ 0, 6, 0 });
+    s.meshes.push_back(floor);
+    scene::Mesh back;
+    back.name = "wall";
+    for (auto [x, y] : { std::pair{ -6.f, 0.f }, { 6.f, 0.f }, { 6.f, 6.f }, { -6.f, 6.f } })
+    {
+        back.positions.push_back({ x, y, -6 });
+        back.normals.push_back({ 0, 0, 1 });
+        back.uv0.push_back({ (x + 6) / 12, y / 6 });
+    }
+    back.indices = { 0, 1, 2, 0, 2, 3 };
+    back.submeshes.push_back({ 0, 6, 1 });
+    s.meshes.push_back(back);
+    s.instances.push_back({});
+    scene::Instance w;
+    w.mesh = 1;
+    s.instances.push_back(w);
+    s.sun.illuminance = 0;
+    scene::Camera cam;
+    cam.name = "low";
+    cam.position = { 0.4f, 1.0f, 8.0f };
+    cam.forward = normalize(float3{ 0, -0.12f, -1 });
+    cam.up = normalize(cross(cross(cam.forward, float3{ 0, 1, 0 }), cam.forward));
+    s.cameras.push_back(cam);
+    return s;
+}
+
+// An n x n RGBA8 (UNORM, linear) texture on the GPU; returns its bindless SRV.
+uint32_t createTexture(Device& device, const std::vector<uint8_t>& rgba, uint32_t n, ComPtr<ID3D12Resource>& texture)
+{
+    D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT }, up{ D3D12_HEAP_TYPE_UPLOAD };
+    D3D12_RESOURCE_DESC1 d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    d.Width = n;
+    d.Height = n;
+    d.DepthOrArraySize = d.MipLevels = 1;
+    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.SampleDesc.Count = 1;
+    check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_COPY_DEST, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&texture)), "texture");
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    UINT64 bytes = 0;
+    device.d3d()->GetCopyableFootprints1(&d, 0, 1, 0, &fp, nullptr, nullptr, &bytes);
+    Buffer staging = createBuffer(device, bytes, D3D12_HEAP_TYPE_UPLOAD, false);
+    uint8_t* mapped = nullptr;
+    D3D12_RANGE none{ 0, 0 };
+    check(staging.resource->Map(0, &none, reinterpret_cast<void**>(&mapped)), "map texture staging");
+    for (uint32_t y = 0; y < n; ++y) std::memcpy(mapped + fp.Offset + y * fp.Footprint.RowPitch, rgba.data() + y * n * 4, n * 4);
+    staging.resource->Unmap(0, nullptr);
+    CommandList cl = device.acquireCommandList(QueueType::Graphics);
+    D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
+    dst.pResource = texture.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.pResource = staging.resource.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint = fp;
+    cl.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    D3D12_TEXTURE_BARRIER tb{};
+    tb.SyncBefore = D3D12_BARRIER_SYNC_COPY;
+    tb.SyncAfter = D3D12_BARRIER_SYNC_NONE;
+    tb.AccessBefore = D3D12_BARRIER_ACCESS_COPY_DEST;
+    tb.AccessAfter = D3D12_BARRIER_ACCESS_NO_ACCESS;
+    tb.LayoutBefore = D3D12_BARRIER_LAYOUT_COPY_DEST;
+    tb.LayoutAfter = D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
+    tb.pResource = texture.Get();
+    tb.Subresources.IndexOrFirstMipLevel = 0xFFFFFFFFu;
+    D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_TEXTURE, 1 };
+    group.pTextureBarriers = &tb;
+    cl.list->Barrier(1, &group);
+    device.queue(QueueType::Graphics).waitCpu(device.submit(cl));
+    const uint32_t srv = device.descriptors().allocateResource();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.Texture2D.MipLevels = 1;
+    device.d3d()->CreateShaderResourceView(texture.Get(), &sd, device.descriptors().resourceCpu(srv));
+    return srv;
+}
+
 struct Outcome
 {
     uint32_t surface = 0, k = 0, mirror = 0, glossy = 0;
@@ -249,10 +351,12 @@ struct Outcome
 };
 
 Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky,
-            const std::function<Expectation(uint32_t, uint32_t)>& expectedAt, uint32_t frames, uint32_t width, uint32_t height)
+            const std::function<Expectation(uint32_t, uint32_t)>& expectedAt, uint32_t frames, uint32_t width, uint32_t height,
+            const std::vector<gpu::MaterialTextures>* textures = nullptr)
 {
     GpuScene gpuScene(device);
     gpuScene.upload(s);
+    if (textures) gpuScene.setMaterialTextures(*textures);
     Outcome out;
     TrackState state;
     RenderGraph graph(device);
@@ -376,6 +480,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
         const uint32_t px = (uint32_t)(i % countX) * stride, py = (uint32_t)(i / countX) * stride;
         const Expectation e = expectedAt(px, py);
         const double expected = e.mean;
+        if (expected <= 1e-6) continue;  // no defined expectation here (scene 3: pixels outside the checked reflection)
         // Allowed relative deviation: 3 % plus 4 sigma of the pixel's sample mean (1 sample for M, g_rays_per_sample for G).
         const double allowM = 0.03 + 4 * e.sigma / expected, allowG = 0.03 + 4 * e.sigma / std::sqrt((double)raysPerSample) / expected;
         if (w == 1)
@@ -436,6 +541,72 @@ int main(int argc, char** argv)
              okB ? "PASS" : "FAIL");
         pass = pass && okB;
 
+        {
+            const uint32_t n = 16;
+            std::vector<uint8_t> rgba(n * n * 4);
+            for (uint32_t y = 0; y < n; ++y)
+                for (uint32_t x = 0; x < n; ++x)
+                {
+                    const uint8_t v = ((x / 2 + y / 2) & 1) ? 255 : 51;
+                    uint8_t* px = &rgba[(y * n + x) * 4];
+                    px[0] = v;
+                    px[1] = (uint8_t)(v / 2);
+                    px[2] = (uint8_t)(255 - v);
+                    px[3] = 255;
+                }
+            ComPtr<ID3D12Resource> texture;
+            const scene::Scene t = texturedWallInMirror();
+            std::vector<gpu::MaterialTextures> published(t.materials.size());
+            published[1].emissive = createTexture(device, rgba, n, texture);
+            published[1].clamp = gpu::MaterialTextureEmissive;
+            auto texel = [&](int x, int y, int c) { return rgba[(std::clamp(y, 0, (int)n - 1) * n + std::clamp(x, 0, (int)n - 1)) * 4 + c] / 255.0; };
+            const ViewDesc tv = ViewDesc::fromCamera(t.cameras[0], 1920, 1080, float4x4{});
+            // Expected: 10 x texture (clamp addressing, bilinear at level 0; the single-level texture has no other) at the
+            // wall point the mirror direction reaches; channel average like the check; floor pixels whose reflection
+            // misses the wall see the black sky.
+            auto expected = [&, tv](uint32_t px, uint32_t py) {
+                const float4x4& m = tv.invViewProj;
+                auto unproject = [&](float z) {
+                    const float x = (px + 0.5f) / 1920 * 2 - 1, y = 1 - (py + 0.5f) / 1080 * 2;
+                    const float w = m.m[3][0] * x + m.m[3][1] * y + m.m[3][2] * z + m.m[3][3];
+                    return float3{ (m.m[0][0] * x + m.m[0][1] * y + m.m[0][2] * z + m.m[0][3]) / w, (m.m[1][0] * x + m.m[1][1] * y + m.m[1][2] * z + m.m[1][3]) / w,
+                                   (m.m[2][0] * x + m.m[2][1] * y + m.m[2][2] * z + m.m[2][3]) / w };
+                };
+                const float3 a = unproject(1.0f), b = unproject(0.5f), d = normalize(b - a);
+                if (d.y >= 0) return Expectation{ 0, 0 };
+                if (d.z < 0)  // the wall itself in front of the floor: not a mirror pixel of this check
+                {
+                    const float3 w = a + d * ((-6 - a.z) / d.z);
+                    if (w.y >= 0 && std::fabs(w.x) <= 6) return Expectation{ 0, 0 };
+                }
+                const float3 p = a + d * (-a.y / d.y);
+                const float3 r{ d.x, -d.y, d.z };
+                if (r.z >= 0) return Expectation{ 0, 0 };
+                const float tw = (-6 - p.z) / r.z;
+                const float3 q = p + r * tw;
+                // An M pixel is one GGX (VNDF) sample; GGX tails are heavy (P(tan theta_h > T) = a^2 / (a^2 + T^2)), so near
+                // the wall's silhouette a correct sample can cross the edge. Reflections closer to the boundary than the
+                // tail radius at probability 1e-5, 2 t a sqrt(1 / 1e-5 - 1) (a = 1e-4: 0.88 m at 14 m), are not judged.
+                const float margin = 2 * tw * 1e-4f * std::sqrt(1 / 1e-5f - 1);
+                if (q.x < -6 + margin || q.x > 6 - margin || q.y < margin || q.y > 6 - margin) return Expectation{ 0, 0 };
+                const double fx = (q.x + 6) / 12 * n - 0.5, fy = q.y / 6 * n - 0.5;
+                const int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+                const double wx = fx - x0, wy = fy - y0;
+                double sum = 0;
+                for (int c = 0; c < 3; ++c)
+                    sum += (texel(x0, y0, c) * (1 - wx) + texel(x0 + 1, y0, c) * wx) * (1 - wy) + (texel(x0, y0 + 1, c) * (1 - wx) + texel(x0 + 1, y0 + 1, c) * wx) * wy;
+                // Near a checker edge the texture varies within the ray's sub-pixel spread: allow the local variation.
+                const double dxv = std::fabs(texel(x0 + 1, y0, 0) - texel(x0, y0, 0)) + std::fabs(texel(x0, y0 + 1, 0) - texel(x0, y0, 0));
+                return Expectation{ 10 * sum / 3, 10 * dxv * 0.02 };
+            };
+            const Outcome c = run(device, shaders, quality, t, { 0, 0, 0 }, expected, 32, 1920, 1080, &published);
+            const bool okC = c.mirror > 1000 && std::fabs(c.meanM - 1) < 0.01 && c.excessM <= 0;
+            logf("textured wall in a mirror: %u M pixels on the wall's reflection (mean value / expected %.4f, worst %.2f %%, %u beyond 3 %% + 4 sigma) -> %s\n",
+                 c.mirror, c.meanM, 100 * c.worstM, c.outliersM, okC ? "PASS" : "FAIL");
+            pass = pass && okC;
+            device.waitIdle();
+            device.descriptors().freeResource(published[1].emissive);
+        }
         rt::RayPipeline::releaseDevice(device);
         rt::RayScene::releaseDevice(device);
         device.waitIdle();

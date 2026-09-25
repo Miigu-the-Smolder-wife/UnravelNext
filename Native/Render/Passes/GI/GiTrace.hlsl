@@ -12,6 +12,7 @@
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli: SKY0 atmosphere LUTs, SKY1 constants), ray length
 // P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view (sun, scene buffers).
 #include "RayTracing/RayShaders.hlsli"
+#include "RayTracing/HitShading.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 
@@ -61,7 +62,8 @@ void GiTraceGen()
     {
         distanceToHit = hit.t;
         const RtSurface s = rtSurface(scene, hit, r.Origin, r.Direction);
-        const GpuMaterial m = loadMaterial(s.material);
+        // Textures at the GI ray's texel-cone footprint (the width its cache cell is sized by).
+        const GpuMaterial m = rtHitMaterial(loadMaterial(s.material), s, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z), dot(s.normal, r.Direction));
         const bool twoSided = (m.classFlags & MATERIAL_TWO_SIDED) != 0;
         if (!s.frontFace && !twoSided)
         {
