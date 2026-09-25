@@ -127,6 +127,28 @@ public:
         return point;
     }
 
+    // Every triangle whose closest point to p lies within 'radius': its index, barycentrics and distance.
+    template <typename Visit>
+    void within(float3 p, float radius, Visit&& visit) const
+    {
+        int a[3], b[3];
+        cellOf(p - float3{ radius, radius, radius }, a);
+        cellOf(p + float3{ radius, radius, radius }, b);
+        std::vector<uint32_t> seen;
+        for (int z = a[2]; z <= b[2]; ++z)
+            for (int y = a[1]; y <= b[1]; ++y)
+                for (int x = a[0]; x <= b[0]; ++x)
+                    for (uint32_t t : m_cells[((size_t)z * m_n[1] + y) * m_n[0] + x])
+                    {
+                        if (std::find(seen.begin(), seen.end(), t) != seen.end()) continue;
+                        seen.push_back(t);
+                        float3 bary;
+                        const float3 q = closestOnTriangle(p, m_positions[m_indices[3 * t]], m_positions[m_indices[3 * t + 1]], m_positions[m_indices[3 * t + 2]], bary);
+                        const float d = length(p - q);
+                        if (d <= radius) visit(t, bary, d);
+                    }
+    }
+
 private:
     void cellOf(float3 p, int k[3]) const
     {
@@ -334,17 +356,52 @@ ProxyPoseCoefficients proxyPoseCoefficients(const scene::Mesh& m, ProxyPoseSkele
         if (skinned) addPair(m, sk, x, q, out, acc);
         else out.bindError = std::max(out.bindError, length(pointOf(m, x) - pointOf(m, q)));
     };
+    // The correspondence: any point of the other surface gives a valid bound, so among the points within a tolerance of
+    // the closest (1e-4 of the mesh extent) take the one whose joint weights differ least. Meshes duplicate vertices along
+    // seams with different weights (a cap rim against the side); the nearest point there can be the wrong side of the seam.
+    float3 lo = m.positions[0], hi = m.positions[0];
+    for (const float3& v : m.positions)
+    {
+        lo = { std::min(lo.x, v.x), std::min(lo.y, v.y), std::min(lo.z, v.z) };
+        hi = { std::max(hi.x, v.x), std::max(hi.y, v.y), std::max(hi.z, v.z) };
+    }
+    const float tolerance = 1e-4f * std::max({ hi.x - lo.x, hi.y - lo.y, hi.z - lo.z });
+    auto weightDistance = [&](const Combination& a, const Combination& b) {
+        JointWeight wa[12], wb[12];
+        const uint32_t na = blended(m, a, wa), nb = blended(m, b, wb);
+        float d = 0;
+        for (uint32_t i = 0; i < na; ++i) d += std::fabs(wa[i].weight - weightOf(wb, nb, wa[i].joint));
+        for (uint32_t i = 0; i < nb; ++i)
+            if (weightOf(wa, na, wb[i].joint) == 0) d += wb[i].weight;
+        return d;
+    };
+    auto correspond = [&](const TriangleGrid& grid, std::span<const uint32_t> indices, const Combination& from) {
+        const float3 p = pointOf(m, from);
+        uint32_t t = 0;
+        float3 bary;
+        const float nearest = length(p - grid.closest(p, t, bary));
+        Combination best = triangleCombination(indices, t, bary);
+        if (!skinned) return best;
+        float bestScore = weightDistance(from, best);
+        grid.within(p, nearest + tolerance, [&](uint32_t ct, float3 cb, float) {
+            const Combination c = triangleCombination(indices, ct, cb);
+            const float score = weightDistance(from, c);
+            if (score < bestScore)
+            {
+                bestScore = score;
+                best = c;
+            }
+        });
+        return best;
+    };
     // Source vertices -> the cut (geometry the cut loses).
     for (uint32_t v = 0; v < (uint32_t)m.positions.size(); ++v)
     {
-        uint32_t t = 0;
-        float3 bary;
-        cutGrid.closest(m.positions[v], t, bary);
         Combination x;
         x.count = 1;
         x.vertex[0] = v;
         x.weight[0] = 1;
-        pair(x, triangleCombination(cut, t, bary));
+        pair(x, correspond(cutGrid, cut, x));
     }
     // Cut corners, edge midpoints and centroids -> the source (geometry the cut adds).
     const float3 samples[7] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 0.5f, 0.5f, 0 }, { 0, 0.5f, 0.5f }, { 0.5f, 0, 0.5f }, { 1 / 3.f, 1 / 3.f, 1 / 3.f } };
@@ -352,10 +409,7 @@ ProxyPoseCoefficients proxyPoseCoefficients(const scene::Mesh& m, ProxyPoseSkele
         for (const float3& b : samples)
         {
             const Combination q = triangleCombination(cut, t, b);
-            uint32_t st = 0;
-            float3 bary;
-            sourceGrid.closest(pointOf(m, q), st, bary);
-            pair(triangleCombination(std::span<const uint32_t>(m.indices), st, bary), q);
+            pair(correspond(sourceGrid, std::span<const uint32_t>(m.indices), q), q);
         }
     // Register the pairs in the skeleton (shared by every cut of the mesh), terms sorted by reference joint.
     for (size_t k = 0; k < acc.terms.size(); ++k)
