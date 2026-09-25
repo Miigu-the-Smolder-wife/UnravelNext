@@ -450,6 +450,23 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
          m_stats.meshBlasBytes / 1048576.0, m_stats.meshBlasBytesBeforeCompaction / 1048576.0, (unsigned long long)m_stats.deformedTriangles,
          (unsigned long long)m_stats.deformedVertices, m_stats.deformedAboveProxyBudget, m_stats.tlasStaticBytes / 1048576.0, m_stats.tlasDynamicBytes / 1048576.0,
          m_stats.loadMs);
+    {
+        // Resident video memory by use (the buffers this object keeps; upload rings are in system memory).
+        auto mb = [](std::initializer_list<const Buffer*> list) {
+            uint64_t bytes = 0;
+            for (const Buffer* b : list)
+                if (b->resource) bytes += b->bytes;
+            return bytes / 1e6;
+        };
+        logf("RayScene resident (MB): static BLAS+TLAS %.1f (BLAS %.1f, TLAS %.2f, descs+scratch %.2f), dynamic AS %.1f (deformed BLAS %.1f, scratch %.1f, "
+             "TLAS+scratch+descs %.2f, emitters %.3f), deformed vertices %.1f, records %.1f (instances, geometries, proxy indices, vertex map, deform jobs)\n",
+             mb({ &m_meshBlasPool, &m_tlasStatic, &m_staticDescBuffer, &m_staticScratch }), mb({ &m_meshBlasPool }), mb({ &m_tlasStatic }),
+             mb({ &m_staticDescBuffer, &m_staticScratch }),
+             mb({ &m_deformedBlasPool, &m_deformedScratch, &m_tlasDynamic, &m_tlasScratch, &m_dynamicDescBuffer, &m_emitterBlas, &m_emitterAabbs }),
+             mb({ &m_deformedBlasPool }), mb({ &m_deformedScratch }), mb({ &m_tlasDynamic, &m_tlasScratch, &m_dynamicDescBuffer }),
+             mb({ &m_emitterBlas, &m_emitterAabbs }), mb({ &m_deformedPool }),
+             mb({ &m_instanceBuffer, &m_geometryBuffer, &m_indexPool, &m_vertexMap, &m_deformJobs, &m_deformGroups, &m_exactCounts, &m_exactZero }));
+    }
 }
 
 void RayScene::buildMeshBlas()
@@ -1019,7 +1036,7 @@ void RayScene::recordExactBuilds(ID3D12GraphicsCommandList7* cmd, const std::vec
 // a slot is rebuilt only when its owner changes). Patches go through a small upload ring copied in the frame.
 void RayScene::selectExactSet(FramePassContext& fc)
 {
-    std::fill(m_exactRebuild.begin(), m_exactRebuild.end(), 0);
+    std::fill(m_exactRebuild.begin(), m_exactRebuild.end(), uint8_t{ 0 });
     m_stats.exactBuilds = 0;
     if (m_exact.empty()) return;
     const uint32_t n = (uint32_t)m_deformed.size();
