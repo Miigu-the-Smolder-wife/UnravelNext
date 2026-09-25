@@ -451,6 +451,114 @@ UNX_TEST(graph_aliased_buffers_keep_their_writes)
     CHECK(wrong[0] == 0 && wrong[1] == 0);
 }
 
+UNX_TEST(graph_alias_reuse_waits_for_readers)
+{
+    // Write-after-read across aliases: buffer A is filled by a kernel and read by a long kernel (into C: each thread
+    // loads A at the end of a long dependent hash chain); buffer B reuses A's memory. C must hold what A held: B's first
+    // write may not start while A's reader still runs. Mode 0: B's first write is a kernel (UAV) right after the reader
+    // [S's froxel frame: the VSM search fill written by searchgrid, read by searchdilate, then the froxel light lists
+    // written by froxel.begin in the same memory; per-resource barriers on the fill and on the lists did not hold the
+    // writes back on the dev GPU, the blocker search bound came out wrong]. Mode 1: A is also read by a copy (into D)
+    // and B's first write is a copy from an upload buffer.
+    RenderGraph g(testDevice());
+    ID3D12PipelineState* fillPso = shaders().compute("Passes/Test/FillBuffer");
+    ID3D12PipelineState* hashPso = shaders().compute("Passes/Test/HashWords");
+    const uint32_t words = 1u << 20, rounds = 4096, seed = 0xC3C3C3C3u, seedB = 0x3C3C3C3Cu;
+    ComPtr<ID3D12Resource> source, rb;
+    D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD }, rp{ D3D12_HEAP_TYPE_READBACK };
+    D3D12_RESOURCE_DESC1 rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = (uint64_t)words * 4;
+    rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    check(testDevice().d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&source)), "upload");
+    rd.Width = (uint64_t)words * 4 * 4;
+    check(testDevice().d3d()->CreateCommittedResource3(&rp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)), "readback");
+    uint32_t* mapped = nullptr;
+    check(source->Map(0, nullptr, (void**)&mapped), "map upload");
+    for (uint32_t i = 0; i < words; ++i) mapped[i] = i * 2654435761u;
+    source->Unmap(0, nullptr);
+    size_t wrong[2][3] = {};
+    bool shared = true;
+    for (int mode = 0; mode < 2; ++mode)
+    for (int f = 0; f < 3; ++f)
+    {
+        const uint64_t bytes = (uint64_t)words * 4;
+        const BufferRef a = g.createBuffer({ "a", bytes, 0 });
+        const BufferRef c = g.createBuffer({ "c", 2 * bytes, 0 });  // A ^ hash, then the hashes
+        const BufferRef d = mode == 1 ? g.createBuffer({ "d", bytes, 0 }) : BufferRef{};
+        const BufferRef b = g.createBuffer({ "b", bytes, 0 });
+        g.addPass("fill a", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(a, Use::UavCompute); },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.uav(a), words, seed, 0 };
+                      ctx.cmd->SetPipelineState(fillPso);
+                      ctx.computeConstants(k, 4);
+                      ctx.cmd->Dispatch(words / 64, 1, 1);
+                  });
+        g.addPass("hash a", QueueType::Graphics,
+                  [&](PassBuilder& pb) {
+                      pb.use(a, Use::SrvCompute);
+                      pb.use(c, Use::UavCompute);
+                  },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.srv(a), ctx.uav(c), words, rounds };
+                      ctx.cmd->SetPipelineState(hashPso);
+                      ctx.computeConstants(k, 4);
+                      ctx.cmd->Dispatch(words / 64, 1, 1);
+                  });
+        if (mode == 1)
+            g.addPass("copy a", QueueType::Graphics,
+                      [&](PassBuilder& pb) {
+                          pb.use(a, Use::CopySrc);
+                          pb.use(d, Use::CopyDst);
+                      },
+                      [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(ctx.resource(d), 0, ctx.resource(a), 0, bytes); });
+        ID3D12Resource* src = source.Get();
+        if (mode == 1)
+            g.addPass("upload b", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(b, Use::CopyDst); },
+                      [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(ctx.resource(b), 0, src, 0, bytes); });
+        else
+            g.addPass("fill b", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(b, Use::UavCompute); },
+                      [=](PassContext& ctx) {
+                          const uint32_t k[4] = { ctx.uav(b), words, seedB, 0 };
+                          ctx.cmd->SetPipelineState(fillPso);
+                          ctx.computeConstants(k, 4);
+                          ctx.cmd->Dispatch(words / 64, 1, 1);
+                      });
+        ID3D12Resource* dst = rb.Get();
+        g.addPass("readback", QueueType::Graphics,
+                  [&](PassBuilder& pb) {
+                      pb.use(b, Use::CopySrc);
+                      pb.use(c, Use::CopySrc);
+                      if (d.valid()) pb.use(d, Use::CopySrc);
+                      pb.keep();
+                  },
+                  [=](PassContext& ctx) {
+                      ctx.cmd->CopyBufferRegion(dst, 0, ctx.resource(b), 0, bytes);
+                      ctx.cmd->CopyBufferRegion(dst, bytes, ctx.resource(c), 0, 2 * bytes);
+                      if (d.valid()) ctx.cmd->CopyBufferRegion(dst, 3 * bytes, ctx.resource(d), 0, bytes);
+                  });
+        g.execute(nullptr);
+        for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+        shared = shared && g.sharesMemory(a, b);
+        const uint32_t* r = nullptr;
+        check(rb->Map(0, nullptr, (void**)&r), "map readback");
+        for (uint32_t i = 0; i < words; ++i)
+        {
+            if (r[i] != (mode == 1 ? i * 2654435761u : (i ^ seedB))) ++wrong[mode][0];
+            if ((r[words + i] ^ r[2 * words + i]) != (i ^ seed)) ++wrong[mode][1];
+            if (mode == 1 && r[3 * words + i] != (i ^ seed)) ++wrong[mode][2];
+        }
+        rb->Unmap(0, nullptr);
+    }
+    for (int mode = 0; mode < 2; ++mode)
+        logf("    alias reuse after readers, B written by a %s (3 frames): %zu wrong words in B, %zu in the kernel reader's output, %zu in D (of %u each)\n",
+             mode == 0 ? "kernel" : "copy", wrong[mode][0], wrong[mode][1], wrong[mode][2], 3 * words);
+    CHECK(shared);  // the case under test: B reuses A's memory
+    for (int mode = 0; mode < 2; ++mode) CHECK(wrong[mode][0] == 0 && wrong[mode][1] == 0 && wrong[mode][2] == 0);
+}
+
 UNX_TEST(graph_castable_view_formats)
 {
     // TextureDesc::srvFormat/uavFormat: written as R32_UINT through the UAV, read as R9G9B9E5_SHAREDEXP through the SRV

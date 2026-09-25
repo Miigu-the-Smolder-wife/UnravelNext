@@ -107,6 +107,45 @@ D3D12_BARRIER_ACCESS orAccess(D3D12_BARRIER_ACCESS a, D3D12_BARRIER_ACCESS b)
     return a | b;
 }
 
+// Global barriers (alias reuse) name only layout-independent accesses, and every sync bit needs a compatible access.
+// Render-target, depth-stencil and resolve scopes have none: before the barrier they are dropped (those predecessors are
+// textures ordered by their own deactivation barrier), after it they widen to DRAW / ALL.
+constexpr D3D12_BARRIER_ACCESS kGlobalAccesses = (D3D12_BARRIER_ACCESS)(
+    D3D12_BARRIER_ACCESS_VERTEX_BUFFER | D3D12_BARRIER_ACCESS_CONSTANT_BUFFER | D3D12_BARRIER_ACCESS_INDEX_BUFFER | D3D12_BARRIER_ACCESS_UNORDERED_ACCESS |
+    D3D12_BARRIER_ACCESS_SHADER_RESOURCE | D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT | D3D12_BARRIER_ACCESS_COPY_DEST | D3D12_BARRIER_ACCESS_COPY_SOURCE |
+    D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ | D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE);
+constexpr D3D12_BARRIER_SYNC kLayoutBoundSync = (D3D12_BARRIER_SYNC)(D3D12_BARRIER_SYNC_RENDER_TARGET | D3D12_BARRIER_SYNC_DEPTH_STENCIL | D3D12_BARRIER_SYNC_RESOLVE);
+
+// A layout-independent access each sync bit is compatible with (its canonical access).
+D3D12_BARRIER_ACCESS canonicalAccess(D3D12_BARRIER_SYNC bit)
+{
+    switch (bit)
+    {
+    case D3D12_BARRIER_SYNC_INDEX_INPUT: return D3D12_BARRIER_ACCESS_INDEX_BUFFER;
+    case D3D12_BARRIER_SYNC_COPY: return D3D12_BARRIER_ACCESS_COPY_SOURCE;
+    case D3D12_BARRIER_SYNC_EXECUTE_INDIRECT: return D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT;  // = PREDICATION
+    case D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW:
+    case D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO: return D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+    case D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE:
+    case D3D12_BARRIER_SYNC_COPY_RAYTRACING_ACCELERATION_STRUCTURE: return D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ;
+    default: return D3D12_BARRIER_ACCESS_SHADER_RESOURCE;  // ALL, DRAW and the shading stages
+    }
+}
+
+// The layout-independent part of 'access', plus the canonical access of every sync bit it leaves uncovered.
+D3D12_BARRIER_ACCESS globalAccess(D3D12_BARRIER_SYNC sync, D3D12_BARRIER_ACCESS access)
+{
+    uint32_t out = access == D3D12_BARRIER_ACCESS_NO_ACCESS ? 0u : (uint32_t)(access & kGlobalAccesses);
+    for (uint32_t bits = (uint32_t)sync; bits != 0; bits &= bits - 1)
+    {
+        const D3D12_BARRIER_SYNC bit = (D3D12_BARRIER_SYNC)(bits & (~bits + 1));
+        const D3D12_BARRIER_ACCESS c = canonicalAccess(bit);
+        const bool covered = bit == D3D12_BARRIER_SYNC_ALL ? out != 0 : (out & (uint32_t)c) != 0;
+        if (!covered) out |= (uint32_t)c;
+    }
+    return (D3D12_BARRIER_ACCESS)out;
+}
+
 double msSince(std::chrono::steady_clock::time_point t0)
 {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -168,7 +207,8 @@ struct RenderGraph::Impl
         std::vector<uint32_t> textureResources;  // resource ids, patched with the frame's pointers
         std::vector<D3D12_BUFFER_BARRIER> buffers;
         std::vector<uint32_t> bufferResources;
-        bool empty() const { return textures.empty() && buffers.empty(); }
+        std::vector<D3D12_GLOBAL_BARRIER> globals;  // alias reuse (orders every access of the earlier occupants)
+        bool empty() const { return textures.empty() && buffers.empty() && globals.empty(); }
     };
     struct PlanPass
     {
@@ -635,27 +675,41 @@ struct RenderGraph::Impl
                     }
                     else
                     {
-                        // Aliased memory (all graphics-queue). Every earlier occupant is deactivated once: a barrier on
-                        // it with its pending accesses as the "before" scope, so its writes (render-target, UAV, copy
-                        // caches) are complete and flushed before this resource's first use and none is written back
-                        // over the new contents later (lost writes to an aliased transient). A dead texture goes to
-                        // UNDEFINED (NO_ACCESS after a sync scope needs it). The new resource then starts from
-                        // UNDEFINED with DISCARD.
+                        // Aliased memory (all graphics-queue). The reuse is ordered by a global barrier: every access of
+                        // the earlier occupants (their pending sync scopes and accesses) completes and is flushed before
+                        // this resource's first use. Barriers bound to the resources do not order it on the dev GPU: a
+                        // kernel writing the new buffer ran while a kernel still read the old one [measured: S's froxel
+                        // frame, the VSM search fill read by searchdilate and the froxel light lists written by
+                        // froxel.begin in the same memory, wrong blocker-search bounds; unit test
+                        // graph_alias_reuse_waits_for_readers, 138432 of 3145728 words read after the new writes; the
+                        // global barrier fixes both]. A dead texture is also deactivated to UNDEFINED (its render-target
+                        // and depth writes are layout-bound accesses a global barrier cannot name, and none may be
+                        // written back over the new contents). The new resource then starts from UNDEFINED with DISCARD
+                        // (textures) or NO_ACCESS (buffers).
                         D3D12_BARRIER_SYNC aliasSync = D3D12_BARRIER_SYNC_NONE;
+                        D3D12_BARRIER_ACCESS aliasAccess = D3D12_BARRIER_ACCESS_NO_ACCESS;
                         for (uint32_t pr : predecessors[r])
                         {
                             Track& pt = track[pr];
                             aliasSync |= pt.pendSync;
                             if (!pt.touched || pt.pendAccess == D3D12_BARRIER_ACCESS_NO_ACCESS) continue;
+                            aliasAccess = orAccess(aliasAccess, pt.pendAccess);
                             if (resources[pr].texture)
                             {
                                 pushTexture(pp.before, pr, pt.pendSync, a.sync, pt.pendAccess, D3D12_BARRIER_ACCESS_NO_ACCESS, pt.layout, D3D12_BARRIER_LAYOUT_UNDEFINED,
                                             D3D12_TEXTURE_BARRIER_FLAG_NONE);
                                 pt.layout = D3D12_BARRIER_LAYOUT_UNDEFINED;
                             }
-                            else
-                                pushBuffer(pp.before, pr, pt.pendSync, a.sync, pt.pendAccess, D3D12_BARRIER_ACCESS_NO_ACCESS);
                             pt.pendAccess = D3D12_BARRIER_ACCESS_NO_ACCESS;  // flushed; its sync scope still orders later occupants
+                        }
+                        const D3D12_BARRIER_SYNC syncBefore = (D3D12_BARRIER_SYNC)(aliasSync & ~kLayoutBoundSync);
+                        if (syncBefore != D3D12_BARRIER_SYNC_NONE)
+                        {
+                            D3D12_BARRIER_SYNC syncAfter = (D3D12_BARRIER_SYNC)(a.sync & ~kLayoutBoundSync);
+                            if (a.sync & (D3D12_BARRIER_SYNC_RENDER_TARGET | D3D12_BARRIER_SYNC_DEPTH_STENCIL)) syncAfter |= D3D12_BARRIER_SYNC_DRAW;
+                            if (a.sync & D3D12_BARRIER_SYNC_RESOLVE) syncAfter |= D3D12_BARRIER_SYNC_ALL;
+                            pp.before.globals.push_back({ syncBefore, syncAfter, globalAccess(syncBefore, aliasAccess), globalAccess(syncAfter, a.access) });
+                            ++barrierCount;
                         }
                         // Every first use grants its access explicitly: the placed resource may have been deactivated
                         // (NO_ACCESS) as an alias predecessor in an earlier frame that used the same plan, and a buffer
@@ -1012,8 +1066,15 @@ struct RenderGraph::Impl
         if (b.empty()) return;
         for (size_t k = 0; k < b.textures.size(); ++k) b.textures[k].pResource = framePointers[b.textureResources[k]];
         for (size_t k = 0; k < b.buffers.size(); ++k) b.buffers[k].pResource = framePointers[b.bufferResources[k]];
-        D3D12_BARRIER_GROUP groups[2];
+        D3D12_BARRIER_GROUP groups[3];
         uint32_t count = 0;
+        if (!b.globals.empty())
+        {
+            groups[count].Type = D3D12_BARRIER_TYPE_GLOBAL;
+            groups[count].NumBarriers = (UINT32)b.globals.size();
+            groups[count].pGlobalBarriers = b.globals.data();
+            ++count;
+        }
         if (!b.textures.empty())
         {
             groups[count].Type = D3D12_BARRIER_TYPE_TEXTURE;
