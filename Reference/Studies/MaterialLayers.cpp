@@ -12,6 +12,7 @@
 //   unx_study_material_layers clearcoat_specpath <out.md> [photons] lossless GGX base under the coat: energy per base-hit count
 //   unx_study_material_layers v1albedo <out.md>                  v1 metal white furnace (table E vs the model's own integral)
 //   unx_study_material_layers metalms <out.md> [photons]         v1 metal MS compensation candidates K, G vs the MS conductor
+//   unx_study_material_layers metalgtable <out.inc> [photons]    candidate G table kMetalScatterScale [rho][r][mu] + validation
 //   unx_study_material_layers coatfilm     <out.md> [photons]   R1 + film under the coat vs the layer model
 //   unx_study_material_layers tables       <out.inc>  E_c, K, A_x, B_x, Abar, Bbar tables for the definition
 // CPU only, at most 4 worker threads, below-normal priority (the machine is shared with measurements and the user).
@@ -201,7 +202,7 @@ int main(int argc, char** argv)
     try
     {
         SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
-        if (argc < 3) fail("usage: unx_study_material_layers thinfilm|metals|clearcoat_r1|clearcoat_r1_ms|clearcoat_r1a|clearcoat_r1b|clearcoat_r1c|clearcoat_r1d|clearcoat_r1e|clearcoat_diag|clearcoat_specpath|v1albedo|metalms|coatfilm|tables <out> [photons]");
+        if (argc < 3) fail("usage: unx_study_material_layers thinfilm|metals|clearcoat_r1|clearcoat_r1_ms|clearcoat_r1a|clearcoat_r1b|clearcoat_r1c|clearcoat_r1d|clearcoat_r1e|clearcoat_diag|clearcoat_specpath|v1albedo|metalms|metalgtable|coatfilm|tables <out> [photons]");
         const std::string cmd = argv[1], out = argv[2];
         const uint32_t photons = argc > 3 ? (uint32_t)std::stoul(argv[3]) : (1u << 21);
         if (cmd == "thinfilm") study::thinFilmStudy(out);
@@ -217,6 +218,7 @@ int main(int argc, char** argv)
         else if (cmd == "clearcoat_specpath") study::clearcoatSpecPath(out, photons);
         else if (cmd == "v1albedo") study::v1Albedo(out);
         else if (cmd == "metalms") study::metalMsStudy(out, photons);
+        else if (cmd == "metalgtable") study::metalGTable(out, photons);
         else if (cmd == "coatfilm") study::coatFilmStudy(out, photons);
         else if (cmd == "tables") study::exportTables(out);
         else fail("unknown study %s", cmd.c_str());

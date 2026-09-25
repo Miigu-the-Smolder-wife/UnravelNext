@@ -1546,6 +1546,177 @@ void metalMsStudy(const std::string& out, uint32_t photons)
         }
 }
 
+// Table for candidate G (v1 metal): f = F D V g(mu_v) g(mu_l), g(mu; r, rho) solved per grid cell by symmetric Sinkhorn so
+// that the energy leaving every incidence equals the multiple-scattering conductor's albedo (Heitz walk) for Schlick
+// Fresnel with F0 = rho. Grid: mu = k / 15 (k = 0 evaluated at 1e-4), r = j / 7 (alpha = r^2), rho = 0.04 + 0.96 i / 7; row-major
+// [rho][r][mu]. r = 0 is a mirror (no multiple scattering): g = 1. Validation: the published table looked up
+// trilinearly (as a shader would) at off-grid roughness and colour, against the reference.
+namespace gtab
+{
+constexpr int NMU = 16, NR = 8, NRHO = 8;
+// rho axis from 0.04 (the common dielectric F0): as F0 -> 0 the single-scattering energy near normal incidence vanishes
+// faster than the multiple-scattering part, so g is ill-conditioned there (g(mu 1) ~ 2-3 at F0 = 0), and a grid point at
+// 0 would pull F0 = 0.04 far off under linear interpolation. Lookups clamp rho below 0.04 to the first row.
+constexpr double kRho0 = 0.04;
+double lookup(const std::vector<float>& t, double mu, double r, double rho)
+{
+    const double x = std::clamp(mu, 0.0, 1.0) * (NMU - 1), y = std::clamp(r, 0.0, 1.0) * (NR - 1), z = std::clamp((rho - kRho0) / (1 - kRho0), 0.0, 1.0) * (NRHO - 1);
+    const int x0 = std::min((int)x, NMU - 2), y0 = std::min((int)y, NR - 2), z0 = std::min((int)z, NRHO - 2);
+    const double fx = x - x0, fy = y - y0, fz = z - z0;
+    auto at = [&](int k, int j, int i) { return (double)t[((size_t)i * NR + j) * NMU + k]; };
+    double v = 0;
+    for (int dz = 0; dz < 2; ++dz)
+        for (int dy = 0; dy < 2; ++dy)
+            for (int dx = 0; dx < 2; ++dx)
+                v += at(x0 + dx, y0 + dy, z0 + dz) * (dx ? fx : 1 - fx) * (dy ? fy : 1 - fy) * (dz ? fz : 1 - fz);
+    return v;
+}
+// g on the 90 incidence bins for one (r, rho) cell.
+std::vector<double> solveCell(double r, double rho, uint32_t photons)
+{
+    std::vector<double> g(NI, 1.0);
+    if (r <= 0) return g;
+    const double a = scene::model::alphaFromRoughness((float)r);
+    const Rgb f0((float)rho);
+    std::vector<double> E(NI, 0.0);
+    parallelFor(NI, [&](uint32_t ii) {
+        reference::Pcg32 rng(0x6AB1 + ii, 31 + (uint64_t)(r * 1000) * 131 + (uint64_t)(rho * 1000));
+        double sum = 0;
+        for (uint32_t s = 0; s < photons; ++s)
+        {
+            float3 o;
+            Rgb w;
+            if (cond::walk(-incident((int)ii), a, f0, rng, o, w)) sum += w.g;
+        }
+        E[ii] = sum / photons;
+    });
+    cond::Def ss;
+    ss.a = a;
+    ss.r = r;
+    ss.f0 = f0;
+    ss.kind = 3;
+    Table tf;
+    cond::defTable(ss, photons, tf);
+    std::vector<double> M((size_t)NI * NT, 0.0);
+    for (int i = 0; i < NI; ++i)
+        for (int t = 0; t < NT; ++t)
+            for (int p = 0; p < NP; ++p) M[(size_t)i * NT + t] += tf.at(i, t, p).g;
+    for (int it = 0; it < 500; ++it)
+        for (int i = 0; i < NI; ++i)
+        {
+            double m = 0;
+            for (int t = 0; t < NT; ++t) m += M[(size_t)i * NT + t] * g[t];
+            if (m > 1e-12 && E[i] > 0) g[i] = std::sqrt(g[i] * E[i] / m);
+        }
+    return g;
+}
+double binLerp1(const std::vector<double>& v, double mu)
+{
+    const double th = std::acos(std::clamp(mu, 0.0, 1.0)) * 180 / kPi - 0.5;
+    const int i0 = std::clamp((int)std::floor(th), 0, NI - 1), i1 = std::min(i0 + 1, NI - 1);
+    const double t = std::clamp(th - i0, 0.0, 1.0);
+    return v[i0] + t * (v[i1] - v[i0]);
+}
+} // namespace gtab
+
+void metalGTable(const std::string& out, uint32_t photons)
+{
+    using namespace gtab;
+    std::vector<float> table((size_t)NRHO * NR * NMU, 1.0f);
+    for (int i = 0; i < NRHO; ++i)
+        for (int j = 0; j < NR; ++j)
+        {
+            const double rho = kRho0 + (1 - kRho0) * i / (NRHO - 1), r = (double)j / (NR - 1);
+            const std::vector<double> g = solveCell(r, rho, photons);
+            for (int k = 0; k < NMU; ++k)
+            {
+                const double mu = std::max((double)k / (NMU - 1), 1e-4);
+                table[((size_t)i * NR + j) * NMU + k] = (float)binLerp1(g, mu);
+            }
+            logf("  cell rho %.3f r %.3f: g(mu 1e-4, 0.2, 0.5, 1) = %.4f %.4f %.4f %.4f\n", rho, r, binLerp1(g, 1e-4), binLerp1(g, 0.2), binLerp1(g, 0.5), binLerp1(g, 1.0));
+        }
+    std::ostringstream s;
+    s << "// v1 metal multiple-scattering scale for candidate G (C track, unx_study_material_layers metalgtable, photons " << photons
+      << ").\n"
+         "// f(v, l) = F(v.h) D V g(mu_v; r, rho) g(mu_l; r, rho), per colour channel with rho = that channel's F0 (Schlick\n"
+         "// F0 + (1 - F0)(1 - v.h)^5; with Schlick the whole Fresnel curve is set by F0, so rho = F0 exactly). g is solved so\n"
+         "// the energy leaving every incidence equals the multiple-scattering GGX conductor (Heitz 2016 walk, same Fresnel\n"
+         "// at every bounce): reciprocal, forward and adjoint albedo equal to the reference.\n"
+         "// Layout: row-major [rho][r][mu], 8 x 8 x 16. mu = cos(theta) = k / 15 (k = 0 evaluated at 1e-4), r = perceptual\n"
+         "// roughness j / 7 (alpha = r^2), rho = 0.04 + 0.96 i / 7. Lookup: trilinear in (mu, r, (rho - 0.04) / 0.96), clamped\n"
+         "// to the grid (rho < 0.04 uses the first row: g is ill-conditioned as F0 -> 0). r = 0: g = 1.\n";
+    s << "const float kMetalScatterScale[" << table.size() << "] = {";
+    for (size_t i = 0; i < table.size(); ++i) s << (i % 8 == 0 ? "\n    " : " ") << format("%.6ff,", table[i]);
+    s << "\n};\n";
+    writeTextFile(out, s.str());
+
+    // Validation: the published table, trilinear, at off-grid roughness and colours.
+    const double rs[] = { 0.07, 0.2, 0.45, 0.7, 0.93 };
+    const Rgb cols[] = { Rgb(1.0f), Rgb(0.996f, 0.733f, 0.359f), Rgb(0.912f, 0.623f, 0.518f), Rgb(0.04f), Rgb(0.02f) };
+    const char* colNames[] = { "white", "gold", "copper", "dielectric F0 0.04", "water F0 0.02 (below the grid)" };
+    std::ostringstream md;
+    md << "# kMetalScatterScale validation [measured]\n\nThe published table (" << out
+       << ") looked up trilinearly per channel (rho = channel F0) vs the MS conductor. Worst relative luminance albedo error "
+          "over incidence 0-89.5 deg (forward = fixed view, adjoint = fixed light). Validation photons "
+       << photons << " per incidence bin.\n\n| F0 | r | adjoint worst | forward worst |\n|---|---|---|---|\n";
+    for (int c = 0; c < 5; ++c)
+        for (double r : rs)
+        {
+            const double a = scene::model::alphaFromRoughness((float)r);
+            std::vector<double> refAlb(NI, 0.0);
+            parallelFor(NI, [&](uint32_t ii) {
+                reference::Pcg32 rng(0x7E57 + ii, 41 + (uint64_t)(r * 1000));
+                Rgb sum;
+                for (uint32_t s2 = 0; s2 < photons; ++s2)
+                {
+                    float3 o;
+                    Rgb w;
+                    if (cond::walk(-incident((int)ii), a, cols[c], rng, o, w)) sum += w;
+                }
+                refAlb[ii] = sum.luminance() / photons;
+            });
+            // Definition with the table: per-channel g from the lookup, stored per incidence bin for the Def evaluator.
+            std::vector<Rgb> g(NI);
+            for (int i = 0; i < NI; ++i)
+            {
+                const double mu = incident(i).z;
+                for (int ch = 0; ch < 3; ++ch) (&g[i].r)[ch] = (float)lookup(table, mu, r, (&cols[c].r)[ch]);
+            }
+            cond::Def d;
+            d.a = a;
+            d.r = r;
+            d.f0 = cols[c];
+            d.kind = 2;
+            d.g = &g;
+            Table T;
+            cond::defTable(d, photons, T);
+            const std::vector<Rgb> fwd = cond::forwardAlbedo(d, photons);
+            double adj = 0, fw = 0;
+            int adjAt = 0, fwAt = 0;
+            for (int i = 0; i < NI; ++i)
+            {
+                double sumT = 0;
+                for (int t = 0; t < NT; ++t)
+                    for (int p = 0; p < NP; ++p) sumT += T.at(i, t, p).luminance();
+                const double ea = std::fabs(sumT / refAlb[i] - 1), ef = std::fabs(fwd[i].luminance() / refAlb[i] - 1);
+                if (ea > adj)
+                {
+                    adj = ea;
+                    adjAt = i;
+                }
+                if (ef > fw)
+                {
+                    fw = ef;
+                    fwAt = i;
+                }
+            }
+            md << format("| %s | %.2f | %.2f%% @%.1f° | %.2f%% @%.1f° |\n", colNames[c], r, 100 * adj, adjAt + 0.5, 100 * fw, fwAt + 0.5);
+            logf("  validate %s r %.2f: adjoint %.2f%% @%.1f, forward %.2f%% @%.1f\n", colNames[c], r, 100 * adj, adjAt + 0.5, 100 * fw, fwAt + 0.5);
+        }
+    const std::string mdPath = out.substr(0, out.find_last_of('.')) + "_validation.md";
+    writeTextFile(mdPath, md.str());
+}
+
 // Coat + film (design 3, item 3): film under the coat (outer index 1.5); the physical base uses the exact spectral film
 // reflectance, the definition method (a).
 void coatFilmStudy(const std::string& out, uint32_t photons)

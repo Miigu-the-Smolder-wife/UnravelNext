@@ -46,6 +46,7 @@ void clearcoatDiag(const std::string& out, uint32_t photons);
 void clearcoatSpecPath(const std::string& out, uint32_t photons);
 void v1Albedo(const std::string& out);
 void metalMsStudy(const std::string& out, uint32_t photons);
+void metalGTable(const std::string& out, uint32_t photons);
 void coatFilmStudy(const std::string& out, uint32_t photons);
 void exportTables(const std::string& out);
 } // namespace unx::study
