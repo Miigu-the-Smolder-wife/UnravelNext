@@ -379,8 +379,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     s.tableRef = table;
     s.metaRef = meta;
     s.pagesRecorded = true;
-    // FrameResources::vsmPool is a TextureRef; the pool is a raw buffer (no layout transitions): left unset, readers use
-    // S's HLSL API (S_STATUS_KO.md).
+    // FrameResources (v1.18): other tracks read the VSM through ShadowVisibility.hlsli (ShadowSrvs).
+    fc.resources.vsmPool = pool;
+    fc.resources.vsmBlocks = blocks;
+    fc.resources.vsmConstants = s.ringCbv[s.constantsOffset / kRingStride];
     fc.resources.vsmPageTable = table;
 
     ShaderLibrary& sh = fc.shaders;
@@ -686,6 +688,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         const BufferRef fill = g.createBuffer(BufferDesc{ "S VSM search fill", (uint64_t)kSlots * 4, 0 });
         const BufferRef bound = g.createBuffer(BufferDesc{ "S VSM search bound", (uint64_t)kSlots * 4, 0 });
         s.boundRef = bound;
+        fc.resources.vsmSearchBound = bound;
         g.addPass("s.vsm.searchgrid", QueueType::Compute,
                   [&](PassBuilder& b) {
                       b.use(table, Use::SrvCompute);
