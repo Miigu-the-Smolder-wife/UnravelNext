@@ -916,7 +916,7 @@ void RayScene::selectExactSet(FramePassContext& fc)
         {
             if (counts[k] < m_exactMinHits) continue;
             const bool member = std::any_of(m_exact.begin(), m_exact.end(), [&](const ExactSlot& e) { return e.owner == k; });
-            if (m_deformed[k].exactNeed > (member ? 0.8f : 1.0f)) wanted.push_back(k);
+            if ((m_experiment & 2) != 0 || m_deformed[k].exactNeed > (member ? 0.8f : 1.0f)) wanted.push_back(k);  // 2: hit count alone
             else ++m_stats.exactWithinBoundTotal;
         }
         m_stats.exactWantedTotal += wanted.size();
