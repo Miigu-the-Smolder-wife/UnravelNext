@@ -85,7 +85,12 @@ uint vsmAirBlock(VsmBlock blk, float2 qa, float2 qb, float ha, float hb)
 // 8-texel block it crosses is settled against the segment's own heights at the block's entry and exit (vsmAirBlock);
 // only mixed blocks are walked at the next size, and at texel size the fraction below the texel's height is exact.
 // Pages not resident at level k hold no caster information for the air (VsmMarkAir requests them): lit.
-float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k)
+// Loads of one walk (atmosphere.froxels.walk_stats): pages classified mixed, 32- and 8-texel blocks, texels.
+struct VsmAirWalkCount
+{
+    uint slices, mixedPages, blocks32, blocks8, texels;  // slices: filled by the caller
+};
+float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k, inout VsmAirWalkCount count)
 {
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
     const float3 pa = vsmLightSpace(vc, a), pb = vsmLightSpace(vc, b);
@@ -105,11 +110,13 @@ float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k)
         uint cls = vsmAirBlock(r.blocks.Load<VsmBlock>((base + VSM_BLOCK_OFFSET_128) * VSM_BLOCK_BYTES), A + D * ta - origin, A + D * tb - origin, h0 + dh * ta, h0 + dh * tb);
         if (cls == VSM_REGION_UMBRA) shadowed += tb - ta;
         if (cls != VSM_REGION_MIXED) continue;
+        ++count.mixedPages;
         VsmAirWalk w32 = vsmAirWalkBegin(A, D, 32, ta, tb);
         float ua, ub;
         int2 c32;
         [loop] for (uint g32 = 0; g32 < 16 && vsmAirWalkNext(w32, ua, ub, c32); ++g32)
         {
+            ++count.blocks32;
             const int2 l32 = clamp(c32 - page * 4, 0, 3);  // rounding at a page boundary
             cls = vsmAirBlock(r.blocks.Load<VsmBlock>((base + VSM_BLOCK_OFFSET_32 + l32.y * 4 + l32.x) * VSM_BLOCK_BYTES), A + D * ua - origin, A + D * ub - origin,
                               h0 + dh * ua, h0 + dh * ub);
@@ -120,6 +127,7 @@ float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k)
             int2 c8;
             [loop] for (uint g8 = 0; g8 < 16 && vsmAirWalkNext(w8, va, vb, c8); ++g8)
             {
+                ++count.blocks8;
                 const int2 l8 = clamp(c8 - page * 16, 0, 15);
                 cls = vsmAirBlock(r.blocks.Load<VsmBlock>((base + VSM_BLOCK_OFFSET_8 + l8.y * 16 + l8.x) * VSM_BLOCK_BYTES), A + D * va - origin, A + D * vb - origin,
                                   h0 + dh * va, h0 + dh * vb);
@@ -130,6 +138,7 @@ float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k)
                 int2 c1;
                 [loop] for (uint g1 = 0; g1 < 24 && vsmAirWalkNext(w1, xa, xb, c1); ++g1)
                 {
+                    ++count.texels;
                     const uint hv = r.pool.Load(vsmPoolAddress(e & VSM_PHYS_MASK, uint2(clamp(c1 - page * (int)VSM_PAGE, 0, (int)VSM_PAGE - 1))));
                     if (hv == VSM_EMPTY) continue;
                     const float H = vsmDecode(hv), ha = h0 + dh * xa, hb = h0 + dh * xb, lo = min(ha, hb), hi = max(ha, hb);
@@ -139,6 +148,11 @@ float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k)
         }
     }
     return shadowed;
+}
+float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k)
+{
+    VsmAirWalkCount count = (VsmAirWalkCount)0;
+    return vsmAirShadowFraction(r, a, b, k, count);
 }
 
 #endif

@@ -122,7 +122,7 @@ void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
     ss.constants = P[0].w;
     ss.lights = P[3].y;
     ss.pad0 = P[3].z;
-    ss.pad1 = 0;
+    ss.pad1 = 0xFFFFFFFFu;
     uint ordinal = 0, n = 0, packed = 0;
     [loop] for (uint i = 0; i < range.y; ++i)
     {

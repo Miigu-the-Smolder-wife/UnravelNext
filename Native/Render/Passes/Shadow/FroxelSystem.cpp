@@ -142,6 +142,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     const float stepAltitude = (float)q.number("atmosphere.froxels.air_step_altitude_m");
     const uint32_t experiment = (uint32_t)q.integer("atmosphere.froxels.experiment_disable");  // cost attribution only
     if (!(stepAltitude > 0)) fail("atmosphere.froxels.air_step_altitude_m must be > 0");
+    const bool walkStats = q.integer("atmosphere.froxels.walk_stats") != 0;  // measurement only
     const TextureRef tlut = fc.resources.transmittanceLut, mlut = fc.resources.multiScatterLut;
     if (!tlut.valid() || !mlut.valid()) fail("S.froxels: the atmosphere LUTs were not recorded this frame");
     VsmFrameRefs vsm;
@@ -165,11 +166,12 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
                       b.use(vsm.pool, Use::SrvCompute);
                       b.use(vsm.blocks, Use::SrvCompute);
                       b.use(vsm.bound, Use::SrvCompute);
+                      if (walkStats) b.use(vsm.stats, Use::UavCompute);
                   }
               },
               [=](PassContext& ctx) {
                   uint32_t k[16] = { ctx.srv(lights), ctx.uav(volume), ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
-                                     bounded ? ctx.srv(readers) : 0xFFFFFFFFu, 0 };
+                                     bounded ? ctx.srv(readers) : 0xFFFFFFFFu, 0xFFFFFFFFu };
                   if (shadows)
                   {
                       k[4] = ctx.srv(vsm.table);
@@ -178,6 +180,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
                       k[7] = vsm.constantsCbv;
                       k[8] = ctx.srv(vsm.bound);
                       std::memcpy(&k[9], &grid.shadowTexelsPerTile, 4);
+                      if (walkStats) k[15] = ctx.uav(vsm.stats);
                   }
                   std::memcpy(&k[10], &stepAltitude, 4);
                   k[11] = experiment;

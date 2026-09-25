@@ -197,6 +197,7 @@ int main(int argc, char** argv)
     {
         bool debugLayer = true, debug = false, keepFroxels = false, uploadFirst = false;
         int debugTile[2] = { 3, 2 };
+        bool gbv = false;
         uint32_t W = 1920, H = 1080;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
@@ -207,11 +208,12 @@ int main(int argc, char** argv)
             else if (a == "--height") H = (uint32_t)std::stoul(argv[++i]);
             else if (a == "--set") overrides.push_back(argv[++i]);
             else if (a == "--debug") debug = true;
+            else if (a == "--gbv") gbv = true;  // GPU-based validation
             else if (a == "--tile") { debugTile[0] = std::stoi(argv[++i]); debugTile[1] = std::stoi(argv[++i]); }  // per-node print of one tile (section 2)
             else if (a == "--keep") keepFroxels = true;
             else if (a == "--upload-first") uploadFirst = true;  // diagnostic: probe input declared before the froxel passes
         }
-        TestFrame tf(debugLayer);
+        TestFrame tf(debugLayer, gbv);
         for (const std::string& o : overrides) tf.quality.applyOverride(o);
         TestRaster raster(tf);
         raster.install();

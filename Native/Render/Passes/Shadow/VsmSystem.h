@@ -63,6 +63,9 @@ struct VsmStats
     // (fallback) and their overflow pixels (overage: 0 in steady state), shadow-casting lights past the third over all
     // pixels (N_ovf), and the capacity in words the frame ran with (CPU).
     uint32_t overflowWords = 0, overflowOverTiles = 0, overflowOverPixels = 0, overflowLights = 0, overflowCapacity = 0;
+    // Air shadow walk of the froxel integration (atmosphere.froxels.walk_stats = 1, measurement only; main and planar
+    // views): slices walked, slices with a mixed page (descended), 32-texel and 8-texel block loads, texel loads.
+    uint32_t airSlices = 0, airSlicesMixed = 0, airBlocks32 = 0, airBlocks8 = 0, airTexels = 0;
 };
 
 // shadowPages: requests, dirty rules, allocation and the dirty-page raster for this frame.
@@ -74,7 +77,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view);
 // not recorded this frame.
 struct VsmFrameRefs
 {
-    BufferRef pool, table, blocks, bound;
+    BufferRef pool, table, blocks, bound, stats;  // stats: raw VSM counters (walk statistics, words 20..24)
     uint32_t constantsCbv = UINT32_MAX;  // ConstantBuffer<VsmConstants> of this frame
 };
 bool frameRefs(FramePassContext& fc, VsmFrameRefs& out);

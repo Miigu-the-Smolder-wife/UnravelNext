@@ -38,7 +38,8 @@
 // P[0].x froxelLights SRV (raw), P[0].y volume UAV (RWTexture3D<float4>), P[0].z transmittance LUT, P[0].w multi-scatter LUT
 // P[1].x VSM page table SRV (raw), .y pool SRV (raw), .z blocks SRV (raw), .w VSM constants CBV (0xFFFFFFFF: no VSM)
 // P[3].x local lights SRV (StructuredBuffer<VsmLocalLight>; 0xFFFFFFFF: none), P[3].y slot of light SRV, P[3].z tile
-// readers SRV (Texture2D<float2>, FroxelTileDepth.hlsl; 0xFFFFFFFF: every slice, tests)
+// readers SRV (Texture2D<float2>, FroxelTileDepth.hlsl; 0xFFFFFFFF: every slice, tests), P[3].w walk statistics UAV (the
+// VSM stats, words 20..24; 0xFFFFFFFF: none; atmosphere.froxels.walk_stats, measurement only)
 // P[2].x VSM search bound SRV (raw), P[2].y shadow texels per tile (float bits), P[2].z air step altitude m (float bits),
 // P[2].w experiment mask (atmosphere.froxels.experiment_disable; 0; cost attribution only: 1 air shadows, 2 local lights,
 // 4 air integration, 8 sun transmittance per substep, 16 multiple scattering per substep)
@@ -123,6 +124,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     const float stepAltitude = asfloat(P[2].z);
     const uint experiment = P[2].w;
     float3 tau = 0, source = 0, skyTerm = 0;
+    VsmAirWalkCount walk = (VsmAirWalkCount)0;  // statistics (P[3].w)
     const float tStart = airViewStart(g_clipPlane, g_cameraPosition, dir);
     const float zs0 = froxelNodeDepth(g, s), zs1 = froxelNodeDepth(g, s + 1);
     const bool hasAir = s < g.slices && zs1 * toRay > tStart;
@@ -190,7 +192,11 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             r.cbv = P[1].w;
             ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[P[1].w];
             uint k;
-            if (vsmAirLevel(vc, froxelTileWidth(g, 0.5 * (z0 + z1)), asfloat(P[2].y), k)) f = vsmAirShadowFraction(r, o, o + dir * len, k);
+            if (vsmAirLevel(vc, froxelTileWidth(g, 0.5 * (z0 + z1)), asfloat(P[2].y), k))
+            {
+                f = vsmAirShadowFraction(r, o, o + dir * len, k, walk);
+                ++walk.slices;
+            }
         }
         source = E * (single * (1 - f) + multi);
         skyTerm = -E * single * f;  // what the sky LUT has and the shadows remove
@@ -273,6 +279,20 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
                 hat0 = gs_hat[j0].xyz;
                 break;
             }
+    if (P[3].w != 0xFFFFFFFFu)  // walk statistics (measurement only): one atomic per wave and counter
+    {
+        const uint slices = WaveActiveSum(walk.slices), mixed = WaveActiveSum(walk.mixedPages > 0 ? 1u : 0u);
+        const uint b32 = WaveActiveSum(walk.blocks32), b8 = WaveActiveSum(walk.blocks8), texels = WaveActiveSum(walk.texels);
+        if (WaveIsFirstLane())
+        {
+            RWByteAddressBuffer st = ResourceDescriptorHeap[P[3].w];
+            st.InterlockedAdd(80, slices);
+            st.InterlockedAdd(84, mixed);
+            st.InterlockedAdd(88, b32);
+            st.InterlockedAdd(92, b8);
+            st.InterlockedAdd(96, texels);
+        }
+    }
     if (s < g.slices)
     {
         // Node s + 1 of the three parts; thread 0 also writes node 0 (the camera).

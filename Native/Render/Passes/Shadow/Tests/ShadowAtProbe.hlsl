@@ -3,7 +3,7 @@
 // P[0].x points SRV (StructuredBuffer<float4>: position, footprint m), P[0].y normals SRV (StructuredBuffer<float4>),
 // P[0].z output UAV (RWStructuredBuffer<float2>: visibility, 1 = resident), P[0].w count
 // P[1] = ShadowSrvs words 0..3 (page table, pool, blocks, search bound), P[2] = words 4..7 (constants, lights, slot of
-// light, 0). Frame constants of the main view.
+// light, layers). Frame constants of the main view.
 #include "Frame.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 
@@ -22,7 +22,7 @@ void main(uint i : SV_DispatchThreadID)
     s.constants = P[2].x;
     s.lights = P[2].y;
     s.pad0 = P[2].z;
-    s.pad1 = 0;
+    s.pad1 = P[2].w;  // transmittance layer (FrameResources::vsmLayers)
     const float4 p = points[i];
     bool resident;
     const float v = shadowSunVisibilityAt(s, p.xyz, normals[i].xyz, p.w, resident);

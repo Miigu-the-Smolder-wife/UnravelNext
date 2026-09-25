@@ -341,10 +341,12 @@ int main(int argc, char** argv)
                                      b.use(r.vsmPool, Use::SrvCompute);
                                      b.use(r.vsmBlocks, Use::SrvCompute);
                                      b.use(r.vsmSearchBound, Use::SrvCompute);
+                                     b.use(r.vsmLayers, Use::SrvCompute);
                                  },
                                  [=](PassContext& ctx) {
                                      const uint32_t k[12] = { ctx.srv(pts), ctx.srv(nrm), ctx.uav(o), count, ctx.srv(r.vsmPageTable), ctx.srv(r.vsmPool),
-                                                              ctx.srv(r.vsmBlocks), ctx.srv(r.vsmSearchBound), r.vsmConstants, r.vsmLocalLights, r.vsmSlotOfLight, 0 };
+                                                              ctx.srv(r.vsmBlocks), ctx.srv(r.vsmSearchBound), r.vsmConstants, r.vsmLocalLights, r.vsmSlotOfLight,
+                                                              ctx.srv(r.vsmLayers) };
                                      ctx.cmd->SetPipelineState(pso);
                                      ctx.bindFrameConstants(cb);
                                      ctx.computeConstants(k, 12);

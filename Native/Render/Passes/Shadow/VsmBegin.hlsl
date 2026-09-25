@@ -16,4 +16,7 @@ void main()
     stats.Store4(32, uint4(0, 0, 0, 0));
     stats.Store4(48, uint4(0, 0, 0, 0));
     stats.Store4(64, uint4(0, 0, 0, 0));
+    stats.Store4(80, uint4(0, 0, 0, 0));
+    stats.Store4(96, uint4(0, 0, 0, 0));
+    stats.Store4(112, uint4(0, 0, 0, 0));
 }

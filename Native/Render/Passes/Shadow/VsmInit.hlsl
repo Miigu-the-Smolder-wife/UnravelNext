@@ -1,7 +1,8 @@
 // unx-kernel: cs_6_6 main
 // Resets the VSM state when the pool is (re)created: empty page table, no requests, every physical page free.
 // P[0].x page table UAV (raw, 8 B per slot), P[0].y requests UAV (raw), P[0].z page metadata UAV (VsmPageMeta),
-// P[0].w free list UAV (raw: count, then page indices); P[1].x slots, P[1].y physical pages
+// P[0].w free list UAV (raw: count, then page indices); P[1].x slots, P[1].y physical pages, P[1].z transmittance layer
+// UAV (raw: its per-page words are cleared: no layer)
 #include "Passes/Shadow/VsmCommon.hlsli"
 
 [numthreads(256, 1, 1)]
@@ -20,6 +21,8 @@ void main(uint i : SV_DispatchThreadID)
     if (i < pages)
     {
         meta[i] = (VsmPageMeta)0;
+        RWByteAddressBuffer layers = ResourceDescriptorHeap[P[1].z];
+        layers.Store(i * 4, 0);
         freeList.Store(4 + i * 4, pages - 1 - i);  // popped from the end: page 0 first
     }
     if (i == 0) freeList.Store(0, pages);

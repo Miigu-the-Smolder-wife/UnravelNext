@@ -4,7 +4,8 @@
 // dirty pages and the triangles V rasterised into them (T_sun), page requests and pool use, visibility paths.
 // Needs a build with tracks V, M, S and C (Build.ps1 -Track S -Tracks "V;M;S;C", or -Track all). GPU lock required:
 //   powershell -File Tools/CI/GpuLock.ps1 -Track S -- build/S/bin/unx_gate_shadow_renderergate.exe
-//       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--moving] [--sun-deg-per-s R] [--out DIR] [--set k=v]
+//       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--moving] [--sun-deg-per-s R]
+//       [--wind-gust-period-s T] [--out DIR] [--set k=v]
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h") && defined(UNX_HAS_SCENEGEN)
 #define S_RENDERER_GATE 1
 #include "unx/clusterbuilder/ClusterBuilder.h"
@@ -66,6 +67,8 @@ int main(int argc, char** argv)
         uint32_t frames = 600;
         bool moving = false;
         float sunDegPerS = 0;  // moving sun (time of day): the sun turns about the horizontal axis normal to it
+        float gustPeriodS = 0;  // wind change after commit (v1.23): every gustPeriodS the source scene's wind alternates
+                                // between the scene's and +30 % speed / +20 degrees (no reload; the host's path)
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -79,6 +82,7 @@ int main(int argc, char** argv)
             else if (a == "--frames") frames = (uint32_t)std::stoul(next());
             else if (a == "--moving") moving = true;
             else if (a == "--sun-deg-per-s") sunDegPerS = std::stof(next());
+            else if (a == "--wind-gust-period-s") gustPeriodS = std::stof(next());
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
             else fail("unknown argument %s", a.c_str());
@@ -98,6 +102,8 @@ int main(int argc, char** argv)
         scene::Scene s = scenegen::generate(request);  // not const: --sun-deg-per-s turns its sun (GpuScene keeps &s)
         const float3 sun0 = normalize(s.sun.direction);
         const float3 sunAxis = normalize(cross(sun0, float3{ 0, 1, 0 }));
+        const float wind0 = s.windSpeed;
+        const float3 windDir0 = s.windDirection;
         ClusterData clusters = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality));
         logf("scene %s (%s), %zu instances, %zu clusters, camera %s\n", sceneName.c_str(), scene::contentHash(s).substr(0, 16).c_str(), s.instances.size(),
              clusters.clusters.size(), moving ? "path 0 (moving)" : "0 (static)");
@@ -115,7 +121,7 @@ int main(int argc, char** argv)
             shadow::setKeepFroxels(renderer.trackState(), true);  // no consumer of the volume yet (M): measure it anyway
             HarnessOptions options;
             options.frames = frames;
-            options.label = "S " + sceneName + (moving ? " moving " : " static ") + (sunDegPerS != 0 ? "sun " + std::to_string(sunDegPerS) + " deg/s " : "") + rs;
+            options.label = "S " + sceneName + (moving ? " moving " : " static ") + (sunDegPerS != 0 ? "sun " + std::to_string(sunDegPerS) + " deg/s " : "") + (gustPeriodS > 0 ? "gusts " : "") + rs;
             if (!out.empty()) options.outputDirectory = out;
             float4x4 prev = ViewDesc::fromCamera(cameraAt(s, moving, 0), res.width, res.height, {}).viewProj;
             // Dirty pages and T_sun averaged over the measured frames (the counters lag the frame by two).
@@ -128,6 +134,13 @@ int main(int argc, char** argv)
                 fc.time = frame / 60.0;
                 fc.deltaTime = 1.0f / 60;
                 fc.mainView = ViewDesc::fromCamera(cameraAt(s, moving, fc.time), rr.width, rr.height, prev);
+                if (gustPeriodS > 0)
+                {
+                    const bool gust = ((uint64_t)(fc.time / gustPeriodS) & 1) != 0;
+                    const float a = gust ? 20.0f * 0.01745329f : 0.0f;
+                    s.windSpeed = gust ? wind0 * 1.3f : wind0;
+                    s.windDirection = float3{ windDir0.x * std::cos(a) - windDir0.z * std::sin(a), windDir0.y, windDir0.x * std::sin(a) + windDir0.z * std::cos(a) };
+                }
                 if (sunDegPerS != 0)
                 {
                     // Rodrigues rotation of the initial sun direction (the axis is normal to it).
@@ -172,6 +185,10 @@ int main(int argc, char** argv)
                                                        shadow::froxelGridFor(quality, res.width, res.height).gridY *
                                                        shadow::froxelGridFor(quality, res.width, res.height).slices),
                  fs.overflowLists, fs.droppedLights, fs.maxCount);
+            if (quality.integer("atmosphere.froxels.walk_stats") != 0)
+                logf("  air shadow walk (last frame): %u slices walked, %u with a mixed page (%.1f %%), block loads 32: %u, 8: %u, texel loads %u (%.1f per mixed slice)\n",
+                     st.airSlices, st.airSlicesMixed, 100.0 * st.airSlicesMixed / std::max(st.airSlices, 1u), st.airBlocks32, st.airBlocks8, st.airTexels,
+                     (double)st.airTexels / std::max(st.airSlicesMixed, 1u));
             // Overflow list (INTERFACES 7.3): the gate requires no tile over the capacity in the measured frames.
             logf("  shadow overflow: lights past the third max %u, words needed max %u, tiles over capacity %u %s\n", overflowLightsMax, overflowWordsMax, overTiles,
                  overTiles ? "FAIL" : "ok");

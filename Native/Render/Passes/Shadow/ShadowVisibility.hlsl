@@ -20,7 +20,8 @@
 // P[3].w overflow tile heads UAV (R32_UINT, with P[1].x).
 // P[4].x planar mask SRV (R8_UINT per pixel), P[4].y planar tile mask SRV (R8_UINT per 8 x 8 tile = this group)
 // (planar reflection views, v1.22; 0xFFFFFFFF: every pixel): tiles without mirror pixels are skipped whole (head 0),
-// pixels that are not mirror pixels are left as sky (M shades neither).
+// pixels that are not mirror pixels are left as sky (M shades neither). P[4].z transmittance layer SRV (raw,
+// FrameResources::vsmLayers; 0xFFFFFFFF: none): slot 0 = opaque visibility x the thin casters' T (v1.26).
 // Frame constants of the view. Mixed pixels get their local slots here and their sun slot in pass 2.
 #include "Frame.hlsli"
 #include "Scene.hlsli"
@@ -76,7 +77,7 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
         ss.constants = P[0].w;
         ss.lights = P[3].y;
         ss.pad0 = P[3].z;
-        ss.pad1 = 0;
+        ss.pad1 = 0xFFFFFFFFu;
         ShadowPixelReceiver pr;
         pr.world = world;
         pr.normal = normal;
@@ -95,7 +96,22 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
         }
         overflow = ordinal > 3 ? ordinal - 3 : 0;
     }
-    packed = (cls == VSM_REGION_UMBRA ? 0u : 255u) | local;
+    // Thin casters (transmittance layer, v1.26): T at the receiver over the reach of its settled class.
+    float sunT = 1;
+    if (cls != VSM_REGION_UMBRA && P[4].z != 0xFFFFFFFFu)
+    {
+        ShadowSrvs ts;
+        ts.pageTable = P[1].y;
+        ts.pool = P[1].z;
+        ts.blocks = P[2].y;
+        ts.searchBound = P[1].w;
+        ts.constants = P[0].w;
+        ts.lights = P[3].y;
+        ts.pad0 = P[3].z;
+        ts.pad1 = P[4].z;
+        sunT = shadowSunTransmittanceAt(ts, world, footprint, max(reach, footprint));
+    }
+    packed = (cls == VSM_REGION_UMBRA ? 0u : (uint)round(saturate(sunT) * 255.0)) | local;
 }
 
 groupshared uint gs_overflow;

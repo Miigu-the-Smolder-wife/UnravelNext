@@ -21,7 +21,7 @@ namespace
 {
 const char* const kStateKey = "s.vsm";
 constexpr uint32_t kRingSlots = 16, kRingStride = 1024;  // per-frame constants; frames in flight must be < kRingSlots
-constexpr uint32_t kStatsSlots = 4;
+constexpr uint32_t kStatsSlots = 4, kStatsBytes = 128;  // VSM stats words (VsmBegin clears them)
 constexpr uint64_t kOverflowMinWords = 1u << 18;  // 1 MB overflow list at least (INTERFACES 7.3)
 constexpr uint32_t kMetaBytes = 48;  // VsmPageMeta
 constexpr uint32_t kBlockBytes = 341 * 32;  // VSM_BLOCK_ENTRIES x VsmBlock
@@ -32,6 +32,8 @@ struct State
     bool needsInit = false;  // pool (re)created: the next frame resets tables and free list
     uint32_t poolPagesX = 0, poolPagesY = 0;
     ComPtr<ID3D12Resource> pool, table, requests, meta, blocks, freeList, dirtyList, cullMask, args, stats, lastRevision, movedList, ring;
+    ComPtr<ID3D12Resource> layers;  // transmittance layer (VsmLayer.hlsli): per physical page words, then layer pages
+    uint64_t layersBytes = 0;
     ComPtr<ID3D12Resource> motion, jointCounts, jointStaging;  // dirty rule (a): per instance x level motion state; joints
     uint32_t jointsRevision = UINT32_MAX;
     bool jointsPending = false;
@@ -59,7 +61,7 @@ struct State
     // This frame's graph handles (valid between shadowPages and the end of the frame's recording).
     uint64_t recordedFrame = UINT64_MAX;
     BufferRef poolRef;
-    BufferRef tableRef, metaRef, boundRef, blocksRef, statsRef;
+    BufferRef tableRef, metaRef, boundRef, blocksRef, statsRef, layersRef;
     bool pagesRecorded = false;
     bool debugPaths = false;
     // Pool growth: a frame whose requests exhausted the pool sets the next size (never shrinks while running).
@@ -134,7 +136,8 @@ void createState(FramePassContext& fc, State& s, uint32_t pages)
     const uint32_t perRow = 64;  // 8192 texels
     if (pages == 0 || pages % perRow) fail("VSM pool: %u pages is not a positive multiple of %u", pages, perRow);
     Device& d = fc.device;
-    for (ComPtr<ID3D12Resource>* r : { std::addressof(s.pool), std::addressof(s.meta), std::addressof(s.blocks), std::addressof(s.freeList), std::addressof(s.dirtyList) })
+    for (ComPtr<ID3D12Resource>* r : { std::addressof(s.pool), std::addressof(s.meta), std::addressof(s.blocks), std::addressof(s.freeList), std::addressof(s.dirtyList),
+                                       std::addressof(s.layers) })
         if (*r) d.deferRelease(*r);
     s.poolPagesX = perRow;
     s.poolPagesY = pages / perRow;
@@ -143,6 +146,9 @@ void createState(FramePassContext& fc, State& s, uint32_t pages)
     s.blocks = createBuffer(d, L"S VSM page blocks", (uint64_t)pages * kBlockBytes);
     s.freeList = createBuffer(d, L"S VSM free list", 4 + (uint64_t)pages * 4);
     s.dirtyList = createBuffer(d, L"S VSM dirty list", 8 + (uint64_t)pages * 8);
+    // Transmittance layer: the per-page words (0 = no layer) until V's coverage-mode raster fills layer pages (v1.26).
+    s.layersBytes = ((uint64_t)pages * 4 + 255) & ~255ull;
+    s.layers = createBuffer(d, L"S VSM transmittance layer", s.layersBytes);
     createPoolViews(d, s);
     if (!s.table)
     {
@@ -151,9 +157,9 @@ void createState(FramePassContext& fc, State& s, uint32_t pages)
         s.localMask = createBuffer(d, L"S VSM local cull mask", (uint64_t)kLocalLights * kLocalViewsPerLight * 512 * 4);
         s.cullMask = createBuffer(d, L"S VSM cull mask", (uint64_t)kSlots / 8);
         s.args = createBuffer(d, L"S VSM indirect args", 48);  // dirty pages at 0, moved x levels at 16, moved x local lights at 32
-        s.stats = createBuffer(d, L"S VSM stats", 80);
+        s.stats = createBuffer(d, L"S VSM stats", kStatsBytes);
         s.ring = createBuffer(d, L"S VSM constants ring", (uint64_t)kRingSlots * kRingStride, D3D12_HEAP_TYPE_UPLOAD);
-        s.statsReadback = createBuffer(d, L"S VSM stats readback", (uint64_t)kStatsSlots * 80, D3D12_HEAP_TYPE_READBACK);
+        s.statsReadback = createBuffer(d, L"S VSM stats readback", (uint64_t)kStatsSlots * kStatsBytes, D3D12_HEAP_TYPE_READBACK);
         D3D12_RANGE none{ 0, 0 };
         check(s.ring->Map(0, &none, reinterpret_cast<void**>(&s.ringMapped)), "map VSM ring");
         D3D12_INDIRECT_ARGUMENT_DESC arg{};
@@ -296,6 +302,7 @@ bool frameRefs(FramePassContext& fc, VsmFrameRefs& out)
     out.blocks = s.blocksRef;
     out.bound = s.boundRef;
     out.constantsCbv = s.ringCbv[s.constantsOffset / kRingStride];
+    out.stats = s.statsRef;
     return true;
 }
 
@@ -434,14 +441,19 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     {
         if (s.statsFence[i] == 0 || s.statsFence[i] > completed || s.statsFrame[i] <= s.latest.frame) continue;
         uint32_t* p = nullptr;
-        D3D12_RANGE r{ i * 80, i * 80 + 80 };
+        D3D12_RANGE r{ i * kStatsBytes, i * kStatsBytes + kStatsBytes };
         check(s.statsReadback->Map(0, &r, reinterpret_cast<void**>(&p)), "map VSM stats");
-        const uint32_t* w = reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(p) + i * 80);
+        const uint32_t* w = reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(p) + i * kStatsBytes);
         s.latest = { s.statsFrame[i], w[0], w[1], w[2], w[3], w[4], w[5], w[8], w[9], w[10], w[11], w[12], w[13], w[14] };
         s.latest.overflowWords = w[16];
         s.latest.overflowOverTiles = w[17];
         s.latest.overflowOverPixels = w[18];
         s.latest.overflowLights = w[19];
+        s.latest.airSlices = w[20];
+        s.latest.airSlicesMixed = w[21];
+        s.latest.airBlocks32 = w[22];
+        s.latest.airBlocks8 = w[23];
+        s.latest.airTexels = w[24];
         D3D12_RANGE none{ 0, 0 };
         s.statsReadback->Unmap(0, &none);
     }
@@ -576,6 +588,9 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     s.blocksRef = blocks;
     const BufferRef freeList = g.importBuffer(s.freeList.Get(), BufferDesc{ "S VSM free list", 4 + (uint64_t)pages * 4, 0 });
     const BufferRef dirty = g.importBuffer(s.dirtyList.Get(), BufferDesc{ "S VSM dirty list", 8 + (uint64_t)pages * 8, 0 });
+    const BufferRef layers = g.importBuffer(s.layers.Get(), BufferDesc{ "S VSM transmittance layer", s.layersBytes, 0 });
+    s.layersRef = layers;
+    fc.resources.vsmLayers = layers;  // v1.26: ShadowSrvs.layers (the pad1 word)
     const BufferRef mask = g.importBuffer(s.cullMask.Get(), BufferDesc{ "S VSM cull mask", (uint64_t)kSlots / 8, 0 });
     const BufferRef args = g.importBuffer(s.args.Get(), BufferDesc{ "S VSM indirect args", 48, 0 });
     const BufferRef moved = g.importBuffer(s.movedList.Get(), BufferDesc{ "S VSM moved instances", 4 + (uint64_t)s.instanceCapacity * 8, 0 });
@@ -593,7 +608,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                   [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(ctx.resource(joints), 0, staging, 0, bytes); });
         s.jointsPending = false;
     }
-    const BufferRef statsBuf = g.importBuffer(s.stats.Get(), BufferDesc{ "S VSM stats", 80, 0 });
+    const BufferRef statsBuf = g.importBuffer(s.stats.Get(), BufferDesc{ "S VSM stats", kStatsBytes, 0 });
     s.statsRef = statsBuf;
     const BufferRef revisions = g.importBuffer(s.lastRevision.Get(), BufferDesc{ "S VSM instance revisions", (uint64_t)s.instanceCapacity * 8, 8 });
     s.recordedFrame = fc.frame.frameIndex;
@@ -622,10 +637,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.use(requests, Use::UavCompute);
                       b.use(meta, Use::UavCompute);
                       b.use(freeList, Use::UavCompute);
+                      b.use(layers, Use::UavCompute);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.uav(table), ctx.uav(requests), ctx.uav(meta), ctx.uav(freeList), kTotalSlots, pages, 0, 0 };
+                      const uint32_t k[8] = { ctx.uav(table), ctx.uav(requests), ctx.uav(meta), ctx.uav(freeList), kTotalSlots, pages, ctx.uav(layers), 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, 8);
                       ctx.cmd->Dispatch(groups(std::max(kTotalSlots, pages), 256), 1, 1);
@@ -643,7 +659,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.use(statsBuf, Use::CopySrc);
                       b.keep();
                   },
-                  [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(rb, slot * 80ull, ctx.resource(statsBuf), 0, 80); });
+                  [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(rb, slot * (uint64_t)kStatsBytes, ctx.resource(statsBuf), 0, kStatsBytes); });
         s.statsFrame[slot] = c.frame - 1;
         s.statsFence[slot] = 0;
         s.lastStatsSlot = (int)slot;
@@ -1079,7 +1095,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     const BufferRef froxelLists = view.froxelLights.valid() ? view.froxelLights : (mainView ? fc.resources.froxelLights : BufferRef{});
     const bool localSlots = froxelLists.valid() && s.localLightsNow != UINT32_MAX;
     const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow;
-    const BufferRef table = s.tableRef, bound = s.boundRef, blocks = s.blocksRef, statsBuf = s.statsRef;
+    const BufferRef table = s.tableRef, bound = s.boundRef, blocks = s.blocksRef, statsBuf = s.statsRef, layers = s.layersRef;
     // Overflow list (INTERFACES 7.3, v1.20): the main view's shadow-casting lights past the third. Capacity = 1.5 x the
     // need of the last completed frame (the counter keeps counting past the capacity, so an overage frame reports its
     // full need), a power of two of words, at least 1 MB; shrinks only below a quarter (no plan churn around a boundary).
@@ -1164,13 +1180,15 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   }
                   if (mirrorMask.valid()) b.use(mirrorMask, Use::SrvCompute);
                   if (mirrorTiles.valid()) b.use(mirrorTiles, Use::SrvCompute);
+                  b.use(layers, Use::SrvCompute);
               },
               [=](PassContext& ctx) {
                   const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu,
                                            ctx.srv(table), ctx.srv(pool), ctx.srv(bound), ctx.uav(list), ctx.srv(blocks), ctx.uav(statsBuf), 0,
                                            localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv,
                                            overflowList ? ctx.uav(heads) : 0xFFFFFFFFu,
-                                           mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu, mirrorTiles.valid() ? ctx.srv(mirrorTiles) : 0xFFFFFFFFu, 0, 0 };
+                                           mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu, mirrorTiles.valid() ? ctx.srv(mirrorTiles) : 0xFFFFFFFFu,
+                                           ctx.srv(layers), 0 };
                   ctx.cmd->SetPipelineState(p1);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 20);
@@ -1199,10 +1217,11 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   b.use(args, Use::IndirectArgs);
                   b.use(statsBuf, Use::UavCompute);
                   b.use(out, Use::UavCompute);
+                  b.use(layers, Use::SrvCompute);
               },
               [=](PassContext& ctx) {
                   const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, off, ctx.srv(table), ctx.srv(pool), ctx.srv(bound),
-                                           ctx.srv(list), ctx.srv(blocks), ctx.uav(statsBuf), 0, rays, steps, 0, 0 };
+                                           ctx.srv(list), ctx.srv(blocks), ctx.uav(statsBuf), 0, rays, steps, ctx.srv(layers), 0 };
                   ctx.cmd->SetPipelineState(p2);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 16);

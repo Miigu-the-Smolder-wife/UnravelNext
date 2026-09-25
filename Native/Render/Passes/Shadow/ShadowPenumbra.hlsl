@@ -6,10 +6,11 @@
 // P[0].x depth SRV, P[0].y G-buffer SRV, P[0].z output UAV (R32_UINT), P[0].w VSM constants CBV
 // P[1].x unused, P[1].y page table SRV (raw), P[1].z pool SRV, P[1].w search bound SRV (raw)
 // P[2].x penumbra list SRV (raw), P[2].y blocks SRV (raw), P[2].z statistics UAV (raw), P[2].w -
-// P[3].x blocker search taps, P[3].y penumbra filter taps. Frame constants of the view.
+// P[3].x blocker search taps, P[3].y penumbra filter taps, P[3].z transmittance layer SRV (raw; 0xFFFFFFFF: none):
+// the result is multiplied by the thin casters' T over the penumbra's reach (v1.26). Frame constants of the view.
 #include "Frame.hlsli"
 #include "Passes/Shadow/ShadowReceiver.hlsli"
-#include "Passes/Shadow/VsmSample.hlsli"
+#include "Passes/Shadow/ShadowVisibility.hlsli"
 
 [numthreads(64, 1, 1)]
 void main(uint i : SV_DispatchThreadID)
@@ -38,7 +39,18 @@ void main(uint i : SV_DispatchThreadID)
         const float tanSun = tan(g_sunAngularRadius);
         const uint k = vsmLevelForFootprint(vc, footprint);
         const float reach = (vsmSearchHeight(r, rc.uv, k) - rc.h) * tanSun;
-        const float sun = vsmSunPenumbra(r, rc, k, reach, tanSun, P[3].x, P[3].y, path);
+        float sun = vsmSunPenumbra(r, rc, k, reach, tanSun, P[3].x, P[3].y, path);
+        if (P[3].z != 0xFFFFFFFFu && sun > 0)
+        {
+            ShadowSrvs ts = (ShadowSrvs)0;
+            ts.pageTable = P[1].y;
+            ts.pool = P[1].z;
+            ts.blocks = P[2].y;
+            ts.searchBound = P[1].w;
+            ts.constants = P[0].w;
+            ts.pad1 = P[3].z;
+            sun *= shadowSunTransmittanceAt(ts, world, footprint, max(reach, footprint));
+        }
 #if PATHS
         output[px] = path;
 #else

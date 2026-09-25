@@ -8,13 +8,16 @@
 #include "Passes/Shadow/ShadowReceiver.hlsli"
 #include "Passes/Shadow/VsmSample.hlsli"
 #include "Passes/Shadow/VsmLocalSample.hlsli"
+#include "Passes/Shadow/VsmLayer.hlsli"
 
 float shadowSlot(uint packed, uint slot) { return ((packed >> (8 * slot)) & 0xFFu) / 255.0; }
 
 // This frame's virtual shadow maps (Docs/Design/Requests/20260925_S_sun_visibility_at.md): bindless indices of the page
 // table, the physical pool (raw buffers), the pages' block hierarchy, the search bound grid, the VSM constants CBV, and for
 // the local lights their shadow-slot records (lights: FrameResources::vsmLocalLights) and the scene light -> shadow slot
-// map (pad0: FrameResources::vsmSlotOfLight; Docs/Design/Requests/20260925_S_local_shadow_lookups.md).
+// map (pad0: FrameResources::vsmSlotOfLight; Docs/Design/Requests/20260925_S_local_shadow_lookups.md), and the thin
+// casters' transmittance layer (pad1 = FrameResources::vsmLayers, INTERFACES 5.6 v1.26 "layers"; the field keeps its
+// old name until every caller fills it: 0xFFFFFFFF or 0 = no layer, T = 1).
 struct ShadowSrvs
 {
     uint pageTable, pool, blocks, searchBound;
@@ -101,6 +104,28 @@ float shadowLocalVisibilityAtPixel(ShadowSrvs s, uint lightIndex, uint2 pixel, u
     return rc.valid ? shadowLocalVisibilityAtReceiver(s, lightIndex, rc) : 1.0;
 }
 
+// Transmittance in [0, 1] of the thin casters above a world point (VSM transmittance layer, VsmLayer.hlsli; INTERFACES
+// 5.6 v1.26): level k for 'footprint', the layer's mip for the filter radius 'reach' (m), T(h) at the point's height.
+// 1 where the page is not resident or has no thin casters. shadowSunVisibilityAt and the visibility slot 0 multiply it.
+float shadowSunTransmittanceAt(ShadowSrvs s, float3 worldPos, float footprint, float reach)
+{
+    // No layer: 0xFFFFFFFF, or 0 from callers written before v1.26 (descriptor 0 is taken at device creation and is never
+    // this frame's layer buffer).
+    if (s.pad1 == 0xFFFFFFFFu || s.pad1 == 0) return 1;
+    ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[s.constants];
+    VsmResources r;
+    r.table = ResourceDescriptorHeap[s.pageTable];
+    r.pool = ResourceDescriptorHeap[s.pool];
+    r.blocks = ResourceDescriptorHeap[s.blocks];
+    r.searchBound = ResourceDescriptorHeap[s.searchBound];
+    r.cbv = s.constants;
+    const float3 ls = vsmLightSpace(c, worldPos);
+    const uint k = vsmLevelForFootprint(c, footprint);
+    const int2 page = vsmAbsPage(vsmAbsTexel(c, ls.xy, k));
+    ByteAddressBuffer layers = ResourceDescriptorHeap[s.pad1];
+    return vsmLayerTransmittance(layers, c.poolPagesX * c.poolPagesY, vsmEntry(r, page, k), page, ls.xy, k, reach, ls.z);
+}
+
 // Sun visibility in [0, 1] at a world point with geometric normal (ray hits, R): the direct view's estimator (SMRT:
 // reach classification, blocker search, disk filter; vsmSunVisibility) on the level whose texel matches 'footprint'
 // (metres, the ray cone's width at the hit), or on one of the three finer levels when that page is not resident (finer
@@ -127,7 +152,9 @@ float shadowSunVisibilityAt(ShadowSrvs s, float3 worldPos, float3 normal, float 
     resident = level != 0xFFFFFFFFu;
     if (!resident) return 1;
     uint path;
-    return vsmSunVisibility(r, worldPos, normal, vsmTexel(level), c.tanSunRadius, c.searchTaps, c.filterTaps, path);
+    // Opaque casters (height field) times the thin casters' transmittance (v1.26).
+    return vsmSunVisibility(r, worldPos, normal, vsmTexel(level), c.tanSunRadius, c.searchTaps, c.filterTaps, path) *
+           shadowSunTransmittanceAt(s, worldPos, footprint, footprint);
 }
 
 #endif
