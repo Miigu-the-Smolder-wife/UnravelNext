@@ -44,6 +44,15 @@ struct GiSrvs
 #define GI_SH_HISTORY 68u      // updates since the last reset (Jacobi phase, then averaging)
 #define GI_SH_EPOCH 72u        // lighting epoch of that history
 
+// Entry irradiance map (design 2.5 revision, request 18): E(n) at the 9 x 9 hemispherical octahedral directions around
+// the entry's anchor normal (texel (i, j) = giHemiOctDecode(((i, j) + 0.5) / 9); the pole, the anchor normal itself, is
+// the centre texel), estimated per ray: every update's 64 rays add L max(0, n_j . w) dw, dw = the ray's solid-angle
+// weight (2 / |p|^3 x the texel's UV area for the hemispherical octahedral map). No texel averaging (a thin band of
+// horizon light is not smeared over a texel) and no SH truncation. RGB9E5 x GI_STORE_SCALE, 81 words + 3 padding.
+// Evaluated with Catmull-Rom (16 texels), clamped at 0.
+#define GI_IRR_N 9u
+#define GI_IRR_STRIDE 336u
+
 // Header (uint4 rows of the first 256 B).
 struct GiHeader
 {
@@ -58,6 +67,7 @@ struct GiHeader
     uint offSelected, offHitStamp, offHitList, offShTable;
     uint hitCount0, hitCount1, jacobiUpdates, historyMax;
     uint offAnchorMin, flags;         // deterministic anchors (per entry 64-bit min of packed candidates); flags bit 0 = gi.deterministic
+    uint offIrr;                      // irradiance maps (GI_IRR_STRIDE per entry)
 };
 
 template <typename B>
@@ -73,8 +83,8 @@ GiHeader giHeader(B b)
     h.camera = asfloat(r5.xyz); h.maxLevel = r5.w;
     h.offSelected = r6.x; h.offHitStamp = r6.y; h.offHitList = r6.z; h.offShTable = r6.w;
     h.hitCount0 = r7.x; h.hitCount1 = r7.y; h.jacobiUpdates = r7.z; h.historyMax = r7.w;
-    const uint2 r15 = b.Load2(240);
-    h.offAnchorMin = r15.x; h.flags = r15.y;
+    const uint3 r15 = b.Load3(240);
+    h.offAnchorMin = r15.x; h.flags = r15.y; h.offIrr = r15.z;
     return h;
 }
 
@@ -167,25 +177,55 @@ void giShBasis(float3 d, out float y[9])
     y[8] = 0.546274 * (d.x * d.x - d.y * d.y);
 }
 
+float3 giIrrUnpack(uint v)
+{
+    const float scale = asfloat(((v >> 27) + 103u) << 23);  // 2^(e - 24), bias 15, 9-bit mantissa
+    return float3(v & 0x1FFu, (v >> 9) & 0x1FFu, (v >> 18) & 0x1FFu) * scale;
+}
+
+// Catmull-Rom weights for the texels at offsets -1, 0, 1, 2 of a fraction t.
+float4 giCatmullRom(float t)
+{
+    const float t2 = t * t, t3 = t2 * t;
+    return float4(-0.5 * t3 + t2 - 0.5 * t, 1.5 * t3 - 2.5 * t2 + 1, -1.5 * t3 + 2 * t2 + 0.5 * t, 0.5 * t3 - 0.5 * t2);
+}
+
+// Irradiance (x 1, not stored scale) of an entry for normal n from its map; normals below the entry's hemisphere use
+// its horizon.
+template <typename B>
+float3 giIrrMap(B b, GiHeader h, uint entry, float3 n)
+{
+    const float3 na = giAnchorNormal(b, h, entry);
+    float3 t, bt;
+    giBasis(na, t, bt);
+    float3 local = float3(dot(n, t), dot(n, bt), max(dot(n, na), 0.0));
+    local = dot(local, local) > 1e-12 ? normalize(local) : float3(0, 0, 1);
+    const float2 e = giHemiOctEncode(local) * (float)GI_IRR_N - 0.5;
+    const int2 i0 = int2(floor(e));
+    const float2 f = e - float2(i0);
+    const float4 wx = giCatmullRom(f.x), wy = giCatmullRom(f.y);
+    const uint base = h.offIrr + entry * GI_IRR_STRIDE;
+    float3 sum = 0;
+    [unroll] for (uint jy = 0; jy < 4; ++jy)
+    {
+        const uint iy = (uint)clamp(i0.y - 1 + (int)jy, 0, (int)GI_IRR_N - 1);
+        float3 row = 0;
+        [unroll] for (uint jx = 0; jx < 4; ++jx)
+        {
+            const uint ix = (uint)clamp(i0.x - 1 + (int)jx, 0, (int)GI_IRR_N - 1);
+            row += wx[jx] * giIrrUnpack(b.Load(base + (iy * GI_IRR_N + ix) * 4));
+        }
+        sum += wy[jy] * row;
+    }
+    return max(sum, 0.0) * GI_LOAD_SCALE;
+}
+
 template <typename B>
 float3 giShIrradiance(B b, GiHeader h, uint entry, float3 n, out float sunVisibility)
 {
-    const uint a = h.offSh + entry * GI_SH_STRIDE;
-    const uint4 w0 = b.Load4(a), w1 = b.Load4(a + 16), w2 = b.Load4(a + 32), w3 = b.Load4(a + 48);
-    const uint w[14] = { w0.x, w0.y, w0.z, w0.w, w1.x, w1.y, w1.z, w1.w, w2.x, w2.y, w2.z, w2.w, w3.x, w3.y };
-    float y[9];
-    giShBasis(n, y);
-    float3 e = 0;
-    [unroll] for (uint k = 0; k < 9; ++k)
-    {
-        const uint i0 = 3 * k, i1 = 3 * k + 1, i2 = 3 * k + 2;
-        const float r = f16tof32(w[i0 >> 1] >> ((i0 & 1) * 16));
-        const float g = f16tof32(w[i1 >> 1] >> ((i1 & 1) * 16));
-        const float bl = f16tof32(w[i2 >> 1] >> ((i2 & 1) * 16));
-        e += float3(r, g, bl) * y[k];
-    }
-    sunVisibility = f16tof32(w[13] >> 16);
-    return max(e * GI_LOAD_SCALE, 0.0);
+    // The entry's irradiance map (per-ray estimate, exact at its grid directions); the SH block keeps the sun visibility.
+    sunVisibility = f16tof32(b.Load(h.offSh + entry * GI_SH_STRIDE + 52) >> 16);
+    return giIrrMap(b, h, entry, n);
 }
 
 // Irradiance (indirect + sky, no direct sun) at a surface point: trilinear over the 8 cells of the point's level (at least

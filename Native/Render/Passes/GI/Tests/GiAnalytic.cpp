@@ -237,6 +237,8 @@ struct Outcome
 {
     double mean = 0, minimum = 0, maximum = 0, worst = 0;  // worst = max |E / expected - 1| over valid probes
     double expectedMean = 0;                                 // mean expected E over the same probes
+    double mapMean = 0, mapWorst = 0, mapExpectedMean = 0;   // the cache's irradiance maps at the probe points (giCacheIrradianceAt)
+    uint32_t mapProbes = 0;
     double radianceMean = 0, radianceWorst = 0;              // screenProbeRadiance against the uniform radiance
     uint32_t probes = 0;
     int converged = -1;  // first frame whose mean is within 1 %
@@ -339,6 +341,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             gi.record(fc, main, rays);
             const BufferRef resultRef = graph.importBuffer(result.resource.Get(), { "test result", resultBytes, 16 });
             const TextureRef probes = main.screenProbes, maps = main.screenProbeMaps;
+            const BufferRef cacheRef = fc.resources.giCache;
             graph.addPass("test.eval", QueueType::Compute,
                           [&](PassBuilder& b) {
                               b.use(probes, Use::SrvCompute);
@@ -346,10 +349,11 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
                               b.use(depth, Use::SrvCompute);
                               b.use(gbuffer, Use::SrvCompute);
                               b.use(resultRef, Use::UavCompute);
+                              b.use(cacheRef, Use::SrvCompute);
                               b.keep();
                           },
-                          [&, probes, maps, depth, gbuffer, resultRef, fcAddress](PassContext& c) {
-                              const uint32_t k[12] = { c.srv(probes), c.srv(depth), c.srv(gbuffer), c.uav(resultRef), probesX, probesY, width, height, c.srv(maps), 0, 0, 0 };
+                          [&, probes, maps, depth, gbuffer, resultRef, cacheRef, fcAddress](PassContext& c) {
+                              const uint32_t k[12] = { c.srv(probes), c.srv(depth), c.srv(gbuffer), c.uav(resultRef), probesX, probesY, width, height, c.srv(maps), c.srv(cacheRef), 0, 0 };
                               c.cmd->SetPipelineState(shaders.compute("Passes/GI/Tests/GiTestEval"));
                               c.computeConstants(k, 12);
                               c.bindFrameConstants(fcAddress);
@@ -423,6 +427,25 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
                 ++n;
             }
             out.expectedMean = n ? esum / n : 0;
+            {
+                double msum = 0, mexp = 0, mworst = 0;
+                uint32_t mn = 0;
+                for (size_t i = 0; i < values.size() / 16; ++i)
+                {
+                    const float* v = &values[16 * i];
+                    if (v[3] < 0 || v[11] < 0) continue;
+                    const double x = expected({ v[8], v[9], v[10] }, { v[12], v[13], v[14] });
+                    if (x < 0) continue;
+                    msum += v[11];
+                    mexp += x;
+                    mworst = std::max(mworst, x > 0 ? std::fabs(v[11] / x - 1) : std::fabs((double)v[11]));
+                    ++mn;
+                }
+                out.mapMean = mn ? msum / mn : 0;
+                out.mapExpectedMean = mn ? mexp / mn : 0;
+                out.mapWorst = mworst;
+                out.mapProbes = mn;
+            }
             out.radianceMean = n ? rsum / n : 0;
             out.radianceWorst = rworst;
             out.probes = n;
@@ -436,6 +459,8 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
                 logf("  frame %3u: mean E %.4f (expected %.4f, %+.2f %%), min %.4f max %.4f, worst probe %.2f %%; K radiance mean %.4f (expected %.4f), worst %.2f %%\n", f,
                      out.mean, out.expectedMean, 100 * (out.mean / out.expectedMean - 1), lo, hi, 100 * worst, out.radianceMean, expectedRadiance, 100 * rworst);
         }
+        logf("  cache maps at %u probe points: mean E %.5f (expected %.5f, %+.3f %%), worst %.3f %%\n", out.mapProbes, out.mapMean, out.mapExpectedMean,
+             out.mapExpectedMean > 0 ? 100 * (out.mapMean / out.mapExpectedMean - 1) : 0.0, 100 * out.mapWorst);
         if (giSystem) out.stats = giSystem->readStats();
         logf("  cache after the last frame: %u live, %u free, %u requested, %u selected + %u background updates, %u hit entries, %u created, %u resets, "
              "%u allocation failures, %u table overflows\n",
@@ -500,14 +525,16 @@ int main(int argc, char** argv)
         logf("white furnace: Le %.2f, albedo %.2f, expected E = pi Le / (1 - rho) = %.4f\n", le, rho, kPi * le / (1 - rho));
         const Outcome a = run(device, shaders, quality, furnace(le, rho), { 0, 0, 0 }, { 0, 0, 0 }, [&](float3, float3) { return (double)kPi * le / (1 - rho); },
                               le / (1 - rho), frames, 1920, 1080);
-        const bool okA = std::fabs(a.mean / (kPi * le / (1 - rho)) - 1) < 0.01 && a.worst < 0.03 && a.radianceWorst < 0.03 && a.tilePixels > 0 && a.tileMismatches == 0;
+        // Gate: the cache irradiance maps (the representation pixels evaluate from design 2.5 rev. D); the screen probes' SH
+        // (per ray, interim until D) is reported.
+        const bool okA = std::fabs(a.mapMean / (kPi * le / (1 - rho)) - 1) < 0.01 && a.mapWorst < 0.03 && a.radianceWorst < 0.03 && a.tilePixels > 0 && a.tileMismatches == 0;
         logf("white furnace: %u probes, mean %+.3f %%, worst probe %.3f %%, within 1 %% from frame %d; K radiance worst %.3f %% -> %s\n", a.probes,
              100 * (a.mean / (kPi * le / (1 - rho)) - 1), 100 * a.worst, a.converged, 100 * a.radianceWorst, okA ? "PASS" : "FAIL");
         pass = pass && okA;
 
         logf("open sky: L 1, ground albedo 0.5, expected E = pi\n");
         const Outcome b = run(device, shaders, quality, openSky(0.5f), { 1, 1, 1 }, { 0, 0, 0 }, [](float3, float3) { return (double)kPi; }, 1.0, frames, 1920, 1080);
-        const bool okB = std::fabs(b.mean / kPi - 1) < 0.01 && b.worst < 0.03 && b.radianceWorst < 0.03 && b.tilePixels > 0 && b.tileMismatches == 0;
+        const bool okB = std::fabs(b.mapMean / kPi - 1) < 0.01 && b.mapWorst < 0.03 && b.radianceWorst < 0.03 && b.tilePixels > 0 && b.tileMismatches == 0;
         logf("open sky: %u probes, mean %+.3f %%, worst probe %.3f %%, within 1 %% from frame %d; K radiance worst %.3f %% -> %s\n", b.probes, 100 * (b.mean / kPi - 1),
              100 * b.worst, b.converged, 100 * b.radianceWorst, okB ? "PASS" : "FAIL");
         pass = pass && okB;
@@ -523,7 +550,7 @@ int main(int argc, char** argv)
                 return groundAlbedo * l.y * viewFactor(p, { 1, 0, 0 }, lit);
             };
             const Outcome c = run(device, shaders, quality, sunWall(groundAlbedo, l), { 0, 0, 0 }, { 1, 1, 1 }, wallExpected, 0, frames, 1920, 1080);
-            const bool okC = c.probes > 1000 && std::fabs(c.mean / c.expectedMean - 1) < 0.01 && c.worst < 0.03 && c.tileMismatches == 0;
+            const bool okC = c.mapProbes > 1000 && std::fabs(c.mapMean / c.mapExpectedMean - 1) < 0.01 && c.mapWorst < 0.03 && c.tileMismatches == 0;
             logf("sunlit ground and a black wall: %u wall probes, mean E %.5f against %.5f (%+.3f %%), worst probe %.3f %%, within 1 %% from frame %d -> %s\n", c.probes,
                  c.mean, c.expectedMean, 100 * (c.mean / c.expectedMean - 1), 100 * c.worst, c.converged, okC ? "PASS" : "FAIL");
             pass = pass && okC;
@@ -545,9 +572,11 @@ int main(int argc, char** argv)
             logf("horizon band sky: L 1 between elevation 0 and 10 deg, ground albedo 0.5; expected E = %.5f\n", exact);
             const Outcome e = run(device, shaders, quality, openSky(0.5f), { 1, 1, 1 }, { 0, 0, 0 }, [&](float3, float3) { return exact; }, 0, frames, 1920, 1080,
                                   (float)band);
-            const bool okE = e.probes > 1000 && std::fabs(e.mean / exact - 1) < 0.01;
-            logf("horizon band sky: %u probes, mean E %.5f against %.5f (%+.2f %%), worst probe %.2f %% -> %s\n", e.probes, e.mean, exact, 100 * (e.mean / exact - 1),
-                 100 * e.worst, okE ? "PASS" : "FAIL");
+            // The cache's irradiance maps (per ray, 9 x 9, exact at the anchor normal) are the gate; the screen probes' SH
+            // (layer D replaces it) is reported for comparison.
+            const bool okE = e.mapProbes > 1000 && std::fabs(e.mapMean / exact - 1) < 0.01;
+            logf("horizon band sky: cache maps at %u probe points, mean E %.5f against %.5f (%+.2f %%), worst %.2f %%; screen probes (SH) %.5f (%+.2f %%) -> %s\n",
+                 e.mapProbes, e.mapMean, exact, 100 * (e.mapMean / exact - 1), 100 * e.mapWorst, e.mean, 100 * (e.mean / exact - 1), okE ? "PASS" : "FAIL");
             pass = pass && okE;
         }
         logf("probe tile cache: screenProbeGatherTile vs screenProbeGather, %u + %u pixel evaluations, %u + %u not bit-identical (2 cones each)\n", a.tilePixels,

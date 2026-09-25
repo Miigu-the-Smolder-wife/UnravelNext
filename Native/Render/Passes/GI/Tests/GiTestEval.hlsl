@@ -1,11 +1,13 @@
 // unx-kernel: cs_6_6 main
 // GI tests only: the M-facing APIs at every probe's own pixel -> four float4: (screenProbeIrradiance rgb, occlusion),
 // (screenProbeRadiance rgb for the mirrored view direction and a 0.4 rad cone, 0), (world position, 0), (normal, 0); the
-// first two have w = -1 where the pixel shows sky.
+// first two have w = -1 where the pixel shows sky. Position .w = the cache's irradiance at the point (the entries' 9 x 9
+// maps, giCacheIrradianceAt, channel mean; -1 = no entry with data). P[2].y = the cache SRV (raw).
 // P[0] = { probes SRV, depth SRV, gbuffer SRV, output UAV }, P[1] = { probesX, probesY, width, height }, P[2].x = maps atlas SRV;
 // b1 = the view.
 #include "GBuffer.hlsli"
 #include "Passes/GI/ScreenProbes.hlsli"
+#include "Passes/GI/GiCache.hlsli"
 
 [numthreads(8, 8, 1)]
 void main(uint2 probe : SV_DispatchThreadID)
@@ -31,6 +33,10 @@ void main(uint2 probe : SV_DispatchThreadID)
     const ScreenProbeLighting l = screenProbeGather(s, pixel, world, n, linearDepth(d), false, true, reflect(-v, n), 0.4);
     output[index] = float4(l.irradiance, l.occlusion);
     output[index + 1] = float4(l.radiance, 0);
-    output[index + 2] = float4(world, 0);
+    ByteAddressBuffer cache = ResourceDescriptorHeap[P[2].y];
+    const GiHeader h = giHeader(cache);
+    float weight;
+    const float3 e = giCacheIrradianceAt(cache, h, world, n, 0, weight);
+    output[index + 2] = float4(world, weight > 0 ? (e.r + e.g + e.b) / 3 : -1.0);
     output[index + 3] = float4(n, 0);
 }

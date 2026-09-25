@@ -1,66 +1,82 @@
 // unx-kernel: cs_6_6 main
-// Projects each updated entry's 64 hemispherical texels onto cosine-convolved L2 spherical harmonics:
-//   local:  L_lm = sum_t L_t * integral over texel t of Y_lm (exact per-texel integrals, GiSystem's table in the cache
-//           buffer; the texels are piecewise-constant radiance), E_lm = A_l L_lm, A = (pi, 2pi/3, pi/4);
-//   world:  band 1 rotates as a vector, band 2 as the traceless quadratic form Q' = R Q R^T, R = [t b n] (exact).
-// Keeps the sun visibility half of word 13; records the update (count, history since reset, epoch, frame).
-// Threads: one per update slot (selected entries, then background). P[0] = { cache UAV, updates per frame, 0, 0 }
+// Folds each updated entry's 64 new ray samples (GiTrace: radiance and the ray's hemispherical octahedral coordinates)
+// into its irradiance, per ray (design 2.5 revision, request 18): every sample weighs L by its own direction and solid
+// angle, dw = 2 / |p|^3 x the texel's UV area (p = the octahedron point of the map; the density integrates to 2 pi), not
+// the texel's average spread over the texel (a thin band of horizon light is not moved up to where cos is larger).
+//   irradiance map: E(n_j) += L max(0, n_j . w) dw at the 9 x 9 directions around the anchor normal (GiCache.hlsli);
+//   SH (world frame, cosine-convolved L2; the screen probes still use it): E_lm += A_l L Y_lm(w) dw.
+// Both blend into the entry's history with the texels' weight (giHistoryAlpha); the sun visibility half of SH word 13 is
+// kept; the update is recorded (count, history since reset, epoch, frame).
+// One group per update slot (selected entries, then background). P[0] = { cache UAV, updates per frame, samples SRV, 0 }
 #include "Passes/GI/GiInternal.hlsli"
 
-[numthreads(64, 1, 1)]
-void main(uint slot : SV_DispatchThreadID)
+groupshared float4 gs_sample[GI_TEXEL_COUNT];     // radiance, solid-angle weight
+groupshared float3 gs_local[GI_TEXEL_COUNT];      // direction in the anchor frame
+groupshared float3 gs_sh[9];
+
+[numthreads(128, 1, 1)]
+void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
 {
     if (slot >= P[0].y) return;
     RWByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
+    StructuredBuffer<uint4> samples = ResourceDescriptorHeap[P[0].z];
     const GiHeader h = giHeader(b);
     uint entry;
     bool background;
-    if (!giUpdateSlot(b, h, slot, entry, background)) return;
-
-    float3 c[9];
-    [unroll] for (uint j = 0; j < 9; ++j) c[j] = 0;
-    [loop] for (uint texel = 0; texel < GI_TEXEL_COUNT; ++texel)
-    {
-        const uint2 v = b.Load2(h.offTexels + (entry * GI_TEXEL_COUNT + texel) * 8);
-        const float3 radiance = float3(f16tof32(v.x), f16tof32(v.x >> 16), f16tof32(v.y)) * GI_LOAD_SCALE;
-        const uint row = h.offShTable + texel * 36;
-        const float4 y0 = asfloat(b.Load4(row)), y1 = asfloat(b.Load4(row + 16));
-        const float y8 = asfloat(b.Load(row + 32));
-        c[0] += radiance * y0.x; c[1] += radiance * y0.y; c[2] += radiance * y0.z; c[3] += radiance * y0.w;
-        c[4] += radiance * y1.x; c[5] += radiance * y1.y; c[6] += radiance * y1.z; c[7] += radiance * y1.w;
-        c[8] += radiance * y8;
-    }
-
-    // Rotation local -> world: world = t * x + b * y + n * z.
-    const float3 n = giAnchorNormal(b, h, entry);
+    if (!giUpdateSlot(b, h, slot, entry, background)) return;  // uniform over the group
+    const float alpha = giHistoryAlpha(h, giHistory(b, h, entry));
+    const float3 na = giAnchorNormal(b, h, entry);
     float3 t, bt;
-    giBasis(n, t, bt);
-    const float3x3 R = float3x3(t.x, bt.x, n.x, t.y, bt.y, n.y, t.z, bt.z, n.z);  // columns t, b, n
-    float3 w[9];
-    w[0] = c[0];
-    // Band 1: Y1 = (y, z, x) * 0.488603 -> coefficient vector v = (c3, c1, c2) in (x, y, z).
-    [unroll] for (uint ch = 0; ch < 3; ++ch)
+    giBasis(na, t, bt);
+
+    if (lane < GI_TEXEL_COUNT)
     {
-        const float3 v = float3(c[3][ch], c[1][ch], c[2][ch]);
-        const float3 vw = mul(R, v);
-        w[1][ch] = vw.y;
-        w[2][ch] = vw.z;
-        w[3][ch] = vw.x;
-        // Band 2 as a quadratic form: f = a4 xy + a5 yz + a6 (3z^2 - 1) + a7 xz + a8 (x^2 - y^2).
-        const float a4 = 1.092548 * c[4][ch], a5 = 1.092548 * c[5][ch], a6 = 0.315392 * c[6][ch], a7 = 1.092548 * c[7][ch], a8 = 0.546274 * c[8][ch];
-        const float3x3 Q = float3x3(a8 - a6, 0.5 * a4, 0.5 * a7, 0.5 * a4, -a8 - a6, 0.5 * a5, 0.5 * a7, 0.5 * a5, 2 * a6);
-        const float3x3 Qw = mul(mul(R, Q), transpose(R));
-        w[4][ch] = 2 * Qw[0][1] / 1.092548;
-        w[5][ch] = 2 * Qw[1][2] / 1.092548;
-        w[6][ch] = 0.5 * Qw[2][2] / 0.315392;
-        w[7][ch] = 2 * Qw[0][2] / 1.092548;
-        w[8][ch] = 0.5 * (Qw[0][0] - Qw[1][1]) / 0.546274;
+        const uint4 s = samples[slot * GI_TEXEL_COUNT + lane];
+        const float2 uv = float2(s.w & 0xFFFFu, s.w >> 16) / 65535.0;
+        // p on the octahedron (hemispherical map: a = u + v - 1, b = u - v, z = 1 - |a| - |b|); dw / (du dv) = 2 / |p|^3.
+        const float2 xy = uv * 2 - 1;
+        const float2 ab = float2((xy.x + xy.y) * 0.5, (xy.x - xy.y) * 0.5);
+        const float3 q = float3(ab, 1 - abs(ab.x) - abs(ab.y));
+        const float len = length(q);
+        gs_sample[lane] = float4(asfloat(s.xyz), 2 / (len * len * len) / (float)GI_TEXEL_COUNT);
+        gs_local[lane] = q / len;
     }
-    const float a[9] = { GI_PI, 2 * GI_PI / 3, 2 * GI_PI / 3, 2 * GI_PI / 3, GI_PI / 4, GI_PI / 4, GI_PI / 4, GI_PI / 4, GI_PI / 4 };
+    GroupMemoryBarrierWithGroupSync();
+
+    // SH: lanes 0..8, one coefficient each (three channels), in the world frame.
+    if (lane < 9)
+    {
+        float3 c = 0;
+        [loop] for (uint k = 0; k < GI_TEXEL_COUNT; ++k)
+        {
+            const float3 d = gs_local[k];
+            float y[9];
+            giShBasis(t * d.x + bt * d.y + na * d.z, y);
+            c += gs_sample[k].xyz * (y[lane] * gs_sample[k].w);
+        }
+        const float a = lane == 0 ? GI_PI : (lane < 4 ? 2 * GI_PI / 3 : GI_PI / 4);
+        gs_sh[lane] = c * a;
+    }
+    // Irradiance map: lanes 0..80, one direction each.
+    if (lane < GI_IRR_N * GI_IRR_N)
+    {
+        const uint ix = lane % GI_IRR_N, iy = lane / GI_IRR_N;
+        const float3 nj = giHemiOctDecode((float2(ix, iy) + 0.5) / (float)GI_IRR_N);
+        float3 e = 0;
+        [loop] for (uint k = 0; k < GI_TEXEL_COUNT; ++k) e += gs_sample[k].xyz * (max(dot(nj, gs_local[k]), 0.0) * gs_sample[k].w);
+        const uint address = h.offIrr + entry * GI_IRR_STRIDE + lane * 4;
+        const float3 previous = giIrrUnpack(b.Load(address)) * GI_LOAD_SCALE;
+        b.Store(address, giPackRgb9e5(lerp(previous, e, alpha) * GI_STORE_SCALE));
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (lane != 0) return;
+
+    float3 previous[9];
+    giLoadSh(b, h, entry, previous);
     float v[27];
     [unroll] for (uint k = 0; k < 9; ++k)
     {
-        const float3 e = w[k] * (a[k] * GI_STORE_SCALE);
+        const float3 e = lerp(previous[k], gs_sh[k], alpha) * GI_STORE_SCALE;
         v[3 * k] = e.r;
         v[3 * k + 1] = e.g;
         v[3 * k + 2] = e.b;

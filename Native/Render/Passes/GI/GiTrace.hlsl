@@ -139,6 +139,9 @@ void GiTraceGen()
         }
     }
 
+    // The raw sample for the per-ray irradiance map and SH (GiIntegrate): radiance, coordinates in the hemisphere map.
+    RWStructuredBuffer<uint4> samples = ResourceDescriptorHeap[P[4].y];
+    samples[thread] = uint4(asuint(radiance), (uint)round(saturate(uv.x) * 65535.0) | ((uint)round(saturate(uv.y) * 65535.0) << 16));
     const uint address = h.offTexels + (entry * GI_TEXEL_COUNT + texel) * 8;
     const uint2 old = b.Load2(address);
     const float3 previous = float3(f16tof32(old.x), f16tof32(old.x >> 16), f16tof32(old.y)) * GI_LOAD_SCALE;

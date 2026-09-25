@@ -30,7 +30,7 @@ uint32_t asU(float f)
 // Cache buffer layout (GiCache.hlsli header fields 4..11, 24..27).
 struct Layout
 {
-    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, end;
+    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, end;
 };
 
 Layout layoutOf(const GiSettings& s)
@@ -49,7 +49,8 @@ Layout layoutOf(const GiSettings& s)
     l.shTable = l.hitList + 2 * s.capacity * 4;
     l.mapOwner = l.shTable + 64 * 36;
     l.anchorMin = l.mapOwner + s.capacity * 4;
-    l.end = l.anchorMin + s.capacity * 8;
+    l.irr = l.anchorMin + s.capacity * 8;
+    l.end = l.irr + s.capacity * 336;  // GI_IRR_STRIDE
     return l;
 }
 
@@ -175,6 +176,7 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[31] = m_settings.historyMax;
     h[37] = l.mapOwner;  // GI_H_MAP_OWNER
     h[60] = l.anchorMin; // deterministic anchors (GiHeader.offAnchorMin)
+    h[62] = l.irr;       // irradiance maps (GiHeader.offIrr)
     for (uint32_t e = 0; e < m_settings.capacity; ++e) head[l.freeList / 4 + e] = m_settings.capacity - 1 - e;  // pops 0, 1, 2 ...
     for (uint32_t t = 0; t < m_settings.tableSlots; ++t) head[l.table / 4 + t * 4 + 2] = 0xFFFFFFFFu;
     std::memcpy(&tail[(l.shTable - l.hitStamp) / 4], shTable.data(), shTable.size() * 4);
@@ -368,14 +370,17 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     const float3 sky = m_skyRadiance, sun = m_sunIlluminance;
     const float skyBand = m_skyBand;
     const uint32_t rayCount = s.updatesPerFrame * 64;
+    // Each ray's radiance and hemispherical octahedral coordinates, for the per-ray irradiance map and SH (GiIntegrate).
+    const BufferRef samples = g.createBuffer({ "GI ray samples", (uint64_t)rayCount * 16, 16 });
     g.addPass("r.gi.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::UavGraphics);
+                  b.use(samples, Use::UavGraphics);
                   rays.declareTraversal(b);
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
-              [&pipeline, cache, rayCount, s, sky, sun, skyBand, scene, frameConstants, atmosphere, luts](PassContext& c) {
+              [&pipeline, cache, samples, rayCount, s, sky, sun, skyBand, scene, frameConstants, atmosphere, luts](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = c.uav(cache);
                   k[1] = rayCount;
@@ -391,12 +396,24 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   k[14] = asU(sun.z);
                   k[15] = s.experimentDisable;
                   k[16] = asU(skyBand);
+                  k[17] = c.uav(samples);
                   std::memcpy(&k[24], scene, sizeof scene);
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
                   pipeline.dispatch(c.cmd, 0, rayCount, 1, 1);
               });
-    compute("r.gi.integrate", "Passes/GI/GiIntegrate", groups(s.updatesPerFrame), { s.updatesPerFrame });
+    g.addPass("r.gi.integrate", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(cache, Use::UavCompute);
+                  b.use(samples, Use::SrvCompute);
+              },
+              [&shaders, cache, samples, updates = s.updatesPerFrame, frameConstants](PassContext& c) {
+                  const uint32_t k[4] = { c.uav(cache), updates, c.srv(samples), 0 };
+                  c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiIntegrate"));
+                  c.computeConstants(k, 4);
+                  c.bindFrameConstants(frameConstants);
+                  c.cmd->Dispatch(updates, 1, 1);  // one group per update slot
+              });
 
     // Map owner list (count, then probe indices) and its indirect dispatch arguments, reset by the gather.
     const BufferRef owners = g.createBuffer({ "GI map owners", 4ull + 4ull * probesX * probesY, 0 });

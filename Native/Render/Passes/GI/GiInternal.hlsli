@@ -198,6 +198,7 @@ uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anch
             b.Store4(h.offAnchor + entry * 16, uint4(asuint(anchor), giPackNormal(normal)));
             [unroll] for (uint k = 0; k < GI_SH_STRIDE / 16; ++k) b.Store4(h.offSh + entry * GI_SH_STRIDE + k * 16, 0u);
             [loop] for (uint t = 0; t < GI_TEXEL_COUNT * 8 / 16; ++t) b.Store4(h.offTexels + entry * GI_TEXEL_COUNT * 8 + t * 16, 0u);
+            [loop] for (uint t = 0; t < GI_IRR_STRIDE / 16; ++t) b.Store4(h.offIrr + entry * GI_IRR_STRIDE + t * 16, 0u);
             b.Store(h.offHitStamp + entry * 4, 0u);
             if (h.flags & 1u)
             {
