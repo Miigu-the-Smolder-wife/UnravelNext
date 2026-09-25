@@ -131,7 +131,7 @@ void GiTraceGen()
                     // One exact shadow ray toward a point of the solar disk: the texel's history integrates the disk
                     // over frames. (S's VSM lookup here measured 0.28 ms more at 4K city than the rays, 375e39d.)
                     RayDesc sr;
-                    sr.Origin = s.position + s.normal * giBias(h, s.position);
+                    sr.Origin = s.position + (dot(s.geometricNormal, l) > 0 ? 1.0 : -1.0) * s.geometricNormal * giBias(h, s.position);  // geometric side (ReflectionHit)
                     sr.Direction = giSunDirection(seed + 7);
                     sr.TMin = 0;
                     sr.TMax = giRayLength();

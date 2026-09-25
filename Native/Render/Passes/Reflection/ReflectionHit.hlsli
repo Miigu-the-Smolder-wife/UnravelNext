@@ -82,8 +82,10 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
             if (!resident)
             {
                 RayDesc sr;
-                const float side = dot(s.normal, l) > 0 ? 1.0 : -1.0;  // leaves transmit: the shadow ray leaves the lit side
-                sr.Origin = s.position + side * s.normal * (1e-3 + 2e-4 * distance(s.position, g_cameraPosition));
+                // Offset along the geometric normal on the sun's side (leaves transmit: the ray leaves the lit side). The
+                // shading normal can point under the triangle (smooth or mapped normals): the ray then shadowed itself.
+                const float side = dot(s.geometricNormal, l) > 0 ? 1.0 : -1.0;
+                sr.Origin = s.position + side * s.geometricNormal * (1e-3 + 2e-4 * distance(s.position, g_cameraPosition));
                 sr.Direction = giSunDirection(seed);
                 sr.TMin = 0;
                 sr.TMax = giRayLength();

@@ -10,9 +10,10 @@
 //     pixels x c_ray  >  cost of its view,
 // c_ray = this system's own GPU timestamps around the reflection trace / its rays (running average), the view's cost =
 // its own bracketing timestamps when it ran within the last second, else a + b x (its mirror pixels: the view draws only
-// those, ViewDesc::planarMask, INTERFACES v1.22/v1.25), with b the running average of measured views per mirror pixel
-// and a, b's prior from reflection.planar_view_fixed_ms and reflection.planar_view_ns_per_px (integrated-gate
-// measurements). 10 % hysteresis. Since cost >= a + b x pixels, a
+// those, ViewDesc::planarMask, INTERFACES v1.22/v1.25), with a and b a least-squares line through the measured views
+// (weights decaying by 1/16 per view) seeded with two prior points from reflection.planar_view_fixed_ms and
+// reflection.planar_view_ns_per_px. Both terms are fitted: charging a large fixed view cost to b alone made b so large
+// that no plane could win and no view ran again to correct it. 10 % hysteresis. Since cost >= a + b x pixels, a
 // plane can pay off only if c_ray > b and pixels > a / (c_ray - b): that exact bound prunes the plane hierarchy (with
 // the pixel bound from area, distance and corner pixel density, and the screen rectangle). The exact set (original BLASes of characters and wind
 // foliage near curved mirrors) is not implemented yet.
@@ -65,7 +66,8 @@ public:
         float planarSelectMs = 0;                     // CPU time of last frame's plane query and camera choice
         uint32_t planarRectPixels = 0;                // screen rectangles of the views rendered last frame
         float rayNs = 0;                              // measured reflection trace cost per ray (running average)
-        float viewNsPerPixel = 0;                     // measured view cost per mirror pixel (running average; prior until a view ran)
+        float viewNsPerPixel = 0;                     // view cost per mirror pixel, b (fit of the measured views; prior until views ran)
+        float viewFixedMs = 0;                        // view cost independent of its pixels, a (same fit)
         float viewMs = 0;                             // measured cost of last read-back frame's views (bracketing timestamps)
     };
     // Planar reflectors of the scene (built on first use). Tests disable the planar path to compare it with rays.
@@ -128,7 +130,9 @@ private:
     const uint8_t* m_readbackMapped = nullptr;
     ComPtr<ID3D12QueryHeap> m_timestamps;     // per slot: trace begin/end, view begin/end x kPlanarMax
     double m_tickMs = 0;
-    float m_rayNs = 0, m_viewNsPerPixel = 0, m_lastViewMs = 0;
+    float m_rayNs = 0, m_viewNsPerPixel = 0, m_viewFixedNs = 0, m_lastViewMs = 0;
+    double m_viewFit[5] = {};  // decaying weighted sums over measured views (x = mirror pixels, y = ns): w, x, y, xx, xy
+    void addViewSample(double pixels, double ns, double weight);
     std::vector<uint32_t> m_slotViewPlanes[4], m_slotViewPixels[4];  // plane and mirror pixels of each view, per slot
     std::vector<float> m_planeViewMs;         // last measured cost of the plane's view
     std::vector<uint64_t> m_planeViewFrame;   // frame of that measurement

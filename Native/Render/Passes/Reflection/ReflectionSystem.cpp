@@ -157,6 +157,29 @@ ReflectionSystem::ReflectionSystem(Device& device, ShaderLibrary& shaders, const
     check(device.queue(QueueType::Graphics).get()->GetTimestampFrequency(&frequency), "timestamp frequency");
     m_tickMs = 1000.0 / (double)frequency;
     m_viewNsPerPixel = m_settings.planarViewNsPerPixel;
+    m_viewFixedNs = m_settings.planarViewFixedMs * 1e6f;
+    // The prior as two points of the fit (at 0 and at 1 M mirror pixels); measured views outweigh them after a few.
+    addViewSample(0, m_viewFixedNs, 1);
+    addViewSample(1e6, m_viewFixedNs + 1e6 * m_viewNsPerPixel, 1);
+}
+
+void ReflectionSystem::addViewSample(double pixels, double ns, double weight)
+{
+    double* f = m_viewFit;
+    for (int i = 0; i < 5; ++i) f[i] *= 15.0 / 16.0;
+    f[0] += weight;
+    f[1] += weight * pixels;
+    f[2] += weight * ns;
+    f[3] += weight * pixels * pixels;
+    f[4] += weight * pixels * ns;
+    // y = a + b x by least squares; a, b >= 0 (a negative term refits the other alone).
+    const double det = f[0] * f[3] - f[1] * f[1];
+    double b = det > 1e-9 * f[0] * f[3] ? (f[0] * f[4] - f[1] * f[2]) / det : m_viewNsPerPixel;
+    double a = (f[2] - b * f[1]) / f[0];
+    if (b < 0) b = 0, a = f[2] / f[0];
+    if (a < 0) a = 0, b = f[3] > 0 ? f[4] / f[3] : m_viewNsPerPixel;
+    m_viewFixedNs = (float)a;
+    m_viewNsPerPixel = (float)b;
 }
 
 // Planar reflector candidates: triangles on which a reflection camera is exact. The material (with instance overrides)
@@ -394,8 +417,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                     m_planeViewMs[p] = ms;
                     m_planeViewFrame[p] = m_slotFrame[oldSlot];
                 }
-                const float perPixel = std::max(ms - m_settings.planarViewFixedMs, 0.0f) * 1e6f / std::max(mirror, 1u);
-                m_viewNsPerPixel += (perPixel - m_viewNsPerPixel) / 4;
+                addViewSample(mirror, ms * 1e6, 1);
             }
         }
     }
@@ -414,7 +436,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     m_slotViewPixels[ringSlot].clear();
     // Exact threshold of the cost choice: a view costs at least a + b x pixels, rays c x pixels, so a plane can pay off
     // only when c > b and pixels > a / (c - b). Until the trace has been measured no plane is chosen.
-    const float rayNs = m_rayNs, viewNs = m_viewNsPerPixel, viewFixedNs = s.planarViewFixedMs * 1e6f;
+    const float rayNs = m_rayNs, viewNs = m_viewNsPerPixel, viewFixedNs = m_viewFixedNs;
     const bool planarCanWin = fc.services.renderView && (m_planarForced || rayNs > viewNs);
     const double minPixels = m_planarForced ? 1.0 : planarCanWin ? viewFixedNs / (rayNs - viewNs) : 1e30;
     const auto selectStart = std::chrono::steady_clock::now();
@@ -753,7 +775,7 @@ ReflectionSystem::Stats ReflectionSystem::readStats()
     D3D12_RANGE none{ 0, 0 };
     readback->Unmap(0, &none);
     const uint32_t largest = m_planePixels.empty() ? 0 : *std::max_element(m_planePixels.begin(), m_planePixels.end());
-    return { v[0], v[1], v[2], v[3], m_lastPlanarViews, m_lastPlanarPixels, m_lastCandidates, largest, m_lastSelectMs, m_lastRectPixels, m_rayNs, m_viewNsPerPixel,
+    return { v[0], v[1], v[2], v[3], m_lastPlanarViews, m_lastPlanarPixels, m_lastCandidates, largest, m_lastSelectMs, m_lastRectPixels, m_rayNs, m_viewNsPerPixel, m_viewFixedNs * 1e-6f,
              m_lastViewMs };
 }
 } // namespace unx::render::refl

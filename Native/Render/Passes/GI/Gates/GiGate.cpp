@@ -406,8 +406,8 @@ int main(int argc, char** argv)
                 logf("R %s: planar candidates %u visible, largest plane %u mirror pixels, %u views (%u px)%s, CPU %.3f ms\n", res.name.c_str(),
                      rs.planarCandidates, rs.planarLargestPixels, rs.planarViews, rs.planarPixels,
                      renderer ? "" : " (no renderView in this gate)", rs.planarSelectMs);
-                logf("R %s: planar cost choice: rays %.3f ns/ray (measured), views %.3f ns per rectangle pixel (%s), last views %.3f ms over %u rectangle px\n",
-                     res.name.c_str(), rs.rayNs, rs.viewNsPerPixel, rs.planarViews || rs.viewMs > 0 ? "measured" : "prior or measured earlier", rs.viewMs,
+                logf("R %s: planar cost choice: rays %.3f ns/ray (measured), views %.3f ms + %.3f ns per mirror pixel (%s), last views %.3f ms over %u rectangle px\n",
+                     res.name.c_str(), rs.rayNs, rs.viewFixedMs, rs.viewNsPerPixel, rs.planarViews || rs.viewMs > 0 ? "fit of measured views" : "prior", rs.viewMs,
                      rs.planarRectPixels);
             }
             if (giSystem)
