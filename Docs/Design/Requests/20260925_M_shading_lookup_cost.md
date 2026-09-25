@@ -41,3 +41,9 @@ S·R가 없는 빌드(V·M·C)에서 M의 셰이딩은 0.385 ms(태양 원반 �
 - 인터페이스: 5.6 표의 S·R 함수 시그니처(추가 또는 교체). M은 새 조회로 바꾸고 같은 분해 측정을 다시 낸다.
 - 측정 재현: `powershell -File Tools/CI/GpuLock.ps1 -Track M -- build/Mall/bin/unx_gate_shading_mgate.exe --scene city_block
   --resolution 4K --frames 300 --set shading.experiment_disable=<0|2|4|8|31>`(빌드: `Build.ps1 -Track Mall -Tracks "V;M;S;R;C"`).
+
+## 결과 (코어 기록, 2026-09-25)
+
+- S: 공기 합성 조회를 한 장의 공기 볼륨으로 바꿨다(S f1f6f8a, 요청 `20260925_S_air_volume.md`, INTERFACES v1.15). `atmosphereAerial`이 전체 공기 합성이고 `atmosphereAirView`가 추가됐으며, `froxelScattering`은 삭제됐다.
+- R: `screenProbeGather`(INTERFACES v1.13, 요청 `20260925_R_probe_lookup_structure.md`)가 발자국 1회로 조도·뒷면 조도·근거리 가림·K 경로 복사휘도를 함께 준다(월드 위치 인자, 프로브별 역투영 없음).
+- M은 두 조회로 옮겼다(M_STATUS). 같은 분해 측정(`shading.experiment_disable`)의 재측정은 게임 뒤 M이 GPU 잠금 아래에서 한다.
