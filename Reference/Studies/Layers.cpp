@@ -1915,6 +1915,13 @@ void metalFinal(const std::string& out, uint32_t photons)
         }
         std::sort(wp.begin(), wp.end());
     }
+    bool kFit = false;
+    {
+        char* v = nullptr;
+        size_t n = 0;
+        if (_dupenv_s(&v, &n, "UNX_K_FIT") == 0 && v) kFit = v[0] == '1';
+        free(v);
+    }
     auto wOf = [&](double r) {
         if (r <= wp.front().first) return wp.front().second;
         if (r >= wp.back().first) return wp.back().second;
@@ -1937,7 +1944,7 @@ void metalFinal(const std::string& out, uint32_t photons)
             if (dot(e.dir, sd) > 0) skyWhite += e.L.luminance() * dot(e.dir, sd) * e.dw / kPi;
     }
     std::ostringstream md;
-    md << "# Metal multiple scattering as shipped: (1 - w) G(table) + w K vs the MS conductor [measured]\n\n"
+    md << "# Metal multiple scattering as shipped: (1 - w) G(table) + w K" << (kFit ? " (K2: fitted per-channel coefficient)" : "") << " vs the MS conductor [measured]\n\n"
           "`unx_study_material_layers metalfinal` with UNX_W_POINTS as below. g: published kMetalScatterScale (trilinear, "
           "per channel, rho = F0); E: core table. Off-grid roughness. Photons per incidence bin: "
        << photons << ".\n\nw(r) points:";
@@ -1988,6 +1995,29 @@ void metalFinal(const std::string& out, uint32_t photons)
                 {
                     const double f = (&f0.r)[ch] + (1 - (&f0.r)[ch]) / 21.0;
                     (&d.Fms.r)[ch] = (float)(f * f * e / (1 - f * (1 - e)));
+                }
+                if (kFit)
+                {
+                    // K2: the multiple-scattering coefficient per channel fitted to the reference's hemispherical
+                    // energy, c = (Ebar_ms - Ebar_ss) / (1 - E_avg) (the Kulla-Conty colour term is approximate for
+                    // coloured Schlick metals).
+                    cond::Def ss = d;
+                    ss.kind = 3;
+                    Table ts;
+                    cond::defTable(ss, photons / 4, ts);
+                    double ems[3] = {}, ess[3] = {};
+                    for (int i = 0; i < NI; ++i)
+                    {
+                        const double t0 = i * kPi / 180, t1 = (i + 1) * kPi / 180, wgt = std::sin(t1) * std::sin(t1) - std::sin(t0) * std::sin(t0);
+                        for (int t = 0; t < NT; ++t)
+                            for (int q = 0; q < NP; ++q)
+                                for (int ch = 0; ch < 3; ++ch)
+                                {
+                                    ems[ch] += (&phys.at(i, t, q).r)[ch] * wgt;
+                                    ess[ch] += (&ts.at(i, t, q).r)[ch] * wgt;
+                                }
+                    }
+                    for (int ch = 0; ch < 3; ++ch) (&d.Fms.r)[ch] = (float)std::max(0.0, (ems[ch] - ess[ch]) / std::max(1e-9, 1 - e));
                 }
             }
             std::vector<Rgb> g(NI);
