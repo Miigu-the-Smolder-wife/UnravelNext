@@ -1,0 +1,23 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "resolution": "3840x2160", "reps": 9, "timestamp": "20260926_050143",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 4,608 bricks (18 MB), 1 B density: camera march (1 px per voxel), 32 B record", "value": 0.869376, "unit": "ms", "note": "0.104815 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 4,608 bricks (18 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only", "value": 0.654336, "unit": "ms", "note": "0.078889 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 4,608 bricks (144 MB), 8 B AoS: camera march (1 px per voxel), 32 B record", "value": 2.3593, "unit": "ms", "note": "0.284444 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 4,608 bricks (162 MB), SoA 1 B density + 8 B attributes where density > 0: camera march (1 px per voxel), 32 B record", "value": 2.62144, "unit": "ms", "note": "0.316049 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 4,608 bricks (162 MB), SoA 1 B density + 8 B attributes where density > 0: receiver sun march (1 px per voxel), 4 B T only", "value": 0.654336, "unit": "ms", "note": "0.078889 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 16,384 bricks (64 MB), 1 B density: camera march (1 px per voxel), 32 B record", "value": 1.02912, "unit": "ms", "note": "0.124074 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 16,384 bricks (64 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only", "value": 0.654336, "unit": "ms", "note": "0.078889 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 16,384 bricks (512 MB), 8 B AoS: camera march (1 px per voxel), 32 B record", "value": 2.8887, "unit": "ms", "note": "0.348272 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 16,384 bricks (576 MB), SoA 1 B density + 8 B attributes where density > 0: camera march (1 px per voxel), 32 B record", "value": 3.64851, "unit": "ms", "note": "0.439877 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 16,384 bricks (576 MB), SoA 1 B density + 8 B attributes where density > 0: receiver sun march (1 px per voxel), 4 B T only", "value": 0.974848, "unit": "ms", "note": "0.117531 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks (96 MB), 1 B density: camera march (1 px per voxel), 32 B record", "value": 1.3015, "unit": "ms", "note": "0.156914 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks (96 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only", "value": 0.886784, "unit": "ms", "note": "0.106914 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks (768 MB), 8 B AoS: camera march (1 px per voxel), 32 B record", "value": 7.56019, "unit": "ms", "note": "0.911481 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks (864 MB), SoA 1 B density + 8 B attributes where density > 0: camera march (1 px per voxel), 32 B record", "value": 7.80083, "unit": "ms", "note": "0.940494 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, pool 24,576 bricks (864 MB), SoA 1 B density + 8 B attributes where density > 0: receiver sun march (1 px per voxel), 4 B T only", "value": 1.00659, "unit": "ms", "note": "0.121358 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, unique world (265 MB), 1 B density: camera march (1 px per voxel), 32 B record", "value": 4.64691, "unit": "ms", "note": "0.560247 ns/pixel"},
+  {"section": "bricks", "name": "vista world 244x139x2 bricks, unique world (265 MB), 1 B density: receiver sun march (1 px per voxel), 4 B T only", "value": 3.2, "unit": "ms", "note": "0.385802 ns/pixel"}
+ ]
+}

@@ -4,6 +4,7 @@
 //   --only-coverage   band B fragment pipeline: conservative raster + exact area + mask + 24 B append (global / per-tile
 //                     segments with per-fragment or per-wave-tile atomics), tile composite (groupshared sort + shade)
 //   --only-bricks     band C brick DDA: 16^3 bricks, 1 B or 8 B voxels, camera and sun (orthographic) marches, entry maps
+//   --bricks-vista    only the vista world of the bricks bench (1 px per voxel, instanced pools 19..96 MB and unique, SoA, brick placement)
 //   --only-bands      banded pixel passes: resolve (8 B in, 12 B out) + shade (32/48 B in, 4 B out), 1/4/8/16 bands
 //   --only-shade      shading kernel with tile-shared probe SH, in-kernel air fetches, K tap, 8 lights, register pressure
 // Hardware runs need the GPU lock (UNX_GPU_LOCK, Tools/CI/GpuLock.ps1). --warp runs everything on the WARP adapter at a
@@ -459,6 +460,7 @@ static Dxc dxc;
 static std::string g_shaderDir = DB_SHADER_DIR;
 static uint32_t g_width = 3840, g_height = 2160;
 static bool g_conservative = true, g_noHelper = false;  // WARP isolation switches
+static bool g_bricksVistaOnly = false;  // --bricks-vista: only the vista world (1 px per voxel, instanced pools) of the bricks bench
 static bool g_d16 = false;  // --d16: VSM bench depth atlas in D16_UNORM instead of D32_FLOAT (revision 1 11.4 (6))
 bool g_d16_fwd() { return g_d16; }
 static ComPtr<ID3D12Resource> g_scratch; static UINT g_scratchUav = 0;  // 128 MB: warm-up target, L2 flush
@@ -657,10 +659,99 @@ static void benchCoverage()
 }
 
 // ------------------------------------------------------------------------------------------ 2. bricks: DDA march
+// Revision 1 14.9 (vista): the far canopy at the band C boundary projects one voxel to one pixel, so neighbouring rays read
+// neighbouring voxels (the dense box below gives 12 px per voxel). World = 240 x 136 x 2 bricks (3840 x 2176 x 32 voxels)
+// seen from 1871 voxels (60 deg fov: 1 px per voxel at the front face, 2 bricks of padding per side); the brick table maps world bricks onto an
+// instanced pool (species bricks) of 4,608 / 16,384 / 24,576 bricks (19 / 64 / 96 MB at 1 B) or the whole world unique.
+static void benchBricksVista(const std::string& s)
+{
+    warmUp("Band C brick DDA, vista world (1 px per voxel, instanced pools)");
+    const uint32_t W = g_width, H = g_height;
+    const uint32_t Bx = (W + 15) / 16 + 4, By = (H + 15) / 16 + 4, Bz = 2, world = Bx * By * Bz;  // 2 bricks of padding per side: edge rays stay inside for 32 steps
+    auto output = g.buffer((UINT64)W * H * 32); const UINT outUav = g.uavStructured(output.Get(), W * H, 32);
+    auto maps = g.buffer(4096); const UINT mapsUav = g.uavRaw(maps.Get(), 4096);
+    const float camDist = (float)H / (2.f * 0.577f);
+    // Mapping of world bricks onto the pool: 0 = random (shuffled when unique) = no locality, the worst case for the TLB and L2;
+    // 1 = tree blocks: each 6 x 6 x 2 world block (one tree instance) maps to a random contiguous 72-brick block of the pool
+    // (instanced species bricks: locality inside a tree, none between trees); 2 = contiguous (world order).
+    struct Pool { const char* name; uint32_t bricks; int mapping; };
+    const Pool pools[] = { { "pool 4,608 bricks, random", 4608u, 0 }, { "pool 16,384 bricks, random", 16384u, 0 }, { "pool 24,576 bricks, random", 24576u, 0 },
+                           { "pool 24,576 bricks, tree blocks", 24576u, 1 }, { "pool 24,576 bricks, contiguous", 24576u, 2 },
+                           { "unique world, shuffled", 0u, 0 }, { "unique world, tree blocks", 0u, 1 }, { "unique world, contiguous", 0u, 2 } };
+    for (const Pool& pl : pools)
+    {
+        const uint32_t pool = pl.bricks == 0 ? world : std::min(g.warp ? pl.bricks / 144 : pl.bricks, world);  // WARP: 256x144 world of 520 bricks
+        if (pl.bricks != 0 && pool == world) continue;  // a pool at least as large as the world is the unique case
+        std::vector<uint32_t> table(world);
+        {
+            std::mt19937 rng(3);
+            if (pl.mapping == 0) { for (uint32_t i = 0; i < world; ++i) table[i] = pool == world ? i : (uint32_t)(rng() % pool); if (pool == world) std::shuffle(table.begin(), table.end(), rng); }
+            else if (pl.mapping == 2) { for (uint32_t i = 0; i < world; ++i) table[i] = i % pool; }
+            else
+            {
+                const uint32_t blocks = std::max(pool / 72u, 1u);
+                std::vector<uint32_t> base((Bx / 6 + 1) * (By / 6 + 1));
+                for (uint32_t& b : base) b = (uint32_t)(rng() % blocks) * 72u;
+                for (uint32_t bz = 0; bz < Bz; ++bz) for (uint32_t by = 0; by < By; ++by) for (uint32_t bx = 0; bx < Bx; ++bx)
+                    table[(bz * By + by) * Bx + bx] = std::min(base[(by / 6) * (Bx / 6 + 1) + bx / 6] + (bx % 6) + 6 * (by % 6) + 36 * bz, pool - 1);
+            }
+        }
+        auto tableBuf = g.buffer((UINT64)world * 4); g.upload(tableBuf.Get(), table.data(), (UINT64)world * 4);
+        const UINT tableSrv = g.srvStructured(tableBuf.Get(), world, 4);
+        struct Layout { const char* name; uint32_t voxelBytes; bool soa; };
+        const Layout layouts[] = { { "1 B density", 1u, false }, { "8 B AoS", 8u, false }, { "SoA 1 B density + 8 B attributes where density > 0", 8u, true } };
+        for (const Layout& ly : layouts)
+        {
+            if (ly.voxelBytes == 8 && pool == world && !g.warp) continue;  // 2 GB: the unique world is measured at 1 B only
+            if (ly.voxelBytes == 8 && pl.mapping != 0) continue;  // the mapping variants are measured on the density plane only
+            const UINT64 planeVox = (UINT64)pool * 4096;
+            const UINT64 bytes = ly.soa ? planeVox * 9 : planeVox * ly.voxelBytes;
+            std::vector<uint8_t> vox(bytes, 0);
+            {
+                std::mt19937 rng(11);
+                for (UINT64 i = 0; i < planeVox; ++i)
+                    if ((rng() & 1023) < 307)
+                    {
+                        const uint8_t dens = (uint8_t)(5 + (rng() % 70));
+                        if (ly.soa) { vox[i] = dens; vox[planeVox + i * 8 + 4] = (uint8_t)(rng() & 0xFF); }
+                        else vox[i * ly.voxelBytes] = dens;
+                    }
+            }
+            auto voxBuf = g.buffer(bytes); g.upload(voxBuf.Get(), vox.data(), bytes);
+            std::vector<uint8_t>().swap(vox);
+            const UINT voxSrv = g.srvRaw(voxBuf.Get(), bytes);
+            std::vector<std::wstring> defs = { wdef("VOXEL_BYTES", ly.voxelBytes), wdef("STEPS", 32u) };
+            if (ly.soa) defs.push_back(L"SOA=1");
+            auto pso = g.computePso(dxc.compile(s, L"MarchCS", L"cs_6_6", defs).Get());
+            std::vector<std::wstring> defsT = defs; defsT.push_back(L"OUT_T=1");
+            auto psoT = g.computePso(dxc.compile(s, L"MarchCS", L"cs_6_6", defsT).Get());
+            struct Case { const char* name; uint32_t mode; bool tOnly; };
+            const Case cases[] = { { "camera march (1 px per voxel), 32 B record", 0u, false }, { "receiver sun march (1 px per voxel), 4 B T only", 2u, true } };
+            for (const Case& cs : cases)
+            {
+                if (cs.mode == 2 && ly.voxelBytes == 8 && !ly.soa) continue;  // the sun march reads density only: 1 B plane or SoA
+                Consts c; c(0, 0) = W; c(0, 1) = H; c(0, 2) = 32; c(0, 3) = cs.mode;
+                c(1, 0) = tableSrv; c(1, 1) = voxSrv; c(1, 2) = outUav; c(1, 3) = mapsUav; c(2, 0) = Bx; c(2, 1) = By; c(2, 2) = Bz; c(2, 3) = world;
+                c(3, 1) = asu(camDist); c(3, 3) = ly.soa ? (uint32_t)planeVox : 0u;
+                ID3D12PipelineState* p = cs.tOnly ? psoT.Get() : pso.Get();
+                Stat st = g.time([&](ID3D12GraphicsCommandList6* l) { g.setConstants(l, c.v); l->SetPipelineState(p); l->Dispatch((W + 7) / 8, (H + 7) / 8, 1); Gpu::uavBarrier(l); }, flushL2);
+                char name[240];
+                snprintf(name, sizeof name, "vista world %ux%ux%u bricks, %s (%.0f MB), %s: %s", Bx, By, Bz, pl.name, bytes / 1048576.0, ly.name, cs.name);
+                record("bricks", name, st.median, "ms", std::to_string(st.median * 1e6 / ((double)W * H)) + " ns/pixel");
+            }
+            if (g.warp)
+            {
+                const auto o = g.readback(output.Get(), 64);
+                logf("  WARP check (vista %s, %s): first record T=%g entries=%u\n", pl.name, ly.name, ((const float*)o.data())[0], ((const uint32_t*)o.data())[3]);
+            }
+        }
+    }
+}
 static void benchBricks()
 {
-    warmUp("Band C brick DDA (16^3 bricks, table indirection, camera and sun marches, entry maps)");
     const std::string s = src("bricks.hlsl");
+    if (g_bricksVistaOnly) { benchBricksVista(s); return; }
+    warmUp("Band C brick DDA (16^3 bricks, table indirection, camera and sun marches, entry maps)");
     const uint32_t W = g_width, H = g_height;
     const uint32_t Bx = g.warp ? 6 : 24, By = g.warp ? 4 : 8, Bz = g.warp ? 6 : 24, bricks = Bx * By * Bz;
     std::vector<uint32_t> table(bricks);
@@ -756,6 +847,7 @@ static void benchBricks()
             logf("  WARP check: first record T=%g depth=%g entries=%u\n", ((const float*)o.data())[0], ((const float*)o.data())[1], ((const uint32_t*)o.data())[3]);
         }
     }
+    benchBricksVista(s);
 }
 
 // ------------------------------------------------------------------------------------------ 3. bands
@@ -937,6 +1029,7 @@ int main(int argc, char** argv)
         else if (a == "--no-conservative") g_conservative = false;
         else if (a == "--no-helperlane") g_noHelper = true;
         else if (a == "--d16") g_d16 = true;
+        else if (a == "--bricks-vista") { only(doBricks); g_bricksVistaOnly = true; }
         else if (a == "--width" && i + 1 < argc) g_width = (uint32_t)atoi(argv[++i]);
         else if (a == "--height" && i + 1 < argc) g_height = (uint32_t)atoi(argv[++i]);
         else if (a == "--reps" && i + 1 < argc) g.reps = atoi(argv[++i]);

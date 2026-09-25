@@ -23,6 +23,9 @@
 #ifndef NO_WRITE
 #define NO_WRITE 0  // 1: skip the 4 B T write (floor decomposition); a never-taken store keeps the march alive
 #endif
+#ifndef SOA
+#define SOA 0  // 1 (with VOXEL_BYTES 8): density in a 1 B plane, the 7 attribute bytes in an 8 B plane read only where density > 0 (revision 1 14.9 vista)
+#endif
 #ifndef OUT_T
 #define OUT_T 0  // 1: write only the 4 B transmittance (receiver sun march, revision 1 11.4 (5)); 0: the 32 B aggregate record
 #endif
@@ -33,7 +36,14 @@ uint voxelAddress(uint brick, int3 local) { return brick * (4096u * VOXEL_BYTES)
 
 float densityAt(ByteAddressBuffer voxels, uint brick, int3 local, inout float extra)
 {
-#if VOXEL_BYTES == 1
+#if SOA
+    // Density plane (1 B per voxel) at 0, attribute plane (8 B per voxel) at P[3].w bytes. Attributes only where density > 0.
+    const uint idx = brick * 4096u + (uint)(local.z * 256 + local.y * 16 + local.x);
+    const uint word = voxels.Load(idx & ~3u);
+    const float sigma = ((word >> ((idx & 3u) * 8)) & 0xFFu) / 255.0;
+    if (sigma > 0) { const uint2 w = voxels.Load2(P[3].w + idx * 8u); extra += (w.y & 0xFFu) / 255.0; }
+    return sigma;
+#elif VOXEL_BYTES == 1
     const uint addr = voxelAddress(brick, local);
     const uint word = voxels.Load(addr & ~3u);
     return ((word >> ((addr & 3u) * 8)) & 0xFFu) / 255.0;
@@ -80,8 +90,11 @@ void MarchCS(uint2 pixel : SV_DispatchThreadID, uint gtid : SV_GroupIndex, uint2
         const float aspect = (float)W / H;
         d = normalize(float3(ndc.x * 0.577 * aspect, -ndc.y * 0.577, 1.0));
         o = float3(box.x * 0.5, box.y * 0.6, -box.z * 0.4);
-        // Enter at z = 0 (front face).
+        // Vista (14.9): P[3].y = camera distance in voxels (float bits) so that one voxel projects to one pixel at the front face.
+        if (P[3].y != 0) o = float3(box.x * 0.5, box.y * 0.5, -asfloat(P[3].y));
+        // Enter at z = 0 (front face). Vista: nudge past the face so the entry voxel never rounds to z = -1 (exit at step 0).
         o += d * (-o.z / d.z);
+        if (P[3].y != 0) o.z = 1e-3;
     }
     else if (P[0].w == 1)
     {
