@@ -336,7 +336,12 @@ bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(N
         nv_real3 contactLocal = local + (offset + path * earliest);
         nv_real3 surfaceVelocity = hitSurface.velocity + cross(hitSurface.angular, contactLocal - hitSurface.origin);
         nv_real3 rest = path * (NV_R(1) - earliest), bounced = nv_bounce(rest, normal, m.restitution, m.friction);
-        if (first.count > 0u && dot(bounced, lastNormal) < NV_R(0)) {
+        // s1: velocity at the contact of the last struck surface (none on the first contact).
+        nv_real tau = remaining * (NV_R(1) - earliest); nv_real3 s1 = surfaceVelocity;
+        if (first.count > 0u) { NvSurface previous = nv_surface_local(NV_SURFACE(carrier), origin); s1 = previous.velocity + cross(previous.angular, contactLocal - previous.origin); }
+        // Measured in the last struck surface's frame: a closing gap brings it to the
+        // particle even when the bounce itself leaves it.
+        if (first.count > 0u && dot(bounced + (surfaceVelocity - s1) * tau, lastNormal) < NV_R(0)) {
             // Facing surfaces (a gap or crease: bouncing off this surface would drive
             // the particle back into the last struck one). For restitution < 1 the
             // limit of the bounces between them is no motion across either, each in
@@ -347,9 +352,7 @@ bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(N
             // contact (a corner, or a closing gap bringing a surface back) holds it
             // on this surface. The rest of the path is relative to this surface: it
             // follows the other surface's motion across n1 over the remaining time.
-            NvSurface previous = nv_surface_local(NV_SURFACE(carrier), origin);
-            nv_real3 s1 = previous.velocity + cross(previous.angular, contactLocal - previous.origin), s2 = surfaceVelocity;
-            nv_real tau = remaining * (NV_R(1) - earliest), g = dot(lastNormal, normal);
+            nv_real3 s2 = surfaceVelocity; nv_real g = dot(lastNormal, normal);
             nv_real3 k = cross(lastNormal, normal); nv_real kk = dot(k, k);
             nv_real3 vrel = velocity - s2;
             if (creases == 0u && kk > NV_R(0.01)) {

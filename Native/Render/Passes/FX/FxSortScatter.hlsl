@@ -1,7 +1,8 @@
 // unx-kernel: cs_6_6 main
-// Radix sort, pass scatter: stable and deterministic. A group handles the 4096 keys of its histogram group (the hist
-// kernel's partition) in two phases.
-//   1. Local order: the keys are ranked as 32 rows of 128. In a row, WaveMatch (SM 6.5) gives each key the lanes of its
+// Radix sort, pass scatter: stable and deterministic. A group handles the FX_SORT_GROUP_KEYS (1024) keys of its
+// histogram group in two phases (1024 rather than 4096 keys per group: 4x the groups in flight, a quarter of the group
+// memory; the rows are latency bound, not bandwidth bound).
+//   1. Local order: the keys are ranked as rows of 128. In a row, WaveMatch (SM 6.5) gives each key the lanes of its
 //      wave with the same digit: rank in the wave = those below it; the lowest of them adds the wave's count for that digit
 //      to group memory. Local position = the digit's start in this group (prefix of the group's digit counts, from the
 //      scanned histogram) + keys of the digit in earlier rows + counts of earlier waves in this row + rank in the wave.
@@ -10,15 +11,18 @@
 //      WARP), so the result is the same for every wave size.
 //   2. Write-out in local order: thread i of a pass writes the key at local position i to digit base + this group's offset
 //      in the digit + (i - the digit's local start). Consecutive threads write consecutive addresses inside each digit's
-//      run (about 16 keys per digit per group), so the stores are coalesced instead of one 32 B sector per 4 B key; the
+//      run (about 4 keys per digit per group at 1024 keys), so the stores are more coalesced than one 32 B sector per 4 B key; the
 //      keys are re-read from the group's 16 KB block (cache resident).
 // Lanes past the key count carry digit 256 (no position) and still take part in every wave operation.
-// P[0].x digit shift, P[0].y ping-pong (0: A -> B, 1: B -> A)
+// While writing, each key is counted into the next pass's histogram at its destination (group dest >> FX_SORT_GROUP_SHIFT, next digit)
+// with atomic adds (order independent), so no separate histogram pass reads the keys again.
+// P[0].x digit shift, P[0].y ping-pong (0: A -> B, 1: B -> A), P[0].z this pass's histogram region, P[0].w the next
+// pass's region (NONE after the last pass)
 #include "Passes/FX/Particles.hlsli"
 
 #define ROW 128u
-#define ROWS 32u
-#define KEYS 4096u
+#define ROWS (FX_SORT_GROUP_KEYS / ROW)
+#define KEYS FX_SORT_GROUP_KEYS
 groupshared uint gs_counts[32 * 64];  // [wave][digit quad]: digit d in byte (d & 3) of word d >> 2
 groupshared uint gs_order[KEYS];      // local position -> index in the group's block
 groupshared uint gs_running[256];     // keys of each digit in earlier rows
@@ -36,17 +40,17 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     FX_RWBUFFER(uint, valsA, g_valsA);
     FX_RWBUFFER(uint, keysB, g_keysB);
     FX_RWBUFFER(uint, valsB, g_valsB);
-    const uint n = counters[FX_COUNTER_ALIVE], shift = P[0].x, flip = P[0].y, t = gtid.x, groups = g_numSortGroups;
+    const uint n = counters[FX_COUNTER_ALIVE], shift = P[0].x, flip = P[0].y, t = gtid.x, groups = g_numSortGroups, region = P[0].z, nextRegion = P[0].w;
     const uint lane = WaveGetLaneIndex(), lanes = WaveGetLaneCount(), wave = t / lanes, waves = ROW / lanes;
     const uint base = gid.x * KEYS;
     for (uint i = t; i < 32u * 64u; i += ROW) gs_counts[i] = 0u;
     // this group's count of digit d = next group's offset in d (or the digit total) - its own offset
     for (uint d = t; d < 256u; d += ROW)
     {
-        const uint digitBase = hist[groups * 256u + d];
-        const uint mine = hist[gid.x * 256u + d];
-        const uint total = (d < 255u ? hist[groups * 256u + d + 1u] : n) - digitBase;
-        const uint next = gid.x + 1u < groups ? hist[(gid.x + 1u) * 256u + d] : total;
+        const uint digitBase = hist[region + groups * 256u + d];
+        const uint mine = hist[region + gid.x * 256u + d];
+        const uint total = (d < 255u ? hist[region + groups * 256u + d + 1u] : n) - digitBase;
+        const uint next = gid.x + 1u < groups ? hist[region + (gid.x + 1u) * 256u + d] : total;
         gs_running[d] = 0u;
         gs_base[d] = digitBase + mine;
         gs_local[d] = next - mine;
@@ -130,5 +134,6 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         const uint dest = gs_base[digit] + (i - gs_local[digit]);
         if (flip != 0u) { keysA[dest] = key; valsA[dest] = val; }
         else { keysB[dest] = key; valsB[dest] = val; }
+        if (nextRegion != FX_NONE) InterlockedAdd(hist[nextRegion + (dest >> FX_SORT_GROUP_SHIFT) * 256u + ((key >> (shift + 8u)) & 255u)], 1u);
     }
 }

@@ -76,15 +76,15 @@ std::string sha(const std::vector<uint8_t>& bytes)
 }
 
 // 1. byte-identical stream copies of the pinned NativeVfx commit (the copies are updated together with this pin)
-constexpr const char* kStreamCommit = "c0893ca1";
+constexpr const char* kStreamCommit = "f461b7c9";
 void checkStreamCopies(bool strict)
 {
     const fs::path mine = fs::path(UNX_SOURCE_DIR) / "Native/Render/Passes/FX/Stream";
     const fs::path original = fs::path(UNX_SOURCE_DIR) / "../Unravel/Native/NativeVfx";
     struct Pin { const char* file; const char* sha; };
-    const Pin pins[] = { { "include/NativeVfxStream.h", "937fa6a7095b01c39f10abb4f4b38030c4989d6765b10e89f7ea1f7b1cef3c3b" },
-                         { "shaders/VfxParticleMath.hlsli", "9cb0510801e282e8811b2b8a83403e41ca24e1015dc4015c193b72561320a3c6" },
-                         { "src/VfxStreamCpu.h", "d1379b26278bb407995aa1290848285cdeebd67f5b80355659beb1f3e4c23780" } };
+    const Pin pins[] = { { "include/NativeVfxStream.h", "041b39a0a88b7717f4cbb6c0e76fcd92d6a90ebe2659282f56d07c8dd795851a" },
+                         { "shaders/VfxParticleMath.hlsli", "e6db9103297d7295982bcb819d70c005bea34dd4bf7ce04475ab3e2d8611f54a" },
+                         { "src/VfxStreamCpu.h", "28372b9142fa28f46308b2b6dfd5d59f5e0ba56981c60ee781d6c6ea70ae057b" } };
     for (const Pin& pin : pins)
     {
         const std::string a = sha(readBinaryFile(mine / pin.file));
@@ -176,8 +176,22 @@ D3 transportd(D3 before, D3 after, D3 side)
     return lend(side) > 1e-6 ? unitd(side) : initiald(after, before);
 }
 struct RibbonRef { D3 v0, v1; double u; uint32_t link; bool written; };
-std::vector<RibbonRef> ribbonReference(const std::vector<D3>& p, const std::vector<double>& width, uint32_t base, D3 normal, double limit, double uvScale)
+// A break test |segment| <= limit on float points is a threshold on a continuous value: within a few float ulps of the
+// limit, float and double arithmetic (and two GPUs) may decide differently, and no implementation can promise
+// otherwise. There (|segment - limit| <= 1e-6 limit) the walk adopts the GPU's decision (link of the later point) and
+// counts it; every other decision and all geometry are compared exactly as before.
+std::vector<RibbonRef> ribbonReference(const std::vector<D3>& p, const std::vector<double>& width, uint32_t base, D3 normal, double limit, double uvScale,
+                                       const std::vector<uint8_t>& gpuLinks, uint32_t& ambiguous)
 {
+    auto gpuLinked = [&](uint32_t later, uint32_t earlier) {
+        uint32_t l;
+        std::memcpy(&l, gpuLinks.data() + (size_t)(base + later) * 4, 4);
+        return l == base + earlier;
+    };
+    auto broken = [&](double length, uint32_t later, uint32_t earlier) {
+        if (std::abs(length - limit) <= 1e-6 * limit) { ++ambiguous; return !gpuLinked(later, earlier); }
+        return length > limit;
+    };
     const uint32_t n = (uint32_t)p.size();
     std::vector<RibbonRef> out(n);
     for (uint32_t j = 0; j < n; ++j) out[j] = { p[j], p[j], 0, 0xFFFFFFFFu, false };
@@ -193,8 +207,8 @@ std::vector<RibbonRef> ribbonReference(const std::vector<D3>& p, const std::vect
         bool before = previous != 0xFFFFFFFFu, after = next < n;
         D3 in{}, outv{};
         double seg = 0;
-        if (before) { in = p[cur] - p[previous]; seg = lend(in); if (seg > limit) before = false; else in = in * (1 / seg); }
-        if (after) { outv = p[next] - p[cur]; const double span = lend(outv); if (span > limit) after = false; else outv = outv * (1 / span); }
+        if (before) { in = p[cur] - p[previous]; seg = lend(in); if (broken(seg, cur, previous)) before = false; else in = in * (1 / seg); }
+        if (after) { outv = p[next] - p[cur]; const double span = lend(outv); if (broken(span, next, cur)) after = false; else outv = outv * (1 / span); }
         if (before || after)
         {
             const D3 t = before ? (after ? (lend(in + outv) > 1e-12 ? unitd(in + outv) : outv) : in) : outv;
@@ -534,6 +548,7 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                 const auto links = ps.readState("ribbonLinks");
                 const auto* programTable = reinterpret_cast<const NV_StreamProgram*>(firstPacket.data() + reinterpret_cast<const NV_StreamHeader*>(firstPacket.data())->programs);
                 double worstRibbon = 0;
+                uint32_t ambiguousBreaks = 0;
                 for (uint32_t r = 0; r < h.emitter_table; ++r)
                 {
                     const NV_StreamEmitter& e = table[r];
@@ -550,7 +565,7 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                         widths[j] = q[3];
                     }
                     const auto ref = ribbonReference(pts, widths, e.output_base, { pr.ribbon_normal[0], pr.ribbon_normal[1], pr.ribbon_normal[2] }, pr.ribbon_break,
-                                                     pr.ribbon_uv > 0 ? pr.ribbon_uv : 1.0);
+                                                     pr.ribbon_uv > 0 ? pr.ribbon_uv : 1.0, links, ambiguousBreaks);
                     for (uint32_t j = 0; j < count; ++j)
                     {
                         const uint32_t k = e.output_base + j;
@@ -566,7 +581,8 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                     worst.ribbonPoints += count;
                 }
                 worst.maxRibbon = std::max(worst.maxRibbon, worstRibbon);
-                FX_LOG("tick %u: ribbon strips vs sequential double walk: links exact, vertex/uv error max %.3g", t, worstRibbon);
+                FX_LOG("tick %u: ribbon strips vs sequential double walk: links exact (%u break tests within 1e-6 of the limit took the GPU's decision), vertex/uv error max %.3g",
+                       t, ambiguousBreaks, worstRibbon);
                 FX_CHECK(worstRibbon <= 1e-5, "tick %u: ribbon vertex error %.3g exceeds 1e-5", t, worstRibbon);
             }
             // 4. state hash of the defined state: every slot's alive flag, the live slots' identity and state (this tick and

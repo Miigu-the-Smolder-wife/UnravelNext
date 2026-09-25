@@ -124,9 +124,11 @@ public:
         const auto bodies=section<NV_StreamBody>(data,bytes,h.bodies,h.body_count);
         const auto dynamic=section<NV_StreamSurface>(data,bytes,h.dynamic_surfaces,h.dynamic_surface_count);
         const auto restore=section<NV_StreamParticle>(data,bytes,h.restore,h.restore_count);
-        load_inputs(fields,world,bodies,dynamic);
         // A state packet (dt == 0) keeps its tick's readback; only alive/status change.
+        // It carries no body frames (its surface rows would not resolve) and integrates
+        // nothing, so the tick inputs are loaded only for a simulating packet.
         const bool simulate=h.dt>0;
+        if(simulate)load_inputs(fields,world,bodies,dynamic);
         if(simulate||(h.flags&NV_STREAM_RESET)){
             readback_={};readback_.stream=h.stream;readback_.generation=h.generation;readback_.tick=h.tick;
             events_.assign(simulate?h.event_slots:0u,NV_StreamEvent{});collisions_.clear();

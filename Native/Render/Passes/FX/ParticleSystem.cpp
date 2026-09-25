@@ -19,7 +19,7 @@ using namespace unx::render;
 namespace
 {
 constexpr uint32_t kScanBlock = 1024;
-constexpr uint32_t kSortGroupKeys = 4096;  // 256 threads x 16 keys
+constexpr uint32_t kSortGroupKeys = 1024;  // Particles.hlsli FX_SORT_GROUP_KEYS (histogram rows, scatter groups)
 constexpr uint32_t kReportBytes = 64;
 constexpr uint32_t kOverflowRecords = 1024, kOverflowRecordBytes = 432;  // IMPACT_OVERFLOW diagnostic records (Particles.hlsli)
 constexpr float kKeyFar = 1.0e6f;          // metres: log range of the sort key (keyNear .. 1000 km)
@@ -167,7 +167,7 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
     const auto* dynamicRows = reinterpret_cast<const NV_StreamSurface*>(packet + h.dynamic_surfaces);
     for (uint32_t k = 0; k < h.dynamic_surface_count; ++k)
         if (dynamicRows[k].body != NV_STREAM_NONE) bodyMax = std::max(bodyMax, dynamicRows[k].body + 1);
-    if (bodyMax > h.body_count) fail("FX particles: surfaces reference body %u, the packet has %u bodies", bodyMax - 1, h.body_count);
+    if (h.dt > 0 && bodyMax > h.body_count) fail("FX particles: surfaces reference body %u, the packet has %u bodies", bodyMax - 1, h.body_count);
     (void)programs;
 }
 } // namespace
@@ -357,7 +357,8 @@ void ParticleSystem::record(FramePassContext& fc)
             b->ensure(device, (uint64_t)capacity * b->stride);
         m.gridBlocks.ensure(device, 1024 * 4);
         m.blockSums.ensure(device, (uint64_t)scanBlocks * 8);
-        m.hist.ensure(device, (uint64_t)(sortGroups + 1) * 256 * 4);
+        const uint32_t histRegion = (sortGroups + 1) * 256;  // per sort pass: group rows + the digit bases
+        m.hist.ensure(device, (uint64_t)std::max<uint32_t>(m_sortPasses, 1) * histRegion * 4);
         m.counters.ensure(device, kCounterWords * 4);
         m.report.ensure(device, kReportBytes);
 
@@ -479,6 +480,9 @@ void ParticleSystem::record(FramePassContext& fc)
             m.surfaceCount = h.surface_count;
         }
         const uint32_t surfaceTotal = m.surfaceCount + h.dynamic_surface_count;  // static table + this tick's dynamic rows
+        // collision surfaces exist only in a simulating packet: a state packet (dt == 0) carries no body frames or dynamic
+        // surfaces, so nothing resolves a body index or builds the grid (NativeVfxStream.h, state packets)
+        const bool collide = surfaceTotal != 0 && h.dt > 0 && !(m_experimentDisable & 8u);
         m.dynamicSurfaces.ensure(device, (uint64_t)h.dynamic_surface_count * sizeof(NV_StreamSurface));
         m.tickSurfaces.ensure(device, (uint64_t)surfaceTotal * sizeof(NV_StreamSurface));
         // Collision grid: buckets = the power of two >= 2 x surfaces (>= 1024); at most 64 cells per listed surface.
@@ -695,11 +699,15 @@ void ParticleSystem::record(FramePassContext& fc)
         tc.flags = h.flags;
         tc.fieldCount = h.field_count;
         tc.worldFieldCount = h.world_field_count;
-        tc.surfaceCount = (m_experimentDisable & 8u) ? 0u : surfaceTotal;
+        tc.surfaceCount = collide ? surfaceTotal : 0u;
         tc.staticSurfaceCount = m.surfaceCount;
         tc.emitterCount = tableRows;
         tc.updateCount = h.emitter_count;
         tc.separationMax = m.separationMax;
+        tc.sortPasses = (m_experimentDisable & 4u) ? 0u : m_sortPasses;
+        tc.histRegion = histRegion;
+        tc.experiment = m_experimentDisable;
+        if (m_experimentDisable & 16u) tc.fieldCount = tc.worldFieldCount = 0;  // timing attribution only
         tc.volumeRangeCount = (uint32_t)volumeRanges.size();
         tc.serial = serialNow;
         tc.eventSlots = h.event_slots;
@@ -800,7 +808,7 @@ void ParticleSystem::record(FramePassContext& fc)
         auto compaction = [&](const char* suffix, uint32_t checkAlive) {
             dispatch(format("fx.particles.compact.scan%s", suffix).c_str(), "Passes/FX/FxCompact.SCATTER0", {}, scanBlocks);
             dispatch(format("fx.particles.compact.sums%s", suffix).c_str(), "Passes/FX/FxScanSums", { checkAlive }, 1);
-            dispatch(format("fx.particles.compact.scatter%s", suffix).c_str(), "Passes/FX/FxCompact.SCATTER1", {}, scanBlocks);
+            dispatch(format("fx.particles.compact.scatter%s", suffix).c_str(), "Passes/FX/FxCompact.SCATTER1", { checkAlive }, scanBlocks);
         };
 
         // 2. emitter table (grown table keeps its rows; delta blocks), begin (+ reset and the compaction that rebuilds the
@@ -819,7 +827,9 @@ void ParticleSystem::record(FramePassContext& fc)
             device.deferRelease(grownFrom.resource);
         }
         dispatch("fx.particles.emitters", "Passes/FX/FxEmitters", {}, std::max<uint32_t>(groups(h.emitter_count, 64), 1), true);
-        const uint32_t beginThreads = std::max<uint32_t>(std::max<uint32_t>(tableRows, 1), reset ? capacity : 0);
+        const uint32_t beginThreads = std::max<uint32_t>(std::max<uint32_t>(std::max<uint32_t>(std::max<uint32_t>(tableRows, 1), reset ? capacity : 0),
+                                                                            m_sortPasses * histRegion),  // + histogram clear
+                                                         collide ? gridBuckets : 0);  // + grid clear
         dispatch("fx.particles.begin", reset ? "Passes/FX/FxBegin.RESET1" : "Passes/FX/FxBegin.RESET0", {}, groups(beginThreads, 256));
         if (reset) compaction(".reset", 0);
         if (repack)
@@ -849,13 +859,11 @@ void ParticleSystem::record(FramePassContext& fc)
                       });
             compaction(".repack", 0);
         }
-        if (surfaceTotal && !(m_experimentDisable & 8u))
+        if (collide)
         {
+            // grid counts cleared by begin; surfaces = transform + count; one-group scan; fill
             dispatch("fx.particles.surfaces", "Passes/FX/FxSurfaces", {}, groups(surfaceTotal, 64));
-            dispatch("fx.particles.grid.clear", "Passes/FX/FxGrid.STEP0", {}, groups(gridBuckets, 64));
-            dispatch("fx.particles.grid.count", "Passes/FX/FxGrid.STEP1", {}, groups(surfaceTotal, 64));
-            dispatch("fx.particles.grid.scan", "Passes/FX/FxGrid.STEP2", {}, groups(gridBuckets, 1024));
-            dispatch("fx.particles.grid.blocks", "Passes/FX/FxGrid.STEP4", {}, 1);
+            dispatch("fx.particles.grid.scan", "Passes/FX/FxGrid.STEP2", {}, 1);
             dispatch("fx.particles.grid.fill", "Passes/FX/FxGrid.STEP3", {}, groups(surfaceTotal, 64));
         }
 
@@ -898,8 +906,7 @@ void ParticleSystem::record(FramePassContext& fc)
         // sort of the alive list by the 24-bit key
         for (uint32_t pass = 0; pass < ((m_experimentDisable & 4u) ? 0u : m_sortPasses); ++pass)
         {
-            const std::array<uint32_t, 8> p = { pass * 8, pass & 1u };
-            dispatch(format("fx.particles.sort.hist%u", pass).c_str(), "Passes/FX/FxSortHist", p, sortGroups);
+            const std::array<uint32_t, 8> p = { pass * 8, pass & 1u, pass * histRegion, pass + 1 < m_sortPasses ? (pass + 1) * histRegion : NV_STREAM_NONE };
             dispatch(format("fx.particles.sort.scan%u", pass).c_str(), "Passes/FX/FxSortScan", p, 1);
             dispatch(format("fx.particles.sort.scatter%u", pass).c_str(), "Passes/FX/FxSortScatter", p, sortGroups);
         }

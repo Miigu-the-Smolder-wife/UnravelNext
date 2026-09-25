@@ -44,8 +44,9 @@ struct TickConstants
     float separationMax;  // largest program separation (collision grid motion bound)
     uint32_t volumeRanges, volumeRangeCount;
     uint32_t surfaceBoxes, velocityOut, overflowRecords, overflowCapacity;
+    uint32_t sortPasses, histRegion, experiment, pad13;  // experiment: fx.particles.experiment_disable (timing only)  // sort histograms: sortPasses regions of histRegion words
 };
-static_assert(sizeof(TickConstants) == 368);
+static_assert(sizeof(TickConstants) == 384);
 
 // counters[] words (Particles.hlsli)
 enum : uint32_t { kCounterAlive = 0, kCounterDead = 1, kCounterCollisions = 2, kCounterStatus = 3, kCounterDying = 4, kCounterWords = 16 };

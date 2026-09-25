@@ -46,6 +46,8 @@
 #define FX_COUNTER_VOLUMES 7u        // live volume particles listed for FxCells this tick
 #define FX_COUNTER_TURN 8u           // asuint(max |w| dt over the grid's surfaces) (FxGrid, motion bound of the queries)
 #define FX_COUNTER_CARRY 9u          // asuint(max carrier displacement bound over all surfaces)
+#define FX_SORT_GROUP_SHIFT 10u      // radix sort: keys per histogram / scatter group = 1 << shift (C++ kSortGroupKeys)
+#define FX_SORT_GROUP_KEYS (1u << FX_SORT_GROUP_SHIFT)
 #define FX_COUNTER_OVERFLOWS 10u     // slots of this tick whose sweep needed a fifth impact (diagnostic records)
 
 // alive[] values: 0 dead, 1 alive, 2 died in this tick (dying list; compaction clears it to 0)
@@ -77,7 +79,8 @@ cbuffer FxTick : register(b1)
     uint g_ribbonCapacity, g_cellCapacity, g_volumeList, g_gridBlocks;  // header ribbon_points, medium_cells; grid block offsets
     uint g_emitterUpdates, g_emitterUpdateRows, g_emitterStamp, g_updateCount;  // emitter table delta (FxEmitters.hlsl)
     uint g_serial; float g_separationMax; uint g_volumeRanges, g_volumeRangeCount;
-    uint g_surfaceBoxes, g_velocityOut, g_overflowRecords, g_overflowCapacity;  // IMPACT_OVERFLOW inputs (diagnostic)  // g_*Out: this tick's state (double buffered by tick parity)  // grown box per surface (FxGrid STEP 1), candidate filter  // packet serial (stamps of the rows
+    uint g_surfaceBoxes, g_velocityOut, g_overflowRecords, g_overflowCapacity;  // IMPACT_OVERFLOW inputs (diagnostic)
+    uint g_sortPasses, g_histRegion, g_experiment, g_pad13;  // sort: pass p's histogram is hist[p * g_histRegion + group * 256 + digit]  // g_*Out: this tick's state (double buffered by tick parity)  // grown box per surface (FxGrid STEP 1), candidate filter  // packet serial (stamps of the rows
                                                                                   // sent); largest separation; FxCells ranges
 };
 
@@ -259,12 +262,51 @@ struct FxSurfaceQuery
     uint cell, cells; // next cell index, cell count
     uint visited;     // candidates so far (watchdog)
 };
-// Bucket start: exclusive prefix inside its block of 1024 buckets + the block's offset (FxGrid STEP 2 and 4).
+// Bucket start: exclusive prefix of the bucket counts (FxGrid STEP 2).
 uint fxGridStart(uint b)
 {
     FX_RWBUFFER(uint, starts, g_gridStart);
-    FX_RWBUFFER(uint, blocks, g_gridBlocks);
-    return starts[b] + blocks[b >> 10];
+    return starts[b];
+}
+// The AABB is inflated by max(1 mm, 1e-5 |coordinate|), so a point the float hit test accepts is inside it, and by the
+// surface's motion over the tick (moving surfaces above); a surface turning by >= 1/2 rad in a tick is large.
+// Box of a tick surface (with its motion bound); turn = |w| dt, carry = its carrier displacement bound D (Particles.hlsli).
+// Returns false when the surface turns by >= 1/2 rad in the tick or its motion is not finite (large list).
+bool fxSurfaceBox(StreamSurface s, out float3 lo, out float3 hi, out float turn, out float carry)
+{
+    // a, b, c are offsets from the anchor-space reference point s.origin (NativeVfxStream.h)
+    float r;
+    if (s.kind == 0u) { lo = s.a - s.radius; hi = s.a + s.radius; r = length(s.a) + s.radius; }
+    else if (s.kind == 1u) { lo = min(s.a, s.b) - s.radius; hi = max(s.a, s.b) + s.radius; r = max(length(s.a), length(s.b)) + s.radius; }
+    else { lo = min(s.a, min(s.b, s.c)); hi = max(s.a, max(s.b, s.c)); r = max(length(s.a), max(length(s.b), length(s.c))); }
+    lo += s.origin;
+    hi += s.origin;
+    turn = 0.0f;
+    carry = 0.0f;
+    float grow = 0.0f;
+    const bool moves = any(s.velocity != 0.0f) || any(s.angular != 0.0f);
+    bool small = true;
+    if (moves)
+    {
+        turn = length(s.angular) * g_dt;
+        const float u = length(s.velocity) * g_dt;
+        carry = u + turn * (r + g_separationMax);
+        small = isfinite(turn) && isfinite(carry) && turn < 0.5f;
+        grow = small ? (turn * r + (1.0f + turn) * u) / (1.0f - turn) : 0.0f;
+        if (!isfinite(carry)) carry = asfloat(0x7F800000u);  // +inf: every query becomes exhaustive
+    }
+    const float3 pad = max(1e-3f, 1e-5f * max(abs(lo), abs(hi))) + grow;
+    lo -= pad;
+    hi += pad;
+    return small;
+}
+
+// Cells of a tick surface in the grid: 0 = large list (too many cells, not finite, or no motion bound).
+uint fxSurfaceCells(StreamSurface s, out int3 a, out int3 span, out float3 lo, out float3 hi, out float turn, out float carry, out bool bounded)
+{
+    bounded = fxSurfaceBox(s, lo, hi, turn, carry);
+    const uint cells = fxGridBox(lo, hi, FX_GRID_SURFACE_CELLS, a, span);
+    return bounded ? cells : 0u;
 }
 bool fxQueryBucket(inout FxSurfaceQuery q)
 {
@@ -346,6 +388,7 @@ NvMotion fxMotion(StreamProgram p, StreamEmitter e, EmitterDynamic dyn, uint bir
     m.self = (p.flags & FX_PROGRAM_COLLIDE_SELF) != 0u ? 1u : 0u;
     m.entity0 = e.entity.x; m.entity1 = e.entity.y; m.generation0 = e.generation.x; m.generation1 = e.generation.y;
     m.restitution = p.restitution; m.friction = p.friction; m.separation = p.separation;
+    if ((g_experiment & 32u) != 0u) m.noise = float3(0, 0, 0);  // timing attribution only (fx.toml experiment_disable)
     m.origin_anchor = dyn.originAnchor;
     return m;
 }

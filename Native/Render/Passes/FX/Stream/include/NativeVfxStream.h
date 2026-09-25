@@ -62,6 +62,9 @@
    integration, tick unchanged. Without RESET it keeps the readback of its
    tick (events, collision events) and updates only counters.alive/status;
    with RESET the readback of the new generation's tick has no events.
+   A state packet carries no tick inputs (fields, World fields, body frames,
+   dynamic surfaces): the executor must not load or resolve them for it, since
+   the static table's body rows would reference absent frames.
 
    Integrate order for one slot with interval h (h = dt, or elapsed for a new
    birth, or lifetime - age for a death state), all in emitter-origin space:
@@ -304,7 +307,8 @@ typedef struct NV_StreamWorldField {
    NV_STREAM_SURFACES, typically the body-local rigid surfaces) and this tick's
    dynamic world-space surfaces (`dynamic_surfaces`, deforming bodies, every
    tick). A surface's index for the collision tie rule is its static index, or
-   surface_count + its dynamic index. Body frames come every tick. */
+   surface_count + its dynamic index. Body frames come with every simulating
+   packet (dt > 0); state packets carry none. */
 typedef struct NV_StreamSurface {
     uint32_t kind,entity[2],generation0;
     uint32_t generation1;float radius;uint32_t body,reserved1;
