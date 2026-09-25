@@ -1,6 +1,6 @@
-# Clearcoat R1 vs energy-conserving coat (MS) — part 1 [measured]
+# Clearcoat R1 vs energy-conserving coat (MS) [measured]
 
-`unx_study_material_layers clearcoat_r1_ms`, photons 2097152 per incidence bin. The run was stopped by mistake after 9 of 15 configurations; these rows are recovered from its log. Remaining configurations: `clearcoat_r1_ms_part2.md` (black glossy, r_c 0.12), `clearcoat_r1_ms_part3.md` (r_c 0.30). Columns as in `clearcoat_r1.md`.
+`unx_study_material_layers clearcoat_r1_ms`, photons 2097152 per incidence bin. Assembled from three runs: 9 configurations recovered from the log of a run stopped by mistake, black glossy r_c 0.12 and r_c 0.30 rerun (UNX_STUDY_RC, UNX_STUDY_BASE). Columns as in `clearcoat_r1.md`.
 
 | base | r_c | definition | worst albedo (rel @theta, abs) | albedo rel at 0/30/60/75/85° | worst L1 | L1 noise | furnace dE mean / P99 | sun+sky dE mean / P99 | criteria |
 |---|---|---|---|---|---|---|---|---|---|
@@ -22,3 +22,15 @@
 | metal flake r 0.3 | 0.12 | 1.1 original | 16.0% @70° (+0.087) | +0.6 / +2.4 / +13.5 / +14.0 / +6.9 % | 0.713 @68° | 0.009 | 4.05 / 9.45 | 5.43 / 16.30 | FAIL |
 | chrome r 0.1 | 0.12 | R1 | 12.0% @82° (+0.095) | -0.3 / -0.3 / +0.5 / +8.7 / +10.0 % | 0.411 @80° | 0.004 | 1.18 / 4.18 | 4.21 / 10.46 | FAIL |
 | chrome r 0.1 | 0.12 | 1.1 original | 7.5% @84° (-0.060) | -3.4 / -3.3 / -4.2 / -5.5 / -7.1 % | 0.791 @72° | 0.004 | 1.85 / 5.85 | 1.88 / 19.42 | FAIL |
+| black glossy r 0.2 | 0.12 | R1 | 7.4% @90° (-0.059) | +0.5 / +0.6 / +0.4 / +0.3 / -1.2 % | 0.076 @90° | 0.012 | 0.10 / 0.16 | 0.16 / 0.58 | FAIL |
+| black glossy r 0.2 | 0.12 | 1.1 original | 45.2% @74° (+0.111) | +11.9 / +10.4 / +17.7 / +44.7 / +17.3 % | 0.465 @74° | 0.012 | 2.90 / 9.98 | 2.91 / 7.20 | FAIL |
+| white diffuse 0.8 | 0.30 | R1 | 2.5% @86° (-0.020) | -1.5 / -1.6 / -1.6 / -1.9 / -2.5 % | 0.044 @84° | 0.011 | 0.55 / 0.78 | 0.52 / 1.96 | FAIL |
+| white diffuse 0.8 | 0.30 | 1.1 original | 15.1% @2° (+0.100) | +14.9 / +14.9 / +13.9 / +12.8 / +11.0 % | 0.172 @62° | 0.011 | 4.67 / 4.90 | 3.80 / 5.67 | FAIL |
+| red paint r 0.5 | 0.30 | R1 | 5.4% @84° (-0.023) | +0.3 / +0.4 / -0.5 / -2.5 / -5.1 % | 0.063 @84° | 0.014 | 0.34 / 1.36 | 0.46 / 1.75 | FAIL |
+| red paint r 0.5 | 0.30 | 1.1 original | 36.2% @24° (+0.059) | +35.7 / +35.9 / +30.3 / +29.5 / +24.1 % | 0.362 @24° | 0.014 | 8.10 / 8.27 | 6.00 / 8.63 | FAIL |
+| metal flake r 0.3 | 0.30 | R1 | 15.8% @90° (+0.094) | +1.3 / +2.8 / +10.6 / +12.4 / +12.3 % | 0.258 @68° | 0.009 | 3.75 / 6.13 | 5.46 / 14.59 | FAIL |
+| metal flake r 0.3 | 0.30 | 1.1 original | 34.9% @90° (+0.207) | +1.7 / +4.6 / +20.3 / +25.7 / +25.6 % | 0.923 @68° | 0.009 | 5.68 / 12.72 | 7.25 / 19.16 | FAIL |
+| chrome r 0.1 | 0.30 | R1 | 26.3% @90° (+0.189) | -0.2 / +0.3 / +7.2 / +14.0 / +23.7 % | 0.619 @74° | 0.006 | 1.79 / 3.65 | 4.31 / 18.57 | FAIL |
+| chrome r 0.1 | 0.30 | 1.1 original | 8.7% @70° (+0.065) | -2.7 / -2.1 / +5.5 / +7.9 / +5.4 % | 1.389 @62° | 0.006 | 2.04 / 7.05 | 4.93 / 70.01 | FAIL |
+| black glossy r 0.2 | 0.30 | R1 | 5.7% @84° (-0.021) | +0.6 / +1.1 / +3.5 / -1.3 / -5.4 % | 0.110 @44° | 0.019 | 0.39 / 1.08 | 0.38 / 2.37 | FAIL |
+| black glossy r 0.2 | 0.30 | 1.1 original | 61.4% @78° (+0.171) | +12.3 / +11.0 / +24.5 / +59.8 / +54.9 % | 0.654 @78° | 0.019 | 3.54 / 13.35 | 3.12 / 8.75 | FAIL |
