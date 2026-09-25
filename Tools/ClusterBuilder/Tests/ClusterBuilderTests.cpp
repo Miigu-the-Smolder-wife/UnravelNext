@@ -637,9 +637,11 @@ float marchTransmittance(const BrickData& d, uint32_t meshIndex, uint32_t level,
     return (float)std::exp(-tau);
 }
 
-// Exact: does the segment o + t w, t in (0, tMax), miss every triangle?
-bool clearPath(const scene::Mesh& m, float3 o, float3 w, float tMax)
+// Exact: the first triangle the segment o + t w, t in (0, tMax), hits (UINT32_MAX: none).
+uint32_t firstHit(const scene::Mesh& m, float3 o, float3 w, float tMax)
 {
+    float best = tMax;
+    uint32_t hit = UINT32_MAX;
     for (size_t i = 0; i + 2 < m.indices.size(); i += 3)
     {
         const float3 a = m.positions[m.indices[i]], b = m.positions[m.indices[i + 1]], c = m.positions[m.indices[i + 2]];
@@ -654,10 +656,16 @@ bool clearPath(const scene::Mesh& m, float3 o, float3 w, float tMax)
         const float v = dot(w, q) * inv;
         if (v < 0 || u + v > 1) continue;
         const float t = dot(e2, q) * inv;
-        if (t > 0 && t < tMax) return false;
+        if (t > 0 && t < best)
+        {
+            best = t;
+            hit = (uint32_t)(i / 3);
+        }
     }
-    return true;
+    return hit;
 }
+
+bool clearPath(const scene::Mesh& m, float3 o, float3 w, float tMax) { return firstHit(m, o, w, tMax) == UINT32_MAX; }
 } // namespace
 
 UNX_TEST(brick_depth_encoding)
@@ -778,6 +786,69 @@ UNX_TEST(brick_bake_of_a_blade_clump)
              countByVoxels[0] ? byVoxels[0] / countByVoxels[0] : 0.0, countByVoxels[0], countByVoxels[1] ? byVoxels[1] / countByVoxels[1] : 0.0, countByVoxels[1],
              countByVoxels[2] ? byVoxels[2] / countByVoxels[2] : 0.0, countByVoxels[2], countByVoxels[3] ? byVoxels[3] / countByVoxels[3] : 0.0, countByVoxels[3]);
     }
+    }
+}
+
+UNX_TEST(brick_model_error_by_elements)
+{
+    // The brick model's error against exact ray casting as a function of the blades a pixel-sized bundle meets (the
+    // realisation behind a pixel), on short paths (+-2.5 voxels) so the transmittance stays mid-range at every density:
+    // clumps of 60 to 3840 blades, level 0 (voxel 16 mm), bundles of 8 x 8 rays one voxel wide. Report only (input to
+    // the design revision's band C transition rule).
+    QualityConfig q = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+    BrickSettings bs = BrickSettings::fromQuality(q);
+    bs.maxFeatureWidth = 1.0f;
+    bs.residualMax = 0;
+    struct Bin
+    {
+        double absSum = 0, signedSum = 0;
+        std::vector<float> errs;
+    };
+    std::map<uint32_t, Bin> byBlades;  // key: distinct blades met by the bundle (1, 2, 3-4, 5-8, 9-16, 17+)
+    auto binOf = [](uint32_t n) { return n <= 2 ? n : n <= 4 ? 4u : n <= 8 ? 8u : n <= 16 ? 16u : 99u; };
+    for (uint32_t blades : { 60u, 240u, 960u, 3840u })
+    {
+        const scene::Scene sd = bladeClump(blades, 7);
+        const BrickData dd = bakeBricks(sd, bs, "", nullptr);
+        const scene::Mesh& mesh = sd.meshes[0];
+        const float voxel = dd.levels[0].voxel, reach = 2.5f * voxel;
+        std::mt19937 rng(13 + blades);
+        std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+        for (int bundle = 0; bundle < 400; ++bundle)
+        {
+            const float z = uni(rng) * 2 - 1, a = 6.2831853f * uni(rng);
+            const float3 w{ std::sqrt(1 - z * z) * std::cos(a), z, std::sqrt(1 - z * z) * std::sin(a) };
+            const float3 helper = std::fabs(w.x) < 0.9f ? float3{ 1, 0, 0 } : float3{ 0, 1, 0 };
+            const float3 u = normalize(cross(helper, w)), v = cross(w, u);
+            const float3 centre{ (uni(rng) - 0.5f) * 0.2f, 0.05f + uni(rng) * 0.2f, (uni(rng) - 0.5f) * 0.2f };
+            double exact = 0, model = 0;
+            std::vector<uint32_t> met;
+            for (int i = 0; i < 8; ++i)
+                for (int j = 0; j < 8; ++j)
+                {
+                    const float3 o = centre + u * ((i + 0.5f) / 8 - 0.5f) * voxel + v * ((j + 0.5f) / 8 - 0.5f) * voxel - w * reach;
+                    const uint32_t hit = firstHit(mesh, o, w, 2 * reach);
+                    exact += hit == UINT32_MAX ? 1 : 0;
+                    if (hit != UINT32_MAX) met.push_back(hit / 6);  // 6 triangles per blade
+                    model += marchTransmittance(dd, 0, 0, o, w, 2 * reach);
+                }
+            std::sort(met.begin(), met.end());
+            const uint32_t distinct = (uint32_t)(std::unique(met.begin(), met.end()) - met.begin());
+            if (distinct == 0) continue;  // the bundle met nothing: no realisation to compare
+            exact /= 64;
+            model /= 64;
+            Bin& b = byBlades[binOf(distinct)];
+            b.absSum += std::fabs(model - exact);
+            b.signedSum += model - exact;
+            b.errs.push_back((float)std::fabs(model - exact));
+        }
+    }
+    for (auto& [key, b] : byBlades)
+    {
+        std::sort(b.errs.begin(), b.errs.end());
+        const char* label = key == 1 ? "1" : key == 2 ? "2" : key == 4 ? "3-4" : key == 8 ? "5-8" : key == 16 ? "9-16" : "17+";
+        logf("    blades met %-4s: %4zu bundles, |model - exact| mean %.4f, P90 %.4f, P99 %.4f; signed mean %+.4f\n", label, b.errs.size(), b.absSum / b.errs.size(),
+             b.errs[b.errs.size() * 9 / 10], b.errs[b.errs.size() * 99 / 100], b.signedSum / b.errs.size());
     }
 }
 
