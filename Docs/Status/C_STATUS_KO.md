@@ -18,7 +18,7 @@ powershell -File Reference/Tools/RenderQueue.ps1                   게이트 기
 
 | 항목 | 내용 | 검증 |
 |---|---|---|
-| 장면 생성기 | CityBlock, ForestThin(잎 6 cm 기하·풀잎 4 mm), ForestCard(잎 35 cm·풀 카드 30 cm, 알파), Waterside(잔잔한 평면 + 파도 만, 젖은 바위, 갈대 3 mm), Interior(거칠기 0.15/0.25/0.35/0.5 바닥 띠, 거울, 크롬 구, 면광원 6, 창 햇빛), CityNight(광원 512, 그림자 128, 젖은 도로 0.15~0.35). 정지·이동 경로 | 결정성(같은 요청 = 같은 해시), `validate`, 광원 수·수목/클럼프 수 [실측, 테스트 통과]. 생성 1~2 s/장면 |
+| 장면 생성기 | CityBlock, ForestThin(잎 6 cm 기하·풀잎 4 mm), ForestCard(잎 35 cm·풀 카드 30 cm, 알파), Waterside(잔잔한 평면 + 파도 만, 젖은 바위, 갈대 3 mm), Interior(거칠기 0.15/0.25/0.35/0.5 바닥 띠, 거울, 크롬 구, 면광원 6, 창 햇빛), CityNight(광원 512, 그림자 128, 젖은 도로 0.15~0.35), RidgeSunset(S 요청: 20 km, 3 km 앞 800 m 능선, 태양 17°, 300 m 탑 4개 — 공기 속 그림자). 정지·이동 경로 | 결정성(같은 요청 = 같은 해시), `validate`, 광원 수·수목/클럼프 수 [실측, 테스트 통과]. 생성 1~2 s/장면 |
 | 기준 경로추적기 | Embree 4.4.1, INTERFACES 8 모델 전체, 편향 없음(러시안 룰렛), 절반 두 장 독립, 체크포인트 재개, 캐시 `Cache/Reference/...` | 아래 표 |
 | 지표 | 코어 골격(PFM, relMSE, HDR/LDR-FLIP, 시간 불안정도) + 16-부표본 인구조사(`.unxids` 엔진 캡처 형식, 1표본 기준선) | 인구조사: 마이크로벤치 장면 CPU 복제가 GPU 값과 마지막 자리까지 일치 [실측, `Results/C/Census/`] |
 
@@ -40,6 +40,14 @@ powershell -File Reference/Tools/RenderQueue.ps1                   게이트 기
 - forest_thin/forest(1.1 M 인스턴스): 2.1 M 경로/s → 1440p ≈ 2 h, 4K ≈ 4.5 h.
 - 대기열은 BelowNormal 우선순위로 돈다(다른 세션 빌드·CPU 측정이 선점). 실행 파일 스냅샷 `Cache/Reference/bin`에서 돌아 build/C 재빌드를 막지 않는다.
 
+### 완성된 기준 영상 [실측]
+
+| 장면/카메라 | 해상도 | spp | 시간 | 절반 간 relMSE |
+|---|---|---|---|---|
+| city_block/street (`--no-wind`) | 2560x1440 | 4096 | 3954 s | 0.00634 |
+
+대기열 순서: ridge_sunset 1440p → 4K (S 검증용, 먼저) → city 1440p(완료, 캐시) → forest_thin 1440p(2688 spp 체크포인트에서 재개) → forest_card 1440p → city 4K → forest_thin 4K → interior floor_60·mirror → city_night wet_road → waterside lake.
+
 ## 설계 결정과 한계 (기록)
 
 - **대기:** 모든 경로 구간의 참여 매질. 짧은 구간은 Gauss-Legendre(패널 = 고도 폭 2 km당 1), 긴 구간은 검증된 표. 하늘빛 분산은 강제 내산란 NEE로 줄인다(편향 없음). 행성 지면은 장면 기하가 없는 광선만 맞는다(골짜기가 행성 반지름 아래로 내려가도 가려지지 않게).
@@ -53,6 +61,7 @@ powershell -File Reference/Tools/RenderQueue.ps1                   게이트 기
 - `20260925_C_embree.md` — Embree를 `Unx::Embree`로 고정. 대기 중(C 폴더에서 같은 URL·SHA-256으로 임시 처리).
 - `20260925_C_wind_direction.md` — `windOffset`의 M·d → Mᵀ·d. 코어 반영(v1.1).
 - `20260925_C_ggx_precision.md` — GGX D의 float 소거(거울에서 1/0). 코어 반영(v1.4).
+- `20260925_C_scene_ridge_sunset.md` — `SceneId::RidgeSunset = 6` 추가(C 헤더에 덧붙임)를 INTERFACES 10.1에 기록. 대기 중.
 
 ## 남은 일
 
