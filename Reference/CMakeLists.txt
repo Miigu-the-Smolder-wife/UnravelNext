@@ -78,3 +78,12 @@ add_executable(unx_test_census_replica PathTracer/Tests/CensusReplica.cpp)
 unx_target_defaults(unx_test_census_replica)
 target_link_libraries(unx_test_census_replica PRIVATE unx_reference)
 c_deploy_embree(unx_test_census_replica)
+
+# Material v2 approximation studies (Docs/Design/MATERIAL_LAYERS_KO.md 3): thin film vs spectral Airy, clearcoat vs a
+# Monte Carlo layered model. Data (CIE 1931 CMFs, Johnson & Christy n,k) in Studies/data.
+add_executable(unx_study_material_layers Studies/MaterialLayers.cpp)
+unx_target_defaults(unx_study_material_layers)
+target_include_directories(unx_study_material_layers PRIVATE PathTracer/src)
+target_link_libraries(unx_study_material_layers PRIVATE unx_reference Unx::Embree)
+target_compile_definitions(unx_study_material_layers PRIVATE UNX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+c_deploy_embree(unx_study_material_layers)
