@@ -3,6 +3,7 @@
 // Every buffer is a StructuredBuffer read through bindless indices published in FrameConstants.
 // Layout changes follow the interface-change procedure (INTERFACES_KO.md 0); sizes are checked here and in HLSL.
 #include "unx/core/Math.h"
+#include "unx/render/ViewKind.h"
 
 #include <cstdint>
 
@@ -170,11 +171,6 @@ struct VisibleCluster  // 8 B
 };
 static_assert(sizeof(VisibleCluster) == 8);
 
-enum class ViewKind : uint32_t
-{
-    Main = 0,
-    PlanarReflection = 1,   // rendered through FrameServices::renderView by R (INTERFACES_KO.md 5.4)
-};
 
 // Root CBV b1 (Frame.hlsli). One per view per frame, 1 KB slots.
 struct FrameConstants

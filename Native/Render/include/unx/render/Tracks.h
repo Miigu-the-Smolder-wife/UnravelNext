@@ -2,12 +2,10 @@
 // Track entry points (INTERFACES_KO.md 5.2). Core's FrameRenderer calls them in the order of ARCHITECTURE 4.1; each
 // track implements its functions in its own folder. The signatures are fixed; the passes inside are the track's.
 #include "unx/render/Frame.h"
+#include "unx/render/TrackPending.h"
 
 namespace unx::render::tracks
 {
-// Entry points a track has not implemented yet call this: it logs once per entry and the entry declares no passes.
-void pending(const char* entry);
-
 // ---- FX: GPU simulation (FX session) - Native/Render/Passes/FX
 // C0 of ARCHITECTURE 4.1, first in the frame after prepareScene: the GPU simulation slices (particles first; cloth,
 // hair guides, water, Matter later), serial in the frame (ARCHITECTURE 2.14).

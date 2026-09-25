@@ -1,12 +1,21 @@
 #pragma once
 // Frame contract between the render tracks (INTERFACES_KO.md 5). Core owns this file; tracks read it and fill the
 // resources they own. Adding a field or service goes through the interface-change procedure (INTERFACES_KO.md 0).
+// v1.42 (infra request 20260926_Infra_header_split): the contracts that change most live in their own headers --
+// ViewDesc.h, FrameResources.h (ViewResources, FrameResources), FrameContext.h, DepthRaster.h, GraphTypes.h, ViewKind.h --
+// and a file that needs only those includes them instead of this one. This header keeps the frame context, services and
+// track state, and for now still includes everything it did before (GpuSceneLayout.h, RenderGraph.h, Shaders.h, ...), so
+// no file needs to change at once.
 #include "unx/core/Config.h"
 #include "unx/core/Math.h"
+#include "unx/render/DepthRaster.h"
 #include "unx/render/Device.h"
+#include "unx/render/FrameContext.h"
+#include "unx/render/FrameResources.h"
 #include "unx/render/GpuSceneLayout.h"
 #include "unx/render/RenderGraph.h"
 #include "unx/render/Shaders.h"
+#include "unx/render/ViewDesc.h"
 #include "unx/scene/SceneData.h"
 
 #include <functional>
@@ -19,224 +28,6 @@
 namespace unx::render
 {
 class GpuScene;
-
-// A camera view. The main view comes from the scene camera; R builds planar-reflection views (5.4).
-struct ViewDesc
-{
-    gpu::ViewKind kind = gpu::ViewKind::Main;
-    uint32_t width = 0, height = 0;     // render target size of this view
-    float4x4 view, proj, viewProj, prevViewProj, invViewProj;
-    float3 position{};
-    float nearPlane = 0.05f;
-    float verticalFov = 1.0471976f;
-    float4 clipPlane{};                 // world plane (xyz normal, w offset); keep dot(n,p) + w >= 0; zero = none.
-                                        // V honours it with SV_ClipDistance0 and in cluster culling.
-    bool mirrored = false;              // reflection views: front faces wind clockwise (V swaps cull mode)
-    float ev100 = 14.0f;
-    // Planar reflection views (v1.22, R request; v1.28 apron, M request): which pixels are drawn. R8_UINT, width x
-    // height: 1 = mirror pixel (R reads it), 2 = apron (the 3 x 3 neighbourhood of mirror pixels: drawn and shaded so
-    // edge detection and composite at the mirror's border see the real reflected surfaces; R does not read it), 0 =
-    // skipped; invalid = every pixel. V, M and S draw every nonzero pixel: V culls clusters over tiles without drawn
-    // pixels and fills the others' depth with the nearest value before the raster (they stay VIS_NONE).
-    TextureRef planarMask;              // [R]
-    TextureRef planarTileMask;          // optional R8_UINT ceil(W/8) x ceil(H/8), nonzero = the tile has drawn [R]
-                                        // pixels of the dilated mask (M and S tile classification in one load)
-
-    // Main view from a scene camera (reversed-Z infinite projection, Math.h).
-    static ViewDesc fromCamera(const scene::Camera& camera, uint32_t width, uint32_t height, const float4x4& prevViewProj);
-    // Mirror of 'mainView' across 'plane' (world), cropped to pixel rectangle 'region' of the main view (the planar
-    // reflector's screen bounds, A_r): off-centre projection, oblique clip plane, same exposure. Owner of use: R.
-    static ViewDesc planarReflection(const ViewDesc& mainView, float4 plane, uint32_t regionX, uint32_t regionY, uint32_t regionWidth, uint32_t regionHeight);
-};
-
-// Per-view products (graph resources of the current frame). Producer in brackets.
-struct ViewResources
-{
-    ViewDesc view;
-    D3D12_GPU_VIRTUAL_ADDRESS frameConstants = 0;  // root CBV b1 for passes of this view [core]
-    TextureRef depth;              // D32_FLOAT reversed Z                                   [V]
-    TextureRef visId;              // R32_UINT (VisBuffer.hlsli)                             [V]
-    BufferRef visibleClusters;     // gpu::VisibleCluster list indexed by the vis id         [V]
-    TextureRef hiz;                // R32_FLOAT, full mip chain: texel (i, j) of mip m = farthest   [V]
-                                   // depth (minimum reversed-Z value) of the pixels [i 2^(m+1), ...);
-                                   // valid mip size ceil(W / 2^(m+1)) x ceil(H / 2^(m+1)) inside a
-                                   // power-of-two allocation (texels beyond it are undefined)
-    // Coverage layer (7.1 v1.41, CoverageTiles.hlsli; invalid = no layer), per 8 x 8 tile:
-    BufferRef coverageTiles;       // raw: 8-word tile headers (records, record base, listed index + 1, [V]
-                                   // opaqueCovered 64 bit, V-internal words)
-    BufferRef coverageRecords;     // StructuredBuffer<uint4>: each listed tile's records contiguous,  [V]
-                                   // pixel-major inside the tile's range
-    BufferRef coverageTileList;    // raw: header (args over the listed tiles and over the blocks,     [V]
-                                   // counts, capacity, tiles per row), 4 words per listed tile
-                                   // { tile, records, record base, block base }
-    BufferRef coverageTilePixels;  // raw: 64 words per listed tile, pixel p's first record in the  [V]
-                                   // tile's range
-    TextureRef coverageDepthRange; // R32G32_UINT per pixel: its records' nearest (max) and farthest  [V]
-                                   // (min) depth bits, see-through included; (0, 0xFFFFFFFF) = none
-    BufferRef coverageChunkTable;  // v1.40 names until M's composite reads the ranges: the table is   [V]
-    BufferRef coverageChunks;      // always invalid (turns the v1.40 readers off), chunks = records
-    TextureRef gbuffer;            // RG32_UINT (GBuffer.hlsli)                              [M]
-    TextureRef shadowVisibility;   // R32_UINT, 4 light slots x 8 bit (7.3)                 [S]
-    TextureRef shadowOverflowTiles;  // R32_UINT ceil(W/8) x ceil(H/8) (main view, 7.3, v1.20): [S]
-                                     // 0 = no shadow-casting light past the third in the tile,
-                                     // 0xFFFFFFFF = over capacity (fallback list), else 1 + the
-                                     // tile's block start word in shadowOverflow
-    BufferRef shadowOverflow;      // raw: per overflow tile 64 pixel words (count << 24 | run  [S]
-                                   // start) + runs of 8-bit visibilities, list order (7.3)
-    BufferRef shadowOverflowFallbackTiles;  // raw: word 0 count, words 1..3 DispatchIndirect  [S]
-                                            // args (count, 1, 1), words 4.. tiles (y << 16 | x)
-    BufferRef shadowFragmentVisibility;  // StructuredBuffer<uint3> per pixel (y x width + x), valid  [S]
-                                         // where coverageDepthRange has records: x = sun visibility
-                                         // at 4 points of [nearest, farthest] (unorm8 each), y = local
-                                         // slots 1..3 at the nearest (byte 0 bit 0: pair flag), z = the
-                                         // same at the farthest (7.3, v1.41)
-    BufferRef shadowFragmentSun;   // raw, 1 B per coverageRecords element: that record's sun  [S]
-                                   // visibility (unorm8); written only for pair-flag pixels (7.3)
-    BufferRef froxelLights;        // this view's froxel light lists (7.4; v1.22): main view =      [S]
-                                   // FrameResources::froxelLights, planar views: S shadowVisibility
-    TextureRef airVolume;          // this view's air volume (v1.15 layout; v1.22): main view =     [S]
-                                   // FrameResources::aerialPerspective; planar views integrate from
-                                   // the mirror plane on (the main view's mirror pixel has the rest)
-    TextureRef screenProbes;       // GI screen probes (main view only)                     [R]
-    TextureRef screenProbeMaps;    // atlas of the K-path radiance maps of the cache entries  [R]
-                                   // the screen probes use, hardware-filterable (M: SrvCompute; R's
-                                   // ScreenProbes.hlsli defines the layout; v1.13)
-    BufferRef screenProbeBlocks;   // GI screen probe blocks, 640 B per corner probe (main view   [R]
-                                   // only; v1.36): (ceil(W/8) + 1) x (ceil(H/8) + 1) probes, each
-                                   // contiguous: records 0..79, mips 0/1/2 fp16 RGB 80..583, spare
-                                   // (the table R and M agreed); M reads SrvCompute (ProbeSrvs)
-    TextureRef reflection;         // RGBA16F reflection radiance + weight (main view only) [R]
-    TextureRef reflectionLobeTiles;  // R8_UNORM ceil(W/8) x ceil(H/8): min over the tile's      [M]
-                                     // surface pixels of reflectionLobeHalfAngle(r, NoV) / pi
-                                     // (Reflection.hlsli; sky-only tile = 1); R skips ray
-                                     // classification in tiles whose minimum is K-path wide
-    // Particle layer (FX request 20260926_FX_particle_render_pass 8a; Passes/FX/ParticleLayer.hlsli; invalid = none):
-    TextureRef particleLayer;      // RGBA16F, 1/4 resolution: premultiplied radiance + transmittance   [FX]
-    TextureRef particleDepthRange; // RG16F, 1/4 resolution: the layer's depth range per texel          [FX]
-    BufferRef particleEdges;       // raw: full-resolution edge pixels of the layer + count              [FX]
-    TextureRef distortionLayer;    // RG16F, 1/4 resolution: screen-space offsets (after M0)             [FX]
-    TextureRef color;              // final colour target of this view                      [M]
-};
-
-// View-independent products of the current frame. Persistent state (VSM pool, GI cache, TLAS) is imported into the
-// graph each frame by its owner.
-struct FrameResources
-{
-    TextureRef transmittanceLut, multiScatterLut, skyViewLut;  // [S]
-    TextureRef aerialPerspective;  // the air volume (froxels(), v1.15): Texture3D RGBA16F      [S]
-                                   // gridX x gridY x 3(S+1) on the froxel grid, part 0 in-scattering
-                                   // camera -> node (x exposure; atmosphere, caster-shadowed air, local
-                                   // lights), part 1 optical depth, part 2 sun transmittance at the node;
-                                   // read with atmosphereAerial / atmosphereAirView (Atmosphere.hlsli)
-    BufferRef vsmPool;             // physical page pool (raw buffer; v1.18)                [S]
-    BufferRef vsmPageTable;        //                                                       [S]
-    BufferRef vsmBlocks;           // per-page block hierarchy (persistent; v1.18)          [S]
-    BufferRef vsmSearchBound;      // blocker-search bound grid of this frame (v1.18)       [S]
-    BufferRef vsmLayers;           // VSM transmittance layer (raw; v1.26, S request): per physical [S]
-                                   // page its layer + 1 (0 = none, T = 1), then the layer pages (4
-                                   // knots per texel) and block profiles; ShadowSrvs.layers
-    uint32_t vsmConstants = UINT32_MAX;  // CBV descriptor of this frame's VSM constants    [S]
-                                         // (upload ring, not a graph resource; v1.18). With
-                                         // the four buffers: ShadowSrvs (ShadowVisibility.hlsli),
-                                         // filled by shadowPages for shadowSunVisibilityAt (R)
-    uint32_t vsmLocalLights = UINT32_MAX;  // SRV descriptors of this frame's local-light shadow [S]
-    uint32_t vsmSlotOfLight = UINT32_MAX;  // records (VsmLocalLight, 48 B x shadow slots) and the
-                                           // scene light -> shadow slot table (uint, 0xFFFF = none)
-                                           // (upload ring; v1.19): ShadowSrvs.lights / .pad0 for
-                                           // shadowVisibilityDirect
-    TextureRef froxels;            // the same air volume as aerialPerspective (v1.15)      [S]
-    BufferRef froxelLights;        // per-froxel light lists (7.4)                          [S]
-    BufferRef tlasStatic, tlasDynamic;  // acceleration structures                          [R]
-    BufferRef giCache;             // world radiance cache                                  [R]
-};
-
-struct FrameContext
-{
-    uint64_t frameIndex = 0;
-    double time = 0;
-    float deltaTime = 0;
-    ViewDesc mainView;
-    // Validation runs: the main view's colour is linear radiance x exposure in RGBA32F (metrics, INTERFACES 9)
-    // instead of the display-encoded RGB10A2.
-    bool outputLinearHdr = false;
-    // GPU simulation steps submitted in this frame (v1.35, design revision 10.3): kGpuSimulation* bits, 0 = none (the
-    // default). R's GI spreads its per-frame ray mean by it (fewer rays in frames that carry a simulation step).
-    uint32_t gpuSimulation = 0;
-    // History discontinuity of this frame (v1.35, I request 20260925_I_history_discontinuity.md), set by the host for
-    // the first frame after the event:
-    //   kDiscontinuityRestore: World snapshot restore, save load, branch change -- every temporal state resets
-    //                          (world-space caches included), and no instance has motion in this frame;
-    //   kDiscontinuityCut:     camera cut -- view-bound histories reset, world-space caches (R's GI cache) are kept.
-    // Either bit: the main view has no previous view (prevViewProj = viewProj). Instance teleports are per instance
-    // (InstanceTransformUpdate::flags).
-    uint32_t discontinuity = 0;
-};
-constexpr uint32_t kGpuSimulationSoft = 1, kGpuSimulationVfx = 2, kGpuSimulationRigid = 4;
-constexpr uint32_t kDiscontinuityRestore = 1, kDiscontinuityCut = 2;
-
-// S -> V: rasterise shadow-casting clusters into depth-like targets through V's cluster pipeline (cull, LOD, deform,
-// mesh shader). V owns geometry; the requester owns the output: either hardware depth into 'depthTarget', or its own
-// pixel kernel (e.g. atomic depth into paged storage) with the extra resources it declares.
-struct RasterView
-{
-    float4x4 viewProj;
-    uint32_t viewportX = 0, viewportY = 0, viewportWidth = 0, viewportHeight = 0;  // in the target (up to 16384^2)
-    // LOD scale. Perspective viewProj: texels per metre at distance 1 (focal length in texels). Orthographic viewProj
-    // (last row 0,0,0,1; V detects it): texels per metre, independent of distance.
-    float lodPixelsPerMetre = 0;
-    uint32_t userData = 0;         // passed to the pixel kernel (e.g. clipmap level / page group)
-    uint32_t cullMaskOffset = UINT32_MAX;  // first uint32 word of this view's tile mask in DepthRasterRequest::cullMask;
-                                           // UINT32_MAX = no mask (the whole viewport is rasterised)
-};
-
-struct DepthRasterRequest
-{
-    std::string name;                              // pass names: "<name>.<step>"
-    std::vector<RasterView> views;
-    uint32_t instanceMask = scene::InstanceCastShadow;  // instances with (flags & mask) != 0
-    TextureRef depthTarget;                        // hardware depth (D32_FLOAT or D16_UNORM); invalid when pixelKernel
-                                                   // writes storage (then no render target and no depth: UAV-only
-                                                   // raster, 1 sample)
-    std::string pixelKernel;                       // requester's pixel shader kernel; empty = depth only. Its input is
-                                                   // struct DepthRasterPixel (Passes/Visibility/DepthRaster.hlsli); it
-                                                   // calls depthRasterCovered(p) first (alpha-tested materials)
-    std::vector<std::pair<TextureRef, Use>> textureUses;  // resources the pixel kernel touches
-    std::vector<std::pair<BufferRef, Use>> bufferUses;
-    uint32_t pixelConstants[16] = {};              // root constants 16..31 for the pixel kernel
-    bool conservative = false;
-    D3D12_CULL_MODE cull = D3D12_CULL_MODE_NONE;   // default both faces (shadows); BACK culls back faces of one-sided
-                                                   // materials only (two-sided materials are never culled)
-    // Tile mask (performance only; the pixel kernel still decides what it writes): raw buffer, per view
-    // ceil(viewportWidth / cullTilePx) x ceil(viewportHeight / cullTilePx) bits, row major, bit i = bit (i & 31) of word
-    // cullMaskOffset + (i >> 5); 1 = the tile needs rasterisation. Written on the GPU earlier in the same frame. V skips
-    // clusters (and meshlet triangles) whose viewport rectangle covers no set bit.
-    BufferRef cullMask;
-    uint32_t cullTilePx = 0;
-    // Tile-local raster (v1.7; needs cullMask): each cluster is drawn once per run of set tiles it covers (one draw
-    // when all tiles under it are set), clipped to that run's rectangle, so the rasteriser makes fragments only inside
-    // set tiles (fragments = sum of triangle area inside set tiles). Pixel positions, depth and DepthRasterPixel are
-    // the same as without it. For sparse masks over large viewports (VSM dirty pages in a 16384^2 level).
-    bool tileLocal = false;
-    // Tile atlas (v1.32, S request 20260925_S_vsm_depth_atlas.md; needs tileLocal, cullMask and depthTarget): every set
-    // tile is drawn on its own into its slot of the atlas 'depthTarget' (hardware depth, D32_FLOAT or D16_UNORM: the
-    // requester picks per request, e.g. VSM D16 while the sun's zenith angle is below 76 degrees). The slot of tile i of
-    // a view (bit i of its mask) is word cullMaskOffset * 32 + i of 'atlasSlots' (raw buffer, one uint per mask bit);
-    // it sits at pixel (slot % atlasTilesPerRow, slot / atlasTilesPerRow) * cullTilePx of the atlas. The tile's pixels
-    // move to the slot's by a whole-pixel shift in clip space (depth and perspective unchanged; the shift's float
-    // rounding is below the rasteriser's 1/256 px snap), clipped to the tile, so fragments land only inside the slots of
-    // set tiles. The views' viewport positions are ignored (their sizes give the tile grids); the pass viewport is the
-    // whole atlas and a pixel kernel (optional; [earlydepthstencil] runs it after the depth test) sees atlas pixels.
-    BufferRef atlasSlots;
-    uint32_t atlasTilesPerRow = 0;
-    // Coverage mode (v1.26; S's VSM transmittance layer): conservative raster of band B clusters only, the pixel kernel
-    // (compiled with DEPTH_RASTER_COVERAGE 1) gets the exact area, mask and centroid depth per texel
-    // (depthRasterCoverage, DepthRaster.hlsli). Needs a pixel kernel and no depth target. Bands are judged in each
-    // view's texels (RasterView::lodPixelsPerMetre): A >= 1.5 texels, B 0.25..1.5, C < 0.25 (the requester's brick march).
-    bool coverage = false;
-    // Which bands a request draws (1 = A, 2 = B, 4 = C; default all, every band as depth). A transmittance-layer VSM
-    // draws A as depth, B in coverage mode and marches C.
-    uint32_t bands = 7;
-};
 
 struct FramePassContext;
 

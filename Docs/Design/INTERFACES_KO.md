@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.41, 2026-09-26)
+# UnravelNext 인터페이스 (v1.42, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -232,6 +232,12 @@ void RenderGraph::addPass(std::string_view name, QueueType, SetupFn setup, Execu
 - 단위 테스트 `device_on_host_device_and_queue`.
 
 ## 5. 프레임 구성 (`Frame.h`, `Tracks.h`, `FrameRenderer.h`)
+- **헤더 배치(v1.42, 인프라 요청 `20260926_Infra_header_split.md`)**: 자주 바뀌는 계약은 작은 헤더에 있다. 필요한 것만 include한다.
+  - `ViewDesc.h`(`ViewDesc`), `FrameResources.h`(`ViewResources`, `FrameResources`), `FrameContext.h`(`FrameContext`, `kGpuSimulation*`, `kDiscontinuity*`), `DepthRaster.h`(`RasterView`, `DepthRasterRequest`).
+  - `GraphTypes.h`(`Use`, `TextureDesc`, `BufferDesc`, `TextureRef`, `BufferRef`; `RenderGraph.h`가 include), `ViewKind.h`(`gpu::ViewKind`; `GpuSceneLayout.h`가 include), `TrackPending.h`(`tracks::pending`).
+  - `Frame.h`는 `TrackState`, `FrameServices`, `FramePassContext`, `passBandCount`를 두고, 당분간 위 헤더와 예전 include(`GpuSceneLayout.h`, `RenderGraph.h`, `Shaders.h`, `Device.h`, `SceneData.h`) 전부를 계속 include한다. 그래서 바꾸지 않아도 컴파일된다. `Tracks.h`도 `Frame.h`를 계속 include한다.
+  - 각 트랙은 인프라가 보내는 목록(HeaderCost)대로 자기 파일의 include를 작은 헤더로 옮긴다. 다 옮기면 `Frame.h`의 호환 include를 지운다(코어, 공지 뒤).
+  - 새 헤더는 모두 단독 컴파일된다[실측, 프로젝트 플래그 /W4 /WX로 헤더마다 한 번역 단위].
 
 ### 5.1 뷰와 자원 게시판
 
@@ -677,6 +683,8 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.42 (2026-09-26):
+  - **공용 헤더 분리(5절, 인프라 요청 `20260926_Infra_header_split.md`)**: 내용 변경 없이 위치만 옮겼다. `Frame.h`는 호환 include를 유지한다. 코어 파일 가운데 `src/GpuLock.cpp`는 `TrackPending.h`만 include한다. 인프라가 적용 뒤 증분 빌드 시간을 다시 잰다.
 - v1.41 (2026-09-26):
   - **coverage 층 타일 구간(7.1, V; 설계 개정 채택, 1절 최악 dispatch 조건)**: 스트림 append → 카운트 → 스캔 → 오프셋 → 흩뿌리기로 목록 타일마다 픽셀 순서 연속 구간을 만든다. M 요청대로 픽셀 순서로 두었고, 목록 정보 `{ tile, records, record base, block base }`는 M의 A 단계와 같은 형식이다. 블록 패스와 여러 블록 타일 마무리 패스가 opaqueCovered와 S의 `coverageDepthRange`를 만든다. 청크 표·확장 트리·CAS는 없다.
     - `ViewResources`: `coverageRecords`, `coverageTilePixels`, `coverageDepthRange` 추가. `coverageChunkTable`(늘 무효)과 `coverageChunks`(= records)는 M 전환 뒤 지운다.
