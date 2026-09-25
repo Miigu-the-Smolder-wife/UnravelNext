@@ -12,7 +12,7 @@
 // a miss.
 //
 // P[0] = { jobs SRV, results UAV (uint2 per job), mode SRV, probes SRV }
-// P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli), ray length in P[1].w
+// P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli), ray length in P[1].w, P[3].w = view.screenProbeMaps SRV
 // P[4] = { depth SRV, gbuffer SRV, GI cache UAV (raw), rays per G sample }, P[5] = { frame, specular albedo LUT SRV, 0, 0 }
 // P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view.
 #include "RayTracing/RayShaders.hlsli"
@@ -41,7 +41,12 @@ void ReflectionTraceGen()
     const ReflSurface s = reflSurface(depth, gbuffer, pixel);
     const float alpha = max(s.roughness * s.roughness, 1e-4);
     const uint rays = mode == REFL_M ? 1u : P[4].w;
-    const ProbeSrvs probes = { P[0].w, P[0].w, 0, 0 };
+    // The screen-probe footprint once per job (the G control variates and gbar share it); the K-path maps from the
+    // hardware-filtered atlas (P[3].w).
+    Texture2D<uint4> probeTexture = ResourceDescriptorHeap[P[0].w];
+    float probeSpacing;
+    int2 probeCount;
+    const GiProbeFootprint footprint = giProbeFootprint(probeTexture, pixel, s.normal, s.linearDepth, probeSpacing, probeCount);
     const float lobe = reflectionLobeHalfAngle(s.roughness, dot(s.normal, s.view));
     uint seed = giRandom(pixel.x * 7919u + pixel.y * 104729u + P[5].x * 15485863u);
     float3 sum = 0;
@@ -70,13 +75,13 @@ void ReflectionTraceGen()
         float d;
         const float3 L = reflHitRadiance(scene, cache, h, r, tan(lobe), seed, d);
         // Control variate for G: the cache's radiance in the same direction at texel resolution.
-        const float3 g = mode == REFL_G ? screenProbeRadiance(probes, pixel, s.normal, s.linearDepth, dir, 0.1763) : 0;
+        const float3 g = mode == REFL_G ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, dir, 0.1763, P[3].w) : 0;
         sum += L - g;
         distSum += d;
         ++valid;
     }
     // G: gbar + mean(L - g). M: the sample itself. No unmasked sample (a grazing single M sample): the cache's lobe value.
-    const float3 gbar = mode == REFL_G || valid == 0 ? screenProbeRadiance(probes, pixel, s.normal, s.linearDepth, reflect(-s.view, s.normal), lobe) : 0;
+    const float3 gbar = mode == REFL_G || valid == 0 ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-s.view, s.normal), lobe, P[3].w) : 0;
     const float3 value = (valid > 0 ? sum / valid : 0) + gbar;
     results[job] = reflPackResult(max(value, 0.0), valid > 0 ? distSum / valid : 0);
 }

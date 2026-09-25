@@ -217,6 +217,13 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     const uint32_t probesX = (main.view.width + s.probeSpacing - 1) / s.probeSpacing;
     const uint32_t probesY = (main.view.height + s.probeSpacing - 1) / s.probeSpacing;
     main.screenProbes = g.createTexture({ "GI screen probes", probesX * 8, probesY * 5 + 1, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT });
+    {
+        // K-path maps atlas (INTERFACES v1.13, layout in ScreenProbes.hlsli): written as R32_UINT, filtered as RGB9E5.
+        TextureDesc maps{ "GI screen probe maps", probesX * 14, probesY * 8, 1, 1, DXGI_FORMAT_R32_UINT };
+        maps.srvFormat = DXGI_FORMAT_R9G9B9E5_SHAREDEXP;
+        main.screenProbeMaps = g.createTexture(maps);
+    }
+    const TextureRef atlas = main.screenProbeMaps;
     const TextureRef probes = main.screenProbes, depth = main.depth, gbuffer = main.gbuffer;
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = main.frameConstants;
     const uint32_t frame = (uint32_t)fc.frame.frameIndex + 1;  // 0 never matches a stamp
@@ -337,9 +344,10 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   b.use(probes, Use::UavCompute);
                   b.use(owners, Use::SrvCompute);
                   b.use(mapArgs, Use::IndirectArgs);
+                  b.use(atlas, Use::UavCompute);
               },
-              [&shaders, cache, probes, owners, mapArgs, probesX, probesY, signature](PassContext& c) {
-                  const uint32_t k[8] = { c.srv(cache), c.uav(probes), probesX, probesY, c.srv(owners), 0, 0, 0 };
+              [&shaders, cache, probes, owners, mapArgs, probesX, probesY, signature, atlas](PassContext& c) {
+                  const uint32_t k[8] = { c.srv(cache), c.uav(probes), probesX, probesY, c.srv(owners), c.uav(atlas), 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiProbeMaps"));
                   c.computeConstants(k, 8);
                   c.cmd->ExecuteIndirect(signature, 1, c.resource(mapArgs), 0, nullptr, 0);

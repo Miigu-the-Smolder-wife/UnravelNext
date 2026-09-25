@@ -608,6 +608,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const uint32_t specularLut = rt::specularAlbedoSrv(fc.device);
     const uint32_t experiment = s.experimentDisable;
     const BufferRef exactCounts = rays.exactHitCounts();
+    const TextureRef probeMaps = main.screenProbeMaps;
     ID3D12QueryHeap* timestamps = m_timestamps.Get();
     const uint32_t firstTick = ringSlot * kTicks;
     g.addPass("r.refl.trace", QueueType::Compute,
@@ -616,6 +617,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   b.use(jobs, Use::SrvGraphics);
                   b.use(modes, Use::SrvGraphics);
                   b.use(probes, Use::SrvGraphics);
+                  b.use(probeMaps, Use::SrvGraphics);
                   b.use(depth, Use::SrvGraphics);
                   b.use(gbuffer, Use::SrvGraphics);
                   b.use(cache, Use::UavGraphics);
@@ -626,7 +628,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
               [&pipeline, jobs, results, modes, probes, depth, gbuffer, cache, luts, atmosphere, sky, sun, rayLength, s, frame, scene, frameConstants, argumentResource,
-               variant, specularLut, timestamps, firstTick, experiment, exactCounts](PassContext& c) {
+               variant, specularLut, timestamps, firstTick, experiment, exactCounts, probeMaps](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = c.srv(jobs);
                   k[1] = c.uav(results);
@@ -640,6 +642,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   k[12] = asU(sun.x);
                   k[13] = asU(sun.y);
                   k[14] = asU(sun.z);
+                  k[15] = c.srv(probeMaps);
                   k[16] = c.srv(depth);
                   k[17] = c.srv(gbuffer);
                   k[18] = c.uav(cache);

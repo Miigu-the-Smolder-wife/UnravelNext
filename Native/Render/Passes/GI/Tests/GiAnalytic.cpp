@@ -224,19 +224,20 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             gi.setConstantSky(sky, { 0, 0, 0 });
             gi.record(fc, main, rays);
             const BufferRef resultRef = graph.importBuffer(result.resource.Get(), { "test result", resultBytes, 16 });
-            const TextureRef probes = main.screenProbes;
+            const TextureRef probes = main.screenProbes, maps = main.screenProbeMaps;
             graph.addPass("test.eval", QueueType::Compute,
                           [&](PassBuilder& b) {
                               b.use(probes, Use::SrvCompute);
+                              b.use(maps, Use::SrvCompute);
                               b.use(depth, Use::SrvCompute);
                               b.use(gbuffer, Use::SrvCompute);
                               b.use(resultRef, Use::UavCompute);
                               b.keep();
                           },
-                          [&, probes, depth, gbuffer, resultRef, fcAddress](PassContext& c) {
-                              const uint32_t k[8] = { c.srv(probes), c.srv(depth), c.srv(gbuffer), c.uav(resultRef), probesX, probesY, width, height };
+                          [&, probes, maps, depth, gbuffer, resultRef, fcAddress](PassContext& c) {
+                              const uint32_t k[12] = { c.srv(probes), c.srv(depth), c.srv(gbuffer), c.uav(resultRef), probesX, probesY, width, height, c.srv(maps), 0, 0, 0 };
                               c.cmd->SetPipelineState(shaders.compute("Passes/GI/Tests/GiTestEval"));
-                              c.computeConstants(k, 8);
+                              c.computeConstants(k, 12);
                               c.bindFrameConstants(fcAddress);
                               c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
                           });

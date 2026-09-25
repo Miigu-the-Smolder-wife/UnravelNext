@@ -21,7 +21,13 @@
 //     row 3: texels 0-3 = the 4 x 4 mip, texel 5 = the cache entry the map comes from (GiProbeGather -> GiProbeMaps)
 //   The map is written once per cache entry, in the block of the lowest probe reading that entry; other probes' map
 //   texels are stale and are reached through plane 5's block.
-// Last row (5 probesY), texel 0 = { spacing px, probesX, probesY, 0 }. Radiance values are x GI_STORE_SCALE (1/64).
+// Last row (5 probesY), texel 0 = { spacing px, probesX, probesY, 0 }.
+//
+// view.screenProbeMaps (v1.13): the same K-path maps as a hardware-filtered atlas, (probesX * 14) x (probesY * 8),
+// R32_UINT written / R9G9B9E5_SHAREDEXP sampled, values x GI_STORE_SCALE. Map block (i, j) has its level L tile
+// (n = 8 >> L texels square) at x0_L + i n, j n, x0 = 0, 8 probesX, 12 probesX; only owner blocks are written.
+// screenProbeGather reads it (ProbeSrvs.pad0 = its SRV); a tile is sampled with coordinates clamped to its texel centres,
+// which equals clamp-to-edge bilinear and never reads a neighbouring tile. Radiance values are x GI_STORE_SCALE (1/64).
 #ifndef UNX_GI_SCREENPROBES_HLSLI
 #define UNX_GI_SCREENPROBES_HLSLI
 #include "Bindless.hlsli"
@@ -138,7 +144,15 @@ struct GiProbeFootprint
     float weight[4];
 };
 
+GiProbeFootprint giProbeFootprintAt(Texture2D<uint4> t, uint2 pixel, float3 pixelWorld, float3 normal, float linearDepth, out float spacing, out int2 count);
+
 GiProbeFootprint giProbeFootprint(Texture2D<uint4> t, uint2 pixel, float3 normal, float linearDepth, out float spacing, out int2 count)
+{
+    return giProbeFootprintAt(t, pixel, worldFromDepth(float2(pixel), g_nearPlane / max(linearDepth, 1e-6)), normal, linearDepth, spacing, count);
+}
+
+// The footprint for a pixel whose world position the caller already has (M's shading).
+GiProbeFootprint giProbeFootprintAt(Texture2D<uint4> t, uint2 pixel, float3 pixelWorld, float3 normal, float linearDepth, out float spacing, out int2 count)
 {
     uint width, height;
     t.GetDimensions(width, height);
@@ -148,7 +162,6 @@ GiProbeFootprint giProbeFootprint(Texture2D<uint4> t, uint2 pixel, float3 normal
     const float2 f = (float2(pixel) + 0.5) / spacing - 0.5;
     const int2 i0 = int2(floor(f));
     const float2 fr = f - floor(f);
-    const float3 pixelWorld = worldFromDepth(float2(pixel), g_nearPlane / max(linearDepth, 1e-6));
     GiProbeFootprint fp;
     float total = 0;
     [unroll] for (uint k = 0; k < 4; ++k)
@@ -197,10 +210,21 @@ float4 screenProbeIrradiance(ProbeSrvs s, uint2 pixel, float3 normal, float line
     return any ? sum : float4(0, 0, 0, 1);
 }
 
+// Bilinear radiance of a map block at level L from the atlas (hardware filtering, RGB9E5), x GI_STORE_SCALE.
+float3 giProbeAtlasBilinear(Texture2D<float4> atlas, int2 count, uint2 block, uint level, float2 uv)
+{
+    const float n = (float)(8u >> level);
+    const float x0 = level == 0 ? 0.0 : (level == 1 ? 8.0 * count.x : 12.0 * count.x);
+    const float2 texel = float2(x0 + block.x * n, block.y * n) + clamp(uv * n, 0.5, n - 0.5);
+    uint w, h;
+    atlas.GetDimensions(w, h);
+    return atlas.SampleLevel(g_linearClamp, texel / float2(w, h), 0).rgb;
+}
+
 // The K path over a footprint. Probes that read the same cache entry share one map block (GiProbeMapOwners): their
 // weights are merged and each distinct block is looked up once. The second mip is read only when it differs from the
 // first (fractional level below the top mip).
-float3 giProbeFootprintRadiance(Texture2D<uint4> t, GiProbeFootprint fp, int2 count, float3 dir, float coneHalfAngle)
+float3 giProbeFootprintRadiance(Texture2D<uint4> t, GiProbeFootprint fp, int2 count, float3 dir, float coneHalfAngle, uint atlasSrv = UNX_NONE)
 {
     const float lod = clamp(log2(max(coneHalfAngle, 1e-3) / (1.5 * 0.1763)), 0.0, 2.0);  // 0.1763 rad = 10.1 deg
     const uint l0 = (uint)floor(lod), l1 = min(l0 + 1, 2u);
@@ -228,8 +252,18 @@ float3 giProbeFootprintRadiance(Texture2D<uint4> t, GiProbeFootprint fp, int2 co
         const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
         const float3 v = local / (abs(local.x) + abs(local.y) + local.z);
         const float2 uv = float2(v.x + v.y, v.x - v.y) * 0.5 + 0.5;
-        float3 r = giProbeMapBilinear(t, block, l0, uv);
-        if (fl > 0 && l1 != l0) r = lerp(r, giProbeMapBilinear(t, block, l1, uv), fl);
+        float3 r;
+        if (atlasSrv != UNX_NONE)
+        {
+            Texture2D<float4> atlas = ResourceDescriptorHeap[atlasSrv];
+            r = giProbeAtlasBilinear(atlas, count, block, l0, uv);
+            if (fl > 0 && l1 != l0) r = lerp(r, giProbeAtlasBilinear(atlas, count, block, l1, uv), fl);
+        }
+        else
+        {
+            r = giProbeMapBilinear(t, block, l0, uv);
+            if (fl > 0 && l1 != l0) r = lerp(r, giProbeMapBilinear(t, block, l1, uv), fl);
+        }
         sum += w * r;
     }
     return sum * 64.0;  // GI_LOAD_SCALE
@@ -246,6 +280,53 @@ float3 screenProbeRadiance(ProbeSrvs s, uint2 pixel, float3 normal, float linear
     int2 count;
     const GiProbeFootprint fp = giProbeFootprint(t, pixel, normal, linearDepth, spacing, count);
     return giProbeFootprintRadiance(t, fp, count, dir, coneHalfAngle);
+}
+// Everything M's shading takes from the screen probes in one footprint (v1.13, request 20260925_R_probe_lookup_structure):
+// irradiance on the normal and near occlusion (as screenProbeIrradiance), optionally the irradiance of the back side
+// (-normal, its own footprint: Foliage transmission; M applies the front occlusion as before), and optionally the K-path
+// radiance (as screenProbeRadiance, from the hardware-filtered atlas). s = { view.screenProbes SRV, (same), view.screenProbeMaps
+// SRV, 0 }; worldPos = the pixel's surface point (M has it; no inverse projection here).
+struct ScreenProbeLighting
+{
+    float3 irradiance;
+    float occlusion;
+    float3 irradianceBack;
+    float3 radiance;
+};
+
+float4 giFootprintIrradiance(Texture2D<uint4> t, GiProbeFootprint fp, int2 count, float3 normal)
+{
+    float4 sum = float4(0, 0, 0, 0);
+    bool any = false;
+    [unroll] for (uint k = 0; k < 4; ++k)
+    {
+        if (fp.weight[k] <= 0) continue;
+        const GiProbeRecord r = giLoadProbeRecord(t, uint2(fp.probe[k]), count);
+        sum += fp.weight[k] * float4(giEvalShIrradiance(r.sh, normal), r.occlusion);
+        any = true;
+    }
+    return any ? sum : float4(0, 0, 0, 1);
+}
+
+ScreenProbeLighting screenProbeGather(ProbeSrvs s, uint2 pixel, float3 worldPos, float3 normal, float linearDepth, bool back, bool wantRadiance, float3 dir,
+                                      float coneHalfAngle)
+{
+    Texture2D<uint4> t = ResourceDescriptorHeap[s.probes];
+    float spacing;
+    int2 count;
+    const GiProbeFootprint fp = giProbeFootprintAt(t, pixel, worldPos, normal, linearDepth, spacing, count);
+    ScreenProbeLighting o;
+    const float4 e = giFootprintIrradiance(t, fp, count, normal);
+    o.irradiance = e.rgb;
+    o.occlusion = e.a;
+    o.irradianceBack = 0;
+    if (back)
+    {
+        const GiProbeFootprint fb = giProbeFootprintAt(t, pixel, worldPos, -normal, linearDepth, spacing, count);
+        o.irradianceBack = giFootprintIrradiance(t, fb, count, -normal).rgb;
+    }
+    o.radiance = wantRadiance ? giProbeFootprintRadiance(t, fp, count, dir, coneHalfAngle, s.pad0) : 0;
+    return o;
 }
 
 #endif
