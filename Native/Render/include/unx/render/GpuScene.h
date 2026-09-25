@@ -5,6 +5,7 @@
 #include "unx/render/GpuSceneLayout.h"
 #include "unx/scene/SceneData.h"
 
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -33,6 +34,14 @@ struct ClusterData  // V's builder output for the whole scene (per-mesh ranges g
     std::vector<Named> named;
 };
 
+class ShaderLibrary;
+
+struct InstanceTransformUpdate
+{
+    uint32_t instance = 0;
+    float3x4 objectToWorld;
+};
+
 class GpuScene
 {
 public:
@@ -47,11 +56,29 @@ public:
     // Scene indices and counts of FrameConstants.
     void fill(gpu::FrameConstants& constants) const;
 
+    // Per-frame updates (INTERFACES_KO.md 6.3, v1.8). Called between frames for the frame about to be recorded
+    // ('frameIndex'); FrameRenderer::record applies them first (flushUpdates). "Previous" always means the previous
+    // rendered frame:
+    //   updateTransforms: the listed instances get objectToWorld; prevObjectToWorld = their objectToWorld of the previous
+    //                     rendered frame; transformRevision += 1 (once per frame). An instance that moved in the previous
+    //                     frame and not in this one gets prev = current, so its motion is zero once it stops.
+    //   updateSkeleton:   joint-to-model transforms of a skeleton; every skinned instance using it gets a new bone
+    //                     palette (jointToModel x inverseBind), the previous palette = the previous rendered frame's,
+    //                     deformRevision += 1; the same settling rule as transforms.
+    //   setInstanceVisible: hidden instances carry gpu::kInstanceHidden; every reader skips them (V culling, R's TLAS).
+    // The CPU mirror (instances()) is updated immediately.
+    void updateTransforms(uint64_t frameIndex, std::span<const InstanceTransformUpdate> updates);
+    void updateSkeleton(uint64_t frameIndex, uint32_t skeleton, std::span<const float3x4> jointToModel);
+    void setInstanceVisible(uint32_t instance, bool visible);
+    // Uploads the changes for 'frameIndex': a scatter kernel on the graphics queue, submitted before the frame's graph;
+    // the other queues wait for it. Upload slot frameIndex % framesInFlight (the caller waited for that slot's frame).
+    void flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, ShaderLibrary& shaders);
+
     const scene::Scene* source() const { return m_source; }
     const std::vector<gpu::Instance>& instances() const { return m_instances; }
     const std::vector<gpu::Mesh>& meshes() const { return m_meshes; }
     uint32_t revision() const { return m_revision; }
-    ID3D12Resource* buffer(const char* name) const;  // "vertices", "indices", ... (R builds BLAS from them)
+    ID3D12Resource* buffer(const char* name) const;  // "vertices", "indices", "instances", "bonePalette", "prevBonePalette", ...
     uint32_t srv(const char* name) const;             // bindless SRV of cluster buffers and of ClusterData::named
 
 private:
@@ -61,8 +88,18 @@ private:
         uint32_t srv = gpu::kNone;
         uint32_t count = 0;
     };
-    Buffer createStructured(const void* data, size_t stride, size_t count, const wchar_t* name);
+    Buffer createStructured(const void* data, size_t stride, size_t count, const wchar_t* name, bool uav = false);
     void release(Buffer& b);
+    void markRecord(uint32_t instance);
+    void writePalette(uint32_t instance, std::vector<float4>& palette);  // jointToModel x inverseBind of its skeleton
+    uint32_t paletteJoints(uint32_t instance) const;
+    struct Upload
+    {
+        ComPtr<ID3D12Resource> buffer;
+        uint8_t* mapped = nullptr;
+        uint64_t bytes = 0;
+        uint32_t srv = gpu::kNone;
+    };
 
     Device& m_device;
     const scene::Scene* m_source = nullptr;
@@ -74,5 +111,16 @@ private:
     std::vector<std::pair<std::string, Buffer>> m_named;
     ClusterData m_clusterData;
     uint32_t m_revision = 0;
+
+    // Per-frame updates: CPU mirrors of the palettes, the frame of each instance's latest change, the instances changed
+    // in this frame and in the previous flushed one (they settle: prev = current), records to upload.
+    std::vector<float4> m_palette, m_prevPalette;
+    std::vector<scene::Skeleton> m_poses;  // current joint-to-model per skeleton
+    std::vector<uint64_t> m_transformFrame, m_paletteFrame;
+    std::vector<uint32_t> m_movedNow, m_movedBefore, m_posedNow, m_posedBefore;
+    std::vector<uint32_t> m_records;
+    std::vector<uint8_t> m_recordMarked;
+    std::vector<Upload> m_uploads;
+    uint32_t m_instanceUav = gpu::kNone, m_paletteUav = gpu::kNone, m_prevPaletteUav = gpu::kNone;
 };
 } // namespace unx::render

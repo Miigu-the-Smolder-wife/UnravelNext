@@ -9,13 +9,14 @@
 namespace unx::render::gpu
 {
 constexpr uint32_t kNone = 0xFFFFFFFFu;
+constexpr uint32_t kInstanceHidden = 1u << 31;  // Instance::flags, GPU scene only (GpuScene::setInstanceVisible): every reader skips it
 
 struct Instance  // 144 B
 {
     float4 objectToWorld[3];      // rows of the affine object -> world transform (this tick)
     float4 prevObjectToWorld[3];  // previous rendered frame's objectToWorld (motion, HiZ phase 1, VSM invalidation); equal when static
     uint32_t mesh;
-    uint32_t flags;               // scene::InstanceFlags
+    uint32_t flags;               // scene::InstanceFlags | kInstanceHidden
     uint32_t materialRemap;       // first entry in the material remap buffer (one per submesh) or kNone = mesh materials
     uint32_t bonePalette;         // first joint in the bone palettes, kNone when rigid
     uint32_t transformRevision;   // increments when objectToWorld changes

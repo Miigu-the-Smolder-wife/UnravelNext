@@ -37,7 +37,7 @@ void main(uint3 id : SV_DispatchThreadID)
         roots = rootBuffer[inst.mesh];
         const CullView v = loadView(view);
         const bool skinned = (inst.flags & INSTANCE_SKINNED) != 0;  // bind-pose bounds do not bound skinned vertices (P3)
-        if ((inst.flags & INSTANCE_MASK) != 0 || INSTANCE_MASK == 0)
+        if (((inst.flags & INSTANCE_MASK) != 0 || INSTANCE_MASK == 0) && (inst.flags & INSTANCE_HIDDEN) == 0)
         {
             const float4 bounds = worldSphere(inst, inst.objectToWorld, mesh.boundsSphere);
             visible = roots.rootCount > 0 && (skinned || (frustumVisible(v, bounds) && tileVisible(v, view, bounds)));

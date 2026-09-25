@@ -138,6 +138,7 @@ gpu::FrameConstants FrameRenderer::frameConstants(const GpuScene& scene, const F
 
 ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& frame, TextureRef output)
 {
+    m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);  // transforms, palettes, visibility of this frame
     FrameResources resources;
     FrameServices services;
     FramePassContext fc{ m_device, graph, m_shaders, m_quality, m_scene, frame, resources, services,

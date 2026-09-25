@@ -1,5 +1,6 @@
 #include "unx/render/GpuScene.h"
 
+#include "unx/render/Shaders.h"
 #include "unx/scene/MaterialModel.h"
 
 #include <algorithm>
@@ -61,6 +62,14 @@ GpuScene::~GpuScene()
                        &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer })
         release(*b);
     for (auto& [name, b] : m_named) release(b);
+    DescriptorHeaps& h = m_device.descriptors();
+    for (uint32_t u : { m_instanceUav, m_paletteUav, m_prevPaletteUav })
+        if (u != gpu::kNone) h.freeResource(u);
+    for (Upload& u : m_uploads)
+    {
+        if (u.buffer) m_device.deferRelease(u.buffer);
+        if (u.srv != gpu::kNone) h.freeResource(u.srv);
+    }
 }
 
 void GpuScene::release(Buffer& b)
@@ -75,7 +84,7 @@ void GpuScene::release(Buffer& b)
     b = {};
 }
 
-GpuScene::Buffer GpuScene::createStructured(const void* data, size_t stride, size_t count, const wchar_t* name)
+GpuScene::Buffer GpuScene::createStructured(const void* data, size_t stride, size_t count, const wchar_t* name, bool uav)
 {
     // Empty streams still get one zeroed element so every published index is a valid descriptor.
     std::vector<uint8_t> zero;
@@ -95,7 +104,9 @@ GpuScene::Buffer GpuScene::createStructured(const void* data, size_t stride, siz
     d.Height = d.DepthOrArraySize = d.MipLevels = 1;
     d.SampleDesc.Count = 1;
     d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    check(m_device.d3d()->CreateCommittedResource3(&defaultHeap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&b.resource)),
+    D3D12_RESOURCE_DESC1 dd = d;
+    if (uav) dd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    check(m_device.d3d()->CreateCommittedResource3(&defaultHeap, D3D12_HEAP_FLAG_NONE, &dd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&b.resource)),
           "GpuScene buffer");
     b.resource->SetName(name);
     ComPtr<ID3D12Resource> staging;
@@ -268,7 +279,7 @@ void GpuScene::upload(const scene::Scene& s)
     for (Buffer* b : { &m_instanceBuffer, &m_meshBuffer, &m_submeshBuffer, &m_vertexBuffer, &m_indexBuffer, &m_materialBuffer, &m_materialRemapBuffer, &m_lightBuffer,
                        &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable })
         release(*b);
-    m_instanceBuffer = createStructured(m_instances.data(), sizeof(gpu::Instance), m_instances.size(), L"scene instances");
+    m_instanceBuffer = createStructured(m_instances.data(), sizeof(gpu::Instance), m_instances.size(), L"scene instances", true);
     m_meshBuffer = createStructured(m_meshes.data(), sizeof(gpu::Mesh), m_meshes.size(), L"scene meshes");
     m_submeshBuffer = createStructured(submeshes.data(), sizeof(gpu::Submesh), submeshes.size(), L"scene submeshes");
     m_vertexBuffer = createStructured(vertices.data(), sizeof(gpu::Vertex), vertices.size(), L"scene vertices");
@@ -277,8 +288,33 @@ void GpuScene::upload(const scene::Scene& s)
     m_materialRemapBuffer = createStructured(remap.data(), sizeof(uint32_t), remap.size(), L"scene material remap");
     m_lightBuffer = createStructured(lights.data(), sizeof(gpu::Light), lights.size(), L"scene lights");
     m_skinBuffer = createStructured(skin.data(), sizeof(gpu::SkinVertex), skin.size(), L"scene skin");
-    m_bonePalette = createStructured(palette.data(), sizeof(float4), palette.size(), L"bone palette");
-    m_prevBonePalette = createStructured(palette.data(), sizeof(float4), palette.size(), L"bone palette (previous)");
+    m_bonePalette = createStructured(palette.data(), sizeof(float4), palette.size(), L"bone palette", true);
+    m_prevBonePalette = createStructured(palette.data(), sizeof(float4), palette.size(), L"bone palette (previous)", true);
+    // Update state: mirrors, raw UAVs of the updatable buffers (SceneUpdate.hlsl).
+    m_palette = palette;
+    m_prevPalette = palette;
+    m_poses = s.skeletons;
+    m_transformFrame.assign(m_instances.size(), UINT64_MAX);
+    m_paletteFrame.assign(m_instances.size(), UINT64_MAX);
+    m_movedNow.clear();
+    m_movedBefore.clear();
+    m_posedNow.clear();
+    m_posedBefore.clear();
+    m_records.clear();
+    m_recordMarked.assign(m_instances.size(), 0);
+    DescriptorHeaps& h = m_device.descriptors();
+    auto rawUav = [&](uint32_t& index, const Buffer& b, uint64_t bytes) {
+        if (index == gpu::kNone) index = h.allocateResource();
+        D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = DXGI_FORMAT_R32_TYPELESS;
+        ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = (UINT)(bytes / 4);
+        ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        m_device.d3d()->CreateUnorderedAccessView(b.resource.Get(), nullptr, &ud, h.resourceCpu(index));
+    };
+    rawUav(m_instanceUav, m_instanceBuffer, (uint64_t)m_instanceBuffer.count * sizeof(gpu::Instance));
+    rawUav(m_paletteUav, m_bonePalette, (uint64_t)m_bonePalette.count * sizeof(float4));
+    rawUav(m_prevPaletteUav, m_prevBonePalette, (uint64_t)m_prevBonePalette.count * sizeof(float4));
     const std::vector<float>& table = scene::model::directionalAlbedoTable();
     m_albedoTable = createStructured(table.data(), sizeof(float), table.size(), L"material model E table");
     if (!m_clusterBuffer.resource) setClusters(ClusterData{});
@@ -317,6 +353,199 @@ void GpuScene::setClusters(ClusterData data)
         m_meshBuffer = createStructured(m_meshes.data(), sizeof(gpu::Mesh), m_meshes.size(), L"scene meshes");
     }
     ++m_revision;
+}
+
+void GpuScene::markRecord(uint32_t instance)
+{
+    if (m_recordMarked[instance]) return;
+    m_recordMarked[instance] = 1;
+    m_records.push_back(instance);
+}
+
+uint32_t GpuScene::paletteJoints(uint32_t instance) const
+{
+    const gpu::Instance& g = m_instances[instance];
+    return g.bonePalette == gpu::kNone ? 0u : (uint32_t)m_source->meshes[g.mesh].skin.inverseBind.size();
+}
+
+void GpuScene::writePalette(uint32_t instance, std::vector<float4>& palette)
+{
+    const scene::Instance& in = m_source->instances[instance];
+    const scene::Mesh& mesh = m_source->meshes[in.mesh];
+    const scene::Skeleton& pose = m_poses[in.skeleton];
+    const uint32_t first = m_instances[instance].bonePalette;
+    for (size_t j = 0; j < mesh.skin.inverseBind.size(); ++j) rows(compose(pose.jointToModel[j], mesh.skin.inverseBind[j]), &palette[(first + j) * 3]);
+}
+
+void GpuScene::updateTransforms(uint64_t frameIndex, std::span<const InstanceTransformUpdate> updates)
+{
+    for (const InstanceTransformUpdate& u : updates)
+    {
+        if (u.instance >= m_instances.size()) fail("GpuScene::updateTransforms: instance %u of %zu", u.instance, m_instances.size());
+        gpu::Instance& g = m_instances[u.instance];
+        if (m_transformFrame[u.instance] != frameIndex)
+        {
+            std::memcpy(g.prevObjectToWorld, g.objectToWorld, sizeof g.objectToWorld);  // the previous rendered frame's
+            ++g.transformRevision;
+            m_transformFrame[u.instance] = frameIndex;
+            m_movedNow.push_back(u.instance);
+        }
+        rows(u.objectToWorld, g.objectToWorld);
+        markRecord(u.instance);
+    }
+}
+
+void GpuScene::updateSkeleton(uint64_t frameIndex, uint32_t skeleton, std::span<const float3x4> jointToModel)
+{
+    if (skeleton >= m_poses.size()) fail("GpuScene::updateSkeleton: skeleton %u of %zu", skeleton, m_poses.size());
+    if (jointToModel.size() != m_poses[skeleton].jointToModel.size())
+        fail("GpuScene::updateSkeleton: %zu joints for skeleton '%s' with %zu", jointToModel.size(), m_poses[skeleton].name.c_str(), m_poses[skeleton].jointToModel.size());
+    m_poses[skeleton].jointToModel.assign(jointToModel.begin(), jointToModel.end());
+    for (uint32_t i = 0; i < m_instances.size(); ++i)
+    {
+        gpu::Instance& g = m_instances[i];
+        if (g.bonePalette == gpu::kNone || m_source->instances[i].skeleton != skeleton) continue;
+        if (m_paletteFrame[i] != frameIndex)
+        {
+            const uint32_t first = g.bonePalette * 3, n = paletteJoints(i) * 3;
+            std::copy(m_palette.begin() + first, m_palette.begin() + first + n, m_prevPalette.begin() + first);
+            ++g.deformRevision;
+            m_paletteFrame[i] = frameIndex;
+            m_posedNow.push_back(i);
+            markRecord(i);
+        }
+        writePalette(i, m_palette);
+    }
+}
+
+void GpuScene::setInstanceVisible(uint32_t instance, bool visible)
+{
+    if (instance >= m_instances.size()) fail("GpuScene::setInstanceVisible: instance %u of %zu", instance, m_instances.size());
+    gpu::Instance& g = m_instances[instance];
+    const uint32_t flags = visible ? g.flags & ~gpu::kInstanceHidden : g.flags | gpu::kInstanceHidden;
+    if (flags == g.flags) return;
+    g.flags = flags;
+    markRecord(instance);
+}
+
+void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, ShaderLibrary& shaders)
+{
+    // Instances changed in the previous frame and not in this one settle: previous = current.
+    for (uint32_t i : m_movedBefore)
+        if (m_transformFrame[i] != frameIndex)
+        {
+            std::memcpy(m_instances[i].prevObjectToWorld, m_instances[i].objectToWorld, sizeof m_instances[i].objectToWorld);
+            markRecord(i);
+        }
+    std::vector<uint32_t> settledPalettes;
+    for (uint32_t i : m_posedBefore)
+        if (m_paletteFrame[i] != frameIndex)
+        {
+            const uint32_t first = m_instances[i].bonePalette * 3, n = paletteJoints(i) * 3;
+            std::copy(m_palette.begin() + first, m_palette.begin() + first + n, m_prevPalette.begin() + first);
+            settledPalettes.push_back(i);
+        }
+    m_movedBefore.swap(m_movedNow);
+    m_movedNow.clear();
+    m_posedBefore.swap(m_posedNow);
+    m_posedNow.clear();
+
+    // 16-byte elements: (target << 28 | element) headers, then payloads (SceneUpdate.hlsl).
+    std::vector<uint32_t> headers;
+    std::vector<float4> payload;
+    constexpr uint32_t kRecordElements = sizeof(gpu::Instance) / 16;
+    static_assert(sizeof(gpu::Instance) % 16 == 0);
+    for (uint32_t i : m_records)
+    {
+        const float4* src = reinterpret_cast<const float4*>(&m_instances[i]);
+        for (uint32_t k = 0; k < kRecordElements; ++k)
+        {
+            headers.push_back(i * kRecordElements + k);
+            payload.push_back(src[k]);
+        }
+        m_recordMarked[i] = 0;
+    }
+    auto addRows = [&](uint32_t target, const std::vector<float4>& rowsOf, uint32_t instance) {
+        const uint32_t first = m_instances[instance].bonePalette * 3, n = paletteJoints(instance) * 3;
+        for (uint32_t k = 0; k < n; ++k)
+        {
+            headers.push_back(target << 28 | (first + k));
+            payload.push_back(rowsOf[first + k]);
+        }
+    };
+    for (uint32_t i : m_posedBefore)  // posed in this frame (swapped above)
+    {
+        addRows(1, m_palette, i);
+        addRows(2, m_prevPalette, i);
+    }
+    for (uint32_t i : settledPalettes) addRows(2, m_prevPalette, i);
+    m_records.clear();
+    if (headers.empty()) return;
+    if (headers.size() >= (1u << 28) || m_instances.size() * kRecordElements >= (1u << 28)) fail("GpuScene::flushUpdates: element index beyond 28 bits");
+
+    // Upload slot of this frame (grown when needed; the caller waited for the frame that used it last).
+    if (m_uploads.size() < framesInFlight) m_uploads.resize(framesInFlight);
+    Upload& u = m_uploads[frameIndex % framesInFlight];
+    const uint64_t headerBytes = (headers.size() * 4 + 15) & ~uint64_t(15);
+    const uint64_t bytes = headerBytes + payload.size() * 16;
+    DescriptorHeaps& h = m_device.descriptors();
+    if (u.bytes < bytes)
+    {
+        if (u.buffer) m_device.deferRelease(u.buffer);
+        u.bytes = std::max<uint64_t>(bytes + bytes / 2, 64 * 1024);
+        D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_UPLOAD };
+        D3D12_RESOURCE_DESC1 d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        d.Width = u.bytes;
+        d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+        d.SampleDesc.Count = 1;
+        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(m_device.d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&u.buffer)),
+              "GpuScene update upload");
+        u.buffer->SetName(L"scene update upload");
+        D3D12_RANGE none{ 0, 0 };
+        check(u.buffer->Map(0, &none, reinterpret_cast<void**>(&u.mapped)), "map scene update upload");
+        if (u.srv == gpu::kNone) u.srv = h.allocateResource();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = DXGI_FORMAT_R32_TYPELESS;
+        sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Buffer.NumElements = (UINT)(u.bytes / 4);
+        sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        m_device.d3d()->CreateShaderResourceView(u.buffer.Get(), &sd, h.resourceCpu(u.srv));
+    }
+    std::memcpy(u.mapped, headers.data(), headers.size() * 4);
+    std::memcpy(u.mapped + headerBytes, payload.data(), payload.size() * 16);
+
+    // Graphics queue, after every queue's earlier work (the previous frame may still read the scene on another queue);
+    // every other queue then waits for the update before this frame's work.
+    Queue& graphics = m_device.queue(QueueType::Graphics);
+    for (uint32_t q = 0; q < kQueueTypeCount; ++q)
+        if (q != (uint32_t)QueueType::Graphics && m_device.queue((QueueType)q).lastSignaled())
+            graphics.waitGpu(m_device.queue((QueueType)q), m_device.queue((QueueType)q).lastSignaled());
+    ID3D12PipelineState* pso = shaders.compute("Passes/Common/SceneUpdate");
+    CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
+    ID3D12GraphicsCommandList7* cmd = cl.list.Get();
+    ID3D12Resource* targets[3] = { m_instanceBuffer.resource.Get(), m_bonePalette.resource.Get(), m_prevBonePalette.resource.Get() };
+    D3D12_BUFFER_BARRIER before[3], after[3];
+    for (uint32_t k = 0; k < 3; ++k)
+    {
+        // Command-list start: earlier submissions on this queue are complete; the other queues were waited for above.
+        before[k] = { D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, targets[k], 0, UINT64_MAX };
+        after[k] = { D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_ALL_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, D3D12_BARRIER_ACCESS_SHADER_RESOURCE, targets[k], 0, UINT64_MAX };
+    }
+    D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_BUFFER, 3 };
+    group.pBufferBarriers = before;
+    cmd->Barrier(1, &group);
+    cmd->SetPipelineState(pso);  // heaps and root signature: bound by acquireCommandList
+    const uint32_t k[8] = { u.srv, (uint32_t)headers.size(), m_instanceUav, m_paletteUav, m_prevPaletteUav, 0, 0, 0 };
+    cmd->SetComputeRoot32BitConstants(0, 8, k, 0);
+    cmd->Dispatch((uint32_t)((headers.size() + 63) / 64), 1, 1);
+    group.pBufferBarriers = after;
+    cmd->Barrier(1, &group);
+    const uint64_t fence = m_device.submit(cl);
+    for (uint32_t q = 0; q < kQueueTypeCount; ++q)
+        if (q != (uint32_t)QueueType::Graphics) m_device.queue((QueueType)q).waitGpu(graphics, fence);
 }
 
 void GpuScene::fill(gpu::FrameConstants& f) const
@@ -358,6 +587,7 @@ ID3D12Resource* GpuScene::buffer(const char* name) const
     if (n == "clusterTriangles") return m_clusterTriangleBuffer.resource.Get();
     if (n == "skin") return m_skinBuffer.resource.Get();
     if (n == "bonePalette") return m_bonePalette.resource.Get();
+    if (n == "prevBonePalette") return m_prevBonePalette.resource.Get();
     if (n == "lodLevels") return m_lodLevelBuffer.resource.Get();
     if (n == "lodLevelClusters") return m_lodLevelClusterBuffer.resource.Get();
     for (const auto& [key, b] : m_named)

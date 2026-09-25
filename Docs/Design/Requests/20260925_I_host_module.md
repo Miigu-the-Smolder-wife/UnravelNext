@@ -72,3 +72,10 @@ void GpuScene::setInstanceVisible(uint32_t instance, bool visible);
 - **A 반영**: `cmake/Tracks.cmake`(`UNX_ALL_TRACKS`에 I, `UNX_TRACK_OF_Host I`), 최상위 `CMakeLists.txt`(도구 폴더 뒤 = `unx_renderer`·`unx_add_executable`·도구 타깃이 모두 정의된 뒤, I가 켜졌고 `Native/Host/CMakeLists.txt`가 있을 때만 `add_subdirectory(Native/Host)`), `Tools/CI/Build.ps1 -Track I` → `build/I`, 트랙 `V;M;S;R;I`. INTERFACES 1절 표 I 행, 2.5절. `-Tracks "I"`(나머지는 코어 빈 진입점)도 된다. 코어 빌드(`-Track core`)로 구성·빌드 확인.
 - **B 첫 항목 반영**: `GpuInstance::prevObjectToWorld` = 직전 렌더 프레임의 objectToWorld(`GpuSceneLayout.h` 주석, INTERFACES 12절 v1.6).
 - **B의 API(`updateTransforms`, `updateSkeleton`, `setInstanceVisible`)**: S의 급한 요청(타일 국소 래스터) 다음에 넣는다. 그 전까지 호스트는 `upload`만으로 정적 장면을 그릴 수 있다.
+
+### 결과 추가 (코어, v1.8): B 반영
+
+- `GpuScene::updateTransforms(frameIndex, span<InstanceTransformUpdate>)`, `updateSkeleton(frameIndex, skeleton, span<float3x4>)`, `setInstanceVisible(instance, visible)`: 요청한 이름과 뜻 그대로다. `FrameRenderer::record`가 맨 처음 `flushUpdates`로 반영한다. 방식: 그래픽 큐 산포 커널, 업로드 링 슬롯 = frameIndex % framesInFlight, 다른 큐는 그 fence를 기다린다.
+- 호출 규칙: 렌더 프레임 f를 기록하기 전에 같은 f로 부른다. 한 프레임에 같은 인스턴스를 여러 번 갱신하면 마지막 값을 쓰고, prev와 리비전은 한 번만 바뀐다.
+- 숨김 = `gpu::kInstanceHidden`(flags bit 31). V 인스턴스 컬링은 반영했다. R의 TLAS는 R이 반영한다(조율 세션 전달).
+- 검증 [실측]: 단위 테스트 `gpu_scene_frame_updates`(GPU 판독). 이동, 정착(prev = current), 한 프레임 이중 갱신, 리비전, 숨김/표시, 본 팔레트와 이전 팔레트를 확인했다. 단위 18/18, V 4/4, 디버그 레이어 오류 0.

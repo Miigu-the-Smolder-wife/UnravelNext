@@ -100,6 +100,7 @@ struct GpuVisibleCluster
 #define INSTANCE_DYNAMIC (1u << 1)
 #define INSTANCE_SKINNED (1u << 2)
 #define INSTANCE_WIND (1u << 3)
+#define INSTANCE_HIDDEN (1u << 31)  // gpu::kInstanceHidden: skipped by every reader (GpuScene::setInstanceVisible)
 // scene::MaterialClass
 #define MATERIAL_STANDARD 0u
 #define MATERIAL_FOLIAGE 1u

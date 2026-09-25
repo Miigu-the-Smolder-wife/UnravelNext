@@ -530,6 +530,101 @@ UNX_TEST(reflection_view_geometry)
     CHECK(std::fabs(c.y - ((b.y - yt) * 2 / (270.f / 1080 * 2) + 1)) < 1e-3f);
 }
 
+UNX_TEST(gpu_scene_frame_updates)
+{
+    // GpuScene per-frame updates (INTERFACES_KO.md 6.3 v1.8): previous = the previous rendered frame, settling to
+    // current once an instance stops, revisions once per frame, hidden flag, bone palettes, read back from the GPU.
+    scene::Scene s = tinyScene();
+    scene::Mesh skinned = s.meshes[0];
+    skinned.name = "skinned quad";
+    skinned.skin.joints.assign(4 * skinned.positions.size(), 0);
+    skinned.skin.weights.clear();
+    for (size_t v = 0; v < skinned.positions.size(); ++v) skinned.skin.weights.insert(skinned.skin.weights.end(), { 1.0f, 0.0f, 0.0f, 0.0f });
+    skinned.skin.inverseBind = { float3x4{} };
+    s.meshes.push_back(skinned);
+    s.skeletons.push_back({ "one joint", { float3x4{} } });
+    scene::Instance a = s.instances[0];
+    a.mesh = 1;
+    a.flags |= scene::InstanceSkinned;
+    a.skeleton = 0;
+    s.instances.push_back(a);
+    GpuScene gs(testDevice());
+    gs.upload(s);
+    const uint32_t revision0 = gs.instances()[0].transformRevision, deform0 = gs.instances()[1].deformRevision;
+
+    auto translation = [](float x, float y, float z) {
+        float3x4 m;
+        m.m[0][3] = x;
+        m.m[1][3] = y;
+        m.m[2][3] = z;
+        return m;
+    };
+    struct Gpu
+    {
+        std::vector<gpu::Instance> instances;
+        std::vector<float4> palette, prevPalette;
+    };
+    auto readBack = [&]() {
+        Gpu out;
+        const uint64_t ib = s.instances.size() * sizeof(gpu::Instance), pb = 3 * sizeof(float4);
+        D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = ib + 2 * pb;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> rb;
+        check(testDevice().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)),
+              "readback");
+        CommandList cl = testDevice().acquireCommandList(QueueType::Graphics);
+        cl.list->CopyBufferRegion(rb.Get(), 0, gs.buffer("instances"), 0, ib);
+        cl.list->CopyBufferRegion(rb.Get(), ib, gs.buffer("bonePalette"), 0, pb);
+        cl.list->CopyBufferRegion(rb.Get(), ib + pb, gs.buffer("prevBonePalette"), 0, pb);
+        testDevice().queue(QueueType::Graphics).waitCpu(testDevice().submit(cl));
+        uint8_t* p = nullptr;
+        check(rb->Map(0, nullptr, reinterpret_cast<void**>(&p)), "map");
+        out.instances.resize(s.instances.size());
+        out.palette.resize(3);
+        out.prevPalette.resize(3);
+        std::memcpy(out.instances.data(), p, ib);
+        std::memcpy(out.palette.data(), p + ib, pb);
+        std::memcpy(out.prevPalette.data(), p + ib + pb, pb);
+        rb->Unmap(0, nullptr);
+        return out;
+    };
+    auto translationOf = [](const float4 rows[3]) { return float3{ rows[0].w, rows[1].w, rows[2].w }; };
+    auto same = [](float3 a, float3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; };
+
+    // Frame 0: instance 0 moves, the skeleton poses, instance 1 is hidden.
+    const InstanceTransformUpdate move0[] = { { 0, translation(1, 0, 0) } };
+    gs.updateTransforms(0, move0);
+    const float3x4 pose0[] = { translation(0, 2, 0) };
+    gs.updateSkeleton(0, 0, pose0);
+    gs.setInstanceVisible(1, false);
+    gs.flushUpdates(0, 2, shaders());
+    Gpu g = readBack();
+    CHECK(same(translationOf(g.instances[0].objectToWorld), { 1, 0, 0 }) && same(translationOf(g.instances[0].prevObjectToWorld), { 0, 0, 0 }));
+    CHECK(g.instances[0].transformRevision == revision0 + 1 && (g.instances[1].flags & gpu::kInstanceHidden) != 0);
+    CHECK(g.instances[1].deformRevision == deform0 + 1 && g.palette[1].w == 2 && g.prevPalette[1].w == 0);
+
+    // Frame 1: nothing changes: previous settles to current (zero motion), revisions stay.
+    gs.setInstanceVisible(1, true);
+    gs.flushUpdates(1, 2, shaders());
+    g = readBack();
+    CHECK(same(translationOf(g.instances[0].prevObjectToWorld), { 1, 0, 0 }) && g.instances[0].transformRevision == revision0 + 1);
+    CHECK((g.instances[1].flags & gpu::kInstanceHidden) == 0 && g.prevPalette[1].w == 2 && g.palette[1].w == 2);
+
+    // Frame 2: two updates in one frame: previous = frame 1's transform, one revision step.
+    const InstanceTransformUpdate move2[] = { { 0, translation(2, 0, 0) }, { 0, translation(3, 0, 0) } };
+    gs.updateTransforms(2, move2);
+    gs.flushUpdates(2, 2, shaders());
+    g = readBack();
+    CHECK(same(translationOf(g.instances[0].objectToWorld), { 3, 0, 0 }) && same(translationOf(g.instances[0].prevObjectToWorld), { 1, 0, 0 }));
+    CHECK(g.instances[0].transformRevision == revision0 + 2);
+    CHECK(same(translationOf(gs.instances()[0].objectToWorld), { 3, 0, 0 }));  // CPU mirror
+}
+
 UNX_TEST(frame_renderer_records_with_track_stubs)
 {
     QualityConfig q = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
