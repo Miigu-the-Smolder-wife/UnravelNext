@@ -553,6 +553,197 @@ void testScene(TestFrame& tf, Report& report)
     sceneCamera();
     sunCamera();
 }
+
+// ---------------------------------------------------------------- 6. local lights through a froxel list
+// S's list format (FroxelCommon.hlsli) with one froxel holding every light, and a shadow-visibility target whose slots
+// differ (slot 1 = 128/255, slot 2 = 1, slot 3 = 64/255): the kernel must give the n-th shadow-casting light of the
+// list slot n and leave the fourth caster unshadowed (7.3). Sun off. Every sampled pixel against the CPU model.
+void testLocalLights(TestFrame& tf, Report& report)
+{
+    scene::Scene s;
+    s.name = "local lights test";
+    scene::Material ground;
+    ground.name = "ground";
+    ground.baseColor = { 0.6f, 0.55f, 0.5f };
+    ground.roughness = 0.4f;
+    s.materials.push_back(ground);
+    scene::Material metal;
+    metal.name = "steel";
+    metal.baseColor = { 0.56f, 0.57f, 0.58f };
+    metal.roughness = 0.25f;
+    metal.metallic = 1;
+    s.materials.push_back(metal);
+    scene::Material leaf;
+    leaf.name = "leaf";
+    leaf.cls = scene::MaterialClass::Foliage;
+    leaf.baseColor = { 0.25f, 0.5f, 0.1f };
+    leaf.roughness = 0.5f;
+    leaf.transmission = 0.35f;
+    leaf.twoSided = true;
+    s.materials.push_back(leaf);
+    scene::Instance plane;
+    plane.mesh = addPlane(s, 30, 0);
+    s.instances.push_back(plane);
+    scene::Instance ball;
+    ball.mesh = addSphere(s, 0.8f, 40, 80, 1);
+    ball.transform = float3x4::translation({ 0.3f, 0.8f, 0 });
+    s.instances.push_back(ball);
+    scene::Instance card;
+    card.mesh = addPlane(s, 1.2f, 2);
+    card.transform.m[1][1] = 0;
+    card.transform.m[1][2] = -1;
+    card.transform.m[2][1] = 1;
+    card.transform.m[2][2] = 0;
+    card.transform.m[0][3] = -1.6f;
+    card.transform.m[1][3] = 0.8f;
+    s.instances.push_back(card);
+    s.sun.illuminance = 0;
+    auto light = [&](scene::LightType t, float3 p, float3 fwd, float intensity, float range, bool shadow) {
+        scene::Light l;
+        l.type = t;
+        l.position = p;
+        l.forward = normalize(fwd);
+        l.intensity = intensity;
+        l.range = range;
+        l.castShadow = shadow;
+        l.spotInner = 0.3f;
+        l.spotOuter = 0.65f;
+        l.color = { 1.0f, 0.9f, 0.8f };
+        s.lights.push_back(l);
+    };
+    light(scene::LightType::Point, { 1, 2, 1 }, { 0, -1, 0 }, 500, 10, true);             // caster 1 -> slot 1
+    light(scene::LightType::Spot, { -1.5f, 3, 0.5f }, { 0.2f, -1, -0.1f }, 2000, 12, true);  // caster 2 -> slot 2
+    light(scene::LightType::Point, { 0, 0.4f, 2.5f }, { 0, -1, 0 }, 80, 6, false);
+    light(scene::LightType::Spot, { 2, 1.5f, -1 }, { -1, -0.3f, 0.5f }, 1500, 8, true);   // caster 3 -> slot 3
+    light(scene::LightType::Point, { -1.6f, 1.2f, -1.5f }, { 0, -1, 0 }, 300, 7, true);   // caster 4: beyond the slots
+    scene::Camera cam;
+    cam.name = "lights";
+    cam.position = { 0.5f, 2.2f, 5 };
+    cam.forward = normalize(float3{ -0.1f, -0.35f, -1 });
+    cam.ev100 = 5;
+    s.cameras.push_back(cam);
+    tf.setScene(s);
+
+    // S's froxel list buffer: header, one froxel (first entry 0, count 5), indices 0..4 as 16-bit pairs.
+    std::vector<uint32_t> list(64, 0);
+    const float nearM = 0.01f, farM = 1000.0f, logRatio = std::log2(farM / nearM);
+    list[0] = 1;
+    list[1] = 1;
+    list[2] = 1;
+    list[3] = 4096;
+    std::memcpy(&list[4], &nearM, 4);
+    std::memcpy(&list[5], &farM, 4);
+    std::memcpy(&list[6], &logRatio, 4);
+    list[8] = 64;   // headerBase
+    list[9] = 128;  // indexBase
+    list[10] = 64;  // indexStride
+    list[11] = 5;   // indexCount
+    list[16] = (0u << 6) | 5u;
+    list[32] = 0 | (1u << 16);
+    list[33] = 2 | (3u << 16);
+    list[34] = 4;
+    ComPtr<ID3D12Resource> listBuffer = uploadStatic(tf.device, list.data(), list.size() * 4, L"test froxel list");
+    const uint32_t slot[4] = { 255, 128, 255, 64 };
+    const double slotVisibility[5] = { 128 / 255.0, 1.0, 1.0, 64 / 255.0, 1.0 };  // per light, list order
+
+    const uint32_t W = 960, H = 540;
+    const uint32_t packed = slot[0] | (slot[1] << 8) | (slot[2] << 16) | (slot[3] << 24);
+    std::vector<uint32_t> shadowTexels((size_t)TestFrame::rowPitch(W, 4) / 4 * H, packed);
+    ComPtr<ID3D12Resource> shadowStaging = makeBuffer(tf.device, shadowTexels.size() * 4, D3D12_HEAP_TYPE_UPLOAD);
+    {
+        void* p = nullptr;
+        D3D12_RANGE none{ 0, 0 };
+        check(shadowStaging->Map(0, &none, &p), "map shadow staging");
+        std::memcpy(p, shadowTexels.data(), shadowTexels.size() * 4);
+        shadowStaging->Unmap(0, nullptr);
+    }
+    std::shared_ptr<std::vector<uint8_t>> gb, words, depth, lin;
+    ViewDesc desc;
+    tf.frame.outputLinearHdr = true;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, W, H, 0);
+        desc = v.view;
+        v.color = fc.graph.createTexture({ "m.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+        tf.vis.record(fc, v);
+        tracks::materialResolve(fc, v);
+        fc.resources.froxelLights = fc.graph.importBuffer(listBuffer.Get(), { "test froxel lists", list.size() * 4, 0 });
+        v.shadowVisibility = fc.graph.createTexture({ "test shadow visibility", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
+        const TextureRef sv = v.shadowVisibility;
+        fc.graph.addPass("m.test.shadow.upload", QueueType::Graphics, [&](PassBuilder& b) { b.use(sv, Use::CopyDst); },
+                         [&, sv, W, H](PassContext& c) {
+                             D3D12_TEXTURE_COPY_LOCATION dst{ c.resource(sv), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                             dst.SubresourceIndex = 0;
+                             D3D12_TEXTURE_COPY_LOCATION src{ shadowStaging.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+                             src.PlacedFootprint.Offset = 0;
+                             src.PlacedFootprint.Footprint = { DXGI_FORMAT_R32_UINT, W, H, 1, TestFrame::rowPitch(W, 4) };
+                             c.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                         });
+        tracks::shading(fc, v);
+        gb = tf.readback(fc, v.gbuffer);
+        words = tf.readback(fc, material::resolveOutputs(fc, v).materialWord);
+        depth = tf.readback(fc, v.depth);
+        lin = tf.readback(fc, v.color);
+    });
+    tf.frame.outputLinearHdr = false;
+
+    const double exposure = 1.0 / (1.2 * std::exp2(5.0));
+    double worst = 0;
+    uint32_t checked = 0, lit = 0, back = 0;
+    for (uint32_t y = 0; y < H; y += 3)
+        for (uint32_t x = 0; x < W; x += 3)
+        {
+            const uint32_t word = texelOf<uint32_t>(*words, W, x, y);
+            if ((word & 0xFFFF) == 0xFFFF) continue;
+            const scene::Material& mat = s.materials[word & 0xFFFF];
+            const uint2 p = texelOf<uint2>(*gb, W, x, y);
+            model::Surface su;
+            su.cls = mat.cls;
+            su.baseColor = { (float)srgbToLinear((p.y & 0xFF) / 255.0), (float)srgbToLinear(((p.y >> 8) & 0xFF) / 255.0), (float)srgbToLinear(((p.y >> 16) & 0xFF) / 255.0) };
+            su.roughness = (p.y >> 24) / 255.0f;
+            su.metallic = ((word >> 16) & 0xFF) / 255.0f;
+            su.specular = mat.specular;
+            su.transmission = mat.transmission;
+            const float3 n = octDecode(p.x);
+            double D[3], Dx[3];
+            pixelRay(desc, x + 0.5, y + 0.5, D, Dx);
+            const float3 v = normalize(float3{ (float)-D[0], (float)-D[1], (float)-D[2] });
+            const double z = desc.nearPlane / std::max((double)texelOf<float>(*depth, W, x, y), 1e-30);
+            const double P[3] = { desc.position.x + D[0] * z, desc.position.y + D[1] * z, desc.position.z + D[2] * z };
+            double sum[3] = {};
+            for (size_t i = 0; i < s.lights.size(); ++i)
+            {
+                const scene::Light& l = s.lights[i];
+                const double t[3] = { l.position.x - P[0], l.position.y - P[1], l.position.z - P[2] };
+                const double d2 = t[0] * t[0] + t[1] * t[1] + t[2] * t[2], d = std::sqrt(d2);
+                const float3 L{ (float)(t[0] / d), (float)(t[1] / d), (float)(t[2] / d) };
+                const double r = d / l.range, w = std::pow(std::clamp(1 - r * r * r * r, 0.0, 1.0), 2);
+                double I = l.intensity * w / d2;
+                if (l.type == scene::LightType::Spot)
+                {
+                    const double ci = std::cos(l.spotInner), co = std::cos(l.spotOuter), scale = 1 / std::max(ci - co, 1e-4), off = -co * scale;
+                    const double sp = std::clamp(-(L.x * l.forward.x + L.y * l.forward.y + L.z * l.forward.z) * scale + off, 0.0, 1.0);
+                    I *= sp * sp;
+                }
+                const float cosL = dot(n, L), NoV = dot(n, v);
+                if (!(NoV * cosL > 0) && !(su.cls == scene::MaterialClass::Foliage && NoV * cosL < 0)) continue;
+                if (NoV <= 0 && su.cls != scene::MaterialClass::Foliage) continue;
+                const float3 f = model::evaluate(su, n, v, L);
+                if (NoV * cosL < 0) ++back;
+                else ++lit;
+                for (int k = 0; k < 3; ++k) sum[k] += (&f.x)[k] * (&l.color.x)[k] * I * std::fabs(cosL) * slotVisibility[i];
+            }
+            const float4 got = texelOf<float4>(*lin, W, x, y);
+            const double e[3] = { sum[0] * exposure, sum[1] * exposure, sum[2] * exposure };
+            const double scale = std::max({ e[0], e[1], e[2], 1e-2 });
+            const double err = std::max({ std::abs(got.x - e[0]), std::abs(got.y - e[1]), std::abs(got.z - e[2]) }) / scale;
+            if (err > worst && err > 5e-3) logf("  lights px (%u,%u) got (%.5f %.5f %.5f) expected (%.5f %.5f %.5f)\n", x, y, got.x, got.y, got.z, e[0], e[1], e[2]);
+            worst = std::max(worst, err);
+            ++checked;
+        }
+    logf("local lights: %u pixels, %u light-surface pairs reflected, %u transmitted through leaves \n", checked, lit, back);
+    report(worst < 5e-3, "local lights [point, spot, shadow slots by list order] vs CPU model (rel.)", worst, 5e-3);
+    report(back > 50, "local lights: back-lit leaf pairs present", back, 50);
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -567,6 +758,7 @@ int main(int argc, char** argv)
         TestFrame tf(debugLayer);
         testScene(tf, report);
         testSunSpecular(tf, report);
+        testLocalLights(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

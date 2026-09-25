@@ -235,6 +235,26 @@ float shSunDiskCoverage(float3 D, float3 Dx, float3 Dy)
     return shHalfPlaneCoverage(-g / gl, (g_sunAngularRadius - angle) / gl);
 }
 
+// ---------------------------------------------------------------- local lights (INTERFACES 8.2)
+// Illuminance (lux x colour) at a surface facing a punctual light: I / d^2 w(d), spots x saturate(cos spotScale +
+// spotOffset)^2 on the angle from the light's axis; 'toLight' = light position - surface point (camera-relative
+// difference), 'l' = unit direction to the light.
+float3 shPunctualIlluminance(GpuLight light, float3 toLight, out float3 l)
+{
+    const float d2 = dot(toLight, toLight);
+    const float d = sqrt(d2);
+    l = toLight / max(d, 1e-9);
+    const float x = d / max(light.range, 1e-6), x2 = x * x;
+    const float w = saturate(1 - x2 * x2);
+    float i = light.intensity * w * w / max(d2, 1e-12);
+    if (lightType(light) == LIGHT_SPOT)
+    {
+        const float sp = saturate(dot(-l, light.forward) * light.spotScale + light.spotOffset);
+        i *= sp * sp;
+    }
+    return light.color * i;
+}
+
 // ---------------------------------------------------------------- output (INTERFACES 7.5, 8.4)
 // Khronos PBR Neutral (reference implementation constants), input linear Rec.709 radiance x exposure.
 float3 shPbrNeutral(float3 color)

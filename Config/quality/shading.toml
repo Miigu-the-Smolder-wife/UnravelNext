@@ -5,5 +5,5 @@ output_encoding = "srgb"          # RGB10A2 display output
 analytic_lights_max = 16          # per froxel list beyond which the rest merge into froxel irradiance (error logged)
 # Cost attribution only (gate --set): bit mask of shading terms left out, 0 in every gate and image. 1 = sun disk
 # regimes below point evaluation (point instead), 2 = GI probe irradiance, 4 = reflection / K-path radiance,
-# 8 = aerial perspective, 16 = sun.
+# 8 = aerial perspective and froxel air, 16 = sun, 32 = local lights.
 experiment_disable = 0

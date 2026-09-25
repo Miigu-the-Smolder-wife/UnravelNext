@@ -157,6 +157,9 @@ void shade(FramePassContext& fc, ViewResources& view)
     ID3D12PipelineState* sky = fc.shaders.compute(linear ? "Passes/Shading/ShadeSky.OUTPUT1" : "Passes/Shading/ShadeSky.OUTPUT0");
     const FrameResources r = fc.resources;
     const bool atmosphere = r.transmittanceLut.valid() && r.multiScatterLut.valid() && r.skyViewLut.valid() && r.aerialPerspective.valid();
+    // The froxel grid is the main view's: planar reflection views read neither its lists nor its volume.
+    const bool froxelLists = r.froxelLights.valid() && view.view.kind == gpu::ViewKind::Main;
+    const bool froxelVolume = froxelLists && r.froxels.valid();
     const ViewResources v = view;
     const uint32_t tileCount = o.tilesX * o.tilesY, lutSrv = lut.srv, experiment = experimentMask(fc.quality);
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
@@ -177,32 +180,35 @@ void shade(FramePassContext& fc, ViewResources& view)
                          if (r.giCache.valid() && v.view.kind == gpu::ViewKind::PlanarReflection) b.use(r.giCache, Use::SrvCompute);
                          if (atmosphere)
                              for (TextureRef t : { r.transmittanceLut, r.multiScatterLut, r.skyViewLut, r.aerialPerspective }) b.use(t, Use::SrvCompute);
+                         if (froxelLists) b.use(r.froxelLights, Use::SrvCompute);
+                         if (froxelVolume) b.use(r.froxels, Use::SrvCompute);
                      },
                      [=](PassContext& c) {
                          const uint32_t none = gpu::kNone;
                          const uint32_t atm[4] = { atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none,
                                                    atmosphere ? c.srv(r.skyViewLut) : none, atmosphere ? c.srv(r.aerialPerspective) : none };
+                         const uint32_t fx[2] = { froxelLists ? c.srv(r.froxelLights) : none, froxelVolume ? c.srv(r.froxels) : none };
                          c.bindFrameConstants(cb);
                          ID3D12Resource* args = c.resource(o.tileArgs);
                          // Sky tiles.
                          {
-                             const uint32_t k[8] = { c.srv(o.materialWord), c.uav(v.color), c.srv(o.tiles), (uint32_t)material::ShadeClass::Sky * tileCount,
-                                                     atm[0], atm[1], atm[2], atm[3] };
+                             const uint32_t k[10] = { c.srv(o.materialWord), c.uav(v.color), c.srv(o.tiles), (uint32_t)material::ShadeClass::Sky * tileCount,
+                                                      atm[0], atm[1], atm[2], atm[3], fx[0], fx[1] };
                              c.cmd->SetPipelineState(sky);
-                             c.computeConstants(k, 8);
+                             c.computeConstants(k, 10);
                              c.cmd->ExecuteIndirect(signature, 1, args, (uint32_t)material::ShadeClass::Sky * sizeof(D3D12_DISPATCH_ARGUMENTS), nullptr, 0);
                          }
                          // Surface classes (Subsurface and Water use the opaque model until theirs are defined).
                          c.cmd->SetPipelineState(opaque);
                          for (material::ShadeClass cls : { material::ShadeClass::Opaque, material::ShadeClass::Subsurface, material::ShadeClass::Water })
                          {
-                             const uint32_t k[19] = { c.srv(v.gbuffer), c.srv(v.depth), c.srv(o.materialWord), c.uav(v.color),
+                             const uint32_t k[22] = { c.srv(v.gbuffer), c.srv(v.depth), c.srv(o.materialWord), c.uav(v.color),
                                                       c.srv(o.tiles), (uint32_t)cls * tileCount, (uint32_t)cls, o.emissive.valid() ? c.srv(o.emissive) : none,
                                                       v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                                       v.reflection.valid() ? c.srv(v.reflection) : none,
                                                       (r.giCache.valid() && v.view.kind == gpu::ViewKind::PlanarReflection) ? c.srv(r.giCache) : none,
-                                                      atm[0], atm[1], atm[2], atm[3], lutSrv, o.textureTableSrv, experiment };
-                             c.computeConstants(k, 19);
+                                                      atm[0], atm[1], atm[2], atm[3], lutSrv, o.textureTableSrv, experiment, 0, fx[0], fx[1] };
+                             c.computeConstants(k, 22);
                              c.cmd->ExecuteIndirect(signature, 1, args, (uint32_t)cls * sizeof(D3D12_DISPATCH_ARGUMENTS), nullptr, 0);
                          }
                      });

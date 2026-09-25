@@ -11,12 +11,15 @@
 //   air      S's aerial perspective between the camera and the surface (main view);
 // then exposure, tone map and the final 4 B (OUTPUT=0) or linear radiance x exposure (OUTPUT=1).
 // Classes without their own model yet (Subsurface, Water: INTERFACES 8.1 defines them before P3/P4) use this kernel.
-// Local lights join through S's froxel lists (Froxel.hlsli) when S publishes them.
+// Local lights: the pixel's froxel list (S, Froxel.hlsli), punctual lights exactly (INTERFACES 8.2); shadow-casting
+// lights take S's slots 1-3 in list order (7.3). Area lights need the LTC tables (next). Planar reflection views have
+// no froxel lists (they are the main view's) and so no local lights yet.
 // P[0] = { gbuffer, depth, material word, color UAV }
 // P[1] = { tile lists (raw), list offset (entries), shade class, emissive or UNX_NONE }
 // P[2] = { shadow visibility, screen probes, reflection, GI cache (planar views) } (UNX_NONE = absent)
 // P[3] = { atmosphere transmittance, multi-scatter, sky view, aerial } (UNX_NONE = absent)
 // P[4] = { specular albedo LUT (float2 per grid point), texture table, experiment mask (0; shading.toml), 0 }
+// P[5] = { froxel lights (raw), froxel volume (Texture3D) } (UNX_NONE = absent)
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -24,6 +27,7 @@
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
+#include "Passes/Atmosphere/Froxel.hlsli"
 #include "Passes/GI/ScreenProbes.hlsli"
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
@@ -115,6 +119,44 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
         radiance += sun * sunVisibility;
     }
 
+    // ---- local lights (main view: S's froxel lists)
+    FroxelSrvs froxels;
+    froxels.lights = P[5].x;
+    froxels.lightIndices = P[5].x;
+    froxels.scattering = P[5].y;
+    froxels.pad = 0;
+    if (froxels.lights != UNX_NONE && g_viewKind == VIEW_MAIN && (experiment & 32) == 0)
+    {
+        uint shadowPacked = 0xFFFFFFFFu;  // all slots lit when S publishes no visibility
+        if (P[2].x != UNX_NONE)
+        {
+            Texture2D<uint> shadow = ResourceDescriptorHeap[P[2].x];
+            shadowPacked = shadow[pixel];
+        }
+        const float e = modelDirectionalAlbedo(max(NoV, 1e-4), s.roughness);
+        const float3 compensation = 1 + f0 * (1 / e - 1);
+        const uint2 range = froxelLightRange(froxels, pixel, linearZ);
+        uint shadowOrdinal = 0;
+        for (uint i = 0; i < range.y; ++i)
+        {
+            const GpuLight light = loadLight(froxelLight(froxels, range.x + i));
+            float visibility = 1;
+            if (lightCastsShadow(light))
+            {
+                ++shadowOrdinal;
+                if (shadowOrdinal <= 3) visibility = shadowSlot(shadowPacked, shadowOrdinal);
+            }
+            if (visibility <= 0 || lightType(light) > LIGHT_SPOT) continue;
+            float3 l;
+            const float3 E = shPunctualIlluminance(light, (light.position - g_cameraPosition) - offset, l);
+            const float cosL = dot(n, l);
+            float3 f = 0;
+            if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
+            else if (foliage && NoV * cosL < 0) f = back;
+            radiance += f * E * (abs(cosL) * visibility);
+        }
+    }
+
     // ---- indirect (R): screen probes (main view) or the world cache (planar views). The viewer's side of the shading
     // normal reflects; Foliage also transmits what arrives on the other side.
     const float3 nv = NoV > 0 ? n : -n;
@@ -158,6 +200,12 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
         float3 inscatter, transmittance;
         atmosphereAerial(atm, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight), linearZ, inscatter, transmittance);
         radiance = radiance * transmittance + inscatter;
+    }
+    // Shadowed sun air and local lights' air in front of the surface (S, Froxel.hlsli): (L T_air + L_air) a + rgb.
+    if (froxels.scattering != UNX_NONE && g_viewKind == VIEW_MAIN && (experiment & 8) == 0)
+    {
+        const float4 air = froxelScattering(froxels, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight), linearZ);
+        radiance = radiance * air.a + air.rgb;
     }
 
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].w];
