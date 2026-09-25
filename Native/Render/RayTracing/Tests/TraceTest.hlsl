@@ -46,8 +46,8 @@ void TraceTestGen()
     o.pad = 0;
     if (h.t >= 0)
     {
-        const RtInstance ri = rtLoadInstance(s, h.instance);
-        const RtGeometry g = rtLoadGeometry(s, ri.geometryBase + h.geometry);
+        RtGeometry g;
+        const RtInstance ri = rtResolve(s, h, g);
         const GpuMesh mesh = loadMesh(loadInstance(ri.sceneInstance).mesh);
         o.sceneInstance = ri.sceneInstance;
         // Proxy geometry (R's index pool): its primitive index is the cut's, not the mesh's (flag bit 2).

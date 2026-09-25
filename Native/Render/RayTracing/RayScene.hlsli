@@ -19,6 +19,7 @@
 
 // RtInstance.flags
 #define RT_INSTANCE_DEFORMED 0x1u  // vertices come from the deformed pool (world space), not the scene vertex pool
+#define RT_INSTANCE_CROWD 0x2u     // one BLAS over many deformed instances: its geometry k = crowd table entry geometryBase + k
 
 // RtGeometry.flags
 #define RT_GEOMETRY_PROXY_INDICES 0x1u  // indices come from R's index pool (proxy cuts) instead of the scene indices
@@ -46,17 +47,25 @@ struct RtDeformedVertex  // 16 B, world space
 };
 
 // Bindless indices of the ray scene, passed by consumers as two uint4 root constants (R-internal convention).
+// The crowd BLAS's geometries (RayScene: far characters built into one BLAS each frame): the geometry record and the
+// owning deformed instance's record (sceneInstance, vertexBase, flags) per geometry. This frame's table: RtSceneSrvs.crowd.
+struct RtCrowdEntry  // 32 B
+{
+    RtGeometry geometry;
+    RtInstance owner;
+};
+
 struct RtSceneSrvs
 {
     uint tlasStatic, tlasDynamic, instances, geometries;
-    uint indices, vertexMap, deformed, pad;
+    uint indices, vertexMap, deformed, crowd;
 };
 
 RtSceneSrvs rtSceneSrvs(uint4 a, uint4 b)
 {
     RtSceneSrvs s;
     s.tlasStatic = a.x; s.tlasDynamic = a.y; s.instances = a.z; s.geometries = a.w;
-    s.indices = b.x; s.vertexMap = b.y; s.deformed = b.z; s.pad = b.w;
+    s.indices = b.x; s.vertexMap = b.y; s.deformed = b.z; s.crowd = b.w;
     return s;
 }
 
@@ -121,10 +130,24 @@ RtTriangle rtTriangle(RtSceneSrvs s, RtGeometry g, uint primitive)
 }
 
 // Material of a hit (instance overrides first).
+// The instance record that owns a hit (the crowd member for a crowd instance) and the hit geometry's record.
+RtInstance rtResolve(RtSceneSrvs s, RtHit h, out RtGeometry g)
+{
+    RtInstance ri = rtLoadInstance(s, h.instance);
+    if ((ri.flags & RT_INSTANCE_CROWD) != 0)
+    {
+        StructuredBuffer<RtCrowdEntry> t = ResourceDescriptorHeap[s.crowd];
+        const RtCrowdEntry e = t[ri.geometryBase + h.geometry];
+        g = e.geometry;
+        return e.owner;
+    }
+    g = rtLoadGeometry(s, ri.geometryBase + h.geometry);
+    return ri;
+}
+
 uint rtMaterial(RtSceneSrvs s, RtHit h, out GpuInstance inst, out GpuMesh mesh, out RtGeometry g)
 {
-    const RtInstance ri = rtLoadInstance(s, h.instance);
-    g = rtLoadGeometry(s, ri.geometryBase + h.geometry);
+    const RtInstance ri = rtResolve(s, h, g);
     inst = loadInstance(ri.sceneInstance);
     mesh = loadMesh(inst.mesh);
     const GpuSubmesh sub = loadSubmesh(mesh.submeshOffset + g.submesh);
@@ -160,7 +183,8 @@ RtSurface rtSurface(RtSceneSrvs s, RtHit h, float3 origin, float3 direction)
     RtGeometry g;
     RtSurface o;
     o.material = rtMaterial(s, h, inst, mesh, g);
-    const RtInstance ri = rtLoadInstance(s, h.instance);
+    RtGeometry unused;
+    const RtInstance ri = rtResolve(s, h, unused);
     o.sceneInstance = ri.sceneInstance;
     const RtTriangle tri = rtTriangle(s, g, h.primitive);
     const float3 w = rtBary(h.barycentrics);

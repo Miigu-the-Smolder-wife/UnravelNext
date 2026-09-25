@@ -409,6 +409,7 @@ GiStats GiSystem::readStats()
     st.hitMisses = h[39];
     st.gSamples = h[48];  // GI_H_STAT_G_SAMPLES
     st.gRatio = h[49];
+    for (int i = 0; i < 9; ++i) st.gHistogram[i] = h[50 + i];  // GI_H_STAT_G_HIST
     return st;
 }
 } // namespace unx::render::gi

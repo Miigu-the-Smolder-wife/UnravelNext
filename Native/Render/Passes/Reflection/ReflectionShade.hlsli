@@ -45,7 +45,8 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     // Reflection exact set: count this frame's M/G hits on skinned instances (RayScene selects the most-hit ones).
     if (P[5].w != UNX_NONE)
     {
-        const RtInstance ri = rtLoadInstance(scene, hit.instance);
+        RtGeometry unused;
+        const RtInstance ri = rtResolve(scene, hit, unused);
         const uint deformedIndex = ri.flags >> 8;
         if ((ri.flags & RT_INSTANCE_DEFORMED) != 0 && deformedIndex != 0xFFFFFFu)
         {

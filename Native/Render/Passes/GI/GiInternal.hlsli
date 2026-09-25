@@ -29,6 +29,10 @@
 // Reflection G samples this frame, and those whose estimate took the ratio branch (beta < 1 in some channel; diagnostics).
 #define GI_H_STAT_G_SAMPLES 192
 #define GI_H_STAT_G_RATIO 196
+// Histogram of the G samples' luminance ratio mean(L) / mean(g) (the rays over the control variate): 9 bins of log2 in
+// [-4, 5), the first and last also take what lies beyond (diagnostics).
+#define GI_H_STAT_G_HIST 200
+#define GI_G_HIST_BINS 9u
 // Selection of this frame, per tier (0 = screen, 1 = hit): age bucket at the tier's budget boundary, entries still to
 // take from that bucket, atomic counter within it (tier t at GI_H_SELECT + 16 t).
 #define GI_H_SELECT 160

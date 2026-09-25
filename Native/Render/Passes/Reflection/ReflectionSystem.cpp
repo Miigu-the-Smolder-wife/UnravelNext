@@ -675,7 +675,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     }
     // Rays buffer of the split passes (ReflectionRay.hlsli): header, hit records, ray -> job, values, shadow rays.
     const uint32_t rayCapacity = (s.experimentDisable & 64) ? 0 : m_rayCapacity;  // 64: every job inline (A/B of the split)
-    const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 16 + (uint64_t)rayCapacity * 52, 0 });
+    const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 16 + (uint64_t)rayCapacity * 56, 0 });  // REFL_RAYS_SLOT_BYTES
     g.addPass("r.refl.args", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(args, Use::UavCompute);

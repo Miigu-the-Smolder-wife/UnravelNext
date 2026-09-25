@@ -459,6 +459,9 @@ int main(int argc, char** argv)
                      st.hitLookups ? 100.0 * st.hitMisses / st.hitLookups : 0.0);
                 logf("R %s: reflection G samples %u, estimated by the ratio branch (beta < 1) %u (%.2f %%)\n", res.name.c_str(), st.gSamples, st.gRatio,
                      st.gSamples ? 100.0 * st.gRatio / st.gSamples : 0.0);
+                logf("R %s: G samples by log2(mean L / mean g): <-3 %u, -3 %u, -2 %u, -1 %u, 0 %u, 1 %u, 2 %u, 3 %u, >=4 or g = 0 %u\n", res.name.c_str(),
+                     st.gHistogram[0], st.gHistogram[1], st.gHistogram[2], st.gHistogram[3], st.gHistogram[4], st.gHistogram[5], st.gHistogram[6],
+                     st.gHistogram[7], st.gHistogram[8]);
             }
         }
         rt::RayPipeline::releaseDevice(device);

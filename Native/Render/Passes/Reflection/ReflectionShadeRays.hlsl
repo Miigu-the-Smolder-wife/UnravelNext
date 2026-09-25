@@ -42,9 +42,9 @@ void main(uint slot : SV_DispatchThreadID)
         hit.t = asfloat(record.w);
         hit.instance = record.x & 0x7FFFFFFFu;
         hit.frontFace = record.x >> 31;
-        hit.geometry = record.y >> 24;
-        hit.primitive = record.y & 0xFFFFFFu;
-        hit.barycentrics = reflUnpackBarycentrics(record.z);
+        hit.geometry = record.y;
+        hit.primitive = record.z;
+        hit.barycentrics = reflUnpackBarycentrics(rays.Load(reflRaysBaryOffset(capacity, slot)));
         hit.pad = 0;
         const ReflHitShade o = reflShadeHit(rtSceneSrvs(P[6], P[7]), cache, h, hit, reflRayOrigin(j.s), dir, j.coneWidth, j.coneSpread);
         radiance = o.radiance;

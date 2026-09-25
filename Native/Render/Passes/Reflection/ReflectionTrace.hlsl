@@ -55,6 +55,13 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
         statCache.InterlockedAdd(GI_H_STAT_G_SAMPLES, gSamples);
         if (gRatio) statCache.InterlockedAdd(GI_H_STAT_G_RATIO, gRatio);
     }
+    if (j.mode == REFL_G && valid > 0)
+    {
+        const float lumL = dot(sumL, float3(0.2126, 0.7152, 0.0722)), lumG = dot(sumG, float3(0.2126, 0.7152, 0.0722));
+        const uint bin = lumG > 1e-8 ? (uint)clamp(floor(log2(max(lumL, 1e-30) / lumG)) + 4, 0.0, (float)GI_G_HIST_BINS - 1) : GI_G_HIST_BINS - 1;
+        RWByteAddressBuffer histCache = ResourceDescriptorHeap[P[4].z];
+        histCache.InterlockedAdd(GI_H_STAT_G_HIST + bin * 4, 1u);
+    }
 }
 
 [shader("raygeneration")]
@@ -93,8 +100,8 @@ void ReflectionTraceGen()
         r.TMax = giRayLength();
         const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION);
         rays.Store4(reflRaysHitOffset(slot), hit.t < 0 ? uint4(REFL_RAY_MISS, 0, 0, 0)
-                                                        : uint4(hit.instance | (hit.frontFace << 31), (hit.geometry << 24) | hit.primitive,
-                                                                reflPackBarycentrics(hit.barycentrics), asuint(hit.t)));
+                                                        : uint4(hit.instance | (hit.frontFace << 31), hit.geometry, hit.primitive, asuint(hit.t)));
+        if (hit.t >= 0) rays.Store(reflRaysBaryOffset(capacity, slot), reflPackBarycentrics(hit.barycentrics));
     }
     results[job] = uint2(base, REFL_JOB_SPLIT);
 }
