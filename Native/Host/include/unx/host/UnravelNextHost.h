@@ -28,7 +28,8 @@ enum UnxResult
 
 #define UNX_ABI_VERSION 6u  // 1: probe; 2: + renderer; 3: + UnxFrameSetSkeletons, UnxSceneSave writes the current state;
                             // 4: + UnxFrameSetEnvironment; 5: UNX_DEVICE_REMOVED (the process survives a device removal);
-                            // 6: + UnxFrameSetDiscontinuity, UnxFrameSetSimulation, UnxTransformUpdate::flags (teleport)
+                            // 6: + UnxFrameSetDiscontinuity, UnxFrameSetSimulation, UnxTransformUpdate::flags (teleport);
+                            //    later additions within 6 (optional exports, bridges probe for them): UnxFrameGraphStatsLatest
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -350,6 +351,20 @@ typedef struct UnxFrameStats
 } UnxFrameStats;
 UNX_API int32_t UNX_CALL UnxFrameStatsLatest(UnxRenderer r, UnxFrameStats* stats);
 
+// What the renderer submitted for the frame UnxFrameStatsLatest reports (its render graph): passes, command lists,
+// barriers, queue synchronisation, transient memory, plan compile time. Optional export within ABI 6 (a bridge probes for
+// it); the frame's GPU span beyond its passes' sum is time between the renderer's submissions, which these explain.
+typedef struct UnxFrameGraphStats
+{
+    uint32_t size, version;     // sizeof, 1
+    uint64_t frameIndex;        // the same frame as UnxFrameStats::frameIndex
+    uint32_t livePasses, commandLists, barrierBatches, barriers;
+    uint32_t crossQueueSyncs, transientResources, planReused, reserved;
+    uint64_t transientBytesAliased;
+    double cpuCompileMs;        // plan build (0 when the cached plan was reused)
+} UnxFrameGraphStats;
+UNX_API int32_t UNX_CALL UnxFrameGraphStatsLatest(UnxRenderer r, UnxFrameGraphStats* stats);
+
 // Per-pass GPU time of the same completed frame (pass names as the render graph declares them, e.g. "v.raster.bandA").
 typedef struct UnxPassTiming
 {
@@ -374,6 +389,7 @@ static_assert(sizeof(UnxSceneInfo) == 128);
 static_assert(sizeof(UnxCameraDesc) == 48);
 static_assert(sizeof(UnxFrameDesc) == 96);
 static_assert(sizeof(UnxFrameStats) == 48);
+static_assert(sizeof(UnxFrameGraphStats) == 64);
 static_assert(sizeof(UnxTransformUpdate) == 56);
 static_assert(sizeof(UnxPassTiming) == 56);
 #endif

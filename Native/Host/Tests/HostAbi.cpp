@@ -63,6 +63,7 @@ struct Api
     UNX_FN(UnxFrameSetTransforms)
     UNX_FN(UnxFrameRenderStandalone)
     UNX_FN(UnxFrameStatsLatest)
+    UNX_FN(UnxFrameGraphStatsLatest)
 #undef UNX_FN
     void load(const std::filesystem::path& path)
     {
@@ -94,6 +95,7 @@ struct Api
         UNX_FN(UnxFrameSetTransforms)
         UNX_FN(UnxFrameRenderStandalone)
         UNX_FN(UnxFrameStatsLatest)
+        UNX_FN(UnxFrameGraphStatsLatest)
 #undef UNX_FN
     }
     void ok(int32_t r, const char* what) const
@@ -626,6 +628,16 @@ int main(int argc, char** argv)
         api.ok(api.UnxFrameStatsLatest(r, &stats), "UnxFrameStatsLatest");
         logf("ABI frames: %u, latest completed frame %llu: GPU %.3f ms, %u passes, CPU record %.3f ms, submit %.3f ms (1440p, correctness run, not a measurement)\n",
              kFrames, (unsigned long long)stats.frameIndex, stats.gpuMs, stats.passes, stats.cpuRecordMs, stats.cpuSubmitMs);
+        UnxFrameGraphStats graph{};
+        graph.size = sizeof graph;
+        graph.version = 1;
+        api.ok(api.UnxFrameGraphStatsLatest(r, &graph), "UnxFrameGraphStatsLatest");
+        logf("ABI graph of frame %llu: %u live passes, %u command lists, %u barriers in %u batches, %u cross-queue syncs, %u transients (%.1f MB aliased), plan %s\n",
+             (unsigned long long)graph.frameIndex, graph.livePasses, graph.commandLists, graph.barriers, graph.barrierBatches, graph.crossQueueSyncs,
+             graph.transientResources, graph.transientBytesAliased / 1048576.0, graph.planReused ? "reused" : "compiled");
+        // The graph numbers belong to the frame the timings report, and that frame recorded passes and lists.
+        if (graph.frameIndex != stats.frameIndex) fail("UnxFrameGraphStatsLatest: frame %llu, stats frame %llu", (unsigned long long)graph.frameIndex, (unsigned long long)stats.frameIndex);
+        if (graph.livePasses == 0 || graph.commandLists == 0) fail("UnxFrameGraphStatsLatest: %u live passes, %u command lists", graph.livePasses, graph.commandLists);
         api.ok(api.UnxRendererDestroy(r), "UnxRendererDestroy");
 
         const QualityConfig q = QualityConfig::loadDirectory(testQuality);

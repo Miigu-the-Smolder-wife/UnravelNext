@@ -47,6 +47,7 @@ HostRenderer::HostRenderer(const HostRendererOptions& options) : m_options(optio
     m_shaders = std::make_unique<ShaderLibrary>(*m_device, options.shaderDirectory);
     m_slotFence.assign(options.framesInFlight, std::array<uint64_t, 3>{});
     m_slotHostFrame.assign(options.framesInFlight, UINT64_MAX);
+    m_slotGraph.assign(options.framesInFlight, {});
     m_standalone = std::make_unique<Standalone>();
 }
 
@@ -314,6 +315,7 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
     {
         std::lock_guard lock(m_mutex);
         m_stats.frameIndex = m_slotHostFrame[t->frame % m_options.framesInFlight];
+        m_stats.graph = m_slotGraph[t->frame % m_options.framesInFlight];
         m_stats.gpuMs = t->gpuFrameMs;
         m_stats.passes = (uint32_t)t->passes.size();
         m_stats.passMs.clear();
@@ -386,6 +388,9 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
 void HostRenderer::endFrame(uint32_t slot, uint64_t)
 {
     for (uint32_t q = 0; q < kQueueTypeCount; ++q) m_slotFence[slot][q] = m_graph->lastFence((QueueType)q);
+    const RenderGraphStats& g = m_graph->stats();
+    m_slotGraph[slot] = { g.livePasses, g.commandLists, g.barrierBatches, g.barriers, g.crossQueueSyncs, g.transientResources, g.planReused,
+                          g.transientBytesAliased, g.cpuCompileMs };
     ++m_recordedFrames;
     std::lock_guard lock(m_mutex);
     m_stats.cpuRecordMs = m_graph->stats().cpuRecordMs;

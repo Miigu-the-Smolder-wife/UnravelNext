@@ -87,11 +87,21 @@ struct FramePacket
     std::vector<std::pair<uint32_t, bool>> visibility;
 };
 
+// The render graph of one recorded frame (RenderGraphStats, the fields the host reports).
+struct GraphFrameStats
+{
+    uint32_t livePasses = 0, commandLists = 0, barrierBatches = 0, barriers = 0, crossQueueSyncs = 0, transientResources = 0;
+    bool planReused = false;
+    uint64_t transientBytesAliased = 0;
+    double cpuCompileMs = 0;
+};
+
 struct FrameStats
 {
     uint64_t frameIndex = UINT64_MAX;              // host frame number the GPU numbers belong to
     double gpuMs = 0, cpuRecordMs = 0, cpuSubmitMs = 0;
     uint32_t passes = 0;
+    GraphFrameStats graph;                         // the same frame's render graph
     std::vector<std::pair<std::string, double>> passMs;  // the same frame's passes in graph order
 };
 
@@ -209,6 +219,7 @@ private:
     // Submission thread only.
     std::vector<std::array<uint64_t, 3>> m_slotFence;
     std::vector<uint64_t> m_slotHostFrame;
+    std::vector<GraphFrameStats> m_slotGraph;  // the render graph of the frame recorded in each slot
     uint64_t m_recordedFrames = 0;
     float4x4 m_prevViewProj{};
     bool m_havePrev = false;

@@ -655,6 +655,26 @@ void renderEvent(uint64_t ticket)
 }
 } // namespace unx::host::plugin
 
+UNX_API int32_t UNX_CALL UnxFrameGraphStatsLatest(UnxRenderer r, UnxFrameGraphStats* stats)
+{
+    return call([&] {
+        requireStruct(stats, "UnxFrameGraphStats");
+        const FrameStats s = find(r)->latestStats();
+        const GraphFrameStats& g = s.graph;
+        stats->frameIndex = s.frameIndex;
+        stats->livePasses = g.livePasses;
+        stats->commandLists = g.commandLists;
+        stats->barrierBatches = g.barrierBatches;
+        stats->barriers = g.barriers;
+        stats->crossQueueSyncs = g.crossQueueSyncs;
+        stats->transientResources = g.transientResources;
+        stats->planReused = g.planReused ? 1u : 0u;
+        stats->reserved = 0;
+        stats->transientBytesAliased = g.transientBytesAliased;
+        stats->cpuCompileMs = g.cpuCompileMs;
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxFrameStatsLatest(UnxRenderer r, UnxFrameStats* stats)
 {
     return call([&] {
