@@ -1,6 +1,6 @@
 // unx-kernel: cs_6_6 main
 // M shading tests: evaluates shSunSpecular for query rows (E = 1 lux, frame constants = the test view's sun).
-// Query (3 x float4): (n, alpha), (v, roughness), (f0, pixel angle). P[0] = { queries SRV, out UAV, count, LUT SRV }
+// Query (3 x float4): (n, alpha), (v, roughness), (f0, pixel angle). P[0] = { queries SRV, out UAV, count, 0 } (LUT: frame constant)
 #include "Bindless.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 
@@ -15,5 +15,5 @@ void main(uint i : SV_DispatchThreadID)
     const float NoV = dot(n, v);
     const float e = modelDirectionalAlbedo(NoV, b.w);
     const float3 compensation = 1 + c.xyz * (1 / e - 1);
-    o[i] = float4(shSunSpecular(P[0].w, c.xyz, b.w, a.w, compensation, n, v, NoV, normalize(g_sunDirection), 1.0.xxx, c.w), 0);
+    o[i] = float4(shSunSpecular(c.xyz, b.w, a.w, compensation, n, v, NoV, normalize(g_sunDirection), 1.0.xxx, c.w), 0);
 }

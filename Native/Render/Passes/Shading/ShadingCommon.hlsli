@@ -11,31 +11,10 @@
 // Single-scattering specular albedo with Schlick F split by f0 (the model's table, scene::model::specularAlbedoTable,
 // same visible-normal samples as its E table; frame constant g_specularAlbedoLut, v1.25): E_ss(f0) = f0 A + B, A + B = E.
 // With the model's multiple-scattering compensation the lobe's full albedo is (f0 A + B)(1 + f0 (1/E - 1)) (INTERFACES
-// 8.1). The forms without a LUT argument read the frame constant; those with one remain for callers that still pass
-// their own copy (R's HitShading.hlsli until it switches).
+// 8.1).
 float3 shSpecularAlbedo(float3 f0, float NoV, float roughness)
 {
     const float2 ab = modelSpecularAlbedo(NoV, roughness);
-    const float e = ab.x + ab.y;
-    return (f0 * ab.x + ab.y) * (1 + f0 * (1 / e - 1));
-}
-
-float2 shSpecularAB(uint lutSrv, float NoV, float roughness)
-{
-    StructuredBuffer<float2> t = ResourceDescriptorHeap[lutSrv];
-    const float last = MODEL_ALBEDO_TABLE_SIZE - 1;
-    const float x = saturate(NoV) * last, y = saturate(roughness) * last;
-    const uint x0 = uint(x), y0 = uint(y);
-    const uint x1 = min(x0 + 1, MODEL_ALBEDO_TABLE_SIZE - 1), y1 = min(y0 + 1, MODEL_ALBEDO_TABLE_SIZE - 1);
-    const float fx = x - x0, fy = y - y0;
-    const float2 a = t[y0 * MODEL_ALBEDO_TABLE_SIZE + x0], b = t[y0 * MODEL_ALBEDO_TABLE_SIZE + x1];
-    const float2 c = t[y1 * MODEL_ALBEDO_TABLE_SIZE + x0], d = t[y1 * MODEL_ALBEDO_TABLE_SIZE + x1];
-    return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
-}
-
-float3 shSpecularAlbedo(uint lutSrv, float3 f0, float NoV, float roughness)
-{
-    const float2 ab = shSpecularAB(lutSrv, NoV, roughness);
     const float e = ab.x + ab.y;
     return (f0 * ab.x + ab.y) * (1 + f0 * (1 / e - 1));
 }
@@ -198,22 +177,6 @@ float3 shSunSpecular(float3 f0, float roughness, float alpha, float3 compensatio
     return shSpecularAlbedo(f0, NoV, roughness) * shSunLobeFraction(n, v, NoV, l0, alpha, pixelAngle) * E / (SH_PI * sinS * sinS);
 }
 
-// The same with the caller's own copy of the table (kept for R's HitShading.hlsli until it switches).
-float3 shSunSpecular(uint lutSrv, float3 f0, float roughness, float alpha, float3 compensation, float3 n, float3 v, float NoV, float3 l0, float3 E,
-                     float pixelAngle)
-{
-    const float sinS = sin(g_sunAngularRadius), cosS = cos(g_sunAngularRadius), thetaS = g_sunAngularRadius;
-    const float3 LOmega = E * (2 / (1 + cosS));  // L_sun * solid angle of the cap
-    const float NoL0 = dot(n, l0);
-    if (NoL0 <= -sinS) return 0;
-    // Terminator band (the disk crosses the shading normal's horizon): the clipped cosine has a kink inside the disk, which
-    // only the per-point quadrature follows; the band is < 1 px wide on curved surfaces, so its cost is negligible.
-    const bool terminator = NoL0 < 2 * sinS;
-    if (!terminator && alpha >= 16 * thetaS) return shSpecular(f0, alpha, compensation, n, v, l0, NoV, NoL0) * NoL0 * LOmega;
-    if (!terminator && alpha >= 2 * thetaS) return shSunSpecular4(f0, alpha, compensation, n, v, l0, NoV, cosS) * LOmega;
-    if (terminator && alpha >= 2 * thetaS) return shSunSpecularQuadrature(f0, alpha, compensation, n, v, l0, NoV, sinS, cosS) * LOmega;
-    return shSpecularAlbedo(lutSrv, f0, NoV, roughness) * shSunLobeFraction(n, v, NoV, l0, alpha, pixelAngle) * E / (SH_PI * sinS * sinS);
-}
 
 // Area of the unit pixel square on the inner side of a straight edge: unit normal nrm (pixel space, pointing inside),
 // signed distance d of the pixel centre from the edge (positive inside). Exact for a half-plane.

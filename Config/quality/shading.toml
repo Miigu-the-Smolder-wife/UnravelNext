@@ -15,5 +15,5 @@ edge_groups_max = 3
 # 8 = S's air volume lookup (aerial perspective, air shadows, local lights' air; sun illuminance then unattenuated),
 # 16 = sun, 32 = local lights, 64 = edge composite with one triangle per surface group, 128 = edge composite without
 # coverage geometry, 256 = no edge detection (no edge pixels), 512 = edge composite without subsample masks, 1024 = edge
-# composite without cut-out coverage.
+# composite without cut-out coverage, 2048 = no shadow visibility reads (slots lit), 4096 = no tone map (raw value).
 experiment_disable = 0

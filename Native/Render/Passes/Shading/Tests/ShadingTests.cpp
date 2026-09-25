@@ -354,18 +354,6 @@ void testSunSpecular(TestFrame& tf, Report& report)
         surfaces.push_back(s);
         views.push_back(v);
     }
-    // The same LUT the shading pass uploads (ShadingSystem.cpp), for the probe kernel.
-    const std::vector<float>& table = shading::specularAlbedoTable();
-    ComPtr<ID3D12Resource> lut = uploadStatic(tf.device, table.data(), table.size() * 4, L"test specular LUT");
-    const uint32_t lutSrv = tf.device.descriptors().allocateResource();
-    {
-        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
-        sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sd.Buffer.NumElements = (UINT)(table.size() / 2);
-        sd.Buffer.StructureByteStride = 8;
-        tf.device.d3d()->CreateShaderResourceView(lut.Get(), &sd, tf.device.descriptors().resourceCpu(lutSrv));
-    }
     std::shared_ptr<std::vector<uint8_t>> out;
     tf.run([&](FramePassContext& fc) {
         ViewResources v = tf.mainView(fc, 64, 64);
@@ -390,7 +378,7 @@ void testSunSpecular(TestFrame& tf, Report& report)
                              b.use(res, Use::UavCompute);
                          },
                          [=](PassContext& c) {
-                             const uint32_t k[4] = { c.srv(in), c.uav(res), count, lutSrv };
+                             const uint32_t k[4] = { c.srv(in), c.uav(res), count, 0 };  // LUT: frame constant
                              c.cmd->SetPipelineState(pso);
                              c.bindFrameConstants(cb);
                              c.computeConstants(k, 4);
@@ -398,7 +386,6 @@ void testSunSpecular(TestFrame& tf, Report& report)
                          });
         out = tf.readbackBuffer(fc, res, cases.size() * 16);
     });
-    tf.device.descriptors().freeResource(lutSrv);
     double worstPoint = 0, worst4 = 0, worstMirror = 0;
     for (size_t i = 0; i < cases.size(); ++i)
     {
@@ -1493,9 +1480,7 @@ void testAreaLights(TestFrame& tf, Report& report)
         q.push_back({ (float)c.v.x, (float)c.v.y, (float)c.v.z, c.f0 });
     }
     const std::vector<float>& ltc = shading::ltcTable();
-    const std::vector<float>& lutData = shading::specularAlbedoTable();
     ComPtr<ID3D12Resource> ltcBuf = uploadStatic(tf.device, ltc.data(), ltc.size() * 4, L"test LTC table");
-    ComPtr<ID3D12Resource> lutBuf = uploadStatic(tf.device, lutData.data(), lutData.size() * 4, L"test specular LUT");
     ComPtr<ID3D12Resource> lightBuf = uploadStatic(tf.device, lights.data(), lights.size() * sizeof(gpu::Light), L"test area lights");
     ComPtr<ID3D12Resource> queryBuf = uploadStatic(tf.device, q.data(), q.size() * 16, L"test area queries");
     auto srvOf = [&](ID3D12Resource* r, uint32_t count, uint32_t stride) {
@@ -1508,7 +1493,7 @@ void testAreaLights(TestFrame& tf, Report& report)
         tf.device.d3d()->CreateShaderResourceView(r, &sd, tf.device.descriptors().resourceCpu(srv));
         return srv;
     };
-    const uint32_t ltcSrv = srvOf(ltcBuf.Get(), (uint32_t)(ltc.size() / 4), 16), lutSrv = srvOf(lutBuf.Get(), (uint32_t)(lutData.size() / 2), 8);
+    const uint32_t ltcSrv = srvOf(ltcBuf.Get(), (uint32_t)(ltc.size() / 4), 16);
     const uint32_t lightSrv = srvOf(lightBuf.Get(), (uint32_t)lights.size(), sizeof(gpu::Light)), querySrv = srvOf(queryBuf.Get(), (uint32_t)q.size(), 16);
     std::shared_ptr<std::vector<uint8_t>> out;
     tf.run([&](FramePassContext& fc) {
@@ -1519,7 +1504,7 @@ void testAreaLights(TestFrame& tf, Report& report)
         const uint32_t count = (uint32_t)cases.size();
         fc.graph.addPass("m.test.area lights", QueueType::Graphics, [&](PassBuilder& b) { b.use(res, Use::UavCompute); },
                          [=](PassContext& c) {
-                             const uint32_t k[8] = { lightSrv, querySrv, c.uav(res), count, ltcSrv, lutSrv, 0, 0 };
+                             const uint32_t k[8] = { lightSrv, querySrv, c.uav(res), count, ltcSrv, 0, 0, 0 };
                              c.cmd->SetPipelineState(pso);
                              c.bindFrameConstants(cb);
                              c.computeConstants(k, 8);
@@ -1527,7 +1512,7 @@ void testAreaLights(TestFrame& tf, Report& report)
                          });
         out = tf.readbackBuffer(fc, res, cases.size() * 16);
     });
-    for (uint32_t srv : { ltcSrv, lutSrv, lightSrv, querySrv }) tf.device.descriptors().freeResource(srv);
+    for (uint32_t srv : { ltcSrv, lightSrv, querySrv }) tf.device.descriptors().freeResource(srv);
 
     // CPU references, cases in parallel.
     struct Ref

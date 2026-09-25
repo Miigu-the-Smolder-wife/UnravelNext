@@ -238,7 +238,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         else E = atmosphereSunIlluminance(atm, worldPos);
     }
     float sunVisibility = 1;
-    if (P[2].x != UNX_NONE)
+    if (P[2].x != UNX_NONE && (P[4].z & 2048) == 0)
     {
         Texture2D<uint> shadow = ResourceDescriptorHeap[P[2].x];
         sunVisibility = shadowSlot(shadow[pixel], 0);
@@ -276,7 +276,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     if (froxels.lights != UNX_NONE && (experiment & 32) == 0)  // this view's lists (v1.22)
     {
         uint shadowPacked = 0xFFFFFFFFu;  // all slots lit when S publishes no visibility
-        if (P[2].x != UNX_NONE)
+        if (P[2].x != UNX_NONE && (experiment & 2048) == 0)
         {
             Texture2D<uint> shadow = ResourceDescriptorHeap[P[2].x];
             shadowPacked = shadow[pixel];
@@ -380,7 +380,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     radiance = radiance * airTransmittance + airInscatter;
 
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].w];
-    color[pixel] = shEncodeOutput(radiance);
+    color[pixel] = (P[4].z & 4096) ? float4(radiance, 1) : shEncodeOutput(radiance);
     ShadedPixel o;
     o.radiance = radiance;
     o.linearZ = linearZ;
