@@ -31,6 +31,11 @@ if(unity_sources)
   target_include_directories(unx_host PRIVATE "${UNX_UNITY_PLUGIN_API}")
   target_link_libraries(unx_host PRIVATE unx_host_core)
   add_dependencies(unx_host unx_render_shaders unx_host_shaders unx_build_identity)
+  # The identity of the source this DLL was linked from travels with it (Deploy.ps1 records it next to the plugin):
+  # copied after a successful link only, so a later failed build cannot relabel an older DLL.
+  add_custom_command(TARGET unx_host POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy "${UNX_BUILD_IDENTITY_HEADER}" "$<TARGET_FILE:unx_host>.identity.h"
+    VERBATIM)
 endif()
 
 foreach(kind Tests Gates)
