@@ -658,6 +658,21 @@ static void benchBricks()
                 snprintf(name, sizeof name, "%s march, %u B voxels (%.0f MB), %u steps, 32 B record", mode == 0 ? "camera" : "sun (orthographic)", voxelBytes, bytes / 1048576.0, steps);
                 record("bricks", name, st.median, "ms", std::to_string(st.median * 1e6 / ((double)W * H)) + " ns/pixel, " + std::to_string(st.median * 1e6 / ((double)W * H * steps)) + " ns/step (upper bound: early exits)");
             }
+            if (steps == 32 || g.warp)
+            {
+                // Revision 1 11.4 (5): the receiver sun march (from the ground up toward the sun, 4 B T only) against the
+                // texel sun march (top face down) with and without the 32 B record.
+                auto psoT = g.computePso(dxc.compile(s, L"MarchCS", L"cs_6_6", { wdef("VOXEL_BYTES", voxelBytes), wdef("STEPS", steps), L"OUT_T=1" }).Get());
+                for (uint32_t mode : { 1u, 2u })
+                {
+                    Consts c; c(0, 0) = W; c(0, 1) = H; c(0, 2) = steps; c(0, 3) = mode;
+                    c(1, 0) = tableSrv; c(1, 1) = voxSrv; c(1, 2) = outUav; c(1, 3) = mapsUav; c(2, 0) = Bx; c(2, 1) = By; c(2, 2) = Bz; c(2, 3) = bricks;
+                    Stat st = g.time([&](ID3D12GraphicsCommandList6* l) { g.setConstants(l, c.v); l->SetPipelineState(psoT.Get()); l->Dispatch((W + 7) / 8, (H + 7) / 8, 1); Gpu::uavBarrier(l); }, flushL2);
+                    char name[200];
+                    snprintf(name, sizeof name, "%s, %u B voxels, %u steps, 4 B T only", mode == 1 ? "sun texel march (top face down)" : "receiver sun march (ground up toward the sun)", voxelBytes, steps);
+                    record("bricks", name, st.median, "ms", std::to_string(st.median * 1e6 / ((double)W * H)) + " ns/pixel (receiver)");
+                }
+            }
         }
         {
             auto pso = g.computePso(dxc.compile(s, L"EntryMapCS", L"cs_6_6", { wdef("VOXEL_BYTES", voxelBytes) }).Get());

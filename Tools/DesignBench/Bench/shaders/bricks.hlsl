@@ -14,6 +14,9 @@
 #ifndef STEPS
 #define STEPS 32
 #endif
+#ifndef OUT_T
+#define OUT_T 0  // 1: write only the 4 B transmittance (receiver sun march, revision 1 11.4 (5)); 0: the 32 B aggregate record
+#endif
 
 struct Aggregate { float T; float depth; uint sggx[3]; uint albedoMaterial; uint entry01; uint entry2pad; };
 
@@ -53,11 +56,20 @@ void MarchCS(uint2 pixel : SV_DispatchThreadID)
         // Enter at z = 0 (front face).
         o += d * (-o.z / d.z);
     }
-    else
+    else if (P[0].w == 1)
     {
         // Sun view: parallel rays down through the top face, texel spacing = box.x / W.
         d = normalize(float3(0.15, -1.0, 0.1));
         o = float3((pixel.x + 0.5) * box.x / W, box.y - 0.001, (pixel.y + 0.5) * box.z / H);
+    }
+    else
+    {
+        // Receiver sun march (11.4 (5)): parallel rays *toward* the sun from receivers on a rolling ground height field
+        // under the canopy (height 0.5..3.5 voxels), pixel spacing = box.x / W (footprint-matched brick LOD = voxel).
+        d = normalize(float3(0.15, 1.0, 0.1));
+        const float2 g = (float2(pixel) + 0.5) / float2(W, H);
+        const float ground = 0.5 + 1.5 * (1.0 + sin(g.x * 37.0) * cos(g.y * 29.0));
+        o = float3(g.x * box.x, ground, g.y * box.z);
     }
     float T = 1;
     float3 pos = o;
@@ -86,6 +98,10 @@ void MarchCS(uint2 pixel : SV_DispatchThreadID)
         pos += d;
         if (T < 1.0 / 32.0) break;
     }
+#if OUT_T
+    output[pixel.y * W + pixel.x].T = T + extra * 0.0 + (float)entries * 0.0 + sumW * 0.0;
+    return;
+#endif
     Aggregate a;
     a.T = T;
     a.depth = sumW > 0 ? sumDepth / sumW : (float)STEPS;
