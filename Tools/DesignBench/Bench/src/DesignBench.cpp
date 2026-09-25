@@ -241,22 +241,25 @@ struct Gpu
     }
     ComPtr<ID3D12Resource> depthTexture(UINT w, UINT h)
     {
+        extern bool g_d16_fwd();
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC d{}; d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; d.Width = w; d.Height = h; d.DepthOrArraySize = 1; d.MipLevels = 1;
-        d.Format = DXGI_FORMAT_R32_TYPELESS; d.SampleDesc.Count = 1; d.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN; d.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-        D3D12_CLEAR_VALUE cv{}; cv.Format = DXGI_FORMAT_D32_FLOAT; cv.DepthStencil.Depth = 0.0f;
+        d.Format = g_d16_fwd() ? DXGI_FORMAT_R16_TYPELESS : DXGI_FORMAT_R32_TYPELESS; d.SampleDesc.Count = 1; d.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN; d.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        D3D12_CLEAR_VALUE cv{}; cv.Format = g_d16_fwd() ? DXGI_FORMAT_D16_UNORM : DXGI_FORMAT_D32_FLOAT; cv.DepthStencil.Depth = 0.0f;
         ComPtr<ID3D12Resource> r;
         check(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, IID_PPV_ARGS(&r)), "CreateCommittedResource(depth)");
         return r;
     }
     D3D12_CPU_DESCRIPTOR_HANDLE dsv(ID3D12Resource* r)
     {
-        D3D12_DEPTH_STENCIL_VIEW_DESC d{}; d.Format = DXGI_FORMAT_D32_FLOAT; d.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        extern bool g_d16_fwd();
+        D3D12_DEPTH_STENCIL_VIEW_DESC d{}; d.Format = g_d16_fwd() ? DXGI_FORMAT_D16_UNORM : DXGI_FORMAT_D32_FLOAT; d.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
         auto h = heapDsv->GetCPUDescriptorHandleForHeapStart(); h.ptr += (SIZE_T)(nextDsv++) * incDsv; dev->CreateDepthStencilView(r, &d, h); return h;
     }
     UINT srvDepth(ID3D12Resource* r)
     {
-        D3D12_SHADER_RESOURCE_VIEW_DESC d{}; d.Format = DXGI_FORMAT_R32_FLOAT; d.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; d.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; d.Texture2D.MipLevels = 1;
+        extern bool g_d16_fwd();
+        D3D12_SHADER_RESOURCE_VIEW_DESC d{}; d.Format = g_d16_fwd() ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R32_FLOAT; d.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; d.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; d.Texture2D.MipLevels = 1;
         UINT i = nextCbv++; dev->CreateShaderResourceView(r, &d, cbvHandle(i)); return i;
     }
     // Mesh pipeline writing hardware depth only (no pixel shader, no targets): the ROP path of the VSM page raster.
@@ -267,7 +270,8 @@ struct Gpu
         s.ms.value = { ms->GetBufferPointer(), ms->GetBufferSize() };
         s.rast.value.FillMode = D3D12_FILL_MODE_SOLID; s.rast.value.CullMode = D3D12_CULL_MODE_NONE; s.rast.value.DepthClipEnable = TRUE;
         s.ds.value.DepthEnable = TRUE; s.ds.value.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL; s.ds.value.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
-        s.rtv.value.NumRenderTargets = 0; s.dsv.value = DXGI_FORMAT_D32_FLOAT;
+        extern bool g_d16_fwd();
+        s.rtv.value.NumRenderTargets = 0; s.dsv.value = g_d16_fwd() ? DXGI_FORMAT_D16_UNORM : DXGI_FORMAT_D32_FLOAT;
         s.topo.value = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; s.sd.value = { 1, 0 }; s.mask.value = UINT_MAX;
         s.blend.value.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
         D3D12_PIPELINE_STATE_STREAM_DESC d{ sizeof s, &s };
@@ -455,6 +459,8 @@ static Dxc dxc;
 static std::string g_shaderDir = DB_SHADER_DIR;
 static uint32_t g_width = 3840, g_height = 2160;
 static bool g_conservative = true, g_noHelper = false;  // WARP isolation switches
+static bool g_d16 = false;  // --d16: VSM bench depth atlas in D16_UNORM instead of D32_FLOAT (revision 1 11.4 (6))
+bool g_d16_fwd() { return g_d16; }
 static ComPtr<ID3D12Resource> g_scratch; static UINT g_scratchUav = 0;  // 128 MB: warm-up target, L2 flush
 static ComPtr<ID3D12PipelineState> g_warmPso, g_flushPso;
 
@@ -813,13 +819,13 @@ static void benchVsm()
         Stat sd = g.time([&](ID3D12GraphicsCommandList6* l) {
             viewport(l); l->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
             g.setConstants(l, c.v, true); l->SetPipelineState(psoDepth.Get()); l->DispatchMesh(gx, gy, 1); }, clearDepth);
-        record("vsm", std::string(cs.name) + ": hardware depth (ROP) into a D32 page atlas, no pixel shader", sd.median, "ms",
+        record("vsm", std::string(cs.name) + (g_d16 ? ": hardware depth (ROP) into a D16 page atlas, no pixel shader" : ": hardware depth (ROP) into a D32 page atlas, no pixel shader"), sd.median, "ms",
                std::to_string(sd.median * 1e6 / fragments) + " ns/fragment (c_rop), " + std::to_string(sd.median * 1e6 / pages) + " ns/page");
         Stat se = g.time([&](ID3D12GraphicsCommandList6* l) {
             Gpu::transition(l, atlas.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             g.setConstants(l, c.v); l->SetPipelineState(psoEncode.Get()); l->Dispatch(pages * 16, 1, 1);
             Gpu::transition(l, atlas.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE); Gpu::uavBarrier(l); }, flushL2);
-        record("vsm", std::string(cs.name) + ": encode atlas -> pool (4 B read + 4 B write per texel) + 8^2/32^2 block min/max", se.median, "ms",
+        record("vsm", std::string(cs.name) + (g_d16 ? ": encode atlas -> pool (2 B read + 4 B write per texel) + 8^2/32^2 block min/max" : ": encode atlas -> pool (4 B read + 4 B write per texel) + 8^2/32^2 block min/max"), se.median, "ms",
                std::to_string(se.median * 1e6 / ((double)pages * 16384)) + " ns/texel, " + std::to_string((double)pages * 16384 * 8 / (se.median * 1e-3) / 1e9) + " GB/s, " + std::to_string(se.median * 1e6 / pages) + " ns/page");
         record("vsm", std::string(cs.name) + ": ROP + encode total", sd.median + se.median, "ms", std::to_string((sd.median + se.median) / su.median) + " x the UAV path");
         if (g.warp)
@@ -847,6 +853,7 @@ int main(int argc, char** argv)
         else if (a == "--gbv") { debug = true; gbv = true; }
         else if (a == "--no-conservative") g_conservative = false;
         else if (a == "--no-helperlane") g_noHelper = true;
+        else if (a == "--d16") g_d16 = true;
         else if (a == "--width" && i + 1 < argc) g_width = (uint32_t)atoi(argv[++i]);
         else if (a == "--height" && i + 1 < argc) g_height = (uint32_t)atoi(argv[++i]);
         else if (a == "--reps" && i + 1 < argc) g.reps = atoi(argv[++i]);

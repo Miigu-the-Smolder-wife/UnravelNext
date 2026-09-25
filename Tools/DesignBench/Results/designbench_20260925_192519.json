@@ -1,0 +1,22 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "resolution": "3840x2160", "reps": 9, "timestamp": "20260925_192519",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "vsm", "name": "4K sun moving: 3600 dirty pages (60x60), 576 tris/page (2.07 M), edge 8 px (32 px^2): UAV InterlockedMax into the raw pool (current S path)", "value": 1.2841, "unit": "ms", "note": "66.355200 M texel fragments, 0.019352 ns/fragment, 356.693333 ns/page"},
+  {"section": "vsm", "name": "4K sun moving: 3600 dirty pages (60x60), 576 tris/page (2.07 M), edge 8 px (32 px^2): hardware depth (ROP) into a D16 page atlas, no pixel shader", "value": 0.564224, "unit": "ms", "note": "0.008503 ns/fragment (c_rop), 156.728889 ns/page"},
+  {"section": "vsm", "name": "4K sun moving: 3600 dirty pages (60x60), 576 tris/page (2.07 M), edge 8 px (32 px^2): encode atlas -> pool (2 B read + 4 B write per texel) + 8^2/32^2 block min/max", "value": 0.534528, "unit": "ms", "note": "0.009062 ns/texel, 882.758621 GB/s, 148.480000 ns/page"},
+  {"section": "vsm", "name": "4K sun moving: 3600 dirty pages (60x60), 576 tris/page (2.07 M), edge 8 px (32 px^2): ROP + encode total", "value": 1.09875, "unit": "ms", "note": "0.855662 x the UAV path"},
+  {"section": "vsm", "name": "same pages, 2304 tris/page (8.3 M), edge 2 px (2 px^2): UAV InterlockedMax into the raw pool (current S path)", "value": 1.22368, "unit": "ms", "note": "16.588800 M texel fragments, 0.073765 ns/fragment, 339.911111 ns/page"},
+  {"section": "vsm", "name": "same pages, 2304 tris/page (8.3 M), edge 2 px (2 px^2): hardware depth (ROP) into a D16 page atlas, no pixel shader", "value": 1.21958, "unit": "ms", "note": "0.073519 ns/fragment (c_rop), 338.773333 ns/page"},
+  {"section": "vsm", "name": "same pages, 2304 tris/page (8.3 M), edge 2 px (2 px^2): encode atlas -> pool (2 B read + 4 B write per texel) + 8^2/32^2 block min/max", "value": 0.543744, "unit": "ms", "note": "0.009219 ns/texel, 867.796610 GB/s, 151.040000 ns/page"},
+  {"section": "vsm", "name": "same pages, 2304 tris/page (8.3 M), edge 2 px (2 px^2): ROP + encode total", "value": 1.76333, "unit": "ms", "note": "1.441004 x the UAV path"},
+  {"section": "vsm", "name": "design wind case: 400 dirty pages (20x20), 576 tris/page, edge 8 px: UAV InterlockedMax into the raw pool (current S path)", "value": 0.137216, "unit": "ms", "note": "7.372800 M texel fragments, 0.018611 ns/fragment, 343.040000 ns/page"},
+  {"section": "vsm", "name": "design wind case: 400 dirty pages (20x20), 576 tris/page, edge 8 px: hardware depth (ROP) into a D16 page atlas, no pixel shader", "value": 0.06656, "unit": "ms", "note": "0.009028 ns/fragment (c_rop), 166.400000 ns/page"},
+  {"section": "vsm", "name": "design wind case: 400 dirty pages (20x20), 576 tris/page, edge 8 px: encode atlas -> pool (2 B read + 4 B write per texel) + 8^2/32^2 block min/max", "value": 0.043008, "unit": "ms", "note": "0.006562 ns/texel, 1219.047619 GB/s, 107.520000 ns/page"},
+  {"section": "vsm", "name": "design wind case: 400 dirty pages (20x20), 576 tris/page, edge 8 px: ROP + encode total", "value": 0.109568, "unit": "ms", "note": "0.798507 x the UAV path"},
+  {"section": "vsm", "name": "1440p sun moving: 1936 dirty pages (44x44), 1536 tris/page (3.0 M), edge 8 px: UAV InterlockedMax into the raw pool (current S path)", "value": 1.8432, "unit": "ms", "note": "95.158272 M texel fragments, 0.019370 ns/fragment, 952.066116 ns/page"},
+  {"section": "vsm", "name": "1440p sun moving: 1936 dirty pages (44x44), 1536 tris/page (3.0 M), edge 8 px: hardware depth (ROP) into a D16 page atlas, no pixel shader", "value": 0.796672, "unit": "ms", "note": "0.008372 ns/fragment (c_rop), 411.504132 ns/page"},
+  {"section": "vsm", "name": "1440p sun moving: 1936 dirty pages (44x44), 1536 tris/page (3.0 M), edge 8 px: encode atlas -> pool (2 B read + 4 B write per texel) + 8^2/32^2 block min/max", "value": 0.279552, "unit": "ms", "note": "0.008813 ns/texel, 907.721612 GB/s, 144.396694 ns/page"},
+  {"section": "vsm", "name": "1440p sun moving: 1936 dirty pages (44x44), 1536 tris/page (3.0 M), edge 8 px: ROP + encode total", "value": 1.07622, "unit": "ms", "note": "0.583889 x the UAV path"}
+ ]
+}
