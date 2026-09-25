@@ -190,37 +190,47 @@ bool nv_surface_next_all(NV_INOUT(NvSurfaceQuery) q, NV_OUT(uint) n) {
 #define NV_SURFACE_QUERY(p, d) nv_surface_query_all(p, d)
 #define NV_SURFACE_NEXT(q, n) nv_surface_next_all(q, n)
 #endif
-bool nv_hit_sphere(nv_real3 p, nv_real3 d, nv_real3 center, nv_real radius, NV_OUT(nv_real) t, NV_OUT(nv_real3) normal) {
+// Entry root of a t^2 + 2 b t + c = 0 (the smaller one) without cancellation:
+// for an approaching segment (b < 0) c / (-b + sqrt(h)), else (-b - sqrt(h)) / a.
+// Contacts start close to surfaces (c near 0): the textbook form cancels there.
+nv_real nv_entry_root(nv_real a, nv_real b, nv_real c, nv_real h) {
+    nv_real root = sqrt(h);
+    return b < NV_R(0) ? c / (root - b) : (-b - root) / a;
+}
+// Geometry is formed relative to the surface (p - center first): positions are
+// emitter-origin space and far points would round the small offsets away.
+// The segment starts at p + offset (offset: a small shift such as a surface's carry).
+bool nv_hit_sphere(nv_real3 p, nv_real3 offset, nv_real3 d, nv_real3 center, nv_real radius, NV_OUT(nv_real) t, NV_OUT(nv_real3) normal) {
     t = NV_R(0); normal = nv_make3(NV_R(0), NV_R(0), NV_R(0));
-    nv_real3 delta = p - center;
+    nv_real3 delta = (p - center) + offset;
     nv_real a = dot(d, d), b = dot(delta, d), c = dot(delta, delta) - radius * radius, h = b * b - a * c;
     if (a <= NV_R(0) || h < NV_R(0)) return false;
-    nv_real candidate = (-b - sqrt(h)) / a;
+    nv_real candidate = nv_entry_root(a, b, c, h);
     if (!(candidate >= NV_R(0) && candidate <= NV_R(1))) return false;
-    normal = p + d * candidate - center; nv_real size = length(normal);
+    normal = delta + d * candidate; nv_real size = length(normal);
     if (!(size > NV_R(0))) return false;
     t = candidate; normal = normal * (NV_R(1) / size); return true;
 }
-bool nv_hit(NvSurface s, nv_real3 p, nv_real3 d, NV_OUT(nv_real) t, NV_OUT(nv_real3) normal) {
+bool nv_hit(NvSurface s, nv_real3 p, nv_real3 offset, nv_real3 d, NV_OUT(nv_real) t, NV_OUT(nv_real3) normal) {
     t = NV_R(0); normal = nv_make3(NV_R(0), NV_R(0), NV_R(0));
-    if (s.kind == 0u) return nv_hit_sphere(p, d, s.a, s.radius, t, normal);
+    if (s.kind == 0u) return nv_hit_sphere(p, offset, d, s.a, s.radius, t, normal);
     if (s.kind == 2u) {
         nv_real3 e1 = s.b - s.a, e2 = s.c - s.a, h = cross(d, e2);
         nv_real determinant = dot(e1, h); if (determinant == NV_R(0)) return false;
-        nv_real3 delta = p - s.a, q = cross(delta, e1);
+        nv_real3 delta = (p - s.a) + offset, q = cross(delta, e1);
         nv_real u = dot(delta, h) / determinant, v = dot(d, q) / determinant, candidate = dot(e2, q) / determinant;
         if (!(candidate >= NV_R(0) && candidate <= NV_R(1)) || u < NV_R(0) || v < NV_R(0) || u + v > NV_R(1)) return false;
         normal = cross(e1, e2); nv_real size = length(normal);
         if (!(size > NV_R(0))) return false;
         normal = normal * ((dot(normal, d) > NV_R(0) ? NV_R(-1) : NV_R(1)) / size); t = candidate; return true;
     }
-    nv_real3 axis = s.b - s.a, delta = p - s.a;
+    nv_real3 axis = s.b - s.a, delta = (p - s.a) + offset;
     nv_real aa = dot(axis, axis), ad = dot(axis, d), ao = dot(axis, delta), dd = dot(d, d), od = dot(delta, d), oo = dot(delta, delta), radius = s.radius;
-    if (aa <= NV_R(0)) return nv_hit_sphere(p, d, s.a, radius, t, normal);
+    if (aa <= NV_R(0)) return nv_hit_sphere(p, offset, d, s.a, radius, t, normal);
     nv_real qa = aa * dd - ad * ad, qb = aa * od - ao * ad, qc = aa * oo - ao * ao - radius * radius * aa, hh = qb * qb - qa * qc;
     bool found = false; t = NV_R(2);
     if (qa > NV_R(0) && hh >= NV_R(0)) {
-        nv_real candidate = (-qb - sqrt(hh)) / qa, y = ao + candidate * ad;
+        nv_real candidate = nv_entry_root(qa, qb, qc, hh), y = ao + candidate * ad;
         if (candidate >= NV_R(0) && candidate <= NV_R(1) && y >= NV_R(0) && y <= aa) {
             nv_real3 n = delta + d * candidate - axis * (y / aa); nv_real size = length(n);
             if (size > NV_R(0)) { t = candidate; normal = n * (NV_R(1) / size); found = true; }
@@ -228,7 +238,7 @@ bool nv_hit(NvSurface s, nv_real3 p, nv_real3 d, NV_OUT(nv_real) t, NV_OUT(nv_re
     }
     NV_UNROLL for (uint end = 0u; end < 2u; ++end) {
         nv_real candidate; nv_real3 n;
-        if (nv_hit_sphere(p, d, end != 0u ? s.b : s.a, radius, candidate, n)) {
+        if (nv_hit_sphere(p, offset, d, end != 0u ? s.b : s.a, radius, candidate, n)) {
             nv_real y = ao + candidate * ad;
             if ((end != 0u ? y >= aa : y <= NV_R(0)) && candidate < t) { t = candidate; normal = n; found = true; }
         }
@@ -239,22 +249,65 @@ nv_real3 nv_bounce(nv_real3 value, nv_real3 normal, nv_real restitution, nv_real
     nv_real incoming = dot(value, normal);
     return incoming < NV_R(0) ? (value - normal * incoming) * (NV_R(1) - friction) - normal * (incoming * restitution) : value;
 }
-// Sweeps origin-space start -> s.position. Returns false when a fifth impact
-// was needed (the state then stays at the fourth contact, separated).
+// Rigid motion of a surface over its last tau seconds (constant velocity v and
+// angular velocity w about its centre of mass `origin`, both given at the tick end).
+// Only displacements are formed (never an absolute carried point): positions are
+// emitter-origin space and can be far from the origin, so an absolute point
+// followed by a difference would cancel in float.
+// (R(w) - I) x with R the rotation by |w| about w: a (w x x) + b w x (w x x),
+// a = sin(t)/t, b = (1 - cos t)/t^2 = 2 (sin(t/2)/t)^2 (no 1 - cos cancellation).
+nv_real3 nv_rotation_delta(nv_real3 w, nv_real3 x) {
+    nv_real angle = length(w);
+    if (angle == NV_R(0)) return nv_make3(NV_R(0), NV_R(0), NV_R(0));
+    nv_real a = sin(angle) / angle, half = sin(angle * NV_R(0.5)) / angle, b = NV_R(2) * half * half;
+    nv_real3 wx = cross(w, x);
+    return wx * a + cross(w, wx) * b;
+}
+// carry(p) - p: where a point that moved with the surface for tau seconds ends,
+// relative to where it was. carry(p) = origin + R(p - origin + v tau).
+nv_real3 nv_surface_carry_delta(NvSurface s, nv_real tau, nv_real3 p) {
+    nv_real3 step = s.velocity * tau;
+    return nv_rotation_delta(s.angular * tau, p - s.origin + step) + step;
+}
+// uncarry(q) - q: where a point moving with the surface was tau seconds before the tick end.
+nv_real3 nv_surface_uncarry_delta(NvSurface s, nv_real tau, nv_real3 q) {
+    return nv_rotation_delta(s.angular * (-tau), q - s.origin) - s.velocity * tau;
+}
+bool nv_surface_moves(NvSurface s) {
+    return s.velocity.x != NV_R(0) || s.velocity.y != NV_R(0) || s.velocity.z != NV_R(0) ||
+           s.angular.x != NV_R(0) || s.angular.y != NV_R(0) || s.angular.z != NV_R(0);
+}
+// Sweeps origin-space start -> start + move over the interval h, each surface in
+// its own frame: the particle's path relative to a moving surface is tested
+// against the surface's tick-end geometry (tick-end coordinates are the world
+// frame), so a particle resting on or struck by a moving body neither tunnels
+// nor starts behind it. After a bounce the particle moves with the struck
+// surface until its next contact: the remaining path of a later surface starts
+// where that point was relative to it. Exact for constant surface velocities over
+// the tick. Returns false when a fifth impact was needed (the state then stays at
+// the fourth contact, separated). A candidate query must return every surface
+// whose motion over the interval can meet the segment (bounds grown by the motion).
 // A surface moved into emitter-origin space (points and its velocity centre).
 NvSurface nv_surface_local(NvSurface s, nv_real3 origin) {
     s.a = s.a - origin; s.b = s.b - origin; s.c = s.c - origin; s.origin = s.origin - origin;
     return s;
 }
-bool nv_collide(NvMotion m, nv_real3 start, NV_INOUT(NvState) s, NV_OUT(NvImpact) first) {
+bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(NvState) s, NV_OUT(NvImpact) first) {
     first.count = 0u; first.contact = nv_make3(NV_R(0), NV_R(0), NV_R(0)); first.velocity = first.contact; first.normal = first.contact; first.fraction = NV_R(0);
     // Positions stay in origin space; the anchor-space point is formed only for
     // the surface tests, so a particle that hits nothing keeps its exact path.
     nv_real3 origin = m.origin_anchor;
-    nv_real3 local = start, displacement = s.position - start, velocity = s.velocity;
+    nv_real3 local = start, displacement = move, velocity = s.velocity;
+    nv_real remaining = h;             // seconds of the interval not yet swept
+    uint carrier = 0xffffffffu;        // surface the particle moves with since its last contact
     bool complete = true;
     NV_LOOP for (uint bounce = 0u; bounce <= 4u; ++bounce) {
         nv_real earliest = NV_R(2); uint selected = 0xffffffffu; nv_real3 normal = nv_make3(NV_R(0), NV_R(0), NV_R(0));
+        nv_real3 offset = nv_make3(NV_R(0), NV_R(0), NV_R(0)), path = displacement;
+        // Where the particle was when this sweep's time started, relative to `local`
+        // (it moved with its carrier since its last contact; zero before any contact).
+        nv_real3 back = nv_make3(NV_R(0), NV_R(0), NV_R(0));
+        if (carrier != 0xffffffffu) back = nv_surface_uncarry_delta(nv_surface_local(NV_SURFACE(carrier), origin), remaining, local);
         // Candidates may come from an acceleration structure (duplicates allowed):
         // the tie rule makes the result independent of their order. The query is
         // anchor space; the hit test is emitter-origin space (error ~ D 2^-24 with
@@ -263,19 +316,29 @@ bool nv_collide(NvMotion m, nv_real3 start, NV_INOUT(NvState) s, NV_OUT(NvImpact
         NV_LOOP while (NV_SURFACE_NEXT(query, n)) {
             NvSurface surface = nv_surface_local(NV_SURFACE(n), origin);
             if (m.self == 0u && surface.entity0 == m.entity0 && surface.entity1 == m.entity1 && surface.generation0 == m.generation0 && surface.generation1 == m.generation1) continue;
+            // The path relative to this surface starts at local + delta (tick-end frame).
+            nv_real3 delta = nv_make3(NV_R(0), NV_R(0), NV_R(0));
+            if (n != carrier) {
+                delta = back;
+                if (nv_surface_moves(surface)) delta = delta + nv_surface_carry_delta(surface, remaining, local + back);
+            }
+            nv_real3 d = displacement - delta;
             nv_real t; nv_real3 direction;
-            if (nv_hit(surface, local, displacement, t, direction) && (t < earliest || (t == earliest && n < selected))) { earliest = t; selected = n; normal = direction; }
+            if (nv_hit(surface, local, delta, d, t, direction) && (t < earliest || (t == earliest && n < selected))) { earliest = t; selected = n; normal = direction; offset = delta; path = d; }
         }
         if (selected == 0xffffffffu) { local = local + displacement; break; }
         if (bounce == 4u) { complete = false; break; }
         NvSurface hitSurface = nv_surface_local(NV_SURFACE(selected), origin);
-        nv_real3 contactLocal = local + displacement * earliest;
+        nv_real3 contactLocal = local + (offset + path * earliest);
         nv_real3 surfaceVelocity = hitSurface.velocity + cross(hitSurface.angular, contactLocal - hitSurface.origin);
         velocity = surfaceVelocity + nv_bounce(velocity - surfaceVelocity, normal, m.restitution, m.friction);
         first.count = first.count + 1u;
         if (first.count == 1u) { first.contact = contactLocal; first.velocity = velocity; first.normal = normal; first.fraction = earliest; }
-        displacement = nv_bounce(displacement * (NV_R(1) - earliest), normal, m.restitution, m.friction);
+        // The rest of the path, relative to the struck surface, reflects off it.
+        displacement = nv_bounce(path * (NV_R(1) - earliest), normal, m.restitution, m.friction);
         local = contactLocal + normal * m.separation;
+        remaining = remaining * (NV_R(1) - earliest);
+        carrier = selected;
     }
     s.position = local; s.velocity = velocity;
     return complete;
@@ -293,16 +356,19 @@ bool nv_integrate(NvMotion m, nv_real h, NvDrag d, NV_INOUT(NvState) s, NV_OUT(N
     }
     a = a + nv_context_fields(q);
     a = a + nv_world_field(0u, q);
-    s.position = s.position + s.velocity * d.position + a * d.acceleration;
+    // The interval's displacement is kept as a small vector and added to the
+    // (possibly far from the origin) position once: the sweep uses it directly.
+    nv_real3 move = s.velocity * d.position + a * d.acceleration;
     s.velocity = s.velocity * d.velocity + a * d.position;
     if (m.wind != 0u) {
         nv_real3 w = nv_world_field(1u, q);
-        s.position = s.position + w * (m.drag * d.acceleration);
+        move = move + w * (m.drag * d.acceleration);
         s.velocity = s.velocity + w * (m.drag * d.position);
     }
     bool complete = true;
     impact.count = 0u; impact.contact = nv_make3(NV_R(0), NV_R(0), NV_R(0)); impact.velocity = impact.contact; impact.normal = impact.contact; impact.fraction = NV_R(0);
-    if (m.collision != 0u) complete = nv_collide(m, start, s, impact);
+    if (m.collision != 0u) complete = nv_collide(m, h, start, move, s, impact);
+    else s.position = start + move;
     s.age = s.age + h;
     return complete;
 }

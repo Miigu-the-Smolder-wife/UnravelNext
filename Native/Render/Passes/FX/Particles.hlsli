@@ -43,6 +43,9 @@
 #define FX_COUNTER_DYING 4u
 #define FX_COUNTER_LARGE 5u      // surfaces in the collision grid's large list
 #define FX_COUNTER_GRID_ENTRIES 6u
+#define FX_COUNTER_VOLUMES 7u        // live volume particles listed for FxCells this tick
+#define FX_COUNTER_TURN 8u           // asuint(max |w| dt over the grid's surfaces) (FxGrid, motion bound of the queries)
+#define FX_COUNTER_CARRY 9u          // asuint(max carrier displacement bound over all surfaces)
 
 // alive[] values: 0 dead, 1 alive, 2 died in this tick (dying list; compaction clears it to 0)
 #define FX_SLOT_DEAD 0u
@@ -69,7 +72,12 @@ cbuffer FxTick : register(b1)
     uint g_report, g_emitterDynamic, g_bodies, g_tickSurfaces;
     float g_gridCell; uint g_gridMask, g_gridCount, g_gridStart;     // collision grid (FxGrid.hlsl)
     uint g_gridFill, g_gridEntries, g_gridLarge, g_gridEntryCapacity;
-    uint g_staticSurfaceCount, g_dynamicSurfaces, g_pad3, g_pad4;  // g_surfaceCount = static + dynamic
+    uint g_staticSurfaceCount, g_dynamicSurfaces, g_ribbonPoints, g_mediumCells;  // g_surfaceCount = static + dynamic
+    uint g_ribbonCapacity, g_cellCapacity, g_volumeList, g_gridBlocks;  // header ribbon_points, medium_cells; grid block offsets
+    uint g_emitterUpdates, g_emitterUpdateRows, g_emitterStamp, g_updateCount;  // emitter table delta (FxEmitters.hlsl)
+    uint g_serial; float g_separationMax; uint g_volumeRanges, g_volumeRangeCount;
+    uint g_surfaceBoxes, g_pad8, g_pad9, g_pad10;  // grown box per surface (FxGrid STEP 1), candidate filter  // packet serial (stamps of the rows
+                                                                                  // sent); largest separation; FxCells ranges
 };
 
 // ---- stream records (StructuredBuffer layouts: 4-byte packing, same order as NativeVfxStream.h) ------------------
@@ -211,6 +219,18 @@ float4 fxCurveKey(uint i)
 // candidates are the large list plus the buckets of the cells its AABB spans (hash collisions and duplicates only add
 // candidates; the shared tie rule makes the order irrelevant). A segment spanning more than FX_GRID_QUERY_CELLS cells
 // tests every surface. So the candidates are always a superset of the surfaces the segment can hit.
+//
+// Moving surfaces (nv_collide sweeps each surface in its own frame): a surface n with velocity v, angular velocity w
+// about its centre of mass o and extent r (largest distance of its points from o) is hit by the relative path from
+// P = carry_n(W) to the segment's end E, where W = uncarry_c(A) is the sweep's start A taken back through the motion
+// of the carrier c (the surface of the last contact; W = A without one). With theta = |w| h, u = |v| h over the
+// interval h <= dt and |W - A| <= D_c = u_c + theta_c (r_c + separation), a hit point x of n and the point y of the
+// query segment at the same parameter satisfy
+//     |x - y| <= [theta_n r_n + (1 + theta_n) u_n] / (1 - theta_n) + [(1 + theta_n) D_c + theta_n |d|] / (1 - theta_n)
+// (|P - A| <= u_n + theta_n |W - o_n + v h| + D_c and |W - o_n| <= D_c + |d| + |x - y| + r_n). The first term grows the
+// surface's box (FxGrid); the second grows the query box with the tick's maxima theta_max over the grid's surfaces and
+// D_max over all surfaces (FX_COUNTER_TURN / FX_COUNTER_CARRY). A surface with theta >= 1/2 is in the large list (always
+// a candidate). Static surfaces add nothing.
 #define FX_GRID_SURFACE_CELLS 64u
 #define FX_GRID_QUERY_CELLS 64u
 uint fxGridHash(int3 c) { return ((uint)c.x * 73856093u) ^ ((uint)c.y * 19349663u) ^ ((uint)c.z * 83492791u); }
@@ -232,12 +252,20 @@ uint fxGridBox(float3 lo, float3 hi, uint limit, out int3 a, out int3 span)
 int3 fxGridCellOf(int3 a, int3 span, uint k) { return a + int3((int)(k % (uint)span.x), (int)((k / (uint)span.x) % (uint)span.y), (int)(k / (uint)(span.x * span.y))); }
 struct FxSurfaceQuery
 {
+    float3 lo, hi;    // grown query box (candidates whose grown box misses it are skipped)
     uint mode;        // 0 large list, 1 grid cells, 2 every surface, 3 done
     uint next, end;   // current list range (large list, bucket entries, surfaces)
     int3 a, span;     // cell box
     uint cell, cells; // next cell index, cell count
     uint visited;     // candidates so far (watchdog)
 };
+// Bucket start: exclusive prefix inside its block of 1024 buckets + the block's offset (FxGrid STEP 2 and 4).
+uint fxGridStart(uint b)
+{
+    FX_RWBUFFER(uint, starts, g_gridStart);
+    FX_RWBUFFER(uint, blocks, g_gridBlocks);
+    return starts[b] + blocks[b >> 10];
+}
 bool fxQueryBucket(inout FxSurfaceQuery q)
 {
     // the next cell of the box with a non-empty bucket; false when the box is done
@@ -247,7 +275,7 @@ bool fxQueryBucket(inout FxSurfaceQuery q)
     {
         const uint b = fxGridHash(fxGridCellOf(q.a, q.span, q.cell)) & g_gridMask;
         q.cell++;
-        q.next = starts[b];
+        q.next = fxGridStart(b);
         q.end = q.next + counts[b];
         if (q.end > g_gridEntryCapacity) { fxStatus(FX_STATUS_RANGE); q.end = q.next; }
         if (q.next < q.end) return true;
@@ -257,19 +285,27 @@ bool fxQueryBucket(inout FxSurfaceQuery q)
 FxSurfaceQuery fxSurfaceQuery(float3 p, float3 d)
 {
     FxSurfaceQuery q;
-    q.cells = fxGridBox(min(p, p + d), max(p, p + d), FX_GRID_QUERY_CELLS, q.a, q.span);
+    FX_RWBUFFER(uint, counters, g_counters);
+    const float turn = asfloat(counters[FX_COUNTER_TURN]), carry = asfloat(counters[FX_COUNTER_CARRY]);
+    const float grow = (turn > 0.0f || carry > 0.0f) ? ((1.0f + turn) * carry + turn * length(d)) / (1.0f - turn) : 0.0f;
+    q.lo = min(p, p + d) - grow;
+    q.hi = max(p, p + d) + grow;
+    q.cells = fxGridBox(q.lo, q.hi, FX_GRID_QUERY_CELLS, q.a, q.span);
     q.cell = 0u;
     q.visited = 0u;
-    FX_RWBUFFER(uint, counters, g_counters);
     if (q.cells == 0u) { q.mode = 2u; q.next = 0u; q.end = g_surfaceCount; }
     else { q.mode = 0u; q.next = 0u; q.end = min(counters[FX_COUNTER_LARGE], g_surfaceCount); }
     return q;
 }
 // Watchdog: a legal enumeration visits at most every surface (exhaustive) or the large list plus the grid entries.
+// A candidate whose grown box (FxGrid) does not overlap the grown query box cannot be hit (the same bound as the cells,
+// without the cell rounding) and is skipped before the shared sweep loads it. A large-list surface without a bound has an
+// infinite box.
 bool fxSurfaceNext(inout FxSurfaceQuery q, out uint n)
 {
     n = 0u;
-    [loop] for (uint guard = 0u; guard < 3u; ++guard)
+    FX_RWBUFFER(float4, boxes, g_surfaceBoxes);
+    [loop] for (uint guard = 0u; guard < 3u + g_surfaceCount + g_gridEntryCapacity; ++guard)
     {
         if (q.next < q.end)
         {
@@ -278,7 +314,9 @@ bool fxSurfaceNext(inout FxSurfaceQuery q, out uint n)
             else if (q.mode == 1u) { FX_RWBUFFER(uint, entries, g_gridEntries); n = entries[q.next]; }
             else n = q.next;
             q.next++;
-            if (n >= g_surfaceCount) { fxStatus(FX_STATUS_RANGE); n = 0u; }
+            if (n >= g_surfaceCount) { fxStatus(FX_STATUS_RANGE); n = 0u; return true; }
+            const float3 blo = boxes[2u * n].xyz, bhi = boxes[2u * n + 1u].xyz;
+            if (any(bhi < q.lo) || any(blo > q.hi)) continue;
             return true;
         }
         if (q.mode == 0u) { q.mode = 1u; if (fxQueryBucket(q)) continue; q.mode = 3u; return false; }
@@ -286,6 +324,7 @@ bool fxSurfaceNext(inout FxSurfaceQuery q, out uint n)
         q.mode = 3u;
         return false;
     }
+    fxStatus(FX_STATUS_WATCHDOG);
     return false;
 }
 #define NV_SURFACE_QUERY_TYPE FxSurfaceQuery
@@ -340,3 +379,63 @@ StreamEvent fxEvent(uint emitter, uint birth, uint kind, NvState s)
     return ev;
 }
 #endif
+
+// ---- geometry outputs (WORLD_VFX_DESIGN_KO.md 3.5), written by the integrate kernel with the slot's final state -----------
+// The live births of an emitter are [death_birth, next_birth), so a live particle's output index is
+// output_base + (birth - death_birth) (NativeVfxStream.h): no sort.
+//   NV_RIBBON: ribbon point {origin-space position, width = size (full), age} (strips: FxRibbon.hlsl);
+//   NV_VOLUME: grid^3 medium cells (NV_MediumCell, 96 B) from output_base + (birth - death_birth) x grid^3 (output_base
+//              counts cells): cuboid of side = size around the particle, separable tent mass over the grid, coefficients
+//              = program coefficients x density (colour alpha scales mass, RGB tints emission) / the support volume (the
+//              old VfxMediaShader rules, in float). Cell coordinates: integer 1024 m cells of the anchor space + float
+//              offsets inside the cell.
+#define FX_OUTPUT_RIBBON 2u
+#define FX_OUTPUT_VOLUME 3u
+struct RibbonPoint { float3 position; float width; float age; uint valid; uint pad0, pad1; };  // 32 B
+struct MediumCell { int4 cell; float4 low, high, absorption, scattering, emission; };           // 96 B (NV_MediumCell)
+float fxCurve1(uint first, uint count, float u) { return count >= 2u ? nv_curve(first, count, u).y : 1.0f; }
+float3 fxCurve3(uint first, uint count, float u) { return count >= 2u ? nv_curve(first, count, u).yzw : float3(1, 1, 1); }
+float fxTentMass(uint k, uint n)
+{
+    const float a = (float)k / (float)n * 2.0f - 1.0f, b = (float)(k + 1u) / (float)n * 2.0f - 1.0f;
+    const float ca = a <= 0 ? 0.5f * (a + 1) * (a + 1) : 1 - 0.5f * (1 - a) * (1 - a);
+    const float cb = b <= 0 ? 0.5f * (b + 1) * (b + 1) : 1 - 0.5f * (1 - b) * (1 - b);
+    return cb - ca;
+}
+// Per-particle values of a live volume particle's cells (48 B), written by the integrate kernel at the index of its first
+// cell; FxCells (thread per cell) reads it. serial = the tick's packet serial, so a record of a slot that is not live this
+// tick (a stale index) is never used.
+struct VolumeRecord { float3 centre; float size; float4 colour; int3 cell; uint serial; };
+// Integrate epilogue: a ribbon particle writes its point; a volume particle writes its record (its grid^3 cells are
+// written by FxCells, thread per cell, so the integrate waves neither diverge on the cell loop nor scatter 96 B rows).
+void fxWriteOutputs(uint slot, uint birth, NvState s, StreamEmitter e, StreamProgram p, EmitterDynamic dyn)
+{
+    if (p.output == FX_OUTPUT_RIBBON)
+    {
+        const float u = saturate(s.age / p.lifetime);
+        const float size = p.size * e.sizeScale * fxCurve1(p.sizeKeys, p.sizeCount, u);
+        const uint index = e.outputBase + (birth - e.deathBirth);
+        if (index >= g_ribbonCapacity) { fxStatus(FX_STATUS_RANGE); return; }
+        FX_RWBUFFER(RibbonPoint, points, g_ribbonPoints);
+        RibbonPoint rp;
+        rp.position = s.position; rp.width = size; rp.age = s.age; rp.valid = 1u; rp.pad0 = rp.pad1 = 0u;
+        points[index] = rp;
+    }
+    else if (p.output == FX_OUTPUT_VOLUME)
+    {
+        const float u = saturate(s.age / p.lifetime);
+        const uint n = clamp(p.mediumGrid, 1u, 32u), cells = n * n * n;
+        const uint first = e.outputBase + (birth - e.deathBirth) * cells;
+        if (cells > g_cellCapacity || first > g_cellCapacity - cells) { fxStatus(FX_STATUS_RANGE); return; }
+        VolumeRecord r;
+        r.size = p.size * e.sizeScale * fxCurve1(p.sizeKeys, p.sizeCount, u);
+        r.colour = float4(p.color.rgb * e.colorScale.rgb * fxCurve3(p.colorKeys, p.colorCount, u),
+                          p.color.a * e.colorScale.a * fxCurve1(p.alphaKeys, p.alphaCount, u));
+        const float3 q = dyn.originAnchor + s.position;
+        r.cell = (int3)floor(q / 1024.0f);
+        r.centre = q - (float3)r.cell * 1024.0f;
+        r.serial = g_serial;
+        FX_RWBUFFER(VolumeRecord, records, g_volumeList);
+        records[first] = r;
+    }
+}

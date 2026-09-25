@@ -37,9 +37,15 @@ struct TickConstants
     uint32_t report, emitterDynamic, bodies, tickSurfaces;
     float gridCell; uint32_t gridMask, gridCount, gridStart;  // collision candidate grid (FxGrid.hlsl)
     uint32_t gridFill, gridEntries, gridLarge, gridEntryCapacity;
-    uint32_t staticSurfaceCount, dynamicSurfaces, pad3, pad4;  // surfaceCount = static + dynamic
+    uint32_t staticSurfaceCount, dynamicSurfaces, ribbonPoints, mediumCells;  // surfaceCount = static + dynamic
+    uint32_t ribbonCapacity, cellCapacity, volumeList, gridBlocks;
+    uint32_t emitterUpdates, emitterUpdateRows, emitterStamp, updateCount;
+    uint32_t serial;
+    float separationMax;  // largest program separation (collision grid motion bound)
+    uint32_t volumeRanges, volumeRangeCount;
+    uint32_t surfaceBoxes, pad8, pad9, pad10;
 };
-static_assert(sizeof(TickConstants) == 304);
+static_assert(sizeof(TickConstants) == 368);
 
 // counters[] words (Particles.hlsli)
 enum : uint32_t { kCounterAlive = 0, kCounterDead = 1, kCounterCollisions = 2, kCounterStatus = 3, kCounterDying = 4, kCounterWords = 16 };
@@ -95,6 +101,7 @@ private:
     render::Device& m_device;
     uint32_t m_sortPasses = 3, m_chainDepthMax = 4, m_readbackSlots = 4, m_collisionReadback = 4096;
     float m_gridCell = 1.0f;
+    uint32_t m_experimentDisable = 0;  // timing attribution only (fx.toml experiment_disable); 0 in every product run
     uint32_t m_capacity = 0;
     uint64_t m_latestTick = 0;
     std::deque<std::vector<uint8_t>> m_pending;

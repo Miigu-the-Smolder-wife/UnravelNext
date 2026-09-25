@@ -12,7 +12,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const uint k = P[0].x + id.x;
     if (k >= P[0].y) return;
     FX_BUFFER(StreamSpawn, spawns, g_spawns);
-    FX_BUFFER(StreamEmitter, emitters, g_emitters);
+    FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
     FX_RWBUFFER(EmitterDynamic, dynamic, g_emitterDynamic);
     FX_RWBUFFER(StreamEvent, events, g_events);
     const uint row = spawns[k].emitter;

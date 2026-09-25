@@ -1,8 +1,9 @@
 // unx-kernel: cs_6_6 main
 // unx-variants: RESET=0,1
-// Tick start of the particle module. Thread per emitter row: the row's derived values start from the table (child rows
+// Tick start of the particle module (after FxEmitters). Thread per emitter row: a row the packet did not send gets its
+// per-tick fields cleared; the row's derived values start from the table (child rows
 // are overwritten at their depth by FxChildSetup). Thread 0 clears the per-tick counters (collision events, status,
-// dying). RESET=1 (NV_STREAM_RESET): additionally thread per slot: slots [0, restore_count) receive the restore records,
+// dying, volume list). RESET=1 (NV_STREAM_RESET): additionally thread per slot: slots [0, restore_count) receive the restore records,
 // every other slot becomes dead (the compaction that follows rebuilds the lists).
 // P[0].x threads (max(emitters, RESET ? capacity : 0))
 #include "Passes/FX/Particles.hlsli"
@@ -17,11 +18,21 @@ void main(uint3 id : SV_DispatchThreadID)
         counters[FX_COUNTER_COLLISIONS] = 0u;
         counters[FX_COUNTER_STATUS] = 0u;
         counters[FX_COUNTER_DYING] = 0u;
+        counters[FX_COUNTER_VOLUMES] = 0u;
     }
     if (i < g_emitterCount)
     {
-        FX_BUFFER(StreamEmitter, emitters, g_emitters);
+        FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
         FX_RWBUFFER(EmitterDynamic, dynamic, g_emitterDynamic);
+        FX_RWBUFFER(uint, stamp, g_emitterStamp);
+        if (stamp[i] != g_serial)
+        {
+            // a row not sent this tick: its per-tick fields are absent (NativeVfxStream.h, NV_STREAM_EMITTER_DELTA)
+            emitters[i].rebase = float3(0, 0, 0);
+            emitters[i].flags &= ~(FX_EMITTER_TRANSPORT | FX_EMITTER_SOURCE | FX_EMITTER_KILLED);
+            emitters[i].parentEvent = FX_NONE;
+            emitters[i].parentRow = FX_NONE;
+        }
         EmitterDynamic d;
         d.originAnchor = emitters[i].originAnchor; d.pad0 = 0u;
         d.inherited = emitters[i].inherited; d.pad1 = 0u;

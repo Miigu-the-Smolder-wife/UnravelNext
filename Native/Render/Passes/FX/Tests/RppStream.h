@@ -18,6 +18,7 @@
 #include "../Stream/src/VfxStreamCpu.h"
 
 #include <algorithm>
+#include <functional>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -38,6 +39,8 @@ struct RppConfig
     uint32_t killRow = 10, killTick = 400;
     bool boxShape = true;         // program 2 emits from a box (development switch while the shared box draws are fixed)
     uint32_t bodies = 1728;
+    double anchorShift[3] = { 0, 0, 0 };  // diagnostic: the anchor moved by this much (world stays the same)
+    bool delta = true;            // emitter table as NV_STREAM_EMITTER_DELTA packets (rows that changed since they were last sent)
     bool childNoise = true;       // diagnostic switch: noise on the cascade children's programs       // rigid bodies with 4 collision surfaces each (RPP: 6,912 surfaces), moving and rotating
 };
 
@@ -46,7 +49,7 @@ class RppStream
 public:
     explicit RppStream(const RppConfig& c) : m_c(c)
     {
-        m_anchor[0] = 1000.0; m_anchor[1] = 0.0; m_anchor[2] = -2000.0;
+        m_anchor[0] = 1000.0 + c.anchorShift[0]; m_anchor[1] = 0.0 + c.anchorShift[1]; m_anchor[2] = -2000.0 + c.anchorShift[2];
         buildPrograms();
         const double rate = double(c.particles) / c.emitters / c.lifetime;
         for (uint32_t e = 0; e < c.emitters; ++e)
@@ -56,9 +59,9 @@ public:
             r.program = e % 16;
             r.rate = rate;
             r.duration = 1e30;
-            r.origin[0] = m_anchor[0] + 6.0 * (e % 16);
-            r.origin[1] = m_anchor[1] + 2.0;
-            r.origin[2] = m_anchor[2] + 6.0 * (e / 16);
+            r.origin[0] = m_anchor[0] - c.anchorShift[0] + 6.0 * (e % 16);  // world fixed under an anchor shift
+            r.origin[1] = m_anchor[1] - c.anchorShift[1] + 2.0;
+            r.origin[2] = m_anchor[2] - c.anchorShift[2] + 6.0 * (e / 16);
             r.seed = 0x9E3779B9u * (e + 1);
             r.explicitBirths = c.features && e == 3;
             r.source = c.features && e % 16 == 5;
@@ -81,6 +84,7 @@ public:
     uint32_t childRowsCreated() const { return m_childRows; }
     uint32_t maxDepth() const { return m_maxDepth; }
     uint32_t capacityChanges() const { return m_capacityChanges; }
+    uint32_t sentBlocks() const { return m_sentBlocks; }  // emitter blocks of the last packet (delta)
 
     // Packet of the next tick. 'previous' = the readback events of the previous tick (the CPU authority reads the
     // GPU's event states: child origins and inherited velocities).
@@ -264,9 +268,44 @@ public:
         }
         m_eventSlots = (uint32_t)m_events.size();
 
-        // Packet.
-        std::vector<NV_StreamEmitter> table(m_rows.size());
-        for (uint32_t e = 0; e < (uint32_t)m_rows.size(); ++e) table[e] = emitterRecord(e, dt);
+        // Packet. Emitter table: whole on the first packet (RESET), else the rows whose block differs from the one the GPU
+        // holds (the last sent block with its per-tick fields read as absent, NativeVfxStream.h NV_STREAM_EMITTER_DELTA).
+        std::vector<NV_StreamEmitter> blocks;
+        std::vector<uint32_t> blockRows;
+        const bool delta = m_c.delta && !first;
+        if (delta)
+        {
+            // a row inactive now and at its last send keeps its block (flags 0, no per-tick field): only the others are
+            // built and compared
+            const uint32_t sentRows = (uint32_t)m_sent.size();
+            m_sent.resize(m_rows.size());
+            for (uint32_t e = 0; e < (uint32_t)m_rows.size(); ++e)
+            {
+                if (e < sentRows && !m_rows[e].active && !(m_sent[e].flags & NV_STREAM_EMITTER_ACTIVE)) continue;
+                const NV_StreamEmitter record = emitterRecord(e, dt);
+                NV_StreamEmitter held{};
+                if (e < sentRows)
+                {
+                    held = m_sent[e];
+                    held.rebase[0] = held.rebase[1] = held.rebase[2] = 0;
+                    held.flags &= ~uint32_t(NV_STREAM_EMITTER_TRANSPORT | NV_STREAM_EMITTER_SOURCE | NV_STREAM_EMITTER_KILLED);
+                    held.parent_event = held.parent_row = NV_STREAM_NONE;
+                }
+                if (e >= sentRows || std::memcmp(&held, &record, sizeof held) != 0)
+                {
+                    blocks.push_back(record);
+                    blockRows.push_back(e);
+                }
+                m_sent[e] = record;
+            }
+        }
+        else
+        {
+            blocks.resize(m_rows.size());
+            for (uint32_t e = 0; e < (uint32_t)m_rows.size(); ++e) { blocks[e] = emitterRecord(e, dt); blockRows.push_back(e); }
+            m_sent = blocks;
+        }
+        m_sentBlocks = (uint32_t)blocks.size();
         std::vector<NV_StreamSpawn> all;
         NV_StreamHeader h{};
         for (uint32_t d = 0; d <= NV_STREAM_MAX_DEPTH; ++d)
@@ -277,7 +316,7 @@ public:
         h.depth[NV_STREAM_MAX_DEPTH + 1] = (uint32_t)all.size();
         h.magic = NV_STREAM_MAGIC;
         h.version = NV_STREAM_VERSION;
-        h.flags = first ? (NV_STREAM_RESET | NV_STREAM_PROGRAMS | NV_STREAM_SURFACES) : 0u;
+        h.flags = first ? (NV_STREAM_RESET | NV_STREAM_PROGRAMS | NV_STREAM_SURFACES) : (delta ? NV_STREAM_EMITTER_DELTA : 0u);
         h.stream = 0x5354524541ull;
         h.generation = 1;
         h.tick = m_tick;
@@ -290,7 +329,8 @@ public:
         h.alive_after = alive;
         h.program_count = first ? (uint32_t)m_programs.size() : 0;
         h.curve_key_count = first ? (uint32_t)m_keys.size() : 0;
-        h.emitter_count = (uint32_t)table.size();
+        h.emitter_count = (uint32_t)blocks.size();
+        h.emitter_table = (uint32_t)m_rows.size();
         h.spawn_count = (uint32_t)all.size();
         h.explicit_count = (uint32_t)explicitBirths.size();
         h.field_count = (uint32_t)m_fields.size();
@@ -320,7 +360,8 @@ public:
             h.programs = section(programs.data(), programs.size() * sizeof(NV_StreamProgram));
             h.curve_keys = section(m_keys.data(), m_keys.size() * sizeof(NV_StreamCurveKey));
         }
-        h.emitters = section(table.data(), table.size() * sizeof(NV_StreamEmitter));
+        h.emitters = section(blocks.data(), blocks.size() * sizeof(NV_StreamEmitter));
+        if (delta) h.emitter_rows = section(blockRows.data(), blockRows.size() * 4);
         h.spawns = section(all.data(), all.size() * sizeof(NV_StreamSpawn));
         h.explicit_births = section(explicitBirths.data(), explicitBirths.size() * sizeof(NV_StreamExplicitBirth));
         h.fields = section(m_fields.data(), m_fields.size() * sizeof(NV_StreamField));
@@ -333,10 +374,15 @@ public:
         std::memcpy(packet.data(), &h, sizeof h);
 
         // Rows: a killed row ends; a child row whose last particle died is free from the next tick.
-        for (auto& r : m_rows)
+        for (uint32_t e = 0; e < (uint32_t)m_rows.size(); ++e)
         {
+            Row& r = m_rows[e];
             if (r.killed) r.active = false;
-            if (r.active && r.childRow && r.nextBirth == r.deathBirth && r.parentEvent == NV_STREAM_NONE) r.active = false;
+            if (r.active && r.childRow && r.nextBirth == r.deathBirth && r.parentEvent == NV_STREAM_NONE)
+            {
+                r.active = false;
+                freeRow(e);
+            }
         }
         return packet;
     }
@@ -383,7 +429,7 @@ private:
         const Program& p = m_programs[m_rows[row].program];
         NV_StreamSpawn s{};
         s.emitter = row; s.count = count; s.first_birth = firstBirth; s.expired = expired; s.kind = kind;
-        for (const auto& x : list) s.thread_offset += x.count;
+        if (!list.empty()) s.thread_offset = list.back().thread_offset + list.back().count;  // prefix of the depth's threads
         s.interval = interval; s.carry = carry; s.rate = rate;
         s.birth_event = NV_STREAM_NONE;
         s.death_event = NV_STREAM_NONE;
@@ -401,12 +447,23 @@ private:
         list.push_back(s);
     }
 
+    // The lowest inactive child row (a min-heap of the rows freed so far), else a new row.
     uint32_t allocateRow()
     {
-        for (uint32_t e = m_c.emitters; e < (uint32_t)m_rows.size(); ++e)
-            if (!m_rows[e].active) return e;
+        if (!m_freeRows.empty())
+        {
+            std::pop_heap(m_freeRows.begin(), m_freeRows.end(), std::greater<uint32_t>());
+            const uint32_t e = m_freeRows.back();
+            m_freeRows.pop_back();
+            return e;
+        }
         m_rows.emplace_back();
         return (uint32_t)m_rows.size() - 1;
+    }
+    void freeRow(uint32_t e)
+    {
+        m_freeRows.push_back(e);
+        std::push_heap(m_freeRows.begin(), m_freeRows.end(), std::greater<uint32_t>());
     }
 
     NV_StreamEmitter emitterRecord(uint32_t e, double dt)
@@ -555,7 +612,8 @@ private:
         {
             NV_StreamField x{};
             x.kind = f % 3;
-            x.position[0] = 10.f * f; x.position[1] = 5; x.position[2] = 10.f * (f % 4);
+            x.position[0] = (float)(10.0 * f - m_c.anchorShift[0]); x.position[1] = (float)(5.0 - m_c.anchorShift[1]);
+            x.position[2] = (float)(10.0 * (f % 4) - m_c.anchorShift[2]);
             x.value[0] = f % 3 == 1 ? 2.f : .1f;
             x.value[1] = f % 3 == 0 ? -.1f : 0;
             x.radius = 1;
@@ -618,7 +676,7 @@ private:
         std::vector<NV_StreamSurface> out;
         auto point = [&](int i, int j, float* p, float* v) {
             const double x = 40.0 + 2.0 * i, z = 16.0 + 2.0 * j, w = 1.7, k = 0.35;
-            p[0] = (float)x; p[1] = (float)(2.8 + 0.4 * std::sin(k * x + w * t)); p[2] = (float)z;
+            p[0] = (float)(x - m_c.anchorShift[0]); p[1] = (float)(2.8 + 0.4 * std::sin(k * x + w * t) - m_c.anchorShift[1]); p[2] = (float)(z - m_c.anchorShift[2]);
             v[0] = 0; v[1] = (float)(0.4 * w * std::cos(k * x + w * t)); v[2] = 0;
         };
         for (int i = 0; i < 4; ++i)
@@ -646,7 +704,8 @@ private:
         std::vector<NV_StreamBody> out(m_c.bodies);
         for (uint32_t b = 0; b < m_c.bodies; ++b)
         {
-            const double hx = 1.5 + 2.8 * (b % 36), hz = 1.0 + 2.9 * ((b / 36) % 16), hy = 2.5 + 1.2 * (b % 3);
+            const double hx = 1.5 + 2.8 * (b % 36) - m_c.anchorShift[0], hz = 1.0 + 2.9 * ((b / 36) % 16) - m_c.anchorShift[2],
+                         hy = 2.5 + 1.2 * (b % 3) - m_c.anchorShift[1];
             const double w = 0.4 + 0.05 * (b % 7), r = 0.6, spin = 0.8 + 0.1 * (b % 5), phase = 0.37 * b;
             NV_StreamBody& f = out[b];
             f.position[0] = (float)(hx + r * std::cos(w * t + phase));
@@ -667,6 +726,9 @@ private:
     RppConfig m_c;
     double m_anchor[3];
     uint64_t m_tick = 0;
+    std::vector<NV_StreamEmitter> m_sent;  // whole table as the GPU holds it (last sent block of each row)
+    std::vector<uint32_t> m_freeRows;      // inactive child rows (min-heap)
+    uint32_t m_sentBlocks = 0;
     uint32_t m_capacity = 0, m_aliveAfter = 0, m_eventSlots = 0, m_childRows = 0, m_maxDepth = 0, m_capacityChanges = 0;
     std::vector<Program> m_programs;
     std::vector<NV_StreamCurveKey> m_keys;

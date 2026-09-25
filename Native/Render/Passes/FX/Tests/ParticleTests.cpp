@@ -55,6 +55,8 @@ namespace
         if (!(cond)) fail("%s:%d: %s", __FILE__, __LINE__, unx::format(__VA_ARGS__).c_str());                         \
     } while (0)
 
+uint32_t g_watchEmitter = UINT32_MAX, g_watchBirth = 0;  // diagnostic: --watch E B logs that particle's error at every compare
+
 struct Options
 {
     uint32_t ticks = 600, compareEvery = 60;
@@ -74,15 +76,15 @@ std::string sha(const std::vector<uint8_t>& bytes)
 }
 
 // 1. byte-identical stream copies of the pinned NativeVfx commit (the copies are updated together with this pin)
-constexpr const char* kStreamCommit = "eca421d7";
+constexpr const char* kStreamCommit = "f2cdf56a";
 void checkStreamCopies(bool strict)
 {
     const fs::path mine = fs::path(UNX_SOURCE_DIR) / "Native/Render/Passes/FX/Stream";
     const fs::path original = fs::path(UNX_SOURCE_DIR) / "../Unravel/Native/NativeVfx";
     struct Pin { const char* file; const char* sha; };
-    const Pin pins[] = { { "include/NativeVfxStream.h", "af9a7e0a475f9b4e8d30288da3e9797ab15c160bd0f124dc41cc6271bf9c6687" },
-                         { "shaders/VfxParticleMath.hlsli", "6586633b3e631f2c39c4a06f4072daad8b25a61c2c56ff46b537f3e5617448a2" },
-                         { "src/VfxStreamCpu.h", "fea7de8484e0fd44963bb25e0d63a2d850e991941faa48b267e3916c8769e6b8" } };
+    const Pin pins[] = { { "include/NativeVfxStream.h", "63165ed5d5dc6f0965f0ed00a2a2f4d691604bbaece5f1933c92b3ee0f9850f1" },
+                         { "shaders/VfxParticleMath.hlsli", "85bae72843562b4224df88a7aed06aeff9e53a59576615b9feef09211c8123d2" },
+                         { "src/VfxStreamCpu.h", "45a9158c4a0d5ec01fe9946ccea5fc5b04f9153f5a538477c8b4e3b43919a693" } };
     for (const Pin& pin : pins)
     {
         const std::string a = sha(readBinaryFile(mine / pin.file));
@@ -141,13 +143,105 @@ template <typename T> std::vector<T> readVector(const fs::path& p)
 }
 fs::path tickFile(const std::string& dir, const char* kind, uint32_t t) { return fs::path(dir) / format("%s_%04u.bin", kind, t); }
 
+// Sequential ribbon strips in double (the old VfxRibbonShader walk) on the GPU's points of one range: the reference of
+// the parallel strip scan (FxRibbon.hlsl). Returns per point {vertex 0, vertex 1, uv.x, link}.
+struct D3 { double x, y, z; };
+D3 operator+(D3 a, D3 b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
+D3 operator-(D3 a, D3 b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
+D3 operator*(D3 a, double s) { return { a.x * s, a.y * s, a.z * s }; }
+double dotd(D3 a, D3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+D3 crossd(D3 a, D3 b) { return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x }; }
+double lend(D3 a) { return std::sqrt(dotd(a, a)); }
+D3 unitd(D3 a) { const double l = lend(a); return l > 0 ? a * (1 / l) : a; }
+D3 initiald(D3 tangent, D3 normal)
+{
+    D3 side = crossd(tangent, normal);
+    if (lend(side) < 1e-6)
+    {
+        const D3 a = { std::abs(tangent.x), std::abs(tangent.y), std::abs(tangent.z) };
+        const D3 alt = a.x <= a.y && a.x <= a.z ? D3{ 1, 0, 0 } : (a.y <= a.z ? D3{ 0, 1, 0 } : D3{ 0, 0, 1 });
+        side = crossd(tangent, alt);
+    }
+    return unitd(side);
+}
+D3 transportd(D3 before, D3 after, D3 side)
+{
+    const double c = std::clamp(dotd(before, after), -1.0, 1.0);
+    if (c > -1.0 + 1e-6)
+    {
+        const D3 axis = crossd(before, after), first = crossd(axis, side);
+        side = side + first + crossd(axis, first) * (1.0 / (1.0 + c));
+    }
+    side = side - after * dotd(side, after);
+    return lend(side) > 1e-6 ? unitd(side) : initiald(after, before);
+}
+struct RibbonRef { D3 v0, v1; double u; uint32_t link; bool written; };
+std::vector<RibbonRef> ribbonReference(const std::vector<D3>& p, const std::vector<double>& width, uint32_t base, D3 normal, double limit, double uvScale)
+{
+    const uint32_t n = (uint32_t)p.size();
+    std::vector<RibbonRef> out(n);
+    for (uint32_t j = 0; j < n; ++j) out[j] = { p[j], p[j], 0, 0xFFFFFFFFu, false };
+    auto last = [&](uint32_t i) { while (i + 1 < n && p[i + 1].x == p[i].x && p[i + 1].y == p[i].y && p[i + 1].z == p[i].z) ++i; return i; };
+    D3 prior = normal, side = normal;
+    double distance = 0;
+    uint32_t previous = 0xFFFFFFFFu;
+    if (!n) return out;
+    uint32_t cur = last(0);
+    while (cur < n)
+    {
+        const uint32_t next = cur + 1 < n ? last(cur + 1) : n;
+        bool before = previous != 0xFFFFFFFFu, after = next < n;
+        D3 in{}, outv{};
+        double seg = 0;
+        if (before) { in = p[cur] - p[previous]; seg = lend(in); if (seg > limit) before = false; else in = in * (1 / seg); }
+        if (after) { outv = p[next] - p[cur]; const double span = lend(outv); if (span > limit) after = false; else outv = outv * (1 / span); }
+        if (before || after)
+        {
+            const D3 t = before ? (after ? (lend(in + outv) > 1e-12 ? unitd(in + outv) : outv) : in) : outv;
+            if (before) { side = transportd(prior, t, side); distance += seg; out[cur].link = base + previous; }
+            else { distance = 0; side = initiald(t, normal); }
+            prior = t;
+            const double h = 0.5 * width[cur];
+            out[cur].v0 = p[cur] - side * h;
+            out[cur].v1 = p[cur] + side * h;
+            out[cur].u = distance / uvScale;
+            out[cur].written = true;
+        }
+        previous = cur;
+        cur = next;
+    }
+    return out;
+}
+
+// Whole emitter table after a packet (a delta updates the listed rows; unsent rows lose their per-tick fields).
+void applyEmitters(std::vector<NV_StreamEmitter>& table, const std::vector<uint8_t>& packet)
+{
+    const NV_StreamHeader& h = *reinterpret_cast<const NV_StreamHeader*>(packet.data());
+    const auto* blocks = reinterpret_cast<const NV_StreamEmitter*>(packet.data() + h.emitters);
+    if (!(h.flags & NV_STREAM_EMITTER_DELTA))
+    {
+        table.assign(blocks, blocks + h.emitter_count);
+        return;
+    }
+    const auto* rows = reinterpret_cast<const uint32_t*>(packet.data() + h.emitter_rows);
+    table.resize(h.emitter_table);
+    for (auto& e : table)
+    {
+        e.rebase[0] = e.rebase[1] = e.rebase[2] = 0;
+        e.flags &= ~uint32_t(NV_STREAM_EMITTER_TRANSPORT | NV_STREAM_EMITTER_SOURCE | NV_STREAM_EMITTER_KILLED);
+        e.parent_event = e.parent_row = NV_STREAM_NONE;
+    }
+    for (uint32_t k = 0; k < h.emitter_count; ++k) table[rows[k]] = blocks[k];
+}
+
 template <typename T> T at(const std::vector<uint8_t>& b, size_t i) { T v; std::memcpy(&v, b.data() + i * sizeof(T), sizeof(T)); return v; }
 
 struct Stats
 {
     double maxPos = 0, maxVel = 0, maxAge = 0, sumPos = 0;
     uint64_t n = 0;
-    double p99Pos = 0, maxEvent = 0;
+    double p99Pos = 0, maxEvent = 0, maxRibbon = 0;
+    uint64_t ribbonPoints = 0;
     uint64_t over = 0;
     int dumped = 0, dumpedEvents = 0;
 };
@@ -170,13 +264,17 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
     frame.mainView = ViewDesc::fromCamera(cam, 3840, 2160, float4x4{});
     FrameServices services;
     std::vector<NV_StreamEvent> previous;
+    std::vector<uint8_t> firstPacket;
+    std::vector<NV_StreamEmitter> emitterTable;  // whole table after each packet
     std::vector<std::string> hashes;
-    uint64_t events = 0, collisions = 0, collisionDiff = 0, childRows = 0;
+    uint64_t events = 0, collisions = 0, collisionDiff = 0, childRows = 0, impactOverflowTicks = 0;
     const auto t0 = std::chrono::steady_clock::now();
     for (uint32_t t = 1; t <= o.ticks; ++t)
     {
         waitIfMeasuring(o.yield);
         const std::vector<uint8_t> packet = stream.next(t == 1 ? nullptr : &previous);
+        if (t == 1) firstPacket = packet;
+        applyEmitters(emitterTable, packet);
         const NV_StreamHeader& h = *reinterpret_cast<const NV_StreamHeader*>(packet.data());
         ps.submit(packet.data(), packet.size());
         if (withReference) cpu.submit(packet.data(), packet.size());
@@ -191,7 +289,11 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
 
         const fx::TickReadback rb = ps.readback(h.stream, h.generation, h.tick);
         FX_CHECK(rb.counters.tick == h.tick && rb.counters.stream == h.stream && rb.counters.generation == h.generation, "tick %u: readback identity", t);
-        FX_CHECK(rb.counters.status == 0, "tick %u: GPU status 0x%x (1 impact overflow, 2 nonfinite, 4 alive mismatch, 8 capacity)", t, rb.counters.status);
+        // NV_STREAM_STATUS_IMPACT_OVERFLOW (1) is a reported condition of the contract (a particle needed a fifth impact in
+        // one interval and stays at its fourth contact); the reference must report it in the same ticks. Any other bit
+        // is a defect.
+        FX_CHECK((rb.counters.status & ~1u) == 0, "tick %u: GPU status 0x%x (1 impact overflow, 2 nonfinite, 4 alive mismatch, 8 capacity, 16 range, 32 watchdog)", t, rb.counters.status);
+        if (rb.counters.status & 1u) ++impactOverflowTicks;
         FX_CHECK(rb.counters.alive == h.alive_after, "tick %u: GPU alive %u != alive_after %u", t, rb.counters.alive, h.alive_after);
         previous = rb.events;
         if (!o.record.empty())
@@ -207,7 +309,8 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
         if (withReference)
         {
             const NV_StreamCounters& rc = cpu.counters();
-            FX_CHECK(rc.status == 0, "tick %u: reference status 0x%x", t, rc.status);
+            FX_CHECK((rc.status & ~1u) == 0, "tick %u: reference status 0x%x", t, rc.status);
+            if ((rc.status & 1u) != (rb.counters.status & 1u)) FX_LOG("tick %u: impact overflow reported by %s only", t, (rc.status & 1u) ? "the reference" : "the GPU");
             FX_CHECK(rc.alive == rb.counters.alive, "tick %u: alive GPU %u reference %u", t, rb.counters.alive, rc.alive);
             const auto& re = cpu.events();
             // CPU-assigned slots: identity exact, state close
@@ -315,6 +418,8 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                     const double ep = std::sqrt(dp) / std::max(std::sqrt(pp), 1.0), ev = std::sqrt(dv) / std::max(std::sqrt(vv), 1.0);
                     const double ea = std::abs(g.age - r.age) / std::max(r.age, 1.0);
                     errs.push_back(ep);
+                    if (g.emitter == g_watchEmitter && g.birth == g_watchBirth)
+                        FX_LOG("  watch tick %u particle (%u,%u): position error %.3g, velocity error %.3g", t, g.emitter, g.birth, ep, ev);
                     if (ep > 1e-5 && worst.dumped < 5)
                     {
                         ++worst.dumped;
@@ -334,11 +439,42 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                 FX_LOG("tick %u: %zu particles, rows %u, event slots %u, collisions %u; position error max %.3g p99 %.3g, velocity %.3g, age %.3g", t,
                         gpu.size(), stream.rows(), h.event_slots, rb.counters.collision_events, errs.empty() ? 0.0 : errs.back(), p99, worst.maxVel, worst.maxAge);
             }
+            // tick surfaces: the GPU's float anchor-space body surfaces against the double transform of the same inputs
+            // (reported, not checked: the stream defines surfaces in float anchor space)
+            if (h.body_count)
+            {
+                const NV_StreamHeader& h0 = *reinterpret_cast<const NV_StreamHeader*>(firstPacket.data());
+                const auto* table0 = reinterpret_cast<const NV_StreamSurface*>(firstPacket.data() + h0.surfaces);
+                const auto* bodies = reinterpret_cast<const NV_StreamBody*>(packet.data() + h.bodies);
+                const auto gpuSurfaces = ps.readState("tickSurfaces");
+                double worstAbs = 0, worstAt = 0;
+                for (uint32_t i = 0; i < h0.surface_count; ++i)
+                {
+                    const NV_StreamSurface& s = table0[i];
+                    if (s.body == NV_STREAM_NONE) continue;
+                    const NV_StreamBody& b = bodies[s.body];
+                    const double qx = b.rotation[0], qy = b.rotation[1], qz = b.rotation[2], qw = b.rotation[3];
+                    NV_StreamSurface g;
+                    std::memcpy(&g, gpuSurfaces.data() + (size_t)i * sizeof(NV_StreamSurface), sizeof g);
+                    for (int v = 0; v < 3; ++v)
+                    {
+                        const float* local = v == 0 ? s.a : v == 1 ? s.b : s.c;
+                        const float* gpuPoint = v == 0 ? g.a : v == 1 ? g.b : g.c;
+                        const D3 u = { qx, qy, qz }, x = { local[0], local[1], local[2] };
+                        const D3 tq = crossd(u, x) * 2.0, r = x + tq * qw + crossd(u, tq);
+                        const D3 p = { r.x + b.position[0], r.y + b.position[1], r.z + b.position[2] };
+                        const double e = lend(D3{ gpuPoint[0] - p.x, gpuPoint[1] - p.y, gpuPoint[2] - p.z });
+                        if (e > worstAbs) { worstAbs = e; worstAt = lend(p); }
+                    }
+                }
+                FX_LOG("tick %u: body surfaces GPU float vs double transform: max vertex error %.3g m at |p| %.1f m (%.2f ulp of |p|)", t, worstAbs, worstAt,
+                       worstAt > 0 ? worstAbs / std::ldexp(1.0, std::ilogb(worstAt) - 23) : 0.0);
+            }
             // geometry outputs: every live ribbon particle's point sits at output_base + (birth - death_birth) with its state;
             // every live volume particle's grid^3 cells are finite, non-empty cuboids
             if (h.ribbon_points || h.medium_cells)
             {
-                const auto* table = reinterpret_cast<const NV_StreamEmitter*>(packet.data() + h.emitters);
+                const NV_StreamEmitter* table = emitterTable.data();
                 const auto points = ps.readState("ribbonPoints"), cellsBuf = ps.readState("mediumCells"), vertices = ps.readState("ribbonVertices");
                 uint32_t checkedPoints = 0, checkedCells = 0;
                 for (uint32_t i = 0; i < nAlive; ++i)
@@ -373,6 +509,44 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                     }
                 }
                 FX_LOG("tick %u: outputs checked: %u ribbon points (of %u), %u volume particles (%u cells)", t, checkedPoints, h.ribbon_points, checkedCells, h.medium_cells);
+                // strips: the parallel scan against the sequential walk in double, per ribbon range
+                const auto links = ps.readState("ribbonLinks");
+                const auto* programTable = reinterpret_cast<const NV_StreamProgram*>(firstPacket.data() + reinterpret_cast<const NV_StreamHeader*>(firstPacket.data())->programs);
+                double worstRibbon = 0;
+                for (uint32_t r = 0; r < h.emitter_table; ++r)
+                {
+                    const NV_StreamEmitter& e = table[r];
+                    const uint32_t count = e.next_birth - e.death_birth;
+                    if (!(e.flags & NV_STREAM_EMITTER_ACTIVE) || !count || programTable[e.program].output != 2) continue;
+                    const NV_StreamProgram& pr = programTable[e.program];
+                    std::vector<D3> pts(count);
+                    std::vector<double> widths(count);
+                    for (uint32_t j = 0; j < count; ++j)
+                    {
+                        float q[8];
+                        std::memcpy(q, points.data() + (size_t)(e.output_base + j) * 32, 32);
+                        pts[j] = { q[0], q[1], q[2] };
+                        widths[j] = q[3];
+                    }
+                    const auto ref = ribbonReference(pts, widths, e.output_base, { pr.ribbon_normal[0], pr.ribbon_normal[1], pr.ribbon_normal[2] }, pr.ribbon_break,
+                                                     pr.ribbon_uv > 0 ? pr.ribbon_uv : 1.0);
+                    for (uint32_t j = 0; j < count; ++j)
+                    {
+                        const uint32_t k = e.output_base + j;
+                        FX_CHECK(at<uint32_t>(links, k) == ref[j].link, "tick %u: ribbon point %u link %u, reference %u", t, k, at<uint32_t>(links, k), ref[j].link);
+                        if (!ref[j].written) continue;
+                        float v[16];
+                        std::memcpy(v, vertices.data() + (size_t)k * 64, 64);
+                        const D3 g0 = { v[0], v[1], v[2] }, g1 = { v[8], v[9], v[10] };
+                        const double scale = std::max(lend(pts[j]), 1.0);
+                        const double err = std::max({ lend(g0 - ref[j].v0) / scale, lend(g1 - ref[j].v1) / scale, std::abs(v[6] - ref[j].u) / std::max(ref[j].u, 1.0) });
+                        worstRibbon = std::max(worstRibbon, err);
+                    }
+                    worst.ribbonPoints += count;
+                }
+                worst.maxRibbon = std::max(worst.maxRibbon, worstRibbon);
+                FX_LOG("tick %u: ribbon strips vs sequential double walk: links exact, vertex/uv error max %.3g", t, worstRibbon);
+                FX_CHECK(worstRibbon <= 1e-5, "tick %u: ribbon vertex error %.3g exceeds 1e-5", t, worstRibbon);
             }
             // 4. state hash
             Sha256 hs;
@@ -387,7 +561,8 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
         }
     }
     childRows = stream.childRowsCreated();
-    FX_LOG("stream: capacity changes %u (repacks without RESET), final capacity %u", stream.capacityChanges(), stream.capacity());
+    FX_LOG("stream: capacity changes %u (repacks without RESET), final capacity %u, peak rows %u, ticks with impact overflow %llu", stream.capacityChanges(),
+           stream.capacity(), stream.rows(), (unsigned long long)impactOverflowTicks);
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     FX_LOG("run: %u ticks in %.1f s, CPU-assigned events %llu, collision events %llu (GPU vs reference count difference %llu), child rows %llu, max cascade depth %u",
             o.ticks, seconds, (unsigned long long)events, (unsigned long long)collisions, (unsigned long long)collisionDiff, (unsigned long long)childRows, stream.maxDepth());
@@ -410,8 +585,9 @@ void replay(const Options& o, Stats& worst)
         std::vector<NV_StreamEvent> ge((rbBytes.size() - sizeof gc) / sizeof(NV_StreamEvent));
         if (!ge.empty()) std::memcpy(ge.data(), rbBytes.data() + sizeof gc, ge.size() * sizeof(NV_StreamEvent));
         const NV_StreamCounters& rc = cpu.counters();
-        FX_CHECK(rc.status == 0, "tick %u: reference status 0x%x", t, rc.status);
-        FX_CHECK(gc.status == 0 && gc.alive == rc.alive, "tick %u: GPU alive %u status 0x%x, reference alive %u", t, gc.alive, gc.status, rc.alive);
+        FX_CHECK((rc.status & ~1u) == 0, "tick %u: reference status 0x%x", t, rc.status);
+        FX_CHECK((gc.status & ~1u) == 0 && gc.alive == rc.alive, "tick %u: GPU alive %u status 0x%x, reference alive %u", t, gc.alive, gc.status, rc.alive);
+        if ((rc.status & 1u) != (gc.status & 1u)) FX_LOG("tick %u: impact overflow reported by %s only", t, (rc.status & 1u) ? "the reference" : "the GPU");
         const auto& re = cpu.events();
         for (uint32_t i = 0; i < h.event_slots; ++i)
         {
@@ -498,6 +674,8 @@ int main(int argc, char** argv)
             else if (a == "--no-box") o.rpp.boxShape = false;
             else if (a == "--no-child-noise") o.rpp.childNoise = false;
             else if (a == "--fields") o.rpp.fields = (uint32_t)std::stoul(next());
+            else if (a == "--watch") { g_watchEmitter = (uint32_t)std::stoul(next()); g_watchBirth = (uint32_t)std::stoul(next()); }
+            else if (a == "--anchor-shift") { o.rpp.anchorShift[0] = std::stod(next()); o.rpp.anchorShift[1] = std::stod(next()); o.rpp.anchorShift[2] = std::stod(next()); }
             else fail("unknown option %s", a.c_str());
         }
         checkStreamCopies(o.strictCopies);

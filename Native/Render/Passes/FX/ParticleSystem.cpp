@@ -9,6 +9,8 @@
 #include <cmath>
 #include <cstring>
 #include <string>
+#include <chrono>
+#include <thread>
 
 namespace unx::fx
 {
@@ -95,6 +97,12 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
     section(h.programs, h.program_count, sizeof(NV_StreamProgram), "programs");
     section(h.curve_keys, h.curve_key_count, sizeof(NV_StreamCurveKey), "curve keys");
     section(h.emitters, h.emitter_count, sizeof(NV_StreamEmitter), "emitters");
+    if (h.flags & NV_STREAM_EMITTER_DELTA)
+    {
+        section(h.emitter_rows, h.emitter_count, 4, "emitter rows");
+        if (h.flags & NV_STREAM_RESET) fail("FX particles: a RESET packet sends the whole emitter table");
+    }
+    else if (h.emitter_count != h.emitter_table) fail("FX particles: whole emitter table of %u blocks for %u rows", h.emitter_count, h.emitter_table);
     section(h.spawns, h.spawn_count, sizeof(NV_StreamSpawn), "spawns");
     section(h.explicit_births, h.explicit_count, sizeof(NV_StreamExplicitBirth), "explicit births");
     section(h.fields, h.field_count, sizeof(NV_StreamField), "fields");
@@ -117,17 +125,21 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
     const auto* spawns = reinterpret_cast<const NV_StreamSpawn*>(packet + h.spawns);
     for (uint32_t k = 0; k < h.spawn_count; ++k)
     {
-        if (spawns[k].emitter >= h.emitter_count) fail("FX particles: spawn record %u names emitter row %u of %u", k, spawns[k].emitter, h.emitter_count);
+        if (spawns[k].emitter >= h.emitter_table) fail("FX particles: spawn record %u names emitter row %u of %u", k, spawns[k].emitter, h.emitter_table);
         if (spawns[k].expired > spawns[k].count) fail("FX particles: spawn record %u expired %u > count %u", k, spawns[k].expired, spawns[k].count);
     }
     const uint32_t programTable = (h.flags & NV_STREAM_PROGRAMS) ? h.program_count : programCount;
-    for (uint32_t e = 0; e < h.emitter_count; ++e)
+    const auto* rows = reinterpret_cast<const uint32_t*>(packet + h.emitter_rows);
+    const bool delta = (h.flags & NV_STREAM_EMITTER_DELTA) != 0;
+    for (uint32_t k = 0; k < h.emitter_count; ++k)
     {
-        const NV_StreamEmitter& x = emitters[e];
+        const uint32_t e = delta ? rows[k] : k;
+        if (e >= h.emitter_table || (delta && k && rows[k - 1] >= e)) fail("FX particles: emitter block %u names row %u (table %u, ascending rows)", k, e, h.emitter_table);
+        const NV_StreamEmitter& x = emitters[k];
         if (!(x.flags & NV_STREAM_EMITTER_ACTIVE)) continue;
         if (x.program >= programTable) fail("FX particles: emitter row %u names program %u of %u", e, x.program, programTable);
-        if (x.parent_event != NV_STREAM_NONE && (x.parent_event >= h.event_slots || x.parent_row >= h.emitter_count))
-            fail("FX particles: emitter row %u: parent event %u / row %u outside %u events, %u rows", e, x.parent_event, x.parent_row, h.event_slots, h.emitter_count);
+        if (x.parent_event != NV_STREAM_NONE && (x.parent_event >= h.event_slots || x.parent_row >= h.emitter_table))
+            fail("FX particles: emitter row %u: parent event %u / row %u outside %u events, %u rows", e, x.parent_event, x.parent_row, h.event_slots, h.emitter_table);
     }
     for (uint32_t k = 0; k < h.spawn_count; ++k)
     {
@@ -139,7 +151,7 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
     for (uint32_t k = 0; k < h.explicit_count; ++k)
     {
         const NV_StreamExplicitBirth& x = explicits[k];
-        if (x.emitter >= h.emitter_count) fail("FX particles: explicit birth %u names row %u of %u", k, x.emitter, h.emitter_count);
+        if (x.emitter >= h.emitter_table) fail("FX particles: explicit birth %u names row %u of %u", k, x.emitter, h.emitter_table);
         if ((x.birth_event != NV_STREAM_NONE && x.birth_event >= h.event_slots) || (x.death_event != NV_STREAM_NONE && x.death_event >= h.event_slots))
             fail("FX particles: explicit birth %u event slots outside %u", k, h.event_slots);
     }
@@ -167,7 +179,15 @@ struct ParticleSystem::Impl
     Buf blockSums{ "fx.blockSums", 8 }, keyBySlot{ "fx.keyBySlot", 4 }, spawnedSlots{ "fx.spawnedSlots", 4 };
     Buf keysA{ "fx.keysA", 4 }, valsA{ "fx.valsA", 4 }, keysB{ "fx.keysB", 4 }, valsB{ "fx.valsB", 4 }, hist{ "fx.hist", 4 };
     Buf records[2] = { { "fx.records0", 32 }, { "fx.records1", 32 } };
-    Buf emitters[2] = { { "fx.emitters0", sizeof(NV_StreamEmitter) }, { "fx.emitters1", sizeof(NV_StreamEmitter) } };
+    Buf emitterTable{ "fx.emitterTable", sizeof(NV_StreamEmitter) }, emitterStamp{ "fx.emitterStamp", 4 };  // persistent (delta updates)
+    Buf emitterUpdates{ "fx.emitterUpdates", sizeof(NV_StreamEmitter) }, emitterUpdateRows{ "fx.emitterUpdateRows", 4 };
+    std::vector<NV_StreamEmitter> table;  // CPU mirror of the persistent table (ribbon and volume ranges)
+    uint32_t tableRows = 0, serial = 0;
+    float separationMax = 0;  // largest program separation (collision grid motion bound)
+    std::vector<uint32_t> programGrid;  // medium_grid per program (volume ranges)
+    std::vector<uint32_t> tickRows;     // mirror rows whose last block carried a per-tick field (cleared next tick)
+    std::vector<uint32_t> outputRows;   // active ribbon/volume rows of the mirror (unordered; ranges are sorted)
+    std::vector<uint8_t> outputFlag;
     Buf dynamic[2] = { { "fx.emitterDynamic0", 32 }, { "fx.emitterDynamic1", 32 } };
     Buf counters{ "fx.counters", 4 }, report{ "fx.report", 4 };
     // inputs
@@ -178,6 +198,12 @@ struct ParticleSystem::Impl
     Buf dynamicSurfaces{ "fx.dynamicSurfaces", sizeof(NV_StreamSurface) };
     Buf bodies{ "fx.bodies", sizeof(NV_StreamBody) }, tickSurfaces{ "fx.tickSurfaces", sizeof(NV_StreamSurface) };
     Buf ribbonPoints{ "fx.ribbonPoints", 32 }, ribbonLinks{ "fx.ribbonLinks", 4 }, ribbonVertices{ "fx.ribbonVertices", 32 }, mediumCells{ "fx.mediumCells", 96 };
+    Buf ribbonRanges{ "fx.ribbonRanges", 16 }, ribbonScanA{ "fx.ribbonScanA", 4 }, ribbonScanB{ "fx.ribbonScanB", 32 }, ribbonRunStart{ "fx.ribbonRunStart", 4 },
+        ribbonTangents{ "fx.ribbonTangents", 16 }, ribbonTotalsA{ "fx.ribbonTotalsA", 4 }, ribbonTotalsB{ "fx.ribbonTotalsB", 32 };
+    std::vector<uint32_t> programOutput;  // output kind per program (the last NV_STREAM_PROGRAMS table)
+    Buf surfaceBoxes{ "fx.surfaceBoxes", 16 };
+    Buf volumeList{ "fx.volumeRecords", 48 }, volumeRanges{ "fx.volumeRanges", 16 }, gridBlocks{ "fx.gridBlocks", 4 };
+    uint32_t lastCollisions = 0;  // collision events of the last tick the CPU read (readback prefix size)
     Buf gridCount{ "fx.gridCount", 4 }, gridStart{ "fx.gridStart", 4 }, gridFill{ "fx.gridFill", 4 }, gridEntries{ "fx.gridEntries", 4 }, gridLarge{ "fx.gridLarge", 4 };
     bool programsValid = false, started = false;
     std::vector<ComPtr<ID3D12Resource>> graveyard;  // buffers a repack of the last recorded frame still read
@@ -198,17 +224,20 @@ struct ParticleSystem::Impl
         bool recorded = false;
         uint64_t stream = 0, generation = 0, tick = 0;
         uint32_t eventSlots = 0, collisionCopy = 0, collisionCapacity = 0;
-        RenderGraph* graph = nullptr;
         uint64_t fenceBase = 0, fence = 0;
     };
     std::vector<Slot> slots;
     uint32_t nextSlot = 0;
     int latestSlot = -1;
 
+    // The frame that recorded a tick signals the graphics queue after record() returns, so its fence is the first value
+    // signaled after the recording: resolved from the device queue (which outlives any render graph), conservatively
+    // (a later signal also covers it). A tick whose frame never executed cannot be waited for: that is a caller error.
+    Queue* queue = nullptr;
     void resolveFence(Slot& s)
     {
-        if (!s.recorded || s.fence != 0 || !s.graph) return;
-        const uint64_t f = s.graph->lastFence(QueueType::Graphics);
+        if (!s.recorded || s.fence != 0 || !queue) return;
+        const uint64_t f = queue->lastSignaled();
         if (f > s.fenceBase) s.fence = f;
     }
     void waitSlot(Device& device, Slot& s)
@@ -216,7 +245,16 @@ struct ParticleSystem::Impl
         if (!s.recorded) return;
         resolveFence(s);
         if (s.fence == 0) fail("FX particles: tick %llu was recorded but its frame was never executed", (unsigned long long)s.tick);
-        device.queue(QueueType::Graphics).waitCpu(s.fence);
+        Queue& q = device.queue(QueueType::Graphics);
+        if (q.completed() >= s.fence) return;
+        // event wait with a bound (a sleep loop would round up to the OS timer tick, ~15 ms)
+        HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        check(q.fence()->SetEventOnCompletion(s.fence, ev), "FX particles: fence event");
+        const DWORD r = WaitForSingleObject(ev, 20000);
+        CloseHandle(ev);
+        if (r != WAIT_OBJECT_0)
+            fail("FX particles: tick %llu: the GPU did not reach fence %llu within 20 s (completed %llu)", (unsigned long long)s.tick,
+                 (unsigned long long)s.fence, (unsigned long long)q.completed());
     }
 };
 
@@ -227,6 +265,7 @@ ParticleSystem::ParticleSystem(Device& device, const QualityConfig& quality) : m
     m_readbackSlots = (uint32_t)quality.integer("fx.particles.readback_slots");
     m_collisionReadback = (uint32_t)quality.integer("fx.particles.collision_readback");
     m_gridCell = (float)quality.number("fx.particles.collision_cell_m");
+    m_experimentDisable = (uint32_t)quality.integer("fx.particles.experiment_disable");
     if (!(m_gridCell > 0)) fail("fx.particles.collision_cell_m must be > 0");
     if (m_sortPasses > 3) fail("fx.particles.sort_passes must be 0..3 (24-bit key)");
     if (m_chainDepthMax > NV_STREAM_MAX_DEPTH) fail("fx.particles.chain_depth_max must be <= %u", NV_STREAM_MAX_DEPTH);
@@ -267,6 +306,10 @@ void ParticleSystem::record(FramePassContext& fc)
         m_pending.pop_front();
         const NV_StreamHeader& h = headerOf(packet);
         const uint8_t* base = packet.data();
+
+        // Fences of the ticks recorded in earlier frames: the first signal after their recording is their frame's.
+        m.queue = &device.queue(QueueType::Graphics);
+        for (auto& x : m.slots) m.resolveFence(x);
 
         // Buffers the previous frame's repack read are released now (after that frame's fence).
         if (m.graveyardFrame != fc.frame.frameIndex)
@@ -310,6 +353,7 @@ void ParticleSystem::record(FramePassContext& fc)
         for (Buf* b : { &m.posAge, &m.velocity, &m.meta, &m.alive, &m.aliveList, &m.deadList, &m.dyingList, &m.keyBySlot, &m.spawnedSlots, &m.keysA, &m.valsA,
                         &m.keysB, &m.valsB, &m.records[0], &m.records[1] })
             b->ensure(device, (uint64_t)capacity * b->stride);
+        m.gridBlocks.ensure(device, 1024 * 4);
         m.blockSums.ensure(device, (uint64_t)scanBlocks * 8);
         m.hist.ensure(device, (uint64_t)(sortGroups + 1) * 256 * 4);
         m.counters.ensure(device, kCounterWords * 4);
@@ -318,6 +362,16 @@ void ParticleSystem::record(FramePassContext& fc)
         // Programs persist until a packet replaces them.
         if (h.flags & NV_STREAM_PROGRAMS)
         {
+            const auto* programTable = reinterpret_cast<const NV_StreamProgram*>(base + h.programs);
+            m.programOutput.resize(h.program_count);
+            m.programGrid.resize(h.program_count);
+            m.separationMax = 0;
+            for (uint32_t k = 0; k < h.program_count; ++k)
+            {
+                m.programOutput[k] = programTable[k].output;
+                m.programGrid[k] = programTable[k].medium_grid;
+                m.separationMax = std::max(m.separationMax, std::abs(programTable[k].separation));
+            }
             m.programs.ensure(device, (uint64_t)h.program_count * sizeof(NV_StreamProgram));
             m.curveKeys.ensure(device, (uint64_t)h.curve_key_count * 16);
             m.programsValid = true;
@@ -326,8 +380,93 @@ void ParticleSystem::record(FramePassContext& fc)
 
         const uint32_t cur = m.parity;
         m.parity ^= 1u;
-        m.emitters[cur].ensure(device, (uint64_t)h.emitter_count * sizeof(NV_StreamEmitter));
-        m.dynamic[cur].ensure(device, (uint64_t)h.emitter_count * sizeof(EmitterDynamic));
+        // Persistent emitter table: a whole table replaces it, a delta updates the rows it lists (the table only grows).
+        // A grown table keeps its rows: the old buffer is copied into the new one at the start of the tick.
+        const bool delta = (h.flags & NV_STREAM_EMITTER_DELTA) != 0;
+        const uint32_t tableRows = h.emitter_table;
+        Buf grownFrom{ "fx.emitterTableOld", sizeof(NV_StreamEmitter) };  // a delta keeps the rows of a grown table (copied below)
+        if (m.emitterTable.bytes < (uint64_t)tableRows * sizeof(NV_StreamEmitter))
+        {
+            if (m.emitterTable.resource && delta)
+            {
+                grownFrom.resource = m.emitterTable.resource;  // released after this frame (deferRelease once the copy is recorded)
+                grownFrom.bytes = m.emitterTable.bytes;
+                m.emitterTable.resource.Reset();
+                m.emitterTable.bytes = 0;
+            }
+            m.emitterTable.ensure(device, (uint64_t)tableRows * sizeof(NV_StreamEmitter));
+        }
+        // stamps start at 0 in a new buffer (committed resources are zeroed); the serial starts at 1
+        m.emitterStamp.ensure(device, (m.emitterTable.bytes / sizeof(NV_StreamEmitter)) * 4);
+        const auto* emitterBlocks = reinterpret_cast<const NV_StreamEmitter*>(base + h.emitters);
+        const auto* blockRows = reinterpret_cast<const uint32_t*>(base + h.emitter_rows);
+        std::vector<uint32_t> updateRows(std::max<uint32_t>(h.emitter_count, 1));
+        // The mirror costs O(blocks + rows with per-tick fields), not O(rows): only the rows whose last block carried a
+        // per-tick field are cleared, and the ribbon/volume rows are kept as a list (a row joins when a block makes it an
+        // output row; inactive or changed rows leave when the ranges are built).
+        if (delta)
+        {
+            m.table.resize(tableRows);
+            m.outputFlag.resize(tableRows, 0);
+            for (uint32_t row : m.tickRows)
+            {
+                NV_StreamEmitter& e = m.table[row];
+                e.rebase[0] = e.rebase[1] = e.rebase[2] = 0;
+                e.flags &= ~uint32_t(NV_STREAM_EMITTER_TRANSPORT | NV_STREAM_EMITTER_SOURCE | NV_STREAM_EMITTER_KILLED);
+                e.parent_event = e.parent_row = NV_STREAM_NONE;
+            }
+            m.tickRows.clear();
+            for (uint32_t k = 0; k < h.emitter_count; ++k) { m.table[blockRows[k]] = emitterBlocks[k]; updateRows[k] = blockRows[k]; }
+        }
+        else
+        {
+            m.table.assign(emitterBlocks, emitterBlocks + h.emitter_count);
+            m.outputFlag.assign(tableRows, 0);
+            m.outputRows.clear();
+            m.tickRows.clear();
+            for (uint32_t k = 0; k < h.emitter_count; ++k) updateRows[k] = k;
+        }
+        for (uint32_t k = 0; k < h.emitter_count; ++k)
+        {
+            const uint32_t row = updateRows[k];
+            const NV_StreamEmitter& x = m.table[row];
+            if (x.rebase[0] != 0 || x.rebase[1] != 0 || x.rebase[2] != 0 || (x.flags & (NV_STREAM_EMITTER_TRANSPORT | NV_STREAM_EMITTER_SOURCE | NV_STREAM_EMITTER_KILLED)) ||
+                x.parent_event != NV_STREAM_NONE || x.parent_row != NV_STREAM_NONE)
+                m.tickRows.push_back(row);
+            const uint32_t output = x.program < m.programOutput.size() ? m.programOutput[x.program] : 0u;
+            if ((x.flags & NV_STREAM_EMITTER_ACTIVE) && (output == 2u || output == 3u) && !m.outputFlag[row])
+            {
+                m.outputFlag[row] = 1;
+                m.outputRows.push_back(row);
+            }
+        }
+        if (delta && (h.flags & NV_STREAM_PROGRAMS))  // a new program table can change any row's output: rebuild the list
+        {
+            m.outputRows.clear();
+            m.outputFlag.assign(tableRows, 0);
+            for (uint32_t row = 0; row < tableRows; ++row)
+            {
+                const NV_StreamEmitter& x = m.table[row];
+                const uint32_t output = x.program < m.programOutput.size() ? m.programOutput[x.program] : 0u;
+                if ((x.flags & NV_STREAM_EMITTER_ACTIVE) && (output == 2u || output == 3u)) { m.outputFlag[row] = 1; m.outputRows.push_back(row); }
+            }
+        }
+        // leave the list: rows no longer active output rows
+        for (size_t k = 0; k < m.outputRows.size();)
+        {
+            const uint32_t row = m.outputRows[k];
+            const NV_StreamEmitter& x = m.table[row];
+            const uint32_t output = x.program < m.programOutput.size() ? m.programOutput[x.program] : 0u;
+            if (row < tableRows && (x.flags & NV_STREAM_EMITTER_ACTIVE) && (output == 2u || output == 3u)) { ++k; continue; }
+            m.outputFlag[row] = 0;
+            m.outputRows[k] = m.outputRows.back();
+            m.outputRows.pop_back();
+        }
+        m.tableRows = tableRows;
+        const uint32_t serialNow = ++m.serial;
+        m.emitterUpdates.ensure(device, (uint64_t)h.emitter_count * sizeof(NV_StreamEmitter));
+        m.emitterUpdateRows.ensure(device, (uint64_t)h.emitter_count * 4);
+        m.dynamic[cur].ensure(device, (uint64_t)tableRows * sizeof(EmitterDynamic));
         m.spawns.ensure(device, (uint64_t)h.spawn_count * sizeof(NV_StreamSpawn));
         m.explicitBirths.ensure(device, (uint64_t)h.explicit_count * sizeof(NV_StreamExplicitBirth));
         m.fields.ensure(device, (uint64_t)h.field_count * sizeof(NV_StreamField));
@@ -349,10 +488,54 @@ void ParticleSystem::record(FramePassContext& fc)
         m.gridFill.ensure(device, (uint64_t)gridBuckets * 4);
         m.gridEntries.ensure(device, (uint64_t)gridEntryCapacity * 4);
         m.gridLarge.ensure(device, (uint64_t)std::max<uint32_t>(surfaceTotal, 1) * 4);
+        m.surfaceBoxes.ensure(device, (uint64_t)std::max<uint32_t>(surfaceTotal, 1) * 32);
         m.ribbonPoints.ensure(device, (uint64_t)h.ribbon_points * 32);
         m.ribbonLinks.ensure(device, (uint64_t)h.ribbon_points * 4);
         m.ribbonVertices.ensure(device, (uint64_t)h.ribbon_points * 64);
         m.mediumCells.ensure(device, (uint64_t)h.medium_cells * 96);
+        m.volumeList.ensure(device, (uint64_t)h.medium_cells * 48);  // volume records at each particle's first cell
+        // ribbon ranges of this tick (active NV_RIBBON rows, by output_base) for the strip scan
+        struct RibbonRange { uint32_t base, count, program, pad; };
+        std::vector<RibbonRange> ribbonRanges;
+        {
+            for (uint32_t e : m.outputRows)
+            {
+                const NV_StreamEmitter& x = m.table[e];
+                const uint32_t count = x.next_birth - x.death_birth;
+                if (!(x.flags & NV_STREAM_EMITTER_ACTIVE) || count == 0 || x.program >= m.programOutput.size() || m.programOutput[x.program] != 2u) continue;
+                if ((uint64_t)x.output_base + count > h.ribbon_points) fail("FX particles: ribbon row %u outside the %u ribbon points", e, h.ribbon_points);
+                ribbonRanges.push_back({ x.output_base, count, x.program, 0 });
+            }
+            std::sort(ribbonRanges.begin(), ribbonRanges.end(), [](const RibbonRange& a, const RibbonRange& b) { return a.base < b.base; });
+            if (h.ribbon_points > 1024u * 1024u) fail("FX particles: %u ribbon points exceed the strip scan's 1M", h.ribbon_points);
+        }
+        const uint32_t ribbonN = ribbonRanges.empty() ? 0 : h.ribbon_points;
+        // volume ranges (active NV_VOLUME rows, by first cell) for the thread-per-cell pass (FxCells.hlsl)
+        struct VolumeRange { uint32_t first, cells, grid, program; };
+        std::vector<VolumeRange> volumeRanges;
+        uint32_t volumeCellEnd = 0;
+        for (uint32_t e : m.outputRows)
+        {
+            const NV_StreamEmitter& x = m.table[e];
+            const uint32_t count = x.next_birth - x.death_birth;
+            if (!(x.flags & NV_STREAM_EMITTER_ACTIVE) || count == 0 || x.program >= m.programOutput.size() || m.programOutput[x.program] != 3u) continue;
+            const uint32_t n = std::clamp<uint32_t>(m.programGrid[x.program], 1u, 32u);
+            const uint64_t cells = (uint64_t)count * n * n * n;
+            if (x.output_base + cells > h.medium_cells) fail("FX particles: volume row %u outside the %u medium cells", e, h.medium_cells);
+            volumeRanges.push_back({ x.output_base, (uint32_t)cells, n, x.program });
+            volumeCellEnd = std::max(volumeCellEnd, x.output_base + (uint32_t)cells);
+        }
+        std::sort(volumeRanges.begin(), volumeRanges.end(), [](const VolumeRange& a, const VolumeRange& b) { return a.first < b.first; });
+        for (size_t k = 1; k < volumeRanges.size(); ++k)
+            if (volumeRanges[k].first < volumeRanges[k - 1].first + volumeRanges[k - 1].cells) fail("FX particles: overlapping volume cell ranges at %u", volumeRanges[k].first);
+        m.volumeRanges.ensure(device, volumeRanges.size() * 16);
+        m.ribbonRanges.ensure(device, ribbonRanges.size() * 16);
+        m.ribbonScanA.ensure(device, (uint64_t)ribbonN * 4);
+        m.ribbonScanB.ensure(device, (uint64_t)ribbonN * 32);
+        m.ribbonRunStart.ensure(device, (uint64_t)ribbonN * 4);
+        m.ribbonTangents.ensure(device, (uint64_t)ribbonN * 16);
+        m.ribbonTotalsA.ensure(device, 1024 * 4);
+        m.ribbonTotalsB.ensure(device, 1024 * 32);
         m.bodies.ensure(device, (uint64_t)h.body_count * sizeof(NV_StreamBody));
         m.restore.ensure(device, (uint64_t)h.restore_count * sizeof(NV_StreamParticle));
         m.slotBase.ensure(device, (uint64_t)h.spawn_count * 4);
@@ -399,7 +582,10 @@ void ParticleSystem::record(FramePassContext& fc)
         Impl::Slot& slot = m.slots[(size_t)thisSlot];
         if (slot.recorded) m.waitSlot(device, slot);  // its upload is free; a replaced tick's readback can no longer be read
         const uint64_t constOffset = 0, packetOffset = 512, rankOffset = align(packetOffset + packet.size(), 16);
-        const uint64_t uploadBytes = rankOffset + slotBase.size() * 4;
+        const uint64_t rangesOffset = align(rankOffset + slotBase.size() * 4, 16);
+        const uint64_t volumeOffset = align(rangesOffset + ribbonRanges.size() * 16, 16);
+        const uint64_t rowsOffset = align(volumeOffset + volumeRanges.size() * 16, 16);
+        const uint64_t uploadBytes = rowsOffset + updateRows.size() * 4;
         if (!slot.upload || slot.uploadBytes < uploadBytes)
         {
             if (slot.upload) { slot.upload->Unmap(0, nullptr); device.deferRelease(slot.upload); }
@@ -410,7 +596,13 @@ void ParticleSystem::record(FramePassContext& fc)
         }
         std::memcpy(slot.mapped + packetOffset, packet.data(), packet.size());
         std::memcpy(slot.mapped + rankOffset, slotBase.data(), slotBase.size() * 4);
-        const uint32_t collisionCopy = keepEvents ? slot.collisionCopy : std::min(h.collision_capacity, m_collisionReadback);
+        if (!ribbonRanges.empty()) std::memcpy(slot.mapped + rangesOffset, ribbonRanges.data(), ribbonRanges.size() * 16);
+        if (!volumeRanges.empty()) std::memcpy(slot.mapped + volumeOffset, volumeRanges.data(), volumeRanges.size() * 16);
+        std::memcpy(slot.mapped + rowsOffset, updateRows.data(), updateRows.size() * 4);
+        // collision events copied with the tick: twice the last count the CPU read, at least 1024 and at most the configured
+        // prefix; more are fetched from the tick's event buffer when read (exact either way)
+        const uint32_t collisionPrefix = std::min(m_collisionReadback, std::max<uint32_t>(1024, 2 * m.lastCollisions));
+        const uint32_t collisionCopy = keepEvents ? slot.collisionCopy : std::min(h.collision_capacity, collisionPrefix);
         if (!keepEvents) slot.events.ensure(device, (uint64_t)(h.event_slots + h.collision_capacity) * sizeof(NV_StreamEvent));
         const uint64_t readbackBytes = kReportBytes + (uint64_t)(h.event_slots + collisionCopy) * sizeof(NV_StreamEvent);
         if (!keepEvents && (!slot.readback || slot.readbackBytes < readbackBytes))
@@ -429,8 +621,8 @@ void ParticleSystem::record(FramePassContext& fc)
             slot.collisionCopy = collisionCopy;
             slot.collisionCapacity = h.collision_capacity;
         }
-        slot.graph = &fc.graph;
-        slot.fenceBase = fc.graph.lastFence(QueueType::Graphics);
+        m.queue = &device.queue(QueueType::Graphics);
+        slot.fenceBase = m.queue->lastSignaled();
         slot.fence = 0;
         m.latestSlot = thisSlot;
         m_latestTick = h.tick;
@@ -440,9 +632,11 @@ void ParticleSystem::record(FramePassContext& fc)
         std::vector<Buf*> state = { &m.posAge, &m.velocity, &m.meta, &m.alive, &m.aliveList, &m.deadList, &m.dyingList, &m.blockSums, &m.keyBySlot,
                                     &m.spawnedSlots, &m.keysA, &m.valsA, &m.keysB, &m.valsB, &m.hist, &m.records[cur], &m.dynamic[cur], &m.counters,
                                     &m.report, &slot.events, &m.tickSurfaces, &m.gridCount, &m.gridStart, &m.gridFill, &m.gridEntries, &m.gridLarge,
-                                    &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.mediumCells };
-        std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitters[cur], &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
-                                     &m.restore, &m.slotBase, &m.bodies, &m.dynamicSurfaces };
+                                    &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.mediumCells, &m.ribbonScanA, &m.ribbonScanB,
+                                    &m.ribbonRunStart, &m.ribbonTangents, &m.ribbonTotalsA, &m.ribbonTotalsB, &m.volumeList, &m.gridBlocks, &m.surfaceBoxes,
+                                    &m.emitterTable, &m.emitterStamp };
+        std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitterUpdates, &m.emitterUpdateRows, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
+                                     &m.restore, &m.slotBase, &m.bodies, &m.dynamicSurfaces, &m.ribbonRanges, &m.volumeRanges };
         for (Buf* b : state) b->import(g, fc.frame.frameIndex);
         for (Buf* b : inputs) b->import(g, fc.frame.frameIndex);
 
@@ -472,7 +666,8 @@ void ParticleSystem::record(FramePassContext& fc)
             add(m.programs, h.programs, (uint64_t)h.program_count * sizeof(NV_StreamProgram));
             add(m.curveKeys, h.curve_keys, (uint64_t)h.curve_key_count * 16);
         }
-        add(m.emitters[cur], h.emitters, (uint64_t)h.emitter_count * sizeof(NV_StreamEmitter));
+        add(m.emitterUpdates, h.emitters, (uint64_t)h.emitter_count * sizeof(NV_StreamEmitter));
+        if (h.emitter_count) copies.push_back({ &m.emitterUpdateRows, rowsOffset, (uint64_t)h.emitter_count * 4 });
         add(m.spawns, h.spawns, (uint64_t)h.spawn_count * sizeof(NV_StreamSpawn));
         add(m.explicitBirths, h.explicit_births, (uint64_t)h.explicit_count * sizeof(NV_StreamExplicitBirth));
         add(m.fields, h.fields, (uint64_t)h.field_count * sizeof(NV_StreamField));
@@ -482,6 +677,8 @@ void ParticleSystem::record(FramePassContext& fc)
         add(m.dynamicSurfaces, h.dynamic_surfaces, (uint64_t)h.dynamic_surface_count * sizeof(NV_StreamSurface));
         add(m.restore, h.restore, (uint64_t)h.restore_count * sizeof(NV_StreamParticle));
         if (h.spawn_count) copies.push_back({ &m.slotBase, rankOffset, (uint64_t)h.spawn_count * 4 });
+        if (!ribbonRanges.empty()) copies.push_back({ &m.ribbonRanges, rangesOffset, ribbonRanges.size() * 16 });
+        if (!volumeRanges.empty()) copies.push_back({ &m.volumeRanges, volumeOffset, volumeRanges.size() * 16 });
         g.addPass("fx.particles.upload", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       for (const Copy& c : copies) b.use(c.dst->ref, Use::CopyDst);
@@ -499,9 +696,13 @@ void ParticleSystem::record(FramePassContext& fc)
         tc.flags = h.flags;
         tc.fieldCount = h.field_count;
         tc.worldFieldCount = h.world_field_count;
-        tc.surfaceCount = surfaceTotal;
+        tc.surfaceCount = (m_experimentDisable & 8u) ? 0u : surfaceTotal;
         tc.staticSurfaceCount = m.surfaceCount;
-        tc.emitterCount = h.emitter_count;
+        tc.emitterCount = tableRows;
+        tc.updateCount = h.emitter_count;
+        tc.separationMax = m.separationMax;
+        tc.volumeRangeCount = (uint32_t)volumeRanges.size();
+        tc.serial = serialNow;
         tc.eventSlots = h.event_slots;
         tc.collisionCapacity = h.collision_capacity;
         tc.aliveAfter = h.alive_after;
@@ -525,6 +726,8 @@ void ParticleSystem::record(FramePassContext& fc)
         tc.gridCell = m_gridCell;
         tc.gridMask = gridBuckets - 1;
         tc.gridEntryCapacity = gridEntryCapacity;
+        tc.ribbonCapacity = h.ribbon_points;
+        tc.cellCapacity = h.medium_cells;
 
         auto declare = [state, inputs](PassBuilder& b) {
             for (Buf* x : state) b.use(x->ref, Use::UavCompute);
@@ -550,7 +753,10 @@ void ParticleSystem::record(FramePassContext& fc)
             tc.hist = c.uav(m.hist.ref);
             tc.programs = c.srv(m.programs.ref);
             tc.curveKeys = c.srv(m.curveKeys.ref);
-            tc.emitters = c.srv(m.emitters[cur].ref);
+            tc.emitters = c.uav(m.emitterTable.ref);
+            tc.emitterUpdates = c.srv(m.emitterUpdates.ref);
+            tc.emitterUpdateRows = c.srv(m.emitterUpdateRows.ref);
+            tc.emitterStamp = c.uav(m.emitterStamp.ref);
             tc.spawns = c.srv(m.spawns.ref);
             tc.explicitBirths = c.srv(m.explicitBirths.ref);
             tc.fields = c.srv(m.fields.ref);
@@ -569,6 +775,12 @@ void ParticleSystem::record(FramePassContext& fc)
             tc.gridFill = c.uav(m.gridFill.ref);
             tc.gridEntries = c.uav(m.gridEntries.ref);
             tc.gridLarge = c.uav(m.gridLarge.ref);
+            tc.ribbonPoints = c.uav(m.ribbonPoints.ref);
+            tc.mediumCells = c.uav(m.mediumCells.ref);
+            tc.volumeList = c.uav(m.volumeList.ref);
+            tc.volumeRanges = c.srv(m.volumeRanges.ref);
+            tc.surfaceBoxes = c.uav(m.surfaceBoxes.ref);
+            tc.gridBlocks = c.uav(m.gridBlocks.ref);
             std::memcpy(constantsCpu, &tc, sizeof tc);
         };
         ShaderLibrary& shaders = fc.shaders;
@@ -589,9 +801,24 @@ void ParticleSystem::record(FramePassContext& fc)
             dispatch(format("fx.particles.compact.scatter%s", suffix).c_str(), "Passes/FX/FxCompact.SCATTER1", {}, scanBlocks);
         };
 
-        // 2. begin (+ reset and the compaction that rebuilds the dead list)
-        const uint32_t beginThreads = std::max<uint32_t>(std::max<uint32_t>(h.emitter_count, 1), reset ? capacity : 0);
-        dispatch("fx.particles.begin", reset ? "Passes/FX/FxBegin.RESET1" : "Passes/FX/FxBegin.RESET0", {}, groups(beginThreads, 256), true);
+        // 2. emitter table (grown table keeps its rows; delta blocks), begin (+ reset and the compaction that rebuilds the
+        // dead list)
+        if (grownFrom.resource)
+        {
+            grownFrom.import(g, fc.frame.frameIndex);
+            const BufferRef from = grownFrom.ref, to = m.emitterTable.ref;
+            const uint64_t bytes = grownFrom.bytes;
+            g.addPass("fx.particles.emitters.grow", QueueType::Graphics,
+                      [=](PassBuilder& b) {
+                          b.use(from, Use::CopySrc);
+                          b.use(to, Use::CopyDst);
+                      },
+                      [=](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(to), 0, c.resource(from), 0, bytes); });
+            device.deferRelease(grownFrom.resource);
+        }
+        dispatch("fx.particles.emitters", "Passes/FX/FxEmitters", {}, std::max<uint32_t>(groups(h.emitter_count, 64), 1), true);
+        const uint32_t beginThreads = std::max<uint32_t>(std::max<uint32_t>(tableRows, 1), reset ? capacity : 0);
+        dispatch("fx.particles.begin", reset ? "Passes/FX/FxBegin.RESET1" : "Passes/FX/FxBegin.RESET0", {}, groups(beginThreads, 256));
         if (reset) compaction(".reset", 0);
         if (repack)
         {
@@ -623,12 +850,13 @@ void ParticleSystem::record(FramePassContext& fc)
                       });
             compaction(".repack", 0);
         }
-        if (surfaceTotal)
+        if (surfaceTotal && !(m_experimentDisable & 8u))
         {
             dispatch("fx.particles.surfaces", "Passes/FX/FxSurfaces", {}, groups(surfaceTotal, 64));
             dispatch("fx.particles.grid.clear", "Passes/FX/FxGrid.STEP0", {}, groups(gridBuckets, 64));
             dispatch("fx.particles.grid.count", "Passes/FX/FxGrid.STEP1", {}, groups(surfaceTotal, 64));
-            dispatch("fx.particles.grid.scan", "Passes/FX/FxGrid.STEP2", {}, 1);
+            dispatch("fx.particles.grid.scan", "Passes/FX/FxGrid.STEP2", {}, groups(gridBuckets, 1024));
+            dispatch("fx.particles.grid.blocks", "Passes/FX/FxGrid.STEP4", {}, 1);
             dispatch("fx.particles.grid.fill", "Passes/FX/FxGrid.STEP3", {}, groups(surfaceTotal, 64));
         }
 
@@ -649,27 +877,32 @@ void ParticleSystem::record(FramePassContext& fc)
         // 4. compaction (alive / dead / dying lists, report, alive_after check)
         compaction("", 1);
 
-        // geometry outputs (ribbon points and strips, medium cells) at output_base + (birth - death_birth)
-        if (h.ribbon_points || h.medium_cells)
+        // medium cells of the listed volume particles
+        if (volumeCellEnd && !(m_experimentDisable & 1u)) dispatch("fx.particles.cells", "Passes/FX/FxCells", {}, groups(volumeCellEnd, 64));
+
+        // ribbon strips: parallel segmented scan over the points the integrate kernel wrote (FxRibbon.hlsl)
+        if (ribbonN && !(m_experimentDisable & 2u))
         {
-            const uint32_t ribbonPoints = h.ribbon_points, mediumCells = h.medium_cells, rows = h.emitter_count;
             Impl* mi = &m;
-            ID3D12PipelineState* points = shaders.compute("Passes/FX/FxOutputs.STEP0");
-            ID3D12PipelineState* strips = shaders.compute("Passes/FX/FxOutputs.STEP1");
-            auto outputs = [=](PassContext& c, ID3D12PipelineState* pso, uint32_t groupCount) {
-                const std::array<uint32_t, 8> p = { c.uav(mi->ribbonPoints.ref), c.uav(mi->ribbonLinks.ref), c.uav(mi->ribbonVertices.ref), c.uav(mi->mediumCells.ref),
-                                                    ribbonPoints, mediumCells, 0, 0 };
-                c.cmd->SetPipelineState(pso);
-                c.bindFrameConstants(constants);
-                c.computeConstants(p.data(), 8);
-                c.cmd->Dispatch(groupCount, 1, 1);
-            };
-            g.addPass("fx.particles.outputs.points", QueueType::Graphics, declare, [=](PassContext& c) { outputs(c, points, groups(capacity, 64)); });
-            if (ribbonPoints) g.addPass("fx.particles.outputs.ribbons", QueueType::Graphics, declare, [=](PassContext& c) { outputs(c, strips, groups(rows, 64)); });
+            const uint32_t rangeCount = (uint32_t)ribbonRanges.size(), blocks = groups(ribbonN, 1024);
+            for (uint32_t step = 0; step < 8; ++step)
+            {
+                ID3D12PipelineState* pso = shaders.compute(format("Passes/FX/FxRibbon.STEP%u", step));
+                const uint32_t groupCount = (step == 2 || step == 6) ? 1 : blocks;
+                g.addPass(format("fx.particles.ribbon.s%u", step), QueueType::Graphics, declare, [=](PassContext& c) {
+                    const std::array<uint32_t, 12> p = { c.uav(mi->ribbonPoints.ref), c.uav(mi->ribbonLinks.ref), c.uav(mi->ribbonVertices.ref), c.srv(mi->ribbonRanges.ref),
+                                                         ribbonN, rangeCount, c.uav(mi->ribbonScanA.ref), c.uav(mi->ribbonScanB.ref),
+                                                         c.uav(mi->ribbonRunStart.ref), c.uav(mi->ribbonTangents.ref), c.uav(mi->ribbonTotalsA.ref), c.uav(mi->ribbonTotalsB.ref) };
+                    c.cmd->SetPipelineState(pso);
+                    c.bindFrameConstants(constants);
+                    c.computeConstants(p.data(), 12);
+                    c.cmd->Dispatch(groupCount, 1, 1);
+                });
+            }
         }
 
         // sort of the alive list by the 24-bit key
-        for (uint32_t pass = 0; pass < m_sortPasses; ++pass)
+        for (uint32_t pass = 0; pass < ((m_experimentDisable & 4u) ? 0u : m_sortPasses); ++pass)
         {
             const std::array<uint32_t, 8> p = { pass * 8, pass & 1u };
             dispatch(format("fx.particles.sort.hist%u", pass).c_str(), "Passes/FX/FxSortHist", p, sortGroups);
@@ -720,6 +953,7 @@ TickReadback ParticleSystem::readback(uint64_t stream, uint64_t generation, uint
     check(s.readback->Map(0, &r, reinterpret_cast<void**>(&p)), "map FX readback");
     std::memcpy(&out.counters, p, sizeof(NV_StreamCounters));
     std::memcpy(&out.dying, p + 48, 4);
+    m.lastCollisions = out.counters.collision_events;
     const uint32_t collisions = std::min(out.counters.collision_events, s.collisionCapacity);
     const uint32_t copied = std::min(collisions, s.collisionCopy);
     out.events.resize((size_t)s.eventSlots + collisions);
@@ -796,6 +1030,7 @@ std::vector<uint8_t> ParticleSystem::readState(const char* name)
     else if (n == "ribbonVertices") b = &m.ribbonVertices, bytes = m.ribbonVertices.bytes;
     else if (n == "ribbonLinks") b = &m.ribbonLinks, bytes = m.ribbonLinks.bytes;
     else if (n == "mediumCells") b = &m.mediumCells, bytes = m.mediumCells.bytes;
+    else if (n == "tickSurfaces") b = &m.tickSurfaces, bytes = m.tickSurfaces.bytes;
     else fail("FX particles: no state buffer '%s'", name);
     return copyOut(m_device, b->resource.Get(), bytes, b->stride, b->name);
 }

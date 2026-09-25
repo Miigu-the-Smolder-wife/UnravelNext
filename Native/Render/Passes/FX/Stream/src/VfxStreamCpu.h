@@ -14,38 +14,41 @@
 #include <vector>
 
 namespace nv_stream {
-struct Real2 {double x,y;};
-struct Real3 {double x,y,z;};
-struct Real4 {double x,y,z,w;};
-inline Real3 operator+(Real3 a,Real3 b){return {a.x+b.x,a.y+b.y,a.z+b.z};}
-inline Real3 operator-(Real3 a,Real3 b){return {a.x-b.x,a.y-b.y,a.z-b.z};}
-inline Real3 operator-(Real3 a){return {-a.x,-a.y,-a.z};}
-inline Real3 operator*(Real3 a,double s){return {a.x*s,a.y*s,a.z*s};}
+template<class R> struct Vec2 {R x,y;};
+template<class R> struct Vec3 {R x,y,z;};
+template<class R> struct Vec4 {R x,y,z,w;};
+template<class R> inline Vec3<R> operator+(Vec3<R> a,Vec3<R> b){return {a.x+b.x,a.y+b.y,a.z+b.z};}
+template<class R> inline Vec3<R> operator-(Vec3<R> a,Vec3<R> b){return {a.x-b.x,a.y-b.y,a.z-b.z};}
+template<class R> inline Vec3<R> operator-(Vec3<R> a){return {-a.x,-a.y,-a.z};}
+template<class R> inline Vec3<R> operator*(Vec3<R> a,R s){return {a.x*s,a.y*s,a.z*s};}
+typedef Vec2<double> Real2;typedef Vec3<double> Real3;typedef Vec4<double> Real4;
 inline Real3 real3(const float* v){return {v[0],v[1],v[2]};}
 
-// The shared formulas, instantiated in double with member buffers as hooks.
-struct Math {
+// The shared formulas, instantiated with member buffers as hooks: in double for
+// the reference executor (Math), and in float to measure how the GPU's float
+// arithmetic conditions them (MathT<float>, tests only).
+template<class R> struct MathT {
     typedef uint32_t uint;
-    typedef double nv_real;
-    typedef Real2 nv_real2;
-    typedef Real3 nv_real3;
-    typedef Real4 nv_real4;
-    static Real3 nv_make3(double x,double y,double z){return {x,y,z};}
-    static Real4 nv_make4(double x,double y,double z,double w){return {x,y,z,w};}
-    static double dot(Real3 a,Real3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
-    static Real3 cross(Real3 a,Real3 b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
-    static double length(Real3 a){return std::sqrt(dot(a,a));}
-    static double sqrt(double v){return std::sqrt(v);}
-    static double exp(double v){return std::exp(v);}
-    static double pow(double a,double b){return std::pow(a,b);}
-    static double cos(double v){return std::cos(v);}
-    static double sin(double v){return std::sin(v);}
-    static double abs(double v){return std::fabs(v);}
-    static double min(double a,double b){return a<b?a:b;}
-    static double max(double a,double b){return a>b?a:b;}
-    static Real3 min(Real3 a,Real3 b){return {min(a.x,b.x),min(a.y,b.y),min(a.z,b.z)};}
-    static Real3 max(Real3 a,Real3 b){return {max(a.x,b.x),max(a.y,b.y),max(a.z,b.z)};}
-    static double clamp(double v,double a,double b){return v<a?a:v>b?b:v;}
+    typedef R nv_real;
+    typedef Vec2<R> nv_real2;
+    typedef Vec3<R> nv_real3;
+    typedef Vec4<R> nv_real4;
+    static nv_real3 nv_make3(R x,R y,R z){return {x,y,z};}
+    static nv_real4 nv_make4(R x,R y,R z,R w){return {x,y,z,w};}
+    static R dot(nv_real3 a,nv_real3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
+    static nv_real3 cross(nv_real3 a,nv_real3 b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
+    static R length(nv_real3 a){return std::sqrt(dot(a,a));}
+    static R sqrt(R v){return std::sqrt(v);}
+    static R exp(R v){return std::exp(v);}
+    static R pow(R a,R b){return std::pow(a,b);}
+    static R cos(R v){return std::cos(v);}
+    static R sin(R v){return std::sin(v);}
+    static R abs(R v){return std::fabs(v);}
+    static R min(R a,R b){return a<b?a:b;}
+    static R max(R a,R b){return a>b?a:b;}
+    static nv_real3 min(nv_real3 a,nv_real3 b){return {min(a.x,b.x),min(a.y,b.y),min(a.z,b.z)};}
+    static nv_real3 max(nv_real3 a,nv_real3 b){return {max(a.x,b.x),max(a.y,b.y),max(a.z,b.z)};}
+    static R clamp(R v,R a,R b){return v<a?a:v>b?b:v;}
 #define NV_PARTICLE_MATH_TYPES_ONLY
 #include "../shaders/VfxParticleMath.hlsli"
 #undef NV_PARTICLE_MATH_TYPES_ONLY
@@ -76,6 +79,7 @@ struct Math {
 #undef NV_SURFACE
 #undef NV_CURVE_KEY
 };
+typedef MathT<double> Math;
 
 // A slot state in double (the in-process path keeps full precision).
 struct ExactParticle {
@@ -99,7 +103,18 @@ public:
             const auto keys=section<NV_StreamCurveKey>(data,bytes,h.curve_keys,h.curve_key_count);
             keys_.resize(keys.size());for(size_t k=0;k<keys.size();++k)keys_[k]={keys[k].t,keys[k].value[0],keys[k].value[1],keys[k].value[2]};
         }
-        emitters_=section<NV_StreamEmitter>(data,bytes,h.emitters,h.emitter_count);
+        if(h.flags&NV_STREAM_EMITTER_DELTA){
+            // Persistent table: per-tick fields of unsent rows read as absent, then the listed rows.
+            require(!(h.flags&NV_STREAM_RESET)&&h.emitter_table>=emitters_.size(),"emitter delta");
+            const auto rows=section<uint32_t>(data,bytes,h.emitter_rows,h.emitter_count);
+            const auto blocks=section<NV_StreamEmitter>(data,bytes,h.emitters,h.emitter_count);
+            emitters_.resize(h.emitter_table,NV_StreamEmitter{});
+            for(auto& e:emitters_){e.rebase[0]=e.rebase[1]=e.rebase[2]=0;e.flags&=~uint32_t(NV_STREAM_EMITTER_TRANSPORT|NV_STREAM_EMITTER_SOURCE|NV_STREAM_EMITTER_KILLED);e.parent_event=e.parent_row=NV_STREAM_NONE;}
+            for(size_t n=0;n<rows.size();++n){require(rows[n]<h.emitter_table&&(n==0||rows[n]>rows[n-1]),"emitter delta rows");emitters_[rows[n]]=blocks[n];}
+        }else{
+            require(h.emitter_count==h.emitter_table,"whole emitter table");
+            emitters_=section<NV_StreamEmitter>(data,bytes,h.emitters,h.emitter_count);
+        }
         for(const auto& e:emitters_)require(!(e.flags&NV_STREAM_EMITTER_ACTIVE)||e.program<programs_.size(),"emitter program");
         const auto spawns=section<NV_StreamSpawn>(data,bytes,h.spawns,h.spawn_count);
         const auto explicits=section<NV_StreamExplicitBirth>(data,bytes,h.explicit_births,h.explicit_count);
@@ -268,9 +283,11 @@ private:
         auto& e=emitters_.at(row);if(e.parent_event==NV_STREAM_NONE)return;
         require(e.parent_event<events_.size()&&e.parent_row<emitters_.size(),"child parent event");
         const auto& ev=events_[e.parent_event];
-        // Float sum by definition (NativeVfxStream.h, parent_event).
-        const auto& parent=emitters_[e.parent_row];
-        origin_[row]={double(float(parent.origin_anchor[0]+ev.position[0])),double(float(parent.origin_anchor[1]+ev.position[1])),double(float(parent.origin_anchor[2]+ev.position[2]))};
+        // Float sum by definition (NativeVfxStream.h, parent_event) on the parent's
+        // origin of this tick: a parent created in this tick has no table value yet,
+        // its origin was resolved at the previous depth (origin_ holds that float).
+        const auto& parent=origin_[e.parent_row];
+        origin_[row]={double(float(parent.x)+ev.position[0]),double(float(parent.y)+ev.position[1]),double(float(parent.z)+ev.position[2])};
         inherited_[row]=Real3{ev.velocity[0],ev.velocity[1],ev.velocity[2]}*double(e.inherited[0]);
     }
     void advance(const NV_StreamHeader& h,Slot& s,bool existing,uint32_t& status){

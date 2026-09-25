@@ -20,6 +20,8 @@
 #include "unx/render/Harness.h"
 #include "unx/render/Tracks.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -44,6 +46,7 @@ int main(int argc, char** argv)
     {
         std::string load = "both", resolution = "both", out = std::string(UNX_SOURCE_DIR) + "/Results/FX/ParticleGate";
         uint32_t frames = 600;
+        bool delta = true;  // emitter table as NV_STREAM_EMITTER_DELTA packets (--no-delta: whole table every tick, A/B)
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -54,6 +57,7 @@ int main(int argc, char** argv)
             else if (a == "--frames") frames = (uint32_t)std::stoul(next());
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
+            else if (a == "--no-delta") delta = false;
             else fail("unknown option %s", a.c_str());
         }
         requireGpuLock("fx.particles");
@@ -75,6 +79,7 @@ int main(int argc, char** argv)
                 fx::test::RppConfig cfg;
                 cfg.features = l == "features";
                 cfg.killTick = UINT32_MAX;  // the population stays at the RPP load
+                cfg.delta = delta;
                 fx::test::RppStream stream(cfg);
                 TrackState state;
                 fx::ParticleSystem& ps = fx::particles(state, device, quality);
@@ -85,7 +90,8 @@ int main(int argc, char** argv)
                 frame.mainView = ViewDesc::fromCamera(cam, res.width, res.height, float4x4{});
                 FrameServices services;
                 std::vector<NV_StreamEvent> previous;
-                uint64_t lastTick = 0, lastStream = 0, lastGeneration = 0;
+                std::vector<double> cpuStream, cpuSubmit, cpuRecord, packetKB, blocks;
+                uint64_t lastTick = 0, lastStream = 0, lastGeneration = 0, overflowTicks = 0, firstOverflow = 0;
 
                 HarnessOptions ho;
                 ho.frames = frames;
@@ -95,27 +101,50 @@ int main(int argc, char** argv)
                     if (cfg.features && lastTick)
                     {
                         const fx::TickReadback rb = ps.readback(lastStream, lastGeneration, lastTick);
-                        if (rb.counters.status) fail("tick %llu: status 0x%x", (unsigned long long)lastTick, rb.counters.status);
+                        // IMPACT_OVERFLOW (bit 1) is a reported condition of the stream (counted); every other bit is a failure
+                        if (rb.counters.status & ~uint32_t(NV_STREAM_STATUS_IMPACT_OVERFLOW)) fail("tick %llu: status 0x%x", (unsigned long long)lastTick, rb.counters.status);
+                        if (rb.counters.status & NV_STREAM_STATUS_IMPACT_OVERFLOW)
+                        {
+                            if (!overflowTicks) firstOverflow = lastTick;
+                            ++overflowTicks;
+                        }
                         previous = rb.events;
                     }
+                    const auto c0 = std::chrono::steady_clock::now();
                     const std::vector<uint8_t> packet = stream.next(lastTick ? &previous : nullptr);
+                    const auto c1 = std::chrono::steady_clock::now();
                     const NV_StreamHeader& h = *reinterpret_cast<const NV_StreamHeader*>(packet.data());
                     lastTick = h.tick;
                     lastStream = h.stream;
                     lastGeneration = h.generation;
+                    packetKB.push_back(packet.size() / 1024.0);
+                    blocks.push_back(h.emitter_count);
                     ps.submit(packet.data(), packet.size());
+                    const auto c2 = std::chrono::steady_clock::now();
                     frame.frameIndex = f;
                     FrameResources resources;
                     FramePassContext fc{ device, graph, shaders, quality, scene, frame, resources, services,
                                          [](const ViewDesc&) -> D3D12_GPU_VIRTUAL_ADDRESS { return 0; }, &state };
                     tracks::simulation(fc);
+                    const auto c3 = std::chrono::steady_clock::now();
+                    cpuStream.push_back(std::chrono::duration<double, std::milli>(c1 - c0).count());
+                    cpuSubmit.push_back(std::chrono::duration<double, std::milli>(c2 - c1).count());
+                    cpuRecord.push_back(std::chrono::duration<double, std::milli>(c3 - c2).count());
                 });
+                auto median = [](std::vector<double> v) { if (v.empty()) return 0.0; std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+                std::printf("FX_PARTICLE_GATE_CPU load=%s resolution=%s delta=%d fixture_ms=%.3f submit_ms=%.3f record_ms=%.3f packet_kb=%.1f emitter_blocks=%.0f of %u rows "
+                            "(medians; the fixture stands in for the VFX authority)\n",
+                            l.c_str(), rn.c_str(), delta ? 1 : 0, median(cpuStream), median(cpuSubmit), median(cpuRecord), median(packetKB), median(blocks), stream.rows());
+                if (cfg.features)
+                    std::printf("FX_PARTICLE_GATE_OVERFLOW load=%s resolution=%s ticks_with_impact_overflow=%llu first_tick=%llu (reported condition, NV_STREAM_STATUS_IMPACT_OVERFLOW)\n",
+                                l.c_str(), rn.c_str(), (unsigned long long)overflowTicks, (unsigned long long)firstOverflow);
                 harness.printSummary(r);
                 const fx::TickReadback last = ps.readback(lastStream, lastGeneration, lastTick);
                 std::printf("FX_PARTICLE_GATE load=%s resolution=%s alive=%u status=0x%x collisions=%u rows=%u tick=%llu gpu_frame_ms_median=%.4f p95=%.4f p99=%.4f "
-                            "passes_ms: integrate=%.4f spawn=%.4f child=%.4f compact=%.4f sort=%.4f grid=%.4f other=%.4f gate=%s\n",
+                            "passes_ms: upload=%.4f emitters=%.4f integrate=%.4f spawn=%.4f child=%.4f compact=%.4f sort=%.4f grid=%.4f other=%.4f gate=%s\n",
                             l.c_str(), rn.c_str(), last.counters.alive, last.counters.status, last.counters.collision_events, stream.rows(),
-                            (unsigned long long)lastTick, r.gpuFrameMs.median, r.gpuFrameMs.p95, r.gpuFrameMs.p99, passSum(r, "fx.particles.integrate"),
+                            (unsigned long long)lastTick, r.gpuFrameMs.median, r.gpuFrameMs.p95, r.gpuFrameMs.p99, passSum(r, "fx.particles.upload"),
+                            passSum(r, "fx.particles.emitters"), passSum(r, "fx.particles.integrate"),
                             passSum(r, "fx.particles.spawn"), passSum(r, "fx.particles.child"), passSum(r, "fx.particles.compact"), passSum(r, "fx.particles.sort"),
                             passSum(r, "fx.particles.grid") + passSum(r, "fx.particles.surfaces"),
                             passSum(r, "fx.particles.upload") + passSum(r, "fx.particles.begin") + passSum(r, "fx.particles.readback"),

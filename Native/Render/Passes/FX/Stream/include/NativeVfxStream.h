@@ -75,7 +75,22 @@
         v += w drag pf (wind sampled at the start position)
      e. collision sweep start -> p against the surface list (at most four
         impacts; a fifth sets NV_STREAM_STATUS_IMPACT_OVERFLOW and the particle
-        stays at its fourth contact point). The first impact of a slot whose
+        stays at its fourth contact point). Each surface is swept in its own
+        frame: a moving surface (velocity / angular_velocity about origin, the
+        centre of mass, at the tick end) is tested against the particle's path
+        relative to it over the interval h, so resting and struck particles neither
+        tunnel through moving bodies nor start behind them (nv_collide). A
+        candidate query must return every surface a relative path can meet. With
+        theta = |w| h, u = |v| h, r a surface's extent from its centre of mass,
+        D_c = u_c + theta_c (r_c + separation) for the carrier and d the query
+        segment, a hit point x and the query point y at the same parameter obey
+        |x - y| <= [theta r + (1 + theta) u] / (1 - theta)
+                   + [(1 + theta) D_c + theta |d|] / (1 - theta):
+        grow each surface by the first term and each query by the second (tick
+        maxima are enough); a surface with theta >= 1/2 is always a candidate
+        (bound derived by the FX V1 module). The sweep forms only small offsets
+        relative to surfaces, so float error stays O(eps) of the magnitudes
+        involved through a contact (tests/CollisionPrecision.h). The first impact of a slot whose
         program has NV_STREAM_PROGRAM_COLLISION_EVENTS appends one collision
         event (count = impacts of this interval).
      f. age += h
@@ -99,7 +114,16 @@ extern "C" {
 enum {
     NV_STREAM_RESET=1u,        /* all slots dead, then restore records installed */
     NV_STREAM_PROGRAMS=2u,     /* program table + curve keys replace the previous ones */
-    NV_STREAM_SURFACES=4u      /* surface table replaces the previous one (else the previous stays) */
+    NV_STREAM_SURFACES=4u,     /* surface table replaces the previous one (else the previous stays) */
+    NV_STREAM_EMITTER_DELTA=8u /* emitters[] updates only the rows listed in emitter_rows[] of the
+                                  persistent table (emitter_table rows); without it emitters[] is the
+                                  whole table (emitter_count == emitter_table). A row not sent keeps its
+                                  block, except the per-tick fields, which read as absent: rebase = 0,
+                                  no TRANSPORT / SOURCE / KILLED flag, parent_event = parent_row = NONE.
+                                  Its [dying_birth, death_birth) range was already applied (no live
+                                  birth is below death_birth), so it kills nothing and writes no event.
+                                  The CPU sends a whole table on RESET, the first packet, a new dt
+                                  (drag factors) and a new anchor (WORLD_VFX_DESIGN_KO.md 9.6). */
 };
 /* Program flags. Kinematic outputs (beams, decals) never enter the stream. */
 enum {
@@ -154,8 +178,11 @@ typedef struct NV_StreamHeader {
     uint32_t body_count;       /* rigid body frames of this tick (surfaces reference them) */
     uint64_t programs,curve_keys,emitters,spawns,explicit_births,fields,world_fields,surfaces,restore,bodies; /* byte offsets */
     uint64_t dynamic_surfaces; /* byte offset of this tick's world-space surfaces */
-    uint32_t dynamic_surface_count,reserved0b;
-    uint64_t reserved[5];
+    uint32_t dynamic_surface_count;
+    uint32_t emitter_table;    /* rows of the persistent emitter table after this packet */
+    uint64_t emitter_rows;     /* NV_STREAM_EMITTER_DELTA: byte offset of uint32 rows[emitter_count]
+                                  (ascending, section padded to 16 B), row of each emitters[] block */
+    uint64_t reserved[4];
 } NV_StreamHeader;
 
 /* Static per program (index = program number). Curves are piecewise linear
@@ -210,8 +237,11 @@ typedef struct NV_StreamEmitter {
                                     the event slot, else NV_STREAM_NONE. Then inherited.x is the inherit
                                     fraction (the GPU writes inherited = fraction * event velocity) and the
                                     GPU sets origin_anchor = parent origin_anchor + event position (float
-                                    sum); the CPU defines the child's double origin as anchor +
-                                    (double)that float, so later ticks send the identical value. */
+                                    sum), where the parent's origin_anchor is its origin of this tick: the
+                                    table value, or for a parent itself created in this tick (depth >= 2)
+                                    the value the GPU resolved at the previous depth. The CPU defines the
+                                    child's double origin as anchor + (double)that float, so later ticks
+                                    send the identical value. */
     float transport[12];         /* attached source motion, row-major 3x4 [R|t] in origin space */
     float source_previous[12];   /* source map at tick start, [R|t - origin] */
     float source_current[12];    /* source map at tick end */

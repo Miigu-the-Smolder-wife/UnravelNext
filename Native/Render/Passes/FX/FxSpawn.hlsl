@@ -48,7 +48,7 @@ void main(uint3 id : SV_DispatchThreadID)
 {
     const uint t = id.x;
     if (t >= P[0].w) return;
-    FX_BUFFER(StreamEmitter, emitters, g_emitters);
+    FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
     FX_BUFFER(StreamProgram, programs, g_programs);
     FX_RWBUFFER(EmitterDynamic, dynamic, g_emitterDynamic);
     if (t < P[0].z)

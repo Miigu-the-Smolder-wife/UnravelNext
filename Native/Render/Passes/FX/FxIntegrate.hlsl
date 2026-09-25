@@ -32,7 +32,7 @@ void main(uint3 id : SV_DispatchThreadID)
     FX_RWBUFFER(float4, posAge, g_posAge);
     FX_RWBUFFER(float4, velocity, g_velocity);
     FX_RWBUFFER(uint2, meta, g_meta);
-    FX_BUFFER(StreamEmitter, emitters, g_emitters);
+    FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
     FX_BUFFER(StreamProgram, programs, g_programs);
     FX_RWBUFFER(EmitterDynamic, dynamic, g_emitterDynamic);
     const float4 pa = posAge[slot];
@@ -59,6 +59,7 @@ void main(uint3 id : SV_DispatchThreadID)
         records[slot] = rr;
         FX_RWBUFFER(uint, keys, g_keyBySlot);
         keys[slot] = fxSortKey(dyn.originAnchor + s.position);
+        fxWriteOutputs(slot, birth, s, e, p, dyn);
         return;
     }
     if (born)
@@ -124,4 +125,5 @@ void main(uint3 id : SV_DispatchThreadID)
     records[slot] = rr;
     FX_RWBUFFER(uint, keys, g_keyBySlot);
     keys[slot] = fxSortKey(dyn.originAnchor + s.position);
+    fxWriteOutputs(slot, birth, s, e, p, dyn);
 }
