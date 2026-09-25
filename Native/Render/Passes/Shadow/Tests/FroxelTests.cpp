@@ -797,15 +797,15 @@ int main(int argc, char** argv)
             }
             const atmosphere::AtmosphereParams p = atmosphere::makeParams(sc.atmosphere, tf.quality);
             const ref::D3 sun = ref::normalize(d3(sc.sun.direction)), camPos = d3(c.position);
-            // C++ twin of airMultipleScattering (bilinear on the GPU LUT): the reference uses the same Psi_ms.
-            auto psi = [&](ref::D3 pos, ref::D3 sd) {
-                const double alt = std::clamp(ref::altitudeOf(model, pos) / (model.top - model.bottom), 0.0, 1.0);
-                const double qx = (ref::dot(ref::upOf(model, pos), sd) * 0.5 + 0.5) * (p.multiScatterSize[0] - 1), qy = alt * (p.multiScatterSize[1] - 1);
-                const uint32_t x0 = std::min((uint32_t)qx, p.multiScatterSize[0] - 1), y0 = std::min((uint32_t)qy, p.multiScatterSize[1] - 1);
-                const uint32_t x1 = std::min(x0 + 1, p.multiScatterSize[0] - 1), y1 = std::min(y0 + 1, p.multiScatterSize[1] - 1);
-                const double fx = qx - x0, fy = qy - y0;
-                auto at = [&](uint32_t x, uint32_t y) { const float4 t = texel(*ms, p.multiScatterSize[0], p.multiScatterSize[1] + 1, x, y); return ref::D3{ t.x, t.y, t.z }; };
-                return (at(x0, y0) * (1 - fx) + at(x1, y0) * fx) * (1 - fy) + (at(x0, y1) * (1 - fx) + at(x1, y1) * fx) * fy;
+            // C++ twin of airMultipleScattering (the GPU J_ms table read back, AtmosphereReference msTableLookup): the
+            // reference uses the same multiple-scattering source.
+            ref::MsTable msTable;
+            msTable.texels = ms.get();
+            for (int i = 0; i < 4; ++i) msTable.n[i] = p.multiScatterSize[i];
+            auto psi = [&](ref::D3 pos, ref::D3 dd, ref::D3 sd) {
+                const ref::D3 up = ref::upOf(model, pos);
+                const double alt = std::clamp(ref::altitudeOf(model, pos), 0.0, model.top - model.bottom);
+                return ref::msTableLookup(model, msTable, alt, ref::dot(up, dd), ref::dot(up, sd), ref::dot(dd, sd));
             };
             auto relErr = [](ref::D3 a, ref::D3 b, double floor) {
                 return std::max({ std::abs(a.x - b.x) / std::max(std::abs(b.x), floor), std::abs(a.y - b.y) / std::max(std::abs(b.y), floor),

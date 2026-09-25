@@ -67,7 +67,9 @@ struct State
     // This frame's graph handles (valid between shadowPages and the end of the frame's recording).
     uint64_t recordedFrame = UINT64_MAX;
     BufferRef poolRef;
-    BufferRef tableRef, metaRef, boundRef, blocksRef, statsRef, layersRef;
+    BufferRef tableRef, metaRef, boundRef, blocksRef, statsRef, layersRef, useRef;
+    ComPtr<ID3D12Resource> use;  // shadow.vsm.use_stats read bits (created on first use)
+    uint32_t useUav = UINT32_MAX;
     bool pagesRecorded = false;
     bool debugPaths = false;
     // Pool growth: a frame whose requests exhausted the pool sets the next size (never shrinks while running).
@@ -310,6 +312,7 @@ bool frameRefs(FramePassContext& fc, VsmFrameRefs& out)
     out.bound = s.boundRef;
     out.constantsCbv = s.ringCbv[s.constantsOffset / kRingStride];
     out.stats = s.statsRef;
+    out.use = s.useRef;
     return true;
 }
 
@@ -463,6 +466,16 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.latest.airTexels = w[24];
         for (uint32_t k = 0; k < kLevels; ++k) s.latest.levelPages[k] = w[32 + k];
         s.latest.sampledSubtiles = w[53];
+        s.latest.usePixel = w[54];
+        s.latest.usePixelRead = w[55];
+        s.latest.useAir = w[56];
+        s.latest.useAirRead = w[57];
+        s.latest.usePropagated = w[58];
+        s.latest.usePropagatedRead = w[59];
+        s.latest.useCachedRead = w[60];
+        s.latest.surfacePixels = w[61];
+        s.latest.backfacePixels = w[62];
+        s.latest.backfaceMixed = w[63];
         D3D12_RANGE none{ 0, 0 };
         s.statsReadback->Unmap(0, &none);
     }
@@ -576,8 +589,23 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const bool windChanged = std::memcmp(&windDir, &s.windDirection, sizeof windDir) != 0 || windSpeed != s.windSpeed;
     s.windDirection = windDir;
     s.windSpeed = windSpeed;
+    // shadow.vsm.use_stats (measurement only): the per-slot read bits and their persistent UAV (VsmSample.hlsli vsmEntry).
+    const bool useStats = q.integer("shadow.vsm.use_stats") != 0;
+    if (useStats && !s.use)
+    {
+        s.use = createBuffer(fc.device, L"S VSM read bits", (uint64_t)kSlots * 4);
+        DescriptorHeaps& h = fc.device.descriptors();
+        s.useUav = h.allocateResource();
+        D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = DXGI_FORMAT_R32_TYPELESS;
+        ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = kSlots;
+        ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        fc.device.d3d()->CreateUnorderedAccessView(s.use.Get(), nullptr, &ud, h.resourceCpu(s.useUav));
+    }
     VsmConstantsCpu& c = s.constants;
     c = {};
+    c.useStats = useStats ? s.useUav + 1 : 0;
     c.windChanged = windChanged ? 1u : 0u;
     c.windSpeed = std::max(windSpeed, 0.0f);
     c.windDirection = c.windSpeed > 0 ? normalize(windDir) : float3{};
@@ -698,6 +726,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     }
     const BufferRef statsBuf = g.importBuffer(s.stats.Get(), BufferDesc{ "S VSM stats", kStatsBytes, 0 });
     s.statsRef = statsBuf;
+    s.useRef = c.useStats ? g.importBuffer(s.use.Get(), BufferDesc{ "S VSM read bits", (uint64_t)kSlots * 4, 0 }) : BufferRef{};
+    const BufferRef useBuf = s.useRef;
     const BufferRef revisions = g.importBuffer(s.lastRevision.Get(), BufferDesc{ "S VSM instance revisions", (uint64_t)s.instanceCapacity * 8, 8 });
     s.recordedFrame = fc.frame.frameIndex;
     s.poolRef = pool;
@@ -962,6 +992,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.use(freeList, Use::UavCompute);
                       b.use(dirty, Use::UavCompute);
                       b.use(statsBuf, Use::UavCompute);
+                      if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
@@ -1184,7 +1215,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     const BufferRef froxelLists = view.froxelLights.valid() ? view.froxelLights : (mainView ? fc.resources.froxelLights : BufferRef{});
     const bool localSlots = froxelLists.valid() && s.localLightsNow != UINT32_MAX;
     const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow;
-    const BufferRef table = s.tableRef, bound = s.boundRef, blocks = s.blocksRef, statsBuf = s.statsRef, layers = s.layersRef;
+    const BufferRef table = s.tableRef, bound = s.boundRef, blocks = s.blocksRef, statsBuf = s.statsRef, layers = s.layersRef, useBuf = s.useRef;
     // Overflow list (INTERFACES 7.3, v1.20): the main view's shadow-casting lights past the third. Capacity = 1.5 x the
     // need of the last completed frame (the counter keeps counting past the capacity, so an overage frame reports its
     // full need), a power of two of words, at least 1 MB; shrinks only below a quarter (no plan churn around a boundary).
@@ -1270,6 +1301,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   if (mirrorMask.valid()) b.use(mirrorMask, Use::SrvCompute);
                   if (mirrorTiles.valid()) b.use(mirrorTiles, Use::SrvCompute);
                   b.use(layers, Use::SrvCompute);
+                  if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
               },
               [=](PassContext& ctx) {
                   const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu,
@@ -1307,6 +1339,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   b.use(statsBuf, Use::UavCompute);
                   b.use(out, Use::UavCompute);
                   b.use(layers, Use::SrvCompute);
+                  if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
               },
               [=](PassContext& ctx) {
                   const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, off, ctx.srv(table), ctx.srv(pool), ctx.srv(bound),
@@ -1335,6 +1368,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   b.use(statsBuf, Use::UavCompute);
                   if (localSlots) b.use(froxelLists, Use::SrvCompute);
                   if (mirrorMask.valid()) b.use(mirrorMask, Use::SrvCompute);
+                  if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
               },
               [=](PassContext& ctx) {
                   const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(heads), ring, ctx.srv(overflowTiles), ctx.srv(table), ctx.srv(pool),

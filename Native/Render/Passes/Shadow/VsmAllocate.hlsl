@@ -6,7 +6,8 @@
 // P[1].x dirty list UAV (raw: count, pad, then (slot, phys) pairs), P[1].y stats UAV (raw), P[1].z VSM constants CBV,
 // P[1].w local lights SRV (StructuredBuffer<VsmLocalLight>; local slots take their light's generation as tag)
 // Stats words: 0 requested, 1 allocated, 2 dirty, 3 pool exhausted, 4 free pages after allocation (VsmFinalize),
-// 5 requested by pixels (the rest by propagation)
+// 5 requested by pixels (the rest by propagation); shadow.vsm.use_stats (measurement only): words 54..60 (VsmStats use*),
+// the read bits of the frame before (vsmEntry) classified by this frame's request kind, then cleared
 #include "Scene.hlsli"
 #include "Passes/Shadow/VsmLocal.hlsli"
 
@@ -16,6 +17,20 @@ void main(uint slot : SV_DispatchThreadID)
     if (slot >= VSM_TOTAL_SLOTS) return;
     RWByteAddressBuffer requests = ResourceDescriptorHeap[P[0].y];
     const uint req = requests.Load(slot * 4);
+    if (slot < VSM_SUN_SLOTS)
+    {
+        ConstantBuffer<VsmConstants> cu = ResourceDescriptorHeap[P[1].z];
+        if (cu.useStats != 0)
+        {
+            RWByteAddressBuffer use = ResourceDescriptorHeap[cu.useStats - 1];
+            RWByteAddressBuffer st = ResourceDescriptorHeap[P[1].y];
+            const bool read = (use.Load(slot * 4) & 1u) != 0;
+            use.Store(slot * 4, 0);
+            const uint kind = (req & VSM_REQ_PIXEL) ? 0u : ((req & VSM_REQ_AIR) ? 1u : ((req & VSM_REQ_PROPAGATED) ? 2u : 3u));
+            if (kind < 3) st.InterlockedAdd(216 + kind * 8, 1);
+            if (read) st.InterlockedAdd(kind < 3 ? 220 + kind * 8 : 240, 1);
+        }
+    }
     if (req == 0) return;
     requests.Store(slot * 4, 0);
     RWByteAddressBuffer table = ResourceDescriptorHeap[P[0].x];

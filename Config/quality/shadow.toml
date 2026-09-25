@@ -11,6 +11,7 @@ lod_bias = 0.0                  # level = floor(log2(pixel footprint / level-0 t
 receiver_bias_texels = 1.0      # receiver-plane tolerance, texels of the compared level (x (1 + plane slope)); no lateral shift
 max_receiver_slope = 8.0        # clamp of the receiver plane's light-space gradient (surfaces within ~7 deg of grazing)
 height_margin_m = 500.0         # caster height range margin (dynamic casters) around the scene's bounds
+use_stats = 0                     # 1: count which sun pages lookups read, by request kind (measurement only; RendererGate)
 subtile_stats = 0                 # 1: count the 32^2 sub-tiles of requested pages that pixels sample (measurement only)
 sun_refresh_error = 0.00196       # moving sun: largest visibility error of a level's basis older than the sun (0.5 / 255:
                                   # below the stored 8 bits); a level refreshes before 2 dtheta / (pi tan theta_s) exceeds it

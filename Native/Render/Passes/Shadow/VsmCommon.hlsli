@@ -48,6 +48,7 @@ uint vsmBlockOffset(uint m) { return m == 0 ? 0u : m == 1 ? 256u : m == 2 ? 320u
 // Request flags (one uint per slot)
 #define VSM_REQ_PIXEL 1u
 #define VSM_REQ_PROPAGATED 2u
+#define VSM_REQ_AIR 4u  // requested by the air marks (VsmMarkAir; with VSM_REQ_PROPAGATED: the same page handling)
 
 // A clipmap level (64 B). Each level keeps the sun basis its pages were rendered with (moving sun: levels refresh to the
 // current sun in turn, S_STATUS_KO.md 7; the lookup error of a basis Delta theta old is <= 2 Delta theta / (pi tan
@@ -92,6 +93,8 @@ struct VsmConstants
     uint filterTaps;
     float3 windDirection;    // this frame's scene wind (unit; zero without wind) and speed (m/s): pages store the wind
     float windSpeed;         // they were drawn with, the rule bounds the change (windChangeBound, v1.23)
+    uint useStats;           // shadow.vsm.use_stats (measurement only): 1 + UAV index of the per-slot read bits, 0 = off
+    uint3 usePad;
     VsmLevel level[VSM_LEVELS];  // CPU copy of the windows (raster views); kernels use vsmTexel / vsmOrigin
 };
 

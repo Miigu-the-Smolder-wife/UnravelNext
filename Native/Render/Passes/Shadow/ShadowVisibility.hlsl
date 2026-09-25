@@ -15,7 +15,8 @@
 // P[1].x overflow tile list UAV (raw: count, dispatch args, tiles y << 16 | x; 0xFFFFFFFF: no overflow list in this view),
 // P[1].y page table SRV (raw), P[1].z pool SRV (raw), P[1].w search bound SRV (raw)
 // P[2].x penumbra list UAV (raw: count, then pixel y << 16 | x), P[2].y blocks SRV (raw), P[2].z statistics UAV (raw,
-// words 8.. of the VSM stats: pixels per VSM_PATH_*)
+// words 8.. of the VSM stats: pixels per VSM_PATH_*; with shadow.vsm.use_stats also words 61..63: surface pixels, those
+// whose geometric normal faces away from the sun (N.L <= 0), and those of them sent to pass 2)
 // P[3].x froxel lists SRV (raw; 0xFFFFFFFF: no local slots in this view), P[3].y local lights SRV, P[3].z slot of light SRV,
 // P[3].w overflow tile heads UAV (R32_UINT, with P[1].x).
 // P[4].x planar mask SRV (R8_UINT per pixel), P[4].y planar tile mask SRV (R8_UINT per 8 x 8 tile = this group)
@@ -29,12 +30,13 @@
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 
 // One pixel's classification: sky, settled (packed visibility), or mixed (goes to pass 2).
-void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out uint overflow)
+void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out uint overflow, out uint facing)
 {
     packed = 0xFFFFFFFFu;
     path = 0xFFu;  // sky
     mixed = false;
     overflow = 0;
+    facing = 0;  // 0 sky, 1 N.L > 0, 2 N.L <= 0 (geometric normal; statistics)
     if (px.x >= g_viewWidth || px.y >= g_viewHeight) return;
     if (P[4].x != 0xFFFFFFFFu)
     {
@@ -53,6 +55,7 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[P[0].w];
     float3 normal;
     const float3 world = shadowReceiver(depthTex, P[0].y, px, depth, normal);
+    facing = dot(normal, g_sunDirection) > 0 ? 1u : 2u;
     const float footprint = 2 * linearDepth(depth) * g_tanHalfFovY / g_viewHeight;
     const VsmReceiver rc = vsmMakeReceiver(vc, world, normal, vsmLevelForFootprint(vc, footprint));
     uint k;
@@ -122,7 +125,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_G
     RWTexture2D<uint> output = ResourceDescriptorHeap[P[0].z];
     RWByteAddressBuffer list = ResourceDescriptorHeap[P[2].x];
     RWByteAddressBuffer stats = ResourceDescriptorHeap[P[2].z];
-    uint packed[1], path[1], overflow[1];
+    uint packed[1], path[1], overflow[1], facing[1];
     bool mixed[1];
     if (P[4].y != 0xFFFFFFFFu)
     {
@@ -138,7 +141,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_G
         }
     }
     if (gi == 0) gs_overflow = 0;
-    classifyPixel(id.xy, packed[0], path[0], mixed[0], overflow[0]);
+    classifyPixel(id.xy, packed[0], path[0], mixed[0], overflow[0], facing[0]);
     if (P[1].x != 0xFFFFFFFFu)
     {
         // The tile's overflow: head 0 now, or the tile to the overflow list (its head is ShadowOverflow.hlsl's).
@@ -183,6 +186,18 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_G
         {
             const uint c = WaveActiveCountBits(path[j2] == i);
             if (WaveIsFirstLane() && c) stats.InterlockedAdd(32 + i * 4, c);
+        }
+        ConstantBuffer<VsmConstants> uc = ResourceDescriptorHeap[P[0].w];
+        if (uc.useStats != 0)  // measurement only: the back-facing share (a mark / visibility skip's gain)
+        {
+            const uint surface = WaveActiveCountBits(facing[j2] != 0), back = WaveActiveCountBits(facing[j2] == 2);
+            const uint backMixed = WaveActiveCountBits(facing[j2] == 2 && mixed[j2]);
+            if (WaveIsFirstLane())
+            {
+                stats.InterlockedAdd(244, surface);
+                stats.InterlockedAdd(248, back);
+                stats.InterlockedAdd(252, backMixed);
+            }
         }
     }
 }

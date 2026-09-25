@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace unx::render::atmosphere::reference
@@ -133,47 +134,7 @@ double miePhase(double c, double g)
     return (1 - g * g) / (4 * kPi * den * std::sqrt(den));
 }
 
-D3 multiScatter(const Model& m, double h, double mus, int directions, int steps)
-{
-    const D3 origin{ 0, h, 0 }, sun{ std::sqrt(std::max(0.0, 1 - mus * mus)), mus, 0 };
-    D3 second, loss;
-    for (int n = 0; n < directions; ++n)
-    {
-        const double z = 1 - 2 * (n + 0.5) / directions, phi = n * 2.399963229728653, s = std::sqrt(1 - z * z);
-        const D3 d{ s * std::cos(phi), z, s * std::sin(phi) };
-        const double ground = distanceToGround(m, origin, d);
-        const double end = std::min(ground, std::max(0.0, distanceToTop(m, origin, d)));
-        D3 T{ 1, 1, 1 };
-        for (int j = 0; j < steps; ++j)
-        {
-            const double u0 = double(j) / steps, u1 = double(j + 1) / steps;
-            const double step = end * (u1 * u1 - u0 * u0);
-            const D3 p = origin + d * (end * u0 * u0 + 0.5 * step);
-            const Coefficients c = coefficients(m, altitudeOf(m, p));
-            D3 integral;
-            for (int k = 0; k < 3; ++k)
-            {
-                const double e = (&c.extinction.x)[k], tau = e * step;
-                (&integral.x)[k] = tau < 1e-9 ? step : (1 - std::exp(-tau)) / e;
-            }
-            second = second + T * integral * (c.rayleigh + c.mie) * sunTransmittance(m, p, sun, 256);
-            D3 absorb = c.extinction - c.rayleigh - c.mie;
-            loss = loss + T * integral * D3{ std::max(0.0, absorb.x), std::max(0.0, absorb.y), std::max(0.0, absorb.z) };
-            T = T * expNeg(c.extinction * step);
-        }
-        if (ground < kInf)
-        {
-            const D3 p = origin + d * ground, up = upOf(m, p);
-            second = second + T * m.albedo * (4 * std::max(0.0, dot(up, sun))) * sunTransmittance(m, p + up * 0.01, sun, 512);
-            loss = loss + T * (D3{ 1, 1, 1 } - m.albedo);
-        }
-        else
-            loss = loss + T;
-    }
-    return { second.x / (4 * kPi * loss.x), second.y / (4 * kPi * loss.y), second.z / (4 * kPi * loss.z) };
-}
-
-D3 skyRadiance(const Model& m, D3 p, D3 d, D3 sun, const PsiFn& psi, int steps)
+D3 skyRadiance(const Model& m, D3 p, D3 d, D3 sun, const MsFn& ms, const GroundFn& groundFn, int steps)
 {
     const double ground = distanceToGround(m, p, d);
     const double end = std::min(ground, std::max(0.0, distanceToTop(m, p, d)));
@@ -187,7 +148,7 @@ D3 skyRadiance(const Model& m, D3 p, D3 d, D3 sun, const PsiFn& psi, int steps)
         const double t0 = end * u0 * u0, t1 = end * u1 * u1, dt = t1 - t0;
         const D3 q = p + d * (0.5 * (t0 + t1));
         const Coefficients c = coefficients(m, altitudeOf(m, q));
-        const D3 source = (c.rayleigh * pr + c.mie * pm) * sunTransmittance(m, q, sun, 512) + (c.rayleigh + c.mie) * psi(q, sun);
+        const D3 source = (c.rayleigh * pr + c.mie * pm) * sunTransmittance(m, q, sun, 512) + (c.rayleigh + c.mie) * ms(q, d, sun);
         D3 integral;
         for (int k = 0; k < 3; ++k)
         {
@@ -202,12 +163,13 @@ D3 skyRadiance(const Model& m, D3 p, D3 d, D3 sun, const PsiFn& psi, int steps)
     if (ground < kInf)
     {
         const D3 q = p + d * ground, up = upOf(m, q);
-        radiance = radiance + T * m.albedo * (sunTransmittance(m, q + up * 0.01, sun, 512) * (std::max(0.0, dot(up, sun)) / kPi) + psi(q, sun));
+        const double mus = dot(up, sun);
+        radiance = radiance + T * m.albedo * ((sunTransmittance(m, q + up * 0.01, sun, 512) * std::max(0.0, mus) + groundFn(mus)) * (1 / kPi));
     }
     return radiance;
 }
 
-void aerial(const Model& m, D3 p, D3 d, double distance, D3 sun, const PsiFn& psi, D3& inscatter, D3& transmittance, int steps)
+void aerial(const Model& m, D3 p, D3 d, double distance, D3 sun, const MsFn& ms, D3& inscatter, D3& transmittance, int steps)
 {
     const double nu = dot(d, sun), pr = rayleighPhase(nu), pm = miePhase(nu, m.g);
     D3 L, T{ 1, 1, 1 };
@@ -218,7 +180,7 @@ void aerial(const Model& m, D3 p, D3 d, double distance, D3 sun, const PsiFn& ps
         const double h = altitudeOf(m, q);
         if (h < 0) q = q + upOf(m, q) * (-h);  // surface air below the model's surface (airLiftToSurface)
         const Coefficients c = coefficients(m, std::max(0.0, h));
-        const D3 source = (c.rayleigh * pr + c.mie * pm) * sunTransmittance(m, q, sun, 512) + (c.rayleigh + c.mie) * psi(q, sun);
+        const D3 source = (c.rayleigh * pr + c.mie * pm) * sunTransmittance(m, q, sun, 512) + (c.rayleigh + c.mie) * ms(q, d, sun);
         D3 integral;
         for (int k = 0; k < 3; ++k)
         {
@@ -230,5 +192,209 @@ void aerial(const Model& m, D3 p, D3 d, double distance, D3 sun, const PsiFn& ps
     }
     inscatter = L;
     transmittance = T;
+}
+D3 singleScattering(const Model& m, D3 p, D3 d, D3 sun, int steps)
+{
+    const double ground = distanceToGround(m, p, d);
+    const double end = std::min(ground, std::max(0.0, distanceToTop(m, p, d)));
+    const double nu = dot(d, sun), pr = rayleighPhase(nu), pm = miePhase(nu, m.g);
+    D3 radiance, T{ 1, 1, 1 };
+    for (int i = 0; i < steps; ++i)
+    {
+        const double u0 = double(i) / steps, u1 = double(i + 1) / steps;
+        const double t0 = end * u0 * u0, t1 = end * u1 * u1, dt = t1 - t0;
+        const D3 q = p + d * (0.5 * (t0 + t1));
+        const Coefficients c = coefficients(m, altitudeOf(m, q));
+        D3 integral;
+        for (int k = 0; k < 3; ++k)
+        {
+            const double e = (&c.extinction.x)[k], tau = e * dt;
+            (&integral.x)[k] = tau < 1e-9 ? dt : (1 - std::exp(-tau)) / e;
+        }
+        radiance = radiance + T * (c.rayleigh * pr + c.mie * pm) * sunTransmittance(m, q, sun, 512) * integral;
+        T = T * expNeg(c.extinction * dt);
+    }
+    if (ground < kInf)
+    {
+        const D3 q = p + d * ground, up = upOf(m, q);
+        radiance = radiance + T * m.albedo * sunTransmittance(m, q + up * 0.01, sun, 512) * (std::max(0.0, dot(up, sun)) / kPi);
+    }
+    return radiance;
+}
+
+D3 sphereSource(const Model& m, D3 p, D3 v, D3 sun, const std::function<D3(D3 w)>& radiance, int nodes)
+{
+    const int polar = std::max(1, (int)std::lround(std::sqrt(double(nodes)))), azimuths = std::max(1, nodes / polar);
+    const int perHg = polar * azimuths;
+    const double g = m.g;
+    auto hgCosine = [&](double u) {
+        if (std::abs(g) < 1e-3) return 1 - 2 * u;
+        const double s = (1 - g * g) / (1 - g + 2 * g * u);
+        return std::clamp((1 + g * g - s * s) / (2 * g), -1.0, 1.0);
+    };
+    const int rings = std::max(1, (int)std::lround(std::sqrt(nodes / 2.0))), around = 2 * rings, grid = 2 * rings * around;
+    const double hz = -std::acos(std::clamp(m.bottom / (m.bottom + std::max(0.0, altitudeOf(m, p))), 0.0, 1.0));
+    // The grid's frame: the local vertical at p.
+    const D3 up = upOf(m, p), side = normalize(std::abs(up.x) < 0.9 ? D3{ 1 - up.x * up.x, -up.x * up.y, -up.x * up.z } : D3{ -up.z * up.x, -up.z * up.y, 1 - up.z * up.z });
+    const D3 side2{ up.y * side.z - up.z * side.y, up.z * side.x - up.x * side.z, up.x * side.y - up.y * side.x };
+    auto gridPdf = [&](D3 w) {
+        const double el = std::asin(std::clamp(dot(w, up), -1.0, 1.0));
+        const double range = el >= hz ? kPi / 2 - hz : hz + kPi / 2;
+        const double u = std::max(std::sqrt(std::clamp(std::abs(el - hz) / range, 0.0, 1.0)), 1e-4);
+        return 0.5 / (2 * u * range) / (2 * kPi) / std::max(std::cos(el), 1e-9);
+    };
+    D3 sR, sM;
+    for (int set = 0; set < 3; ++set)
+    {
+        const int count = set < 2 ? perHg : grid;
+        const D3 axis = set == 0 ? v : sun;
+        const D3 a = std::abs(axis.y) < 0.9 ? D3{ 0, 1, 0 } : D3{ 1, 0, 0 };
+        const D3 e1 = normalize(D3{ axis.y * a.z - axis.z * a.y, axis.z * a.x - axis.x * a.z, axis.x * a.y - axis.y * a.x });
+        const D3 e2{ axis.y * e1.z - axis.z * e1.y, axis.z * e1.x - axis.x * e1.z, axis.x * e1.y - axis.y * e1.x };
+        for (int i = 0; i < count; ++i)
+        {
+            D3 w;
+            if (set < 2)
+            {
+                const double ct = hgCosine((i / azimuths + 0.5) / polar), st = std::sqrt(std::max(0.0, 1 - ct * ct));
+                const double phi = 2 * kPi * ((i % azimuths) + 0.5) / azimuths;
+                w = normalize(axis * ct + (e1 * std::cos(phi) + e2 * std::sin(phi)) * st);
+            }
+            else
+            {
+                const int above = i / (rings * around), k = (i / around) % rings;
+                const double u = (k + 0.5) / rings, phi = 2 * kPi * ((i % around) + 0.5) / around;
+                const double el = above ? hz + u * u * (kPi / 2 - hz) : hz - u * u * (hz + kPi / 2);
+                w = side * (std::cos(el) * std::cos(phi)) + up * std::sin(el) + side2 * (std::cos(el) * std::sin(phi));
+            }
+            const double cv = dot(w, v);
+            const double density = perHg * (miePhase(cv, g) + miePhase(dot(w, sun), g)) + grid * gridPdf(w);
+            const D3 L = radiance(w) * (1 / density);
+            sR = sR + L * rayleighPhase(cv);
+            sM = sM + L * miePhase(cv, g);
+        }
+    }
+    const Coefficients c = coefficients(m, std::min(altitudeOf(m, p), (m.top - m.bottom) * 0.999999));
+    D3 out;
+    for (int k = 0; k < 3; ++k)
+    {
+        const double r = (&c.rayleigh.x)[k], mi = (&c.mie.x)[k];
+        (&out.x)[k] = r + mi > 0 ? (r * (&sR.x)[k] + mi * (&sM.x)[k]) / (r + mi) : (&sR.x)[k];
+    }
+    return out;
+}
+
+namespace
+{
+double horizonElevation(const Model& m, double altitude) { return -std::acos(std::clamp(m.bottom / (m.bottom + std::max(0.0, altitude)), 0.0, 1.0)); }
+double msAltitude(const Model& m, double u)
+{
+    const double H = std::sqrt((m.top - m.bottom) * (m.top + m.bottom)), rho = u * H;
+    return rho * rho / (std::sqrt(rho * rho + m.bottom * m.bottom) + m.bottom);
+}
+double msR(const Model& m, double altitude)
+{
+    const double H = std::sqrt((m.top - m.bottom) * (m.top + m.bottom));
+    return std::clamp(std::sqrt(std::max(0.0, altitude * (altitude + 2 * m.bottom))) / H, 0.0, 1.0);
+}
+constexpr double kMsTwilight = 0.4;  // ATMO_MS_TWILIGHT
+double msSunCoord(double mus)
+{
+    if (mus >= 0) return 0.5 + 0.5 * (std::sqrt(0.04 + 3.2 * std::min(mus, 1.0)) - 0.2) / 1.6;
+    const double m = std::min(-mus / kMsTwilight, 1.0);
+    return 0.5 - 0.5 * (std::sqrt(1 + 8 * m) - 1) * 0.5;
+}
+double msSunCosine(double u)
+{
+    const double t = 2 * u - 1;
+    return t >= 0 ? t * (0.2 + 0.8 * t) : -kMsTwilight * 0.5 * (-t + t * t);
+}
+double msNuCoord(double nu) { return std::pow(std::acos(std::clamp(nu, -1.0, 1.0)) / kPi, 2.0 / 3.0); }
+double msNu(double u) { return std::cos(kPi * u * std::sqrt(u)); }
+constexpr double kMsLogMin = -50.0;  // ATMO_MS_LOG_MIN
+double msViewRow(const Model& m, uint32_t nMu, double altitude, double mu)
+{
+    const uint32_t half = nMu / 2;
+    const double elevation = std::asin(std::clamp(mu, -1.0, 1.0)), horizon = horizonElevation(m, altitude);
+    if (elevation >= horizon) return half + std::sqrt(std::clamp((elevation - horizon) / (kPi / 2 - horizon), 0.0, 1.0)) * (half - 1);
+    return std::sqrt(std::clamp((horizon - elevation) / (horizon + kPi / 2), 0.0, 1.0)) * (half - 1);
+}
+double msViewCosine(const Model& m, uint32_t nMu, double altitude, uint32_t row)
+{
+    const uint32_t half = nMu / 2;
+    const double u = double(row % half) / (half - 1), horizon = horizonElevation(m, altitude);
+    const double elevation = row >= half ? horizon + u * u * (kPi / 2 - horizon) : horizon - u * u * (horizon + kPi / 2);
+    return std::sin(elevation);
+}
+} // namespace
+
+MsTexelCoords msTexel(const Model& m, const MsTable& t, uint32_t iNu, uint32_t iMus, uint32_t iMu, uint32_t iR)
+{
+    MsTexelCoords c;
+    c.altitude = msAltitude(m, double(iR) / (t.n[3] - 1));
+    c.mu = msViewCosine(m, t.n[2], c.altitude, iMu);
+    c.mus = msSunCosine(double(iMus) / (t.n[1] - 1));
+    const double sm = std::sqrt(std::max(0.0, 1 - c.mu * c.mu)), ss = std::sqrt(std::max(0.0, 1 - c.mus * c.mus));
+    c.nu = std::clamp(msNu(double(iNu) / (t.n[0] - 1)), c.mu * c.mus - sm * ss, c.mu * c.mus + sm * ss);
+    return c;
+}
+
+namespace
+{
+D3 msTexelLog(const MsTable& t, uint32_t iNu, uint32_t iMus, uint32_t iMu, uint32_t iR)
+{
+    // R16G16B16A16_UNORM: (ln J^ - kMsLogMin) / -kMsLogMin.
+    // Texture N_mus x N_mu x (N_nu N_r) (AtmosphereCommon.hlsli); readback rows 256 B aligned.
+    const size_t pitch = (size_t(t.n[1]) * 8 + 255) & ~size_t(255);
+    const size_t offset = ((size_t(iNu) * t.n[3] + iR) * t.n[2] + iMu) * pitch + size_t(iMus) * 8;
+    uint16_t v[3];
+    std::memcpy(v, t.texels->data() + offset, 6);
+    return D3{ kMsLogMin * (1 - v[0] / 65535.0), kMsLogMin * (1 - v[1] / 65535.0), kMsLogMin * (1 - v[2] / 65535.0) };
+}
+} // namespace
+
+D3 msTexelValue(const MsTable& t, uint32_t iNu, uint32_t iMus, uint32_t iMu, uint32_t iR)
+{
+    return expNeg(msTexelLog(t, iNu, iMus, iMu, iR) * -1.0);
+}
+
+D3 msTableLookup(const Model& m, const MsTable& t, double altitude, double mu, double mus, double nu)
+{
+    // Continuous node coordinates; mu stays within its half (as the GPU's clamp-to-row-range does).
+    const double y = msViewRow(m, t.n[2], altitude, mu), z = msR(m, altitude) * (t.n[3] - 1);
+    const double fsCoord = msSunCoord(mus) * (t.n[1] - 1), fn = msNuCoord(nu) * (t.n[0] - 1);
+    const uint32_t half = t.n[2] / 2;
+    const uint32_t y0 = std::min((uint32_t)y, t.n[2] - 1), y1 = (y0 + 1 < t.n[2] && (y0 + 1) / half == y0 / half) ? y0 + 1 : y0;
+    const uint32_t z0 = std::min((uint32_t)z, t.n[3] - 1), z1 = std::min(z0 + 1, t.n[3] - 1);
+    const uint32_t n0 = std::min((uint32_t)fn, t.n[0] - 2), n1 = n0 + 1;
+    const double s1 = std::min(std::floor(fsCoord), double(t.n[1] - 2)), ts = fsCoord - s1;
+    // Catmull-Rom along mu_s (AtmosphereCommon.hlsli airCatmullRom), linear in the other axes.
+    const double t2 = ts * ts, t3 = t2 * ts;
+    const double ws[4] = { -0.5 * t3 + t2 - 0.5 * ts, 1.5 * t3 - 2.5 * t2 + 1, -1.5 * t3 + 2 * t2 + 0.5 * ts, 0.5 * t3 - 0.5 * t2 };
+    const double fy = y - y0, fz = z - z0, fnu = fn - n0;
+    D3 v;
+    for (int k = 0; k < 4; ++k)
+    {
+        const uint32_t sk = (uint32_t)std::clamp(s1 - 1 + k, 0.0, double(t.n[1] - 1));
+        for (int a = 0; a < 2; ++a)
+            for (int c = 0; c < 2; ++c)
+                for (int d = 0; d < 2; ++d)
+                {
+                    const double w = ws[k] * (a ? fnu : 1 - fnu) * (c ? fy : 1 - fy) * (d ? fz : 1 - fz);
+                    if (w != 0) v = v + msTexelLog(t, a ? n1 : n0, sk, c ? y1 : y0, d ? z1 : z0) * w;
+                }
+    }
+    return expNeg(v * -1.0);  // log-domain interpolation (AtmosphereCommon.hlsli)
+}
+
+D3 groundIndirectLookup(const std::vector<uint8_t>& transmittance, uint32_t w, uint32_t row, double mus)
+{
+    const double q = msSunCoord(std::clamp(mus, -1.0, 1.0)) * (w - 1);
+    const uint32_t i0 = std::min((uint32_t)q, w - 2);
+    const double f = q - i0;
+    float a[4], b[4];
+    std::memcpy(a, transmittance.data() + (size_t(row) * w + i0) * 16, 16);
+    std::memcpy(b, transmittance.data() + (size_t(row) * w + i0 + 1) * 16, 16);
+    return D3{ a[0], a[1], a[2] } * (1 - f) + D3{ b[0], b[1], b[2] } * f;
 }
 } // namespace unx::render::atmosphere::reference

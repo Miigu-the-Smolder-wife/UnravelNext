@@ -37,5 +37,5 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     float ta, tb;
     int2 page;
     [loop] for (uint guard = 0; guard < 512 && vsmAirWalkNext(w, ta, tb, page); ++guard)
-        if (vsmInWindow(c, page, k)) requests.InterlockedOr(vsmSlot(page, k) * 4, VSM_REQ_PROPAGATED);
+        if (vsmInWindow(c, page, k)) requests.InterlockedOr(vsmSlot(page, k) * 4, VSM_REQ_PROPAGATED | VSM_REQ_AIR);
 }

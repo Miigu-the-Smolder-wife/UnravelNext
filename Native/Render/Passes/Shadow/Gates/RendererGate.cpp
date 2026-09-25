@@ -5,7 +5,7 @@
 // Needs a build with tracks V, M, S and C (Build.ps1 -Track S -Tracks "V;M;S;C", or -Track all). GPU lock required:
 //   powershell -File Tools/CI/GpuLock.ps1 -Track S -- build/S/bin/unx_gate_shadow_renderergate.exe
 //       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--moving] [--sun-deg-per-s R]
-//       [--wind-gust-period-s T] [--capture FILE.pfm] [--out DIR] [--set k=v]
+//       [--wind-gust-period-s T] [--camera NAME] [--capture FILE.pfm] [--out DIR] [--set k=v]
 // --capture: the main view's linear scene radiance (FrameContext::outputLinearHdr, x exposure) of the last frame as
 // a PFM for unx_reference compare (one resolution; the frames still render as measured, plus one copy each).
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h") && defined(UNX_HAS_SCENEGEN)
@@ -37,9 +37,11 @@ using namespace unx::render;
 #if S_RENDERER_GATE
 namespace
 {
-scene::Camera cameraAt(const scene::Scene& s, bool moving, double time)
+scene::Camera cameraAt(const scene::Scene& s, bool moving, double time, const std::string& name)
 {
     scene::Camera c = s.cameras.at(0);
+    for (const scene::Camera& k : s.cameras)
+        if (k.name == name) c = k;
     if (!moving || s.paths.empty() || s.paths[0].keys.size() < 2) return c;
     const auto& keys = s.paths[0].keys;
     const double span = keys.back().time - keys.front().time;
@@ -71,6 +73,7 @@ int main(int argc, char** argv)
         bool moving = false;
         float sunDegPerS = 0;  // moving sun (time of day): the sun turns about the horizontal axis normal to it
         std::string capturePath;  // --capture: last frame's linear radiance as PFM
+        std::string cameraName;   // --camera: a camera of the scene by name (default: the first)
         float gustPeriodS = 0;  // wind change after commit (v1.23): every gustPeriodS the source scene's wind alternates
                                 // between the scene's and +30 % speed / +20 degrees (no reload; the host's path)
         std::vector<std::string> overrides;
@@ -84,6 +87,7 @@ int main(int argc, char** argv)
             if (a == "--scene") sceneName = next();
             else if (a == "--resolution") resolutionArg = next();
             else if (a == "--frames") frames = (uint32_t)std::stoul(next());
+            else if (a == "--camera") cameraName = next();
             else if (a == "--moving") moving = true;
             else if (a == "--sun-deg-per-s") sunDegPerS = std::stof(next());
             else if (a == "--wind-gust-period-s") gustPeriodS = std::stof(next());
@@ -111,7 +115,7 @@ int main(int argc, char** argv)
         const float3 windDir0 = s.windDirection;
         ClusterData clusters = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality));
         logf("scene %s (%s), %zu instances, %zu clusters, camera %s\n", sceneName.c_str(), scene::contentHash(s).substr(0, 16).c_str(), s.instances.size(),
-             clusters.clusters.size(), moving ? "path 0 (moving)" : "0 (static)");
+             clusters.clusters.size(), moving ? "path 0 (moving)" : (cameraName.empty() ? "0 (static)" : cameraName.c_str()));
         Device device({});
         ComPtr<ID3D12Resource> captureBuffer;  // --capture: readback of the gate output (last frame wins)
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT captureFootprint{};
@@ -131,7 +135,7 @@ int main(int argc, char** argv)
             options.frames = frames;
             options.label = "S " + sceneName + (moving ? " moving " : " static ") + (sunDegPerS != 0 ? "sun " + std::to_string(sunDegPerS) + " deg/s " : "") + (gustPeriodS > 0 ? "gusts " : "") + rs;
             if (!out.empty()) options.outputDirectory = out;
-            float4x4 prev = ViewDesc::fromCamera(cameraAt(s, moving, 0), res.width, res.height, {}).viewProj;
+            float4x4 prev = ViewDesc::fromCamera(cameraAt(s, moving, 0, cameraName), res.width, res.height, {}).viewProj;
             // Dirty pages and T_sun averaged over the measured frames (the counters lag the frame by two).
             double dirtySum = 0, trianglesSum = 0, requestedSum = 0;
             uint32_t samples = 0, exhausted = 0, requestedMax = 0, overTiles = 0, overflowWordsMax = 0, overflowLightsMax = 0;
@@ -141,7 +145,7 @@ int main(int argc, char** argv)
                 fc.frameIndex = frame;
                 fc.time = frame / 60.0;
                 fc.deltaTime = 1.0f / 60;
-                fc.mainView = ViewDesc::fromCamera(cameraAt(s, moving, fc.time), rr.width, rr.height, prev);
+                fc.mainView = ViewDesc::fromCamera(cameraAt(s, moving, fc.time, cameraName), rr.width, rr.height, prev);
                 if (gustPeriodS > 0)
                 {
                     const bool gust = ((uint64_t)(fc.time / gustPeriodS) & 1) != 0;
@@ -267,13 +271,19 @@ int main(int argc, char** argv)
                                                        shadow::froxelGridFor(quality, res.width, res.height).slices),
                  fs.overflowLists, fs.droppedLights, fs.maxCount);
             if (quality.integer("atmosphere.froxels.walk_stats") != 0)
-                logf("  air shadow walk (last frame): %u slices walked, %u with a mixed page (%.1f %%), block loads 32: %u, 8: %u, texel loads %u (%.1f per mixed slice)\n",
+                logf("  air walk: slices %u, mixed %u (%.1f %%), loads b32 %u b8 %u texel %u (%.1f/mixed)\n",
                      st.airSlices, st.airSlicesMixed, 100.0 * st.airSlicesMixed / std::max(st.airSlices, 1u), st.airBlocks32, st.airBlocks8, st.airTexels,
                      (double)st.airTexels / std::max(st.airSlicesMixed, 1u));
             {
                 std::string pagesLine;
                 for (uint32_t k = 0; k < shadow::kLevels; ++k) pagesLine += format(" L%u:%u", k, st.levelPages[k]);
                 logf("  requested sun pages by level (last frame):%s\n", pagesLine.c_str());
+                if (quality.integer("shadow.vsm.use_stats") != 0)
+                    logf("  pages read: pixel %u/%u, air %u/%u, propagated %u/%u, cached %u\n",
+                         st.usePixelRead, st.usePixel, st.useAirRead, st.useAir, st.usePropagatedRead, st.usePropagated, st.useCachedRead);
+                if (quality.integer("shadow.vsm.use_stats") != 0)
+                    logf("  surface px %u, N.L<=0 %u (%.1f %%), N.L<=0 mixed %u\n",
+                         st.surfacePixels, st.backfacePixels, 100.0 * st.backfacePixels / std::max(st.surfacePixels, 1u), st.backfaceMixed);
                 if (quality.integer("shadow.vsm.subtile_stats") != 0)
                     logf("  sampled 32^2 sub-tiles %u of %u in pixel-requested pages (%.1f %%)\n", st.sampledSubtiles, st.pixelRequested * 16,
                          100.0 * st.sampledSubtiles / std::max(st.pixelRequested * 16, 1u));

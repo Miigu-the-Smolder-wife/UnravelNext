@@ -1,14 +1,16 @@
-// S sky model split by scattering order for comparison with unx_reference --volume-order (CPU only, no GPU lock).
+// S sky model's single scattering for comparison with unx_reference --volume-order 1:1 (CPU only, no GPU lock).
 //   unx_gate_atmosphere_skyorders --scene NAME --camera NAME --res WxH [--step N] [--rows A:B] [--out FILE.csv]
 //                                 [--black-ground] [--write-scene FILE.unxscene]
 // For a grid of pixels (every N-th, pixel centres, the unx_reference camera mapping) whose view ray leaves the atmosphere
-// without meeting the planet, the double-precision S model (AtmosphereReference.h) gives single scattering (Psi = 0)
-// and the full far-field sky (Hillaire 2020 Psi_ms from a fine table), in exposed units (x E_TOA x sun colour x
-// 1 / (1.2 2^ev100)) like the reference images. Scene geometry (terrain, towers) is not in the model: pick sky pixels.
-// unx_reference's order window counts atmosphere events only, so its order 1 also holds sunlight reflected by the ground
-// and then scattered once, which the model carries in Psi_ms. --black-ground sets the planet albedo and every material
-// to black (no diffuse, no specular) in the model and in the scene written by --write-scene, so that order 1 of a
-// reference of that scene is single scattering alone.
+// without meeting the planet, the double-precision S model (AtmosphereReference.h) gives the single scattering in
+// exposed units (x E_TOA x sun colour x 1 / (1.2 2^ev100)) like the reference images. Scene geometry (terrain, towers)
+// is not in the model: pick sky pixels. unx_reference's order window counts atmosphere events only, so its order 1 also
+// holds sunlight reflected by the ground and then scattered once (in S: part of J_ms). --black-ground sets the planet
+// albedo and every material to black (no diffuse, no specular) in the model and in the scene written by --write-scene,
+// so that order 1 of a reference of that scene is single scattering alone. The multiple scattering (the J_ms table) is
+// compared through RendererGate --capture against the full reference and its order windows (S_STATUS_KO.md 8).
+// 2026-09-25 [measured, ridge_sunset 640x360]: single scattering 0.999 of the reference; Hillaire 2020 Psi_ms (the
+// previous model) gave 0.80-0.94 of the multiple scattering, which J_ms replaced.
 #include "AtmosphereReference.h"
 
 #if __has_include("unx/scenegen/SceneGen.h") && defined(UNX_HAS_SCENEGEN)
@@ -29,37 +31,6 @@ namespace
 {
 ref::D3 d3(float3 v) { return { v.x, v.y, v.z }; }
 
-// Psi_ms on a (sun cosine, altitude) grid, bilinear like the GPU LUT but finer and with fine quadrature.
-struct PsiTable
-{
-    static constexpr int kMu = 64, kAlt = 64, kDirections = 256, kSteps = 64;
-    std::vector<ref::D3> v;
-    double height = 0;
-    void build(const ref::Model& m)
-    {
-        height = m.top - m.bottom;
-        v.resize(kMu * kAlt);
-        std::vector<std::thread> threads;
-        const unsigned n = std::max(1u, std::thread::hardware_concurrency() / 2);
-        for (unsigned t = 0; t < n; ++t)
-            threads.emplace_back([&, t] {
-                for (int i = (int)t; i < kMu * kAlt; i += (int)n)
-                {
-                    const int x = i % kMu, y = i / kMu;
-                    v[i] = ref::multiScatter(m, double(y) / (kAlt - 1) * height, double(x) / (kMu - 1) * 2 - 1, kDirections, kSteps);
-                }
-            });
-        for (auto& th : threads) th.join();
-    }
-    ref::D3 at(double altitude, double mu) const
-    {
-        const double qx = std::clamp(mu * 0.5 + 0.5, 0.0, 1.0) * (kMu - 1), qy = std::clamp(altitude / height, 0.0, 1.0) * (kAlt - 1);
-        const int x0 = std::min((int)qx, kMu - 2), y0 = std::min((int)qy, kAlt - 2);
-        const double fx = qx - x0, fy = qy - y0;
-        auto e = [&](int x, int y) { return v[y * kMu + x]; };
-        return (e(x0, y0) * (1 - fx) + e(x0 + 1, y0) * fx) * (1 - fy) + (e(x0, y0 + 1) * (1 - fx) + e(x0 + 1, y0 + 1) * fx) * fy;
-    }
-};
 } // namespace
 
 int main(int argc, char** argv)
@@ -132,10 +103,6 @@ int main(int argc, char** argv)
         if (!cam) fail("unknown camera %s", cameraName.c_str());
 
         const ref::Model m = ref::fromScene(s.atmosphere);
-        PsiTable psi;
-        psi.build(m);
-        const ref::PsiFn psiFn = [&](ref::D3 p, ref::D3 sun) { return psi.at(ref::altitudeOf(m, p), ref::dot(ref::upOf(m, p), sun)); };
-        const ref::PsiFn none = [](ref::D3, ref::D3) { return ref::D3{}; };
         const ref::D3 sun = ref::normalize(d3(s.sun.direction));
         const double exposure = 1.0 / (1.2 * std::exp2((double)cam->ev100));
         const ref::D3 scale = d3(s.sun.color) * (s.sun.illuminance * exposure);
@@ -151,13 +118,13 @@ int main(int argc, char** argv)
         struct Row
         {
             uint32_t x, y;
-            ref::D3 single, full;
+            ref::D3 single;
             bool sky;
         };
         std::vector<Row> rows;
         for (uint32_t y = step / 2; y < h; y += step)
             if (y >= row0 && y <= row1)
-                for (uint32_t x = step / 2; x < w; x += step) rows.push_back({ x, y, {}, {}, false });
+                for (uint32_t x = step / 2; x < w; x += step) rows.push_back({ x, y, {}, false });
         std::vector<std::thread> threads;
         const unsigned n = std::max(1u, std::thread::hardware_concurrency() / 2);
         for (unsigned t = 0; t < n; ++t)
@@ -169,8 +136,7 @@ int main(int argc, char** argv)
                     const ref::D3 d = ref::normalize(f + right * (nx * th * aspect) + up * (ny * th));
                     r.sky = !ref::hitsGround(m, eye, d);
                     if (!r.sky) continue;
-                    r.single = ref::skyRadiance(m, eye, d, sun, none) * scale;
-                    r.full = ref::skyRadiance(m, eye, d, sun, psiFn) * scale;
+                    r.single = ref::singleScattering(m, eye, d, sun) * scale;
                 }
             });
         for (auto& th2 : threads) th2.join();
@@ -178,10 +144,10 @@ int main(int argc, char** argv)
         FILE* file = stdout;
         if (!out.empty() && fopen_s(&file, out.c_str(), "w") != 0) file = nullptr;
         if (!file) fail("cannot write %s", out.c_str());
-        std::fprintf(file, "x,y,single_r,single_g,single_b,full_r,full_g,full_b\n");
+        std::fprintf(file, "x,y,single_r,single_g,single_b\n");
         for (const Row& r : rows)
             if (r.sky)
-                std::fprintf(file, "%u,%u,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n", r.x, r.y, r.single.x, r.single.y, r.single.z, r.full.x, r.full.y, r.full.z);
+                std::fprintf(file, "%u,%u,%.9g,%.9g,%.9g\n", r.x, r.y, r.single.x, r.single.y, r.single.z);
         if (file != stdout) std::fclose(file);
         logf("sky orders: %zu pixels (%s)\n", rows.size(), out.empty() ? "stdout" : out.c_str());
         return 0;

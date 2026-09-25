@@ -113,7 +113,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
 {
     const FroxelGrid g = froxelGrid(P[0].x);
     const uint2 tile = gid.xy;
-    const AtmosphereParams a = airParamsFromTexels(P[0].w);
+    const AtmosphereParams a = airParamsFromTexels(P[0].z);
     const uint tlut = P[0].z, mlut = P[0].w;
     const float3 ray = froxelTileRay(g, tile);
     const float toRay = length(ray);
@@ -178,7 +178,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             const AirCoefficients c = airCoefficients(a, max(0.0, airAltitude(a, p)));
             const float3 w = exp(-tau) * airIntegral(c.extinction, dt);
             single += w * (c.rayleigh * phaseR + c.mie * phaseM) * ((experiment & 8) ? 1.0 : airSunTransmittance(a, tlut, p, sun));
-            multi += w * (c.rayleigh + c.mie) * ((experiment & 16) ? 1.0 : airMultipleScattering(a, mlut, p, sun));
+            multi += w * (c.rayleigh + c.mie) * ((experiment & 16) ? 1.0 : airMultipleScattering(a, mlut, p, dir, sun));
             tau += c.extinction * dt;
         }
         // Casters' shadows in the air: the shadowed fraction of the segment removes that part of the single scattering.

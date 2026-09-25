@@ -1,8 +1,10 @@
 // unx-kernel: cs_6_6 main
 // Transmittance LUT (ARCHITECTURE 2.3): optical depth from (altitude, view cosine) to the top of the atmosphere,
 // Gauss-Legendre 4 points on each of transmittanceSteps segments. Stored as optical depth (RGBA32F) so lookups
-// interpolate the exponent. Built when the atmosphere parameters change.
-// P[0].x params (raw buffer, AtmosphereParams), P[0].y output UAV (RWTexture2D<float4>)
+// interpolate the exponent. Built when the atmosphere parameters change. The texture has two more rows: row size.y the
+// ground's indirect irradiance (MsBuild.hlsl), row size.y + 1 a copy of AtmosphereParams (11 float4) for the public
+// lookups (airParamsFromTexels).
+// P[0].x params (raw buffer, AtmosphereParams), P[0].y output UAV (RWTexture2D<float4>, height size.y + 2)
 #include "Bindless.hlsli"
 #include "Passes/Atmosphere/AtmosphereCommon.hlsli"
 
@@ -13,6 +15,12 @@ static const float4 kGlWeights = float4(0.3478548451374539, 0.6521451548625461, 
 void main(uint2 id : SV_DispatchThreadID)
 {
     const AtmosphereParams a = airLoadParams(P[0].x);
+    if (id.y == 0 && id.x < 11)
+    {
+        ByteAddressBuffer raw = ResourceDescriptorHeap[P[0].x];
+        RWTexture2D<float4> record = ResourceDescriptorHeap[P[0].y];
+        record[uint2(id.x, a.transmittanceSize.y + 1)] = asfloat(raw.Load4(id.x * 16));
+    }
     if (any(id >= a.transmittanceSize)) return;
     float altitude, cosine;
     airTransmittanceParams(a, float2(id) / float2(a.transmittanceSize - 1), altitude, cosine);

@@ -22,7 +22,13 @@ uint vsmEntry(VsmResources r, int2 page, uint k)
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
     if (!vsmInWindow(vc, page, k)) return 0;
     const uint2 e = r.table.Load2(vsmSlot(page, k) * 8);
-    return ((e.x & VSM_FLAG_RESIDENT) != 0 && e.y == vsmTag(page)) ? e.x : 0;
+    const bool hit = (e.x & VSM_FLAG_RESIDENT) != 0 && e.y == vsmTag(page);
+    if (hit && vc.useStats != 0)
+    {
+        RWByteAddressBuffer use = ResourceDescriptorHeap[vc.useStats - 1];  // measurement only (shadow.vsm.use_stats)
+        use.InterlockedOr(vsmSlot(page, k) * 4, 1u);
+    }
+    return hit ? e.x : 0;
 }
 
 // The receiver's plane in light space: its height above a lateral offset q from the receiver is hr + dot(slope, q).

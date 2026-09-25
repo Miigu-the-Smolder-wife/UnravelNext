@@ -32,7 +32,7 @@ void main(uint id : SV_DispatchThreadID)
     const bool same = all(abs(inscatter - inscatter2) <= 1e-5 * abs(inscatter) + 1e-30) && all(abs(transmittance - transmittance2) <= 1e-5 * transmittance + 1e-30);
     output[3 * id] = float4(inscatter, same ? 0 : 1);
     // Diagnostics (.w): the ray's distance to the model surface crossing and to the queried depth (airViewLookup).
-    Texture2D<float4> pt = ResourceDescriptorHeap[s.multiScatter];
+    Texture2D<float4> pt = ResourceDescriptorHeap[s.transmittance];
     uint pw, ph;
     pt.GetDimensions(pw, ph);
     const float bottom = pt.Load(int3(0, ph - 1, 0)).x;

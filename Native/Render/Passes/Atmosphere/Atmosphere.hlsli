@@ -6,9 +6,8 @@
 // these functions multiply by E_TOA * sunColor (g_sunIlluminance * g_sunColor).
 //
 // Exactness: the LUTs integrate the same model as the reference path tracer (Rayleigh, Mie HG, ozone, Lambertian
-// ground) with the previous engine's quadratures; multiple scattering follows Hillaire 2020 (isotropic second-order
-// series closed geometrically), which is the model's approximation and is recorded in S_STATUS_KO.md against the
-// reference. Air shadowing by casters and local lights' in-scattering are in atmosphereAerial / atmosphereAirView
+// ground) with the previous engine's quadratures; multiple scattering is the exact source table J_ms (orders iterated,
+// S_STATUS_KO.md 8; checked against the reference path tracer's scattering orders). Air shadowing by casters and local lights' in-scattering are in atmosphereAerial / atmosphereAirView
 // (the air volume); atmosphereSkyRadiance / atmosphereSunRadiance / atmosphereSunIlluminance do not include caster shadows.
 #ifndef UNX_ATMOSPHERE_HLSLI
 #define UNX_ATMOSPHERE_HLSLI
@@ -27,7 +26,7 @@ struct AtmosphereSrvs
 // Mie), so this holds for points within tens of metres of the camera's altitude and is an approximation beyond.
 float3 atmosphereSkyRadiance(AtmosphereSrvs s, float3 worldDir)
 {
-    const AtmosphereParams a = airParamsFromTexels(s.multiScatter);
+    const AtmosphereParams a = airParamsFromTexels(s.transmittance);
     const float altitude = max(0.0, airAltitude(a, g_cameraPosition));
     const float3 up = airUp(a, g_cameraPosition);
     float2 coord;
@@ -49,7 +48,7 @@ float3 atmosphereSkyRadiance(AtmosphereSrvs s, float3 worldDir)
 // (pi sin^2 theta_s). Zero when the planet blocks the sun. Caster shadows are not included.
 float3 atmosphereSunRadiance(AtmosphereSrvs s, float3 worldPos)
 {
-    const AtmosphereParams a = airParamsFromTexels(s.multiScatter);
+    const AtmosphereParams a = airParamsFromTexels(s.transmittance);
     const float sinTheta = sin(g_sunAngularRadius);
     const float3 T = airSunTransmittance(a, s.transmittance, worldPos, normalize(g_sunDirection));
     return g_sunIlluminance * g_sunColor * T / (ATMO_PI * sinTheta * sinTheta);
@@ -58,7 +57,7 @@ float3 atmosphereSunRadiance(AtmosphereSrvs s, float3 worldPos)
 // Solar illuminance arriving at worldPos on a surface facing the sun (lux): E_TOA * T(p -> sun) * colour.
 float3 atmosphereSunIlluminance(AtmosphereSrvs s, float3 worldPos)
 {
-    const AtmosphereParams a = airParamsFromTexels(s.multiScatter);
+    const AtmosphereParams a = airParamsFromTexels(s.transmittance);
     return g_sunIlluminance * g_sunColor * airSunTransmittance(a, s.transmittance, worldPos, normalize(g_sunDirection));
 }
 
@@ -115,7 +114,7 @@ float4 airVolumeCoord(Texture3D<float4> v, Texture2D<float4> p, float2 uv, float
 void airViewLookup(AtmosphereSrvs s, float2 uv, float linearDepth, bool wantSun, out float3 inscatter, out float3 transmittance, out float3 sunTransmittance)
 {
     Texture3D<float4> v = ResourceDescriptorHeap[s.aerial];
-    Texture2D<float4> p = ResourceDescriptorHeap[s.multiScatter];
+    Texture2D<float4> p = ResourceDescriptorHeap[s.transmittance];
     uint pw, ph;
     p.GetDimensions(pw, ph);
     const float bottom = p.Load(int3(0, ph - 1, 0)).x;
@@ -147,7 +146,7 @@ void airViewLookup(AtmosphereSrvs s, float2 uv, float linearDepth, bool wantSun,
     sunTransmittance = 0;
     if (wantSun || lifted) sunTransmittance = v.SampleLevel(g_linearClamp, float3(t.x, t.w, t.z + 2 * N / d), 0).rgb;
     if (!lifted) return;
-    const AtmosphereParams ap = airParamsFromTexels(s.multiScatter);
+    const AtmosphereParams ap = airParamsFromTexels(s.transmittance);
     const AirCoefficients c = airCoefficients(ap, 0.0);
     const float3 sun = normalize(g_sunDirection);
     const float nu = dot(dir, sun);
@@ -161,7 +160,7 @@ void airViewLookup(AtmosphereSrvs s, float2 uv, float linearDepth, bool wantSun,
     [unroll] for (uint k = 0; k < LIFTED_STEPS; ++k)
     {
         const float3 x = airLiftToSurface(ap, g_cameraPosition + dir * (kink + (k + 0.5) * dt));
-        const float3 source = phase * airSunTransmittance(ap, s.transmittance, x, sun) + (c.rayleigh + c.mie) * airMultipleScattering(ap, s.multiScatter, x, sun);
+        const float3 source = phase * airSunTransmittance(ap, s.transmittance, x, sun) + (c.rayleigh + c.mie) * airMultipleScattering(ap, s.multiScatter, x, dir, sun);
         inscatter += transmittance * source * step * (g_sunIlluminance * g_sunColor);
         transmittance *= decay;
     }
@@ -180,7 +179,7 @@ float3 atmosphereSkyRadianceView(AtmosphereSrvs s, float3 worldDir, float2 uv)
     float3 radiance = atmosphereSkyRadiance(s, worldDir);
     if (s.aerial == 0xFFFFFFFFu) return radiance;
     Texture3D<float4> v = ResourceDescriptorHeap[s.aerial];
-    Texture2D<float4> p = ResourceDescriptorHeap[s.multiScatter];
+    Texture2D<float4> p = ResourceDescriptorHeap[s.transmittance];
     uint w, h, depth;
     v.GetDimensions(w, h, depth);
     uint pw, ph;

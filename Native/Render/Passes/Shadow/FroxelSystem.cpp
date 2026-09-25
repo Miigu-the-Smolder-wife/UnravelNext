@@ -167,6 +167,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
                       b.use(vsm.blocks, Use::SrvCompute);
                       b.use(vsm.bound, Use::SrvCompute);
                       if (walkStats) b.use(vsm.stats, Use::UavCompute);
+                      if (vsm.use.valid()) b.use(vsm.use, Use::UavCompute);  // shadow.vsm.use_stats (vsmEntry)
                   }
               },
               [=](PassContext& ctx) {

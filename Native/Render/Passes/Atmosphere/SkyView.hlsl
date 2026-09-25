@@ -1,13 +1,16 @@
 // unx-kernel: cs_6_6 main
 // Sky view LUT = the previous engine's far-field sky table at the camera altitude (ARCHITECTURE 2.3): unoccluded
 // atmosphere in-scattering along a complete ray to space or to the ground, per unit solar illuminance. Integrand:
-// single scattering with LUT sun transmittance + the LUT multiple-scattering source + the Lambertian ground.
+// single scattering with LUT sun transmittance + the multiple-scattering source table J_ms (along this ray's direction)
+// + the Lambertian ground lit by the sun and by the scattered light (its indirect irradiance). J_ms (8 fetches) is read at
+// the segment boundaries and interpolated linearly inside a segment (second order: J_ms varies on the scale heights, a
+// segment is a small part of it); the single scattering keeps its 4 Gauss-Legendre points.
 // skySegments quadratic segments (dense near the camera) x Gauss-Legendre 4 points; within a segment the
 // transmittance uses the segment-midpoint extinction. Rebuilt when the sun or the camera altitude changes.
 // One group per texel: its SKY_THREADS threads take contiguous runs of segments, integrate them with the transmittance
 // from their run's start, and a scan of the runs' optical depths joins them (fixed order: deterministic).
 // Dispatch: size.x x size.y groups.
-// P[0].x params, P[0].y transmittance LUT, P[0].z multi-scatter LUT, P[0].w output UAV (RWTexture2D<float4>)
+// P[0].x params, P[0].y transmittance LUT, P[0].z multiple-scattering table (J_ms), P[0].w output UAV (RWTexture2D<float4>)
 // Frame constants: g_cameraPosition, g_sunDirection.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -46,21 +49,25 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     const uint perThread = (a.skySegments + SKY_THREADS - 1) / SKY_THREADS;
     const uint first = lane * perThread, last = min(first + perThread, a.skySegments);
     float3 radiance = 0, tau = 0;
+    float3 msStart = 0;
+    if (first < last && extent > 0) msStart = airMultipleScattering(a, mlut, origin + d * (span.x + extent * float(first * first) / n2), d, sun);
     [loop] for (uint n = first; n < last && extent > 0; ++n)
     {
         const float s0 = span.x + extent * float(n * n) / n2, s1 = span.x + extent * float((n + 1) * (n + 1)) / n2;
         const float width = s1 - s0;
         const AirCoefficients middle = airCoefficients(a, airAltitude(a, origin + d * (s0 + width * 0.5)));
         const float3 transmittance = exp(-tau);
+        const float3 msEnd = airMultipleScattering(a, mlut, origin + d * s1, d, sun);
         [unroll] for (uint j = 0; j < 4; ++j)
         {
-            const float t = width * 0.5 * (1 + kGlPoints[j]);
+            const float f = 0.5 * (1 + kGlPoints[j]), t = width * f;
             const float3 p = origin + d * (s0 + t);
             const AirCoefficients c = airCoefficients(a, airAltitude(a, p));
             const float3 source = (c.rayleigh * rayleighPhase + c.mie * miePhase) * airSunTransmittance(a, tlut, p, sun) +
-                                  (c.rayleigh + c.mie) * airMultipleScattering(a, mlut, p, sun);
+                                  (c.rayleigh + c.mie) * lerp(msStart, msEnd, f);
             radiance += transmittance * exp(-middle.extinction * t) * source * (width * 0.5 * kGlWeights[j]);
         }
+        msStart = msEnd;
         tau += middle.extinction * width;
     }
     // Exclusive scan of the runs' optical depths (Hillis-Steele), then the runs' radiance summed in lane order.
@@ -86,8 +93,9 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     {
         const float3 transmittance = exp(-gs_tau[SKY_THREADS - 1]);
         const float3 p = origin + d * span.y, gup = airUp(a, p);
-        total += transmittance * a.groundAlbedo *
-                 (saturate(dot(gup, sun)) * airSunTransmittance(a, tlut, p + gup * 0.01, sun) / ATMO_PI + airMultipleScattering(a, mlut, p, sun));
+        const float mus = dot(gup, sun);
+        total += transmittance * a.groundAlbedo / ATMO_PI *
+                 (saturate(mus) * airSunTransmittance(a, tlut, p + gup * 0.01, sun) + airGroundIndirect(a, tlut, mus));
     }
     RWTexture2D<float4> output = ResourceDescriptorHeap[P[0].w];
     output[id] = float4(total, 0);

@@ -2,9 +2,18 @@
 [atmosphere]
 transmittance_lut = [256, 64]        # Bruneton parameterisation, optical depth RGBA32F
 transmittance_steps = 128            # Gauss-Legendre-4 segments per texel (convergence: Tests/AtmosphereTests)
-multiscatter_lut = [32, 32]          # (sun cosine, altitude)
-multiscatter_directions = 1024       # Fibonacci sphere directions per texel (sun at the horizon: planet-shadow boundary)
-multiscatter_steps = 64              # quadratic-spaced exact-exponential steps per direction
+# Multiple scattering: the exact source table J_ms (MsBuild.hlsl, S_STATUS_KO.md 8), rebuilt only when the medium or the
+# ground albedo changes (not with the sun). Convergence of every count: Tests/AtmosphereTests.
+multiscatter_table = [32, 64, 128, 32]  # (nu, sun cosine, view cosine: two halves at the horizon, radius): 64 MiB
+                                      # R16G16B16A16_UNORM log J; a frame reads only the sun cosines near its sun
+multiscatter_orders = 8              # orders iterated (>= 2) + geometric tail J_N q / (1 - q)
+multiscatter_sh_order = 32           # scattering densities by spherical harmonics (Funk-Hecke): Rayleigh exact (l <= 2),
+                                     # Henyey-Greenstein exact up to g^(L+1) (6e-4 at g = 0.8); <= 48 (MS_SH_MAX)
+multiscatter_sh_grid = [64, 128]     # projection grid: elevation nodes per half (square-root spaced from the horizon),
+                                     # azimuth nodes over [0, pi] (the radiance is symmetric about the sun's plane)
+multiscatter_directions = 2048       # hemisphere directions of the ground's irradiance from scattered light
+multiscatter_steps = 128             # quadratic-spaced exact-exponential steps along each texel's ray
+rebuild_every_frame = 0              # 1: rebuild the transmittance LUT and J_ms every frame (measurement only: build cost)
 # Sky view = the previous engine's far-field table at the camera altitude: 192 azimuths over [0, pi], 128 elevations
 # (64 per side of the true horizon, as the previous engine's 64 per half; the first draft's 108 was coarser).
 sky_view_lut = [192, 128]

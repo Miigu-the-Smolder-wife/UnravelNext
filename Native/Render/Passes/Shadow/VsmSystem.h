@@ -36,6 +36,7 @@ struct VsmConstantsCpu
     uint32_t searchTaps, filterTaps;
     float3 windDirection;
     float windSpeed;
+    uint32_t useStats, usePad[3];  // 1 + UAV index of the read bits (shadow.vsm.use_stats), 0 = off
     VsmLevelCpu level[20];
 };
 constexpr uint32_t kLevels = 20, kPage = 128, kTable = 128, kVirtual = 16384;
@@ -53,7 +54,7 @@ struct VsmLocalLightCpu
     uint32_t active;
 };
 static_assert(sizeof(VsmLocalLightCpu) == 48);
-static_assert(sizeof(VsmConstantsCpu) == 64 + 16 * 4 + kLevels * 64 && sizeof(VsmConstantsCpu) <= 2048);
+static_assert(sizeof(VsmConstantsCpu) == 64 + 16 * 5 + kLevels * 64 && sizeof(VsmConstantsCpu) <= 2048);
 constexpr uint32_t kSlots = kLevels * kTable * kTable;  // the sun's
 constexpr uint32_t kTotalSlots = kSlots + kLocalLights * kLocalLightSlots;
 
@@ -70,6 +71,13 @@ struct VsmStats
     float largestBasisAge = 0;
     uint32_t levelPages[20] = {};  // requested sun pages per level (GPU, completed frame)
     uint32_t sampledSubtiles = 0;  // 32^2 sub-tiles of requested sun pages that pixels sample (shadow.vsm.subtile_stats)
+    // shadow.vsm.use_stats (measurement only): sun pages by request kind and whether a lookup read them (vsmEntry of
+    // the frame before: a static camera requests the same pages): requested by pixels / read, by the air marks only /
+    // read, by propagation only / read, not requested but read (cached pages).
+    uint32_t usePixel = 0, usePixelRead = 0, useAir = 0, useAirRead = 0, usePropagated = 0, usePropagatedRead = 0, useCachedRead = 0;
+    // The same key, visibility pass (all views): surface pixels, those facing away from the sun (geometric N.L <= 0), and
+    // those of them the page structures could not settle (penumbra pass).
+    uint32_t surfacePixels = 0, backfacePixels = 0, backfaceMixed = 0;
     // Overflow list of the main view (INTERFACES 7.3, v1.20): words the frame's tiles needed, tiles over the capacity
     // (fallback) and their overflow pixels (overage: 0 in steady state), shadow-casting lights past the third over all
     // pixels (N_ovf), and the capacity in words the frame ran with (CPU).
@@ -89,6 +97,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view);
 struct VsmFrameRefs
 {
     BufferRef pool, table, blocks, bound, stats;  // stats: raw VSM counters (walk statistics, words 20..24)
+    BufferRef use;  // read bits (shadow.vsm.use_stats; invalid when off): readers declare it as UAV
     uint32_t constantsCbv = UINT32_MAX;  // ConstantBuffer<VsmConstants> of this frame
 };
 bool frameRefs(FramePassContext& fc, VsmFrameRefs& out);
