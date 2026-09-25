@@ -22,3 +22,5 @@ max_node_items = 4194304          # hierarchy traversal work items (instance, no
 max_group_items = 1048576         # hierarchy leaves reached (instance, group)
 max_deferred_items = 1048576      # phase-1 occluded instances / nodes / clusters retested in phase 2
 max_coverage_fragments = 12582912 # coverage layer fragments per frame (20 B raw + 16 B sorted each; < 2^24)
+coverage_band_c = true            # with coverage_layer: band C clusters are drawn in the coverage layer until the band C
+                                  # bricks exist; false leaves them undrawn (measurement of band B's cost only)

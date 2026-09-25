@@ -7,10 +7,14 @@
 // 16384^2, level k texel 2^(k-10) m, centred on the camera; the camera's page dirty in levels 0-5; pixel kernel
 // ServicePagePixel), drawn per frame as whole-view raster, tile-local raster (DepthRasterRequest::tileLocal) or both
 // (--service whole|local|both; separate runs keep one request's tail out of the other's first pass).
+// With --set visibility.coverage_layer=true the coverage layer's passes are reported against the design formula
+// (ARCHITECTURE 2.1: F_cov x 0.05 ns raster + sort F_cov x 16 B x 2 / 600 GB/s) with the fragments-per-pixel
+// histogram of one extra frame. --cluster-stats FILE writes every cluster's width, size and LOD errors (CSV) and a
+// per-mesh summary of the band distances at the resolution (band C design input).
 // Performance runs only under the GPU lock (INTERFACES 3.3):
 //   powershell -File Tools/CI/GpuLock.ps1 -Track core -- build/<t>/bin/unx_gate_visibility_visibilitygate.exe
 //       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--scale 1] [--moving] [--service whole|local|both]
-//       [--out DIR]
+//       [--out DIR] [--set key=value ...] [--cluster-stats FILE]
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
@@ -25,9 +29,12 @@
 #include "unx/scenegen/SceneGen.h"
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -108,6 +115,63 @@ RawBuffer rawBuffer(Device& device, uint64_t bytes, bool uav, const wchar_t* nam
     return b;
 }
 
+// Every cluster's band quantities (CSV) and a per-mesh summary: minimum feature width, bounding radius, LOD errors, and
+// at focal length 'focal' (pixels at distance 1) the distances where the width projects to 1.5 px (band A limit) and
+// 0.25 px (band C limit), and the cluster's projected diameter there (the brick resolution the cluster would need).
+void writeClusterStats(const scene::Scene& s, const ClusterData& cd, float focal, const std::string& path)
+{
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "w") != 0 || !f) fail("cannot write %s", path.c_str());
+    fprintf(f, "mesh,cluster,triangles,min_feature_width_m,sheet,radius_m,lod_error_m,parent_lod_error_m,d_band_a_m,d_band_c_m,diameter_px_at_band_c\n");
+    std::vector<uint32_t> instancesOf(s.meshes.size(), 0);
+    for (const auto& inst : s.instances) ++instancesOf[inst.mesh];
+    struct MeshSum
+    {
+        uint32_t clusters = 0, source = 0;
+        std::vector<float> width, diameterC;
+    };
+    std::vector<MeshSum> sums(s.meshes.size());
+    for (uint32_t m = 0; m < cd.meshes.size() && m < s.meshes.size(); ++m)
+    {
+        const auto& range = cd.meshes[m];
+        for (uint32_t c = range.clusterOffset; c < range.clusterOffset + range.clusterCount; ++c)
+        {
+            const gpu::Cluster& cl = cd.clusters[c];
+            const float w = std::fabs(cl.minFeatureWidth), r = cl.boundsSphere.w;
+            const float dA = w > 0 ? focal * w / 1.5f : 0, dC = w > 0 ? focal * w / 0.25f : 0;
+            const float diamC = dC > 0 ? 2 * r * focal / dC : 0;
+            fprintf(f, "%u,%u,%u,%.6g,%d,%.6g,%.6g,%.6g,%.6g,%.6g,%.6g\n", m, c, (cl.counts >> 8) & 0xFFu, w, cl.minFeatureWidth < 0 ? 1 : 0, r, cl.lodError,
+                    cl.parentLodError > 1e30f ? -1.0f : cl.parentLodError, dA, dC, diamC);
+            MeshSum& ms = sums[m];
+            ++ms.clusters;
+            if (cl.lodError == 0) ++ms.source;
+            if (w > 0)
+            {
+                ms.width.push_back(w);
+                ms.diameterC.push_back(diamC);
+            }
+        }
+    }
+    fclose(f);
+    auto pct = [](std::vector<float> v, float q) {
+        if (v.empty()) return 0.0f;
+        std::sort(v.begin(), v.end());
+        return v[std::min(v.size() - 1, (size_t)(q * (v.size() - 1) + 0.5f))];
+    };
+    logf("cluster statistics -> %s (focal %.0f px): per mesh: instances, clusters (source), min feature width median / P10 (m), band A / C distance "
+         "at the median width (m), cluster diameter at the band C distance median / P90 (px)\n",
+         path.c_str(), focal);
+    for (uint32_t m = 0; m < sums.size(); ++m)
+    {
+        const MeshSum& ms = sums[m];
+        if (ms.clusters == 0) continue;
+        const float wMed = pct(ms.width, 0.5f);
+        logf("  mesh %u '%s': %u instances, %u clusters (%u source), width %.4g / %.4g, d_A %.1f, d_C %.1f, diameter %.1f / %.1f\n", m, s.meshes[m].name.c_str(),
+             instancesOf[m], ms.clusters, ms.source, wMed, pct(ms.width, 0.1f), focal * wMed / 1.5f, focal * wMed / 0.25f, pct(ms.diameterC, 0.5f),
+             pct(ms.diameterC, 0.9f));
+    }
+}
+
 // S's clipmap geometry (VsmSystem.cpp): light basis z towards the sun, x horizontal; level k texel 2^(k-10) m over
 // 16384 texels, window origin in 128-texel pages with the camera's page at tile (64, 64); height range = casters'
 // bounding spheres along z +- 500 m.
@@ -158,7 +222,8 @@ int main(int argc, char** argv)
 {
     try
     {
-        std::string sceneName = "city_block", resolutionArg = "both", out;
+        std::string sceneName = "city_block", resolutionArg = "both", out, clusterStats;
+        std::vector<std::string> overrides;
         uint32_t frames = 600;
         float scale = 1.0f;
         bool moving = false, service = false;
@@ -182,13 +247,17 @@ int main(int argc, char** argv)
                 if (serviceMode != "whole" && serviceMode != "local" && serviceMode != "both") fail("--service whole|local|both");
             }
             else if (a == "--out") out = next();
+            else if (a == "--set") overrides.push_back(next());
+            else if (a == "--cluster-stats") clusterStats = next();
             else fail("unknown argument %s", a.c_str());
         }
         requireGpuLock("unx_gate_visibility_visibilitygate");
 #if !UNX_HAS_SCENEGEN
         fail("this build has no scene generator: build with track C enabled (Build.ps1 -Tracks \"V;C\" or -Track all)");
 #else
-        const QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+        QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+        for (const std::string& o : overrides) quality.applyOverride(o);
+        const bool coverage = quality.boolean("visibility.coverage_layer");
         scenegen::Request request;
         bool found = false;
         for (scenegen::SceneId id : scenegen::allScenes())
@@ -210,6 +279,12 @@ int main(int argc, char** argv)
         const double buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         logf("scene %s (scale %.2f): %zu meshes, %zu instances, %llu instanced triangles, %zu clusters; generated in %.0f ms, clusters built in %.0f ms\n", sceneName.c_str(),
              scale, s.meshes.size(), s.instances.size(), (unsigned long long)sceneTriangles, clusters.clusters.size(), generateMs, buildMs);
+        if (!clusterStats.empty())
+        {
+            const Resolution first = resolutionFromString(resolutionArg == "both" ? "4K" : resolutionArg, quality);
+            const scene::Camera cam = cameraAt(s, false, 0);
+            writeClusterStats(s, clusters, 0.5f * first.height / std::tan(0.5f * cam.verticalFov), clusterStats);
+        }
 
         Device device({});
         ShaderLibrary shaders(device, executableDirectory() / "shaders");
@@ -290,6 +365,93 @@ int main(int argc, char** argv)
             logf("  nodes tested %u, triangles by band A/B/C %u/%u/%u, deferred %u/%u/%u, overflow 0x%x (stats of frame %llu)\n", st.nodesTested, st.triangles[0],
                  st.triangles[1], st.triangles[2], st.deferredInstances, st.deferredNodes, st.deferredClusters, st.overflow, (unsigned long long)st.frameIndex);
             if (st.overflow) status = 1;
+            if (coverage)
+            {
+                const double covRaster = sumPasses(r, [](const std::string& n) { return n == "v.coverage.raster"; });
+                const double covBuild = sumPasses(r, [](const std::string& n) { return n == "v.coverage.build"; });
+                const double covOther = sumPasses(r, [](const std::string& n) { return startsWith(n, "v.coverage.") && n != "v.coverage.raster" && n != "v.coverage.build"; });
+                const double F = st.coverageFragments;
+                logf("  coverage layer: %u fragments in %u pixels (%.2f per pixel) | raster %.3f ms (%.3f ns/fragment; design F x 0.05 ns = %.3f ms) | build (walk, "
+                     "sort, write) %.3f ms (design F x 16 B x 2 / 600 GB/s = %.3f ms) | clear/prepare/args %.3f ms\n",
+                     st.coverageFragments, st.coveragePixels, st.coveragePixels ? F / st.coveragePixels : 0.0, covRaster, F > 0 ? covRaster * 1e6 / F : 0.0,
+                     F * 0.05e-6, covBuild, F * 32.0 / 600e9 * 1e3, covOther);
+                // Fragments-per-pixel histogram of one more frame (heads = first | count << 24).
+                RenderGraph g(device);
+                FrameContext fc;
+                fc.frameIndex = frames + 1000;
+                fc.time = fc.frameIndex / 60.0;
+                fc.deltaTime = 1.0f / 60;
+                fc.mainView = ViewDesc::fromCamera(cameraAt(s, moving, fc.time), res.width, res.height, prev);
+                const TextureRef output = g.createTexture({ "gate output", res.width, res.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
+                const ViewResources main = renderer.record(g, fc, output);
+                const uint32_t pitch = (res.width * 4 + 255) / 256 * 256;
+                ComPtr<ID3D12Resource> rb;
+                {
+                    D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+                    D3D12_RESOURCE_DESC1 rd{};
+                    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                    rd.Width = (uint64_t)pitch * res.height;
+                    rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+                    rd.SampleDesc.Count = 1;
+                    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                    check(device.d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)),
+                          "gate heads readback");
+                }
+                ID3D12Resource* dst = rb.Get();
+                const uint32_t w = res.width, h = res.height;
+                g.addPass("gate.heads.readback", QueueType::Graphics,
+                          [&](PassBuilder& b) {
+                              b.use(main.coverageHeads, Use::CopySrc);
+                              b.keep();
+                          },
+                          [=](PassContext& c) {
+                              D3D12_TEXTURE_COPY_LOCATION to{}, from{};
+                              to.pResource = dst;
+                              to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                              to.PlacedFootprint.Footprint = { DXGI_FORMAT_R32_UINT, w, h, 1, pitch };
+                              from.pResource = c.resource(main.coverageHeads);
+                              from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                              c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+                          });
+                g.execute(nullptr);
+                device.waitIdle();
+                const uint8_t* p = nullptr;
+                check(rb->Map(0, nullptr, (void**)&p), "map heads");
+                const uint32_t edges[] = { 1, 2, 3, 4, 6, 8, 12, 16, 32, 64, 128, 256 };
+                uint64_t bins[std::size(edges)] = {}, pixels = 0, fragments = 0, over8 = 0, fragmentsOver8 = 0;
+                for (uint32_t y = 0; y < h; ++y)
+                    for (uint32_t x = 0; x < w; ++x)
+                    {
+                        uint32_t v;
+                        std::memcpy(&v, p + (size_t)y * pitch + 4 * x, 4);
+                        const uint32_t n = v >> 24;
+                        if (n == 0) continue;
+                        ++pixels;
+                        fragments += n;
+                        if (n > 8)
+                        {
+                            ++over8;
+                            fragmentsOver8 += n;
+                        }
+                        size_t k = 0;
+                        while (k + 1 < std::size(edges) && n >= edges[k + 1]) ++k;
+                        ++bins[k];
+                    }
+                rb->Unmap(0, nullptr);
+                std::string hist;
+                for (size_t k = 0; k < std::size(edges); ++k)
+                {
+                    char b[64];
+                    const uint32_t lo = edges[k], hi = k + 1 < std::size(edges) ? edges[k + 1] - 1 : 255;
+                    if (lo == hi) snprintf(b, sizeof b, "%s%u: %.2f%%", k ? ", " : "", lo, pixels ? 100.0 * bins[k] / pixels : 0.0);
+                    else snprintf(b, sizeof b, "%s%u-%u: %.2f%%", k ? ", " : "", lo, hi, pixels ? 100.0 * bins[k] / pixels : 0.0);
+                    hist += b;
+                }
+                logf("  fragments per pixel (one frame, %llu pixels, %llu fragments): %s | pixels over 8: %.2f%% holding %.1f%% of the fragments\n",
+                     (unsigned long long)pixels, (unsigned long long)fragments, hist.c_str(), pixels ? 100.0 * over8 / pixels : 0.0,
+                     fragments ? 100.0 * fragmentsOver8 / fragments : 0.0);
+                device.deferRelease(rb);
+            }
             if (service)
                 for (const char* run : { "svc.whole", "svc.local" })
                 {

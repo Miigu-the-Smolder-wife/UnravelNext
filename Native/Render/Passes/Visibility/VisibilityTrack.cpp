@@ -39,7 +39,7 @@ struct Settings
 {
     uint32_t capVisible = 0, capNodes = 0, capGroups = 0, capDeferred = 0, capCoverageFragments = 0;
     float lodErrorPx = 0, bandAMinPx = 0, bandCMaxPx = 0;
-    bool occlusion = true, coverageLayer = false;
+    bool occlusion = true, coverageLayer = false, coverageBandC = true;
 
     static Settings load(const QualityConfig& q)
     {
@@ -53,6 +53,7 @@ struct Settings
         s.bandCMaxPx = (float)q.number("visibility.band_c_max_width_px");
         s.occlusion = q.boolean("visibility.occlusion_culling");
         s.coverageLayer = q.boolean("visibility.coverage_layer");
+        s.coverageBandC = q.boolean("visibility.coverage_band_c");
         const int64_t coverage = q.integer("visibility.max_coverage_fragments");
         if (coverage < 1 || coverage >= (1 << 24)) fail("visibility.max_coverage_fragments = %lld: 1 .. 2^24 - 1 (24-bit first-fragment field of the heads)", (long long)coverage);
         s.capCoverageFragments = (uint32_t)coverage;
@@ -918,7 +919,7 @@ void visibility(FramePassContext& fc, ViewResources& view)
     r.viewCount = 1;
     // Secondary views (planar reflections) still draw every band in the vis buffer: their coverage layer needs its own
     // persistent heads and M's composite in that view (V status).
-    r.bandMode = main && cfg.coverageLayer ? kBandModeCoverage : kBandModeA;
+    r.bandMode = main && cfg.coverageLayer ? (cfg.coverageBandC ? kBandModeCoverage : kBandModeFull) : kBandModeA;
 
     // Main view: two-phase occlusion against its persistent HiZ once a previous frame produced one. Secondary views
     // (planar reflections) have no history: one phase without occlusion, no HiZ.
