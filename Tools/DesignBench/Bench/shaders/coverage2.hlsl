@@ -113,6 +113,41 @@ float triangleArea(float2 a, float2 b, float2 c, float2 pixel)
     }
     return 0.5 * abs(twice);
 }
+#ifndef AREA
+#define AREA 0
+#endif
+#ifndef MASK
+#define MASK 1
+#endif
+// AREA=1: signed area of the polygon clipped to the unit square as the sum of per-edge contributions, each edge clipped
+// against the four half-planes independently (Green's theorem on the clipped edge): no vertex arrays, register resident.
+float clipSegmentArea(float2 p, float2 q)
+{
+    const float dy = q.y - p.y;
+    if (abs(dy) < 1e-7) { const float y = clamp(p.y, 0.0, 1.0); return 0.5 * (p.x * y - q.x * y); }
+    const float t0 = (0.0 - p.y) / dy, t1 = (1.0 - p.y) / dy;
+    const float ta = clamp(min(t0, t1), 0.0, 1.0), tb = clamp(max(t0, t1), 0.0, 1.0);
+    float2 a = lerp(p, q, ta), b = lerp(p, q, tb);
+    a.y = clamp(a.y, 0.0, 1.0); b.y = clamp(b.y, 0.0, 1.0);
+    const float2 pa = float2(p.x, clamp(p.y, 0.0, 1.0)), qb = float2(q.x, clamp(q.y, 0.0, 1.0));
+    return 0.5 * (pa.x * a.y - a.x * pa.y) + 0.5 * (a.x * b.y - b.x * a.y) + 0.5 * (b.x * qb.y - qb.x * b.y);
+}
+float clipXThenY(float2 p, float2 q)
+{
+    const float dx = q.x - p.x;
+    if (abs(dx) < 1e-7) { const float x = clamp(p.x, 0.0, 1.0); return clipSegmentArea(float2(x, p.y), float2(x, q.y)); }
+    const float t0 = (0.0 - p.x) / dx, t1 = (1.0 - p.x) / dx;
+    const float ta = clamp(min(t0, t1), 0.0, 1.0), tb = clamp(max(t0, t1), 0.0, 1.0);
+    float2 a = lerp(p, q, ta), b = lerp(p, q, tb);
+    a.x = clamp(a.x, 0.0, 1.0); b.x = clamp(b.x, 0.0, 1.0);
+    const float2 pa = float2(clamp(p.x, 0.0, 1.0), p.y), qb = float2(clamp(q.x, 0.0, 1.0), q.y);
+    return clipSegmentArea(pa, a) + clipSegmentArea(a, b) + clipSegmentArea(b, qb);
+}
+float triangleAreaGreen(float2 a, float2 b, float2 c, float2 pixel)
+{
+    a -= pixel; b -= pixel; c -= pixel;
+    return abs(clipXThenY(a, b) + clipXThenY(b, c) + clipXThenY(c, a));
+}
 float2 coverageSample(uint i) { return float2((i + 0.5) / 32.0, (reversebits(i) >> 27) / 32.0 + 1.0 / 64.0); }
 uint triangleMask(float2 a, float2 b, float2 c, float2 pixel)
 {
@@ -133,7 +168,11 @@ uint triangleMask(float2 a, float2 b, float2 c, float2 pixel)
 void FragPS(V v, Prim p)
 {
     const float2 p0 = floor(v.pos.xy);
+#if AREA
+    const float area = triangleAreaGreen(p.a, p.b, p.c, p0);
+#else
     const float area = triangleArea(p.a, p.b, p.c, p0);
+#endif
 #ifdef NO_HELPER
     const bool live = area > 0;
 #else
@@ -190,7 +229,11 @@ void FragPS(V v, Prim p)
         Frag f;
         f.pixel = ((uint)p0.y << 16) | (uint)p0.x;
         f.depth = v.pos.z;
+#if MASK
         f.mask = triangleMask(p.a, p.b, p.c, p0);
+#else
+        f.mask = 0xFFFFFFFFu;
+#endif
         f.areaFlags = (uint)round(saturate(area) * 65535.0) | (1u << 16);
         f.normal = p.normal;
         const float2 uv = frac(p0 * float2(0.013, 0.017) + p.id * 1e-4);

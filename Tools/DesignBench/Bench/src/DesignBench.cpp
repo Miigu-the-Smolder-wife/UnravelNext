@@ -109,8 +109,9 @@ struct Consts { uint32_t v[32]{}; uint32_t& operator()(int i, int c) { return v[
 
 struct Gpu
 {
-    bool warp = false, debug = false;
+    bool warp = false, debug = false, gbv = false;
     ComPtr<ID3D12InfoQueue> infoQueue;
+    uint32_t debugErrors = 0;
     ComPtr<IDXGIFactory6> factory;
     ComPtr<ID3D12Device5> dev;
     ComPtr<ID3D12CommandQueue> direct;
@@ -128,10 +129,20 @@ struct Gpu
     std::string adapterName, driverVersion;
     int reps = 9, warm = 3;
 
-    void init(bool useWarp, bool useDebug)
+    void init(bool useWarp, bool useDebug, bool useGbv)
     {
-        warp = useWarp; debug = useDebug;
-        if (debug) { ComPtr<ID3D12Debug> dbg; if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) { dbg->EnableDebugLayer(); logf("D3D12 debug layer enabled\n"); } }
+        warp = useWarp; debug = useDebug; gbv = useGbv;
+        if (debug)
+        {
+            ComPtr<ID3D12Debug> dbg;
+            if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg))))
+            {
+                dbg->EnableDebugLayer();
+                ComPtr<ID3D12Debug1> dbg1;
+                if (gbv && SUCCEEDED(dbg.As(&dbg1))) dbg1->SetEnableGPUBasedValidation(TRUE);
+                logf("D3D12 debug layer enabled%s\n", gbv ? " + GPU-based validation" : "");
+            }
+        }
         check(CreateDXGIFactory2(debug ? DXGI_CREATE_FACTORY_DEBUG : 0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
         if (warp)
         {
@@ -250,7 +261,7 @@ struct Gpu
         {
             SIZE_T len = 0; infoQueue->GetMessage(i, nullptr, &len);
             std::vector<uint8_t> buf(len); auto* m = (D3D12_MESSAGE*)buf.data();
-            if (len && SUCCEEDED(infoQueue->GetMessage(i, m, &len))) logf("  d3d12[%d]: %s\n", (int)m->Severity, m->pDescription);
+            if (len && SUCCEEDED(infoQueue->GetMessage(i, m, &len))) { logf("  d3d12[%d]: %s\n", (int)m->Severity, m->pDescription); if (m->Severity <= D3D12_MESSAGE_SEVERITY_ERROR) ++debugErrors; }
         }
         infoQueue->ClearStoredMessages();
     }
@@ -532,6 +543,21 @@ static void benchCoverage()
             record("coverage", std::string(cs.name) + ": raster + area + mask + 24 B append (" + modeNames[m] + ")", sa.median, "ms",
                    std::to_string(appended / 1e6) + " M appended, " + std::to_string(overflow) + " overflow, " + std::to_string(sa.median * 1e6 / std::max(1u, appended)) + " ns/fragment");
         }
+        if (!g.warp && std::string(cs.name).find("F ~10 M") != std::string::npos && !cs.cards && cs.width == 0.5f)
+        {
+            struct AV { const char* name; uint32_t area, mask, count; };
+            const AV avs[] = { { "area: Green's theorem (register resident), mask 32", 1, 1, 0 }, { "area: Sutherland-Hodgman arrays, no mask", 0, 0, 0 },
+                               { "area: Green's theorem, no mask", 1, 0, 0 }, { "count pass with Green's-theorem area", 1, 1, 1 } };
+            for (const AV& av : avs)
+            {
+                std::vector<std::wstring> d = helper; d.push_back(wdef("AREA", av.area)); d.push_back(wdef("MASK", av.mask)); d.push_back(av.count ? L"COUNT=1" : wdef("APPEND_MODE", 1));
+                auto psv = dxc.compile(s, L"FragPS", L"ps_6_6", d);
+                auto psov = g.meshPso(ms.Get(), psv.Get(), g_conservative);
+                Stat sv = g.time([&](ID3D12GraphicsCommandList6* l) { recordRaster(l, psov.Get()); }, zeroPre);
+                record("coverage", std::string(cs.name) + ": " + av.name + (av.count ? "" : " (tile segments, per-fragment atomic)"), sv.median, "ms",
+                       std::to_string(sv.median * 1e6 / fragments) + " ns/fragment");
+            }
+        }
         // (c) composite from the tile segments of mode 1 (records as left by the last repetition of mode 2: same layout).
         {
             Consts cc = c; cc(1, 0) = recSrv; cc(1, 1) = tcSrv; cc(1, 2) = toSrv; cc(2, 0) = tcapSrv;
@@ -700,7 +726,7 @@ static void benchShade()
 static std::string jsonEscape(const std::string& s) { std::string o; for (char c : s) { if (c == '"' || c == '\\') o += '\\'; if (c == '\n') { o += "\\n"; continue; } o += c; } return o; }
 int main(int argc, char** argv)
 {
-    bool doCoverage = true, doBricks = true, doBands = true, doShade = true, warp = false, debug = false;
+    bool doCoverage = true, doBricks = true, doBands = true, doShade = true, warp = false, debug = false, gbv = false;
     std::string dxcDir = DB_DXC_DIR, outDir = DB_RESULT_DIR;
     for (int i = 1; i < argc; ++i)
     {
@@ -709,11 +735,13 @@ int main(int argc, char** argv)
         if (a == "--only-coverage") only(doCoverage); else if (a == "--only-bricks") only(doBricks); else if (a == "--only-bands") only(doBands); else if (a == "--only-shade") only(doShade);
         else if (a == "--warp") warp = true;
         else if (a == "--debug") debug = true;
+        else if (a == "--gbv") { debug = true; gbv = true; }
         else if (a == "--no-conservative") g_conservative = false;
         else if (a == "--no-helperlane") g_noHelper = true;
         else if (a == "--width" && i + 1 < argc) g_width = (uint32_t)atoi(argv[++i]);
         else if (a == "--height" && i + 1 < argc) g_height = (uint32_t)atoi(argv[++i]);
         else if (a == "--reps" && i + 1 < argc) g.reps = atoi(argv[++i]);
+        else if (a == "--quick") { g.reps = 1; g.warm = 0; }
         else if (a == "--out" && i + 1 < argc) outDir = argv[++i];
         else if (a == "--dxc" && i + 1 < argc) dxcDir = argv[++i];
         else { fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
@@ -723,7 +751,7 @@ int main(int argc, char** argv)
     int code = 0;
     try
     {
-        g.init(warp, debug);
+        g.init(warp, debug, gbv);
         dxc.load(dxcDir);
         dxc.includeDir.assign(g_shaderDir.begin(), g_shaderDir.end());
         logf("DXC: %s, shaders: %s, resolution %ux%u, reps %d%s\n", dxcDir.c_str(), g_shaderDir.c_str(), g_width, g_height, g.reps, warp ? " (WARP)" : "");
@@ -742,8 +770,8 @@ int main(int argc, char** argv)
         logf("\nFAILED: %s\n", f.what.c_str());
         g.drainMessages();
         HRESULT reason = g.dev ? g.dev->GetDeviceRemovedReason() : S_OK;
-        if (FAILED(reason)) logf("device removed reason 0x%08X\n", (unsigned)reason);
-        code = 1;
+        if (FAILED(reason)) { logf("device removed reason 0x%08X\n", (unsigned)reason); code = 87; }  // GpuLock.ps1 convention: 87 = device removed (TDR)
+        else code = 1;
     }
     SYSTEMTIME st; GetLocalTime(&st);
     char stamp[64]; snprintf(stamp, sizeof stamp, "%04d%02d%02d_%02d%02d%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
@@ -761,6 +789,8 @@ int main(int argc, char** argv)
     md << "# DesignBench " << stamp << (warp ? " (WARP dry run)" : "") << "\n\nAdapter: " << g.adapterName << ", driver " << g.driverVersion << ", Agility SDK " << D3D12SDKVersion << ", " << g_width << "x" << g_height << ", reps " << g.reps << "\n\n| section | measurement | value | unit | note |\n|---|---|---:|---|---|\n";
     for (const Result& r : g_results) md << "| " << r.section << " | " << r.name << " | " << r.value << " | " << r.unit << " | " << r.note << " |\n";
     std::ofstream lg(base + ".log"); lg << g_log;
+    if (g.debugErrors) { logf("debug layer: %u error/corruption messages\n", g.debugErrors); code = code ? code : 4; }
+    else if (g.debug) logf("debug layer: no error messages\n");
     logf("\nResults written to %s.{json,md,log}\n", base.c_str());
     return code;
 }

@@ -1,0 +1,31 @@
+{
+ "adapter": "NVIDIA GeForce RTX 4080", "driver": "32.0.15.9186", "agility_sdk": 618, "resolution": "3840x2160", "reps": 9, "timestamp": "20260925_144949",
+ "results": [
+  {"section": "env", "name": "timestamp frequency", "value": 1e+09, "unit": "Hz", "note": ""},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~5 M: count pass (conservative raster, tile atomics only)", "value": 0.828288, "unit": "ms", "note": "5.183129 M fragments, max/tile 218, tiles > 1024: 0"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~5 M: raster + area + mask + 24 B append (global list, one atomic per wave)", "value": 1.3209, "unit": "ms", "note": "5.183129 M appended, 0 overflow, 0.254845 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~5 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)", "value": 1.27722, "unit": "ms", "note": "5.183129 M appended, 0 overflow, 0.246418 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~5 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))", "value": 1.34922, "unit": "ms", "note": "5.183129 M appended, 0 overflow, 0.260309 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~5 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)", "value": 0.553984, "unit": "ms", "note": "0.106882 ns/fragment, 0.066790 ns/pixel (all pixels)"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~10 M: count pass (conservative raster, tile atomics only)", "value": 1.65376, "unit": "ms", "note": "10.368084 M fragments, max/tile 308, tiles > 1024: 0"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~10 M: raster + area + mask + 24 B append (global list, one atomic per wave)", "value": 2.6391, "unit": "ms", "note": "10.368084 M appended, 0 overflow, 0.254541 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)", "value": 2.55098, "unit": "ms", "note": "10.368084 M appended, 0 overflow, 0.246041 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))", "value": 2.69488, "unit": "ms", "note": "10.368084 M appended, 0 overflow, 0.259921 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~10 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)", "value": 0.84992, "unit": "ms", "note": "0.081975 ns/fragment, 0.102469 ns/pixel (all pixels)"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~20 M: count pass (conservative raster, tile atomics only)", "value": 3.13206, "unit": "ms", "note": "19.697171 M fragments, max/tile 518, tiles > 1024: 0"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~20 M: raster + area + mask + 24 B append (global list, one atomic per wave)", "value": 5.00045, "unit": "ms", "note": "19.697171 M appended, 0 overflow, 0.253866 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~20 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)", "value": 4.8337, "unit": "ms", "note": "19.697171 M appended, 0 overflow, 0.245401 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~20 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))", "value": 5.10378, "unit": "ms", "note": "19.697171 M appended, 0 overflow, 0.259112 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.5 px x 20 px, F ~20 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)", "value": 1.43872, "unit": "ms", "note": "0.073042 ns/fragment, 0.173457 ns/pixel (all pixels)"},
+  {"section": "coverage", "name": "slivers 0.25 px x 20 px, F ~10 M: count pass (conservative raster, tile atomics only)", "value": 1.53674, "unit": "ms", "note": "9.498973 M fragments, max/tile 278, tiles > 1024: 0"},
+  {"section": "coverage", "name": "slivers 0.25 px x 20 px, F ~10 M: raster + area + mask + 24 B append (global list, one atomic per wave)", "value": 2.47469, "unit": "ms", "note": "9.498973 M appended, 0 overflow, 0.260522 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.25 px x 20 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)", "value": 2.39184, "unit": "ms", "note": "9.498973 M appended, 0 overflow, 0.251800 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.25 px x 20 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))", "value": 2.52893, "unit": "ms", "note": "9.498973 M appended, 0 overflow, 0.266232 ns/fragment"},
+  {"section": "coverage", "name": "slivers 0.25 px x 20 px, F ~10 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)", "value": 0.79872, "unit": "ms", "note": "0.084085 ns/fragment, 0.096296 ns/pixel (all pixels)"},
+  {"section": "coverage", "name": "cards 4 px, F ~10 M: count pass (conservative raster, tile atomics only)", "value": 1.91654, "unit": "ms", "note": "13.349635 M fragments, max/tile 468, tiles > 1024: 0"},
+  {"section": "coverage", "name": "cards 4 px, F ~10 M: raster + area + mask + 24 B append (global list, one atomic per wave)", "value": 3.0737, "unit": "ms", "note": "13.349635 M appended, 0 overflow, 0.230246 ns/fragment"},
+  {"section": "coverage", "name": "cards 4 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)", "value": 2.96406, "unit": "ms", "note": "13.349635 M appended, 0 overflow, 0.222033 ns/fragment"},
+  {"section": "coverage", "name": "cards 4 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))", "value": 3.11277, "unit": "ms", "note": "13.349635 M appended, 0 overflow, 0.233173 ns/fragment"},
+  {"section": "coverage", "name": "cards 4 px, F ~10 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)", "value": 0.95744, "unit": "ms", "note": "0.071720 ns/fragment, 0.115432 ns/pixel (all pixels)"}
+ ]
+}
