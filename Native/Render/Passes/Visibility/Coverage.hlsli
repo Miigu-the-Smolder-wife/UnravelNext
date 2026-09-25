@@ -1,8 +1,8 @@
 // Exact coverage of a triangle inside a pixel (INTERFACES_KO.md 5.5.1, 7.1). Owner: V. Shared by V's coverage layer
 // (band B fragments) and M's edge composite (band A edge pixels), so both see the same geometry.
 //   coverageTriangleArea: area of triangle (a, b, c) inside the pixel square [pixel, pixel + 1)^2, exact up to float
-//                         rounding (Sutherland-Hodgman clip against the four pixel edges, shoelace area). Screen pixels,
-//                         either winding.
+//                         rounding (Green's theorem on the boundary clamped to the square, streamed per edge). Screen
+//                         pixels, either winding.
 //   coverageTriangleAreaCentroid: the same area and the clipped polygon's centroid (coverage-layer fragment depth).
 //   coverageTriangleMask: which of the 32 subsamples (kCoverageSamples, stratified in x and y) lie inside the triangle;
 //                         orders overlapping fragments inside one pixel (ARCHITECTURE 2.1: error <= 1/32 of the pixel).
@@ -10,7 +10,6 @@
 #define UNX_COVERAGE_HLSLI
 
 #define COVERAGE_SAMPLES 32u
-#define COVERAGE_MAX_CLIPPED 7u  // a triangle clipped by four half-planes has at most 7 vertices
 
 // Subsample i: x = (i + 0.5) / 32, y = bit-reversed i (base-2 radical inverse) + 1/64: one sample per row and column
 // of the 32 x 32 grid.
@@ -19,76 +18,90 @@ float2 coverageSample(uint i)
     return float2((i + 0.5) / 32.0, (reversebits(i) >> 27) / 32.0 + 1.0 / 64.0);
 }
 
-// Clips polygon 'p' (n vertices) by the half-plane dot(axis, v) * sign <= limit * sign, i.e. keeps coord <= limit
-// (sign = 1) or coord >= limit (sign = -1) of the chosen axis.
-void coverageClip(inout float2 p[COVERAGE_MAX_CLIPPED], inout uint n, uint axis, float limit, float sign)
+// Area (and first moments) of a triangle inside the unit pixel square by Green's theorem on its boundary clamped to the
+// square: clamping every point of a closed curve to a convex box keeps the winding number of every interior point of
+// the box (the segment from a point to its clamp never crosses the interior), so the clamped curve's signed area is
+// the area of the triangle inside the box, and its first moments are the region's. Each edge is split where it crosses
+// x = 0, 1 (clamping x), each piece where it crosses y = 0, 1 (clamping y), and the pieces add shoelace terms: no
+// vertex arrays, registers only (V's microbenchmark: 0.121 vs 0.246 ns per fragment for the Sutherland-Hodgman clip).
+struct CoverageGreen
 {
-    float2 o[COVERAGE_MAX_CLIPPED];
-    uint m = 0;
-    [unroll] for (uint i = 0; i < COVERAGE_MAX_CLIPPED; ++i)
-    {
-        if (i >= n) break;
-        const float2 a = p[i], b = p[(i + 1) % n];
-        const float da = (a[axis] - limit) * sign, db = (b[axis] - limit) * sign;  // <= 0: inside
-        if (da <= 0 && m < COVERAGE_MAX_CLIPPED) o[m++] = a;
-        if ((da < 0 && db > 0) || (da > 0 && db < 0))
-        {
-            const float t = da / (da - db);
-            if (m < COVERAGE_MAX_CLIPPED) o[m++] = lerp(a, b, t);
-        }
-    }
-    n = m;
-    [unroll] for (uint k = 0; k < COVERAGE_MAX_CLIPPED; ++k) p[k] = o[k];
+    float twice;    // 2 x signed area
+    float2 moment;  // 6 x first moments (sum (u + v)(u x v))
+};
+
+void coverageGreenSegment(float2 u, float2 v, inout CoverageGreen g)
+{
+    const float cr = u.x * v.y - v.x * u.y;
+    g.twice += cr;
+    g.moment += (u + v) * cr;
 }
 
-float coverageTriangleArea(float2 a, float2 b, float2 c, float2 pixel)
+// Segment p -> q with x already in [0, 1]: split at y = 0, 1 and clamp y.
+void coverageGreenClipY(float2 p, float2 q, inout CoverageGreen g)
 {
-    float2 p[COVERAGE_MAX_CLIPPED];
-    p[0] = a - pixel;
-    p[1] = b - pixel;
-    p[2] = c - pixel;
-    [unroll] for (uint k = 3; k < COVERAGE_MAX_CLIPPED; ++k) p[k] = 0;
-    uint n = 3;
-    coverageClip(p, n, 0, 0.0, -1.0);
-    coverageClip(p, n, 0, 1.0, 1.0);
-    coverageClip(p, n, 1, 0.0, -1.0);
-    coverageClip(p, n, 1, 1.0, 1.0);
-    float twice = 0;
-    [unroll] for (uint i = 0; i < COVERAGE_MAX_CLIPPED; ++i)
+    const float dy = q.y - p.y;
+    if (abs(dy) < 1e-7)
     {
-        if (i >= n) break;
-        const float2 u = p[i], v = p[(i + 1) % n];
-        twice += u.x * v.y - v.x * u.y;
+        const float y = clamp(p.y, 0.0, 1.0);
+        coverageGreenSegment(float2(p.x, y), float2(q.x, y), g);
+        return;
     }
-    return 0.5 * abs(twice);
+    const float t0 = (0.0 - p.y) / dy, t1 = (1.0 - p.y) / dy;
+    const float ta = clamp(min(t0, t1), 0.0, 1.0), tb = clamp(max(t0, t1), 0.0, 1.0);
+    float2 a = lerp(p, q, ta), b = lerp(p, q, tb);
+    a.y = clamp(a.y, 0.0, 1.0);
+    b.y = clamp(b.y, 0.0, 1.0);
+    const float2 pa = float2(p.x, clamp(p.y, 0.0, 1.0)), qb = float2(q.x, clamp(q.y, 0.0, 1.0));
+    coverageGreenSegment(pa, a, g);
+    coverageGreenSegment(a, b, g);
+    coverageGreenSegment(b, qb, g);
 }
 
-// Area and centroid (screen pixels) of the same clipped polygon: the covered region's centre of mass, where the
-// coverage layer evaluates a fragment's depth (always inside the triangle, unlike the pixel centre).
+// Segment p -> q: split at x = 0, 1 and clamp x, then each piece in y.
+void coverageGreenClip(float2 p, float2 q, inout CoverageGreen g)
+{
+    const float dx = q.x - p.x;
+    if (abs(dx) < 1e-7)
+    {
+        const float x = clamp(p.x, 0.0, 1.0);
+        coverageGreenClipY(float2(x, p.y), float2(x, q.y), g);
+        return;
+    }
+    const float t0 = (0.0 - p.x) / dx, t1 = (1.0 - p.x) / dx;
+    const float ta = clamp(min(t0, t1), 0.0, 1.0), tb = clamp(max(t0, t1), 0.0, 1.0);
+    float2 a = lerp(p, q, ta), b = lerp(p, q, tb);
+    a.x = clamp(a.x, 0.0, 1.0);
+    b.x = clamp(b.x, 0.0, 1.0);
+    const float2 pa = float2(clamp(p.x, 0.0, 1.0), p.y), qb = float2(clamp(q.x, 0.0, 1.0), q.y);
+    coverageGreenClipY(pa, a, g);
+    coverageGreenClipY(a, b, g);
+    coverageGreenClipY(b, qb, g);
+}
+
+CoverageGreen coverageGreenTriangle(float2 a, float2 b, float2 c, float2 pixel)
+{
+    CoverageGreen g;
+    g.twice = 0;
+    g.moment = 0;
+    a -= pixel;
+    b -= pixel;
+    c -= pixel;
+    coverageGreenClip(a, b, g);
+    coverageGreenClip(b, c, g);
+    coverageGreenClip(c, a, g);
+    return g;
+}
+
+float coverageTriangleArea(float2 a, float2 b, float2 c, float2 pixel) { return 0.5 * abs(coverageGreenTriangle(a, b, c, pixel).twice); }
+
+// Area and centroid (screen pixels) of the same region: the covered region's centre of mass, where the coverage layer
+// evaluates a fragment's depth (always inside the triangle, unlike the pixel centre).
 float coverageTriangleAreaCentroid(float2 a, float2 b, float2 c, float2 pixel, out float2 regionCentre)
 {
-    float2 p[COVERAGE_MAX_CLIPPED];
-    p[0] = a - pixel;
-    p[1] = b - pixel;
-    p[2] = c - pixel;
-    [unroll] for (uint k = 3; k < COVERAGE_MAX_CLIPPED; ++k) p[k] = 0;
-    uint n = 3;
-    coverageClip(p, n, 0, 0.0, -1.0);
-    coverageClip(p, n, 0, 1.0, 1.0);
-    coverageClip(p, n, 1, 0.0, -1.0);
-    coverageClip(p, n, 1, 1.0, 1.0);
-    float twice = 0;
-    float2 moment = 0;
-    [unroll] for (uint i = 0; i < COVERAGE_MAX_CLIPPED; ++i)
-    {
-        if (i >= n) break;
-        const float2 u = p[i], v = p[(i + 1) % n];
-        const float cr = u.x * v.y - v.x * u.y;
-        twice += cr;
-        moment += (u + v) * cr;
-    }
-    regionCentre = pixel + (abs(twice) > 1e-12 ? moment / (3.0 * twice) : float2(0.5, 0.5));
-    return 0.5 * abs(twice);
+    const CoverageGreen g = coverageGreenTriangle(a, b, c, pixel);
+    regionCentre = pixel + (abs(g.twice) > 1e-12 ? g.moment / (3.0 * g.twice) : float2(0.5, 0.5));
+    return 0.5 * abs(g.twice);
 }
 
 uint coverageTriangleMask(float2 a, float2 b, float2 c, float2 pixel)

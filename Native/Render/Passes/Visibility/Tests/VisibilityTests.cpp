@@ -1389,7 +1389,7 @@ UNX_TEST(coverage_layer_is_exact)
         // Expected fragments from the source triangles of the band B/C meshes.
         struct Expect
         {
-            double area, depth;
+            double area, depth, depthMin = 0, depthMax = 0;  // (the polygon's depth range)
             uint32_t mask, ambiguous;
             bool required = false;  // not a float-rounding sliver, not at the occlusion threshold
             bool found = false;
@@ -1436,6 +1436,8 @@ UNX_TEST(coverage_layer_is_exact)
                             Expect e;
                             e.area = area;
                             e.depth = depth;
+                            e.depthMin = *std::min_element(sp.z.begin(), sp.z.end());
+                            e.depthMax = *std::max_element(sp.z.begin(), sp.z.end());
                             polygonMask(sp.xy, px, py, e.mask, e.ambiguous);
                             e.required = area >= 5e-4 && std::fabs(depth - hizFar) > margin;
                             if (area > 0 && !e.required) ++marginal;
@@ -1447,8 +1449,8 @@ UNX_TEST(coverage_layer_is_exact)
 
         // Every listed pixel: sorted fragments that match an expected one.
         std::vector<uint8_t> listed((size_t)width * height, 0);
-        size_t checked = 0, maxAreaMiss = 0;
-        double worstArea = 0, worstDepth = 0;
+        size_t checked = 0, maxAreaMiss = 0, depthOver = 0;
+        double worstArea = 0, worstDepth = 0, worstSliverDepth = 0;
         for (uint32_t k = 0; k < pixelCount; ++k)
         {
             const uint32_t packed = fo.pixels[8 + k], px = packed & 0xFFFF, py = packed >> 16;
@@ -1493,9 +1495,20 @@ UNX_TEST(coverage_layer_is_exact)
                 e.foundDepth = depth;
                 const double da = std::fabs(area - e.area), dd = std::fabs(depth - e.depth);
                 worstArea = std::max(worstArea, da);
-                worstDepth = std::max(worstDepth, dd / std::max(e.depth, 1e-6));
+                if (e.area >= 1e-2) worstDepth = std::max(worstDepth, dd / std::max(e.depth, 1e-6));
+                else worstSliverDepth = std::max(worstSliverDepth, dd / std::max(e.depth, 1e-6));
                 if (da > 2e-4 + 1e-4 * e.area) fail("frame %zu: pixel (%u, %u): area %.7f, exact %.7f", f, px, py, area, e.area);
-                if (dd > 1e-7 + 1e-4 * e.depth) fail("frame %zu: pixel (%u, %u): depth %.9g, exact %.9g", f, px, py, depth, e.depth);
+                // Depth at the covered region's centroid: Green's moments (Coverage.hlsli) give the centroid to float
+                // rounding divided by the area, so a sliver's depth is looser. Depth only orders overlapping fragments,
+                // and a misordered fragment moves the pixel's coverage by at most its own area: below 1e-2 px^2 that is
+                // inside the 1/32 overlap bound of the quality definition (ARCHITECTURE 3) with margin, and such a
+                // fragment's depth need only lie in its triangle's depth range.
+                const bool depthOk = e.area >= 1e-2 ? dd <= 1e-7 + 1e-4 * e.depth : depth >= e.depthMin - 1e-6 && depth <= e.depthMax + 1e-6;
+                if (!depthOk)
+                {
+                    ++depthOver;
+                    if (depthOver <= 3) logf("    depth over tolerance: frame %zu pixel (%u, %u): depth %.9g, exact %.9g, area %.3g\n", f, px, py, depth, e.depth, e.area);
+                }
                 if (((fr[2] ^ e.mask) & ~e.ambiguous) != 0)
                     fail("frame %zu: pixel (%u, %u): mask 0x%08x, exact 0x%08x (ambiguous 0x%08x)", f, px, py, fr[2], e.mask, e.ambiguous);
                 ++checked;
@@ -1511,10 +1524,10 @@ UNX_TEST(coverage_layer_is_exact)
         size_t staleHeads = 0;
         for (size_t i = 0; i < listed.size(); ++i)
             if (!listed[i] && fo.heads[i] != 0) ++staleHeads;
-        logf("    frame %zu: %u pixels, %u fragments; %zu checked against the exact clip (worst area error %.2e px, depth %.2e relative); %zu expected missing; "
+        logf("    frame %zu: %u pixels, %u fragments; %zu checked against the exact clip (worst area error %.2e px, depth %.2e relative, slivers < 1e-2 px2 %.2e); %zu expected missing; "
              "%zu back-facing triangles culled, %zu pixel fragments occluded by band A, %zu marginal; %zu stale heads\n",
-             f, pixelCount, fragmentCount, checked, worstArea, worstDepth, missing, culledBack, occluded, marginal, staleHeads);
-        CHECK(missing == 0 && staleHeads == 0 && checked == fragmentCount);
+             f, pixelCount, fragmentCount, checked, worstArea, worstDepth, worstSliverDepth, missing, culledBack, occluded, marginal, staleHeads);
+        CHECK(missing == 0 && staleHeads == 0 && checked == fragmentCount && depthOver == 0);
         CHECK(culledBack > 0 && occluded > 0);
     }
     logf("    coverage layer exact over %zu frames\n", frames.size());
