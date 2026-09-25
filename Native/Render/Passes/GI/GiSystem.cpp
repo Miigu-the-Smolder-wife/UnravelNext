@@ -97,6 +97,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.rayLength = (float)q.number("gi.ray_length_m");
     s.hitUpdateShare = (float)q.number("gi.hit_update_share");
     s.hitCellFootprintScale = (float)q.number("gi.hit_cell_footprint_scale");
+    s.experimentDisable = (uint32_t)q.integer("gi.experiment_disable");
     // Fixed by the kernels (GiCache.hlsli, GiProbeGather.hlsl, GiInternal.hlsli probe offsets).
     if (q.integer("gi.cache_octahedral_texels") != 8) fail("gi.cache_octahedral_texels must be 8 (GI_TEXELS)");
     if (q.integer("gi.near_occlusion_taps") != 16) fail("gi.near_occlusion_taps must be 16 (GiProbeGather)");
@@ -302,6 +303,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   k[12] = asU(sun.x);
                   k[13] = asU(sun.y);
                   k[14] = asU(sun.z);
+                  k[15] = s.experimentDisable;
                   std::memcpy(&k[24], scene, sizeof scene);
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);

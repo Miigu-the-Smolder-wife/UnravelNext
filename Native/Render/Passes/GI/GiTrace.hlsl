@@ -10,7 +10,7 @@
 //
 // P[0] = { cache UAV, ray budget (dispatch width), hit cell footprint scale (float bits), ShadowSrvs buffer (raw; UNX_NONE =
 //          no VSM: every sunlit hit traces a shadow ray) }
-// P[1], P[2], P[3] = sky and sun (GiSky.hlsli: SKY0 atmosphere LUTs, SKY1 constants), ray length
+// P[1], P[2], P[3] = sky and sun (GiSky.hlsli: SKY0 atmosphere LUTs, SKY1 constants), ray length; P[3].w = gi.experiment_disable
 // P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view (sun, scene buffers).
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
@@ -65,7 +65,8 @@ void GiTraceGen()
         distanceToHit = hit.t;
         const RtSurface s = rtSurface(scene, hit, r.Origin, r.Direction);
         // Textures at the GI ray's texel-cone footprint (the width its cache cell is sized by).
-        const GpuMaterial m = rtHitMaterial(loadMaterial(s.material), s, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z), dot(s.normal, r.Direction));
+        GpuMaterial m = loadMaterial(s.material);
+        if ((P[3].w & 8) == 0) m = rtHitMaterial(m, s, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z), dot(s.normal, r.Direction));
         const bool twoSided = (m.classFlags & MATERIAL_TWO_SIDED) != 0;
         if (!s.frontFace && !twoSided)
         {
@@ -100,7 +101,7 @@ void GiTraceGen()
                     // shadow ray (request 20260925_R_sun_visibility_at_hits.md).
                     bool resident = false;
                     float visibility = 0;
-                    if (P[0].w != UNX_NONE)
+                    if (P[0].w != UNX_NONE && (P[3].w & 4) == 0)
                     {
                         ByteAddressBuffer vb = ResourceDescriptorHeap[P[0].w];
                         const uint4 a = vb.Load4(0), c = vb.Load4(16);

@@ -12,7 +12,7 @@
 // it with an earlier dump of the same camera and resolution: per 8 x 8 tile the mean luminance of the pixels valid in both
 // (a = 1), then over tiles whose reference mean is above 1e-3 of the image's mean the mean and P95 of |a - b| / b and the
 // signed bias sum(a - b) / sum(b). Tile means average the per-pixel ray noise (e.g. reflection.experiment_disable=4, sun
-// visibility at hits by shadow rays, against 0, by S's VSM). The copy runs every frame: dump runs are not measurements.
+// visibility at hits by shadow rays, against 0, by S's VSM). The copy runs in one extra frame after the timed ones.
 //
 //   GpuLock.ps1 -Track R -- unx_gate_gi_gigate --scene <file.unxscene> [--camera N] [--resolution 4K|1440p|both] [--frames N]
 //                                                [--out DIR] [--integrated] [--set key=value ...] [--dump FILE] [--compare FILE]
@@ -173,8 +173,10 @@ int main(int argc, char** argv)
                 check(device.d3d()->CreateCommittedResource3(&rb, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&dumpBuffer)),
                       "reflection dump");
             }
+            bool dumpFrame = false;  // the extra untimed frame after the harness
+            uint64_t lastFrame = 0;
             auto copyReflection = [&](RenderGraph& graph, TextureRef reflection) {
-                if (!keepReflection || !reflection.valid()) return;
+                if (!dumpFrame || !reflection.valid()) return;
                 const BufferRef dst = graph.importBuffer(dumpBuffer.Get(), { "gate reflection dump", (uint64_t)dumpPitch * res.height, 0 });
                 graph.addPass("gate.dump", QueueType::Graphics,
                               [&](PassBuilder& b) {
@@ -193,7 +195,8 @@ int main(int argc, char** argv)
                                   c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
                               });
             };
-            HarnessResult r = harness.run(res, opt, [&](RenderGraph& graph, const Resolution&, uint64_t f) {
+            auto frameBody = [&](RenderGraph& graph, const Resolution&, uint64_t f) {
+                lastFrame = f;
                 if (renderer)
                 {
                     FrameContext frame;
@@ -311,11 +314,18 @@ int main(int argc, char** argv)
                     b.use(reflection, Use::SrvCompute);
                     b.keep();
                 }, [](PassContext&) {});
-            });
+            };
+            HarnessResult r = harness.run(res, opt, frameBody);
             harness.printSummary(r);
             if (keepReflection)
             {
                 device.waitIdle();
+                dumpFrame = true;
+                RenderGraph dumpGraph(device);
+                frameBody(dumpGraph, res, lastFrame + 1);
+                dumpGraph.execute(nullptr);
+                device.waitIdle();
+                dumpFrame = false;
                 std::vector<uint16_t> texels((size_t)res.width * res.height * 4);
                 void* mapped = nullptr;
                 D3D12_RANGE all{ 0, (SIZE_T)dumpPitch * res.height }, none{ 0, 0 };

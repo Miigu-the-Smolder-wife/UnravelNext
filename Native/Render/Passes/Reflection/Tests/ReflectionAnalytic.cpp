@@ -175,12 +175,26 @@ float3 sampleGgx(float3 v, float alpha, float u1, float u2)
 }
 
 // Expected reflection value of a pixel and the standard deviation of one lobe sample around it (a pixel's M value is one
-// sample, a G value the mean of reflection.g_rays_per_sample: the per-pixel tolerance adds 4 sigma / sqrt(n)).
+// sample, a G value the mean of reflection.g_rays_per_sample: the per-pixel tolerance adds z sigma / sqrt(n), familyZ).
 struct Expectation
 {
     double mean = 0, sigma = 0;
     double hitNoV = 1;  // mean cosine at the reflection hits (diagnostics)
 };
+
+// Per-sample tolerance in sigmas for a check over 'samples' values that together may fail by chance with probability
+// 0.1 % (Bonferroni, two-sided normal tail): z with samples x erfc(z / sqrt 2) = 1e-3 (129600 samples: z = 5.8). A fixed
+// 4 sigma over ~39 k samples expects ~2.5 chance exceedances; bias is caught by the mean check (< 1 %) instead.
+double familyZ(size_t samples)
+{
+    double lo = 0, hi = 10;
+    for (int i = 0; i < 60; ++i)
+    {
+        const double z = 0.5 * (lo + hi);
+        (samples * std::erfc(z / std::sqrt(2.0)) > 1e-3 ? lo : hi) = z;
+    }
+    return hi;
+}
 
 // Expected reflection value of a pixel in furnaceWithMirrors (see the file comment).
 std::function<Expectation(uint32_t, uint32_t)> furnaceExpectation(const ViewDesc& view, uint32_t width, uint32_t height, double le, double rho)
@@ -582,6 +596,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
     readback.resource->Unmap(0, &none);
     const uint32_t raysPerSample = (uint32_t)quality.integer("reflection.g_rays_per_sample");
     double sumM = 0, sumG = 0;
+    const double z = familyZ(values.size() / 4);
     for (size_t i = 0; i < values.size() / 4; ++i)
     {
         const float w = values[4 * i + 3];
@@ -597,8 +612,8 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
         const Expectation e = expectedAt(px, py);
         const double expected = e.mean;
         if (expected <= 1e-6) continue;  // no defined expectation here (scene 3: pixels outside the checked reflection)
-        // Allowed relative deviation: 3 % plus 4 sigma of the pixel's sample mean (1 sample for M, g_rays_per_sample for G).
-        const double allowM = 0.03 + 4 * e.sigma / expected, allowG = 0.03 + 4 * e.sigma / std::sqrt((double)raysPerSample) / expected;
+        // Allowed relative deviation: 3 % plus z sigma of the pixel's sample mean (1 sample for M, g_rays_per_sample for G).
+        const double allowM = 0.03 + z * e.sigma / expected, allowG = 0.03 + z * e.sigma / std::sqrt((double)raysPerSample) / expected;
         if (w == 1)
         {
             ++out.mirror;
@@ -647,7 +662,7 @@ int main(int argc, char** argv)
         const Outcome a = run(device, shaders, quality, furnace, { 0, 0, 0 },
                               furnaceExpectation(ViewDesc::fromCamera(furnace.cameras[0], 1920, 1080, float4x4{}), 1920, 1080, 1.0, 0.5), frames, 1920, 1080);
         const bool okA = a.mirror > 0 && a.glossy > 0 && std::fabs(a.meanM - 1) < 0.01 && std::fabs(a.meanG - 1) < 0.01 && a.excessM <= 0 && a.excessG <= 0;
-        logf("furnace (value / expected; cache L = 2): %u surface samples: K %u, M %u (mean %.4f, worst %.2f %%, %u beyond 3 %% + 4 sigma), G %u (mean %.4f, worst %.2f %%) -> %s\n", a.surface, a.k,
+        logf("furnace (value / expected; cache L = 2): %u surface samples: K %u, M %u (mean %.4f, worst %.2f %%, %u beyond 3 %% + z sigma), G %u (mean %.4f, worst %.2f %%) -> %s\n", a.surface, a.k,
              a.mirror, a.meanM, 100 * a.worstM, a.outliersM, a.glossy, a.meanG, 100 * a.worstG, okA ? "PASS" : "FAIL");
         pass = pass && okA;
 
@@ -717,7 +732,7 @@ int main(int argc, char** argv)
             };
             const Outcome c = run(device, shaders, quality, t, { 0, 0, 0 }, expected, 32, 1920, 1080, &published);
             const bool okC = c.mirror > 1000 && std::fabs(c.meanM - 1) < 0.01 && c.excessM <= 0;
-            logf("textured wall in a mirror: %u M pixels on the wall's reflection (mean value / expected %.4f, worst %.2f %%, %u beyond 3 %% + 4 sigma) -> %s\n",
+            logf("textured wall in a mirror: %u M pixels on the wall's reflection (mean value / expected %.4f, worst %.2f %%, %u beyond 3 %% + z sigma) -> %s\n",
                  c.mirror, c.meanM, 100 * c.worstM, c.outliersM, okC ? "PASS" : "FAIL");
             pass = pass && okC;
             device.waitIdle();
@@ -763,7 +778,7 @@ int main(int argc, char** argv)
             const Outcome control = run(device, shaders, noExact, t, { 0, 0, 0 }, expected, 16, 1920, 1080, nullptr, &cuts);
             logf("exact set control (no exact set, proxy with holes): mean value / expected %.4f\n", control.meanM);
             const bool okD = c.exactSlots == 1 && c.exactOccupied == 1 && c.mirror > 1000 && std::fabs(c.meanM - 1) < 0.02 && c.excessM <= 0 && control.meanM < 0.8;
-            logf("exact set: %u of %u slot(s) occupied; %u M pixels on the panel's reflection (mean value / expected %.4f, worst %.2f %%, %u beyond 3 %% + 4 sigma) -> %s\n",
+            logf("exact set: %u of %u slot(s) occupied; %u M pixels on the panel's reflection (mean value / expected %.4f, worst %.2f %%, %u beyond 3 %% + z sigma) -> %s\n",
                  c.exactOccupied, c.exactSlots, c.mirror, c.meanM, 100 * c.worstM, c.outliersM, okD ? "PASS" : "FAIL");
             pass = pass && okD;
         }

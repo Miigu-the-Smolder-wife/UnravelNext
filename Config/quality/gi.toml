@@ -19,3 +19,6 @@ ray_length_m = 10000
 hit_update_share = 0.25            # share of the hemisphere updates guaranteed to entries that GI rays hit (bounce cells)
 hit_cell_footprint_scale = 4.0     # bounce cells (2nd+ bounce irradiance at ray hits) = this x the ray footprint (~0.36 t);
                                    # direct sun at hits is an exact shadow ray
+experiment_disable = 0             # cost attribution only (recorded in the quality hash): 4 = sun visibility at hits by shadow
+                                   # rays only (no VSM lookup), 8 = hit materials without textures. Never nonzero outside
+                                   # measurements.
