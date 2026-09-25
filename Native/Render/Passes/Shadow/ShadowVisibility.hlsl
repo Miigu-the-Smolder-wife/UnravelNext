@@ -18,6 +18,9 @@
 // words 8.. of the VSM stats: pixels per VSM_PATH_*)
 // P[3].x froxel lists SRV (raw; 0xFFFFFFFF: no local slots in this view), P[3].y local lights SRV, P[3].z slot of light SRV,
 // P[3].w overflow tile heads UAV (R32_UINT, with P[1].x).
+// P[4].x planar mask SRV (R8_UINT per pixel), P[4].y planar tile mask SRV (R8_UINT per 8 x 8 tile = this group)
+// (planar reflection views, v1.22; 0xFFFFFFFF: every pixel): tiles without mirror pixels are skipped whole (head 0),
+// pixels that are not mirror pixels are left as sky (M shades neither).
 // Frame constants of the view. Mixed pixels get their local slots here and their sun slot in pass 2.
 #include "Frame.hlsli"
 #include "Scene.hlsli"
@@ -32,6 +35,11 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
     mixed = false;
     overflow = 0;
     if (px.x >= g_viewWidth || px.y >= g_viewHeight) return;
+    if (P[4].x != 0xFFFFFFFFu)
+    {
+        Texture2D<uint> mask = ResourceDescriptorHeap[P[4].x];
+        if (mask.Load(int3(px, 0)) == 0) return;
+    }
     Texture2D<float> depthTex = ResourceDescriptorHeap[P[0].x];
     const float depth = depthTex.Load(int3(px, 0));
     if (depth <= 0) return;
@@ -100,6 +108,19 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_G
     RWByteAddressBuffer stats = ResourceDescriptorHeap[P[2].z];
     uint packed[1], path[1], overflow[1];
     bool mixed[1];
+    if (P[4].y != 0xFFFFFFFFu)
+    {
+        Texture2D<uint> tiles = ResourceDescriptorHeap[P[4].y];
+        if (tiles.Load(int3(gid.xy, 0)) == 0)  // no mirror pixel in this 8 x 8 tile (group-uniform)
+        {
+            if (gi == 0 && P[1].x != 0xFFFFFFFFu)
+            {
+                RWTexture2D<uint> heads = ResourceDescriptorHeap[P[3].w];
+                heads[gid.xy] = 0;
+            }
+            return;
+        }
+    }
     if (gi == 0) gs_overflow = 0;
     classifyPixel(id.xy, packed[0], path[0], mixed[0], overflow[0]);
     if (P[1].x != 0xFFFFFFFFu)

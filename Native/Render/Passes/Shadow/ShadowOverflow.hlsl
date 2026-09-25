@@ -14,7 +14,8 @@
 // word 16 need in words summed over the frame's views (capacity), 17 tiles over capacity, 18 their overflow pixels, 19
 // lights past the third over all pixels)
 // P[3].x froxel lists SRV (raw), P[3].y local lights SRV, P[3].z slot of light SRV, P[3].w the view's allocation counter
-// UAV (raw). Frame constants of the view.
+// UAV (raw). P[4].x planar mask SRV (R8_UINT; 0xFFFFFFFF: every pixel): other pixels have no lights past the third.
+// Frame constants of the view.
 #include "Frame.hlsli"
 #include "Scene.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
@@ -38,7 +39,12 @@ void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
     f.scattering = 0;
     f.pad = 0;
     Texture2D<float> depthTex = ResourceDescriptorHeap[P[0].x];
-    const bool inside = px.x < g_viewWidth && px.y < g_viewHeight;
+    bool inside = px.x < g_viewWidth && px.y < g_viewHeight;
+    if (inside && P[4].x != 0xFFFFFFFFu)
+    {
+        Texture2D<uint> mask = ResourceDescriptorHeap[P[4].x];
+        inside = mask.Load(int3(px, 0)) != 0;
+    }
     const float depth = inside ? depthTex.Load(int3(px, 0)) : 0.0;
     uint2 range = 0;
     if (depth > 0) range = froxelLightRange(f, px, linearDepth(depth));

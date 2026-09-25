@@ -196,6 +196,7 @@ int main(int argc, char** argv)
     try
     {
         bool debugLayer = true, debug = false, keepFroxels = false, uploadFirst = false;
+        int debugTile[2] = { 3, 2 };
         uint32_t W = 1920, H = 1080;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
@@ -206,6 +207,7 @@ int main(int argc, char** argv)
             else if (a == "--height") H = (uint32_t)std::stoul(argv[++i]);
             else if (a == "--set") overrides.push_back(argv[++i]);
             else if (a == "--debug") debug = true;
+            else if (a == "--tile") { debugTile[0] = std::stoi(argv[++i]); debugTile[1] = std::stoi(argv[++i]); }  // per-node print of one tile (section 2)
             else if (a == "--keep") keepFroxels = true;
             else if (a == "--upload-first") uploadFirst = true;  // diagnostic: probe input declared before the froxel passes
         }
@@ -495,8 +497,8 @@ int main(int argc, char** argv)
                             tau = tau + c.extinction * dt;
                         }
                         const ref::D3 g = node(tx, ty, n) - nodeOf(without, tx, ty, n);
-                        if (debug && tx == 3 && ty == 2 && n <= 12)
-                            logf("  tile (3,2) node %u z %.3f: gpu %.4g %.4g %.4g ref %.4g %.4g %.4g\n", n, grid.node(n), g.x, g.y, g.z, acc.x, acc.y, acc.z);
+                        if (debug && (int)tx == debugTile[0] && (int)ty == debugTile[1] && n <= 40)
+                            logf("  tile (%u,%u) node %u z %.3f: gpu %.4g %.4g %.4g ref %.4g %.4g %.4g\n", tx, ty, n, grid.node(n), g.x, g.y, g.z, acc.x, acc.y, acc.z);
                         const double r = acc.x + acc.y + acc.z, e = std::abs(g.x - acc.x) + std::abs(g.y - acc.y) + std::abs(g.z - acc.z);
                         const double exposure = 1.0 / (1.2 * std::exp2(grid.view.ev100));
                         if (r * exposure > 1e-3)  // displayed above 1e-3 of white: fp16 holds it to 1e-3 relative

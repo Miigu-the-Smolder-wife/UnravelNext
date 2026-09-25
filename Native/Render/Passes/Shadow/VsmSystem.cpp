@@ -1067,6 +1067,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     const TextureRef out = g.createTexture(TextureDesc{ "S shadow visibility", w, h, 1, 1, DXGI_FORMAT_R32_UINT });
     view.shadowVisibility = out;
     const TextureRef depth = view.depth, gbuffer = view.gbuffer;
+    const TextureRef mirrorMask = view.view.planarMask, mirrorTiles = view.view.planarTileMask;  // planar views: mirror pixels only
     const BufferRef pool = s.poolRef;
     // Local slots (1-3) and the overflow list from the view's froxel lists (INTERFACES 7.3, 7.4, v1.22): the main view's
     // (FrameRenderer sets them after froxels; tests without froxels: shadowPages' lists), a planar reflection view's own
@@ -1159,15 +1160,18 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       b.use(overflowTiles, Use::UavCompute);
                       b.use(heads, Use::UavCompute);
                   }
+                  if (mirrorMask.valid()) b.use(mirrorMask, Use::SrvCompute);
+                  if (mirrorTiles.valid()) b.use(mirrorTiles, Use::SrvCompute);
               },
               [=](PassContext& ctx) {
-                  const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu,
+                  const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu,
                                            ctx.srv(table), ctx.srv(pool), ctx.srv(bound), ctx.uav(list), ctx.srv(blocks), ctx.uav(statsBuf), 0,
                                            localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv,
-                                           overflowList ? ctx.uav(heads) : 0xFFFFFFFFu };
+                                           overflowList ? ctx.uav(heads) : 0xFFFFFFFFu,
+                                           mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu, mirrorTiles.valid() ? ctx.srv(mirrorTiles) : 0xFFFFFFFFu, 0, 0 };
                   ctx.cmd->SetPipelineState(p1);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 16);
+                  ctx.computeConstants(k, 20);
                   ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
               });
     g.addPass("s.shadow.listargs", QueueType::Compute,
@@ -1220,14 +1224,16 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   b.use(counter, Use::UavCompute);
                   b.use(statsBuf, Use::UavCompute);
                   if (localSlots) b.use(froxelLists, Use::SrvCompute);
+                  if (mirrorMask.valid()) b.use(mirrorMask, Use::SrvCompute);
               },
               [=](PassContext& ctx) {
-                  const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(heads), ring, ctx.srv(overflowTiles), ctx.srv(table), ctx.srv(pool),
+                  const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(heads), ring, ctx.srv(overflowTiles), ctx.srv(table), ctx.srv(pool),
                                            ctx.srv(blocks), ctx.uav(overflow), capacity, ctx.uav(fallback), ctx.uav(statsBuf),
-                                           localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv, ctx.uav(counter) };
+                                           localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv, ctx.uav(counter),
+                                           mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu, 0, 0, 0 };
                   ctx.cmd->SetPipelineState(po);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 16);
+                  ctx.computeConstants(k, 20);
                   ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(overflowTiles), 4, nullptr, 0);
               });
 }
