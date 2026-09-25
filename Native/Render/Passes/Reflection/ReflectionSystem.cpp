@@ -612,6 +612,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.computeConstants(k, 8);
                   c.cmd->Dispatch((std::max(tilesX, kCandidatesMax) + 7) / 8, (tilesY + 7) / 8, 1);
               });
+    uint32_t spacingLog2 = 0;  // reflection.g_sample_spacing_px bound (1, 2, 4 or 8)
+    while ((2u << spacingLog2) <= s.maxSpacing && spacingLog2 < 3) ++spacingLog2;
     g.addPass("r.refl.classify", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
@@ -630,11 +632,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   }
               },
               [&shaders, depth, gbuffer, lobes, history, modes, jobs, args, reflection, s, focal, width, height, tilesX, tilesY, frameConstants, planarSrv,
-               planarOffset, planarCounts, planarViews, viewCount = planar.views](PassContext& c) {
+               planarOffset, planarCounts, planarViews, viewCount = planar.views, spacingLog2](PassContext& c) {
                   uint32_t k[28] = { c.srv(depth), c.srv(gbuffer), lobes.valid() ? c.srv(lobes) : 0xFFFFFFFFu, c.srv(history),
                                      c.uav(modes), c.uav(jobs), c.uav(args), c.uav(reflection),
                                      asU(s.kHalfAngle), asU(s.mirrorRoughness), asU(focal), height,
-                                     width, height, planarSrv, planarOffset, c.uav(planarCounts), 0, 0, 0 };
+                                     width, height, planarSrv, planarOffset, c.uav(planarCounts), spacingLog2, 0, 0 };
                   for (uint32_t v = 0; v < kPlanarMax; ++v)
                   {
                       k[20 + v] = v < viewCount ? c.uav(planarViews[v].mask) : 0xFFFFFFFFu;

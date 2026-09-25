@@ -12,7 +12,8 @@
 // P[0] = { depth SRV, gbuffer SRV, lobe tiles SRV (UNX_NONE = none), distance history SRV }
 // P[1] = { mode UAV, jobs UAV, counter UAV (uint at 0), reflection UAV }
 // P[2] = { K threshold (float radians), mirror roughness max (float), focal length px (float), rows H }
-// P[3] = { width, height, planar SRV (raw), planar byte offset }, P[4].x = planar counts UAV; frame constants b1 = main view.
+// P[3] = { width, height, planar SRV (raw), planar byte offset }, P[4].x = planar counts UAV, P[4].y = log2 of the largest G spacing
+// (reflection.g_sample_spacing_px, at most 3 = 8 px); frame constants b1 = main view.
 // Mirror-smooth pixels on a planar candidate (inside its rectangle, on its plane, facing along its normal) are counted per
 // candidate (the CPU's raster-or-rays choice framesInFlight frames later) and are REFL_PLANAR (no job) when it has a camera.
 // P[5] = mirror mask UAVs, P[6] = tile mask UAVs of views 0-3 (ViewDesc::planarMask / planarTileMask, INTERFACES v1.22;
@@ -120,7 +121,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
                 else
                 {
                     mode = REFL_G;
-                    spacingLog2 = (uint)clamp(floor(log2(max(blur / 3, 1.0))), 0.0, 3.0);
+                    spacingLog2 = (uint)clamp(floor(log2(max(blur / 3, 1.0))), 0.0, (float)P[4].y);
                     const uint sp = 1u << spacingLog2;
                     job = all((pixel % sp) == sp / 2);  // on the global s-grid (s = 1: every pixel)
                 }
