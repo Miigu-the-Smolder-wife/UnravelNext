@@ -135,7 +135,7 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
   - **대기자 표시**: 기다리는 쪽은 첫 대기 전에 `.gpulock/waiting/<pid>.json`(`{track, kind, pid, since, command}`, tmp 뒤 `MoveFileEx` 교체)을 쓰고, 얻거나 포기하면 지운다. 죽은 pid의 파일은 보는 쪽이 지운다.
   - **correctness 양보**: kind = correctness인 획득은 살아 있는 timing 대기자가 있으면 250 ms마다 다시 보며 기다린다. 뮤텍스를 얻은 직후에도 한 번 더 보고, 그 사이 timing 대기자나 HOLD가 생겼으면 다시 놓는다. timing끼리는 뮤텍스 순서를 따른다.
   - **HOLD**: `.gpulock/HOLD`가 있으면 아무도 새로 얻지 않는다(사용자가 게임할 때 두는 표지, 내용 = 사유; 조율 규칙).
-  - **프로세스 안 조각**(C의 GPU 기준 경로추적기 등 수 분짜리 correctness 작업): 같은 규약(뮤텍스 이름, current.json 원자 교체, history 줄, 대기자·양보·HOLD)을 프로세스 안에서 조각마다 따른다. history 줄은 `acquire C (correctness) :: slice k/N <what>` / `release C (correctness) exit 0 slice k/N <ms> ms`, 조각이 15 s를 넘으면 `LONG_SLICE`. core가 C++ API(`GpuLock.h`의 `GpuLockSlice`)를 낸다. 그 전까지는 C의 임시 구현이 같은 규약을 따른다.
+  - **프로세스 안 조각**(C의 GPU 기준 경로추적기 등 수 분짜리 correctness 작업): 같은 규약(뮤텍스 이름, current.json 원자 교체, history 줄, 대기자·양보·HOLD)을 프로세스 안에서 조각마다 따른다. history 줄은 `acquire C (correctness) :: slice k/N <what>` / `release C (correctness) exit 0 slice k/N <ms> ms`, 조각이 15 s를 넘으면 `LONG_SLICE`. C++ API는 `GpuLock.h`의 `GpuLockSlice(track, kind, what)`다(v1.42): `acquire(waitLimit, label)`이 false면 못 얻은 것이고 `lastBlocker()`가 이유다. `release(exitCode)`, 소멸자가 놓는다. 조각 동안 그 프로세스의 `UNX_GPU_LOCK` = track이다. 잠금 폴더는 `UNX_GPU_LOCK_DIR` 또는 현재 디렉터리에서 위로 찾은 `.gpulock`(저장소를 작업 디렉터리로 두고 실행)이다. acquire와 release는 같은 스레드에서 부른다(Win32 뮤텍스). [실측] 단위 시험 `gpu_lock_slice_protocol`(별도 뮤텍스·임시 폴더): 얻기·놓기의 current.json과 history 줄, HOLD 차단과 사유, 살아 있는 timing 대기자에게 양보한 뒤 그 프로세스가 끝나면 얻고 대기 파일을 지운다.
   - [실측] 자체 시험(작업 트리 사본, 진짜 뮤텍스): HOLD가 있으면 얻지 않고 사유를 알린다. 살아 있는 가짜 timing 대기자가 있으면 correctness가 양보한다. 그 프로세스가 끝나면 파일이 지워지고 곧 얻는다.
   - [실측] CPU 시험(9 s 명령, 잡 밖에서 powershell 바쁜 루프 5개 8 s): release 줄 `background: cpu 7 s >= 4 cores, peak 5.2 cores`(바쁜 루프 = 배경)와 `cpu-contended: 9 s >= 4 cores, peak 26.9 cores; top: unx_reference.exe 159 core-s, unx_study_material_layers.exe 18, cl.exe 9, unx_test_fx_particletests.exe 9`(같은 시각 다른 세션들의 실제 CPU 작업)가 나왔다. 짧은 끝 구간 규칙 전에는 0.1 s 구간이 "peak 58.1 cores"를 만들었다.
 - 사용자의 다른 GPU 앱은 닫지 않는다. 측정은 4K·1440p만(하네스가 강제), 1.5초 워밍업, 중앙값·P95·P99.
@@ -684,6 +684,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
 - v1.42 (2026-09-26):
+  - **`GpuLockSlice`(3.3, C 요청)**: 프로세스 안 조각 잠금 C++ API. GpuLock.ps1과 같은 규약이다.
   - **공용 헤더 분리(5절, 인프라 요청 `20260926_Infra_header_split.md`)**: 내용 변경 없이 위치만 옮겼다. `Frame.h`는 호환 include를 유지한다. 코어 파일 가운데 `src/GpuLock.cpp`는 `TrackPending.h`만 include한다. 인프라가 적용 뒤 증분 빌드 시간을 다시 잰다.
 - v1.41 (2026-09-26):
   - **coverage 층 타일 구간(7.1, V; 설계 개정 채택, 1절 최악 dispatch 조건)**: 스트림 append → 카운트 → 스캔 → 오프셋 → 흩뿌리기로 목록 타일마다 픽셀 순서 연속 구간을 만든다. M 요청대로 픽셀 순서로 두었고, 목록 정보 `{ tile, records, record base, block base }`는 M의 A 단계와 같은 형식이다. 블록 패스와 여러 블록 타일 마무리 패스가 opaqueCovered와 S의 `coverageDepthRange`를 만든다. 청크 표·확장 트리·CAS는 없다.

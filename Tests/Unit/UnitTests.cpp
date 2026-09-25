@@ -8,6 +8,7 @@
 #include "unx/core/Jobs.h"
 #include "unx/core/Sha256.h"
 #include "unx/render/FrameRenderer.h"
+#include "unx/render/GpuLock.h"
 #include "unx/render/Harness.h"
 #include "unx/scene/MaterialModel.h"
 #if UNX_HAS_CLUSTERBUILDER
@@ -18,6 +19,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <functional>
 #include <string>
 #include <utility>
@@ -1532,6 +1536,52 @@ std::pair<DWORD, std::string> runChildMode(const wchar_t* argument, const wchar_
     return { code, last };
 }
 } // namespace
+
+UNX_TEST(gpu_lock_slice_protocol)
+{
+    // GpuLockSlice (INTERFACES 3.3, v1.42) on a private mutex and lock folder: acquire writes current.json and an acquire
+    // line and sets UNX_GPU_LOCK, release removes both and writes the release line; HOLD blocks every acquire with its
+    // reason; a correctness slice yields to a live timing waiter and takes the lock once that process has ended (and
+    // removes its waiting file).
+    namespace fs = std::filesystem;
+    const std::string tag = std::to_string(GetCurrentProcessId());
+    const fs::path dir = fs::temp_directory_path() / ("unx_gpulock_test_" + tag);
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    {
+        GpuLockSlice slice("T", "correctness", "unit test", dir.string(), "Local\\UnravelNext.GpuLockTest." + tag);
+        CHECK(slice.acquire(std::chrono::seconds(5), "slice 1/2"));
+        CHECK(fs::exists(dir / "current.json") && requireGpuLock("gpu_lock_slice_protocol") == "T");
+        slice.release(0);
+        CHECK(!fs::exists(dir / "current.json"));
+        std::ofstream(dir / "HOLD") << "unit test hold\n";
+        CHECK(!slice.acquire(std::chrono::milliseconds(600), "slice 2/2"));
+        CHECK(slice.lastBlocker() == "HOLD: unit test hold");
+        fs::remove(dir / "HOLD");
+        STARTUPINFOW si{};
+        si.cb = sizeof si;
+        PROCESS_INFORMATION pi{};
+        wchar_t cmd[] = L"cmd.exe /c ping -n 3 127.0.0.1 >nul";
+        CHECK(CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi));
+        const fs::path waiter = dir / "waiting" / (std::to_string(pi.dwProcessId) + ".json");
+        std::ofstream(waiter) << "{\"track\":\"W\",\"kind\":\"timing\",\"pid\":" << pi.dwProcessId << ",\"since\":\"x\",\"command\":\"waiter\"}";
+        CHECK(!slice.acquire(std::chrono::milliseconds(600)));
+        CHECK(slice.lastBlocker().rfind("timing waiter W", 0) == 0);
+        WaitForSingleObject(pi.hProcess, 10000);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        CHECK(slice.acquire(std::chrono::seconds(5), "slice 2/2") && !fs::exists(waiter));
+    }  // the destructor releases
+    std::ifstream in(dir / "history.log");
+    std::stringstream history;
+    history << in.rdbuf();
+    const std::string h = history.str();
+    size_t acquires = 0;
+    for (size_t i = h.find("acquire T (correctness) :: unit test"); i != std::string::npos; i = h.find("acquire T (correctness) :: unit test", i + 1)) ++acquires;
+    CHECK(acquires == 2 && h.find("release T (correctness) exit 0 slice 1/2 ") != std::string::npos && h.find("release T (correctness) exit 0 slice 2/2 ") != std::string::npos);
+    in.close();
+    fs::remove_all(dir);
+}
 
 UNX_TEST(device_removed_exit_policy)
 {
