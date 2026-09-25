@@ -379,6 +379,101 @@ int main(int argc, char** argv)
             }
         }
 
+        // Segment classification (vsmSegmentClassify, COVERAGE_REDESIGN 4.3 fragment depth ranges): segments from 2 cm off
+        // the receivers of f2 towards the camera, 0.05 / 0.5 / 2 m long. Lit must mean visibility 1 at every one of 16
+        // points along it, umbra 0 (vsmSunVisibility with flat receivers, the classifier's points).
+        {
+            const uint32_t pv = TestFrame::rowPitch(W, 4), pg = TestFrame::rowPitch(W, 8);
+            const ViewDesc& v = tf.frame.mainView;
+            std::vector<float4> segments;
+            for (float lift : { 0.02f, 0.5f })
+            for (float len : { 0.05f, 0.5f, 2.0f })
+                for (uint32_t y = 3; y < H; y += 8)
+                    for (uint32_t x = 3; x < W; x += 8)
+                    {
+                        float d;
+                        std::memcpy(&d, f2.depth.data() + y * pv + x * 4, 4);
+                        if (d <= 0) continue;
+                        uint32_t g[2];
+                        std::memcpy(g, f2.gbuffer.data() + y * pg + x * 8, 8);
+                        const float ndc[4] = { (x + 0.5f) / W * 2 - 1, 1 - (y + 0.5f) / H * 2, d, 1 };
+                        float wp[4] = {};
+                        for (int r = 0; r < 4; ++r)
+                            for (int c = 0; c < 4; ++c) wp[r] += v.invViewProj.m[r][c] * ndc[c];
+                        const float3 p{ wp[0] / wp[3], wp[1] / wp[3], wp[2] / wp[3] };
+                        const float3 p0 = p + octDecodeCpu(g[0]) * lift;
+                        const float3 p1 = p0 + normalize(v.position - p0) * len;
+                        const float z = v.nearPlane / d;
+                        segments.push_back({ p0.x, p0.y, p0.z, 2 * z * std::tan(0.5f * v.verticalFov) / H });
+                        segments.push_back({ p1.x, p1.y, p1.z, 0 });
+                    }
+            const uint32_t count = (uint32_t)segments.size() / 2;
+            std::shared_ptr<std::vector<uint8_t>> out;
+            ++recorded;
+            tf.run([&](FramePassContext& fc) {
+                ViewResources main;
+                main.view = fc.frame.mainView;
+                main.frameConstants = fc.frameConstantsFor(main.view);
+                raster.mainView(fc, main);
+                tracks::shadowPages(fc, main);
+                const BufferRef seg = tf.uploadBuffer(fc, segments.data(), segments.size() * 16, 16, "probe segments");
+                const BufferRef o = fc.graph.createBuffer(BufferDesc{ "segment out", (uint64_t)count * 17 * 4, 4 });
+                const FrameResources r = fc.resources;
+                ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shadow/Tests/ShadowSegmentProbe");
+                const D3D12_GPU_VIRTUAL_ADDRESS cb = main.frameConstants;
+                fc.graph.addPass("s.test.segmentprobe", QueueType::Graphics,
+                                 [&](PassBuilder& b) {
+                                     b.use(seg, Use::SrvCompute);
+                                     b.use(o, Use::UavCompute);
+                                     b.use(r.vsmPageTable, Use::SrvCompute);
+                                     b.use(r.vsmPool, Use::SrvCompute);
+                                     b.use(r.vsmBlocks, Use::SrvCompute);
+                                     b.use(r.vsmSearchBound, Use::SrvCompute);
+                                 },
+                                 [=](PassContext& ctx) {
+                                     const uint32_t k[12] = { ctx.srv(seg), ctx.uav(o), count, 0, ctx.srv(r.vsmPageTable), ctx.srv(r.vsmPool),
+                                                              ctx.srv(r.vsmBlocks), ctx.srv(r.vsmSearchBound), r.vsmConstants, 0, 0, 0 };
+                                     ctx.cmd->SetPipelineState(pso);
+                                     ctx.bindFrameConstants(cb);
+                                     ctx.computeConstants(k, 12);
+                                     ctx.cmd->Dispatch((count + 63) / 64, 1, 1);
+                                 });
+                out = tf.readbackBuffer(fc, o, (uint64_t)count * 17 * 4);
+            });
+            tf.frame.time += tf.frame.deltaTime;
+            uint32_t classes[3] = {}, violations = 0, mixedUniform = 0, airSettled = 0, airCount = 0;
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const bool air = i >= count / 2;  // the second half: 0.5 m off the surface
+                float vals[17];
+                std::memcpy(vals, out->data() + i * 17ull * 4, 17 * 4);
+                const uint32_t cls = (uint32_t)vals[0];
+                ++classes[std::min(cls, 2u)];
+                bool allLit = true, allDark = true;
+                for (int j = 1; j < 17; ++j)
+                {
+                    allLit = allLit && vals[j] >= 1 - 1e-6f;
+                    allDark = allDark && vals[j] <= 1e-6f;
+                }
+                if (cls == 0 && (allLit || allDark)) ++mixedUniform;
+                if (air)
+                {
+                    ++airCount;
+                    airSettled += cls != 0 ? 1u : 0u;
+                }
+                for (int j = 1; j < 17; ++j)
+                    if ((cls == 1 && vals[j] < 1 - 1e-6f) || (cls == 2 && vals[j] > 1e-6f))
+                    {
+                        if (violations < 5) logf("  segment %u class %u: point %d visibility %.4f\n", i, cls, j - 1, vals[j]);
+                        ++violations;
+                    }
+            }
+            logf("segment classification: %u segments, lit %u, umbra %u, mixed %u (of those uniform at 16 points: %u)\n", count, classes[1], classes[2], classes[0], mixedUniform);
+            report(violations == 0, "segment classification: lit / umbra contradicted by a point", violations, 0);
+            logf("  segments 0.5 m off surfaces: %u of %u settled" "\n", airSettled, airCount);
+            report(airSettled > airCount / 2, "segment classification: settles most free-air segments", (double)airSettled / std::max(airCount, 1u), 0.5);
+        }
+
         // 2. Small camera move: only newly visible pages render.
         setCamera(cam.position + float3{ 0.3f, 0, 0.1f });
         runFrame(false);

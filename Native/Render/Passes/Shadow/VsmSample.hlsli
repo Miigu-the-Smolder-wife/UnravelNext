@@ -247,6 +247,77 @@ uint vsmRegionClassify(VsmResources r, VsmReceiver rcIn, float radius, uint k)
     return VSM_REGION_MIXED;
 }
 
+// One piece of a segment (vsmSegmentClassify): the reach square of any of its points lies inside the square around its
+// endpoints' reach squares; its light-space height is linear along its projection: the plane h(uv) = h_a + g . (uv - uv_a),
+// g = (h_b - h_a) d / |d|^2 (d = uv_b - uv_a), bounds every point whose reach square holds a texel to within
+// sqrt 2 |g| reach of the texel's plane height. No texel of the square above plane - margin -> lit, every texel above
+// plane + margin -> umbra, both exact (conservative). A piece nearly along the sun (projection shorter than 2 sqrt 2 reach)
+// uses the flat bounds [h_lo, h_hi].
+uint vsmPieceClassify(VsmResources r, ConstantBuffer<VsmConstants> vc, VsmReceiver a, VsmReceiver b, float reach, uint k)
+{
+    const float3 axis = vc.level[k].lightZ;
+    const float2 lo = min(a.uv, b.uv) - reach, hi = max(a.uv, b.uv) + reach;
+    VsmReceiver c = a;
+    c.uv = 0.5 * (lo + hi);
+    const float radius = 0.5 * max(hi.x - lo.x, hi.y - lo.y);
+    const float2 d = b.uv - a.uv;
+    const float len = length(d);
+    float hLit = min(a.h, b.h), hUmbra = max(a.h, b.h);
+    c.slope = 0;
+    if (len > 2.8284271 * reach)
+    {
+        c.slope = (b.h - a.h) * d / (len * len);
+        const float centre = a.h + dot(c.slope, c.uv - a.uv), margin = 1.4142136 * length(c.slope) * reach;
+        hLit = centre - margin;
+        hUmbra = centre + margin;
+    }
+    c.h = hLit;
+    c.world = vc.level[k].lightX * c.uv.x + vc.level[k].lightY * c.uv.y + axis * hLit;
+    const uint lit = vsmRegionClassify(r, c, radius, k);
+    if (lit == VSM_REGION_LIT) return VSM_REGION_LIT;
+    c.h = hUmbra;
+    c.world = vc.level[k].lightX * c.uv.x + vc.level[k].lightY * c.uv.y + axis * hUmbra;
+    return vsmRegionClassify(r, c, radius, k) == VSM_REGION_UMBRA ? VSM_REGION_UMBRA : VSM_REGION_MIXED;
+}
+
+// Segment p0 -> p1 (world; a pixel's fragment depth range, COVERAGE_REDESIGN 4.3): VSM_REGION_LIT when every point of it
+// sees the whole sun disk, VSM_REGION_UMBRA when none sees any of it, VSM_REGION_MIXED otherwise. Points are receivers
+// without a surface plane (flat in light space). The segment is cut into pieces whose projection is at most 8 texels or
+// 2 sqrt 2 reach (at most VSM_SEGMENT_PIECES; each piece's square then stays near its line), each classified exactly
+// (vsmPieceClassify): lit / umbra when every piece is. Level: the pixel's, coarser while the segment is longer than a
+// page (so the search bound of its endpoints covers it).
+#define VSM_SEGMENT_PIECES 8u
+uint vsmSegmentClassify(VsmResources r, float3 p0, float3 p1, float footprint, float tanSun)
+{
+    ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
+    uint k = vsmLevelForFootprint(vc, footprint);
+    [loop] while (k + 1 < VSM_LEVELS && length(vsmLightSpaceAt(vc, p1, k).xy - vsmLightSpaceAt(vc, p0, k).xy) > vsmPageSize(k)) ++k;
+    const float3 axis = vc.level[k].lightZ;
+    const VsmReceiver a = vsmMakeReceiver(vc, p0, axis, k), b = vsmMakeReceiver(vc, p1, axis, k);
+    const float dmax = max(vsmSearchHeight(r, a, k), vsmSearchHeight(r, b, k)) - min(a.h, b.h);
+    if (dmax <= 0) return VSM_REGION_LIT;
+    const float reach = dmax * tanSun;
+    const float pieceLen = max(8 * vsmTexel(k), 2.8284271 * reach);
+    const uint pieces = clamp((uint)ceil(length(b.uv - a.uv) / pieceLen), 1u, VSM_SEGMENT_PIECES);
+    uint lit = 0, umbra = 0;
+    [loop] for (uint i = 0; i < pieces; ++i)
+    {
+        VsmReceiver pa = a, pb = a;
+        const float t0 = float(i) / pieces, t1 = float(i + 1) / pieces;
+        pa.uv = lerp(a.uv, b.uv, t0);
+        pa.h = lerp(a.h, b.h, t0);
+        pa.world = lerp(p0, p1, t0);
+        pb.uv = lerp(a.uv, b.uv, t1);
+        pb.h = lerp(a.h, b.h, t1);
+        pb.world = lerp(p0, p1, t1);
+        const uint cls = vsmPieceClassify(r, vc, pa, pb, reach, k);
+        if (cls == VSM_REGION_MIXED) return VSM_REGION_MIXED;
+        lit += cls == VSM_REGION_LIT ? 1u : 0u;
+        umbra += cls == VSM_REGION_UMBRA ? 1u : 0u;
+    }
+    return lit == pieces ? VSM_REGION_LIT : umbra == pieces ? VSM_REGION_UMBRA : VSM_REGION_MIXED;
+}
+
 // Sunflower point i of n in the unit disk (equal area).
 float2 vsmDiskPoint(uint i, uint n)
 {
