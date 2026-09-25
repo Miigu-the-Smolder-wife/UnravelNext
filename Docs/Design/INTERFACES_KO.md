@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.16, 2026-09-25)
+# UnravelNext 인터페이스 (v1.17, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -73,6 +73,15 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
 - `Build.ps1 -Track <이름>`이 기본 선택을 정한다: `core` → V(코어 세션, v1.2), `M` → M, `S` → S, `R` → R, `C` → C, `V` → V, `I` → V;M;S;R;I(호스트 DLL은 렌더러 전체를 링크, v1.6), `all` → 전부. I 폴더(`Native/Host`)는 I가 켜졌을 때만 최상위 `CMakeLists.txt`가 `add_subdirectory`한다(그 안의 `CMakeLists.txt`는 I 소유). 다른 조합은 `-Tracks "S;V"`처럼 준다.
 - 트랙 세션의 개발·정확성 검사는 자기 선택 빌드(`build/<트랙>`)로 한다. **모든 트랙을 켜는 통합 빌드(`-Track all`, `build/all`)는 게이트 측정 때만** 쓰고, 통합 빌드가 실패하면 원인 파일의 소유 트랙이 고친다.
 - 꺼진 트랙의 공개 HLSL 헤더(5.6)는 소스 트리에 있으면 include할 수 있다(커널만 컴파일하지 않는다). 다른 트랙 헤더는 그 트랙이 커밋한 뒤에 쓴다.
+
+### 2.6 요구 하드웨어와 표준 경로 (v1.17, 사용자 지시)
+완성된 게임은 개발 PC(RTX 4080)만이 아니라 다른 컴퓨터에서도 돌아야 한다. 지금 다른 GPU용 작업을 하지는 않지만, 렌더러가 개발 PC에서만 도는 구조가 되지 않게 아래를 지킨다.
+- **요구 기능(DX12 Ultimate 계열, `Device`가 시작할 때 검사하고 없으면 실패)**: Direct3D 12 기능 수준 12_2, 셰이더 모델 6.6 이상(bindless `ResourceDescriptorHeap`), 메시 셰이더 tier 1, DXR 1.1(raytracing tier 1.1, 인라인 광선 포함), enhanced barriers, resource binding tier 3, resource heap tier 2(버퍼·텍스처를 섞은 과도 힙). 캐스팅 가능한 뷰 형식을 쓰는 자원이 있으면 relaxed format casting(`DeviceCaps::relaxedFormatCasting`)도 필요하다(없으면 그 자원을 만들 때 실패; v1.13).
+- **런타임**: Agility SDK 1.618.5(SDK 버전 618)를 실행 파일 옆 `D3D12\`에 둔다. Unity 호스트 안에서는 Unity가 싣는 D3D12Core(6000.6: 1.618.1, 같은 SDK 버전 618)를 쓴다(4.1).
+- **표준 경로가 항상 있다**: 벤더 전용 기능(NVAPI: 클럭 판독, OMM, SER 등)은 선택 사항이다. 그것이 없으면 같은 결과를 내는 표준 D3D12 경로로 동작한다. 벤더 경로를 넣는 트랙은 표준 경로와 결과가 같음을 테스트로 보인다. 지금 NVAPI는 하네스의 클럭 기록에만 쓰인다.
+- **선을 올리는 변경은 기록한다**: 새 기능이 요구 기능을 늘리면(예: 셰이더 모델 6.8 전용 기능, 작업 그래프, 새 형식 지원) 이 절과 `Device`의 검사에 함께 적고 12절에 남긴다.
+- **약한 GPU에서의 동작 정책은 나중에 정한다.** 품질을 몰래 낮추는 경로는 여전히 금지다. 정할 때도 비용식과 품질 정의를 먼저 쓴다.
+- 개발 PC 측정값은 그 장치의 실측으로만 적는다. 다른 장치의 성능은 측정 전까지 [예상]이다.
 
 ## 3. 병렬 작업 규칙
 
@@ -400,3 +409,5 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.16 (2026-09-25):
   - **`Passes/Visibility/Coverage.hlsli` 커밋과 시그니처 기록(5.5.1)**: M의 커밋된 `EdgeComposite.hlsl`/`EdgeAreaProbe.hlsl`이 include하는데 커밋에 없어 `-Committed` 빌드가 깨졌다(R 신고).
   - `Build.ps1`: git 호출을 종료 코드로 판정한다. PowerShell 안에서 `& Build.ps1`로 부를 때 git의 정보성 stderr가 오류로 끝나지 않는다(R 신고).
+- v1.17 (2026-09-25):
+  - **요구 하드웨어와 표준 경로(2.6, 사용자 지시)**: `Device`가 검사하는 요구 기능(FL 12_2, SM 6.6, 메시 셰이더, DXR 1.1, enhanced barriers, binding tier 3, heap tier 2, 캐스팅 형식을 쓰면 relaxed format casting), Agility SDK 618, 벤더 전용 경로는 선택이며 표준 경로가 항상 있다, 선을 올리는 변경은 기록한다, 약한 GPU 정책은 나중에 정한다(몰래 품질을 낮추지 않는다).
