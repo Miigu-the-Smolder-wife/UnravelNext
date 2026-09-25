@@ -120,8 +120,8 @@ struct Gpu
     ComPtr<ID3D12Fence> fence;
     UINT64 fenceValue = 0;
     HANDLE event = nullptr;
-    ComPtr<ID3D12DescriptorHeap> heapCbv;
-    UINT incCbv = 0, nextCbv = 0;
+    ComPtr<ID3D12DescriptorHeap> heapCbv, heapDsv;
+    UINT incCbv = 0, nextCbv = 0, incDsv = 0, nextDsv = 0;
     ComPtr<ID3D12QueryHeap> queryHeap;
     ComPtr<ID3D12Resource> queryReadback;
     UINT64 timestampFrequency = 0;
@@ -192,6 +192,9 @@ struct Gpu
         D3D12_DESCRIPTOR_HEAP_DESC h{}; h.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; h.NumDescriptors = 4096; h.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         check(dev->CreateDescriptorHeap(&h, IID_PPV_ARGS(&heapCbv)), "cbv heap");
         incCbv = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_DESCRIPTOR_HEAP_DESC hd{}; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; hd.NumDescriptors = 8;
+        check(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heapDsv)), "dsv heap");
+        incDsv = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
         D3D12_QUERY_HEAP_DESC qh{}; qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP; qh.Count = 64;
         check(dev->CreateQueryHeap(&qh, IID_PPV_ARGS(&queryHeap)), "query heap");
         queryReadback = buffer(64 * 8, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE);
@@ -235,6 +238,40 @@ struct Gpu
         ComPtr<ID3D12Resource> r;
         check(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, uav ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&r)), "CreateCommittedResource(texture)");
         return r;
+    }
+    ComPtr<ID3D12Resource> depthTexture(UINT w, UINT h)
+    {
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC d{}; d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; d.Width = w; d.Height = h; d.DepthOrArraySize = 1; d.MipLevels = 1;
+        d.Format = DXGI_FORMAT_R32_TYPELESS; d.SampleDesc.Count = 1; d.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN; d.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        D3D12_CLEAR_VALUE cv{}; cv.Format = DXGI_FORMAT_D32_FLOAT; cv.DepthStencil.Depth = 0.0f;
+        ComPtr<ID3D12Resource> r;
+        check(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, IID_PPV_ARGS(&r)), "CreateCommittedResource(depth)");
+        return r;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv(ID3D12Resource* r)
+    {
+        D3D12_DEPTH_STENCIL_VIEW_DESC d{}; d.Format = DXGI_FORMAT_D32_FLOAT; d.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        auto h = heapDsv->GetCPUDescriptorHandleForHeapStart(); h.ptr += (SIZE_T)(nextDsv++) * incDsv; dev->CreateDepthStencilView(r, &d, h); return h;
+    }
+    UINT srvDepth(ID3D12Resource* r)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC d{}; d.Format = DXGI_FORMAT_R32_FLOAT; d.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; d.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; d.Texture2D.MipLevels = 1;
+        UINT i = nextCbv++; dev->CreateShaderResourceView(r, &d, cbvHandle(i)); return i;
+    }
+    // Mesh pipeline writing hardware depth only (no pixel shader, no targets): the ROP path of the VSM page raster.
+    ComPtr<ID3D12PipelineState> meshDepthPso(IDxcBlob* ms)
+    {
+        MeshStream s{};
+        s.rs.value = rootSig.Get();
+        s.ms.value = { ms->GetBufferPointer(), ms->GetBufferSize() };
+        s.rast.value.FillMode = D3D12_FILL_MODE_SOLID; s.rast.value.CullMode = D3D12_CULL_MODE_NONE; s.rast.value.DepthClipEnable = TRUE;
+        s.ds.value.DepthEnable = TRUE; s.ds.value.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL; s.ds.value.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
+        s.rtv.value.NumRenderTargets = 0; s.dsv.value = DXGI_FORMAT_D32_FLOAT;
+        s.topo.value = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; s.sd.value = { 1, 0 }; s.mask.value = UINT_MAX;
+        s.blend.value.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        D3D12_PIPELINE_STATE_STREAM_DESC d{ sizeof s, &s };
+        ComPtr<ID3D12PipelineState> p; check(dev->CreatePipelineState(&d, IID_PPV_ARGS(&p)), "CreatePipelineState(mesh depth)"); return p;
     }
     ID3D12GraphicsCommandList6* begin()
     {
@@ -734,17 +771,77 @@ static void benchShade()
     }
 }
 
+// ------------------------------------------------------------------------------------------ 5. VSM dirty-page raster (S request)
+static void benchVsm()
+{
+    warmUp("VSM dirty-page raster: UAV InterlockedMax pool vs hardware depth atlas + encode/pagemax pass");
+    const std::string s = src("vsmraster.hlsl");
+    auto ms = dxc.compile(s, L"PageMS", L"ms_6_6", {});
+    auto psPool = dxc.compile(s, L"PoolPS", L"ps_6_6", { L"UAV=1" });
+    auto psoUav = g.meshPso(ms.Get(), psPool.Get(), false);
+    auto psoDepth = g.meshDepthPso(ms.Get());
+    auto psoEncode = g.computePso(dxc.compile(s, L"EncodeCS", L"cs_6_6", {}).Get());
+    auto psoClear = g.computePso(dxc.compile(s, L"ClearCS", L"cs_6_6", {}).Get());
+    struct Case { const char* name; uint32_t pagesX, pagesY, trisPerPage; float edge; };
+    std::vector<Case> cases;
+    if (g.warp || g_width <= 256) cases = { { "6x6 pages, 64 tris/page, edge 8 px", 6, 6, 64, 8.f } };  // WARP / small hardware debug pass
+    else cases = { { "4K sun moving: 3600 dirty pages (60x60), 576 tris/page (2.07 M), edge 8 px (32 px^2)", 60, 60, 576, 8.f },
+                   { "same pages, 2304 tris/page (8.3 M), edge 2 px (2 px^2)", 60, 60, 2304, 2.f },
+                   { "design wind case: 400 dirty pages (20x20), 576 tris/page, edge 8 px", 20, 20, 576, 8.f },
+                   { "1440p sun moving: 1936 dirty pages (44x44), 1536 tris/page (3.0 M), edge 8 px", 44, 44, 1536, 8.f } };
+    for (const Case& cs : cases)
+    {
+        const uint32_t pages = cs.pagesX * cs.pagesY, W = cs.pagesX * 128, H = cs.pagesY * 128;
+        const UINT64 poolBytes = (UINT64)pages * 16384 * 4, blockBytes = (UINT64)pages * 17 * 16 * 8;
+        auto pool = g.buffer(poolBytes); const UINT poolUav = g.uavRaw(pool.Get(), poolBytes);
+        auto blocks = g.buffer(blockBytes); const UINT blocksUav = g.uavRaw(blocks.Get(), blockBytes);
+        auto atlas = g.depthTexture(W, H); const D3D12_CPU_DESCRIPTOR_HANDLE dsv = g.dsv(atlas.Get()); const UINT atlasSrv = g.srvDepth(atlas.Get());
+        const uint32_t groupsPerPage = std::max(cs.trisPerPage / 64, 1u), groups = pages * groupsPerPage, gx = std::min<uint32_t>(groups, 4096), gy = (groups + gx - 1) / gx;
+        const double tris = (double)groups * 64, fragments = tris * 0.5 * cs.edge * cs.edge;
+        Consts c; c(0, 0) = cs.pagesX; c(0, 1) = cs.pagesY; c(0, 2) = asu(cs.edge); c(0, 3) = cs.trisPerPage;
+        c(1, 0) = poolUav; c(1, 1) = 77; c(1, 2) = gx; c(1, 3) = (uint32_t)std::min<UINT64>(poolBytes, 0xFFFFFFF0u); c(2, 0) = atlasSrv; c(2, 1) = blocksUav;
+        auto viewport = [&](ID3D12GraphicsCommandList6* l) { D3D12_VIEWPORT vp{ 0, 0, (float)W, (float)H, 0, 1 }; D3D12_RECT sc{ 0, 0, (LONG)W, (LONG)H }; l->RSSetViewports(1, &vp); l->RSSetScissorRects(1, &sc); };
+        auto clearPool = [&](ID3D12GraphicsCommandList6* l) { g.setConstants(l, c.v); l->SetPipelineState(psoClear.Get()); l->Dispatch((uint32_t)((poolBytes / 16 + 255) / 256), 1, 1); };
+        // (i) UAV InterlockedMax path (pool cleared untimed before every repetition).
+        Stat su = g.time([&](ID3D12GraphicsCommandList6* l) {
+            viewport(l); l->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+            g.setConstants(l, c.v, true); l->SetPipelineState(psoUav.Get()); l->DispatchMesh(gx, gy, 1); Gpu::uavBarrier(l); }, clearPool);
+        record("vsm", std::string(cs.name) + ": UAV InterlockedMax into the raw pool (current S path)", su.median, "ms",
+               std::to_string(fragments / 1e6) + " M texel fragments, " + std::to_string(su.median * 1e6 / fragments) + " ns/fragment, " + std::to_string(su.median * 1e6 / pages) + " ns/page");
+        // (ii) hardware depth into the atlas (clear untimed), (iii) encode + pagemax pass.
+        auto clearDepth = [&](ID3D12GraphicsCommandList6* l) { l->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr); };
+        Stat sd = g.time([&](ID3D12GraphicsCommandList6* l) {
+            viewport(l); l->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+            g.setConstants(l, c.v, true); l->SetPipelineState(psoDepth.Get()); l->DispatchMesh(gx, gy, 1); }, clearDepth);
+        record("vsm", std::string(cs.name) + ": hardware depth (ROP) into a D32 page atlas, no pixel shader", sd.median, "ms",
+               std::to_string(sd.median * 1e6 / fragments) + " ns/fragment (c_rop), " + std::to_string(sd.median * 1e6 / pages) + " ns/page");
+        Stat se = g.time([&](ID3D12GraphicsCommandList6* l) {
+            Gpu::transition(l, atlas.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            g.setConstants(l, c.v); l->SetPipelineState(psoEncode.Get()); l->Dispatch(pages * 16, 1, 1);
+            Gpu::transition(l, atlas.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE); Gpu::uavBarrier(l); }, flushL2);
+        record("vsm", std::string(cs.name) + ": encode atlas -> pool (4 B read + 4 B write per texel) + 8^2/32^2 block min/max", se.median, "ms",
+               std::to_string(se.median * 1e6 / ((double)pages * 16384)) + " ns/texel, " + std::to_string((double)pages * 16384 * 8 / (se.median * 1e-3) / 1e9) + " GB/s, " + std::to_string(se.median * 1e6 / pages) + " ns/page");
+        record("vsm", std::string(cs.name) + ": ROP + encode total", sd.median + se.median, "ms", std::to_string((sd.median + se.median) / su.median) + " x the UAV path");
+        if (g.warp)
+        {
+            const auto o = g.readback(pool.Get(), 4096);
+            uint32_t nz = 0; for (int i = 0; i < 1024; ++i) nz += ((const uint32_t*)o.data())[i] != 0;
+            logf("  WARP check: first page row 0..7 has %u non-zero encoded depths of 1024\n", nz);
+        }
+    }
+}
+
 // ------------------------------------------------------------------------------------------ main
 static std::string jsonEscape(const std::string& s) { std::string o; for (char c : s) { if (c == '"' || c == '\\') o += '\\'; if (c == '\n') { o += "\\n"; continue; } o += c; } return o; }
 int main(int argc, char** argv)
 {
-    bool doCoverage = true, doBricks = true, doBands = true, doShade = true, warp = false, debug = false, gbv = false;
+    bool doCoverage = true, doBricks = true, doBands = true, doShade = true, doVsm = true, warp = false, debug = false, gbv = false;
     std::string dxcDir = DB_DXC_DIR, outDir = DB_RESULT_DIR;
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
-        auto only = [&](bool& keep) { doCoverage = doBricks = doBands = doShade = false; keep = true; };
-        if (a == "--only-coverage") only(doCoverage); else if (a == "--only-bricks") only(doBricks); else if (a == "--only-bands") only(doBands); else if (a == "--only-shade") only(doShade);
+        auto only = [&](bool& keep) { doCoverage = doBricks = doBands = doShade = doVsm = false; keep = true; };
+        if (a == "--only-coverage") only(doCoverage); else if (a == "--only-bricks") only(doBricks); else if (a == "--only-bands") only(doBands); else if (a == "--only-shade") only(doShade); else if (a == "--only-vsm") only(doVsm);
         else if (a == "--warp") warp = true;
         else if (a == "--debug") debug = true;
         else if (a == "--gbv") { debug = true; gbv = true; }
@@ -776,6 +873,7 @@ int main(int argc, char** argv)
         if (doBricks) benchBricks();
         if (doBands) benchBands();
         if (doShade) benchShade();
+        if (doVsm) benchVsm();
     }
     catch (Failure& f)
     {
