@@ -531,12 +531,16 @@ static void benchCoverage()
     auto psoComposite = g.computePso(dxc.compile(s, L"CompositeCS", L"cs_6_6", {}).Get());
     logf("  pipelines ready\n");
 
-    struct Case { const char* name; bool cards; float width, length; uint32_t slivers; };
+    struct Case { const char* name; bool cards; float width, length; uint32_t slivers; float region = 1.f; };
     std::vector<Case> cases;
     if (g.warp) cases = { { "slivers 0.5 px x 20 px", false, 0.5f, 20.f, 1024 }, { "cards 4 px", true, 4.f, 4.f, 1024 } };
     else cases = { { "slivers 0.5 px x 20 px, F ~5 M", false, 0.5f, 20.f, 76000 }, { "slivers 0.5 px x 20 px, F ~10 M", false, 0.5f, 20.f, 152000 },
                    { "slivers 0.5 px x 20 px, F ~20 M", false, 0.5f, 20.f, 304000 }, { "slivers 0.25 px x 20 px, F ~10 M", false, 0.25f, 20.f, 152000 },
-                   { "cards 4 px, F ~10 M", true, 4.f, 4.f, 380000 } };
+                   { "cards 4 px, F ~10 M", true, 4.f, 4.f, 380000 },
+                   // Revision 1 4.5: deep tiles (V waterside gate: 12 M fragments in 7 k tiles, deepest 32 k). Same fragment count
+                   // concentrated in 15 % of the screen width/height (2.25 % of the area, ~2.9 k tiles).
+                   { "slivers 0.5 px x 20 px, F ~10 M, clumped in 15 % region (deep tiles)", false, 0.5f, 20.f, 152000, 0.15f },
+                   { "cards 4 px, F ~10 M, clumped in 15 % region (deep tiles)", true, 4.f, 4.f, 380000, 0.15f } };
     for (const Case& cs : cases)
     {
         const uint32_t groups = (cs.slivers + 31) / 32, gx = std::min<uint32_t>(groups, 512), gy = (groups + gx - 1) / gx;
@@ -545,6 +549,7 @@ static void benchCoverage()
         c(1, 0) = recUav; c(1, 1) = cntUav; c(1, 2) = tcUav; c(1, 3) = toSrv;
         c(2, 0) = tcapSrv; c(2, 1) = 12345; c(2, 2) = gx; c(2, 3) = tilesX;
         c(3, 0) = recordCap; c(3, 1) = 1024; c(3, 2) = texSrv; c(3, 3) = outUav;
+        c(5, 2) = cs.region != 1.f ? asu(cs.region) : 0u;
         auto recordRaster = [&](ID3D12GraphicsCommandList6* l, ID3D12PipelineState* pso) {
             D3D12_VIEWPORT vp{ 0, 0, (float)W, (float)H, 0, 1 }; D3D12_RECT sc{ 0, 0, (LONG)W, (LONG)H };
             l->RSSetViewports(1, &vp); l->RSSetScissorRects(1, &sc);

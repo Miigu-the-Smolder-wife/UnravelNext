@@ -40,7 +40,8 @@ void SliverMS(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
     // 32 slivers per meshlet, 4 vertices + 2 triangles each; sliver s = gtid / 4 for vertices.
     const uint s = gtid >> 2;
     uint seed = pcg(gid * 32u + s + P[2].y);
-    float2 o = float2(u01(seed) * W, u01(seed) * H);
+    const float R = P[5].z ? asfloat(P[5].z) : 1.0;  // clump region factor (revision 1 4.5: deep tiles)
+    float2 o = float2((0.5 + (u01(seed) - 0.5) * R) * W, (0.5 + (u01(seed) - 0.5) * R) * H);
     const float ang = u01(seed) * 6.2831853;
     const float2 d = float2(cos(ang), sin(ang)), n = float2(-d.y, d.x);
     const float z = 0.1 + 0.8 * u01(seed);
@@ -57,7 +58,7 @@ void SliverMS(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
     {
         const uint sp = gtid >> 1;
         uint seed2 = pcg(gid * 32u + sp + P[2].y);
-        float2 o2 = float2(u01(seed2) * W, u01(seed2) * H);
+        float2 o2 = float2((0.5 + (u01(seed2) - 0.5) * R) * W, (0.5 + (u01(seed2) - 0.5) * R) * H);
         const float ang2 = u01(seed2) * 6.2831853;
         const float2 d2 = float2(cos(ang2), sin(ang2)), n2 = float2(-d2.y, d2.x);
 #if CARDS
