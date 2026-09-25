@@ -295,12 +295,22 @@ NvSurface nv_surface_local(NvSurface s, nv_real3 origin) {
     s.origin = s.origin - origin;
     return s;
 }
-bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(NvState) s, NV_OUT(NvImpact) first) {
+// The response follows the analytic motion (dv/dt = accel - k v, k = m.drag): the
+// velocity at a contact is the segment's velocity at that time (propagated back
+// from its end velocity over the remaining time), the bounce acts on it, and the
+// remaining time moves the particle by the same motion (acceleration not
+// reflected). A contact at the end of one interval and at the start of the next
+// then give the same result (continuous in the contact time).
+bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, nv_real3 accel, NV_INOUT(NvState) s, NV_OUT(NvImpact) first) {
     first.count = 0u; first.contact = nv_make3(NV_R(0), NV_R(0), NV_R(0)); first.velocity = first.contact; first.normal = first.contact; first.fraction = NV_R(0);
     // Positions stay in origin space; the anchor-space point is formed only for
     // the surface tests, so a particle that hits nothing keeps its exact path.
     nv_real3 origin = m.origin_anchor;
     nv_real3 local = start, displacement = move, velocity = s.velocity;
+    // vend: velocity at the end of the current segment if nothing more is struck;
+    // analytic: the segment follows the motion (else a constrained facing contact
+    // holds a constant velocity).
+    nv_real3 vend = s.velocity; bool analytic = true;
     nv_real remaining = h;             // seconds of the interval not yet swept
     uint carrier = 0xffffffffu;        // surface the particle moves with since its last contact
     nv_real3 lastNormal = nv_make3(NV_R(0), NV_R(0), NV_R(0)); uint creases = 0u;
@@ -335,9 +345,16 @@ bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(N
         NvSurface hitSurface = nv_surface_local(NV_SURFACE(selected), origin);
         nv_real3 contactLocal = local + (offset + path * earliest);
         nv_real3 surfaceVelocity = hitSurface.velocity + cross(hitSurface.angular, contactLocal - hitSurface.origin);
-        nv_real3 rest = path * (NV_R(1) - earliest), bounced = nv_bounce(rest, normal, m.restitution, m.friction);
+        nv_real3 rest = path * (NV_R(1) - earliest);
         // s1: velocity at the contact of the last struck surface (none on the first contact).
         nv_real tau = remaining * (NV_R(1) - earliest); nv_real3 s1 = surfaceVelocity;
+        // Velocity at the contact: back from the segment end over the remaining time tau.
+        NvDrag after = nv_linear_drag(m.drag, tau);
+        nv_real3 contactVelocity = analytic ? (vend - accel * after.position) * (NV_R(1) / after.velocity) : vend;
+        // The free bounce: relative velocity u reflects; relative to the struck surface
+        // (constant velocity s2) the motion keeps acceleration accel - k s2.
+        nv_real3 u = nv_bounce(contactVelocity - surfaceVelocity, normal, m.restitution, m.friction);
+        nv_real3 bounced = u * after.position + (accel - surfaceVelocity * m.drag) * after.acceleration;
         if (first.count > 0u) { NvSurface previous = nv_surface_local(NV_SURFACE(carrier), origin); s1 = previous.velocity + cross(previous.angular, contactLocal - previous.origin); }
         // Measured in the last struck surface's frame: a closing gap brings it to the
         // particle even when the bounce itself leaves it.
@@ -354,7 +371,7 @@ bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(N
             // follows the other surface's motion across n1 over the remaining time.
             nv_real3 s2 = surfaceVelocity; nv_real g = dot(lastNormal, normal);
             nv_real3 k = cross(lastNormal, normal); nv_real kk = dot(k, k);
-            nv_real3 vrel = velocity - s2;
+            nv_real3 vrel = contactVelocity - s2;
             if (creases == 0u && kk > NV_R(0.01)) {
                 k = k * (NV_R(1) / sqrt(kk));
                 nv_real r1 = dot(s1, lastNormal), r2 = dot(s2, normal);
@@ -369,20 +386,45 @@ bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(N
                 rest = (rest - normal * dot(rest, normal)) * (NV_R(1) - m.friction) + normal * ((mid - dot(s2, normal)) * tau);
             } else { velocity = s2; rest = nv_make3(NV_R(0), NV_R(0), NV_R(0)); }
             displacement = rest;
+            vend = velocity; analytic = false;
             creases = creases + 1u;
         } else {
-            velocity = surfaceVelocity + nv_bounce(velocity - surfaceVelocity, normal, m.restitution, m.friction);
-            // The rest of the path, relative to the struck surface, reflects off it.
+            velocity = surfaceVelocity + u;
+            // The rest of the interval follows the motion from the bounced velocity.
             displacement = bounced;
+            vend = velocity * after.velocity + accel * after.position; analytic = true;
         }
         first.count = first.count + 1u;
         if (first.count == 1u) { first.contact = contactLocal; first.velocity = velocity; first.normal = normal; first.fraction = earliest; }
         lastNormal = normal;
-        local = contactLocal + normal * m.separation;
+        // The separation push is swept too (at the contact time, each other surface
+        // in its own frame): in a gap narrower than the separation it stops halfway
+        // to the facing surface instead of passing through it.
+        nv_real push = m.separation;
+        if (push > NV_R(0)) {
+            nv_real3 lift = normal * push;
+            nv_real3 atContact = nv_surface_uncarry_delta(hitSurface, tau, contactLocal);
+            NV_SURFACE_QUERY_TYPE pushQuery = NV_SURFACE_QUERY(origin + contactLocal, lift); uint other = 0u;
+            NV_LOOP while (NV_SURFACE_NEXT(pushQuery, other)) {
+                if (other == selected) continue;
+                NvSurface blocker = nv_surface_local(NV_SURFACE(other), origin);
+                if (m.self == 0u && blocker.entity0 == m.entity0 && blocker.entity1 == m.entity1 && blocker.generation0 == m.generation0 && blocker.generation1 == m.generation1) continue;
+                nv_real3 shift = atContact;
+                if (nv_surface_moves(blocker)) shift = shift + nv_surface_carry_delta(blocker, tau, contactLocal + atContact);
+                nv_real reach; nv_real3 facing;
+                // A surface the push starts on (a coplanar neighbour of the struck one,
+                // reach ~ 0 up to the float error of a point on its plane, about
+                // eps L / separation) is left, not blocking.
+                if (nv_hit(blocker, contactLocal, shift, lift, reach, facing) && reach > NV_R(0.01)) { nv_real limit = NV_R(0.5) * reach * m.separation; if (limit < push) push = limit; }
+            }
+        }
+        local = contactLocal + normal * push;
         remaining = remaining * (NV_R(1) - earliest);
         carrier = selected;
     }
-    s.position = local; s.velocity = velocity;
+    // Without a contact the end velocity is the motion's (unchanged); a fifth
+    // impact keeps the fourth contact's state.
+    s.position = local; s.velocity = !complete ? velocity : vend;
     return complete;
 }
 
@@ -393,7 +435,7 @@ bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(N
 // (forces, drag, wind) gives the interval's start point and displacement and the
 // end velocity; the finish sweeps collisions (or moves) and ages the slot. A GPU
 // executor may run the finish of colliding slots in a separate pass.
-void nv_integrate_motion(NvMotion m, nv_real h, NvDrag d, NV_INOUT(NvState) s, NV_OUT(nv_real3) start, NV_OUT(nv_real3) move) {
+void nv_integrate_motion(NvMotion m, nv_real h, NvDrag d, NV_INOUT(NvState) s, NV_OUT(nv_real3) start, NV_OUT(nv_real3) move, NV_OUT(nv_real3) accel) {
     start = s.position; nv_real3 q = m.origin_anchor + s.position;
     nv_real3 a = m.acceleration;
     if (m.noise.x != NV_R(0) || m.noise.y != NV_R(0) || m.noise.z != NV_R(0)) {
@@ -410,20 +452,22 @@ void nv_integrate_motion(NvMotion m, nv_real h, NvDrag d, NV_INOUT(NvState) s, N
         nv_real3 w = nv_world_field(1u, q);
         move = move + w * (m.drag * d.acceleration);
         s.velocity = s.velocity + w * (m.drag * d.position);
+        a = a + w * m.drag;
     }
+    accel = a; // effective acceleration of the interval (with the wind's drag term)
 }
-bool nv_integrate_finish(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(NvState) s, NV_OUT(NvImpact) impact) {
+bool nv_integrate_finish(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, nv_real3 accel, NV_INOUT(NvState) s, NV_OUT(NvImpact) impact) {
     bool complete = true;
     impact.count = 0u; impact.contact = nv_make3(NV_R(0), NV_R(0), NV_R(0)); impact.velocity = impact.contact; impact.normal = impact.contact; impact.fraction = NV_R(0);
-    if (m.collision != 0u) complete = nv_collide(m, h, start, move, s, impact);
+    if (m.collision != 0u) complete = nv_collide(m, h, start, move, accel, s, impact);
     else s.position = start + move;
     s.age = s.age + h;
     return complete;
 }
 bool nv_integrate(NvMotion m, nv_real h, NvDrag d, NV_INOUT(NvState) s, NV_OUT(NvImpact) impact) {
-    nv_real3 start, move;
-    nv_integrate_motion(m, h, d, s, start, move);
-    return nv_integrate_finish(m, h, start, move, s, impact);
+    nv_real3 start, move, accel;
+    nv_integrate_motion(m, h, d, s, start, move, accel);
+    return nv_integrate_finish(m, h, start, move, accel, s, impact);
 }
 
 // ---- births --------------------------------------------------------------------------------

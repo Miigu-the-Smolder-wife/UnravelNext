@@ -461,7 +461,7 @@ StreamEvent fxEvent(uint emitter, uint birth, uint kind, NvState s)
 struct RibbonPoint { float3 position; float width; float age; uint valid; uint pad0, pad1; };  // 32 B
 float fxCurve1(uint first, uint count, float u) { return count >= 2u ? nv_curve(first, count, u).y : 1.0f; }
 float3 fxCurve3(uint first, uint count, float u) { return count >= 2u ? nv_curve(first, count, u).yzw : float3(1, 1, 1); }
-// Inputs of an nv_integrate call whose sweep needed a fifth impact (diagnostic, FxIntegrate): 432 B.
+// Inputs of an nv_integrate call whose sweep needed a fifth impact (diagnostic, FxIntegrate): 448 B.
 struct OverflowRecord
 {
     uint row, birth, newborn, depth;
@@ -470,10 +470,11 @@ struct OverflowRecord
     float4 drag;                      // NvDrag velocity, position, acceleration
     StreamEmitter emitter;            // the row as the kernel read it (per-tick fields included)
     EmitterDynamic dynamic;           // origin_anchor, inherited velocity of this tick
+    float4 accel;                     // finish inputs (newborn = 2): effective acceleration of the motion; else 0
 };
 // Diagnostic trace of one particle (g_traceRow, g_traceBirth): the inputs of its integrate call this tick in the
 // OverflowRecord form (position/velocity/age = state before the motion, after rebase/transport; h; drag), then the end:
-// state, impact count, the collision event (if any). 432 + 32 + 64 = 528 B.
+// state, impact count, the collision event (if any). 448 + 32 + 64 = 544 B.
 struct TraceRecord
 {
     OverflowRecord inputs;
@@ -482,8 +483,8 @@ struct TraceRecord
     StreamEvent collision;
 };
 bool fxTraced(uint row, uint birth) { return g_traceRow != FX_NONE && row == g_traceRow && birth == g_traceBirth; }
-// A colliding slot after its motion (nv_integrate_motion), waiting for its sweep in FxCollide: 48 B.
-struct ColliderRecord { float3 start; uint slot; float3 move; float h; float3 velocity; float age; };
+// A colliding slot after its motion (nv_integrate_motion), waiting for its sweep in FxCollide: 60 B.
+struct ColliderRecord { float3 start; uint slot; float3 move; float h; float3 velocity; float age; float3 accel; };
 // Local volume particles (render rules request 3b; design 14.8 decision 2): the froxel pass evaluates each particle's
 // medium directly from two records per live volume particle (no medium cells):
 //   record16 = { float3 centre (anchor space), uint half2(r, m) }: the density field is
@@ -544,13 +545,13 @@ void fxWriteOutputs(uint slot, uint birth, NvState s, StreamEmitter e, StreamPro
 // ---- end of a slot's tick (FxIntegrate for non-colliding slots, FxCollide for colliding ones) --------------------------
 // nv_integrate_finish (the sweep or start + move, age += h) and everything after it: status, the IMPACT_OVERFLOW
 // diagnostic record (the finish inputs: position = start, velocity = velocity after the motion, drag.xyz = move,
-// newborn = 2 marks this layout), the collision event, this tick's state, the sort key and the outputs.
+// accel = effective acceleration, newborn = 2 marks this layout), the collision event, this tick's state, the sort key and the outputs.
 void fxFinishSlot(uint slot, uint row, uint birth, StreamEmitter e, StreamProgram p, EmitterDynamic dyn, NvMotion mo, float h, float3 start, float3 move,
-                  NvState s)
+                  float3 accel, NvState s)
 {
     const NvState before = s;
     NvImpact impact;
-    const bool complete = nv_integrate_finish(mo, h, start, move, s, impact);
+    const bool complete = nv_integrate_finish(mo, h, start, move, accel, s, impact);
     uint status = complete ? 0u : FX_STATUS_IMPACT_OVERFLOW;
     FX_RWBUFFER(uint, counters, g_counters);
     if (!complete && g_overflowCapacity != 0u)
@@ -565,6 +566,7 @@ void fxFinishSlot(uint slot, uint row, uint birth, StreamEmitter e, StreamProgra
             r.position = start; r.age = before.age;
             r.velocity = before.velocity; r.h = h;
             r.drag = float4(move, 0);
+            r.accel = float4(accel, 0);
             r.emitter = e;
             r.dynamic = dyn;
             records[at] = r;

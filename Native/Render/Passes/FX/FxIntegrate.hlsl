@@ -111,8 +111,8 @@ void main(uint3 id : SV_DispatchThreadID)
         r.inputs.emitter = e; r.inputs.dynamic = dyn;
         trace[0] = r;
     }
-    float3 start, move;
-    nv_integrate_motion(mo, h, drag, s, start, move);
+    float3 start, move, accel;
+    nv_integrate_motion(mo, h, drag, s, start, move, accel);
     if (mo.collision != 0u && g_surfaceCount != 0u)
     {
         // the sweep runs in FxCollide, whose waves hold colliding slots only (they no longer stall the other lanes)
@@ -123,11 +123,11 @@ void main(uint3 id : SV_DispatchThreadID)
         {
             FX_RWBUFFER(ColliderRecord, colliders, g_colliders);
             ColliderRecord c;
-            c.start = start; c.slot = slot; c.move = move; c.h = h; c.velocity = s.velocity; c.age = s.age;
+            c.start = start; c.slot = slot; c.move = move; c.h = h; c.velocity = s.velocity; c.age = s.age; c.accel = accel;
             colliders[at] = c;
         }
         else fxStatus(FX_STATUS_CAPACITY);
         return;
     }
-    fxFinishSlot(slot, row, birth, e, p, dyn, mo, h, start, move, s);
+    fxFinishSlot(slot, row, birth, e, p, dyn, mo, h, start, move, accel, s);
 }

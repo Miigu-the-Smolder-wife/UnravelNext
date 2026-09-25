@@ -95,7 +95,7 @@ public:
     uint32_t capacity() const { return m_capacity; }
     uint64_t latestTick() const { return m_latestTick; }
     // Diagnostic: every later tick writes the inputs and the end of this particle's integrate call into a TraceRecord
-    // (Particles.hlsli; readState("trace"), 528 B). row = UINT32_MAX switches it off.
+    // (Particles.hlsli; readState("trace"), 544 B). row = UINT32_MAX switches it off.
     void setTrace(uint32_t row, uint32_t birth) { m_traceRow = row; m_traceBirth = birth; }
 
 private:

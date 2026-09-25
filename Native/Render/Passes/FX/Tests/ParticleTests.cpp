@@ -79,14 +79,14 @@ std::string sha(const std::vector<uint8_t>& bytes)
 }
 
 // 1. byte-identical stream copies of the pinned NativeVfx commit (the copies are updated together with this pin)
-constexpr const char* kStreamCommit = "92aada32";
+constexpr const char* kStreamCommit = "8228815d";
 void checkStreamCopies(bool strict)
 {
     const fs::path mine = fs::path(UNX_SOURCE_DIR) / "Native/Render/Passes/FX/Stream";
     const fs::path original = fs::path(UNX_SOURCE_DIR) / "../Unravel/Native/NativeVfx";
     struct Pin { const char* file; const char* sha; };
     const Pin pins[] = { { "include/NativeVfxStream.h", "6c7a6ce17dcf1bbe3a2743aad25b1f7b2275b785a01fb4e4d14465678d236201" },
-                         { "shaders/VfxParticleMath.hlsli", "54cee51763671e0742087c1eabc294b77e86359211b0f3369004ee1ba81efb64" },
+                         { "shaders/VfxParticleMath.hlsli", "c07a4f32b89457ee4803be0d066464e71b4edbd385f9717cb3650c0e6f7419ae" },
                          { "src/VfxStreamCpu.h", "dfb1165d13171b95b10e72ab91fbcf5a86f65b78632e775b9e00349f8e07b3ee" } };
     for (const Pin& pin : pins)
     {
@@ -301,7 +301,7 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
         if (rb.counters.status & 1u) ++impactOverflowTicks;
         if (g_traceEmitter != UINT32_MAX && !o.overflowDump.empty())
         {
-            // diagnostic: the traced particle's integrate inputs and end of this tick (TraceRecord, 528 B per tick)
+            // diagnostic: the traced particle's integrate inputs and end of this tick (TraceRecord, 544 B per tick)
             const auto rec = ps.readState("trace");
             uint32_t row, birth;
             std::memcpy(&row, rec.data(), 4);
@@ -312,21 +312,21 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                 writeFile(tickFile(o.overflowDump, format("trace_%u_%u", row, birth).c_str(), t), rec.data(), rec.size());
                 float in[8], end[8];
                 std::memcpy(in, rec.data() + 16, 32);
-                std::memcpy(end, rec.data() + 432, 32);
+                std::memcpy(end, rec.data() + 448, 32);
                 uint32_t impacts;
-                std::memcpy(&impacts, rec.data() + 460, 4);
+                std::memcpy(&impacts, rec.data() + 476, 4);
                 FX_LOG("trace tick %u (%u,%u): in p %.9g %.9g %.9g v %.9g %.9g %.9g age %.9g h %.9g | end p %.9g %.9g %.9g v %.9g %.9g %.9g impacts %u", t, row, birth,
                        in[0], in[1], in[2], in[4], in[5], in[6], in[3], in[7], end[0], end[1], end[2], end[4], end[5], end[6], impacts);
             }
         }
         if ((rb.counters.status & 1u) && !o.overflowDump.empty())
         {
-            // the inputs of every overflowing nv_integrate call of this tick (Particles.hlsli OverflowRecord, 432 B each)
+            // the inputs of every overflowing call of this tick (Particles.hlsli OverflowRecord, 448 B each)
             const auto counters = ps.readState("counters"), records = ps.readState("overflow");
-            const uint32_t n = std::min<uint32_t>(at<uint32_t>(counters, 10), (uint32_t)(records.size() / 432));
-            std::vector<uint8_t> b(4 + (size_t)n * 432);
+            const uint32_t n = std::min<uint32_t>(at<uint32_t>(counters, 10), (uint32_t)(records.size() / 448));
+            std::vector<uint8_t> b(4 + (size_t)n * 448);
             std::memcpy(b.data(), &n, 4);
-            std::memcpy(b.data() + 4, records.data(), (size_t)n * 432);
+            std::memcpy(b.data() + 4, records.data(), (size_t)n * 448);
             fs::create_directories(o.overflowDump);
             writeFile(tickFile(o.overflowDump, "overflow", t), b.data(), b.size());
             FX_LOG("tick %u: IMPACT_OVERFLOW in %u slots (inputs dumped)", t, at<uint32_t>(counters, 10));

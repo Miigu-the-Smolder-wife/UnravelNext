@@ -26,5 +26,5 @@ void main(uint3 id : SV_DispatchThreadID)
     const EmitterDynamic dyn = dynamic[row];
     NvState s;
     s.position = c.start; s.velocity = c.velocity; s.age = c.age;
-    fxFinishSlot(c.slot, row, birth, e, p, dyn, fxMotion(p, e, dyn, birth), c.h, c.start, c.move, s);
+    fxFinishSlot(c.slot, row, birth, e, p, dyn, fxMotion(p, e, dyn, birth), c.h, c.start, c.move, c.accel, s);
 }

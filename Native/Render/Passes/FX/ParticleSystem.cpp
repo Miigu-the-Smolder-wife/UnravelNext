@@ -26,7 +26,7 @@ constexpr uint64_t kFieldRowsOffset = sizeof(TickConstants), kWorldRowsOffset = 
                    kConstBytes = (kWorldRowsOffset + kCbWorldFields * 64 + 255) / 256 * 256;
 static_assert(sizeof(NV_StreamField) == 32 && sizeof(NV_StreamWorldField) == 64, "FxTick field rows");
 static_assert(sizeof(TickConstants) % 16 == 0, "FxTick rows start on a 16-byte boundary");
-constexpr uint32_t kOverflowRecords = 1024, kOverflowRecordBytes = 432;  // IMPACT_OVERFLOW diagnostic records (Particles.hlsli)
+constexpr uint32_t kOverflowRecords = 1024, kOverflowRecordBytes = 448;  // IMPACT_OVERFLOW diagnostic records (Particles.hlsli)
 constexpr float kKeyFar = 1.0e6f;          // metres: log range of the sort key (keyNear .. 1000 km)
 
 uint32_t groups(uint64_t n, uint32_t size) { return (uint32_t)((n + size - 1) / size); }
@@ -222,8 +222,8 @@ struct ParticleSystem::Impl
     Buf ribbonRanges{ "fx.ribbonRanges", 16 }, ribbonRunStart{ "fx.ribbonRunStart", 4 }, ribbonTangents{ "fx.ribbonTangents", 16 };
     std::vector<uint32_t> programOutput;  // output kind per program (the last NV_STREAM_PROGRAMS table)
     Buf surfaceBoxes{ "fx.surfaceBoxes", 16 };
-    Buf colliders{ "fx.colliders", 48 };
-    Buf trace{ "fx.trace", 528 };  // TraceRecord of the traced particle (diagnostic)  // colliding slots after their motion (FxIntegrate -> FxCollide)
+    Buf colliders{ "fx.colliders", 60 };
+    Buf trace{ "fx.trace", 544 };  // TraceRecord of the traced particle (diagnostic)  // colliding slots after their motion (FxIntegrate -> FxCollide)
     Buf overflowRecords{ "fx.overflowRecords", kOverflowRecordBytes };  // IMPACT_OVERFLOW inputs (diagnostic, readState "overflow")
     // local volume particles: record16 + side8 per live volume particle (Particles.hlsli; render rules request 3b)
     Buf volumeRecords{ "fx.volumeRecords", 16 }, volumeSide{ "fx.volumeSide", 8 }, volumeRanges{ "fx.volumeRanges", 32 }, gridBlocks{ "fx.gridBlocks", 4 };
@@ -531,8 +531,8 @@ void ParticleSystem::record(FramePassContext& fc)
         m.gridEntries.ensure(device, (uint64_t)gridEntryCapacity * 4);
         m.gridLarge.ensure(device, (uint64_t)std::max<uint32_t>(surfaceTotal, 1) * 4);
         m.surfaceBoxes.ensure(device, (uint64_t)std::max<uint32_t>(surfaceTotal, 1) * 32);
-        m.colliders.ensure(device, (uint64_t)std::max<uint32_t>(capacity, 1) * 48);
-        m.trace.ensure(device, 528);
+        m.colliders.ensure(device, (uint64_t)std::max<uint32_t>(capacity, 1) * 60);
+        m.trace.ensure(device, 544);
         m.overflowRecords.ensure(device, (uint64_t)kOverflowRecords * kOverflowRecordBytes);
         m.ribbonPoints.ensure(device, (uint64_t)h.ribbon_points * 32);
         m.ribbonLinks.ensure(device, (uint64_t)h.ribbon_points * 4);
@@ -919,10 +919,15 @@ void ParticleSystem::record(FramePassContext& fc)
         {
             if (h.depth[d + 1] == h.depth[d]) continue;
             const uint32_t spawned = slotStart[d + 1] - slotStart[d];
-            dispatch(format("fx.particles.child.d%u", d).c_str(), "Passes/FX/FxChildSetup", { h.depth[d], h.depth[d + 1] }, groups(h.depth[d + 1] - h.depth[d], 64));
+            dispatch(format("fx.particles.child.d%u", d).c_str(), "Passes/FX/FxChildSetup.KEEP0", { h.depth[d], h.depth[d + 1] }, groups(h.depth[d + 1] - h.depth[d], 64));
             dispatch(format("fx.particles.spawn.d%u", d).c_str(), "Passes/FX/FxSpawn", { h.depth[d], h.depth[d + 1], threads[d], threads[d] }, groups(threads[d], 64));
             dispatch(format("fx.particles.integrate.d%u", d).c_str(), "Passes/FX/FxIntegrate.LIST1", { slotStart[d], spawned }, groups(spawned, 256));
         }
+
+        // chain children keep their resolved origin / inherited velocity in the table (NativeVfxStream.h, after every depth)
+        if (h.dt > 0 && h.depth[NV_STREAM_MAX_DEPTH + 1] > h.depth[1])
+            dispatch("fx.particles.child.keep", "Passes/FX/FxChildSetup.KEEP1", { h.depth[1], h.depth[NV_STREAM_MAX_DEPTH + 1] },
+                     groups(h.depth[NV_STREAM_MAX_DEPTH + 1] - h.depth[1], 64));
 
         // collision sweeps of every depth's colliding slots (queued by the integrate passes)
         if (collide) dispatch("fx.particles.collide", "Passes/FX/FxCollide", {}, groups(capacity, 64));
@@ -1067,7 +1072,7 @@ std::vector<uint8_t> ParticleSystem::readState(const char* name)
     else if (n == "volumeRecords") b = &m.volumeRecords, bytes = (uint64_t)m_volumeParticles * 16;
     else if (n == "volumeSide") b = &m.volumeSide, bytes = (uint64_t)m_volumeParticles * 8;
     else if (n == "overflow") b = &m.overflowRecords, bytes = m.overflowRecords.bytes;
-    else if (n == "trace") b = &m.trace, bytes = 528;
+    else if (n == "trace") b = &m.trace, bytes = 544;
     else if (n == "tickSurfaces") b = &m.tickSurfaces, bytes = m.tickSurfaces.bytes;
     else fail("FX particles: no state buffer '%s'", name);
     return copyOut(m_device, b->resource.Get(), bytes, b->stride, b->name);
