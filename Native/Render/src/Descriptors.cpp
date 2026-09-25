@@ -4,17 +4,29 @@ namespace unx::render
 {
 uint32_t DescriptorHeaps::FreeList::take(const char* what)
 {
+    uint32_t i;
     if (!released.empty())
     {
-        uint32_t i = released.back();
+        i = released.back();
         released.pop_back();
-        return i;
     }
-    if (next >= capacity) fail("%s descriptor heap exhausted (%u)", what, capacity);
-    return next++;
+    else
+    {
+        if (next >= capacity) fail("%s descriptor heap exhausted (%u)", what, capacity);
+        i = next++;
+    }
+    if (live.size() <= i) live.resize((size_t)i + 1 + i / 2, 0);
+    live[i] = 1;
+    return i;
 }
 
-void DescriptorHeaps::FreeList::give(uint32_t index) { released.push_back(index); }
+void DescriptorHeaps::FreeList::give(uint32_t index)
+{
+    // Two owners of one slot silently redirect a view to another resource: fail at the second free instead.
+    if (index >= live.size() || !live[index]) fail("descriptor %u freed twice (or never allocated)", index);
+    live[index] = 0;
+    released.push_back(index);
+}
 
 DescriptorHeaps::DescriptorHeaps(ID3D12Device* device)
 {

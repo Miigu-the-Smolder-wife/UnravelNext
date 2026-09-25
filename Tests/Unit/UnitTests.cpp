@@ -255,6 +255,194 @@ UNX_TEST(graph_views_of_reused_transients)
     CHECK(bufferSrv != gpu::kNone && textureSrv != gpu::kNone);
 }
 
+UNX_TEST(graph_depth_memory_not_shared)
+{
+    // A depth buffer dies, then a 3D UAV texture is written and read back in the same frame. With depth and other
+    // textures aliasing the same memory the 3D texture lost its writes [measured, S froxel volume]; every texel must
+    // hold what the kernel wrote, and the two never share memory.
+    RenderGraph g(testDevice());
+    ID3D12PipelineState* fill = shaders().compute("Passes/Test/Fill3D");
+    MeshPipelineDesc md;
+    md.meshShader = "Passes/Test/DepthField.ms";
+    md.depthFormat = DXGI_FORMAT_D32_FLOAT;
+    md.cull = D3D12_CULL_MODE_NONE;
+    ID3D12PipelineState* field = shaders().mesh("test.depthfield", md);
+    const uint32_t w = 80, h = 45, d = 195, dw = 1920, dh = 1152;
+    ComPtr<ID3D12Resource> rb;
+    uint64_t rowPitch = 0, slicePitch = 0, total = 0;
+    TextureRef lastDepth, lastVolume;
+    for (int f = 0; f < 2; ++f)
+    {
+        const TextureRef depth = g.createTexture({ "depth", dw, dh, 1, 1, DXGI_FORMAT_D32_FLOAT });
+        const TextureRef volume = g.createTexture({ "volume", w, h, (uint16_t)d, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D });
+        const TextureRef after = g.createTexture({ "after depth", 64, 64, 1, 1, DXGI_FORMAT_R32_FLOAT });
+        lastDepth = depth;
+        lastVolume = volume;
+        // Rasterised depth (compressed tiles with varied planes), as a real depth buffer holds.
+        g.addPass("depth", QueueType::Graphics, [&](PassBuilder& b) { b.use(depth, Use::DepthWrite); },
+                  [=](PassContext& c) {
+                      const D3D12_CPU_DESCRIPTOR_HANDLE dsv = c.dsv(depth);
+                      c.cmd->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
+                      c.cmd->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+                      const D3D12_VIEWPORT vp{ 0, 0, (float)dw, (float)dh, 0, 1 };
+                      const D3D12_RECT sc{ 0, 0, (LONG)dw, (LONG)dh };
+                      c.cmd->RSSetViewports(1, &vp);
+                      c.cmd->RSSetScissorRects(1, &sc);
+                      c.cmd->SetPipelineState(field);
+                      const uint32_t k[2] = { dw / 16, dh / 16 };
+                      c.graphicsConstants(k, 2);
+                      c.cmd->DispatchMesh(dw / 16, dh / 16, 1);
+                  });
+        touchPass(g, "depth read", QueueType::Graphics, { depth }, { after });
+        g.addPass("fill", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(after, Use::SrvCompute);  // ordered after the depth's last use
+                      b.use(volume, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[4] = { c.uav(volume), w, h, d };
+                      c.cmd->SetPipelineState(fill);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch((w + 3) / 4, (h + 3) / 4, (d + 3) / 4);
+                  });
+        g.addPass("readback", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(volume, Use::CopySrc);
+                      b.keep();
+                  },
+                  [&](PassContext& c) {
+                      ID3D12Resource* src = c.resource(volume);
+                      const D3D12_RESOURCE_DESC desc = src->GetDesc();
+                      D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+                      UINT rows;
+                      UINT64 rowBytes;
+                      testDevice().d3d()->GetCopyableFootprints(&desc, 0, 1, 0, &fp, &rows, &rowBytes, &total);
+                      rowPitch = fp.Footprint.RowPitch;
+                      slicePitch = (uint64_t)fp.Footprint.RowPitch * rows;
+                      if (!rb)
+                      {
+                          D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+                          D3D12_RESOURCE_DESC1 rd{};
+                          rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                          rd.Width = total;
+                          rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+                          rd.SampleDesc.Count = 1;
+                          rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                          check(testDevice().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr,
+                                                                             IID_PPV_ARGS(&rb)),
+                                "readback");
+                      }
+                      D3D12_TEXTURE_COPY_LOCATION dst{ rb.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+                      dst.PlacedFootprint = fp;
+                      D3D12_TEXTURE_COPY_LOCATION s{ src, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                      c.cmd->CopyTextureRegion(&dst, 0, 0, 0, &s, nullptr);
+                  });
+        g.execute(nullptr);
+        for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+    }
+    CHECK(!g.sharesMemory(lastDepth, lastVolume));
+    const uint8_t* p = nullptr;
+    check(rb->Map(0, nullptr, (void**)&p), "map");
+    auto half = [](uint16_t v) {  // IEEE half -> float (normal numbers and zero: what the kernel writes)
+        const uint32_t e = (v >> 10) & 31, m = v & 1023;
+        return e == 0 ? 0.0f : std::ldexp(1.0f + m / 1024.0f, (int)e - 15) * ((v & 0x8000) ? -1.0f : 1.0f);
+    };
+    size_t wrong = 0;
+    for (uint32_t z = 0; z < d; ++z)
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+            {
+                const uint16_t* t = reinterpret_cast<const uint16_t*>(p + z * slicePitch + y * rowPitch + x * 8);
+                if (half(t[0]) != (float)x || half(t[1]) != (float)y || half(t[2]) != (float)z || half(t[3]) != 1.0f) ++wrong;
+            }
+    rb->Unmap(0, nullptr);
+    logf("    3D texture after a depth buffer: %zu of %u texels wrong\n", wrong, w * h * d);
+    CHECK(wrong == 0);
+}
+
+UNX_TEST(graph_aliased_buffers_keep_their_writes)
+{
+    // Buffer B reuses buffer A's memory after A's last use; B is written by a kernel (UAV) or by a copy and read back.
+    // Every word must be what B's writer wrote (A's barrier, deactivation and B's first-use barrier order the reuse).
+    RenderGraph g(testDevice());
+    ID3D12PipelineState* fillPso = shaders().compute("Passes/Test/FillBuffer");
+    const uint32_t words = 1u << 20;  // 4 MB
+    ComPtr<ID3D12Resource> source, rb;
+    D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD }, rp{ D3D12_HEAP_TYPE_READBACK };
+    D3D12_RESOURCE_DESC1 rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = (uint64_t)words * 4;
+    rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    check(testDevice().d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&source)), "upload");
+    check(testDevice().d3d()->CreateCommittedResource3(&rp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)), "readback");
+    uint32_t* mapped = nullptr;
+    check(source->Map(0, nullptr, (void**)&mapped), "map upload");
+    for (uint32_t i = 0; i < words; ++i) mapped[i] = i * 2654435761u;
+    source->Unmap(0, nullptr);
+    size_t wrong[2] = {};
+    for (int mode = 0; mode < 2; ++mode)  // 0: B written by a kernel, 1: B written by a copy
+        for (int f = 0; f < 2; ++f)
+        {
+            const BufferRef a = g.createBuffer({ "a", (uint64_t)words * 4, 0 });
+            const BufferRef b = g.createBuffer({ "b", (uint64_t)words * 4, 0 });
+            const TextureRef sink = g.createTexture({ "sink", 64, 64, 1, 1, DXGI_FORMAT_R32_FLOAT });
+            auto fill = [&](const char* name, BufferRef target, uint32_t seed, BufferRef after) {
+                g.addPass(name, QueueType::Graphics,
+                          [&](PassBuilder& pb) {
+                              if (after.valid()) pb.use(after, Use::SrvCompute);
+                              pb.use(target, Use::UavCompute);
+                          },
+                          [=](PassContext& c) {
+                              const uint32_t k[4] = { c.uav(target), words, seed, 0 };
+                              c.cmd->SetPipelineState(fillPso);
+                              c.computeConstants(k, 4);
+                              c.cmd->Dispatch(words / 64, 1, 1);
+                          });
+            };
+            fill("fill a", a, 0xA5A5A5A5u, {});
+            g.addPass("read a", QueueType::Graphics,
+                      [&](PassBuilder& pb) {
+                          pb.use(a, Use::SrvCompute);
+                          pb.use(sink, Use::UavCompute);
+                          pb.keep();
+                      },
+                      [](PassContext&) {});
+            if (mode == 0) fill("fill b", b, 0x5A5A5A5Au, {});
+            else
+            {
+                ID3D12Resource* src = source.Get();
+                g.addPass("copy b", QueueType::Graphics,
+                          [&](PassBuilder& pb) {
+                              pb.use(sink, Use::SrvCompute);
+                              pb.use(b, Use::CopyDst);
+                          },
+                          [=](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(b), 0, src, 0, (uint64_t)words * 4); });
+            }
+            ID3D12Resource* dst = rb.Get();
+            g.addPass("readback b", QueueType::Graphics,
+                      [&](PassBuilder& pb) {
+                          pb.use(b, Use::CopySrc);
+                          pb.keep();
+                      },
+                      [=](PassContext& c) { c.cmd->CopyBufferRegion(dst, 0, c.resource(b), 0, (uint64_t)words * 4); });
+            g.execute(nullptr);
+            for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+            if (f == 1)
+            {
+                CHECK(g.sharesMemory(a, b));  // the case under test: B reuses A's memory
+                const uint32_t* r = nullptr;
+                check(rb->Map(0, nullptr, (void**)&r), "map readback");
+                for (uint32_t i = 0; i < words; ++i)
+                    if (r[i] != (mode == 0 ? (i ^ 0x5A5A5A5Au) : i * 2654435761u)) ++wrong[mode];
+                rb->Unmap(0, nullptr);
+            }
+        }
+    logf("    aliased buffer B: %zu wrong words after a kernel write, %zu after a copy (of %u)\n", wrong[0], wrong[1], words);
+    CHECK(wrong[0] == 0 && wrong[1] == 0);
+}
+
 UNX_TEST(graph_single_queue_is_one_list)
 {
     // Default policy: compute-queue passes run on the graphics queue; the frame is one command list.

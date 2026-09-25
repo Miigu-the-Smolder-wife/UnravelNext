@@ -169,6 +169,10 @@ public:
     const RenderGraphStats& stats() const { return m_stats; }
     // Last fence value submitted on each queue by execute().
     uint64_t lastFence(QueueType q) const { return m_lastFence[(size_t)q]; }
+    // Tests: whether two transients of the last executed frame (refs from that frame) occupy overlapping heap memory.
+    bool sharesMemory(TextureRef a, TextureRef b) const { return sharesMemory(a.id, b.id); }
+    bool sharesMemory(BufferRef a, BufferRef b) const { return sharesMemory(a.id, b.id); }
+    bool sharesMemory(uint32_t a, uint32_t b) const;  // resource ids
 
 private:
     friend class PassBuilder;

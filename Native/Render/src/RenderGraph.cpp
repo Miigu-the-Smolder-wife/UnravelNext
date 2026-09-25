@@ -431,26 +431,39 @@ struct RenderGraph::Impl
             return infos[a].SizeInBytes > infos[b].SizeInBytes;
         });
         auto alignUp = [](uint64_t v, uint64_t a) { return (v + a - 1) / a * a; };
+        // Three aliasing pools: depth-stencil textures, render-target textures and everything else each alias only
+        // within their own pool. Resources placed over memory that a depth-stencil or render-target texture used earlier
+        // in the frame lost their writes although the barriers were as the API requires (predecessor deactivated,
+        // UNDEFINED + DISCARD for textures) [measured: RTX 4080, driver 591.86; S froxel volume (3D UAV) over the test
+        // depth buffer lost every write, the froxel light lists (buffer) over the test G-buffer (render target) gave
+        // wrong in-scattering; with no aliasing both were right]. Unit test graph_depth_memory_not_shared.
+        auto poolOf = [&](uint32_t r) { return sum[r].ds ? 2 : (sum[r].rt ? 1 : 0); };
         uint64_t aliasedEnd = 0;
-        for (uint32_t r : placeOrder)
+        for (int pool = 0; pool < 3; ++pool)
         {
-            if (sum[r].async) continue;
-            const uint64_t size = infos[r].SizeInBytes, align = infos[r].Alignment;
-            std::vector<std::pair<uint64_t, uint64_t>> busy;
-            for (const Placed& p : aliased)
-                if (!(p.last < sum[r].first || sum[r].last < p.first)) busy.push_back({ p.offset, p.offset + p.size });
-            std::sort(busy.begin(), busy.end());
-            uint64_t offset = 0;
-            for (auto [b, e] : busy)
+            const uint64_t base = alignUp(aliasedEnd, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
+            std::vector<Placed> placedHere;
+            for (uint32_t r : placeOrder)
             {
-                if (alignUp(offset, align) + size <= b) break;
-                offset = std::max(offset, e);
+                if (sum[r].async || poolOf(r) != pool) continue;
+                const uint64_t size = infos[r].SizeInBytes, align = infos[r].Alignment;
+                std::vector<std::pair<uint64_t, uint64_t>> busy;
+                for (const Placed& p : placedHere)
+                    if (noAliasing() || !(p.last < sum[r].first || sum[r].last < p.first)) busy.push_back({ p.offset, p.offset + p.size });
+                std::sort(busy.begin(), busy.end());
+                uint64_t offset = base;
+                for (auto [b, e] : busy)
+                {
+                    if (alignUp(offset, align) + size <= b) break;
+                    offset = std::max(offset, e);
+                }
+                offset = alignUp(offset, align);
+                placedHere.push_back({ r, offset, size, sum[r].first, sum[r].last });
+                pl.physical[r].offset = offset;
+                pl.physical[r].size = size;
+                aliasedEnd = std::max(aliasedEnd, offset + size);
             }
-            offset = alignUp(offset, align);
-            aliased.push_back({ r, offset, size, sum[r].first, sum[r].last });
-            pl.physical[r].offset = offset;
-            pl.physical[r].size = size;
-            aliasedEnd = std::max(aliasedEnd, offset + size);
+            aliased.insert(aliased.end(), placedHere.begin(), placedHere.end());
         }
         uint64_t end = aliasedEnd;
         for (uint32_t r : placeOrder)
@@ -608,9 +621,28 @@ struct RenderGraph::Impl
                     }
                     else
                     {
-                        // Aliased memory: wait for the last accesses of every earlier occupant (all graphics-queue).
+                        // Aliased memory (all graphics-queue). Every earlier occupant is deactivated once: a barrier on
+                        // it with its pending accesses as the "before" scope, so its writes (render-target, UAV, copy
+                        // caches) are complete and flushed before this resource's first use and none is written back
+                        // over the new contents later (lost writes to an aliased transient). A dead texture goes to
+                        // UNDEFINED (NO_ACCESS after a sync scope needs it). The new resource then starts from
+                        // UNDEFINED with DISCARD.
                         D3D12_BARRIER_SYNC aliasSync = D3D12_BARRIER_SYNC_NONE;
-                        for (uint32_t pr : predecessors[r]) aliasSync |= track[pr].pendSync;
+                        for (uint32_t pr : predecessors[r])
+                        {
+                            Track& pt = track[pr];
+                            aliasSync |= pt.pendSync;
+                            if (!pt.touched || pt.pendAccess == D3D12_BARRIER_ACCESS_NO_ACCESS) continue;
+                            if (resources[pr].texture)
+                            {
+                                pushTexture(pp.before, pr, pt.pendSync, a.sync, pt.pendAccess, D3D12_BARRIER_ACCESS_NO_ACCESS, pt.layout, D3D12_BARRIER_LAYOUT_UNDEFINED,
+                                            D3D12_TEXTURE_BARRIER_FLAG_NONE);
+                                pt.layout = D3D12_BARRIER_LAYOUT_UNDEFINED;
+                            }
+                            else
+                                pushBuffer(pp.before, pr, pt.pendSync, a.sync, pt.pendAccess, D3D12_BARRIER_ACCESS_NO_ACCESS);
+                            pt.pendAccess = D3D12_BARRIER_ACCESS_NO_ACCESS;  // flushed; its sync scope still orders later occupants
+                        }
                         if (n.texture)
                             pushTexture(pp.before, r, aliasSync, a.sync, D3D12_BARRIER_ACCESS_NO_ACCESS, a.access, D3D12_BARRIER_LAYOUT_UNDEFINED, a.layout, D3D12_TEXTURE_BARRIER_FLAG_DISCARD);
                         else if (aliasSync != D3D12_BARRIER_SYNC_NONE)
@@ -775,6 +807,14 @@ struct RenderGraph::Impl
         for (const Segment& sg : pl.segments)
             for (const PlanPass& pp : sg.passes) batches += (pp.before.empty() ? 0 : 1) + (pp.after.empty() ? 0 : 1);
 
+        if (dumpPlans())
+        {
+            dumpPlan(pl, placeOrder);
+            for (uint32_t r : placeOrder)
+                logf("  lifetime '%s': positions %u..%u (%s), offset %llu size %llu\n", resources[r].name.c_str(), sum[r].first, sum[r].last,
+                     passes[order[sum[r].first]].name.c_str(), (unsigned long long)pl.physical[r].offset, (unsigned long long)pl.physical[r].size);
+        }
+
         pl.stats.declaredPasses = passCount;
         pl.stats.livePasses = (uint32_t)order.size();
         pl.stats.transientResources = (uint32_t)placeOrder.size();
@@ -878,6 +918,64 @@ struct RenderGraph::Impl
         const ResourceNode& n = resources[r];
         if (n.imported) return importedViews.at(n.importedResource);
         return plan->physical[r].views;
+    }
+
+    // UNX_GRAPH_NO_ALIAS=1: every transient gets its own memory (diagnosis: aliasing or an undeclared use).
+    static bool noAliasing()
+    {
+        static const bool on = [] {
+            char* v = nullptr;
+            size_t n = 0;
+            const bool set = _dupenv_s(&v, &n, "UNX_GRAPH_NO_ALIAS") == 0 && v && v[0] == '1';
+            free(v);
+            return set;
+        }();
+        return on;
+    }
+    // UNX_GRAPH_DUMP=1: every compiled plan is logged (segments, passes, barriers, transient placement).
+    public:
+    static bool dumpPlans()
+    {
+        static const bool on = [] {
+            char* v = nullptr;
+            size_t n = 0;
+            const bool set = _dupenv_s(&v, &n, "UNX_GRAPH_DUMP") == 0 && v && v[0] == '1';
+            free(v);
+            return set;
+        }();
+        return on;
+    }
+    void dumpBarriers(const char* where, const Barriers& b) const
+    {
+        for (size_t k = 0; k < b.textures.size(); ++k)
+        {
+            const D3D12_TEXTURE_BARRIER& t = b.textures[k];
+            logf("      %s texture '%s': sync 0x%x -> 0x%x, access 0x%x -> 0x%x, layout %d -> %d%s\n", where, resources[b.textureResources[k]].name.c_str(), t.SyncBefore,
+                 t.SyncAfter, t.AccessBefore, t.AccessAfter, (int)t.LayoutBefore, (int)t.LayoutAfter, (t.Flags & D3D12_TEXTURE_BARRIER_FLAG_DISCARD) ? " discard" : "");
+        }
+        for (size_t k = 0; k < b.buffers.size(); ++k)
+        {
+            const D3D12_BUFFER_BARRIER& t = b.buffers[k];
+            logf("      %s buffer '%s': sync 0x%x -> 0x%x, access 0x%x -> 0x%x\n", where, resources[b.bufferResources[k]].name.c_str(), t.SyncBefore, t.SyncAfter, t.AccessBefore,
+                 t.AccessAfter);
+        }
+    }
+    void dumpPlan(const Plan& pl, const std::vector<uint32_t>& placeOrder) const
+    {
+        logf("render graph plan %016llx: %zu segments\n", (unsigned long long)pl.key, pl.segments.size());
+        for (size_t si = 0; si < pl.segments.size(); ++si)
+        {
+            const Segment& sg = pl.segments[si];
+            logf("  segment %zu (%s queue), waits on %zu segments\n", si, queueName(sg.queue), sg.waitSegments.size());
+            for (const PlanPass& pp : sg.passes)
+            {
+                dumpBarriers("before", pp.before);
+                if (pp.pass != UINT32_MAX) logf("    pass %s\n", passes[pp.pass].name.c_str());
+                dumpBarriers("after", pp.after);
+            }
+        }
+        for (uint32_t r : placeOrder)
+            logf("  transient '%s': offset %llu size %llu\n", resources[r].name.c_str(), (unsigned long long)pl.physical[r].offset, (unsigned long long)pl.physical[r].size);
     }
 
     void emit(ID3D12GraphicsCommandList7* cmd, Barriers& b)
@@ -1018,6 +1116,16 @@ void RenderGraph::addPass(std::string_view name, QueueType queue, const SetupFn&
     setup(b);
 }
 
+bool RenderGraph::sharesMemory(uint32_t a, uint32_t b) const
+{
+    const Impl& impl = *m_impl;
+    if (!impl.plan || a >= impl.plan->physical.size() || b >= impl.plan->physical.size()) return false;
+    const auto& pa = impl.plan->physical[a];
+    const auto& pb = impl.plan->physical[b];
+    if (pa.size == 0 || pb.size == 0) return false;
+    return pa.offset < pb.offset + pb.size && pb.offset < pa.offset + pa.size;
+}
+
 void RenderGraph::execute(GpuProfiler* profiler)
 {
     Impl& impl = *m_impl;
@@ -1059,6 +1167,14 @@ void RenderGraph::execute(GpuProfiler* profiler)
             impl.createViews(u.resource, n.importedResource, srv, uav, u.use == Use::RenderTarget, u.use == Use::DepthWrite, u.use == Use::DepthRead, v);
         }
     }
+
+    if (Impl::dumpPlans())
+        for (uint32_t r = 0; r < impl.resources.size(); ++r)
+        {
+            const auto& n = impl.resources[r];
+            const Impl::Views v = n.imported ? impl.importedViews[n.importedResource] : plan.physical[r].views;
+            logf("  frame resource '%s'%s: %p srv %u uav %u\n", n.name.c_str(), n.imported ? " (imported)" : "", (void*)impl.framePointers[r], v.srv, v.uav);
+        }
 
     // Record every segment.
     auto t0 = std::chrono::steady_clock::now();

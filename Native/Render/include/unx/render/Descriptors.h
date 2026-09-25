@@ -41,6 +41,7 @@ private:
         uint32_t capacity = 0;
         uint32_t next = 0;
         std::vector<uint32_t> released;
+        std::vector<uint8_t> live;  // per index: allocated (a double free or a free of a free slot fails)
         uint32_t take(const char* what);
         void give(uint32_t index);
     };
