@@ -337,13 +337,54 @@ World 세션의 수정(TimeManager 1/60, 호스트가 `Time.fixedDeltaTime`을 �
 - 고정 스텝(데이터 월드 tick) 중앙값 6.21 ms(4K 창)·8.41 ms(1440p 창)로 50 Hz 때 12.6 ms보다 짧다(World W2 충돌 표면 수정 포함).
   Unity 프레임 주기 중앙값 4K 5.07·1440p 3.02 ms. 메인 스레드 중앙값 1.06·0.90 ms. 호스트 동기화 0.044·0.036 ms.
 
+### 2.2.5 사용자 보고: "화면이 뒤집힌 것 같다", "자글자글한 노이즈" (2026-09-26 0시) — 원인과 수정
+
+보고는 23:29 Player 창(1280×720, 출력 3840×2160)에서 나왔다. 코드에서 찾은 원인은 네 가지다. 첫 셋은 표시 경로, 넷째는 이력이다.
+- **행 순서 [코드 판독, 실측 예정]:**
+  - 렌더러는 0행 = 위로 쓴다(D3D). Unity RT는 D3D에서 아래 행부터 저장하는 규약이다.
+  - 그래서 `command.Blit(output, CameraTarget)`는 위아래를 뒤집어 보였을 것이다.
+  - 측정기의 PNG는 스스로 행을 뒤집어 저장해서 바로 보였다.
+- **표본 부족 [코드 판독]:** 3840→1280 bilinear Blit은 3×3 텍셀의 가운데 하나만 읽는다. 그래서 화면 픽셀마다 4K 텍셀 하나의 잡음이 그대로 보였다.
+- **이중 인코딩 가능성 [예상, 실측 예정]:**
+  - 출력(RGB10A2 UNORM)은 이미 sRGB OETF 값이다. 프로젝트는 Linear 색공간이고, 백버퍼는 쓸 때 인코딩한다.
+  - 그러면 예전 Blit은 한 번 더 인코딩했을 수 있다(들뜬 색).
+- **정지 물체가 매 프레임 "이동" [코드 판독]:**
+  - 어댑터는 보이는 인스턴스 전부의 변환을 매 프레임 보내고, `GpuScene::updateTransforms`는 갱신마다 `transformRevision`을 올린다.
+  - 그래서 정지 물체가 매 프레임 국소광 VSM 재목록(`VsmMoved` bit 31)에 올랐고, 정적 TLAS 키(`RayScene::staticKey`)도 매 프레임 바뀌었다.
+  - 보간도 두 tick의 root가 같아도 쿼터니언 왕복으로 ulp만큼 다른 행렬을 냈다. 게다가 스케일을 버렸다.
+
+수정:
+- **호스트 (UnravelNext 5ab9478) [실측]:**
+  - `beginFrame`이 GPU 장면이 가진 값과 비트 단위로 같은 변환·포즈 갱신을 버린다.
+  - 정착 규칙상 결과는 같다(prev = current). 제자리 teleport도 같다.
+  - HostFrameFlags 8/8. 정지 3프레임은 revision·움직임 없음, 이어진 실제 이동은 revision +1. HostAbi 통과.
+- **표시 (브리지, stage → 다음 Unity 차례):**
+  - `Runtime/Resources/UnravelNextPresent.shader` + `UnravelNextPresent.Record`. 파이프라인과 HostBoundaryProbe가 같이 쓴다.
+  - 대상 픽셀마다 출력 텍셀의 정확한 면적 평균을 선형광으로 낸다(정수 비율 = 텍셀 상자, 그 밖 = 걸친 면적 가중). 확대는 픽셀 상자다.
+  - 행 순서를 바로잡는다.
+  - 대상이 인코딩하면(Linear 색공간의 카메라 대상이나 sRGB 텍스처) 선형 값을, 아니면 인코딩된 값을 쓴다.
+  - CPU 에뮬레이션 [실측]: 3840→1280·2560→1280·동일 크기에서 정확한 면적 적분과 차이 0, 3840→1366에서 2e-5(float 반올림). FXC ps/vs_5_0 컴파일 통과.
+  - `-unxPresentLegacy`(진단용)는 같은 빌드에서 예전 Blit을 보인다.
+- **화면 검사 (측정기):**
+  - 측정마다 `ScreenCapture.CaptureScreenshotAsTexture`로 실제 백버퍼를 `*_screen.png`로 저장한다.
+  - 출력 되읽기와 64×36 셀 평균으로 비교해 네 가설(바로/뒤집힘 × 한 번/두 번 인코딩)의 MAD와 판정을 결과 JSON `screen`에 넣는다.
+- **이력 연속성 (측정기 `history`):** 프레임당 바뀐 변환 수, 그중 정지 몸체 수(0이어야 한다), Restore/Cut 표시 수, teleport 수, 카메라가 바뀐 프레임 수.
+- **어댑터 보간:** 두 tick의 root가 같으면 그대로 넘긴다(비트 동일). 아니면 TRS로 분해해 이동·스케일은 double로 선형 보간하고 회전은 slerp한다.
+- **불연속 연결 (World 252202ff, stage; World가 새 NativeWorld.dll 설치를 알린 뒤 배포):**
+  - `StateGeneration`이 바뀐 첫 프레임에 Restore 비트를 켠다. previous 발행의 세대가 다르면 그 프레임은 보간하지 않는다.
+  - `CollectMotionBreaks(previous.Tick)`에 나온 인스턴스는 보간하지 않는다.
+  - `CollectMotionBreaks(마지막 렌더 tick)`에 나온 인스턴스는 teleport 플래그를 받는다.
+
+남은 판정은 실측으로 한다: 예전/새 blit의 화면 검사, `history`, 그리고 수정 전후 Player GPU 시간(수정 전 4K 4.11·1440p 2.22 ms). 4K 원본의 반점 자체는 R의 hit 셰이딩 분산 문제로 남고, 판단은 `-unxCaptureFull` 원본으로 한다.
+
 ## 2.3 실행 절차 (재현)
 
 ```text
 1. build:   powershell -File Tools/CI/Build.ps1 -Track I -Tracks "V;M;S;R;C;I"         (UnravelNext.dll, 커널, 시험·게이트)
             build/I는 항상 이 트랙 집합으로 구성한다. 같은 폴더에서 -Tracks를 바꿔 재구성하면 CMake가 대상마다
             CXXDependInfo.json을 다시 쓰고, Ninja가 dyndep 단언(edge && !edge->outputs_ready())으로 멈춘다(2026-09-25 [실측]).
-            그때는 build/I를 지우고 새로 빌드한다(111 s).
+            그때는 build/I를 지우고 새로 빌드한다(111 s). Build.ps1은 이제 트랙 집합이 바뀌면 폴더를 스스로 지운다.
+            -Tracks를 빠뜨리면(-Track I 기본 V;M;S;R;I) 폴더가 지워지고 처음부터 빌드된다(-Jobs 4에서 438 s, 2026-09-26).
    측정용:  powershell -File Tools/CI/Build.ps1 -Track all -Committed                  (커밋 기준, ..\UnravelNext-gate\build\all:
             다른 트랙의 작업 중 파일에 영향받지 않는다. INTERFACES v1.12 3.5)
 2. deploy:  powershell -File Native/Host/Deploy.ps1 [-Build ..\UnravelNext-gate\build\all] (Unity가 DLL을 싣고 있으면 거부;
