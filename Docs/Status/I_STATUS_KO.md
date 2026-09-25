@@ -472,7 +472,26 @@ World 세션의 수정(TimeManager 1/60, 호스트가 `Time.fixedDeltaTime`을 �
   `unx_test_host_hostframeflags` 통과(커밋 빌드 b7d93ed). 어댑터 연결은 World의 StateGeneration·teleport 표시를 기다린다. 원래 설명: World 복원·카메라 컷의 렌더 이력 계약. 호스트가 복원을 감지해(NW_Info epoch·branch, tick 역행)
   불연속 비트를 넘기고, 렌더러는 모든 시간 상태를 재설정한다. 같음의 수준을 정해야 한다: 확률 항을 뺀 부분집합은 비트 동일,
   전체는 (i) 결정적 누적(I 권장) 또는 (ii) 실측 바닥 이하. 옛 시험 `WorldHierarchySkinAndVfxReachRealRenderedPixelsAcrossRestore`를 이 경로로 옮긴다.
-- `20260925_I_skin_normals.md`(대기): 스킨 법선을 관절 3×3의 여인수로 변환하는 것이다. 데이터 월드 캐릭터의 비균일 스케일(0.6, 0.8, 0.6)을 관절에 접으면 필요하다.
+- `20260925_I_skin_normals.md`(반영, INTERFACES `skin()`의 `cofactorNormal`, 단위 테스트 `skin_normals_use_the_cofactor`; e70384f Player에 들어 있다):
+  스킨 법선을 관절 3×3의 여인수 × sign(det)으로 변환한다. 데이터 월드 캐릭터의 비균일 스케일(0.6, 0.8, 0.6)을 관절에 접을 때 필요했다.
+- `20260925_I_history_discontinuity.md`의 어댑터 연결(반영, 브리지 ca392d1a): World 252202ff의 `StateGeneration`이 바뀌면 Restore 비트를 켜고,
+  previous 발행의 세대가 다르거나 previous가 없으면 보간하지 않는다(복원·초기화·구조 commit 직후 previous = null). `CollectMotionBreaks(previous.Tick)`에
+  나온 인스턴스는 보간하지 않고, `CollectMotionBreaks(마지막 렌더 tick)`에 나온 것은 teleport 플래그를 받는다. 복원 검사(아래 2.4)가 이 경로를 잰다.
+- `20260926_I_profiler_gaps.md`(대기, core): `FrameTiming`에 큐별 `headMs`·`tailMs`·`gapMs`·`listBoundaries`와 contended 프레임 검출을 더해 달라는 요청이다.
+  Player의 "프레임 구간 − 패스 합"(4K 0.27 → 0.40 ms)을 설계 2.13의 **호스트 통합 틈** 항(목표 ≤ 0.10 ms)으로 셋으로 나눠 재려는 것이다:
+  렌더러 목록 경계 수, 경계당 ms, Unity 큐 작업 ms.
+  - 호스트는 먼저 `UnxFrameGraphStatsLatest`(0eb268d, ABI 6 안의 선택 export; 브리지가 있는지 보고 쓴다)를 더했다.
+  - HostAbi 1440p 독립 실행 [실측]: 패스 124개, 명령 목록 1개, 배리어 600개/115묶음, 교차 큐 동기화 0.
+  - Player도 목록이 하나면, 그 틈은 목록 사이가 아니라 머리·꼬리거나 Unity 쪽이다.
+- **V3 GPU 입자 연결(설계 결정, WORLD_VFX 1·3.3·3.7):**
+  - 문제: Unity에서 VFX tick의 submit(nv_commit)은 메인 스레드이고, FX tick 기록은 렌더 스레드의 프레임 C0이다. 한 프레임에 고정 스텝이 둘이면 다음 tick의 prepare가 아직 기록되지 않은 tick의 되읽기를 막고 기다려 교착한다(I 발견).
+  - 결정: (b) 항상 호스트 소유 시뮬레이션 큐, 기본 대안은 (f) 하이브리드다. 평소 tick은 C0이다. 히치 때만 메인 스레드가 그 tick을 claim해 호스트 소유 큐(compute 또는 호스트 direct)에 즉시 제출하고, 렌더 이벤트에서 Unity 큐에 queue->Wait를 넣는다.
+  - 프레임의 그래픽스 큐는 Unity 소유라 메인 스레드에서 제출할 수 없다. 렌더 스레드는 메인을 기다리지 않으니 교착이 없다.
+  - 나눔:
+    - FX: 프레임 밖 `record(RenderGraph&, ShaderLibrary&, tickIndex, QueueType)`, 렌더가 읽는 tick 버퍼 링 ≥ 3, tick별 claim 상태 기계, 스트림마다 인스턴스.
+    - core: 외부 디바이스 위의 고우선 compute 큐.
+    - I: `NV_StreamExecutor` ABI, 링 fence 전달, 렌더 이벤트 Wait, fence 대기 비용 실측.
+  - 구현 뒤 A/B: ① C0, ② (b), ③ (f) + 강제 2스텝. 항목은 GPU 프레임 중앙값·P95, 패스 합, 패스 바깥 틈, soft 겹침이다(조율 조건).
 
 ## 3.1 호스트 쪽 설계 조건 (날씨·시간대)
 
