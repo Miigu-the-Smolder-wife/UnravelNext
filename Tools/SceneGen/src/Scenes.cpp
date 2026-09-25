@@ -177,14 +177,6 @@ Scene forest(const Request& rq, bool thin)
 // Waterside (P2/P4): a lake basin with a calm water plane (planar-mirror case, slope 0), a wind-wave bay (0.08 m
 // sinusoid sum), wet shore rocks, card trees on the banks and 3 mm reeds (thin geometry). Low sun (12 deg).
 // Water is a Standard dielectric (f0 0.02, roughness 0.02 / 0.05, dark body colour) until the Water class exists.
-float lakeFloor(float x, float z)
-{
-    const float r = std::sqrt(x * x + z * z);
-    const float lake = 1.0f - smoothstepf(120.0f, 190.0f, r);
-    const float bay = (1.0f - smoothstepf(90.0f, 140.0f, std::fabs(z))) * smoothstepf(60.0f, 120.0f, x) * (1.0f - smoothstepf(430.0f, 470.0f, x));
-    const float basin = std::max(lake, bay);
-    return lerpf(0.5f * rollingTerrain(x, z) + 3.0f, -4.0f, basin);
-}
 
 float waveHeight(float x, float z)
 {
@@ -603,8 +595,20 @@ scene::Scene generate(const Request& rq)
     case SceneId::ForestCombat: s = forestCombat(rq); break;
     default: fail("scenegen: unknown scene id %u", (uint32_t)rq.id);
     }
+    DynamicContent content = dynamicContent(rq);
+    addDynamicBodies(s, content);
     s.seed = rq.seed;
     scene::validate(s);
+    return s;
+}
+
+scene::Scene generateWithContent(const Request& rq, DynamicContent& content)
+{
+    scene::Scene s = generate(rq);
+    content = dynamicContent(rq);
+    // generate() added the same bodies (deterministic): the dynamic instances are the last content.bodies.size() ones.
+    uint32_t first = (uint32_t)s.instances.size() - (uint32_t)content.bodies.size();
+    for (size_t i = 0; i < content.bodies.size(); ++i) content.bodies[i].instance = first + (uint32_t)i;
     return s;
 }
 

@@ -2,6 +2,7 @@
 //   unx_scenegen --list
 //   unx_scenegen --scene <name|all> [--seed N] [--scale S] [--out <dir>] [--stats]
 #include "unx/core/Log.h"
+#include "unx/core/File.h"
 #include "unx/scenegen/SceneGen.h"
 
 #include <chrono>
@@ -37,7 +38,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        std::string which, out;
+        std::string which, out, bodies;
         scenegen::Request rq;
         bool list = false;
         for (int i = 1; i < argc; ++i)
@@ -49,6 +50,7 @@ int main(int argc, char** argv)
             else if (a == "--seed") rq.seed = std::stoull(next());
             else if (a == "--scale") rq.scale = std::stof(next());
             else if (a == "--out") out = next();
+            else if (a == "--bodies") bodies = next();
             else if (a == "--stats") {}
             else fail("unknown argument %s", a.c_str());
         }
@@ -64,11 +66,19 @@ int main(int argc, char** argv)
         {
             rq.id = id;
             const auto t0 = std::chrono::steady_clock::now();
-            const scene::Scene s = scenegen::generate(rq);
+            scenegen::DynamicContent content;
+            const scene::Scene s = scenegen::generateWithContent(rq, content);
             const double genSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             stats(s);
             const std::string hash = scene::contentHash(s);
             logf("  generated in %.2f s, contentHash %s (seed %llu, scale %g)\n", genSec, hash.c_str(), (unsigned long long)rq.seed, rq.scale);
+            if (!bodies.empty() && !content.bodies.empty())
+            {
+                // --bodies <path>: the RPP-1 dynamic content as JSON (with --scene all, <path> is a directory).
+                const std::string path = which == "all" ? bodies + "/" + scenegen::sceneName(id) + "_bodies.json" : bodies;
+                writeTextFile(path, scenegen::dynamicContentJson(rq, content));
+                logf("  wrote %s (%zu bodies, %zu character slots)\n", path.c_str(), content.bodies.size(), content.characters.size());
+            }
             if (!out.empty())
             {
                 const std::string path = out + "/" + scenegen::sceneName(id) + ".unxscene";

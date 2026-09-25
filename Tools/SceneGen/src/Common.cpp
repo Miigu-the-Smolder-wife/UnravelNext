@@ -424,4 +424,14 @@ scene::CameraPath orbitPath(std::string name, float3 centre, float radius, float
     }
     return p;
 }
+// Waterside terrain: lake basin (r < 120-190 m) and the wave bay, -4 m water floor, shore from the rolling terrain.
+float lakeFloor(float x, float z)
+{
+    const float r = std::sqrt(x * x + z * z);
+    const float lake = 1.0f - smoothstepf(120.0f, 190.0f, r);
+    const float bay = (1.0f - smoothstepf(90.0f, 140.0f, std::fabs(z))) * smoothstepf(60.0f, 120.0f, x) * (1.0f - smoothstepf(430.0f, 470.0f, x));
+    const float basin = std::max(lake, bay);
+    return lerpf(0.5f * rollingTerrain(x, z) + 3.0f, -4.0f, basin);
+}
+
 } // namespace unx::scenegen::detail

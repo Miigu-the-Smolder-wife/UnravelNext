@@ -101,6 +101,7 @@ Palette buildPalette(Scene& s, uint64_t seed, bool wetRoads);
 // Terrain height functions (metres).
 float rollingTerrain(float x, float z);          // the microbench terrain (6 m + 2 m + 0.7 m waves)
 float cityTerrain(float x, float z);             // gentle, near 0 inside the city area
+float lakeFloor(float x, float z);               // waterside: lake basin and wave bay (water plane at 0)
 
 // Sun direction (unit, towards the sun) from elevation above the horizon and azimuth measured from +X towards +Z.
 float3 sunDirection(float elevationDegrees, float azimuthDegrees);
@@ -140,4 +141,8 @@ struct FoliageAssets
     uint32_t leavesPerTree = 0, bladesPerClump = 0;
 };
 FoliageAssets buildFoliage(Scene& s, const Palette& p, uint64_t seed, FoliageStyle style);
+
+// RPP-1 dynamic bodies (Bodies.cpp): adds the content's bodies to the scene as InstanceDynamic instances and records
+// each body's scene instance index.
+void addDynamicBodies(Scene& s, DynamicContent& content);
 } // namespace unx::scenegen::detail

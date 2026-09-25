@@ -42,6 +42,33 @@ int main(int argc, char** argv)
             }
             CHECK(staticPath && movingPath);
             CHECK(a.name == scenegen::sceneName(id));
+            // RPP-1 dynamic content: 1,024 InstanceDynamic bodies in the section scenes, none elsewhere; the exported content
+            // maps each body to its instance with the same t0 position.
+            {
+                size_t dynamicCount = 0;
+                for (const scene::Instance& in : a.instances) dynamicCount += (in.flags & scene::InstanceDynamic) != 0;
+                const bool section = id == scenegen::SceneId::CityBlock || id == scenegen::SceneId::CityNight || combat || id == scenegen::SceneId::Waterside ||
+                                     id == scenegen::SceneId::Interior;
+                CHECK(dynamicCount == (section ? 1024u : 0u));
+                if (section)
+                {
+                    scenegen::DynamicContent content;
+                    scenegen::Request r0 = rq;
+                    r0.seed = 7;  // rq.seed was changed above
+                    const scene::Scene c = scenegen::generateWithContent(r0, content);
+                    CHECK(scene::contentHash(c) == ha && content.bodies.size() == 1024 && content.characters.size() == 256);
+                    size_t heroes = 0;
+                    for (const auto& ch : content.characters) heroes += ch.hero;
+                    CHECK(heroes == 8);
+                    for (const scenegen::DynamicBody& body : content.bodies)
+                    {
+                        const scene::Instance& in = c.instances[body.instance];
+                        CHECK((in.flags & scene::InstanceDynamic) != 0);
+                        const float3 t{ in.transform.m[0][3], in.transform.m[1][3], in.transform.m[2][3] };
+                        CHECK(length(t - body.position) < 1e-3f);
+                    }
+                }
+            }
             if (id == scenegen::SceneId::CityNight)
             {
                 uint32_t shadowed = 0;
