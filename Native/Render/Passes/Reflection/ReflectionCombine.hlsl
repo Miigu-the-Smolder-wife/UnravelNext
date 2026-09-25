@@ -51,8 +51,10 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     if (j.mode == REFL_G && valid > 0)
     {
         const float lumL = dot(sumL, float3(0.2126, 0.7152, 0.0722)), lumG = dot(sumG, float3(0.2126, 0.7152, 0.0722));
-        const uint bin = lumG > 1e-8 ? (uint)clamp(floor(log2(max(lumL, 1e-30) / lumG)) + 4, 0.0, (float)GI_G_HIST_BINS - 1) : GI_G_HIST_BINS - 1;
         RWByteAddressBuffer histCache = ResourceDescriptorHeap[P[4].z];
-        histCache.InterlockedAdd(GI_H_STAT_G_HIST + bin * 4, 1u);
+        if (lumG > 1e-8)
+            histCache.InterlockedAdd(GI_H_STAT_G_HIST + (uint)clamp(floor(log2(max(lumL, 1e-30) / lumG)) + 4, 0.0, (float)GI_G_HIST_BINS - 1) * 4, 1u);
+        else
+            histCache.InterlockedAdd(GI_H_STAT_G_ZERO, 1u);
     }
 }

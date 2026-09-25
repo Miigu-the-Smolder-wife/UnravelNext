@@ -33,6 +33,8 @@
 // [-4, 5), the first and last also take what lies beyond (diagnostics).
 #define GI_H_STAT_G_HIST 200
 #define GI_G_HIST_BINS 9u
+// G samples whose control variate is zero (mean g = 0: the cache predicts no light along every ray; not in the histogram).
+#define GI_H_STAT_G_ZERO 236
 // Selection of this frame, per tier (0 = screen, 1 = hit): age bucket at the tier's budget boundary, entries still to
 // take from that bucket, atomic counter within it (tier t at GI_H_SELECT + 16 t).
 #define GI_H_SELECT 160

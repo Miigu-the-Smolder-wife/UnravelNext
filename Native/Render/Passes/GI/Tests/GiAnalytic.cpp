@@ -7,6 +7,9 @@
 //     0 facing the sun's side. The wall's indirect irradiance is the ground's single bounce, E = rho E_sun cos(theta_sun) F,
 //     F = the view factor from the probe to the (unshadowed) ground in front of the wall, exact by Lambert's contour
 //     integral per probe. Exercises the sun at GI hits (illuminance, cosine, shadow ray) that 1 and 2 do not.
+//  4. A single sunlit plane (albedo 0.5, no sky), level and tilted 25 deg: a plane cannot see itself, so its indirect
+//     irradiance is exactly 0. Any light the cache gives it is spurious bounce (self-hits, cells that sample around the
+//     surface, directions below a record's hemisphere); reported as E over the plane's direct sun irradiance.
 // Each runs the frame path (RayScene::record -> ray-traced primary visibility standing in for V/M -> GiSystem::record)
 // for N frames and evaluates screenProbeIrradiance (M's API) at every probe pixel. Also reports the frames needed to
 // come within 1 % (reconvergence, gi.relight_frames_max).
@@ -151,6 +154,40 @@ scene::Scene sunWall(float albedo, float3 sunDirection)
     cam.name = "facing the wall";
     cam.position = { 14, 5, 0 };
     cam.forward = normalize(float3{ -1, -0.2f, 0 });
+    cam.up = normalize(cross(cross(cam.forward, float3{ 0, 1, 0 }), cam.forward));
+    s.cameras.push_back(cam);
+    return s;
+}
+
+// One plane through the origin with normal (-sin tilt, cos tilt, 0), 2 x 2 km, sun from above.
+scene::Scene sunPlane(float albedo, float tiltDeg, float3 sunDirection)
+{
+    scene::Scene s;
+    s.name = "gi_sun_plane";
+    scene::Material ground;
+    ground.name = "ground";
+    ground.baseColor = { albedo, albedo, albedo };
+    s.materials.push_back(ground);
+    const float t = tiltDeg * kPi / 180;
+    const float3 n{ -std::sin(t), std::cos(t), 0 }, u{ std::cos(t), std::sin(t), 0 }, w{ 0, 0, 1 };
+    scene::Mesh plane;
+    plane.name = "plane";
+    for (auto [a, b] : { std::pair{ -1000.f, -1000.f }, { 1000.f, -1000.f }, { 1000.f, 1000.f }, { -1000.f, 1000.f } })
+    {
+        plane.positions.push_back(u * a + w * b);
+        plane.normals.push_back(n);
+        plane.uv0.push_back({ a, b });
+    }
+    plane.indices = { 0, 2, 1, 0, 3, 2 };
+    plane.submeshes.push_back({ 0, 6, 0 });
+    s.meshes.push_back(plane);
+    s.instances.push_back({});
+    s.sun.direction = sunDirection;
+    s.sun.illuminance = 0;  // GI's sun comes from setConstantSky
+    scene::Camera cam;
+    cam.name = "above";
+    cam.position = n * 3.0f;
+    cam.forward = normalize(float3{ 0.2f, -0.6f, -1 });
     cam.up = normalize(cross(cross(cam.forward, float3{ 0, 1, 0 }), cam.forward));
     s.cameras.push_back(cam);
     return s;
@@ -372,7 +409,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
                 esum += x;
                 lo = std::min(lo, e);
                 hi = std::max(hi, e);
-                worst = std::max(worst, std::fabs(e / x - 1));
+                worst = std::max(worst, x > 0 ? std::fabs(e / x - 1) : std::fabs(e));  // expected 0: the absolute value
                 const double r = (v[4] + v[5] + v[6]) / 3.0;
                 rsum += r;
                 if (expectedRadiance > 0) rworst = std::max(rworst, std::fabs(r / expectedRadiance - 1));
@@ -386,7 +423,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             out.minimum = lo;
             out.maximum = hi;
             out.worst = worst;
-            if (out.converged < 0 && n && std::fabs(out.mean / out.expectedMean - 1) < 0.01) out.converged = (int)f;
+            if (out.converged < 0 && n && out.expectedMean > 0 && std::fabs(out.mean / out.expectedMean - 1) < 0.01) out.converged = (int)f;
             if (f == frames - 1 || (f & (f - 1)) == 0)
                 logf("  frame %3u: mean E %.4f (expected %.4f, %+.2f %%), min %.4f max %.4f, worst probe %.2f %%; K radiance mean %.4f (expected %.4f), worst %.2f %%\n", f,
                      out.mean, out.expectedMean, 100 * (out.mean / out.expectedMean - 1), lo, hi, 100 * worst, out.radianceMean, expectedRadiance, 100 * rworst);
@@ -454,6 +491,18 @@ int main(int argc, char** argv)
             logf("sunlit ground and a black wall: %u wall probes, mean E %.5f against %.5f (%+.3f %%), worst probe %.3f %%, within 1 %% from frame %d -> %s\n", c.probes,
                  c.mean, c.expectedMean, 100 * (c.mean / c.expectedMean - 1), 100 * c.worst, c.converged, okC ? "PASS" : "FAIL");
             pass = pass && okC;
+        }
+        for (const float tilt : { 0.0f, 25.0f })
+        {
+            const float3 l = normalize(float3{ 0.3f, 1, 0.5f });
+            const float t = tilt * kPi / 180;
+            const float direct = std::max(0.0f, dot(float3{ -std::sin(t), std::cos(t), 0 }, l));
+            logf("single sunlit plane tilted %.0f deg: albedo 0.5, sun E 1 (%.3f on the plane), no sky; expected indirect E = 0\n", tilt, direct);
+            const Outcome d = run(device, shaders, quality, sunPlane(0.5f, tilt, l), { 0, 0, 0 }, { 1, 1, 1 }, [](float3, float3) { return 0.0; }, 0, frames, 1920, 1080);
+            const bool okD = d.probes > 1000 && d.mean < 1e-3 * direct && d.worst < 1e-2 * direct;
+            logf("single sunlit plane tilted %.0f deg: %u probes, mean indirect E %.6f (%.4f %% of the direct sun on it), worst probe %.6f -> %s\n", tilt, d.probes,
+                 d.mean, 100 * d.mean / direct, d.worst, okD ? "PASS" : "FAIL");
+            pass = pass && okD;
         }
         logf("probe tile cache: screenProbeGatherTile vs screenProbeGather, %u + %u pixel evaluations, %u + %u not bit-identical (2 cones each)\n", a.tilePixels,
              b.tilePixels, a.tileMismatches, b.tileMismatches);

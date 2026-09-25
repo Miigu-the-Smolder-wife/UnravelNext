@@ -888,8 +888,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         if (statsFrame >= fc.framesInFlight && (statsFrame - fc.framesInFlight) % s.statsLogFrames == 0)
         {
             const uint32_t* h = m_statsMapped + ((statsFrame - fc.framesInFlight) % kPlanarSlots) * 64;
-            logf("R stats frame %llu: reflection hit cache lookups %u, no data %u; G samples %u, ratio branch %u; mean L / mean g log2 bins [<-3 .. >=4] %u %u %u %u %u %u %u %u %u\n",
-                 (unsigned long long)(statsFrame - fc.framesInFlight), h[38], h[39], h[48], h[49], h[50], h[51], h[52], h[53], h[54], h[55], h[56], h[57], h[58]);
+            logf("R stats frame %llu: reflection hit cache lookups %u, no data %u; G samples %u, ratio branch %u; mean L / mean g log2 bins [<-3 .. >=4] %u %u %u %u %u %u %u %u %u, mean g = 0 %u\n",
+                 (unsigned long long)(statsFrame - fc.framesInFlight), h[38], h[39], h[48], h[49], h[50], h[51], h[52], h[53], h[54], h[55], h[56], h[57], h[58], h[59]);
         }
         const BufferRef statsRef = g.importBuffer(m_statsReadback.Get(), { "R reflection stats readback", kPlanarSlots * 256, 0 });
         const uint64_t statsOffset = (statsFrame % kPlanarSlots) * 256;

@@ -26,6 +26,7 @@ void main(uint lane : SV_GroupIndex)
     b.Store4(GI_H_STAT_G_HIST, uint4(0, 0, 0, 0));
     b.Store4(GI_H_STAT_G_HIST + 16, uint4(0, 0, 0, 0));
     b.Store(GI_H_STAT_G_HIST + 32, 0u);
+    b.Store(GI_H_STAT_G_ZERO, 0u);
     b.Store4(GI_H_SELECT, uint4(0, 0, 0, 0));
     b.Store4(GI_H_SELECT + 16, uint4(0, 0, 0, 0));
 }

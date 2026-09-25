@@ -70,6 +70,7 @@ void GiTraceGen()
     if (hit.t < 0)
     {
         radiance = giSkyRadiance(r.Direction);
+        if ((P[3].w & 32) != 0 && r.Direction.y < 0) radiance = 0;  // attribution: nothing below the horizon (the sky LUT's lit ground)
         distanceToHit = 65000;
     }
     else
@@ -114,7 +115,7 @@ void GiTraceGen()
             const float3 l = normalize(g_sunDirection);
             const float cosSun = dot(s.normal, l);
             float3 sun = 0;
-            if (cosSun > 0)
+            if (cosSun > 0 && (P[3].w & 16) == 0)  // 16 (attribution): no sun at GI hits
             {
                 const float3 e0 = giSunIlluminance(s.position);
                 if (any(e0 > 0))

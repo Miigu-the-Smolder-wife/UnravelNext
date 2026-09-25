@@ -29,6 +29,7 @@ struct GiStats  // header counters of the last completed frame (tests, diagnosti
     uint32_t hitLookups = 0, hitMisses = 0;  // reflection hits' cache lookups and those with no data at any level
     uint32_t gSamples = 0, gRatio = 0;       // reflection G samples, and those estimated by the ratio branch (reflLobeEstimate)
     uint32_t gHistogram[9] = {};             // G samples by log2(mean L / mean g), bins [-4, 5)
+    uint32_t gZero = 0;                      // G samples with mean g = 0 (not in the histogram)
 };
 
 class GiSystem
