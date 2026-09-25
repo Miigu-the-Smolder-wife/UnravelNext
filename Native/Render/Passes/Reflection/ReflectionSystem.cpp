@@ -417,9 +417,10 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             const uint32_t* counters = reinterpret_cast<const uint32_t*>(slot + kJobsOffset);  // total jobs, M, G samples, G pixels
             const double traced = (double)counters[1] + (double)counters[2] * m_settings.raysPerSample;
             // Ray slots for the split passes: 1.5 x the traced rays once they pass 3/4 of the capacity (a frame beyond it
-            // traces the overflowing jobs inline: the same values, slower).
+            // traces the overflowing jobs inline: the same values, slower). At most 2^25 slots (56 B each, 1.88 GB): a raw
+            // view addresses 2^31 bytes, and slots past it lost their stores (a 64-ray reference lost its shadow rays).
             if (traced > 0.75 * m_rayCapacity)
-                while (m_rayCapacity < 1.5 * traced && m_rayCapacity < (1u << 26)) m_rayCapacity *= 2;
+                while (m_rayCapacity < 1.5 * traced && m_rayCapacity < (1u << 25)) m_rayCapacity *= 2;
             if (ticks[1] > ticks[0] && traced >= 4096)
             {
                 const float sample = (float)((ticks[1] - ticks[0]) * m_tickMs * 1e6 / traced);
@@ -676,7 +677,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   [heap, tick](PassContext& pc) { pc.cmd->EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, tick + 1); });
     }
     // Rays buffer of the split passes (ReflectionRay.hlsli): header, hit records, ray -> job, values, shadow rays.
-    const uint32_t rayCapacity = (s.experimentDisable & 64) ? 0 : m_rayCapacity;  // 64: every job inline (A/B of the split)
+    const uint32_t rayCapacity = (s.experimentDisable & 64) ? 0 : m_rayCapacity;
+    static_assert(16 + (1ull << 25) * 56 <= (1ull << 31), "the rays buffer must fit one raw view");  // 64: every job inline (A/B of the split)
     const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 16 + (uint64_t)rayCapacity * 56, 0 });  // REFL_RAYS_SLOT_BYTES
     g.addPass("r.refl.args", QueueType::Compute,
               [&](PassBuilder& b) {
