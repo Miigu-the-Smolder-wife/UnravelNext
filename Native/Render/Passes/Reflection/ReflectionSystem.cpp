@@ -44,8 +44,12 @@ float3 xform(const float4 rows[3], float3 p)
     return { rows[0].x * p.x + rows[0].y * p.y + rows[0].z * p.z + rows[0].w, rows[1].x * p.x + rows[1].y * p.y + rows[1].z * p.z + rows[1].w,
              rows[2].x * p.x + rows[2].y * p.y + rows[2].z * p.z + rows[2].w };
 }
-constexpr uint32_t kArgumentsBytes = 16 + 2 * kDescStride;
+// Arguments buffer: counters, trace descriptions (SKY0, SKY1), shadow description, shade and combine Dispatch arguments.
+constexpr uint32_t kShadowDescOffset = 16 + 2 * kDescStride, kShadeArgsOffset = kShadowDescOffset + kDescStride, kCombineArgsOffset = kShadeArgsOffset + 16;
+constexpr uint32_t kArgumentsBytes = kCombineArgsOffset + 16;
 const char* const kTraceLibrary[2] = { "Passes/Reflection/ReflectionTrace.SKY0", "Passes/Reflection/ReflectionTrace.SKY1" };
+const char* const kShadeKernel[2] = { "Passes/Reflection/ReflectionShadeRays.SKY0", "Passes/Reflection/ReflectionShadeRays.SKY1" };
+constexpr const char* kShadowLibrary = "Passes/Reflection/ReflectionShadow";
 } // namespace
 
 ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
@@ -104,6 +108,19 @@ ReflectionSystem::ReflectionSystem(Device& device, ShaderLibrary& shaders, const
     {
         const D3D12_DISPATCH_RAYS_DESC desc = rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kTraceLibrary[v], { "ReflectionTraceGen" })).dispatchDesc(0, 0, 1, 1);
         std::memcpy(image + 16 + v * kDescStride, &desc, sizeof desc);
+    }
+    {
+        const D3D12_DISPATCH_RAYS_DESC desc = rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kShadowLibrary, { "ReflectionShadowGen" })).dispatchDesc(0, 0, 1, 1);
+        std::memcpy(image + kShadowDescOffset, &desc, sizeof desc);
+    }
+    {
+        D3D12_INDIRECT_ARGUMENT_DESC arg{};
+        arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        D3D12_COMMAND_SIGNATURE_DESC sd{};
+        sd.ByteStride = 16;
+        sd.NumArgumentDescs = 1;
+        sd.pArgumentDescs = &arg;
+        check(device.d3d()->CreateCommandSignature(&sd, nullptr, IID_PPV_ARGS(&m_dispatchSignature)), "reflection dispatch signature");
     }
     d.Flags = D3D12_RESOURCE_FLAG_NONE;
     ComPtr<ID3D12Resource> staging;
@@ -399,6 +416,10 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             const uint64_t* ticks = reinterpret_cast<const uint64_t*>(slot + kTicksOffset);
             const uint32_t* counters = reinterpret_cast<const uint32_t*>(slot + kJobsOffset);  // total jobs, M, G samples, G pixels
             const double traced = (double)counters[1] + (double)counters[2] * m_settings.raysPerSample;
+            // Ray slots for the split passes: 1.5 x the traced rays once they pass 3/4 of the capacity (a frame beyond it
+            // traces the overflowing jobs inline: the same values, slower).
+            if (traced > 0.75 * m_rayCapacity)
+                while (m_rayCapacity < 1.5 * traced && m_rayCapacity < (1u << 26)) m_rayCapacity *= 2;
             if (ticks[1] > ticks[0] && traced >= 4096)
             {
                 const float sample = (float)((ticks[1] - ticks[0]) * m_tickMs * 1e6 / traced);
@@ -635,11 +656,18 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         g.addPass("r.refl.view.end", QueueType::Graphics, [&](PassBuilder& b) { b.keep(); },
                   [heap, tick](PassContext& pc) { pc.cmd->EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, tick + 1); });
     }
-    g.addPass("r.refl.args", QueueType::Compute, [&](PassBuilder& b) { b.use(args, Use::UavCompute); },
-              [&shaders, args](PassContext& c) {
-                  const uint32_t k[4] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width) };
+    // Rays buffer of the split passes (ReflectionRay.hlsli): header, hit records, ray -> job, values, shadow rays.
+    const uint32_t rayCapacity = (s.experimentDisable & 64) ? 0 : m_rayCapacity;  // 64: every job inline (A/B of the split)
+    const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 16 + (uint64_t)rayCapacity * 52, 0 });
+    g.addPass("r.refl.args", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(args, Use::UavCompute);
+                  b.use(raysBuffer, Use::UavCompute);
+              },
+              [&shaders, args, raysBuffer, rayCapacity](PassContext& c) {
+                  const uint32_t k[8] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity, 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionArgs"));
-                  c.computeConstants(k, 4);
+                  c.computeConstants(k, 8);
                   c.cmd->Dispatch(1, 1, 1);
               });
 
@@ -662,51 +690,118 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const uint64_t frameIndex = fc.frame.frameIndex;
     ID3D12QueryHeap* timestamps = m_timestamps.Get();
     const uint32_t firstTick = ringSlot * kTicks;
+    // Root constants shared by the trace, shade, shadow and combine passes (ReflectionRay.hlsli).
+    auto constantsFor = [jobs, results, modes, probes, depth, gbuffer, cache, luts, atmosphere, sky, sun, rayLength, s, frame, scene, experiment, exactCounts,
+                         probeMaps, vsm, rayScene, frameIndex, raysBuffer](PassContext& c, uint32_t k[32]) {
+        k[0] = c.srv(jobs);
+        k[1] = c.uav(results);
+        k[2] = c.srv(modes);
+        k[3] = c.srv(probes);
+        k[4] = asU(sky.x);
+        k[5] = asU(sky.y);
+        k[6] = asU(sky.z);
+        k[7] = asU(rayLength);
+        for (int i = 0; i < 4; ++i) k[8 + i] = atmosphere ? c.srv(luts[i]) : 0xFFFFFFFFu;
+        k[12] = asU(sun.x);
+        k[13] = asU(sun.y);
+        k[14] = asU(sun.z);
+        k[15] = c.srv(probeMaps);
+        k[16] = c.srv(depth);
+        k[17] = c.srv(gbuffer);
+        k[18] = c.uav(cache);
+        k[19] = s.raysPerSample;
+        k[20] = (frame & 0xFFFFFFu) | (experiment << 24);
+        k[21] = c.uav(raysBuffer);
+        k[22] = rayScene->vsmSrvs(c, vsm, frameIndex, 1);  // S's VSM for sun visibility at hits (UNX_NONE: rays)
+        k[23] = exactCounts.valid() ? c.uav(exactCounts) : 0xFFFFFFFFu;
+        std::memcpy(&k[24], scene, sizeof scene);
+    };
+    // Every resource constantsFor names, declared by each pass that binds it (all-shading uses cover DispatchRays and compute).
+    auto declareShared = [&](PassBuilder& b) {
+        b.use(raysBuffer, Use::UavGraphics);
+        b.use(jobs, Use::SrvGraphics);
+        b.use(modes, Use::SrvGraphics);
+        b.use(probes, Use::SrvGraphics);
+        b.use(probeMaps, Use::SrvGraphics);
+        b.use(depth, Use::SrvGraphics);
+        b.use(gbuffer, Use::SrvGraphics);
+        b.use(cache, Use::UavGraphics);
+        b.use(results, Use::UavGraphics);
+        if (exactCounts.valid()) b.use(exactCounts, Use::UavGraphics);
+        rt::RayScene::declareVsm(b, vsm);
+        rays.declareTraversal(b);
+        if (atmosphere)
+            for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
+    };
     g.addPass("r.refl.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(args, Use::IndirectArgs);
-                  b.use(jobs, Use::SrvGraphics);
-                  b.use(modes, Use::SrvGraphics);
-                  b.use(probes, Use::SrvGraphics);
-                  b.use(probeMaps, Use::SrvGraphics);
-                  b.use(depth, Use::SrvGraphics);
-                  b.use(gbuffer, Use::SrvGraphics);
-                  b.use(cache, Use::UavGraphics);
-                  b.use(results, Use::UavGraphics);
-                  if (exactCounts.valid()) b.use(exactCounts, Use::UavGraphics);
-                  rt::RayScene::declareVsm(b, vsm);
-                  rays.declareTraversal(b);
-                  if (atmosphere)
-                      for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
+                  declareShared(b);
               },
-              [&pipeline, jobs, results, modes, probes, depth, gbuffer, cache, luts, atmosphere, sky, sun, rayLength, s, frame, scene, frameConstants, argumentResource,
-               variant, timestamps, firstTick, experiment, exactCounts, probeMaps, vsm, rayScene, frameIndex](PassContext& c) {
+              [&pipeline, constantsFor, frameConstants, argumentResource, variant, timestamps, firstTick](PassContext& c) {
                   uint32_t k[32] = {};
-                  k[0] = c.srv(jobs);
-                  k[1] = c.uav(results);
-                  k[2] = c.srv(modes);
-                  k[3] = c.srv(probes);
-                  k[4] = asU(sky.x);
-                  k[5] = asU(sky.y);
-                  k[6] = asU(sky.z);
-                  k[7] = asU(rayLength);
-                  for (int i = 0; i < 4; ++i) k[8 + i] = atmosphere ? c.srv(luts[i]) : 0xFFFFFFFFu;
-                  k[12] = asU(sun.x);
-                  k[13] = asU(sun.y);
-                  k[14] = asU(sun.z);
-                  k[15] = c.srv(probeMaps);
-                  k[16] = c.srv(depth);
-                  k[17] = c.srv(gbuffer);
-                  k[18] = c.uav(cache);
-                  k[19] = s.raysPerSample;
-                  k[20] = (frame & 0xFFFFFFu) | (experiment << 24);
-                  k[22] = rayScene->vsmSrvs(c, vsm, frameIndex, 1);  // S's VSM for sun visibility at hits (UNX_NONE: rays)
-                  k[23] = exactCounts.valid() ? c.uav(exactCounts) : 0xFFFFFFFFu;
-                  std::memcpy(&k[24], scene, sizeof scene);
+                  constantsFor(c, k);
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick);
                   pipeline.dispatchIndirect(c.cmd, argumentResource, 16 + variant * kDescStride);
+              });
+    // Split passes (ARCHITECTURE 2.6 revision 1): hit shading in compute, off-screen sun visibility, the jobs' values.
+    auto rayArgs = [&](const char* name, uint32_t stage) {
+        g.addPass(name, QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(args, Use::UavCompute);
+                      b.use(raysBuffer, Use::UavCompute);
+                  },
+                  [&shaders, args, raysBuffer, stage](PassContext& c) {
+                      const uint32_t k[8] = { c.uav(args), c.uav(raysBuffer), stage, 0, kShadeArgsOffset, kCombineArgsOffset,
+                                              kShadowDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionRayArgs"));
+                      c.computeConstants(k, 8);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+    };
+    rayArgs("r.refl.rayargs", 0);
+    ID3D12CommandSignature* dispatchSignature = m_dispatchSignature.Get();
+    g.addPass("r.refl.shade", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(args, Use::IndirectArgs);
+                  declareShared(b);
+              },
+              [&shaders, constantsFor, frameConstants, argumentResource, variant, dispatchSignature](PassContext& c) {
+                  uint32_t k[32] = {};
+                  constantsFor(c, k);
+                  c.cmd->SetPipelineState(shaders.compute(kShadeKernel[variant]));
+                  c.computeConstants(k, 32);
+                  c.bindFrameConstants(frameConstants);
+                  c.cmd->ExecuteIndirect(dispatchSignature, 1, argumentResource, kShadeArgsOffset, nullptr, 0);
+              });
+    rayArgs("r.refl.shadowargs", 1);
+    rt::RayPipeline& shadowPipeline = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(kShadowLibrary, { "ReflectionShadowGen" }));
+    g.addPass("r.refl.shadow", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(args, Use::IndirectArgs);
+                  declareShared(b);
+              },
+              [&shadowPipeline, constantsFor, frameConstants, argumentResource](PassContext& c) {
+                  uint32_t k[32] = {};
+                  constantsFor(c, k);
+                  c.computeConstants(k, 32);
+                  c.bindFrameConstants(frameConstants);
+                  shadowPipeline.dispatchIndirect(c.cmd, argumentResource, kShadowDescOffset);
+              });
+    g.addPass("r.refl.combine", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(args, Use::IndirectArgs);
+                  declareShared(b);
+              },
+              [&shaders, constantsFor, frameConstants, argumentResource, dispatchSignature, timestamps, firstTick](PassContext& c) {
+                  uint32_t k[32] = {};
+                  constantsFor(c, k);
+                  c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionCombine"));
+                  c.computeConstants(k, 32);
+                  c.bindFrameConstants(frameConstants);
+                  c.cmd->ExecuteIndirect(dispatchSignature, 1, argumentResource, kCombineArgsOffset, nullptr, 0);
                   c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick + 1);
               });
     rays.recordExactReadback(fc);  // after the trace: the counts pick next frames' exact set

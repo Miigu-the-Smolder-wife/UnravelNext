@@ -198,6 +198,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     m_sceneRevision = scene.revision();
     const uint32_t proxyBudget = (uint32_t)quality.integer("raytracing.character_proxy_triangles");
     m_proxyErrorPx = (float)quality.number("raytracing.proxy_error_px");
+    m_experiment = (uint32_t)quality.integer("raytracing.experiment_disable");
     const uint64_t dynamicMax = (uint64_t)quality.integer("raytracing.dynamic_tlas_instances_max");
 
     const auto& instances = scene.instances();
@@ -834,7 +835,7 @@ void RayScene::recordRefit(ID3D12GraphicsCommandList7* cmd, bool refit, const st
     for (size_t k = 0; k < m_deformed.size(); ++k)
     {
         const Deformed& dd = m_deformed[k];
-        const bool update = refit && !(rebuild && k < rebuild->size() && (*rebuild)[k]);
+        const bool update = refit && (m_experiment & 1) == 0 && !(rebuild && k < rebuild->size() && (*rebuild)[k]);
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
         inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
         inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
@@ -1047,6 +1048,7 @@ void RayScene::declareVsm(PassBuilder& b, const VsmRefs& v)
 {
     if (!v.valid()) return;
     for (const BufferRef& r : { v.pageTable, v.pool, v.blocks, v.searchBound }) b.use(r, Use::SrvGraphics);
+    if (v.layers.valid()) b.use(v.layers, Use::SrvGraphics);
 }
 
 uint32_t RayScene::vsmSrvs(PassContext& c, const VsmRefs& v, uint64_t frame, uint32_t user)
@@ -1082,7 +1084,9 @@ uint32_t RayScene::vsmSrvs(PassContext& c, const VsmRefs& v, uint64_t frame, uin
     }
     // Slot of frame % kDescSlots: frame f - kDescSlots has completed (frames in flight <= kDescSlots, record()).
     const uint32_t slot = (uint32_t)(frame % kDescSlots) * 2 + user;
-    const uint32_t words[8] = { c.srv(v.pageTable), c.srv(v.pool), c.srv(v.blocks), c.srv(v.searchBound), v.constants, 0xFFFFFFFFu, 0, 0 };
+    // ShadowSrvs: { page table, pool, blocks, search bound, constants, lights (none), 0, transmittance layer (UNX_NONE: T = 1) }.
+    const uint32_t words[8] = { c.srv(v.pageTable), c.srv(v.pool), c.srv(v.blocks), c.srv(v.searchBound), v.constants, 0xFFFFFFFFu, 0,
+                                v.layers.valid() ? c.srv(v.layers) : 0xFFFFFFFFu };
     std::memcpy(m_vsmRingMapped + slot * 32, words, sizeof words);
     return m_vsmRingSrv[slot];
 }

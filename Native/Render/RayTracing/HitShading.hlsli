@@ -55,7 +55,7 @@ GpuMaterial rtHitMaterial(GpuMaterial m, RtSurface s, float coneWidth, float cos
 struct RtHitLighting
 {
     float3 sunIlluminance;    // E on a surface facing the sun (transmittance included), 0 below the horizon
-    float sunVisibility;      // 0 or 1 (one shadow ray)
+    float sunVisibility;      // in [0, 1]: S's VSM disk integral, or one shadow ray (0 or 1)
     float3 irradiance;        // indirect irradiance at the hit
     float3 specularRadiance;  // indirect incident radiance from the hit's mirror direction
 };
@@ -87,6 +87,7 @@ float3 rtHitRadiance(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float p
             sun = diffuseAlbedo * L.sunIlluminance * NoL + shSunSpecular(f0, s.roughness, alpha, compensation, n, v, NoV, l0, L.sunIlluminance, pixelAngle);
         else if (foliage)
             sun = albedo * s.transmission * L.sunIlluminance * -NoL;  // transmitted through the leaf (model v1)
+        sun *= L.sunVisibility;  // fractional in penumbrae (the VSM estimate); was only tested > 0, giving full sun there
     }
     return m.emissive + sun + diffuseAlbedo * L.irradiance + shSpecularAlbedo(f0, NoV, s.roughness) * L.specularRadiance;
 }

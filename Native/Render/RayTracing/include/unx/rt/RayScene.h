@@ -102,11 +102,11 @@ public:
     // and returns the raw SRV the kernel loads it from (UNX_NONE without a VSM).
     struct VsmRefs
     {
-        BufferRef pageTable, pool, blocks, searchBound;
+        BufferRef pageTable, pool, blocks, searchBound, layers;  // layers: S's transmittance layer (v1.26; invalid = none)
         uint32_t constants = 0xFFFFFFFFu;
         bool valid() const { return pageTable.valid() && pool.valid() && blocks.valid() && searchBound.valid() && constants != 0xFFFFFFFFu; }
     };
-    static VsmRefs vsmRefs(const FrameResources& r) { return { r.vsmPageTable, r.vsmPool, r.vsmBlocks, r.vsmSearchBound, r.vsmConstants }; }
+    static VsmRefs vsmRefs(const FrameResources& r) { return { r.vsmPageTable, r.vsmPool, r.vsmBlocks, r.vsmSearchBound, r.vsmLayers, r.vsmConstants }; }
     static void declareVsm(PassBuilder& b, const VsmRefs& v);
     uint32_t vsmSrvs(PassContext& c, const VsmRefs& v, uint64_t frame, uint32_t user);
 
@@ -183,6 +183,7 @@ private:
     std::vector<uint32_t> m_indexPoolData, m_vertexMapData;
     uint32_t m_proxyBudget = 0;
     float m_proxyErrorPx = 1;  // raytracing.proxy_error_px
+    uint32_t m_experiment = 0; // raytracing.experiment_disable (cost attribution only): 1 = build the deformed BLASes every frame
     // Per frame: each deformed instance's cut, the coarsest whose error (x the instance's scale) is at most
     // proxy_error_px x the main view's pixel angle x the instance's distance from the eye (its bounding sphere's nearest
     // point). A reflection or GI ray reaching the instance has a footprint of at least that width (the eye's pixel cone

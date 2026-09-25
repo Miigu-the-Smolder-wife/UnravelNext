@@ -93,7 +93,10 @@ private:
     ReflectionSettings m_settings;
     ComPtr<ID3D12Resource> m_history;   // R16_FLOAT reflection hit distance of the last frame (G spacing)
     uint32_t m_historyWidth = 0, m_historyHeight = 0;
-    ComPtr<ID3D12Resource> m_arguments;  // raw: job counter, then the two indirect dispatch descriptions (SKY0, SKY1)
+    ComPtr<ID3D12Resource> m_arguments;  // raw: job counters, the trace descriptions (SKY0, SKY1), the shadow description,
+                                         // the shade and combine Dispatch arguments (ReflectionSystem.cpp offsets)
+    ComPtr<ID3D12CommandSignature> m_dispatchSignature;  // one D3D12_DISPATCH_ARGUMENTS
+    uint32_t m_rayCapacity = 1u << 20;   // ray slots of the rays buffer (grows with the traced rays read back)
     float3 m_skyRadiance{}, m_sunIlluminance{};
     TextureRef m_modes;
     Rect m_viewRects[4];  // kPlanarMax (ReflectionSystem.cpp)

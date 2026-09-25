@@ -1,0 +1,101 @@
+// Reflection rays of a job and their records (R-internal): the per-job setup and direction sequence shared by the trace
+// (DispatchRays: traversal), shade (compute: hit shading) and combine (compute: the job's value) passes, which replay the
+// same seeded VNDF draws instead of storing directions; and the layout of the rays buffer.
+//
+// Root constants, the same in every pass: P[0] = { jobs SRV, results UAV (uint2 per job), mode SRV, probes SRV },
+// P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli), ray length in P[1].w, P[3].w = view.screenProbeMaps SRV,
+// P[4] = { depth SRV, gbuffer SRV, GI cache UAV (raw), rays per G sample }, P[5] = { frame | experiment << 24, rays buffer
+// UAV (raw), ShadowSrvs buffer (ReflectionShade.hlsli), exact set counts }, P[6], P[7] = RtSceneSrvs. Frame constants
+// b1 = main view.
+//
+// Rays buffer (raw): header { rays allocated (atomic), capacity, shadow rays (atomic), 0 }, then per ray slot:
+//   hit records    uint4 at 16 + slot x 16: { instance | front face << 31 (REFL_RAY_MISS, REFL_RAY_NONE), geometry << 24 |
+//                  primitive, barycentrics (2 x unorm16: attributes only; the position comes from t), t }
+//   ray -> job     uint  at 16 + capacity x 16 + slot x 4: job | ray index << 28
+//   shaded value   uint4 at 16 + capacity x 20 + slot x 16: { radiance rg, radiance b | hit distance, sun term rg, sun
+//                  term b | valid << 16 } (fp16, radiance and sun term x REFL_STORE_SCALE)
+//   shadow rays    uint4 at 16 + capacity x 36 + index x 16: { origin xyz, slot }
+// A job whose rays do not fit (header capacity) is traced and shaded inline by the trace pass (ReflectionHit.hlsli) and
+// its result written there; results[job] = { first slot, REFL_JOB_SPLIT } marks the split jobs for the combine pass.
+#ifndef UNX_REFLECTION_RAY_HLSLI
+#define UNX_REFLECTION_RAY_HLSLI
+#include "Passes/Reflection/ReflectionInternal.hlsli"
+#include "Passes/GI/ScreenProbes.hlsli"
+#include "Passes/GI/GiInternal.hlsli"
+#include "Passes/GI/GiSky.hlsli"  // giRandom, giUnit (the includer defines SKY)
+
+#define REFL_SAMPLE_ATTEMPTS 8u
+#define REFL_RAY_MISS 0xFFFFFFFFu
+#define REFL_RAY_NONE 0xFFFFFFFEu  // no unmasked direction was drawn
+#define REFL_JOB_SPLIT 0xFFFFFFFFu  // results[job].y of a job whose rays are in the rays buffer (never a packed fp16 pair)
+
+uint reflRaysHitOffset(uint slot) { return 16 + slot * 16; }
+uint reflRaysJobOffset(uint capacity, uint slot) { return 16 + capacity * 16 + slot * 4; }
+uint reflRaysValueOffset(uint capacity, uint slot) { return 16 + capacity * 20 + slot * 16; }
+uint reflRaysShadowOffset(uint capacity, uint index) { return 16 + capacity * 36 + index * 16; }
+
+struct ReflJob
+{
+    uint2 pixel;
+    uint mode, rays, seed;
+    ReflSurface s;
+    float alpha, lobe, coneWidth, coneSpread;
+};
+
+ReflJob reflLoadJob(uint job)
+{
+    StructuredBuffer<uint> jobs = ResourceDescriptorHeap[P[0].x];
+    Texture2D<uint> modes = ResourceDescriptorHeap[P[0].z];
+    Texture2D<float> depth = ResourceDescriptorHeap[P[4].x];
+    Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[4].y];
+    ReflJob j;
+    j.pixel = reflUnpackPixel(jobs[job]);
+    j.mode = reflMode(modes.Load(int3(j.pixel, 0)));
+    j.s = reflSurface(depth, gbuffer, j.pixel);
+    j.alpha = max(j.s.roughness * j.s.roughness, 1e-4);
+    j.rays = j.mode == REFL_M ? 1u : P[4].w;
+    j.lobe = reflectionLobeHalfAngle(j.s.roughness, dot(j.s.normal, j.s.view));
+    // Ray cone of the pixel (ReflectionShade.hlsli): its width at this surface and its spread after the lobe.
+    const float pixelSpread = 2 * g_tanHalfFovY / g_viewHeight;
+    j.coneWidth = pixelSpread * distance(j.s.position, g_cameraPosition);
+    j.coneSpread = pixelSpread + 2 * tan(j.lobe);
+    j.seed = giRandom(j.pixel.x * 7919u + j.pixel.y * 104729u + (P[5].x & 0xFFFFFFu) * 15485863u);
+    return j;
+}
+
+// The next direction of the job's sequence. The lobe average is over unmasked directions (the specular directional albedo
+// M applies carries the masked loss), so a direction below the surface is redrawn: rejection sampling draws exactly the
+// unmasked part of the VNDF distribution. False only when all REFL_SAMPLE_ATTEMPTS draws are masked (extreme grazing).
+bool reflNextDirection(ReflJob j, inout uint seed, out float3 dir)
+{
+    dir = 0;
+    [loop] for (uint attempt = 0; attempt < REFL_SAMPLE_ATTEMPTS; ++attempt)
+    {
+        const float2 u = float2(giUnit(seed), giUnit(seed + 1));
+        seed = giRandom(seed + 2);
+        dir = reflSampleGgx(j.s.normal, j.s.view, j.alpha, u);
+        if (dot(dir, j.s.normal) > 0) return true;
+    }
+    return false;
+}
+
+// The direction of ray 'index' (replaying the draws of the rays before it).
+bool reflRayDirection(ReflJob j, uint index, out float3 dir)
+{
+    uint seed = j.seed;
+    bool found = false;
+    dir = 0;
+    [loop] for (uint i = 0; i <= index; ++i) found = reflNextDirection(j, seed, dir);
+    return found;
+}
+
+uint reflPackBarycentrics(float2 b)
+{
+    const uint2 q = uint2(round(saturate(b) * 65535.0));
+    return q.x | (q.y << 16);
+}
+float2 reflUnpackBarycentrics(uint v) { return float2(v & 0xFFFFu, v >> 16) / 65535.0; }
+
+float3 reflRayOrigin(ReflSurface s) { return s.position + s.normal * (1e-3 + 2e-4 * s.linearDepth); }
+
+#endif
