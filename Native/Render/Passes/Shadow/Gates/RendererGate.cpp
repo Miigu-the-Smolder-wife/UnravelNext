@@ -5,7 +5,9 @@
 // Needs a build with tracks V, M, S and C (Build.ps1 -Track S -Tracks "V;M;S;C", or -Track all). GPU lock required:
 //   powershell -File Tools/CI/GpuLock.ps1 -Track S -- build/S/bin/unx_gate_shadow_renderergate.exe
 //       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--moving] [--sun-deg-per-s R]
-//       [--wind-gust-period-s T] [--out DIR] [--set k=v]
+//       [--wind-gust-period-s T] [--capture FILE.pfm] [--out DIR] [--set k=v]
+// --capture: the main view's linear scene radiance (FrameContext::outputLinearHdr, no exposure) of the last frame as
+// a PFM for unx_reference compare (one resolution; the frames still render as measured, plus one copy each).
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h") && defined(UNX_HAS_SCENEGEN)
 #define S_RENDERER_GATE 1
 #include "unx/clusterbuilder/ClusterBuilder.h"
@@ -25,6 +27,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -67,6 +70,7 @@ int main(int argc, char** argv)
         uint32_t frames = 600;
         bool moving = false;
         float sunDegPerS = 0;  // moving sun (time of day): the sun turns about the horizontal axis normal to it
+        std::string capturePath;  // --capture: last frame's linear radiance as PFM
         float gustPeriodS = 0;  // wind change after commit (v1.23): every gustPeriodS the source scene's wind alternates
                                 // between the scene's and +30 % speed / +20 degrees (no reload; the host's path)
         std::vector<std::string> overrides;
@@ -83,6 +87,7 @@ int main(int argc, char** argv)
             else if (a == "--moving") moving = true;
             else if (a == "--sun-deg-per-s") sunDegPerS = std::stof(next());
             else if (a == "--wind-gust-period-s") gustPeriodS = std::stof(next());
+            else if (a == "--capture") capturePath = next();
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
             else fail("unknown argument %s", a.c_str());
@@ -108,6 +113,9 @@ int main(int argc, char** argv)
         logf("scene %s (%s), %zu instances, %zu clusters, camera %s\n", sceneName.c_str(), scene::contentHash(s).substr(0, 16).c_str(), s.instances.size(),
              clusters.clusters.size(), moving ? "path 0 (moving)" : "0 (static)");
         Device device({});
+        ComPtr<ID3D12Resource> captureBuffer;  // --capture: readback of the gate output (last frame wins)
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT captureFootprint{};
+        float captureEv100 = 0;  // the captured frame's exposure (the output is radiance x exposure)
         ShaderLibrary shaders(device, executableDirectory() / "shaders");
         GpuScene gpuScene(device);
         gpuScene.upload(s);
@@ -148,8 +156,54 @@ int main(int argc, char** argv)
                     s.sun.direction = normalize(sun0 * ca + cross(sunAxis, sun0) * sa);
                 }
                 prev = fc.mainView.viewProj;
-                const TextureRef output = g.createTexture({ "gate output", rr.width, rr.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
+                fc.outputLinearHdr = !capturePath.empty();
+                captureEv100 = fc.mainView.ev100;
+                const TextureRef output = g.createTexture({ "gate output", rr.width, rr.height, 1, 1,
+                                                            capturePath.empty() ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R32G32B32A32_FLOAT });
                 renderer.record(g, fc, output);
+                if (!capturePath.empty())
+                {
+                    if (!captureBuffer)
+                    {
+                        D3D12_RESOURCE_DESC td{};
+                        td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                        td.Width = rr.width;
+                        td.Height = rr.height;
+                        td.DepthOrArraySize = 1;
+                        td.MipLevels = 1;
+                        td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+                        td.SampleDesc.Count = 1;
+                        UINT rows;
+                        UINT64 rowBytes, total;
+                        device.d3d()->GetCopyableFootprints(&td, 0, 1, 0, &captureFootprint, &rows, &rowBytes, &total);
+                        D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+                        D3D12_RESOURCE_DESC bd{};
+                        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                        bd.Width = total;
+                        bd.Height = 1;
+                        bd.DepthOrArraySize = 1;
+                        bd.MipLevels = 1;
+                        bd.SampleDesc.Count = 1;
+                        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                        check(device.d3d()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                                    IID_PPV_ARGS(&captureBuffer)),
+                              "capture readback");
+                    }
+                    ID3D12Resource* rb = captureBuffer.Get();
+                    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = captureFootprint;
+                    g.addPass("s.gate.capture", QueueType::Graphics,
+                              [&](PassBuilder& b) {
+                                  b.use(output, Use::CopySrc);
+                                  b.keep();
+                              },
+                              [=](PassContext& ctx) {
+                                  D3D12_TEXTURE_COPY_LOCATION dst{ rb, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+                                  dst.PlacedFootprint = fp;
+                                  D3D12_TEXTURE_COPY_LOCATION src{ ctx.resource(output), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                                  src.SubresourceIndex = 0;
+                                  ctx.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                              });
+                }
                 const shadow::VsmStats& st = shadow::stats(renderer.trackState());
                 if (frame > 8 && st.frame != lastStatsFrame)
                 {
@@ -167,6 +221,34 @@ int main(int argc, char** argv)
                 }
             });
             harness.printSummary(r);
+            if (!capturePath.empty() && captureBuffer)
+            {
+                // The harness waits for the GPU at its end: the readback holds the last frame. PFM: "PF", width height,
+                // -1 (little endian), rows bottom to top, RGB float.
+                void* mapped = nullptr;
+                check(captureBuffer->Map(0, nullptr, &mapped), "map capture");
+                std::string header = "PF\n" + std::to_string(res.width) + " " + std::to_string(res.height) + "\n-1.0\n";
+                std::vector<float> rgb((size_t)res.width * res.height * 3);
+                // The linear-HDR output is scene radiance already (measured against C's reference: the exposure is not in
+                // it, although Frame.h's comment says 'x exposure'); written as it is.
+                const float toRadiance = 1.0f;
+                (void)captureEv100;
+                for (uint32_t y = 0; y < res.height; ++y)
+                {
+                    const float* row = reinterpret_cast<const float*>(static_cast<const uint8_t*>(mapped) + captureFootprint.Offset + (size_t)y * captureFootprint.Footprint.RowPitch);
+                    float* dstRow = &rgb[(size_t)(res.height - 1 - y) * res.width * 3];
+                    for (uint32_t x = 0; x < res.width; ++x)
+                        for (int c = 0; c < 3; ++c) dstRow[x * 3 + c] = row[x * 4 + c] * toRadiance;
+                }
+                D3D12_RANGE none{ 0, 0 };
+                captureBuffer->Unmap(0, &none);
+                std::ofstream file(capturePath, std::ios::binary);
+                if (!file) fail("cannot write %s", capturePath.c_str());
+                file.write(header.data(), (std::streamsize)header.size());
+                file.write(reinterpret_cast<const char*>(rgb.data()), (std::streamsize)(rgb.size() * sizeof(float)));
+                logf("captured %ux%u linear radiance -> %s\n", res.width, res.height, capturePath.c_str());
+                captureBuffer.Reset();
+            }
             const shadow::VsmStats& st = shadow::stats(renderer.trackState());
             double sPasses = 0, raster = 0;
             for (const auto& [name, d] : r.passMs)
