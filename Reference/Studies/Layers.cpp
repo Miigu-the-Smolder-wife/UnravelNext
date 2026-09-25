@@ -1565,12 +1565,12 @@ void metalMsStudy(const std::string& out, uint32_t photons)
 
 // Table for candidate G (v1 metal): f = F D V g(mu_v) g(mu_l), g(mu; r, rho) solved per grid cell by symmetric Sinkhorn so
 // that the energy leaving every incidence equals the multiple-scattering conductor's albedo (Heitz walk) for Schlick
-// Fresnel with F0 = rho. Grid: mu = (k / 15)^2 (k = 0 at 1e-4), r = (j / 15)^2 (alpha = r^2), rho = 0.04 + 0.96 i / 7; row-major
+// Fresnel with F0 = rho. Grid: mu = (k / 15)^2 (k = 0 at 1e-4), r = (j / 31)^2 (alpha = r^2), rho = 0.04 + 0.96 i / 7; row-major
 // [rho][r][mu]. r = 0 is a mirror (no multiple scattering): g = 1. Validation: the published table looked up
 // trilinearly (as a shader would) at off-grid roughness and colour, against the reference.
 namespace gtab
 {
-constexpr int NMU = 16, NR = 16, NRHO = 8;
+constexpr int NMU = 16, NR = 32, NRHO = 8;
 // rho axis from 0.04 (the common dielectric F0): as F0 -> 0 the single-scattering energy near normal incidence vanishes
 // faster than the multiple-scattering part, so g is ill-conditioned there (g(mu 1) ~ 2-3 at F0 = 0), and a grid point at
 // 0 would pull F0 = 0.04 far off under linear interpolation. Lookups clamp rho below 0.04 to the first row.
@@ -1578,7 +1578,7 @@ constexpr double kRho0 = 0.04;
 // mu axis uniform in sqrt(mu) (mu_k = (k / 15)^2): g changes fastest at grazing incidence, where a uniform mu grid has a
 // single interval over 86-90 deg (validation: 5.9 % albedo error at r 0.07, 89.5 deg).
 double muAt(int k) { const double t = (double)k / (NMU - 1); return std::max(t * t, 1e-4); }
-// r axis uniform in sqrt(r) (r_j = (j / 15)^2): between the mirror (g = 1) and slightly rough metal, g at grazing grows
+// r axis uniform in sqrt(r) (r_j = (j / 31)^2): between the mirror (g = 1) and slightly rough metal, g at grazing grows
 // non-linearly (shadowing goes with alpha tan(theta)); validation with uniform r: 4.8 % at r 0.07, 2.8 % at r 0.2 (87.5 deg).
 double rAt(int j) { const double t = (double)j / (NR - 1); return t * t; }
 double lookup(const std::vector<float>& t, double mu, double r, double rho)
@@ -1665,9 +1665,9 @@ void metalGTable(const std::string& out, uint32_t photons)
          "// F0 + (1 - F0)(1 - v.h)^5; with Schlick the whole Fresnel curve is set by F0, so rho = F0 exactly). g is solved so\n"
          "// the energy leaving every incidence equals the multiple-scattering GGX conductor (Heitz 2016 walk, same Fresnel\n"
          "// at every bounce): reciprocal, forward and adjoint albedo equal to the reference.\n"
-         "// Layout: row-major [rho][r][mu], 8 x 16 x 16. mu = cos(theta) = (k / 15)^2 (uniform in sqrt(mu); k = 0 evaluated at\n"
-         "// 1e-4), r = perceptual roughness (j / 15)^2 (uniform in sqrt(r); alpha = r^2),\n"
-         "// rho = 0.04 + 0.96 i / 7. Lookup: trilinear in (sqrt(mu), sqrt(r), (rho - 0.04) / 0.96), clamped\n"
+         "// Layout: row-major [rho][r][mu], 8 x 32 x 16. mu = cos(theta) = (k / 15)^2 (uniform in sqrt(mu); k = 0 evaluated at\n"
+         "// 1e-4), r = perceptual roughness (j / 31)^2 (uniform in sqrt(r); alpha = r^2),\n"
+         "// rho = 0.04 + 0.96 i / 7. Lookup: trilinear in (sqrt(mu), sqrt(r), (rho - 0.04) / 0.96) scaled to (15, 31, 7), clamped\n"
          "// to the grid (rho < 0.04 uses the first row: g is ill-conditioned as F0 -> 0). r = 0: g = 1.\n";
     s << "const float kMetalScatterScale[" << table.size() << "] = {";
     for (size_t i = 0; i < table.size(); ++i) s << (i % 8 == 0 ? "\n    " : " ") << format("%.6ff,", table[i]);
@@ -1675,7 +1675,7 @@ void metalGTable(const std::string& out, uint32_t photons)
     writeTextFile(out, s.str());
 
     // Validation: the published table, trilinear, at off-grid roughness and colours.
-    const double rs[] = { 0.03, 0.07, 0.2, 0.45, 0.7, 0.871, 0.93 };  // 0.871 = (14/15)^2 is on the grid
+    const double rs[] = { 0.03, 0.07, 0.2, 0.45, 0.6, 0.7, 0.8, 0.93 };
     const Rgb cols[] = { Rgb(1.0f), Rgb(0.996f, 0.733f, 0.359f), Rgb(0.912f, 0.623f, 0.518f), Rgb(0.04f), Rgb(0.02f) };
     const char* colNames[] = { "white", "gold", "copper", "dielectric F0 0.04", "water F0 0.02 (below the grid)" };
     std::ostringstream md;
