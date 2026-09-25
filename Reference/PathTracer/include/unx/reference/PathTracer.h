@@ -63,8 +63,10 @@ struct RenderSettings
     // have the same expectation; the reference always uses the forced one (lower variance for sky light).
     bool forcedInScattering = true;
     // Diagnostics only: keep the light that underwent between volumeOrderMin and volumeOrderMax atmosphere scattering
-    // events (1 = single scattering). The default keeps everything; the reference tool puts a non-default window in the
-    // cache key.
+    // events. The default keeps everything; the reference tool puts a non-default window in the cache key. Only
+    // atmosphere events are counted: surface bounces (the planet ground and scene surfaces) are not, so the window 1:1
+    // also holds light scattered once in the air after any number of surface reflections. Pure single scattering
+    // needs a scene with black surfaces and ground (e.g. a --write-scene .unxscene edited to albedo 0).
     uint32_t volumeOrderMin = 0, volumeOrderMax = 0xFFFFFFFFu;
 };
 

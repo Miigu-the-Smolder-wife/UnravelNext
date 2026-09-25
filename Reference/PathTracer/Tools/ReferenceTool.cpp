@@ -2,9 +2,12 @@
 //
 //   unx_reference render  --scene <name|file.unxscene> (--camera <name> | --path <name> --time <s>) --res <WxH>
 //                         [--seed N] [--scale S] [--no-wind] [--sun-illuminance lux] [--write-scene <file>] [--spp N] [--force]
+//                         [--volume-order MIN:MAX]
 //       Renders into / reuses Cache/Reference/<scene>/<camera>_<W>x<H>_<spp>_<sceneHash16>_<qualityHash16>.pfm (+ .json,
 //       + .halfA.pfm / .halfB.pfm). --spp overrides reference.samples_per_pixel (recorded in the name and the hash);
 //       cached references (the ones gates read) use the configured value (>= 4096). Checkpoints every 10 min and resumes.
+//       --volume-order MIN:MAX (diagnostics, MAX may be inf) keeps only light with MIN..MAX atmosphere scattering events;
+//       surface and ground bounces are not counted (pure single scattering needs black surfaces and ground).
 //   unx_reference census  --scene ... (--camera|--path/--time) --res <WxH> [--engine <capture.unxids>] [--out report.json]
 //       16-sub-sample identity census; without --engine the 1-sample (pixel centre) + 3x3 baseline.
 //   unx_reference compare --scene ... (--camera|--path/--time) --res <WxH> --test <engine.pfm> [--out report.json]
