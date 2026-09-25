@@ -1171,6 +1171,7 @@ ID3D12Resource* PassContext::resource(BufferRef b) const { return m_graph->m_imp
 D3D12_GPU_VIRTUAL_ADDRESS PassContext::address(BufferRef b) const { return m_graph->m_impl->framePointers[b.id]->GetGPUVirtualAddress(); }
 const TextureDesc& PassContext::desc(TextureRef t) const { return m_graph->m_impl->resources[t.id].tdesc; }
 const TextureDesc& RenderGraph::desc(TextureRef t) const { return m_impl->resources[t.id].tdesc; }
+const BufferDesc& RenderGraph::desc(BufferRef b) const { return m_impl->resources[b.id].bdesc; }
 void PassContext::computeConstants(const void* data, uint32_t dwords) const { cmd->SetComputeRoot32BitConstants(0, dwords, data, 0); }
 void PassContext::graphicsConstants(const void* data, uint32_t dwords) const { cmd->SetGraphicsRoot32BitConstants(0, dwords, data, 0); }
 void PassContext::bindFrameConstants(D3D12_GPU_VIRTUAL_ADDRESS address) const

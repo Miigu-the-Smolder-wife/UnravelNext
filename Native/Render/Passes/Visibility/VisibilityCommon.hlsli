@@ -52,10 +52,13 @@ struct CullView
 #define VS_STAT_TRIANGLES 25u // + band (3): triangles of visible clusters per band A, B, C
 #define VS_GROUP_END 28u      // group items of the current cluster pass: [VS_GROUP_BEGIN, VS_GROUP_END)
 #define VS_TILE_PAIRS 29u     // tile-local raster: (cluster, tile rectangle) pairs appended
+#define VS_COV_POOL 30u       // coverage record pool of the frame (chunks; CoverageBuild MODE 2, for the statistics)
 #define VS_COV_FRAGMENTS 32u  // coverage layer (CoverageLayer.hlsli): fragments appended by the raster
-#define VS_COV_PIXELS 33u     // pixels with fragments (pixel list entries)
-#define VS_COV_ALLOC 34u      // sorted fragments allocated by the build
+#define VS_COV_TILES 33u      // tiles with fragments (tile list entries)
+#define VS_COV_CHUNKS 34u     // record chunks taken from the pool (may exceed the pool: the need, for its sizing)
 #define VS_STAT_BAND_CLUSTERS 35u  // + band (3): visible clusters per band A, B, C
+#define VS_COV_LOST 38u       // chunks taken but not published (another wave published the slot's chunk first)
+#define VS_COV_HEAVY 39u      // heavy coverage tiles (tile list)
 #define VS_WORDS 40u
 
 #define VS_LISTS 6u
@@ -75,8 +78,8 @@ struct CullView
 #define VA_SEED_NODES 12u
 #define VA_MESH 15u           // + 3 * list
 #define VA_COV_MESH 33u       // coverage raster: every band B list entry (both phases)
-#define VA_COV_RESET 36u      // heads reset over last frame's coverage pixels
-#define VA_COV_PIXELS 39u     // build over this frame's coverage pixels
+#define VA_COV_CLEAR 36u      // tile clear over last frame's coverage tiles (one group per tile)
+#define VA_COV_TILES 39u      // heavy tile classification over this frame's coverage tiles (64 per group)
 #define VA_WORDS 42u
 
 // Overflow bits (VS_OVERFLOW): a capacity was exceeded; the run's statistics report them (Stats::overflow).
@@ -88,8 +91,7 @@ struct CullView
 #define OVERFLOW_DEFER_CLUSTERS 32u
 #define OVERFLOW_NODE_DEPTH 64u        // node items left unprocessed after the last traversal iteration
 #define OVERFLOW_TILE_PAIRS 128u
-#define OVERFLOW_COVERAGE 256u         // coverage fragments beyond visibility.max_coverage_fragments
-#define OVERFLOW_COVERAGE_DEPTH 512u   // a pixel with more than 255 coverage fragments (the nearest-listed 255 kept)
+#define OVERFLOW_COVERAGE 256u         // the coverage record pool ran out (its fragments are lost; the pool grows)
 
 // Wave-aggregated append of 'n' entries per lane to a counter word; returns this lane's first index. Must be called
 // from uniform control flow (every active lane of the wave). Entries at or beyond 'capacity' set 'overflowBit'.

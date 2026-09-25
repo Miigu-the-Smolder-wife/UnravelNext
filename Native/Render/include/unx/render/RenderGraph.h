@@ -185,6 +185,7 @@ public:
     TextureRef createTexture(const TextureDesc& desc);
     BufferRef createBuffer(const BufferDesc& desc);
     const TextureDesc& desc(TextureRef t) const;  // at record time (e.g. a service choosing its pipeline by format)
+    const BufferDesc& desc(BufferRef b) const;    // at record time (e.g. a buffer sized per frame by its producer)
 
     void addPass(std::string_view name, QueueType queue, const SetupFn& setup, ExecuteFn execute);
 

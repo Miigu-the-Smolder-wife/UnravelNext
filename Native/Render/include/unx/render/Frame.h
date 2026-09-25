@@ -61,11 +61,15 @@ struct ViewResources
                                    // depth (minimum reversed-Z value) of the pixels [i 2^(m+1), ...);
                                    // valid mip size ceil(W / 2^(m+1)) x ceil(H / 2^(m+1)) inside a
                                    // power-of-two allocation (texels beyond it are undefined)
-    BufferRef coverageFragments;   // coverage layer fragments, sorted per pixel            [V]
-    TextureRef coverageHeads;      // R32_UINT per pixel: first fragment | count << 24       [V]
-    BufferRef coveragePixels;      // raw: words 0..2 DispatchIndirect args over the coverage  [V]
-                                   // pixels (64 per group), 3 pixel count, 4 fragment count,
-                                   // 8.. pixel list (x | y << 16) (7.1, v1.25; invalid = no layer)
+    // Coverage layer (7.1 v2, CoverageTiles.hlsli; invalid = no layer), per 8 x 8 tile:
+    BufferRef coverageTiles;       // raw: 8-word tile headers (count, zNear, zFar, opaqueCovered  [V]
+                                   // 64 bit, first extension chunk table)
+    BufferRef coverageChunkTable;  // raw: per tile N words, chunk index + 1 of its first N chunks [V]
+    BufferRef coverageChunks;      // raw: record pool, chunks of 64 16 B CoverageFragment records [V]
+                                   // (or 256-word extension tables)
+    TextureRef coverageBDepth;     // R32_UINT: nearest full-pixel opaque fragment depth (bits)  [V]
+    BufferRef coverageTileList;    // raw: header (args over the tiles, counts, N, tiles per row,  [V]
+                                   // heavy tile args and count), tiles with fragments, heavy tiles
     TextureRef gbuffer;            // RG32_UINT (GBuffer.hlsli)                              [M]
     TextureRef shadowVisibility;   // R32_UINT, 4 light slots x 8 bit (7.3)                 [S]
     TextureRef shadowOverflowTiles;  // R32_UINT ceil(W/8) x ceil(H/8) (main view, 7.3, v1.20): [S]

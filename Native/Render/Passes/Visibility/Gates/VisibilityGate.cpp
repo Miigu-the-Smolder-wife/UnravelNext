@@ -36,6 +36,7 @@
 #endif
 
 #include <algorithm>
+#include <bit>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -536,14 +537,13 @@ int main(int argc, char** argv)
             if (coverage)
             {
                 const double covRaster = sumPasses(r, [](const std::string& n) { return n == "v.coverage.raster"; });
-                const double covBuild = sumPasses(r, [](const std::string& n) { return n == "v.coverage.build"; });
-                const double covOther = sumPasses(r, [](const std::string& n) { return startsWith(n, "v.coverage.") && n != "v.coverage.raster" && n != "v.coverage.build"; });
+                const double covOther = sumPasses(r, [](const std::string& n) { return startsWith(n, "v.coverage.") && n != "v.coverage.raster"; });
                 const double F = st.coverageFragments;
-                logf("  coverage layer: %u fragments in %u pixels (%.2f per pixel) | raster %.3f ms (%.3f ns/fragment; design F x 0.05 ns = %.3f ms) | build (walk, "
-                     "sort, write) %.3f ms (design F x 16 B x 2 / 600 GB/s = %.3f ms) | clear/prepare/args %.3f ms\n",
-                     st.coverageFragments, st.coveragePixels, st.coveragePixels ? F / st.coveragePixels : 0.0, covRaster, F > 0 ? covRaster * 1e6 / F : 0.0,
-                     F * 0.05e-6, covBuild, F * 32.0 / 600e9 * 1e3, covOther);
-                // Fragments-per-pixel histogram of one more frame (heads = first | count << 24).
+                logf("  coverage layer: %u fragments in %u tiles (%.2f per pixel of a listed tile), %u chunks of pool %u (%u lost to races), %u heavy tiles | raster "
+                     "%.3f ms (%.3f ns/fragment; design F x 0.05 ns = %.3f ms) | clear/prepare/args/heavy %.3f ms\n",
+                     st.coverageFragments, st.coverageTiles, st.coverageTiles ? F / (64.0 * st.coverageTiles) : 0.0, st.coverageChunks, st.coveragePoolChunks,
+                     st.coverageChunksLost, st.coverageHeavyTiles, covRaster, F > 0 ? covRaster * 1e6 / F : 0.0, F * 0.05e-6, covOther);
+                // Fragments-per-tile histogram of one more frame (tile header word 0).
                 RenderGraph g(device);
                 FrameContext fc;
                 fc.frameIndex = frames + 1000;
@@ -552,72 +552,60 @@ int main(int argc, char** argv)
                 fc.mainView = ViewDesc::fromCamera(cameraAt(s, moving, fc.time), res.width, res.height, prev);
                 const TextureRef output = g.createTexture({ "gate output", res.width, res.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
                 const ViewResources main = renderer.record(g, fc, output);
-                const uint32_t pitch = (res.width * 4 + 255) / 256 * 256;
+                const uint32_t tileCount = ((res.width + 7) / 8) * ((res.height + 7) / 8);
                 ComPtr<ID3D12Resource> rb;
                 {
                     D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
                     D3D12_RESOURCE_DESC1 rd{};
                     rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-                    rd.Width = (uint64_t)pitch * res.height;
+                    rd.Width = (uint64_t)tileCount * 32;
                     rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
                     rd.SampleDesc.Count = 1;
                     rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
                     check(device.d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)),
-                          "gate heads readback");
+                          "gate tile readback");
                 }
                 ID3D12Resource* dst = rb.Get();
-                const uint32_t w = res.width, h = res.height;
-                g.addPass("gate.heads.readback", QueueType::Graphics,
+                g.addPass("gate.tiles.readback", QueueType::Graphics,
                           [&](PassBuilder& b) {
-                              b.use(main.coverageHeads, Use::CopySrc);
+                              b.use(main.coverageTiles, Use::CopySrc);
                               b.keep();
                           },
-                          [=](PassContext& c) {
-                              D3D12_TEXTURE_COPY_LOCATION to{}, from{};
-                              to.pResource = dst;
-                              to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                              to.PlacedFootprint.Footprint = { DXGI_FORMAT_R32_UINT, w, h, 1, pitch };
-                              from.pResource = c.resource(main.coverageHeads);
-                              from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                              c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
-                          });
+                          [=](PassContext& c) { c.cmd->CopyBufferRegion(dst, 0, c.resource(main.coverageTiles), 0, (uint64_t)tileCount * 32); });
                 g.execute(nullptr);
                 device.waitIdle();
-                const uint8_t* p = nullptr;
-                check(rb->Map(0, nullptr, (void**)&p), "map heads");
-                const uint32_t edges[] = { 1, 2, 3, 4, 6, 8, 12, 16, 32, 64, 128, 256 };
-                uint64_t bins[std::size(edges)] = {}, pixels = 0, fragments = 0, over8 = 0, fragmentsOver8 = 0;
-                for (uint32_t y = 0; y < h; ++y)
-                    for (uint32_t x = 0; x < w; ++x)
-                    {
-                        uint32_t v;
-                        std::memcpy(&v, p + (size_t)y * pitch + 4 * x, 4);
-                        const uint32_t n = v >> 24;
-                        if (n == 0) continue;
-                        ++pixels;
-                        fragments += n;
-                        if (n > 8)
-                        {
-                            ++over8;
-                            fragmentsOver8 += n;
-                        }
-                        size_t k = 0;
-                        while (k + 1 < std::size(edges) && n >= edges[k + 1]) ++k;
-                        ++bins[k];
-                    }
+                const uint32_t* p = nullptr;
+                check(rb->Map(0, nullptr, (void**)&p), "map tiles");
+                // Bins by fragments per tile (per pixel = / 64); the heavy threshold of M's block sort is 1024.
+                const uint32_t edges[] = { 1, 64, 128, 256, 512, 1024, 2048, 4096, 16384 };
+                uint64_t bins[std::size(edges)] = {}, tiles = 0, fragments = 0, heavyFragments = 0, opaquePixels = 0;
+                uint32_t deepest = 0;
+                for (uint32_t t = 0; t < tileCount; ++t)
+                {
+                    const uint32_t n = p[8 * t];
+                    opaquePixels += std::popcount(p[8 * t + 3]) + std::popcount(p[8 * t + 4]);
+                    if (n == 0) continue;
+                    ++tiles;
+                    fragments += n;
+                    deepest = std::max(deepest, n);
+                    if (n > 1024) heavyFragments += n;
+                    size_t k = 0;
+                    while (k + 1 < std::size(edges) && n >= edges[k + 1]) ++k;
+                    ++bins[k];
+                }
                 rb->Unmap(0, nullptr);
                 std::string hist;
                 for (size_t k = 0; k < std::size(edges); ++k)
                 {
                     char b[64];
-                    const uint32_t lo = edges[k], hi = k + 1 < std::size(edges) ? edges[k + 1] - 1 : 255;
-                    if (lo == hi) snprintf(b, sizeof b, "%s%u: %.2f%%", k ? ", " : "", lo, pixels ? 100.0 * bins[k] / pixels : 0.0);
-                    else snprintf(b, sizeof b, "%s%u-%u: %.2f%%", k ? ", " : "", lo, hi, pixels ? 100.0 * bins[k] / pixels : 0.0);
+                    if (k + 1 < std::size(edges)) snprintf(b, sizeof b, "%s%u-%u: %.2f%%", k ? ", " : "", edges[k], edges[k + 1] - 1, tiles ? 100.0 * bins[k] / tiles : 0.0);
+                    else snprintf(b, sizeof b, "%s%u+: %.2f%%", k ? ", " : "", edges[k], tiles ? 100.0 * bins[k] / tiles : 0.0);
                     hist += b;
                 }
-                logf("  fragments per pixel (one frame, %llu pixels, %llu fragments): %s | pixels over 8: %.2f%% holding %.1f%% of the fragments\n",
-                     (unsigned long long)pixels, (unsigned long long)fragments, hist.c_str(), pixels ? 100.0 * over8 / pixels : 0.0,
-                     fragments ? 100.0 * fragmentsOver8 / fragments : 0.0);
+                logf("  fragments per tile (one frame, %llu tiles, %llu fragments, deepest %u): %s | tiles over 1024 hold %.1f%% of the fragments | opaqueCovered "
+                     "pixels %llu\n",
+                     (unsigned long long)tiles, (unsigned long long)fragments, deepest, hist.c_str(), fragments ? 100.0 * heavyFragments / fragments : 0.0,
+                     (unsigned long long)opaquePixels);
                 device.deferRelease(rb);
             }
             if (service)

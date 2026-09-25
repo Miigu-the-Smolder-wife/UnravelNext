@@ -1,51 +1,39 @@
-// V internal: the coverage layer (band B, ARCHITECTURE 2.1; INTERFACES 7.1): records, root constants and helpers of
-// CoverageRaster.ms/ps and CoverageBuild. Owner: V.
+// V internal: the coverage layer (band B, ARCHITECTURE 2.1; INTERFACES 7.1 v2, CoverageTiles.hlsli): root constants and
+// helpers of CoverageRaster.ms/ps and CoverageBuild. Owner: V.
 //
 // Per frame (main view):
-//  1. the heads of last frame's coverage pixels are cleared (the pixel list still holds them), so the whole-screen
-//     heads are never cleared;
+//  1. last frame's tiles (the tile list still holds them) get their header, chunk table and bDepth pixels cleared, so
+//     the whole-screen buffers are never cleared;
 //  2. band B clusters are rasterised conservatively: each pixel fragment carries the exact area of its triangle inside
-//     the pixel, the 32-subsample mask and the depth at the covered region's centroid, and is appended (raw, 20 B) to a
-//     per-pixel linked list (heads = newest fragment + 1) unless every band A surface around the pixel is nearer; a
-//     pixel's first fragment puts it on the pixel list;
-//  3. per listed pixel, the build walks the list, allocates a contiguous range, writes the fragments sorted nearest
-//     first (16 B, INTERFACES 7.1) and sets heads = first | count << 24.
-// The pixel buffer (header + list) stays for M's coverage composite and for the next frame's clear.
-//   P[0] cull state UAV (raw; VS_COV_* words), cull args UAV (raw), raw fragments UAV, sorted fragments UAV
-//   P[1] heads UAV (RWTexture2D<uint>), pixel buffer UAV (raw, COV_PIXEL_*), fragment capacity, pixel capacity
+//     the pixel, the 32-subsample mask, the depth at the covered region's centroid and the interpolated normal there;
+//     fragments behind the pixel's bDepth or behind every band A surface around the pixel are dropped; the rest are
+//     appended to their 8 x 8 tile: one count atomic per tile and wave, a chunk per 64 records taken from the pool and
+//     published in the tile's chunk table (or, past its slots, the tile's extension tables) by compare-and-swap (no
+//     waiting); a tile's first fragment puts it on the tile list; full-pixel opaque fragments set the tile's
+//     opaqueCovered bit and the pixel's bDepth;
+//  3. the tile list's header for M: dispatch arguments over the tiles, and the heavy tiles (more fragments than M's
+//     block sort holds) in a list of their own.
+// No sort: M's composite sorts a tile's records in groupshared.
+//   P[0] cull state UAV (raw; VS_COV_* words), cull args UAV (raw), records UAV (raw), chunk table UAV (raw)
+//   P[1] bDepth UAV (RWTexture2D<uint>), tile list UAV (raw), pool chunks, chunk table slots | heavy threshold << 12
 //   P[2] HiZ SRV (Texture2D<float> mip 0, UNX_NONE = none), view width, view height, HiZ mip 0 width | height << 16
 //   P[3] visible SRV (uint2), lists SRV (raw), list capacity, views SRV
 //   P[4] front-face sign (+1: front = negative signed area in y-down pixels, i.e. counter-clockwise on screen;
-//        -1 mirrored), unused x 3
+//        -1 mirrored), tile headers UAV (raw), tiles per row, tiles
 #ifndef UNX_COVERAGE_LAYER_HLSLI
 #define UNX_COVERAGE_LAYER_HLSLI
 #include "Passes/Visibility/VisibilityCommon.hlsli"
-
-struct CoverageRawFragment  // 20 B, linked per pixel during the raster
-{
-    uint visId;
-    float depth;  // device depth (reversed Z) at the covered region's centroid
-    uint mask;    // 32-subsample coverage (Coverage.hlsli coverageSample)
-    float area;   // exact area of the triangle inside the pixel, in pixels (x the alpha-tested fraction)
-    uint next;    // older fragment of the same pixel + 1 (0 = end)
-};
-
-struct CoverageFragment  // 16 B, INTERFACES 7.1
-{
-    uint visId;
-    float depth;
-    uint coverageMask32;
-    float area;
-};
+#include "Passes/Visibility/CoverageTiles.hlsli"
 
 #define COV_STATE P[0].x
 #define COV_ARGS P[0].y
-#define COV_RAW P[0].z
-#define COV_SORTED P[0].w
-#define COV_HEADS P[1].x
-#define COV_PIXELS P[1].y
-#define COV_CAP_FRAGMENTS P[1].z
-#define COV_CAP_PIXELS P[1].w
+#define COV_RECORDS P[0].z
+#define COV_CHUNK_TABLE P[0].w
+#define COV_BDEPTH P[1].x
+#define COV_TILE_LIST P[1].y
+#define COV_CAP_CHUNKS P[1].z
+#define COV_TABLE_SLOTS (P[1].w & 0xFFFu)
+#define COV_HEAVY_MIN (P[1].w >> 12)
 #define COV_HIZ P[2].x
 #define COV_WIDTH P[2].y
 #define COV_HEIGHT P[2].z
@@ -55,19 +43,32 @@ struct CoverageFragment  // 16 B, INTERFACES 7.1
 #define COV_LIST_CAPACITY P[3].z
 #define COV_VIEWS P[3].w
 #define COV_FRONT_SIGN asfloat(P[4].x)
-
-// Pixel buffer (raw, persistent; ViewResources::coveragePixels): a header, then the pixel list (x | y << 16).
-#define COV_PIXEL_ARGS 0u       // DispatchIndirect args over this frame's coverage pixels (64 per group)
-#define COV_PIXEL_COUNT 3u      // this frame's coverage pixels (next frame: the pixels whose heads are cleared)
-#define COV_PIXEL_FRAGMENTS 4u  // this frame's sorted fragments
-#define COV_PIXEL_LIST 8u       // first list word
+#define COV_TILE_HEADERS P[4].y
+#define COV_TILES_X P[4].z
+#define COV_TILES P[4].w
 
 // Primitive flags (CoverageRaster.ms -> ps).
-#define COV_FLAG_ALPHA 1u  // alpha-tested material
-#define COV_FLAG_QUAD 2u   // near-clipped: the polygon is the quad (a, b, c, d)
+#define COV_FLAG_ALPHA 1u   // alpha-tested material
+#define COV_FLAG_QUAD 2u    // near-clipped: the polygon is the quad (a, b, c, d)
+#define COV_FLAG_OPAQUE 4u  // not alpha-tested and not transmissive: a full-pixel fragment hides everything behind it
+#define COV_FLAG_BACK 8u    // seen from behind (two-sided): the normals are turned towards the viewer
 
-uint coveragePack(uint2 p) { return p.x | (p.y << 16); }
-uint2 coverageUnpack(uint v) { return uint2(v & 0xFFFFu, v >> 16); }
+// Vertex normals between the mesh and pixel kernels: octahedral 16 + 16 bits (the record keeps 8 + 8).
+uint coverageOct32(float3 n)
+{
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    const float2 e = n.z >= 0 ? n.xy : (1 - abs(n.yx)) * float2(n.x >= 0 ? 1 : -1, n.y >= 0 ? 1 : -1);
+    const uint2 q = uint2(round(saturate(e * 0.5 + 0.5) * 65535));
+    return q.x | (q.y << 16);
+}
+
+float3 coverageOct32Decode(uint v)
+{
+    const float2 e = float2(v & 0xFFFFu, v >> 16) / 65535.0 * 2 - 1;
+    float3 n = float3(e, 1 - abs(e.x) - abs(e.y));
+    if (n.z < 0) n.xy = (1 - abs(n.yx)) * float2(n.x >= 0 ? 1 : -1, n.y >= 0 ? 1 : -1);
+    return normalize(n);
+}
 
 // Barycentric weights of point q with respect to triangle (a, b, c) (screen pixels); affine, so valid outside it.
 float3 coverageBarycentric(float2 a, float2 b, float2 c, float2 q)

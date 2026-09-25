@@ -5,7 +5,10 @@
 // the triangle clipped to the near plane (z <= w, reversed Z) as a polygon of 3 or 4 vertices in viewport pixels with
 // device depth z/w and 1/w, plus their uvs (perspective-correct alpha tests). The hardware clips the same triangle, so
 // the pixels it shades lie in that polygon. Culled here: nothing left after the near clip, zero area, and back faces of
-// one-sided materials in views that cull back faces (the front sign follows the view's mirroring).
+// one-sided materials in views that cull back faces (the front sign follows the view's mirroring). The polygon's vertex
+// normals (world, octahedral 16 + 16 bits, so the record's 8 + 8 bits are the only coarse rounding) go along for the
+// record's interpolated normal; COV_FLAG_BACK marks a
+// primitive seen from behind (two-sided materials), whose normals the pixel kernel turns towards the viewer.
 #include "Passes/Visibility/CoverageLayer.hlsli"
 #include "VisBuffer.hlsli"
 
@@ -25,11 +28,13 @@ struct PrimitiveOut
     float4 d : TRID;  // = c unless COV_FLAG_QUAD
     float4 tab : UVAB;
     float4 tcd : UVCD;
+    uint4 normals : NRMS;  // coverageOct32 of a, b, c, d
     bool cull : SV_CullPrimitive;
 };
 
 groupshared float4 gs_clip[128];
 groupshared float2 gs_uv[128];
+groupshared float3 gs_normal[128];
 
 float4 toScreen(float4 p, float2 viewport)
 {
@@ -60,6 +65,9 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     const GpuMaterial m = loadMaterial(material);
     const bool oneSided = (m.classFlags & MATERIAL_TWO_SIDED) == 0 && (v.flags & CULL_VIEW_CULL_BACK) != 0;
     const uint alphaFlag = (m.classFlags & MATERIAL_ALPHA_TESTED) != 0 ? COV_FLAG_ALPHA : 0u;
+    // Opaque for the view: no alpha test and not a see-through class (a leaf's transmission is light, not view).
+    const uint materialClass = m.classFlags & 0xFFu;
+    const uint opaqueFlag = alphaFlag == 0 && materialClass != MATERIAL_GLASS && materialClass != MATERIAL_WATER ? COV_FLAG_OPAQUE : 0u;
     const uint vertexCount = valid ? clusterVertexCount(cl) : 0, triangleCount = valid ? clusterTriangleCount(cl) : 0;
     SetMeshOutputCounts(vertexCount, triangleCount);
     StructuredBuffer<uint> clusterVertices = ResourceDescriptorHeap[g_clusterVertexIndices];
@@ -71,6 +79,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         verts[i].position = p;
         gs_clip[i] = p;
         gs_uv[i] = loadVertex(mesh, meshVertex).uv;
+        gs_normal[i] = dv.normal;
     }
     GroupMemoryBarrierWithGroupSync();
     StructuredBuffer<uint> clusterTriangles = ResourceDescriptorHeap[g_clusterTriangles];
@@ -81,10 +90,12 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         tris[t] = tri;
         const float4 p[3] = { gs_clip[tri.x], gs_clip[tri.y], gs_clip[tri.z] };
         const float2 uv[3] = { gs_uv[tri.x], gs_uv[tri.y], gs_uv[tri.z] };
+        const float3 nv[3] = { gs_normal[tri.x], gs_normal[tri.y], gs_normal[tri.z] };
         // Near clip (keep w - z >= 0): Sutherland-Hodgman against one plane leaves 3 or 4 vertices (0 when behind).
         // Clip-space interpolation is linear in the world position, so the uvs interpolate with the same parameter.
         float4 q[4];
         float2 tq[4];
+        float3 nq[4];
         uint n = 0;
         [unroll] for (uint k = 0; k < 3; ++k)
         {
@@ -94,6 +105,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
             {
                 q[n] = p[k];
                 tq[n] = uv[k];
+                nq[n] = nv[k];
                 ++n;
             }
             if ((ek >= 0) != (ej >= 0))
@@ -101,6 +113,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
                 const float s = ek / (ek - ej);
                 q[n] = lerp(p[k], p[j], s);
                 tq[n] = lerp(uv[k], uv[j], s);
+                nq[n] = lerp(nv[k], nv[j], s);
                 ++n;
             }
         }
@@ -114,6 +127,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
             {
                 q[3] = q[2];
                 tq[3] = tq[2];
+                nq[3] = nq[2];
             }
             o.a = toScreen(q[0], v.viewportSize);
             o.b = toScreen(q[1], v.viewportSize);
@@ -121,10 +135,12 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
             o.d = toScreen(q[3], v.viewportSize);
             o.tab = float4(tq[0], tq[1]);
             o.tcd = float4(tq[2], tq[3]);
-            o.flags = alphaFlag | (n == 4 ? COV_FLAG_QUAD : 0u);
+            o.normals = uint4(coverageOct32(nq[0]), coverageOct32(nq[1]), coverageOct32(nq[2]), coverageOct32(nq[3]));
             // Signed area of the polygon (shoelace), y-down pixels.
             const float area2 = (o.a.x * o.b.y - o.b.x * o.a.y) + (o.b.x * o.c.y - o.c.x * o.b.y) + (o.c.x * o.d.y - o.d.x * o.c.y) + (o.d.x * o.a.y - o.a.x * o.d.y);
-            cull = area2 == 0 || (oneSided && COV_FRONT_SIGN * area2 > 0);
+            const bool back = COV_FRONT_SIGN * area2 > 0;
+            o.flags = alphaFlag | opaqueFlag | (n == 4 ? COV_FLAG_QUAD : 0u) | (back ? COV_FLAG_BACK : 0u);
+            cull = area2 == 0 || (oneSided && back);
         }
         o.cull = cull;
         prims[t] = o;

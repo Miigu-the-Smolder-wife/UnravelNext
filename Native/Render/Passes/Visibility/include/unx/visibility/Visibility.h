@@ -22,9 +22,15 @@ struct Stats
                                        // tile-local raster runs: (cluster, tile rectangle) pairs
     uint32_t tilePairs = 0;            // tile-local raster runs: pairs drawn (DepthRasterRequest::tileLocal)
     uint32_t deferredInstances = 0, deferredNodes = 0, deferredClusters = 0;  // phase 1 -> phase 2
-    uint32_t coverageFragments = 0;    // coverage layer fragments appended (main view; may exceed the capacity)
-    uint32_t coveragePixels = 0;       // pixels with coverage fragments
+    uint32_t coverageFragments = 0;    // coverage layer fragments appended (main view)
+    uint32_t coverageTiles = 0;        // 8 x 8 tiles with coverage fragments
+    uint32_t coverageChunks = 0;       // record chunks taken, extension tables included (the need; may exceed the pool)
+    uint32_t coverageChunksLost = 0;   // chunks taken but not published (another wave published the slot first)
+    uint32_t coverageHeavyTiles = 0;   // tiles over visibility.coverage_heavy_tile_fragments (M's heavy path)
+    uint32_t coveragePoolChunks = 0;   // the frame's record pool (chunks of 64 records)
     uint32_t overflow = 0;             // capacity bits (0 = every list fit); nonzero means geometry was dropped
+                                       // (0x100: the coverage record pool ran out; it grows from the next
+                                       // completed frame)
 };
 
 // Statistics of the latest frame whose readback has completed (frameIndex = UINT64_MAX before the first): "main" for

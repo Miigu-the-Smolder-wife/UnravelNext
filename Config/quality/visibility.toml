@@ -33,6 +33,12 @@ max_visible_clusters = 1048576    # visible-list entries (each draw list has the
 max_node_items = 4194304          # hierarchy traversal work items (instance, node) of both phases
 max_group_items = 1048576         # hierarchy leaves reached (instance, group)
 max_deferred_items = 1048576      # phase-1 occluded instances / nodes / clusters retested in phase 2
-max_coverage_fragments = 12582912 # coverage layer fragments per frame (20 B raw + 16 B sorted each; < 2^24)
+coverage_table_slots = 32         # coverage layer: chunk table slots per 8 x 8 tile (64 fragments each); later chunks go to
+                                  # the tile's extension tables (no per-tile limit; COVERAGE_REDESIGN 4.5)
+coverage_pool_min_fragments_per_pixel = 1.0  # coverage record pool floor (4K: 8.3 M records, 133 MB); the pool is 1.5 x
+                                  # the latest measured need when larger (16 B per record)
+coverage_heavy_tile_fragments = 1024  # tiles with more fragments go on the heavy list (M's block sort and merge)
+max_coverage_fragments = 12582912 # unused since INTERFACES v1.37 (coverage layer v2); kept so binaries built before it still
+                                  # start; removed after the next integrated rebuild
 coverage_band_c = true            # with coverage_layer: band C clusters are drawn in the coverage layer until the band C
                                   # bricks exist; false leaves them undrawn (measurement of band B's cost only)

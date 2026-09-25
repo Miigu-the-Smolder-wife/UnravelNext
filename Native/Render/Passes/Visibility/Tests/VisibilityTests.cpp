@@ -1302,15 +1302,16 @@ void addCard(scene::Mesh& m, float3 c, float w, float len, bool front)
     else m.indices.insert(m.indices.end(), { b, b + 1, b + 2, b, b + 2, b + 3 });
 }
 
-// A thin strip along z (from z0 to z1) at (x, y), width w along x, in the plane y = const: it passes the near plane.
-void addStrip(scene::Mesh& m, float x, float y, float z0, float z1, float w)
+// A thin strip along z (from z0 to z1) at (x, y), width w along x, in the plane y = const: it passes the near plane. The
+// vertex normals are n0 at z0 and n1 at z1.
+void addStrip(scene::Mesh& m, float x, float y, float z0, float z1, float w, float3 n0 = { 0, 1, 0 }, float3 n1 = { 0, 1, 0 })
 {
     const uint32_t b = (uint32_t)m.positions.size();
     const float3 p[4] = { { x - 0.5f * w, y, z0 }, { x + 0.5f * w, y, z0 }, { x + 0.5f * w, y, z1 }, { x - 0.5f * w, y, z1 } };
     for (int k = 0; k < 4; ++k)
     {
         m.positions.push_back(p[k]);
-        m.normals.push_back({ 0, 1, 0 });
+        m.normals.push_back(normalize(k < 2 ? n0 : n1));
         m.uv0.push_back({ 0, 0 });
     }
     m.indices.insert(m.indices.end(), { b, b + 1, b + 2, b, b + 2, b + 3 });
@@ -1319,13 +1320,15 @@ void addStrip(scene::Mesh& m, float x, float y, float z0, float z1, float w)
 struct CoverageScene
 {
     scene::Scene scene;
-    uint32_t bladeMesh = 0, stripMesh = 0;
+    uint32_t bladeMesh = 0, stripMesh = 0, columnMesh = 0, stackMesh = 0;
 };
 
 // Camera at the origin looking along +z (60 degree fov, near 0.05 m). Band A: a reference card (winding check), an
 // occluder box in front of some blades. Bands B/C: blades 0.2 .. 2 mm wide at 0.6 .. 3 m (0.1 .. 1.2 px), in pairs that
 // overlap on screen at different depths, half of them wound the other way (one-sided: culled), a two-sided group, and a
-// 0.1 mm strip crossing the near plane.
+// 0.1 mm strip crossing the near plane (its vertex normals differ along it: the perspective-correct normal). Opaque
+// columns 1.3 px wide in front of the upper blades cover whole pixels (bDepth, opaqueCovered). A stack of 4,000 cards,
+// each 6 x 0.3 px on the same spot at 2 .. 3.6 m, puts 24,000 fragments in one tile (a chain of extension tables).
 CoverageScene coverageScene()
 {
     CoverageScene cs;
@@ -1363,14 +1366,51 @@ CoverageScene coverageScene()
     s.meshes.push_back(blades);
     scene::Mesh strip;
     strip.name = "near strip";
-    addStrip(strip, 0.02f, -0.012f, -0.05f, 0.35f, 0.0001f);
+    addStrip(strip, 0.02f, -0.012f, -0.05f, 0.35f, 0.0001f, { 0, 1, 0 }, { 0.8f, 1, -0.5f });
     strip.submeshes.push_back({ 0, (uint32_t)strip.indices.size(), 1 });
     cs.stripMesh = (uint32_t)s.meshes.size();
     s.meshes.push_back(strip);
+    // Screen position (pixels, 640 x 360) to world at depth z for the test camera (at the origin looking along +z), and
+    // pixel sizes to world sizes there, from the view's own projection.
+    const float4x4 vp = ViewDesc::fromCamera(camera({ 0, 0, 0 }, { 0, 0, 1 }), 640, 360, {}).viewProj;
+    CHECK(vp.m[0][1] == 0 && vp.m[1][0] == 0 && vp.m[3][0] == 0 && vp.m[3][1] == 0 && vp.m[3][2] > 0);
+    auto world = [&](float sx, float sy, float z) {
+        const float w = vp.m[3][2] * z + vp.m[3][3];
+        return float3{ ((2 * sx / 640 - 1) * w - vp.m[0][2] * z - vp.m[0][3]) / vp.m[0][0], ((1 - 2 * sy / 360) * w - vp.m[1][2] * z - vp.m[1][3]) / vp.m[1][1], z };
+    };
+    auto pxX = [&](float px, float z) { return px * 2 * (vp.m[3][2] * z + vp.m[3][3]) / (640 * std::fabs(vp.m[0][0])); };
+    auto pxY = [&](float px, float z) { return px * 2 * (vp.m[3][2] * z + vp.m[3][3]) / (360 * std::fabs(vp.m[1][1])); };
+    scene::Mesh columns;
+    columns.name = "opaque columns";
+    // 1.3 px wide: a whole pixel lies inside when the centre's fraction is in 0.35 .. 0.65, so centre fractions 0.15 apart
+    // keep two such columns under any camera shift. Close together (35 x 20 px), so the cluster's conservative width at its
+    // sphere's near side stays below band A's 1.5 px.
+    for (const float sx : { 300.05f, 307.2f, 314.35f, 321.5f, 328.65f, 335.8f })
+    {
+        const float3 c = world(sx, 160.0f, 1.0f);
+        addCard(columns, c, pxX(1.3f, 1.0f), pxY(20.0f, 1.0f), true);
+    }
+    columns.submeshes.push_back({ 0, (uint32_t)columns.indices.size(), 0 });
+    cs.columnMesh = (uint32_t)s.meshes.size();
+    s.meshes.push_back(columns);
+    scene::Mesh stack;
+    stack.name = "card stack";
+    for (int k = 0; k < 4000; ++k)
+    {
+        const float z = 2.0f + 0.0004f * k;
+        const float3 c = world(100.0f, 300.4f, z);
+        // 6 px along x, 0.3 px along y: inside one pixel row.
+        addCard(stack, c, pxX(6.0f, z), pxY(0.3f, z), true);
+    }
+    stack.submeshes.push_back({ 0, (uint32_t)stack.indices.size(), 0 });
+    cs.stackMesh = (uint32_t)s.meshes.size();
+    s.meshes.push_back(stack);
     s.instances.push_back(at(0, { 0, 0, 0 }));
     s.instances.push_back(at(1, { 0.25f, 0.13f, 1.4f }));  // occluder over part of the upper blade group
     s.instances.push_back(at(cs.bladeMesh, { 0, 0, 0 }));
     s.instances.push_back(at(cs.stripMesh, { 0, 0, 0 }));
+    s.instances.push_back(at(cs.columnMesh, { 0, 0, 0 }));
+    s.instances.push_back(at(cs.stackMesh, { 0, 0, 0 }));
     scene::Camera c;
     c.name = "main";
     s.cameras.push_back(c);
@@ -1382,7 +1422,7 @@ struct CoverageFrame
 {
     ViewDesc view;
     std::vector<float> depth;
-    std::vector<uint32_t> visId, visible, heads, pixels, fragments;  // fragments: 4 words each
+    std::vector<uint32_t> visId, visible, bDepth, tiles, table, list, records;  // tiles: 8 words each; records: the raw pool
 };
 
 std::vector<CoverageFrame> renderCoverage(const scene::Scene& s, const QualityConfig& q, const std::vector<scene::Camera>& cams, uint32_t width, uint32_t height,
@@ -1394,11 +1434,13 @@ std::vector<CoverageFrame> renderCoverage(const scene::Scene& s, const QualityCo
     gs.setClusters(clusters);
     FrameRenderer renderer(device(), shaders(), q, gs, 2);
     RenderGraph graph(device());
-    const uint64_t capacity = (uint64_t)q.integer("visibility.max_visible_clusters"), fragments = (uint64_t)q.integer("visibility.max_coverage_fragments");
-    const uint64_t pixelWords = 8 + (uint64_t)width * height;
+    const uint64_t capacity = (uint64_t)q.integer("visibility.max_visible_clusters");
+    const uint64_t tileCount = (uint64_t)((width + 7) / 8) * ((height + 7) / 8), slots = (uint64_t)q.integer("visibility.coverage_table_slots");
+    const uint64_t tileWords = tileCount * 8, tableWords = tileCount * slots, listWords = 16 + 2 * tileCount;
     ComPtr<ID3D12Resource> depthRb = readbackBuffer((uint64_t)rowPitch(width) * height), visRb = readbackBuffer((uint64_t)rowPitch(width) * height),
-                           listRb = readbackBuffer(capacity * 8), headsRb = readbackBuffer((uint64_t)rowPitch(width) * height), pixelsRb = readbackBuffer(pixelWords * 4),
-                           fragRb = readbackBuffer(fragments * 16);
+                           listRb = readbackBuffer(capacity * 8), bDepthRb = readbackBuffer((uint64_t)rowPitch(width) * height), tilesRb = readbackBuffer(tileWords * 4),
+                           tableRb = readbackBuffer(tableWords * 4), tileListRb = readbackBuffer(listWords * 4), recordsRb;
+    uint64_t recordBytes = 0;
     std::vector<CoverageFrame> out;
     float4x4 prev = ViewDesc::fromCamera(cams[0], width, height, {}).viewProj;
     for (uint32_t f = 0; f < cams.size(); ++f)
@@ -1410,25 +1452,37 @@ std::vector<CoverageFrame> renderCoverage(const scene::Scene& s, const QualityCo
         fr.mainView = ViewDesc::fromCamera(cams[f], width, height, prev);
         TextureRef output = graph.createTexture({ "test output", width, height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
         const ViewResources main = renderer.record(graph, fr, output);
-        CHECK(main.coverageHeads.valid() && main.coverageFragments.valid() && main.coveragePixels.valid());
-        ID3D12Resource *d = depthRb.Get(), *v = visRb.Get(), *l = listRb.Get(), *h = headsRb.Get(), *px = pixelsRb.Get(), *fg = fragRb.Get();
+        CHECK(main.coverageTiles.valid() && main.coverageChunkTable.valid() && main.coverageChunks.valid() && main.coverageBDepth.valid() && main.coverageTileList.valid());
+        const uint64_t poolBytes = graph.desc(main.coverageChunks).size;
+        if (poolBytes != recordBytes)
+        {
+            if (recordsRb) device().deferRelease(recordsRb);
+            recordsRb = readbackBuffer(poolBytes);
+            recordBytes = poolBytes;
+        }
+        ID3D12Resource *d = depthRb.Get(), *v = visRb.Get(), *l = listRb.Get(), *bd = bDepthRb.Get(), *tl = tilesRb.Get(), *tb = tableRb.Get(), *li = tileListRb.Get(),
+                       *rc = recordsRb.Get();
         graph.addPass("test.readback", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           b.use(main.depth, Use::CopySrc);
                           b.use(main.visId, Use::CopySrc);
                           b.use(main.visibleClusters, Use::CopySrc);
-                          b.use(main.coverageHeads, Use::CopySrc);
-                          b.use(main.coveragePixels, Use::CopySrc);
-                          b.use(main.coverageFragments, Use::CopySrc);
+                          b.use(main.coverageBDepth, Use::CopySrc);
+                          b.use(main.coverageTiles, Use::CopySrc);
+                          b.use(main.coverageChunkTable, Use::CopySrc);
+                          b.use(main.coverageTileList, Use::CopySrc);
+                          b.use(main.coverageChunks, Use::CopySrc);
                           b.keep();
                       },
                       [=](PassContext& c) {
                           copyTexture(c, main.depth, d, width, height);
                           copyTexture(c, main.visId, v, width, height);
-                          copyTexture(c, main.coverageHeads, h, width, height);
+                          copyTexture(c, main.coverageBDepth, bd, width, height);
                           c.cmd->CopyBufferRegion(l, 0, c.resource(main.visibleClusters), 0, capacity * 8);
-                          c.cmd->CopyBufferRegion(px, 0, c.resource(main.coveragePixels), 0, pixelWords * 4);
-                          c.cmd->CopyBufferRegion(fg, 0, c.resource(main.coverageFragments), 0, fragments * 16);
+                          c.cmd->CopyBufferRegion(tl, 0, c.resource(main.coverageTiles), 0, tileWords * 4);
+                          c.cmd->CopyBufferRegion(tb, 0, c.resource(main.coverageChunkTable), 0, tableWords * 4);
+                          c.cmd->CopyBufferRegion(li, 0, c.resource(main.coverageTileList), 0, listWords * 4);
+                          c.cmd->CopyBufferRegion(rc, 0, c.resource(main.coverageChunks), 0, poolBytes);
                       });
         graph.execute(nullptr);
         device().waitIdle();
@@ -1436,7 +1490,7 @@ std::vector<CoverageFrame> renderCoverage(const scene::Scene& s, const QualityCo
         fo.view = fr.mainView;
         fo.depth = readTexture<float>(d, width, height);
         fo.visId = readTexture<uint32_t>(v, width, height);
-        fo.heads = readTexture<uint32_t>(h, width, height);
+        fo.bDepth = readTexture<uint32_t>(bd, width, height);
         auto readBuffer = [](ID3D12Resource* r, uint64_t words) {
             std::vector<uint32_t> w(words);
             uint8_t* p = nullptr;
@@ -1446,13 +1500,16 @@ std::vector<CoverageFrame> renderCoverage(const scene::Scene& s, const QualityCo
             return w;
         };
         fo.visible = readBuffer(l, capacity * 2);
-        fo.pixels = readBuffer(px, pixelWords);
-        fo.fragments = readBuffer(fg, fragments * 4);
+        fo.tiles = readBuffer(tl, tileWords);
+        fo.table = readBuffer(tb, tableWords);
+        fo.list = readBuffer(li, listWords);
+        fo.records = readBuffer(rc, poolBytes / 4);
         out.push_back(std::move(fo));
         prev = fr.mainView.viewProj;
     }
     stats = visibility::latestStats(renderer.trackState());
-    for (ComPtr<ID3D12Resource>* r : std::initializer_list<ComPtr<ID3D12Resource>*>{ &depthRb, &visRb, &listRb, &headsRb, &pixelsRb, &fragRb }) device().deferRelease(*r);
+    for (ComPtr<ID3D12Resource>* r : std::initializer_list<ComPtr<ID3D12Resource>*>{ &depthRb, &visRb, &listRb, &bDepthRb, &tilesRb, &tableRb, &tileListRb, &recordsRb })
+        device().deferRelease(*r);
     return out;
 }
 
@@ -1499,24 +1556,31 @@ double pixelArea(const std::vector<D2>& poly, int px, int py, D2& centre)
 
 // Screen polygon of a world triangle: near-clipped in clip space (keep w - z >= 0), projected (x, y pixels), with the
 // plane's device depth as an affine function of screen position (z/w at the polygon's vertices).
+struct D3
+{
+    double x, y, z;
+};
+
 struct ScreenPoly
 {
     std::vector<D2> xy;
-    std::vector<double> z;
+    std::vector<double> z, invW;
+    std::vector<D3> n;      // vertex normals (clip-space linear through the near clip)
     double signedArea = 0;  // y-down pixels
 };
 
-ScreenPoly project(const float4x4& m, const float3 w[3], uint32_t width, uint32_t height)
+ScreenPoly project(const float4x4& m, const float3 w[3], uint32_t width, uint32_t height, const float3* normals = nullptr)
 {
     struct C4
     {
         double x, y, z, w;
+        D3 n;
     };
     C4 c[3];
     for (int k = 0; k < 3; ++k)
     {
         auto row = [&](int r) { return (double)m.m[r][0] * w[k].x + (double)m.m[r][1] * w[k].y + (double)m.m[r][2] * w[k].z + m.m[r][3]; };
-        c[k] = { row(0), row(1), row(2), row(3) };
+        c[k] = { row(0), row(1), row(2), row(3), normals ? D3{ normals[k].x, normals[k].y, normals[k].z } : D3{ 0, 0, 0 } };
     }
     std::vector<C4> poly;
     for (int k = 0; k < 3; ++k)
@@ -1527,7 +1591,8 @@ ScreenPoly project(const float4x4& m, const float3 w[3], uint32_t width, uint32_
         if ((ea >= 0) != (eb >= 0))
         {
             const double t = ea / (ea - eb);
-            poly.push_back({ a.x + t * (b.x - a.x), a.y + t * (b.y - a.y), a.z + t * (b.z - a.z), a.w + t * (b.w - a.w) });
+            poly.push_back({ a.x + t * (b.x - a.x), a.y + t * (b.y - a.y), a.z + t * (b.z - a.z), a.w + t * (b.w - a.w),
+                             { a.n.x + t * (b.n.x - a.n.x), a.n.y + t * (b.n.y - a.n.y), a.n.z + t * (b.n.z - a.n.z) } });
         }
     }
     ScreenPoly sp;
@@ -1535,6 +1600,8 @@ ScreenPoly project(const float4x4& m, const float3 w[3], uint32_t width, uint32_
     {
         sp.xy.push_back({ (v.x / v.w * 0.5 + 0.5) * width, (0.5 - v.y / v.w * 0.5) * height });
         sp.z.push_back(v.z / v.w);
+        sp.invW.push_back(1 / v.w);
+        sp.n.push_back(v.n);
     }
     for (size_t i = 0; i < sp.xy.size(); ++i)
     {
@@ -1560,6 +1627,54 @@ double depthAt(const ScreenPoly& sp, D2 q)
     const double det = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
     const double s = ((q.x - a.x) * (c.y - a.y) - (c.x - a.x) * (q.y - a.y)) / det, t = ((b.x - a.x) * (q.y - a.y) - (q.x - a.x) * (b.y - a.y)) / det;
     return (1 - s - t) * sp.z[bi] + s * sp.z[bj] + t * sp.z[bk];
+}
+
+// Unit normal at q: perspective-correct over the fan triangle (0, k, k + 1) holding q (1/w-weighted barycentrics).
+D3 normalAt(const ScreenPoly& sp, D2 q)
+{
+    size_t best = 1;
+    double bestMin = -1e30, wBest[3] = { 1, 0, 0 };
+    for (size_t k = 1; k + 1 < sp.xy.size(); ++k)
+    {
+        const D2 a = sp.xy[0], b = sp.xy[k], c = sp.xy[k + 1];
+        const double det = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+        if (det == 0) continue;
+        const double u = ((q.x - a.x) * (c.y - a.y) - (c.x - a.x) * (q.y - a.y)) / det, v = ((b.x - a.x) * (q.y - a.y) - (q.x - a.x) * (b.y - a.y)) / det;
+        const double lo = std::min({ 1 - u - v, u, v });
+        if (lo > bestMin)
+        {
+            bestMin = lo;
+            best = k;
+            wBest[0] = 1 - u - v;
+            wBest[1] = u;
+            wBest[2] = v;
+        }
+    }
+    const size_t idx[3] = { 0, best, best + 1 };
+    D3 n{ 0, 0, 0 };
+    for (int i = 0; i < 3; ++i)
+    {
+        const D3 v = sp.n[idx[i]];
+        const double len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z), wgt = wBest[i] * sp.invW[idx[i]] / len;
+        n = { n.x + v.x * wgt, n.y + v.y * wgt, n.z + v.z * wgt };
+    }
+    const double len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+    return { n.x / len, n.y / len, n.z / len };
+}
+
+// CoverageTiles.hlsli coverageFragmentNormal.
+D3 decodeRecordNormal(uint32_t packed)
+{
+    const double ex = (packed & 0xFF) / 255.0 * 2 - 1, ey = ((packed >> 8) & 0xFF) / 255.0 * 2 - 1;
+    double x = ex, y = ey;
+    const double z = 1 - std::fabs(ex) - std::fabs(ey);
+    if (z < 0)
+    {
+        x = (1 - std::fabs(ey)) * (ex >= 0 ? 1 : -1);
+        y = (1 - std::fabs(ex)) * (ey >= 0 ? 1 : -1);
+    }
+    const double len = std::sqrt(x * x + y * y + z * z);
+    return { x / len, y / len, z / len };
 }
 
 // Subsample i of Coverage.hlsli: x = (i + 0.5) / 32, y = bit-reversed i / 32 + 1/64.
@@ -1705,209 +1820,361 @@ UNX_TEST(coverage_mask_lut_matches_exact)
 
 UNX_TEST(coverage_layer_is_exact)
 {
+    // Coverage layer v2 (INTERFACES 7.1 v2, CoverageTiles.hlsli) against the exact clip of every band B/C triangle, in two
+    // configurations: the defaults, and one chunk-table slot with a heavy threshold of 64 (every tile past 64 fragments
+    // keeps its chunks in extension tables). The card stack's tile needs a chain of two extension tables in both. Per
+    // frame: every record is an expected (triangle, pixel) fragment with its exact area (10-bit), centroid depth, mask and
+    // perspective-correct normal (8 + 8 bit octahedral); no expected fragment is missing unless it lies behind the pixel's
+    // bDepth (the raster drops such fragments only when the full-pixel opaque fragment came first); tile headers (count,
+    // depth range, opaqueCovered, extension table) match the records; bDepth is the depth of a full-pixel opaque record
+    // and covers every exact full-pixel fragment; the tile and heavy lists are exact; no chunk is used twice; the tiles of
+    // earlier frames were emptied.
     const CoverageScene cs = coverageScene();
     const scene::Scene& s = cs.scene;
-    const QualityConfig q = quality({ "visibility.coverage_layer = true", "visibility.occlusion_culling = false", "visibility.max_coverage_fragments = 1048576" });
-    const uint32_t width = 640, height = 360;
-    std::vector<scene::Camera> cams(3, camera({ 0, 0, 0 }, { 0, 0, 1 }));
-    cams[1].position = { 0.004f, 0.002f, 0 };  // moves every fragment: last frame's heads must be cleared
-    cams[2].position = { -0.003f, 0.001f, 0 };  // (and the statistics of frame 0 are read back by frame 2)
-    ClusterData cd;
-    visibility::Stats stats;
-    const std::vector<CoverageFrame> frames = renderCoverage(s, q, cams, width, height, cd, stats);
-    logf("    stats (frame %llu): triangles A/B/C %u/%u/%u, list B %u, coverage fragments %u in %u pixels, overflow 0x%x\n", (unsigned long long)stats.frameIndex,
-         stats.triangles[0], stats.triangles[1], stats.triangles[2], stats.listEntries[4], stats.coverageFragments, stats.coveragePixels, stats.overflow);
-    CHECK(stats.overflow == 0);
-    CHECK(stats.triangles[1] + stats.triangles[2] > 0);
-
-    // Winding: the reference card (band A, one-sided, the "front" blade winding) must be visible with back faces culled.
+    struct Config
     {
-        const CoverageFrame& fo = frames[0];
-        size_t cardPixels = 0;
-        for (size_t i = 0; i < fo.visId.size(); ++i)
-            if (fo.visId[i] != kVisNone && fo.visible[2 * ((fo.visId[i] - 1) >> 7)] == 0) ++cardPixels;
-        // The CPU front-face rule below (negative signed area in y-down pixels) must call the visible card front.
-        const scene::Mesh& cm = s.meshes[0];
-        float3 w[3];
-        for (int k = 0; k < 3; ++k) w[k] = s.instances[0].transform.transformPoint(cm.positions[cm.indices[k]]);
-        const double cardArea = project(fo.view.viewProj, w, width, height).signedArea;
-        logf("    reference card (front winding, band A, back faces culled): %zu pixels, signed area %.1f px (front < 0)\n", cardPixels, cardArea);
-        CHECK(cardPixels > 500 && cardArea < 0);
-    }
-
-    // Source triangle key: (instance, sorted mesh vertex indices).
-    auto key = [](uint32_t instance, uint32_t a, uint32_t b, uint32_t c) {
-        uint32_t v[3] = { a, b, c };
-        std::sort(v, v + 3);
-        return (uint64_t)instance << 60 ^ (uint64_t)v[0] << 40 ^ (uint64_t)v[1] << 20 ^ v[2];
+        const char* name;
+        std::vector<std::string> keys;
     };
-    for (size_t f = 0; f < frames.size(); ++f)
+    const Config configs[] = {
+        { "defaults", { "visibility.coverage_layer = true", "visibility.occlusion_culling = false" } },
+        { "1 table slot, heavy past 64",
+          { "visibility.coverage_layer = true", "visibility.occlusion_culling = false", "visibility.coverage_table_slots = 1", "visibility.coverage_heavy_tile_fragments = 64" } },
+    };
+    for (const Config& config : configs)
     {
-        const CoverageFrame& fo = frames[f];
-        const float4x4& vp = fo.view.viewProj;
-        const uint32_t pixelCount = fo.pixels[3], fragmentCount = fo.pixels[4];
-        CHECK(pixelCount > 0 && fragmentCount >= pixelCount);
-        CHECK(fo.pixels[0] == (pixelCount + 63) / 64 && fo.pixels[1] == 1 && fo.pixels[2] == 1);
-        // HiZ mip 0 of this frame (farthest of 2 x 2), the pixel kernel's occlusion rule.
-        const uint32_t hw = width / 2, hh = height / 2;
-        std::vector<float> hiz((size_t)hw * hh);
-        for (uint32_t y = 0; y < hh; ++y)
-            for (uint32_t x = 0; x < hw; ++x)
-            {
-                float m = 1;
-                for (int k = 0; k < 4; ++k) m = std::min(m, fo.depth[(size_t)(2 * y + (k >> 1)) * width + 2 * x + (k & 1)]);
-                hiz[(size_t)y * hw + x] = m;
-            }
-        auto farthest = [&](int px, int py) {
-            const int x0 = std::max(px - 1, 0) >> 1, y0 = std::max(py - 1, 0) >> 1, x1 = std::min((px + 1) >> 1, (int)hw - 1), y1 = std::min((py + 1) >> 1, (int)hh - 1);
-            return std::min({ hiz[(size_t)y0 * hw + x0], hiz[(size_t)y0 * hw + x1], hiz[(size_t)y1 * hw + x0], hiz[(size_t)y1 * hw + x1] });
-        };
+        const QualityConfig q = quality(config.keys);
+        const uint32_t width = 640, height = 360, tilesX = (width + 7) / 8, tileCount = tilesX * ((height + 7) / 8);
+        const uint32_t slots = (uint32_t)q.integer("visibility.coverage_table_slots"), heavyMin = (uint32_t)q.integer("visibility.coverage_heavy_tile_fragments");
+        std::vector<scene::Camera> cams(3, camera({ 0, 0, 0 }, { 0, 0, 1 }));
+        cams[1].position = { 0.004f, 0.002f, 0 };  // moves every fragment: last frame's tiles must be emptied
+        cams[2].position = { -0.003f, 0.001f, 0 };  // (and the statistics of frame 0 are read back by frame 2)
+        ClusterData cd;
+        visibility::Stats stats;
+        const std::vector<CoverageFrame> frames = renderCoverage(s, q, cams, width, height, cd, stats);
+        logf("    [%s] stats (frame %llu): triangles A/B/C %u/%u/%u, list B %u, coverage fragments %u in %u tiles, %u chunks (%u lost to races, pool %u), "
+             "%u heavy tiles, overflow 0x%x\n",
+             config.name, (unsigned long long)stats.frameIndex, stats.triangles[0], stats.triangles[1], stats.triangles[2], stats.listEntries[4], stats.coverageFragments,
+             stats.coverageTiles, stats.coverageChunks, stats.coverageChunksLost, stats.coveragePoolChunks, stats.coverageHeavyTiles, stats.overflow);
+        CHECK(stats.overflow == 0);
+        CHECK(stats.triangles[1] + stats.triangles[2] > 0);
 
-        // Expected fragments from the source triangles of the band B/C meshes.
-        struct Expect
+        // Winding: the reference card (band A, one-sided, the "front" blade winding) must be visible with back faces culled.
         {
-            double area, depth, depthMin = 0, depthMax = 0;  // (the polygon's depth range)
-            uint32_t mask, ambiguous;
-            bool required = false;  // not a float-rounding sliver, not at the occlusion threshold
-            bool found = false;
-            uint32_t foundCluster = 0, foundTri = 0, foundEntry = 0;
-            float foundArea = 0, foundDepth = 0;
+            const CoverageFrame& fo = frames[0];
+            size_t cardPixels = 0;
+            for (size_t i = 0; i < fo.visId.size(); ++i)
+                if (fo.visId[i] != kVisNone && fo.visible[2 * ((fo.visId[i] - 1) >> 7)] == 0) ++cardPixels;
+            // The CPU front-face rule below (negative signed area in y-down pixels) must call the visible card front.
+            const scene::Mesh& cm = s.meshes[0];
+            float3 w[3];
+            for (int k = 0; k < 3; ++k) w[k] = s.instances[0].transform.transformPoint(cm.positions[cm.indices[k]]);
+            const double cardArea = project(fo.view.viewProj, w, width, height).signedArea;
+            logf("    reference card (front winding, band A, back faces culled): %zu pixels, signed area %.1f px (front < 0)\n", cardPixels, cardArea);
+            CHECK(cardPixels > 500 && cardArea < 0);
+        }
+
+        // Source triangle key: (instance, sorted mesh vertex indices).
+        auto key = [](uint32_t instance, uint32_t a, uint32_t b, uint32_t c) {
+            uint32_t v[3] = { a, b, c };
+            std::sort(v, v + 3);
+            return (uint64_t)instance << 60 ^ (uint64_t)v[0] << 40 ^ (uint64_t)v[1] << 20 ^ v[2];
         };
-        std::map<std::pair<uint64_t, uint32_t>, Expect> expected;  // (triangle key, pixel)
-        size_t culledBack = 0, occluded = 0, marginal = 0;
-        for (uint32_t ii = 2; ii < s.instances.size(); ++ii)
+        for (size_t f = 0; f < frames.size(); ++f)
         {
-            const scene::Instance& inst = s.instances[ii];
-            const scene::Mesh& mesh = s.meshes[inst.mesh];
-            for (const scene::Submesh& sm : mesh.submeshes)
-            {
-                const bool twoSided = s.materials[sm.material].twoSided;
-                for (uint32_t t = sm.indexOffset; t < sm.indexOffset + sm.indexCount; t += 3)
+            const CoverageFrame& fo = frames[f];
+            const float4x4& vp = fo.view.viewProj;
+            const uint32_t poolChunks = (uint32_t)(fo.records.size() / 256);
+            auto bDepthAt = [&](uint32_t pi) {
+                float v;
+                std::memcpy(&v, &fo.bDepth[pi], 4);
+                return v;
+            };
+            // HiZ mip 0 of this frame (farthest of 2 x 2), the pixel kernel's occlusion rule.
+            const uint32_t hw = width / 2, hh = height / 2;
+            std::vector<float> hiz((size_t)hw * hh);
+            for (uint32_t y = 0; y < hh; ++y)
+                for (uint32_t x = 0; x < hw; ++x)
                 {
-                    const uint32_t vi[3] = { mesh.indices[t], mesh.indices[t + 1], mesh.indices[t + 2] };
-                    float3 w[3];
-                    for (int k = 0; k < 3; ++k) w[k] = inst.transform.transformPoint(mesh.positions[vi[k]]);
-                    const ScreenPoly sp = project(vp, w, width, height);
-                    if (sp.xy.size() < 3 || sp.signedArea == 0) continue;
-                    if (!twoSided && sp.signedArea > 0)  // counter-clockwise on screen (negative in y-down pixels) is front
+                    float m = 1;
+                    for (int k = 0; k < 4; ++k) m = std::min(m, fo.depth[(size_t)(2 * y + (k >> 1)) * width + 2 * x + (k & 1)]);
+                    hiz[(size_t)y * hw + x] = m;
+                }
+            auto farthest = [&](int px, int py) {
+                const int x0 = std::max(px - 1, 0) >> 1, y0 = std::max(py - 1, 0) >> 1, x1 = std::min((px + 1) >> 1, (int)hw - 1), y1 = std::min((py + 1) >> 1, (int)hh - 1);
+                return std::min({ hiz[(size_t)y0 * hw + x0], hiz[(size_t)y0 * hw + x1], hiz[(size_t)y1 * hw + x0], hiz[(size_t)y1 * hw + x1] });
+            };
+
+            // Expected fragments from the source triangles of the band B/C meshes.
+            struct Expect
+            {
+                double area, depth, depthMin = 0, depthMax = 0;  // (the polygon's depth range)
+                D3 normal{ 0, 0, 0 };
+                uint32_t mask, ambiguous;
+                bool required = false;  // not a float-rounding sliver, not at the occlusion threshold, not behind bDepth
+                bool full = false;      // covers the whole pixel (every subsample, area 1): sets bDepth
+                bool passesA = false;   // not a sliver, clear of the band A occlusion threshold
+                bool found = false;
+                uint32_t foundVis = 0, foundCluster = 0, foundTri = 0, foundEntry = 0;
+                uint32_t foundRecord[4] = {};
+            };
+            std::map<std::pair<uint64_t, uint32_t>, Expect> expected;  // (triangle key, pixel)
+            size_t culledBack = 0, occluded = 0, marginal = 0, behindBDepth = 0;
+            for (uint32_t ii = 2; ii < s.instances.size(); ++ii)
+            {
+                const scene::Instance& inst = s.instances[ii];
+                const scene::Mesh& mesh = s.meshes[inst.mesh];
+                for (const scene::Submesh& sm : mesh.submeshes)
+                {
+                    const bool twoSided = s.materials[sm.material].twoSided;
+                    for (uint32_t t = sm.indexOffset; t < sm.indexOffset + sm.indexCount; t += 3)
                     {
-                        ++culledBack;
-                        continue;
-                    }
-                    double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
-                    for (const D2& v : sp.xy) x0 = std::min(x0, v.x), y0 = std::min(y0, v.y), x1 = std::max(x1, v.x), y1 = std::max(y1, v.y);
-                    // Pixels touching the polygon's box (+1: float rounding may give a touching pixel a sliver).
-                    for (int py = std::max((int)std::floor(y0) - 1, 0); py <= std::min((int)std::floor(y1) + 1, (int)height - 1); ++py)
-                        for (int px = std::max((int)std::floor(x0) - 1, 0); px <= std::min((int)std::floor(x1) + 1, (int)width - 1); ++px)
+                        const uint32_t vi[3] = { mesh.indices[t], mesh.indices[t + 1], mesh.indices[t + 2] };
+                        float3 w[3], n[3];
+                        for (int k = 0; k < 3; ++k)
                         {
-                            D2 centre;
-                            const double area = pixelArea(sp.xy, px, py, centre);
-                            const double depth = depthAt(sp, centre);
-                            const float hizFar = farthest(px, py);
-                            const double margin = 1e-7 + 2e-4 * depth;  // float projection vs double
-                            if (area > 0 && depth < hizFar - margin)
-                            {
-                                ++occluded;
-                                continue;
-                            }
-                            Expect e;
-                            e.area = area;
-                            e.depth = depth;
-                            e.depthMin = *std::min_element(sp.z.begin(), sp.z.end());
-                            e.depthMax = *std::max_element(sp.z.begin(), sp.z.end());
-                            polygonMask(sp.xy, px, py, e.mask, e.ambiguous);
-                            e.required = area >= 5e-4 && std::fabs(depth - hizFar) > margin;
-                            if (area > 0 && !e.required) ++marginal;
-                            expected[{ key(ii, vi[0], vi[1], vi[2]), (uint32_t)py * width + px }] = e;
+                            w[k] = inst.transform.transformPoint(mesh.positions[vi[k]]);
+                            n[k] = inst.transform.transformVector(mesh.normals[vi[k]]);
                         }
+                        const ScreenPoly sp = project(vp, w, width, height, n);
+                        if (sp.xy.size() < 3 || sp.signedArea == 0) continue;
+                        const bool back = sp.signedArea > 0;  // counter-clockwise on screen (negative in y-down pixels) is front
+                        if (!twoSided && back)
+                        {
+                            ++culledBack;
+                            continue;
+                        }
+                        double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+                        for (const D2& v : sp.xy) x0 = std::min(x0, v.x), y0 = std::min(y0, v.y), x1 = std::max(x1, v.x), y1 = std::max(y1, v.y);
+                        // Pixels touching the polygon's box (+1: float rounding may give a touching pixel a sliver).
+                        for (int py = std::max((int)std::floor(y0) - 1, 0); py <= std::min((int)std::floor(y1) + 1, (int)height - 1); ++py)
+                            for (int px = std::max((int)std::floor(x0) - 1, 0); px <= std::min((int)std::floor(x1) + 1, (int)width - 1); ++px)
+                            {
+                                D2 centre;
+                                const double area = pixelArea(sp.xy, px, py, centre);
+                                const double depth = depthAt(sp, centre);
+                                const float hizFar = farthest(px, py);
+                                const double margin = 1e-7 + 2e-4 * depth;  // float projection vs double
+                                if (area > 0 && depth < hizFar - margin)
+                                {
+                                    ++occluded;
+                                    continue;
+                                }
+                                const uint32_t pi = (uint32_t)py * width + px;
+                                Expect e;
+                                e.area = area;
+                                e.depth = depth;
+                                e.depthMin = *std::min_element(sp.z.begin(), sp.z.end());
+                                e.depthMax = *std::max_element(sp.z.begin(), sp.z.end());
+                                if (area > 0)
+                                {
+                                    e.normal = normalAt(sp, centre);
+                                    if (back) e.normal = { -e.normal.x, -e.normal.y, -e.normal.z };
+                                }
+                                polygonMask(sp.xy, px, py, e.mask, e.ambiguous);
+                                e.full = area >= 1 - 1e-6 && e.mask == 0xFFFFFFFFu;
+                                const double bd = bDepthAt(pi);
+                                e.passesA = area >= 5e-4 && std::fabs(depth - hizFar) > margin;
+                                e.required = e.passesA && depth > bd + margin;
+                                if (area > 0 && depth <= bd + margin && !e.full) ++behindBDepth;
+                                if (area > 0 && !e.required) ++marginal;
+                                expected[{ key(ii, vi[0], vi[1], vi[2]), pi }] = e;
+                            }
+                    }
                 }
             }
-        }
 
-        // Every listed pixel: sorted fragments that match an expected one.
-        std::vector<uint8_t> listed((size_t)width * height, 0);
-        size_t checked = 0, maxAreaMiss = 0, depthOver = 0;
-        double worstArea = 0, worstDepth = 0, worstSliverDepth = 0;
-        for (uint32_t k = 0; k < pixelCount; ++k)
-        {
-            const uint32_t packed = fo.pixels[8 + k], px = packed & 0xFFFF, py = packed >> 16;
-            CHECK(px < width && py < height);
-            const uint32_t pi = py * width + px;
-            if (listed[pi]) fail("frame %zu: pixel (%u, %u) listed twice", f, px, py);
-            listed[pi] = 1;
-            const uint32_t h = fo.heads[pi], first = h & 0xFFFFFF, n = h >> 24;
-            if (n == 0 || first + n > fo.fragments.size() / 4) fail("frame %zu: pixel (%u, %u) head 0x%08x (capacity %zu)", f, px, py, h, fo.fragments.size() / 4);
-            float previous = 2;
-            for (uint32_t j = 0; j < n; ++j)
+            // The tile list and the tiles.
+            const std::vector<uint32_t>& L = fo.list;
+            const uint32_t listed = L[3], heavyCount = L[11];
+            CHECK(listed > 0 && listed <= tileCount && L[0] == std::min(listed, 65535u) && L[1] == (listed + 65534u) / 65535u && L[2] == 1);
+            CHECK(L[6] == slots && L[7] == tilesX && L[12] == heavyMin && L[13] == 16 + tileCount);
+            CHECK(heavyCount <= listed && L[8] == std::min(heavyCount, 65535u) && L[9] == (heavyCount + 65534u) / 65535u && L[10] == 1);
+            std::vector<uint8_t> tileListed(tileCount, 0), heavyListed(tileCount, 0);
+            for (uint32_t k = 0; k < heavyCount; ++k)
             {
-                const uint32_t* fr = &fo.fragments[4 * (size_t)(first + j)];
-                float depth, area;
-                std::memcpy(&depth, &fr[1], 4);
-                std::memcpy(&area, &fr[3], 4);
-                if (depth > previous) fail("frame %zu: pixel (%u, %u) fragments not sorted nearest first (%g after %g)", f, px, py, depth, previous);
-                previous = depth;
-                const uint32_t vis = fr[0], entry = (vis - 1) >> 7, tri = (vis - 1) & 127;
-                const uint32_t instance = fo.visible[2 * entry], cluster = fo.visible[2 * entry + 1] & 0xFFFFFF;
-                CHECK(instance < s.instances.size() && cluster < cd.clusters.size());
-                const gpu::Cluster& c = cd.clusters[cluster];
-                const uint32_t tp = cd.clusterTriangles[c.triangleOffset + tri];
-                uint32_t mv[3];
-                for (int m = 0; m < 3; ++m) mv[m] = cd.clusterVertexIndices[c.vertexOffset + ((tp >> (8 * m)) & 0xFF)];
-                const auto it = expected.find({ key(instance, mv[0], mv[1], mv[2]), pi });
-                if (it == expected.end())
-                    fail("frame %zu: pixel (%u, %u) has a fragment of instance %u vertices %u %u %u (area %g, depth %g) that the exact clip does not expect", f, px, py,
-                         instance, mv[0], mv[1], mv[2], area, depth);
-                Expect& e = it->second;
-                if (e.found)
-                    fail("frame %zu: pixel (%u, %u): the same triangle twice: entry %u cluster %u tri %u (area %g, depth %g) and entry %u cluster %u tri %u "
-                         "(area %g, depth %g); clusters' lodError %g / %g, parentLodError %g / %g",
-                         f, px, py, e.foundEntry, e.foundCluster, e.foundTri, e.foundArea, e.foundDepth, entry, cluster, tri, area, depth,
-                         cd.clusters[e.foundCluster].lodError, cd.clusters[cluster].lodError, cd.clusters[e.foundCluster].parentLodError,
-                         cd.clusters[cluster].parentLodError);
-                e.found = true;
-                e.foundCluster = cluster;
-                e.foundTri = tri;
-                e.foundEntry = entry;
-                e.foundArea = area;
-                e.foundDepth = depth;
-                const double da = std::fabs(area - e.area), dd = std::fabs(depth - e.depth);
-                worstArea = std::max(worstArea, da);
-                if (e.area >= 1e-2) worstDepth = std::max(worstDepth, dd / std::max(e.depth, 1e-6));
-                else worstSliverDepth = std::max(worstSliverDepth, dd / std::max(e.depth, 1e-6));
-                if (da > 2e-4 + 1e-4 * e.area) fail("frame %zu: pixel (%u, %u): area %.7f, exact %.7f", f, px, py, area, e.area);
-                // Depth at the covered region's centroid: Green's moments (Coverage.hlsli) give the centroid to float
-                // rounding divided by the area, so a sliver's depth is looser. Depth only orders overlapping fragments,
-                // and a misordered fragment moves the pixel's coverage by at most its own area: below 1e-2 px^2 that is
-                // inside the 1/32 overlap bound of the quality definition (ARCHITECTURE 3) with margin, and such a
-                // fragment's depth need only lie in its triangle's depth range.
-                const bool depthOk = e.area >= 1e-2 ? dd <= 1e-7 + 1e-4 * e.depth : depth >= e.depthMin - 1e-6 && depth <= e.depthMax + 1e-6;
-                if (!depthOk)
+                const uint32_t t = L[16 + tileCount + k];
+                CHECK(t < tileCount && !heavyListed[t]);
+                heavyListed[t] = 1;
+            }
+            std::vector<uint8_t> chunkUsed(poolChunks, 0);
+            auto useChunk = [&](uint32_t chunk, const char* what, uint32_t tile) {
+                if (chunk == 0 || chunk > poolChunks) fail("frame %zu: tile %u: %s chunk %u (pool %u)", f, tile, what, chunk, poolChunks);
+                if (chunkUsed[chunk - 1]) fail("frame %zu: tile %u: %s chunk %u used twice", f, tile, what, chunk);
+                chunkUsed[chunk - 1] = 1;
+            };
+            size_t checked = 0, duplicates = 0, depthOver = 0, extTables = 0, fullRecords = 0;
+            uint64_t fragmentSum = 0;
+            uint32_t deepest = 0;
+            double worstArea = 0, worstDepth = 0, worstSliverDepth = 0, worstNormalDeg = 0;
+            for (uint32_t k = 0; k < listed; ++k)
+            {
+                const uint32_t tile = L[16 + k];
+                CHECK(tile < tileCount);
+                if (tileListed[tile]) fail("frame %zu: tile %u listed twice", f, tile);
+                tileListed[tile] = 1;
+                const uint32_t* h = &fo.tiles[(size_t)tile * 8];
+                const uint32_t n = h[0];
+                if (n == 0) fail("frame %zu: listed tile %u has no fragments", f, tile);
+                fragmentSum += n;
+                deepest = std::max(deepest, n);
+                if ((n > heavyMin) != (heavyListed[tile] != 0)) fail("frame %zu: tile %u with %u fragments %s the heavy list (threshold %u)", f, tile, n, heavyListed[tile] ? "on" : "not on", heavyMin);
+                // Chunks by ordinal: the table, then the extension chain.
+                const uint32_t ordinals = (n + 63) / 64;
+                std::vector<uint32_t> chunks(ordinals, 0);
+                for (uint32_t o = 0; o < std::min(ordinals, slots); ++o) chunks[o] = fo.table[(size_t)tile * slots + o];
+                for (uint32_t o = ordinals; o < slots; ++o)
+                    if (fo.table[(size_t)tile * slots + o] != 0) fail("frame %zu: tile %u: table slot %u set past its %u chunks", f, tile, o, ordinals);
+                uint32_t ext = h[5];
+                if ((ext != 0) != (ordinals > slots)) fail("frame %zu: tile %u: extension table %u with %u chunks and %u slots", f, tile, ext, ordinals, slots);
+                for (uint32_t base = slots; base < ordinals; base += 255)
                 {
-                    ++depthOver;
-                    if (depthOver <= 3) logf("    depth over tolerance: frame %zu pixel (%u, %u): depth %.9g, exact %.9g, area %.3g\n", f, px, py, depth, e.depth, e.area);
+                    useChunk(ext, "extension table", tile);
+                    ++extTables;
+                    const uint32_t* et = &fo.records[(size_t)(ext - 1) * 256];
+                    for (uint32_t e = 0; e < 255; ++e)
+                        if (base + e < ordinals) chunks[base + e] = et[e];
+                        else if (et[e] != 0) fail("frame %zu: tile %u: extension slot %u set past the tile's chunks", f, tile, base + e);
+                    ext = et[255];
+                    if ((ext != 0) != (base + 255 < ordinals)) fail("frame %zu: tile %u: extension link %u after ordinal %u of %u", f, tile, ext, base + 255, ordinals);
                 }
-                if (((fr[2] ^ e.mask) & ~e.ambiguous) != 0)
-                    fail("frame %zu: pixel (%u, %u): mask 0x%08x, exact 0x%08x (ambiguous 0x%08x)", f, px, py, fr[2], e.mask, e.ambiguous);
-                ++checked;
+                for (uint32_t o = 0; o < ordinals; ++o) useChunk(chunks[o], "record", tile);
+                uint32_t zNear = 0, zFar = 0xFFFFFFFFu, opaque[2] = { 0, 0 };
+                std::map<uint32_t, std::vector<uint32_t>> byPixel;  // pixel -> record indices in the tile
+                for (uint32_t i = 0; i < n; ++i)
+                {
+                    const uint32_t* fr = &fo.records[(size_t)(chunks[i / 64] - 1) * 256 + 4 * (i % 64)];
+                    const uint32_t p = fr[3] >> 26, px = (tile % tilesX) * 8 + p % 8, py = (tile / tilesX) * 8 + p / 8;
+                    if (px >= width || py >= height) fail("frame %zu: tile %u record %u: pixel (%u, %u) outside the view", f, tile, i, px, py);
+                    const uint32_t pi = py * width + px;
+                    float depth;
+                    std::memcpy(&depth, &fr[1], 4);
+                    const double area = ((fr[3] >> 16) & 0x3FF) / 1023.0;
+                    zNear = std::max(zNear, fr[1]);
+                    zFar = std::min(zFar, fr[1]);
+                    const uint32_t vis = fr[0], entry = (vis - 1) >> 7, tri = (vis - 1) & 127;
+                    const uint32_t instance = fo.visible[2 * entry], cluster = fo.visible[2 * entry + 1] & 0xFFFFFF;
+                    CHECK(instance < s.instances.size() && cluster < cd.clusters.size());
+                    const gpu::Cluster& c = cd.clusters[cluster];
+                    const uint32_t tp = cd.clusterTriangles[c.triangleOffset + tri];
+                    uint32_t mv[3];
+                    for (int m = 0; m < 3; ++m) mv[m] = cd.clusterVertexIndices[c.vertexOffset + ((tp >> (8 * m)) & 0xFF)];
+                    const auto it = expected.find({ key(instance, mv[0], mv[1], mv[2]), pi });
+                    if (it == expected.end())
+                        fail("frame %zu: pixel (%u, %u) has a fragment of instance %u vertices %u %u %u (area %g, depth %g) that the exact clip does not expect", f, px, py,
+                             instance, mv[0], mv[1], mv[2], area, depth);
+                    Expect& e = it->second;
+                    if (e.found)
+                    {
+                        // A primitive the hardware clipped is shaded once per piece along the cuts: the same vis id with the
+                        // same values. Anything else is the same triangle drawn twice.
+                        if (e.foundVis == vis && std::memcmp(e.foundRecord, fr, 16) == 0)
+                        {
+                            ++duplicates;
+                            ++checked;
+                            continue;
+                        }
+                        fail("frame %zu: pixel (%u, %u): the same triangle twice: entry %u cluster %u tri %u and entry %u cluster %u tri %u (records %08x %08x %08x "
+                             "%08x / %08x %08x %08x %08x)",
+                             f, px, py, e.foundEntry, e.foundCluster, e.foundTri, entry, cluster, tri, e.foundRecord[0], e.foundRecord[1], e.foundRecord[2],
+                             e.foundRecord[3], fr[0], fr[1], fr[2], fr[3]);
+                    }
+                    e.found = true;
+                    e.foundVis = vis;
+                    e.foundCluster = cluster;
+                    e.foundTri = tri;
+                    e.foundEntry = entry;
+                    std::memcpy(e.foundRecord, fr, 16);
+                    const double da = std::fabs(area - e.area), dd = std::fabs(depth - e.depth);
+                    worstArea = std::max(worstArea, da);
+                    if (e.area >= 1e-2) worstDepth = std::max(worstDepth, dd / std::max(e.depth, 1e-6));
+                    else worstSliverDepth = std::max(worstSliverDepth, dd / std::max(e.depth, 1e-6));
+                    // Area: 10 bits (half a step) on top of the float clip's error.
+                    if (da > 0.5 / 1023 + 2e-4 + 1e-4 * e.area) fail("frame %zu: pixel (%u, %u): area %.7f, exact %.7f", f, px, py, area, e.area);
+                    // Depth at the covered region's centroid: Green's moments (Coverage.hlsli) give the centroid to float
+                    // rounding divided by the area, so a sliver's depth is looser. Depth only orders overlapping fragments,
+                    // and a misordered fragment moves the pixel's coverage by at most its own area: below 1e-2 px^2 that is
+                    // inside the 1/32 overlap bound of the quality definition (ARCHITECTURE 3) with margin, and such a
+                    // fragment's depth need only lie in its triangle's depth range.
+                    const bool depthOk = e.area >= 1e-2 ? dd <= 1e-7 + 1e-4 * e.depth : depth >= e.depthMin - 1e-6 && depth <= e.depthMax + 1e-6;
+                    if (!depthOk)
+                    {
+                        ++depthOver;
+                        if (depthOver <= 3) logf("    depth over tolerance: frame %zu pixel (%u, %u): depth %.9g, exact %.9g, area %.3g\n", f, px, py, depth, e.depth, e.area);
+                    }
+                    if (((fr[2] ^ e.mask) & ~e.ambiguous) != 0)
+                        fail("frame %zu: pixel (%u, %u): mask 0x%08x, exact 0x%08x (ambiguous 0x%08x)", f, px, py, fr[2], e.mask, e.ambiguous);
+                    // Normal: the perspective-correct interpolation in 8 + 8 bit octahedral code, whose rounding is at most
+                    // 0.95 degrees (400,000 random directions); 1.1 leaves the float interpolation its share. The centroid
+                    // of a sliver is float rounding over its area, so only fragments of 1e-2 px^2 or more count.
+                    if (e.area >= 1e-2)
+                    {
+                        const D3 g = decodeRecordNormal(fr[3]);
+                        const double cosA = std::clamp(g.x * e.normal.x + g.y * e.normal.y + g.z * e.normal.z, -1.0, 1.0), deg = std::acos(cosA) * 57.29578;
+                        worstNormalDeg = std::max(worstNormalDeg, deg);
+                        if (deg > 1.1)
+                            fail("frame %zu: pixel (%u, %u): normal (%.4f %.4f %.4f), exact (%.4f %.4f %.4f): %.2f degrees", f, px, py, g.x, g.y, g.z, e.normal.x, e.normal.y,
+                                 e.normal.z, deg);
+                    }
+                    if (area == 1.0 && fr[2] == 0xFFFFFFFFu) ++fullRecords;
+                    byPixel[p].push_back(i);
+                    ++checked;
+                }
+                if (h[1] != zNear || h[2] != zFar) fail("frame %zu: tile %u: depth range %08x .. %08x, records %08x .. %08x", f, tile, h[2], h[1], zFar, zNear);
+                // opaqueCovered and bDepth: the same full-pixel opaque fragments set both; bDepth is one of those records' depth.
+                for (uint32_t p = 0; p < 64; ++p)
+                {
+                    const uint32_t px = (tile % tilesX) * 8 + p % 8, py = (tile / tilesX) * 8 + p / 8;
+                    const uint32_t bd = px < width && py < height ? fo.bDepth[py * width + px] : 0;
+                    const bool bit = ((p < 32 ? h[3] : h[4]) >> (p & 31)) & 1u;
+                    if (bit != (bd != 0)) fail("frame %zu: pixel (%u, %u): opaqueCovered %d, bDepth %08x", f, px, py, (int)bit, bd);
+                    if (bd == 0) continue;
+                    bool source = false;
+                    for (uint32_t i : byPixel[p])
+                    {
+                        const uint32_t* fr = &fo.records[(size_t)(chunks[i / 64] - 1) * 256 + 4 * (i % 64)];
+                        source = source || (fr[1] == bd && ((fr[3] >> 16) & 0x3FF) == 1023 && fr[2] == 0xFFFFFFFFu);
+                    }
+                    if (!source) fail("frame %zu: pixel (%u, %u): bDepth %08x is no full-pixel record's depth", f, px, py, bd);
+                }
             }
-        }
-        size_t missing = 0;
-        for (const auto& [k, e] : expected)
-            if (!e.found && e.required)
+            CHECK(fragmentSum == L[4]);
+            // Tiles not listed: empty (last frame's were emptied); no chunk table entries, no bDepth.
+            size_t staleTiles = 0;
+            for (uint32_t t = 0; t < tileCount; ++t)
             {
-                if (++missing <= 5) logf("    missing: pixel %u, area %g, depth %g\n", k.second, e.area, e.depth);
-                (void)maxAreaMiss;
+                if (tileListed[t]) continue;
+                const uint32_t* h = &fo.tiles[(size_t)t * 8];
+                bool stale = h[0] != 0 || h[1] != 0 || h[2] != 0xFFFFFFFFu || h[3] != 0 || h[4] != 0 || h[5] != 0 || h[6] != 0 || h[7] != 0;
+                for (uint32_t o = 0; o < slots; ++o) stale = stale || fo.table[(size_t)t * slots + o] != 0;
+                for (uint32_t p = 0; p < 64; ++p)
+                {
+                    const uint32_t px = (t % tilesX) * 8 + p % 8, py = (t / tilesX) * 8 + p / 8;
+                    if (px < width && py < height) stale = stale || fo.bDepth[py * width + px] != 0;
+                }
+                if (stale) ++staleTiles;
             }
-        size_t staleHeads = 0;
-        for (size_t i = 0; i < listed.size(); ++i)
-            if (!listed[i] && fo.heads[i] != 0) ++staleHeads;
-        logf("    frame %zu: %u pixels, %u fragments; %zu checked against the exact clip (worst area error %.2e px, depth %.2e relative, slivers < 1e-2 px2 %.2e); %zu expected missing; "
-             "%zu back-facing triangles culled, %zu pixel fragments occluded by band A, %zu marginal; %zu stale heads\n",
-             f, pixelCount, fragmentCount, checked, worstArea, worstDepth, worstSliverDepth, missing, culledBack, occluded, marginal, staleHeads);
-        CHECK(missing == 0 && staleHeads == 0 && checked == fragmentCount && depthOver == 0);
-        CHECK(culledBack > 0 && occluded > 0);
+            // Exact full-pixel fragments: bDepth at least their depth (float rounding margin).
+            size_t missing = 0, fullUncovered = 0;
+            for (const auto& [k, e] : expected)
+            {
+                if (e.full && e.passesA && bDepthAt(k.second) < e.depth - (1e-7 + 1e-4 * e.depth))
+                {
+                    if (++fullUncovered <= 3) logf("    full-pixel fragment above bDepth: pixel %u, depth %.9g, bDepth %.9g\n", k.second, e.depth, bDepthAt(k.second));
+                }
+                if (!e.found && e.required)
+                    if (++missing <= 5) logf("    missing: pixel %u, area %g, depth %g\n", k.second, e.area, e.depth);
+            }
+            logf("    [%s] frame %zu: %u tiles (%u heavy, deepest %u fragments, %zu extension tables), %llu fragments; %zu checked against the exact clip (%zu duplicates of "
+                 "clipped pieces; worst area error %.2e px, depth %.2e relative, slivers < 1e-2 px2 %.2e, normal %.2f degrees); %zu full-pixel records; %zu expected "
+                 "missing; %zu back-facing triangles culled, %zu pixel fragments occluded by band A, %zu behind bDepth, %zu marginal; %zu stale tiles\n",
+                 config.name, f, listed, heavyCount, deepest, extTables, (unsigned long long)fragmentSum, checked, duplicates, worstArea, worstDepth, worstSliverDepth,
+                 worstNormalDeg, fullRecords, missing, culledBack, occluded, behindBDepth, marginal, staleTiles);
+            CHECK(missing == 0 && staleTiles == 0 && checked == fragmentSum && depthOver == 0 && fullUncovered == 0);
+            CHECK(culledBack > 0 && occluded > 0 && fullRecords > 0 && deepest > 16384 && extTables >= 2);
+        }
     }
-    logf("    coverage layer exact over %zu frames\n", frames.size());
+    logf("    coverage layer exact over %zu frames in 2 configurations\n", (size_t)3);
 }
 
 int main(int argc, char** argv)

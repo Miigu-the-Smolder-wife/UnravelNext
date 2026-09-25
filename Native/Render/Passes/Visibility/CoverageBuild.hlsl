@@ -1,179 +1,103 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: MODE=0,1,2,3,4
-// Coverage layer build (CoverageLayer.hlsli root constants):
+// unx-variants: MODE=0,1,2,3,5,4
+// Coverage layer bookkeeping (CoverageLayer.hlsli root constants; layout CoverageTiles.hlsli). The raster appends into
+// the tiles directly; there is no sort (M's composite sorts a tile's records in groupshared):
 //   MODE=0 (1 thread, after culling): DispatchMesh args over the band B list (both phases) and the clear args over last
-//          frame's coverage pixels.
-//   MODE=1 (per last frame's coverage pixel): its head to 0 (every other head is already 0).
-//   MODE=2 (1 thread, after the raster): args over this frame's coverage pixels; the pixel buffer header for M.
-//   MODE=3 (per coverage pixel): walks the pixel's linked fragments, allocates a contiguous range of at most 255 (more
-//          sets OVERFLOW_COVERAGE_DEPTH and keeps the first 255 of the walk), writes them sorted nearest first (larger
-//          reversed-Z depth first, then larger vis id: deterministic whatever the append order) without duplicates of a
-//          vis id (clipped primitives, below) and sets the head to first | count << 24; adds the written count to the
-//          header. Up to 8 fragments sort in registers (19-comparator network); more sort in place.
-//   MODE=4 (2D, 8 x 8 groups over the view; on creation): heads to 0; thread (0, 0) zeroes the pixel buffer header.
+//          frame's tiles (the tile list still holds them: one group per tile).
+//   MODE=1 (one group per last frame's tile): the tile's header, chunk table and bDepth pixels back to empty, so the
+//          whole-screen buffers are never cleared.
+//   MODE=2 (1 thread, after the raster): the tile list's header for M: DispatchIndirect args (one group per tile),
+//          tile, fragment and chunk counts, the layout words; V's args over the listed tiles for MODE 3.
+//   MODE=3 (per listed tile): tiles with more fragments than the heavy threshold go on the heavy list.
+//   MODE=5 (1 thread): the heavy list's DispatchIndirect args (one group per heavy tile) and count.
+//   MODE=4 (one group per tile of the view; on creation): every tile empty; the tile list's header zeroed.
 #include "Passes/Visibility/CoverageLayer.hlsli"
 
-#define WALK_LIMIT 1024u  // bound on a list walk (a list never holds more than the frame's fragments)
-
-void storeDispatch64(RWByteAddressBuffer args, uint word, uint items)
+void storeDispatchTiles(RWByteAddressBuffer args, uint word, uint tiles)
 {
-    const uint groups = (items + 63) / 64;
-    args.Store3(4 * word, uint3(min(groups, 65535u), (groups + 65534u) / 65535u, 1));
+    args.Store3(4 * word, uint3(min(tiles, 65535u), (tiles + 65534u) / 65535u, 1));
 }
 
-uint itemOf(uint3 gid, uint lane) { return (gid.x + gid.y * 65535u) * 64u + lane; }
+void storeDispatch64(RWByteAddressBuffer args, uint word, uint items) { storeDispatchTiles(args, word, (items + 63) / 64); }
 
-// Nearest first: larger depth, then larger vis id.
-bool nearer(CoverageFragment x, CoverageFragment y) { return x.depth > y.depth || (x.depth == y.depth && x.visId > y.visId); }
-
-CoverageFragment toSorted(CoverageRawFragment r)
+// One tile back to empty, by its 64 threads: header, chunk table, bDepth of its pixels inside the view.
+void clearTile(uint tile, uint lane)
 {
-    CoverageFragment f;
-    f.visId = r.visId;
-    f.depth = r.depth;
-    f.coverageMask32 = r.mask;
-    f.area = r.area;
-    return f;
+    RWByteAddressBuffer headers = ResourceDescriptorHeap[COV_TILE_HEADERS];
+    RWByteAddressBuffer table = ResourceDescriptorHeap[COV_CHUNK_TABLE];
+    RWTexture2D<uint> bDepth = ResourceDescriptorHeap[COV_BDEPTH];
+    if (lane < COV_TILE_WORDS) headers.Store(4 * (tile * COV_TILE_WORDS + lane), lane == COV_TILE_ZFAR ? 0xFFFFFFFFu : 0u);
+    for (uint c = lane; c < COV_TABLE_SLOTS; c += 64) table.Store(4 * (tile * COV_TABLE_SLOTS + c), 0);
+    const uint2 pixel = uint2(tile % COV_TILES_X, tile / COV_TILES_X) * COV_TILE_PX + uint2(lane % COV_TILE_PX, lane / COV_TILE_PX);
+    if (pixel.x < COV_WIDTH && pixel.y < COV_HEIGHT) bDepth[pixel] = 0;
 }
 
-#if MODE == 0 || MODE == 2
+#if MODE == 0 || MODE == 2 || MODE == 5
 [numthreads(1, 1, 1)]
 void main()
 {
     RWByteAddressBuffer state = ResourceDescriptorHeap[COV_STATE];
     RWByteAddressBuffer args = ResourceDescriptorHeap[COV_ARGS];
-    RWByteAddressBuffer pixels = ResourceDescriptorHeap[COV_PIXELS];
+    RWByteAddressBuffer list = ResourceDescriptorHeap[COV_TILE_LIST];
 #if MODE == 0
     const uint entries = min(state.Load(4 * (VS_LIST_COUNT + LIST_B)), COV_LIST_CAPACITY);
     args.Store3(4 * VA_COV_MESH, uint3(min(entries, 65535u), (entries + 65534u) / 65535u, 1));
-    storeDispatch64(args, VA_COV_RESET, min(pixels.Load(4 * COV_PIXEL_COUNT), COV_CAP_PIXELS));
+    storeDispatchTiles(args, VA_COV_CLEAR, min(list.Load(4 * COV_LIST_COUNT), COV_TILES));
+#elif MODE == 2
+    const uint tiles = min(state.Load(4 * VS_COV_TILES), COV_TILES);
+    storeDispatchTiles(list, COV_LIST_ARGS, tiles);
+    list.Store(4 * COV_LIST_COUNT, tiles);
+    list.Store(4 * COV_LIST_FRAGMENTS, state.Load(4 * VS_COV_FRAGMENTS));
+    list.Store(4 * COV_LIST_CHUNKS, min(state.Load(4 * VS_COV_CHUNKS), COV_CAP_CHUNKS));
+    list.Store(4 * COV_LIST_TABLE_SLOTS, COV_TABLE_SLOTS);
+    list.Store(4 * COV_LIST_TILES_X, COV_TILES_X);
+    list.Store(4 * COV_LIST_HEAVY_MIN, COV_HEAVY_MIN);
+    list.Store(4 * COV_LIST_HEAVY_START, COV_LIST_TILES + COV_TILES);
+    storeDispatch64(args, VA_COV_TILES, tiles);
+    state.Store(4 * VS_COV_POOL, COV_CAP_CHUNKS);
 #else
-    const uint count = min(state.Load(4 * VS_COV_PIXELS), COV_CAP_PIXELS);
-    storeDispatch64(args, VA_COV_PIXELS, count);
-    storeDispatch64(pixels, COV_PIXEL_ARGS, count);
-    pixels.Store(4 * COV_PIXEL_COUNT, count);
-    pixels.Store(4 * COV_PIXEL_FRAGMENTS, 0);  // MODE 3 adds the written fragments
+    const uint heavy = min(state.Load(4 * VS_COV_HEAVY), COV_TILES);
+    storeDispatchTiles(list, COV_LIST_HEAVY_ARGS, heavy);
+    list.Store(4 * COV_LIST_HEAVY_COUNT, heavy);
 #endif
 }
 #elif MODE == 1
 [numthreads(64, 1, 1)]
 void main(uint3 gid : SV_GroupID, uint lane : SV_GroupThreadID)
 {
-    RWByteAddressBuffer pixels = ResourceDescriptorHeap[COV_PIXELS];
-    const uint i = itemOf(gid, lane);
-    if (i >= min(pixels.Load(4 * COV_PIXEL_COUNT), COV_CAP_PIXELS)) return;
-    RWTexture2D<uint> heads = ResourceDescriptorHeap[COV_HEADS];
-    heads[coverageUnpack(pixels.Load(4 * (COV_PIXEL_LIST + i)))] = 0;
+    RWByteAddressBuffer list = ResourceDescriptorHeap[COV_TILE_LIST];
+    const uint i = gid.x + gid.y * 65535u;
+    if (i >= min(list.Load(4 * COV_LIST_COUNT), COV_TILES)) return;
+    clearTile(list.Load(4 * (COV_LIST_TILES + i)), lane);
 }
 #elif MODE == 3
-#define SORT_LOCAL 8u
 [numthreads(64, 1, 1)]
 void main(uint3 gid : SV_GroupID, uint lane : SV_GroupThreadID)
 {
     RWByteAddressBuffer state = ResourceDescriptorHeap[COV_STATE];
-    RWByteAddressBuffer pixels = ResourceDescriptorHeap[COV_PIXELS];
-    RWTexture2D<uint> heads = ResourceDescriptorHeap[COV_HEADS];
-    RWStructuredBuffer<CoverageRawFragment> raw = ResourceDescriptorHeap[COV_RAW];
-    const uint i = itemOf(gid, lane);
-    const bool active = i < min(state.Load(4 * VS_COV_PIXELS), COV_CAP_PIXELS);
-    const uint stored = min(state.Load(4 * VS_COV_FRAGMENTS), COV_CAP_FRAGMENTS);
-    uint2 p = 0;
-    uint head = 0, n = 0;
-    if (active)
+    RWByteAddressBuffer list = ResourceDescriptorHeap[COV_TILE_LIST];
+    RWByteAddressBuffer headers = ResourceDescriptorHeap[COV_TILE_HEADERS];
+    const uint i = (gid.x + gid.y * 65535u) * 64u + lane;
+    uint tile = 0;
+    bool heavy = false;
+    if (i < min(state.Load(4 * VS_COV_TILES), COV_TILES))
     {
-        p = coverageUnpack(pixels.Load(4 * (COV_PIXEL_LIST + i)));
-        head = heads[p];
-        for (uint ptr = head; ptr != 0 && ptr <= stored && n < WALK_LIMIT; ++n) ptr = raw[ptr - 1].next;
+        tile = list.Load(4 * (COV_LIST_TILES + i));
+        heavy = headers.Load(4 * (tile * COV_TILE_WORDS + COV_TILE_COUNT)) > COV_HEAVY_MIN;
     }
-    const uint keep = min(n, 255u);
-    if (n > keep) state.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_COVERAGE_DEPTH);
-    const uint first = waveAppend(state, VS_COV_ALLOC, keep, stored, OVERFLOW_COVERAGE);
-    // Written fragments of this pixel: the kept ones without duplicates. A primitive the hardware clips (near plane,
-    // guard band) is rasterised in pieces, and conservative rasterisation shades pixels along the cuts once per piece;
-    // every such invocation computes the same whole polygon, so the fragments are identical and one is kept. They are
-    // adjacent after the sort (same depth and vis id).
-    uint unique = 0;
-    if (active && first + keep <= stored)  // (always, with consistent lists: the kept counts sum to at most 'stored')
-    {
-        RWStructuredBuffer<CoverageFragment> sorted = ResourceDescriptorHeap[COV_SORTED];
-        if (keep <= SORT_LOCAL)
-        {
-            CoverageFragment f[SORT_LOCAL];
-            uint ptr = head;
-            [unroll] for (uint k = 0; k < SORT_LOCAL; ++k)
-            {
-                f[k] = (CoverageFragment)0;
-                f[k].depth = -1;  // below every reversed-Z depth: padding sorts last
-                if (k < keep)
-                {
-                    const CoverageRawFragment r = raw[ptr - 1];
-                    f[k] = toSorted(r);
-                    ptr = r.next;
-                }
-            }
-            // Optimal 8-input network (19 compare-exchanges, depth 6), nearest first.
-#define CX(x, y) if (nearer(f[y], f[x])) { const CoverageFragment t = f[x]; f[x] = f[y]; f[y] = t; }
-            CX(0, 2) CX(1, 3) CX(4, 6) CX(5, 7)
-            CX(0, 4) CX(1, 5) CX(2, 6) CX(3, 7)
-            CX(0, 1) CX(2, 3) CX(4, 5) CX(6, 7)
-            CX(2, 4) CX(3, 5)
-            CX(1, 4) CX(3, 6)
-            CX(1, 2) CX(3, 4) CX(5, 6)
-#undef CX
-            uint lastVis = 0;
-            [unroll] for (uint k2 = 0; k2 < SORT_LOCAL; ++k2)
-                if (k2 < keep && (unique == 0 || f[k2].visId != lastVis))
-                {
-                    sorted[first + unique] = f[k2];
-                    lastVis = f[k2].visId;
-                    ++unique;
-                }
-        }
-        else
-        {
-            uint ptr = head;
-            for (uint k = 0; k < keep; ++k)
-            {
-                const CoverageRawFragment r = raw[ptr - 1];
-                // Insertion into the written prefix [first, first + k).
-                const CoverageFragment x = toSorted(r);
-                uint j = k;
-                while (j > 0 && nearer(x, sorted[first + j - 1]))
-                {
-                    sorted[first + j] = sorted[first + j - 1];
-                    --j;
-                }
-                sorted[first + j] = x;
-                ptr = r.next;
-            }
-            uint lastVis = 0;
-            for (uint k2 = 0; k2 < keep; ++k2)
-            {
-                const CoverageFragment x = sorted[first + k2];
-                if (unique == 0 || x.visId != lastVis)
-                {
-                    sorted[first + unique] = x;
-                    lastVis = x.visId;
-                    ++unique;
-                }
-            }
-        }
-    }
-    if (active) heads[p] = first | (unique << 24);
-    const uint total = WaveActiveSum(unique);
-    if (WaveIsFirstLane() && total > 0) pixels.InterlockedAdd(4 * COV_PIXEL_FRAGMENTS, total);
+    const uint slot = waveAppend(state, VS_COV_HEAVY, heavy ? 1 : 0, COV_TILES, OVERFLOW_COVERAGE);
+    if (heavy) list.Store(4 * (COV_LIST_TILES + COV_TILES + slot), tile);
 }
 #else
-[numthreads(8, 8, 1)]
-void main(uint2 id : SV_DispatchThreadID)
+[numthreads(64, 1, 1)]
+void main(uint3 gid : SV_GroupID, uint lane : SV_GroupThreadID)
 {
-    if (all(id == 0))
+    const uint tile = gid.x + gid.y * COV_TILES_X;
+    if (tile == 0 && lane < COV_LIST_TILES)
     {
-        RWByteAddressBuffer pixels = ResourceDescriptorHeap[COV_PIXELS];
-        [unroll] for (uint w = 0; w < COV_PIXEL_LIST; ++w) pixels.Store(4 * w, 0);
+        RWByteAddressBuffer list = ResourceDescriptorHeap[COV_TILE_LIST];
+        list.Store(4 * lane, 0);
     }
-    if (id.x >= COV_WIDTH || id.y >= COV_HEIGHT) return;
-    RWTexture2D<uint> heads = ResourceDescriptorHeap[COV_HEADS];
-    heads[id] = 0;
+    clearTile(tile, lane);
 }
 #endif

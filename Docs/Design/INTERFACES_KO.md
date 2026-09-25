@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.36, 2026-09-25)
+# UnravelNext 인터페이스 (v1.37, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -217,7 +217,7 @@ void RenderGraph::addPass(std::string_view name, QueueType, SetupFn setup, Execu
 | visId | R32_UINT (7.1) | V | M, R |
 | visibleClusters | `gpu::VisibleCluster[]` | V | M, R |
 | hiz | R32_FLOAT 전 밉. 밉 k 텍셀 (i, j) = 픽셀 [i·2^(k+1), (i+1)·2^(k+1)) 블록의 가장 먼 깊이(reversed-Z 최솟값). 유효 크기 ⌈W/2^(k+1)⌉×⌈H/2^(k+1)⌉, 할당은 2의 거듭제곱(D3D 밉 크기는 내림이라 올림 체인을 담기 위함; 유효 영역 밖 텍셀은 정의되지 않음) | V | S(페이지 표시), R |
-| coverageFragments / coverageHeads / coveragePixels | 7.1 (v1.25) | V | M |
+| coverageTiles / coverageChunkTable / coverageChunks / coverageBDepth / coverageTileList | 7.1 (v1.37, 타일 청크 v2) | V | M, S |
 | gbuffer | RG32_UINT (7.2) | M | S, R |
 | shadowVisibility | R32_UINT (7.3) | S | M |
 | shadowOverflowTiles / shadowOverflow / shadowOverflowFallbackTiles | 7.3 (v1.20; v1.22부터 평면 뷰도 그 뷰 리스트 기준) | S | M |
@@ -414,10 +414,36 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 ### 7.1 vis id · depth · coverage 층 (`VisBuffer.hlsli`)
 - vis id R32_UINT = `(visibleCluster << 7 | triangle) + 1`, `VIS_NONE = 0` = 하늘(v1.5). visibleCluster는 그 뷰의 `VisibleCluster` 목록 인덱스(< 2^25 − 1). 소비자는 `packVisId`·`visVisibleCluster`·`visTriangle`·`VIS_NONE`(VisBuffer.hlsli)만 쓰고 비트 연산을 직접 하지 않는다. 0인 이유: UINT 렌더 타깃은 float 클리어 값만 받으므로 0xFFFFFFFF(float로 표현 불가, 실측으로 0이 된다)로 지울 수 없고, 지우기 패스를 따로 두면 대상 전체를 한 번 더 쓴다(4K 33 MB).
 - depth D32_FLOAT, reversed-Z, 무한 원평면.
-- coverage 층: `coverageHeads` R32_UINT = 첫 fragment 인덱스(하위 24 bit) | 개수 << 24, `coverageFragments`는 픽셀별 깊이 순 정렬된 16 B `{ uint visId; float depth; uint coverageMask32; float area; }`. 대역 C 브릭 fragment는 visId의 삼각형 필드가 `0x7F`.
-  - (v1.25, V 구현) 정렬은 가까운 것부터다(reversed-Z depth 큰 것 먼저, 같으면 visId 큰 것 먼저; 결정적). `depth`는 덮인 영역 무게중심의 device depth, `area`는 삼각형(가까운 평면으로 잘린 다각형)∩픽셀의 정확 면적(px², 알파 테스트 재질은 통과 부표본 비율을 곱함), `coverageMask32`는 `coverageSample(i)` 32 부표본이다. 한 픽셀에서 visId는 한 번만 나온다. 픽셀당 최대 255개이고, 넘치면 `Stats::overflow` 0x200이 선다.
-  - `coverageHeads`는 전 화면에서 유효하다(fragment 없는 픽셀 0). `ViewResources::coveragePixels`(raw): 워드 0..2 = fragment가 있는 픽셀 위의 DispatchIndirect 인자(그룹당 64 픽셀), 3 = 픽셀 수, 4 = fragment 수, 8.. = 픽셀 목록(`x | y << 16`). M의 coverage 합성은 이 목록 위에서 ExecuteIndirect(바이트 오프셋 0)로 돈다.
-  - 켜기: `visibility.coverage_layer = true`(메인 뷰의 대역 B·C가 coverage 층으로 가고 vis buffer에는 없다). 기본값은 false다. M이 coverage fragment를 합성하게 되면 켠다(그 전에 켜면 얇은 기하가 M 이미지에서 빠진다). 용량 `visibility.max_coverage_fragments`(12 M, < 2^24). 평면 반사 뷰는 아직 vis buffer로 그린다(V 다음 항목).
+- coverage 층 v2(v1.37; 요청 `20260926_V_coverage_layer_v2.md`, 설계 COVERAGE_REDESIGN 4.5 채택; 배치는 `Passes/Visibility/CoverageTiles.hlsli`가 정한다). 8×8 픽셀 타일 단위이고, 타일 번호 = tx + ty·⌈W/8⌉이다.
+  - **레코드 16 B** `CoverageFragment { visId; depth; mask; packed }`:
+    - `depth`는 덮인 영역 무게중심의 device depth(reversed Z)다.
+    - `mask`는 `coverageSample(i)` 32 부표본이다.
+    - `packed` = 팔면체 법선 8+8 bit | 면적 × 1023 반올림 << 16 | 타일 안 픽셀 x + 8y << 26.
+    - 면적은 (가까운 평면으로 잘린) 다각형 ∩ 픽셀의 정확 면적이다. 알파 테스트 재질은 통과 부표본 비율을 곱한다.
+    - 법선은 무게중심에서 원근 보정으로 보간한 월드 법선이다. 뒤에서 본 양면 재질은 뷰어 쪽으로 뒤집는다.
+    - 대역 C 브릭 fragment는 visId의 삼각형 필드가 `0x7F`다.
+  - **청크**: 레코드는 64개씩 청크(1 KB)로 `coverageChunks`(raw 풀)에 있다. 타일의 i번째 fragment는 청크 서수 i/64의 i%64번 레코드다.
+    - 서수 < N이면 청크 번호 + 1은 `coverageChunkTable`의 타일 칸에 있다(N = `visibility.coverage_table_slots`, 기본 32, 목록 머리 워드 6).
+    - 그 뒤 서수는 타일 머리 워드 5에서 시작하는 확장 표 사슬에 있다. 확장 표는 풀의 청크 하나를 256 워드로 쓴다: 0..254 = 다음 255 서수의 청크, 255 = 다음 확장 표. 타일당 fragment 수에 한도가 없다.
+    - 읽기 도우미는 `coverageChunkOf`, `coverageLoadRecord`다. 청크 번호 0(수보다 아래)은 풀이 모자랐다는 뜻이다(`Stats::overflow` 0x100).
+  - **순서와 중복**: 타일 안 레코드는 추가 순서다(V는 정렬하지 않는다). 읽는 쪽(M 합성)이 (픽셀, 깊이, visId)로 정렬한다. 하드웨어가 잘라 조각으로 래스터한 프리미티브는 같은 visId·같은 값으로 두 번 나올 수 있으니 인접 중복은 하나로 친다.
+  - **타일 머리 8 워드**(`coverageTiles`):
+    - 0 = fragment 수.
+    - 1 = zNear(가장 가까운 depth 비트, 원자 max). 2 = zFar(가장 먼 것, 원자 min; 없으면 0xFFFFFFFF).
+    - 3·4 = opaqueCovered 64 bit: 픽셀 전체를 덮은 불투명 fragment가 있는 픽셀이다. 그 뒤 대역 A 표면의 가중치는 0이다.
+    - 5 = 첫 확장 표. 6·7 = 예비(0).
+  - **`coverageBDepth`** R32_UINT: 픽셀 전체를 덮은 불투명 fragment 중 가장 가까운 것의 depth 비트다(원자 max). 그보다 뒤인 fragment는 래스터가 버린다. 다만 그 fragment가 먼저 래스터된 경우에만 버려지므로, 순서에 따라 남아 있을 수 있다(가중치 0).
+  - **`coverageTileList`**(raw) 머리:
+    - 0..2 = fragment가 있는 타일 위 DispatchIndirect 인자(타일당 그룹 1개, x ≤ 65535 다음 y). 3 = 타일 수. 4 = fragment 수. 5 = 청크 수. 6 = N. 7 = 타일 열 수.
+    - 8..10 = 무거운 타일 위 인자(타일당 그룹 1개). 11 = 무거운 타일 수. 12 = 무거운 문턱(`visibility.coverage_heavy_tile_fragments`, 기본 1,024: fragment 수가 이보다 많은 타일). 13 = 무거운 타일 목록의 시작 워드.
+    - 16.. = 타일 번호. [워드 13].. = 무거운 타일 번호(앞 목록의 부분집합).
+    - M은 두 목록 위에서 ExecuteIndirect로 돈다(바이트 오프셋 0과 32). 무거운 타일은 블록 정렬 + k-way 병합으로 처리한다(설계 4.5 (b)).
+  - **풀 크기**: 직전 완료 프레임의 필요량 × 1.5를 16 MB 단위로 쓴다. 늘릴 때는 바로 늘리고, 필요량이 반 아래일 때만 줄인다.
+    - 하한은 `visibility.coverage_pool_min_fragments_per_pixel` × 픽셀이다(1.0: 4K 8.3 M 레코드, 133 MB).
+    - 상한은 raw 뷰의 2^27 워드(512 MB = 33.5 M fragment)다.
+    - 필요량이 풀을 넘으면 그 프레임의 fragment가 빠지고 `Stats::overflow` 0x100(게이트 실패)이 선다. fragment를 버리는 경로는 이것뿐이다.
+  - **켜기**: `visibility.coverage_layer`(기본 false). M 합성이 이 층을 읽게 되면 켠다. 평면 반사 뷰는 아직 vis buffer로 그린다.
+  - v1.25 형식(`coverageHeads/coverageFragments/coveragePixels`, overflow 0x200)은 폐기했다. 키 `max_coverage_fragments`는 읽지 않는다. v1.37 이전에 빌드한 바이너리가 시작되도록 설정 파일에만 남겨 두고, 다음 통합 재빌드 뒤 지운다.
 
 ### 7.2 G-buffer (`GBuffer.hlsli`) — RG32_UINT 8 B
 `.x` 월드 셰이딩 법선(팔면체 snorm16×2), `.y` baseColor sRGB8×3 | 지각 거칠기 unorm8(상위 8 bit). metallic·specular·클래스·플래그는 재질 테이블(vis id → 클러스터 → 재질). 픽셀별 metallic/occlusion 맵은 M의 셰이딩 커널이 vis id로 다시 평가한다.
@@ -606,6 +632,15 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.37 (2026-09-26):
+  - **coverage 층 v2(7.1, V 요청 `20260926_V_coverage_layer_v2.md`, 설계 채택 d90f9db)**: 8×8 타일 청크, 16 B 레코드(보간 법선 포함), 타일 머리(수·깊이 범위·opaqueCovered·확장 표), bDepth, 타일 목록과 무거운 타일 목록. 정렬 없음(M이 groupshared에서 정렬). `ViewResources`의 coverage 필드 5개가 v1.25의 3개를 대신한다.
+    - 구현: 픽셀 커널이 웨이브의 fragment를 타일별로 묶어 타일마다 원자 1회로 번호를 받는다. 청크는 풀에서 받아 CAS로 표에 넣고, 진 쪽은 이긴 쪽 청크를 쓴다(기다림 없음). 확장 표는 0으로 채운 뒤 메모리 펜스를 두고 게시하며, 표 읽기는 원자 연산이다. 지난 프레임의 타일만 비운다(화면 전체 지우기 없음). 무거운 타일 분류는 목록 위 패스 하나다.
+    - 품질 키: `coverage_table_slots`(32), `coverage_pool_min_fragments_per_pixel`(1.0), `coverage_heavy_tile_fragments`(1,024). `max_coverage_fragments`는 읽지 않는다(이전 바이너리용으로 설정에만 남김).
+    - V 통계: `coverageTiles`, `coverageChunks`(필요량, 풀 크기 근거), `coverageChunksLost`(CAS에 진 청크), `coverageHeavyTiles`, `coveragePoolChunks`. `coveragePixels`는 없앴다.
+    - `RenderGraph::desc(BufferRef)`(코어): 기록 시점의 버퍼 설명.
+    - [실측] `coverage_layer_is_exact`(640×360, 두 설정 × 3프레임, RTX 4080, 새 커널 첫 실행은 GPU 잠금 안): 프레임당 65,998~70,538 레코드 전부가 정확 클리핑과 일치했다. 면적 최대 오차 5.25e-4 px²(10 bit 반 걸음 4.9e-4 + float), 깊이 1.25e-5 상대, 법선 최대 0.77°(8+8 bit 팔면체 반올림 상한 0.95°, 40만 방향 실측). 누락 0, 남은 타일 0, 절단 조각 중복 162~195개(같은 값). 카드 4,000장 더미의 타일(51,641~56,000 fragment)은 확장 표 사슬에 모두 담겼다(표 칸 32: 표 4개, 칸 1: 68~80개). 무거운 타일 목록은 문턱 1,024와 64에서 정확했고, bDepth·opaqueCovered는 픽셀 전체를 덮은 불투명 레코드와 일치했다. D3D12 디버그 층 오류 0.
+    - 관찰 1(실제 장면 값은 V 게이트에서 잰다): CAS에 진 청크. 더미 타일처럼 웨이브 수천 개가 한 타일에 몰리면 청크 5,073개 중 3,916개가 버려졌다(풀 16,384 안이라 손실은 없다).
+    - 관찰 2(설계 개정·M 판정 필요): opaqueCovered·bDepth는 fragment 하나가 픽셀 전체를 덮을 때만 선다. 대각선으로 나뉜 사각형(1.3 px 기둥)은 두 삼각형이 픽셀을 나눠 덮으므로 거의 서지 않았다(프레임당 5~12 픽셀). 설계 4.6의 −0.70 ms가 이 조건에 달려 있다.
 - v1.36 (2026-09-25):
   - **결정성(5.5.2, 사용자 결정)**: 결정 모드 스위치(R `gi.deterministic` 등)로 두고, 합계표 여유가 확인되면 늘 켬으로 올린다.
   - **`ViewResources::screenProbeBlocks`(R 요청, 설계 개정 12.3)**: GI 화면 프로브 블록, 프로브당 640 B 연속, 메인 뷰 전용. R이 쓰고 M이 읽는다.
