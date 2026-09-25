@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.22, 2026-09-25)
+# UnravelNext 인터페이스 (v1.23, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -280,7 +280,14 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 - 비용 [예상]: 갱신 원소(16 B) 수 × 2(업로드 링 + 산포). 인스턴스 2만 개와 본 2.56만 개면 약 2.2 MB, 0.01 ms 수준.
 
 ### 6.4 변형
-스킨: 선형 블렌드, 조인트 4개, 팔레트 = jointToModel × inverseBind(인스턴스마다, 현재·이전 두 벌). 바람: `windOffset(inst, p, time)`(v1 모델, P3에서 같은 시그니처로 교체), 상한 `windOffsetBound(inst, centre, radius)`(구 안 모든 점·모든 시각), 변화 인자 `windChangeFactor(t0, t1)`(v1.4: 장면 바람과 인스턴스 변환이 그대로일 때 |windOffset(t1) − windOffset(t0)| ≤ windOffsetBound × windChangeFactor; 모델이 바뀌면 세 함수를 같이 바꾼다). **래스터(V), 그림자 페이지(V 서비스), BLAS refit(R)은 모두 `deformVertex`를 쓴다.** Revision: `Instance.transformRevision`, `deformRevision`, `Material.revision`, `Light.revision`, `FrameConstants.sceneRevision` — S의 dirty 규칙과 R의 캐시 무효화가 이것을 읽는다.
+스킨: 선형 블렌드, 조인트 4개, 팔레트 = jointToModel × inverseBind(인스턴스마다, 현재·이전 두 벌). 바람: `windOffset(inst, p, time)`(v1 모델, P3에서 같은 시그니처로 교체), 상한 `windOffsetBound(inst, centre, radius)`(구 안 모든 점·모든 시각, 이번 프레임의 바람).
+- **장면 바람 변경(v1.23, I 요청·S·R 검토)**: 호스트는 프레임 기록 전에 `GpuScene::source()` 장면의 `windDirection`·`windSpeed`를 바꿀 수 있다(태양과 같은 경로). 프레임 상수 `g_windDirection`·`g_windSpeed`가 그 프레임의 바람이다. 바람 revision은 없다. 소비자는 끝점을 비교한다.
+- **무기억 계약**: `windOffset`은 시각과 그 시각의 바람만의 함수다(이력 없음). P3 모델도 이 성질을 지킨다. 지키지 않으면 아래 상한이 이력을 받는 형태로 바뀐다.
+- `float windOffsetScale(GpuInstance, float3 centre, float radius)`: 속도 무관 부분이다. `windOffsetBound` = scale × `g_windSpeed`².
+- `float windChangeBound(float scale, float t0, float s0, float3 d0, float t1, float s1, float3 d1)`: 같은 인스턴스 변환에서 |windOffset(t1; s1, d1) − windOffset(t0; s0, d0)|의 상한이다. 사이에 바람이 어떻게 바뀌었어도 성립한다.
+  - v1 식: scale × [s1²·0.4·min(2, 1.7|t1 − t0|) + |s1² − s0²| + 2 sin(Δθ/2)·s0²].
+  - 바람을 재사용하는 소비자(S 페이지, R BLAS)는 그린 순간의 (t0, s0, d0)와 scale을 저장하고 이 상한으로 판정한다.
+- `windChangeFactor(t0, t1)`는 "바람이 그대로일 때"의 인자로 남는다(= 같은 바람의 `windChangeBound` / `windOffsetBound`)., 변화 인자 `windChangeFactor(t0, t1)`(v1.4: 장면 바람과 인스턴스 변환이 그대로일 때 |windOffset(t1) − windOffset(t0)| ≤ windOffsetBound × windChangeFactor; 모델이 바뀌면 세 함수를 같이 바꾼다). **래스터(V), 그림자 페이지(V 서비스), BLAS refit(R)은 모두 `deformVertex`를 쓴다.** Revision: `Instance.transformRevision`, `deformRevision`, `Material.revision`, `Light.revision`, `FrameConstants.sceneRevision` — S의 dirty 규칙과 R의 캐시 무효화가 이것을 읽는다.
 
 ### 6.5 클러스터 (V 소유, 형식 고정)
 64 삼각형(최대 128), 정점 ≤ 255, 클러스터마다 경계 구, 법선 원뿔, LOD 오차·부모 오차(단조), **최소 특징 폭**(물체 공간 m, 대역 A/B/C 분류), 대역 C 브릭 인덱스. 한 클러스터는 서브메시 하나에만 속한다.
@@ -441,3 +448,9 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
     - V: 거울 픽셀이 없는 8×8 타일 위의 클러스터를 컬링하고(래스터 서비스와 같은 타일 마스크 컬링), 래스터 전에 거울 픽셀이 아닌 픽셀의 깊이를 가장 가까운 값(1)으로 채운다. 그 픽셀은 조기 깊이 판정으로 모든 fragment를 버리고 `VIS_NONE`으로 남는다.
     - M·S: 타일 분류에서 거울 픽셀이 없는 타일을 건너뛴다.
     - V 구현은 GPU 검증(게임 뒤) 뒤에 들어간다. 그 전까지 V는 마스크를 무시하고 모든 픽셀을 그린다(결과는 같고 비용만 크다).
+- v1.23 (2026-09-25):
+  - **I 요청 `20260925_I_wind_change.md` 반영(S 검토 `20260925_S_wind_change_review.md`, R 의견)**: 커밋 뒤 장면 바람 변경의 계약(6.4).
+    - 호스트는 프레임 기록 전에 source 장면의 바람을 바꾼다(태양과 같은 경로). 바람 revision은 두지 않는다. S와 R 모두 끝점 비교로 충분하다고 했다.
+    - `windOffset`의 무기억 계약을 넣었다(P3 모델도 지킨다).
+    - `Deformation.hlsli`에 `windOffsetScale`(속도 무관, `windOffsetBound` = scale × s²)과 `windChangeBound`(끝점 상한, S의 더 좁은 식)를 추가했다. `windOffsetBound`와 `windChangeFactor`는 그대로다.
+    - S는 페이지 메타에 scale과 그린 순간의 바람을 저장하고, `windChanged` 전체 무효화를 없앤다. R의 바람 BLAS 재사용은 같은 방식이다. I의 `UnxFrameSetEnvironment`가 바람도 받을 수 있다.

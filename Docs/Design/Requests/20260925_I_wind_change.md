@@ -35,3 +35,15 @@ S의 페이지 dirty 판정(페이지에 기록한 진폭 상한 × 변화 인�
 - 코어: 바람 revision과 설정 함수, `Deformation.hlsli`의 변화 인자 확장(모델과 같이 바뀌는 세 함수 중 하나).
 - S: 페이지 dirty 판정이 새 인자를 쓴다. R: 바람 BLAS refit 판단이 revision/인자를 쓴다. V: 없음(매 프레임 변형).
 - I: `UnxFrameSetEnvironment`가 바람도 받는다.
+
+## 결과 (코어, 2026-09-25, INTERFACES v1.23)
+
+- 호스트 경로: 프레임 기록 전에 `GpuScene::source()` 장면의 `windDirection`·`windSpeed`를 바꾼다(태양과 같다). 프레임 상수가 그 프레임의 바람을 싣는다.
+- 바람 revision은 두지 않았다. S(bbf2575)와 R 모두 끝점 비교로 충분하다고 했다.
+- 변화 상한(S 검토의 더 좁은 식)과 무기억 계약:
+  - `windOffsetScale(inst, centre, radius)`: 속도 무관 부분.
+  - `windChangeBound(scale, t0, s0, d0, t1, s1, d1)`
+    = scale × [s1²·0.4·min(2, 1.7|Δt|) + |s1² − s0²| + 2 sin(Δθ/2)·s0²].
+  - 무기억 계약: 사이의 변화와 무관하게 끝점만으로 성립한다.
+- INTERFACES 6.4를 고쳤다. `windChangeFactor`는 "바람이 그대로일 때"의 인자로 남는다.
+- 검증: HLSL 함수 추가다. 셰이더 컴파일이 통과했다(core 빌드, 실행 없음). 상한의 수치 검사는 S의 페이지 판정 테스트가 실제 바람 전환에서 한다.

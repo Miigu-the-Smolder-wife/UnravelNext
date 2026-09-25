@@ -53,7 +53,10 @@ void skin(GpuMesh mesh, GpuInstance inst, uint meshVertex, uint palette, inout f
 }
 
 // Wind displacement (object space) for a vertex at object position p, at time 'time'. v1: height-weighted sway along
-// the scene wind direction; replaced by the P3 wind model behind the same signature.
+// the scene wind direction; replaced by the P3 wind model behind the same signature. The scene wind may change between
+// frames (the host changes it before recording, v1.23). windOffset is memoryless: a function of the time and of the
+// wind at that time only, never of the wind's history; the P3 model keeps this property (otherwise windChangeBound
+// must take the history), because page and BLAS reuse compares only the two endpoints.
 float3 windOffset(GpuInstance inst, float3 p, float time)
 {
     if (inst.windStiffness <= 0 || g_windSpeed <= 0) return 0;
@@ -66,19 +69,37 @@ float3 windOffset(GpuInstance inst, float3 p, float time)
     return dirObject * amplitude * (0.6 + 0.4 * sin(time * 1.7 + inst.windPhase));
 }
 
-// Upper bound of |windOffset| (object space) for any point of an object-space sphere and any time. Culling inflates
-// bounds by it so geometry moved by the wind is never culled. Changes together with windOffset.
-float windOffsetBound(GpuInstance inst, float3 centre, float radius)
+// Speed-independent part of the bound (v1.23): windOffsetBound = windOffsetScale x speed^2 for the frame's speed. A
+// consumer that reuses wind-moved results (S's pages, R's BLAS) stores it with the wind it drew them with.
+float windOffsetScale(GpuInstance inst, float3 centre, float radius)
 {
-    if ((inst.flags & INSTANCE_WIND) == 0 || inst.windStiffness <= 0 || g_windSpeed <= 0) return 0;
+    if ((inst.flags & INSTANCE_WIND) == 0 || inst.windStiffness <= 0) return 0;
     const float h = max(centre.y + radius - inst.windAnchor, 0.0);
-    return g_windSpeed * g_windSpeed * 0.002 / inst.windStiffness * h * h;
+    return 0.002 / inst.windStiffness * h * h;
 }
+
+// Upper bound of |windOffset| (object space) for any point of an object-space sphere and any time, at this frame's
+// wind. Culling inflates bounds by it so geometry moved by the wind is never culled. Changes together with windOffset.
+float windOffsetBound(GpuInstance inst, float3 centre, float radius) { return g_windSpeed > 0 ? windOffsetScale(inst, centre, radius) * g_windSpeed * g_windSpeed : 0; }
 
 // |windOffset(t1) - windOffset(t0)| <= windOffsetBound(...) * windChangeFactor(t0, t1) for every instance and vertex,
 // while the scene wind (direction, speed) and the instance transform are unchanged (S request: page-side VSM dirty
 // rule). v1: amplitude x (0.6 + 0.4 sin(1.7 t + phase)), and |sin a - sin b| <= min(2, |a - b|).
 float windChangeFactor(float t0, float t1) { return 0.4 * min(2.0, 1.7 * abs(t1 - t0)); }
+
+// Across wind changes (v1.23; I request, S review): for an unchanged instance transform and every point of the sphere
+// windOffsetScale was taken over,
+//   |windOffset(t1; s1, d1) - windOffset(t0; s0, d0)| <= windChangeBound(windOffsetScale(...), t0, s0, d0, t1, s1, d1)
+// for times t0, t1, wind speeds s0, s1 (m/s) and unit world directions d0, d1, however the wind changed in between
+// (windOffset is memoryless). v1: windOffset = d K s^2 m(t), m = 0.6 + 0.4 sin(1.7 t + phase) in [0.2, 1], so
+//   |d1 K s1^2 m1 - d0 K s0^2 m0| <= K [s1^2 |m1 - m0| + |s1^2 - s0^2| m0 + |d1 - d0| s0^2 m0]
+//                                 <= K [s1^2 0.4 min(2, 1.7 |t1 - t0|) + |s1^2 - s0^2| + 2 sin(dtheta / 2) s0^2],
+// |d1 - d0| = 2 sin(dtheta / 2) (the object-space directions are the same rotation of d0, d1). Unchanged wind gives
+// windOffsetBound x windChangeFactor.
+float windChangeBound(float scale, float t0, float s0, float3 d0, float t1, float s1, float3 d1)
+{
+    return scale * (s1 * s1 * 0.4 * min(2.0, 1.7 * abs(t1 - t0)) + abs(s1 * s1 - s0 * s0) + length(d1 - d0) * s0 * s0);
+}
 
 DeformedVertex deformVertex(GpuInstance inst, GpuMesh mesh, uint meshVertex)
 {
