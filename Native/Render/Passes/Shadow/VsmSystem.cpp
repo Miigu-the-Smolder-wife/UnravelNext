@@ -1018,6 +1018,10 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     view.shadowVisibility = out;
     const TextureRef depth = view.depth, gbuffer = view.gbuffer;
     const BufferRef pool = s.poolRef;
+    // Local slots (1-3) from the froxel lists: the main view only (the lists are the main view's).
+    const bool localSlots = view.view.kind == gpu::ViewKind::Main && fc.resources.froxelLights.valid() && s.localLightsNow != UINT32_MAX;
+    const BufferRef froxelLists = fc.resources.froxelLights;
+    const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow;
     const BufferRef table = s.tableRef, bound = s.boundRef, blocks = s.blocksRef, statsBuf = s.statsRef;
     const uint32_t ring = s.ringCbv[s.constantsOffset / kRingStride], off = 0;
     const uint32_t rays = (uint32_t)fc.quality.integer("shadow.vsm.search_taps"), steps = (uint32_t)fc.quality.integer("shadow.vsm.filter_taps");
@@ -1049,13 +1053,15 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   b.use(statsBuf, Use::UavCompute);
                   b.use(list, Use::UavCompute);
                   b.use(out, Use::UavCompute);
+                  if (localSlots) b.use(froxelLists, Use::SrvCompute);
               },
               [=](PassContext& ctx) {
-                  const uint32_t k[12] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, off, ctx.srv(table), ctx.srv(pool), ctx.srv(bound),
-                                           ctx.uav(list), ctx.srv(blocks), ctx.uav(statsBuf), 0 };
+                  const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, off, ctx.srv(table), ctx.srv(pool), ctx.srv(bound),
+                                           ctx.uav(list), ctx.srv(blocks), ctx.uav(statsBuf), 0,
+                                           localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv, 0 };
                   ctx.cmd->SetPipelineState(p1);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 12);
+                  ctx.computeConstants(k, 16);
                   ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
               });
     g.addPass("s.shadow.listargs", QueueType::Compute,

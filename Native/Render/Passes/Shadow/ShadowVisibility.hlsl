@@ -2,7 +2,8 @@
 // unx-variants: PATHS=0,1
 // Shadow visibility, pass 1 of 2 (ARCHITECTURE 2.11: small kernels separate from shading, so the page-table and pool
 // dependent loads are hidden by occupancy). Writes 4 B per pixel (INTERFACES 7.3): slot 0 = sun, slots 1-3 = the first
-// three shadowed local lights of the pixel's froxel list (255 until local-light VSM lands). Settles every pixel whose
+// three shadow-casting local lights of the pixel's froxel list, in list order (vsmLocalVisibility; 255 for a casting light
+// without a shadow slot, and in views without froxel lists). Settles every pixel whose
 // sun visibility the page structures decide exactly (vsmSunClassify: no caster within reach, the block hierarchy over
 // the reach square all below or all above the receiver's plane) and compacts the rest into a list for pass 2
 // (ShadowPenumbra.hlsl, indirect).
@@ -10,10 +11,15 @@
 // P[0].x depth SRV, P[0].y G-buffer SRV (RG32_UINT), P[0].z output UAV (R32_UINT), P[0].w VSM constants CBV
 // P[1].x unused, P[1].y page table SRV (raw), P[1].z pool SRV (raw), P[1].w search bound SRV (raw)
 // P[2].x penumbra list UAV (raw: count, then pixel y << 16 | x), P[2].y blocks SRV (raw), P[2].z statistics UAV (raw,
-// words 8.. of the VSM stats: pixels per VSM_PATH_*). Frame constants of the view.
+// words 8.. of the VSM stats: pixels per VSM_PATH_*)
+// P[3].x froxel lists SRV (raw; 0xFFFFFFFF: no local slots in this view), P[3].y local lights SRV, P[3].z slot of light SRV.
+// Frame constants of the view. Mixed pixels get their local slots here and their sun slot in pass 2.
 #include "Frame.hlsli"
+#include "Scene.hlsli"
+#include "Passes/Atmosphere/Froxel.hlsli"
 #include "Passes/Shadow/ShadowReceiver.hlsli"
 #include "Passes/Shadow/VsmSample.hlsli"
+#include "Passes/Shadow/VsmLocalSample.hlsli"
 
 // One pixel's classification: sky, settled (packed visibility), or mixed (goes to pass 2).
 void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed)
@@ -40,7 +46,35 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed)
     float reach;
     const uint cls = vsmSunClassify(r, rc, footprint, tan(g_sunAngularRadius), k, reach, path);
     mixed = cls == VSM_REGION_MIXED;
-    packed = (cls == VSM_REGION_UMBRA ? 0u : 255u) | 0xFFFFFF00u;
+    // Slots 1-3: the first three shadow-casting lights of the pixel's froxel list (INTERFACES 7.3).
+    uint local = 0xFFFFFF00u;
+    if (P[3].x != 0xFFFFFFFFu)
+    {
+        FroxelSrvs f;
+        f.lights = P[3].x;
+        f.lightIndices = P[3].x;
+        f.scattering = 0;
+        f.pad = 0;
+        const uint2 range = froxelLightRange(f, px, linearDepth(depth));
+        StructuredBuffer<VsmLocalLight> lights = ResourceDescriptorHeap[P[3].y];
+        StructuredBuffer<uint> slotOf = ResourceDescriptorHeap[P[3].z];
+        VsmLocalResources lr;
+        lr.table = r.table;
+        lr.pool = r.pool;
+        lr.blocks = r.blocks;
+        uint ordinal = 0;
+        [loop] for (uint i = 0; i < range.y && ordinal < 3; ++i)
+        {
+            const uint li = froxelLight(f, range.x + i);
+            if (!lightCastsShadow(loadLight(li))) continue;
+            ++ordinal;
+            const uint slot = slotOf[li];
+            if (slot == VSM_LOCAL_NONE) continue;  // no shadow slot (more than 128 casting lights): stays 255
+            const float v = vsmLocalVisibility(lr, lights[slot], slot, world, normal, footprint, vc.receiverBiasTexels, vc.maxReceiverSlope, vc.searchTaps, vc.filterTaps);
+            local = (local & ~(0xFFu << (8 * ordinal))) | ((uint)round(saturate(v) * 255.0) << (8 * ordinal));
+        }
+    }
+    packed = (cls == VSM_REGION_UMBRA ? 0u : 255u) | local;
 }
 
 [numthreads(8, 8, 1)]
@@ -61,12 +95,12 @@ void main(uint3 id : SV_DispatchThreadID)
         if (WaveIsFirstLane() && n) list.InterlockedAdd(0, n, base);
         base = WaveReadLaneFirst(base);
         if (mixed[j2]) list.Store(4 + (base + WavePrefixCountBits(mixed[j2])) * 4, (px.y << 16) | px.x);
-        if (px.x < g_viewWidth && px.y < g_viewHeight && !mixed[j2])
+        if (px.x < g_viewWidth && px.y < g_viewHeight && (!mixed[j2] || !PATHS))
         {
 #if PATHS
             output[px] = path[j2];
 #else
-            output[px] = packed[j2];
+            output[px] = packed[j2];  // mixed: the local slots now, the sun slot in pass 2
 #endif
         }
         [unroll] for (uint i = 0; i < 3; ++i)

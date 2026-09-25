@@ -42,7 +42,7 @@ void main(uint i : SV_DispatchThreadID)
 #if PATHS
         output[px] = path;
 #else
-        output[px] = (uint)round(saturate(sun) * 255.0) | 0xFFFFFF00u;
+        output[px] = (output[px] & 0xFFFFFF00u) | (uint)round(saturate(sun) * 255.0);  // local slots from pass 1
 #endif
     }
     RWByteAddressBuffer stats = ResourceDescriptorHeap[P[2].z];

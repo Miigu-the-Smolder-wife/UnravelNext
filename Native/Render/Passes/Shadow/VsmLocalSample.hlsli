@@ -1,8 +1,9 @@
 // Local-light visibility through the local virtual shadow maps (VsmLocal.hlsli). Owner: S.
 // The light is a disk of radius r_L seen from the receiver (sphere, disk; rect and tube by their half extent). Same
 // estimator as the sun's (VsmSample.hlsli) in the light's face tangent space:
-//  1. blocker search: `searchTaps` bilinear taps over the disk of tangent radius r_L (1 / z_near - 1 / z_r) around the
-//     receiver (the largest reach a caster between the light's near plane and the receiver can have); a stored depth
+//  1. blocker search: `searchTaps` taps over the disk of tangent radius r_L (1 / z_min - 1 / z_r) around the receiver,
+//     z_min the nearest caster of the receiver's page and its four neighbours two mips coarser (their block maxima,
+//     VsmPageMax; the largest reach a caster there can have); a stored depth
 //     z_s occludes some light direction when it is nearer than the receiver's plane there and its tap lies within its
 //     own reach r_L (1 / z_s - 1 / z_r); the blockers' mean 1 / z_s gives the penumbra radius; none: lit;
 //  2. filter: 1 - mean occupancy of `filterTaps` sunflower taps over the disk of radius r_L (mean(1 / z_b) - 1 / z_r),
@@ -21,7 +22,22 @@ struct VsmLocalResources
 {
     ByteAddressBuffer table;
     ByteAddressBuffer pool;
+    ByteAddressBuffer blocks;  // VsmPageMax: per physical page, the page block's range.y = nearest caster key
 };
+
+// Nearest caster key of the page holding direction c at mip m (or the nearest coarser resident mip); VSM_EMPTY if none.
+uint vsmLocalPageNearest(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, uint m)
+{
+    const VsmLocalPoint q = vsmLocalProject(l, l.position + c);
+    [loop] for (int j = (int)m; j >= 0; --j)
+    {
+        const uint2 t = min(uint2(vsmLocalTexel(q.xy, (uint)j)), vsmLocalRes((uint)j) - 1);
+        const uint2 e = r.table.Load2(vsmLocalSlot(slot, q.face, (uint)j, t >> VSM_PAGE_SHIFT) * 8);
+        if ((e.x & VSM_FLAG_RESIDENT) != 0 && e.y == l.generation)
+            return r.blocks.Load(((e.x & VSM_PHYS_MASK) * VSM_BLOCK_ENTRIES + VSM_BLOCK_OFFSET_128) * VSM_BLOCK_BYTES + 4);  // range.y
+    }
+    return VSM_EMPTY;
+}
 
 // Stored key (vsmEncode(-z)) of the texel of mip m (or the nearest coarser resident mip) holding direction c.
 uint vsmLocalKeyAt(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, uint m, out uint mipUsed)
@@ -67,7 +83,19 @@ float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3
     const float invZr = 1 / pr.z;
     // Hard light (no extent beyond a texel): bilinear occupancy of the 2 x 2 texels around the receiver.
     const float texelTan = 2.0 / vsmLocalRes(m);
-    const float searchR = min(l.radius * (1 / l.nearM - invZr), 1.0);
+    // Nearest caster around the receiver (its page and the four neighbours, two mips coarser).
+    const uint mp = m >= 2 ? m - 2 : 0;
+    const float hp = float(VSM_PAGE) / vsmLocalRes(mp) * 2;  // a page of mip mp in tangent units
+    uint nearest = VSM_EMPTY;
+    nearest = max(nearest, vsmLocalPageNearest(r, l, slot, c0, mp));
+    nearest = max(nearest, vsmLocalPageNearest(r, l, slot, c0 + hp * right, mp));
+    nearest = max(nearest, vsmLocalPageNearest(r, l, slot, c0 - hp * right, mp));
+    nearest = max(nearest, vsmLocalPageNearest(r, l, slot, c0 + hp * up, mp));
+    nearest = max(nearest, vsmLocalPageNearest(r, l, slot, c0 - hp * up, mp));
+    if (nearest == VSM_EMPTY) return 1;
+    const float zMin = max(-vsmDecode(nearest), l.nearM);
+    if (zMin >= pr.z) return 1;  // nothing nearer to the light than the receiver
+    const float searchR = min(l.radius * (1 / zMin - invZr), 1.0);
     if (searchR <= texelTan)
     {
         float occ = 0;
