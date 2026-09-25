@@ -15,10 +15,12 @@
 #endif
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace unx;
@@ -1439,13 +1441,18 @@ UNX_TEST(frame_renderer_records_with_track_stubs)
     testDevice().waitIdle();
 }
 
-UNX_TEST(device_removed_exit_policy)
+namespace
 {
-    // Exit policy (tests, gates, tools): a child process of this binary reports a removal and must end with exit code
-    // kDeviceRemovedExitCode and "UNX_DEVICE_REMOVED ..." as its last line of output.
+// Runs this binary with 'argument' (a child mode of main) and returns its exit code and last line of output. 'fenceLimit'
+// sets UNX_FENCE_TIMEOUT_S for the child only.
+std::pair<DWORD, std::string> runChildMode(const wchar_t* argument, const wchar_t* fenceLimit = nullptr)
+{
     wchar_t self[MAX_PATH];
     GetModuleFileNameW(nullptr, self, MAX_PATH);
-    std::wstring cmd = std::wstring(L"\"") + self + L"\" --device-removed-exit-child";
+    std::wstring cmd = std::wstring(L"\"") + self + L"\" " + argument;
+    wchar_t saved[64] = {};
+    const bool hadLimit = GetEnvironmentVariableW(L"UNX_FENCE_TIMEOUT_S", saved, 64) > 0;
+    if (fenceLimit) SetEnvironmentVariableW(L"UNX_FENCE_TIMEOUT_S", fenceLimit);
     SECURITY_ATTRIBUTES sa{ sizeof sa, nullptr, TRUE };
     HANDLE readEnd = nullptr, writeEnd = nullptr;
     CHECK(CreatePipe(&readEnd, &writeEnd, &sa, 0));
@@ -1457,6 +1464,7 @@ UNX_TEST(device_removed_exit_policy)
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     PROCESS_INFORMATION pi{};
     CHECK(CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi));
+    if (fenceLimit) SetEnvironmentVariableW(L"UNX_FENCE_TIMEOUT_S", hadLimit ? saved : nullptr);
     CloseHandle(writeEnd);
     std::string output;
     char buffer[4096];
@@ -1471,7 +1479,35 @@ UNX_TEST(device_removed_exit_policy)
     while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) output.pop_back();
     const std::string last = output.substr(output.find_last_of('\n') == std::string::npos ? 0 : output.find_last_of('\n') + 1);
     logf("    child exit %lu, last line '%s'\n", code, last.c_str());
+    return { code, last };
+}
+} // namespace
+
+UNX_TEST(device_removed_exit_policy)
+{
+    // Exit policy (tests, gates, tools): a child process of this binary reports a removal and must end with exit code
+    // kDeviceRemovedExitCode and "UNX_DEVICE_REMOVED ..." as its last line of output.
+    const auto [code, last] = runChildMode(L"--device-removed-exit-child");
     CHECK(code == (DWORD)kDeviceRemovedExitCode && last.rfind("UNX_DEVICE_REMOVED test.child hr 0x887A0006", 0) == 0);
+}
+
+UNX_TEST(fence_wait_limit_exit_policy)
+{
+    // A CPU wait for a fence value nobody signals (no GPU work: the value is simply never signalled) ends a tool at the
+    // limit with exit code kFenceTimeoutExitCode and "UNX_FENCE_TIMEOUT ..." as its last line (UNX_FENCE_TIMEOUT_S = 2).
+    const auto start = std::chrono::steady_clock::now();
+    const auto [code, last] = runChildMode(L"--fence-timeout-child", L"2");
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    logf("    child ran %.1f s\n", seconds);
+    CHECK(code == (DWORD)kFenceTimeoutExitCode && last.rfind("UNX_FENCE_TIMEOUT Queue::waitCpu(graphics) value ", 0) == 0);
+    CHECK(last.find(" after 2 s") != std::string::npos && seconds >= 2.0 && seconds < 30.0);
+}
+
+UNX_TEST(fence_wait_limit_throw_policy)
+{
+    // Throw policy (a host process): the wait returns at the limit, the device counts as lost and the process lives on.
+    const auto [code, last] = runChildMode(L"--fence-timeout-throw-child", L"2");
+    CHECK(code == 0 && last == "fence wait returned, device lost 1");
 }
 
 // Last test (it leaves this process's device marked removed): the Throw policy of a host process.
@@ -1498,6 +1534,21 @@ int main(int argc, char** argv)
 {
     const char* filter = argc > 1 ? argv[1] : nullptr;
     if (filter && std::string(filter) == "--device-removed-exit-child") deviceRemoved("test.child", DXGI_ERROR_DEVICE_HUNG);
+    if (filter && std::string(filter) == "--fence-timeout-child")
+    {
+        Queue& q = testDevice().queue(QueueType::Graphics);
+        q.waitCpu(q.signal() + 1000);  // never signalled
+        return 0;
+    }
+    if (filter && std::string(filter) == "--fence-timeout-throw-child")
+    {
+        setDeviceRemovedPolicy(DeviceRemovedPolicy::Throw);
+        Queue& q = testDevice().queue(QueueType::Graphics);
+        q.waitCpu(q.signal() + 1000);
+        std::printf("fence wait returned, device lost %d\n", deviceWasRemoved() ? 1 : 0);
+        std::fflush(stdout);
+        TerminateProcess(GetCurrentProcess(), 0);  // (no teardown on a lost device: the line stays last)
+    }
     int failed = 0, run = 0;
     for (const TestCase& t : registry())
     {

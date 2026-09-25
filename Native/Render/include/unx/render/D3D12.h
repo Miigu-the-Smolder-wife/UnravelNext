@@ -41,6 +41,21 @@ struct DeviceRemovedError : Error
 [[noreturn]] void deviceRemoved(const char* what, HRESULT hr);  // Exit: exits; Throw: throws DeviceRemovedError
 // Exit: exits; Throw: notes the removal once and returns (paths that must not throw: signal, waits, destructors).
 void noteDeviceRemoved(const char* what, HRESULT hr);
+
+// CPU fence waits have a limit (v1.30, coordination request): a wait past it is a GPU-side deadlock (a queue waiting for
+// a fence nobody signals) or a hang that never reached TDR, and it must not hold the GPU lock forever (an FX gate sat at
+// 0 % CPU for 31 minutes). The limit is UNX_FENCE_TIMEOUT_S seconds, read once (default 60; 0 = none, for PIX captures
+// and debugger breaks). Past it:
+//   Exit:  "UNX_FENCE_TIMEOUT <what> value N completed M after S s" as the last line of stdout and exit code
+//          kFenceTimeoutExitCode at once; GpuLock.ps1 logs FENCE_TIMEOUT.
+//   Throw: the same line to the log; the device counts as lost like a removal (deviceWasRemoved() is true, later waits
+//          return at once) and the wait returns. The host checks deviceWasRemoved() and reports the error.
+// A removed device found at the limit is reported as a removal (87), not a timeout.
+constexpr int kFenceTimeoutExitCode = 88;
+uint32_t fenceTimeoutSeconds();
+// Waits on the CPU for 'fence' to reach 'value' through 'event' under the rules above (removal and limit). Queue::waitCpu
+// uses it; so can code that waits on a host's fence.
+void waitFenceCpu(ID3D12Fence* fence, HANDLE event, uint64_t value, const char* what);
 inline bool isDeviceRemoved(HRESULT hr)
 {
     return hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG || hr == DXGI_ERROR_DEVICE_RESET || hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR;

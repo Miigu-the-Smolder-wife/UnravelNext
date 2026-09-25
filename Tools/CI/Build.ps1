@@ -1,3 +1,6 @@
+# [CmdletBinding()]: an unknown parameter is an error instead of an ignored argument (S passed -BuildDir, which a plain
+# param block dropped into $args, and the build went on with the default -Track core in another session's folder).
+[CmdletBinding()]
 param(
   [string]$Track = "core",     # core | M | S | R | C | I | FX | all : each session builds in its own folder build/<Track>
   [string]$Tracks = "",        # enabled tracks (cmake/Tracks.cmake); default from -Track: core -> V, M -> M, S -> S, R -> R,

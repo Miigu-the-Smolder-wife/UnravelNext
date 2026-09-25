@@ -110,22 +110,8 @@ uint64_t Queue::signal()
 
 void Queue::waitCpu(uint64_t value)
 {
-    const uint64_t done = m_fence->GetCompletedValue();
-    if (done == UINT64_MAX)  // a removed device's fence
-    {
-        noteDeviceRemoved("Queue::waitCpu", DXGI_ERROR_DEVICE_REMOVED);
-        return;
-    }
-    if (done >= value || deviceWasRemoved()) return;
-    const HRESULT hr = m_fence->SetEventOnCompletion(value, m_event);
-    if (FAILED(hr))
-    {
-        if (!isDeviceRemoved(hr)) check(hr, "SetEventOnCompletion");
-        noteDeviceRemoved("Queue::waitCpu", hr);
-        return;
-    }
-    WaitForSingleObject(m_event, INFINITE);
-    if (m_fence->GetCompletedValue() == UINT64_MAX) noteDeviceRemoved("Queue::waitCpu", DXGI_ERROR_DEVICE_REMOVED);
+    static const char* const kWhat[kQueueTypeCount] = { "Queue::waitCpu(graphics)", "Queue::waitCpu(compute)", "Queue::waitCpu(copy)" };
+    waitFenceCpu(m_fence.Get(), m_event, value, kWhat[(uint32_t)m_type]);
 }
 
 void Queue::waitGpu(const Queue& other, uint64_t value)
@@ -159,15 +145,20 @@ std::string removedLine(const char* what, HRESULT hr, HRESULT reason)
     return b;
 }
 
-[[noreturn]] void exitRemoved(const std::string& line)
+// The line is the last output of the process: stdout and stderr are flushed and the process ends at once. Not _Exit:
+// ExitProcess still detaches the DLLs, and the D3D12 debug layer's live-object report would print after the line.
+[[noreturn]] void exitWithLine(const char* line, int code)
 {
     std::fflush(stdout);
-    std::fprintf(stderr, "%s\n", line.c_str());
-    std::fprintf(stdout, "%s\n", line.c_str());
+    std::fprintf(stderr, "%s\n", line);
+    std::fprintf(stdout, "%s\n", line);
     std::fflush(stderr);
     std::fflush(stdout);
-    std::_Exit(kDeviceRemovedExitCode);
+    TerminateProcess(GetCurrentProcess(), (UINT)code);
+    std::_Exit(code);  // (not reached)
 }
+
+[[noreturn]] void exitRemoved(const std::string& line) { exitWithLine(line.c_str(), kDeviceRemovedExitCode); }
 } // namespace
 
 void setDeviceRemovedPolicy(DeviceRemovedPolicy policy)
@@ -193,6 +184,59 @@ void noteDeviceRemoved(const char* what, HRESULT hr)
     const std::string line = removedLine(what, hr, reason);
     if (g_removedPolicy == DeviceRemovedPolicy::Exit) exitRemoved(line);
     if (!g_removed.exchange(true)) logf("%s\n", line.c_str());
+}
+
+uint32_t fenceTimeoutSeconds()
+{
+    static const uint32_t seconds = [] {
+        char b[32];
+        size_t n = 0;
+        if (getenv_s(&n, b, sizeof b, "UNX_FENCE_TIMEOUT_S") == 0 && n > 1) return (uint32_t)std::strtoul(b, nullptr, 10);
+        return 60u;
+    }();
+    return seconds;
+}
+
+void waitFenceCpu(ID3D12Fence* fence, HANDLE event, uint64_t value, const char* what)
+{
+    const uint64_t done = fence->GetCompletedValue();
+    if (done == UINT64_MAX)  // a removed device's fence
+    {
+        noteDeviceRemoved(what, DXGI_ERROR_DEVICE_REMOVED);
+        return;
+    }
+    if (done >= value || deviceWasRemoved()) return;
+    const HRESULT hr = fence->SetEventOnCompletion(value, event);
+    if (FAILED(hr))
+    {
+        if (!isDeviceRemoved(hr)) check(hr, "SetEventOnCompletion");
+        noteDeviceRemoved(what, hr);
+        return;
+    }
+    const uint32_t seconds = fenceTimeoutSeconds();
+    if (WaitForSingleObject(event, seconds ? seconds * 1000u : INFINITE) != WAIT_TIMEOUT)
+    {
+        if (fence->GetCompletedValue() == UINT64_MAX) noteDeviceRemoved(what, DXGI_ERROR_DEVICE_REMOVED);
+        return;
+    }
+    const uint64_t completed = fence->GetCompletedValue();
+    if (completed == UINT64_MAX)
+    {
+        noteDeviceRemoved(what, DXGI_ERROR_DEVICE_REMOVED);
+        return;
+    }
+    if (completed >= value) return;  // signalled right at the limit
+    const HRESULT reason = g_reasonDevice ? g_reasonDevice->GetDeviceRemovedReason() : S_OK;
+    if (FAILED(reason))  // removed, and its fences have not said so yet
+    {
+        noteDeviceRemoved(what, reason);
+        return;
+    }
+    char line[256];
+    std::snprintf(line, sizeof line, "UNX_FENCE_TIMEOUT %s value %llu completed %llu after %u s", what, (unsigned long long)value,
+                  (unsigned long long)completed, seconds);
+    if (g_removedPolicy == DeviceRemovedPolicy::Exit) exitWithLine(line, kFenceTimeoutExitCode);
+    if (!g_removed.exchange(true)) logf("%s\n", line);
 }
 
 Device::Device(const DeviceOptions& options) : m_options(options)

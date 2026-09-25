@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.29, 2026-09-25)
+# UnravelNext 인터페이스 (v1.30, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -100,12 +100,25 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
 ### 3.3 GPU 잠금 (성능 측정만)
 - 성능 측정(하네스 `Harness::run`, 마이크로벤치, 게이트, 타임스탬프 비교 실험)은 `Tools/CI/GpuLock.ps1 -Track <트랙> -- <명령>`으로만 실행한다. 잠금은 세션 전체에서 한 번에 하나다(이름 있는 mutex `Local\UnravelNext.GpuMeasurement`). 현재 보유자 `.gpulock/current.json`, 기록 `.gpulock/history.log`.
 - 코드가 강제한다: `Harness::run`과 `requireGpuLock()`을 부르는 도구는 `UNX_GPU_LOCK`이 없으면 측정을 거부한다. 트랙의 게이트도 측정 전에 `unx::render::requireGpuLock("<게이트 이름>")`을 부른다.
-- 정확성 실행(단위 테스트, 디버그 레이어·GPU 검증, 기준 영상 비교, 디버그 캡처)은 잠금 없이 동시에 해도 된다. (조율 세션이 임시 규칙을 알리는 동안은 모든 하드웨어 GPU 실행이 잠금 안이다.)
+- (v1.30, 사용자 결정) 잠금 안에서 하나씩 돌리는 것: 성능 측정(timing), **새 커널의 첫 하드웨어 실행**(`-Kind correctness`, 짧게), **물리 GPU 실행**. 그 밖의 정확성 실행(단위 테스트, 정확성 테스트, 디버그 레이어·GPU 검증, 기준 영상 비교, 디버그 캡처)은 잠금 없이 동시에 해도 된다. (TDR 원인 조사 동안의 "모든 하드웨어 GPU 실행은 잠금 안" 임시 규칙은 끝났다.)
 - (v1.28) `-Kind timing|correctness`(기본 timing): 잠금을 잡은 실행의 종류다. `current.json`의 `kind`와 `history.log`의 `acquire <트랙> (<종류>) :: ...`, `release <트랙> (<종류>) exit N`에 남는다. CPU를 많이 쓰는 백그라운드 작업(C 기준 렌더 대기열, WARP 실행)은 `kind`가 timing일 때만 멈춘다(정확성 실행을 잠금 안에서 직렬화하는 동안 25분씩 멈추지 않게).
-- (v1.26) GUI 서브시스템 실행 파일(Unity.exe)은 `&`가 곧바로 반환하므로, GpuLock.ps1은 PE 헤더로 판별해 `Start-Process -Wait`로 그 프로세스와 자손을 기다린 뒤 종료 코드를 돌려준다.
+- (v1.30) **보유 상한과 프로세스 트리**: GpuLock.ps1은 명령을 Job 객체(닫히면 전부 종료)에 넣어 띄운다(일시 정지로 만들어 Job에 넣은 뒤 재개하므로 손자 프로세스도 빠지지 않는다). 콘솔·GUI 실행 파일(Unity.exe)·`.cmd`·`.ps1` 모두 같은 경로로 기다린다(v1.26의 `Start-Process -Wait` 대신).
+  - `-TimeoutMinutes N`(기본 45: 기록상 가장 긴 정상 보유는 Unity 테스트 27.6분, FX 멈춤은 31분이었다)을 넘으면 프로세스 트리 전체를 끝내고 `release <트랙> (<종류>) exit 124 TIMEOUT after N min`을 남긴다. 래퍼 종료 코드도 124다. 더 긴 실행은 `-TimeoutMinutes`를 준다.
+  - 래퍼가 강제 종료되면 Job의 마지막 핸들이 닫혀 명령의 트리도 함께 끝난다. 잠금이 풀린 뒤에 GPU를 쓰는 고아 프로세스가 남지 않는다.
+  - 명령이 끝나고 5초 뒤에도 남은 자손은 끝내고 release 줄에 이름을 적는다(`(ended leftover descendants: ...)`).
+  - release 줄 없이 죽은 보유자는 다음 acquire가 `stale release <트랙> (<종류>) holder pid N gone :: <명령>`으로 남긴다(뮤텍스가 abandoned로 돌아오거나, 보유자의 `current.json`이 남아 있고 그 프로세스가 없을 때).
+  - `current.json`은 뮤텍스 보유자만 쓴다(임시 파일 + 원자적 이름 바꾸기). 읽는 쪽은 읽기·쓰기·삭제 공유로 연다(여러 세션이 동시에 잠금을 잡을 때 IOException으로 exit 1이 나던 문제, S 신고).
+  - 잠금을 기다리는 시간의 상한은 `-WaitMinutes`(기본 120)다(v1.29까지 `-TimeoutMinutes`였다).
+  - release 줄의 종료 코드 표기: 87 `DEVICE_REMOVED`, 88 `FENCE_TIMEOUT`, 124 `TIMEOUT`.
 - (v1.26, v1.27) **장치 제거(TDR)**: `check()`가 DEVICE_REMOVED/HUNG/RESET/DRIVER_INTERNAL_ERROR를 만나거나 제거된 장치의 펜스(UINT64_MAX)를 읽으면 정책(`setDeviceRemovedPolicy`, `D3D12.h`)을 따른다.
   - `Exit`(기본: 테스트·게이트·도구): 표준 출력 마지막 줄 `UNX_DEVICE_REMOVED <what> hr 0x.. reason 0x..`(GetDeviceRemovedReason) + 종료 코드 **87**(`kDeviceRemovedExitCode`). 곧바로 끝내고 정적 소멸자는 돌지 않는다. GpuLock.ps1은 `history.log`에 `release <트랙> exit 87 DEVICE_REMOVED`로 남긴다.
   - `Throw`(호스트 프로세스: Unity 편집기·Player가 살아남아야 한다. 호스트는 장치를 만들기 전에 설정한다. 호스트 장치(`externalDevice`) 위의 첫 장치는 명시 설정이 없으면 Throw다): 같은 줄을 로그에 남기고 `check()`가 `DeviceRemovedError{ where, hr, reason }`를 던진다. `Queue::signal/waitCpu`, `Device::waitIdle`(소멸자에서도 불린다)는 던지지 않는다. 제거를 기록하고 바로 돌아온다(기다릴 작업이 없다). `deviceWasRemoved()`로 확인한다.
+  - Exit 줄은 표준 출력·오류를 비운 뒤 `TerminateProcess`로 끝낸다(v1.30). `_Exit`는 DLL 분리를 돌려 D3D12 디버그 레이어의 live object 보고가 마지막 줄 뒤에 찍혔다.
+- (v1.30, 조율 요청) **CPU 펜스 대기 상한**: `Queue::waitCpu`(그리고 `Device::waitIdle`)는 `waitFenceCpu(fence, event, value, what)`(`D3D12.h`)로 기다린다. 상한은 `UNX_FENCE_TIMEOUT_S`초(한 번 읽음, 기본 60, 0 = 없음: PIX 캡처·디버거용)다. TDR에 걸리지 않는 GPU 쪽 교착(아무도 신호하지 않는 펜스를 기다리는 큐)이 잠금을 무기한 쥐지 않게 한다.
+  - `Exit`: 마지막 줄 `UNX_FENCE_TIMEOUT <what> value N completed M after S s` + 종료 코드 **88**(`kFenceTimeoutExitCode`). `<what>`은 `Queue::waitCpu(graphics|compute|copy)`다.
+  - `Throw`: 같은 줄을 로그에 남기고, 장치를 제거와 같이 잃은 것으로 친다(`deviceWasRemoved()`가 true, 이후 대기는 곧바로 돌아온다). 대기는 던지지 않고 돌아온다. 호스트는 `deviceWasRemoved()`를 보고 오류를 돌려준다.
+  - 상한에서 장치가 제거된 것으로 확인되면(펜스 UINT64_MAX 또는 `GetDeviceRemovedReason` 실패) 시간 초과가 아니라 제거(87)로 보고한다.
+  - 호스트 펜스를 직접 기다리는 코드(I: `HostBoundary.cpp`, `UnityPlugin.cpp`)도 `waitFenceCpu`를 쓰면 같은 규칙을 따른다.
 - 사용자의 다른 GPU 앱은 닫지 않는다. 측정은 4K·1440p만(하네스가 강제), 1.5초 워밍업, 중앙값·P95·P99.
 
 ### 3.4 결과·상태
@@ -510,6 +523,11 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.28 (2026-09-25):
   - **GpuLock `-Kind timing|correctness`**(조율 요청, 3.3): 종류를 `current.json`과 `history.log`에 기록한다. 백그라운드 CPU 작업의 멈춤 규칙은 timing만 대상이다(C의 PauseGate는 `kind`를 읽도록 C가 맞춘다). history 줄의 형식이 `acquire <트랙> (<종류>) :: ...`로 바뀌었다.
   - **M 요청 `20260925_M_planar_mask_apron.md`(R 동의)**: `ViewDesc::planarMask` 값이 1 = 거울 픽셀(R이 읽음), 2 = 에이프런(거울 픽셀의 3×3 이웃, 그리고 셰이딩하지만 R은 읽지 않음), 0 = 건너뜀이 됐다. `planarTileMask`는 팽창된 마스크 기준이다. V·S·M은 "0 아님 = 그림" 그대로라 바뀌는 것이 없다(V의 64 px 컬링 마스크와 깊이 채움은 이미 0 아님으로 판정한다). R의 resolve만 "== 1"로 읽는다. 마스크 생성은 R 몫이다.
+- v1.30 (2026-09-25):
+  - **GpuLock 보유 상한(3.3, 조율 요청)**: Job 객체로 명령 트리를 묶는다. `-TimeoutMinutes`(기본 45)를 넘으면 트리를 끝내고 `TIMEOUT`(124)으로 기록한다. 래퍼가 죽으면 트리도 같이 끝난다. 명령 뒤에 남은 자손을 정리하고, 죽은 보유자는 `stale release`로 남긴다. `current.json` 쓰기 경쟁을 고쳤다. 잠금 대기 상한은 `-WaitMinutes`로 이름을 바꿨다. [실측] 자체 시험(별도 뮤텍스 이름의 사본): 3초 상한에서 exit 124, 잠자던 자식 0개 남음. 떠난 자손 1개를 이름과 함께 정리. 래퍼 강제 종료 2초 뒤 자식(PING, conhost) 0개. 기다리는 쪽이 있을 때와 없을 때 모두 `stale release` 기록. 대기자 4개가 동시에 `current.json`을 읽어도 모두 exit 0.
+  - **CPU 펜스 대기 상한(3.3, 조율 요청)**: `waitFenceCpu`, `fenceTimeoutSeconds`, `kFenceTimeoutExitCode = 88`. [실측] 단위 테스트 `fence_wait_limit_exit_policy`(자식 프로세스, 상한 2초: 2.8초에 exit 88, 마지막 줄 `UNX_FENCE_TIMEOUT Queue::waitCpu(graphics) value 1001 completed 1 after 2 s`), `fence_wait_limit_throw_policy`(대기가 돌아오고 `deviceWasRemoved()` = true). 33/33.
+  - **GPU 잠금 규칙(3.3, 사용자 결정)**: 잠금은 성능 측정, 새 커널의 첫 하드웨어 실행, 물리 GPU 실행만이다. 그 밖의 정확성 실행은 다시 잠금 없이 동시에 해도 된다.
+  - **Build.ps1 `[CmdletBinding()]`(조율 요청)**: 모르는 매개변수는 오류다. S가 준 `-BuildDir`가 무시되어 기본 `-Track core`로 다른 폴더를 다시 구성했었다. 공유 트리의 `build\core`는 `-Tracks "V;C"`로 다시 구성했다.
 - v1.29 (2026-09-25):
   - **밴드 패스 그룹(4절, 설계 개정 1 요청 7절)**: `RenderGraph::addBandedGroup`, `PassContext::band`, `passBandCount`, 품질 키 `output.band_pixels`(코어). M·S가 픽셀 패스를 옮긴다.
   - **Coverage.hlsli 면적·무게중심을 Green 정리 스트리밍으로 바꿨다(V, 요청 11절 9.4, 4354627)**: 시그니처는 그대로다. 면적은 이전과 같은 정확도(최대 5.7e-5 px²)다. 무게중심 깊이는 면적 1e-2 px² 이상 fragment에서 1.3e-5 상대 이내이고, 더 작은 조각은 그 삼각형의 깊이 범위 안이다(순서 오차 ≤ 그 면적 < 1/32). M은 가장자리 합성 테스트를 다시 돌린다.
