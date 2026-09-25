@@ -364,6 +364,8 @@ UNX_TEST(graph_aliased_buffers_keep_their_writes)
 {
     // Buffer B reuses buffer A's memory after A's last use; B is written by a kernel (UAV) or by a copy and read back.
     // Every word must be what B's writer wrote (A's barrier, deactivation and B's first-use barrier order the reuse).
+    // In the copy mode A is also written by a copy: in the second frame its first use follows its deactivation as B's
+    // predecessor in the first frame (same plan, same placed resource), which must not leave it inaccessible.
     RenderGraph g(testDevice());
     ID3D12PipelineState* fillPso = shaders().compute("Passes/Test/FillBuffer");
     const uint32_t words = 1u << 20;  // 4 MB
@@ -401,7 +403,13 @@ UNX_TEST(graph_aliased_buffers_keep_their_writes)
                               c.cmd->Dispatch(words / 64, 1, 1);
                           });
             };
-            fill("fill a", a, 0xA5A5A5A5u, {});
+            if (mode == 0) fill("fill a", a, 0xA5A5A5A5u, {});
+            else
+            {
+                ID3D12Resource* src = source.Get();
+                g.addPass("copy a", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(a, Use::CopyDst); },
+                          [=](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(a), 0, src, 0, (uint64_t)words * 4); });
+            }
             g.addPass("read a", QueueType::Graphics,
                       [&](PassBuilder& pb) {
                           pb.use(a, Use::SrvCompute);

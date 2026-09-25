@@ -643,9 +643,12 @@ struct RenderGraph::Impl
                                 pushBuffer(pp.before, pr, pt.pendSync, a.sync, pt.pendAccess, D3D12_BARRIER_ACCESS_NO_ACCESS);
                             pt.pendAccess = D3D12_BARRIER_ACCESS_NO_ACCESS;  // flushed; its sync scope still orders later occupants
                         }
+                        // Every first use grants its access explicitly: the placed resource may have been deactivated
+                        // (NO_ACCESS) as an alias predecessor in an earlier frame that used the same plan, and a buffer
+                        // left there stays inaccessible (lost copy writes; debug layer error 1332).
                         if (n.texture)
                             pushTexture(pp.before, r, aliasSync, a.sync, D3D12_BARRIER_ACCESS_NO_ACCESS, a.access, D3D12_BARRIER_LAYOUT_UNDEFINED, a.layout, D3D12_TEXTURE_BARRIER_FLAG_DISCARD);
-                        else if (aliasSync != D3D12_BARRIER_SYNC_NONE)
+                        else
                             pushBuffer(pp.before, r, aliasSync, a.sync, D3D12_BARRIER_ACCESS_NO_ACCESS, a.access);
                     }
                     if (n.texture) t.layout = a.layout;
