@@ -4,7 +4,8 @@
 // P[5].y unused, P[5].z = a raw buffer holding this frame's ShadowSrvs (UNX_NONE: no VSM, every
 // sunlit hit traces a shadow ray) and P[5].w = RayScene's exact set hit counts UAV (UNX_NONE: none).
 // (cost attribution only, 0 in the shipped configuration: bit 1 = sun shadow rays without any-hit, bit 2 = no sun
-// visibility, the sun taken as visible, bit 4 = sun visibility by shadow rays only, bit 8 = hit materials without textures).
+// visibility, the sun taken as visible, bit 4 = sun visibility by shadow rays only, bit 8 = hit materials without textures, bit 16 = no cache lookup at hits,
+// bit 32 = traversal only: a hit returns 1).
 #ifndef UNX_REFLECTION_HIT_HLSLI
 #define UNX_REFLECTION_HIT_HLSLI
 #include "RayTracing/RayShaders.hlsli"
@@ -30,6 +31,7 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
         return giSkyRadiance(r.Direction);
     }
     hitDistance = hit.t;
+    if ((P[5].x >> 24) & 32) return float3(1, 1, 1);  // attribution: traversal only
     // Reflection exact set: count this frame's M/G hits on skinned instances (RayScene selects the most-hit ones).
     if (P[5].w != UNX_NONE)
     {
@@ -47,15 +49,19 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
     if (((P[5].x >> 24) & 8) == 0) m = rtHitMaterial(m, s, footprint, dot(s.normal, r.Direction));
     if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return 0;
     const uint footprintLevel = giLevelForSize(h, footprint);
-    bool created;
-    const uint e = giFindOrCreate(cache, h, giSurfaceKey(h, s.position, s.normal, footprintLevel), giAnchorAtHit(h, s.position, r.Direction), s.normal, created);
-    if (e != GI_ENTRY_PENDING)
-    {
-        giTouch(cache, h, e);
-        giRequestHit(cache, h, e);
-    }
     RtHitLighting L;
-    giCacheLightingAt(cache, h, s.position, s.normal, reflect(r.Direction, s.normal), footprintLevel, L.irradiance, L.specularRadiance);
+    L.irradiance = L.specularRadiance = 0;
+    if ((((P[5].x >> 24) & 16) == 0))  // attribution bit 16: no cache at the hit
+    {
+        bool created;
+        const uint e = giFindOrCreate(cache, h, giSurfaceKey(h, s.position, s.normal, footprintLevel), giAnchorAtHit(h, s.position, r.Direction), s.normal, created);
+        if (e != GI_ENTRY_PENDING)
+        {
+            giTouch(cache, h, e);
+            giRequestHit(cache, h, e);
+        }
+        giCacheLightingAt(cache, h, s.position, s.normal, reflect(r.Direction, s.normal), footprintLevel, L.irradiance, L.specularRadiance);
+    }
     const float3 v = -r.Direction;
     L.sunIlluminance = 0;
     L.sunVisibility = 0;
