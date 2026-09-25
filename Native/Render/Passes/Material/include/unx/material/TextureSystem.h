@@ -8,6 +8,9 @@
 //                  trace and |mean|^2, so the hardware filter yields the exact slope variance of its footprint.
 //   Rg8RoughMetal  RG8, Rgba8Linear RGBA8, R8Linear R8, Rgba16Float RGBA16F: box mips of the linear values.
 // Mips are box filters of the covered base texels (fractional coverage for odd sizes), computed in double.
+// Cut-out coverage (R8): for every base colour texture an alpha-tested material uses, the fraction of base texels whose
+// alpha passes the cutoff, box mips of that binary mask; the edge composite filters it over a pixel's footprint to
+// weigh a cut-out surface by the part of the pixel it covers (EdgeComposite.hlsl).
 // The per-material texture table (MTextureSet, MaterialInternal.hlsli) carries the SRVs.
 #include "unx/render/Device.h"
 #include "unx/render/GpuScene.h"
@@ -25,7 +28,7 @@ struct TextureSetGpu  // mirror of MTextureSet (MaterialInternal.hlsli), 32 B
     uint32_t occlusion;
     float slopeRange;
     uint32_t flags;          // clamp addressing per texture, gpu::MaterialTextureBit (1 = g_anisoClamp)
-    uint32_t pad;
+    uint32_t coverage;       // cut-out coverage mips of the base colour (alpha-tested materials), gpu::kNone otherwise
 };
 static_assert(sizeof(TextureSetGpu) == 32);
 
@@ -42,6 +45,9 @@ struct MipChain
 // Builds the mip chain of scene texture 'index' for its uses in 'scene' (base colour of alpha-tested materials gets
 // coverage-preserving alpha at that material's cutoff).
 MipChain buildMipChain(const scene::Scene& scene, uint32_t index);
+// Cut-out coverage mips of scene texture 'index' (R8_UNORM: fraction of base texels with alpha >= the cutoff of the
+// alpha-tested materials that use it as base colour); no levels when no alpha-tested material uses it.
+MipChain buildCoverageChain(const scene::Scene& scene, uint32_t index);
 
 class TextureSystem
 {
@@ -75,6 +81,7 @@ private:
     uint32_t m_revision = UINT32_MAX;
     std::string m_fingerprint;
     std::vector<Resource> m_textures;
+    std::vector<Resource> m_coverage;  // per scene texture, cut-out coverage (alpha-tested base colours only)
     std::vector<float> m_slopeRange;
     Resource m_table;
     std::vector<gpu::MaterialTextures> m_published;

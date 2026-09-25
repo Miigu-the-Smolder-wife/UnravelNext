@@ -48,12 +48,14 @@ float mWordMetallic(uint word) { return ((word >> 16) & 0xFFu) / 255.0; }
 //   emissive    RGBA8 sRGB or RGBA16F: multiplies the material's emissive (nits)
 //   slopeRange  S of the moments encoding (max |slope| of the source map)
 //   flags       clamp addressing per texture (M_TEX_* bits = gpu::MaterialTextureBit)
+//   coverage    R8_UNORM cut-out coverage of the base colour for alpha-tested materials (fraction of base texels whose
+//               alpha passes the cutoff, box mips), UNX_NONE otherwise
 struct MTextureSet
 {
     uint baseColor, moments, roughMetal, emissive;
     uint occlusion;
     float slopeRange;
-    uint flags, pad;
+    uint flags, coverage;
 };
 
 // Footprint-filtered sample with the texture's addressing (MTextureSet.flags / gpu::Material.textureClamp bit).

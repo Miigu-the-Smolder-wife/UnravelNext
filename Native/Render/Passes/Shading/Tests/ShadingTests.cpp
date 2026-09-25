@@ -8,7 +8,9 @@
 //   5. the display encoding (PBR Neutral + sRGB OETF, RGB10A2) against the CPU on the linear image;
 //   6. local lights (froxel list, shadow slots) against the CPU;
 //   7. the edge composite's exact triangle area (edgeTriangleArea) against double-precision clipping, and the composite
-//      of two overlapping quads against their exact visible areas.
+//      of two overlapping quads against their exact visible areas;
+//   8. the edge composite over an alpha-tested (cut-out) quad against the supersampled cut shape (the pixel's share
+//      where the bilinear alpha passes the cutoff), so cut edges keep their width.
 //   unx_test_shading_shadingtests [--no-debug-layer]
 #include "../../Material/Tests/MTestFrame.h"
 
@@ -1084,6 +1086,134 @@ void testEdgeComposite(TestFrame& tf, Report& report)
     report(worstSingle < 2e-3, "edge composite: pixels outside overlaps vs exact visible areas (abs.)", worstSingle, 2e-3);
     report(worst < 1.0 / 32 + 2e-3, "edge composite: all pixels (overlaps within 1/32) vs exact visible areas (abs.)", worst, 1.0 / 32 + 2e-3);
 }
+// ---------------------------------------------------------------- 8
+// A red emissive quad cut out by a smooth alpha disk (radius 11 of 32 texels, alpha ramp over two texels, cutoff 0.5,
+// about 4.4 pixels per texel) in front of a green emissive wall. Truth per pixel: the share of 32 x 32 subsamples where
+// the quad's bilinear alpha (mip 0, wrapped, the stand-in V's test) passes the cutoff. The composite must give that
+// share in red and the rest in green; the geometric area alone (no cut-out coverage) would paint every pixel the card
+// covers red, a one-pixel dilation of the disk.
+void testEdgeCutout(TestFrame& tf, Report& report)
+{
+    scene::Scene s;
+    s.name = "edge cut-out test";
+    auto emissive = [&](const char* name, float3 e) {
+        scene::Material m;
+        m.name = name;
+        m.baseColor = { 0, 0, 0 };
+        m.specular = 0;
+        m.emissive = e;
+        s.materials.push_back(m);
+        return (uint32_t)s.materials.size() - 1;
+    };
+    const uint32_t wall = emissive("wall", { 0, 1.2f, 0 }), leaf = emissive("cut-out", { 1.2f, 0, 0 });
+    constexpr uint32_t T = 32;
+    scene::Texture tex;
+    tex.name = "alpha disk";
+    tex.width = tex.height = T;
+    tex.format = scene::TextureFormat::Rgba8Srgb;
+    tex.wrap = true;
+    tex.texels.resize(T * T * 4);
+    for (uint32_t y = 0; y < T; ++y)
+        for (uint32_t x = 0; x < T; ++x)
+        {
+            const double r = std::hypot(x + 0.5 - T / 2.0, y + 0.5 - T / 2.0);
+            const double a = std::clamp(0.5 + (11.0 - r) / 2.0, 0.0, 1.0);
+            uint8_t* t = &tex.texels[(y * T + x) * 4];
+            t[0] = t[1] = t[2] = 128;
+            t[3] = (uint8_t)std::lround(a * 255);
+        }
+    s.textures.push_back(tex);
+    s.materials[leaf].baseColorTexture = 0;
+    s.materials[leaf].alphaCutoff = 0.5f;
+    const float h = 0.6f;
+    const uint32_t quadWall = addPlane(s, 20, wall), quadLeaf = addPlane(s, 2 * h, leaf);
+    // Object y (the plane's normal) -> world +z (towards the camera), object z -> world -y: uv (0, 0) at the top left.
+    auto facing = [&](uint32_t mesh, float3 at) {
+        float3x4 t;  // rows: world x, y, z; columns: object x, y, z, translation
+        const float r[3][3] = { { 1, 0, 0 }, { 0, 0, -1 }, { 0, 1, 0 } };
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) t.m[i][j] = r[i][j];
+        t.m[0][3] = at.x;
+        t.m[1][3] = at.y;
+        t.m[2][3] = at.z;
+        scene::Instance in;
+        in.mesh = mesh;
+        in.transform = t;
+        s.instances.push_back(in);
+    };
+    const float3 leafAt = { 0.07f, -0.03f, -4 };
+    facing(quadWall, { 0, 0, -6 });
+    facing(quadLeaf, leafAt);
+    s.sun.illuminance = 0;
+    scene::Camera cam;
+    cam.name = "front";
+    cam.position = { 0, 0, 0 };
+    cam.forward = { 0, 0, -1 };
+    cam.ev100 = 0;
+    s.cameras.push_back(cam);
+    tf.setScene(s);
+
+    const uint32_t W = 960, H = 540;
+    std::shared_ptr<std::vector<uint8_t>> lin;
+    ViewDesc desc;
+    tf.frame.outputLinearHdr = true;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, W, H, 0);
+        desc = v.view;
+        v.color = fc.graph.createTexture({ "m.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+        tf.vis.record(fc, v);
+        tracks::materialResolve(fc, v);
+        tracks::shading(fc, v);
+        lin = tf.readback(fc, v.color);
+    });
+    tf.frame.outputLinearHdr = false;
+
+    auto alphaAt = [&](double u, double v) {
+        const double px = u * T - 0.5, py = v * T - 0.5;
+        const double fx = std::floor(px), fy = std::floor(py);
+        auto texel = [&](double x, double y) {
+            const uint32_t ix = (uint32_t)(((int64_t)x % T + T) % T), iy = (uint32_t)(((int64_t)y % T + T) % T);
+            return tex.texels[(iy * T + ix) * 4 + 3] / 255.0;
+        };
+        const double ax = px - fx, ay = py - fy;
+        return (texel(fx, fy) * (1 - ax) + texel(fx + 1, fy) * ax) * (1 - ay) + (texel(fx, fy + 1) * (1 - ax) + texel(fx + 1, fy + 1) * ax) * ay;
+    };
+    double worst = 0, sumErr = 0, sumTruth = 0, sumRed = 0;
+    uint32_t partial = 0;
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+        {
+            uint32_t pass = 0;
+            constexpr uint32_t N = 32;
+            for (uint32_t j = 0; j < N; ++j)
+                for (uint32_t i = 0; i < N; ++i)
+                {
+                    double D[3], Dx[3];
+                    pixelRay(desc, x + (i + 0.5) / N, y + (j + 0.5) / N, D, Dx);
+                    const double t = leafAt.z / D[2];
+                    const double ox = D[0] * t - leafAt.x, oz = -(D[1] * t - leafAt.y);
+                    const double u = (ox + h) / (2 * h), v = (oz + h) / (2 * h);
+                    if (u >= 0 && u <= 1 && v >= 0 && v <= 1 && alphaAt(u, v) >= 0.5) ++pass;
+                }
+            const double truth = pass / double(N * N);
+            const float4 g = texelOf<float4>(*lin, W, x, y);
+            const double err = std::max(std::fabs(g.x - truth), std::fabs(g.y - (1 - truth)));
+            sumTruth += truth;
+            sumRed += g.x;
+            if (truth > 0 && truth < 1)
+            {
+                ++partial;
+                sumErr += err;
+            }
+            if (err > worst && err > 0.15) logf("  cut-out px (%u,%u) got (%.4f %.4f) truth %.4f\n", x, y, g.x, g.y, truth);
+            worst = std::max(worst, err);
+        }
+    logf("edge cut-out: %u pixels partly covered by the cut shape; covered area %.2f px (truth %.2f px)\n", partial, sumRed, sumTruth);
+    report(sumErr / std::max(partial, 1u) < 0.02, "edge cut-out: mean error over partly covered pixels (abs.)", sumErr / std::max(partial, 1u), 0.02);
+    report(worst < 0.15, "edge cut-out: every pixel vs supersampled cut shape (abs.)", worst, 0.15);
+    report(std::fabs(sumRed - sumTruth) / sumTruth < 3e-3, "edge cut-out: total covered area vs truth (rel.)", std::fabs(sumRed - sumTruth) / sumTruth, 3e-3);
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1101,6 +1231,7 @@ int main(int argc, char** argv)
         testLocalLights(tf, report);
         testEdgeArea(tf, report);
         testEdgeComposite(tf, report);
+        testEdgeCutout(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

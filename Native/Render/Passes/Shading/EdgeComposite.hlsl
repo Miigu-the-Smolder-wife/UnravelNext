@@ -6,17 +6,19 @@
 // neighbours, then corners; the sky is a group without triangles): a neighbour on a triangle an earlier neighbour showed
 // joins that neighbour's group (one triangle is one surface), any other joins the first group whose representative sees
 // the same surface or opens a group. A group's coverage of the pixel square is the exact area of its distinct triangles
-// inside it (edgeTriangleArea, deformed vertices projected camera-relative; each triangle is fetched once), and groups
-// hide each other in depth order at the pixel centre by their 32-subsample masks (V's coverageTriangleMask; error <= 1/32
-// of the overlap). The farthest group (the sky when present) holds the remaining area: it continues behind the nearer
-// ones. Each group contributes the exposed linear radiance of its representative pixel (the shading kernels kept it for
+// inside it (edgeTriangleArea, deformed vertices projected camera-relative; each triangle is fetched once), times, for
+// an alpha-tested material, the part of the pixel its cut-out covers (edgeCutoutCoverage: the triangle's uv under the
+// pixel centre). Groups hide each other in depth order at the pixel centre by their 32-subsample masks (V's
+// coverageTriangleMask; error <= 1/32 of the overlap); a cut-out group hides the subsamples of its mask in proportion to
+// its cut-out coverage. The farthest group (the sky when present) holds the remaining area: it continues behind the
+// nearer ones. Each group contributes the exposed linear radiance of its representative pixel (the shading kernels kept it for
 // every edge pixel), and the sum is tone mapped once (the pixel filter acts on radiance, not on display values).
 // Every per-neighbour and per-group array is indexed by unrolled constants only, so it stays in registers.
 // P[0] = { vis id SRV, visible clusters SRV, material word SRV, depth SRV }
 // P[1] = { gbuffer SRV, edge radiance SRV, colour UAV, edge pixel list SRV (raw) }
 // P[2] = { cos angle, footprint tolerance, distance tolerance (floats), groups max }
 // P[3] = { experiment mask (shading.experiment_disable; cost attribution only: 64 = one triangle per group, its
-//        representative's; 128 = no coverage geometry, the centre's radiance), 0, 0, 0 }
+//        representative's; 128 = no coverage geometry, the centre's radiance), M texture table SRV, 0, 0 }
 #include "Bindless.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/Edge.hlsli"
@@ -45,7 +47,8 @@ float3 edgeProject(float3 offset)
 struct EdgeGroup
 {
     float z;          // depth of the group's plane along the pixel-centre ray
-    float area;       // exact coverage of the pixel square by the group's triangles
+    float area;       // coverage of the pixel square by the group's triangles (exact area x cut-out coverage)
+    float density;    // area over the triangles' geometric area: 1 for opaque surfaces, the cut-out's share otherwise
     uint mask;        // 32-subsample coverage
     float3 radiance;  // exposed linear radiance of the representative pixel
 };
@@ -138,32 +141,40 @@ void main(uint i : SV_DispatchThreadID)
     if (P[3].x & 64) triangles &= representatives;
 
     // Coverage and 32-subsample mask per group, one triangle fetch per distinct triangle.
-    float area[EDGE_GROUPS] = { 0, 0, 0 };
+    float3 D, Dx, Dy;
+    mPixelRay(float2(pixel) + 0.5, D, Dx, Dy);
+    float area[EDGE_GROUPS] = { 0, 0, 0 }, geometric[EDGE_GROUPS] = { 0, 0, 0 };
     uint mask[EDGE_GROUPS] = { 0, 0, 0 };
     while (triangles != 0)
     {
         const uint k = firstbitlow(triangles);
         triangles &= triangles - 1;
         const uint g = (groupOf >> (2 * k)) & 3u;
-        float3 w0, w1, w2;
-        mTriangleWorld(visIds[uint2(int2(pixel) + edgeNeighbour(k))], P[0].y, w0, w1, w2);
-        const float3 a = edgeProject(w0 - g_cameraPosition);
-        const float3 b = edgeProject(w1 - g_cameraPosition);
-        const float3 c = edgeProject(w2 - g_cameraPosition);
+        const MTriangleCorners t = mTriangleCorners(visIds[uint2(int2(pixel) + edgeNeighbour(k))], P[0].y);
+        const float3 a = edgeProject(t.w0 - g_cameraPosition);
+        const float3 b = edgeProject(t.w1 - g_cameraPosition);
+        const float3 c = edgeProject(t.w2 - g_cameraPosition);
         if (min(a.z, min(b.z, c.z)) <= g_nearPlane * 0.5) continue;  // crosses the camera plane: left to the remainder
         const float ar = edgeTriangleArea(a.xy, b.xy, c.xy, float2(pixel));
         const uint m = coverageTriangleMask(a.xy, b.xy, c.xy, float2(pixel));
+        float cut = 1;
+        const MTextureSet ts = mLoadTextureSet(P[3].y, t.material);
+        if (ts.coverage != UNX_NONE)
+        {
+            float2 uv, duvdx, duvdy;
+            mPlaneUv(t, D, Dx, Dy, uv, duvdx, duvdy);
+            cut = edgeCutoutCoverage(ts, loadMaterial(t.material).alphaCutoff, uv, duvdx, duvdy);
+        }
         [unroll] for (uint j = 0; j < EDGE_GROUPS; ++j)
             if (j == g)
             {
-                area[j] += ar;
+                area[j] += ar * cut;
+                geometric[j] += ar;
                 mask[j] |= m;
             }
     }
 
     // Depth of each group's plane along the centre ray, then front to back (sorting network on registers).
-    float3 D, Dx, Dy;
-    mPixelRay(float2(pixel) + 0.5, D, Dx, Dy);
     EdgeGroup grp[EDGE_GROUPS];
     [unroll] for (uint g1 = 0; g1 < EDGE_GROUPS; ++g1)
     {
@@ -171,6 +182,7 @@ void main(uint i : SV_DispatchThreadID)
         const float nD = dot(r.normal, D);
         grp[g1].z = g1 >= groups ? 3.0e38 : r.sky ? 1e30 : nD < -1e-6 ? dot(r.normal, r.position) / nD : linearDepth(depth[repPixel[g1]]);
         grp[g1].area = area[g1];
+        grp[g1].density = geometric[g1] > 0 ? area[g1] / geometric[g1] : 1;
         grp[g1].mask = mask[g1];
         grp[g1].radiance = g1 < groups ? edgeRadiance[repPixel[g1]].rgb : 0;
     }
@@ -178,8 +190,10 @@ void main(uint i : SV_DispatchThreadID)
     edgeOrder(grp[1], grp[2]);
     edgeOrder(grp[0], grp[1]);
 
-    // The farthest group takes what the nearer ones leave.
+    // The farthest group takes what the nearer ones leave. A nearer group hides its mask's subsamples by its density
+    // (opaque 1); with at most three groups only the middle one is seen through a nearer one, the front group's.
     uint covered = 0;
+    float through = 1;  // share of the covered subsamples the nearer group lets through
     float used = 0;
     float3 sum = 0;
     [unroll] for (uint g2 = 0; g2 < EDGE_GROUPS; ++g2)
@@ -190,8 +204,10 @@ void main(uint i : SV_DispatchThreadID)
         else
         {
             const uint m = grp[g2].mask;
-            const float seenFraction = countbits(m) > 0 ? countbits(m & ~covered) / (float)countbits(m) : 1 - countbits(covered) / 32.0;
+            const float seenFraction = countbits(m) > 0 ? (countbits(m & ~covered) + countbits(m & covered) * through) / (float)countbits(m)
+                                                        : 1 - countbits(covered) / 32.0 * (1 - through);
             w = min(grp[g2].area * seenFraction, max(1 - used, 0.0));
+            through = covered == 0 ? 1 - grp[g2].density : through * (1 - grp[g2].density);
             covered |= m;
         }
         used += w;

@@ -337,6 +337,30 @@ MipChain buildMipChain(const scene::Scene& s, uint32_t index)
     return out;
 }
 
+MipChain buildCoverageChain(const scene::Scene& s, uint32_t index)
+{
+    const scene::Texture& t = s.textures.at(index);
+    const Use use = usesOf(s, index);
+    MipChain out;
+    if (!use.alphaTested || t.format != scene::TextureFormat::Rgba8Srgb) return out;
+    out.width = t.width;
+    out.height = t.height;
+    out.format = DXGI_FORMAT_R8_UNORM;
+    out.bytesPerTexel = 1;
+    Image img;
+    img.init(t.width, t.height, 1);
+    for (size_t i = 0; i < (size_t)t.width * t.height; ++i) img.v[i] = t.texels[i * 4 + 3] / 255.0 >= use.cutoff ? 1.0 : 0.0;
+    const uint32_t levels = mipCount(t.width, t.height);
+    for (uint32_t l = 0; l < levels; ++l)
+    {
+        if (l > 0) img = downsample(img);
+        std::vector<uint8_t> bytes(img.v.size());
+        for (size_t i = 0; i < img.v.size(); ++i) bytes[i] = unorm8(img.v[i]);
+        out.levels.push_back(std::move(bytes));
+    }
+    return out;
+}
+
 TextureSystem::~TextureSystem() { clear(); }
 
 void TextureSystem::release(Resource& r)
@@ -355,7 +379,9 @@ void TextureSystem::release(Resource& r)
 void TextureSystem::clear()
 {
     for (Resource& r : m_textures) release(r);
+    for (Resource& r : m_coverage) release(r);
     m_textures.clear();
+    m_coverage.clear();
     release(m_table);
     m_gpuBytes = 0;
 }
@@ -392,6 +418,7 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
         clear();
         m_fingerprint = fingerprint;
         m_textures.resize(s->textures.size());
+        m_coverage.resize(s->textures.size());
         m_slopeRange.assign(s->textures.size(), 0.0f);
 
         // Upload in batches of ~256 MB of staging memory.
@@ -461,11 +488,14 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
             batchBytes = 0;
         };
 
-        for (uint32_t i = 0; i < (uint32_t)s->textures.size(); ++i)
+        // Scene textures (kind 0) and the cut-out coverage of alpha-tested base colours (kind 1).
+        for (uint32_t job = 0; job < 2 * (uint32_t)s->textures.size(); ++job)
         {
+            const uint32_t i = job >> 1, kind = job & 1;
             Pending p;
-            p.chain = buildMipChain(*s, i);
-            m_slopeRange[i] = p.chain.slopeRange;
+            p.chain = kind == 0 ? buildMipChain(*s, i) : buildCoverageChain(*s, i);
+            if (p.chain.levels.empty()) continue;
+            if (kind == 0) m_slopeRange[i] = p.chain.slopeRange;
             D3D12_RESOURCE_DESC d{};
             d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
             d.Width = p.chain.width;
@@ -495,12 +525,13 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
             d1.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
             check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d1, D3D12_BARRIER_LAYOUT_COPY_DEST, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&p.texture)),
                   "M texture");
-            const std::wstring wide(s->textures[i].name.begin(), s->textures[i].name.end());
+            const std::string name = kind == 0 ? s->textures[i].name : s->textures[i].name + " (cut-out coverage)";
+            const std::wstring wide(name.begin(), name.end());
             p.texture->SetName(wide.c_str());
             D3D12_RESOURCE_ALLOCATION_INFO info = device.d3d()->GetResourceAllocationInfo(0, 1, &d);
             m_gpuBytes += info.SizeInBytes;
 
-            Resource& r = m_textures[i];
+            Resource& r = kind == 0 ? m_textures[i] : m_coverage[i];
             r.resource = p.texture;
             r.srv = heaps.allocateResource();
             D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
@@ -545,6 +576,7 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
         e.slopeRange = m.normalTexture != scene::kNone ? m_slopeRange[m.normalTexture] : 0.0f;
         e.flags = clampBit(m.baseColorTexture, gpu::MaterialTextureBaseColor) | clampBit(m.normalTexture, gpu::MaterialTextureNormal) |
                   clampBit(m.roughMetalTexture, gpu::MaterialTextureRoughMetal) | clampBit(m.emissiveTexture, gpu::MaterialTextureEmissive);
+        e.coverage = (m.alphaCutoff > 0 && m.baseColorTexture != scene::kNone && m.baseColorTexture < m_coverage.size()) ? m_coverage[m.baseColorTexture].srv : gpu::kNone;
         if (e.emissive != gpu::kNone) m_anyEmissive = true;
         table.push_back(e);
         gpu::MaterialTextures pub;
@@ -556,7 +588,7 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
         pub.clamp = e.flags;
         m_published.push_back(pub);
     }
-    if (table.empty()) table.push_back(TextureSetGpu{ gpu::kNone, gpu::kNone, gpu::kNone, gpu::kNone, gpu::kNone, 0, 0, 0 });
+    if (table.empty()) table.push_back(TextureSetGpu{ gpu::kNone, gpu::kNone, gpu::kNone, gpu::kNone, gpu::kNone, 0, 0, gpu::kNone });
 
     const uint64_t bytes = table.size() * sizeof(TextureSetGpu);
     D3D12_HEAP_PROPERTIES def{ D3D12_HEAP_TYPE_DEFAULT }, up{ D3D12_HEAP_TYPE_UPLOAD };

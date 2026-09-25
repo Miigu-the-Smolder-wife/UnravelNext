@@ -88,17 +88,49 @@ MVertex mTriangleVertex(uint visId, uint visibleClustersSrv, uint corner)
     return o;
 }
 
-// The three deformed world positions of the triangle a vis id names (records loaded once; coverage needs no attributes).
-void mTriangleWorld(uint visId, uint visibleClustersSrv, out float3 w0, out float3 w1, out float3 w2)
+// The triangle a vis id names as coverage needs it (records loaded once): deformed world positions, material, and the
+// vertex uv (loaded only where the caller reads it).
+struct MTriangleCorners
+{
+    float3 w0, w1, w2;
+    float2 uv0, uv1, uv2;
+    uint material;
+};
+
+MTriangleCorners mTriangleCorners(uint visId, uint visibleClustersSrv)
 {
     const GpuVisibleCluster vc = loadVisibleCluster(visibleClustersSrv, visVisibleCluster(visId));
     const GpuInstance inst = loadInstance(vc.instance);
     const GpuCluster c = loadCluster(vc.cluster);
     const GpuMesh mesh = loadMesh(inst.mesh);
     const uint3 tri = loadClusterTriangle(c, visTriangle(visId));
-    w0 = deformVertex(inst, mesh, tri.x).world;
-    w1 = deformVertex(inst, mesh, tri.y).world;
-    w2 = deformVertex(inst, mesh, tri.z).world;
+    MTriangleCorners o;
+    o.w0 = deformVertex(inst, mesh, tri.x).world;
+    o.w1 = deformVertex(inst, mesh, tri.y).world;
+    o.w2 = deformVertex(inst, mesh, tri.z).world;
+    o.uv0 = loadVertex(mesh, tri.x).uv;
+    o.uv1 = loadVertex(mesh, tri.y).uv;
+    o.uv2 = loadVertex(mesh, tri.z).uv;
+    o.material = clusterMaterial(inst, c);
+    return o;
+}
+
+// uv of a triangle's plane under the pixel-centre ray (D, Dx, Dy of mPixelRay) and its screen derivatives, by the
+// barycentric formulas of mSurfaceFromVertices (the point may lie outside the triangle: the plane's affine uv).
+void mPlaneUv(MTriangleCorners t, float3 D, float3 Dx, float3 Dy, out float2 uv, out float2 duvdx, out float2 duvdy)
+{
+    const float3 r0 = t.w0 - g_cameraPosition;
+    const float3 e1 = t.w1 - t.w0, e2 = t.w2 - t.w0;
+    const float3 n = cross(e1, e2);
+    const float nD = dot(n, D);
+    const float tHit = dot(n, r0) / nD;
+    const float inv = 1.0 / dot(n, n);
+    const float3 r = tHit * D - r0;
+    const float3 rx = tHit * (Dx - D * (dot(n, Dx) / nD)), ry = tHit * (Dy - D * (dot(n, Dy) / nD));
+    const float2 u1 = t.uv1 - t.uv0, u2 = t.uv2 - t.uv0;
+    uv = t.uv0 + u1 * (dot(n, cross(r, e2)) * inv) + u2 * (dot(n, cross(e1, r)) * inv);
+    duvdx = u1 * (dot(n, cross(rx, e2)) * inv) + u2 * (dot(n, cross(e1, rx)) * inv);
+    duvdy = u1 * (dot(n, cross(ry, e2)) * inv) + u2 * (dot(n, cross(e1, ry)) * inv);
 }
 
 // The surface of a triangle (three deformed vertices) under the pixel-centre ray.

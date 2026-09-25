@@ -12,6 +12,7 @@
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
+#include "Passes/Shading/ShadingCommon.hlsli"
 
 struct EdgeParams
 {
@@ -132,6 +133,55 @@ float edgeTriangleArea(float2 a, float2 b, float2 c, float2 pixel)
     b -= pixel;
     c -= pixel;
     return abs(edgeColumnIntegral(a, b) + edgeColumnIntegral(b, c) + edgeColumnIntegral(c, a));
+}
+
+// Fraction of the pixel square an alpha-tested (cut-out) surface covers at uv (screen gradients dx, dy): the part where
+// the base colour's alpha passes the cutoff, as V's alpha test decides at a pixel centre (MaterialTextures.hlsli).
+//   Minified (footprint >= 2 base texels along its major axis): M's cut-out coverage mips (fraction of base texels
+//   passing the cutoff, box mips) filtered over the footprint.
+//   Magnified (<= 1 texel): the bilinear alpha of mip 0 is linear to first order across the pixel, so the passing
+//   region is a half-plane; its exact area in the pixel square (shHalfPlaneCoverage) with the alpha's screen gradient.
+//   Between 1 and 2 texels the two blend linearly.
+float edgeCutoutCoverage(MTextureSet ts, float cutoff, float2 uv, float2 dx, float2 dy)
+{
+    const bool clampAddress = (ts.flags & M_TEX_BASE_COLOR) != 0;
+    Texture2D<float4> base = ResourceDescriptorHeap[ts.baseColor];
+    uint w, h;
+    base.GetDimensions(w, h);
+    const float2 size = float2(w, h);
+    const float rho = max(length(dx * size), length(dy * size));
+    float minified = 0, magnified = 0;
+    if (rho > 1)
+    {
+        Texture2D<float> coverage = ResourceDescriptorHeap[ts.coverage];
+        minified = clampAddress ? coverage.SampleGrad(g_anisoClamp, uv, dx, dy) : coverage.SampleGrad(g_anisoWrap, uv, dx, dy);
+    }
+    if (rho < 2)
+    {
+        // The bilinear cell around uv on mip 0 (as mNormalMoments: chosen here, read with the texture's addressing).
+        const float2 p = uv * size - 0.5;
+        const float2 c0 = floor(p);
+        const float2 f = p - c0;
+        int2 i0, i1;
+        if (clampAddress)
+        {
+            i0 = clamp(int2(c0), int2(0, 0), int2(w - 1, h - 1));
+            i1 = clamp(int2(c0) + 1, int2(0, 0), int2(w - 1, h - 1));
+        }
+        else
+        {
+            i0 = int2(c0 - size * floor(c0 / size));
+            i1 = int2((c0 + 1) - size * floor((c0 + 1) / size));
+        }
+        const float a00 = base.Load(int3(i0.x, i0.y, 0)).a, a10 = base.Load(int3(i1.x, i0.y, 0)).a;
+        const float a01 = base.Load(int3(i0.x, i1.y, 0)).a, a11 = base.Load(int3(i1.x, i1.y, 0)).a;
+        const float alpha = lerp(lerp(a00, a10, f.x), lerp(a01, a11, f.x), f.y);
+        const float2 perTexel = float2(lerp(a10 - a00, a11 - a01, f.y), lerp(a01 - a00, a11 - a10, f.x));
+        const float2 g = float2(dot(perTexel, dx * size), dot(perTexel, dy * size));  // d alpha per pixel step
+        const float gl = length(g);
+        magnified = gl > 1e-8 ? shHalfPlaneCoverage(g / gl, (alpha - cutoff) / gl) : (alpha >= cutoff ? 1.0 : 0.0);
+    }
+    return rho <= 1 ? magnified : (rho >= 2 ? minified : lerp(magnified, minified, rho - 1));
 }
 
 // Appends the wave's edge pixels to the edge pixel list (one atomic per wave). Edge args layout (raw, 24 B): bytes 0-11

@@ -361,12 +361,13 @@ void shade(FramePassContext& fc, ViewResources& view)
                          b.use(edgeArgs, Use::IndirectArgs);
                      },
                      [=](PassContext& c) {
-                         const uint32_t k[13] = { c.srv(v.visId), c.srv(v.visibleClusters), c.srv(o.materialWord), c.srv(v.depth),
+                         const uint32_t k[14] = { c.srv(v.visId), c.srv(v.visibleClusters), c.srv(o.materialWord), c.srv(v.depth),
                                                   c.srv(v.gbuffer), c.srv(edgeRadiance), c.uav(v.color), c.srv(edgePixels),
-                                                  asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), ec.groupsMax, experiment };
+                                                  asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), ec.groupsMax,
+                                                  experiment, o.textureTableSrv };
                          c.cmd->SetPipelineState(composite);
                          c.bindFrameConstants(cb);
-                         c.computeConstants(k, 13);
+                         c.computeConstants(k, 14);
                          c.cmd->ExecuteIndirect(signature, 1, c.resource(edgeArgs), 0, nullptr, 0);
                      });
 }
