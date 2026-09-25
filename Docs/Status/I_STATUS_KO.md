@@ -273,6 +273,15 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
 
 ## 2.5 설계 동적 규모의 호스트 경로 [실측]
 
+> **2026-09-26 변경(860af88, 9a342b9):** 게이트가 합성 장면의 고리 배치를 버리고 RPP-1 장면에서 돈다(조율 지적: 강체 1,024개가 지름 10 m 안에 겹쳐 대표성이 없었다).
+> - 적재: 장면은 `UnxSceneLoad`(ABI 6 안의 선택 export)로 싣고, C의 배치 파일 `<장면>_bodies.json`(C 195fda3)을 읽는다.
+> - 강체 1,024개: 정지 / restHeight까지 낙하 / 굴러감을 운동학적으로 재생한다. 주기가 넘어가면 teleport 플래그를 붙인다. 장면 t0의 3 × 3을 유지한다.
+> - 캐릭터 256은 파일의 슬롯에, 카메라는 장면 camera 0이다. 파일이 없거나 오래되면 오류다. 시험 `HostBodies` 12/12.
+> - 장면은 공유 `Cache/Scenes`를 덮지 않도록 `unx_scenegen --scene <s> --out <dir> --bodies <dir>/<s>_bodies.json`으로 따로 만든다.
+> - city_block [실측, build/I 860af88]: GPU 4K 9.785 / 1440p 5.686 ms, `r.as.tlas.dynamic` 0.131 / 0.136 ms, refit 0.031 ms, 인스턴스 1,633.
+> - 결과 JSON에는 큐별 head/tail/gap, 명령 목록·배리어 수, GpuLock 경합(경합 초·프레임, 경합 없는 GPU 시간)이 들어간다.
+> - 아래는 옛 합성 장면의 기록이다.
+
 `unx_gate_host_hostdynamic`(독립 실행, `UnravelNext.dll`의 export 경유, GpuLock): 강체 1,024개가 매 프레임 움직이고, 캐릭터 256체
 (64본, 60k 삼각형 공유 메시, 정점당 가중치 2개)가 매 프레임 새 포즈를 받는다(RPP-1 N_dyn과 ARCHITECTURE 2.8 부하). 인스턴스 삼각형 1,540만.
 원본: `Results/I/HostDynamic/host_dynamic_20260925_111846.json`, `..._112359.json`(패스별 분포 포함).
@@ -396,6 +405,27 @@ World 세션의 수정(TimeManager 1/60, 호스트가 `Time.fixedDeltaTime`을 �
 - R 통계(`rstats_…_004825`)는 `-unxLogFile` 없이 돌아 통계 줄이 없다(통계는 렌더러 로그 파일에만 나온다). GPU 4K 4.25 ms로 측정값 자체는 유효하다. 다음 차례에 로그를 붙여 다시 돈다.
 
 4K 원본의 반점 자체는 R의 hit 셰이딩 분산 문제로 남고, 판단은 `-unxCaptureFull` 원본으로 한다(`present_area2_…_005046_3840x2160.png`).
+
+### 2.2.6 2026-09-26 새벽 차례 (렌더러 583a2eb, 브리지 1dfdc44c) [실측]
+
+Player 조건: NativeWorld 82bdc089(71fea21d + b943ccee), NativePhysics 1F6EF281(np-p52g), NativeVfx 04e44d9e. 식별 정보는 `Results/I/DataWorld/*_583a2eb_*`의 identity 파일에 있다.
+- **편집기 Game 뷰 방향**(텍스처 대상, `editor_orient_583a2eb_*`): 바로 보이고 한 번 인코딩된다. MAD 0.00046이다. 표시 셰이더의 `_ProjectionParams.x < 0` 행 뒤집기가 편집기에서도 맞다.
+- **호스트 통합 틈 ≈ 0** (설계 2.13 항, 목표 ≤ 0.10 ms): core의 목록 마크(v1.39)와 호스트 그래프 통계 v2(583a2eb)로 쟀다.
+  - Player 4K·1440p에서 명령 목록 1개, 교차 큐 동기화 0, graphics head 0 / tail 0(P95 0.001) / gap 0 ms, 경합 0 s였다.
+  - 앞서 보고한 "프레임 − 패스 합 0.27~0.70 ms"는 틀렸다. 프레임 중앙값에서 패스별 중앙값의 합을 뺀 값이었고, 꼬리가 긴 분포에서 두 값은 같지 않다.
+  - 평균으로 보면 모든 실행(f8d09d3, e70384f, 583a2eb, 4K·1440p)에서 프레임 − 패스 합이 +0.0001 ms 이하다. HostDynamic(city_block 1440p)도 목록 1개, 틈 ≈ 0이다.
+- **설계 규모 동기화 분해** (`scale_split_583a2eb_*`, 4K 중앙값):
+  - Present 0.263 + 스켈레톤 0.031 + 루트 읽기 0.087 + 루트 루프 0.172 + SetTransforms 0.013 = 0.598 ms다.
+  - 루트 루프(보간·부위·복제 변환)는 Burst 작업 후보다.
+  - GPU는 4K 6.36 / 1440p 3.36 ms다.
+- **복원 검사** (`-unxRestoreCheck`): 절차는 A 복원 → A2 연속 복원 → K2 → B 60 tick → C 복원이다. 판정 기준은 바닥 = 연속 복원 두 번, C ≤ 2 × 바닥, B > 4 × 바닥, Restore 표시 3회다.
+  - **데이터 수준 통과** (`restore_check_583a2eb_20260926_050034`): committed World 루트(항목 22개)가 A = A2 = C다(0개 다름). B는 17개가 최대 0.64 m 움직였다. Restore 표시 3회가 닿았다.
+  - 영상 수준은 아직 판정하지 못했다. 사용자가 데스크톱을 쓰는 동안 Player 창이 가려지면 Unity가 렌더를 건너뛴다(`runInBackground`와 무관). 그래서 모든 캡처가 같은 옛 프레임이었다.
+  - 첫 실행(04:48)의 "C에서 강체 자세가 다르다"도 같은 원인으로 무효 처리했다. 이제 측정기는 10 s 동안 렌더러 프레임이 없으면 오류로 멈춘다.
+- **사고**: Player tick 예외 "Animation origin must be rebased before root precision exceeds one millimetre"(시작 약 140 s 뒤)가 나서 호스트가 World tick을 멈췄다.
+  - 애니메이션 몫이다. 자동 원점 재기준을 설계 중이다.
+  - 몸체가 12 × 12 m 바닥을 벗어났는지 확인하려고, 다음 차례에 `-unxRootLog`(루트 초당 기록 200 s, 기본과 `NP_JOLT_NARROWPHASE=1`)로 잰다.
+- f8d09d3 / e70384f A B A B는 첫 실행이 가려진 창 때문에 멈춰서 취소했다. 틈이 착시로 판정됐으니 두 렌더러 중앙값 차이(4.11 → 4.24 ms)만 남아 있고, 창을 앞에 둘 수 있을 때 잰다.
 
 ## 2.3 실행 절차 (재현)
 
