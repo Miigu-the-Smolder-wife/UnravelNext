@@ -12,6 +12,7 @@
 // The bodies file must come from the same generator build as the scene (every body's instance is dynamic and starts at the
 // file's position); a missing or mismatched file stops the gate (no fallback placement).
 #include "BodiesFile.h"
+#include "Contention.h"
 
 #include "unx/host/UnravelNextHost.h"
 #include "unx/scene/SceneData.h"
@@ -60,6 +61,7 @@ struct Api
     UNX_FN(UnxFrameRenderStandalone)
     UNX_FN(UnxFrameStatsLatest)
     UNX_FN(UnxFramePassTimingsLatest)
+    UNX_FN(UnxFrameGraphStatsLatest)
 #undef UNX_FN
     void load(const std::filesystem::path& path)
     {
@@ -86,6 +88,7 @@ struct Api
         UNX_FN(UnxFrameRenderStandalone)
         UNX_FN(UnxFrameStatsLatest)
         UNX_FN(UnxFramePassTimingsLatest)
+        UNX_FN(UnxFrameGraphStatsLatest)
 #undef UNX_FN
     }
     void ok(int32_t r, const char* what) const
@@ -368,6 +371,12 @@ int main(int argc, char** argv)
             uint64_t teleports = 0;
             std::vector<float> poses(12ull * bones * characters);
             std::vector<double> updateMs, gpuMs, recordMs, submitMs;
+            // Time outside the passes per queue (profiler list marks, v1.39) and each measured frame's submission time
+            // (unix ms: GpuLock's contention samples are matched against it).
+            std::vector<double> qLists[2], qHead[2], qTail[2], qGap[2], graphLists, graphBarriers;
+            std::map<uint64_t, int64_t> submittedAt;
+            std::vector<uint64_t> gpuFrames;
+            int64_t windowStartUnix = 0;
             std::map<std::string, std::vector<double>> passMs;
             std::vector<std::string> order;
             std::vector<UnxPassTiming> passes(512);
@@ -405,7 +414,12 @@ int main(int argc, char** argv)
                 api.ok(api.UnxFrameQueue(r, &f, &ticket), "UnxFrameQueue");
                 const double upd = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - u0).count();
                 api.ok(api.UnxFrameRenderStandalone(r, ticket, nullptr, 0), "UnxFrameRenderStandalone");
-                if (firstMeasured == UINT64_MAX && std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() >= 1.5) firstMeasured = frame + 1;
+                submittedAt[frame] = gate::unixMs();
+                if (firstMeasured == UINT64_MAX && std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() >= 1.5)
+                {
+                    firstMeasured = frame + 1;
+                    windowStartUnix = gate::unixMs();
+                }
                 if (firstMeasured == UINT64_MAX || frame < firstMeasured) continue;
                 updateMs.push_back(upd);
                 UnxFrameStats s{};
@@ -416,6 +430,24 @@ int main(int argc, char** argv)
                 {
                     lastStats = s.frameIndex;
                     gpuMs.push_back(s.gpuMs);
+                    gpuFrames.push_back(s.frameIndex);
+                    UnxFrameGraphStats gs{};
+                    gs.size = sizeof gs;
+                    gs.version = 2;
+                    api.ok(api.UnxFrameGraphStatsLatest(r, &gs), "UnxFrameGraphStatsLatest");
+                    if (gs.frameIndex == s.frameIndex)
+                    {
+                        graphLists.push_back(gs.commandLists);
+                        graphBarriers.push_back(gs.barriers);
+                        for (uint32_t q = 0; q < 2; ++q)
+                            if (gs.queues[q].lists)
+                            {
+                                qLists[q].push_back(gs.queues[q].lists);
+                                qHead[q].push_back(gs.queues[q].headMs);
+                                qTail[q].push_back(gs.queues[q].tailMs);
+                                qGap[q].push_back(gs.queues[q].gapMs);
+                            }
+                    }
                     recordMs.push_back(s.cpuRecordMs);
                     submitMs.push_back(s.cpuSubmitMs);
                     uint32_t count = 0;
@@ -429,6 +461,28 @@ int main(int argc, char** argv)
                 }
             }
             api.ok(api.UnxRendererDestroy(r), "UnxRendererDestroy");
+            const gate::Contention contention = gate::readContention(windowStartUnix, gate::unixMs());
+            std::vector<double> clean;
+            uint32_t contendedFrames = 0;
+            for (size_t i = 0; i < gpuMs.size(); ++i)
+            {
+                const auto at = submittedAt.find(gpuFrames[i]);
+                if (at != submittedAt.end() && contention.contended(at->second)) ++contendedFrames;
+                else clean.push_back(gpuMs[i]);
+            }
+            std::string samples;
+            for (const std::string& line : contention.samples) samples += (samples.empty() ? "" : ", ") + line;
+            const std::string contentionJson = contention.sampled
+                ? format("{\"contendedSeconds\": %.1f, \"contendedFrames\": %u, \"gpuFrameMsUncontended\": %s, \"samples\": [%s]}", contention.seconds(), contendedFrames,
+                         distJson(clean).c_str(), samples.c_str())
+                : std::string("null");
+            auto queueJson = [&](uint32_t q) {
+                return qLists[q].empty() ? std::string("null")
+                                         : format("{\"lists\": %s, \"headMs\": %s, \"tailMs\": %s, \"gapMs\": %s}", distJson(qLists[q]).c_str(), distJson(qHead[q]).c_str(),
+                                                  distJson(qTail[q]).c_str(), distJson(qGap[q]).c_str());
+            };
+            const std::string graphJson = format("{\"commandLists\": %s, \"barriers\": %s, \"queues\": {\"graphics\": %s, \"compute\": %s}}", distJson(graphLists).c_str(),
+                                                 distJson(graphBarriers).c_str(), queueJson(0).c_str(), queueJson(1).c_str());
             const Distribution g = Distribution::of(gpuMs), u = Distribution::of(updateMs);
             logf("%s: %s, %u bodies (%llu restarts) + %u characters x %u bones, %u instances: GPU frame median %.3f ms (P95 %.3f, P99 %.3f) | host updates %.3f ms | record %.3f submit %.3f ms\n",
                  rs.c_str(), placement.scene.c_str(), bodies, (unsigned long long)teleports, characters, bones, info.instances, g.median, g.p95, g.p99, u.median, Distribution::of(recordMs).median,
@@ -436,10 +490,10 @@ int main(int argc, char** argv)
             std::string passJson;
             // Per pass over the frames it ran in (passes that run only on some frames, e.g. LUT rebuilds, have count < frames).
             for (const std::string& name : order) passJson += format("%s\n      \"%s\": %s", passJson.empty() ? "" : ",", name.c_str(), distJson(passMs[name]).c_str());
-            json += format("%s    {\"resolution\": \"%s\", \"meshTriangles\": %llu, \"instances\": %u, \"bodyRestarts\": %llu, \"clusters\": %llu, \"sceneBuildMs\": %.1f, \"gpuFrameMs\": %s, \"hostUpdateMs\": %s, \"cpuRecordMs\": %s, \"cpuSubmitMs\": %s, \"passMs\": {%s}}",
+            json += format("%s    {\"resolution\": \"%s\", \"meshTriangles\": %llu, \"instances\": %u, \"bodyRestarts\": %llu, \"clusters\": %llu, \"sceneBuildMs\": %.1f, \"gpuFrameMs\": %s, \"hostUpdateMs\": %s, \"cpuRecordMs\": %s, \"cpuSubmitMs\": %s, \"graph\": %s, \"gpuContention\": %s, \"passMs\": {%s}}",
                            firstRun ? "" : ",\n", rs.c_str(), (unsigned long long)info.triangles, info.instances, (unsigned long long)teleports, (unsigned long long)info.clusters,
                            info.buildMs, distJson(gpuMs).c_str(), distJson(updateMs).c_str(), distJson(recordMs).c_str(),
-                           distJson(submitMs).c_str(), passJson.c_str());
+                           distJson(submitMs).c_str(), graphJson.c_str(), contentionJson.c_str(), passJson.c_str());
             firstRun = false;
         }
         json += "\n  ]\n}\n";
