@@ -310,6 +310,15 @@ typedef struct UnxFrameStats
 } UnxFrameStats;
 UNX_API int32_t UNX_CALL UnxFrameStatsLatest(UnxRenderer r, UnxFrameStats* stats);
 
+// Per-pass GPU time of the same completed frame (pass names as the render graph declares them, e.g. "v.raster.bandA").
+typedef struct UnxPassTiming
+{
+    char name[48];              // UTF-8, truncated to 47 bytes
+    double ms;
+} UnxPassTiming;
+// Writes min(capacity, passes) entries; *count receives the frame's pass count.
+UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming* passes, uint32_t capacity, uint32_t* count);
+
 #ifdef __cplusplus
 }
 // The managed bridge (Assets/UnravelNextBridge/Runtime/Native/UnravelNextNative.cs) checks the same sizes at start.
@@ -326,4 +335,5 @@ static_assert(sizeof(UnxCameraDesc) == 48);
 static_assert(sizeof(UnxFrameDesc) == 96);
 static_assert(sizeof(UnxFrameStats) == 48);
 static_assert(sizeof(UnxTransformUpdate) == 56);
+static_assert(sizeof(UnxPassTiming) == 56);
 #endif

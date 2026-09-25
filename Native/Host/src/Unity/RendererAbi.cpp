@@ -422,6 +422,21 @@ UNX_API int32_t UNX_CALL UnxFrameRenderStandalone(UnxRenderer r, uint64_t ticket
     });
 }
 
+UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming* passes, uint32_t capacity, uint32_t* count)
+{
+    return call([&] {
+        if (!count || (capacity && !passes)) fail("pass timing output is null");
+        const FrameStats s = find(r)->latestStats();
+        *count = (uint32_t)s.passMs.size();
+        for (uint32_t i = 0; i < capacity && i < s.passMs.size(); ++i)
+        {
+            std::memset(passes[i].name, 0, sizeof passes[i].name);
+            std::memcpy(passes[i].name, s.passMs[i].first.data(), std::min(s.passMs[i].first.size(), sizeof passes[i].name - 1));
+            passes[i].ms = s.passMs[i].second;
+        }
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxFrameSetTransforms(UnxRenderer r, const UnxTransformUpdate* updates, uint32_t count)
 {
     return call([&] {

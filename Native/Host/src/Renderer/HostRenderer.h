@@ -79,6 +79,7 @@ struct FrameStats
     uint64_t frameIndex = UINT64_MAX;              // host frame number the GPU numbers belong to
     double gpuMs = 0, cpuRecordMs = 0, cpuSubmitMs = 0;
     uint32_t passes = 0;
+    std::vector<std::pair<std::string, double>> passMs;  // the same frame's passes in graph order
 };
 
 // Executes one of the frame's command lists on the host queue; 'output' is the host texture the list may touch.

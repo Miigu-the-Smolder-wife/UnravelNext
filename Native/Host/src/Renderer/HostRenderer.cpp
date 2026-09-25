@@ -200,6 +200,8 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
         m_stats.frameIndex = m_slotHostFrame[t->frame % m_options.framesInFlight];
         m_stats.gpuMs = t->gpuFrameMs;
         m_stats.passes = (uint32_t)t->passes.size();
+        m_stats.passMs.clear();
+        for (const PassTiming& pt : t->passes) m_stats.passMs.emplace_back(pt.name, pt.durationMs());
     }
     m_slotHostFrame[slot] = p.frameIndex;
     // Scene changes of this frame (GpuScene uploads them at the start of FrameRenderer::record).
