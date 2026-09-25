@@ -387,6 +387,9 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
   GPU" 단언(EnableVfxGpu = true)이 실패한다. TitanNative 공유 GPU VFX 실행기가 퇴역했고, GPU 입자 모듈 연결은 V3(I가 FX 모듈을
   `VfxStreamExecutors.Provider` / `NV_StreamExecutor`로 잇는 일)다. EnableVfxGpu = false(`-unxVfxCpu`) 조건의 Player에는 영향이 없다.
   설치 뒤 TitanNative VFX 렌더러는 CPU 투영으로 그린다. `Docs/Rebuild/WORLD_VFX_DESIGN_KO.md` 9.4(a81466e5).
+- `20260925_I_history_discontinuity.md`(대기): World 복원·카메라 컷의 렌더 이력 계약. 호스트가 복원을 감지해(NW_Info epoch·branch, tick 역행)
+  불연속 비트를 넘기고, 렌더러는 모든 시간 상태를 재설정한다. 같음의 수준을 정해야 한다: 확률 항을 뺀 부분집합은 비트 동일,
+  전체는 (i) 결정적 누적(I 권장) 또는 (ii) 실측 바닥 이하. 옛 시험 `WorldHierarchySkinAndVfxReachRealRenderedPixelsAcrossRestore`를 이 경로로 옮긴다.
 - `20260925_I_skin_normals.md`(대기): 스킨 법선을 관절 3×3의 여인수로 변환하는 것이다. 데이터 월드 캐릭터의 비균일 스케일(0.6, 0.8, 0.6)을 관절에 접으면 필요하다.
 
 ## 3.1 호스트 쪽 설계 조건 (날씨·시간대)
