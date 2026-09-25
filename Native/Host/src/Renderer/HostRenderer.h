@@ -80,6 +80,8 @@ struct FramePacket
         float speed = 0;
     };
     std::optional<Wind> wind;                      // changed scene wind (INTERFACES 6.4 v1.23: memoryless model, endpoint bound)
+    uint32_t discontinuity = 0;                    // FrameContext::discontinuity (v1.35): kDiscontinuityRestore | Cut
+    uint32_t gpuSimulation = 0;                    // FrameContext::gpuSimulation (v1.35): kGpuSimulation* bits
     std::vector<render::InstanceTransformUpdate> transforms;
     std::vector<SkeletonPose> skeletons;
     std::vector<std::pair<uint32_t, bool>> visibility;
@@ -122,6 +124,10 @@ public:
     uint32_t jointCount(uint32_t skeleton) const;
     void setInstanceVisible(uint32_t instance, bool visible);
     void setSun(const scene::Sun& sun);
+    // History discontinuity and GPU simulation steps of the next queued frame (INTERFACES 5.5.2, v1.35); bits of a
+    // dropped packet are ORed into the next one.
+    void setDiscontinuity(uint32_t flags);
+    void setSimulation(uint32_t gpuSimulation);
     // Sun, atmosphere and (when set) wind of the following frames.
     void setEnvironment(const scene::Sun& sun, const scene::Atmosphere& atmosphere, std::optional<FramePacket::Wind> wind);
     uint64_t queueFrame(FramePacket packet);
@@ -139,6 +145,9 @@ public:
     // the old one's address, so views cached by resource pointer would point at a destroyed texture.
     void setRecreateStandaloneOutput(bool recreate) { m_recreateOutput = recreate; }
     uint32_t outputAddressReuses() const { return m_outputReuses; }
+    // Test hooks: the flags of the last recorded frame, and the GPU scene's CPU mirror of an instance.
+    std::pair<uint32_t, uint32_t> lastFrameFlags() const { return { m_lastDiscontinuity, m_lastGpuSimulation }; }
+    const render::gpu::Instance& gpuInstanceForTest(uint32_t instance) const { return m_gpuScene->instances().at(instance); }
     // Test hook: removes this renderer's D3D12 device (ID3D12Device5::RemoveDevice: this process only, no GPU reset), as a
     // TDR would, so the device-removal path can be exercised.
     void removeDeviceForTest();
@@ -205,6 +214,7 @@ private:
     struct Standalone;
     std::unique_ptr<Standalone> m_standalone;
     bool m_recreateOutput = false;
+    uint32_t m_lastDiscontinuity = 0, m_lastGpuSimulation = 0;  // submission thread (test hook)
     uint32_t m_outputReuses = 0, m_outputRecreations = 0;
 };
 } // namespace unx::host

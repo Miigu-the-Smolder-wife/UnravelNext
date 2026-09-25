@@ -26,8 +26,9 @@ enum UnxResult
                                // them (UnxRendererDestroy still works) and create new ones once the host has a device
 };
 
-#define UNX_ABI_VERSION 5u  // 1: probe; 2: + renderer; 3: + UnxFrameSetSkeletons, UnxSceneSave writes the current state;
-                            // 4: + UnxFrameSetEnvironment; 5: UNX_DEVICE_REMOVED (the process survives a device removal)
+#define UNX_ABI_VERSION 6u  // 1: probe; 2: + renderer; 3: + UnxFrameSetSkeletons, UnxSceneSave writes the current state;
+                            // 4: + UnxFrameSetEnvironment; 5: UNX_DEVICE_REMOVED (the process survives a device removal);
+                            // 6: + UnxFrameSetDiscontinuity, UnxFrameSetSimulation, UnxTransformUpdate::flags (teleport)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -289,9 +290,14 @@ typedef struct UnxFrameDesc
 // Per-frame scene changes (after UnxSceneCommit), collected into the next UnxFrameQueue. Transforms and poses are the
 // values to show in that frame (the host interpolates between committed World ticks; the renderer keeps the previous
 // frame's for motion).
+enum UnxTransformFlags
+{
+    UNX_TRANSFORM_TELEPORT = 1u << 0,  // the instance jumped: no motion this frame (prevObjectToWorld = objectToWorld)
+};
+
 typedef struct UnxTransformUpdate
 {
-    uint32_t instance, reserved;
+    uint32_t instance, flags;   // UnxTransformFlags
     float transform[12];        // object -> world, row-major 3x4: rotation, uniform scale, translation
 } UnxTransformUpdate;
 UNX_API int32_t UNX_CALL UnxFrameSetTransforms(UnxRenderer r, const UnxTransformUpdate* updates, uint32_t count);
@@ -301,6 +307,24 @@ UNX_API int32_t UNX_CALL UnxFrameSetSkeleton(UnxRenderer r, uint32_t skeleton, c
 // skeleton's joint count (12 floats per joint); jointCount is the buffer's total, checked before anything is recorded.
 UNX_API int32_t UNX_CALL UnxFrameSetSkeletons(UnxRenderer r, uint32_t count, const uint32_t* skeletons, const float* jointToModel, uint64_t jointCount);
 UNX_API int32_t UNX_CALL UnxFrameSetInstanceVisible(UnxRenderer r, uint32_t instance, uint32_t visible);
+
+// History discontinuity of the next queued frame (INTERFACES 5.5.2): RESTORE for a World snapshot restore, save load
+// or branch change (every temporal state resets), CUT for a camera cut (view-bound histories reset, world-space caches
+// kept). Set for the first frame after the event; bits of a frame that is never rendered carry into the next one.
+enum UnxDiscontinuity
+{
+    UNX_DISCONTINUITY_RESTORE = 1u << 0,
+    UNX_DISCONTINUITY_CUT = 1u << 1,
+};
+UNX_API int32_t UNX_CALL UnxFrameSetDiscontinuity(UnxRenderer r, uint32_t flags);
+// GPU simulation steps submitted in the next queued frame (FrameContext::gpuSimulation): R's GI spreads its rays by it.
+enum UnxGpuSimulation
+{
+    UNX_GPU_SIMULATION_SOFT = 1u << 0,
+    UNX_GPU_SIMULATION_VFX = 1u << 1,
+    UNX_GPU_SIMULATION_RIGID = 1u << 2,
+};
+UNX_API int32_t UNX_CALL UnxFrameSetSimulation(UnxRenderer r, uint32_t gpuSimulation);
 // Sun of the following frames (time of day): unit direction ground -> sun, lux at the top of the atmosphere.
 UNX_API int32_t UNX_CALL UnxFrameSetSun(UnxRenderer r, const float direction[3], float illuminance, const float color[3], float angularRadius);
 // Sun, atmosphere and wind of the following frames (time of day, weather); the atmosphere track rebuilds its LUTs when

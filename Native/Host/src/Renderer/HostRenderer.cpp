@@ -185,6 +185,22 @@ void HostRenderer::setSun(const scene::Sun& sun)
     m_pending.sun = sun;
 }
 
+void HostRenderer::setDiscontinuity(uint32_t flags)
+{
+    requireCommitted();
+    if (flags & ~(kDiscontinuityRestore | kDiscontinuityCut)) fail("unknown discontinuity bits 0x%x", flags);
+    std::lock_guard lock(m_mutex);
+    m_pending.discontinuity |= flags;
+}
+
+void HostRenderer::setSimulation(uint32_t gpuSimulation)
+{
+    requireCommitted();
+    if (gpuSimulation & ~(kGpuSimulationSoft | kGpuSimulationVfx | kGpuSimulationRigid)) fail("unknown GPU simulation bits 0x%x", gpuSimulation);
+    std::lock_guard lock(m_mutex);
+    m_pending.gpuSimulation |= gpuSimulation;
+}
+
 void HostRenderer::setEnvironment(const scene::Sun& sun, const scene::Atmosphere& atmosphere, std::optional<FramePacket::Wind> wind)
 {
     requireCommitted();
@@ -204,6 +220,8 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.sun = std::move(m_pending.sun);
     packet.atmosphere = std::move(m_pending.atmosphere);
     packet.wind = std::move(m_pending.wind);
+    packet.discontinuity = m_pending.discontinuity;
+    packet.gpuSimulation = m_pending.gpuSimulation;
     packet.transforms = std::move(m_pending.transforms);
     packet.skeletons = std::move(m_pending.skeletons);
     packet.visibility = std::move(m_pending.visibility);
@@ -219,6 +237,8 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
         if (!next.sun) next.sun = dropped.sun;
         if (!next.atmosphere) next.atmosphere = dropped.atmosphere;
         if (!next.wind) next.wind = dropped.wind;
+        next.discontinuity |= dropped.discontinuity;
+        next.gpuSimulation |= dropped.gpuSimulation;
         next.transforms.insert(next.transforms.begin(), dropped.transforms.begin(), dropped.transforms.end());
         next.skeletons.insert(next.skeletons.begin(), dropped.skeletons.begin(), dropped.skeletons.end());
         next.visibility.insert(next.visibility.begin(), dropped.visibility.begin(), dropped.visibility.end());
@@ -238,6 +258,8 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         if (old.sun) carried.sun = old.sun;
         if (old.atmosphere) carried.atmosphere = old.atmosphere;
         if (old.wind) carried.wind = old.wind;
+        carried.discontinuity |= old.discontinuity;
+        carried.gpuSimulation |= old.gpuSimulation;
         carried.transforms.insert(carried.transforms.end(), old.transforms.begin(), old.transforms.end());
         carried.skeletons.insert(carried.skeletons.end(), std::make_move_iterator(old.skeletons.begin()), std::make_move_iterator(old.skeletons.end()));
         carried.visibility.insert(carried.visibility.end(), old.visibility.begin(), old.visibility.end());
@@ -252,6 +274,8 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         if (!p.sun) p.sun = carried.sun;
         if (!p.atmosphere) p.atmosphere = carried.atmosphere;
         if (!p.wind) p.wind = carried.wind;
+        p.discontinuity |= carried.discontinuity;
+        p.gpuSimulation |= carried.gpuSimulation;
         p.transforms.insert(p.transforms.begin(), carried.transforms.begin(), carried.transforms.end());
         p.skeletons.insert(p.skeletons.begin(), std::make_move_iterator(carried.skeletons.begin()), std::make_move_iterator(carried.skeletons.end()));
         p.visibility.insert(p.visibility.begin(), carried.visibility.begin(), carried.visibility.end());
@@ -319,7 +343,13 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.time = p.time;
     fc.deltaTime = p.deltaTime;
     const ViewDesc current = ViewDesc::fromCamera(p.camera, p.width, p.height, {});
-    fc.mainView = ViewDesc::fromCamera(p.camera, p.width, p.height, m_havePrev ? m_prevViewProj : current.viewProj);
+    // Either discontinuity bit: the main view has no previous view (INTERFACES 5.5.2).
+    const bool previous = m_havePrev && p.discontinuity == 0;
+    fc.mainView = ViewDesc::fromCamera(p.camera, p.width, p.height, previous ? m_prevViewProj : current.viewProj);
+    fc.discontinuity = p.discontinuity;
+    fc.gpuSimulation = p.gpuSimulation;
+    m_lastDiscontinuity = p.discontinuity;
+    m_lastGpuSimulation = p.gpuSimulation;
     m_prevViewProj = fc.mainView.viewProj;
     m_havePrev = true;
     m_frameRenderer->record(*m_graph, fc, output);

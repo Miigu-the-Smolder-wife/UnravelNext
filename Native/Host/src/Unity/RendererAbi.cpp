@@ -533,6 +533,8 @@ UNX_API int32_t UNX_CALL UnxFrameSetTransforms(UnxRenderer r, const UnxTransform
         {
             u[i].instance = updates[i].instance;
             u[i].objectToWorld = affine(updates[i].transform);
+            if (updates[i].flags & ~(uint32_t)UNX_TRANSFORM_TELEPORT) fail("transform update %u: unknown flags 0x%x", i, updates[i].flags);
+            u[i].flags = (updates[i].flags & UNX_TRANSFORM_TELEPORT) ? render::kTransformTeleport : 0u;
         }
         find(r)->setTransforms(u);
     });
@@ -574,6 +576,19 @@ UNX_API int32_t UNX_CALL UnxFrameSetSkeletons(UnxRenderer r, uint32_t count, con
 UNX_API int32_t UNX_CALL UnxFrameSetInstanceVisible(UnxRenderer r, uint32_t instance, uint32_t visible)
 {
     return call([&] { find(r)->setInstanceVisible(instance, visible != 0); });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameSetDiscontinuity(UnxRenderer r, uint32_t flags)
+{
+    static_assert(UNX_DISCONTINUITY_RESTORE == render::kDiscontinuityRestore && UNX_DISCONTINUITY_CUT == render::kDiscontinuityCut);
+    return call([&] { find(r)->setDiscontinuity(flags); });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameSetSimulation(UnxRenderer r, uint32_t gpuSimulation)
+{
+    static_assert(UNX_GPU_SIMULATION_SOFT == render::kGpuSimulationSoft && UNX_GPU_SIMULATION_VFX == render::kGpuSimulationVfx &&
+                  UNX_GPU_SIMULATION_RIGID == render::kGpuSimulationRigid);
+    return call([&] { find(r)->setSimulation(gpuSimulation); });
 }
 
 UNX_API int32_t UNX_CALL UnxFrameSetSun(UnxRenderer r, const float direction[3], float illuminance, const float color[3], float angularRadius)
