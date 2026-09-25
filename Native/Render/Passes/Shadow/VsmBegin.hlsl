@@ -19,4 +19,5 @@ void main()
     stats.Store4(80, uint4(0, 0, 0, 0));
     stats.Store4(96, uint4(0, 0, 0, 0));
     stats.Store4(112, uint4(0, 0, 0, 0));
+    [unroll] for (uint i = 0; i < 8; ++i) stats.Store4(128 + i * 16, uint4(0, 0, 0, 0));
 }

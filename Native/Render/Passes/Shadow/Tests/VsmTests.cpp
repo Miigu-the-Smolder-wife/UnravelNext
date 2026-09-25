@@ -479,7 +479,7 @@ int main(int argc, char** argv)
             };
             for (const float step : { 0.3f, 3.0f })
             {
-                uint32_t maxRefreshed = 0, minRefreshed = 1000;
+                uint32_t maxRefreshed = 0, minRefreshed = 1000, maxPages = 0, largestLevel = 0, totalPages = 0;
                 float maxAge = 0;
                 Frame last;
                 for (int i = 0; i < 40; ++i)
@@ -488,6 +488,14 @@ int main(int argc, char** argv)
                     last = runFrame(i == 39);
                     const shadow::VsmStats& st = shadow::stats(tf.trackState);
                     maxRefreshed = std::max(maxRefreshed, st.levelsRefreshed);
+                    if (i >= 8) maxPages = std::max(maxPages, st.pagesRefreshed);  // after the page counts arrive
+                    totalPages = 0;
+                    largestLevel = 0;
+                    for (uint32_t k = 0; k < shadow::kLevels; ++k)
+                    {
+                        totalPages += st.levelPages[k];
+                        largestLevel = std::max(largestLevel, st.levelPages[k]);
+                    }
                     minRefreshed = std::min(minRefreshed, st.levelsRefreshed);
                     maxAge = std::max(maxAge, st.largestBasisAge);
                 }
@@ -495,8 +503,12 @@ int main(int argc, char** argv)
                      "\n", step, dthetaMax, minRefreshed, maxRefreshed, maxAge);
                 report(maxAge <= dthetaMax * 1.0001f, format("moving sun x%.1f: no level older than dthetaMax", step).c_str(), maxAge, dthetaMax);
                 if (step < 1)
-                    report(maxRefreshed <= (uint32_t)std::ceil(shadow::kLevels * step) + 2 && minRefreshed >= 1,
-                           "moving sun x0.3: refreshes spread (levels per frame <= 20 x step + 2)", maxRefreshed, std::ceil(shadow::kLevels * step) + 2);
+                {
+                    // Spread by pages: at most the budget (total x step) plus the level that crosses it.
+                    const double limit = totalPages * step + largestLevel;
+                    logf("  pages refreshed per frame at most %u (requested %u, largest level %u)\n", maxPages, totalPages, largestLevel);
+                    report(maxPages <= limit && minRefreshed >= 1, "moving sun x0.3: refreshes spread by pages (<= total x step + largest level)", maxPages, limit);
+                }
                 else
                     report(minRefreshed == shadow::kLevels, "moving sun x3: every level refreshes every frame", minRefreshed, shadow::kLevels);
                 compare(last, step < 1 ? "moving sun (slow)" : "moving sun (fast)", 2);

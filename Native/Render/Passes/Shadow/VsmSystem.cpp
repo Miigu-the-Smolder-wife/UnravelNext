@@ -21,7 +21,7 @@ namespace
 {
 const char* const kStateKey = "s.vsm";
 constexpr uint32_t kRingSlots = 16, kRingStride = 2048;  // per-frame constants; frames in flight must be < kRingSlots
-constexpr uint32_t kStatsSlots = 4, kStatsBytes = 128;  // VSM stats words (VsmBegin clears them)
+constexpr uint32_t kStatsSlots = 4, kStatsBytes = 256;  // VSM stats words (VsmBegin clears them)
 constexpr uint64_t kOverflowMinWords = 1u << 18;  // 1 MB overflow list at least (INTERFACES 7.3)
 constexpr uint32_t kMetaBytes = 48;  // VsmPageMeta
 constexpr uint32_t kBlockBytes = 341 * 32;  // VSM_BLOCK_ENTRIES x VsmBlock
@@ -460,6 +460,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.latest.airBlocks32 = w[22];
         s.latest.airBlocks8 = w[23];
         s.latest.airTexels = w[24];
+        for (uint32_t k = 0; k < kLevels; ++k) s.latest.levelPages[k] = w[32 + k];
         D3D12_RANGE none{ 0, 0 };
         s.statsReadback->Unmap(0, &none);
     }
@@ -491,7 +492,9 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     // dthetaMax = (pi / 2) tan(theta_s) e (visibility error e = shadow.vsm.sun_refresh_error: a basis dtheta old shifts
     // a shadow by d dtheta under a penumbra of width 2 d tan(theta_s), slope <= 4 / (pi w), so |dV| <= 2 dtheta /
     // (pi tan(theta_s)), independent of d and the level); besides the levels that must refresh, ceil(20 x
-    // (sun change this frame) / dthetaMax) of the oldest refresh every frame so the load spreads evenly.
+    // (sun change this frame) / dthetaMax) of the oldest refresh every frame so the load spreads evenly. The spread is
+    // by pages: the oldest levels refresh until their requested pages (the last completed frame's, per level) reach
+    // total x change / dthetaMax, so a level with many pages does not share its frame with others (P95 = mean).
     const bool sceneChanged = !s.initialized || fc.scene.revision() != s.sceneRevision;
     const float margin = (float)q.number("shadow.vsm.height_margin_m");
     uint32_t invalidateMask = 0;
@@ -509,7 +512,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.levelHMax[k] = hi + margin;
         invalidateMask |= 1u << k;
     };
-    uint32_t refreshed = 0;
+    uint32_t refreshed = 0, pagesRefreshed = 0;
     float oldest = 0;
     if (sceneChanged)
     {
@@ -522,24 +525,39 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     {
         float age[kLevels];
         for (uint32_t k = 0; k < kLevels; ++k) age[k] = angleBetween(s.levelSun[k], sunDir);
-        const uint32_t spread = std::min<uint32_t>(kLevels, (uint32_t)std::ceil(kLevels * sunAngle / std::max(dthetaMax, 1e-12f)));
+        const float share = sunAngle / std::max(dthetaMax, 1e-12f);
+        uint64_t totalPages = 0;
+        for (uint32_t k = 0; k < kLevels; ++k) totalPages += s.latest.levelPages[k];
+        const bool weighted = totalPages > 0;
+        const double pageBudget = weighted ? (double)totalPages * share : (double)kLevels * share;
         uint32_t order[kLevels];
         for (uint32_t k = 0; k < kLevels; ++k) order[k] = k;
         std::sort(order, order + kLevels, [&](uint32_t a, uint32_t b) { return age[a] > age[b]; });
+        double taken = 0;
         for (uint32_t i = 0; i < kLevels; ++i)
         {
             const uint32_t k = order[i];
-            // Must: by the next frame the basis would be older than the bound; spread: the oldest ones.
-            if (age[k] + sunAngle > dthetaMax || i < spread) refresh(k);
+            // Must: by the next frame the basis would be older than the bound; spread: the oldest ones within the budget.
+            const bool must = age[k] + sunAngle > dthetaMax;
+            if (must || taken < pageBudget)
+            {
+                refresh(k);
+                taken += weighted ? s.latest.levelPages[k] : 1.0;
+            }
         }
         for (uint32_t k = 0; k < kLevels; ++k)
         {
-            if (invalidateMask >> k & 1u) ++refreshed;
+            if (invalidateMask >> k & 1u)
+            {
+                ++refreshed;
+                pagesRefreshed += s.latest.levelPages[k];
+            }
             else oldest = std::max(oldest, age[k]);
         }
     }
     s.sun = sunDir;
     s.latest.levelsRefreshed = refreshed;
+    s.latest.pagesRefreshed = pagesRefreshed;
     s.latest.largestBasisAge = oldest;
     s.hMin = s.levelHMin[0];
     s.hMax = s.levelHMax[0];

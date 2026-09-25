@@ -189,6 +189,11 @@ int main(int argc, char** argv)
                 logf("  air shadow walk (last frame): %u slices walked, %u with a mixed page (%.1f %%), block loads 32: %u, 8: %u, texel loads %u (%.1f per mixed slice)\n",
                      st.airSlices, st.airSlicesMixed, 100.0 * st.airSlicesMixed / std::max(st.airSlices, 1u), st.airBlocks32, st.airBlocks8, st.airTexels,
                      (double)st.airTexels / std::max(st.airSlicesMixed, 1u));
+            {
+                std::string pagesLine;
+                for (uint32_t k = 0; k < shadow::kLevels; ++k) pagesLine += format(" L%u:%u", k, st.levelPages[k]);
+                logf("  requested sun pages by level (last frame):%s\n", pagesLine.c_str());
+            }
             // Overflow list (INTERFACES 7.3): the gate requires no tile over the capacity in the measured frames.
             logf("  shadow overflow: lights past the third max %u, words needed max %u, tiles over capacity %u %s\n", overflowLightsMax, overflowWordsMax, overTiles,
                  overTiles ? "FAIL" : "ok");

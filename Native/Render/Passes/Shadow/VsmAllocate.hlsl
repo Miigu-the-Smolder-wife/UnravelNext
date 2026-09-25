@@ -29,6 +29,7 @@ void main(uint slot : SV_DispatchThreadID)
     {
         const uint k = slot / VSM_SLOTS_PER_LEVEL;
         tag = vsmTag(vsmSlotAbsPage(c, slot % VSM_SLOTS_PER_LEVEL, k));
+        stats.InterlockedAdd(128 + k * 4, 1);  // requested pages per level (moving sun: refresh weights)
     }
     else
     {

@@ -66,8 +66,9 @@ struct VsmStats
     // Local lights of the latest recorded frame (CPU): shadow slots in use, raster-active, casting lights without a slot.
     uint32_t localAssigned = 0, localActive = 0, localWithoutSlot = 0;
     // Moving sun (CPU, latest recorded frame): levels whose basis refreshed this frame, largest basis age (rad).
-    uint32_t levelsRefreshed = 0;
+    uint32_t levelsRefreshed = 0, pagesRefreshed = 0;  // pages: the refreshed levels' requested pages (last stats)
     float largestBasisAge = 0;
+    uint32_t levelPages[20] = {};  // requested sun pages per level (GPU, completed frame)
     // Overflow list of the main view (INTERFACES 7.3, v1.20): words the frame's tiles needed, tiles over the capacity
     // (fallback) and their overflow pixels (overage: 0 in steady state), shadow-casting lights past the third over all
     // pixels (N_ovf), and the capacity in words the frame ran with (CPU).
