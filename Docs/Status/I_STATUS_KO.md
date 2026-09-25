@@ -299,6 +299,16 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
   확인: `unx_gate_host_hostdynamic --save-scene <f>`(내용만, 커밋 전 저장) → `unx_gate_host_hostscene --scene <f> --describe`("LOD cuts" 줄).
   R·S가 게임이 끝난 뒤 이 게이트로 refit·VSM 수정을 잰다(사용법을 두 세션에 보냈다).
 
+### 2.2.3 데이터 월드 tick은 50 Hz였다 (2026-09-25 저녁 발견)
+
+- `ProjectSettings/TimeManager.asset`의 Fixed Timestep이 0.02 s라 Unity `FixedUpdate`, 곧 데이터 월드 tick이 50 Hz로 돈다.
+  `NativeDataWorldHost.FixedDeltaTime = 1/60`은 물리 설정에만 쓰이고 런타임에 `Time.fixedDeltaTime`을 맞추지 않는다(편집기 저작 도구만 맞춘다).
+  그래서 Player에서 World는 tick마다 1/60 s를 나아가면서 초당 50번 tick한다. 곧 실시간의 83 % 속도다. 설계와 사용자 결정은 60 Hz다.
+- 이 조건으로 잰 tick·시뮬 측정(2.2.2의 고정 스텝 12.57 ms 등)은 초당 부하를 1/6 적게 본 것이다. 수정 소유는 World·감사(호스트가
+  Initialize에서 `Time.fixedDeltaTime`을 맞춤)와 조율(프로젝트 기본값)이다. 조율 세션에 알렸다.
+- I 결함: 어댑터의 렌더 보간 alpha가 `Host.FixedDeltaTime`으로 나눠서, 0.02 s tick 간격이면 매 tick 마지막 3.3 ms 동안 포즈가 멈췄다.
+  Unity의 실제 fixed step으로 나누게 고쳤다(스테이징, 다음 편집기 차례에 넣는다). 측정기는 `fixedDeltaTime`을 기록하므로 조건에 tick 주파수가 남는다.
+
 ## 2.3 실행 절차 (재현)
 
 ```text
