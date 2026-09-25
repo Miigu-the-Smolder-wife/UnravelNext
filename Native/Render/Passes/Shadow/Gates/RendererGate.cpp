@@ -4,7 +4,7 @@
 // dirty pages and the triangles V rasterised into them (T_sun), page requests and pool use, visibility paths.
 // Needs a build with tracks V, M, S and C (Build.ps1 -Track S -Tracks "V;M;S;C", or -Track all). GPU lock required:
 //   powershell -File Tools/CI/GpuLock.ps1 -Track S -- build/S/bin/unx_gate_shadow_renderergate.exe
-//       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--moving] [--out DIR] [--set k=v]
+//       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--moving] [--sun-deg-per-s R] [--out DIR] [--set k=v]
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h") && defined(UNX_HAS_SCENEGEN)
 #define S_RENDERER_GATE 1
 #include "unx/clusterbuilder/ClusterBuilder.h"
@@ -65,6 +65,7 @@ int main(int argc, char** argv)
         std::string sceneName = "city_block", resolutionArg = "both", out;
         uint32_t frames = 600;
         bool moving = false;
+        float sunDegPerS = 0;  // moving sun (time of day): the sun turns about the horizontal axis normal to it
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -77,6 +78,7 @@ int main(int argc, char** argv)
             else if (a == "--resolution") resolutionArg = next();
             else if (a == "--frames") frames = (uint32_t)std::stoul(next());
             else if (a == "--moving") moving = true;
+            else if (a == "--sun-deg-per-s") sunDegPerS = std::stof(next());
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
             else fail("unknown argument %s", a.c_str());
@@ -93,7 +95,9 @@ int main(int argc, char** argv)
                 found = true;
             }
         if (!found) fail("unknown scene %s", sceneName.c_str());
-        const scene::Scene s = scenegen::generate(request);
+        scene::Scene s = scenegen::generate(request);  // not const: --sun-deg-per-s turns its sun (GpuScene keeps &s)
+        const float3 sun0 = normalize(s.sun.direction);
+        const float3 sunAxis = normalize(cross(sun0, float3{ 0, 1, 0 }));
         ClusterData clusters = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality));
         logf("scene %s (%s), %zu instances, %zu clusters, camera %s\n", sceneName.c_str(), scene::contentHash(s).substr(0, 16).c_str(), s.instances.size(),
              clusters.clusters.size(), moving ? "path 0 (moving)" : "0 (static)");
@@ -111,7 +115,7 @@ int main(int argc, char** argv)
             shadow::setKeepFroxels(renderer.trackState(), true);  // no consumer of the volume yet (M): measure it anyway
             HarnessOptions options;
             options.frames = frames;
-            options.label = "S " + sceneName + (moving ? " moving " : " static ") + rs;
+            options.label = "S " + sceneName + (moving ? " moving " : " static ") + (sunDegPerS != 0 ? "sun " + std::to_string(sunDegPerS) + " deg/s " : "") + rs;
             if (!out.empty()) options.outputDirectory = out;
             float4x4 prev = ViewDesc::fromCamera(cameraAt(s, moving, 0), res.width, res.height, {}).viewProj;
             // Dirty pages and T_sun averaged over the measured frames (the counters lag the frame by two).
@@ -124,6 +128,12 @@ int main(int argc, char** argv)
                 fc.time = frame / 60.0;
                 fc.deltaTime = 1.0f / 60;
                 fc.mainView = ViewDesc::fromCamera(cameraAt(s, moving, fc.time), rr.width, rr.height, prev);
+                if (sunDegPerS != 0)
+                {
+                    // Rodrigues rotation of the initial sun direction (the axis is normal to it).
+                    const float a = sunDegPerS * 0.01745329252f * (float)fc.time, ca = std::cos(a), sa = std::sin(a);
+                    s.sun.direction = normalize(sun0 * ca + cross(sunAxis, sun0) * sa);
+                }
                 prev = fc.mainView.viewProj;
                 const TextureRef output = g.createTexture({ "gate output", rr.width, rr.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
                 renderer.record(g, fc, output);
