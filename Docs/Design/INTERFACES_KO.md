@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.10, 2026-09-25)
+# UnravelNext 인터페이스 (v1.11, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -177,6 +177,7 @@ void RenderGraph::addPass(std::string_view name, QueueType, SetupFn setup, Execu
 `FrameRenderer::record`가 설계서 4.1 순서로 부른다(큐 하나, 순서는 선언 의존성으로만 의미가 있다):
 
 ```text
+M prepareScene(fc)                  장면 텍스처 적재·재질 레코드 게시 (어떤 프레임 상수보다 먼저, v1.11)
 S atmosphere(fc)                    하늘·aerial LUT (태양·날씨 변경 시)
 R accelerationStructures(fc)        정적/동적 TLAS, BLAS refit
 V visibility(fc, main)              컬링 2단계, 대역 분류, 대역 A vis buffer, HiZ, coverage 층(B/C)
@@ -234,6 +235,7 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 | `Passes/Shadow/ShadowVisibility.hlsli` | S | `float shadowSlot(uint packed, uint slot)`(7.3 해독) · `uint shadowSlotOfLight(FroxelSrvs, uint2 pixel, float linearDepth, uint lightIndex)`(1~3 또는 0xFFFFFFFF) · `struct ShadowSrvs { uint pool, pageTable, lights, pad; };` `float shadowVisibilityDirect(ShadowSrvs, uint lightIndex, float3 worldPos, float3 normal)`(슬롯 초과 광원용 느린 경로) |
 | `Passes/GI/GiCache.hlsli` | R | `struct GiSrvs { uint cache, hash, pad0, pad1; };` `float3 giCacheIrradiance(GiSrvs, float3 worldPos, float3 normal)` · `float3 giCacheRadiance(GiSrvs, float3 worldPos, float3 dir, float coneHalfAngle)` |
 | `Passes/GI/ScreenProbes.hlsli` | R | `struct ProbeSrvs { uint probes, occlusion, pad0, pad1; };` `float4 screenProbeIrradiance(ProbeSrvs, uint2 pixel, float3 normal, float linearDepth)`(rgb 조도, a 근거리 가림 0~1) · `float3 screenProbeRadiance(ProbeSrvs, uint2 pixel, float3 normal, float linearDepth, float3 dir, float coneHalfAngle)`(v1.2: 4프로브 보간, 반각 coneHalfAngle 원뿔로 prefilter한 입사 복사휘도, nit) |
+| `Passes/Material/MaterialTextures.hlsli` | M (v1.11) | 게시된 텍스처 형식(6.3) · `MATERIAL_TEXTURE_*` 비트 · `float4 materialBaseColorGrad(GpuMaterial, float2 uv, float2 duvdx, float2 duvdy)` · `float4 materialBaseColorLevel(GpuMaterial, float2 uv, float lod)`(선형 rgb, a = coverage, 텍스처 없으면 1; clamp 비트에 따라 `g_anisoClamp`/`g_anisoWrap`). V의 알파 테스트(`AlphaTest.hlsli`)가 이것으로 읽는다 |
 | `Passes/Reflection/Reflection.hlsli` | R | `float4 reflectionRadiance(uint reflectionSrv, uint2 pixel)`: rgb = 반사 lobe로 정규화 적분한 입사 복사휘도(G/M 경로 결과, M이 방향 알베도 항을 곱한다), a = 1이면 유효 · `float reflectionLobeHalfAngle(float perceptualRoughness, float NoV)`(v1.2: 설계서 2.6의 θ_r,narrow, M과 R이 K/G/M을 같은 식으로 가른다). **K 경로(v1.2)**: `a == 0`인 본 뷰 픽셀은 M의 셰이딩 커널이 `screenProbeRadiance(probes, pixel, n, depth, reflect(-v, n), reflectionLobeHalfAngle(r, NoV))`에 재질 모델의 스페큘러 방향 알베도 항을 곱해 평가한다. 보조 뷰(평면 반사)는 `giCacheRadiance` |
 
 ## 6. 장면 데이터
@@ -247,7 +249,7 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 ### 6.3 GPU 장면 (`GpuScene.h`, `GpuSceneLayout.h` ↔ `Scene.hlsli`)
 `GpuScene::upload(scene)`가 레코드를 채운다(코어 소유). 크기 고정: Instance 144 B, Mesh 80 B, Submesh 16 B, Vertex 32 B(v1 비압축; `loadVertex`로만 읽으므로 V/M이 압축해도 인터페이스 변경 아님), SkinVertex 16 B, Cluster 64 B, LodLevel 16 B, Material 80 B, Light 80 B, VisibleCluster 8 B. 클러스터 계층은 V의 빌더(`Tools/ClusterBuilder`)가 `GpuScene::setClusters(ClusterData)`로 넣는다. `GpuScene::clusters()`는 그 CPU 사본(메시별 `clusterOffset/Count`, `lodLevelOffset/Count`, `lodLevelClusters`), `GpuScene::srv(name)`은 클러스터 버퍼와 V 내부 버퍼(`ClusterData::named`)의 bindless SRV다(v1.1). R은 `GpuScene::buffer("vertices" | "indices" | "clusters" | "clusterVertexIndices" | "clusterTriangles" | "lodLevels" | "lodLevelClusters" | ...)`와 메시의 원본 삼각형(`indexOffset`, `triangleCount`) 또는 LOD 레벨의 클러스터로 BLAS를 만든다.
 
-**재질 텍스처(v1.10, M 요청 `20260925_M_material_textures.md`)**: M의 텍스처 시스템이 `GpuScene::setMaterialTextures(std::vector<gpu::MaterialTextures>)`로 재질마다 bindless SRV `{baseColor, normal, roughMetal, emissive, occlusion}`와 clamp 비트(`MaterialTextureBit`)를 게시한다. 코어는 재질 버퍼를 다시 올린다(새 SRV). 바뀐 재질의 `revision`과 장면 `revision()`을 올린다. SRV 수명은 M이 소유한다. `gpu::Material::textureClamp`(이전 `pad0`)의 비트 1 = clamp 주소(`g_anisoClamp`), 0 = wrap. 텍스처 형식(알파 coverage 보존 밉 등)은 M의 공개 헤더 `Passes/Material/MaterialTextures.hlsli`(5.6)가 정한다. 프레임 상수에 재질 버퍼 SRV가 들어가므로, 게시는 그 프레임의 어떤 프레임 상수보다 먼저 한다. M의 진입점 `tracks::prepareScene(fc)`에서 하고, `FrameRenderer::record`가 맨 처음 부른다(진입점 선언은 M이 정의를 커밋한 뒤 코어가 넣는다. 빌드가 끊기지 않게 하려는 순서다).
+**재질 텍스처(v1.10, M 요청 `20260925_M_material_textures.md`)**: M의 텍스처 시스템이 `GpuScene::setMaterialTextures(std::vector<gpu::MaterialTextures>)`로 재질마다 bindless SRV `{baseColor, normal, roughMetal, emissive, occlusion}`와 clamp 비트(`MaterialTextureBit`)를 게시한다. 코어는 재질 버퍼를 다시 올린다(새 SRV). 바뀐 재질의 `revision`과 장면 `revision()`을 올린다. SRV 수명은 M이 소유한다. `gpu::Material::textureClamp`(이전 `pad0`)의 비트 1 = clamp 주소(`g_anisoClamp`), 0 = wrap. 텍스처 형식(알파 coverage 보존 밉 등)은 M의 공개 헤더 `Passes/Material/MaterialTextures.hlsli`(5.6)가 정한다. 프레임 상수에 재질 버퍼 SRV가 들어가므로, 게시는 그 프레임의 어떤 프레임 상수보다 먼저 한다. M의 진입점 `tracks::prepareScene(fc)`에서 하고, `FrameRenderer::record`가 맨 처음 부른다(v1.11). `FramePassContext`를 직접 만드는 테스트 프레임은 `prepareScene`을 한 번 부르면 텍스처가 게시된다.
 
 **프레임 갱신(v1.8, I 요청)**: 호스트는 렌더 프레임 f를 기록하기 전에 `updateTransforms(f, {instance, objectToWorld}[])`, `updateSkeleton(f, skeleton, jointToModel[])`, `setInstanceVisible(instance, bool)`을 부른다. `FrameRenderer::record`가 맨 처음 `flushUpdates`로 반영한다. 반영은 그래픽 큐의 산포 커널(`Passes/Common/SceneUpdate`)이 프레임 그래프보다 먼저 하고, 다른 큐는 그 fence를 기다린다. 뜻:
 - `prevObjectToWorld` = **직전 렌더 프레임**의 objectToWorld, 이전 본 팔레트 = 직전 렌더 프레임의 팔레트. 이번 프레임에 안 바뀐 인스턴스 중 직전 프레임에 바뀐 것은 prev = current로 맞춘다(멈추면 움직임 0).
@@ -373,3 +375,6 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **I 요청 `20260925_I_unity_queue_device.md` 반영**: `DeviceOptions::externalDevice`, `DeviceOptions::externalGraphicsQueue`, `Queue::setExecuteHook`(4.1). 둘 다 null이면 기존 동작이다. 트랙 코드는 바뀌지 않는다.
 - v1.10 (2026-09-25):
   - **M 요청 `20260925_M_material_textures.md` 반영(코어 부분)**: `gpu::MaterialTextures`, `MaterialTextureBit`, `gpu::Material::textureClamp`(이전 `pad0`, HLSL `GpuMaterial.textureClamp`), `GpuScene::setMaterialTextures`, `GpuScene::materials()`, `GpuScene::buffer("materials")`, 정적 샘플러 s5 `g_anisoClamp`(aniso 16, clamp). 단위 테스트 `gpu_scene_material_textures`. 진입점 `tracks::prepareScene`은 M이 자기 모듈에 정의를 커밋한 뒤 `Tracks.h` 선언과 `FrameRenderer` 호출을 넣는다.
+- v1.11 (2026-09-25):
+  - **M 요청 `20260925_M_material_textures.md` 마무리**: 진입점 `tracks::prepareScene(fc)`(`Tracks.h`, M 구현 89e0817, 꺼진 M은 코어 빈 구현), `FrameRenderer::record`가 어떤 프레임 상수보다 먼저 부른다(5.2 순서 표 첫 줄). 5.6 표에 `Passes/Material/MaterialTextures.hlsli`. V의 알파 테스트가 `materialBaseColorGrad`(텍스처 주소 방식·발자국 필터·coverage 보존 알파 밉)로 읽는다. 알파 테스트 재질이 이제 실제로 잘린다.
+  - **렌더 그래프 앨리어싱(S 신고)**: 과도 자원 배치를 세 풀로 나눴다. 깊이-스텐실 텍스처, 렌더 타깃 텍스처, 나머지가 각자 풀 안에서만 메모리를 공유한다. 깊이 버퍼가 쓰던 메모리에 놓인 3D UAV 텍스처(S 공기 볼륨)가 쓰기를 전부 잃었다 [실측]. 배리어는 API 규칙대로였다. 선행 점유자 비활성화 배리어(쓰기 플러시)를 추가했다. 진단 스위치 `UNX_GRAPH_DUMP=1`(플랜·배리어·배치·수명 로그)과 `UNX_GRAPH_NO_ALIAS=1`을 넣었다. 서술자 이중 해제를 검출한다. `RenderGraph::sharesMemory`(테스트용). 단위 테스트 `graph_depth_memory_not_shared`, `graph_aliased_buffers_keep_their_writes`.

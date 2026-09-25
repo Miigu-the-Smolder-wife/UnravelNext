@@ -16,6 +16,9 @@ void visibility(FramePassContext& fc, ViewResources& view);
 void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request);
 
 // ---- M: material and shading (M session) - Passes/Material, Passes/Shading
+// Called first in every frame, before any frame constants of the frame exist: uploads scene textures when the scene
+// changed and publishes them in the material records (GpuScene::setMaterialTextures, INTERFACES_KO.md 6.3).
+void prepareScene(FramePassContext& fc);
 void materialResolve(FramePassContext& fc, ViewResources& view);  // writes view.gbuffer
 void shading(FramePassContext& fc, ViewResources& view);          // writes view.color (+ edge/coverage composite)
 

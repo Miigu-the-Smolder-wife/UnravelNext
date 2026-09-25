@@ -191,14 +191,16 @@ void refreshScene(State& s, FramePassContext& fc)
         if (!nodes[node].leaf)
             for (uint32_t c = 0; c < nodes[node].count; ++c) stack.push_back({ nodes[node].first + c, depth + 1 });
     }
-    // Alpha-tested materials are cut by their baseColor texture on the GPU (AlphaTest.hlsli); where the GPU scene has no
-    // texture yet (no texture upload), the material covers its whole triangles. Said once, so results carry it.
+    // Alpha-tested materials are cut by their baseColor texture on the GPU (AlphaTest.hlsli). A texture the GPU scene
+    // does not carry (M's prepareScene not run: a build without M, or a context built without FrameRenderer) leaves the
+    // material covering its whole triangles; said once, so results carry it.
     if (const scene::Scene* src = fc.scene.source())
     {
         uint32_t untextured = 0;
-        for (const auto& m : src->materials)
-            if (m.alphaCutoff > 0 && m.baseColorTexture != UINT32_MAX) ++untextured;
-        if (untextured) logf("V: %u alpha-tested materials have a baseColor texture that the GPU scene does not upload yet: drawn uncut\n", untextured);
+        const auto& gpuMaterials = fc.scene.materials();
+        for (size_t i = 0; i < src->materials.size() && i < gpuMaterials.size(); ++i)
+            if (src->materials[i].alphaCutoff > 0 && src->materials[i].baseColorTexture != UINT32_MAX && gpuMaterials[i].baseColorTexture == gpu::kNone) ++untextured;
+        if (untextured) logf("V: %u alpha-tested materials have a baseColor texture that is not in the GPU scene (M.prepareScene not run): drawn uncut\n", untextured);
     }
     s.traversalLevels = deepest;
     s.sceneRevision = fc.scene.revision();

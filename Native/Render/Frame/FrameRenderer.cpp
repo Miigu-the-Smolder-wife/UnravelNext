@@ -143,6 +143,8 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& fram
     FrameServices services;
     FramePassContext fc{ m_device, graph, m_shaders, m_quality, m_scene, frame, resources, services,
                          [this, &frame](const ViewDesc& v) { return allocateFrameConstants(frame, v); }, &m_trackState, m_framesInFlight };
+    // Scene textures into the material records before any frame constants (they carry the material buffer's SRV).
+    tracks::prepareScene(fc);
     services.rasterizeDepth = [](FramePassContext& c, const DepthRasterRequest& r) { tracks::rasterizeDepth(c, r); };
     services.renderView = [](FramePassContext& c, const ViewDesc& v) {
         if (v.kind == gpu::ViewKind::Main) fail("renderView is for secondary views");
