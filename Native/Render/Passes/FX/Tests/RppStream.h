@@ -18,6 +18,8 @@
 #include "../Stream/src/VfxStreamCpu.h"
 
 #include <algorithm>
+#include <iterator>
+#include <chrono>
 #include <functional>
 #include <cmath>
 #include <cstdint>
@@ -41,12 +43,18 @@ struct RppConfig
     uint32_t bodies = 1728;
     double anchorShift[3] = { 0, 0, 0 };  // diagnostic: the anchor moved by this much (world stays the same)
     bool delta = true;            // emitter table as NV_STREAM_EMITTER_DELTA packets (rows that changed since they were last sent)
-    bool childNoise = true;       // diagnostic switch: noise on the cascade children's programs       // rigid bodies with 4 collision surfaces each (RPP: 6,912 surfaces), moving and rotating
+    bool childNoise = true;       // diagnostic switch: noise on the cascade children's programs
+    // RPP outputs (WORLD_VFX 3.3/3.5: "ribbon 256, 국소 볼륨 16") as their own emitters beside the 128 x 4096 roots:
+    // 256 ribbons of `ribbonPoints` live points and 16 local volumes of `volumeParticles` live particles (grid 2^3 cells
+    // each: 16 x 2048 x 8 = 262,144 medium cells). false: the older layout (ribbon/volume programs on 16 of the roots).
+    bool rppOutputs = true;
+    uint32_t ribbons = 256, ribbonPoints = 256, volumes = 16, volumeParticles = 2048;
 };
 
 class RppStream
 {
 public:
+    static constexpr uint32_t kRibbonProgram = 22, kVolumeProgram = 23;  // with RppConfig::rppOutputs
     explicit RppStream(const RppConfig& c) : m_c(c)
     {
         m_anchor[0] = 1000.0 + c.anchorShift[0]; m_anchor[1] = 0.0 + c.anchorShift[1]; m_anchor[2] = -2000.0 + c.anchorShift[2];
@@ -68,11 +76,31 @@ public:
             r.transport = c.features && e % 16 == 7;
             r.rebase = c.features && e % 16 == 9;
             m_rows.push_back(r);
+            m_live.push_back(e);
         }
         if (c.features && c.emitters > 64)
         {
             m_rows[0].program = 16;  // death rule -> C1 cascade
             m_rows[64].program = 16;
+        }
+        if (c.rppOutputs)
+        {
+            auto addRow = [&](uint32_t program, double live, double x, double y, double z) {
+                const uint32_t e = (uint32_t)m_rows.size();
+                Row r;
+                r.active = true;
+                r.program = program;
+                r.rate = live / c.lifetime;
+                r.duration = 1e30;
+                r.origin[0] = m_anchor[0] - c.anchorShift[0] + x;
+                r.origin[1] = m_anchor[1] - c.anchorShift[1] + y;
+                r.origin[2] = m_anchor[2] - c.anchorShift[2] + z;
+                r.seed = 0x9E3779B9u * (e + 1);
+                m_rows.push_back(r);
+                m_live.push_back(e);
+            };
+            for (uint32_t i = 0; i < c.ribbons; ++i) addRow(kRibbonProgram, c.ribbonPoints, 1.5 + 6.0 * (i % 16), 1.0, 1.5 + 3.0 * (i / 16));
+            for (uint32_t i = 0; i < c.volumes; ++i) addRow(kVolumeProgram, c.volumeParticles, 3.0 + 24.0 * (i % 4), 3.0, 3.0 + 12.0 * (i / 4));
         }
     }
 
@@ -84,6 +112,8 @@ public:
     uint32_t childRowsCreated() const { return m_childRows; }
     uint32_t maxDepth() const { return m_maxDepth; }
     uint32_t capacityChanges() const { return m_capacityChanges; }
+    const double* sectionMs() const { return m_sectionMs; }  // accumulated: 1 children, 2 rows, 3 deaths, 4 births, 5 cascade,
+                                                             // 6 totals, 7 packet, 8 row ends
     uint32_t sentBlocks() const { return m_sentBlocks; }  // emitter blocks of the last packet (delta)
 
     // Packet of the next tick. 'previous' = the readback events of the previous tick (the CPU authority reads the
@@ -91,6 +121,12 @@ public:
     std::vector<uint8_t> next(const std::vector<NV_StreamEvent>* previous)
     {
         ++m_tick;
+        auto t0 = std::chrono::steady_clock::now();
+        auto mark = [&](int k) {  // section costs (diagnostic: the fixture stands in for the VFX authority)
+            const auto t1 = std::chrono::steady_clock::now();
+            m_sectionMs[k] += std::chrono::duration<double, std::milli>(t1 - t0).count();
+            t0 = t1;
+        };
         const bool first = m_tick == 1;
         const double dt = m_c.dt, tEnd = m_tick * dt, tStart = tEnd - dt;
 
@@ -113,8 +149,15 @@ public:
         }
         m_created.clear();
 
-        // Rows of this tick: rebase, kill.
-        for (uint32_t e = 0; e < (uint32_t)m_rows.size(); ++e)
+        mark(1);
+        // Rows of this tick: rebase, kill. Visited: the live rows and the rows that ended last tick (whose per-tick fields
+        // are reset once more before their inactive block is sent; a row inactive for longer is unchanged). Both lists are
+        // ascending, so every order-dependent result (event slots, output bases) equals a walk over all rows.
+        std::vector<uint32_t> visit;
+        visit.reserve(m_live.size() + m_ended.size());
+        std::merge(m_live.begin(), m_live.end(), m_ended.begin(), m_ended.end(), std::back_inserter(visit));
+        visit.erase(std::unique(visit.begin(), visit.end()), visit.end());
+        for (uint32_t e : visit)
         {
             Row& r = m_rows[e];
             r.rebaseNow = 0;
@@ -129,9 +172,10 @@ public:
         m_events.clear();
         uint32_t aliveBefore = 0;
 
+        mark(2);
         // Deaths of existing particles (depth 0): births whose age at tEnd reaches the lifetime (ages decrease with the
         // birth number, so the dead births are a prefix).
-        for (uint32_t e = 0; e < (uint32_t)m_rows.size(); ++e)
+        for (uint32_t e : visit)
         {
             Row& r = m_rows[e];
             r.dyingBirth = r.deathBirth;
@@ -160,8 +204,9 @@ public:
             while (!r.batches.empty() && r.batches.front().first + r.batches.front().count <= death) r.batches.pop_front();
         }
 
+        mark(3);
         // Depth 0 births of the root rows (scheduled; row 3 as explicit records).
-        for (uint32_t e = 0; e < (uint32_t)m_rows.size(); ++e)
+        for (uint32_t e : m_live)
         {
             Row& r = m_rows[e];
             if (!r.active || r.childRow || r.killed) continue;
@@ -202,6 +247,7 @@ public:
             r.age += dt;
         }
 
+        mark(4);
         // Children: events of depth d-1 -> child rows with burst records of depth d.
         size_t scan = 0;
         for (uint32_t d = 1; d <= NV_STREAM_MAX_DEPTH && m_c.features; ++d)
@@ -235,18 +281,22 @@ public:
                 c.deathBirth = expired;
                 c.dyingBirth = 0;
                 m_created.push_back(row);
+                m_live.push_back(row);
                 ++m_childRows;
                 m_maxDepth = std::max(m_maxDepth, d);
             }
             scan = end;
         }
 
+        std::sort(m_live.begin(), m_live.end());
+        mark(5);
         // Totals.
         uint32_t alive = 0, collisionCapacity = 0, slotBirths = (uint32_t)explicitBirths.size(), ribbonPoints = 0, mediumCells = 0;
         for (uint32_t d = 0; d <= NV_STREAM_MAX_DEPTH; ++d)
             for (const auto& s : spawns[d]) slotBirths += s.count - s.expired;
-        for (auto& r : m_rows)
+        for (uint32_t e : m_live)
         {
+            Row& r = m_rows[e];
             if (!r.active) continue;
             alive += r.nextBirth - r.deathBirth;
             // output bases: ribbon points and medium cells of the live births [death_birth, next_birth)
@@ -268,6 +318,7 @@ public:
         }
         m_eventSlots = (uint32_t)m_events.size();
 
+        mark(6);
         // Packet. Emitter table: whole on the first packet (RESET), else the rows whose block differs from the one the GPU
         // holds (the last sent block with its per-tick fields read as absent, NativeVfxStream.h NV_STREAM_EMITTER_DELTA).
         std::vector<NV_StreamEmitter> blocks;
@@ -275,11 +326,15 @@ public:
         const bool delta = m_c.delta && !first;
         if (delta)
         {
-            // a row inactive now and at its last send keeps its block (flags 0, no per-tick field): only the others are
-            // built and compared
+            // a row inactive now and at its last send keeps its block (flags 0, no per-tick field): only the live rows and
+            // the rows that ended last tick are built and compared (ascending, as the stream requires)
             const uint32_t sentRows = (uint32_t)m_sent.size();
             m_sent.resize(m_rows.size());
-            for (uint32_t e = 0; e < (uint32_t)m_rows.size(); ++e)
+            std::vector<uint32_t> candidates;
+            candidates.reserve(m_live.size() + m_ended.size());
+            std::merge(m_live.begin(), m_live.end(), m_ended.begin(), m_ended.end(), std::back_inserter(candidates));
+            candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+            for (uint32_t e : candidates)
             {
                 if (e < sentRows && !m_rows[e].active && !(m_sent[e].flags & NV_STREAM_EMITTER_ACTIVE)) continue;
                 const NV_StreamEmitter record = emitterRecord(e, dt);
@@ -346,6 +401,10 @@ public:
         h.medium_cells = mediumCells;
 
         std::vector<uint8_t> packet(sizeof(NV_StreamHeader));
+        packet.reserve(sizeof(NV_StreamHeader) + 16 * 16 + blocks.size() * sizeof(NV_StreamEmitter) + blockRows.size() * 4 + all.size() * sizeof(NV_StreamSpawn) +
+                       explicitBirths.size() * sizeof(NV_StreamExplicitBirth) + m_fields.size() * sizeof(NV_StreamField) + m_world.size() * sizeof(NV_StreamWorldField) +
+                       (first ? m_programs.size() * sizeof(NV_StreamProgram) + m_keys.size() * sizeof(NV_StreamCurveKey) + m_surfaces.size() * sizeof(NV_StreamSurface) : 0) +
+                       bodies.size() * sizeof(NV_StreamBody) + dynamicRows.size() * sizeof(NV_StreamSurface));
         auto section = [&](const void* data, size_t bytes) -> uint64_t {
             if (!bytes) return 0;
             packet.resize((packet.size() + 15) & ~size_t(15));
@@ -353,10 +412,10 @@ public:
             packet.insert(packet.end(), (const uint8_t*)data, (const uint8_t*)data + bytes);
             return at;
         };
-        std::vector<NV_StreamProgram> programs;
-        for (const auto& p : m_programs) programs.push_back(p.record);
         if (first)
         {
+            std::vector<NV_StreamProgram> programs;
+            for (const auto& p : m_programs) programs.push_back(p.record);
             h.programs = section(programs.data(), programs.size() * sizeof(NV_StreamProgram));
             h.curve_keys = section(m_keys.data(), m_keys.size() * sizeof(NV_StreamCurveKey));
         }
@@ -373,8 +432,11 @@ public:
         h.bytes = packet.size();
         std::memcpy(packet.data(), &h, sizeof h);
 
+        mark(7);
         // Rows: a killed row ends; a child row whose last particle died is free from the next tick.
-        for (uint32_t e = 0; e < (uint32_t)m_rows.size(); ++e)
+        m_ended.clear();
+        size_t kept = 0;
+        for (uint32_t e : m_live)
         {
             Row& r = m_rows[e];
             if (r.killed) r.active = false;
@@ -383,7 +445,11 @@ public:
                 r.active = false;
                 freeRow(e);
             }
+            if (r.active) m_live[kept++] = e;
+            else m_ended.push_back(e);
         }
+        m_live.resize(kept);
+        mark(8);
         return packet;
     }
 
@@ -565,12 +631,12 @@ private:
             r.columns = r.rows = 1;
             r.medium_grid = 1;
             r.ribbon_break = 3.4e38f;
-            if (p == 13)  // ribbon trails: strips break at 1 m
+            if (p == 13 && !m_c.rppOutputs)  // ribbon trails: strips break at 1 m
             {
                 r.output = 2;
                 r.ribbon_normal[1] = 1; r.ribbon_uv = 1; r.ribbon_break = 1.0f;
             }
-            if (p == 14)  // volume puffs: 2^3 medium cells per particle
+            if (p == 14 && !m_c.rppOutputs)  // volume puffs: 2^3 medium cells per particle
             {
                 r.output = 3;
                 r.medium_grid = 2;
@@ -606,6 +672,22 @@ private:
         child(0.004, 20, 1, NV_STREAM_NONE, 0);            // 19 C3
         child(0.5, NV_STREAM_NONE, 0, NV_STREAM_NONE, 0);  // 20 C4
         child(0.3, NV_STREAM_NONE, 0, NV_STREAM_NONE, 0);  // 21 CB
+        if (m_c.rppOutputs)
+        {
+            Program ribbon = m_programs[13];  // 22: ribbon trails, strips break at 1 m
+            ribbon.record.output = 2;
+            ribbon.record.ribbon_normal[1] = 1; ribbon.record.ribbon_uv = 1; ribbon.record.ribbon_break = 1.0f;
+            m_programs.push_back(ribbon);
+            Program volume = m_programs[14];  // 23: local volume puffs, 2^3 medium cells per particle
+            NV_StreamProgram& v = volume.record;
+            v.output = 3;
+            v.medium_grid = 2;
+            v.medium_absorption[0] = v.medium_absorption[1] = v.medium_absorption[2] = 0.02f;
+            v.medium_scattering[0] = v.medium_scattering[1] = v.medium_scattering[2] = 0.3f;
+            v.medium_emission[0] = 0.1f;
+            v.medium_phase = 0.4f;
+            m_programs.push_back(volume);
+        }
 
         // 16 context fields (the reference measurement's), anchor space
         for (uint32_t f = 0; f < m_c.fields; ++f)
@@ -739,6 +821,9 @@ private:
     uint64_t m_tick = 0;
     std::vector<NV_StreamEmitter> m_sent;  // whole table as the GPU holds it (last sent block of each row)
     std::vector<uint32_t> m_freeRows;      // inactive child rows (min-heap)
+    std::vector<uint32_t> m_live;          // active rows, ascending after the cascade
+    std::vector<uint32_t> m_ended;         // rows that ended last tick (their inactive block is sent once)
+    double m_sectionMs[9] = {};      // inactive child rows (min-heap)
     uint32_t m_sentBlocks = 0;
     uint32_t m_capacity = 0, m_aliveAfter = 0, m_eventSlots = 0, m_childRows = 0, m_maxDepth = 0, m_capacityChanges = 0;
     std::vector<Program> m_programs;

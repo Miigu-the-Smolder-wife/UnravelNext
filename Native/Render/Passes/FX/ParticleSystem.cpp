@@ -200,8 +200,7 @@ struct ParticleSystem::Impl
     Buf dynamicSurfaces{ "fx.dynamicSurfaces", sizeof(NV_StreamSurface) };
     Buf bodies{ "fx.bodies", sizeof(NV_StreamBody) }, tickSurfaces{ "fx.tickSurfaces", sizeof(NV_StreamSurface) };
     Buf ribbonPoints{ "fx.ribbonPoints", 32 }, ribbonLinks{ "fx.ribbonLinks", 4 }, ribbonVertices{ "fx.ribbonVertices", 32 }, mediumCells{ "fx.mediumCells", 16 };  // NV_MediumCell rows (96 B) viewed as float4 (FxCells writes whole rows of a group)
-    Buf ribbonRanges{ "fx.ribbonRanges", 16 }, ribbonScanA{ "fx.ribbonScanA", 4 }, ribbonScanB{ "fx.ribbonScanB", 32 }, ribbonRunStart{ "fx.ribbonRunStart", 4 },
-        ribbonTangents{ "fx.ribbonTangents", 16 }, ribbonTotalsA{ "fx.ribbonTotalsA", 4 }, ribbonTotalsB{ "fx.ribbonTotalsB", 32 };
+    Buf ribbonRanges{ "fx.ribbonRanges", 16 }, ribbonRunStart{ "fx.ribbonRunStart", 4 }, ribbonTangents{ "fx.ribbonTangents", 16 };
     std::vector<uint32_t> programOutput;  // output kind per program (the last NV_STREAM_PROGRAMS table)
     Buf surfaceBoxes{ "fx.surfaceBoxes", 16 };
     Buf overflowRecords{ "fx.overflowRecords", kOverflowRecordBytes };  // IMPACT_OVERFLOW inputs (diagnostic, readState "overflow")
@@ -511,7 +510,7 @@ void ParticleSystem::record(FramePassContext& fc)
                 ribbonRanges.push_back({ x.output_base, count, x.program, 0 });
             }
             std::sort(ribbonRanges.begin(), ribbonRanges.end(), [](const RibbonRange& a, const RibbonRange& b) { return a.base < b.base; });
-            if (h.ribbon_points > 1024u * 1024u) fail("FX particles: %u ribbon points exceed the strip scan's 1M", h.ribbon_points);
+            if (ribbonRanges.size() > 65535u) fail("FX particles: %zu ribbon ranges exceed one dispatch (65535 groups)", ribbonRanges.size());
         }
         const uint32_t ribbonN = ribbonRanges.empty() ? 0 : h.ribbon_points;
         // volume ranges (active NV_VOLUME rows, by first cell) for the thread-per-cell pass (FxCells.hlsl)
@@ -534,12 +533,8 @@ void ParticleSystem::record(FramePassContext& fc)
             if (volumeRanges[k].first < volumeRanges[k - 1].first + volumeRanges[k - 1].cells) fail("FX particles: overlapping volume cell ranges at %u", volumeRanges[k].first);
         m.volumeRanges.ensure(device, volumeRanges.size() * 16);
         m.ribbonRanges.ensure(device, ribbonRanges.size() * 16);
-        m.ribbonScanA.ensure(device, (uint64_t)ribbonN * 4);
-        m.ribbonScanB.ensure(device, (uint64_t)ribbonN * 32);
         m.ribbonRunStart.ensure(device, (uint64_t)ribbonN * 4);
         m.ribbonTangents.ensure(device, (uint64_t)ribbonN * 16);
-        m.ribbonTotalsA.ensure(device, 1024 * 4);
-        m.ribbonTotalsB.ensure(device, 1024 * 32);
         m.bodies.ensure(device, (uint64_t)h.body_count * sizeof(NV_StreamBody));
         m.restore.ensure(device, (uint64_t)h.restore_count * sizeof(NV_StreamParticle));
         m.slotBase.ensure(device, (uint64_t)h.spawn_count * 4);
@@ -636,8 +631,8 @@ void ParticleSystem::record(FramePassContext& fc)
         std::vector<Buf*> state = { &m.posAge[0], &m.posAge[1], &m.velocity[0], &m.velocity[1], &m.meta, &m.alive, &m.aliveList, &m.deadList, &m.dyingList, &m.blockSums, &m.keyBySlot,
                                     &m.spawnedSlots, &m.keysA, &m.valsA, &m.keysB, &m.valsB, &m.hist, &m.dynamic[cur], &m.counters,
                                     &m.report, &slot.events, &m.tickSurfaces, &m.gridCount, &m.gridStart, &m.gridFill, &m.gridEntries, &m.gridLarge,
-                                    &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.mediumCells, &m.ribbonScanA, &m.ribbonScanB,
-                                    &m.ribbonRunStart, &m.ribbonTangents, &m.ribbonTotalsA, &m.ribbonTotalsB, &m.volumeList, &m.gridBlocks, &m.surfaceBoxes, &m.overflowRecords,
+                                    &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.mediumCells,
+                                    &m.ribbonRunStart, &m.ribbonTangents, &m.volumeList, &m.gridBlocks, &m.surfaceBoxes, &m.overflowRecords,
                                     &m.emitterTable, &m.emitterStamp };
         std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitterUpdates, &m.emitterUpdateRows, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
                                      &m.restore, &m.slotBase, &m.bodies, &m.dynamicSurfaces, &m.ribbonRanges, &m.volumeRanges };
@@ -884,25 +879,20 @@ void ParticleSystem::record(FramePassContext& fc)
         // medium cells of the listed volume particles
         if (volumeCellEnd && !(m_experimentDisable & 1u)) dispatch("fx.particles.cells", "Passes/FX/FxCells", {}, groups(volumeCellEnd, 64));
 
-        // ribbon strips: parallel segmented scan over the points the integrate kernel wrote (FxRibbon.hlsl)
+        // ribbon strips: one group per ribbon range walks it in chunks with carried scans (FxRibbon.hlsl)
         if (ribbonN && !(m_experimentDisable & 2u))
         {
             Impl* mi = &m;
-            const uint32_t rangeCount = (uint32_t)ribbonRanges.size(), blocks = groups(ribbonN, 1024);
-            for (uint32_t step = 0; step < 8; ++step)
-            {
-                ID3D12PipelineState* pso = shaders.compute(format("Passes/FX/FxRibbon.STEP%u", step));
-                const uint32_t groupCount = (step == 2 || step == 6) ? 1 : blocks;
-                g.addPass(format("fx.particles.ribbon.s%u", step), QueueType::Graphics, declare, [=](PassContext& c) {
-                    const std::array<uint32_t, 12> p = { c.uav(mi->ribbonPoints.ref), c.uav(mi->ribbonLinks.ref), c.uav(mi->ribbonVertices.ref), c.srv(mi->ribbonRanges.ref),
-                                                         ribbonN, rangeCount, c.uav(mi->ribbonScanA.ref), c.uav(mi->ribbonScanB.ref),
-                                                         c.uav(mi->ribbonRunStart.ref), c.uav(mi->ribbonTangents.ref), c.uav(mi->ribbonTotalsA.ref), c.uav(mi->ribbonTotalsB.ref) };
-                    c.cmd->SetPipelineState(pso);
-                    c.bindFrameConstants(constants);
-                    c.computeConstants(p.data(), 12);
-                    c.cmd->Dispatch(groupCount, 1, 1);
-                });
-            }
+            const uint32_t rangeCount = (uint32_t)ribbonRanges.size();
+            ID3D12PipelineState* pso = shaders.compute("Passes/FX/FxRibbon");
+            g.addPass("fx.particles.ribbon", QueueType::Graphics, declare, [=](PassContext& c) {
+                const std::array<uint32_t, 8> p = { c.uav(mi->ribbonPoints.ref), c.uav(mi->ribbonLinks.ref), c.uav(mi->ribbonVertices.ref), c.srv(mi->ribbonRanges.ref),
+                                                    c.uav(mi->ribbonRunStart.ref), c.uav(mi->ribbonTangents.ref), rangeCount, 0 };
+                c.cmd->SetPipelineState(pso);
+                c.bindFrameConstants(constants);
+                c.computeConstants(p.data(), 8);
+                c.cmd->Dispatch(rangeCount, 1, 1);
+            });
         }
 
         // sort of the alive list by the 24-bit key

@@ -76,14 +76,14 @@ std::string sha(const std::vector<uint8_t>& bytes)
 }
 
 // 1. byte-identical stream copies of the pinned NativeVfx commit (the copies are updated together with this pin)
-constexpr const char* kStreamCommit = "768e7e16";
+constexpr const char* kStreamCommit = "c0893ca1";
 void checkStreamCopies(bool strict)
 {
     const fs::path mine = fs::path(UNX_SOURCE_DIR) / "Native/Render/Passes/FX/Stream";
     const fs::path original = fs::path(UNX_SOURCE_DIR) / "../Unravel/Native/NativeVfx";
     struct Pin { const char* file; const char* sha; };
     const Pin pins[] = { { "include/NativeVfxStream.h", "937fa6a7095b01c39f10abb4f4b38030c4989d6765b10e89f7ea1f7b1cef3c3b" },
-                         { "shaders/VfxParticleMath.hlsli", "f738443189ed9ac746548ca3c988128a5d0fcf53c21c7b2a6d486bdabe4796e1" },
+                         { "shaders/VfxParticleMath.hlsli", "9cb0510801e282e8811b2b8a83403e41ca24e1015dc4015c193b72561320a3c6" },
                          { "src/VfxStreamCpu.h", "d1379b26278bb407995aa1290848285cdeebd67f5b80355659beb1f3e4c23780" } };
     for (const Pin& pin : pins)
     {
@@ -500,7 +500,9 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                     const uint32_t slot = at<uint32_t>(aliveList, i), row = at<uint32_t>(meta, slot * 2), birth = at<uint32_t>(meta, slot * 2 + 1);
                     const NV_StreamEmitter& e = table[row];
                     const float4 pa = at<float4>(posAge, slot);
-                    if (e.program == 13)
+                    const NV_StreamProgram& outProgram = reinterpret_cast<const NV_StreamProgram*>(
+                        firstPacket.data() + reinterpret_cast<const NV_StreamHeader*>(firstPacket.data())->programs)[e.program];
+                    if (outProgram.output == 2)
                     {
                         const uint32_t k = e.output_base + (birth - e.death_birth);
                         FX_CHECK(k < h.ribbon_points, "tick %u: ribbon point %u outside %u", t, k, h.ribbon_points);
@@ -512,10 +514,11 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                         FX_CHECK(std::isfinite(v[0]) && std::isfinite(v[3]) && std::isfinite(v[6]), "tick %u: ribbon vertex %u not finite", t, k);
                         ++checkedPoints;
                     }
-                    if (e.program == 14)
+                    if (outProgram.output == 3)
                     {
-                        const uint32_t k = e.output_base + (birth - e.death_birth) * 8;
-                        for (uint32_t c = 0; c < 8; ++c)
+                        const uint32_t g = outProgram.medium_grid, cellsPer = g * g * g;
+                        const uint32_t k = e.output_base + (birth - e.death_birth) * cellsPer;
+                        for (uint32_t c = 0; c < cellsPer; ++c)
                         {
                             float cell[24];
                             std::memcpy(cell, cellsBuf.data() + ((size_t)k + c) * 96, 96);
@@ -566,9 +569,31 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                 FX_LOG("tick %u: ribbon strips vs sequential double walk: links exact, vertex/uv error max %.3g", t, worstRibbon);
                 FX_CHECK(worstRibbon <= 1e-5, "tick %u: ribbon vertex error %.3g exceeds 1e-5", t, worstRibbon);
             }
-            // 4. state hash
+            // 4. state hash of the defined state: every slot's alive flag, the live slots' identity and state (this tick and
+            // the previous tick, in alive-list order), and each list up to its count. Bytes past a count (a list's stale
+            // tail, a dead slot's state) are undefined: they depend on the memory a buffer received and are never read.
             Sha256 hs;
-            for (const auto* b : { &posAge, &velocity, &meta, &alive, &aliveList, &deadList, &dying, &keys, &vals, &posAgePrev }) hs.update(b->data(), b->size());
+            std::string parts;
+            std::vector<uint8_t> live[4];
+            for (uint32_t i = 0; i < nAlive; ++i)
+            {
+                const uint32_t s = at<uint32_t>(aliveList, i);
+                const std::vector<uint8_t>* src[4] = { &posAge, &velocity, &meta, &posAgePrev };
+                const size_t stride[4] = { 16, 16, 8, 16 };
+                for (int k = 0; k < 4; ++k) live[k].insert(live[k].end(), src[k]->data() + s * stride[k], src[k]->data() + (s + 1) * stride[k]);
+            }
+            auto prefix = [](const std::vector<uint8_t>& b, uint32_t n) { return std::vector<uint8_t>(b.begin(), b.begin() + std::min<size_t>(b.size(), (size_t)n * 4)); };
+            const std::vector<uint8_t> parts2[] = { live[0], live[1], live[2], prefix(alive, cap), prefix(aliveList, nAlive), prefix(deadList, nDead),
+                                                    prefix(dying, nDying), prefix(keys, nAlive), prefix(vals, nAlive), live[3] };
+            for (const auto& b : parts2)
+            {
+                hs.update(b.data(), b.size());
+                Sha256 one;
+                one.update(b.data(), b.size());
+                const auto d = one.finish();
+                parts += format(" %02x%02x", d[0], d[1]);  // per-part fingerprint (posAge velocity meta alive aliveList dead dying keys vals prev)
+            }
+            if (o.determinism) FX_LOG("tick %u: buffer fingerprints%s", t, parts.c_str());
             std::vector<NV_StreamEvent> ev = rb.events;
             std::sort(ev.begin() + h.event_slots, ev.end(), [](const NV_StreamEvent& a, const NV_StreamEvent& b) { return std::tie(a.emitter, a.birth) < std::tie(b.emitter, b.birth); });
             hs.update(ev.data(), ev.size() * sizeof(NV_StreamEvent));
@@ -671,6 +696,7 @@ int main(int argc, char** argv)
     try
     {
         Options o;
+        uint32_t ribbonPoints = 0;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -693,10 +719,20 @@ int main(int argc, char** argv)
             else if (a == "--no-child-noise") o.rpp.childNoise = false;
             else if (a == "--fields") o.rpp.fields = (uint32_t)std::stoul(next());
             else if (a == "--overflow-dump") o.overflowDump = next();
+            else if (a == "--ribbon-points") ribbonPoints = (uint32_t)std::stoul(next());
             else if (a == "--watch") { g_watchEmitter = (uint32_t)std::stoul(next()); g_watchBirth = (uint32_t)std::stoul(next()); }
             else if (a == "--anchor-shift") { o.rpp.anchorShift[0] = std::stod(next()); o.rpp.anchorShift[1] = std::stod(next()); o.rpp.anchorShift[2] = std::stod(next()); }
             else fail("unknown option %s", a.c_str());
         }
+        // a reduced root population (WARP, short runs) reduces the ribbon points and volume particles in the same ratio;
+        // the structure (256 ribbons, 16 volumes) stays
+        if (o.rpp.particles < 524288u)
+        {
+            const double f = o.rpp.particles / 524288.0;
+            o.rpp.ribbonPoints = std::max<uint32_t>(8u, (uint32_t)(o.rpp.ribbonPoints * f));
+            o.rpp.volumeParticles = std::max<uint32_t>(8u, (uint32_t)(o.rpp.volumeParticles * f));
+        }
+        if (ribbonPoints) o.rpp.ribbonPoints = ribbonPoints;  // e.g. long ribbons (several strip chunks) at a small root count
         checkStreamCopies(o.strictCopies);
         if (!o.replay.empty())
         {

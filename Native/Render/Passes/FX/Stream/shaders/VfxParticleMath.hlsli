@@ -303,6 +303,7 @@ bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(N
     nv_real3 local = start, displacement = move, velocity = s.velocity;
     nv_real remaining = h;             // seconds of the interval not yet swept
     uint carrier = 0xffffffffu;        // surface the particle moves with since its last contact
+    nv_real3 lastNormal = nv_make3(NV_R(0), NV_R(0), NV_R(0)); uint creases = 0u;
     bool complete = true;
     NV_LOOP for (uint bounce = 0u; bounce <= 4u; ++bounce) {
         nv_real earliest = NV_R(2); uint selected = 0xffffffffu; nv_real3 normal = nv_make3(NV_R(0), NV_R(0), NV_R(0));
@@ -334,11 +335,46 @@ bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(N
         NvSurface hitSurface = nv_surface_local(NV_SURFACE(selected), origin);
         nv_real3 contactLocal = local + (offset + path * earliest);
         nv_real3 surfaceVelocity = hitSurface.velocity + cross(hitSurface.angular, contactLocal - hitSurface.origin);
-        velocity = surfaceVelocity + nv_bounce(velocity - surfaceVelocity, normal, m.restitution, m.friction);
+        nv_real3 rest = path * (NV_R(1) - earliest), bounced = nv_bounce(rest, normal, m.restitution, m.friction);
+        if (first.count > 0u && dot(bounced, lastNormal) < NV_R(0)) {
+            // Facing surfaces (a gap or crease: bouncing off this surface would drive
+            // the particle back into the last struck one). For restitution < 1 the
+            // limit of the bounces between them is no motion across either, each in
+            // its own frame. With s1, s2 the two surface velocities at the contact:
+            // v.n1 = s1.n1 and v.n2 = s2.n2, the crease component free (friction on
+            // it). Nearly parallel surfaces share one normal, and the particle moves
+            // with the midplane (a squeeze has no other answer). A third facing
+            // contact (a corner, or a closing gap bringing a surface back) holds it
+            // on this surface. The rest of the path is relative to this surface: it
+            // follows the other surface's motion across n1 over the remaining time.
+            NvSurface previous = nv_surface_local(NV_SURFACE(carrier), origin);
+            nv_real3 s1 = previous.velocity + cross(previous.angular, contactLocal - previous.origin), s2 = surfaceVelocity;
+            nv_real tau = remaining * (NV_R(1) - earliest), g = dot(lastNormal, normal);
+            nv_real3 k = cross(lastNormal, normal); nv_real kk = dot(k, k);
+            nv_real3 vrel = velocity - s2;
+            if (creases == 0u && kk > NV_R(0.01)) {
+                k = k * (NV_R(1) / sqrt(kk));
+                nv_real r1 = dot(s1, lastNormal), r2 = dot(s2, normal);
+                nv_real3 across = lastNormal * ((r1 - g * r2) / kk) + normal * ((r2 - g * r1) / kk);
+                velocity = across + k * (dot(s2, k) + dot(vrel, k) * (NV_R(1) - m.friction));
+                nv_real p1 = dot(s1 - s2, lastNormal) * tau;
+                rest = lastNormal * (p1 / kk) + normal * (-g * p1 / kk) + k * (dot(rest, k) * (NV_R(1) - m.friction));
+            } else if (creases == 0u) {
+                nv_real mid = NV_R(0.5) * (dot(s2, normal) + dot(s1, normal));
+                nv_real3 tangent = vrel - normal * dot(vrel, normal);
+                velocity = s2 - normal * dot(s2, normal) + normal * mid + tangent * (NV_R(1) - m.friction);
+                rest = (rest - normal * dot(rest, normal)) * (NV_R(1) - m.friction) + normal * ((mid - dot(s2, normal)) * tau);
+            } else { velocity = s2; rest = nv_make3(NV_R(0), NV_R(0), NV_R(0)); }
+            displacement = rest;
+            creases = creases + 1u;
+        } else {
+            velocity = surfaceVelocity + nv_bounce(velocity - surfaceVelocity, normal, m.restitution, m.friction);
+            // The rest of the path, relative to the struck surface, reflects off it.
+            displacement = bounced;
+        }
         first.count = first.count + 1u;
         if (first.count == 1u) { first.contact = contactLocal; first.velocity = velocity; first.normal = normal; first.fraction = earliest; }
-        // The rest of the path, relative to the struck surface, reflects off it.
-        displacement = nv_bounce(path * (NV_R(1) - earliest), normal, m.restitution, m.friction);
+        lastNormal = normal;
         local = contactLocal + normal * m.separation;
         remaining = remaining * (NV_R(1) - earliest);
         carrier = selected;
@@ -388,7 +424,7 @@ struct NvBirthShape {
 };
 nv_real3 nv_unit_sphere_point(NV_INOUT(uint) rng, nv_real radius) {
     nv_real z = NV_R(2) * nv_next01(rng) - NV_R(1), theta = NV_R(6.283185307179586) * nv_next01(rng), r = radius * pow(nv_next01(rng), NV_R(1.0 / 3.0));
-    nv_real xy = sqrt(max(NV_R(0), NV_R(1) - z * z));
+    nv_real xy = sqrt(max(NV_R(0), (NV_R(1) - z) * (NV_R(1) + z))); // 1 - z*z cancels near the poles; both factors are exact
     return nv_make3(r * xy * cos(theta), r * xy * sin(theta), r * z);
 }
 // Local offset and velocity of a generated birth (before source frames and inheritance).
@@ -410,8 +446,10 @@ void nv_birth_local(NvBirthShape b, uint rng, NV_OUT(nv_real3) offset, NV_OUT(nv
         nv_real3 u = abs(n.z) < NV_R(0.9) ? nv_make3(-n.y, n.x, NV_R(0)) : nv_make3(NV_R(0), -n.z, n.y);
         u = u * (NV_R(1) / length(u));
         nv_real3 v = cross(n, u);
-        nv_real z = NV_R(1) - nv_next01(rng) * (NV_R(1) - b.cone_cos);
-        nv_real radial = sqrt(max(NV_R(0), NV_R(1) - z * z)), theta = NV_R(6.283185307179586) * nv_next01(rng);
+        // w = 1 - z is formed directly: 1 - z*z would cancel for narrow cones
+        // (radial error eps / radial), while w * (2 - w) keeps relative precision.
+        nv_real w = nv_next01(rng) * (NV_R(1) - b.cone_cos), z = NV_R(1) - w;
+        nv_real radial = sqrt(max(NV_R(0), w * (NV_R(2) - w))), theta = NV_R(6.283185307179586) * nv_next01(rng);
         velocity = velocity + (n * z + (u * cos(theta) + v * sin(theta)) * radial) * speed;
     }
     velocity = (velocity + b.velocity) * b.speed;

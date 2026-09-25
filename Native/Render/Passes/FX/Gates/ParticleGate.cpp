@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -46,7 +47,13 @@ int main(int argc, char** argv)
     {
         std::string load = "both", resolution = "both", out = std::string(UNX_SOURCE_DIR) + "/Results/FX/ParticleGate";
         uint32_t frames = 600;
-        bool delta = true;  // emitter table as NV_STREAM_EMITTER_DELTA packets (--no-delta: whole table every tick, A/B)
+        bool delta = true;
+        bool passTimestamps = true;  // --no-pass-timestamps: frame timing only (the per-pass queries serialise the queue)  // emitter table as NV_STREAM_EMITTER_DELTA packets (--no-delta: whole table every tick, A/B)
+        // --packets DIR: submit a recorded stream (ParticleTests --record: packet_NNNN.bin) open loop. The GPU tick is then
+        // timed without the stand-in authority's CPU in the loop (a closed-loop features run leaves the GPU idle while the
+        // fixture builds the next packet, and its clocks drop). The module is deterministic on one GPU and driver, so the
+        // recorded packets stay consistent with the events this run produces. Runs out of packets = failure (never loops).
+        std::string packets;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -58,6 +65,8 @@ int main(int argc, char** argv)
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
             else if (a == "--no-delta") delta = false;
+            else if (a == "--no-pass-timestamps") passTimestamps = false;
+            else if (a == "--packets") packets = next();
             else fail("unknown option %s", a.c_str());
         }
         requireGpuLock("fx.particles");
@@ -71,6 +80,7 @@ int main(int argc, char** argv)
 
         std::vector<std::string> loads, resolutions;
         if (load == "both") loads = { "core", "features" }; else loads = { load };
+        if (!packets.empty()) loads = { "recorded" };
         if (resolution == "both") resolutions = { "4K", "1440p" }; else resolutions = { resolution };
         for (const std::string& l : loads)
             for (const std::string& rn : resolutions)
@@ -92,13 +102,15 @@ int main(int argc, char** argv)
                 std::vector<NV_StreamEvent> previous;
                 std::vector<double> cpuStream, cpuSubmit, cpuRecord, packetKB, blocks;
                 uint64_t lastTick = 0, lastStream = 0, lastGeneration = 0, overflowTicks = 0, firstOverflow = 0;
+                uint32_t tableRows = 0;
 
                 HarnessOptions ho;
                 ho.frames = frames;
-                ho.label = "fx_particles_" + l;
+                ho.passTimestamps = passTimestamps;
+                ho.label = "fx_particles_" + l + (passTimestamps ? "" : "_nopass");
                 ho.outputDirectory = out;
                 const HarnessResult r = harness.run(res, ho, [&](RenderGraph& graph, const Resolution&, uint64_t f) {
-                    if (cfg.features && lastTick)
+                    if ((cfg.features || !packets.empty()) && lastTick)
                     {
                         const fx::TickReadback rb = ps.readback(lastStream, lastGeneration, lastTick);
                         // IMPACT_OVERFLOW (bit 1) is a reported condition of the stream (counted); every other bit is a failure
@@ -111,7 +123,14 @@ int main(int argc, char** argv)
                         previous = rb.events;
                     }
                     const auto c0 = std::chrono::steady_clock::now();
-                    const std::vector<uint8_t> packet = stream.next(lastTick ? &previous : nullptr);
+                    std::vector<uint8_t> packet;
+                    if (packets.empty()) packet = stream.next(lastTick ? &previous : nullptr);
+                    else
+                    {
+                        const std::filesystem::path file = std::filesystem::path(packets) / format("packet_%04llu.bin", (unsigned long long)(lastTick + 1));
+                        if (!std::filesystem::exists(file)) fail("--packets: %s is missing (the recording is shorter than warm-up + %u frames)", file.string().c_str(), frames);
+                        packet = readBinaryFile(file);
+                    }
                     const auto c1 = std::chrono::steady_clock::now();
                     const NV_StreamHeader& h = *reinterpret_cast<const NV_StreamHeader*>(packet.data());
                     lastTick = h.tick;
@@ -119,6 +138,7 @@ int main(int argc, char** argv)
                     lastGeneration = h.generation;
                     packetKB.push_back(packet.size() / 1024.0);
                     blocks.push_back(h.emitter_count);
+                    tableRows = h.emitter_table;
                     ps.submit(packet.data(), packet.size());
                     const auto c2 = std::chrono::steady_clock::now();
                     frame.frameIndex = f;
@@ -134,7 +154,13 @@ int main(int argc, char** argv)
                 auto median = [](std::vector<double> v) { if (v.empty()) return 0.0; std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
                 std::printf("FX_PARTICLE_GATE_CPU load=%s resolution=%s delta=%d fixture_ms=%.3f submit_ms=%.3f record_ms=%.3f packet_kb=%.1f emitter_blocks=%.0f of %u rows "
                             "(medians; the fixture stands in for the VFX authority)\n",
-                            l.c_str(), rn.c_str(), delta ? 1 : 0, median(cpuStream), median(cpuSubmit), median(cpuRecord), median(packetKB), median(blocks), stream.rows());
+                            l.c_str(), rn.c_str(), delta ? 1 : 0, median(cpuStream), median(cpuSubmit), median(cpuRecord), median(packetKB), median(blocks), tableRows);
+                {
+                    const double* sm = stream.sectionMs();
+                    const double n = (double)std::max<uint64_t>(lastTick, 1);
+                    std::printf("FX_PARTICLE_GATE_FIXTURE load=%s ms/tick: children %.3f rows %.3f deaths %.3f births %.3f cascade %.3f totals %.3f packet %.3f ends %.3f\n",
+                                l.c_str(), sm[1] / n, sm[2] / n, sm[3] / n, sm[4] / n, sm[5] / n, sm[6] / n, sm[7] / n, sm[8] / n);
+                }
                 if (cfg.features)
                     std::printf("FX_PARTICLE_GATE_OVERFLOW load=%s resolution=%s ticks_with_impact_overflow=%llu first_tick=%llu (reported condition, NV_STREAM_STATUS_IMPACT_OVERFLOW)\n",
                                 l.c_str(), rn.c_str(), (unsigned long long)overflowTicks, (unsigned long long)firstOverflow);
@@ -142,7 +168,7 @@ int main(int argc, char** argv)
                 const fx::TickReadback last = ps.readback(lastStream, lastGeneration, lastTick);
                 std::printf("FX_PARTICLE_GATE load=%s resolution=%s alive=%u status=0x%x collisions=%u rows=%u tick=%llu gpu_frame_ms_median=%.4f p95=%.4f p99=%.4f "
                             "passes_ms: upload=%.4f emitters=%.4f integrate=%.4f spawn=%.4f child=%.4f compact=%.4f sort=%.4f grid=%.4f other=%.4f gate=%s\n",
-                            l.c_str(), rn.c_str(), last.counters.alive, last.counters.status, last.counters.collision_events, stream.rows(),
+                            l.c_str(), rn.c_str(), last.counters.alive, last.counters.status, last.counters.collision_events, tableRows,
                             (unsigned long long)lastTick, r.gpuFrameMs.median, r.gpuFrameMs.p95, r.gpuFrameMs.p99, passSum(r, "fx.particles.upload"),
                             passSum(r, "fx.particles.emitters"), passSum(r, "fx.particles.integrate"),
                             passSum(r, "fx.particles.spawn"), passSum(r, "fx.particles.child"), passSum(r, "fx.particles.compact"), passSum(r, "fx.particles.sort"),

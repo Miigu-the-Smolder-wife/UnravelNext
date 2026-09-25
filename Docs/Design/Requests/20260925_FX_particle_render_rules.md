@@ -5,15 +5,19 @@ WORLD_VFX_DESIGN_KO.md 8절 3("FX 패스의 셀 키 함수 정의, 슬롯 단위
 품질 정의는 아직 없으므로 **렌더 패스 구현 전에 조율 세션(Fable 설계)에 넘긴다.** 이 파일은 시뮬레이션 쪽이 지금 정해야 하는
 부분만 제안한다.
 
-## 1. 렌더 레코드 (32 B, tick마다 한 벌, 두 벌 유지)
+## 1. 렌더 입력 = 상태 쌍 (개정 2026-09-25 저녁: 별도 32 B 레코드 없음)
+
+시뮬레이션 상태가 tick 패리티로 두 벌이다(`posAge[2]`, `velocity[2]`: integrate가 지난 tick 출력을 읽어 이번 tick 출력을 다른 벌에
+쓴다). 렌더러는 두 벌을 그대로 읽는다. 복사 레코드(슬롯당 32 B 쓰기, 96 B 간격의 부분 섹터 쓰기)는 없앴다 [실측: integrate 쓰기 32 B/슬롯 감소].
 
 ```text
-float3 position   이미터 원점 기준 (m)
-float  age        tick 끝의 나이 (s)
-float3 velocity   tick 끝의 속도 (m/s)
-uint   emitter    이미터 슬롯
+posAge[cur][s]   float3 position (이미터 원점 기준, m), float age (tick 끝, s)
+velocity[cur][s] float3 velocity (m/s), 0
+posAge[prev][s], velocity[prev][s]   지난 tick 끝 (repack 때 슬롯과 같이 옮겨짐)
+meta[s]          uint emitter, uint birth
 ```
 
+- 새로 태어난 슬롯은 prev 쪽에 스폰 레코드(나이 부호 비트 = −elapsed)가 들어 있으므로 "tick n에 태어남"은 prev 나이의 부호로도 판별된다.
 - 설계서 3.1의 레코드(위치·크기·색·이미터·정렬 키)에서 **크기·색을 빼고 속도·나이를 넣는다.** 크기·색·알파·회전·uv·flipbook은 모두
   (프로그램, 이미터 매개변수, 나이, 수명)의 순수 함수다. 렌더 프레임 시각의 나이로 렌더러가 평가하면 tick 값의 선형 보간보다
   정확하다(곡선의 꺾임이 tick 사이에 있어도 그대로 나온다). 매개변수는 그 tick의 이미터 표에서 읽는다("다음 tick부터 적용" 계약 유지).
