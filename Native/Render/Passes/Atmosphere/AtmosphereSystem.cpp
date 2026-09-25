@@ -173,7 +173,7 @@ void record(FramePassContext& fc)
                       const uint32_t k[4] = { c.srv(params), c.srv(tlut), c.uav(mlut), 0 };
                       c.cmd->SetPipelineState(pm);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(std::max(groups(p.multiScatterSize[0], 8), 2u), groups(p.multiScatterSize[1], 8), 1);
+                      c.cmd->Dispatch(p.multiScatterSize[0], p.multiScatterSize[1], 1);  // one group per texel (MultiScatter.hlsl)
                   });
         s.lutPending = false;
         ++s.stats.lutBuilds;

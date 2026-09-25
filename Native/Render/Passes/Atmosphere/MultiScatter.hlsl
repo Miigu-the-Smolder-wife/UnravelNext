@@ -4,28 +4,35 @@
 // sphere of directions close the series Psi_ms = L2 / (1 - f_ms). 1 - f_ms is accumulated directly as the absorbed
 // and escaped energy (better conditioned than 1 - f_ms when the medium is thick). The ground is Lambertian.
 // Row size.y of the output texture holds a copy of AtmosphereParams (9 float4) for the public lookups.
+// One group per texel: its 256 threads take the directions in turn and the sums are reduced in a fixed order
+// (deterministic); the per-direction integral is the same for any group size.
 // P[0].x params, P[0].y transmittance LUT SRV, P[0].z output UAV (RWTexture2D<float4>, height = size.y + 1)
+// Dispatch: size.x x size.y groups.
 #include "Bindless.hlsli"
 #include "Passes/Atmosphere/AtmosphereCommon.hlsli"
 
-[numthreads(8, 8, 1)]
-void main(uint2 id : SV_DispatchThreadID)
+#define MS_THREADS 256u
+groupshared float3 gs_second[MS_THREADS];
+groupshared float3 gs_loss[MS_THREADS];
+
+[numthreads(MS_THREADS, 1, 1)]
+void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
 {
     const AtmosphereParams a = airLoadParams(P[0].x);
     RWTexture2D<float4> output = ResourceDescriptorHeap[P[0].z];
-    if (id.y == 0 && id.x < 9)
+    const uint2 id = gid.xy;
+    if (all(id == 0) && lane < 9)
     {
         ByteAddressBuffer raw = ResourceDescriptorHeap[P[0].x];
-        output[uint2(id.x, a.multiScatterSize.y)] = asfloat(raw.Load4(id.x * 16));
+        output[uint2(lane, a.multiScatterSize.y)] = asfloat(raw.Load4(lane * 16));
     }
-    if (any(id >= a.multiScatterSize)) return;
     const uint lut = P[0].y;
     const float h = float(id.y) / (a.multiScatterSize.y - 1) * (a.topRadius - a.bottomRadius);
     const float mu = float(id.x) / (a.multiScatterSize.x - 1) * 2 - 1;
     const float3 origin = float3(0, h, 0), sun = float3(sqrt(saturate(1 - mu * mu)), mu, 0);
     const uint directions = a.multiScatterDirections, steps = a.multiScatterSteps;
     float3 second = 0, loss = 0;
-    [loop] for (uint n = 0; n < directions; ++n)
+    [loop] for (uint n = lane; n < directions; n += MS_THREADS)
     {
         // Fibonacci sphere: uniform solid angle, deterministic.
         const float z = 1 - 2 * (n + 0.5) / directions, phi = n * 2.399963229728653;
@@ -55,6 +62,18 @@ void main(uint2 id : SV_DispatchThreadID)
         else
             loss += T;
     }
+    gs_second[lane] = second;
+    gs_loss[lane] = loss;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint width = MS_THREADS / 2; width > 0; width >>= 1)
+    {
+        if (lane < width)
+        {
+            gs_second[lane] += gs_second[lane + width];
+            gs_loss[lane] += gs_loss[lane + width];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
     // second / directions = mean over the sphere; L2 = that / 4 pi (isotropic phase); 1 - f_ms = loss / directions.
-    output[id] = float4(second / (4 * ATMO_PI * loss), 0);
+    if (lane == 0) output[id] = float4(gs_second[0] / (4 * ATMO_PI * gs_loss[0]), 0);
 }
