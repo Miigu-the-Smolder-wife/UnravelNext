@@ -14,8 +14,10 @@ void main()
     const uint4 header = rays.Load4(0);  // allocated, capacity, shadow rays, jobs
     if (P[0].z == 0)
     {
-        args.Store3(P[1].x, uint3((min(header.x, header.y) + 63) / 64, 1, 1));
-        args.Store3(P[1].y, uint3((header.w + 63) / 64, 1, 1));
+        // Groups of 64 in two dimensions (at most 65535 per dimension): the kernels index group.y * 65535 + group.x.
+        const uint shade = (min(header.x, header.y) + 63) / 64, combine = (header.w + 63) / 64;
+        args.Store3(P[1].x, uint3(min(shade, 65535u), (shade + 65534) / 65535, 1));
+        args.Store3(P[1].y, uint3(min(combine, 65535u), (combine + 65534) / 65535, 1));
     }
     else
         args.Store3(P[1].z, uint3(header.z, 1, 1));

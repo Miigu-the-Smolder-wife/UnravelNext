@@ -7,8 +7,9 @@
 #include "Passes/Reflection/ReflectionRay.hlsli"
 
 [numthreads(64, 1, 1)]
-void main(uint job : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
+    const uint job = (group.y * 65535u + group.x) * 64u + lane;  // 2D dispatch (ReflectionRayArgs)
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[5].y];
     if (job >= rays.Load(12)) return;
     RWStructuredBuffer<uint2> results = ResourceDescriptorHeap[P[0].y];

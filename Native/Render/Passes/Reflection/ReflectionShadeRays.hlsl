@@ -11,8 +11,9 @@
 uint reflPackHalf2(float a, float b) { return f32tof16(a) | (f32tof16(b) << 16); }
 
 [numthreads(64, 1, 1)]
-void main(uint slot : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
+    const uint slot = (group.y * 65535u + group.x) * 64u + lane;  // 2D dispatch (ReflectionRayArgs)
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[5].y];
     const uint capacity = rays.Load(4);
     if (slot >= min(rays.Load(0), capacity)) return;
