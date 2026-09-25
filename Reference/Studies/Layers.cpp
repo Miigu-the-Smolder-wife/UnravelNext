@@ -21,6 +21,7 @@
 #include "Sampler.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -101,6 +102,69 @@ bool refractOut(float3 w, float3& out)
     return true;
 }
 
+// Rough dielectric interface with microsurface multiple scattering (Heitz, Hanika, d'Eon, Dachsbacher 2016: Smith GGX,
+// uniform height distribution, stochastic walk over reflections and refractions on both sides). The medium (index
+// kEta) is below z = 0. wr is the propagation direction on arrival (from outside: wr.z < 0; from inside: wr.z > 0).
+// Returns with wr the propagation direction on leaving and outside the side (true: into air, wr.z > 0). Energy
+// conserving (no weights). False for a walk that did not leave within the order cap (not counted).
+namespace ms
+{
+double c1(double h) { return std::clamp(0.5 * (h + 1), 0.0, 1.0); }
+double invC1(double u) { return std::clamp(2 * u - 1, -1.0, 1.0); }
+double lambda(float3 w, double a)  // signed: -1 - Lambda(-w) for w.z < 0
+{
+    if (w.z > 0.9999f) return 0;
+    if (w.z < -0.9999f) return -1;
+    const double s = std::sqrt(std::max(1e-30, 1.0 - (double)w.z * w.z)), x = w.z / (s * a);
+    return 0.5 * (-1 + (x > 0 ? 1 : -1) * std::sqrt(1 + 1 / (x * x)));
+}
+double sampleHeight(float3 wr, double hr, double u, double a)
+{
+    if (wr.z > 0.9999f) return HUGE_VAL;
+    if (wr.z < -0.9999f) return invC1(u * c1(hr));
+    if (std::fabs(wr.z) < 0.0001f) return hr;
+    const double L = lambda(wr, a);
+    const double G1 = wr.z <= 0 ? 0.0 : std::pow(c1(hr), L);
+    if (u > 1 - G1) return HUGE_VAL;
+    return invC1(c1(hr) / std::pow(1 - u, 1 / L));
+}
+// Visible normal for a viewer direction wi on either side of the horizon (Dupuy & Benyoub 2023 spherical caps).
+float3 vndfAny(float3 wi, double a, double u1, double u2)
+{
+    const float3 v = normalize(float3{ (float)(a * wi.x), (float)(a * wi.y), wi.z });
+    const double phi = 2 * kPi * u1, z = (1 - u2) * (1 + v.z) - v.z, st = std::sqrt(std::clamp(1 - z * z, 0.0, 1.0));
+    const float3 h{ (float)(st * std::cos(phi) + v.x), (float)(st * std::sin(phi) + v.y), (float)(z + v.z) };
+    return normalize(float3{ (float)(a * h.x), (float)(a * h.y), std::max(h.z, 0.0f) });
+}
+// One phase-function step: wi points away from the microsurface on the side given by wiOutside.
+float3 phase(float3 wi, bool wiOutside, bool& woOutside, double a, reference::Pcg32& rng)
+{
+    const double eta = wiOutside ? kEta : 1 / kEta;
+    const double u1 = rng.uniform(), u2 = rng.uniform();
+    const float3 m = wiOutside ? vndfAny(wi, a, u1, u2) : -vndfAny(-wi, a, u1, u2);
+    const double c = std::max(0.0, (double)dot(wi, m));
+    woOutside = wiOutside;
+    if (rng.uniform() < fresnelExact(c, eta)) return m * (float)(2 * c) - wi;
+    woOutside = !wiOutside;
+    const double ct = -std::sqrt(std::max(0.0, 1 - (1 - c * c) / (eta * eta)));
+    return normalize(m * (float)(c / eta + ct) - wi / (float)eta);
+}
+bool interact(float3& wr, bool& outside, double a, reference::Pcg32& rng)
+{
+    double hr = outside ? 1 + invC1(0.999) : -1 - invC1(0.999);
+    for (int order = 0; order < 4096; ++order)
+    {
+        const double u = rng.uniform();
+        hr = outside ? sampleHeight(wr, hr, u, a) : -sampleHeight(-wr, -hr, u, a);
+        if (std::isinf(hr)) return (wr.z > 0) == outside;
+        const bool wiOutside = outside;
+        wr = phase(-wr, wiOutside, outside, a, rng);
+        if (!(wr.z == wr.z)) return false;
+    }
+    return false;
+}
+} // namespace ms
+
 // ---------------------------------------------------------------------------------------------- configuration
 struct FilmTable  // RGB Fresnel of the base specular as a function of v.h (1024 samples in cos)
 {
@@ -121,6 +185,7 @@ struct Config
     double rc = 0.12;
     const FilmTable* filmPhys = nullptr;  // exact spectral film (physical model)
     const FilmTable* filmDef = nullptr;   // method (a) film (definition)
+    bool msCoat = false;                  // physical coat with microsurface multiple scattering (ms::interact)
 };
 
 // Base BRDF value f(v, l) in the base's frame (n = +z). Without a film: the v1 model; with a film: v1 with the
@@ -150,6 +215,10 @@ struct Integrals
     std::vector<Rgb> a, e;               // base albedo and first-escape part on mu' = (i + 0.5) / 256
     Rgb rhoBar;                          // cosine-weighted hemisphere mean of a
     std::vector<double> RcOld;           // original definition: Schlick coat reflectance R_c
+    // Candidate A (energy-conserving coat): directional reflectance of the multiple-scattering coat on the Rc grid, its
+    // excess over f_c (Delta = RcMs - Rc) and cosine-weighted mean Delta-bar, inner diffuse reflectance.
+    std::vector<double> RcMs;
+    double DeltaBar = 0, KMs = 0;
     double at(const std::vector<double>& t, double mu) const
     {
         const double x = std::clamp(mu * t.size() - 0.5, 0.0, (double)t.size() - 1.0001);
@@ -181,13 +250,25 @@ struct Definitions
         baseR1 = c.base;
         baseR1.roughness = (float)std::sqrt(std::sqrt(apb2));  // alpha = r^2
     }
-    // R1: f = f_c + f_1 + f_ms (c = 1).
-    Rgb r1(float3 wo, float3 wi) const
+    // R1: f = f_c + f_1 + f_ms (c = 1). parts (optional): f_c, f_1, f_ms.
+    // candA (C-track candidate A, energy-conserving coat): f_c gains the coat's multiple-scattering reflection
+    // Delta(mu_i) Delta(mu_o) / (pi Delta-bar) (Kulla-Conty form, Delta = E_ms - E_c), transmission uses 1 - E_ms, and
+    // the inner diffuse reflectance is the multiple-scattering K_ms.
+    Rgb r1(float3 wo, float3 wi, Rgb* parts = nullptr, bool candA = false) const
     {
         if (wo.z <= 0 || wi.z <= 0) return {};
         const float3 h = normalize(wo + wi);
-        const double fc = ggxD({ 0, 0, 1 }, h, ac) * g2(wi.z, wo.z, ac) / (4.0 * wi.z * wo.z) * fresnelExact(dot(wo, h), kEta);
-        const double Ti = 1 - in.at(in.Rc, wi.z), To = 1 - in.at(in.Rc, wo.z);
+        double fc = ggxD({ 0, 0, 1 }, h, ac) * g2(wi.z, wo.z, ac) / (4.0 * wi.z * wo.z) * fresnelExact(dot(wo, h), kEta);
+        double Ti = 1 - in.at(in.Rc, wi.z), To = 1 - in.at(in.Rc, wo.z), K = in.K;
+        if (candA)
+        {
+            const double Ei = in.at(in.RcMs, wi.z), Eo = in.at(in.RcMs, wo.z);
+            const double di = std::max(0.0, Ei - in.at(in.Rc, wi.z)), dout = std::max(0.0, Eo - in.at(in.Rc, wo.z));
+            if (in.DeltaBar > 0) fc += di * dout / (kPi * in.DeltaBar);
+            Ti = 1 - Ei;
+            To = 1 - Eo;
+            K = in.KMs;
+        }
         const float3 pi = refractIn(wi), po = refractIn(wo);
         const Rgb f1 = baseBrdf(baseR1, cfg.filmDef, po, pi) * (float)(Ti * To / (kEta * kEta));
         const Rgb ret = in.atRgb(in.a, pi.z) - in.atRgb(in.e, pi.z);
@@ -195,7 +276,13 @@ struct Definitions
         const float* rb = &in.rhoBar.r;
         const float* rt = &ret.r;
         float* o = &fms.r;
-        for (int c = 0; c < 3; ++c) o[c] = (float)(Ti * rt[c] * rb[c] / (1 - rb[c] * in.K) * To / (kPi * kEta * kEta));
+        for (int c = 0; c < 3; ++c) o[c] = (float)(Ti * rt[c] * rb[c] / (1 - rb[c] * K) * To / (kPi * kEta * kEta));
+        if (parts)
+        {
+            parts[0] = Rgb((float)fc);
+            parts[1] = f1;
+            parts[2] = fms;
+        }
         return Rgb((float)fc) + f1 + fms;
     }
     // Original 1.1 (for comparison): Schlick coat with multiple-scattering compensation, T_c T_c f_base, no refraction.
@@ -264,6 +351,40 @@ void computeIntegrals(const Config& c, Definitions& d)
         in.K = (sumR[0] + sumR[1] + sumR[2] + sumR[3]) / 4;
         in.Kout = (sumT[0] + sumT[1] + sumT[2] + sumT[3]) / 4;
     }
+    // Multiple-scattering coat (candidate A): E_ms on the Rc grid, Delta-bar, K_ms.
+    {
+        in.RcMs.assign(1024, 0);
+        parallelFor(1024, [&](uint32_t i) {
+            const double mu = (i + 0.5) / 1024;
+            reference::Pcg32 rng(9000 + i, 21);
+            const uint32_t n = 1 << 15;
+            double hits = 0;
+            for (uint32_t k = 0; k < n; ++k)
+            {
+                float3 w{ -(float)std::sqrt(1 - mu * mu), 0, -(float)mu };
+                bool outside = true;
+                if (ms::interact(w, outside, d.ac, rng) && outside) hits += 1;
+            }
+            in.RcMs[i] = hits / n;
+        });
+        double db = 0;
+        for (int i = 0; i < 1024; ++i) db += std::max(0.0, in.RcMs[i] - in.Rc[i]) * 2 * ((i + 0.5) / 1024) / 1024;
+        in.DeltaBar = db;
+        double sumK[4] = {};
+        parallelFor(4, [&](uint32_t t) {
+            reference::Pcg32 rng(7000 + t, 23);
+            const uint32_t n = 1 << 19;
+            double r = 0;
+            for (uint32_t k = 0; k < n; ++k)
+            {
+                float3 w = cosineDir(rng.uniform(), rng.uniform());
+                bool outside = false;
+                if (ms::interact(w, outside, d.ac, rng) && !outside) r += 1;
+            }
+            sumK[t] = r / n;
+        });
+        in.KMs = (sumK[0] + sumK[1] + sumK[2] + sumK[3]) / 4;
+    }
     // Base albedo a(mu'), first-escape part e(mu') (smooth-interface inner transmission), rho-bar.
     in.a.assign(256, Rgb());
     in.e.assign(256, Rgb());
@@ -323,26 +444,48 @@ float3 incident(int i)
     return { (float)std::sin(th), 0, (float)std::cos(th) };
 }
 
-void physicalTable(const Config& c, const Definitions& d, uint32_t photons, Table& T, Table& Thalf)
+// Energy (luminance) leaving per incidence bin, split by the number of base interactions: 0 (coat only), 1, ..., 14,
+// >= 15 (last entry).
+constexpr int kSplit = 16;
+using Split = std::vector<std::array<double, kSplit>>;
+
+// mask (optional): incidence bins to trace (others stay zero). split (optional): see Split.
+void physicalTable(const Config& c, const Definitions& d, uint32_t photons, Table& T, Table& Thalf, const std::vector<uint8_t>* mask = nullptr, Split* split = nullptr)
 {
     reference::Surface surf;
     surf.ng = surf.ns = { 0, 0, 1 };
     surf.bsdf = c.base;
     const double ac = d.ac;
+    if (split) split->assign(NI, std::array<double, kSplit>{});
     parallelFor(NI, [&](uint32_t ii) {
+        if (mask && !(*mask)[ii]) return;
         const float3 wi = incident((int)ii);
-        reference::Pcg32 rng(0xC0A7 + ii, 11 + (uint64_t)(c.rc * 1000));
+        reference::Pcg32 rng(0xC0A7 + ii, 11 + (uint64_t)(c.rc * 1000) + (c.msCoat ? 5000 : 0));
+        std::array<double, kSplit> sp{};
         for (uint32_t s = 0; s < photons; ++s)
         {
             float3 dir = -wi;
             double w = 1;
             Rgb wrgb(1.0f);
             bool inside = false;
+            int baseHits = 0;
             for (int bounce = 0; bounce < 256; ++bounce)
             {
                 float3 exitDir{};
                 bool exited = false;
-                if (!inside)
+                if (c.msCoat && (!inside || dir.z > 0))
+                {
+                    // Coat interface with microsurface multiple scattering, from either side.
+                    bool outside = !inside;
+                    if (!ms::interact(dir, outside, ac, rng)) break;
+                    if (outside)
+                    {
+                        exitDir = dir;
+                        exited = true;
+                    }
+                    else inside = true;
+                }
+                else if (!inside)
                 {
                     const float3 wo = -dir;
                     const float3 m = vndf(wo, ac, rng.uniform(), rng.uniform());
@@ -374,6 +517,7 @@ void physicalTable(const Config& c, const Definitions& d, uint32_t photons, Tabl
                     wrgb *= baseBrdf(c.base, c.filmPhys, bs.wi, l) * (bs.wi.z / bs.pdf);
                     if (wrgb.isZero()) break;
                     dir = bs.wi;
+                    ++baseHits;
                 }
                 else
                 {
@@ -404,6 +548,7 @@ void physicalTable(const Config& c, const Definitions& d, uint32_t photons, Tabl
                     const Rgb add = wrgb * (float)(w / photons);
                     T.at((int)ii, bt, bp) += add;
                     if (s & 1) Thalf.at((int)ii, bt, bp) += add * 2.0f;  // odd half, for the noise floor
+                    sp[std::min(baseHits, kSplit - 1)] += add.luminance();
                     break;
                 }
                 if (bounce > 8)
@@ -414,20 +559,26 @@ void physicalTable(const Config& c, const Definitions& d, uint32_t photons, Tabl
                 }
             }
         }
+        if (split) (*split)[ii] = sp;
     });
 }
 
-enum class Which { R1, Old };
-void definitionTable(const Config& c, const Definitions& d, Which which, uint32_t samples, Table& T)
+enum class Which { R1, Old, R1A };
+// parts (R1 only, optional): energy (luminance) of f_c, f_1, f_ms per incidence bin.
+using Parts = std::vector<std::array<double, 3>>;
+void definitionTable(const Config& c, const Definitions& d, Which which, uint32_t samples, Table& T, const std::vector<uint8_t>* mask = nullptr, Parts* parts = nullptr)
 {
+    if (parts) parts->assign(NI, { 0, 0, 0 });
     reference::Surface surfR1;
     surfR1.ng = surfR1.ns = { 0, 0, 1 };
-    surfR1.bsdf = which == Which::R1 ? d.baseR1 : c.base;
+    surfR1.bsdf = which != Which::Old ? d.baseR1 : c.base;
     parallelFor(NI, [&](uint32_t ii) {
+        if (mask && !(*mask)[ii]) return;
         const float3 wi = incident((int)ii);
-        const float3 pi = which == Which::R1 ? refractIn(wi) : wi;
+        const float3 pi = which != Which::Old ? refractIn(wi) : wi;
+        std::array<double, 3> pp = { 0, 0, 0 };
         const reference::Bsdf base(surfR1, pi);
-        reference::Pcg32 rng(0xDEF0 + ii, 13 + (uint64_t)(c.rc * 1000) + (which == Which::R1 ? 0 : 7));
+        reference::Pcg32 rng(0xDEF0 + ii, 13 + (uint64_t)(c.rc * 1000) + (which == Which::R1 ? 0 : which == Which::Old ? 7 : 3));
         auto baseLobePdf = [&](float3 wo) {
             if (which == Which::Old) return (double)base.pdf(wo);
             const float3 po = refractIn(wo);
@@ -457,11 +608,16 @@ void definitionTable(const Config& c, const Definitions& d, Which which, uint32_
             const double pc = g1(wi.z, d.ac) * ggxD({ 0, 0, 1 }, h, d.ac) / (4 * wi.z);
             const double pdf = 0.35 * pc + 0.45 * baseLobePdf(wo) + 0.2 * wo.z / kPi;
             if (!(pdf > 0)) continue;
-            const Rgb f = which == Which::R1 ? d.r1(wo, wi) : d.old(wo, wi);
+            Rgb pr[3];
+            const Rgb f = which != Which::Old ? d.r1(wo, wi, pr, which == Which::R1A) : d.old(wo, wi);
             int bt, bp;
             binOf(wo, bt, bp);
-            T.at((int)ii, bt, bp) += f * (float)(wo.z / pdf / samples);
+            const double wgt = wo.z / pdf / samples;
+            T.at((int)ii, bt, bp) += f * (float)wgt;
+            if (which != Which::Old)
+                for (int k = 0; k < 3; ++k) pp[k] += pr[k].luminance() * wgt;
         }
+        if (parts) (*parts)[ii] = pp;
     });
 }
 
@@ -643,7 +799,7 @@ std::string row(const std::string& name, double rc, const char* def, const Metri
 }
 } // namespace
 
-void clearcoatR1Study(const std::string& out, uint32_t photons)
+void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, bool candA)
 {
     struct BaseDef
     {
@@ -671,7 +827,9 @@ void clearcoatR1Study(const std::string& out, uint32_t photons)
     }
     std::ostringstream md, eq;
     md << "# Clearcoat R1 vs physical layer model [measured]\n\n"
-          "`unx_study_material_layers clearcoat_r1`. Criteria (MATERIAL_LAYERS 3): albedo rel <= 2 % (or abs <= 0.005), L1 <= 0.05, "
+          "`unx_study_material_layers " << (candA ? "clearcoat_r1a" : msCoat ? "clearcoat_r1_ms" : "clearcoat_r1") << "`. Physical coat: "
+       << (msCoat ? "microsurface multiple scattering (Heitz et al. 2016, energy conserving)" : "single-scattering microfacets (energy lost at grazing)")
+       << ". Criteria (MATERIAL_LAYERS 3): albedo rel <= 2 % (or abs <= 0.005), L1 <= 0.05, "
           "render dE76 mean <= 1.0 and P99 <= 2.3 (white furnace / sun + sky sphere, 64 x 64). Photons per incidence bin: "
           << photons << " (physical), " << photons << " (definition). 'L1 noise' = physical half vs full (MC floor).\n\n"
           "| base | r_c | definition | worst albedo (rel @theta, abs) | albedo rel at 0/30/60/75/85° | worst L1 | L1 noise | furnace dE mean / P99 | sun+sky dE mean / P99 | criteria |\n"
@@ -684,16 +842,18 @@ void clearcoatR1Study(const std::string& out, uint32_t photons)
             c.name = b.name;
             c.base = b.s;
             c.rc = rc;
+            c.msCoat = msCoat;
             Definitions d(c);
             computeIntegrals(c, d);
             Table phys, half, r1, old;
             physicalTable(c, d, photons, phys, half);
             definitionTable(c, d, Which::R1, photons, r1);
-            definitionTable(c, d, Which::Old, photons, old);
+            definitionTable(c, d, candA ? Which::R1A : Which::Old, photons, old);
             const std::vector<Rgb3> pf = renderSphere(phys, furnace, 64), ps = renderSphere(phys, sky, 64);
             const Metrics m1 = compare(r1, phys, half, furnace, sky, skyWhite, &pf, &ps), m0 = compare(old, phys, half, furnace, sky, skyWhite, &pf, &ps);
-            md << row(b.name, rc, "R1", m1) << row(b.name, rc, "1.1 original", m0);
-            logf("%s%s", row(b.name, rc, "R1", m1).c_str(), row(b.name, rc, "1.1 original", m0).c_str());
+            const char* second = candA ? "R1 + A (coat MS)" : "1.1 original";
+            md << row(b.name, rc, "R1", m1) << row(b.name, rc, second, m0);
+            logf("%s%s", row(b.name, rc, "R1", m1).c_str(), row(b.name, rc, second, m0).c_str());
             logf("   K %.4f (out %.4f), rho-bar (%.3f %.3f %.3f)\n", d.in.K, d.in.Kout, d.in.rhoBar.r, d.in.rhoBar.g, d.in.rhoBar.b);
             // Lobe width check at normal incidence (metal bases): angular energy distribution excluding the coat lobe
             // (the definition's f_c energy per theta_o bin is subtracted from both).
@@ -753,6 +913,127 @@ void clearcoatR1Study(const std::string& out, uint32_t photons)
     writeTextFile(out, md.str() + eq.str());
 }
 
+// Diagnosis of the R1 failures: energy leaving per incidence angle, split by the number of base interactions in the
+// physical walk (single-scattering coat and multiple-scattering coat), against R1's own split (f_c, f_1, f_ms).
+void clearcoatDiag(const std::string& out, uint32_t photons)
+{
+    auto mk = [](float3 col, float r, float m) {
+        scene::model::Surface s;
+        s.baseColor = col;
+        s.roughness = r;
+        s.metallic = m;
+        return s;
+    };
+    struct Case
+    {
+        const char* name;
+        scene::model::Surface base;
+        double rc;
+    };
+    const Case cases[] = { { "chrome r 0.1", mk({ 0.9f, 0.9f, 0.9f }, 0.1f, 1), 0.05 },   { "metal flake r 0.3", mk({ 0.9f, 0.6f, 0.3f }, 0.3f, 1), 0.05 },
+                           { "white diffuse 0.8", mk({ 0.8f, 0.8f, 0.8f }, 0.9f, 0), 0.05 }, { "white diffuse 0.8", mk({ 0.8f, 0.8f, 0.8f }, 0.9f, 0), 0.12 },
+                           { "white diffuse 0.8", mk({ 0.8f, 0.8f, 0.8f }, 0.9f, 0), 0.30 }, { "chrome r 0.1", mk({ 0.9f, 0.9f, 0.9f }, 0.1f, 1), 0.30 } };
+    const int probe[] = { 0, 30, 60, 70, 75, 80, 84, 87, 89 };
+    std::vector<uint8_t> mask(NI, 0);
+    for (int i : probe) mask[i] = 1;
+    std::ostringstream md;
+    md << "# Clearcoat R1 failure diagnosis [measured]\n\n"
+          "`unx_study_material_layers clearcoat_diag`. Directional albedo (luminance) and its split by the number of base "
+          "interactions before leaving: 0 (coat only) / 1 / 2 / >= 3. SS: physical walk with single-scattering coat microfacets "
+          "(energy lost at grazing); MS: microsurface multiple scattering (Heitz et al. 2016, energy conserving). R1 split: f_c / f_1 / "
+          "f_ms. Photons per angle: "
+       << photons << ".\n";
+    for (const Case& k : cases)
+    {
+        Config c;
+        c.name = k.name;
+        c.base = k.base;
+        c.rc = k.rc;
+        Definitions d(c);
+        computeIntegrals(c, d);
+        Table ss, ssHalf, msT, msHalf, r1;
+        Split sss, mss;
+        Parts pr;
+        physicalTable(c, d, photons, ss, ssHalf, &mask, &sss);
+        Config cm = c;
+        cm.msCoat = true;
+        physicalTable(cm, d, photons, msT, msHalf, &mask, &mss);
+        definitionTable(c, d, Which::R1, photons, r1, &mask, &pr);
+        const size_t mark = md.str().size();
+        md << format("\n## %s, r_c %.2f (alpha_c %.4f, alpha_b %.4f, alpha'_b %.4f)\n\n", k.name, k.rc, d.ac, d.ab, scene::model::alphaFromRoughness(d.baseR1.roughness))
+           << "| theta_i | albedo SS | albedo MS | albedo R1 | SS 0 / 1 / 2 / >=3 | MS 0 / 1 / 2 / >=3 | R1 f_c / f_1 / f_ms |\n|---|---|---|---|---|---|---|\n";
+        for (int i : probe)
+        {
+            auto agg = [](const std::array<double, kSplit>& x) {
+                std::array<double, 4> y{ x[0], x[1], x[2], 0 };
+                for (int k = 3; k < kSplit; ++k) y[3] += x[k];
+                return y;
+            };
+            const auto a = agg(sss[i]);
+            const auto b = agg(mss[i]);
+            const auto& r = pr[i];
+            md << format("| %.1f° | %.4f | %.4f | %.4f | %.4f / %.4f / %.4f / %.4f | %.4f / %.4f / %.4f / %.4f | %.4f / %.4f / %.4f |\n", i + 0.5, a[0] + a[1] + a[2] + a[3],
+                         b[0] + b[1] + b[2] + b[3], r[0] + r[1] + r[2], a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], r[0], r[1], r[2]);
+        }
+        logf("%s", md.str().substr(mark).c_str());
+        writeTextFile(out, md.str());
+    }
+}
+
+// Specular-path census for the glossy/metal base redesign: a lossless GGX base (v1 metal, base colour 1, so its
+// directional albedo is 1 at every angle) under the multiple-scattering coat. S_k(theta_i) = energy leaving after
+// exactly k base interactions; for a base of constant albedo rho the layer's base-path energy is sum_k S_k rho^k.
+// Also q_k = S_{k+1} / S_k (how far the tail is from geometric) and the energy still trapped at the walk cap.
+void clearcoatSpecPath(const std::string& out, uint32_t photons)
+{
+    const double coats[] = { 0.05, 0.12, 0.30 };
+    const float bases[] = { 0.1f, 0.2f, 0.3f, 0.45f, 0.6f };  // roughness (alpha = r^2: 0.01, 0.04, 0.09, 0.2, 0.36)
+    const int probe[] = { 0, 30, 45, 60, 65, 70, 75, 80, 85, 89 };
+    std::vector<uint8_t> mask(NI, 0);
+    for (int i : probe) mask[i] = 1;
+    std::ostringstream md;
+    md << "# Specular-path census: lossless GGX base under the coat [measured]\n\n"
+          "`unx_study_material_layers clearcoat_specpath`. Base: v1 metal, base colour 1 (albedo 1 at every angle), roughness r_b; "
+          "coat: n 1.5, microsurface multiple scattering, roughness r_c. S_k = energy leaving after exactly k base interactions "
+          "(S_0 = coat reflection). A base of constant albedo rho gives sum_k S_k rho^k. Photons per angle: "
+       << photons << ".\n";
+    for (double rc : coats)
+        for (float rb : bases)
+        {
+            Config c;
+            c.name = "lossless GGX";
+            c.base.baseColor = { 1, 1, 1 };
+            c.base.roughness = rb;
+            c.base.metallic = 1;
+            c.rc = rc;
+            c.msCoat = true;
+            Definitions d(c);
+            Table T, Th;
+            Split sp;
+            physicalTable(c, d, photons, T, Th, &mask, &sp);
+            const size_t mark = md.str().size();
+            md << format("\n## r_c %.2f, r_b %.2f (alpha_c %.4f, alpha_b %.4f)\n\n", rc, rb, d.ac, d.ab)
+               << "| theta_i | S_0 | S_1 | S_2 | S_3 | S_4 | S_5 | S_6..14 | S_>=15 | q_2 = S_3/S_2 | q_4 = S_5/S_4 | lost at walk cap | E(rho 0.9) | E(rho 0.6) |\n"
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
+            for (int i : probe)
+            {
+                const auto& x = sp[i];
+                double mid = 0, e9 = 0, e6 = 0, tot = 0;
+                for (int k = 0; k < kSplit; ++k) tot += x[k];
+                for (int k = 6; k < kSplit - 1; ++k) mid += x[k];
+                for (int k = 1; k < kSplit; ++k)
+                {
+                    e9 += x[k] * std::pow(0.9, k);
+                    e6 += x[k] * std::pow(0.6, k);
+                }
+                md << format("| %.1f° | %.4f | %.4f | %.4f | %.4f | %.4f | %.4f | %.4f | %.4f | %.3f | %.3f | %.4f | %.4f | %.4f |\n", i + 0.5, x[0], x[1], x[2], x[3], x[4], x[5], mid,
+                             x[kSplit - 1], x[2] > 0 ? x[3] / x[2] : 0.0, x[4] > 0 ? x[5] / x[4] : 0.0, 1 - tot, e9, e6);
+            }
+            logf("%s", md.str().substr(mark).c_str());
+            writeTextFile(out, md.str());
+        }
+}
+
 // Coat + film (design 3, item 3): film under the coat (outer index 1.5); the physical base uses the exact spectral film
 // reflectance, the definition method (a).
 void coatFilmStudy(const std::string& out, uint32_t photons)
@@ -787,7 +1068,8 @@ void coatFilmStudy(const std::string& out, uint32_t photons)
     }
     std::ostringstream md;
     md << "# Clearcoat R1 + thin film under the coat vs physical model [measured]\n\n"
-          "Coat r_c 0.12 over a filmed base (outer index 1.5). Physical: layer model with the exact spectral film reflectance in "
+          "Coat r_c 0.12 over a filmed base (outer index 1.5). Physical: layer model (coat with microsurface multiple scattering) "
+          "with the exact spectral film reflectance in "
           "the base specular; definition: R1 with film method (a). Same metrics and criteria as clearcoat_r1.md.\n\n"
           "| case | r_c | definition | worst albedo (rel @theta, abs) | albedo rel at 0/30/60/75/85° | worst L1 | L1 noise | furnace dE mean / P99 | sun+sky dE mean / P99 | criteria |\n"
           "|---|---|---|---|---|---|---|---|---|---|\n";
@@ -800,6 +1082,7 @@ void coatFilmStudy(const std::string& out, uint32_t photons)
         c.rc = 0.12;
         c.filmPhys = &fp;
         c.filmDef = &fd;
+        c.msCoat = true;
         Definitions d(c);
         computeIntegrals(c, d);
         Table phys, half, r1;
@@ -820,7 +1103,7 @@ void coatFilmStudy(const std::string& out, uint32_t photons)
 void exportTables(const std::string& out)
 {
     const int n = 32;
-    std::vector<double> Ec(n * n), K(n), Ax(n * n), Bx(n * n), Ab(n), Bb(n);
+    std::vector<double> Ec(n * n), K(n), Ax(n * n), Bx(n * n), Ab(n), Bb(n), EcMs(n * n), KMs(n);
     parallelFor(n, [&](uint32_t j) {
         const double r = (double)j / (n - 1), a = scene::model::alphaFromRoughness((float)r);
         std::vector<double> A(n), B(n);
@@ -876,6 +1159,30 @@ void exportTables(const std::string& out)
             }
         }
         K[j] = R / m;
+        // Multiple-scattering coat (the reference physics): directional reflectance from outside and the inner diffuse
+        // reflectance, by the microsurface walk (ms::interact).
+        for (int i = 0; i < n; ++i)
+        {
+            const double mu = std::max((double)i / (n - 1), 1e-4);
+            const uint32_t q = 1 << 16;
+            double hits = 0;
+            for (uint32_t k = 0; k < q; ++k)
+            {
+                float3 w{ -(float)std::sqrt(1 - mu * mu), 0, -(float)mu };
+                bool outside = true;
+                if (ms::interact(w, outside, a, rng) && outside) hits += 1;
+            }
+            EcMs[j * n + i] = hits / q;
+        }
+        double ri = 0;
+        const uint32_t q = 1 << 20;
+        for (uint32_t k = 0; k < q; ++k)
+        {
+            float3 w = cosineDir(rng.uniform(), rng.uniform());  // upward inside the medium
+            bool outside = false;
+            if (ms::interact(w, outside, a, rng) && !outside) ri += 1;
+        }
+        KMs[j] = ri / q;
     });
     std::ostringstream s;
     s << "// Clearcoat tables (MATERIAL_LAYERS_KO.md 1.1), generated by unx_study_material_layers tables. eta = 1.5,\n"
@@ -891,6 +1198,9 @@ void exportTables(const std::string& out)
     arr("kBaseEscapeB", Bx);
     arr("kBaseMeanA", Ab);
     arr("kBaseMeanB", Bb);
+    s << "// Energy-conserving coat (microsurface multiple scattering, Heitz et al. 2016): the reference physics.\n";
+    arr("kCoatReflectanceMs", EcMs);
+    arr("kCoatInnerDiffuseReflectanceMs", KMs);
     writeTextFile(out, s.str());
     logf("K(r) at r = 0, 0.12 (j 4), 0.3 (j 9), 1: %.4f %.4f %.4f %.4f\n", K[0], K[4], K[9], K[31]);
 }
