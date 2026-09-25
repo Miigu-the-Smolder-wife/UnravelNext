@@ -2,13 +2,18 @@
 // Reflections of the R track (ARCHITECTURE 2.6), main view. One instance per FrameRenderer (track state "R.reflection").
 // Per frame (after GI: the screen probes are the G path's control variate and the K path's source):
 //   r.refl.begin -> r.refl.classify -> r.refl.args -> r.refl.trace (indirect DispatchRays) -> r.refl.resolve
-// K pixels are left to M (Reflection.hlsli). Planar mirrors: triangles of mirror-smooth submeshes (static instances) are
-// clustered by plane. Each frame classify counts, per visible candidate plane, the mirror-smooth pixels on it; a plane
-// gets a reflection camera through FrameServices::renderView (INTERFACES 5.4; same geometry path as the main view, so
-// the reflection matches the direct view exactly) when its count (framesInFlight frames old, read back without stalls) reaches
-// reflection.planar_min_pixels: the break-even of the design's cost formula (2.6) between the view's fixed cost and the
-// per-pixel ray cost it saves. Other planes' pixels take rays. Planes whose exact pixel bound (area, distance, corner
-// pixel density; screen rectangle) is below that threshold are not candidates at all. The exact set (original BLASes of characters and wind
+// K pixels are left to M (Reflection.hlsli). Planar mirrors: triangles on which a reflection camera is exact are
+// clustered by plane. Each frame classify counts, per visible candidate plane, the mirror-smooth pixels on it (read back
+// framesInFlight frames later). Raster or rays is chosen per plane by measured cost (design 2.6 cost formula, user
+// policy "raster vs rays by cost"): a plane gets a reflection camera (FrameServices::renderView, INTERFACES 5.4; the
+// same geometry and shading path as the main view) when
+//     pixels x c_ray  >  cost of its view,
+// c_ray = this system's own GPU timestamps around the reflection trace / its rays (running average), the view's cost =
+// its own bracketing timestamps when it ran within the last second, else a + b x (its screen rectangle), with b the
+// running average of measured views (per rectangle pixel) and a, b's prior from reflection.planar_view_fixed_ms and
+// reflection.planar_view_ns_per_px (integrated-gate measurements). 10 % hysteresis. Since cost >= a + b x pixels, a
+// plane can pay off only if c_ray > b and pixels > a / (c_ray - b): that exact bound prunes the plane hierarchy (with
+// the pixel bound from area, distance and corner pixel density, and the screen rectangle). The exact set (original BLASes of characters and wind
 // foliage near curved mirrors) is not implemented yet.
 #include "unx/gi/GiSystem.h"
 #include "unx/render/Frame.h"
@@ -23,7 +28,8 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     uint32_t raysPerSample = 0;  // G path rays per sample
     uint32_t maxSpacing = 0;     // G sample spacing bound in px (tile-limited to 8)
     uint32_t planarViewsMax = 0; // reflection cameras per frame (largest pixel counts first; the rest use rays)
-    uint32_t planarMinPixels = 0;// pixels on a plane above which a reflection camera is cheaper than rays
+    float planarViewFixedMs = 0;     // prior fixed cost of a reflection view (a)
+    float planarViewNsPerPixel = 0;  // prior cost per pixel of a view's screen rectangle (b)
     static ReflectionSettings fromQuality(const QualityConfig& q);
 };
 
@@ -55,9 +61,15 @@ public:
         uint32_t planarCandidates = 0;                // visible candidate planes counted last frame
         uint32_t planarLargestPixels = 0;             // largest read-back pixel count of one plane
         float planarSelectMs = 0;                     // CPU time of last frame's plane query and camera choice
+        uint32_t planarRectPixels = 0;                // screen rectangles of the views rendered last frame
+        float rayNs = 0;                              // measured reflection trace cost per ray (running average)
+        float viewNsPerPixel = 0;                     // measured view cost per rectangle pixel (running average; prior until a view ran)
+        float viewMs = 0;                             // measured cost of last read-back frame's views (bracketing timestamps)
     };
     // Planar reflectors of the scene (built on first use). Tests disable the planar path to compare it with rays.
     void setPlanarEnabled(bool enabled) { m_planarEnabled = enabled; }
+    // Tests and capture modes: every counted candidate plane gets a camera (up to planar_views_max), without the cost choice.
+    void setPlanarForced(bool forced) { m_planarForced = forced; }
     size_t planarReflectorCount() const { return m_planes.size(); }
     // Counters of the last completed frame (blocking readback).
     Stats readStats();
@@ -82,7 +94,7 @@ private:
         uint32_t triangles = 0;
     };
     // Bounding volume hierarchy over the planes: a node holds the bounds and the largest area of its planes, so a frame
-    // visits only planes whose pixel-count bound can reach reflection.planar_min_pixels.
+    // visits only planes whose pixel-count bound can reach the cost choice's threshold.
     struct PlaneNode
     {
         float3 lo, hi;
@@ -97,13 +109,21 @@ private:
     std::vector<uint32_t> m_planeOrder;
     std::vector<uint64_t> m_planeLastSeen, m_planeRunStart;  // frames a plane was a candidate: last, start of the current run
     uint32_t m_planesRevision = 0xFFFFFFFFu;
-    bool m_planarEnabled = true;
+    bool m_planarEnabled = true, m_planarForced = false;
     ComPtr<ID3D12Resource> m_planarRing;      // upload ring: per frame { candidates, views, pad, 64 x { plane, rect } }
     uint8_t* m_planarMapped = nullptr;
     uint32_t m_planarSrv = 0xFFFFFFFFu;
     ComPtr<ID3D12Resource> m_planarCounts;    // per candidate of this frame: mirror-smooth pixels on its plane
-    ComPtr<ID3D12Resource> m_planarReadback;  // ring of the counts, read on the CPU framesInFlight frames later
-    const uint32_t* m_readbackMapped = nullptr;
+    ComPtr<ID3D12Resource> m_planarReadback;  // per slot: counts, timestamps (trace, views), job counters; read framesInFlight later
+    const uint8_t* m_readbackMapped = nullptr;
+    ComPtr<ID3D12QueryHeap> m_timestamps;     // per slot: trace begin/end, view begin/end x kPlanarMax
+    double m_tickMs = 0;
+    float m_rayNs = 0, m_viewNsPerPixel = 0, m_lastViewMs = 0;
+    std::vector<uint32_t> m_slotViewPlanes[4], m_slotViewRects[4];  // plane and rectangle pixels of each view, per slot
+    std::vector<float> m_planeViewMs;         // last measured cost of the plane's view
+    std::vector<uint64_t> m_planeViewFrame;   // frame of that measurement
+    std::vector<uint64_t> m_planeCameraFrame; // last frame the plane had a camera (hysteresis)
+    uint32_t m_lastRectPixels = 0;
     std::vector<uint32_t> m_slotPlanes[4];    // plane of each candidate, per ring slot
     std::vector<uint64_t> m_slotFrame;        // frame that wrote each slot
     std::vector<uint32_t> m_planePixels;      // last read-back count per plane

@@ -227,9 +227,12 @@ int main(int argc, char** argv)
                 const refl::ReflectionSystem::Stats rs = reflSystem->readStats();
                 logf("R %s: reflection jobs %u (M %u = rays %u; G samples %u = rays %u), G pixels %u\n", res.name.c_str(), rs.jobs, rs.mirrorJobs, rs.mirrorJobs, rs.glossyJobs,
                      rs.glossyJobs * reflSystem->settings().raysPerSample, rs.glossyPixels);
-                logf("R %s: planar candidates %u visible, largest plane %u mirror pixels (camera from %u), %u views (%u px)%s, CPU %.3f ms\n", res.name.c_str(),
-                     rs.planarCandidates, rs.planarLargestPixels, reflSystem->settings().planarMinPixels, rs.planarViews, rs.planarPixels,
+                logf("R %s: planar candidates %u visible, largest plane %u mirror pixels, %u views (%u px)%s, CPU %.3f ms\n", res.name.c_str(),
+                     rs.planarCandidates, rs.planarLargestPixels, rs.planarViews, rs.planarPixels,
                      renderer ? "" : " (no renderView in this gate)", rs.planarSelectMs);
+                logf("R %s: planar cost choice: rays %.3f ns/ray (measured), views %.3f ns per rectangle pixel (%s), last views %.3f ms over %u rectangle px\n",
+                     res.name.c_str(), rs.rayNs, rs.viewNsPerPixel, rs.planarViews || rs.viewMs > 0 ? "measured" : "prior or measured earlier", rs.viewMs,
+                     rs.planarRectPixels);
             }
             if (giSystem)
             {

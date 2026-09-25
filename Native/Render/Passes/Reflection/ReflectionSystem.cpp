@@ -25,6 +25,9 @@ uint32_t asU(float f)
 
 constexpr uint32_t kDescStride = (uint32_t)((sizeof(D3D12_DISPATCH_RAYS_DESC) + 7) / 8 * 8);
 constexpr uint32_t kPlanarMax = 4, kCandidatesMax = 64, kPlanarSlotBytes = 4096, kPlanarSlots = 4;  // ring slots > frames in flight
+// Read-back slot: candidate pixel counts, timestamps (trace begin/end, then begin/end per view), job counters (args 0..16).
+constexpr uint32_t kTicks = 2 + 2 * kPlanarMax, kTicksOffset = kCandidatesMax * 4, kJobsOffset = kTicksOffset + kTicks * 8, kReadbackStride = 512;
+static_assert(kJobsOffset + 16 <= kReadbackStride);
 struct PlanarGpu  // ReflectionInternal.hlsli: candidates [0, views) have a reflection camera
 {
     uint32_t candidates, views, pad[2];
@@ -58,7 +61,8 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     if (s.raysPerSample == 0) fail("reflection.g_rays_per_sample must be > 0");
     s.planarViewsMax = (uint32_t)q.integer("reflection.planar_views_max");
     if (s.planarViewsMax > kPlanarMax) fail("reflection.planar_views_max must be <= %u", kPlanarMax);
-    s.planarMinPixels = (uint32_t)q.integer("reflection.planar_min_pixels");
+    s.planarViewFixedMs = (float)q.number("reflection.planar_view_fixed_ms");
+    s.planarViewNsPerPixel = (float)q.number("reflection.planar_view_ns_per_px");
     return s;
 }
 
@@ -135,13 +139,23 @@ ReflectionSystem::ReflectionSystem(Device& device, ShaderLibrary& shaders, const
     check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_planarCounts)),
           "planar counts");
     D3D12_HEAP_PROPERTIES readback{ D3D12_HEAP_TYPE_READBACK };
-    d.Width = kPlanarSlots * kCandidatesMax * 4;
+    d.Width = kPlanarSlots * kReadbackStride;
     d.Flags = D3D12_RESOURCE_FLAG_NONE;
     check(device.d3d()->CreateCommittedResource3(&readback, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_planarReadback)),
           "planar count readback");
     D3D12_RANGE all{ 0, (SIZE_T)d.Width };
-    check(m_planarReadback->Map(0, &all, reinterpret_cast<void**>(const_cast<uint32_t**>(&m_readbackMapped))), "map planar readback");
+    check(m_planarReadback->Map(0, &all, reinterpret_cast<void**>(const_cast<uint8_t**>(&m_readbackMapped))), "map planar readback");
     m_slotFrame.assign(kPlanarSlots, UINT64_MAX);
+
+    // Own timestamps for the cost choice (the frame profiler is not visible to tracks).
+    D3D12_QUERY_HEAP_DESC qd{};
+    qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    qd.Count = kPlanarSlots * kTicks;
+    check(device.d3d()->CreateQueryHeap(&qd, IID_PPV_ARGS(&m_timestamps)), "reflection timestamps");
+    uint64_t frequency = 0;
+    check(device.queue(QueueType::Graphics).get()->GetTimestampFrequency(&frequency), "timestamp frequency");
+    m_tickMs = 1000.0 / (double)frequency;
+    m_viewNsPerPixel = m_settings.planarViewNsPerPixel;
 }
 
 // Planar reflector candidates: triangles on which a reflection camera is exact. The material (with instance overrides)
@@ -233,6 +247,9 @@ void ReflectionSystem::buildPlanes(const GpuScene& gpuScene)
         buildPlaneNodes(0, (uint32_t)m_planes.size());
     }
     m_planePixels.assign(m_planes.size(), 0);
+    m_planeViewMs.assign(m_planes.size(), 0);
+    m_planeViewFrame.assign(m_planes.size(), UINT64_MAX);
+    m_planeCameraFrame.assign(m_planes.size(), UINT64_MAX - 1);
     m_planeLastSeen.assign(m_planes.size(), UINT64_MAX - 1);
     m_planeRunStart.assign(m_planes.size(), UINT64_MAX);
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -286,6 +303,7 @@ ReflectionSystem::~ReflectionSystem()
     if (m_planarReadback) m_planarReadback->Unmap(0, nullptr);
     m_device.deferRelease(m_planarReadback);
     m_device.deferRelease(m_planarCounts);
+    m_device.deferRelease(m_timestamps);
     DescriptorHeaps* h = &m_device.descriptors();
     const uint32_t srv = m_planarSrv;
     if (srv != 0xFFFFFFFFu) m_device.deferCall([h, srv] { h->freeResource(srv); });
@@ -334,9 +352,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     ShaderLibrary& shaders = fc.shaders;
     const float focal = height / (2.0f * std::tan(main.view.verticalFov * 0.5f));
 
-    // Planar mirrors (design 2.6 cost formula): read back the per-plane pixel counts of the frame that last used the slot
-    // framesInFlight frames ago; visible planes become candidates (counted this frame), the ones whose count reaches
-    // reflection.planar_min_pixels get a reflection camera (FrameServices::renderView) and their pixels take no rays.
+    // Planar mirrors (design 2.6 cost formula, header comment): read back the per-plane pixel counts and the measured
+    // costs of the frame that last used the slot framesInFlight frames ago; visible planes become candidates (counted
+    // this frame), the ones whose rays cost more than their view get a reflection camera and their pixels take no rays.
     if (m_planesRevision != fc.scene.revision()) buildPlanes(fc.scene);
     const uint32_t ringSlot = (uint32_t)(fc.frame.frameIndex % kPlanarSlots);
     {
@@ -344,36 +362,72 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         if (fc.framesInFlight >= kPlanarSlots) fail("R reflections: %u frames in flight need more planar ring slots", fc.framesInFlight);
         const uint32_t oldSlot = (uint32_t)((fc.frame.frameIndex + kPlanarSlots - fc.framesInFlight) % kPlanarSlots);
         if (m_slotFrame[oldSlot] != UINT64_MAX && fc.frame.frameIndex >= m_slotFrame[oldSlot] + fc.framesInFlight)
+        {
+            const uint8_t* slot = m_readbackMapped + oldSlot * kReadbackStride;
+            const uint32_t* counts = reinterpret_cast<const uint32_t*>(slot);
             for (size_t c = 0; c < m_slotPlanes[oldSlot].size(); ++c)
             {
                 const uint32_t p = m_slotPlanes[oldSlot][c];
                 // Only counts of the plane's current run of consecutive candidate frames (its view may have changed).
-                if (p < m_planePixels.size() && m_planeRunStart[p] <= m_slotFrame[oldSlot]) m_planePixels[p] = m_readbackMapped[oldSlot * kCandidatesMax + c];
+                if (p < m_planePixels.size() && m_planeRunStart[p] <= m_slotFrame[oldSlot]) m_planePixels[p] = counts[c];
             }
+            // Costs: the trace per ray, each view per rectangle pixel (running averages over ~16 frames).
+            const uint64_t* ticks = reinterpret_cast<const uint64_t*>(slot + kTicksOffset);
+            const uint32_t* counters = reinterpret_cast<const uint32_t*>(slot + kJobsOffset);  // total jobs, M, G samples, G pixels
+            const double traced = (double)counters[1] + (double)counters[2] * m_settings.raysPerSample;
+            if (ticks[1] > ticks[0] && traced >= 4096)
+            {
+                const float sample = (float)((ticks[1] - ticks[0]) * m_tickMs * 1e6 / traced);
+                m_rayNs = m_rayNs > 0 ? m_rayNs + (sample - m_rayNs) / 16 : sample;
+            }
+            m_lastViewMs = 0;
+            for (size_t v = 0; v < m_slotViewPlanes[oldSlot].size(); ++v)
+            {
+                const uint64_t t0 = ticks[2 + 2 * v], t1 = ticks[3 + 2 * v];
+                if (t1 <= t0) continue;  // not bracketed (the view's passes ran on another queue): no measurement
+                const float ms = (float)((t1 - t0) * m_tickMs);
+                m_lastViewMs += ms;
+                const uint32_t p = m_slotViewPlanes[oldSlot][v], rect = m_slotViewRects[oldSlot][v];
+                if (p < m_planeViewMs.size())
+                {
+                    m_planeViewMs[p] = ms;
+                    m_planeViewFrame[p] = m_slotFrame[oldSlot];
+                }
+                const float perPixel = std::max(ms - m_settings.planarViewFixedMs, 0.0f) * 1e6f / std::max(rect, 1u);
+                m_viewNsPerPixel += (perPixel - m_viewNsPerPixel) / 4;
+            }
+        }
     }
     PlanarGpu planar{};
     TextureRef planarColor[kPlanarMax];
-    m_lastPlanarViews = m_lastPlanarPixels = m_lastCandidates = 0;
+    m_lastPlanarViews = m_lastPlanarPixels = m_lastCandidates = m_lastRectPixels = 0;
     std::vector<uint32_t>& slotPlanes = m_slotPlanes[ringSlot];
     slotPlanes.clear();
+    m_slotViewPlanes[ringSlot].clear();
+    m_slotViewRects[ringSlot].clear();
+    // Exact threshold of the cost choice: a view costs at least a + b x pixels, rays c x pixels, so a plane can pay off
+    // only when c > b and pixels > a / (c - b). Until the trace has been measured no plane is chosen.
+    const float rayNs = m_rayNs, viewNs = m_viewNsPerPixel, viewFixedNs = s.planarViewFixedMs * 1e6f;
+    const bool planarCanWin = fc.services.renderView && (m_planarForced || rayNs > viewNs);
+    const double minPixels = m_planarForced ? 1.0 : planarCanWin ? viewFixedNs / (rayNs - viewNs) : 1e30;
     const auto selectStart = std::chrono::steady_clock::now();
-    if (m_planarEnabled && !m_planes.empty())
+    if (m_planarEnabled && !m_planes.empty() && planarCanWin)
     {
         struct Candidate
         {
             uint32_t plane, x, y, w, h;
-            bool eligible;  // a current read-back count at or above reflection.planar_min_pixels
+            bool eligible;  // a current read-back count whose rays cost more than the plane's view
         };
         std::vector<Candidate> candidates;
         const float4x4& vp = main.view.viewProj;
         const float3 cam = main.view.position;
         const uint64_t frame = fc.frame.frameIndex;
         // Exact bound: a plane of area A whose bounds are at distance d covers a solid angle <= A / d^2, and a pixel
-        // subtends >= cos^3(corner) / f^2 sr, so pixels <= A f^2 / (d^2 cos^3). Planes whose bound is below
-        // reflection.planar_min_pixels can never pay for a camera and are not visited (BVH on bounds and max area).
+        // subtends >= cos^3(corner) / f^2 sr, so pixels <= A f^2 / (d^2 cos^3). Planes whose bound is below minPixels
+        // can never pay for a camera and are not visited (BVH on bounds and max area).
         const float tanY = std::tan(main.view.verticalFov * 0.5f), tanX = tanY * width / height;
         const float cosCorner = 1.0f / std::sqrt(1 + tanX * tanX + tanY * tanY);
-        const float reach = s.planarMinPixels ? focal * focal / (s.planarMinPixels * cosCorner * cosCorner * cosCorner) : 1e30f;  // d^2 <= A * reach
+        const float reach = minPixels > 0 ? (float)(focal * focal / (minPixels * cosCorner * cosCorner * cosCorner)) : 1e30f;  // d^2 <= A * reach
         auto distance2 = [&](const float3& lo, const float3& hi) {
             const float dx = std::max({ lo.x - cam.x, 0.0f, cam.x - hi.x }), dy = std::max({ lo.y - cam.y, 0.0f, cam.y - hi.y }),
                         dz = std::max({ lo.z - cam.z, 0.0f, cam.z - hi.z });
@@ -407,9 +461,16 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             if (behind) x0 = y0 = 0, x1 = (float)width, y1 = (float)height;  // crosses the near plane: whole view
             const uint32_t ix0 = (uint32_t)std::clamp(std::floor(x0) - 1, 0.0f, (float)width), iy0 = (uint32_t)std::clamp(std::floor(y0) - 1, 0.0f, (float)height);
             const uint32_t ix1 = (uint32_t)std::clamp(std::ceil(x1) + 1, 0.0f, (float)width), iy1 = (uint32_t)std::clamp(std::ceil(y1) + 1, 0.0f, (float)height);
-            if (ix1 <= ix0 || iy1 <= iy0 || (uint64_t)(ix1 - ix0) * (iy1 - iy0) < s.planarMinPixels) return;  // the rectangle bounds the count too
+            const uint64_t rect = (uint64_t)(ix1 - ix0) * (iy1 - iy0);
+            if (ix1 <= ix0 || iy1 <= iy0 || (double)rect < minPixels) return;  // the rectangle bounds the count too
             const bool current = m_planeLastSeen[k] + 1 == frame && m_planeRunStart[k] + fc.framesInFlight <= frame;
-            candidates.push_back({ k, ix0, iy0, ix1 - ix0, iy1 - iy0, current && m_planePixels[k] >= s.planarMinPixels });
+            // The view's cost: measured within the last second, else the model a + b x rectangle.
+            const bool measured = m_planeViewFrame[k] != UINT64_MAX && frame < m_planeViewFrame[k] + 60;
+            const double viewCost = measured ? m_planeViewMs[k] * 1e6 : viewFixedNs + (double)viewNs * rect;
+            const double rayCost = (double)rayNs * m_planePixels[k];
+            const bool hadCamera = m_planeCameraFrame[k] + 1 == frame;
+            const bool cheaper = hadCamera ? viewCost < rayCost * 1.1 : viewCost * 1.1 < rayCost;  // hysteresis
+            candidates.push_back({ k, ix0, iy0, ix1 - ix0, iy1 - iy0, current && (m_planarForced ? m_planePixels[k] > 0 : cheaper) });
         };
         uint32_t stack[64], top = 0;
         stack[top++] = 0;
@@ -445,8 +506,19 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             if (view)
             {
                 const ViewDesc v = ViewDesc::planarReflection(main.view, m_planes[c.plane].plane, c.x, c.y, c.w, c.h);
-                planarColor[planar.views] = fc.services.renderView(fc, v).color;
+                const uint32_t index = planar.views;
+                ID3D12QueryHeap* heap = m_timestamps.Get();
+                const uint32_t tick = ringSlot * kTicks + 2 + 2 * index;
+                g.addPass("r.refl.view.begin", QueueType::Graphics, [&](PassBuilder& b) { b.keep(); },
+                          [heap, tick](PassContext& pc) { pc.cmd->EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, tick); });
+                planarColor[index] = fc.services.renderView(fc, v).color;
+                g.addPass("r.refl.view.end", QueueType::Graphics, [&](PassBuilder& b) { b.keep(); },
+                          [heap, tick](PassContext& pc) { pc.cmd->EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, tick + 1); });
+                m_slotViewPlanes[ringSlot].push_back(c.plane);
+                m_slotViewRects[ringSlot].push_back(c.w * c.h);
+                m_planeCameraFrame[c.plane] = frame;
                 m_lastPlanarPixels += m_planePixels[c.plane];
+                m_lastRectPixels += c.w * c.h;
                 ++planar.views;
             }
             if (m_planeLastSeen[c.plane] + 1 != frame)
@@ -466,7 +538,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const uint32_t planarOffset = ringSlot * kPlanarSlotBytes;
     std::memcpy(m_planarMapped + planarOffset, &planar, sizeof planar);
     const BufferRef planarCounts = g.importBuffer(m_planarCounts.Get(), { "R planar counts", kCandidatesMax * 4, 0 });
-    const BufferRef planarReadback = g.importBuffer(m_planarReadback.Get(), { "R planar count readback", kPlanarSlots * kCandidatesMax * 4, 0 });
+    const BufferRef planarReadback = g.importBuffer(m_planarReadback.Get(), { "R planar readback", kPlanarSlots * kReadbackStride, 0 });
+    const uint64_t readbackOffset = (uint64_t)ringSlot * kReadbackStride;
     const uint32_t planarSrv = m_planarSrv;
 
     if (fresh)
@@ -512,16 +585,6 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch(tilesX, tilesY, 1);
               });
-    const uint64_t readbackOffset = (uint64_t)ringSlot * kCandidatesMax * 4;
-    g.addPass("r.refl.planar.readback", QueueType::Graphics,
-              [&](PassBuilder& b) {
-                  b.use(planarCounts, Use::CopySrc);
-                  b.use(planarReadback, Use::CopyDst);
-                  b.keep();
-              },
-              [planarCounts, planarReadback, readbackOffset](PassContext& c) {
-                  c.cmd->CopyBufferRegion(c.resource(planarReadback), readbackOffset, c.resource(planarCounts), 0, kCandidatesMax * 4);
-              });
     g.addPass("r.refl.args", QueueType::Compute, [&](PassBuilder& b) { b.use(args, Use::UavCompute); },
               [&shaders, args](PassContext& c) {
                   const uint32_t k[4] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width) };
@@ -542,6 +605,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const uint32_t frame = (uint32_t)fc.frame.frameIndex;
     ID3D12Resource* argumentResource = m_arguments.Get();
     const uint32_t specularLut = rt::specularAlbedoSrv(fc.device);
+    ID3D12QueryHeap* timestamps = m_timestamps.Get();
+    const uint32_t firstTick = ringSlot * kTicks;
     g.addPass("r.refl.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(args, Use::IndirectArgs);
@@ -557,7 +622,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
               [&pipeline, jobs, results, modes, probes, depth, gbuffer, cache, luts, atmosphere, sky, sun, rayLength, s, frame, scene, frameConstants, argumentResource,
-               variant, specularLut](PassContext& c) {
+               variant, specularLut, timestamps, firstTick](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = c.srv(jobs);
                   k[1] = c.uav(results);
@@ -580,7 +645,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   std::memcpy(&k[24], scene, sizeof scene);
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
+                  c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick);
                   pipeline.dispatchIndirect(c.cmd, argumentResource, 16 + variant * kDescStride);
+                  c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick + 1);
               });
     const uint32_t planarCount = planar.views;
     g.addPass("r.refl.resolve", QueueType::Compute,
@@ -602,6 +669,21 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.computeConstants(k, 16);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch(tilesX, tilesY, 1);
+              });
+    // One copy into this frame's read-back slot (read framesInFlight later): candidate pixel counts, timestamps (trace,
+    // views) and job counters. A single copy-destination use per frame: the read-back heap buffer takes no barrier.
+    const uint32_t tickCount = 2 + 2 * planarCount;
+    g.addPass("r.refl.readback", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(planarCounts, Use::CopySrc);
+                  b.use(args, Use::CopySrc);
+                  b.use(planarReadback, Use::CopyDst);
+                  b.keep();
+              },
+              [timestamps, firstTick, tickCount, args, planarCounts, planarReadback, readbackOffset](PassContext& c) {
+                  c.cmd->CopyBufferRegion(c.resource(planarReadback), readbackOffset, c.resource(planarCounts), 0, kCandidatesMax * 4);
+                  c.cmd->ResolveQueryData(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick, tickCount, c.resource(planarReadback), readbackOffset + kTicksOffset);
+                  c.cmd->CopyBufferRegion(c.resource(planarReadback), readbackOffset + kJobsOffset, c.resource(args), 0, 16);
               });
 }
 } // namespace unx::render::refl
@@ -632,6 +714,7 @@ ReflectionSystem::Stats ReflectionSystem::readStats()
     D3D12_RANGE none{ 0, 0 };
     readback->Unmap(0, &none);
     const uint32_t largest = m_planePixels.empty() ? 0 : *std::max_element(m_planePixels.begin(), m_planePixels.end());
-    return { v[0], v[1], v[2], v[3], m_lastPlanarViews, m_lastPlanarPixels, m_lastCandidates, largest, m_lastSelectMs };
+    return { v[0], v[1], v[2], v[3], m_lastPlanarViews, m_lastPlanarPixels, m_lastCandidates, largest, m_lastSelectMs, m_lastRectPixels, m_rayNs, m_viewNsPerPixel,
+             m_lastViewMs };
 }
 } // namespace unx::render::refl

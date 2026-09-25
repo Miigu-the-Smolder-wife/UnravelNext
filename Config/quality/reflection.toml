@@ -7,5 +7,5 @@ mirror_roughness_max = 0.14
 exact_set_min_hits = 64
 planar_max_wave_slope_deg = 2.0
 planar_views_max = 4                   # reflection cameras per frame (largest pixel counts); others use rays
-planar_min_pixels = 110000             # a plane gets a reflection camera from this many mirror pixels on it: design 2.6
-                                       # C_planar = A_r * 2.14 ms + 0.05 ms vs rays A_r * 6.0 ms -> 0.05 / 3.86 * 8.3 M px [expected]
+planar_view_fixed_ms = 0.05             # prior cost of a planar reflection view: a + b x its screen rectangle (b per pixel, ns);
+planar_view_ns_per_px = 0.26            # replaced online by the view's own measured cost. Design 2.6: 2.14 ms per 8.3 M px [expected]

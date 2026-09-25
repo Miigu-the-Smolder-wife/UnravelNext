@@ -6,8 +6,9 @@
 // specular reflection of the GI cache (f0 0.04), whose texels are Monte Carlo estimates that differ between the two
 // independent runs by ~1 % per pixel. So a pixel mismatches when it differs by more than 10 % (a misregistered
 // reflection differs by the checker contrast); fewer than 1 % may (checker edges, sub-pixel ray jitter), and the mean
-// signed difference must stay under 0.5 % (no bias). Run C raises reflection.planar_min_pixels above the mirror's pixel
-// count: the cost formula must then keep every mirror pixel on rays.
+// signed difference must stay under 0.5 % (no bias). Run B forces the camera (setPlanarForced) to test the path; run C
+// leaves the choice to the cost formula with a view prior of 1 s (reflection.planar_view_fixed_ms): every mirror pixel
+// must then stay on rays.
 //
 //   unx_test_reflection_planarmirror [--validate]
 #include "unx/core/Config.h"
@@ -120,7 +121,14 @@ Buffer createBuffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE type, bool u
 }
 
 // Reflection values (rgb) and modes (w) of every 2nd pixel after a few frames.
-std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, bool planar, uint32_t width, uint32_t height,
+enum class Planar
+{
+    Off,
+    Forced,
+    Cost
+};
+
+std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, Planar planar, uint32_t width, uint32_t height,
                        uint32_t& planarViews)
 {
     GpuScene gpuScene(device);
@@ -234,7 +242,8 @@ std::vector<float> run(Device& device, ShaderLibrary& shaders, const QualityConf
                       });
         gi::GiSystem::get(fc).record(fc, main, rays);
         reflSystem = &refl::ReflectionSystem::get(fc);
-        reflSystem->setPlanarEnabled(planar);
+        reflSystem->setPlanarEnabled(planar != Planar::Off);
+        reflSystem->setPlanarForced(planar == Planar::Forced);
         reflSystem->record(fc, main, rays);
         const TextureRef reflection = main.reflection, modes = reflSystem->modes();
         const BufferRef resultRef = graph.importBuffer(result.resource.Get(), { "test result", resultBytes, 16 });
@@ -289,14 +298,13 @@ int main(int argc, char** argv)
         ShaderLibrary shaders(device, executableDirectory() / "shaders");
         const scene::Scene s = checkerRoom();
         uint32_t viewsA = 0, viewsB = 0;
-        const std::vector<float> a = run(device, shaders, quality, s, false, 1920, 1080, viewsA);
-        const std::vector<float> b = run(device, shaders, quality, s, true, 1920, 1080, viewsB);
-        // Run C: the same mirror with reflection.planar_min_pixels above its pixel count (1920 x 1080 = 2.07 M) must stay
-        // on rays (the cost formula's choice), every mirror pixel M as in run A.
+        const std::vector<float> a = run(device, shaders, quality, s, Planar::Off, 1920, 1080, viewsA);
+        const std::vector<float> b = run(device, shaders, quality, s, Planar::Forced, 1920, 1080, viewsB);
+        // Run C: the cost formula with a view that costs more than any ray count: every mirror pixel M as in run A.
         QualityConfig costly = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
-        costly.applyOverride("reflection.planar_min_pixels=4000000");
+        costly.applyOverride("reflection.planar_view_fixed_ms=1000");
         uint32_t viewsC = 0, rayPixelsC = 0;
-        const std::vector<float> runC = run(device, shaders, costly, s, true, 1920, 1080, viewsC);
+        const std::vector<float> runC = run(device, shaders, costly, s, Planar::Cost, 1920, 1080, viewsC);
         for (size_t i = 0; i < runC.size() / 4; ++i)
             if (a[4 * i + 3] == 1 && runC[4 * i + 3] == 1) ++rayPixelsC;
         uint32_t compared = 0, mismatched = 0, planarPixels = 0, mirrorPixels = 0;
@@ -327,7 +335,7 @@ int main(int argc, char** argv)
         logf("planar mirror: run A (rays) %u M pixels, run B %u planar view(s), %u planar pixels; %u compared, %u differ by > 10 %% (%.3f %%, checker "
              "edges), mean relative difference %.4f %% -> %s\n",
              mirrorPixels, viewsB, planarPixels, compared, mismatched, 100 * mismatchFraction, compared ? 100 * sumDiff / compared : 0.0, pass ? "PASS" : "FAIL");
-        logf("planar mirror: run C (planar_min_pixels above the count) %u planar view(s), %u of %u mirror pixels on rays\n", viewsC, rayPixelsC, mirrorPixelsA);
+        logf("planar mirror: run C (cost formula, view prior 1 s) %u planar view(s), %u of %u mirror pixels on rays\n", viewsC, rayPixelsC, mirrorPixelsA);
         rt::RayPipeline::releaseDevice(device);
         rt::RayScene::releaseDevice(device);
         device.waitIdle();
