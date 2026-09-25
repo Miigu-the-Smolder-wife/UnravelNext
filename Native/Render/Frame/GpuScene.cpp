@@ -469,8 +469,32 @@ void GpuScene::updateTransforms(uint64_t frameIndex, std::span<const InstanceTra
             m_movedNow.push_back(u.instance);
         }
         rows(u.objectToWorld, g.objectToWorld);
+        if (u.flags & kTransformTeleport) std::memcpy(g.prevObjectToWorld, g.objectToWorld, sizeof g.objectToWorld);
         markRecord(u.instance);
     }
+}
+
+void GpuScene::resetMotion()
+{
+    // Only what changed in this frame differs from its previous state (last frame's changes settle in flushUpdates).
+    for (uint32_t i : m_movedNow)
+    {
+        std::memcpy(m_instances[i].prevObjectToWorld, m_instances[i].objectToWorld, sizeof m_instances[i].objectToWorld);
+        markRecord(i);
+    }
+    for (uint32_t i : m_posedNow)  // uploaded with this frame's palettes (flushUpdates: the posed instances' previous rows)
+    {
+        const uint32_t first = m_instances[i].bonePalette * 3, n = paletteJoints(i) * 3;
+        std::copy(m_palette.begin() + first, m_palette.begin() + first + n, m_prevPalette.begin() + first);
+    }
+}
+
+std::span<const float4> GpuScene::palette(uint32_t instance) const
+{
+    if (instance >= m_instances.size()) fail("GpuScene::palette: instance %u of %zu", instance, m_instances.size());
+    const uint32_t n = paletteJoints(instance) * 3;
+    if (n == 0) return {};
+    return { m_palette.data() + (size_t)m_instances[instance].bonePalette * 3, n };
 }
 
 void GpuScene::updateSkeleton(uint64_t frameIndex, uint32_t skeleton, std::span<const float3x4> jointToModel)

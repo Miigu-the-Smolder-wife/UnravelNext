@@ -1380,6 +1380,25 @@ UNX_TEST(gpu_scene_frame_updates)
     CHECK(same(translationOf(g.instances[0].objectToWorld), { 3, 0, 0 }) && same(translationOf(g.instances[0].prevObjectToWorld), { 1, 0, 0 }));
     CHECK(g.instances[0].transformRevision == revision0 + 2);
     CHECK(same(translationOf(gs.instances()[0].objectToWorld), { 3, 0, 0 }));  // CPU mirror
+
+    // Frame 3 (v1.35): a teleport has no motion (previous = the new transform).
+    const InstanceTransformUpdate jump3[] = { { 0, translation(10, 0, 0), kTransformTeleport } };
+    gs.updateTransforms(3, jump3);
+    gs.flushUpdates(3, 2, shaders());
+    g = readBack();
+    CHECK(same(translationOf(g.instances[0].objectToWorld), { 10, 0, 0 }) && same(translationOf(g.instances[0].prevObjectToWorld), { 10, 0, 0 }));
+
+    // Frame 4: a restore (resetMotion) after this frame's move and pose: no motion anywhere; the CPU palette accessor.
+    const InstanceTransformUpdate move4[] = { { 0, translation(11, 0, 0) } };
+    gs.updateTransforms(4, move4);
+    const float3x4 pose4[] = { translation(0, 5, 0) };
+    gs.updateSkeleton(4, 0, pose4);
+    gs.resetMotion();
+    gs.flushUpdates(4, 2, shaders());
+    g = readBack();
+    CHECK(same(translationOf(g.instances[0].prevObjectToWorld), { 11, 0, 0 }) && g.palette[1].w == 5 && g.prevPalette[1].w == 5);
+    const std::span<const float4> cpuPalette = gs.palette(1);
+    CHECK(cpuPalette.size() == 3 && cpuPalette[1].w == 5 && gs.palette(0).empty());
 }
 
 UNX_TEST(material_tables_on_the_gpu)

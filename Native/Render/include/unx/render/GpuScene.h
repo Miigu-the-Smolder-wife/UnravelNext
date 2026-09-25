@@ -51,7 +51,9 @@ struct InstanceTransformUpdate
 {
     uint32_t instance = 0;
     float3x4 objectToWorld;
+    uint32_t flags = 0;  // kTransformTeleport: the instance jumped (prevObjectToWorld = objectToWorld, zero motion)
 };
+constexpr uint32_t kTransformTeleport = 1;
 
 class GpuScene
 {
@@ -79,6 +81,13 @@ public:
     //   setInstanceVisible: hidden instances carry gpu::kInstanceHidden; every reader skips them (V culling, R's TLAS).
     // The CPU mirror (instances()) is updated immediately.
     void updateTransforms(uint64_t frameIndex, std::span<const InstanceTransformUpdate> updates);
+    // History discontinuity (FrameContext::discontinuity, kDiscontinuityRestore; FrameRenderer calls it before
+    // flushUpdates): this frame's previous transforms and palettes = the current ones, so no instance has motion.
+    void resetMotion();
+    // The current frame's bone palette of a skinned instance (CPU copy): paletteJoints(instance) joints of 3 float4 rows
+    // (row-major 3 x 4, jointToModel x inverseBind); empty for other instances. Valid until the next updateSkeleton.
+    std::span<const float4> palette(uint32_t instance) const;
+    uint32_t paletteJoints(uint32_t instance) const;
     void updateSkeleton(uint64_t frameIndex, uint32_t skeleton, std::span<const float3x4> jointToModel);
     void setInstanceVisible(uint32_t instance, bool visible);
     // Material textures published by M's texture system (INTERFACES_KO.md 6.3, v1.10): one entry per scene material.
@@ -109,7 +118,6 @@ private:
     void release(Buffer& b);
     void markRecord(uint32_t instance);
     void writePalette(uint32_t instance, std::vector<float4>& palette);  // jointToModel x inverseBind of its skeleton
-    uint32_t paletteJoints(uint32_t instance) const;
     struct Upload
     {
         ComPtr<ID3D12Resource> buffer;

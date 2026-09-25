@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.34, 2026-09-25)
+# UnravelNext 인터페이스 (v1.35, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -304,9 +304,34 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 ### 5.5 프레임 상수 (b1, `Frame.hlsli` ↔ `gpu::FrameConstants`, 544 B)
 
 뷰 행렬 5개(row_major), 카메라 위치·near, 클립 평면, 뷰 크기·종류·프레임 번호, 시간·dt·노출(`1/(1.2·2^EV100)`)·tan(fov/2), 태양 방향·조도(lux, 대기 위)·색·각반지름, 바람 방향·속도, 장면 버퍼 bindless 인덱스(인스턴스, 메시, 서브메시, 정점, 인덱스, 클러스터, 클러스터 정점 인덱스, 클러스터 삼각형, LOD 레벨, 재질, 재질 리매핑, 광원, 스킨, 본 팔레트 현재/이전, 재질 모델 LUT, LOD 레벨 클러스터 목록 `g_lodLevelClusters`(v1.1, 예비 칸 사용, 크기 불변)), 개수, 장면 revision. 패스는 `c.bindFrameConstants(view.frameConstants)`로 묶는다.
-- (v1.34) 마지막 행(16 B, 528 → 544 B): `coverageMaskLut`(coverage 마스크 LUT SRV, 5.5.1), `giRaysThisFrame`(이 프레임의 GI 광선 몫, 설계 개정 10.3: 배분 규칙이 R·I 합의로 들어가기 전까지 0), 예비 2칸. HLSL은 `g_coverageMaskLut`, `g_giRaysThisFrame`이다. 앞 필드의 오프셋은 바뀌지 않는다.
+- (v1.34) 마지막 행(16 B, 528 → 544 B): `coverageMaskLut`(coverage 마스크 LUT SRV, 5.5.1), `giRaysThisFrame`(이 프레임의 GI 광선 몫, 설계 개정 10.3. 배분은 R의 GiSystem이 `FrameContext::gpuSimulation`으로 하고, 이 칸은 R이 진단용으로 채운다. 코어는 0을 쓴다), 예비 2칸. HLSL은 `g_coverageMaskLut`, `g_giRaysThisFrame`이다. 앞 필드의 오프셋은 바뀌지 않는다.
 
 **트랙 지속 상태(v1.1)**: `FramePassContext::state<T>("<트랙>.<이름>")`은 `FrameRenderer`가 소유한 저장소(`TrackState`)에서 T를 처음 쓸 때 만들고, 렌더러 파괴 때 GPU 유휴를 기다린 뒤 없앤다(히스토리 버퍼, 풀, 캐시). 키 하나에는 늘 같은 타입을 쓴다. 렌더러 없이 만든 컨텍스트에서는 실패한다. 트랙이 이미 쓰는 장치 키 레지스트리(`DeviceState.h`)는 그대로 둬도 되고, 수명 훅이 필요하면 이것으로 옮긴다.
+
+### 5.5.2 이력 불연속과 결정성 (v1.35, I 요청 `20260925_I_history_discontinuity.md`, S·R·M 목록)
+- **신호**: 호스트가 사건 뒤 첫 프레임에 `FrameContext::discontinuity`를 켠다. I의 ABI는 `UnxFrameSetDiscontinuity(r, flags)`이고, 떨어진 패킷의 비트는 다음 패킷에 OR로 합쳐진다.
+  - `kDiscontinuityRestore`: World 스냅숏 복원, 세이브 로드, 분기 변경이다. 호스트는 committed World의 epoch·branch·StateGeneration이 바뀌거나 tick이 뒤로 가는 것으로 안다.
+  - `kDiscontinuityCut`: 카메라 컷이다. 게임 코드가 `UnravelNextRenderer.MarkDiscontinuity(Cut)`을 부른다. 카메라 점프를 추정해서 감지하지는 않는다.
+  - 개체 하나의 순간이동은 전역 신호가 아니라 인스턴스별 `InstanceTransformUpdate::flags = kTransformTeleport`다(6.3).
+- **코어가 하는 것**:
+  - 두 비트 모두: 메인 뷰 `prevViewProj = viewProj`(카메라 움직임 0).
+  - Restore: `GpuScene::resetMotion()`으로 이 프레임의 이전 변환과 이전 팔레트를 지금 것으로 둔다(개체 움직임 0).
+- **트랙이 하는 것**(시간 상태 목록, 각 트랙 제출):
+
+  | 트랙 | 상태 | Restore | Cut | 재수렴 |
+  |---|---|---|---|---|
+  | S | VSM 태양·국소광 페이지 캐시, 움직이는 태양 스케줄 | 버림 | 버림(시점 페이지) | 1프레임. 신호 프레임에는 전부 다시 그리므로 지금 경로에서 4K 9.4 ms 스파이크가 생긴다. 한 경로 VSM(매 프레임 전부 다시 그리기)이면 이 항목과 스파이크가 없다 |
+  | S | 대기 표(투과율, J_ms, 하늘 뷰) | 유지(매질·태양·고도의 순수 함수) | 유지 | 0 |
+  | S | 날씨의 여러 프레임 분할 재구축 | 버리고 새 입력으로 한 프레임에 | 같음 | 1 |
+  | R | GI 월드 캐시(4K 138.8 MB) | 버림 | **유지**(세계 공간, 시점 무관) | 1~13프레임(백색로 13, 열린 하늘 2, 햇빛 지면 1; 한도 `gi.relight_frames_max` = 8) |
+  | R | 반사 거리 이력(16.6 MB), 화면 프로브 | 버림 | 버림 | 1 |
+  | R | RayScene 프록시 절단 이력·정확 집합 | 현재 거리로 다시 정함 | 같음 | framesInFlight + 1 |
+  | M | 없음(모든 패스가 그 프레임 입력만 읽는다) | — | — | 0 |
+
+- **같음의 수준(계약)**:
+  1. 같은 GPU·드라이버에서 Restore 신호 뒤 입력 열이 같으면 결정적 부분집합(아래 결정성 항의 원천을 뺀 것)은 비트 동일하다. M·S는 지금 그렇다(M 확인, S는 VsmTests의 discontinuity 절로 실측 예정).
+  2. 전체 렌더러의 비트 동일은 **결정성 결정에 달렸다(결정 대기)**. R GI의 비결정 원천은 세 가지다: 원자 free list 순서에서 나온 광선 seed, 갱신 선택의 원자 선착순, 용량 압박 때 할당 순서. 결정적 대안(64-bit 키 seed, hash 우선순위 radix select)의 비용은 평시 +0.03~0.05 ms, 압박 장면 +0.08 ms[R 예상]이다. 평면 뷰 대 광선 선택은 실측 GPU 시간 적합을 결정 모드에서 기기별 고정 계수로 바꾼다. 선택지: (i) 늘 켬, (ii) 결정 모드 스위치(시험·재생 기록에서 켬). 합계표의 여유(숲·수변 목표선 ±0.06)와 함께 설계 개정·사용자 결정으로 정한다.
+  3. 신호 뒤 K프레임이 지나면 영상은 신호 없이 이어진 실행과 기준 비교 한도(3.4) 안이다. K = 트랙 재수렴의 최댓값이다(지금 R GI 13).
 
 ### 5.5.1 V ↔ M 경계 (v1.2)
 - **V가 낸다**: vis id·depth·visible clusters·HiZ(대역 A), coverage 층(대역 B/C) fragment 목록 — 픽셀별 깊이 순 정렬, fragment마다 정확 면적·32-부표본 마스크·vis id(7.1). V는 fragment를 셰이딩하지 않는다.
@@ -349,6 +374,7 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 텍스처(mip 0, 형식 6종), 재질(클래스, baseColor, roughness(지각), metallic, specular, emissive(nit), alphaCutoff, transmission, ior, twoSided, 텍스처 5종), 메시(위치·법선·탄젠트(노멀맵이면 필수)·uv0·인덱스·서브메시·스킨 스트림), 인스턴스(메시, 변환, 플래그 CastShadow/Dynamic/Skinned/Wind, 스켈레톤, 바람, 서브메시별 재질 교체), 스켈레톤 포즈, 광원 6종, 태양, 대기(이전 엔진 수식·기본값), 바람, 카메라, 카메라 경로. `serialize`는 결정적이고 `contentHash`(SHA-256)가 장면 identity다. `validate`가 구조 규칙을 검사한다.
 
 ### 6.3 GPU 장면 (`GpuScene.h`, `GpuSceneLayout.h` ↔ `Scene.hlsli`)
+- (v1.35) `InstanceTransformUpdate::flags`의 `kTransformTeleport`: 그 인스턴스는 이 프레임에 `prevObjectToWorld = objectToWorld`(움직임 0)다. I의 `UnxTransformUpdate` 예약 칸이 `UNX_TRANSFORM_TELEPORT`로 이어진다. 같은 프레임에 순간이동 뒤 다시 움직이면 이전 = 순간이동 위치다. `GpuScene::resetMotion()`은 이 프레임에 바뀐 모든 인스턴스의 이전 변환과 이전 팔레트를 지금 것으로 둔다(Restore, 5.5.2). `GpuScene::palette(instance)`(R 요청)는 이번 프레임 본 팔레트의 CPU 사본이다. 조인트마다 float4 3행(행 우선 3 × 4, jointToModel × inverseBind)이고, 다음 `updateSkeleton`까지 유효하다. [실측] 단위 테스트 `gpu_scene_frame_updates`(순간이동, resetMotion, 팔레트 접근자).
 `GpuScene::upload(scene)`가 레코드를 채운다(코어 소유). 크기 고정: Instance 144 B, Mesh 80 B, Submesh 16 B, Vertex 32 B(v1 비압축; `loadVertex`로만 읽으므로 V/M이 압축해도 인터페이스 변경 아님), SkinVertex 16 B, Cluster 64 B, LodLevel 16 B, Material 80 B, Light 80 B, VisibleCluster 8 B. 클러스터 계층은 V의 빌더(`Tools/ClusterBuilder`)가 `GpuScene::setClusters(ClusterData)`로 넣는다. `GpuScene::clusters()`는 그 CPU 사본(메시별 `clusterOffset/Count`, `lodLevelOffset/Count`, `lodLevelClusters`), `GpuScene::srv(name)`은 클러스터 버퍼와 V 내부 버퍼(`ClusterData::named`)의 bindless SRV다(v1.1). R은 `GpuScene::buffer("vertices" | "indices" | "clusters" | "clusterVertexIndices" | "clusterTriangles" | "lodLevels" | "lodLevelClusters" | ...)`와 메시의 원본 삼각형(`indexOffset`, `triangleCount`) 또는 LOD 레벨의 클러스터로 BLAS를 만든다.
 
 **재질 텍스처(v1.10, M 요청 `20260925_M_material_textures.md`)**: M의 텍스처 시스템이 `GpuScene::setMaterialTextures(std::vector<gpu::MaterialTextures>)`로 재질마다 bindless SRV `{baseColor, normal, roughMetal, emissive, occlusion}`와 clamp 비트(`MaterialTextureBit`)를 게시한다. 코어는 재질 버퍼를 다시 올린다(새 SRV). 바뀐 재질의 `revision`과 장면 `revision()`을 올린다. SRV 수명은 M이 소유한다. `gpu::Material::textureClamp`(이전 `pad0`)의 비트 1 = clamp 주소(`g_anisoClamp`), 0 = wrap. 텍스처 형식(알파 coverage 보존 밉 등)은 M의 공개 헤더 `Passes/Material/MaterialTextures.hlsli`(5.6)가 정한다. 프레임 상수에 재질 버퍼 SRV가 들어가므로, 게시는 그 프레임의 어떤 프레임 상수보다 먼저 한다. M의 진입점 `tracks::prepareScene(fc)`에서 하고, `FrameRenderer::record`가 맨 처음 부른다(v1.11). `FramePassContext`를 직접 만드는 테스트 프레임은 `prepareScene`을 한 번 부르면 텍스처가 게시된다.
@@ -568,6 +594,10 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.28 (2026-09-25):
   - **GpuLock `-Kind timing|correctness`**(조율 요청, 3.3): 종류를 `current.json`과 `history.log`에 기록한다. 백그라운드 CPU 작업의 멈춤 규칙은 timing만 대상이다(C의 PauseGate는 `kind`를 읽도록 C가 맞춘다). history 줄의 형식이 `acquire <트랙> (<종류>) :: ...`로 바뀌었다.
   - **M 요청 `20260925_M_planar_mask_apron.md`(R 동의)**: `ViewDesc::planarMask` 값이 1 = 거울 픽셀(R이 읽음), 2 = 에이프런(거울 픽셀의 3×3 이웃, 그리고 셰이딩하지만 R은 읽지 않음), 0 = 건너뜀이 됐다. `planarTileMask`는 팽창된 마스크 기준이다. V·S·M은 "0 아님 = 그림" 그대로라 바뀌는 것이 없다(V의 64 px 컬링 마스크와 깊이 채움은 이미 0 아님으로 판정한다). R의 resolve만 "== 1"로 읽는다. 마스크 생성은 R 몫이다.
+- v1.35 (2026-09-25):
+  - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
+  - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
+  - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
 - v1.34 (2026-09-25):
   - **FrameConstants 544 B(5.5)**: `coverageMaskLut`, `giRaysThisFrame`, 예비 2칸.
   - **coverage 마스크 LUT(5.5.1, 설계 개정 11 b)**: `coverageTriangleMaskLut`, `coverageMaskTable()`. 게이트 결과는 5.5.1에 있다.

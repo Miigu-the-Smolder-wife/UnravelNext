@@ -147,8 +147,13 @@ gpu::FrameConstants FrameRenderer::frameConstants(const GpuScene& scene, const F
     return c;
 }
 
-ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& frame, TextureRef output)
+ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, TextureRef output)
 {
+    // History discontinuity (v1.35): no previous view in this frame; a restore also has no previous transforms or
+    // palettes. The tracks reset their own temporal state from frame.discontinuity.
+    FrameContext frame = in;
+    if (frame.discontinuity != 0) frame.mainView.prevViewProj = frame.mainView.viewProj;
+    if (frame.discontinuity & kDiscontinuityRestore) m_scene.resetMotion();
     m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);  // transforms, palettes, visibility of this frame
     FrameResources resources;
     FrameServices services;
