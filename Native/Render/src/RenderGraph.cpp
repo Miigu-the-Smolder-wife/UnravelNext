@@ -237,7 +237,20 @@ struct RenderGraph::Impl
     std::unique_ptr<Plan> plan;
     ComPtr<ID3D12Heap> heap;
     uint64_t heapSize = 0;
-    std::unordered_map<ID3D12Resource*, Views> importedViews;
+    // Views of imported resources, reused across frames. An entry holds a reference to its resource, so while it is
+    // cached no other resource can take its address (a raw-pointer key alone handed a new resource at a destroyed one's
+    // address that resource's stale descriptors: GBV "invalid resource pointed to by descriptor", DEVICE_HUNG [M]).
+    // An entry whose view description changed gets new views; one not imported in a frame is dropped after the GPU is
+    // past it (descriptors and reference released by the device's deferred calls).
+    struct Imported
+    {
+        ComPtr<ID3D12Resource> resource;
+        uint64_t viewKey = 0;
+        uint64_t frame = 0;
+        Views views;
+    };
+    std::unordered_map<ID3D12Resource*, Imported> importedViews;
+    uint64_t executeCount = 0;
     std::vector<ID3D12Resource*> framePointers;  // per resource id, this frame
     uint64_t prevFrameFence[kQueueTypeCount] = {};
 
@@ -246,7 +259,11 @@ struct RenderGraph::Impl
     ~Impl()
     {
         if (plan) releasePlan(*plan);
-        for (auto& [ptr, v] : importedViews) releaseViews(v);
+        for (auto& [ptr, e] : importedViews)
+        {
+            releaseViews(e.views);
+            if (e.resource) device.deferRelease(e.resource);
+        }
     }
 
     // Descriptor slots may still be read by frames in flight, so they return to the heap only after every queue
@@ -900,6 +917,29 @@ struct RenderGraph::Impl
         stats.cpuCompileMs = msSince(t0);
     }
 
+    // What an imported resource's views depend on (its declared description).
+    uint64_t viewKey(const ResourceNode& n) const
+    {
+        uint64_t h = mix(1469598103934665603ull, n.texture);
+        if (n.texture)
+        {
+            h = mix(h, n.tdesc.width);
+            h = mix(h, n.tdesc.height);
+            h = mix(h, n.tdesc.depthOrArraySize);
+            h = mix(h, n.tdesc.mipLevels);
+            h = mix(h, (uint64_t)n.tdesc.format);
+            h = mix(h, (uint64_t)n.tdesc.dimension);
+            h = mix(h, (uint64_t)n.tdesc.srvFormat);
+            h = mix(h, (uint64_t)n.tdesc.uavFormat);
+        }
+        else
+        {
+            h = mix(h, n.bdesc.size);
+            h = mix(h, n.bdesc.stride);
+        }
+        return h;
+    }
+
     void createViews(uint32_t r, ID3D12Resource* res, bool srv, bool uav, bool rt, bool ds, bool dsRead, Views& v)
     {
         const ResourceNode& n = resources[r];
@@ -987,7 +1027,7 @@ struct RenderGraph::Impl
     const Views& viewsOf(uint32_t r) const
     {
         const ResourceNode& n = resources[r];
-        if (n.imported) return importedViews.at(n.importedResource);
+        if (n.imported) return importedViews.at(n.importedResource).views;
         return plan->physical[r].views;
     }
 
@@ -1231,6 +1271,7 @@ void RenderGraph::execute(GpuProfiler* profiler)
     Impl::Plan& plan = *impl.plan;
 
     // This frame's resource pointers and imported views.
+    ++impl.executeCount;
     impl.framePointers.assign(impl.resources.size(), nullptr);
     for (uint32_t r = 0; r < impl.resources.size(); ++r)
     {
@@ -1238,10 +1279,31 @@ void RenderGraph::execute(GpuProfiler* profiler)
         if (n.imported)
         {
             impl.framePointers[r] = n.importedResource;
-            impl.importedViews.try_emplace(n.importedResource);
+            auto [it, fresh] = impl.importedViews.try_emplace(n.importedResource);
+            Impl::Imported& e = it->second;
+            const uint64_t viewKey = impl.viewKey(n);
+            if (fresh) e.resource = n.importedResource;  // holds a reference while cached
+            else if (e.frame == impl.executeCount && e.viewKey != viewKey)
+                fail("render graph: '%s' is imported twice in one frame with different descriptions", n.name.c_str());
+            else if (e.viewKey != viewKey)
+                impl.releaseViews(e.views);  // same resource, new description: new views
+            e.viewKey = viewKey;
+            e.frame = impl.executeCount;
         }
         else if (plan.physical[r].resource)
             impl.framePointers[r] = plan.physical[r].resource.Get();
+    }
+    // Imported resources not imported this frame leave the cache once the GPU is past their last use.
+    for (auto it = impl.importedViews.begin(); it != impl.importedViews.end();)
+    {
+        if (it->second.frame == impl.executeCount)
+        {
+            ++it;
+            continue;
+        }
+        impl.releaseViews(it->second.views);
+        impl.device.deferRelease(it->second.resource);
+        it = impl.importedViews.erase(it);
     }
     // Views for imported resources: created on first sight with the uses seen this frame.
     for (uint32_t p = 0; p < impl.passes.size(); ++p)
@@ -1251,7 +1313,7 @@ void RenderGraph::execute(GpuProfiler* profiler)
         {
             const auto& n = impl.resources[u.resource];
             if (!n.imported) continue;
-            Impl::Views& v = impl.importedViews[n.importedResource];
+            Impl::Views& v = impl.importedViews.at(n.importedResource).views;
             bool srv = u.use == Use::SrvCompute || u.use == Use::SrvGraphics;
             bool uav = u.use == Use::UavCompute || u.use == Use::UavComputeDisjoint || u.use == Use::UavGraphics;
             impl.createViews(u.resource, n.importedResource, srv, uav, u.use == Use::RenderTarget, u.use == Use::DepthWrite, u.use == Use::DepthRead, v);
@@ -1262,7 +1324,7 @@ void RenderGraph::execute(GpuProfiler* profiler)
         for (uint32_t r = 0; r < impl.resources.size(); ++r)
         {
             const auto& n = impl.resources[r];
-            const Impl::Views v = n.imported ? impl.importedViews[n.importedResource] : plan.physical[r].views;
+            const Impl::Views v = n.imported ? impl.importedViews.at(n.importedResource).views : plan.physical[r].views;
             logf("  frame resource '%s'%s: %p srv %u uav %u\n", n.name.c_str(), n.imported ? " (imported)" : "", (void*)impl.framePointers[r], v.srv, v.uav);
         }
 

@@ -559,6 +559,94 @@ UNX_TEST(graph_alias_reuse_waits_for_readers)
     for (int mode = 0; mode < 2; ++mode) CHECK(wrong[mode][0] == 0 && wrong[mode][1] == 0 && wrong[mode][2] == 0);
 }
 
+UNX_TEST(graph_imported_views_follow_their_resource)
+{
+    // Imported resources' views are cached across frames. The cache holds a reference to each resource while cached (no
+    // other resource can take its address), rebuilds the views when the declared description changes, and drops the
+    // entry (views and reference, after the GPU) once a frame does not import it. Then resources created and destroyed
+    // at one size, so their addresses may repeat, each get views of their own [M: a raw-pointer key handed a new
+    // resource a destroyed one's descriptors: GBV "invalid resource pointed to by descriptor", DEVICE_HUNG].
+    RenderGraph g(testDevice());
+    ID3D12PipelineState* fillPso = shaders().compute("Passes/Test/FillBuffer");
+    const uint32_t words = 1u << 18;  // 1 MB
+    auto makeBuffer = [&](bool readback) {
+        D3D12_HEAP_PROPERTIES hp{ readback ? D3D12_HEAP_TYPE_READBACK : D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = (uint64_t)words * 4;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        rd.Flags = readback ? D3D12_RESOURCE_FLAG_NONE : D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        ComPtr<ID3D12Resource> r;
+        check(testDevice().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&r)),
+              "test buffer");
+        return r;
+    };
+    ComPtr<ID3D12Resource> rb = makeBuffer(true);
+    auto refs = [](ID3D12Resource* r) {
+        r->AddRef();
+        return r->Release();
+    };
+    auto finish = [&]() {
+        for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+        testDevice().collectGarbage();
+    };
+    // One frame: fill 'count' words of the imported buffer (declared 'declared' words) with i ^ seed and read it back.
+    auto frame = [&](ID3D12Resource* res, uint32_t declared, uint32_t count, uint32_t seed) {
+        const BufferRef b = g.importBuffer(res, { "imported", (uint64_t)declared * 4, 0 });
+        g.addPass("fill", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(b, Use::UavCompute); },
+                  [=](PassContext& c) {
+                      const uint32_t k[4] = { c.uav(b), count, seed, 0 };
+                      c.cmd->SetPipelineState(fillPso);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch((count + 63) / 64, 1, 1);
+                  });
+        ID3D12Resource* dst = rb.Get();
+        g.addPass("readback", QueueType::Graphics,
+                  [&](PassBuilder& pb) {
+                      pb.use(b, Use::CopySrc);
+                      pb.keep();
+                  },
+                  [=](PassContext& c) { c.cmd->CopyBufferRegion(dst, 0, c.resource(b), 0, (uint64_t)words * 4); });
+        g.execute(nullptr);
+        finish();
+        const uint32_t* r = nullptr;
+        size_t wrong = 0;
+        check(rb->Map(0, nullptr, (void**)&r), "map readback");
+        for (uint32_t i = 0; i < count; ++i)
+            if (r[i] != (i ^ seed)) ++wrong;
+        rb->Unmap(0, nullptr);
+        return wrong;
+    };
+    auto idle = [&]() {  // a frame that imports nothing
+        g.addPass("idle", QueueType::Graphics, [&](PassBuilder& pb) { pb.keep(); }, [](PassContext&) {});
+        g.execute(nullptr);
+        finish();
+    };
+
+    ComPtr<ID3D12Resource> a = makeBuffer(false);
+    const ULONG base = refs(a.Get());
+    CHECK(frame(a.Get(), words / 2, words / 2, 0x1111u) == 0);
+    CHECK(refs(a.Get()) == base + 1);                          // held while cached
+    CHECK(frame(a.Get(), words, words, 0x2222u) == 0);         // declared twice as large: new views reach every word
+    idle();
+    idle();
+    CHECK(refs(a.Get()) == base);                              // not imported: dropped after the GPU
+    a.Reset();
+
+    size_t wrong = 0;
+    for (uint32_t k = 0; k < 24; ++k)  // same size each time: addresses may repeat once a buffer is gone
+    {
+        ComPtr<ID3D12Resource> b = makeBuffer(false);
+        wrong += frame(b.Get(), words, words, 0x9E3779B9u * (k + 1));
+        b.Reset();
+        idle();  // (the cache lets go of it here)
+    }
+    logf("    imported buffers created and destroyed 24 times at one size: %zu wrong words\n", wrong);
+    CHECK(wrong == 0);
+}
+
 UNX_TEST(graph_castable_view_formats)
 {
     // TextureDesc::srvFormat/uavFormat: written as R32_UINT through the UAV, read as R9G9B9E5_SHAREDEXP through the SRV
