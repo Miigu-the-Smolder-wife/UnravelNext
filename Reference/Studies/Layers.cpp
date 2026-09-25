@@ -263,6 +263,10 @@ struct Definitions
     Integrals in;
     const SpecPath* sp = nullptr;
     int coatForm = 0;  // candidate A's multiple-scattering coat term: 0 = Kulla-Conty additive (A), 1 = scaled f_c (A2)
+    // Candidate S: angle-dependent refraction spread of the base lobe through the rough coat,
+    // alpha'^2 = alpha_b^2 + (s(mu_i)^2 + s(mu_o)^2) alpha_c^2 / 4, s(mu) = 1 - cos(theta) / (eta cos(theta')) (the
+    // sensitivity of the refracted angle to the microfacet tilt; at normal incidence this is R1's formula).
+    bool spread = false;
     scene::model::Surface baseR1;  // base with alpha'_b
     double ac, ab;
     explicit Definitions(const Config& c) : cfg(c)
@@ -335,7 +339,14 @@ struct Definitions
             K = in.KMs;
         }
         const float3 pi = refractIn(wi), po = refractIn(wo);
-        const Rgb f1 = baseBrdf(baseR1, cfg.filmDef, po, pi) * (float)(Ti * To / (kEta * kEta));
+        scene::model::Surface lobe = baseR1;
+        if (spread)
+        {
+            const double si = 1 - wi.z / (kEta * pi.z), so = 1 - wo.z / (kEta * po.z);
+            const double a2 = ab * ab + 0.25 * (si * si + so * so) * ac * ac;
+            lobe.roughness = (float)std::sqrt(std::sqrt(a2));
+        }
+        const Rgb f1 = baseBrdf(lobe, cfg.filmDef, po, pi) * (float)(Ti * To / (kEta * kEta));
         const Rgb ret = in.atRgb(in.a, pi.z) - in.atRgb(in.e, pi.z);
         Rgb fms;
         const float* rb = &in.rhoBar.r;
@@ -888,7 +899,7 @@ std::string row(const std::string& name, double rc, const char* def, const Metri
 }
 } // namespace
 
-void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, bool candA, bool candB, bool candC, bool candD)
+void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, bool candA, bool candB, bool candC, bool candD, bool candE)
 {
     struct BaseDef
     {
@@ -916,7 +927,7 @@ void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, boo
     }
     std::ostringstream md, eq;
     md << "# Clearcoat R1 vs physical layer model [measured]\n\n"
-          "`unx_study_material_layers " << (candD ? "clearcoat_r1d" : candC ? "clearcoat_r1c" : candB ? "clearcoat_r1b" : candA ? "clearcoat_r1a" : msCoat ? "clearcoat_r1_ms" : "clearcoat_r1") << "`. Physical coat: "
+          "`unx_study_material_layers " << (candE ? "clearcoat_r1e" : candD ? "clearcoat_r1d" : candC ? "clearcoat_r1c" : candB ? "clearcoat_r1b" : candA ? "clearcoat_r1a" : msCoat ? "clearcoat_r1_ms" : "clearcoat_r1") << "`. Physical coat: "
        << (msCoat ? "microsurface multiple scattering (Heitz et al. 2016, energy conserving)" : "single-scattering microfacets (energy lost at grazing)")
        << ". Criteria (MATERIAL_LAYERS 3): albedo rel <= 2 % (or abs <= 0.005), L1 <= 0.05, "
           "render dE76 mean <= 1.0 and P99 <= 2.3 (white furnace / sun + sky sphere, 64 x 64). Photons per incidence bin: "
@@ -947,7 +958,8 @@ void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, boo
             Definitions d(c);
             computeIntegrals(c, d);
             SpecPath spd;
-            if (candC || candD)
+            if (candE) d.spread = true;
+            if (candC || candD || candE)
             {
                 // A2 + B2: scaled coat term; base path scaled by g(mu_i) g(mu_o) so that every incidence bin's base-path
                 // energy equals the census value sum_k S_k rho^k (rho = a(mu') per channel), solved by symmetric
@@ -1012,12 +1024,12 @@ void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, boo
             }
             Table phys, half, r1, old;
             physicalTable(c, d, photons, phys, half);
-            definitionTable(c, d, (candC || candD || candB) ? Which::R1A : Which::R1, photons, r1);
-            definitionTable(c, d, (candB || candC || candD) ? Which::R1B : candA ? Which::R1A : Which::Old, photons, old);
+            definitionTable(c, d, (candC || candD || candE || candB) ? Which::R1A : Which::R1, photons, r1);
+            definitionTable(c, d, (candB || candC || candD || candE) ? Which::R1B : candA ? Which::R1A : Which::Old, photons, old);
             const std::vector<Rgb3> pf = renderSphere(phys, furnace, 64), ps = renderSphere(phys, sky, 64);
             const Metrics m1 = compare(r1, phys, half, furnace, sky, skyWhite, &pf, &ps), m0 = compare(old, phys, half, furnace, sky, skyWhite, &pf, &ps);
-            const char* first = (candC || candD) ? "R1 + A2" : candB ? "R1 + A" : "R1";
-            const char* second = candD ? "R1 + A2 + B3" : candC ? "R1 + A2 + B2" : candB ? "R1 + A + B" : candA ? "R1 + A (coat MS)" : "1.1 original";
+            const char* first = candE ? "R1 + A2 + S" : (candC || candD) ? "R1 + A2" : candB ? "R1 + A" : "R1";
+            const char* second = candE ? "R1 + A2 + B2 + S" : candD ? "R1 + A2 + B3" : candC ? "R1 + A2 + B2" : candB ? "R1 + A + B" : candA ? "R1 + A (coat MS)" : "1.1 original";
             md << row(b.name, rc, first, m1) << row(b.name, rc, second, m0);
             logf("%s%s", row(b.name, rc, first, m1).c_str(), row(b.name, rc, second, m0).c_str());
             logf("   K %.4f (out %.4f), rho-bar (%.3f %.3f %.3f)\n", d.in.K, d.in.Kout, d.in.rhoBar.r, d.in.rhoBar.g, d.in.rhoBar.b);
@@ -1198,6 +1210,69 @@ void clearcoatSpecPath(const std::string& out, uint32_t photons)
             logf("%s", md.str().substr(mark).c_str());
             writeTextFile(out, md.str());
         }
+}
+
+// v1 metal white furnace: directional albedo of the v1 model with base colour 1, metallic 1 (F = 1, so the albedo is
+// E_true(mu, r) / E_table(mu, r) with E_true the integral of the model's own D V). Reported per roughness and angle next
+// to the core table value directionalAlbedo(mu, r) and E_true = albedo * E_table.
+void v1Albedo(const std::string& out)
+{
+    const float rs[] = { 0.05f, 0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f };
+    const double mus[] = { 0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 0.85, 1.0 };
+    constexpr int NR = 11, NM = 9;
+    std::vector<double> alb(NR * NM, 0.0), sd(NR * NM, 0.0), adj(NR * NM, 0.0);
+    parallelFor(NR * NM, [&](uint32_t idx) {
+        const int ri = (int)idx / NM, mi = (int)idx % NM;
+        reference::Surface surf;
+        surf.ng = surf.ns = { 0, 0, 1 };
+        surf.bsdf.baseColor = { 1, 1, 1 };
+        surf.bsdf.metallic = 1;
+        surf.bsdf.roughness = rs[ri];
+        const double mu = mus[mi];
+        const float3 v{ (float)std::sqrt(1 - mu * mu), 0, (float)mu };
+        const reference::Bsdf b(surf, v);
+        reference::Pcg32 rng(3100 + idx, 7);
+        const uint32_t n = 1 << 22;
+        double s1 = 0, s2 = 0, sa = 0;
+        for (uint32_t k = 0; k < n; ++k)
+        {
+            reference::BsdfSample bs;
+            double x = 0, y = 0;
+            if (b.sample(rng.uniform(), rng.uniform(), rng.uniform(), bs) && bs.wi.z > 0)
+            {
+                x = reference::evaluateModel(surf.bsdf, { 0, 0, 1 }, v, bs.wi).g * bs.wi.z / bs.pdf;
+                // Adjoint: the fixed direction is the light, the integral runs over the view direction.
+                y = reference::evaluateModel(surf.bsdf, { 0, 0, 1 }, bs.wi, v).g * bs.wi.z / bs.pdf;
+            }
+            s1 += x;
+            s2 += x * x;
+            sa += y;
+        }
+        adj[idx] = sa / n;
+        alb[idx] = s1 / n;
+        sd[idx] = std::sqrt(std::max(0.0, s2 / n - alb[idx] * alb[idx]) / n);
+    });
+    std::ostringstream md;
+    md << "# v1 metal white furnace (base colour 1, metallic 1) [measured]\n\n"
+          "`unx_study_material_layers v1albedo`. Directional albedo of `reference::evaluateModel` (the v1 model: F D V (1 + F0 (1/E - 1)), "
+          "E = scene::model::directionalAlbedo) with F0 = 1, 4M importance samples per cell (standard error in parentheses, x1e-4). "
+          "F = 1 makes the albedo E_true / E_table, so an albedo above 1 means the table E is below the integral of the model's own "
+          "D V. Adjoint albedo: the same integral with the roles swapped (fixed light direction, integral over the view direction), "
+          "which light tracing and the layer walk see; the compensation factor depends on the view angle only, so the model is not "
+          "reciprocal and the adjoint albedo is not 1. Cells: albedo (se) / adjoint albedo / E_table.\n\n| roughness \\\\ mu |";
+    for (double mu : mus) md << format(" %.2f |", mu);
+    md << "\n|---|";
+    for (int m = 0; m < NM; ++m) md << "---|";
+    md << "\n";
+    for (int r = 0; r < NR; ++r)
+    {
+        md << format("| %.2f |", rs[r]);
+        for (int m = 0; m < NM; ++m)
+            md << format(" %.4f (%.0f) / %.4f / %.4f |", alb[r * NM + m], sd[r * NM + m] * 1e4, adj[r * NM + m], scene::model::directionalAlbedo((float)mus[m], rs[r]));
+        md << "\n";
+    }
+    writeTextFile(out, md.str());
+    logf("%s", md.str().c_str());
 }
 
 // Coat + film (design 3, item 3): film under the coat (outer index 1.5); the physical base uses the exact spectral film

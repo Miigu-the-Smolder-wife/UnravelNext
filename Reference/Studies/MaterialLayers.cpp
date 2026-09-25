@@ -7,8 +7,10 @@
 //   unx_study_material_layers clearcoat_r1b <out.md> [photons]   R1+A and candidate B (metal base path) vs the MS coat
 //   unx_study_material_layers clearcoat_r1c <out.md> [photons]   R1+A2 and A2+B2 (scaled coat term, Sinkhorn base path)
 //   unx_study_material_layers clearcoat_r1d <out.md> [photons]   R1+A2 and A2+B3 (single-hit lobe + separable multi-hit term)
+//   unx_study_material_layers clearcoat_r1e <out.md> [photons]   A2 + S and A2 + B2 + S (angle-dependent refraction spread)
 //   unx_study_material_layers clearcoat_diag <out.md> [photons]  energy split by base interactions (failure diagnosis)
 //   unx_study_material_layers clearcoat_specpath <out.md> [photons] lossless GGX base under the coat: energy per base-hit count
+//   unx_study_material_layers v1albedo <out.md>                  v1 metal white furnace (table E vs the model's own integral)
 //   unx_study_material_layers coatfilm     <out.md> [photons]   R1 + film under the coat vs the layer model
 //   unx_study_material_layers tables       <out.inc>  E_c, K, A_x, B_x, Abar, Bbar tables for the definition
 // CPU only, at most 4 worker threads, below-normal priority (the machine is shared with measurements and the user).
@@ -198,7 +200,7 @@ int main(int argc, char** argv)
     try
     {
         SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
-        if (argc < 3) fail("usage: unx_study_material_layers thinfilm|metals|clearcoat_r1|clearcoat_r1_ms|clearcoat_r1a|clearcoat_r1b|clearcoat_r1c|clearcoat_r1d|clearcoat_diag|clearcoat_specpath|coatfilm|tables <out> [photons]");
+        if (argc < 3) fail("usage: unx_study_material_layers thinfilm|metals|clearcoat_r1|clearcoat_r1_ms|clearcoat_r1a|clearcoat_r1b|clearcoat_r1c|clearcoat_r1d|clearcoat_r1e|clearcoat_diag|clearcoat_specpath|v1albedo|coatfilm|tables <out> [photons]");
         const std::string cmd = argv[1], out = argv[2];
         const uint32_t photons = argc > 3 ? (uint32_t)std::stoul(argv[3]) : (1u << 21);
         if (cmd == "thinfilm") study::thinFilmStudy(out);
@@ -209,8 +211,10 @@ int main(int argc, char** argv)
         else if (cmd == "clearcoat_r1b") study::clearcoatR1Study(out, photons, true, true, true);
         else if (cmd == "clearcoat_r1c") study::clearcoatR1Study(out, photons, true, true, false, true);
         else if (cmd == "clearcoat_r1d") study::clearcoatR1Study(out, photons, true, true, false, false, true);
+        else if (cmd == "clearcoat_r1e") study::clearcoatR1Study(out, photons, true, true, false, false, false, true);
         else if (cmd == "clearcoat_diag") study::clearcoatDiag(out, photons);
         else if (cmd == "clearcoat_specpath") study::clearcoatSpecPath(out, photons);
+        else if (cmd == "v1albedo") study::v1Albedo(out);
         else if (cmd == "coatfilm") study::coatFilmStudy(out, photons);
         else if (cmd == "tables") study::exportTables(out);
         else fail("unknown study %s", cmd.c_str());
