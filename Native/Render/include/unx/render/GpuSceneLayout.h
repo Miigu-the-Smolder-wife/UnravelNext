@@ -199,6 +199,9 @@ struct FrameConstants
     uint32_t instanceCount, meshCount, clusterCount, lightCount;
     uint32_t materialCount, sceneRevision, lodLevelClusters, specularAlbedoLut;  // lodLevelClusters: cluster indices of LodLevel cuts;
                                                                                  // specularAlbedoLut: (A, B) table (8.1, v1.25)
+    // v1.34: coverageMaskLut: edge half-plane masks for coverageTriangleMaskLut (Coverage.hlsli, 5.5.1); giRaysThisFrame:
+    // this frame's share of gi.rays_per_tick (10.3 of the design revision; 0 until the renderer hands it out).
+    uint32_t coverageMaskLut, giRaysThisFrame, spare0, spare1;
 };
-static_assert(sizeof(FrameConstants) == 528);
+static_assert(sizeof(FrameConstants) == 544);
 } // namespace unx::render::gpu

@@ -12,6 +12,17 @@
 
 namespace unx::render
 {
+// Edge half-plane masks of the coverage mask LUT (Coverage.hlsli coverageTriangleMaskLut, INTERFACES 5.5.1; design
+// revision 1, 11 b): kCoverageLutAngles x kCoverageLutDistances entries of two uint32 masks (sure inside, sure outside),
+// row-major by angle bin. The inward normal n (upper half plane) is binned by its pseudo-angle pa = n.x / (|n.x| + n.y)
+// in [-1, 1]: bin k holds pa in [1 - (k + 1) / 32, 1 - k / 32]; the pixel centre's signed distance inside the edge h
+// (unit n) by j: h in [-R + j D, -R + (j + 1) D], D = 2R / distances, R = sqrt(2) / 2. Bit i of 'inside' = subsample i
+// (coverageSample) is inside for every (n, h) of the bin by more than kCoverageLutMargin px, of 'outside' = outside for
+// every one by more than it; the rest the shader tests exactly. Published as FrameConstants::coverageMaskLut.
+constexpr uint32_t kCoverageLutAngles = 64, kCoverageLutDistances = 64;
+constexpr float kCoverageLutMargin = 1.0f / 128;  // px: covers float error of the edge functions up to ~30,000 px
+const std::vector<uint32_t>& coverageMaskTable();  // 2 words per entry
+
 struct ClusterData  // V's builder output for the whole scene (per-mesh ranges go into gpu::Mesh)
 {
     std::vector<gpu::Cluster> clusters;
@@ -113,7 +124,7 @@ private:
     std::vector<gpu::Mesh> m_meshes;
     std::vector<gpu::Material> m_materials;
     Buffer m_instanceBuffer, m_meshBuffer, m_submeshBuffer, m_vertexBuffer, m_indexBuffer, m_materialBuffer, m_materialRemapBuffer,
-        m_lightBuffer, m_skinBuffer, m_bonePalette, m_prevBonePalette, m_albedoTable, m_specularTable;
+        m_lightBuffer, m_skinBuffer, m_bonePalette, m_prevBonePalette, m_albedoTable, m_specularTable, m_coverageTable;
     Buffer m_clusterBuffer, m_lodLevelBuffer, m_lodLevelClusterBuffer, m_clusterVertexIndexBuffer, m_clusterTriangleBuffer;
     std::vector<std::pair<std::string, Buffer>> m_named;
     ClusterData m_clusterData;

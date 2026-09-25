@@ -875,6 +875,7 @@ void recordStats(FramePassContext& fc, State& s, const Run& r, const std::string
         st.clustersTested = w[kStateStatClusters];
         st.visibleClusters = w[kStateVisible];
         for (uint32_t b = 0; b < 3; ++b) st.triangles[b] = w[kStateStatTriangles + b];
+        for (uint32_t b = 0; b < 3; ++b) st.bandClusters[b] = w[kStateStatBandClusters + b];
         for (uint32_t l = 0; l < kLists; ++l) st.listEntries[l] = w[kStateListCount + l];
         st.tilePairs = w[kStateTilePairs];
         st.deferredInstances = w[kStateDeferInstances];

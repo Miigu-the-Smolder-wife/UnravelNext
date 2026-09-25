@@ -6,7 +6,7 @@
 // --service adds the depth raster service in a VSM page-raster setting (S's clipmap: 12 orthographic sun views of
 // 16384^2, level k texel 2^(k-10) m, centred on the camera; the camera's page dirty in levels 0-5; pixel kernel
 // ServicePagePixel), drawn per frame as whole-view raster, tile-local raster (DepthRasterRequest::tileLocal), or depth
-// only into a tile atlas (DepthRasterRequest::atlasSlots, D16 or D32, 64 slots of 128 px per row) -- --service takes a
+// only into a tile atlas (DepthRasterRequest::atlasSlots, D16 or D32, 64 or 128 slots of 128 px per row) -- --service takes a
 // comma-separated list of whole, local, atlas16, atlas32 (or both = whole,local); each is its own request, so one
 // request's tail stays out of the next one's first pass. --service-pages picks the requested pages: camera (the
 // camera's page in levels 0-5, S's static-sun measurement) or ring (synthetic receiver-driven request of a moving sun:
@@ -19,7 +19,7 @@
 // Performance runs only under the GPU lock (INTERFACES 3.3):
 //   powershell -File Tools/CI/GpuLock.ps1 -Track core -- build/<t>/bin/unx_gate_visibility_visibilitygate.exe
 //       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--scale 1] [--moving]
-//       [--service whole,local,atlas16,atlas32] [--service-pages camera|ring]
+//       [--service whole,local,atlas16,atlas32] [--service-pages camera|ring] [--service-levels 12] [--service-spacing 2]
 //       [--out DIR] [--set key=value ...] [--cluster-stats FILE]
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/core/Config.h"
@@ -182,7 +182,12 @@ void writeClusterStats(const scene::Scene& s, const ClusterData& cd, float focal
 // S's clipmap geometry (VsmSystem.cpp): light basis z towards the sun, x horizontal; level k texel 2^(k-10) m over
 // 16384 texels, window origin in 128-texel pages with the camera's page at tile (64, 64); height range = casters'
 // bounding spheres along z +- 500 m.
-constexpr uint32_t kServiceLevels = 12, kServiceVirtual = 16384, kServicePage = 128, kServiceTable = 128;
+constexpr uint32_t kServiceVirtual = 16384, kServicePage = 128, kServiceTable = 128;
+// Levels of the service clipmap (--service-levels, --service-spacing): level k texel 2^-10 m x spacing^k. S's clipmap is
+// 2 x spacing (12 levels to 2 m here); the design's fractional levels (11.4 (7)) are sqrt(2) spacing, twice the levels.
+uint32_t g_serviceLevels = 12;
+float g_serviceSpacing = 2.0f;
+float serviceTexel(uint32_t k) { return std::pow(g_serviceSpacing, (float)k) / 1024.0f; }
 
 std::vector<RasterView> serviceViews(const GpuScene& scene, float3 sun, float3 camera)
 {
@@ -204,9 +209,9 @@ std::vector<RasterView> serviceViews(const GpuScene& scene, float3 sun, float3 c
     }
     const float hMin = lo - 500, hMax = hi + 500, range = hMax - hMin, V = (float)kServiceVirtual;
     std::vector<RasterView> views;
-    for (uint32_t k = 0; k < kServiceLevels; ++k)
+    for (uint32_t k = 0; k < g_serviceLevels; ++k)
     {
-        const float t = std::ldexp(1.0f, (int)k - 10), pageSize = t * kServicePage;
+        const float t = serviceTexel(k), pageSize = t * kServicePage;
         const float ox = (float)((int32_t)std::floor(dot(camera, x) / pageSize) - (int32_t)kServiceTable / 2) * kServicePage;
         const float oy = (float)((int32_t)std::floor(dot(camera, y) / pageSize) - (int32_t)kServiceTable / 2) * kServicePage;
         RasterView v;
@@ -232,11 +237,11 @@ std::vector<uint32_t> ringPages(const GpuScene& scene, float3 sun, const ViewDes
     const float3 up = std::abs(z.y) < 0.999f ? float3{ 0, 1, 0 } : float3{ 1, 0, 0 };
     const float3 x = normalize(cross(up, z)), y = cross(z, x);
     const float pixelAngle = 2.0f / (camera.proj.m[1][1] * (float)height);
-    std::vector<uint32_t> words(kServiceLevels * kServiceTable * kServiceTable / 32, 0);
-    for (uint32_t k = 0; k < kServiceLevels; ++k)
+    std::vector<uint32_t> words(g_serviceLevels * kServiceTable * kServiceTable / 32, 0);
+    for (uint32_t k = 0; k < g_serviceLevels; ++k)
     {
-        const float t = std::ldexp(1.0f, (int)k - 10), d = t / pixelAngle;
-        const float nearD = k == 0 ? 0.0f : d, farD = k + 1 == kServiceLevels ? 1e30f : 2 * d;
+        const float t = serviceTexel(k), d = t / pixelAngle;
+        const float nearD = k == 0 ? 0.0f : d, farD = k + 1 == g_serviceLevels ? 1e30f : g_serviceSpacing * d;
         // Window origin in texels (serviceViews: texel u = dot(p, x) / t - ox).
         const float ox = (1 + views[k].viewProj.m[0][3]) * kServiceVirtual / 2 * -1;
         const float oy = (views[k].viewProj.m[1][3] - 1) * kServiceVirtual / 2;
@@ -327,6 +332,12 @@ int main(int argc, char** argv)
                 }
                 service = true;
             }
+            else if (a == "--service-levels")
+            {
+                g_serviceLevels = (uint32_t)std::stoul(next());
+                if (g_serviceLevels < 6 || g_serviceLevels > 64) fail("--service-levels 6..64");
+            }
+            else if (a == "--service-spacing") g_serviceSpacing = std::stof(next());
             else if (a == "--service-pages")
             {
                 const std::string m = next();
@@ -388,10 +399,10 @@ int main(int argc, char** argv)
         gpuScene.setClusters(std::move(clusters));
         Harness harness(device, quality);
         // Service measurement resources: tile mask (12 views x 128^2 tiles; committed buffers start zeroed) and one page.
-        const RawBuffer serviceMask = rawBuffer(device, (uint64_t)kServiceLevels * kServiceTable * kServiceTable / 8, false, L"gate service mask");
+        const RawBuffer serviceMask = rawBuffer(device, (uint64_t)g_serviceLevels * kServiceTable * kServiceTable / 8, false, L"gate service mask");
         const RawBuffer servicePage = rawBuffer(device, (uint64_t)kServicePage * kServicePage * 4, true, L"gate service page");
         // Ring pattern: the mask and the atlas slots (one word per tile) come from the CPU each frame.
-        const uint64_t maskBytes = serviceMask.bytes, slotBytes = (uint64_t)kServiceLevels * kServiceTable * kServiceTable * 4;
+        const uint64_t maskBytes = serviceMask.bytes, slotBytes = (uint64_t)g_serviceLevels * kServiceTable * kServiceTable * 4;
         const RawBuffer serviceSlots = rawBuffer(device, slotBytes, false, L"gate service slots");
         const UploadRing serviceUpload = uploadRing(device, maskBytes + slotBytes, 3);
         uint64_t requestedPages = 0, requestedFrames = 0;
@@ -443,7 +454,7 @@ int main(int argc, char** argv)
                     uint8_t* dst = serviceUpload.mapped + (frame % 3) * serviceUpload.slotBytes;
                     std::memcpy(dst, words.data(), maskBytes);
                     uint32_t* slotWords = reinterpret_cast<uint32_t*>(dst + maskBytes);
-                    for (uint32_t i = 0; i < kServiceLevels * kServiceTable * kServiceTable; ++i)
+                    for (uint32_t i = 0; i < g_serviceLevels * kServiceTable * kServiceTable; ++i)
                         slotWords[i] = (words[i / 32] >> (i & 31)) & 1 ? pages++ : UINT32_MAX;
                     ID3D12Resource* upload = serviceUpload.resource.Get();
                     const uint64_t offset = (frame % 3) * serviceUpload.slotBytes;
@@ -470,8 +481,10 @@ int main(int argc, char** argv)
                 req.pixelConstants[1] = servicePage.descriptor;
                 req.cullMask = mask;
                 req.cullTilePx = kServicePage;
-                // Atlas: 64 slots of 128 px per row (8192 wide), rows for this frame's pages (at least one).
-                const uint32_t atlasRows = std::max(1u, (pages + 63) / 64);
+                // Atlas: 64 slots of 128 px per row (8192 wide), or 128 (16384 wide) past 8192 pages; rows for this frame's
+                // pages (at least one). Past 16384 pages one atlas cannot hold them (S draws such a frame in several atlases).
+                const uint32_t slotsPerRow = pages > 8192 ? 128 : 64, atlasRows = std::max(1u, (pages + slotsPerRow - 1) / slotsPerRow);
+                if (atlasRows * kServicePage > 16384) fail("%u requested pages exceed one 16384^2 atlas of 128 px slots", pages);
                 for (const std::string& mode : serviceModes)
                 {
                     DepthRasterRequest one = req;
@@ -480,7 +493,7 @@ int main(int argc, char** argv)
                     if (mode == "atlas16" || mode == "atlas32")
                     {
                         if (!ringPattern) fail("--service atlas16|atlas32 needs --service-pages ring (the camera pattern has no slots)");
-                        const TextureRef atlas = g.createTexture({ "gate.service.atlas", 8192, atlasRows * kServicePage, 1, 1,
+                        const TextureRef atlas = g.createTexture({ "gate.service.atlas", slotsPerRow * kServicePage, atlasRows * kServicePage, 1, 1,
                                                                    mode == "atlas16" ? DXGI_FORMAT_D16_UNORM : DXGI_FORMAT_D32_FLOAT });
                         g.addPass(one.name + ".clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(atlas, Use::DepthWrite); },
                                   [=](PassContext& c) { c.cmd->ClearDepthStencilView(c.dsv(atlas), D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr); });
@@ -488,7 +501,7 @@ int main(int argc, char** argv)
                         one.bufferUses.clear();
                         one.depthTarget = atlas;
                         one.atlasSlots = slots;
-                        one.atlasTilesPerRow = 64;
+                        one.atlasTilesPerRow = slotsPerRow;
                         tracks::rasterizeDepth(sc, one);
                         // S's lookups read the atlas; here nothing does, so a kept reader keeps the raster from being culled.
                         g.addPass(one.name + ".keep", QueueType::Graphics,
@@ -516,6 +529,7 @@ int main(int argc, char** argv)
                  "(design %.3f on %u clusters, %u triangles) | total V %.3f ms of frame %.3f ms\n",
                  sceneName.c_str(), rs.c_str(), cull, designCull, st.instancesVisible, st.clustersTested, hiz, raster, designRaster, st.visibleClusters, trianglesA,
                  cull + hiz + raster, r.gpuFrameMs.median);
+            logf("  visible clusters by band A/B/C %u/%u/%u\n", st.bandClusters[0], st.bandClusters[1], st.bandClusters[2]);
             logf("  nodes tested %u, triangles by band A/B/C %u/%u/%u, deferred %u/%u/%u, overflow 0x%x (stats of frame %llu)\n", st.nodesTested, st.triangles[0],
                  st.triangles[1], st.triangles[2], st.deferredInstances, st.deferredNodes, st.deferredClusters, st.overflow, (unsigned long long)st.frameIndex);
             if (st.overflow) status = 1;

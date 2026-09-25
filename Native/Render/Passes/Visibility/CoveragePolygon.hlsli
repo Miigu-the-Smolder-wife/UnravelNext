@@ -9,6 +9,7 @@
 //     (the pixel's gradients x 1 / sqrt(32)); a polygon covering no subsample takes the test at its centroid.
 #ifndef UNX_COVERAGE_POLYGON_HLSLI
 #define UNX_COVERAGE_POLYGON_HLSLI
+#include "Frame.hlsli"
 #include "Passes/Visibility/Coverage.hlsli"
 #include "Passes/Material/MaterialTextures.hlsli"
 
@@ -69,8 +70,10 @@ CoverageSample coveragePolygonGeometry(CoveragePolygon p, float2 pixel, out floa
 
 uint coveragePolygonMask(CoveragePolygon p, float2 pixel)
 {
-    uint mask = coverageTriangleMask(p.a.xy, p.b.xy, p.c.xy, pixel);
-    if (p.quad) mask |= coverageTriangleMask(p.a.xy, p.c.xy, p.d.xy, pixel);
+    // The frame's coverage mask LUT (v1.34): coverageTriangleMask's bits at a fraction of the edge evaluations.
+    StructuredBuffer<uint2> lut = ResourceDescriptorHeap[g_coverageMaskLut];
+    uint mask = coverageTriangleMaskLut(p.a.xy, p.b.xy, p.c.xy, pixel, lut);
+    if (p.quad) mask |= coverageTriangleMaskLut(p.a.xy, p.c.xy, p.d.xy, pixel, lut);
     return mask;
 }
 

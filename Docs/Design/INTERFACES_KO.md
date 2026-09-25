@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.33, 2026-09-25)
+# UnravelNext 인터페이스 (v1.34, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -124,6 +124,11 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
 ### 3.4 결과·상태
 - 게이트 결과: `Results/<트랙>/<게이트>/`(JSON 요약·로그는 커밋, 프레임별 CSV는 커밋하지 않음). 모든 보고에 해상도·품질 해시·빌드 identity·드라이버·큐 우선순위·GPU 잠금 보유자가 들어간다(하네스가 기록).
 - 트랙 상태: `Docs/Status/<트랙>_STATUS_KO.md`. 실측/예상 표기 규칙은 설계서와 같다.
+- **기준 비교 한도(v1.34, C 합의)**: 엔진 영상 대 C 기준 경로추적 영상의 한도는 장면마다 `Config/quality/reference.toml`의 `[reference.threshold.<장면>]` `flip_mean` / `flip_p99` / `relmse`다(C 소유, 측정한 바닥 값을 주석으로 함께 적는다).
+  - 한도 = k × 바닥이고 k = 2(잠정)다. 바닥은 같은 해상도에서 기준의 두 반쪽(각 spp/2) 사이 지표다(`unx_metrics --reference <반쪽 A> --test <반쪽 B>`).
+  - 전체 기준의 참값 대비 잡음은 relMSE로 바닥의 약 1/4이다. 그래서 k = 2이면 엔진과 기준의 차이가 기준 자체의 불확도보다 충분히 클 때만 실패한다.
+  - 바닥이 판정 해상도보다 큰 장면(예: city_block, 창유리 태양 코스틱 반딧불로 FLIP P99 0.42)은 C가 기준을 먼저 수렴시킨 뒤 한도를 둔다. 태양 코스틱은 광원 추적 경로를 더해 경로 공간을 나누는 방식으로 고친다.
+  - 한도가 정해지기 전의 비교 결과는 [잠정]으로 적는다.
 
 ### 3.5 통합 게이트 빌드: 커밋 기준 (v1.12, 사용자 지시)
 - 여러 트랙을 합친 측정(통합 게이트, `-Track all` 또는 여러 트랙 조합)은 **커밋된 코드로만** 빌드한다: `powershell -File Tools/CI/Build.ps1 -Track all -Committed [-Ref <커밋>]`. 저장소 옆 git worktree `..\UnravelNext-gate`를 그 커밋(기본 HEAD)으로 맞추고(서브모듈은 본 저장소의 객체로, 의존성 캐시는 복사) 그 안의 `build\<트랙>`에 빌드한다. 공유 작업 트리의 남의 미커밋 파일은 들어가지 않고, 결과 JSON의 `build.commit`은 그 커밋, `build.dirty`는 false다. worktree는 객체만 공유하고 index는 따로라 다른 세션의 스테이징·커밋과 무관하다. `-Committed` 빌드는 한 번에 하나(이름 있는 뮤텍스, 나중 것이 기다린다).
@@ -281,7 +286,13 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
     4K 아틀라스는 요청 텍셀당 0.010 ns로 설계 벤치의 c_rop와 같다. 아틀라스 clear는 0.06 ms다.
 - **(v1.33) 타일 마스크 존재 판정**: 인스턴스·노드 컬링의 마스크 검사는 이제 "범위 안에 켜진 타일이 있는가"만 판정한다(`tileAnySet`). 범위 안에 온전히 든 켜진 요약 칸에서 곧바로 참이고, 범위 경계에 걸린 칸만 행으로 본다. 이전에는 클러스터 쌍 계산용 `tileVisit`(켜진 타일 전부를 세는 걸음)을 불러, 큰 구가 스레드 하나에서 수천 번 돌았다. 출력은 같다(가시 클러스터 17,681, 타일 쌍 154,258).
   - [실측, 위와 같은 4K 부하] 서비스 컬링 합: 0.790 → 0.282 ms. 인스턴스 0.125 → 0.012, 노드(5단계) 0.44 → 0.05, 클러스터 0.19(쌍 계산·쓰기, 그대로).
-  - 설계 개정 11.4 (2)의 방향 독립 1회 순회는 단별로 반복되는 인스턴스·노드·클러스터 판정을 합친다. 12단에서 그 반복 몫(인스턴스 + 노드)은 이제 0.06 ms다. 40단(√2 간격, 11.4 (7))에서 단 수에 비례해 느는 몫을 V 게이트로 재고, 그 값으로 1회 순회를 구현한다.
+  - 설계 개정 11.4 (2)의 방향 독립 1회 순회는 단별로 반복되는 인스턴스·노드·클러스터 판정을 합친다. 그 몫이 단 수에 비례하는지 V 게이트로 쟀다(v1.34, `--service-levels N --service-spacing s`, 4K city 링 부하, 아틀라스 D32):
+| 단 수 × 간격 | 요청 페이지 | 컬링 합 | 인스턴스 | 노드 | 클러스터 |
+    |---|---|---|---|---|---|
+    | 12 × 2 | 6,758 | 0.286 ms | 0.013 | 0.058 | 0.189 |
+    | 23 × √2(같은 범위) | 5,767 | 0.224 ms | 0.012 | 0.058 | 0.128 |
+
+    같은 거리 범위를 두 배 많은 단으로 덮어도 단별 반복 몫(인스턴스 + 노드 0.07 ms)은 늘지 않았다. 페이지(−15 %)와 클러스터 쌍 몫은 줄었다. 비용은 단 수가 아니라 요청 페이지와 그 위 클러스터에 비례한다. 40단(√2, 더 넓은 범위)과 20단(× 2)은 아틀라스가 8,192페이지를 넘어 한 장에 들지 않아 이번 게이트에서 실패했다. 16,384페이지까지 받게 고친 게이트로 다시 잰다(용량을 올린 채).
 
 ### 5.4 R → V·M·S: 평면 반사 뷰
 
@@ -290,9 +301,10 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 3. V는 클립 평면을 `SV_ClipDistance0`과 클러스터 컬링으로 지키고 `mirrored`면 컬링 면을 바꾼다. M은 `viewKind == VIEW_PLANAR_REFLECTION`이면 화면 프로브·반사 결과 대신 R의 GI 캐시 API(5.6)를 쓰고, 반사를 재귀하지 않는다(거친 반사는 캐시 K 경로).
 4. 원본 기하 그대로(캐릭터 원본 메시, 바람 적용 잎, coverage 층)라 직접 시야와 같다(설계서 2.6). R은 `v.color`를 자기 반사 결과에 합성한다.
 
-### 5.5 프레임 상수 (b1, `Frame.hlsli` ↔ `gpu::FrameConstants`, 528 B)
+### 5.5 프레임 상수 (b1, `Frame.hlsli` ↔ `gpu::FrameConstants`, 544 B)
 
 뷰 행렬 5개(row_major), 카메라 위치·near, 클립 평면, 뷰 크기·종류·프레임 번호, 시간·dt·노출(`1/(1.2·2^EV100)`)·tan(fov/2), 태양 방향·조도(lux, 대기 위)·색·각반지름, 바람 방향·속도, 장면 버퍼 bindless 인덱스(인스턴스, 메시, 서브메시, 정점, 인덱스, 클러스터, 클러스터 정점 인덱스, 클러스터 삼각형, LOD 레벨, 재질, 재질 리매핑, 광원, 스킨, 본 팔레트 현재/이전, 재질 모델 LUT, LOD 레벨 클러스터 목록 `g_lodLevelClusters`(v1.1, 예비 칸 사용, 크기 불변)), 개수, 장면 revision. 패스는 `c.bindFrameConstants(view.frameConstants)`로 묶는다.
+- (v1.34) 마지막 행(16 B, 528 → 544 B): `coverageMaskLut`(coverage 마스크 LUT SRV, 5.5.1), `giRaysThisFrame`(이 프레임의 GI 광선 몫, 설계 개정 10.3: 배분 규칙이 R·I 합의로 들어가기 전까지 0), 예비 2칸. HLSL은 `g_coverageMaskLut`, `g_giRaysThisFrame`이다. 앞 필드의 오프셋은 바뀌지 않는다.
 
 **트랙 지속 상태(v1.1)**: `FramePassContext::state<T>("<트랙>.<이름>")`은 `FrameRenderer`가 소유한 저장소(`TrackState`)에서 T를 처음 쓸 때 만들고, 렌더러 파괴 때 GPU 유휴를 기다린 뒤 없앤다(히스토리 버퍼, 풀, 캐시). 키 하나에는 늘 같은 타입을 쓴다. 렌더러 없이 만든 컨텍스트에서는 실패한다. 트랙이 이미 쓰는 장치 키 레지스트리(`DeviceState.h`)는 그대로 둬도 되고, 수명 훅이 필요하면 이것으로 옮긴다.
 
@@ -300,6 +312,16 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 - **V가 낸다**: vis id·depth·visible clusters·HiZ(대역 A), coverage 층(대역 B/C) fragment 목록 — 픽셀별 깊이 순 정렬, fragment마다 정확 면적·32-부표본 마스크·vis id(7.1). V는 fragment를 셰이딩하지 않는다.
 - **M이 한다**: 재질 해석(G-buffer), 셰이딩, 가장자리 픽셀(E: 3×3 identity 2개 이상) 검출과 그 픽셀의 해석적 coverage, coverage fragment 셰이딩, 깊이 순 합성, 톤맵 → `color`. E·coverage 합성은 셰이딩 뒤 최종 합성으로 M의 `shading` 진입점 안에 있다.
 - **공유 기하 함수**: 삼각형∩픽셀 사각형의 정확 면적과 32-부표본 마스크는 V의 `Passes/Visibility/Coverage.hlsli`(V 소유, 대역 B 래스터와 M의 E 합성이 같은 함수를 쓴다)에 둔다. 시그니처(v1.16): `float coverageTriangleArea(float2 a, float2 b, float2 c, float2 pixel)` — 화면 픽셀 좌표의 삼각형과 픽셀 사각형 [pixel, pixel + 1)²의 교집합 면적(네 변에 대한 Sutherland-Hodgman 클리핑 + shoelace, 감김 무관, float 반올림까지 정확; M 테스트가 해석해와 비교해 오차를 보고한다) · `uint coverageTriangleMask(float2 a, float2 b, float2 c, float2 pixel)` — 32 부표본(`coverageSample(i)`: x = (i + 0.5)/32, y = 비트 반전 i/32 + 1/64, 32×32 격자의 행·열마다 하나) 중 삼각형 안의 것 · `COVERAGE_SAMPLES` = 32.
+- (v1.34, 설계 개정 11 b) `uint coverageTriangleMaskLut(float2 a, float2 b, float2 c, float2 pixel, StructuredBuffer<uint> lut)`: 같은 마스크를 변 마스크 3개의 AND로 낸다. 변마다 표 한 번 조회이고, `lut`는 `ResourceDescriptorHeap[g_coverageMaskLut]`다.
+  - 표는 각 64 × 거리 64(`GpuScene.h` `coverageMaskTable()`, 16 KB)다. 칸 (k, j)는 안쪽 법선 각 φ = (k + ½)π/64 ∈ [0, π)와 픽셀 중심의 부호 거리 h = −R + (j + ½)·2R/64(R = √2/2)이다. 비트 i는 dot(n, x_i − 중심) ≥ −h이다.
+  - 법선을 [0, π)로 접을 때는 거리를 반대로 하고 마스크의 보수를 쓴다.
+  - 칸 안에서 변에 아주 가까운 부표본은 반대쪽으로 갈 수 있다. `coverageTriangleMask`는 정확한 기준으로 남는다.
+  - 품질 게이트 |coverage 차| P99 ≤ 1/32 [실측, V 테스트 `coverage_mask_lut_matches_exact`, 무작위 삼각형 786,432개, 픽셀을 자르는 것만]:
+- 정점 0.75 px 안: 픽셀을 자르는 삼각형 220,101개, 정확 마스크와 다른 것 0, 정확 검사 부표본은 교차 삼각형당 2.84개(최대 14)
+    - 3 px 안: 122,718개, 다른 것 0, 1.88개(최대 12)
+    - 30 px 안: 15,893개, 다른 것 0, 1.50개(최대 10)
+    - 처음 설계대로 칸 중심 마스크 표(64 × 64)만 쓰면 이 게이트를 통과하지 못했다: P99 2/32, 최대 5/32. 그래서 칸마다 "확실히 안 / 확실히 밖" 보수적 마스크 두 개(1/128 px 여유, 32 KB)를 두고, 남는 모호 부표본만 `coverageTriangleMask`와 같은 식으로 검사한다. 결과는 비트 단위로 같다.
+  - 속도 [실측, forest_card 4K, coverage 층 켬, V 게이트, GpuLock timing, 300프레임 중앙값]: coverage 래스터 4.487 → 2.940 ms(−34 %, fragment 1.18 M로 같음, 3.79 → 2.48 ns/fragment). V의 coverage 래스터 PS와 깊이 래스터 coverage 모드(`coveragePolygonMask`)가 이것을 쓴다.
 - M은 V의 vis buffer가 나오기 전까지 자기 테스트의 가짜 vis buffer(같은 형식, 7.1)로 개발한다. V는 출력이 준비되면 알린다.
 
 ### 5.6 공개 HLSL API (고정된 이름·시그니처)
@@ -546,6 +568,12 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.28 (2026-09-25):
   - **GpuLock `-Kind timing|correctness`**(조율 요청, 3.3): 종류를 `current.json`과 `history.log`에 기록한다. 백그라운드 CPU 작업의 멈춤 규칙은 timing만 대상이다(C의 PauseGate는 `kind`를 읽도록 C가 맞춘다). history 줄의 형식이 `acquire <트랙> (<종류>) :: ...`로 바뀌었다.
   - **M 요청 `20260925_M_planar_mask_apron.md`(R 동의)**: `ViewDesc::planarMask` 값이 1 = 거울 픽셀(R이 읽음), 2 = 에이프런(거울 픽셀의 3×3 이웃, 그리고 셰이딩하지만 R은 읽지 않음), 0 = 건너뜀이 됐다. `planarTileMask`는 팽창된 마스크 기준이다. V·S·M은 "0 아님 = 그림" 그대로라 바뀌는 것이 없다(V의 64 px 컬링 마스크와 깊이 채움은 이미 0 아님으로 판정한다). R의 resolve만 "== 1"로 읽는다. 마스크 생성은 R 몫이다.
+- v1.34 (2026-09-25):
+  - **FrameConstants 544 B(5.5)**: `coverageMaskLut`, `giRaysThisFrame`, 예비 2칸.
+  - **coverage 마스크 LUT(5.5.1, 설계 개정 11 b)**: `coverageTriangleMaskLut`, `coverageMaskTable()`. 게이트 결과는 5.5.1에 있다.
+  - **기준 비교 한도 형식(3.4, C 합의)**.
+  - **서비스 컬링의 단 수 척도(5.3)**: V 게이트 `--service-levels`, `--service-spacing`. 아틀라스 행 128 슬롯(16,384 페이지까지).
+  - **`visibility::Stats::bandClusters[3]`**: 대역별 가시 클러스터 수(V 게이트 출력). [실측, forest_thin 4K, 브릭 없는 지금 빌드, 순회 용량 초과 상태의 하한] A/B/C = 4,890 / 1,850,897 / 3,926,947. 설계 개정 14.2 ③의 visId 24 bit 상한(131 k)을 넘으므로 ③은 (b) 타일 청크 클러스터 표로 간다(설계 개정 판정). forest_card 4K(용량을 올림): 65,557 / 78,942 / 0.
 - v1.33 (2026-09-25):
   - **서비스 컬링의 타일 마스크 존재 판정(5.3, V)**: 인스턴스·노드 단계는 `tileAnySet`(조기 종료). [실측] city 4K 링 부하 12단: 컬링 0.790 → 0.282 ms, 출력 동일.
   - **V 게이트**: `--service`가 쉼표 목록(whole, local, atlas16, atlas32)을 받는다. `--service-pages camera|ring`. 아틀라스 실측은 5.3 표에 있다.

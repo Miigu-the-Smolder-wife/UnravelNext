@@ -6,6 +6,10 @@
 //   coverageTriangleAreaCentroid: the same area and the clipped polygon's centroid (coverage-layer fragment depth).
 //   coverageTriangleMask: which of the 32 subsamples (kCoverageSamples, stratified in x and y) lie inside the triangle;
 //                         orders overlapping fragments inside one pixel (ARCHITECTURE 2.1: error <= 1/32 of the pixel).
+//   coverageTriangleMaskLut: the same bits from a 64 angle x 64 distance table of conservative edge masks
+//                         (FrameConstants::coverageMaskLut, GpuScene coverageMaskTable): one 8 B load per edge, and the
+//                         exact edge function only for the few subsamples the table leaves open (V test
+//                         coverage_mask_lut_matches_exact: identical to coverageTriangleMask).
 #ifndef UNX_COVERAGE_HLSLI
 #define UNX_COVERAGE_HLSLI
 
@@ -102,6 +106,72 @@ float coverageTriangleAreaCentroid(float2 a, float2 b, float2 c, float2 pixel, o
     const CoverageGreen g = coverageGreenTriangle(a, b, c, pixel);
     regionCentre = pixel + (abs(g.twice) > 1e-12 ? g.moment / (3.0 * g.twice) : float2(0.5, 0.5));
     return 0.5 * abs(g.twice);
+}
+
+#define COVERAGE_LUT_ANGLES 64u
+#define COVERAGE_LUT_DISTANCES 64u
+#define COVERAGE_LUT_REACH 0.70710678  // sqrt(2) / 2: no subsample is farther from the pixel centre along any direction
+#define COVERAGE_LUT_MARGIN (1.0 / 128)  // GpuScene.h kCoverageLutMargin
+
+// Sure-inside and ambiguous subsamples of edge a -> b of a triangle (screen pixels; s = +-1 makes it counter-clockwise):
+// the edge's table bin (inward normal folded into the upper half plane by complementing, pseudo-angle and distance)
+// gives the subsamples inside or outside for every edge of the bin; the others are ambiguous.
+void coverageEdgeLut(float2 a, float2 b, float2 pixel, float s, StructuredBuffer<uint2> lut, out uint inside, out uint ambiguous)
+{
+    const float2 e = (b - a) * s;
+    const float len2 = dot(e, e);
+    if (len2 == 0)
+    {
+        inside = 0;
+        ambiguous = 0xFFFFFFFFu;  // the exact test decides (a zero edge function counts as inside)
+        return;
+    }
+    float2 n = float2(-e.y, e.x);
+    float h = dot(n, float2(0.5, 0.5) - (a - pixel)) * rsqrt(len2);
+    const bool flip = n.y < 0 || (n.y == 0 && n.x < 0);
+    if (flip)
+    {
+        n = -n;
+        h = -h;
+    }
+    uint2 t;
+    if (h >= COVERAGE_LUT_REACH + COVERAGE_LUT_MARGIN) t = uint2(0xFFFFFFFFu, 0);
+    else if (h < -COVERAGE_LUT_REACH - COVERAGE_LUT_MARGIN) t = uint2(0, 0xFFFFFFFFu);
+    else
+    {
+        const uint k = min((uint)((1 - n.x / (abs(n.x) + n.y)) * (COVERAGE_LUT_ANGLES / 2)), COVERAGE_LUT_ANGLES - 1);
+        const uint j = min((uint)max((h + COVERAGE_LUT_REACH) * (COVERAGE_LUT_DISTANCES / (2 * COVERAGE_LUT_REACH)), 0.0), COVERAGE_LUT_DISTANCES - 1);
+        t = lut[k * COVERAGE_LUT_DISTANCES + j];
+    }
+    if (flip) t = t.yx;
+    inside = t.x;
+    ambiguous = ~(t.x | t.y);
+}
+
+// coverageTriangleMask's result from the table: subsamples surely inside all three edges are set, surely outside one
+// are dropped, and only the ambiguous ones that can still be covered run coverageTriangleMask's edge function (the
+// same expression, so the result is the same bits; about two subsamples per edge that crosses the pixel).
+uint coverageTriangleMaskLut(float2 a, float2 b, float2 c, float2 pixel, StructuredBuffer<uint2> lut)
+{
+    const float orient = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+    const float s = orient >= 0 ? 1.0 : -1.0;
+    uint in0, am0, in1, am1, in2, am2;
+    coverageEdgeLut(a, b, pixel, s, lut, in0, am0);
+    coverageEdgeLut(b, c, pixel, s, lut, in1, am1);
+    coverageEdgeLut(c, a, pixel, s, lut, in2, am2);
+    uint mask = (in0 | am0) & (in1 | am1) & (in2 | am2);
+    uint test = mask & (am0 | am1 | am2);
+    while (test != 0)
+    {
+        const uint i = firstbitlow(test);
+        test &= test - 1;
+        const float2 q = pixel + coverageSample(i);
+        const bool e0 = (am0 >> i & 1) == 0 || ((b.x - a.x) * (q.y - a.y) - (b.y - a.y) * (q.x - a.x)) * s >= 0;
+        const bool e1 = (am1 >> i & 1) == 0 || ((c.x - b.x) * (q.y - b.y) - (c.y - b.y) * (q.x - b.x)) * s >= 0;
+        const bool e2 = (am2 >> i & 1) == 0 || ((a.x - c.x) * (q.y - c.y) - (a.y - c.y) * (q.x - c.x)) * s >= 0;
+        if (!(e0 && e1 && e2)) mask &= ~(1u << i);
+    }
+    return mask;
 }
 
 uint coverageTriangleMask(float2 a, float2 b, float2 c, float2 pixel)

@@ -155,6 +155,8 @@ void emit(RWByteAddressBuffer state, bool active, uint instance, uint clusterInd
     {
         const uint t = WaveActiveSum((visible && r.band == b) ? r.triangles : 0);
         if (WaveIsFirstLane() && t > 0) state.InterlockedAdd(4 * (VS_STAT_TRIANGLES + b), t);
+        const uint n = WaveActiveCountBits(visible && r.band == b);
+        if (WaveIsFirstLane() && n > 0) state.InterlockedAdd(4 * (VS_STAT_BAND_CLUSTERS + b), n);
     }
     const uint tested = WaveActiveCountBits(active);
     if (WaveIsFirstLane() && tested > 0) state.InterlockedAdd(4 * VS_STAT_CLUSTERS, tested);

@@ -9,6 +9,50 @@
 
 namespace unx::render
 {
+const std::vector<uint32_t>& coverageMaskTable()
+{
+    static const std::vector<uint32_t> table = [] {
+        // Subsamples exactly as Coverage.hlsli coverageSample, relative to the pixel centre.
+        double sx[32], sy[32];
+        for (uint32_t i = 0; i < 32; ++i)
+        {
+            uint32_t r = 0;
+            for (uint32_t b = 0; b < 5; ++b) r |= ((i >> b) & 1u) << (4 - b);
+            sx[i] = (i + 0.5) / 32.0 - 0.5;
+            sy[i] = r / 32.0 + 1.0 / 64.0 - 0.5;
+        }
+        const double pi = 3.14159265358979323846, reach = std::sqrt(0.5), step = 2 * reach / kCoverageLutDistances, margin = kCoverageLutMargin;
+        auto angle = [](double pa) { return std::atan2(1 - std::fabs(pa), pa); };  // pseudo-angle -> angle in [0, pi]
+        std::vector<uint32_t> t(2 * kCoverageLutAngles * kCoverageLutDistances);
+        for (uint32_t k = 0; k < kCoverageLutAngles; ++k)
+        {
+            const double phiA = angle(1 - (double)k / 32), phiB = angle(1 - (double)(k + 1) / 32);  // phiA < phiB
+            for (uint32_t j = 0; j < kCoverageLutDistances; ++j)
+            {
+                const double h0 = -reach + j * step, h1 = h0 + step;
+                uint32_t inside = 0, outside = 0;
+                for (uint32_t i = 0; i < 32; ++i)
+                {
+                    // d(phi) = dot(n(phi), x_i - centre) = r cos(phi - theta): extremes at the ends or where phi = theta
+                    // (max r) or theta +- pi (min -r) inside [phiA, phiB].
+                    const double r = std::hypot(sx[i], sy[i]), theta = std::atan2(sy[i], sx[i]);
+                    double lo = std::min(r * std::cos(phiA - theta), r * std::cos(phiB - theta)), hi = std::max(r * std::cos(phiA - theta), r * std::cos(phiB - theta));
+                    for (double c : { theta, theta + 2 * pi, theta - 2 * pi })
+                        if (c >= phiA && c <= phiB) hi = r;
+                    for (double c : { theta + pi, theta - pi, theta + 3 * pi, theta - 3 * pi })
+                        if (c >= phiA && c <= phiB) lo = -r;
+                    if (lo + h0 >= margin) inside |= 1u << i;
+                    if (hi + h1 <= -margin) outside |= 1u << i;
+                }
+                t[2 * (k * kCoverageLutDistances + j)] = inside;
+                t[2 * (k * kCoverageLutDistances + j) + 1] = outside;
+            }
+        }
+        return t;
+    }();
+    return table;
+}
+
 namespace
 {
 uint32_t octEncode(float3 n)
@@ -58,7 +102,8 @@ GpuScene::GpuScene(Device& device) : m_device(device) {}
 GpuScene::~GpuScene()
 {
     for (Buffer* b : { &m_instanceBuffer, &m_meshBuffer, &m_submeshBuffer, &m_vertexBuffer, &m_indexBuffer, &m_materialBuffer, &m_materialRemapBuffer, &m_lightBuffer,
-                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable, &m_clusterBuffer, &m_lodLevelBuffer, &m_lodLevelClusterBuffer,
+                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable, &m_coverageTable, &m_clusterBuffer, &m_lodLevelBuffer,
+                       &m_lodLevelClusterBuffer,
                        &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer })
         release(*b);
     for (auto& [name, b] : m_named) release(b);
@@ -279,7 +324,7 @@ void GpuScene::upload(const scene::Scene& s)
     }
 
     for (Buffer* b : { &m_instanceBuffer, &m_meshBuffer, &m_submeshBuffer, &m_vertexBuffer, &m_indexBuffer, &m_materialBuffer, &m_materialRemapBuffer, &m_lightBuffer,
-                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable })
+                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable, &m_coverageTable })
         release(*b);
     m_instanceBuffer = createStructured(m_instances.data(), sizeof(gpu::Instance), m_instances.size(), L"scene instances", true);
     m_meshBuffer = createStructured(m_meshes.data(), sizeof(gpu::Mesh), m_meshes.size(), L"scene meshes");
@@ -321,6 +366,8 @@ void GpuScene::upload(const scene::Scene& s)
     m_albedoTable = createStructured(table.data(), sizeof(float), table.size(), L"material model E table");
     const std::vector<float>& specular = scene::model::specularAlbedoTable();
     m_specularTable = createStructured(specular.data(), 2 * sizeof(float), specular.size() / 2, L"material model (A, B) table");
+    const std::vector<uint32_t>& coverage = coverageMaskTable();
+    m_coverageTable = createStructured(coverage.data(), 2 * sizeof(uint32_t), coverage.size() / 2, L"coverage mask LUT");
     if (!m_clusterBuffer.resource) setClusters(ClusterData{});
 }
 
@@ -599,6 +646,9 @@ void GpuScene::fill(gpu::FrameConstants& f) const
     f.prevBonePalette = m_prevBonePalette.srv;
     f.materialModelLut = m_albedoTable.srv;
     f.specularAlbedoLut = m_specularTable.srv;
+    f.coverageMaskLut = m_coverageTable.srv;
+    f.giRaysThisFrame = 0;
+    f.spare0 = f.spare1 = 0;
     f.instanceCount = (uint32_t)m_instances.size();
     f.meshCount = (uint32_t)m_meshes.size();
     f.clusterCount = m_clusterBuffer.count;

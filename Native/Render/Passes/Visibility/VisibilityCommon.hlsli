@@ -55,6 +55,7 @@ struct CullView
 #define VS_COV_FRAGMENTS 32u  // coverage layer (CoverageLayer.hlsli): fragments appended by the raster
 #define VS_COV_PIXELS 33u     // pixels with fragments (pixel list entries)
 #define VS_COV_ALLOC 34u      // sorted fragments allocated by the build
+#define VS_STAT_BAND_CLUSTERS 35u  // + band (3): visible clusters per band A, B, C
 #define VS_WORDS 40u
 
 #define VS_LISTS 6u
