@@ -91,6 +91,26 @@ uint4 giProbePlane(GiProbeTile t, uint2 probe, uint plane, int2 count)
 }
 uint4 giProbeHeader(GiProbeTile t) { return gs_giHeader; }
 
+// Split form of giProbeTileLoad for kernels that issue their own reads in between (M's shading kernel: the pixel's
+// word, G-buffer and depth and S's overflow head go out together with the tile's records; the records are stored once
+// those are in flight). The probe counts come from the caller: with the fixed 8 px spacing they are ceil(view / 8)
+// (GiSystem), so no header read has to come first; lane 54 returns the header those counts define.
+// [M measurement, city 4K: shading 1.257 -> 1.191 ms, 3 alternating rounds, together with M's reordered kernel.]
+uint4 giProbeTileFetch(ProbeSrvs s, uint2 tile, uint lane, int2 count)
+{
+    if (lane > 54) return 0;
+    if (lane == 54) return uint4(8, count.x, count.y, 0);
+    Texture2D<uint4> t = ResourceDescriptorHeap[s.probes];
+    const uint k = lane / 6, plane = lane % 6;
+    const int2 probe = clamp(int2(tile) - 1 + int2(k % 3, k / 3), int2(0, 0), count - 1);
+    return giProbePlane(t, uint2(probe), plane, count);
+}
+void giProbeTileStore(uint lane, uint4 value)
+{
+    if (lane < 54) gs_giProbe[lane / 6][lane % 6] = value;
+    else if (lane == 54) gs_giHeader = value;
+}
+
 // Lanes 0..53 load (probe k = lane / 6, plane lane % 6), lane 54 the header; the caller then syncs the group.
 void giProbeTileLoad(ProbeSrvs s, uint2 tile, uint lane)
 {

@@ -1,7 +1,8 @@
 // unx-kernel: cs_6_6 main
 // GI tests only (GiAnalytic): screenProbeGatherTile (records from the tile's groupshared copy, GI_PROBE_TILE_CACHE)
 // against screenProbeGather at every pixel of the view, front and back irradiance, occlusion and K radiance at two cone
-// widths (two map levels): every value must be bit-identical. One group per 8 x 8 tile.
+// widths (two map levels): every value must be bit-identical. One group per 8 x 8 tile; alternate tiles are filled
+// with giProbeTileLoad and with giProbeTileFetch + giProbeTileStore.
 // P[0] = { probes SRV, depth SRV, gbuffer SRV, result UAV (raw) }, P[1] = { 0, 0, width, height }, P[2].x = maps atlas SRV;
 // b1 = the view. Result: { pixels compared, mismatches, recorded, 0 } then the first 4 mismatches, 64 B each:
 // { pixel, cone index, field mask (1 irradiance, 2 occlusion, 4 back, 8 radiance), 0, texture path rgb + occlusion,
@@ -20,7 +21,11 @@ uint differing(ScreenProbeLighting a, ScreenProbeLighting b)
 void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : SV_GroupIndex)
 {
     const ProbeSrvs s = { P[0].x, P[0].x, P[2].x, 0 };
-    giProbeTileLoad(s, tile, lane);
+    // Alternate tiles fill the cache with the split form (giProbeTileFetch / giProbeTileStore, counts from the view size).
+    if (((tile.x ^ tile.y) & 1) != 0)
+        giProbeTileStore(lane, giProbeTileFetch(s, tile, lane, int2((P[1].zw + 7) / 8)));
+    else
+        giProbeTileLoad(s, tile, lane);
     GroupMemoryBarrierWithGroupSync();
     const uint2 pixel = tile * 8 + local;
     if (any(pixel >= P[1].zw)) return;

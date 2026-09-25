@@ -36,15 +36,18 @@ constexpr D3D12_BARRIER_ACCESS kAsWrite = D3D12_BARRIER_ACCESS_RAYTRACING_ACCELE
 
 std::mutex g_sceneMutex;
 std::map<std::pair<Device*, GpuScene*>, std::unique_ptr<RayScene>> g_scenes;
+
+struct RaySceneSlot
+{
+    std::unique_ptr<RayScene> scene;
+};
 } // namespace
+
+RayScene* RayScene::find(TrackState& state) { return state.get<RaySceneSlot>("R.rayScene").scene.get(); }
 
 RayScene& RayScene::get(FramePassContext& fc)
 {
-    struct Slot
-    {
-        std::unique_ptr<RayScene> scene;
-    };
-    Slot& slot = fc.state<Slot>("R.rayScene");
+    RaySceneSlot& slot = fc.state<RaySceneSlot>("R.rayScene");
     if (slot.scene && slot.scene->sceneRevision() != fc.scene.revision()) slot.scene.reset();  // re-uploaded scene
     if (!slot.scene) slot.scene = std::make_unique<RayScene>(fc.device, fc.shaders, fc.scene, fc.quality);
     return *slot.scene;
@@ -1172,6 +1175,11 @@ void RayScene::record(FramePassContext& fc)
         selectExactSet(fc);
     }
     selectProxyLevels(fc);
+    ++m_stats.framesRecorded;
+    m_stats.exactBuildsTotal += m_stats.exactBuilds;
+    m_stats.exactOccupiedTotal += m_stats.exactOccupied;
+    m_stats.exactVerticesTotal += m_stats.exactVertices;
+    m_stats.proxySwitchesTotal += m_stats.proxySwitches;
     // This frame's instance descriptors (GpuScene's CPU mirror is current, INTERFACES 6.3 v1.8).
     if (fc.framesInFlight > kDescSlots) fail("RayScene: %u frames in flight exceed %u descriptor slots", fc.framesInFlight, kDescSlots);
     const uint64_t slotOffset = (fc.frame.frameIndex % kDescSlots) * m_descSlotBytes;

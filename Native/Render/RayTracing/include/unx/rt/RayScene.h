@@ -59,6 +59,9 @@ struct RaySceneStats
     uint32_t exactOccupied = 0, exactBuilds = 0;  // last frame: slots in use, slots (re)built
     uint64_t exactVertices = 0;            // vertices deformed per occupied slot's owner (last frame)
     uint32_t proxySwitches = 0;            // last frame: deformed instances whose proxy cut changed (BLAS rebuilt)
+    // Since load (measurement summaries): frames recorded, and over them exact slots (re)built, exact slots occupied, exact
+    // vertices deformed and proxy cut switches.
+    uint64_t framesRecorded = 0, exactBuildsTotal = 0, exactOccupiedTotal = 0, exactVerticesTotal = 0, proxySwitchesTotal = 0;
 };
 
 class RayScene
@@ -67,6 +70,8 @@ public:
     // The frame's ray scene, kept in the FrameRenderer's track state ("R.rayScene"); built on first use (load time,
     // outside the frame graph) and rebuilt when the GPU scene is re-uploaded (streaming boundary).
     static RayScene& get(FramePassContext& fc);
+    // The track state's ray scene if one was built (measurement tools; nullptr otherwise).
+    static RayScene* find(TrackState& state);
     // Device-keyed registry for tests that trace without a frame context; releaseDevice drops a device's scenes.
     static RayScene& get(Device& device, ShaderLibrary& shaders, GpuScene& scene, const QualityConfig& quality);
     static void releaseDevice(Device& device);

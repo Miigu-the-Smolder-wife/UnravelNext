@@ -172,6 +172,7 @@ int main(int argc, char** argv)
             const ViewDesc view = ViewDesc::fromCamera(s.cameras[cameraIndex], res.width, res.height, float4x4{});
             gi::GiSystem* giSystem = nullptr;
             refl::ReflectionSystem* reflSystem = nullptr;
+            rt::RayScene* rayScene = nullptr;
             std::unique_ptr<FrameRenderer> renderer;
             if (integrated) renderer = std::make_unique<FrameRenderer>(device, shaders, quality, gpuScene, opt.framesInFlight);
             // --dump / --compare: the reflection rows of every frame into one read-back buffer (the last frame's copy stays).
@@ -275,6 +276,7 @@ int main(int argc, char** argv)
                 main.gbuffer = graph.createTexture({ "stand-in gbuffer", res.width, res.height, 1, 1, DXGI_FORMAT_R32G32_UINT });
                 rt::RayScene& rays = rt::RayScene::get(fc);
                 rays.record(fc);
+                rayScene = &rays;
                 uint32_t sceneConstants[8];
                 rays.rootConstants(sceneConstants);
                 rt::RayPipeline& primary = rt::RayPipeline::get(device, shaders, rt::standardRayPipeline("Passes/GI/Tests/GiTestPrimary", { "GiTestPrimaryGen" }));
@@ -421,6 +423,7 @@ int main(int argc, char** argv)
             {
                 giSystem = gi::GiSystem::find(renderer->trackState());
                 reflSystem = refl::ReflectionSystem::find(renderer->trackState());
+                rayScene = rt::RayScene::find(renderer->trackState());
             }
             const double reflMs = passSum(r, "r.refl."), traceReflMs = r.passMs.count("r.refl.trace") ? r.passMs.at("r.refl.trace").median : 0;
             logf("R %s: reflections %.3f ms (trace %.3f ms, classify %.3f, resolve %.3f)\n", res.name.c_str(), reflMs, traceReflMs,
@@ -438,6 +441,15 @@ int main(int argc, char** argv)
                      r.passMs.count("bench.probe.footprint") ? r.passMs.at("bench.probe.footprint").median : 0,
                      r.passMs.count("bench.probe.none") ? r.passMs.at("bench.probe.none").median : 0,
                      r.passMs.count("bench.probe.gather") ? r.passMs.at("bench.probe.gather").median : 0);
+            if (rayScene && rayScene->stats().framesRecorded > 0)
+            {
+                const rt::RaySceneStats& as = rayScene->stats();
+                const double recorded = (double)as.framesRecorded;
+                logf("R %s: over %llu frames: exact set %.2f of %u slots occupied, %.3f slot builds / frame (%llu), %.0f exact vertices deformed / frame; "
+                     "proxy cut switches %.3f / frame (%llu)\n", res.name.c_str(), (unsigned long long)as.framesRecorded, as.exactOccupiedTotal / recorded, as.exactSlots,
+                     as.exactBuildsTotal / recorded, (unsigned long long)as.exactBuildsTotal, as.exactVerticesTotal / recorded, as.proxySwitchesTotal / recorded,
+                     (unsigned long long)as.proxySwitchesTotal);
+            }
             if (reflSystem)
             {
                 const refl::ReflectionSystem::Stats rs = reflSystem->readStats();
