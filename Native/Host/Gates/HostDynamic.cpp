@@ -375,6 +375,8 @@ int main(int argc, char** argv)
             // (unix ms: GpuLock's contention samples are matched against it).
             std::vector<double> qLists[2], qHead[2], qTail[2], qGap[2], graphLists, graphBarriers;
             std::map<uint64_t, int64_t> submittedAt;
+            // Scene revision changes in the measured frames: each one starts a new GI lighting epoch (history reset).
+            uint32_t lastRevision = UINT32_MAX, revisionChanges = 0;
             std::vector<uint64_t> gpuFrames;
             int64_t windowStartUnix = 0;
             std::map<std::string, std::vector<double>> passMs;
@@ -437,6 +439,8 @@ int main(int argc, char** argv)
                     api.ok(api.UnxFrameGraphStatsLatest(r, &gs), "UnxFrameGraphStatsLatest");
                     if (gs.frameIndex == s.frameIndex)
                     {
+                        if (lastRevision != UINT32_MAX && gs.sceneRevision != lastRevision) ++revisionChanges;
+                        lastRevision = gs.sceneRevision;
                         graphLists.push_back(gs.commandLists);
                         graphBarriers.push_back(gs.barriers);
                         for (uint32_t q = 0; q < 2; ++q)
@@ -481,8 +485,8 @@ int main(int argc, char** argv)
                                          : format("{\"lists\": %s, \"headMs\": %s, \"tailMs\": %s, \"gapMs\": %s}", distJson(qLists[q]).c_str(), distJson(qHead[q]).c_str(),
                                                   distJson(qTail[q]).c_str(), distJson(qGap[q]).c_str());
             };
-            const std::string graphJson = format("{\"commandLists\": %s, \"barriers\": %s, \"queues\": {\"graphics\": %s, \"compute\": %s}}", distJson(graphLists).c_str(),
-                                                 distJson(graphBarriers).c_str(), queueJson(0).c_str(), queueJson(1).c_str());
+            const std::string graphJson = format("{\"commandLists\": %s, \"barriers\": %s, \"sceneRevisionChanges\": %u, \"queues\": {\"graphics\": %s, \"compute\": %s}}",
+                                                 distJson(graphLists).c_str(), distJson(graphBarriers).c_str(), revisionChanges, queueJson(0).c_str(), queueJson(1).c_str());
             const Distribution g = Distribution::of(gpuMs), u = Distribution::of(updateMs);
             logf("%s: %s, %u bodies (%llu restarts) + %u characters x %u bones, %u instances: GPU frame median %.3f ms (P95 %.3f, P99 %.3f) | host updates %.3f ms | record %.3f submit %.3f ms\n",
                  rs.c_str(), placement.scene.c_str(), bodies, (unsigned long long)teleports, characters, bones, info.instances, g.median, g.p95, g.p99, u.median, Distribution::of(recordMs).median,

@@ -94,6 +94,7 @@ struct GraphFrameStats
     bool planReused = false;
     uint64_t transientBytesAliased = 0;
     double cpuCompileMs = 0;
+    uint32_t sceneRevision = 0;  // GpuScene::revision() the frame recorded with (GI lighting epochs follow it)
 };
 
 struct FrameStats
@@ -163,6 +164,8 @@ public:
     // Test hooks: the flags of the last recorded frame, and the GPU scene's CPU mirror of an instance.
     std::pair<uint32_t, uint32_t> lastFrameFlags() const { return { m_lastDiscontinuity, m_lastGpuSimulation }; }
     const render::gpu::Instance& gpuInstanceForTest(uint32_t instance) const { return m_gpuScene->instances().at(instance); }
+    // The D3D12 device the renderer records on (Unity's inside Unity).
+    ID3D12Device* d3dDevice() const;
     // Test hook: transform and pose updates that matched the GPU scene bit for bit and were not applied (beginFrame).
     std::pair<uint64_t, uint64_t> droppedUpdatesForTest() const { return { m_droppedTransforms, m_droppedPoses }; }
     // Test hook: removes this renderer's D3D12 device (ID3D12Device5::RemoveDevice: this process only, no GPU reset), as a

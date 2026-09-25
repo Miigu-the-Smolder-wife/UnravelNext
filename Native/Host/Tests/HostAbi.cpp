@@ -64,6 +64,7 @@ struct Api
     UNX_FN(UnxFrameRenderStandalone)
     UNX_FN(UnxFrameStatsLatest)
     UNX_FN(UnxFrameGraphStatsLatest)
+    UNX_FN(UnxVideoMemory)
 #undef UNX_FN
     void load(const std::filesystem::path& path)
     {
@@ -96,6 +97,7 @@ struct Api
         UNX_FN(UnxFrameRenderStandalone)
         UNX_FN(UnxFrameStatsLatest)
         UNX_FN(UnxFrameGraphStatsLatest)
+        UNX_FN(UnxVideoMemory)
 #undef UNX_FN
     }
     void ok(int32_t r, const char* what) const
@@ -641,6 +643,13 @@ int main(int argc, char** argv)
         logf("ABI queue timing of frame %llu: graphics %u lists, head %.4f tail %.4f gap %.4f ms; compute %u lists (correctness run, not a measurement)\n",
              (unsigned long long)graph.frameIndex, graph.queues[0].lists, graph.queues[0].headMs, graph.queues[0].tailMs, graph.queues[0].gapMs, graph.queues[1].lists);
         if (graph.queues[0].lists == 0) fail("UnxFrameGraphStatsLatest: no graphics list in the queue timing");
+        UnxVideoMemoryInfo vram{};
+        vram.size = sizeof vram;
+        vram.version = 1;
+        api.ok(api.UnxVideoMemory(r, &vram), "UnxVideoMemory");
+        logf("ABI video memory of this process: local %.1f MB used of %.1f MB budget, non-local %.1f MB (correctness run, 1440p test scene)\n", vram.localUsage / 1048576.0,
+             vram.localBudget / 1048576.0, vram.nonLocalUsage / 1048576.0);
+        if (vram.localBudget == 0 || vram.localUsage == 0) fail("UnxVideoMemory: empty local segment");
         // Version 1 (the first 64 bytes) is still served.
         UnxFrameGraphStats v1{};
         v1.size = (uint32_t)offsetof(UnxFrameGraphStats, queues);

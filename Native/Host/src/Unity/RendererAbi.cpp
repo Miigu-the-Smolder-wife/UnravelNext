@@ -703,9 +703,37 @@ UNX_API int32_t UNX_CALL UnxFrameGraphStatsLatest(UnxRenderer r, UnxFrameGraphSt
         stats->crossQueueSyncs = g.crossQueueSyncs;
         stats->transientResources = g.transientResources;
         stats->planReused = g.planReused ? 1u : 0u;
-        stats->reserved = 0;
+        stats->sceneRevision = g.sceneRevision;
         stats->transientBytesAliased = g.transientBytesAliased;
         stats->cpuCompileMs = g.cpuCompileMs;
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxVideoMemory(UnxRenderer r, UnxVideoMemoryInfo* info)
+{
+    return call([&] {
+        requireStruct(info, "UnxVideoMemoryInfo");
+        ID3D12Device* device = nullptr;
+        if (r) device = find(r)->d3dDevice();
+        else if (IUnityGraphicsD3D12v8* unity = plugin::unityD3D12()) device = unity->GetDevice();
+        if (!device) fail("UnxVideoMemory: no device (renderer 0 outside Unity)");
+        const LUID luid = device->GetAdapterLuid();
+        ComPtr<IDXGIFactory4> factory;
+        if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)))) fail("UnxVideoMemory: CreateDXGIFactory2 failed");
+        ComPtr<IDXGIAdapter3> adapter;
+        if (FAILED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter)))) fail("UnxVideoMemory: the device's adapter was not found");
+        DXGI_QUERY_VIDEO_MEMORY_INFO local{}, nonLocal{};
+        if (FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)) ||
+            FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonLocal)))
+            fail("UnxVideoMemory: QueryVideoMemoryInfo failed");
+        info->localBudget = local.Budget;
+        info->localUsage = local.CurrentUsage;
+        info->localReservation = local.CurrentReservation;
+        info->localAvailableForReservation = local.AvailableForReservation;
+        info->nonLocalBudget = nonLocal.Budget;
+        info->nonLocalUsage = nonLocal.CurrentUsage;
+        info->nonLocalReservation = nonLocal.CurrentReservation;
+        info->nonLocalAvailableForReservation = nonLocal.AvailableForReservation;
     });
 }
 

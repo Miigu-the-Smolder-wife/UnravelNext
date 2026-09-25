@@ -386,12 +386,14 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     m_frameRenderer->record(*m_graph, fc, output);
 }
 
+ID3D12Device* HostRenderer::d3dDevice() const { return m_device ? m_device->d3d() : nullptr; }
+
 void HostRenderer::endFrame(uint32_t slot, uint64_t)
 {
     for (uint32_t q = 0; q < kQueueTypeCount; ++q) m_slotFence[slot][q] = m_graph->lastFence((QueueType)q);
     const RenderGraphStats& g = m_graph->stats();
     m_slotGraph[slot] = { g.livePasses, g.commandLists, g.barrierBatches, g.barriers, g.crossQueueSyncs, g.transientResources, g.planReused,
-                          g.transientBytesAliased, g.cpuCompileMs };
+                          g.transientBytesAliased, g.cpuCompileMs, m_gpuScene->revision() };
     ++m_recordedFrames;
     std::lock_guard lock(m_mutex);
     m_stats.cpuRecordMs = m_graph->stats().cpuRecordMs;

@@ -31,7 +31,7 @@ enum UnxResult
                             // 4: + UnxFrameSetEnvironment; 5: UNX_DEVICE_REMOVED (the process survives a device removal);
                             // 6: + UnxFrameSetDiscontinuity, UnxFrameSetSimulation, UnxTransformUpdate::flags (teleport);
                             //    later additions within 6 (optional exports, bridges probe for them): UnxFrameGraphStatsLatest,
-                            //    UnxSceneLoad
+                            //    UnxSceneLoad, UnxVideoMemory
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -376,12 +376,26 @@ typedef struct UnxFrameGraphStats
     uint32_t size, version;     // sizeof, 2
     uint64_t frameIndex;        // the same frame as UnxFrameStats::frameIndex
     uint32_t livePasses, commandLists, barrierBatches, barriers;
-    uint32_t crossQueueSyncs, transientResources, planReused, reserved;
+    uint32_t crossQueueSyncs, transientResources, planReused;
+    uint32_t sceneRevision;     // the GPU scene's revision the frame recorded with: it changes on uploads and on published
+                                // material textures, and every change resets the GI cache's history (a new lighting epoch)
     uint64_t transientBytesAliased;
     double cpuCompileMs;        // plan build (0 when the cached plan was reused)
     UnxQueueTiming queues[2];   // graphics, compute (version 2)
 } UnxFrameGraphStats;
 UNX_API int32_t UNX_CALL UnxFrameGraphStatsLatest(UnxRenderer r, UnxFrameGraphStats* stats);
+
+// This process's video memory on the renderer's adapter (DXGI QueryVideoMemoryInfo, bytes): local (VRAM) and non-local
+// (system memory the GPU maps). 'r' names the renderer whose device's adapter is asked; 0 asks Unity's device (inside
+// Unity). Usage is the whole process: Unity's own resources, every renderer's, and any other D3D12 user in the process.
+// Optional export within ABI 6.
+typedef struct UnxVideoMemoryInfo
+{
+    uint32_t size, version;     // sizeof, 1
+    uint64_t localBudget, localUsage, localReservation, localAvailableForReservation;
+    uint64_t nonLocalBudget, nonLocalUsage, nonLocalReservation, nonLocalAvailableForReservation;
+} UnxVideoMemoryInfo;
+UNX_API int32_t UNX_CALL UnxVideoMemory(UnxRenderer r, UnxVideoMemoryInfo* info);
 
 // Per-pass GPU time of the same completed frame (pass names as the render graph declares them, e.g. "v.raster.bandA").
 typedef struct UnxPassTiming
@@ -408,6 +422,7 @@ static_assert(sizeof(UnxCameraDesc) == 48);
 static_assert(sizeof(UnxFrameDesc) == 96);
 static_assert(sizeof(UnxFrameStats) == 48);
 static_assert(sizeof(UnxQueueTiming) == 32);
+static_assert(sizeof(UnxVideoMemoryInfo) == 72);
 static_assert(sizeof(UnxFrameGraphStats) == 128);
 static_assert(offsetof(UnxFrameGraphStats, queues) == 64);  // version 1 is the first 64 bytes
 static_assert(sizeof(UnxTransformUpdate) == 56);
