@@ -1,12 +1,15 @@
 // unx-kernel: cs_6_6 main
 // unx-variants: LIST=0,1
-// Integrate (stream step 2 / 3). LIST=0: thread per slot (depth 0: every live slot, existing and newly spawned).
+// Integrate (stream step 2 / 3). LIST=0 (depth 0): thread per live slot - the alive list holds the last compaction's
+// live slots (slot order) followed by this tick's P[0].x depth-0 births (appended by FxSpawn); dead slots get no thread.
 // LIST=1: thread per slot spawned at depth d >= 1 (spawned[P[0].x + t], t < P[0].y).
 // Per slot, in the stream's order: an existing slot of a KILLED row dies (no event); an existing slot whose birth is in
 // the row's dying range [dying_birth, death_birth) dies, integrated to its lifetime end first when the row writes death
 // events (event slot death_event + (birth - dying_birth)), after a. rebase / transport (existing slots), else b-f.
 // nv_integrate over h = dt (full-dt drag factors of the row) or, for a new birth (age sign bit), h = elapsed from age 0.
 // The first impact of a colliding program with collision events appends a collision event after the CPU slots.
+// The motion (nv_integrate_motion) runs here for every slot; a slot of a colliding program is then queued for FxCollide
+// (sweep + finish), the others finish here (fxFinishSlot), so the collision sweeps run in waves of colliders only.
 // Reads the input state (last tick's output, with this tick's births) and writes this tick's state into the other
 // buffer of the pair, so the renderer interpolates the two ticks of a slot from the state itself (no render record copy);
 // writes the slot's sort key; a dead slot is marked DYING (dying list).
@@ -27,8 +30,12 @@ void main(uint3 id : SV_DispatchThreadID)
     FX_RWBUFFER(uint, spawned, g_spawnedSlots);
     const uint slot = spawned[P[0].x + id.x];
 #else
-    const uint slot = id.x;
-    if (slot >= g_capacity) return;
+    FX_RWBUFFER(uint, counters, g_counters);
+    const uint listed = min(counters[FX_COUNTER_ALIVE] + P[0].x, g_capacity);
+    if (id.x >= listed) return;
+    FX_RWBUFFER(uint, aliveList, g_aliveList);
+    const uint slot = aliveList[id.x];
+    if (slot >= g_capacity) { fxStatus(FX_STATUS_RANGE); return; }
 #endif
     if (alive[slot] != FX_SLOT_ALIVE) return;
     FX_RWBUFFER(float4, posAge, g_posAge);
@@ -94,56 +101,24 @@ void main(uint3 id : SV_DispatchThreadID)
         h = g_dt;
         drag.velocity = e.dragVelocity; drag.position = e.dragPosition; drag.acceleration = e.dragAcceleration;
     }
-    NvImpact impact;
-    const NvState start = s;
-    const bool complete = nv_integrate(fxMotion(p, e, dyn, birth), h, drag, s, impact);
-    uint status = complete ? 0u : FX_STATUS_IMPACT_OVERFLOW;
-    if (!complete && g_overflowCapacity != 0u)
+    const NvMotion mo = fxMotion(p, e, dyn, birth);
+    float3 start, move;
+    nv_integrate_motion(mo, h, drag, s, start, move);
+    if (mo.collision != 0u && g_surfaceCount != 0u)
     {
-        // the exact inputs of this nv_integrate call, so the sweep can be replayed with a trace (IMPACT_OVERFLOW rule)
+        // the sweep runs in FxCollide, whose waves hold colliding slots only (they no longer stall the other lanes)
         FX_RWBUFFER(uint, counters, g_counters);
         uint at;
-        InterlockedAdd(counters[FX_COUNTER_OVERFLOWS], 1u, at);
-        if (at < g_overflowCapacity)
+        InterlockedAdd(counters[FX_COUNTER_COLLIDERS], 1u, at);
+        if (at < g_capacity)
         {
-            FX_RWBUFFER(OverflowRecord, records, g_overflowRecords);
-            OverflowRecord r;
-            r.row = row; r.birth = birth; r.newborn = born ? 1u : 0u; r.depth = 0u;
-            r.position = start.position; r.age = start.age;
-            r.velocity = start.velocity; r.h = h;
-            r.drag = float4(drag.velocity, drag.position, drag.acceleration, 0);
-            r.emitter = e;
-            r.dynamic = dyn;
-            records[at] = r;
+            FX_RWBUFFER(ColliderRecord, colliders, g_colliders);
+            ColliderRecord c;
+            c.start = start; c.slot = slot; c.move = move; c.h = h; c.velocity = s.velocity; c.age = s.age;
+            colliders[at] = c;
         }
-    }
-    if (!fxFinite(s))
-    {
-        fxStatus(status | FX_STATUS_NONFINITE);
-        alive[slot] = FX_SLOT_DEAD;  // a defect: removed without a dying record
+        else fxStatus(FX_STATUS_CAPACITY);
         return;
     }
-    fxStatus(status);
-    if (impact.count != 0u && (p.flags & FX_PROGRAM_COLLISION_EVENTS) != 0u)
-    {
-        FX_RWBUFFER(uint, counters, g_counters);
-        uint n;
-        InterlockedAdd(counters[FX_COUNTER_COLLISIONS], 1u, n);
-        if (n < g_collisionCapacity)
-        {
-            FX_RWBUFFER(StreamEvent, events, g_events);
-            StreamEvent ev;
-            ev.emitter = row; ev.birth = birth; ev.kind = FX_EVENT_COLLISION; ev.impacts = impact.count;
-            ev.position = impact.contact; ev.after = (1 - impact.fraction) * h;
-            ev.velocity = impact.velocity; ev.reserved0 = 0; ev.normal = impact.normal; ev.reserved1 = 0;
-            events[g_eventSlots + n] = ev;
-        }
-    }
-    FX_RWBUFFER(float4, posAgeOut, g_posAgeOut);
-    FX_RWBUFFER(float4, velocityOut, g_velocityOut);
-    posAgeOut[slot] = float4(s.position, s.age);
-    velocityOut[slot] = float4(s.velocity, 0);
-    FX_RWBUFFER(uint, keys, g_keyBySlot);
-    keys[slot] = fxSortKey(dyn.originAnchor + s.position);
-    fxWriteOutputs(slot, birth, s, e, p, dyn);
+    fxFinishSlot(slot, row, birth, e, p, dyn, mo, h, start, move, s);
 }

@@ -76,14 +76,14 @@ std::string sha(const std::vector<uint8_t>& bytes)
 }
 
 // 1. byte-identical stream copies of the pinned NativeVfx commit (the copies are updated together with this pin)
-constexpr const char* kStreamCommit = "f461b7c9";
+constexpr const char* kStreamCommit = "49e83889";
 void checkStreamCopies(bool strict)
 {
     const fs::path mine = fs::path(UNX_SOURCE_DIR) / "Native/Render/Passes/FX/Stream";
     const fs::path original = fs::path(UNX_SOURCE_DIR) / "../Unravel/Native/NativeVfx";
     struct Pin { const char* file; const char* sha; };
     const Pin pins[] = { { "include/NativeVfxStream.h", "041b39a0a88b7717f4cbb6c0e76fcd92d6a90ebe2659282f56d07c8dd795851a" },
-                         { "shaders/VfxParticleMath.hlsli", "e6db9103297d7295982bcb819d70c005bea34dd4bf7ce04475ab3e2d8611f54a" },
+                         { "shaders/VfxParticleMath.hlsli", "54cee51763671e0742087c1eabc294b77e86359211b0f3369004ee1ba81efb64" },
                          { "src/VfxStreamCpu.h", "28372b9142fa28f46308b2b6dfd5d59f5e0ba56981c60ee781d6c6ea70ae057b" } };
     for (const Pin& pin : pins)
     {

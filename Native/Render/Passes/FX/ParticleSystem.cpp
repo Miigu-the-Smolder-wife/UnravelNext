@@ -19,8 +19,14 @@ using namespace unx::render;
 namespace
 {
 constexpr uint32_t kScanBlock = 1024;
-constexpr uint32_t kSortGroupKeys = 1024;  // Particles.hlsli FX_SORT_GROUP_KEYS (histogram rows, scatter groups)
+constexpr uint32_t kSortGroupKeys = 4096;  // Particles.hlsli FX_SORT_GROUP_KEYS (histogram rows, scatter groups)
 constexpr uint32_t kReportBytes = 64;
+// FxTick constant buffer: TickConstants, then kCbFields context fields and kCbWorldFields world fields (Particles.hlsli)
+constexpr uint32_t kCbFields = 64, kCbWorldFields = 16;
+constexpr uint64_t kFieldRowsOffset = sizeof(TickConstants), kWorldRowsOffset = kFieldRowsOffset + kCbFields * 32,
+                   kConstBytes = (kWorldRowsOffset + kCbWorldFields * 64 + 255) / 256 * 256;
+static_assert(sizeof(NV_StreamField) == 32 && sizeof(NV_StreamWorldField) == 64, "FxTick field rows");
+static_assert(sizeof(TickConstants) % 16 == 0, "FxTick rows start on a 16-byte boundary");
 constexpr uint32_t kOverflowRecords = 1024, kOverflowRecordBytes = 432;  // IMPACT_OVERFLOW diagnostic records (Particles.hlsli)
 constexpr float kKeyFar = 1.0e6f;          // metres: log range of the sort key (keyNear .. 1000 km)
 
@@ -203,6 +209,7 @@ struct ParticleSystem::Impl
     Buf ribbonRanges{ "fx.ribbonRanges", 16 }, ribbonRunStart{ "fx.ribbonRunStart", 4 }, ribbonTangents{ "fx.ribbonTangents", 16 };
     std::vector<uint32_t> programOutput;  // output kind per program (the last NV_STREAM_PROGRAMS table)
     Buf surfaceBoxes{ "fx.surfaceBoxes", 16 };
+    Buf colliders{ "fx.colliders", 48 };  // colliding slots after their motion (FxIntegrate -> FxCollide)
     Buf overflowRecords{ "fx.overflowRecords", kOverflowRecordBytes };  // IMPACT_OVERFLOW inputs (diagnostic, readState "overflow")
     Buf volumeList{ "fx.volumeRecords", 48 }, volumeRanges{ "fx.volumeRanges", 16 }, gridBlocks{ "fx.gridBlocks", 4 };
     uint32_t lastCollisions = 0;  // collision events of the last tick the CPU read (readback prefix size)
@@ -236,6 +243,9 @@ struct ParticleSystem::Impl
     // signaled after the recording: resolved from the device queue (which outlives any render graph), conservatively
     // (a later signal also covers it). A tick whose frame never executed cannot be waited for: that is a caller error.
     Queue* queue = nullptr;
+    // Bound of a readback wait: 20 s on a GPU. A software adapter (WARP) compiles each kernel to CPU code on its first
+    // dispatch, which for the collision kernels takes tens of seconds on a loaded machine, so it gets 10 min.
+    DWORD fenceWaitMs = 20000;
     void resolveFence(Slot& s)
     {
         if (!s.recorded || s.fence != 0 || !queue) return;
@@ -252,16 +262,19 @@ struct ParticleSystem::Impl
         // event wait with a bound (a sleep loop would round up to the OS timer tick, ~15 ms)
         HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         check(q.fence()->SetEventOnCompletion(s.fence, ev), "FX particles: fence event");
-        const DWORD r = WaitForSingleObject(ev, 20000);
+        const DWORD r = WaitForSingleObject(ev, fenceWaitMs);
         CloseHandle(ev);
         if (r != WAIT_OBJECT_0)
-            fail("FX particles: tick %llu: the GPU did not reach fence %llu within 20 s (completed %llu)", (unsigned long long)s.tick,
-                 (unsigned long long)s.fence, (unsigned long long)q.completed());
+            fail("FX particles: tick %llu: the GPU did not reach fence %llu within %lu s (completed %llu)", (unsigned long long)s.tick,
+                 (unsigned long long)s.fence, (unsigned long)(fenceWaitMs / 1000), (unsigned long long)q.completed());
     }
 };
 
 ParticleSystem::ParticleSystem(Device& device, const QualityConfig& quality) : m_impl(std::make_unique<Impl>()), m_device(device)
 {
+    DXGI_ADAPTER_DESC3 adapter{};
+    if (device.adapter() && SUCCEEDED(device.adapter()->GetDesc3(&adapter)) && (adapter.Flags & DXGI_ADAPTER_FLAG3_SOFTWARE))
+        m_impl->fenceWaitMs = 600000;
     m_sortPasses = (uint32_t)quality.integer("fx.particles.sort_passes");
     m_chainDepthMax = (uint32_t)quality.integer("fx.particles.chain_depth_max");
     m_readbackSlots = (uint32_t)quality.integer("fx.particles.readback_slots");
@@ -495,6 +508,7 @@ void ParticleSystem::record(FramePassContext& fc)
         m.gridEntries.ensure(device, (uint64_t)gridEntryCapacity * 4);
         m.gridLarge.ensure(device, (uint64_t)std::max<uint32_t>(surfaceTotal, 1) * 4);
         m.surfaceBoxes.ensure(device, (uint64_t)std::max<uint32_t>(surfaceTotal, 1) * 32);
+        m.colliders.ensure(device, (uint64_t)std::max<uint32_t>(capacity, 1) * 48);
         m.overflowRecords.ensure(device, (uint64_t)kOverflowRecords * kOverflowRecordBytes);
         m.ribbonPoints.ensure(device, (uint64_t)h.ribbon_points * 32);
         m.ribbonLinks.ensure(device, (uint64_t)h.ribbon_points * 4);
@@ -584,7 +598,7 @@ void ParticleSystem::record(FramePassContext& fc)
         }
         Impl::Slot& slot = m.slots[(size_t)thisSlot];
         if (slot.recorded) m.waitSlot(device, slot);  // its upload is free; a replaced tick's readback can no longer be read
-        const uint64_t constOffset = 0, packetOffset = 512, rankOffset = align(packetOffset + packet.size(), 16);
+        const uint64_t constOffset = 0, packetOffset = kConstBytes, rankOffset = align(packetOffset + packet.size(), 16);
         const uint64_t rangesOffset = align(rankOffset + slotBase.size() * 4, 16);
         const uint64_t volumeOffset = align(rangesOffset + ribbonRanges.size() * 16, 16);
         const uint64_t rowsOffset = align(volumeOffset + volumeRanges.size() * 16, 16);
@@ -598,6 +612,11 @@ void ParticleSystem::record(FramePassContext& fc)
             check(slot.upload->Map(0, &none, reinterpret_cast<void**>(&slot.mapped)), "map FX upload");
         }
         std::memcpy(slot.mapped + packetOffset, packet.data(), packet.size());
+        // the tick's fields into the constant buffer (Particles.hlsli FxTick rows) when they fit
+        if (h.field_count && h.field_count <= kCbFields)
+            std::memcpy(slot.mapped + constOffset + kFieldRowsOffset, base + h.fields, (size_t)h.field_count * sizeof(NV_StreamField));
+        if (h.world_field_count && h.world_field_count <= kCbWorldFields)
+            std::memcpy(slot.mapped + constOffset + kWorldRowsOffset, base + h.world_fields, (size_t)h.world_field_count * sizeof(NV_StreamWorldField));
         std::memcpy(slot.mapped + rankOffset, slotBase.data(), slotBase.size() * 4);
         if (!ribbonRanges.empty()) std::memcpy(slot.mapped + rangesOffset, ribbonRanges.data(), ribbonRanges.size() * 16);
         if (!volumeRanges.empty()) std::memcpy(slot.mapped + volumeOffset, volumeRanges.data(), volumeRanges.size() * 16);
@@ -636,7 +655,7 @@ void ParticleSystem::record(FramePassContext& fc)
                                     &m.spawnedSlots, &m.keysA, &m.valsA, &m.keysB, &m.valsB, &m.hist, &m.dynamic[cur], &m.counters,
                                     &m.report, &slot.events, &m.tickSurfaces, &m.gridCount, &m.gridStart, &m.gridFill, &m.gridEntries, &m.gridLarge,
                                     &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.mediumCells,
-                                    &m.ribbonRunStart, &m.ribbonTangents, &m.volumeList, &m.gridBlocks, &m.surfaceBoxes, &m.overflowRecords,
+                                    &m.ribbonRunStart, &m.ribbonTangents, &m.volumeList, &m.gridBlocks, &m.surfaceBoxes, &m.overflowRecords, &m.colliders,
                                     &m.emitterTable, &m.emitterStamp };
         std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitterUpdates, &m.emitterUpdateRows, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
                                      &m.restore, &m.slotBase, &m.bodies, &m.dynamicSurfaces, &m.ribbonRanges, &m.volumeRanges };
@@ -788,6 +807,7 @@ void ParticleSystem::record(FramePassContext& fc)
             tc.volumeList = c.uav(m.volumeList.ref);
             tc.volumeRanges = c.srv(m.volumeRanges.ref);
             tc.surfaceBoxes = c.uav(m.surfaceBoxes.ref);
+            tc.colliders = c.uav(m.colliders.ref);
             tc.overflowRecords = c.uav(m.overflowRecords.ref);
             tc.overflowCapacity = kOverflowRecords;
             tc.gridBlocks = c.uav(m.gridBlocks.ref);
@@ -870,8 +890,9 @@ void ParticleSystem::record(FramePassContext& fc)
         // 3. depth 0: spawn (generated + explicit), integrate every slot; depths 1..4: child setup, spawn, integrate
         // (a state packet, dt == 0, has no spawns and no motion: FxIntegrate applies kills only)
         if (h.dt > 0)
-            dispatch("fx.particles.spawn.d0", "Passes/FX/FxSpawn", { h.depth[0], h.depth[1], threads[0], threads[0] + h.explicit_count }, groups(threads[0] + h.explicit_count, 64));
-        dispatch("fx.particles.integrate.d0", "Passes/FX/FxIntegrate.LIST0", {}, groups(capacity, 256));
+            dispatch("fx.particles.spawn.d0", "Passes/FX/FxSpawn", { h.depth[0], h.depth[1], threads[0], threads[0] + h.explicit_count, 1u }, groups(threads[0] + h.explicit_count, 64));
+        // live slots of the last compaction + depth-0 births (<= capacity threads; the live count is read on the GPU)
+        dispatch("fx.particles.integrate.d0", "Passes/FX/FxIntegrate.LIST0", { h.dt > 0 ? slotStart[1] : 0u }, groups(capacity, 256));
         for (uint32_t d = 1; d <= NV_STREAM_MAX_DEPTH && h.dt > 0; ++d)
         {
             if (h.depth[d + 1] == h.depth[d]) continue;
@@ -880,6 +901,9 @@ void ParticleSystem::record(FramePassContext& fc)
             dispatch(format("fx.particles.spawn.d%u", d).c_str(), "Passes/FX/FxSpawn", { h.depth[d], h.depth[d + 1], threads[d], threads[d] }, groups(threads[d], 64));
             dispatch(format("fx.particles.integrate.d%u", d).c_str(), "Passes/FX/FxIntegrate.LIST1", { slotStart[d], spawned }, groups(spawned, 256));
         }
+
+        // collision sweeps of every depth's colliding slots (queued by the integrate passes)
+        if (collide) dispatch("fx.particles.collide", "Passes/FX/FxCollide", {}, groups(capacity, 64));
 
         // 4. compaction (alive / dead / dying lists, report, alive_after check)
         compaction("", 1);

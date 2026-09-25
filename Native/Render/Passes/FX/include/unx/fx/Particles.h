@@ -44,7 +44,7 @@ struct TickConstants
     float separationMax;  // largest program separation (collision grid motion bound)
     uint32_t volumeRanges, volumeRangeCount;
     uint32_t surfaceBoxes, velocityOut, overflowRecords, overflowCapacity;
-    uint32_t sortPasses, histRegion, experiment, pad13;  // experiment: fx.particles.experiment_disable (timing only)  // sort histograms: sortPasses regions of histRegion words
+    uint32_t sortPasses, histRegion, experiment, colliders;  // experiment: fx.particles.experiment_disable (timing only)  // sort histograms: sortPasses regions of histRegion words
 };
 static_assert(sizeof(TickConstants) == 384);
 

@@ -11,4 +11,5 @@ collision_readback = 4096    # collision events copied with the tick; more are f
                              # when the CPU reads the tick (exact either way)
 experiment_disable = 0       # timing attribution only, never a product setting: bit 1 medium cells, 2 ribbon strips,
                              # 4 sort, 8 collisions (no surfaces, no grid), 16 context and world fields,
-                             # 32 noise; the outputs are then incomplete
+                             # 32 noise, 64 fields read from buffers instead of the constant
+                             # buffer (A/B); the outputs are then incomplete (not 64)

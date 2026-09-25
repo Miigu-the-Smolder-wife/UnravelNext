@@ -1,7 +1,7 @@
 // unx-kernel: cs_6_6 main
-// Radix sort, pass scatter: stable and deterministic. A group handles the FX_SORT_GROUP_KEYS (1024) keys of its
-// histogram group in two phases (1024 rather than 4096 keys per group: 4x the groups in flight, a quarter of the group
-// memory; the rows are latency bound, not bandwidth bound).
+// Radix sort, pass scatter: stable and deterministic. A group handles the FX_SORT_GROUP_KEYS (4096) keys of its
+// histogram group in two phases. (Group size = a trade: smaller groups put more groups in flight, but the single-group
+// digit scan then walks proportionally more histogram rows; kept by A/B timing.)
 //   1. Local order: the keys are ranked as rows of 128. In a row, WaveMatch (SM 6.5) gives each key the lanes of its
 //      wave with the same digit: rank in the wave = those below it; the lowest of them adds the wave's count for that digit
 //      to group memory. Local position = the digit's start in this group (prefix of the group's digit counts, from the
@@ -11,7 +11,7 @@
 //      WARP), so the result is the same for every wave size.
 //   2. Write-out in local order: thread i of a pass writes the key at local position i to digit base + this group's offset
 //      in the digit + (i - the digit's local start). Consecutive threads write consecutive addresses inside each digit's
-//      run (about 4 keys per digit per group at 1024 keys), so the stores are more coalesced than one 32 B sector per 4 B key; the
+//      run (about 16 keys per digit per group), so the stores are coalesced instead of one 32 B sector per 4 B key; the
 //      keys are re-read from the group's 16 KB block (cache resident).
 // Lanes past the key count carry digit 256 (no position) and still take part in every wave operation.
 // While writing, each key is counted into the next pass's histogram at its destination (group dest >> FX_SORT_GROUP_SHIFT, next digit)

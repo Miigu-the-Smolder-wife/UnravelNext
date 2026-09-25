@@ -46,8 +46,9 @@
 #define FX_COUNTER_VOLUMES 7u        // live volume particles listed for FxCells this tick
 #define FX_COUNTER_TURN 8u           // asuint(max |w| dt over the grid's surfaces) (FxGrid, motion bound of the queries)
 #define FX_COUNTER_CARRY 9u          // asuint(max carrier displacement bound over all surfaces)
-#define FX_SORT_GROUP_SHIFT 10u      // radix sort: keys per histogram / scatter group = 1 << shift (C++ kSortGroupKeys)
+#define FX_SORT_GROUP_SHIFT 12u      // radix sort: keys per histogram / scatter group = 1 << shift (C++ kSortGroupKeys)
 #define FX_SORT_GROUP_KEYS (1u << FX_SORT_GROUP_SHIFT)
+#define FX_COUNTER_COLLIDERS 11u     // colliding slots queued by integrate for FxCollide this tick
 #define FX_COUNTER_OVERFLOWS 10u     // slots of this tick whose sweep needed a fifth impact (diagnostic records)
 
 // alive[] values: 0 dead, 1 alive, 2 died in this tick (dying list; compaction clears it to 0)
@@ -55,6 +56,8 @@
 #define FX_SLOT_ALIVE 1u
 #define FX_SLOT_DYING 2u
 
+#define FX_CB_FIELDS 64u        // context fields held in FxTick (C++ kCbFields)
+#define FX_CB_WORLD_FIELDS 16u  // world fields held in FxTick (C++ kCbWorldFields)
 cbuffer FxTick : register(b1)
 {
     uint g_capacity, g_numScanBlocks, g_numSortGroups, g_flags;
@@ -78,10 +81,16 @@ cbuffer FxTick : register(b1)
     uint g_staticSurfaceCount, g_dynamicSurfaces, g_ribbonPoints, g_mediumCells;  // g_surfaceCount = static + dynamic
     uint g_ribbonCapacity, g_cellCapacity, g_volumeList, g_gridBlocks;  // header ribbon_points, medium_cells; grid block offsets
     uint g_emitterUpdates, g_emitterUpdateRows, g_emitterStamp, g_updateCount;  // emitter table delta (FxEmitters.hlsl)
-    uint g_serial; float g_separationMax; uint g_volumeRanges, g_volumeRangeCount;
-    uint g_surfaceBoxes, g_velocityOut, g_overflowRecords, g_overflowCapacity;  // IMPACT_OVERFLOW inputs (diagnostic)
-    uint g_sortPasses, g_histRegion, g_experiment, g_pad13;  // sort: pass p's histogram is hist[p * g_histRegion + group * 256 + digit]  // g_*Out: this tick's state (double buffered by tick parity)  // grown box per surface (FxGrid STEP 1), candidate filter  // packet serial (stamps of the rows
-                                                                                  // sent); largest separation; FxCells ranges
+    uint g_serial; float g_separationMax; uint g_volumeRanges, g_volumeRangeCount;  // packet serial; largest separation;
+                                                                                  // FxCells ranges
+    uint g_surfaceBoxes, g_velocityOut, g_overflowRecords, g_overflowCapacity;  // grown box per surface (candidate filter);
+                                                                                // this tick's velocity; IMPACT_OVERFLOW inputs
+    uint g_sortPasses, g_histRegion, g_experiment, g_colliders;  // sort: pass p's histogram is hist[p * g_histRegion + group * 256
+                                                                  // + digit]; g_colliders: queue of colliding slots (FxCollide)
+    // The tick's fields, uniform for every particle: read through the constant path (one broadcast load per row) instead of
+    // per-particle buffer loads. Filled by the CPU when the counts fit (else the structured buffers are read).
+    uint4 g_fieldRows[FX_CB_FIELDS * 2];             // context fields (StreamField, 32 B each)
+    uint4 g_worldFieldRows[FX_CB_WORLD_FIELDS * 4];  // world fields (StreamWorldField, 64 B each)
 };
 
 // ---- stream records (StructuredBuffer layouts: 4-byte packing, same order as NativeVfxStream.h) ------------------
@@ -177,16 +186,33 @@ bool fxNegative(float x) { return (asuint(x) >> 31) != 0u; }  // sign bit (a new
 
 NvField fxField(uint i)
 {
+    NvField r;
+    if (g_fieldCount <= FX_CB_FIELDS && (g_experiment & 64u) == 0u)
+    {
+        const uint4 a = g_fieldRows[2u * i], b = g_fieldRows[2u * i + 1u];
+        r.position = asfloat(a.xyz); r.kind = a.w; r.value = asfloat(b.xyz); r.radius = asfloat(b.w);
+        return r;
+    }
     FX_BUFFER(StreamField, fields, g_fields);
     const StreamField f = fields[i];
-    NvField r;
     r.position = f.position; r.kind = f.kind; r.value = f.value; r.radius = f.radius;
     return r;
 }
 NvWorldField fxWorldField(uint i)
 {
-    FX_BUFFER(StreamWorldField, fields, g_worldFields);
-    const StreamWorldField f = fields[i];
+    StreamWorldField f;
+    if (g_worldFieldCount <= FX_CB_WORLD_FIELDS && (g_experiment & 64u) == 0u)
+    {
+        const uint4 a = g_worldFieldRows[4u * i], b = g_worldFieldRows[4u * i + 1u], c = g_worldFieldRows[4u * i + 2u], d = g_worldFieldRows[4u * i + 3u];
+        f.origin = asfloat(a.xyz); f.packed = a.w;
+        f.basis0 = asfloat(b.xyz); f.basis1 = asfloat(uint3(b.w, c.x, c.y)); f.basis2 = asfloat(uint3(c.z, c.w, d.x));
+        f.value = asfloat(d.yzw);
+    }
+    else
+    {
+        FX_BUFFER(StreamWorldField, fields, g_worldFields);
+        f = fields[i];
+    }
     NvWorldField r;
     r.origin = f.origin;
     r.quantity = f.packed & 0xFFu; r.shape = (f.packed >> 8) & 0xFFu; r.operation = (f.packed >> 16) & 0xFFu;
@@ -421,7 +447,6 @@ StreamEvent fxEvent(uint emitter, uint birth, uint kind, NvState s)
     ev.position = s.position; ev.after = 0; ev.velocity = s.velocity; ev.reserved0 = 0; ev.normal = float3(0, 0, 0); ev.reserved1 = 0;
     return ev;
 }
-#endif
 
 // ---- geometry outputs (WORLD_VFX_DESIGN_KO.md 3.5), written by the integrate kernel with the slot's final state -----------
 // The live births of an emitter are [death_birth, next_birth), so a live particle's output index is
@@ -455,6 +480,8 @@ struct OverflowRecord
     StreamEmitter emitter;            // the row as the kernel read it (per-tick fields included)
     EmitterDynamic dynamic;           // origin_anchor, inherited velocity of this tick
 };
+// A colliding slot after its motion (nv_integrate_motion), waiting for its sweep in FxCollide: 48 B.
+struct ColliderRecord { float3 start; uint slot; float3 move; float h; float3 velocity; float age; };
 // Per-particle values of a live volume particle's cells (48 B), written by the integrate kernel at the index of its first
 // cell; FxCells (thread per cell) reads it. serial = the tick's packet serial, so a record of a slot that is not live this
 // tick (a stale index) is never used.
@@ -492,3 +519,63 @@ void fxWriteOutputs(uint slot, uint birth, NvState s, StreamEmitter e, StreamPro
         records[first] = r;
     }
 }
+// ---- end of a slot's tick (FxIntegrate for non-colliding slots, FxCollide for colliding ones) --------------------------
+// nv_integrate_finish (the sweep or start + move, age += h) and everything after it: status, the IMPACT_OVERFLOW
+// diagnostic record (the finish inputs: position = start, velocity = velocity after the motion, drag.xyz = move,
+// newborn = 2 marks this layout), the collision event, this tick's state, the sort key and the outputs.
+void fxFinishSlot(uint slot, uint row, uint birth, StreamEmitter e, StreamProgram p, EmitterDynamic dyn, NvMotion mo, float h, float3 start, float3 move,
+                  NvState s)
+{
+    const NvState before = s;
+    NvImpact impact;
+    const bool complete = nv_integrate_finish(mo, h, start, move, s, impact);
+    uint status = complete ? 0u : FX_STATUS_IMPACT_OVERFLOW;
+    FX_RWBUFFER(uint, counters, g_counters);
+    if (!complete && g_overflowCapacity != 0u)
+    {
+        uint at;
+        InterlockedAdd(counters[FX_COUNTER_OVERFLOWS], 1u, at);
+        if (at < g_overflowCapacity)
+        {
+            FX_RWBUFFER(OverflowRecord, records, g_overflowRecords);
+            OverflowRecord r;
+            r.row = row; r.birth = birth; r.newborn = 2u; r.depth = 0u;
+            r.position = start; r.age = before.age;
+            r.velocity = before.velocity; r.h = h;
+            r.drag = float4(move, 0);
+            r.emitter = e;
+            r.dynamic = dyn;
+            records[at] = r;
+        }
+    }
+    if (!fxFinite(s))
+    {
+        fxStatus(status | FX_STATUS_NONFINITE);
+        FX_RWBUFFER(uint, alive, g_alive);
+        alive[slot] = FX_SLOT_DEAD;  // a defect: removed without a dying record
+        return;
+    }
+    fxStatus(status);
+    if (impact.count != 0u && (p.flags & FX_PROGRAM_COLLISION_EVENTS) != 0u)
+    {
+        uint n;
+        InterlockedAdd(counters[FX_COUNTER_COLLISIONS], 1u, n);
+        if (n < g_collisionCapacity)
+        {
+            FX_RWBUFFER(StreamEvent, events, g_events);
+            StreamEvent ev;
+            ev.emitter = row; ev.birth = birth; ev.kind = FX_EVENT_COLLISION; ev.impacts = impact.count;
+            ev.position = impact.contact; ev.after = (1 - impact.fraction) * h;
+            ev.velocity = impact.velocity; ev.reserved0 = 0; ev.normal = impact.normal; ev.reserved1 = 0;
+            events[g_eventSlots + n] = ev;
+        }
+    }
+    FX_RWBUFFER(float4, posAgeOut, g_posAgeOut);
+    FX_RWBUFFER(float4, velocityOut, g_velocityOut);
+    posAgeOut[slot] = float4(s.position, s.age);
+    velocityOut[slot] = float4(s.velocity, 0);
+    FX_RWBUFFER(uint, keys, g_keyBySlot);
+    keys[slot] = fxSortKey(dyn.originAnchor + s.position);
+    fxWriteOutputs(slot, birth, s, e, p, dyn);
+}
+#endif

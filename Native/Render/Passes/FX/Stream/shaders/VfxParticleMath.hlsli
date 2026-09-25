@@ -389,8 +389,12 @@ bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(N
 // ---- one interval --------------------------------------------------------------------------
 // Advances s by h seconds from its age. Forces are sampled at the start
 // position; noise at the interval midpoint. Returns false on a fifth impact.
-bool nv_integrate(NvMotion m, nv_real h, NvDrag d, NV_INOUT(NvState) s, NV_OUT(NvImpact) impact) {
-    nv_real3 start = s.position, q = m.origin_anchor + s.position;
+// One interval in two parts (nv_integrate is their composition): the motion
+// (forces, drag, wind) gives the interval's start point and displacement and the
+// end velocity; the finish sweeps collisions (or moves) and ages the slot. A GPU
+// executor may run the finish of colliding slots in a separate pass.
+void nv_integrate_motion(NvMotion m, nv_real h, NvDrag d, NV_INOUT(NvState) s, NV_OUT(nv_real3) start, NV_OUT(nv_real3) move) {
+    start = s.position; nv_real3 q = m.origin_anchor + s.position;
     nv_real3 a = m.acceleration;
     if (m.noise.x != NV_R(0) || m.noise.y != NV_R(0) || m.noise.z != NV_R(0)) {
         nv_real time = (s.age + h * NV_R(0.5)) * m.noise_frequency;
@@ -400,19 +404,26 @@ bool nv_integrate(NvMotion m, nv_real h, NvDrag d, NV_INOUT(NvState) s, NV_OUT(N
     a = a + nv_world_field(0u, q);
     // The interval's displacement is kept as a small vector and added to the
     // (possibly far from the origin) position once: the sweep uses it directly.
-    nv_real3 move = s.velocity * d.position + a * d.acceleration;
+    move = s.velocity * d.position + a * d.acceleration;
     s.velocity = s.velocity * d.velocity + a * d.position;
     if (m.wind != 0u) {
         nv_real3 w = nv_world_field(1u, q);
         move = move + w * (m.drag * d.acceleration);
         s.velocity = s.velocity + w * (m.drag * d.position);
     }
+}
+bool nv_integrate_finish(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, NV_INOUT(NvState) s, NV_OUT(NvImpact) impact) {
     bool complete = true;
     impact.count = 0u; impact.contact = nv_make3(NV_R(0), NV_R(0), NV_R(0)); impact.velocity = impact.contact; impact.normal = impact.contact; impact.fraction = NV_R(0);
     if (m.collision != 0u) complete = nv_collide(m, h, start, move, s, impact);
     else s.position = start + move;
     s.age = s.age + h;
     return complete;
+}
+bool nv_integrate(NvMotion m, nv_real h, NvDrag d, NV_INOUT(NvState) s, NV_OUT(NvImpact) impact) {
+    nv_real3 start, move;
+    nv_integrate_motion(m, h, d, s, start, move);
+    return nv_integrate_finish(m, h, start, move, s, impact);
 }
 
 // ---- births --------------------------------------------------------------------------------

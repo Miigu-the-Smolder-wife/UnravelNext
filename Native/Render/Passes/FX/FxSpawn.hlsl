@@ -5,7 +5,10 @@
 // so the slot of a particle depends only on the inputs (no atomics). Births with rank < expired take no slot: they
 // report their birth event, are integrated for their whole lifetime and report their death event (CPU-assigned slots).
 // A new particle stores age = -elapsed (sign bit set, also for 0): the integrate pass of this depth advances it.
-// P[0] = (record begin, record end, generated threads, total threads)
+// Depth 0 (P[1].x != 0) also appends the slot after the live entries of the alive list (aliveList[alive + rank]), so the
+// depth-0 integrate walks one list: the last compaction's live slots, then this tick's births (the compaction at the end
+// of the tick rebuilds the list).
+// P[0] = (record begin, record end, generated threads, total threads), P[1].x = depth 0
 #include "Passes/FX/Particles.hlsli"
 
 uint findRecord(uint t, uint begin, uint end)
@@ -39,6 +42,13 @@ void place(uint rank, uint row, uint birth, NvState s, float elapsed)
     meta[slot] = uint2(row, birth);
     alive[slot] = FX_SLOT_ALIVE;
     spawned[rank] = slot;
+    if (P[1].x != 0u)
+    {
+        FX_RWBUFFER(uint, aliveList, g_aliveList);
+        const uint at = counters[FX_COUNTER_ALIVE] + rank;
+        if (at < g_capacity) aliveList[at] = slot;
+        else fxStatus(FX_STATUS_CAPACITY);
+    }
 }
 
 void writeEvent(uint index, StreamEvent ev) { fxWriteEvent(index, ev); }
