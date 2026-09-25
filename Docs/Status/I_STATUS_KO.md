@@ -350,6 +350,10 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
 - `20260925_I_device_removed_policy.md`(반영, 코어 67b5508 v1.27): 플러그인이 `UnityPluginLoad`에서 `DeviceRemovedPolicy::Throw`를 둔다.
   ABI 5: `DeviceRemovedError`는 `UNX_DEVICE_REMOVED`(−4)가 되고, 그 뒤 모든 렌더러 호출이 같은 코드를 돌려준다(파괴는 된다). 렌더 이벤트는
   제거 뒤 아무것도 하지 않는다. 시험 `unx_test_host_hostdeviceremoved`(RemoveDevice로 이 프로세스의 장치만 제거; TDR 아님).
+  **한계:** 장치 제거 뒤 다시 적재하지 않는다. C#은 렌더러를 버리고 배경만 지우며, 그 프로세스에서는 다시 만들지 않는다. 코어의
+  `deviceWasRemoved()`가 프로세스 전역이고 되돌릴 수 없어서, Unity가 새 장치를 만들어도 모든 호출이 `UNX_DEVICE_REMOVED`를 돌려준다.
+  13:56에는 Unity 자신도 D3D12 제거를 복구 불가로 처리했다. 복구(드라이버 재설정·TDR 뒤 새 장치로 다시 적재)는 재구축 계획 13.6
+  P10 제품화의 "TDR·장치 제거 복구" 항목이다. 그때 코어에 장치별 제거 상태를 요청한다.
 - 알려진 실패(VFX 세션, V3까지, 회귀 아님): NativeVfx V2가 설치되면 `NativeDataWorldPlayerValidation`의 "Data VFX did not execute on the shared
   GPU" 단언(EnableVfxGpu = true)이 실패한다. TitanNative 공유 GPU VFX 실행기가 퇴역했고, GPU 입자 모듈 연결은 V3(I가 FX 모듈을
   `VfxStreamExecutors.Provider` / `NV_StreamExecutor`로 잇는 일)다. EnableVfxGpu = false(`-unxVfxCpu`) 조건의 Player에는 영향이 없다.
