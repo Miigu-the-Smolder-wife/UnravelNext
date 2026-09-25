@@ -989,6 +989,10 @@ UNX_TEST(reflection_view_geometry)
     const float xl = 960.f / 1920 * 2 - 1, yt = 1 - 540.f / 1080 * 2;
     CHECK(std::fabs(c.x - ((b.x - xl) * 2 / (480.f / 1920 * 2) - 1)) < 1e-3f);
     CHECK(std::fabs(c.y - ((b.y - yt) * 2 / (270.f / 1080 * 2) + 1)) < 1e-3f);
+    // The crop keeps the main view's pixel angle 2 tan(verticalFov / 2) / height (froxel tiles, texture LOD, VSM
+    // footprints, ray cones read it), and verticalFov is the projection's own: proj[1][1] = 1 / tan(verticalFov / 2).
+    CHECK(std::fabs(2 * std::tan(crop.verticalFov * 0.5f) / crop.height - 2 * std::tan(main.verticalFov * 0.5f) / main.height) < 1e-8f);
+    CHECK(std::fabs(crop.proj.m[1][1] * std::tan(crop.verticalFov * 0.5f) - 1) < 1e-5f);
 }
 
 UNX_TEST(device_on_host_device_and_queue)

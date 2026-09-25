@@ -55,6 +55,9 @@ ViewDesc ViewDesc::planarReflection(const ViewDesc& main, float4 plane, uint32_t
     v.kind = gpu::ViewKind::PlanarReflection;
     v.width = rw;
     v.height = rh;
+    // The same pixel angle as the main view: consumers take 2 tan(verticalFov / 2) / height as the pixel's angular size
+    // (froxel tiles, texture LOD, VSM footprints, ray cones), and the crop keeps the main view's pixels.
+    v.verticalFov = 2 * std::atan(std::tan(main.verticalFov * 0.5f) * (float)rh / H);
     v.view = mul(main.view, reflect);
     v.proj = mul(crop, main.proj);
     v.viewProj = mul(v.proj, v.view);
