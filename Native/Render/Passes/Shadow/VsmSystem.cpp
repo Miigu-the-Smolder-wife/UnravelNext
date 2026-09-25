@@ -22,6 +22,7 @@ namespace
 const char* const kStateKey = "s.vsm";
 constexpr uint32_t kRingSlots = 16, kRingStride = 1024;  // per-frame constants; frames in flight must be < kRingSlots
 constexpr uint32_t kStatsSlots = 4;
+constexpr uint64_t kOverflowMinWords = 1u << 18;  // 1 MB overflow list at least (INTERFACES 7.3)
 constexpr uint32_t kMetaBytes = 32;  // VsmPageMeta
 constexpr uint32_t kBlockBytes = 341 * 32;  // VSM_BLOCK_ENTRIES x VsmBlock
 
@@ -64,6 +65,8 @@ struct State
     // Pool growth: a frame whose requests exhausted the pool sets the next size (never shrinks while running).
     uint32_t poolTarget = 0;
     uint64_t grownAtFrame = 0;
+    // Overflow list capacity in words (power of two, at least kOverflowMinWords): 1.5 x the last completed frame's need.
+    uint32_t overflowCapacity = 0;
     // Local-light shadows: shadow slot -> scene light + 1 (0 = free), generation, geometry signature; per-frame uploads.
     uint32_t localLight[kLocalLights] = {};
     uint32_t localGen[kLocalLights] = {};
@@ -435,6 +438,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         check(s.statsReadback->Map(0, &r, reinterpret_cast<void**>(&p)), "map VSM stats");
         const uint32_t* w = reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(p) + i * 80);
         s.latest = { s.statsFrame[i], w[0], w[1], w[2], w[3], w[4], w[5], w[8], w[9], w[10], w[11], w[12], w[13], w[14] };
+        s.latest.overflowWords = w[16];
+        s.latest.overflowOverTiles = w[17];
+        s.latest.overflowOverPixels = w[18];
+        s.latest.overflowLights = w[19];
         D3D12_RANGE none{ 0, 0 };
         s.statsReadback->Unmap(0, &none);
     }
@@ -1066,6 +1073,38 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     const BufferRef froxelLists = fc.resources.froxelLights;
     const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow;
     const BufferRef table = s.tableRef, bound = s.boundRef, blocks = s.blocksRef, statsBuf = s.statsRef;
+    // Overflow list (INTERFACES 7.3, v1.20): the main view's shadow-casting lights past the third. Capacity = 1.5 x the
+    // need of the last completed frame (the counter keeps counting past the capacity, so an overage frame reports its
+    // full need), a power of two of words, at least 1 MB; shrinks only below a quarter (no plan churn around a boundary).
+    const bool overflowList = view.view.kind == gpu::ViewKind::Main;
+    const uint32_t tilesX = groups(w, 8), tilesY = groups(h, 8), tiles = tilesX * tilesY;
+    TextureRef heads;
+    BufferRef overflow, overflowTiles, fallback;
+    uint32_t capacity = 0;
+    if (overflowList)
+    {
+        const uint64_t need = s.latest.overflowWords;
+        uint64_t target = std::max<uint64_t>(kOverflowMinWords, need + need / 2);
+        uint64_t pow2 = kOverflowMinWords;
+        while (pow2 < target) pow2 <<= 1;
+        target = std::min<uint64_t>(pow2, 1ull << 30);
+        if (target > s.overflowCapacity || target * 4 <= s.overflowCapacity)
+        {
+            if (s.overflowCapacity && target > s.overflowCapacity)
+                logf("S shadow overflow: frame %llu needed %u words (%u tiles over capacity): capacity grows to %llu words\n",
+                     (unsigned long long)s.latest.frame, s.latest.overflowWords, s.latest.overflowOverTiles, (unsigned long long)target);
+            s.overflowCapacity = (uint32_t)target;
+        }
+        capacity = s.overflowCapacity;
+        s.latest.overflowCapacity = capacity;
+        heads = g.createTexture(TextureDesc{ "S shadow overflow tiles", tilesX, tilesY, 1, 1, DXGI_FORMAT_R32_UINT });
+        overflow = g.createBuffer(BufferDesc{ "S shadow overflow", (uint64_t)capacity * 4, 0 });
+        overflowTiles = g.createBuffer(BufferDesc{ "S shadow overflow tile list", 16 + (uint64_t)tiles * 4, 0 });
+        fallback = g.createBuffer(BufferDesc{ "S shadow overflow fallback tiles", 16 + (uint64_t)tiles * 4, 0 });
+        view.shadowOverflowTiles = heads;
+        view.shadowOverflow = overflow;
+        view.shadowOverflowFallbackTiles = fallback;
+    }
     const uint32_t ring = s.ringCbv[s.constantsOffset / kRingStride], off = 0;
     const uint32_t rays = (uint32_t)fc.quality.integer("shadow.vsm.search_taps"), steps = (uint32_t)fc.quality.integer("shadow.vsm.filter_taps");
     const D3D12_GPU_VIRTUAL_ADDRESS constants = view.frameConstants;
@@ -1074,13 +1113,22 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     ID3D12PipelineState* p1 = fc.shaders.compute(std::string("Passes/Shadow/ShadowVisibility") + variant);
     ID3D12PipelineState* pa = fc.shaders.compute("Passes/Shadow/ShadowListArgs");
     ID3D12PipelineState* p2 = fc.shaders.compute(std::string("Passes/Shadow/ShadowPenumbra") + variant);
+    ID3D12PipelineState* po = overflowList ? fc.shaders.compute("Passes/Shadow/ShadowOverflow") : nullptr;
     ID3D12CommandSignature* signature = s.dispatchSignature.Get();
     // Pass 1 settles the pixels the page structures decide; the mixed ones go to a list for pass 2 (indirect).
     const BufferRef list = g.createBuffer(BufferDesc{ "S penumbra list", 4 + (uint64_t)w * h * 4, 0 });
     const BufferRef args = g.createBuffer(BufferDesc{ "S penumbra args", 16, 0 });
-    g.addPass("s.shadow.listclear", QueueType::Compute, [&](PassBuilder& b) { b.use(list, Use::UavCompute); },
+    g.addPass("s.shadow.listclear", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(list, Use::UavCompute);
+                  if (overflowList)
+                  {
+                      b.use(overflowTiles, Use::UavCompute);
+                      b.use(fallback, Use::UavCompute);
+                  }
+              },
               [=](PassContext& ctx) {
-                  const uint32_t k[4] = { ctx.uav(list), 0, 0, 0 };
+                  const uint32_t k[4] = { ctx.uav(list), overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu, overflowList ? ctx.uav(fallback) : 0xFFFFFFFFu, 0 };
                   ctx.cmd->SetPipelineState(pc);
                   ctx.computeConstants(k, 4);
                   ctx.cmd->Dispatch(1, 1, 1);
@@ -1097,11 +1145,17 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   b.use(list, Use::UavCompute);
                   b.use(out, Use::UavCompute);
                   if (localSlots) b.use(froxelLists, Use::SrvCompute);
+                  if (overflowList)
+                  {
+                      b.use(overflowTiles, Use::UavCompute);
+                      b.use(heads, Use::UavCompute);
+                  }
               },
               [=](PassContext& ctx) {
-                  const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, off, ctx.srv(table), ctx.srv(pool), ctx.srv(bound),
-                                           ctx.uav(list), ctx.srv(blocks), ctx.uav(statsBuf), 0,
-                                           localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv, 0 };
+                  const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu,
+                                           ctx.srv(table), ctx.srv(pool), ctx.srv(bound), ctx.uav(list), ctx.srv(blocks), ctx.uav(statsBuf), 0,
+                                           localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv,
+                                           overflowList ? ctx.uav(heads) : 0xFFFFFFFFu };
                   ctx.cmd->SetPipelineState(p1);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 16);
@@ -1138,6 +1192,33 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 16);
                   ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 0, nullptr, 0);
+              });
+    if (!overflowList) return;
+    // Overflow tiles: recount, one block per tile from the capacity, the lights past the third (indirect, one group per
+    // listed tile; without local slots the list is empty and the dispatch has no groups).
+    g.addPass("s.shadow.overflow", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(depth, Use::SrvCompute);
+                  b.use(gbuffer, Use::SrvCompute);
+                  b.use(pool, Use::SrvCompute);
+                  b.use(table, Use::SrvCompute);
+                  b.use(blocks, Use::SrvCompute);
+                  b.use(overflowTiles, Use::SrvCompute);
+                  b.use(overflowTiles, Use::IndirectArgs);
+                  b.use(heads, Use::UavCompute);
+                  b.use(overflow, Use::UavCompute);
+                  b.use(fallback, Use::UavCompute);
+                  b.use(statsBuf, Use::UavCompute);
+                  if (localSlots) b.use(froxelLists, Use::SrvCompute);
+              },
+              [=](PassContext& ctx) {
+                  const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(heads), ring, ctx.srv(overflowTiles), ctx.srv(table), ctx.srv(pool),
+                                           ctx.srv(blocks), ctx.uav(overflow), capacity, ctx.uav(fallback), ctx.uav(statsBuf),
+                                           localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv, 0 };
+                  ctx.cmd->SetPipelineState(po);
+                  ctx.bindFrameConstants(constants);
+                  ctx.computeConstants(k, 16);
+                  ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(overflowTiles), 4, nullptr, 0);
               });
 }
 } // namespace unx::render::shadow

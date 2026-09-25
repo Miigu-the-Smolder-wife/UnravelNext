@@ -53,10 +53,12 @@ scene::Camera cameraAt(const scene::Scene& s, bool moving, double time)
 
 int main(int argc, char** argv)
 {
+    int gateFailures = 0;
     try
     {
 #if !S_RENDERER_GATE
         (void)argc;
+        (void)gateFailures;
         (void)argv;
         fail("this build lacks V's cluster builder or C's scene generator: Build.ps1 -Track S -Tracks \"V;M;S;C\" (or -Track all)");
 #else
@@ -114,7 +116,7 @@ int main(int argc, char** argv)
             float4x4 prev = ViewDesc::fromCamera(cameraAt(s, moving, 0), res.width, res.height, {}).viewProj;
             // Dirty pages and T_sun averaged over the measured frames (the counters lag the frame by two).
             double dirtySum = 0, trianglesSum = 0, requestedSum = 0;
-            uint32_t samples = 0, exhausted = 0, requestedMax = 0;
+            uint32_t samples = 0, exhausted = 0, requestedMax = 0, overTiles = 0, overflowWordsMax = 0, overflowLightsMax = 0;
             uint64_t lastStatsFrame = 0;
             const HarnessResult r = harness.run(res, options, [&](RenderGraph& g, const Resolution& rr, uint64_t frame) {
                 FrameContext fc;
@@ -135,6 +137,9 @@ int main(int argc, char** argv)
                     requestedSum += st.requested;
                     requestedMax = std::max(requestedMax, st.requested);
                     exhausted += st.exhausted;
+                    overTiles += st.overflowOverTiles;
+                    overflowWordsMax = std::max(overflowWordsMax, st.overflowWords);
+                    overflowLightsMax = std::max(overflowLightsMax, st.overflowLights);
                     ++samples;
                 }
             });
@@ -157,12 +162,16 @@ int main(int argc, char** argv)
                                                        shadow::froxelGridFor(quality, res.width, res.height).gridY *
                                                        shadow::froxelGridFor(quality, res.width, res.height).slices),
                  fs.overflowLists, fs.droppedLights, fs.maxCount);
+            // Overflow list (INTERFACES 7.3): the gate requires no tile over the capacity in the measured frames.
+            logf("  shadow overflow: lights past the third max %u, words needed max %u, tiles over capacity %u %s\n", overflowLightsMax, overflowWordsMax, overTiles,
+                 overTiles ? "FAIL" : "ok");
+            if (overTiles) ++gateFailures;
             const double px = st.pathNoCaster + st.pathRegionLit + st.pathRegionUmbra + st.pathSearchLit + st.pathFiltered + st.pathDiskLit + st.pathDiskUmbra;
             logf("  visibility paths (%% of %.2f M pixels): no caster %.1f, reach lit %.1f, reach umbra %.1f, search lit %.1f, disk lit %.1f, disk umbra %.1f, filtered %.1f\n",
                  px / 1e6, 100 * st.pathNoCaster / px, 100 * st.pathRegionLit / px, 100 * st.pathRegionUmbra / px, 100 * st.pathSearchLit / px, 100 * st.pathDiskLit / px,
                  100 * st.pathDiskUmbra / px, 100 * st.pathFiltered / px);
         }
-        return 0;
+        return gateFailures ? 1 : 0;
 #endif
     }
     catch (const std::exception& e)

@@ -5,6 +5,7 @@
 #define UNX_SHADOW_VISIBILITY_HLSLI
 #include "Scene.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
+#include "Passes/Shadow/ShadowReceiver.hlsli"
 #include "Passes/Shadow/VsmSample.hlsli"
 #include "Passes/Shadow/VsmLocalSample.hlsli"
 
@@ -52,6 +53,52 @@ float shadowVisibilityDirect(ShadowSrvs s, uint lightIndex, float3 worldPos, flo
     r.pool = ResourceDescriptorHeap[s.pool];
     r.blocks = ResourceDescriptorHeap[s.blocks];
     return vsmLocalVisibility(r, lights[slot], slot, worldPos, normal, 0.0, c.receiverBiasTexels, c.maxReceiverSlope, c.searchTaps, c.filterTaps);
+}
+
+// Receiver of a pixel of the view whose frame constants are bound: the world position and geometric normal from the depth
+// buffer (ShadowReceiver.hlsli) and the pixel's footprint in metres. valid = false for sky and pixels outside the view.
+struct ShadowPixelReceiver
+{
+    float3 world;
+    float footprint;
+    float3 normal;
+    uint valid;
+};
+ShadowPixelReceiver shadowPixelReceiver(uint2 pixel, uint depthSrv, uint gbufferSrv)
+{
+    ShadowPixelReceiver rc = (ShadowPixelReceiver)0;
+    if (pixel.x >= g_viewWidth || pixel.y >= g_viewHeight) return rc;
+    Texture2D<float> depthTex = ResourceDescriptorHeap[depthSrv];
+    const float depth = depthTex.Load(int3(pixel, 0));
+    if (depth <= 0) return rc;
+    rc.world = shadowReceiver(depthTex, gbufferSrv, pixel, depth, rc.normal);
+    rc.footprint = 2 * linearDepth(depth) * g_tanHalfFovY / g_viewHeight;
+    rc.valid = 1;
+    return rc;
+}
+
+// Visibility of scene light lightIndex at a pixel receiver: exactly the computation of the visibility slots 1-3 and of
+// the overflow list (INTERFACES 7.3; ShadowVisibility.hlsl, ShadowOverflow.hlsl call it), so a fallback that evaluates
+// the lights of an over-capacity tile with it agrees with them (the stored slots are this value rounded to 8 bits:
+// round(saturate(v) * 255) / 255). 1 for lights without a shadow slot (the slots store 255 there).
+float shadowLocalVisibilityAtReceiver(ShadowSrvs s, uint lightIndex, ShadowPixelReceiver rc)
+{
+    StructuredBuffer<uint> slotOf = ResourceDescriptorHeap[s.pad0];
+    const uint slot = slotOf[lightIndex];
+    if (slot == VSM_LOCAL_NONE) return 1;
+    StructuredBuffer<VsmLocalLight> lights = ResourceDescriptorHeap[s.lights];
+    ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[s.constants];
+    VsmLocalResources r;
+    r.table = ResourceDescriptorHeap[s.pageTable];
+    r.pool = ResourceDescriptorHeap[s.pool];
+    r.blocks = ResourceDescriptorHeap[s.blocks];
+    return vsmLocalVisibility(r, lights[slot], slot, rc.world, rc.normal, rc.footprint, c.receiverBiasTexels, c.maxReceiverSlope, c.searchTaps,
+                              c.filterTaps);
+}
+float shadowLocalVisibilityAtPixel(ShadowSrvs s, uint lightIndex, uint2 pixel, uint depthSrv, uint gbufferSrv)
+{
+    const ShadowPixelReceiver rc = shadowPixelReceiver(pixel, depthSrv, gbufferSrv);
+    return rc.valid ? shadowLocalVisibilityAtReceiver(s, lightIndex, rc) : 1.0;
 }
 
 // Sun visibility in [0, 1] at a world point with geometric normal (ray hits, R): the direct view's estimator (SMRT:

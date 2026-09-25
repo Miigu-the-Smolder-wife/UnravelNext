@@ -8,25 +8,29 @@
 // the reach square all below or all above the receiver's plane) and compacts the rest into a list for pass 2
 // (ShadowPenumbra.hlsl, indirect).
 // PATHS=1 (diagnostics): writes each pixel's VSM_PATH_* (0xFF = sky) instead of the visibility.
+// Shadow-casting lights past the third (INTERFACES 7.3 overflow list, v1.20): each pixel counts them (list only, no VSM
+// taps); a tile (= this 8x8 group = M's shading tile) without any writes its shadowOverflowTiles head 0, a tile with some
+// goes to the overflow tile list, whose tiles ShadowOverflow.hlsl allocates and evaluates.
 // P[0].x depth SRV, P[0].y G-buffer SRV (RG32_UINT), P[0].z output UAV (R32_UINT), P[0].w VSM constants CBV
-// P[1].x unused, P[1].y page table SRV (raw), P[1].z pool SRV (raw), P[1].w search bound SRV (raw)
+// P[1].x overflow tile list UAV (raw: count, dispatch args, tiles y << 16 | x; 0xFFFFFFFF: no overflow list in this view),
+// P[1].y page table SRV (raw), P[1].z pool SRV (raw), P[1].w search bound SRV (raw)
 // P[2].x penumbra list UAV (raw: count, then pixel y << 16 | x), P[2].y blocks SRV (raw), P[2].z statistics UAV (raw,
 // words 8.. of the VSM stats: pixels per VSM_PATH_*)
-// P[3].x froxel lists SRV (raw; 0xFFFFFFFF: no local slots in this view), P[3].y local lights SRV, P[3].z slot of light SRV.
+// P[3].x froxel lists SRV (raw; 0xFFFFFFFF: no local slots in this view), P[3].y local lights SRV, P[3].z slot of light SRV,
+// P[3].w overflow tile heads UAV (R32_UINT, with P[1].x).
 // Frame constants of the view. Mixed pixels get their local slots here and their sun slot in pass 2.
 #include "Frame.hlsli"
 #include "Scene.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
-#include "Passes/Shadow/ShadowReceiver.hlsli"
-#include "Passes/Shadow/VsmSample.hlsli"
-#include "Passes/Shadow/VsmLocalSample.hlsli"
+#include "Passes/Shadow/ShadowVisibility.hlsli"
 
 // One pixel's classification: sky, settled (packed visibility), or mixed (goes to pass 2).
-void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed)
+void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out uint overflow)
 {
     packed = 0xFFFFFFFFu;
     path = 0xFFu;  // sky
     mixed = false;
+    overflow = 0;
     if (px.x >= g_viewWidth || px.y >= g_viewHeight) return;
     Texture2D<float> depthTex = ResourceDescriptorHeap[P[0].x];
     const float depth = depthTex.Load(int3(px, 0));
@@ -56,36 +60,71 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed)
         f.scattering = 0;
         f.pad = 0;
         const uint2 range = froxelLightRange(f, px, linearDepth(depth));
-        StructuredBuffer<VsmLocalLight> lights = ResourceDescriptorHeap[P[3].y];
-        StructuredBuffer<uint> slotOf = ResourceDescriptorHeap[P[3].z];
-        VsmLocalResources lr;
-        lr.table = r.table;
-        lr.pool = r.pool;
-        lr.blocks = r.blocks;
+        ShadowSrvs ss;
+        ss.pageTable = P[1].y;
+        ss.pool = P[1].z;
+        ss.blocks = P[2].y;
+        ss.searchBound = P[1].w;
+        ss.constants = P[0].w;
+        ss.lights = P[3].y;
+        ss.pad0 = P[3].z;
+        ss.pad1 = 0;
+        ShadowPixelReceiver pr;
+        pr.world = world;
+        pr.normal = normal;
+        pr.footprint = footprint;
+        pr.valid = 1;
         uint ordinal = 0;
-        [loop] for (uint i = 0; i < range.y && ordinal < 3; ++i)
+        [loop] for (uint i = 0; i < range.y; ++i)
         {
             const uint li = froxelLight(f, range.x + i);
             if (!lightCastsShadow(loadLight(li))) continue;
             ++ordinal;
-            const uint slot = slotOf[li];
-            if (slot == VSM_LOCAL_NONE) continue;  // no shadow slot (more than 128 casting lights): stays 255
-            const float v = vsmLocalVisibility(lr, lights[slot], slot, world, normal, footprint, vc.receiverBiasTexels, vc.maxReceiverSlope, vc.searchTaps, vc.filterTaps);
+            if (ordinal > 3) continue;  // counted for the overflow list (ShadowOverflow.hlsl evaluates it)
+            // No shadow slot (more than 128 casting lights): 1, stored 255.
+            const float v = shadowLocalVisibilityAtReceiver(ss, li, pr);
             local = (local & ~(0xFFu << (8 * ordinal))) | ((uint)round(saturate(v) * 255.0) << (8 * ordinal));
         }
+        overflow = ordinal > 3 ? ordinal - 3 : 0;
     }
     packed = (cls == VSM_REGION_UMBRA ? 0u : 255u) | local;
 }
 
+groupshared uint gs_overflow;
+
 [numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 {
     RWTexture2D<uint> output = ResourceDescriptorHeap[P[0].z];
     RWByteAddressBuffer list = ResourceDescriptorHeap[P[2].x];
     RWByteAddressBuffer stats = ResourceDescriptorHeap[P[2].z];
-    uint packed[1], path[1];
+    uint packed[1], path[1], overflow[1];
     bool mixed[1];
-    classifyPixel(id.xy, packed[0], path[0], mixed[0]);
+    if (gi == 0) gs_overflow = 0;
+    classifyPixel(id.xy, packed[0], path[0], mixed[0], overflow[0]);
+    if (P[1].x != 0xFFFFFFFFu)
+    {
+        // The tile's overflow: head 0 now, or the tile to the overflow list (its head is ShadowOverflow.hlsl's).
+        GroupMemoryBarrierWithGroupSync();
+        if (overflow[0]) InterlockedOr(gs_overflow, 1u);
+        GroupMemoryBarrierWithGroupSync();
+        if (gi == 0)
+        {
+            if (gs_overflow == 0)
+            {
+                RWTexture2D<uint> heads = ResourceDescriptorHeap[P[3].w];
+                heads[gid.xy] = 0;
+            }
+            else
+            {
+                RWByteAddressBuffer tiles = ResourceDescriptorHeap[P[1].x];
+                uint at;
+                tiles.InterlockedAdd(0, 1, at);
+                tiles.InterlockedAdd(4, 1);  // dispatch args: one group per tile
+                tiles.Store(16 + at * 4, (gid.y << 16) | gid.x);
+            }
+        }
+    }
     {
         const uint j2 = 0;
         const uint2 px = id.xy;
