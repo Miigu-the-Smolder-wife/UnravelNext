@@ -90,7 +90,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
                 const uint4 a = b.Load4(0), c = b.Load4(16);
                 ShadowSrvs vsm;
                 vsm.pageTable = a.x; vsm.pool = a.y; vsm.blocks = a.z; vsm.searchBound = a.w;
-                vsm.constants = c.x; vsm.lights = c.y; vsm.pad0 = c.z; vsm.pad1 = c.w;
+                vsm.constants = c.x; vsm.lights = c.y; vsm.pad0 = c.z; vsm.layers = c.w;
                 L.sunVisibility = shadowSunVisibilityAt(vsm, s.position, s.geometricNormal, footprint, resident);
             }
             if (experiment & 2)
