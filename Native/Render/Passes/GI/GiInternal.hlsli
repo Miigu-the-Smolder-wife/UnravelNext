@@ -59,6 +59,31 @@ void giRequestUpdate(RWByteAddressBuffer b, GiHeader h, uint entry, uint tier)
     if (slot < h.capacity) b.Store(h.offUpdate + slot * 4, entry | (tier != 0 ? GI_TIER_HIT : 0u));
 }
 
+// Deterministic update selection (gi.deterministic; GiDetDigits, GiDetResolve, GiSelect): per tier a 256-bin digit
+// histogram, then the priority prefix resolved so far, the entries still to take and whether the entries whose priority
+// equals the final prefix are taken.
+#define GI_DET_PREFIX 1024
+#define GI_DET_REMAINING 1028
+#define GI_DET_EQUAL 1032
+#define GI_DET_TIER_BYTES 1040
+
+// An entry's selection priority this frame: a hash of its key (not its index, which depends on allocation order) and
+// the frame.
+uint giDetHash(uint x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+uint giDetPriority(RWByteAddressBuffer b, GiHeader h, uint entry)
+{
+    const uint2 key = b.Load2(h.offMeta + entry * 16);
+    return giDetHash(key.x ^ giDetHash(key.y ^ (h.frame * 0x9E3779B9u)));
+}
+
 uint giAgeBucket(RWByteAddressBuffer b, GiHeader h, uint entry)
 {
     const uint last = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_LAST_UPDATE);

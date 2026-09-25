@@ -1340,6 +1340,16 @@ void RayScene::record(FramePassContext& fc)
                   },
                   [this, staticDescs](PassContext& c) { recordStaticTlas(c.cmd, staticDescs); });
     }
+    // The barrier into the build (refit writes -> TLAS reads) is taken by this empty pass, so its time (waiting for the
+    // deformed BLAS builds to drain) is not charged to r.as.tlas.dynamic, which then times the build alone.
+    g.addPass("r.as.tlas.sync", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  if (frame.deformedBlas.valid()) b.use(frame.deformedBlas, Use::AccelerationStructureRead);
+                  b.use(frame.tlasDynamic, Use::AccelerationStructureWrite);
+                  b.use(scratch, Use::AccelerationStructureScratch);
+                  if (dynamicDescCopy) b.use(*dynamicDescCopy, Use::AccelerationStructureInput);
+              },
+              [](PassContext&) {});
     g.addPass("r.as.tlas.dynamic", QueueType::Compute,
               [&](PassBuilder& b) {
                   if (frame.deformedBlas.valid()) b.use(frame.deformedBlas, Use::AccelerationStructureRead);
