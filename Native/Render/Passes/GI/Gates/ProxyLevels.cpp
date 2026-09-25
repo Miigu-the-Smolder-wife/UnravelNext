@@ -259,6 +259,40 @@ int main(int argc, char** argv)
                 const render::rt::ProxyPoseCoefficients pc = render::rt::proxyPoseCoefficients(sm, sk, cutIndices);
                 render::rt::ProxyPoseTerms terms;
                 render::rt::proxyPoseTerms(sk, palette, terms);
+                {
+                    // The bound's largest cluster and its terms (what dominates it).
+                    auto apply = [&](uint32_t j, float3 q) {
+                        const float4 a = palette[3 * j], b = palette[3 * j + 1], c = palette[3 * j + 2];
+                        return float3{ a.x * q.x + a.y * q.y + a.z * q.z + a.w, b.x * q.x + b.y * q.y + b.z * q.z + b.w, c.x * q.x + c.y * q.y + c.z * q.z + c.w };
+                    };
+                    float worst = -1;
+                    size_t worstCluster = 0;
+                    for (size_t k = 0; k < pc.clusters.size(); ++k)
+                    {
+                        const auto& cl = pc.clusters[k];
+                        float sum = 0;
+                        for (uint32_t t = cl.first; t < cl.first + cl.count; ++t)
+                        {
+                            const auto [i, r] = sk.pairs[pc.terms[t].pair];
+                            sum += terms.alpha[pc.terms[t].pair] * pc.terms[t].k1 + length(apply(i, cl.centre) - apply(r, cl.centre)) * pc.terms[t].k2;
+                        }
+                        if (sum > worst) { worst = sum; worstCluster = k; }
+                    }
+                    if (!pc.clusters.empty())
+                    {
+                        const auto& cl = pc.clusters[worstCluster];
+                        logf("          %zu clusters, %zu terms; worst cluster at (%.3f %.3f %.3f) sum %.4f:", pc.clusters.size(), pc.terms.size(), cl.centre.x, cl.centre.y,
+                             cl.centre.z, worst);
+                        for (uint32_t t = cl.first; t < cl.first + cl.count && t < cl.first + 12; ++t)
+                        {
+                            const auto [i, r] = sk.pairs[pc.terms[t].pair];
+                            logf(" (j%u|r%u K1 %.3f K2 %.3f a %.3f b %.3f)", i, r, pc.terms[t].k1, pc.terms[t].k2, terms.alpha[pc.terms[t].pair],
+                                 length(apply(i, cl.centre) - apply(r, cl.centre)));
+                        }
+                        logf("
+");
+                    }
+                }
                 const Stats plost = distances(posedSourcePoints, TriangleGrid(posedCut)), padded = distances(samplePoints(posedCut, 20000, 4), posedSourceGrid);
                 const float posedMax = std::max(plost.max, padded.max);
                 logf("          bind pose max %.5f m (P99 %.5f); stored pose: measured %.5f m (P99 %.5f), bound %.5f m -> a 4K pixel beyond %.1f m\n",
