@@ -276,9 +276,8 @@ float3 shPbrNeutral(float3 color)
 float shSrgbOetf(float c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
 
 // Display: sRGB OETF of the tone-mapped value; linear outputs (validation, secondary views): radiance x exposure.
-float4 shEncodeOutput(float3 radiance)
+float4 shEncodeExposed(float3 e)
 {
-    const float3 e = radiance * g_exposure;
 #if OUTPUT == 0
     const float3 t = saturate(shPbrNeutral(max(e, 0.0)));
     return float4(shSrgbOetf(t.r), shSrgbOetf(t.g), shSrgbOetf(t.b), 1);
@@ -286,6 +285,7 @@ float4 shEncodeOutput(float3 radiance)
     return float4(e, 1);
 #endif
 }
+float4 shEncodeOutput(float3 radiance) { return shEncodeExposed(radiance * g_exposure); }
 
 // Angular size of one pixel along the view ray (radians): |dD/dx| / |D| for the ray direction D of mPixelRay.
 float shPixelAngle(float3 D, float3 Dx) { return length(Dx) / length(D); }

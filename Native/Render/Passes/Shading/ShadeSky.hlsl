@@ -6,12 +6,16 @@
 // P[0] = { material word, color UAV, tile lists (raw), list offset (entries) }
 // P[1] = { atmosphere transmittance, multi-scatter, sky view, aerial } (UNX_NONE = absent)
 // P[2] = { froxel lights (raw), froxel volume } (UNX_NONE = absent): shafts in front of the sky (depth clamps to far_m)
+// P[3] = { depth SRV, gbuffer SRV, edge args UAV (raw), 0 }, P[6] = edge parameters (floats), P[7] as ShadeOpaque
 #include "Bindless.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
+#include "Passes/Shading/Edge.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
+
+bool shadeSky(uint2 pixel, Texture2D<uint> words);
 
 [numthreads(8, 8, 1)]
 void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
@@ -19,9 +23,16 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     ByteAddressBuffer tiles = ResourceDescriptorHeap[P[0].z];
     const uint tile = tiles.Load(4 * (P[0].w + gid.x));
     const uint2 pixel = uint2(tile & 0xFFFFu, tile >> 16) * M_TILE + tid;
-    if (any(pixel >= uint2(g_viewWidth, g_viewHeight))) return;
     Texture2D<uint> words = ResourceDescriptorHeap[P[0].x];
-    if (mWordMaterial(words[pixel]) != M_MATERIAL_SKY) return;
+    const bool active = all(pixel < uint2(g_viewWidth, g_viewHeight)) && mWordMaterial(words[min(pixel, uint2(g_viewWidth, g_viewHeight) - 1)]) == M_MATERIAL_SKY;
+    bool isEdgeLane = false;
+    if (active) isEdgeLane = shadeSky(pixel, words);
+    const bool anyEdge = WaveActiveAnyTrue(isEdgeLane);
+    if (WaveIsFirstLane()) edgeAppendTile(uint2(tile & 0xFFFFu, tile >> 16), anyEdge, P[7].y, P[7].z, P[7].w, P[3].z);
+}
+
+bool shadeSky(uint2 pixel, Texture2D<uint> words)
+{
 
     float3 D, Dx, Dy;
     mPixelRay(float2(pixel) + 0.5, D, Dx, Dy);
@@ -58,4 +69,15 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
 
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].y];
     color[pixel] = shEncodeOutput(radiance);
+    if (P[7].x == UNX_NONE) return false;
+    Texture2D<float> depthTex = ResourceDescriptorHeap[P[3].x];
+    Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[3].y];
+    const EdgeParams ep = { asfloat(P[6].x), asfloat(P[6].y), asfloat(P[6].z) };
+    const bool isEdge = edgeIsEdge(pixel, words, depthTex, gbuffer, ep);
+    if (isEdge)
+    {
+        RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];
+        edgeRadiance[pixel] = float4(radiance * g_exposure, 1);
+    }
+    return isEdge;
 }

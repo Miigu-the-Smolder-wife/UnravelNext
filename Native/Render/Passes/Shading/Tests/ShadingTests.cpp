@@ -12,6 +12,7 @@
 #include "unx/scene/MaterialModel.h"
 #include "unx/shading/ShadingSystem.h"
 
+#include <array>
 #include <cstdio>
 
 using namespace unx;
@@ -183,6 +184,118 @@ uint32_t addSphere(scene::Scene& s, float radius, uint32_t rings, uint32_t secto
     m.submeshes.push_back({ 0, (uint32_t)m.indices.size(), material });
     s.meshes.push_back(std::move(m));
     return (uint32_t)s.meshes.size() - 1;
+}
+
+// ---------------------------------------------------------------- edge pixels on the CPU (Edge.hlsli)
+// The same relation as the GPU, slightly stricter (cos of 0.9 x the angle, 0.9 x the tolerances) so a pixel near a
+// threshold that the GPU may classify either way counts as an edge here: the centre-sample model checks skip it.
+struct CpuEdgeSample
+{
+    bool sky = true;
+    uint32_t material = 0;
+    double pos[3] = {}, n[3] = {};
+    double footprint = 0;
+};
+CpuEdgeSample cpuEdgeSample(const ViewDesc& desc, const std::vector<uint8_t>& words, const std::vector<uint8_t>& gb, const std::vector<uint8_t>& depth,
+                            uint32_t W, uint32_t x, uint32_t y)
+{
+    CpuEdgeSample e;
+    const uint32_t word = texelOf<uint32_t>(words, W, x, y);
+    e.material = word & 0xFFFF;
+    e.sky = e.material == 0xFFFF;
+    if (e.sky) return e;
+    double D[3], Dx[3];
+    pixelRay(desc, x + 0.5, y + 0.5, D, Dx);
+    const double z = desc.nearPlane / std::max((double)texelOf<float>(depth, W, x, y), 1e-30);
+    for (int k = 0; k < 3; ++k) e.pos[k] = D[k] * z;
+    const float3 n = octDecode(texelOf<uint2>(gb, W, x, y).x);
+    e.n[0] = n.x;
+    e.n[1] = n.y;
+    e.n[2] = n.z;
+    e.footprint = std::sqrt(Dx[0] * Dx[0] + Dx[1] * Dx[1] + Dx[2] * Dx[2]) * z;
+    return e;
+}
+bool cpuSameSurface(const CpuEdgeSample& a, const CpuEdgeSample& b, const QualityConfig& q)
+{
+    if (a.sky || b.sky) return a.sky && b.sky;
+    if (a.material != b.material) return false;
+    const double cosA = std::cos(0.9 * q.number("shading.edge_normal_angle_deg") * kPi / 180);
+    if (a.n[0] * b.n[0] + a.n[1] * b.n[1] + a.n[2] * b.n[2] < cosA) return false;
+    const double d[3] = { b.pos[0] - a.pos[0], b.pos[1] - a.pos[1], b.pos[2] - a.pos[2] };
+    const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    const double tol = 0.9 * std::max(q.number("shading.edge_footprint_tolerance") * std::max(a.footprint, b.footprint), q.number("shading.edge_distance_tolerance") * len);
+    return std::fabs(d[0] * a.n[0] + d[1] * a.n[1] + d[2] * a.n[2]) <= tol && std::fabs(d[0] * b.n[0] + d[1] * b.n[1] + d[2] * b.n[2]) <= tol;
+}
+bool cpuIsEdge(const ViewDesc& desc, const std::vector<uint8_t>& words, const std::vector<uint8_t>& gb, const std::vector<uint8_t>& depth, uint32_t W, uint32_t H,
+               uint32_t x, uint32_t y, const QualityConfig& q)
+{
+    const CpuEdgeSample c = cpuEdgeSample(desc, words, gb, depth, W, x, y);
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            const int qx = (int)x + dx, qy = (int)y + dy;
+            if ((dx == 0 && dy == 0) || qx < 0 || qy < 0 || qx >= (int)W || qy >= (int)H) continue;
+            if (!cpuSameSurface(c, cpuEdgeSample(desc, words, gb, depth, W, (uint32_t)qx, (uint32_t)qy), q)) return true;
+        }
+    return false;
+}
+
+// ---------------------------------------------------------------- 2D convex polygons (edge composite reference)
+using Poly = std::vector<std::array<double, 2>>;
+double polyArea(const Poly& p)
+{
+    double a = 0;
+    for (size_t i = 0; i < p.size(); ++i)
+    {
+        const auto& u = p[i];
+        const auto& v = p[(i + 1) % p.size()];
+        a += u[0] * v[1] - v[0] * u[1];
+    }
+    return 0.5 * std::fabs(a);
+}
+// Clips 'p' by the convex polygon 'c' (either winding).
+Poly polyClip(Poly p, const Poly& c)
+{
+    double orient = 0;
+    for (size_t i = 0; i < c.size(); ++i) orient += c[i][0] * c[(i + 1) % c.size()][1] - c[(i + 1) % c.size()][0] * c[i][1];
+    const double sgn = orient >= 0 ? 1 : -1;
+    for (size_t e = 0; e < c.size() && !p.empty(); ++e)
+    {
+        const auto& a = c[e];
+        const auto& b = c[(e + 1) % c.size()];
+        auto side = [&](const std::array<double, 2>& q) { return sgn * ((b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0])); };
+        Poly o;
+        for (size_t i = 0; i < p.size(); ++i)
+        {
+            const auto& u = p[i];
+            const auto& v = p[(i + 1) % p.size()];
+            const double su = side(u), sv = side(v);
+            if (su >= 0) o.push_back(u);
+            if ((su >= 0) != (sv >= 0))
+            {
+                const double t = su / (su - sv);
+                o.push_back({ u[0] + (v[0] - u[0]) * t, u[1] + (v[1] - u[1]) * t });
+            }
+        }
+        p = o;
+    }
+    return p;
+}
+std::array<double, 2> projectPixel(const ViewDesc& v, float3 w)
+{
+    const double p[4] = { w.x, w.y, w.z, 1 };
+    double vs[4], cl[4];
+    for (int r = 0; r < 4; ++r)
+    {
+        vs[r] = 0;
+        for (int k = 0; k < 4; ++k) vs[r] += v.view.m[r][k] * p[k];
+    }
+    for (int r = 0; r < 4; ++r)
+    {
+        cl[r] = 0;
+        for (int k = 0; k < 4; ++k) cl[r] += v.proj.m[r][k] * vs[k];
+    }
+    return { (cl[0] / cl[3] * 0.5 + 0.5) * v.width, (0.5 - cl[1] / cl[3] * 0.5) * v.height };
 }
 
 // ---------------------------------------------------------------- 1
@@ -378,6 +491,7 @@ void testScene(TestFrame& tf, Report& report)
                 gb = tf.readback(fc, v.gbuffer);
                 words = tf.readback(fc, material::resolveOutputs(fc, v).materialWord);
                 lin = tf.readback(fc, v.color);
+                depthRb = tf.readback(fc, v.depth);
             }
             else disp = tf.readback(fc, v.color);
         });
@@ -387,10 +501,15 @@ void testScene(TestFrame& tf, Report& report)
     const float3 E = s.sun.color * s.sun.illuminance;
     const double cap = 2 / (1 + std::cos(thetaS));
     double worst = 0;
-    uint32_t checked = 0, glint = 0, backlit = 0;
+    uint32_t checked = 0, glint = 0, backlit = 0, edgeSkipped = 0;
     for (uint32_t y = 0; y < H; y += 3)
         for (uint32_t x = 0; x < W; x += 3)
         {
+            if (cpuIsEdge(desc, *words, *gb, *depthRb, W, H, x, y, tf.quality))
+            {
+                ++edgeSkipped;
+                continue;  // edge composite (testEdgeComposite)
+            }
             const uint32_t word = texelOf<uint32_t>(*words, W, x, y);
             const float4 got = texelOf<float4>(*lin, W, x, y);
             float3 expected{};
@@ -469,7 +588,7 @@ void testScene(TestFrame& tf, Report& report)
             worst = std::max(worst, e);
             ++checked;
         }
-    logf("scene: %u pixels checked, %u sun-glint pixels (disk regimes), %u back-lit leaf pixels\n", checked, glint, backlit);
+    logf("scene: %u pixels checked, %u sun-glint pixels (disk regimes), %u back-lit leaf pixels, %u edge pixels left to the composite test\n", checked, glint, backlit, edgeSkipped);
     report(worst < 5e-3, "scene [linear]: pixel radiance vs CPU model on the G-buffer (rel.)", worst, 5e-3);
     report(glint > 20 && backlit > 100, "scene: glint and back-lit transmission pixels present", std::min(glint, backlit), 20);
 
@@ -694,6 +813,7 @@ void testLocalLights(TestFrame& tf, Report& report)
         {
             const uint32_t word = texelOf<uint32_t>(*words, W, x, y);
             if ((word & 0xFFFF) == 0xFFFF) continue;
+            if (cpuIsEdge(desc, *words, *gb, *depth, W, H, x, y, tf.quality)) continue;  // edge composite (testEdgeComposite)
             const scene::Material& mat = s.materials[word & 0xFFFF];
             const uint2 p = texelOf<uint2>(*gb, W, x, y);
             model::Surface su;
@@ -744,6 +864,116 @@ void testLocalLights(TestFrame& tf, Report& report)
     report(worst < 5e-3, "local lights [point, spot, shadow slots by list order] vs CPU model (rel.)", worst, 5e-3);
     report(back > 50, "local lights: back-lit leaf pairs present", back, 50);
 }
+
+// ---------------------------------------------------------------- 7. edge composite
+// Two emissive planar quads at different depths, the nearer overlapping the farther, over a black sky (sun off): every
+// pixel's exposed radiance must equal the exact visible areas of the quads in the pixel square (convex clipping of the
+// projected quads; the farther one minus its overlap with the nearer), within the 32-subsample overlap resolution where
+// both quads' edges cross the pixel.
+void testEdgeComposite(TestFrame& tf, Report& report)
+{
+    scene::Scene s;
+    s.name = "edge composite test";
+    auto emissive = [&](const char* name, float3 e) {
+        scene::Material m;
+        m.name = name;
+        m.baseColor = { 0, 0, 0 };
+        m.specular = 0;
+        m.emissive = e;
+        s.materials.push_back(m);
+        return (uint32_t)s.materials.size() - 1;
+    };
+    const uint32_t red = emissive("red", { 1.2f, 0, 0 }), green = emissive("green", { 0, 1.2f, 0 });
+    const uint32_t quadB = addPlane(s, 1, red), quadC = addPlane(s, 1, green);
+    // Rotation about x by +90 deg turns the plane's +y normal to +z (towards the camera), then scale, spin, place.
+    auto place = [&](uint32_t mesh, float sx, float sz, float spin, float tilt, float3 at) {
+        const double cs = std::cos(spin), sn = std::sin(spin), ct = std::cos(tilt), st = std::sin(tilt);
+        // Object (x, y, z) -> face (x, -z, y) spun about z by 'spin', tilted about y by 'tilt'. Non-uniform scale is not
+        // allowed on instances (INTERFACES 6.1), so the quad's size goes into the mesh positions instead.
+        scene::Mesh& m = s.meshes[mesh];
+        for (float3& p : m.positions) p = float3{ p.x * sx, p.y, p.z * sz };
+        float3x4 t;
+        const double r[3][3] = { { cs * ct, 0, -sn * ct }, { sn, 0, cs }, { -cs * st, -1, sn * st } };
+        // columns: object x -> (cs ct, sn, -cs st); object y -> (0,0,-1)... keep a proper rotation: build from basis.
+        const float3 ex = normalize(float3{ (float)(cs * ct), (float)sn, (float)(-cs * st) });
+        const float3 ez = normalize(float3{ (float)st, 0, (float)ct });       // face normal (object +y) -> ez
+        const float3 ey = cross(ez, ex);
+        const float3 ox = normalize(cross(ey, ez));                            // orthonormal x
+        const float3 oz = cross(ox, ez);                                       // object z so that (x, y=normal, z) is right-handed
+        (void)r;
+        t.m[0][0] = ox.x; t.m[1][0] = ox.y; t.m[2][0] = ox.z;
+        t.m[0][1] = ez.x; t.m[1][1] = ez.y; t.m[2][1] = ez.z;
+        t.m[0][2] = oz.x; t.m[1][2] = oz.y; t.m[2][2] = oz.z;
+        t.m[0][3] = at.x; t.m[1][3] = at.y; t.m[2][3] = at.z;
+        scene::Instance in;
+        in.mesh = mesh;
+        in.transform = t;
+        s.instances.push_back(in);
+        return t;
+    };
+    const float3x4 tB = place(quadB, 2.2f, 1.6f, 0.35f, 0.3f, { -0.2f, 0.1f, -6 });
+    const float3x4 tC = place(quadC, 1.0f, 1.0f, 0.9f, -0.25f, { 0.5f, 0.3f, -4 });
+    s.sun.illuminance = 0;
+    scene::Camera cam;
+    cam.name = "front";
+    cam.position = { 0, 0, 0 };
+    cam.forward = { 0, 0, -1 };
+    cam.ev100 = 0;
+    s.cameras.push_back(cam);
+    tf.setScene(s);
+
+    const uint32_t W = 960, H = 540;
+    std::shared_ptr<std::vector<uint8_t>> lin;
+    ViewDesc desc;
+    tf.frame.outputLinearHdr = true;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, W, H, 0);
+        desc = v.view;
+        v.color = fc.graph.createTexture({ "m.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+        tf.vis.record(fc, v);
+        tracks::materialResolve(fc, v);
+        tracks::shading(fc, v);
+        lin = tf.readback(fc, v.color);
+    });
+    tf.frame.outputLinearHdr = false;
+
+    auto screenQuad = [&](const float3x4& t, uint32_t mesh) {
+        const scene::Mesh& m = s.meshes[mesh];  // corners: indices 0, 1, 3, 2 of the 2 x 2 vertex grid
+        Poly p;
+        for (int i : { 0, 1, 3, 2 }) p.push_back(projectPixel(desc, t.transformPoint(m.positions[i])));
+        return p;
+    };
+    const Poly pB = screenQuad(tB, quadB), pC = screenQuad(tC, quadC);
+    double worst = 0, worstSingle = 0, sumEdge = 0;
+    uint32_t edgePixels = 0, overlapPixels = 0;
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+        {
+            const Poly px = { { (double)x, (double)y }, { x + 1.0, (double)y }, { x + 1.0, y + 1.0 }, { (double)x, y + 1.0 } };
+            const Poly bIn = polyClip(px, pB), cIn = polyClip(px, pC);
+            const double aC = cIn.empty() ? 0 : polyArea(cIn);
+            const double aBall = bIn.empty() ? 0 : polyArea(bIn);
+            const Poly bc = bIn.empty() ? Poly{} : polyClip(bIn, pC);
+            const double aB = aBall - (bc.empty() ? 0 : polyArea(bc));
+            const float4 g = texelOf<float4>(*lin, W, x, y);
+            const double err = std::max({ std::fabs(g.x - aB), std::fabs(g.y - aC), std::fabs((double)g.z) });
+            const bool partial = (aB > 1e-6 && aB < 1 - 1e-6) || (aC > 1e-6 && aC < 1 - 1e-6);
+            const bool overlap = !bc.empty() && polyArea(bc) > 1e-6 && (aBall < 1 - 1e-6 || aC < 1 - 1e-6) && aC < 1 - 1e-6;
+            if (partial)
+            {
+                ++edgePixels;
+                sumEdge += err;
+            }
+            if (overlap) ++overlapPixels;
+            else worstSingle = std::max(worstSingle, err);
+            if (err > worst && err > 2e-3) logf("  edge px (%u,%u) got (%.4f %.4f) exact (%.4f %.4f)%s\n", x, y, g.x, g.y, aB, aC, overlap ? " overlap" : "");
+            worst = std::max(worst, err);
+        }
+    logf("edge composite: %u pixels with partial coverage, %u where both quads' edges meet; mean error over edge pixels %.2e \n", edgePixels, overlapPixels,
+         sumEdge / std::max(edgePixels, 1u));
+    report(worstSingle < 2e-3, "edge composite: pixels outside overlaps vs exact visible areas (abs.)", worstSingle, 2e-3);
+    report(worst < 1.0 / 32 + 2e-3, "edge composite: all pixels (overlaps within 1/32) vs exact visible areas (abs.)", worst, 1.0 / 32 + 2e-3);
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -759,6 +989,7 @@ int main(int argc, char** argv)
         testScene(tf, report);
         testSunSpecular(tf, report);
         testLocalLights(tf, report);
+        testEdgeComposite(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

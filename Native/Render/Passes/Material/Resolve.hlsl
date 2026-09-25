@@ -12,7 +12,7 @@
 // P[0] = { visId SRV, visibleClusters SRV, gbuffer UAV, material word UAV }
 // P[1] = { emissive UAV or UNX_NONE, lobe tiles UAV, tile lists UAV (raw), tile args UAV (raw) }
 // P[2] = { texture table SRV, tilesX, tilesY, tileCount }
-// P[3].y experiment mask (material.experiment_disable: cost attribution only, 0 otherwise)
+// P[3].y experiment mask (material.experiment_disable: cost attribution only, 0 otherwise), P[3].z tile flags UAV (raw)
 // P[3].x (DEBUG=1) RWStructuredBuffer<float4>, 3 per pixel: (uv, duv/dx), (duv/dy, variance, roughness'),
 //        (camera-relative hit, front)
 #include "Bindless.hlsli"
@@ -136,6 +136,8 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
     GroupMemoryBarrierWithGroupSync();
     if (gi == 0)
     {
+        RWByteAddressBuffer tileFlags = ResourceDescriptorHeap[P[3].z];
+        tileFlags.Store(4 * (gid.y * P[2].y + gid.x), 0);
         RWTexture2D<unorm float> lobeTiles = ResourceDescriptorHeap[P[1].y];
         lobeTiles[gid] = floor(saturate(asfloat(gs_minLobe)) * 255.0) / 255.0;  // rounded down: never above the minimum
         RWByteAddressBuffer tiles = ResourceDescriptorHeap[P[1].z];

@@ -7,6 +7,9 @@
 //   emissive       RGBA16F per pixel, written only for materials with an emissive texture (nits, before exposure)
 //   tile lists     raw buffer: for shade class c, tiles[c * tileCount + i] = tile x | tile y << 16, i < count(c)
 //   tile args      raw buffer: for shade class c, D3D12_DISPATCH_ARGUMENTS at byte 12 c = (count(c), 1, 1)
+//   tile flags     raw buffer, one uint per tile: 0 after the resolve; the shading kernels set bit 0 when the tile has
+//                  an edge pixel, and the first to set it appends the tile to the edge list (ShadingSystem.cpp)
+//   word bit 24..  reserved (0)
 //   texture table  StructuredBuffer<MTextureSet>, one entry per scene material (TextureSystem.cpp)
 #ifndef UNX_M_MATERIAL_INTERNAL_HLSLI
 #define UNX_M_MATERIAL_INTERNAL_HLSLI

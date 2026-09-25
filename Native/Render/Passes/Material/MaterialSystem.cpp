@@ -88,6 +88,7 @@ void resolve(FramePassContext& fc, ViewResources& view)
     if (textures.anyEmissiveTexture()) o.emissive = fc.graph.createTexture({ "m.emissive", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     o.tiles = fc.graph.createBuffer({ "m.tiles", (uint64_t)kShadeClassCount * tileCount * 4, 0 });
     o.tileArgs = fc.graph.createBuffer({ "m.tile args", (uint64_t)kShadeClassCount * sizeof(D3D12_DISPATCH_ARGUMENTS), 0 });
+    o.tileFlags = fc.graph.createBuffer({ "m.tile flags", (uint64_t)tileCount * 4, 0 });
 
     ID3D12PipelineState* begin = fc.shaders.compute("Passes/Material/ResolveBegin");
     const ResolveDebug& debug = fc.state<ResolveDebug>("M.resolveDebug");
@@ -117,15 +118,16 @@ void resolve(FramePassContext& fc, ViewResources& view)
                          if (o.emissive.valid()) b.use(o.emissive, Use::UavCompute);
                          b.use(o.tiles, Use::UavCompute);
                          b.use(o.tileArgs, Use::UavCompute);
+                         b.use(o.tileFlags, Use::UavCompute);
                          if (debugBuffer.valid()) b.use(debugBuffer, Use::UavCompute);
                      },
                      [kernel, v, o, cb, tileCount, debugBuffer, experiment](PassContext& c) {
-                         const uint32_t k[14] = { c.srv(v.visId), c.srv(v.visibleClusters), c.uav(v.gbuffer), c.uav(o.materialWord),
+                         const uint32_t k[15] = { c.srv(v.visId), c.srv(v.visibleClusters), c.uav(v.gbuffer), c.uav(o.materialWord),
                                                   o.emissive.valid() ? c.uav(o.emissive) : gpu::kNone, c.uav(v.reflectionLobeTiles), c.uav(o.tiles), c.uav(o.tileArgs),
-                                                  o.textureTableSrv, o.tilesX, o.tilesY, tileCount, debugBuffer.valid() ? c.uav(debugBuffer) : gpu::kNone, experiment };
+                                                  o.textureTableSrv, o.tilesX, o.tilesY, tileCount, debugBuffer.valid() ? c.uav(debugBuffer) : gpu::kNone, experiment, c.uav(o.tileFlags) };
                          c.cmd->SetPipelineState(kernel);
                          c.bindFrameConstants(cb);
-                         c.computeConstants(k, 14);
+                         c.computeConstants(k, 15);
                          c.cmd->Dispatch(o.tilesX, o.tilesY, 1);
                      });
 

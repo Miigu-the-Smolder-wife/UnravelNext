@@ -20,11 +20,14 @@
 // P[3] = { atmosphere transmittance, multi-scatter, sky view, aerial } (UNX_NONE = absent)
 // P[4] = { specular albedo LUT (float2 per grid point), texture table, experiment mask (0; shading.toml), 0 }
 // P[5] = { froxel lights (raw), froxel volume (Texture3D) } (UNX_NONE = absent)
+// P[6] = { edge cos angle, edge footprint tolerance, edge distance tolerance (floats), edge args UAV (raw) }
+// P[7] = { edge radiance UAV (RGBA16F), tilesX, tile flags UAV (raw), edge tile list UAV (raw) }
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
+#include "Passes/Shading/Edge.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
@@ -32,22 +35,35 @@
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
 
+bool shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, Texture2D<uint2> gbuffer, Texture2D<float> depthTex);
+
 [numthreads(8, 8, 1)]
 void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
 {
     ByteAddressBuffer tiles = ResourceDescriptorHeap[P[1].x];
     const uint tile = tiles.Load(4 * (P[1].y + gid.x));
     const uint2 pixel = uint2(tile & 0xFFFFu, tile >> 16) * M_TILE + tid;
-    if (any(pixel >= uint2(g_viewWidth, g_viewHeight))) return;
     Texture2D<uint> words = ResourceDescriptorHeap[P[0].z];
-    const uint word = words[pixel];
-    const uint materialIndex = mWordMaterial(word);
-    if (materialIndex == M_MATERIAL_SKY) return;
-    const GpuMaterial m = loadMaterial(materialIndex);
-    if (mShadeClass(materialClass(m)) != P[1].z) return;
-
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].x];
     Texture2D<float> depthTex = ResourceDescriptorHeap[P[0].y];
+    bool active = all(pixel < uint2(g_viewWidth, g_viewHeight));
+    const uint word = active ? words[pixel] : M_MATERIAL_SKY;
+    const uint materialIndex = mWordMaterial(word);
+    active = active && materialIndex != M_MATERIAL_SKY;
+    const GpuMaterial m = loadMaterial(active ? materialIndex : 0);
+    active = active && mShadeClass(materialClass(m)) == P[1].z;
+    bool isEdgeLane = false;
+    if (active)
+    {
+        isEdgeLane = shadeSurface(pixel, word, materialIndex, m, words, gbuffer, depthTex);
+    }
+    const bool anyEdge = WaveActiveAnyTrue(isEdgeLane);
+    if (WaveIsFirstLane()) edgeAppendTile(uint2(tile & 0xFFFFu, tile >> 16), anyEdge, P[7].y, P[7].z, P[7].w, P[6].w);
+}
+
+// Shades one pixel of this class; returns whether it is an edge pixel (its exposed radiance is then kept).
+bool shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, Texture2D<uint2> gbuffer, Texture2D<float> depthTex)
+{
     const GBufferSample g = decodeGBuffer(gbuffer[pixel]);
     const float linearZ = linearDepth(depthTex[pixel]);
     float3 D, Dx, Dy;
@@ -210,4 +226,13 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
 
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].w];
     color[pixel] = shEncodeOutput(radiance);
+    // Edge pixels keep their exposed linear radiance for the composite (EdgeComposite.hlsl).
+    const EdgeParams ep = { asfloat(P[6].x), asfloat(P[6].y), asfloat(P[6].z) };
+    const bool isEdge = P[7].x != UNX_NONE && edgeIsEdge(pixel, words, depthTex, gbuffer, ep);
+    if (isEdge)
+    {
+        RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];
+        edgeRadiance[pixel] = float4(radiance * g_exposure, 1);
+    }
+    return isEdge;
 }
