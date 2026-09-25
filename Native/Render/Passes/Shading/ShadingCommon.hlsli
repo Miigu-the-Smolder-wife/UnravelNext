@@ -42,14 +42,16 @@ float3 shSpecular(float3 f0, float alpha, float3 compensation, float3 n, float3 
 
 // ---------------------------------------------------------------- sun disk
 // Specular reflection of the solar disk: I = L_sun int_cap f_s (n.l) dw, L_sun = E / (pi sin^2 theta_s) (INTERFACES
-// 8.3), E = illuminance on a surface facing the sun (transmittance included). Three regimes by the lobe width alpha:
-//   alpha >= 16 theta_s   the lobe is flat over the disk: point evaluation at the centre, relative error ~ (theta_s /
-//                         alpha)^2 / 2 (0.64 % measured at 8.6 theta_s), times L_sun Omega = E * 2 / (1 + cos theta_s);
-//   theta_s / 2 .. 16     polar product quadrature over the cap (4 Gauss-Legendre radii in area x 12 angles; the
-//                         integrand is smooth in angle, so the trapezoid rule converges geometrically);
-//   alpha < theta_s / 2   narrow lobe: the lobe's full albedo times the fraction of its reflected directions inside
-//                         the disk (shSunLobeFraction).
-// The two lower regimes blend linearly for alpha in [theta_s / 3, theta_s / 2].
+// 8.3), E = illuminance on a surface facing the sun (transmittance included). Regimes by the lobe width alpha
+// (errors relative to the lobe's peak, measured against dense and lobe-sampled references in ShadingTests.cpp):
+//   alpha >= 16 theta_s   the lobe is flat over the disk: point evaluation at the centre, <= 0.13 %, times
+//                         L_sun Omega = E * 2 / (1 + cos theta_s);
+//   2 .. 16 theta_s       4-point disk rule, exact to degree 3 (shSunSpecular4): <= 0.25 %;
+//   alpha < 2 theta_s     the lobe's full albedo times the fraction of its reflected directions inside the disk
+//                         (shSunLobeFraction): <= 0.65 %;
+//   terminator band       (the disk crosses the shading normal's horizon, alpha >= 2 theta_s): polar product
+//                         quadrature over the cap with the cosine clipped per point (4 Gauss-Legendre radii in area x
+//                         12 angles), the only rule that follows the kink; < 1 px wide on curved surfaces.
 float3 shSunSpecularQuadrature(float3 f0, float alpha, float3 compensation, float3 n, float3 v, float3 l0, float NoV, float sinS, float cosS)
 {
     const float4 glNodes = float4(0.0694318442, 0.3300094782, 0.6699905218, 0.9305681558);  // Gauss-Legendre on [0, 1]
@@ -73,6 +75,43 @@ float3 shSunSpecularQuadrature(float3 f0, float alpha, float3 compensation, floa
         sum += ring * (glWeights[i] / 12);
     }
     return sum;  // mean of f_s cos over the cap
+}
+
+// Mean of max(n.l, 0) over the solar disk (uniform radiance): n.l is linear across the small disk (radius R = theta_s
+// in the tangent plane at l0, gradient k = sqrt(1 - NoL0^2)), so with u = -NoL0 / (k R) the clipped mean is
+//   (2 k R / pi) [ (1 - u^2)^(3/2) / 3 - (u / 2)(acos u - u sqrt(1 - u^2)) ],
+// NoL0 when the whole disk is above the horizon (u <= -1) and 0 below (u >= 1). The terminator of a curved surface is
+// a band of disk width, not a kink.
+float shCapCosine(float NoL0)
+{
+    const float k = sqrt(max(1 - NoL0 * NoL0, 0.0)), kR = k * g_sunAngularRadius;
+    if (NoL0 >= kR) return NoL0;
+    if (NoL0 <= -kR) return 0;
+    const float u = -NoL0 / kR, w = sqrt(max(1 - u * u, 0.0));
+    return (2 * kR / SH_PI) * (w * w * w / 3 - 0.5 * u * (acos(u) - u * w));
+}
+
+// Mean of f_s cos over the cap by the 4-point disk rule (radius R / sqrt 2 in area measure, weights 1/4): exact for
+// every polynomial of degree <= 3 over the disk, so for a lobe much wider than the disk the error is the fourth-order
+// term ~ (theta_s / alpha)^4. Only Fresnel (a function of v.h, which the 0.27 deg disk moves by < 0.3 deg) and the
+// compensation enter once; D, V and the cosine are taken per point, since at grazing light n.l itself changes by
+// +-sin(theta_s) across the disk (measured in ShadingTests.cpp for 2 theta_s <= alpha < 16 theta_s).
+float3 shSunSpecular4(float3 f0, float alpha, float3 compensation, float3 n, float3 v, float3 l0, float NoV, float cosS)
+{
+    const float3 t = normalize(abs(l0.y) < 0.99 ? cross(float3(0, 1, 0), l0) : cross(float3(1, 0, 0), l0));
+    const float3 b = cross(l0, t);
+    const float c = 1 - 0.5 * (1 - cosS), s = sqrt(max(1 - c * c, 0.0)) * 0.70710678;  // s * (+-t +- b) per point
+    float sum = 0;
+    [unroll] for (uint k = 0; k < 4; ++k)
+    {
+        const float3 l = l0 * c + (t * ((k & 1) ? s : -s) + b * ((k & 2) ? s : -s));
+        const float NoL = dot(n, l);  // > 0: the caller keeps the disk above the horizon (NoL0 >= 2 sin theta_s)
+        const float3 h = normalize(v + l);
+        const float3 nxh = cross(n, h);
+        sum += modelD(saturate(dot(n, h)), dot(nxh, nxh), alpha) * modelV(NoV, NoL, alpha) * NoL;
+    }
+    const float3 h0 = normalize(v + l0);
+    return modelFresnel(f0, saturate(dot(v, h0))) * (0.25 * sum) * compensation;
 }
 
 // Fraction of a narrow specular lobe (alpha < theta_s / 2) whose reflected directions fall inside the solar disk.
@@ -139,18 +178,15 @@ float3 shSunSpecular(uint lutSrv, float3 f0, float roughness, float alpha, float
 {
     const float sinS = sin(g_sunAngularRadius), cosS = cos(g_sunAngularRadius), thetaS = g_sunAngularRadius;
     const float3 LOmega = E * (2 / (1 + cosS));  // L_sun * solid angle of the cap
-    if (alpha >= 16 * thetaS)
-    {
-        const float NoL = dot(n, l0);
-        return NoL > 0 ? shSpecular(f0, alpha, compensation, n, v, l0, NoV, NoL) * NoL * LOmega : 0;
-    }
-    float3 quadrature = 0, mirror = 0;
-    if (alpha >= thetaS / 3) quadrature = shSunSpecularQuadrature(f0, alpha, compensation, n, v, l0, NoV, sinS, cosS) * LOmega;
-    if (alpha < thetaS / 2)
-        mirror = shSpecularAlbedo(lutSrv, f0, NoV, roughness) * shSunLobeFraction(n, v, NoV, l0, alpha, pixelAngle) * E / (SH_PI * sinS * sinS);
-    if (alpha >= thetaS / 2) return quadrature;
-    if (alpha < thetaS / 3) return mirror;
-    return lerp(mirror, quadrature, (alpha - thetaS / 3) * 6 / thetaS);
+    const float NoL0 = dot(n, l0);
+    if (NoL0 <= -sinS) return 0;
+    // Terminator band (the disk crosses the shading normal's horizon): the clipped cosine has a kink inside the disk, which
+    // only the per-point quadrature follows; the band is < 1 px wide on curved surfaces, so its cost is negligible.
+    const bool terminator = NoL0 < 2 * sinS;
+    if (!terminator && alpha >= 16 * thetaS) return shSpecular(f0, alpha, compensation, n, v, l0, NoV, NoL0) * NoL0 * LOmega;
+    if (!terminator && alpha >= 2 * thetaS) return shSunSpecular4(f0, alpha, compensation, n, v, l0, NoV, cosS) * LOmega;
+    if (terminator && alpha >= 2 * thetaS) return shSunSpecularQuadrature(f0, alpha, compensation, n, v, l0, NoV, sinS, cosS) * LOmega;
+    return shSpecularAlbedo(lutSrv, f0, NoV, roughness) * shSunLobeFraction(n, v, NoV, l0, alpha, pixelAngle) * E / (SH_PI * sinS * sinS);
 }
 
 // Area of the unit pixel square on the inner side of a straight edge: unit normal nrm (pixel space, pointing inside),

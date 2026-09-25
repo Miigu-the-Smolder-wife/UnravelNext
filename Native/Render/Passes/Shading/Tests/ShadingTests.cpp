@@ -208,7 +208,7 @@ void testSunSpecular(TestFrame& tf, Report& report)
         float3 f0;
     };
     std::vector<Case> cases;
-    for (float r : { 0.01f, 0.03f, 0.04f, 0.06f, 0.1f, 0.15f, 0.19f, 0.2f, 0.3f, 0.5f })
+    for (float r : { 0.01f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f, 0.09f, 0.1f, 0.13f, 0.14f, 0.15f, 0.17f, 0.19f, 0.22f, 0.25f, 0.27f, 0.3f, 0.5f })
         for (float o : { 0.0f, 0.5f, 0.95f, 1.0f, 1.05f, 2.0f, 6.0f }) cases.push_back({ r, o, { 0.04f, 0.04f, 0.04f } });
     for (float r : { 0.03f, 0.1f }) cases.push_back({ r, 0.3f, { 0.95f, 0.64f, 0.54f } });
     std::vector<float4> q;
@@ -274,7 +274,7 @@ void testSunSpecular(TestFrame& tf, Report& report)
         out = tf.readbackBuffer(fc, res, cases.size() * 16);
     });
     tf.device.descriptors().freeResource(lutSrv);
-    double worstPoint = 0, worstQuad = 0, worstMirror = 0;
+    double worstPoint = 0, worst4 = 0, worstMirror = 0;
     for (size_t i = 0; i < cases.size(); ++i)
     {
         float4 g;
@@ -285,15 +285,16 @@ void testSunSpecular(TestFrame& tf, Report& report)
         // outside the disk do not dominate through tiny denominators.
         const float3 peak = sunSpecularReference(surfaces[i], n, normalize(n * (2 * dot(n, l0)) - l0), l0, thetaS, 200, 600);
         const double e = std::max({ std::abs(g.x - ref.x), std::abs(g.y - ref.y), std::abs(g.z - ref.z) }) / std::max({ peak.x, peak.y, peak.z, 1e-30f });
-        const char* regime = alpha >= 16 * thetaS ? "point" : alpha >= thetaS / 3 ? "quadrature" : "narrow lobe";
+        const char* regime = alpha >= 16 * thetaS ? "point" : alpha >= 2 * thetaS ? "4-point" : "narrow lobe";
         if (e > 5e-3) logf("  r %.2f offset %.2f (%s): gpu %.5e ref %.5e (peak %.5e) err %.2e\n", cases[i].roughness, cases[i].offset, regime, g.y, ref.y, peak.y, e);
         if (alpha >= 16 * thetaS) worstPoint = std::max(worstPoint, e);
-        else if (alpha >= thetaS / 3) worstQuad = std::max(worstQuad, e);
+        else if (alpha >= 2 * thetaS) worst4 = std::max(worst4, e);
+
         else worstMirror = std::max(worstMirror, e);
     }
     report(worstPoint < 5e-3, "sun specular [point, alpha >= 16 theta_s] vs dense quadrature (rel. to peak)", worstPoint, 5e-3);
-    report(worstQuad < 1e-2, "sun specular [disk quadrature] vs dense quadrature (rel. to peak)", worstQuad, 1e-2);
-    report(worstMirror < 1e-2, "sun specular [narrow lobe, alpha < theta_s / 3] vs lobe-sampled reference (rel. to peak)", worstMirror, 1e-2);
+    report(worst4 < 5e-3, "sun specular [4-point rule, 2..16 theta_s] vs dense quadrature (rel. to peak)", worst4, 5e-3);
+    report(worstMirror < 1e-2, "sun specular [narrow lobe, alpha < 2 theta_s] vs dense / lobe-sampled reference (rel. to peak)", worstMirror, 1e-2);
 }
 
 // ---------------------------------------------------------------- 3-5
@@ -410,23 +411,59 @@ void testScene(TestFrame& tf, Report& report)
                 const float3 v = normalize(float3{ (float)-D[0], (float)-D[1], (float)-D[2] });
                 const float NoV = dot(n, v), NoL = dot(n, l0);
                 const float3 diffuse = su.baseColor * ((1 - su.metallic) / model::kPi);
+                const float3 front = su.cls == scene::MaterialClass::Foliage ? diffuse * (1 - su.transmission) : diffuse;
+                const float3 back = su.cls == scene::MaterialClass::Foliage ? diffuse * su.transmission : float3{};
+                // Cap averages of the clipped cosines: the point value away from the terminator, a dense disk quadrature
+                // within two disk radii of it (the model integrated over the disk, as the reference path tracer does).
+                auto capCos = [&](float sign) {
+                    const double nl = sign * NoL;
+                    if (nl >= 2 * std::sin(thetaS)) return nl;
+                    if (nl <= -2 * std::sin(thetaS)) return 0.0;
+                    const float3 t = normalize(std::fabs(l0.y) < 0.99f ? cross(float3{ 0, 1, 0 }, l0) : cross(float3{ 1, 0, 0 }, l0));
+                    const float3 b = cross(l0, t);
+                    double sum = 0;
+                    const uint32_t nr = 64, na = 128;
+                    for (uint32_t i = 0; i < nr; ++i)
+                    {
+                        const double c = 1 - (i + 0.5) / nr * (1 - std::cos(thetaS)), sn = std::sqrt(std::max(1 - c * c, 0.0));
+                        for (uint32_t k = 0; k < na; ++k)
+                        {
+                            const double ph = (k + 0.5) / na * 2 * kPi;
+                            const float3 l = l0 * (float)c + (t * (float)std::cos(ph) + b * (float)std::sin(ph)) * (float)sn;
+                            sum += std::max(0.0, (double)sign * dot(n, l));
+                        }
+                    }
+                    return sum / (nr * na);
+                };
                 float3 sun{};
-                if (NoV > 0 && NoL > 0)
+                const double above = capCos(1), below = capCos(-1);
+                if (NoV > 0)
                 {
-                    const float3 front = su.cls == scene::MaterialClass::Foliage ? diffuse * (1 - su.transmission) : diffuse;
-                    const double alpha = model::alphaFromRoughness(su.roughness);
-                    const float3 spec = alpha >= 16 * thetaS ? (model::evaluate(su, n, v, l0) - front) * NoL * (float)cap : sunSpecularReference(su, n, v, l0, thetaS, 24, 48);
-                    sun = front * NoL * (float)cap + spec;
-                    if (alpha < 16 * thetaS && spec.y > 10 * front.y * NoL) ++glint;
+                    if (above > 0)
+                    {
+                        const double alpha = model::alphaFromRoughness(su.roughness);
+                        const bool terminator = std::fabs(NoL) < 2 * std::sin(thetaS);
+                        const float3 spec = (alpha >= 16 * thetaS && !terminator) ? (model::evaluate(su, n, v, l0) - front) * NoL * (float)cap
+                                                                                   : sunSpecularReference(su, n, v, l0, thetaS, terminator ? 200 : 24, terminator ? 400 : 48);
+                        sun = front * (float)(above * cap) + spec;
+                        if (alpha < 16 * thetaS && spec.y > 10 * front.y * NoL) ++glint;
+                    }
+                    if (su.cls == scene::MaterialClass::Foliage && below > 0)
+                    {
+                        sun = sun + back * (float)(below * cap);
+                        ++backlit;
+                    }
                 }
-                else if (su.cls == scene::MaterialClass::Foliage && NoV * NoL < 0)
+                else if (su.cls == scene::MaterialClass::Foliage && above > 0)
                 {
-                    sun = diffuse * su.transmission * std::fabs(NoL) * (float)cap;
+                    sun = back * (float)(above * cap);
                     ++backlit;
                 }
                 expected = (sun * E + mat.emissive) * (float)exposure;
             }
-            const double scale = std::max({ expected.x, expected.y, expected.z, 1e-3f });
+            // Relative to the pixel, floored at 1 % of a sunlit surface (~1 after exposure here): the disk integrators are exact
+            // relative to the lobe's peak, so at grazing light (values 1e-3 of lit) their error is judged on that scale.
+            const double scale = std::max({ expected.x, expected.y, expected.z, 1e-2f });
             const double e = std::max({ std::abs(got.x - expected.x), std::abs(got.y - expected.y), std::abs(got.z - expected.z) }) / scale;
             if (e > worst && e > 5e-3) logf("  px (%u,%u) word %08x got (%.5f %.5f %.5f) expected (%.5f %.5f %.5f)\n", x, y, word, got.x, got.y, got.z, expected.x, expected.y, expected.z);
             worst = std::max(worst, e);

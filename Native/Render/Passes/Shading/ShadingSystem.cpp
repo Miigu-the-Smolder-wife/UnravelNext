@@ -123,6 +123,18 @@ void checkQuality(const QualityConfig& q)
     if (q.string("shading.output_encoding") != "srgb") fail("shading.output_encoding: only \"srgb\" (INTERFACES 7.5) is implemented");
     (void)q.integer("shading.analytic_lights_max");  // S reads it for the froxel lists (INTERFACES 9); local lights come with them
 }
+
+uint32_t experimentMask(const QualityConfig& q)
+{
+    const int64_t m = q.integer("shading.experiment_disable");
+    static bool logged = false;
+    if (m != 0 && !logged)
+    {
+        logf("M shading: experiment mask %lld leaves terms out (cost attribution run, not an image)\n", (long long)m);
+        logged = true;
+    }
+    return (uint32_t)m;
+}
 } // namespace
 
 const std::vector<float>& specularAlbedoTable()
@@ -146,10 +158,11 @@ void shade(FramePassContext& fc, ViewResources& view)
     const FrameResources r = fc.resources;
     const bool atmosphere = r.transmittanceLut.valid() && r.multiScatterLut.valid() && r.skyViewLut.valid() && r.aerialPerspective.valid();
     const ViewResources v = view;
-    const uint32_t tileCount = o.tilesX * o.tilesY, lutSrv = lut.srv;
+    const uint32_t tileCount = o.tilesX * o.tilesY, lutSrv = lut.srv, experiment = experimentMask(fc.quality);
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
 
-    fc.graph.addPass("m.shade", QueueType::Graphics,
+    // Planar reflection views are timed apart (their cost is R's reflection budget, ARCHITECTURE 2.6 C_planar).
+    fc.graph.addPass(view.view.kind == gpu::ViewKind::Main ? "m.shade" : "m.shade.planar", QueueType::Graphics,
                      [&](PassBuilder& b) {
                          b.use(v.gbuffer, Use::SrvCompute);
                          b.use(v.depth, Use::SrvCompute);
@@ -183,13 +196,13 @@ void shade(FramePassContext& fc, ViewResources& view)
                          c.cmd->SetPipelineState(opaque);
                          for (material::ShadeClass cls : { material::ShadeClass::Opaque, material::ShadeClass::Subsurface, material::ShadeClass::Water })
                          {
-                             const uint32_t k[18] = { c.srv(v.gbuffer), c.srv(v.depth), c.srv(o.materialWord), c.uav(v.color),
+                             const uint32_t k[19] = { c.srv(v.gbuffer), c.srv(v.depth), c.srv(o.materialWord), c.uav(v.color),
                                                       c.srv(o.tiles), (uint32_t)cls * tileCount, (uint32_t)cls, o.emissive.valid() ? c.srv(o.emissive) : none,
                                                       v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                                       v.reflection.valid() ? c.srv(v.reflection) : none,
                                                       (r.giCache.valid() && v.view.kind == gpu::ViewKind::PlanarReflection) ? c.srv(r.giCache) : none,
-                                                      atm[0], atm[1], atm[2], atm[3], lutSrv, o.textureTableSrv };
-                             c.computeConstants(k, 18);
+                                                      atm[0], atm[1], atm[2], atm[3], lutSrv, o.textureTableSrv, experiment };
+                             c.computeConstants(k, 19);
                              c.cmd->ExecuteIndirect(signature, 1, args, (uint32_t)cls * sizeof(D3D12_DISPATCH_ARGUMENTS), nullptr, 0);
                          }
                      });

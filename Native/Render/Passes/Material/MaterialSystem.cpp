@@ -82,7 +82,10 @@ void resolve(FramePassContext& fc, ViewResources& view)
     ID3D12PipelineState* kernel = fc.shaders.compute(debug.buffer.valid() ? "Passes/Material/Resolve.DEBUG1" : "Passes/Material/Resolve.DEBUG0");
     const BufferRef debugBuffer = debug.buffer;
     const BufferRef args = o.tileArgs;
-    fc.graph.addPass("m.resolve.begin", QueueType::Graphics, [&](PassBuilder& b) { b.use(args, Use::UavCompute); },
+    // Planar reflection views (R, through FrameServices::renderView) are timed apart: their cost is the reflection
+    // budget's (ARCHITECTURE 2.6 C_planar), not the main view's resolve.
+    const bool planar = view.view.kind != gpu::ViewKind::Main;
+    fc.graph.addPass(planar ? "m.resolve.begin.planar" : "m.resolve.begin", QueueType::Graphics, [&](PassBuilder& b) { b.use(args, Use::UavCompute); },
                      [begin, args](PassContext& c) {
                          const uint32_t k[4] = { c.uav(args), kShadeClassCount, 0, 0 };
                          c.cmd->SetPipelineState(begin);
@@ -92,7 +95,7 @@ void resolve(FramePassContext& fc, ViewResources& view)
 
     const ViewResources v = view;
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
-    fc.graph.addPass("m.resolve", QueueType::Graphics,
+    fc.graph.addPass(planar ? "m.resolve.planar" : "m.resolve", QueueType::Graphics,
                      [&](PassBuilder& b) {
                          b.use(v.visId, Use::SrvCompute);
                          b.use(v.visibleClusters, Use::SrvCompute);

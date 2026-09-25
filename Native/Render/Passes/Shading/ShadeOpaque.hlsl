@@ -16,7 +16,7 @@
 // P[1] = { tile lists (raw), list offset (entries), shade class, emissive or UNX_NONE }
 // P[2] = { shadow visibility, screen probes, reflection, GI cache (planar views) } (UNX_NONE = absent)
 // P[3] = { atmosphere transmittance, multi-scatter, sky view, aerial } (UNX_NONE = absent)
-// P[4] = { specular albedo LUT (float2 per grid point), texture table, 0, 0 }
+// P[4] = { specular albedo LUT (float2 per grid point), texture table, experiment mask (0; shading.toml), 0 }
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -92,17 +92,26 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
         sunVisibility = shadowSlot(shadow[pixel], 0);
     }
     const float NoL = dot(n, l0);
-    if (sunVisibility > 0)
+    const uint experiment = P[4].z;
+    if (sunVisibility > 0 && (experiment & 16) == 0)
     {
         const float3 cap = E * (2 / (1 + cos(g_sunAngularRadius)));  // L_sun x solid angle of the disk
+        // The disk's parts above and below the shading normal's horizon (cap-averaged clipped cosines).
+        const float above = shCapCosine(NoL), below = shCapCosine(-NoL);
         float3 sun = 0;
-        if (NoV > 0 && NoL > 0)
+        if (NoV > 0)
         {
-            const float e = modelDirectionalAlbedo(NoV, s.roughness);
-            const float3 compensation = 1 + f0 * (1 / e - 1);
-            sun = front * NoL * cap + shSunSpecular(P[4].x, f0, s.roughness, alpha, compensation, n, v, NoV, l0, E, shPixelAngle(D, Dx));
+            if (above > 0)
+            {
+                const float e = modelDirectionalAlbedo(NoV, s.roughness);
+                const float3 compensation = 1 + f0 * (1 / e - 1);
+                sun = front * above * cap;
+                if (experiment & 1) sun += NoL > 0 ? shSpecular(f0, alpha, compensation, n, v, l0, NoV, NoL) * NoL * cap : 0;
+                else sun += shSunSpecular(P[4].x, f0, s.roughness, alpha, compensation, n, v, NoV, l0, E, shPixelAngle(D, Dx));
+            }
+            if (foliage) sun += back * below * cap;
         }
-        else if (foliage && NoV * NoL < 0) sun = back * abs(NoL) * cap;
+        else if (foliage) sun = back * above * cap;  // viewer behind the shading normal: only light crossing the leaf
         radiance += sun * sunVisibility;
     }
 
@@ -112,16 +121,19 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     const float3 r = reflect(-v, n);
     const float halfAngle = reflectionLobeHalfAngle(s.roughness, NoV);
     float3 irradiance = 0, irradianceBack = 0, incident = 0;
-    if (g_viewKind == VIEW_MAIN && P[2].y != UNX_NONE)
+    if (g_viewKind == VIEW_MAIN && P[2].y != UNX_NONE && (experiment & 6) != 6)
     {
         ProbeSrvs probes;
         probes.probes = P[2].y;
         probes.occlusion = P[2].y;
         probes.pad0 = probes.pad1 = 0;
-        const float4 e = screenProbeIrradiance(probes, pixel, nv, linearZ);
-        irradiance = e.rgb * e.a;
-        if (foliage) irradianceBack = screenProbeIrradiance(probes, pixel, -nv, linearZ).rgb * e.a;
-        if (NoV > 0)
+        if ((experiment & 2) == 0)
+        {
+            const float4 e = screenProbeIrradiance(probes, pixel, nv, linearZ);
+            irradiance = e.rgb * e.a;
+            if (foliage) irradianceBack = screenProbeIrradiance(probes, pixel, -nv, linearZ).rgb * e.a;
+        }
+        if (NoV > 0 && (experiment & 4) == 0)
         {
             const float4 refl = P[2].z != UNX_NONE ? reflectionRadiance(P[2].z, pixel) : float4(0, 0, 0, 0);
             incident = refl.a > 0 ? refl.rgb : screenProbeRadiance(probes, pixel, n, linearZ, r, halfAngle);
@@ -141,7 +153,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     radiance += back * irradianceBack;
 
     // ---- air between the camera and the surface (main view volume)
-    if (haveAtmosphere && g_viewKind == VIEW_MAIN)
+    if (haveAtmosphere && g_viewKind == VIEW_MAIN && (experiment & 8) == 0)
     {
         float3 inscatter, transmittance;
         atmosphereAerial(atm, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight), linearZ, inscatter, transmittance);
