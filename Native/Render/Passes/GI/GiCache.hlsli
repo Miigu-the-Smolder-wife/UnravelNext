@@ -187,7 +187,8 @@ float3 giShIrradiance(B b, GiHeader h, uint entry, float3 n, out float sunVisibi
 
 // Irradiance (indirect + sky, no direct sun) at a surface point: trilinear over the 8 cells of the point's level (at least
 // minLevel) and normal class, entries that exist and have been updated at least once (renormalised); coarser levels when
-// none does (up to GI_LEVEL_CLIMB more: points no probe sees only have the coarse cells GI rays created there).
+// none does (up to GI_LEVEL_CLIMB more: points no probe sees only have the coarse cells GI rays created there), then finer
+// ones down to the point's own level (giCacheLevels).
 #define GI_LEVEL_CLIMB 6u
 
 // Read hook of the lookups below, per contributing entry. Read-only readers (M's shading) do nothing; R's ray hits read
@@ -196,32 +197,64 @@ float3 giShIrradiance(B b, GiHeader h, uint entry, float3 n, out float sunVisibi
 void giKeepRead(ByteAddressBuffer b, GiHeader h, uint entry) {}
 void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry);
 
+// One level's trilinear accumulation over the 8 cells of the point (entries that exist and have been updated).
+template <typename B>
+void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, bool wantRadiance, uint nc, uint level, inout float3 sumE,
+                       inout float3 sumL, inout float weight)
+{
+    const float s = giCellSize(h, level);
+    const float3 f = worldPos / s - 0.5;
+    const int3 c0 = int3(floor(f));
+    const float3 t = f - floor(f);
+    [loop] for (uint k = 0; k < 8; ++k)
+    {
+        const int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
+        const uint entry = giFind(b, h, giKey(level, nc, c0 + o));
+        if (entry == GI_ENTRY_PENDING || b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0) continue;  // no information yet
+        const float3 wt = lerp(1 - t, t, float3(o));
+        const float w = wt.x * wt.y * wt.z;
+        float sv;
+        sumE += w * giShIrradiance(b, h, entry, normal, sv);
+        if (wantRadiance)
+        {
+            const float3 n = giAnchorNormal(b, h, entry);
+            float3 tb, bb;
+            giBasis(n, tb, bb);
+            const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
+            sumL += w * giTexelRadiance(b, h, entry, giHemiOctEncode(local));
+        }
+        weight += w;
+        giKeepRead(b, h, entry);
+    }
+}
+
+// Level search of the lookups: from the point's level (at least minLevel) up to GI_LEVEL_CLIMB coarser levels; when none of
+// those has data and minLevel raised the start, down through the finer levels to the point's own level (the cells
+// screen probes and nearer rays created there). A ray hit's footprint level is often coarser than every cell that exists
+// at its point: stopping at the coarse side returned 0 there (black reflection samples on surfaces the cache covers).
+template <typename B>
+void giCacheLevels(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, bool wantRadiance, uint minLevel, out float3 sumE, out float3 sumL,
+                   out float weight)
+{
+    const uint nc = giNormalClass(normal);
+    const uint own = giLevel(h, worldPos), first = max(own, minLevel);
+    float3 e = 0, l = 0;
+    float w = 0;
+    uint level = first;
+    [loop] for (uint attempt = 0; attempt < GI_LEVEL_CLIMB && w <= 0 && level <= h.maxLevel; ++attempt, ++level)
+        giAccumulateLevel(b, h, worldPos, normal, dir, wantRadiance, nc, level, e, l, w);
+    [loop] for (uint finer = first; w <= 0 && finer > own && first - finer < GI_LEVEL_CLIMB; --finer)
+        giAccumulateLevel(b, h, worldPos, normal, dir, wantRadiance, nc, finer - 1, e, l, w);
+    sumE = e;
+    sumL = l;
+    weight = w;
+}
+
 template <typename B>
 float3 giCacheIrradianceAt(B b, GiHeader h, float3 worldPos, float3 normal, uint minLevel, out float weight)
 {
-    const uint nc = giNormalClass(normal);
-    uint level = max(giLevel(h, worldPos), minLevel);
-    float3 sum = 0;
-    weight = 0;
-    [loop] for (uint attempt = 0; attempt < GI_LEVEL_CLIMB && weight <= 0 && level <= h.maxLevel; ++attempt, ++level)
-    {
-        const float s = giCellSize(h, level);
-        const float3 f = worldPos / s - 0.5;
-        const int3 c0 = int3(floor(f));
-        const float3 t = f - floor(f);
-        [loop] for (uint k = 0; k < 8; ++k)
-        {
-            const int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
-            const uint entry = giFind(b, h, giKey(level, nc, c0 + o));
-            if (entry == GI_ENTRY_PENDING || b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0) continue;  // no information yet
-            const float3 wt = lerp(1 - t, t, float3(o));
-            const float w = wt.x * wt.y * wt.z;
-            float sv;
-            sum += w * giShIrradiance(b, h, entry, normal, sv);
-            weight += w;
-            giKeepRead(b, h, entry);
-        }
-    }
+    float3 sum, unused;
+    giCacheLevels(b, h, worldPos, normal, normal, false, minLevel, sum, unused, weight);
     return weight > 0 ? sum / weight : 0;
 }
 
@@ -268,38 +301,13 @@ float3 giTexelRadiance(B b, GiHeader h, uint entry, float2 uv)
 // Irradiance and incident radiance from direction dir at a surface point, in one pass over the cells (ray hits need
 // both): trilinear over the 8 cells of the point's level (at least minLevel) and normal class like giCacheIrradianceAt;
 // each existing updated entry contributes its SH irradiance and its texel-resolution radiance toward dir (bilinear over
-// its 8 x 8 hemisphere, in its own frame); coarser levels when none exists; zeros when no level has one.
+// its 8 x 8 hemisphere, in its own frame); level search as giCacheLevels; zeros when no level has one.
 template <typename B>
 void giCacheLightingAt(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, uint minLevel, out float3 irradiance, out float3 radiance)
 {
-    const uint nc = giNormalClass(normal);
-    uint level = max(giLevel(h, worldPos), minLevel);
-    float3 sumE = 0, sumL = 0;
-    float weight = 0;
-    [loop] for (uint attempt = 0; attempt < GI_LEVEL_CLIMB && weight <= 0 && level <= h.maxLevel; ++attempt, ++level)
-    {
-        const float s = giCellSize(h, level);
-        const float3 f = worldPos / s - 0.5;
-        const int3 c0 = int3(floor(f));
-        const float3 t = f - floor(f);
-        [loop] for (uint k = 0; k < 8; ++k)
-        {
-            const int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
-            const uint entry = giFind(b, h, giKey(level, nc, c0 + o));
-            if (entry == GI_ENTRY_PENDING || b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0) continue;
-            const float3 wt = lerp(1 - t, t, float3(o));
-            const float w = wt.x * wt.y * wt.z;
-            float sv;
-            sumE += w * giShIrradiance(b, h, entry, normal, sv);
-            const float3 n = giAnchorNormal(b, h, entry);
-            float3 tb, bb;
-            giBasis(n, tb, bb);
-            const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
-            sumL += w * giTexelRadiance(b, h, entry, giHemiOctEncode(local));
-            weight += w;
-            giKeepRead(b, h, entry);
-        }
-    }
+    float3 sumE, sumL;
+    float weight;
+    giCacheLevels(b, h, worldPos, normal, dir, true, minLevel, sumE, sumL, weight);
     irradiance = weight > 0 ? sumE / weight : 0;
     radiance = weight > 0 ? sumL / weight : 0;
 }

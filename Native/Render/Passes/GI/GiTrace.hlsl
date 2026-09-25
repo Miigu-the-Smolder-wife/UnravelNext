@@ -108,17 +108,8 @@ void GiTraceGen()
             // cells (reflection hits land on fresh fine cells all the time) showed it as dark spots.
             if (!known)
             {
-                const uint nc = giNormalClass(s.normal);
-                uint level = max(giLevel(h, s.position), bounceLevel) + 1;
-                [loop] for (uint attempt = 0; attempt < GI_LEVEL_CLIMB && level <= h.maxLevel && !known; ++attempt, ++level)
-                {
-                    const uint c = giFind(b, h, giKey(level, nc, int3(floor(s.position / giCellSize(h, level)))));
-                    if (c == GI_ENTRY_PENDING || b.Load(h.offSh + c * GI_SH_STRIDE + GI_SH_UPDATES) == 0) continue;
-                    float unused;
-                    irradiance = giShIrradiance(b, h, c, s.normal, unused);
-                    giKeepRead(b, h, c);
-                    known = true;
-                }
+                float weight;
+                irradiance = giCacheIrradianceAt(b, h, s.position, s.normal, bounceLevel, weight);  // coarser, then finer levels
             }
             const float3 l = normalize(g_sunDirection);
             const float cosSun = dot(s.normal, l);
