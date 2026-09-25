@@ -172,6 +172,14 @@ RayScene::~RayScene()
     m_device.deferRelease(m_exactReadback);
     if (m_patchRing) m_patchRing->Unmap(0, nullptr);
     m_device.deferRelease(m_patchRing);
+    if (m_crowdRing)
+    {
+        m_crowdRing->Unmap(0, nullptr);
+        m_device.deferRelease(m_crowdRing);
+        DescriptorHeaps* ch = &m_device.descriptors();
+        for (uint32_t srv : m_crowdRingSrv)
+            if (srv != 0xFFFFFFFFu) m_device.deferCall([ch, srv] { ch->freeResource(srv); });
+    }
     if (m_vsmRing)
     {
         m_vsmRing->Unmap(0, nullptr);
@@ -199,6 +207,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     const uint32_t proxyBudget = (uint32_t)quality.integer("raytracing.character_proxy_triangles");
     m_proxyErrorPx = (float)quality.number("raytracing.proxy_error_px");
     m_experiment = (uint32_t)quality.integer("raytracing.experiment_disable");
+    m_nearCharacters = (uint32_t)quality.integer("raytracing.near_characters_with_proxy");
     const uint64_t dynamicMax = (uint64_t)quality.integer("raytracing.dynamic_tlas_instances_max");
 
     const auto& instances = scene.instances();
@@ -342,6 +351,43 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     {
         e.record = (uint32_t)m_instances.size();
         m_instances.push_back({ 0, 0, e.vertexBase, kRtInstanceDeformed | (0xFFFFFFu << 8) });
+    }
+    if (m_crowdMaxGeometries > 0)
+    {
+        m_crowdRecord = (uint32_t)m_instances.size();
+        m_instances.push_back({ 0, 0, 0, kRtInstanceCrowd });  // geometryBase 0: this frame's crowd table from its start
+        D3D12_RAYTRACING_INSTANCE_DESC desc{};
+        desc.Transform[0][0] = desc.Transform[1][1] = desc.Transform[2][2] = 1;  // world-space vertices
+        desc.InstanceID = m_crowdRecord;
+        desc.InstanceMask = 0;  // until a frame has members
+        desc.AccelerationStructure = m_deformedBlasPool.address() + m_crowdBlasOffset;
+        m_crowdDesc = (uint32_t)m_dynamicDescs.size();
+        m_dynamicRecord.push_back(m_crowdRecord);
+        m_dynamicDescs.push_back(desc);
+        D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = (uint64_t)kDescSlots * m_crowdMaxGeometries * 32;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(m_device.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_crowdRing)),
+              "RT crowd table ring");
+        D3D12_RANGE none{ 0, 0 };
+        check(m_crowdRing->Map(0, &none, reinterpret_cast<void**>(&m_crowdRingMapped)), "map RT crowd ring");
+        DescriptorHeaps& h = m_device.descriptors();
+        for (uint32_t k = 0; k < kDescSlots; ++k)
+        {
+            m_crowdRingSrv[k] = h.allocateResource();
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sd.Buffer.FirstElement = (uint64_t)k * m_crowdMaxGeometries;
+            sd.Buffer.NumElements = m_crowdMaxGeometries;
+            sd.Buffer.StructureByteStride = 32;
+            m_device.d3d()->CreateShaderResourceView(m_crowdRing.Get(), &sd, h.resourceCpu(m_crowdRingSrv[k]));
+        }
+        m_crowdSrv = m_crowdRingSrv[0];
     }
     m_stats.staticInstances = (uint32_t)m_staticDescs.size();
     m_stats.dynamicInstances = (uint32_t)m_dynamicDescs.size();
@@ -777,6 +823,26 @@ void RayScene::buildDeformed()
         }
         m_exactRebuild.assign(m_exact.size(), 0);
     }
+    // Crowd BLAS region: every deformed instance's finest cut together (the most the crowd can hold).
+    if (m_deformed.size() > m_nearCharacters)
+    {
+        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> all;
+        for (const Deformed& d : m_deformed)
+            for (const D3D12_RAYTRACING_GEOMETRY_DESC& g : proxyGeometry(d.sceneInstance, d.mesh, m_proxyLevels[d.mesh][0], d.vertexBase)) all.push_back(g);
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs = (UINT)all.size();
+        inputs.pGeometryDescs = all.data();
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
+        m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &sizes);
+        m_crowdBlasOffset = poolBytes;
+        poolBytes += alignUp(sizes.ResultDataMaxSizeInBytes, kAsAlign);
+        m_crowdScratchOffset = scratchBytes;
+        scratchBytes += alignUp(sizes.ScratchDataSizeInBytes, kAsAlign);
+        m_crowdMaxGeometries = (uint32_t)all.size();
+    }
     m_deformedBlasPool = createBuffer(poolBytes, false, true, L"RT deformed BLAS pool");
     m_deformedScratch = createBuffer(scratchBytes, true, false, L"RT deformed BLAS scratch");
     m_deformJobs = createStructured(jobs.data(), sizeof(DeformJob), (uint32_t)jobs.size(), L"RT deform jobs");
@@ -835,6 +901,7 @@ void RayScene::recordRefit(ID3D12GraphicsCommandList7* cmd, bool refit, const st
     for (size_t k = 0; k < m_deformed.size(); ++k)
     {
         const Deformed& dd = m_deformed[k];
+        if (dd.crowd) continue;  // in the crowd BLAS this frame (its own BLAS is built when it leaves the crowd)
         const bool update = refit && (m_experiment & 1) == 0 && !(rebuild && k < rebuild->size() && (*rebuild)[k]);
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
         inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
@@ -988,7 +1055,6 @@ void RayScene::selectProxyLevels(FramePassContext& fc)
     {
         Deformed& d = m_deformed[k];
         const std::vector<ProxyMesh>& levels = m_proxyLevels[d.mesh];
-        if (levels.size() > 1 && patches.size() + 2 <= patchCapacity)
         {
             const gpu::Instance& in = instances[d.sceneInstance];
             const gpu::Mesh& gm = meshes[d.mesh];
@@ -1005,6 +1071,12 @@ void RayScene::selectProxyLevels(FramePassContext& fc)
             const float3 toEye{ centre.x - view.position.x, centre.y - view.position.y, centre.z - view.position.z };
             // A skinned pose can leave the bind-pose sphere: the distance is from its doubled radius (conservative).
             const float distance = std::max(std::sqrt(toEye.x * toEye.x + toEye.y * toEye.y + toEye.z * toEye.z) - 2 * gm.boundsSphere.w * scale, 0.0f);
+            d.distance = distance;
+            if (levels.size() <= 1 || patches.size() + 2 > patchCapacity)
+            {
+                triangles += levels[d.level].triangles;
+                continue;
+            }
             const float bound = m_proxyErrorPx * pixelAngle * distance;
             uint32_t level = d.level;
             while (level > 0 && levels[level].error * scale > bound) --level;  // finer at once
@@ -1042,6 +1114,60 @@ void RayScene::selectProxyLevels(FramePassContext& fc)
                          for (size_t k = 0; k < patches.size(); ++k)
                              c.cmd->CopyBufferRegion(c.resource(patches[k].job ? jobsRef : instancesRef), patches[k].dst, ring, ringOffset + k * 16, 16);
                      });
+}
+
+void RayScene::selectCrowd(FramePassContext& fc)
+{
+    m_crowdGeometries.clear();
+    m_stats.crowdInstances = 0;
+    m_stats.crowdTriangles = 0;
+    if (m_crowdMaxGeometries == 0) return;
+    // The nearest raytracing.near_characters_with_proxy keep their own BLAS, and so do the exact set's owners (their
+    // records point at their slot) and hidden instances (masked anyway); the rest are the crowd.
+    std::vector<uint32_t> order(m_deformed.size());
+    for (uint32_t k = 0; k < (uint32_t)order.size(); ++k) order[k] = k;
+    std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return m_deformed[a].distance < m_deformed[b].distance; });
+    std::vector<uint8_t> owner(m_deformed.size(), 0);
+    for (const ExactSlot& e : m_exact)
+        if (e.owner != 0xFFFFFFFFu) owner[e.owner] = 1;
+    const auto& instances = m_scene.instances();
+    const uint32_t slot = (uint32_t)(fc.frame.frameIndex % kDescSlots);
+    uint8_t* table = m_crowdRingMapped + (uint64_t)slot * m_crowdMaxGeometries * 32;
+    for (uint32_t r = 0; r < (uint32_t)order.size(); ++r)
+    {
+        const uint32_t k = order[r];
+        Deformed& d = m_deformed[k];
+        const bool crowd = r >= m_nearCharacters && !owner[k] && !(instances[d.sceneInstance].flags & gpu::kInstanceHidden);
+        if (!crowd && d.crowd) m_deformedRebuild[k] = 1;  // back from the crowd: its own BLAS was not refit meanwhile
+        d.crowd = crowd;
+        if (!crowd) continue;
+        const ProxyMesh& p = m_proxyLevels[d.mesh][d.level];
+        const std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometry = proxyGeometry(d.sceneInstance, d.mesh, p, d.vertexBase);
+        for (size_t g = 0; g < geometry.size(); ++g)
+        {
+            const size_t entry = m_crowdGeometries.size();
+            const RtGeometry& record = m_geometries[p.geometryBase + g];
+            std::memcpy(table + entry * 32, &record, 16);
+            std::memcpy(table + entry * 32 + 16, &m_instances[d.record], 16);
+            m_crowdGeometries.push_back(geometry[g]);
+        }
+        ++m_stats.crowdInstances;
+        m_stats.crowdTriangles += p.triangles;
+    }
+    m_crowdSrv = m_crowdRingSrv[slot];
+}
+
+void RayScene::recordCrowdBuild(ID3D12GraphicsCommandList7* cmd, const std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>& geometries) const
+{
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
+    d.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+    d.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+    d.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    d.Inputs.NumDescs = (UINT)geometries.size();
+    d.Inputs.pGeometryDescs = geometries.data();
+    d.DestAccelerationStructureData = m_deformedBlasPool.address() + m_crowdBlasOffset;
+    d.ScratchAccelerationStructureData = m_deformedScratch.address() + m_crowdScratchOffset;
+    cmd->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
 }
 
 void RayScene::declareVsm(PassBuilder& b, const VsmRefs& v)
@@ -1162,6 +1288,7 @@ void RayScene::record(FramePassContext& fc)
         selectExactSet(fc);
     }
     selectProxyLevels(fc);
+    selectCrowd(fc);
     // This frame's instance descriptors (GpuScene's CPU mirror is current, INTERFACES 6.3 v1.8).
     if (fc.framesInFlight > kDescSlots) fail("RayScene: %u frames in flight exceed %u descriptor slots", fc.framesInFlight, kDescSlots);
     const uint64_t slotOffset = (fc.frame.frameIndex % kDescSlots) * m_descSlotBytes;
@@ -1170,9 +1297,16 @@ void RayScene::record(FramePassContext& fc)
     for (size_t k = 0; k < m_dynamicDescs.size(); ++k)
     {
         const RtInstance& ri = m_instances[m_dynamicRecord[k]];
+        if (ri.flags & kRtInstanceCrowd)
+        {
+            slotDescs[k] = m_dynamicDescs[k];
+            slotDescs[k].InstanceMask = m_crowdGeometries.empty() ? 0 : kRtMaskAll;
+            continue;
+        }
         refreshDesc(m_dynamicDescs[k], sceneInstances[ri.sceneInstance], (ri.flags & kRtInstanceDeformed) != 0);
         slotDescs[k] = m_dynamicDescs[k];
         if ((ri.flags & kRtInstanceDeformed) == 0) continue;
+        if (m_deformed[ri.flags >> 8].crowd) slotDescs[k].InstanceMask = 0;  // in the crowd BLAS this frame
         // A skinned instance in the reflection exact set is traced with its original mesh (its slot's BLAS and record).
         const uint32_t deformedIndex = ri.flags >> 8;
         for (const ExactSlot& e : m_exact)
@@ -1217,8 +1351,9 @@ void RayScene::record(FramePassContext& fc)
                       b.use(blas, Use::AccelerationStructureRead);
                       b.use(blasScratch, Use::AccelerationStructureScratch);
                   },
-                  [this, rebuild = m_exactRebuild, deformedRebuild = m_deformedRebuild](PassContext& c) {
+                  [this, rebuild = m_exactRebuild, deformedRebuild = m_deformedRebuild, crowd = m_crowdGeometries](PassContext& c) {
                       recordRefit(c.cmd, true, &deformedRebuild);
+                      if (!crowd.empty()) recordCrowdBuild(c.cmd, crowd);
                       recordExactBuilds(c.cmd, rebuild);
                   });
     }
@@ -1302,6 +1437,6 @@ void RayScene::rootConstants(uint32_t out[8]) const
     out[4] = m_indexPool.srv;
     out[5] = m_vertexMap.srv;
     out[6] = m_deformedPool.srv;
-    out[7] = 0;
+    out[7] = m_crowdSrv;  // this frame's crowd table (RtSceneSrvs.crowd)
 }
 } // namespace unx::render::rt
