@@ -1,10 +1,12 @@
 // unx-kernel: cs_6_6 main
 // unx-variants: OUTPUT=0,1
 // Sky pixels (no surface in the vis buffer), one 8 x 8 tile of the sky class list per group: S's sky radiance of the
-// pixel direction plus the solar disk (uniform radiance, INTERFACES 8.3) weighted by its coverage of the pixel.
+// pixel direction with the view's air (atmosphereSkyRadianceView: the far-field sky plus the air volume's sky
+// correction, i.e. local lights' glow against the sky and the scattering casters' shadows remove, as shafts) plus the
+// solar disk (uniform radiance, INTERFACES 8.3) weighted by its coverage of the pixel.
 // Without S's atmosphere (tracks built alone) the sky is black and the disk has the top-of-atmosphere radiance.
 // P[0] = { material word, color UAV, tile lists (raw), list offset (entries) }
-// P[1] = { atmosphere transmittance, multi-scatter, sky view, aerial } (UNX_NONE = absent)
+// P[1] = { atmosphere transmittance, multi-scatter, sky view, this view's air volume } (UNX_NONE = absent)
 // P[2] = { experiment mask (shading.experiment_disable), 0, 0, 0 }
 // P[3] = { 0, 0, edge args UAV (raw), vis id SRV }, P[7] as ShadeOpaque
 #include "Bindless.hlsli"
@@ -44,7 +46,7 @@ bool shadeSky(uint2 pixel, Texture2D<uint> words)
     float3 sun;
     if (atm.transmittance != UNX_NONE)
     {
-        radiance = atmosphereSkyRadiance(atm, dir);
+        radiance = atmosphereSkyRadianceView(atm, dir, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight));
         sun = atmosphereSunRadiance(atm, g_cameraPosition);
     }
     else

@@ -55,15 +55,6 @@ struct ShadedPixel
 ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, Texture2D<uint2> gbuffer, Texture2D<float> depthTex,
                          uint overflowHead);
 
-// Edge detection shares the tile's samples: each lane publishes its vis id and edge sample, so a neighbour inside the
-// tile costs no loads; neighbours outside it are read from the screen buffers. A lane of another class (or the sky)
-// shows another material, which is an edge before any geometry.
-#define EDGE_OUTSIDE 0xFFFFFFFFu
-groupshared uint gsVis[64];
-groupshared uint gsMaterial[64];  // EDGE_OUTSIDE: outside the view
-groupshared float3 gsPosition[64];
-groupshared float3 gsNormal[64];
-groupshared float gsFootprint[64];
 
 [numthreads(8, 8, 1)]
 void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
@@ -94,45 +85,25 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     ShadedPixel sp = (ShadedPixel)0;
     if (active) sp = shadeSurface(pixel, word, materialIndex, m, words, gbuffer, depthTex, overflowHead);
 
-    // ---- edge (E) pixels keep their exposed linear radiance for the composite (EdgeComposite.hlsl)
+    // ---- edge (E) pixels keep their exposed linear radiance for the composite (EdgeComposite.hlsl). Neighbours are read
+    // from the screen buffers (L1 hits within the tile): a groupshared exchange needs a group barrier after the shading,
+    // which makes both waves of a tile wait on each other's lookups.
     if (P[7].x == UNX_NONE || (P[4].z & 256) != 0) return;
-    const uint lane = tid.y * M_TILE + tid.x;
-    const EdgePixel c = edgeSample(pixel, materialIndex, sp.linearZ, sp.normal);
-    const uint vc = inView ? visIds[pixel] : VIS_NONE;
-    gsVis[lane] = vc;
-    gsMaterial[lane] = inView ? materialIndex : EDGE_OUTSIDE;
-    gsPosition[lane] = c.position;
-    gsNormal[lane] = c.normal;
-    gsFootprint[lane] = c.footprint;
-    GroupMemoryBarrierWithGroupSync();
     bool isEdge = false;
     if (active)
     {
         const EdgeParams ep = { asfloat(P[6].x), asfloat(P[6].y), asfloat(P[6].z) };
+        const EdgePixel c = edgeSample(pixel, materialIndex, sp.linearZ, sp.normal);
+        const uint vc = visIds[pixel];
         [unroll] for (uint k = 0; k < 9; ++k)
         {
             if (k == 4 || isEdge) continue;
-            const int2 o = int2(int(k % 3) - 1, int(k / 3) - 1);
-            const int2 q = int2(pixel) + o;
+            const int2 q = int2(pixel) + int2(int(k % 3) - 1, int(k / 3) - 1);
             if (any(q < 0) || q.x >= int(g_viewWidth) || q.y >= int(g_viewHeight)) continue;
-            const int2 t = int2(tid) + o;
+            if (visIds[uint2(q)] == vc) continue;
             EdgePixel e = (EdgePixel)0;
-            if (all(t >= 0) && all(t < int(M_TILE)))
-            {
-                const uint l = uint(t.y) * M_TILE + uint(t.x);
-                if (gsVis[l] == vc) continue;
-                e.material = gsMaterial[l];
-                e.sky = false;
-                e.position = gsPosition[l];
-                e.normal = gsNormal[l];
-                e.footprint = gsFootprint[l];
-            }
-            else
-            {
-                if (visIds[uint2(q)] == vc) continue;
-                e.material = mWordMaterial(words[uint2(q)]);
-                if (e.material == c.material) e = edgeSample(uint2(q), e.material, linearDepth(depthTex[uint2(q)]), octDecode(gbuffer[uint2(q)].x));
-            }
+            e.material = mWordMaterial(words[uint2(q)]);
+            if (e.material == c.material) e = edgeSample(uint2(q), e.material, linearDepth(depthTex[uint2(q)]), octDecode(gbuffer[uint2(q)].x));
             isEdge = e.material != c.material || !edgeSameSurface(c, e, ep);
         }
         if (isEdge)

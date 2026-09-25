@@ -14,7 +14,7 @@
 //   9. area lights (AreaLight.hlsli): the diffuse integrals (front, back) and the LTC integral over the true light shape
 //      against surface-grid integration in double (exactness of the region integration), and the LTC specular against
 //      the model BRDF integrated over the light (the fit error, reported by roughness).
-//   unx_test_shading_shadingtests [--no-debug-layer]
+//   unx_test_shading_shadingtests [--no-debug-layer] [--gbv]   (--gbv: GPU-based validation)
 #include "../../Material/Tests/MTestFrame.h"
 
 #include "unx/scene/MaterialModel.h"
@@ -1580,12 +1580,15 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true;
+        bool debugLayer = true, gpuValidation = false;
         for (int i = 1; i < argc; ++i)
+        {
             if (std::string(argv[i]) == "--no-debug-layer") debugLayer = false;
+            if (std::string(argv[i]) == "--gbv") gpuValidation = true;
+        }
         Report report;
         testTable(report);
-        TestFrame tf(debugLayer);
+        TestFrame tf(debugLayer, gpuValidation);
         testScene(tf, report);
         testSunSpecular(tf, report);
         testLocalLights(tf, report);

@@ -205,8 +205,9 @@ public:
 class TestFrame
 {
 public:
-    explicit TestFrame(bool debugLayer = true)
-        : device([&] { DeviceOptions o; o.debugLayer = debugLayer; return o; }()),
+    // gpuValidation: GPU-based validation (implies the debug layer; out-of-range and state errors reported per access).
+    explicit TestFrame(bool debugLayer = true, bool gpuValidation = false)
+        : device([&] { DeviceOptions o; o.debugLayer = debugLayer || gpuValidation; o.gpuValidation = gpuValidation; return o; }()),
           shaders(device, executableDirectory() / "shaders"),
           quality(QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality")),
           gpuScene(device)
