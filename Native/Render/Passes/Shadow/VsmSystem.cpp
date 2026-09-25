@@ -56,6 +56,7 @@ struct State
     uint32_t levelBasis[kLevels] = {};
     float levelHMin[kLevels] = {}, levelHMax[kLevels] = {};
     uint32_t basisCounter = 0;
+    double refreshCredit = 0;  // pages the spread may still refresh (budget accumulated per frame, spent per level)
     float3 windDirection{};
     float windSpeed = -1;
     uint32_t sceneRevision = UINT32_MAX;
@@ -461,6 +462,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.latest.airBlocks8 = w[23];
         s.latest.airTexels = w[24];
         for (uint32_t k = 0; k < kLevels; ++k) s.latest.levelPages[k] = w[32 + k];
+        s.latest.sampledSubtiles = w[53];
         D3D12_RANGE none{ 0, 0 };
         s.statsReadback->Unmap(0, &none);
     }
@@ -494,7 +496,9 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     // (pi tan(theta_s)), independent of d and the level); besides the levels that must refresh, ceil(20 x
     // (sun change this frame) / dthetaMax) of the oldest refresh every frame so the load spreads evenly. The spread is
     // by pages: the oldest levels refresh until their requested pages (the last completed frame's, per level) reach
-    // total x change / dthetaMax, so a level with many pages does not share its frame with others (P95 = mean).
+    // total x change / dthetaMax on average: a running credit gains the budget every frame and pays each refreshed
+    // level's pages, so the mean equals the budget and a frame exceeds it by at most one level (levels that must refresh
+    // are paid too, the credit may go negative).
     const bool sceneChanged = !s.initialized || fc.scene.revision() != s.sceneRevision;
     const float margin = (float)q.number("shadow.vsm.height_margin_m");
     uint32_t invalidateMask = 0;
@@ -529,20 +533,26 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         uint64_t totalPages = 0;
         for (uint32_t k = 0; k < kLevels; ++k) totalPages += s.latest.levelPages[k];
         const bool weighted = totalPages > 0;
-        const double pageBudget = weighted ? (double)totalPages * share : (double)kLevels * share;
+        // 10 % above the steady-state need: the round robin completes before any level reaches the must bound.
+        const double pageBudget = 1.1 * (weighted ? (double)totalPages * share : (double)kLevels * share);
         uint32_t order[kLevels];
         for (uint32_t k = 0; k < kLevels; ++k) order[k] = k;
         std::sort(order, order + kLevels, [&](uint32_t a, uint32_t b) { return age[a] > age[b]; });
-        double taken = 0;
+        s.refreshCredit = std::min(s.refreshCredit + pageBudget, weighted ? (double)totalPages : (double)kLevels);
+        bool spreading = true;
         for (uint32_t i = 0; i < kLevels; ++i)
         {
             const uint32_t k = order[i];
-            // Must: by the next frame the basis would be older than the bound; spread: the oldest ones within the budget.
+            const double cost = weighted ? s.latest.levelPages[k] : 1.0;
+            // Must: by the next frame the basis would be older than the bound. Spread: strictly oldest first, stopping at
+            // the first level the credit does not cover (it waits for the credit, alone, instead of younger levels
+            // taking the credit until it becomes a must together with others).
             const bool must = age[k] + sunAngle > dthetaMax;
-            if (must || taken < pageBudget)
+            spreading = spreading && s.refreshCredit >= cost;
+            if (must || spreading)
             {
                 refresh(k);
-                taken += weighted ? s.latest.levelPages[k] : 1.0;
+                s.refreshCredit -= cost;
             }
         }
         for (uint32_t k = 0; k < kLevels; ++k)
@@ -761,6 +771,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     if (main.depth.valid())
     {
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmMark");
+        const bool subtileStats = q.integer("shadow.vsm.subtile_stats") != 0;  // measurement only
         const TextureRef depth = main.depth;
         const uint32_t w = main.view.width, h = main.view.height;
         g.addPass("s.vsm.mark", QueueType::Compute,
@@ -770,7 +781,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.srv(depth), ctx.uav(requests), ring, off };
+                      const uint32_t k[4] = { ctx.srv(depth), ctx.uav(requests), ring, subtileStats ? 1u : 0u };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 4);

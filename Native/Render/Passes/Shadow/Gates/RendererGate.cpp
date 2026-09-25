@@ -193,6 +193,9 @@ int main(int argc, char** argv)
                 std::string pagesLine;
                 for (uint32_t k = 0; k < shadow::kLevels; ++k) pagesLine += format(" L%u:%u", k, st.levelPages[k]);
                 logf("  requested sun pages by level (last frame):%s\n", pagesLine.c_str());
+                if (quality.integer("shadow.vsm.subtile_stats") != 0)
+                    logf("  sampled 32^2 sub-tiles %u of %u in pixel-requested pages (%.1f %%)\n", st.sampledSubtiles, st.pixelRequested * 16,
+                         100.0 * st.sampledSubtiles / std::max(st.pixelRequested * 16, 1u));
             }
             // Overflow list (INTERFACES 7.3): the gate requires no tile over the capacity in the measured frames.
             logf("  shadow overflow: lights past the third max %u, words needed max %u, tiles over capacity %u %s\n", overflowLightsMax, overflowWordsMax, overTiles,

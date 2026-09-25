@@ -1,7 +1,9 @@
 // unx-kernel: cs_6_6 main
 // Page requests from a view's depth (ARCHITECTURE 2.3): every visible surface requests the page of the finest level
 // whose texel is not larger than its pixel footprint. Duplicate requests within a wave store once.
-// P[0].x depth SRV (Texture2D<float>), P[0].y requests UAV (raw), P[0].z VSM constants CBV, P[0].w unused
+// P[0].x depth SRV (Texture2D<float>), P[0].y requests UAV (raw), P[0].z VSM constants CBV, P[0].w 1: sub-tile statistics
+// (shadow.vsm.subtile_stats, measurement only: each pixel also sets bit 16 + its 32^2 sub-tile (4 x 4 per page) in the
+// request word, VsmAllocate counts them)
 // Frame constants of the view.
 #include "Frame.hlsli"
 #include "Passes/Shadow/VsmCommon.hlsli"
@@ -21,6 +23,13 @@ void main(uint2 px : SV_DispatchThreadID)
     const int2 page = vsmAbsPage(vsmAbsTexel(c, ls.xy, k));
     if (!vsmInWindow(c, page, k)) return;
     const uint slot = vsmSlot(page, k);
+    if (P[0].w == 1)
+    {
+        const uint2 local = uint2(vsmAbsTexel(c, ls.xy, k) & (int)(VSM_PAGE - 1)) >> 5;
+        RWByteAddressBuffer requests = ResourceDescriptorHeap[P[0].y];
+        requests.InterlockedOr(slot * 4, VSM_REQ_PIXEL | (1u << (16 + local.y * 4 + local.x)));
+        return;
+    }
     if (slot != WaveReadLaneFirst(slot) || WaveIsFirstLane())
     {
         RWByteAddressBuffer requests = ResourceDescriptorHeap[P[0].y];

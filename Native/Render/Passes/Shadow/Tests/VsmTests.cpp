@@ -504,10 +504,10 @@ int main(int argc, char** argv)
                 report(maxAge <= dthetaMax * 1.0001f, format("moving sun x%.1f: no level older than dthetaMax", step).c_str(), maxAge, dthetaMax);
                 if (step < 1)
                 {
-                    // Spread by pages: at most the budget (total x step) plus the level that crosses it.
-                    const double limit = totalPages * step + largestLevel;
+                    // Spread by pages: at most the budget (1.1 x total x step: the schedule's slack) plus one level.
+                    const double limit = 1.1 * totalPages * step + largestLevel;
                     logf("  pages refreshed per frame at most %u (requested %u, largest level %u)\n", maxPages, totalPages, largestLevel);
-                    report(maxPages <= limit && minRefreshed >= 1, "moving sun x0.3: refreshes spread by pages (<= total x step + largest level)", maxPages, limit);
+                    report(maxPages <= limit && minRefreshed >= 1, "moving sun x0.3: refreshes spread by pages (<= 1.1 x total x step + largest level)", maxPages, limit);
                 }
                 else
                     report(minRefreshed == shadow::kLevels, "moving sun x3: every level refreshes every frame", minRefreshed, shadow::kLevels);
