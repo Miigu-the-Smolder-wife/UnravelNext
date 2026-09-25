@@ -1,0 +1,65 @@
+﻿{
+    "player":  "C:\\Users\\USER\\Unravel\\Builds\\UnravelNextDataWorld",
+    "playerExeWritten":  "2026-09-25T10:23:45",
+    "oldRepoCommit":  "80d34a08eab6dec469e469db666fdd3ea7166a68",
+    "oldRepoDirtyEngineOrBridgePaths":  19,
+    "rendererAtBuild":  {
+                            "commit":  "886fee2f37217b48a7f13b603f8339f6230aa3bd",
+                            "diffSha256":  "",
+                            "source":  "UnravelNext",
+                            "deployed":  "2026-09-25T19:29:34",
+                            "built":  "2026-09-25T19:28:58",
+                            "dirty":  false
+                        },
+    "rendererReplacedAfterBuild":  null,
+    "plugins":  [
+                    {
+                        "name":  "lib_burst_generated.dll",
+                        "sha256":  "de0e827010e1f9eef431431bac230d89cc3fdf0607ac314118b9ace5a6d7e58e",
+                        "bytes":  1132032,
+                        "written":  "2026-09-25T19:31:42"
+                    },
+                    {
+                        "name":  "libonigwrap.dll",
+                        "sha256":  "c22db1e7be04c50eb47e67362bf705830bb95df30c02c22dd7add835ee777583",
+                        "bytes":  551336,
+                        "written":  "2026-09-25T10:23:45"
+                    },
+                    {
+                        "name":  "NativeAnimation.dll",
+                        "sha256":  "75ef3fca9355755d5ef0b53abd315d5a9ed6b74361fe85ac743ea38069f31471",
+                        "bytes":  1388032,
+                        "written":  "2026-09-25T19:30:16"
+                    },
+                    {
+                        "name":  "NativePhysics.dll",
+                        "sha256":  "9c09421a8fa6fa60ee4b252b2d558548eb7a4ad1a92f35c338e3d3bed89b1e6a",
+                        "bytes":  3488768,
+                        "written":  "2026-09-25T10:23:45"
+                    },
+                    {
+                        "name":  "NativeVfx.dll",
+                        "sha256":  "492747843b4fead031382d11049d5cbfec09e7cb94ebaf55bcf2459222ae4f3e",
+                        "bytes":  582656,
+                        "written":  "2026-09-25T19:30:16"
+                    },
+                    {
+                        "name":  "NativeWorld.dll",
+                        "sha256":  "edf256cb860efcf43df4c7262e4443761cdef718a7978250c910e6d4f86e4175",
+                        "bytes":  316928,
+                        "written":  "2026-09-25T19:30:16"
+                    },
+                    {
+                        "name":  "TitanNative.dll",
+                        "sha256":  "2526de9e06242a33f5c149c7441fc949b806439b6db3031e16b0d98cbfd80743",
+                        "bytes":  17071104,
+                        "written":  "2026-09-25T10:23:45"
+                    },
+                    {
+                        "name":  "UnravelNext.dll",
+                        "sha256":  "7373515b1b5978b7f7c89f1c8dbb539b47308e5a4d6994ac8fe1c6616148744c",
+                        "bytes":  1375232,
+                        "written":  "2026-09-25T19:30:16"
+                    }
+                ]
+}

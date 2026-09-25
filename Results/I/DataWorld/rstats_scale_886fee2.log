@@ -1,0 +1,22 @@
+UnravelNext host: scene committed, 10 meshes, 1280 instances, 2584 triangles, 89 clusters, 278.0 ms, hash 44efc84e155eb517
+RayScene: 0 static + 1280 dynamic instances (256 deformed), 8 mesh BLAS (920 tris, 0.0 MB compacted from 0.1 MB), deformed 212992 tris / 140800 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.37 MB, load 33 ms
+GI cache: 200000 entries, 524288 table slots, 132.4 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+R stats frame 0: reflection hit cache lookups 24964, no data 12427; G samples 0, ratio branch 0; mean L / mean g log2 bins [<-3 .. >=4] 0 0 0 0 0 0 0 0 0
+R stats frame 60: reflection hit cache lookups 49938, no data 0; G samples 29581, ratio branch 261; mean L / mean g log2 bins [<-3 .. >=4] 76 70 183 12255 12497 1402 629 407 2062
+R stats frame 120: reflection hit cache lookups 56323, no data 0; G samples 31996, ratio branch 205; mean L / mean g log2 bins [<-3 .. >=4] 249 111 311 12887 11056 759 379 266 5978
+R stats frame 180: reflection hit cache lookups 50615, no data 0; G samples 30192, ratio branch 58; mean L / mean g log2 bins [<-3 .. >=4] 57 66 111 12582 10749 948 841 379 4459
+R stats frame 240: reflection hit cache lookups 51543, no data 0; G samples 30344, ratio branch 99; mean L / mean g log2 bins [<-3 .. >=4] 77 78 195 12582 10660 949 879 497 4427
+R stats frame 300: reflection hit cache lookups 47164, no data 0; G samples 29402, ratio branch 68; mean L / mean g log2 bins [<-3 .. >=4] 76 70 183 12693 10423 959 399 562 4037
+R stats frame 360: reflection hit cache lookups 45813, no data 0; G samples 28926, ratio branch 63; mean L / mean g log2 bins [<-3 .. >=4] 39 29 148 12480 10116 964 410 519 4221
+R stats frame 420: reflection hit cache lookups 46066, no data 0; G samples 29329, ratio branch 50; mean L / mean g log2 bins [<-3 .. >=4] 32 64 176 12437 10299 1008 488 352 4473
+R stats frame 480: reflection hit cache lookups 46421, no data 0; G samples 29272, ratio branch 62; mean L / mean g log2 bins [<-3 .. >=4] 40 66 168 12289 10156 875 483 288 4907
+R stats frame 540: reflection hit cache lookups 47000, no data 0; G samples 29311, ratio branch 47; mean L / mean g log2 bins [<-3 .. >=4] 40 60 142 12340 10524 926 551 255 4473
+R stats frame 600: reflection hit cache lookups 52255, no data 0; G samples 30729, ratio branch 216; mean L / mean g log2 bins [<-3 .. >=4] 341 82 183 12321 10873 1020 556 313 5040
+R stats frame 660: reflection hit cache lookups 48628, no data 0; G samples 29783, ratio branch 61; mean L / mean g log2 bins [<-3 .. >=4] 35 97 147 12284 10106 957 684 495 4978
+R stats frame 720: reflection hit cache lookups 46484, no data 0; G samples 29210, ratio branch 85; mean L / mean g log2 bins [<-3 .. >=4] 24 21 127 12116 10361 912 621 411 4617
+R stats frame 780: reflection hit cache lookups 48511, no data 0; G samples 29733, ratio branch 74; mean L / mean g log2 bins [<-3 .. >=4] 41 77 152 12126 10467 1091 602 408 4769
+R stats frame 840: reflection hit cache lookups 48813, no data 0; G samples 29776, ratio branch 176; mean L / mean g log2 bins [<-3 .. >=4] 167 78 166 12176 10379 1036 593 386 4795
+R stats frame 900: reflection hit cache lookups 46877, no data 0; G samples 29343, ratio branch 139; mean L / mean g log2 bins [<-3 .. >=4] 103 49 139 12211 10388 843 545 311 4754
+R stats frame 960: reflection hit cache lookups 45258, no data 0; G samples 28880, ratio branch 116; mean L / mean g log2 bins [<-3 .. >=4] 60 58 168 12129 10456 840 417 275 4477
+R stats frame 1020: reflection hit cache lookups 46200, no data 0; G samples 29071, ratio branch 57; mean L / mean g log2 bins [<-3 .. >=4] 22 35 151 12166 10098 896 562 334 4807

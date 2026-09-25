@@ -188,6 +188,11 @@ M의 추가 분리[실측, 14:34~14:36, 같은 조건]: `reflection.cache_lobe_h
 0ff332b 뒤[실측, Player 렌더러 파일만 0ff332b, 앞 상자 정면에서 중앙값 절반보다 어두운 픽셀]: 기본 3.98 %(1371ac5는 4.15 %), `reflection.experiment_disable`
 16(hit 캐시 조회 끔) 4.66 %, 2(hit 태양 가시성 없음) 4.77 %, 32(순회만, hit이 1) 0.00 %, K만 0.00 %. 순회·원점은 원인이 아니고 hit 셰이딩이다.
 R에 보냈다(R이 반사 곱셈 수정을 준비 중).
+886fee2(R fd008b7 비음수 추정·e277df1 포함, Player 재빌드, 새 World·VFX·Animation DLL, identity 사이드카 있음)[실측, 50 Hz tick 조건]: 반점 지표 4.48 %
+(0ff332b 3.98 %)로 변화가 없다. 같은 빌드에서 R 통계(`-unxLogFile`, `reflection.stats_log_frames = 60`): 워밍업 뒤 비율 가지 D/C 0.469 %(보통)·0.332 %
+(1024+256), log2(mean L / mean g)가 1 아래인 표본 39.6 %·42.7 %, 16배 이상 22.4 %·15.8 %, hit 캐시 no data 0 %. 워밍업(frame < 120)은 no data
+6.1 %·16.6 %다. 비율 가지가 드물어 음수 잘림으로는 반점을 설명하기 어렵다. 성긴 G 표본(약 12k 표본이 669k 픽셀을 8×8까지 보간)의 분산으로 보여
+R에 전달했다. 로그 `Results/I/DataWorld/rstats_{,scale_}886fee2.log`.
 빌드된 Player의 렌더러 파일(DLL·커널·품질)은 Unity 재빌드 없이 커밋 빌드로 바꿀 수 있다(스크래치패드 `update_player_renderer.ps1`, 관리 코드와
 ABI가 그대로일 때만; `<Data>/UnravelNext/renderer.build.json`에 커밋을 적는다).
 
