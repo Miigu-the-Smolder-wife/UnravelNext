@@ -1,5 +1,5 @@
 param(
-  [string]$Track = "core",     # core | M | S | R | C | I | all : each session builds in its own folder build/<Track>
+  [string]$Track = "core",     # core | M | S | R | C | I | FX | all : each session builds in its own folder build/<Track>
   [string]$Tracks = "",        # enabled tracks (cmake/Tracks.cmake); default from -Track: core -> V, M -> M, S -> S, R -> R,
                                # C -> C, V -> V, I -> V;M;S;R;I (the host links the whole renderer),
                                # all -> all (integrated build for gate measurements)

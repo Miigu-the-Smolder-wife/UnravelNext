@@ -2,13 +2,13 @@
 #
 # The four sessions share one working tree, so one track's unfinished file must not break another track's build.
 # UNX_TRACKS lists the tracks whose folders are compiled (core is always on): "all" (integrated build, used for gate
-# measurements) or a subset of V;M;S;R;C;I. A disabled track's render modules, kernels, tools, tests and gates are not
+# measurements) or a subset of V;M;S;R;C;I;FX. A disabled track's render modules, kernels, tools, tests and gates are not
 # configured; its entry points (Tracks.h) come from core's empty stubs (Native/Render/Frame/Stubs), which declare no
 # passes. Tools/CI/Build.ps1 -Track <name> selects the tracks of that session.
 include_guard(GLOBAL)
 
-set(UNX_TRACKS "all" CACHE STRING "Enabled tracks: all, or a list of V;M;S;R;C;I (core is always on)")
-set(UNX_ALL_TRACKS V M S R C I)
+set(UNX_TRACKS "all" CACHE STRING "Enabled tracks: all, or a list of V;M;S;R;C;I;FX (core is always on)")
+set(UNX_ALL_TRACKS V M S R C I FX)
 
 if(NOT UNX_TRACKS STREQUAL "all")
   foreach(t ${UNX_TRACKS})
@@ -32,6 +32,7 @@ set(UNX_TRACK_OF_ClusterBuilder V)
 set(UNX_TRACK_OF_SceneGen C)
 set(UNX_TRACK_OF_Reference C)
 set(UNX_TRACK_OF_Host I)
+set(UNX_TRACK_OF_FX FX)
 
 function(unx_track_of folder out)
   if(NOT DEFINED UNX_TRACK_OF_${folder})

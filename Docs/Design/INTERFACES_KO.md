@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.23, 2026-09-25)
+# UnravelNext 인터페이스 (v1.24, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -21,6 +21,7 @@
 | R 광선·GI·반사 | R 세션 | `Native/Render/RayTracing/`, `Native/Render/Passes/GI/`, `Native/Render/Passes/Reflection/`, `Config/quality/raytracing.toml`, `Config/quality/gi.toml`, `Config/quality/reflection.toml` |
 | C 기준·콘텐츠 | C 세션 | `Reference/`, `Tools/SceneGen/`, `Config/quality/reference.toml` |
 | I 통합 | I 세션 (v1.6) | `Native/Host/`, `Config/quality/host.toml` (이전 저장소 쪽 `Assets/UnravelNextBridge/`) |
+| FX GPU 시뮬레이션 | FX 세션 (v1.24) | `Native/Render/Passes/FX/`, `Config/quality/fx.toml` |
 | 모두 | — | `Docs/Design/Requests/`(새 파일만), `Results/<트랙>/`(자기 결과), `Docs/Status/<트랙>_STATUS_KO.md`(자기 상태) |
 
 - 소유 폴더 밖은 읽기만 한다. 다른 트랙의 공개 HLSL 헤더(5.6)는 `#include`해서 쓴다.
@@ -454,3 +455,10 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
     - `windOffset`의 무기억 계약을 넣었다(P3 모델도 지킨다).
     - `Deformation.hlsli`에 `windOffsetScale`(속도 무관, `windOffsetBound` = scale × s²)과 `windChangeBound`(끝점 상한, S의 더 좁은 식)를 추가했다. `windOffsetBound`와 `windChangeFactor`는 그대로다.
     - S는 페이지 메타에 scale과 그린 순간의 바람을 저장하고, `windChanged` 전체 무효화를 없앤다. R의 바람 BLAS 재사용은 같은 방식이다. I의 `UnxFrameSetEnvironment`가 바람도 받을 수 있다.
+- v1.24 (2026-09-25):
+  - **FX 트랙 등록(조율 세션 요청, World·VFX 설계 7절 V1 입자 GPU 모듈)**:
+    - 1절 소유표에 FX 행: `Native/Render/Passes/FX/`, `Config/quality/fx.toml`.
+    - `cmake/Tracks.cmake`: `UNX_ALL_TRACKS`에 FX, `UNX_TRACK_OF_FX`.
+    - `Build.ps1 -Track FX`: `build/FX`, 트랙 "FX"(코어 + FX). V·M과 함께 돌릴 때는 `-Tracks "V;M;FX"`.
+    - 진입점 `tracks::simulation(fc)`(`Tracks.h`): C0 슬롯(설계 4.1)이다. `FrameRenderer::record`가 `prepareScene`과 메인 뷰 프레임 상수 다음, `atmosphere` 앞에서 부른다. 코어가 만든 빈 구현(`Passes/FX/FxTrack.cpp`)과 꺼진 빌드용 스텁(`Frame/Stubs/TrackFX.cpp`)을 넣었다.
+    - `GpuScene::setParticleBuffers` 계약은 FX 요청 파일로 받는다.

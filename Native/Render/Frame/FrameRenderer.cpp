@@ -169,6 +169,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& fram
 
     // ARCHITECTURE 4.1, one graphics queue (4.3). Order matters only through declared dependencies; it follows the
     // design so the reader can map passes to the budget table.
+    tracks::simulation(fc);  // C0
     tracks::atmosphere(fc);
     tracks::accelerationStructures(fc);
     tracks::visibility(fc, main);

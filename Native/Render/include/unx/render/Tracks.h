@@ -8,6 +8,11 @@ namespace unx::render::tracks
 // Entry points a track has not implemented yet call this: it logs once per entry and the entry declares no passes.
 void pending(const char* entry);
 
+// ---- FX: GPU simulation (FX session) - Native/Render/Passes/FX
+// C0 of ARCHITECTURE 4.1, first in the frame after prepareScene: the GPU simulation slices (particles first; cloth,
+// hair guides, water, Matter later), serial in the frame (ARCHITECTURE 2.14).
+void simulation(FramePassContext& fc);
+
 // ---- V: visibility (core session) - Native/Render/Passes/Visibility, Tools/ClusterBuilder
 // Culling (two phase), band A/B/C classification, band A vis buffer + depth, HiZ, coverage layer (bands B/C).
 // Writes view.depth, visId, visibleClusters, hiz, coverageFragments, coverageHeads.
