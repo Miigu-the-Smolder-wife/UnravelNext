@@ -4,20 +4,22 @@
 //
 // Per 8 x 8 pixel tile (tile = tx + ty * tilesX, tilesX = ceil(width / 8)):
 //   header (8 words): fragment count, nearest and farthest fragment depth (reversed-Z device depth as float bits:
-//          zNear = max, zFar = min), the 64-bit opaqueCovered mask (pixel p = x + 8 y: a fragment covering the whole
-//          pixel with an opaque material, so every band A surface behind it has weight zero), the first extension chunk
-//          table, spare
+//          zNear = max, zFar = min), the 64-bit opaqueCovered mask (pixel p = x + 8 y: the union of the masks of the
+//          pixel's opaque records is full and the band A surface lies behind the farthest of those records, so that
+//          surface has weight zero under the composite's mask-union occlusion; COVERAGE_REDESIGN 4.6), the first
+//          extension chunk table, spare
 //   chunk table: tableSlots words (list header word 6), word c = chunk index + 1 of the tile's c-th chunk (0 = none)
 //   extension tables: the tile's chunks from ordinal tableSlots on. An extension table is one chunk of the record pool
-//          read as 256 words: words 0..254 the next 255 ordinals' chunks, word 255 the next extension table (chunk
-//          index + 1). The chain has no length limit: a tile holds any number of fragments.
-// Records (16 B, CoverageFragment) in chunks of 64 in a raw buffer: the tile's i-th fragment is record i % 64 of its
-// chunk i / 64 (byte (chunk index) * 1024 + (i % 64) * 16). Records of a tile are in append order (not sorted); the same
+//          read as 256 words (word w = component w % 4 of the chunk's element w / 4): words 0..254 the next 255
+//          ordinals' chunks, word 255 the next extension table (chunk index + 1). The chain has no length limit: a tile
+//          holds any number of fragments.
+// Records (16 B, CoverageFragment) in chunks of 64 in a StructuredBuffer<uint4> (one record per element): the tile's
+// i-th fragment is element (chunk index) * 64 + i % 64 of its chunk i / 64. Records of a tile are in append order (not sorted); the same
 // vis id may appear twice in one pixel (a primitive the hardware clipped is shaded once per piece along the cuts, with
 // identical values): readers sort by (pixel, depth, vis id) and keep one of equal neighbours. A chunk slot of 0 below
 // the tile's count means the pool ran out (Stats::overflow bit OVERFLOW_COVERAGE, a gate failure).
-// bDepth (R32_UINT per pixel): the nearest depth (float bits, atomic max) of a fragment covering the whole pixel with an
-// opaque material; the raster drops fragments behind it (their weight is zero).
+// A record is opaque for the view unless its material is glass or water (alpha-tested records: their mask is the one
+// after the test); a see-through record has the sign bit of its depth word set (depth is never negative).
 // Tile list (raw buffer), header words:
 //   0..2 DispatchIndirect args over the listed tiles (one group per tile; x up to 65535, then y), 3 tile count,
 //   4 fragments appended, 5 chunks allocated, 6 chunk table slots per tile, 7 tiles per row,
@@ -30,6 +32,9 @@
 #define COV_TILE_PX 8u
 #define COV_CHUNK_RECORDS 64u
 #define COV_CHUNK_BYTES 1024u
+#define COV_TILE_PIXELS 64u
+#define COV_MASK_FULL 0xFFFFFFFFu
+#define COV_DEPTH_SEE_THROUGH 0x80000000u  // record depth word: the material is not opaque for the view
 #define COV_EXT_SLOTS 255u        // chunk slots per extension table (word 255 links the next table)
 #define COV_TILE_WORDS 8u         // header words per tile
 #define COV_TILE_COUNT 0u         // fragments of the tile
@@ -53,12 +58,14 @@
 struct CoverageFragment  // 16 B
 {
     uint visId;       // VisBuffer.hlsli packing
-    float depth;      // device depth (reversed Z) at the covered region's centroid
+    uint depthBits;   // device depth (reversed Z) at the covered region's centroid, float bits | COV_DEPTH_SEE_THROUGH
     uint mask;        // 32 subsamples (Coverage.hlsli coverageSample)
     uint packed;      // octahedral normal 8 + 8 bits | area x 1023 (10 bits) << 16 | pixel in the tile (x + 8 y) << 26
 };
 
 uint coverageFragmentPixel(CoverageFragment f) { return f.packed >> 26; }                         // 0..63
+float coverageFragmentDepth(CoverageFragment f) { return asfloat(f.depthBits & ~COV_DEPTH_SEE_THROUGH); }
+bool coverageFragmentOpaque(CoverageFragment f) { return (f.depthBits & COV_DEPTH_SEE_THROUGH) == 0; }
 float coverageFragmentArea(CoverageFragment f) { return ((f.packed >> 16) & 0x3FFu) / 1023.0; }  // px^2, alpha included
 // Unit normal (world, interpolated at the covered region's centroid; faces the viewer for two-sided materials).
 float3 coverageFragmentNormal(CoverageFragment f)
@@ -87,29 +94,32 @@ CoverageFragment coverageUnpackRecord(uint4 v)
 {
     CoverageFragment f;
     f.visId = v.x;
-    f.depth = asfloat(v.y);
+    f.depthBits = v.y;
     f.mask = v.z;
     f.packed = v.w;
     return f;
 }
 
-// Readers (after V's passes): the tile's ordinal-th chunk (index + 1; 0 = none). 'ext' is header word COV_TILE_EXT.
-uint coverageChunkOf(ByteAddressBuffer table, ByteAddressBuffer records, uint tableSlots, uint tile, uint ext, uint ordinal)
+// Readers (after V's passes): word w of the extension table in chunk t (index + 1).
+uint coverageExtWord(StructuredBuffer<uint4> records, uint t, uint w) { return records[(t - 1) * COV_CHUNK_RECORDS + w / 4][w % 4]; }
+
+// Readers: the tile's ordinal-th chunk (index + 1; 0 = none). 'ext' is header word COV_TILE_EXT.
+uint coverageChunkOf(ByteAddressBuffer table, StructuredBuffer<uint4> records, uint tableSlots, uint tile, uint ext, uint ordinal)
 {
     if (ordinal < tableSlots) return table.Load(4 * (tile * tableSlots + ordinal));
     uint e = ordinal - tableSlots, t = ext;
     while (t != 0 && e >= COV_EXT_SLOTS)
     {
-        t = records.Load((t - 1) * COV_CHUNK_BYTES + 4 * COV_EXT_SLOTS);
+        t = coverageExtWord(records, t, COV_EXT_SLOTS);
         e -= COV_EXT_SLOTS;
     }
-    return t == 0 ? 0 : records.Load((t - 1) * COV_CHUNK_BYTES + 4 * e);
+    return t == 0 ? 0 : coverageExtWord(records, t, e);
 }
 
 // Readers: record i of a tile whose i / 64-th chunk is 'chunk' (non-zero).
-CoverageFragment coverageLoadRecord(ByteAddressBuffer records, uint chunk, uint i)
+CoverageFragment coverageLoadRecord(StructuredBuffer<uint4> records, uint chunk, uint i)
 {
-    return coverageUnpackRecord(records.Load4((chunk - 1) * COV_CHUNK_BYTES + 16 * (i % COV_CHUNK_RECORDS)));
+    return coverageUnpackRecord(records[(chunk - 1) * COV_CHUNK_RECORDS + i % COV_CHUNK_RECORDS]);
 }
 
 #endif

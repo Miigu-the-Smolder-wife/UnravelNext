@@ -65,9 +65,8 @@ struct ViewResources
     BufferRef coverageTiles;       // raw: 8-word tile headers (count, zNear, zFar, opaqueCovered  [V]
                                    // 64 bit, first extension chunk table)
     BufferRef coverageChunkTable;  // raw: per tile N words, chunk index + 1 of its first N chunks [V]
-    BufferRef coverageChunks;      // raw: record pool, chunks of 64 16 B CoverageFragment records [V]
+    BufferRef coverageChunks;      // StructuredBuffer<uint4> record pool: chunks of 64 records  [V]
                                    // (or 256-word extension tables)
-    TextureRef coverageBDepth;     // R32_UINT: nearest full-pixel opaque fragment depth (bits)  [V]
     BufferRef coverageTileList;    // raw: header (args over the tiles, counts, N, tiles per row,  [V]
                                    // heavy tile args and count), tiles with fragments, heavy tiles
     TextureRef gbuffer;            // RG32_UINT (GBuffer.hlsli)                              [M]

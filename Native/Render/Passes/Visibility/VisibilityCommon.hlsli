@@ -79,7 +79,7 @@ struct CullView
 #define VA_MESH 15u           // + 3 * list
 #define VA_COV_MESH 33u       // coverage raster: every band B list entry (both phases)
 #define VA_COV_CLEAR 36u      // tile clear over last frame's coverage tiles (one group per tile)
-#define VA_COV_TILES 39u      // heavy tile classification over this frame's coverage tiles (64 per group)
+#define VA_COV_TILES 39u      // opaqueCovered and heavy tiles over this frame's coverage tiles (one group per tile)
 #define VA_WORDS 42u
 
 // Overflow bits (VS_OVERFLOW): a capacity was exceeded; the run's statistics report them (Stats::overflow).

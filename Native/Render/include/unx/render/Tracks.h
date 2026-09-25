@@ -16,7 +16,7 @@ void simulation(FramePassContext& fc);
 // ---- V: visibility (core session) - Native/Render/Passes/Visibility, Tools/ClusterBuilder
 // Culling (two phase), band A/B/C classification, band A vis buffer + depth, HiZ, coverage layer (bands B/C).
 // Writes view.depth, visId, visibleClusters, hiz and the coverage layer (coverageTiles, coverageChunkTable, coverageChunks,
-// coverageBDepth, coverageTileList).
+// coverageTileList).
 void visibility(FramePassContext& fc, ViewResources& view);
 // Service behind FrameServices::rasterizeDepth.
 void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request);

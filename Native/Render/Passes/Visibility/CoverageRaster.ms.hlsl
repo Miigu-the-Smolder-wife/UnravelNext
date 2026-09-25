@@ -65,9 +65,10 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     const GpuMaterial m = loadMaterial(material);
     const bool oneSided = (m.classFlags & MATERIAL_TWO_SIDED) == 0 && (v.flags & CULL_VIEW_CULL_BACK) != 0;
     const uint alphaFlag = (m.classFlags & MATERIAL_ALPHA_TESTED) != 0 ? COV_FLAG_ALPHA : 0u;
-    // Opaque for the view: no alpha test and not a see-through class (a leaf's transmission is light, not view).
+    // Opaque for the view: not a see-through class (a leaf's transmission is light, not view; an alpha-tested fragment
+    // hides what its mask covers after the test).
     const uint materialClass = m.classFlags & 0xFFu;
-    const uint opaqueFlag = alphaFlag == 0 && materialClass != MATERIAL_GLASS && materialClass != MATERIAL_WATER ? COV_FLAG_OPAQUE : 0u;
+    const uint opaqueFlag = materialClass != MATERIAL_GLASS && materialClass != MATERIAL_WATER ? COV_FLAG_OPAQUE : 0u;
     const uint vertexCount = valid ? clusterVertexCount(cl) : 0, triangleCount = valid ? clusterTriangleCount(cl) : 0;
     SetMeshOutputCounts(vertexCount, triangleCount);
     StructuredBuffer<uint> clusterVertices = ResourceDescriptorHeap[g_clusterVertexIndices];

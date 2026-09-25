@@ -5,10 +5,10 @@
 //     and the covered region's centroid (Coverage.hlsli); zero area (conservative raster's touching pixels) writes
 //     nothing;
 //  2. depth at the centroid (z/w is affine in screen space over the plane of the triangle);
-//  3. occlusion: dropped behind the pixel's bDepth (an opaque fragment covering the whole pixel is already there: the
-//     dropped fragment's composite weight is zero), and when every band A surface over the pixel's 3 x 3 neighbourhood
-//     is nearer (HiZ mip 0: farthest depth of 2 x 2 blocks). A band A edge pixel keeps its band B fragments (the E
-//     composite needs them);
+//  3. band A occlusion: dropped when every band A surface over the pixel's 3 x 3 neighbourhood is nearer (HiZ mip 0:
+//     farthest depth of 2 x 2 blocks). A band A edge pixel keeps its band B fragments (the E composite needs them). No
+//     cut behind nearer band B fragments here: per-fragment atomics for that cost more than they save (design 4.6,
+//     DesignBench); M's composite applies the mask-union rule in its own sort;
 //  4. the 32-subsample mask; alpha-tested materials clear the subsamples whose texture alpha fails and scale the area by
 //     the passing fraction. The uv is perspective-correct (uv/w and 1/w are affine in screen space) and the texture
 //     footprint is one subsample's cell (the pixel's gradients x 1/sqrt(32)): 32 samples of the alpha estimate its
@@ -20,13 +20,9 @@
 //     update); the tile's i-th fragment goes to record i % 64 of its chunk i / 64, which the first wave needing it takes
 //     from the pool and publishes in the tile's chunk table, or past the table's slots in the tile's extension tables,
 //     by compare-and-swap (a wave losing the race uses the winner's chunk; no waiting). A tile's first fragment puts it
-//     on the tile list. An opaque fragment covering the whole pixel raises the pixel's bDepth and sets its
-//     opaqueCovered bit.
+//     on the tile list. A record of a see-through material (glass, water) has COV_DEPTH_SEE_THROUGH in its depth word.
 #include "Passes/Visibility/CoverageLayer.hlsli"
 #include "Passes/Visibility/CoveragePolygon.hlsli"
-
-// Whole pixel: the exact clipped area equals 1 up to its float rounding (below 2^-16 of the pixel), and every subsample.
-#define COV_FULL_AREA (1.0 - 1.0 / 65536.0)
 
 bool coverageAboveBandA(uint2 pixel, float depth)
 {
@@ -43,15 +39,10 @@ bool coverageAboveBandA(uint2 pixel, float depth)
     return depth >= farthest;  // reversed Z: nearer = larger
 }
 
-// The chunk (index + 1) published at byte 'address' of 'buf'; if none is there yet, one is taken from the pool and
-// published by compare-and-swap (a wave losing the race uses the winner's chunk). A chunk that becomes an extension table
-// ('table') is zeroed before it is published, and the fence orders the zeroes before the publication. Reads are atomic,
-// so they see other waves' publications whatever the caches. 0: the pool ran out.
-uint coverageChunkAt(RWByteAddressBuffer buf, uint address, bool table, RWByteAddressBuffer state, RWByteAddressBuffer records)
+// A chunk from the pool (index + 1; 0: the pool ran out). A chunk that becomes an extension table is zeroed, and the
+// fence orders the zeroes before its publication.
+uint coverageTakeChunk(bool table, RWByteAddressBuffer state, RWStructuredBuffer<uint4> records)
 {
-    uint found = 0;
-    buf.InterlockedOr(address, 0, found);
-    if (found != 0) return found;
     uint fresh = 0;
     state.InterlockedAdd(4 * VS_COV_CHUNKS, 1, fresh);
     if (fresh >= COV_CAP_CHUNKS)
@@ -61,12 +52,41 @@ uint coverageChunkAt(RWByteAddressBuffer buf, uint address, bool table, RWByteAd
     }
     if (table)
     {
-        for (uint w = 0; w < COV_CHUNK_BYTES / 16; ++w) records.Store4(fresh * COV_CHUNK_BYTES + 16 * w, 0);
+        for (uint e = 0; e < COV_CHUNK_RECORDS; ++e) records[fresh * COV_CHUNK_RECORDS + e] = 0;
         DeviceMemoryBarrier();
     }
+    return fresh + 1;
+}
+
+// The chunk (index + 1) published at byte 'address' of the chunk table or the tile headers; if none is there yet, one is
+// taken from the pool and published by compare-and-swap (a wave losing the race uses the winner's chunk). Reads are
+// atomic, so they see other waves' publications whatever the caches. 0: the pool ran out.
+uint coverageChunkAt(RWByteAddressBuffer buf, uint address, bool table, RWByteAddressBuffer state, RWStructuredBuffer<uint4> records)
+{
+    uint found = 0;
+    buf.InterlockedOr(address, 0, found);
+    if (found != 0) return found;
+    const uint fresh = coverageTakeChunk(table, state, records);
+    if (fresh == 0) return 0;
     uint previous = 0;
-    buf.InterlockedCompareExchange(address, 0, fresh + 1, previous);
-    if (previous == 0) return fresh + 1;
+    buf.InterlockedCompareExchange(address, 0, fresh, previous);
+    if (previous == 0) return fresh;
+    state.InterlockedAdd(4 * VS_COV_LOST, 1);
+    return previous;
+}
+
+// The same for word w of the extension table in chunk t (index + 1): element (t - 1) * 64 + w / 4, component w % 4.
+uint coverageExtChunkAt(RWStructuredBuffer<uint4> records, uint t, uint w, bool table, RWByteAddressBuffer state)
+{
+    const uint e = (t - 1) * COV_CHUNK_RECORDS + w / 4, c = w % 4;
+    uint found = 0;
+    InterlockedOr(records[e][c], 0, found);
+    if (found != 0) return found;
+    const uint fresh = coverageTakeChunk(table, state, records);
+    if (fresh == 0) return 0;
+    uint previous = 0;
+    InterlockedCompareExchange(records[e][c], 0, fresh, previous);
+    if (previous == 0) return fresh;
     state.InterlockedAdd(4 * VS_COV_LOST, 1);
     return previous;
 }
@@ -108,12 +128,13 @@ void main(float4 position : SV_Position, nointerpolation uint visId : VISID, noi
     poly.quad = (flags & COV_FLAG_QUAD) != 0;
     float2 mid = 0;
     CoverageSample cs = (CoverageSample)0;
-    RWTexture2D<uint> bDepth = ResourceDescriptorHeap[COV_BDEPTH];
+    const uint tile = (pixel.y / COV_TILE_PX) * COV_TILES_X + pixel.x / COV_TILE_PX;
+    const uint pixelInTile = (pixel.x % COV_TILE_PX) + COV_TILE_PX * (pixel.y % COV_TILE_PX);
     bool live = pixel.x < COV_WIDTH && pixel.y < COV_HEIGHT;
     if (live)
     {
         cs = coveragePolygonGeometry(poly, float2(pixel), mid);
-        live = cs.area > 0 && asuint(cs.depth) >= bDepth[pixel] && coverageAboveBandA(pixel, cs.depth);
+        live = cs.area > 0 && coverageAboveBandA(pixel, cs.depth);
     }
     if (live)
     {
@@ -125,15 +146,8 @@ void main(float4 position : SV_Position, nointerpolation uint visId : VISID, noi
         }
     }
     // From here every lane takes part in the wave operations; 'live' selects the lanes with a fragment.
-    const uint tile = (pixel.y / COV_TILE_PX) * COV_TILES_X + pixel.x / COV_TILE_PX;
-    const uint pixelInTile = (pixel.x % COV_TILE_PX) + COV_TILE_PX * (pixel.y % COV_TILE_PX);
     RWByteAddressBuffer headers = ResourceDescriptorHeap[COV_TILE_HEADERS];
     RWByteAddressBuffer state = ResourceDescriptorHeap[COV_STATE];
-    if (live && (flags & COV_FLAG_OPAQUE) != 0 && cs.area >= COV_FULL_AREA && cs.mask == 0xFFFFFFFFu)
-    {
-        InterlockedMax(bDepth[pixel], asuint(cs.depth));
-        headers.InterlockedOr(4 * (tile * COV_TILE_WORDS + (pixelInTile < 32 ? COV_TILE_OPAQUE_LO : COV_TILE_OPAQUE_HI)), 1u << (pixelInTile & 31));
-    }
 
     // Slots in the tiles: one count atomic and one depth-range update per tile present in the wave.
     uint index = 0;
@@ -174,7 +188,7 @@ void main(float4 position : SV_Position, nointerpolation uint visId : VISID, noi
     // pool lasts.
     const uint ordinal = index / COV_CHUNK_RECORDS;
     RWByteAddressBuffer table = ResourceDescriptorHeap[COV_CHUNK_TABLE];
-    RWByteAddressBuffer records = ResourceDescriptorHeap[COV_RECORDS];
+    RWStructuredBuffer<uint4> records = ResourceDescriptorHeap[COV_RECORDS];
     uint chunk = 0;  // chunk index + 1 (0: the pool ran out)
     pending = live;
     while (WaveActiveAnyTrue(pending))
@@ -194,10 +208,10 @@ void main(float4 position : SV_Position, nointerpolation uint visId : VISID, noi
                     uint t = coverageChunkAt(headers, 4 * (tile * COV_TILE_WORDS + COV_TILE_EXT), true, state, records);
                     while (t != 0 && e >= COV_EXT_SLOTS)
                     {
-                        t = coverageChunkAt(records, (t - 1) * COV_CHUNK_BYTES + 4 * COV_EXT_SLOTS, true, state, records);
+                        t = coverageExtChunkAt(records, t, COV_EXT_SLOTS, true, state);
                         e -= COV_EXT_SLOTS;
                     }
-                    if (t != 0) found = coverageChunkAt(records, (t - 1) * COV_CHUNK_BYTES + 4 * e, false, state, records);
+                    if (t != 0) found = coverageExtChunkAt(records, t, e, false, state);
                 }
             }
             chunk = WaveReadLaneFirst(found);
@@ -207,6 +221,7 @@ void main(float4 position : SV_Position, nointerpolation uint visId : VISID, noi
     if (chunk != 0)
     {
         const float3 normal = coveragePolygonNormal(poly, normals, mid, (flags & COV_FLAG_BACK) != 0);
-        records.Store4((chunk - 1) * COV_CHUNK_BYTES + 16 * (index % COV_CHUNK_RECORDS), uint4(visId, asuint(cs.depth), cs.mask, coveragePackFragment(normal, cs.area, pixelInTile)));
+        const uint depthBits = asuint(cs.depth) | ((flags & COV_FLAG_OPAQUE) != 0 ? 0u : COV_DEPTH_SEE_THROUGH);
+        records[(chunk - 1) * COV_CHUNK_RECORDS + index % COV_CHUNK_RECORDS] = uint4(visId, depthBits, cs.mask, coveragePackFragment(normal, cs.area, pixelInTile));
     }
 }

@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.37, 2026-09-26)
+# UnravelNext 인터페이스 (v1.38, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -217,7 +217,7 @@ void RenderGraph::addPass(std::string_view name, QueueType, SetupFn setup, Execu
 | visId | R32_UINT (7.1) | V | M, R |
 | visibleClusters | `gpu::VisibleCluster[]` | V | M, R |
 | hiz | R32_FLOAT 전 밉. 밉 k 텍셀 (i, j) = 픽셀 [i·2^(k+1), (i+1)·2^(k+1)) 블록의 가장 먼 깊이(reversed-Z 최솟값). 유효 크기 ⌈W/2^(k+1)⌉×⌈H/2^(k+1)⌉, 할당은 2의 거듭제곱(D3D 밉 크기는 내림이라 올림 체인을 담기 위함; 유효 영역 밖 텍셀은 정의되지 않음) | V | S(페이지 표시), R |
-| coverageTiles / coverageChunkTable / coverageChunks / coverageBDepth / coverageTileList | 7.1 (v1.37, 타일 청크 v2) | V | M, S |
+| coverageTiles / coverageChunkTable / coverageChunks / coverageTileList | 7.1 (v1.37 타일 청크 v2, v1.38 레코드 기반 opaqueCovered) | V | M, S |
 | gbuffer | RG32_UINT (7.2) | M | S, R |
 | shadowVisibility | R32_UINT (7.3) | S | M |
 | shadowOverflowTiles / shadowOverflow / shadowOverflowFallbackTiles | 7.3 (v1.20; v1.22부터 평면 뷰도 그 뷰 리스트 기준) | S | M |
@@ -415,24 +415,26 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - vis id R32_UINT = `(visibleCluster << 7 | triangle) + 1`, `VIS_NONE = 0` = 하늘(v1.5). visibleCluster는 그 뷰의 `VisibleCluster` 목록 인덱스(< 2^25 − 1). 소비자는 `packVisId`·`visVisibleCluster`·`visTriangle`·`VIS_NONE`(VisBuffer.hlsli)만 쓰고 비트 연산을 직접 하지 않는다. 0인 이유: UINT 렌더 타깃은 float 클리어 값만 받으므로 0xFFFFFFFF(float로 표현 불가, 실측으로 0이 된다)로 지울 수 없고, 지우기 패스를 따로 두면 대상 전체를 한 번 더 쓴다(4K 33 MB).
 - depth D32_FLOAT, reversed-Z, 무한 원평면.
 - coverage 층 v2(v1.37; 요청 `20260926_V_coverage_layer_v2.md`, 설계 COVERAGE_REDESIGN 4.5 채택; 배치는 `Passes/Visibility/CoverageTiles.hlsli`가 정한다). 8×8 픽셀 타일 단위이고, 타일 번호 = tx + ty·⌈W/8⌉이다.
-  - **레코드 16 B** `CoverageFragment { visId; depth; mask; packed }`:
-    - `depth`는 덮인 영역 무게중심의 device depth(reversed Z)다.
+  - **레코드 16 B** `CoverageFragment { visId; depthBits; mask; packed }`:
+    - `depthBits`는 덮인 영역 무게중심의 device depth(reversed Z, float 비트)다. 부호 비트(`COV_DEPTH_SEE_THROUGH`, depth는 음수가 아니다)는 시야에 투과인 재질(유리·물)의 표시다(v1.38). 읽기는 `coverageFragmentDepth`, `coverageFragmentOpaque`로 한다.
     - `mask`는 `coverageSample(i)` 32 부표본이다.
     - `packed` = 팔면체 법선 8+8 bit | 면적 × 1023 반올림 << 16 | 타일 안 픽셀 x + 8y << 26.
     - 면적은 (가까운 평면으로 잘린) 다각형 ∩ 픽셀의 정확 면적이다. 알파 테스트 재질은 통과 부표본 비율을 곱한다.
     - 법선은 무게중심에서 원근 보정으로 보간한 월드 법선이다. 뒤에서 본 양면 재질은 뷰어 쪽으로 뒤집는다.
     - 대역 C 브릭 fragment는 visId의 삼각형 필드가 `0x7F`다.
-  - **청크**: 레코드는 64개씩 청크(1 KB)로 `coverageChunks`(raw 풀)에 있다. 타일의 i번째 fragment는 청크 서수 i/64의 i%64번 레코드다.
+  - **청크**: 레코드는 64개씩 청크(1 KB)로 `coverageChunks`(`StructuredBuffer<uint4>` 풀, 원소 하나가 레코드 하나, v1.38)에 있다. 타일의 i번째 fragment는 청크 서수 i/64의 i%64번 레코드다.
     - 서수 < N이면 청크 번호 + 1은 `coverageChunkTable`의 타일 칸에 있다(N = `visibility.coverage_table_slots`, 기본 32, 목록 머리 워드 6).
-    - 그 뒤 서수는 타일 머리 워드 5에서 시작하는 확장 표 사슬에 있다. 확장 표는 풀의 청크 하나를 256 워드로 쓴다: 0..254 = 다음 255 서수의 청크, 255 = 다음 확장 표. 타일당 fragment 수에 한도가 없다.
+    - 그 뒤 서수는 타일 머리 워드 5에서 시작하는 확장 표 사슬에 있다. 확장 표는 풀의 청크 하나를 256 워드로 쓴다(워드 w = 원소 w/4의 성분 w%4): 0..254 = 다음 255 서수의 청크, 255 = 다음 확장 표. 타일당 fragment 수에 한도가 없다.
     - 읽기 도우미는 `coverageChunkOf`, `coverageLoadRecord`다. 청크 번호 0(수보다 아래)은 풀이 모자랐다는 뜻이다(`Stats::overflow` 0x100).
   - **순서와 중복**: 타일 안 레코드는 추가 순서다(V는 정렬하지 않는다). 읽는 쪽(M 합성)이 (픽셀, 깊이, visId)로 정렬한다. 하드웨어가 잘라 조각으로 래스터한 프리미티브는 같은 visId·같은 값으로 두 번 나올 수 있으니 인접 중복은 하나로 친다.
   - **타일 머리 8 워드**(`coverageTiles`):
     - 0 = fragment 수.
     - 1 = zNear(가장 가까운 depth 비트, 원자 max). 2 = zFar(가장 먼 것, 원자 min; 없으면 0xFFFFFFFF).
-    - 3·4 = opaqueCovered 64 bit: 픽셀 전체를 덮은 불투명 fragment가 있는 픽셀이다. 그 뒤 대역 A 표면의 가중치는 0이다.
+    - 3·4 = opaqueCovered 64 bit(v1.38, 설계 COVERAGE_REDESIGN 4.6 합집합 규칙): 그 픽셀 불투명 레코드 마스크의 합집합이 가득이고, 대역 A 표면이 그 레코드들 중 가장 먼 깊이보다 뒤인 픽셀이다(하늘 포함). 그 대역 A 표면은 합성의 마스크 합집합 가림에서 가중치가 0이다.
+      - 불투명 = 유리·물이 아닌 재질이다. 알파 테스트 재질은 테스트 뒤 마스크로 기여하고, 투과 잎도 시야 가림에는 불투명이다.
+      - 래스터 뒤 타일 패스(타일당 그룹 1개)가 레코드에서 만든다(픽셀별 groupshared OR·min). fragment마다 원자로 하는 판은 설계 개정의 DesignBench 실측에서 +0.11~+0.17 ns/fragment라 기각했다.
+      - 래스터는 그 뒤 fragment를 버리지 않는다. 뒤 fragment 컷은 합성이 자기 정렬에서 한다.
     - 5 = 첫 확장 표. 6·7 = 예비(0).
-  - **`coverageBDepth`** R32_UINT: 픽셀 전체를 덮은 불투명 fragment 중 가장 가까운 것의 depth 비트다(원자 max). 그보다 뒤인 fragment는 래스터가 버린다. 다만 그 fragment가 먼저 래스터된 경우에만 버려지므로, 순서에 따라 남아 있을 수 있다(가중치 0).
   - **`coverageTileList`**(raw) 머리:
     - 0..2 = fragment가 있는 타일 위 DispatchIndirect 인자(타일당 그룹 1개, x ≤ 65535 다음 y). 3 = 타일 수. 4 = fragment 수. 5 = 청크 수. 6 = N. 7 = 타일 열 수.
     - 8..10 = 무거운 타일 위 인자(타일당 그룹 1개). 11 = 무거운 타일 수. 12 = 무거운 문턱(`visibility.coverage_heavy_tile_fragments`, 기본 1,024: fragment 수가 이보다 많은 타일). 13 = 무거운 타일 목록의 시작 워드.
@@ -440,7 +442,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
     - M은 두 목록 위에서 ExecuteIndirect로 돈다(바이트 오프셋 0과 32). 무거운 타일은 블록 정렬 + k-way 병합으로 처리한다(설계 4.5 (b)).
   - **풀 크기**: 직전 완료 프레임의 필요량 × 1.5를 16 MB 단위로 쓴다. 늘릴 때는 바로 늘리고, 필요량이 반 아래일 때만 줄인다.
     - 하한은 `visibility.coverage_pool_min_fragments_per_pixel` × 픽셀이다(1.0: 4K 8.3 M 레코드, 133 MB).
-    - 상한은 raw 뷰의 2^27 워드(512 MB = 33.5 M fragment)다.
+    - 상한은 구조 버퍼 뷰의 2^27 원소(2 GB = 134 M fragment)다.
     - 필요량이 풀을 넘으면 그 프레임의 fragment가 빠지고 `Stats::overflow` 0x100(게이트 실패)이 선다. fragment를 버리는 경로는 이것뿐이다.
   - **켜기**: `visibility.coverage_layer`(기본 false). M 합성이 이 층을 읽게 되면 켠다. 평면 반사 뷰는 아직 vis buffer로 그린다.
   - v1.25 형식(`coverageHeads/coverageFragments/coveragePixels`, overflow 0x200)은 폐기했다. 키 `max_coverage_fragments`는 읽지 않는다. v1.37 이전에 빌드한 바이너리가 시작되도록 설정 파일에만 남겨 두고, 다음 통합 재빌드 뒤 지운다.
@@ -502,7 +504,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 ## 10. C 트랙 API
 
 ### 10.1 테스트 장면 생성기 (`Tools/SceneGen/include/unx/scenegen/SceneGen.h`)
-`scene::Scene generate(const Request&)`, `allScenes()`, `sceneName(id)`. 장면: CityBlock, ForestThin(잎 6 cm·풀잎 4 mm), ForestCard(잎 35 cm·풀 카드 30 cm), Waterside(잔잔한 물·파도), Interior(거울·광택 바닥·면광원), CityNight(광원 512·그림자 128), RidgeSunset(v1.17: 능선·탑 그림자의 공기 산란, 낮은 태양 17°, 20 km, 바람 없음; 번호 6, 기존 번호 불변). 결정적(같은 요청 = 같은 `contentHash`), `validate` 통과, 카메라 하나 이상과 정지·이동 카메라 경로 포함. `scale`은 게이트 부하 배율(1 = 그 장면의 게이트 정의, 예: P1 장면 ≥ 1천만 삼각형).
+`scene::Scene generate(const Request&)`, `allScenes()`, `sceneName(id)`. 장면: CityBlock, ForestThin(잎 6 cm·풀잎 4 mm), ForestCard(잎 35 cm·풀 카드 30 cm), Waterside(잔잔한 물·파도), Interior(거울·광택 바닥·면광원), CityNight(광원 512·그림자 128), RidgeSunset(v1.17: 능선·탑 그림자의 공기 산란, 낮은 태양 17°, 20 km, 바람 없음; 번호 6, 기존 번호 불변). ForestCombat(v1.38, C bb73ea1: RPP-1 숲·전투 게이트 장면, forest_thin 바탕 + 전투 지점 둘레의 닫힌 수관 숲, 카메라 eye·up·edge; 번호 7; 메타 `Results/C/Scenes/forest_combat_meta.md`). V 게이트는 `--camera NAME`으로 카메라를 고른다. 결정적(같은 요청 = 같은 `contentHash`), `validate` 통과, 카메라 하나 이상과 정지·이동 카메라 경로 포함. `scale`은 게이트 부하 배율(1 = 그 장면의 게이트 정의, 예: P1 장면 ≥ 1천만 삼각형).
 
 ### 10.2 기준 경로추적기 (C, `Reference/`)
 - 입력: `.unxscene`(또는 `generate` 결과), 카메라 이름 또는 경로 시각, 해상도(4K·1440p), 표본 수(`reference.samples_per_pixel`, ≥ 4096).
@@ -632,6 +634,12 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.38 (2026-09-26):
+  - **opaqueCovered를 합집합 규칙으로(7.1, 설계 개정 판정: COVERAGE_REDESIGN 4.6)**: v1.37의 "fragment 하나가 픽셀 전체" 규칙은 얇은 기하에서 거의 서지 않았다(관찰 2). 이제는 래스터 뒤 타일 패스가 레코드에서 픽셀별 불투명 마스크 합집합과 가장 먼 불투명 깊이를 만들어 비트를 세운다. `coverageBDepth`는 없앴다(래스터의 뒤 fragment 컷도 없다). 레코드 depth 워드의 부호 비트가 투과 재질 표시다.
+    - 픽셀별 원자 판(기여자 D min → 펜스 → U or, 64 bit CAS 판은 선택 기능이라 제외)을 먼저 구현하고 정확성까지 확인했다. 그러나 설계 개정 DesignBench에서 fragment당 +0.11~+0.17 ns(펜스 없이)로 재어져 버렸다.
+  - **레코드 풀을 `StructuredBuffer<uint4>`로 바꿨다**: raw 뷰의 원소 상한 2^27 워드(33.5 M fragment)는 forest_thin(브릭 전 25.2 M)에 너무 가까웠다. 16 B 원소 뷰는 134 M까지 된다. 확장 표 원자는 원소 성분 원자로 한다.
+  - [실측] `coverage_layer_is_exact`(두 설정 × 3프레임, 바뀐 커널의 첫 하드웨어 실행은 잠금 안): opaqueCovered는 모든 픽셀에서 "불투명 레코드 마스크 합집합이 가득 & 대역 A 깊이 < 그중 가장 먼 깊이"와 같았다. 불투명 합집합이 가득 찬 픽셀은 프레임당 38~60개였다. v1.37 규칙에서는 5~12개였으니 5~7배다(1.3 px 기둥 6개, 사각형 하나 = 삼각형 2개). 유리 카드 더미의 레코드 51,641~56,000개는 모두 투과 표시가 있었고, 다른 레코드에는 없었다. 누락 0, 남은 타일 0. visibility 8/8, unit 34/34, D3D12 디버그 층 오류 0.
+  - V 게이트: `--camera NAME|INDEX`(forest_combat의 eye·up·edge). coverage 출력에 타일 패스 시간(`v.coverage.tiles`)을 따로 내고, 한 프레임 되읽기에서 "채워진 불투명 합집합 뒤의 fragment 비율"(합성에서 가중치가 0인 몫)과 합집합이 가득 찬 픽셀 수를 낸다.
 - v1.37 (2026-09-26):
   - **coverage 층 v2(7.1, V 요청 `20260926_V_coverage_layer_v2.md`, 설계 채택 d90f9db)**: 8×8 타일 청크, 16 B 레코드(보간 법선 포함), 타일 머리(수·깊이 범위·opaqueCovered·확장 표), bDepth, 타일 목록과 무거운 타일 목록. 정렬 없음(M이 groupshared에서 정렬). `ViewResources`의 coverage 필드 5개가 v1.25의 3개를 대신한다.
     - 구현: 픽셀 커널이 웨이브의 fragment를 타일별로 묶어 타일마다 원자 1회로 번호를 받는다. 청크는 풀에서 받아 CAS로 표에 넣고, 진 쪽은 이긴 쪽 청크를 쓴다(기다림 없음). 확장 표는 0으로 채운 뒤 메모리 펜스를 두고 게시하며, 표 읽기는 원자 연산이다. 지난 프레임의 타일만 비운다(화면 전체 지우기 없음). 무거운 타일 분류는 목록 위 패스 하나다.

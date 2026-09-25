@@ -55,6 +55,6 @@ constexpr uint32_t kCovTilePx = 8, kCovTileWords = 8, kCovChunkRecords = 64, kCo
 constexpr uint32_t kCovTileCount = 0, kCovTileZNear = 1, kCovTileZFar = 2, kCovTileOpaqueLo = 3, kCovTileOpaqueHi = 4, kCovTileExt = 5;
 constexpr uint32_t kCovListArgs = 0, kCovListCount = 3, kCovListFragments = 4, kCovListChunks = 5, kCovListTableSlots = 6, kCovListTilesX = 7,
                    kCovListHeavyArgs = 8, kCovListHeavyCount = 11, kCovListHeavyMin = 12, kCovListHeavyStart = 13, kCovListTiles = 16;
-// Record pool: raw views count 32-bit elements, at most 2^27 (512 MB = 524,288 chunks = 33.5 M fragments).
-constexpr uint32_t kCovPoolMaxChunks = (1u << 27) / (kCovChunkBytes / 4);
+// Record pool: a structured view (16 B elements) holds at most 2^27 elements (2 GB = 2,097,152 chunks = 134 M fragments).
+constexpr uint32_t kCovPoolMaxChunks = (1u << 27) / kCovChunkRecords;
 } // namespace unx::visibility::detail

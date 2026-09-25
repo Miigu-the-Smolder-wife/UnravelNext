@@ -79,11 +79,11 @@ struct Hiz
     bool history = false;                      // holds a complete HiZ of the previous frame
 };
 
-// Persistent coverage layer resources of the main view (CoverageTiles.hlsli): tile headers, chunk tables, bDepth and the
-// tile list; the record pool is a graph buffer sized per frame.
+// Persistent coverage layer resources of the main view (CoverageTiles.hlsli): tile headers, chunk tables and the tile
+// list; the record pool is a graph buffer sized per frame.
 struct Coverage
 {
-    ComPtr<ID3D12Resource> headers, table, bDepth, list;
+    ComPtr<ID3D12Resource> headers, table, list;
     uint32_t width = 0, height = 0, tableSlots = 0, tilesX = 0, tiles = 0;
     uint32_t poolChunks = 0;
     bool fresh = true;  // every tile still to be emptied (CoverageBuild MODE 4)
@@ -734,24 +734,11 @@ ComPtr<ID3D12Resource> createCoverageBuffer(Device& device, uint64_t bytes, cons
 
 void ensureCoverage(Device& device, Coverage& cv, uint32_t width, uint32_t height, uint32_t tableSlots)
 {
-    if (cv.bDepth && cv.width == width && cv.height == height && cv.tableSlots == tableSlots) return;
-    for (ComPtr<ID3D12Resource>* r : { std::addressof(cv.headers), std::addressof(cv.table), std::addressof(cv.bDepth), std::addressof(cv.list) })
+    if (cv.headers && cv.width == width && cv.height == height && cv.tableSlots == tableSlots) return;
+    for (ComPtr<ID3D12Resource>* r : { std::addressof(cv.headers), std::addressof(cv.table), std::addressof(cv.list) })
         if (*r) device.deferRelease(*r);
     cv.tilesX = (width + kCovTilePx - 1) / kCovTilePx;
     cv.tiles = cv.tilesX * ((height + kCovTilePx - 1) / kCovTilePx);
-    D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
-    D3D12_RESOURCE_DESC1 rd{};
-    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    rd.Width = width;
-    rd.Height = height;
-    rd.DepthOrArraySize = 1;
-    rd.MipLevels = 1;
-    rd.Format = DXGI_FORMAT_R32_UINT;
-    rd.SampleDesc.Count = 1;
-    rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    check(device.d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&cv.bDepth)),
-          "V coverage bDepth");
-    cv.bDepth->SetName(L"V coverage bDepth (main view)");
     cv.headers = createCoverageBuffer(device, (uint64_t)cv.tiles * kCovTileWords * 4, L"V coverage tile headers (main view)");
     cv.table = createCoverageBuffer(device, (uint64_t)cv.tiles * tableSlots * 4, L"V coverage chunk tables (main view)");
     cv.list = createCoverageBuffer(device, (uint64_t)(kCovListTiles + 2ull * cv.tiles) * 4, L"V coverage tile list (main view)");
@@ -787,26 +774,26 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     const uint32_t slotsHeavy = r.cfg.coverageTableSlots | r.cfg.coverageHeavyMin << 12;
     const BufferRef headers = g.importBuffer(cv.headers.Get(), { "v.coverage.tiles", (uint64_t)tiles * kCovTileWords * 4, 0 });
     const BufferRef table = g.importBuffer(cv.table.Get(), { "v.coverage.chunkTable", (uint64_t)tiles * cv.tableSlots * 4, 0 });
-    const TextureRef bDepth = g.importTexture(cv.bDepth.Get(), { "v.coverage.bDepth", width, height, 1, 1, DXGI_FORMAT_R32_UINT }, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
     const BufferRef list = g.importBuffer(cv.list.Get(), { "v.coverage.tileList", (uint64_t)(kCovListTiles + 2ull * tiles) * 4, 0 });
-    const BufferRef records = g.createBuffer({ "v.coverage.chunks", (uint64_t)poolChunks * kCovChunkBytes, 0 });
+    const BufferRef records = g.createBuffer({ "v.coverage.chunks", (uint64_t)poolChunks * kCovChunkBytes, 16 });
     view.coverageTiles = headers;
     view.coverageChunkTable = table;
     view.coverageChunks = records;
-    view.coverageBDepth = bDepth;
     view.coverageTileList = list;
     const uint32_t hizSrv = s.mainHiz.srv, hizSize = s.mainHiz.width | s.mainHiz.height << 16;
     const float frontSign = view.view.mirrored ? -1.0f : 1.0f;
     const Run run = r;
     // Resources a pass declares (the cull state always); root constants of the others are kNone.
-    enum : uint32_t { kUseArgs = 1, kUseList = 2, kUseTiles = 4, kUseRecords = 8 };  // kUseTiles: headers, chunk tables, bDepth
+    // kUseTiles: headers, chunk tables; kUseDepthA: the band A depth (MODE 3, in the visible-list slot).
+    enum : uint32_t { kUseArgs = 1, kUseList = 2, kUseTiles = 4, kUseRecords = 8, kUseDepthA = 16 };
+    const TextureRef depthA = view.depth;
     auto constants = [=](const PassContext& c, uint32_t k[20], uint32_t uses, bool raster) {
         std::memset(k, 0, 20 * 4);
         k[0] = c.uav(run.state);
         k[1] = (uses & kUseArgs) ? c.uav(run.args) : kNone;
         k[2] = (uses & kUseRecords) ? c.uav(records) : kNone;
         k[3] = (uses & kUseTiles) ? c.uav(table) : kNone;
-        k[4] = (uses & kUseTiles) ? c.uav(bDepth) : kNone;
+        k[4] = kNone;
         k[5] = (uses & kUseList) ? c.uav(list) : kNone;
         k[6] = poolChunks;
         k[7] = slotsHeavy;
@@ -814,7 +801,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         k[9] = width;
         k[10] = height;
         k[11] = hizSize;
-        k[12] = raster ? c.srv(run.visible) : kNone;
+        k[12] = raster ? c.srv(run.visible) : ((uses & kUseDepthA) ? c.srv(depthA) : kNone);
         k[13] = raster ? c.srv(run.lists) : kNone;
         k[14] = run.cfg.capVisible;
         k[15] = run.viewsSrv;
@@ -839,8 +826,9 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       {
                           b.use(headers, Use::UavCompute);
                           b.use(table, Use::UavCompute);
-                          b.use(bDepth, Use::UavCompute);
                       }
+                      if (uses & kUseRecords) b.use(records, Use::UavCompute);
+                      if (uses & kUseDepthA) b.use(depthA, Use::SrvCompute);
                   },
                   [=](PassContext& c) {
                       uint32_t k[20];
@@ -877,7 +865,6 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                   b.use(run.state, Use::UavGraphics);
                   b.use(headers, Use::UavGraphics);
                   b.use(table, Use::UavGraphics);
-                  b.use(bDepth, Use::UavGraphics);
                   b.use(list, Use::UavGraphics);
                   b.use(records, Use::UavGraphics);
                   if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
@@ -897,7 +884,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                   c.cmd->ExecuteIndirect(meshSig, 1, c.resource(run.args), kArgCovMesh * 4, nullptr, 0);
               });
     build("args", 2, 1, 1, 0, kUseArgs | kUseList);
-    build("heavy", 3, 0, 0, kArgCovTiles, kUseList | kUseTiles);
+    build("tiles", 3, 0, 0, kArgCovTiles, kUseList | kUseTiles | kUseRecords | kUseDepthA);
     build("heavyArgs", 5, 1, 1, 0, kUseList);
 }
 

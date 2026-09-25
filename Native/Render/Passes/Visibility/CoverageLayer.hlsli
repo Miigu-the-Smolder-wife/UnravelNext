@@ -2,22 +2,23 @@
 // helpers of CoverageRaster.ms/ps and CoverageBuild. Owner: V.
 //
 // Per frame (main view):
-//  1. last frame's tiles (the tile list still holds them) get their header, chunk table and bDepth pixels cleared, so
+//  1. last frame's tiles (the tile list still holds them) get their header and chunk table cleared, so
 //     the whole-screen buffers are never cleared;
 //  2. band B clusters are rasterised conservatively: each pixel fragment carries the exact area of its triangle inside
 //     the pixel, the 32-subsample mask, the depth at the covered region's centroid and the interpolated normal there;
-//     fragments behind the pixel's bDepth or behind every band A surface around the pixel are dropped; the rest are
+//     fragments behind every band A surface around the pixel are dropped; the rest are
 //     appended to their 8 x 8 tile: one count atomic per tile and wave, a chunk per 64 records taken from the pool and
 //     published in the tile's chunk table (or, past its slots, the tile's extension tables) by compare-and-swap (no
-//     waiting); a tile's first fragment puts it on the tile list; full-pixel opaque fragments set the tile's
-//     opaqueCovered bit and the pixel's bDepth;
-//  3. the tile list's header for M: dispatch arguments over the tiles, and the heavy tiles (more fragments than M's
-//     block sort holds) in a list of their own.
+//     waiting); a tile's first fragment puts it on the tile list;
+//  3. the tile list's header for M: dispatch arguments over the tiles; per tile, from its records, the opaqueCovered
+//     bits (the union of the opaque masks is full in front of band A) and the heavy tiles (more fragments than M's block
+//     sort holds) in a list of their own.
 // No sort: M's composite sorts a tile's records in groupshared.
-//   P[0] cull state UAV (raw; VS_COV_* words), cull args UAV (raw), records UAV (raw), chunk table UAV (raw)
-//   P[1] bDepth UAV (RWTexture2D<uint>), tile list UAV (raw), pool chunks, chunk table slots | heavy threshold << 12
+//   P[0] cull state UAV (raw; VS_COV_* words), cull args UAV (raw), records UAV (StructuredBuffer<uint4>), chunk table
+//        UAV (raw)
+//   P[1] spare, tile list UAV (raw), pool chunks, chunk table slots | heavy threshold << 12
 //   P[2] HiZ SRV (Texture2D<float> mip 0, UNX_NONE = none), view width, view height, HiZ mip 0 width | height << 16
-//   P[3] visible SRV (uint2), lists SRV (raw), list capacity, views SRV
+//   P[3] visible SRV (uint2; CoverageBuild MODE 3: band A depth SRV), lists SRV (raw), list capacity, views SRV
 //   P[4] front-face sign (+1: front = negative signed area in y-down pixels, i.e. counter-clockwise on screen;
 //        -1 mirrored), tile headers UAV (raw), tiles per row, tiles
 #ifndef UNX_COVERAGE_LAYER_HLSLI
@@ -29,7 +30,6 @@
 #define COV_ARGS P[0].y
 #define COV_RECORDS P[0].z
 #define COV_CHUNK_TABLE P[0].w
-#define COV_BDEPTH P[1].x
 #define COV_TILE_LIST P[1].y
 #define COV_CAP_CHUNKS P[1].z
 #define COV_TABLE_SLOTS (P[1].w & 0xFFFu)
@@ -39,6 +39,7 @@
 #define COV_HEIGHT P[2].z
 #define COV_HIZ_SIZE uint2(P[2].w & 0xFFFFu, P[2].w >> 16)
 #define COV_VISIBLE P[3].x
+#define COV_BAND_A_DEPTH P[3].x  // CoverageBuild MODE 3
 #define COV_LISTS P[3].y
 #define COV_LIST_CAPACITY P[3].z
 #define COV_VIEWS P[3].w
@@ -50,7 +51,8 @@
 // Primitive flags (CoverageRaster.ms -> ps).
 #define COV_FLAG_ALPHA 1u   // alpha-tested material
 #define COV_FLAG_QUAD 2u    // near-clipped: the polygon is the quad (a, b, c, d)
-#define COV_FLAG_OPAQUE 4u  // not alpha-tested and not transmissive: a full-pixel fragment hides everything behind it
+#define COV_FLAG_OPAQUE 4u  // opaque for the view (not glass or water; alpha-tested: its mask after the test);
+                            // otherwise the record's depth word carries COV_DEPTH_SEE_THROUGH
 #define COV_FLAG_BACK 8u    // seen from behind (two-sided): the normals are turned towards the viewer
 
 // Vertex normals between the mesh and pixel kernels: octahedral 16 + 16 bits (the record keeps 8 + 8).
