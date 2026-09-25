@@ -1,7 +1,8 @@
 // unx-kernel: cs_6_6 main
 // Planar reflection test only (PlanarMirror.cpp, run B): the view's mirror mask against the classification. One group
 // per 8 x 8 tile of the view. A view texel p is main pixel origin + p; it must be 1 exactly when that pixel's tile was
-// written by R (validity texel) and its mode is REFL_PLANAR of view 0. A tile mask texel must be the OR of its texels.
+// written by R (validity texel) and its mode is REFL_PLANAR of view 0, 2 where another pixel has such a pixel among its
+// 3 x 3 neighbours (apron, v1.28), else 0. A tile mask texel must be the OR of its texels.
 // P[0] = { mask SRV, tile mask SRV, modes SRV, reflection SRV }, P[1] = { origin x, origin y, view width, view height },
 // P[2].x = result UAV (raw: pixel errors, tile errors, mirror texels, view texels)
 #include "Passes/Reflection/ReflectionInternal.hlsli"
@@ -29,9 +30,17 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
         const uint expected = written && reflMode(m) == REFL_PLANAR && ((m >> 2) & 7u) == 0 ? 1u : 0u;
         const uint got = mask.Load(int3(p, 0));
         if (got != 0) InterlockedOr(g_any, 1u);
+        // Apron (v1.28): 2 exactly where a non-mirror pixel has a mirror pixel among its 3 x 3 neighbours in the view.
+        bool nearMirror = false;
+        [unroll] for (int k = 0; k < 9; ++k)
+        {
+            const int2 q = int2(p) + int2(k % 3 - 1, k / 3 - 1);
+            if (k != 4 && all(q >= 0) && all(q < int2(P[1].zw)) && mask.Load(int3(q, 0)) == 1) nearMirror = true;
+        }
+        const uint expectedValue = expected ? 1u : (nearMirror ? 2u : 0u);
         uint previous;
-        if ((got != 0 ? 1u : 0u) != expected) result.InterlockedAdd(0, 1u, previous);
-        if (got != 0) result.InterlockedAdd(8, 1u, previous);
+        if (got != expectedValue) result.InterlockedAdd(0, 1u, previous);
+        if (got == 1) result.InterlockedAdd(8, 1u, previous);
         result.InterlockedAdd(12, 1u, previous);
     }
     GroupMemoryBarrierWithGroupSync();

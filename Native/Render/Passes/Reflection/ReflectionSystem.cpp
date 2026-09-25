@@ -645,7 +645,24 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch(tilesX, tilesY, 1);
               });
-    // The reflection cameras (their masks come from the classification above).
+    // Mask aprons (v1.28): 3 x 3 dilation of each view's mirror pixels as value 2, tile masks from the dilated masks.
+    for (uint32_t v = 0; v < planar.views; ++v)
+    {
+        const TextureRef mask = planarViews[v].mask, tileMask = planarViews[v].tileMask;
+        const uint32_t w = planarViews[v].desc.width, h = planarViews[v].desc.height;
+        g.addPass("r.refl.planar.apron", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(mask, Use::UavCompute);
+                      b.use(tileMask, Use::UavCompute);
+                  },
+                  [&shaders, mask, tileMask, w, h](PassContext& c) {
+                      const uint32_t k[4] = { c.uav(mask), c.uav(tileMask), w, h };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionPlanarApron"));
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  });
+    }
+    // The reflection cameras (their masks come from the classification and the aprons above).
     for (uint32_t v = 0; v < planar.views; ++v)
     {
         ID3D12QueryHeap* heap = m_timestamps.Get();
