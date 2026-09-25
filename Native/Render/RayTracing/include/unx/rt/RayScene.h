@@ -199,6 +199,8 @@ private:
     float m_proxyErrorPx = 1;  // raytracing.proxy_error_px
     float m_proxySkinWeight = 1;  // raytracing.proxy_skin_weight (skinAwareCuts)
     bool m_skinAwareCuts = true;  // raytracing.skinned_proxy_cuts
+    float m_proxyPosedFactor = 1.5f;  // raytracing.proxy_posed_factor
+    bool m_proxyErrorBound = false;   // raytracing.proxy_error_model = "bound"
     uint32_t m_experiment = 0; // raytracing.experiment_disable (cost attribution only): 1 = build the deformed BLASes every frame
     // Per frame: each deformed instance's cut, the coarsest whose error in the instance's current pose (ProxyPoseBound.h:
     // bind-pose error plus the joints' relative motion times the cut's weight mismatch; raytracing.experiment_disable 16:

@@ -5,8 +5,12 @@ proxy_error_px = 1.0                   # a character's RT proxy cut: the coarses
                                        # footprints at its distance (every R ray's footprint there is at least one pixel's)
 skinned_proxy_cuts = "skin_aware"     # skinned RT proxies: R's skin-aware cuts ("skin_aware"), or V's cluster LOD cuts
                                        # ("cluster_lod": bind-pose error only; tests of the proxy mechanism)
-proxy_skin_weight = 1.0                # skinned proxies: cost of collapsing across skin weights (skinAwareCuts; the
-                                       # skin-weight centroid attribute against the positional error)
+proxy_skin_weight = 4.0                # skinned proxies: cost of collapsing across skin weights (skinAwareCuts; the
+                                       # skin-weight centroid attribute against the positional error). At 4 the posed error
+                                       # tracks the bind error (measured 0.93-1.32x, host_dynamic tube, ProxyLevels)
+proxy_error_model = "measured"         # a cut's error for the choice: "measured" = bind-pose Hausdorff x proxy_posed_factor,
+                                       # "bound" = the certified posed bound (50-170x the measured error; tests)
+proxy_posed_factor = 1.5               # posed / bind-pose error margin of skin-aware cuts (measured up to 1.32)
 near_characters_with_proxy = 64
 dynamic_tlas_instances_max = 100000
 exact_set_max = 8                      # reflection exact set: skinned instances traced with their original mesh (ARCHITECTURE 2.6)

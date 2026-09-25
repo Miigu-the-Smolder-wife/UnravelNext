@@ -204,6 +204,12 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     const uint32_t proxyBudget = (uint32_t)quality.integer("raytracing.character_proxy_triangles");
     m_proxyErrorPx = (float)quality.number("raytracing.proxy_error_px");
     m_proxySkinWeight = (float)quality.number("raytracing.proxy_skin_weight");
+    m_proxyPosedFactor = (float)quality.number("raytracing.proxy_posed_factor");
+    {
+        const std::string model = quality.string("raytracing.proxy_error_model");
+        if (model != "measured" && model != "bound") fail("raytracing.proxy_error_model must be \"measured\" or \"bound\" (got \"%s\")", model.c_str());
+        m_proxyErrorBound = model == "bound";
+    }
     {
         const std::string cuts = quality.string("raytracing.skinned_proxy_cuts");
         if (cuts != "skin_aware" && cuts != "cluster_lod") fail("raytracing.skinned_proxy_cuts must be \"skin_aware\" or \"cluster_lod\" (got \"%s\")", cuts.c_str());
@@ -1067,10 +1073,17 @@ void RayScene::selectProxyLevels(FramePassContext& fc)
             // A skinned pose can leave the bind-pose sphere: the distance is from its doubled radius (conservative).
             const float distance = std::max(std::sqrt(toEye.x * toEye.x + toEye.y * toEye.y + toEye.z * toEye.z) - 2 * gm.boundsSphere.w * scale, 0.0f);
             const float bound = m_proxyErrorPx * pixelAngle * distance;
-            // Cut errors in this pose (object space); 16 (attribution): V's bind-pose error alone.
-            const bool posed = (m_experiment & 16) == 0;
-            if (posed) proxyPoseTerms(m_proxySkeletons[d.mesh], m_scene.palette(d.sceneInstance), m_poseTerms);
-            auto cutError = [&](uint32_t l) { return !levels[l].reduced ? 0.0f : posed ? proxyPoseError(levels[l].pose, m_proxySkeletons[d.mesh], m_poseTerms) : levels[l].error; };
+            // Error model (raytracing.proxy_error_model): "measured" = the cut's measured bind-pose Hausdorff x
+            // raytracing.proxy_posed_factor (skin-aware cuts: posed / bind measured 0.93-1.32 at attribute weight 4, see
+            // ProxyPoseBound.h); "bound" = the certified posed bound (sound, but 50-170x the measured error: it counts
+            // tangential sliding of corresponding points, which Hausdorff does not). Experiment bit 16: V's claim alone.
+            const bool certified = m_proxyErrorBound && (m_experiment & 16) == 0;
+            if (certified) proxyPoseTerms(m_proxySkeletons[d.mesh], m_scene.palette(d.sceneInstance), m_poseTerms);
+            auto cutError = [&](uint32_t l) {
+                if (!levels[l].reduced) return 0.0f;
+                if (m_experiment & 16) return levels[l].error;
+                return certified ? proxyPoseError(levels[l].pose, m_proxySkeletons[d.mesh], m_poseTerms) : levels[l].error * m_proxyPosedFactor;
+            };
             // The reflection exact set's criterion (selectExactSet): the finest cut's error over this bound.
             const float finest = cutError(0) * scale;
             d.exactNeed = finest > 0 ? (bound > 0 ? finest / bound : FLT_MAX) : 0.0f;
