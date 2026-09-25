@@ -18,7 +18,7 @@
 //       16-sub-sample identity census; without --engine the 1-sample (pixel centre) + 3x3 baseline.
 //   unx_reference compare --scene ... (--camera|--path/--time) --res <WxH> --test <engine.pfm> [--out report.json]
 //       Metrics against the cached reference and the scene thresholds of Config/quality/reference.toml.
-//   unx_reference scenemeta --scene ... --res <WxH> [--out meta.md]
+//   unx_reference scenemeta --scene ... --res <WxH> [--wcap px (0)] [--out meta.md]
 //       Per camera: surface pixels, triangles per visibility band (frustum, before occlusion), light counts.
 //   unx_reference selfcheck
 //       Measured error of the atmosphere optical-depth table against direct quadrature.
@@ -67,6 +67,7 @@ struct Args
     uint32_t orderMin = 0, orderMax = 0xFFFFFFFFu;  // --volume-order MIN:MAX (diagnostics)
     uint32_t surfMin = 0, surfMax = 0xFFFFFFFFu;    // --surface-order MIN:MAX (diagnostics)
     uint32_t threads = 0;                            // --threads N (0 = 3/4 of the logical processors)
+    float wcap = 0.0f;                               // scenemeta --wcap: face-on sheets below this width are band B (design default 0)
     std::vector<std::string> alsoHold;               // --also-hold <file> (repeatable)
 };
 
@@ -103,6 +104,7 @@ Args parse(int argc, char** argv)
         else if (k == "--test") a.test = next();
         else if (k == "--write-scene") a.writeScene = next();
         else if (k == "--threads") a.threads = (uint32_t)std::stoul(next());
+        else if (k == "--wcap") a.wcap = std::stof(next());
         else if (k == "--also-hold") a.alsoHold.push_back(next());
         else if (k == "--volume-order" || k == "--surface-order")
         {
@@ -279,7 +281,7 @@ std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const s
 // altitude x instance scale x focal / distance of the instance centre; flat features (Foliage class or two-sided
 // materials) are band B up to 8 px, solid ones up to 1.5 px; below 0.25 px band C), counted over instances whose
 // bounding sphere meets the view frustum (before occlusion), and light counts.
-std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t W, uint32_t H, const std::vector<std::filesystem::path>& hold)
+std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t W, uint32_t H, const std::vector<std::filesystem::path>& hold, float wcap)
 {
     // Per mesh: object-space bounding sphere and a histogram of triangle minimum altitudes (log bins) split flat / solid.
     constexpr int kBins = 96;
@@ -332,12 +334,12 @@ std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t
         }
     }
     std::ostringstream md;
-    md << format("## %s at %ux%u\n\n", s.name.c_str(), W, H);
+    md << format("## %s at %ux%u, w_cap %.1f px\n\n", s.name.c_str(), W, H, wcap);
     md << format("Lights: sun %s, local lights %zu (%zu casting shadows).\n\n", s.sun.illuminance > 0 ? "on" : "off", s.lights.size(),
                  (size_t)std::count_if(s.lights.begin(), s.lights.end(), [](const scene::Light& l) { return l.castShadow; }));
     md << "Band of a visible triangle (COVERAGE_REDESIGN 14.9): w_px = smallest altitude x instance scale x focal / distance to the "
           "triangle centroid; C below 0.25 px; solid B below 1.5 px; flat (Foliage or two-sided) B only when |cos theta| x w_px < 1.5 px "
-          "(theta between the view ray and the sheet normal), else A. Visible = hit by one of 16 stratified sub-samples per pixel (no "
+          "(theta between the view ray and the sheet normal) or w_px < w_cap, else A. Visible = hit by one of 16 stratified sub-samples per pixel (no "
           "wind). P_A / P_B / P_C = pixels whose sub-samples include a triangle of that band (ARCHITECTURE 2 table: P_B, P_C); T_A / T_B "
           "/ T_C = distinct visible triangles per band (before any LOD).\n\n"
           "| camera | surface px (centre ray) | surface % | P_A / P_B / P_C (M px) | P_B or P_C | T_A / T_B / T_C (visible) | instances in frustum |\n"
@@ -369,6 +371,7 @@ std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t
             const double w = m.alt[tri] * scale * focal / d;
             if (w < 0.25) return 2;
             if (!m.isFlat[tri]) return w < 1.5 ? 1 : 0;
+            if (w < wcap) return 1;  // face-on sheets narrower than w_cap: band B by cost (design request 16)
             const float3 n = normalize(in.transform.transformVector(m.nrm[tri]));
             const double cosT = std::fabs((double)dot(n, v)) / d;
             return cosT * w < 1.5 ? 1 : 0;
@@ -475,7 +478,7 @@ int main(int argc, char** argv)
             if (a.width == 0 || a.height == 0) fail("--res is required");
             reference::waitWhileHeld(holdFiles(a));
             reference::PathTracer pt(s);
-            const std::string md = sceneMeta(s, pt, a.width, a.height, holdFiles(a));
+            const std::string md = sceneMeta(s, pt, a.width, a.height, holdFiles(a), a.wcap);
             if (!a.out.empty()) writeTextFile(a.out, md);
             logf("%s", md.c_str());
             return 0;
