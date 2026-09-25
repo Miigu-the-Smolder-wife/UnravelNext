@@ -165,11 +165,12 @@ float vsmSearchHeight(VsmResources r, VsmReceiver rc, uint k)
     const int2 page = vsmAbsPage(vsmAbsTexel(vc, rc.uv, k));
     [loop] for (uint j = k; j < VSM_LEVELS; ++j)
     {
-        const int2 a = vsmSameBasis(vc, k, j) ? page >> (int)(j - k) : vsmAbsPage(vsmAbsTexel(vc, vsmReceiverAt(vc, rc, j).uv, j));
+        float slack;
+        const int2 a = vsmPageAcross(vc, page, k, j, slack);  // across a basis change: raised by the height slack
         if (vsmInWindow(vc, a, j))
         {
             const uint m = r.searchBound.Load(vsmSlot(a, j) * 4);
-            return m == VSM_EMPTY ? -3.0e38 : vsmDecode(m);
+            return m == VSM_EMPTY ? -3.0e38 : vsmDecode(m) + slack;
         }
     }
     return -3.0e38;

@@ -8,6 +8,8 @@
 //         take their finest in-window ancestor's fill).
 // P[0].x page table SRV (raw), P[0].y page metadata SRV (VsmPageMeta), P[0].z fill (MODE 0: UAV, MODE 1: SRV),
 // P[0].w bound UAV (MODE 1), P[1].x VSM constants CBV, P[1].y unused
+// Moving sun: a level whose basis differs from the ancestor's takes the ancestor's page over its own (vsmPageAcross) and
+// raises the value by the basis height slack (the bound stays an upper bound).
 #include "Passes/Shadow/VsmCommon.hlsli"
 
 uint entryOf(ConstantBuffer<VsmConstants> c, ByteAddressBuffer table, int2 page, uint k)
@@ -30,10 +32,12 @@ void main(uint slot : SV_DispatchThreadID)
     uint m = VSM_EMPTY;
     [loop] for (uint j = k; j < VSM_LEVELS; ++j)
     {
-        const uint e = entryOf(c, table, page >> (int)(j - k), j);
+        float slack;
+        const int2 a = vsmPageAcross(c, page, k, j, slack);
+        const uint e = entryOf(c, table, a, j);
         if (e != 0)
         {
-            m = meta[e & VSM_PHYS_MASK].maxHeight;
+            m = vsmRaise(meta[e & VSM_PHYS_MASK].maxHeight, slack);
             break;
         }
     }
@@ -48,10 +52,11 @@ void main(uint slot : SV_DispatchThreadID)
             const int2 q = page + int2(dx, dy);
             [loop] for (uint j = k; j < VSM_LEVELS; ++j)
             {
-                const int2 a = q >> (int)(j - k);
+                float slack;
+                const int2 a = vsmPageAcross(c, q, k, j, slack);
                 if (vsmInWindow(c, a, j))
                 {
-                    m = max(m, fill.Load(vsmSlot(a, j) * 4));
+                    m = max(m, vsmRaise(fill.Load(vsmSlot(a, j) * 4), slack));
                     break;
                 }
             }

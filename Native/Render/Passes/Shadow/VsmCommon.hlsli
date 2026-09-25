@@ -135,6 +135,24 @@ float3 vsmLightSpaceAt(ConstantBuffer<VsmConstants> c, float3 world, uint k)
 }
 bool vsmSameBasis(ConstantBuffer<VsmConstants> c, uint k, uint j) { return c.level[k].basis == c.level[j].basis; }
 
+// The page of level j (coarser) over page 'page' of level k: the nested ancestor when the bases agree; otherwise the
+// page holding the centre of 'page' (at level k's middle caster height) in level j's grid. heightSlack bounds how much a
+// light-space height of any point of the page differs between the two bases (|h_j(q) - h_k(q)| = |q . (Z_j - Z_k)| <=
+// |q| |Z_j - Z_k|): heights and bounds carried from j to k grow by it (conservative).
+int2 vsmPageAcross(ConstantBuffer<VsmConstants> c, int2 page, uint k, uint j, out float heightSlack)
+{
+    heightSlack = 0;
+    if (vsmSameBasis(c, k, j)) return page >> (int)(j - k);
+    const float2 centre = (float2(page) + 0.5) * vsmPageSize(k);
+    const float h = 0.5 * (c.level[k].hMin + c.level[k].hMax);
+    const float3 world = c.level[k].lightX * centre.x + c.level[k].lightY * centre.y + c.level[k].lightZ * h;
+    const float extent = length(world) + 2 * vsmPageSize(k) + (c.level[k].hMax - c.level[k].hMin);
+    heightSlack = length(c.level[j].lightZ - c.level[k].lightZ) * extent;
+    return int2(floor(vsmLightSpaceAt(c, world, j).xy / vsmPageSize(j)));
+}
+// Encoded height raised by 'slack' metres (VSM_EMPTY stays empty).
+uint vsmRaise(uint encoded, float slack) { return (encoded == 0u || slack == 0) ? encoded : vsmEncode(vsmDecode(encoded) + slack); }
+
 // Finest level whose texel is not larger than the receiver's pixel footprint (ARCHITECTURE 2.3: page texel <= pixel).
 uint vsmLevelForFootprint(ConstantBuffer<VsmConstants> c, float footprint)
 {
