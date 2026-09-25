@@ -408,7 +408,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         ud.Buffer.NumElements = (UINT)m_deformed.size();
         ud.Buffer.StructureByteStride = 4;
         m_device.d3d()->CreateUnorderedAccessView(m_exactCounts.resource.Get(), nullptr, &ud, h.resourceCpu(m_exactCountsUav));
-        D3D12_HEAP_PROPERTIES readback{ D3D12_HEAP_TYPE_READBACK }, upHeap{ D3D12_HEAP_TYPE_UPLOAD };
+        D3D12_HEAP_PROPERTIES readback{ D3D12_HEAP_TYPE_READBACK };
         D3D12_RESOURCE_DESC1 d{};
         d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
         d.Width = kDescSlots * bytes;
@@ -419,12 +419,22 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
               "RT exact set readback");
         D3D12_RANGE all{ 0, (SIZE_T)d.Width };
         check(m_exactReadback->Map(0, &all, reinterpret_cast<void**>(const_cast<uint32_t**>(&m_exactReadbackMapped))), "map exact readback");
+        m_exactSlotFrame.assign(kDescSlots, UINT64_MAX);
+    }
+    // Patch ring (exact set records and proxy cut switches): whenever there are deformed instances.
+    if (!m_deformed.empty())
+    {
+        D3D12_HEAP_PROPERTIES upHeap{ D3D12_HEAP_TYPE_UPLOAD };
+        D3D12_RESOURCE_DESC1 d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
         d.Width = kDescSlots * kPatchSlotBytes;
+        d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+        d.SampleDesc.Count = 1;
+        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         check(m_device.d3d()->CreateCommittedResource3(&upHeap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_patchRing)),
               "RT patch ring");
         D3D12_RANGE none{ 0, 0 };
         check(m_patchRing->Map(0, &none, reinterpret_cast<void**>(&m_patchRingMapped)), "map patch ring");
-        m_exactSlotFrame.assign(kDescSlots, UINT64_MAX);
     }
     m_geometryBuffer = createStructured(m_geometries.data(), sizeof(RtGeometry), (uint32_t)m_geometries.size(), L"RT geometries");
 
