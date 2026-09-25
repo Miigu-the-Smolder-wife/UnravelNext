@@ -264,6 +264,10 @@ typedef struct UnxCameraDesc
     float up[3], ev100;
 } UnxCameraDesc;
 
+// Saves the content added so far as a .unxscene file (INTERFACES 6.2), with 'camera' (nullable) as its camera 0 and 'name'
+// as the scene name: host scenes become test scenes for every track and for standalone gates.
+UNX_API int32_t UNX_CALL UnxSceneSave(UnxRenderer r, const char* utf8Path, const char* utf8Name, const UnxCameraDesc* camera);
+
 typedef struct UnxFrameDesc
 {
     uint32_t size, version;     // sizeof, 1

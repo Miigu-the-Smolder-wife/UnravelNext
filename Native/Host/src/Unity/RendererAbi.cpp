@@ -392,6 +392,31 @@ UNX_API int32_t UNX_CALL UnxSceneContentHash(UnxRenderer r, char hash[65])
     });
 }
 
+UNX_API int32_t UNX_CALL UnxSceneSave(UnxRenderer r, const char* utf8Path, const char* utf8Name, const UnxCameraDesc* camera)
+{
+    return call([&] {
+        if (!utf8Path || !*utf8Path) fail("scene path is empty");
+        scene::Scene copy = find(r)->scene();
+        copy.name = utf8Name ? utf8Name : "";
+        if (camera)
+        {
+            scene::Camera c;
+            c.name = "host";
+            c.position = f3(camera->position);
+            c.forward = f3(camera->forward);
+            c.up = f3(camera->up);
+            c.verticalFov = camera->verticalFov;
+            c.nearPlane = camera->nearPlane;
+            c.ev100 = camera->ev100;
+            copy.cameras.insert(copy.cameras.begin(), c);
+        }
+        const std::string path(utf8Path);
+        scene::save(copy, std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(path.data()), path.size())));
+        logf("UnravelNext: saved scene '%s' (%zu meshes, %zu instances) to %s, hash %s\n", copy.name.c_str(), copy.meshes.size(), copy.instances.size(), path.c_str(),
+             scene::contentHash(copy).substr(0, 16).c_str());
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxFrameQueue(UnxRenderer r, const UnxFrameDesc* d, uint64_t* ticket)
 {
     return call([&] {

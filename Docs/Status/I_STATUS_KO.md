@@ -167,6 +167,17 @@ NativeDataWorld_UnravelNext.unity`, 원본은 그대로). Player는 `Builds/Unra
             (창 있는 편집기, Play 모드에서 같은 측정을 하고 스스로 종료)
 ```
 
+## 2.4 남은 일 (I)
+
+- 편집기 Play 모드 실행과 Player 재측정(PNG 캡처 포함). 감사 세션이 Unity를 끝내면 한다.
+- 장면 내보내기(`UnxSceneSave`, `-unxExportScene`)와 호스트 장면 게이트(`unx_gate_host_hostscene`). 같은 데이터 월드를 Unity 밖에서 재서
+  Unity 호스팅 비용을 직접 비교한다. 내보낸 `.unxscene`은 다른 트랙의 실제 장면 시험에도 쓴다.
+- 규모: C# 어댑터는 인스턴스·관절마다 관리 코드로 보간·복사한다. RPP 부하(캐릭터 256, 강체 1,024)에서 메인 스레드 비용을 재고
+  (`hostSynchronizeMs`), 렌더 제출 1 ms 할당을 넘으면 네이티브 어댑터로 옮긴다. NativeWorld의 `nw_snapshot_previous`와
+  `nw_snapshot_read_components`, Animation 포즈 리스를 C++에서 직접 읽는 방식이다.
+- 표시 경로가 없는 것: 소프트 바디(tick마다 변형되는 정점 → GpuScene의 동적 정점 API 필요), Matter·VFX(FX 트랙), 파괴 조각(적재 뒤
+  인스턴스 추가 → 용량 있는 인스턴스 풀 필요), 개체에 붙은 광원(프레임별 광원 갱신 API 필요). 필요할 때 코어에 요청한다.
+
 ## 3. 요청
 
 - `20260925_I_host_module.md`: A(등록)는 반영됐다(코어 3b0c049, v1.6). B(GpuScene 프레임 갱신)도 반영됐다(6af7de8, v1.8).
