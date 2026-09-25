@@ -7,67 +7,85 @@
 
 | 항목 | 설계 | 위치 |
 |---|---|---|
-| 투과 LUT(광학 깊이), 다중산란 LUT(Hillaire, 파라미터 행 포함), sky-view(지평선에서 나눔) | 2.3 | `Atmosphere/*.hlsl`, `AtmosphereSystem` |
-| 공기 볼륨(프록셀 격자): 대기 단일·다중 산란, 캐스터 그림자로 가려진 공기, 국소광 공기 산란, 노드 태양 투과 | 2.3, 2.4 | `Atmosphere/FroxelIntegrate.hlsl`, `Shadow/FroxelSystem` |
-| 공개 조회: `atmosphereSkyRadiance/SunRadiance/SunIlluminance`, `atmosphereAerial`(fetch 2회), `atmosphereAirView`(fetch 3회) | 5.6 | `Atmosphere/Atmosphere.hlsli` |
+| 투과 LUT(광학 깊이), 다중산란 LUT(Hillaire, 파라미터 행 포함, 텍셀당 256 스레드 그룹), sky-view(지평선에서 나눔, 텍셀당 32 스레드 + 광학 깊이 scan) | 2.3 | `Atmosphere/*.hlsl`, `AtmosphereSystem` |
+| 공기 볼륨(프록셀 격자, 노드 0..64, 64 km까지): 대기 단일·다중 산란, 캐스터 그림자로 가려진 공기, 국소광 공기 산란, 노드 태양 투과 | 2.3, 2.4 | `Atmosphere/FroxelIntegrate.hlsl`, `Shadow/FroxelSystem` |
+| 공개 조회: `atmosphereSkyRadiance/SunRadiance/SunIlluminance`, `atmosphereAerial`(fetch 2회), `atmosphereAirView`(fetch 3회), 모델 표면 아래로 들어간 광선의 표면 공기 경로 | 5.6 | `Atmosphere/Atmosphere.hlsli` |
 | 프록셀 광원 리스트: 타일 절두체 → 슬라이스별 중요도순 ≤ 32, 고정 run(오버플로 없음), 절단 통계 | 2.4, 7.4 | `FroxelLists.hlsl`, `Froxel.hlsli` |
-| 태양 VSM: 클립맵, 페이지 캐시, dirty 규칙(변환·스킨 / 바람 > 텍셀 / 새 페이지 / 카메라 이동), 버퍼 풀 | 2.3 | `Shadow/Vsm*.hlsl`, `VsmSystem` |
+| 태양 VSM: 20단 클립맵(텍셀 1 mm~512 m), 페이지 캐시, 버퍼 풀(메가픽셀당 700 페이지, 소진 시 자동 확장) | 2.3 | `Shadow/Vsm*.hlsl`, `VsmSystem` |
+| dirty 규칙: (a) 움직인 캐스터는 (인스턴스, 단)마다 누적 변위(강체 + 스킨 팔레트 경계)가 그 단 텍셀에 닿을 때만, (b) 바람 > 텍셀, (c) 새 페이지, 카메라 이동 | 2.3 | `VsmMoved/Invalidate/Release` |
 | 블록 계층(8~128 텍셀 최소제곱 평면 + 잔차 경계), 탐색 경계 격자 | 2.3 | `VsmPageMax`, `VsmSearchGrid` |
 | 가시성 패스(2패스: 분류·압축 → 반영 penumbra 간접 디스패치), 4 B/px | 2.11, 7.3 | `ShadowVisibility/Penumbra.hlsl` |
-| 공기 그림자: 선분이 지나는 페이지 → 32·8 텍셀 블록 → 텍셀(정확) 걷기, 공기 페이지 요청 | 2.3 | `VsmAir.hlsli`, `VsmMarkAir.hlsl` |
+| 공기 그림자: 선분이 지나는 페이지 → 32·8 텍셀 블록 → 텍셀(정확) 걷기, 선분이 지나는 페이지만 요청 | 2.3 | `VsmAir.hlsli`, `VsmMarkAir.hlsl` |
 | 페이지 래스터: V 서비스의 타일 국소 모드(`tileLocal`) | 2.3 | `VsmSystem.cpp` |
 
 ## 2. 정확성 [실측, 디버그 레이어 오류 0]
 
-- `unx_test_atmosphere_atmospheretests`: 배정밀 기준 대비 투과 3.3e-6, 하늘 0.17 %, 다중산란 수렴 0.48 %, 태양 3.5e-4. PASS.
-- `unx_test_shadow_vsmtests`: 정확한 원반 기준 대비 평균 오차 4e-5. dirty 규칙: 정지 0 / 0.32 m 이동 27 / 움직인 캐스터 191 / 태양
-  변경 전부. 바람은 흔들림보다 텍셀이 작은 단만 다시 그린다. PASS.
-- `unx_test_shadow_froxeltests`:
+- `unx_test_atmosphere_atmospheretests`: 배정밀 기준 대비 투과 3.3e-6, 하늘 0.17 %, 다중산란 GPU 대 배정밀 2.8e-4, 수렴 0.48 %, 태양 3.5e-4,
+  sky view 재생성 비트 일치. PASS.
+- `unx_test_shadow_vsmtests`: 정확한 원반 기준 대비 평균 오차 4e-5. dirty 규칙: 정지 0 / 0.32 m 카메라 이동 51 / 움직인 캐스터 189 /
+  태양 변경 전부. 느린 이동 2 mm × 30프레임은 2~5단만 다시 그린다(555/574/108/9, 6 cm보다 거친 단 0). 바람은 흔들림보다 텍셀이 작은
+  단만 다시 그린다. PASS.
+- `unx_test_shadow_froxeltests` (4K / 1440p / 1080p):
   - 리스트: 보수성(점 36.9만 개에서 누락 0), 중요도 순서, 두 프레임 간 결정성, 절단 통계.
   - 국소광 공기 산란: 기준 대비 평균 0.04 %, 최대 0.08 %.
-  - 그림자진 공기: 균일 슬라이스는 저장 정밀도 안에서 정확하고, 경계 슬라이스는 텍셀 경계 안이다.
-  - 공기 원근 vs 기준(4번): 렌더 그래프 앨리어싱 결함(코어가 조사 중)으로 기본 설정에서는 막혀 있다. `UNX_GRAPH_NO_ALIAS=1`로 확인해 이 절에 채운다.
+  - 그림자진 공기, 지붕 20 m 앞: 균일 슬라이스는 저장 정밀도 안에서 정확하고, 경계 슬라이스는 텍셀 경계 안이다.
+  - 그림자진 공기, 3 km 능선(800 m, 낮은 태양): 평균 0.07 %(4K) / 0.09 %(1080p). 풀 소진은 정상 상태에서 0이다.
+  - 공기 원근 vs 기준(4번, `UNX_GRAPH_NO_ALIAS=1` 진단):
+    - 4K: 모든 항이 한도 안이다(산란 0.32 %, 투과 0.19 %, 태양 0.13 %).
+    - 1440p / 1080p: 투과와 태양은 한도 안이다. 30 km 산란은 한 질의(uv 0.50, 0.55)에서 2.8 % / 3.3 %로 한도(2 %)를 넘는다. 표면 아래 경로
+      분기가 이 질의에서 발동하지 않는 이유를 조사 중이다(열림).
+    - 기본(앨리어싱 켬)은 코어의 WAR 결함(업로드 복사가 앨리어싱 선행자의 독자와 겹침)으로 막혀 있다. 코어에 증거와 함께 넘겼다
+      (`--upload-first`로 순서를 바꾸면 통과).
 
-## 3. 성능 [실측, RendererGate city_block 정지 카메라, V·M·S·C 빌드]
+## 3. 성능 [실측, RendererGate city_block 정지 카메라, V·M·S·C 빌드, 20단]
 
 | 패스 | 4K ms | 1440p ms | 설계 항 [예상] |
 |---|---:|---:|---|
-| `s.froxel.integrate` (공기 전부) | 0.59 | 0.25 | 2.3 프록셀 0.03 |
+| `s.froxel.integrate` (공기 전부, 먼 공기 그림자 포함) | 0.63 | 0.27 | 2.3 프록셀 0.03 |
 | ├ 기본 (리스트 읽기·scan·노드 쓰기) | 0.10 | | |
 | ├ 공기 적분 (LUT 부분 단계) | 0.27 | | |
 | └ 공기 그림자 (선분 걷기) | 0.22 | | |
 | `s.froxel.lists` | 0.045 | 0.021 | 2.4 리스트 0.01 |
-| `s.vsm.markair` | 0.089 | 0.041 | — |
-| `s.vsm.mark` | 0.054 | 0.050 | 2.3 페이지 관리 0.04 |
-| `s.vsm.raster.*` (dirty 5.5 페이지) | 0.062 | 0.051 | 2.3 T_sun/30G 0.20 |
-| `s.shadow.visibility` + `penumbra` | 0.52 + 0.17 | 0.23 + 0.09 | 2.11 |
-| **S 합** | **1.57** | **0.77** | 2.13: 0.30 + 0.14 |
+| `s.vsm.markair` | 0.079 | 0.034 | — |
+| `s.vsm.mark` | 0.055 | 0.050 | 2.3 페이지 관리 0.04 |
+| `s.vsm.raster.*` (dirty 5.3 페이지) | 0.062 | 0.048 | 2.3 T_sun/30G 0.20 |
+| `s.shadow.visibility` + `penumbra` | 0.52 + 0.16 | 0.24 + 0.09 | 2.11 |
+| **S 합** | **1.60** | **0.79** | 2.13: 0.30 + 0.14 |
 
-변천: 페이지 래스터 26.8 → 0.06 ms(타일 국소). 공기 그림자 2.45 → 0.22 ms(정사각형 분할 → 선분 걷기). M 셰이딩 안 `atmosphereAerial`은
-1.12 ms였고, 새 구조에서 fetch 2~3회로 바뀐다(M 게이트 재측정 필요).
+변천:
+- 페이지 래스터 26.8 → 0.06 ms(타일 국소).
+- 공기 그림자 2.45 → 0.22 ms(정사각형 분할 → 선분 걷기).
+- M 셰이딩 안 `atmosphereAerial`은 1.12 ms였다. 새 구조에서 fetch 2~3회로 바뀐다(M 게이트 재측정 필요).
+- 다중산란 LUT 첫 생성 23.3 ms(I 실측), sky view(태양이 움직이면 매 프레임)는 그룹 구조로 바꿨다. 재측정은 사용자 게임 뒤에 한다.
+- 다중산란 LUT는 (태양 코사인, 고도)가 인덱스라 시간대 변화로는 다시 만들지 않고, 대기 파라미터가 바뀔 때만 만든다.
 
 ## 4. 설계 가정 오류 (실측이 설계와 다른 곳)
 
 1. **가시성 패스**: 설계의 0.17 ms 마이크로벤치는 깊이와 법선을 읽지 않았다. 깊이 + 수신 평면만으로 0.114 ms가 바닥이다(4K).
-2. **요청 페이지 수**: texel ≤ footprint 규칙이면 4K에서 3,000~4,000 페이지다(설계는 800~1,500).
+2. **요청 페이지 수**: texel ≤ footprint 규칙이면 4K에서 3,000~5,500 페이지다(설계는 800~1,500). 풀은 메가픽셀당 700 페이지(4K 약 370 MB +
+   블록 64 MB)이고 소진 시 커진다.
 3. **프록셀 적분**: 설계는 "F × 300 FLOP + F × 64 B"였다. 실제 프록셀 일은 의존 메모리 조회다(LUT 2개 + VSM 테이블 → 블록 → 텍셀). 게다가
    이 항이 이제 옛 공기 원근 볼륨까지 대신한다.
 4. **셰이딩 조회**: 설계는 "프록셀 조회 1회"였다. 옛 API는 픽셀마다 3D 8회 + 파라미터 9 Load였고, 낮은 점유율의 셰이딩 커널에서
    1.12 ms였다. 새 공기 볼륨으로 고쳤다.
+5. **클립맵 단 수**: 12단(텍셀 2 m까지)은 4K 약 1 km 너머 공기와 먼 지면에 맞는 단이 없다. 20단으로 늘렸다.
+6. **규칙 (a)**: 움직인 캐스터가 모든 단을 다시 그리면 동적 장면(강체 1,024 + 캐릭터 256)에서 래스터 0.81 ms다(I 실측). 텍셀 누적 규칙으로 고쳤다.
 
 ## 5. 진행 중·다음 (모두 이번 범위에서 구현 대상)
 
-- **먼 공기의 캐스터 그림자**: 12단 클립맵(최대 텍셀 2 m)은 4K 약 1 km 너머 공기에 맞는 단이 없다. 20단으로 늘린다(텍셀 512 m까지).
-  비용식 [예상]: 공기 페이지 ≤ 약 320개(단마다 폭 5 × 슬라이스당 0.5), 거친 페이지는 거의 dirty가 되지 않는다. 래스터는 거친 LOD다.
-  먼 픽셀이 2 m 단에 묶이지 않아 페이지 수는 오히려 준다. 이후 GPU 잠금으로 실측하고, C 기준 영상(먼 거리 god ray·산 그림자)과 비교한다.
-- 공기 적분 0.27 ms, 공기 그림자 0.22 ms, markair 0.09 ms 줄이기(attribution 키 `atmosphere.froxels.experiment_disable`로 분해 중).
-- 국소광 VSM 128(큐브 면, 가시성 슬롯 1~3, `shadowSlotOfLight`, `shadowVisibilityDirect`).
+- **움직이는 태양(시간대)**: 태양 방향이 바뀌면 VSM 전체가 무효가 된다. 매 프레임 움직이면 매 프레임 전부 다시 그린다. 비용식과 구조
+  (방향 변화가 텍셀에 미치는 영향으로 정한 갱신 규칙, 단별 분할 갱신)를 먼저 적고 구현한다.
+- 1440p·1080p 먼 공기 산란 한 질의 조사(2절).
+- 공기 적분 0.27 ms, 공기 그림자 0.22 ms, markair 0.08 ms 줄이기(attribution 키 `atmosphere.froxels.experiment_disable`: 1 그림자,
+  2 국소광, 4 적분, 8 부분 단계 태양 투과, 16 부분 단계 다중산란).
+- I 동적 게이트(`unx_gate_host_hostdynamic`)에서 dirty 페이지와 래스터를 재측정한다.
+- C 기준 영상 `ridge_sunset`(렌더 중)과 비교한다.
+- 국소광 VSM 128(큐브 면, 가시성 슬롯 1~3, `shadowSlotOfLight`, `shadowVisibilityDirect`), 국소광 그림자를 공기 산란에 넣기.
 - `lights_max` 초과 광원을 프록셀 조도로 합치는 경로(현재는 절단하고 수와 에너지를 통계로 낸다).
-- 국소광 그림자가 공기 산란에 들어가지 않음(국소 VSM 뒤).
-- 태양 방향이 바뀌면 전부 다시 그림(회전 불변 캐시 설계 필요). 반사 뷰의 페이지 요청. 스킨 경계가 bind pose.
-- `FrameResources::vsmPool`이 TextureRef인데 풀이 버퍼다(S 공개 HLSL API만 쓰게 되어 있음, 코어 요청 필요 시 제출).
+- 반사 뷰의 페이지 요청. 스킨 경계가 bind pose.
+- `FrameResources::vsmPool`이 TextureRef인데 풀이 버퍼다(S 공개 HLSL API만 쓰게 되어 있음).
 
 ## 6. 요청
 
 - `Docs/Design/Requests/20260925_S_depth_raster_page_mask.md` (v1.1 반영), `..._S_raster_instance_and_wind_change.md` (v1.4 반영),
-  `..._S_page_local_raster.md` (v1.7 반영), `..._S_air_volume.md` (공기 볼륨, 5.6 변경 요청).
+  `..._S_page_local_raster.md` (v1.7 반영), `..._S_air_volume.md` (v1.15 반영).
