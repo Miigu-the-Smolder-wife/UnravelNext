@@ -149,6 +149,39 @@ uint32_t asUint(float f)
     return u;
 }
 
+// Readback ring of the main view's tile counts (4 slots: never reused while the harness keeps <= 2 frames in flight).
+struct StatsRing
+{
+    static constexpr uint32_t kSlots = 4, kBytes = 64;
+    Device* device = nullptr;
+    ComPtr<ID3D12Resource> buffer;
+    uint8_t* mapped = nullptr;
+    uint64_t frame[kSlots] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
+    uint32_t tiles[kSlots] = {};
+    uint64_t last = UINT64_MAX;
+    ~StatsRing()
+    {
+        if (buffer) buffer->Unmap(0, nullptr);
+        if (device) device->deferRelease(buffer);
+    }
+    void ensure(Device& d)
+    {
+        if (buffer) return;
+        device = &d;
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 bd{};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = kSlots * kBytes;
+        bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
+        bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &bd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&buffer)),
+              "M stats ring");
+        D3D12_RANGE all{ 0, kSlots * kBytes };
+        check(buffer->Map(0, &all, reinterpret_cast<void**>(&mapped)), "map M stats ring");
+    }
+};
+
 uint32_t experimentMask(const QualityConfig& q)
 {
     const int64_t m = q.integer("shading.experiment_disable");
@@ -161,6 +194,21 @@ uint32_t experimentMask(const QualityConfig& q)
     return (uint32_t)m;
 }
 } // namespace
+
+Stats latestStats(TrackState& state)
+{
+    StatsRing& ring = state.get<StatsRing>("M.statsRing");
+    Stats st;
+    if (ring.last == UINT64_MAX || !ring.mapped) return st;
+    const uint32_t slot = (uint32_t)(ring.last % StatsRing::kSlots);
+    uint32_t w[16];
+    std::memcpy(w, ring.mapped + slot * StatsRing::kBytes, sizeof w);
+    st.frameIndex = ring.frame[slot];
+    for (uint32_t c = 0; c < 4; ++c) st.classTiles[c] = w[3 * c];
+    st.edgeTiles = w[12];
+    st.tiles = ring.tiles[slot];
+    return st;
+}
 
 const std::vector<float>& specularAlbedoTable()
 {
@@ -226,6 +274,7 @@ void shade(FramePassContext& fc, ViewResources& view)
                          b.use(edgeTiles, Use::UavCompute);
                          b.use(edgeArgs, Use::UavCompute);
                          b.use(o.tileFlags, Use::UavCompute);
+                         b.use(v.visId, Use::SrvCompute);
                      },
                      [=](PassContext& c) {
                          const uint32_t none = gpu::kNone;
@@ -239,7 +288,7 @@ void shade(FramePassContext& fc, ViewResources& view)
                          // Sky tiles.
                          {
                              uint32_t k[32] = { c.srv(o.materialWord), c.uav(v.color), c.srv(o.tiles), (uint32_t)material::ShadeClass::Sky * tileCount,
-                                                atm[0], atm[1], atm[2], atm[3], fx[0], fx[1], 0, 0, c.srv(v.depth), c.srv(v.gbuffer), c.uav(edgeArgs), 0 };
+                                                atm[0], atm[1], atm[2], atm[3], fx[0], fx[1], 0, 0, c.srv(v.depth), c.srv(v.gbuffer), c.uav(edgeArgs), c.srv(v.visId) };
                              std::memcpy(k + 24, edge, sizeof edge);
                              c.cmd->SetPipelineState(sky);
                              c.computeConstants(k, 32);
@@ -254,7 +303,7 @@ void shade(FramePassContext& fc, ViewResources& view)
                                                       v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                                       v.reflection.valid() ? c.srv(v.reflection) : none,
                                                       (r.giCache.valid() && v.view.kind == gpu::ViewKind::PlanarReflection) ? c.srv(r.giCache) : none,
-                                                      atm[0], atm[1], atm[2], atm[3], lutSrv, o.textureTableSrv, experiment, 0, fx[0], fx[1] };
+                                                      atm[0], atm[1], atm[2], atm[3], lutSrv, o.textureTableSrv, experiment, c.srv(v.visId), fx[0], fx[1] };
                              uint32_t k32[32] = {};
                              std::memcpy(k32, k, sizeof k);
                              std::memcpy(k32 + 24, edge, sizeof edge);
@@ -262,6 +311,29 @@ void shade(FramePassContext& fc, ViewResources& view)
                              c.cmd->ExecuteIndirect(signature, 1, args, (uint32_t)cls * sizeof(D3D12_DISPATCH_ARGUMENTS), nullptr, 0);
                          }
                      });
+
+    // Tile counts of the main view into the readback ring (statistics for gates).
+    if (!planar && fc.trackState)
+    {
+        StatsRing& ring = fc.state<StatsRing>("M.statsRing");
+        ring.ensure(fc.device);
+        const uint32_t slot = (uint32_t)(fc.frame.frameIndex % StatsRing::kSlots);
+        ring.frame[slot] = fc.frame.frameIndex;
+        ring.tiles[slot] = tileCount;
+        ring.last = fc.frame.frameIndex;
+        ID3D12Resource* dst = ring.buffer.Get();
+        const BufferRef classArgs = o.tileArgs;
+        fc.graph.addPass("m.stats", QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             b.use(classArgs, Use::CopySrc);
+                             b.use(edgeArgs, Use::CopySrc);
+                             b.keep();
+                         },
+                         [dst, slot, classArgs, edgeArgs](PassContext& c) {
+                             c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes, c.resource(classArgs), 0, 48);
+                             c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 48, c.resource(edgeArgs), 0, 12);
+                         });
+    }
 
     // Edge composite over the edge tiles (analytic coverage of the pixel square by the neighbourhood's surfaces).
     ID3D12PipelineState* composite = fc.shaders.compute(linear ? "Passes/Shading/EdgeComposite.OUTPUT1" : "Passes/Shading/EdgeComposite.OUTPUT0");

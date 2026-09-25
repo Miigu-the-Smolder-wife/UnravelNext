@@ -227,14 +227,16 @@ bool cpuSameSurface(const CpuEdgeSample& a, const CpuEdgeSample& b, const Qualit
     return std::fabs(d[0] * a.n[0] + d[1] * a.n[1] + d[2] * a.n[2]) <= tol && std::fabs(d[0] * b.n[0] + d[1] * b.n[1] + d[2] * b.n[2]) <= tol;
 }
 bool cpuIsEdge(const ViewDesc& desc, const std::vector<uint8_t>& words, const std::vector<uint8_t>& gb, const std::vector<uint8_t>& depth, uint32_t W, uint32_t H,
-               uint32_t x, uint32_t y, const QualityConfig& q)
+               uint32_t x, uint32_t y, const QualityConfig& q, const std::vector<uint8_t>* vis = nullptr)
 {
     const CpuEdgeSample c = cpuEdgeSample(desc, words, gb, depth, W, x, y);
+    const uint32_t vc = vis ? texelOf<uint32_t>(*vis, W, x, y) : 0;
     for (int dy = -1; dy <= 1; ++dy)
         for (int dx = -1; dx <= 1; ++dx)
         {
             const int qx = (int)x + dx, qy = (int)y + dy;
             if ((dx == 0 && dy == 0) || qx < 0 || qy < 0 || qx >= (int)W || qy >= (int)H) continue;
+            if (vis && texelOf<uint32_t>(*vis, W, (uint32_t)qx, (uint32_t)qy) == vc) continue;
             if (!cpuSameSurface(c, cpuEdgeSample(desc, words, gb, depth, W, (uint32_t)qx, (uint32_t)qy), q)) return true;
         }
     return false;

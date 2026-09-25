@@ -44,7 +44,7 @@ EdgePixel edgePixel(uint2 q, Texture2D<uint> words, Texture2D<float> depth, Text
         mPixelRay(float2(q) + 0.5, D, Dx, Dy);
         const float z = linearDepth(depth[q]);
         e.position = D * z;
-        e.normal = decodeGBuffer(gbuffer[q]).normal;
+        e.normal = octDecode(gbuffer[q].x);
         e.footprint = length(Dx) * z;
     }
     return e;
@@ -60,15 +60,31 @@ bool edgeSameSurface(EdgePixel a, EdgePixel b, EdgeParams p)
     return abs(dot(d, a.normal)) <= tol && abs(dot(d, b.normal)) <= tol;
 }
 
-// Is 'pixel' an edge pixel: some in-view 3 x 3 neighbour sees another surface.
-bool edgeIsEdge(uint2 pixel, Texture2D<uint> words, Texture2D<float> depth, Texture2D<uint2> gbuffer, EdgeParams p)
+// Is 'pixel' an edge pixel: some in-view 3 x 3 neighbour sees another surface. A neighbour on the same triangle (same
+// vis id) is the same surface and one with another material is not, before any geometry is read.
+bool edgeIsEdge(uint2 pixel, Texture2D<uint> visIds, Texture2D<uint> words, Texture2D<float> depth, Texture2D<uint2> gbuffer, EdgeParams p)
 {
-    const EdgePixel c = edgePixel(pixel, words, depth, gbuffer);
+    const uint vc = visIds[pixel];
+    const uint mc = mWordMaterial(words[pixel]);
+    bool geometric = false;
     [unroll] for (uint k = 0; k < 9; ++k)
     {
         if (k == 4) continue;
         const int2 q = int2(pixel) + int2(int(k % 3) - 1, int(k / 3) - 1);
         if (any(q < 0) || q.x >= int(g_viewWidth) || q.y >= int(g_viewHeight)) continue;
+        const uint vq = visIds[uint2(q)];
+        if (vq == vc) continue;
+        if (mWordMaterial(words[uint2(q)]) != mc) return true;
+        geometric = true;
+    }
+    if (!geometric) return false;
+    const EdgePixel c = edgePixel(pixel, words, depth, gbuffer);
+    [unroll] for (uint k2 = 0; k2 < 9; ++k2)
+    {
+        if (k2 == 4) continue;
+        const int2 q = int2(pixel) + int2(int(k2 % 3) - 1, int(k2 / 3) - 1);
+        if (any(q < 0) || q.x >= int(g_viewWidth) || q.y >= int(g_viewHeight)) continue;
+        if (visIds[uint2(q)] == vc) continue;
         if (!edgeSameSurface(c, edgePixel(uint2(q), words, depth, gbuffer), p)) return true;
     }
     return false;

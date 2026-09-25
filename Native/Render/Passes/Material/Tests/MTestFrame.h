@@ -262,6 +262,7 @@ public:
         FrameResources resources;
         FrameServices services;
         FramePassContext fc{ device, graph, shaders, quality, gpuScene, frame, resources, services, [this](const ViewDesc& v) { return frameConstantsFor(v); }, &trackState };
+        material::prepareScene(fc);  // before any frame constants, as FrameRenderer::record does (INTERFACES 5.2 v1.10)
         build(fc);
         graph.execute(nullptr);
         for (uint32_t q = 0; q < kQueueTypeCount; ++q) device.queue((QueueType)q).waitCpu(graph.lastFence((QueueType)q));

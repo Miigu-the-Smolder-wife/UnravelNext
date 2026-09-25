@@ -527,6 +527,8 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
         return m_textures[tex].srv;
     };
     bool occlusionLogged = false;
+    m_published.clear();
+    auto clampBit = [&](uint32_t tex, uint32_t bit) { return (tex != scene::kNone && tex < s->textures.size() && !s->textures[tex].wrap) ? bit : 0u; };
     for (const scene::Material& m : s->materials)
     {
         TextureSetGpu e{};
@@ -541,8 +543,18 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
             occlusionLogged = true;
         }
         e.slopeRange = m.normalTexture != scene::kNone ? m_slopeRange[m.normalTexture] : 0.0f;
+        e.flags = clampBit(m.baseColorTexture, gpu::MaterialTextureBaseColor) | clampBit(m.normalTexture, gpu::MaterialTextureNormal) |
+                  clampBit(m.roughMetalTexture, gpu::MaterialTextureRoughMetal) | clampBit(m.emissiveTexture, gpu::MaterialTextureEmissive);
         if (e.emissive != gpu::kNone) m_anyEmissive = true;
         table.push_back(e);
+        gpu::MaterialTextures pub;
+        pub.baseColor = e.baseColor;
+        pub.normal = e.moments;
+        pub.roughMetal = e.roughMetal;
+        pub.emissive = e.emissive;
+        pub.occlusion = gpu::kNone;
+        pub.clamp = e.flags;
+        m_published.push_back(pub);
     }
     if (table.empty()) table.push_back(TextureSetGpu{ gpu::kNone, gpu::kNone, gpu::kNone, gpu::kNone, gpu::kNone, 0, 0, 0 });
 

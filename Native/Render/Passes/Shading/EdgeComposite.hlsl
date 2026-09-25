@@ -56,7 +56,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
         at[k] = valid[k] ? uint2(q) : pixel;
         e[k] = edgePixel(at[k], words, depth, gbuffer);
         vis[k] = visIds[at[k]];
-        if (k > 0 && valid[k] && !edgeSameSurface(e[0], e[k], ep)) isEdge = true;
+        if (k > 0 && valid[k] && vis[k] != vis[0] && !edgeSameSurface(e[0], e[k], ep)) isEdge = true;
     }
     if (!isEdge) return;
 
@@ -72,7 +72,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
         if (!valid[k2]) continue;
         uint g = EDGE_GROUPS;
         for (uint j = 0; j < groups; ++j)
-            if (g == EDGE_GROUPS && edgeSameSurface(e[rep[j]], e[k2], ep)) g = j;
+            if (g == EDGE_GROUPS && (vis[rep[j]] == vis[k2] || edgeSameSurface(e[rep[j]], e[k2], ep))) g = j;
         if (g == EDGE_GROUPS)
         {
             if (groups < groupsMax)

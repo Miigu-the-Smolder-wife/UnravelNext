@@ -24,7 +24,8 @@ struct TextureSetGpu  // mirror of MTextureSet (MaterialInternal.hlsli), 32 B
     uint32_t baseColor, moments, roughMetal, emissive;
     uint32_t occlusion;
     float slopeRange;
-    uint32_t flags, pad;
+    uint32_t flags;          // clamp addressing per texture, gpu::MaterialTextureBit (1 = g_anisoClamp)
+    uint32_t pad;
 };
 static_assert(sizeof(TextureSetGpu) == 32);
 
@@ -53,6 +54,9 @@ public:
     // Uploads textures and the material table when the GPU scene changed (revision). Blocking; load time only.
     void sync(Device& device, const GpuScene& scene);
     uint32_t tableSrv() const { return m_table.srv; }
+    // Per scene material, what GpuScene::setMaterialTextures publishes (INTERFACES 6.3 v1.10; formats in
+    // Passes/Material/MaterialTextures.hlsli). Valid after sync().
+    const std::vector<gpu::MaterialTextures>& published() const { return m_published; }
     bool anyEmissiveTexture() const { return m_anyEmissive; }
     uint32_t textureSrv(uint32_t sceneTexture) const { return m_textures.at(sceneTexture).srv; }
     uint64_t gpuBytes() const { return m_gpuBytes; }
@@ -73,6 +77,7 @@ private:
     std::vector<Resource> m_textures;
     std::vector<float> m_slopeRange;
     Resource m_table;
+    std::vector<gpu::MaterialTextures> m_published;
     bool m_anyEmissive = false;
     uint64_t m_gpuBytes = 0;
 };

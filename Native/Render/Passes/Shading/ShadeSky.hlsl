@@ -6,7 +6,7 @@
 // P[0] = { material word, color UAV, tile lists (raw), list offset (entries) }
 // P[1] = { atmosphere transmittance, multi-scatter, sky view, aerial } (UNX_NONE = absent)
 // P[2] = { froxel lights (raw), froxel volume } (UNX_NONE = absent): shafts in front of the sky (depth clamps to far_m)
-// P[3] = { depth SRV, gbuffer SRV, edge args UAV (raw), 0 }, P[6] = edge parameters (floats), P[7] as ShadeOpaque
+// P[3] = { depth SRV, gbuffer SRV, edge args UAV (raw), vis id SRV }, P[6] = edge parameters (floats), P[7] as ShadeOpaque
 #include "Bindless.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
@@ -73,7 +73,8 @@ bool shadeSky(uint2 pixel, Texture2D<uint> words)
     Texture2D<float> depthTex = ResourceDescriptorHeap[P[3].x];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[3].y];
     const EdgeParams ep = { asfloat(P[6].x), asfloat(P[6].y), asfloat(P[6].z) };
-    const bool isEdge = edgeIsEdge(pixel, words, depthTex, gbuffer, ep);
+    Texture2D<uint> visIds = ResourceDescriptorHeap[P[3].w];
+    const bool isEdge = edgeIsEdge(pixel, visIds, words, depthTex, gbuffer, ep);
     if (isEdge)
     {
         RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];

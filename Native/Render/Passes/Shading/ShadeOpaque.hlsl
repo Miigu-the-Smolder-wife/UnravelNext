@@ -18,7 +18,7 @@
 // P[1] = { tile lists (raw), list offset (entries), shade class, emissive or UNX_NONE }
 // P[2] = { shadow visibility, screen probes, reflection, GI cache (planar views) } (UNX_NONE = absent)
 // P[3] = { atmosphere transmittance, multi-scatter, sky view, aerial } (UNX_NONE = absent)
-// P[4] = { specular albedo LUT (float2 per grid point), texture table, experiment mask (0; shading.toml), 0 }
+// P[4] = { specular albedo LUT (float2 per grid point), texture table, experiment mask (0; shading.toml), vis id SRV }
 // P[5] = { froxel lights (raw), froxel volume (Texture3D) } (UNX_NONE = absent)
 // P[6] = { edge cos angle, edge footprint tolerance, edge distance tolerance (floats), edge args UAV (raw) }
 // P[7] = { edge radiance UAV (RGBA16F), tilesX, tile flags UAV (raw), edge tile list UAV (raw) }
@@ -228,7 +228,8 @@ bool shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Tex
     color[pixel] = shEncodeOutput(radiance);
     // Edge pixels keep their exposed linear radiance for the composite (EdgeComposite.hlsl).
     const EdgeParams ep = { asfloat(P[6].x), asfloat(P[6].y), asfloat(P[6].z) };
-    const bool isEdge = P[7].x != UNX_NONE && edgeIsEdge(pixel, words, depthTex, gbuffer, ep);
+    Texture2D<uint> visIds = ResourceDescriptorHeap[P[4].w];
+    const bool isEdge = P[7].x != UNX_NONE && edgeIsEdge(pixel, visIds, words, depthTex, gbuffer, ep);
     if (isEdge)
     {
         RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];

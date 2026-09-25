@@ -39,6 +39,11 @@ struct ResolveDebug
     BufferRef buffer;
 };
 
+// Scene preparation (INTERFACES 5.2 v1.10, before any view's frame constants): uploads the scene's textures when the
+// GPU scene changed and publishes them in gpu::Material (GpuScene::setMaterialTextures), so V's alpha test, R's hit
+// shading and M's resolve read the same textures.
+void prepareScene(FramePassContext& fc);
+
 // Records the resolve of 'view' (needs view.visId and view.visibleClusters). Writes view.gbuffer and
 // view.reflectionLobeTiles; the internal outputs are kept for shading of the same view in this frame.
 void resolve(FramePassContext& fc, ViewResources& view);

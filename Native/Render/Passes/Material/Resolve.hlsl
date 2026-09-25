@@ -68,13 +68,13 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             if (ts.baseColor != UNX_NONE && (P[3].y & 1) == 0)
             {
                 Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
-                baseColor *= t.SampleGrad(g_anisoWrap, s.uv, s.duvdx, s.duvdy).rgb;
+                baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, s.uv, s.duvdx, s.duvdy).rgb;
             }
             float roughness = m.roughness, metallic = m.metallic;
             if (ts.roughMetal != UNX_NONE && (P[3].y & 1) == 0)
             {
-                Texture2D<float2> t = ResourceDescriptorHeap[ts.roughMetal];
-                const float2 rm = t.SampleGrad(g_anisoWrap, s.uv, s.duvdx, s.duvdy);
+                Texture2D<float4> t = ResourceDescriptorHeap[ts.roughMetal];
+                const float2 rm = mSampleGrad(t, (ts.flags & M_TEX_ROUGH_METAL) != 0, s.uv, s.duvdx, s.duvdy).xy;
                 roughness *= rm.x;
                 metallic *= rm.y;
             }
@@ -86,7 +86,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             if (ts.moments != UNX_NONE && (P[3].y & 2) == 0)
             {
                 Texture2D<float4> t = ResourceDescriptorHeap[ts.moments];
-                const MSlopeMoments mm = mNormalMoments(t, s.uv, s.duvdx, s.duvdy, ts.slopeRange);
+                const MSlopeMoments mm = mNormalMoments(t, s.uv, s.duvdx, s.duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
                 const float3 B = s.tangentSign * cross(s.normal, s.tangent);
                 n = normalize(s.tangent * mm.mean.x + B * mm.mean.y + s.normal);
                 variance += mm.variance;
@@ -108,7 +108,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             {
                 Texture2D<float4> t = ResourceDescriptorHeap[ts.emissive];
                 RWTexture2D<float4> emissive = ResourceDescriptorHeap[P[1].x];
-                emissive[pixel] = float4(m.emissive * t.SampleGrad(g_anisoWrap, s.uv, s.duvdx, s.duvdy).rgb, 1);
+                emissive[pixel] = float4(m.emissive * mSampleGrad(t, (ts.flags & M_TEX_EMISSIVE) != 0, s.uv, s.duvdx, s.duvdy).rgb, 1);
             }
 
             classBit = 1u << mShadeClass(materialClass(m));

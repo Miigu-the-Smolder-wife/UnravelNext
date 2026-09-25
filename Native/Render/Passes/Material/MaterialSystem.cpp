@@ -45,6 +45,14 @@ uint32_t experimentMask(const QualityConfig& q)
 }
 } // namespace
 
+void prepareScene(FramePassContext& fc)
+{
+    TextureSystem& t = fc.state<TextureSystem>("M.textures");
+    t.sync(fc.device, fc.scene);
+    // A no-op when nothing changed (GpuScene keeps the buffer and the revision).
+    fc.scene.setMaterialTextures(t.published());
+}
+
 uint32_t textureTable(FramePassContext& fc)
 {
     TextureSystem& t = fc.state<TextureSystem>("M.textures");

@@ -47,6 +47,7 @@ float mWordMetallic(uint word) { return ((word >> 16) & 0xFFu) / 255.0; }
 //   roughMetal  RG8_UNORM: r = perceptual roughness factor, g = metallic factor
 //   emissive    RGBA8 sRGB or RGBA16F: multiplies the material's emissive (nits)
 //   slopeRange  S of the moments encoding (max |slope| of the source map)
+//   flags       clamp addressing per texture (M_TEX_* bits = gpu::MaterialTextureBit)
 struct MTextureSet
 {
     uint baseColor, moments, roughMetal, emissive;
@@ -54,6 +55,17 @@ struct MTextureSet
     float slopeRange;
     uint flags, pad;
 };
+
+// Footprint-filtered sample with the texture's addressing (MTextureSet.flags / gpu::Material.textureClamp bit).
+float4 mSampleGrad(Texture2D<float4> t, bool clampAddress, float2 uv, float2 duvdx, float2 duvdy)
+{
+    return clampAddress ? t.SampleGrad(g_anisoClamp, uv, duvdx, duvdy) : t.SampleGrad(g_anisoWrap, uv, duvdx, duvdy);
+}
+
+#define M_TEX_BASE_COLOR 1u
+#define M_TEX_NORMAL 2u
+#define M_TEX_ROUGH_METAL 4u
+#define M_TEX_EMISSIVE 8u
 
 MTextureSet mLoadTextureSet(uint tableSrv, uint material)
 {
@@ -76,9 +88,9 @@ struct MSlopeMoments
     float variance;  // trace of the slope covariance over the footprint
 };
 
-MSlopeMoments mNormalMoments(Texture2D<float4> t, float2 uv, float2 duvdx, float2 duvdy, float S)
+MSlopeMoments mNormalMoments(Texture2D<float4> t, float2 uv, float2 duvdx, float2 duvdy, float S, bool clampAddress)
 {
-    const float4 m = t.SampleGrad(g_anisoWrap, uv, duvdx, duvdy);
+    const float4 m = mSampleGrad(t, clampAddress, uv, duvdx, duvdy);
     uint w, h;
     t.GetDimensions(w, h);
     const float2 size = float2(w, h);
@@ -102,8 +114,17 @@ MSlopeMoments mNormalMoments(Texture2D<float4> t, float2 uv, float2 duvdx, float
         const float2 p = uv * size - 0.5;
         const float2 c0 = floor(p);
         const float2 f = p - c0;
-        const int2 i0 = int2(c0 - size * floor(c0 / size));
-        const int2 i1 = int2(uint2(i0 + 1) % uint2(w, h));
+        int2 i0, i1;
+        if (clampAddress)
+        {
+            i0 = clamp(int2(c0), int2(0, 0), int2(w - 1, h - 1));
+            i1 = clamp(int2(c0) + 1, int2(0, 0), int2(w - 1, h - 1));
+        }
+        else
+        {
+            i0 = int2(c0 - size * floor(c0 / size));
+            i1 = int2(uint2(i0 + 1) % uint2(w, h));
+        }
         const float2 m00 = (t.Load(int3(i0.x, i0.y, 0)).xy * 2.0 - 1.0) * S, m10 = (t.Load(int3(i1.x, i0.y, 0)).xy * 2.0 - 1.0) * S;
         const float2 m01 = (t.Load(int3(i0.x, i1.y, 0)).xy * 2.0 - 1.0) * S, m11 = (t.Load(int3(i1.x, i1.y, 0)).xy * 2.0 - 1.0) * S;
         const float2 dxu = lerp(m10 - m00, m11 - m01, f.y);  // d mu / du (per texel)
