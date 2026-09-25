@@ -6,7 +6,7 @@
 //   powershell -File Tools/CI/GpuLock.ps1 -Track S -- build/S/bin/unx_gate_shadow_renderergate.exe
 //       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--moving] [--sun-deg-per-s R]
 //       [--wind-gust-period-s T] [--capture FILE.pfm] [--out DIR] [--set k=v]
-// --capture: the main view's linear scene radiance (FrameContext::outputLinearHdr, no exposure) of the last frame as
+// --capture: the main view's linear scene radiance (FrameContext::outputLinearHdr, x exposure) of the last frame as
 // a PFM for unx_reference compare (one resolution; the frames still render as measured, plus one copy each).
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h") && defined(UNX_HAS_SCENEGEN)
 #define S_RENDERER_GATE 1
@@ -229,10 +229,9 @@ int main(int argc, char** argv)
                 check(captureBuffer->Map(0, nullptr, &mapped), "map capture");
                 std::string header = "PF\n" + std::to_string(res.width) + " " + std::to_string(res.height) + "\n-1.0\n";
                 std::vector<float> rgb((size_t)res.width * res.height * 3);
-                // The linear-HDR output is scene radiance already (measured against C's reference: the exposure is not in
-                // it, although Frame.h's comment says 'x exposure'); written as it is.
+                // The linear-HDR output is radiance x exposure (Frame.h; 1 / (1.2 2^ev100)), the same units as C's
+                // unx_reference images (their json records the camera's ev100): written as it is.
                 const float toRadiance = 1.0f;
-                (void)captureEv100;
                 for (uint32_t y = 0; y < res.height; ++y)
                 {
                     const float* row = reinterpret_cast<const float*>(static_cast<const uint8_t*>(mapped) + captureFootprint.Offset + (size_t)y * captureFootprint.Footprint.RowPitch);
@@ -246,7 +245,7 @@ int main(int argc, char** argv)
                 if (!file) fail("cannot write %s", capturePath.c_str());
                 file.write(header.data(), (std::streamsize)header.size());
                 file.write(reinterpret_cast<const char*>(rgb.data()), (std::streamsize)(rgb.size() * sizeof(float)));
-                logf("captured %ux%u linear radiance -> %s\n", res.width, res.height, capturePath.c_str());
+                logf("captured %ux%u linear radiance x exposure (ev100 %.2f) -> %s\n", res.width, res.height, captureEv100, capturePath.c_str());
                 captureBuffer.Reset();
             }
             const shadow::VsmStats& st = shadow::stats(renderer.trackState());
