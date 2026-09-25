@@ -1753,7 +1753,20 @@ void metalGTable(const std::string& out, uint32_t photons)
 // lobe (G) and the separable diffuse shape (K).
 void metalMixStudy(const std::string& out, uint32_t photons)
 {
-    const double rs[] = { 0.3, 0.45, 0.6, 0.8, 1.0 };
+    std::vector<double> rs = { 0.3, 0.45, 0.6, 0.8, 1.0 };
+    {
+        // Optional subset (rerunning part of the sweep): UNX_MIX_RS = comma-separated roughness values.
+        char* v = nullptr;
+        size_t n = 0;
+        if (_dupenv_s(&v, &n, "UNX_MIX_RS") == 0 && v)
+        {
+            rs.clear();
+            std::stringstream ss(v);
+            std::string item;
+            while (std::getline(ss, item, ',')) rs.push_back(std::stod(item));
+        }
+        free(v);
+    }
     const double ws[] = { 0.0, 0.25, 0.5, 0.75, 1.0 };
     const Rgb f0(1.0f);
     const std::vector<EnvSample> furnace = environment(true), sky = environment(false);
