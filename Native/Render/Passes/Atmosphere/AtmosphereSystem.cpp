@@ -22,17 +22,13 @@ struct State
     AtmosphereParams params{};
     bool valid = false;
     ComPtr<ID3D12Resource> paramsBuffer, staging;
-    ComPtr<ID3D12Resource> transmittance, multiScatter, skyView, aerial;
-    uint32_t aerialSize[3] = {};
+    ComPtr<ID3D12Resource> transmittance, multiScatter, skyView;
     bool paramsPending = false;   // staging holds params not yet copied by a recorded frame
     bool lutPending = false;      // transmittance + multi-scatter need a build
-    // Inputs of the last sky view / aerial build.
+    // Inputs of the last sky view build.
     float3 skySun{};
     float skyAltitude = -1;
     bool skyValid = false;
-    float4x4 aerialViewProj{};
-    float3 aerialSun{}, aerialCamera{};
-    bool aerialValid = false;
     AtmosphereStats stats;
 };
 
@@ -65,21 +61,22 @@ AtmosphereParams makeParams(const scene::Atmosphere& a, const QualityConfig& q)
     p.ozoneAbsorption = a.ozoneAbsorption;
     p.groundAlbedo = a.groundAlbedo;
     const std::vector<double> t = q.numbers("atmosphere.transmittance_lut"), m = q.numbers("atmosphere.multiscatter_lut"),
-                              s = q.numbers("atmosphere.sky_view_lut"), ap = q.numbers("atmosphere.aerial_perspective");
-    if (t.size() != 2 || m.size() != 2 || s.size() != 2 || ap.size() != 3) fail("atmosphere: LUT size keys need [w, h] / [w, h, slices]");
+                              s = q.numbers("atmosphere.sky_view_lut");
+    if (t.size() != 2 || m.size() != 2 || s.size() != 2) fail("atmosphere: LUT size keys need [w, h]");
     p.transmittanceSize[0] = u32(t[0]);
     p.transmittanceSize[1] = u32(t[1]);
     p.multiScatterSize[0] = u32(m[0]);
     p.multiScatterSize[1] = u32(m[1]);
     p.skyViewSize[0] = u32(s[0]);
     p.skyViewSize[1] = u32(s[1]);
-    p.aerialSlices = u32(ap[2]);
-    p.aerialMaxDistance = (float)q.number("atmosphere.aerial_max_distance_m");
+    p.froxelSlices = (uint32_t)q.integer("atmosphere.froxels.depth_slices");
+    p.froxelFarM = (float)q.number("atmosphere.froxels.far_m");
+    p.froxelTilePx = (uint32_t)q.integer("atmosphere.froxels.tile_px");
+    p.froxelNearM = (float)q.number("atmosphere.froxels.near_m");
     p.transmittanceSteps = (uint32_t)q.integer("atmosphere.transmittance_steps");
     p.multiScatterDirections = (uint32_t)q.integer("atmosphere.multiscatter_directions");
     p.multiScatterSteps = (uint32_t)q.integer("atmosphere.multiscatter_steps");
     p.skySegments = (uint32_t)q.integer("atmosphere.sky_view_segments");
-    p.aerialStepsPerSlice = (uint32_t)q.integer("atmosphere.aerial_steps_per_slice");
     if (p.skyViewSize[1] % 2 || p.skyViewSize[1] < 4) fail("atmosphere.sky_view_lut height must be even (two halves split at the horizon)");
     if (p.transmittanceSize[0] < 2 || p.transmittanceSize[1] < 2 || p.multiScatterSize[0] < 2 || p.multiScatterSize[1] < 2 || p.multiScatterSize[0] < 9)
         fail("atmosphere: LUTs need >= 2 texels per axis (multi-scatter width >= 9 for the parameter row)");
@@ -96,26 +93,20 @@ void record(FramePassContext& fc)
     const scene::Scene* src = fc.scene.source();
     const scene::Atmosphere atm = src ? src->atmosphere : scene::Atmosphere{};
     const AtmosphereParams p = makeParams(atm, fc.quality);
-    const auto& ap = fc.quality.numbers("atmosphere.aerial_perspective");
-    const uint32_t aw = u32(ap[0]), ah = u32(ap[1]);
 
     if (!s.valid || std::memcmp(&p, &s.params, sizeof p) != 0)
     {
         const bool sizes = !s.valid || std::memcmp(p.transmittanceSize, s.params.transmittanceSize, 8) || std::memcmp(p.multiScatterSize, s.params.multiScatterSize, 8) ||
-                           std::memcmp(p.skyViewSize, s.params.skyViewSize, 8) || p.aerialSlices != s.params.aerialSlices || aw != s.aerialSize[0] || ah != s.aerialSize[1];
+                           std::memcmp(p.skyViewSize, s.params.skyViewSize, 8);
         if (sizes)
         {
-            for (ComPtr<ID3D12Resource>* r : { std::addressof(s.transmittance), std::addressof(s.multiScatter), std::addressof(s.skyView), std::addressof(s.aerial) })
+            for (ComPtr<ID3D12Resource>* r : { std::addressof(s.transmittance), std::addressof(s.multiScatter), std::addressof(s.skyView) })
                 if (*r) fc.device.deferRelease(*r);
             const auto T2 = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
             const auto L = D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
             s.transmittance = createTexture(fc.device, L"S transmittance LUT", T2, p.transmittanceSize[0], p.transmittanceSize[1], 1, DXGI_FORMAT_R32G32B32A32_FLOAT, L);
             s.multiScatter = createTexture(fc.device, L"S multiple scattering LUT", T2, p.multiScatterSize[0], p.multiScatterSize[1] + 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, L);
             s.skyView = createTexture(fc.device, L"S sky view LUT", T2, p.skyViewSize[0], p.skyViewSize[1], 1, DXGI_FORMAT_R32G32B32A32_FLOAT, L);
-            s.aerial = createTexture(fc.device, L"S aerial perspective", D3D12_RESOURCE_DIMENSION_TEXTURE3D, aw, ah, (uint16_t)(4 * (p.aerialSlices + 1)), DXGI_FORMAT_R32G32B32A32_FLOAT, L);
-            s.aerialSize[0] = aw;
-            s.aerialSize[1] = ah;
-            s.aerialSize[2] = p.aerialSlices;
         }
         if (!s.paramsBuffer) s.paramsBuffer = createBuffer(fc.device, L"S atmosphere params", 256);
         if (s.staging) fc.device.deferRelease(s.staging);
@@ -130,7 +121,6 @@ void record(FramePassContext& fc)
         s.paramsPending = true;
         s.lutPending = true;
         s.skyValid = false;
-        s.aerialValid = false;
     }
 
     RenderGraph& g = fc.graph;
@@ -138,12 +128,10 @@ void record(FramePassContext& fc)
     const TextureRef tlut = g.importTexture(s.transmittance.Get(), desc("S transmittance LUT", p.transmittanceSize[0], p.transmittanceSize[1], 1, D3D12_RESOURCE_DIMENSION_TEXTURE2D), L);
     const TextureRef mlut = g.importTexture(s.multiScatter.Get(), desc("S multi-scatter LUT", p.multiScatterSize[0], p.multiScatterSize[1] + 1, 1, D3D12_RESOURCE_DIMENSION_TEXTURE2D), L);
     const TextureRef sky = g.importTexture(s.skyView.Get(), desc("S sky view LUT", p.skyViewSize[0], p.skyViewSize[1], 1, D3D12_RESOURCE_DIMENSION_TEXTURE2D), L);
-    const TextureRef aerial = g.importTexture(s.aerial.Get(), desc("S aerial perspective", aw, ah, (uint16_t)(4 * (p.aerialSlices + 1)), D3D12_RESOURCE_DIMENSION_TEXTURE3D), L);
     const BufferRef params = g.importBuffer(s.paramsBuffer.Get(), BufferDesc{ "S atmosphere params", 256, 0 });
     fc.resources.transmittanceLut = tlut;
     fc.resources.multiScatterLut = mlut;
     fc.resources.skyViewLut = sky;
-    fc.resources.aerialPerspective = aerial;
 
     if (s.paramsPending)
     {
@@ -227,33 +215,6 @@ void record(FramePassContext& fc)
         s.skyAltitude = altitude;
         s.skyValid = true;
         ++s.stats.skyViewBuilds;
-    }
-
-    if (!s.aerialValid || std::memcmp(&mv.viewProj, &s.aerialViewProj, sizeof(float4x4)) != 0 || std::memcmp(&sun, &s.aerialSun, sizeof sun) != 0 ||
-        std::memcmp(&mv.position, &s.aerialCamera, sizeof(float3)) != 0)
-    {
-        ID3D12PipelineState* pa = sh.compute("Passes/Atmosphere/AerialPerspective");
-        const D3D12_GPU_VIRTUAL_ADDRESS cb = constants();
-        g.addPass("s.atmosphere.aerial", QueueType::Compute,
-                  [&](PassBuilder& b) {
-                      b.use(params, Use::SrvCompute);
-                      b.use(tlut, Use::SrvCompute);
-                      b.use(mlut, Use::SrvCompute);
-                      b.use(aerial, Use::UavCompute);
-                      b.keep();
-                  },
-                  [=](PassContext& c) {
-                      const uint32_t k[8] = { c.srv(params), c.srv(tlut), c.srv(mlut), c.uav(aerial), aw, ah, 0, 0 };
-                      c.cmd->SetPipelineState(pa);
-                      c.bindFrameConstants(cb);
-                      c.computeConstants(k, 8);
-                      c.cmd->Dispatch(groups(aw, 8), groups(ah, 8), 1);
-                  });
-        s.aerialViewProj = mv.viewProj;
-        s.aerialSun = sun;
-        s.aerialCamera = mv.position;
-        s.aerialValid = true;
-        ++s.stats.aerialBuilds;
     }
 }
 } // namespace unx::render::atmosphere

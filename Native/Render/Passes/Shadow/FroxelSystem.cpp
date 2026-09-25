@@ -83,10 +83,15 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
 
     RenderGraph& g = fc.graph;
     const BufferRef lights = g.createBuffer(BufferDesc{ "S froxel light lists", bytes, 0 });
-    const TextureRef volume = g.createTexture(TextureDesc{ "S froxels", grid.gridX, grid.gridY, (uint16_t)grid.slices, 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    // Air volume: in-scattering, optical depth, sun transmittance; nodes 0..S each (FroxelIntegrate.hlsl).
+    const TextureRef volume = g.createTexture(TextureDesc{ "S air volume", grid.gridX, grid.gridY, (uint16_t)(3 * (grid.slices + 1)), 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                                            D3D12_RESOURCE_DIMENSION_TEXTURE3D });
     fc.resources.froxelLights = lights;
     fc.resources.froxels = volume;
+    fc.resources.aerialPerspective = volume;  // atmosphereAerial / atmosphereAirView read it (Atmosphere.hlsli)
+    const float stepAltitude = (float)q.number("atmosphere.froxels.air_step_altitude_m");
+    const uint32_t experiment = (uint32_t)q.integer("atmosphere.froxels.experiment_disable");  // cost attribution only
+    if (!(stepAltitude > 0)) fail("atmosphere.froxels.air_step_altitude_m must be > 0");
     const TextureRef tlut = fc.resources.transmittanceLut, mlut = fc.resources.multiScatterLut;
     if (!tlut.valid() || !mlut.valid()) fail("S.froxels: the atmosphere LUTs were not recorded this frame");
     VsmFrameRefs vsm;
@@ -142,6 +147,8 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
                       k[8] = ctx.srv(vsm.bound);
                       std::memcpy(&k[9], &grid.shadowTexelsPerTile, 4);
                   }
+                  std::memcpy(&k[10], &stepAltitude, 4);
+                  k[11] = experiment;
                   ctx.cmd->SetPipelineState(pi);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 12);

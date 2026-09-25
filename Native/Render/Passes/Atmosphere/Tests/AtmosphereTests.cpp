@@ -75,7 +75,7 @@ int main(int argc, char** argv)
         const ref::D3 camPos = d3(cam.position);
 
         // Queries for the public lookups.
-        std::vector<float4> skyQ, sunQ, aerialQ;
+        std::vector<float4> skyQ, sunQ;
         for (double el : { -0.6, -0.08, -0.02, -0.004, 0.0, 0.003, 0.02, 0.1, 0.4, 1.2 })
             for (double az : { 0.0, 0.05, 0.4, 1.3, 2.4, 3.1 })
             {
@@ -84,11 +84,8 @@ int main(int argc, char** argv)
                 skyQ.push_back({ (float)(std::cos(el) * std::cos(sa)), (float)std::sin(el), (float)(std::cos(el) * std::sin(sa)), 0 });
             }
         for (float3 pos : { float3{ 0, 0, 0 }, float3{ 100, 30, -50 }, float3{ -2000, 800, 1500 } }) sunQ.push_back({ pos.x, pos.y, pos.z, 0 });
-        for (float u : { 0.1f, 0.5f, 0.93f })
-            for (float v : { 0.2f, 0.55f, 0.9f })
-                for (float z : { 3.f, 40.f, 700.f, 5000.f, 30000.f }) aerialQ.push_back({ u, v, z, 0 });
 
-        std::shared_ptr<std::vector<uint8_t>> rt, rm, rs, ra, oSky, oSun, oAerial;
+        std::shared_ptr<std::vector<uint8_t>> rt, rm, rs, oSky, oSun;
         auto probe = [&](FramePassContext& fc, int mode, const std::vector<float4>& q) {
             const uint32_t n = (uint32_t)q.size(), outCount = mode == 2 ? 2 * n : n;
             BufferRef in = tf.uploadBuffer(fc, q.data(), q.size() * 16, 16, "probe queries");
@@ -98,12 +95,12 @@ int main(int argc, char** argv)
             const D3D12_GPU_VIRTUAL_ADDRESS cb = fc.frameConstantsFor(fc.frame.mainView);
             fc.graph.addPass("s.test.probe", QueueType::Graphics,
                              [&](PassBuilder& b) {
-                                 for (TextureRef t : { r.transmittanceLut, r.multiScatterLut, r.skyViewLut, r.aerialPerspective }) b.use(t, Use::SrvCompute);
+                                 for (TextureRef t : { r.transmittanceLut, r.multiScatterLut, r.skyViewLut }) b.use(t, Use::SrvCompute);
                                  b.use(in, Use::SrvCompute);
                                  b.use(out, Use::UavCompute);
                              },
                              [=](PassContext& c) {
-                                 const uint32_t k[8] = { c.srv(r.transmittanceLut), c.srv(r.multiScatterLut), c.srv(r.skyViewLut), c.srv(r.aerialPerspective), c.srv(in), c.uav(out), n, 0 };
+                                 const uint32_t k[8] = { c.srv(r.transmittanceLut), c.srv(r.multiScatterLut), c.srv(r.skyViewLut), 0xFFFFFFFFu, c.srv(in), c.uav(out), n, 0 };
                                  c.cmd->SetPipelineState(pso);
                                  c.bindFrameConstants(cb);
                                  c.computeConstants(k, 8);
@@ -117,10 +114,8 @@ int main(int argc, char** argv)
             rt = tf.readback(fc, fc.resources.transmittanceLut);
             rm = tf.readback(fc, fc.resources.multiScatterLut);
             rs = tf.readback(fc, fc.resources.skyViewLut);
-            ra = tf.readback(fc, fc.resources.aerialPerspective);
             oSky = probe(fc, 0, skyQ);
             oSun = probe(fc, 1, sunQ);
-            oAerial = probe(fc, 2, aerialQ);
         });
         const Lut T{ *rt, p.transmittanceSize[0], p.transmittanceSize[1] };
         const Lut MS{ *rm, p.multiScatterSize[0], p.multiScatterSize[1] + 1 };
@@ -213,56 +208,16 @@ int main(int argc, char** argv)
             report(worst < 5e-4, "sun disk radiance vs reference (rel.)", worst, 5e-4);
         }
 
-        // 5. Aerial perspective at arbitrary (uv, depth) vs the reference along the same ray.
-        {
-            double worstL = 0, worstT = 0, nearL = 0, nearT = 0;
-            const ViewDesc& v = tf.frame.mainView;
-            const float3 fwd = normalize(cam.forward);
-            for (size_t i = 0; i < aerialQ.size(); ++i)
-            {
-                float4 gi, gt;
-                std::memcpy(&gi, oAerial->data() + (2 * i) * 16, 16);
-                std::memcpy(&gt, oAerial->data() + (2 * i + 1) * 16, 16);
-                const float4 q = aerialQ[i];
-                const double ndc[4] = { q.x * 2.0 - 1, 1 - q.y * 2.0, 1, 1 };
-                double np[4] = {};
-                for (int r = 0; r < 4; ++r)
-                    for (int c = 0; c < 4; ++c) np[r] += v.invViewProj.m[r][c] * ndc[c];
-                const ref::D3 dir = ref::normalize(ref::D3{ np[0] / np[3], np[1] / np[3], np[2] / np[3] } - camPos);
-                const double cosA = ref::dot(dir, d3(fwd));
-                ref::D3 L, Tr;
-                ref::aerial(m, camPos, dir, q.z / cosA, sun, [&](ref::D3 x, ref::D3 s) { return psiFromLut(MS, p, m, x, s); }, L, Tr, 4096);
-                // In-scattering floor 1e-6 per unit illuminance (0.13 nit at 128 klx, < 1e-4 of a sunlit surface): the
-                // near-camera values are ~1e-5 and carry a measured ~2e-8 absolute offset of no visible consequence.
-                const double eL = relErr(d3(gi) * (1.0 / sc.sun.illuminance), L, 1e-6), eT = relErr(d3(gt), Tr, 1e-6);
-                worstL = std::max(worstL, eL);
-                worstT = std::max(worstT, eT);
-                if (q.z <= 700)
-                {
-                    nearL = std::max(nearL, eL);
-                    nearT = std::max(nearT, eT);
-                }
-                if (eL > 5e-3 || eT > 1e-3)
-                    logf("  aerial uv (%.2f %.2f) z %.0f: L gpu %.4e %.4e %.4e ref %.4e %.4e %.4e  T gpu %.5f ref %.5f\n", q.x, q.y, q.z, gi.x / sc.sun.illuminance,
-                         gi.y / sc.sun.illuminance, gi.z / sc.sun.illuminance, L.x, L.y, L.z, gt.y, Tr.y);
-            }
-            // Upward rays: K bends between the quadratic nodes (562 m, 1 km): ~0.5 % measured of an in-scattering that is a
-            // few percent of the pixel at these depths.
-            report(nearL < 1e-2, "aerial in-scattering, depth <= 700 m (rel.)", nearL, 1e-2);
-            report(nearT < 1e-4, "aerial transmittance, depth <= 700 m (rel.)", nearT, 1e-4);
-            // Beyond: linear-in-depth interpolation over slices ~2.7 km wide at 30 km and bilinear across 64 screen rows,
-            // largest in the horizon band (rays grazing the surface); smaller than the multiple-scattering model error.
-            report(worstL < 2e-2, "aerial in-scattering, all depths to 30 km (rel.)", worstL, 2e-2);
-            report(worstT < 1e-2, "aerial transmittance, all depths to 30 km (rel.)", worstT, 1e-2);
-        }
+        // 5. Aerial perspective: the air volume is built by froxels() on the froxel grid (it reads the VSM); its accuracy
+        //    against this reference is checked in Passes/Shadow/Tests/FroxelTests.cpp.
 
-        // 6. Rebuild policy and determinism: same inputs -> no passes; changed sun -> sky + aerial only, same bits
+        // 6. Rebuild policy and determinism: same inputs -> no passes; changed sun -> sky view only, same bits
         //    when the original sun comes back.
         {
             const atmosphere::AtmosphereStats before = atmosphere::stats(tf.trackState);
             tf.run([&](FramePassContext& fc) { tracks::atmosphere(fc); });
             const atmosphere::AtmosphereStats same = atmosphere::stats(tf.trackState);
-            report(same.lutBuilds == before.lutBuilds && same.skyViewBuilds == before.skyViewBuilds && same.aerialBuilds == before.aerialBuilds,
+            report(same.lutBuilds == before.lutBuilds && same.skyViewBuilds == before.skyViewBuilds,
                    "unchanged inputs rebuild nothing (builds added)", double(same.skyViewBuilds - before.skyViewBuilds), 0);
             scene::Scene moved = sc;
             moved.sun.direction = normalize(float3{ 0.2f, 0.8f, 0.1f });

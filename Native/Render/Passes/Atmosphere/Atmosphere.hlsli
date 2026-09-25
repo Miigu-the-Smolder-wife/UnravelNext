@@ -8,7 +8,8 @@
 // Exactness: the LUTs integrate the same model as the reference path tracer (Rayleigh, Mie HG, ozone, Lambertian
 // ground) with the previous engine's quadratures; multiple scattering follows Hillaire 2020 (isotropic second-order
 // series closed geometrically), which is the model's approximation and is recorded in S_STATUS_KO.md against the
-// reference. Air shadowing (terrain, casters) is not in these functions; the froxel volume carries it (Froxel.hlsli).
+// reference. Air shadowing by casters and local lights' in-scattering are in atmosphereAerial / atmosphereAirView
+// (the air volume); atmosphereSkyRadiance / atmosphereSunRadiance / atmosphereSunIlluminance do not include caster shadows.
 #ifndef UNX_ATMOSPHERE_HLSLI
 #define UNX_ATMOSPHERE_HLSLI
 #include "Bindless.hlsli"
@@ -62,33 +63,57 @@ float3 atmosphereSunIlluminance(AtmosphereSrvs s, float3 worldPos)
 }
 
 // Air between the main camera and the surface at screen uv (main view, [0,1]^2) and view-space depth linearDepth
-// (Frame.hlsli linearDepth): in-scattered radiance (nits, unshadowed) and chromatic transmittance. The frame constants
-// bound must be the main view's (the volume is built for its frustum).
-//  - Transmittance: the volume's optical depth interpolated linearly in depth (exact for a homogeneous segment).
-//    (Bruneton's two-lookup difference of LUT optical depths was measured worse: its absolute LUT error dominates
-//    short and near-horizontal segments; S_STATUS_KO.md.)
-//  - In-scattering: I = K (1 - T) with K interpolated linearly in depth between nodes (exact for a homogeneous segment,
-//    K does not depend on the density scale) and the exact Rayleigh / Mie phase of the pixel's direction.
-// Depths beyond atmosphere.aerial_max_distance_m clamp to it. The composition with the froxel volume is in Froxel.hlsli.
+// (Frame.hlsli linearDepth): in-scattered radiance (nits) and chromatic transmittance of everything in the air of the
+// main view, from the air volume S's froxels() builds on the froxel grid (tile_px x depth_slices, FroxelIntegrate.hlsl):
+// the atmosphere's single scattering (with the casters' shadows in the air, VSM) and multiple scattering, and the local
+// lights' in-scattering by the air. Two trilinear fetches; the frame constants bound must be the main view's.
+//  - Depth: nodes exponential in view depth to atmosphere.froxels.far_m (clamped beyond), interpolated linearly in depth
+//    (hardware weight, 1/256 of a node step).
+//  - Direction: the phase of the tile-centre ray, interpolated bilinearly across tiles: within 0.1 % of the pixel's own
+//    Mie phase (g = 0.8, 0.67 deg tiles at 4K; S_STATUS_KO.md), Rayleigh exact to 1e-5.
 void atmosphereAerial(AtmosphereSrvs s, float2 uv, float linearDepth, out float3 inscatter, out float3 transmittance)
 {
-    const AtmosphereParams a = airParamsFromTexels(s.multiScatter);
     Texture3D<float4> v = ResourceDescriptorHeap[s.aerial];
-    const float S = a.aerialSlices, N = S + 1, D = 4 * N, half = 0.5 / D;
-    const float z = min(max(linearDepth, 0.0), a.aerialMaxDistance);
-    const float n0 = clamp(floor(sqrt(z / a.aerialMaxDistance) * S), 0.0, S - 1);
-    const float za = a.aerialMaxDistance * (n0 / S) * (n0 / S), zb = a.aerialMaxDistance * ((n0 + 1) / S) * ((n0 + 1) / S);
-    const float w = saturate((z - za) / (zb - za));
-    // Node n of component c sits at depth coordinate (c N + n + 0.5) / 4N.
-    const float3 kR = lerp(v.SampleLevel(g_linearClamp, float3(uv, n0 / D + half), 0).rgb, v.SampleLevel(g_linearClamp, float3(uv, (n0 + 1) / D + half), 0).rgb, w);
-    const float3 kM = lerp(v.SampleLevel(g_linearClamp, float3(uv, (N + n0) / D + half), 0).rgb, v.SampleLevel(g_linearClamp, float3(uv, (N + n0 + 1) / D + half), 0).rgb, w);
-    const float3 kS = lerp(v.SampleLevel(g_linearClamp, float3(uv, (2 * N + n0) / D + half), 0).rgb, v.SampleLevel(g_linearClamp, float3(uv, (2 * N + n0 + 1) / D + half), 0).rgb, w);
-    const float3 tau = lerp(v.SampleLevel(g_linearClamp, float3(uv, (3 * N + n0) / D + half), 0).rgb, v.SampleLevel(g_linearClamp, float3(uv, (3 * N + n0 + 1) / D + half), 0).rgb, w);
-    transmittance = exp(-tau);
-    const float3 dir = airViewDirection(uv);
-    const float nu = dot(dir, normalize(g_sunDirection));
-    const float3 K = kR * airRayleighPhase(nu) + kM * airMiePhase(nu, a.mieG) + kS;
-    inscatter = K * airOneMinusExp(tau) * (g_sunIlluminance * g_sunColor);
+    Texture2D<float4> p = ResourceDescriptorHeap[s.multiScatter];
+    uint w, h, d;
+    v.GetDimensions(w, h, d);
+    uint pw, ph;
+    p.GetDimensions(pw, ph);
+    const float farM = p.Load(int3(4, ph - 1, 0)).w;
+    const float4 q8 = p.Load(int3(8, ph - 1, 0));
+    const float tilePx = asuint(q8.z), nearM = q8.w;
+    const float N = d / 3;  // nodes per part (S + 1)
+    const float c = airNodeCoord(nearM, farM, N - 1, min(linearDepth, farM));
+    const float2 xy = uv * float2(g_viewWidth, g_viewHeight) / (float2(w, h) * tilePx);
+    const float4 a = v.SampleLevel(g_linearClamp, float3(xy, (c + 0.5) / d), 0);
+    const float4 t = v.SampleLevel(g_linearClamp, float3(xy, (c + 0.5 + N) / d), 0);
+    inscatter = a.rgb / g_exposure;  // stored pre-exposed
+    transmittance = exp(-t.rgb);
+}
+
+// atmosphereAerial plus the unshadowed solar illuminance (lux) at the surface point (main view): the air volume's sun
+// transmittance at that depth along the tile-centre ray (the pixel's own ray differs by less than a tile laterally).
+// Three trilinear fetches; replaces atmosphereAerial + atmosphereSunIlluminance for main-view pixels.
+void atmosphereAirView(AtmosphereSrvs s, float2 uv, float linearDepth, out float3 inscatter, out float3 transmittance, out float3 sunIlluminance)
+{
+    Texture3D<float4> v = ResourceDescriptorHeap[s.aerial];
+    Texture2D<float4> p = ResourceDescriptorHeap[s.multiScatter];
+    uint w, h, d;
+    v.GetDimensions(w, h, d);
+    uint pw, ph;
+    p.GetDimensions(pw, ph);
+    const float farM = p.Load(int3(4, ph - 1, 0)).w;
+    const float4 q8 = p.Load(int3(8, ph - 1, 0));
+    const float tilePx = asuint(q8.z), nearM = q8.w;
+    const float N = d / 3;
+    const float c = airNodeCoord(nearM, farM, N - 1, min(linearDepth, farM));
+    const float2 xy = uv * float2(g_viewWidth, g_viewHeight) / (float2(w, h) * tilePx);
+    const float4 a = v.SampleLevel(g_linearClamp, float3(xy, (c + 0.5) / d), 0);
+    const float4 t = v.SampleLevel(g_linearClamp, float3(xy, (c + 0.5 + N) / d), 0);
+    const float4 e = v.SampleLevel(g_linearClamp, float3(xy, (c + 0.5 + 2 * N) / d), 0);
+    inscatter = a.rgb / g_exposure;
+    transmittance = exp(-t.rgb);
+    sunIlluminance = e.rgb * (g_sunIlluminance * g_sunColor);
 }
 
 #endif

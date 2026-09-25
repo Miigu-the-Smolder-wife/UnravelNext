@@ -9,14 +9,13 @@ multiscatter_steps = 64              # quadratic-spaced exact-exponential steps 
 # (64 per side of the true horizon, as the previous engine's 64 per half; the first draft's 108 was coarser).
 sky_view_lut = [192, 128]
 sky_view_segments = 128              # quadratic segments x Gauss-Legendre 4 along each sky ray
-aerial_perspective = [64, 64, 32]    # screen columns x, y (64: the near-horizon rows change fast at long range), quadratic depth slices
-aerial_max_distance_m = 64000        # depth of the last slice
-aerial_steps_per_slice = 4
 
 [atmosphere.froxels]
 tile_px = 24
 depth_slices = 64                    # exponential in view depth between near_m and far_m (<= 64: one thread per slice)
 lights_max = 32                      # per froxel list (<= 32, FROXEL_LIST_MAX); more reaching a froxel are counted
 near_m = 0.5                         # slice 0 spans the camera .. near_m (far / near)^(1/64)
-far_m = 4096                         # the air's shadowing beyond it is not held (Froxel.hlsli)
+far_m = 65536                        # last node of the air volume (air perspective to 64 km; depths beyond clamp)
+experiment_disable = 0               # cost attribution only (never in a verdict): 1 air shadows, 2 local lights, 4 air integration
+air_step_altitude_m = 100            # air integration substeps: at most this altitude change per step (midpoint error (dh/H_mie)^2/24)
 shadow_texels_per_tile = 4           # air shadows: VSM level with texel <= tile width / 4 (boundary placement, VsmAir.hlsli)

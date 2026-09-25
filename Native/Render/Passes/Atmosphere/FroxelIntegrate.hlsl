@@ -1,22 +1,25 @@
 // unx-kernel: cs_6_6 main
-// Froxel integration (ARCHITECTURE 2.3 "볼륨 산란", INTERFACES 5.6 froxelScattering). One group per screen tile, one
-// thread per depth slice; slice s is the segment of the tile-centre ray between nodes s and s + 1 (slice 0 starts at
-// the camera, node S = farM). Per slice, with the air's coefficients at the segment's midpoint (constant along it):
-//  - sun: the single-scattered sunlight the air does NOT receive, -f x E_sun T_sun (sigma_R P_R + sigma_M P_M)
-//    (1 - e^(-sigma_t L)) / sigma_t, where f is the segment's shadowed fraction by length (vsmAirShadowFraction at the
-//    froxel's lateral resolution). The multiple-scattering term of the air perspective is not reduced (its sources are
-//    the whole sky, not the sun direction);
+// Air volume of the main view on the froxel grid (ARCHITECTURE 2.3 "볼륨 산란"; Atmosphere.hlsli atmosphereAerial /
+// atmosphereAirView). One group per screen tile, one thread per depth slice; slice s is the segment of the tile-centre
+// ray between nodes s and s + 1 (node 0 = camera, node S = far_m). Per slice, midpoint substeps of at most
+// air_step_altitude_m altitude change (exact exponential within each):
+//  - the atmosphere's single scattering with the tile-centre phase, times (1 - f), f the segment's fraction shadowed by
+//    casters (vsmAirShadowFraction, at shadow_texels_per_tile texels per tile width); multiple scattering (Hillaire's
+//    Psi_ms; its sources are the whole sky and are not reduced by the casters' shadows);
 //  - local lights of the froxel's list: in-scattering by the air, int e^(-sigma_t t) (sigma_R P_R + sigma_M P_M) I(w)
 //    window(d) / d^2 dt, integrated in the angle subtended at the light (t = t_c + h tan theta, dt / d^2 = dtheta / h:
 //    the integrand is smooth in theta) with 8-point Gauss-Legendre. Area lights act as point sources of their
 //    projected intensity (froxelIntensity). No local-light shadows in the air yet (S_STATUS_KO.md);
-//  - optical depth sigma_t L.
-// Then a group scan: node n = sum over slices j < n of e^(-tau before j) x source_j, written to volume slice n - 1 as
-// rgb x exposure of the main view (fp16 keeps the relative precision of what is displayed, also at night exposures where
-// local lights' air glow is 1e-4 nits; froxelScattering divides it out), with a = 1 (no local media in scenes v1).
+//  - optical depth.
+// A group scan gives node n = sum over slices j < n of e^(-tau before j) x source_j. Volume (RGBA16F, gridX x gridY x
+// 3 (S + 1)): part 0 in-scattering x exposure of the main view (fp16 keeps the relative precision of what is displayed,
+// also at night exposures where local lights' air glow is 1e-4 nits), part 1 optical depth, part 2 sun transmittance at
+// the node. No local media in scenes v1 (their optical depth adds to part 1).
 // P[0].x froxelLights SRV (raw), P[0].y volume UAV (RWTexture3D<float4>), P[0].z transmittance LUT, P[0].w multi-scatter LUT
 // P[1].x VSM page table SRV (raw), .y pool SRV (raw), .z blocks SRV (raw), .w VSM constants CBV (0xFFFFFFFF: no VSM)
-// P[2].x VSM search bound SRV (raw), P[2].y shadow texels per tile (float bits)
+// P[2].x VSM search bound SRV (raw), P[2].y shadow texels per tile (float bits), P[2].z air step altitude m (float bits),
+// P[2].w experiment mask (atmosphere.froxels.experiment_disable; 0; cost attribution only: 1 air shadows, 2 local lights,
+// 4 air integration)
 // Frame constants of the main view.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -63,20 +66,40 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     const FroxelGrid g = froxelGrid(P[0].x);
     const uint2 tile = gid.xy;
     const AtmosphereParams a = airParamsFromTexels(P[0].w);
+    const uint tlut = P[0].z, mlut = P[0].w;
     const float3 ray = froxelTileRay(g, tile);
     const float toRay = length(ray);
     const float3 dir = ray / toRay;
+    const float3 sun = normalize(g_sunDirection);
+    const float3 E = g_sunIlluminance * g_sunColor;
+    const float nu = dot(dir, sun);
+    const float phaseR = airRayleighPhase(nu), phaseM = airMiePhase(nu, a.mieG);
+    const float stepAltitude = asfloat(P[2].z);
+    const uint experiment = P[2].w;
     float3 tau = 0, source = 0;
     if (s < g.slices)
     {
         const float z0 = froxelNodeDepth(g, s), z1 = froxelNodeDepth(g, s + 1);
         const float t0 = z0 * toRay, len = (z1 - z0) * toRay;
         const float3 o = g_cameraPosition + dir * t0;
-        const float3 pm = airLiftToSurface(a, o + dir * (0.5 * len));
-        const AirCoefficients c = airCoefficients(a, max(0.0, airAltitude(a, pm)));
-        tau = c.extinction * len;
-        // Sun.
-        if (P[1].w != 0xFFFFFFFFu)
+        // Substeps: the air's density is exponential in altitude; midpoint steps of at most stepAltitude.
+        const float h0 = airAltitude(a, o), h1 = airAltitude(a, o + dir * len), hm = airAltitude(a, o + dir * (0.5 * len));
+        const float dh = max(max(abs(h1 - h0), abs(hm - h0)), abs(hm - h1));
+        const uint steps = (experiment & 4) ? 0u : (uint)clamp(ceil(dh / stepAltitude), 1.0, 32.0);
+        const float dt = len / steps;
+        float3 single = 0, multi = 0;
+        [loop] for (uint k = 0; k < steps; ++k)
+        {
+            const float3 p = airLiftToSurface(a, o + dir * ((k + 0.5) * dt));
+            const AirCoefficients c = airCoefficients(a, max(0.0, airAltitude(a, p)));
+            const float3 w = exp(-tau) * airIntegral(c.extinction, dt);
+            single += w * (c.rayleigh * phaseR + c.mie * phaseM) * airSunTransmittance(a, tlut, p, sun);
+            multi += w * (c.rayleigh + c.mie) * airMultipleScattering(a, mlut, p, sun);
+            tau += c.extinction * dt;
+        }
+        // Casters' shadows in the air: the shadowed fraction of the segment removes that part of the single scattering.
+        float f = 0;
+        if (P[1].w != 0xFFFFFFFFu && any(single > 0) && (experiment & 1) == 0)
         {
             VsmResources r;
             r.table = ResourceDescriptorHeap[P[1].x];
@@ -85,26 +108,21 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             r.searchBound = ResourceDescriptorHeap[P[2].x];
             r.cbv = P[1].w;
             ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[P[1].w];
-            const float3 sun = normalize(g_sunDirection);
-            const float3 sunT = airSunTransmittance(a, P[0].z, pm, sun);
-            if (any(sunT > 0))
-            {
-                const uint k = vsmAirLevel(vc, froxelTileWidth(g, 0.5 * (z0 + z1)), asfloat(P[2].y));
-                const float f = vsmAirShadowFraction(r, o, o + dir * len, k);
-                const float nu = dot(dir, sun);
-                const float3 phase = c.rayleigh * airRayleighPhase(nu) + c.mie * airMiePhase(nu, a.mieG);
-                source -= f * (g_sunIlluminance * g_sunColor) * sunT * phase * airIntegral(c.extinction, len);
-            }
+            uint k;
+            if (vsmAirLevel(vc, froxelTileWidth(g, 0.5 * (z0 + z1)), asfloat(P[2].y), k)) f = vsmAirShadowFraction(r, o, o + dir * len, k);
         }
-        // Local lights of the froxel's list.
+        source = E * (single * (1 - f) + multi);
+        // Local lights of the froxel's list (air at the segment's midpoint).
+        const float3 pm = airLiftToSurface(a, o + dir * (0.5 * len));
+        const AirCoefficients cm = airCoefficients(a, max(0.0, airAltitude(a, pm)));
         ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].x];
         const uint h = lists.Load(g.headerBase + froxelIndex(g, tile, s) * 4);
-        const uint first = h >> 6, count = h & 63u;
+        const uint first = h >> 6, count = (experiment & 2) ? 0u : h & 63u;
         for (uint i = 0; i < count; ++i)
         {
             const uint w = lists.Load(g.indexBase + ((first + i) >> 1) * 4);
             const uint li = ((first + i) & 1) ? w >> 16 : w & 0xFFFFu;
-            source += airLocalLight(loadLight(li), o, dir, len, c, a.mieG);
+            source += airLocalLight(loadLight(li), o, dir, len, cm, a.mieG);
         }
     }
     // Exclusive scan of the optical depth, inclusive scan of the attenuated sources (Hillis-Steele over 64 slices).
@@ -128,7 +146,18 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     }
     if (s < g.slices)
     {
+        // Node s + 1 of the three parts; thread 0 also writes node 0 (the camera).
         RWTexture3D<float4> volume = ResourceDescriptorHeap[P[0].y];
-        volume[uint3(tile, s)] = float4(gs_source[s] * g_exposure, 1);  // pre-exposed: fp16 precision follows the display
+        const uint N = g.slices + 1;
+        const float3 node = g_cameraPosition + dir * (froxelNodeDepth(g, s + 1) * toRay);
+        volume[uint3(tile, s + 1)] = float4(min(gs_source[s] * g_exposure, 65504.0), 0);  // pre-exposed: fp16 precision follows the display
+        volume[uint3(tile, N + s + 1)] = float4(gs_tau[s], 0);
+        volume[uint3(tile, 2 * N + s + 1)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, node), sun), 0);
+        if (s == 0)
+        {
+            volume[uint3(tile, 0)] = 0;
+            volume[uint3(tile, N)] = 0;
+            volume[uint3(tile, 2 * N)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, g_cameraPosition), sun), 0);
+        }
     }
 }

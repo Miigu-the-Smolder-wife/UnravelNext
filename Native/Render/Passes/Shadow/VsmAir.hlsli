@@ -6,74 +6,137 @@
 #define UNX_VSM_AIR_HLSLI
 #include "Passes/Shadow/VsmSample.hlsli"
 
-#define VSM_AIR_DEPTH 5u  // halvings of a mixed segment (at most 32 leaves)
-
 // Level for the air of a froxel 'width' metres wide: the finest level whose texel is not larger than width / texelsPerTile
 // (atmosphere.froxels.shadow_texels_per_tile: a shadow boundary crossing the tile-centre segment is placed to that
-// fraction of the tile). The page requests (VsmMarkAir) and the lookup use this rule.
-uint vsmAirLevel(ConstantBuffer<VsmConstants> c, float width, float texelsPerTile) { return vsmLevelForFootprint(c, width / texelsPerTile); }
-
-// Square (light-space lateral centre, radius) the classification of segment p0 -> p1 (light space) reads.
-void vsmAirSquare(float3 p0, float3 p1, out float2 centre, out float radius)
+// fraction of the tile). False when that texel is coarser than the coarsest clipmap level: the clipmap holds no level
+// for that air (at 4K about 1 km away), which then gets no caster shadows (S_STATUS_KO.md: coarser levels for far air).
+// The page requests (VsmMarkAir) and the lookup use this rule.
+bool vsmAirLevel(ConstantBuffer<VsmConstants> c, float width, float texelsPerTile, out uint k)
 {
-    centre = 0.5 * (p0.xy + p1.xy);
-    radius = 0.5 * length(p1.xy - p0.xy);
+    const float level = floor(log2(max(width / texelsPerTile, 1e-30) * 1024.0) + c.lodBias);  // tau_0 = 2^-10 m
+    k = (uint)clamp(level, 0.0, float(VSM_LEVELS - 1));
+    return level <= float(VSM_LEVELS - 1);
 }
 
-// Fraction (by length) of the world segment a -> b below the height field held at level k (or the finest resident level
-// above it). Sub-segments are settled by vsmRegionClassify against the plane that contains them (gradient along the
-// segment, none across it: every texel under the segment is compared with the segment's own height); mixed ones are
-// halved (stackless in-order walk) down to a texel or VSM_AIR_DEPTH halvings. A leaf takes the exact fraction of its
-// linear height profile below the texel under its midpoint (exact when the leaf lies over one texel).
+// ---- Segment walk over the block hierarchy (VsmPageMax): cells of 128 (the page), 32 and 8 texels, then texels.
+// Cells that the segment A + D t (texel coordinates of level k, t in [t0, t1]) crosses, in order (2D DDA).
+struct VsmAirWalk
+{
+    float2 tNext, tDelta;
+    int2 cell, step;
+    float t, tEnd;
+};
+VsmAirWalk vsmAirWalkBegin(float2 A, float2 D, float size, float t0, float t1)
+{
+    VsmAirWalk w;
+    const float2 p = A + D * (t0 + (t1 - t0) * 1e-4);  // inside the first cell (not on its boundary)
+    w.cell = int2(floor(p / size));
+    w.step = int2(sign(D));
+    [unroll] for (uint i = 0; i < 2; ++i)
+    {
+        const bool moves = abs(D[i]) > 1e-12;
+        const float boundary = (w.cell[i] + (w.step[i] > 0 ? 1 : 0)) * size;
+        w.tNext[i] = moves ? (boundary - A[i]) / D[i] : 3.0e38;
+        w.tDelta[i] = moves ? size / abs(D[i]) : 3.0e38;
+    }
+    w.t = t0;
+    w.tEnd = t1;
+    return w;
+}
+// Next cell and its parameter interval; false when the walk has passed t1.
+bool vsmAirWalkNext(inout VsmAirWalk w, out float ta, out float tb, out int2 cell)
+{
+    ta = w.t;
+    tb = w.t;
+    cell = w.cell;
+    if (ta >= w.tEnd) return false;
+    const bool x = w.tNext.x < w.tNext.y;
+    tb = min(x ? w.tNext.x : w.tNext.y, w.tEnd);
+    if (x)
+    {
+        w.cell.x += w.step.x;
+        w.tNext.x += w.tDelta.x;
+    }
+    else
+    {
+        w.cell.y += w.step.y;
+        w.tNext.y += w.tDelta.y;
+    }
+    w.t = tb;
+    return true;
+}
+
+// The sub-segment [ta, tb] against one block (plane + residual bounds of its non-empty texels): VSM_REGION_LIT when it
+// lies at or above every texel, VSM_REGION_UMBRA when every texel is present and above it, else VSM_REGION_MIXED.
+// q = page-local texel coordinates (the plane's own: texel i spans [i, i + 1)); the texels under the segment have
+// centres within half a texel diagonal of it, so the plane is compared with that margin.
+uint vsmAirBlock(VsmBlock blk, float2 qa, float2 qb, float ha, float hb)
+{
+    if (blk.range.y == VSM_EMPTY) return VSM_REGION_LIT;
+    const float da = ha - (blk.ref + dot(blk.plane.xy, qa) + blk.plane.z), db = hb - (blk.ref + dot(blk.plane.xy, qb) + blk.plane.z);
+    const float margin = 0.70711 * length(blk.plane.xy);
+    if (min(da, db) - margin >= blk.residual.y) return VSM_REGION_LIT;
+    if (blk.range.x != VSM_EMPTY && max(da, db) + margin < blk.residual.x) return VSM_REGION_UMBRA;
+    return VSM_REGION_MIXED;
+}
+
+// Fraction (by length) of the world segment a -> b whose points lie below the height field of level k. The segment's
+// light-space height is linear in its parameter; it is walked through the pages it crosses, and each page, 32-texel and
+// 8-texel block it crosses is settled against the segment's own heights at the block's entry and exit (vsmAirBlock);
+// only mixed blocks are walked at the next size, and at texel size the fraction below the texel's height is exact.
+// Pages not resident at level k hold no caster information for the air (VsmMarkAir requests them): lit.
 float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k)
 {
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
     const float3 pa = vsmLightSpace(vc, a), pb = vsmLightSpace(vc, b);
     const float texel = vsmTexel(k);
+    const float2 A = pa.xy / texel, D = (pb.xy - pa.xy) / texel;
+    const float h0 = pa.z, dh = pb.z - pa.z;
     float shadowed = 0;
-    uint depth = 0, index = 0;  // node covers [index, index + 1] / 2^depth of the segment
-    [loop] for (uint guard = 0; guard < 2u << VSM_AIR_DEPTH; ++guard)
+    VsmAirWalk wp = vsmAirWalkBegin(A, D, VSM_PAGE, 0, 1);
+    float ta, tb;
+    int2 page;
+    [loop] for (uint gp = 0; gp < 512 && vsmAirWalkNext(wp, ta, tb, page); ++gp)
     {
-        const float scale = 1.0 / float(1u << depth);
-        const float s0 = index * scale, s1 = s0 + scale;
-        const float3 p0 = lerp(pa, pb, s0), p1 = lerp(pa, pb, s1);
-        const float lateral = length(p1.xy - p0.xy);
-        bool descend = false;
-        if (lateral <= texel || depth == VSM_AIR_DEPTH)
+        const uint e = vsmEntry(r, page, k);
+        if (e == 0) continue;
+        const uint base = (e & VSM_PHYS_MASK) * VSM_BLOCK_ENTRIES;
+        const float2 origin = float2(page * (int)VSM_PAGE);
+        uint cls = vsmAirBlock(r.blocks.Load<VsmBlock>((base + VSM_BLOCK_OFFSET_128) * VSM_BLOCK_BYTES), A + D * ta - origin, A + D * tb - origin, h0 + dh * ta, h0 + dh * tb);
+        if (cls == VSM_REGION_UMBRA) shadowed += tb - ta;
+        if (cls != VSM_REGION_MIXED) continue;
+        VsmAirWalk w32 = vsmAirWalkBegin(A, D, 32, ta, tb);
+        float ua, ub;
+        int2 c32;
+        [loop] for (uint g32 = 0; g32 < 16 && vsmAirWalkNext(w32, ua, ub, c32); ++g32)
         {
-            const float3 m = 0.5 * (p0 + p1);
-            const uint e = vsmHeightAt(r, vsmAbsTexel(vc, m.xy, k), k);
-            if (e != VSM_EMPTY)
+            const int2 l32 = clamp(c32 - page * 4, 0, 3);  // rounding at a page boundary
+            cls = vsmAirBlock(r.blocks.Load<VsmBlock>((base + VSM_BLOCK_OFFSET_32 + l32.y * 4 + l32.x) * VSM_BLOCK_BYTES), A + D * ua - origin, A + D * ub - origin,
+                              h0 + dh * ua, h0 + dh * ub);
+            if (cls == VSM_REGION_UMBRA) shadowed += ub - ua;
+            if (cls != VSM_REGION_MIXED) continue;
+            VsmAirWalk w8 = vsmAirWalkBegin(A, D, 8, ua, ub);
+            float va, vb;
+            int2 c8;
+            [loop] for (uint g8 = 0; g8 < 16 && vsmAirWalkNext(w8, va, vb, c8); ++g8)
             {
-                const float H = vsmDecode(e), lo = min(p0.z, p1.z), hi = max(p0.z, p1.z);
-                shadowed += scale * (hi > lo ? saturate((H - lo) / (hi - lo)) : (lo < H ? 1.0 : 0.0));
+                const int2 l8 = clamp(c8 - page * 16, 0, 15);
+                cls = vsmAirBlock(r.blocks.Load<VsmBlock>((base + VSM_BLOCK_OFFSET_8 + l8.y * 16 + l8.x) * VSM_BLOCK_BYTES), A + D * va - origin, A + D * vb - origin,
+                                  h0 + dh * va, h0 + dh * vb);
+                if (cls == VSM_REGION_UMBRA) shadowed += vb - va;
+                if (cls != VSM_REGION_MIXED) continue;
+                VsmAirWalk w1 = vsmAirWalkBegin(A, D, 1, va, vb);
+                float xa, xb;
+                int2 c1;
+                [loop] for (uint g1 = 0; g1 < 24 && vsmAirWalkNext(w1, xa, xb, c1); ++g1)
+                {
+                    const uint hv = r.pool.Load(vsmPoolAddress(e & VSM_PHYS_MASK, uint2(clamp(c1 - page * (int)VSM_PAGE, 0, (int)VSM_PAGE - 1))));
+                    if (hv == VSM_EMPTY) continue;
+                    const float H = vsmDecode(hv), ha = h0 + dh * xa, hb = h0 + dh * xb, lo = min(ha, hb), hi = max(ha, hb);
+                    shadowed += (xb - xa) * (hi > lo ? saturate((H - lo) / (hi - lo)) : (lo < H ? 1.0 : 0.0));
+                }
             }
         }
-        else
-        {
-            VsmReceiver rc;
-            float radius;
-            vsmAirSquare(p0, p1, rc.uv, radius);
-            rc.h = 0.5 * (p0.z + p1.z);
-            rc.slope = (p1.xy - p0.xy) * ((p1.z - p0.z) / (lateral * lateral));
-            rc.bias = 0;
-            const uint cls = vsmRegionClassify(r, rc, rc.uv, radius, k);
-            if (cls == VSM_REGION_UMBRA) shadowed += scale;
-            descend = cls == VSM_REGION_MIXED;
-        }
-        if (descend)
-        {
-            ++depth;
-            index <<= 1;
-            continue;
-        }
-        while ((index & 1) != 0 && depth > 0)
-        {
-            index >>= 1;
-            --depth;
-        }
-        if (depth == 0) break;
-        ++index;
     }
     return shadowed;
 }

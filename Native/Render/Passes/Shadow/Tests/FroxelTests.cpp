@@ -2,17 +2,21 @@
 //  1. light lists (scene of scattered lights plus a dense cluster): every light that reaches a point of a froxel is in
 //     its list unless the list is full with lights at least as important; lists ordered by importance; no duplicates;
 //     truncation statistics match; lists identical over two frames;
-//  2. local lights' in-scattering by the air (sun below the horizon, lists not truncated): each node of the volume against
-//     a double-precision integral along the tile-centre ray (every light, fine steps, continuous air coefficients);
-//  3. the sun's shadowed air (roof over part of the view, no local lights): per slice, the removed in-scattering against
-//     the exact integral with the roof and ground boxes ray-cast towards the sun; slices entirely lit or entirely
-//     shadowed must match to the storage precision (the block hierarchy classifies them exactly), all slices within the
+//  2. local lights' in-scattering by the air (sun below the horizon, lists not truncated): each node of the air volume
+//     with the lights minus without them, against a double-precision integral along the tile-centre ray (every light,
+//     fine steps, continuous air coefficients);
+//  3. the sun's shadowed air: per slice, the in-scattering removed by a roof (volume with the roof minus without it)
+//     against the exact integral with the roof ray-cast towards the sun; slices entirely lit or entirely shadowed must
+//     match to the storage precision (the block hierarchy classifies them exactly), all slices within the
 //     texel-resolution bound;
-//  4. D3D12 debug layer clean.
+//  4. the air perspective (atmosphereAirView = atmosphereAerial + sun illuminance, no casters or lights) at arbitrary
+//     (uv, depth) against the double-precision atmosphere reference along the pixel's own ray (AtmosphereReference.h);
+//  5. D3D12 debug layer clean.
 //   unx_test_shadow_froxeltests [--no-debug-layer] [--width W --height H] [--set key=value]
 #include "TestRaster.h"
 
 #include "../../Atmosphere/AtmosphereReference.h"
+#include "../../Atmosphere/AtmosphereSystem.h"
 #include "FroxelSystem.h"
 #include "VsmSystem.h"
 
@@ -168,7 +172,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, debug = false;
+        bool debugLayer = true, debug = false, keepFroxels = false;
         uint32_t W = 1920, H = 1080;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
@@ -179,6 +183,7 @@ int main(int argc, char** argv)
             else if (a == "--height") H = (uint32_t)std::stoul(argv[++i]);
             else if (a == "--set") overrides.push_back(argv[++i]);
             else if (a == "--debug") debug = true;
+            else if (a == "--keep") keepFroxels = true;
         }
         TestFrame tf(debugLayer);
         for (const std::string& o : overrides) tf.quality.applyOverride(o);
@@ -246,12 +251,15 @@ int main(int argc, char** argv)
             }
         };
         const uint32_t volumePitch = TestFrame::rowPitch(fg.gridX, 8);
-        auto node = [&](uint32_t tx, uint32_t ty, uint32_t n) -> ref::D3 {  // node n >= 1 = volume slice n - 1
+        // Air volume: part 0 in-scattering (pre-exposed), 1 optical depth, 2 sun transmittance; node n = 0..S at slice
+        // part (S + 1) + n.
+        auto nodeOf = [&](const std::vector<uint8_t>& vol, uint32_t tx, uint32_t ty, uint32_t n, uint32_t part = 0) -> ref::D3 {
             uint16_t h[4];
-            std::memcpy(h, lastVolume.data() + (size_t)(n - 1) * volumePitch * fg.gridY + (size_t)ty * volumePitch + (size_t)tx * 8, 8);
-            const double e = 1.0 / (1.2 * std::exp2(grid.view.ev100));  // stored pre-exposed
+            std::memcpy(h, vol.data() + (size_t)(part * (fg.slices + 1) + n) * volumePitch * fg.gridY + (size_t)ty * volumePitch + (size_t)tx * 8, 8);
+            const double e = part == 0 ? 1.0 / (1.2 * std::exp2(grid.view.ev100)) : 1.0;  // part 0 stored pre-exposed
             return { halfToFloat(h[0]) / e, halfToFloat(h[1]) / e, halfToFloat(h[2]) / e };
         };
+        auto node = [&](uint32_t tx, uint32_t ty, uint32_t n) { return nodeOf(lastVolume, tx, ty, n); };
         const ref::Model model = ref::fromScene(base.atmosphere);
         std::mt19937 rng(7);
         auto uni = [&](float a, float b) { return std::uniform_real_distribution<float>(a, b)(rng); };
@@ -384,7 +392,11 @@ int main(int argc, char** argv)
                 l.size = { uni(0.01f, 0.05f), uni(0.01f, 0.03f) };  // small: the line-distance floor rarely applies
                 sc.lights.push_back(l);
             }
-            run(sc, 1, -2.0f);  // night exposure: the lights' air glow is displayed
+            scene::Scene dark = sc;
+            dark.lights.clear();
+            run(dark, 1, -2.0f);  // night exposure: the lights' air glow is displayed
+            const std::vector<uint8_t> without = lastVolume;
+            run(sc, 1, -2.0f);
             const Lists lists{ lastLists };
             report(lists.word(48) == 0, "local-light scene: no truncated list", lists.word(48), 0);
             // Reference: fine midpoint integration of every light along the tile-centre ray, continuous air coefficients.
@@ -425,13 +437,7 @@ int main(int argc, char** argv)
                             }
                             tau = tau + c.extinction * dt;
                         }
-                        const ref::D3 g = node(tx, ty, n);
-                        if (debug && tx == 3 && ty == 2 && n <= 12)
-                        {
-                            uint16_t hh[4];
-                            std::memcpy(hh, lastVolume.data() + (size_t)(n - 1) * volumePitch * fg.gridY + (size_t)ty * volumePitch + (size_t)tx * 8, 8);
-                            logf("  raw %04x %04x %04x %04x (volume bytes %zu, expected %zu)\n", hh[0], hh[1], hh[2], hh[3], lastVolume.size(), (size_t)volumePitch * fg.gridY * fg.slices);
-                        }
+                        const ref::D3 g = node(tx, ty, n) - nodeOf(without, tx, ty, n);
                         if (debug && tx == 3 && ty == 2 && n <= 12)
                             logf("  tile (3,2) node %u z %.3f: gpu %.4g %.4g %.4g ref %.4g %.4g %.4g\n", n, grid.node(n), g.x, g.y, g.z, acc.x, acc.y, acc.z);
                         const double r = acc.x + acc.y + acc.z, e = std::abs(g.x - acc.x) + std::abs(g.y - acc.y) + std::abs(g.z - acc.z);
@@ -456,6 +462,10 @@ int main(int argc, char** argv)
         {
             scene::Scene sc = base;
             sc.sun.direction = normalize(float3{ 0.35f, 0.85f, -0.4f });
+            scene::Scene open = sc;
+            open.instances.resize(1);  // ground only
+            run(open, 1);
+            const std::vector<uint8_t> without = lastVolume;
             run(sc, 1);
             const ref::D3 sun = d3(sc.sun.direction), camPos = d3(grid.view.position);
             const double E = sc.sun.illuminance;
@@ -470,7 +480,7 @@ int main(int argc, char** argv)
                     const double toRay = std::sqrt(ref::dot(ray, ray));
                     const ref::D3 dir = ray * (1 / toRay);
                     const double nu = ref::dot(dir, sun);
-                    ref::D3 tau{}, prevNode{};
+                    ref::D3 tau{}, prevNode{}, prevMag{};
                     for (uint32_t n = 1; n <= fg.slices; ++n)
                     {
                         const double z0 = grid.node(n - 1), z1 = grid.node(n);
@@ -511,16 +521,19 @@ int main(int argc, char** argv)
                                 slice = slice - source;
                             }
                         }
-                        const ref::D3 gNode = node(tx, ty, n);
+                        const ref::D3 withRoof = node(tx, ty, n), noRoof = nodeOf(without, tx, ty, n);
+                        const ref::D3 gNode = withRoof - noRoof;
                         if (debug && tx == 2 && ty == 13 && n <= 40)
                             logf("  tile (2,13) node %u z %.3f: gpu %.4g ref slice %.4g | shadowed %d/%d near %d\n", n, z1, gNode.x - prevNode.x, slice.x, shadowed, steps, nearBoundary);
                         const ref::D3 gSlice = gNode - prevNode;
                         prevNode = gNode;
+                        const double mag = std::abs(withRoof.x) + std::abs(withRoof.y) + std::abs(withRoof.z) + std::abs(noRoof.x) + std::abs(noRoof.y) + std::abs(noRoof.z);
+                        const double magBefore = prevMag.x;
+                        prevMag.x = mag;
                         if (belowGround) continue;  // beyond the ground: no pixel reads it
                         const double r = std::abs(slice.x) + std::abs(slice.y) + std::abs(slice.z);
                         const double e = std::abs(gSlice.x - slice.x) + std::abs(gSlice.y - slice.y) + std::abs(gSlice.z - slice.z);
-                        const double nodeMag = std::abs(gNode.x) + std::abs(gNode.y) + std::abs(gNode.z);
-                        const double storage = 2e-3 * nodeMag;  // two fp16 nodes
+                        const double storage = 1e-3 * (mag + magBefore);  // four fp16 nodes
                         if ((shadowed == 0 || shadowed == steps) && nearBoundary == 0)
                         {
                             ++exactSlices;
@@ -535,8 +548,11 @@ int main(int argc, char** argv)
                             const double sinA = std::sqrt(std::max(1 - nu * nu, 1e-4));
                             const double bound = 2 * 2 * texel / sinA * peak + storage + 0.01 * r;
                             if (e > bound) ++mixedOver;
+                            if (e > bound && debug)
+                                logf("  over bound: tile (%u,%u) node %u z %.2f gpu %.4g ref %.4g bound %.3g texel %.4f shadowed %d/%d\n", tx, ty, n, z1, gSlice.x + gSlice.y + gSlice.z,
+                                     slice.x + slice.y + slice.z, bound, texel, shadowed, steps);
                         }
-                        sumErr += e;
+                        sumErr += std::max(0.0, e - storage);  // the test's difference of two volumes adds their fp16 rounding
                         sumRef += r;
                     }
                 }
@@ -544,6 +560,135 @@ int main(int argc, char** argv)
             report(exactSlices > 100 && worstExact == 0, "entirely lit / shadowed slices beyond storage precision (worst rel.)", worstExact, 0);
             report(mixedSlices > 20 && mixedOver == 0, "slices with a shadow boundary outside the texel bound", mixedOver, 0);
             report(sumErr / std::max(sumRef, 1e-30) < 0.03, "shadowed air in-scattering vs reference (mean relative)", sumErr / std::max(sumRef, 1e-30), 0.03);
+        }
+
+        // ---- 4. Air perspective at arbitrary (uv, depth) vs the atmosphere reference (no casters, no lights).
+        {
+            scene::Scene sc;
+            sc.name = "air perspective";
+            sc.materials.push_back({});
+            sc.meshes.push_back(boxMesh("far box", { 1, 1, 1 }));
+            sc.instances.push_back(instanceAt(0, { -3000, 1, -3000 }));  // behind the camera: no shadow in the view's air
+            sc.sun.direction = normalize(float3{ 0.55f, 0.25f, 0.2f });  // low sun: long paths, strong horizon gradients
+            scene::Camera c;
+            c.name = "main";
+            c.position = { 3, 1.7f, -2 };
+            c.forward = normalize(float3{ 0.8f, 0.05f, 0.3f });
+            sc.cameras.push_back(c);
+            std::vector<float4> queries;
+            for (float u : { 0.1f, 0.5f, 0.93f })
+                for (float v : { 0.2f, 0.55f, 0.9f })
+                    for (float z : { 3.f, 40.f, 700.f, 5000.f, 30000.f }) queries.push_back({ u, v, z, 0 });
+            std::shared_ptr<std::vector<uint8_t>> out, ms, vol4, hdr4;
+            tf.setScene(sc);
+            tf.frame.mainView = ViewDesc::fromCamera(c, W, H, float4x4{});
+            tf.frame.mainView.prevViewProj = tf.frame.mainView.viewProj;
+            grid.view = tf.frame.mainView;
+            const uint32_t n = (uint32_t)queries.size();
+            if (keepFroxels) shadow::setKeepFroxels(tf.trackState, true);
+            tf.run([&](FramePassContext& fc) {
+                ViewResources main;
+                main.view = fc.frame.mainView;
+                main.frameConstants = fc.frameConstantsFor(main.view);
+                tracks::atmosphere(fc);
+                raster.mainView(fc, main);
+                tracks::shadowPages(fc, main);
+                tracks::froxels(fc, main);
+                BufferRef in = tf.uploadBuffer(fc, queries.data(), queries.size() * 16, 16, "probe queries");
+                BufferRef o = fc.graph.createBuffer(BufferDesc{ "probe out", 3ull * n * 16, 16 });
+                ID3D12PipelineState* pso = fc.shaders.compute("Passes/Atmosphere/Tests/AtmosphereProbe.MODE2");
+                const FrameResources r = fc.resources;
+                const D3D12_GPU_VIRTUAL_ADDRESS cb = main.frameConstants;
+                fc.graph.addPass("s.test.probe", QueueType::Graphics,
+                                 [&](PassBuilder& b) {
+                                     for (TextureRef t : { r.transmittanceLut, r.multiScatterLut, r.skyViewLut, r.aerialPerspective }) b.use(t, Use::SrvCompute);
+                                     b.use(in, Use::SrvCompute);
+                                     b.use(o, Use::UavCompute);
+                                 },
+                                 [=](PassContext& ctx) {
+                                     const uint32_t k[8] = { ctx.srv(r.transmittanceLut), ctx.srv(r.multiScatterLut), ctx.srv(r.skyViewLut), ctx.srv(r.aerialPerspective),
+                                                             ctx.srv(in), ctx.uav(o), n, 0 };
+                                     ctx.cmd->SetPipelineState(pso);
+                                     ctx.bindFrameConstants(cb);
+                                     ctx.computeConstants(k, 8);
+                                     ctx.cmd->Dispatch((n + 63) / 64, 1, 1);
+                                 });
+                out = tf.readbackBuffer(fc, o, 3ull * n * 16);
+                if (debug) vol4 = tf.readback(fc, r.aerialPerspective);
+                ms = tf.readback(fc, r.multiScatterLut);
+            });
+            if (debug && hdr4)
+            {
+                const uint32_t* hw = reinterpret_cast<const uint32_t*>(hdr4->data());
+                logf("  header %u %u %u %u | %u %u %u %u\n", hw[0], hw[1], hw[2], hw[3], hw[8], hw[9], hw[10], hw[11]);
+            }
+            if (debug && vol4)
+            {
+                const ref::D3 t30 = nodeOf(*vol4, 5, 5, 30, 1), s30 = nodeOf(*vol4, 5, 5, 30, 0);
+                logf("  readback: tau node 30 tile (5,5) %g %g %g, inscatter %g\n", t30.x, t30.y, t30.z, s30.x);
+            }
+            const atmosphere::AtmosphereParams p = atmosphere::makeParams(sc.atmosphere, tf.quality);
+            const ref::D3 sun = ref::normalize(d3(sc.sun.direction)), camPos = d3(c.position);
+            // C++ twin of airMultipleScattering (bilinear on the GPU LUT): the reference uses the same Psi_ms.
+            auto psi = [&](ref::D3 pos, ref::D3 sd) {
+                const double alt = std::clamp(ref::altitudeOf(model, pos) / (model.top - model.bottom), 0.0, 1.0);
+                const double qx = (ref::dot(ref::upOf(model, pos), sd) * 0.5 + 0.5) * (p.multiScatterSize[0] - 1), qy = alt * (p.multiScatterSize[1] - 1);
+                const uint32_t x0 = std::min((uint32_t)qx, p.multiScatterSize[0] - 1), y0 = std::min((uint32_t)qy, p.multiScatterSize[1] - 1);
+                const uint32_t x1 = std::min(x0 + 1, p.multiScatterSize[0] - 1), y1 = std::min(y0 + 1, p.multiScatterSize[1] - 1);
+                const double fx = qx - x0, fy = qy - y0;
+                auto at = [&](uint32_t x, uint32_t y) { const float4 t = texel(*ms, p.multiScatterSize[0], p.multiScatterSize[1] + 1, x, y); return ref::D3{ t.x, t.y, t.z }; };
+                return (at(x0, y0) * (1 - fx) + at(x1, y0) * fx) * (1 - fy) + (at(x0, y1) * (1 - fx) + at(x1, y1) * fx) * fy;
+            };
+            auto relErr = [](ref::D3 a, ref::D3 b, double floor) {
+                return std::max({ std::abs(a.x - b.x) / std::max(std::abs(b.x), floor), std::abs(a.y - b.y) / std::max(std::abs(b.y), floor),
+                                  std::abs(a.z - b.z) / std::max(std::abs(b.z), floor) });
+            };
+            double worstL = 0, worstT = 0, nearL = 0, nearT = 0, worstE = 0;
+            uint32_t mismatch = 0;
+            const ViewDesc& v = tf.frame.mainView;
+            const float3 fwd = normalize(c.forward);
+            for (uint32_t i = 0; i < n; ++i)
+            {
+                float4 gi, gt, ge;
+                std::memcpy(&gi, out->data() + (3 * i) * 16, 16);
+                std::memcpy(&gt, out->data() + (3 * i + 1) * 16, 16);
+                std::memcpy(&ge, out->data() + (3 * i + 2) * 16, 16);
+                mismatch += gi.w != 0 ? 1 : 0;
+                const float4 q = queries[i];
+                const double ndc[4] = { q.x * 2.0 - 1, 1 - q.y * 2.0, 1, 1 };
+                double np[4] = {};
+                for (int r = 0; r < 4; ++r)
+                    for (int cc = 0; cc < 4; ++cc) np[r] += v.invViewProj.m[r][cc] * ndc[cc];
+                const ref::D3 dir = ref::normalize(ref::D3{ np[0] / np[3], np[1] / np[3], np[2] / np[3] } - camPos);
+                const double cosA = ref::dot(dir, d3(fwd));
+                ref::D3 L, Tr;
+                ref::aerial(model, camPos, dir, q.z / cosA, sun, psi, L, Tr, 4096);
+                // In-scattering floor 1e-6 per unit illuminance (0.13 nit at 128 klx, < 1e-4 of a sunlit surface).
+                const double eL = relErr(ref::D3{ gi.x, gi.y, gi.z } * (1.0 / sc.sun.illuminance), L, 1e-6), eT = relErr(ref::D3{ gt.x, gt.y, gt.z }, Tr, 1e-6);
+                // Unshadowed sun illuminance at the surface point, per unit illuminance.
+                ref::D3 surface = camPos + dir * (q.z / cosA);
+                if (ref::altitudeOf(model, surface) < 0) surface = surface + ref::upOf(model, surface) * -ref::altitudeOf(model, surface);
+                const ref::D3 Es = ref::sunTransmittance(model, surface, sun, 4096);
+                const double eE = relErr(ref::D3{ ge.x, ge.y, ge.z } * (1.0 / sc.sun.illuminance), Es, 1e-3);
+                worstL = std::max(worstL, eL);
+                worstT = std::max(worstT, eT);
+                worstE = std::max(worstE, eE);
+                if (q.z <= 700)
+                {
+                    nearL = std::max(nearL, eL);
+                    nearT = std::max(nearT, eT);
+                }
+                if (debug) logf("  raw t %g %g %g %g e %g %g %g %g\n", gt.x, gt.y, gt.z, gt.w, ge.x, ge.y, ge.z, ge.w);
+                if (eL > 5e-3 || eT > 1e-3 || eE > 1e-3 || debug)
+                    logf("  air uv (%.2f %.2f) z %.0f: L gpu %.4e %.4e %.4e ref %.4e %.4e %.4e  T gpu %.5f ref %.5f  Esun gpu %.5f ref %.5f\n", q.x, q.y, q.z,
+                         gi.x / sc.sun.illuminance, gi.y / sc.sun.illuminance, gi.z / sc.sun.illuminance, L.x, L.y, L.z, gt.y, Tr.y, ge.y / sc.sun.illuminance, Es.y);
+            }
+            report(mismatch == 0, "atmosphereAerial and atmosphereAirView agree bit for bit (queries differing)", mismatch, 0);
+            report(nearL < 1e-2, "air in-scattering, depth <= 700 m (rel.)", nearL, 1e-2);
+            report(nearT < 1e-4, "air transmittance, depth <= 700 m (rel.)", nearT, 1e-4);
+            report(worstL < 2e-2, "air in-scattering, all depths to 30 km (rel.)", worstL, 2e-2);
+            report(worstT < 1e-2, "air transmittance, all depths to 30 km (rel.)", worstT, 1e-2);
+            report(worstE < 2e-3, "sun illuminance at the surface (rel.)", worstE, 2e-3);
         }
 
         if (debugLayer) logf("D3D12 debug layer: enabled (errors abort the run)\n");

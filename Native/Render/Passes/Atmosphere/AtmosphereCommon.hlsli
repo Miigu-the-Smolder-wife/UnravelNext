@@ -21,14 +21,15 @@ struct AtmosphereParams
     float3 mieAbsorption;
     float ozoneWidth;
     float3 ozoneAbsorption;
-    float aerialMaxDistance;
+    float froxelFarM;        // air volume (froxel grid, FroxelIntegrate.hlsl): depth of the last node
     float3 groundAlbedo;
-    uint aerialSlices;
+    uint froxelSlices;
     uint2 transmittanceSize;
     uint2 multiScatterSize;
     uint2 skyViewSize;
     uint transmittanceSteps, multiScatterDirections;
-    uint multiScatterSteps, skySegments, aerialStepsPerSlice, pad0;
+    uint multiScatterSteps, skySegments, froxelTilePx;
+    float froxelNearM;
 };
 
 AtmosphereParams airLoadParams(uint rawBuffer)
@@ -50,11 +51,11 @@ AtmosphereParams airParamsFromTexels(uint multiScatterLut)
     a.rayleighScattering = q[1].xyz; a.mieG = q[1].w;
     a.mieScattering = q[2].xyz; a.ozoneCenter = q[2].w;
     a.mieAbsorption = q[3].xyz; a.ozoneWidth = q[3].w;
-    a.ozoneAbsorption = q[4].xyz; a.aerialMaxDistance = q[4].w;
-    a.groundAlbedo = q[5].xyz; a.aerialSlices = asuint(q[5].w);
+    a.ozoneAbsorption = q[4].xyz; a.froxelFarM = q[4].w;
+    a.groundAlbedo = q[5].xyz; a.froxelSlices = asuint(q[5].w);
     a.transmittanceSize = asuint(q[6].xy); a.multiScatterSize = asuint(q[6].zw);
     a.skyViewSize = asuint(q[7].xy); a.transmittanceSteps = asuint(q[7].z); a.multiScatterDirections = asuint(q[7].w);
-    a.multiScatterSteps = asuint(q[8].x); a.skySegments = asuint(q[8].y); a.aerialStepsPerSlice = asuint(q[8].z); a.pad0 = asuint(q[8].w);
+    a.multiScatterSteps = asuint(q[8].x); a.skySegments = asuint(q[8].y); a.froxelTilePx = asuint(q[8].z); a.froxelNearM = q[8].w;
     return a;
 }
 
@@ -114,6 +115,21 @@ float2 airInterval(AtmosphereParams a, float3 p, float3 d, float limit)
     const float2 ground = airSphere(a, p, d, a.bottomRadius);
     if (ground.y > shell.x && ground.x >= 0 && ground.x < shell.y) shell.y = ground.x;
     return shell;
+}
+
+// ---- Air volume of the main view (froxel grid): node n = 0..S at view depth z_0 = 0, z_n = near (far / near)^(n / S).
+// Three parts of S + 1 depth slices each in one Texture3D (RGBA16F, gridX x gridY x 3 (S + 1)): part 0 in-scattering
+// (rgb, pre-exposed), part 1 optical depth (rgb), part 2 sun transmittance at the node (rgb). Continuous node coordinate
+// of a view depth, linear in z between nodes (the hardware interpolates between two slices with this weight).
+float airNodeDepth(float nearM, float logRatio, float S, float n) { return n <= 0 ? 0.0 : nearM * exp2(logRatio * n / S); }
+float airNodeCoord(float nearM, float farM, float S, float z)
+{
+    const float logRatio = log2(farM / nearM);
+    const float z1 = airNodeDepth(nearM, logRatio, S, 1);
+    if (z <= z1) return max(z, 0.0) / z1;
+    const float n0 = min(floor(S * log2(z / nearM) / logRatio), S - 1);
+    const float za = airNodeDepth(nearM, logRatio, S, n0), zb = airNodeDepth(nearM, logRatio, S, n0 + 1);
+    return n0 + saturate((z - za) / (zb - za));
 }
 
 // A point on the surface (lifted, airLiftToSurface) may land a rounding error inside the sphere (near < 0 < far): it is
