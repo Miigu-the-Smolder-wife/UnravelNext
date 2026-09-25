@@ -30,12 +30,15 @@ struct EdgePixel
     float footprint;  // lateral size of one pixel at the surface (m)
 };
 
-EdgePixel edgePixel(uint2 q, Texture2D<uint> words, Texture2D<float> depth, Texture2D<uint2> gbuffer)
+// A pixel's edge sample from its material, linear depth and shading normal. Every consumer (a shading kernel for its
+// pixel and the neighbours it compares, the composite) builds a pixel's sample with this one function from the same
+// inputs, so the same-surface relation is exactly symmetric: whoever a pixel sees as another surface sees it back, and
+// every surface an edge pixel's composite borrows radiance from is itself an edge pixel (its radiance was kept).
+EdgePixel edgeSample(uint2 q, uint material, float linearZ, float3 normal)
 {
     EdgePixel e;
-    const uint word = words[q];
-    e.material = mWordMaterial(word);
-    e.sky = e.material == M_MATERIAL_SKY;
+    e.material = material;
+    e.sky = material == M_MATERIAL_SKY;
     e.position = 0;
     e.normal = 0;
     e.footprint = 0;
@@ -43,12 +46,18 @@ EdgePixel edgePixel(uint2 q, Texture2D<uint> words, Texture2D<float> depth, Text
     {
         float3 D, Dx, Dy;
         mPixelRay(float2(q) + 0.5, D, Dx, Dy);
-        const float z = linearDepth(depth[q]);
-        e.position = D * z;
-        e.normal = octDecode(gbuffer[q].x);
-        e.footprint = length(Dx) * z;
+        e.position = D * linearZ;
+        e.normal = normal;
+        e.footprint = length(Dx) * linearZ;
     }
     return e;
+}
+
+EdgePixel edgePixel(uint2 q, Texture2D<uint> words, Texture2D<float> depth, Texture2D<uint2> gbuffer)
+{
+    const uint material = mWordMaterial(words[q]);
+    if (material == M_MATERIAL_SKY) return edgeSample(q, material, 0, 0);
+    return edgeSample(q, material, linearDepth(depth[q]), octDecode(gbuffer[q].x));
 }
 
 bool edgeSameSurface(EdgePixel a, EdgePixel b, EdgeParams p)
@@ -59,48 +68,6 @@ bool edgeSameSurface(EdgePixel a, EdgePixel b, EdgeParams p)
     const float3 d = b.position - a.position;
     const float tol = max(p.footprintTolerance * max(a.footprint, b.footprint), p.distanceTolerance * length(d));
     return abs(dot(d, a.normal)) <= tol && abs(dot(d, b.normal)) <= tol;
-}
-
-// The centre's sample from what the shading kernel already holds: material, pixel ray D (unit view depth) and its x
-// derivative, linear depth, shading normal.
-EdgePixel edgeCenter(uint material, float3 D, float3 Dx, float linearZ, float3 normal)
-{
-    EdgePixel e;
-    e.material = material;
-    e.sky = material == M_MATERIAL_SKY;
-    e.position = e.sky ? 0 : D * linearZ;
-    e.normal = e.sky ? 0 : normal;
-    e.footprint = e.sky ? 0 : length(Dx) * linearZ;
-    return e;
-}
-
-// Is 'pixel' (centre sample c, pixel ray D, Dx, Dy) an edge pixel: some in-view 3 x 3 neighbour sees another surface.
-// A neighbour on the same triangle (same vis id) is the same surface and one with another material is not, before any
-// geometry is read. A neighbour's ray is the centre's plus its offset times the ray's screen derivatives (the pixel ray
-// is affine in pixel position), so only its depth and normal are loaded.
-bool edgeIsEdge(uint2 pixel, EdgePixel c, float3 D, float3 Dx, float3 Dy, Texture2D<uint> visIds, Texture2D<uint> words, Texture2D<float> depth,
-                Texture2D<uint2> gbuffer, EdgeParams p)
-{
-    const uint vc = visIds[pixel];
-    [unroll] for (uint k = 0; k < 9; ++k)
-    {
-        if (k == 4) continue;
-        const int2 o = int2(int(k % 3) - 1, int(k / 3) - 1);
-        const int2 q = int2(pixel) + o;
-        if (any(q < 0) || q.x >= int(g_viewWidth) || q.y >= int(g_viewHeight)) continue;
-        if (visIds[uint2(q)] == vc) continue;
-        EdgePixel e;
-        e.material = mWordMaterial(words[uint2(q)]);
-        if (e.material != c.material) return true;
-        e.sky = c.sky;
-        if (e.sky) continue;  // the sky has one vis id (VIS_NONE); kept for completeness
-        const float z = linearDepth(depth[uint2(q)]);
-        e.position = (D + float(o.x) * Dx + float(o.y) * Dy) * z;
-        e.normal = octDecode(gbuffer[uint2(q)].x);
-        e.footprint = length(Dx) * z;
-        if (!edgeSameSurface(c, e, p)) return true;
-    }
-    return false;
 }
 
 // Mean of clamp(y, 0, 1) over a linear ramp between ya and yb (either order): the ramp spends t0 below 0, t1 - t0

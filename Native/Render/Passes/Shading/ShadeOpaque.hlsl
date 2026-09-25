@@ -36,7 +36,24 @@
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
 
-bool shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, Texture2D<uint2> gbuffer, Texture2D<float> depthTex);
+struct ShadedPixel
+{
+    float3 radiance;  // linear, before exposure
+    float linearZ;
+    float3 normal;    // shading normal (G-buffer)
+};
+
+ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, Texture2D<uint2> gbuffer, Texture2D<float> depthTex);
+
+// Edge detection shares the tile's samples: each lane publishes its vis id and edge sample, so a neighbour inside the
+// tile costs no loads; neighbours outside it are read from the screen buffers. A lane of another class (or the sky)
+// shows another material, which is an edge before any geometry.
+#define EDGE_OUTSIDE 0xFFFFFFFFu
+groupshared uint gsVis[64];
+groupshared uint gsMaterial[64];  // EDGE_OUTSIDE: outside the view
+groupshared float3 gsPosition[64];
+groupshared float3 gsNormal[64];
+groupshared float gsFootprint[64];
 
 [numthreads(8, 8, 1)]
 void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
@@ -47,22 +64,68 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     Texture2D<uint> words = ResourceDescriptorHeap[P[0].z];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].x];
     Texture2D<float> depthTex = ResourceDescriptorHeap[P[0].y];
-    bool active = all(pixel < uint2(g_viewWidth, g_viewHeight));
-    const uint word = active ? words[pixel] : M_MATERIAL_SKY;
+    Texture2D<uint> visIds = ResourceDescriptorHeap[P[4].w];
+    const bool inView = all(pixel < uint2(g_viewWidth, g_viewHeight));
+    const uint word = inView ? words[pixel] : M_MATERIAL_SKY;
     const uint materialIndex = mWordMaterial(word);
-    active = active && materialIndex != M_MATERIAL_SKY;
+    bool active = inView && materialIndex != M_MATERIAL_SKY;
     const GpuMaterial m = loadMaterial(active ? materialIndex : 0);
     active = active && mShadeClass(materialClass(m)) == P[1].z;
-    bool isEdgeLane = false;
+    ShadedPixel sp = (ShadedPixel)0;
+    if (active) sp = shadeSurface(pixel, word, materialIndex, m, words, gbuffer, depthTex);
+
+    // ---- edge (E) pixels keep their exposed linear radiance for the composite (EdgeComposite.hlsl)
+    if (P[7].x == UNX_NONE || (P[4].z & 256) != 0) return;
+    const uint lane = tid.y * M_TILE + tid.x;
+    const EdgePixel c = edgeSample(pixel, materialIndex, sp.linearZ, sp.normal);
+    const uint vc = inView ? visIds[pixel] : VIS_NONE;
+    gsVis[lane] = vc;
+    gsMaterial[lane] = inView ? materialIndex : EDGE_OUTSIDE;
+    gsPosition[lane] = c.position;
+    gsNormal[lane] = c.normal;
+    gsFootprint[lane] = c.footprint;
+    GroupMemoryBarrierWithGroupSync();
+    bool isEdge = false;
     if (active)
     {
-        isEdgeLane = shadeSurface(pixel, word, materialIndex, m, words, gbuffer, depthTex);
+        const EdgeParams ep = { asfloat(P[6].x), asfloat(P[6].y), asfloat(P[6].z) };
+        [unroll] for (uint k = 0; k < 9; ++k)
+        {
+            if (k == 4 || isEdge) continue;
+            const int2 o = int2(int(k % 3) - 1, int(k / 3) - 1);
+            const int2 q = int2(pixel) + o;
+            if (any(q < 0) || q.x >= int(g_viewWidth) || q.y >= int(g_viewHeight)) continue;
+            const int2 t = int2(tid) + o;
+            EdgePixel e = (EdgePixel)0;
+            if (all(t >= 0) && all(t < int(M_TILE)))
+            {
+                const uint l = uint(t.y) * M_TILE + uint(t.x);
+                if (gsVis[l] == vc) continue;
+                e.material = gsMaterial[l];
+                e.sky = false;
+                e.position = gsPosition[l];
+                e.normal = gsNormal[l];
+                e.footprint = gsFootprint[l];
+            }
+            else
+            {
+                if (visIds[uint2(q)] == vc) continue;
+                e.material = mWordMaterial(words[uint2(q)]);
+                if (e.material == c.material) e = edgeSample(uint2(q), e.material, linearDepth(depthTex[uint2(q)]), octDecode(gbuffer[uint2(q)].x));
+            }
+            isEdge = e.material != c.material || !edgeSameSurface(c, e, ep);
+        }
+        if (isEdge)
+        {
+            RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];
+            edgeRadiance[pixel] = float4(sp.radiance * g_exposure, 1);
+        }
     }
-    edgeAppendPixel(pixel, isEdgeLane, P[7].w, P[6].w);
+    edgeAppendPixel(pixel, isEdge, P[7].w, P[6].w);
 }
 
-// Shades one pixel of this class; returns whether it is an edge pixel (its exposed radiance is then kept).
-bool shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, Texture2D<uint2> gbuffer, Texture2D<float> depthTex)
+// Shades one pixel of this class (writes the output) and returns what edge detection needs.
+ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, Texture2D<uint2> gbuffer, Texture2D<float> depthTex)
 {
     const GBufferSample g = decodeGBuffer(gbuffer[pixel]);
     const float linearZ = linearDepth(depthTex[pixel]);
@@ -223,15 +286,9 @@ bool shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Tex
 
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].w];
     color[pixel] = shEncodeOutput(radiance);
-    // Edge pixels keep their exposed linear radiance for the composite (EdgeComposite.hlsl).
-    const EdgeParams ep = { asfloat(P[6].x), asfloat(P[6].y), asfloat(P[6].z) };
-    Texture2D<uint> visIds = ResourceDescriptorHeap[P[4].w];
-    const bool isEdge = P[7].x != UNX_NONE && (experiment & 256) == 0 &&
-                        edgeIsEdge(pixel, edgeCenter(materialIndex, D, Dx, linearZ, n), D, Dx, Dy, visIds, words, depthTex, gbuffer, ep);
-    if (isEdge)
-    {
-        RWTexture2D<float4> edgeRadiance = ResourceDescriptorHeap[P[7].x];
-        edgeRadiance[pixel] = float4(radiance * g_exposure, 1);
-    }
-    return isEdge;
+    ShadedPixel o;
+    o.radiance = radiance;
+    o.linearZ = linearZ;
+    o.normal = n;
+    return o;
 }
