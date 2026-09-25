@@ -191,7 +191,8 @@ struct DepthRasterRequest
 struct FramePassContext;
 
 // Bands of a banded pass group for a view of width x height (RenderGraph::addBandedGroup): the view's pixels over
-// output.band_pixels (quality key, core; 4K / 8 = L2-sized intermediates), at least 1.
+// output.band_pixels (quality key, core; 4K / 8 = L2-sized intermediates), at least 1; band_pixels = 0 is one band (the
+// default since v1.31: M measured a net loss with bands while shading is latency-bound).
 uint32_t passBandCount(const QualityConfig& quality, uint32_t width, uint32_t height);
 
 // Persistent state of a track (history buffers, pools, caches) owned by the FrameRenderer: created on first use,

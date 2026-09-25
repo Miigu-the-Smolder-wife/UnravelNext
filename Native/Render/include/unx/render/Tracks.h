@@ -33,6 +33,17 @@ void shadowPages(FramePassContext& fc, const ViewResources& main);  // VSM marki
 void froxels(FramePassContext& fc, const ViewResources& main);    // light lists + froxel integration
 void shadowVisibility(FramePassContext& fc, ViewResources& view); // writes view.shadowVisibility
 
+// ---- Banded lighting group (v1.31, INTERFACES_KO.md 4): FrameRenderer records S's shadow visibility and M's edge
+// detection and shading of a view as one banded group (RenderGraph::addBandedGroup, passBandCount bands):
+// shadowVisibilityPasses(...) then shadingPasses(...), band by band, then shadingComposite (whole-view work on the group's
+// results, e.g. M's edge composite). The *Passes functions create their resources and add their ordinary passes (which
+// run before the group: clears, per-band tile lists) themselves, and return the banded passes: setup declares uses only
+// (it runs once per band), execute touches PassContext::band's rows (or band.lagged(rows) when it reads rows below).
+// They replace shadowVisibility and shading when both tracks have them (FrameRenderer switches in one commit).
+std::vector<RenderGraph::BandedPass> shadowVisibilityPasses(FramePassContext& fc, ViewResources& view);  // S
+std::vector<RenderGraph::BandedPass> shadingPasses(FramePassContext& fc, ViewResources& view);           // M
+void shadingComposite(FramePassContext& fc, ViewResources& view);                                          // M
+
 // ---- R: rays, GI, reflections - RayTracing, Passes/GI, Passes/Reflection
 void accelerationStructures(FramePassContext& fc);                // static/dynamic TLAS, BLAS refits -> FrameResources
 void globalIllumination(FramePassContext& fc, ViewResources& main);  // cache update rays, screen probes, near occlusion

@@ -1247,17 +1247,23 @@ void RenderGraph::addPass(std::string_view name, QueueType queue, const SetupFn&
     setup(b);
 }
 
+PassBand passBand(uint32_t height, uint32_t count, uint32_t index)
+{
+    auto row = [&](uint32_t b) { return b >= count ? height : std::min(height, (uint32_t)((uint64_t)height * b / count) & ~7u); };
+    PassBand band;
+    band.index = index;
+    band.count = count;
+    band.y0 = row(index);
+    band.y1 = row(index + 1);
+    return band;
+}
+
 void RenderGraph::addBandedGroup(std::string_view group, uint32_t height, uint32_t bands, const std::vector<BandedPass>& passes)
 {
     if (bands == 0 || height == 0) fail("render graph: banded group '%.*s' with %u bands over %u rows", (int)group.size(), group.data(), bands, height);
-    auto row = [&](uint32_t b) { return b >= bands ? height : std::min(height, (uint32_t)((uint64_t)height * b / bands) & ~7u); };
     for (uint32_t b = 0; b < bands; ++b)
     {
-        PassBand band;
-        band.index = b;
-        band.count = bands;
-        band.y0 = row(b);
-        band.y1 = row(b + 1);
+        const PassBand band = passBand(height, bands, b);
         for (const BandedPass& p : passes)
         {
             addPass(std::string(group) + "." + p.name + ".b" + std::to_string(b), p.queue, p.setup, p.execute);

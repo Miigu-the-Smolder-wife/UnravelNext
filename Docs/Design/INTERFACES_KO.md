@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.30, 2026-09-25)
+# UnravelNext 인터페이스 (v1.31, 2026-09-25)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -180,11 +180,15 @@ void RenderGraph::addPass(std::string_view name, QueueType, SetupFn setup, Execu
 - **밴드 패스 그룹(v1.29, 설계 개정 1 요청 7절)**: `RenderGraph::addBandedGroup(group, height, bands, { BandedPass{ name, queue, setup, execute } ... })`는 그룹의 패스들을 밴드 순서로 선언한다(A(밴드 0) → B(밴드 0) → … → A(밴드 1) …). 패스 이름은 `<group>.<name>.b<밴드>`다.
   - 같은 setup으로 밴드마다 선언되므로, 그래프가 밴드마다 같은 자원의 배리어를 보통 패스처럼 낸다.
   - execute는 `PassContext::band`(`PassBand{ index, count, y0, y1 }`, 행 [y0, y1), y0은 8행 경계)를 읽고 그 행만 쓴다. 그룹 밖 패스는 band = {0, 1, 0, UINT32_MAX}다.
-  - 밴드 경계를 넘어 읽으면 이전 밴드의 끝난 행만 보인다. 다음 밴드의 행이 필요한 픽셀(3×3 이웃의 아래 경계)은 그 패스가 뒤 밴드로 미룬다(M).
-  - 밴드 수는 `passBandCount(quality, width, height)` = round(픽셀 수 / `output.band_pixels`), 최소 1이다. 기본 1036800(4K/8)이라 4K는 8밴드, 1440p는 4밴드다.
-  - 근거 [실측, 설계 벤치 `--only-bands`, UAV↔SRV 전환 포함]: 해석 → 셰이딩 4K 0.740 → 0.470 ms.
-  - 검증 [실측]: 단위 테스트 `graph_banded_group_covers_every_row`(1·3·8밴드, 999행, 모든 셀 일치, 밴드가 행을 빈틈없이 덮음, 패스 수 = 패스 × 밴드).
-  - M(해석·셰이딩·가장자리)과 S(가시성 패스)가 자기 픽셀 패스를 그룹으로 옮긴다.
+  - 밴드 경계를 넘어 읽으면 이전 밴드의 끝난 행만 보인다. 아래 행을 읽는 패스는 `band.lagged(rows)`로 처리 행을 늦춘다(v1.31): [y0 − rows, y1 − rows)를 0에서 자르고, 첫 밴드는 0행부터, 마지막 밴드는 끝까지다. 그룹의 밴드들에 대해 늦춘 구간도 뷰를 빈틈없이 덮는다. 비어 있지 않은 늦춘 구간은 그 밴드나 앞 밴드가 만든 행만 읽는다(y1' + rows ≤ y1). 지연은 사슬을 따라 더해진다(생산자가 8행 늦으면 그것을 읽는 3×3 소비자는 9행).
+  - `passBand(height, count, index)`(v1.31)는 `addBandedGroup`과 똑같이 밴드를 자른다. 트랙은 그룹 앞에서 밴드별 작업 목록(타일 목록, 간접 인자)을 이것으로 나눈다. 원자 카운터 하나로 목록을 채우면 목록 내용은 밴드 순서와 무관하게 정확하다. 간접 인자는 밴드마다 슬롯을 두고 밴드별 시작 오프셋을 기록한다.
+  - 밴드 수는 `passBandCount(quality, width, height)` = round(픽셀 수 / `output.band_pixels`), 최소 1이다. **`band_pixels` = 0은 한 밴드(뷰 전체)이고 v1.31부터 기본값이다.** 근거 [실측, M]: M 패스만 4K/8(1036800)로 밴드화했을 때 도시 4K 프레임이 6.725 → 6.800 ms로 순손실이었다. 셰이딩이 지연에 묶여 있어 L2 적중이 밴드마다의 배리어를 갚지 못한다. 셰이딩이 바닥에 가까워지면 1036800으로 다시 잰다(같은 코드, 설정만 바꾼다).
+  - 근거 [실측, 설계 벤치 `--only-bands`, UAV↔SRV 전환 포함]: 해석 → 셰이딩 4K 0.740 → 0.470 ms. 실제 프레임 순서에서는 해석과 셰이딩 사이에 전체 화면 소비자(S 페이지 표시, 프록셀, R GI·반사)가 있어서 이 쌍은 성립하지 않는다(M). 그래서 그룹은 아래의 조명 그룹이다.
+  - **조명 그룹(v1.31, M·S 요청)**: FrameRenderer가 뷰마다 `tracks::shadowVisibilityPasses(fc, view)`(S) + `tracks::shadingPasses(fc, view)`(M)를 한 그룹으로 선언한다. 이름은 `lit`, 밴드 안 순서는 목록 순서(S → M)다. 그 뒤 `tracks::shadingComposite(fc, view)`(M: 가장자리 합성처럼 그룹 결과를 뷰 전체로 읽는 일)를 부른다(`Tracks.h`).
+    - `*Passes` 함수는 자기 자원을 만들고, 그룹 앞에 돌 보통 패스(클리어, 밴드별 타일 목록)를 직접 선언한 뒤 밴드 패스 목록을 돌려준다. setup은 밴드마다 불리므로 사용 선언만 한다(자원을 만들지 않는다). execute는 값 캡처이고 자기 밴드의 행만 쓴다.
+    - S 가시성은 지연 0행이다(S: 이웃 읽기는 그룹 앞에 이미 있는 깊이 ±1 픽셀뿐). M 검출·셰이딩은 `lagged(8)`이다.
+    - `shadowVisibility`와 `shading`은 S·M이 새 함수를 커밋할 때까지 그대로 불린다. 둘 다 들어오면 코어가 FrameRenderer를 한 커밋으로 바꾼다. 꺼진 빌드용 코어 스텁은 빈 목록을 돌려준다.
+  - 검증 [실측]: 단위 테스트 `graph_banded_group_covers_every_row`(1·3·8밴드, 999행, 모든 셀 일치, 밴드가 행을 빈틈없이 덮음, 기록된 행 = `passBand`, 패스 수 = 패스 × 밴드), `graph_band_rows_and_lag`(높이 1~2160, 밴드 1~300, 지연 0·1·8·16의 9,156개 밴드: 연속·8행 경계·늦춘 구간 연속·y1' + rows ≤ y1).
 
 ### 4.1 디바이스와 호스트 통합 (v1.9, I 요청 `20260925_I_unity_queue_device.md`)
 `Device(DeviceOptions)`가 디바이스·큐 셋·서술자 힙·루트 서명을 만든다. 호스트(Unity) 안에서는 I가 다음을 쓴다:
@@ -523,6 +527,9 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.28 (2026-09-25):
   - **GpuLock `-Kind timing|correctness`**(조율 요청, 3.3): 종류를 `current.json`과 `history.log`에 기록한다. 백그라운드 CPU 작업의 멈춤 규칙은 timing만 대상이다(C의 PauseGate는 `kind`를 읽도록 C가 맞춘다). history 줄의 형식이 `acquire <트랙> (<종류>) :: ...`로 바뀌었다.
   - **M 요청 `20260925_M_planar_mask_apron.md`(R 동의)**: `ViewDesc::planarMask` 값이 1 = 거울 픽셀(R이 읽음), 2 = 에이프런(거울 픽셀의 3×3 이웃, 그리고 셰이딩하지만 R은 읽지 않음), 0 = 건너뜀이 됐다. `planarTileMask`는 팽창된 마스크 기준이다. V·S·M은 "0 아님 = 그림" 그대로라 바뀌는 것이 없다(V의 64 px 컬링 마스크와 깊이 채움은 이미 0 아님으로 판정한다). R의 resolve만 "== 1"로 읽는다. 마스크 생성은 R 몫이다.
+- v1.31 (2026-09-25):
+  - **조명 그룹과 밴드 도구(4절, M·S 요청)**: `tracks::shadowVisibilityPasses/shadingPasses/shadingComposite` 선언(`Tracks.h`)과 코어 스텁, `PassBand::lagged(rows)`, `passBand(height, count, index)`. FrameRenderer 전환은 S·M 구현 뒤에 한다. [실측] 34/34.
+  - **`output.band_pixels` 기본 0 = 한 밴드(M 실측 순손실 6.725 → 6.800 ms)**. 틀과 도구는 그대로 두고, 셰이딩이 바닥에 가까워지면 다시 잰다.
 - v1.30 (2026-09-25):
   - **GpuLock 보유 상한(3.3, 조율 요청)**: Job 객체로 명령 트리를 묶는다. `-TimeoutMinutes`(기본 45)를 넘으면 트리를 끝내고 `TIMEOUT`(124)으로 기록한다. 래퍼가 죽으면 트리도 같이 끝난다. 명령 뒤에 남은 자손을 정리하고, 죽은 보유자는 `stale release`로 남긴다. `current.json` 쓰기 경쟁을 고쳤다. 잠금 대기 상한은 `-WaitMinutes`로 이름을 바꿨다. [실측] 자체 시험(별도 뮤텍스 이름의 사본): 3초 상한에서 exit 124, 잠자던 자식 0개 남음. 떠난 자손 1개를 이름과 함께 정리. 래퍼 강제 종료 2초 뒤 자식(PING, conhost) 0개. 기다리는 쪽이 있을 때와 없을 때 모두 `stale release` 기록. 대기자 4개가 동시에 `current.json`을 읽어도 모두 exit 0.
   - **CPU 펜스 대기 상한(3.3, 조율 요청)**: `waitFenceCpu`, `fenceTimeoutSeconds`, `kFenceTimeoutExitCode = 88`. [실측] 단위 테스트 `fence_wait_limit_exit_policy`(자식 프로세스, 상한 2초: 2.8초에 exit 88, 마지막 줄 `UNX_FENCE_TIMEOUT Queue::waitCpu(graphics) value 1001 completed 1 after 2 s`), `fence_wait_limit_throw_policy`(대기가 돌아오고 `deviceWasRemoved()` = true). 33/33.

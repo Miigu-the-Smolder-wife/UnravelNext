@@ -99,7 +99,24 @@ struct PassBand
 {
     uint32_t index = 0, count = 1;
     uint32_t y0 = 0, y1 = UINT32_MAX;
+
+    // The band 'rows' rows later (v1.31): [y0 - rows, y1 - rows) clamped at 0, the first band from row 0 and the last to
+    // its end. For a pass that reads up to 'rows' rows below the row it writes (a 3 x 3 neighbourhood: 1; M's edge
+    // detection and shading lag one 8-row tile row: 8): over a group's bands the lagged ranges still tile the view, and a
+    // non-empty lagged range reads only rows this band or an earlier one produced (y1' + rows <= y1).
+    PassBand lagged(uint32_t rows) const
+    {
+        PassBand b = *this;
+        b.y0 = index == 0 ? 0 : (y0 > rows ? y0 - rows : 0);
+        b.y1 = index + 1 >= count ? y1 : (y1 > rows ? y1 - rows : 0);
+        return b;
+    }
 };
+
+// Band 'index' of 'count' over 'height' rows exactly as addBandedGroup cuts them: y0 = min(height, floor(height * index /
+// count) rounded down to 8 rows), the last band ends at 'height'. Tracks cut per-band work lists (tile lists, indirect
+// arguments) with it before the group.
+PassBand passBand(uint32_t height, uint32_t count, uint32_t index);
 
 class PassContext
 {

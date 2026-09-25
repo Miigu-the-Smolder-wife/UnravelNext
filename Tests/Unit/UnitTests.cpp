@@ -707,6 +707,7 @@ UNX_TEST(graph_banded_group_covers_every_row)
         for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
         CHECK(g.stats().livePasses == 2 * bands + 1);
         CHECK(rows.size() == bands && rows.front().first == 0 && rows.back().second == height);
+        for (uint32_t k = 0; k < bands; ++k) CHECK(rows[k].first == passBand(height, bands, k).y0 && rows[k].second == passBand(height, bands, k).y1);
         for (size_t k = 0; k < rows.size(); ++k)
         {
             CHECK(rows[k].first % 8 == 0 && rows[k].first < rows[k].second);
@@ -721,6 +722,36 @@ UNX_TEST(graph_banded_group_covers_every_row)
         logf("    %u bands over %u rows: %zu wrong cells of %u\n", bands, height, wrong, cells);
         CHECK(wrong == 0);
     }
+}
+
+UNX_TEST(graph_band_rows_and_lag)
+{
+    // passBand cuts exactly the bands addBandedGroup records, and PassBand::lagged ranges tile the view for any lag with
+    // every non-empty lagged range reading only rows its own or an earlier band produced (y1' + rows <= y1).
+    size_t cases = 0;
+    for (uint32_t height : { 1u, 7u, 8u, 20u, 999u, 1440u, 2160u })
+        for (uint32_t count : { 1u, 2u, 3u, 8u, 13u, 300u })
+            for (uint32_t rows : { 0u, 1u, 8u, 16u })
+            {
+                uint32_t plainEnd = 0, laggedEnd = 0;
+                for (uint32_t b = 0; b < count; ++b)
+                {
+                    const PassBand band = passBand(height, count, b);
+                    CHECK(band.index == b && band.count == count && band.y0 == plainEnd && band.y0 <= band.y1);
+                    CHECK(b + 1 == count || band.y1 % 8 == 0);
+                    const PassBand late = band.lagged(rows);
+                    CHECK(late.y0 == laggedEnd && late.y0 <= late.y1);
+                    if (late.y1 > late.y0 && b + 1 < count) CHECK(late.y1 + rows <= band.y1);
+                    plainEnd = band.y1;
+                    laggedEnd = late.y1;
+                    ++cases;
+                }
+                CHECK(plainEnd == height && laggedEnd == height);
+            }
+    // A pass outside a group: band 0 of 1 over every row, unchanged by a lag.
+    const PassBand whole;
+    CHECK(whole.lagged(8).y0 == 0 && whole.lagged(8).y1 == UINT32_MAX);
+    logf("    %zu bands checked\n", cases);
 }
 
 UNX_TEST(graph_castable_view_formats)

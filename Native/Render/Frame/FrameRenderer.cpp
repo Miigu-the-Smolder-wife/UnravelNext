@@ -28,7 +28,8 @@ ViewDesc ViewDesc::fromCamera(const scene::Camera& camera, uint32_t width, uint3
 uint32_t passBandCount(const QualityConfig& quality, uint32_t width, uint32_t height)
 {
     const double perBand = (double)quality.integer("output.band_pixels");
-    if (!(perBand > 0)) fail("output.band_pixels must be positive");
+    if (perBand < 0) fail("output.band_pixels must be 0 (one band) or positive");
+    if (perBand == 0) return 1;  // one band: the whole view (the default, v1.31)
     return std::max(1u, (uint32_t)std::lround((double)width * height / perBand));
 }
 

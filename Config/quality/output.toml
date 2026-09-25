@@ -6,5 +6,7 @@
 # Measurement and gate resolutions. The harness refuses anything else.
 resolutions = ["3840x2160", "2560x1440"]
 # Banded pass groups (RenderGraph::addBandedGroup, passBandCount): pixels per band, so a band's intermediate buffers stay
-# in L2 between producer and consumer passes. 4K / 8 = 1036800 (8 bands at 4K, 4 at 1440p; design bench --only-bands).
-band_pixels = 1036800
+# in L2 between producer and consumer passes; 0 = one band (the whole view). Default 0 (v1.31): with only M's passes
+# banded at 4K / 8 = 1036800 (8 bands at 4K, 4 at 1440p) M measured city 4K 6.725 -> 6.800 ms (shading is latency-bound,
+# the L2 hits do not pay for the per-band barriers yet). Measure again at 1036800 when shading nears its floor.
+band_pixels = 0

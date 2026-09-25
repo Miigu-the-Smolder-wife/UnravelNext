@@ -8,4 +8,10 @@ namespace unx::render::tracks
 void prepareScene(FramePassContext&) { pending("M.prepareScene (track disabled in this build)"); }
 void materialResolve(FramePassContext&, ViewResources&) { pending("M.materialResolve (track disabled in this build)"); }
 void shading(FramePassContext&, ViewResources&) { pending("M.shading (track disabled in this build)"); }
+std::vector<RenderGraph::BandedPass> shadingPasses(FramePassContext&, ViewResources&)
+{
+    pending("M.shadingPasses (track disabled in this build)");
+    return {};
+}
+void shadingComposite(FramePassContext&, ViewResources&) { pending("M.shadingComposite (track disabled in this build)"); }
 } // namespace unx::render::tracks
