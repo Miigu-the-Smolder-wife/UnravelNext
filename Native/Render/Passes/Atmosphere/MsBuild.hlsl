@@ -32,8 +32,8 @@
 
 #define MS_SH_MAX 48u  // largest multiscatter_sh_order the kernels hold (registers of PASS 5)
 groupshared float3 gs_coefficients[(MS_SH_MAX + 1) * (MS_SH_MAX + 2) / 2];
-groupshared float4 gs_node[64];
-groupshared float2 gs_nodeX[64];
+#define MS_RING_MAX 256u  // largest azimuth node count of the projection grid (groupshared ring)
+groupshared float3 gs_ring[MS_RING_MAX];
 
 struct MsTexel
 {
@@ -225,10 +225,13 @@ void main(uint3 thread : SV_DispatchThreadID)
     output[sum] = float4(P[1].x != 0 ? E : output[sum].rgb + E, 0);
 #elif PASS == 5
     // P[0].z L_{n-1} SRV (Texture3D<float4>), P[0].w coefficients UAV (RWStructuredBuffer<float4>, per slice (L + 1)(L + 2) / 2),
-    // P[1].x SH order L, P[1].y elevation nodes per half K, P[1].z azimuth nodes over [0, pi] A. Group = the slice;
-    // thread m accumulates the coefficients (l, m), l = m..L, in registers over the grid, 64 nodes at a time.
+    // P[1].x SH order L, P[1].y elevation nodes per half K, P[1].z azimuth nodes over [0, pi] A (<= MS_RING_MAX).
+    // Group = the slice. Ring by ring (2K elevation rings): the ring's A radiance values into groupshared, then thread m
+    // takes their azimuthal Fourier term F_m (cos m phi by a rotation recurrence) and adds F_m w_ring P~_l^m(x_ring) to
+    // its coefficients (l, m), l = m..L (registers): O(A + L) per ring and thread instead of O(A L) per ring and
+    // coefficient; the same quadrature as evaluating every basis function at every node.
     const uint4 n = a.multiScatterSize;
-    const uint L = min(P[1].x, MS_SH_MAX), K = P[1].y, A = P[1].z;
+    const uint L = min(P[1].x, MS_SH_MAX), K = P[1].y, A = min(P[1].z, MS_RING_MAX);
     const uint iMus = thread.x / 64, lane = thread.x % 64, r = P[1].w;
     Texture3D<float4> radiance = ResourceDescriptorHeap[P[0].z];
     const float altitude = airMsAltitude(a, float(r) / (n.w - 1));
@@ -238,62 +241,56 @@ void main(uint3 thread : SV_DispatchThreadID)
     float kmm = 0.28209479177387814;  // |P~_m^m| / sin^m: sqrt((2m + 1) / 4 pi x prod (2k - 1) / 2k), sign (-1)^m
     for (uint k2 = 1; k2 <= m; ++k2) kmm *= sqrt((2.0 * k2 + 1) / (2.0 * k2));
     if (m & 1) kmm = -kmm;
+    const float step = ATMO_PI / A;  // azimuth spacing over [0, pi]; nodes at (a + 0.5) step, doubled by symmetry
+    float cStep, sStep, c0, s0;
+    sincos(m * step, sStep, cStep);
+    sincos(m * 0.5 * step, s0, c0);
+    const float azimuthNorm = (m == 0 ? 1.0 : 1.4142135623730951) * 2 * step;  // x 2: the half [pi, 2 pi] mirrored
     float3 acc[MS_SH_MAX + 1];
     [unroll] for (uint j0 = 0; j0 <= MS_SH_MAX; ++j0) acc[j0] = 0;
-    const uint nodes = 2 * K * A;
-    for (uint first = 0; first < nodes; first += 64)
+    for (uint ring = 0; ring < 2 * K; ++ring)
     {
-        const uint j = first + lane;
-        float4 node = 0;  // (L rgb x weight, and x = sin el in gs_node_x, cos phi in gs_node_c)
-        float x = 0, cphi = 1;
-        if (j < nodes)
+        const uint above = ring / K, k = ring % K;
+        const float u = (k + 0.5) / K, range = above ? 1.5707963267948966 - hz : hz + 1.5707963267948966;
+        const float el = above ? hz + u * u * range : hz - u * u * range;
+        const float x = sin(el), ce = cos(el);
+        for (uint az = lane; az < A; az += 64)
         {
-            const uint above = j / (K * A), k = (j / A) % K;
-            const float u = (k + 0.5) / K, range = above ? 1.5707963267948966 - hz : hz + 1.5707963267948966;
-            const float el = above ? hz + u * u * range : hz - u * u * range;
-            const float phi = ATMO_PI * ((j % A) + 0.5) / A;
-            x = sin(el);
-            cphi = cos(phi);
-            const float weight = cos(el) * 2 * u * range / K * (6.283185307179586 / A);
-            node = float4(airMsSample(a, radiance, altitude, x, mus, cos(el) * cphi * ss + x * mus) * weight, 0);
+            const float phi = (az + 0.5) * step;
+            gs_ring[az] = airMsSample(a, radiance, altitude, x, mus, ce * cos(phi) * ss + x * mus);
         }
-        gs_node[lane] = node;
-        gs_nodeX[lane] = float2(x, cphi);
         GroupMemoryBarrierWithGroupSync();
         if (m <= L)
-            for (uint q = 0; q < 64 && first + q < nodes; ++q)
+        {
+            float3 F = 0;
+            float cm = c0, sm = s0;
+            for (uint az2 = 0; az2 < A; ++az2)
             {
-                const float3 value = gs_node[q].rgb;
-                const float xq = gs_nodeX[q].x, cq = gs_nodeX[q].y;
-                const float sq = sqrt(saturate(1 - xq * xq));
-                // cos(m phi) by the Chebyshev recurrence (m <= L <= 64).
-                float cm = 1, cprev = cq;
-                for (uint t2 = 0; t2 < m; ++t2)
-                {
-                    const float next = 2 * cq * cm - cprev;
-                    cprev = cm;
-                    cm = next;
-                }
-                const float azimuth = m == 0 ? 1.0 : 1.4142135623730951 * cm;
-                const float pmm = kmm * pow(sq, float(m));
-                float p2 = 0, p1 = pmm;
-                [unroll] for (uint i2 = 0; i2 <= MS_SH_MAX; ++i2)
-                {
-                    const uint l = m + i2;
-                    if (l > L) break;
-                    float p = pmm;
-                    if (i2 == 1) p = sqrt(2.0 * m + 3) * xq * pmm;
-                    else if (i2 > 1)
-                        p = sqrt((4.0 * l * l - 1) / (float(l * l) - float(m * m))) *
-                            (xq * p1 - sqrt((float((l - 1) * (l - 1)) - float(m * m)) / (4.0 * (l - 1) * (l - 1) - 1)) * p2);
-                    if (i2 > 0)
-                    {
-                        p2 = p1;
-                        p1 = p;
-                    }
-                    acc[i2] += value * (p * azimuth);
-                }
+                F += gs_ring[az2] * cm;
+                const float cn = cm * cStep - sm * sStep;
+                sm = sm * cStep + cm * sStep;
+                cm = cn;
             }
+            F *= azimuthNorm * ce * 2 * u * range / K;
+            const float pmm = kmm * pow(ce, float(m));
+            float p2 = 0, p1 = pmm;
+            [unroll] for (uint i2 = 0; i2 <= MS_SH_MAX; ++i2)
+            {
+                const uint l = m + i2;
+                if (l > L) break;
+                float p = pmm;
+                if (i2 == 1) p = sqrt(2.0 * m + 3) * x * pmm;
+                else if (i2 > 1)
+                    p = sqrt((4.0 * l * l - 1) / (float(l * l) - float(m * m))) *
+                        (x * p1 - sqrt((float((l - 1) * (l - 1)) - float(m * m)) / (4.0 * (l - 1) * (l - 1) - 1)) * p2);
+                if (i2 > 0)
+                {
+                    p2 = p1;
+                    p1 = p;
+                }
+                acc[i2] += F * p;
+            }
+        }
         GroupMemoryBarrierWithGroupSync();
     }
     if (m <= L)

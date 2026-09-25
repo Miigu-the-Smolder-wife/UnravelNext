@@ -92,8 +92,8 @@ AtmosphereParams makeParams(const scene::Atmosphere& a, const QualityConfig& q)
         p.multiScatterSize[1] > 2048 || p.multiScatterSize[2] > 2048 || p.multiScatterSize[0] * p.multiScatterSize[3] > 2048)
         fail("atmosphere.multiscatter_table: >= 2 texels per axis, mu even and >= 4 (two halves split at the horizon), mu_s, mu and nu x r <= 2048");
     if (p.multiScatterOrders < 2 || p.multiScatterDirections < 2 || p.multiScatterSteps < 1 || p.multiScatterShOrder > 48 ||
-        p.multiScatterShGrid[0] < 1 || p.multiScatterShGrid[1] < 1)
-        fail("atmosphere: multiscatter_orders >= 2, directions >= 2, steps >= 1, sh_order <= 48 (MS_SH_MAX), sh_grid >= 1");
+        p.multiScatterShGrid[0] < 1 || p.multiScatterShGrid[1] < 1 || p.multiScatterShGrid[1] > 256)
+        fail("atmosphere: multiscatter_orders >= 2, directions >= 2, steps >= 1, sh_order <= 48 (MS_SH_MAX), 1 <= sh_grid, azimuths <= 256 (MS_RING_MAX)");
     if (!(p.bottomRadius > 0 && p.topRadius > p.bottomRadius && p.rayleighScaleHeight > 0 && p.mieScaleHeight > 0 && std::abs(p.mieG) < 1 && p.ozoneWidth > 0))
         fail("atmosphere: invalid shell, scale heights or Mie g");
     return p;
