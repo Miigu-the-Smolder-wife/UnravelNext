@@ -23,3 +23,8 @@ INTERFACES 5.6 표의 ShadowVisibility.hlsli 칸에 아래를 추가해 주기 �
 
 ## 비용
 - 새 자원이나 필드는 없다. 헤더에 Frame.hlsli와 GBuffer.hlsli가 포함된다. 기존 소비자(ShadeOpaque, GiTrace, ReflectionTrace)는 이미 그 둘을 포함하며, 오프라인 컴파일로 통과를 확인했다(V;M;S;C 빌드).
+
+## 결과 (코어, 2026-09-25, INTERFACES v1.21)
+
+- 5.6 `ShadowVisibility.hlsli` 칸에 네 선언(`ShadowPixelReceiver`, `shadowPixelReceiver`, `shadowLocalVisibilityAtReceiver`, `shadowLocalVisibilityAtPixel`)과 조건(같은 계산·같은 양자화, 슬롯 없는 광원 1, `searchBound` 미사용)을 적었다. `shadowVisibilityDirect`는 "뷰 픽셀이 없는 호출자용"으로 표기했다.
+- 문서 기록뿐이다(S 파일, 새 자원 없음).
