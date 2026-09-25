@@ -667,19 +667,22 @@ static void benchBricksVista(const std::string& s)
 {
     warmUp("Band C brick DDA, vista world (1 px per voxel, instanced pools)");
     const uint32_t W = g_width, H = g_height;
-    const uint32_t Bx = (W + 15) / 16 + 4, By = (H + 15) / 16 + 4, Bz = 2, world = Bx * By * Bz;  // 2 bricks of padding per side: edge rays stay inside for 32 steps
+    const uint32_t Bx = (W + 15) / 16 + 4, By = (H + 15) / 16 + 4;  // 2 bricks of padding per side: edge rays stay inside for 32 steps
     auto output = g.buffer((UINT64)W * H * 32); const UINT outUav = g.uavStructured(output.Get(), W * H, 32);
     auto maps = g.buffer(4096); const UINT mapsUav = g.uavRaw(maps.Get(), 4096);
     const float camDist = (float)H / (2.f * 0.577f);
     // Mapping of world bricks onto the pool: 0 = random (shuffled when unique) = no locality, the worst case for the TLB and L2;
     // 1 = tree blocks: each 6 x 6 x 2 world block (one tree instance) maps to a random contiguous 72-brick block of the pool
     // (instanced species bricks: locality inside a tree, none between trees); 2 = contiguous (world order).
-    struct Pool { const char* name; uint32_t bricks; int mapping; };
-    const Pool pools[] = { { "pool 4,608 bricks, random", 4608u, 0 }, { "pool 16,384 bricks, random", 16384u, 0 }, { "pool 24,576 bricks, random", 24576u, 0 },
-                           { "pool 24,576 bricks, tree blocks", 24576u, 1 }, { "pool 24,576 bricks, contiguous", 24576u, 2 },
-                           { "unique world, shuffled", 0u, 0 }, { "unique world, tree blocks", 0u, 1 }, { "unique world, contiguous", 0u, 2 } };
+    struct Pool { const char* name; uint32_t bricks; int mapping; uint32_t depth; };
+    const Pool pools[] = { { "pool 4,608 bricks, random", 4608u, 0, 2 }, { "pool 16,384 bricks, random", 16384u, 0, 2 }, { "pool 24,576 bricks, random", 24576u, 0, 2 },
+                           { "pool 24,576 bricks, tree blocks", 24576u, 1, 2 }, { "pool 24,576 bricks, contiguous", 24576u, 2, 2 },
+                           { "unique world, shuffled", 0u, 0, 2 }, { "unique world, tree blocks", 0u, 1, 2 }, { "unique world, contiguous", 0u, 2, 2 },
+                           // w/2 mip question (14.9 item 4): 1.06 / 2.1 GB brick sets, rays touch the front two brick layers only (265 MB).
+                           { "unique world x4 depth (1.06 GB, front 265 MB touched), tree blocks", 0u, 1, 8 }, { "unique world x8 depth (2.1 GB, front 265 MB touched), tree blocks", 0u, 1, 16 } };
     for (const Pool& pl : pools)
     {
+        const uint32_t Bz = pl.depth, world = Bx * By * Bz;
         const uint32_t pool = pl.bricks == 0 ? world : std::min(g.warp ? pl.bricks / 144 : pl.bricks, world);  // WARP: 256x144 world of 520 bricks
         if (pl.bricks != 0 && pool == world) continue;  // a pool at least as large as the world is the unique case
         std::vector<uint32_t> table(world);
@@ -689,9 +692,9 @@ static void benchBricksVista(const std::string& s)
             else if (pl.mapping == 2) { for (uint32_t i = 0; i < world; ++i) table[i] = i % pool; }
             else
             {
-                const uint32_t blocks = std::max(pool / 72u, 1u);
+                const uint32_t blockBricks = 36u * Bz, blocks = std::max(pool / blockBricks, 1u);
                 std::vector<uint32_t> base((Bx / 6 + 1) * (By / 6 + 1));
-                for (uint32_t& b : base) b = (uint32_t)(rng() % blocks) * 72u;
+                for (uint32_t& b : base) b = (uint32_t)(rng() % blocks) * blockBricks;
                 for (uint32_t bz = 0; bz < Bz; ++bz) for (uint32_t by = 0; by < By; ++by) for (uint32_t bx = 0; bx < Bx; ++bx)
                     table[(bz * By + by) * Bx + bx] = std::min(base[(by / 6) * (Bx / 6 + 1) + bx / 6] + (bx % 6) + 6 * (by % 6) + 36 * bz, pool - 1);
             }
@@ -704,6 +707,7 @@ static void benchBricksVista(const std::string& s)
         {
             if (ly.voxelBytes == 8 && pool == world && !g.warp) continue;  // 2 GB: the unique world is measured at 1 B only
             if (ly.voxelBytes == 8 && pl.mapping != 0) continue;  // the mapping variants are measured on the density plane only
+            if (pl.depth > 2 && g.warp && ly.voxelBytes == 8) continue;
             const UINT64 planeVox = (UINT64)pool * 4096;
             const UINT64 bytes = ly.soa ? planeVox * 9 : planeVox * ly.voxelBytes;
             std::vector<uint8_t> vox(bytes, 0);
