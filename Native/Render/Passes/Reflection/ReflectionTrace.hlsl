@@ -48,6 +48,9 @@ void ReflectionTraceGen()
     int2 probeCount;
     const GiProbeFootprint footprint = giProbeFootprint(probeTexture, pixel, s.normal, s.linearDepth, probeSpacing, probeCount);
     const float lobe = reflectionLobeHalfAngle(s.roughness, dot(s.normal, s.view));
+    // Ray cone of the pixel (ReflectionHit.hlsli): its width at this surface and its spread after the lobe.
+    const float pixelSpread = 2 * g_tanHalfFovY / g_viewHeight;
+    const float coneWidth = pixelSpread * distance(s.position, g_cameraPosition), coneSpread = pixelSpread + 2 * tan(lobe);
     uint seed = giRandom(pixel.x * 7919u + pixel.y * 104729u + (P[5].x & 0xFFFFFFu) * 15485863u);
     float3 sum = 0;
     float distSum = 0;
@@ -73,7 +76,7 @@ void ReflectionTraceGen()
         r.TMin = 0;
         r.TMax = giRayLength();
         float d;
-        const float3 L = reflHitRadiance(scene, cache, h, r, tan(lobe), seed, d);
+        const float3 L = reflHitRadiance(scene, cache, h, r, coneWidth, coneSpread, seed, d);
         // Control variate for G: the cache's radiance in the same direction at texel resolution.
         const float3 g = mode == REFL_G ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, dir, 0.1763, P[3].w) : 0;
         sum += L - g;

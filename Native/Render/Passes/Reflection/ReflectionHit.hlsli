@@ -13,11 +13,15 @@
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 
-// A reflection hit consumes the cache like a GI hit: its cell (the lobe's footprint there, 2 t tan(lobe), at least) is
-// found or created and requested for update next frame (hit tier), so cells only reflections see are kept converged.
+// The hit's footprint is the ray cone's width there (Akenine-Moller et al., ray cones): 'coneWidth' at the ray origin (the
+// primary pixel's width at the reflector, pixel spread x eye distance) plus t x 'coneSpread' (full angle: the pixel's spread
+// plus the lobe's 2 tan(half-angle); reflector curvature is not included, so on curved mirrors it is a lower bound). It
+// picks the texture level, the cache level and the VSM level at the hit, and filters the sun's specular highlight.
+// A reflection hit consumes the cache like a GI hit: its cell (at the footprint's level) is found or created and
+// requested for update next frame (hit tier), so cells only reflections see are kept converged.
 // The cache read (irradiance and the mirror direction's radiance) starts at that level and climbs until an updated cell
 // exists.
-float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RayDesc r, float coneTan, uint seed, out float hitDistance)
+float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RayDesc r, float coneWidth, float coneSpread, uint seed, out float hitDistance)
 {
     const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION);
     if (hit.t < 0)
@@ -38,9 +42,10 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
         }
     }
     const RtSurface s = rtSurface(scene, hit, r.Origin, r.Direction);
-    const GpuMaterial m = rtHitMaterial(loadMaterial(s.material), s, 2 * hit.t * coneTan, dot(s.normal, r.Direction));
+    const float footprint = coneWidth + hit.t * coneSpread;
+    const GpuMaterial m = rtHitMaterial(loadMaterial(s.material), s, footprint, dot(s.normal, r.Direction));
     if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return 0;
-    const uint footprintLevel = giLevelForSize(h, 2 * hit.t * coneTan);
+    const uint footprintLevel = giLevelForSize(h, footprint);
     bool created;
     const uint e = giFindOrCreate(cache, h, giSurfaceKey(h, s.position, s.normal, footprintLevel), s.position, s.normal, created);
     if (e != GI_ENTRY_PENDING)
@@ -71,7 +76,7 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
                 ShadowSrvs vsm;
                 vsm.pageTable = a.x; vsm.pool = a.y; vsm.blocks = a.z; vsm.searchBound = a.w;
                 vsm.constants = c.x; vsm.lights = c.y; vsm.pad0 = c.z; vsm.pad1 = c.w;
-                L.sunVisibility = shadowSunVisibilityAt(vsm, s.position, s.geometricNormal, 2 * hit.t * coneTan, resident);
+                L.sunVisibility = shadowSunVisibilityAt(vsm, s.position, s.geometricNormal, footprint, resident);
             }
             if (!resident)
             {
@@ -85,7 +90,7 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
             }
         }
     }
-    return rtHitRadiance(m, P[5].y, s.normal, v, L, 2 * coneTan);
+    return rtHitRadiance(m, P[5].y, s.normal, v, L, coneSpread);
 }
 
 #endif
