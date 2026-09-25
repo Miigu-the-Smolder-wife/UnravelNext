@@ -11,6 +11,8 @@
 //       pause it instead of running beside it).
 //       --volume-order MIN:MAX (diagnostics, MAX may be inf) keeps only light with MIN..MAX atmosphere scattering events;
 //       surface and ground bounces are not counted (pure single scattering needs black surfaces and ground).
+//       --surface-order MIN:MAX the same for surface scattering events (1 = reflected once, at the visible surface);
+//       --volume-order 0:0 --surface-order 1:1 is direct light only.
 //   unx_reference census  --scene ... (--camera|--path/--time) --res <WxH> [--engine <capture.unxids>] [--out report.json]
 //       16-sub-sample identity census; without --engine the 1-sample (pixel centre) + 3x3 baseline.
 //   unx_reference compare --scene ... (--camera|--path/--time) --res <WxH> --test <engine.pfm> [--out report.json]
@@ -57,6 +59,7 @@ struct Args
     float sunIlluminance = -1;
     bool noHold = false;
     uint32_t orderMin = 0, orderMax = 0xFFFFFFFFu;  // --volume-order MIN:MAX (diagnostics)
+    uint32_t surfMin = 0, surfMax = 0xFFFFFFFFu;    // --surface-order MIN:MAX (diagnostics)
     uint32_t threads = 0;                            // --threads N (0 = 3/4 of the logical processors)
     std::vector<std::string> alsoHold;               // --also-hold <file> (repeatable)
 };
@@ -95,14 +98,16 @@ Args parse(int argc, char** argv)
         else if (k == "--write-scene") a.writeScene = next();
         else if (k == "--threads") a.threads = (uint32_t)std::stoul(next());
         else if (k == "--also-hold") a.alsoHold.push_back(next());
-        else if (k == "--volume-order")
+        else if (k == "--volume-order" || k == "--surface-order")
         {
             const std::string r = next();
             const size_t c = r.find(':');
-            if (c == std::string::npos) fail("--volume-order expects MIN:MAX (MAX may be 'inf')");
-            a.orderMin = (uint32_t)std::stoul(r.substr(0, c));
+            if (c == std::string::npos) fail("%s expects MIN:MAX (MAX may be 'inf')", k.c_str());
             const std::string mx = r.substr(c + 1);
-            a.orderMax = mx == "inf" ? 0xFFFFFFFFu : (uint32_t)std::stoul(mx);
+            uint32_t& lo = k == "--volume-order" ? a.orderMin : a.surfMin;
+            uint32_t& hi = k == "--volume-order" ? a.orderMax : a.surfMax;
+            lo = (uint32_t)std::stoul(r.substr(0, c));
+            hi = mx == "inf" ? 0xFFFFFFFFu : (uint32_t)std::stoul(mx);
         }
         else fail("unknown argument %s", k.c_str());
     }
@@ -172,7 +177,8 @@ struct ReferenceKeys
     uint32_t spp = 0, rrStart = 0;
     std::string hash16;
 };
-ReferenceKeys referenceKeys(const QualityConfig& q, uint32_t sppOverride, uint32_t orderMin = 0, uint32_t orderMax = 0xFFFFFFFFu)
+ReferenceKeys referenceKeys(const QualityConfig& q, uint32_t sppOverride, bool sunCaustics, uint32_t orderMin = 0, uint32_t orderMax = 0xFFFFFFFFu,
+                            uint32_t surfMin = 0, uint32_t surfMax = 0xFFFFFFFFu)
 {
     ReferenceKeys k;
     k.spp = sppOverride ? sppOverride : (uint32_t)q.integer("reference.samples_per_pixel");
@@ -180,7 +186,11 @@ ReferenceKeys referenceKeys(const QualityConfig& q, uint32_t sppOverride, uint32
     // Only what changes the image: estimator version, sample count, Russian-roulette start.
     std::string canonical = format("%s\nreference.samples_per_pixel = %u\nreference.russian_roulette_start_bounce = %u\n", kEstimatorVersion, k.spp, k.rrStart);
     // A diagnostic scattering-order window changes the image, so it is part of the key (absent for full references).
+    // Sun caustics by light tracing (2026-09-25): changes the images of scenes with sun-caustic surfaces only; the others
+    // keep their key (their images are bitwise unchanged).
+    if (sunCaustics) canonical += "estimator.sun_caustics = light_traced\n";
     if (orderMin != 0 || orderMax != 0xFFFFFFFFu) canonical += format("diagnostic.volume_order = %u:%u\n", orderMin, orderMax);
+    if (surfMin != 0 || surfMax != 0xFFFFFFFFu) canonical += format("diagnostic.surface_order = %u:%u\n", surfMin, surfMax);
     k.hash16 = Sha256::hex(canonical).substr(0, 16);
     return k;
 }
@@ -205,7 +215,7 @@ std::string nowIso()
 
 std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const std::string& label, const reference::ResolvedCamera& cam, const QualityConfig& q)
 {
-    const ReferenceKeys k = referenceKeys(q, a.spp, a.orderMin, a.orderMax);
+    const ReferenceKeys k = referenceKeys(q, a.spp, reference::hasSunCausticSurfaces(s), a.orderMin, a.orderMax, a.surfMin, a.surfMax);
     const std::filesystem::path pfm = cachePath(s, label, a.width, a.height, k);
     if (std::filesystem::exists(pfm) && !a.force)
     {
@@ -227,6 +237,9 @@ std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const s
     rs.pauseWhileExists = holdFiles(a);
     rs.volumeOrderMin = a.orderMin;
     rs.volumeOrderMax = a.orderMax;
+    rs.surfaceOrderMin = a.surfMin;
+    rs.surfaceOrderMax = a.surfMax;
+    if (a.surfMin != 0 || a.surfMax != 0xFFFFFFFFu) logf("reference: diagnostic surface scattering order window %u:%u\n", a.surfMin, a.surfMax);
     if (a.orderMin != 0 || a.orderMax != 0xFFFFFFFFu) logf("reference: diagnostic volume scattering order window %u:%u\n", a.orderMin, a.orderMax);
     const reference::RenderOutput out = pt.render(cam, rs, [&](const reference::RenderStats& st) {
         const double rate = st.seconds > 0 ? st.rays / st.seconds / 1e6 : 0;

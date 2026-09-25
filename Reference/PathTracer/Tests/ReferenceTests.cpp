@@ -79,7 +79,7 @@ struct Measured
     double mean = 0, stderr_ = 0;
 };
 
-Measured renderPatch(const scene::Scene& s, uint32_t spp)
+Measured renderPatch(const scene::Scene& s, uint32_t spp, bool sunCaustics = true)
 {
     reference::PathTracer pt(s);
     reference::RenderSettings rs;
@@ -88,6 +88,7 @@ Measured renderPatch(const scene::Scene& s, uint32_t spp)
     rs.samplesPerPixel = spp;
     rs.russianRouletteStart = 4;
     rs.samplesPerPass = spp / 2;
+    rs.sunCaustics = sunCaustics;
     const reference::RenderOutput out = pt.render(reference::resolveCamera(s, { "down", "", 0 }), rs);
     CHECK(out.stats.nanSamples == 0 && out.stats.truncatedPaths == 0);
     const double exposure = 1.0 / 1.2;
@@ -271,6 +272,50 @@ void testSunAbsorbing()
     const double tauView = 2e-6 * 1200.0 * (1 - std::exp(-50.0 / 1200.0));
     const double expected = lambert(0.5f) * 100000 * std::exp(-tau) * std::sin(elev) * std::exp(-tauView);
     expectNear("sun", m, expected, 2e-4);  // allowance: the 0.27 deg disk is integrated, the closed form uses its centre
+}
+
+// Sun caustic: a 2 x 2 m mirror (metal, base colour 1, roughness 0.03 -> alpha 9e-4) reflects the sun onto a Lambert
+// floor (albedo 0.1). Floor irradiance at the viewed patch = E_sun (cos(direct) + R cos(mirror image)), R = the mirror's
+// directional albedo (v1 metal, F0 = 1: 1 within 0.1 % at this angle, v1_metal_furnace.md). The light tracer
+// (default) and the camera paths alone (sunCaustics = false, many more samples) estimate the same expectation.
+// Floor -> mirror -> floor interreflection adds < 0.3 % (albedo 0.1, mirror solid angle 0.14 sr).
+void testSunCaustic()
+{
+    scene::Scene s = planeScene(0.1f);
+    scene::Material mm;
+    mm.name = "mirror";
+    mm.baseColor = { 1, 1, 1 };
+    mm.metallic = 1;
+    mm.roughness = 0.03f;
+    s.materials.push_back(mm);
+    const float elev = 60.0f * kPi / 180;
+    const float3 ws{ std::cos(elev), std::sin(elev), 0 };
+    s.sun.direction = ws;
+    s.sun.illuminance = 100000;
+    const float3 M{ -3, 3, 0 }, r = normalize(float3{ 0, 0, 0 } - M), n = normalize(r + ws);
+    const float3 t1{ 0, 0, 1 }, t2 = normalize(cross(n, t1));
+    scene::Mesh mesh;
+    mesh.name = "mirror";
+    mesh.positions = { M - t1 - t2, M + t1 - t2, M + t1 + t2, M - t1 + t2 };
+    mesh.normals = { n, n, n, n };
+    mesh.uv0 = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+    mesh.indices = { 0, 1, 2, 0, 2, 3 };
+    if (dot(cross(mesh.positions[1] - mesh.positions[0], mesh.positions[2] - mesh.positions[0]), n) < 0) mesh.indices = { 0, 2, 1, 0, 3, 2 };
+    mesh.submeshes = { { 0, 6, 1 } };
+    s.meshes.push_back(mesh);
+    scene::Instance in;
+    in.mesh = 1;
+    s.instances.push_back(in);
+    s.cameras[0].position = { 0, 5, 0 };
+    s.cameras[0].verticalFov = 0.16f;  // 0.8 m patch around the origin, inside the uniform part of the caustic
+    const double expected = lambert(0.1f) * 100000 * (std::sin(elev) + 1.0 * dot(float3{ 0, 1, 0 }, -r));
+    const Measured lt = renderPatch(s, 256);
+    expectNear("caustic", lt, expected, 1e-2);
+    const Measured cp = renderPatch(s, 65536, false);
+    logf("  caustic  camera paths only (65536 spp): %.6g +- %.2g (light tracer %.6g +- %.2g)\n", cp.mean, cp.stderr_, lt.mean, lt.stderr_);
+    if (std::fabs(cp.mean - lt.mean) > 4 * std::sqrt(cp.stderr_ * cp.stderr_ + lt.stderr_ * lt.stderr_) + 1e-3 * lt.mean)
+        fail("caustic: camera paths %.6g vs light tracer %.6g", cp.mean, lt.mean);
+    if (!(lt.stderr_ < cp.stderr_)) fail("caustic: the light tracer is not less noisy (%.3g vs %.3g)", lt.stderr_, cp.stderr_);
 }
 
 scene::Scene skyScene(float coefficientScale, float3 view)
@@ -566,6 +611,7 @@ int main(int argc, char** argv)
         run("disk", testDiskAndTube);
         run("shadow", testShadow);
         run("sun", testSunAbsorbing);
+        run("caustic", testSunCaustic);
         run("skythin", testSkySingleScatter);
         run("sky", testSkyEstimators);
         logf("reference tests passed\n");

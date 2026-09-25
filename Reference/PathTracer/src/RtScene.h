@@ -79,6 +79,7 @@ public:
     const DeformationReport& deformation() const { return m_deform; }
     bool alphaOpaque(uint32_t instance, uint32_t triangle, float u, float v) const;
     uint32_t instanceOf(uint32_t topGeom, uint32_t instPrim) const;  // instance-array hit -> scene instance
+    bool deformed(uint32_t instance) const { return m_instanceDeformed[instance] >= 0; }  // own world-space geometry
 
     struct MeshData;
     struct Group;

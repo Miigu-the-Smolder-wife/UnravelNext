@@ -294,8 +294,36 @@ struct PathTracer::Impl
 
     Rgb radiance(float3 origin, float3 dir, float tnear, Sampler& smp, Counters& cnt, uint32_t rrStart) const;
     bool forced = true;
+
+    // --- Sun caustics. Paths camera -> x -> y_k ... y_1 -> sun with x not smooth, every y smooth (GGX alpha <= 0.02 by
+    // material, no roughness texture, Standard class) and y_1 (the vertex that sees the sun) on a rigid instance carry
+    // the sun's image in near-mirror surfaces onto rough ones. A camera path reaches them only when a BSDF sample from
+    // x happens to leave through the reflected 0.5 deg sun disk, so 4096 spp leave them as fireflies (city_block:
+    // windows on the road and the facades). They are estimated by light tracing instead (sun -> y_1 ... y_k -> x,
+    // connected to the pinhole camera) and the camera paths drop exactly this class: a partition of the path space,
+    // so the image keeps its expectation. The class is decided from the same material predicate and instance flag on
+    // both sides.
+    static constexpr float kSmoothAlpha = 0.02f;
+    bool caustics = false;             // light tracing active (emission set non-empty and RenderSettings::sunCaustics)
+    std::vector<uint8_t> smoothMat;    // per scene material
+    struct EmitTri
+    {
+        float3 p0, e1, e2;
+        uint32_t instance, triangle;
+    };
+    std::vector<EmitTri> emitTris;     // smooth triangles of rigid instances, world space
+    std::vector<double> emitCdf;       // cumulative area
+    double emitArea = 0;
+    bool smooth(const Surface& s) const { return s.material < smoothMat.size() && smoothMat[s.material] != 0; }
+    void buildCaustics();
+    // One light path; adds its camera connection (times scale) to sum (W x H x 3).
+    void traceCaustic(const ResolvedCamera& cam, uint32_t W, uint32_t H, Pcg32& rng, double* sum, double scale, Counters& cnt) const;
     uint32_t orderMin = 0, orderMax = 0xFFFFFFFFu;  // RenderSettings::volumeOrderMin/Max
-    float orderWeight(uint32_t k) const { return k >= orderMin && k <= orderMax ? 1.0f : 0.0f; }
+    uint32_t surfMin = 0, surfMax = 0xFFFFFFFFu;    // RenderSettings::surfaceOrderMin/Max
+    float orderWeight(uint32_t kVol, uint32_t kSurf) const
+    {
+        return kVol >= orderMin && kVol <= orderMax && kSurf >= surfMin && kSurf <= surfMax ? 1.0f : 0.0f;
+    }
     // Direct light (sun + one local light) scattered at y towards -d, per unit throughput.
     Rgb mediumNee(float3 yf, const AtmosphereModel::Coefficients& c, float3 d, Sampler& smp, Counters& cnt, LightCandidates& cands) const;
 };
@@ -335,6 +363,173 @@ Rgb PathTracer::Impl::mediumNee(float3 yf, const AtmosphereModel::Coefficients& 
     return L;
 }
 
+namespace
+{
+bool sunCausticMaterial(const scene::Material& mt, float smoothAlpha)
+{
+    return mt.cls == scene::MaterialClass::Standard && mt.roughMetalTexture == scene::kNone && scene::model::alphaFromRoughness(mt.roughness) <= smoothAlpha;
+}
+} // namespace
+
+bool hasSunCausticSurfaces(const scene::Scene& scene)
+{
+    for (const scene::Instance& in : scene.instances)
+    {
+        const scene::Mesh& mesh = scene.meshes[in.mesh];
+        for (size_t si = 0; si < mesh.submeshes.size(); ++si)
+        {
+            const uint32_t mat = in.materialOverrides.empty() ? mesh.submeshes[si].material : in.materialOverrides[si];
+            if (mat < scene.materials.size() && sunCausticMaterial(scene.materials[mat], PathTracer::Impl::kSmoothAlpha)) return true;
+        }
+    }
+    return false;
+}
+
+void PathTracer::Impl::buildCaustics()
+{
+    smoothMat.assign(scene.materials.size(), 0);
+    for (size_t m = 0; m < scene.materials.size(); ++m)
+        if (sunCausticMaterial(scene.materials[m], kSmoothAlpha)) smoothMat[m] = 1;
+    emitTris.clear();
+    emitCdf.clear();
+    emitArea = 0;
+    for (uint32_t i = 0; i < (uint32_t)scene.instances.size(); ++i)
+    {
+        if (rt->deformed(i)) continue;
+        const scene::Instance& in = scene.instances[i];
+        const scene::Mesh& mesh = scene.meshes[in.mesh];
+        for (size_t si = 0; si < mesh.submeshes.size(); ++si)
+        {
+            const scene::Submesh& sub = mesh.submeshes[si];
+            const uint32_t mat = in.materialOverrides.empty() ? sub.material : in.materialOverrides[si];
+            if (mat >= smoothMat.size() || !smoothMat[mat]) continue;
+            for (uint32_t k = sub.indexOffset; k + 2 < sub.indexOffset + sub.indexCount; k += 3)
+            {
+                const float3 p0 = in.transform.transformPoint(mesh.positions[mesh.indices[k]]);
+                const float3 p1 = in.transform.transformPoint(mesh.positions[mesh.indices[k + 1]]);
+                const float3 p2 = in.transform.transformPoint(mesh.positions[mesh.indices[k + 2]]);
+                const float3 c = cross(p1 - p0, p2 - p0);
+                const double area = 0.5 * std::sqrt((double)dot(c, c));
+                if (!(area > 0)) continue;
+                emitTris.push_back({ p0, p1 - p0, p2 - p0, i, k / 3 });
+                emitArea += area;
+                emitCdf.push_back(emitArea);
+            }
+        }
+    }
+}
+
+void PathTracer::Impl::traceCaustic(const ResolvedCamera& cam, uint32_t W, uint32_t H, Pcg32& rng, double* sum, double scale, Counters& cnt) const
+{
+    // Emission: a point on the smooth set (uniform in area) lit by a direction in the sun cone (uniform in solid angle).
+    const double ua = rng.uniform() * emitArea;
+    const size_t ti = std::min((size_t)(std::upper_bound(emitCdf.begin(), emitCdf.end(), ua) - emitCdf.begin()), emitTris.size() - 1);
+    const EmitTri& et = emitTris[ti];
+    const float r1 = rng.uniform(), r2 = rng.uniform(), su = std::sqrt(r1);
+    Hit h;
+    h.instance = et.instance;
+    h.triangle = et.triangle;
+    h.u = 1 - su;
+    h.v = r2 * su;
+    const float u1 = rng.uniform(), u2 = rng.uniform();
+    if (!rt->alphaOpaque(h.instance, h.triangle, h.u, h.v)) return;
+    const float3 ws = sampleSun(u1, u2);
+    Surface s = rt->surface(h, -ws);
+    if (!s.frontFacing || !smooth(s)) return;
+    const float nsl = dot(s.ns, ws);
+    if (dot(s.ng, ws) <= 0 || nsl <= 0) return;
+    const Rgb Ls = sunArriving(s.p, ws, s.ng, true, cnt);
+    if (Ls.isZero()) return;
+    Rgb beta = Ls * (float)(emitArea * sunSolidAngle * nsl);
+    float3 l = ws;  // towards the light
+    for (int depth = 0; depth < 16; ++depth)
+    {
+        // At smooth vertex s: sample the camera-side direction v; weight f(v, l) |l.ns| |v.ng| / (|l.ng| pdf(v)).
+        const Bsdf bl(s, l);
+        BsdfSample bs;
+        if (!bl.sample(rng.uniform(), rng.uniform(), rng.uniform(), bs)) return;
+        const float3 v = bs.wi;
+        const float gv = dot(s.ng, v);
+        if (gv <= 0 || dot(s.ns, v) <= 0) return;
+        const Rgb f = Bsdf(s, v).eval(l);
+        if (f.isZero()) return;
+        beta *= f * (std::fabs(dot(l, s.ns)) / std::fabs(dot(l, s.ng)) * gv / bs.pdf);
+        // Next vertex (scene surface or planet ground), transmittance along the segment (no medium event: that is
+        // another path class, left to the camera paths).
+        const float3 o = offsetRayOrigin(s.p, s.ng);
+        Hit hn;
+        ++cnt.rays;
+        Surface x;
+        bool lambert = false;
+        double len;
+        const bool surf = rt->intersect(o, v, 0.0f, INFINITY, kMaskAll, hn);
+        if (surf)
+        {
+            len = hn.t;
+            x = rt->surface(hn, v);
+            if (!x.frontFacing) return;
+        }
+        else
+        {
+            const Double3 od = toD(o);
+            const double g = atm.groundDistance(od, v);
+            if (!(g > 0)) return;
+            len = g;
+            const Double3 gp{ od.x + v.x * g, od.y + v.y * g, od.z + v.z * g };
+            const double gy = gp.y + atm.bottomRadius();
+            const double inv = 1.0 / std::sqrt(gp.x * gp.x + gy * gy + gp.z * gp.z);
+            x.p = toF(gp);
+            x.ng = x.ns = float3{ (float)(gp.x * inv), (float)(gy * inv), (float)(gp.z * inv) };
+            x.bsdf.baseColor = scene.atmosphere.groundAlbedo;
+            lambert = true;
+        }
+        beta *= expNeg(atm.opticalDepth(toD(o), v, len));
+        l = -v;
+        if (!lambert && smooth(x))
+        {
+            s = x;
+            continue;
+        }
+        // First rough vertex x: connect to the pinhole camera.
+        const float3 toCam = cam.position - x.p;
+        const float d2 = dot(toCam, toCam), dist = std::sqrt(d2);
+        const float3 wc = toCam * (1.0f / dist), dc = -wc;
+        const float3 fw = normalize(cam.forward), right = normalize(cross(fw, cam.up)), up = cross(right, fw);
+        const float zc = dot(dc, fw);
+        if (zc <= 1e-6f) return;
+        const float th = std::tan(0.5f * cam.verticalFov), aspect = (float)W / (float)H;
+        const float nx = dot(dc, right) / (zc * th * aspect), ny = dot(dc, up) / (zc * th);
+        const float px = (nx + 1) * 0.5f * W, py = (1 - ny) * 0.5f * H;
+        if (!(px >= 0 && px < W && py >= 0 && py < H)) return;
+        const float tn = cam.nearPlane / zc;
+        if (dist <= tn) return;
+        Surface xc = x;  // x as the camera sees it
+        if (surf)
+        {
+            xc = rt->surface(hn, dc);
+            if (!xc.frontFacing) return;
+        }
+        else if (dot(xc.ng, wc) <= 0) return;
+        const float gc = std::fabs(dot(wc, xc.ng));
+        const Rgb fx = Bsdf(xc, wc, lambert).eval(l);
+        if (fx.isZero()) return;
+        Hit hv;
+        ++cnt.rays;
+        if (rt->intersect(cam.position, dc, tn, dist * (1 - 1e-4f), kMaskAll, hv)) return;
+        if (!surf && atm.groundDistance(toD(cam.position), dc) < dist * (1 - 1e-4)) return;
+        const Rgb T = expNeg(atm.opticalDepth(toD(cam.position), dc, dist));
+        const float Ap = (2 * th * aspect / W) * (2 * th / H);
+        const Rgb val = beta * fx * T *
+                        (std::fabs(dot(l, xc.ns)) / std::fabs(dot(l, xc.ng)) * gc / (d2 * Ap * zc * zc * zc) * orderWeight(0, (uint32_t)depth + 2) * (float)scale);
+        if (!val.finite()) return;
+        const size_t pi = (size_t)std::min((uint32_t)py, H - 1) * W + std::min((uint32_t)px, W - 1);
+        std::atomic_ref<double>(sum[3 * pi]).fetch_add(val.r);
+        std::atomic_ref<double>(sum[3 * pi + 1]).fetch_add(val.g);
+        std::atomic_ref<double>(sum[3 * pi + 2]).fetch_add(val.b);
+        return;
+    }
+}
+
 Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& smp, Counters& cnt, uint32_t rrStart) const
 {
     enum class Prev { Camera, Surface, Medium };
@@ -346,6 +541,9 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
     float3 prevPos{};
     LightCandidates cands, prevCands;
     uint32_t nVol = 0;  // atmosphere scattering events so far (order diagnostics)
+    // Sun caustic class (see Impl): chain = the path so far is camera -> rough x -> smooth vertices, no medium event.
+    uint32_t surfVerts = 0;
+    bool chain = false, dropSun = false;
 
     for (uint32_t bounce = 0;; ++bounce)
     {
@@ -398,7 +596,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                 if (!lights.intersect(li, prevPos, d, (float)segLen, t, Le, pdfSA)) continue;
                 const float pSel = (prevCands.cumulative[k] - (k ? prevCands.cumulative[k - 1] : 0.0f)) / prevCands.total;
                 const float w = powerHeuristic(prevBsdfPdf, pSel * pdfSA);
-                L += beta * expNeg(atm.opticalDepth(od, d, t)) * Le * (w * orderWeight(nVol));
+                L += beta * expNeg(atm.opticalDepth(od, d, t)) * Le * (w * orderWeight(nVol, surfVerts));
             }
         }
 
@@ -418,7 +616,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                 const Double3 y{ od.x + d.x * t, od.y + d.y * t, od.z + d.z * t };
                 const Rgb T = expNeg(atm.opticalDepth(od, d, t));
                 const AtmosphereModel::Coefficients c = atm.at(atm.altitude(y));
-                L += beta * T * mediumNee(toF(y), c, d, smp, cnt, cands) * (orderWeight(nVol + 1) / (pt * pForce));
+                L += beta * T * mediumNee(toF(y), c, d, smp, cnt, cands) * (orderWeight(nVol + 1, surfVerts) / (pt * pForce));
             }
             else if (forced)
             {
@@ -441,7 +639,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                 const float uMix = smp.get1D();
                 // Absorption-only point: this branch carries zero weight (the path ends; unbiased).
                 if (c.scatteringRayleigh.max() + c.scatteringMie.max() <= 0) break;
-                if (!forced) L += beta * T * mediumNee(toF(y), c, d, smp, cnt, cands) * (orderWeight(nVol + 1) / (pt * pScatter));
+                if (!forced) L += beta * T * mediumNee(toF(y), c, d, smp, cnt, cands) * (orderWeight(nVol + 1, surfVerts) / (pt * pScatter));
                 float pdfDir;
                 const float3 w = atm.samplePhase(d, c.scatteringRayleigh.avg(), c.scatteringMie.avg(), uMix, u1, u2, pdfDir);
                 const float cw = dot(w, d);
@@ -451,6 +649,8 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                 d = w;
                 tmin = 0;
                 prev = Prev::Medium;
+                chain = false;
+                dropSun = false;
                 if (++nVol > orderMax) break;  // no later contribution can be inside the order window
                 if (bounce + 1 >= rrStart)
                 {
@@ -466,10 +666,10 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
         // --- segment end
         if (end == End::Space)
         {
-            if (prev != Prev::Medium && inSun(d))
+            if (prev != Prev::Medium && !(prev == Prev::Surface && dropSun) && inSun(d))
             {
                 const float w = prev == Prev::Camera ? 1.0f : powerHeuristic(prevBsdfPdf, 1.0f / sunSolidAngle);
-                L += beta * sunRadiance * (w * orderWeight(nVol));
+                L += beta * sunRadiance * (w * orderWeight(nVol, surfVerts));
             }
             break;
         }
@@ -478,7 +678,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
         if (end == End::Surface)
         {
             s = rt->surface(hit, d);
-            if (!s.emission.isZero()) L += beta * s.emission * orderWeight(nVol);
+            if (!s.emission.isZero()) L += beta * s.emission * orderWeight(nVol, surfVerts);
             if (!s.frontFacing) break;  // back of a one-sided surface: the BRDF is zero for this view
         }
         else
@@ -494,6 +694,16 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
         }
         const float3 wo = -d;
         const Bsdf bsdf(s, wo, lambert);
+        {
+            const bool isSmooth = !lambert && smooth(s);
+            ++surfVerts;
+            if (surfVerts == 1) chain = prev == Prev::Camera && !isSmooth;
+            else if (chain) chain = isSmooth;
+            // Sun seen from this vertex (NEE here, or a BSDF sample from here reaching the disk) belongs to the light
+            // tracer when the chain holds and this smooth vertex is on a rigid instance.
+            dropSun = caustics && chain && surfVerts >= 2 && isSmooth && end == End::Surface && !rt->deformed(hit.instance);
+            if (surfVerts > surfMax) break;  // every later contribution has more surface events than the window
+        }
 
         // Sun NEE.
         {
@@ -508,7 +718,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                 if (!Ls.isZero())
                 {
                     const float pl = 1.0f / sunSolidAngle;
-                    L += beta * f * Ls * (bsdf.cosine(ws) * powerHeuristic(pl, bsdf.pdf(ws)) * orderWeight(nVol) / pl);
+                    if (!dropSun) L += beta * f * Ls * (bsdf.cosine(ws) * powerHeuristic(pl, bsdf.pdf(ws)) * orderWeight(nVol, surfVerts) / pl);
                 }
             }
         }
@@ -535,7 +745,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                             const float pl = pSel * ls.pdf;
                             const bool mis = !ls.delta && lights.light(li).castShadow;
                             const float w = mis ? powerHeuristic(pl, bsdf.pdf(ls.wi)) : 1.0f;
-                            L += beta * f * Ll * (bsdf.cosine(ls.wi) * w * orderWeight(nVol) / pl);
+                            L += beta * f * Ll * (bsdf.cosine(ls.wi) * w * orderWeight(nVol, surfVerts) / pl);
                         }
                     }
                 }
@@ -674,9 +884,13 @@ RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings&
     if (st.samplesPerPixel < 2 || (st.samplesPerPixel & 1)) fail("reference: samples per pixel must be even (two halves), got %u", st.samplesPerPixel);
     if (st.russianRouletteStart == 0) fail("reference: russian roulette start bounce must be >= 1");
     im.build(cam.time);
+    im.buildCaustics();
+    im.caustics = st.sunCaustics && !im.emitTris.empty() && im.sunSolidAngle > 0 && !im.sunRadiance.isZero();
     im.forced = st.forcedInScattering;
     im.orderMin = st.volumeOrderMin;
     im.orderMax = st.volumeOrderMax;
+    im.surfMin = st.surfaceOrderMin;
+    im.surfMax = st.surfaceOrderMax;
     const uint32_t W = st.width, H = st.height, halfSpp = st.samplesPerPixel / 2;
     const size_t pixels = (size_t)W * H;
     std::vector<double> sum[2] = { std::vector<double>(pixels * 3, 0.0), std::vector<double>(pixels * 3, 0.0) };
@@ -769,6 +983,22 @@ RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings&
             truncated += cnt.truncated;
             nans += localNans;
         });
+        // Sun caustics: W x H light paths per sample per half, splatted into the same sums with weight 1 / (W H) so the
+        // final division by the sample count makes them an average over W H spp light paths.
+        if (im.caustics)
+        {
+            const uint64_t perHalf = (uint64_t)pixels * (end - begin), chunk = 4096;
+            const uint32_t chunks = (uint32_t)((perHalf + chunk - 1) / chunk);
+            Jobs::instance().parallelFor(2 * chunks, [&](uint32_t ci) {
+                gate.wait();
+                const uint32_t half = ci / chunks, c = ci % chunks;
+                Pcg32 rng(hashCombine(hashCombine(hashCombine((uint32_t)st.seed ^ 0xCA057105u, half), begin), c), 0xC0FFEEull + half);
+                Impl::Counters cnt;
+                const uint64_t n = std::min<uint64_t>(chunk, perHalf - (uint64_t)c * chunk);
+                for (uint64_t k = 0; k < n; ++k) im.traceCaustic(cam, W, H, rng, sum[half].data(), 1.0 / (double)pixels, cnt);
+                rays += cnt.rays;
+            });
+        }
         done = end;
         stats.paths += (uint64_t)pixels * 2 * (end - begin);
         stats.rays += rays;

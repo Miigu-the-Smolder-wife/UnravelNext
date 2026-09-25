@@ -40,6 +40,11 @@ struct ResolvedCamera
 };
 ResolvedCamera resolveCamera(const scene::Scene& scene, const CameraSelection& selection);
 
+// True when some instance uses a material of the sun-caustic class (PathTracer.cpp: Standard, no roughness texture,
+// GGX alpha <= 0.02). Without one the light tracer has nothing to emit from and images are bitwise those of the
+// camera-path estimator alone (the reference tool keys its cache on this).
+bool hasSunCausticSurfaces(const scene::Scene& scene);
+
 // Blocks while any of the hold files is in place (same rule as RenderSettings::pauseWhileExists); callers use it before
 // heavy setup (BVH and atmosphere-table builds run on every core).
 void waitWhileHeld(const std::vector<std::filesystem::path>& files);
@@ -68,6 +73,12 @@ struct RenderSettings
     // also holds light scattered once in the air after any number of surface reflections. Pure single scattering
     // needs a scene with black surfaces and ground (e.g. a --write-scene .unxscene edited to albedo 0).
     uint32_t volumeOrderMin = 0, volumeOrderMax = 0xFFFFFFFFu;
+    // Diagnostics only: the same for surface scattering events (1 = light reflected once, at the surface the camera
+    // sees; 0 = sky and emitters seen directly). Both windows apply together.
+    uint32_t surfaceOrderMin = 0, surfaceOrderMax = 0xFFFFFFFFu;
+    // Testing only: false leaves sun caustics (camera -> rough -> smooth chain -> sun) to the camera paths instead of
+    // the light tracer. Both have the same expectation; the reference always uses the light tracer (see PathTracer.cpp).
+    bool sunCaustics = true;
 };
 
 struct RenderStats
