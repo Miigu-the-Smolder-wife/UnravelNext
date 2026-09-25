@@ -39,8 +39,8 @@ constexpr uint32_t kViewTileSingle = 4;  // tile-local pairs are single tiles (a
 // Cull state words.
 constexpr uint32_t kStateNodeWrite = 0, kStateNodeEnd = 2, kStateGroupWrite = 3, kStateVisible = 5, kStateDeferInstances = 6, kStateDeferNodes = 7,
                    kStateDeferClusters = 8, kStateListCount = 9, kStateOverflow = 21, kStateStatInstances = 22, kStateStatNodes = 23, kStateStatClusters = 24,
-                   kStateStatTriangles = 25, kStateTilePairs = 29, kStateCovPool = 30, kStateCovInvocations = 31, kStateCovFragments = 32, kStateCovTiles = 33, kStateCovChunks = 34,
-                   kStateStatBandClusters = 35, kStateCovLost = 38, kStateCovHeavy = 39, kStateStatMixedClusters = 40,
+                   kStateStatTriangles = 25, kStateTilePairs = 29, kStateCovPool = 30, kStateCovInvocations = 31, kStateCovFragments = 32, kStateCovTiles = 33, kStateCovMeasured = 34,
+                   kStateStatBandClusters = 35, kStateCovBlocks = 38, kStateCovHeavy = 39, kStateStatMixedClusters = 40,
                    kStateStatMixedTriangles = 41, kStateWords = 48;
 constexpr uint32_t kLists = 6;
 constexpr uint32_t kListABack = 0, kListANone = 1, kListAAlphaBack = 2, kListAAlphaNone = 3, kListB = 4, kListC = 5;
@@ -48,18 +48,20 @@ constexpr uint32_t kAListCount = 4;  // lists drawn by the vis buffer raster
 
 // Indirect argument words.
 constexpr uint32_t kArgNodes = 0, kArgGroups = 3, kArgDeferredClusters = 6, kArgDeferredInstances = 9, kArgSeedNodes = 12, kArgMesh = 15, kArgCovMesh = 33,
-                   kArgCovClear = 36, kArgCovTiles = 39, kArgWords = 42;
+                   kArgCovClear = 36, kArgCovRecords = 39, kArgWords = 42;
 
 // Band modes of a cull run (CullShared.hlsli BAND_MODE_*): A = every band in the band A lists (raster service, secondary
 // views; classification still runs and is reported in Stats::triangles); Coverage = bands B and C in the coverage layer
 // list until the band C bricks exist; Full = band C in its own list.
 constexpr uint32_t kBandModeA = 0, kBandModeCoverage = 1, kBandModeFull = 2;
 
-// Coverage layer (CoverageTiles.hlsli): tiles, chunks, tile list header.
-constexpr uint32_t kCovTilePx = 8, kCovTileWords = 8, kCovChunkRecords = 64, kCovChunkBytes = 1024, kCovExtSlots = 255;
-constexpr uint32_t kCovTileCount = 0, kCovTileZNear = 1, kCovTileZFar = 2, kCovTileOpaqueLo = 3, kCovTileOpaqueHi = 4, kCovTileExt = 5;
-constexpr uint32_t kCovListArgs = 0, kCovListCount = 3, kCovListFragments = 4, kCovListChunks = 5, kCovListTableSlots = 6, kCovListTilesX = 7,
-                   kCovListHeavyArgs = 8, kCovListHeavyCount = 11, kCovListHeavyMin = 12, kCovListHeavyStart = 13, kCovListTiles = 16;
-// Record pool: a structured view (16 B elements) holds at most 2^27 elements (2 GB = 2,097,152 chunks = 134 M fragments).
-constexpr uint32_t kCovPoolMaxChunks = (1u << 27) / kCovChunkRecords;
+// Coverage layer (CoverageTiles.hlsli, CoverageLayer.hlsli): tiles, tile list, blocks, scratch slots.
+constexpr uint32_t kCovTilePx = 8, kCovTileWords = 8, kCovTilePixels = 64, kCovBlock = 1024, kCovScratchWords = 256;
+constexpr uint32_t kCovTileCount = 0, kCovTileBase = 1, kCovTileListed = 2, kCovTileOpaqueLo = 3, kCovTileOpaqueHi = 4, kCovTileHeavy = 5;
+constexpr uint32_t kCovListArgs = 0, kCovListCount = 3, kCovListRecords = 4, kCovListBlocks = 5, kCovListPool = 6, kCovListTilesX = 7,
+                   kCovListBlockArgs = 8, kCovListHeavyCount = 11, kCovListHeavyArgs = 12, kCovListInfo = 16;
+// Record capacity: a structured view (16 B elements) holds at most 2^27 elements (2 GB = 134 M records).
+constexpr uint32_t kCovPoolMaxRecords = 1u << 27;
+// Scratch slots of a capacity: a tile of more than one block holds more than kCovBlock records.
+inline uint32_t coverageScratchSlots(uint32_t capacity) { return capacity / (kCovBlock + 1) + 1; }
 } // namespace unx::visibility::detail

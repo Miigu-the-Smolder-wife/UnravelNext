@@ -56,14 +56,15 @@ struct CullView
 #define VS_STAT_TRIANGLES 25u // + band (3): triangles of visible clusters per band A, B, C
 #define VS_GROUP_END 28u      // group items of the current cluster pass: [VS_GROUP_BEGIN, VS_GROUP_END)
 #define VS_TILE_PAIRS 29u     // tile-local raster: (cluster, tile rectangle) pairs appended
-#define VS_COV_POOL 30u       // coverage record pool of the frame (chunks; CoverageBuild MODE 2, for the statistics)
+#define VS_COV_POOL 30u       // coverage record capacity of the frame (records; CoverageBuild MODE 2, for the statistics)
 #define VS_COV_INVOCATIONS 31u // coverage pixel kernel invocations (measurement stages only)
-#define VS_COV_FRAGMENTS 32u  // coverage layer (CoverageLayer.hlsli): fragments appended by the raster
-#define VS_COV_TILES 33u      // tiles with fragments (tile list entries)
-#define VS_COV_CHUNKS 34u     // record chunks taken from the pool (may exceed the pool: the need, for its sizing)
+#define VS_COV_FRAGMENTS 32u  // coverage layer (CoverageLayer.hlsli): fragments appended by the raster (may exceed the
+                              // capacity: the need, for the pool sizing)
+#define VS_COV_TILES 33u      // tiles with records (tile list entries)
+#define VS_COV_MEASURED 34u   // fragments of the raster measurement stages (nothing stored)
 #define VS_STAT_BAND_CLUSTERS 35u  // + band (3): visible clusters per band A, B, C (mixed sheet clusters count as B)
-#define VS_COV_LOST 38u       // chunks taken but not published (another wave published the slot's chunk first)
-#define VS_COV_HEAVY 39u      // heavy coverage tiles (tile list)
+#define VS_COV_BLOCKS 38u     // blocks of COV_BLOCK records over the listed tiles
+#define VS_COV_HEAVY 39u      // listed tiles of more than one block
 #define VS_STAT_MIXED_CLUSTERS 40u  // sheet clusters drawn in both rasters, split per triangle by the mesh kernels
 #define VS_STAT_MIXED_TRIANGLES 41u // their triangles
 #define VS_WORDS 48u
@@ -86,7 +87,7 @@ struct CullView
 #define VA_MESH 15u           // + 3 * list
 #define VA_COV_MESH 33u       // coverage raster: every band B list entry (both phases)
 #define VA_COV_CLEAR 36u      // tile clear over last frame's coverage tiles (one group per tile)
-#define VA_COV_TILES 39u      // opaqueCovered and heavy tiles over this frame's coverage tiles (one group per tile)
+#define VA_COV_RECORDS 39u    // count and scatter over the stored stream entries (one group per COV_BLOCK)
 #define VA_WORDS 42u
 
 // Overflow bits (VS_OVERFLOW): a capacity was exceeded; the run's statistics report them (Stats::overflow).
@@ -99,7 +100,7 @@ struct CullView
 #define OVERFLOW_NODE_DEPTH 64u        // node items left unprocessed after the last traversal iteration
 #define OVERFLOW_TILE_PAIRS 128u
 #define OVERFLOW_COVERAGE 256u         // the coverage record pool ran out (its fragments are lost; the pool grows)
-#define OVERFLOW_COVERAGE_DEPTH 512u   // a coverage tile past its extension tree (10^9 fragments)
+#define OVERFLOW_COVERAGE_DEPTH 512u   // unused since v1.41 (was: a coverage tile past its extension tree)
 #define OVERFLOW_ITERATION_LIMIT 1024u // a data-dependent shader loop reached its hard bound (INTERFACES 3.6)
 
 // Wave-aggregated append of 'n' entries per lane to a counter word; returns this lane's first index. Must be called

@@ -1425,7 +1425,7 @@ struct CoverageFrame
 {
     ViewDesc view;
     std::vector<float> depth;
-    std::vector<uint32_t> visId, visible, tiles, table, list, records;  // tiles: 8 words each
+    std::vector<uint32_t> visId, visible, tiles, list, records, starts, range;  // tiles: 8 words each; range: 2 words per pixel
 };
 
 std::vector<CoverageFrame> renderCoverage(const scene::Scene& s, const QualityConfig& q, const std::vector<scene::Camera>& cams, uint32_t width, uint32_t height,
@@ -1438,11 +1438,12 @@ std::vector<CoverageFrame> renderCoverage(const scene::Scene& s, const QualityCo
     FrameRenderer renderer(device(), shaders(), q, gs, 2);
     RenderGraph graph(device());
     const uint64_t capacity = (uint64_t)q.integer("visibility.max_visible_clusters");
-    const uint64_t tileCount = (uint64_t)((width + 7) / 8) * ((height + 7) / 8), slots = (uint64_t)q.integer("visibility.coverage_table_slots");
-    const uint64_t tileWords = tileCount * 8, tableWords = tileCount * slots, listWords = 16 + 2 * tileCount;
+    const uint64_t tileCount = (uint64_t)((width + 7) / 8) * ((height + 7) / 8);
+    const uint64_t tileWords = tileCount * 8, listWords = 16 + 4 * tileCount, startWords = tileCount * 64;
+    const uint32_t rangePitch = (width * 8 + 255) / 256 * 256;
     ComPtr<ID3D12Resource> depthRb = readbackBuffer((uint64_t)rowPitch(width) * height), visRb = readbackBuffer((uint64_t)rowPitch(width) * height),
-                           listRb = readbackBuffer(capacity * 8), tilesRb = readbackBuffer(tileWords * 4),
-                           tableRb = readbackBuffer(tableWords * 4), tileListRb = readbackBuffer(listWords * 4), recordsRb;
+                           listRb = readbackBuffer(capacity * 8), tilesRb = readbackBuffer(tileWords * 4), tileListRb = readbackBuffer(listWords * 4),
+                           startsRb = readbackBuffer(startWords * 4), rangeRb = readbackBuffer((uint64_t)rangePitch * height), recordsRb;
     uint64_t recordBytes = 0;
     std::vector<CoverageFrame> out;
     float4x4 prev = ViewDesc::fromCamera(cams[0], width, height, {}).viewProj;
@@ -1455,25 +1456,27 @@ std::vector<CoverageFrame> renderCoverage(const scene::Scene& s, const QualityCo
         fr.mainView = ViewDesc::fromCamera(cams[f], width, height, prev);
         TextureRef output = graph.createTexture({ "test output", width, height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
         const ViewResources main = renderer.record(graph, fr, output);
-        CHECK(main.coverageTiles.valid() && main.coverageChunkTable.valid() && main.coverageChunks.valid() && main.coverageTileList.valid());
-        const uint64_t poolBytes = graph.desc(main.coverageChunks).size;
+        CHECK(main.coverageTiles.valid() && main.coverageRecords.valid() && main.coverageTileList.valid() && main.coverageTilePixels.valid() &&
+              main.coverageDepthRange.valid() && !main.coverageChunkTable.valid());
+        const uint64_t poolBytes = graph.desc(main.coverageRecords).size;
         if (poolBytes != recordBytes)
         {
             if (recordsRb) device().deferRelease(recordsRb);
             recordsRb = readbackBuffer(poolBytes);
             recordBytes = poolBytes;
         }
-        ID3D12Resource *d = depthRb.Get(), *v = visRb.Get(), *l = listRb.Get(), *tl = tilesRb.Get(), *tb = tableRb.Get(), *li = tileListRb.Get(),
-                       *rc = recordsRb.Get();
+        ID3D12Resource *d = depthRb.Get(), *v = visRb.Get(), *l = listRb.Get(), *tl = tilesRb.Get(), *li = tileListRb.Get(), *rc = recordsRb.Get(),
+                       *st = startsRb.Get(), *rg = rangeRb.Get();
         graph.addPass("test.readback", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           b.use(main.depth, Use::CopySrc);
                           b.use(main.visId, Use::CopySrc);
                           b.use(main.visibleClusters, Use::CopySrc);
                           b.use(main.coverageTiles, Use::CopySrc);
-                          b.use(main.coverageChunkTable, Use::CopySrc);
                           b.use(main.coverageTileList, Use::CopySrc);
-                          b.use(main.coverageChunks, Use::CopySrc);
+                          b.use(main.coverageRecords, Use::CopySrc);
+                          b.use(main.coverageTilePixels, Use::CopySrc);
+                          b.use(main.coverageDepthRange, Use::CopySrc);
                           b.keep();
                       },
                       [=](PassContext& c) {
@@ -1481,9 +1484,16 @@ std::vector<CoverageFrame> renderCoverage(const scene::Scene& s, const QualityCo
                           copyTexture(c, main.visId, v, width, height);
                           c.cmd->CopyBufferRegion(l, 0, c.resource(main.visibleClusters), 0, capacity * 8);
                           c.cmd->CopyBufferRegion(tl, 0, c.resource(main.coverageTiles), 0, tileWords * 4);
-                          c.cmd->CopyBufferRegion(tb, 0, c.resource(main.coverageChunkTable), 0, tableWords * 4);
                           c.cmd->CopyBufferRegion(li, 0, c.resource(main.coverageTileList), 0, listWords * 4);
-                          c.cmd->CopyBufferRegion(rc, 0, c.resource(main.coverageChunks), 0, poolBytes);
+                          c.cmd->CopyBufferRegion(rc, 0, c.resource(main.coverageRecords), 0, poolBytes);
+                          c.cmd->CopyBufferRegion(st, 0, c.resource(main.coverageTilePixels), 0, startWords * 4);
+                          D3D12_TEXTURE_COPY_LOCATION to{}, from{};
+                          to.pResource = rg;
+                          to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                          to.PlacedFootprint.Footprint = { DXGI_FORMAT_R32G32_UINT, width, height, 1, rangePitch };
+                          from.pResource = c.resource(main.coverageDepthRange);
+                          from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                          c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
                       });
         graph.execute(nullptr);
         device().waitIdle();
@@ -1502,14 +1512,19 @@ std::vector<CoverageFrame> renderCoverage(const scene::Scene& s, const QualityCo
         };
         fo.visible = readBuffer(l, capacity * 2);
         fo.tiles = readBuffer(tl, tileWords);
-        fo.table = readBuffer(tb, tableWords);
         fo.list = readBuffer(li, listWords);
         fo.records = readBuffer(rc, poolBytes / 4);
+        fo.starts = readBuffer(st, startWords);
+        {
+            const std::vector<uint32_t> raw = readBuffer(rg, (uint64_t)rangePitch / 4 * height);
+            fo.range.resize((size_t)width * height * 2);
+            for (uint32_t y = 0; y < height; ++y) std::memcpy(&fo.range[(size_t)y * width * 2], &raw[(size_t)y * rangePitch / 4], (size_t)width * 8);
+        }
         out.push_back(std::move(fo));
         prev = fr.mainView.viewProj;
     }
     stats = visibility::latestStats(renderer.trackState());
-    for (ComPtr<ID3D12Resource>* r : std::initializer_list<ComPtr<ID3D12Resource>*>{ &depthRb, &visRb, &listRb, &tilesRb, &tableRb, &tileListRb, &recordsRb })
+    for (ComPtr<ID3D12Resource>* r : std::initializer_list<ComPtr<ID3D12Resource>*>{ &depthRb, &visRb, &listRb, &tilesRb, &tileListRb, &recordsRb, &startsRb, &rangeRb })
         device().deferRelease(*r);
     return out;
 }
@@ -1821,15 +1836,17 @@ UNX_TEST(coverage_mask_lut_matches_exact)
 
 UNX_TEST(coverage_layer_is_exact)
 {
-    // Coverage layer v2 (INTERFACES 7.1 v2, CoverageTiles.hlsli) against the exact clip of every band B/C triangle, in two
-    // configurations: the defaults, and one chunk-table slot with a heavy threshold of 64 (every tile past 64 fragments
-    // keeps its chunks in the extension tree). The card stack's tile reaches the 2-level subtree in both. Per
+    // Coverage layer v1.41 (INTERFACES 7.1, CoverageTiles.hlsli) against the exact clip of every band B/C triangle. Per
     // frame: every record is an expected (triangle, pixel) fragment with its exact area (10-bit), centroid depth, mask and
     // perspective-correct normal (8 + 8 bit octahedral) and see-through flag (the glass stack); no expected fragment is
-    // missing; tile headers (count, depth range, extension table) match the records; opaqueCovered (COVERAGE_REDESIGN 4.6
-    // union rule, from the records) is set exactly where the union of the pixel's opaque record masks is full and the band
-    // A surface lies behind the farthest of those records; the tile and heavy lists are exact; no chunk is used twice; the
-    // tiles of earlier frames were emptied.
+    // missing; the tile list's header and per-tile entries (record and block bases: exclusive prefixes in list order)
+    // match the tile headers; each tile's range is pixel-major with the published pixel starts; coverageDepthRange is the
+    // nearest and farthest record depth of every pixel ((0, 0xFFFFFFFF) where there is none); opaqueCovered
+    // (COVERAGE_REDESIGN 4.6 union rule, from the records) is set exactly where the union of the pixel's opaque record masks
+    // is full and the band A surface lies behind the farthest of those records; the tiles of earlier frames were emptied.
+    // The card stack's tile holds more than 16 blocks of records (the scratch path of tiles of more than one block), and
+    // the capacity floor of the second configuration is below the first frame's need (the pool overflows, then grows):
+    // an overflowing frame stores a consistent subset.
     const CoverageScene cs = coverageScene();
     const scene::Scene& s = cs.scene;
     struct Config
@@ -1839,25 +1856,27 @@ UNX_TEST(coverage_layer_is_exact)
     };
     const Config configs[] = {
         { "defaults", { "visibility.coverage_layer = true", "visibility.occlusion_culling = false" } },
-        { "1 table slot, heavy past 64",
-          { "visibility.coverage_layer = true", "visibility.occlusion_culling = false", "visibility.coverage_table_slots = 1", "visibility.coverage_heavy_tile_fragments = 64" } },
+        { "small capacity floor",
+          { "visibility.coverage_layer = true", "visibility.occlusion_culling = false", "visibility.coverage_pool_min_fragments_per_pixel = 0.05" } },
     };
     for (const Config& config : configs)
     {
         const QualityConfig q = quality(config.keys);
         const uint32_t width = 640, height = 360, tilesX = (width + 7) / 8, tileCount = tilesX * ((height + 7) / 8);
-        const uint32_t slots = (uint32_t)q.integer("visibility.coverage_table_slots"), heavyMin = (uint32_t)q.integer("visibility.coverage_heavy_tile_fragments");
-        std::vector<scene::Camera> cams(3, camera({ 0, 0, 0 }, { 0, 0, 1 }));
+        const bool smallFloor = std::string(config.name) == "small capacity floor";
+        std::vector<scene::Camera> cams(4, camera({ 0, 0, 0 }, { 0, 0, 1 }));
         cams[1].position = { 0.004f, 0.002f, 0 };  // moves every fragment: last frame's tiles must be emptied
         cams[2].position = { -0.003f, 0.001f, 0 };  // (and the statistics of frame 0 are read back by frame 2)
+        cams[3].position = { 0.001f, -0.002f, 0 };
         ClusterData cd;
         visibility::Stats stats;
         const std::vector<CoverageFrame> frames = renderCoverage(s, q, cams, width, height, cd, stats);
-        logf("    [%s] stats (frame %llu): triangles A/B/C %u/%u/%u, list B %u, coverage fragments %u in %u tiles, %u chunks (%u lost to races, pool %u), "
-             "%u heavy tiles, overflow 0x%x\n",
+        logf("    [%s] stats (frame %llu): triangles A/B/C %u/%u/%u, list B %u, coverage fragments %u in %u tiles, %u blocks, %u tiles of more than one "
+             "block, capacity %u, overflow 0x%x\n",
              config.name, (unsigned long long)stats.frameIndex, stats.triangles[0], stats.triangles[1], stats.triangles[2], stats.listEntries[4], stats.coverageFragments,
-             stats.coverageTiles, stats.coverageChunks, stats.coverageChunksLost, stats.coveragePoolChunks, stats.coverageHeavyTiles, stats.overflow);
-        CHECK(stats.overflow == 0);
+             stats.coverageTiles, stats.coverageBlocks, stats.coverageHeavyTiles, stats.coveragePoolRecords, stats.overflow);
+        // The latest statistics are of frame 1: with the small floor its pool was full (0x100), nothing else.
+        CHECK(smallFloor ? (stats.overflow & ~0x100u) == 0 : stats.overflow == 0);
         CHECK(stats.triangles[1] + stats.triangles[2] > 0);
 
         // Winding: the reference card (band A, one-sided, the "front" blade winding) must be visible with back faces culled.
@@ -1885,7 +1904,7 @@ UNX_TEST(coverage_layer_is_exact)
         {
             const CoverageFrame& fo = frames[f];
             const float4x4& vp = fo.view.viewProj;
-            const uint32_t poolChunks = (uint32_t)(fo.records.size() / 256);
+            const uint32_t capacity = (uint32_t)(fo.records.size() / 4);
             // HiZ mip 0 of this frame (farthest of 2 x 2), the pixel kernel's occlusion rule.
             const uint32_t hw = width / 2, hh = height / 2;
             std::vector<float> hiz((size_t)hw * hh);
@@ -1978,87 +1997,48 @@ UNX_TEST(coverage_layer_is_exact)
             const std::vector<uint32_t>& L = fo.list;
             const uint32_t listed = L[3], heavyCount = L[11];
             CHECK(listed > 0 && listed <= tileCount && L[0] == std::min(listed, 65535u) && L[1] == (listed + 65534u) / 65535u && L[2] == 1);
-            CHECK(L[6] == slots && L[7] == tilesX && L[12] == heavyMin && L[13] == 16 + tileCount);
-            CHECK(heavyCount <= listed && L[8] == std::min(heavyCount, 65535u) && L[9] == (heavyCount + 65534u) / 65535u && L[10] == 1);
-            std::vector<uint8_t> tileListed(tileCount, 0), heavyListed(tileCount, 0);
-            for (uint32_t k = 0; k < heavyCount; ++k)
-            {
-                const uint32_t t = L[16 + tileCount + k];
-                CHECK(t < tileCount && !heavyListed[t]);
-                heavyListed[t] = 1;
-            }
-            std::vector<uint8_t> chunkUsed(poolChunks, 0);
-            auto useChunk = [&](uint32_t chunk, const char* what, uint32_t tile) {
-                if (chunk == 0 || chunk > poolChunks) fail("frame %zu: tile %u: %s chunk %u (pool %u)", f, tile, what, chunk, poolChunks);
-                if (chunkUsed[chunk - 1]) fail("frame %zu: tile %u: %s chunk %u used twice", f, tile, what, chunk);
-                chunkUsed[chunk - 1] = 1;
-            };
-            size_t checked = 0, duplicates = 0, depthOver = 0, extTables = 0, coveredPixels = 0, opaqueBits = 0, seeThroughRecords = 0;
-            uint64_t fragmentSum = 0;
+            CHECK(L[6] == capacity && L[7] == tilesX && L[5] > 0 && L[8] == std::min(L[5], 65535u) && L[9] == (L[5] + 65534u) / 65535u && L[10] == 1);
+            CHECK(heavyCount <= listed && L[12] == std::min(heavyCount, 65535u) && L[13] == (heavyCount + 65534u) / 65535u && L[14] == 1);
+            std::vector<uint8_t> tileListed(tileCount, 0);
+            size_t checked = 0, duplicates = 0, depthOver = 0, coveredPixels = 0, opaqueBits = 0, seeThroughRecords = 0, heavyTiles = 0;
+            uint64_t fragmentSum = 0, blockSum = 0;
             uint32_t deepest = 0;
             double worstArea = 0, worstDepth = 0, worstSliverDepth = 0, worstNormalDeg = 0;
+            std::vector<uint8_t> rangeSeen((size_t)width * height, 0);
             for (uint32_t k = 0; k < listed; ++k)
             {
-                const uint32_t tile = L[16 + k];
+                const uint32_t* info = &L[16 + 4 * k];
+                const uint32_t tile = info[0], n = info[1], base = info[2];
                 CHECK(tile < tileCount);
                 if (tileListed[tile]) fail("frame %zu: tile %u listed twice", f, tile);
                 tileListed[tile] = 1;
                 const uint32_t* h = &fo.tiles[(size_t)tile * 8];
-                const uint32_t n = h[0];
-                if (n == 0) fail("frame %zu: listed tile %u has no fragments", f, tile);
+                if (n == 0 || h[0] != n || h[1] != base || h[2] != k + 1)
+                    fail("frame %zu: listed tile %u (entry %u): %u records at %u, header %u records at %u, listed %u", f, tile, k, n, base, h[0], h[1], h[2]);
+                if (base != fragmentSum || info[3] != blockSum)
+                    fail("frame %zu: listed tile %u: record base %u, block base %u; prefixes %llu, %llu", f, tile, base, info[3], (unsigned long long)fragmentSum,
+                         (unsigned long long)blockSum);
+                if ((h[5] != 0) != (n > 1024)) fail("frame %zu: tile %u with %u records: scratch slot word %u", f, tile, n, h[5]);
+                heavyTiles += n > 1024;
                 fragmentSum += n;
+                blockSum += (n + 1023) / 1024;
                 deepest = std::max(deepest, n);
-                if ((n > heavyMin) != (heavyListed[tile] != 0)) fail("frame %zu: tile %u with %u fragments %s the heavy list (threshold %u)", f, tile, n, heavyListed[tile] ? "on" : "not on", heavyMin);
-                // Chunks by ordinal: the table, then the extension chain.
-                const uint32_t ordinals = (n + 63) / 64;
-                std::vector<uint32_t> chunks(ordinals, 0);
-                for (uint32_t o = 0; o < std::min(ordinals, slots); ++o) chunks[o] = fo.table[(size_t)tile * slots + o];
-                for (uint32_t o = ordinals; o < slots; ++o)
-                    if (fo.table[(size_t)tile * slots + o] != 0) fail("frame %zu: tile %u: table slot %u set past its %u chunks", f, tile, o, ordinals);
-                // Extension tree (256 words per node): the root (header word 5) holds ordinals slots .. slots + 253
-                // directly, its word 254 roots a 2-level subtree (the next 65,536), word 255 a 3-level subtree. A child
-                // exists exactly when its range starts below the tile's chunk count.
-                std::function<void(uint32_t, uint32_t, uint64_t)> visit = [&](uint32_t node, uint32_t depth, uint64_t first) {
-                    useChunk(node, "extension node", tile);
-                    ++extTables;
-                    const uint32_t* w = &fo.records[(size_t)(node - 1) * 256];
-                    uint64_t span = 1;
-                    for (uint32_t k = 1; k < depth; ++k) span *= 256;
-                    for (uint32_t i = 0; i < 256; ++i)
-                    {
-                        const uint64_t start = first + i * span;
-                        if (start < ordinals)
-                        {
-                            if (depth == 1) chunks[start] = w[i];
-                            else if (w[i] == 0) fail("frame %zu: tile %u: extension node missing below ordinal %llu", f, tile, (unsigned long long)start);
-                            else visit(w[i], depth - 1, start);
-                        }
-                        else if (w[i] != 0) fail("frame %zu: tile %u: extension slot for ordinal %llu set past the tile's %u chunks", f, tile, (unsigned long long)start, ordinals);
-                    }
-                };
-                const uint32_t root = h[5];
-                if ((root != 0) != (ordinals > slots)) fail("frame %zu: tile %u: extension root %u with %u chunks and %u slots", f, tile, root, ordinals, slots);
-                if (h[6] != 0 || h[7] != 0) fail("frame %zu: tile %u: spare header words %u %u", f, tile, h[6], h[7]);
-                if (root != 0)
+                CHECK((uint64_t)base + n <= capacity);
+                // Pixel starts: pixel p's records are [base + start(p), base + start(p + 1)), start(64) = n.
+                const uint32_t* start = &fo.starts[(size_t)k * 64];
+                CHECK(start[0] == 0);
+                for (uint32_t pix = 0; pix < 64; ++pix)
                 {
-                    useChunk(root, "extension root", tile);
-                    ++extTables;
-                    const uint32_t* w = &fo.records[(size_t)(root - 1) * 256];
-                    for (uint32_t i = 0; i < 254; ++i)
-                        if (slots + i < ordinals) chunks[slots + i] = w[i];
-                        else if (w[i] != 0) fail("frame %zu: tile %u: extension root word %u set past the tile's %u chunks", f, tile, i, ordinals);
-                    const uint64_t first2 = (uint64_t)slots + 254, first3 = first2 + 65536;
-                    if ((w[254] != 0) != (first2 < ordinals)) fail("frame %zu: tile %u: 2-level subtree %u with %u chunks", f, tile, w[254], ordinals);
-                    if ((w[255] != 0) != (first3 < ordinals)) fail("frame %zu: tile %u: 3-level subtree %u with %u chunks", f, tile, w[255], ordinals);
-                    if (w[254] != 0) visit(w[254], 2, first2);
-                    if (w[255] != 0) visit(w[255], 3, first3);
+                    const uint32_t end = pix < 63 ? start[pix + 1] : n;
+                    if (end < start[pix]) fail("frame %zu: tile %u: pixel %u starts at %u, the next at %u", f, tile, pix, start[pix], end);
+                    for (uint32_t i = start[pix]; i < end; ++i)
+                        if ((fo.records[((size_t)base + i) * 4 + 3] >> 26) != pix)
+                            fail("frame %zu: tile %u: record %u in pixel %u's range belongs to pixel %u", f, tile, i, pix, fo.records[((size_t)base + i) * 4 + 3] >> 26);
                 }
-                for (uint32_t o = 0; o < ordinals; ++o) useChunk(chunks[o], "record", tile);
-                uint32_t zNear = 0, zFar = 0xFFFFFFFFu, opaque[2] = { 0, 0 };
                 std::map<uint32_t, std::vector<uint32_t>> byPixel;  // pixel -> record indices in the tile
                 for (uint32_t i = 0; i < n; ++i)
                 {
-                    const uint32_t* fr = &fo.records[(size_t)(chunks[i / 64] - 1) * 256 + 4 * (i % 64)];
+                    const uint32_t* fr = &fo.records[((size_t)base + i) * 4];
                     const uint32_t p = fr[3] >> 26, px = (tile % tilesX) * 8 + p % 8, py = (tile / tilesX) * 8 + p / 8;
                     if (px >= width || py >= height) fail("frame %zu: tile %u record %u: pixel (%u, %u) outside the view", f, tile, i, px, py);
                     const uint32_t pi = py * width + px;
@@ -2066,8 +2046,6 @@ UNX_TEST(coverage_layer_is_exact)
                     float depth;
                     std::memcpy(&depth, &depthBits, 4);
                     const double area = ((fr[3] >> 16) & 0x3FF) / 1023.0;
-                    zNear = std::max(zNear, depthBits);
-                    zFar = std::min(zFar, depthBits);
                     const uint32_t vis = fr[0], entry = (vis - 1) >> 7, tri = (vis - 1) & 127;
                     const uint32_t instance = fo.visible[2 * entry], cluster = fo.visible[2 * entry + 1] & 0xFFFFFF;
                     CHECK(instance < s.instances.size() && cluster < cd.clusters.size());
@@ -2092,6 +2070,7 @@ UNX_TEST(coverage_layer_is_exact)
                         {
                             ++duplicates;
                             ++checked;
+                            byPixel[p].push_back(i);
                             continue;
                         }
                         fail("frame %zu: pixel (%u, %u): the same triangle twice: entry %u cluster %u tri %u and entry %u cluster %u tri %u (records %08x %08x %08x "
@@ -2139,9 +2118,8 @@ UNX_TEST(coverage_layer_is_exact)
                     byPixel[p].push_back(i);
                     ++checked;
                 }
-                if (h[1] != zNear || h[2] != zFar) fail("frame %zu: tile %u: depth range %08x .. %08x, records %08x .. %08x", f, tile, h[2], h[1], zFar, zNear);
                 // opaqueCovered: the union of the pixel's opaque records' masks is full and band A lies behind the farthest
-                // of them (reversed Z: a smaller depth).
+                // of them (reversed Z: a smaller depth). Depth range: the pixel's nearest and farthest record.
                 for (uint32_t p = 0; p < 64; ++p)
                 {
                     const uint32_t px = (tile % tilesX) * 8 + p % 8, py = (tile / tilesX) * 8 + p / 8;
@@ -2151,16 +2129,22 @@ UNX_TEST(coverage_layer_is_exact)
                         if (bit) fail("frame %zu: tile %u pixel %u outside the view is opaqueCovered", f, tile, p);
                         continue;
                     }
-                    uint32_t unionMask = 0, farthestOpaque = 0xFFFFFFFFu;
+                    uint32_t unionMask = 0, farthestOpaque = 0xFFFFFFFFu, nearest = 0, farthestAll = 0xFFFFFFFFu;
                     for (uint32_t i : byPixel[p])
                     {
-                        const uint32_t* fr = &fo.records[(size_t)(chunks[i / 64] - 1) * 256 + 4 * (i % 64)];
+                        const uint32_t* fr = &fo.records[((size_t)base + i) * 4];
+                        nearest = std::max(nearest, fr[1] & 0x7FFFFFFFu);
+                        farthestAll = std::min(farthestAll, fr[1] & 0x7FFFFFFFu);
                         if ((fr[1] >> 31) != 0 || fr[2] == 0) continue;
                         unionMask |= fr[2];
                         farthestOpaque = std::min(farthestOpaque, fr[1]);
                     }
+                    const size_t pi = (size_t)py * width + px;
+                    rangeSeen[pi] = 1;
+                    if (fo.range[2 * pi] != nearest || fo.range[2 * pi + 1] != farthestAll)
+                        fail("frame %zu: pixel (%u, %u): depth range %08x .. %08x, records %08x .. %08x", f, px, py, fo.range[2 * pi + 1], fo.range[2 * pi], farthestAll, nearest);
                     uint32_t depthA;
-                    std::memcpy(&depthA, &fo.depth[(size_t)py * width + px], 4);
+                    std::memcpy(&depthA, &fo.depth[pi], 4);
                     const bool expectBit = unionMask == 0xFFFFFFFFu && depthA < farthestOpaque;
                     if (bit != expectBit)
                         fail("frame %zu: pixel (%u, %u): opaqueCovered %d, opaque union %08x, farthest %08x, band A depth %08x", f, px, py, (int)bit, unionMask, farthestOpaque, depthA);
@@ -2168,31 +2152,36 @@ UNX_TEST(coverage_layer_is_exact)
                     opaqueBits += bit;
                 }
             }
+            CHECK(heavyTiles == heavyCount && blockSum == L[5]);
             CHECK(fragmentSum == L[4]);
-            // Tiles not listed: empty (last frame's were emptied); no chunk table entries.
-            size_t staleTiles = 0;
+            // Tiles not listed: empty (last frame's were emptied); pixels outside the listed tiles have no depth range.
+            size_t staleTiles = 0, staleRanges = 0;
             for (uint32_t t = 0; t < tileCount; ++t)
             {
                 if (tileListed[t]) continue;
                 const uint32_t* h = &fo.tiles[(size_t)t * 8];
-                bool stale = h[0] != 0 || h[1] != 0 || h[2] != 0xFFFFFFFFu || h[3] != 0 || h[4] != 0 || h[5] != 0 || h[6] != 0 || h[7] != 0;
-                for (uint32_t o = 0; o < slots; ++o) stale = stale || fo.table[(size_t)t * slots + o] != 0;
-                if (stale) ++staleTiles;
+                if (h[0] != 0 || h[2] != 0 || h[3] != 0 || h[4] != 0) ++staleTiles;
             }
+            for (size_t pi = 0; pi < rangeSeen.size(); ++pi)
+                if (!rangeSeen[pi] && (fo.range[2 * pi] != 0 || fo.range[2 * pi + 1] != 0xFFFFFFFFu)) ++staleRanges;
             size_t missing = 0;
             for (const auto& [k, e] : expected)
             {
                 if (!e.found && e.required)
                     if (++missing <= 5) logf("    missing: pixel %u, area %g, depth %g\n", k.second, e.area, e.depth);
             }
-            logf("    [%s] frame %zu: %u tiles (%u heavy, deepest %u fragments, %zu extension nodes), %llu fragments; %zu checked against the exact clip (%zu duplicates of "
-                 "clipped pieces; worst area error %.2e px, depth %.2e relative, slivers < 1e-2 px2 %.2e, normal %.2f degrees); %zu see-through records; %zu pixels "
-                 "with a full opaque union, %zu opaqueCovered; %zu expected missing; %zu back-facing triangles culled, %zu pixel fragments occluded by band A, "
-                 "%zu marginal; %zu stale tiles\n",
-                 config.name, f, listed, heavyCount, deepest, extTables, (unsigned long long)fragmentSum, checked, duplicates, worstArea, worstDepth, worstSliverDepth,
-                 worstNormalDeg, seeThroughRecords, coveredPixels, opaqueBits, missing, culledBack, occluded, marginal, staleTiles);
-            CHECK(missing == 0 && staleTiles == 0 && checked == fragmentSum && depthOver == 0);
-            CHECK(culledBack > 0 && occluded > 0 && coveredPixels > 0 && opaqueBits > 0 && seeThroughRecords > 16384 && deepest > 16384 && extTables >= 2);
+            const bool full = fragmentSum < capacity;  // a frame at capacity may have lost fragments (OVERFLOW_COVERAGE)
+            logf("    [%s] frame %zu: %u tiles (%u of more than one block, deepest %u records), %llu records of capacity %u (%llu blocks); %zu checked against the "
+                 "exact clip (%zu duplicates of clipped pieces; worst area error %.2e px, depth %.2e relative, slivers < 1e-2 px2 %.2e, normal %.2f degrees); %zu "
+                 "see-through records; %zu pixels with a full opaque union, %zu opaqueCovered; %zu expected missing%s; %zu back-facing triangles culled, %zu pixel "
+                 "fragments occluded by band A, %zu marginal; %zu stale tiles, %zu stale depth ranges\n",
+                 config.name, f, listed, heavyCount, deepest, (unsigned long long)fragmentSum, capacity, (unsigned long long)blockSum, checked, duplicates, worstArea,
+                 worstDepth, worstSliverDepth, worstNormalDeg, seeThroughRecords, coveredPixels, opaqueBits, missing, full ? "" : " (the pool was full)", culledBack,
+                 occluded, marginal, staleTiles, staleRanges);
+            CHECK(staleTiles == 0 && staleRanges == 0 && checked == fragmentSum && depthOver == 0);
+            CHECK(missing == 0 || (smallFloor && !full));
+            if (full) CHECK(culledBack > 0 && occluded > 0 && coveredPixels > 0 && opaqueBits > 0 && seeThroughRecords > 16384 && deepest > 16 * 1024 && heavyCount > 0);
+            if (smallFloor && f == 0) CHECK(!full);  // the floor is below the first frame's need
         }
     }
     logf("    coverage layer exact over %zu frames in 2 configurations\n", (size_t)3);

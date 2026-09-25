@@ -61,14 +61,20 @@ struct ViewResources
                                    // depth (minimum reversed-Z value) of the pixels [i 2^(m+1), ...);
                                    // valid mip size ceil(W / 2^(m+1)) x ceil(H / 2^(m+1)) inside a
                                    // power-of-two allocation (texels beyond it are undefined)
-    // Coverage layer (7.1 v2, CoverageTiles.hlsli; invalid = no layer), per 8 x 8 tile:
-    BufferRef coverageTiles;       // raw: 8-word tile headers (count, zNear, zFar, opaqueCovered  [V]
-                                   // 64 bit, first extension chunk table)
-    BufferRef coverageChunkTable;  // raw: per tile N words, chunk index + 1 of its first N chunks [V]
-    BufferRef coverageChunks;      // StructuredBuffer<uint4> record pool: chunks of 64 records  [V]
-                                   // (or 256-word extension tables)
-    BufferRef coverageTileList;    // raw: header (args over the tiles, counts, N, tiles per row,  [V]
-                                   // heavy tile args and count), tiles with fragments, heavy tiles
+    // Coverage layer (7.1 v1.41, CoverageTiles.hlsli; invalid = no layer), per 8 x 8 tile:
+    BufferRef coverageTiles;       // raw: 8-word tile headers (records, record base, listed index + 1, [V]
+                                   // opaqueCovered 64 bit, V-internal words)
+    BufferRef coverageRecords;     // StructuredBuffer<uint4>: each listed tile's records contiguous,  [V]
+                                   // pixel-major inside the tile's range
+    BufferRef coverageTileList;    // raw: header (args over the listed tiles and over the blocks,     [V]
+                                   // counts, capacity, tiles per row), 4 words per listed tile
+                                   // { tile, records, record base, block base }
+    BufferRef coverageTilePixels;  // raw: 64 words per listed tile, pixel p's first record in the  [V]
+                                   // tile's range
+    TextureRef coverageDepthRange; // R32G32_UINT per pixel: its records' nearest (max) and farthest  [V]
+                                   // (min) depth bits, see-through included; (0, 0xFFFFFFFF) = none
+    BufferRef coverageChunkTable;  // v1.40 names until M's composite reads the ranges: the table is   [V]
+    BufferRef coverageChunks;      // always invalid (turns the v1.40 readers off), chunks = records
     TextureRef gbuffer;            // RG32_UINT (GBuffer.hlsli)                              [M]
     TextureRef shadowVisibility;   // R32_UINT, 4 light slots x 8 bit (7.3)                 [S]
     TextureRef shadowOverflowTiles;  // R32_UINT ceil(W/8) x ceil(H/8) (main view, 7.3, v1.20): [S]
@@ -79,6 +85,13 @@ struct ViewResources
                                    // start) + runs of 8-bit visibilities, list order (7.3)
     BufferRef shadowOverflowFallbackTiles;  // raw: word 0 count, words 1..3 DispatchIndirect  [S]
                                             // args (count, 1, 1), words 4.. tiles (y << 16 | x)
+    BufferRef shadowFragmentVisibility;  // StructuredBuffer<uint3> per pixel (y x width + x), valid  [S]
+                                         // where coverageDepthRange has records: x = sun visibility
+                                         // at 4 points of [nearest, farthest] (unorm8 each), y = local
+                                         // slots 1..3 at the nearest (byte 0 bit 0: pair flag), z = the
+                                         // same at the farthest (7.3, v1.41)
+    BufferRef shadowFragmentSun;   // raw, 1 B per coverageRecords element: that record's sun  [S]
+                                   // visibility (unorm8); written only for pair-flag pixels (7.3)
     BufferRef froxelLights;        // this view's froxel light lists (7.4; v1.22): main view =      [S]
                                    // FrameResources::froxelLights, planar views: S shadowVisibility
     TextureRef airVolume;          // this view's air volume (v1.15 layout; v1.22): main view =     [S]
@@ -97,6 +110,11 @@ struct ViewResources
                                      // surface pixels of reflectionLobeHalfAngle(r, NoV) / pi
                                      // (Reflection.hlsli; sky-only tile = 1); R skips ray
                                      // classification in tiles whose minimum is K-path wide
+    // Particle layer (FX request 20260926_FX_particle_render_pass 8a; Passes/FX/ParticleLayer.hlsli; invalid = none):
+    TextureRef particleLayer;      // RGBA16F, 1/4 resolution: premultiplied radiance + transmittance   [FX]
+    TextureRef particleDepthRange; // RG16F, 1/4 resolution: the layer's depth range per texel          [FX]
+    BufferRef particleEdges;       // raw: full-resolution edge pixels of the layer + count              [FX]
+    TextureRef distortionLayer;    // RG16F, 1/4 resolution: screen-space offsets (after M0)             [FX]
     TextureRef color;              // final colour target of this view                      [M]
 };
 

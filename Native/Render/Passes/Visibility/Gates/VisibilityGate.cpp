@@ -590,16 +590,21 @@ int main(int argc, char** argv)
             if (coverage)
             {
                 const double covRaster = sumPasses(r, [](const std::string& n) { return n == "v.coverage.raster"; });
-                const double covTiles = sumPasses(r, [](const std::string& n) { return n == "v.coverage.tiles"; });
-                const double covOther = sumPasses(r, [](const std::string& n) { return startsWith(n, "v.coverage.") && n != "v.coverage.raster" && n != "v.coverage.tiles"; });
-                const double F = st.coverageFragments;
+                auto pass = [&](const char* name) { return sumPasses(r, [&](const std::string& n) { return n == std::string("v.coverage.") + name; }); };
+                const double covCount = pass("count"), covScan = pass("scan"), covOffsets = pass("offsets"), covScatter = pass("scatter"), covBlocks = pass("blocks"),
+                             covHeavy = pass("heavy");
+                const double covOther = sumPasses(r, [](const std::string& n) { return startsWith(n, "v.coverage.") && n != "v.coverage.raster"; }) - covCount - covScan -
+                                        covOffsets - covScatter - covBlocks - covHeavy;
+                const double F = st.coverageFragments + st.coverageMeasured;
                 if (st.coverageInvocations > 0)
-                    logf("  coverage pixel kernel invocations %u (%.2f per fragment; measurement stage)\n", st.coverageInvocations,
-                         st.coverageFragments ? (double)st.coverageInvocations / st.coverageFragments : 0.0);
-                logf("  coverage layer: %u fragments in %u tiles (%.2f per pixel of a listed tile), %u chunks of pool %u (%u lost to races), %u heavy tiles | raster "
-                     "%.3f ms (%.3f ns/fragment; design F x 0.05 ns = %.3f ms) | clear/prepare/args %.3f ms, tiles (opaqueCovered, heavy) %.3f ms\n",
-                     st.coverageFragments, st.coverageTiles, st.coverageTiles ? F / (64.0 * st.coverageTiles) : 0.0, st.coverageChunks, st.coveragePoolChunks,
-                     st.coverageChunksLost, st.coverageHeavyTiles, covRaster, F > 0 ? covRaster * 1e6 / F : 0.0, F * 0.05e-6, covOther, covTiles);
+                    logf("  coverage pixel kernel invocations %u (%.2f per fragment; measurement stage, %u fragments, nothing stored)\n", st.coverageInvocations,
+                         F > 0 ? st.coverageInvocations / F : 0.0, st.coverageMeasured);
+                logf("  coverage layer: %u fragments in %u tiles (%.2f per pixel of a listed tile), %u blocks, %u tiles of more than one block, capacity %u records | "
+                     "raster %.3f ms (%.3f ns/fragment; design F x 0.05 ns = %.3f ms) | count %.3f, scan %.3f, offsets %.3f, scatter %.3f, blocks %.3f, heavy %.3f "
+                     "ms (%.3f ns/fragment after the raster) | clear/prepare/args %.3f ms\n",
+                     st.coverageFragments, st.coverageTiles, st.coverageTiles ? F / (64.0 * st.coverageTiles) : 0.0, st.coverageBlocks, st.coverageHeavyTiles,
+                     st.coveragePoolRecords, covRaster, F > 0 ? covRaster * 1e6 / F : 0.0, F * 0.05e-6, covCount, covScan, covOffsets, covScatter, covBlocks, covHeavy,
+                     F > 0 ? (covCount + covScan + covOffsets + covScatter + covBlocks + covHeavy) * 1e6 / F : 0.0, covOther);
                 // Fragments-per-tile histogram of one more frame (tile header word 0).
                 RenderGraph g(device);
                 FrameContext fc;
@@ -610,9 +615,8 @@ int main(int argc, char** argv)
                 const TextureRef output = g.createTexture({ "gate output", res.width, res.height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
                 const ViewResources main = renderer.record(g, fc, output);
                 const uint32_t tilesX = (res.width + 7) / 8, tileCount = tilesX * ((res.height + 7) / 8);
-                const uint64_t slots = (uint64_t)quality.integer("visibility.coverage_table_slots");
-                const uint64_t tileBytes = (uint64_t)tileCount * 32, tableBytes = (uint64_t)tileCount * slots * 4, listBytes = (16 + 2ull * tileCount) * 4;
-                const uint64_t recordBytes = g.desc(main.coverageChunks).size;
+                const uint64_t tileBytes = (uint64_t)tileCount * 32, listBytes = (16 + 4ull * tileCount) * 4;
+                const uint64_t recordBytes = g.desc(main.coverageRecords).size;
                 const uint64_t visibleBytes = g.desc(main.visibleClusters).size;
                 auto readback = [&](uint64_t bytes) {
                     D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
@@ -628,17 +632,15 @@ int main(int argc, char** argv)
                     return buffer;
                 };
                 const uint32_t visPitch = (res.width * 4 + 255) / 256 * 256;
-                ComPtr<ID3D12Resource> rbTiles = readback(tileBytes), rbTable = readback(tableBytes), rbList = readback(listBytes), rbRecords = readback(recordBytes),
+                ComPtr<ID3D12Resource> rbTiles = readback(tileBytes), rbList = readback(listBytes), rbRecords = readback(recordBytes),
                                        rbVis = readback((uint64_t)visPitch * res.height), rbVisible = readback(visibleBytes);
-                ID3D12Resource *dTiles = rbTiles.Get(), *dTable = rbTable.Get(), *dList = rbList.Get(), *dRecords = rbRecords.Get(), *dVis = rbVis.Get(),
-                               *dVisible = rbVisible.Get();
+                ID3D12Resource *dTiles = rbTiles.Get(), *dList = rbList.Get(), *dRecords = rbRecords.Get(), *dVis = rbVis.Get(), *dVisible = rbVisible.Get();
                 const uint32_t visW = res.width, visH = res.height;
                 g.addPass("gate.coverage.readback", QueueType::Graphics,
                           [&](PassBuilder& b) {
                               b.use(main.coverageTiles, Use::CopySrc);
-                              b.use(main.coverageChunkTable, Use::CopySrc);
                               b.use(main.coverageTileList, Use::CopySrc);
-                              b.use(main.coverageChunks, Use::CopySrc);
+                              b.use(main.coverageRecords, Use::CopySrc);
                               b.use(main.visId, Use::CopySrc);
                               b.use(main.visibleClusters, Use::CopySrc);
                               b.keep();
@@ -652,17 +654,15 @@ int main(int argc, char** argv)
                               from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
                               c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
                               c.cmd->CopyBufferRegion(dTiles, 0, c.resource(main.coverageTiles), 0, tileBytes);
-                              c.cmd->CopyBufferRegion(dTable, 0, c.resource(main.coverageChunkTable), 0, tableBytes);
                               c.cmd->CopyBufferRegion(dList, 0, c.resource(main.coverageTileList), 0, listBytes);
-                              c.cmd->CopyBufferRegion(dRecords, 0, c.resource(main.coverageChunks), 0, recordBytes);
+                              c.cmd->CopyBufferRegion(dRecords, 0, c.resource(main.coverageRecords), 0, recordBytes);
                               c.cmd->CopyBufferRegion(dVisible, 0, c.resource(main.visibleClusters), 0, visibleBytes);
                           });
                 g.execute(nullptr);
                 device.waitIdle();
-                const uint32_t *p = nullptr, *table = nullptr, *list = nullptr, *records = nullptr, *visible = nullptr;
+                const uint32_t *p = nullptr, *list = nullptr, *records = nullptr, *visible = nullptr;
                 check(rbVisible->Map(0, nullptr, (void**)&visible), "map visible clusters");
                 check(rbTiles->Map(0, nullptr, (void**)&p), "map tiles");
-                check(rbTable->Map(0, nullptr, (void**)&table), "map chunk table");
                 check(rbList->Map(0, nullptr, (void**)&list), "map tile list");
                 check(rbRecords->Map(0, nullptr, (void**)&records), "map records");
                 // Bins by fragments per tile (per pixel = / 64); the heavy threshold of M's block sort is 1024.
@@ -685,7 +685,7 @@ int main(int argc, char** argv)
                 // Hidden fragments: per pixel in depth order (nearest first), those after the union of the opaque records'
                 // masks became full have weight zero under the composite's mask-union occlusion (what an exact cut behind
                 // opaque band B fragments could drop), and the pixels whose opaque union fills at all.
-                const uint64_t poolChunks = recordBytes / 1024;
+                const uint64_t poolRecords = recordBytes / 16;
                 uint64_t hidden = 0, stored = 0, fullPixels = 0, seeThrough = 0, coveragePixels = 0;
                 struct Rec
                 {
@@ -718,42 +718,14 @@ int main(int argc, char** argv)
                 std::vector<uint32_t> perPixel, untilFull;  // records per coverage pixel; records up to (and with) the one filling its union
                 for (uint32_t k = 0; k < std::min(list[3], tileCount); ++k)
                 {
-                    const uint32_t tile = list[16 + k], n = p[8 * tile];
+                    // Listed tile k: { tile, records, record base, block base } (CoverageTiles.hlsli v1.41), pixel-major range.
+                    const uint32_t n = list[16 + 4 * k + 1], base = list[16 + 4 * k + 2];
                     for (auto& v : byPixel) v.clear();
-                    for (uint32_t c = 0; c * 64 < n && c < poolChunks; ++c)
+                    for (uint32_t ri = 0; ri < n && (uint64_t)base + ri < poolRecords; ++ri)
                     {
-                        uint32_t chunk = 0;
-                        if (c < slots) chunk = table[(size_t)tile * slots + c];
-                        else
-                        {
-                            // Extension tree (CoverageTiles.hlsli): root words 0..253 direct, 254 a 2-level subtree, 255 a
-                            // 3-level subtree.
-                            uint64_t e = c - slots;
-                            uint32_t rootWord = (uint32_t)e, digits = 0;
-                            if (e >= 254)
-                            {
-                                e -= 254;
-                                rootWord = 254;
-                                digits = 2;
-                                if (e >= 65536)
-                                {
-                                    e -= 65536;
-                                    rootWord = 255;
-                                    digits = 3;
-                                }
-                            }
-                            chunk = p[8 * tile + 5];
-                            if (chunk != 0 && chunk <= poolChunks) chunk = records[(size_t)(chunk - 1) * 256 + rootWord];
-                            for (uint32_t digit = digits; digit > 0 && chunk != 0 && chunk <= poolChunks; --digit)
-                                chunk = records[(size_t)(chunk - 1) * 256 + ((e >> (8 * (digit - 1))) & 0xFF)];
-                        }
-                        if (chunk == 0 || chunk > poolChunks) continue;
-                        for (uint32_t ri = 0; ri < 64 && c * 64 + ri < n; ++ri)
-                        {
-                            const uint32_t* rec = &records[((size_t)(chunk - 1) * 64 + ri) * 4];
-                            byPixel[rec[3] >> 26].push_back({ rec[1], rec[2], rec[0] });
-                            ++stored;
-                        }
+                        const uint32_t* rec = &records[((size_t)base + ri) * 4];
+                        byPixel[rec[3] >> 26].push_back({ rec[1], rec[2], rec[0] });
+                        ++stored;
                     }
                     for (auto& v : byPixel)
                     {
@@ -810,7 +782,6 @@ int main(int argc, char** argv)
                     rbVis->Unmap(0, nullptr);
                 }
                 rbTiles->Unmap(0, nullptr);
-                rbTable->Unmap(0, nullptr);
                 rbList->Unmap(0, nullptr);
                 rbRecords->Unmap(0, nullptr);
                 rbVisible->Unmap(0, nullptr);
@@ -854,7 +825,7 @@ int main(int argc, char** argv)
                     }
                     logf("  by distance (nearest record per pixel; record's own distance): %s\n", line.c_str());
                 }
-                for (ComPtr<ID3D12Resource>* buffer : { std::addressof(rbTiles), std::addressof(rbTable), std::addressof(rbList), std::addressof(rbRecords), std::addressof(rbVis),
+                for (ComPtr<ID3D12Resource>* buffer : { std::addressof(rbTiles), std::addressof(rbList), std::addressof(rbRecords), std::addressof(rbVis),
                                                         std::addressof(rbVisible) })
                     device.deferRelease(*buffer);
             }

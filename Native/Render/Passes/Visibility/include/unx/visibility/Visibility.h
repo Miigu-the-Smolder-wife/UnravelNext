@@ -23,11 +23,11 @@ struct Stats
     uint32_t tilePairs = 0;            // tile-local raster runs: pairs drawn (DepthRasterRequest::tileLocal)
     uint32_t deferredInstances = 0, deferredNodes = 0, deferredClusters = 0;  // phase 1 -> phase 2
     uint32_t coverageFragments = 0;    // coverage layer fragments appended (main view)
-    uint32_t coverageTiles = 0;        // 8 x 8 tiles with coverage fragments
-    uint32_t coverageChunks = 0;       // record chunks taken, extension tables included (the need; may exceed the pool)
-    uint32_t coverageChunksLost = 0;   // chunks taken but not published (another wave published the slot first)
-    uint32_t coverageHeavyTiles = 0;   // tiles over visibility.coverage_heavy_tile_fragments (M's heavy path)
-    uint32_t coveragePoolChunks = 0;   // the frame's record pool (chunks of 64 records)
+    uint32_t coverageTiles = 0;        // 8 x 8 tiles with coverage records
+    uint32_t coverageBlocks = 0;       // blocks of 1,024 records over the listed tiles
+    uint32_t coverageHeavyTiles = 0;   // tiles of more than one block
+    uint32_t coveragePoolRecords = 0;  // the frame's record capacity
+    uint32_t coverageMeasured = 0;     // fragments of the raster measurement stages (nothing stored)
     uint32_t coverageInvocations = 0;  // coverage pixel kernel invocations (visibility.coverage_debug_stage != 0 only)
     uint32_t mixedClusters = 0;        // sheet clusters drawn in both rasters, split per triangle (counted in bandClusters[1])
     uint32_t mixedTriangles = 0;       // their triangles (counted in triangles[1]'s cluster rule: see the mesh kernels)

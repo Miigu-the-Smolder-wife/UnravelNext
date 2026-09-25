@@ -6,4 +6,5 @@
 namespace unx::render::tracks
 {
 void simulation(FramePassContext&) { pending("FX.simulation (track disabled in this build)"); }
+void particles(FramePassContext&, ViewResources&) { pending("FX.particles (track disabled in this build)"); }
 } // namespace unx::render::tracks

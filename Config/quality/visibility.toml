@@ -35,13 +35,13 @@ max_visible_clusters = 1048576    # visible-list entries (each draw list has the
 max_node_items = 4194304          # hierarchy traversal work items (instance, node) of both phases
 max_group_items = 1048576         # hierarchy leaves reached (instance, group)
 max_deferred_items = 1048576      # phase-1 occluded instances / nodes / clusters retested in phase 2
-coverage_table_slots = 32         # coverage layer: chunk table slots per 8 x 8 tile (64 fragments each); later chunks go to
-                                  # the tile's extension tables (no per-tile limit; COVERAGE_REDESIGN 4.5)
-coverage_pool_min_fragments_per_pixel = 1.0  # coverage record pool floor (4K: 8.3 M records, 133 MB); the pool is 1.5 x
-                                  # the latest measured need when larger (16 B per record)
-coverage_heavy_tile_fragments = 1024  # tiles with more fragments go on the heavy list (M's block sort and merge)
+coverage_table_slots = 32         # unused since INTERFACES v1.41 (tile ranges replace the chunk tables); kept so binaries
+                                  # built before it still start
+coverage_pool_min_fragments_per_pixel = 1.0  # coverage record capacity floor (4K: 8.3 M records); the capacity is 1.5 x the
+                                  # latest measured need when larger (37 B per record: stream 20 + ranges 16 + scratch 1)
+coverage_heavy_tile_fragments = 1024  # unused since INTERFACES v1.41 (kept like coverage_table_slots)
 coverage_debug_stage = 0          # measurement only: 3 = the pixel kernel returns at once, 4 = after area, depth and band A
-                                  # test, 1 = after the fragment's math, 2 = after the tile counters; 0 = the layer
+                                  # test, 1 = after the fragment's math, 2 = after the append atomic; 0 = the layer
 max_coverage_fragments = 12582912 # unused since INTERFACES v1.37 (coverage layer v2); kept so binaries built before it still
                                   # start; removed after the next integrated rebuild
 coverage_band_c = true            # with coverage_layer: band C clusters are drawn in the coverage layer until the band C

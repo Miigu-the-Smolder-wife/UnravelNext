@@ -12,11 +12,15 @@ void pending(const char* entry);
 // C0 of ARCHITECTURE 4.1, first in the frame after prepareScene: the GPU simulation slices (particles first; cloth,
 // hair guides, water, Matter later), serial in the frame (ARCHITECTURE 2.14).
 void simulation(FramePassContext& fc);
+// The particle layer of a view (v1.41, FX request 20260926_FX_particle_render_pass 8a): after reflections and before
+// shadow visibility and shading (VSM pages, froxel light lists, air and the GI cache are ready; M composites the layer
+// before tonemapping). Writes view.particleLayer, particleDepthRange, particleEdges, distortionLayer (invalid = none).
+void particles(FramePassContext& fc, ViewResources& view);
 
 // ---- V: visibility (core session) - Native/Render/Passes/Visibility, Tools/ClusterBuilder
 // Culling (two phase), band A/B/C classification, band A vis buffer + depth, HiZ, coverage layer (bands B/C).
-// Writes view.depth, visId, visibleClusters, hiz and the coverage layer (coverageTiles, coverageChunkTable, coverageChunks,
-// coverageTileList).
+// Writes view.depth, visId, visibleClusters, hiz and the coverage layer (coverageTiles, coverageRecords, coverageTileList,
+// coverageTilePixels, coverageDepthRange).
 void visibility(FramePassContext& fc, ViewResources& view);
 // Service behind FrameServices::rasterizeDepth.
 void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request);

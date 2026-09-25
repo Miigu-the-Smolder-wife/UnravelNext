@@ -1,64 +1,55 @@
-// Coverage layer, tile-chunk form (INTERFACES_KO.md 7.1 v2; request 20260926_V_coverage_layer_v2.md, design
-// COVERAGE_REDESIGN 4.5). Owner: V. Readers: M's coverage composite, S's fragment visibility. V writes it in the coverage
-// raster (CoverageRaster.ps) and CoverageBuild.
+// Coverage layer, tile-range form (INTERFACES_KO.md 7.1 v1.41; design COVERAGE_REDESIGN 4.6). Owner: V. Readers: M's
+// coverage composite, S's fragment visibility. V writes it in the coverage raster (CoverageRaster.ps) and CoverageBuild.
 //
-// Per 8 x 8 pixel tile (tile = tx + ty * tilesX, tilesX = ceil(width / 8)):
-//   header (8 words): fragment count, nearest and farthest fragment depth (reversed-Z device depth as float bits:
-//          zNear = max, zFar = min), the 64-bit opaqueCovered mask (pixel p = x + 8 y: the union of the masks of the
-//          pixel's opaque records is full and the band A surface lies behind the farthest of those records, so that
-//          surface has weight zero under the composite's mask-union occlusion; COVERAGE_REDESIGN 4.6), the extension
-//          root, spare (2 words)
-//   chunk table: tableSlots words (list header word 6), word c = chunk index + 1 of the tile's c-th chunk (0 = none)
-//   extension tree (v1.40): the tile's chunks from ordinal tableSlots on (e = ordinal - tableSlots). Its nodes are
-//          chunks of the record pool read as 256 words (word w = component w % 4 of the chunk's element w / 4; chunk
-//          index + 1, 0 = none). The root (header word 5) holds the chunks of e < 254 directly; its word 254 roots a
-//          2-level subtree (the next 65,536 ordinals: e's two base-256 digits), its word 255 a 3-level subtree (the
-//          next 16,777,216). A lookup reads at most 4 nodes whatever the tile's depth (v1.37-38 walked a chain of
-//          tables, whose cost grew with the ordinal: a tile of millions of fragments stalled the GPU), and a tile holds
-//          up to tableSlots + 16.8 M chunks (10^9 fragments; past that OVERFLOW_COVERAGE_DEPTH).
-// Records (16 B, CoverageFragment) in chunks of 64 in a StructuredBuffer<uint4> (one record per element): the tile's
-// i-th fragment is element (chunk index) * 64 + i % 64 of its chunk i / 64. Records of a tile are in append order (not sorted); the same
-// vis id may appear twice in one pixel (a primitive the hardware clipped is shaded once per piece along the cuts, with
-// identical values): readers sort by (pixel, depth, vis id) and keep one of equal neighbours. A chunk slot of 0 below
-// the tile's count means the pool ran out (Stats::overflow bit OVERFLOW_COVERAGE, a gate failure).
+// Records (16 B, CoverageFragment) in a StructuredBuffer<uint4> (ViewResources::coverageRecords). Every listed tile's
+// records are one contiguous range, pixel-major inside it: listed tile j (list order) holds the elements
+// [recordBase, recordBase + records), its pixel p (x + 8 y) the elements [recordBase + start(p), recordBase + start(p + 1))
+// with start(p) = word j * 64 + p of ViewResources::coverageTilePixels and start(64) = records. The order of a pixel's
+// records is not defined. The same vis id may appear twice in one pixel (a primitive the hardware clipped is shaded once
+// per piece along the cuts, with identical values): readers sort by (depth, vis id) and keep one of equal neighbours.
 // A record is opaque for the view unless its material is glass or water (alpha-tested records: their mask is the one
 // after the test); a see-through record has the sign bit of its depth word set (depth is never negative).
+// Per 8 x 8 pixel tile (tile = tx + ty * tilesX, tilesX = ceil(width / 8)), header (8 words): records, record base,
+//   listed index + 1 (0: no records this frame), the 64-bit opaqueCovered mask (pixel p: the union of the masks of the
+//   pixel's opaque records is full and the band A surface lies behind the farthest of those records, so that surface has
+//   weight zero under the composite's mask-union occlusion; COVERAGE_REDESIGN 4.6), V-internal words 5..7. Words 1 and
+//   5..7 of a tile without records are undefined.
 // Tile list (raw buffer), header words:
-//   0..2 DispatchIndirect args over the listed tiles (one group per tile; x up to 65535, then y), 3 tile count,
-//   4 fragments appended, 5 chunks allocated, 6 chunk table slots per tile, 7 tiles per row,
-//   8..10 DispatchIndirect args over the heavy tiles (one group per tile), 11 heavy tile count, 12 heavy threshold (a
-//   heavy tile holds more fragments than this: M's block sort), 13 first word of the heavy tile list, 14..15 spare;
-//   words 16.. the tile indices of tiles with fragments, words [word 13] .. the heavy tiles' indices (a subset).
+//   0..2 DispatchIndirect args over the listed tiles (one group per tile; x up to 65535, then y), 3 listed tiles,
+//   4 records stored, 5 blocks (a tile's records in blocks of COV_BLOCK, the last one partial), 6 record capacity,
+//   7 tiles per row, 8..10 DispatchIndirect args over the blocks (one group per block), 11..15 V internal;
+//   words 16 + 4 j: listed tile j = { tile, records, record base, block base } (block base: the tile's first block, an
+//   exclusive prefix over the list, like the record base).
+// Per-pixel depth range (ViewResources::coverageDepthRange, Texture2D<uint2> R32G32_UINT): x = the nearest record's depth
+// bits (max), y = the farthest (min), see-through records included, flag cleared; (0, 0xFFFFFFFF) = no record.
+// Fewer records stored than fragments appended means the pool ran out (Stats::overflow bit OVERFLOW_COVERAGE, a gate
+// failure; the pool grows from the next completed frame).
+//
+// Every V pass over the layer does a fixed amount of work per group (COV_BLOCK records, one tile's 64 pixels, or one list
+// scan of at most ceil(tiles / 1024) tiles per thread), with as many groups as the data needs (INTERFACES 3.6): no tile
+// or pixel depth makes one group's work grow.
 #ifndef UNX_COVERAGE_TILES_HLSLI
 #define UNX_COVERAGE_TILES_HLSLI
 
 #define COV_TILE_PX 8u
-#define COV_CHUNK_RECORDS 64u
-#define COV_CHUNK_BYTES 1024u
 #define COV_TILE_PIXELS 64u
+#define COV_BLOCK 1024u             // records per block (V's block pass; M's block stages)
 #define COV_MASK_FULL 0xFFFFFFFFu
 #define COV_DEPTH_SEE_THROUGH 0x80000000u  // record depth word: the material is not opaque for the view
-#define COV_EXT_DIRECT 254u        // root words holding chunks directly (254: 2-level subtree, 255: 3-level subtree)
-#define COV_EXT_SPAN2 65536u
-#define COV_EXT_SPAN3 16777216u
-#define COV_TILE_WORDS 8u         // header words per tile
-#define COV_TILE_COUNT 0u         // fragments of the tile
-#define COV_TILE_ZNEAR 1u         // nearest depth (float bits; 0 = none)
-#define COV_TILE_ZFAR 2u          // farthest depth (float bits; 0xFFFFFFFF = none)
-#define COV_TILE_OPAQUE_LO 3u     // opaqueCovered pixels 0..31
-#define COV_TILE_OPAQUE_HI 4u     // opaqueCovered pixels 32..63
-#define COV_TILE_EXT 5u           // extension tree root (chunk index + 1; 0 = none)
-#define COV_LIST_ARGS 0u          // tile list header
+#define COV_TILE_WORDS 8u           // header words per tile
+#define COV_TILE_COUNT 0u           // records of the tile
+#define COV_TILE_BASE 1u            // element of its record 0
+#define COV_TILE_LISTED 2u          // listed index + 1 (0: not listed)
+#define COV_TILE_OPAQUE_LO 3u       // opaqueCovered pixels 0..31
+#define COV_TILE_OPAQUE_HI 4u       // opaqueCovered pixels 32..63
+#define COV_LIST_ARGS 0u            // tile list header
 #define COV_LIST_COUNT 3u
-#define COV_LIST_FRAGMENTS 4u
-#define COV_LIST_CHUNKS 5u
-#define COV_LIST_TABLE_SLOTS 6u
+#define COV_LIST_RECORDS 4u
+#define COV_LIST_BLOCKS 5u
+#define COV_LIST_POOL 6u
 #define COV_LIST_TILES_X 7u
-#define COV_LIST_HEAVY_ARGS 8u
-#define COV_LIST_HEAVY_COUNT 11u
-#define COV_LIST_HEAVY_MIN 12u
-#define COV_LIST_HEAVY_START 13u
-#define COV_LIST_TILES 16u        // first tile index
+#define COV_LIST_BLOCK_ARGS 8u
+#define COV_LIST_INFO 16u           // listed tile j: words 16 + 4 j .. 16 + 4 j + 3
 
 struct CoverageFragment  // 16 B
 {
@@ -105,39 +96,38 @@ CoverageFragment coverageUnpackRecord(uint4 v)
     return f;
 }
 
-// Readers (after V's passes): word w of the extension table in chunk t (index + 1).
-uint coverageExtWord(StructuredBuffer<uint4> records, uint t, uint w) { return records[(t - 1) * COV_CHUNK_RECORDS + w / 4][w % 4]; }
+// Readers: listed tile j = { tile, records, record base, block base }.
+uint4 coverageTileInfo(ByteAddressBuffer list, uint j) { return list.Load4(4 * (COV_LIST_INFO + 4 * j)); }
 
-// Extension ordinal e (ordinal - tableSlots) -> the root word to start from (e itself when direct) and the digits below
-// it (0 = the root word is the chunk; 2 or 3 = subtree digits of e, most significant first). Returns false past the tree.
-bool coverageExtPath(inout uint e, out uint rootWord, out uint digits)
+// Readers: the first record of pixel p (0..64; 64 = the tile's end) of listed tile j, relative to its record base.
+uint coveragePixelStart(ByteAddressBuffer tilePixels, uint4 info, uint j, uint p)
 {
-    rootWord = e;
-    digits = 0;
-    if (e < COV_EXT_DIRECT) return true;
-    e -= COV_EXT_DIRECT;
-    rootWord = COV_EXT_DIRECT;
-    digits = 2;
-    if (e < COV_EXT_SPAN2) return true;
-    e -= COV_EXT_SPAN2;
-    rootWord = COV_EXT_DIRECT + 1;
-    digits = 3;
-    return e < COV_EXT_SPAN3;
+    return p < COV_TILE_PIXELS ? tilePixels.Load(4 * (j * COV_TILE_PIXELS + p)) : info.y;
 }
 
-// Readers: the tile's ordinal-th chunk (index + 1; 0 = none). 'ext' is header word COV_TILE_EXT.
-uint coverageChunkOf(ByteAddressBuffer table, StructuredBuffer<uint4> records, uint tableSlots, uint tile, uint ext, uint ordinal)
+// Readers: the listed tile holding block b (the last with block base <= b), by binary search over the list (at most
+// log2(listed) + 1 steps; the loop is bounded by 32).
+uint coverageBlockTile(ByteAddressBuffer list, uint b)
 {
-    if (ordinal < tableSlots) return table.Load(4 * (tile * tableSlots + ordinal));
-    uint e = ordinal - tableSlots, rootWord, digits;
-    if (ext == 0 || !coverageExtPath(e, rootWord, digits)) return 0;
-    uint t = coverageExtWord(records, ext, rootWord);
-    [unroll] for (uint k = 3; k > 0; --k)
-        if (k <= digits && t != 0) t = coverageExtWord(records, t, (e >> (8 * (k - 1))) & 0xFFu);
-    return t;
+    uint lo = 0, hi = list.Load(4 * COV_LIST_COUNT);
+    for (uint step = 0; step < 32 && hi - lo > 1; ++step)
+    {
+        const uint mid = (lo + hi) / 2;
+        if (list.Load(4 * (COV_LIST_INFO + 4 * mid + 3)) <= b) lo = mid;
+        else hi = mid;
+    }
+    return lo;
 }
 
-// Readers: record i of a tile whose i / 64-th chunk is 'chunk' (non-zero).
+CoverageFragment coverageLoadRecord(StructuredBuffer<uint4> records, uint element) { return coverageUnpackRecord(records[element]); }
+
+// ---- v1.40 tile-chunk names, kept only until M's composite moves to the ranges (INTERFACES 12, v1.41). They compile but
+// ---- do not read the v1.41 layout: ViewResources::coverageChunkTable is invalid, which turns the v1.40 readers off.
+#define COV_CHUNK_RECORDS 64u
+#define COV_TILE_EXT 5u
+#define COV_LIST_TABLE_SLOTS 6u
+#define COV_LIST_TILES 16u
+uint coverageChunkOf(ByteAddressBuffer table, StructuredBuffer<uint4> records, uint tableSlots, uint tile, uint ext, uint ordinal) { return 0; }
 CoverageFragment coverageLoadRecord(StructuredBuffer<uint4> records, uint chunk, uint i)
 {
     return coverageUnpackRecord(records[(chunk - 1) * COV_CHUNK_RECORDS + i % COV_CHUNK_RECORDS]);

@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.40, 2026-09-26)
+# UnravelNext 인터페이스 (v1.41, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -127,6 +127,16 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
   - 명령에는 `UNX_GPU_CONTENTION` = 매초 갱신되는 요약 파일(`.gpulock/contention.<래퍼 pid>.json`, 줄마다 `{"t_ms": unix ms, "pid", "ms_per_s", "name"}`)이 주어진다. `Harness::run`은 측정 창 안의 샘플을 결과 JSON `gpu_contention`에 넣고, 그 초에 제출된 프레임을 `contended_frames`로 세며, 나머지 프레임의 `gpu_frame_ms_uncontended`를 낸다. 요약에도 `GPU CONTENDED` 줄이 붙는다. 하네스를 쓰지 않는 측정(I의 Player JSON 등)도 같은 파일을 읽으면 된다.
   - 샘플 비용은 래퍼 프로세스의 CPU 1~2 ms/s다. GPU 작업은 없다.
   - [실측] 자체 시험(별도 뮤텍스 사본, 진짜 잠금 안): 단독 실행은 contended 0 s, 중앙값 0.266 ms. 같은 게이트를 잡 밖에서 돌리는 경합자를 붙이면 중앙값 0.861 ms, JSON contended 15 s, release 줄에 경합자(29 s, peak 761 ms/s)가 나왔다. 같은 실행 중 다른 세션의 잠금 없는 FX 테스트(`unx_test_fx_particletests`, 2 s)도 잡혔다.
+- (v1.41) **경합 판정 대상, CPU 경합, 대기자, HOLD**(FX 신고·조율 결정·C 조각 요청):
+  - GPU는 **하드웨어 어댑터의 엔진만** 센다(DXGI 소프트웨어 플래그가 없는 어댑터, 카운터 인스턴스 이름의 LUID로 대조). 이유: WARP(Basic Render Driver)의 가상 엔진이 WARP 스레드가 도는 동안 1000 ms/s로 읽혔다.
+  - **우리 프로세스만 경합이다**: 저장소 산출물·도구(이미지 경로가 Unravel* 체크아웃이나 Claude 스크래치 폴더 아래, 또는 이름이 unx*·pd_*·DesignBench*·GpuPathTracer*), Unity와 그 작업자, 도구 사슬(cl, link, ninja, cmake, dxc). 그 밖(브라우저, 채팅, 런처, 오버레이, Claude 앱)은 사용자 측정 환경의 일부라 판정에 넣지 않는다. 200 ms/s를 넘는 시간이 5 s를 넘을 때만 release 줄에 `background: ...`로 적는다.
+  - **CPU 경합**: 같은 1초 샘플에서 트리 밖 우리 프로세스의 CPU 시간(user + kernel, `NtQuerySystemInformation` 한 번) 합이 4코어 이상이면 그 초는 `cpu-contended`다. release 줄 `cpu-contended: N s >= 4 cores, peak P cores; top: 이름 (pid) C core-s`, 요약 파일 `cpu_contended_seconds`·`cpu_over`(줄마다 `{"cpu_t_ms", "cores", "top"}`; 하네스의 `t_ms` 샘플과 섞이지 않는다). 이유: WARP 실행·빌드가 CPU 틱 측정(애니메이션, World, 물리)을 흐린다. 배경 프로세스가 4코어를 5 s 넘게 쓰면 `background: cpu ...`로 적는다.
+  - 구간 끝의 짧은 샘플(명령 종료로 잘린 반 구간 미만)은 합계에만 넣고 판정하지 않는다(스케줄러 틱 단위 계측이 짧은 구간에서 가짜 최고값을 만든다).
+  - **대기자 표시**: 기다리는 쪽은 첫 대기 전에 `.gpulock/waiting/<pid>.json`(`{track, kind, pid, since, command}`, tmp 뒤 `MoveFileEx` 교체)을 쓰고, 얻거나 포기하면 지운다. 죽은 pid의 파일은 보는 쪽이 지운다.
+  - **correctness 양보**: kind = correctness인 획득은 살아 있는 timing 대기자가 있으면 250 ms마다 다시 보며 기다린다. 뮤텍스를 얻은 직후에도 한 번 더 보고, 그 사이 timing 대기자나 HOLD가 생겼으면 다시 놓는다. timing끼리는 뮤텍스 순서를 따른다.
+  - **HOLD**: `.gpulock/HOLD`가 있으면 아무도 새로 얻지 않는다(사용자가 게임할 때 두는 표지, 내용 = 사유; 조율 규칙).
+  - **프로세스 안 조각**(C의 GPU 기준 경로추적기 등 수 분짜리 correctness 작업): 같은 규약(뮤텍스 이름, current.json 원자 교체, history 줄, 대기자·양보·HOLD)을 프로세스 안에서 조각마다 따른다. history 줄은 `acquire C (correctness) :: slice k/N <what>` / `release C (correctness) exit 0 slice k/N <ms> ms`, 조각이 15 s를 넘으면 `LONG_SLICE`. core가 C++ API(`GpuLock.h`의 `GpuLockSlice`)를 낸다. 그 전까지는 C의 임시 구현이 같은 규약을 따른다.
+  - [실측] 자체 시험(작업 트리 사본, 진짜 뮤텍스): HOLD가 있으면 얻지 않고 사유를 알린다. 살아 있는 가짜 timing 대기자가 있으면 correctness가 양보한다. 그 프로세스가 끝나면 파일이 지워지고 곧 얻는다.
 - 사용자의 다른 GPU 앱은 닫지 않는다. 측정은 4K·1440p만(하네스가 강제), 1.5초 워밍업, 중앙값·P95·P99.
 
 ### 3.4 결과·상태
@@ -235,10 +245,12 @@ void RenderGraph::addPass(std::string_view name, QueueType, SetupFn setup, Execu
 | visId | R32_UINT (7.1) | V | M, R |
 | visibleClusters | `gpu::VisibleCluster[]` | V | M, R |
 | hiz | R32_FLOAT 전 밉. 밉 k 텍셀 (i, j) = 픽셀 [i·2^(k+1), (i+1)·2^(k+1)) 블록의 가장 먼 깊이(reversed-Z 최솟값). 유효 크기 ⌈W/2^(k+1)⌉×⌈H/2^(k+1)⌉, 할당은 2의 거듭제곱(D3D 밉 크기는 내림이라 올림 체인을 담기 위함; 유효 영역 밖 텍셀은 정의되지 않음) | V | S(페이지 표시), R |
-| coverageTiles / coverageChunkTable / coverageChunks / coverageTileList | 7.1 (v1.37 타일 청크 v2, v1.38 레코드 기반 opaqueCovered) | V | M, S |
+| coverageTiles / coverageRecords / coverageTileList / coverageTilePixels / coverageDepthRange | 7.1 (v1.41 타일 구간·픽셀 순서, 깊이 구간; v1.38 레코드 기반 opaqueCovered) | V | M, S |
 | gbuffer | RG32_UINT (7.2) | M | S, R |
 | shadowVisibility | R32_UINT (7.3) | S | M |
 | shadowOverflowTiles / shadowOverflow / shadowOverflowFallbackTiles | 7.3 (v1.20; v1.22부터 평면 뷰도 그 뷰 리스트 기준) | S | M |
+| shadowFragmentVisibility / shadowFragmentSun | 7.3 (v1.41, S 요청 `20260926_S_fragment_visibility.md`) | S | M |
+| particleLayer / particleDepthRange / particleEdges / distortionLayer | FX의 `Passes/FX/ParticleLayer.hlsli` (v1.41, FX 요청 `20260926_FX_particle_render_pass.md` 8a) | FX | M |
 | froxelLights / airVolume (뷰 단위, v1.22) | 7.4, v1.15 형식 | S(메인 뷰: 코어가 FrameResources 참조를 넣음) | M |
 | screenProbes | R 내부 형식, HLSL API로 읽음(5.6) | R | M |
 | screenProbeMaps | 화면 프로브가 쓰는 캐시 항목의 K 경로 지도 아틀라스, 하드웨어 필터 가능(형식·배치는 R의 `ScreenProbes.hlsli`가 정한다; 권장: UAV R32_UINT로 쓰고 SRV R9G9B9E5_SHAREDEXP로 읽기, texel 4 B) (v1.13) | R | M(`SrvCompute`) |
@@ -432,7 +444,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 ### 7.1 vis id · depth · coverage 층 (`VisBuffer.hlsli`)
 - vis id R32_UINT = `(visibleCluster << 7 | triangle) + 1`, `VIS_NONE = 0` = 하늘(v1.5). visibleCluster는 그 뷰의 `VisibleCluster` 목록 인덱스(< 2^25 − 1). 소비자는 `packVisId`·`visVisibleCluster`·`visTriangle`·`VIS_NONE`(VisBuffer.hlsli)만 쓰고 비트 연산을 직접 하지 않는다. 0인 이유: UINT 렌더 타깃은 float 클리어 값만 받으므로 0xFFFFFFFF(float로 표현 불가, 실측으로 0이 된다)로 지울 수 없고, 지우기 패스를 따로 두면 대상 전체를 한 번 더 쓴다(4K 33 MB).
 - depth D32_FLOAT, reversed-Z, 무한 원평면.
-- coverage 층 v2(v1.37; 요청 `20260926_V_coverage_layer_v2.md`, 설계 COVERAGE_REDESIGN 4.5 채택; 배치는 `Passes/Visibility/CoverageTiles.hlsli`가 정한다). 8×8 픽셀 타일 단위이고, 타일 번호 = tx + ty·⌈W/8⌉이다.
+- coverage 층(v1.41 타일 구간; v1.37 요청 `20260926_V_coverage_layer_v2.md`의 레코드, 설계 COVERAGE_REDESIGN 4.5·4.6; 배치는 `Passes/Visibility/CoverageTiles.hlsli`가 정한다). 8×8 픽셀 타일 단위이고, 타일 번호 = tx + ty·⌈W/8⌉이다.
   - **레코드 16 B** `CoverageFragment { visId; depthBits; mask; packed }`:
     - `depthBits`는 덮인 영역 무게중심의 device depth(reversed Z, float 비트)다. 부호 비트(`COV_DEPTH_SEE_THROUGH`, depth는 음수가 아니다)는 시야에 투과인 재질(유리·물)의 표시다(v1.38). 읽기는 `coverageFragmentDepth`, `coverageFragmentOpaque`로 한다.
     - `mask`는 `coverageSample(i)` 32 부표본이다.
@@ -440,34 +452,34 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
     - 면적은 (가까운 평면으로 잘린) 다각형 ∩ 픽셀의 정확 면적이다. 알파 테스트 재질은 통과 부표본 비율을 곱한다.
     - 법선은 무게중심에서 원근 보정으로 보간한 월드 법선이다. 뒤에서 본 양면 재질은 뷰어 쪽으로 뒤집는다.
     - 대역 C 브릭 fragment는 visId의 삼각형 필드가 `0x7F`다.
-  - **청크**: 레코드는 64개씩 청크(1 KB)로 `coverageChunks`(`StructuredBuffer<uint4>` 풀, 원소 하나가 레코드 하나, v1.38)에 있다. 타일의 i번째 fragment는 청크 서수 i/64의 i%64번 레코드다.
-    - 서수 < N이면 청크 번호 + 1은 `coverageChunkTable`의 타일 칸에 있다(N = `visibility.coverage_table_slots`, 기본 32, 목록 머리 워드 6).
-    - 그 뒤 서수(e = 서수 − N)는 타일 머리 워드 5를 뿌리로 하는 확장 트리에 있다(v1.39; v1.37~38의 사슬을 대신한다). 노드는 풀의 청크 하나를 256 워드로 쓴다(워드 w = 원소 w/4의 성분 w%4, 값 = 청크 번호 + 1, 0 = 없음).
-      - 뿌리의 워드 0..253은 e < 254의 청크를 직접 담는다.
-      - 워드 254는 2단 하위 트리(다음 65,536 서수, e의 256진 두 자리)를, 워드 255는 3단 하위 트리(다음 16,777,216)를 가리킨다.
-      - 조회는 깊이와 상관없이 노드 4개 이하다. 타일당 N + 16.8 M 청크(10^9 fragment)까지 담고, 넘으면 `Stats::overflow` 0x200이다.
-      - 이유: 사슬 걷기는 서수에 비례해서, 수백만 fragment 타일(forest_combat edge의 지평선)에서 조회 비용이 제곱이 되어 GPU가 멈췄다(FENCE_TIMEOUT, 조율 신고).
-    - 읽기 도우미는 `coverageChunkOf(table, records, N, tile, ext = 머리 워드 5, ordinal)`(시그니처는 v1.38과 같다), `coverageLoadRecord`, `coverageExtPath`다. 청크 번호 0(수보다 아래)은 풀이 모자랐다는 뜻이다(`Stats::overflow` 0x100).
-  - **순서와 중복**: 타일 안 레코드는 추가 순서다(V는 정렬하지 않는다). 읽는 쪽(M 합성)이 (픽셀, 깊이, visId)로 정렬한다. 하드웨어가 잘라 조각으로 래스터한 프리미티브는 같은 visId·같은 값으로 두 번 나올 수 있으니 인접 중복은 하나로 친다.
-  - **타일 머리 8 워드**(`coverageTiles`):
-    - 0 = fragment 수.
-    - 1 = zNear(가장 가까운 depth 비트, 원자 max). 2 = zFar(가장 먼 것, 원자 min; 없으면 0xFFFFFFFF).
-    - 3·4 = opaqueCovered 64 bit(v1.38, 설계 COVERAGE_REDESIGN 4.6 합집합 규칙): 그 픽셀 불투명 레코드 마스크의 합집합이 가득이고, 대역 A 표면이 그 레코드들 중 가장 먼 깊이보다 뒤인 픽셀이다(하늘 포함). 그 대역 A 표면은 합성의 마스크 합집합 가림에서 가중치가 0이다.
+  - **타일 구간(v1.41)**: `coverageRecords`(`StructuredBuffer<uint4>`, 원소 하나가 레코드 하나)에서 목록 타일마다 레코드가 **한 구간으로 이어져 있고, 구간 안은 픽셀 순서(pixel-major)**다.
+    - 목록 타일 j(목록 순서)는 원소 [recordBase, recordBase + records)를 가진다. 그 픽셀 p(x + 8y)의 레코드는 [recordBase + start(p), recordBase + start(p + 1))이다. start(p) = `coverageTilePixels` 워드 j·64 + p, start(64) = records다.
+    - 한 픽셀 안의 레코드 순서는 정해져 있지 않다. 읽는 쪽이 (깊이, visId)로 정렬한다. 하드웨어가 잘라 조각으로 래스터한 프리미티브는 같은 visId·같은 값으로 두 번 나올 수 있으니 인접 중복은 하나로 친다.
+    - 읽기 도우미: `coverageTileInfo(list, j)`, `coveragePixelStart(tilePixels, info, j, p)`, `coverageBlockTile(list, b)`(블록 b를 가진 목록 타일, 이분 탐색 ≤ 32단계), `coverageLoadRecord(records, element)`.
+    - **왜 바꿨나(v1.40 → v1.41)**: v1.37~1.40은 타일 청크(CAS로 풀에서 받음) + 확장 트리였다. 깊은 타일 성장 곡선 [실측, 4K, 한 타일에 fragment 10 k~300 k]에서 타일 패스는 선형이었지만, 타일당 그룹 하나가 레코드를 다 걸어 300 k에 2.05 ms였다(풀 최대면 ≈ 0.9 s, 3.6 최악 dispatch 규칙 위반). CAS에 진 헛 청크도 81 %였다.
+  - **만드는 과정**(모든 패스가 그룹당 일정한 일, 그룹 수는 데이터 비례; `CoverageLayer.hlsli`):
+    1. 래스터 픽셀 커널이 웨이브당 전역 원자 1회로 스트림에 레코드(16 B)와 키(타일 × 64 + 픽셀, 4 B)를 붙인다. 타일 원자·청크·CAS는 없다.
+    2. 카운트(1,024 원소/그룹): 키마다, 타일마다 `WaveMatch`로 모은 웨이브의 원자 1회. 타일의 첫 레코드가 타일을 목록에 올린다.
+    3. 스캔(그룹 하나 × 1,024 스레드, 스레드마다 ⌈타일 수 / 1,024⌉ 이하의 목록 타일): 목록 순서의 레코드·블록 기저(배타 접두합).
+    4. 오프셋(목록 타일당 그룹 1개): 64 폭 접두합으로 픽셀 시작, 픽셀 카운터 = 픽셀 끝(절대).
+    5. 흩뿌리기(1,024 원소/그룹): 키마다 웨이브의 감소 원자 1회로 레코드를 자기 픽셀 구간에 넣는다.
+    6. 블록(1,024 레코드/그룹): 픽셀별 불투명 마스크 합집합·가장 먼 불투명 깊이·가장 가까운/먼 깊이. 블록 하나인 타일은 여기서 끝낸다. 여러 블록 타일은 scratch 슬롯에 원자로 모으고 마무리 패스(타일당 그룹 1개)가 끝낸다.
+  - **타일 머리 8 워드**(`coverageTiles`): 0 = 레코드 수, 1 = record base, 2 = 목록 번호 + 1(0 = 이번 프레임 목록에 없음), 3·4 = opaqueCovered 64 bit, 5..7 = V 내부. 목록에 없는 타일의 워드 1·5..7은 정의되지 않는다.
+    - opaqueCovered(v1.38, 설계 4.6 합집합 규칙): 그 픽셀 불투명 레코드 마스크의 합집합이 가득이고, 대역 A 표면이 그 레코드들 중 가장 먼 깊이보다 뒤인 픽셀이다(하늘 포함). 그 대역 A 표면은 합성의 마스크 합집합 가림에서 가중치가 0이다.
       - 불투명 = 유리·물이 아닌 재질이다. 알파 테스트 재질은 테스트 뒤 마스크로 기여하고, 투과 잎도 시야 가림에는 불투명이다.
-      - 래스터 뒤 타일 패스(타일당 그룹 1개)가 레코드에서 만든다(픽셀별 groupshared OR·min). fragment마다 원자로 하는 판은 설계 개정의 DesignBench 실측에서 +0.11~+0.17 ns/fragment라 기각했다.
+      - 블록 패스가 레코드에서 만든다(픽셀별 groupshared OR·min). fragment마다 원자로 하는 판은 DesignBench 실측에서 +0.11~+0.17 ns/fragment라 기각했다.
       - 래스터는 그 뒤 fragment를 버리지 않는다. 뒤 fragment 컷은 합성이 자기 정렬에서 한다.
-    - 5 = 확장 트리 뿌리. 6·7 = 예비(0).
-  - **`coverageTileList`**(raw) 머리:
-    - 0..2 = fragment가 있는 타일 위 DispatchIndirect 인자(타일당 그룹 1개, x ≤ 65535 다음 y). 3 = 타일 수. 4 = fragment 수. 5 = 청크 수. 6 = N. 7 = 타일 열 수.
-    - 8..10 = 무거운 타일 위 인자(타일당 그룹 1개). 11 = 무거운 타일 수. 12 = 무거운 문턱(`visibility.coverage_heavy_tile_fragments`, 기본 1,024: fragment 수가 이보다 많은 타일). 13 = 무거운 타일 목록의 시작 워드.
-    - 16.. = 타일 번호. [워드 13].. = 무거운 타일 번호(앞 목록의 부분집합).
-    - M은 두 목록 위에서 ExecuteIndirect로 돈다(바이트 오프셋 0과 32). 무거운 타일은 블록 정렬 + k-way 병합으로 처리한다(설계 4.5 (b)).
-  - **풀 크기**: 직전 완료 프레임의 필요량 × 1.5를 16 MB 단위로 쓴다. 늘릴 때는 바로 늘리고, 필요량이 반 아래일 때만 줄인다.
-    - 하한은 `visibility.coverage_pool_min_fragments_per_pixel` × 픽셀이다(1.0: 4K 8.3 M 레코드, 133 MB).
-    - 상한은 구조 버퍼 뷰의 2^27 원소(2 GB = 134 M fragment)다.
-    - 필요량이 풀을 넘으면 그 프레임의 fragment가 빠지고 `Stats::overflow` 0x100(게이트 실패)이 선다. fragment를 버리는 경로는 이것뿐이다.
+  - **`coverageTileList`**(raw) 머리: 0..2 = 목록 타일 위 DispatchIndirect 인자(타일당 그룹 1개, x ≤ 65535 다음 y), 3 = 목록 타일 수, 4 = 저장한 레코드 수, 5 = 블록 수(타일마다 `COV_BLOCK` = 1,024 레코드씩, 마지막은 부분), 6 = 레코드 용량, 7 = 타일 열 수, 8..10 = 블록 위 인자(블록당 그룹 1개), 11..15 = V 내부. 워드 16 + 4j = 목록 타일 j의 `{ tile, records, record base, block base }`(block base도 목록 순서 배타 접두합).
+  - **`coverageDepthRange`**(R32G32_UINT, 픽셀당; S 요청 `20260926_S_fragment_visibility.md`): x = 그 픽셀 레코드 중 가장 가까운 깊이 비트(max), y = 가장 먼 것(min). 투과 레코드도 넣고 표시 비트는 지운다. 레코드가 없으면 (0, 0xFFFFFFFF)다. 블록 패스(또는 여러 블록 타일의 마무리 패스)가 쓰고, 지난 프레임 타일은 지우기 패스가 되돌린다.
+  - **용량**: 직전 완료 프레임에 붙인 fragment 수(필요량) × 1.5를 64 K 레코드 단위로 쓴다(프레임의 V 패스 앞에서 읽는다). 늘릴 때는 바로 늘리고, 반 아래일 때만 줄인다.
+    - 하한은 `visibility.coverage_pool_min_fragments_per_pixel` × 픽셀이다(1.0: 4K 8.3 M 레코드).
+    - 상한은 구조 버퍼 뷰의 2^27 원소(134 M 레코드)다.
+    - 메모리: 용량 C 레코드당 37 B(스트림 20 + 구간 16 + scratch ≈ 1; 스트림은 흩뿌리기 뒤 풀린다) + 해상도 고정분(4K: 픽셀 카운터 33.2 MB + 타일 머리 4.1 + 목록 2.1 + 픽셀 시작 33.2 + 깊이 구간 66.4 = 139 MB).
+    - 필요량이 용량을 넘으면 그 프레임의 fragment가 빠지고 `Stats::overflow` 0x100(게이트 실패)이 선다. fragment를 버리는 경로는 이것뿐이다. 저장된 부분은 일관된다(목록·구간·깊이 구간이 저장 레코드와 맞는다).
+    - 일관성 검사(키가 뷰 밖, 타일 수 > 용량, 픽셀 접두합 ≠ 타일 레코드 수, 흩뿌리기 대상이 용량 밖)는 결함이고 `Stats::overflow` 0x400이다.
   - **켜기**: `visibility.coverage_layer`(기본 false). M 합성이 이 층을 읽게 되면 켠다. 평면 반사 뷰는 아직 vis buffer로 그린다.
-  - v1.25 형식(`coverageHeads/coverageFragments/coveragePixels`, overflow 0x200)은 폐기했다. 키 `max_coverage_fragments`는 읽지 않는다. v1.37 이전에 빌드한 바이너리가 시작되도록 설정 파일에만 남겨 두고, 다음 통합 재빌드 뒤 지운다.
+  - v1.25 형식(`coverageHeads/coverageFragments/coveragePixels`, overflow 0x200)과 v1.37~1.40 타일 청크(`coverageChunkTable`, 확장 트리, overflow 0x200)는 폐기했다. 키 `max_coverage_fragments`, `coverage_table_slots`, `coverage_heavy_tile_fragments`는 읽지 않는다. 이전 바이너리가 시작되도록 설정 파일에만 남겨 두고, 다음 통합 재빌드 뒤 지운다.
+  - **전환 기간(v1.41, M 합성이 구간을 읽을 때까지)**: `ViewResources::coverageChunkTable`은 늘 무효라 v1.40 판독기가 꺼진다. `coverageChunks` = `coverageRecords`다. `CoverageTiles.hlsli`의 v1.40 이름(`coverageChunkOf` 등)은 컴파일만 되고 층을 읽지 않는다. M 전환 커밋 뒤 셋 다 지운다.
 
 ### 7.2 G-buffer (`GBuffer.hlsli`) — RG32_UINT 8 B
 `.x` 월드 셰이딩 법선(팔면체 snorm16×2), `.y` baseColor sRGB8×3 | 지각 거칠기 unorm8(상위 8 bit). metallic·specular·클래스·플래그는 재질 테이블(vis id → 클러스터 → 재질). 픽셀별 metallic/occlusion 맵은 M의 셰이딩 커널이 vis id로 다시 평가한다.
@@ -484,6 +496,12 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - 할당: 블록은 타일당 원자 가산 1회다. 같은 프레임 안에서 정확하고, 블록 위치만 비결정적이다. 용량은 S가 직전 필요량으로 관리한다.
 - 넘친 타일은 `shadowOverflowFallbackTiles`(raw: 워드 0 = 개수, 워드 1..3 = DispatchIndirect 인자(개수, 1, 1), 워드 4.. = 타일 `y << 16 | x`)에 오른다. M 주 셰이딩 커널은 넘친 타일을 건너뛴다. M fallback 커널이 이 목록 위에서(바이트 오프셋 4의 인자) 슬롯 밖 광원을 `shadowVisibilityDirect`로 VSM에서 직접 탭한다. 결과는 정확하다.
 - S는 overage(넘친 타일 수·픽셀 수)를 통계로 낸다. 게이트는 0을 요구한다.
+- **coverage fragment 가시성(v1.41, S 요청 `20260926_S_fragment_visibility.md`)**: coverage 층 픽셀의 fragment용이다.
+  - `shadowFragmentVisibility`(`StructuredBuffer<uint3>`, 픽셀당 12 B, 색인 y × width + x). `coverageDepthRange`에 레코드가 있는 픽셀만 유효하다.
+    - `.x` = 선분 z_near → z_far(뷰 광선 위, 픽셀 중심)의 4점 z_k = z_near + (z_far − z_near)·k/3에서의 태양 가시성, unorm8 바이트 k. M은 fragment 깊이로 선형 보간한다(선형 뷰 깊이 기준).
+    - `.y` = z_near에서 잰 국소광 슬롯 1~3(바이트 1~3, 이 절의 부호화, 255 = 슬롯 없음). 바이트 0 bit 0 = pair 플래그.
+    - `.z` = 같은 값을 z_far에서 잰 것. 바이트 0은 예비다.
+  - `shadowFragmentSun`(raw, `coverageRecords` 원소당 1 B): pair 플래그가 선 픽셀의 fragment만 유효하다. 바이트 e = 원소 e 레코드의 태양 가시성(unorm8). 플래그 없는 픽셀의 바이트는 그 프레임에 쓰이지 않으니 플래그 없이 읽지 않는다.
 
 ### 7.4 프록셀 광원 리스트 (S)
 프록셀(24 px × 64 깊이 슬라이스) 당 광원 인덱스 목록, 최대 `atmosphere.froxels.lights_max`개. 초과 시 중요도 상위 `shading.analytic_lights_max`개를 해석 평가하고 나머지는 프록셀 조도로 합친다(합친 에너지를 통계로 기록). 소비자는 `froxelLightRange/froxelLight`로만 읽는다. 리스트는 뷰 단위다(v1.22, `ViewResources::froxelLights`). 메인 뷰는 `FrameResources::froxelLights`와 같고, 평면 반사 뷰는 S `shadowVisibility`가 그 뷰 크기의 격자로 만든다. 호출자는 그 뷰의 SRV를 넘기고 그 뷰의 프레임 상수를 바인딩한다. 항목의 bit 15는 "그 광원에 S의 그림자 슬롯이 있음"이다(v1.19, `froxelLightShadowed`). `froxelLight`는 그 비트를 뺀 광원 인덱스를 돌려주고, 장면 광원 한도는 32767이다.
@@ -658,6 +676,16 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.41 (2026-09-26):
+  - **coverage 층 타일 구간(7.1, V; 설계 개정 채택, 1절 최악 dispatch 조건)**: 스트림 append → 카운트 → 스캔 → 오프셋 → 흩뿌리기로 목록 타일마다 픽셀 순서 연속 구간을 만든다. M 요청대로 픽셀 순서로 두었고, 목록 정보 `{ tile, records, record base, block base }`는 M의 A 단계와 같은 형식이다. 블록 패스와 여러 블록 타일 마무리 패스가 opaqueCovered와 S의 `coverageDepthRange`를 만든다. 청크 표·확장 트리·CAS는 없다.
+    - `ViewResources`: `coverageRecords`, `coverageTilePixels`, `coverageDepthRange` 추가. `coverageChunkTable`(늘 무효)과 `coverageChunks`(= records)는 M 전환 뒤 지운다.
+    - V 통계: `coverageBlocks`, `coverageHeavyTiles`(여러 블록 타일), `coveragePoolRecords`, `coverageMeasured`(측정 단계의 fragment). `coverageChunks`, `coverageChunksLost`, `coveragePoolChunks`는 없앴다. 측정 단계 2는 이제 "append 원자까지"다.
+    - 용량 판독을 프레임의 V 패스 앞으로 당겼다(필요량이 늘면 한 프레임 일찍 커진다).
+    - [실측] 첫 하드웨어 실행(잠금 안 correctness, `UNX_FENCE_TIMEOUT_S=10`): visibility 8/8, D3D12 디버그 층 오류 0. `coverage_layer_is_exact` 두 설정 × 4프레임:
+      - 기본: 프레임당 65,998~80,513 레코드가 전부 정확 클리핑과 일치했다(면적 최대 오차 5.3e-4 px², 법선 0.78° 이하). 가장 깊은 타일은 51,641~65,916 레코드(블록 51~65개)로 여러 블록 경로를 지났다. 목록·기저·픽셀 구간·깊이 구간이 레코드와 맞았고, 지난 프레임 타일과 깊이 구간은 모두 비워졌다.
+      - 용량 하한 0.05/px(65,536 레코드): 프레임 0~2가 가득 찼고(`Stats::overflow` 0x100), 저장된 65,536 레코드는 모두 일관됐다. 프레임 3은 131,072로 커져 빠짐이 없었다.
+  - **S·FX 필드(7.3, 표)**: `shadowFragmentVisibility`, `shadowFragmentSun`(S), `particleLayer`, `particleDepthRange`, `particleEdges`, `distortionLayer`(FX). FX 진입점 `tracks::particles`와 호출 위치는 FX 모듈의 정의가 들어온 뒤 넣는다.
+  - **GpuLock(3.3)**: 하드웨어 어댑터 LUID만, 우리 프로세스만 경합(그 밖은 `background:`), `cpu-contended`, 대기자 파일·correctness 양보·HOLD, 짧은 끝 구간은 판정 제외, 프로세스 안 조각 규약.
 - v1.40 (2026-09-26):
   - **대역을 삼각형 단위로 판정(설계 개정 14.9 교정 3, 요청 16)**: 판 모양(sheet) 클러스터 중 최소 폭이 히스테리시스 폭(`visibility.band_a_hysteresis_px`, 2.0 px) 아래인 것(대역 C·스킨·`BAND_MODE_A` 제외)은 "혼합"이다. 혼합 클러스터는 대역 A 목록과 coverage 목록(LIST_B) 둘 다에 들어가고, 목록 항목 bit 31(`LIST_ENTRY_MIXED`)이 선다. 두 메시 커널이 같은 변형 정점으로 `sheetTriangleBandB`(최소 높이 × lodScale / 무게중심 거리 × |cos|)를 계산해 삼각형 하나를 정확히 한 쪽에서만 그린다: VisRaster는 B 삼각형을, CoverageRaster는 A 삼각형을 `SV_CullPrimitive`로 버린다. 히스테리시스 (a): 지금 폭이 A 최소와 히스테리시스 폭 사이이면 이전 카메라 위치(`CullView::prevPosition`, 컷 뒤에는 현재 위치)에서 B였을 때 B로 둔다. 판이 아닌 클러스터는 클러스터 규칙에 거리 비례 히스테리시스를 더한다. `CullView` 352 B.
     - 통계: `visibility::Stats::mixedClusters`, `mixedTriangles`(상태 워드 40, 41; `VS_WORDS` 48).

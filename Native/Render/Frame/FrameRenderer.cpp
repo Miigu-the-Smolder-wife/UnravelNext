@@ -193,6 +193,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     main.airVolume = resources.aerialPerspective;
     tracks::globalIllumination(fc, main);
     tracks::reflections(fc, main);
+    tracks::particles(fc, main);
     tracks::shadowVisibility(fc, main);
     tracks::shading(fc, main);
     return main;
