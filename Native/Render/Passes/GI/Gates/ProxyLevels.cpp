@@ -261,8 +261,35 @@ int main(int argc, char** argv)
                     render::rt::ProxyPoseTerms terms;
                     render::rt::proxyPoseTerms(sk, palette, terms);
                     logf("          stored pose of skeleton %u: s %.3f, bound %.5f m;", in.skeleton, terms.s, render::rt::proxyPoseError(pc, terms));
-                    for (size_t j = 0; j < terms.alpha.size(); ++j) logf(" (j%u|r%u) a %.3f b %.3f", sk.pairs[j].first, sk.pairs[j].second, terms.alpha[j], terms.beta[j]);
                     logf("\n");
+                    // The true posed distance: skin the source and the cut with this palette (linear blend, normalised weights).
+                    std::vector<float3> posed(sm.positions.size());
+                    float3 lo = sm.positions[0], hi = sm.positions[0];
+                    for (size_t v = 0; v < sm.positions.size(); ++v)
+                    {
+                        float3 out{};
+                        const float3 p = sm.positions[v];
+                        float sum = 0;
+                        for (int k = 0; k < 4; ++k) sum += sm.skin.weights[4 * v + k];
+                        for (int k = 0; k < 4; ++k)
+                        {
+                            const float w = sum > 0 ? sm.skin.weights[4 * v + k] / sum : 0;
+                            const uint32_t j = sm.skin.joints[4 * v + k];
+                            if (w <= 0 || 3 * j + 2 >= palette.size()) continue;
+                            const float4 a = palette[3 * j], b = palette[3 * j + 1], c = palette[3 * j + 2];
+                            out = out + float3{ a.x * p.x + a.y * p.y + a.z * p.z + a.w, b.x * p.x + b.y * p.y + b.z * p.z + b.w, c.x * p.x + c.y * p.y + c.z * p.z + c.w } * w;
+                        }
+                        posed[v] = out;
+                        lo = { std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z) };
+                        hi = { std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z) };
+                    }
+                    std::vector<Tri> posedSource, posedCut;
+                    for (size_t t = 0; t + 2 < sm.indices.size(); t += 3) posedSource.push_back({ posed[sm.indices[t]], posed[sm.indices[t + 1]], posed[sm.indices[t + 2]] });
+                    for (size_t t = 0; t + 2 < cutIndices.size(); t += 3) posedCut.push_back({ posed[cutIndices[t]], posed[cutIndices[t + 1]], posed[cutIndices[t + 2]] });
+                    const Stats plost = distances(samplePoints(posedSource, 20000, 3), TriangleGrid(posedCut)),
+                                padded = distances(samplePoints(posedCut, 20000, 4), TriangleGrid(posedSource));
+                    logf("          stored pose measured: source -> cut max %.5f, cut -> source max %.5f m (bind-pose mesh extent %.3f x %.3f x %.3f m)\n", plost.max,
+                         padded.max, hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
                     break;  // one instance per mesh
                 }
             }
