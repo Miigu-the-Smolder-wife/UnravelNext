@@ -642,20 +642,32 @@ int main(int argc, char** argv)
                 {
                     const uint32_t tile = list[16 + k], n = p[8 * tile];
                     for (auto& v : byPixel) v.clear();
-                    uint32_t ext = p[8 * tile + 5], e = 0;
-                    for (uint32_t c = 0; c * 64 < n; ++c)
+                    for (uint32_t c = 0; c * 64 < n && c < poolChunks; ++c)
                     {
                         uint32_t chunk = 0;
                         if (c < slots) chunk = table[(size_t)tile * slots + c];
                         else
                         {
-                            if (e == 255)
+                            // Extension tree (CoverageTiles.hlsli): root words 0..253 direct, 254 a 2-level subtree, 255 a
+                            // 3-level subtree.
+                            uint64_t e = c - slots;
+                            uint32_t rootWord = (uint32_t)e, digits = 0;
+                            if (e >= 254)
                             {
-                                ext = ext && ext <= poolChunks ? records[(size_t)(ext - 1) * 256 + 255] : 0;
-                                e = 0;
+                                e -= 254;
+                                rootWord = 254;
+                                digits = 2;
+                                if (e >= 65536)
+                                {
+                                    e -= 65536;
+                                    rootWord = 255;
+                                    digits = 3;
+                                }
                             }
-                            chunk = ext && ext <= poolChunks ? records[(size_t)(ext - 1) * 256 + e] : 0;
-                            ++e;
+                            chunk = p[8 * tile + 5];
+                            if (chunk != 0 && chunk <= poolChunks) chunk = records[(size_t)(chunk - 1) * 256 + rootWord];
+                            for (uint32_t digit = digits; digit > 0 && chunk != 0 && chunk <= poolChunks; --digit)
+                                chunk = records[(size_t)(chunk - 1) * 256 + ((e >> (8 * (digit - 1))) & 0xFF)];
                         }
                         if (chunk == 0 || chunk > poolChunks) continue;
                         for (uint32_t ri = 0; ri < 64 && c * 64 + ri < n; ++ri)

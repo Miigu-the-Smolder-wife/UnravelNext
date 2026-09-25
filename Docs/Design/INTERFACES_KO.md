@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.38, 2026-09-26)
+# UnravelNext 인터페이스 (v1.39, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -119,6 +119,13 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
   - `Throw`: 같은 줄을 로그에 남기고, 장치를 제거와 같이 잃은 것으로 친다(`deviceWasRemoved()`가 true, 이후 대기는 곧바로 돌아온다). 대기는 던지지 않고 돌아온다. 호스트는 `deviceWasRemoved()`를 보고 오류를 돌려준다.
   - 상한에서 장치가 제거된 것으로 확인되면(펜스 UINT64_MAX 또는 `GetDeviceRemovedReason` 실패) 시간 초과가 아니라 제거(87)로 보고한다.
   - 호스트 펜스를 직접 기다리는 코드(I: `HostBoundary.cpp`, `UnityPlugin.cpp`)도 `waitFenceCpu`를 쓰면 같은 규칙을 따른다.
+- (v1.39, 조율 요청) **경합 검출**: 정확성 실행은 잠금 없이 돌므로(사용자 결정), timing 값이 다른 GPU 작업과 겹쳤는지를 GpuLock.ps1이 잰다.
+  - 명령이 도는 동안 래퍼 안의 스레드가 1초마다 PDH `\GPU Engine(*)\Running Time`(작업 관리자와 같은 출처, D3DKMT 통계)을 읽는다. 대상은 3D·compute·copy 엔진이고, 명령의 Job 트리 밖 프로세스마다 가장 바쁜 엔진의 바쁜 시간(ms/s, 구간 길이로 상한)을 센다.
+  - 50 ms/s 이상(GPU 엔진의 5 %)이면 그 초는 **contended**다. [실측] 배경 UI(브라우저 웹뷰, 런처, Claude 앱)는 6~22 ms/s였다. pid 4(System, 측정 프로세스가 일으키는 레지던시 페이징)는 판정에서 뺀다.
+  - release 줄: `contended: <이름> (pid) N s >= 50 ms/s, peak P ms/s; ...`.
+  - 명령에는 `UNX_GPU_CONTENTION` = 매초 갱신되는 요약 파일(`.gpulock/contention.<래퍼 pid>.json`, 줄마다 `{"t_ms": unix ms, "pid", "ms_per_s", "name"}`)이 주어진다. `Harness::run`은 측정 창 안의 샘플을 결과 JSON `gpu_contention`에 넣고, 그 초에 제출된 프레임을 `contended_frames`로 세며, 나머지 프레임의 `gpu_frame_ms_uncontended`를 낸다. 요약에도 `GPU CONTENDED` 줄이 붙는다. 하네스를 쓰지 않는 측정(I의 Player JSON 등)도 같은 파일을 읽으면 된다.
+  - 샘플 비용은 래퍼 프로세스의 CPU 1~2 ms/s다. GPU 작업은 없다.
+  - [실측] 자체 시험(별도 뮤텍스 사본, 진짜 잠금 안): 단독 실행은 contended 0 s, 중앙값 0.266 ms. 같은 게이트를 잡 밖에서 돌리는 경합자를 붙이면 중앙값 0.861 ms, JSON contended 15 s, release 줄에 경합자(29 s, peak 761 ms/s)가 나왔다. 같은 실행 중 다른 세션의 잠금 없는 FX 테스트(`unx_test_fx_particletests`, 2 s)도 잡혔다.
 - 사용자의 다른 GPU 앱은 닫지 않는다. 측정은 4K·1440p만(하네스가 강제), 1.5초 워밍업, 중앙값·P95·P99.
 
 ### 3.4 결과·상태
@@ -135,6 +142,12 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
 - 실행: 작업 디렉터리는 본 저장소로 두고 실행 파일은 게이트 worktree에서 부른다. 예: `powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- ..\UnravelNext-gate\build\all\bin\unx_gate_<...>.exe --out Results/<트랙>/<게이트>`. 품질 설정은 그 커밋의 것이다(`UNX_SOURCE_DIR` = worktree).
 - 트랙 단독 게이트(자기 트랙 + 코어)는 지금처럼 자기 선택 빌드(`build/<트랙>`)를 써도 된다.
 - 빌드 폴더의 트랙 집합이 바뀌면 `Build.ps1`이 경고하고 그 폴더를 새로 구성한다. 같은 폴더에서 트랙 집합을 바꿔 다시 구성하면 Ninja dyndep 단언으로 멈췄기 때문이다(I 신고).
+
+### 3.6 데이터 의존 셰이더 루프의 상한 (v1.39, 조율 결정)
+- 이 장치는 선점이 된다. 그래서 끝나지 않는 커널이 TDR 없이 계속 돌 수 있다. 그동안 GPU가 시분할되어 데스크톱과 다른 세션이 느려진다.
+- 반복 횟수가 데이터에 따라 정해지는 셰이더 루프에는 모두 **하드 반복 상한**을 둔다: 웨이브 집계 루프(웨이브 폭), 트리·사슬·목록 걷기(깊이나 용량), CAS 재시도, 타일·레코드 루프(풀 용량).
+- 상한에 닿으면 조용히 끊지 않는다. 트랙의 오류 비트를 세워(V: `Stats::overflow` 0x400 `OVERFLOW_ITERATION_LIMIT`) 게이트를 실패로 만든다. 그래야 livelock이 멈춤이 아니라 검출되는 결함이 된다.
+- 하드웨어 재현은 잠금 안에서 `UNX_FENCE_TIMEOUT_S`를 짧게(5~10 s) 하고 프레임 1~3개로 한다.
 
 ## 4. Render graph API (`Native/Render/include/unx/render/RenderGraph.h`)
 
@@ -424,8 +437,12 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
     - 대역 C 브릭 fragment는 visId의 삼각형 필드가 `0x7F`다.
   - **청크**: 레코드는 64개씩 청크(1 KB)로 `coverageChunks`(`StructuredBuffer<uint4>` 풀, 원소 하나가 레코드 하나, v1.38)에 있다. 타일의 i번째 fragment는 청크 서수 i/64의 i%64번 레코드다.
     - 서수 < N이면 청크 번호 + 1은 `coverageChunkTable`의 타일 칸에 있다(N = `visibility.coverage_table_slots`, 기본 32, 목록 머리 워드 6).
-    - 그 뒤 서수는 타일 머리 워드 5에서 시작하는 확장 표 사슬에 있다. 확장 표는 풀의 청크 하나를 256 워드로 쓴다(워드 w = 원소 w/4의 성분 w%4): 0..254 = 다음 255 서수의 청크, 255 = 다음 확장 표. 타일당 fragment 수에 한도가 없다.
-    - 읽기 도우미는 `coverageChunkOf`, `coverageLoadRecord`다. 청크 번호 0(수보다 아래)은 풀이 모자랐다는 뜻이다(`Stats::overflow` 0x100).
+    - 그 뒤 서수(e = 서수 − N)는 타일 머리 워드 5를 뿌리로 하는 확장 트리에 있다(v1.39; v1.37~38의 사슬을 대신한다). 노드는 풀의 청크 하나를 256 워드로 쓴다(워드 w = 원소 w/4의 성분 w%4, 값 = 청크 번호 + 1, 0 = 없음).
+      - 뿌리의 워드 0..253은 e < 254의 청크를 직접 담는다.
+      - 워드 254는 2단 하위 트리(다음 65,536 서수, e의 256진 두 자리)를, 워드 255는 3단 하위 트리(다음 16,777,216)를 가리킨다.
+      - 조회는 깊이와 상관없이 노드 4개 이하다. 타일당 N + 16.8 M 청크(10^9 fragment)까지 담고, 넘으면 `Stats::overflow` 0x200이다.
+      - 이유: 사슬 걷기는 서수에 비례해서, 수백만 fragment 타일(forest_combat edge의 지평선)에서 조회 비용이 제곱이 되어 GPU가 멈췄다(FENCE_TIMEOUT, 조율 신고).
+    - 읽기 도우미는 `coverageChunkOf(table, records, N, tile, ext = 머리 워드 5, ordinal)`(시그니처는 v1.38과 같다), `coverageLoadRecord`, `coverageExtPath`다. 청크 번호 0(수보다 아래)은 풀이 모자랐다는 뜻이다(`Stats::overflow` 0x100).
   - **순서와 중복**: 타일 안 레코드는 추가 순서다(V는 정렬하지 않는다). 읽는 쪽(M 합성)이 (픽셀, 깊이, visId)로 정렬한다. 하드웨어가 잘라 조각으로 래스터한 프리미티브는 같은 visId·같은 값으로 두 번 나올 수 있으니 인접 중복은 하나로 친다.
   - **타일 머리 8 워드**(`coverageTiles`):
     - 0 = fragment 수.
@@ -434,7 +451,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
       - 불투명 = 유리·물이 아닌 재질이다. 알파 테스트 재질은 테스트 뒤 마스크로 기여하고, 투과 잎도 시야 가림에는 불투명이다.
       - 래스터 뒤 타일 패스(타일당 그룹 1개)가 레코드에서 만든다(픽셀별 groupshared OR·min). fragment마다 원자로 하는 판은 설계 개정의 DesignBench 실측에서 +0.11~+0.17 ns/fragment라 기각했다.
       - 래스터는 그 뒤 fragment를 버리지 않는다. 뒤 fragment 컷은 합성이 자기 정렬에서 한다.
-    - 5 = 첫 확장 표. 6·7 = 예비(0).
+    - 5 = 확장 트리 뿌리. 6·7 = 예비(0).
   - **`coverageTileList`**(raw) 머리:
     - 0..2 = fragment가 있는 타일 위 DispatchIndirect 인자(타일당 그룹 1개, x ≤ 65535 다음 y). 3 = 타일 수. 4 = fragment 수. 5 = 청크 수. 6 = N. 7 = 타일 열 수.
     - 8..10 = 무거운 타일 위 인자(타일당 그룹 1개). 11 = 무거운 타일 수. 12 = 무거운 문턱(`visibility.coverage_heavy_tile_fragments`, 기본 1,024: fragment 수가 이보다 많은 타일). 13 = 무거운 타일 목록의 시작 워드.
@@ -518,6 +535,8 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 
 ## 11. 게이트·보고
 - 하네스(`Harness::run`) JSON: 라벨, 해상도, 품질 SHA-256·파일, 빌드(commit, dirty, diff SHA-256), 어댑터·드라이버·D3D12Core·Agility·NVAPI, GPU 잠금 보유자, 큐 우선순위, 워밍업·프레임 수, GPU 프레임 중앙값·P95·P99, CPU 선언·기록·제출, SM 클럭, 그래프 통계, 패스별 분포.
+  - (v1.39) `gpu_contention`(3.3 경합 검출; 샘플러가 없으면 null)과 `queues`를 더했다. `queues`는 큐별(graphics, compute)로 프레임당 명령 목록 수와 패스 바깥 시간 `head_ms`·`tail_ms`·`gap_ms`의 분포다.
+  - 프로파일러(`GpuProfiler`, I 요청 `20260926_I_profiler_gaps.md`): 명령 목록마다 시작 마크와 끝 마크(목록의 마지막 배리어 뒤)를 찍는다(`listBegin`/`listEnd`가 `frameMark`를 대신한다). 패스는 목록 시작 마크부터 이어서 잰다. `FrameTiming::queues[]`(`QueueTiming`)는 lists, headMs(프레임 첫 타임스탬프 → 이 큐의 첫 목록 시작), tailMs(목록마다 마지막 패스 끝 → 목록 끝의 합: 목록을 닫는 배리어, 마지막 목록에서는 프레임 끝 레이아웃 전환), gapMs(목록 끝 → 다음 목록 시작의 합)다. 한 큐에서는 프레임 = head + 패스 합 + tail + gap이다. 목록이 하나면 타임스탬프 수는 v1.38과 같다.
 - 게이트 판정은 설계서 7절의 값과 비용식을 기준으로 한다. 실측이 크면 설계 가정 오류인지 구현 비효율인지 먼저 가른다. 품질·표본·부하는 낮추지 않는다.
 
 ## 12. 버전 기록
@@ -634,6 +653,11 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.39 (2026-09-26):
+  - **coverage 확장 트리(7.1)와 셰이더 루프 상한 규칙(3.6)**: forest_combat edge V 게이트의 FENCE_TIMEOUT(조율 신고)이 원인이다. 확장 사슬 걷기가 깊은 타일에서 제곱 비용이 됐다. 트리로 바꿔 조회를 노드 4개 이하로 했고, M 합성의 `coverageChunkOf` 호출은 그대로 맞다(4변형 컴파일 확인). V의 웨이브 루프·타일 패스 루프에 상한 + 0x400을 넣었다. 새 overflow 비트: 0x200 트리 초과, 0x400 반복 상한.
+    - [실측] `coverage_layer_is_exact`(두 설정 × 3프레임, 바뀐 커널의 첫 하드웨어 실행은 잠금 안에서 `UNX_FENCE_TIMEOUT_S=10`)가 통과했다. 트리 노드는 기본 설정에서 5개, 칸 1 설정에서 69~81개였고, 카드 더미 타일은 2단 하위 트리까지 갔다. unit 34/34, visibility 8/8, D3D12 디버그 층 오류 0. 래스터 단가 분해용 측정 키 `visibility.coverage_debug_stage`(1 = fragment 계산까지, 2 = + 타일 카운터, 0 = 층): waterside 4K 12.0 M fragment, A B C 두 번 교대. 1 = 7.63~7.69 ms(0.64 ns/f), 2 = 9.39~9.66(+0.16 ns/f), 0 = 11.95~12.03(+0.20 ns/f). 경합(카운터·청크)은 1/3이고, 가장 큰 몫은 픽셀 커널 계산과 메시·래스터 앞단이다(설계 목표 ≤ 0.3 ns/f).
+  - **GpuLock 경합 검출(3.3, 조율 요청)**, **하네스 JSON `gpu_contention`·`queues`, 프로파일러 목록 마크(11, I 요청)**. 설계 개정은 2.13에 "호스트 통합 틈" 행을 더했다(목표 ≤ 0.10 ms; I Player 4K 실측 0.27~0.44, 1024+256 부하에서 0.59 ms로 부하와 함께 커진다). 이 마크로 tail(끝 배리어)인지 목록 사이 틈인지 가른다.
+  - [실측] unit 34/34, visibility 8/8, D3D12 디버그 층 오류 0.
 - v1.38 (2026-09-26):
   - **opaqueCovered를 합집합 규칙으로(7.1, 설계 개정 판정: COVERAGE_REDESIGN 4.6)**: v1.37의 "fragment 하나가 픽셀 전체" 규칙은 얇은 기하에서 거의 서지 않았다(관찰 2). 이제는 래스터 뒤 타일 패스가 레코드에서 픽셀별 불투명 마스크 합집합과 가장 먼 불투명 깊이를 만들어 비트를 세운다. `coverageBDepth`는 없앴다(래스터의 뒤 fragment 컷도 없다). 레코드 depth 워드의 부호 비트가 투과 재질 표시다.
     - 픽셀별 원자 판(기여자 D min → 펜스 → U or, 64 bit CAS 판은 선택 기능이라 제외)을 먼저 구현하고 정확성까지 확인했다. 그러나 설계 개정 DesignBench에서 fragment당 +0.11~+0.17 ns(펜스 없이)로 재어져 버렸다.

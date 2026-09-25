@@ -38,6 +38,8 @@ coverage_table_slots = 32         # coverage layer: chunk table slots per 8 x 8 
 coverage_pool_min_fragments_per_pixel = 1.0  # coverage record pool floor (4K: 8.3 M records, 133 MB); the pool is 1.5 x
                                   # the latest measured need when larger (16 B per record)
 coverage_heavy_tile_fragments = 1024  # tiles with more fragments go on the heavy list (M's block sort and merge)
+coverage_debug_stage = 0          # measurement only: 1 = the pixel kernel stops after the fragment's math, 2 = after the
+                                  # tile counters (no records); 0 = the layer
 max_coverage_fragments = 12582912 # unused since INTERFACES v1.37 (coverage layer v2); kept so binaries built before it still
                                   # start; removed after the next integrated rebuild
 coverage_band_c = true            # with coverage_layer: band C clusters are drawn in the coverage layer until the band C

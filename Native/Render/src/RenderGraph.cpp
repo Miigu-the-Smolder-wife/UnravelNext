@@ -1366,7 +1366,7 @@ void RenderGraph::execute(GpuProfiler* profiler)
         Impl::Segment& seg = plan.segments[s];
         lists[s] = m_device.acquireCommandList(seg.queue);
         ID3D12GraphicsCommandList7* cmd = lists[s].list.Get();
-        if (profiler && seg.firstOfQueue) profiler->frameMark(cmd, seg.queue);
+        if (profiler) profiler->listBegin(cmd, seg.queue);
         for (Impl::PlanPass& pp : seg.passes)
         {
             impl.emit(cmd, pp.before);
@@ -1382,11 +1382,8 @@ void RenderGraph::execute(GpuProfiler* profiler)
             }
             impl.emit(cmd, pp.after);
         }
-        if (profiler && seg.lastOfQueue)
-        {
-            profiler->frameMark(cmd, seg.queue);
-            profiler->resolve(cmd, seg.queue);
-        }
+        if (profiler) profiler->listEnd(cmd, seg.queue);
+        if (profiler && seg.lastOfQueue) profiler->resolve(cmd, seg.queue);
     }
     m_stats.cpuRecordMs = msSince(t0);
 

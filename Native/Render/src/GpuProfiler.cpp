@@ -50,7 +50,7 @@ void GpuProfiler::beginFrame(uint64_t frame)
     for (uint32_t q = 0; q < kQueueTypeCount; ++q)
     {
         slot.used[q] = 0;
-        slot.frameMarks[q].clear();
+        slot.lists[q].clear();
         m_open[q].clear();
         m_lastMark[q] = UINT32_MAX;
     }
@@ -67,11 +67,22 @@ uint32_t GpuProfiler::allocate(QueueType queue)
     return (slotIndex * 2 + q) * m_perQueue + used++;
 }
 
-void GpuProfiler::frameMark(ID3D12GraphicsCommandList* cmd, QueueType queue)
+void GpuProfiler::listBegin(ID3D12GraphicsCommandList* cmd, QueueType queue)
 {
     uint32_t i = allocate(queue);
     cmd->EndQuery(m_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, i);
-    m_current->frameMarks[(size_t)queue].push_back(i);
+    m_current->lists[(size_t)queue].push_back({ i, UINT32_MAX, i });
+    m_lastMark[(size_t)queue] = i;
+}
+
+void GpuProfiler::listEnd(ID3D12GraphicsCommandList* cmd, QueueType queue)
+{
+    auto& lists = m_current->lists[(size_t)queue];
+    if (lists.empty() || lists.back().end != UINT32_MAX) fail("GpuProfiler::listEnd without listBegin");
+    lists.back().lastPassEnd = m_lastMark[(size_t)queue];
+    uint32_t i = allocate(queue);
+    cmd->EndQuery(m_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, i);
+    lists.back().end = i;
     m_lastMark[(size_t)queue] = i;
 }
 
@@ -115,12 +126,14 @@ void GpuProfiler::read(Slot& slot)
     auto toMs = [&](QueueType q, uint32_t index) { return (double)m_mapped[index] * m_msPerTick[(size_t)q] + m_calibrationOffsetMs[(size_t)q]; };
     double first = 1e300, last = -1e300;
     for (uint32_t q = 0; q < 2; ++q)
-        for (uint32_t i : slot.frameMarks[q])
-        {
-            double t = toMs((QueueType)q, i);
-            first = std::min(first, t);
-            last = std::max(last, t);
-        }
+        for (const ListMarks& l : slot.lists[q])
+            for (uint32_t i : { l.begin, l.end })
+            {
+                if (i == UINT32_MAX) continue;
+                double t = toMs((QueueType)q, i);
+                first = std::min(first, t);
+                last = std::max(last, t);
+            }
     for (const Event& e : slot.events)
     {
         if (e.end == UINT32_MAX) continue;
@@ -134,6 +147,21 @@ void GpuProfiler::read(Slot& slot)
     {
         if (e.end == UINT32_MAX) continue;
         m_completed.passes.push_back({ e.name, e.queue, toMs(e.queue, e.begin) - first, toMs(e.queue, e.end) - first });
+    }
+    for (uint32_t q = 0; q < 2; ++q)
+    {
+        QueueTiming& qt = m_completed.queues[q];
+        qt = QueueTiming{};
+        const auto& lists = slot.lists[q];
+        qt.lists = (uint32_t)lists.size();
+        for (size_t k = 0; k < lists.size(); ++k)
+        {
+            const ListMarks& l = lists[k];
+            if (l.end == UINT32_MAX) continue;
+            if (k == 0) qt.headMs = std::max(toMs((QueueType)q, l.begin) - first, 0.0);
+            qt.tailMs += std::max(toMs((QueueType)q, l.end) - toMs((QueueType)q, l.lastPassEnd), 0.0);
+            if (k > 0 && lists[k - 1].end != UINT32_MAX) qt.gapMs += std::max(toMs((QueueType)q, l.begin) - toMs((QueueType)q, lists[k - 1].end), 0.0);
+        }
     }
     m_hasCompleted = true;
 }

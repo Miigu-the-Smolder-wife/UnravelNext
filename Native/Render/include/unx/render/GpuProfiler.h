@@ -16,11 +16,23 @@ struct PassTiming
     double durationMs() const { return endMs - beginMs; }
 };
 
+// Per queue, the frame time outside its passes (v1.39, I request 20260926_I_profiler_gaps.md). Passes tile each
+// command list from its begin mark, so on one queue: frame span = head + passes + tails + gaps.
+struct QueueTiming
+{
+    uint32_t lists = 0;   // command lists of the frame on this queue (list boundaries = lists - 1)
+    double headMs = 0;    // the frame's first timestamp (any queue) to this queue's first list begin
+    double tailMs = 0;    // sum over lists of last pass end to list end: the barriers closing each list (the frame's
+                          // final layout transitions on the last list)
+    double gapMs = 0;     // sum of list end to next list begin: time the queue ran other work or idled between lists
+};
+
 struct FrameTiming
 {
     uint64_t frame = 0;
     double gpuFrameMs = 0;  // first to last timestamp over all queues
     std::vector<PassTiming> passes;
+    QueueTiming queues[2];  // graphics, compute
 };
 
 // GPU timestamps for every pass, on by default (ARCHITECTURE_KO.md 6, 7.0). One timestamp per pass boundary: a pass
@@ -40,8 +52,10 @@ public:
     void beginFrame(uint64_t frame);
     const FrameTiming* lastCompleted() const { return m_hasCompleted ? &m_completed : nullptr; }
 
-    // Recording interface used by the render graph.
-    void frameMark(ID3D12GraphicsCommandList* cmd, QueueType queue);  // frame begin/end markers
+    // Recording interface used by the render graph: every command list opens with listBegin and closes with listEnd
+    // (after its last barriers); passes chain from the list's begin mark.
+    void listBegin(ID3D12GraphicsCommandList* cmd, QueueType queue);
+    void listEnd(ID3D12GraphicsCommandList* cmd, QueueType queue);
     void passBegin(ID3D12GraphicsCommandList* cmd, QueueType queue, std::string_view name);
     void passEnd(ID3D12GraphicsCommandList* cmd, QueueType queue);
     void resolve(ID3D12GraphicsCommandList* cmd, QueueType queue);  // once per queue per frame, last
@@ -57,12 +71,16 @@ private:
         QueueType queue;
         uint32_t begin, end;
     };
+    struct ListMarks
+    {
+        uint32_t begin, end, lastPassEnd;  // lastPassEnd = begin when the list has no pass
+    };
     struct Slot
     {
         uint64_t frame = UINT64_MAX;
         std::vector<Event> events;
         uint32_t used[kQueueTypeCount] = {};
-        std::vector<uint32_t> frameMarks[kQueueTypeCount];
+        std::vector<ListMarks> lists[kQueueTypeCount];
     };
     uint32_t allocate(QueueType queue);
     void read(Slot& slot);

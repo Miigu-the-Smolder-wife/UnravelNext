@@ -38,7 +38,7 @@ constexpr uint32_t kReadbackBytes = 256;
 struct Settings
 {
     uint32_t capVisible = 0, capNodes = 0, capGroups = 0, capDeferred = 0;
-    uint32_t coverageTableSlots = 0, coverageHeavyMin = 0;
+    uint32_t coverageTableSlots = 0, coverageHeavyMin = 0, coverageDebugStage = 0;
     double coveragePoolMinPerPixel = 0;
     float lodErrorPx = 0, bandAMinPx = 0, bandCMaxPx = 0;
     bool occlusion = true, coverageLayer = false, coverageBandC = true;
@@ -59,6 +59,9 @@ struct Settings
         const int64_t slots = q.integer("visibility.coverage_table_slots");
         if (slots < 1 || slots > 4095) fail("visibility.coverage_table_slots = %lld: 1 .. 4095 (12-bit root constant field)", (long long)slots);
         s.coverageTableSlots = (uint32_t)slots;
+        const int64_t stage = q.integer("visibility.coverage_debug_stage");
+        if (stage < 0 || stage > 2) fail("visibility.coverage_debug_stage = %lld: 0 (the layer), 1 or 2 (measurement variants)", (long long)stage);
+        s.coverageDebugStage = (uint32_t)stage;
         const int64_t heavy = q.integer("visibility.coverage_heavy_tile_fragments");
         if (heavy < 64 || heavy >= (1 << 20)) fail("visibility.coverage_heavy_tile_fragments = %lld: 64 .. 2^20 - 1 (20-bit root constant field)", (long long)heavy);
         s.coverageHeavyMin = (uint32_t)heavy;
@@ -849,12 +852,12 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
 
     MeshPipelineDesc d;
     d.meshShader = "Passes/Visibility/CoverageRaster.ms";
-    d.pixelShader = "Passes/Visibility/CoverageRaster.ps";
+    d.pixelShader = "Passes/Visibility/CoverageRaster.ps.STAGE" + std::to_string(r.cfg.coverageDebugStage);
     d.depthFormat = DXGI_FORMAT_UNKNOWN;
     d.depthWrite = false;
     d.cull = D3D12_CULL_MODE_NONE;  // one-sided back faces are culled by the mesh kernel (with the near clip)
     d.conservative = true;
-    ID3D12PipelineState* rasterPso = fc.shaders.mesh("v.coverage", d);
+    ID3D12PipelineState* rasterPso = fc.shaders.mesh("v.coverage.stage" + std::to_string(r.cfg.coverageDebugStage), d);
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = view.frameConstants;
     const TextureRef hiz = r.hiz;
     g.addPass("v.coverage.raster", QueueType::Graphics,
@@ -927,7 +930,8 @@ void recordStats(FramePassContext& fc, State& s, const Run& r, const std::string
         if (st.overflow && !run.overflowReported)
         {
             logf("V: capacity exceeded in '%s', frame %llu (bits 0x%x): raise visibility.max_* (Stats::overflow; 0x100: the coverage record pool ran "
-                 "out, it grows from the next completed frame)\n",
+                 "out, it grows from the next completed frame; 0x200: a coverage tile past its extension tree; 0x400: a shader loop reached its iteration "
+                 "bound, a defect)\n",
                  name.c_str(), (unsigned long long)st.frameIndex, st.overflow);
             run.overflowReported = true;
         }

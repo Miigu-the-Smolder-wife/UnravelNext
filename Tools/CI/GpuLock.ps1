@@ -13,6 +13,15 @@
 # release line. A holder that died without a release line (abandoned mutex, or its current.json left behind with its
 # process gone) is logged as "stale release" by the next acquirer. -WaitMinutes (default 120) bounds the wait for the
 # lock.
+#
+# Contention (v1.39): while the command runs, a sampler thread reads every process's GPU engine busy time (3D, compute
+# and copy engines; Windows' per-process "GPU Engine\Running Time" counters, the source Task Manager uses) once a second
+# and keeps every process outside the command's own tree. A process whose busiest engine is busy for >= 50 ms of a 1 s
+# sample (5 %; the desktop's background UI measured 6-22 ms/s) contends with the measurement: the release line says
+# "contended: name (pid) N s >= 50 ms/s, peak P ms/s", and the live summary .gpulock/contention.<pid>.json (path in
+# UNX_GPU_CONTENTION for the command) lets Harness::run put the samples inside its measurement window into its result
+# JSON ("gpu_contention"), so a contaminated timing is marked where it is judged. The sampler runs in this wrapper,
+# outside the measured process (a sample costs 1-2 ms of CPU; no GPU work).
 # Arguments are parsed by hand (no param block) so everything after "--" reaches the command unchanged.
 $ErrorActionPreference = "Stop"
 $Track = $null
@@ -122,6 +131,17 @@ public static class UnxGpuLockJob
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool MoveFileExW(string from, string to, uint flags);
 
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+    static extern uint PdhOpenQuery(string source, IntPtr user, out IntPtr query);
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+    static extern uint PdhAddEnglishCounter(IntPtr query, string path, IntPtr user, out IntPtr counter);
+    [DllImport("pdh.dll")]
+    static extern uint PdhCollectQueryData(IntPtr query);
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+    static extern uint PdhGetRawCounterArray(IntPtr counter, ref uint bufferSize, out uint itemCount, IntPtr buffer);
+    [DllImport("pdh.dll")]
+    static extern uint PdhCloseQuery(IntPtr query);
+
     const uint WAIT_TIMEOUT = 0x102;
     const uint KILL_ON_JOB_CLOSE = 0x2000, BREAKAWAY_OK = 0x800;
 
@@ -131,6 +151,182 @@ public static class UnxGpuLockJob
         public bool TimedOut;
         public string Leftover = "";   // descendants still running after the command exited (ended)
         public int Survivors;          // processes that did not end after termination
+        public double ContendedSeconds;  // seconds in which some process outside the tree kept the GPU busy >= the threshold
+        public string Contention = "";   // "name (pid) N s >= T ms/s, peak P ms/s; ..." for those processes
+    }
+
+    // GPU engine busy time per process outside the job (the command's tree), sampled every IntervalMs.
+    class ContentionSampler
+    {
+        public const int IntervalMs = 1000;
+        public const double ThresholdMsPerS = 50;
+        class Other { public string Name; public double BusyMs, PeakMsPerS, SecondsOver; }
+        readonly IntPtr job;
+        readonly string path;
+        IntPtr query, counter;
+        Dictionary<string, long> last = new Dictionary<string, long>();
+        Stopwatch clock = Stopwatch.StartNew();
+        double lastMs;
+        int samples;
+        double contendedSeconds;
+        Dictionary<int, Other> others = new Dictionary<int, Other>();
+        List<string> over = new List<string>();
+        System.Threading.Thread thread;
+        System.Threading.ManualResetEvent stop = new System.Threading.ManualResetEvent(false);
+
+        public ContentionSampler(IntPtr job, string path)
+        {
+            this.job = job;
+            this.path = path;
+            if (PdhOpenQuery(null, IntPtr.Zero, out query) != 0) { query = IntPtr.Zero; return; }
+            if (PdhAddEnglishCounter(query, @"\GPU Engine(*)\Running Time", IntPtr.Zero, out counter) != 0) { PdhCloseQuery(query); query = IntPtr.Zero; return; }
+            Read();  // baseline
+            lastMs = clock.Elapsed.TotalMilliseconds;
+            thread = new System.Threading.Thread(Loop);
+            thread.IsBackground = true;
+            thread.Start();
+        }
+
+        // Instance name -> cumulative running time (100 ns units) of the 3D, compute and copy engines.
+        Dictionary<string, long> Read()
+        {
+            Dictionary<string, long> values = new Dictionary<string, long>();
+            PdhCollectQueryData(query);
+            uint size = 0, n = 0;
+            PdhGetRawCounterArray(counter, ref size, out n, IntPtr.Zero);
+            if (size == 0) return values;
+            IntPtr buffer = Marshal.AllocHGlobal((int)size);
+            try
+            {
+                if (PdhGetRawCounterArray(counter, ref size, out n, buffer) != 0) return values;
+                int stride = IntPtr.Size + 40;  // PDH_RAW_COUNTER_ITEM_W: name pointer + PDH_RAW_COUNTER (FirstValue at +16)
+                for (int i = 0; i < (int)n; ++i)
+                {
+                    IntPtr item = buffer + i * stride;
+                    string name = Marshal.PtrToStringUni(Marshal.ReadIntPtr(item));
+                    string lower = name == null ? "" : name.ToLowerInvariant();
+                    if (!(lower.EndsWith("engtype_3d") || lower.Contains("engtype_compute") || lower.Contains("engtype_copy"))) continue;
+                    values[name] = Marshal.ReadInt64(item + IntPtr.Size + 16);
+                }
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+            return values;
+        }
+
+        HashSet<int> JobPids()
+        {
+            HashSet<int> pids = new HashSet<int>();
+            const int capacity = 256;
+            IntPtr buffer = Marshal.AllocHGlobal(8 + 8 * capacity);
+            try
+            {
+                if (QueryInformationJobObject(job, 3, buffer, 8 + 8 * capacity, IntPtr.Zero))
+                {
+                    int count = Marshal.ReadInt32(buffer, 4);
+                    for (int k = 0; k < count; ++k) pids.Add((int)Marshal.ReadInt64(buffer, 8 + 8 * k));
+                }
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+            return pids;
+        }
+
+        void Sample()
+        {
+            Dictionary<string, long> now = Read();
+            double ms = clock.Elapsed.TotalMilliseconds, dt = Math.Max(ms - lastMs, 1.0);  // interval (ms)
+            lastMs = ms;
+            HashSet<int> mine = JobPids();
+            Dictionary<int, double> busy = new Dictionary<int, double>();
+            foreach (KeyValuePair<string, long> kv in now)
+            {
+                long before;
+                if (!last.TryGetValue(kv.Key, out before) || kv.Value <= before) continue;
+                int a = kv.Key.IndexOf("pid_"), b = a >= 0 ? kv.Key.IndexOf('_', a + 4) : -1;
+                int pid;
+                if (a < 0 || b < 0 || !int.TryParse(kv.Key.Substring(a + 4, b - a - 4), out pid) || pid == 0 || mine.Contains(pid)) continue;
+                // The process's busiest engine over the interval (an engine cannot be busier than the interval).
+                double v;
+                busy.TryGetValue(pid, out v);
+                busy[pid] = Math.Max(v, Math.Min((kv.Value - before) / 10000.0, dt));
+            }
+            last = now;
+            ++samples;
+            bool contended = false;
+            long unixMs = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+            foreach (KeyValuePair<int, double> kv in busy)
+            {
+                Other o;
+                if (!others.TryGetValue(kv.Key, out o))
+                {
+                    o = new Other();
+                    o.Name = "pid " + kv.Key;
+                    try { o.Name = Process.GetProcessById(kv.Key).ProcessName; } catch (Exception) { }
+                    others[kv.Key] = o;
+                }
+                double perS = kv.Value * 1000.0 / dt;
+                o.BusyMs += kv.Value;
+                o.PeakMsPerS = Math.Max(o.PeakMsPerS, perS);
+                if (perS >= ThresholdMsPerS && kv.Key != 4)  // pid 4 (System): residency paging, which the measured process itself causes
+                {
+                    o.SecondsOver += dt / 1000.0;
+                    contended = true;
+                    over.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        "  {{\"t_ms\": {0}, \"pid\": {1}, \"ms_per_s\": {2:F1}, \"name\": \"{3}\"}}", unixMs, kv.Key, perS, Escape(o.Name)));
+                }
+            }
+            if (contended) contendedSeconds += dt / 1000.0;
+            Write();
+        }
+
+        static string Escape(string s) { return s.Replace("\\", "\\\\").Replace("\"", "\\\""); }
+
+        // Live summary: one "over" sample per line (Harness::run keeps those inside its measurement window).
+        void Write()
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            StringBuilder b = new StringBuilder();
+            b.AppendFormat(System.Globalization.CultureInfo.InvariantCulture, "{{\"interval_ms\": {0}, \"threshold_ms_per_s\": {1}, \"samples\": {2}, \"contended_seconds\": {3:F1},\n",
+                           IntervalMs, ThresholdMsPerS, samples, contendedSeconds);
+            b.Append("\"over\": [\n").Append(string.Join(",\n", over.ToArray())).Append("\n],\n\"others\": [\n");
+            List<string> rows = new List<string>();
+            foreach (KeyValuePair<int, Other> kv in others)
+                if (kv.Value.BusyMs >= 10)
+                    rows.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                        "  {{\"pid\": {0}, \"name\": \"{1}\", \"busy_ms\": {2:F1}, \"peak_ms_per_s\": {3:F1}, \"seconds_over\": {4:F1} }}", kv.Key, Escape(kv.Value.Name),
+                        kv.Value.BusyMs, kv.Value.PeakMsPerS, kv.Value.SecondsOver));
+            b.Append(string.Join(",\n", rows.ToArray())).Append("\n]}\n");
+            string tmp = path + ".tmp";
+            try
+            {
+                System.IO.File.WriteAllText(tmp, b.ToString(), new UTF8Encoding(false));
+                if (!ReplaceFile(tmp, path)) System.IO.File.Delete(tmp);
+            }
+            catch (Exception) { }
+        }
+
+        void Loop()
+        {
+            while (!stop.WaitOne(IntervalMs))
+            {
+                try { Sample(); } catch (Exception) { }
+            }
+        }
+
+        public void Finish(Result r)
+        {
+            if (query == IntPtr.Zero) return;
+            stop.Set();
+            thread.Join();
+            try { Sample(); } catch (Exception) { }  // the last partial interval
+            PdhCloseQuery(query);
+            r.ContendedSeconds = contendedSeconds;
+            List<string> parts = new List<string>();
+            foreach (KeyValuePair<int, Other> kv in others)
+                if (kv.Value.SecondsOver > 0)
+                    parts.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0} ({1}) {2:F0} s >= {3:F0} ms/s, peak {4:F0} ms/s", kv.Value.Name, kv.Key,
+                                            kv.Value.SecondsOver, ThresholdMsPerS, kv.Value.PeakMsPerS));
+            r.Contention = string.Join("; ", parts.ToArray());
+        }
     }
 
     // Replace 'to' with 'from' in one rename (readers open the file with delete sharing).
@@ -172,7 +368,7 @@ public static class UnxGpuLockJob
 
     // Runs 'commandLine' (application path 'application') in a new kill-on-close job with this process's standard
     // handles, and waits for it at most 'timeoutMinutes'.
-    public static Result Run(string application, string commandLine, string directory, double timeoutMinutes)
+    public static Result Run(string application, string commandLine, string directory, double timeoutMinutes, string contentionPath)
     {
         IntPtr job = CreateJobObjectW(IntPtr.Zero, null);  // not inheritable: only this process holds it
         if (job == IntPtr.Zero) throw new Win32Exception();
@@ -205,6 +401,7 @@ public static class UnxGpuLockJob
                     throw new Win32Exception(error);
                 }
                 ResumeThread(pi.hThread);
+                ContentionSampler sampler = new ContentionSampler(job, contentionPath);
 
                 Result r = new Result();
                 double ms = timeoutMinutes * 60000.0;
@@ -221,6 +418,7 @@ public static class UnxGpuLockJob
                     TerminateJobObject(job, 124);
                     r.Survivors = Drain(job, 60000);
                 }
+                sampler.Finish(r);
                 uint code;
                 GetExitCodeProcess(pi.hProcess, out code);
                 r.ExitCode = r.TimedOut ? 124 : (int)code;
@@ -355,7 +553,9 @@ try {
   Write-Current ($info | ConvertTo-Json -Compress)
   Add-History ("{0} acquire {1} ({2}) :: {3}" -f $info.started, $Track, $Kind, $info.command)
   $env:UNX_GPU_LOCK = $Track
-  $r = [UnxGpuLockJob]::Run($launch[0], $launch[1], (Get-Location).ProviderPath, $TimeoutMinutes)
+  $contention = Join-Path $lockDir ("contention.{0}.json" -f $PID)
+  $env:UNX_GPU_CONTENTION = $contention
+  $r = [UnxGpuLockJob]::Run($launch[0], $launch[1], (Get-Location).ProviderPath, $TimeoutMinutes, $contention)
   $code = $r.ExitCode
   # Exit 87 = the device was removed (TDR) in the run, 88 = a fence wait passed its limit (D3D12.h): say so in the log.
   $tag = ""
@@ -364,10 +564,13 @@ try {
   elseif ($code -eq 88) { $tag = " FENCE_TIMEOUT" }
   if ($r.Leftover) { $tag += " (ended leftover descendants: $($r.Leftover))" }
   if ($r.Survivors -gt 0) { $tag += " ($($r.Survivors) processes did not end)" }
+  if ($r.ContendedSeconds -gt 0) { $tag += " contended: $($r.Contention)" }
   Add-History ("{0} release {1} ({2}) exit {3}{4}" -f (Get-Date).ToString("s"), $Track, $Kind, $code, $tag)
   if ($tag) { Write-Host "GpuLock.ps1:$tag" }
 } finally {
   Remove-Item Env:\UNX_GPU_LOCK -ErrorAction SilentlyContinue
+  Remove-Item Env:\UNX_GPU_CONTENTION -ErrorAction SilentlyContinue
+  if ($contention) { Remove-Item $contention, "$contention.tmp" -ErrorAction SilentlyContinue }
   if ($acquired) {
     Remove-Item $current -ErrorAction SilentlyContinue
     $mutex.ReleaseMutex()

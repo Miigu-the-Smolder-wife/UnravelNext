@@ -6,13 +6,16 @@
 //   header (8 words): fragment count, nearest and farthest fragment depth (reversed-Z device depth as float bits:
 //          zNear = max, zFar = min), the 64-bit opaqueCovered mask (pixel p = x + 8 y: the union of the masks of the
 //          pixel's opaque records is full and the band A surface lies behind the farthest of those records, so that
-//          surface has weight zero under the composite's mask-union occlusion; COVERAGE_REDESIGN 4.6), the first
-//          extension chunk table, spare
+//          surface has weight zero under the composite's mask-union occlusion; COVERAGE_REDESIGN 4.6), the extension
+//          root, spare (2 words)
 //   chunk table: tableSlots words (list header word 6), word c = chunk index + 1 of the tile's c-th chunk (0 = none)
-//   extension tables: the tile's chunks from ordinal tableSlots on. An extension table is one chunk of the record pool
-//          read as 256 words (word w = component w % 4 of the chunk's element w / 4): words 0..254 the next 255
-//          ordinals' chunks, word 255 the next extension table (chunk index + 1). The chain has no length limit: a tile
-//          holds any number of fragments.
+//   extension tree (v1.40): the tile's chunks from ordinal tableSlots on (e = ordinal - tableSlots). Its nodes are
+//          chunks of the record pool read as 256 words (word w = component w % 4 of the chunk's element w / 4; chunk
+//          index + 1, 0 = none). The root (header word 5) holds the chunks of e < 254 directly; its word 254 roots a
+//          2-level subtree (the next 65,536 ordinals: e's two base-256 digits), its word 255 a 3-level subtree (the
+//          next 16,777,216). A lookup reads at most 4 nodes whatever the tile's depth (v1.37-38 walked a chain of
+//          tables, whose cost grew with the ordinal: a tile of millions of fragments stalled the GPU), and a tile holds
+//          up to tableSlots + 16.8 M chunks (10^9 fragments; past that OVERFLOW_COVERAGE_DEPTH).
 // Records (16 B, CoverageFragment) in chunks of 64 in a StructuredBuffer<uint4> (one record per element): the tile's
 // i-th fragment is element (chunk index) * 64 + i % 64 of its chunk i / 64. Records of a tile are in append order (not sorted); the same
 // vis id may appear twice in one pixel (a primitive the hardware clipped is shaded once per piece along the cuts, with
@@ -35,14 +38,16 @@
 #define COV_TILE_PIXELS 64u
 #define COV_MASK_FULL 0xFFFFFFFFu
 #define COV_DEPTH_SEE_THROUGH 0x80000000u  // record depth word: the material is not opaque for the view
-#define COV_EXT_SLOTS 255u        // chunk slots per extension table (word 255 links the next table)
+#define COV_EXT_DIRECT 254u        // root words holding chunks directly (254: 2-level subtree, 255: 3-level subtree)
+#define COV_EXT_SPAN2 65536u
+#define COV_EXT_SPAN3 16777216u
 #define COV_TILE_WORDS 8u         // header words per tile
 #define COV_TILE_COUNT 0u         // fragments of the tile
 #define COV_TILE_ZNEAR 1u         // nearest depth (float bits; 0 = none)
 #define COV_TILE_ZFAR 2u          // farthest depth (float bits; 0xFFFFFFFF = none)
 #define COV_TILE_OPAQUE_LO 3u     // opaqueCovered pixels 0..31
 #define COV_TILE_OPAQUE_HI 4u     // opaqueCovered pixels 32..63
-#define COV_TILE_EXT 5u           // first extension chunk table (chunk index + 1; 0 = none)
+#define COV_TILE_EXT 5u           // extension tree root (chunk index + 1; 0 = none)
 #define COV_LIST_ARGS 0u          // tile list header
 #define COV_LIST_COUNT 3u
 #define COV_LIST_FRAGMENTS 4u
@@ -103,17 +108,33 @@ CoverageFragment coverageUnpackRecord(uint4 v)
 // Readers (after V's passes): word w of the extension table in chunk t (index + 1).
 uint coverageExtWord(StructuredBuffer<uint4> records, uint t, uint w) { return records[(t - 1) * COV_CHUNK_RECORDS + w / 4][w % 4]; }
 
+// Extension ordinal e (ordinal - tableSlots) -> the root word to start from (e itself when direct) and the digits below
+// it (0 = the root word is the chunk; 2 or 3 = subtree digits of e, most significant first). Returns false past the tree.
+bool coverageExtPath(inout uint e, out uint rootWord, out uint digits)
+{
+    rootWord = e;
+    digits = 0;
+    if (e < COV_EXT_DIRECT) return true;
+    e -= COV_EXT_DIRECT;
+    rootWord = COV_EXT_DIRECT;
+    digits = 2;
+    if (e < COV_EXT_SPAN2) return true;
+    e -= COV_EXT_SPAN2;
+    rootWord = COV_EXT_DIRECT + 1;
+    digits = 3;
+    return e < COV_EXT_SPAN3;
+}
+
 // Readers: the tile's ordinal-th chunk (index + 1; 0 = none). 'ext' is header word COV_TILE_EXT.
 uint coverageChunkOf(ByteAddressBuffer table, StructuredBuffer<uint4> records, uint tableSlots, uint tile, uint ext, uint ordinal)
 {
     if (ordinal < tableSlots) return table.Load(4 * (tile * tableSlots + ordinal));
-    uint e = ordinal - tableSlots, t = ext;
-    while (t != 0 && e >= COV_EXT_SLOTS)
-    {
-        t = coverageExtWord(records, t, COV_EXT_SLOTS);
-        e -= COV_EXT_SLOTS;
-    }
-    return t == 0 ? 0 : coverageExtWord(records, t, e);
+    uint e = ordinal - tableSlots, rootWord, digits;
+    if (ext == 0 || !coverageExtPath(e, rootWord, digits)) return 0;
+    uint t = coverageExtWord(records, ext, rootWord);
+    [unroll] for (uint k = 3; k > 0; --k)
+        if (k <= digits && t != 0) t = coverageExtWord(records, t, (e >> (8 * (k - 1))) & 0xFFu);
+    return t;
 }
 
 // Readers: record i of a tile whose i / 64-th chunk is 'chunk' (non-zero).

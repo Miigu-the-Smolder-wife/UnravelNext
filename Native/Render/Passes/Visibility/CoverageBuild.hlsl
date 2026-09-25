@@ -93,20 +93,21 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupThreadID)
     // The tile's records chunk by chunk (one record per thread, 1 KB contiguous per chunk): the table's chunks, then the
     // extension chain in order.
     const uint h = 4 * tile * COV_TILE_WORDS, count = headers.Load(h + 4 * COV_TILE_COUNT), slots = COV_TABLE_SLOTS;
-    uint ext = headers.Load(h + 4 * COV_TILE_EXT), e = 0;
-    for (uint c = 0; c * COV_CHUNK_RECORDS < count; ++c)
+    // Chunks in order: the table's, then the extension tree's (at most 3 node reads each). The loop is bounded by the
+    // pool: a tile cannot hold more chunks than the pool has.
+    const uint chunks = (count + COV_CHUNK_RECORDS - 1) / COV_CHUNK_RECORDS, walked = min(chunks, COV_CAP_CHUNKS);
+    if (chunks > walked && lane == 0) state.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_ITERATION_LIMIT);
+    for (uint c = 0; c < walked; ++c)
     {
         uint chunk = 0;
         if (c < slots) chunk = table.Load(4 * (tile * slots + c));
         else
         {
-            if (e == COV_EXT_SLOTS)
-            {
-                ext = ext != 0 ? records[(ext - 1) * COV_CHUNK_RECORDS + COV_EXT_SLOTS / 4][COV_EXT_SLOTS % 4] : 0;
-                e = 0;
-            }
-            chunk = ext != 0 ? records[(ext - 1) * COV_CHUNK_RECORDS + e / 4][e % 4] : 0;
-            ++e;
+            uint e = c - slots, rootWord, digits;
+            chunk = coverageExtPath(e, rootWord, digits) ? headers.Load(h + 4 * COV_TILE_EXT) : 0;
+            if (chunk != 0) chunk = records[(chunk - 1) * COV_CHUNK_RECORDS + rootWord / 4][rootWord % 4];
+            [unroll] for (uint k = 3; k > 0; --k)
+                if (k <= digits && chunk != 0) chunk = records[(chunk - 1) * COV_CHUNK_RECORDS + ((e >> (8 * (k - 1))) & 0xFFu) / 4][((e >> (8 * (k - 1))) & 0xFFu) % 4];
         }
         if (chunk != 0 && c * COV_CHUNK_RECORDS + lane < count)
         {

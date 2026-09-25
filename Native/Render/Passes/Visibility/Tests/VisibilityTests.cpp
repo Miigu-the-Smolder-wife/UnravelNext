@@ -1329,7 +1329,8 @@ struct CoverageScene
 // 0.1 mm strip crossing the near plane (its vertex normals differ along it: the perspective-correct normal). Opaque
 // columns 1.3 px wide in front of the upper blades cover whole pixels with the union of their two triangles
 // (opaqueCovered). A stack of 4,000 glass cards (see-through records: no opaque cover),
-// each 6 x 0.3 px on the same spot at 2 .. 3.6 m, puts 24,000 fragments in one tile (a chain of extension tables).
+// each 6 x 0.3 px on the same spot at 2 .. 3.6 m, puts 48,000 fragments in one tile (the extension root and its 2-level
+// subtree).
 CoverageScene coverageScene()
 {
     CoverageScene cs;
@@ -1822,7 +1823,7 @@ UNX_TEST(coverage_layer_is_exact)
 {
     // Coverage layer v2 (INTERFACES 7.1 v2, CoverageTiles.hlsli) against the exact clip of every band B/C triangle, in two
     // configurations: the defaults, and one chunk-table slot with a heavy threshold of 64 (every tile past 64 fragments
-    // keeps its chunks in extension tables). The card stack's tile needs a chain of two extension tables in both. Per
+    // keeps its chunks in the extension tree). The card stack's tile reaches the 2-level subtree in both. Per
     // frame: every record is an expected (triangle, pixel) fragment with its exact area (10-bit), centroid depth, mask and
     // perspective-correct normal (8 + 8 bit octahedral) and see-through flag (the glass stack); no expected fragment is
     // missing; tile headers (count, depth range, extension table) match the records; opaqueCovered (COVERAGE_REDESIGN 4.6
@@ -2014,18 +2015,43 @@ UNX_TEST(coverage_layer_is_exact)
                 for (uint32_t o = 0; o < std::min(ordinals, slots); ++o) chunks[o] = fo.table[(size_t)tile * slots + o];
                 for (uint32_t o = ordinals; o < slots; ++o)
                     if (fo.table[(size_t)tile * slots + o] != 0) fail("frame %zu: tile %u: table slot %u set past its %u chunks", f, tile, o, ordinals);
-                uint32_t ext = h[5];
-                if ((ext != 0) != (ordinals > slots)) fail("frame %zu: tile %u: extension table %u with %u chunks and %u slots", f, tile, ext, ordinals, slots);
-                for (uint32_t base = slots; base < ordinals; base += 255)
-                {
-                    useChunk(ext, "extension table", tile);
+                // Extension tree (256 words per node): the root (header word 5) holds ordinals slots .. slots + 253
+                // directly, its word 254 roots a 2-level subtree (the next 65,536), word 255 a 3-level subtree. A child
+                // exists exactly when its range starts below the tile's chunk count.
+                std::function<void(uint32_t, uint32_t, uint64_t)> visit = [&](uint32_t node, uint32_t depth, uint64_t first) {
+                    useChunk(node, "extension node", tile);
                     ++extTables;
-                    const uint32_t* et = &fo.records[(size_t)(ext - 1) * 256];
-                    for (uint32_t e = 0; e < 255; ++e)
-                        if (base + e < ordinals) chunks[base + e] = et[e];
-                        else if (et[e] != 0) fail("frame %zu: tile %u: extension slot %u set past the tile's chunks", f, tile, base + e);
-                    ext = et[255];
-                    if ((ext != 0) != (base + 255 < ordinals)) fail("frame %zu: tile %u: extension link %u after ordinal %u of %u", f, tile, ext, base + 255, ordinals);
+                    const uint32_t* w = &fo.records[(size_t)(node - 1) * 256];
+                    uint64_t span = 1;
+                    for (uint32_t k = 1; k < depth; ++k) span *= 256;
+                    for (uint32_t i = 0; i < 256; ++i)
+                    {
+                        const uint64_t start = first + i * span;
+                        if (start < ordinals)
+                        {
+                            if (depth == 1) chunks[start] = w[i];
+                            else if (w[i] == 0) fail("frame %zu: tile %u: extension node missing below ordinal %llu", f, tile, (unsigned long long)start);
+                            else visit(w[i], depth - 1, start);
+                        }
+                        else if (w[i] != 0) fail("frame %zu: tile %u: extension slot for ordinal %llu set past the tile's %u chunks", f, tile, (unsigned long long)start, ordinals);
+                    }
+                };
+                const uint32_t root = h[5];
+                if ((root != 0) != (ordinals > slots)) fail("frame %zu: tile %u: extension root %u with %u chunks and %u slots", f, tile, root, ordinals, slots);
+                if (h[6] != 0 || h[7] != 0) fail("frame %zu: tile %u: spare header words %u %u", f, tile, h[6], h[7]);
+                if (root != 0)
+                {
+                    useChunk(root, "extension root", tile);
+                    ++extTables;
+                    const uint32_t* w = &fo.records[(size_t)(root - 1) * 256];
+                    for (uint32_t i = 0; i < 254; ++i)
+                        if (slots + i < ordinals) chunks[slots + i] = w[i];
+                        else if (w[i] != 0) fail("frame %zu: tile %u: extension root word %u set past the tile's %u chunks", f, tile, i, ordinals);
+                    const uint64_t first2 = (uint64_t)slots + 254, first3 = first2 + 65536;
+                    if ((w[254] != 0) != (first2 < ordinals)) fail("frame %zu: tile %u: 2-level subtree %u with %u chunks", f, tile, w[254], ordinals);
+                    if ((w[255] != 0) != (first3 < ordinals)) fail("frame %zu: tile %u: 3-level subtree %u with %u chunks", f, tile, w[255], ordinals);
+                    if (w[254] != 0) visit(w[254], 2, first2);
+                    if (w[255] != 0) visit(w[255], 3, first3);
                 }
                 for (uint32_t o = 0; o < ordinals; ++o) useChunk(chunks[o], "record", tile);
                 uint32_t zNear = 0, zFar = 0xFFFFFFFFu, opaque[2] = { 0, 0 };
@@ -2159,7 +2185,7 @@ UNX_TEST(coverage_layer_is_exact)
                 if (!e.found && e.required)
                     if (++missing <= 5) logf("    missing: pixel %u, area %g, depth %g\n", k.second, e.area, e.depth);
             }
-            logf("    [%s] frame %zu: %u tiles (%u heavy, deepest %u fragments, %zu extension tables), %llu fragments; %zu checked against the exact clip (%zu duplicates of "
+            logf("    [%s] frame %zu: %u tiles (%u heavy, deepest %u fragments, %zu extension nodes), %llu fragments; %zu checked against the exact clip (%zu duplicates of "
                  "clipped pieces; worst area error %.2e px, depth %.2e relative, slivers < 1e-2 px2 %.2e, normal %.2f degrees); %zu see-through records; %zu pixels "
                  "with a full opaque union, %zu opaqueCovered; %zu expected missing; %zu back-facing triangles culled, %zu pixel fragments occluded by band A, "
                  "%zu marginal; %zu stale tiles\n",

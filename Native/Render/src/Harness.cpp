@@ -9,7 +9,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <ctime>
+#include <fstream>
 #include <sstream>
 
 namespace unx::render
@@ -102,6 +105,47 @@ uint32_t Harness::sampleSmClockMHz()
     return g.bIsPresent ? g.frequency / 1000 : 0;
 }
 
+namespace
+{
+int64_t unixMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
+
+// The GpuLock sampler's live summary (UNX_GPU_CONTENTION): its "over" samples, one per line, inside [from, to] (a 1 s
+// sample ending up to 1 s after the window still overlaps it).
+void readContention(int64_t from, int64_t to, HarnessResult& result, int& intervalOut)
+{
+    char path[1024];
+    size_t n = 0;
+    if (getenv_s(&n, path, sizeof path, "UNX_GPU_CONTENTION") != 0 || n <= 1) return;
+    std::ifstream in(path);
+    if (!in) return;
+    result.contendedSeconds = 0;
+    int intervalMs = 1000;
+    std::string line;
+    while (std::getline(in, line))
+    {
+        const size_t i = line.find("\"interval_ms\": ");
+        if (i != std::string::npos) intervalMs = std::atoi(line.c_str() + i + 15);
+        long long t = 0;
+        const size_t k = line.find("{\"t_ms\": ");
+        if (k == std::string::npos || sscanf_s(line.c_str() + k, "{\"t_ms\": %lld", &t) != 1) continue;
+        if (t < from || t > to + intervalMs) continue;
+        std::string sample = line.substr(k);
+        while (!sample.empty() && (sample.back() == ',' || sample.back() == ' ' || sample.back() == '\r')) sample.pop_back();
+        result.contentionSamples.push_back(sample);
+    }
+    // Seconds with any contending process (samples share a timestamp per interval).
+    std::vector<long long> stamps;
+    for (const std::string& s : result.contentionSamples)
+    {
+        long long t = 0;
+        if (sscanf_s(s.c_str(), "{\"t_ms\": %lld", &t) == 1) stamps.push_back(t);
+    }
+    std::sort(stamps.begin(), stamps.end());
+    result.contendedSeconds = (double)(std::unique(stamps.begin(), stamps.end()) - stamps.begin()) * intervalMs / 1000.0;
+    intervalOut = intervalMs;
+}
+} // namespace
+
 HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& options, const BuildFrame& build)
 {
     if (resolution.width == 0) fail("harness: resolution not set");
@@ -118,8 +162,11 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
     std::vector<std::array<uint64_t, kQueueTypeCount>> slotFence(options.framesInFlight, std::array<uint64_t, kQueueTypeCount>{});
     std::vector<CpuFrame> cpu;
     std::vector<FrameTiming> timings;
+    std::vector<int64_t> submittedMs;  // unix ms of each measured frame's submission (contention matching)
+    std::map<uint64_t, int64_t> submitOf;
     std::vector<double> clocks;
     uint64_t firstMeasured = UINT64_MAX;
+    int64_t windowStartMs = 0;
     const auto start = std::chrono::steady_clock::now();
     HarnessResult result;
     result.label = options.label;
@@ -134,13 +181,19 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
         {
             const FrameTiming* t = profiler.lastCompleted();
             const uint64_t done = frame - options.framesInFlight;
-            if (t && t->frame == done && done >= firstMeasured && timings.size() < options.frames) timings.push_back(*t);
+            if (t && t->frame == done && done >= firstMeasured && timings.size() < options.frames)
+            {
+                timings.push_back(*t);
+                submittedMs.push_back(submitOf[done]);
+            }
+            submitOf.erase(done);
         }
         if (timings.size() >= options.frames) break;
 
         const auto t0 = std::chrono::steady_clock::now();
         build(graph, resolution, frame);
         graph.execute(&profiler);
+        submitOf[frame] = unixMs();
         const double total = msSince(t0);
         for (uint32_t q = 0; q < kQueueTypeCount; ++q) slotFence[slot][q] = graph.lastFence((QueueType)q);
 
@@ -151,9 +204,14 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
             if (frame % 16 == 0) clocks.push_back((double)sampleSmClockMHz());
         }
         else if (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() >= options.warmupSeconds)
+        {
             firstMeasured = frame + 1;
+            windowStartMs = unixMs();
+        }
     }
     m_device.waitIdle();
+    int contentionIntervalMs = 1000;
+    readContention(windowStartMs, unixMs(), result, contentionIntervalMs);
     result.graph = graph.stats();
 
     std::vector<double> gpu, cpuTotal, cpuRecord, cpuSubmit;
@@ -175,6 +233,39 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
         cpuSubmit.push_back(c.submit);
     }
     result.gpuFrameMs = Distribution::of(gpu);
+    {
+        // A frame submitted inside a contended sample (the sample covers the interval before its stamp) is contended.
+        std::vector<long long> stamps;
+        for (const std::string& s : result.contentionSamples)
+        {
+            long long t = 0;
+            if (sscanf_s(s.c_str(), "{\"t_ms\": %lld", &t) == 1) stamps.push_back(t);
+        }
+        std::vector<double> clean;
+        for (size_t i = 0; i < timings.size(); ++i)
+        {
+            bool hit = false;
+            for (long long t : stamps) hit = hit || (submittedMs[i] <= t && submittedMs[i] > t - contentionIntervalMs);
+            if (hit) ++result.contendedFrames;
+            else clean.push_back(timings[i].gpuFrameMs);
+        }
+        result.gpuFrameMsUncontended = Distribution::of(clean);
+        for (uint32_t q = 0; q < 2; ++q)
+        {
+            std::vector<double> head, tail, gap;
+            for (const FrameTiming& t : timings)
+            {
+                result.queueLists[q] = std::max(result.queueLists[q], t.queues[q].lists);
+                if (t.queues[q].lists == 0) continue;
+                head.push_back(t.queues[q].headMs);
+                tail.push_back(t.queues[q].tailMs);
+                gap.push_back(t.queues[q].gapMs);
+            }
+            result.queueHeadMs[q] = Distribution::of(head);
+            result.queueTailMs[q] = Distribution::of(tail);
+            result.queueGapMs[q] = Distribution::of(gap);
+        }
+    }
     result.cpuFrameMs = Distribution::of(cpuTotal);
     result.cpuRecordMs = Distribution::of(cpuRecord);
     result.cpuSubmitMs = Distribution::of(cpuSubmit);
@@ -207,6 +298,14 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
         js << " \"d3d12core\": " << jsonString(caps.runtimeVersion) << ", \"agility_package\": " << jsonString(UNX_AGILITY_PACKAGE_VERSION) << ",\n";
         js << " \"nvapi\": " << jsonString(caps.nvapiInterface + " / driver branch " + caps.nvapiBranch) << ",\n";
         js << " \"gpu_lock\": " << jsonString(lockHolder) << ",\n";
+        if (result.contendedSeconds < 0) js << " \"gpu_contention\": null,\n";
+        else
+        {
+            js << " \"gpu_contention\": {\"contended_seconds\": " << result.contendedSeconds << ", \"contended_frames\": " << result.contendedFrames
+               << ", \"gpu_frame_ms_uncontended\": " << jsonDistribution(result.gpuFrameMsUncontended) << ", \"samples\": [";
+            for (size_t i = 0; i < result.contentionSamples.size(); ++i) js << (i ? ", " : "") << result.contentionSamples[i];
+            js << "]},\n";
+        }
         js << " \"queue_priority\": " << jsonString(m_device.options().queuePriority == D3D12_COMMAND_QUEUE_PRIORITY_HIGH ? "high" : "normal") << ",\n";
         js << " \"warmup_s\": " << options.warmupSeconds << ", \"frames\": " << timings.size() << ", \"frames_in_flight\": " << options.framesInFlight << ", \"pass_timestamps\": " << (options.passTimestamps ? "true" : "false")
            << ", \"async_compute\": " << (options.asyncCompute ? "true" : "false") << ",\n";
@@ -215,6 +314,11 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
         js << " \"cpu_record_ms\": " << jsonDistribution(result.cpuRecordMs) << ",\n";
         js << " \"cpu_submit_ms\": " << jsonDistribution(result.cpuSubmitMs) << ",\n";
         js << " \"sm_clock_mhz\": " << jsonDistribution(result.smClockMHz) << ",\n";
+        js << " \"queues\": {";
+        for (uint32_t q = 0; q < 2; ++q)
+            js << (q ? ", " : "") << jsonString(q == 0 ? "graphics" : "compute") << ": {\"lists\": " << result.queueLists[q] << ", \"head_ms\": " << jsonDistribution(result.queueHeadMs[q])
+               << ", \"tail_ms\": " << jsonDistribution(result.queueTailMs[q]) << ", \"gap_ms\": " << jsonDistribution(result.queueGapMs[q]) << "}";
+        js << "},\n";
         const RenderGraphStats& g = result.graph;
         js << " \"graph\": {\"declared_passes\": " << g.declaredPasses << ", \"live_passes\": " << g.livePasses << ", \"transients\": " << g.transientResources
            << ", \"barrier_batches\": " << g.barrierBatches << ", \"barriers\": " << g.barriers << ", \"cross_queue_syncs\": " << g.crossQueueSyncs
@@ -240,5 +344,12 @@ void Harness::printSummary(const HarnessResult& r) const
          r.cpuRecordMs.median, r.cpuSubmitMs.median, r.smClockMHz.median, r.smClockMHz.min, r.graph.livePasses, r.graph.barriers, r.graph.barrierBatches,
          r.graph.crossQueueSyncs, r.graph.commandLists, r.graph.transientResources, r.graph.transientBytesAliased / 1048576.0, r.graph.transientBytesUnaliased / 1048576.0,
          m_quality.shortHash().c_str());
+    logf("[%s %s] outside passes: graphics %u lists, head %.4f, tail %.4f, gap %.4f ms (medians)%s\n", r.label.c_str(), r.resolution.name.c_str(), r.queueLists[0],
+         r.queueHeadMs[0].median, r.queueTailMs[0].median, r.queueGapMs[0].median,
+         r.queueLists[1] ? format(" | compute %u lists, head %.4f, tail %.4f, gap %.4f ms", r.queueLists[1], r.queueHeadMs[1].median, r.queueTailMs[1].median, r.queueGapMs[1].median).c_str()
+                         : "");
+    if (r.contendedSeconds > 0)
+        logf("[%s %s] GPU CONTENDED: another process kept the GPU busy in %.0f s of the measurement window (%zu samples, GpuLock contention; first: %s)\n",
+             r.label.c_str(), r.resolution.name.c_str(), r.contendedSeconds, r.contentionSamples.size(), r.contentionSamples.front().c_str());
 }
 } // namespace unx::render

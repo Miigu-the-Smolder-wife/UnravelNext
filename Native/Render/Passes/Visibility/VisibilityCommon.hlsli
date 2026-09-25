@@ -92,6 +92,8 @@ struct CullView
 #define OVERFLOW_NODE_DEPTH 64u        // node items left unprocessed after the last traversal iteration
 #define OVERFLOW_TILE_PAIRS 128u
 #define OVERFLOW_COVERAGE 256u         // the coverage record pool ran out (its fragments are lost; the pool grows)
+#define OVERFLOW_COVERAGE_DEPTH 512u   // a coverage tile past its extension tree (10^9 fragments)
+#define OVERFLOW_ITERATION_LIMIT 1024u // a data-dependent shader loop reached its hard bound (INTERFACES 3.6)
 
 // Wave-aggregated append of 'n' entries per lane to a counter word; returns this lane's first index. Must be called
 // from uniform control flow (every active lane of the wave). Entries at or beyond 'capacity' set 'overflowBit'.

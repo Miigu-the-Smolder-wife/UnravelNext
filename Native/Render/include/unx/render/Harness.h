@@ -52,6 +52,15 @@ struct HarnessResult
     std::map<std::string, Distribution> passMs;
     std::vector<std::string> passOrder;
     RenderGraphStats graph;
+    // GPU contention in the measurement window (GpuLock.ps1 v1.39 sampler, UNX_GPU_CONTENTION): seconds in which some
+    // process outside the measured tree kept the GPU busy >= its threshold, and those samples. -1 = no sampler data.
+    double contendedSeconds = -1;
+    std::vector<std::string> contentionSamples;  // JSON objects {"t_ms", "pid", "ms_per_s", "name"}
+    uint32_t contendedFrames = 0;                // measured frames submitted inside a contended sample
+    Distribution gpuFrameMsUncontended;          // gpu frame over the other frames
+    // Per queue (graphics, compute): command lists per frame and the time outside passes (GpuProfiler QueueTiming).
+    uint32_t queueLists[2] = {};
+    Distribution queueHeadMs[2], queueTailMs[2], queueGapMs[2];
     std::filesystem::path jsonPath, csvPath;
 };
 

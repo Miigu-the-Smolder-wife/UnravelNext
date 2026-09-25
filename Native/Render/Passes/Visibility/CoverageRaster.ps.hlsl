@@ -1,6 +1,8 @@
 // unx-kernel: ps_6_6 main
+// unx-variants: STAGE=0,1,2
 // Coverage layer pixel kernel (band B, CoverageLayer.hlsli, CoverageTiles.hlsli), conservative rasterisation, no render
-// target or depth:
+// target or depth (STAGE 0; STAGE 1 and 2 are measurement variants, visibility.coverage_debug_stage: 1 stops after the
+// fragment's math, 2 after the tile counters, so the gate can split the kernel's cost):
 //  1. the exact area of the primitive's polygon (triangle, or the near-clipped quad as two triangles) inside this pixel
 //     and the covered region's centroid (Coverage.hlsli); zero area (conservative raster's touching pixels) writes
 //     nothing;
@@ -148,12 +150,34 @@ void main(float4 position : SV_Position, nointerpolation uint visId : VISID, noi
     // From here every lane takes part in the wave operations; 'live' selects the lanes with a fragment.
     RWByteAddressBuffer headers = ResourceDescriptorHeap[COV_TILE_HEADERS];
     RWByteAddressBuffer state = ResourceDescriptorHeap[COV_STATE];
+#if STAGE != 0
+    {
+        // Measurement: the record's values are computed as in STAGE 0 and folded into one wave value, so the compiler
+        // keeps the work; the fragments are counted.
+        const float3 normal = live ? coveragePolygonNormal(poly, normals, mid, (flags & COV_FLAG_BACK) != 0) : float3(0, 0, 0);
+        const uint folded = WaveActiveBitXor(live ? cs.mask ^ asuint(cs.depth) ^ coveragePackFragment(normal, cs.area, pixelInTile) : 0u);
+        if (WaveIsFirstLane() && folded == 0x9E3779B9u) state.InterlockedAdd(4 * VS_COV_LOST, 1);
+    }
+#endif
+#if STAGE == 1
+    {
+        const uint counted = WaveActiveCountBits(live);
+        if (counted > 0 && WaveIsFirstLane()) state.InterlockedAdd(4 * VS_COV_FRAGMENTS, counted);
+        return;
+    }
+#endif
 
     // Slots in the tiles: one count atomic and one depth-range update per tile present in the wave.
     uint index = 0;
     bool first = false, pending = live;
+    uint tileRounds = 0;
     while (WaveActiveAnyTrue(pending))
     {
+        if (++tileRounds > WaveGetLaneCount())
+        {
+            if (WaveIsFirstLane()) state.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_ITERATION_LIMIT);
+            break;
+        }
         // The first pending lane's tile, read by the pending lanes only (a non-pending first lane would match nobody).
         uint lead = 0;
         if (pending) lead = WaveReadLaneFirst(tile);
@@ -182,17 +206,26 @@ void main(float4 position : SV_Position, nointerpolation uint visId : VISID, noi
         RWByteAddressBuffer list = ResourceDescriptorHeap[COV_TILE_LIST];
         list.Store(4 * (COV_LIST_TILES + listSlot), tile);
     }
+#if STAGE == 2
+    return;
+#endif
 
     // Chunks: one lookup (and, for a new chunk, one pool allocation and compare-and-swap) per (tile, chunk) present in
-    // the wave. Past the table's slots the tile's extension tables hold the chunks: no fragment is dropped while the
-    // pool lasts.
+    // the wave. Past the table's slots the tile's extension tree holds the chunks (at most 3 node reads): no fragment
+    // is dropped while the pool lasts.
     const uint ordinal = index / COV_CHUNK_RECORDS;
     RWByteAddressBuffer table = ResourceDescriptorHeap[COV_CHUNK_TABLE];
     RWStructuredBuffer<uint4> records = ResourceDescriptorHeap[COV_RECORDS];
     uint chunk = 0;  // chunk index + 1 (0: the pool ran out)
     pending = live;
+    uint rounds = 0;  // at most one round per lane (a lane finishes in the round its (tile, chunk) leads)
     while (WaveActiveAnyTrue(pending))
     {
+        if (++rounds > WaveGetLaneCount())
+        {
+            if (WaveIsFirstLane()) state.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_ITERATION_LIMIT);
+            break;
+        }
         uint2 lead = 0;
         if (pending) lead = WaveReadLaneFirst(uint2(tile, ordinal));
         if (pending && all(uint2(tile, ordinal) == lead))
@@ -204,14 +237,18 @@ void main(float4 position : SV_Position, nointerpolation uint visId : VISID, noi
                 if (ordinal < slots) found = coverageChunkAt(table, 4 * (tile * slots + ordinal), false, state, records);
                 else
                 {
-                    uint e = ordinal - slots;
-                    uint t = coverageChunkAt(headers, 4 * (tile * COV_TILE_WORDS + COV_TILE_EXT), true, state, records);
-                    while (t != 0 && e >= COV_EXT_SLOTS)
+                    uint e = ordinal - slots, rootWord, digits;
+                    if (!coverageExtPath(e, rootWord, digits)) state.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_COVERAGE_DEPTH);
+                    else
                     {
-                        t = coverageExtChunkAt(records, t, COV_EXT_SLOTS, true, state);
-                        e -= COV_EXT_SLOTS;
+                        // Root (a node), its word (the chunk when direct, else a subtree node), then one node per digit;
+                        // the last word read is the chunk itself.
+                        uint t = coverageChunkAt(headers, 4 * (tile * COV_TILE_WORDS + COV_TILE_EXT), true, state, records);
+                        if (t != 0) t = coverageExtChunkAt(records, t, rootWord, digits > 0, state);
+                        [unroll] for (uint k = 3; k > 0; --k)
+                            if (k <= digits && t != 0) t = coverageExtChunkAt(records, t, (e >> (8 * (k - 1))) & 0xFFu, k > 1, state);
+                        found = t;
                     }
-                    if (t != 0) found = coverageExtChunkAt(records, t, e, false, state);
                 }
             }
             chunk = WaveReadLaneFirst(found);
