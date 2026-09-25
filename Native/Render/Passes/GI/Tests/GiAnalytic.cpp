@@ -135,6 +135,7 @@ struct Outcome
     uint32_t probes = 0;
     int converged = -1;  // first frame whose mean is within 1 %
     gi::GiStats stats;
+    uint32_t tilePixels = 0, tileMismatches = 0;  // screenProbeGatherTile vs screenProbeGather (ProbeTileCompare), all frames
 };
 
 Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky, double expected, double expectedRadiance,
@@ -143,6 +144,8 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
     GpuScene gpuScene(device);
     gpuScene.upload(s);
     Outcome out;
+    Buffer tileResult = createBuffer(device, 512, D3D12_HEAP_TYPE_DEFAULT, true);  // zero-filled at creation
+    Buffer tileReadback = createBuffer(device, 512, D3D12_HEAP_TYPE_READBACK, false);
     {
         TrackState state;
         RenderGraph graph(device);
@@ -241,12 +244,48 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
                               c.bindFrameConstants(fcAddress);
                               c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
                           });
+            const BufferRef tileRef = graph.importBuffer(tileResult.resource.Get(), { "test tile compare", 512, 0 });
+            graph.addPass("test.tilecompare", QueueType::Compute,
+                          [&](PassBuilder& b) {
+                              b.use(probes, Use::SrvCompute);
+                              b.use(maps, Use::SrvCompute);
+                              b.use(depth, Use::SrvCompute);
+                              b.use(gbuffer, Use::SrvCompute);
+                              b.use(tileRef, Use::UavCompute);
+                              b.keep();
+                          },
+                          [&, probes, maps, depth, gbuffer, tileRef, fcAddress](PassContext& c) {
+                              const uint32_t k[12] = { c.srv(probes), c.srv(depth), c.srv(gbuffer), c.uav(tileRef), 0, 0, width, height, c.srv(maps), 0, 0, 0 };
+                              c.cmd->SetPipelineState(shaders.compute("Passes/GI/Tests/ProbeTileCompare"));
+                              c.computeConstants(k, 12);
+                              c.bindFrameConstants(fcAddress);
+                              c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                          });
             graph.execute(nullptr);
             device.queue(QueueType::Graphics).waitCpu(graph.lastFence(QueueType::Graphics));
 
             CommandList cl = device.acquireCommandList(QueueType::Graphics);
             cl.list->CopyBufferRegion(readback.resource.Get(), 0, result.resource.Get(), 0, resultBytes);
+            cl.list->CopyBufferRegion(tileReadback.resource.Get(), 0, tileResult.resource.Get(), 0, 272);
             device.queue(QueueType::Graphics).waitCpu(device.submit(cl));
+            {
+                void* tm = nullptr;
+                D3D12_RANGE tr{ 0, 272 };
+                check(tileReadback.resource->Map(0, &tr, &tm), "map tile compare");
+                uint32_t words[68];
+                std::memcpy(words, tm, 272);
+                tileReadback.resource->Unmap(0, &none);
+                out.tilePixels = words[0];
+                if (words[1] > out.tileMismatches)
+                    for (uint32_t r = 0; r < std::min(words[2], 4u); ++r)
+                    {
+                        const uint32_t* w = words + 4 + r * 16;
+                        auto fv = [&](uint32_t i) { float v; std::memcpy(&v, &w[i], 4); return v; };
+                        logf("  tile mismatch at frame %u pixel (%u, %u) cone %u fields %x: E %.9g %.9g %.9g occ %.9g vs E %.9g %.9g %.9g occ %.9g; K.r %.9g vs %.9g; back.r %.9g vs %.9g\n",
+                             f, w[0] & 0xFFFFu, w[0] >> 16, w[1], w[2], fv(4), fv(5), fv(6), fv(7), fv(8), fv(9), fv(10), fv(11), fv(12), fv(13), fv(14), fv(15));
+                    }
+                out.tileMismatches = words[1];
+            }
             void* rb = nullptr;
             D3D12_RANGE all{ 0, (SIZE_T)values.size() * 4 };
             check(readback.resource->Map(0, &all, &rb), "map result");
@@ -315,17 +354,19 @@ int main(int argc, char** argv)
         const float le = 1.0f, rho = 0.5f;
         logf("white furnace: Le %.2f, albedo %.2f, expected E = pi Le / (1 - rho) = %.4f\n", le, rho, kPi * le / (1 - rho));
         const Outcome a = run(device, shaders, quality, furnace(le, rho), { 0, 0, 0 }, kPi * le / (1 - rho), le / (1 - rho), frames, 1920, 1080);
-        const bool okA = std::fabs(a.mean / (kPi * le / (1 - rho)) - 1) < 0.01 && a.worst < 0.03 && a.radianceWorst < 0.03;
+        const bool okA = std::fabs(a.mean / (kPi * le / (1 - rho)) - 1) < 0.01 && a.worst < 0.03 && a.radianceWorst < 0.03 && a.tilePixels > 0 && a.tileMismatches == 0;
         logf("white furnace: %u probes, mean %+.3f %%, worst probe %.3f %%, within 1 %% from frame %d; K radiance worst %.3f %% -> %s\n", a.probes,
              100 * (a.mean / (kPi * le / (1 - rho)) - 1), 100 * a.worst, a.converged, 100 * a.radianceWorst, okA ? "PASS" : "FAIL");
         pass = pass && okA;
 
         logf("open sky: L 1, ground albedo 0.5, expected E = pi\n");
         const Outcome b = run(device, shaders, quality, openSky(0.5f), { 1, 1, 1 }, kPi, 1.0, frames, 1920, 1080);
-        const bool okB = std::fabs(b.mean / kPi - 1) < 0.01 && b.worst < 0.03 && b.radianceWorst < 0.03;
+        const bool okB = std::fabs(b.mean / kPi - 1) < 0.01 && b.worst < 0.03 && b.radianceWorst < 0.03 && b.tilePixels > 0 && b.tileMismatches == 0;
         logf("open sky: %u probes, mean %+.3f %%, worst probe %.3f %%, within 1 %% from frame %d; K radiance worst %.3f %% -> %s\n", b.probes, 100 * (b.mean / kPi - 1),
              100 * b.worst, b.converged, 100 * b.radianceWorst, okB ? "PASS" : "FAIL");
         pass = pass && okB;
+        logf("probe tile cache: screenProbeGatherTile vs screenProbeGather, %u + %u pixel evaluations, %u + %u not bit-identical (2 cones each)\n", a.tilePixels,
+             b.tilePixels, a.tileMismatches, b.tileMismatches);
 
         rt::RayPipeline::releaseDevice(device);
         rt::RayScene::releaseDevice(device);
