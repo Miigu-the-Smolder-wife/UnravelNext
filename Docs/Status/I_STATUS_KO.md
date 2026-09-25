@@ -314,6 +314,8 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
             추가 인자: -unxExportScene <file.unxscene>(첫 동기화 뒤 현재 장면 저장), -unxScale 1024,256(설계 규모 부하 복제:
             실제 개체의 committed 루트·포즈를 읽는 인스턴스를 격자에 더한다)
    검사:   unx_gate_host_hostscene.exe --scene <file.unxscene> --describe      (CPU만: 태양·재질·메시별 NaN·감김·LOD 절단·RT 프록시·인스턴스)
+   잠금 종류(v1.28): 정확성 시험(hostswitch, hostdeviceremoved, HostAbi)은 GpuLock.ps1 -Track I -Kind correctness -- ...,
+            게이트·Player 측정은 기본(-Kind timing). 하드웨어 GPU 실행은 모두 잠금 안에서 하나씩(임시 규칙).
             unx_gate_host_hostdynamic.exe --save-scene <file.unxscene>          (게이트 장면 내용 저장, 잠금 없음; 디바이스는 만든다)
 5. 편집기: Unity.exe -projectPath ... -executeMethod UnravelNextBridge.DataWorld.Editor.UnravelNextEditorRun.Play -unxMeasureOut <json>
             (창 있는 편집기, Play 모드에서 같은 측정을 하고 스스로 종료)
@@ -349,7 +351,9 @@ S의 공기 볼륨 커밋(f1f6f8a) 뒤의 DLL(792f315 + 다른 트랙의 미커�
   `windChangeBound`와 windOffset 무기억 계약. 코어가 INTERFACES를 올리면 커밋 뒤 바람 변경 거부를 푼다.
 - `20260925_I_device_removed_policy.md`(반영, 코어 67b5508 v1.27): 플러그인이 `UnityPluginLoad`에서 `DeviceRemovedPolicy::Throw`를 둔다.
   ABI 5: `DeviceRemovedError`는 `UNX_DEVICE_REMOVED`(−4)가 되고, 그 뒤 모든 렌더러 호출이 같은 코드를 돌려준다(파괴는 된다). 렌더 이벤트는
-  제거 뒤 아무것도 하지 않는다. 시험 `unx_test_host_hostdeviceremoved`(RemoveDevice로 이 프로세스의 장치만 제거; TDR 아님).
+  제거 뒤 아무것도 하지 않는다. 시험 `unx_test_host_hostdeviceremoved`(RemoveDevice로 이 프로세스의 장치만 제거; TDR 아님)[실측, 커밋 빌드
+  ff07562, GpuLock]: 제거 뒤 다음 프레임이 `DeviceRemovedError`("map VSM stats", hr 0x887A0005)를 던지고, `Queue::waitCpu`는 제거를 기록하고
+  돌아오며, 렌더러 파괴가 끝나고 프로세스는 0으로 끝난다(87이 아니다). 통과.
   **한계:** 장치 제거 뒤 다시 적재하지 않는다. C#은 렌더러를 버리고 배경만 지우며, 그 프로세스에서는 다시 만들지 않는다. 코어의
   `deviceWasRemoved()`가 프로세스 전역이고 되돌릴 수 없어서, Unity가 새 장치를 만들어도 모든 호출이 `UNX_DEVICE_REMOVED`를 돌려준다.
   13:56에는 Unity 자신도 D3D12 제거를 복구 불가로 처리했다. 복구(드라이버 재설정·TDR 뒤 새 장치로 다시 적재)는 재구축 계획 13.6
