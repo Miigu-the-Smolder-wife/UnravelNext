@@ -1,0 +1,51 @@
+Adapter: NVIDIA GeForce RTX 4080, driver 32.0.15.9186, D3D12Core: C:\Users\USER\UnravelNext\Tools\DesignBench\build\D3D12\D3D12Core.dll
+DXC: C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64, shaders: C:/Users/USER/UnravelNext/Tools/DesignBench/Bench/shaders, resolution 3840x2160, reps 9
+  [env] timestamp frequency                                                    1000000000.0000 Hz       
+
+== Band B fragment pipeline (conservative raster + exact area + mask + 24 B append, tile composite) (after 1.5 s warm-up)
+  compiling coverage kernels
+  creating mesh pipelines
+  pipelines ready
+  slivers 0.5 px x 20 px, F ~5 M: count pass
+  prefix done
+  [coverage] slivers 0.5 px x 20 px, F ~5 M: count pass (conservative raster, tile atomics only)       0.8264 ms       5.183129 M fragments, max/tile 218, tiles > 1024: 0
+  [coverage] slivers 0.5 px x 20 px, F ~5 M: raster + area + mask + 24 B append (global list, one atomic per wave)       1.3179 ms       5.183129 M appended, 0 overflow, 0.254271 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~5 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)       1.2742 ms       5.183129 M appended, 0 overflow, 0.245844 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~5 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))       1.3465 ms       5.183129 M appended, 0 overflow, 0.259791 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~5 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)       0.5540 ms       0.106882 ns/fragment, 0.066790 ns/pixel (all pixels)
+  slivers 0.5 px x 20 px, F ~10 M: count pass
+  prefix done
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: count pass (conservative raster, tile atomics only)       1.6588 ms       10.368084 M fragments, max/tile 308, tiles > 1024: 0
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: raster + area + mask + 24 B append (global list, one atomic per wave)       2.6499 ms       10.368084 M appended, 0 overflow, 0.255581 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)       2.7403 ms       10.368084 M appended, 0 overflow, 0.264300 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))       2.8846 ms       10.368084 M appended, 0 overflow, 0.278220 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: area: Green's theorem (register resident), mask 32 (tile segments, per-fragment atomic)       1.2592 ms       0.121447 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: area: Sutherland-Hodgman arrays, no mask (tile segments, per-fragment atomic)       1.9278 ms       0.185934 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: area: Green's theorem, no mask (tile segments, per-fragment atomic)       0.8887 ms       0.085715 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: count pass with Green's-theorem area        0.3803 ms       0.036682 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: tile segments + union atomics U|=mask, D=min depth, skip when U full       4.2905 ms       0.413815 ns/fragment, full pixels 2273 of 8294400
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: tile segments + union atomics, no skip       4.5275 ms       0.436675 ns/fragment, full pixels 2273 of 8294400
+  [coverage] slivers 0.5 px x 20 px, F ~10 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)       0.8407 ms       0.081086 ns/fragment, 0.101358 ns/pixel (all pixels)
+  slivers 0.5 px x 20 px, F ~20 M: count pass
+  prefix done
+  [coverage] slivers 0.5 px x 20 px, F ~20 M: count pass (conservative raster, tile atomics only)       3.2963 ms       19.697171 M fragments, max/tile 518, tiles > 1024: 0
+  [coverage] slivers 0.5 px x 20 px, F ~20 M: raster + area + mask + 24 B append (global list, one atomic per wave)       5.3459 ms       19.697171 M appended, 0 overflow, 0.271405 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~20 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)       5.2525 ms       19.697171 M appended, 0 overflow, 0.266663 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~20 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))       5.4815 ms       19.697171 M appended, 0 overflow, 0.278287 ns/fragment
+  [coverage] slivers 0.5 px x 20 px, F ~20 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)       1.4397 ms       0.073094 ns/fragment, 0.173580 ns/pixel (all pixels)
+  slivers 0.25 px x 20 px, F ~10 M: count pass
+  prefix done
+  [coverage] slivers 0.25 px x 20 px, F ~10 M: count pass (conservative raster, tile atomics only)       1.5399 ms       9.498973 M fragments, max/tile 278, tiles > 1024: 0
+  [coverage] slivers 0.25 px x 20 px, F ~10 M: raster + area + mask + 24 B append (global list, one atomic per wave)       2.6605 ms       9.498973 M appended, 0 overflow, 0.280081 ns/fragment
+  [coverage] slivers 0.25 px x 20 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)       2.3936 ms       9.498973 M appended, 0 overflow, 0.251982 ns/fragment
+  [coverage] slivers 0.25 px x 20 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))       2.7115 ms       9.498973 M appended, 0 overflow, 0.285451 ns/fragment
+  [coverage] slivers 0.25 px x 20 px, F ~10 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)       0.7997 ms       0.084193 ns/fragment, 0.096420 ns/pixel (all pixels)
+  cards 4 px, F ~10 M: count pass
+  prefix done
+  [coverage] cards 4 px, F ~10 M: count pass (conservative raster, tile atomics only)       1.9198 ms       13.349635 M fragments, max/tile 468, tiles > 1024: 0
+  [coverage] cards 4 px, F ~10 M: raster + area + mask + 24 B append (global list, one atomic per wave)       3.2612 ms       13.349635 M appended, 0 overflow, 0.244290 ns/fragment
+  [coverage] cards 4 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per fragment)       3.1943 ms       13.349635 M appended, 0 overflow, 0.239280 ns/fragment
+  [coverage] cards 4 px, F ~10 M: raster + area + mask + 24 B append (tile segments, one atomic per (wave, tile))       3.3048 ms       13.349635 M appended, 0 overflow, 0.247557 ns/fragment
+  [coverage] cards 4 px, F ~10 M: tile segments + union atomics U|=mask, D=min depth, skip when U full       4.6277 ms       0.346655 ns/fragment, full pixels 3059541 of 8294400
+  [coverage] cards 4 px, F ~10 M: tile segments + union atomics, no skip                  5.1990 ms       0.389452 ns/fragment, full pixels 3059541 of 8294400
+  [coverage] cards 4 px, F ~10 M: tile composite (groupshared sort by pixel/depth, mask union, 2 taps/fragment)       0.9564 ms       0.071644 ns/fragment, 0.115309 ns/pixel (all pixels)

@@ -113,6 +113,9 @@ float triangleArea(float2 a, float2 b, float2 c, float2 pixel)
     }
     return 0.5 * abs(twice);
 }
+#ifndef UNION
+#define UNION 0  // revision 1 4.6 opaqueCovered union rule: 1 = per-pixel U |= mask, D = min depth with the early skip when U is full; 2 = no skip. P[5] = { U UAV (raw), D UAV (raw) }
+#endif
 #ifndef AREA
 #define AREA 0
 #endif
@@ -240,6 +243,18 @@ void FragPS(V v, Prim p)
         f.attr = (uint)(uv.x * 65535.0) | ((uint)(uv.y * 65535.0) << 16);
         frags[slot] = f;
         InterlockedAdd(counters[0], 1u);
+#if UNION
+        RWByteAddressBuffer uU = ResourceDescriptorHeap[P[5].x];
+        RWByteAddressBuffer uD = ResourceDescriptorHeap[P[5].y];
+        const uint pix = ((uint)p0.y * (uint)asfloat(P[0].x) + (uint)p0.x) * 4u;
+#if UNION == 1
+        if (uU.Load(pix) != 0xFFFFFFFFu)
+#endif
+        {
+            uD.InterlockedMin(pix, asuint(v.pos.z));
+            uU.InterlockedOr(pix, f.mask);
+        }
+#endif
     }
 #endif
 }

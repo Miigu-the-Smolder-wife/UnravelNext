@@ -609,6 +609,32 @@ static void benchCoverage()
                        std::to_string(sv.median * 1e6 / fragments) + " ns/fragment");
             }
         }
+        // Revision 1 4.6: per-pixel union atomics (U |= mask, D = min depth) added to the tile-segment append; with and
+        // without the early skip when the pixel is already full. Slivers (rarely full) and cards (fill quickly).
+        if (!g.warp && ((std::string(cs.name).find("F ~10 M") != std::string::npos && !cs.cards && cs.width == 0.5f) || cs.cards))
+        {
+            const UINT64 pixBytes = (UINT64)W * H * 4;
+            auto uBuf = g.buffer(pixBytes); auto dBuf = g.buffer(pixBytes);
+            const UINT uUav = g.uavRaw(uBuf.Get(), pixBytes), dUav = g.uavRaw(dBuf.Get(), pixBytes);
+            auto initUpload = g.buffer(pixBytes * 2, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+            { void* p; check(initUpload->Map(0, nullptr, &p), "map union init"); memset(p, 0, (size_t)pixBytes); memset((uint8_t*)p + pixBytes, 0xFF, (size_t)pixBytes); initUpload->Unmap(0, nullptr); }
+            auto unionPre = [&](ID3D12GraphicsCommandList6* l) { zeroPre(l); l->CopyBufferRegion(uBuf.Get(), 0, initUpload.Get(), 0, pixBytes); l->CopyBufferRegion(dBuf.Get(), 0, initUpload.Get(), pixBytes, pixBytes); };
+            c(5, 0) = uUav; c(5, 1) = dUav;
+            struct UV { const char* name; uint32_t uni; };
+            const UV uvs[] = { { "+ union atomics U|=mask, D=min depth, skip when U full", 1 }, { "+ union atomics, no skip", 2 } };
+            for (const UV& uv : uvs)
+            {
+                std::vector<std::wstring> d = helper; d.push_back(wdef("APPEND_MODE", 1)); d.push_back(wdef("UNION", uv.uni));
+                auto psv = dxc.compile(s, L"FragPS", L"ps_6_6", d);
+                auto psov = g.meshPso(cs.cards ? msCards.Get() : ms.Get(), psv.Get(), g_conservative);
+                Stat sv = g.time([&](ID3D12GraphicsCommandList6* l) { recordRaster(l, psov.Get()); }, unionPre);
+                const auto ub = g.readback(uBuf.Get(), pixBytes);
+                uint64_t full = 0; const uint32_t* uw = (const uint32_t*)ub.data(); for (UINT64 i = 0; i < (UINT64)W * H; ++i) full += uw[i] == 0xFFFFFFFFu;
+                record("coverage", std::string(cs.name) + ": tile segments " + uv.name, sv.median, "ms",
+                       std::to_string(sv.median * 1e6 / fragments) + " ns/fragment, full pixels " + std::to_string(full) + " of " + std::to_string((UINT64)W * H));
+            }
+            c(5, 0) = 0; c(5, 1) = 0;
+        }
         // (c) composite from the tile segments of mode 1 (records as left by the last repetition of mode 2: same layout).
         {
             Consts cc = c; cc(1, 0) = recSrv; cc(1, 1) = tcSrv; cc(1, 2) = toSrv; cc(2, 0) = tcapSrv;
