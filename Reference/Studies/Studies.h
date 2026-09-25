@@ -38,7 +38,7 @@ inline void parallelFor(uint32_t count, const std::function<void(uint32_t)>& fn)
 
 void thinFilmStudy(const std::string& out);
 void metalPresets(const std::string& out);
-void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, bool candA = false);
+void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, bool candA = false, bool candB = false);
 void clearcoatDiag(const std::string& out, uint32_t photons);
 void clearcoatSpecPath(const std::string& out, uint32_t photons);
 void coatFilmStudy(const std::string& out, uint32_t photons);

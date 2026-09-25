@@ -236,10 +236,26 @@ struct Integrals
 };
 
 // ---------------------------------------------------------------------------------------------- definitions
+float3 incident(int i)
+{
+    const double th = (i + 0.5) * (kPi / 2) / NI;
+    return { (float)std::sin(th), 0, (float)std::cos(th) };
+}
+constexpr int kSplit = 16;
+// Candidate B inputs per configuration (exact integrals, per incidence bin centre theta = (i + 0.5) deg): the lossless
+// base-path census S_k (physical walk, base colour 1, same roughness, MS coat) and the energy of R1's f_1 (with
+// candidate A's transmission), per channel.
+struct SpecPath
+{
+    std::vector<std::array<double, kSplit>> S;
+    std::vector<Rgb> f1E;
+};
+
 struct Definitions
 {
     const Config& cfg;
     Integrals in;
+    const SpecPath* sp = nullptr;
     scene::model::Surface baseR1;  // base with alpha'_b
     double ac, ab;
     explicit Definitions(const Config& c) : cfg(c)
@@ -254,7 +270,30 @@ struct Definitions
     // candA (C-track candidate A, energy-conserving coat): f_c gains the coat's multiple-scattering reflection
     // Delta(mu_i) Delta(mu_o) / (pi Delta-bar) (Kulla-Conty form, Delta = E_ms - E_c), transmission uses 1 - E_ms, and
     // the inner diffuse reflectance is the multiple-scattering K_ms.
-    Rgb r1(float3 wo, float3 wi, Rgb* parts = nullptr, bool candA = false) const
+    // candB (C-track candidate B, metallic bases; includes A): the base path f_1 + f_ms is replaced by R1's f_1 lobe
+    // scaled by sqrt(Gamma(mu_i) Gamma(mu_o)) per channel, Gamma = sum_k S_k rho^k / E_f1 (exact base-path energy over
+    // the f_1 lobe's own energy), rho = base albedo a(mu').
+    double gammaAt(double mu, int ch) const
+    {
+        const double th = std::acos(std::clamp(mu, 0.0, 1.0)) * 180 / kPi - 0.5;
+        const int i0 = std::clamp((int)std::floor(th), 0, NI - 1), i1 = std::min(i0 + 1, NI - 1);
+        const double t = std::clamp(th - i0, 0.0, 1.0);
+        auto g = [&](int i) {
+            const double muIn = refractIn(incident(i)).z;
+            const Rgb a = in.atRgb(in.a, muIn);
+            const double rho = (&a.r)[ch];
+            double e = 0, rk = 1;
+            for (int k = 1; k < kSplit; ++k)
+            {
+                rk *= rho;
+                e += sp->S[i][k] * rk;
+            }
+            const double f1 = (&sp->f1E[i].r)[ch];
+            return f1 > 1e-6 ? e / f1 : 1.0;
+        };
+        return g(i0) + t * (g(i1) - g(i0));
+    }
+    Rgb r1(float3 wo, float3 wi, Rgb* parts = nullptr, bool candA = false, bool candB = false) const
     {
         if (wo.z <= 0 || wi.z <= 0) return {};
         const float3 h = normalize(wo + wi);
@@ -277,6 +316,18 @@ struct Definitions
         const float* rt = &ret.r;
         float* o = &fms.r;
         for (int c = 0; c < 3; ++c) o[c] = (float)(Ti * rt[c] * rb[c] / (1 - rb[c] * K) * To / (kPi * kEta * kEta));
+        if (candB && sp && cfg.base.metallic > 0)
+        {
+            Rgb path;
+            for (int c = 0; c < 3; ++c) (&path.r)[c] = (float)((&f1.r)[c] * std::sqrt(gammaAt(wi.z, c) * gammaAt(wo.z, c)));
+            if (parts)
+            {
+                parts[0] = Rgb((float)fc);
+                parts[1] = path;
+                parts[2] = Rgb();
+            }
+            return Rgb((float)fc) + path;
+        }
         if (parts)
         {
             parts[0] = Rgb((float)fc);
@@ -438,15 +489,9 @@ double binCosSolidAngle(int t)  // integral of cos over the bin, both signs of d
     const double t0 = t * (kPi / 2) / NT, t1 = (t + 1) * (kPi / 2) / NT;
     return 0.5 * (std::sin(t1) * std::sin(t1) - std::sin(t0) * std::sin(t0)) * 2 * (kPi / NP);
 }
-float3 incident(int i)
-{
-    const double th = (i + 0.5) * (kPi / 2) / NI;
-    return { (float)std::sin(th), 0, (float)std::cos(th) };
-}
 
 // Energy (luminance) leaving per incidence bin, split by the number of base interactions: 0 (coat only), 1, ..., 14,
 // >= 15 (last entry).
-constexpr int kSplit = 16;
 using Split = std::vector<std::array<double, kSplit>>;
 
 // mask (optional): incidence bins to trace (others stay zero). split (optional): see Split.
@@ -563,12 +608,15 @@ void physicalTable(const Config& c, const Definitions& d, uint32_t photons, Tabl
     });
 }
 
-enum class Which { R1, Old, R1A };
+enum class Which { R1, Old, R1A, R1B };
 // parts (R1 only, optional): energy (luminance) of f_c, f_1, f_ms per incidence bin.
 using Parts = std::vector<std::array<double, 3>>;
-void definitionTable(const Config& c, const Definitions& d, Which which, uint32_t samples, Table& T, const std::vector<uint8_t>* mask = nullptr, Parts* parts = nullptr)
+// f1E (optional): energy of the f_1 part per incidence bin, per channel.
+void definitionTable(const Config& c, const Definitions& d, Which which, uint32_t samples, Table& T, const std::vector<uint8_t>* mask = nullptr, Parts* parts = nullptr,
+                     std::vector<Rgb>* f1E = nullptr)
 {
     if (parts) parts->assign(NI, { 0, 0, 0 });
+    if (f1E) f1E->assign(NI, Rgb());
     reference::Surface surfR1;
     surfR1.ng = surfR1.ns = { 0, 0, 1 };
     surfR1.bsdf = which != Which::Old ? d.baseR1 : c.base;
@@ -577,8 +625,9 @@ void definitionTable(const Config& c, const Definitions& d, Which which, uint32_
         const float3 wi = incident((int)ii);
         const float3 pi = which != Which::Old ? refractIn(wi) : wi;
         std::array<double, 3> pp = { 0, 0, 0 };
+        Rgb f1Sum;
         const reference::Bsdf base(surfR1, pi);
-        reference::Pcg32 rng(0xDEF0 + ii, 13 + (uint64_t)(c.rc * 1000) + (which == Which::R1 ? 0 : which == Which::Old ? 7 : 3));
+        reference::Pcg32 rng(0xDEF0 + ii, 13 + (uint64_t)(c.rc * 1000) + (which == Which::R1 ? 0 : which == Which::Old ? 7 : which == Which::R1A ? 3 : 5));
         auto baseLobePdf = [&](float3 wo) {
             if (which == Which::Old) return (double)base.pdf(wo);
             const float3 po = refractIn(wo);
@@ -609,15 +658,19 @@ void definitionTable(const Config& c, const Definitions& d, Which which, uint32_
             const double pdf = 0.35 * pc + 0.45 * baseLobePdf(wo) + 0.2 * wo.z / kPi;
             if (!(pdf > 0)) continue;
             Rgb pr[3];
-            const Rgb f = which != Which::Old ? d.r1(wo, wi, pr, which == Which::R1A) : d.old(wo, wi);
+            const Rgb f = which != Which::Old ? d.r1(wo, wi, pr, which == Which::R1A || which == Which::R1B, which == Which::R1B) : d.old(wo, wi);
             int bt, bp;
             binOf(wo, bt, bp);
             const double wgt = wo.z / pdf / samples;
             T.at((int)ii, bt, bp) += f * (float)wgt;
             if (which != Which::Old)
+            {
                 for (int k = 0; k < 3; ++k) pp[k] += pr[k].luminance() * wgt;
+                f1Sum += pr[1] * (float)wgt;
+            }
         }
         if (parts) (*parts)[ii] = pp;
+        if (f1E) (*f1E)[ii] = f1Sum;
     });
 }
 
@@ -799,7 +852,7 @@ std::string row(const std::string& name, double rc, const char* def, const Metri
 }
 } // namespace
 
-void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, bool candA)
+void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, bool candA, bool candB)
 {
     struct BaseDef
     {
@@ -827,7 +880,7 @@ void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, boo
     }
     std::ostringstream md, eq;
     md << "# Clearcoat R1 vs physical layer model [measured]\n\n"
-          "`unx_study_material_layers " << (candA ? "clearcoat_r1a" : msCoat ? "clearcoat_r1_ms" : "clearcoat_r1") << "`. Physical coat: "
+          "`unx_study_material_layers " << (candB ? "clearcoat_r1b" : candA ? "clearcoat_r1a" : msCoat ? "clearcoat_r1_ms" : "clearcoat_r1") << "`. Physical coat: "
        << (msCoat ? "microsurface multiple scattering (Heitz et al. 2016, energy conserving)" : "single-scattering microfacets (energy lost at grazing)")
        << ". Criteria (MATERIAL_LAYERS 3): albedo rel <= 2 % (or abs <= 0.005), L1 <= 0.05, "
           "render dE76 mean <= 1.0 and P99 <= 2.3 (white furnace / sun + sky sphere, 64 x 64). Photons per incidence bin: "
@@ -845,15 +898,28 @@ void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, boo
             c.msCoat = msCoat;
             Definitions d(c);
             computeIntegrals(c, d);
+            SpecPath spd;
+            if (candB)
+            {
+                // Candidate B inputs: lossless base-path census and R1+A's f_1 energy per incidence bin.
+                Config lossless = c;
+                lossless.base.baseColor = { 1, 1, 1 };
+                lossless.base.metallic = 1;
+                Table t0, t1, t2;
+                physicalTable(lossless, d, photons / 2, t0, t1, nullptr, &spd.S);
+                definitionTable(c, d, Which::R1A, photons / 2, t2, nullptr, nullptr, &spd.f1E);
+                d.sp = &spd;
+            }
             Table phys, half, r1, old;
             physicalTable(c, d, photons, phys, half);
-            definitionTable(c, d, Which::R1, photons, r1);
-            definitionTable(c, d, candA ? Which::R1A : Which::Old, photons, old);
+            definitionTable(c, d, candB ? Which::R1A : Which::R1, photons, r1);
+            definitionTable(c, d, candB ? Which::R1B : candA ? Which::R1A : Which::Old, photons, old);
             const std::vector<Rgb3> pf = renderSphere(phys, furnace, 64), ps = renderSphere(phys, sky, 64);
             const Metrics m1 = compare(r1, phys, half, furnace, sky, skyWhite, &pf, &ps), m0 = compare(old, phys, half, furnace, sky, skyWhite, &pf, &ps);
-            const char* second = candA ? "R1 + A (coat MS)" : "1.1 original";
-            md << row(b.name, rc, "R1", m1) << row(b.name, rc, second, m0);
-            logf("%s%s", row(b.name, rc, "R1", m1).c_str(), row(b.name, rc, second, m0).c_str());
+            const char* first = candB ? "R1 + A" : "R1";
+            const char* second = candB ? "R1 + A + B" : candA ? "R1 + A (coat MS)" : "1.1 original";
+            md << row(b.name, rc, first, m1) << row(b.name, rc, second, m0);
+            logf("%s%s", row(b.name, rc, first, m1).c_str(), row(b.name, rc, second, m0).c_str());
             logf("   K %.4f (out %.4f), rho-bar (%.3f %.3f %.3f)\n", d.in.K, d.in.Kout, d.in.rhoBar.r, d.in.rhoBar.g, d.in.rhoBar.b);
             // Lobe width check at normal incidence (metal bases): angular energy distribution excluding the coat lobe
             // (the definition's f_c energy per theta_o bin is subtracted from both).
