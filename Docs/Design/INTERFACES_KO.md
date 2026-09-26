@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.76, 2026-09-27)
+# UnravelNext 인터페이스 (v1.80, 2026-09-27)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -735,6 +735,12 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.80 (2026-09-27, 렌더 B 요청: M의 GI 캐시 조회를 셰이딩 밖으로):
+  - **`ViewResources::giIrradiance`**(RGBA16F, 주 뷰 W×H): R의 `r.gi.screen`이 globalIllumination 끝에서 쓴다. rgb = M과 같은 표면점(카메라 + mPixelRay × 선형 z, 법선은 보는 쪽으로)의 `giCacheIrradianceScreen` × g_exposure, a = 1(캐시 값 있음) / 0(M이 프로브를 씀). 앞면만이고 Foliage 뒷면은 M이 직접 조회한다. 무효면 M이 전처럼 직접 조회한다.
+- v1.79 (2026-09-27, 렌더 A: A3 FX 발광 입자 광원 core, 계약 S_STATUS 10):
+  - **`GpuScene::setFxLightCapacity(F_max)` / `fxLightRange()`**: 장면 광원 버퍼 뒤 F_max개 꼬리(gpu::Light, UAV 가능, 0으로 시작)와 개수 버퍼(요소 0 = F, 용량이 바뀔 때마다 0). N + F_max > 65,535이면 거절하고 꼬리는 그대로다(`kMaxSceneLights`). 쓰는 쪽(FX)은 gpuInstanceRange처럼 자기 장벽(SRV → UAV/복사 → SRV)으로 매 프레임 레코드와 F를 쓴다.
+  - **`FrameConstants::fxLightCount`**(StructuredBuffer<uint> SRV, kNone = 꼬리 없음)와 **`fxLightCapacity`**(F_max): 이전 framePad0/1 자리(576 B 그대로). HLSL `g_fxLightCount`, `g_fxLightCapacity`. 읽는 쪽 광원 범위는 [0, lightCount + min(F, F_max)).
+  - 원점 재설정 뒤 CPU 광원 거울(`GpuScene::lights()`)이 GPU 표와 같아졌다(이전에는 재설정 전 값으로 남아 있었다).
 - v1.78 (2026-09-27, 엔진 2 W: W2 닫힌 수체(욕탕·수영장), FEATURES_GAME 1.10):
   - **`render::PoolFrame`, `render::PoolSourceFrame`, `FrameContext::pools` / `poolCount`**: 이 프레임의 수조와 이 프레임의 원천.
     - 수조: id(0이 아니고 프레임 안에서 유일; 물결 상태의 열쇠 — 목록에서 빠지면 해제), 재질(Water 클래스), 안쪽 크기 Lx·Lz, 균일 수심, 표면막 0/1, 고요 수면 중심(이 프레임 좌표, y = 물체가 없을 때 수위), yaw.
