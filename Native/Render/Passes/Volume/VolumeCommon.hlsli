@@ -25,6 +25,8 @@
 #define VOLUME_STATUS_HAZE_OVERFLOW 2u     // haze tile entries exceed their buffer
 #define VOLUME_STATUS_RANGE 4u             // an index outside its buffer
 #define VOLUME_STATUS_HAZE_LARGE 8u        // |D| >= 8 px somewhere: outside the linear small-angle condition (reported)
+#define VOLUME_STATUS_NONFINITE 16u        // a record or a slice integral with a NaN or infinity (a defect upstream): the
+                                           // record is not binned and a slice keeps no medium, never full opacity
 
 struct VolumeConstants
 {

@@ -43,6 +43,12 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
         tau += A * r.a;
         source += A * r.b;
     }
+    if (!all(isfinite(tau)) || !all(isfinite(source)))
+    {
+        volumeStatus(c, VOLUME_STATUS_NONFINITE);  // reported; VolumeSetup isolates non-finite records, so this is a defect here
+        tau = 0;
+        source = 0;
+    }
     const float3 selfAttenuation = float3(tau.x > 1e-6f ? (1 - exp(-tau.x)) / tau.x : 1 - 0.5f * tau.x,
                                           tau.y > 1e-6f ? (1 - exp(-tau.y)) / tau.y : 1 - 0.5f * tau.y,
                                           tau.z > 1e-6f ? (1 - exp(-tau.z)) / tau.z : 1 - 0.5f * tau.z);

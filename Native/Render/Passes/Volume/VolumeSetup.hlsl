@@ -286,6 +286,14 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : S
                 }
             }
         }
+        // non-finite inputs (a defect upstream, e.g. an unset program or light term) are isolated and reported, never
+        // binned: one NaN channel would otherwise saturate the slices' extinction (min(NaN, 65504) = 65504, T = 0)
+        const float check = rec.centre.x + rec.centre.y + rec.centre.z + rec.radius + rec.mass + rec.a.x + rec.a.y + rec.a.z + rec.b.x + rec.b.y + rec.b.z;
+        if (rec.kind != VOLUME_KIND_NONE && !isfinite(check))
+        {
+            volumeStatus(c, VOLUME_STATUS_NONFINITE);
+            rec = (VolumeRecord)0;
+        }
         records[t] = rec;
     }
     return;  // binning: STEP 4 (counts) and STEP 3 (entries), one thread per record and tile row
