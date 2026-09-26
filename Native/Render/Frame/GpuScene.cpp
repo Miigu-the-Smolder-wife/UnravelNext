@@ -300,6 +300,9 @@ void GpuScene::upload(const scene::Scene& s)
     m_movedBefore.clear();
     m_posedNow.clear();
     m_posedBefore.clear();
+    m_brokenNow.clear();
+    m_brokenBefore.clear();
+    m_brokenMarked.assign(m_instances.size(), 0);
     m_records.clear();
     m_recordMarked.assign(m_instances.size(), 0);
     rawUav(m_instanceUav, m_instanceBuffer, (uint64_t)m_instanceBuffer.count * sizeof(gpu::Instance), false);
@@ -415,6 +418,7 @@ void GpuScene::setInstances(std::span<const uint32_t> indices)
             m_transformFrame.push_back(UINT64_MAX);
             m_paletteFrame.push_back(UINT64_MAX);
             m_recordMarked.push_back(0);
+            m_brokenMarked.push_back(0);
         }
         else
         {
@@ -563,21 +567,46 @@ void GpuScene::updateTransforms(uint64_t frameIndex, std::span<const InstanceTra
             m_movedNow.push_back(u.instance);
         }
         rows(u.objectToWorld, g.objectToWorld);
-        if (u.flags & kTransformTeleport) std::memcpy(g.prevObjectToWorld, g.objectToWorld, sizeof g.objectToWorld);
+        if (u.flags & kTransformTeleport)
+        {
+            // prev is still the previous rendered frame's transform here, unless a teleport of this frame already broke it.
+            if (!m_brokenMarked[u.instance]) markBreak(u.instance, g.prevObjectToWorld);
+            std::memcpy(g.prevObjectToWorld, g.objectToWorld, sizeof g.objectToWorld);
+        }
         markRecord(u.instance);
     }
+}
+
+void GpuScene::markBreak(uint32_t instance, const float4 (&before)[3])
+{
+    gpu::Instance& g = m_instances[instance];
+    const float4 c = m_meshes[g.mesh].boundsSphere;
+    g.breakCentre = { before[0].x * c.x + before[0].y * c.y + before[0].z * c.z + before[0].w,
+                      before[1].x * c.x + before[1].y * c.y + before[1].z * c.z + before[1].w,
+                      before[2].x * c.x + before[2].y * c.y + before[2].z * c.z + before[2].w };
+    g.flags |= gpu::kInstanceMotionBreak;
+    if (!m_brokenMarked[instance])
+    {
+        m_brokenMarked[instance] = 1;
+        m_brokenNow.push_back(instance);
+    }
+    markRecord(instance);
 }
 
 void GpuScene::resetMotion()
 {
     // Only what changed in this frame differs from its previous state (last frame's changes settle in flushUpdates).
+    // Each is flagged kInstanceMotionBreak: its motion is zero now, and a cache keyed by where it was drawn before (VSM
+    // pages) re-renders from breakCentre instead (the restore check found shadows of the pre-restore places otherwise).
     for (uint32_t i : m_movedNow)
     {
+        if (!m_brokenMarked[i]) markBreak(i, m_instances[i].prevObjectToWorld);  // (a teleport of this frame already did)
         std::memcpy(m_instances[i].prevObjectToWorld, m_instances[i].objectToWorld, sizeof m_instances[i].objectToWorld);
         markRecord(i);
     }
     for (uint32_t i : m_posedNow)  // uploaded with this frame's palettes (flushUpdates: the posed instances' previous rows)
     {
+        if (!m_brokenMarked[i]) markBreak(i, m_instances[i].objectToWorld);
         const uint32_t first = m_instances[i].bonePalette * 3, n = paletteJoints(i) * 3;
         std::copy(m_palette.begin() + first, m_palette.begin() + first + n, m_prevPalette.begin() + first);
     }
@@ -645,6 +674,16 @@ void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, Shader
     m_movedNow.clear();
     m_posedBefore.swap(m_posedNow);
     m_posedNow.clear();
+    // Motion breaks last one frame: last frame's flags clear unless this frame broke the instance again.
+    for (uint32_t i : m_brokenBefore)
+        if (!m_brokenMarked[i])
+        {
+            m_instances[i].flags &= ~gpu::kInstanceMotionBreak;
+            markRecord(i);
+        }
+    for (uint32_t i : m_brokenNow) m_brokenMarked[i] = 0;
+    m_brokenBefore.swap(m_brokenNow);
+    m_brokenNow.clear();
 
     // 16-byte elements: (target << 28 | element) headers, then payloads (SceneUpdate.hlsl).
     std::vector<uint32_t> headers;

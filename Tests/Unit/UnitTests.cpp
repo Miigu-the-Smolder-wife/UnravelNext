@@ -1481,6 +1481,7 @@ UNX_TEST(gpu_scene_frame_updates)
     CHECK(same(translationOf(g.instances[0].objectToWorld), { 3, 0, 0 }) && same(translationOf(g.instances[0].prevObjectToWorld), { 1, 0, 0 }));
     CHECK(g.instances[0].transformRevision == revision0 + 2);
     CHECK(same(translationOf(gs.instances()[0].objectToWorld), { 3, 0, 0 }));  // CPU mirror
+    CHECK((g.instances[0].flags & gpu::kInstanceMotionBreak) == 0 && (g.instances[1].flags & gpu::kInstanceMotionBreak) == 0);
 
     // Frame 3 (v1.35): a teleport has no motion (previous = the new transform).
     const InstanceTransformUpdate jump3[] = { { 0, translation(10, 0, 0), kTransformTeleport } };
@@ -1488,6 +1489,11 @@ UNX_TEST(gpu_scene_frame_updates)
     gs.flushUpdates(3, 2, shaders());
     g = readBack();
     CHECK(same(translationOf(g.instances[0].objectToWorld), { 10, 0, 0 }) && same(translationOf(g.instances[0].prevObjectToWorld), { 10, 0, 0 }));
+    // v1.45: the break is flagged for this frame with the bounding-sphere centre of the previous rendered frame (x = 3),
+    // where caches keyed by the drawn place (VSM pages) still hold it.
+    const float4 bounds0 = gs.meshes()[s.instances[0].mesh].boundsSphere, bounds1 = gs.meshes()[s.instances[1].mesh].boundsSphere;
+    CHECK((g.instances[0].flags & gpu::kInstanceMotionBreak) != 0 && same(g.instances[0].breakCentre, { bounds0.x + 3, bounds0.y, bounds0.z }));
+    CHECK((g.instances[1].flags & gpu::kInstanceMotionBreak) == 0);
 
     // Frame 4: a restore (resetMotion) after this frame's move and pose: no motion anywhere; the CPU palette accessor.
     const InstanceTransformUpdate move4[] = { { 0, translation(11, 0, 0) } };
@@ -1500,6 +1506,16 @@ UNX_TEST(gpu_scene_frame_updates)
     CHECK(same(translationOf(g.instances[0].prevObjectToWorld), { 11, 0, 0 }) && g.palette[1].w == 5 && g.prevPalette[1].w == 5);
     const std::span<const float4> cpuPalette = gs.palette(1);
     CHECK(cpuPalette.size() == 3 && cpuPalette[1].w == 5 && gs.palette(0).empty());
+    // Both changed instances break here: instance 0 was drawn at x = 10 last frame, instance 1 (re-posed, not moved) where it
+    // is. The teleport's flag of frame 3 lasted one frame and is renewed only by this frame's restore.
+    CHECK((g.instances[0].flags & gpu::kInstanceMotionBreak) != 0 && same(g.instances[0].breakCentre, { bounds0.x + 10, bounds0.y, bounds0.z }));
+    const float3 at1 = translationOf(g.instances[1].objectToWorld);
+    CHECK((g.instances[1].flags & gpu::kInstanceMotionBreak) != 0 && same(g.instances[1].breakCentre, { bounds1.x + at1.x, bounds1.y + at1.y, bounds1.z + at1.z }));
+
+    // Frame 5: nothing changes: the flags clear.
+    gs.flushUpdates(5, 2, shaders());
+    g = readBack();
+    CHECK((g.instances[0].flags & gpu::kInstanceMotionBreak) == 0 && (g.instances[1].flags & gpu::kInstanceMotionBreak) == 0);
 }
 
 UNX_TEST(material_tables_on_the_gpu)

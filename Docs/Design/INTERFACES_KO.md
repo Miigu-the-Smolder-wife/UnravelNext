@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.44, 2026-09-26)
+# UnravelNext 인터페이스 (v1.45, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -423,6 +423,7 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 - `prevObjectToWorld` = **직전 렌더 프레임**의 objectToWorld, 이전 본 팔레트 = 직전 렌더 프레임의 팔레트. 이번 프레임에 안 바뀐 인스턴스 중 직전 프레임에 바뀐 것은 prev = current로 맞춘다(멈추면 움직임 0).
 - `transformRevision`, `deformRevision`은 바뀐 프레임마다 1씩 오른다(한 프레임에 여러 번 갱신해도 1).
 - 숨김: `Instance::flags`의 `gpu::kInstanceHidden`(1 << 31, HLSL `INSTANCE_HIDDEN`). 모든 소비자가 건너뛴다. V는 인스턴스 컬링에서 건너뛰고(주 뷰, 서비스), R은 TLAS에서 뺀다(R이 반영).
+- 움직임 끊김(v1.45): 순간이동(`kTransformTeleport`)이나 `resetMotion()`(Restore)으로 이전 변환·팔레트를 지금 것으로 둔 인스턴스는 그 프레임 하나 동안 `gpu::kInstanceMotionBreak`(1 << 30, HLSL `INSTANCE_MOTION_BREAK`)를 달고, `Instance::breakCentre`(옛 pad0..2)에 직전 렌더 프레임에서 경계 구의 월드 중심을 담는다. 움직임은 0이다. 전에 그린 자리에 묶인 캐시(S의 VSM 페이지)는 prev로 점프를 잴 수 없으므로 이 플래그로 옛 자리와 새 자리를 무효화한다. 복원 검사에서 복원 전 자리의 그림자가 남던 원인이다.
 - CPU 사본(`instances()`)은 호출 즉시 바뀐다. `revision()`(장면 구조)은 바뀌지 않는다.
 - 비용 [예상]: 갱신 원소(16 B) 수 × 2(업로드 링 + 산포). 인스턴스 2만 개와 본 2.56만 개면 약 2.2 MB, 0.01 ms 수준.
 
@@ -722,6 +723,8 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.45 (2026-09-26):
+  - **움직임 끊김 플래그(6.3, A0 복원 검사)**: `gpu::kInstanceMotionBreak`와 `Instance::breakCentre`. S의 `VsmMoved`는 끊긴 인스턴스의 모든 단계를 무효화하고(기준점은 마지막으로 그린 자리에 남는다), `VsmLocalInvalidate`는 옛 구를 `breakCentre`에서 잡는다.
 - v1.44 (2026-09-26):
   - **commit 뒤 장면 편집(6.3, I 요청, D0)**: `GpuScene::setInstances`, `setMaterials`.
   - **Unity 콘텐츠 매핑(8.5, D0, core 결정)**: 좌표·UV·재질(URP Lit, Standard)·광원·메시 규칙. 8.1로 정확히 옮길 수 없는 입력은 콘텐츠 보고로 남긴다.

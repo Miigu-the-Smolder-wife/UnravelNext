@@ -15,7 +15,7 @@ struct GpuInstance
     uint transformRevision;
     uint deformRevision;
     float windStiffness, windPhase, windAnchor;
-    uint pad0, pad1, pad2;
+    float3 breakCentre;  // INSTANCE_MOTION_BREAK: world centre of the bounding sphere in the previous rendered frame
 };
 
 struct GpuMesh
@@ -101,6 +101,9 @@ struct GpuVisibleCluster
 #define INSTANCE_SKINNED (1u << 2)
 #define INSTANCE_WIND (1u << 3)
 #define INSTANCE_HIDDEN (1u << 31)  // gpu::kInstanceHidden: skipped by every reader (GpuScene::setInstanceVisible)
+// gpu::kInstanceMotionBreak (v1.45): a teleport or restore in this frame; prev* = current (zero motion), breakCentre = where
+// its bounding sphere was in the previous rendered frame (caches keyed by the old place invalidate from it).
+#define INSTANCE_MOTION_BREAK (1u << 30)
 // scene::MaterialClass
 #define MATERIAL_STANDARD 0u
 #define MATERIAL_FOLIAGE 1u

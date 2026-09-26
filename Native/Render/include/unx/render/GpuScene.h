@@ -161,6 +161,10 @@ private:
     std::vector<scene::Skeleton> m_poses;  // current joint-to-model per skeleton
     std::vector<uint64_t> m_transformFrame, m_paletteFrame;
     std::vector<uint32_t> m_movedNow, m_movedBefore, m_posedNow, m_posedBefore;
+    // Instances flagged gpu::kInstanceMotionBreak in this frame and in the previous flushed one (the flag lasts one frame).
+    std::vector<uint32_t> m_brokenNow, m_brokenBefore;
+    std::vector<uint8_t> m_brokenMarked;
+    void markBreak(uint32_t instance, const float4 (&before)[3]);
     std::vector<uint32_t> m_records;
     std::vector<uint8_t> m_recordMarked;
     std::vector<Upload> m_uploads;

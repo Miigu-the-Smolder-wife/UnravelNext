@@ -11,6 +11,11 @@ namespace unx::render::gpu
 {
 constexpr uint32_t kNone = 0xFFFFFFFFu;
 constexpr uint32_t kInstanceHidden = 1u << 31;  // Instance::flags, GPU scene only (GpuScene::setInstanceVisible): every reader skips it
+// Instance::flags, GPU scene only, set for one frame (v1.45): the instance's motion history broke in this frame (a teleport,
+// UNX_TRANSFORM_TELEPORT, or a restore discontinuity: prevObjectToWorld = objectToWorld and the previous palette = the
+// current one, so its motion is zero). Caches keyed by where the instance was drawn before (VSM pages) cannot measure the
+// jump from prevObjectToWorld: breakCentre holds the world centre of its bounding sphere in the previous rendered frame.
+constexpr uint32_t kInstanceMotionBreak = 1u << 30;
 
 struct Instance  // 144 B
 {
@@ -23,7 +28,7 @@ struct Instance  // 144 B
     uint32_t transformRevision;   // increments when objectToWorld changes
     uint32_t deformRevision;      // increments when skinning/wind changes this instance's vertices beyond a tick
     float windStiffness, windPhase, windAnchor;
-    uint32_t pad0, pad1, pad2;
+    float3 breakCentre;           // kInstanceMotionBreak: world centre of the bounding sphere in the previous rendered frame
 };
 static_assert(sizeof(Instance) == 144);
 
