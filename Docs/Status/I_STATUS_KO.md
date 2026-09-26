@@ -1,3 +1,23 @@
+## 재개 지점 (렌더 A, 2026-09-27 06:20; 문맥 비움 전)
+- 상태:
+  - 모든 작업이 커밋되었다(UnravelNext ecb0546까지, Unravel 62724c31 이후 FEATURE_STATUS 측정).
+  - 마지막 배포는 Unravel 7f41a91a(빌드 a0bb161)다.
+  - 배포 절차: `Tools/CI/Build.ps1 -Track all -Committed` → 게이트 빌드로 전체 ShadingTests 하드웨어 → `Tools/UnitySlots/UnityLock.ps1 -Slot A ... -- Native/Host/Deploy.ps1 -Build ..\UnravelNext-gate\build\all` → Plugins·Native~ 커밋.
+- 다음 순서(조정 결정):
+  1. sheen 면광원. 알려진 결함이다: 면광원 아래 sheen 광택 없음. Charlie lobe가 고리 모양이라 LTC 적합 연구 (1) → (2) 2엽 → (3) 입체각 구적 순으로 한다. 코드는 `Passes/Common/MaterialModel.hlsli` modelSheen*, ShadeOpaque `LAYERED == 2`의 `scaleBase = keepS`, CoverageShade `sheenOn`이다.
+  2. 발광 입자 광원. B와 계약했다: 장면 광원 버퍼 꼬리, 용량 = 빛 플래그 행 수, N + F_max ≤ 65,535, core 몫.
+  3. 비등방성(G-buffer 접선) → 박막((c) 32칸) → 자동차 도장(코트 아래 금속 재설계) → 스타일화.
+  4. 메시 입자·빔. 엔진 2와 계약했다: 자산 키, 방향 사원수 v4, 빔은 스트림 경로.
+- UI 겹치기(A13) 확인은 캡처하지 못했다. 원인과 할 일:
+  - 캡처 시험은 camera.targetTexture에 그리는데, Screen Space Overlay(uGUI, UI Toolkit)는 화면 백버퍼에만 그려진다.
+  - UnravelNextPipeline은 SupportedRenderingFeatures.rendersUIOverlay를 두지 않으므로 Unity가 Render 뒤에 백버퍼 위에 겹쳐 그린다. 순서는 맞을 것으로 본다[예상].
+  - HDR 출력(RGBA16F 선형 백버퍼)에서는 UI 밝기(paper white)가 맞는지 확인이 필요하다.
+  - 할 일: PlayMode 시험에서 ScreenCapture.CaptureScreenshotAsTexture로 SDR·HDR 두 경우를 찍는다.
+- 측정 [실측] 4K(`Results/M/D0Timing_0927`):
+  - D0 중앙값 10.27 ms(M 4.21 / S 2.80 / R 2.49, 최상위 m.lit.shade.b0 3.35).
+  - fp_1000 21.87 ms(S 13.99, 그중 s.froxel.integrate 4.65).
+- 대기 중인 합류: 없음.
+
 # I 트랙 상태 (통합: Unity 호스트 ↔ 새 렌더러) — 2026-09-25
 
 표기: [실측] = 이 기계(i9-13900KF, RTX 4080, 드라이버 591.86, 모니터 2560×1440 143 Hz)에서 실행한 결과, [예상] = 비용식·가정.
