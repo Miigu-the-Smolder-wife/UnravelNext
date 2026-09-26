@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.66, 2026-09-26)
+# UnravelNext 인터페이스 (v1.67, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -735,6 +735,12 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
     - World 단계마다 순서는 tick들 → 분수 → 프레임이다. 건너뛰거나 버린 프레임의 연산은 이월된다.
     - [실측] `unx_test_host_hosthair` 통과(id 일치, 상태 생성, 잘못된 입력 거부, 제거·재사용, 디버그 오류 0).
   - **GPU 브리지 호스트(엔진 1의 84922cc)**: 렌더러 장치마다 GpuBridgeHost 하나. 선택 export `UnxAcquireGpuBridge / UnxReleaseGpuBridge / UnxGpuBridgeStatistics`(NRC_GpuBridge 136 B, NRC_GpuStatistics 240 B, 옛 Tnr* 모양). 소멸자는 quiesce 뒤 장치보다 먼저 해제한다. 프레임 합류(prepareGraphics / commitGraphics)는 B8 유체 표면 때 넣는다.
+- v1.67 (2026-09-26, 렌더 C, A6 투과 층 — A 결정):
+  - **투과 층**(주 뷰, coverage 층 켜짐, 장면에 유리·물 재질이 있을 때): 대역 A 폭의 유리(`MATERIAL_GLASS`)·물(`MATERIAL_WATER`) 클러스터는 대역 A에서 빠져 `LIST_T_BACK`·`LIST_T_NONE`으로 간다(대역 A는 그 뒤를 그대로 가진다; HiZ도 유리를 가리개로 쓰지 않는다). 두 단계 모든 항목을 band A 깊이 사본 위에 그린다(재질 알파 시험 포함): 개수(깊이 시험만) → 최근접(깊이 시험·쓰기).
+  - **`ViewResources::translucentVis`**(R32_UINT, 이 뷰의 visibleClusters 기준 vis id, VIS_NONE = 없음), **`translucentDepth`**(R32F 선형 뷰 깊이, +inf = 없음), **`translucentClass`**(R8_UINT): 0 없음, 1 표본이 픽셀의 유일한 투과 면이고 픽셀 전체를 덮음, 2 픽셀의 투과 면들은 coverage 기록(투과 비트, 정확 면적·마스크·깊이)이고 표본은 쓰지 않음. 2의 조건: 투과 면 개수 ≥ 2, 또는 3 × 3 이웃에 개수가 1이 아니거나 다른 면(인스턴스·재질)이 있거나 깊이가 굽음(2차 차분 > 1e-3 × 깊이), 또는 중심에 투과 면이 없는데 이웃 중심에 있음(윤곽 바깥쪽: 면이 중심 없이 픽셀 일부를 덮을 수 있어 표본은 없음). 0은 3 × 3 어디에도 없음.
+  - **M 합성**: 클래스 1은 표본(vis·깊이)을 픽셀 전체 투과 면으로, 클래스 2는 기록으로 앞에서 뒤로 투과를 누적한다. 물 층(v1.63·v1.64)과 대역 B 기록은 그대로 함께 온다.
+  - 목록·상태 배치(V 내부): VS_LISTS 8, VS_LIST_PHASE1 48, VA_MESH 48, VA_COV_T_MESH 72. CoverageRaster는 `COV_RASTER_LIST`(P[6].x)·`COV_RASTER_TRANSLUCENT`(P[6].y)·`COV_TRANSLUCENT_CLASS`(P[7].z)를 받는다.
+  - 시험 `unx_test_visibility_translucenttests`: 먼 불투명 배경, 유리 판 두 장(판 2가 판 1 뒤에서 일부 겹침), 판 1 모서리 앞의 불투명 판으로 된 장면에서 대역 A 안의 유리 0 픽셀; 윤곽 0.01 px 안과 그 이웃을 뺀 230,346 픽셀에서 클래스·면·깊이 불일치 0(깊이 최악 상대 4.3e-7); 투과 기록 6,818개 전부 투과 비트·클래스 2 픽셀 안; 가려지지 않은 판 2: 클래스 1 픽셀 2,861 + 기록 3,030.374 px² = 5891.374 px² 대 정확 5891.409(반올림 한도 1.578). 첫 실행에서 윤곽 바깥쪽 픽셀(중심 개수 0)이 기록을 못 받아 10.4 px²가 빠진 결함을 찾아 클래스 규칙을 고쳤다. V·S 시험 14개 통과(디버그 층 오류 0). 함께: `GpuScene::addRuntimeMesh`는 풀 대상 뷰가 없으면 거절한다(B 제안). 커밋 f0f1031.
 - v1.66 (2026-09-26, 렌더 A·core: Hair·Cut 재질 필드, 엔진 2·렌더 C 합의):
   - **scene::Material**: `hairEumelanin`, `hairPheomelanin`, `hairBetaN`(0.3), `hairTilt`(0.0349 rad), `cutScale`(1), `cutDamageWidth`(0.01 m), `MaterialClass::Cut = 6`(HLSL `MATERIAL_CUT`). validate는 Hair(멜라닌 ≥ 0, β_N ∈ (0, 1], ior > 1)와 Cut(cutScale > 0, 폭 ≥ 0)을 검사한다.
   - **장면 파일**: 확장 블록 "HAIR"와 "CUTS"는 해당 클래스 재질이 있을 때만 쓴다. 그래서 형식 버전과 기존 장면의 바이트·contentHash는 그대로다. 읽기는 확장 블록(MRPH, HAIR, CUTS)을 순서대로 받는다.
