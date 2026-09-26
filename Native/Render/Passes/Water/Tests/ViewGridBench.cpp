@@ -10,6 +10,7 @@
 // the sampler returns identical bits for a point evaluated twice, which WARP's SampleGrad does not); the hashed atomic
 // min equals a CPU min per pixel.
 //   unx_test_water_viewgridbench [--no-debug-layer] [--time | --warp]
+#include "unx/water/LinearDispatch.h"
 #include "unx/water/Ocean.h"
 
 #include "unx/render/GpuProfiler.h"
@@ -291,14 +292,14 @@ int main(int argc, char** argv)
                                       const uint32_t k[8] = { paramSrv, c.srv(displacement), c.uav(vertices), 0, aniso };
                                       c.cmd->SetPipelineState(vertexPass);
                                       c.computeConstants(k, 8);
-                                      c.cmd->Dispatch((grid.columns * grid.rows + 63) / 64, 1, 1);
+                                      unx::water::dispatchLinear(c.cmd, (grid.columns * grid.rows + 63) / 64);
                                   });
                     g.addPass("view grid clear", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(key, Use::UavCompute); pb.use(counter, Use::UavCompute); },
                               [=](PassContext& c) {
                                   const uint32_t k[8] = { 0, 0, c.uav(key), 0, 0, pixels, pixels, 0xFFFFFFFFu };
                                   c.cmd->SetPipelineState(atomics);
                                   c.computeConstants(k, 8);
-                                  c.cmd->Dispatch((pixels + 63) / 64, 1, 1);
+                                  unx::water::dispatchLinear(c.cmd, (pixels + 63) / 64);
                                   const uint32_t z[8] = { 0, 0, c.uav(counter), 0, 0, 32, 32, 0 };  // 256 B of zero
                                   c.computeConstants(z, 8);
                                   c.cmd->Dispatch(1, 1, 1);
@@ -325,7 +326,7 @@ int main(int argc, char** argv)
                                       const uint32_t k[8] = { paramSrv, c.srv(displacement), c.uav(waves), 0, aniso };
                                       c.cmd->SetPipelineState(sampler);
                                       c.computeConstants(k, 8);
-                                      c.cmd->Dispatch((grid.columns * grid.rows + 63) / 64, 1, 1);
+                                      unx::water::dispatchLinear(c.cmd, (grid.columns * grid.rows + 63) / 64);
                                   });
                     ComPtr<ID3D12Resource> rb;
                     if (!time)
@@ -420,14 +421,14 @@ int main(int argc, char** argv)
                                       const uint32_t z[8] = { 0, 0, c.uav(key), 0, 0, pixels, pixels, 0xFFFFFFFFu };
                                       c.cmd->SetPipelineState(atomics);
                                       c.computeConstants(z, 8);
-                                      c.cmd->Dispatch((pixels + 63) / 64, 1, 1);
+                                      unx::water::dispatchLinear(c.cmd, (pixels + 63) / 64);
                                   });
                         g.addPass("atomic min", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(key, Use::UavCompute); },
                                   [=](PassContext& c) {
                                       const uint32_t z[8] = { 0, 0, c.uav(key), 0, mode, threads, pixels, 0 };
                                       c.cmd->SetPipelineState(atomics);
                                       c.computeConstants(z, 8);
-                                      c.cmd->Dispatch((threads + 63) / 64, 1, 1);
+                                      unx::water::dispatchLinear(c.cmd, (threads + 63) / 64);
                                   });
                         ComPtr<ID3D12Resource> rb;
                         if (!time)

@@ -4,6 +4,7 @@
 //   threads / pixels); mode 2: thread i updates a hashed pixel. Key = (hash(i) & 0x7fffffff) << 32 | i.
 // P[0] 0, 0, key UAV (raw), 0; P[1] mode, threads, pixels, fill value (mode 0)
 #include "Bindless.hlsli"
+#include "../WaterLinear.hlsli"
 
 uint vgHash(uint x)
 {
@@ -12,8 +13,9 @@ uint vgHash(uint x)
 }
 
 [numthreads(64, 1, 1)]
-void main(uint i : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint thread : SV_GroupThreadID)
 {
+    const uint i = waterLinear(group, thread, 64);
     if (i >= P[1].y) return;
     RWByteAddressBuffer keys = ResourceDescriptorHeap[P[0].z];
     const uint pixels = P[1].z;

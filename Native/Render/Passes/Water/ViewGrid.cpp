@@ -1,4 +1,5 @@
 // Water view grid (track W, B7). See include/unx/water/ViewGrid.h and ViewGrid.hlsli.
+#include "unx/water/LinearDispatch.h"
 #include "unx/water/ViewGrid.h"
 
 #include "unx/core/Log.h"
@@ -335,7 +336,7 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
                   const uint32_t k[4] = { c.uav(keys), pixels, c.uav(counters), 64 };
                   c.cmd->SetPipelineState(clear);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch((pixels + 63) / 64, 1, 1);
+                  unx::water::dispatchLinear(c.cmd, (pixels + 63) / 64);
               });
     // The ocean bounds pyramid (the adaptive near field's distances; its top mip is the measured R and A).
     const TextureRef pyramid = g.importTexture(m_pyramid.Get(), TextureDesc{ "ocean bounds pyramid", 512, 512, 3, 10, DXGI_FORMAT_R32G32B32A32_FLOAT }, D3D12_BARRIER_LAYOUT_COMMON);

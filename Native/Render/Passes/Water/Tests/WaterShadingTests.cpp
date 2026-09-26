@@ -6,6 +6,7 @@
 //   - reciprocity: R from air at theta_i equals R from water at the refracted angle theta_t (Stokes, |d| <= 2e-6)
 //   - energy: R + T = 1 at every angle by construction (T = 1 - R), and R, T in [0, 1]
 //   unx_test_water_watershadingtests [--no-debug-layer]
+#include "unx/water/LinearDispatch.h"
 #include "unx/render/Device.h"
 #include "unx/render/RenderGraph.h"
 #include "unx/render/Shaders.h"
@@ -61,7 +62,7 @@ int main(int argc, char** argv)
         ID3D12PipelineState* pso = shaders.compute("Passes/Water/Tests/WaterShadingProbe");
         const BufferRef out = g.createBuffer({ "water probe", kAngles * 48, 0 });
         g.addPass("water probe", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(out, Use::UavCompute); },
-                  [=](PassContext& c) { const uint32_t k[4] = { c.uav(out), kAngles, 0, 0 }; c.cmd->SetPipelineState(pso); c.computeConstants(k, 4); c.cmd->Dispatch((kAngles + 63) / 64, 1, 1); });
+                  [=](PassContext& c) { const uint32_t k[4] = { c.uav(out), kAngles, 0, 0 }; c.cmd->SetPipelineState(pso); c.computeConstants(k, 4); unx::water::dispatchLinear(c.cmd, (kAngles + 63) / 64); });
         ID3D12Resource* rb = readback.Get();
         g.addPass("water probe read", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(out, Use::CopySrc); pb.keep(); },
                   [=](PassContext& c) { c.cmd->CopyBufferRegion(rb, 0, c.resource(out), 0, kAngles * 48); });

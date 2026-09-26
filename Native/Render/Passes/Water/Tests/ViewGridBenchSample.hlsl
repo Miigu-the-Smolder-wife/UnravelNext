@@ -4,10 +4,12 @@
 // wave sum is stored so nothing is optimised away.
 // P[0] params SRV, displacement SRV, output UAV (raw, 4 B per wave), 0; P[1] anisotropic
 #include "../ViewGrid.hlsli"
+#include "../WaterLinear.hlsli"
 
 [numthreads(64, 1, 1)]
-void main(uint i : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint thread : SV_GroupThreadID)
 {
+    const uint i = waterLinear(group, thread, 64);
     const ViewGridParams p = viewGridParams(P[0].x);
     const int2 q = int2(i % p.columns, i / p.columns);
     float sum = 0;

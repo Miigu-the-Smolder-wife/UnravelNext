@@ -7,10 +7,12 @@
 // where the terrain covers it).
 // P[0] params SRV, displacement SRV, vertex UAV (raw, 12 B per point), 0; P[1] anisotropic
 #include "../ViewGrid.hlsli"
+#include "../WaterLinear.hlsli"
 
 [numthreads(64, 1, 1)]
-void main(uint i : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint thread : SV_GroupThreadID)
 {
+    const uint i = waterLinear(group, thread, 64);
     const ViewGridParams p = viewGridParams(P[0].x);
     if (i >= p.columns * p.rows) return;
     const int2 q = int2(i % p.columns, i / p.columns);

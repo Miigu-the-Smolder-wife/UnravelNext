@@ -15,8 +15,8 @@ float foamCoarser(RWTexture2DArray<float> foam, FoamParams p, uint level, float2
     const int2 i0 = int2(floor(u));
     const float2 f = u - float2(i0);
     if (any(i0 < l.origin) || any(i0 + 1 >= l.origin + FOAM_N)) return 0;
-    const float a = foam[uint3(foamStorage(i0), level)], b = foam[uint3(foamStorage(i0 + int2(1, 0)), level)];
-    const float c = foam[uint3(foamStorage(i0 + int2(0, 1)), level)], d = foam[uint3(foamStorage(i0 + 1), level)];
+    const float a = foam[uint3(foamStorage(l, i0), level)], b = foam[uint3(foamStorage(l, i0 + int2(1, 0)), level)];
+    const float c = foam[uint3(foamStorage(l, i0 + int2(0, 1)), level)], d = foam[uint3(foamStorage(l, i0 + 1), level)];
     return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
 }
 
@@ -31,13 +31,15 @@ void main(uint2 id : SV_DispatchThreadID)
     const int2 texel = l.origin + int2(id);
     const float2 x0 = (float2(texel) + 0.5) * s;
     RWTexture2DArray<float> foam = ResourceDescriptorHeap[P[0].x];
-    const uint3 at = uint3(foamStorage(texel), level);
+    const uint3 at = uint3(foamStorage(l, texel), level);
     const bool entered = any(texel < l.previous) || any(texel >= l.previous + FOAM_N);
     const float previous = entered ? (level + 1 < p.levels ? foamCoarser(foam, p, level + 1, x0) : 0.0) : foam[at] * exp(-l.elapsed / p.tau);
     const OceanPoint o = oceanSample(P[1].x, P[1].y, asfloat(P[2].xyz), x0, s);
     const float jacobian = (1 + o.dDdx.x) * (1 + o.dDdz.z) - o.dDdz.x * o.dDdx.z;
     ByteAddressBuffer accumulator = ResourceDescriptorHeap[P[0].z];
     const float sigma = sqrt(float(accumulator.Load<uint64_t>(8 * level)) * (1.0 / 1099511627776.0));
-    const float breaking = sigma > 0 ? foamPhi((p.threshold - jacobian) / sigma) : (jacobian < p.threshold ? 1.0 : 0.0);
+    // J_t: the authored one, or (NaN) the sea state's automatic threshold (FoamCalibrate, byte 136).
+    const float threshold = isnan(p.threshold) ? asfloat(accumulator.Load(136)) : p.threshold;
+    const float breaking = sigma > 0 ? foamPhi((threshold - jacobian) / sigma) : (jacobian < threshold ? 1.0 : 0.0);
     foam[at] = max(previous, breaking);
 }

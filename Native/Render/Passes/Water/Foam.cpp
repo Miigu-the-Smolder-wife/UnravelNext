@@ -4,6 +4,7 @@
 #include "unx/core/Log.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace unx::water
@@ -71,15 +72,36 @@ Foam::~Foam()
 }
 void Foam::setDesc(const FoamDesc& desc)
 {
-    if (!desc.levels || desc.levels > kMaxLevels || !(desc.s0 > 0) || !(desc.tau > 0)) fail("foam: invalid description");
+    if (!desc.levels || desc.levels > kMaxLevels || !(desc.s0 > 0) || !(desc.tau > 0) || !(std::isnan(desc.coverage) || (desc.coverage > 0 && desc.coverage <= 1)))
+        fail("foam: invalid description");
     const bool resolution = desc.s0 != m_desc.s0 || desc.levels != m_desc.levels;
+    if (desc.tau != m_desc.tau || !(desc.coverage == m_desc.coverage || (std::isnan(desc.coverage) && std::isnan(m_desc.coverage)))) m_calibratedWind = -1;
     m_desc = desc;
     if (resolution) std::fill(std::begin(m_placed), std::end(m_placed), false);  // every texel starts again
     m_varianceValid = m_varianceValid && !resolution;
 }
 
-FoamOutput Foam::record(RenderGraph& g, uint64_t frame, double seconds, const OceanOutput& fields, const float lengths[3], double cameraX, double cameraZ)
+void Foam::rebase(double shiftX, double shiftZ)
 {
+    const double shift[2] = { shiftX, shiftZ };
+    for (uint32_t l = 0; l < kMaxLevels; ++l)
+    {
+        const double spacing = double(m_desc.s0) * double(1u << (2 * l));
+        for (int a = 0; a < 2; ++a)
+        {
+            const double texels = shift[a] / spacing, whole = std::round(texels);
+            if (std::abs(texels - whole) > 1e-6 * std::max(1.0, std::abs(whole)))
+                fail("foam: an origin shift of %.9g m is not a whole number of level %u's %.9g m texels", shift[a], l, spacing);
+            const int32_t n = int32_t(whole);
+            m_origin[l][a] -= n;
+            m_bias[l][a] = (m_bias[l][a] + n) & int32_t(kN - 1);
+        }
+    }
+}
+
+FoamOutput Foam::record(RenderGraph& g, uint64_t frame, double seconds, const OceanOutput& fields, const OceanDesc& sea, double cameraX, double cameraZ)
+{
+    const float* lengths = sea.lengths;
     const uint32_t slot = uint32_t(frame % m_upload.size());
     uint8_t* p = m_mapped[slot];
     const float header[4] = { 0, m_desc.s0, m_desc.tau, m_desc.threshold };
@@ -108,6 +130,7 @@ FoamOutput Foam::record(RenderGraph& g, uint64_t frame, double seconds, const Oc
         std::memcpy(row + 8, update[l] ? previous : m_origin[l], 8);
         std::memcpy(row + 16, &elapsed, 4);
         std::memcpy(row + 20, &updated, 4);
+        std::memcpy(row + 24, m_bias[l], 8);
     }
     FoamOutput out;
     out.paramSrv = m_paramSrv[slot];
@@ -124,7 +147,7 @@ FoamOutput Foam::record(RenderGraph& g, uint64_t frame, double seconds, const Oc
         ID3D12PipelineState* reduce = m_shaders.compute("Passes/Water/FoamVariance");
         g.addPass("foam variance clear", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(variance, Use::UavCompute); },
                   [=](PassContext& c) {
-                      const uint32_t z[4] = { 0, 0, c.uav(variance), 16 };  // ViewGridClear: the accumulators only
+                      const uint32_t z[4] = { 0, 0, c.uav(variance), 64 };  // ViewGridClear: the accumulators only (256 B)
                       c.cmd->SetPipelineState(clear);
                       c.computeConstants(z, 4);
                       c.cmd->Dispatch(1, 1, 1);
@@ -139,6 +162,23 @@ FoamOutput Foam::record(RenderGraph& g, uint64_t frame, double seconds, const Oc
                       c.cmd->Dispatch((Ocean::kN * Ocean::kN * 3 + 255) / 256, 1, 1);
                   });
         m_varianceValid = true;
+        m_calibratedWind = -1;
+    }
+    if (std::isnan(m_desc.threshold) && m_calibratedWind != sea.windSpeed)
+    {
+        // The automatic threshold for this sea state (FoamCalibrate.hlsl).
+        ID3D12PipelineState* calibrate = m_shaders.compute("Passes/Water/FoamCalibrate");
+        const float target = std::isnan(m_desc.coverage) ? observedCoverage(sea.windSpeed) : m_desc.coverage, tau = m_desc.tau;
+        g.addPass("foam calibrate", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(variance, Use::UavCompute); },
+                  [=](PassContext& c) {
+                      uint32_t k[4] = { c.uav(variance), 0 };
+                      std::memcpy(&k[2], &target, 4);
+                      std::memcpy(&k[3], &tau, 4);
+                      c.cmd->SetPipelineState(calibrate);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+        m_calibratedWind = sea.windSpeed;
     }
     ID3D12PipelineState* kernel = m_shaders.compute("Passes/Water/FoamUpdate");
     for (int32_t l = int32_t(levels) - 1; l >= 0; --l)  // coarse first: entering fine texels read the coarser level

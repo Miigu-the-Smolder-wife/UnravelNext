@@ -5,10 +5,12 @@
 // vertex, the block's 11 x 11 vertices from quad 8 block - 1: viewGridNearVertex).
 // P[0] params SRV, displacement SRV, output UAV (raw, 16 B per point), points; P[1] mode, 0, slopes SRV, entries SRV
 #include "../ViewGrid.hlsli"
+#include "../WaterLinear.hlsli"
 
 [numthreads(64, 1, 1)]
-void main(uint i : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint thread : SV_GroupThreadID)
 {
+    const uint i = waterLinear(group, thread, 64);
     if (i >= P[0].w) return;
     const ViewGridParams p = viewGridParams(P[0].x);
     int2 xy;

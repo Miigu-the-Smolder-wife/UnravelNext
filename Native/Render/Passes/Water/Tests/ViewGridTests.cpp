@@ -14,6 +14,7 @@
 // requires some).
 //   unx_test_water_viewgridtests [--no-debug-layer] [--warp] [--size W H] [--theta-of W]: the pixel angle of a 60 deg view W
 //   pixels wide (the image is then a window of that view; --theta-of 3840 checks at 4K's pixel angle)
+#include "unx/water/LinearDispatch.h"
 #include "unx/water/ViewGrid.h"
 
 #include "unx/core/File.h"
@@ -259,7 +260,7 @@ int main(int argc, char** argv)
                               const uint32_t k[8] = { paramSrv, c.srv(displacement), c.uav(partOut), part.points, part.mode, 0, c.srv(slopeField), entrySrv };
                               c.cmd->SetPipelineState(probe);
                               c.computeConstants(k, 8);
-                              c.cmd->Dispatch((part.points + 63) / 64, 1, 1);
+                              unx::water::dispatchLinear(c.cmd, (part.points + 63) / 64);
                           });
                 const uint64_t at = offset, bytes = uint64_t(part.points) * 16;
                 g.addPass("view grid probe gather", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(partOut, Use::CopySrc); pb.use(probeOut, Use::CopyDst); },

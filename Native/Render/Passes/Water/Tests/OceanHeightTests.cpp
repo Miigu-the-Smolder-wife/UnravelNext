@@ -12,6 +12,7 @@
 //      |t_gpu - t_ref| <= 1e-4 t_ref. Node visits are printed (median, 99th percentile, max)
 //   --time: [performance] build + mips (12 levels) and a 3840 x 2160 pinhole search over open sea (median of 16 frames)
 //   unx_test_water_oceanheighttests [--no-debug-layer] [--time | --warp]
+#include "unx/water/LinearDispatch.h"
 #include "unx/water/OceanHeight.h"
 
 #include "unx/render/GpuProfiler.h"
@@ -172,7 +173,7 @@ Result frame(Gpu& gpu, Ocean& ocean, OceanHeight& clip, const Scene& scene, cons
                       k[15] = c.srv(slopes);
                       c.cmd->SetPipelineState(probe);
                       c.computeConstants(k, 16);
-                      c.cmd->Dispatch((count + 63) / 64, 1, 1);
+                      unx::water::dispatchLinear(c.cmd, (count + 63) / 64);
                   });
         return result;
     };

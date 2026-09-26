@@ -9,10 +9,12 @@
 // P[2] cascade lengths; P[3] refine parameter SRV (raw), input SRV (raw), mode, slopes SRV
 #include "Bindless.hlsli"
 #include "../OceanRefine.hlsli"
+#include "../WaterLinear.hlsli"
 
 [numthreads(64, 1, 1)]
-void main(uint i : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint thread : SV_GroupThreadID)
 {
+    const uint i = waterLinear(group, thread, 64);
     if (i >= P[0].w) return;
     ByteAddressBuffer input = ResourceDescriptorHeap[P[3].y];
     RWByteAddressBuffer o = ResourceDescriptorHeap[P[0].z];

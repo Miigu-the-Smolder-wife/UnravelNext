@@ -6,10 +6,12 @@
 #include "Bindless.hlsli"
 #include "../WaterShading.hlsli"
 #include "../WaterFragment.hlsli"  // compiled here so the interface file is always built
+#include "../WaterLinear.hlsli"
 
 [numthreads(64, 1, 1)]
-void main(uint i : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint thread : SV_GroupThreadID)
 {
+    const uint i = waterLinear(group, thread, 64);
     if (i >= P[0].y) return;
     RWByteAddressBuffer o = ResourceDescriptorHeap[P[0].x];
     float theta = radians(0.5 * i);
