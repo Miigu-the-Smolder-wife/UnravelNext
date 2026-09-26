@@ -8,12 +8,17 @@
 //   3. open boundary: a splash at the centre leaves the window through the sponge: after 90 s (the slowest resolved
 //      ripple, 10 cm, needs 64 s to reach the edge) the peak |eta| is below 1e-3 of its early peak (no wrap-around)
 //   4. two runs are bit-identical
-//   unx_test_water_rippletests [--no-debug-layer] [--time]
+//   5. origin rebase (FrameContext::originShift): a run whose world coordinates move by (-1024, +2048) m at frame 10
+//      (Ripples::rebase, focus and sources moved with them) is bit-identical to the run without the rebase (texel
+//      1/16 m, so 1024 m is a whole number of texels exactly)
+//   unx_test_water_rippletests [--no-debug-layer] [--time | --warp] [--rebase-only]
 #include "unx/water/Ripple.h"
 
 #include "unx/render/GpuProfiler.h"
 #include "unx/core/File.h"
 #include "unx/core/Log.h"
+
+#include <dxgi1_6.h>
 
 #include <algorithm>
 #include <cmath>
@@ -42,12 +47,29 @@ constexpr size_t kTexels = size_t(N) * N;
 constexpr double kPi = 3.14159265358979323846;
 using cd = std::complex<double>;
 
+ComPtr<ID3D12Device> warpDevice()
+{
+    ComPtr<IDXGIFactory4> factory;
+    check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "DXGI factory");
+    ComPtr<IDXGIAdapter> adapter;
+    check(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)), "WARP adapter");
+    ComPtr<ID3D12Device> device;
+    check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)), "WARP device");
+    return device;
+}
 struct Gpu
 {
+    ComPtr<ID3D12Device> external;
     Device device;
     ShaderLibrary shaders;
-    explicit Gpu(bool debugLayer)
-        : device([&] { DeviceOptions o; o.debugLayer = debugLayer; return o; }()), shaders(device, executableDirectory() / "shaders") {}
+    Gpu(bool debugLayer, bool warp)
+        : external(warp ? warpDevice() : nullptr), device([&] {
+              DeviceOptions o;
+              o.debugLayer = debugLayer && !warp;
+              o.externalDevice = external.Get();
+              return o;
+          }()),
+          shaders(device, executableDirectory() / "shaders") {}
 };
 ComPtr<ID3D12Resource> buffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE type)
 {
@@ -228,13 +250,16 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, time = false;
+        bool debugLayer = true, time = false, warp = false, rebaseOnly = false;
         for (int i = 1; i < argc; ++i)
         {
             if (std::string(argv[i]) == "--no-debug-layer") debugLayer = false;
             if (std::string(argv[i]) == "--time") time = true;
+            if (std::string(argv[i]) == "--warp") warp = true;
+            if (std::string(argv[i]) == "--rebase-only") rebaseOnly = true;
         }
-        Gpu gpu(debugLayer);
+        if (warp && time) fail("--time measures hardware; WARP runs correctness only");
+        Gpu gpu(debugLayer, warp);
         const float dt = 1.0f / 165;
 
         if (time)
@@ -260,108 +285,137 @@ int main(int argc, char** argv)
             return 0;
         }
 
-        // 1. exact dispersion of single modes (no sponge, no viscosity)
-        auto mode = [&](const char* what, float depth, uint32_t ix, uint32_t iz) {
-            RippleDesc d;
-            d.spongeRate = 0;
-            d.viscosity = 0;
-            d.depth = depth;
-            Ripples ripples(gpu.device, gpu.shaders, d);
-            const double A = 0.02, kx = 2 * kPi * ix / (N * double(d.texel)), kz = 2 * kPi * iz / (N * double(d.texel));
-            std::vector<float> state(kTexels * 2, 0.0f);
-            for (uint32_t z = 0; z < N; ++z)
-                for (uint32_t x = 0; x < N; ++x) state[2 * (z * N + x)] = float(A * std::cos(kx * x * d.texel + kz * z * d.texel));
-            ripples.setState(state);
-            std::vector<float> f;
-            const int frames = 300;
-            for (int n = 0; n < frames; ++n) f = step(gpu, ripples, uint64_t(n), 0, 0, dt, {}, n == frames - 1);
-            const double w = omega(d, std::sqrt(kx * kx + kz * kz)), wGravity = std::sqrt(std::sqrt(kx * kx + kz * kz) * d.gravity);
-            double worst = 0;
-            for (uint32_t z = 0; z < N; ++z)
-                for (uint32_t x = 0; x < N; ++x)
-                    worst = std::max(worst, std::abs(f[4 * (z * N + x)] - A * std::cos(kx * x * d.texel + kz * z * d.texel) * std::cos(w * frames * double(dt))));
-            W_CHECK(worst <= 1e-4 * A, "%s: eta differs from A cos(k.x) cos(w t) by %.3g A", what, worst / A);
-            std::printf("dispersion %s: |k| %.2f 1/m, w %.4f rad/s (gravity only %.4f, %+.2f %%), after %d frames within %.2e A\n", what, std::sqrt(kx * kx + kz * kz), w, wGravity,
-                        100 * (w / wGravity - 1), frames, worst / A);
-        };
-        mode("long gravity wave", 0, 8, 3);
-        mode("short wave (capillarity)", 0, 200, 40);
-        mode("0.3 m depth", 0.3f, 6, 0);
-
-        // 2. the whole frame against the double reference
+        if (!rebaseOnly)
         {
-            RippleDesc d;
-            Ripples ripples(gpu.device, gpu.shaders, d);
-            Reference ref(d);
-            std::vector<RippleSource> sources = { { 0.3f, -0.4f, 0.12f, 2.0f, 0 }, { -1.1f, 0.7f, 0.02f, 0.5f, 0 }, { 2.0f, 1.0f, 0.3f, -1.0f, 0 }, { -0.5f, -1.2f, 0.15f, 0, 2e-4f } };
-            const double focus[4][2] = { { 0, 0 }, { 0.12, -0.08 }, { 0.37, 0.2 }, { 0.37, 0.2 } };
-            double worst = 0, peak = 0;
-            for (int n = 0; n < 4; ++n)
+            // 1. exact dispersion of single modes (no sponge, no viscosity)
+            auto mode = [&](const char* what, float depth, uint32_t ix, uint32_t iz) {
+                RippleDesc d;
+                d.spongeRate = 0;
+                d.viscosity = 0;
+                d.depth = depth;
+                Ripples ripples(gpu.device, gpu.shaders, d);
+                const double A = 0.02, kx = 2 * kPi * ix / (N * double(d.texel)), kz = 2 * kPi * iz / (N * double(d.texel));
+                std::vector<float> state(kTexels * 2, 0.0f);
+                for (uint32_t z = 0; z < N; ++z)
+                    for (uint32_t x = 0; x < N; ++x) state[2 * (z * N + x)] = float(A * std::cos(kx * x * d.texel + kz * z * d.texel));
+                ripples.setState(state);
+                std::vector<float> f;
+                const int frames = 300;
+                for (int n = 0; n < frames; ++n) f = step(gpu, ripples, uint64_t(n), 0, 0, dt, {}, n == frames - 1);
+                const double w = omega(d, std::sqrt(kx * kx + kz * kz)), wGravity = std::sqrt(std::sqrt(kx * kx + kz * kz) * d.gravity);
+                double worst = 0;
+                for (uint32_t z = 0; z < N; ++z)
+                    for (uint32_t x = 0; x < N; ++x)
+                        worst = std::max(worst, std::abs(f[4 * (z * N + x)] - A * std::cos(kx * x * d.texel + kz * z * d.texel) * std::cos(w * frames * double(dt))));
+                W_CHECK(worst <= 1e-4 * A, "%s: eta differs from A cos(k.x) cos(w t) by %.3g A", what, worst / A);
+                std::printf("dispersion %s: |k| %.2f 1/m, w %.4f rad/s (gravity only %.4f, %+.2f %%), after %d frames within %.2e A\n", what, std::sqrt(kx * kx + kz * kz), w, wGravity,
+                            100 * (w / wGravity - 1), frames, worst / A);
+            };
+            mode("long gravity wave", 0, 8, 3);
+            mode("short wave (capillarity)", 0, 200, 40);
+            mode("0.3 m depth", 0.3f, 6, 0);
+
+            // 2. the whole frame against the double reference
             {
-                const auto used = n < 2 ? sources : std::vector<RippleSource>{};
-                const auto f = step(gpu, ripples, uint64_t(n), focus[n][0], focus[n][1], dt, used, true);
-                const auto r = ref.frame(focus[n][0], focus[n][1], dt, used);
-                double e = 0, p = 0, ce[4] = {}, cp[4] = {};
-                size_t at[4] = {};
-                for (size_t i = 0; i < kTexels * 4; ++i)
+                RippleDesc d;
+                Ripples ripples(gpu.device, gpu.shaders, d);
+                Reference ref(d);
+                std::vector<RippleSource> sources = { { 0.3f, -0.4f, 0.12f, 2.0f, 0 }, { -1.1f, 0.7f, 0.02f, 0.5f, 0 }, { 2.0f, 1.0f, 0.3f, -1.0f, 0 }, { -0.5f, -1.2f, 0.15f, 0, 2e-4f } };
+                const double focus[4][2] = { { 0, 0 }, { 0.12, -0.08 }, { 0.37, 0.2 }, { 0.37, 0.2 } };
+                double worst = 0, peak = 0;
+                for (int n = 0; n < 4; ++n)
                 {
-                    const double err = std::abs(double(f[i]) - r[i]);
-                    e = std::max(e, err); p = std::max(p, std::abs(r[i]));
-                    if (err > ce[i % 4]) { ce[i % 4] = err; at[i % 4] = i / 4; }
-                    cp[i % 4] = std::max(cp[i % 4], std::abs(r[i]));
+                    const auto used = n < 2 ? sources : std::vector<RippleSource>{};
+                    const auto f = step(gpu, ripples, uint64_t(n), focus[n][0], focus[n][1], dt, used, true);
+                    const auto r = ref.frame(focus[n][0], focus[n][1], dt, used);
+                    double e = 0, p = 0, ce[4] = {}, cp[4] = {};
+                    size_t at[4] = {};
+                    for (size_t i = 0; i < kTexels * 4; ++i)
+                    {
+                        const double err = std::abs(double(f[i]) - r[i]);
+                        e = std::max(e, err); p = std::max(p, std::abs(r[i]));
+                        if (err > ce[i % 4]) { ce[i % 4] = err; at[i % 4] = i / 4; }
+                        cp[i % 4] = std::max(cp[i % 4], std::abs(r[i]));
+                    }
+                    for (int c = 0; c < 4; ++c)
+                        std::printf("  frame %d channel %d: max error %.3g at (%zu, %zu) (GPU %.6g, reference %.6g), channel peak %.3g\n", n, c, ce[c], at[c] % N, at[c] / N, double(f[4 * at[c] + c]),
+                                    r[4 * at[c] + c], cp[c]);
+                    W_CHECK(e <= 1e-4 * p, "frame %d: GPU differs from the double reference by %.3g (peak %.3g)", n, e, p);
+                    worst = std::max(worst, e / p);
+                    peak = std::max(peak, p);
                 }
-                for (int c = 0; c < 4; ++c)
-                    std::printf("  frame %d channel %d: max error %.3g at (%zu, %zu) (GPU %.6g, reference %.6g), channel peak %.3g\n", n, c, ce[c], at[c] % N, at[c] / N, double(f[4 * at[c] + c]),
-                                r[4 * at[c] + c], cp[c]);
-                W_CHECK(e <= 1e-4 * p, "frame %d: GPU differs from the double reference by %.3g (peak %.3g)", n, e, p);
-                worst = std::max(worst, e / p);
-                peak = std::max(peak, p);
+                std::printf("frames: 4 frames (3 impulse sources and a volume source, window moved twice, sponge, viscosity) equal the double reference within %.2e of the peak\n", worst);
             }
-            std::printf("frames: 4 frames (3 impulse sources and a volume source, window moved twice, sponge, viscosity) equal the double reference within %.2e of the peak\n", worst);
-        }
 
-        // 2b. displaced volume: a body pushing V = 1 litre out of its footprint lowers the mean surface by exactly V
-        {
-            Ripples ripples(gpu.device, gpu.shaders, RippleDesc{});
-            const auto f = step(gpu, ripples, 0, 0, 0, dt, { { 0.4f, -0.3f, 0.1f, 0, 1e-3f } }, true);
-            double volume = 0;
-            for (size_t i = 0; i < kTexels; ++i) volume += double(f[4 * i]) * 0.05 * 0.05;
-            W_CHECK(std::abs(volume + 1e-3) <= 1e-8, "a 1 litre source changed the water volume by %.9g m^3", volume);
-            std::printf("volume: a 1 litre source lowers the surface by %.9g m^3 in total (exact: -0.001)\n", volume);
-        }
-
-        // 3. open boundary
-        {
-            Ripples ripples(gpu.device, gpu.shaders, RippleDesc{});
-            double early = 0, late = 0;
-            // The slowest resolved ripples (wavelength 2 h = 10 cm) travel at their group velocity, about 0.2 m/s: 64 s
-            // to the edge from the centre, so the check waits 90 s.
-            const int frames = 165 * 90;
-            for (int n = 0; n < frames; ++n)
-            {
-                const bool read = n == 40 || n == frames - 1;
-                const auto f = step(gpu, ripples, uint64_t(n), 0, 0, dt, n == 0 ? std::vector<RippleSource>{ { 0, 0, 0.08f, 5.0f } } : std::vector<RippleSource>{}, read);
-                if (!read) continue;
-                double m = 0;
-                for (size_t i = 0; i < kTexels; ++i) m = std::max(m, double(std::abs(f[4 * i])));
-                (n == 40 ? early : late) = m;
-            }
-            W_CHECK(late <= 1e-3 * early, "the splash did not leave the window: peak %.3g m after 90 s, %.3g m at 0.24 s", late, early);
-            std::printf("open boundary: peak |eta| %.3g m at 0.24 s, %.3g m after 90 s (%.2e)\n", early, late, late / early);
-        }
-
-        // 4. determinism
-        {
-            std::vector<float> a, b;
-            for (int run = 0; run < 2; ++run)
+            // 2b. displaced volume: a body pushing V = 1 litre out of its footprint lowers the mean surface by exactly V
             {
                 Ripples ripples(gpu.device, gpu.shaders, RippleDesc{});
+                const auto f = step(gpu, ripples, 0, 0, 0, dt, { { 0.4f, -0.3f, 0.1f, 0, 1e-3f } }, true);
+                double volume = 0;
+                for (size_t i = 0; i < kTexels; ++i) volume += double(f[4 * i]) * 0.05 * 0.05;
+                W_CHECK(std::abs(volume + 1e-3) <= 1e-8, "a 1 litre source changed the water volume by %.9g m^3", volume);
+                std::printf("volume: a 1 litre source lowers the surface by %.9g m^3 in total (exact: -0.001)\n", volume);
+            }
+
+            // 3. open boundary
+            {
+                Ripples ripples(gpu.device, gpu.shaders, RippleDesc{});
+                double early = 0, late = 0;
+                // The slowest resolved ripples (wavelength 2 h = 10 cm) travel at their group velocity, about 0.2 m/s: 64 s
+                // to the edge from the centre, so the check waits 90 s.
+                const int frames = 165 * 90;
+                for (int n = 0; n < frames; ++n)
+                {
+                    const bool read = n == 40 || n == frames - 1;
+                    const auto f = step(gpu, ripples, uint64_t(n), 0, 0, dt, n == 0 ? std::vector<RippleSource>{ { 0, 0, 0.08f, 5.0f } } : std::vector<RippleSource>{}, read);
+                    if (!read) continue;
+                    double m = 0;
+                    for (size_t i = 0; i < kTexels; ++i) m = std::max(m, double(std::abs(f[4 * i])));
+                    (n == 40 ? early : late) = m;
+                }
+                W_CHECK(late <= 1e-3 * early, "the splash did not leave the window: peak %.3g m after 90 s, %.3g m at 0.24 s", late, early);
+                std::printf("open boundary: peak |eta| %.3g m at 0.24 s, %.3g m after 90 s (%.2e)\n", early, late, late / early);
+            }
+
+            // 4. determinism
+            {
+                std::vector<float> a, b;
+                for (int run = 0; run < 2; ++run)
+                {
+                    Ripples ripples(gpu.device, gpu.shaders, RippleDesc{});
+                    std::vector<float> f;
+                    for (int n = 0; n < 20; ++n) f = step(gpu, ripples, uint64_t(n), 0.01 * n, 0, dt, { { 0.2f, 0.1f, 0.05f, 1.0f } }, n == 19);
+                    (run ? b : a) = f;
+                }
+                W_CHECK(std::memcmp(a.data(), b.data(), a.size() * 4) == 0, "two runs differ");
+                std::printf("determinism: two 20-frame runs are bit-identical\n");
+            }
+        }
+        // 5. origin rebase
+        {
+            std::vector<float> a, b;
+            RippleDesc d;
+            d.texel = 1.0f / 16;
+            for (int run = 0; run < 2; ++run)
+            {
+                Ripples ripples(gpu.device, gpu.shaders, d);
                 std::vector<float> f;
-                for (int n = 0; n < 20; ++n) f = step(gpu, ripples, uint64_t(n), 0.01 * n, 0, dt, { { 0.2f, 0.1f, 0.05f, 1.0f } }, n == 19);
+                double shift[2] = { 0, 0 };
+                for (int n = 0; n < 20; ++n)
+                {
+                    if (run == 1 && n == 10)
+                    {
+                        ripples.rebase(1024, -2048);
+                        shift[0] = 1024;
+                        shift[1] = -2048;
+                    }
+                    const RippleSource source{ float(0.25 - shift[0]), float(0.125 - shift[1]), 0.1f, n < 12 ? 1.0f : 0.0f };
+                    f = step(gpu, ripples, uint64_t(n), 0.03 * n - shift[0], 0.5 - shift[1], dt, { source }, n == 19);
+                }
                 (run ? b : a) = f;
             }
-            W_CHECK(std::memcmp(a.data(), b.data(), a.size() * 4) == 0, "two runs differ");
-            std::printf("determinism: two 20-frame runs are bit-identical\n");
+            W_CHECK(std::memcmp(a.data(), b.data(), a.size() * 4) == 0, "the rebased run differs");
+            std::printf("origin rebase: a (-1024, +2048) m shift at frame 10 leaves the field bit-identical\n");
         }
         const uint32_t errors = gpu.device.drainDebugMessages();
         W_CHECK(errors == 0, "%u debug-layer errors", errors);

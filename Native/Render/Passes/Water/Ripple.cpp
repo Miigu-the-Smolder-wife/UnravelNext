@@ -93,6 +93,19 @@ void Ripples::setState(const std::vector<float>& etaPhi)
     m_stateDirty = true;
 }
 
+void Ripples::rebase(double shiftX, double shiftZ)
+{
+    const double shift[2] = { shiftX, shiftZ };
+    for (int a = 0; a < 2; ++a)
+    {
+        const double texels = shift[a] / double(m_desc.texel);
+        const double whole = std::round(texels);
+        if (std::abs(texels - whole) > 1e-6 * std::max(1.0, std::abs(whole)))
+            fail("ripples: an origin shift of %.9g m is not a whole number of %.9g m texels", shift[a], double(m_desc.texel));
+        m_origin[a] -= int32_t(whole);
+    }
+}
+
 RippleOutput Ripples::record(RenderGraph& g, uint64_t frame, double focusX, double focusZ, float dt, const std::vector<RippleSource>& sources)
 {
     if (!(dt >= 0)) fail("ripples: negative frame time");

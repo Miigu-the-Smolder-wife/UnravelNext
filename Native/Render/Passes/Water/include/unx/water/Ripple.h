@@ -55,6 +55,10 @@ public:
     RippleOutput record(render::RenderGraph& graph, uint64_t frame, double focusX, double focusZ, float dt, const std::vector<RippleSource>& sources);
     // Replaces the state (eta, phi per texel, row-major, 2 N^2 floats) at the current window; tests and restores.
     void setState(const std::vector<float>& etaPhi);
+    // Origin rebase (FrameContext::originShift, C9): world coordinates became the previous ones minus (shiftX, shiftZ);
+    // the window keeps its water (its texel origin moves by the same whole number of texels). Each shift must be a whole
+    // number of texels (1024 m multiples with the default 5 cm texel).
+    void rebase(double shiftX, double shiftZ);
     const RippleDesc& desc() const { return m_desc; }
     static int32_t windowOrigin(double focus, float texel);  // world texel index of texel 0 for a focus coordinate
 
