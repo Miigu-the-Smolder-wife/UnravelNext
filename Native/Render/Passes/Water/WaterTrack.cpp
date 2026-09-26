@@ -12,6 +12,7 @@
 #include "unx/core/Log.h"
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <vector>
 
@@ -114,6 +115,19 @@ static void waterFluids(FramePassContext& fc)
         // The fluid's particles and origin are in the physics World's axes, which are the particle streams' (the Unity host's
         // World is the renderer's mirrored in z: FrameContext::streamAxes); the surface is written in renderer axes.
         for (int a = 0; a < 3; ++a) input.axes[a] = frame.streamAxes[a] < 0 ? -1.0f : 1.0f;
+        {
+            // W3 seam: the basins recorded this frame whose footprint meets the fluid's domain (at most two)
+            float lo[3], hi[3];
+            slot.surface->bounds(lo, hi);
+            for (int a = 0; a < 3; ++a)
+                if (input.axes[a] < 0) { const float l = -hi[a]; hi[a] = -lo[a]; lo[a] = l; }
+            for (const water::FluidSurfaceInput::Basin& b : fc.state<std::vector<water::FluidSurfaceInput::Basin>>("W.poolBasins"))
+            {
+                const float r = 0.5f * std::sqrt(b.sizeX * b.sizeX + b.sizeZ * b.sizeZ);
+                if (b.centre[0] + r < lo[0] || b.centre[0] - r > hi[0] || b.centre[2] + r < lo[2] || b.centre[2] - r > hi[2]) continue;
+                input.basins.push_back(b);
+            }
+        }
         const water::FluidSurfaceOutput out = slot.surface->record(g, input);
         TriangleStream stream;
         stream.vertices = out.vertices;

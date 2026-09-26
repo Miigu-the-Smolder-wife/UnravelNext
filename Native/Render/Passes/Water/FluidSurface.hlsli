@@ -53,6 +53,88 @@ bool fsFirstRecord() { return P[7].w != 0; }
 float3 fsAxes() { return float3((P[6].w & 1u) ? -1.0 : 1.0, (P[6].w & 2u) ? -1.0 : 1.0, (P[6].w & 4u) ? -1.0 : 1.0); }
 bool fsMirrored() { return (countbits(P[6].w & 7u) & 1u) != 0; }
 
+// ---- W3 seam (engine 2): basins whose water the fluid enters --------------------------------------------------------
+// Inside a closed basin the fluid and the bath are one medium: the fluid surface below the bath surface is no boundary
+// and is cut away exactly, triangle by triangle, at y = level + eta(x, z) (the pool's field, W2), in the renderer's
+// axes. The basins are a table (FluidBasin.hlsl writes it: P[8] = (table SRV, basin count)), eta at sample (lx, lz) /
+// (L / 256) of each basin's local frame (Pool.cpp axes(): local x = dx cos - dz sin + Lx / 2, local z = dx sin + dz cos +
+// Lz / 2). Only cells in the band |y - level| <= band + 2 h over a basin take two triangle slots per case triangle (a
+// triangle cut to a quad is two); cells wholly below it are under the water (zero area); every other cell is emitted
+// exactly as before. The band is this frame's max |eta| of the basin's field (FluidBasin.hlsl): measured, so no part of
+// the surface leaves it and the out-of-band decisions are exact.
+#define FS_CLIP_BASINS_MAX 64u
+#define FS_CLIP_FAR 1e30f
+struct FsBasin { float3 centre; uint field; float c, s, sizeX, sizeZ, band; };
+uint fsBasinCount() { return min(P[8].y, FS_CLIP_BASINS_MAX); }
+FsBasin fsBasin(uint b)
+{
+    ByteAddressBuffer table = ResourceDescriptorHeap[P[8].x];  // 48 B records (FluidBasin.hlsl)
+    const uint4 a = table.Load4(b * 48), q = table.Load4(b * 48 + 16);
+    FsBasin r;
+    r.centre = asfloat(a.xyz); r.field = a.w; r.c = asfloat(q.x); r.s = asfloat(q.y); r.sizeX = asfloat(q.z); r.sizeZ = asfloat(q.w);
+    r.band = asfloat(table.Load(b * 48 + 32));
+    return r;
+}
+float2 fsBasinLocal(FsBasin b, float3 p)
+{
+    const float dx = p.x - b.centre.x, dz = p.z - b.centre.z;
+    return float2(dx * b.c - dz * b.s + 0.5f * b.sizeX, dx * b.s + dz * b.c + 0.5f * b.sizeZ);
+}
+// Bilinear eta of the pool field (RGBA32F 257^2, .x) at local (lx, lz).
+float fsEta(FsBasin b, float2 l)
+{
+    Texture2D<float4> field = ResourceDescriptorHeap[b.field];
+    const float2 u = clamp(l / float2(b.sizeX, b.sizeZ) * 256.0f, 0.0f, 256.0f);
+    const uint2 i = min((uint2)u, 255u);
+    const float2 f = u - (float2)i;
+    const float e00 = field.Load(int3(i, 0)).x, e10 = field.Load(int3(i + uint2(1, 0), 0)).x;
+    const float e01 = field.Load(int3(i + uint2(0, 1), 0)).x, e11 = field.Load(int3(i + uint2(1, 1), 0)).x;
+    return lerp(lerp(e00, e10, f.x), lerp(e01, e11, f.x), f.y);
+}
+// Signed height above the water of the basin over p (renderer axes): < 0 is under a bath surface; FS_CLIP_FAR outside
+// every basin.
+float fsAboveWater(float3 p)
+{
+    [loop] for (uint k = 0; k < fsBasinCount(); ++k)
+    {
+        const FsBasin b = fsBasin(k);
+        const float2 l = fsBasinLocal(b, p);
+        if (l.x < 0 || l.y < 0 || l.x > b.sizeX || l.y > b.sizeZ) continue;
+        return p.y - (b.centre.y + fsEta(b, l));
+    }
+    return FS_CLIP_FAR;
+}
+// The centre of marching cubes cell `cell` (node coordinates of its lowest corner) in the renderer's axes: one
+// expression for the count and the emit, so both passes decide the band identically.
+float3 fsCellCentre(int3 cell) { return fsAxes() * (fsOrigin() + ((float3)cell + 0.5f) * fsH()); }
+// A cell wholly under a basin's water: over the basin and below its band (the field's measured max |eta|, so the whole
+// surface is above the cell): its triangles are all under the surface and are emitted with zero area (one slot each).
+bool fsUnderBand(float3 centre)
+{
+    const float reach = 2.0f * fsH();
+    [loop] for (uint k = 0; k < fsBasinCount(); ++k)
+    {
+        const FsBasin b = fsBasin(k);
+        const float2 l = fsBasinLocal(b, centre);
+        if (l.x < reach || l.y < reach || l.x > b.sizeX - reach || l.y > b.sizeZ - reach) continue;
+        if (centre.y < b.centre.y - b.band - reach) return true;
+    }
+    return false;
+}
+// A marching cubes cell (its centre, renderer axes) in the waterline band of a basin: it takes two slots per triangle.
+bool fsInBand(float3 centre)
+{
+    const float reach = 2.0f * fsH();
+    [loop] for (uint k = 0; k < fsBasinCount(); ++k)
+    {
+        const FsBasin b = fsBasin(k);
+        const float2 l = fsBasinLocal(b, centre);
+        if (l.x < -reach || l.y < -reach || l.x > b.sizeX + reach || l.y > b.sizeZ + reach) continue;
+        if (abs(centre.y - b.centre.y) <= b.band + reach) return true;
+    }
+    return false;
+}
+
 uint fsBlockIndex(int3 b) { uint3 n = fsBlocks(); return ((uint)b.z * n.y + (uint)b.y) * n.x + (uint)b.x; }
 bool fsInside(int3 b) { uint3 n = fsBlocks(); return all(b >= 0) && all(b < (int3)n); }
 int3 fsBlockCoord(uint i) { uint3 n = fsBlocks(); return int3(i % n.x, (i / n.x) % n.y, i / (n.x * n.y)); }

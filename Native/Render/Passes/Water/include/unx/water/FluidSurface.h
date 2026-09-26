@@ -6,6 +6,8 @@
 // Deterministic: fixed-point density sums, slots and triangles in block, cell and case-table order.
 #include "unx/render/Device.h"
 #include "unx/render/RenderGraph.h"
+
+#include <vector>
 #include "unx/render/Shaders.h"
 
 #include <array>
@@ -36,6 +38,18 @@ struct FluidSurfaceInput
                                   // World is the renderer's mirrored in z); the grid, origin and bounds stay in particle space
     uint32_t previousSlotOffset = UINT32_MAX;  // bytes to the uint index of each particle in `previous` (physics fluid:
                                                // 44, Particle.origin); UINT32_MAX = the same index
+    // W3 seam (engine 2): closed basins the fluid enters. Their water and the fluid are one medium, so the surface below
+    // a basin's water (level + eta, W2 pool field) is cut away exactly (FluidSurface.hlsli fsAboveWater); only cells in
+    // the waterline band change. Renderer axes, as the output.
+    struct Basin
+    {
+        float centre[3] = {};        // the water's centre at its level (PoolPlacement::centre)
+        float cosYaw = 1, sinYaw = 0;  // Pool.cpp axes(): local x = dx cos - dz sin, local z = dx sin + dz cos
+        float sizeX = 0, sizeZ = 0;  // inner basin (m)
+        render::TextureRef field;    // RGBA32F 257^2 pool field (eta in .x) of this frame
+    };
+    static constexpr uint32_t kMaxBasins = 64;  // FluidSurface.hlsli FS_CLIP_BASINS_MAX
+    std::vector<Basin> basins;
 };
 struct FluidSurfaceOutput
 {
@@ -77,6 +91,7 @@ private:
     FluidSurfaceDesc m_desc;
     uint32_t m_blocks[3] = {}, m_tableSize = 0, m_maxBlocks = 0;
     render::ComPtr<ID3D12Resource> m_table, m_scan, m_density, m_counters, m_info, m_blockTris, m_vertices, m_velocities, m_cases, m_dispatch, m_draw;
+    render::ComPtr<ID3D12Resource> m_basinTable;  // W3 seam: 64 basin records of 48 B (FluidBasin.hlsl)
     render::ComPtr<ID3D12CommandSignature> m_signature;
     bool m_casesUploaded = false;
     bool m_recorded = false;  // FluidTail: the first record retires the whole capacity

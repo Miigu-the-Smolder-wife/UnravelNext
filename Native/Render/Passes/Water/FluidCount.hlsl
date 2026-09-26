@@ -29,6 +29,8 @@ void main(uint t : SV_GroupThreadID, uint3 group : SV_GroupID)
         if (g_density[(n.z * FS_WINDOW + n.y) * FS_WINDOW + n.x] >= FS_ISO) mask |= 1u << corner;
     }
     uint count = cases.Load(4 * mask * FS_CASE_STRIDE);
+    // W3 seam: a waterline cell takes two slots per triangle (FluidSurface.hlsli fsInBand; the emit cuts them)
+    if (count != 0u && fsInBand(fsCellCentre(origin + c))) count *= 2u;
     g_prefix[t] = count; GroupMemoryBarrierWithGroupSync();
     for (uint s = 1; s < FS_BLOCK_NODES; s <<= 1) { uint a = t >= s ? g_prefix[t - s] : 0; GroupMemoryBarrierWithGroupSync(); g_prefix[t] += a; GroupMemoryBarrierWithGroupSync(); }
     info.Store(4 * (g * FS_BLOCK_NODES + t), mask | ((g_prefix[t] - count) << 8));

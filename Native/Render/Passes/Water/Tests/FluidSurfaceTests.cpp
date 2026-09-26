@@ -203,7 +203,18 @@ ComPtr<ID3D12Resource> buffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE ty
     return r;
 }
 
-Mesh run(Gpu& gpu, FluidSurface& surface, const std::vector<Particle>& now, const std::vector<Particle>* previous, float alpha, const float* axes = nullptr)
+// W3 seam: a basin whose water (level + eta, eta = tilt (lx - Lx / 2): a tilted surface, exact under bilinear sampling)
+// cuts the fluid surface; renderer axes.
+struct SeamBasin { float centre[3]; float yaw, sizeX, sizeZ, tilt; };
+double seamAbove(const SeamBasin& b, double x, double y, double z)
+{
+    const double c = std::cos(double(b.yaw)), s = std::sin(double(b.yaw)), dx = x - b.centre[0], dz = z - b.centre[2];
+    const double lx = dx * c - dz * s + 0.5 * b.sizeX, lz = dx * s + dz * c + 0.5 * b.sizeZ;
+    if (lx < 0 || lz < 0 || lx > b.sizeX || lz > b.sizeZ) return 1e30;
+    return y - (b.centre[1] + b.tilt * (lx - 0.5 * b.sizeX));
+}
+Mesh run(Gpu& gpu, FluidSurface& surface, const std::vector<Particle>& now, const std::vector<Particle>* previous, float alpha, const float* axes = nullptr,
+         const SeamBasin* seam = nullptr)
 {
     const uint64_t bytes = std::max<size_t>(now.size(), 1) * sizeof(Particle);
     auto upload = buffer(gpu.device, bytes * (previous ? 2 : 1), D3D12_HEAP_TYPE_UPLOAD);
@@ -231,6 +242,36 @@ Mesh run(Gpu& gpu, FluidSurface& surface, const std::vector<Particle>& now, cons
     in.particles = particles; in.previous = old; in.count = (uint32_t)now.size(); in.stride = sizeof(Particle); in.alpha = alpha;
     in.velocityOffset = 16; in.velocityScale = kVelocityScale; in.previousSlotOffset = previous ? 44 : UINT32_MAX;
     if (axes) for (int a = 0; a < 3; ++a) in.axes[a] = axes[a];
+    ComPtr<ID3D12Resource> fieldUpload;
+    if (seam)
+    {
+        // the pool field (RGBA32F 257^2, eta in .x at local (i Lx / 256, j Lz / 256)), uploaded by a copy
+        constexpr uint32_t kSide = 257, kPitch = (kSide * 16 + 255) / 256 * 256;
+        fieldUpload = buffer(gpu.device, uint64_t(kPitch) * kSide, D3D12_HEAP_TYPE_UPLOAD);
+        uint8_t* f = nullptr;
+        check(fieldUpload->Map(0, nullptr, (void**)&f), "map seam field");
+        for (uint32_t j = 0; j < kSide; ++j)
+            for (uint32_t i = 0; i < kSide; ++i)
+            {
+                const float e[4] = { seam->tilt * (float(i) * seam->sizeX / 256.0f - 0.5f * seam->sizeX), 0, 0, 0 };
+                std::memcpy(f + uint64_t(j) * kPitch + uint64_t(i) * 16, e, 16);
+            }
+        fieldUpload->Unmap(0, nullptr);
+        const TextureRef field = g.createTexture(TextureDesc{ "seam field", kSide, kSide, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+        ID3D12Resource* fu = fieldUpload.Get();
+        g.addPass("upload seam field", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(field, Use::CopyDst); },
+                  [=](PassContext& c) {
+                      D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
+                      dst.pResource = c.resource(field); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = 0;
+                      src.pResource = fu; src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                      src.PlacedFootprint.Footprint = { DXGI_FORMAT_R32G32B32A32_FLOAT, kSide, kSide, 1, kPitch };
+                      c.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                  });
+        unx::water::FluidSurfaceInput::Basin b;
+        for (int a = 0; a < 3; ++a) b.centre[a] = seam->centre[a];
+        b.cosYaw = std::cos(seam->yaw); b.sinYaw = std::sin(seam->yaw); b.sizeX = seam->sizeX; b.sizeZ = seam->sizeZ; b.field = field;
+        in.basins.push_back(b);
+    }
     const auto out = surface.record(g, in);
     ID3D12Resource* rv = readVertices.Get();
     ID3D12Resource* rs = readSmall.Get();
@@ -366,6 +407,61 @@ int main(int argc, char** argv)
         checkClosed(boxMesh, boxRef, "box");
         const double h3 = double(desc.h) * desc.h * desc.h, boxVolume = volume(boxMesh), boxExpected = box.size() * h3;
         W_CHECK(std::abs(boxVolume / boxExpected - 1) <= 0.01, "box volume %.6g m3, particles %.6g m3", boxVolume, boxExpected);
+        // 9. W3 seam (engine 2): a basin far from the fluid changes nothing (bit identical); a tilted bath surface through
+        // the box cuts it exactly - no vertex of a drawn triangle under the water, and the kept area equals the unclipped
+        // mesh clipped on the CPU in double against the same surface
+        {
+            double lo[3] = { 1e30, 1e30, 1e30 }, hi[3] = { -1e30, -1e30, -1e30 };
+            for (const auto& v : boxMesh.vertices) for (int a = 0; a < 3; ++a) { lo[a] = std::min(lo[a], double(v[a])); hi[a] = std::max(hi[a], double(v[a])); }
+            const SeamBasin away{ { float(lo[0] + 100), float(0.5 * (lo[1] + hi[1])), float(lo[2]) }, 0.3f, 2, 2, 0.05f };
+            const auto farMesh = run(gpu, surface, box, nullptr, 1, nullptr, &away);
+            bool same = farMesh.triangles == boxMesh.triangles && farMesh.vertices.size() == boxMesh.vertices.size();
+            for (size_t i = 0; same && i < farMesh.vertices.size(); ++i) same = std::memcmp(&farMesh.vertices[i], &boxMesh.vertices[i], sizeof(farMesh.vertices[i])) == 0;
+            W_CHECK(same, "seam: a basin away from the fluid changed its surface");
+            // a gentle surface and a steep one (|eta| to ~0.4 m: the band is the field's measured max |eta|, FluidBasin.hlsl)
+            for (const float tilt : { 0.05f, 0.5f })
+            {
+                const SeamBasin cut{ { float(0.5 * (lo[0] + hi[0])), float(0.5 * (lo[1] + hi[1])), float(0.5 * (lo[2] + hi[2])) }, 0.3f,
+                                     float(2 * (hi[0] - lo[0]) + 0.4), float(2 * (hi[2] - lo[2]) + 0.4), tilt };
+                const auto cutMesh = run(gpu, surface, box, nullptr, 1, nullptr, &cut);
+                auto area = [](const std::array<double, 3>& a, const std::array<double, 3>& b, const std::array<double, 3>& c) {
+                    const double u[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] }, w[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+                    const double x = u[1] * w[2] - u[2] * w[1], y = u[2] * w[0] - u[0] * w[2], z = u[0] * w[1] - u[1] * w[0];
+                    return 0.5 * std::sqrt(x * x + y * y + z * z);
+                };
+                double worstBelow = 0, kept = 0;
+                uint32_t drawn = 0;
+                for (size_t t = 0; t + 2 < cutMesh.vertices.size(); t += 3)
+                {
+                    std::array<double, 3> p[3];
+                    for (int v = 0; v < 3; ++v) for (int a = 0; a < 3; ++a) p[v][a] = cutMesh.vertices[t + v][a];
+                    const double A = area(p[0], p[1], p[2]);
+                    if (A <= 1e-12) continue;
+                    ++drawn;
+                    kept += A;
+                    for (int v = 0; v < 3; ++v) worstBelow = std::max(worstBelow, -seamAbove(cut, p[v][0], p[v][1], p[v][2]));
+                }
+                // reference: the unclipped box surface, each triangle clipped against the surface (f linear: exact interpolation)
+                double reference = 0;
+                for (size_t t = 0; t + 2 < boxMesh.vertices.size(); t += 3)
+                {
+                    std::vector<std::array<double, 3>> poly;
+                    for (int v = 0; v < 3; ++v)
+                    {
+                        std::array<double, 3> a, b;
+                        for (int k = 0; k < 3; ++k) { a[k] = boxMesh.vertices[t + v][k]; b[k] = boxMesh.vertices[t + (v + 1) % 3][k]; }
+                        const double fa = seamAbove(cut, a[0], a[1], a[2]), fb = seamAbove(cut, b[0], b[1], b[2]);
+                        if (fa >= 0) poly.push_back(a);
+                        if ((fa >= 0) != (fb >= 0)) { const double s = fa / (fa - fb); poly.push_back({ a[0] + s * (b[0] - a[0]), a[1] + s * (b[1] - a[1]), a[2] + s * (b[2] - a[2]) }); }
+                    }
+                    for (size_t k = 1; k + 1 < poly.size(); ++k) reference += area(poly[0], poly[k], poly[k + 1]);
+                }
+                std::printf("seam: far basin bit identical (%u triangles); cut (tilt %.2f, max |eta| %.3f m): %u drawn of %u slots, deepest drawn vertex %.3g m under the water, kept area %.6f m2 vs clipped reference %.6f (rel %.2e)\n",
+                            boxMesh.triangles, tilt, 0.5 * tilt * cut.sizeX, drawn, cutMesh.triangles, worstBelow, kept, reference, std::abs(kept / reference - 1));
+                W_CHECK(worstBelow <= 2e-5, "seam: a drawn vertex %.3g m under the water", worstBelow);
+                W_CHECK(std::abs(kept / reference - 1) <= 1e-4, "seam: kept area %.6f vs reference %.6f", kept, reference);
+            }
+        }
         // 8. axes: mirrored in z
         {
             const float mirror[3] = { 1, 1, -1 };

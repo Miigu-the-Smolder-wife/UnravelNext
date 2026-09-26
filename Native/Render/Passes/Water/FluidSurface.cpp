@@ -213,6 +213,7 @@ FluidSurface::FluidSurface(Device& device, ShaderLibrary& shaders, const FluidSu
     m_cases = makeBuffer(device, sizeof(uint32_t) * 256 * kCaseStride, D3D12_HEAP_TYPE_DEFAULT, L"fluid surface cases");
     m_dispatch = makeBuffer(device, 6 * 4, D3D12_HEAP_TYPE_DEFAULT, L"fluid surface dispatch");
     m_draw = makeBuffer(device, 4 * 4, D3D12_HEAP_TYPE_DEFAULT, L"fluid surface draw");
+    m_basinTable = makeBuffer(device, uint64_t(FluidSurfaceInput::kMaxBasins) * 48, D3D12_HEAP_TYPE_DEFAULT, L"fluid surface basins");
     m_caseUpload = makeBuffer(device, sizeof(uint32_t) * 256 * kCaseStride, D3D12_HEAP_TYPE_UPLOAD, L"fluid surface cases upload");
     void* mapped = nullptr;
     D3D12_RANGE none{ 0, 0 };
@@ -254,10 +255,13 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
     }
     if (in.velocityOffset != UINT32_MAX && (in.velocityOffset % 4 || in.velocityOffset + 12 > in.stride)) fail("fluid surface: the particle velocity must be a float3 inside the element");
     if (in.previousSlotOffset != UINT32_MAX && (in.previousSlotOffset % 4 || in.previousSlotOffset + 4 > in.stride)) fail("fluid surface: the previous slot must be a uint inside the element");
-    struct Constants { uint32_t p[8][4]; };
+    struct Constants { uint32_t p[12][4]; };
+    if (in.basins.size() > FluidSurfaceInput::kMaxBasins) fail("fluid surface: %zu basins in its domain (the table holds %u)", in.basins.size(), FluidSurfaceInput::kMaxBasins);
+    const uint32_t basinCount = (uint32_t)in.basins.size();
+    const BufferRef basinTable = import(m_basinTable.Get(), "fluid basins");
     const bool first = !m_recorded;
     m_recorded = true;
-    auto constants = [this, first, in, table, scan, density, counters, info, blockTris, vertices, velocities, cases, dispatch, draw](const PassContext& c) {
+    auto constants = [this, first, in, table, scan, density, counters, info, blockTris, vertices, velocities, cases, dispatch, draw, basinTable, basinCount](const PassContext& c) {
         Constants k{};
         k.p[0][0] = in.count ? c.srv(in.particles) : 0; k.p[0][1] = in.previous.valid() ? c.srv(in.previous) : 0xFFFFFFFFu; k.p[0][2] = in.count; k.p[0][3] = in.stride;
         std::memcpy(&k.p[1][0], &in.alpha, 4); std::memcpy(&k.p[1][1], &m_desc.scale, 4); std::memcpy(&k.p[1][2], &m_desc.h, 4); k.p[1][3] = m_tableSize;
@@ -268,7 +272,8 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
         k.p[6][0] = c.uav(dispatch); k.p[6][1] = c.uav(draw); k.p[6][2] = c.uav(velocities);
         k.p[6][3] = (in.axes[0] < 0 ? 1u : 0u) | (in.axes[1] < 0 ? 2u : 0u) | (in.axes[2] < 0 ? 4u : 0u);
         k.p[7][0] = in.velocityOffset; std::memcpy(&k.p[7][1], &in.velocityScale, 4); k.p[7][2] = in.previousSlotOffset; k.p[7][3] = first ? 1 : 0;
-        c.computeConstants(&k, 32);
+        k.p[8][0] = c.srv(basinTable); k.p[8][1] = basinCount;  // W3 seam: the basin table (FluidBasin.hlsl)
+        c.computeConstants(&k, 48);
     };
     // Every pass declares all the module's buffers it can touch (the constants carry every view).
     auto uses = [&, in](PassBuilder& pb, bool indirect) {
@@ -277,6 +282,8 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
         for (BufferRef b : { table, scan, density, counters, info, blockTris, vertices, velocities, draw }) pb.use(b, Use::UavCompute);
         pb.use(cases, Use::SrvCompute);
         pb.use(dispatch, indirect ? Use::IndirectArgs : Use::UavCompute);
+        pb.use(basinTable, Use::SrvCompute);
+        for (const FluidSurfaceInput::Basin& b : in.basins) pb.use(b.field, Use::SrvCompute);
     };
     auto direct = [&](const char* name, const char* kernel, uint32_t x) {
         ID3D12PipelineState* pso = m_shaders.compute(kernel);
@@ -289,6 +296,22 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
         g.addPass(name, QueueType::Graphics, [&](PassBuilder& pb) { uses(pb, true); },
                   [=](PassContext& c) { c.cmd->SetPipelineState(pso); constants(c); c.cmd->ExecuteIndirect(signature, 1, c.resource(dispatch), argument * 12, nullptr, 0); });
     };
+    // W3 seam: the basin table, one group per basin (the field SRVs are known when the pass runs; the group measures the band)
+    for (uint32_t b = 0; b < basinCount; ++b)
+    {
+        ID3D12PipelineState* pso = m_shaders.compute("Passes/Water/FluidBasin");
+        const FluidSurfaceInput::Basin basin = in.basins[b];
+        g.addPass("fluid basin", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(basinTable, Use::UavCompute); pb.use(basin.field, Use::SrvCompute); },
+                  [=](PassContext& c) {
+                      uint32_t k[12] = {};
+                      k[0] = c.uav(basinTable); k[1] = b;
+                      std::memcpy(&k[4], basin.centre, 12); k[7] = c.srv(basin.field);
+                      std::memcpy(&k[8], &basin.cosYaw, 4); std::memcpy(&k[9], &basin.sinYaw, 4); std::memcpy(&k[10], &basin.sizeX, 4); std::memcpy(&k[11], &basin.sizeZ, 4);
+                      c.cmd->SetPipelineState(pso);
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+    }
     direct("fluid clear", "Passes/Water/FluidClear", groups(std::max(m_tableSize, kCounters)));
     direct("fluid mark", "Passes/Water/FluidMark", groups(in.count));
     direct("fluid scan 0", "Passes/Water/FluidScan0", groups(m_tableSize, 1024));

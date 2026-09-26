@@ -1,12 +1,14 @@
 // W2 closed basins in the frame (FEATURES_GAME 1.10; INTERFACES v1.78): FrameContext::pools -> one unx::water::Pool per id
 // (track state "W.pools"), evolved in the frames where a view can see the basin or it has sources, and pushed as layer-1
 // triangle streams before V. Called by W's waterGeometry.
+#include "unx/water/FluidSurface.h"
 #include "unx/water/Pool.h"
 #include "unx/water/WaterSurface.h"
 
 #include "unx/render/Frame.h"
 #include "unx/core/Log.h"
 
+#include <cmath>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -37,6 +39,8 @@ void poolGeometry(FramePassContext& fc)
 {
     const FrameContext& frame = fc.frame;
     PoolState& state = fc.state<PoolState>("W.pools");
+    std::vector<FluidSurfaceInput::Basin>& basins = fc.state<std::vector<FluidSurfaceInput::Basin>>("W.poolBasins");
+    basins.clear();  // this frame's recorded basins (the fluids' seam, WaterTrack waterFluids)
     // A restore (save load, snapshot) starts every basin calm: the ripples are not World state.
     if (frame.discontinuity & kDiscontinuityRestore) state.slots.clear();
     std::unordered_set<uint32_t> present;
@@ -77,6 +81,16 @@ void poolGeometry(FramePassContext& fc)
         }
         PoolOutput out = slot.pool->record(fc.graph, frame.frameIndex, placement, frame.time, frame.deltaTime, sources);
         out.stream.material = in.material;
+        {
+            FluidSurfaceInput::Basin b;
+            for (int a = 0; a < 3; ++a) b.centre[a] = float(placement.centre[a]);
+            b.cosYaw = float(std::cos(double(placement.yaw)));
+            b.sinYaw = float(std::sin(double(placement.yaw)));
+            b.sizeX = desc.sizeX;
+            b.sizeZ = desc.sizeZ;
+            b.field = out.field;
+            basins.push_back(b);
+        }
         // Calm water (A14): the still level is the surface's rest plane; the reflection camera serves the samples that lie
         // on it (WaterSurface.hlsli's image-shift bound), ripples keep their reflection rays.
         WaterPlane rest;
