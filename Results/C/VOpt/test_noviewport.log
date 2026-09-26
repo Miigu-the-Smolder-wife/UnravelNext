@@ -1,0 +1,57 @@
+﻿waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":37516,"started":"2026-09-27T08:46:36","timeoutMinutes":45,"command":"build\\all\\bin\\unx_test_shadow_froxeltests.exe"}
+powershell : V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skin
+ned (0 joint spheres)
+At line:1 char:856
++ ... xil -Force; powershell -File Tools/CI/GpuLock.ps1 -Track C -- build/C ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (V: instance hie... joint spheres):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[d3d12 WARNING 926] WriteBufferImmediate: 5 resources contain the GPU Virtual Address range [0x000000001aa00000, 0x0000
+00001aa00003] on a Heap (0x0000028657ED8290:'unx render graph transients').  This may be OK as long as only one of thes
+e resources is actively being used. However, there is no definitive way for the debug layer to identify which resource 
+is intended. Consider using AssertResourceState to help with state validation.
+[d3d12 WARNING 926] WriteBufferImmediate: 5 resources contain the GPU Virtual Address range [0x000000001aa00004, 0x0000
+00001aa00007] on a Heap (0x0000028657ED8290:'unx render graph transients').  This may be OK as long as only one of thes
+e resources is actively being used. However, there is no definitive way for the debug layer to identify which resource 
+is intended. Consider using AssertResourceState to help with state validation.
+[d3d12 WARNING 926] WriteBufferImmediate: 5 resources contain the GPU Virtual Address range [0x000000001aa00000, 0x0000
+00001aa00003] on a Heap (0x0000028657ED8290:'unx render graph transients').  This may be OK as long as only one of thes
+e resources is actively being used. However, there is no definitive way for the debug layer to identify which resource 
+is intended. Consider using AssertResourceState to help with state validation.
+[d3d12 WARNING 926] WriteBufferImmediate: 5 resources contain the GPU Virtual Address range [0x000000001aa00004, 0x0000
+00001aa00007] on a Heap (0x0000028657ED8290:'unx render graph transients').  This may be OK as long as only one of thes
+e resources is actively being used. However, there is no definitive way for the debug layer to identify which resource 
+is intended. Consider using AssertResourceState to help with state validation.
+[d3d12 WARNING 926] WriteBufferImmediate: 5 resources contain the GPU Virtual Address range [0x000000001aa00000, 0x0000
+00001aa00003] on a Heap (0x0000028657ED8290:'unx render graph transients').  This may be OK as long as only one of thes
+e resources is actively being used. However, there is no definitive way for the debug layer to identify which resource 
+is intended. Consider using AssertResourceState to help with state validation.
+[d3d12 WARNING 926] WriteBufferImmediate: 5 resources contain the GPU Virtual Address range [0x000000001aa00004, 0x0000
+00001aa00007] on a Heap (0x0000028657ED8290:'unx render graph transients').  This may be OK as long as only one of thes
+e resources is actively being used. However, there is no definitive way for the debug layer to identify which resource 
+is intended. Consider using AssertResourceState to help with state validation.
+    service, hardware depth: frame 0, 84 instances, 586 nodes, 1072 clusters tested, 500 visible, triangles A/B/C 27471
+/320/0, deferred 0/0/0, overflow 0x0
+    service, pixel kernel  : frame 0, 44 instances, 312 nodes, 652 clusters tested, 264 visible, triangles A/B/C 14591/
+128/0, deferred 0/0/0, overflow 0x0
+    service, source detail : frame 0, 84 instances, 918 nodes, 7526 clusters tested, 3620 visible, triangles A/B/C 2238
+08/0/0, deferred 0/0/0, overflow 0x0
+    service, sparse mask   : frame 0, 60 instances, 418 nodes, 808 clusters tested, 357 visible, triangles A/B/C 19592/
+320/0, deferred 0/0/0, overflow 0x0
+    service, tile-local    : frame 0, 60 instances, 418 nodes, 808 clusters tested, 357 visible, triangles A/B/C 19592/
+320/0, deferred 0/0/0, overflow 0x0
+    hardware depth: 0 uncovered; LOD vs source on 487084 terrain pixels (normal distance, 39156 silhouette pixels exclu
+ded): worst 0.120 m = 1.53 LOD px, 4292 beyond 1 LOD px; pixel kernel (masked left half, 524288 px): 0 depth mismatches
+, 0 bad instance/userData
+    tile-local vs whole-view raster, sparse mask (491520 px in set tiles): fragments inside 526072 vs 526072, outside 0
+ vs 504639; per-pixel differences in set tiles: fragments 0, depth 94662, ids at equal depth 0, whole-view vs hardware 
+depth 0; pixels written outside 0; 449 pairs; depth difference worst 1025 ulp = 3.05e-05 = 0.0068 px lateral (0 px beyo
+nd 1/64 px)
+PASS raster_service
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint 
+spheres)
+    491520 texels in 30 set tiles (491520 covered): 428306 exact, 63214 within the snap bound (worst 0.67 snap steps x 
+G), 0 edge flips, 0 other; D16 worst 8.55e-06 (1 step 1.53e-05), 0 beyond; 0 texels written in unused slots
+PASS raster_service_tile_atlas
+2/2 passed, D3D12 debug-layer errors: 0

@@ -1940,8 +1940,9 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     {
         const bool back = request.cull == D3D12_CULL_MODE_BACK && (l == kListABack || l == kListAAlphaBack);
         MeshPipelineDesc d;
-        d.meshShader = atlas ? "Passes/Visibility/DepthRaster.ms.TILE2"
-                             : request.tileLocal ? "Passes/Visibility/DepthRaster.ms.TILE1" : "Passes/Visibility/DepthRaster.ms.TILE0";
+        // DEPTH1: no pixel kernel reads the attributes (hardware depth only), so the kernel exports none of them
+        d.meshShader = std::string("Passes/Visibility/DepthRaster.ms.TILE") + (atlas ? "2" : request.tileLocal ? "1" : "0") +
+                       (request.pixelKernel.empty() ? ".DEPTH1" : ".DEPTH0");
         d.pixelShader = request.pixelKernel;
         d.depthFormat = depthOut ? depthFormat : DXGI_FORMAT_UNKNOWN;
         d.depthWrite = depthOut;

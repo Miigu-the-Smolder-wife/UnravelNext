@@ -1,0 +1,32 @@
+scene city_block (scale 1.00): 127 meshes, 1377 instances, 2433614 instanced triangles, 65817 clusters; generated in 1097 ms, clusters built in 8600 ms
+note: track entry point E.viewModelPrepare (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point E.debugBegin (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point M.prepareScene (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point E.lightFunctions (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point FX.simulation (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point W.waterGeometry (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point S.atmosphere (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point R.accelerationStructures (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point E.hair (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+V: 5 alpha-tested materials have a baseColor texture that is not in the GPU scene (M.prepareScene not run): drawn uncut
+V: instance hierarchy: 353 static instances in 55 chunks (64 m cells, <= 256 each), 1024 flat instances, 0 skinned (0 joint spheres)
+note: track entry point S.shadowPages (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point E.decals (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point E.surfaceState (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point M.materialResolve (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point S.froxels (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point R.globalIllumination (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point R.reflections (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point FX.particles (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point E.distortion (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point S.shadowVisibility (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point M.shading (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point E.debugOverlay (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+[V city_block static 4K] gpu frame median 1.8923 ms, p95 2.2354, p99 2.3511 (n=300) | cpu frame median 1.1671 ms (record 0.1516, submit 0.0383) | SM clock median 2820 MHz (min 2820) | passes 70, barriers 610 in 68 batches, cross-queue syncs 0, command lists 1, transients 25 (576.1 MB aliased / 716.1 MB unaliased) | quality d87a2ff9d9cc7079
+[V city_block static 4K] outside passes: graphics 1 lists, head 0.0000, tail 0.0000, gap 0.0000 ms (medians)
+V city_block 4K: cull 0.170 ms (design 0.001 on 744 instances, 8272 clusters tested) | HiZ 0.055 ms (design 0.020) | band A raster 0.075 ms (design 0.006 on 4536 clusters, 38003 triangles) | total V 0.301 ms of frame 1.892 ms | raster service for other tracks' views 0.000 ms
+  raster passes (2): v.cull.raster.p1 0.073, v.cull.raster.p2 0.003
+  visible clusters by band A/B/C 2185/2351/0 (of B: 0 mixed sheet clusters split per triangle, 0 triangles)
+  nodes tested 4321, triangles by band A/B/C 38003/40840/0, deferred 344/42/719, overflow 0x0 (stats of frame 969)
+  service pages (ring): 6758.0 requested per frame (max 6758) = 110.7 M texels
+  service svc.atlas32: raster 1.163 ms (0.0105 ns per requested texel), cull 0.319 ms, clear 0.062 ms | 18637 clusters visible, 328038 triangles, 157301 tile pairs, overflow 0x0

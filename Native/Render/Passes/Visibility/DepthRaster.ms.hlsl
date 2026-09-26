@@ -1,5 +1,5 @@
 // unx-kernel: ms_6_6 main
-// unx-variants: TILE=0,1,2
+// unx-variants: TILE=0,1,2 DEPTH=0,1
 // Depth raster service (FrameServices::rasterizeDepth, INTERFACES 5.3): one mesh-shader group per draw-list entry,
 // any number of views (the visible entry carries the view). Outputs match struct DepthRasterPixel (DepthRaster.hlsli)
 // for the requester's pixel kernel: position, uv (alpha test), userData, material, instance.
@@ -9,6 +9,9 @@
 // so the rasteriser makes fragments only inside the requested tiles; positions are unchanged (same pixels, same depth).
 // TILE=2 (atlas mode, DepthRasterRequest::atlasSlots): pairs are single tiles (CULL_VIEW_TILE_SINGLE); the tile moves to
 // its atlas slot by a whole-pixel shift in clip space, the viewport being the whole atlas.
+// DEPTH=1 (no pixel kernel: hardware depth only): only the position, the clip distances, the viewport and the cull flag
+// are exported. The attributes a pixel kernel reads (uv, userData, material, instance) are dead there, and each mesh
+// shader group's output size limits how many groups an SM holds at once.
 //   P[0] visible SRV (uint2), lists SRV (raw), state SRV (raw), list
 //   P[1] phase (always 1: the service culls in one phase), list capacity, views SRV, viewport per view (0 = one viewport)
 //   P[2] tile pairs SRV (uint3, TILE=1,2), atlas slots SRV (raw, TILE=2), atlas tiles per row, atlas size (w | h << 16)
@@ -17,7 +20,9 @@
 struct VertexOut
 {
     float4 position : SV_Position;
+#if !DEPTH
     float2 uv : TEXCOORD0;
+#endif
 #if TILE
     float4 clip : SV_ClipDistance0;  // >= 0 inside the pair's tile rectangle (left, right, top, bottom)
 #endif
@@ -25,10 +30,14 @@ struct VertexOut
 
 struct PrimitiveOut
 {
+#if !DEPTH
     uint userData : USERDATA;
     uint material : MATERIAL;
     uint instance : INSTANCE;
-    uint viewport : SV_ViewportArrayIndex;
+#endif
+#if TILE != 2
+    uint viewport : SV_ViewportArrayIndex;  // (atlas mode: every view's viewport is the whole atlas, so none is exported)
+#endif
     bool cull : SV_CullPrimitive;  // tile rectangle (TILE), C5 terrain patch blocks
 };
 
@@ -96,7 +105,9 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
 #else
         verts[i].position = p;
 #endif
+#if !DEPTH
         verts[i].uv = loadVertex(mesh, meshVertex).uv;
+#endif
 #if TILE
         verts[i].clip = float4(p.x - ndcLo.x * p.w, ndcHi.x * p.w - p.x, ndcLo.y * p.w - p.y, p.y - ndcHi.y * p.w);
         g_pixel[i] = p.w > 0 ? float3((p.x / p.w * 0.5 + 0.5) * v.viewportSize.x, (0.5 - p.y / p.w * 0.5) * v.viewportSize.y, 1) : 0;
@@ -111,10 +122,14 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         const uint packed = clusterTriangles[cl.triangleOffset + t];
         const uint3 tri = uint3(packed & 0xFFu, (packed >> 8) & 0xFFu, (packed >> 16) & 0xFFu);
         tris[t] = tri;
+#if !DEPTH
         prims[t].userData = v.userData;
         prims[t].material = material;
         prims[t].instance = entry.x;
+#endif
+#if TILE != 2
         prims[t].viewport = P[1].w != 0 ? view : 0;
+#endif
 #if TILE
         // Outside the rectangle: its pixel box misses [lo, hi] (triangles reaching behind the eye are kept).
         const float3 a = g_pixel[tri.x], b = g_pixel[tri.y], c = g_pixel[tri.z];
