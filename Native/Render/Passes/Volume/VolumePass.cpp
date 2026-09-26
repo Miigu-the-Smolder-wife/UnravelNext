@@ -234,9 +234,16 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
         b.use(o.records, Use::UavCompute);
         useLists(b);
     });
+    // binning: one thread per (record, tile row) - rows = the taller of the two tile grids
+    const uint32_t binRows = std::max(media ? out.gridY : 0u, f.haze ? hazeTilesY : 0u);
+    dispatch("volume.count", "Passes/Volume/VolumeSetup.STEP4", groups(threads, 256), binRows, 0, [=](PassBuilder& b) {
+        b.use(o.records, Use::UavCompute);
+        if (froxelLights.valid()) b.use(froxelLights, Use::SrvCompute);
+        useLists(b);
+    });
     if (media) dispatch("volume.media.scan", "Passes/Volume/VolumeSetup.STEP2", 1, 1, 0, useLists);
     if (f.haze) dispatch("volume.haze.scan", "Passes/Volume/VolumeSetup.STEP2", 1, 1, 1, useLists);
-    dispatch("volume.scatter", "Passes/Volume/VolumeSetup.STEP3", groups(threads, 256), 1, 0, [=](PassBuilder& b) {
+    dispatch("volume.scatter", "Passes/Volume/VolumeSetup.STEP3", groups(threads, 256), binRows, 0, [=](PassBuilder& b) {
         b.use(o.records, Use::UavCompute);
         if (froxelLights.valid()) b.use(froxelLights, Use::SrvCompute);
         useLists(b);

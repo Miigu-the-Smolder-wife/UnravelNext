@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: STEP=0,1,2,3
+// unx-variants: STEP=0,1,2,3,4
 // Particle media and heat haze, records and tile lists (VolumeCommon.hlsli):
 //   STEP=0 clear: the media and haze tile counts and fills, the counters (thread per tile of the larger grid).
 //   STEP=1 setup, thread per render thread: the particle at the frame time (FxLayerSetup.hlsl's interpolation: cubic
@@ -236,15 +236,14 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : S
         RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[c.counters];
         counters[id.x] = 0u;
     }
-#elif STEP == 1 || STEP == 3
+#elif STEP == 1 || STEP == 3 || STEP == 4
     const uint t = id.x;
     if (t >= c.threads) return;
     RWStructuredBuffer<VolumeRecord> records = ResourceDescriptorHeap[c.records];
     VolumeRecord rec = (VolumeRecord)0;
 #if STEP == 1
     s_curveKeys = c.curveKeys;
-    if ((c.mode & 4u) != 0u) rec = records[t];  // given records (VolumePass::recordRecords): lists only
-    else
+    if ((c.mode & 4u) != 0u) return;  // given records (VolumePass::recordRecords): nothing to evaluate
     {
         const RenderRange rr = volumeRange(c, t, gid.x);
         StructuredBuffer<StreamEmitter> emitters = ResourceDescriptorHeap[c.emitters];
@@ -289,6 +288,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : S
         }
         records[t] = rec;
     }
+    return;  // binning: STEP 4 (counts) and STEP 3 (entries), one thread per record and tile row
 #else
     rec = records[t];
 #endif
@@ -312,30 +312,36 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : S
         countsIndex = c.hazeCounts; fillIndex = c.hazeFill; startsIndex = c.hazeStarts; entriesIndex = c.hazeEntries;
         capacity = c.hazeEntryCapacity; overflowBit = VOLUME_STATUS_HAZE_OVERFLOW;
     }
+    if (tilesX == 0u || tilesY == 0u || span == 0u) return;  // no grid: tilesX - 1 would wrap and the loops below never end
     const float2 lo = floor(plo / span), hi = floor(phi / span);
     if (any(hi < 0.0f) || lo.x > (float)(tilesX - 1) || lo.y > (float)(tilesY - 1)) return;
     const uint2 t0 = (uint2)clamp(lo, 0.0f, float2(tilesX - 1, tilesY - 1)), t1 = (uint2)clamp(hi, 0.0f, float2(tilesX - 1, tilesY - 1));
-#if STEP == 1
+    // One tile row of the record's rectangle per thread (dispatch Y = row): a thread's work is at most one row of the
+    // grid (tilesX atomics) whatever the particle's size, and the rows of a large particle run in parallel.
+    const uint y = t0.y + gid.y;
+    if (y > t1.y) return;
+#if STEP == 4
     RWStructuredBuffer<uint> counts = ResourceDescriptorHeap[countsIndex];
-    [loop] for (uint y = t0.y; y <= t1.y; ++y)
-        [loop] for (uint x = t0.x; x <= t1.x; ++x) InterlockedAdd(counts[y * tilesX + x], 1u);
-    RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[c.counters];
-    InterlockedAdd(counters[VOLUME_COUNTER_RECORDS], 1u);
+    [loop] for (uint x = t0.x; x <= t1.x; ++x) InterlockedAdd(counts[y * tilesX + x], 1u);
+    if (gid.y == 0u)
+    {
+        RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[c.counters];
+        InterlockedAdd(counters[VOLUME_COUNTER_RECORDS], 1u);
+    }
 #else
     RWStructuredBuffer<uint> fill = ResourceDescriptorHeap[fillIndex];
     RWStructuredBuffer<uint> starts = ResourceDescriptorHeap[startsIndex];
     RWStructuredBuffer<uint2> entries = ResourceDescriptorHeap[entriesIndex];
     const uint zz = f32tof16(z0 * 0.999f) | (f32tof16(z1 * 1.001f) << 16);  // widened past half-float rounding (the density is 0 there)
-    [loop] for (uint y = t0.y; y <= t1.y; ++y)
-        [loop] for (uint x = t0.x; x <= t1.x; ++x)
-        {
-            const uint tile = y * tilesX + x;
-            uint slot;
-            InterlockedAdd(fill[tile], 1u, slot);
-            const uint at = starts[tile] + slot;
-            if (at < capacity) entries[at] = uint2(t, zz);
-            else volumeStatus(c, overflowBit);
-        }
+    [loop] for (uint x = t0.x; x <= t1.x; ++x)
+    {
+        const uint tile = y * tilesX + x;
+        uint slot;
+        InterlockedAdd(fill[tile], 1u, slot);
+        const uint at = starts[tile] + slot;
+        if (at < capacity) entries[at] = uint2(t, zz);
+        else volumeStatus(c, overflowBit);
+    }
 #endif
 #else  // STEP == 2: one group of 256 threads, each a run of consecutive tiles
     const bool haze = P[0].y != 0u;
