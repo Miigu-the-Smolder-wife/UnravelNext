@@ -33,6 +33,7 @@ RtConstants rtC()
 static uint g_rays = 0;
 static uint g_errors = 0;
 static uint g_maxCandidates = 0;  // most candidates one ray of this thread visited (kRtCounterMaxCandidates)
+void rtRaiseError(uint bits) { g_errors |= bits; }
 
 float rtAlbedoTableFetch(uint i)
 {

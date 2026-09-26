@@ -204,35 +204,33 @@ RtPath rtPathStart(float3 origin, float3 dir, float tnear)
     return p;
 }
 
-// One iteration of the CPU's path loop (PathTracer::Impl::radiance): the segment from the current vertex, its events and
-// the next vertex. The next-event queries it queues are resolved before it returns (the CPU resolves them at the top of the
-// next iteration: the same additions to L in the same order). False when the path had already ended (nothing done); the
-// iteration cap kRtMaxBounces ends a path as truncated.
-bool rtPathStep(RtConstants C, inout RtPath p, inout RtSampler smp)
+// A path iteration's segment (section 1's result for sections 2 and 3).
+struct RtSegment
 {
-    if (!p.alive) return false;
-    if (p.bounce >= kRtMaxBounces)
-    {
-        p.truncated = true;
-        p.alive = false;
-        return false;
-    }
-    const bool forced = C.forced != 0, caustics = C.caustics != 0;
+    RtHit hit;
+    uint end;  // 0 surface, 1 ground, 2 space
+    float segLen;
+};
+
+// Section 1 of a path iteration (the CPU loop body, verbatim): the segment from the current vertex - its end (a surface
+// hit, the ground, space) and length. False when the path ended here (below the planet heading down).
+bool rtPathTrace(RtConstants C, inout RtPath p, out RtSegment g)
+{
     float3 L = p.L, beta = p.beta, o = p.o, d = p.d, prevPos = p.prevPos;
     float tmin = p.tmin, prevBsdfPdf = p.prevBsdfPdf, prevTotal = p.prevTotal;
     uint prev = p.prev, prevCell = p.prevCell, nVol = p.nVol, surfVerts = p.surfVerts;
     const uint bounce = p.bounce;
-    bool chain = p.chain, dropSun = p.dropSun, alive = true;
-    RtQueries qs;
-    qs.n = 0;
-    // The CPU loop's body, verbatim: its exits ("continue") leave this single pass.
+    bool chain = p.chain, dropSun = p.dropSun, alive = p.alive;
+    const bool forced = C.forced != 0, caustics = C.caustics != 0;
+    RtHit hit;
+    uint end = 2;
+    float segLen = 0;
+    bool surf = false;
+    bool proceed = false;
     [loop] for (uint once = 0; once < 1; ++once)
     {
             // --- trace the segment
-            RtHit hit;
-            const bool surf = rtIntersect(o, d, tmin, kRtFarT, kRtMaskAll, hit);
-            uint end;  // 0 surface, 1 ground, 2 space
-            float segLen;
+            surf = rtIntersect(o, d, tmin, kRtFarT, kRtMaskAll, hit);
             if (surf)
             {
                 end = 0;
@@ -260,6 +258,45 @@ bool rtPathStep(RtConstants C, inout RtPath p, inout RtSampler smp)
                 }
             }
 
+                proceed = true;
+    }
+    p.L = L;
+    p.beta = beta;
+    p.o = o;
+    p.d = d;
+    p.prevPos = prevPos;
+    p.tmin = tmin;
+    p.prevBsdfPdf = prevBsdfPdf;
+    p.prevTotal = prevTotal;
+    p.prev = prev;
+    p.prevCell = prevCell;
+    p.nVol = nVol;
+    p.surfVerts = surfVerts;
+    p.chain = chain;
+    p.dropSun = dropSun;
+    p.alive = alive;
+    g.hit = hit;
+    g.end = end;
+    g.segLen = segLen;
+    return proceed;
+}
+
+// Section 2: the analytic area-light emission along the segment and the atmosphere on it (forced next-event point,
+// tracked collision). False when the iteration ended here (a medium scattering event, or the path ended).
+bool rtPathMedium(RtConstants C, inout RtPath p, inout RtSampler smp, inout RtQueries qs, RtSegment g)
+{
+    float3 L = p.L, beta = p.beta, o = p.o, d = p.d, prevPos = p.prevPos;
+    float tmin = p.tmin, prevBsdfPdf = p.prevBsdfPdf, prevTotal = p.prevTotal;
+    uint prev = p.prev, prevCell = p.prevCell, nVol = p.nVol, surfVerts = p.surfVerts;
+    const uint bounce = p.bounce;
+    bool chain = p.chain, dropSun = p.dropSun, alive = p.alive;
+    const bool forced = C.forced != 0, caustics = C.caustics != 0;
+    const RtHit hit = g.hit;
+    const uint end = g.end;
+    const float segLen = g.segLen;
+    bool proceed = false;
+    [loop] for (uint once = 0; once < 1; ++once)
+    {
             // --- 1. analytic area-light emission along the segment (after a surface vertex)
             if (prev == kRtPrevSurface && prevCell != ~0u && prevTotal > 0)
             {
@@ -368,6 +405,41 @@ bool rtPathStep(RtConstants C, inout RtPath p, inout RtSampler smp)
                 beta *= Tseg * (1.0f / max(Tavg, 1e-30f));
             }
 
+                proceed = true;
+    }
+    p.L = L;
+    p.beta = beta;
+    p.o = o;
+    p.d = d;
+    p.prevPos = prevPos;
+    p.tmin = tmin;
+    p.prevBsdfPdf = prevBsdfPdf;
+    p.prevTotal = prevTotal;
+    p.prev = prev;
+    p.prevCell = prevCell;
+    p.nVol = nVol;
+    p.surfVerts = surfVerts;
+    p.chain = chain;
+    p.dropSun = dropSun;
+    p.alive = alive;
+    return proceed;
+}
+
+// Section 3: the segment's end - space (the sun) or a surface or ground vertex with its next-event queries, the next
+// direction and Russian roulette.
+void rtPathSurface(RtConstants C, inout RtPath p, inout RtSampler smp, inout RtQueries qs, RtSegment g)
+{
+    float3 L = p.L, beta = p.beta, o = p.o, d = p.d, prevPos = p.prevPos;
+    float tmin = p.tmin, prevBsdfPdf = p.prevBsdfPdf, prevTotal = p.prevTotal;
+    uint prev = p.prev, prevCell = p.prevCell, nVol = p.nVol, surfVerts = p.surfVerts;
+    const uint bounce = p.bounce;
+    bool chain = p.chain, dropSun = p.dropSun, alive = p.alive;
+    const bool forced = C.forced != 0, caustics = C.caustics != 0;
+    RtHit hit = g.hit;
+    const uint end = g.end;
+    const float segLen = g.segLen;
+    [loop] for (uint once = 0; once < 1; ++once)
+    {
             // --- segment end
             if (end == 2)
             {
@@ -485,7 +557,6 @@ bool rtPathStep(RtConstants C, inout RtPath p, inout RtSampler smp)
             }
             if (rtIsZero3(beta)) alive = false;
     }
-    if (qs.n > 0) L += rtResolveQueries(C, qs);
     p.L = L;
     p.beta = beta;
     p.o = o;
@@ -498,10 +569,30 @@ bool rtPathStep(RtConstants C, inout RtPath p, inout RtSampler smp)
     p.prevCell = prevCell;
     p.nVol = nVol;
     p.surfVerts = surfVerts;
-    p.bounce = bounce + 1;
     p.chain = chain;
     p.dropSun = dropSun;
     p.alive = alive;
+}
+
+// One iteration of the CPU's path loop (PathTracer::Impl::radiance): the segment from the current vertex, its events and
+// the next vertex - the three sections above in turn. The next-event queries it queues are resolved before it returns (the
+// CPU resolves them at the top of the next iteration: the same additions to L in the same order). False when the path had
+// already ended (nothing done); the iteration cap kRtMaxBounces ends a path as truncated.
+bool rtPathStep(RtConstants C, inout RtPath p, inout RtSampler smp)
+{
+    if (!p.alive) return false;
+    if (p.bounce >= kRtMaxBounces)
+    {
+        p.truncated = true;
+        p.alive = false;
+        return false;
+    }
+    RtQueries qs;
+    qs.n = 0;
+    RtSegment g;
+    if (rtPathTrace(C, p, g) && rtPathMedium(C, p, smp, qs, g)) rtPathSurface(C, p, smp, qs, g);
+    if (qs.n > 0) p.L += rtResolveQueries(C, qs);
+    p.bounce += 1;
     return true;
 }
 

@@ -218,14 +218,18 @@ Rgb AtmosphereModel::opticalDepthToTop(const Double3& o, float3 d) const
     const double mu = (ox * d.x + oy * d.y + oz * d.z) / r;
     if (r < m_R)
     {
-        // Below the planet surface (inside a scene valley): integrate directly up to the surface crossing.
+        // Below the planet surface (inside a scene valley): integrate directly up to the surface crossing, one 8-point panel
+        // per 2 km of the chord's altitude span (the short-segment rule; the chord's lowest point is o or its closest
+        // approach to the centre), then the table from the surface.
         const double b = r * mu, c = r * r - m_R * m_R;
         const double tExit = -b + std::sqrt(b * b - c);
         const Double3 e{ o.x + d.x * tExit, o.y + d.y * tExit, o.z + d.z * tExit };
         const double ex = e.x, ey = e.y + m_R, ez = e.z;
         const double re = std::sqrt(ex * ex + ey * ey + ez * ez);
         const double mue = (ex * d.x + ey * d.y + ez * d.z) / re;
-        const uint32_t panels = std::max(1u, (uint32_t)std::ceil(tExit / 2000.0));
+        double hMin = r - m_R;
+        if (-b > 0 && -b < tExit) hMin = std::min(hMin, std::sqrt(std::max(0.0, r * r - b * b)) - m_R);
+        const uint32_t panels = std::max(1u, (uint32_t)std::ceil(-hMin / 2000.0));
         return integrate(o, d, 0, tExit, panels) + depthTopTable(m_R, std::max(mue, 0.0));
     }
     if (r > m_Rt) return {};

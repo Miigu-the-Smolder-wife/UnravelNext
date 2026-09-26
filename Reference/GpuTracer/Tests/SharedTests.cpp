@@ -38,6 +38,8 @@ float3 rtAtmTableFetch(uint ir, uint im)
     return { t[0], t[1], t[2] };
 }
 RtLight rtLightFetch(uint i) { return g_lights[i]; }
+static uint g_errors = 0;
+void rtRaiseError(uint bits) { g_errors |= bits; }
 uint rtLightCellStart(uint c) { return g_cellStart[c]; }
 uint rtLightCellLight(uint k) { return g_cellLights[k]; }
 } // namespace unx::reference::shared

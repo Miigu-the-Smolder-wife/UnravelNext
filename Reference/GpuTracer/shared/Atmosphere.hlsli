@@ -43,6 +43,7 @@ struct RtAtmCoefficients
 };
 
 float3 rtAtmTableFetch(uint ir, uint im);  // defined by the includer: tau_top[ir * 2048 + im]
+void rtRaiseError(uint bits);              // defined by the includer: a kRtError* bit (the GPU fails the render)
 
 RT_INLINE RtAtmCoefficients rtAtmAt(RtAtmosphere a, float h)
 {
@@ -213,14 +214,27 @@ RT_INLINE float3 rtAtmDepthToTop(RtAtmosphere a, float3 o, float3 d)
     const float b = rtAtmRadialDot(a, o, d);
     if (q < 0)
     {
-        // Below the planet surface (a scene valley): integrate up to the surface crossing, then the table at h = 0.
+        // Below the planet surface (a scene valley): integrate up to the surface crossing, one 8-point panel per 2 km of the
+        // chord's altitude span (the CPU's rule: the lowest point is o or the closest approach), then the table at h = 0.
+        // At most 64 panels (kRtErrorPanels beyond: geometry 128 km below the surface).
         const float disc = b * b - q;
         const float sd = sqrt(max(disc, 0.0f));
         const float tExit = b > 0 ? (-q) / (b + sd) : sd - b;
         const float3 e = o + d * tExit;
         const float qe = rtAtmQ(a, e);
         const float mue = rtAtmRadialDot(a, e, d) / rtAtmRadius(a, qe);
-        const uint panels = min(max(1u, (uint)ceil(tExit / 2000.0f)), 4096u);
+        float hMin = q / (r + a.R);
+        if (-b > 0 && -b < tExit)
+        {
+            const float qc = q - b * b;  // r_closest^2 - R^2
+            hMin = min(hMin, qc / (sqrt(max(qc + a.R * a.R, 0.0f)) + a.R));
+        }
+        uint panels = max(1u, (uint)ceil(-hMin / 2000.0f));
+        if (panels > 64u)
+        {
+            rtRaiseError(16u);  // kRtErrorPanels (Types.hlsli, defined after this header)
+            panels = 64u;
+        }
         return rtAtmIntegrate(a, o, d, 0, tExit, panels) + rtAtmDepthTopTable(a, 0.0f, max(mue, 0.0f));
     }
     const float h = q / (r + a.R);
