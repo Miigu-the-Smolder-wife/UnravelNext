@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<test-run id="2" testcasecount="1" result="Passed" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0" engine-version="3.5.0.0" clr-version="4.0.30319.42000" start-time="2026-09-26 02:33:22Z" end-time="2026-09-26 02:33:23Z" duration="0.8232752">
+  <test-suite type="TestSuite" id="1000" name="Unravel Native World" fullname="Unravel Native World" runstate="Runnable" testcasecount="2260" result="Passed" start-time="2026-09-26 02:33:22Z" end-time="2026-09-26 02:33:23Z" duration="0.823275" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+    <properties>
+      <property name="platform" value="EditMode" />
+    </properties>
+    <test-suite type="Assembly" id="3794" name="UnravelNextBridge.CookTests.Editor.dll" fullname="C:/Users/USER/Unravel-UnityB/Library/ScriptAssemblies/UnravelNextBridge.CookTests.Editor.dll" runstate="Runnable" testcasecount="1" result="Passed" start-time="2026-09-26 02:33:22Z" end-time="2026-09-26 02:33:23Z" duration="0.796922" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+      <properties>
+        <property name="_PID" value="25704" />
+        <property name="_APPDOMAIN" value="Unity Child Domain" />
+        <property name="platform" value="EditMode" />
+        <property name="EditorOnly" value="True" />
+      </properties>
+      <test-suite type="TestSuite" id="3795" name="UnravelNextBridge" fullname="UnravelNextBridge" runstate="Runnable" testcasecount="1" result="Passed" start-time="2026-09-26 02:33:22Z" end-time="2026-09-26 02:33:23Z" duration="0.796481" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+        <properties />
+        <test-suite type="TestSuite" id="3796" name="Editor" fullname="UnravelNextBridge.Editor" runstate="Runnable" testcasecount="1" result="Passed" start-time="2026-09-26 02:33:22Z" end-time="2026-09-26 02:33:23Z" duration="0.796309" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+          <properties />
+          <test-suite type="TestSuite" id="3797" name="Tests" fullname="UnravelNextBridge.Editor.Tests" runstate="Runnable" testcasecount="1" result="Passed" start-time="2026-09-26 02:33:22Z" end-time="2026-09-26 02:33:23Z" duration="0.796121" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+            <properties />
+            <test-suite type="TestFixture" id="3792" name="UnravelNextTerrainCookTests" fullname="UnravelNextBridge.Editor.Tests.UnravelNextTerrainCookTests" classname="UnravelNextBridge.Editor.Tests.UnravelNextTerrainCookTests" runstate="Runnable" testcasecount="1" result="Passed" start-time="2026-09-26 02:33:22Z" end-time="2026-09-26 02:33:23Z" duration="0.794975" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+              <properties />
+              <test-case id="3793" name="TileHeightsHolesAndSeams" fullname="UnravelNextBridge.Editor.Tests.UnravelNextTerrainCookTests.TileHeightsHolesAndSeams" methodname="TileHeightsHolesAndSeams" classname="UnravelNextBridge.Editor.Tests.UnravelNextTerrainCookTests" runstate="Runnable" seed="609733534" result="Passed" start-time="2026-09-26 02:33:22Z" end-time="2026-09-26 02:33:23Z" duration="0.780986" asserts="0">
+                <properties>
+                  <property name="retryIteration" value="0" />
+                  <property name="repeatIteration" value="0" />
+                </properties>
+                <output><![CDATA[Saving results to: C:/Users/USER/AppData/LocalLow/Unravel/Unravel Native World\TestResults.xml
+]]></output>
+              </test-case>
+            </test-suite>
+          </test-suite>
+        </test-suite>
+      </test-suite>
+    </test-suite>
+  </test-suite>
+</test-run>
