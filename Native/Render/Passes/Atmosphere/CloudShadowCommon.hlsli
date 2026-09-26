@@ -51,7 +51,7 @@ float cloudShadowTexelTau(CloudRecord c, Texture2D<uint4> map, int2 t, float a)
     const uint4 q0 = map[uint2(t.x * 2, t.y)], q1 = map[uint2(t.x * 2 + 1, t.y)];
     const float total = f16tof32(q1.w >> 16);
     float prevA = c.top, prevTau = 0;
-    [unroll] for (uint k = 0; k < CLOUD_SHADOW_LEVELS; ++k)
+    [loop] for (uint k = 0; k < CLOUD_SHADOW_LEVELS; ++k)
     {
         const uint4 q = k < 8 ? q0 : q1;
         const uint w = q[(k % 8) / 2], v = ((k & 1) ? w >> 16 : w) & 0xFFFFu;
@@ -76,7 +76,7 @@ float cloudSunTau(CloudRecord c, float3 x)
     const int2 i0 = int2(floor(p));
     const float2 f = p - floor(p);
     float tau = 0;
-    [unroll] for (uint q = 0; q < 4; ++q)
+    [loop] for (uint q = 0; q < 4; ++q)
     {
         const int2 o = int2(q & 1, q >> 1);
         tau += (o.x ? f.x : 1 - f.x) * (o.y ? f.y : 1 - f.y) * cloudShadowTexelTau(c, map, clamp(i0 + o, 0, int(n) - 1), a);
@@ -86,26 +86,35 @@ float cloudSunTau(CloudRecord c, float3 x)
 // The sun's optical depth at a sample in the layer (single scattering): integrated along the sun ray in
 // CLOUD_SUN_STEP midpoint steps until it leaves the layer or tau > CLOUD_SUN_TAU_MAX (T < 1.2e-4: the sample's
 // contribution is below every error considered); past CLOUD_SUN_MAX_STEPS (the structural bound: long paths of a low
-// sun) the map gives the rest. A map alone cannot reach this accuracy at a useful size: bilinear filtering between texel
+// sun) the map gives the rest and the value is returned negated (the caller takes its magnitude and counts the event). A map alone cannot reach this accuracy at a useful size: bilinear filtering between texel
 // rays that pass through different cloud columns blends a core with open air at every edge, an error that falls only
 // with the texel [measured, CloudTests WARP: 16 / 7.5 / 3.8 / 2.9 % mean at 94 / 47 / 23 / 12 m texels; near field
 // exact + map 8.8 % at 47 m; this function 1.0 %].
-#define CLOUD_SUN_STEP 20.0
+#define CLOUD_SUN_STEP 20.0        // the near field's step (the CPU reference's)
+#define CLOUD_SUN_NEAR_STEPS 4u     // steps at CLOUD_SUN_STEP before the steps grow
+#ifndef CLOUD_SUN_GROWTH
+#define CLOUD_SUN_GROWTH 0          // 1: past the near field the step doubles every second step, up to CLOUD_SUN_STEP_MAX
+#endif
+#define CLOUD_SUN_STEP_MAX 320.0
 #define CLOUD_SUN_MAX_STEPS 256u
 #define CLOUD_SUN_TAU_MAX 9.0
 float cloudSunTauMarch(CloudRecord c, float3 x)
 {
-    float tau = 0;
+    float tau = 0, t = 0, dt = CLOUD_SUN_STEP;
     uint k = 0;
     [loop] for (; k < CLOUD_SUN_MAX_STEPS && tau < CLOUD_SUN_TAU_MAX; ++k)
     {
-        const float3 y = x + c.sunDir * ((k + 0.5) * CLOUD_SUN_STEP);
+#if CLOUD_SUN_GROWTH
+        if (k >= CLOUD_SUN_NEAR_STEPS && ((k - CLOUD_SUN_NEAR_STEPS) & 1) == 0) dt = min(dt * 2, CLOUD_SUN_STEP_MAX);
+#endif
+        const float3 y = x + c.sunDir * (t + 0.5 * dt);
         const float a = cloudAltitude(c, y);
         if (a > c.top || a < c.base - 1) return tau;
-        tau += cloudDensity(c, y) * CLOUD_SUN_STEP;
+        tau += cloudDensity(c, y) * dt;
+        t += dt;
     }
     if (tau >= CLOUD_SUN_TAU_MAX) return tau;
-    const float3 y = x + c.sunDir * (k * CLOUD_SUN_STEP);
-    return tau + cloudSunTau(c, y);
+    // Past the structural bound: the map gives the rest; the result is returned negative so the caller counts it.
+    return -(tau + cloudSunTau(c, x + c.sunDir * t));
 }
 #endif

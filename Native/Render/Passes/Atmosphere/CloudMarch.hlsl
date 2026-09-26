@@ -5,35 +5,46 @@
 // (distance x pixel angle x resolution scale, 25..400 m) and at most CLOUD_MARCH_STEPS per span (the structural bound).
 // Per step: the density (CloudCommon.hlsli), the sun's single scattering with the sun's transmittance integrated along
 // the sun ray (cloudSunTauMarch; the map only past its structural bound), the exact in-interval transmittance.
-// [Step (b): single scattering of the sun only; multiple scattering and the sky's light are step (d).]
-// P[0] = { cloud record SRV, output UAV, depth SRV (UNX_NONE: no surface), scale (pixels of the view per output texel) }
+// [Single scattering of the sun only; multiple scattering and the sky's light are step (d).]
+// Mode 0 (the frame, CloudSystem.cpp): the whole view ray (no depth clip: the readers apply the layer per full-resolution
+// pixel where the surface lies beyond the cloud, so no upsampling halo at geometry edges), the sun's illuminance at the
+// cloud through the atmosphere (transmittance LUT at the span's middle), rows [P[1].w, P[1].w + 64) of the output (the
+// dispatch is split into 64-row bands: each band's worst time is bounded), counters of the step bounds reached in the
+// stats UAV P[2].y (uint 0: pixels whose span needed more than CLOUD_MARCH_STEPS, 1: sun paths past CLOUD_SUN_MAX_STEPS).
+// P[0] = { cloud record SRV, output UAV, depth SRV (tests: UNX_NONE), scale (pixels of the view per output texel) }
 // P[1] = { output width, height, mode (0 = RGBA16F texture: radiance, transmittance; 1 = tests: raw buffer of 8 floats
 // per texel { radiance rgb, transmittance, direction xyz, 0 }; 2 = as 1 with the sun's transmittance from the deep
-// opacity map alone (attribution)), max distance (float bits, modes 1-2) };
+// opacity map alone (attribution)), max distance (float bits, modes 1-2) or first row (mode 0) };
+// P[2] = { transmittance LUT SRV (mode 0), stats UAV (mode 0), distance UAV (mode 0: R16F, km, extinction-weighted mean),
+// multiple-scattering table SRV (mode 0) }.
+// Mode 0 stores the layer with the air in front of it folded in (the readers then need one fetch): with in(0, d_c) and
+// T_air(0, d_c) the air's in-scattering and transmittance from the camera to the cloud distance d_c (CLOUD_AIR_STEPS
+// midpoint steps: sun single scattering through the transmittance LUT + the J_ms multiple scattering; the casters'
+// shadows in that air are not included), rgb = in(0, d_c) (1 - T_c) + T_air(0, d_c) L_c and a = T_c, so a pixel beyond
+// the cloud has in' = rgb + T_c in(0, d_s) and T' = T_c T_air(0, d_s) (Atmosphere.hlsli airApplyClouds).
 // b1 = the view.
 #include "Passes/Atmosphere/CloudShadowCommon.hlsli"
+#include "Passes/Atmosphere/AtmosphereCommon.hlsli"
 #include "Frame.hlsli"
 
 #define CLOUD_MARCH_STEPS 256u
+#define CLOUD_AIR_STEPS 16u
 
 [numthreads(8, 8, 1)]
 void main(uint2 id : SV_DispatchThreadID)
 {
+    const bool test = P[1].z != 0;
+    if (!test) id.y += P[1].w;
     if (any(id >= P[1].xy)) return;
     const CloudRecord c = cloudLoad(P[0].x);
     const float scale = (float)P[0].w;
     const float2 pixel = (float2(id) + 0.5) * scale - 0.5;  // the view pixel at the texel's centre (worldFromDepth adds 0.5)
     const float3 far = worldFromDepth(pixel, 1e-6);
     const float3 dir = normalize(far - g_cameraPosition);
-    const bool test = P[1].z != 0;
-    float tMax = test ? asfloat(P[1].w) : 3.0e38;
-    if (P[1].z == 0 && P[0].z != UNX_NONE)
-    {
-        Texture2D<float> depth = ResourceDescriptorHeap[P[0].z];
-        const float dd = depth.Load(int3(min(uint2(pixel + 0.5), uint2(g_viewWidth, g_viewHeight) - 1), 0));
-        if (dd > 0) tMax = distance(worldFromDepth(pixel, dd), g_cameraPosition);
-    }
-    float3 L = 0;
+    const float tMax = test ? asfloat(P[1].w) : 3.0e38;
+    float3 L = 0, sunIlluminance = c.sunIlluminance;
+    float distanceSum = 0, distanceWeight = 0;
+    uint capped = 0, sunCapped = 0;
     float T = 1;
     float t0, t1;
     if (cloudShellSpan(c, g_cameraPosition, dir, tMax, t0, t1))
@@ -41,7 +52,15 @@ void main(uint2 id : SV_DispatchThreadID)
         // The pixel angle from the projection (the view's vertical field of view over its height), times the scale.
         const float pixelAngle = length(worldFromDepth(pixel + float2(0, 1), 1e-6) - far) / length(far - g_cameraPosition) * scale;
         const float stepLength = clamp(0.5 * (t0 + t1) * pixelAngle, 25.0, 400.0);
-        const uint steps = clamp((uint)ceil((t1 - t0) / stepLength), 1u, CLOUD_MARCH_STEPS);
+        const uint wanted = (uint)ceil((t1 - t0) / stepLength), steps = clamp(wanted, 1u, CLOUD_MARCH_STEPS);
+        capped = wanted > CLOUD_MARCH_STEPS ? 1u : 0u;
+        if (!test)
+        {
+            // The sun at the cloud: top-of-atmosphere illuminance through the air to the span's middle.
+            const AtmosphereParams ap = airParamsFromTexels(P[2].x);
+            const float3 mid = g_cameraPosition + dir * (0.5 * (t0 + t1));
+            sunIlluminance = g_sunIlluminance * g_sunColor * airSunTransmittance(ap, P[2].x, mid, c.sunDir);
+        }
         const float dt = (t1 - t0) / steps;
         const float phase = cloudPhase(c, dot(dir, c.sunDir));
         [loop] for (uint s = 0; s < steps && T > 1e-4; ++s)
@@ -52,7 +71,11 @@ void main(uint2 id : SV_DispatchThreadID)
             const float segment = (1 - exp(-rho * dt)) / rho;
             // Mode 2 (attribution): the map alone.
             const float tauSun = P[1].z == 2 ? cloudSunTau(c, x) : cloudSunTauMarch(c, x);
-            L += T * c.albedo * rho * phase * c.sunIlluminance * exp(-tauSun) * segment;
+            if (tauSun < 0) sunCapped = 1;
+            const float w = T * (1 - exp(-rho * dt));
+            L += T * c.albedo * rho * phase * sunIlluminance * exp(-abs(tauSun)) * segment;
+            distanceSum += w * (t0 + (s + 0.5) * dt);
+            distanceWeight += w;
             T *= exp(-rho * dt);
         }
     }
@@ -65,7 +88,37 @@ void main(uint2 id : SV_DispatchThreadID)
     }
     else
     {
+        const float dc = distanceWeight > 0 ? distanceSum / distanceWeight : 65000.0;
+        float3 folded = L;
+        if (T < 0.9999)
+        {
+            // The air between the camera and the cloud.
+            const AtmosphereParams ap = airParamsFromTexels(P[2].x);
+            const float3 sunDir = normalize(g_sunDirection), E = g_sunIlluminance * g_sunColor;
+            const float nu = dot(dir, sunDir);
+            float3 inC = 0, TaC = 1;
+            const float ds = dc / CLOUD_AIR_STEPS;
+            [loop] for (uint k = 0; k < CLOUD_AIR_STEPS; ++k)
+            {
+                const float3 x = g_cameraPosition + dir * ((k + 0.5) * ds);
+                const AirCoefficients ac = airCoefficients(ap, airAltitude(ap, x));
+                const float3 source = (ac.rayleigh * airRayleighPhase(nu) + ac.mie * airMiePhase(nu, ap.mieG)) * airSunTransmittance(ap, P[2].x, x, sunDir) +
+                                      (ac.rayleigh + ac.mie) * airMultipleScattering(ap, P[2].w, x, dir, sunDir);
+                inC += TaC * source * E * airIntegral(ac.extinction, ds);
+                TaC *= exp(-ac.extinction * ds);
+            }
+            folded = inC * (1 - T) + TaC * L;
+        }
         RWTexture2D<float4> dst = ResourceDescriptorHeap[P[0].y];
-        dst[id] = float4(L, T);
+        dst[id] = float4(folded, T);
+        RWTexture2D<float> dist = ResourceDescriptorHeap[P[2].z];
+        dist[id] = dc * 1e-3;  // km
+        const uint cappedLanes = WaveActiveCountBits(capped != 0), sunLanes = WaveActiveCountBits(sunCapped != 0);
+        if (WaveIsFirstLane() && (cappedLanes | sunLanes))
+        {
+            RWByteAddressBuffer stats = ResourceDescriptorHeap[P[2].y];
+            if (cappedLanes) stats.InterlockedAdd(0, cappedLanes);
+            if (sunLanes) stats.InterlockedAdd(4, sunLanes);
+        }
     }
 }

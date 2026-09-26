@@ -23,7 +23,8 @@ struct CloudRecord
     float lobeBlend, invShape, invDetail, invWeather;
     float shapeOffset[3], bottomRadius;
     float detailOffset[3], pad0;
-    float weatherOffset[2], pad1[2];
+    float weatherOffset[2];
+    uint32_t layerSrv, distanceSrv;  // the frame's cloud layer textures (readers; CloudSystem.cpp)
     float origin[3], pad2;
     uint32_t shape, detail, weather, shadow;
     float sunDir[3], shadowHalfExtent;

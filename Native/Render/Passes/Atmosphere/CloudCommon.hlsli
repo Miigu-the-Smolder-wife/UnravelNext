@@ -7,7 +7,7 @@
 //   [2]  lobe blend, 1 / shape period, 1 / detail period, 1 / weather period
 //   [3]  shape offset xyz (periods), planet bottom radius (m)
 //   [4]  detail offset xyz, 0
-//   [5]  weather offset xy, 0, 0
+//   [5]  weather offset xy, cloud layer SRV (RGBA16F), cloud distance SRV (R16F, km) (the frame's; readers)
 //   [6]  world origin offset xyz (world = renderer space + origin), 0
 //   [7]  SRVs: shape (Texture3D R8), detail (Texture3D R8), weather (Texture2D RG8), shadow (Texture2D RGBA32_UINT)
 //   [8]  toward the sun xyz (unit), shadow half extent (m)
@@ -26,6 +26,7 @@ struct CloudRecord
     float bottomRadius;
     float3 detailOffset;
     float2 weatherOffset;
+    uint layerSrv, distanceSrv;
     float3 origin;
     uint shape, detail, weather, shadow;
     float3 sunDir;
@@ -48,6 +49,7 @@ CloudRecord cloudLoad(uint rawBuffer)
     c.shapeOffset = q3.xyz, c.bottomRadius = q3.w;
     c.detailOffset = q4.xyz;
     c.weatherOffset = q5.xy;
+    c.layerSrv = asuint(q5.z), c.distanceSrv = asuint(q5.w);
     c.origin = q6.xyz;
     c.shape = q7.x, c.detail = q7.y, c.weather = q7.z, c.shadow = q7.w;
     c.sunDir = q8.xyz, c.shadowHalfExtent = q8.w;

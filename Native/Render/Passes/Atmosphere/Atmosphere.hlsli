@@ -175,6 +175,35 @@ void airViewLookup(AtmosphereSrvs s, float2 uv, float linearDepth, bool wantSun,
     if (wantSun) sunTransmittance = airSunTransmittance(ap, s.transmittance, airLiftToSurface(ap, g_cameraPosition + dir * min(tDepth, ap.froxelFarM * toRay)), sun);
 }
 
+// ---- B5 volumetric clouds (CloudSystem.cpp): the main view's cloud layer, marched at quarter resolution along the whole
+// view ray with the air in front of it folded in (CloudMarch.hlsl: rgb = in(0, d_c)(1 - T_c) + T_air(0, d_c) L_c, a = T_c,
+// d_c the extinction-weighted cloud distance). A pixel whose surface (or the sky) lies beyond d_c: in' = rgb + T_c in,
+// T' = T_c T; a surface nearer than d_c is in front of the cloud and unchanged. Applied to sky pixels
+// (atmosphereSkyRadianceClouded, ShadeSky);
+// surfaces beyond the clouds and the cloud shadow on surfaces come from S passes, not from code inlined into M's shading
+// kernels (their DXIL is at the 200 KB limit). Secondary views: no clouds yet (A14).
+uint airCloudRecordSrv(AtmosphereSrvs s)
+{
+    if (g_viewKind != 0) return 0;
+    Texture2D<float4> p = ResourceDescriptorHeap[s.transmittance];
+    uint pw, ph;
+    p.GetDimensions(pw, ph);
+    return asuint(p.Load(int3(10, ph - 1, 0)).z);  // AtmosphereParams.clouds.x (SRV + 1; 0 = none)
+}
+void airApplyClouds(AtmosphereSrvs s, float2 uv, float surfaceM, inout float3 inscatter, inout float3 transmittance)
+{
+    const uint r = airCloudRecordSrv(s);
+    if (r == 0) return;
+    ByteAddressBuffer b = ResourceDescriptorHeap[r - 1];
+    const uint2 srvs = b.Load2(88);  // CloudRecord layerSrv, distanceSrv
+    Texture2D<float4> layer = ResourceDescriptorHeap[srvs.x];
+    Texture2D<float> dist = ResourceDescriptorHeap[srvs.y];
+    if (surfaceM <= dist.SampleLevel(g_linearClamp, uv, 0) * 1000) return;
+    const float4 v = layer.SampleLevel(g_linearClamp, uv, 0);
+    inscatter = v.rgb + v.a * inscatter;
+    transmittance *= v.a;
+}
+
 // Sky pixels of a view with an air volume (ShadeSky; INTERFACES 5.6): the far-field sky (atmosphereSkyRadiance) plus
 // the volume's sky correction at the pixel (bilinear across tiles, like the surface lookups): the local lights'
 // in-scattering by the air (a street lamp's glow against the night sky) and the single scattering the casters' shadows
@@ -200,6 +229,15 @@ float3 atmosphereSkyRadianceView(AtmosphereSrvs s, float3 worldDir, float2 uv)
     const float3 correction = v.SampleLevel(g_linearClamp, float3(t, (3 * N + 0.5) / depth), 0).rgb / g_exposure;
     const float3 media = v.SampleLevel(g_linearClamp, float3(t, (3 * N + 1.5) / depth), 0).rgb;
     return max(radiance * exp(-media) + correction, 0.0);
+}
+
+// atmosphereSkyRadianceView with the cloud layer (B5) in front of the sky: for ShadeSky's sky pixels (one call site; the
+// other readers stay without it so M's large kernels keep their DXIL size).
+float3 atmosphereSkyRadianceClouded(AtmosphereSrvs s, float3 worldDir, float2 uv)
+{
+    float3 sky = atmosphereSkyRadianceView(s, worldDir, uv), unit = 1;
+    airApplyClouds(s, uv, 3.0e38, sky, unit);
+    return sky;
 }
 
 // Air between the main camera and the surface at screen uv (main view, [0,1]^2) and view-space depth linearDepth

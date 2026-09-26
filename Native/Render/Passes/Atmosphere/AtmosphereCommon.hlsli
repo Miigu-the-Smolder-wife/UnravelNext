@@ -35,7 +35,8 @@ struct AtmosphereParams
     float froxelNearM;
     uint4 multiScatterSize;       // J_ms table (nu, mu_s, mu, r)
     uint2 multiScatterShGrid;     // projection grid: elevation nodes per half, azimuth nodes over [0, pi]
-    uint2 pad;
+    uint2 clouds;                 // B5: x = SRV + 1 of the main view's cloud record (CloudCommon.hlsli: layer textures,
+                                  // sun map), 0 = no clouds; y = 0 (CloudSystem.cpp)
 };
 
 AtmosphereParams airLoadParams(uint rawBuffer)
@@ -63,7 +64,7 @@ AtmosphereParams airParamsFromTexels(uint transmittanceLut)
     a.skyViewSize = asuint(q[7].xy); a.transmittanceSteps = asuint(q[7].z); a.multiScatterDirections = asuint(q[7].w);
     a.multiScatterSteps = asuint(q[8].x); a.skySegments = asuint(q[8].y); a.froxelTilePx = asuint(q[8].z); a.froxelNearM = q[8].w;
     a.multiScatterSize = asuint(q[9]);
-    a.multiScatterShGrid = asuint(q[10].xy); a.pad = 0;
+    a.multiScatterShGrid = asuint(q[10].xy); a.clouds = asuint(q[10].zw);
     return a;
 }
 

@@ -30,7 +30,7 @@ struct AtmosphereParams
     float froxelNearM;
     uint32_t multiScatterSize[4];  // J_ms table (nu, mu_s, mu, r)
     uint32_t multiScatterShGrid[2];  // density projection grid: elevation nodes per half, azimuth nodes over [0, pi]
-    uint32_t pad[2];
+    uint32_t clouds[2];  // B5: [0] SRV + 1 of the cloud record (0 = no clouds), [1] 0 (CloudSystem.cpp)
 };
 static_assert(sizeof(AtmosphereParams) == 176);
 

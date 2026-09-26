@@ -1,4 +1,5 @@
 #include "AtmosphereSystem.h"
+#include "CloudSystem.h"
 
 #include "Celestial.h"
 #include "SResources.h"
@@ -28,6 +29,7 @@ struct State
     ComPtr<ID3D12Resource> transmittance, multiScatter, skyView;
     bool paramsPending = false;   // staging holds params not yet copied by a recorded frame
     bool lutPending = false;      // transmittance + multi-scatter need a build
+    bool recordPending = false;   // only the record row needs rewriting (B5 cloud words)
     // Inputs of the last sky view build.
     float3 skySun{};
     float skyAltitude = -1;
@@ -489,13 +491,36 @@ void record(FramePassContext& fc)
     State& s = fc.state<State>(kStateKey);
     const scene::Scene* src = fc.scene.source();
     const scene::Atmosphere atm = src ? src->atmosphere : scene::Atmosphere{};
-    const AtmosphereParams p = makeParams(atm, fc.quality);
+    AtmosphereParams p = makeParams(atm, fc.quality);
+    cloudsPrepare(fc, p.clouds);  // B5: the cloud layer's SRVs in the record (0 without clouds)
 
     // atmosphere.rebuild_every_frame (measurement only): the transmittance LUT and the J_ms table are rebuilt every frame,
     // so a gate times the build (it otherwise runs only when the medium changes).
     const bool rebuildEveryFrame = fc.quality.integer("atmosphere.rebuild_every_frame") != 0;
     if (rebuildEveryFrame && s.valid) s.lutPending = true;
-    if (!s.valid || std::memcmp(&p, &s.params, sizeof p) != 0)
+    // Only the record's cloud words changed (clouds turned on or off, the view resized): the record row is rewritten and
+    // the LUTs stay.
+    bool recordOnly = false;
+    if (s.valid && std::memcmp(&p, &s.params, sizeof p) != 0)
+    {
+        AtmosphereParams a = p, b = s.params;
+        a.clouds[0] = a.clouds[1] = b.clouds[0] = b.clouds[1] = 0;
+        recordOnly = std::memcmp(&a, &b, sizeof a) == 0;
+    }
+    if (recordOnly)
+    {
+        if (s.staging) fc.device.deferRelease(s.staging);
+        s.staging = createBuffer(fc.device, L"S atmosphere params staging", 256, D3D12_HEAP_TYPE_UPLOAD);
+        void* mapped = nullptr;
+        D3D12_RANGE none{ 0, 0 };
+        check(s.staging->Map(0, &none, &mapped), "map atmosphere params");
+        std::memcpy(mapped, &p, sizeof p);
+        s.staging->Unmap(0, nullptr);
+        s.params = p;
+        s.paramsPending = true;
+        s.recordPending = true;
+    }
+    else if (!s.valid || std::memcmp(&p, &s.params, sizeof p) != 0)
     {
         const bool sizes = !s.valid || std::memcmp(p.transmittanceSize, s.params.transmittanceSize, 8) || std::memcmp(p.multiScatterSize, s.params.multiScatterSize, 16) ||
                            std::memcmp(p.skyViewSize, s.params.skyViewSize, 8);
@@ -550,6 +575,23 @@ void record(FramePassContext& fc)
     }
 
     ShaderLibrary& sh = fc.shaders;
+    if (s.recordPending && !s.lutPending)
+    {
+        ID3D12PipelineState* pr = sh.compute("Passes/Atmosphere/AtmosphereRecord");
+        g.addPass("s.atmosphere.record", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(params, Use::SrvCompute);
+                      b.use(tlut, Use::UavCompute);
+                      b.keep();
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[4] = { c.srv(params), c.uav(tlut), 0, 0 };
+                      c.cmd->SetPipelineState(pr);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+    }
+    s.recordPending = false;
     if (s.lutPending)
     {
         ID3D12PipelineState* pt = sh.compute("Passes/Atmosphere/Transmittance");
@@ -610,5 +652,6 @@ void record(FramePassContext& fc)
     publishCelestial(fc, s);
     publishWind(fc, s);
     publishWeather(fc, s);
+    cloudsRecord(fc, tlut);  // B5 (CloudSystem.cpp): nothing without clouds
 }
 } // namespace unx::render::atmosphere
