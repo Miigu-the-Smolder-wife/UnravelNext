@@ -365,10 +365,11 @@ int main(int argc, char** argv)
                     const TextureRef benchOut = graph.createTexture({ "bench probe lookups", res.width, res.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
                     const D3D12_GPU_VIRTUAL_ADDRESS benchConstants = main.frameConstants;
                     const BufferRef giCache = fc.resources.giCache;
-                    for (uint32_t mode : { 0u, 1u, 2u, 3u, 4u, 8u, 16u })
+                    for (uint32_t mode : { 0u, 1u, 2u, 3u, 4u, 8u, 16u, 32u })
                     {
-                        static const char* const names[17] = { "bench.probe.none", "bench.probe.irradiance", "bench.probe.radiance", "bench.probe.both", "bench.probe.footprint",
-                                                                "", "", "", "bench.probe.gather", "", "", "", "", "", "", "", "bench.probe.cache" };
+                        static const char* const names[33] = { "bench.probe.none", "bench.probe.irradiance", "bench.probe.radiance", "bench.probe.both", "bench.probe.footprint",
+                                                                "", "", "", "bench.probe.gather", "", "", "", "", "", "", "", "bench.probe.cache",
+                                                                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "bench.probe.cachetile" };
                         graph.addPass(names[mode], QueueType::Compute,
                                       [&](PassBuilder& b) {
                                           b.use(probesIn, Use::SrvCompute);
@@ -382,7 +383,8 @@ int main(int argc, char** argv)
                                       [&shaders, probesIn, mapsIn, depth, gbuffer, benchOut, benchConstants, mode, res, giCache](PassContext& c) {
                                           const uint32_t k[12] = { c.srv(probesIn), c.srv(depth), c.srv(gbuffer), c.uav(benchOut), mode, res.width, res.height, c.srv(mapsIn),
                                                                    c.srv(giCache), 0, 0, 0 };
-                                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/Gates/ProbeLookupBench"));
+                                          // 32: the group-resolved GI cache lookup (ProbeLookupBenchTile.hlsl, GiCacheTile.hlsli).
+                                          c.cmd->SetPipelineState(shaders.compute(mode == 32 ? "Passes/GI/Gates/ProbeLookupBenchTile" : "Passes/GI/Gates/ProbeLookupBench"));
                                           c.computeConstants(k, 12);
                                           c.bindFrameConstants(benchConstants);
                                           c.cmd->Dispatch((res.width + 7) / 8, (res.height + 7) / 8, 1);
@@ -596,6 +598,10 @@ int main(int argc, char** argv)
             logf("R %s: GI %.3f ms (trace %.3f ms = %.2f G rays/s incl. hit shading), acceleration structures %.3f ms; stand-in primary visibility %.3f ms (not R)\n",
                  res.name.c_str(), giMs, traceMs, traceMs > 0 ? gi::GiSettings::fromQuality(quality).updatesPerFrame * 64 / (traceMs * 1e-3) / 1e9 : 0, asMs,
                  r.passMs.count("standin.primary") ? r.passMs.at("standin.primary").median : 0);
+            if (!renderer)
+                logf("R %s: GI cache irradiance at every pixel (M's lookup, own kernel): per pixel %.3f ms, group-resolved (tile) %.3f ms\n", res.name.c_str(),
+                     r.passMs.count("bench.probe.cache") ? r.passMs.at("bench.probe.cache").median : 0,
+                     r.passMs.count("bench.probe.cachetile") ? r.passMs.at("bench.probe.cachetile").median : 0);
             if (!renderer)
                 logf("R %s: M-facing probe lookups at every pixel: irradiance %.3f ms, K radiance %.3f ms, both %.3f ms, footprint alone %.3f ms (lookup-free kernel %.3f ms), screenProbeGather %.3f ms\n", res.name.c_str(),
                      r.passMs.count("bench.probe.irradiance") ? r.passMs.at("bench.probe.irradiance").median : 0,
