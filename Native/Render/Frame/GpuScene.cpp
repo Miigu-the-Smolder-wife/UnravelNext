@@ -247,61 +247,14 @@ void GpuScene::upload(const scene::Scene& s)
     // Materials (textures are bound by M's texture system; until then no texture indices are published).
     std::vector<gpu::Material>& materials = m_materials;
     materials.clear();
-    for (const scene::Material& m : s.materials)
-    {
-        gpu::Material g{};
-        g.baseColor = m.baseColor;
-        g.roughness = m.roughness;
-        g.emissive = m.emissive;
-        g.metallic = m.metallic;
-        g.specular = m.specular;
-        g.alphaCutoff = m.alphaCutoff;
-        g.transmission = m.transmission;
-        g.ior = m.ior;
-        g.classFlags = (uint32_t)m.cls | ((m.twoSided ? gpu::MaterialTwoSided : 0u) | (m.alphaCutoff > 0 ? gpu::MaterialAlphaTested : 0u)) << 8;
-        g.baseColorTexture = g.normalTexture = g.roughMetalTexture = g.emissiveTexture = g.occlusionTexture = gpu::kNone;  // setMaterialTextures
-        g.textureClamp = 0;
-        g.revision = m_revision;
-        materials.push_back(g);
-    }
+    for (const scene::Material& m : s.materials) materials.push_back(packMaterial(m));
 
     // Instances, material remaps, bone palettes (jointToModel * inverseBind per skinned instance).
-    std::vector<uint32_t> remap;
     std::vector<float4> palette;
     m_instances.clear();
-    for (const scene::Instance& in : s.instances)
-    {
-        gpu::Instance g{};
-        rows(in.transform, g.objectToWorld);
-        rows(in.transform, g.prevObjectToWorld);
-        g.mesh = in.mesh;
-        g.flags = in.flags;
-        g.materialRemap = gpu::kNone;
-        if (!in.materialOverrides.empty())
-        {
-            g.materialRemap = (uint32_t)remap.size();
-            remap.insert(remap.end(), in.materialOverrides.begin(), in.materialOverrides.end());
-        }
-        g.bonePalette = gpu::kNone;
-        if ((in.flags & scene::InstanceSkinned) && in.skeleton != scene::kNone)
-        {
-            const scene::Mesh& mesh = s.meshes[in.mesh];
-            const scene::Skeleton& sk = s.skeletons[in.skeleton];
-            g.bonePalette = (uint32_t)(palette.size() / 3);
-            for (size_t j = 0; j < mesh.skin.inverseBind.size(); ++j)
-            {
-                float4 r[3];
-                rows(compose(sk.jointToModel[j], mesh.skin.inverseBind[j]), r);
-                palette.insert(palette.end(), r, r + 3);
-            }
-        }
-        g.transformRevision = m_revision;
-        g.deformRevision = m_revision;
-        g.windStiffness = in.wind.stiffness;
-        g.windPhase = in.wind.phase;
-        g.windAnchor = in.wind.anchorHeight;
-        m_instances.push_back(g);
-    }
+    m_remap.clear();
+    for (const scene::Instance& in : s.instances) m_instances.push_back(packInstance(in, &palette));
+    const std::vector<uint32_t>& remap = m_remap;
 
     // Lights.
     std::vector<gpu::Light> lights;
@@ -349,19 +302,9 @@ void GpuScene::upload(const scene::Scene& s)
     m_posedBefore.clear();
     m_records.clear();
     m_recordMarked.assign(m_instances.size(), 0);
-    DescriptorHeaps& h = m_device.descriptors();
-    auto rawUav = [&](uint32_t& index, const Buffer& b, uint64_t bytes) {
-        if (index == gpu::kNone) index = h.allocateResource();
-        D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
-        ud.Format = DXGI_FORMAT_R32_TYPELESS;
-        ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        ud.Buffer.NumElements = (UINT)(bytes / 4);
-        ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-        m_device.d3d()->CreateUnorderedAccessView(b.resource.Get(), nullptr, &ud, h.resourceCpu(index));
-    };
-    rawUav(m_instanceUav, m_instanceBuffer, (uint64_t)m_instanceBuffer.count * sizeof(gpu::Instance));
-    rawUav(m_paletteUav, m_bonePalette, (uint64_t)m_bonePalette.count * sizeof(float4));
-    rawUav(m_prevPaletteUav, m_prevBonePalette, (uint64_t)m_prevBonePalette.count * sizeof(float4));
+    rawUav(m_instanceUav, m_instanceBuffer, (uint64_t)m_instanceBuffer.count * sizeof(gpu::Instance), false);
+    rawUav(m_paletteUav, m_bonePalette, (uint64_t)m_bonePalette.count * sizeof(float4), false);
+    rawUav(m_prevPaletteUav, m_prevBonePalette, (uint64_t)m_prevBonePalette.count * sizeof(float4), false);
     const std::vector<float>& table = scene::model::directionalAlbedoTable();
     m_albedoTable = createStructured(table.data(), sizeof(float), table.size(), L"material model E table");
     const std::vector<float>& specular = scene::model::specularAlbedoTable();
@@ -369,6 +312,157 @@ void GpuScene::upload(const scene::Scene& s)
     const std::vector<uint32_t>& coverage = coverageMaskTable();
     m_coverageTable = createStructured(coverage.data(), 2 * sizeof(uint32_t), coverage.size() / 2, L"coverage mask LUT");
     if (!m_clusterBuffer.resource) setClusters(ClusterData{});
+}
+
+gpu::Material GpuScene::packMaterial(const scene::Material& m) const
+{
+    gpu::Material g{};
+    g.baseColor = m.baseColor;
+    g.roughness = m.roughness;
+    g.emissive = m.emissive;
+    g.metallic = m.metallic;
+    g.specular = m.specular;
+    g.alphaCutoff = m.alphaCutoff;
+    g.transmission = m.transmission;
+    g.ior = m.ior;
+    g.classFlags = (uint32_t)m.cls | ((m.twoSided ? gpu::MaterialTwoSided : 0u) | (m.alphaCutoff > 0 ? gpu::MaterialAlphaTested : 0u)) << 8;
+    g.baseColorTexture = g.normalTexture = g.roughMetalTexture = g.emissiveTexture = g.occlusionTexture = gpu::kNone;  // setMaterialTextures
+    g.textureClamp = 0;
+    g.revision = m_revision;
+    return g;
+}
+
+// An instance record at the current revision, with no motion (previous = current). 'palette' (upload only) receives the
+// bone palette rows of a skinned instance.
+gpu::Instance GpuScene::packInstance(const scene::Instance& in, std::vector<float4>* palette)
+{
+    const scene::Scene& s = *m_source;
+    gpu::Instance g{};
+    rows(in.transform, g.objectToWorld);
+    rows(in.transform, g.prevObjectToWorld);
+    g.mesh = in.mesh;
+    g.flags = in.flags;
+    g.materialRemap = gpu::kNone;
+    if (!in.materialOverrides.empty())
+    {
+        g.materialRemap = (uint32_t)m_remap.size();
+        m_remap.insert(m_remap.end(), in.materialOverrides.begin(), in.materialOverrides.end());
+    }
+    g.bonePalette = gpu::kNone;
+    if ((in.flags & scene::InstanceSkinned) && in.skeleton != scene::kNone)
+    {
+        if (!palette) fail("GpuScene: skinned instance of mesh %u after upload (skinned instances are added with GpuScene::upload)", in.mesh);
+        const scene::Mesh& mesh = s.meshes[in.mesh];
+        const scene::Skeleton& sk = s.skeletons[in.skeleton];
+        g.bonePalette = (uint32_t)(palette->size() / 3);
+        for (size_t j = 0; j < mesh.skin.inverseBind.size(); ++j)
+        {
+            float4 r[3];
+            rows(compose(sk.jointToModel[j], mesh.skin.inverseBind[j]), r);
+            palette->insert(palette->end(), r, r + 3);
+        }
+    }
+    g.transformRevision = m_revision;
+    g.deformRevision = m_revision;
+    g.windStiffness = in.wind.stiffness;
+    g.windPhase = in.wind.phase;
+    g.windAnchor = in.wind.anchorHeight;
+    return g;
+}
+
+// Raw UAV of an updatable buffer (SceneUpdate.hlsl). fresh: the buffer was replaced while frames may still read the old
+// descriptor, so the view goes to a new descriptor and the old one is freed when the GPU is done.
+void GpuScene::rawUav(uint32_t& index, const Buffer& b, uint64_t bytes, bool fresh)
+{
+    DescriptorHeaps& h = m_device.descriptors();
+    if (fresh && index != gpu::kNone)
+    {
+        DescriptorHeaps* heaps = &h;
+        const uint32_t old = index;
+        m_device.deferCall([heaps, old] { heaps->freeResource(old); });
+        index = gpu::kNone;
+    }
+    if (index == gpu::kNone) index = h.allocateResource();
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+    ud.Format = DXGI_FORMAT_R32_TYPELESS;
+    ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    ud.Buffer.NumElements = (UINT)(bytes / 4);
+    ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+    m_device.d3d()->CreateUnorderedAccessView(b.resource.Get(), nullptr, &ud, h.resourceCpu(index));
+}
+
+void GpuScene::setInstances(std::span<const uint32_t> indices)
+{
+    if (!m_source) fail("GpuScene::setInstances: no scene uploaded");
+    if (indices.empty()) return;
+    const scene::Scene& s = *m_source;
+    const size_t remapBefore = m_remap.size();
+    ++m_revision;  // the records below carry the new revision
+    for (uint32_t i : indices)
+    {
+        if (i > m_instances.size() || i >= s.instances.size())
+            fail("GpuScene::setInstances: instance %u (the GPU scene has %zu, the source %zu; append in order)", i, m_instances.size(), s.instances.size());
+        const scene::Instance& in = s.instances[i];
+        if (in.mesh >= m_meshes.size()) fail("GpuScene::setInstances: instance %u uses mesh %u of %zu (a new mesh needs GpuScene::upload)", i, in.mesh, m_meshes.size());
+        if (i < m_instances.size() && m_instances[i].bonePalette != gpu::kNone)
+            fail("GpuScene::setInstances: instance %u is skinned (its palette slot is fixed at upload)", i);
+        for (uint32_t m : in.materialOverrides)
+            if (m >= m_materials.size()) fail("GpuScene::setInstances: instance %u overrides with material %u of %zu", i, m, m_materials.size());
+        const gpu::Instance g = packInstance(in, nullptr);
+        if (i == m_instances.size())
+        {
+            m_instances.push_back(g);
+            m_transformFrame.push_back(UINT64_MAX);
+            m_paletteFrame.push_back(UINT64_MAX);
+            m_recordMarked.push_back(0);
+        }
+        else
+        {
+            m_instances[i] = g;
+            m_transformFrame[i] = UINT64_MAX;
+        }
+    }
+    // The whole table from the CPU mirror (pending records of this frame hold the same values). Readers take the new SRV
+    // from the frame constants; the scatter gets a new raw UAV descriptor.
+    release(m_instanceBuffer);
+    m_instanceBuffer = createStructured(m_instances.data(), sizeof(gpu::Instance), m_instances.size(), L"scene instances", true);
+    rawUav(m_instanceUav, m_instanceBuffer, (uint64_t)m_instanceBuffer.count * sizeof(gpu::Instance), true);
+    if (m_remap.size() != remapBefore)
+    {
+        release(m_materialRemapBuffer);
+        m_materialRemapBuffer = createStructured(m_remap.data(), sizeof(uint32_t), m_remap.size(), L"scene material remap");
+    }
+}
+
+void GpuScene::setMaterials(std::span<const uint32_t> indices)
+{
+    if (!m_source) fail("GpuScene::setMaterials: no scene uploaded");
+    if (indices.empty()) return;
+    const scene::Scene& s = *m_source;
+    ++m_revision;
+    for (uint32_t i : indices)
+    {
+        if (i > m_materials.size() || i >= s.materials.size())
+            fail("GpuScene::setMaterials: material %u (the GPU scene has %zu, the source %zu; append in order)", i, m_materials.size(), s.materials.size());
+        const scene::Material& m = s.materials[i];
+        for (uint32_t t : { m.baseColorTexture, m.normalTexture, m.roughMetalTexture, m.emissiveTexture, m.occlusionTexture })
+            if (t != scene::kNone && t >= s.textures.size()) fail("GpuScene::setMaterials: material %u uses texture %u of %zu", i, t, s.textures.size());
+        gpu::Material g = packMaterial(m);
+        if (i < m_materials.size())
+        {
+            const gpu::Material& old = m_materials[i];  // published textures stay until M republishes
+            g.baseColorTexture = old.baseColorTexture;
+            g.normalTexture = old.normalTexture;
+            g.roughMetalTexture = old.roughMetalTexture;
+            g.emissiveTexture = old.emissiveTexture;
+            g.occlusionTexture = old.occlusionTexture;
+            g.textureClamp = old.textureClamp;
+            m_materials[i] = g;
+        }
+        else m_materials.push_back(g);
+    }
+    release(m_materialBuffer);
+    m_materialBuffer = createStructured(m_materials.data(), sizeof(gpu::Material), m_materials.size(), L"scene materials");
 }
 
 void GpuScene::setClusters(ClusterData data)
@@ -677,7 +771,7 @@ void GpuScene::fill(gpu::FrameConstants& f) const
     f.meshCount = (uint32_t)m_meshes.size();
     f.clusterCount = m_clusterBuffer.count;
     f.lightCount = m_source ? (uint32_t)m_source->lights.size() : 0;
-    f.materialCount = m_source ? (uint32_t)m_source->materials.size() : 0;
+    f.materialCount = (uint32_t)m_materials.size();
     f.sceneRevision = m_revision;
 }
 

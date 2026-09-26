@@ -1291,6 +1291,103 @@ UNX_TEST(gpu_scene_material_textures)
     CHECK(again.materials == after.materials && gs.revision() == sceneRevision + 1);
 }
 
+UNX_TEST(gpu_scene_edits_after_upload)
+{
+    // Scene edits after upload (INTERFACES 6.3 v1.44, D0): setInstances appends and replaces instances of uploaded meshes
+    // (no motion, visible again, overrides in the remap table), setMaterials appends and replaces materials (published
+    // textures kept); each call bumps the scene revision; the GPU tables match the CPU mirrors after the edits and after a
+    // frame's scatter into the replaced instance buffer; per-frame updates keep working on appended instances.
+    scene::Scene s = tinyScene();
+    GpuScene gs(testDevice());
+    gs.upload(s);
+    const uint32_t r0 = gs.revision();
+    auto translation = [](float x, float y, float z) {
+        float3x4 m;
+        m.m[0][3] = x;
+        m.m[1][3] = y;
+        m.m[2][3] = z;
+        return m;
+    };
+    auto readInstances = [&]() {
+        const uint64_t bytes = gs.instances().size() * sizeof(gpu::Instance);
+        D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = bytes;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> rb;
+        check(testDevice().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)),
+              "readback");
+        CommandList cl = testDevice().acquireCommandList(QueueType::Graphics);
+        cl.list->CopyBufferRegion(rb.Get(), 0, gs.buffer("instances"), 0, bytes);
+        testDevice().queue(QueueType::Graphics).waitCpu(testDevice().submit(cl));
+        std::vector<gpu::Instance> out(gs.instances().size());
+        uint8_t* q = nullptr;
+        check(rb->Map(0, nullptr, reinterpret_cast<void**>(&q)), "map");
+        std::memcpy(out.data(), q, bytes);
+        rb->Unmap(0, nullptr);
+        return out;
+    };
+    auto sameRecords = [](const std::vector<gpu::Instance>& a, const std::vector<gpu::Instance>& b) {
+        return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size() * sizeof(gpu::Instance)) == 0;
+    };
+
+    // Append two instances of mesh 0 (one with a material override), replace instance 0 by a moved copy.
+    const size_t n0 = s.instances.size();
+    s.materials.push_back(s.materials[0]);
+    s.materials.back().name = "appended";
+    s.materials.back().baseColor = { 0.9f, 0.1f, 0.1f };
+    const uint32_t newMaterial = (uint32_t)s.materials.size() - 1;
+    const uint32_t mats[] = { newMaterial };
+    gs.setMaterials(mats);
+    CHECK(gs.revision() == r0 + 1 && gs.materials().size() == s.materials.size() && gs.materials()[newMaterial].baseColor.x == 0.9f);
+    scene::Instance a = s.instances[0], b = s.instances[0];
+    a.transform = translation(3, 0, 0);
+    b.transform = translation(-3, 0, 0);
+    b.materialOverrides.assign(s.meshes[b.mesh].submeshes.size(), newMaterial);
+    s.instances.push_back(a);
+    s.instances.push_back(b);
+    s.instances[0].transform = translation(0, 5, 0);
+    const uint32_t edited[] = { (uint32_t)n0, (uint32_t)n0 + 1, 0 };
+    gs.setInstances(edited);
+    CHECK(gs.revision() == r0 + 2 && gs.instances().size() == n0 + 2);
+    const gpu::Instance& g0 = gs.instances()[0];
+    CHECK(g0.objectToWorld[1].w == 5.0f && g0.prevObjectToWorld[1].w == 5.0f && g0.transformRevision == r0 + 2);
+    CHECK(gs.instances()[n0 + 1].materialRemap != gpu::kNone && gs.instances()[n0].materialRemap == gpu::kNone);
+    CHECK(sameRecords(readInstances(), gs.instances()));
+
+    // Remove (hide) the appended instance, reuse its slot for another copy: visible again, no motion.
+    gs.setInstanceVisible((uint32_t)n0, false);
+    CHECK((gs.instances()[n0].flags & gpu::kInstanceHidden) != 0);
+    s.instances[n0].transform = translation(7, 0, 0);
+    const uint32_t reuse[] = { (uint32_t)n0 };
+    gs.setInstances(reuse);
+    CHECK((gs.instances()[n0].flags & gpu::kInstanceHidden) == 0 && gs.instances()[n0].objectToWorld[0].w == 7.0f && gs.instances()[n0].prevObjectToWorld[0].w == 7.0f);
+
+    // Per-frame updates on an appended instance, scattered into the replaced table.
+    const InstanceTransformUpdate move[] = { { (uint32_t)n0 + 1, translation(-4, 0, 0) } };
+    gs.updateTransforms(0, move);
+    gs.flushUpdates(0, 2, shaders());
+    testDevice().waitIdle();
+    const std::vector<gpu::Instance> gpu0 = readInstances();
+    CHECK(sameRecords(gpu0, gs.instances()) && gpu0[n0 + 1].objectToWorld[0].w == -4.0f && gpu0[n0 + 1].prevObjectToWorld[0].w == -3.0f);
+
+    // Out-of-range edits fail.
+    bool threw = false;
+    try
+    {
+        const uint32_t bad[] = { (uint32_t)s.instances.size() + 1 };
+        gs.setInstances(bad);
+    }
+    catch (const std::exception&)
+    {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 UNX_TEST(gpu_scene_frame_updates)
 {
     // GpuScene per-frame updates (INTERFACES_KO.md 6.3 v1.8): previous = the previous rendered frame, settling to

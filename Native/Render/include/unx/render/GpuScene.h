@@ -95,6 +95,19 @@ public:
     // materials whose textures changed and the scene revision. Call before any frame constants of the frame are
     // allocated (tracks::prepareScene), since they carry the material buffer's SRV.
     void setMaterialTextures(const std::vector<gpu::MaterialTextures>& perMaterial);
+    // Scene edits after upload (v1.44, INTERFACES 6.3; I request 20260926_I_game_features 1-2, D0). The caller first
+    // changes its scene (the source), then names what changed:
+    //   setInstances: the instances at 'indices' are packed from source instances[i]; i == instances().size() appends (in
+    //                 order). Transform with no motion (previous = current), mesh (already uploaded: a new mesh needs
+    //                 upload), flags (the instance is visible again), material overrides, wind. Skinned instances need
+    //                 upload. Removal is setInstanceVisible(false); the caller keeps the free slots and reuses them here.
+    //   setMaterials: the materials at 'indices' are packed from source materials[i] (i == materials().size() appends);
+    //                 their published textures stay until M's texture system republishes them. Textures added to the
+    //                 source are picked up with the next setMaterials (the revision).
+    // Both bump the scene revision, so every track rebuilds what it derives from the scene (V, R's ray scene, S's pages,
+    // the GI epoch; M re-uploads textures only when their content or references changed). Blocking (edit time).
+    void setInstances(std::span<const uint32_t> indices);
+    void setMaterials(std::span<const uint32_t> indices);
     const std::vector<gpu::Material>& materials() const { return m_materials; }
     // Uploads the changes for 'frameIndex': a scatter kernel on the graphics queue, submitted before the frame's graph;
     // the other queues wait for it. Upload slot frameIndex % framesInFlight (the caller waited for that slot's frame).
@@ -118,6 +131,9 @@ private:
     void release(Buffer& b);
     void markRecord(uint32_t instance);
     void writePalette(uint32_t instance, std::vector<float4>& palette);  // jointToModel x inverseBind of its skeleton
+    gpu::Instance packInstance(const scene::Instance& in, std::vector<float4>* palette);  // overrides appended to m_remap
+    gpu::Material packMaterial(const scene::Material& m) const;
+    void rawUav(uint32_t& index, const Buffer& b, uint64_t bytes, bool fresh);  // fresh: a new descriptor, the old freed later
     struct Upload
     {
         ComPtr<ID3D12Resource> buffer;
@@ -131,6 +147,7 @@ private:
     std::vector<gpu::Instance> m_instances;
     std::vector<gpu::Mesh> m_meshes;
     std::vector<gpu::Material> m_materials;
+    std::vector<uint32_t> m_remap;  // material override table (gpu::Instance::materialRemap)
     Buffer m_instanceBuffer, m_meshBuffer, m_submeshBuffer, m_vertexBuffer, m_indexBuffer, m_materialBuffer, m_materialRemapBuffer,
         m_lightBuffer, m_skinBuffer, m_bonePalette, m_prevBonePalette, m_albedoTable, m_specularTable, m_coverageTable;
     Buffer m_clusterBuffer, m_lodLevelBuffer, m_lodLevelClusterBuffer, m_clusterVertexIndexBuffer, m_clusterTriangleBuffer;

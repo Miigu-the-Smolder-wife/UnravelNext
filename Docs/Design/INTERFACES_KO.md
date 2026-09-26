@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.43, 2026-09-26)
+# UnravelNext 인터페이스 (v1.44, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -426,6 +426,17 @@ M shading(fc, main)                 셰이딩 커널, 가장자리·coverage 합
 - CPU 사본(`instances()`)은 호출 즉시 바뀐다. `revision()`(장면 구조)은 바뀌지 않는다.
 - 비용 [예상]: 갱신 원소(16 B) 수 × 2(업로드 링 + 산포). 인스턴스 2만 개와 본 2.56만 개면 약 2.2 MB, 0.01 ms 수준.
 
+**commit 뒤 장면 편집(v1.44, I 요청 `20260926_I_game_features.md` 1·2, D0)**: 호출자는 먼저 자기 장면(`source()`)을 고치고, 바뀐 번호를 알린다.
+- `setInstances(indices)`: `source()->instances[i]`에서 레코드를 다시 만든다. i = `instances().size()`면 뒤에 붙인다(순서대로).
+  - 변환은 움직임 0이다(prev = current). 메시는 이미 올라간 것이어야 한다(새 메시는 `upload`). 플래그는 장면 값이라 숨김도 풀린다. 재질 교체는 remap 표에 붙인다. 바람 값도 넣는다.
+  - 스킨 인스턴스는 추가하거나 갈아 끼울 수 없다(팔레트 자리가 upload에서 정해진다). D0 뒤 항목이다.
+  - **제거**는 `setInstanceVisible(false)`다. 빈 번호는 호출자가 관리하고, 재사용할 때 `setInstances`로 갈아 끼운다.
+- `setMaterials(indices)`: `source()->materials[i]`에서 값을 다시 만든다(i = 수면 추가). M이 게시한 텍스처 SRV는 M의 텍스처 시스템이 다시 게시할 때까지 유지한다. 장면에 텍스처를 추가했으면 그 텍스처를 쓰는 재질로 `setMaterials`를 부른다.
+- 두 호출 모두 `revision()`을 올린다. 그래서 장면에서 파생한 상태를 트랙마다 다시 만든다: V 계층, R 광선 장면(BLAS·TLAS), S 페이지, GI 에포크. M은 텍스처 내용·참조·컷이 바뀌었을 때만 다시 올린다. 정확성 우선이다. 편집 한 번의 비용(주로 R 광선 장면 재구축)은 실측으로 적는다. 인스턴스 집합만 바뀐 경우에 트랙별로 더 빠른 경로를 넣는 것은 각 트랙 몫이다.
+- 인스턴스 표는 CPU 사본에서 통째로 다시 올린다(새 SRV). 산포용 raw UAV는 새 서술자로 만들고, 옛 것은 GPU가 끝난 뒤 푼다. 같은 프레임의 `updateTransforms`·`setInstanceVisible`은 그대로 쌓인다. 호출은 막힘형이다(편집 시점).
+- `FrameConstants::materialCount`는 이제 GPU 재질 표의 크기다.
+- [실측] 단위 시험 `gpu_scene_edits_after_upload`: 추가·교체·재사용, remap, revision, 되읽은 GPU 표가 CPU 사본과 같다. 교체한 표에 프레임 산포를 한 뒤에도 같다. debug layer 오류 0.
+
 ### 6.4 변형
 스킨: 선형 블렌드, 조인트 4개, 팔레트 = jointToModel × inverseBind(인스턴스마다, 현재·이전 두 벌). 바람: `windOffset(inst, p, time)`(v1 모델, P3에서 같은 시그니처로 교체), 상한 `windOffsetBound(inst, centre, radius)`(구 안 모든 점·모든 시각, 이번 프레임의 바람).
 - **장면 바람 변경(v1.23, I 요청·S·R 검토)**: 호스트는 프레임 기록 전에 `GpuScene::source()` 장면의 `windDirection`·`windSpeed`를 바꿀 수 있다(태양과 같은 경로). 프레임 상수 `g_windDirection`·`g_windSpeed`가 그 프레임의 바람이다. 바람 revision은 없다. 소비자는 끝점을 비교한다.
@@ -542,6 +553,34 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 
 ### 8.4 카메라·노출·톤맵
 핀홀(피사계 심도·모션 블러 없음, v1). 픽셀 필터 = 픽셀 사각형 박스. 노출 = 1 / (1.2 · 2^EV100). 톤맵 = Khronos PBR Neutral(`shading.tonemap`), 이어서 sRGB OETF.
+
+### 8.5 Unity 콘텐츠 → 렌더러 장면 매핑 (v1.44, D0; core 결정 — M 정지 중, 조율 지시)
+호스트(I)의 레벨 적재기가 Unity 에셋을 `scene::Scene`(UnxScene*)으로 바꿀 때의 규칙이다. 목표는 두 가지다. 같은 입력이면 늘 같은 장면이 나와야 하고, 8.1~8.4 모델로 정확히 옮길 수 없는 입력은 조용히 바꾸지 않고 **콘텐츠 보고**(적재 로그 + 적재기 결과 목록)에 남긴다.
+- **좌표**: Unity(왼손, y 위)에서 렌더러 공간으로 z를 반전한다(S = diag(1, 1, −1)).
+  - 위치·법선: z → −z. 탄젠트: xyz의 z → −z, **w → −w**(반사가 틀의 손방향을 뒤집는다).
+  - 인스턴스 행렬: M_r = S · M_u · S. 삼각형 순서는 그대로 둔다(Unity의 시계 방향 앞면이 반사 뒤 반시계 방향 앞면이 된다).
+  - 카메라도 같은 S로 바꾼다.
+- **UV와 텍스처 행**: 텍스처는 행을 위→아래(`UnxTextureDesc.texels` 계약)로 넘긴다. Unity `GetPixels`는 아래→위라서 행을 뒤집고, 대신 **v' = 1 − v**로 둔다.
+  - 탄젠트와 노멀맵 초록 채널은 둘 다 Unity의 +v를 가리킨 채로 둔다. 둘이 같은 방향을 가리키므로 TBN은 맞다.
+  - 재질의 타일링·오프셋(`_BaseMap_ST`/`_MainTex_ST`)은 uv0에 굽는다: uv = uv·scale + offset, 그다음 v 반전. 한 정점을 ST가 다른 두 재질이 쓰면 정점을 복제한다.
+- **재질(URP Lit, Built-in Standard; 색은 `Color.linear`, 텍스처 색 공간은 가져오기 설정 그대로)**:
+  - `baseColor` = `_BaseColor`/`_Color`.rgb(선형). 기본 맵 → Rgba8Srgb. 기본 색 alpha는 텍스처 alpha에 곱해 굽는다.
+  - 금속 흐름(기본): `_MetallicGlossMap`이 없으면 metallic = `_Metallic`, roughness = 1 − `_Smoothness`(또는 `_Glossiness`). Unity의 smoothness는 지각 값이고 GGX α = (1 − s)²라서 8.1(α = r²)과 같다.
+    - 맵이 있으면 metallic = roughness = 1(상수)로 두고, Rg8RoughMetal 텍스처를 재질마다 굽는다: R = 1 − a·`_Smoothness`(`_GlossMapScale`), G = 맵.r. a는 `_SmoothnessTextureChannel`에 따라 맵 alpha 또는 기본 맵 alpha다.
+  - 스펙큘러 흐름(`_WorkflowMode` = 0, `_SpecColor`): f0이 무채색이고 0.08 이하면 metallic 0, specular = f0/0.08로 정확하다. 확산색이 검정이면 metallic 1, baseColor = f0로 정확하다. 그 밖은 8.1로 정확히 옮길 수 없으므로 콘텐츠 보고를 남기고 첫 규칙으로 바꾼다.
+  - 노멀(`_BumpMap`): 가져온 원본(OpenGL +Y)을 풀어 x, y = 2c − 1로 하고, `_BumpScale`을 xy에 곱한 뒤 x² + y² ≤ 1로 자른다. 결과는 Rg8Normal(0.5 + 0.5·xy)이다. Unity 압축형(DXT5nm AG, BC5 RG)을 읽을 때는 풀어서 같은 값으로 만든다. 노멀맵이 있는 메시는 탄젠트를 반드시 넘긴다(Unity 메시 탄젠트, 위 변환).
+  - 가림(`_OcclusionMap`): R8Linear = lerp(1, 맵.g, `_OcclusionStrength`).
+  - 방출: nit = S · `_EmissionColor`(선형, HDR 세기 포함) × 방출 맵이다. S = 1.2 · 2^EV100_ref이고 EV100_ref는 레벨 설정(기본 14 = `ViewDesc::ev100` 기본값)이다. 이 척도에서는 Unity가 흰색(1.0)으로 보이는 방출이 렌더러에서도 EV100_ref 노출에서 흰색으로 보인다.
+  - 알파 컷: URP `_AlphaClip` / Standard Cutout이면 alphaCutoff = `_Cutoff`다. 반투명(URP `_Surface` = Transparent, Standard Fade/Transparent)은 v1에 알파 혼합 경로가 없으므로 콘텐츠 보고를 남기고 불투명으로 그린다(유리·물은 Glass/Water 클래스가 들어올 때 따로 매핑).
+  - 양면: `_Cull` = Off(0)면 twoSided다. 디테일 맵, 시차(높이) 맵, 투명 코트는 v1에 없으므로 콘텐츠 보고를 남긴다.
+  - 재질 클래스: Standard다. 셰이더가 투과 값(`_Translucency`, `_TransmissionScale` 등)을 가지면 Foliage이고 transmission = 그 값이다. 값 없이 이름만으로 추정하지 않는다. 그 밖의 사용자 셰이더는 콘텐츠 보고를 남기고 `_BaseColor`·`_BaseMap`만 읽는다.
+- **광원(URP 물리 감쇠 기준)**: 같은 S로 바꾼다. Unity Lambert(알베도 × 세기 × N·L / d²)와 렌더러(알베도/π × 조도)가 EV100_ref 노출에서 같은 화소값이 된다.
+  - 점·스폿: 광도 I(cd) = π · S · intensity. range는 그대로다(8.2의 창 함수가 URP와 같다).
+  - 스폿: spotScale = 1 / max(cos θ_in − cos θ_out, 1e-3), spotOffset = −cos θ_out · spotScale. θ는 반각이다(Unity의 spotAngle·innerSpotAngle은 전각이다).
+  - 방향광: 태양의 방향만 쓴다. 세기와 색은 물리 하늘(환경 기본값, 8.3)이 정한다. 사용자가 태양 조도를 따로 저작하면 UnxFrameSetSun으로 준다.
+  - 면광원(Area, 굽는 전용): v1 면광원으로 옮긴다. 휘도 L = S · intensity / π다.
+- **메시**: 인덱스는 32비트, 서브메시 = Unity 서브메시(재질 슬롯)다. 법선이 없으면 가져오기 설정대로 계산한 법선을 쓴다. 퇴화 삼각형(넓이 0)은 적재기가 지운다. `scene::validate`가 거부하는 입력은 적재 실패로 보고한다.
+- **정적·동적**: Unity Static 플래그와 상관없이 모든 인스턴스는 같은 경로로 들어간다. 편집 모드의 이동은 `UnxFrameSetTransforms`, 추가·교체는 `GpuScene::setInstance`, 제거는 숨김 + 슬롯 재사용이다(6.3).
 
 ## 9. 품질 설정 키 (`Config/quality/<이름>.toml`)
 - 파일 `<이름>.toml`은 `<이름>.`으로 시작하는 키만 가질 수 있다(`QualityConfig::loadDirectory`가 강제). 파일 소유는 1절 표.
@@ -683,6 +722,9 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.44 (2026-09-26):
+  - **commit 뒤 장면 편집(6.3, I 요청, D0)**: `GpuScene::setInstances`, `setMaterials`.
+  - **Unity 콘텐츠 매핑(8.5, D0, core 결정)**: 좌표·UV·재질(URP Lit, Standard)·광원·메시 규칙. 8.1로 정확히 옮길 수 없는 입력은 콘텐츠 보고로 남긴다.
 - v1.43 (2026-09-26):
   - **`FrameResources::vsmAtlas`(S 요청 `20260926_S_vsm_one_path.md`)**: VSM 한 경로의 페이지 아틀라스(D32_FLOAT, SRV R32_FLOAT, 페이지 p는 ((p % 128), (p / 128)) × 128 px, 0 = 캐스터 없음). `ShadowSrvs.pool`이 그 SRV를 담는다. 전환 순서: 필드를 먼저 더했다(`vsmPool`과 함께). M·R·FX가 `vsmAtlas`를 읽도록 옮긴 뒤 S가 아틀라스를 게시하고 `vsmPool`을 무효로 둔다. 그다음 코어가 `vsmPool`을 지운다. 버퍼 서술자를 텍스처로 읽는 창은 생기지 않는다.
 - v1.42 (2026-09-26):
