@@ -56,6 +56,8 @@ public:
     // buffers, valid after the graph runs until the next record.
     FluidSurfaceOutput record(render::RenderGraph& graph, const FluidSurfaceInput& input);
     const FluidSurfaceDesc& desc() const { return m_desc; }
+    // The node grid's world position for the next record (the fluid's origin in this frame's coordinates: origin rebase).
+    void setOrigin(const float origin[3]) { for (int a = 0; a < 3; ++a) m_desc.origin[a] = origin[a]; }
     uint32_t blocks() const { return m_blocks[0] * m_blocks[1] * m_blocks[2]; }
     // World bounds of every possible vertex (the node grid): the stream's culling box.
     void bounds(float minimum[3], float maximum[3]) const;
