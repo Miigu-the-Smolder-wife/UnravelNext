@@ -81,6 +81,12 @@ struct ParticleRenderInputs
     double anchor[2][3] = {};                              // stream anchor of each tick's state
     float dt = 0;                                          // dt of the latest tick
     double tickTime = 0;                                   // context time at the end of the latest tick
+    // Mesh particles (executor version 4): the orientation pair (NV_StreamParticleOrientation per slot, laid out like
+    // posAge; invalid when no program of the stream carries orientations), the latest tick's serial number (increments
+    // per recorded tick) and whether its input was a RESET's restore records instead of the tick before it.
+    render::BufferRef orientation[2];
+    uint64_t tickSerial = 0;
+    bool reset = false;
     bool valid = false;                                    // a tick was recorded
 };
 

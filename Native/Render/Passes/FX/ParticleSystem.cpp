@@ -251,6 +251,8 @@ struct ParticleSystem::Impl
     // carries an orientation (sticky: slots of such a program always have their input orientation written)
     Buf orientation[2] = { { "fx.orientation0", sizeof(NV_StreamParticleOrientation) }, { "fx.orientation1", sizeof(NV_StreamParticleOrientation) } };
     bool orientationSized[2] = { false, false }, oriented = false;
+    bool latestReset = false;  // the latest tick's input was not the tick before it (RESET): render continuity breaks
+    uint64_t tickSerial = 0;   // recorded ticks (the render passes' continuity check)
     Buf restoreOrientations{ "fx.restoreOrientations", sizeof(NV_StreamParticleOrientation) };
     std::vector<uint8_t> programOriented;  // per program: NV_STREAM_PROGRAM_ORIENTATION
     bool restoreTurns = false;             // this tick installs restore orientations
@@ -1053,6 +1055,8 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         slot.fence = 0;
         m.latestSlot = thisSlot;
         m_latestTick = h.tick;
+        m.latestReset = reset;
+        ++m.tickSerial;
         m.layoutPrev = std::move(in);
         m.renderThreads = renderThreads;
         m.renderRangeCount = (uint32_t)renderRanges.size();
@@ -1541,6 +1545,13 @@ ParticleRenderInputs ParticleSystem::renderInputs(RenderGraph& graph, uint64_t i
     r.rangeCount = m.renderRangeCount;
     std::memcpy(r.anchor[0], m.anchor[prev], sizeof r.anchor[0]);
     std::memcpy(r.anchor[1], m.anchor[last], sizeof r.anchor[1]);
+    if (m.oriented && m.orientation[prev].resource && m.orientation[last].resource)
+    {
+        r.orientation[0] = m.orientation[prev].import(graph, importIndex);
+        r.orientation[1] = m.orientation[last].import(graph, importIndex);
+    }
+    r.tickSerial = m.tickSerial;
+    r.reset = m.latestReset;
     r.dt = m.tickDt;
     r.tickTime = m.tickTime;
     r.valid = true;

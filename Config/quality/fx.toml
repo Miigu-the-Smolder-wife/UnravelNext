@@ -8,6 +8,8 @@ collision_cell_m = 1.0       # collision candidate grid cell (m): a size (the ca
                              # surfaces a segment can hit, so the results do not depend on it)
 collision_readback = 4096    # collision events copied with the tick; more are fetched from the tick's GPU event buffer
                              # when the CPU reads the tick (exact either way)
+mesh_instances_max = 65536    # mesh particles (A3): scene instances the GPU writes per frame (RuntimeCapacity::gpuInstances);
+                             # live mesh particles past it are counted (MeshParticleStats::overflow), a size to raise, never a cap
 experiment_disable = 0       # timing attribution only, never a product setting: bit 1 (unused: volumes are records), 2 ribbon strips,
                              # 4 (unused: the sort moved to the render pass), 8 collisions (no surfaces, no grid), 16 context and world fields,
                              # 32 noise, 64 fields read from buffers instead of the constant
