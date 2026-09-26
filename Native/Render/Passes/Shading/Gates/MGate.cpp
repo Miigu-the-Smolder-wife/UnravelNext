@@ -105,6 +105,7 @@ int main(int argc, char** argv)
 #if !(UNX_M_HAS_SCENEGEN && UNX_M_HAS_CLUSTERBUILDER)
         fail("this build has no scene generator or cluster builder: use the integrated build (Build.ps1 -Track all)");
 #else
+        bool failed = false;  // a gate check failed (exit code 2)
         QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
         for (const std::string& o : overrides) quality.applyOverride(o);
         scenegen::Request request;
@@ -270,8 +271,14 @@ int main(int argc, char** argv)
                  "frame %.3f ms\n",
                  label.c_str(), rs.c_str(), resolve, d.resolve, shade, d.shade, kind, planarM, r.gpuFrameMs.median);
             if (coverage > 0) logf("M %s %s: coverage composite %.3f ms\n", label.c_str(), rs.c_str(), coverage);
+            if (st.coverageErrors != 0)
+            {
+                logf("M %s %s: coverage composite error bits 0x%x (0x400: a data-dependent loop reached its bound, INTERFACES 3.6) - gate FAILED\n",
+                     label.c_str(), rs.c_str(), st.coverageErrors);
+                failed = true;
+            }
         }
-        return 0;
+        return failed ? 2 : 0;
 #endif
     }
     catch (const std::exception& e)

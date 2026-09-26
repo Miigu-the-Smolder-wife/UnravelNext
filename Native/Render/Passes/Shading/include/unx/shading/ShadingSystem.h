@@ -30,6 +30,7 @@ struct Stats
     uint32_t classTiles[4] = {};
     uint32_t edgePixels = 0;
     uint32_t tiles = 0;
+    uint32_t coverageErrors = 0;  // coverage composite error bits (0x400: a data-dependent loop reached its bound, 0x800: a heavy pixel open after the rounds)
 };
 Stats latestStats(TrackState& state);
 } // namespace unx::render::shading

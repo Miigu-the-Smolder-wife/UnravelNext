@@ -7,6 +7,7 @@
 #include "unx/core/Log.h"
 #include "unx/material/MaterialSystem.h"
 #include "unx/render/Frame.h"
+#include "unx/render/GpuProfiler.h"
 #include "unx/render/GpuScene.h"
 #include "unx/render/Tracks.h"
 
@@ -274,8 +275,14 @@ public:
         FramePassContext fc{ device, graph, shaders, quality, gpuScene, frame, resources, services, [this](const ViewDesc& v) { return frameConstantsFor(v); }, &trackState };
         material::prepareScene(fc);  // before any frame constants, as FrameRenderer::record does (INTERFACES 5.2 v1.10)
         build(fc);
-        graph.execute(nullptr);
+        if (profiler) profiler->beginFrame(frame.frameIndex);
+        graph.execute(profiler);
         for (uint32_t q = 0; q < kQueueTypeCount; ++q) device.queue((QueueType)q).waitCpu(graph.lastFence((QueueType)q));
+        if (profiler)
+        {
+            profiler->beginFrame(frame.frameIndex);  // one slot: reads this frame's timestamps
+            lastTiming = profiler->lastCompleted() ? *profiler->lastCompleted() : FrameTiming{};
+        }
         for (auto& f : afterFrame) f();
         afterFrame.clear();
         keepAlive.clear();
@@ -365,6 +372,8 @@ public:
     FrameContext frame;
     TrackState trackState;
     FakeVisibility vis;
+    GpuProfiler* profiler = nullptr;  // optional (one frame in flight): per-pass GPU times of each run in lastTiming
+    FrameTiming lastTiming;
 
 private:
     static constexpr uint32_t kSlots = 16;

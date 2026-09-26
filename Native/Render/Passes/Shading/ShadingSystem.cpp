@@ -172,6 +172,7 @@ struct StatsRing
     uint8_t* mapped = nullptr;
     uint64_t frame[kSlots] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
     uint32_t tiles[kSlots] = {};
+    bool coverage[kSlots] = {};  // the frame ran the coverage composite (its error word at byte 20 is this frame's)
     uint64_t last = UINT64_MAX;
     ~StatsRing()
     {
@@ -220,6 +221,7 @@ Stats latestStats(TrackState& state)
     st.frameIndex = ring.frame[slot];
     for (uint32_t c = 0; c < 4; ++c) st.classTiles[c] = w[c];
     st.edgePixels = w[4];
+    st.coverageErrors = ring.coverage[slot] ? w[5] : 0;
     st.tiles = ring.tiles[slot];
     return st;
 }
@@ -293,11 +295,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
     const EdgeConfig ec = edgeConfig(fc.quality);
     const bool planar = view.view.kind != gpu::ViewKind::Main;
-    // V's coverage layer (INTERFACES 7.1 v1.37/v1.38; main view): its fragments are composited over band A
+    // V's coverage layer (INTERFACES 7.1 v1.41; main view): its fragments are composited over band A
     // (CoverageComposite.hlsl, design COVERAGE_REDESIGN 4.5). The fragments' shadows come from S's fragment visibility
     // (4.3); until S publishes it, the layer is shaded only in frames without S's shadows (shading bit 8192 allows it for
     // cost attribution, never an image).
-    const bool coverage = !planar && v.coverageTiles.valid() && v.coverageChunkTable.valid() && v.coverageChunks.valid() && v.coverageTileList.valid();
+    const bool coverage = !planar && v.coverageTiles.valid() && v.coverageRecords.valid() && v.coverageTileList.valid() && v.coverageTilePixels.valid();
     if (coverage && v.shadowVisibility.valid() && (experiment & 8192) == 0)
         fail("M.shading: V's coverage layer with S's shadows but without S's fragment visibility (COVERAGE_REDESIGN 4.3): its fragments would be unshadowed");
     // S's shadow overflow (INTERFACES 7.3, v1.20; main view): the list the main kernel loads, and the fallback tiles over
@@ -560,6 +562,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         const uint32_t slot = (uint32_t)(fc.frame.frameIndex % StatsRing::kSlots);
         ring.frame[slot] = fc.frame.frameIndex;
         ring.tiles[slot] = tileCount;
+        ring.coverage[slot] = coverage;
         ring.last = fc.frame.frameIndex;
         ID3D12Resource* dst = ring.buffer.Get();
         const BufferRef classArgs = o.tileArgs;
@@ -621,55 +624,177 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                          c.cmd->ExecuteIndirect(signature, 1, c.resource(edgeArgs), 0, nullptr, 0);
                      });
 
-    // Coverage composite (design COVERAGE_REDESIGN 4.5): one group per tile of V's tile list (heavy tiles included: the
-    // records are sorted through M's scratch, pixel-major, so no tile size limit), fragments shaded and composited over
-    // the band A radiance the shading kernels kept for coverage tiles.
+    // Coverage composite (design COVERAGE_REDESIGN 4.5; stages in CoverageShade.hlsli): V's fragments (pixel-major ranges,
+    // v1.41) composited over the band A radiance the shading kernels kept for coverage tiles. Every group takes a bounded
+    // piece of work (a light pixel, a run of the heavy sort, a round of a heavy pixel), dispatched indirectly with sizes
+    // made on the GPU: no tile, pixel or fragment distribution makes one group's work grow.
     if (coverage)
     {
-        const BufferRef scratch = fc.graph.createBuffer({ "m.coverage scratch", (fc.graph.desc(v.coverageChunks).size / 16 + 1) * 4, 0 });
-        ID3D12PipelineState* begin = fc.shaders.compute("Passes/Shading/CoverageBegin");
-        fc.graph.addPass("m.coverage.begin", QueueType::Graphics, [&](PassBuilder& b) { b.use(scratch, Use::UavCompute); },
-                         [begin, scratch](PassContext& c) {
-                             const uint32_t k[4] = { c.uav(scratch), 0, 0, 0 };
-                             c.cmd->SetPipelineState(begin);
-                             c.computeConstants(k, 4);
-                             c.cmd->Dispatch(1, 1, 1);
-                         });
-        ID3D12PipelineState* kernel = fc.shaders.compute(
-            (std::string("Passes/Shading/CoverageComposite.OUTPUT") + (linear ? "1" : "0") + ".AREA" + (areaLights ? "1" : "0")).c_str());
-        fc.graph.addPass("m.coverage", QueueType::Graphics,
-                         [&](PassBuilder& b) {
-                             for (BufferRef cb2 : { v.coverageTiles, v.coverageChunkTable, v.coverageChunks }) b.use(cb2, Use::SrvCompute);
-                             b.use(v.coverageTileList, Use::SrvCompute);
-                             b.use(v.coverageTileList, Use::IndirectArgs);
-                             b.use(v.visibleClusters, Use::SrvCompute);
-                             b.use(v.depth, Use::SrvCompute);
-                             b.use(v.color, Use::UavCompute);
-                             b.use(edgeRadiance, Use::SrvCompute);
-                             b.use(edgeResolved, Use::SrvCompute);
-                             b.use(edgeTiles, Use::SrvCompute);
-                             b.use(scratch, Use::UavCompute);
-                             if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
-                             if (atmosphere)
-                                 for (TextureRef t : { r.transmittanceLut, r.multiScatterLut }) b.use(t, Use::SrvCompute);
-                             if (air) b.use(v.airVolume, Use::SrvCompute);
-                             if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
-                             if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
-                         },
-                         [=](PassContext& c) {
-                             const uint32_t none = gpu::kNone;
-                             const uint32_t k[24] = { c.srv(v.coverageTiles), c.srv(v.coverageChunkTable), c.srv(v.coverageChunks), c.srv(v.coverageTileList),
-                                                      c.srv(v.visibleClusters), o.textureTableSrv, c.srv(v.depth), c.uav(v.color),
-                                                      c.srv(edgeRadiance), c.srv(edgeResolved), c.srv(edgeTiles), c.uav(scratch),
-                                                      froxelLists ? c.srv(v.froxelLights) : none, ltcSrv, experiment, none,
-                                                      atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none,
-                                                      air ? c.srv(v.airVolume) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
-                                                      v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, 0, 0, 0 };
-                             c.cmd->SetPipelineState(kernel);
-                             c.bindFrameConstants(cb);
-                             c.computeConstants(k, 24);
-                             c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
-                         });
+        constexpr uint64_t kBlock = 1024, kLight = 16, kRounds = 8, kTilePx = 8;
+        const uint64_t capacity = fc.graph.desc(v.coverageRecords).size / 16;  // records of V's pool
+        const uint64_t tiles = ((uint64_t)v.view.width + kTilePx - 1) / kTilePx * (((uint64_t)v.view.height + kTilePx - 1) / kTilePx);
+        const uint64_t heavyCap = std::max<uint64_t>(1, std::min(capacity / (kLight + 1), tiles * 64));  // > COV_LIGHT records each
+        const uint64_t cursorCap = heavyCap + capacity / kBlock;                                   // >= sum of ceil(count / COV_BLOCK)
+        RenderGraph& g = fc.graph;
+        const BufferRef state = g.createBuffer({ "m.coverage state", 8 * 4, 0 });
+        const BufferRef args = g.createBuffer({ "m.coverage args", 16 * 4, 0 });
+        const BufferRef pairs = g.createBuffer({ "m.coverage pairs", std::max<uint64_t>(capacity, 1) * 8, 0 });
+        const BufferRef heavy = g.createBuffer({ "m.coverage heavy", heavyCap * 16 * 4, 0 });
+        const BufferRef cursors = g.createBuffer({ "m.coverage cursors", cursorCap * 4, 0 });
+        const BufferRef lists = g.createBuffer({ "m.coverage open", heavyCap * 2 * 4, 0 });
+        const uint32_t hcap = (uint32_t)heavyCap, ccap = (uint32_t)cursorCap;
+        const std::string area = areaLights ? "1" : "0", output = linear ? "1" : "0";
+        ID3D12PipelineState* begin[3] = { fc.shaders.compute("Passes/Shading/CoverageBegin.MODE0"), fc.shaders.compute("Passes/Shading/CoverageBegin.MODE1"),
+                                          fc.shaders.compute("Passes/Shading/CoverageBegin.MODE2") };
+        ID3D12PipelineState* light = fc.shaders.compute(("Passes/Shading/CoverageComposite.OUTPUT" + output + ".AREA" + area).c_str());
+        ID3D12PipelineState* sort = fc.shaders.compute("Passes/Shading/CoverageHeavySort");
+        ID3D12PipelineState* heavyRound = fc.shaders.compute(("Passes/Shading/CoverageHeavyRound.AREA" + area).c_str());
+        ID3D12PipelineState* finish = fc.shaders.compute(("Passes/Shading/CoverageHeavyFinish.OUTPUT" + output).c_str());
+
+        // CoverageBegin: MODE 0 reset, 1 heavy arguments, 2 round r's arguments.
+        auto addBegin = [&](const char* name, uint32_t mode, uint32_t roundIndex) {
+            g.addPass(name, QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(state, Use::UavCompute);
+                          b.use(args, Use::UavCompute);
+                      },
+                      [k = begin[mode], state, args, hcap, roundIndex](PassContext& c) {
+                          const uint32_t p[4] = { c.uav(state), hcap, roundIndex, c.uav(args) };
+                          c.cmd->SetPipelineState(k);
+                          c.computeConstants(p, 4);
+                          c.cmd->Dispatch(1, 1, 1);
+                      });
+        };
+        // The fragment shading kernels' resources (CoverageShade.hlsli: P[1], P[3], P[4], P[5].x).
+        auto useShading = [=](PassBuilder& b) {
+            b.use(v.coverageRecords, Use::SrvCompute);
+            b.use(v.visibleClusters, Use::SrvCompute);
+            b.use(v.depth, Use::SrvCompute);
+            if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
+            if (atmosphere)
+                for (TextureRef t : { r.transmittanceLut, r.multiScatterLut }) b.use(t, Use::SrvCompute);
+            if (air) b.use(v.airVolume, Use::SrvCompute);
+            if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
+            if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
+        };
+        auto shadingConstants = [=](PassContext& c, uint32_t (&k)[24], uint32_t colour) {
+            const uint32_t none = gpu::kNone;
+            const uint32_t s[16] = { c.srv(v.visibleClusters), o.textureTableSrv, c.srv(v.depth), colour,
+                                     0, 0, 0, 0,
+                                     froxelLists ? c.srv(v.froxelLights) : none, ltcSrv, experiment, none,
+                                     atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none,
+                                     air ? c.srv(v.airVolume) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none };
+            for (uint32_t i = 0; i < 16; ++i)
+                if (i < 4 || i >= 8) k[4 + i] = s[i];
+            k[20] = v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none;
+        };
+        auto useBandA = [=](PassBuilder& b) {
+            b.use(edgeRadiance, Use::SrvCompute);
+            b.use(edgeResolved, Use::SrvCompute);
+            b.use(edgeTiles, Use::SrvCompute);
+        };
+
+        addBegin("m.coverage.begin", 0, 0);
+        // E: per listed tile, light pixels composited, heavy pixels recorded.
+        g.addPass("m.coverage", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      useShading(b);
+                      useBandA(b);
+                      b.use(v.coverageTilePixels, Use::SrvCompute);
+                      b.use(v.coverageTileList, Use::SrvCompute);
+                      b.use(v.coverageTileList, Use::IndirectArgs);
+                      b.use(state, Use::UavCompute);
+                      b.use(heavy, Use::UavCompute);
+                      b.use(v.color, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      uint32_t k[24] = { c.srv(v.coverageRecords), c.srv(v.coverageTilePixels), c.srv(v.coverageTileList), c.uav(state) };
+                      shadingConstants(c, k, c.uav(v.color));
+                      k[8] = c.srv(edgeRadiance);
+                      k[9] = c.srv(edgeResolved);
+                      k[10] = c.srv(edgeTiles);
+                      k[11] = c.uav(heavy);
+                      k[21] = hcap;
+                      k[22] = ccap;
+                      c.cmd->SetPipelineState(light);
+                      c.bindFrameConstants(cb);
+                      c.computeConstants(k, 24);
+                      c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
+                  });
+        addBegin("m.coverage.heavy args", 1, 0);
+        // F1: heavy pixels' runs of COV_BLOCK records sorted into the pair buffer.
+        g.addPass("m.coverage.sort", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(state, Use::SrvCompute);
+                      b.use(heavy, Use::SrvCompute);
+                      b.use(pairs, Use::UavCompute);
+                      b.use(cursors, Use::UavCompute);
+                      b.use(v.coverageRecords, Use::SrvCompute);
+                      b.use(args, Use::IndirectArgs);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t p[8] = { c.srv(state), c.srv(heavy), c.uav(pairs), c.uav(cursors), hcap, c.srv(v.coverageRecords), 0, 0 };
+                      c.cmd->SetPipelineState(sort);
+                      c.computeConstants(p, 8);
+                      c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 16, nullptr, 0);
+                  });
+        // F2: COV_ROUNDS rounds, each over the heavy pixels the previous one left open.
+        for (uint32_t rd = 0; rd < kRounds; ++rd)
+        {
+            if (rd > 0) addBegin("m.coverage.round args", 2, rd);
+            g.addPass("m.coverage.round", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          useShading(b);
+                          b.use(state, Use::UavCompute);
+                          b.use(heavy, Use::UavCompute);
+                          b.use(cursors, Use::UavCompute);
+                          b.use(pairs, Use::SrvCompute);
+                          b.use(lists, Use::UavCompute);
+                          b.use(args, Use::IndirectArgs);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[24] = { c.srv(v.coverageRecords), c.uav(state), c.uav(heavy), c.uav(cursors) };
+                          shadingConstants(c, k, gpu::kNone);
+                          k[11] = c.srv(pairs);
+                          k[21] = rd;
+                          k[22] = hcap;
+                          k[23] = c.uav(lists);
+                          c.cmd->SetPipelineState(heavyRound);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 24);
+                          c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 32, nullptr, 0);
+                      });
+        }
+        // F3: heavy pixels' band A remainder and output; a pixel the rounds left open sets the error bit.
+        g.addPass("m.coverage.finish", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      useBandA(b);
+                      b.use(state, Use::UavCompute);
+                      b.use(heavy, Use::SrvCompute);
+                      b.use(v.color, Use::UavCompute);
+                      b.use(args, Use::IndirectArgs);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t p[12] = { c.uav(state), c.srv(heavy), hcap, 0, 0, 0, 0, c.uav(v.color), c.srv(edgeRadiance), c.srv(edgeResolved), c.srv(edgeTiles), 0 };
+                      c.cmd->SetPipelineState(finish);
+                      c.bindFrameConstants(cb);
+                      c.computeConstants(p, 12);
+                      c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 48, nullptr, 0);
+                  });
+        // Its error bits (INTERFACES 3.6: a data-dependent loop reached its bound) into the statistics: a gate failure.
+        if (fc.trackState)
+        {
+            StatsRing& ring = fc.state<StatsRing>("M.statsRing");
+            ring.ensure(fc.device);
+            ID3D12Resource* dst = ring.buffer.Get();
+            const uint32_t slot = (uint32_t)(fc.frame.frameIndex % StatsRing::kSlots);
+            g.addPass("m.coverage.stats", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(state, Use::CopySrc);
+                          b.keep();
+                      },
+                      [dst, slot, state](PassContext& c) { c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 20, c.resource(state), 12, 4); });
+        }
     }
     return {};
 }

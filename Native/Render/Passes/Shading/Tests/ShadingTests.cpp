@@ -1850,6 +1850,71 @@ void testAreaLightContours(TestFrame& tf, Report& report)
     report(worstAll < 1e-3, "area lights: closed forms vs dense outline, worst for kappa <= 100 (rel. to max(I, 1e-3))", worstAll, 1e-3);
 }
 
+// V's coverage layer in its v1.41 layout (CoverageTiles.hlsli, INTERFACES 7.1) from records per tile ({ visId, depth
+// bits, mask, packed }, the pixel in packed >> 26): each listed tile's records pixel-major (a pixel's in the given
+// order), tiles listed in index order, uploaded for a view.
+struct TestCoverageLayer
+{
+    std::vector<uint32_t> headers, list, records, tilePixels;
+    uint32_t listed = 0, stored = 0;
+    ComPtr<ID3D12Resource> headerBuf, listBuf, recordBuf, pixelBuf;
+
+    TestCoverageLayer(Device& device, uint32_t tilesX, uint32_t tilesY, const std::vector<std::vector<std::array<uint32_t, 4>>>& tileRecords)
+    {
+        const uint32_t tiles = tilesX * tilesY;
+        headers.assign((size_t)tiles * 8, 0);
+        list.assign(16, 0);
+        uint32_t blocks = 0;
+        for (uint32_t tile = 0; tile < tiles; ++tile)
+        {
+            const auto& fr = tileRecords[tile];
+            if (fr.empty()) continue;
+            const uint32_t base = (uint32_t)(records.size() / 4), n = (uint32_t)fr.size();
+            headers[tile * 8] = n;
+            headers[tile * 8 + 1] = base;
+            headers[tile * 8 + 2] = listed + 1;
+            list.insert(list.end(), { tile, n, base, blocks });
+            blocks += (n + 1023) / 1024;
+            std::vector<std::vector<uint32_t>> byPixel(64);
+            for (uint32_t i = 0; i < n; ++i) byPixel[fr[i][3] >> 26].push_back(i);
+            uint32_t offset = 0;
+            for (uint32_t px = 0; px < 64; ++px)
+            {
+                tilePixels.push_back(offset);
+                for (uint32_t i : byPixel[px]) records.insert(records.end(), fr[i].begin(), fr[i].end());
+                offset += (uint32_t)byPixel[px].size();
+            }
+            ++listed;
+        }
+        stored = (uint32_t)(records.size() / 4);
+        list[0] = listed;
+        list[1] = 1;
+        list[2] = 1;
+        list[3] = listed;
+        list[4] = stored;
+        list[5] = blocks;
+        list[6] = std::max(stored, 1u);
+        list[7] = tilesX;
+        list[8] = std::min(blocks, 65535u);
+        list[9] = blocks ? (blocks + 65534) / 65535 : 0;
+        list[10] = 1;
+        if (records.empty()) records.assign(4, 0);
+        if (tilePixels.empty()) tilePixels.assign(64, 0);
+        headerBuf = uploadStatic(device, headers.data(), headers.size() * 4, L"test coverage tiles");
+        listBuf = uploadStatic(device, list.data(), list.size() * 4, L"test coverage tile list");
+        recordBuf = uploadStatic(device, records.data(), records.size() * 4, L"test coverage records");
+        pixelBuf = uploadStatic(device, tilePixels.data(), tilePixels.size() * 4, L"test coverage tile pixels");
+    }
+
+    void install(RenderGraph& g, ViewResources& v) const
+    {
+        v.coverageTiles = g.importBuffer(headerBuf.Get(), { "test coverage tiles", headers.size() * 4, 0 });
+        v.coverageTileList = g.importBuffer(listBuf.Get(), { "test coverage tile list", list.size() * 4, 0 });
+        v.coverageRecords = g.importBuffer(recordBuf.Get(), { "test coverage records", records.size() * 4, 16 });
+        v.coverageTilePixels = g.importBuffer(pixelBuf.Get(), { "test coverage tile pixels", tilePixels.size() * 4, 0 });
+    }
+};
+
 // ---------------------------------------------------------------- 11. coverage composite (CoverageComposite.hlsl)
 // A ground plane in band A and 90 small triangles (diffuse, rough metal, two-sided leaf with transmission and emission)
 // in band B: the stand-in raster leaves them out of band A, and their coverage records are made here as V defines them
@@ -1914,6 +1979,66 @@ void testCoverageComposite(TestFrame& tf, Report& report)
         }
         bm.submeshes.push_back({ first, (uint32_t)bm.indices.size() - first, m });
     }
+    // A fourth submesh (grass): 30 slivers ~0.3 px wide through one screen point at depths 2..4 m along the view axis, in
+    // random directions, so pixels there hold up to ~30 fragments of a few subsamples each: the walk needs several
+    // windows of 8 before the mask union fills.
+    {
+        const uint32_t first = (uint32_t)bm.indices.size();
+        const float3 eye{ 0, 1.1f, 1.5f }, fwd = normalize(float3{ 0, -0.12f, -1 });
+        const float3 right = normalize(cross(fwd, float3{ 0, 1, 0 })), up = cross(right, fwd);
+        for (uint32_t k = 0; k < 30; ++k)
+        {
+            const float t = 2.0f + 2.0f * k / 29.0f, th = 6.2831853f * u01(rng);
+            const float3 c = eye + fwd * t, u = right * std::cos(th) + up * std::sin(th), w = cross(fwd, u);
+            const float half = 0.06f * t, width = 0.3f * t * 1.0472f / 180;  // ~0.3 px at 180 rows over 60 deg
+            const float3 p[3] = { c - u * half, c + u * half, c + w * width };
+            const float3 fn = normalize(cross(p[1] - p[0], p[2] - p[0]));
+            for (int i = 0; i < 3; ++i)
+            {
+                bm.indices.push_back((uint32_t)bm.positions.size());
+                bm.positions.push_back(p[i]);
+                bm.normals.push_back(fn);
+                bm.tangents.push_back({ 1, 0, 0, 1 });
+                bm.uv0.push_back({ 0, 0 });
+            }
+        }
+        bm.submeshes.push_back({ first, (uint32_t)bm.indices.size() - first, 1 });
+    }
+    // Heavy stacks (CoverageHeavy*): tiny triangles (a few hundredths of a pixel, most without a subsample) facing the
+    // camera at random depths 2..4 m inside one target pixel each, in submeshes of 30. Stack 1: 120 rough-metal
+    // triangles, so the walk goes through every one (several rounds of 32). Stack 2: 1,110 leaf triangles, so the pixel
+    // holds more than one sorted run of 1,024 and its nearest fragments come from both runs.
+    auto addStack = [&](float px, float py, uint32_t count, float side, uint32_t material) {
+        const float3 eye{ 0, 1.1f, 1.5f }, fwd = normalize(float3{ 0, -0.12f, -1 });
+        const float3 right = normalize(cross(fwd, float3{ 0, 1, 0 })), up = cross(right, fwd);
+        const float pixelAngle = 60.0f / 180 * 3.14159265f / 180;  // ~ one pixel at the centre (180 rows over 60 deg)
+        for (uint32_t k0 = 0; k0 < count; k0 += 30)
+        {
+            const uint32_t first = (uint32_t)bm.indices.size();
+            for (uint32_t k = 0; k < 30; ++k)
+            {
+                const float t = 2.0f + 2.0f * u01(rng), size = side * t * pixelAngle;
+                const float dx = px - 160 + 0.2f + 0.6f * u01(rng), dy = py - 90 + 0.2f + 0.6f * u01(rng);
+                const float3 c = eye + fwd * t + right * (dx * t * pixelAngle) - up * (dy * t * pixelAngle);
+                const float th = 6.2831853f * u01(rng);
+                const float3 a = right * std::cos(th) + up * std::sin(th), b = cross(fwd, a);
+                float3 p[3] = { c + a * size, c + b * size, c - (a + b) * (0.7f * size) };
+                if (dot(cross(p[1] - p[0], p[2] - p[0]), fwd) > 0) std::swap(p[1], p[2]);  // front faces toward the camera
+                const float3 fn = normalize(cross(p[1] - p[0], p[2] - p[0]));
+                for (int i = 0; i < 3; ++i)
+                {
+                    bm.indices.push_back((uint32_t)bm.positions.size());
+                    bm.positions.push_back(p[i]);
+                    bm.normals.push_back(fn);
+                    bm.tangents.push_back({ 1, 0, 0, 1 });
+                    bm.uv0.push_back({ 0, 0 });
+                }
+            }
+            bm.submeshes.push_back({ first, (uint32_t)bm.indices.size() - first, material });
+        }
+    };
+    addStack(100, 40, 120, 0.12f, 2);
+    addStack(220, 40, 1110, 0.3f, 3);
     s.meshes.push_back(bm);
     const uint32_t blades = (uint32_t)s.meshes.size() - 1;
     scene::Instance a;
@@ -1971,7 +2096,7 @@ void testCoverageComposite(TestFrame& tf, Report& report)
     };
     std::vector<std::vector<Frag>> tileFrags(tilesX * tilesY);
     const uint32_t visibleBlades = tf.vis.rasterised;
-    M_CHECK(tf.vis.visible.size() == visibleBlades + 3, "blades expected in three clusters (one per submesh) after the ground's");
+    M_CHECK(tf.vis.visible.size() == visibleBlades + bm.submeshes.size(), "blades expected in one cluster per submesh after the ground's");
     uint32_t fragments = 0;
     for (uint32_t t = 0; t < (uint32_t)bm.indices.size() / 3; ++t)
     {
@@ -2041,48 +2166,12 @@ void testCoverageComposite(TestFrame& tf, Report& report)
                 ++fragments;
             }
     }
-    // Buffers (CoverageTiles.hlsli layout; chunk table only, no extension tables).
-    const uint32_t slots = 16;
-    std::vector<uint32_t> headers(tilesX * tilesY * 8, 0), table(tilesX * tilesY * slots, 0), list(16, 0);
-    std::vector<uint32_t> pool;  // uint4 records
-    uint32_t chunks = 0, listed = 0;
+    // V's layer (v1.41 layout).
+    std::vector<std::vector<std::array<uint32_t, 4>>> tileRecords(tilesX * tilesY);
     for (uint32_t tile = 0; tile < tilesX * tilesY; ++tile)
-    {
-        const auto& fr = tileFrags[tile];
-        if (fr.empty()) continue;
-        M_CHECK(fr.size() <= slots * 64, "test tile over its chunk table");
-        headers[tile * 8] = (uint32_t)fr.size();
-        for (size_t i = 0; i < fr.size(); ++i)
-        {
-            if (i % 64 == 0)
-            {
-                table[tile * slots + i / 64] = ++chunks;
-                pool.resize((size_t)chunks * 64 * 4, 0);
-            }
-            const size_t e = ((size_t)(chunks - 1) * 64 + i % 64) * 4;
-            pool[e] = fr[i].visId;
-            pool[e + 1] = fr[i].depthBits;
-            pool[e + 2] = fr[i].mask;
-            pool[e + 3] = fr[i].packed;
-        }
-        list.push_back(tile);
-        ++listed;
-    }
-    list[0] = listed;
-    list[1] = 1;
-    list[2] = 1;
-    list[3] = listed;
-    list[4] = fragments;
-    list[5] = chunks;
-    list[6] = slots;
-    list[7] = tilesX;
-    list[12] = 1024;
-    list[13] = 16 + listed;
-    if (pool.empty()) pool.resize(64 * 4, 0);
-    ComPtr<ID3D12Resource> hdrBuf = uploadStatic(tf.device, headers.data(), headers.size() * 4, L"test coverage tiles");
-    ComPtr<ID3D12Resource> tblBuf = uploadStatic(tf.device, table.data(), table.size() * 4, L"test coverage chunk table");
-    ComPtr<ID3D12Resource> poolBuf = uploadStatic(tf.device, pool.data(), pool.size() * 4, L"test coverage chunks");
-    ComPtr<ID3D12Resource> listBuf = uploadStatic(tf.device, list.data(), list.size() * 4, L"test coverage tile list");
+        for (const Frag& f : tileFrags[tile]) tileRecords[tile].push_back({ f.visId, f.depthBits, f.mask, f.packed });
+    const TestCoverageLayer layer(tf.device, tilesX, tilesY, tileRecords);
+    const uint32_t listed = layer.listed;
 
     // Band A alone, then with the layer (linear output).
     std::shared_ptr<std::vector<uint8_t>> base, withLayer, depthRb;
@@ -2093,13 +2182,7 @@ void testCoverageComposite(TestFrame& tf, Report& report)
             v.color = fc.graph.createTexture({ "m.test.coverage color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
             tf.vis.record(fc, v);
             tracks::materialResolve(fc, v);
-            if (pass == 1)
-            {
-                v.coverageTiles = fc.graph.importBuffer(hdrBuf.Get(), { "test coverage tiles", headers.size() * 4, 0 });
-                v.coverageChunkTable = fc.graph.importBuffer(tblBuf.Get(), { "test coverage chunk table", table.size() * 4, 0 });
-                v.coverageChunks = fc.graph.importBuffer(poolBuf.Get(), { "test coverage chunks", pool.size() * 4, 16 });
-                v.coverageTileList = fc.graph.importBuffer(listBuf.Get(), { "test coverage tile list", list.size() * 4, 0 });
-            }
+            if (pass == 1) layer.install(fc.graph, v);
             tracks::shading(fc, v);
             if (pass == 0)
             {
@@ -2120,7 +2203,8 @@ void testCoverageComposite(TestFrame& tf, Report& report)
     const float3 l0 = normalize(s.sun.direction);
     const float3 E = s.sun.color * s.sun.illuminance;
     double worst = 0, worstOther = 0;
-    uint32_t checked = 0, layered = 0, hidden = 0, sky = 0;
+    uint32_t checked = 0, layered = 0, hidden = 0, sky = 0, heavyPixels = 0, rounds = 0, runs = 0, most = 0;
+    uint32_t failedHeavy = 0, overLimit = 0;
     std::vector<bool> hasFrags(W * H, false);
     for (uint32_t tile = 0; tile < tilesX * tilesY; ++tile)
         for (const Frag& f : tileFrags[tile])
@@ -2141,14 +2225,22 @@ void testCoverageComposite(TestFrame& tf, Report& report)
             const float bandDepth = texelOf<float>(*depthRb, W, x, y);
             if (bandDepth == 0) ++sky;
             double sum[3] = {}, used = 0;
-            uint32_t covered = 0, visible = 0;
+            uint32_t covered = 0, visible = 0, walked = 0, complete = 0;  // complete: fragments walked until used reached 1
+            // The heavy rounds take at most kRoundLimit fragments (CoverageShade.hlsli COV_ROUNDS x COV_ROUND): the
+            // composite at that point, for pixels that need more (the frame then reports COV_M_ERROR_ROUNDS).
+            constexpr uint32_t kRoundLimit = 256;
+            double sumAtLimit[3] = {}, usedAtLimit = 0;
+            bool behind = false;
+            most = std::max(most, (uint32_t)px.size());
             for (const Frag* f : px)
             {
+                ++walked;
                 float d;
                 std::memcpy(&d, &f->depthBits, 4);
                 if (d < bandDepth)
                 {
                     ++hidden;
+                    behind = true;
                     break;
                 }
                 const uint32_t bits = bitCount(f->mask);
@@ -2161,7 +2253,7 @@ void testCoverageComposite(TestFrame& tf, Report& report)
                     double D[3], Dx[3];
                     pixelRay(desc, f->cx, f->cy, D, Dx);
                     const float3 fn = bm.normals[bm.indices[3 * f->tri]];
-                    const scene::Material& mat = s.materials[f->tri / 30 + 1];
+                    const scene::Material& mat = s.materials[bm.submeshes[f->tri / 30].material];
                     const double nD = fn.x * D[0] + fn.y * D[1] + fn.z * D[2];
                     float3 n = fn;
                     if (!(nD < 0) && mat.twoSided) n = n * -1.0f;
@@ -2179,19 +2271,39 @@ void testCoverageComposite(TestFrame& tf, Report& report)
                     sum[2] += w * L.z;
                 }
                 used += w;
+                if (walked == kRoundLimit)
+                {
+                    std::copy(sum, sum + 3, sumAtLimit);
+                    usedAtLimit = used;
+                }
+                if (complete == 0 && used >= 1 - 1e-6) complete = walked;
                 covered |= f->mask;
                 if (covered == 0xFFFFFFFFu) break;
             }
+            // Fragments the composite has to take: up to the one that fills the union or the weights, or all in front
+            // of the band A surface.
+            uint32_t needed = behind ? walked - 1 : walked;
+            if (complete > 0) needed = std::min(needed, complete);
+            const bool truncated = px.size() > 16 && needed > kRoundLimit;
+            overLimit += truncated;
+            if (truncated)
+            {
+                std::copy(sumAtLimit, sumAtLimit + 3, sum);
+                used = usedAtLimit;
+            }
             layered += visible > 1;
+            heavyPixels += px.size() > 16;            // CoverageHeavy* (more than COV_LIGHT)
+            rounds += px.size() > 16 && walked > 32;  // several heavy rounds of 32
+            runs += px.size() > 1024;                 // several sorted runs of 1,024
             const float4 A = texelOf<float4>(*base, W, x, y);
             const double wA = std::max(1 - used, 0.0);
             const double want[3] = { sum[0] + wA * A.x, sum[1] + wA * A.y, sum[2] + wA * A.z };
             const float4 got = texelOf<float4>(*withLayer, W, x, y);
             const double scale = std::max({ want[0], want[1], want[2], 1e-2 });
             const double e = std::max({ std::fabs(got.x - want[0]), std::fabs(got.y - want[1]), std::fabs(got.z - want[2]) }) / scale;
-            if (e > 5e-3 && e > worst)
-                logf("  coverage px (%u,%u): %zu fragments, used %.4f: got (%.5f %.5f %.5f) want (%.5f %.5f %.5f)\n", x, y, px.size(), used, got.x, got.y, got.z, want[0], want[1],
-                     want[2]);
+            if (e > 5e-3 && (e > worst || (px.size() > 16 && failedHeavy++ < 12)))
+                logf("  coverage px (%u,%u): %zu fragments (%u needed%s, %u visible), used %.4f: got (%.5f %.5f %.5f) want (%.5f %.5f %.5f), band A (%.5f %.5f %.5f)\n", x, y,
+                     px.size(), needed, truncated ? ", truncated" : "", visible, used, got.x, got.y, got.z, want[0], want[1], want[2], A.x, A.y, A.z);
             worst = std::max(worst, e);
             ++checked;
         }
@@ -2203,14 +2315,145 @@ void testCoverageComposite(TestFrame& tf, Report& report)
                 const float4 g = texelOf<float4>(*withLayer, W, x, y), a0 = texelOf<float4>(*base, W, x, y);
                 worstOther = std::max({ worstOther, (double)std::fabs(g.x - a0.x), (double)std::fabs(g.y - a0.y), (double)std::fabs(g.z - a0.z) });
             }
-    logf("coverage composite: %u fragments in %u tiles, %u pixels checked (%u with several visible fragments, %u over the sky), %u walks ended by the band A surface\n",
-         fragments, listed, checked, layered, sky, hidden);
+    const uint32_t errors = shading::latestStats(tf.trackState).coverageErrors;
+    logf("coverage composite: %u fragments in %u tiles, %u pixels checked (%u with several visible fragments, %u over the sky, %u heavy, %u walked "
+         "past one round, %u with several runs, %u needing more than the rounds take, at most %u in a pixel), %u walks ended by the band A surface; "
+         "error bits 0x%x\n",
+         fragments, listed, checked, layered, sky, heavyPixels, rounds, runs, overLimit, most, hidden, errors);
+    report(heavyPixels >= 10 && rounds >= 1 && runs >= 1 && overLimit >= 1,
+           "coverage composite: heavy pixels, walks of several rounds, pixels of several runs and over the round limit present",
+           std::min({ heavyPixels / 10, rounds, runs, overLimit }), 1);
+    // 0x800 exactly when a pixel needs more fragments than the rounds take (compared above at the limit); nothing else.
+    report(errors == (overLimit > 0 ? 0x800u : 0u), "coverage composite: error bits = COV_M_ERROR_ROUNDS iff pixels over the round limit", errors ^ (overLimit > 0 ? 0x800u : 0u), 0);
     report(checked > 500 && layered > 50, "coverage composite: pixels with fragments and with overlapping fragments present", std::min(checked / 10, layered), 50);
     report(worst < 5e-3, "coverage composite: pixels with fragments vs CPU composite of CPU-shaded fragments (rel.)", worst, 5e-3);
     report(worstOther == 0, "coverage composite: pixels without fragments unchanged (abs.)", worstOther, 0);
 }
 
 } // namespace
+
+// ---------------------------------------------------------------- coverage composite growth (--coverage-growth)
+// One tile over the sky holds N synthetic coverage records (v1.41 layout; triangles of a real cluster, masks empty, area
+// 1/1023, random depths), spread over the tile's 64 pixels or all in one pixel; every coverage stage is timed per dispatch. Tiny areas
+// make every heavy pixel walk all COV_ROUNDS rounds (the rounds' worst case; COV_M_ERROR_ROUNDS is then expected).
+// The growth stops before a dispatch could come near the TDR limit: when the slowest dispatch passes 50 ms, the next
+// size is not run (COVERAGE_REDESIGN validation order (1), coordinator 2026-09-26).
+int testCoverageGrowth(TestFrame& tf)
+{
+    scene::Scene s;
+    s.name = "coverage growth";
+    scene::Material ground;
+    ground.name = "ground";
+    ground.baseColor = { 0.5f, 0.45f, 0.4f };
+    ground.roughness = 0.6f;
+    s.materials.push_back(ground);
+    const uint32_t plane = addPlane(s, 40, 0);
+    scene::Mesh bm;
+    bm.name = "blades";
+    std::mt19937 rng(77);
+    std::uniform_real_distribution<float> u01(0, 1);
+    for (uint32_t k = 0; k < 30; ++k)
+    {
+        const float3 c{ -1.0f + 2.0f * u01(rng), 1.5f + u01(rng), -3.0f - u01(rng) };
+        const float3 p[3] = { c, c + float3{ 0.1f, 0, 0 }, c + float3{ 0, 0.1f, 0 } };
+        for (int i = 0; i < 3; ++i)
+        {
+            bm.indices.push_back((uint32_t)bm.positions.size());
+            bm.positions.push_back(p[i]);
+            bm.normals.push_back({ 0, 0, 1 });
+            bm.tangents.push_back({ 1, 0, 0, 1 });
+            bm.uv0.push_back({ 0, 0 });
+        }
+    }
+    bm.submeshes.push_back({ 0, (uint32_t)bm.indices.size(), 0 });
+    s.meshes.push_back(bm);
+    scene::Instance a;
+    a.mesh = plane;
+    s.instances.push_back(a);
+    scene::Instance b;
+    b.mesh = (uint32_t)s.meshes.size() - 1;
+    s.instances.push_back(b);
+    s.sun.direction = normalize(float3{ 0.3f, 0.6f, -0.75f });
+    scene::Camera cam;
+    cam.name = "growth";
+    cam.position = { 0, 1.1f, 1.5f };
+    cam.forward = normalize(float3{ 0, -0.12f, -1 });
+    cam.ev100 = 13;
+    s.cameras.push_back(cam);
+    tf.setScene(s, { 1 });
+    const uint32_t visibleBlades = tf.vis.rasterised;
+
+    GpuProfiler profiler(tf.device, 1, 1024);
+    tf.profiler = &profiler;
+    const uint32_t W = 256, H = 256, tilesX = W / 8, tiles = tilesX * (H / 8), tile = 1 * tilesX + 16;  // row 1: sky
+    int failures = 0;
+    for (int onePixel = 0; onePixel < 2; ++onePixel)
+    {
+        double slowest = 0;
+        for (uint32_t n : { 10000u, 30000u, 100000u, 300000u })
+        {
+            if (slowest > 50)
+            {
+                logf("coverage growth %s: %u records not run (slowest dispatch %.1f ms > 50 ms)\n", onePixel ? "one pixel" : "64 pixels", n, slowest);
+                continue;
+            }
+            std::vector<std::vector<std::array<uint32_t, 4>>> tileRecords(tiles);
+            for (uint32_t i = 0; i < n; ++i)
+            {
+                const uint32_t tri = rng() % 30, pixel = onePixel ? 9 : i % 64;
+                const float depth = 0.01f + 0.5f * u01(rng);
+                uint32_t bits;
+                std::memcpy(&bits, &depth, 4);
+                // No subsample (seen = what the union left), normal +z, area 1/1023.
+                tileRecords[tile].push_back({ ((visibleBlades << 7) | tri) + 1, bits, 0u, 0x8080u | (1u << 16) | (pixel << 26) });
+            }
+            const TestCoverageLayer layer(tf.device, tilesX, H / 8, tileRecords);
+            FrameTiming timing;
+            for (int pass = 0; pass < 2; ++pass)  // the first frame compiles the pipelines
+            {
+                tf.run([&](FramePassContext& fc) {
+                    ViewResources v = tf.mainView(fc, W, H, 0);
+                    v.color = fc.graph.createTexture({ "m.test.growth color", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+                    tf.vis.record(fc, v);
+                    tracks::materialResolve(fc, v);
+                    layer.install(fc.graph, v);
+                    tracks::shading(fc, v);
+                });
+                timing = tf.lastTiming;
+            }
+            const uint32_t errors = shading::latestStats(tf.trackState).coverageErrors;
+            std::string line;
+            double total = 0, slowestHere = 0, rounds = 0;
+            for (const PassTiming& p : timing.passes)
+            {
+                if (p.name.rfind("m.coverage", 0) != 0) continue;
+                const double ms = p.durationMs();
+                total += ms;
+                slowestHere = std::max(slowestHere, ms);
+                if (p.name == "m.coverage.round") rounds += ms;
+                else if (p.name != "m.coverage.round args")
+                {
+                    char buf[96];
+                    std::snprintf(buf, sizeof buf, " %s %.3f", p.name.size() > 11 ? p.name.c_str() + 11 : "light", ms);
+                    line += buf;
+                }
+            }
+            slowest = std::max(slowest, slowestHere);
+            logf("coverage growth %s, %6u records: total %.3f ms, slowest dispatch %.3f ms, rounds %.3f ms;%s; error bits 0x%x\n", onePixel ? "one pixel" : "64 pixels", n, total,
+                 slowestHere, rounds, line.c_str(), errors);
+            // Tiny areas: a pixel walks all its fragments, so COV_M_ERROR_ROUNDS exactly when one holds more than the
+            // rounds take (COV_ROUNDS x COV_ROUND = 256), nothing else.
+            const uint32_t perPixel = onePixel ? n : (n + 63) / 64, expected = perPixel > 256 ? 0x800u : 0u;
+            if (errors != expected)
+            {
+                logf("  unexpected error bits 0x%x (expected 0x%x)\n", errors, expected);
+                ++failures;
+            }
+        }
+    }
+    tf.profiler = nullptr;
+    return failures;
+}
 
 // ---------------------------------------------------------------- planar view products (v1.22)
 // A planar reflection view shades with S's own froxel lists and air volume. When the frame's main view has lists and a
@@ -2244,7 +2487,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, gpuValidation = false;
+        bool debugLayer = true, gpuValidation = false, growth = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -2252,11 +2495,18 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--gbv") gpuValidation = true;
             if (std::string(argv[i]) == "--area-dump") g_areaDump = true;
             if (std::string(argv[i]) == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
+            if (std::string(argv[i]) == "--coverage-growth") growth = true;
         }
         Report report;
         testTable(report);
         TestFrame tf(debugLayer, gpuValidation);
         for (const std::string& o : overrides) tf.quality.applyOverride(o);
+        if (growth)
+        {
+            const int failures = testCoverageGrowth(tf);
+            logf("%s: %d failure(s)\n", failures ? "FAILED" : "passed", failures);
+            return failures ? 1 : 0;
+        }
         testScene(tf, report);
         testSunSpecular(tf, report);
         testLocalLights(tf, report);
