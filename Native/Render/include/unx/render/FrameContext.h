@@ -8,6 +8,28 @@ namespace unx::render
 {
 struct FrameTiming;
 
+// v1.50 (B6, Docs/Design/Requests/20260926_B_weather_fields.md): this tick's wind and weather from the World. The wind
+// records are Passes/Atmosphere/WindField.hlsli WindRecord (80 B each, the World's evaluation order), their origins
+// relative to windReference (the host subtracts it in double); time is the tick's World time (s). S builds the wind
+// cache around the camera from them (FrameResources::wind). The weather values are the World's weather row.
+struct WindFrame
+{
+    const void* records = nullptr;  // count x 80 B, valid until record() returns
+    uint32_t count = 0;
+    double time = 0;
+    double reference[3] = { 0, 0, 0 };  // world position the record origins are relative to
+};
+struct WeatherFrame
+{
+    float rainRate = 0;     // mm/h
+    float wetness = 0;      // 0..1, the World's dW/dt = rain - W / tau_dry
+    float snowRate = 0;     // mm/h water equivalent
+    float snowDepth = 0;    // m
+    float fogDensity = 0;   // Mie scattering multiplier of the medium trajectory (0 = the scene's medium)
+    float cloudCover = 0;   // 0..1
+    float3 rainDirection{ 0, -1, 0 };  // unit, the direction the drops fall (the wind tilts it)
+};
+
 // v1.49 (B4, FEATURES_GAME 11): the sky's celestial objects of this frame, set by the host from its time and place
 // (Passes/Atmosphere/Celestial.h: sky::celestial, sky::directionalLight, sky::celestialFrame). flags: bit 0 the frame's
 // directional light (Scene::sun) is the moon (the sky pass leaves out its uniform solar disk), bit 1 the moon's disk is
@@ -55,10 +77,16 @@ struct FrameContext
     // display-referred linear Rec.709 light, 1 = paper white, after the tone curve generalised to that peak (M, Post.cpp;
     // at 1 exactly the SDR curve); the host encodes it for the swap chain.
     float displayPeak = 0;
+    // v1.51 (A5, COVERAGE 14.12 (2c)): the physical camera's lens for the aperture integral (depth of field): aperture
+    // diameter (m; 0 = pinhole, no depth of field - the gate camera) and focus distance (m, along the view axis). The
+    // circle of confusion of a depth z is f_px A |1/z - 1/z_focus| pixels (f_px = (H/2) proj[1][1]).
+    float lensAperture = 0, lensFocus = 0;
     // v1.50 (A15, E): GPU pass timings of the last completed frame (GpuProfiler::lastCompleted), shown by the debug HUD
     // (quality key debug.hud); null = no timings (the HUD says so). The host keeps it valid until record() returns.
     const FrameTiming* timing = nullptr;
     CelestialFrame celestial;  // v1.49 (B4): moon, stars, airglow (S publishes FrameResources::celestial)
+    WindFrame wind;            // v1.50 (B6): the World's wind records of this tick (S publishes FrameResources::wind)
+    WeatherFrame weather;      // v1.50 (B6): rain, wetness, snow, fog, cloud cover
 };
 constexpr uint32_t kGpuSimulationSoft = 1, kGpuSimulationVfx = 2, kGpuSimulationRigid = 4;
 constexpr uint32_t kDiscontinuityRestore = 1, kDiscontinuityCut = 2;

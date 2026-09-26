@@ -121,6 +121,14 @@ struct FrameResources
     // v1.49 (B4): raw SRV of this frame's celestial record (Celestial.hlsli atmosphereCelestial; upload ring, not a graph  [S]
     // resource); UINT32_MAX when FrameContext::celestial draws nothing.
     uint32_t celestial = UINT32_MAX;
+    // v1.50 (B6): raw SRV of this frame's wind header (WindCache.hlsli: the cache grid's origin and spacing, the cache      [S]
+    // texture's SRV, the records' SRV and count, the tick time) for windSample / windExact; UINT32_MAX without records.
+    uint32_t wind = UINT32_MAX;
+    TextureRef windCache;          // v1.50 (B6): the wind cache the header's texture SRV names (declare it to sample)  [S]
+    // v1.50 (B6): raw SRV of this frame's weather record (WeatherField.hlsli: the World's weather row, rainExposure's map    [S]
+    // parameters) and the rain shadow map it names (declare rainShadow to read rainExposure); UINT32_MAX / invalid without weather.
+    uint32_t weather = UINT32_MAX;
+    TextureRef rainShadow;
                                          // (upload ring, not a graph resource; v1.18). With
                                          // the four buffers: ShadowSrvs (ShadowVisibility.hlsli),
                                          // filled by shadowPages for shadowSunVisibilityAt (R)

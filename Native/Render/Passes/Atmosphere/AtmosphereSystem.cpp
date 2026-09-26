@@ -41,19 +41,39 @@ struct State
     uint64_t starsBytes = 0;
     bool starsPending = false;
     uint8_t* ringMapped = nullptr;
+    // Wind cache (B6, WindCache.hlsli): the 64^3 texture, and per-frame header (64 B) and record rings.
+    ComPtr<ID3D12Resource> windCache, windRing;
+    uint32_t windCacheSrv = UINT32_MAX, windHeaderSrv[kRingSlots] = {}, windRecordsSrv[kRingSlots] = {}, windCapacity = 0;
+    uint8_t* windMapped = nullptr;
+    // Weather (B6, WeatherField.hlsli): the per-frame record ring (96 B slots) and the rain shadow map (512^2 R32F).
+    ComPtr<ID3D12Resource> weatherRing, rainMap;
+    uint32_t weatherSrv[kRingSlots] = {}, rainMapSrv = UINT32_MAX;
+    uint8_t* weatherMapped = nullptr;
     Device* device = nullptr;
     ~State()
     {
         if (!device) return;
         if (ring) ring->Unmap(0, nullptr);
-        for (ComPtr<ID3D12Resource>* r : { std::addressof(stars), std::addressof(starsStaging), std::addressof(ring) })
+        if (windRing) windRing->Unmap(0, nullptr);
+        if (weatherRing) weatherRing->Unmap(0, nullptr);
+        for (ComPtr<ID3D12Resource>* r : { std::addressof(stars), std::addressof(starsStaging), std::addressof(ring), std::addressof(windCache), std::addressof(windRing),
+                                           std::addressof(weatherRing), std::addressof(rainMap) })
             if (*r) device->deferRelease(*r);
         DescriptorHeaps* h = &device->descriptors();
+        for (uint32_t k = 0; k < kRingSlots; ++k)
+            for (uint32_t srv : { windHeaderSrv[k], windRecordsSrv[k] })
+                if (srv) device->deferCall([h, srv] { h->freeResource(srv); });
+        if (windCacheSrv != UINT32_MAX) device->deferCall([h, srv = windCacheSrv] { h->freeResource(srv); });
+        for (uint32_t srv : weatherSrv)
+            if (srv) device->deferCall([h, srv] { h->freeResource(srv); });
+        if (rainMapSrv != UINT32_MAX) device->deferCall([h, srv = rainMapSrv] { h->freeResource(srv); });
         for (uint32_t srv : ringSrv)
             if (srv) device->deferCall([h, srv] { h->freeResource(srv); });
         if (starsSrv != UINT32_MAX) device->deferCall([h, srv = starsSrv] { h->freeResource(srv); });
     }
 };
+
+TextureDesc desc(const char* name, uint32_t w, uint32_t h, uint16_t d, D3D12_RESOURCE_DIMENSION dim, DXGI_FORMAT format);  // below
 
 uint32_t rawSrv(Device& device, ID3D12Resource* buffer, uint64_t firstByte, uint64_t bytes)
 {
@@ -68,6 +88,143 @@ uint32_t rawSrv(Device& device, ID3D12Resource* buffer, uint64_t firstByte, uint
     sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
     device.d3d()->CreateShaderResourceView(buffer, &sd, h.resourceCpu(index));
     return index;
+}
+
+// The wind cache (B6): this tick's records (FrameContext::wind) and header into the rings, the 64^3 grid of windAt around
+// the camera into the cache texture; publishes fc.resources.wind / windCache (nothing without records).
+void publishWind(FramePassContext& fc, State& s)
+{
+    const WindFrame& w = fc.frame.wind;
+    if (w.count == 0 || !w.records) return;
+    s.device = &fc.device;
+    // The header slot is one record long so the records' structured view starts on an element (80 B: a 64 B header put
+    // the view's first element inside it -- NaN winds on the GPU, WindCacheTests).
+    constexpr uint32_t kCells = 64, kRecordBytes = 80, kHeaderBytes = 80;
+    constexpr float kSpacing = 8;
+    if (!s.windCache)
+    {
+        s.windCache = createTexture(fc.device, L"S wind cache", D3D12_RESOURCE_DIMENSION_TEXTURE3D, kCells, kCells, (uint16_t)kCells, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                    D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+        DescriptorHeaps& h = fc.device.descriptors();
+        s.windCacheSrv = h.allocateResource();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        sd.Texture3D.MipLevels = 1;
+        fc.device.d3d()->CreateShaderResourceView(s.windCache.Get(), &sd, h.resourceCpu(s.windCacheSrv));
+    }
+    if (w.count > s.windCapacity)
+    {
+        // Rings of kRingSlots slots: header then the records (StructuredBuffer<WindRecord> view).
+        if (s.windRing)
+        {
+            s.windRing->Unmap(0, nullptr);
+            fc.device.deferRelease(s.windRing);
+            DescriptorHeaps* h = &fc.device.descriptors();
+            for (uint32_t k = 0; k < State::kRingSlots; ++k)
+                for (uint32_t srv : { s.windHeaderSrv[k], s.windRecordsSrv[k] }) fc.device.deferCall([h, srv] { h->freeResource(srv); });
+        }
+        s.windCapacity = std::max(256u, w.count);
+        const uint64_t slotBytes = kHeaderBytes + (uint64_t)s.windCapacity * kRecordBytes;  // a multiple of 16
+        s.windRing = createBuffer(fc.device, L"S wind rings", State::kRingSlots * slotBytes, D3D12_HEAP_TYPE_UPLOAD);
+        D3D12_RANGE none{ 0, 0 };
+        check(s.windRing->Map(0, &none, reinterpret_cast<void**>(&s.windMapped)), "map wind rings");
+        DescriptorHeaps& h = fc.device.descriptors();
+        for (uint32_t k = 0; k < State::kRingSlots; ++k)
+        {
+            s.windHeaderSrv[k] = rawSrv(fc.device, s.windRing.Get(), k * slotBytes, kHeaderBytes);
+            s.windRecordsSrv[k] = h.allocateResource();
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sd.Format = DXGI_FORMAT_UNKNOWN;
+            sd.Buffer.FirstElement = (k * slotBytes + kHeaderBytes) / kRecordBytes;
+            sd.Buffer.NumElements = s.windCapacity;
+            sd.Buffer.StructureByteStride = kRecordBytes;
+            fc.device.d3d()->CreateShaderResourceView(s.windRing.Get(), &sd, h.resourceCpu(s.windRecordsSrv[k]));
+        }
+    }
+    const uint64_t slotBytes = kHeaderBytes + (uint64_t)s.windCapacity * kRecordBytes;
+    const uint32_t slot = (uint32_t)(fc.frame.frameIndex % State::kRingSlots);
+    uint8_t* dst = s.windMapped + slot * slotBytes;
+    std::memcpy(dst + kHeaderBytes, w.records, (size_t)w.count * kRecordBytes);
+    const float3 camera = fc.frame.mainView.position;
+    const float3 gridOrigin{ std::floor(camera.x / kSpacing) * kSpacing - kSpacing * kCells / 2, std::floor(camera.y / kSpacing) * kSpacing - kSpacing * kCells / 2,
+                             std::floor(camera.z / kSpacing) * kSpacing - kSpacing * kCells / 2 };
+    const float header[8] = { (float)w.reference[0], (float)w.reference[1], (float)w.reference[2], (float)w.time, gridOrigin.x, gridOrigin.y, gridOrigin.z, kSpacing };
+    const uint32_t tail[4] = { s.windCacheSrv, s.windRecordsSrv[slot], w.count, kCells };
+    std::memcpy(dst, header, 32);
+    std::memcpy(dst + 32, tail, 16);
+    const TextureRef cache = fc.graph.importTexture(s.windCache.Get(), desc("S wind cache", kCells, kCells, (uint16_t)kCells, D3D12_RESOURCE_DIMENSION_TEXTURE3D,
+                                                                             DXGI_FORMAT_R16G16B16A16_FLOAT),
+                                                     D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+    const uint32_t headerSrv = s.windHeaderSrv[slot];
+    ID3D12PipelineState* pso = fc.shaders.compute("Passes/Atmosphere/WindCacheBuild");
+    fc.graph.addPass("s.wind.cache", QueueType::Compute, [&](PassBuilder& b) { b.use(cache, Use::UavCompute); },
+                     [=](PassContext& c) {
+                         const uint32_t k[4] = { headerSrv, c.uav(cache), 0, 0 };
+                         c.cmd->SetPipelineState(pso);
+                         c.computeConstants(k, 4);
+                         c.cmd->Dispatch(kCells / 4, kCells / 4, kCells / 4);
+                     });
+    fc.resources.wind = headerSrv;
+    fc.resources.windCache = cache;
+}
+
+// The weather (B6): the World's weather row and the rain shadow map (while it rains, snows or the ground is wet) into the
+// frame's record; publishes fc.resources.weather / rainShadow (nothing when every value is 0).
+void publishWeather(FramePassContext& fc, State& s)
+{
+    const WeatherFrame& w = fc.frame.weather;
+    const bool rain = w.rainRate > 0 || w.wetness > 0 || w.snowRate > 0 || w.snowDepth > 0;
+    if (!rain && w.fogDensity <= 0 && w.cloudCover <= 0) return;
+    s.device = &fc.device;
+    constexpr uint32_t kRecordBytes = 96, kTexels = 512;
+    constexpr float kCell = 0.25f, kTop = 400, kReach = 600;
+    if (!s.weatherRing)
+    {
+        s.weatherRing = createBuffer(fc.device, L"S weather records", State::kRingSlots * kRecordBytes, D3D12_HEAP_TYPE_UPLOAD);
+        D3D12_RANGE none{ 0, 0 };
+        check(s.weatherRing->Map(0, &none, reinterpret_cast<void**>(&s.weatherMapped)), "map weather records");
+        for (uint32_t k = 0; k < State::kRingSlots; ++k) s.weatherSrv[k] = rawSrv(fc.device, s.weatherRing.Get(), k * (uint64_t)kRecordBytes, kRecordBytes);
+    }
+    const uint32_t slot = (uint32_t)(fc.frame.frameIndex % State::kRingSlots);
+    const float3 d = normalize(w.rainDirection);
+    const float3 helper = std::fabs(d.x) < 0.9f ? float3{ 1, 0, 0 } : float3{ 0, 0, 1 };
+    const float3 u = normalize(cross(helper, d)), v = cross(d, u);
+    // The map's plane: normal to the rain, kTop above the camera along it, centred on the camera snapped to whole texels.
+    const float3 c = fc.frame.mainView.position;
+    const float cu = std::floor(dot(c, u) / kCell) * kCell, cv = std::floor(dot(c, v) / kCell) * kCell, cd = dot(c, d) - kTop;
+    const float3 origin = u * (cu - kCell * kTexels / 2) + v * (cv - kCell * kTexels / 2) + d * cd;
+    bool map = false;
+#if UNX_HAS_RAYTRACING
+    map = rain;
+#endif
+    if (map && !s.rainMap)
+    {
+        s.rainMap = createTexture(fc.device, L"S rain shadow map", D3D12_RESOURCE_DIMENSION_TEXTURE2D, kTexels, kTexels, 1, DXGI_FORMAT_R32_FLOAT, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+        DescriptorHeaps& h = fc.device.descriptors();
+        s.rainMapSrv = h.allocateResource();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Format = DXGI_FORMAT_R32_FLOAT;
+        sd.Texture2D.MipLevels = 1;
+        fc.device.d3d()->CreateShaderResourceView(s.rainMap.Get(), &sd, h.resourceCpu(s.rainMapSrv));
+    }
+    float head[24] = { w.rainRate, w.wetness, w.snowRate, w.snowDepth, w.fogDensity, w.cloudCover, 0, kReach, d.x, d.y, d.z, 0, origin.x, origin.y, origin.z, kCell,
+                       u.x, u.y, u.z, 0, v.x, v.y, v.z, 0 };
+    const uint32_t mapSrv = map ? s.rainMapSrv : UINT32_MAX, texels = kTexels;
+    std::memcpy(&head[11], &mapSrv, 4);
+    std::memcpy(&head[19], &texels, 4);
+    std::memcpy(s.weatherMapped + slot * (uint64_t)kRecordBytes, head, sizeof head);
+    const uint32_t recordSrv = s.weatherSrv[slot];
+    fc.resources.weather = recordSrv;
+    // The map is traced by R right after its ray scene record (RayTracingTrack.cpp: the frame's TLAS refs exist then).
+    if (map)
+        fc.resources.rainShadow = fc.graph.importTexture(s.rainMap.Get(), desc("S rain shadow map", kTexels, kTexels, 1, D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_R32_FLOAT),
+                                                         D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
 }
 
 // This frame's celestial record (FrameContext::celestial) into the ring, and the star buffer the first time stars are
@@ -451,5 +608,7 @@ void record(FramePassContext& fc)
         ++s.stats.skyViewBuilds;
     }
     publishCelestial(fc, s);
+    publishWind(fc, s);
+    publishWeather(fc, s);
 }
 } // namespace unx::render::atmosphere
