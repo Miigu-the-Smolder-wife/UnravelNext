@@ -51,7 +51,12 @@ RayScene* RayScene::find(TrackState& state) { return state.get<RaySceneSlot>("R.
 RayScene& RayScene::get(FramePassContext& fc)
 {
     RaySceneSlot& slot = fc.state<RaySceneSlot>("R.rayScene");
-    if (slot.scene && slot.scene->sceneRevision() != fc.scene.revision()) slot.scene.reset();  // re-uploaded scene
+    if (slot.scene && slot.scene->sceneRevision() != fc.scene.revision())
+    {
+        // A new revision: rebuilt from the previous object (its mesh BLASes and static TLAS reused where unchanged, B3).
+        std::unique_ptr<RayScene> previous = std::move(slot.scene);
+        slot.scene = std::make_unique<RayScene>(fc.device, fc.shaders, fc.scene, fc.quality, previous.get());
+    }
     if (!slot.scene) slot.scene = std::make_unique<RayScene>(fc.device, fc.shaders, fc.scene, fc.quality);
     return *slot.scene;
 }
@@ -60,7 +65,11 @@ RayScene& RayScene::get(Device& device, ShaderLibrary& shaders, GpuScene& scene,
 {
     std::lock_guard lock(g_sceneMutex);
     auto& slot = g_scenes[{ &device, &scene }];
-    if (slot && slot->sceneRevision() != scene.revision()) slot.reset();  // re-uploaded scene: rebuild (streaming boundary)
+    if (slot && slot->sceneRevision() != scene.revision())
+    {
+        std::unique_ptr<RayScene> previous = std::move(slot);  // a new revision: rebuilt from the previous object (B3)
+        slot = std::make_unique<RayScene>(device, shaders, scene, quality, previous.get());
+    }
     if (!slot) slot = std::make_unique<RayScene>(device, shaders, scene, quality);
     return *slot;
 }
@@ -170,6 +179,7 @@ void RayScene::release(Buffer& b)
 
 RayScene::~RayScene()
 {
+    for (Buffer& b : m_inheritedPools) release(b);
     for (Buffer* b : { &m_meshBlasPool, &m_emitterAabbs, &m_emitterBlas, &m_deformedPool, &m_deformedBlasPool, &m_deformedScratch, &m_deformJobs, &m_deformGroups, &m_instanceBuffer, &m_geometryBuffer,
                        &m_indexPool, &m_vertexMap, &m_tlasStatic, &m_tlasDynamic, &m_tlasScratch, &m_staticDescBuffer, &m_dynamicDescBuffer, &m_staticScratch,
                        &m_exactCounts, &m_exactZero })
@@ -210,7 +220,40 @@ RayScene::~RayScene()
         if (srv != gpu::kNone) m_device.deferCall([h, srv] { h->freeResource(srv); });
 }
 
-RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, const QualityConfig& quality) : m_device(device), m_shaders(shaders), m_scene(scene)
+namespace
+{
+// World AABB of a mesh's bounding sphere under a row-major affine transform (uniform scale: INTERFACES 6.2).
+std::pair<float3, float3> sphereBounds(const float4 rows[3], const float4& sphere)
+{
+    const float3 c{ rows[0].x * sphere.x + rows[0].y * sphere.y + rows[0].z * sphere.z + rows[0].w,
+                    rows[1].x * sphere.x + rows[1].y * sphere.y + rows[1].z * sphere.z + rows[1].w,
+                    rows[2].x * sphere.x + rows[2].y * sphere.y + rows[2].z * sphere.z + rows[2].w };
+    const float s = std::sqrt(rows[0].x * rows[0].x + rows[1].x * rows[1].x + rows[2].x * rows[2].x), r = sphere.w * s;
+    return { c - float3{ r, r, r }, c + float3{ r, r, r } };
+}
+std::pair<float3, float3> descBounds(const D3D12_RAYTRACING_INSTANCE_DESC& d, const float4& sphere)
+{
+    float4 rows[3];
+    for (int i = 0; i < 3; ++i) rows[i] = { d.Transform[i][0], d.Transform[i][1], d.Transform[i][2], d.Transform[i][3] };
+    return sphereBounds(rows, sphere);
+}
+} // namespace
+
+uint32_t RayScene::alphaMaskOf(uint32_t mesh) const
+{
+    const scene::Scene* src = m_scene.source();
+    const scene::Mesh& sm = src->meshes[mesh];
+    uint32_t mask = 0;
+    for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size() && s < 32; ++s)
+    {
+        const uint32_t mat = sm.submeshes[s].material;
+        if (mat < src->materials.size() && src->materials[mat].alphaCutoff > 0) mask |= 1u << s;
+    }
+    return mask;
+}
+
+RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, const QualityConfig& quality, RayScene* previous)
+    : m_device(device), m_shaders(shaders), m_scene(scene)
 {
     const auto t0 = std::chrono::steady_clock::now();
     if (device.caps().raytracingTier < D3D12_RAYTRACING_TIER_1_1) fail("RayScene: DXR tier 1.1 required");
@@ -279,6 +322,41 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     // RtInstance records: static TLAS instances first, then the dynamic TLAS (rigid, then deformed).
     for (uint32_t i : staticList) m_meshBlas[instances[i].mesh].geometryBase = geometryBase(instances[i].mesh);
     for (uint32_t i : dynamicRigid) m_meshBlas[instances[i].mesh].geometryBase = geometryBase(instances[i].mesh);
+    m_meshRecords = meshes;
+    m_materialRecords = scene.materials();
+    m_instanceRecords = instances;
+    for (uint32_t m = 0; m < (uint32_t)meshes.size(); ++m) m_meshBlas[m].alphaMask = alphaMaskOf(m);
+    if (previous)
+    {
+        // B3: inherit the previous object's BLAS of every mesh whose record and alpha layout are unchanged.
+        m_incremental = true;
+        m_materialsChanged = previous->m_materialRecords.size() != m_materialRecords.size() ||
+                             (m_materialRecords.size() && std::memcmp(previous->m_materialRecords.data(), m_materialRecords.data(), m_materialRecords.size() * sizeof(gpu::Material)) != 0);
+        for (uint32_t m = 0; m < (uint32_t)std::min(meshes.size(), previous->m_meshRecords.size()); ++m)
+        {
+            const MeshBlas& old = previous->m_meshBlas[m];
+            if (!old.built || old.alphaMask != m_meshBlas[m].alphaMask || std::memcmp(&previous->m_meshRecords[m], &meshes[m], sizeof(gpu::Mesh)) != 0) continue;
+            m_meshBlas[m].address = old.address;
+            m_meshBlas[m].anyAlpha = old.anyAlpha;
+            m_meshBlas[m].built = true;
+        }
+        m_inheritedPools = std::move(previous->m_inheritedPools);
+        if (previous->m_meshBlasPool.resource) m_inheritedPools.push_back(previous->m_meshBlasPool);
+        previous->m_meshBlasPool = {};
+        // Geometry that changed: instances added, removed (hidden) or changed in mesh, flags or transform.
+        const auto& oldInst = previous->m_instanceRecords;
+        const auto& oldMeshes = previous->m_meshRecords;
+        for (uint32_t i = 0; i < (uint32_t)std::max(instances.size(), oldInst.size()); ++i)
+        {
+            const bool had = i < oldInst.size() && (oldInst[i].flags & gpu::kInstanceHidden) == 0;
+            const bool has = i < instances.size() && (instances[i].flags & gpu::kInstanceHidden) == 0;
+            if (had && has && oldInst[i].mesh == instances[i].mesh && oldInst[i].flags == instances[i].flags &&
+                std::memcmp(oldInst[i].objectToWorld, instances[i].objectToWorld, sizeof(instances[i].objectToWorld)) == 0)
+                continue;
+            if (had) m_buildChanges.push_back(sphereBounds(oldInst[i].objectToWorld, oldMeshes[oldInst[i].mesh].boundsSphere));
+            if (has) m_buildChanges.push_back(sphereBounds(instances[i].objectToWorld, meshes[instances[i].mesh].boundsSphere));
+        }
+    }
     buildMeshBlas();
 
     auto transformOf = [&](const gpu::Instance& in, D3D12_RAYTRACING_INSTANCE_DESC& d) {
@@ -290,7 +368,6 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
             d.Transform[r][3] = in.objectToWorld[r].w;
         }
     };
-    const D3D12_GPU_VIRTUAL_ADDRESS meshPool = m_meshBlasPool.address();
     auto rigidDesc = [&](uint32_t i) {
         const gpu::Instance& in = instances[i];
         D3D12_RAYTRACING_INSTANCE_DESC d{};
@@ -299,7 +376,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         d.InstanceMask = (in.flags & gpu::kInstanceHidden) ? 0 : kRtMaskAll;
         d.InstanceContributionToHitGroupIndex = 0;
         d.Flags = instanceFlags(i);  // DXR's default winding = CCW front in our right-handed frame (verified by Tests/RayScene)
-        d.AccelerationStructure = meshPool + m_meshBlas[in.mesh].offset;
+        d.AccelerationStructure = m_meshBlas[in.mesh].address;
         m_instances.push_back({ i, m_meshBlas[in.mesh].geometryBase, gpu::kNone, 0 });
         return d;
     };
@@ -427,7 +504,20 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     }
     m_geometryBuffer = createStructured(m_geometries.data(), sizeof(RtGeometry), (uint32_t)m_geometries.size(), L"RT geometries");
 
-    buildStaticTlas();
+    // The static TLAS: inherited when the static set (descriptors, their BLASes and keys) is the previous one's.
+    if (previous && previous->m_tlasStatic.resource && previous->m_staticDescs.size() == m_staticDescs.size() && previous->m_staticKeys == m_staticKeys &&
+        (m_staticDescs.empty() ||
+         std::memcmp(previous->m_staticDescs.data(), m_staticDescs.data(), m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC)) == 0))
+    {
+        m_tlasStatic = previous->m_tlasStatic;
+        m_staticDescBuffer = previous->m_staticDescBuffer;
+        m_staticScratch = previous->m_staticScratch;
+        previous->m_tlasStatic = previous->m_staticDescBuffer = previous->m_staticScratch = {};
+        m_stats.tlasStaticBytes = m_tlasStatic.bytes;
+        m_stats.staticTlasInherited = 1;
+    }
+    else
+        buildStaticTlas();
     {
         m_descSlotBytes = (uint64_t)(m_dynamicDescs.size() + m_staticDescs.size() + 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
         m_descSlotBytes = (m_descSlotBytes + 255) / 256 * 256;
@@ -503,7 +593,7 @@ void RayScene::buildMeshBlas()
     std::vector<Build> builds;
     for (uint32_t m = 0; m < (uint32_t)meshes.size(); ++m)
     {
-        if (m_meshBlas[m].geometryBase == gpu::kNone) continue;
+        if (m_meshBlas[m].geometryBase == gpu::kNone || m_meshBlas[m].built) continue;  // unused, or inherited (B3)
         const gpu::Mesh& gm = meshes[m];
         const scene::Mesh& sm = src->meshes[m];
         Build b;
@@ -620,6 +710,8 @@ void RayScene::buildMeshBlas()
         copy.list->CopyRaytracingAccelerationStructure(m_meshBlasPool.address() + compactOffset[k], buildPool.address() + builds[k].offset,
                                                       D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
         m_meshBlas[builds[k].mesh].offset = compactOffset[k];
+        m_meshBlas[builds[k].mesh].address = m_meshBlasPool.address() + compactOffset[k];
+        m_meshBlas[builds[k].mesh].built = true;
     }
     m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(copy));
     m_stats.meshBlasBytes = compactBytes;
@@ -1340,6 +1432,8 @@ void RayScene::record(FramePassContext& fc)
 {
     RenderGraph& g = fc.graph;
     m_frame = {};
+    m_changes = std::move(m_buildChanges);
+    m_buildChanges.clear();
     updateLightGrid(fc);
     m_frame.tlasStatic = g.importBuffer(m_tlasStatic.resource.Get(), { "RT static TLAS", m_tlasStatic.bytes, 0 });
     m_frame.tlasDynamic = g.importBuffer(m_tlasDynamic.resource.Get(), { "RT dynamic TLAS", m_tlasDynamic.bytes, 0 });
@@ -1447,7 +1541,10 @@ void RayScene::record(FramePassContext& fc)
         const gpu::Instance& in = sceneInstances[m_staticScene[k]];
         if (staticKey(in) == m_staticKeys[k]) continue;
         m_staticKeys[k] = staticKey(in);
+        const float4 sphere = m_scene.meshes()[in.mesh].boundsSphere;
+        if (m_staticDescs[k].InstanceMask != 0) m_changes.push_back(descBounds(m_staticDescs[k], sphere));  // where it was (B3)
         refreshDesc(m_staticDescs[k], in, false);
+        if (m_staticDescs[k].InstanceMask != 0) m_changes.push_back(descBounds(m_staticDescs[k], sphere));  // where it is now
         staticChanged = true;
     }
     if (!m_deformed.empty())

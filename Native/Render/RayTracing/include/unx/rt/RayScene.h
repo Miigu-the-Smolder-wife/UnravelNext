@@ -64,6 +64,7 @@ struct RaySceneStats
     uint64_t meshBlasBytes = 0, meshBlasBytesBeforeCompaction = 0;
     uint64_t deformedBlasBytes = 0, tlasStaticBytes = 0, tlasDynamicBytes = 0;
     double loadMs = 0;                     // CPU wall time of the load-time build (includes GPU waits)
+    uint32_t staticTlasInherited = 0;      // B3: this build kept the previous object's static TLAS (an instance edit)
     uint32_t deformedAboveProxyBudget = 0; // deformed meshes with more triangles than raytracing.character_proxy_triangles
     uint32_t exactSlots = 0;               // reflection exact set capacity (original BLAS)
     uint32_t exactOccupied = 0, exactBuilds = 0;  // last frame: slots in use, slots (re)built
@@ -94,7 +95,7 @@ public:
     // is keyed by address, and a later GpuScene at the same address must not receive it).
     static void release(Device& device, GpuScene& scene);
 
-    RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, const QualityConfig& quality);
+    RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, const QualityConfig& quality, RayScene* previous = nullptr);
     ~RayScene();
     RayScene(const RayScene&) = delete;
     RayScene& operator=(const RayScene&) = delete;
@@ -108,6 +109,12 @@ public:
     // HitLocalLights.hlsli).
     void rootConstants(uint32_t out[8]) const;
     const RaySceneStats& stats() const { return m_stats; }
+    // B3: whether this object was rebuilt from the previous one for an instance edit (meshes and materials kept), and the
+    // world AABBs of the geometry that changed (instances added, removed, re-meshed, hidden or moved while static) at
+    // this build or in this frame's record. GI invalidates the cache entries whose texel rays cross them instead of a new
+    // lighting epoch.
+    bool incrementalRebuild() const { return m_incremental && !m_materialsChanged; }
+    const std::vector<std::pair<float3, float3>>& changes() const { return m_changes; }
     uint32_t sceneRevision() const { return m_sceneRevision; }
 
     // Reflection exact set (ARCHITECTURE 2.6): per skinned instance, the M/G reflection rays that hit it this frame. The
@@ -187,12 +194,26 @@ private:
 
     struct MeshBlas
     {
-        uint64_t offset = 0;  // in the compacted pool
+        uint64_t offset = 0;  // in the compacted pool of this object's build
+        D3D12_GPU_VIRTUAL_ADDRESS address = 0;  // the BLAS (this build's pool, or an inherited one)
         uint32_t geometryBase = gpu::kNone;
+        uint32_t alphaMask = 0;  // per submesh (<= 32): alpha-tested when built (an alpha change rebuilds)
         bool anyAlpha = false;
+        bool built = false;      // has a BLAS (built here or inherited)
     };
     std::vector<MeshBlas> m_meshBlas;  // per scene mesh (geometryBase kNone = unused)
     Buffer m_meshBlasPool;
+    // Scene edits after upload (B3: destruction events, INTERFACES 6.3 v1.44): a revision that keeps the meshes (records
+    // and alpha layout) rebuilds this object from the previous one, inheriting its mesh BLASes (their pools stay alive
+    // here) and, when the static set is the same, its static TLAS; only new meshes are built.
+    std::vector<Buffer> m_inheritedPools;
+    std::vector<gpu::Mesh> m_meshRecords;          // the meshes this object's BLASes were built from
+    std::vector<gpu::Material> m_materialRecords;  // the materials (a change: GI's lighting epoch)
+    std::vector<gpu::Instance> m_instanceRecords;  // the instances at build (change bounds of the next rebuild)
+    bool m_incremental = false, m_materialsChanged = false;
+    std::vector<std::pair<float3, float3>> m_changes;       // world AABBs whose geometry changed at this build or this frame
+    std::vector<std::pair<float3, float3>> m_buildChanges;  // this build's, handed to the first record
+    uint32_t alphaMaskOf(uint32_t mesh) const;
 
     // RT proxies of a skinned mesh (ARCHITECTURE 2.8): V's uniform-error LOD cuts (ClusterData::lodLevels) with at most
     // raytracing.character_proxy_triangles triangles, finest first (the coarsest cut when none fits; the full mesh when

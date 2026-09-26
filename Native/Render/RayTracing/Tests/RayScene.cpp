@@ -4,7 +4,9 @@
 // and a two-submesh mesh with an alpha-tested (untextured, hence opaque) submesh. Also refits the deformed BLASes and
 // rebuilds the dynamic TLAS, then traces again. Round 6: the analytic area lights as ray geometry (raytracing.emitters):
 // closest hits on rect, disk, sphere and tube lights (one-sided rect and disk, point lights absent) against a CPU
-// intersector.
+// intersector. Round 7 (B3, destruction events): instances appended after upload (GpuScene::setInstances) rebuild the
+// ray scene from the previous one: no mesh BLAS is built again, the static TLAS is kept while only dynamic instances were
+// added, the rays match the CPU reference with the new instances, and the changed geometry's bounds are reported.
 //
 //   unx_test_raytracing_rayscene [--rays N] [--validate]     --validate: debug layer + GPU-based validation
 #include "unx/core/Config.h"
@@ -983,6 +985,107 @@ int main(int argc, char** argv)
                  ok ? "PASS" : "FAIL");
             pass = pass && ok;
             rt::RayScene::release(device, emitterScene);
+        }
+        {
+            // Round 7 (B3): fragments of a destruction event appear as new instances of existing meshes.
+            scene::Scene edit = makeScene(7);
+            const uint32_t baseCount = (uint32_t)edit.instances.size();
+            // Proxy cuts pinned to the finest (error bound 0): the CPU reference holds the skinned tube's full mesh.
+            QualityConfig editQuality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            editQuality.applyOverride("raytracing.proxy_error_px=0");
+            GpuScene editScene(device);
+            editScene.upload(edit);
+            rt::RayScene& before = rt::RayScene::get(device, shaders, editScene, editQuality);
+            const uint32_t firstBuild = before.stats().meshBlas;
+            auto traceAgainst = [&](rt::RayScene& rsE, const char* label) {
+                gpu::FrameConstants fce{};
+                editScene.fill(fce);
+                GpuBuffer ce = createBuffer(device, 1024, D3D12_HEAP_TYPE_UPLOAD, false);
+                void* mp = nullptr;
+                D3D12_RANGE nothing{ 0, 0 };
+                check(ce.resource->Map(0, &nothing, &mp), "map constants");
+                std::memcpy(mp, &fce, sizeof fce);
+                ce.resource->Unmap(0, nullptr);
+                const std::vector<CpuTri> etris = worldTriangles(edit);
+                std::vector<CpuHit> ecpu(rayCount);
+                std::vector<uint8_t> evis(rayCount, 0);
+                for (uint32_t i = 0; i < rayCount; ++i)
+                {
+                    ecpu[i] = intersect(etris, rays[i].origin, rays[i].direction, rays[i].tMax);
+                    if (rays[i].visibleTMax > 0) evis[i] = intersect(etris, rays[i].origin, rays[i].direction, rays[i].visibleTMax).t < 0 ? 1 : 0;
+                }
+                const std::vector<TestResult> gpu = trace(device, shaders, rsE, ce.resource->GetGPUVirtualAddress(), rays);
+                const Check c = compare(edit, etris, rays, gpu, ecpu, evis);
+                // Rays that hit the added instances (their scene instances in the reference).
+                uint32_t onNew = 0;
+                for (uint32_t i = 0; i < rayCount; ++i)
+                    if (ecpu[i].t >= 0 && etris[ecpu[i].tri].instance >= baseCount) ++onNew;
+                const bool ok = c.hitMismatch == 0 && c.tMismatch == 0 && c.faceMismatch == 0 && c.normalMismatch == 0 && c.visibilityMismatch == 0 &&
+                                c.coincident <= std::max<uint32_t>(2, c.hits / 2000);
+                logf("  %s: %u hits (%u on added instances); hit/miss mismatches %u, t mismatches %u, identity ties %u, facing %u, normal %u, visibility %u\n", label,
+                     c.hits, onNew, c.hitMismatch, c.tMismatch, c.coincident, c.faceMismatch, c.normalMismatch, c.visibilityMismatch);
+                return std::pair<bool, uint32_t>{ ok, onNew };
+            };
+            auto recordFrame = [&](rt::RayScene& rsE, uint64_t index) {
+                gpu::FrameConstants fcr{};
+                editScene.fill(fcr);  // this scene's buffers (setInstances replaces the instance buffer)
+                GpuBuffer cr = createBuffer(device, 1024, D3D12_HEAP_TYPE_UPLOAD, false);
+                void* mr = nullptr;
+                D3D12_RANGE nothing{ 0, 0 };
+                check(cr.resource->Map(0, &nothing, &mr), "map constants");
+                std::memcpy(mr, &fcr, sizeof fcr);
+                cr.resource->Unmap(0, nullptr);
+                RenderGraph graph(device);
+                FrameContext frame;
+                frame.frameIndex = index;
+                FrameResources resources;
+                FrameServices services;
+                TrackState state;
+                FramePassContext fctx{ device, graph, shaders, editQuality, editScene, frame, resources, services,
+                                       [&](const ViewDesc&) { return cr.resource->GetGPUVirtualAddress(); }, &state };
+                rsE.record(fctx);
+                graph.execute(nullptr);
+                device.queue(QueueType::Graphics).waitCpu(graph.lastFence(QueueType::Graphics));
+                return rsE.changes().size();
+            };
+            const auto [okFresh, onNewFresh] = traceAgainst(before, "fresh, no frame recorded");
+            recordFrame(before, 1);
+            const auto [okBefore, onNewBefore] = traceAgainst(before, "before the edits");
+            // Two dynamic fragments (box mesh), then one static one.
+            for (int k = 0; k < 2; ++k)
+            {
+                scene::Instance f;
+                f.mesh = 1;
+                f.flags |= scene::InstanceDynamic;
+                f.transform = transform({ 0.3f, 1, 0.2f }, 0.4f + k, 1.2f, { -2.0f + 4.0f * k, 1.5f, 6.0f });
+                edit.instances.push_back(f);
+            }
+            const uint32_t n0 = (uint32_t)editScene.instances().size();
+            const uint32_t added[2] = { n0, n0 + 1 };
+            editScene.setInstances(added);
+            rt::RayScene& afterDynamic = rt::RayScene::get(device, shaders, editScene, editQuality);
+            const bool incrementalA = afterDynamic.incrementalRebuild(), keptTlas = afterDynamic.stats().staticTlasInherited == 1;
+            const uint32_t buildsA = afterDynamic.stats().meshBlas;
+            const size_t changesA = recordFrame(afterDynamic, 2);
+            const auto [okA, onNewA] = traceAgainst(afterDynamic, "two dynamic fragments");
+            scene::Instance st;
+            st.mesh = 1;
+            st.transform = transform({ 0, 1, 0 }, 0.2f, 1.4f, { 0.0f, 0.8f, 9.0f });
+            edit.instances.push_back(st);
+            const uint32_t addedStatic[1] = { n0 + 2 };
+            editScene.setInstances(addedStatic);
+            rt::RayScene& afterStatic = rt::RayScene::get(device, shaders, editScene, editQuality);
+            const bool rebuiltTlas = afterStatic.stats().staticTlasInherited == 0;
+            const uint32_t buildsB = afterStatic.stats().meshBlas;
+            const size_t changesB = recordFrame(afterStatic, 3);
+            const auto [okB, onNewB] = traceAgainst(afterStatic, "and a static fragment");
+            const bool ok = okBefore && onNewBefore == 0 && okA && okB && incrementalA && keptTlas && rebuiltTlas && buildsA == 0 && buildsB == 0 && changesA == 2 && changesB == 1 && onNewA > 0 &&
+                            onNewB > onNewA && firstBuild > 0;
+            logf("instances after upload (B3): first build %u mesh BLAS; +2 dynamic: incremental %d, mesh BLAS built %u, static TLAS kept %d, changed bounds %zu; "
+                 "+1 static: mesh BLAS built %u, static TLAS rebuilt %d, changed bounds %zu -> %s\n",
+                 firstBuild, incrementalA ? 1 : 0, buildsA, keptTlas ? 1 : 0, changesA, buildsB, rebuiltTlas ? 1 : 0, changesB, ok ? "PASS" : "FAIL");
+            pass = pass && ok;
+            rt::RayScene::release(device, editScene);
         }
         rt::RayPipeline::releaseDevice(device);
         rt::RayScene::releaseDevice(device);
