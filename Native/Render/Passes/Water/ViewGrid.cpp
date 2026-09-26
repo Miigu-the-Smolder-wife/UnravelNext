@@ -278,7 +278,8 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
     // The ocean's measured bounds: the slot written framesInFlight + 1 records ago (its GPU work has completed: the caller
     // waited for frame - framesInFlight before recording this one).
     const uint32_t ring = uint32_t(m_boundsReadback.size()), readSlot = uint32_t((frame + 1) % ring), writeSlot = uint32_t(frame % ring);
-    if (m_boundsFrame[readSlot] && m_boundsFrame[readSlot] + ring - 1 == frame + 1)
+    if (!fields.previousValid) m_seaChanged = frame + 1;
+    if (m_boundsFrame[readSlot] && m_boundsFrame[readSlot] + ring - 1 == frame + 1 && m_boundsFrame[readSlot] >= m_seaChanged)
     {
         const uint8_t* m = nullptr;
         D3D12_RANGE all{ 0, 3 * 256 };
@@ -297,12 +298,19 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
         m_measuredBounds[0] = r;
         m_measuredBounds[1] = std::max(top, -bottom);
         m_measured = true;
+        m_measuredFrame = m_boundsFrame[readSlot];
     }
     ViewGridWater effective = water;
-    if (m_measured)
+    const bool current = m_measured && m_measuredFrame >= m_seaChanged;  // measured after the latest sea state
+    if (current)
     {
         effective.horizontalBound = 1.25f * m_measuredBounds[0];
         effective.verticalBound = 1.25f * m_measuredBounds[1];
+    }
+    else if (m_measured)
+    {
+        effective.horizontalBound = std::max(water.horizontalBound, 1.25f * m_measuredBounds[0]);
+        effective.verticalBound = std::max(water.verticalBound, 1.25f * m_measuredBounds[1]);
     }
     ViewGridLayout l = layout(camera, effective, lengths);
     const uint32_t drawnUav = diagnostics ? m_drawnUav : 0;

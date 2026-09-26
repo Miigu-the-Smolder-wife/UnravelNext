@@ -25,7 +25,9 @@ struct ViewGridWater
     float extent = 1.0e6f;    // the water body's extent from the camera (m, horizontal; open sea: the horizon)
     float nearRadius = 16;    // the far field starts here (m, horizontal)
     // R and A until the ocean's own bounds are measured (the bounds pyramid's top mip, read back framesInFlight + 1 frames
-    // later, times 1.25 for the sea's change over those frames); then the measured ones.
+    // later, times 1.25 for the sea's change over those frames); then the measured ones. After a new sea state or spectrum
+    // (OceanOutput::previousValid false) the larger of these and the last measurement, until the new state is measured:
+    // configure the bound of the game's roughest sea.
     float horizontalBound = 1.5f;  // R: bound of the horizontal displacement (m)
     float verticalBound = 2.0f;    // A: bound of the displacement's height above and below the still water (m)
     float bound() const { return horizontalBound + verticalBound; }
@@ -81,6 +83,8 @@ private:
     std::vector<render::ComPtr<ID3D12Resource>> m_boundsReadback;  // the pyramid's top mip per frame slot
     std::vector<uint64_t> m_boundsFrame;                           // the frame whose bounds a slot holds (+1; 0 = none)
     bool m_measured = false;
+    uint64_t m_seaChanged = 0;                                     // frame + 1 of the last new sea state
+    uint64_t m_measuredFrame = 0;                                  // frame + 1 of the measurement in use
     float m_measuredBounds[2] = {};                                // R, A
 };
 } // namespace unx::water
