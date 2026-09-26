@@ -1,0 +1,209 @@
+// A9 sheen layer (MATERIAL_LAYERS 1.4), CPU: the directional albedo table E_sh against an independent estimator
+// (uniform hemisphere, a different grid), E_sh in [0, 1], the energy bound of the layered model on a white base, the
+// lobe's reciprocity, the sun disk's centre evaluation against the disk average, and the .unxscene sheen block with its
+// validation.
+#include "unx/core/Log.h"
+#include "unx/scene/MaterialModel.h"
+#include "unx/scene/SceneData.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <exception>
+
+using namespace unx;
+using namespace unx::scene;
+using namespace unx::scene::model;
+
+namespace
+{
+uint32_t g_failures = 0;
+#define CHECK(c) \
+    do { if (!(c)) { std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #c); ++g_failures; } } while (0)
+
+constexpr float kPiF = 3.14159265358979f;
+
+float3 dirAt(float mu) { return { std::sqrt(std::max(0.0f, 1 - mu * mu)), 0, mu }; }
+
+// Independent albedo: uniform solid angle over the hemisphere in (phi, cos theta) with a golden-ratio Fibonacci set.
+double albedoIndependent(float mu, float r)
+{
+    const uint32_t count = 1u << 22;
+    const float3 n{ 0, 0, 1 }, v = dirAt(mu);
+    double sum = 0;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const double c = (i + 0.5) / count, ph = 2 * 3.14159265358979 * std::fmod(i * 0.6180339887498949, 1.0);
+        const double s = std::sqrt(1 - c * c);
+        const float3 l{ (float)(s * std::cos(ph)), (float)(s * std::sin(ph)), (float)c };
+        sum += evaluateSheenLobe(r, n, v, l) * c;
+    }
+    return sum * 2 * 3.14159265358979 / count;
+}
+
+bool fails(const Scene& s)
+{
+    try
+    {
+        validate(s);
+    }
+    catch (const std::exception&)
+    {
+        return true;
+    }
+    return false;
+}
+} // namespace
+
+int main()
+{
+    // 1. The table against the independent estimator at grid points and between them (bilinear).
+    double worst = 0;
+    for (float r : { 0.1f, 0.25f, 0.5f, 0.75f, 1.0f })
+        for (float mu : { 0.02f, 0.1f, 0.3f, 0.5f, 0.7f, 0.9f, 1.0f })
+        {
+            const double ref = albedoIndependent(mu, r), tab = sheenAlbedo(mu, r);
+            const double err = std::abs(tab - ref);
+            worst = std::max(worst, err / std::max(ref, 0.01));
+            if (err > std::max(0.02 * ref, 0.002)) std::fprintf(stderr, "E_sh(%.2f, %.2f): table %.5f, independent %.5f\n", mu, r, tab, ref);
+            CHECK(err <= std::max(0.02 * ref, 0.002));  // MATERIAL_LAYERS 3 albedo criterion: 2 % or 0.002 absolute
+        }
+    std::printf("E_sh table vs independent: worst relative %.4f\n", worst);
+
+    // 1b. The projected area: A(1) = 1 (D's normalisation), A(mu) >= mu (Lambda >= 0).
+    for (float r : { 0.1f, 0.5f, 1.0f })
+    {
+        CHECK(std::abs(sheenProjectedArea(1, r) - 1) <= 2e-3f);
+        for (float mu : { 0.05f, 0.3f, 0.7f }) CHECK(sheenProjectedArea(mu, r) >= mu * (1 - 1e-3f));
+    }
+
+    // 2. E_sh in [0, 1] over the table (the base's scale 1 - max(C) E_sh stays in [0, 1]).
+    float emax = 0;
+    for (uint32_t i = 0; i < kSheenTableMu * kSheenTableR; ++i)
+    {
+        const float e = sheenTable()[kSheenTableMu * kSheenTableR + i];
+        CHECK(e >= 0 && e <= 1);
+        emax = std::max(emax, e);
+    }
+    std::printf("E_sh max %.4f\n", emax);
+
+    // 3. Energy: under a white sheen the layered albedo is E_sh + (1 - E_sh) B with B the base's own albedo (so at most 1
+    // for a base that conserves energy), and with C = 0 exactly the base.
+    double furnaceMax = 0;
+    for (float r : { 0.1f, 0.4f, 1.0f })
+        for (float rb : { 0.05f, 0.5f, 1.0f })
+            for (float mu : { 0.05f, 0.4f, 1.0f })
+            {
+                Surface s;
+                s.baseColor = { 0.5f, 0.5f, 0.5f };
+                s.roughness = rb;
+                Sheen sh;
+                sh.color = { 1, 1, 1 };
+                sh.roughness = r;
+                const float3 n{ 0, 0, 1 }, v = dirAt(mu);
+                double total = 0, base = 0;
+                const uint32_t nt = 512, np = 256;
+                for (uint32_t i = 0; i < nt; ++i)
+                    for (uint32_t j = 0; j < np; ++j)
+                    {
+                        const float c = (i + 0.5f) / nt, sn = std::sqrt(1 - c * c), ph = 2 * kPiF * (j + 0.5f) / np;
+                        const float3 l{ sn * std::cos(ph), sn * std::sin(ph), c };
+                        total += evaluateSheen(s, sh, n, v, l).x * c;
+                        base += evaluate(s, n, v, l).x * c;
+                    }
+                total *= 2 * kPiF / (nt * np);
+                base *= 2 * kPiF / (nt * np);
+                const double e = sheenAlbedo(mu, r), expect = e + (1 - e) * base;
+                furnaceMax = std::max(furnaceMax, std::abs(total - expect));
+                if (std::abs(total - expect) > 0.01) std::fprintf(stderr, "furnace r %.2f rb %.2f mu %.2f: %.4f, expected %.4f (B %.4f)\n", r, rb, mu, total, expect, base);
+                CHECK(std::abs(total - expect) <= 0.01);
+                Sheen none;
+                const float3 l = dirAt(0.6f);
+                const float3 a = evaluateSheen(s, none, n, v, float3{ -l.x, 0, l.z }), b = evaluate(s, n, v, float3{ -l.x, 0, l.z });
+                CHECK(a.x == b.x && a.y == b.y && a.z == b.z);
+            }
+    std::printf("furnace: layered albedo vs E_sh + (1 - E_sh) B, worst %.4f\n", furnaceMax);
+
+    // 4. The sheen lobe is reciprocal.
+    for (float r : { 0.1f, 0.6f })
+        for (float a : { 0.1f, 0.5f, 0.95f })
+            for (float b : { 0.2f, 0.7f })
+            {
+                const float3 n{ 0, 0, 1 }, v = dirAt(a);
+                const float3 l{ -std::sqrt(1 - b * b) * 0.6f, std::sqrt(1 - b * b) * 0.8f, b };
+                const float x = evaluateSheenLobe(r, n, v, l), y = evaluateSheenLobe(r, n, l, v);
+                CHECK(std::abs(x - y) <= 1e-6f * std::max(1.0f, x));
+            }
+
+    // 5. The sun's disk (0.2725 deg radius, rho): the renderer's 4-point rule (the lobe at c +- rho / sqrt(2) along both
+    // disk axes, averaged: exact for quadratics over the disk) against the disk average (polar midpoint quadrature over
+    // the cap), over roughness, view and sun elevation down to 2 degrees above the horizon.
+    const float radius = 0.2725f * kPiF / 180;
+    double diskWorst = 0;
+    for (float r : { 0.1f, 0.3f, 1.0f })
+        for (float mu : { 0.02f, 0.3f, 1.0f })
+            for (float el : { 2.0f, 10.0f, 45.0f, 90.0f })
+                for (float az : { 0.0f, 90.0f, 180.0f })
+                {
+                    const float3 n{ 0, 0, 1 }, v = dirAt(mu);
+                    const float t = el * kPiF / 180, p = az * kPiF / 180;
+                    const float3 c{ std::cos(t) * std::cos(p), std::cos(t) * std::sin(p), std::sin(t) };
+                    const float3 u = normalize(cross(std::abs(c.z) < 0.9f ? float3{ 0, 0, 1 } : float3{ 1, 0, 0 }, c)), w = cross(c, u);
+                    double sum = 0, wsum = 0;
+                    for (uint32_t i = 0; i < 16; ++i)
+                        for (uint32_t j = 0; j < 32; ++j)
+                        {
+                            const float rr = radius * std::sqrt((i + 0.5f) / 16), ph = 2 * kPiF * (j + 0.5f) / 32;
+                            const float3 l = normalize(c + u * (rr * std::cos(ph)) + w * (rr * std::sin(ph)));
+                            sum += evaluateSheenLobe(r, n, v, l) * std::max(0.0f, l.z);
+                            wsum += 1;
+                        }
+                    // relative to the lobe's cosine-weighted scale E_sh / pi where the lobe is near 0 (its zero at h = n)
+                    double centre = 0;
+                    const float q = radius / std::sqrt(2.0f);
+                    for (const float3 d : { u * q, u * -q, w * q, w * -q })
+                    {
+                        const float3 l = normalize(c + d);
+                        centre += 0.25 * evaluateSheenLobe(r, n, v, l) * std::max(0.0f, l.z);
+                    }
+                    const double avg = sum / wsum;
+                    const double rel = std::abs(centre - avg) / std::max(avg, sheenAlbedo(mu, r) / 3.14159265358979);
+                    if (rel > diskWorst) std::printf("  disk r %.2f mu %.2f el %.0f az %.0f: %.2e\n", r, mu, el, az, rel);
+                    diskWorst = std::max(diskWorst, rel);
+                }
+    std::printf("sun disk: centre vs disk average, worst relative %.2e\n", diskWorst);
+    CHECK(diskWorst <= 2e-3);
+
+    // 6. .unxscene: the sheen block round-trips; validation rejects a sheen with a clearcoat, off-range values and a
+    // non-Standard class.
+    Scene s;
+    Material cloth;
+    cloth.name = "cloth";
+    cloth.sheenColor = { 0.8f, 0.3f, 0.1f };
+    cloth.sheenRoughness = 0.35f;
+    Material plain;
+    plain.name = "plain";
+    s.materials = { plain, cloth };
+    const Scene back = deserialize(serialize(s));
+    CHECK(back.materials.size() == 2);
+    CHECK(back.materials[1].sheenColor.x == 0.8f && back.materials[1].sheenColor.y == 0.3f && back.materials[1].sheenColor.z == 0.1f);
+    CHECK(back.materials[1].sheenRoughness == 0.35f);
+    CHECK(back.materials[0].sheenColor.x == 0 && back.materials[0].sheenRoughness == 0.5f);
+    CHECK(!fails(s));
+    Scene bad = s;
+    bad.materials[1].clearcoat = 0.5f;
+    CHECK(fails(bad));
+    bad = s;
+    bad.materials[1].sheenRoughness = 0.05f;
+    CHECK(fails(bad));
+    bad = s;
+    bad.materials[1].sheenColor.y = 1.5f;
+    CHECK(fails(bad));
+    bad = s;
+    bad.materials[1].cls = MaterialClass::Foliage;
+    CHECK(fails(bad));
+
+    if (g_failures) std::fprintf(stderr, "unx_test_scene_sheen: %u failure(s)\n", g_failures);
+    else std::printf("unx_test_scene_sheen: PASS\n");
+    return g_failures ? 1 : 0;
+}

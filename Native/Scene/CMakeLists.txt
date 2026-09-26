@@ -13,3 +13,8 @@ target_link_libraries(unx_test_scene_morph PRIVATE unx_scene)
 add_executable(unx_test_scene_terrainpatch Tests/TerrainPatchTests.cpp)
 unx_target_defaults(unx_test_scene_terrainpatch)
 target_link_libraries(unx_test_scene_terrainpatch PRIVATE unx_scene)
+
+# A9 sheen layer (render A): the model, its albedo table and the scene block (CPU).
+add_executable(unx_test_scene_sheen Tests/SheenTests.cpp)
+unx_target_defaults(unx_test_scene_sheen)
+target_link_libraries(unx_test_scene_sheen PRIVATE unx_scene)

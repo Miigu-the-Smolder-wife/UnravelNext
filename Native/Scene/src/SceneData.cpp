@@ -287,6 +287,35 @@ void writeCoat(Writer& w, const Scene& s)
     }
 }
 
+// A9 sheen extension block, written only when a material has a sheen: u32 tag "SHEN", u64 count, then per material its
+// index, sheenColor, sheenRoughness.
+constexpr uint32_t kSheenTag = 0x4E454853u;  // "SHEN"
+
+bool hasSheen(const Material& m) { return m.sheenColor.x > 0 || m.sheenColor.y > 0 || m.sheenColor.z > 0; }
+
+bool anySheen(const Scene& s)
+{
+    for (const Material& m : s.materials)
+        if (hasSheen(m)) return true;
+    return false;
+}
+
+void writeSheen(Writer& w, const Scene& s)
+{
+    w.pod(kSheenTag);
+    uint64_t count = 0;
+    for (const Material& m : s.materials) count += hasSheen(m);
+    w.pod(count);
+    for (uint32_t i = 0; i < s.materials.size(); ++i)
+    {
+        const Material& m = s.materials[i];
+        if (!hasSheen(m)) continue;
+        w.pod(i);
+        w.pod(m.sheenColor);
+        w.pod(m.sheenRoughness);
+    }
+}
+
 bool anyMorph(const Scene& s)
 {
     for (const Mesh& m : s.meshes)
@@ -347,6 +376,7 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anyCut(s)) writeCut(w, s);
     if (anyTerrain(s)) writeTerrain(w, s);
     if (anyCoat(s)) writeCoat(w, s);
+    if (anySheen(s)) writeSheen(w, s);
     return std::move(w.out);
 }
 
@@ -462,6 +492,18 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kSheenTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.materials.size()) fail("unxscene: sheen parameters of material %u of %zu", i, s.materials.size());
+            s.materials[i].sheenColor = r.pod<float3>();
+            s.materials[i].sheenRoughness = r.pod<float>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
     if (tag != 0) fail("unxscene: unknown extension block 0x%08x", tag);
     if (r.at != bytes.size()) fail("unxscene: %zu trailing bytes", bytes.size() - r.at);
     return s;
@@ -512,6 +554,15 @@ void validate(const Scene& s)
                 fail("material %zu '%s': a clearcoat is defined on Standard materials", i, m.name.c_str());
             if (m.clearcoatIor != 1.5f && m.clearcoatIor != 1.33f)
                 fail("material %zu '%s': clearcoatIor %g is not a tabulated coat (1.5 or 1.33)", i, m.name.c_str(), m.clearcoatIor);
+        }
+        if (hasSheen(m))
+        {
+            if (!(m.sheenColor.x >= 0 && m.sheenColor.x <= 1 && m.sheenColor.y >= 0 && m.sheenColor.y <= 1 && m.sheenColor.z >= 0 && m.sheenColor.z <= 1))
+                fail("material %zu '%s': sheenColor in [0, 1]", i, m.name.c_str());
+            if (!(m.sheenRoughness >= 0.1f && m.sheenRoughness <= 1))
+                fail("material %zu '%s': sheenRoughness in [0.1, 1] (the lobe stays much wider than the sun's disk)", i, m.name.c_str());
+            if (m.cls != MaterialClass::Standard) fail("material %zu '%s': a sheen is defined on Standard materials", i, m.name.c_str());
+            if (m.clearcoat > 0) fail("material %zu '%s': one layer kind per material (sheen or clearcoat)", i, m.name.c_str());
         }
         if (m.cls == MaterialClass::Terrain)
         {

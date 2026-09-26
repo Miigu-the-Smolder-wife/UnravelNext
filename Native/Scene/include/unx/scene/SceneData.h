@@ -99,6 +99,10 @@ struct Material
     float clearcoat = 0.0f;                  // [0, 1]; 0 = no layer
     float clearcoatRoughness = 0.05f;        // [0, 1]
     float clearcoatIor = 1.5f;               // 1.5 or 1.33
+    // Sheen layer (A9, MATERIAL_LAYERS 1.4; Standard class, not with a clearcoat): cloth's grazing sheen, colour sheenColor
+    // (linear, [0, 1]; 0 = none) and perceptual roughness sheenRoughness in [0.1, 1].
+    float3 sheenColor{ 0, 0, 0 };
+    float sheenRoughness = 0.5f;
 };
 
 struct Submesh

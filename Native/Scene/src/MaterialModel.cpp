@@ -168,6 +168,118 @@ float evaluateCoatLobe(const Coat& c, float3 n, float3 v, float3 l)
     return distributionGgx(NoH, dot(nxh, nxh), ac) * visibilitySmithGgxCorrelated(NoV, NoL, ac) * fresnelDielectric(VoH, c.eta) * scale;
 }
 
+namespace
+{
+// Charlie D (normalised: its projected area on n is 1).
+float sheenD(float NoH, float alpha)
+{
+    const float inv = 1 / alpha, sin2 = std::max(0.0f, 1 - NoH * NoH);
+    return (2 + inv) * std::pow(sin2, 0.5f * inv) / (2 * kPi);
+}
+
+// Sheen table cell (column i at sqrt(mu) = i / (M - 1), row j at sqrt((r - 0.1) / 0.9) = j / (R - 1)): its mu and r.
+float sheenMu(uint32_t i) { const float x = (float)i / (kSheenTableMu - 1); return std::max(x * x, 1e-4f); }
+float sheenRow(uint32_t j) { const float y = (float)j / (kSheenTableR - 1); return 0.1f + 0.9f * y * y; }
+
+std::vector<float> buildSheenTable()
+{
+    const uint32_t nm = kSheenTableMu, nr = kSheenTableR, cells = nm * nr;
+    std::vector<float> t(2 * cells);
+    // A(mu, r) = integral of D(m) max(0, w.m) dm: per cosine c of m the azimuth integral is closed,
+    // 2 (a phi0 + b sin phi0) with a = mu c, b = |w x n| |m x n|, phi0 = acos(-a / b) (midpoint in c, 4096 steps).
+    const uint32_t nc = 4096;
+    for (uint32_t j = 0; j < nr; ++j)
+        for (uint32_t i = 0; i < nm; ++i)
+        {
+            const double alpha = alphaFromRoughness(sheenRow(j));
+            const double mu = sheenMu(i), sw = std::sqrt(1 - mu * mu);
+            double sum = 0;
+            for (uint32_t k = 0; k < nc; ++k)
+            {
+                const double c = (k + 0.5) / nc, sm = std::sqrt(1 - c * c);
+                const double D = (2 + 1 / alpha) * std::pow(sm * sm, 0.5 / alpha) / (2 * 3.14159265358979);
+                const double aa = mu * c, bb = sw * sm;
+                double az;
+                if (bb <= aa) az = 2 * 3.14159265358979 * aa;
+                else
+                {
+                    const double phi0 = std::acos(std::clamp(-aa / bb, -1.0, 1.0));
+                    az = 2 * (aa * phi0 + bb * std::sin(phi0));
+                }
+                sum += D * az;
+            }
+            t[j * nm + i] = (float)(sum / nc);
+        }
+    // E_sh(mu, r) = integral of f_sh cos over the hemisphere with C = 1, over the microfacet normal h (dl = 4 v.h dh:
+    // E = integral of D(h) G2 v.h / n.v over v.h > 0, n.l > 0), where D is smooth in (cos theta_h, phi) (midpoint, the
+    // lobe's mirror symmetry about the plane of v and n: phi in [0, pi) twice).
+    const uint32_t nt = 1024, np = 256;
+    for (uint32_t j = 0; j < nr; ++j)
+        for (uint32_t i = 0; i < nm; ++i)
+        {
+            const float r = sheenRow(j), alpha = alphaFromRoughness(r), mu = sheenMu(i);
+            const float3 v{ std::sqrt(1 - mu * mu), 0, mu };
+            const float Av = t[j * nm + i];
+            double sum = 0;
+            for (uint32_t a = 0; a < nt; ++a)
+            {
+                const float c = (a + 0.5f) / nt, sn = std::sqrt(1 - c * c), D = sheenD(c, alpha);
+                for (uint32_t b = 0; b < np; ++b)
+                {
+                    const float ph = kPi * (b + 0.5f) / np;
+                    const float3 h{ sn * std::cos(ph), sn * std::sin(ph), c };
+                    const float VoH = dot(v, h);
+                    if (VoH <= 0) continue;
+                    const float NoL = 2 * VoH * c - mu;
+                    if (NoL <= 0) continue;
+                    const float G2 = 1 / std::max(Av / mu + sheenLookup(t.data(), NoL, r) / NoL - 1, 1.0f);
+                    sum += D * G2 * VoH / mu;
+                }
+            }
+            t[cells + j * nm + i] = (float)(sum * 2 * kPi / nt / np);
+        }
+    return t;
+}
+} // namespace
+
+float sheenLookup(const float* t, float mu, float r)
+{
+    const float x = std::sqrt(std::clamp(mu, 0.0f, 1.0f)) * (kSheenTableMu - 1);
+    const float y = std::sqrt(std::clamp((r - 0.1f) / 0.9f, 0.0f, 1.0f)) * (kSheenTableR - 1);
+    const uint32_t x0 = std::min((uint32_t)x, kSheenTableMu - 2), y0 = std::min((uint32_t)y, kSheenTableR - 2);
+    const float fx = x - x0, fy = y - y0;
+    auto at = [&](uint32_t xi, uint32_t yi) { return t[yi * kSheenTableMu + xi]; };
+    return (at(x0, y0) * (1 - fx) + at(x0 + 1, y0) * fx) * (1 - fy) + (at(x0, y0 + 1) * (1 - fx) + at(x0 + 1, y0 + 1) * fx) * fy;
+}
+
+const std::vector<float>& sheenTable()
+{
+    static const std::vector<float> t = buildSheenTable();
+    return t;
+}
+
+float sheenProjectedArea(float mu, float roughness) { return sheenLookup(sheenTable().data(), mu, roughness); }
+
+float sheenAlbedo(float NoV, float roughness) { return sheenLookup(sheenTable().data() + kSheenTableMu * kSheenTableR, NoV, roughness); }
+
+float evaluateSheenLobe(float roughness, float3 n, float3 v, float3 l)
+{
+    const float NoV = dot(n, v), NoL = dot(n, l);
+    if (NoV <= 0 || NoL <= 0) return 0;
+    const float G2 = 1 / std::max(sheenProjectedArea(NoV, roughness) / NoV + sheenProjectedArea(NoL, roughness) / NoL - 1, 1.0f);
+    return sheenD(saturate(dot(n, normalize(v + l))), alphaFromRoughness(roughness)) * G2 / (4 * NoV * NoL);
+}
+
+float3 evaluateSheen(const Surface& s, const Sheen& sh, float3 n, float3 v, float3 l)
+{
+    const float3 base = evaluate(s, n, v, l);
+    const float cmax = std::max(sh.color.x, std::max(sh.color.y, sh.color.z));
+    if (!(cmax > 0)) return base;
+    const float NoV = dot(n, v), NoL = dot(n, l);
+    if (NoV <= 0 || NoL <= 0) return base;
+    return sh.color * evaluateSheenLobe(sh.roughness, n, v, l) + base * (1 - cmax * sheenAlbedo(NoV, sh.roughness));
+}
+
 float3 evaluateCoated(const Surface& s, const Coat& c, float3 n, float3 v, float3 l)
 {
     const float3 base = evaluate(s, n, v, l);

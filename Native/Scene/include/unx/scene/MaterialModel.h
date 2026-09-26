@@ -92,6 +92,30 @@ float fresnelDielectric(float cosI, float eta);  // exact, unpolarised; eta = n_
 float3 evaluateCoated(const Surface& s, const Coat& c, float3 n, float3 v, float3 l);
 float evaluateCoatLobe(const Coat& c, float3 n, float3 v, float3 l);  // f_c alone (without the cover)
 
+// Sheen layer (A9, MATERIAL_LAYERS 1.4; cloth): a Charlie microfacet surface over a Standard surface s, for n.v, n.l > 0,
+//   f = f_sh + f_s (1 - max(C) E_sh(n.v, r_sh)),   f_sh = C D(h) G2(v, l) / (4 n.v n.l),
+//   D = (2 + 1 / a) (1 - (n.h)^2)^(1 / (2 a)) / (2 pi)    Charlie (Estevez & Kulla 2017), a = alpha(r_sh)
+//   G2 = 1 / (1 + Lambda(v) + Lambda(l)),  Lambda(w) = A(n.w) / n.w - 1,  A(mu) = integral of D(m) max(0, w.m) dm
+// Smith masking derived from D itself (the projected area A, tabulated; no fitted shadowing), so the lobe's albedo is at
+// most 1. E_sh(mu, r) = the lobe's directional albedo with C = 1. sheenTable(): A then E_sh, each kSheenTableMu columns
+// at sqrt(mu) = i / (kSheenTableMu - 1) by kSheenTableR rows at sqrt((r - 0.1) / 0.9) = j / (kSheenTableR - 1) (E_sh is
+// steep at grazing views and for sharp lobes), bilinear (sheenLookup); deterministic midpoint integration.
+// The base's scale takes the view side only (Imageworks' albedo scaling: energy bounded, exact under any lighting
+// integral).
+// r_sh in [0.1, 1] (scene validation).
+struct Sheen
+{
+    float3 color{ 0, 0, 0 };
+    float roughness = 0.5f;
+};
+constexpr uint32_t kSheenTableMu = 64, kSheenTableR = 32, kSheenTableSize = 2 * kSheenTableMu * kSheenTableR;
+float sheenLookup(const float* table, float mu, float roughness);
+const std::vector<float>& sheenTable();
+float sheenProjectedArea(float mu, float roughness);
+float sheenAlbedo(float NoV, float roughness);
+float evaluateSheenLobe(float roughness, float3 n, float3 v, float3 l);  // D G2 / (4 n.v n.l) (C = 1)
+float3 evaluateSheen(const Surface& s, const Sheen& sh, float3 n, float3 v, float3 l);
+
 // Hair class (INTERFACES 8.1 v1.66): the fibre's absorption sigma_a (PBRT 4e's convention: per unit fibre radius, the
 // chord of the unit-radius cross-section is the path length; HairBsdf.hlsli hairAttenuation). With melanin (eumelanin +
 // pheomelanin > 0): d'Eon et al. 2011, eu (0.419, 0.697, 1.37) + pheo (0.187, 0.4, 1.05). Otherwise baseColor is the
