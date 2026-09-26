@@ -119,31 +119,11 @@ bool causticCell(RWTexture2DArray<uint> caustics, float2 c0, float2 c1, float2 c
     return true;
 }
 
-[numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+// Texel q's own light (the per-texel path): its cell to the neighbours' landing points when all four are water (beam),
+// else its own square.
+void causticTexel(RWTexture2DArray<uint> caustics, CausticMap m, float3 S0, float3 d0, bool beam, float3 S1, float3 d1, float3 S2, float3 d2,
+                  float3 S3, float3 d3, float unit, uint nc, inout uint overflow)
 {
-    ByteAddressBuffer cb = ResourceDescriptorHeap[P[0].w];
-    const uint4 head = cb.Load4(0);
-    CausticMap m;
-    m.n = head.y;
-    if (head.x == 0 || any(id.xy >= m.n)) return;
-    Texture2D<float> depth = ResourceDescriptorHeap[P[0].x];
-    if (depth[id.xy] <= 0) return;
-    Texture2D<float2> normals = ResourceDescriptorHeap[P[0].y];
-    Texture2D<float4> media = ResourceDescriptorHeap[P[0].z];
-    m.r = asfloat(cb.Load4(16));
-    m.u = asfloat(cb.Load4(32));
-    m.s = asfloat(cb.Load4(48));
-    m.k = asfloat(cb.Load4(64));
-    RWTexture2DArray<uint> caustics = ResourceDescriptorHeap[P[1].x];
-    const uint nc = min(m.n, WATER_CAUSTIC_MAX);                        // the caustic grid over the same extent
-    const float unit = float(nc) * float(nc) / (float(m.n) * float(m.n));  // one map texel's share of a caustic texel
-    const int2 q = int2(id.xy);
-    float3 S0, S1, S2, S3, d0, d1, d2, d3;
-    if (!causticRay(m, depth, normals, media, q, S0, d0)) return;  // (total reflection: no light enters)
-    const bool beam = causticRay(m, depth, normals, media, q + int2(1, 0), S1, d1) && causticRay(m, depth, normals, media, q + int2(1, 1), S2, d2) &&
-                      causticRay(m, depth, normals, media, q + int2(0, 1), S3, d3);
-    uint overflow = 0;
     [loop] for (uint slice = 0; slice < WATER_CAUSTIC_SLICES; ++slice)
     {
         const float zk = waterCausticDepth(slice);
@@ -172,6 +152,94 @@ void main(uint3 id : SV_DispatchThreadID)
             causticPoint(caustics, (c0 + c2 + c3) / 3 + shift, slice, unit * a2 / total, nc);
             overflow += 2;
         }
+    }
+}
+
+// A step's move on the caustic grid per metre of slice depth (causticGrid's linear part).
+float2 causticGridStep(CausticMap m, float3 v, float nc) { return float2(dot(v, m.r.xyz) * m.k.x, -dot(v, m.u.xyz) * m.k.y) * nc; }
+
+// One thread per 2 x 2 block of map texels (their cells span the texel centres base .. base + 2, so the block needs the
+// 3 x 3 rays around it; neighbouring blocks share their edge rays). Where the landing map is affine over the block, the
+// four cells are one quad with four times the light: deposited once (flat water everywhere, smooth water mostly). The
+// landing point is G(S) + z G'(step): the surface points' grid positions are exactly affine in the texel index (the
+// map's grid, the sun axis dropping out of the projection), so the deviation from affine is z times the steps' second
+// differences, largest at the deepest slice - the block merges when that is within WATER_CAUSTIC_AFFINE caustic texels
+// there (a cell's density then within ~4 x that relative of the per-cell deposit's). Otherwise each texel deposits its
+// own cell (causticTexel).
+#define WATER_CAUSTIC_AFFINE 2.5e-4
+
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    ByteAddressBuffer cb = ResourceDescriptorHeap[P[0].w];
+    const uint4 head = cb.Load4(0);
+    CausticMap m;
+    m.n = head.y;
+    const int2 base = int2(id.xy) * 2;
+    if (head.x == 0 || any(base >= int(m.n))) return;
+    Texture2D<float> depth = ResourceDescriptorHeap[P[0].x];
+    const int2 hiTexel = int(m.n) - 1;
+    if (depth[base] <= 0 && depth[min(base + int2(1, 0), hiTexel)] <= 0 && depth[min(base + int2(0, 1), hiTexel)] <= 0 && depth[min(base + 1, hiTexel)] <= 0) return;
+    Texture2D<float2> normals = ResourceDescriptorHeap[P[0].y];
+    Texture2D<float4> media = ResourceDescriptorHeap[P[0].z];
+    m.r = asfloat(cb.Load4(16));
+    m.u = asfloat(cb.Load4(32));
+    m.s = asfloat(cb.Load4(48));
+    m.k = asfloat(cb.Load4(64));
+    RWTexture2DArray<uint> caustics = ResourceDescriptorHeap[P[1].x];
+    const uint nc = min(m.n, WATER_CAUSTIC_MAX);                        // the caustic grid over the same extent
+    const float unit = float(nc) * float(nc) / (float(m.n) * float(m.n));  // one map texel's share of a caustic texel
+    float3 S[3][3], D[3][3];
+    bool ok[3][3];
+    bool all = true;
+    [unroll] for (int j = 0; j < 3; ++j)
+        [unroll] for (int i = 0; i < 3; ++i)
+        {
+            ok[j][i] = causticRay(m, depth, normals, media, base + int2(i, j), S[j][i], D[j][i]);
+            all = all && ok[j][i];
+        }
+    uint overflow = 0;
+    bool merged = false;
+    if (all)
+    {
+        const float fnc = float(nc);
+        const float2 g00 = causticGridStep(m, D[0][0], fnc), A = 0.5 * (causticGridStep(m, D[0][2], fnc) - g00), B = 0.5 * (causticGridStep(m, D[2][0], fnc) - g00);
+        float deviation = 0;
+        [unroll] for (int j2 = 0; j2 < 3; ++j2)
+            [unroll] for (int i2 = 0; i2 < 3; ++i2)
+            {
+                const float2 e = causticGridStep(m, D[j2][i2], fnc) - (g00 + float(i2) * A + float(j2) * B);
+                deviation = max(deviation, max(abs(e.x), abs(e.y)));
+            }
+        merged = deviation * waterCausticDepth(WATER_CAUSTIC_SLICES - 1) <= WATER_CAUSTIC_AFFINE;
+    }
+    if (merged)
+    {
+        [loop] for (uint slice = 0; slice < WATER_CAUSTIC_SLICES; ++slice)
+        {
+            const float zk = waterCausticDepth(slice), fnc = float(nc);
+            const float2 c0 = causticGrid(m, S[0][0] + D[0][0] * zk, fnc), c1 = causticGrid(m, S[0][2] + D[0][2] * zk, fnc),
+                         c2 = causticGrid(m, S[2][2] + D[2][2] * zk, fnc), c3 = causticGrid(m, S[2][0] + D[2][0] * zk, fnc);
+            const float a1 = 0.5 * abs((c1.x - c0.x) * (c2.y - c0.y) - (c2.x - c0.x) * (c1.y - c0.y));
+            const float a2 = 0.5 * abs((c2.x - c0.x) * (c3.y - c0.y) - (c3.x - c0.x) * (c2.y - c0.y));
+            const float total = a1 + a2;
+            const float2 shift = -0.25 * ((c1 - c0) + (c3 - c0));  // the cells' half-texel shift (causticTexel), per texel step
+            if (!(total >= 1e-12)) { causticPoint(caustics, (c0 + c2) * 0.5 + shift, slice, 4 * unit, nc); continue; }
+            if (!causticCell(caustics, c0 + shift, c1 + shift, c2 + shift, c3 + shift, slice, 4 * unit / total, nc))
+            {
+                causticPoint(caustics, (c0 + c1 + c2) / 3 + shift, slice, 4 * unit * a1 / total, nc);
+                causticPoint(caustics, (c0 + c2 + c3) / 3 + shift, slice, 4 * unit * a2 / total, nc);
+                overflow += 2;
+            }
+        }
+    }
+    else
+    {
+        [unroll] for (int b = 0; b < 2; ++b)
+            [unroll] for (int a = 0; a < 2; ++a)
+                if (ok[b][a])  // (not water, or total reflection: no light enters)
+                    causticTexel(caustics, m, S[b][a], D[b][a], ok[b][a + 1] && ok[b + 1][a + 1] && ok[b + 1][a], S[b][a + 1], D[b][a + 1],
+                                 S[b + 1][a + 1], D[b + 1][a + 1], S[b + 1][a], D[b + 1][a], unit, nc, overflow);
     }
     if (overflow != 0 && P[1].y != UNX_NONE)
     {

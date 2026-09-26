@@ -184,7 +184,8 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
                   const uint32_t k[8] = { c.srv(depth), c.srv(normal), c.srv(medium), c.srv(constants), c.uav(caustics), c.uav(overflow), 0, 0 };
                   c.cmd->SetPipelineState(splat);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch((n + 7) / 8, (n + 7) / 8, 1);
+                  const uint32_t blocks = (n + 1) / 2;  // one thread per 2 x 2 block of map texels (WaterCaustics.hlsl)
+                  c.cmd->Dispatch((blocks + 7) / 8, (blocks + 7) / 8, 1);
               });
     return out;
 }
