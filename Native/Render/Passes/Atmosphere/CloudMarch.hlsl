@@ -3,13 +3,13 @@
 // transmittance, over the ray's span in the layer's altitude shell (cloudShellSpan; clipped at the pixel's opaque
 // surface). Steps: midpoints of equal intervals, the interval length the ray's footprint at the span's middle
 // (distance x pixel angle x resolution scale, 25..400 m) and at most CLOUD_MARCH_STEPS per span (the structural bound).
-// Per step: the density (CloudCommon.hlsli), the sun's single scattering with the transmittance to the sun from the
-// deep opacity map (CloudShadowCommon.hlsli), the exact in-interval transmittance (1 - e^(-rho dt)) / rho.
+// Per step: the density (CloudCommon.hlsli), the sun's single scattering with the sun's transmittance integrated along
+// the sun ray (cloudSunTauMarch; the map only past its structural bound), the exact in-interval transmittance.
 // [Step (b): single scattering of the sun only; multiple scattering and the sky's light are step (d).]
 // P[0] = { cloud record SRV, output UAV, depth SRV (UNX_NONE: no surface), scale (pixels of the view per output texel) }
 // P[1] = { output width, height, mode (0 = RGBA16F texture: radiance, transmittance; 1 = tests: raw buffer of 8 floats
-// per texel { radiance rgb, transmittance, direction xyz, 0 }; 2 = as 1 with the sun's transmittance integrated along
-// the sun ray (20 m midpoint steps: attribution of the deep opacity map's error)), max distance (float bits, modes 1-2) };
+// per texel { radiance rgb, transmittance, direction xyz, 0 }; 2 = as 1 with the sun's transmittance from the deep
+// opacity map alone (attribution)), max distance (float bits, modes 1-2) };
 // b1 = the view.
 #include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 #include "Frame.hlsli"
@@ -50,19 +50,8 @@ void main(uint2 id : SV_DispatchThreadID)
             const float rho = cloudDensity(c, x);
             if (rho <= 0) continue;
             const float segment = (1 - exp(-rho * dt)) / rho;
-            float tauSun = 0;
-            if (P[1].z == 2)
-            {
-                // The CPU reference's sun path: 20 m midpoint steps until the ray leaves the layer.
-                [loop] for (float u = 10; u < 50000; u += 20)
-                {
-                    const float3 y = x + c.sunDir * u;
-                    const float a = cloudAltitude(c, y);
-                    if (a > c.top || a < c.base - 1) break;
-                    tauSun += cloudDensity(c, y) * 20;
-                }
-            }
-            else tauSun = cloudSunTau(c, x);
+            // Mode 2 (attribution): the map alone.
+            const float tauSun = P[1].z == 2 ? cloudSunTau(c, x) : cloudSunTauMarch(c, x);
             L += T * c.albedo * rho * phase * c.sunIlluminance * exp(-tauSun) * segment;
             T *= exp(-rho * dt);
         }

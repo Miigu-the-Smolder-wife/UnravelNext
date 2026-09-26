@@ -83,4 +83,29 @@ float cloudSunTau(CloudRecord c, float3 x)
     }
     return tau;
 }
+// The sun's optical depth at a sample in the layer (single scattering): integrated along the sun ray in
+// CLOUD_SUN_STEP midpoint steps until it leaves the layer or tau > CLOUD_SUN_TAU_MAX (T < 1.2e-4: the sample's
+// contribution is below every error considered); past CLOUD_SUN_MAX_STEPS (the structural bound: long paths of a low
+// sun) the map gives the rest. A map alone cannot reach this accuracy at a useful size: bilinear filtering between texel
+// rays that pass through different cloud columns blends a core with open air at every edge, an error that falls only
+// with the texel [measured, CloudTests WARP: 16 / 7.5 / 3.8 / 2.9 % mean at 94 / 47 / 23 / 12 m texels; near field
+// exact + map 8.8 % at 47 m; this function 1.0 %].
+#define CLOUD_SUN_STEP 20.0
+#define CLOUD_SUN_MAX_STEPS 256u
+#define CLOUD_SUN_TAU_MAX 9.0
+float cloudSunTauMarch(CloudRecord c, float3 x)
+{
+    float tau = 0;
+    uint k = 0;
+    [loop] for (; k < CLOUD_SUN_MAX_STEPS && tau < CLOUD_SUN_TAU_MAX; ++k)
+    {
+        const float3 y = x + c.sunDir * ((k + 0.5) * CLOUD_SUN_STEP);
+        const float a = cloudAltitude(c, y);
+        if (a > c.top || a < c.base - 1) return tau;
+        tau += cloudDensity(c, y) * CLOUD_SUN_STEP;
+    }
+    if (tau >= CLOUD_SUN_TAU_MAX) return tau;
+    const float3 y = x + c.sunDir * (k * CLOUD_SUN_STEP);
+    return tau + cloudSunTau(c, y);
+}
 #endif

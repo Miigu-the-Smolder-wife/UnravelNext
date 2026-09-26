@@ -2,7 +2,9 @@
 // (CloudMarch.hlsl, single scattering of the sun) against the CPU reference (CloudModel.cpp: exact transmittance toward
 // the camera and the sun, 20 m steps, double precision) on the same rays. The view is 96 x 54 pixels with the pixel angle
 // of a quarter-resolution 4K view (2.1e-3 rad), so the march takes the step lengths it takes in a frame.
-//   unx_test_atmosphere_cloudtests [--warp] [--no-debug-layer] [--texels N]
+//   unx_test_atmosphere_cloudtests [--warp] [--no-debug-layer] [--texels N] [--size W H] [--time N]
+// --time N repeats the shadow map + march N more times and reports the median wall time of a submission and wait (an
+// upper bound of the GPU time: includes the submission; run under GpuLock -Kind timing).
 #include "../CloudGpu.h"
 #include "unx/core/File.h"
 #include "unx/core/Log.h"
@@ -13,6 +15,7 @@
 #include "unx/scene/SceneData.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -68,12 +71,15 @@ int main(int argc, char** argv)
     {
         bool warp = false, debugLayer = true;
         uint32_t texelsArg = 0;  // --texels N: the deep opacity map's size (attribution runs)
+        uint32_t sizeArg[2] = { 96, 54 }, timeRuns = 0;  // --size W H (the pixel angle stays 2.1e-3); --time N: N timed frames
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
             if (a == "--warp") warp = true;
             else if (a == "--no-debug-layer") debugLayer = false;
             else if (a == "--texels" && i + 1 < argc) texelsArg = (uint32_t)std::stoul(argv[++i]);
+            else if (a == "--size" && i + 2 < argc) sizeArg[0] = (uint32_t)std::stoul(argv[++i]), sizeArg[1] = (uint32_t)std::stoul(argv[++i]);
+            else if (a == "--time" && i + 1 < argc) timeRuns = (uint32_t)std::stoul(argv[++i]);
             else fail("unknown argument %s", a.c_str());
         }
         bool pass = true;
@@ -98,7 +104,7 @@ int main(int argc, char** argv)
         CloudTextures textures = uploadTextures(device, noise);
 
         // The view: from the ground toward a cloudy azimuth, 12 deg up; pixel angle 2.1e-3 rad (quarter-resolution 4K).
-        const uint32_t W = 96, H = 54;
+        const uint32_t W = sizeArg[0], H = sizeArg[1];
         scene::Camera camera;
         camera.position = { 0, 1.8f, 0 };
         const float elevation = 0.21f;
@@ -149,7 +155,10 @@ int main(int argc, char** argv)
             constants->Unmap(0, nullptr);
         }
         const uint32_t recordSrv = rawSrv(device, recordBuffer.Get(), 256);
+        std::vector<double> times;
+        for (uint32_t iter = 0; iter <= timeRuns; ++iter)
         {
+            const auto t0 = std::chrono::steady_clock::now();
             RenderGraph graph(device);
             TextureDesc sd{ "cloud shadow map", texels * 2, texels, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT };
             const TextureRef shadow = graph.createTexture(sd);
@@ -192,6 +201,13 @@ int main(int argc, char** argv)
             }
             graph.execute(nullptr);
             device.queue(QueueType::Graphics).waitCpu(graph.lastFence(QueueType::Graphics));
+            if (iter > 0) times.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        }
+        if (!times.empty())
+        {
+            std::sort(times.begin(), times.end());
+            logf("  %ux%u, map %u^2: shadow map + both marches (map and exact sun), median %.3f ms over %zu (submission included)\n", W, H, texels,
+                 times[times.size() / 2], times.size());
         }
         CommandList cl = device.acquireCommandList(QueueType::Graphics);
         cl.list->CopyBufferRegion(readback.Get(), 0, outs[0].Get(), 0, outBytes);
@@ -213,8 +229,9 @@ int main(int argc, char** argv)
         };
         std::vector<Pair> pairs;
         const double o3[3] = { camera.position.x, camera.position.y, camera.position.z }, s3[3] = { sun[0], sun[1], sun[2] };
-        for (uint32_t y = 3; y < H; y += 6)
-            for (uint32_t x = 3; x < W; x += 6)
+        const uint32_t stride = std::max(6u, W / 16);
+        for (uint32_t y = stride / 2; y < H; y += stride)
+            for (uint32_t x = stride / 2; x < W; x += stride)
             {
                 const float* p = &v[(y * W + x) * 8];
                 const double d[3] = { p[4], p[5], p[6] };
@@ -241,13 +258,9 @@ int main(int argc, char** argv)
         logf("  %zu rays, %u with radiance above 5 %% of the brightest (%.4e)\n", pairs.size(), cloudy, maxL);
         report(cloudy >= 20, "the view shows lit cloud (rays)", cloudy, 20);
         report(worstT < 0.03, "transmittance |GPU - CPU| (worst)", worstT, 0.03);
-        // OPEN (S_STATUS_KO.md 9): the single map's error falls with its texel (256: 16 %, 512: 7.5 %, 1024: 3.8 %, 2048: 2.9 %
-        // mean [measured, WARP]); the cascaded map (texel ~ the view's footprint) closes it. Reported, not gating, until then.
-        const double meanRel = cloudy ? sumRel / cloudy : 1;
-        logf("  %-66s %.3e (limit %.1e) %s\n", "radiance |GPU - CPU| / CPU (mean)", meanRel, 0.03, meanRel < 0.03 ? "ok" : "OPEN");
-        report(cloudy && sumExact / cloudy < 0.02, "radiance with the sun path exact (mode 2) |GPU - CPU| / CPU (mean)", cloudy ? sumExact / cloudy : 1, 0.02);
-        logf("  radiance worst relative %.3f; with the sun path integrated exactly (mode 2): mean %.4f, worst %.3f\n", worstRel,
-             cloudy ? sumExact / cloudy : 0.0, worstExact);
+        report(cloudy && sumRel / cloudy < 0.02, "radiance |GPU - CPU| / CPU (mean)", cloudy ? sumRel / cloudy : 1, 0.02);
+        report(worstRel < 0.1, "radiance |GPU - CPU| / CPU (worst)", worstRel, 0.1);
+        logf("  attribution: the deep opacity map alone (mode 2): mean %.4f, worst %.3f\n", cloudy ? sumExact / cloudy : 0.0, worstExact);
         releaseTextures(device, textures);
         device.waitIdle();
         logf("RESULT %s\n", pass ? "PASS" : "FAIL");
