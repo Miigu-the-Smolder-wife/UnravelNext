@@ -19,7 +19,9 @@
 // transmittance, multi-scatter, air volume, R's screen probes }, P[5].x = R's screen probe maps (UNX_NONE = absent),
 // P[6].zw = { R's GI cache, S's per-record sun bytes (shadowFragmentSun) }, P[7].x = V's coverageDepthRange,
 // P[7].zw = { E's surface state field (one raw SRV), S's weather record } (UNX_NONE: none): the surface layers
-// (Passes/Material/SurfaceLayers.hlsli), as in the resolve. P[8].x = E's light function table (A8; UNX_NONE: none),
+// (Passes/Material/SurfaceLayers.hlsli), as in the resolve. P[9] = W's sun-space water map (v1.77: depth, normal, medium,
+// constants; UNX_NONE: no water) - a fragment under water from the sun takes the refracted sun and the water's
+// transmittance (waterSunLight, the direct parts only). P[8].x = E's light function table (A8; UNX_NONE: none),
 // P[8].y = ViewResources::coverageRecordRadiance (raw SRV, v1.75): special records (vis id top bits != 00: hair, streams,
 // M pre-shaded classes) are read from it (their owners shaded them, CoverageSpecial.hlsli), clusters are shaded here.
 // COV_PRESHADE_CLASSES (CoverageSpecial.hlsl MODE=1, 2): covFragmentMaterial takes the material of its class as the
@@ -33,6 +35,7 @@
 #include "Passes/Lights/LightFunction.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/AreaLight.hlsli"
+#include "Passes/Water/WaterLight.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shading/CoverageSpecial.hlsli"
 #if COV_PRESHADE_CLASSES == 1
@@ -377,7 +380,19 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             atmosphereAirView(atm, centre / float2(g_viewWidth, g_viewHeight), linearZ, airInscatter, airTransmittance, E);
         else E = atmosphereSunIlluminance(atm, worldPos);
     }
-    const float3 l0 = normalize(g_sunDirection);
+    float3 l0 = normalize(g_sunDirection);
+#if COV_PART != 2
+    if (P[9].w != UNX_NONE)
+    {
+        // W stage 2 (v1.77), as ShadeOpaque: under water from the sun, the refracted direction and the water's transmittance
+        float3 lw, tw;
+        if (waterSunLight(P[9].x, P[9].y, P[9].z, P[9].w, worldPos, l0, 0, lw, tw))
+        {
+            l0 = lw;
+            E *= tw;
+        }
+    }
+#endif
     const float NoL = dot(n, l0);
     const CovFragmentShadow shadow = covFragmentShadow(pixel, element, linearZ);
     const float sunVisibility = shadow.sun;

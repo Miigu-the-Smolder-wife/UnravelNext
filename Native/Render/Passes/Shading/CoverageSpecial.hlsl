@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: MODE=0,1,2,3,4,5,6 AREA=0,1
+// unx-variants: MODE=0,1,2,4,5,6 AREA=0,1
 // Special coverage records (CoverageSpecial.hlsli, INTERFACES 7.1 v1.75), one thread per entry of
 // ViewResources::coverageSpecial, dispatched indirectly from its header (64 per group):
 //   MODE=0 (before tracks::water): kinds 1 (hair) and 2 (streams) get radiance 0, the defined value their owners
@@ -8,19 +8,16 @@
 //          4 A9 layered Standard materials (clearcoat): the material at the footprint (CoverageShade.hlsli
 //          covFragmentMaterial, as the resolve; MODE 4 also the coat's filtered roughness) stored per entry (48 B, M's
 //          scratch). A kernel per material kind and the lighting apart: together they exceed the 200 KB DXIL limit.
-//   MODE=3: kind 5 entries without layers lit as the composite lights a cluster record, with the stored material
-//          (COV_PRESHADE_LIGHT), into ViewResources::coverageRecordRadiance.
-//   MODE=5, 6: layered entries (A9 COV_COAT): 5 the emission, sun and local lights (unexposed, before the air) into M's
-//          second scratch (16 B per entry), 6 the indirect light added, then the air and exposure, into the record
-//          radiance (COV_PART 1, 2: one kernel with the coat exceeds the DXIL limit).
+//   MODE=5, 6: every kind 5 entry lit as the composite lights a cluster record, with the stored material (a layered one
+//          with its coat, COV_COAT): 5 the emission, sun and local lights (unexposed, before the air) into M's second
+//          scratch (16 B per entry), 6 the indirect light added, then the air and exposure, into the record radiance
+//          (COV_PART 1, 2: one lighting kernel is at the DXIL limit; 2026-09-27 the one-kernel MODE 3 is retired).
 // P[0] = { records (StructuredBuffer<uint4>), special list (raw), tile list (raw), MODE 1, 2, 4: material scratch UAV;
-// MODE 3, 6: record radiance UAV; MODE 5: direct scratch UAV (raw) }; MODE 1..6: P[1] (visible clusters, M texture
-// table); MODE 3, 5, 6: P[3], P[4], P[5].x, P[6].zw, P[7], P[8].x (the shading constants, CoverageShade.hlsli), P[5].y the
+// MODE 6: record radiance UAV; MODE 5: direct scratch UAV (raw) }; MODE 1..6: P[1] (visible clusters, M texture
+// table); MODE 5, 6: P[3], P[4], P[5].x, P[6].zw, P[7], P[8].x (the shading constants, CoverageShade.hlsli), P[5].y the
 // material scratch SRV, MODE 6: P[5].z the direct scratch SRV.
 #if MODE == 1 || MODE == 2
 #define COV_PRESHADE_CLASSES MODE
-#elif MODE == 3
-#define COV_PRESHADE_LIGHT 1
 #elif MODE == 5 || MODE == 6
 #define COV_PRESHADE_LIGHT 1
 #define COV_COAT 1
@@ -49,8 +46,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const GpuMaterial m = loadMaterial(tid.material);
     const bool layered = (m.classFlags & MATERIAL_LAYERED) != 0 && materialClass(m) == MATERIAL_STANDARD;
     const uint2 pixel = covRecordPixel(list, entry.x, f);
-#if MODE == 3 || MODE == 5 || MODE == 6
-    if (layered != (MODE != 3)) return;
+#if MODE == 5 || MODE == 6
     g_covPreshadeSlot = id.x;
 #if MODE == 5
     output.Store3(16 * id.x, asuint(covShadeFragment(visId, entry.x, pixel, P[3].z)));

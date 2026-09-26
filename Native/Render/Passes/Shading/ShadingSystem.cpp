@@ -805,6 +805,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 b.use(v.coverageDepthRange, Use::SrvCompute);
                 if (v.shadowFragmentSun.valid()) b.use(v.shadowFragmentSun, Use::SrvCompute);
             }
+            if (waterSun)
+            {
+                for (TextureRef t : { r.waterSunDepth, r.waterSunNormal, r.waterSunMedium }) b.use(t, Use::SrvCompute);
+                b.use(r.waterSunConstants, Use::SrvCompute);
+            }
         };
         // P[6].zw, P[7].x of the fragment kernels (CoverageShade.hlsli): R's GI cache, S's per-record sun, V's depth range.
         auto fragmentConstants = [=](PassContext& c, uint32_t* k) {
@@ -816,6 +821,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             k[31] = r.weather != UINT32_MAX ? r.weather : gpu::kNone;                  // P[7].w
             k[32] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : gpu::kNone;  // P[8].x (A8; the arrays hold 48)
             k[33] = v.coverageRecordRadiance.valid() ? c.srv(v.coverageRecordRadiance) : gpu::kNone;  // P[8].y (v1.75)
+            waterSunConstants(c, k + 36);  // P[9] (v1.77)
         };
         auto shadingConstants = [=](PassContext& c, uint32_t (&k)[24], uint32_t colour) {
             const uint32_t none = gpu::kNone;
@@ -837,7 +843,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         addBegin("m.coverage.begin", 0, 0);
         // v1.75: the special records of M's pre-shaded classes (kind 5: Cut, Terrain), shaded once each before the composite
         // reads them (CoverageSpecial.hlsl): the material of each class into M's scratch (MODE 1 Cut, 2 Terrain), then the
-        // lighting of every kind 5 entry (MODE 3) - apart, as together they exceed the 200 KB DXIL limit.
+        // lighting of every kind 5 entry (MODE 5 direct, MODE 6 indirect) - apart, as together they exceed the 200 KB DXIL limit.
         const BufferRef shaded = v.coverageRecordRadiance, special = v.coverageSpecial;
         if (shaded.valid())
         {
@@ -864,7 +870,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                               c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
                           });
             }
-            // the lighting: MODE 3 (no layers) into the record radiance; A9 layered entries in two kernels (DXIL limit):
+            // the lighting of every kind 5 entry in two kernels (DXIL limit):
             // MODE 5 the direct part into a second scratch, MODE 6 the indirect part plus it into the record radiance
             const BufferRef direct = g.createBuffer({ "m.coverage special direct", entries * 16, 0 });
             auto addLight = [&](const char* mode) {
@@ -896,12 +902,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                               c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
                           });
             };
-            addLight("3");
-            if (layeredMaterials)
-            {
-                addLight("5");
-                addLight("6");
-            }
+            addLight("5");  // every kind 5 entry (MODE 3, one lighting kernel, retired at the DXIL limit)
+            addLight("6");
         }
         // E: per listed tile and part, the light pixels' fragments walked and weighted (part 1 records the heavy pixels).
         auto addComposite = [&](uint32_t stage) {
