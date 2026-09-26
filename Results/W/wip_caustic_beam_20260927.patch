@@ -1,0 +1,557 @@
+diff --git a/Native/Render/Passes/Water/Tests/WaterLightTests.cpp b/Native/Render/Passes/Water/Tests/WaterLightTests.cpp
+index dc44a47..587c816 100644
+--- a/Native/Render/Passes/Water/Tests/WaterLightTests.cpp
++++ b/Native/Render/Passes/Water/Tests/WaterLightTests.cpp
+@@ -11,7 +11,12 @@
+ //      transmittance x cos(floor normal, light direction) = (1 - F) cos theta_s T^d (relative 3e-3);
+ //   4. with the map absent (constants UNX_NONE) nothing is lit;
+ //   5. caustics on (a third run): flat water focuses nothing, so where the light reaching the point entered the water more
+-//      than 4 caustic texels inside a plate the transmittance is unchanged (relative 3e-3).
++//      than 4 caustic texels inside a plate the transmittance is unchanged (relative 3e-3), and the caustic grid is 1 at
++//      every texel whose value is not an edge's;
++//   6. caustics where the water spreads the light (a bowl y = 0.4 + (x^2 + z^2) / 2, sun overhead, spreading about 2x at
++//      4 m): 4 m below their surface points (the last slice), the caustic factor (transmittance with / without caustics)
++//      equals the exact spreading 1 / |det J| of the landing map (Snell at each entry point, Newton for the entry that lands
++//      at the receiver) within 3 % - no gaps between the texels' landing points (the point splat left holes there).
+ //   unx_test_water_waterlighttests [--no-debug-layer] [--warp]
+ #include "unx/water/LinearDispatch.h"
+ #include "unx/water/WaterSunMap.h"
+@@ -139,6 +144,8 @@ int main(int argc, char** argv)
+         const uint32_t count = uint32_t(points.size() / 4);
+ 
+         std::vector<uint8_t> result[3];
++        std::vector<uint32_t> causticSlice;  // run 2: slice 2 (1 m) of the caustic grid
++        uint32_t causticSide = 0;
+         const double causticMargin = 0.03;  // 4 caustic texels and more (the grid's extent here is ~5 m over 1024)
+         for (int run = 0; run < 3; ++run)
+         {
+@@ -206,6 +213,24 @@ int main(int argc, char** argv)
+                           c.computeConstants(k, 12);
+                           water::dispatchLinear(c.cmd, (count + 63) / 64);
+                       });
++            ComPtr<ID3D12Resource> crb;
++            const uint32_t nc = std::min(out.texels, 1024u), cpitch = (nc * 4 + 255) & ~255u;
++            if (withCaustics)
++            {
++                crb = hostBuffer(gpu.device, uint64_t(cpitch) * nc, D3D12_HEAP_TYPE_READBACK);
++                ID3D12Resource* cdst = crb.Get();
++                g.addPass("w.test.read caustics", QueueType::Graphics,
++                          [&](PassBuilder& pb) {
++                              pb.use(caustics, Use::CopySrc);
++                              pb.keep();
++                          },
++                          [=](PassContext& c) {
++                              D3D12_TEXTURE_COPY_LOCATION to{ cdst, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT }, from{ c.resource(caustics), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
++                              to.PlacedFootprint.Footprint = { DXGI_FORMAT_R32_UINT, nc, nc, 1, cpitch };
++                              from.SubresourceIndex = 2;  // slice 2 (mip 0)
++                              c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
++                          });
++            }
+             g.addPass("w.test.read", QueueType::Graphics,
+                       [&](PassBuilder& pb) {
+                           pb.use(res, Use::CopySrc);
+@@ -218,6 +243,15 @@ int main(int argc, char** argv)
+             check(rb->Map(0, nullptr, (void**)&m), "map result");
+             result[run].assign(m, m + uint64_t(count) * 32);
+             rb->Unmap(0, nullptr);
++            if (crb)
++            {
++                const uint8_t* cm = nullptr;
++                check(crb->Map(0, nullptr, (void**)&cm), "map caustics");
++                causticSlice.resize((size_t)nc * nc);
++                for (uint32_t y = 0; y < nc; ++y) std::memcpy(&causticSlice[(size_t)y * nc], cm + (size_t)y * cpitch, nc * 4);
++                crb->Unmap(0, nullptr);
++                causticSide = nc;
++            }
+         }
+ 
+         uint32_t lit = 0, unlit = 0, boundary = 0, wrongLit = 0, wrongUnlit = 0;
+@@ -318,8 +352,203 @@ int main(int argc, char** argv)
+         W_CHECK(worstDir <= 2e-3, "light direction off by %.3g", worstDir);
+         W_CHECK(worstT <= 3e-3, "transmittance off by %.3g relative", worstT);
+         W_CHECK(worstEnergy <= 3e-3, "floor irradiance under the flat pool off by %.3g relative", worstEnergy);
++        {
++            // The grid itself: flat water gives 1 at every texel not on the plates' edges (edges: partial coverage).
++            uint32_t exact = 0, close5 = 0, off = 0, nonzero = 0;
++            for (size_t k = 0; k < causticSlice.size(); ++k)
++            {
++                const uint32_t v = causticSlice[k];
++                if (!v) continue;
++                ++nonzero;
++                const double f = v / 65536.0;
++                if (std::fabs(f - 1) < 1e-3) ++exact; else if (std::fabs(f - 1) < 0.05) ++close5; else ++off;
++            }
++            logf("caustic slice 2 (%u^2): %u nonzero, %u within 1e-3 of 1, %u within 5 %%, %u further (the plates' edges)\n", causticSide, nonzero, exact, close5, off);
++            W_CHECK(exact > 20 * (close5 + off), "flat caustic grid: %u texels within 1e-3 of 1, %u not (more than the plates' edges)", exact, close5 + off);
++        }
+         W_CHECK(causticChecked > 1000 && worstCaustic <= 3e-3, "caustics on flat water: %u checks, off by %.3g relative", causticChecked, worstCaustic);
+         std::printf("caustics: flat water keeps the transmittance at %u checks within %.2e (relative)%c", causticChecked, worstCaustic, 10);
++        W_CHECK(causticSlice.size() > 0, "no caustic slice read");
++        // 6. a bowl that spreads the light
++        {
++            const double kappa = 1.0, y0 = 0.4, ior = 1.333, eta = 1 / ior, zk = 4.0;
++            auto height = [&](double x, double z) { return y0 + 0.5 * kappa * (x * x + z * z); };
++            auto normalAt = [&](double x, double z) { return norm({ -kappa * x, 1, -kappa * z }); };
++            // Landing (x, z) of the overhead sunlight entering at (x, z), zk below the entry along its normal.
++            auto landing = [&](double x, double z, double& lx, double& lz) {
++                const V3 n = normalAt(x, z), v{ 0, 1, 0 };
++                const double cosI = dot(v, n), s2 = eta * eta * (1 - cosI * cosI);
++                const V3 t = norm(v * -eta + n * (eta * cosI - std::sqrt(1 - s2)));
++                const double cosT = -dot(t, n);
++                lx = x + t.x * zk / cosT;
++                lz = z + t.z * zk / cosT;
++            };
++            auto jacobian = [&](double x, double z, double J[4]) {
++                const double h = 1e-6;
++                double a, b, c, d;
++                landing(x + h, z, a, b);
++                landing(x - h, z, c, d);
++                J[0] = (a - c) / (2 * h), J[2] = (b - d) / (2 * h);
++                landing(x, z + h, a, b);
++                landing(x, z - h, c, d);
++                J[1] = (a - c) / (2 * h), J[3] = (b - d) / (2 * h);
++            };
++            // The mesh: 128 x 128 quads over [-0.5, 0.5]^2, analytic normals.
++            const int cells = 256;
++            std::vector<float> bowl;
++            auto vertex = [&](int i, int k) {
++                const double x = -0.5 + double(i) / cells, z = -0.5 + double(k) / cells;
++                const V3 n = normalAt(x, z);
++                bowl.insert(bowl.end(), { (float)x, (float)height(x, z), (float)z, 1, (float)n.x, (float)n.y, (float)n.z, 0 });
++            };
++            for (int k = 0; k < cells; ++k)
++                for (int i = 0; i < cells; ++i)
++                    for (const auto& c : { std::pair{ 0, 0 }, std::pair{ 0, 1 }, std::pair{ 1, 0 }, std::pair{ 1, 0 }, std::pair{ 0, 1 }, std::pair{ 1, 1 } }) vertex(i + c.first, k + c.second);
++            // Receivers over |x|, |z| <= 0.3, zk below their surface point along its normal (the lookup's depth).
++            std::vector<float> rec;
++            for (double z = -0.3; z <= 0.3001; z += 0.02)
++                for (double x = -0.3; x <= 0.3001; x += 0.02)
++                {
++                    const double ny = normalAt(x, z).y;
++                    rec.insert(rec.end(), { (float)x, (float)(height(x, z) - zk / ny), (float)z, 0 });
++                }
++            const uint32_t nrec = uint32_t(rec.size() / 4);
++            std::vector<uint8_t> got[2];
++            uint32_t bowlOverflow = 0;
++            for (int run = 0; run < 2; ++run)
++            {
++                RenderGraph g(gpu.device);
++                std::vector<ComPtr<ID3D12Resource>> keep;
++                auto upload = [&](const char* name, const void* data, uint64_t bytes, uint32_t stride = 0) {
++                    const BufferRef b = g.createBuffer({ name, bytes, stride });
++                    ComPtr<ID3D12Resource> staging = hostBuffer(gpu.device, bytes, D3D12_HEAP_TYPE_UPLOAD);
++                    uint8_t* m = nullptr;
++                    D3D12_RANGE none{ 0, 0 };
++                    check(staging->Map(0, &none, reinterpret_cast<void**>(&m)), "map");
++                    std::memcpy(m, data, bytes);
++                    staging->Unmap(0, nullptr);
++                    ID3D12Resource* src = staging.Get();
++                    keep.push_back(staging);
++                    g.addPass("w.test.upload", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(b, Use::CopyDst); },
++                              [=](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(b), 0, src, 0, bytes); });
++                    return b;
++                };
++                water::WaterSunStream w;
++                w.stream.vertices = upload("w.test.bowl vertices", bowl.data(), bowl.size() * 4);
++                const uint32_t args[4] = { uint32_t(bowl.size() / 8), 1, 0, 0 };
++                w.stream.drawArgs = upload("w.test.bowl args", args, 16);
++                w.stream.maxTriangles = uint32_t(bowl.size() / 24);
++                w.stream.boundsMin = { -0.5f, (float)y0, -0.5f };
++                w.stream.boundsMax = { 0.5f, (float)height(0.5, 0.5), 0.5f };
++                w.transmittance[0] = w.transmittance[1] = w.transmittance[2] = 1.0f;
++                w.ior = (float)ior;
++                water::WaterSunMap map(gpu.device);
++                const water::WaterSunMapOutput out = map.record(g, gpu.shaders, 0, { w }, { 0, 1, 0 });
++                const BufferRef pts = upload("w.test.receivers", rec.data(), rec.size() * 4, 16);
++                const BufferRef res = g.createBuffer({ "w.test.bowl light", uint64_t(nrec) * 32, 0 });
++                ComPtr<ID3D12Resource> rb = hostBuffer(gpu.device, uint64_t(nrec) * 32 + 16, D3D12_HEAP_TYPE_READBACK);
++                ID3D12Resource* rbp = rb.Get();
++                ID3D12PipelineState* probe = gpu.shaders.compute("Passes/Water/Tests/WaterLightProbe");
++                const TextureRef depth = out.depth, normal = out.normal, medium = out.medium, caustics = out.caustics;
++                const BufferRef constants = out.constants, overflow = out.causticOverflow;
++                const bool withCaustics = run == 1;
++                g.addPass("w.test.bowl probe", QueueType::Graphics,
++                          [&](PassBuilder& pb) {
++                              pb.use(pts, Use::SrvCompute);
++                              pb.use(res, Use::UavCompute);
++                              pb.use(depth, Use::SrvCompute);
++                              pb.use(normal, Use::SrvCompute);
++                              pb.use(medium, Use::SrvCompute);
++                              pb.use(constants, Use::SrvCompute);
++                              pb.use(caustics, Use::SrvCompute);
++                          },
++                          [=](PassContext& c) {
++                              uint32_t k[12] = { c.srv(pts), c.uav(res), nrec, 0, c.srv(depth), c.srv(normal), c.srv(medium), c.srv(constants) };
++                              const float sunF[3] = { 0, 1, 0 };
++                              std::memcpy(&k[8], sunF, 12);
++                              k[11] = withCaustics ? c.srv(caustics) : gpu::kNone;
++                              c.cmd->SetPipelineState(probe);
++                              c.computeConstants(k, 12);
++                              water::dispatchLinear(c.cmd, (nrec + 63) / 64);
++                          });
++                g.addPass("w.test.bowl read", QueueType::Graphics,
++                          [&](PassBuilder& pb) {
++                              pb.use(res, Use::CopySrc);
++                              pb.use(overflow, Use::CopySrc);
++                              pb.keep();
++                          },
++                          [=](PassContext& c) {
++                              c.cmd->CopyBufferRegion(rbp, 0, c.resource(res), 0, uint64_t(nrec) * 32);
++                              c.cmd->CopyBufferRegion(rbp, uint64_t(nrec) * 32, c.resource(overflow), 0, 4);
++                          });
++                const uint32_t bnc = std::min(out.texels, 1024u), bpitch = (bnc * 4 + 255) & ~255u;
++                ComPtr<ID3D12Resource> brb = hostBuffer(gpu.device, uint64_t(bpitch) * bnc, D3D12_HEAP_TYPE_READBACK);
++                ID3D12Resource* bdst = brb.Get();
++                g.addPass("w.test.bowl caustics", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(caustics, Use::CopySrc); pb.keep(); },
++                          [=](PassContext& c) {
++                              D3D12_TEXTURE_COPY_LOCATION to{ bdst, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT }, from{ c.resource(caustics), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
++                              to.PlacedFootprint.Footprint = { DXGI_FORMAT_R32_UINT, bnc, bnc, 1, bpitch };
++                              from.SubresourceIndex = 4;
++                              c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
++                          });
++                g.execute(nullptr);
++                for (uint32_t q = 0; q < kQueueTypeCount; ++q) gpu.device.queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
++                if (run == 1)
++                {
++                    const uint8_t* bm = nullptr;
++                    check(brb->Map(0, nullptr, (void**)&bm), "map bowl caustics");
++                    std::printf("bowl grid %u (map %u):\n", bnc, out.texels);
++                    for (uint32_t x = bnc / 2 - 60; x < bnc / 2 + 60; x += 3) { uint32_t v; std::memcpy(&v, bm + (size_t)(bnc / 2) * bpitch + 4 * x, 4); std::printf(" %.3f", v / 65536.0); }
++                    std::printf("\n");
++                    brb->Unmap(0, nullptr);
++                }
++                const uint8_t* m = nullptr;
++                check(rb->Map(0, nullptr, (void**)&m), "map bowl");
++                got[run].assign(m, m + uint64_t(nrec) * 32);
++                if (withCaustics) std::memcpy(&bowlOverflow, m + uint64_t(nrec) * 32, 4);
++                rb->Unmap(0, nullptr);
++            }
++            double worst = 0, lo = 1e9, hi = 0;
++            uint32_t checked = 0, logged = 0;
++            for (uint32_t i = 0; i < nrec; ++i)
++            {
++                uint32_t lit0, lit1;
++                std::memcpy(&lit0, &got[0][32 * i + 12], 4);
++                std::memcpy(&lit1, &got[1][32 * i + 12], 4);
++                W_CHECK(lit0 == 1 && lit1 == 1, "bowl receiver %u unlit", i);
++                float t0[4], t1[4];
++                std::memcpy(t0, &got[0][32 * i + 16], 16);
++                std::memcpy(t1, &got[1][32 * i + 16], 16);
++                const double factor = t1[1] / t0[1];
++                // the entry that lands at the receiver (Newton on the landing map)
++                const double gx = rec[4 * i], gz = rec[4 * i + 2];
++                double ex = gx * 0.5, ez = gz * 0.5;
++                for (int it = 0; it < 30; ++it)
++                {
++                    double lx, lz, J[4];
++                    landing(ex, ez, lx, lz);
++                    jacobian(ex, ez, J);
++                    const double det = J[0] * J[3] - J[1] * J[2], rx = gx - lx, rz = gz - lz;
++                    ex += (J[3] * rx - J[1] * rz) / det;
++                    ez += (-J[2] * rx + J[0] * rz) / det;
++                }
++                double J[4];
++                jacobian(ex, ez, J);
++                const double want = 1 / std::fabs(J[0] * J[3] - J[1] * J[2]);
++                lo = std::min(lo, want), hi = std::max(hi, want);
++                const double e = std::fabs(factor / want - 1);
++                if (e > 0.03 && logged < 6)
++                {
++                    ++logged;
++                    std::printf("  bowl receiver (%.2f, %.2f): caustic factor %.4f, exact %.4f (entry %.3f, %.3f)\n", gx, gz, factor, want, ex, ez);
++                }
++                worst = std::max(worst, e);
++                ++checked;
++            }
++            std::printf("caustics in a spreading bowl: %u receivers, exact factor %.3f..%.3f, worst relative error %.3g, %u triangles past the span bound\n", checked, lo, hi, worst, bowlOverflow);
++            W_CHECK(hi < 0.6 && worst <= 0.03, "caustics in a spreading bowl: off by %.3g relative (exact factors %.3f..%.3f)", worst, lo, hi);
++            W_CHECK(bowlOverflow == 0, "caustics in a spreading bowl: %u triangles past the span bound", bowlOverflow);
++        }
+         std::printf("energy: a horizontal floor under the flat pool gets (1 - F) cos(theta_s) T^d within %.2e (relative)\n", worstEnergy);
+         if (!warp)
+         {
+diff --git a/Native/Render/Passes/Water/WaterCaustics.hlsl b/Native/Render/Passes/Water/WaterCaustics.hlsl
+index 7bbe56e..9e46689 100644
+--- a/Native/Render/Passes/Water/WaterCaustics.hlsl
++++ b/Native/Render/Passes/Water/WaterCaustics.hlsl
+@@ -1,57 +1,186 @@
+ // unx-kernel: cs_6_6 main
+ // Water stage 2 caustics (FEATURES_GAME 1.3 (c) on the sun-space map; WaterLight.hlsli reads them): every water texel of
+ // the sun map sends its sunlight along the exact Snell refraction at its surface point S (normal and IOR from the map)
+-// and splats it, bilinearly in fixed point (2^-16), where the refracted ray reaches the slice depths z_k = 0.25, 0.5, 1,
+-// 2, 4 m below its entry point along the entry's normal (a receiver's depth is measured the same way: below its own
+-// surface point along that point's normal, WaterLight.hlsli; planes across the sun would not do - under an oblique sun a
+-// flat pool's own surface spans metres of depth along the sun). A
+-// slice texel then holds the light that arrives there per unit of the light that entered one texel of the surface:
+-// flat water shifts the whole texel grid uniformly, so every texel gets exactly 1 (the caustic factor of no focusing);
+-// a curved surface concentrates or spreads it, and the total is conserved (every texel's unit lands somewhere).
++// to the slice depths z_k = 0.25, 0.5, 1, 2, 4 m below its entry point along the entry's normal (a receiver's depth is
++// measured the same way: below its own surface point along that point's normal, WaterLight.hlsli; planes across the sun
++// would not do - under an oblique sun a flat pool's own surface spans metres of depth along the sun). A slice texel then
++// holds the light that arrives there per unit of the light that entered one texel of the surface: flat water shifts the
++// whole texel grid uniformly, so every texel gets exactly 1 (the caustic factor of no focusing); a curved surface
++// concentrates or spreads it, and the total is conserved.
++// Beams, not points: texel (i, j) carries the light of the cell between the texel centres (i, j), (i+1, j), (i+1, j+1),
++// (i, j+1) - one texel of area - and lays it on the cell spanned by those four centres' landing points, split into two
++// triangles that share it by their areas (|area|: a fold, where the landing map's Jacobian changes sign, keeps each
++// triangle convex and the share positive). Each triangle deposits on every caustic texel it overlaps its flux x the
++// exactly clipped overlap / its area, in fixed point (2^-16). So light that spreads leaves no gaps between the texels'
++// landing points (a point splat of width one texel did: holes at the map's spacing where the surface diverges, a grid
++// seen through a rippled bath - engine 2's finding). Where a corner is not water or refracts totally (the pool's edge),
++// the texel's light lands as its own square, one map texel wide, centred on its landing point. A triangle spanning more than
++// WATER_CAUSTIC_SPAN caustic texels (a beam spread wider than that at the slice) is splatted as a point too and counted
++// (P[1].y): the dispatch's worst case stays bounded.
+ // Binned by the landing point's own sun-map coordinates on the caustic grid (min(map texels, 1024) per side over the same
+ // extent; a map texel carries (grid / map)^2 of a grid texel), so a receiver X reads the grid texel of X's projection.
+-// P[0] depth SRV, normal SRV, medium SRV, constants SRV; P[1] caustics UAV (RWTexture2DArray<uint>, WATER_CAUSTIC_SLICES)
++// P[0] depth SRV, normal SRV, medium SRV, constants SRV; P[1] caustics UAV (RWTexture2DArray<uint>, WATER_CAUSTIC_SLICES),
++// overflow counter UAV (raw, one word; UNX_NONE: not counted)
+ #include "WaterLight.hlsli"
+ 
++#define WATER_CAUSTIC_SPAN 16u
++
++struct CausticMap
++{
++    uint n;
++    float4 r, u, s, k;
++};
++
++// Texel q's surface point S and its refracted ray per unit depth along the entry normal (t / cos theta_t): the landing
++// point at slice depth zk is S + zk x step. False where q is not water or the light reflects totally.
++bool causticRay(CausticMap m, Texture2D<float> depth, Texture2D<float2> normals, Texture2D<float4> media, int2 q, out float3 S, out float3 step)
++{
++    S = 0;
++    step = 0;
++    if (any(q < 0) || any(q >= int(m.n))) return false;
++    const float d = depth[q];
++    if (d <= 0) return false;
++    float3 nrm = waterOctDecode(normals[q]);
++    if (dot(nrm, m.s.xyz) < 0) nrm = -nrm;
++    float3 t;
++    if (!waterRefract(m.s.xyz, nrm, 1.0 / max(media[q].w, 1.0001), t)) return false;
++    const float cosT = dot(-t, nrm);  // the refracted ray's descent along the normal per unit length
++    if (cosT <= 0) return false;
++    const float extent = 1.0 / m.k.x;
++    const float2 uv = (float2(q) + 0.5) / float(m.n);
++    S = m.r.xyz * (m.r.w + uv.x * extent) + m.u.xyz * (m.u.w + (1 - uv.y) * extent) + m.s.xyz * (m.s.w + d * m.k.z);
++    step = t / cosT;
++    return true;
++}
++// A world point's position on the caustic grid (texel c covers [c, c + 1)).
++float2 causticGrid(CausticMap m, float3 Q, float nc) { return float2((dot(Q, m.r.xyz) - m.r.w) * m.k.x, 1 - (dot(Q, m.u.xyz) - m.u.w) * m.k.y) * nc; }
++
++void causticAdd(RWTexture2DArray<uint> caustics, int2 at, uint slice, float amount, uint nc)
++{
++    if (any(at < 0) || any(at >= int(nc)) || !(amount > 0)) return;
++    InterlockedAdd(caustics[uint3(at, slice)], uint(round(amount * 65536.0)));
++}
++
++// Bilinear point splat (texel centres at c + 0.5).
++void causticPoint(RWTexture2DArray<uint> caustics, float2 p, uint slice, float amount, uint nc)
++{
++    const float2 c = p - 0.5;
++    const int2 i0 = int2(floor(c));
++    const float2 f = c - float2(i0);
++    causticAdd(caustics, i0, slice, amount * (1 - f.x) * (1 - f.y), nc);
++    causticAdd(caustics, i0 + int2(1, 0), slice, amount * f.x * (1 - f.y), nc);
++    causticAdd(caustics, i0 + int2(0, 1), slice, amount * (1 - f.x) * f.y, nc);
++    causticAdd(caustics, i0 + int2(1, 1), slice, amount * f.x * f.y, nc);
++}
++
++// Area of triangle (a, b, c) inside the square [lo, lo + 1]^2 (Sutherland-Hodgman against the four edges), in
++// coordinates relative to lo: the shoelace sum on absolute grid positions (hundreds) cancels away a small polygon's
++// area in fp32 (measured: flat water off by 5 %).
++float causticClipArea(float2 a, float2 b, float2 c, float2 corner)
++{
++    float2 poly[10], next[10];
++    uint count = 3;
++    poly[0] = a - corner;
++    poly[1] = b - corner;
++    poly[2] = c - corner;
++    const float2 lo = 0;
++    [unroll] for (uint e = 0; e < 4; ++e)
++    {
++        const uint axis = e & 1;
++        const float bound = (e < 2) ? lo[axis] : lo[axis] + 1;
++        const float sgn = (e < 2) ? 1.0 : -1.0;  // inside: sgn x (v - bound) >= 0
++        uint kept = 0;
++        for (uint i = 0; i < count; ++i)
++        {
++            const float2 p = poly[i], q = poly[(i + 1) % count];
++            const float dp = sgn * (p[axis] - bound), dq = sgn * (q[axis] - bound);
++            if (dp >= 0) next[kept++] = p;
++            if ((dp >= 0) != (dq >= 0)) next[kept++] = p + (q - p) * (dp / (dp - dq));
++        }
++        count = kept;
++        for (uint i2 = 0; i2 < count; ++i2) poly[i2] = next[i2];
++        if (count < 3) return 0;
++    }
++    float twice = 0;
++    for (uint i3 = 0; i3 < count; ++i3) twice += poly[i3].x * poly[(i3 + 1) % count].y - poly[(i3 + 1) % count].x * poly[i3].y;
++    return 0.5 * abs(twice);
++}
++
++// Deposits `flux` over triangle (a, b, c) by exact overlap; false (nothing deposited) when it spans too many texels.
++bool causticTriangle(RWTexture2DArray<uint> caustics, float2 a, float2 b, float2 c, uint slice, float flux, uint nc)
++{
++    const float area = 0.5 * abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y));
++    if (!(flux > 0)) return true;
++    const float2 lo = floor(min(a, min(b, c))), hi = floor(max(a, max(b, c)));
++    if (hi.x - lo.x >= WATER_CAUSTIC_SPAN || hi.y - lo.y >= WATER_CAUSTIC_SPAN) return false;
++    if (area < 1e-12)
++    {
++        causticPoint(caustics, (a + b + c) / 3, slice, flux, nc);  // a focus: all of it at one point
++        return true;
++    }
++    for (float y = lo.y; y <= hi.y; y += 1)
++        for (float x = lo.x; x <= hi.x; x += 1)
++        {
++            const float part = causticClipArea(a, b, c, float2(x, y));
++            if (part > 0) causticAdd(caustics, int2(x, y), slice, flux * part / area, nc);
++        }
++    return true;
++}
++
+ [numthreads(8, 8, 1)]
+ void main(uint3 id : SV_DispatchThreadID)
+ {
+-    ByteAddressBuffer c = ResourceDescriptorHeap[P[0].w];
+-    const uint4 head = c.Load4(0);
+-    const uint n = head.y;
+-    if (head.x == 0 || any(id.xy >= n)) return;
++    ByteAddressBuffer cb = ResourceDescriptorHeap[P[0].w];
++    const uint4 head = cb.Load4(0);
++    CausticMap m;
++    m.n = head.y;
++    if (head.x == 0 || any(id.xy >= m.n)) return;
+     Texture2D<float> depth = ResourceDescriptorHeap[P[0].x];
+-    const float d = depth[id.xy];
+-    if (d <= 0) return;
+-    const float4 r = asfloat(c.Load4(16)), u = asfloat(c.Load4(32)), s = asfloat(c.Load4(48)), k = asfloat(c.Load4(64));
++    if (depth[id.xy] <= 0) return;
+     Texture2D<float2> normals = ResourceDescriptorHeap[P[0].y];
+     Texture2D<float4> media = ResourceDescriptorHeap[P[0].z];
+-    float3 nrm = waterOctDecode(normals[id.xy]);
+-    if (dot(nrm, s.xyz) < 0) nrm = -nrm;
+-    float3 t;
+-    if (!waterRefract(s.xyz, nrm, 1.0 / max(media[id.xy].w, 1.0001), t)) return;
+-    // S from the texel centre: along right and up from the map's origin, along the sun from its depth.
+-    const float extent = 1.0 / k.x;
+-    const float2 uv = (float2(id.xy) + 0.5) / float(n);
+-    const float alongS = s.w + d * k.z;
+-    const float3 S = r.xyz * (r.w + uv.x * extent) + u.xyz * (u.w + (1 - uv.y) * extent) + s.xyz * alongS;
+-    const float cosT = dot(-t, nrm);  // the refracted ray's descent along the normal per unit length
+-    if (cosT <= 0) return;
++    m.r = asfloat(cb.Load4(16));
++    m.u = asfloat(cb.Load4(32));
++    m.s = asfloat(cb.Load4(48));
++    m.k = asfloat(cb.Load4(64));
+     RWTexture2DArray<uint> caustics = ResourceDescriptorHeap[P[1].x];
+-    const uint nc = min(n, WATER_CAUSTIC_MAX);                       // the caustic grid over the same extent
+-    const float unit = float(nc) * float(nc) / (float(n) * float(n));  // one map texel's share of a caustic texel
+-    [unroll] for (uint slice = 0; slice < WATER_CAUSTIC_SLICES; ++slice)
++    const uint nc = min(m.n, WATER_CAUSTIC_MAX);                        // the caustic grid over the same extent
++    const float unit = float(nc) * float(nc) / (float(m.n) * float(m.n));  // one map texel's share of a caustic texel
++    const int2 q = int2(id.xy);
++    float3 S0, S1, S2, S3, d0, d1, d2, d3;
++    if (!causticRay(m, depth, normals, media, q, S0, d0)) return;  // (total reflection: no light enters)
++    const bool beam = causticRay(m, depth, normals, media, q + int2(1, 0), S1, d1) && causticRay(m, depth, normals, media, q + int2(1, 1), S2, d2) &&
++                      causticRay(m, depth, normals, media, q + int2(0, 1), S3, d3);
++    uint overflow = 0;
++    [loop] for (uint slice = 0; slice < WATER_CAUSTIC_SLICES; ++slice)
+     {
+-        const float3 Q = S + t * (waterCausticDepth(slice) / cosT);
+-        const float2 p = float2((dot(Q, r.xyz) - r.w) * k.x, 1 - (dot(Q, u.xyz) - u.w) * k.y) * float(nc) - 0.5;
+-        const int2 i0 = int2(floor(p));
+-        const float2 f = p - float2(i0);
+-        const float w[4] = { (1 - f.x) * (1 - f.y), f.x * (1 - f.y), (1 - f.x) * f.y, f.x * f.y };
+-        [unroll] for (uint q = 0; q < 4; ++q)
++        const float zk = waterCausticDepth(slice);
++        const float2 c0 = causticGrid(m, S0 + d0 * zk, float(nc));
++        if (!beam)
+         {
+-            const int2 at = i0 + int2(q & 1, q >> 1);
+-            if (any(at < 0) || any(at >= int(nc))) continue;
+-            InterlockedAdd(caustics[uint3(at, slice)], uint(round(w[q] * unit * 65536.0)));
++            // The water's edge (a corner is not water or reflects totally): the texel's own square of light, one map
++            // texel wide, centred on its landing point - the shape its interior neighbours' cells take on flat water, so
++            // the two tile (a point splat one caustic texel wide beside them did not: edges off by up to 25 %).
++            const float half = 0.5 * float(nc) / float(m.n);
++            const float2 p0 = c0 + float2(-half, -half), p1 = c0 + float2(half, -half), p2 = c0 + float2(half, half), p3 = c0 + float2(-half, half);
++            if (!causticTriangle(caustics, p0, p1, p2, slice, 0.5 * unit, nc) || !causticTriangle(caustics, p0, p2, p3, slice, 0.5 * unit, nc))
++                ++overflow;  // (a square of one map texel never spans the bound)
++            continue;
+         }
++        const float2 c1 = causticGrid(m, S1 + d1 * zk, float(nc)), c2 = causticGrid(m, S2 + d2 * zk, float(nc)), c3 = causticGrid(m, S3 + d3 * zk, float(nc));
++        const float a1 = 0.5 * abs((c1.x - c0.x) * (c2.y - c0.y) - (c2.x - c0.x) * (c1.y - c0.y));
++        const float a2 = 0.5 * abs((c2.x - c0.x) * (c3.y - c0.y) - (c3.x - c0.x) * (c2.y - c0.y));
++        const float total = a1 + a2;
++        const float f1 = total > 0 ? unit * a1 / total : 0.5 * unit, f2 = unit - f1;
++        // The cell between the four texel centres lands half a texel on from texel q's own light: shifted back by half its
++        // edges so its centre lands where q's centre does (flat water: the texel grid moved whole, every caustic texel 1).
++        const float2 shift = -0.5 * ((c1 - c0) + (c3 - c0));
++        if (!causticTriangle(caustics, c0 + shift, c1 + shift, c2 + shift, slice, f1, nc)) { causticPoint(caustics, (c0 + c1 + c2) / 3 + shift, slice, f1, nc); ++overflow; }
++        if (!causticTriangle(caustics, c0 + shift, c2 + shift, c3 + shift, slice, f2, nc)) { causticPoint(caustics, (c0 + c2 + c3) / 3 + shift, slice, f2, nc); ++overflow; }
++    }
++    if (overflow != 0 && P[1].y != UNX_NONE)
++    {
++        RWByteAddressBuffer counter = ResourceDescriptorHeap[P[1].y];
++        counter.InterlockedAdd(0, overflow);
+     }
+ }
+diff --git a/Native/Render/Passes/Water/WaterSunMap.cpp b/Native/Render/Passes/Water/WaterSunMap.cpp
+index 843e1b4..1177fc0 100644
+--- a/Native/Render/Passes/Water/WaterSunMap.cpp
++++ b/Native/Render/Passes/Water/WaterSunMap.cpp
+@@ -76,6 +76,10 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
+     // One texel of margin on each side (the rasteriser's pixel-centre rule at the bounds' edges).
+     const double texel = side / (n - 2);
+     minR -= texel, minU -= texel;
++    // Depth 0 means "no water" (the clear value): the range starts a margin below the bounds so the surface's lowest
++    // point along the sun (a flat pool under an overhead sun: all of it) is stored above 0.
++    const double margin = std::max(1e-3, 1e-3 * (maxS - minS));
++    minS -= margin;
+     const double extent = texel * n, range = std::max(maxS - minS, 1e-3) * (1 + 1e-4);
+     const uint32_t head[4] = { 1, n, 0, 0 };
+     const float rows[16] = { (float)r[0], (float)r[1], (float)r[2], (float)minR, (float)u[0], (float)u[1], (float)u[2], (float)minU,
+@@ -148,6 +152,16 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
+     const uint32_t nc = std::min(n, kCausticMax);
+     out.caustics = g.createTexture(TextureDesc{ "w.sun map caustics", nc, nc, uint16_t(kCausticSlices), 1, DXGI_FORMAT_R32_UINT });
+     const TextureRef caustics = out.caustics;
++    out.causticOverflow = g.createBuffer({ "w.sun map caustic overflow", 16, 0 });
++    const BufferRef overflow = out.causticOverflow;
++    ID3D12PipelineState* counterClear = shaders.compute("Passes/Water/ViewGridClear");
++    g.addPass("w.sun map caustic overflow clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(overflow, Use::UavCompute); },
++              [=](PassContext& c) {
++                  const uint32_t k[4] = { 0, 0, c.uav(overflow), 4 };  // ViewGridClear: the counter words only
++                  c.cmd->SetPipelineState(counterClear);
++                  c.computeConstants(k, 4);
++                  c.cmd->Dispatch(1, 1, 1);
++              });
+     ID3D12PipelineState* zero = shaders.compute("Passes/Water/WaterCausticsClear");
+     ID3D12PipelineState* splat = shaders.compute("Passes/Water/WaterCaustics");
+     g.addPass("w.sun map caustics clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(caustics, Use::UavCompute); },
+@@ -164,9 +178,10 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
+                   b.use(medium, Use::SrvCompute);
+                   b.use(constants, Use::SrvCompute);
+                   b.use(caustics, Use::UavCompute);
++                  b.use(overflow, Use::UavCompute);
+               },
+               [=](PassContext& c) {
+-                  const uint32_t k[8] = { c.srv(depth), c.srv(normal), c.srv(medium), c.srv(constants), c.uav(caustics), 0, 0, 0 };
++                  const uint32_t k[8] = { c.srv(depth), c.srv(normal), c.srv(medium), c.srv(constants), c.uav(caustics), c.uav(overflow), 0, 0 };
+                   c.cmd->SetPipelineState(splat);
+                   c.computeConstants(k, 8);
+                   c.cmd->Dispatch((n + 7) / 8, (n + 7) / 8, 1);
+diff --git a/Native/Render/Passes/Water/include/unx/water/WaterSunMap.h b/Native/Render/Passes/Water/include/unx/water/WaterSunMap.h
+index 8b1b1ea..36519a0 100644
+--- a/Native/Render/Passes/Water/include/unx/water/WaterSunMap.h
++++ b/Native/Render/Passes/Water/include/unx/water/WaterSunMap.h
+@@ -22,6 +22,7 @@ struct WaterSunMapOutput
+ {
+     render::TextureRef depth, normal, medium;
+     render::TextureRef caustics;  // R32_UINT array: WaterLight.hlsli WATER_CAUSTIC_SLICES slices of min(texels, 1024)^2
++    render::BufferRef causticOverflow;  // uint: beam triangles spread wider than WATER_CAUSTIC_SPAN texels, splatted as points
+     render::BufferRef constants;
+     uint32_t texels = 0;  // per side; 0 = no map (no streams)
+ };
