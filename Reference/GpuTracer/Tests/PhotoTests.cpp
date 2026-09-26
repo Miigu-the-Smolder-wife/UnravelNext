@@ -9,10 +9,12 @@
 //             the halves' relMSE falls as 1 / samples;
 //   exr       writeExr / readExr round trip, bit exact.
 //   unx_test_reference_photo [case]
+#include "unx/core/File.h"
 #include "unx/core/Log.h"
 #include "unx/metrics/Metrics.h"
 #include "unx/reference/GpuPathTracer.h"
 #include "unx/reference/PathTracer.h"
+#include "unx/render/Device.h"
 
 #include <cmath>
 #include <cstring>
@@ -331,6 +333,38 @@ void testMotionBlur()
     logf("  motion  square moving 20 px in the shutter: 128 columns match the trapezoid (worst |err| %.4f, %.2f sigma; plateau %.3f)\n", worstErr, worstZ, peak);
 }
 
+// Photo mode inside a game: the tracer on the caller's render::Device (render A request) gives the image of its own
+// device (same estimator; float summation order aside), and returns every descriptor when destroyed.
+void testSharedDevice()
+{
+    const scene::Scene s = edgeScene();
+    reference::ResolvedCamera cam = downCamera(10, 0.02f);
+    cam.lensAperture = 0.5f;
+    cam.lensFocus = 5;
+    reference::RenderOutput own;
+    {
+        reference::GpuPathTracer gpt(s, UNX_SOURCE_DIR, "unx_test_reference_photo shared (own device)");
+        own = gpt.render(cam, settings(128, 8, 256));
+    }
+    render::DeviceOptions o;
+    render::Device device(o);
+    const uint32_t before = device.descriptors().resourcesInUse();
+    reference::RenderOutput shared;
+    uint32_t peak = 0;
+    {
+        reference::GpuPathTracer gpt(s, device, unx::executableDirectory() / "shaders" / "Reference", "unx_test_reference_photo shared");
+        shared = gpt.render(cam, settings(128, 8, 256));
+        peak = device.descriptors().resourcesInUse();
+        CHECK(peak > before, "shared: the tracer allocated no descriptors on the shared device");
+    }
+    const uint32_t after = device.descriptors().resourcesInUse();
+    double worst = 0;
+    for (size_t i = 0; i < own.image.rgb.size(); ++i) worst = std::max(worst, (double)std::abs(own.image.rgb[i] - shared.image.rgb[i]));
+    CHECK(worst <= 1e-5, "shared: the image differs from the own-device render by %.3g", worst);
+    CHECK(after == before, "shared: %u descriptors left on the device (%u before)", after, before);
+    logf("  shared  the renderer's device: same image as the tracer's own device (worst %.1e), all %u descriptors returned\n", worst, peak - before);
+}
+
 void testExr()
 {
     metrics::Image im;
@@ -361,6 +395,7 @@ int main(int argc, char** argv)
         run("progress", testProgressive);
         run("lenslight", testLensLightTracer);
         run("motion", testMotionBlur);
+        run("shared", testSharedDevice);
         logf("photo mode tests passed\n");
         return 0;
     }

@@ -12,6 +12,11 @@
 #include <memory>
 #include <string>
 
+namespace unx::render
+{
+class Device;
+}
+
 namespace unx::reference
 {
 struct GpuRenderInfo
@@ -51,6 +56,12 @@ public:
     // repoRoot: for .gpulock (slices) and the kernels next to the executable (bin/shaders/Reference). An empty root
     // (photo mode inside a game) runs without the measurement-lock protocol.
     GpuPathTracer(const scene::Scene& scene, std::filesystem::path repoRoot, std::string what);
+    // Photo mode in a game (render A request): the renderer's device (no second device in the process: the VRAM budget
+    // of an 8 GB PC; the result stays on the device for the post chain). No measurement-lock slices. shaderDirectory: the
+    // folder holding the tracer's kernels (bin/shaders/Reference of a build, deployed beside the host plugin). The tracer
+    // frees every descriptor it allocated when destroyed, after the device's queues are idle. Call it from the thread
+    // that submits to the device (the render thread).
+    GpuPathTracer(const scene::Scene& scene, render::Device& device, std::filesystem::path shaderDirectory, std::string what);
     ~GpuPathTracer();
     GpuPathTracer(const GpuPathTracer&) = delete;
     GpuPathTracer& operator=(const GpuPathTracer&) = delete;

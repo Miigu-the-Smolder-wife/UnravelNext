@@ -78,7 +78,16 @@ struct GpuPathTracer::Impl
     std::string what;
     GpuRenderInfo info;
 
-    std::unique_ptr<render::Device> device;
+    std::unique_ptr<render::Device> ownedDevice;  // the tracer's own device (tools); null when given the renderer's
+    render::Device* device = nullptr;
+    std::filesystem::path shaderDir;              // empty: bin/shaders/Reference beside the executable
+    std::vector<uint32_t> views;                  // every descriptor allocated (freed with a shared device)
+    uint32_t allocView()
+    {
+        const uint32_t v = device->descriptors().allocateResource();
+        views.push_back(v);
+        return v;
+    }
     std::unique_ptr<render::ShaderLibrary> shaders;
     ID3D12PipelineState* psoPath = nullptr;
     ID3D12PipelineState* psoCaustic = nullptr;
@@ -106,10 +115,14 @@ struct GpuPathTracer::Impl
     // --- device and buffers
     void createDevice()
     {
-        if (device) return;
+        if (shaders) return;
         render::DeviceOptions o;
         o.queuePriority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;  // a background job: never ahead of other sessions' work
-        device = std::make_unique<render::Device>(o);
+        if (!device)
+        {
+            ownedDevice = std::make_unique<render::Device>(o);
+            device = ownedDevice.get();
+        }
         info.adapter = device->caps().adapter;
         info.driver = device->caps().driver;
         D3D12_FEATURE_DATA_D3D12_OPTIONS o0{};
@@ -120,9 +133,14 @@ struct GpuPathTracer::Impl
         // add/mul (accumulation, ray-sphere quadratics) and 64-bit integers (PCG32).
         if (!o0.DoublePrecisionFloatShaderOps) fail("gpu reference: the device has no double-precision shader operations");
         if (!o1.Int64ShaderOps) fail("gpu reference: the device has no 64-bit integer shader operations");
-        wchar_t exe[MAX_PATH];
-        GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        shaders = std::make_unique<render::ShaderLibrary>(*device, std::filesystem::path(exe).parent_path() / "shaders" / "Reference");
+        std::filesystem::path dir = shaderDir;
+        if (dir.empty())
+        {
+            wchar_t exe[MAX_PATH];
+            GetModuleFileNameW(nullptr, exe, MAX_PATH);
+            dir = std::filesystem::path(exe).parent_path() / "shaders" / "Reference";
+        }
+        shaders = std::make_unique<render::ShaderLibrary>(*device, dir);
         psoPath = shaders->compute("PathTrace");
         psoCaustic = shaders->compute("Caustic");
         psoResolve = shaders->compute("Resolve");
@@ -174,7 +192,7 @@ struct GpuPathTracer::Impl
         d.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         d.Buffer.NumElements = (UINT)std::max<uint64_t>(1, b.size / stride);
         d.Buffer.StructureByteStride = stride;
-        b.view = device->descriptors().allocateResource();
+        b.view = allocView();
         device->d3d()->CreateShaderResourceView(b.res.Get(), &d, device->descriptors().resourceCpu(b.view));
     }
     void rawView(Buffer& b)
@@ -185,7 +203,7 @@ struct GpuPathTracer::Impl
         d.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         d.Buffer.NumElements = (UINT)(b.size / 4);
         d.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-        b.view = device->descriptors().allocateResource();
+        b.view = allocView();
         device->d3d()->CreateShaderResourceView(b.res.Get(), &d, device->descriptors().resourceCpu(b.view));
     }
     void rawUav(Buffer& b)
@@ -195,7 +213,7 @@ struct GpuPathTracer::Impl
         d.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
         d.Buffer.NumElements = (UINT)(b.size / 4);
         d.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-        b.view = device->descriptors().allocateResource();
+        b.view = allocView();
         device->d3d()->CreateUnorderedAccessView(b.res.Get(), nullptr, &d, device->descriptors().resourceCpu(b.view));
     }
 
@@ -755,7 +773,7 @@ void GpuPathTracer::Impl::buildAccelerationStructures(const std::vector<sh::RtMe
     v.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
     v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     v.RaytracingAccelerationStructure.Location = tlas.va;
-    tlas.view = device->descriptors().allocateResource();
+    tlas.view = allocView();
     device->d3d()->CreateShaderResourceView(nullptr, &v, device->descriptors().resourceCpu(tlas.view));
     rt.geoms = geoms;
     rt.blasOffset = offset;
@@ -1562,12 +1580,24 @@ GpuPathTracer::GpuPathTracer(const scene::Scene& scene, std::filesystem::path re
     : m_impl(std::make_unique<Impl>(scene, std::move(repoRoot), std::move(what)))
 {
 }
+GpuPathTracer::GpuPathTracer(const scene::Scene& scene, render::Device& device, std::filesystem::path shaderDirectory, std::string what)
+    : m_impl(std::make_unique<Impl>(scene, std::filesystem::path(), std::move(what)))
+{
+    m_impl->device = &device;
+    m_impl->shaderDir = std::move(shaderDirectory);
+}
 GpuPathTracer::~GpuPathTracer()
 {
     if (m_impl && m_impl->device)
     {
         m_impl->device->waitIdle();
         if (m_impl->slice && m_impl->slice->held()) m_impl->slice->release();
+        if (!m_impl->ownedDevice)
+        {
+            // a shared device outlives the tracer: return its descriptors (resources go with the Impl's buffers)
+            for (uint32_t v : m_impl->views) m_impl->device->descriptors().freeResource(v);
+            m_impl->views.clear();
+        }
     }
 }
 RenderOutput GpuPathTracer::render(const ResolvedCamera& camera, const RenderSettings& settings, const Progress& progress)
