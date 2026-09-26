@@ -94,7 +94,7 @@ private:
     void ensureHistory(uint32_t width, uint32_t height);
     Device& m_device;
     ReflectionSettings m_settings;
-    ComPtr<ID3D12Resource> m_history;   // R16_FLOAT reflection hit distance of the last frame (G spacing)
+    ComPtr<ID3D12Resource> m_history;   // R16G16_FLOAT: last frame's reflection hit distance (G spacing), hit motion
     uint32_t m_historyWidth = 0, m_historyHeight = 0;
     // Time integration (ReflectionAccumulate.hlsl), ping-pong by frame parity: RGBA16F running mean + n, RG32_UINT key
     // (scene instance + 1, linear depth). m_accumReset: the next frame ignores the history (new textures, a scene

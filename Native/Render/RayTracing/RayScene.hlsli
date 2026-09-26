@@ -43,10 +43,11 @@ struct RtGeometry  // 16 B
     uint vertexMap;       // proxy cuts: first entry in R's vertex map (compact -> mesh vertex); UNX_NONE = identity
 };
 
-struct RtDeformedVertex  // 16 B, world space
+struct RtDeformedVertex  // 24 B, world space
 {
     float3 position;
     uint normalOct;
+    uint2 motion;  // world - prevWorld (deformVertex, previous tick), fp16 x 3: hit motion without re-deforming
 };
 
 // Bindless indices of the ray scene, passed by consumers as two uint4 root constants (R-internal convention).

@@ -12,8 +12,8 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     const uint job = (group.y * 65535u + group.x) * 64u + lane;  // 2D dispatch (ReflectionRayArgs)
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[5].y];
     if (job >= rays.Load(12)) return;
-    RWStructuredBuffer<uint2> results = ResourceDescriptorHeap[P[0].y];
-    const uint2 marker = results[job];
+    RWStructuredBuffer<uint3> results = ResourceDescriptorHeap[P[0].y];
+    const uint3 marker = results[job];
     if (marker.y != REFL_JOB_SPLIT) return;  // traced and combined inline
     const uint capacity = rays.Load(4);
     const ReflJob j = reflLoadJob(job);
@@ -25,7 +25,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     float3 sumL = 0, sumG = 0;
     float distSum = 0;
     uint valid = 0;
-    bool moving = false;
+    float motion = 0;
     [loop] for (uint i = 0; i < j.rays; ++i)
     {
         float3 dir;
@@ -36,12 +36,12 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         sumL += L;
         sumG += g;
         distSum += f16tof32(v.y >> 16);
-        moving = moving || ((v.w >> 17) & 1u) != 0;  // ReflectionShadeRays: the ray hit moving geometry
+        motion = max(motion, f16tof32(v.w >> 17));  // ReflectionShadeRays: the hit's motion over its footprint
         ++valid;
     }
     const float3 gbar = j.mode == REFL_G ? reflLobeControl(j, probeTexture, footprint, probeCount)
                                          : valid == 0 ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w) : 0;
-    results[job] = reflPackResult(reflLobeEstimate(sumL, sumG, valid, gbar), valid > 0 ? distSum / valid : 0, moving);
+    results[job] = reflPackResult(reflLobeEstimate(sumL, sumG, valid, gbar), valid > 0 ? distSum / valid : 0, motion);
     // Diagnostics: G samples and those estimated by the ratio branch, one atomic per wave (GI header).
     const uint gSamples = WaveActiveCountBits(j.mode == REFL_G), gRatio = WaveActiveCountBits(j.mode == REFL_G && reflLobeRatio(sumL, sumG, valid, gbar));
     if (WaveIsFirstLane() && gSamples)

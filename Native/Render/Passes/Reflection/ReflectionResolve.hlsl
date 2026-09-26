@@ -4,8 +4,8 @@
 //   M: its own job's result;
 //   G: the samples of its spacing's global grid around it (up to 4, in any marked tile), weighted by bilinear position,
 //      distance to the pixel's tangent plane and normal agreement; a = 0 when none agrees (K fallback, counted).
-// Also stores the reflection hit distance for next frame's G spacing (distance history, R16F), negative when the value's
-// rays hit moving geometry this frame (ReflectionAccumulate then does not integrate it; ReflectionClassify reads |d|).
+// Also stores the reflection hit distance for next frame's G spacing and the value's hit motion (history, RG16F:
+// distance, largest reflResultMotion of the samples used; ReflectionAccumulate limits the time window by it).
 // Planar mirror pixels read their reflection camera's colour at (pixel - rectangle origin), divided by the exposure.
 // P[0] = { mode SRV, results SRV, depth SRV, gbuffer SRV }, P[1] = { reflection UAV, history UAV, rows H, planar SRV }
 // P[2] = { width, height, planar byte offset, 0 }, P[3] = planar colour SRVs; frame constants b1 = main view.
@@ -21,10 +21,10 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     const uint2 pixel = tile * 8 + local;
     if (any(pixel >= size)) return;
     Texture2D<uint> modes = ResourceDescriptorHeap[P[0].x];
-    StructuredBuffer<uint2> results = ResourceDescriptorHeap[P[0].y];
+    StructuredBuffer<uint3> results = ResourceDescriptorHeap[P[0].y];
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].z];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].w];
-    RWTexture2D<float> history = ResourceDescriptorHeap[P[1].y];
+    RWTexture2D<float2> history = ResourceDescriptorHeap[P[1].y];
     const uint m = modes.Load(int3(pixel, 0));
     const uint mode = reflMode(m);
     if (mode == REFL_K)
@@ -42,9 +42,9 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     }
     if (mode == REFL_M)
     {
-        const uint2 r = results[reflJob(m)];
+        const uint3 r = results[reflJob(m)];
         reflection[pixel] = float4(reflResultRadiance(r), 1);
-        history[pixel] = reflResultMoving(r) ? -reflResultDistance(r) : reflResultDistance(r);
+        history[pixel] = float2(reflResultDistance(r), reflResultMotion(r));
         return;
     }
     // G: bilinear over the spacing grid (sample positions s/2 + i s), in tiles R marked this frame.
@@ -55,7 +55,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     const float2 fr = f - floor(f);
     float3 sum = 0;
     float dist = 0, weight = 0;
-    bool moving = false;
+    float motion = 0;
     [unroll] for (uint k = 0; k < 4; ++k)
     {
         const int2 o = int2(k & 1, k >> 1);
@@ -69,11 +69,11 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         const float w = (o.x ? fr.x : 1 - fr.x) * (o.y ? fr.y : 1 - fr.y) * pow(saturate(1 - plane / 0.02), 2) * pow(saturate(dot(s.normal, t.normal)), 8) *
                         saturate(1 - abs(s.roughness - t.roughness) * 4);
         if (w <= 0) continue;
-        const uint2 r = results[reflJob(mq)];
+        const uint3 r = results[reflJob(mq)];
         sum += w * reflResultRadiance(r);
         dist += w * reflResultDistance(r);
         weight += w;
-        moving = moving || reflResultMoving(r);
+        motion = max(motion, reflResultMotion(r));
     }
     if (weight < 1e-4)
     {
@@ -81,5 +81,5 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         return;
     }
     reflection[pixel] = float4(sum / weight, 1);
-    history[pixel] = moving ? -dist / weight : dist / weight;
+    history[pixel] = float2(dist / weight, motion);
 }

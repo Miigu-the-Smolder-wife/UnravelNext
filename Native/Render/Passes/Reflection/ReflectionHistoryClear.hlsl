@@ -7,6 +7,6 @@
 void main(uint2 pixel : SV_DispatchThreadID)
 {
     if (pixel.x >= P[0].y || pixel.y >= P[0].z) return;
-    RWTexture2D<float> history = ResourceDescriptorHeap[P[0].x];
+    RWTexture2D<float2> history = ResourceDescriptorHeap[P[0].x];
     history[pixel] = 0;
 }

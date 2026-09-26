@@ -21,14 +21,41 @@
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 
-// Geometry that moves this frame (its reflection changes): a rigid transform that changed (GpuScene keeps prev = current
-// once an instance stops), skinned instances and instances in the wind.
-bool reflInstanceMoving(uint sceneInstance)
+// Motion of a hit since the previous tick, in units of the ray's footprint there: |x - x_prev| / footprint, x_prev the
+// same barycentric point of the triangle's previous-tick vertices (deformed instances: the pool's per-vertex world -
+// prevWorld that RayTracing/Deform.hlsl writes with deformVertex, the function R's refit uses; rigid instances: the
+// previous transform of the object-space point). Static instances: 0.
+// The time integration keeps n x motion <= reflection.temporal_lobe_shift: the reflected content may move at most that
+// share of the footprint over the window.
+float reflHitMotion(RtSceneSrvs scene, RtHit hit, float footprint)
 {
-    const GpuInstance inst = loadInstance(sceneInstance);
-    if ((inst.flags & INSTANCE_SKINNED) != 0 || ((inst.flags & INSTANCE_WIND) != 0 && inst.windStiffness > 0 && g_windSpeed > 0)) return true;
-    return any(inst.objectToWorld[0] != inst.prevObjectToWorld[0]) || any(inst.objectToWorld[1] != inst.prevObjectToWorld[1]) ||
-           any(inst.objectToWorld[2] != inst.prevObjectToWorld[2]);
+    GpuInstance inst;
+    GpuMesh mesh;
+    RtGeometry g;
+    rtMaterial(scene, hit, inst, mesh, g);
+    RtGeometry unused;
+    const RtInstance ri = rtResolve(scene, hit, unused);
+    const bool deformed = (ri.flags & RT_INSTANCE_DEFORMED) != 0;
+    if (!deformed && all(inst.objectToWorld[0] == inst.prevObjectToWorld[0]) && all(inst.objectToWorld[1] == inst.prevObjectToWorld[1]) &&
+        all(inst.objectToWorld[2] == inst.prevObjectToWorld[2]))
+        return 0;
+    const RtTriangle tri = rtTriangle(scene, g, hit.primitive);
+    const float3 w = rtBary(hit.barycentrics);
+    float3 delta;
+    if (deformed)
+    {
+        StructuredBuffer<RtDeformedVertex> d = ResourceDescriptorHeap[scene.deformed];
+        const uint2 a = d[ri.vertexBase + tri.poolIndex.x].motion, b = d[ri.vertexBase + tri.poolIndex.y].motion, c = d[ri.vertexBase + tri.poolIndex.z].motion;
+        delta = float3(f16tof32(a.x), f16tof32(a.x >> 16), f16tof32(a.y)) * w.x + float3(f16tof32(b.x), f16tof32(b.x >> 16), f16tof32(b.y)) * w.y +
+                float3(f16tof32(c.x), f16tof32(c.x >> 16), f16tof32(c.y)) * w.z;
+    }
+    else
+    {
+        const float3 p = loadVertex(mesh, tri.meshVertex.x).position * w.x + loadVertex(mesh, tri.meshVertex.y).position * w.y +
+                         loadVertex(mesh, tri.meshVertex.z).position * w.z;
+        delta = transformPoint(inst.objectToWorld, p) - transformPoint(inst.prevObjectToWorld, p);
+    }
+    return length(delta) / max(footprint, 1e-6);
 }
 
 // radiance = the hit's radiance toward the ray origin when the sun term is resolved (no sun, or S's VSM holds the hit);
@@ -38,7 +65,7 @@ struct ReflHitShade
 {
     float3 radiance, sunTerm, shadowOrigin;
     bool needsShadowRay;
-    bool moving;  // the hit geometry moves this frame (reflInstanceMoving)
+    float motion;  // the hit's displacement since the previous tick over the footprint (reflHitMotion)
 };
 
 ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RtHit hit, float3 origin, float3 direction, float coneWidth,
@@ -47,7 +74,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     ReflHitShade o;
     o.radiance = o.sunTerm = o.shadowOrigin = 0;
     o.needsShadowRay = false;
-    o.moving = false;
+    o.motion = 0;
     const uint experiment = P[5].x >> 24;
     if (hit.instance == RT_INSTANCE_EMITTER)
     {
@@ -73,8 +100,8 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
         }
     }
     const RtSurface s = rtSurface(scene, hit, origin, direction);
-    o.moving = reflInstanceMoving(s.sceneInstance);
     const float footprint = coneWidth + hit.t * coneSpread;
+    o.motion = reflHitMotion(scene, hit, footprint);
     GpuMaterial m = loadMaterial(s.material);
     if ((experiment & 8) == 0) m = rtHitMaterial(m, s, footprint, dot(s.normal, direction));
     if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return o;  // inside closed geometry

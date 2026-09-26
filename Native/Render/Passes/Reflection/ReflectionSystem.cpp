@@ -370,7 +370,7 @@ void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
     d.Width = width;
     d.Height = height;
     d.DepthOrArraySize = d.MipLevels = 1;
-    d.Format = DXGI_FORMAT_R16_FLOAT;
+    d.Format = DXGI_FORMAT_R16G16_FLOAT;  // distance, hit motion (ReflectionResolve)
     d.SampleDesc.Count = 1;
     d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_history)),
@@ -409,10 +409,10 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const TextureRef reflection = main.reflection, depth = main.depth, gbuffer = main.gbuffer, probes = main.screenProbes, lobes = main.reflectionLobeTiles;
     const TextureRef modes = g.createTexture({ "R reflection modes", width, height, 1, 1, DXGI_FORMAT_R32_UINT });
     m_modes = modes;
-    const TextureRef history = g.importTexture(m_history.Get(), { "R reflection distance history", width, height, 1, 1, DXGI_FORMAT_R16_FLOAT },
+    const TextureRef history = g.importTexture(m_history.Get(), { "R reflection distance history", width, height, 1, 1, DXGI_FORMAT_R16G16_FLOAT },
                                                D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     const BufferRef jobs = g.createBuffer({ "R reflection jobs", (uint64_t)width * height * 4, 4 });
-    const BufferRef results = g.createBuffer({ "R reflection results", (uint64_t)width * height * 8, 8 });
+    const BufferRef results = g.createBuffer({ "R reflection results", (uint64_t)width * height * 12, 12 });
     const BufferRef args = g.importBuffer(m_arguments.Get(), { "R reflection dispatch arguments", kArgumentsBytes, 0 });
     const BufferRef cache = fc.resources.giCache;
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = main.frameConstants;

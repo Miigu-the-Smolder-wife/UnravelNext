@@ -14,7 +14,8 @@ planar_view_ns_per_px = 0.34            # replaced online by the view's own meas
 temporal_history_max = 32             # time integration (ReflectionAccumulate, design 2.6): running mean over at most this many
                                        # frames where identity, motion and revision are proven (as the GI cache's window)
 temporal_lobe_shift = 0.1              # the history window is limited so the reflected direction travels at most this share of the
-                                       # lobe half-angle over it (view-dependence of the lobe integral; mirrors: still views only)
+                                       # lobe half-angle over it (view-dependence of the lobe integral; mirrors: still views only),
+                                       # and the reflected hits move at most this share of the ray footprint there
 stats_log_frames = 0                   # diagnostics: every N frames the log gets the reflection hits' cache lookups and
                                        # misses and the G samples' estimator branch and mean L / mean g histogram (0 = off)
 experiment_disable = 0                 # cost attribution only (recorded in the quality hash): 1 = sun shadow rays at hits without

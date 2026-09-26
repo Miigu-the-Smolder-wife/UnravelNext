@@ -30,7 +30,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     reflRayDirection(j, owner >> 28, dir);
     float3 radiance, sun = 0;
     float distanceToHit;
-    bool moving = false;
+    float motion = 0;
     if (record.x == REFL_RAY_MISS)
     {
         radiance = giSkyRadiance(dir);
@@ -51,7 +51,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         const ReflHitShade o = reflShadeHit(rtSceneSrvs(P[6], P[7]), cache, h, hit, reflRayOrigin(j.s), dir, j.coneWidth, j.coneSpread);
         radiance = o.radiance;
         distanceToHit = hit.t;
-        moving = o.moving;
+        motion = o.motion;
         if (o.needsShadowRay)
         {
             sun = o.sunTerm;
@@ -62,5 +62,5 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     }
     const float3 r = radiance * REFL_STORE_SCALE, s = sun * REFL_STORE_SCALE;
     rays.Store4(valueOffset, uint4(reflPackHalf2(r.r, r.g), reflPackHalf2(r.b, min(distanceToHit, 65000.0)), reflPackHalf2(s.r, s.g),
-                                   f32tof16(s.b) | (1u << 16) | (moving ? (1u << 17) : 0u)));  // bit 16 valid, 17 moving hit
+                                   f32tof16(s.b) | (1u << 16) | ((f32tof16(min(motion, 60000.0)) & 0x7FFFu) << 17)));  // bit 16 valid, 17.. hit motion (fp16 >= 0)
 }

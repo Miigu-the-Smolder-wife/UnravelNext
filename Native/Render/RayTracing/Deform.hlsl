@@ -40,5 +40,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     RtDeformedVertex o;
     o.position = d.world;
     o.normalOct = octEncode(d.normal);
+    const float3 m = d.world - d.prevWorld;
+    o.motion = uint2(f32tof16(m.x) | (f32tof16(m.y) << 16), f32tof16(m.z));
     pool[job.deformedBase + local] = o;
 }

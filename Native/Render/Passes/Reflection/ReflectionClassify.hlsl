@@ -111,7 +111,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
             const float lobe = reflectionLobeHalfAngle(s.roughness, dot(s.normal, s.view));
             if (lobe < kThreshold)
             {
-                const float dr = abs(history.Load(int3(pixel, 0)));  // negative: moving content (ReflectionResolve)
+                const float dr = history.Load(int3(pixel, 0));
                 const float blur = dr / max(s.linearDepth, 1e-4) * lobe * asfloat(P[2].z);
                 if (s.roughness < asfloat(P[2].y) || blur < 1)
                 {

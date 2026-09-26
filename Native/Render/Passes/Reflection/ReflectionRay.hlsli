@@ -2,7 +2,7 @@
 // (DispatchRays: traversal), shade (compute: hit shading) and combine (compute: the job's value) passes, which replay the
 // same seeded VNDF draws instead of storing directions; and the layout of the rays buffer.
 //
-// Root constants, the same in every pass: P[0] = { jobs SRV, results UAV (uint2 per job), mode SRV, probes SRV },
+// Root constants, the same in every pass: P[0] = { jobs SRV, results UAV (uint3 per job), mode SRV, probes SRV },
 // P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli), ray length in P[1].w, P[3].w = view.screenProbeMaps SRV,
 // P[4] = { depth SRV, gbuffer SRV, GI cache UAV (raw), rays per G sample }, P[5] = { frame | experiment << 24, rays buffer
 // UAV (raw), ShadowSrvs buffer (ReflectionShade.hlsli), exact set counts }, P[6], P[7] = RtSceneSrvs. Frame constants

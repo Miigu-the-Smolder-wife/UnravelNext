@@ -18,7 +18,7 @@
 // The inline path of one job (the rays buffer is full): trace, shade and combine in this thread.
 void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h)
 {
-    RWStructuredBuffer<uint2> results = ResourceDescriptorHeap[P[0].y];
+    RWStructuredBuffer<uint3> results = ResourceDescriptorHeap[P[0].y];
     Texture2D<uint4> probeTexture = ResourceDescriptorHeap[P[0].w];
     float probeSpacing;
     int2 probeCount;
@@ -27,7 +27,7 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
     float3 sumL = 0, sumG = 0;
     float distSum = 0;
     uint valid = 0;
-    bool moving = false;
+    float motion = 0;
     [loop] for (uint i = 0; i < j.rays; ++i)
     {
         float3 dir;
@@ -38,9 +38,9 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
         r.TMin = 0;
         r.TMax = giRayLength();
         float d;
-        bool hitMoving;
-        const float3 L = reflHitRadiance(scene, cache, h, r, j.coneWidth, j.coneSpread, seed, d, hitMoving);
-        moving = moving || hitMoving;
+        float hitMotion;
+        const float3 L = reflHitRadiance(scene, cache, h, r, j.coneWidth, j.coneSpread, seed, d, hitMotion);
+        motion = max(motion, hitMotion);
         const float3 g = j.mode == REFL_G ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, dir, 0.1763, P[3].w) : 0;
         sumL += L;
         sumG += g;
@@ -49,7 +49,7 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
     }
     const float3 gbar = j.mode == REFL_G ? reflLobeControl(j, probeTexture, footprint, probeCount)
                                          : valid == 0 ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w) : 0;
-    results[job] = reflPackResult(reflLobeEstimate(sumL, sumG, valid, gbar), valid > 0 ? distSum / valid : 0, moving);
+    results[job] = reflPackResult(reflLobeEstimate(sumL, sumG, valid, gbar), valid > 0 ? distSum / valid : 0, motion);
     // Diagnostics: G samples and those estimated by the ratio branch, one atomic per wave (GI header).
     const uint gSamples = WaveActiveCountBits(j.mode == REFL_G), gRatio = WaveActiveCountBits(j.mode == REFL_G && reflLobeRatio(sumL, sumG, valid, gbar));
     if (WaveIsFirstLane() && gSamples)
@@ -71,7 +71,7 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
 void ReflectionTraceGen()
 {
     const uint job = DispatchRaysIndex().x;
-    RWStructuredBuffer<uint2> results = ResourceDescriptorHeap[P[0].y];
+    RWStructuredBuffer<uint3> results = ResourceDescriptorHeap[P[0].y];
     RWByteAddressBuffer cache = ResourceDescriptorHeap[P[4].z];
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[5].y];
     const GiHeader h = giHeader(cache);
@@ -109,5 +109,5 @@ void ReflectionTraceGen()
                                                         : uint4(hit.instance | (hit.frontFace << 31), hit.geometry, hit.primitive, asuint(hit.t)));
         if (hit.t >= 0) rays.Store(reflRaysBaryOffset(capacity, slot), reflPackBarycentrics(hit.barycentrics));
     }
-    results[job] = uint2(base, REFL_JOB_SPLIT);
+    results[job] = uint3(base, REFL_JOB_SPLIT, 0);
 }

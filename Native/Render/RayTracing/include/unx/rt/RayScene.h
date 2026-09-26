@@ -32,10 +32,11 @@ struct RtGeometry  // 16 B
     uint32_t flags;
     uint32_t vertexMap;
 };
-struct RtDeformedVertex  // 16 B
+struct RtDeformedVertex  // 24 B
 {
     float3 position;
     uint32_t normalOct;
+    uint32_t motion[2];  // world - prevWorld, fp16 x 3 (RayScene.hlsli)
 };
 struct DeformJob  // 16 B (Deform.hlsl)
 {

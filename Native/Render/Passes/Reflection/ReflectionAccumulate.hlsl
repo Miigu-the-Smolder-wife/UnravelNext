@@ -8,8 +8,8 @@
 //             vertices (Deformation.hlsli deformVertex: rigid transforms, skinning and wind alike), projected with the
 //             previous view; each tap's stored linear depth must lie on that point's plane within the depth change one
 //             pixel of the surface can show (1e-3 + 2 x pixel angle / |n.v|);
-//   content:  a value whose rays hit moving geometry this frame (ReflectionResolve: distance history sign) is not
-//             accumulated (the reflected content changed);
+//   content:  the reflected content may move: the value's hit motion m (displacement per tick over the ray footprint,
+//             ReflectionShade reflHitMotion; the largest of its samples) limits the window to n x m <= lobe shift;
 //   revision: a scene upload, material change or history discontinuity resets every pixel (P[3].w bit 0);
 //   view:     the lobe integral depends on the view direction; the history window n is limited so the reflected
 //             direction's travel over it stays within reflection.temporal_lobe_shift of the lobe half-angle
@@ -20,7 +20,7 @@
 // P[0] = { reflection UAV, modes SRV, depth SRV, gbuffer SRV }
 // P[1] = { vis id SRV, visible clusters SRV, distance history UAV, previous accumulation UAV (RGBA16F: mean, n) }
 // P[2] = { previous keys UAV (RG32: instance + 1, linear depth), accumulation out UAV, keys out UAV, historyMax }
-// P[3] = { width, height, asuint(lobe shift), flags (bit 0 reset, bit 1 off, bit 2 diagnostics: rgb = n / 32, moving, state) }
+// P[3] = { width, height, asuint(lobe shift), flags (bit 0 reset, bit 1 off, bit 2 diagnostics: rgb = n / 32, min(motion, 1), state) }
 // P[4] = { asuint(previous camera position xyz), asuint(pixel angle) }; frame constants b1 = main view.
 #include "Passes/Reflection/ReflectionInternal.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
@@ -61,13 +61,13 @@ void main(uint2 pixel : SV_DispatchThreadID)
     const GpuVisibleCluster vc = loadVisibleCluster(P[1].y, visVisibleCluster(visId));
     const uint instance = vc.instance;
     keysOut[pixel] = uint2(instance + 1, asuint(s.linearDepth));
-    RWTexture2D<float> distanceHistory = ResourceDescriptorHeap[P[1].z];
-    const bool movingContent = distanceHistory[pixel] < 0;  // ReflectionResolve: rays hit moving geometry
+    RWTexture2D<float2> distanceHistory = ResourceDescriptorHeap[P[1].z];
+    const float motion = distanceHistory[pixel].y;  // ReflectionResolve: the value's hit motion
     const uint flags = P[3].w;
     uint n = 0;
     float3 mean = current.rgb;
     float state = 0;  // diagnostics (flags bit 2): 0 no valid tap, 0.25 behind the camera, 0.5 taps valid with no history, 0.75 window 0, 1 integrated
-    if ((flags & 3u) == 0 && !movingContent)
+    if ((flags & 3u) == 0)
     {
         // The pixel's point one frame ago: barycentric in its triangle, previous-tick vertices.
         const GpuInstance inst = loadInstance(instance);
@@ -126,9 +126,11 @@ void main(uint2 pixel : SV_DispatchThreadID)
                 const float3 r = reflect(-s.view, s.normal);
                 const float3 vPrev = normalize(prevCamera - prevPosition);
                 const float3 rPrev = reflect(-vPrev, prevNormal);
-                const float shift = acos(clamp(dot(r, rPrev), -1.0, 1.0));
+                const float shift = 2 * asin(saturate(0.5 * length(r - rPrev)));  // exact for small angles (acos(dot) is not)
                 const float lobe = reflectionLobeHalfAngle(s.roughness, max(dot(s.normal, s.view), 1e-4));
-                const float windowMax = shift > 1e-7 ? asfloat(P[3].z) * lobe / shift : 1e9;
+                const float viewWindow = shift > 0 ? asfloat(P[3].z) * lobe / shift : 1e9;
+                const float motionWindow = motion > 0 ? asfloat(P[3].z) / motion : 1e9;
+                const float windowMax = min(viewWindow, motionWindow);
                 n = (uint)min((float)min(nPrev, P[2].w), floor(windowMax));
                 if (n > 0)
                 {
@@ -138,6 +140,6 @@ void main(uint2 pixel : SV_DispatchThreadID)
             }
         }
     }
-    reflection[pixel] = (flags & 4u) ? float4(n / 32.0, movingContent ? 1.0 : 0.0, state, current.a) : float4(mean, current.a);
-    accumOut[pixel] = float4(mean, movingContent ? 0.0 : (float)min(n + 1, P[2].w));
+    reflection[pixel] = (flags & 4u) ? float4(n / 32.0, min(motion, 1.0), state, current.a) : float4(mean, current.a);
+    accumOut[pixel] = float4(mean, (float)min(n + 1, P[2].w));
 }
