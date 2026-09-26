@@ -1,0 +1,7 @@
+﻿scene debris (scale 1.00): 1001 meshes, 1001 instances, 108768 instanced triangles, 3128 clusters; generated in 7 ms, clusters built in 50 ms
+[V debris static 4K] gpu frame median 14.2189 ms, p95 80.5835, p99 82.4556 (n=300) | cpu frame median 0.4979 ms (record 0.2518, submit 0.0978) | SM clock median 2790 MHz (min 2790) | passes 34, barriers 220 in 34 batches, cross-queue syncs 0, command lists 1, transients 19 (192.2 MB aliased / 286.6 MB unaliased) | quality aa14dcb72b1fdc70
+[V debris static 4K] outside passes: graphics 1 lists, head 0.0000, tail 0.0000, gap 0.0000 ms (medians)
+V debris 4K: cull 0.098 ms (design 0.000 on 740 instances, 2339 clusters tested) | HiZ 0.058 ms (design 0.020) | band A raster 0.053 ms (design 0.001 on 1540 clusters, 1516 triangles) | total V 0.208 ms of frame 14.219 ms
+  visible clusters by band A/B/C 50/1490/0 (of B: 0 mixed sheet clusters split per triangle, 0 triangles)
+  nodes tested 1742, triangles by band A/B/C 1516/77468/0, deferred 123/5/31, overflow 0x0 (stats of frame 314)
+GpuLock.ps1: contended: unx_test_gi_gianalytic (81420) 1 s >= 50 ms/s, peak 60 ms/s background: Remnant2-Win64-Shipping (13816) 9 s >= 200 ms/s, peak 940 ms/s; cpu 10 s >= 4 cores, peak 9.5 cores

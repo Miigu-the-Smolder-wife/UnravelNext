@@ -18,7 +18,7 @@
 // per-mesh summary of the band distances at the resolution (band C design input).
 // Performance runs only under the GPU lock (INTERFACES 3.3):
 //   powershell -File Tools/CI/GpuLock.ps1 -Track core -- build/<t>/bin/unx_gate_visibility_visibilitygate.exe
-//       --scene city_block|forest_thin|...|deep_tile [--camera NAME|INDEX] [--deep-tile-cards N] [--resolution 4K|1440p|both] [--frames 600] [--scale 1] [--moving]
+//       --scene city_block|forest_thin|...|deep_tile|debris [--camera NAME|INDEX] [--deep-tile-cards N] [--debris N] [--resolution 4K|1440p|both] [--frames 600] [--scale 1] [--moving]
 //       [--service whole,local,atlas16,atlas32] [--service-pages camera|ring] [--service-levels 12] [--service-spacing 2]
 //       [--out DIR] [--set key=value ...] [--cluster-stats FILE]
 #include "unx/clusterbuilder/ClusterBuilder.h"
@@ -100,6 +100,87 @@ scene::Scene deepTileScene(uint32_t cards)
     scene::Camera c;
     c.name = "main";
     c.forward = { 0, 0, 1 };
+    c.nearPlane = 0.05f;
+    s.cameras.push_back(c);
+    scene::validate(s);
+    return s;
+}
+
+// Destruction debris (C2, FEATURES_GAME 2.2 "fragment instances <= 1,000 x <= 100 triangles"): N distinct fragment meshes
+// (a box of 3 x 3 quads per face = 108 triangles, every vertex displaced by its own random amount, so no two meshes are
+// alike), scattered with random orientation over a 24 x 16 m field 4 to 20 m in front of an eye-height camera, on a
+// ground slab. All fragments are separate instances of separate meshes, as pre-authored and CARVE fragments are.
+scene::Scene debrisScene(uint32_t count)
+{
+    scene::Scene s;
+    s.name = "debris";
+    s.materials.resize(1);
+    auto box = [](float3 half, uint32_t n, uint32_t seed) {
+        scene::Mesh m;
+        m.name = "fragment " + std::to_string(seed);
+        uint32_t state = seed * 747796405u + 2891336453u;
+        auto rnd = [&]() {
+            state = state * 747796405u + 2891336453u;
+            return ((state >> 8) & 0xFFFF) / 65535.0f;
+        };
+        const float3 axes[3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+        for (int f = 0; f < 6; ++f)
+        {
+            const int a = f / 2;
+            const float sign = (f & 1) ? -1.0f : 1.0f;
+            const float3 nrm = axes[a] * sign, u = axes[(a + 1) % 3], v = cross(nrm, u);
+            auto extent = [&](float3 dir) { return std::fabs(dir.x) * half.x + std::fabs(dir.y) * half.y + std::fabs(dir.z) * half.z; };
+            const uint32_t base = (uint32_t)m.positions.size();
+            for (uint32_t i = 0; i <= n; ++i)
+                for (uint32_t j = 0; j <= n; ++j)
+                {
+                    const float fu = (2.0f * j / n - 1) * extent(u), fv = (2.0f * i / n - 1) * extent(v);
+                    m.positions.push_back((nrm * extent(nrm) + u * fu + v * fv) * (0.8f + 0.4f * rnd()));
+                    m.normals.push_back(nrm);
+                    m.uv0.push_back({ (float)j / n, (float)i / n });
+                }
+            for (uint32_t i = 0; i < n; ++i)
+                for (uint32_t j = 0; j < n; ++j)
+                {
+                    const uint32_t p0 = base + i * (n + 1) + j, q = p0 + 1, r = p0 + n + 1, t = r + 1;
+                    m.indices.insert(m.indices.end(), { p0, q, t, p0, t, r });
+                }
+        }
+        m.submeshes.push_back({ 0, (uint32_t)m.indices.size(), 0 });
+        return m;
+    };
+    s.meshes.push_back(box({ 40, 0.5f, 40 }, 8, 0));
+    scene::Instance ground;
+    ground.mesh = 0;
+    ground.transform.m[1][3] = -0.5f;
+    s.instances.push_back(ground);
+    uint32_t state = 12345;
+    auto rnd = [&]() {
+        state = state * 747796405u + 2891336453u;
+        return ((state >> 8) & 0xFFFF) / 65535.0f;
+    };
+    for (uint32_t k = 0; k < count; ++k)
+    {
+        const float size = 0.08f + 0.35f * rnd();
+        s.meshes.push_back(box({ size, size * (0.4f + 0.6f * rnd()), size * (0.5f + 0.5f * rnd()) }, 3, k + 1));
+        scene::Instance in;
+        in.mesh = (uint32_t)s.meshes.size() - 1;
+        in.flags |= scene::InstanceDynamic;
+        const float yaw = 6.2831853f * rnd(), pitch = 3.1415927f * rnd();
+        const float cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch);
+        // R = Ry(yaw) Rx(pitch)
+        in.transform.m[0][0] = cy, in.transform.m[0][1] = sy * sp, in.transform.m[0][2] = sy * cp;
+        in.transform.m[1][0] = 0, in.transform.m[1][1] = cp, in.transform.m[1][2] = -sp;
+        in.transform.m[2][0] = -sy, in.transform.m[2][1] = cy * sp, in.transform.m[2][2] = cy * cp;
+        in.transform.m[0][3] = -12 + 24 * rnd();
+        in.transform.m[1][3] = size + 1.5f * rnd();  // some mid-air
+        in.transform.m[2][3] = 4 + 16 * rnd();
+        s.instances.push_back(in);
+    }
+    scene::Camera c;
+    c.name = "main";
+    c.position = { 0, 1.7f, 0 };
+    c.forward = normalize(float3{ 0, -0.12f, 1 });
     c.nearPlane = 0.05f;
     s.cameras.push_back(c);
     scene::validate(s);
@@ -337,7 +418,7 @@ int main(int argc, char** argv)
     try
     {
         std::string sceneName = "city_block", resolutionArg = "both", out, clusterStats, cameraName;
-        uint32_t deepTileCards = 1000;
+        uint32_t deepTileCards = 1000, debrisCount = 1000;
         std::vector<std::string> overrides;
         uint32_t frames = 600;
         float scale = 1.0f;
@@ -353,6 +434,7 @@ int main(int argc, char** argv)
             if (a == "--scene") sceneName = next();
             else if (a == "--camera") cameraName = next();
             else if (a == "--deep-tile-cards") deepTileCards = (uint32_t)std::stoul(next());
+            else if (a == "--debris") debrisCount = (uint32_t)std::stoul(next());
             else if (a == "--resolution") resolutionArg = next();
             else if (a == "--frames") frames = (uint32_t)std::stoul(next());
             else if (a == "--scale") scale = std::stof(next());
@@ -408,7 +490,7 @@ int main(int argc, char** argv)
         for (const std::string& o : overrides) quality.applyOverride(o);
         const bool coverage = quality.boolean("visibility.coverage_layer");
         scenegen::Request request;
-        bool found = sceneName == "deep_tile";
+        bool found = sceneName == "deep_tile" || sceneName == "debris";
         for (scenegen::SceneId id : scenegen::allScenes())
             if (sceneName == scenegen::sceneName(id))
             {
@@ -418,7 +500,7 @@ int main(int argc, char** argv)
         if (!found) fail("unknown scene %s", sceneName.c_str());
         request.scale = scale;
         auto t0 = std::chrono::steady_clock::now();
-        scene::Scene s = sceneName == "deep_tile" ? deepTileScene(deepTileCards) : scenegen::generate(request);
+        scene::Scene s = sceneName == "deep_tile" ? deepTileScene(deepTileCards) : sceneName == "debris" ? debrisScene(debrisCount) : scenegen::generate(request);
         const double generateMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         if (!cameraName.empty())  // the named (or numbered) scene camera becomes camera 0
         {

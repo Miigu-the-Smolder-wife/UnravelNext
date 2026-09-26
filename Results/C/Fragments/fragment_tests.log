@@ -1,0 +1,12 @@
+﻿
+       4 m: wall pixels 1417981, on the event frame fragment pixels 1417981, other 0; coverage changed 2 (all within 1.
+1e-03 px of the edge: yes), depth max relative difference 9.45e-07; visible clusters 16 -> 16, overflow 0x0
+      30 m: wall pixels 23688, on the event frame fragment pixels 23688, other 0; coverage changed 0 (all within 0.0e+0
+0 px of the edge: yes), depth max relative difference 2.78e-07; visible clusters 4 -> 4, overflow 0x0
+PASS fragment_transition_is_exact
+    frame 1: fragment pixels (every 2nd) 59056, vis ids not covering their pixel 0, visible clusters 0, overflow 0x0
+    frame 11: fragment pixels (every 2nd) 56212, vis ids not covering their pixel 0, visible clusters 54, overflow 0x0
+PASS fragments_fly_apart
+2/2 passed
+
+
