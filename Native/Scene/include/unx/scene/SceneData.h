@@ -85,6 +85,29 @@ struct SkinStream
     std::vector<float3x4> inverseBind;  // per joint
 };
 
+// Blend shape (C4, FEATURES_GAME 15): a sparse set of vertex offsets in the mesh's bind pose. With instance weights w_s,
+// a vertex is  p = p0 + sum_s w_s dp_s,  n = normalize(n0 + sum_s w_s dn_s)  (before skinning; evaluateMorph is the
+// definition every consumer follows: raster, shadows, rays and the reference).
+struct BlendShape
+{
+    std::string name;
+    std::vector<uint32_t> vertices;      // strictly ascending mesh vertex indices the shape moves
+    std::vector<float3> deltaPositions;  // one per listed vertex, object space
+    std::vector<float3> deltaNormals;    // one per listed vertex, or empty (the shape leaves normals)
+};
+
+// Vertex animation (VAT, C4): baked positions (and optionally normals) of every vertex per frame at a fixed rate. At
+// time t the vertex is the linear interpolation of frames floor(t fps) and the next (wrapping when looping, held at the
+// ends otherwise); it replaces the bind pose. A mesh with a vertex animation has no skin and no blend shapes.
+struct VertexAnimation
+{
+    float framesPerSecond = 0;       // 0 = none
+    uint32_t frameCount = 0;
+    bool loop = true;
+    std::vector<float3> positions;   // frameCount x vertex count, frame-major
+    std::vector<float3> normals;     // same layout, or empty (the mesh normals)
+};
+
 struct Mesh
 {
     std::string name;
@@ -97,6 +120,8 @@ struct Mesh
     std::vector<uint32_t> indices; // triangle list, counter-clockwise front faces
     std::vector<Submesh> submeshes;
     SkinStream skin;               // empty = rigid
+    std::vector<BlendShape> blendShapes;  // C4; empty = none
+    VertexAnimation vertexAnimation;      // C4; framesPerSecond 0 = none
 };
 
 // Wind (ARCHITECTURE 2.3, 2.7): per-instance response to the scene wind field; the displacement function is shared
@@ -124,6 +149,8 @@ struct Instance
     uint32_t skeleton = kNone;     // index into Scene::skeletons when InstanceSkinned
     WindParams wind;
     std::vector<uint32_t> materialOverrides;  // per submesh; empty = mesh materials
+    std::vector<float> blendWeights;          // C4: per blend shape of its mesh (initial weights; hosts set them per frame); empty = 0
+    float vertexAnimationTime = 0;            // C4: seconds into the mesh's vertex animation (hosts set it per frame)
 };
 
 // A skeleton's current pose: joint matrices in model space (applied after inverseBind).
@@ -235,4 +262,11 @@ Scene deserialize(const std::vector<uint8_t>& bytes);
 std::string contentHash(const Scene& scene);
 // Structural checks (index ranges, unit vectors, sizes); throws unx::Error with the first problem found.
 void validate(const Scene& scene);
+
+// C4 reference evaluation of vertex v of 'mesh' before skinning: blend shapes with 'weights' (per shape; missing = 0)
+// and the vertex animation at 'time'. Returns the object-space position and unit normal.
+void evaluateMorph(const Mesh& mesh, const std::vector<float>& weights, float time, uint32_t v, float3& position, float3& normal);
+// Largest displacement from the bind pose any vertex can reach: blend shapes with |w_s| <= the given bounds (per shape),
+// or the vertex animation over all frames (the culling inflation of an instance).
+float morphBound(const Mesh& mesh, const std::vector<float>& weightBounds);
 } // namespace unx::scene

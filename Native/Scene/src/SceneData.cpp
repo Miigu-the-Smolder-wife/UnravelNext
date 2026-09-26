@@ -4,6 +4,8 @@
 #include "unx/core/Log.h"
 #include "unx/core/Sha256.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <type_traits>
@@ -160,6 +162,47 @@ void readList(Reader& r, std::vector<T>& v)
 bool unit(float3 v) { return std::fabs(length(v) - 1.0f) < 1e-3f; }
 } // namespace
 
+// C4 extension block, written after every other field only when some mesh or instance uses blend shapes or a vertex
+// animation, so scenes without them keep their bytes and content hashes: u32 tag "MRPH", then per mesh (blend shapes,
+// vertex animation) and per instance (weights, time).
+constexpr uint32_t kMorphTag = 0x4850524Du;  // "MRPH"
+
+bool anyMorph(const Scene& s)
+{
+    for (const Mesh& m : s.meshes)
+        if (!m.blendShapes.empty() || m.vertexAnimation.framesPerSecond > 0) return true;
+    for (const Instance& i : s.instances)
+        if (!i.blendWeights.empty() || i.vertexAnimationTime != 0) return true;
+    return false;
+}
+
+void writeMorph(Writer& w, const Scene& s)
+{
+    w.pod(kMorphTag);
+    for (const Mesh& m : s.meshes)
+    {
+        w.pod<uint64_t>(m.blendShapes.size());
+        for (const BlendShape& b : m.blendShapes)
+        {
+            w.str(b.name);
+            w.podArray(b.vertices);
+            w.podArray(b.deltaPositions);
+            w.podArray(b.deltaNormals);
+        }
+        const VertexAnimation& a = m.vertexAnimation;
+        w.pod(a.framesPerSecond);
+        w.pod(a.frameCount);
+        w.pod(a.loop);
+        w.podArray(a.positions);
+        w.podArray(a.normals);
+    }
+    for (const Instance& i : s.instances)
+    {
+        w.podArray(i.blendWeights);
+        w.pod(i.vertexAnimationTime);
+    }
+}
+
 std::vector<uint8_t> serialize(const Scene& s)
 {
     Writer w;
@@ -179,6 +222,7 @@ std::vector<uint8_t> serialize(const Scene& s)
     w.pod(s.windSpeed);
     writeList(w, s.cameras);
     writeList(w, s.paths);
+    if (anyMorph(s)) writeMorph(w, s);
     return std::move(w.out);
 }
 
@@ -205,6 +249,32 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
     s.windSpeed = r.pod<float>();
     readList(r, s.cameras);
     readList(r, s.paths);
+    if (r.at < bytes.size())
+    {
+        if (r.pod<uint32_t>() != kMorphTag) fail("unxscene: unknown extension block");
+        for (Mesh& m : s.meshes)
+        {
+            m.blendShapes.resize((size_t)r.pod<uint64_t>());
+            for (BlendShape& b : m.blendShapes)
+            {
+                b.name = r.str();
+                r.podArray(b.vertices);
+                r.podArray(b.deltaPositions);
+                r.podArray(b.deltaNormals);
+            }
+            VertexAnimation& a = m.vertexAnimation;
+            a.framesPerSecond = r.pod<float>();
+            a.frameCount = r.pod<uint32_t>();
+            a.loop = r.pod<bool>();
+            r.podArray(a.positions);
+            r.podArray(a.normals);
+        }
+        for (Instance& i : s.instances)
+        {
+            r.podArray(i.blendWeights);
+            i.vertexAnimationTime = r.pod<float>();
+        }
+    }
     if (r.at != bytes.size()) fail("unxscene: %zu trailing bytes", bytes.size() - r.at);
     return s;
 }
@@ -259,6 +329,22 @@ void validate(const Scene& s)
         for (const Submesh& sm : m.submeshes)
             if (s.materials[sm.material].normalTexture != kNone && (m.tangents.empty() || m.uv0.empty()))
                 fail("mesh %zu '%s': a normal-mapped material needs tangents and uv0", i, m.name.c_str());
+        for (const BlendShape& b : m.blendShapes)
+        {
+            if (b.deltaPositions.size() != b.vertices.size() || (!b.deltaNormals.empty() && b.deltaNormals.size() != b.vertices.size()))
+                fail("mesh %zu '%s': blend shape '%s' stream sizes differ", i, m.name.c_str(), b.name.c_str());
+            for (size_t k = 0; k < b.vertices.size(); ++k)
+                if (b.vertices[k] >= n || (k > 0 && b.vertices[k] <= b.vertices[k - 1]))
+                    fail("mesh %zu '%s': blend shape '%s' vertices must be ascending mesh vertices", i, m.name.c_str(), b.name.c_str());
+        }
+        const VertexAnimation& va = m.vertexAnimation;
+        if (va.framesPerSecond < 0 || !std::isfinite(va.framesPerSecond)) fail("mesh %zu '%s': vertex animation rate", i, m.name.c_str());
+        if (va.framesPerSecond > 0)
+        {
+            if (va.frameCount == 0 || va.positions.size() != (size_t)va.frameCount * n || (!va.normals.empty() && va.normals.size() != va.positions.size()))
+                fail("mesh %zu '%s': vertex animation stream sizes", i, m.name.c_str());
+            if (!m.skin.joints.empty() || !m.blendShapes.empty()) fail("mesh %zu '%s': a vertex-animated mesh has no skin and no blend shapes", i, m.name.c_str());
+        }
     }
     for (size_t i = 0; i < s.instances.size(); ++i)
     {
@@ -266,6 +352,10 @@ void validate(const Scene& s)
         if (in.mesh >= s.meshes.size()) fail("instance %zu: mesh out of range", i);
         if ((in.flags & InstanceSkinned) && (in.skeleton >= s.skeletons.size() || s.meshes[in.mesh].skin.joints.empty())) fail("instance %zu: skinned without skeleton/skin", i);
         if (!in.materialOverrides.empty() && in.materialOverrides.size() != s.meshes[in.mesh].submeshes.size()) fail("instance %zu: material overrides per submesh", i);
+        if (!in.blendWeights.empty() && in.blendWeights.size() != s.meshes[in.mesh].blendShapes.size()) fail("instance %zu: blend weights per blend shape", i);
+        for (float wgt : in.blendWeights)
+            if (!std::isfinite(wgt)) fail("instance %zu: blend weight not finite", i);
+        if (!std::isfinite(in.vertexAnimationTime)) fail("instance %zu: vertex animation time not finite", i);
         // Rotation + uniform scale: the three basis columns have equal length and are orthogonal.
         const float3 cx{ in.transform.m[0][0], in.transform.m[1][0], in.transform.m[2][0] };
         const float3 cy{ in.transform.m[0][1], in.transform.m[1][1], in.transform.m[2][1] };
@@ -279,5 +369,70 @@ void validate(const Scene& s)
     if (!unit(s.sun.direction)) fail("sun direction not unit");
     for (const Camera& c : s.cameras)
         if (!unit(c.forward) || !unit(c.up)) fail("camera '%s': forward/up not unit", c.name.c_str());
+}
+void evaluateMorph(const Mesh& m, const std::vector<float>& weights, float time, uint32_t v, float3& position, float3& normal)
+{
+    const VertexAnimation& a = m.vertexAnimation;
+    const size_t n = m.positions.size();
+    if (a.framesPerSecond > 0)
+    {
+        const double f = (double)time * a.framesPerSecond;
+        double base = std::floor(f);
+        const float t = (float)(f - base);
+        uint64_t f0, f1;
+        if (a.loop)
+        {
+            const double c = a.frameCount;
+            base = base - c * std::floor(base / c);
+            f0 = (uint64_t)base;
+            f1 = (f0 + 1) % a.frameCount;
+        }
+        else
+        {
+            f0 = (uint64_t)std::clamp(base, 0.0, (double)a.frameCount - 1);
+            f1 = std::min<uint64_t>(f0 + 1, a.frameCount - 1);
+            if (base < 0 || base >= a.frameCount - 1) f1 = f0;
+        }
+        const float3 p0 = a.positions[f0 * n + v], p1 = a.positions[f1 * n + v];
+        position = p0 + (p1 - p0) * t;
+        const float3 n0 = a.normals.empty() ? m.normals[v] : a.normals[f0 * n + v], n1 = a.normals.empty() ? m.normals[v] : a.normals[f1 * n + v];
+        normal = normalize(n0 + (n1 - n0) * t);
+        return;
+    }
+    position = m.positions[v];
+    float3 nrm = m.normals[v];
+    for (size_t s = 0; s < m.blendShapes.size() && s < weights.size(); ++s)
+    {
+        const BlendShape& b = m.blendShapes[s];
+        if (weights[s] == 0) continue;
+        const auto it = std::lower_bound(b.vertices.begin(), b.vertices.end(), v);
+        if (it == b.vertices.end() || *it != v) continue;
+        const size_t k = (size_t)(it - b.vertices.begin());
+        position = position + b.deltaPositions[k] * weights[s];
+        if (!b.deltaNormals.empty()) nrm = nrm + b.deltaNormals[k] * weights[s];
+    }
+    normal = normalize(nrm);
+}
+
+float morphBound(const Mesh& m, const std::vector<float>& weightBounds)
+{
+    const VertexAnimation& a = m.vertexAnimation;
+    const size_t n = m.positions.size();
+    float bound = 0;
+    if (a.framesPerSecond > 0)
+    {
+        for (size_t f = 0; f < a.frameCount; ++f)
+            for (size_t v = 0; v < n; ++v) bound = std::max(bound, length(a.positions[f * n + v] - m.positions[v]));
+        return bound;
+    }
+    // Per vertex, sum over the shapes that move it of |w_s| max |dp|: bounded by the sum over shapes of the shape's
+    // largest offset, which is what a per-instance culling inflation can carry.
+    for (size_t s = 0; s < m.blendShapes.size() && s < weightBounds.size(); ++s)
+    {
+        float largest = 0;
+        for (const float3& d : m.blendShapes[s].deltaPositions) largest = std::max(largest, length(d));
+        bound += std::fabs(weightBounds[s]) * largest;
+    }
+    return bound;
 }
 } // namespace unx::scene
