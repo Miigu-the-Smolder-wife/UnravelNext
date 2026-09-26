@@ -99,6 +99,12 @@ struct GpuPathTracer::Impl
     ID3D12PipelineState* psoMeanSum = nullptr;
     ID3D12PipelineState* psoAtmosphereTable = nullptr;
     ID3D12PipelineState* psoCensus = nullptr;
+    ID3D12PipelineState* psoPathArgs = nullptr;
+    // Camera-path wavefront (PathTrace.hlsl): slot states, the two slot lists, the wave buffer (list counts, rectangle),
+    // the indirect dispatch arguments and the counts' read-back.
+    Buffer pathStates, pathLists[2], pathWave, pathArgs, pathWaveReadback;
+    uint32_t pathListUav[2] = { sh::kRtNone, sh::kRtNone }, pathArgsUav = sh::kRtNone;
+    ComPtr<ID3D12CommandSignature> dispatchSignature;
     ComPtr<ID3D12Resource> meanImage;  // currentImageResource()
     // currentHalvesRelMse(): Mean.hlsl's per-group sums, MeanSum.hlsl's result and its read-back (8 bytes)
     Buffer meanSums, meanResult, meanResultReadback;
@@ -123,6 +129,10 @@ struct GpuPathTracer::Impl
     // heavier than that forest, before the measured cap halves it.
     static constexpr uint64_t kMaxPathsPerDispatch = 1ull << 19;
     static constexpr uint32_t kMaxSamplesPerThread = 16;
+    // Camera paths run as a wavefront (PathTrace.hlsl): a dispatch advances at most kMaxSlots (pixel, half) slots by at most
+    // kPathBudget path iterations each, so its worst time is kMaxSlots x kPathBudget x the worst iteration whatever the
+    // paths' lengths (up to kRtMaxBounces); the measured slot cap (Run::slotCap) only lowers the slot count.
+    static constexpr uint32_t kMaxSlots = 1u << 18, kPathBudget = 32, kStateBytes = 140, kAdvancesPerList = 4;
     bool warp = false;  // setWarp(): WARP (software) device - correctness runs without the GPU
     ComPtr<ID3D12Resource> staging;
     uint8_t* stagingPtr = nullptr;
@@ -179,6 +189,7 @@ struct GpuPathTracer::Impl
         psoMean = shaders->compute("Mean");
         psoAtmosphereTable = shaders->compute("AtmosphereTable");
         psoCensus = shaders->compute("Census");
+        psoPathArgs = shaders->compute("PathArgs");
         psoMeanSum = shaders->compute("MeanSum");
         D3D12_QUERY_HEAP_DESC qd{};
         qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
@@ -353,6 +364,10 @@ struct GpuPathTracer::Impl
     void pass(uint32_t maxHalfSamples);
     void runBatch();
     void add(const WorkItem& w);
+    // Reads and resets the kernels' counters (rays, NaN samples, truncated paths, error bits) into the run's statistics.
+    void readCounters();
+    // The camera paths of one rectangle to completion (PathTrace.hlsl wavefront).
+    void runCameraRect(uint32_t halfBase, uint32_t halves, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h, uint32_t c0, uint32_t c1);
     // The accumulation so far (mean over the samples done); final: releases the lock slice and the checkpoint.
     RenderOutput output(bool final);
 };
@@ -1105,6 +1120,7 @@ struct GpuPathTracer::Impl::Run
     // dispatch has been measured near the target (the time model then sizes batches).
     uint64_t unitCap = 4096;
     bool calibrated = false;
+    uint32_t slotCap = 4096;  // camera-path slots per rectangle (the wavefront's measured cap, <= kMaxSlots)
     RenderStats stats;
     // Time model (ms per unit) per kernel, refined from GPU timestamps; start conservative.
     double msPer[3] = { 2e-5, 2e-5, 2e-6 };
@@ -1358,6 +1374,168 @@ void GpuPathTracer::Impl::start(const ResolvedCamera& cam, const RenderSettings&
     R.lastCheckpoint = R.lastProgress = std::chrono::steady_clock::now();
 }
 
+void GpuPathTracer::Impl::runCameraRect(uint32_t halfBase, uint32_t halves, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h, uint32_t c0, uint32_t c1)
+{
+    Run& R = *run;
+    const uint32_t slots = w * h * halves;
+    if (slots > kMaxSlots) fail("gpu reference: %u camera-path slots exceed the wavefront's %u", slots, kMaxSlots);
+    if (!pathStates.res)
+    {
+        const D3D12_RESOURCE_FLAGS uav = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        pathStates = createBuffer((uint64_t)kMaxSlots * kStateBytes, D3D12_HEAP_TYPE_DEFAULT, uav, D3D12_RESOURCE_STATE_COMMON);
+        rawUav(pathStates);
+        for (int k = 0; k < 2; ++k)
+        {
+            pathLists[k] = createBuffer((uint64_t)kMaxSlots * 4, D3D12_HEAP_TYPE_DEFAULT, uav, D3D12_RESOURCE_STATE_COMMON);
+            rawUav(pathLists[k]);
+            pathListUav[k] = pathLists[k].view;
+        }
+        pathWave = createBuffer(64, D3D12_HEAP_TYPE_DEFAULT, uav, D3D12_RESOURCE_STATE_COMMON);
+        rawUav(pathWave);
+        pathArgs = createBuffer(16, D3D12_HEAP_TYPE_DEFAULT, uav, D3D12_RESOURCE_STATE_COMMON);
+        rawUav(pathArgs);
+        pathArgsUav = pathArgs.view;
+        pathWaveReadback = createBuffer(8, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST, false);
+        D3D12_INDIRECT_ARGUMENT_DESC arg{};
+        arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        D3D12_COMMAND_SIGNATURE_DESC sd{};
+        sd.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
+        sd.NumArgumentDescs = 1;
+        sd.pArgumentDescs = &arg;
+        check(device->d3d()->CreateCommandSignature(&sd, nullptr, IID_PPV_ARGS(&dispatchSignature)), "CreateCommandSignature(dispatch)");
+    }
+    // the wave buffer: both list counts 0, then the rectangle
+    const uint32_t wave[16] = { 0, 0, 0, 0, x0, y0, w, h, halves, halfBase, c0, c1, 0, 0, 0, 0 };
+    upload(pathWave, wave, sizeof wave);
+    const double tsFreq = (double)device->queue(render::QueueType::Compute).timestampFrequency();
+    const auto t0 = std::chrono::steady_clock::now();
+    // Diagnostics: UNX_REFERENCE_WAVE_BUDGET lowers the path iterations per dispatch (never above kPathBudget).
+    static const uint32_t budget = [] {
+        char v[16] = {};
+        const DWORD n = GetEnvironmentVariableA("UNX_REFERENCE_WAVE_BUDGET", v, sizeof v);
+        const uint32_t b = n > 0 && n < sizeof v ? (uint32_t)std::strtoul(v, nullptr, 10) : kPathBudget;
+        return std::clamp(b, 1u, kPathBudget);
+    }();
+    auto root = [&](uint32_t mode) {
+        Root r{};
+        r.constants = constantsBuffer.view;
+        r.x0 = pathWave.view;
+        r.y0 = pathStates.view;
+        r.w = pathListUav[0];
+        r.h = pathListUav[1];
+        r.sampleBegin = mode;
+        r.sampleEnd = budget;
+        return r;
+    };
+    auto barrierUav = [](render::CommandList& cl) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        cl.list->ResourceBarrier(1, &b);
+    };
+    auto transition = [](render::CommandList& cl, ID3D12Resource* res, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = res;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = from;
+        b.Transition.StateAfter = to;
+        cl.list->ResourceBarrier(1, &b);
+    };
+    uint32_t written = 1;  // the list the last dispatch wrote (the start writes list 1)
+    double firstMs = 0, rectMaxMs = 0;
+    for (bool first = true;; first = false)
+    {
+        ensureSlice();
+        render::CommandList cl = device->acquireCommandList(render::QueueType::Compute);
+        ID3D12DescriptorHeap* heaps[] = { device->descriptors().resourceHeap(), device->descriptors().samplerHeap() };
+        cl.list->SetDescriptorHeaps(2, heaps);
+        cl.list->SetComputeRootSignature(device->rootSignature());
+        uint32_t queries = 0;
+        if (first)
+        {
+            cl.list->SetPipelineState(psoPath);
+            const Root r = root(0);
+            cl.list->SetComputeRoot32BitConstants(0, sizeof(Root) / 4, &r, 0);
+            cl.list->EndQuery(queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queries++);
+            cl.list->Dispatch((slots + 63) / 64, 1, 1);
+            cl.list->EndQuery(queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queries++);
+            barrierUav(cl);
+        }
+        for (uint32_t k = 0; k < kAdvancesPerList; ++k)
+        {
+            // arguments for the list just written, the other list's count reset
+            cl.list->SetPipelineState(psoPathArgs);
+            Root a{};
+            a.constants = constantsBuffer.view;
+            a.x0 = pathWave.view;
+            a.y0 = pathArgsUav;
+            a.sampleBegin = written;
+            cl.list->SetComputeRoot32BitConstants(0, sizeof(Root) / 4, &a, 0);
+            cl.list->Dispatch(1, 1, 1);
+            barrierUav(cl);
+            transition(cl, pathArgs.res.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+            cl.list->SetPipelineState(psoPath);
+            const Root r = root(written == 1 ? 2u : 1u);
+            cl.list->SetComputeRoot32BitConstants(0, sizeof(Root) / 4, &r, 0);
+            cl.list->EndQuery(queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queries++);
+            cl.list->ExecuteIndirect(dispatchSignature.Get(), 1, pathArgs.res.Get(), 0, nullptr, 0);
+            cl.list->EndQuery(queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queries++);
+            transition(cl, pathArgs.res.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            barrierUav(cl);
+            written = 1 - written;
+        }
+        cl.list->ResolveQueryData(queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, queries, timestampReadback.res.Get(), 0);
+        transition(cl, pathWave.res.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        cl.list->CopyBufferRegion(pathWaveReadback.res.Get(), 0, pathWave.res.Get(), 0, 8);
+        transition(cl, pathWave.res.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+        submitWait(cl);
+        {
+            uint64_t* ts = nullptr;
+            const D3D12_RANGE rr{ 0, 8 * (size_t)queries };
+            check(timestampReadback.res->Map(0, &rr, (void**)&ts), "Map timestamps");
+            for (uint32_t q = 0; q + 1 < queries; q += 2)
+            {
+                const double ms = (double)(ts[q + 1] - ts[q]) * 1000.0 / tsFreq;
+                info.longestDispatchMs = std::max(info.longestDispatchMs, ms);
+                R.dispatchMsSum += ms;
+                ++R.dispatchCount;
+                rectMaxMs = std::max(rectMaxMs, ms);
+                if (first && q == 0) firstMs = ms;
+            }
+            const D3D12_RANGE none{ 0, 0 };
+            timestampReadback.res->Unmap(0, &none);
+        }
+        uint32_t* counts = nullptr;
+        const D3D12_RANGE rr{ 0, 8 };
+        check(pathWaveReadback.res->Map(0, &rr, (void**)&counts), "Map wavefront counts");
+        const uint32_t left = counts[written];
+        const D3D12_RANGE none{ 0, 0 };
+        pathWaveReadback.res->Unmap(0, &none);
+        if (slice && slice->sliceExpired()) slice->release();
+        static const bool trace = GetEnvironmentVariableA("UNX_REFERENCE_TRACE_WAVE", nullptr, 0) > 0;  // diagnostics (WARP first runs)
+        if (trace) logf("gpu reference: wavefront rect %u,%u %ux%u x%u samples %u..%u: %u slots left (longest dispatch %.1f ms)\n", x0, y0, w, h, halves, c0, c1, left,
+                        rectMaxMs);
+        if (left == 0) break;
+    }
+    readCounters();
+    if (info.errors) fail("gpu reference: kernel error bits 0x%x (iteration limit reached; INTERFACES 3.6)", info.errors);
+    // Time model: ms per path sample of this rectangle (pass sizing), and the slot cap from the heaviest dispatch - the
+    // start, where every slot is listed - sized to the target (the cap only lowers the structural kMaxSlots).
+    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    R.stats.seconds += sec;
+    info.gpuSeconds += sec;
+    const double samples = (double)slots * (c1 - c0);
+    if (samples > 0 && sec > 0)
+    {
+        double& m = R.msPer[(int)Kind::Path];
+        const double est = sec * 1000.0 / samples;
+        m = std::max(m * 0.5 + est * 0.5, est * 0.8);
+    }
+    const double target = kTargetDispatchMs;
+    if (rectMaxMs > 2 * target) R.slotCap = std::max(R.slotCap / 2, 256u);
+    else if (firstMs < 0.5 * target && slots >= R.slotCap) R.slotCap = std::min(R.slotCap * 2, kMaxSlots);
+}
+
 void GpuPathTracer::Impl::runBatch()
 {
     Run& R = *run;
@@ -1388,35 +1566,7 @@ void GpuPathTracer::Impl::runBatch()
     }
     cl.list->ResolveQueryData(queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, (UINT)(2 * batch.size()), timestampReadback.res.Get(), 0);
     submitWait(cl);
-    // Counters: read and reset (explicit states: the buffer decayed to COMMON after the list above).
-    {
-        render::CommandList c2 = device->acquireCommandList(render::QueueType::Compute);
-        D3D12_RESOURCE_BARRIER tb{};
-        tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        tb.Transition.pResource = counters.res.Get();
-        tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        tb.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-        tb.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        c2.list->ResourceBarrier(1, &tb);
-        c2.list->CopyBufferRegion(countersReadback.res.Get(), 0, counters.res.Get(), 0, sh::kRtCounterCount * 4);
-        tb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        tb.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-        c2.list->ResourceBarrier(1, &tb);
-        c2.list->CopyBufferRegion(counters.res.Get(), 0, countersZero.res.Get(), 0, sh::kRtCounterCount * 4);
-        tb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        tb.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
-        c2.list->ResourceBarrier(1, &tb);
-        submitWait(c2);
-        uint32_t* cnt = nullptr;
-        const D3D12_RANGE rr{ 0, sh::kRtCounterCount * 4 };
-        check(countersReadback.res->Map(0, &rr, (void**)&cnt), "Map counters");
-        stats.rays += cnt[sh::kRtCounterRays];
-        stats.nanSamples += cnt[sh::kRtCounterNans];
-        stats.truncatedPaths += cnt[sh::kRtCounterTruncated];
-        info.errors |= cnt[sh::kRtCounterErrors];
-        const D3D12_RANGE none{ 0, 0 };
-        countersReadback.res->Unmap(0, &none);
-    }
+    readCounters();
     {
         uint64_t* ts = nullptr;
         const D3D12_RANGE rr{ 0, 16 * batch.size() };
@@ -1454,6 +1604,38 @@ void GpuPathTracer::Impl::runBatch()
     if (slice && slice->sliceExpired()) slice->release();
 }
 
+void GpuPathTracer::Impl::readCounters()
+{
+    RenderStats& stats = run->stats;
+    // Read and reset (explicit states: the buffer decayed to COMMON after the last list).
+    render::CommandList c2 = device->acquireCommandList(render::QueueType::Compute);
+    D3D12_RESOURCE_BARRIER tb{};
+    tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    tb.Transition.pResource = counters.res.Get();
+    tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    tb.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    tb.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    c2.list->ResourceBarrier(1, &tb);
+    c2.list->CopyBufferRegion(countersReadback.res.Get(), 0, counters.res.Get(), 0, sh::kRtCounterCount * 4);
+    tb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    tb.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+    c2.list->ResourceBarrier(1, &tb);
+    c2.list->CopyBufferRegion(counters.res.Get(), 0, countersZero.res.Get(), 0, sh::kRtCounterCount * 4);
+    tb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    tb.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+    c2.list->ResourceBarrier(1, &tb);
+    submitWait(c2);
+    uint32_t* cnt = nullptr;
+    const D3D12_RANGE rr{ 0, sh::kRtCounterCount * 4 };
+    check(countersReadback.res->Map(0, &rr, (void**)&cnt), "Map counters");
+    stats.rays += cnt[sh::kRtCounterRays];
+    stats.nanSamples += cnt[sh::kRtCounterNans];
+    stats.truncatedPaths += cnt[sh::kRtCounterTruncated];
+    info.errors |= cnt[sh::kRtCounterErrors];
+    const D3D12_RANGE none{ 0, 0 };
+    countersReadback.res->Unmap(0, &none);
+}
+
 void GpuPathTracer::Impl::add(const WorkItem& w)
 {
     Run& R = *run;
@@ -1472,32 +1654,20 @@ void GpuPathTracer::Impl::dispatchSamples(uint32_t half, uint32_t begin, uint32_
     const bool useCaustics = R.useCaustics;
     double* msPer = R.msPer;
     const uint32_t halves = half == 2 ? 2u : 1u, halfBase = half == 2 ? 0u : half, end = begin + k;
-    // Camera paths: rectangles of whole rows (or of columns of one row band), at most unitCap paths each, a thread's
-    // samples in chunks of at most kMaxSamplesPerThread (cols >= 8 x perPixel <= 32 stays under unitCap's floor 1024).
+    // Camera paths: a wavefront per rectangle of whole rows (or of columns of one row band) of at most slotCap (pixel,
+    // half) slots, each running the chunk's samples in turn; chunks of at most kMaxSamplesPerThread samples keep each
+    // slot's float sum over the same samples as before.
     for (uint32_t c0 = begin; c0 < end; c0 += kMaxSamplesPerThread)
     {
-    const uint32_t c1 = std::min(end, c0 + kMaxSamplesPerThread);
-    const uint64_t perPixel = (uint64_t)halves * (c1 - c0);
-    const uint32_t cols = (uint32_t)std::clamp<uint64_t>(R.unitCap / perPixel, 8, W);
-    for (uint32_t y0 = 0; y0 < H;)
-    {
-        const double rowMs = (double)cols * perPixel * msPer[(int)Kind::Path];
-        const uint64_t capRows = std::max<uint64_t>(R.unitCap / ((uint64_t)cols * perPixel), 1);
-        const uint32_t rows = (uint32_t)std::min<uint64_t>(std::clamp((uint32_t)(target / std::max(rowMs, 1e-9)), 1u, H - y0), cols < W ? 1 : capRows);
-        for (uint32_t x0 = 0; x0 < W; x0 += cols)
+        const uint32_t c1 = std::min(end, c0 + kMaxSamplesPerThread);
+        const uint32_t pixelCap = std::max(R.slotCap / halves, 1u);
+        const uint32_t cols = std::min(W, pixelCap);
+        for (uint32_t y0 = 0; y0 < H;)
         {
-            const uint32_t wc = std::min(cols, W - x0);
-            WorkItem w{};
-            w.kind = Kind::Path;
-            w.root = { 0, x0, y0, wc, rows, c0, c1, 0, 0, 0, halfBase, 0 };
-            w.groupsX = (wc + 7) / 8;
-            w.groupsY = (rows + 7) / 8;
-            w.groupsZ = halves;
-            w.units = (double)wc * rows * perPixel;
-            add(w);
+            const uint32_t rows = cols < W ? 1u : std::min(H - y0, std::max(pixelCap / cols, 1u));
+            for (uint32_t x0 = 0; x0 < W; x0 += cols) runCameraRect(halfBase, halves, x0, y0, std::min(cols, W - x0), rows, c0, c1);
+            y0 += rows;
         }
-        y0 += rows;
-    }
     }
     // Sun-caustic light paths: W H per sample per half (the CPU's count), then the splat resolve.
     if (useCaustics)
