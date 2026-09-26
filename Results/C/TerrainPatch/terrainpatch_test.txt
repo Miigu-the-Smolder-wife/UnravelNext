@@ -1,0 +1,9 @@
+  z sign +1: 9 of 64 blocks replaced
+  patches: 14337 vertices, 27808 triangles; worst |y - (source + D)| 1.18e-06 m
+  combined: 29566 triangles, 0 open edges inside, 0 edges used 3+ times, 0 flipped
+  projected area 255.500000 m^2 (source 255.500000)
+  z sign -1: 9 of 64 blocks replaced
+  patches: 14337 vertices, 27808 triangles; worst |y - (source + D)| 1.18e-06 m
+  combined: 29566 triangles, 0 open edges inside, 0 edges used 3+ times, 0 flipped
+  projected area 255.500000 m^2 (source 255.500000)
+TERRAIN PATCH TEST PASSED
