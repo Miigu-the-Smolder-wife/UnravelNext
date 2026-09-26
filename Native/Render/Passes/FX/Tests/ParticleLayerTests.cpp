@@ -324,6 +324,8 @@ RunResult run(Device& device, const Options& o, bool verify, bool lit = false, i
                               b.use(out.tileStarts, Use::UavCompute);
                               b.use(out.entries, Use::UavCompute);
                               b.use(out.records, Use::UavCompute);
+                              b.use(out.ribbonVertices, Use::UavCompute);
+                              b.use(out.ribbonAppearance, Use::UavCompute);
                           }
                           else
                           {
@@ -346,6 +348,9 @@ RunResult run(Device& device, const Options& o, bool verify, bool lit = false, i
     const uint64_t edgeBytes = ((16ull + 4ull * out.layerWidth * out.layerHeight + 15) & ~15ull) + (uint64_t)out.edgeCapacity * 128;
     auto edgeData = rb.buffer(graph, out.edges, edgeBytes);
     auto recordData = rb.buffer(graph, out.records, (uint64_t)std::max<uint32_t>(out.threads, 1) * 32);
+    // the strip records after the sprite records (ribbon segments, FxLayerStrips)
+    const uint32_t stripRecords = out.recordCount > out.threads ? out.recordCount - out.threads : 0u;
+    auto stripData = stripRecords ? rb.buffer(graph, out.records, (uint64_t)out.recordCount * 32) : nullptr;
     auto counterData = rb.buffer(graph, out.counters, 16);
     auto flagData = rb.buffer(graph, flags, 16);
     graph.execute(nullptr);
@@ -376,6 +381,20 @@ RunResult run(Device& device, const Options& o, bool verify, bool lit = false, i
     FX_CHECK(counters[2] == 0, "pass status 0x%x (1 entry overflow, 2 tile overflow, 4 edge overflow, 8 range)", counters[2]);
     FX_CHECK(refFlags == 0, "reference: more than 128 covering records at a pixel");
     FX_CHECK(counters[3] > 0, "no record drawn");
+    if (stripData)
+    {
+        uint32_t strips = 0;
+        for (uint32_t i = out.threads; i < out.recordCount; ++i)
+        {
+            float radius;
+            uint32_t recordFlags;
+            std::memcpy(&radius, stripData->data() + (size_t)i * 32 + 8, 4);
+            std::memcpy(&recordFlags, stripData->data() + (size_t)i * 32 + 24, 4);
+            strips += radius > 0 && (recordFlags & 2u) != 0;  // FX_LAYER_RECORD_STRIP
+        }
+        FX_LOG("ribbons: %u points, %u segments drawn as strips", stripRecords, strips);
+        FX_CHECK(strips > 0, "the stream's ribbons drew no strip");
+    }
 
     // pixel comparison: edge pixels (their layer pixel is an edge block) and the others
     const uint32_t lw = out.layerWidth;

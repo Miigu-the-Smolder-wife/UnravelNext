@@ -29,12 +29,12 @@ struct LayerConstants
     uint32_t tileCounts, tileStarts, tileFill, entries;
     uint32_t depth, layer, depthRange, edgeBlocks;
     uint32_t counters, entryCapacity, edgeCapacity, layerSrv;
-    uint32_t edgeBlocksSrv, pad0, pad1, pad2;
+    uint32_t edgeBlocksSrv, ribbonPoints, ribbonLinks, ribbonVertices;
     // Stage 2 (lighting, request 3): S's ShadowSrvs, R's GI cache, S's froxel lights and air volume, the atmosphere LUTs
     // of the view; UNX_NONE where the frame has none.
     uint32_t shadow[8];
     uint32_t giCache, froxelLights, airVolume, transmittance;
-    uint32_t multiScatter, pad3, pad4, pad5;
+    uint32_t multiScatter, ribbonAppearance, ribbonCapacity, stripBase;
 };
 static_assert(sizeof(LayerConstants) == 240);
 constexpr uint32_t kConstantSlots = 64, kConstantSlotBytes = 256;
@@ -77,9 +77,12 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     const uint32_t tilesX = (width + kTilePixels - 1) / kTilePixels, tilesY = (height + kTilePixels - 1) / kTilePixels, tiles = tilesX * tilesY;
     if (tiles > 1024u * 64u) fail("FX layer: %u tiles exceed the one-group scan (%u)", tiles, 1024u * 64u);
     const uint32_t threads = in.threads;
-    // Tile entries: a sprite's square covers at least one tile; the buffer takes 4 per particle + one per tile, and more
+    // Ribbon points of this frame (their strips' segments are records after the sprites'): the latest tick's layout.
+    const uint32_t ribbons = in.ribbonRangeCount ? in.ribbonCapacity : 0u;
+    const uint32_t recordCount = threads + ribbons;
+    // Tile entries: a sprite's square covers at least one tile; the buffer takes 4 per record + one per tile, and more
     // sets FX_LAYER_STATUS_ENTRY_OVERFLOW (reported; the capacity is a cost term to redesign, never a silent cap).
-    const uint32_t entryCapacity = std::max<uint32_t>(threads * 4u + tiles, 4096u);
+    const uint32_t entryCapacity = std::max<uint32_t>(recordCount * 4u + tiles, 4096u);
     // Edge blocks: a quarter of the layer pixels (overflow reported the same way).
     const uint32_t edgeCapacity = std::max<uint32_t>(lw * lh / 4u, 4096u);
     const uint64_t edgeIndexBytes = align(16u + 4ull * lw * lh, 16);
@@ -89,6 +92,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
 
     out.valid = true;
     out.threads = threads;
+    out.recordCount = recordCount;
     out.tiles = tiles;
     out.layerWidth = lw;
     out.layerHeight = lh;
@@ -96,7 +100,15 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     out.edgeCapacity = edgeCapacity;
     out.w = (float)w;
     out.constants = g.createBuffer(BufferDesc{ "fx.layer.constants", kConstantSlotBytes, (uint32_t)sizeof(LayerConstants) });
-    out.records = g.createBuffer(BufferDesc{ "fx.layer.records", (uint64_t)std::max<uint32_t>(threads, 1) * kRecordBytes, kRecordBytes });
+    out.records = g.createBuffer(BufferDesc{ "fx.layer.records", (uint64_t)std::max<uint32_t>(recordCount, 1) * kRecordBytes, kRecordBytes });
+    // ribbons: this frame's points, their half4 appearance, FxRibbon's links, vertices (2 per point), run starts, tangents
+    const uint32_t rb = std::max<uint32_t>(ribbons, 1);
+    const BufferRef ribbonPoints = g.createBuffer(BufferDesc{ "fx.layer.ribbonPoints", (uint64_t)rb * 32, 32 });
+    out.ribbonAppearance = g.createBuffer(BufferDesc{ "fx.layer.ribbonAppearance", (uint64_t)rb * 8, 8 });
+    const BufferRef ribbonLinks = g.createBuffer(BufferDesc{ "fx.layer.ribbonLinks", (uint64_t)rb * 4, 4 });
+    out.ribbonVertices = g.createBuffer(BufferDesc{ "fx.layer.ribbonVertices", (uint64_t)rb * 64, 32 });
+    const BufferRef ribbonRunStart = g.createBuffer(BufferDesc{ "fx.layer.ribbonRunStart", (uint64_t)rb * 4, 4 });
+    const BufferRef ribbonTangents = g.createBuffer(BufferDesc{ "fx.layer.ribbonTangents", (uint64_t)rb * 16, 16 });
     out.tileCounts = g.createBuffer(BufferDesc{ "fx.layer.tileCounts", (uint64_t)tiles * 4, 4 });
     const BufferRef tileFill = g.createBuffer(BufferDesc{ "fx.layer.tileFill", (uint64_t)tiles * 4, 4 });
     out.tileStarts = g.createBuffer(BufferDesc{ "fx.layer.tileStarts", (uint64_t)tiles * 4, 4 });
@@ -118,7 +130,9 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     lc.threads = threads;
     lc.current = in.current;
     lc.rangeCount = in.rangeCount;
-    lc.recordCapacity = std::max<uint32_t>(threads, 1);
+    lc.recordCapacity = recordCount;
+    lc.ribbonCapacity = ribbons;
+    lc.stripBase = threads;
     lc.layerWidth = lw;
     lc.layerHeight = lh;
     lc.tilesX = tilesX;
@@ -157,6 +171,10 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
                   lc.counters = c.uav(o.counters);
                   lc.layerSrv = c.srv(o.layer);
                   lc.edgeBlocksSrv = c.srv(o.edges);
+                  lc.ribbonPoints = c.uav(ribbonPoints);
+                  lc.ribbonLinks = c.uav(ribbonLinks);
+                  lc.ribbonVertices = c.uav(o.ribbonVertices);
+                  lc.ribbonAppearance = c.uav(o.ribbonAppearance);
                   const ParticleLighting& L = f.lighting;
                   const uint32_t none = 0xFFFFFFFFu;
                   const bool sun = L.vsmPageTable.valid() && (L.vsmAtlas.valid() || L.vsmPool.valid()) && L.vsmBlocks.valid() && L.vsmSearchBound.valid();
@@ -212,13 +230,44 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         b.use(o.records, Use::UavCompute);
         b.use(o.tileCounts, Use::UavCompute);
         b.use(o.counters, Use::UavCompute);
+        b.use(ribbonPoints, Use::UavCompute);
+        b.use(o.ribbonAppearance, Use::UavCompute);
     });
+    if (ribbons)
+    {
+        // the strips of this frame's points (FxRibbon, the simulation's kernel: same geometry rules), then their segments
+        dispatch("fx.layer.ribbon.clear", "Passes/FX/FxLayerStrips.STEP0", groups(ribbons, 256), [=](PassBuilder& b) { b.use(ribbonLinks, Use::UavCompute); });
+        ID3D12PipelineState* ribbonPso = shaders.compute("Passes/FX/FxRibbon");
+        const BufferRef ranges = in.ribbonRanges, programs = in.programs;
+        const uint32_t rangeCount = in.ribbonRangeCount;
+        g.addPass("fx.layer.ribbon", QueueType::Graphics,
+                  [=](PassBuilder& b) {
+                      for (const BufferRef& x : { ribbonPoints, ribbonLinks, o.ribbonVertices, ribbonRunStart, ribbonTangents }) b.use(x, Use::UavCompute);
+                      b.use(ranges, Use::SrvCompute);
+                      b.use(programs, Use::SrvCompute);
+                  },
+                  [=](PassContext& c) {
+                      const std::array<uint32_t, 8> p = { c.uav(ribbonPoints), c.uav(ribbonLinks), c.uav(o.ribbonVertices), c.srv(ranges),
+                                                          c.uav(ribbonRunStart), c.uav(ribbonTangents), rangeCount, c.srv(programs) };
+                      c.cmd->SetPipelineState(ribbonPso);
+                      c.bindFrameConstants(frameConstants);
+                      c.computeConstants(p.data(), 8);
+                      c.cmd->Dispatch(rangeCount, 1, 1);
+                  });
+        dispatch("fx.layer.strips", "Passes/FX/FxLayerStrips.STEP1", groups(ribbons, 256), [=](PassBuilder& b) {
+            b.use(ribbonLinks, Use::UavCompute);
+            b.use(o.ribbonVertices, Use::UavCompute);
+            b.use(o.records, Use::UavCompute);
+            b.use(o.tileCounts, Use::UavCompute);
+            b.use(o.counters, Use::UavCompute);
+        });
+    }
     dispatch("fx.layer.scan", "Passes/FX/FxLayerScan.STEP1", 1, [=](PassBuilder& b) {
         b.use(o.tileCounts, Use::UavCompute);
         b.use(o.tileStarts, Use::UavCompute);
         b.use(o.counters, Use::UavCompute);
     });
-    dispatch("fx.layer.scatter", "Passes/FX/FxLayerSetup.STEP1", groups(threads, 256), [=](PassBuilder& b) {
+    dispatch("fx.layer.scatter", "Passes/FX/FxLayerSetup.STEP1", groups(recordCount, 256), [=](PassBuilder& b) {
         b.use(o.records, Use::UavCompute);
         b.use(tileFill, Use::UavCompute);
         b.use(o.tileStarts, Use::UavCompute);
@@ -235,6 +284,10 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         b.use(o.layer, Use::UavCompute);
         b.use(o.depthRange, Use::UavCompute);
         b.use(o.edges, Use::UavCompute);
+        b.use(o.ribbonVertices, Use::UavCompute);
+        b.use(o.ribbonAppearance, Use::UavCompute);
+        for (const TextureRef& x : { lighting.airVolume, lighting.transmittanceLut, lighting.multiScatterLut })
+            if (x.valid()) b.use(x, Use::SrvCompute);
     });
     return out;
 }

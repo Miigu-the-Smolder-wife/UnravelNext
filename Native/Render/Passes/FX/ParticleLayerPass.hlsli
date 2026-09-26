@@ -12,6 +12,7 @@
 #include "Frame.hlsli"
 #include "Passes/FX/StreamRecords.hlsli"
 #include "Passes/FX/ParticleLayer.hlsli"
+#include "Passes/Atmosphere/Atmosphere.hlsli"
 
 #define FX_LAYER_TILE 8u         // layer pixels per tile side
 #define FX_LAYER_SCALE 4u        // full-resolution pixels per layer pixel side
@@ -46,11 +47,12 @@ struct LayerConstants
     uint tileCounts, tileStarts, tileFill, entries;
     uint depth, layer, depthRange, edgeBlocks;
     uint counters, entryCapacity, edgeCapacity, layerSrv;  // layer / edges: UAVs; layerSrv, edgeBlocksSrv: their SRVs
-    uint edgeBlocksSrv, pad0, pad1, pad2;
+    uint edgeBlocksSrv, ribbonPoints, ribbonLinks, ribbonVertices;  // ribbons (strips): this frame's points, links, vertices
     uint shadowPageTable, shadowPool, shadowBlocks, shadowSearchBound;  // S's ShadowSrvs (stage 2 lighting)
     uint shadowConstants, shadowLights, shadowSlotOfLight, shadowLayers;
     uint giCache, froxelLights, airVolume, transmittance;
-    uint multiScatter, pad3, pad4, pad5;
+    uint multiScatter, ribbonAppearance, ribbonCapacity, stripBase;  // per-point half4 appearance; points; strip records at
+                                                                      // stripBase + point (after the sprite records)
 };
 
 // One render range (ParticleSystem.cpp): render threads [thread, thread + count) are births [first, first + count) of
@@ -70,6 +72,12 @@ struct LayerRecord
     uint program;
 };
 #define FX_LAYER_RECORD_SMALL 1u  // radius < FX_LAYER_MIN_RADIUS: full-resolution walk only
+#define FX_LAYER_RECORD_STRIP 2u  // a ribbon/beam segment: radianceAlpha = (its point, the previous point), evaluated per pixel
+
+// Ribbon points of this frame (FxLayerSetup: the particle at the frame time, camera-relative; the layout of the stream's
+// ribbon points) and the strip vertices FxRibbon builds from them (two per point, the side frame parallel-transported).
+struct FxRibbonPoint { float3 position; float width; float age; uint valid; uint pad0, pad1; };  // 32 B (Particles.hlsli RibbonPoint)
+struct FxRibbonVertex { float3 position; float3 normal; float2 uv; };                          // 32 B (FxRibbon.hlsl)
 
 LayerConstants fxLayerConstants()
 {
@@ -100,5 +108,78 @@ float fxLayerOpacity(LayerRecord r, float2 p, float alpha)
     const float2 d = p - r.centre;
     const float q = dot(d, d) / (r.radius * r.radius);
     return q < 1.0f ? alpha * (1.0f - q) * (1.0f - q) : 0.0f;
+}
+
+// Ray (origin 0, camera-relative direction D) against triangle (a, b, c): distance t along D and barycentrics (u, v) of b
+// and c. Two-sided.
+bool fxRayTriangle(float3 D, float3 a, float3 b, float3 c, out float t, out float u, out float v)
+{
+    const float3 e1 = b - a, e2 = c - a, q = cross(D, e2);
+    const float det = dot(e1, q);
+    t = u = v = 0;
+    if (abs(det) < 1e-20f) return false;
+    const float inv = 1.0f / det;
+    const float3 s = -a;
+    u = dot(s, q) * inv;
+    const float3 r = cross(s, e1);
+    v = dot(D, r) * inv;
+    t = dot(e2, r) * inv;
+    return u >= 0 && v >= 0 && u + v <= 1 && t > 0;
+}
+
+// A strip record at full-resolution point p: the pixel-centre ray's hit on the segment's quad (the previous point's edge
+// vertices A0, A1, this point's B0, B1; triangles (A0, A1, B0) and (B0, A1, B1)), s along the segment (0 at A) and e across
+// (0 at edge 0). Opacity: the points' alphas interpolated along, times the profile (1 - x^2)^2 across (x = 2 e - 1; the
+// sprite profile's section); radiance: the points' interpolated along, then the air between the camera and the hit (S's air
+// volume at the pixel and the hit's view depth). Device depth = near / view depth of the hit.
+bool fxStripSample(LayerConstants c, LayerRecord r, float2 p, out float a, out float3 colour, out float depth)
+{
+    a = 0;
+    colour = 0;
+    depth = 0;
+    const uint k = r.radianceAlpha.x, j = r.radianceAlpha.y;
+    RWStructuredBuffer<FxRibbonVertex> vertices = ResourceDescriptorHeap[c.ribbonVertices];  // (UAVs: written earlier in the pass)
+    const float3 a0 = vertices[2u * j].position, a1 = vertices[2u * j + 1u].position;
+    const float3 b0 = vertices[2u * k].position, b1 = vertices[2u * k + 1u].position;
+    // the pixel-centre ray (view space at z = -1, then world axes; every projection here has no shear: mPixelRay)
+    const float2 ndc = float2(p.x / g_viewWidth * 2 - 1, 1 - p.y / g_viewHeight * 2);
+    const float vx = (ndc.x + g_proj[0][2] - g_proj[0][3]) / g_proj[0][0];
+    const float vy = (ndc.y + g_proj[1][2] - g_proj[1][3]) / g_proj[1][1];
+    const float3 D = g_view[0].xyz * vx + g_view[1].xyz * vy - g_view[2].xyz;  // view depth of D is 1
+    float t, u, v, s, e;
+    if (fxRayTriangle(D, a0, a1, b0, t, u, v)) { s = v; e = u; }
+    else if (fxRayTriangle(D, b0, a1, b1, t, u, v)) { s = 1 - u; e = u + v; }
+    else return false;
+    if (!(t > g_nearPlane)) return false;
+    RWStructuredBuffer<uint2> appearance = ResourceDescriptorHeap[c.ribbonAppearance];
+    const float4 pa = fxUnpackHalf4(appearance[j]), pb = fxUnpackHalf4(appearance[k]);
+    const float4 ca = lerp(pa, pb, saturate(s));
+    const float x = 2 * saturate(e) - 1;
+    a = ca.w * (1 - x * x) * (1 - x * x);
+    colour = ca.rgb;
+    depth = g_nearPlane / t;
+    if (c.airVolume != UNX_NONE && c.transmittance != UNX_NONE)
+    {
+        AtmosphereSrvs atm;
+        atm.transmittance = c.transmittance;
+        atm.multiScatter = c.multiScatter;
+        atm.skyView = UNX_NONE;
+        atm.aerial = c.airVolume;
+        float3 inscatter, transmittance, sunAtDepth;
+        atmosphereAirView(atm, p / float2(g_viewWidth, g_viewHeight), t, inscatter, transmittance, sunAtDepth);
+        colour = colour * transmittance + inscatter * g_exposure;
+    }
+    return a > 0;
+}
+
+// Opacity, premultiplied colour and device depth of any record at full-resolution point p.
+bool fxLayerSample(LayerConstants c, LayerRecord r, float2 p, out float a, out float3 colour, out float depth)
+{
+    if ((r.flags & FX_LAYER_RECORD_STRIP) != 0u) return fxStripSample(c, r, p, a, colour, depth);
+    const float4 ca = fxUnpackHalf4(r.radianceAlpha);
+    a = fxLayerOpacity(r, p, ca.w);
+    colour = ca.rgb;
+    depth = r.depth;
+    return a > 0;
 }
 #endif

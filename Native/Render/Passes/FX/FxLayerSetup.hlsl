@@ -147,32 +147,22 @@ RenderRange renderRange(LayerConstants c, uint t, uint group)
     return ranges[lo];
 }
 
-LayerRecord setup(LayerConstants c, uint t, uint group)
+// The particle at the frame time, relative to the camera, and its age (false: not alive then). A particle of both ticks by
+// cubic Hermite of the two ends' positions and velocities; one born in the latest tick by p_n - v_n (1 - w) dt; one that died
+// in it by p_(n-1) + v_(n-1) w dt while w dt < lifetime - age_(n-1). 'dying' = a particle of the previous state only.
+bool fxParticleAt(LayerConstants c, RenderRange rr, uint k, uint birth, uint row, StreamProgram p, out float3 pos, out float age, out bool dying)
 {
-    LayerRecord rec = (LayerRecord)0;
-    const RenderRange rr = renderRange(c, t, group);
-    const uint k = t - rr.thread, birth = rr.first + k, row = rr.row;
-    StructuredBuffer<StreamEmitter> emitters = ResourceDescriptorHeap[c.emitters];
-    StructuredBuffer<StreamProgram> programs = ResourceDescriptorHeap[c.programs];
-    const StreamEmitter e = emitters[row];
-    const StreamProgram p = programs[e.program];
-    // The particle material contract (0 emissive: colour = nit; 1 lit: colour = albedo): any other value is refused, not
-    // guessed (an old material-table index drew as emissive at the wrong scale).
-    const bool badMaterial = p.output == FX_OUTPUT_SPRITE && p.material > 1u;
-    if (WaveActiveAnyTrue(badMaterial) && WaveIsFirstLane()) fxLayerStatus(c, FX_LAYER_STATUS_MATERIAL);
-    if (badMaterial || p.output != FX_OUTPUT_SPRITE || (e.flags & FX_EMITTER_KILLED) != 0u || !(p.lifetime > 0)) return rec;
-
-    // the particle at the frame time, relative to the camera
+    pos = 0;
+    age = 0;
+    dying = (rr.prevCountFlags & 0x80000000u) != 0u;
     const float wdt = c.w * c.dt, rest = (1.0f - c.w) * c.dt;
-    float3 pos;
-    float age;
-    if ((rr.prevCountFlags & 0x80000000u) != 0u)
+    if (dying)
     {
         StructuredBuffer<float4> posAge = ResourceDescriptorHeap[c.posAgePrev];
         StructuredBuffer<float4> velocity = ResourceDescriptorHeap[c.velocityPrev];
         StructuredBuffer<EmitterDynamic> dynamic = ResourceDescriptorHeap[c.dynamicPrev];
         const float4 pa = posAge[rr.stateBase + k];
-        if (!(wdt < p.lifetime - pa.w)) return rec;  // dead by the frame time
+        if (!(wdt < p.lifetime - pa.w)) return false;  // dead by the frame time
         pos = c.offsetPrev + dynamic[row].originAnchor + pa.xyz + velocity[rr.stateBase + k].xyz * wdt;
         age = pa.w + wdt;
     }
@@ -198,10 +188,95 @@ LayerRecord setup(LayerConstants c, uint t, uint group)
         }
         else
         {
-            if (age < 0) return rec;  // born after the frame time
+            if (age < 0) return false;  // born after the frame time
             pos = p1 - v1 * rest;
         }
     }
+    return true;
+}
+
+// A ribbon particle's point of this frame at its place in the stream's ribbon layout (output_base + birth - death_birth of
+// the latest tick; FxRibbon then builds the strips): camera-relative position at the frame time, width after the
+// pixel-footprint prefilter across it (the strip's profile widened to h' = sqrt(h^2 + 1/4) px, h its half width, at the same
+// integrated opacity: alpha h / h'), and its appearance before the air (the strip samples the air at each hit):
+// radiance x exposure (material 1 lit at the point like a sprite, 0 emissive), opacity. A point born after the frame time
+// is written invalid: those are the newest births, the range's tail, and FxRibbon ends the range at the first one. A point
+// of the previous state only (died in the latest tick) has no place in the latest layout and is not drawn this frame (its
+// alpha is the end of its life's curve). A killed emitter or a refused material writes invalid points (nothing drawn).
+void ribbonPoint(LayerConstants c, RenderRange rr, uint k, uint birth, uint row, StreamEmitter e, StreamProgram p, bool drawn)
+{
+    float3 pos;
+    float age;
+    bool dying;
+    const bool alive = drawn && fxParticleAt(c, rr, k, birth, row, p, pos, age, dying);
+    dying = (rr.prevCountFlags & 0x80000000u) != 0u;
+    if (dying) return;
+    const uint index = e.outputBase + (birth - e.deathBirth);
+    if (index >= c.ribbonCapacity) { fxLayerStatus(c, FX_LAYER_STATUS_RANGE); return; }
+    RWStructuredBuffer<FxRibbonPoint> points = ResourceDescriptorHeap[c.ribbonPoints];
+    RWStructuredBuffer<uint2> appearance = ResourceDescriptorHeap[c.ribbonAppearance];
+    FxRibbonPoint rp = (FxRibbonPoint)0;
+    if (!alive)
+    {
+        points[index] = rp;  // valid = 0
+        appearance[index] = uint2(0, 0);
+        return;
+    }
+    const float u = saturate(age / p.lifetime);
+    const float size = p.size * e.sizeScale * curve1(p.sizeKeys, p.sizeCount, u);
+    const float3 colour = p.color.rgb * e.colorScale.rgb * curve3(p.colorKeys, p.colorCount, u);
+    float alpha = saturate(p.color.a * e.colorScale.a * curve1(p.alphaKeys, p.alphaCount, u));
+    const float3 v = mul((float3x3)g_view, pos);
+    const float distance = -v.z;
+    float width = max(size, 0.0f);
+    float2 pixel = float2(0.5f * g_viewWidth, 0.5f * g_viewHeight);
+    if (distance > g_nearPlane && width > 0)
+    {
+        const float h = 0.5f * width * g_proj[1][1] * 0.5f * g_viewHeight / distance;
+        const float hEff = sqrt(h * h + 0.25f);
+        width *= hEff / h;
+        alpha *= h / hEff;
+        const float4 clip = mul(g_proj, float4(v, 1));
+        pixel = clamp(float2((clip.x / clip.w + 1) * 0.5f * g_viewWidth, (1 - clip.y / clip.w) * 0.5f * g_viewHeight), 0.0f,
+                      float2(g_viewWidth - 1, g_viewHeight - 1));
+    }
+    const float linearZ = max(distance, g_nearPlane);
+    const float footprint = 2.0f * linearZ / (g_proj[1][1] * g_viewHeight);
+    const float3 radiance = p.material == 1u ? fxLitRadiance(c, colour, pos, normalize(pos), p.mediumPhase, max(size * 0.5f, footprint), (uint2)pixel, linearZ) : colour;
+    rp.position = pos;
+    rp.width = width;
+    rp.age = age;
+    rp.valid = 1u;
+    points[index] = rp;
+    appearance[index] = fxPackHalf4(float4(radiance * g_exposure, alpha));
+}
+
+LayerRecord setup(LayerConstants c, uint t, uint group)
+{
+    LayerRecord rec = (LayerRecord)0;
+    const RenderRange rr = renderRange(c, t, group);
+    const uint k = t - rr.thread, birth = rr.first + k, row = rr.row;
+    StructuredBuffer<StreamEmitter> emitters = ResourceDescriptorHeap[c.emitters];
+    StructuredBuffer<StreamProgram> programs = ResourceDescriptorHeap[c.programs];
+    const StreamEmitter e = emitters[row];
+    const StreamProgram p = programs[e.program];
+    // The particle material contract (0 emissive: colour = nit; 1 lit: colour = albedo): any other value is refused, not
+    // guessed (an old material-table index drew as emissive at the wrong scale).
+    const bool badMaterial = p.output == FX_OUTPUT_SPRITE && p.material > 1u;
+    if (WaveActiveAnyTrue(badMaterial) && WaveIsFirstLane()) fxLayerStatus(c, FX_LAYER_STATUS_MATERIAL);
+    const bool badRibbon = p.output == FX_OUTPUT_RIBBON && p.material > 1u;
+    if (WaveActiveAnyTrue(badRibbon) && WaveIsFirstLane()) fxLayerStatus(c, FX_LAYER_STATUS_MATERIAL);
+    if (p.output == FX_OUTPUT_RIBBON)
+    {
+        ribbonPoint(c, rr, k, birth, row, e, p, !badRibbon && (e.flags & FX_EMITTER_KILLED) == 0u && p.lifetime > 0);
+        return rec;
+    }
+    if (badMaterial || p.output != FX_OUTPUT_SPRITE || (e.flags & FX_EMITTER_KILLED) != 0u || !(p.lifetime > 0)) return rec;
+
+    float3 pos;
+    float age;
+    bool dying;
+    if (!fxParticleAt(c, rr, k, birth, row, p, pos, age, dying)) return rec;
 
     // appearance at that age
     const float u = saturate(age / p.lifetime);
@@ -255,7 +330,11 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
     const LayerConstants c = fxLayerConstants();
     const uint t = id.x;
+#if STEP == 0
     if (t >= c.threads) return;
+#else
+    if (t >= c.recordCapacity) return;
+#endif
     RWStructuredBuffer<LayerRecord> records = ResourceDescriptorHeap[c.records];
 #if STEP == 0
     s_curveKeys = c.curveKeys;
@@ -270,6 +349,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID)
     RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[c.counters];
     if (WaveIsFirstLane()) InterlockedAdd(counters[FX_LAYER_COUNTER_DRAWN], n);
 #else
+    // (the thread range covers the strip records too: FxLayerStrips at stripBase + point)
     const LayerRecord rec = records[t];
     uint2 t0, t1;
     if (!fxLayerTiles(c, rec, t0, t1)) return;

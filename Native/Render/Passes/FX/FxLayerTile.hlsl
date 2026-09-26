@@ -4,7 +4,8 @@
 //      the order is deterministic), at most FX_LAYER_TILE_ENTRIES (the farthest beyond are dropped with
 //      FX_LAYER_STATUS_TILE_OVERFLOW: a defect to redesign, never an expected state);
 //   2. thread per layer pixel: its 4 x 4 block's opaque depth range; front-to-back composite at the block centre of the
-//      sprites whose radius is >= FX_LAYER_MIN_RADIUS and that are in front of every opaque pixel of the block:
+//      sprites whose radius is >= FX_LAYER_MIN_RADIUS (strips as wide) and that are in front of every opaque pixel of the
+//      block (a strip at its hit there):
 //      L += T a c, T *= 1 - a. The block is an edge block (ParticleLayer.hlsli) when a small sprite touches it or a
 //      sprite's depth lies inside the block's opaque depth range;
 //   3. per edge block (16 threads each): every full-resolution pixel composites the whole sorted list at its centre,
@@ -37,16 +38,24 @@ float4 composite(uint count, float2 p, float opaqueFar, float opaqueNear, bool l
         const float reach = r.radius + blockReach;
         if (dot(d, d) >= reach * reach) continue;          // the square test binned it; the disc misses this block/pixel
         if (!(r.depth > opaqueFar)) continue;              // behind every opaque pixel of the block (or this pixel's surface)
+                                                           // (a strip's record depth is its nearest vertex)
+        const bool strip = (r.flags & FX_LAYER_RECORD_STRIP) != 0u;
         if (layer)
         {
-            if ((r.flags & FX_LAYER_RECORD_SMALL) != 0u || r.depth < opaqueNear) { edge = true; continue; }
+            if ((r.flags & FX_LAYER_RECORD_SMALL) != 0u || (!strip && r.depth < opaqueNear)) { edge = true; continue; }
         }
-        const float4 ca = fxUnpackHalf4(r.radianceAlpha);
-        const float a = fxLayerOpacity(r, p, ca.w);
-        if (!(a > 0)) continue;
-        L += T * a * ca.rgb;
+        float a, sampleDepth;
+        float3 colour;
+        if (!fxLayerSample(c, r, p, a, colour, sampleDepth)) continue;
+        if (strip)
+        {
+            // a strip's depth varies over it: the test at this sample (its hit)
+            if (!(sampleDepth > opaqueFar)) continue;
+            if (layer && sampleDepth < opaqueNear) { edge = true; continue; }
+        }
+        L += T * a * colour;
         T *= 1.0f - a;
-        depthRange = float2(depthRange.x == 0 ? r.depth : min(depthRange.x, r.depth), max(depthRange.y, r.depth));
+        depthRange = float2(depthRange.x == 0 ? sampleDepth : min(depthRange.x, sampleDepth), max(depthRange.y, sampleDepth));
     }
     return float4(L, T);
 }

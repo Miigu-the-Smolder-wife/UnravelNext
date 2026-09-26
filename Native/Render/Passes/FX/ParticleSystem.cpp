@@ -219,6 +219,7 @@ struct ParticleSystem::Impl
     // particles that died in it (drawn from the previous state until their death time); group of 256 threads -> range.
     Buf renderRanges{ "fx.renderRanges", 32 }, renderBlocks{ "fx.renderBlocks", 4 };
     uint32_t renderThreads = 0, renderCurrent = 0, renderRangeCount = 0;
+    uint32_t ribbonRangeCount = 0, ribbonCapacity = 0;  // the latest tick's ribbon ranges and points (render pass strips)
     double anchor[2][3] = {};  // stream anchor of the tick whose state is in that parity
     float tickDt = 0;          // dt of the latest tick
     double tickTime = 0;       // context time at the end of the latest tick
@@ -609,6 +610,8 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             if (ribbonRanges.size() > 65535u) fail("FX particles: %zu ribbon ranges exceed one dispatch (65535 groups)", ribbonRanges.size());
         }
         const uint32_t ribbonN = ribbonRanges.empty() ? 0 : h.ribbon_points;
+        m.ribbonRangeCount = (uint32_t)ribbonRanges.size();
+        m.ribbonCapacity = ribbonN;
         // volume ranges (active NV_VOLUME rows, by first cell): the record index of a volume particle (Particles.hlsli)
         struct VolumeRange { uint32_t first, cells, grid, program, particleBase, pad[3]; };
         std::vector<VolumeRange> volumeRanges;
@@ -1134,7 +1137,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             ID3D12PipelineState* pso = shaders.compute("Passes/FX/FxRibbon");
             g.addPass("fx.particles.ribbon", queueType, declare, [=](PassContext& c) {
                 const std::array<uint32_t, 8> p = { c.uav(mi->ribbonPoints.ref), c.uav(mi->ribbonLinks.ref), c.uav(mi->ribbonVertices.ref), c.srv(mi->ribbonRanges.ref),
-                                                    c.uav(mi->ribbonRunStart.ref), c.uav(mi->ribbonTangents.ref), rangeCount, 0 };
+                                                    c.uav(mi->ribbonRunStart.ref), c.uav(mi->ribbonTangents.ref), rangeCount, c.srv(mi->programs.ref) };
                 c.cmd->SetPipelineState(pso);
                 c.bindFrameConstants(constants);
                 c.computeConstants(p.data(), 8);
@@ -1335,6 +1338,12 @@ ParticleRenderInputs ParticleSystem::renderInputs(RenderGraph& graph, uint64_t i
     r.curveKeys = m.curveKeys.import(graph, importIndex);
     r.renderRanges = m.renderRanges.import(graph, importIndex);
     r.renderBlocks = m.renderBlocks.import(graph, importIndex);
+    if (m.ribbonRangeCount && m.ribbonRanges.resource)
+    {
+        r.ribbonRanges = m.ribbonRanges.import(graph, importIndex);
+        r.ribbonRangeCount = m.ribbonRangeCount;
+        r.ribbonCapacity = m.ribbonCapacity;
+    }
     r.threads = m.renderThreads;
     r.current = m.renderCurrent;
     r.rangeCount = m.renderRangeCount;

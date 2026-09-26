@@ -4,7 +4,8 @@
 //   STEP=0 reference: every record of the pixel's tile list that covers the pixel centre and is in front of the pixel's
 //          opaque depth, sorted per pixel (insertion sort of up to 128; more sets the reference overflow bit in P[0].z's
 //          buffer), composited front to back at full resolution -> RGBA32F (L, T). Independent of the tile kernel's
-//          sort, 1/4 layer and edge classification; shares the records, the tile lists and the opacity function.
+//          sort, 1/4 layer and edge classification; shares the records, the tile lists and the sample function (sprite
+//          profile, strip hit).
 //   STEP=1 compose: the pass's output at the pixel through fxParticleLayerAt (the function M's shading calls) -> RGBA32F.
 // P[0] = (LayerConstants, output UAV, flags UAV (uint), 0)
 #include "Passes/FX/ParticleLayerPass.hlsli"
@@ -34,7 +35,9 @@ void main(uint3 id : SV_DispatchThreadID)
         const uint r = entries[start + i].y;
         const LayerRecord rec = records[r];
         if (!(rec.depth > d)) continue;
-        if (!(fxLayerOpacity(rec, p, 1.0f) > 0)) continue;
+        float a0, depth0;
+        float3 unused;
+        if (!fxLayerSample(c, rec, p, a0, unused, depth0) || !(depth0 > d)) continue;
         if (n == 128u)
         {
             RWStructuredBuffer<uint> flags = ResourceDescriptorHeap[P[0].z];
@@ -58,9 +61,10 @@ void main(uint3 id : SV_DispatchThreadID)
     for (uint j = 0u; j < n; ++j)
     {
         const LayerRecord rec = records[idx[j]];
-        const float4 ca = fxUnpackHalf4(rec.radianceAlpha);
-        const float a = fxLayerOpacity(rec, p, ca.w);
-        L += T * a * ca.rgb;
+        float a, sampleDepth;
+        float3 colour;
+        fxLayerSample(c, rec, p, a, colour, sampleDepth);
+        L += T * a * colour;
         T *= 1.0f - a;
     }
     output[id.xy] = float4(L, T);

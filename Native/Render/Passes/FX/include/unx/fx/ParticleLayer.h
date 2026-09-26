@@ -36,7 +36,9 @@ struct ParticleLayerOutput
     render::BufferRef edges;               // raw: count, edge index table, edge blocks (ParticleLayer.hlsli)
     // the pass's own resources (tests read them)
     render::BufferRef constants, records, tileCounts, tileStarts, entries, counters;
+    render::BufferRef ribbonVertices, ribbonAppearance;  // this frame's strips (the records' sample function reads them)
     uint32_t threads = 0, tiles = 0, layerWidth = 0, layerHeight = 0, entryCapacity = 0, edgeCapacity = 0;
+    uint32_t recordCount = 0;  // records: threads sprite records, then one per ribbon point (strip segments)
     float w = 0;  // frame time between the previous tick's end (0) and the latest tick's end (1)
 };
 
