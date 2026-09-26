@@ -653,7 +653,7 @@ void physicalTable(const Config& c, const Definitions& d, uint32_t photons, Tabl
     });
 }
 
-enum class Which { R1, Old, R1A, R1B };
+enum class Which { R1, Old, R1A, R1B, Model };  // Model: scene::model::evaluateCoated (the shipped table form, A9)
 // parts (R1 only, optional): energy (luminance) of f_c, f_1, f_ms per incidence bin.
 using Parts = std::vector<std::array<double, 3>>;
 // f1E (optional): energy of the f_1 part per incidence bin, per channel.
@@ -704,12 +704,23 @@ void definitionTable(const Config& c, const Definitions& d, Which which, uint32_
             const double pdf = 0.35 * pc + 0.45 * baseLobePdf(wo) + 0.2 * wo.z / kPi;
             if (!(pdf > 0)) continue;
             Rgb pr[3];
-            const Rgb f = which != Which::Old ? d.r1(wo, wi, pr, which == Which::R1A || which == Which::R1B, which == Which::R1B) : d.old(wo, wi);
+            Rgb f;
+            if (which == Which::Model)
+            {
+                scene::model::Coat coat;
+                coat.cover = 1;
+                coat.roughness = (float)c.rc;
+                coat.eta = (float)kEta;
+                const float3 m = scene::model::evaluateCoated(c.base, coat, { 0, 0, 1 }, wo, wi);
+                f = Rgb(m.x, m.y, m.z);
+                pr[0] = pr[1] = pr[2] = Rgb();
+            }
+            else f = which != Which::Old ? d.r1(wo, wi, pr, which == Which::R1A || which == Which::R1B, which == Which::R1B) : d.old(wo, wi);
             int bt, bp;
             binOf(wo, bt, bp);
             const double wgt = wo.z / pdf / samples;
             T.at((int)ii, bt, bp) += (f1Only ? pr[1] : f) * (float)wgt;
-            if (which != Which::Old)
+            if (which != Which::Old && which != Which::Model)
             {
                 for (int k = 0; k < 3; ++k) pp[k] += pr[k].luminance() * wgt;
                 f1Sum += pr[1] * (float)wgt;
@@ -1098,6 +1109,55 @@ void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, boo
             }
         }
     writeTextFile(out, md.str() + eq.str());
+}
+
+// A9: the shipped table form (scene::model::evaluateCoated: R1 + A2 + S with the tables of both coats) against the
+// energy-conserving physical coat, on clearcoatR1Study's grid, for the coat's eta (setCoatEta before).
+void clearcoatModelStudy(const std::string& out, uint32_t photons)
+{
+    auto mk = [](float3 c, float r, float m) {
+        scene::model::Surface s;
+        s.baseColor = c;
+        s.roughness = r;
+        s.metallic = m;
+        return s;
+    };
+    const std::pair<const char*, scene::model::Surface> bases[] = {
+        { "white diffuse 0.8", mk({ 0.8f, 0.8f, 0.8f }, 0.9f, 0) }, { "red paint r 0.5", mk({ 0.6f, 0.05f, 0.05f }, 0.5f, 0) },
+        { "black glossy r 0.2", mk({ 0.02f, 0.02f, 0.02f }, 0.2f, 0) }, { "tile glaze base r 0.4", mk({ 0.7f, 0.65f, 0.55f }, 0.4f, 0) },
+        { "metal flake r 0.3", mk({ 0.9f, 0.6f, 0.3f }, 0.3f, 1) }, { "chrome r 0.1", mk({ 0.9f, 0.9f, 0.9f }, 0.1f, 1) } };
+    const std::vector<EnvSample> furnace = environment(true), sky = environment(false);
+    double skyWhite = 0;
+    {
+        const float3 s = normalize(float3{ 0.45f, 0.62f, 0.64f });
+        for (const EnvSample& e : sky)
+            if (dot(e.dir, s) > 0) skyWhite += e.L.luminance() * dot(e.dir, s) * e.dw / kPi;
+    }
+    std::ostringstream md;
+    md << "# Clearcoat table model (scene::model::evaluateCoated) vs physical layer model, eta " << kEta << " [measured]\n\n"
+          "`unx_study_material_layers clearcoat_model <out> " << photons << " " << kEta << "`. Physical coat: microsurface multiple "
+          "scattering (energy conserving). Criteria (MATERIAL_LAYERS 3): albedo rel <= 2 % (or abs <= 0.005), L1 <= 0.05, render "
+          "dE76 mean <= 1.0 and P99 <= 2.3.\n\n"
+          "| base | r_c | definition | worst albedo (rel @theta, abs) | albedo rel at 0/30/60/75/85° | worst L1 | L1 noise | furnace dE mean / P99 | sun+sky dE mean / P99 | render noise P99 furnace / sky | criteria |\n"
+          "|---|---|---|---|---|---|---|---|---|---|---|\n";
+    for (double rc : { 0.05, 0.12, 0.30 })
+        for (const auto& [name, base] : bases)
+        {
+            Config c;
+            c.name = name;
+            c.base = base;
+            c.rc = rc;
+            c.msCoat = true;
+            Definitions d(c);
+            Table phys, half, model;
+            physicalTable(c, d, photons, phys, half);
+            definitionTable(c, d, Which::Model, photons, model);
+            const std::vector<Rgb3> pf = renderSphere(phys, furnace, 64), ps = renderSphere(phys, sky, 64);
+            const Metrics m = compare(model, phys, half, furnace, sky, skyWhite, &pf, &ps);
+            md << row(name, rc, "table model", m);
+            logf("%s", row(name, rc, "table model", m).c_str());
+        }
+    writeTextFile(out, md.str());
 }
 
 // Diagnosis of the R1 failures: energy leaving per incidence angle, split by the number of base interactions in the
