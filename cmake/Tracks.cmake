@@ -34,6 +34,9 @@ set(UNX_TRACK_OF_Reference C)
 set(UNX_TRACK_OF_Host I)
 set(UNX_TRACK_OF_FX FX)
 set(UNX_TRACK_OF_RppBuild RPP)  # RPP-1 scene build (CPU tool; links unx_scenegen, so its builds enable C too)
+set(UNX_TRACK_OF_Cook V)       # C: asset cooking (texture chains, caches); needs M for the mip builder (skips itself without)
+set(UNX_TRACK_OF_Terrain V)    # C: terrain
+set(UNX_TRACK_OF_Streaming V)  # C: NVMe -> RAM -> VRAM streaming
 
 function(unx_track_of folder out)
   if(NOT DEFINED UNX_TRACK_OF_${folder})
