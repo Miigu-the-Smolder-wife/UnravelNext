@@ -180,28 +180,34 @@ UNX_API int32_t UNX_CALL UnxSceneAddTexture(UnxRenderer r, const UnxTextureDesc*
     });
 }
 
+static scene::Material toMaterial(const UnxMaterialDesc* d)
+{
+    requireStruct(d, "UnxMaterialDesc");
+    if (d->materialClass > UNX_MATERIAL_SUBSURFACE) fail("unknown material class %u", d->materialClass);
+    scene::Material m;
+    m.name = fixedString(d->name, sizeof d->name);
+    m.cls = (scene::MaterialClass)d->materialClass;
+    m.baseColor = f3(d->baseColor);
+    m.roughness = d->roughness;
+    m.metallic = d->metallic;
+    m.specular = d->specular;
+    m.emissive = f3(d->emissive);
+    m.alphaCutoff = d->alphaCutoff;
+    m.transmission = d->transmission;
+    m.ior = d->ior;
+    m.twoSided = d->twoSided != 0;
+    m.baseColorTexture = d->baseColorTexture;
+    m.normalTexture = d->normalTexture;
+    m.roughMetalTexture = d->roughMetalTexture;
+    m.emissiveTexture = d->emissiveTexture;
+    m.occlusionTexture = d->occlusionTexture;
+    return m;
+}
+
 UNX_API int32_t UNX_CALL UnxSceneAddMaterial(UnxRenderer r, const UnxMaterialDesc* d, uint32_t* index)
 {
     return call([&] {
-        requireStruct(d, "UnxMaterialDesc");
-        if (d->materialClass > UNX_MATERIAL_SUBSURFACE) fail("unknown material class %u", d->materialClass);
-        scene::Material m;
-        m.name = fixedString(d->name, sizeof d->name);
-        m.cls = (scene::MaterialClass)d->materialClass;
-        m.baseColor = f3(d->baseColor);
-        m.roughness = d->roughness;
-        m.metallic = d->metallic;
-        m.specular = d->specular;
-        m.emissive = f3(d->emissive);
-        m.alphaCutoff = d->alphaCutoff;
-        m.transmission = d->transmission;
-        m.ior = d->ior;
-        m.twoSided = d->twoSided != 0;
-        m.baseColorTexture = d->baseColorTexture;
-        m.normalTexture = d->normalTexture;
-        m.roughMetalTexture = d->roughMetalTexture;
-        m.emissiveTexture = d->emissiveTexture;
-        m.occlusionTexture = d->occlusionTexture;
+        scene::Material m = toMaterial(d);
         auto h = find(r);
         const uint32_t i = h->add(h->scene().materials, std::move(m));
         if (index) *index = i;
@@ -279,21 +285,47 @@ UNX_API int32_t UNX_CALL UnxSceneAddSkeleton(UnxRenderer r, const float* jointTo
     });
 }
 
+static scene::Instance toInstance(const UnxInstanceDesc* d)
+{
+    requireStruct(d, "UnxInstanceDesc");
+    scene::Instance inst;
+    inst.mesh = d->mesh;
+    inst.transform = affine(d->transform);
+    inst.flags = d->flags;
+    inst.skeleton = d->skeleton;
+    inst.wind = { d->windStiffness, d->windPhase, d->windAnchorHeight };
+    if (d->materialOverrideCount)
+    {
+        if (!d->materialOverrides) fail("instance: materialOverrideCount %u without materialOverrides", d->materialOverrideCount);
+        inst.materialOverrides.assign(d->materialOverrides, d->materialOverrides + d->materialOverrideCount);
+    }
+    return inst;
+}
+
+UNX_API int32_t UNX_CALL UnxSceneEditInstances(UnxRenderer r, const uint32_t* indices, const UnxInstanceDesc* descs, uint32_t count)
+{
+    return call([&] {
+        if (count && (!indices || !descs)) fail("UnxSceneEditInstances: %u edits without indices or descriptions", count);
+        std::vector<std::pair<uint32_t, scene::Instance>> edits;
+        for (uint32_t k = 0; k < count; ++k) edits.emplace_back(indices[k], toInstance(&descs[k]));
+        find(r)->editInstances(edits);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxSceneEditMaterials(UnxRenderer r, const uint32_t* indices, const UnxMaterialDesc* descs, uint32_t count)
+{
+    return call([&] {
+        if (count && (!indices || !descs)) fail("UnxSceneEditMaterials: %u edits without indices or descriptions", count);
+        std::vector<std::pair<uint32_t, scene::Material>> edits;
+        for (uint32_t k = 0; k < count; ++k) edits.emplace_back(indices[k], toMaterial(&descs[k]));
+        find(r)->editMaterials(edits);
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxSceneAddInstance(UnxRenderer r, const UnxInstanceDesc* d, uint32_t* index)
 {
     return call([&] {
-        requireStruct(d, "UnxInstanceDesc");
-        scene::Instance inst;
-        inst.mesh = d->mesh;
-        inst.transform = affine(d->transform);
-        inst.flags = d->flags;
-        inst.skeleton = d->skeleton;
-        inst.wind = { d->windStiffness, d->windPhase, d->windAnchorHeight };
-        if (d->materialOverrideCount)
-        {
-            if (!d->materialOverrides) fail("instance: materialOverrideCount %u without materialOverrides", d->materialOverrideCount);
-            inst.materialOverrides.assign(d->materialOverrides, d->materialOverrides + d->materialOverrideCount);
-        }
+        scene::Instance inst = toInstance(d);
         auto h = find(r);
         const uint32_t i = h->add(h->scene().instances, std::move(inst));
         if (index) *index = i;

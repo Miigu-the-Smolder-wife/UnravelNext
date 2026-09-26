@@ -31,7 +31,7 @@ enum UnxResult
                             // 4: + UnxFrameSetEnvironment; 5: UNX_DEVICE_REMOVED (the process survives a device removal);
                             // 6: + UnxFrameSetDiscontinuity, UnxFrameSetSimulation, UnxTransformUpdate::flags (teleport);
                             //    later additions within 6 (optional exports, bridges probe for them): UnxFrameGraphStatsLatest,
-                            //    UnxSceneLoad, UnxVideoMemory
+                            //    UnxSceneLoad, UnxVideoMemory, UnxSceneEditInstances, UnxSceneEditMaterials
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -242,6 +242,13 @@ UNX_API int32_t UNX_CALL UnxSceneAddMesh(UnxRenderer r, const UnxMeshDesc* desc,
 // jointToModel: 12 floats per joint (row-major 3x4), the skeleton's current pose in model space.
 UNX_API int32_t UNX_CALL UnxSceneAddSkeleton(UnxRenderer r, const float* jointToModel, uint32_t jointCount, uint32_t* index);
 UNX_API int32_t UNX_CALL UnxSceneAddInstance(UnxRenderer r, const UnxInstanceDesc* desc, uint32_t* index);
+// Scene edits after commit (optional exports within ABI 6; INTERFACES 6.3 v1.44, render A item A2): the instance at each
+// index takes its description (index == the current instance count appends, in order; the new instance is visible and has
+// no motion). Meshes and textures are fixed at commit, and a skinned instance cannot be added or replaced (a new renderer).
+// Materials likewise (index == the material count appends). Edits reach the GPU scene with the next queued frame; remove an
+// instance with UnxFrameSetInstanceVisible(0) and reuse its slot in a later edit.
+UNX_API int32_t UNX_CALL UnxSceneEditInstances(UnxRenderer r, const uint32_t* indices, const UnxInstanceDesc* descs, uint32_t count);
+UNX_API int32_t UNX_CALL UnxSceneEditMaterials(UnxRenderer r, const uint32_t* indices, const UnxMaterialDesc* descs, uint32_t count);
 UNX_API int32_t UNX_CALL UnxSceneAddLight(UnxRenderer r, const UnxLightDesc* desc, uint32_t* index);
 UNX_API int32_t UNX_CALL UnxSceneSetEnvironment(UnxRenderer r, const UnxEnvironmentDesc* desc);
 // The renderer's defaults for the environment (scene::Sun, scene::Atmosphere), for callers that set only some fields.

@@ -85,6 +85,10 @@ struct FramePacket
     std::vector<render::InstanceTransformUpdate> transforms;
     std::vector<SkeletonPose> skeletons;
     std::vector<std::pair<uint32_t, bool>> visibility;
+    // Scene edits after commit (INTERFACES 6.3 v1.44, GpuScene::setInstances / setMaterials), in the order the host made
+    // them: index == the count at that point appends. Applied before this packet's transforms.
+    std::vector<std::pair<uint32_t, scene::Instance>> instanceEdits;
+    std::vector<std::pair<uint32_t, scene::Material>> materialEdits;
 };
 
 // The render graph of one recorded frame (RenderGraphStats, the fields the host reports).
@@ -139,6 +143,14 @@ public:
     void setSkeleton(uint32_t skeleton, std::vector<float3x4> jointToModel);
     uint32_t jointCount(uint32_t skeleton) const;
     void setInstanceVisible(uint32_t instance, bool visible);
+    // Scene edits after commit (main thread; A2, INTERFACES 6.3 v1.44): each instance at its index takes the new value
+    // (index == instanceCount() appends, in order; its transform has no motion and it is visible); skinned instances and
+    // new meshes need a new renderer. Materials likewise (their textures must already be in the scene). They reach the
+    // GPU scene with the next queued frame; a removal is setInstanceVisible(false), the slot reused by a later edit.
+    void editInstances(std::span<const std::pair<uint32_t, scene::Instance>> edits);
+    void editMaterials(std::span<const std::pair<uint32_t, scene::Material>> edits);
+    uint32_t instanceCount() const;
+    uint32_t materialCount() const;
     void setSun(const scene::Sun& sun);
     // History discontinuity and GPU simulation steps of the next queued frame (INTERFACES 5.5.2, v1.35); bits of a
     // dropped packet are ORed into the next one.
@@ -195,6 +207,7 @@ private:
         FramePacket::Wind wind;
     };
     static void overlay(const FramePacket& p, HostState& state);
+    static void applyEdits(const FramePacket& p, scene::Scene& s);
     void ensureStandaloneOutput(uint32_t width, uint32_t height);
     // Paces the frame slot, applies the packet's scene updates, declares the frame; returns the frame slot.
     uint32_t beginFrame(const FramePacket& packet);
@@ -215,6 +228,8 @@ private:
     mutable std::mutex m_mutex;  // packets, pending updates, stats
     std::deque<FramePacket> m_packets;
     FramePacket m_pending;       // updates for the next queued frame
+    uint32_t m_hostInstances = 0, m_hostMaterials = 0;  // counts with every edit the host made (m_mutex)
+    std::vector<uint8_t> m_hostSkinned;                 // per instance, with the host's edits (m_mutex)
     // Latest state of every packet taken for rendering (takePacket, under m_mutex then m_appliedMutex): with the queued
     // packets and m_pending on top it is the host's current scene. m_appliedMutex also guards m_scene.sun,
     // m_scene.atmosphere and the scene wind, which the submission thread writes (the renderer reads them from

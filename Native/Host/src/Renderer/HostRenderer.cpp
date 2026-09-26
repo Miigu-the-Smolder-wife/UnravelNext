@@ -11,7 +11,9 @@
 #define UNX_HOST_HAS_CLUSTERBUILDER 1
 #endif
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 
 namespace unx::host
@@ -99,6 +101,9 @@ SceneCommitInfo HostRenderer::commit()
     m_applied.wind = { m_scene.windDirection, m_scene.windSpeed };
     m_gpuTransforms = m_applied.transforms;
     m_gpuPoses = m_applied.poses;
+    m_hostInstances = (uint32_t)m_scene.instances.size();
+    m_hostMaterials = (uint32_t)m_scene.materials.size();
+    for (const scene::Instance& i : m_scene.instances) m_hostSkinned.push_back((i.flags & scene::InstanceSkinned) ? 1 : 0);
     info.contentHash = scene::contentHash(m_scene);
     info.buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     logf("UnravelNext host: scene committed, %zu meshes, %zu instances, %llu triangles, %llu clusters, %.1f ms, hash %s\n", m_scene.meshes.size(),
@@ -109,11 +114,86 @@ SceneCommitInfo HostRenderer::commit()
 void HostRenderer::setTransforms(std::span<const InstanceTransformUpdate> updates)
 {
     requireCommitted();
-    const uint32_t count = (uint32_t)m_scene.instances.size();
-    for (const InstanceTransformUpdate& u : updates)
-        if (u.instance >= count) fail("transform update for instance %u of %u", u.instance, count);
     std::lock_guard lock(m_mutex);
+    for (const InstanceTransformUpdate& u : updates)
+        if (u.instance >= m_hostInstances) fail("transform update for instance %u of %u", u.instance, m_hostInstances);
     m_pending.transforms.insert(m_pending.transforms.end(), updates.begin(), updates.end());
+}
+
+uint32_t HostRenderer::instanceCount() const
+{
+    std::lock_guard lock(m_mutex);
+    return m_hostInstances;
+}
+
+uint32_t HostRenderer::materialCount() const
+{
+    std::lock_guard lock(m_mutex);
+    return m_hostMaterials;
+}
+
+void HostRenderer::editInstances(std::span<const std::pair<uint32_t, scene::Instance>> edits)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    // Meshes and textures are fixed after commit, so they can be read here; instances and materials change on the
+    // submission thread, so the host's own counts decide.
+    uint32_t count = m_hostInstances;
+    for (const auto& [i, inst] : edits)
+    {
+        if (i > count) fail("instance edit %u of %u (append in order)", i, count);
+        if (inst.mesh >= m_scene.meshes.size()) fail("instance edit %u: mesh %u of %zu (a new mesh needs a new renderer)", i, inst.mesh, m_scene.meshes.size());
+        if (inst.flags & scene::InstanceSkinned) fail("instance edit %u: a skinned instance needs a new renderer (its palette slot is fixed at commit)", i);
+        if (i < count && i < m_hostSkinned.size() && m_hostSkinned[i]) fail("instance edit %u replaces a skinned instance", i);
+        const size_t submeshes = m_scene.meshes[inst.mesh].submeshes.size();
+        if (!inst.materialOverrides.empty() && inst.materialOverrides.size() != submeshes)
+            fail("instance edit %u: %zu material overrides for %zu submeshes", i, inst.materialOverrides.size(), submeshes);
+        for (uint32_t m : inst.materialOverrides)
+            if (m >= m_hostMaterials) fail("instance edit %u: material %u of %u", i, m, m_hostMaterials);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 4; ++c)
+                if (!std::isfinite(inst.transform.m[r][c])) fail("instance edit %u: transform is not finite", i);
+        if (i == count) ++count;
+    }
+    for (const auto& e : edits)
+    {
+        if (e.first == m_hostInstances)
+        {
+            ++m_hostInstances;
+            m_hostSkinned.push_back(0);
+        }
+        m_pending.instanceEdits.push_back(e);
+    }
+}
+
+void HostRenderer::editMaterials(std::span<const std::pair<uint32_t, scene::Material>> edits)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    uint32_t count = m_hostMaterials;
+    const uint32_t textures = (uint32_t)m_scene.textures.size();
+    for (const auto& [i, m] : edits)
+    {
+        if (i > count) fail("material edit %u of %u (append in order)", i, count);
+        for (uint32_t t : { m.baseColorTexture, m.normalTexture, m.roughMetalTexture, m.emissiveTexture, m.occlusionTexture })
+            if (t != scene::kNone && t >= textures) fail("material edit %u: texture %u of %u (textures are fixed at commit)", i, t, textures);
+        if (i == count) ++count;
+    }
+    for (const auto& e : edits)
+    {
+        if (e.first == m_hostMaterials) ++m_hostMaterials;
+        m_pending.materialEdits.push_back(e);
+    }
+}
+
+void HostRenderer::applyEdits(const FramePacket& p, scene::Scene& s)
+{
+    for (const auto& [i, m] : p.materialEdits)
+        if (i == s.materials.size()) s.materials.push_back(m);
+        else s.materials[i] = m;
+    for (const auto& [i, inst] : p.instanceEdits)
+        if (i == s.instances.size()) s.instances.push_back(inst);
+        else s.instances[i] = inst;
 }
 
 void HostRenderer::setSkeleton(uint32_t skeleton, std::vector<float3x4> jointToModel)
@@ -138,6 +218,16 @@ void HostRenderer::overlay(const FramePacket& p, HostState& state)
     if (p.sun) state.sun = *p.sun;
     if (p.atmosphere) state.atmosphere = *p.atmosphere;
     if (p.wind) state.wind = *p.wind;
+    for (const auto& [i, inst] : p.instanceEdits)  // before the packet's transforms and visibility
+    {
+        if (i == state.transforms.size())
+        {
+            state.transforms.push_back(inst.transform);
+            state.visible.push_back(1);
+        }
+        state.transforms[i] = inst.transform;
+        state.visible[i] = 1;
+    }
     for (const InstanceTransformUpdate& u : p.transforms) state.transforms[u.instance] = u.objectToWorld;
     for (const SkeletonPose& s : p.skeletons) state.poses[s.skeleton] = s.jointToModel;
     for (const auto& [instance, visible] : p.visibility) state.visible[instance] = visible ? 1 : 0;
@@ -155,7 +245,12 @@ scene::Scene HostRenderer::currentScene() const
             s = m_scene;
             state = m_applied;
         }
-        for (const FramePacket& p : m_packets) overlay(p, state);
+        for (const FramePacket& p : m_packets)
+        {
+            applyEdits(p, s);
+            overlay(p, state);
+        }
+        applyEdits(m_pending, s);
         overlay(m_pending, state);
     }
     s.sun = state.sun;
@@ -177,8 +272,8 @@ scene::Scene HostRenderer::currentScene() const
 void HostRenderer::setInstanceVisible(uint32_t instance, bool visible)
 {
     requireCommitted();
-    if (instance >= m_scene.instances.size()) fail("visibility of instance %u of %zu", instance, m_scene.instances.size());
     std::lock_guard lock(m_mutex);
+    if (instance >= m_hostInstances) fail("visibility of instance %u of %u", instance, m_hostInstances);
     m_pending.visibility.push_back({ instance, visible });
 }
 
@@ -228,6 +323,8 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.transforms = std::move(m_pending.transforms);
     packet.skeletons = std::move(m_pending.skeletons);
     packet.visibility = std::move(m_pending.visibility);
+    packet.instanceEdits = std::move(m_pending.instanceEdits);
+    packet.materialEdits = std::move(m_pending.materialEdits);
     m_pending = FramePacket{};
     m_packets.push_back(std::move(packet));
     // A frame the host never renders (camera disabled, event dropped) must not hold its updates back from later
@@ -245,6 +342,8 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
         next.transforms.insert(next.transforms.begin(), dropped.transforms.begin(), dropped.transforms.end());
         next.skeletons.insert(next.skeletons.begin(), dropped.skeletons.begin(), dropped.skeletons.end());
         next.visibility.insert(next.visibility.begin(), dropped.visibility.begin(), dropped.visibility.end());
+        next.instanceEdits.insert(next.instanceEdits.begin(), std::make_move_iterator(dropped.instanceEdits.begin()), std::make_move_iterator(dropped.instanceEdits.end()));
+        next.materialEdits.insert(next.materialEdits.begin(), std::make_move_iterator(dropped.materialEdits.begin()), std::make_move_iterator(dropped.materialEdits.end()));
     }
     return ticket;
 }
@@ -266,6 +365,8 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         carried.transforms.insert(carried.transforms.end(), old.transforms.begin(), old.transforms.end());
         carried.skeletons.insert(carried.skeletons.end(), std::make_move_iterator(old.skeletons.begin()), std::make_move_iterator(old.skeletons.end()));
         carried.visibility.insert(carried.visibility.end(), old.visibility.begin(), old.visibility.end());
+        carried.instanceEdits.insert(carried.instanceEdits.end(), std::make_move_iterator(old.instanceEdits.begin()), std::make_move_iterator(old.instanceEdits.end()));
+        carried.materialEdits.insert(carried.materialEdits.end(), std::make_move_iterator(old.materialEdits.begin()), std::make_move_iterator(old.materialEdits.end()));
         haveCarried = true;
         m_packets.pop_front();
     }
@@ -282,10 +383,14 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         p.transforms.insert(p.transforms.begin(), carried.transforms.begin(), carried.transforms.end());
         p.skeletons.insert(p.skeletons.begin(), std::make_move_iterator(carried.skeletons.begin()), std::make_move_iterator(carried.skeletons.end()));
         p.visibility.insert(p.visibility.begin(), carried.visibility.begin(), carried.visibility.end());
+        p.instanceEdits.insert(p.instanceEdits.begin(), std::make_move_iterator(carried.instanceEdits.begin()), std::make_move_iterator(carried.instanceEdits.end()));
+        p.materialEdits.insert(p.materialEdits.begin(), std::make_move_iterator(carried.materialEdits.begin()), std::make_move_iterator(carried.materialEdits.end()));
     }
     // Leaving the queue: its updates join the applied state here, under the queue's lock, so currentScene never misses
-    // a packet between the queue and the GPU.
+    // a packet between the queue and the GPU. Its scene edits join the scene (the GPU scene's source) at the same point;
+    // beginFrame hands them to the GPU scene.
     std::lock_guard applied(m_appliedMutex);
+    applyEdits(p, m_scene);
     overlay(p, m_applied);
     return p;
 }
@@ -333,6 +438,26 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
         {
             m_scene.windDirection = p.wind->direction;
             m_scene.windSpeed = p.wind->speed;
+        }
+    }
+    // Scene edits (the scene already has them, takePacket): materials first, since new instances may override with them.
+    if (!p.materialEdits.empty() || !p.instanceEdits.empty())
+    {
+        std::vector<uint32_t> materials, instances;
+        for (const auto& e : p.materialEdits) materials.push_back(e.first);
+        for (const auto& e : p.instanceEdits) instances.push_back(e.first);
+        auto unique = [](std::vector<uint32_t>& v) {
+            std::sort(v.begin(), v.end());
+            v.erase(std::unique(v.begin(), v.end()), v.end());
+        };
+        unique(materials);
+        unique(instances);
+        if (!materials.empty()) m_gpuScene->setMaterials(materials);
+        if (!instances.empty())
+        {
+            m_gpuScene->setInstances(instances);
+            m_gpuTransforms.resize(m_gpuScene->instances().size());
+            for (uint32_t i : instances) m_gpuTransforms[i] = m_scene.instances[i].transform;
         }
     }
     // Only changes reach the GPU scene. A host sends every visible instance and pose each frame (a body at rest included),
