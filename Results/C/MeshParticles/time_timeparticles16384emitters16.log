@@ -1,0 +1,2 @@
+device: NVIDIA GeForce RTX 4080
+writer fx.mesh.instances [measured, GpuLock timing]: median 0.0308 ms, min 0.0295, max 0.0317 over 78 frames; 1024 instances, 114400 live particles (all render threads)

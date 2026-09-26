@@ -10,7 +10,13 @@
 //   3. previous transforms: w = 0 (a new tick, mode 2) = the previous frame's drawn records (+ the origin shift at the
 //      tick it happens); w = 0.37 and 1 (same tick, mode 1) = the previous frame's transforms.
 // Options: --ticks N (90) --particles P (16384) --emitters E (16)
+//          --time: GPU time of the writer pass (GpuLock timing), no reference; the full RPP load unless --particles/--emitters
+//                  are given, 150 ticks, median of the w = 0.37 frames from tick 125 on (steady state from tick 121)
+//          --capture DIR: the stream drawn by the FrameRenderer (the frame join: tracks::particleMeshes before V) over a
+//                  ground, casings at their authored size (program size 1), brass; DIR/mesh_particles.ppm after --ticks (150)
 #include "RppStream.h"
+
+#include "unx/clusterbuilder/ClusterBuilder.h"
 
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
@@ -18,13 +24,17 @@
 #include "unx/fx/MeshParticles.h"
 #include "unx/fx/Particles.h"
 #include "unx/render/Frame.h"
+#include "unx/render/FrameRenderer.h"
+#include "unx/render/GpuProfiler.h"
 #include "unx/render/GpuScene.h"
 #include "unx/render/Tracks.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -200,6 +210,130 @@ struct Index
         return found;
     }
 };
+
+scene::Mesh slab(float3 half)
+{
+    scene::Mesh m = casing();
+    m.name = "ground";
+    for (int k = 0; k < 8; ++k) m.positions[k] = { (k & 1) ? half.x : -half.x, (k & 2) ? half.y : -half.y, (k & 4) ? half.z : -half.z };
+    return m;
+}
+
+// The stream drawn by the renderer (FrameRenderer: simulation, mesh particles, V, S, M), one frame per tick at w = 0.5.
+int captureRun(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, fx::test::RppConfig rpp, uint32_t ticks, const std::filesystem::path& dir)
+{
+    constexpr uint64_t kDrawnAsset = 0x4d455348u;
+    scene::Scene s;
+    s.name = "mesh particle capture";
+    s.materials.resize(2);
+    s.materials[0].name = "ground";
+    s.materials[0].baseColor = { 0.18f, 0.18f, 0.17f };
+    s.materials[0].roughness = 0.8f;
+    s.materials[1].name = "brass";
+    s.materials[1].baseColor = { 0.91f, 0.78f, 0.42f };  // f0 of brass
+    s.materials[1].metallic = 1;
+    s.materials[1].roughness = 0.3f;
+    s.meshes = { casing(), slab({ 8, 0.05f, 8 }) };
+    s.meshes[0].submeshes[0].material = 1;
+    scene::Instance ground;
+    ground.mesh = 1;
+    ground.transform.m[1][3] = -0.05f;
+    s.instances.push_back(ground);
+    s.cameras.push_back(scene::Camera{});
+    scene::validate(s);
+    GpuScene gs(device);
+    RuntimeCapacity rc;
+    rc.gpuInstances = (uint32_t)quality.integer("fx.particles.mesh_instances_max");
+    gs.reserveRuntime(rc);
+    gs.upload(s);
+    gs.setClusters(clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality)));
+    FrameRenderer renderer(device, shaders, quality, gs, 2);
+    fx::ParticleSystem& ps = fx::particles(renderer.trackState(), device, quality);
+    fx::meshAssets(renderer.trackState()) = { { kDrawnAsset, 0 } };
+    RenderGraph graph(device);
+    fx::test::RppStream stream(rpp);
+
+    const uint32_t width = 1920, height = 1080;
+    const double axes[3] = { 1, 1, -1 };
+    FrameContext fr;
+    fr.deltaTime = 1.0f / 60;
+    for (int a = 0; a < 3; ++a) fr.streamAxes[a] = (float)axes[a];
+    scene::Camera cam;
+    cam.position = { 1.9f, 0.75f, 2.1f };  // program 0's emitter is at frame (0, 2, 0), the ground at y = 0
+    cam.forward = normalize(float3{ -1.9f, -0.5f, -2.1f });
+    cam.nearPlane = 0.02f;
+    std::vector<NV_StreamEvent> previous;
+    const uint64_t pitch = ((uint64_t)width * 4 + 255) / 256 * 256;
+    const ComPtr<ID3D12Resource> rb = hostBuffer(device, pitch * height, D3D12_HEAP_TYPE_READBACK);
+    fx::MeshParticleStats last;
+    for (uint32_t t = 1; t <= ticks; ++t)
+    {
+        std::vector<uint8_t> packet = stream.next(t == 1 ? nullptr : &previous);
+        NV_StreamHeader& h = *reinterpret_cast<NV_StreamHeader*>(packet.data());
+        if (h.programs && h.program_count)
+        {
+            auto* p = reinterpret_cast<NV_StreamProgram*>(packet.data() + h.programs);
+            for (uint32_t k = 0; k < h.program_count; ++k)
+                if (p[k].flags & NV_STREAM_PROGRAM_ORIENTATION) p[k].output = 1, p[k].size = 1, p[k].size_count = 0;  // the casing at its size
+                else p[k].color[3] = 0;  // the stream's sprite programs stay out of the picture (alpha 0: not drawn)
+        }
+        ps.submit(packet.data(), packet.size());
+        for (int a = 0; a < 3; ++a) fr.worldOrigin[a] = std::floor(axes[a] * h.anchor[a]);
+        fr.frameIndex = t;
+        fr.time = h.time - 0.5 * h.dt;
+        fr.mainView = ViewDesc::fromCamera(cam, width, height, t == 1 ? float4x4{} : fr.mainView.viewProj);
+        const TextureRef output = graph.createTexture({ "capture output", width, height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
+        renderer.record(graph, fr, output);
+        if (t == ticks)
+        {
+            ID3D12Resource* r = rb.Get();
+            graph.addPass("test.capture", QueueType::Graphics,
+                          [&](PassBuilder& b) {
+                              b.use(output, Use::CopySrc);
+                              b.keep();
+                          },
+                          [=](PassContext& c) {
+                              D3D12_TEXTURE_COPY_LOCATION to{}, from{};
+                              to.pResource = r;
+                              to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                              to.PlacedFootprint.Footprint = { DXGI_FORMAT_R10G10B10A2_UNORM, width, height, 1, (UINT)pitch };
+                              from.pResource = c.resource(output);
+                              from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                              c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+                          });
+        }
+        graph.execute(nullptr);
+        MP_CHECK(device.drainDebugMessages() == 0, "capture tick %u: D3D12 debug layer errors", t);
+        const fx::TickReadback back = ps.readback(h.stream, h.generation, h.tick);
+        previous = back.events;
+        if (fx::MeshParticlePass* pass = fx::findMeshParticles(renderer.trackState())) last = pass->stats();
+    }
+    device.waitIdle();
+    MP_CHECK(last.recorded && last.instances > 0 && last.overflow == 0 && last.status == 0, "capture: mesh particles not drawn (recorded %d, %u instances)", last.recorded,
+             last.instances);
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path file = dir / "mesh_particles.ppm";
+    FILE* f = nullptr;
+    MP_CHECK(_wfopen_s(&f, file.c_str(), L"wb") == 0 && f, "cannot write %s", file.string().c_str());
+    std::fprintf(f, "P6\n%u %u\n255\n", width, height);
+    uint8_t* p = nullptr;
+    check(rb->Map(0, nullptr, reinterpret_cast<void**>(&p)), "map capture");
+    std::vector<uint8_t> row((size_t)width * 3);
+    for (uint32_t y = 0; y < height; ++y)
+    {
+        for (uint32_t x = 0; x < width; ++x)
+        {
+            uint32_t v;
+            std::memcpy(&v, p + y * pitch + x * 4, 4);
+            for (int k = 0; k < 3; ++k) row[(size_t)x * 3 + k] = (uint8_t)((((v >> (10 * k)) & 1023u) * 255u + 511u) / 1023u);  // display codes
+        }
+        std::fwrite(row.data(), 1, row.size(), f);
+    }
+    rb->Unmap(0, nullptr);
+    std::fclose(f);
+    logf("capture: %s (%u x %u, tick %u): %u mesh particle instances drawn, %u unmapped\n", file.string().c_str(), width, height, ticks, last.instances, last.unmapped);
+    return 0;
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -215,21 +349,31 @@ int main(int argc, char** argv)
         rpp.heightfield = false;
         rpp.sheet = false;
         rpp.delta = false;  // whole emitter table in every packet (the test reads rows directly)
+        bool timing = false, sized = false;
+        std::filesystem::path captureDir;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
             auto next = [&]() -> std::string { if (i + 1 >= argc) fail("missing value after %s", a.c_str()); return argv[++i]; };
             if (a == "--ticks") ticks = (uint32_t)std::stoul(next());
-            else if (a == "--particles") rpp.particles = (uint32_t)std::stoul(next());
-            else if (a == "--emitters") rpp.emitters = (uint32_t)std::stoul(next());
+            else if (a == "--particles") rpp.particles = (uint32_t)std::stoul(next()), sized = true;
+            else if (a == "--emitters") rpp.emitters = (uint32_t)std::stoul(next()), sized = true;
+            else if (a == "--time") timing = true;
+            else if (a == "--capture") captureDir = next();
             else fail("unknown option %s", a.c_str());
         }
+        if (timing)
+        {
+            if (!sized) rpp.particles = 524288, rpp.emitters = 128;
+            if (ticks == 90) ticks = 150;
+        }
         DeviceOptions opts;
-        opts.debugLayer = true;
+        opts.debugLayer = !timing;
         Device device(opts);
         logf("device: %s\n", device.caps().adapter.c_str());
         ShaderLibrary shaders(device, executableDirectory() / "shaders");
         const QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+        if (!captureDir.empty()) return captureRun(device, shaders, quality, rpp, ticks == 90 ? 150 : ticks, captureDir);
 
         scene::Scene s;
         s.name = "mesh particles";
@@ -283,6 +427,9 @@ int main(int argc, char** argv)
         uint64_t compared = 0, continuity = 0, prevCompared = 0, unmappedSeen = 0, turning = 0;
         int countSlack = 0;
         const double ws[3] = { 0.0, 0.37, 1.0 };
+        GpuProfiler profiler(device, 1, 256);
+        std::vector<double> writerMs;
+        uint32_t lastInstances = 0, lastThreads = 0;
         for (uint32_t t = 1; t <= ticks; ++t)
         {
             std::vector<uint8_t> packet = stream.next(t == 1 ? nullptr : &previous);
@@ -304,7 +451,7 @@ int main(int argc, char** argv)
             const std::vector<NV_StreamEmitter> table(reinterpret_cast<const NV_StreamEmitter*>(packet.data() + h.emitters),
                                                       reinterpret_cast<const NV_StreamEmitter*>(packet.data() + h.emitters) + h.emitter_count);
             ps.submit(packet.data(), packet.size());
-            cpu.submit(packet.data(), packet.size());
+            if (!timing) cpu.submit(packet.data(), packet.size());
             {
                 FrameResources resources;
                 FramePassContext fc{ device, graph, shaders, quality, scene, frame, resources, services, [](const ViewDesc&) -> D3D12_GPU_VIRTUAL_ADDRESS { return 0; }, &state };
@@ -313,11 +460,13 @@ int main(int argc, char** argv)
                 ++frame.frameIndex;
             }
             const fx::TickReadback rb = ps.readback(h.stream, h.generation, h.tick);
+            lastThreads = h.alive_after;
             MP_CHECK(rb.counters.alive == h.alive_after, "tick %u: alive %u, expected %u", t, rb.counters.alive, h.alive_after);
             previous = rb.events;
             refPrev = std::move(refCur);
             refCur.clear();
-            for (const auto& x : cpu.checkpoint()) refCur[{ x.row, x.birth }] = x;
+            if (!timing)
+                for (const auto& x : cpu.checkpoint()) refCur[{ x.row, x.birth }] = x;
             std::memcpy(anchorPrev, anchorCur, sizeof anchorPrev);
             std::memcpy(anchorCur, h.anchor, sizeof anchorCur);
             if (t == 1) std::memcpy(anchorPrev, h.anchor, sizeof anchorPrev);
@@ -343,10 +492,14 @@ int main(int argc, char** argv)
                     rangeCopy(graph, range, zero.Get(), readback.Get(), true);
                     tracks::particleMeshes(fc);
                     rangeCopy(graph, range, zero.Get(), readback.Get(), false);
-                    graph.execute(nullptr);
+                    profiler.beginFrame(frame.frameIndex);
+                    graph.execute(&profiler);
                     ++frame.frameIndex;
                 }
                 device.waitIdle();
+                if (const FrameTiming* ft = profiler.lastCompleted(); ft && timing && t >= 125)
+                    for (const PassTiming& pt : ft->passes)
+                        if (pt.name == "fx.mesh.instances") writerMs.push_back(pt.durationMs());
                 MP_CHECK(device.drainDebugMessages() == 0, "tick %u frame %d: D3D12 debug layer errors", t, f);
                 const fx::MeshParticleStats st = fx::findMeshParticles(state)->stats();
                 if (t == 1)
@@ -356,6 +509,8 @@ int main(int argc, char** argv)
                     continue;
                 }
                 MP_CHECK(st.recorded && st.status == 0 && st.overflow == 0, "tick %u frame %d: recorded %d status %u overflow %u", t, f, st.recorded, st.status, st.overflow);
+                lastInstances = st.instances;
+                if (timing) continue;
                 const uint32_t expectMode = t == 2 && f == 0 ? 0u : f == 0 ? 2u : 1u;
                 MP_CHECK(st.mode == expectMode, "tick %u frame %d: previous-transform mode %u, expected %u", t, f, st.mode, expectMode);
 
@@ -494,6 +649,14 @@ int main(int argc, char** argv)
                 lastFrame = std::move(drawn);
                 std::memcpy(lastOrigin, frame.worldOrigin, sizeof lastOrigin);
             }
+        }
+        if (timing)
+        {
+            std::sort(writerMs.begin(), writerMs.end());
+            MP_CHECK(!writerMs.empty(), "no writer timings");
+            logf("writer fx.mesh.instances [measured, GpuLock timing]: median %.4f ms, min %.4f, max %.4f over %zu frames; %u instances, %u live particles (all render threads)\n",
+                 writerMs[writerMs.size() / 2], writerMs.front(), writerMs.back(), writerMs.size(), lastInstances, lastThreads);
+            return 0;
         }
         logf("mesh particles: %llu transforms vs reference (%llu spinning): position %.3g (/ max(1 m, |p|)), rotation %.3g rad, scale %.3g; count slack %d; unmapped seen %llu\n",
              (unsigned long long)compared, (unsigned long long)turning, maxPos, maxTurn, maxScale, countSlack, (unsigned long long)unmappedSeen);

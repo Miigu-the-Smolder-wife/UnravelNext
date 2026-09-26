@@ -78,19 +78,23 @@ powershell -File Reference/Tools/RenderQueue.ps1                   게이트 기
 4. C5·C6 나머지(FEATURE_STATUS 렌더 C 표)와 C7·C8 HLOD 보류분은 재개 때 표에서 다시 순서를 정한다. 하드웨어에서 아직 안 돌린 것: 이번 커밋 뒤 shadow 3종(vsm·localshadow·froxel) 재실행.
 5. 알려진 main 결함(내 변경 무관): visibilitytests coverage_layer_is_exact가 1a616eb에서 같은 자리에서 실패(렌더 A의 f056694 투과 합성 추정, A에 알림). WARP로 전체 프레임 시험을 돌리면 RayScene AS 빌드에서 d3d10warp 정수 0 나누기(렌더 B/R에 알림 예정).
 
-## 메시 입자 (조정 배정 2026-09-27 07:20, 재개 지점 — 구현 전)
+## 메시 입자 (조정 배정 2026-09-27 07:20) — 완료 3ff83b2, df8b934 (합류 렌더 A cccff0f)
 
-설계: FEATURES_GAME 0.A 7b(렌더 A). 엔진 2 인계(2026-09-27): NativeVfx 실행기 v4(Unravel 87056534, 배포 5300a0d4), FX 방향 상태(UnravelNext da4da3a: ParticleSystem 방향 쌍 버퍼 orientation[2], posAge와 같은 배치, 32 B {quat xyzw 로컬→앵커(스트림 축), spin rad/s}, 규칙 VfxParticleMath 끝 nv_orientation_*; 프로그램 reserved6 = mesh_asset lo/hi, asfloat spin_min/max, 플래그 NV_STREAM_PROGRAM_ORIENTATION 256; 출력 FX_OUTPUT_MESH 1).
-순서:
-1. ParticleRenderInputs에 orientation[0/1] 추가(Passes/FX, 렌더 A 폴더 — A에 한 줄 알림).
-2. `FxMeshInstances.hlsl`: 살아 있는 메시 프로그램 슬롯마다 gpu::Instance(160 B) 하나를 GpuScene::gpuInstanceRange()에 쓴다(개수 = patchData[kGpuInstanceCountElement].x 원자 증가, 용량 = fx.mesh_instances_max, 넘치면 통계).
-   - 위치: FxLayerSetup의 fxParticleAt 규칙(Hermite, 출생·죽음 외삽). 방향: nv_orientation_advance(q_latest, ω, −(1−w)dt)(죽는 입자는 q_prev를 +w dt). 이전 변환: time − frameDt에서 같은 식.
-   - 렌더러 축: R_r = M R_s M(M = diag(streamAxes)), 위치 = axes⊙(anchor + originAnchor + p) − worldOrigin. 크기 = size × sizeScale × 크기 곡선(메시 원래 크기 1).
-   - flags: Dynamic | CastShadow(SKINNED·WIND 없음), materialRemap kNone, morph/patch kNone, transformRevision 매 프레임 증가.
-3. mesh_asset(64비트) → 장면 메시 색인: 호스트 ABI `UnxVfxMapMeshAsset`(렌더 A 계약) + FX 상태 표. 키 없는 프로그램은 그리지 않고 통계.
-4. 시험: GPU 기록 변환 = FX CPU 실행기(VfxStreamCpu) 참조 변환(위치·회전·크기) 일치, 토크 없는 회전의 tick 경계 연속(w = 1 → 다음 tick w = 0), 캡처(탄피 장면) — 그리기는 기존 동적 인스턴스 경로라 V/M 시험을 다시 쓴다.
-5. Unity 저작(VfxOpcode.MeshShape 46)은 엔진 2.
-비용 [예상]: 기록 N_m × 0.02 ns, 나머지는 인스턴스 N_m개의 기존 V·M 행.
+- 구조: `Passes/FX/FxMeshInstances.hlsl` + `MeshParticles.cpp`(`unx/fx/MeshParticles.h`). `tracks::particleMeshes`가 simulation 뒤·V 앞에서 렌더 스레드마다 한 스레드로, 메시 프로그램(FX_OUTPUT_MESH)의 살아 있는 입자를 gpu::Instance(160 B)로 C의 GPU 인스턴스 범위에 쓴다(웨이브 묶음 원자 증가, 넘치면 overflow 통계). 범위 버퍼 장벽은 패스 안에서 처리한다.
+- 규칙: 위치 = fxParticleAt(FxLayerSetup에서 `FxParticleAt.hlsli`로 순수 이동, DXIL 비트 동일). 회전 = q(w) = transport^w ⊗ exp(ω0 w dt/2) q0, transport = q1 ⊗ conj(exp(ω0 dt/2) q0)(없으면 항등). 그래서 w = 0, 1에서 두 tick 상태와 정확히 같고, 충돌 감쇠가 있어도 tick 경계가 연속이다. tick 안 출생은 exp(−ω1(1−w)dt/2) q1, 죽음은 exp(ω0 w dt/2) q0. 크기 = size × sizeScale × 크기 곡선. 축 R_r = M R_s M.
+- 이전 변환 = 직전 프레임에 실제로 그린 변환. 같은 tick이면 그 프레임의 w로 같은 식을 쓴다(모드 1). 다음 tick이면 그린 기록(32 B, 최신 배치 색인, 원점 이동 반영)을 쓴다(모드 2). 둘 다 없으면(그 뒤 출생, RESET, 첫 프레임) 속도·회전으로 프레임 시간만큼 되돌린다. 용량이 커지면 기록을 복사해 이어 쓴다.
+- 메시: 프로그램 asset 키 → `fx::meshAssets` 정렬 표(호스트 `UnxVfxMapMeshAsset`, 렌더 A). 매핑이 없거나 해제됐거나 런타임 메시가 제거됐으면 그리지 않고 unmapped로 센다. 품질 키 `fx.particles.mesh_instances_max` = 65,536.
+- 시험 `unx_test_fx_meshparticletests`(하드웨어, GpuLock correctness, 디버그 층 0): RPP 스트림, 축 (1,1,−1), 1024 m 원점 이동, 90 tick × w = 0/0.37/1.
+  - CPU 기준 실행기 대비 변환 103,435개: 위치 4.5e-7(상대), 회전 4.0e-5 rad, 크기 5.3e-7. 인스턴스 수는 정확히 같고, 매핑 없는 프로그램은 세기만 한다.
+  - tick 경계 34,121개: 회전 5.9e-7 rad.
+  - 이전 변환 102,668개: 회전 오차 0.
+  - 캡처 `--capture`: FrameRenderer 경로, 황동 탄피 1,024개, 태양 그림자 포함. `Results/C/MeshParticles/mesh_particles.png`.
+- 비용 [실측, GpuLock timing] `fx.mesh.instances` 패스: 전체 RPP 부하(렌더 스레드 622k, 인스턴스 32,768) 중앙값 0.066 ms. 게임 규모(스레드 114k, 인스턴스 1,024)는 0.031 ms다. 설계 [예상] ≤ 0.002 ms보다 크다. 원인은 스프라이트까지 모든 렌더 스레드를 띄우는 구조다. 다음 단계는 CPU가 메시 행의 render range만 모은 목록을 dispatch하는 것이다(비용은 N_m에 비례).
+- 남음:
+  - 위의 dispatch 축소.
+  - R(광선 반사·GI)은 메시 입자를 보지 않는다(설계 3절 조건).
+  - 입자 분리(separation)가 점 기준이라, 바닥에 쉬는 탄피는 메시 반두께만큼 바닥에 묻힌다. 엔진 2의 저작 값 문제로 알린다.
+  - Unity 저작(VfxOpcode.MeshShape)과 C# 바인딩은 엔진 2가 맡는다.
 
 ## 잔잔한 물 평면 반사 (최종 스프린트, 2026-09-27) — 완료 c8737fb
 
