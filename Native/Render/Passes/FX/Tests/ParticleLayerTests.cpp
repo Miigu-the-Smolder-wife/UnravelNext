@@ -177,9 +177,14 @@ void writePfm(const fs::path& path, const std::vector<uint8_t>& rgba32f, uint32_
 struct RunResult
 {
     std::vector<uint8_t> layer, edgeMask, composite;
+    std::vector<uint8_t> records;  // the pass's particle records (32 B each)
+    ViewDesc view;
 };
+// Stage 2 check: the sun of the lit run (frame constants; no shadow pages, GI, local lights or air in this test).
+const float3 kTestSunDirection = normalize(float3{ 0.3f, 0.8f, -0.5f }), kTestSunColor{ 1.0f, 0.9f, 0.8f };
+constexpr float kTestSunIlluminance = 1000.0f, kTestPhase = 0.6f;
 
-RunResult run(Device& device, const Options& o, bool verify)
+RunResult run(Device& device, const Options& o, bool verify, bool lit = false)
 {
     ShaderLibrary shaders(device, executableDirectory() / "shaders");
     const QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
@@ -187,7 +192,13 @@ RunResult run(Device& device, const Options& o, bool verify)
     RenderGraph graph(device);
     TrackState state;
     fx::ParticleSystem& ps = fx::particles(state, device, quality);
-    fx::test::RppStream stream(o.rpp);
+    fx::test::RppConfig rpp = o.rpp;
+    if (lit)
+    {
+        rpp.material = 1;
+        rpp.phase = kTestPhase;
+    }
+    fx::test::RppStream stream(rpp);
     FrameContext frame;
     FrameServices services;
     std::vector<NV_StreamEvent> previous;
@@ -246,6 +257,9 @@ RunResult run(Device& device, const Options& o, bool verify)
         c.viewHeight = view.height;
         c.exposure = 1.0f;
         c.tanHalfFovY = std::tan(view.verticalFov * 0.5f);
+        c.sunDirection = kTestSunDirection;
+        c.sunIlluminance = kTestSunIlluminance;
+        c.sunColor = kTestSunColor;
         void* p = nullptr;
         D3D12_RANGE none{ 0, 0 };
         check(cbuffer->Map(0, &none, &p), "map frame constants");
@@ -328,6 +342,7 @@ RunResult run(Device& device, const Options& o, bool verify)
     auto layerBytes = rb.texture(graph, out.layer, layerPitch);
     const uint64_t edgeBytes = ((16ull + 4ull * out.layerWidth * out.layerHeight + 15) & ~15ull) + (uint64_t)out.edgeCapacity * 128;
     auto edgeData = rb.buffer(graph, out.edges, edgeBytes);
+    auto recordData = rb.buffer(graph, out.records, (uint64_t)std::max<uint32_t>(out.threads, 1) * 32);
     auto counterData = rb.buffer(graph, out.counters, 16);
     auto flagData = rb.buffer(graph, flags, 16);
     graph.execute(nullptr);
@@ -343,6 +358,8 @@ RunResult run(Device& device, const Options& o, bool verify)
     RunResult result;
     result.layer = *layerBytes;
     result.composite = *cmpBytes;
+    result.records = *recordData;
+    result.view = view;
     result.edgeMask.resize((size_t)out.layerWidth * out.layerHeight);
     for (size_t i = 0; i < result.edgeMask.size(); ++i)
     {
@@ -446,6 +463,54 @@ int main(int argc, char** argv)
         FX_CHECK(a.layer == b.layer && a.edgeMask == b.edgeMask && a.composite == b.composite,
                  "determinism: the layer, the edge pixels or the composited pixels differ between two runs");
         FX_LOG("determinism: layer, edge pixels and composited pixels bit identical between two runs");
+
+        // Stage 2: the same particles lit by the sun alone (albedo = the emissive run's colour): each record's radiance
+        // is the emissive one x E_sun x HG(dot(l, D), g), D from the camera to the particle centre (its record).
+        const RunResult lit = run(device, o, false, true);
+        FX_CHECK(lit.records.size() == a.records.size(), "lit run: %zu record bytes vs %zu", lit.records.size(), a.records.size());
+        const ViewDesc& v = a.view;
+        double worst = 0;
+        uint32_t checked = 0;
+        for (size_t i = 0; i + 32 <= a.records.size(); i += 32)
+        {
+            float e[4], l[4], centre[2], radius, depth;
+            auto half4 = [](const uint8_t* p, float* out) {
+                uint32_t w[2];
+                std::memcpy(w, p, 8);
+                const uint16_t h[4] = { (uint16_t)(w[0] & 0xFFFF), (uint16_t)(w[0] >> 16), (uint16_t)(w[1] & 0xFFFF), (uint16_t)(w[1] >> 16) };
+                for (int k = 0; k < 4; ++k)
+                {
+                    const uint32_t s = (h[k] >> 15) & 1, ex = (h[k] >> 10) & 31, m = h[k] & 1023;
+                    const float f = ex == 0 ? std::ldexp((float)m, -24) : std::ldexp(1.0f + m / 1024.0f, (int)ex - 15);
+                    out[k] = s ? -f : f;
+                }
+            };
+            std::memcpy(centre, a.records.data() + i, 8);
+            std::memcpy(&radius, a.records.data() + i + 8, 4);
+            std::memcpy(&depth, a.records.data() + i + 12, 4);
+            if (!(radius > 0)) continue;
+            half4(a.records.data() + i + 16, e);
+            half4(lit.records.data() + i + 16, l);
+            if (e[0] < 1e-2f) continue;
+            // the centre's view ray: NDC -> view space direction (the view's inverse projection), then world
+            const float x = centre[0] / v.width * 2 - 1, y = 1 - centre[1] / v.height * 2;
+            const float tanY = std::tan(v.verticalFov * 0.5f), tanX = tanY * v.width / v.height;
+            const float3 dv = normalize(float3{ x * tanX, y * tanY, -1.0f });
+            // view -> world: the view matrix's rotation rows (orthonormal)
+            const float3 D = normalize(float3{ v.view.m[0][0] * dv.x + v.view.m[1][0] * dv.y + v.view.m[2][0] * dv.z,
+                                               v.view.m[0][1] * dv.x + v.view.m[1][1] * dv.y + v.view.m[2][1] * dv.z,
+                                               v.view.m[0][2] * dv.x + v.view.m[1][2] * dv.y + v.view.m[2][2] * dv.z });
+            const float c = kTestSunDirection.x * D.x + kTestSunDirection.y * D.y + kTestSunDirection.z * D.z;
+            const float g = kTestPhase, g2 = g * g;
+            const float hg = (1 - g2) / (4 * 3.14159265f * std::pow(std::max(1 + g2 - 2 * g * c, 1e-6f), 1.5f));
+            const float expected[3] = { e[0] * kTestSunIlluminance * kTestSunColor.x * hg, e[1] * kTestSunIlluminance * kTestSunColor.y * hg,
+                                        e[2] * kTestSunIlluminance * kTestSunColor.z * hg };
+            for (int k = 0; k < 3; ++k) worst = std::max(worst, (double)std::abs(l[k] - expected[k]) / std::max(expected[k], 1e-3f));
+            FX_CHECK(l[3] == e[3], "lit record %zu: opacity %g vs %g (lighting must not change it)", i / 32, l[3], e[3]);
+            ++checked;
+        }
+        FX_LOG("stage 2: %u lit records vs albedo x E_sun x HG(g %.1f): worst relative error %.2e (half precision + the centre's pixel ray)", checked, kTestPhase, worst);
+        FX_CHECK(checked > 100 && worst < 1e-2, "stage 2: lit records differ from the analytic sun term (worst %.3e over %u)", worst, checked);
         FX_LOG("FX particle layer tests PASS");
         return 0;
     }

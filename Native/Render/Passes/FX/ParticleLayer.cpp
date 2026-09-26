@@ -30,8 +30,13 @@ struct LayerConstants
     uint32_t depth, layer, depthRange, edgeBlocks;
     uint32_t counters, entryCapacity, edgeCapacity, layerSrv;
     uint32_t edgeBlocksSrv, pad0, pad1, pad2;
+    // Stage 2 (lighting, request 3): S's ShadowSrvs, R's GI cache, S's froxel lights and air volume, the atmosphere LUTs
+    // of the view; UNX_NONE where the frame has none.
+    uint32_t shadow[8];
+    uint32_t giCache, froxelLights, airVolume, transmittance;
+    uint32_t multiScatter, pad3, pad4, pad5;
 };
-static_assert(sizeof(LayerConstants) == 176);
+static_assert(sizeof(LayerConstants) == 240);
 constexpr uint32_t kConstantSlots = 64, kConstantSlotBytes = 256;
 constexpr uint32_t kLayerScale = 4, kTilePixels = 32;  // FX_LAYER_SCALE, FX_LAYER_TILE x FX_LAYER_SCALE
 constexpr uint32_t kRecordBytes = 32, kEdgeBlockBytes = 128;
@@ -152,6 +157,22 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
                   lc.counters = c.uav(o.counters);
                   lc.layerSrv = c.srv(o.layer);
                   lc.edgeBlocksSrv = c.srv(o.edges);
+                  const ParticleLighting& L = f.lighting;
+                  const uint32_t none = 0xFFFFFFFFu;
+                  const bool sun = L.vsmPageTable.valid() && (L.vsmAtlas.valid() || L.vsmPool.valid()) && L.vsmBlocks.valid() && L.vsmSearchBound.valid();
+                  lc.shadow[0] = sun ? c.srv(L.vsmPageTable) : none;
+                  lc.shadow[1] = sun ? (L.vsmAtlas.valid() ? c.srv(L.vsmAtlas) : c.srv(L.vsmPool)) : none;
+                  lc.shadow[2] = sun ? c.srv(L.vsmBlocks) : none;
+                  lc.shadow[3] = sun ? c.srv(L.vsmSearchBound) : none;
+                  lc.shadow[4] = sun ? L.vsmConstants : none;
+                  lc.shadow[5] = L.vsmLocalLights;
+                  lc.shadow[6] = L.vsmSlotOfLight;
+                  lc.shadow[7] = L.vsmLayers.valid() ? c.srv(L.vsmLayers) : none;
+                  lc.giCache = L.giCache.valid() ? c.srv(L.giCache) : none;
+                  lc.froxelLights = L.froxelLights.valid() ? c.srv(L.froxelLights) : none;
+                  lc.airVolume = L.airVolume.valid() ? c.srv(L.airVolume) : none;
+                  lc.transmittance = L.transmittanceLut.valid() ? c.srv(L.transmittanceLut) : none;
+                  lc.multiScatter = L.multiScatterLut.valid() ? c.srv(L.multiScatterLut) : none;
                   std::memcpy(mapped, &lc, sizeof lc);
                   c.cmd->CopyBufferRegion(c.resource(o.constants), 0, upload, uploadOffset, sizeof lc);
               });
@@ -181,8 +202,13 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         b.use(o.counters, Use::UavCompute);
         b.use(o.edges, Use::UavCompute);
     });
+    const ParticleLighting lighting = f.lighting;
     dispatch("fx.layer.setup", "Passes/FX/FxLayerSetup.STEP0", groups(threads, 256), [=](PassBuilder& b) {
         for (const BufferRef& x : inputBuffers) b.use(x, Use::SrvCompute);
+        for (const BufferRef& x : { lighting.vsmPageTable, lighting.vsmPool, lighting.vsmBlocks, lighting.vsmSearchBound, lighting.vsmLayers, lighting.giCache, lighting.froxelLights })
+            if (x.valid()) b.use(x, Use::SrvCompute);
+        for (const TextureRef& x : { lighting.vsmAtlas, lighting.airVolume, lighting.transmittanceLut, lighting.multiScatterLut })
+            if (x.valid()) b.use(x, Use::SrvCompute);
         b.use(o.records, Use::UavCompute);
         b.use(o.tileCounts, Use::UavCompute);
         b.use(o.counters, Use::UavCompute);

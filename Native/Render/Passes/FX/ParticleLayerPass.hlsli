@@ -46,6 +46,10 @@ struct LayerConstants
     uint depth, layer, depthRange, edgeBlocks;
     uint counters, entryCapacity, edgeCapacity, layerSrv;  // layer / edges: UAVs; layerSrv, edgeBlocksSrv: their SRVs
     uint edgeBlocksSrv, pad0, pad1, pad2;
+    uint shadowPageTable, shadowPool, shadowBlocks, shadowSearchBound;  // S's ShadowSrvs (stage 2 lighting)
+    uint shadowConstants, shadowLights, shadowSlotOfLight, shadowLayers;
+    uint giCache, froxelLights, airVolume, transmittance;
+    uint multiScatter, pad3, pad4, pad5;
 };
 
 // One render range (ParticleSystem.cpp): render threads [thread, thread + count) are births [first, first + count) of

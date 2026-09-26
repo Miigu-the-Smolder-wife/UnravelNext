@@ -10,6 +10,15 @@
 
 namespace unx::fx
 {
+// Stage 2 inputs (request 20260926_FX_particle_render_pass 3): what lit particles and the air in front of every particle
+// read, from the frame's and the view's resources (invalid = absent).
+struct ParticleLighting
+{
+    render::BufferRef vsmPageTable, vsmPool, vsmBlocks, vsmSearchBound, vsmLayers, giCache, froxelLights;
+    render::TextureRef vsmAtlas, airVolume, transmittanceLut, multiScatterLut;
+    uint32_t vsmConstants = 0xFFFFFFFFu, vsmLocalLights = 0xFFFFFFFFu, vsmSlotOfLight = 0xFFFFFFFFu;
+};
+
 struct ParticleLayerFrame
 {
     const render::ViewDesc* view = nullptr;        // size, matrices
@@ -17,6 +26,7 @@ struct ParticleLayerFrame
     render::TextureRef depth;                      // the view's opaque depth (D32, reversed Z)
     double camera[3] = {};                         // the camera's world position (double: the anchor offset is a difference)
     double time = 0;                               // the particle stream's context time of this frame (s)
+    ParticleLighting lighting;
 };
 
 struct ParticleLayerOutput

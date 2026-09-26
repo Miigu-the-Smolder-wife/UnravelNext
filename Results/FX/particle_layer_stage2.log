@@ -1,0 +1,10 @@
+device: NVIDIA GeForce RTX 4080 (hardware), view 1920 x 1080, 60 ticks, 8192 root particles
+frame w 0.500: 4992 render threads, 3968 records drawn, 4253 tile entries (capacity 22008), 1716 edge blocks (capacity 32400) of 129600 layer pixels, status 0x0
+edge pixels 27456 (2564 covered): |dT| max 0.000488 p99 0.000486, |dL|/max(L,1) max 0.00024
+layer pixels 2046144 (0 covered): |dT| max 5.96e-08 p99 0, |dL|/max(L,1) max 0; max reference radiance 0.402
+frame w 0.500: 4992 render threads, 3968 records drawn, 4253 tile entries (capacity 22008), 1716 edge blocks (capacity 32400) of 129600 layer pixels, status 0x0
+determinism: layer, edge pixels and composited pixels bit identical between two runs
+frame w 0.500: 4992 render threads, 3968 records drawn, 4253 tile entries (capacity 22008), 1716 edge blocks (capacity 32400) of 129600 layer pixels, status 0x0
+stage 2: 3968 lit records vs albedo x E_sun x HG(g 0.6): worst relative error 9.70e-04 (half precision + the centre's pixel ray)
+FX particle layer tests PASS
+GpuLock.ps1: cpu-contended: 1 s >= 4 cores, peak 8.3 cores; top: Unity.exe (8496) 6 core-s, unx_test_fx_particletests.exe (47068) 1 core-s, dotnet.exe (36244) 1 core-s, UnityPackageManager.exe (7088) 0 core-s

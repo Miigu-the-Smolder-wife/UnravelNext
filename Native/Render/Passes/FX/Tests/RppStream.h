@@ -45,6 +45,8 @@ struct RppConfig
     bool delta = true;            // emitter table as NV_STREAM_EMITTER_DELTA packets (rows that changed since they were last sent)
     bool patches = true;          // with delta: a row whose only changes are its per-tick fields goes as a 48 B patch
     bool childNoise = true;       // diagnostic switch: noise on the cascade children's programs
+    uint32_t material = 0;        // NV_StreamProgram.material of the sprite programs: 0 emissive, 1 lit (render stage 2)
+    float phase = 0;              // their medium_phase (Henyey-Greenstein g of lit sprites)
     // RPP outputs (WORLD_VFX 3.3/3.5: "ribbon 256, 국소 볼륨 16") as their own emitters beside the 128 x 4096 roots:
     // 256 ribbons of `ribbonPoints` live points and 16 local volumes of `volumeParticles` live particles (grid 2^3 cells
     // each: 16 x 2048 x 8 = 262,144 medium cells). false: the older layout (ribbon/volume programs on 16 of the roots).
@@ -651,6 +653,8 @@ private:
             if (p == 6) { r.shape = NV_STREAM_SHAPE_DISC; r.position_radius = 0.7f; r.cone[1] = 2; r.cone_cos = 0.9f; }
             if (p == 11) r.shape = NV_STREAM_SHAPE_POINT;
             r.color[0] = r.color[1] = r.color[2] = r.color[3] = 1;
+            r.material = m_c.material;
+            r.medium_phase = m_c.phase;
             r.size_count = r.color_count = r.alpha_count = 2;
             r.uv[0] = r.uv[1] = 1;
             r.columns = r.rows = 1;
