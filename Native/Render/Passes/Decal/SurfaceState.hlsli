@@ -7,8 +7,10 @@
 // 336 + 2 v), voxel v = (i * 4 + j) * 4 + k for x, y, z steps i, j, k. A channel with half-life h decays analytically:
 // value(t) = value(t0) 2^-((t - t0) / h). Bricks are found through an open-addressing hash table of 16 B entries
 // (int32 key[3], slot; slot 0xFFFFFFFF = empty), linear probing, at most maxProbe + 1 probes (a structural bound the
-// CPU keeps). Constants (raw, 48 B): tableMask, maxProbe, bricks, 0, now (seconds after the time base), 1 / half-life
-// per channel (0 = no decay), 0.
+// CPU keeps). One raw buffer holds everything (one SRV: coverage-fragment kernels have few root constants): constants
+// at byte 0 (48 B: tableMask, maxProbe, bricks, table byte offset, now (seconds after the time base), 1 / half-life per
+// channel (0 = no decay), pool byte offset), the table and the pool at their offsets. FrameResources::surfaceConstants,
+// surfaceTable and surfacePool name that one buffer; surfaceContextOf(srv) builds the context from its SRV.
 #ifndef UNX_SURFACE_STATE_HLSLI
 #define UNX_SURFACE_STATE_HLSLI
 #include "Bindless.hlsli"
@@ -19,8 +21,16 @@
 
 struct SurfaceContext
 {
-    uint constants, table, pool;  // SURFACE_NONE: no field
+    uint constants, table, pool;  // SRVs of the field buffer (the same one); SURFACE_NONE: no field
 };
+SurfaceContext surfaceContextOf(uint field)
+{
+    SurfaceContext c;
+    c.constants = field;
+    c.table = field;
+    c.pool = field;
+    return c;
+}
 struct SurfaceSample
 {
     float wet, scorch, frost, dust, blood;  // [0, 1]
@@ -41,11 +51,11 @@ uint surfaceFind(SurfaceContext c, int3 key)
 {
     ByteAddressBuffer constants = ResourceDescriptorHeap[c.constants];
     ByteAddressBuffer table = ResourceDescriptorHeap[c.table];
-    const uint mask = constants.Load(0), maxProbe = constants.Load(4);
+    const uint mask = constants.Load(0), maxProbe = constants.Load(4), tableOffset = constants.Load(12);
     uint i = surfaceHash(key) & mask;
     for (uint p = 0; p <= maxProbe; ++p)
     {
-        const int4 e = asint(table.Load4(i * 16u));
+        const int4 e = asint(table.Load4(tableOffset + i * 16u));
         if (uint(e.w) == SURFACE_NONE) return SURFACE_NONE;
         if (all(e.xyz == key)) return uint(e.w);
         i = (i + 1u) & mask;
@@ -62,6 +72,7 @@ SurfaceSample surfaceStateAt(SurfaceContext c, float3 worldPos)
     ByteAddressBuffer constants = ResourceDescriptorHeap[c.constants];
     ByteAddressBuffer pool = ResourceDescriptorHeap[c.pool];
     const float now = asfloat(constants.Load(16));
+    const uint poolOffset = constants.Load(44);
     float inv[6];
     [unroll] for (uint k = 0; k < 6; ++k) inv[k] = asfloat(constants.Load(20 + 4 * k));
     const float3 q = worldPos / SURFACE_VOXEL - 0.5f;
@@ -81,14 +92,14 @@ SurfaceSample surfaceStateAt(SurfaceContext c, float3 worldPos)
             cachedSlot = surfaceFind(c, key);
             if (cachedSlot != SURFACE_NONE)
             {
-                const float t0 = asfloat(pool.Load(cachedSlot * SURFACE_BRICK_BYTES + 12u));
+                const float t0 = asfloat(pool.Load(poolOffset + cachedSlot * SURFACE_BRICK_BYTES + 12u));
                 [unroll] for (uint k = 0; k < 6; ++k) decay[k] = inv[k] > 0 ? exp2(-(now - t0) * inv[k]) : 1.0f;
             }
         }
         if (cachedSlot == SURFACE_NONE || !(w > 0)) continue;
         const int3 local = voxel - key * 4;
         const uint v = uint((local.x * 4 + local.y) * 4 + local.z);
-        const uint base = cachedSlot * SURFACE_BRICK_BYTES;
+        const uint base = poolOffset + cachedSlot * SURFACE_BRICK_BYTES;
         const uint byte0 = 16u + 5u * v;
         const uint2 words = pool.Load2(base + (byte0 & ~3u));
         const uint shift = (byte0 & 3u) * 8u;

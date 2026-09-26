@@ -137,11 +137,11 @@ int main(int argc, char** argv)
             std::shared_ptr<std::vector<uint8_t>> t1;
             tf.run([&](FramePassContext& fc) {
                 tracks::surfaceState(fc);
-                t1 = tf.readbackBuffer(fc, fc.resources.surfaceTable, (uint64_t)field.tableSize() * 16);
+                t1 = tf.readbackBuffer(fc, fc.resources.surfaceTable, 256 + (uint64_t)field.tableSize() * 16);
             });
             uint32_t bad = 0, firstBad = UINT32_MAX;
             for (uint32_t i = 0; i < field.tableSize(); ++i)
-                if (std::memcmp(t1->data() + 16 * (size_t)i, field.table()[i].data(), 16) != 0) { ++bad; if (firstBad == UINT32_MAX) firstBad = i; }
+                if (std::memcmp(t1->data() + 256 + 16 * (size_t)i, field.table()[i].data(), 16) != 0) { ++bad; if (firstBad == UINT32_MAX) firstBad = i; }
             S_CHECK(bad == 0, "%s: %u of %u GPU table entries differ from the CPU table (first %u)", label, bad, field.tableSize(), firstBad);
         };
         checkTable("frame 1");
@@ -228,17 +228,17 @@ int main(int argc, char** argv)
                                  c.cmd->Dispatch((count + 63) / 64, 1, 1);
                              });
             results = tf.readbackBuffer(fc, out, (uint64_t)count * 32);
-            gpuTable = tf.readbackBuffer(fc, table, (uint64_t)field.tableSize() * 16);
-            gpuPool = tf.readbackBuffer(fc, pool, (uint64_t)field.capacity() * surface::kBrickBytes);
+            // one field buffer: constants at 0, the table at 256, the pool after it
+            gpuTable = tf.readbackBuffer(fc, table, 256 + (uint64_t)field.tableSize() * 16 + (uint64_t)field.capacity() * surface::kBrickBytes);
+            gpuPool = gpuTable;
         });
         // the GPU copy equals the CPU copy: every table entry, every live brick record
         {
             const auto& t = field.table();
             for (uint32_t i = 0; i < field.tableSize(); ++i)
-                S_CHECK(std::memcmp(gpuTable->data() + 16 * (size_t)i, t[i].data(), 16) == 0 || (uint32_t)t[i][3] == surface::kEmpty && ((const uint32_t*)gpuTable->data())[4 * i + 3] == surface::kEmpty,
-                        "table entry %u differs (cpu slot %d, gpu slot %d)", i, t[i][3], (int)((const uint32_t*)gpuTable->data())[4 * i + 3]);
+                S_CHECK(std::memcmp(gpuTable->data() + 256 + 16 * (size_t)i, t[i].data(), 16) == 0, "table entry %u differs (cpu slot %d)", i, t[i][3]);
             for (uint32_t s : field.liveSlots())
-                S_CHECK(std::memcmp(gpuPool->data() + (size_t)s * surface::kBrickBytes, field.records().data() + (size_t)s * surface::kBrickBytes, surface::kBrickBytes) == 0,
+                S_CHECK(std::memcmp(gpuPool->data() + 256 + 16 * (size_t)field.tableSize() + (size_t)s * surface::kBrickBytes, field.records().data() + (size_t)s * surface::kBrickBytes, surface::kBrickBytes) == 0,
                         "brick record in slot %u differs", s);
         }
         const float* g = reinterpret_cast<const float*>(results->data());

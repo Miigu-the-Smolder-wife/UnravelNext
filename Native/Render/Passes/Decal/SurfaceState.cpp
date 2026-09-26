@@ -258,10 +258,8 @@ public:
         if (!m_pool || m_capacity != capacity || m_tableSize != tableSize)
         {
             if (m_pool) m_device.deferRelease(m_pool);
-            if (m_table) m_device.deferRelease(m_table);
-            m_pool = makeBuffer(m_device, (uint64_t)capacity * kBrickBytes, D3D12_HEAP_TYPE_DEFAULT, L"surface pool");
-            m_table = makeBuffer(m_device, (uint64_t)tableSize * 16, D3D12_HEAP_TYPE_DEFAULT, L"surface table");
-            m_constants = makeBuffer(m_device, 256, D3D12_HEAP_TYPE_DEFAULT, L"surface constants");
+            // one buffer (one SRV for every reader): constants at 0, the table at 256, the pool after the table
+            m_pool = makeBuffer(m_device, 256 + (uint64_t)tableSize * 16 + (uint64_t)capacity * kBrickBytes, D3D12_HEAP_TYPE_DEFAULT, L"surface field");
             m_capacity = capacity;
             m_tableSize = tableSize;
             m_whole = true;
@@ -303,6 +301,8 @@ public:
         c[0] = tableSize - 1;
         c[1] = field.maxProbe();
         c[2] = (uint32_t)field.bricks();
+        c[3] = 256;                               // table byte offset
+        c[11] = 256 + tableSize * 16;             // pool byte offset
         const float now = (float)field.now();
         std::memcpy(&c[4], &now, 4);
         for (uint32_t k = 0; k < kChannels; ++k)
@@ -328,9 +328,11 @@ public:
         }
 
         RenderGraph& g = fc.graph;
-        const BufferRef pool = g.importBuffer(m_pool.Get(), BufferDesc{ "surface.pool", (uint64_t)capacity * kBrickBytes, 0 });
-        const BufferRef table = g.importBuffer(m_table.Get(), BufferDesc{ "surface.table", (uint64_t)tableSize * 16, 0 });
-        const BufferRef constants = g.importBuffer(m_constants.Get(), BufferDesc{ "surface.constants", 256, 0 });
+        const uint64_t fieldBytes = 256 + (uint64_t)tableSize * 16 + (uint64_t)capacity * kBrickBytes;
+        if (fieldBytes > UINT32_MAX) fail("surface: the field buffer exceeds 4 GB (surface.max_bricks)");
+        const BufferRef fieldBuffer = g.importBuffer(m_pool.Get(), BufferDesc{ "surface.field", fieldBytes, 0 });
+        const BufferRef constants = fieldBuffer, table = fieldBuffer, pool = fieldBuffer;
+        const uint32_t tableOffset = 256, poolOffset = 256 + tableSize * 16;
         ID3D12Resource* upload = slot.upload.Get();
         const uint32_t nb = (uint32_t)slots.size(), ne = (uint32_t)entries.size();
         const BufferRef staged = (nb || ne) ? g.createBuffer(BufferDesc{ "surface.staged", std::max<uint64_t>(brickBytes + entryBytes, 16), 0 }) : BufferRef{};
@@ -343,7 +345,7 @@ public:
                       ctx.cmd->CopyBufferRegion(ctx.resource(constants), 0, upload, 0, 256);
                       if (staged.valid()) ctx.cmd->CopyBufferRegion(ctx.resource(staged), 0, upload, 256, brickBytes + entryBytes);
                   });
-        auto scatter = [&](const char* name, const char* kernel, BufferRef target, uint32_t count, uint32_t offset, uint32_t perGroup) {
+        auto scatter = [&](const char* name, const char* kernel, BufferRef target, uint32_t count, uint32_t offset, uint32_t targetOffset, uint32_t perGroup) {
             if (!count) return;
             ID3D12PipelineState* pso = fc.shaders.compute(kernel);
             g.addPass(name, QueueType::Graphics,
@@ -355,7 +357,7 @@ public:
                           ctx.cmd->SetPipelineState(pso);
                           for (uint32_t first = 0; first < count; first += 65535u * perGroup)
                           {
-                              const uint32_t k[8] = { ctx.srv(staged), ctx.uav(target), count, first, offset, 0, 0, 0 };
+                              const uint32_t k[8] = { ctx.srv(staged), ctx.uav(target), count, first, offset, targetOffset, 0, 0 };
                               ctx.computeConstants(k, 8);
                               ctx.cmd->Dispatch(std::min((count - first + perGroup - 1) / perGroup, 65535u), 1, 1);
                           }
@@ -363,8 +365,8 @@ public:
         };
         // brick records first (117 words each), then the table records (5 words each) in the one staged buffer
         if (brickBytes + entryBytes > UINT32_MAX) fail("surface: %llu bytes to upload in one frame", (unsigned long long)(brickBytes + entryBytes));
-        scatter("surface.bricks", "Passes/Decal/SurfaceUpload.MODE0", pool, nb, 0, 1);
-        scatter("surface.entries", "Passes/Decal/SurfaceUpload.MODE1", table, ne, (uint32_t)brickBytes, 64);
+        scatter("surface.bricks", "Passes/Decal/SurfaceUpload.MODE0", pool, nb, 0, poolOffset, 1);
+        scatter("surface.entries", "Passes/Decal/SurfaceUpload.MODE1", table, ne, (uint32_t)brickBytes, tableOffset, 64);
         fc.resources.surfaceConstants = constants;
         fc.resources.surfaceTable = table;
         fc.resources.surfacePool = pool;
@@ -378,7 +380,7 @@ private:
         uint64_t bytes = 0;
     };
     Device& m_device;
-    ComPtr<ID3D12Resource> m_pool, m_table, m_constants;
+    ComPtr<ID3D12Resource> m_pool;  // the field: constants, table, pool
     uint32_t m_capacity = 0, m_tableSize = 0;
     bool m_whole = true;
     std::vector<Slot> m_slots;
