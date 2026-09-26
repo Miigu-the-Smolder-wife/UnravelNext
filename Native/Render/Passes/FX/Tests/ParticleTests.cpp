@@ -81,13 +81,13 @@ std::string sha(const std::vector<uint8_t>& bytes)
 }
 
 // 1. byte-identical stream copies of the pinned NativeVfx commit (the copies are updated together with this pin)
-constexpr const char* kStreamCommit = "87056534";
+constexpr const char* kStreamCommit = "40317ccd";
 void checkStreamCopies(bool strict)
 {
     const fs::path mine = fs::path(UNX_SOURCE_DIR) / "Native/Render/Passes/FX/Stream";
     const fs::path original = fs::path(UNX_SOURCE_DIR) / "../Unravel/Native/NativeVfx";
     struct Pin { const char* file; const char* sha; };
-    const Pin pins[] = { { "include/NativeVfxStream.h", "d59f2f0cce3ba7d2c4a10cfd0b83115595db97d4d8d652623aca9e875632640d" },
+    const Pin pins[] = { { "include/NativeVfxStream.h", "ba9cb23af3bc994454bac7447d3120dd9a78dd590961a2367cb30539a4071590" },
                          { "shaders/VfxParticleMath.hlsli", "516945d0fdc0a55e553de4f848a3155a57f5d3588adc7a066e9731feb3b600d4" },
                          { "shaders/VfxWindTurbulence.hlsli", "d5800916c55e8afc1ac0c3eabc5e040c45047a9ea0a003cafdcb2e3c71f73d4a" },
                          { "src/VfxStreamCpu.h", "43a9a8da8587540ca51cde66c38c963d936dd7f6637d04c388bb2336ac4bb86d" } };

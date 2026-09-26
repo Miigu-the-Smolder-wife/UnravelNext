@@ -173,7 +173,12 @@ enum {
     NV_STREAM_PROGRAM_BIRTH_EVENTS=32u,
     NV_STREAM_PROGRAM_DEATH_EVENTS=64u,
     NV_STREAM_PROGRAM_ATTACHED=128u,       /* source-affine mode 1: particles transported by the source */
-    NV_STREAM_PROGRAM_ORIENTATION=256u     /* mesh particles: slots carry an orientation (executor version >= 4) */
+    NV_STREAM_PROGRAM_ORIENTATION=256u,    /* mesh particles: slots carry an orientation (executor version >= 4) */
+    NV_STREAM_PROGRAM_LIGHT=512u           /* emissive particles light the scene (render A's A3 contract): per emitter row one
+                                              light, I = sum L_i pi (s_i / 2)^2 (nit x projected area; colour the I-weighted
+                                              mean), at the I-weighted centre, spread = I-weighted RMS radius + mean particle
+                                              radius, no shadow; only material 0 (emissive) particles count. A flag for the
+                                              renderer: executors ignore it (no state, no executor version) */
 };
 enum { NV_STREAM_SHAPE_POINT=0u,NV_STREAM_SHAPE_SPHERE=1u,NV_STREAM_SHAPE_BOX=2u,NV_STREAM_SHAPE_DISC=3u,NV_STREAM_SHAPE_EXPLICIT=4u };
 /* Emitter flags. */
