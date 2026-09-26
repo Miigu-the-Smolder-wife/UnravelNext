@@ -124,11 +124,13 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                   c.computeConstants(k, 4);
                   c.cmd->Dispatch(1, 1, 1);
               });
-    TextureRef status;
+    TextureRef status, marchImage;
     if (debug.status && interiorPass)
     {
         status = g.createTexture(TextureDesc{ "w.surface.status", W, H, 1, 1, DXGI_FORMAT_R8_UINT });
         debug.image = status;
+        marchImage = g.createTexture(TextureDesc{ "w.surface.march", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+        debug.march = marchImage;
         ID3D12PipelineState* zero = fc.shaders.compute("Passes/Water/WaterStatusClear");
         g.addPass("w.surface.status clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(status, Use::UavCompute); },
                   [=](PassContext& c) {
@@ -207,6 +209,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                       b.use(colour, Use::UavCompute);
                       if (bandARadiance.valid()) b.use(bandARadiance, Use::UavCompute);
                       if (status.valid()) b.use(status, Use::UavCompute);
+                      if (marchImage.valid()) b.use(marchImage, Use::UavCompute);
                       if (particleLayer.valid()) b.use(particleLayer, Use::SrvCompute);
                       if (particleEdges.valid()) b.use(particleEdges, Use::SrvCompute);
                   },
@@ -215,6 +218,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                       shadingConstants(c, k, 1);
                       k[0] = c.uav(colour);
                       k[11] = status.valid() ? c.uav(status) : none;
+                      k[17] = marchImage.valid() ? c.uav(marchImage) : none;
                       k[20] = bandARadiance.valid() ? c.uav(bandARadiance) : none;
                       k[21] = particleLayer.valid() ? c.srv(particleLayer) : none;
                       k[22] = particleLayer.valid() && particleEdges.valid() ? c.srv(particleEdges) : none;

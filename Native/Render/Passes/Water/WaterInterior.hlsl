@@ -8,7 +8,8 @@
 // P[1] waterVis SRV, waterDepth SRV, slot table SRV (WaterSurface.hlsli), GI cache SRV (UNX_NONE)
 // P[2] atmosphere transmittance, multi-scatter, air volume (UNX_NONE: no air), status UAV (tests: R8_UINT per pixel,
 //      the sample's WATER_STAT_* + 1; UNX_NONE)
-// P[3] VSM page table (UNX_NONE: no sun shadow), blocks, search bound, constants CBV; P[4] VSM transmittance layers
+// P[3] VSM page table (UNX_NONE: no sun shadow), blocks, search bound, constants CBV; P[4] VSM transmittance layers,
+// debug image UAV (tests: RGBA32F, WaterSurface.hlsli g_waterMarchDebug; UNX_NONE)
 // P[5] bandARadiance UAV (RGBA16F), particle layer SRV, particle edges SRV (UNX_NONE: no particle layer)
 #include "WaterSurface.hlsli"
 
@@ -81,6 +82,11 @@ void main(uint3 id : SV_DispatchThreadID)
     {
         RWByteAddressBuffer statistics = ResourceDescriptorHeap[P[0].w];
         statistics.InterlockedAdd(4 * stat, 1);
+    }
+    if (P[4].y != UNX_NONE)
+    {
+        RWTexture2D<float4> debugImage = ResourceDescriptorHeap[P[4].y];
+        debugImage[pixel] = g_waterMarchDebug;
     }
     if (P[2].w != UNX_NONE)
     {

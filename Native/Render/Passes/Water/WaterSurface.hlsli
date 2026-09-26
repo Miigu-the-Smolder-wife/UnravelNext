@@ -44,6 +44,10 @@
 #define WATER_STAT_COUNT 7u
 #define WATER_MARCH_STEPS 9000u  // one step per pixel of the ray's screen path clipped to the image (<= its diagonal: 8K 8,812)
 
+// Tests: the march's hit screen position (x, y), the step it ended at, and band A's view depth there (WaterInterior's
+// debug image).
+static float4 g_waterMarchDebug = float4(-1, -1, -1, -1);
+
 // The frame's water slot table (raw, 16 B per stream slot): vertices SRV (UNX_NONE: not a W stream), material, 0, 0
 // (W's upload ring).
 struct WaterSlot { uint vertices, material; };
@@ -107,9 +111,47 @@ float3 waterSurfaceRadiance(WaterShadeSrvs s, float2 pos, float z)
     return max(shaded - inscatter * g_exposure, 0) / max(transmittance, 1e-6);
 }
 
+// A depth image's 1 / z at screen position pos, continuous across a surface: over a plane 1 / z is affine in screen
+// space, so where the texels around pos are one surface the bilinear value of the four texel centres around pos is exact
+// on planes and follows curved surfaces to second order. One surface: all nine texels of the 3 x 3 block around the
+// nearest texel present, their second differences along x and y and the bilinear quad's twist |a - b - c + d| each
+// within 1e-3 of the nearest texel's value (affine = zero; a step edge, even one aligned with the quad, fails). Across
+// a depth discontinuity (an object's outline) or missing samples the value is the nearest texel's. `bandA`: reversed-Z
+// device depth (1 / z = d / near); otherwise linear depth (+inf = none, 1 / z = 0). `step`: the largest change of 1 / z
+// between neighbouring texels of the block (the march's step test).
+float waterInvDepthAt(Texture2D<float> t, float2 pos, bool bandA, out bool continuous, out float step)
+{
+    const int2 hi = int2(g_viewWidth, g_viewHeight) - 1;
+    const int2 n = clamp(int2(floor(pos)), 0, hi);
+    float v[3][3];
+    float smallest = 3.0e38;
+    [unroll] for (int y = 0; y < 3; ++y)
+        [unroll] for (int x = 0; x < 3; ++x)
+        {
+            const float r = t[clamp(n + int2(x - 1, y - 1), 0, hi)];
+            v[y][x] = bandA ? r / g_nearPlane : (r < 3.0e38 ? 1.0 / r : 0.0);
+            smallest = min(smallest, v[y][x]);
+        }
+    const float c = v[1][1], tol = 1e-3 * c;
+    // the bilinear quad: texel centres i0 .. i0 + 1 around pos, i0 = floor(pos - 0.5), inside the block
+    const float2 u = pos - 0.5;
+    const int2 o = int2(floor(u)) - n + 1;  // 0 or 1 in each axis
+    const float2 f = u - floor(u);
+    const float a = v[o.y][o.x], b = v[o.y][o.x + 1], cc = v[o.y + 1][o.x], d = v[o.y + 1][o.x + 1];
+    continuous = smallest > 0 && abs(v[1][0] - 2 * c + v[1][2]) <= tol && abs(v[0][1] - 2 * c + v[2][1]) <= tol && abs(a - b - cc + d) <= tol;
+    step = max(max(abs(v[1][1] - v[1][0]), abs(v[1][2] - v[1][1])), max(abs(v[1][1] - v[0][1]), abs(v[2][1] - v[1][1])));
+    if (continuous) return lerp(lerp(a, b, f.x), lerp(cc, d, f.x), f.y);
+    return c;
+}
+
 // The refracted ray from P along t, marched in screen space: true with the hit H (world) when it meets band A inside
-// the water; status a WATER_STAT_* fallback otherwise. Steps follow the ray's screen path one pixel at a time (depth
-// interpolated in 1 / z between the projected ends: exact along the 3D line), from P to where the path leaves the screen.
+// the water; status a WATER_STAT_* fallback otherwise. Steps follow the ray's screen path one pixel at a time; along it
+// the ray's 1 / z is affine (exact for the 3D line) and so is a planar surface's, so where band A is continuous the
+// crossing is the exact root of their affine difference between two steps. The crossing belongs to one surface when both
+// steps' quads are continuous and band A changes between them by no more than 1.5 times the texel change of that surface
+// (plus 1e-3): otherwise the steps straddle an outline, and a surface nearer than the ray at the previous step means the
+// ray passed behind it (occluded), a farther one that it meets that surface at this step.
+// Inside the water: the water layer (this stream, continuous 1 / z likewise) must lie in front of the ray point.
 bool waterMarch(WaterShadeSrvs s, float3 P, float3 t, uint slot, out float3 H, out uint status)
 {
     Texture2D<float> bandA = ResourceDescriptorHeap[s.bandADepth];
@@ -138,40 +180,58 @@ bool waterMarch(WaterShadeSrvs s, float3 P, float3 t, uint slot, out float3 H, o
     const uint steps = uint(min(ceil(len), float(WATER_MARCH_STEPS)));
     if (steps == 0) return false;
     reach *= fmax;  // (the ray parameter of b, for a ray parallel to the image plane)
-    float prevZ = a.z;
+    bool prevContinuous;
+    float prevStep;
+    float prevInvA = waterInvDepthAt(bandA, a.xy, true, prevContinuous, prevStep);
+    float prevF = 0, prevDiff = 1.0 / a.z - prevInvA, prevZ = a.z;  // (> 0: band A behind P)
     for (uint i = 1; i <= steps; ++i)
     {
         const float f = float(i) / float(steps);
-        // the 3D line's point at screen fraction f: 1/z linear in screen space
-        const float invZ = lerp(1.0 / a.z, 1.0 / b.z, f), z = 1.0 / invZ;
+        const float invRay = lerp(1.0 / a.z, 1.0 / b.z, f), z = 1.0 / invRay;
         const float2 pos = a.xy + d * f;
-        const int2 q = int2(floor(pos));
-        if (any(q < 0) || q.x >= int(g_viewWidth) || q.y >= int(g_viewHeight)) { status = WATER_STAT_OFFSCREEN; return false; }
-        const float zA = waterBandADepth(bandA, q);
-        if (z >= zA)
+        if (any(pos < 0) || pos.x >= size.x || pos.y >= size.y) { status = WATER_STAT_OFFSCREEN; return false; }
+        bool continuous;
+        float texelStep;
+        const float invA = waterInvDepthAt(bandA, pos, true, continuous, texelStep);
+        const float diff = invRay - invA;  // > 0: the ray is in front of band A
+        if (diff <= 0)
         {
-            // Band A is reached between the previous step and this one; a jump past more than this step's depth span
-            // means the ray went behind a nearer surface there.
-            if (zA < prevZ - 1e-4 * zA) { status = WATER_STAT_OCCLUDED; return false; }
-            // bisection on the screen fraction for the crossing
-            float lo = float(i - 1) / float(steps), hi = f;
-            [unroll] for (uint k = 0; k < 12; ++k)
+            const float zA = 1.0 / invA;
+            const bool oneSurface = continuous && prevContinuous && abs(invA - prevInvA) <= 1.5 * max(texelStep, prevStep) + 1e-3 * invA;
+            if (!oneSurface && zA < prevZ - 1e-4 * zA)
             {
-                const float m = 0.5 * (lo + hi), zm = 1.0 / lerp(1.0 / a.z, 1.0 / b.z, m);
-                const int2 qm = clamp(int2(floor(a.xy + d * m)), 0, int2(g_viewWidth, g_viewHeight) - 1);
-                if (zm >= waterBandADepth(bandA, qm)) hi = m; else lo = m;
+                status = WATER_STAT_OCCLUDED;
+                g_waterMarchDebug = float4(pos, float(i), prevZ - zA);
+                return false;
             }
-            const float zh = 1.0 / lerp(1.0 / a.z, 1.0 / b.z, hi);
-            // the world point at view depth zh on the ray P + t u: u from the depth along the view axis
-            // (a ray parallel to the image plane keeps its depth: the screen fraction is then the ray parameter's)
-            H = abs(tz) > 1e-6 ? P + t * ((zh - pz) / tz) : P + t * (hi * reach);
+            // the affine difference's root between the previous step and this one
+            const float fh = oneSurface ? lerp(prevF, f, saturate(prevDiff / max(prevDiff - diff, 1e-30))) : f;
+            const float zh = 1.0 / lerp(1.0 / a.z, 1.0 / b.z, fh);
+            // the world point at view depth zh on the ray P + t u (a ray parallel to the image plane keeps its depth:
+            // the screen fraction is then the ray parameter's)
+            H = abs(tz) > 1e-6 ? P + t * ((zh - pz) / tz) : P + t * (fh * reach);
+            g_waterMarchDebug = float4(a.xy + d * fh, float(i), zA);
             status = WATER_STAT_SHADED;
             return true;
         }
         // Still inside the water: this stream's water layer must lie in front of the ray point here.
+        const int2 q = clamp(int2(floor(pos)), 0, int2(size) - 1);
         const uint v = wvis[q];
-        if ((v >> 30) != 3u || ((v >> 24) & 0x3Fu) != slot || wdepth[q] > z * (1 + 1e-5)) { status = WATER_STAT_EXIT; return false; }
+        bool waterContinuous;
+        float waterStep;
+        const float invW = waterInvDepthAt(wdepth, pos, false, waterContinuous, waterStep);
+        if ((v >> 30) != 3u || ((v >> 24) & 0x3Fu) != slot || invW <= 0 || invW < invRay * (1 - 1e-5))
+        {
+            status = WATER_STAT_EXIT;
+            g_waterMarchDebug = float4(pos, float(i), invW > 0 ? 1.0 / invW - z : -1);
+            return false;
+        }
+        prevF = f;
+        prevDiff = diff;
         prevZ = z;
+        prevInvA = invA;
+        prevContinuous = continuous;
+        prevStep = texelStep;
     }
     status = WATER_STAT_OFFSCREEN;  // the clipped path ended at the image border without meeting band A
     return false;

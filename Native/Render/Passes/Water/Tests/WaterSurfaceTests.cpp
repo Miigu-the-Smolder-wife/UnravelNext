@@ -1,14 +1,20 @@
 // Track W water surface shading, stage 1 (FEATURES_GAME 1.9; WaterSurface.hlsli, WaterInterior.hlsl). M's test frame
-// (stand-in V, M resolve and shading) renders a pool twice: without water, then with a flat water layer (y = 0.4 over
-// |x|, |z| <= 1) given to the shading track as V's water layer (waterVis / waterDepth from a CPU ray cast) and a layer-1
-// triangle stream. Needs the M and V tracks (build folder with -Tracks "V;M;W"); without them it only reports a skip.
-//   1. every interior water pixel whose refracted ray (exact Snell, double) meets the floor or the sphere under the
-//      water inside the screen, away from the base image's edges, equals (1 - F) exp(-sigma_a |PH|) L(H) / n^2 + F x
-//      (the sun's specular: none here, the sun's mirror lobe is off screen), with L(H) the no-water image at H's
-//      projection, F the exact unpolarised Fresnel (relative 1e-2);
-//   2. those pixels are shaded samples, not fallbacks (status image), except within 2 px of the paths the CPU marks as
-//      leaving the water's screen region; pixels whose ray leaves the water region are fallbacks (exit or off-screen);
-//   3. every pixel that is not an interior water pixel is bit-identical to the no-water image;
+// (stand-in V, M resolve and shading) renders a closed pool at 960 x 540 twice: without water, then with a flat water
+// layer (y = 0.4 over |x|, |z| <= 1, inside four 0.6 m walls, a sphere under it, a checker floor) given to the shading
+// track as V's water layer (waterVis / waterDepth from a CPU ray cast with V's depth test) and a layer-1 triangle
+// stream. Needs the M and V tracks (build folder with -Tracks "V;M;W"); without them it only reports a skip.
+//   Expected classification (exact CPU geometry, double): a pixel's refracted ray (exact Snell) is expected shaded when
+//   every point of its path P -> H (every 0.25 px on screen) lies under the water layer and in front of band A at its
+//   screen position and H is on screen - the rule WaterSurface.hlsli defines; a fallback otherwise. Boundary cases,
+//   where the answer changes within 2 px of a path point or the path comes within 1e-3 of band A's depth (below what
+//   band A's pixel depths resolve), may go either way.
+//   1. expected-shaded pixels away from the base image's edges equal (1 - F) exp(-sigma_a |PH|) L(H) / n^2 + F x (the
+//      sun's specular: none here), L(H) the no-water image at H's projection, F the exact unpolarised Fresnel
+//      (relative 1e-2, over more than 5,000 pixels);
+//   2. expected-shaded pixels are shaded samples and expected fallbacks are fallbacks (status image), boundary cases
+//      excepted;
+//   3. every pixel of an 8 x 8 tile without water-layer pixels is bit-identical to the no-water image (M's edge composite
+//      blends edge pixels from their tile's representatives, which in water tiles now hold water);
 //   4. the statistics equal the status image's counts.
 //   unx_test_water_watersurfacetests [--no-debug-layer] [--warp]
 #if __has_include("unx/shading/ShadingSystem.h") && __has_include("unx/material/MaterialSystem.h")
@@ -18,6 +24,8 @@
 #include <dxgi1_6.h>
 
 #include <algorithm>
+#include <array>
+#include <limits>
 #include <cmath>
 #include <cstdio>
 
@@ -110,6 +118,20 @@ uint32_t addSphere(scene::Scene& s, float radius, uint32_t rings, uint32_t secto
     s.meshes.push_back(std::move(m));
     return (uint32_t)s.meshes.size() - 1;
 }
+// A wall quad in world coordinates (corners in order around it).
+uint32_t addQuad(scene::Scene& s, float3 a, float3 b, float3 c, float3 d, float3 normal, uint32_t material)
+{
+    scene::Mesh m;
+    m.name = "wall";
+    m.positions = { a, b, c, d };
+    m.normals.assign(4, normal);
+    m.tangents.assign(4, { 1, 0, 0, 1 });
+    m.uv0 = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+    m.indices = { 0, 1, 2, 0, 2, 3 };
+    m.submeshes.push_back({ 0, 6, material });
+    s.meshes.push_back(std::move(m));
+    return (uint32_t)s.meshes.size() - 1;
+}
 float4 bilinear(const std::vector<uint8_t>& img, uint32_t W, uint32_t H, double px, double py)
 {
     const double u = px - 0.5, v = py - 0.5;
@@ -149,14 +171,14 @@ int main(int argc, char** argv)
             check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&software)), "WARP device");
         }
         TestFrame tf(debugLayer, false, software.Get());
-        const uint32_t W = 480, H = 270;
+        const uint32_t W = 960, H = 540;
         const double level = 0.4, half = 1.0, ior = 1.333;
         const double sigma[3] = { 0.340, 0.0565, 0.00922 };
 
         // A pool: a checker floor of 0.25 m tiles, a sphere under the water, a water material (Water class).
         scene::Scene s;
         s.name = "water surface";
-        scene::Material light, dark, ball, waterMaterial;
+        scene::Material light, dark, ball, waterMaterial, wall;
         light.name = "light";
         light.baseColor = { 0.8f, 0.78f, 0.7f };
         light.roughness = 0.8f;
@@ -170,7 +192,11 @@ int main(int argc, char** argv)
         waterMaterial.cls = scene::MaterialClass::Water;
         waterMaterial.roughness = 0.02f;
         waterMaterial.ior = (float)ior;
-        s.materials = { light, dark, ball, waterMaterial };
+        wall.name = "wall";
+        wall.baseColor = { 0.55f, 0.45f, 0.35f };
+        wall.roughness = 0.7f;
+        wall.twoSided = true;
+        s.materials = { light, dark, ball, waterMaterial, wall };
         const uint32_t tileLight = addPlane(s, 0.25f, 0), tileDark = addPlane(s, 0.25f, 1), sphere = addSphere(s, 0.15f, 32, 64, 2);
         for (int tz = -12; tz < 12; ++tz)
             for (int tx = -12; tx < 12; ++tx)
@@ -187,11 +213,22 @@ int main(int argc, char** argv)
             in.transform = float3x4::translation({ (float)sphereCentre.x, (float)sphereCentre.y, (float)sphereCentre.z });
             s.instances.push_back(in);
         }
+        // The pool's four walls (0.6 m high, two-sided): a closed basin, so refracted rays end on its floor or walls.
+        const float wh = 0.6f;
+        for (const auto& q : { std::array<float3, 5>{ float3{ -1, 0, -1 }, float3{ 1, 0, -1 }, float3{ 1, wh, -1 }, float3{ -1, wh, -1 }, float3{ 0, 0, 1 } },
+                               std::array<float3, 5>{ float3{ -1, 0, 1 }, float3{ -1, 0, -1 }, float3{ -1, wh, -1 }, float3{ -1, wh, 1 }, float3{ 1, 0, 0 } },
+                               std::array<float3, 5>{ float3{ 1, 0, -1 }, float3{ 1, 0, 1 }, float3{ 1, wh, 1 }, float3{ 1, wh, -1 }, float3{ -1, 0, 0 } },
+                               std::array<float3, 5>{ float3{ 1, 0, 1 }, float3{ -1, 0, 1 }, float3{ -1, wh, 1 }, float3{ 1, wh, 1 }, float3{ 0, 0, -1 } } })
+        {
+            scene::Instance in;
+            in.mesh = addQuad(s, q[0], q[1], q[2], q[3], q[4], 4);
+            s.instances.push_back(in);
+        }
         s.sun.direction = normalize(float3{ 0.3f, 0.8f, 0.5f });  // behind the camera: its mirror lobe is off screen
         scene::Camera cam;
         cam.name = "pool";
-        cam.position = { 0.2f, 1.3f, 2.4f };
-        cam.forward = normalize(float3{ -0.2f, -1.1f, -2.4f });
+        cam.position = { 0.3f, 2.4f, 1.8f };  // above the near wall, looking steeply into the pool
+        cam.forward = normalize(float3{ -0.3f, -2.4f, -1.9f });
         cam.ev100 = 13;
         s.cameras.push_back(cam);
         tf.setScene(s);
@@ -199,6 +236,55 @@ int main(int argc, char** argv)
         const ViewDesc desc = ViewDesc::fromCamera(cam, W, H, float4x4{});
         const V3 camPos{ cam.position.x, cam.position.y, cam.position.z };
         const V3 fwd{ -desc.view.m[2][0], -desc.view.m[2][1], -desc.view.m[2][2] };
+
+        // Exact scene ray cast (the floor, the sphere, the walls): the nearest hit parameter along dir (unnormalised).
+        auto cast = [&](V3 o, V3 dir) {
+            double best = std::numeric_limits<double>::infinity();
+            auto consider = [&](double t) { if (t > 1e-9 && t < best) best = t; };
+            if (dir.y != 0)
+            {
+                const double t = -o.y / dir.y;
+                const V3 p = o + dir * t;
+                if (std::fabs(p.x) <= 3 && std::fabs(p.z) <= 3) consider(t);
+            }
+            {
+                const V3 oc = o - sphereCentre;
+                const double a2 = dot(dir, dir), bq = dot(oc, dir), cq = dot(oc, oc) - 0.15 * 0.15, disc = bq * bq - a2 * cq;
+                if (disc >= 0) consider((-bq - std::sqrt(disc)) / a2);
+            }
+            for (double side : { -1.0, 1.0 })
+                if (dir.z != 0)
+                {
+                    const double t = (side - o.z) / dir.z;
+                    const V3 p = o + dir * t;
+                    if (std::fabs(p.x) <= 1 && p.y >= 0 && p.y <= wh) consider(t);
+                }
+            for (double side : { -1.0, 1.0 })
+                if (dir.x != 0)
+                {
+                    const double t = (side - o.x) / dir.x;
+                    const V3 p = o + dir * t;
+                    if (std::fabs(p.z) <= 1 && p.y >= 0 && p.y <= wh) consider(t);
+                }
+            return best;
+        };
+        // Band A's linear depth at a screen position (the exact surface under that sub-pixel point).
+        auto bandADepth = [&](double px, double py) {
+            V3 D;
+            pixelRay(desc, px, py, D);
+            return dot(D * cast(camPos, D), fwd);
+        };
+        // The water layer at a screen position: its linear depth where the view ray meets the water square in front of
+        // band A, else +inf.
+        auto waterDepthAt = [&](double px, double py) {
+            V3 D;
+            pixelRay(desc, px, py, D);
+            if (D.y >= 0) return std::numeric_limits<double>::infinity();
+            const V3 p = camPos + D * ((level - camPos.y) / D.y);
+            if (std::fabs(p.x) > half || std::fabs(p.z) > half) return std::numeric_limits<double>::infinity();
+            const double zw = dot(p - camPos, fwd);
+            return zw < bandADepth(px, py) ? zw : std::numeric_limits<double>::infinity();
+        };
 
         // The water layer from a CPU ray cast: triangle 0 = (a, c, b), 1 = (b, c, d) over the square (CCW from above).
         std::vector<uint32_t> wvis((size_t)W * H, 0xFFFFFFFFu);
@@ -212,6 +298,7 @@ int main(int argc, char** argv)
                 const double u = (level - camPos.y) / D.y;
                 const V3 p = camPos + D * u;
                 if (std::fabs(p.x) > half || std::fabs(p.z) > half) continue;
+                if (!(dot(p - camPos, fwd) < bandADepth(x + 0.5, y + 0.5))) continue;  // behind a wall: V's depth test
                 const uint32_t tri = (p.x - (-half)) + (p.z - (-half)) <= 2 * half ? 0u : 1u;  // diagonal b-c: x + z = 0
                 wvis[(size_t)y * W + x] = 0xC0000000u | (0u << 24) | tri;
                 wdepth[(size_t)y * W + x] = (float)dot(p - camPos, fwd);
@@ -261,7 +348,7 @@ int main(int argc, char** argv)
             return buf;
         };
 
-        std::shared_ptr<std::vector<uint8_t>> base, with, status;
+        std::shared_ptr<std::vector<uint8_t>> base, with, status, march;
         tf.frame.outputLinearHdr = true;
         for (int pass = 0; pass < 2; ++pass)
             tf.run([&](FramePassContext& fc) {
@@ -283,7 +370,11 @@ int main(int argc, char** argv)
                 tracks::materialResolve(fc, v);
                 tracks::shading(fc, v);
                 (pass == 0 ? base : with) = tf.readback(fc, v.color);
-                if (pass == 1) status = tf.readback(fc, fc.state<water::WaterSurfaceDebug>("W.surface.debug").image);
+                if (pass == 1)
+                {
+                    status = tf.readback(fc, fc.state<water::WaterSurfaceDebug>("W.surface.debug").image);
+                    march = tf.readback(fc, fc.state<water::WaterSurfaceDebug>("W.surface.debug").march);
+                }
                 fc.resources.triangleStreams.clear();
             });
         tf.frame.outputLinearHdr = false;
@@ -293,6 +384,7 @@ int main(int argc, char** argv)
         uint32_t interior = 0, checked = 0, smoothSkipped = 0, insideButFallback = 0, insideTotal = 0, outsideButShaded = 0;
         uint32_t counts[8] = {};
         double worst = 0, worstOther = 0;
+        uint32_t loggedOther = 0, loggedFallback = 0, loggedHit = 0, loggedOutside = 0;
         for (uint32_t y = 0; y < H; ++y)
             for (uint32_t x = 0; x < W; ++x)
             {
@@ -300,7 +392,19 @@ int main(int argc, char** argv)
                 const float4 g = texelOf<float4>(*with, W, x, y), o = texelOf<float4>(*base, W, x, y);
                 if (sv == 0)
                 {
-                    worstOther = std::max({ worstOther, (double)std::fabs(g.x - o.x), (double)std::fabs(g.y - o.y), (double)std::fabs(g.z - o.z) });
+                    const double e = std::max({ (double)std::fabs(g.x - o.x), (double)std::fabs(g.y - o.y), (double)std::fabs(g.z - o.z) });
+                    // M's own edge composite blends an edge pixel from representatives in its 8 x 8 tile: tiles with
+                    // water-layer pixels may change legitimately (their edge groups now hold water); others may not.
+                    bool waterTile = false;
+                    for (uint32_t ty = y & ~7u; ty < std::min(H, (y & ~7u) + 8); ++ty)
+                        for (uint32_t tx = x & ~7u; tx < std::min(W, (x & ~7u) + 8); ++tx) waterTile = waterTile || wvis[(size_t)ty * W + tx] != 0xFFFFFFFFu;
+                    if (waterTile) continue;
+                    if (e > 0 && loggedOther < 6)
+                    {
+                        ++loggedOther;
+                        logf("  changed non-interior px (%u,%u): %.4f -> %.4f, water vis %08x\n", x, y, o.y, g.y, wvis[(size_t)y * W + x]);
+                    }
+                    worstOther = std::max(worstOther, e);
                     continue;
                 }
                 ++interior;
@@ -311,41 +415,86 @@ int main(int argc, char** argv)
                 const double cosI = view.y, eta = 1 / ior, F = fresnel(cosI, eta);
                 const double s2 = eta * eta * (1 - cosI * cosI);
                 const V3 t = norm(view * -eta + V3{ 0, 1, 0 } * (eta * cosI - std::sqrt(1 - s2)));
-                // exact hit: the sphere or the floor
-                double best = (0 - P.y) / t.y;
-                const V3 oc = P - sphereCentre;
-                const double bq = dot(oc, t), cq = dot(oc, oc) - 0.15 * 0.15, disc = bq * bq - cq;
-                if (disc >= 0 && -bq - std::sqrt(disc) > 0) best = std::min(best, -bq - std::sqrt(disc));
+                // The exact refracted hit and the expected classification. Along the ray's screen path (samples every
+                // 0.25 px of the 3D segment P -> H), every point must lie under the water layer and in front of band A at
+                // its screen position (the GPU's rule, from exact geometry), and H must be on screen. A condition that
+                // changes within 2 px of a path point makes the pixel a boundary case (either answer is right).
+                const double best = cast(P, t);
                 const V3 Hp = P + t * best;
                 const V3 h = project(desc, Hp, camPos);
-                const bool inWater = std::fabs(Hp.x) <= half && std::fabs(Hp.z) <= half;
-                const bool onScreen = h.x >= 0 && h.y >= 0 && h.x < W && h.y < H;
-                // Is the whole screen path from P to H over this stream's water? (the GPU's inside test)
-                bool pathInside = inWater && onScreen;
-                double margin = 1e9;
-                if (pathInside)
+                const V3 p0 = project(desc, P, camPos);
+                auto pointOk = [&](double qx, double qy, double zX, bool last) {
+                    if (qx < 0 || qy < 0 || qx >= W || qy >= H) return false;
+                    if (!(waterDepthAt(qx, qy) <= zX * (1 + 1e-5))) return false;  // under the water layer
+                    return last || bandADepth(qx, qy) > zX * (1 - 1e-6);           // in front of band A (H: on it)
+                };
+                // Walk the path in order: the first failing point decides a fallback; a point before it whose answer is
+                // ambiguous (it changes within 2 px, or the ray is within 1e-3 of band A's depth: below what band A's
+                // pixel depths resolve) makes the pixel a boundary case - the GPU may stop there either way.
+                bool expectShaded = true, decisive = false, ambiguous = false;
+                double clearance = 1e9;
+                const int n = std::max(4, (int)std::ceil(std::hypot(h.x - p0.x, h.y - p0.y) * 4));
+                const double offsets[4][2] = { { 2, 0 }, { -2, 0 }, { 0, 2 }, { 0, -2 } };
+                for (int k = 1; k <= n && expectShaded; ++k)
                 {
-                    const V3 p0 = project(desc, P, camPos);
-                    const int n = (int)std::ceil(std::max(std::fabs(h.x - p0.x), std::fabs(h.y - p0.y))) * 4 + 1;
-                    for (int k = 0; k <= n && pathInside; ++k)
+                    const V3 X = P + (Hp - P) * (double(k) / n);
+                    const V3 q = project(desc, X, camPos);
+                    const bool last = k == n;
+                    const bool centreOk = pointOk(q.x, q.y, q.z, last);
+                    int agree = 0;
+                    for (const auto& off : offsets) agree += pointOk(q.x + off[0], q.y + off[1], q.z, last) == centreOk;
+                    if (!last && q.x >= 0 && q.y >= 0 && q.x < W && q.y < H)
                     {
-                        const double f = double(k) / n;
-                        const double qx = p0.x + (h.x - p0.x) * f, qy = p0.y + (h.y - p0.y) * f;
-                        V3 Dq;
-                        pixelRay(desc, qx, qy, Dq);
-                        const V3 wp = camPos + Dq * ((level - camPos.y) / Dq.y);
-                        margin = std::min(margin, std::min(half - std::fabs(wp.x), half - std::fabs(wp.z)) / std::max(1e-9, std::sqrt(dot(wp - camPos, wp - camPos))) *
-                                                      (W / (2 * std::tan(0.5 * cam.verticalFov) * W / H)));
-                        if (std::fabs(wp.x) > half || std::fabs(wp.z) > half) pathInside = false;
+                        const double gap = std::fabs(bandADepth(q.x, q.y) - q.z) / q.z;
+                        clearance = std::min(clearance, gap);
+                        if (gap <= 1e-3) ambiguous = true;
                     }
+                    if (!centreOk)
+                    {
+                        expectShaded = false;
+                        decisive = agree == 4;
+                    }
+                    else if (agree != 4) ambiguous = true;
                 }
-                const bool nearBoundary = margin < 2.0;  // within 2 px of the water region's outline along the path
-                if (pathInside && !nearBoundary)
+                const bool robust = !ambiguous && (expectShaded || decisive);
+                const bool pathInside = expectShaded, nearBoundary = !robust;
+                const float4 mg = texelOf<float4>(*march, W, x, y);
+                if (expectShaded && robust)
                 {
                     ++insideTotal;
-                    if (sv != 1) ++insideButFallback;
+                    if (sv != 1)
+                    {
+                        ++insideButFallback;
+                        if (loggedFallback < 12)
+                        {
+                            ++loggedFallback;
+                            logf("  fallback px (%u,%u) status %u: GPU end (%.2f, %.2f) step %.0f value %.5g; CPU H px (%.2f, %.2f) z %.4f\n", x, y, sv - 1, mg.x, mg.y, mg.z, mg.w, h.x, h.y, h.z);
+                        }
+                    }
+                    else if (loggedHit < 8 && std::hypot(mg.x - h.x, mg.y - h.y) > 0.5)
+                    {
+                        ++loggedHit;
+                        logf("  hit px (%u,%u): GPU H (%.2f, %.2f) step %.0f band A z %.4f; CPU H (%.2f, %.2f) z %.4f\n", x, y, mg.x, mg.y, mg.z, mg.w, h.x, h.y, h.z);
+                    }
                 }
-                if (!pathInside && !nearBoundary && sv == 1) ++outsideButShaded;
+                if (!expectShaded && robust && sv == 1)
+                {
+                    ++outsideButShaded;
+                    if (loggedOutside < 8)
+                    {
+                        ++loggedOutside;
+                        // the CPU's view at the GPU's stopping point: band A there and the ray's depth there
+                        double zRay = 0;
+                        for (int k = 0; k <= 4000; ++k)
+                        {
+                            const V3 X = P + (Hp - P) * (k / 4000.0);
+                            const V3 q = project(desc, X, camPos);
+                            if (std::hypot(q.x - mg.x, q.y - mg.y) < 0.02) { zRay = q.z; break; }
+                        }
+                        logf("  shaded but expected fallback px (%u,%u): GPU H (%.2f, %.2f) step %.0f band A z (GPU) %.4f (CPU) %.4f, ray z %.4f; CPU H (%.2f, %.2f) z %.4f, clearance %.2e\n",
+                             x, y, mg.x, mg.y, mg.z, mg.w, bandADepth(mg.x, mg.y), zRay, h.x, h.y, h.z, clearance);
+                    }
+                }
                 if (sv != 1 || !pathInside || nearBoundary) continue;
                 // smooth neighbourhood of H in the no-water image (3 x 3 within 2 %)
                 const int hx = (int)std::floor(h.x), hy = (int)std::floor(h.y);
@@ -359,7 +508,7 @@ int main(int argc, char** argv)
                     }
                 if (hi - lo > 0.02 * hi) { ++smoothSkipped; continue; }
                 const float4 L = bilinear(*base, W, H, h.x, h.y);
-                const double len = best;
+                const double len = best * std::sqrt(dot(t, t));
                 double want[3];
                 for (int k = 0; k < 3; ++k) want[k] = (1 - F) * std::exp(-sigma[k] * len) * (&L.x)[k] / (ior * ior);
                 const double scale = std::max({ want[0], want[1], want[2], 1e-4 });
@@ -375,9 +524,9 @@ int main(int argc, char** argv)
         logf("statistics: shaded %u, off-screen %u, exit %u, occluded %u, steps %u, inside %u, unlit %u\n", st.shaded, st.offscreen, st.exited, st.occluded, st.steps, st.inside,
              st.unlit);
         report(checked > 5000 && worst <= 1e-2, "1. interior water pixels vs (1 - F) exp(-sigma d) L(H) / n^2 (rel.)", worst, 1e-2);
-        report(insideButFallback == 0, "2. rays inside the water's screen region are shaded, not fallbacks (pixels)", insideButFallback, 0);
-        report(outsideButShaded == 0, "2. rays leaving the water region are fallbacks (pixels)", outsideButShaded, 0);
-        report(worstOther == 0, "3. pixels outside the interior are unchanged", worstOther, 0);
+        report(insideButFallback == 0, "2. rays that stay in the water to a visible H are shaded (pixels)", insideButFallback, 0);
+        report(outsideButShaded == 0, "2. rays leaving the water or the screen or passing behind a surface: fallbacks", outsideButShaded, 0);
+        report(worstOther == 0, "3. pixels of tiles without water are unchanged", worstOther, 0);
         const bool statsMatch = st.shaded == counts[0] && st.offscreen == counts[1] && st.exited == counts[2] && st.occluded == counts[3] && st.inside == counts[5];
         report(statsMatch && insideTotal > 0, "4. statistics equal the status image", statsMatch ? 0 : 1, 0);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);

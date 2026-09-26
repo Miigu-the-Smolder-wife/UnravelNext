@@ -24,6 +24,7 @@ struct WaterSurfaceDebug
 {
     bool status = false;
     render::TextureRef image;
+    render::TextureRef march;  // RGBA32F: the march's hit or exit screen position, step, and a depth (WaterSurface.hlsli)
 };
 
 void waterSurface(render::FramePassContext& fc, render::ViewResources& view);
