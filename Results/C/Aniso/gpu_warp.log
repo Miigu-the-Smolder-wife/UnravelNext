@@ -1,0 +1,11 @@
+mirror: anisoSpecular x cos vs evaluateAnisotropic (rel. to E / pi)      2.891e-05 (limit 1.0e-03) ok
+mirror: anisoSpecularAlbedo (A + B) vs C++ (abs.)                        2.468e-05 (limit 5.0e-05) ok
+mirror: anisoFrame degenerate flags                                      0.000e+00 (limit 0.0e+00) ok
+mirror: anisoFrame t vs C++ (radians)                                    2.705e-06 (limit 1.0e-05) ok
+mirror: word round trip about the decoded normal (radians)               3.607e-05 (limit 1.0e-04) ok
+mirror: anisoPdf vs double (rel., floor 1e-3)                            2.306e-05 (limit 1.0e-04) ok
+V: 38386 surface pixels, mean tangent angle error 2.15e-07 rad
+V: brushed sphere pixels                                                 3.839e+04 (limit 2.0e+04) ok
+V: vis-buffer frame t vs double replica (radians)                        6.674e-05 (limit 2.0e-04) ok
+V: band-limited alpha_t', alpha_b' vs double replica (rel.)              1.169e-04 (limit 2.0e-03) ok
+passed: 0 failure(s)

@@ -316,6 +316,35 @@ void writeSheen(Writer& w, const Scene& s)
     }
 }
 
+// A9 anisotropy extension block, written only when a material is anisotropic: u32 tag "ANIS", u64 count, then per
+// material its index, anisotropy, anisotropyRotation.
+constexpr uint32_t kAnisoTag = 0x53494E41u;  // "ANIS"
+
+bool hasAnisotropy(const Material& m) { return m.anisotropy != 0.0f || m.anisotropyRotation != 0.0f; }
+
+bool anyAnisotropy(const Scene& s)
+{
+    for (const Material& m : s.materials)
+        if (hasAnisotropy(m)) return true;
+    return false;
+}
+
+void writeAnisotropy(Writer& w, const Scene& s)
+{
+    w.pod(kAnisoTag);
+    uint64_t count = 0;
+    for (const Material& m : s.materials) count += hasAnisotropy(m);
+    w.pod(count);
+    for (uint32_t i = 0; i < s.materials.size(); ++i)
+    {
+        const Material& m = s.materials[i];
+        if (!hasAnisotropy(m)) continue;
+        w.pod(i);
+        w.pod(m.anisotropy);
+        w.pod(m.anisotropyRotation);
+    }
+}
+
 // A10 glass extension block, written only when a Glass material's attenuation distance is not the default: u32 tag
 // "GATT", u64 count, then per material its index and attenuationDistance.
 constexpr uint32_t kGlassTag = 0x54544147u;  // "GATT"
@@ -405,6 +434,7 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anyCoat(s)) writeCoat(w, s);
     if (anySheen(s)) writeSheen(w, s);
     if (anyAttenuation(s)) writeAttenuation(w, s);
+    if (anyAnisotropy(s)) writeAnisotropy(w, s);
     return std::move(w.out);
 }
 
@@ -543,6 +573,18 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kAnisoTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.materials.size()) fail("unxscene: anisotropy of material %u of %zu", i, s.materials.size());
+            s.materials[i].anisotropy = r.pod<float>();
+            s.materials[i].anisotropyRotation = r.pod<float>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
     if (tag != 0) fail("unxscene: unknown extension block 0x%08x", tag);
     if (r.at != bytes.size()) fail("unxscene: %zu trailing bytes", bytes.size() - r.at);
     return s;
@@ -605,6 +647,12 @@ void validate(const Scene& s)
             if (m.cls != MaterialClass::Standard) fail("material %zu '%s': a sheen is defined on Standard materials", i, m.name.c_str());
             if (m.clearcoat > 0) fail("material %zu '%s': one layer kind per material (sheen or clearcoat)", i, m.name.c_str());
         }
+        if (hasAnisotropy(m))
+        {
+            if (!(m.anisotropy >= 0 && m.anisotropy <= 1)) fail("material %zu '%s': anisotropy in [0, 1]", i, m.name.c_str());
+            if (!std::isfinite(m.anisotropyRotation)) fail("material %zu '%s': anisotropyRotation finite (radians)", i, m.name.c_str());
+            if (m.cls != MaterialClass::Standard) fail("material %zu '%s': anisotropy is defined on Standard materials", i, m.name.c_str());
+        }
         if (m.cls == MaterialClass::Terrain)
         {
             const size_t layers = m.terrainLayers.size();
@@ -637,6 +685,9 @@ void validate(const Scene& s)
         for (const Submesh& sm : m.submeshes)
             if (s.materials[sm.material].normalTexture != kNone && (m.tangents.empty() || m.uv0.empty()))
                 fail("mesh %zu '%s': a normal-mapped material needs tangents and uv0", i, m.name.c_str());
+        for (const Submesh& sm : m.submeshes)
+            if (s.materials[sm.material].anisotropy > 0 && m.tangents.empty())
+                fail("mesh %zu '%s': an anisotropic material needs tangents (the lobe's direction)", i, m.name.c_str());
         for (const BlendShape& b : m.blendShapes)
         {
             if (b.deltaPositions.size() != b.vertices.size() || (!b.deltaNormals.empty() && b.deltaNormals.size() != b.vertices.size()))

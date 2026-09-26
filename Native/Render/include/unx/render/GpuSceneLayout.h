@@ -184,7 +184,10 @@ struct MaterialLayers  // 64 B
     float coatEta;
     float sheenColor[3];        // A9 sheen (MaterialSheen; MATERIAL_LAYERS 1.4): colour C (0 = none), perceptual r_sh
     float sheenRoughness;
-    float reserved[8];          // (thin film, anisotropy: later layers)
+    float anisotropy;           // A9 anisotropy (MaterialAnisotropic; MATERIAL_LAYERS 1.5): strength s, the rotation's
+    float anisotropyCos;        // cos and sin (from the cooked tangent towards the bitangent)
+    float anisotropySin;
+    float reserved[5];          // (thin film: a later layer)
 };
 static_assert(sizeof(MaterialLayers) == 64);
 
@@ -211,6 +214,7 @@ enum MaterialFlags : uint32_t
     MaterialAlphaTested = 1u << 1,
     MaterialLayered = 1u << 2,  // A9: a MaterialLayers record, index in classFlags bits 16..31
     MaterialSheen = 1u << 3,    // A9: the record's layer is a sheen (shade class Sheen; else a clearcoat)
+    MaterialAnisotropic = 1u << 4,  // A9: the record's anisotropy is used (with MaterialLayered; a coat may also be present)
 };
 
 struct Light  // 80 B

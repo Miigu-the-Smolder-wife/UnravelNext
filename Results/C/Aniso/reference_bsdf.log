@@ -1,0 +1,13 @@
+[bsdf]
+  bsdf r=0.50 m=0.0 cls=0 nov=0.80 s=0.00: E_bsdf 0.53753  E_uniform 0.53727  |diff| 2.64e-04 (tol 3.44e-03), integral of pdf 0.9933
+  bsdf r=0.20 m=1.0 cls=0 nov=0.50 s=0.00: E_bsdf 0.61192  E_uniform 0.58543  |diff| 2.65e-02 (tol 5.85e-02), integral of pdf 0.9541
+  bsdf r=0.35 m=0.0 cls=0 nov=0.26 s=0.00: E_bsdf 0.27448  E_uniform 0.27766  |diff| 3.19e-03 (tol 1.02e-02), integral of pdf 0.9823
+  bsdf r=0.90 m=0.3 cls=0 nov=0.10 s=0.00: E_bsdf 0.24169  E_uniform 0.24156  |diff| 1.23e-04 (tol 1.52e-03), integral of pdf 0.9397
+  bsdf r=0.50 m=0.0 cls=1 nov=0.70 s=0.00: E_bsdf 0.15998  E_uniform 0.15996  |diff| 1.82e-05 (tol 8.33e-04), integral of pdf 0.9804
+  bsdf r=0.30 m=1.0 cls=0 nov=0.60 s=0.80: E_bsdf 0.58099  E_uniform 0.58125  |diff| 2.58e-04 (tol 1.00e-02), integral of pdf 0.8572
+    reference vs C++ model (anisotropic): 9.11e-07
+  bsdf r=0.10 m=1.0 cls=0 nov=0.30 s=0.95: E_bsdf 0.87890  E_uniform 0.88788  |diff| 8.98e-03 (tol 4.83e-02), integral of pdf 0.8923
+    reference vs C++ model (anisotropic): 9.62e-06
+  bsdf r=0.50 m=0.0 cls=0 nov=0.90 s=0.50: E_bsdf 0.33333  E_uniform 0.33323  |diff| 1.04e-04 (tol 2.16e-03), integral of pdf 0.9870
+    reference vs C++ model (anisotropic): 2.25e-07
+reference tests passed

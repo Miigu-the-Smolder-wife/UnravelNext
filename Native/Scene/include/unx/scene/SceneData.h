@@ -103,6 +103,11 @@ struct Material
     // (linear, [0, 1]; 0 = none) and perceptual roughness sheenRoughness in [0.1, 1].
     float3 sheenColor{ 0, 0, 0 };
     float sheenRoughness = 0.5f;
+    // Anisotropy (A9, MATERIAL_LAYERS 1.5; Standard class; MaterialModel.h evaluateAnisotropic): the GGX lobe stretched
+    // along the cooked tangent rotated by anisotropyRotation (radians, towards the bitangent), alpha_t = alpha + (1 - alpha)
+    // anisotropy^2, alpha_b = alpha (KHR_materials_anisotropy). 0 = isotropic. Meshes using it need tangents.
+    float anisotropy = 0.0f;                 // [0, 1]
+    float anisotropyRotation = 0.0f;         // radians
     // Glass solid bodies (one-sided; A10 R-2): baseColor is the body's transmittance over attenuationDistance metres, so
     // sigma_a = -ln(baseColor) / attenuationDistance (1/m). A pane (two-sided) takes baseColor per pass as before.
     float attenuationDistance = 0.01f;

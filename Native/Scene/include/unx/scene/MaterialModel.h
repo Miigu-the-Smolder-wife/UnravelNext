@@ -121,6 +121,40 @@ float evaluateSheenLobe(float roughness, float3 n, float3 v, float3 l);  // D G2
 float sheenSunRule(float roughness, float3 n, float3 v, float3 l0, float rho);
 float3 evaluateSheen(const Surface& s, const Sheen& sh, float3 n, float3 v, float3 l);
 
+// Anisotropic Standard surface (A9, MATERIAL_LAYERS 1.5; brushed metal, satin): the Standard model with the GGX lobe
+// stretched along a tangent direction (KHR_materials_anisotropy's parameters):
+//   alpha = max(r^2, kMinAlpha),  alpha_t = alpha + (1 - alpha) s^2,  alpha_b = alpha      s = anisotropy in [0, 1]
+//   D   = 1 / (pi alpha_t alpha_b ((h.t / alpha_t)^2 + (h.b / alpha_b)^2 + (h.n)^2)^2)
+//   V   = 0.5 / (n.l |(alpha_t v.t, alpha_b v.b, v.n)| + n.v |(alpha_t l.t, alpha_b l.b, l.n)|)   Smith, height-correlated
+//   f_s = D V F (1 + f0 (1 / E_a(v) - 1)),  E_a(v) = A_a + B_a the lobe's directional albedo (F = 1) for this view
+// (n, t, b) is the frame anisoFrame builds. E_a depends on the view's azimuth and on both roughnesses; no single
+// isotropic roughness stands for it (Results/C/Aniso/albedo_study.txt: the geometric mean, the view-projected roughness
+// and their blend err by 0.26-0.46 in E at alpha_t / alpha_b >= 4), so it is tabulated: anisoAlbedoTable() holds (A, B)
+// pairs (the split of specularAlbedo) on kAnisoTableMu columns at sqrt(mu) = i / (M - 1) (mu_0 = 1e-4) x kAnisoTablePhi
+// azimuths phi = k / (P - 1) pi / 2 (|v.t|, |v.b|: the lobe's mirror symmetries) x kAnisoTableR rows at
+// sqrt(alpha_t) = j / (R - 1) x the same for alpha_b (alpha >= kMinAlpha), quadrilinear (anisoSpecularAlbedo), index
+// ((((jb R + jt) P + k) M + i) 2 + {0: A, 1: B}). Each point: 4096 Hammersley visible-normal samples (Heitz 2018,
+// stretched) as the isotropic tables. Interpolation error [measured, 250 random points, numpy study]: worst 0.0087 in E,
+// 0.0058 at n.v >= 0.05. At s = 0 the model is the isotropic one up to that table error (the grids differ).
+struct Anisotropy
+{
+    float strength = 0;                 // s
+    float3 t{ 1, 0, 0 }, b{ 0, 1, 0 };  // unit, orthogonal to n (anisoFrame)
+};
+constexpr uint32_t kAnisoTableMu = 32, kAnisoTablePhi = 13, kAnisoTableR = 16;
+constexpr uint32_t kAnisoTableSize = 2 * kAnisoTableMu * kAnisoTablePhi * kAnisoTableR * kAnisoTableR;  // floats
+float2 anisoAlphas(float roughness, float strength);  // (alpha_t, alpha_b)
+float distributionGgxAniso(float ht, float hb, float hn, float alphaT, float alphaB);
+float visibilitySmithGgxAniso(float3 vLocal, float3 lLocal, float alphaT, float alphaB);  // local = (w.t, w.b, w.n)
+const std::vector<float>& anisoAlbedoTable();  // built at first use (deterministic, parallel over rows)
+float2 anisoSpecularAlbedo(float3 vLocal, float alphaT, float alphaB);  // (A_a, B_a) for the unit local view
+// The frame: T, N the interpolated vertex tangent and normal (any length), sign the bitangent sign, theta the material's
+// rotation (radians, from the tangent towards the bitangent), n the unit shading normal. T^ = normalize(T - N^ (N^.T)),
+// B^ = sign N^ x T^, d = cos theta T^ + sin theta B^, t = normalize(d - n (n.d)), b = n x t. Returns false where T is
+// parallel to N or d to n (degenerate; validation requires cooked tangents on meshes with anisotropic materials).
+bool anisoFrame(float3 T, float sign, float3 N, float theta, float3 n, float3& t, float3& b);
+float3 evaluateAnisotropic(const Surface& s, const Anisotropy& a, float3 n, float3 v, float3 l);
+
 // Hair class (INTERFACES 8.1 v1.66): the fibre's absorption sigma_a (PBRT 4e's convention: per unit fibre radius, the
 // chord of the unit-radius cross-section is the path length; HairBsdf.hlsli hairAttenuation). With melanin (eumelanin +
 // pheomelanin > 0): d'Eon et al. 2011, eu (0.419, 0.697, 1.37) + pheo (0.187, 0.4, 1.05). Otherwise baseColor is the

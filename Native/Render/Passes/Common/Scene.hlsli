@@ -93,7 +93,10 @@ struct GpuMaterialLayers  // v1.76 (A9): gpu::MaterialLayers, 64 B
     float coatEta;
     float3 sheenColor;  // A9 sheen (MATERIAL_SHEEN): colour C, perceptual roughness
     float sheenRoughness;
-    float4 reserved[2];
+    float anisotropy;       // A9 anisotropy (MATERIAL_ANISOTROPIC; Passes/Material/Aniso.hlsli): strength, rotation
+    float2 anisotropyRotation;  // (cos, sin)
+    float reservedA;
+    float4 reserved;
 };
 GpuMaterialLayers loadMaterialLayers(uint i) { StructuredBuffer<GpuMaterialLayers> b = ResourceDescriptorHeap[g_materialLayers]; return b[i]; }
 
@@ -150,6 +153,7 @@ struct GpuVisibleCluster
 #define MATERIAL_ALPHA_TESTED (1u << 9)
 #define MATERIAL_LAYERED (1u << 10)  // v1.76 A9: layer record index in classFlags bits 16..31 (loadMaterialLayers)
 #define MATERIAL_SHEEN (1u << 11)    // A9: the record's layer is a sheen (shade class Sheen), else a clearcoat
+#define MATERIAL_ANISOTROPIC (1u << 12)  // A9: the record's anisotropy is used (with MATERIAL_LAYERED)
 // scene::LightType
 #define LIGHT_POINT 0u
 #define LIGHT_SPOT 1u

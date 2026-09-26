@@ -465,10 +465,14 @@ void GpuScene::upload(const scene::Scene& s)
     m_albedoTable = createStructured(table.data(), sizeof(float), table.size(), L"material model E table");
     const std::vector<float>& specular = scene::model::specularAlbedoTable();
     m_specularTable = createStructured(specular.data(), 2 * sizeof(float), specular.size() / 2, L"material model (A, B) table");
-    // the coat tables, then the sheen table at 2 x kCoatTableStride (MaterialModel.hlsli MODEL_SHEEN_TABLE)
+    // the coat tables, then the sheen table at 2 x kCoatTableStride (MaterialModel.hlsli MODEL_SHEEN_TABLE), then - only
+    // when a material is anisotropic - the anisotropy (A, B) table (Passes/Material/Aniso.hlsli ANISO_TABLE, 832 KB)
     std::vector<float> coat = scene::model::coatTable();
     coat.insert(coat.end(), scene::model::sheenTable().begin(), scene::model::sheenTable().end());
-    m_coatTable = createStructured(coat.data(), sizeof(float), coat.size(), L"clearcoat and sheen tables");
+    bool anisotropic = false;
+    for (const scene::Material& m : s.materials) anisotropic |= m.anisotropy > 0;
+    if (anisotropic) coat.insert(coat.end(), scene::model::anisoAlbedoTable().begin(), scene::model::anisoAlbedoTable().end());
+    m_coatTable = createStructured(coat.data(), sizeof(float), coat.size(), L"clearcoat, sheen and anisotropy tables");
     const std::vector<uint32_t>& coverage = coverageMaskTable();
     m_coverageTable = createStructured(coverage.data(), 2 * sizeof(uint32_t), coverage.size() / 2, L"coverage mask LUT");
     if (!m_clusterBuffer.resource) setClusters(ClusterData{});
@@ -505,9 +509,10 @@ void GpuScene::packMaterialLayers(std::vector<gpu::Material>& materials)
     for (size_t i = 0; i < materials.size() && i < s.materials.size(); ++i)
     {
         const scene::Material& m = s.materials[i];
-        materials[i].classFlags &= 0xFFFFu & ~((gpu::MaterialLayered | gpu::MaterialSheen) << 8);
+        materials[i].classFlags &= 0xFFFFu & ~((gpu::MaterialLayered | gpu::MaterialSheen | gpu::MaterialAnisotropic) << 8);
         const bool sheen = m.sheenColor.x > 0 || m.sheenColor.y > 0 || m.sheenColor.z > 0;
-        if (!(m.clearcoat > 0) && !sheen) continue;
+        const bool aniso = m.anisotropy > 0;
+        if (!(m.clearcoat > 0) && !sheen && !aniso) continue;
         if (layers.size() >= 0xFFFFu) fail("GpuScene: more than 65535 layered materials");
         gpu::MaterialLayers l{};
         l.clearcoat = m.clearcoat;
@@ -516,7 +521,11 @@ void GpuScene::packMaterialLayers(std::vector<gpu::Material>& materials)
         l.coatEta = m.clearcoatIor;
         l.sheenColor[0] = m.sheenColor.x, l.sheenColor[1] = m.sheenColor.y, l.sheenColor[2] = m.sheenColor.z;
         l.sheenRoughness = m.sheenRoughness;
-        materials[i].classFlags |= ((gpu::MaterialLayered | (sheen ? gpu::MaterialSheen : 0u)) << 8) | (uint32_t)layers.size() << 16;
+        l.anisotropy = m.anisotropy;
+        l.anisotropyCos = std::cos(m.anisotropyRotation);
+        l.anisotropySin = std::sin(m.anisotropyRotation);
+        materials[i].classFlags |= ((gpu::MaterialLayered | (sheen ? gpu::MaterialSheen : 0u) | (aniso ? gpu::MaterialAnisotropic : 0u)) << 8) |
+                                   (uint32_t)layers.size() << 16;
         layers.push_back(l);
     }
     release(m_materialLayerBuffer);

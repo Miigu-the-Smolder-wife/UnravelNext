@@ -92,6 +92,25 @@ I 요청 `Requests/20260925_I_material_layers.md`에 대한 설계다. 새 기�
   2. GPU 층 레코드, 셰이드 클래스, ShadeOpaque(태양·점광원·간접), resolve 거칠기, 하드웨어에서 C++ 대조.
   3. 면광원 LTC, coverage 조각(CoverageShade), C# `UnxMaterialDesc`.
 
+### 1.5 비등방성 (브러시드 금속·새틴, 렌더 C, 2026-09-27; 셰이딩 합류는 렌더 A)
+- **필드**: `anisotropy` s ∈ [0, 1](0 = 등방), `anisotropyRotation` θ(라디안, 접선에서 종접선 쪽). Standard 클래스 전용. 클리어코트와 함께 쓸 수 있다. 이 재질을 쓰는 메시는 접선이 있어야 한다(검증). `.unxscene` 확장 블록 "ANIS"는 비등방 재질이 있을 때만 쓴다. GPU: `MaterialLayers`의 `anisotropy, anisotropyCos, anisotropySin`(예약 칸), 플래그 `MaterialAnisotropic`(= HLSL `MATERIAL_ANISOTROPIC`, `MATERIAL_LAYERED`와 함께).
+- **정의**(`MaterialModel.h` `evaluateAnisotropic`, KHR_materials_anisotropy의 매개변수): α = max(r², 1e-4), α_t = α + (1 − α) s², α_b = α.
+  - D = 1 / (π α_t α_b ((h·t/α_t)² + (h·b/α_b)² + (h·n)²)²), V = 0.5 / (n·l |(α_t v·t, α_b v·b, v·n)| + n·v |(α_t l·t, α_b l·b, l·n)|)(높이 상관 Smith).
+  - f_s = F D V (1 + f0 (1/E_a(v) − 1)), E_a(v) = A_a + B_a는 이 시선의 단일 산란 알베도(F = 1)다.
+  - **E_a는 표다.** 등방 거칠기 하나로 대신하는 세 후보(기하 평균, 시선 방위 투영 거칠기, 둘의 혼합)는 α_t/α_b ≥ 4에서 E 오차 0.26~0.46이었다 [실측, `Results/C/Aniso/albedo_study.txt`]. 표는 (A, B) 쌍으로 32(√(n·v)) × 13(방위 0~π/2) × 16(√α_t) × 16(√α_b), 사선형 보간, 점마다 Hammersley 4096 VNDF 표본(등방 표와 같은 방법)이다. 832 KB이고 비등방 재질이 있는 장면에서만 `g_coatTable`의 sheen 표 뒤에 올린다(`ANISO_TABLE`). 만들기 1.7 s(16 스레드) [실측].
+- **프레임(V, vis 버퍼 재구성)**: `anisoFrame`(C++)과 `anisoFrameOfSurface`(`Passes/Material/Aniso.hlsli`). 보간 법선 N에 직교화한 쿠킹 접선 T̂, B̂ = sign N̂ × T̂, d = cos θ T̂ + sin θ B̂, t = normalize(d − n(n·d)), b = n × t. 양면 재질의 뒷면에서도 d는 뒤집지 않은 보간값으로 만든다(표면 위의 한 선).
+  - **쿠킹 접선을 고른 근거**: UV 미분 접선은 삼각형마다 상수다. 방사형으로 브러시한 원판(부채꼴 K개)에서 모서리를 사이에 둔 복사휘도 차이가 K = 16/32/64에서 88~98 %/68~88 %/44~66 %였다. 쿠킹 접선은 두 삼각형이 한 정점 접선을 공유하므로 차이가 0이다 [실측 CPU, `Results/C/Aniso/tangent_continuity.txt`].
+- **대역 제한(축별)**: α_t′² = α_t² + 2 S_tt + σ²_map, α_b′² = α_b² + 2 S_bb + σ²_map. S_tt = ((∂n/∂x·t)² + (∂n/∂y·t)²)/12이고, σ²_map은 LEAN 분산 합(축마다 절반 × 2)이다. α_t = α_b이고 공분산이 등방이면 기존 규칙 α′² = α² + trace와 같다.
+- **픽셀 워드(R32_UINT, 비등방 픽셀만)**: 비트 0..15는 G-buffer에서 **디코드한** 법선의 Duff 기저에 대한 접선 각 ψ ∈ [0, π)(unorm16, 0.0027°)다. 셰이딩 커널은 같은 비트로 같은 기저를 만든다. t와 −t는 같은 로브다. 비트 16..23과 24..31은 √α_t′, √α_b′(unorm8)이다. 이 픽셀의 G-buffer 거칠기는 √√(α_t′α_b′)(면적이 같은 등방 로브)로, 비등방을 모르는 판독자(S, R 분류)용이다.
+- **광선(R)**: `anisoSampleVndf`/`anisoPdf`(늘인 VNDF, Heitz 2018). 기준 추적기의 `Bsdf`도 같은 표본화를 쓴다.
+- **비용식 [예상]**(셰이딩 합류 뒤 GpuLock으로 잰다): 비등방 픽셀 N_a마다 resolve에서 프레임·대역 제한 ALU와 4 B 쓰기, 셰이딩에서 4 B 읽기, E_a 1회(32 load, L2 상주 832 KB), 광원 L개마다 로브 ALU(sqrt 2개 추가)가 든다. t ≈ N_a (c_tab + L c_lobe). 표 조회는 3D 텍스처(μ, φ, α_t; α_b 조각 사이만 수동 보간)로 바꾸면 하드웨어 삼선형 2회로 줄어든다. 합류 때 A가 고른다.
+- **시험 [실측]**:
+  - `unx_test_scene_aniso`(CPU): 격자점 표 대 독립 추정(GGX 기울기 역CDF 표본, 2 M) 3.5e-4. 격자 사이 4.2e-3. 흰 금속 에너지 |∫f cos − 1| ≤ 2.0e-3. 로브 상반성 0. s = 0 대 등방 모델 1.4e-3(두 표의 차이). 프레임 규칙, 블록 왕복, 검증.
+  - `unx_test_material_anisotests --warp`(GPU 거울상과 V): 로브 × cos 대 C++ 2.9e-5, E_a 2.5e-5(float atan2), 프레임 2.7e-6 rad, 워드 왕복 3.6e-5 rad, pdf 2.3e-5. vis 버퍼 프레임 대 배정밀 복제(구 2개, 하나는 회전 + 균일 배율, 부호 ±, 38,386픽셀): 최대 6.7e-5 rad(평균 2.2e-7), 대역 제한 α′ 1.2e-4(상대).
+  - `unx_test_reference bsdf`(기준 추적기): 비등방 3경우의 BSDF 표본화 적분 대 균일 적분이 허용차 안이다(8.98e-3 대 4.83e-2, 2.6e-4 대 1.0e-2, 1.0e-4 대 2.2e-3). 배정밀 평가 대 C++ 모델 ≤ 9.6e-6(값에 상대, E/π 하한).
+- **합류(렌더 A에 요청)**: (1) `mShadeClassOf`가 `MATERIAL_ANISOTROPIC`을 먼저 보고 비등방 셰이드 클래스로 보낸다. 지금은 `MATERIAL_LAYERED`라 Layered(코트 0 = 기저만, 등방)로 간다. (2) resolve가 `anisoFrameOfSurface` → `anisoBandLimit` → `anisoPackWord`(디코드한 법선으로)를 써서 워드 텍스처에 쓴다. G-buffer 거칠기는 위 규칙이다. (3) ShadeOpaque/CoverageShade가 `anisoUnpackWord`, `anisoSpecularAlbedo`로 태양(원반 규칙), 점광원(정확), 면광원(설계 14절: 늘임 변환 후 등방 LTC, 오차 C 대조), 간접(f0 A_a + B_a)을 셰이딩한다. (4) 호스트 `UnxMaterialDesc`와 Unity 대응. 런타임에 비등방 재질이 처음 생기면 표를 올려야 한다(지금은 `upload` 때만).
+- **남음**: GPU 추적기(B11 사진 모드)의 비등방 표본화, 프레임 안 렌더러 대 기준 이미지 비교(합류 뒤).
+
 ### 1.3 데이터 (검토 반영)
 - `scene::Material`: `clearcoat`, `clearcoatRoughness`, `thinFilmThickness`, `thinFilmIor`, `thinFilmCoverage`, `float3 substrateIor`, `float3 substrateExtinction`. 기본값은 층 없음(c = 0, d = 0)이다. `.unxscene` v2로 올리고 v1 파일은 기본값으로 읽는다.
 - **층 레코드를 따로 둔다**: `gpu::Material`(80 B, 모든 픽셀이 읽는 뜨거운 레코드)은 그대로 둔다. 층 매개변수는 별도 `StructuredBuffer<GpuMaterialLayers>`(64 B: clearcoat, r_c, d, η_f, w, η_s float3, κ_s float3, 예비 1)에 담는다. `classFlags`의 비트 16~31이 그 레코드 번호다(층 재질 65535개까지). 비트 8~15의 플래그에 `MaterialClearcoat`, `MaterialThinFilm`을 둔다. `FrameConstants` 끝에 `materialLayers` SRV 줄(uint4)을 붙인다(528 → 544 B, 뒤에 붙이므로 기존 필드 위치는 불변).

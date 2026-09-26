@@ -70,6 +70,36 @@ inline Rgb evaluateModel(const scene::model::Surface& s, float3 n, float3 v, flo
     return { (float)out[0], (float)out[1], (float)out[2] };
 }
 
+// A9 anisotropy (MaterialModel.h evaluateAnisotropic) in double: D = 1 / (pi at ab (x^2 / at^2 + y^2 / ab^2 + z^2)^2) has no
+// cancellation; E_a is the table (anisoSpecularAlbedo).
+inline Rgb evaluateAnisotropicModel(const scene::model::Surface& s, const scene::model::Anisotropy& a, float3 n, float3 v, float3 l)
+{
+    const double nov = dot3(n, v), nol = dot3(n, l);
+    if (nov <= 0 || nol <= 0) return {};
+    const double kd = (1 - s.metallic) / 3.14159265358979323846;
+    double hx = (double)v.x + l.x, hy = (double)v.y + l.y, hz = (double)v.z + l.z;
+    const double hl = std::sqrt(hx * hx + hy * hy + hz * hz);
+    hx /= hl;
+    hy /= hl;
+    hz /= hl;
+    const double ht = a.t.x * hx + a.t.y * hy + a.t.z * hz, hb = a.b.x * hx + a.b.y * hy + a.b.z * hz;
+    const double hn = std::max(0.0, (double)n.x * hx + (double)n.y * hy + (double)n.z * hz);
+    const double voh = std::clamp((double)v.x * hx + (double)v.y * hy + (double)v.z * hz, 0.0, 1.0);
+    const float2 al = scene::model::anisoAlphas(s.roughness, a.strength);
+    const double at = al.x, ab = al.y;
+    const double x = ht / at, y = hb / ab, d = x * x + y * y + hn * hn;
+    const double D = 1 / (3.14159265358979323846 * at * ab * d * d);
+    const double vt = dot3(a.t, v), vb = dot3(a.b, v), lt = dot3(a.t, l), lb = dot3(a.b, l);
+    const double V = 0.5 / (nol * std::sqrt(at * at * vt * vt + ab * ab * vb * vb + nov * nov) + nov * std::sqrt(at * at * lt * lt + ab * ab * lb * lb + nol * nol));
+    const float2 e = scene::model::anisoSpecularAlbedo(float3{ (float)vt, (float)vb, (float)nov }, al.x, al.y);
+    const float3 f0 = scene::model::f0(s);
+    const double w = std::pow(1 - voh, 5.0);
+    const double f0c[3] = { f0.x, f0.y, f0.z }, base[3] = { s.baseColor.x, s.baseColor.y, s.baseColor.z };
+    double out[3];
+    for (int c = 0; c < 3; ++c) out[c] = base[c] * kd + (f0c[c] + (1 - f0c[c]) * w) * D * V * (1 + f0c[c] * (1 / ((double)e.x + e.y) - 1));
+    return { (float)out[0], (float)out[1], (float)out[2] };
+}
+
 struct BsdfSample
 {
     float3 wi;
@@ -86,7 +116,16 @@ public:
         m_t = normalize(cross(ref, s.ns));
         m_b = cross(s.ns, m_t);
         m_nov = std::max(dot(s.ns, wo), 1e-6f);
-        m_alpha = scene::model::alphaFromRoughness(s.bsdf.roughness);
+        m_alpha = m_alphaB = scene::model::alphaFromRoughness(s.bsdf.roughness);
+        if (s.aniso.strength > 0 && !lambertOnly)
+        {
+            // A9: the lobe's own frame; visible-normal sampling of the stretched lobe (alpha_t along m_t)
+            m_t = s.aniso.t;
+            m_b = s.aniso.b;
+            const float2 al = scene::model::anisoAlphas(s.bsdf.roughness, s.aniso.strength);
+            m_alpha = al.x;
+            m_alphaB = al.y;
+        }
         if (m_lambert)
         {
             m_pSpec = 0;
@@ -116,6 +155,7 @@ public:
         if (gn * sn <= 0) return {};
         if (m_lambert) return sn > 0 ? Rgb(m_s.bsdf.baseColor) * (1.0f / scene::model::kPi) : Rgb();
         if (sn < 0 && m_s.bsdf.cls != scene::MaterialClass::Foliage) return {};
+        if (m_s.aniso.strength > 0) return evaluateAnisotropicModel(m_s.bsdf, m_s.aniso, m_s.ns, m_wo, wi);
         return evaluateModel(m_s.bsdf, m_s.ns, m_wo, wi);
     }
 
@@ -168,17 +208,27 @@ private:
         const float3 n = m_s.ns;
         const double noh = n.x * hx + n.y * hy + n.z * hz;
         if (noh <= 0) return 0;
+        const double nov = m_nov;
+        if (m_alpha != m_alphaB)
+        {
+            // A9: G1(v) D(h) / (4 n.v) of the stretched lobe
+            const double at = m_alpha, ab = m_alphaB;
+            const double x = (m_t.x * hx + m_t.y * hy + m_t.z * hz) / at, y = (m_b.x * hx + m_b.y * hy + m_b.z * hz) / ab, d = x * x + y * y + noh * noh;
+            const double vt = dot3(m_t, m_wo), vb = dot3(m_b, m_wo);
+            const double g1 = 2 * nov / (nov + std::sqrt(at * at * vt * vt + ab * ab * vb * vb + nov * nov));
+            return (float)(g1 / (3.14159265358979323846 * at * ab * d * d) / (4 * nov));
+        }
         const double cx = n.y * hz - n.z * hy, cy = n.z * hx - n.x * hz, cz = n.x * hy - n.y * hx;
-        const double a = m_alpha, a2 = a * a, nov = m_nov;
+        const double a = m_alpha, a2 = a * a;
         const double g1 = 2 * nov / (nov + std::sqrt(a2 + (1 - a2) * nov * nov));
         return (float)(g1 * ModelTerms::ggx(noh, cx * cx + cy * cy + cz * cz, a) / (4 * nov));
     }
 
     float3 sampleVisibleNormalReflection(float u1, float u2) const
     {
-        const float a = m_alpha;
+        const float a = m_alpha, ab = m_alphaB;  // (alpha_t, alpha_b); equal for isotropic lobes
         const float3 v{ dot(m_wo, m_t), dot(m_wo, m_b), dot(m_wo, m_s.ns) };
-        const float3 vh = normalize(float3{ a * v.x, a * v.y, v.z });
+        const float3 vh = normalize(float3{ a * v.x, ab * v.y, v.z });
         const float lensq = vh.x * vh.x + vh.y * vh.y;
         const float3 t1 = lensq > 0 ? float3{ -vh.y, vh.x, 0 } / std::sqrt(lensq) : float3{ 1, 0, 0 };
         const float3 t2 = cross(vh, t1);
@@ -187,7 +237,7 @@ private:
         const float s = 0.5f * (1 + vh.z);
         const float p2 = (1 - s) * std::sqrt(std::max(0.0f, 1 - p1 * p1)) + s * r * std::sin(phi);
         const float3 nh = t1 * p1 + t2 * p2 + vh * std::sqrt(std::max(0.0f, 1 - p1 * p1 - p2 * p2));
-        const float3 hl = normalize(float3{ a * nh.x, a * nh.y, std::max(0.0f, nh.z) });
+        const float3 hl = normalize(float3{ a * nh.x, ab * nh.y, std::max(0.0f, nh.z) });
         const float3 h = m_t * hl.x + m_b * hl.y + m_s.ns * hl.z;
         return normalize(h * (2 * dot(m_wo, h)) - m_wo);
     }
@@ -195,7 +245,7 @@ private:
     const Surface& m_s;
     float3 m_wo, m_t, m_b;
     bool m_lambert;
-    float m_nov = 1, m_alpha = 1, m_pSpec = 0, m_pDiff = 0, m_pTrans = 0;
+    float m_nov = 1, m_alpha = 1, m_alphaB = 1, m_pSpec = 0, m_pDiff = 0, m_pTrans = 0;
 };
 
 inline float powerHeuristic(float a, float b)

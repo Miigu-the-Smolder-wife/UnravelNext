@@ -1,0 +1,8 @@
+# cooked vs uv-derivative tangent across a fan edge of a radially brushed disc (A9 anisotropy; AnisoTests --study)
+# K segments, s, r: max relative jump of f cos over views/lights with f cos > 5 % of the max
+K  16  s 0.5  r 0.3  cooked jump 0  uv-derivative jump 0.885  (tangent turn 22.50 deg)
+K  16  s 0.9  r 0.3  cooked jump 0  uv-derivative jump 0.977  (tangent turn 22.50 deg)
+K  32  s 0.5  r 0.3  cooked jump 0  uv-derivative jump 0.679  (tangent turn 11.25 deg)
+K  32  s 0.9  r 0.3  cooked jump 0  uv-derivative jump 0.875  (tangent turn 11.25 deg)
+K  64  s 0.5  r 0.3  cooked jump 0  uv-derivative jump 0.437  (tangent turn 5.62 deg)
+K  64  s 0.9  r 0.3  cooked jump 0  uv-derivative jump 0.655  (tangent turn 5.62 deg)

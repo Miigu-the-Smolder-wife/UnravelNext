@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iterator>
+#include <thread>
 
 namespace unx::scene::model
 {
@@ -453,6 +454,150 @@ float3 evaluate(const Surface& s, float3 n, float3 v, float3 l)
     const float3 diffuse = s.cls == MaterialClass::Foliage ? albedo * (1 - s.transmission) : albedo;
     return diffuse + single * compensation;
 }
+
+// ---- Anisotropy (A9, MATERIAL_LAYERS 1.5)
+float2 anisoAlphas(float roughness, float strength)
+{
+    const float a = alphaFromRoughness(roughness), s = saturate(strength);
+    return { a + (1 - a) * s * s, a };
+}
+
+float distributionGgxAniso(float ht, float hb, float hn, float alphaT, float alphaB)
+{
+    const float x = ht / alphaT, y = hb / alphaB, d = x * x + y * y + hn * hn;
+    return 1 / (kPi * alphaT * alphaB * d * d);
+}
+
+float visibilitySmithGgxAniso(float3 v, float3 l, float alphaT, float alphaB)
+{
+    const float gv = l.z * std::sqrt(alphaT * alphaT * v.x * v.x + alphaB * alphaB * v.y * v.y + v.z * v.z);
+    const float gl = v.z * std::sqrt(alphaT * alphaT * l.x * l.x + alphaB * alphaB * l.y * l.y + l.z * l.z);
+    return 0.5f / (gv + gl);
+}
+
+namespace
+{
+float anisoTableMu(uint32_t i) { const float x = (float)i / (kAnisoTableMu - 1); return std::max(x * x, 1e-4f); }
+float anisoTableAlpha(uint32_t j) { const float x = (float)j / (kAnisoTableR - 1); return std::max(x * x, kMinAlpha); }
+
+// (A, B) of one view (n = +Z, v = (sin cos phi, sin sin phi, mu)), 4096 Hammersley visible-normal samples of the stretched
+// lobe: weight = f n.l / pdf(l) with F = 1 = G2 / G1(v) (as buildTables, anisotropic).
+void anisoPoint(float mu, float phi, float at, float ab, float& outA, float& outB)
+{
+    const uint32_t samples = 4096;
+    const float st = std::sqrt(1 - mu * mu);
+    const float3 v{ st * std::cos(phi), st * std::sin(phi), mu };
+    const float3 vh = normalize(float3{ at * v.x, ab * v.y, v.z });
+    const float lensq = vh.x * vh.x + vh.y * vh.y;
+    const float3 t1 = lensq > 0 ? float3{ -vh.y, vh.x, 0 } / std::sqrt(lensq) : float3{ 1, 0, 0 };
+    const float3 t2 = cross(vh, t1);
+    const float lv = std::sqrt(at * at * v.x * v.x + ab * ab * v.y * v.y + v.z * v.z);  // 2 mu (1 + Lambda(v)) / 2
+    const double g1v = 2 * mu / (mu + lv);
+    double a = 0, b = 0;
+    for (uint32_t s = 0; s < samples; ++s)
+    {
+        const float u1 = (s + 0.5f) / samples, u2 = radicalInverse(s);
+        const float radius = std::sqrt(u1), ph = 2 * kPi * u2;
+        const float p1 = radius * std::cos(ph);
+        const float sBlend = 0.5f * (1 + vh.z);
+        const float p2 = (1 - sBlend) * std::sqrt(std::max(0.0f, 1 - p1 * p1)) + sBlend * radius * std::sin(ph);
+        const float3 nh = t1 * p1 + t2 * p2 + vh * std::sqrt(std::max(0.0f, 1 - p1 * p1 - p2 * p2));
+        const float3 h = normalize(float3{ at * nh.x, ab * nh.y, std::max(0.0f, nh.z) });
+        const float VoH = dot(v, h);
+        const float3 l = h * (2 * VoH) - v;
+        if (l.z <= 0) continue;
+        const double weight = 4.0 * visibilitySmithGgxAniso(v, l, at, ab) * l.z * mu / g1v;
+        const double w = std::pow(1.0 - std::clamp((double)VoH, 0.0, 1.0), 5.0);
+        a += weight * (1 - w);
+        b += weight * w;
+    }
+    outA = (float)(a / samples);
+    outB = (float)(b / samples);
+}
+
+std::vector<float> buildAnisoTable()
+{
+    const uint32_t M = kAnisoTableMu, P = kAnisoTablePhi, R = kAnisoTableR;
+    std::vector<float> t(kAnisoTableSize);
+    auto row = [&](uint32_t jb) {
+        for (uint32_t jt = 0; jt < R; ++jt)
+            for (uint32_t k = 0; k < P; ++k)
+                for (uint32_t i = 0; i < M; ++i)
+                {
+                    const size_t at = 2 * ((((size_t)jb * R + jt) * P + k) * M + i);
+                    anisoPoint(anisoTableMu(i), 0.5f * kPi * k / (P - 1), anisoTableAlpha(jt), anisoTableAlpha(jb), t[at], t[at + 1]);
+                }
+    };
+    std::vector<std::thread> threads;
+    for (uint32_t jb = 0; jb < R; ++jb) threads.emplace_back(row, jb);  // each point depends on its own indices only
+    for (std::thread& th : threads) th.join();
+    return t;
+}
+} // namespace
+
+const std::vector<float>& anisoAlbedoTable()
+{
+    static const std::vector<float> t = buildAnisoTable();
+    return t;
+}
+
+float2 anisoSpecularAlbedo(float3 v, float alphaT, float alphaB)
+{
+    const std::vector<float>& t = anisoAlbedoTable();
+    const uint32_t M = kAnisoTableMu, P = kAnisoTablePhi, R = kAnisoTableR;
+    const float x = std::sqrt(saturate(v.z)) * (M - 1);
+    const float y = std::atan2(std::fabs(v.y), std::fabs(v.x)) / (0.5f * kPi) * (P - 1);  // atan2(0, 0) = 0 at the pole
+    const float zt = std::sqrt(saturate(alphaT)) * (R - 1), zb = std::sqrt(saturate(alphaB)) * (R - 1);
+    const uint32_t x0 = std::min((uint32_t)x, M - 2), y0 = std::min((uint32_t)y, P - 2);
+    const uint32_t t0 = std::min((uint32_t)zt, R - 2), b0 = std::min((uint32_t)zb, R - 2);
+    const float fx = x - x0, fy = y - y0, ft = zt - t0, fb = zb - b0;
+    float2 out{ 0, 0 };
+    for (uint32_t c = 0; c < 16; ++c)
+    {
+        const uint32_t dx = c & 1, dy = (c >> 1) & 1, dt = (c >> 2) & 1, db = c >> 3;
+        const float w = (dx ? fx : 1 - fx) * (dy ? fy : 1 - fy) * (dt ? ft : 1 - ft) * (db ? fb : 1 - fb);
+        const size_t at = 2 * ((((size_t)(b0 + db) * R + (t0 + dt)) * P + (y0 + dy)) * M + (x0 + dx));
+        out.x += w * t[at];
+        out.y += w * t[at + 1];
+    }
+    return out;
+}
+
+bool anisoFrame(float3 T, float sign, float3 N, float theta, float3 n, float3& t, float3& b)
+{
+    const float nl = length(N);
+    if (!(nl > 0)) return false;
+    const float3 Nh = N / nl;
+    float3 Tp = T - Nh * dot(Nh, T);
+    const float tl = length(Tp);
+    if (!(tl > 1e-12f)) return false;
+    Tp = Tp / tl;
+    const float3 Bp = cross(Nh, Tp) * (sign < 0 ? -1.0f : 1.0f);
+    const float3 d = Tp * std::cos(theta) + Bp * std::sin(theta);
+    const float3 dp = d - n * dot(n, d);
+    const float dl = length(dp);
+    if (!(dl > 1e-12f)) return false;
+    t = dp / dl;
+    b = cross(n, t);
+    return true;
+}
+
+float3 evaluateAnisotropic(const Surface& s, const Anisotropy& a, float3 n, float3 v, float3 l)
+{
+    const float NoV = dot(n, v), NoL = dot(n, l);
+    const float3 albedo = s.baseColor * ((1 - s.metallic) / kPi);
+    if (NoV <= 0 || NoL <= 0) return {};
+    const float3 h = normalize(v + l);
+    const float VoH = saturate(dot(v, h));
+    const float2 al = anisoAlphas(s.roughness, a.strength);
+    const float3 vl{ dot(v, a.t), dot(v, a.b), NoV }, ll{ dot(l, a.t), dot(l, a.b), NoL };
+    const float3 f = f0(s);
+    const float dv = distributionGgxAniso(dot(h, a.t), dot(h, a.b), std::max(dot(h, n), 0.0f), al.x, al.y) * visibilitySmithGgxAniso(vl, ll, al.x, al.y);
+    const float2 ab = anisoSpecularAlbedo(vl, al.x, al.y);
+    const float3 compensation = float3{ 1, 1, 1 } + f * (1 / (ab.x + ab.y) - 1);
+    return albedo + fresnelSchlick(f, VoH) * dv * compensation;
+}
+
 float3 hairAbsorption(const Material& m)
 {
     if (m.hairEumelanin + m.hairPheomelanin > 0)

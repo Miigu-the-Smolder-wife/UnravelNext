@@ -536,6 +536,7 @@ Surface RtScene::surface(const Hit& hit, float3 rayDir) const
     s.p = p0 * w + p1 * u + p2 * v;
     s.ng = normalize(cross(p1 - p0, p2 - p0));
     float3 n = normalize(toWorldV(N[tri[0]] * w + N[tri[1]] * u + N[tri[2]] * v));
+    const float3 nInterp = n;  // A9 anisotropy: the frame's interpolated normal (unflipped on both sides)
     s.material = materialOf(hit.instance, md, hit.triangle);
     const scene::Material& mat = m_scene.materials[s.material];
     float2 uv{};
@@ -624,6 +625,14 @@ Surface RtScene::surface(const Hit& hit, float3 rayDir) const
     const float nv = dot(n, wo);
     if (s.frontFacing && nv < 1e-4f) n = normalize(n + wo * (1e-4f - nv));
     s.ns = n;
+    if (mat.anisotropy > 0 && T)
+    {
+        // A9 (MaterialModel.h anisoFrame): the cooked tangent rotated and orthogonalised against the final shading normal
+        const float4 t0 = T[tri[0]], t1 = T[tri[1]], t2 = T[tri[2]];
+        const float3 tl{ t0.x * w + t1.x * u + t2.x * v, t0.y * w + t1.y * u + t2.y * v, t0.z * w + t1.z * u + t2.z * v };
+        if (scene::model::anisoFrame(toWorldV(tl), t0.w, nInterp, mat.anisotropyRotation, n, s.aniso.t, s.aniso.b))
+            s.aniso.strength = mat.anisotropy;
+    }
     s.bsdf.cls = mat.cls;
     s.bsdf.baseColor = base;
     s.bsdf.roughness = std::clamp(rough, 0.0f, 1.0f);

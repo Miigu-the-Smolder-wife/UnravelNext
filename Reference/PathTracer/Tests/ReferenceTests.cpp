@@ -512,6 +512,7 @@ void testBsdfSampling()
         scene::MaterialClass cls;
         float3 base;
         float roughness, metallic, transmission, nov;
+        float aniso = 0;  // A9 anisotropy strength (frame: t rotated 0.5 rad about n from x)
     };
     const Case cases[] = {
         { scene::MaterialClass::Standard, { 0.5f, 0.5f, 0.5f }, 0.5f, 0.0f, 0.0f, 0.8f },
@@ -519,6 +520,9 @@ void testBsdfSampling()
         { scene::MaterialClass::Standard, { 0.1f, 0.1f, 0.1f }, 0.35f, 0.0f, 0.0f, 0.26f },
         { scene::MaterialClass::Standard, { 0.2f, 0.2f, 0.2f }, 0.9f, 0.3f, 0.0f, 0.1f },
         { scene::MaterialClass::Foliage, { 0.06f, 0.12f, 0.03f }, 0.5f, 0.0f, 0.3f, 0.7f },
+        { scene::MaterialClass::Standard, { 0.95f, 0.64f, 0.54f }, 0.3f, 1.0f, 0.0f, 0.6f, 0.8f },
+        { scene::MaterialClass::Standard, { 0.9f, 0.9f, 0.9f }, 0.1f, 1.0f, 0.0f, 0.3f, 0.95f },
+        { scene::MaterialClass::Standard, { 0.4f, 0.3f, 0.2f }, 0.5f, 0.0f, 0.0f, 0.9f, 0.5f },
     };
     for (const Case& c : cases)
     {
@@ -529,6 +533,9 @@ void testBsdfSampling()
         s.bsdf.roughness = c.roughness;
         s.bsdf.metallic = c.metallic;
         s.bsdf.transmission = c.transmission;
+        s.aniso.strength = c.aniso;
+        s.aniso.t = { std::cos(0.5f), std::sin(0.5f), 0 };
+        s.aniso.b = { -std::sin(0.5f), std::cos(0.5f), 0 };
         const float3 wo{ std::sqrt(1 - c.nov * c.nov), 0, c.nov };
         const reference::Bsdf b(s, wo);
         const uint32_t N = 1 << 20;
@@ -552,9 +559,26 @@ void testBsdfSampling()
         const double mB = sumB / N, mU = sumU / N;
         const double sB = std::sqrt(std::max(0.0, sumB2 / N - mB * mB) / N), sU = std::sqrt(std::max(0.0, sumU2 / N - mU * mU) / N);
         const double diff = std::fabs(mB - mU), tol = 5 * std::sqrt(sB * sB + sU * sU);
-        logf("  bsdf r=%.2f m=%.1f cls=%d nov=%.2f: E_bsdf %.5f  E_uniform %.5f  |diff| %.2e (tol %.2e), integral of pdf %.4f\n", c.roughness, c.metallic, (int)c.cls, c.nov, mB,
+        logf("  bsdf r=%.2f m=%.1f cls=%d nov=%.2f s=%.2f: E_bsdf %.5f  E_uniform %.5f  |diff| %.2e (tol %.2e), integral of pdf %.4f\n", c.roughness, c.metallic, (int)c.cls, c.nov, c.aniso, mB,
              mU, diff, tol, pdfInt / N);
         if (diff > tol) fail("bsdf sampling inconsistent with evaluation");
+        if (c.aniso > 0)
+        {
+            // A9: the double evaluation against the C++ model (MaterialModel.h evaluateAnisotropic), relative to E / pi
+            scene::model::Anisotropy a = s.aniso;
+            double worst = 0;
+            reference::Pcg32 r2(99, 3);
+            for (int k = 0; k < 4096; ++k)
+            {
+                const float z = r2.uniform(), rr = std::sqrt(std::max(0.0f, 1 - z * z)), phi = 2 * kPi * r2.uniform();
+                const float3 w{ rr * std::cos(phi), rr * std::sin(phi), std::max(z, 0.01f) };
+                const float3 m = scene::model::evaluateAnisotropic(s.bsdf, a, s.ns, wo, normalize(w));
+                const double ref = b.eval(normalize(w)).g;  // relative to the value, floored at the lobe's scale E / pi
+                worst = std::max(worst, std::fabs(ref - m.y) / std::max(ref, std::max(mB / kPi, 1e-3)));
+            }
+            logf("    reference vs C++ model (anisotropic): %.2e\n", worst);
+            if (worst > 1e-4) fail("anisotropic reference evaluation disagrees with the model");
+        }
         if (pdfInt / N > 1.02) fail("bsdf pdf integrates above 1");
     }
 }

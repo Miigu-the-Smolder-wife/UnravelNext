@@ -35,6 +35,7 @@ struct Surface
     float3 ns;       // shading normal (normal map applied), same side as ng
     bool frontFacing = true;   // the viewer is on the ng side (always true for two-sided)
     scene::model::Surface bsdf;
+    scene::model::Anisotropy aniso;  // strength 0 = isotropic; else the frame (t, b) about ns (MaterialModel.h anisoFrame)
     Rgb emission;
     uint32_t material = 0;
     float ior = 1.5f;  // the material's index of refraction (Water: Dielectric.h)
