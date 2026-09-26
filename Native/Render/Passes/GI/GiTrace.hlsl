@@ -6,7 +6,8 @@
 // emission + diffuse albedo / pi * (direct sun at the hit point, one exact shadow ray within the solar disk
 // + indirect irradiance of the hit's cell). The indirect part is the second and later bounces, a smooth field: its cell
 // is gi.hit_cell_footprint_scale x the ray footprint (texel cone ~0.36 t) coarse, and is requested for update next frame.
-// Texels blend with the entry's history weight (GiInternal giHistoryAlpha).
+// The texel values go to GiIntegrate with two flags (the ray read a bounce term; from a young cell), which
+// sets the entry's history weight (GiInternal giHistoryAlpha) and blends texels, map and SH with it.
 //
 // P[0] = { cache UAV, ray budget (dispatch width), hit cell footprint scale (float bits), 0 }
 // Local lights at the hit: one next-event sample (HitLocalLights.hlsli) and a shadow ray; with them the cache's
@@ -57,8 +58,6 @@ void GiTraceGen()
     float3 t, bt;
     giBasis(n, t, bt);
     const uint shAddress = h.offSh + entry * GI_SH_STRIDE;
-    const uint history = giHistory(b, h, entry);
-    const float alpha = giHistoryAlpha(h, history);
     // gi.deterministic (P[0].w bit 0): seeds from the entry's key, not its index (allocation order).
     const uint identity = (P[0].w & 1u) != 0 ? giDetPriority(b, h, entry) : entry;
     const uint seed = giRandom(identity * 9781u + h.frame * 6271u + texel * 26699u);
@@ -98,6 +97,8 @@ void GiTraceGen()
     }
 
     float3 radiance, sampleRadiance;
+    bool readsBounce = false;  // the hit's radiance has a bounce term (albedo / pi x the cache irradiance read there)
+    bool youngBounce = false;  // read from a young cell, or from other levels in place of a cell without data
     float3 emissionOut = 0;  // the hit's own emission's share the MIS moves to the emitter samples (1 - w_b) x emission
     bool emitter = false;
     float distanceToHit;
@@ -152,10 +153,12 @@ void GiTraceGen()
             // A bounce cell without data yet (new, or not updated since): the same surface's coarser cells hold the best
             // estimate there. Irradiance 0 in its place made every young cell's first updates dark, and readers of those
             // cells (reflection hits land on fresh fine cells all the time) showed it as dark spots.
+            float fallbackWeight = 0, fallbackYoung = 0;
             if (!known)
             {
-                float weight;
-                irradiance = giCacheIrradianceAt(b, h, s.position, s.normal, bounceLevel, weight);  // coarser, then finer levels
+                g_giReadYoung = 0;
+                irradiance = giCacheIrradianceAt(b, h, s.position, s.normal, bounceLevel, fallbackWeight);  // coarser, then finer levels
+                fallbackYoung = g_giReadYoung;
             }
             const float3 l = normalize(g_sunDirection);
             const float cosSun = dot(s.normal, l);
@@ -188,6 +191,9 @@ void GiTraceGen()
                 }
             }
             radiance = m.emissive + albedo / GI_PI * (irradiance + sun) + local;
+            readsBounce = any(albedo > 0);
+            // A fallback read is young by the young entries' share of its weight (or without data: 0 in place of the light).
+            youngBounce = known ? giYoung(b, h, e) : !(fallbackWeight > 0) || fallbackYoung > 0;
             if (any(m.emissive > 0) && (P[3].w & 256) == 0)  // 256 (attribution): no emitter samples, texel rays alone
             {
                 RtGeometry g;
@@ -230,11 +236,9 @@ void GiTraceGen()
         emitterSamples[P[0].y + thread] = uint4(asuint(emitted), octEncode(normalize(emitLocal)));
     }
     samples[thread] = uint4(asuint(sampleRadiance), (uint)round(saturate(uv.x) * 65535.0) | ((uint)round(saturate(uv.y) * 65535.0) << 16));
-    const uint address = h.offTexels + (entry * GI_TEXEL_COUNT + texel) * 8;
-    const uint2 old = b.Load2(address);
-    const float3 previous = float3(f16tof32(old.x), f16tof32(old.x >> 16), f16tof32(old.y)) * GI_LOAD_SCALE;
-    const float3 value = lerp(previous, radiance, alpha);
-    const float dist = lerp(f16tof32(old.y >> 16), min(distanceToHit, 65000.0), alpha);
-    const float3 stored = value * GI_STORE_SCALE;
-    b.Store2(address, uint2(giPackHalf2(stored.r, stored.g), giPackHalf2(stored.b, dist)));
+    // The texel's value for GiIntegrate (third block of the samples buffer): radiance, hit distance (fp16, >= 0), bit 16 =
+    // the ray read a bounce term, bit 17 = from young cells. By count, not by luminance: a cell without data reads 0 (the
+    // most biased read has no luminance).
+    samples[2 * P[0].y + thread] = uint4(asuint(radiance), (f32tof16(min(distanceToHit, 65000.0)) & 0xFFFFu) | (readsBounce ? 0x10000u : 0u) |
+                                                             (readsBounce && youngBounce ? 0x20000u : 0u));
 }

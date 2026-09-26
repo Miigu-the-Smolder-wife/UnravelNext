@@ -26,6 +26,7 @@
 #include "Passes/Reflection/Reflection.hlsli"
 #include "Passes/Common/VisBuffer.hlsli"
 #include "Passes/Common/Deformation.hlsli"
+#include "RayTracing/HalfNearest.hlsli"
 
 // Minimal rotation taking unit a to unit b, applied to v (Rodrigues; a = -b keeps v).
 float3 rotateBetween(float3 a, float3 b, float3 v)
@@ -141,5 +142,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
         }
     }
     reflection[pixel] = (flags & 4u) ? float4(n / 32.0, min(motion, 1.0), state, current.a) : float4(mean, current.a);
-    accumOut[pixel] = float4(mean, (float)min(n + 1, P[2].w));
+    // Nearest-even before the RGBA16F store: this GPU truncates toward zero, a -2.4e-4 bias per store that the running mean
+    // (weight down to 1 / historyMax) would amplify to about -2.4e-4 x historyMax in the steady state (RayTracing/HalfNearest.hlsli).
+    accumOut[pixel] = float4(nearestHalf(mean), (float)min(n + 1, P[2].w));
 }

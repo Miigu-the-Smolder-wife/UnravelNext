@@ -25,16 +25,31 @@ void main(uint2 probe : SV_DispatchThreadID)
         giTouch(b, h, own);
         giRequestUpdate(b, h, own, 0);
     }
-    // The other cells of the trilinear footprint (same level and normal class) that exist.
+    // The other cells of the trilinear footprint (same level and normal class) that exist; in the level band
+    // (GiCache.hlsli giLevelBand) also the next coarser level's cell here (created) and footprint, which the pixels blend in.
     const uint nc = giNormalClass(n);
-    const uint level = giLevel(h, p);
-    const float3 f = p / giCellSize(h, level) - 0.5;
-    const int3 c0 = int3(floor(f));
-    [loop] for (uint k = 0; k < 8; ++k)
+    uint level;
+    const float beta = giLevelBand(h, p, level);
+    [loop] for (uint l = level; l <= level + (beta > 0 ? 1u : 0u); ++l)
     {
-        const uint e = giFind(b, h, giKey(level, nc, c0 + int3(k & 1, (k >> 1) & 1, k >> 2)));
-        if (e == GI_ENTRY_PENDING || e == own) continue;
-        giTouch(b, h, e);
-        giRequestUpdate(b, h, e, 0);
+        uint centre = own;
+        if (l != level)
+        {
+            centre = giFindOrCreate(b, h, giSurfaceKey(h, p, n, l), giAnchorAtHit(h, p, normalize(p - g_cameraPosition)), n, created);
+            if (centre != GI_ENTRY_PENDING)
+            {
+                giTouch(b, h, centre);
+                giRequestUpdate(b, h, centre, 0);
+            }
+        }
+        const float3 f = p / giCellSize(h, l) - 0.5;
+        const int3 c0 = int3(floor(f));
+        [loop] for (uint k = 0; k < 8; ++k)
+        {
+            const uint e = giFind(b, h, giKey(l, nc, c0 + int3(k & 1, (k >> 1) & 1, k >> 2)));
+            if (e == GI_ENTRY_PENDING || e == centre) continue;
+            giTouch(b, h, e);
+            giRequestUpdate(b, h, e, 0);
+        }
     }
 }

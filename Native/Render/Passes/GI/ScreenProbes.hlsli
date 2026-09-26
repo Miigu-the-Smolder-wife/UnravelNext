@@ -467,11 +467,11 @@ ScreenProbeLighting giProbeGatherFrom(Src t, ProbeSrvs s, uint2 pixel, float3 wo
         ByteAddressBuffer cache = ResourceDescriptorHeap[s.pad1 - 1];
         const GiHeader h = giHeader(cache);
         float weight;
-        const float3 front = giCacheIrradianceAt(cache, h, worldPos, normal, 0, weight);
+        const float3 front = giCacheIrradianceScreen(cache, h, worldPos, normal, weight);
         if (weight > 0) o.irradiance = front;
         if (back)
         {
-            const float3 behind = giCacheIrradianceAt(cache, h, worldPos, -normal, 0, weight);
+            const float3 behind = giCacheIrradianceScreen(cache, h, worldPos, -normal, weight);
             if (weight > 0) o.irradianceBack = behind;
         }
     }

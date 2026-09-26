@@ -41,7 +41,7 @@ struct GiSrvs
 #define GI_SH_UPDATES 56u      // completed updates (all time)
 #define GI_SH_SUN_SAMPLES 60u  // sun visibility samples
 #define GI_SH_LAST_UPDATE 64u  // frame stamp of the last selection/update
-#define GI_SH_HISTORY 68u      // updates since the last reset (Jacobi phase, then averaging)
+#define GI_SH_HISTORY 68u      // convergence phase | mean samples << 16 since the last reset (GiInternal giHistoryAlpha)
 #define GI_SH_EPOCH 72u        // lighting epoch of that history
 
 // Entry irradiance map (design 2.5 revision, request 18): E(n) at the 9 x 9 hemispherical octahedral directions around
@@ -238,9 +238,9 @@ float3 giShIrradiance(B b, GiHeader h, uint entry, float3 n, out float sunVisibi
 
 // Read hook of the lookups below, per contributing entry. Read-only readers (M's shading) do nothing; R's ray hits read
 // through the RW cache and keep what they read alive and requested (GiInternal.hlsli): an entry only readers see must not
-// be left at its first, unconverged update.
-void giKeepRead(ByteAddressBuffer b, GiHeader h, uint entry) {}
-void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry);
+// be left at its first, unconverged update. w = the entry's trilinear weight in the lookup.
+void giKeepRead(ByteAddressBuffer b, GiHeader h, uint entry, float w) {}
+void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w);
 
 // One level's trilinear accumulation over the 8 cells of the point (entries that exist and have been updated).
 template <typename B>
@@ -269,7 +269,7 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
             sumL += w * giTexelRadiance(b, h, entry, giHemiOctEncode(local));
         }
         weight += w;
-        giKeepRead(b, h, entry);
+        giKeepRead(b, h, entry, w);
     }
 }
 
@@ -301,6 +301,38 @@ float3 giCacheIrradianceAt(B b, GiHeader h, float3 worldPos, float3 normal, uint
     float3 sum, unused;
     giCacheLevels(b, h, worldPos, normal, normal, false, minLevel, sum, unused, weight);
     return weight > 0 ? sum / weight : 0;
+}
+
+// Screen surfaces (M's per-pixel irradiance, ScreenProbes pad1): the point's level is a step function of its distance to
+// the camera, and neighbouring levels hold estimates at different anchors and cell sizes, so a hard level switch drew a
+// visible arc (a sphere around the camera) wherever irradiance varies over a cell (D0 play capture 2026-09-26). Over the
+// last GI_LEVEL_BAND of a level's range (log2 of the cell size) the result blends linearly into the next coarser level,
+// which it equals at the boundary: continuous in distance. The screen probes in the band create and keep that level's
+// cells too (GiProbePlace), so the blend has data wherever it applies. Cost: the pixels and probes in the band
+// (GI_LEVEL_BAND of the log-distance range) read a second level (8 more cells); their probes keep up to 8 more entries.
+#define GI_LEVEL_BAND 0.25
+// The blend weight of the next coarser level at a screen point, and the point's own level.
+float giLevelBand(GiHeader h, float3 worldPos, out uint own)
+{
+    const float size = distance(worldPos, h.camera) * h.cellTan;
+    own = giLevelForSize(h, size);
+    const float u = log2(max(size, 1e-30) / h.cellSize0);  // level own holds u in (own - 1, own]
+    return own < h.maxLevel ? saturate((u - ((float)own - GI_LEVEL_BAND)) / GI_LEVEL_BAND) : 0.0;
+}
+template <typename B>
+float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, out float weight)
+{
+    uint own;
+    const float beta = giLevelBand(h, worldPos, own);
+    float3 e = giCacheIrradianceAt(b, h, worldPos, normal, own, weight);
+    if (beta > 0)
+    {
+        float wc;
+        const float3 c = giCacheIrradianceAt(b, h, worldPos, normal, own + 1, wc);
+        if (wc > 0) e = weight > 0 ? lerp(e, c, beta) : c;
+        weight = max(weight, wc);
+    }
+    return e;
 }
 
 float3 giCacheIrradiance(GiSrvs s, float3 worldPos, float3 normal)

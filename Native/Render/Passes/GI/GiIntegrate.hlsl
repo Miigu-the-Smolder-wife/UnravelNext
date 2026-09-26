@@ -5,8 +5,9 @@
 // the texel's average spread over the texel (a thin band of horizon light is not moved up to where cos is larger).
 //   irradiance map: E(n_j) += L max(0, n_j . w) dw at the 9 x 9 directions around the anchor normal (GiCache.hlsli);
 //   SH (world frame, cosine-convolved L2; the screen probes still use it): E_lm += A_l L Y_lm(w) dw.
-// Both blend into the entry's history with the texels' weight (giHistoryAlpha); the sun visibility half of SH word 13 is
-// kept; the update is recorded (count, history since reset, epoch, frame).
+// The texels (GiTrace's third sample block: radiance, hit distance), the map and the SH blend into the entry's history with
+// one weight (giHistoryAlpha), set by the share of the update's bounce reads that came from young cells; the sun
+// visibility half of SH word 13 is kept; the update is recorded (count, history word, epoch, frame).
 // The emitter samples (GiTrace: one per texel ray, MIS-weighted radiance over p_l, direction in the anchor frame) follow
 // the texel samples at index ray budget + slot x 64 + k; each adds L_w max(0, n_j . w) / 64.
 // One group per update slot (selected entries, then background). P[0] = { cache UAV, updates per frame, samples SRV, 0 }
@@ -16,6 +17,7 @@
 groupshared float4 gs_sample[2 * GI_TEXEL_COUNT];  // radiance, solid-angle weight (texel samples, then emitter samples)
 groupshared float3 gs_local[2 * GI_TEXEL_COUNT];   // direction in the anchor frame
 groupshared float3 gs_sh[9];
+groupshared float2 gs_bounce[GI_TEXEL_COUNT];  // per texel ray: 1 if its bounce read was young, 1 if it read a bounce term
 
 [numthreads(128, 1, 1)]
 void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
@@ -27,7 +29,7 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     uint entry;
     bool background;
     if (!giUpdateSlot(b, h, slot, entry, background)) return;  // uniform over the group
-    const float alpha = giHistoryAlpha(h, giHistory(b, h, entry));
+    const uint history = giHistory(b, h, entry);
     const float3 na = giAnchorNormal(b, h, entry);
     float3 t, bt;
     giBasis(na, t, bt);
@@ -43,6 +45,8 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         const float len = length(q);
         gs_sample[lane] = float4(asfloat(s.xyz), 2 / (len * len * len) / (float)GI_TEXEL_COUNT);
         gs_local[lane] = q / len;
+        const uint w = samples[2 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane].w;
+        gs_bounce[lane] = float2((w >> 17) & 1u, (w >> 16) & 1u);
     }
     else if (lane < 2 * GI_TEXEL_COUNT)
     {
@@ -51,6 +55,22 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         gs_local[lane] = octDecode(s.w);
     }
     GroupMemoryBarrierWithGroupSync();
+    float2 bounce = 0;
+    [loop] for (uint k = 0; k < GI_TEXEL_COUNT; ++k) bounce += gs_bounce[k];
+    const float young = bounce.y > 0 ? bounce.x / bounce.y : 0.0;  // no bounce light read: nothing biased
+    const float alpha = giHistoryAlpha(h, history, young);
+
+    // Texels: lanes 0..63 (radiance, hit distance).
+    if (lane < GI_TEXEL_COUNT)
+    {
+        const uint4 s = samples[2 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane];
+        const uint address = h.offTexels + (entry * GI_TEXEL_COUNT + lane) * 8;
+        const uint2 old = b.Load2(address);
+        const float3 previous = float3(f16tof32(old.x), f16tof32(old.x >> 16), f16tof32(old.y)) * GI_LOAD_SCALE;
+        const float3 value = lerp(previous, asfloat(s.xyz), alpha) * GI_STORE_SCALE;
+        const float dist = lerp(f16tof32(old.y >> 16), f16tof32(s.w & 0xFFFFu), alpha);
+        b.Store2(address, uint2(giPackHalf2(value.r, value.g), giPackHalf2(value.b, dist)));
+    }
 
     // SH: lanes 0..8, one coefficient each (three channels), in the world frame.
     if (lane < 9)
@@ -94,14 +114,13 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     const uint word13 = b.Load(address + 52);
     uint word[14];
     [unroll] for (uint i = 0; i < 13; ++i) word[i] = giPackHalf2(v[2 * i], v[2 * i + 1]);
-    word[13] = f32tof16(v[26]) | (word13 & 0xFFFF0000u);
+    word[13] = f32tof16(nearestHalf(v[26])) | (word13 & 0xFFFF0000u);
     b.Store4(address, uint4(word[0], word[1], word[2], word[3]));
     b.Store4(address + 16, uint4(word[4], word[5], word[6], word[7]));
     b.Store4(address + 32, uint4(word[8], word[9], word[10], word[11]));
     b.Store2(address + 48, uint2(word[12], word[13]));
-    const uint history = giHistory(b, h, entry);
     if (history == 0) b.InterlockedAdd(GI_H_STAT_RESETS, 1u);
     b.Store(address + GI_SH_UPDATES, b.Load(address + GI_SH_UPDATES) + 1);
     b.Store(address + GI_SH_LAST_UPDATE, h.frame);
-    b.Store2(address + GI_SH_HISTORY, uint2(history + 1, h.epoch));
+    b.Store2(address + GI_SH_HISTORY, uint2(giHistoryNext(h, history, young), h.epoch));
 }

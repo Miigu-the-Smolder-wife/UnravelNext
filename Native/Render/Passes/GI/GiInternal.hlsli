@@ -2,6 +2,7 @@
 #ifndef UNX_GI_INTERNAL_HLSLI
 #define UNX_GI_INTERNAL_HLSLI
 #include "Passes/GI/GiCache.hlsli"
+#include "RayTracing/HalfNearest.hlsli"
 
 // Header byte offsets (GiCache.hlsli GiHeader) of the fields kernels write.
 #define GI_H_FREE_COUNT 48
@@ -110,8 +111,14 @@ void giRequestHit(RWByteAddressBuffer b, GiHeader h, uint entry)
 // Cache lookups by ray hits (GiCache.hlsli giKeepRead): each contributing entry is touched and requested once per frame
 // (a plain load of its hit stamp first, so entries shared by many rays cost one load after the first).
 static bool g_giKeepReads = true;  // per thread; false: lookups read only (attribution runs, reflection experiment 256)
-void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry)
+// Per thread: the trilinear weight of young entries (GiInternal giYoung: still in their Jacobi phase) among the RW lookups'
+// reads since the caller zeroed it (GiTrace's bounce fallback: whether the irradiance it read is a converged estimate).
+static float g_giReadYoung = 0;
+void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w)
 {
+    const uint a = h.offSh + entry * GI_SH_STRIDE;
+    const uint history = b.Load(a + GI_SH_EPOCH) == h.epoch ? b.Load(a + GI_SH_HISTORY) : 0u;
+    if ((history & 0xFFFFu) < h.jacobiUpdates) g_giReadYoung += w;
     if (!g_giKeepReads) return;
     if (b.Load(h.offHitStamp + entry * 4) == h.frame) return;
     giTouch(b, h, entry);
@@ -232,22 +239,45 @@ uint64_t giSurfaceKey(GiHeader h, float3 p, float3 n, uint minLevel)
     return giKey(level, giNormalClass(n), int3(floor(p / giCellSize(h, level))));
 }
 
-// History weight of an update: pure Jacobi (alpha 1) for the first jacobiUpdates updates after a reset (multi-bounce
-// converges geometrically), then the running mean over at most historyMax updates (static scenes converge; slow changes
-// such as a moving sun are followed with that window).
-float giHistoryAlpha(GiHeader h, uint history)
+// History word (GI_SH_HISTORY, 0 after a reset): bits 0-15 = convergence phase, bits 16-31 = updates in the running mean.
+//   An update's only biased input is the bounce light it reads from other cells (sky, sun shadow rays, local and emissive
+//   samples are unbiased from the first update). A cell is young while its phase is < jacobiUpdates: its value still
+//   carries the Jacobi iteration's error (multi-bounce converges geometrically from the reset). The weight of an update
+//   is Jacobi (alpha 1: replace) by the share y of its bounce reads (texel rays whose hit has a bounce term) that came from
+//   young cells or found no data, and the running mean over at most historyMax updates for the rest (counted, not
+//   luminance-weighted: a read without data returns 0, the most biased read has no luminance):
+//     alpha = lerp(1 / (n + 1), 1, y) while the cell itself is young, 1 / (n + 1) after (>= 1 / historyMax),
+//     n' = max(1, round(lerp(n + 1, 1, y))).
+//   After a reset of the whole cache every read is young: the same Jacobi phase, then a mean restarted from its last
+//   iterate, as before (the furnace converges as fast). A cell made later in a converged cache (camera motion, new
+//   geometry) reads converged cells: y = 0, a plain mean from its first update and never young (its phase jumps to
+//   jacobiUpdates), so it shows no single-update noise (the 8 replaced updates showed each cell's 64-ray estimate
+//   alone: cell-sized blotches, D0 play capture 2026-09-26). Past its own young phase a cell averages whatever it reads
+//   (as before): bounce cells are updated less often than screen cells, and waiting for them kept readers replacing.
+uint giHistoryPhase(uint history) { return history & 0xFFFFu; }
+uint giHistorySamples(uint history) { return history >> 16; }
+float giHistoryAlpha(GiHeader h, uint history, float young)
 {
-    if (history < h.jacobiUpdates) return 1.0;
-    return max(1.0 / (float)(history - h.jacobiUpdates + 2), 1.0 / (float)h.historyMax);
+    const float mean = max(1.0 / (float)(giHistorySamples(history) + 1), 1.0 / (float)h.historyMax);
+    return giHistoryPhase(history) < h.jacobiUpdates ? lerp(mean, 1.0, saturate(young)) : mean;
 }
-
-// Updates since the last reset, 0 when the entry's history belongs to an older lighting epoch.
+uint giHistoryNext(GiHeader h, uint history, float young)
+{
+    if (giHistoryPhase(history) >= h.jacobiUpdates) young = 0;
+    const float n = lerp((float)(giHistorySamples(history) + 1), 1.0, saturate(young));
+    const uint samples = clamp((uint)round(n), 1u, max(h.historyMax, 2u) - 1u);
+    const uint phase = young > 0 ? giHistoryPhase(history) + 1 : max(giHistoryPhase(history) + 1, h.jacobiUpdates);
+    return min(phase, 0xFFFFu) | (samples << 16);
+}
+// History word of the entry, 0 when it belongs to an older lighting epoch.
 template <typename B>
 uint giHistory(B b, GiHeader h, uint entry)
 {
     const uint a = h.offSh + entry * GI_SH_STRIDE;
     return b.Load(a + GI_SH_EPOCH) == h.epoch ? b.Load(a + GI_SH_HISTORY) : 0u;
 }
+template <typename B>
+bool giYoung(B b, GiHeader h, uint entry) { return giHistoryPhase(giHistory(b, h, entry)) < h.jacobiUpdates; }
 
 // SH block coefficients (irradiance, world frame).
 template <typename B>
@@ -347,7 +377,9 @@ bool giProbePixel(Texture2D<float> depth, uint2 probe, uint spacing, uint2 size,
     return false;
 }
 
-uint giPackHalf2(float a, float b) { return f32tof16(a) | (f32tof16(b) << 16); }
+// fp16 pairs rounded to nearest even (RayTracing/HalfNearest.hlsli): the hardware conversion truncates toward zero, and
+// the texels and SH are running means whose steady state would carry that bias / alpha (-0.8 % at alpha 1/32).
+uint giPackHalf2(float a, float b) { return f32tof16(nearestHalf(a)) | (f32tof16(nearestHalf(b)) << 16); }
 
 // Shared-exponent RGB (5-bit exponent, bias 15, 9-bit mantissas), non-negative.
 uint giPackRgb9e5(float3 c)
@@ -380,7 +412,7 @@ void giStoreProbe(RWTexture2D<uint4> t, uint2 probe, uint2 count, float3 c[9], f
     }
     uint w[14];
     [unroll] for (uint i = 0; i < 13; ++i) w[i] = giPackHalf2(v[2 * i], v[2 * i + 1]);
-    w[13] = (f32tof16(v[26]) & 0xFFFFu) | (uint(round(saturate(occlusion) * 65535.0)) << 16);
+    w[13] = (f32tof16(nearestHalf(v[26])) & 0xFFFFu) | (uint(round(saturate(occlusion) * 65535.0)) << 16);
     const uint normalWord = valid ? max(giPackNormal(normal), 1u) : 0u;
     const uint y = count.y * 4 + probe.y;
     t[uint2(probe.x, y)] = uint4(asuint(position.x), asuint(position.y), asuint(position.z), normalWord);

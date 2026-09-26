@@ -77,6 +77,7 @@ int main(int argc, char** argv)
         float gustPeriodS = 0;  // wind change after commit (v1.23): every gustPeriodS the source scene's wind alternates
                                 // between the scene's and +30 % speed / +20 degrees (no reload; the host's path)
         std::vector<std::string> overrides;
+        double warmupSeconds = -1;  // --warmup-seconds: the harness default when negative
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -94,13 +95,17 @@ int main(int argc, char** argv)
             else if (a == "--capture") capturePath = next();
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
+            else if (a == "--warmup-seconds") warmupSeconds = std::stod(next());  // repro of early frames (never with timings)
             else fail("unknown argument %s", a.c_str());
         }
         requireGpuLock("unx_gate_shadow_renderergate");
         QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
         for (const std::string& o : overrides) quality.applyOverride(o);
+        // --scene: a SceneGen scene by name, or a saved .unxscene file (the host's UnravelNextRenderer save: repro of an
+        // engine capture in the gate).
+        const bool sceneFile = sceneName.size() > 9 && sceneName.compare(sceneName.size() - 9, 9, ".unxscene") == 0;
         scenegen::Request request;
-        bool found = false;
+        bool found = sceneFile;
         for (scenegen::SceneId id : scenegen::allScenes())
             if (sceneName == scenegen::sceneName(id))
             {
@@ -108,7 +113,7 @@ int main(int argc, char** argv)
                 found = true;
             }
         if (!found) fail("unknown scene %s", sceneName.c_str());
-        scene::Scene s = scenegen::generate(request);  // not const: --sun-deg-per-s turns its sun (GpuScene keeps &s)
+        scene::Scene s = sceneFile ? scene::load(sceneName) : scenegen::generate(request);  // not const: --sun-deg-per-s turns its sun (GpuScene keeps &s)
         const float3 sun0 = normalize(s.sun.direction);
         const float3 sunAxis = normalize(cross(sun0, float3{ 0, 1, 0 }));
         const float wind0 = s.windSpeed;
@@ -128,11 +133,20 @@ int main(int argc, char** argv)
         const std::vector<std::string> resolutions = resolutionArg == "both" ? std::vector<std::string>{ "4K", "1440p" } : std::vector<std::string>{ resolutionArg };
         for (const std::string& rs : resolutions)
         {
-            const Resolution res = resolutionFromString(rs, quality);
+            // A repro of an engine capture at its own size (WxH): with --capture only, and its timings are not measurements.
+            Resolution res;
+            if (const size_t x = rs.find('x'); x != std::string::npos && rs != "3840x2160" && rs != "2560x1440")
+            {
+                if (capturePath.empty()) fail("--resolution %s: other sizes than 4K and 1440p only for a --capture repro", rs.c_str());
+                res = { (uint32_t)std::stoul(rs.substr(0, x)), (uint32_t)std::stoul(rs.substr(x + 1)), rs + " (repro, not a measurement)" };
+            }
+            else
+                res = resolutionFromString(rs, quality);
             FrameRenderer renderer(device, shaders, quality, gpuScene, 2);
             shadow::setKeepFroxels(renderer.trackState(), true);  // no consumer of the volume yet (M): measure it anyway
             HarnessOptions options;
             options.frames = frames;
+            if (warmupSeconds >= 0) options.warmupSeconds = warmupSeconds;
             options.label = "S " + sceneName + (moving ? " moving " : " static ") + (sunDegPerS != 0 ? "sun " + std::to_string(sunDegPerS) + " deg/s " : "") + (gustPeriodS > 0 ? "gusts " : "") + rs;
             if (!out.empty()) options.outputDirectory = out;
             float4x4 prev = ViewDesc::fromCamera(cameraAt(s, moving, 0, cameraName), res.width, res.height, {}).viewProj;

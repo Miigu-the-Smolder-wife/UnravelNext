@@ -381,7 +381,8 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     const float skyBand = m_skyBand;
     const uint32_t rayCount = s.updatesPerFrame * 64;
     // Each ray's radiance and hemispherical octahedral coordinates, for the per-ray irradiance map and SH (GiIntegrate).
-    const BufferRef samples = g.createBuffer({ "GI ray samples", (uint64_t)rayCount * 2 * 16, 16 });  // texel samples, then emitter samples
+    // Three blocks: texel samples (irradiance), emitter samples, texel values (radiance, distance, bounce; GiIntegrate blends).
+    const BufferRef samples = g.createBuffer({ "GI ray samples", (uint64_t)rayCount * 3 * 16, 16 });
     g.addPass("r.gi.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::UavGraphics);
