@@ -140,23 +140,10 @@ float decalLayer(DecalContext c, DecalFrame d, DecalSurface s, out DecalMaterial
     return saturate(a);
 }
 
-// Every decal of the pixel's tile over the material, lowest (priority, order) first.
-void decalApply(DecalContext c, uint2 pixel, DecalSurface s, inout DecalMaterial m)
+// The given decals (indices into the frame records) over the material, lowest (priority, order) first.
+void decalApplyList(DecalContext c, uint ids[DECAL_PER_TILE], uint count, DecalSurface s, inout DecalMaterial m)
 {
-    if (c.frames == DECAL_NONE || c.tiles == DECAL_NONE) return;
-    ByteAddressBuffer tiles = ResourceDescriptorHeap[c.tiles];
     StructuredBuffer<DecalFrame> frames = ResourceDescriptorHeap[c.frames];
-    const uint tilesX = tiles.Load(0);
-    const uint tile = (pixel.y / DECAL_TILE_PX) * tilesX + pixel.x / DECAL_TILE_PX;
-    const uint base = DECAL_TILES_HEADER_BYTES + tile * DECAL_TILE_WORDS * 4u;
-    const uint count = min(tiles.Load(base), DECAL_PER_TILE);
-    if (count == 0) return;
-    uint ids[DECAL_PER_TILE];
-    [unroll] for (uint k = 0; k < DECAL_PER_TILE; ++k)
-    {
-        const uint w = tiles.Load(base + 4u + (k / 2u) * 4u);
-        ids[k] = (w >> (16u * (k & 1u))) & 0xFFFFu;
-    }
     // insertion sort by (priority, order)
     for (uint i = 1; i < count; ++i)
     {
@@ -182,5 +169,31 @@ void decalApply(DecalContext c, uint2 pixel, DecalSurface s, inout DecalMaterial
         m.normal = normalize(lerp(m.normal, layer.normal, a));
         m.variance = lerp(m.variance, layer.variance, a);
     }
+}
+// Every decal of the pixel's tile over the material (M's resolve).
+void decalApply(DecalContext c, uint2 pixel, DecalSurface s, inout DecalMaterial m)
+{
+    if (c.frames == DECAL_NONE || c.tiles == DECAL_NONE) return;
+    ByteAddressBuffer tiles = ResourceDescriptorHeap[c.tiles];
+    const uint tilesX = tiles.Load(0);
+    const uint tile = (pixel.y / DECAL_TILE_PX) * tilesX + pixel.x / DECAL_TILE_PX;
+    const uint base = DECAL_TILES_HEADER_BYTES + tile * DECAL_TILE_WORDS * 4u;
+    const uint count = min(tiles.Load(base), DECAL_PER_TILE);
+    if (count == 0) return;
+    uint ids[DECAL_PER_TILE];
+    [unroll] for (uint k = 0; k < DECAL_PER_TILE; ++k)
+    {
+        const uint w = tiles.Load(base + 4u + (k / 2u) * 4u);
+        ids[k] = (w >> (16u * (k & 1u))) & 0xFFFFu;
+    }
+    decalApplyList(c, ids, count, s, m);
+}
+// A ray hit's decals (R's hit shading, FEATURES_GAME 5.2): the candidates R's decal-AABB query collected (at most
+// DECAL_PER_TILE; the box test of each happens here), over the hit's material. c.tiles is not read. The AABB of decal i
+// is its frame record's camera-relative box: centre +- (|axisX| + |axisY| + |axisZ|) per component.
+void decalApplyHit(DecalContext c, uint ids[DECAL_PER_TILE], uint count, DecalSurface s, inout DecalMaterial m)
+{
+    if (c.frames == DECAL_NONE || count == 0) return;
+    decalApplyList(c, ids, min(count, DECAL_PER_TILE), s, m);
 }
 #endif
