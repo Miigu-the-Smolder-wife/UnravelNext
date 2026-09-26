@@ -1,7 +1,9 @@
 #pragma once
 // FFT ocean (track W, B7; FEATURES_GAME 1; kernels Ocean.hlsli): three periodic cascades of 512^2, each holding its own
 // band of a JONSWAP sea with directional spreading, evolved by deep-water dispersion and inverse-FFT'd every frame into
-// displacement (Dx, h, Dz), slopes, the horizontal-displacement derivatives and the Jacobian (foam) per texel.
+// displacement (Dx, h, Dz), slopes and the horizontal-displacement derivatives (tangents, Jacobian for foam) per texel,
+// with a full mip chain (the low-pass a coarser vertex spacing or pixel footprint sees) and the previous frame's
+// displacement (motion: V's triangle stream velocities).
 #include "unx/render/Device.h"
 #include "unx/render/RenderGraph.h"
 #include "unx/render/Shaders.h"
@@ -25,16 +27,20 @@ struct OceanDesc
 };
 struct OceanOutput
 {
-    // RGBA32F texture array of 6 slices, 512^2: slice 2c = (Dx, h, Dz, J), 2c + 1 = (dh/dx, dh/dz, dDx/dx, dDz/dz) of
-    // cascade c; texel (x, z) is the rest position (x, z) L_c / 512 of the periodic tile; metres.
-    render::TextureRef field;
-    render::BufferRef h0;  // the persistent initial spectrum, float4 per bin (Ocean.hlsli)
+    // RGBA32F texture arrays, 512^2 with 10 mips, slice c = cascade c; texel (x, z) of mip 0 is the rest position
+    // (x, z) L_c / 512 of the periodic tile (mip m: texel centres at (x + 0.5) 2^m - 0.5); metres.
+    //   displacement: (Dx, h, Dz, dDx/dz)       slopes: (dh/dx, dh/dz, dDx/dx, dDz/dz)
+    // Jacobian J = (1 + dDx/dx)(1 + dDz/dz) - (dDx/dz)^2; tangents (1 + dDx/dx, dh/dx, dDx/dz), (dDx/dz, dh/dz, 1 + dDz/dz).
+    render::TextureRef displacement, slopes;
+    render::TextureRef previousDisplacement;  // the previous record's displacement (same layout)
+    bool previousValid = false;               // false on the first record and after a new sea state or spectrum
+    render::BufferRef h0;                     // the persistent initial spectrum, float4 per bin (Ocean.hlsli)
 };
 
 class Ocean
 {
 public:
-    static constexpr uint32_t kN = 512, kCascades = 3;
+    static constexpr uint32_t kN = 512, kCascades = 3, kMips = 10;
     static constexpr double kRepeat = 4096.0;  // dispersion repeat period T (s), Ocean.hlsli
     Ocean(render::Device& device, render::ShaderLibrary& shaders, const OceanDesc& desc);
     ~Ocean();
@@ -46,8 +52,8 @@ public:
     // An explicit initial spectrum instead of the sea state's (authoring, tests): kCascades N^2 float4 per bin,
     // (h0(k), conj(h0(-k))) at bin index (x, z) with k = 2 pi ((x, z) - N / 2) / L. Uploaded by the next record.
     void setSpectrum(const std::vector<float>& h0);
-    // Records the frame's evolution and inverse FFTs at game time `seconds` (compute on the graphics queue); the field
-    // is a graph texture of this graph.
+    // Records the frame's evolution, inverse FFTs and mip chain at game time `seconds` (compute on the graphics queue).
+    // The textures are the module's own (persistent, ping-ponged displacement), imported into this graph.
     OceanOutput record(render::RenderGraph& graph, double seconds);
     const OceanDesc& desc() const { return m_desc; }
 
@@ -60,6 +66,9 @@ private:
     render::ShaderLibrary& m_shaders;
     OceanDesc m_desc;
     render::ComPtr<ID3D12Resource> m_h0, m_frequencies, m_twiddles, m_upload, m_frequencyUpload;
-    bool m_dirty = true, m_explicit = false, m_frequenciesDirty = true;
+    render::ComPtr<ID3D12Resource> m_textures[3];  // displacement (ping-pong 0, 1), slopes
+    uint32_t m_uav[3][kMips] = {};                 // per-mip UAVs (the graph's views cover mip 0)
+    uint32_t m_current = 0;                        // displacement texture written by the next record
+    bool m_dirty = true, m_explicit = false, m_frequenciesDirty = true, m_previousValid = false;
 };
 } // namespace unx::water

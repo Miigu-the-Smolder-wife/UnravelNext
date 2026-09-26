@@ -9,7 +9,9 @@
 //      each field's inverse transform is real to 1e-9 of its rms: the packing's Hermitian pairs), max |d| <= 4e-5 rms
 //      (float FFT with the host's exact twiddles; hardware sin/cos twiddles measured 6.4e-5)
 //   4. time: the field at t and t + T (T = 4096 s) is equal (the integer phase clock), and at t = 1 h the fields still
-//      equal the double reference (no float phase loss); two runs are bit-identical
+//      equal the double reference (no float phase loss); two runs are bit-identical; each record's previous
+//      displacement is the last record's (every mip, bit for bit), invalid after a new sea state
+//   5. mips: every level of both textures is the mean of its 2 x 2 children (within the roundings of the two 4-term sums)
 //   unx_test_water_oceantests [--no-debug-layer] [--time]   (--time: 64 frames, median GPU time of the frame passes)
 #include "unx/water/Ocean.h"
 
@@ -64,12 +66,22 @@ ComPtr<ID3D12Resource> buffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE ty
     return r;
 }
 
-// Field (x, z) of channel ch (0..7: Dx, h, Dz, J, dh/dx, dh/dz, dDx/dx, dDz/dz) of cascade c.
+// The module's three textures read back with every mip: 0 displacement (Dx, h, Dz, dDx/dz), 1 slopes (dh/dx, dh/dz,
+// dDx/dx, dDz/dz), 2 the previous displacement. Channel ch (0..7) of cascade c at mip 0 = texture ch / 4, component ch % 4.
+constexpr uint32_t kMips = Ocean::kMips;
+uint64_t texelIndex(uint32_t mip, uint32_t c, uint32_t x, uint32_t z)
+{
+    uint64_t base = 0;
+    for (uint32_t m = 0; m < mip; ++m) base += uint64_t(C) * (N >> m) * (N >> m);
+    const uint32_t n = N >> mip;
+    return (base + (uint64_t(c) * n + z) * n + x) * 4;
+}
 struct Frame
 {
-    std::vector<float> field;  // [c][slice 0/1][z][x][4]
-    std::vector<float> h0;     // [bin][4]
-    float at(uint32_t c, uint32_t ch, uint32_t x, uint32_t z) const { return field[((((uint64_t)c * 2 + ch / 4) * N + z) * N + x) * 4 + ch % 4]; }
+    std::vector<float> tex[3];
+    std::vector<float> h0;  // [bin][4]
+    bool previousValid = false;
+    float at(uint32_t c, uint32_t ch, uint32_t x, uint32_t z) const { return tex[ch / 4][texelIndex(0, c, x, z) + ch % 4]; }
 };
 
 Frame run(Gpu& gpu, Ocean& ocean, double seconds, GpuProfiler* profiler = nullptr, uint64_t frame = 0)
@@ -77,59 +89,98 @@ Frame run(Gpu& gpu, Ocean& ocean, double seconds, GpuProfiler* profiler = nullpt
     RenderGraph g(gpu.device);
     const auto out = ocean.record(g, seconds);
     Frame f;
-    ComPtr<ID3D12Resource> readField, readH0 = buffer(gpu.device, kBins * 16, D3D12_HEAP_TYPE_READBACK);
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp[2 * C]{};
-    UINT rows[2 * C];
-    UINT64 rowBytes[2 * C], total = 0;
+    f.previousValid = out.previousValid;
+    constexpr uint32_t kSubresources = kMips * C;
+    ComPtr<ID3D12Resource> readTex[3], readH0 = buffer(gpu.device, kBins * 16, D3D12_HEAP_TYPE_READBACK);
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fp(kSubresources);
+    const TextureRef textures[3] = { out.displacement, out.slopes, out.previousDisplacement };
     if (!profiler)
     {
         D3D12_RESOURCE_DESC td{};
         td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         td.Width = td.Height = N;
-        td.DepthOrArraySize = 2 * C;
-        td.MipLevels = 1;
+        td.DepthOrArraySize = C;
+        td.MipLevels = kMips;
         td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         td.SampleDesc.Count = 1;
-        gpu.device.d3d()->GetCopyableFootprints(&td, 0, 2 * C, 0, fp, rows, rowBytes, &total);
-        readField = buffer(gpu.device, total, D3D12_HEAP_TYPE_READBACK);
-        ID3D12Resource* rf = readField.Get();
+        std::vector<UINT> rows(kSubresources);
+        std::vector<UINT64> rowBytes(kSubresources);
+        UINT64 total = 0;
+        gpu.device.d3d()->GetCopyableFootprints(&td, 0, kSubresources, 0, fp.data(), rows.data(), rowBytes.data(), &total);
+        ID3D12Resource* rt[3];
+        for (uint32_t t = 0; t < 3; ++t) { readTex[t] = buffer(gpu.device, total, D3D12_HEAP_TYPE_READBACK); rt[t] = readTex[t].Get(); }
         ID3D12Resource* rh = readH0.Get();
-        const auto field = out.field;
         const auto h0 = out.h0;
-        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(fp, fp + 2 * C);
-        g.addPass("ocean read", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(field, Use::CopySrc); pb.use(h0, Use::CopySrc); pb.keep(); },
+        const bool withPrevious = out.previousValid;
+        g.addPass("ocean read", QueueType::Graphics,
+                  [&](PassBuilder& pb) {
+                      for (uint32_t t = 0; t < (withPrevious ? 3u : 2u); ++t) pb.use(textures[t], Use::CopySrc);
+                      pb.use(h0, Use::CopySrc);
+                      pb.keep();
+                  },
                   [=](PassContext& c) {
-                      for (uint32_t s = 0; s < 2 * C; ++s)
-                      {
-                          D3D12_TEXTURE_COPY_LOCATION dst{ rf, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
-                          dst.PlacedFootprint = footprints[s];
-                          D3D12_TEXTURE_COPY_LOCATION src{ c.resource(field), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
-                          src.SubresourceIndex = s;
-                          c.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-                      }
+                      for (uint32_t t = 0; t < (withPrevious ? 3u : 2u); ++t)
+                          for (uint32_t s = 0; s < kSubresources; ++s)
+                          {
+                              D3D12_TEXTURE_COPY_LOCATION dst{ rt[t], D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+                              dst.PlacedFootprint = fp[s];
+                              D3D12_TEXTURE_COPY_LOCATION src{ c.resource(textures[t]), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                              src.SubresourceIndex = s;
+                              c.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                          }
                       c.cmd->CopyBufferRegion(rh, 0, c.resource(h0), 0, kBins * 16);
                   });
     }
     else
     {
-        const auto field = out.field;
-        g.addPass("ocean keep", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(field, Use::SrvCompute); pb.keep(); }, [](PassContext&) {});
+        g.addPass("ocean keep", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(textures[0], Use::SrvCompute); pb.use(textures[1], Use::SrvCompute); pb.keep(); }, [](PassContext&) {});
         profiler->beginFrame(frame);
     }
     g.execute(profiler);
     for (uint32_t q = 0; q < kQueueTypeCount; ++q) gpu.device.queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
     if (profiler) return f;
-    const uint8_t* p = nullptr;
-    check(readField->Map(0, nullptr, (void**)&p), "map field");
-    f.field.resize(uint64_t(2 * C) * N * N * 4);
-    for (uint32_t s = 0; s < 2 * C; ++s)
-        for (uint32_t z = 0; z < N; ++z) std::memcpy(&f.field[((uint64_t)s * N + z) * N * 4], p + fp[s].Offset + uint64_t(z) * fp[s].Footprint.RowPitch, N * 16);
-    readField->Unmap(0, nullptr);
+    for (uint32_t t = 0; t < (out.previousValid ? 3u : 2u); ++t)
+    {
+        const uint8_t* p = nullptr;
+        check(readTex[t]->Map(0, nullptr, (void**)&p), "map ocean texture");
+        f.tex[t].resize(texelIndex(kMips, 0, 0, 0));
+        // Subresource index = mip + slice x mips.
+        for (uint32_t c = 0; c < C; ++c)
+            for (uint32_t m = 0; m < kMips; ++m)
+            {
+                const auto& footprint = fp[m + c * kMips];
+                const uint32_t n = N >> m;
+                for (uint32_t z = 0; z < n; ++z) std::memcpy(&f.tex[t][texelIndex(m, c, 0, z)], p + footprint.Offset + uint64_t(z) * footprint.Footprint.RowPitch, n * 16);
+            }
+        readTex[t]->Unmap(0, nullptr);
+    }
     const float* h = nullptr;
     check(readH0->Map(0, nullptr, (void**)&h), "map h0");
     f.h0.assign(h, h + kBins * 4);
     readH0->Unmap(0, nullptr);
     return f;
+}
+
+// Every mip level of both textures is the mean of its 2 x 2 children (within the rounding of a 4-term float sum).
+uint64_t checkMips(const Frame& f)
+{
+    uint64_t checked = 0;
+    for (uint32_t t = 0; t < 2; ++t)
+        for (uint32_t m = 1; m < kMips; ++m)
+            for (uint32_t c = 0; c < C; ++c)
+                for (uint32_t z = 0; z < (N >> m); ++z)
+                    for (uint32_t x = 0; x < (N >> m); ++x)
+                        for (uint32_t k = 0; k < 4; ++k)
+                        {
+                            auto child = [&](uint32_t dx, uint32_t dz) { return f.tex[t][texelIndex(m - 1, c, 2 * x + dx, 2 * z + dz) + k]; };
+                            const float expect = ((child(0, 0) + child(1, 0)) + (child(0, 1) + child(1, 1))) * 0.25f;
+                            const float got = f.tex[t][texelIndex(m, c, x, z) + k];
+                            // HLSL leaves the order of the float additions to the compiler: 3 roundings of each of the two sums
+                            const double bound = 6 * 5.97e-8 * 0.25 * (std::abs(child(0, 0)) + std::abs(child(1, 0)) + std::abs(child(0, 1)) + std::abs(child(1, 1)));
+                            W_CHECK(std::abs(double(got) - double(expect)) <= bound, "texture %u mip %u cascade %u texel (%u, %u).%u: %.9g, mean of children %.9g", t, m, c, x, z, k, got, expect);
+                            ++checked;
+                        }
+    return checked;
 }
 
 // Double-precision replica of OceanSpectrum.hlsl.
@@ -233,16 +284,10 @@ std::vector<std::vector<double>> referenceFields(const Frame& f, const OceanDesc
             if (!(k > 0)) continue;
             const cd v[8] = { I * kx / k * h, h, I * kz / k * h, 0.0, I * kx * h, I * kz * h, -kx * kx / k * h, -kz * kz / k * h };
             for (int ch = 0; ch < 8; ++ch) spectra[ch][z * N + x] = v[ch];
-            spectra[3][z * N + x] = -kx * kz / k * h;  // dDx/dz, for J
+            spectra[3][z * N + x] = -kx * kz / k * h;  // dDx/dz
         }
     std::vector<std::vector<double>> fields(8);
     for (int ch = 0; ch < 8; ++ch) *worstImag = std::max(*worstImag, transform(spectra[ch], fields[ch]) / 1.0);
-    // Channel 3 carried dDx/dz: J = (1 + dDx/dx)(1 + dDz/dz) - dDx/dz^2.
-    for (uint64_t i = 0; i < uint64_t(N) * N; ++i)
-    {
-        const double cross = fields[3][i];
-        fields[3][i] = (1 + fields[6][i]) * (1 + fields[7][i]) - cross * cross;
-    }
     return fields;
 }
 double rms(const std::vector<double>& v)
@@ -260,13 +305,12 @@ double compareFields(const Frame& f, const OceanDesc& d, double seconds, const c
         const auto ref = referenceFields(f, d, c, seconds, &imag);
         for (uint32_t ch = 0; ch < 8; ++ch)
         {
-            const double r = ch == 3 ? 1.0 : rms(ref[ch]);
+            const double r = rms(ref[ch]);
             W_CHECK(r > 0, "%s: cascade %u channel %u is empty", what, c, ch);
             double e = 0;
             for (uint32_t z = 0; z < N; ++z)
                 for (uint32_t x = 0; x < N; ++x) e = std::max(e, std::abs(double(f.at(c, ch, x, z)) - ref[ch][z * N + x]));
-            // J is 1 + O(slope): its error is judged against the derivative fields it is made of.
-            const double scale = ch == 3 ? std::max(rms(ref[6]), rms(ref[7])) : r;
+            const double scale = r;
             W_CHECK(e <= 4e-5 * scale, "%s: cascade %u channel %u differs from the double FFT by %.3g (rms %.3g)", what, c, ch, e, scale);
             worst = std::max(worst, e / scale);
         }
@@ -295,27 +339,29 @@ int main(int argc, char** argv)
         if (time)
         {
             GpuProfiler profiler(gpu.device, 1, 64);
-            std::vector<double> ms, rowsMs, columnsMs;
+            std::vector<double> ms, rowsMs, columnsMs, mipsMs;
             for (uint64_t i = 0; i < 64; ++i)
             {
                 run(gpu, ocean, 0.01 * double(i), &profiler, i);
                 if (i >= 8 && profiler.lastCompleted())
                 {
-                    double r = 0, c = 0;
+                    double r = 0, c = 0, mp = 0;
                     for (const auto& p : profiler.lastCompleted()->passes)
                     {
                         if (p.name == "ocean rows") r += p.durationMs();
                         if (p.name == "ocean columns") c += p.durationMs();
+                        if (p.name == "ocean mip") mp += p.durationMs();
                     }
-                    ms.push_back(r + c);
+                    ms.push_back(r + c + mp);
+                    mipsMs.push_back(mp);
                     rowsMs.push_back(r);
                     columnsMs.push_back(c);
                 }
             }
             auto median = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
             std::sort(ms.begin(), ms.end());
-            std::printf("ocean frame passes (3 cascades 512^2): rows + columns median %.4f ms (min %.4f, max %.4f; rows %.4f, columns %.4f) over %zu frames\n", ms[ms.size() / 2],
-                        ms.front(), ms.back(), median(rowsMs), median(columnsMs), ms.size());
+            std::printf("ocean frame passes (3 cascades 512^2): rows + columns + mips median %.4f ms (min %.4f, max %.4f; rows %.4f, columns %.4f, 9 mips %.4f) over %zu frames\n", ms[ms.size() / 2],
+                        ms.front(), ms.back(), median(rowsMs), median(columnsMs), median(mipsMs), ms.size());
             return 0;
         }
 
@@ -341,10 +387,10 @@ int main(int argc, char** argv)
                     for (uint32_t x = 0; x < N; ++x)
                     {
                         const double X = double(x) * L / N, th = k * X - omega * t + phi;
-                        const double expect[8] = { -A * std::sin(th), A * std::cos(th), 0, 1 - A * k * std::cos(th), -A * k * std::sin(th), 0, -A * k * std::cos(th), 0 };
+                        const double expect[8] = { -A * std::sin(th), A * std::cos(th), 0, 0, -A * k * std::sin(th), 0, -A * k * std::cos(th), 0 };
                         for (uint32_t ch = 0; ch < 8; ++ch) worst = std::max(worst, std::abs(f.at(0, ch, x, z) - expect[ch]) / (ch == 1 || ch == 0 ? A : A * k));
                         for (uint32_t c = 1; c < C; ++c)
-                            for (uint32_t ch = 0; ch < 8; ++ch) W_CHECK(f.at(c, ch, x, z) == (ch == 3 ? 1.0f : 0.0f), "single mode: cascade %u channel %u not empty", c, ch);
+                            for (uint32_t ch = 0; ch < 8; ++ch) W_CHECK(f.at(c, ch, x, z) == 0.0f, "single mode: cascade %u channel %u not empty", c, ch);
                         if (z == 0 && f.at(0, 1, x, 0) > best) { best = f.at(0, 1, x, 0); crest[step] = X; }
                     }
             }
@@ -360,6 +406,9 @@ int main(int argc, char** argv)
         // 2. sea state spectrum
         ocean.setDesc(desc);
         const Frame f0 = run(gpu, ocean, 3.7);
+        W_CHECK(!f0.previousValid, "a new sea state must not report a valid previous displacement");
+        const uint64_t mipValues = checkMips(f0);
+        std::printf("mips: %llu values of levels 1..9 equal the mean of their children (float rounding)\n", (unsigned long long)mipValues);
         {
             double worst = 0, bandSum = 0;
             uint32_t mismatched = 0;
@@ -412,9 +461,13 @@ int main(int argc, char** argv)
         // 4. time
         {
             const Frame a = run(gpu, ocean, 5.0), b = run(gpu, ocean, 5.0 + Ocean::kRepeat), again = run(gpu, ocean, 5.0);
-            W_CHECK(std::memcmp(a.field.data(), again.field.data(), a.field.size() * 4) == 0, "two runs at the same time differ");
+            for (uint32_t t = 0; t < 2; ++t) W_CHECK(std::memcmp(a.tex[t].data(), again.tex[t].data(), a.tex[t].size() * 4) == 0, "two runs at the same time differ (texture %u)", t);
+            // The previous displacement of each record is the last record's displacement, every mip, bit for bit.
+            W_CHECK(b.previousValid && again.previousValid, "previous displacement not valid after the first record");
+            W_CHECK(b.tex[2] == a.tex[0] && again.tex[2] == b.tex[0], "the previous displacement is not the last record's");
             double worst = 0, scale = 0;
-            for (size_t i = 0; i < a.field.size(); ++i) { worst = std::max(worst, (double)std::abs(a.field[i] - b.field[i])); scale = std::max(scale, (double)std::abs(a.field[i])); }
+            for (uint32_t t = 0; t < 2; ++t)
+                for (size_t i = 0; i < a.tex[t].size(); ++i) { worst = std::max(worst, (double)std::abs(a.tex[t][i] - b.tex[t][i])); scale = std::max(scale, (double)std::abs(a.tex[t][i])); }
             W_CHECK(worst <= 1e-5 * scale, "t and t + T differ by %.3g (max field %.3g)", worst, scale);
             const Frame hour = run(gpu, ocean, 3600.0);
             const double eh = compareFields(hour, desc, 3600.0, "t = 1 h");

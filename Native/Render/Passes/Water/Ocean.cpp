@@ -49,11 +49,39 @@ Ocean::Ocean(Device& device, ShaderLibrary& shaders, const OceanDesc& desc) : m_
     m_h0 = makeBuffer(device, kBins * 16, D3D12_HEAP_TYPE_DEFAULT, L"ocean h0");
     m_frequencies = makeBuffer(device, kBins * 4, D3D12_HEAP_TYPE_DEFAULT, L"ocean frequencies");
     m_twiddles = makeBuffer(device, kN * 4, D3D12_HEAP_TYPE_DEFAULT, L"ocean twiddles");
+    const wchar_t* names[3] = { L"ocean displacement 0", L"ocean displacement 1", L"ocean slopes" };
+    for (uint32_t t = 0; t < 3; ++t)
+    {
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC1 d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        d.Width = d.Height = kN;
+        d.DepthOrArraySize = kCascades;
+        d.MipLevels = kMips;
+        d.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        d.SampleDesc.Count = 1;
+        d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_COMMON, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_textures[t])),
+              "ocean texture");
+        m_textures[t]->SetName(names[t]);
+        for (uint32_t m = 0; m < kMips; ++m)
+        {
+            m_uav[t][m] = device.descriptors().allocateResource();
+            D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+            ud.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+            ud.Texture2DArray.MipSlice = m;
+            ud.Texture2DArray.ArraySize = kCascades;
+            device.d3d()->CreateUnorderedAccessView(m_textures[t].Get(), nullptr, &ud, device.descriptors().resourceCpu(m_uav[t][m]));
+        }
+    }
 }
 Ocean::~Ocean()
 {
-    for (const ComPtr<ID3D12Resource>& r : { m_h0, m_frequencies, m_twiddles, m_upload, m_frequencyUpload })
+    for (const ComPtr<ID3D12Resource>& r : { m_h0, m_frequencies, m_twiddles, m_upload, m_frequencyUpload, m_textures[0], m_textures[1], m_textures[2] })
         if (r) m_device.deferRelease(r);
+    for (auto& t : m_uav)
+        for (uint32_t index : t) m_device.descriptors().freeResource(index);
 }
 
 void Ocean::setDesc(const OceanDesc& desc)
@@ -63,6 +91,7 @@ void Ocean::setDesc(const OceanDesc& desc)
     m_desc = desc;
     m_dirty = true;
     m_explicit = false;
+    m_previousValid = false;
 }
 void Ocean::setSpectrum(const std::vector<float>& h0)
 {
@@ -76,6 +105,7 @@ void Ocean::setSpectrum(const std::vector<float>& h0)
     m_upload->Unmap(0, nullptr);
     m_dirty = true;
     m_explicit = true;
+    m_previousValid = false;
 }
 
 uint32_t Ocean::phaseClock(double seconds)
@@ -143,27 +173,38 @@ OceanOutput Ocean::record(RenderGraph& g, double seconds)
     m_dirty = false;
 
     const BufferRef spectrum = g.createBuffer({ "ocean rows", uint64_t(kCascades) * kN * (kN + 1) * 32, 0 });  // row pitch N + 1 (Ocean.hlsli)
-    TextureDesc fd{};
-    fd.name = "ocean field";
-    fd.width = fd.height = kN;
-    fd.depthOrArraySize = 2 * kCascades;
-    fd.format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    const TextureRef field = g.createTexture(fd);
+    auto importTexture = [&](uint32_t t, const char* name) {
+        return g.importTexture(m_textures[t].Get(), TextureDesc{ name, kN, kN, (uint16_t)kCascades, (uint16_t)kMips, DXGI_FORMAT_R32G32B32A32_FLOAT }, D3D12_BARRIER_LAYOUT_COMMON);
+    };
+    const uint32_t cur = m_current, prev = cur ^ 1u;
+    const TextureRef displacement = importTexture(cur, "ocean displacement"), previous = importTexture(prev, "ocean previous displacement"), slopes = importTexture(2, "ocean slopes");
     const uint32_t clock = phaseClock(seconds);
     const OceanDesc d = m_desc;
-    auto constants = [=](PassContext& c, bool columnsPass) {
-        uint32_t k[12] = { c.srv(h0), c.uav(spectrum), columnsPass ? c.uav(field) : 0u, kCascades, clock, c.srv(frequencies), c.srv(twiddles), 0 };
+    const uint32_t displacementUav = m_uav[cur][0], slopesUav = m_uav[2][0];
+    auto constants = [=](PassContext& c) {
+        uint32_t k[12] = { c.srv(h0), c.uav(spectrum), displacementUav, kCascades, clock, c.srv(frequencies), c.srv(twiddles), slopesUav };
         std::memcpy(&k[8], d.lengths, 12);
         c.computeConstants(k, 12);
     };
     ID3D12PipelineState* rows = m_shaders.compute("Passes/Water/OceanRows");
     ID3D12PipelineState* columns = m_shaders.compute("Passes/Water/OceanColumns");
+    ID3D12PipelineState* mip = m_shaders.compute("Passes/Water/OceanMip");
     g.addPass("ocean rows", QueueType::Graphics,
               [&](PassBuilder& pb) { pb.use(h0, Use::SrvCompute); pb.use(frequencies, Use::SrvCompute); pb.use(twiddles, Use::SrvCompute); pb.use(spectrum, Use::UavCompute); },
-              [=](PassContext& c) { c.cmd->SetPipelineState(rows); constants(c, false); c.cmd->Dispatch(kN * kCascades, 1, 1); });
+              [=](PassContext& c) { c.cmd->SetPipelineState(rows); constants(c); c.cmd->Dispatch(kN * kCascades, 1, 1); });
     g.addPass("ocean columns", QueueType::Graphics,
-              [&](PassBuilder& pb) { pb.use(h0, Use::SrvCompute); pb.use(frequencies, Use::SrvCompute); pb.use(twiddles, Use::SrvCompute); pb.use(spectrum, Use::UavCompute); pb.use(field, Use::UavCompute); },
-              [=](PassContext& c) { c.cmd->SetPipelineState(columns); constants(c, true); c.cmd->Dispatch(kN * kCascades, 1, 1); });
-    return { field, h0 };
+              [&](PassBuilder& pb) { pb.use(h0, Use::SrvCompute); pb.use(frequencies, Use::SrvCompute); pb.use(spectrum, Use::UavCompute); pb.use(twiddles, Use::SrvCompute); pb.use(displacement, Use::UavCompute); pb.use(slopes, Use::UavCompute); },
+              [=](PassContext& c) { c.cmd->SetPipelineState(columns); constants(c); c.cmd->Dispatch(kN * kCascades, 1, 1); });
+    for (uint32_t m = 1; m < kMips; ++m)
+    {
+        const uint32_t size = kN >> m;
+        const uint32_t k[8] = { m_uav[cur][m - 1], m_uav[cur][m], m_uav[2][m - 1], m_uav[2][m], size, 0, 0, 0 };
+        g.addPass("ocean mip", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(displacement, Use::UavCompute); pb.use(slopes, Use::UavCompute); },
+                  [=](PassContext& c) { c.cmd->SetPipelineState(mip); c.computeConstants(k, 8); c.cmd->Dispatch((size + 7) / 8, (size + 7) / 8, kCascades); });
+    }
+    OceanOutput out{ displacement, slopes, previous, m_previousValid, h0 };
+    m_current = prev;
+    m_previousValid = true;
+    return out;
 }
 } // namespace unx::water

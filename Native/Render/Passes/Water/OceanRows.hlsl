@@ -3,8 +3,8 @@
 // packing), then the inverse FFT along x. The row results go to the spectrum buffer in row order (bin (x, z) of cascade
 // c at 32 (c N P + z P + x), pitch P = N + 1, Ocean.hlsli): coalesced stores; the column pass reads 32 B sectors down a
 // column.
-// Root constants: P[0] h0 SRV (raw), spectrum UAV (raw), field UAV (texture array), cascade count; P[1] u = frac(t / T)
-// 2^32 (Ocean.hlsli), frequency index SRV (raw, uint m per bin), twiddle SRV (raw, float2 x N/2), 0; P[2] cascade lengths (m) 0..2
+// Root constants: P[0] h0 SRV (raw), spectrum UAV (raw), displacement UAV (columns), cascade count; P[1] u = frac(t / T)
+// 2^32 (Ocean.hlsli), frequency index SRV (raw, uint m per bin), twiddle SRV (raw, float2 x N/2), slopes UAV (columns); P[2] cascade lengths (m) 0..2
 #include "OceanFft.hlsli"
 
 [numthreads(256, 1, 1)]
