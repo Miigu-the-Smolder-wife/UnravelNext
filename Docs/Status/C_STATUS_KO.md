@@ -94,7 +94,7 @@ powershell -File Reference/Tools/RenderQueue.ps1                   게이트 기
   - 위의 dispatch 축소.
   - R(광선 반사·GI)은 메시 입자를 보지 않는다(설계 3절 조건).
   - 입자 분리(separation)가 점 기준이라, 바닥에 쉬는 탄피는 메시 반두께만큼 바닥에 묻힌다. 엔진 2의 저작 값 문제로 알린다.
-  - Unity 저작(VfxOpcode.MeshShape)과 C# 바인딩은 엔진 2가 맡는다.
+  - (해결) C# 바인딩과 Unity 저작 규칙은 엔진 2가 완료했다(Unravel c7d49e40: `UnravelNextRenderer.TryMapVfxMeshAsset`, 장면 제공자 `UnravelNextVfxMesh`; 컴포넌트 설명에 실제 크기 메시는 size 1, separation은 메시 반두께).
 
 ## 잔잔한 물 평면 반사 (최종 스프린트, 2026-09-27) — 완료 c8737fb
 
