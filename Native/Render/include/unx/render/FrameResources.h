@@ -81,6 +81,10 @@ struct ViewResources
     TextureRef volumeSlices;       // RGBA16F gridX x gridY x 2S on the froxel grid (main view): part 0 the particle      [E]
                                    // media's optical depth of each slice (rgb), part 1 its source (nit, before exposure,
                                    // at the slice entry, self-attenuated); S adds them in the froxel integration
+    // Projected decals (FEATURES_GAME 5, E's Passes/Decal; invalid = none this frame): M's resolve (and R's hit shading)
+    // pass both to decalApply (Decal.hlsli).
+    BufferRef decalFrames;         // StructuredBuffer<DecalFrame>: the frame's decals, camera-relative               [E]
+    BufferRef decalTiles;          // raw: 16 x 16 px tile lists (<= 16 decals per tile, header + status)             [E]
     TextureRef color;              // final colour target of this view                      [M]
 };
 

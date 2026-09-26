@@ -66,6 +66,9 @@ void distortion(FramePassContext& fc, ViewResources& view);
 // this frame's debug primitive buffer when debug drawing is on (quality debug.draw / debug.hud / debug.view, or CPU
 // primitives queued in debug::drawList) and returns its UAV for FrameConstants::debugDraw (0xFFFFFFFF = off).
 uint32_t debugBegin(FramePassContext& fc);
+// E (A7, FEATURES_GAME 5): the view's projected decals, after visibility (reads view.depth) and before the material
+// resolve: writes view.decalFrames and view.decalTiles (invalid when no decal is live).
+void decals(FramePassContext& fc, ViewResources& view);
 // Last in the frame: the buffer visualization (debug.view, replaces the view's colour), then the debug primitives
 // (CPU and GPU appends) and the HUD drawn over view.color.
 void debugOverlay(FramePassContext& fc, ViewResources& view);

@@ -1,0 +1,6 @@
+# Owner: E (A7, FEATURES_GAME 5). Projected decals (Passes/Decal).
+
+[decal]
+# Live decals at most (FEATURES_GAME 5.1: authored static + runtime <= 4 k); 16-bit tile entries allow 65535. More live
+# decals than this is an error (the game's budget), not a silent drop.
+max_decals = 4096

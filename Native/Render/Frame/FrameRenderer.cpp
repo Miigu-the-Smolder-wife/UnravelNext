@@ -178,6 +178,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
         view.frameConstants = c.frameConstantsFor(v);
         view.color = c.graph.createTexture({ "secondary view colour", v.width, v.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
         tracks::visibility(c, view);
+        tracks::decals(c, view);
         tracks::materialResolve(c, view);
         tracks::shadowVisibility(c, view);
         tracks::shading(c, view);
@@ -195,6 +196,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::atmosphere(fc);
     tracks::accelerationStructures(fc);
     tracks::visibility(fc, main);
+    tracks::decals(fc, main);  // E (A7): decal records and tile lists for the resolve
     tracks::materialResolve(fc, main);
     tracks::shadowPages(fc, main);
     tracks::froxels(fc, main);
