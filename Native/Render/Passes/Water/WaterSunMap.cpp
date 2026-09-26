@@ -164,6 +164,19 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
               });
     ID3D12PipelineState* zero = shaders.compute("Passes/Water/WaterCausticsClear");
     ID3D12PipelineState* splat = shaders.compute("Passes/Water/WaterCaustics");
+    ID3D12PipelineState* pull = shaders.compute("Passes/Water/WaterCausticsPull");
+    // The grid's coarser levels (WaterCaustics.hlsl causticCell): a beam wider than the box goes to the finest level where
+    // it fits, and WaterCausticsPull spreads the levels back over the slices.
+    uint32_t levelWords = 0;
+    for (uint32_t levelSide = nc >> 1; levelSide >= 1; levelSide >>= 1) levelWords += levelSide * levelSide;
+    const BufferRef levels = g.createBuffer({ "w.sun map caustic levels", uint64_t(std::max(1u, levelWords * kCausticSlices)) * 4, 0 });
+    g.addPass("w.sun map caustic levels clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(levels, Use::UavCompute); },
+              [=](PassContext& c) {
+                  const uint32_t words = levelWords * kCausticSlices, k[4] = { 0, 0, c.uav(levels), words };  // ViewGridClear: the counter words only
+                  c.cmd->SetPipelineState(counterClear);
+                  c.computeConstants(k, 4);
+                  c.cmd->Dispatch(std::max(1u, (words + 63) / 64), 1, 1);
+              });
     g.addPass("w.sun map caustics clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(caustics, Use::UavCompute); },
               [=](PassContext& c) {
                   const uint32_t k[4] = { c.uav(caustics), nc, kCausticSlices, 0 };
@@ -179,13 +192,25 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
                   b.use(constants, Use::SrvCompute);
                   b.use(caustics, Use::UavCompute);
                   b.use(overflow, Use::UavCompute);
+                  b.use(levels, Use::UavCompute);
               },
               [=](PassContext& c) {
-                  const uint32_t k[8] = { c.srv(depth), c.srv(normal), c.srv(medium), c.srv(constants), c.uav(caustics), c.uav(overflow), 0, 0 };
+                  const uint32_t k[8] = { c.srv(depth), c.srv(normal), c.srv(medium), c.srv(constants), c.uav(caustics), c.uav(overflow), c.uav(levels), 0 };
                   c.cmd->SetPipelineState(splat);
                   c.computeConstants(k, 8);
                   const uint32_t blocks = (n + 1) / 2;  // one thread per 2 x 2 block of map texels (WaterCaustics.hlsl)
                   c.cmd->Dispatch((blocks + 7) / 8, (blocks + 7) / 8, 1);
+              });
+    g.addPass("w.sun map caustics pull", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(caustics, Use::UavCompute);
+                  b.use(levels, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[4] = { c.uav(caustics), nc, kCausticSlices, c.uav(levels) };
+                  c.cmd->SetPipelineState(pull);
+                  c.computeConstants(k, 4);
+                  c.cmd->Dispatch((nc + 7) / 8, (nc + 7) / 8, kCausticSlices);
               });
     return out;
 }

@@ -22,7 +22,7 @@ struct WaterSunMapOutput
 {
     render::TextureRef depth, normal, medium;
     render::TextureRef caustics;  // R32_UINT array: WaterLight.hlsli WATER_CAUSTIC_SLICES slices of min(texels, 1024)^2
-    render::BufferRef causticOverflow;  // uint: beam triangles spread wider than WATER_CAUSTIC_SPAN texels, splatted as points
+    render::BufferRef causticOverflow;  // uint, stays 0 (kept for the tests' reads): wide beams go to coarser levels, none is bounded out
     render::BufferRef constants;
     uint32_t texels = 0;  // per side; 0 = no map (no streams)
 };

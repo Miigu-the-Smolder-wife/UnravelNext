@@ -17,6 +17,8 @@
 //      4 m): 4 m below their surface points (the last slice), the caustic factor (transmittance with / without caustics)
 //      equals the exact spreading 1 / |det J| of the landing map (Snell at each entry point, Newton for the entry that lands
 //      at the receiver) within 3 % - no gaps between the texels' landing points (the point splat left holes there).
+//   7. a rippled patch (3 cm ripples) whose beams spread far past the level-0 box: the light on the 0.25 m and 0.5 m
+//      slices equals the flat patch's (the coarser levels and their pull keep it; relative 1e-3).
 //   unx_test_water_waterlighttests [--no-debug-layer] [--warp]
 #include "unx/water/LinearDispatch.h"
 #include "unx/water/WaterSunMap.h"
@@ -529,6 +531,104 @@ int main(int argc, char** argv)
             std::printf("caustics in a spreading bowl: %u receivers, exact factor %.3f..%.3f, worst relative error %.3g, %u triangles past the span bound\n", checked, lo, hi, worst, bowlOverflow);
             W_CHECK(hi < 0.6 && worst <= 0.03, "caustics in a spreading bowl: off by %.3g relative (exact factors %.3f..%.3f)", worst, lo, hi);
             W_CHECK(bowlOverflow == 0, "caustics in a spreading bowl: %u triangles past the span bound", bowlOverflow);
+        }
+        // 7. a rippled patch whose beams spread far wider than the level-0 box (the level path, WaterCaustics.hlsl): under an
+        //    overhead sun every map texel carries the same light rippled or flat, so each slice's total must equal the flat
+        //    patch's (light kept exactly by the coarser levels and their pull), and nothing lands non-finite.
+        {
+            const double y0 = 0.4, amp = 0.002, k = 2 * 3.14159265358979 / 0.03, ior = 1.333;
+            std::vector<double> totals[2];
+            double widest = 0;
+            for (int run = 0; run < 2; ++run)
+            {
+                const bool rippled = run == 1;
+                auto height = [&](double x, double z) { return y0 + ((rippled && std::abs(x) < 0.2 && std::abs(z) < 0.2) ? amp * std::sin(k * x) * std::sin(k * z) : 0.0); };
+                auto normalAt = [&](double x, double z) {
+                    if (!(rippled && std::abs(x) < 0.2 && std::abs(z) < 0.2)) return V3{ 0, 1, 0 };
+                    return norm({ -amp * k * std::cos(k * x) * std::sin(k * z), 1, -amp * k * std::sin(k * x) * std::cos(k * z) });
+                };
+                const int cells = 240;  // 2.5 mm over [-0.3, 0.3]^2: 12 per ripple wavelength
+                std::vector<float> patch;
+                auto vertex = [&](int i, int kk) {
+                    const double x = -0.3 + 0.6 * double(i) / cells, z = -0.3 + 0.6 * double(kk) / cells;
+                    const V3 n = normalAt(x, z);
+                    patch.insert(patch.end(), { (float)x, (float)height(x, z), (float)z, 1, (float)n.x, (float)n.y, (float)n.z, 0 });
+                };
+                for (int kk = 0; kk < cells; ++kk)
+                    for (int i = 0; i < cells; ++i)
+                        for (const auto& c : { std::pair{ 0, 0 }, std::pair{ 0, 1 }, std::pair{ 1, 0 }, std::pair{ 1, 0 }, std::pair{ 0, 1 }, std::pair{ 1, 1 } }) vertex(i + c.first, kk + c.second);
+                RenderGraph g(gpu.device);
+                std::vector<ComPtr<ID3D12Resource>> keep;
+                auto upload = [&](const char* name, const void* data, uint64_t bytes) {
+                    const BufferRef b = g.createBuffer({ name, bytes, 0 });
+                    ComPtr<ID3D12Resource> staging = hostBuffer(gpu.device, bytes, D3D12_HEAP_TYPE_UPLOAD);
+                    uint8_t* m = nullptr;
+                    D3D12_RANGE none{ 0, 0 };
+                    check(staging->Map(0, &none, reinterpret_cast<void**>(&m)), "map");
+                    std::memcpy(m, data, bytes);
+                    staging->Unmap(0, nullptr);
+                    ID3D12Resource* src = staging.Get();
+                    keep.push_back(staging);
+                    g.addPass("w.test.upload", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(b, Use::CopyDst); },
+                              [=](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(b), 0, src, 0, bytes); });
+                    return b;
+                };
+                water::WaterSunStream w;
+                w.stream.vertices = upload("w.test.patch vertices", patch.data(), patch.size() * 4);
+                const uint32_t args[4] = { uint32_t(patch.size() / 8), 1, 0, 0 };
+                w.stream.drawArgs = upload("w.test.patch args", args, 16);
+                w.stream.maxTriangles = uint32_t(patch.size() / 24);
+                w.stream.boundsMin = { -0.3f, (float)(y0 - amp), -0.3f };
+                w.stream.boundsMax = { 0.3f, (float)(y0 + amp), 0.3f };
+                w.transmittance[0] = w.transmittance[1] = w.transmittance[2] = 1.0f;
+                w.ior = (float)ior;
+                water::WaterSunMap map(gpu.device);
+                const water::WaterSunMapOutput out = map.record(g, gpu.shaders, 0, { w }, { 0, 1, 0 });
+                W_CHECK(out.texels >= 256, "no sun map for the rippled patch");
+                const uint32_t nc = std::min(out.texels, 1024u), cpitch = (nc * 4 + 255) & ~255u;
+                if (rippled) widest = 0.5 * (1 - 1 / ior) * amp * k * k * (0.6 / out.texels) / (0.6 / nc);  // a map texel's landing spread at 0.5 m, caustic texels
+                ComPtr<ID3D12Resource> crb = hostBuffer(gpu.device, uint64_t(cpitch) * nc * 2, D3D12_HEAP_TYPE_READBACK);
+                ID3D12Resource* cdst = crb.Get();
+                const TextureRef caustics = out.caustics;
+                g.addPass("w.test.patch read", QueueType::Graphics,
+                          [&](PassBuilder& pb) {
+                              pb.use(caustics, Use::CopySrc);
+                              pb.keep();
+                          },
+                          [=](PassContext& c) {
+                              for (uint32_t s = 0; s < 2; ++s)
+                              {
+                                  D3D12_TEXTURE_COPY_LOCATION to{ cdst, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT }, from{ c.resource(caustics), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                                  to.PlacedFootprint.Offset = uint64_t(cpitch) * nc * s;
+                                  to.PlacedFootprint.Footprint = { DXGI_FORMAT_R32_UINT, nc, nc, 1, cpitch };
+                                  from.SubresourceIndex = s;  // slices 0 (0.25 m) and 1 (0.5 m)
+                                  c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+                              }
+                          });
+                g.execute(nullptr);
+                for (uint32_t q = 0; q < kQueueTypeCount; ++q) gpu.device.queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+                const uint8_t* cm = nullptr;
+                check(crb->Map(0, nullptr, (void**)&cm), "map patch caustics");
+                for (uint32_t s = 0; s < 2; ++s)
+                {
+                    double total = 0;
+                    for (uint32_t y = 0; y < nc; ++y)
+                        for (uint32_t x = 0; x < nc; ++x)
+                        {
+                            uint32_t v;
+                            std::memcpy(&v, cm + uint64_t(cpitch) * nc * s + uint64_t(y) * cpitch + x * 4, 4);
+                            total += v / 65536.0;
+                        }
+                    totals[run].push_back(total);
+                }
+                crb->Unmap(0, nullptr);
+            }
+            double worstTotal = 0;
+            for (size_t s = 0; s < 2; ++s) worstTotal = std::max(worstTotal, std::abs(totals[1][s] / totals[0][s] - 1));
+            std::printf("caustics under a rippled patch (beams up to ~%.0f caustic texels wide at 0.5 m, coarse levels): light per slice %.1f / %.1f texels (flat %.1f / %.1f), relative %.2e\n",
+                        widest, totals[1][0], totals[1][1], totals[0][0], totals[0][1], worstTotal);
+            W_CHECK(widest > 6, "the rippled patch must spread beams past the level-0 box");
+            W_CHECK(worstTotal <= 1e-3, "caustics under a rippled patch: slice light differs from the flat patch's by %.3g relative", worstTotal);
         }
         std::printf("energy: a horizontal floor under the flat pool gets (1 - F) cos(theta_s) T^d within %.2e (relative)\n", worstEnergy);
         if (!warp)
