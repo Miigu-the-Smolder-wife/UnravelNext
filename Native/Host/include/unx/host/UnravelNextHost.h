@@ -35,7 +35,8 @@ enum UnxResult
                             //    UnxRendererQualityOverride, UnxFrameSetLens, UnxSurfaceDelta, UnxSurfaceSetHalfLives, UnxSurfaceSetTime,
                             //    UnxDebugPrimitives, UnxDebugText, UnxDecalAdd, UnxDecalUpdate, UnxDecalRemove, UnxViewModelAdd,
                             //    UnxViewModelSetPose, UnxViewModelRemove, UnxPhotoBegin, UnxPhotoSave, UnxPhotoEnd, UnxPhotoGetStatus,
-                            //    UnxAcquireGpuBridge, UnxReleaseGpuBridge, UnxGpuBridgeStatistics,
+                            //    UnxAcquireGpuBridge, UnxReleaseGpuBridge, UnxGpuBridgeStatistics, UnxHairAddBody, UnxHairTick,
+                            //    UnxHairSetFrameFraction, UnxHairRemoveBody,
                             //    UnxSceneAddBlendShape, UnxSceneSetVertexAnimation, UnxFrameSetMorphs (C4),
                             //    UnxFrameSetOriginShift (C9), UnxSceneReserveRuntime, UnxFrameAddRuntimeMesh,
                             //    UnxFrameRemoveRuntimeMesh, UnxFrameAddRuntimeInstance, UnxFrameRemoveRuntimeInstance,
@@ -405,6 +406,56 @@ typedef struct NRC_GpuStatistics NRC_GpuStatistics;
 UNX_API int32_t UNX_CALL UnxAcquireGpuBridge(UnxRenderer r, NRC_GpuBridge* bridge, uint32_t size);
 UNX_API int32_t UNX_CALL UnxReleaseGpuBridge(NRC_GpuBridge* bridge, uint32_t size);
 UNX_API int32_t UNX_CALL UnxGpuBridgeStatistics(UnxRenderer r, NRC_GpuStatistics* statistics, uint32_t size);
+
+// B10 strand hair (optional exports within ABI 6, INTERFACES v1.69; E's hair::HairSystem, Passes/Hair/Hair.h): a body of
+// guide strands (nodesPerStrand nodes each, the root bound to a joint) with follow strands around them, simulated per
+// World tick on the GPU and drawn in V's coverage layer with the Hair-class material. Per World step: UnxHairTick for
+// every body (the joints' world transforms and the body's capsules at the tick's end, the wind at the body, the tick
+// interval), then UnxHairSetFrameFraction with the rendered frame's time within the latest tick (0 = the previous tick's
+// end, 1 = the latest's), then the frame. Body ids are reused after removal (last freed first).
+typedef struct UnxHairSimulation
+{
+    float gravity[3], damping;          // m/s^2; fraction of the Verlet velocity removed per substep
+    float globalStiffness, globalRange; // pull per substep towards the rest pose; fraction of the strand it acts on
+    float localStiffness;               // pull per sweep towards the rest vector in the carried frame
+    uint32_t localIterations;           // <= 16
+    float dftlDamping, collisionMargin; // DFTL velocity correction; m
+    uint32_t substeps;                  // >= 1
+    float windDrag;                     // wind acceleration per (m/s) of relative air speed
+} UnxHairSimulation;
+typedef struct UnxHairFollow
+{
+    uint32_t guide;
+    float offset[3];                    // at the root, in the guide's rest frame (x along the root segment)
+    float tipSpread;                    // offset scale at the tip (1: parallel)
+} UnxHairFollow;
+typedef struct UnxHairBodyDesc
+{
+    uint32_t size, version;             // sizeof, 1
+    uint32_t nodesPerStrand, joints;    // 2..32 nodes; joints the roots bind to
+    uint32_t guides, follows;
+    const float* restPositions;         // guides x nodesPerStrand x 3, in the space of each guide's joint
+    const uint32_t* guideJoint;         // guides
+    const UnxHairFollow* followStrands; // follows
+    float rootRadius, tipRadius;        // m
+    uint32_t material, instance;        // a Hair-class scene material; the scene instance it belongs to (0xFFFFFFFF: none)
+    UnxHairSimulation simulation;
+} UnxHairBodyDesc;
+typedef struct UnxHairCapsule
+{
+    float a[3], radius;                 // world
+    float b[3];
+    uint32_t reserved;                  // 0
+} UnxHairCapsule;
+#ifdef __cplusplus
+static_assert(sizeof(UnxHairSimulation) == 48 && sizeof(UnxHairFollow) == 20 && sizeof(UnxHairBodyDesc) == 112 && sizeof(UnxHairCapsule) == 32,
+              "UnxHair* are part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxHairAddBody(UnxRenderer r, const UnxHairBodyDesc* desc, uint32_t* body);
+UNX_API int32_t UNX_CALL UnxHairTick(UnxRenderer r, uint32_t body, const float* joints12, uint32_t jointCount, const UnxHairCapsule* capsules,
+                                     uint32_t capsuleCount, const float wind[3], float dt);
+UNX_API int32_t UNX_CALL UnxHairSetFrameFraction(UnxRenderer r, float fraction);
+UNX_API int32_t UNX_CALL UnxHairRemoveBody(UnxRenderer r, uint32_t body);
 
 // Loads a .unxscene file (INTERFACES 6.2) as the renderer's content: textures, materials, meshes, skeletons, instances
 // (their flags included), lights, sun, atmosphere and wind, with the file's indices. Only before any content was added and

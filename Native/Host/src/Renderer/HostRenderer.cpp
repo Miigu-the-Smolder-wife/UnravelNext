@@ -860,6 +860,73 @@ void checkPose(const float3x4& p, const char* what)
 }
 } // namespace
 
+uint32_t HostRenderer::hairAddBody(const hair::BodyDesc& desc)
+{
+    requireCommitted();
+    {
+        hair::HairSystem check;  // E's own validation, on the calling thread (a body needs no GPU until its first frame)
+        check.addBody(desc);
+    }
+    if (desc.material >= m_scene.materials.size() || m_scene.materials[desc.material].cls != scene::MaterialClass::Hair)
+        fail("hair body: material %u is not a Hair-class material", desc.material);
+    std::lock_guard lock(m_mutex);
+    uint32_t id;
+    if (!m_hairFree.empty())
+    {
+        id = m_hairFree.back();
+        m_hairFree.pop_back();
+    }
+    else
+    {
+        id = (uint32_t)m_hairJoints.size();
+        m_hairJoints.push_back(0);
+    }
+    m_hairJoints[id] = desc.joints;
+    FramePacket::HairOp op;
+    op.kind = FramePacket::HairOp::AddBody;
+    op.body = id;
+    op.desc = std::make_shared<const hair::BodyDesc>(desc);
+    m_pending.hairOps.push_back(std::move(op));
+    return id;
+}
+
+void HostRenderer::hairTick(uint32_t body, std::span<const float3x4> joints, std::span<const hair::Capsule> capsules, float3 wind, float dt)
+{
+    requireCommitted();
+    if (!(dt > 0)) fail("hair tick: dt %g", dt);
+    std::lock_guard lock(m_mutex);
+    if (body >= m_hairJoints.size() || m_hairJoints[body] == 0) fail("hair body %u is not live", body);
+    if (joints.size() != m_hairJoints[body]) fail("hair tick: %zu joints for a body of %u", joints.size(), m_hairJoints[body]);
+    FramePacket::HairOp op;
+    op.kind = FramePacket::HairOp::Tick;
+    op.body = body;
+    op.joints.assign(joints.begin(), joints.end());
+    op.capsules.assign(capsules.begin(), capsules.end());
+    op.wind = wind;
+    op.dt = dt;
+    m_pending.hairOps.push_back(std::move(op));
+}
+
+void HostRenderer::hairSetFrameFraction(float fraction)
+{
+    if (!(fraction >= 0 && fraction <= 1)) fail("hair frame fraction %g outside [0, 1]", fraction);
+    std::lock_guard lock(m_mutex);
+    m_pending.hairFraction = fraction;
+}
+
+void HostRenderer::hairRemoveBody(uint32_t body)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    if (body >= m_hairJoints.size() || m_hairJoints[body] == 0) fail("hair body %u is not live", body);
+    m_hairJoints[body] = 0;
+    m_hairFree.push_back(body);
+    FramePacket::HairOp op;
+    op.kind = FramePacket::HairOp::RemoveBody;
+    op.body = body;
+    m_pending.hairOps.push_back(std::move(op));
+}
+
 uint32_t HostRenderer::viewModelAdd(uint32_t instance, const float3x4& cameraLocal)
 {
     requireCommitted();
@@ -954,6 +1021,8 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.debugGlyphs = std::move(m_pending.debugGlyphs);
     if (m_decalsChanged) packet.decals = std::make_shared<const decal::DecalSet>(m_decals);
     packet.viewModelOps = std::move(m_pending.viewModelOps);
+    packet.hairOps = std::move(m_pending.hairOps);
+    packet.hairFraction = m_pending.hairFraction;
     m_decalsChanged = false;
     m_pending = FramePacket{};
     m_packets.push_back(std::move(packet));
@@ -985,6 +1054,8 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
         if (!next.surfaceHalfLives) next.surfaceHalfLives = dropped.surfaceHalfLives;
         if (!next.decals) next.decals = dropped.decals;
         next.viewModelOps.insert(next.viewModelOps.begin(), dropped.viewModelOps.begin(), dropped.viewModelOps.end());
+        next.hairOps.insert(next.hairOps.begin(), std::make_move_iterator(dropped.hairOps.begin()), std::make_move_iterator(dropped.hairOps.end()));
+        if (!next.hairFraction) next.hairFraction = dropped.hairFraction;
     }
     return ticket;
 }
@@ -1019,6 +1090,8 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         if (old.surfaceHalfLives) carried.surfaceHalfLives = old.surfaceHalfLives;
         if (old.decals) carried.decals = old.decals;
         carried.viewModelOps.insert(carried.viewModelOps.end(), old.viewModelOps.begin(), old.viewModelOps.end());
+        carried.hairOps.insert(carried.hairOps.end(), std::make_move_iterator(old.hairOps.begin()), std::make_move_iterator(old.hairOps.end()));
+        if (old.hairFraction) carried.hairFraction = old.hairFraction;
         haveCarried = true;
         m_packets.pop_front();
     }
@@ -1047,6 +1120,8 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         if (!p.surfaceHalfLives) p.surfaceHalfLives = carried.surfaceHalfLives;
         if (!p.decals) p.decals = carried.decals;
         p.viewModelOps.insert(p.viewModelOps.begin(), carried.viewModelOps.begin(), carried.viewModelOps.end());
+        p.hairOps.insert(p.hairOps.begin(), std::make_move_iterator(carried.hairOps.begin()), std::make_move_iterator(carried.hairOps.end()));
+        if (!p.hairFraction) p.hairFraction = carried.hairFraction;
     }
     // Leaving the queue: its updates join the applied state here, under the queue's lock, so currentScene never misses
     // a packet between the queue and the GPU. Its scene edits join the scene (the GPU scene's source) at the same point;
@@ -1277,6 +1352,20 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
         else if (op.kind == FramePacket::ViewModelOp::SetPose) viewModels.setPose(op.id, op.pose);
         else viewModels.remove(op.id);
     }
+    // B10 hair: the host's operations in order (the same body ids as the host's mirror), then the frame's tick fraction
+    hair::HairSystem& hairs = hair::hairSystem(m_frameRenderer->trackState());
+    for (const FramePacket::HairOp& op : p.hairOps)
+    {
+        if (op.kind == FramePacket::HairOp::AddBody)
+        {
+            const uint32_t id = hairs.addBody(*op.desc);
+            if (id != op.body) fail("hair replay: body %u, the host's %u", id, op.body);
+        }
+        else if (op.kind == FramePacket::HairOp::Tick)
+            hairs.tick(op.body, op.joints.data(), (uint32_t)op.joints.size(), op.capsules.data(), (uint32_t)op.capsules.size(), op.wind, op.dt);
+        else hairs.removeBody(op.body);
+    }
+    if (p.hairFraction) hairs.setFrameFraction(*p.hairFraction);
     debug::DrawList& draw = debug::drawList(m_frameRenderer->trackState());
     draw.lines.insert(draw.lines.end(), p.debugLines.begin(), p.debugLines.end());
     draw.triangles.insert(draw.triangles.end(), p.debugTriangles.begin(), p.debugTriangles.end());

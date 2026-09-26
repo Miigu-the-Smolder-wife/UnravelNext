@@ -729,6 +729,12 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.69 (2026-09-26, 렌더 A: 머리카락 호스트, GPU 브리지 호스트; v1.67·v1.68은 렌더 C의 A6 투과 층과 coverageSpecial):
+  - **머리카락 호스트(B10, E의 hair::HairSystem과 1:1)**: `HostRenderer::hairAddBody / hairTick / hairSetFrameFraction / hairRemoveBody`, 선택 export `UnxHairAddBody(UnxHairBodyDesc 112 B) / UnxHairTick(관절 3×4, UnxHairCapsule 32 B, 바람, dt) / UnxHairSetFrameFraction / UnxHairRemoveBody`.
+    - 몸체 id는 호스트 거울이 정하고, 렌더 스레드가 연산을 순서대로 재생해 같은 id를 얻는다(해제된 id는 마지막 해제부터 재사용). 검증은 호출 스레드에서 E의 addBody와 Hair 클래스 재질 검사로 한다.
+    - World 단계마다 순서는 tick들 → 분수 → 프레임이다. 건너뛰거나 버린 프레임의 연산은 이월된다.
+    - [실측] `unx_test_host_hosthair` 통과(id 일치, 상태 생성, 잘못된 입력 거부, 제거·재사용, 디버그 오류 0).
+  - **GPU 브리지 호스트(엔진 1의 84922cc)**: 렌더러 장치마다 GpuBridgeHost 하나. 선택 export `UnxAcquireGpuBridge / UnxReleaseGpuBridge / UnxGpuBridgeStatistics`(NRC_GpuBridge 136 B, NRC_GpuStatistics 240 B, 옛 Tnr* 모양). 소멸자는 quiesce 뒤 장치보다 먼저 해제한다. 프레임 합류(prepareGraphics / commitGraphics)는 B8 유체 표면 때 넣는다.
 - v1.66 (2026-09-26, 렌더 A·core: Hair·Cut 재질 필드, 엔진 2·렌더 C 합의):
   - **scene::Material**: `hairEumelanin`, `hairPheomelanin`, `hairBetaN`(0.3), `hairTilt`(0.0349 rad), `cutScale`(1), `cutDamageWidth`(0.01 m), `MaterialClass::Cut = 6`(HLSL `MATERIAL_CUT`). validate는 Hair(멜라닌 ≥ 0, β_N ∈ (0, 1], ior > 1)와 Cut(cutScale > 0, 폭 ≥ 0)을 검사한다.
   - **장면 파일**: 확장 블록 "HAIR"와 "CUTS"는 해당 클래스 재질이 있을 때만 쓴다. 그래서 형식 버전과 기존 장면의 바이트·contentHash는 그대로다. 읽기는 확장 블록(MRPH, HAIR, CUTS)을 순서대로 받는다.

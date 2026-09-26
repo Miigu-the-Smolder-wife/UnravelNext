@@ -15,6 +15,7 @@
 #include "unx/decal/Decals.h"
 #include "unx/decal/SurfaceState.h"
 #include "unx/viewmodel/ViewModel.h"
+#include "unx/hair/Hair.h"
 #include "unx/render/Frame.h"
 #include "unx/render/GpuScene.h"
 #include "unx/scene/SceneData.h"
@@ -151,6 +152,20 @@ struct FramePacket
         float3x4 pose;
     };
     std::vector<ViewModelOp> viewModelOps;
+    // B10 strand hair (E's hair::HairSystem): the host's operations in call order, replayed on the render thread (the
+    // same body ids as the host's mirror), and the frame's time within the latest tick when set.
+    struct HairOp
+    {
+        enum Kind : uint8_t { AddBody, Tick, RemoveBody } kind;
+        uint32_t body = 0;
+        std::shared_ptr<const hair::BodyDesc> desc;  // AddBody
+        std::vector<float3x4> joints;                // Tick: the joints' world transforms at the tick's end
+        std::vector<hair::Capsule> capsules;         // Tick: world, at the tick's end
+        float3 wind{};
+        float dt = 0;
+    };
+    std::vector<HairOp> hairOps;
+    std::optional<float> hairFraction;
 };
 
 // The render graph of one recorded frame (RenderGraphStats, the fields the host reports).
@@ -284,6 +299,14 @@ public:
     uint32_t viewModelAdd(uint32_t instance, const float3x4& cameraLocal);
     void viewModelSetPose(uint32_t id, const float3x4& cameraLocal);
     void viewModelRemove(uint32_t id);
+    // B10 strand hair (E's hair::HairSystem, mirrored here: a body's id is the system's; validated on the calling thread):
+    // a body of guide strands bound to joints, one World tick of it (the joints and capsules at the tick's end, the wind,
+    // the tick interval) and the rendered frames' time within the latest tick (0 = the previous tick's end, 1 = the
+    // latest's). Order per World step: ticks, then the fraction, then the frame.
+    uint32_t hairAddBody(const hair::BodyDesc& desc);
+    void hairTick(uint32_t body, std::span<const float3x4> joints, std::span<const hair::Capsule> capsules, float3 wind, float dt);
+    void hairSetFrameFraction(float fraction);
+    void hairRemoveBody(uint32_t body);
     void setSimulation(uint32_t gpuSimulation);
     // Sun, atmosphere and (when set) wind of the following frames.
     void setEnvironment(const scene::Sun& sun, const scene::Atmosphere& atmosphere, std::optional<FramePacket::Wind> wind);
@@ -469,6 +492,8 @@ private:
     std::vector<uint8_t> m_decalLive;           // (m_mutex) per decal id: live
     bool m_decalsChanged = false;               // (m_mutex) a snapshot goes with the next queued frame
     viewmodel::ViewModels m_viewModels;         // (m_mutex) the host's mirror (ids, live entries)
+    std::vector<uint32_t> m_hairJoints;         // (m_mutex) per hair body id: its joint count (0 = free)
+    std::vector<uint32_t> m_hairFree;           // (m_mutex) free ids, reused last-freed first (HairSystem's rule)
     std::unique_ptr<render::RenderGraph> m_simGraph;  // the claimed ticks' graph (compute queue)
     uint64_t m_simIndex = 1ull << 48;                // its import index (apart from frame indices)
     uint64_t m_simFence = 0, m_simWaited = 0;        // compute fence of the last claimed tick; the frames waited up to

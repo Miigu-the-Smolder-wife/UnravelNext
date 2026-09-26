@@ -484,6 +484,69 @@ std::filesystem::path utf8Path(const char* s)
 }
 } // namespace
 
+UNX_API int32_t UNX_CALL UnxHairAddBody(UnxRenderer r, const UnxHairBodyDesc* desc, uint32_t* body)
+{
+    return call([&] {
+        if (!desc || desc->size != sizeof(UnxHairBodyDesc) || desc->version != 1 || !body) fail("UnxHairAddBody: UnxHairBodyDesc size or version, or no body");
+        if (!desc->restPositions || !desc->guideJoint || (desc->follows && !desc->followStrands)) fail("UnxHairAddBody: missing arrays");
+        hair::BodyDesc d;
+        d.nodesPerStrand = desc->nodesPerStrand;
+        d.joints = desc->joints;
+        const size_t nodes = (size_t)desc->guides * desc->nodesPerStrand;
+        for (size_t i = 0; i < nodes; ++i) d.restPositions.push_back({ desc->restPositions[3 * i], desc->restPositions[3 * i + 1], desc->restPositions[3 * i + 2] });
+        d.guideJoint.assign(desc->guideJoint, desc->guideJoint + desc->guides);
+        for (uint32_t f = 0; f < desc->follows; ++f)
+        {
+            const UnxHairFollow& x = desc->followStrands[f];
+            d.follows.push_back({ x.guide, { x.offset[0], x.offset[1], x.offset[2] }, x.tipSpread });
+        }
+        d.rootRadius = desc->rootRadius;
+        d.tipRadius = desc->tipRadius;
+        d.material = desc->material;
+        d.instance = desc->instance;
+        const UnxHairSimulation& s = desc->simulation;
+        d.params.gravity = { s.gravity[0], s.gravity[1], s.gravity[2] };
+        d.params.damping = s.damping;
+        d.params.globalStiffness = s.globalStiffness;
+        d.params.globalRange = s.globalRange;
+        d.params.localStiffness = s.localStiffness;
+        d.params.localIterations = s.localIterations;
+        d.params.dftlDamping = s.dftlDamping;
+        d.params.collisionMargin = s.collisionMargin;
+        d.params.substeps = s.substeps;
+        d.params.windDrag = s.windDrag;
+        *body = find(r)->hairAddBody(d);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxHairTick(UnxRenderer r, uint32_t body, const float* joints12, uint32_t jointCount, const UnxHairCapsule* capsules,
+                                     uint32_t capsuleCount, const float wind[3], float dt)
+{
+    return call([&] {
+        if ((jointCount && !joints12) || (capsuleCount && !capsules) || !wind) fail("UnxHairTick: missing arrays");
+        std::vector<float3x4> joints(jointCount);
+        for (uint32_t j = 0; j < jointCount; ++j) joints[j] = poseOf(joints12 + 12 * j);
+        std::vector<hair::Capsule> caps(capsuleCount);
+        for (uint32_t k = 0; k < capsuleCount; ++k)
+        {
+            caps[k].a = { capsules[k].a[0], capsules[k].a[1], capsules[k].a[2] };
+            caps[k].radius = capsules[k].radius;
+            caps[k].b = { capsules[k].b[0], capsules[k].b[1], capsules[k].b[2] };
+        }
+        find(r)->hairTick(body, joints, caps, { wind[0], wind[1], wind[2] }, dt);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxHairSetFrameFraction(UnxRenderer r, float fraction)
+{
+    return call([&] { find(r)->hairSetFrameFraction(fraction); });
+}
+
+UNX_API int32_t UNX_CALL UnxHairRemoveBody(UnxRenderer r, uint32_t body)
+{
+    return call([&] { find(r)->hairRemoveBody(body); });
+}
+
 UNX_API int32_t UNX_CALL UnxAcquireGpuBridge(UnxRenderer r, NRC_GpuBridge* bridge, uint32_t size)
 {
     return call([&] {
