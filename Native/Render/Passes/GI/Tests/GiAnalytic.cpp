@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <tuple>
 
 using namespace unx;
 using namespace unx::render;
@@ -119,6 +120,36 @@ scene::Scene openSky(float albedo)
     cam.up = normalize(cross(cross(cam.forward, float3{ 0, 1, 0 }), cam.forward));
     s.cameras.push_back(cam);
     return s;
+}
+
+// The K path by the lobe (ScreenProbes.hlsli giProbeFootprintLobe) against the exact BRDF-weighted mean incident radiance
+// of the GGX lobe: 32 x 32 stratified visible-normal samples weighted by G2 / G1(V) (the same estimator's density,
+// converged), the incident radiance from 'radiance(p, direction)'.
+double lobeMean(float3 p, float3 n, float3 v, float alpha, const std::function<double(float3, float3)>& radiance)
+{
+    const float3 up = std::fabs(n.y) < 0.9f ? float3{ 0, 1, 0 } : float3{ 1, 0, 0 };
+    const float3 tb = normalize(cross(up, n)), bb = cross(n, tb);
+    const float3 ve = normalize(float3{ dot(v, tb), dot(v, bb), std::max(dot(v, n), 1e-4f) });
+    const double a2 = (double)alpha * alpha;
+    auto lambda = [&](double c) { const double c2 = std::max(c * c, 1e-8); return 0.5 * (std::sqrt(1 + a2 * (1 - c2) / c2) - 1); };
+    const double lv = lambda(ve.z);
+    const float3 vh = normalize(float3{ alpha * ve.x, alpha * ve.y, ve.z });
+    double sum = 0, wsum = 0;
+    constexpr int kN = 32;
+    for (int i = 0; i < kN; ++i)
+        for (int j = 0; j < kN; ++j)
+        {
+            const double u1 = (i + 0.5) / kN, u2 = (j + 0.5) / kN;
+            const double phi = 2 * kPi * u1, z = (1 - u2) * (1 + vh.z) - vh.z, st = std::sqrt(std::max(0.0, 1 - z * z));
+            const float3 hh = float3{ (float)(st * std::cos(phi)), (float)(st * std::sin(phi)), (float)z } + vh;
+            const float3 m = normalize(float3{ alpha * hh.x, alpha * hh.y, std::max(hh.z, 1e-6f) });
+            const float3 l = m * (2 * dot(ve, m)) - ve;
+            if (l.z <= 0) continue;
+            const double w = (1 + lv) / (1 + lv + lambda(l.z));
+            sum += w * radiance(p, normalize(tb * l.x + bb * l.y + n * l.z));
+            wsum += w;
+        }
+    return wsum > 0 ? sum / wsum : 0;
 }
 
 // Ground plane (albedo rho, 400 x 400 m) and a wall of albedo 0 in the plane x = 0 facing +x (60 m wide, 20 m tall),
@@ -306,7 +337,7 @@ struct Outcome
 // radiance is not checked (not uniform).
 Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky, float3 sun,
             const std::function<double(float3, float3)>& expected, double expectedRadiance, uint32_t frames, uint32_t width, uint32_t height,
-            float skyBand = 1)
+            float skyBand = 1, float lobeAlpha = 0)
 {
     GpuScene gpuScene(device);
     gpuScene.upload(s);
@@ -408,7 +439,9 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
                               b.keep();
                           },
                           [&, probes, maps, depth, gbuffer, resultRef, cacheRef, fcAddress](PassContext& c) {
-                              const uint32_t k[12] = { c.srv(probes), c.srv(depth), c.srv(gbuffer), c.uav(resultRef), probesX, probesY, width, height, c.srv(maps), c.srv(cacheRef), 0, 0 };
+                              uint32_t alphaBits;
+                              std::memcpy(&alphaBits, &lobeAlpha, 4);
+                              const uint32_t k[12] = { c.srv(probes), c.srv(depth), c.srv(gbuffer), c.uav(resultRef), probesX, probesY, width, height, c.srv(maps), c.srv(cacheRef), alphaBits, 0 };
                               c.cmd->SetPipelineState(shaders.compute("Passes/GI/Tests/GiTestEval"));
                               c.computeConstants(k, 12);
                               c.bindFrameConstants(fcAddress);
@@ -624,11 +657,78 @@ int main(int argc, char** argv)
                 if (n.x < 0.99f || std::fabs(p.x) > 0.05f || std::fabs(p.z) > 29.5f || p.y > 19.5f || p.y < 0.05f) return -1;
                 return groundAlbedo * l.y * viewFactor(p, { 1, 0, 0 }, lit);
             };
-            const Outcome c = run(device, shaders, quality, sunWall(groundAlbedo, l), { 0, 0, 0 }, { 1, 1, 1 }, wallExpected, 0, frames, 1920, 1080);
+            const float lobeAlpha = 0.25f;  // perceptual roughness 0.5
+            const scene::Scene wallScene = sunWall(groundAlbedo, l);
+            const Outcome c = run(device, shaders, quality, wallScene, { 0, 0, 0 }, { 1, 1, 1 }, wallExpected, 0, frames, 1920, 1080, 1, lobeAlpha);
             const bool okC = c.mapProbes > 1000 && std::fabs(c.mapMean / c.mapExpectedMean - 1) < 0.01 && c.mapWorst < 0.03 && c.tileMismatches == 0;
             logf("sunlit ground and a black wall: %u wall probes, mean E %.5f against %.5f (%+.3f %%), worst probe %.3f %%, within 1 %% from frame %d -> %s\n", c.probes,
                  c.mean, c.expectedMean, 100 * (c.mean / c.expectedMean - 1), 100 * c.worst, c.converged, okC ? "PASS" : "FAIL");
             pass = pass && okC;
+            // K by the lobe at the wall probes (head-on above, then a grazing view along the wall): the ground in front of
+            // the wall (x in [0, 200], |z| <= 200) is lit with radiance rho E cos / pi (the wall is black, no sky), every
+            // other direction is dark.
+            const double groundL = groundAlbedo * l.y / kPi;
+            auto incident = [&](float3 p, float3 d) -> double {
+                if (d.y >= 0) return 0;
+                const float t = -p.y / d.y;
+                const float x = p.x + d.x * t, z = p.z + d.z * t;
+                return x >= 0 && x <= 200 && std::fabs(z) <= 200 ? groundL : 0;
+            };
+            auto lobeCheck = [&](const scene::Scene& ws, const Outcome& oc, const char* viewName) {
+                double lobeErr = 0, splitErr = 0, lobeWorst = 0, splitWorst = 0, expSum = 0, lobeSigned = 0, splitSigned = 0;
+                uint32_t nLobe = 0;
+                double binL[5] = {}, binS[5] = {}, binX[5] = {}, binA[5] = {}, binB[5] = {};
+                uint32_t binN[5] = {};
+                for (size_t i = 0; i < oc.values.size() / 16; ++i)
+                {
+                    const float* v = &oc.values[16 * i];
+                    const float3 p{ v[8], v[9], v[10] }, nn{ v[12], v[13], v[14] };
+                    if (v[3] < 0 || wallExpected(p, nn) < 0) continue;
+                    const float3 view = normalize(ws.cameras[0].position - p);
+                    const double x = lobeMean(p, nn, view, lobeAlpha, incident);
+                    lobeErr += std::fabs(v[15] - x);
+                    splitErr += std::fabs(v[7] - x);
+                    lobeWorst = std::max(lobeWorst, std::fabs(v[15] - x) / groundL);
+                    splitWorst = std::max(splitWorst, std::fabs(v[7] - x) / groundL);
+                    expSum += x;
+                    const int bin = std::clamp((int)(dot(nn, view) * 5), 0, 4);
+                    binL[bin] += v[15] - x;
+                    binS[bin] += v[7] - x;
+                    binA[bin] += std::fabs(v[15] - x);
+                    binB[bin] += std::fabs(v[7] - x);
+                    binX[bin] += x;
+                    ++binN[bin];
+                    lobeSigned += v[15] - x;
+                    splitSigned += v[7] - x;
+                    ++nLobe;
+                }
+                const double lobeMeanErr = nLobe ? lobeErr / expSum : 1, splitMeanErr = nLobe ? splitErr / expSum : 1;
+                logf("K path by the lobe (alpha %.2f), %s, %u wall probes: mean |error| %.2f %% of the expected (worst %.2f %% of the ground radiance, signed "
+                     "%+.2f %%); the split-sum lookup for the same lobe %.2f %% (worst %.2f %%, signed %+.2f %%)\n",
+                     lobeAlpha, viewName, nLobe, 100 * lobeMeanErr, 100 * lobeWorst, 100 * lobeSigned / expSum, 100 * splitMeanErr, 100 * splitWorst,
+                     100 * splitSigned / expSum);
+                for (int bin = 0; bin < 5; ++bin)
+                    if (binN[bin])
+                        logf("  NoV %.1f-%.1f: %u probes, expected %.5f, lobe signed %+.2f %% |%.2f| %%, split signed %+.2f %% |%.2f| %%\n", bin * 0.2,
+                             bin * 0.2 + 0.2, binN[bin], binX[bin] / binN[bin], 100 * binL[bin] / binX[bin], 100 * binA[bin] / binX[bin],
+                             100 * binS[bin] / binX[bin], 100 * binB[bin] / binX[bin]);
+                return std::tuple<double, double, double>{ lobeMeanErr, lobeWorst, splitMeanErr };
+            };
+            const auto headOn = lobeCheck(wallScene, c, "head-on view");
+            scene::Scene grazingScene = wallScene;
+            grazingScene.cameras[0].name = "along the wall";
+            grazingScene.cameras[0].position = { 3.5f, 4, -29 };
+            grazingScene.cameras[0].forward = normalize(float3{ -0.22f, -0.08f, 1 });
+            grazingScene.cameras[0].up = normalize(cross(cross(grazingScene.cameras[0].forward, float3{ 0, 1, 0 }), grazingScene.cameras[0].forward));
+            const Outcome cg = run(device, shaders, quality, grazingScene, { 0, 0, 0 }, { 1, 1, 1 }, wallExpected, 0, frames, 1920, 1080, 1, lobeAlpha);
+            const auto grazing = lobeCheck(grazingScene, cg, "grazing view");
+            // Gate: at both views within 6 % mean |error| and 10 % of the ground radiance at any probe (the 8 x 8 maps'
+            // resolution bound, see ScreenProbes.hlsli), and at the grazing view less than half the split sum's error.
+            const bool okK = std::get<0>(headOn) < 0.06 && std::get<1>(headOn) < 0.1 && std::get<0>(grazing) < 0.06 && std::get<1>(grazing) < 0.1 &&
+                             std::get<0>(grazing) < 0.5 * std::get<2>(grazing);
+            logf("K path by the lobe: head-on %.2f %%, grazing %.2f %% (split sum %.2f %%) -> %s\n", 100 * std::get<0>(headOn), 100 * std::get<0>(grazing),
+                 100 * std::get<2>(grazing), okK ? "PASS" : "FAIL");
+            pass = pass && okK;
         }
         for (const float tilt : { 0.0f, 25.0f })
         {

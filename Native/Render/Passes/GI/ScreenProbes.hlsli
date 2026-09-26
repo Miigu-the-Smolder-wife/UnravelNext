@@ -404,6 +404,63 @@ float3 giProbeFootprintRadiance(Src t, GiProbeFootprint fp, int2 count, float3 d
     return sum * 64.0;  // GI_LOAD_SCALE
 }
 
+// K path by the lobe (INTERFACES 5.6 v1.49, request of A 2026-09-26): the BRDF-weighted mean incident radiance of a GGX
+// lobe, L = (integral of L f cos) / (integral of f cos), which M multiplies by its specular albedo S(NoV, roughness)
+// as before. The single cone lookup along the mirror direction (split sum) read 8-18 % low against the ray-traced G path
+// where the light is not uniform over the lobe (a wall between bright ground and dark sky at a grazing view: the lobe's
+// mass is not around the mirror direction) [measured, D0 Wall N], and the K/G boundary showed as an arc.
+// Deterministic quadrature: GI_LOBE_TAPS fixed Hammersley points through the visible-normal distribution of the view
+// (Dupuy & Benyoub 2023 spherical caps), each tap weighted by G2 / G1(V) (height-correlated Smith), read at the map mip
+// whose texel cone matches the tap's share of the lobe's solid angle (1 / (taps x pdf)); taps below the horizon carry no
+// weight. Tap count from the quadrature error of a sharp horizon in the field (ground below, sky above: a wall), blurred
+// as the 8 x 8 maps blur it, GGX alpha 0.25 [model, scratch lobe_quad.py]: 8 taps 5-8 % mean |error|, 16 taps 1.5-3 %
+// (worst ~6 %), where the single cone lookup errs 12-15 % at NoV 0.15-0.3 (worst 17-23 %). Measured (GiAnalytic, a black
+// wall above lit ground, alpha 0.25): grazing view 4.2 % mean |error| against the split sum's 11.5 % (NoV < 0.2: +4 %
+// against -35 % signed); head-on 5.1 % against 2.2 %. The rest is the 8 x 8 maps' resolution: a lobe about one texel wide
+// over a sharp boundary is not integrated exactly from texel averages by any lookup. Fresnel's variation across the lobe is left out of the weights
+// (it is in S). Same points for every pixel: no noise. Cost: GI_LOBE_TAPS footprint lookups per K pixel.
+#define GI_LOBE_TAPS 16u
+float giSmithLambda(float cosTheta, float alpha2)
+{
+    const float c2 = max(cosTheta * cosTheta, 1e-8);
+    return 0.5 * (sqrt(1 + alpha2 * (1 - c2) / c2) - 1);
+}
+template <typename Src>
+float3 giProbeFootprintLobe(Src t, GiProbeFootprint fp, int2 count, float3 n, float3 v, float alpha, uint atlasSrv)
+{
+    float3 tb, bb;
+    giBasis(n, tb, bb);
+    const float3 ve = normalize(float3(dot(v, tb), dot(v, bb), max(dot(v, n), 1e-4)));
+    const float a = clamp(alpha, 1e-3, 1.0), a2 = a * a;
+    const float lambdaV = giSmithLambda(ve.z, a2);
+    const float3 vh = normalize(float3(a * ve.x, a * ve.y, ve.z));
+    float3 sum = 0;
+    float weightSum = 0;
+    [loop] for (uint i = 0; i < GI_LOBE_TAPS; ++i)
+    {
+        const float2 u = float2((i + 0.5) / GI_LOBE_TAPS, reversebits(i) * 2.3283064365386963e-10 + 0.5 / GI_LOBE_TAPS);
+        // Visible normal: a point on the spherical cap below vh, then back to the ellipsoid's normal.
+        const float phi = 2 * GI_PI * u.x;
+        const float z = (1 - u.y) * (1 + vh.z) - vh.z;
+        const float sinTheta = sqrt(saturate(1 - z * z));
+        const float3 hh = float3(sinTheta * cos(phi), sinTheta * sin(phi), z) + vh;
+        const float3 m = normalize(float3(a * hh.x, a * hh.y, max(hh.z, 1e-6)));
+        const float3 l = 2 * dot(ve, m) * m - ve;
+        if (l.z <= 0) continue;
+        const float w = (1 + lambdaV) / (1 + lambdaV + giSmithLambda(l.z, a2));
+        // pdf(l) = G1(V) D(m) / (4 NoV); the tap's cone has the solid angle 1 / (taps pdf).
+        const float d = m.z * m.z * (a2 - 1) + 1;
+        const float pdf = (a2 / (GI_PI * d * d)) / ((1 + lambdaV) * 4 * ve.z);
+        const float omega = 1 / (GI_LOBE_TAPS * max(pdf, 1e-6));
+        // Read one mip level coarser than the tap's own share (cone x 2): of x1, x2, x3 the smallest error at both views of
+        // GiAnalytic's lobe check [measured].
+        const float cone = 2 * acos(saturate(1 - omega / (2 * GI_PI)));
+        sum += w * giProbeFootprintRadiance(t, fp, count, tb * l.x + bb * l.y + n * l.z, cone, atlasSrv);
+        weightSum += w;
+    }
+    return weightSum > 0 ? sum / weightSum : 0;
+}
+
 // Incident radiance (nits) from 'dir' prefiltered by a cone of half-angle coneHalfAngle (radians): the K reflection path
 // (INTERFACES 5.6 v1.2). Same four probes and weights as screenProbeIrradiance; per probe the map mip whose texel cone
 // matches the lobe with the design's Nyquist margin 1.5 (8 x 8 texel ~10.1 deg, 4 x 4 ~20.2, 2 x 2 ~40.4 half-angle),
@@ -446,7 +503,7 @@ float4 giFootprintIrradiance(Src t, GiProbeFootprint fp, int2 count, float3 norm
 
 template <typename Src>
 ScreenProbeLighting giProbeGatherFrom(Src t, ProbeSrvs s, uint2 pixel, float3 worldPos, float3 normal, float linearDepth, bool back, bool wantRadiance,
-                                      float3 dir, float coneHalfAngle)
+                                      float3 dir, float coneHalfAngle, float lobeAlpha = -1)
 {
     float spacing;
     int2 count;
@@ -475,7 +532,9 @@ ScreenProbeLighting giProbeGatherFrom(Src t, ProbeSrvs s, uint2 pixel, float3 wo
             if (weight > 0) o.irradianceBack = behind;
         }
     }
-    o.radiance = wantRadiance ? giProbeFootprintRadiance(t, fp, count, dir, coneHalfAngle, s.pad0) : 0;
+    if (!wantRadiance) o.radiance = 0;
+    else if (lobeAlpha >= 0) o.radiance = giProbeFootprintLobe(t, fp, count, normal, dir, lobeAlpha, s.pad0);  // dir = V
+    else o.radiance = giProbeFootprintRadiance(t, fp, count, dir, coneHalfAngle, s.pad0);
     return o;
 }
 
@@ -484,6 +543,14 @@ ScreenProbeLighting screenProbeGather(ProbeSrvs s, uint2 pixel, float3 worldPos,
 {
     Texture2D<uint4> t = ResourceDescriptorHeap[s.probes];
     return giProbeGatherFrom(t, s, pixel, worldPos, normal, linearDepth, back, wantRadiance, dir, coneHalfAngle);
+}
+// As screenProbeGather with the K radiance as the lobe's BRDF-weighted mean (giProbeFootprintLobe, v1.49): v = the unit
+// vector from the surface to the eye, alpha = GGX alpha (perceptual roughness squared); M multiplies it by S as before.
+ScreenProbeLighting screenProbeGatherLobe(ProbeSrvs s, uint2 pixel, float3 worldPos, float3 normal, float linearDepth, bool back, bool wantRadiance, float3 v,
+                                          float alpha)
+{
+    Texture2D<uint4> t = ResourceDescriptorHeap[s.probes];
+    return giProbeGatherFrom(t, s, pixel, worldPos, normal, linearDepth, back, wantRadiance, v, 0, max(alpha, 0.0));
 }
 
 #ifdef GI_PROBE_TILE_CACHE
@@ -494,6 +561,14 @@ ScreenProbeLighting screenProbeGatherTile(ProbeSrvs s, uint2 tile, uint2 pixel, 
     GiProbeTile t;
     t.first = int2(tile);
     return giProbeGatherFrom(t, s, pixel, worldPos, normal, linearDepth, back, wantRadiance, dir, coneHalfAngle);
+}
+// screenProbeGatherLobe for a pixel of 'tile' (its 8 x 8 group) after giProbeTileLoad and the group barrier.
+ScreenProbeLighting screenProbeGatherLobeTile(ProbeSrvs s, uint2 tile, uint2 pixel, float3 worldPos, float3 normal, float linearDepth, bool back, bool wantRadiance,
+                                              float3 v, float alpha)
+{
+    GiProbeTile t;
+    t.first = int2(tile);
+    return giProbeGatherFrom(t, s, pixel, worldPos, normal, linearDepth, back, wantRadiance, v, 0, max(alpha, 0.0));
 }
 #endif
 
