@@ -48,6 +48,17 @@ public:
     // Ray from o along unit d hits the emitting side of an area light before tmax: distance, radiance, solid-angle pdf.
     bool intersect(uint32_t light, float3 o, float3 d, float tmax, float& t, Rgb& L, float& pdf) const;
 
+    // Grid and normalised lights (GPU tracer upload).
+    size_t count() const { return m_lights.size(); }
+    float3 up(uint32_t i) const { return m_up[i]; }
+    float spotScale(uint32_t i) const { return m_spotScale[i]; }
+    float spotOffset(uint32_t i) const { return m_spotOffset[i]; }
+    float3 gridMin() const { return m_min; }
+    float3 gridCell() const { return m_cell; }
+    const uint32_t* gridDim() const { return m_dim; }
+    const std::vector<uint32_t>& cellStart() const { return m_cellStart; }
+    const std::vector<uint32_t>& cellLights() const { return m_cellLights; }
+
 private:
     float window(const scene::Light& l, float3 x) const;
     std::vector<scene::Light> m_lights;

@@ -44,6 +44,8 @@ ResolvedCamera resolveCamera(const scene::Scene& scene, const CameraSelection& s
 // GGX alpha <= 0.02). Without one the light tracer has nothing to emit from and images are bitwise those of the
 // camera-path estimator alone (the reference tool keys its cache on this).
 bool hasSunCausticSurfaces(const scene::Scene& scene);
+// The material predicate of that class (the GPU tracer uses the same one).
+bool sunCausticMaterial(const scene::Material& material);
 
 // Blocks while any of the hold files is in place (same rule as RenderSettings::pauseWhileExists); callers use it before
 // heavy setup (BVH and atmosphere-table builds run on every core).

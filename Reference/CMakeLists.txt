@@ -57,19 +57,40 @@ unx_target_defaults(unx_reference)
 target_include_directories(unx_reference PUBLIC PathTracer/include PRIVATE PathTracer/src)
 target_link_libraries(unx_reference PUBLIC unx_metrics unx_scene PRIVATE Unx::Embree)
 
-# unx_reference: render / cache reference images, census (see PathTracer/Tools/ReferenceTool.cpp).
-add_executable(unx_reference_tool PathTracer/Tools/ReferenceTool.cpp)
-unx_target_defaults(unx_reference_tool)
-set_target_properties(unx_reference_tool PROPERTIES OUTPUT_NAME unx_reference)
-target_link_libraries(unx_reference_tool PRIVATE unx_reference unx_scenegen)
+# GPU reference path tracer (coordination 2026-09-26, GpuTracer/README_KO.md): the same estimator on standard D3D12
+# (DXR 1.1 inline ray queries in compute). Shared estimator code in GpuTracer/shared is compiled both here (C++, tests)
+# and into the kernels (bin/shaders/Reference/<name>.dxil).
+unx_add_shaders(unx_reference_gpu_shaders ROOT "${CMAKE_CURRENT_SOURCE_DIR}/GpuTracer/shaders" OUTPUT "${UNX_SHADER_OUTPUT}/Reference")
+file(GLOB reference_gpu_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/GpuTracer/src/*.cpp")
+add_library(unx_reference_gpu STATIC ${reference_gpu_sources})
+unx_target_defaults(unx_reference_gpu)
+target_include_directories(unx_reference_gpu PUBLIC GpuTracer/include PRIVATE GpuTracer/src GpuTracer PathTracer/src)
+target_link_libraries(unx_reference_gpu PUBLIC unx_reference unx_render PRIVATE Unx::Embree)
+add_dependencies(unx_reference_gpu unx_reference_gpu_shaders)
+# The shared estimator code compiled as C++ against the CPU estimator's functions (no GPU).
+add_executable(unx_test_reference_gpu GpuTracer/Tests/SharedTests.cpp)
+unx_target_defaults(unx_test_reference_gpu)
+target_include_directories(unx_test_reference_gpu PRIVATE PathTracer/src GpuTracer)
+target_link_libraries(unx_test_reference_gpu PRIVATE unx_reference unx_scenegen Unx::Embree)
+c_deploy_embree(unx_test_reference_gpu)
+
+# unx_reference: render / cache reference images, census (see PathTracer/Tools/ReferenceTool.cpp). An engine executable
+# (Agility SDK exports and runtime) since it also drives the GPU tracer (--device gpu).
+unx_add_executable(unx_reference_tool PathTracer/Tools/ReferenceTool.cpp)
+# ARCHIVE_OUTPUT_NAME: the Agility exports give the executable an import library, which must not overwrite unx_reference.lib.
+set_target_properties(unx_reference_tool PROPERTIES OUTPUT_NAME unx_reference ARCHIVE_OUTPUT_NAME unx_reference_tool)
+target_link_libraries(unx_reference_tool PRIVATE unx_reference unx_reference_gpu unx_scenegen)
+add_dependencies(unx_reference_tool unx_reference_gpu_shaders)
 target_compile_definitions(unx_reference_tool PRIVATE UNX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 c_deploy_embree(unx_reference_tool)
 
 # Correctness checks of the estimator against closed forms (no GPU).
-add_executable(unx_test_reference PathTracer/Tests/ReferenceTests.cpp)
-unx_target_defaults(unx_test_reference)
+# (--gpu: the same closed forms on the GPU tracer, hence an engine executable.)
+unx_add_executable(unx_test_reference PathTracer/Tests/ReferenceTests.cpp)
+set_target_properties(unx_test_reference PROPERTIES ARCHIVE_OUTPUT_NAME unx_test_reference_exe)
 target_include_directories(unx_test_reference PRIVATE PathTracer/src)
-target_link_libraries(unx_test_reference PRIVATE unx_reference unx_scenegen Unx::Embree)
+target_link_libraries(unx_test_reference PRIVATE unx_reference unx_reference_gpu unx_scenegen Unx::Embree)
+add_dependencies(unx_test_reference unx_reference_gpu_shaders)
 target_compile_definitions(unx_test_reference PRIVATE UNX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 c_deploy_embree(unx_test_reference)
 

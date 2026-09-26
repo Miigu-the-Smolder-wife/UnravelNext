@@ -49,6 +49,10 @@ class Texture
 public:
     explicit Texture(const scene::Texture& t);
     Texel sample(float2 uv) const;  // bilinear on mip 0, wrap or clamp as the texture says; sRGB decoded
+    uint32_t width() const { return m_w; }
+    uint32_t height() const { return m_h; }
+    bool wrap() const { return m_wrap; }
+    const std::vector<Texel>& texels() const { return m_texels; }  // decoded (linear) texels, row-major
 private:
     uint32_t m_w, m_h;
     bool m_wrap;
@@ -100,6 +104,16 @@ private:
     std::vector<Texture> m_textures;
     DeformationReport m_deform;
 };
+
+// Deformation of one instance (skin: linear blend of 4 joints; wind v1: windOffset), the function RtScene uses for its
+// world-space copies and the GPU tracer uploads. instanceNeedsDeformation: skinned, or wind active at the render time.
+struct DeformedGeometry
+{
+    std::vector<float3> positions, normals;  // world space
+    std::vector<float4> tangents;            // world space (w: handedness), empty if the mesh has none
+};
+bool instanceNeedsDeformation(const scene::Scene& scene, const scene::Instance& instance);
+DeformedGeometry deformInstance(const scene::Scene& scene, uint32_t instance, float time);
 
 // Robust ray origin offset (Waechter & Binder, Ray Tracing Gems ch. 6).
 float3 offsetRayOrigin(float3 p, float3 n);

@@ -10,7 +10,10 @@
 //   sky         full atmosphere: forced in-scattering NEE and collision NEE agree (two unbiased estimators)
 //   bsdf        E[f cos / pdf] with BSDF sampling equals E[f cos / p_uniform] (sampling/pdf consistency), per material
 //   atmosphere  optical-depth table error against 8192-panel quadrature (measured, printed)
+// With --gpu as the first argument the rendering cases run on the GPU reference tracer (Reference/GpuTracer) against
+// the same closed forms (the validation gate's furnace and energy tests); the CPU-only cases are skipped.
 #include "unx/core/Log.h"
+#include "unx/reference/GpuPathTracer.h"
 #include "unx/reference/PathTracer.h"
 #include "unx/scene/MaterialModel.h"
 
@@ -33,6 +36,19 @@ namespace
 {
 constexpr float kPi = 3.14159265358979323846f;
 #define CHECK(c) do { if (!(c)) fail("%s:%d: CHECK failed: %s", __FILE__, __LINE__, #c); } while (0)
+
+bool g_gpu = false;  // --gpu: render on the GPU tracer
+
+reference::RenderOutput renderOn(const scene::Scene& s, const reference::ResolvedCamera& cam, const reference::RenderSettings& rs)
+{
+    if (g_gpu)
+    {
+        reference::GpuPathTracer gpt(s, UNX_SOURCE_DIR, "unx_test_reference --gpu");
+        return gpt.render(cam, rs);
+    }
+    reference::PathTracer pt(s);
+    return pt.render(cam, rs);
+}
 
 scene::Scene planeScene(float albedo)
 {
@@ -81,7 +97,6 @@ struct Measured
 
 Measured renderPatch(const scene::Scene& s, uint32_t spp, bool sunCaustics = true)
 {
-    reference::PathTracer pt(s);
     reference::RenderSettings rs;
     rs.width = 16;
     rs.height = 16;
@@ -89,7 +104,7 @@ Measured renderPatch(const scene::Scene& s, uint32_t spp, bool sunCaustics = tru
     rs.russianRouletteStart = 4;
     rs.samplesPerPass = spp / 2;
     rs.sunCaustics = sunCaustics;
-    const reference::RenderOutput out = pt.render(reference::resolveCamera(s, { "down", "", 0 }), rs);
+    const reference::RenderOutput out = renderOn(s, reference::resolveCamera(s, { "down", "", 0 }), rs);
     CHECK(out.stats.nanSamples == 0 && out.stats.truncatedPaths == 0);
     const double exposure = 1.0 / 1.2;
     double a = 0, b = 0;
@@ -345,7 +360,6 @@ scene::Scene skyScene(float coefficientScale, float3 view)
 
 Measured renderSky(const scene::Scene& s, uint32_t spp, bool forced)
 {
-    reference::PathTracer pt(s);
     reference::RenderSettings rs;
     rs.width = 4;
     rs.height = 4;
@@ -353,7 +367,7 @@ Measured renderSky(const scene::Scene& s, uint32_t spp, bool forced)
     rs.russianRouletteStart = 4;
     rs.samplesPerPass = spp / 2;
     rs.forcedInScattering = forced;
-    const reference::RenderOutput out = pt.render(reference::resolveCamera(s, { "sky", "", 0 }), rs);
+    const reference::RenderOutput out = renderOn(s, reference::resolveCamera(s, { "sky", "", 0 }), rs);
     CHECK(out.stats.nanSamples == 0 && out.stats.truncatedPaths == 0);
     double a = 0, b = 0;
     for (size_t i = 0; i < out.halfA.rgb.size(); i += 3)
@@ -602,9 +616,17 @@ int main(int argc, char** argv)
 {
     try
     {
-        const char* only = argc > 1 ? argv[1] : nullptr;
+        int arg = 1;
+        if (argc > arg && std::strcmp(argv[arg], "--gpu") == 0)
+        {
+            g_gpu = true;
+            ++arg;
+        }
+        const char* only = argc > arg ? argv[arg] : nullptr;
         auto run = [&](const char* name, void (*fn)()) {
             if (only && std::strcmp(only, name) != 0) return;
+            const bool cpuOnly = std::strcmp(name, "hold") == 0 || std::strcmp(name, "atmosphere") == 0 || std::strcmp(name, "model") == 0 || std::strcmp(name, "bsdf") == 0;
+            if (g_gpu && cpuOnly) return;
             logf("[%s]\n", name);
             fn();
         };
@@ -621,7 +643,7 @@ int main(int argc, char** argv)
         run("caustic", testSunCaustic);
         run("skythin", testSkySingleScatter);
         run("sky", testSkyEstimators);
-        logf("reference tests passed\n");
+        logf(g_gpu ? "reference tests passed (GPU tracer)\n" : "reference tests passed\n");
         return 0;
     }
     catch (const std::exception& e)

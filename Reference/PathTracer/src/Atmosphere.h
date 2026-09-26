@@ -79,6 +79,10 @@ public:
     double selfCheck(uint32_t samples, double* maxRelTransmittanceError = nullptr, bool verbose = false) const;
 
     const scene::Atmosphere& params() const { return m_a; }
+    // tau_top table (GPU tracer upload): [ir * kTableMu + imu], kTableMu x kTableR entries.
+    static constexpr uint32_t tableMu() { return kTableMu; }
+    static constexpr uint32_t tableR() { return kTableR; }
+    const std::vector<std::array<float, 3>>& table() const { return m_table; }
     double bottomRadius() const { return m_a.bottomRadius; }
 
 private:

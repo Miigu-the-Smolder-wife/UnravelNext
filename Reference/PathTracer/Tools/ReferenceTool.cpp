@@ -2,6 +2,7 @@
 //
 //   unx_reference render  --scene <name|file.unxscene> (--camera <name> | --path <name> --time <s>) --res <WxH>
 //                         [--seed N] [--scale S] [--no-wind] [--sun-illuminance lux] [--write-scene <file>] [--spp N] [--force]
+//                         [--device cpu|gpu] [--render-seed N]
 //                         [--volume-order MIN:MAX]
 //       Renders into / reuses Cache/Reference/<scene>/<camera>_<W>x<H>_<spp>_<sceneHash16>_<qualityHash16>.pfm (+ .json,
 //       + .halfA.pfm / .halfB.pfm). --spp overrides reference.samples_per_pixel (recorded in the name and the hash);
@@ -20,6 +21,8 @@
 //       Metrics against the cached reference and the scene thresholds of Config/quality/reference.toml.
 //   unx_reference scenemeta --scene ... --res <WxH> [--wcap px (0)] [--out meta.md]
 //       Per camera: surface pixels, triangles per visibility band (frustum, before occlusion), light counts.
+//   unx_reference gatecompare --scene ... --camera ... --res WxH --cpu-image <pfm> --gpu-image <pfm> [--out md]
+//       CPU/GPU validation gate: tile z-scores, per-mask bias, relMSE against both noises (halves beside the images).
 //   unx_reference selfcheck
 //       Measured error of the atmosphere optical-depth table against direct quadrature.
 // render and census pause while another session holds the GPU measurement lock (.gpulock/current.json with a live
@@ -32,6 +35,7 @@
 #include "unx/core/Sha256.h"
 #include "unx/metrics/Census.h"
 #include "unx/metrics/Metrics.h"
+#include "unx/reference/GpuPathTracer.h"
 #include "unx/reference/PathTracer.h"
 #include "unx/scenegen/SceneGen.h"
 
@@ -69,6 +73,10 @@ struct Args
     uint32_t threads = 0;                            // --threads N (0 = 3/4 of the logical processors)
     float wcap = 0.0f;                               // scenemeta --wcap: face-on sheets below this width are band B (design default 0)
     std::vector<std::string> alsoHold;               // --also-hold <file> (repeatable)
+    std::string cpuImage, gpuImage;                  // gatecompare --cpu-image / --gpu-image (full images; halves beside them)
+    bool stripDynamic = false;                       // --strip-dynamic: drop the RPP-1 dynamic bodies (the scene before 2026-09-26)
+    bool gpu = false;                                // --device gpu: the GPU reference path tracer (Reference/GpuTracer)
+    uint64_t renderSeed = 0;                         // --render-seed N (0 = the device default)
 };
 
 Args parse(int argc, char** argv)
@@ -106,6 +114,16 @@ Args parse(int argc, char** argv)
         else if (k == "--threads") a.threads = (uint32_t)std::stoul(next());
         else if (k == "--wcap") a.wcap = std::stof(next());
         else if (k == "--also-hold") a.alsoHold.push_back(next());
+        else if (k == "--device")
+        {
+            const std::string d = next();
+            if (d != "cpu" && d != "gpu") fail("--device expects cpu or gpu");
+            a.gpu = d == "gpu";
+        }
+        else if (k == "--render-seed") a.renderSeed = std::stoull(next());
+        else if (k == "--strip-dynamic") a.stripDynamic = true;
+        else if (k == "--cpu-image") a.cpuImage = next();
+        else if (k == "--gpu-image") a.gpuImage = next();
         else if (k == "--volume-order" || k == "--surface-order")
         {
             const std::string r = next();
@@ -137,6 +155,16 @@ scene::Scene loadScene(const Args& a)
                 found = true;
             }
         if (!found) fail("unknown scene '%s'", a.scene.c_str());
+    }
+    if (a.stripDynamic)
+    {
+        // The generator appends the RPP-1 bodies last (3 materials, the body meshes, the InstanceDynamic instances):
+        // removing them gives the scene of the references rendered before they existed (validation against those).
+        while (!s.instances.empty() && (s.instances.back().flags & scene::InstanceDynamic)) s.instances.pop_back();
+        while (!s.meshes.empty() && s.meshes.back().name.rfind("body_", 0) == 0) s.meshes.pop_back();
+        while (!s.materials.empty() && s.materials.back().name.rfind("body_", 0) == 0) s.materials.pop_back();
+        for (const scene::Instance& in : s.instances)
+            if (in.flags & scene::InstanceDynamic) fail("--strip-dynamic: dynamic instances are not the last ones");
     }
     if (a.noWind) s.windSpeed = 0;
     if (a.sunIlluminance >= 0) s.sun.illuminance = a.sunIlluminance;
@@ -190,7 +218,7 @@ struct ReferenceKeys
     std::string hash16;
 };
 ReferenceKeys referenceKeys(const QualityConfig& q, uint32_t sppOverride, bool sunCaustics, uint32_t orderMin = 0, uint32_t orderMax = 0xFFFFFFFFu,
-                            uint32_t surfMin = 0, uint32_t surfMax = 0xFFFFFFFFu)
+                            uint32_t surfMin = 0, uint32_t surfMax = 0xFFFFFFFFu, bool gpu = false, uint64_t renderSeed = 0)
 {
     ReferenceKeys k;
     k.spp = sppOverride ? sppOverride : (uint32_t)q.integer("reference.samples_per_pixel");
@@ -203,6 +231,10 @@ ReferenceKeys referenceKeys(const QualityConfig& q, uint32_t sppOverride, bool s
     if (sunCaustics) canonical += "estimator.sun_caustics = light_traced\n";
     if (orderMin != 0 || orderMax != 0xFFFFFFFFu) canonical += format("diagnostic.volume_order = %u:%u\n", orderMin, orderMax);
     if (surfMin != 0 || surfMax != 0xFFFFFFFFu) canonical += format("diagnostic.surface_order = %u:%u\n", surfMin, surfMax);
+    // GPU tracer images (2026-09-26): their own identity until the CPU/GPU validation gate has passed
+    // (Reference/GpuTracer/README_KO.md); a non-default render seed too (independent estimates for comparisons).
+    if (gpu) canonical += "estimator.device = gpu\n";
+    if (renderSeed) canonical += format("estimator.render_seed = %llu\n", (unsigned long long)renderSeed);
     k.hash16 = Sha256::hex(canonical).substr(0, 16);
     return k;
 }
@@ -227,19 +259,24 @@ std::string nowIso()
 
 std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const std::string& label, const reference::ResolvedCamera& cam, const QualityConfig& q)
 {
-    const ReferenceKeys k = referenceKeys(q, a.spp, reference::hasSunCausticSurfaces(s), a.orderMin, a.orderMax, a.surfMin, a.surfMax);
+    const ReferenceKeys k = referenceKeys(q, a.spp, reference::hasSunCausticSurfaces(s), a.orderMin, a.orderMax, a.surfMin, a.surfMax, a.gpu, a.renderSeed);
     const std::filesystem::path pfm = cachePath(s, label, a.width, a.height, k);
     if (std::filesystem::exists(pfm) && !a.force)
     {
         logf("reference: cached %s\n", pfm.string().c_str());
         return pfm;
     }
-    logf("reference: rendering %s camera %s %ux%u at %u spp (quality %s) -> %s\n", s.name.c_str(), label.c_str(), a.width, a.height, k.spp, k.hash16.c_str(), pfm.string().c_str());
-    reference::waitWhileHeld(holdFiles(a));
+    logf("reference: rendering %s camera %s %ux%u at %u spp (quality %s, %s) -> %s\n", s.name.c_str(), label.c_str(), a.width, a.height, k.spp, k.hash16.c_str(),
+         a.gpu ? "gpu" : "cpu", pfm.string().c_str());
+    if (!a.gpu) reference::waitWhileHeld(holdFiles(a));
     const auto t0 = std::chrono::steady_clock::now();
-    reference::PathTracer pt(s);
+    std::unique_ptr<reference::PathTracer> pt;
+    std::unique_ptr<reference::GpuPathTracer> gpt;
+    if (a.gpu) gpt = std::make_unique<reference::GpuPathTracer>(s, root(), format("unx_reference gpu %s/%s %ux%u %u spp", s.name.c_str(), label.c_str(), a.width, a.height, k.spp));
+    else pt = std::make_unique<reference::PathTracer>(s);
     const double buildSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     reference::RenderSettings rs;
+    rs.seed = a.renderSeed ? a.renderSeed : a.gpu ? 0x6E5EEDull : 0x5EEDull;
     rs.width = a.width;
     rs.height = a.height;
     rs.samplesPerPixel = k.spp;
@@ -253,11 +290,25 @@ std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const s
     rs.surfaceOrderMax = a.surfMax;
     if (a.surfMin != 0 || a.surfMax != 0xFFFFFFFFu) logf("reference: diagnostic surface scattering order window %u:%u\n", a.surfMin, a.surfMax);
     if (a.orderMin != 0 || a.orderMax != 0xFFFFFFFFu) logf("reference: diagnostic volume scattering order window %u:%u\n", a.orderMin, a.orderMax);
-    const reference::RenderOutput out = pt.render(cam, rs, [&](const reference::RenderStats& st) {
+    auto progress = [&](const reference::RenderStats& st) {
         const double rate = st.seconds > 0 ? st.rays / st.seconds / 1e6 : 0;
         const double eta = st.samplesDone ? st.seconds * (k.spp - st.samplesDone) / st.samplesDone : 0;
         logf("  %u/%u spp  %.0f s (paused %.0f s)  %.1f Mrays/s  ETA %.0f s\n", st.samplesDone, k.spp, st.seconds, st.pausedSeconds, rate, eta);
-    });
+    };
+    const reference::RenderOutput out = a.gpu ? gpt->render(cam, rs, progress) : pt->render(cam, rs, progress);
+    std::string gpuJson;
+    if (a.gpu)
+    {
+        const reference::GpuRenderInfo& g = gpt->info();
+        gpuJson = format(",\n  \"device\": \"gpu\",\n  \"render_seed\": %llu,\n  \"adapter\": \"%s\",\n  \"driver\": \"%s\",\n  \"vram_scene_mb\": %.1f,\n"
+                         "  \"vram_process_peak_mb\": %.1f,\n  \"gpu_build_seconds\": %.1f,\n  \"lock_wait_seconds\": %.1f,\n  \"slices\": %u,\n"
+                         "  \"longest_slice_seconds\": %.2f,\n  \"dispatches\": %u,\n  \"longest_dispatch_ms\": %.2f,\n  \"mean_dispatch_ms\": %.2f",
+                         (unsigned long long)rs.seed, g.adapter.c_str(), g.driver.c_str(), g.vramSceneBytes / 1048576.0, g.vramProcessPeakBytes / 1048576.0, g.buildSeconds,
+                         g.lockWaitSeconds, g.slices, g.longestSliceSeconds, g.dispatches, g.longestDispatchMs, g.meanDispatchMs);
+        logf("reference: gpu %s, scene %.0f MB, process peak %.0f MB, %u slices (longest %.1f s), %u dispatches (longest %.1f ms, mean %.1f ms), lock wait %.0f s\n",
+             g.adapter.c_str(), g.vramSceneBytes / 1048576.0, g.vramProcessPeakBytes / 1048576.0, g.slices, g.longestSliceSeconds, g.dispatches, g.longestDispatchMs,
+             g.meanDispatchMs, g.lockWaitSeconds);
+    }
     metrics::writePfm(pfm, out.image);
     const std::string stem = pfm.string().substr(0, pfm.string().size() - 4);
     metrics::writePfm(stem + ".halfA.pfm", out.halfA);
@@ -266,10 +317,10 @@ std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const s
         "{\n  \"scene\": \"%s\",\n  \"scene_hash\": \"%s\",\n  \"camera\": \"%s\",\n  \"width\": %u,\n  \"height\": %u,\n  \"spp\": %u,\n"
         "  \"russian_roulette_start_bounce\": %u,\n  \"estimator\": \"%s\",\n  \"quality_hash16\": \"%s\",\n  \"ev100\": %.9g,\n  \"time\": %.9g,\n"
         "  \"halves_relmse\": %.9g,\n  \"render_seconds\": %.1f,\n  \"build_seconds\": %.1f,\n  \"paths\": %llu,\n  \"rays\": %llu,\n  \"truncated_paths\": %llu,\n"
-        "  \"nan_samples\": %llu,\n  \"threads\": %u,\n  \"finished\": \"%s\"\n}\n",
+        "  \"nan_samples\": %llu,\n  \"threads\": %u,\n  \"finished\": \"%s\"%s\n}\n",
         s.name.c_str(), scene::contentHash(s).c_str(), label.c_str(), a.width, a.height, k.spp, k.rrStart, kEstimatorVersion, k.hash16.c_str(), cam.ev100, cam.time,
         out.halvesRelMse, out.stats.seconds, buildSec, (unsigned long long)out.stats.paths, (unsigned long long)out.stats.rays, (unsigned long long)out.stats.truncatedPaths,
-        (unsigned long long)out.stats.nanSamples, std::thread::hardware_concurrency(), nowIso().c_str());
+        (unsigned long long)out.stats.nanSamples, std::thread::hardware_concurrency(), nowIso().c_str(), gpuJson.c_str());
     writeTextFile(stem + ".json", json);
     logf("reference: done in %.0f s, halves relMSE %.3g, %llu NaN samples, %llu truncated paths\n", out.stats.seconds, out.halvesRelMse,
          (unsigned long long)out.stats.nanSamples, (unsigned long long)out.stats.truncatedPaths);
@@ -337,13 +388,27 @@ std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t
     md << format("## %s at %ux%u, w_cap %.1f px\n\n", s.name.c_str(), W, H, wcap);
     md << format("Lights: sun %s, local lights %zu (%zu casting shadows).\n\n", s.sun.illuminance > 0 ? "on" : "off", s.lights.size(),
                  (size_t)std::count_if(s.lights.begin(), s.lights.end(), [](const scene::Light& l) { return l.castShadow; }));
+    {
+        const size_t dynamic = (size_t)std::count_if(s.instances.begin(), s.instances.end(), [](const scene::Instance& in) { return (in.flags & scene::InstanceDynamic) != 0; });
+        md << format("Dynamic content (RPP-1): %zu rigid bodies (InstanceDynamic, placement from the generator = bodies.json). "
+                     "References show them frozen at bodies.json t0 (the frozen-body variant); a moving-body variant is a separate "
+                     "per-frame sequence. Character slots (256, 8 with hair) and VFX are empty in these references: nothing is "
+                     "rendered for them.\n\n",
+                     dynamic);
+    }
     md << "Band of a visible triangle (COVERAGE_REDESIGN 14.9): w_px = smallest altitude x instance scale x focal / distance to the "
           "triangle centroid; C below 0.25 px; solid B below 1.5 px; flat (Foliage or two-sided) B only when |cos theta| x w_px < 1.5 px "
           "(theta between the view ray and the sheet normal) or w_px < w_cap, else A. Visible = hit by one of 16 stratified sub-samples per pixel (no "
           "wind). P_A / P_B / P_C = pixels whose sub-samples include a triangle of that band (ARCHITECTURE 2 table: P_B, P_C); T_A / T_B "
           "/ T_C = distinct visible triangles per band (before any LOD).\n\n"
-          "| camera | surface px (centre ray) | surface % | P_A / P_B / P_C (M px) | P_B or P_C | T_A / T_B / T_C (visible) | instances in frustum |\n"
-          "|---|---|---|---|---|---|---|\n";
+          "| camera | surface px (centre ray) | surface % | P_A / P_B / P_C (M px) | P_B or P_C | T_A / T_B / T_C (visible) | instances in frustum | dynamic bodies in frustum |\n"
+          "|---|---|---|---|---|---|---|---|\n";
+    // Band B by distance (design revision request 2026-09-26: stored-layer model of COVERAGE_REDESIGN 14.9 per distance).
+    static const double kDistEdges[4] = { 62, 94, 187, 374 };
+    std::ostringstream dist;
+    dist << "\nBand B by distance (camera to the triangle centroid, the distance of the band rule). P_B: pixels by their nearest band-B "
+            "sub-sample; T_B: distinct visible band-B triangles.\n\n"
+            "| camera | P_B < 62 / 62-94 / 94-187 / 187-374 / >= 374 m (M px) | T_B < 62 / 62-94 / 94-187 / 187-374 / >= 374 m (M) |\n|---|---|---|\n";
     for (const scene::Camera& c : s.cameras)
     {
         reference::CameraSelection sel;
@@ -376,32 +441,60 @@ std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t
             const double cosT = std::fabs((double)dot(n, v)) / d;
             return cosT * w < 1.5 ? 1 : 0;
         };
-        uint64_t pxBand[3] = {}, pxBC = 0;
+        auto distOfId = [&](uint64_t id) {
+            const scene::Instance& in = s.instances[(uint32_t)(id >> 32)];
+            const MeshInfo& m = mi[in.mesh];
+            const uint32_t tri = (uint32_t)id;
+            if (tri >= m.ctr.size()) return 0.0;
+            const float3 v = in.transform.transformPoint(m.ctr[tri]) - cam.position;
+            return (double)std::sqrt(dot(v, v));
+        };
+        auto distBin = [&](double d) {
+            int b = 0;
+            while (b < 4 && d >= kDistEdges[b]) ++b;
+            return b;
+        };
+        uint64_t pxBand[3] = {}, pxBC = 0, pxBDist[5] = {}, visBDist[5] = {};
         std::vector<uint64_t> seen;
         seen.reserve((size_t)W * H);
         for (size_t i = 0; i < (size_t)W * H; ++i)
         {
             bool has[3] = {};
+            double nearestB = -1;
             for (int k = 0; k < 16; ++k)
             {
                 const uint64_t id = ids[i * 17 + k];
                 if (id == reference::kSkyIdentity) continue;
-                has[bandOfId(id)] = true;
+                const int band = bandOfId(id);
+                has[band] = true;
+                if (band == 1)
+                {
+                    const double d = distOfId(id);
+                    if (nearestB < 0 || d < nearestB) nearestB = d;
+                }
                 seen.push_back(id);
             }
             for (int b = 0; b < 3; ++b) pxBand[b] += has[b];
             pxBC += has[1] || has[2];
+            if (nearestB >= 0) ++pxBDist[distBin(nearestB)];
         }
         std::sort(seen.begin(), seen.end());
         seen.erase(std::unique(seen.begin(), seen.end()), seen.end());
         uint64_t visBand[3] = {};
-        for (uint64_t id : seen) ++visBand[bandOfId(id)];
+        for (uint64_t id : seen)
+        {
+            const int band = bandOfId(id);
+            ++visBand[band];
+            if (band == 1) ++visBDist[distBin(distOfId(id))];
+        }
+        dist << format("| %s | %.2f / %.2f / %.2f / %.2f / %.2f | %.2f / %.2f / %.2f / %.2f / %.2f |\n", c.name.c_str(), pxBDist[0] / 1e6, pxBDist[1] / 1e6, pxBDist[2] / 1e6,
+                       pxBDist[3] / 1e6, pxBDist[4] / 1e6, visBDist[0] / 1e6, visBDist[1] / 1e6, visBDist[2] / 1e6, visBDist[3] / 1e6, visBDist[4] / 1e6);
         // Frustum side-plane normals (inward) for the sphere test.
         const double tx = th * aspect;
         const float3 nL = normalize(right * 1.0f + fw * (float)tx), nR = normalize(right * -1.0f + fw * (float)tx);
         const float3 nB = normalize(up * 1.0f + fw * (float)th), nT = normalize(up * -1.0f + fw * (float)th);
         double bandA = 0, bandB = 0, bandBflat = 0, bandC = 0;
-        uint64_t inst = 0;
+        uint64_t inst = 0, dyn = 0;
         for (const scene::Instance& in : s.instances)
         {
             const MeshInfo& m = mi[in.mesh];
@@ -413,6 +506,7 @@ std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t
             if (dot(v, fw) < -r) continue;
             if (dot(v, nL) < -r || dot(v, nR) < -r || dot(v, nB) < -r || dot(v, nT) < -r) continue;
             ++inst;
+            dyn += (in.flags & scene::InstanceDynamic) ? 1 : 0;
             const double d = std::max((double)std::sqrt(dot(v, v)), (double)cam.nearPlane);
             for (int b = 0; b < kBins; ++b)
             {
@@ -437,11 +531,128 @@ std::string sceneMeta(const scene::Scene& s, reference::PathTracer& pt, uint32_t
         (void)bandA;
         (void)bandB;
         (void)bandC;
-        md << format("| %s | %.2f M | %.1f %% | %.2f / %.2f / %.2f | %.2f M | %.2f M / %.2f M / %.2f M | %llu |\n", c.name.c_str(), surf / 1e6, 100.0 * surf / ((double)W * H),
-                     pxBand[0] / 1e6, pxBand[1] / 1e6, pxBand[2] / 1e6, pxBC / 1e6, visBand[0] / 1e6, visBand[1] / 1e6, visBand[2] / 1e6, (unsigned long long)inst);
+        md << format("| %s | %.2f M | %.1f %% | %.2f / %.2f / %.2f | %.2f M | %.2f M / %.2f M / %.2f M | %llu | %llu |\n", c.name.c_str(), surf / 1e6, 100.0 * surf / ((double)W * H),
+                     pxBand[0] / 1e6, pxBand[1] / 1e6, pxBand[2] / 1e6, pxBC / 1e6, visBand[0] / 1e6, visBand[1] / 1e6, visBand[2] / 1e6, (unsigned long long)inst, (unsigned long long)dyn);
         logf("  scenemeta %s/%s: surface %.2f M px (%.1f %%), P_A %.2f P_B %.2f P_C %.2f M px, visible triangles A %.2f B %.2f C %.2f M\n", s.name.c_str(), c.name.c_str(),
              surf / 1e6, 100.0 * surf / ((double)W * H), pxBand[0] / 1e6, pxBand[1] / 1e6, pxBand[2] / 1e6, visBand[0] / 1e6, visBand[1] / 1e6, visBand[2] / 1e6);
     }
+    md << dist.str();
+    return md.str();
+}
+
+// CPU/GPU validation gate (Reference/GpuTracer/README_KO.md): the GPU tracer's image against the CPU reference of the
+// same scene, camera and resolution, each with its two independent halves. Noise per pixel from the halves:
+// var(full) = (A - B)^2 / 4. Criteria: tile z-scores (16 x 16 tiles, z = sum(G - C) / sqrt(sum var)) with mean 0 and
+// deviation 1; per-mask mean bias in units of its standard error (masks from the 17 primary sub-sample identities:
+// sky, edge, leaf, metal, ground, other); relMSE(C, G) against the sum of both images' noise, (h_C + h_G) / 4 with
+// h = relMSE(half A, half B).
+std::string gateCompare(const scene::Scene& s, const reference::ResolvedCamera& cam, const std::string& label, uint32_t W, uint32_t H, const std::filesystem::path& cpuPfm,
+                        const std::filesystem::path& gpuPfm, const std::vector<std::filesystem::path>& hold)
+{
+    auto stem = [](const std::filesystem::path& p) { const std::string x = p.string(); return x.substr(0, x.size() - 4); };
+    const metrics::Image C = metrics::readPfm(cpuPfm), Ca = metrics::readPfm(stem(cpuPfm) + ".halfA.pfm"), Cb = metrics::readPfm(stem(cpuPfm) + ".halfB.pfm");
+    const metrics::Image G = metrics::readPfm(gpuPfm), Ga = metrics::readPfm(stem(gpuPfm) + ".halfA.pfm"), Gb = metrics::readPfm(stem(gpuPfm) + ".halfB.pfm");
+    for (const metrics::Image* im : { &C, &Ca, &Cb, &G, &Ga, &Gb })
+        if (im->width != W || im->height != H) fail("gatecompare: image size %ux%u, expected %ux%u", im->width, im->height, W, H);
+    const size_t n = (size_t)W * H;
+    // Masks from the primary identities (centre sample 16; edge = the 16 sub-samples do not all see the centre's surface).
+    reference::PathTracer pt(s);
+    const std::vector<uint64_t> ids = pt.primaryIdentities(cam, W, H, hold);
+    enum Mask { All, Sky, Edge, Leaf, Metal, Ground, Other, MaskCount };
+    const char* maskNames[MaskCount] = { "all", "sky", "edge", "leaf (Foliage)", "metal (metallic >= 0.5)", "ground (terrain / street)", "other surfaces" };
+    std::vector<uint8_t> mask(n);
+    for (size_t p = 0; p < n; ++p)
+    {
+        const uint64_t c = ids[p * 17 + 16];
+        bool edge = false;
+        for (int k = 0; k < 16; ++k) edge |= ids[p * 17 + k] != c;
+        if (edge)
+        {
+            mask[p] = Edge;
+            continue;
+        }
+        if (c == reference::kSkyIdentity)
+        {
+            mask[p] = Sky;
+            continue;
+        }
+        const scene::Instance& in = s.instances[(uint32_t)(c >> 32)];
+        const scene::Mesh& m = s.meshes[in.mesh];
+        const uint32_t tri = (uint32_t)c;
+        uint32_t sub = 0;
+        for (uint32_t k = 0; k < (uint32_t)m.submeshes.size(); ++k)
+            if (m.submeshes[k].indexOffset / 3 <= tri) sub = k;
+        const scene::Material& mat = s.materials[in.materialOverrides.empty() ? m.submeshes[sub].material : in.materialOverrides[sub]];
+        if (mat.cls == scene::MaterialClass::Foliage) mask[p] = Leaf;
+        else if (mat.metallic >= 0.5f) mask[p] = Metal;
+        else if (m.name == "terrain" || m.name == "ground" || m.name.rfind("street", 0) == 0) mask[p] = Ground;
+        else mask[p] = Other;
+    }
+    auto Y = [](const metrics::Image& im, size_t p) { return 0.2126 * im.rgb[3 * p] + 0.7152 * im.rgb[3 * p + 1] + 0.0722 * im.rgb[3 * p + 2]; };
+    std::vector<double> varSum(n);
+    for (size_t p = 0; p < n; ++p)
+    {
+        const double dc = Y(Ca, p) - Y(Cb, p), dg = Y(Ga, p) - Y(Gb, p);
+        varSum[p] = 0.25 * (dc * dc + dg * dg);
+    }
+    std::ostringstream md;
+    md << format("## %s / %s %ux%u: GPU vs CPU reference [measured]\n\n", s.name.c_str(), label.c_str(), W, H);
+    md << "CPU: `" << cpuPfm.filename().string() << "`, GPU: `" << gpuPfm.filename().string() << "`. Luminance; noise of each image from its halves.\n\n";
+    // Tile z-scores.
+    {
+        const uint32_t T = 16;
+        std::vector<double> z;
+        for (uint32_t ty = 0; ty + T <= H; ty += T)
+            for (uint32_t tx = 0; tx + T <= W; tx += T)
+            {
+                double d = 0, v = 0;
+                for (uint32_t y = ty; y < ty + T; ++y)
+                    for (uint32_t x = tx; x < tx + T; ++x)
+                    {
+                        const size_t p = (size_t)y * W + x;
+                        d += Y(G, p) - Y(C, p);
+                        v += varSum[p];
+                    }
+                if (v > 0) z.push_back(d / std::sqrt(v));
+            }
+        double mean = 0, sq = 0;
+        size_t over3 = 0, over5 = 0;
+        for (double v : z)
+        {
+            mean += v;
+            sq += v * v;
+            over3 += std::fabs(v) > 3;
+            over5 += std::fabs(v) > 5;
+        }
+        mean /= std::max<size_t>(1, z.size());
+        const double sd = std::sqrt(std::max(0.0, sq / std::max<size_t>(1, z.size()) - mean * mean));
+        md << format("Tile z-scores (16 x 16 px, %zu tiles): mean %.3f (standard error %.3f), deviation %.3f, |z| > 3: %.2f %% (normal 0.27 %%), |z| > 5: %zu\n\n", z.size(), mean,
+                     1.0 / std::sqrt((double)std::max<size_t>(1, z.size())), sd, 100.0 * over3 / std::max<size_t>(1, z.size()), over5);
+    }
+    // Per-mask bias.
+    md << "| mask | pixels | CPU mean Y | GPU - CPU (relative) | standard error | bias / error |\n|---|---|---|---|---|---|\n";
+    for (int k = 0; k < MaskCount; ++k)
+    {
+        double sc = 0, sg = 0, v = 0;
+        size_t cnt = 0;
+        for (size_t p = 0; p < n; ++p)
+            if (k == All || mask[p] == k)
+            {
+                sc += Y(C, p);
+                sg += Y(G, p);
+                v += varSum[p];
+                ++cnt;
+            }
+        if (cnt == 0) continue;
+        const double rel = (sg - sc) / sc, err = std::sqrt(v) / sc;
+        md << format("| %s | %zu | %.5g | %+.4f %% | %.4f %% | %+.2f |\n", maskNames[k], cnt, sc / cnt, 100 * rel, 100 * err, rel / err);
+    }
+    // Image metrics.
+    const double hC = metrics::relMse(Ca, Cb), hG = metrics::relMse(Ga, Gb), rel = metrics::relMse(C, G);
+    const metrics::FlipResult f = metrics::flipHdr(C, G), fn = metrics::flipHdr(Ca, Cb);
+    md << format("\nrelMSE(CPU, GPU) %.4g; expected from the two noises (h_CPU + h_GPU) / 4 = %.4g (h_CPU %.4g, h_GPU %.4g): ratio %.3f. HDR-FLIP(CPU, GPU) mean %.4f, P99 %.4f; "
+                 "CPU halves (floor) mean %.4f, P99 %.4f.\n\n",
+                 rel, (hC + hG) / 4, hC, hG, rel / ((hC + hG) / 4), f.mean, f.p99, fn.mean, fn.p99);
     return md.str();
 }
 
@@ -516,6 +727,14 @@ int main(int argc, char** argv)
                 json = censusJson("engine", r);
             }
             if (!a.out.empty()) writeTextFile(a.out, json);
+            return 0;
+        }
+        if (a.command == "gatecompare")
+        {
+            if (a.cpuImage.empty() || a.gpuImage.empty()) fail("gatecompare needs --cpu-image and --gpu-image");
+            const std::string md = gateCompare(s, cam, label, a.width, a.height, a.cpuImage, a.gpuImage, holdFiles(a));
+            if (!a.out.empty()) writeTextFile(a.out, md);
+            logf("%s", md.c_str());
             return 0;
         }
         if (a.command == "compare")

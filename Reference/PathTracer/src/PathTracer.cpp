@@ -363,13 +363,11 @@ Rgb PathTracer::Impl::mediumNee(float3 yf, const AtmosphereModel::Coefficients& 
     return L;
 }
 
-namespace
-{
 bool sunCausticMaterial(const scene::Material& mt, float smoothAlpha)
 {
     return mt.cls == scene::MaterialClass::Standard && mt.roughMetalTexture == scene::kNone && scene::model::alphaFromRoughness(mt.roughness) <= smoothAlpha;
 }
-} // namespace
+bool sunCausticMaterial(const scene::Material& mt) { return sunCausticMaterial(mt, PathTracer::Impl::kSmoothAlpha); }
 
 bool hasSunCausticSurfaces(const scene::Scene& scene)
 {

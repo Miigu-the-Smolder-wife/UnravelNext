@@ -138,6 +138,59 @@ Texel Texture::sample(float2 uv) const
     return { lerp2(a.r, b.r, c.r, d.r), lerp2(a.g, b.g, c.g, d.g), lerp2(a.b, b.b, c.b, d.b), lerp2(a.a, b.a, c.a, d.a) };
 }
 
+bool instanceNeedsDeformation(const scene::Scene& s, const scene::Instance& in)
+{
+    return (in.flags & scene::InstanceSkinned) != 0 || windActive(s, in);
+}
+
+DeformedGeometry deformInstance(const scene::Scene& s, uint32_t instance, float time)
+{
+    const scene::Instance& in = s.instances[instance];
+    const scene::Mesh& m = s.meshes[in.mesh];
+    DeformedGeometry out;
+    const size_t n = m.positions.size();
+    out.positions.resize(n);
+    out.normals.resize(n);
+    if (!m.tangents.empty()) out.tangents.resize(n);
+    std::vector<float3x4> palette;
+    if (in.flags & scene::InstanceSkinned)
+    {
+        const scene::Skeleton& sk = s.skeletons[in.skeleton];
+        if (sk.jointToModel.size() < m.skin.inverseBind.size()) fail("reference: skeleton '%s' has fewer joints than mesh '%s'", sk.name.c_str(), m.name.c_str());
+        palette.resize(m.skin.inverseBind.size());
+        for (size_t j = 0; j < palette.size(); ++j) palette[j] = mul34(sk.jointToModel[j], m.skin.inverseBind[j]);
+    }
+    for (size_t v = 0; v < n; ++v)
+    {
+        float3 p = m.positions[v], nn = m.normals[v];
+        float3 t = m.tangents.empty() ? float3{} : float3{ m.tangents[v].x, m.tangents[v].y, m.tangents[v].z };
+        if (!palette.empty())
+        {
+            float3 sp{}, sn{}, st{};
+            for (int k = 0; k < 4; ++k)
+            {
+                const float w = m.skin.weights[4 * v + k];
+                const float3x4& jm = palette[m.skin.joints[4 * v + k]];
+                sp = sp + jm.transformPoint(p) * w;
+                sn = sn + jm.transformVector(nn) * w;
+                st = st + jm.transformVector(t) * w;
+            }
+            p = sp;
+            nn = normalize(sn);
+            if (!m.tangents.empty()) t = normalize(st);
+        }
+        if (windActive(s, in)) p = p + windOffset(s, in, p, time);
+        out.positions[v] = in.transform.transformPoint(p);
+        out.normals[v] = normalize(xformVector(in.transform, nn));
+        if (!m.tangents.empty())
+        {
+            const float3 tw = normalize(xformVector(in.transform, t));
+            out.tangents[v] = { tw.x, tw.y, tw.z, m.tangents[v].w };
+        }
+    }
+    return out;
+}
+
 RtScene::RtScene(const scene::Scene& s, float time, uint32_t threads) : m_scene(s)
 {
     scene::validate(s);
@@ -284,46 +337,10 @@ RtScene::RtScene(const scene::Scene& s, float time, uint32_t threads) : m_scene(
         md->meshIndex = in.mesh;
         md->deformedInstance = (uint32_t)i;
         buildTriSubmesh(*md);
-        const size_t n = m.positions.size();
-        md->positions.resize(n);
-        md->normals.resize(n);
-        if (!m.tangents.empty()) md->tangents.resize(n);
-        std::vector<float3x4> palette;
-        if (in.flags & scene::InstanceSkinned)
-        {
-            const scene::Skeleton& sk = s.skeletons[in.skeleton];
-            if (sk.jointToModel.size() < m.skin.inverseBind.size()) fail("reference: skeleton '%s' has fewer joints than mesh '%s'", sk.name.c_str(), m.name.c_str());
-            palette.resize(m.skin.inverseBind.size());
-            for (size_t j = 0; j < palette.size(); ++j) palette[j] = mul34(sk.jointToModel[j], m.skin.inverseBind[j]);
-        }
-        for (size_t v = 0; v < n; ++v)
-        {
-            float3 p = m.positions[v], nn = m.normals[v];
-            float3 t = m.tangents.empty() ? float3{} : float3{ m.tangents[v].x, m.tangents[v].y, m.tangents[v].z };
-            if (!palette.empty())
-            {
-                float3 sp{}, sn{}, st{};
-                for (int k = 0; k < 4; ++k)
-                {
-                    const float w = m.skin.weights[4 * v + k];
-                    const float3x4& jm = palette[m.skin.joints[4 * v + k]];
-                    sp = sp + jm.transformPoint(p) * w;
-                    sn = sn + jm.transformVector(nn) * w;
-                    st = st + jm.transformVector(t) * w;
-                }
-                p = sp;
-                nn = normalize(sn);
-                if (!m.tangents.empty()) t = normalize(st);
-            }
-            if (windActive(s, in)) p = p + windOffset(s, in, p, time);
-            md->positions[v] = in.transform.transformPoint(p);
-            md->normals[v] = normalize(xformVector(in.transform, nn));
-            if (!m.tangents.empty())
-            {
-                const float3 tw = normalize(xformVector(in.transform, t));
-                md->tangents[v] = { tw.x, tw.y, tw.z, m.tangents[v].w };
-            }
-        }
+        DeformedGeometry dg = deformInstance(s, (uint32_t)i, time);
+        md->positions = std::move(dg.positions);
+        md->normals = std::move(dg.normals);
+        md->tangents = std::move(dg.tangents);
         bool alpha = false;
         for (size_t k = 0; k < m.submeshes.size(); ++k)
             alpha |= materialAlpha(in.materialOverrides.empty() ? m.submeshes[k].material : in.materialOverrides[k]);
