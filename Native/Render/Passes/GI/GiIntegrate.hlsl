@@ -7,11 +7,14 @@
 //   SH (world frame, cosine-convolved L2; the screen probes still use it): E_lm += A_l L Y_lm(w) dw.
 // Both blend into the entry's history with the texels' weight (giHistoryAlpha); the sun visibility half of SH word 13 is
 // kept; the update is recorded (count, history since reset, epoch, frame).
+// The emitter samples (GiTrace: one per texel ray, MIS-weighted radiance over p_l, direction in the anchor frame) follow
+// the texel samples at index ray budget + slot x 64 + k; each adds L_w max(0, n_j . w) / 64.
 // One group per update slot (selected entries, then background). P[0] = { cache UAV, updates per frame, samples SRV, 0 }
+#include "Scene.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
 
-groupshared float4 gs_sample[GI_TEXEL_COUNT];     // radiance, solid-angle weight
-groupshared float3 gs_local[GI_TEXEL_COUNT];      // direction in the anchor frame
+groupshared float4 gs_sample[2 * GI_TEXEL_COUNT];  // radiance, solid-angle weight (texel samples, then emitter samples)
+groupshared float3 gs_local[2 * GI_TEXEL_COUNT];   // direction in the anchor frame
 groupshared float3 gs_sh[9];
 
 [numthreads(128, 1, 1)]
@@ -41,13 +44,19 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         gs_sample[lane] = float4(asfloat(s.xyz), 2 / (len * len * len) / (float)GI_TEXEL_COUNT);
         gs_local[lane] = q / len;
     }
+    else if (lane < 2 * GI_TEXEL_COUNT)
+    {
+        const uint4 s = samples[P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane - GI_TEXEL_COUNT];
+        gs_sample[lane] = float4(asfloat(s.xyz), 1.0 / GI_TEXEL_COUNT);
+        gs_local[lane] = octDecode(s.w);
+    }
     GroupMemoryBarrierWithGroupSync();
 
     // SH: lanes 0..8, one coefficient each (three channels), in the world frame.
     if (lane < 9)
     {
         float3 c = 0;
-        [loop] for (uint k = 0; k < GI_TEXEL_COUNT; ++k)
+        [loop] for (uint k = 0; k < 2 * GI_TEXEL_COUNT; ++k)
         {
             const float3 d = gs_local[k];
             float y[9];
@@ -63,7 +72,7 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         const uint ix = lane % GI_IRR_N, iy = lane / GI_IRR_N;
         const float3 nj = giHemiOctDecode((float2(ix, iy) + 0.5) / (float)GI_IRR_N);
         float3 e = 0;
-        [loop] for (uint k = 0; k < GI_TEXEL_COUNT; ++k) e += gs_sample[k].xyz * (max(dot(nj, gs_local[k]), 0.0) * gs_sample[k].w);
+        [loop] for (uint k = 0; k < 2 * GI_TEXEL_COUNT; ++k) e += gs_sample[k].xyz * (max(dot(nj, gs_local[k]), 0.0) * gs_sample[k].w);
         const uint address = h.offIrr + entry * GI_IRR_STRIDE + lane * 4;
         const float3 previous = giIrrUnpack(b.Load(address)) * GI_LOAD_SCALE;
         b.Store(address, giPackRgb9e5(lerp(previous, e, alpha) * GI_STORE_SCALE));

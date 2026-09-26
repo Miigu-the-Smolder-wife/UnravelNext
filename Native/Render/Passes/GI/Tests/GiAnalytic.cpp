@@ -18,6 +18,7 @@
 // come within 1 % (reconvergence, gi.relight_frames_max).
 //
 //   unx_test_gi_gianalytic [--frames N] [--validate] [--determinism]
+// --set key=value: quality overrides (e.g. gi.experiment_disable=256 for the emissive panel's texel-only control).
 // --determinism: gi.deterministic off and on, two furnace runs each; on must be bit-identical.
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
@@ -199,6 +200,58 @@ scene::Scene sunPlane(float albedo, float tiltDeg, float3 sunDirection)
 
 // View factor from a point p with unit normal n to a planar polygon (all of it in front of p), Lambert's contour
 // integral: F = |sum_i angle(R_i, R_i+1) n . unit(R_i x R_i+1)| / (2 pi), R_i = unit(q_i - p).
+// A black floor (400 x 400 m) under a 1 x 1 m emissive panel at height 1 facing down (radiance Le, one-sided), no sun or
+// sky: the floor's irradiance is pi Le F (F the point-to-polygon view factor), all of it direct emission of a mesh (the
+// GI rays' emissive-triangle samples with MIS, B2).
+scene::Scene emissivePanel(float radiance)
+{
+    scene::Scene s;
+    s.name = "gi_emissive_panel";
+    scene::Material floor;
+    floor.name = "black floor";
+    floor.baseColor = { 0, 0, 0 };
+    s.materials.push_back(floor);
+    scene::Material panel;
+    panel.name = "emitter";
+    panel.baseColor = { 0, 0, 0 };
+    panel.emissive = { radiance, radiance, radiance };
+    s.materials.push_back(panel);
+    scene::Mesh plane;
+    plane.name = "floor";
+    for (auto [x, z] : { std::pair{ -200.f, -200.f }, { 200.f, -200.f }, { 200.f, 200.f }, { -200.f, 200.f } })
+    {
+        plane.positions.push_back({ x, 0, z });
+        plane.normals.push_back({ 0, 1, 0 });
+        plane.uv0.push_back({ x, z });
+    }
+    plane.indices = { 0, 2, 1, 0, 3, 2 };
+    plane.submeshes.push_back({ 0, 6, 0 });
+    s.meshes.push_back(plane);
+    scene::Mesh quad;
+    quad.name = "panel";
+    for (auto [x, z] : { std::pair{ -0.5f, -0.5f }, { 0.5f, -0.5f }, { 0.5f, 0.5f }, { -0.5f, 0.5f } })
+    {
+        quad.positions.push_back({ x, 1, z });
+        quad.normals.push_back({ 0, -1, 0 });
+        quad.uv0.push_back({ x + 0.5f, z + 0.5f });
+    }
+    quad.indices = { 0, 1, 2, 0, 2, 3 };  // front face (counter-clockwise) toward -y
+    quad.submeshes.push_back({ 0, 6, 1 });
+    s.meshes.push_back(quad);
+    s.instances.push_back({});
+    scene::Instance q;
+    q.mesh = 1;
+    s.instances.push_back(q);
+    s.sun.illuminance = 0;
+    scene::Camera cam;
+    cam.name = "above";
+    cam.position = { 0, 2.5f, 3.5f };
+    cam.forward = normalize(float3{ 0, -2.5f, -3.5f });
+    cam.up = normalize(cross(cross(cam.forward, float3{ 0, 1, 0 }), cam.forward));
+    s.cameras.push_back(cam);
+    return s;
+}
+
 double viewFactor(float3 p, float3 n, const std::vector<float3>& polygon)
 {
     double sum = 0;
@@ -497,15 +550,18 @@ int main(int argc, char** argv)
     {
         uint32_t frames = 160;
         bool validate = false, determinism = false;
+        std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
             if (a == "--frames" && i + 1 < argc) frames = (uint32_t)std::stoul(argv[++i]);
             else if (a == "--validate") validate = true;
             else if (a == "--determinism") determinism = true;
+            else if (a == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
             else fail("unknown argument %s", a.c_str());
         }
         QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+        for (const std::string& o : overrides) quality.applyOverride(o);
         DeviceOptions options;
         options.debugLayer = validate;
         options.gpuValidation = validate;
@@ -597,6 +653,32 @@ int main(int argc, char** argv)
             logf("horizon band sky: cache maps at %u probe points, mean E %.5f against %.5f (%+.2f %%), worst %.2f %%; screen probes (SH) %.5f (%+.2f %%) -> %s\n",
                  e.mapProbes, e.mapMean, exact, 100 * (e.mapMean / exact - 1), 100 * e.mapWorst, e.mean, 100 * (e.mean / exact - 1), okE ? "PASS" : "FAIL");
             pass = pass && okE;
+        }
+        {
+            // Emissive mesh (B2): floor irradiance pi Le F under the panel, from the GI rays' emitter samples with MIS.
+            const float panelLe = 10;
+            const std::vector<float3> panel = { { -0.5f, 1, -0.5f }, { 0.5f, 1, -0.5f }, { 0.5f, 1, 0.5f }, { -0.5f, 1, 0.5f } };
+            auto panelExpected = [&](float3 p, float3 n) -> double {
+                if (n.y < 0.99f || std::fabs(p.y) > 0.05f || std::fabs(p.x) > 2.5f || std::fabs(p.z) > 2.5f) return -1;
+                if (std::fabs(p.x) < 0.6f && std::fabs(p.z) < 0.6f) return -1;  // under the panel's edge the floor is hidden from the camera
+                return kPi * panelLe * viewFactor(p, { 0, 1, 0 }, panel);
+            };
+            logf("emissive panel: 1 x 1 m at height 1, Le %.0f, black floor, no sun or sky; floor probes expect pi Le F\n", panelLe);
+            const Outcome f = run(device, shaders, quality, emissivePanel(panelLe), { 0, 0, 0 }, { 0, 0, 0 }, panelExpected, 0, frames, 1920, 1080);
+            // Control: the texel rays alone (gi.experiment_disable 256). Both estimators are unbiased for the same cache, so
+            // their means agree; the emitter samples with MIS must cut the per-probe error (P99) at least in half. What both
+            // share (a small excess where E falls steeply: the cache cells' spatial resolution) is judged by the 1 % mean.
+            QualityConfig textelOnly = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            for (const std::string& ov : overrides) textelOnly.applyOverride(ov);
+            textelOnly.applyOverride("gi.experiment_disable=256");
+            const Outcome g = run(device, shaders, textelOnly, emissivePanel(panelLe), { 0, 0, 0 }, { 0, 0, 0 }, panelExpected, 0, frames, 1920, 1080);
+            const bool okF = f.mapProbes > 1000 && std::fabs(f.mapMean / f.mapExpectedMean - 1) < 0.01 && std::fabs(f.mapMean / g.mapMean - 1) < 0.005 &&
+                             f.mapP99 < 0.5 * g.mapP99;
+            logf("emissive panel: cache maps at %u probe points, mean E %.4f against %.4f (%+.2f %%), P99 %.2f %%, worst %.2f %%; texel rays alone: mean %.4f, "
+                 "P99 %.2f %% -> %s\n", f.mapProbes, f.mapMean, f.mapExpectedMean, 100 * (f.mapMean / f.mapExpectedMean - 1), 100 * f.mapP99, 100 * f.mapWorst,
+                 g.mapMean, 100 * g.mapP99, okF ? "PASS" : "FAIL");
+            logf("  worst probe at (%.3f, %.3f, %.3f): E %.4f against %.4f\n", f.mapWorstAt.x, f.mapWorstAt.y, f.mapWorstAt.z, f.mapWorstValue, f.mapWorstExpected);
+            pass = pass && okF;
         }
         logf("probe tile cache: screenProbeGatherTile vs screenProbeGather, %u + %u pixel evaluations, %u + %u not bit-identical (2 cones each)\n", a.tilePixels,
              b.tilePixels, a.tileMismatches, b.tileMismatches);

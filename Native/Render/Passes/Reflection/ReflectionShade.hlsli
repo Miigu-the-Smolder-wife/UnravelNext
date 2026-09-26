@@ -84,7 +84,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     if (hit.instance == RT_INSTANCE_EMITTER)
     {
         // An analytic area light (raytracing.emitters, design 12.4 structure 2): its radiance, seen from the reflector.
-        o.radiance = rtEmitterRadiance(hit.primitive, origin);
+        o.radiance = rtEmitterCounts(scene.pad, hit.primitive) ? rtEmitterRadiance(hit.primitive, origin) : float3(0, 0, 0);
         return o;
     }
     if (experiment & 32)

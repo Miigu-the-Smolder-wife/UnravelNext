@@ -179,6 +179,13 @@ RayScene::~RayScene()
     if (m_patchRing) m_patchRing->Unmap(0, nullptr);
     m_device.deferRelease(m_patchRing);
     static_assert(sizeof(m_lightRingSrv) / sizeof(uint32_t) == kDescSlots && sizeof(m_lightSlotVersion) / sizeof(uint64_t) == kDescSlots);
+    if (m_emissive)
+    {
+        m_device.deferRelease(m_emissive);
+        DescriptorHeaps* eh = &m_device.descriptors();
+        const uint32_t srv = m_emissiveSrv;
+        m_device.deferCall([eh, srv] { eh->freeResource(srv); });
+    }
     if (m_lightRing)
     {
         m_lightRing->Unmap(0, nullptr);
@@ -1604,8 +1611,100 @@ constexpr uint32_t kLightCellsMax = 1u << 18;  // the grid's cell size grows pas
 // The reference LightSet's normalisation and grid (Reference/PathTracer/src/Lights.cpp: forward unit, right
 // orthogonalised, up = forward x right, spot scale / offset, cells of half the median range within [0.5, 16] m, a light
 // listed in every cell its range sphere touches), with the cell size grown until at most kLightCellsMax cells.
+void RayScene::updateEmissive(FramePassContext& fc)
+{
+    if (fc.scene.revision() == m_emissiveRevision) return;
+    m_emissiveRevision = fc.scene.revision();
+    if (m_emissive)
+    {
+        m_device.deferRelease(m_emissive);
+        DescriptorHeaps* h = &m_device.descriptors();
+        const uint32_t srv = m_emissiveSrv;
+        m_device.deferCall([h, srv] { h->freeResource(srv); });
+        m_emissive.Reset();
+        m_emissiveSrv = 0xFFFFFFFFu;
+    }
+    const scene::Scene* src = fc.scene.source();
+    if (!src) return;
+    std::vector<uint32_t> entries;  // 4 words each: instance, mesh triangle, submesh, running weight (float bits)
+    std::vector<uint32_t> base(src->instances.size(), 0xFFFFFFFFu);
+    double total = 0;
+    for (uint32_t i = 0; i < (uint32_t)src->instances.size(); ++i)
+    {
+        const scene::Instance& in = src->instances[i];
+        if (in.flags & scene::InstanceSkinned) continue;  // deformed emitters: their emission still reaches the cache by rays
+        const scene::Mesh& m = src->meshes[in.mesh];
+        std::vector<float> lum(m.submeshes.size(), 0.0f);
+        bool any = false;
+        for (size_t k = 0; k < m.submeshes.size(); ++k)
+        {
+            const uint32_t mat = in.materialOverrides.empty() ? m.submeshes[k].material : in.materialOverrides[k];
+            const float3 e = src->materials[mat].emissive;
+            lum[k] = 0.2126f * e.x + 0.7152f * e.y + 0.0722f * e.z;
+            any = any || lum[k] > 0;
+        }
+        if (!any) continue;
+        base[i] = (uint32_t)(entries.size() / 4);
+        const uint32_t triangles = (uint32_t)(m.indices.size() / 3);
+        for (uint32_t t = 0; t < triangles; ++t)
+        {
+            uint32_t sub = 0;
+            for (uint32_t k = 0; k < (uint32_t)m.submeshes.size(); ++k)
+                if (t * 3 >= m.submeshes[k].indexOffset && t * 3 < m.submeshes[k].indexOffset + m.submeshes[k].indexCount) sub = k;
+            double w = 0;
+            if (lum[sub] > 0)
+            {
+                const float3 p0 = in.transform.transformPoint(m.positions[m.indices[3 * t]]), p1 = in.transform.transformPoint(m.positions[m.indices[3 * t + 1]]),
+                             p2 = in.transform.transformPoint(m.positions[m.indices[3 * t + 2]]);
+                w = 0.5 * length(cross(p1 - p0, p2 - p0)) * lum[sub];
+            }
+            total += w;
+            float cum = (float)total;
+            uint32_t cumBits;
+            std::memcpy(&cumBits, &cum, 4);
+            entries.insert(entries.end(), { i, t, sub, cumBits });
+        }
+    }
+    if (entries.empty() || !(total > 0)) return;
+    // Raw buffer: { entries, instances, total (float bits), base-table offset }, entries (16 B), base table (4 B each).
+    const uint32_t count = (uint32_t)(entries.size() / 4), baseOffset = 16 + count * 16;
+    std::vector<uint32_t> image(4 + entries.size() + base.size());
+    const float totalF = (float)total;
+    image[0] = count;
+    image[1] = (uint32_t)base.size();
+    std::memcpy(&image[2], &totalF, 4);
+    image[3] = baseOffset;
+    std::copy(entries.begin(), entries.end(), image.begin() + 4);
+    std::copy(base.begin(), base.end(), image.begin() + 4 + entries.size());
+    D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
+    D3D12_RESOURCE_DESC1 d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = image.size() * 4;
+    d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    check(m_device.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_emissive)),
+          "RT emissive triangles");
+    m_emissive->SetName(L"RT emissive triangles");
+    void* mapped = nullptr;
+    D3D12_RANGE nothing{ 0, 0 };
+    check(m_emissive->Map(0, &nothing, &mapped), "map RT emissive triangles");
+    std::memcpy(mapped, image.data(), image.size() * 4);
+    m_emissive->Unmap(0, nullptr);
+    DescriptorHeaps& h = m_device.descriptors();
+    m_emissiveSrv = h.allocateResource();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Format = DXGI_FORMAT_R32_TYPELESS;
+    sd.Buffer.NumElements = (UINT)image.size();
+    sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+    m_device.d3d()->CreateShaderResourceView(m_emissive.Get(), &sd, h.resourceCpu(m_emissiveSrv));
+}
+
 void RayScene::updateLightGrid(FramePassContext& fc)
 {
+    updateEmissive(fc);
     const scene::Scene* src = fc.scene.source();
     const std::vector<scene::Light> none;
     const std::vector<scene::Light>& lights = src ? src->lights : none;
@@ -1622,6 +1721,7 @@ void RayScene::updateLightGrid(FramePassContext& fc)
     }
     const size_t n = lights.size();
     mix(&n, sizeof n);
+    mix(&m_emissiveSrv, 4);  // the header carries it
     if (hash != m_lightHash || m_lightImage.empty())
     {
         m_lightHash = hash;
@@ -1706,6 +1806,7 @@ void RayScene::updateLightGrid(FramePassContext& fc)
             cellStart[cells] = (uint32_t)cellLights.size();
         }
         if (cellLights.empty()) cellLights.push_back(0);
+        head.pad2 = m_emissiveSrv;  // word 15: emissive triangles (0xFFFFFFFF: none)
         head.lightsOffset = sizeof(RtLightHeader);
         head.cellStartOffset = head.lightsOffset + (uint32_t)(std::max<size_t>(n, 1) * sizeof(RtLightRecord));
         head.cellLightsOffset = head.cellStartOffset + (uint32_t)(cellStart.size() * 4);
@@ -1715,7 +1816,7 @@ void RayScene::updateLightGrid(FramePassContext& fc)
         std::memcpy(m_lightImage.data() + head.cellStartOffset, cellStart.data(), cellStart.size() * 4);
         std::memcpy(m_lightImage.data() + head.cellLightsOffset, cellLights.data(), cellLights.size() * 4);
     }
-    if (n == 0)
+    if (n == 0 && m_emissiveSrv == 0xFFFFFFFFu && !m_emittersEnabled)
     {
         m_lightSrvNow = 0xFFFFFFFFu;
         return;
@@ -1766,6 +1867,10 @@ void RayScene::updateLightGrid(FramePassContext& fc)
         std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes, m_lightImage.data(), m_lightImage.size());
         m_lightSlotVersion[slot] = m_lightVersion;
     }
+    // Word 11 (RtLightGrid.pad1), every frame: M's stable-area-light bits (COVERAGE 12.4 structure 2; FrameResources::
+    // areaLightStable, published by prepareScene before this record). An emitter hit counts only for stable lights; M
+    // shades the others' specular with LTC. UINT32_MAX (no M, or emitters off): every emitter counts.
+    std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes + 44, &fc.resources.areaLightStable, 4);
     m_lightSrvNow = m_lightRingSrv[slot];
 }
 } // namespace unx::render::rt

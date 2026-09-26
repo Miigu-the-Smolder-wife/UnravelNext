@@ -13,6 +13,9 @@
 //     one shadowed point light; sun, sky and emission 0, so the wall's only light is the point light (the mirror floor
 //     has no diffuse albedo: no bounce). An M pixel's value is the wall point's radiance rho / pi x I w(d) cos / d^2 (the
 //     next-event sample of a delta light is exact; its shadow ray sees the light).
+//  6. Area lights as ray geometry (raytracing.emitters, COVERAGE 12.4 structure 2): a mirror floor reflects a rect
+//     light (4 x 3 m, luminance 5, one-sided toward the camera); an M pixel whose mirror direction meets the rect reads
+//     its radiance x the range window at the mirror point (no M in this test: every light counts as stable).
 //  3. Textures at hits (INTERFACES v1.11): a mirror floor reflects a wall whose emission is modulated by a published
 //     16 x 16 checker texture (black sky, black diffuse): an M pixel's value is the wall's emission x the texture's
 //     bilinear value at the reflected point, computed on the CPU from the mirror direction.
@@ -404,6 +407,45 @@ scene::Scene litWallInMirror()
     l.intensity = kLightI;
     l.range = kLightRange;
     l.castShadow = true;
+    s.lights.push_back(l);
+    scene::Camera cam;
+    cam.name = "low";
+    cam.position = { 0.4f, 1.0f, 8.0f };
+    cam.forward = normalize(float3{ 0, -0.12f, -1 });
+    cam.up = normalize(cross(cross(cam.forward, float3{ 0, 1, 0 }), cam.forward));
+    s.cameras.push_back(cam);
+    return s;
+}
+
+// Scene 6: a mirror floor and a rect area light (centre (0, 3, -6), facing +z, 4 x 3 m, luminance 5, range 60).
+const float3 kRectPos{ 0, 3, -6 };
+constexpr float kRectL = 5, kRectRange = 60, kRectW = 4, kRectH = 3;
+scene::Scene rectLightInMirror()
+{
+    scene::Scene s;
+    s.name = "refl_rect_light";
+    scene::Material floorMaterial;
+    floorMaterial.name = "mirror";
+    floorMaterial.baseColor = { 1, 1, 1 };
+    floorMaterial.metallic = 1;
+    floorMaterial.roughness = 0;
+    s.materials.push_back(floorMaterial);
+    scene::Mesh floor;
+    floor.name = "floor";
+    addQuad(floor, { -40, 0, 20 }, { 40, 0, 20 }, { 40, 0, -6 }, { -40, 0, -6 }, { 0, 1, 0 });
+    floor.submeshes.push_back({ 0, 6, 0 });
+    s.meshes.push_back(floor);
+    s.instances.push_back({});
+    s.sun.illuminance = 0;
+    scene::Light l;
+    l.type = scene::LightType::Rect;
+    l.position = kRectPos;
+    l.forward = { 0, 0, 1 };
+    l.right = { 1, 0, 0 };
+    l.size = { kRectW, kRectH };
+    l.intensity = kRectL;
+    l.range = kRectRange;
+    l.castShadow = false;
     s.lights.push_back(l);
     scene::Camera cam;
     cam.name = "low";
@@ -978,6 +1020,40 @@ int main(int argc, char** argv)
                  "GGX-tail expectation %.2f, allowed %.0f) -> %s\n",
                  c.mirror, c.meanM, 100 * c.worstM, c.outliersM, tailSum, allowed, okE ? "PASS" : "FAIL");
             pass = pass && okE;
+        }
+        {
+            // 6. Area light as ray geometry, seen in a mirror.
+            QualityConfig emitterQuality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            for (const std::string& o : overrides) emitterQuality.applyOverride(o);
+            emitterQuality.applyOverride("raytracing.emitters=true");
+            const scene::Scene t = rectLightInMirror();
+            const ViewDesc tv = ViewDesc::fromCamera(t.cameras[0], 1920, 1080, float4x4{});
+            auto expected = [tv](uint32_t px, uint32_t py) {
+                const float4x4& m = tv.invViewProj;
+                auto unproject = [&](float z) {
+                    const float x = (px + 0.5f) / 1920 * 2 - 1, y = 1 - (py + 0.5f) / 1080 * 2;
+                    const float w = m.m[3][0] * x + m.m[3][1] * y + m.m[3][2] * z + m.m[3][3];
+                    return float3{ (m.m[0][0] * x + m.m[0][1] * y + m.m[0][2] * z + m.m[0][3]) / w, (m.m[1][0] * x + m.m[1][1] * y + m.m[1][2] * z + m.m[1][3]) / w,
+                                   (m.m[2][0] * x + m.m[2][1] * y + m.m[2][2] * z + m.m[2][3]) / w };
+                };
+                const float3 a = unproject(1.0f), b = unproject(0.5f), d = normalize(b - a);
+                if (d.y >= 0) return Expectation{ 0, 0 };
+                const float3 p = a + d * (-a.y / d.y);
+                if (p.z < -6) return Expectation{ 0, 0 };
+                const float3 r{ d.x, -d.y, d.z };
+                if (r.z >= 0) return Expectation{ 0, 0 };
+                const float tw = (kRectPos.z - p.z) / r.z;
+                const float3 q = p + r * tw;
+                const float margin = 2 * tw * 1e-4f * std::sqrt(1 / 1e-5f - 1);  // GGX tail at the rect's edge (as scene 3)
+                if (std::fabs(q.x - kRectPos.x) > kRectW / 2 - margin || std::fabs(q.y - kRectPos.y) > kRectH / 2 - margin) return Expectation{ 0, 0 };
+                const double x = length(kRectPos - p) / kRectRange, window = std::pow(std::clamp(1 - x * x * x * x, 0.0, 1.0), 2);
+                return Expectation{ kRectL * window, 0 };
+            };
+            const Outcome c = run(device, shaders, emitterQuality, t, { 0, 0, 0 }, expected, 16, 1920, 1080);
+            const bool okG = c.mirror > 1000 && std::fabs(c.meanM - 1) < 0.01 && c.excessM <= 0;
+            logf("area light in a mirror (emitters on): %u M pixels on the light's reflection (mean value / expected %.4f, worst %.2f %%, %u beyond 3 %% + z "
+                 "sigma) -> %s\n", c.mirror, c.meanM, 100 * c.worstM, c.outliersM, okG ? "PASS" : "FAIL");
+            pass = pass && okG;
         }
         rt::RayPipeline::releaseDevice(device);
         rt::RayScene::releaseDevice(device);

@@ -232,6 +232,19 @@ bool rtAlphaOpaque(RtSceneSrvs s, uint instance, uint geometry, uint primitive, 
     return materialBaseColorLevel(m, uv, 0).a >= m.alphaCutoff;
 }
 
+// Whether an area light's specular belongs to the ray paths this frame (COVERAGE 12.4 structure 2): M's stable bits
+// (word 11 of RayScene's local-light data; 0xFFFFFFFF: no bits, every light), else M shades it with LTC and a ray hit on
+// its emitter must add nothing (the geometry behind the light stays occluded).
+bool rtEmitterCounts(uint lightData, uint light)
+{
+    if (lightData == 0xFFFFFFFFu) return true;
+    ByteAddressBuffer b = ResourceDescriptorHeap[lightData];
+    const uint maskSrv = b.Load(44);
+    if (maskSrv == 0xFFFFFFFFu) return true;
+    ByteAddressBuffer mask = ResourceDescriptorHeap[maskSrv];
+    return ((mask.Load(4u * (light >> 5)) >> (light & 31u)) & 1u) != 0;
+}
+
 // Radiance of an area light seen from 'receiver' (the ray origin): L = intensity x colour x the light's range window
 // (INTERFACES 8.3; the same w(distance to the light's centre) as M's shAreaWindow, so LTC and rays see one light).
 float3 rtEmitterRadiance(uint light, float3 receiver)

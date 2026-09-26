@@ -8,9 +8,9 @@ skinned_proxy_cuts = "skin_aware"     # skinned RT proxies: R's skin-aware cuts 
 proxy_skin_weight = 4.0                # skinned proxies: cost of collapsing across skin weights (skinAwareCuts; the
                                        # skin-weight centroid attribute against the positional error). At 4 the posed error
                                        # tracks the bind error (measured 0.93-1.32x, host_dynamic tube, ProxyLevels)
-emitters = false                       # analytic area lights as ray geometry (design 12.4 structure 2: G/M reflection rays
-                                       # see static lights, the cache's emissive channel feeds the K path); off until the
-                                       # structure-2 gate and M's LTC specular hand-over
+emitters = true                        # analytic area lights as ray geometry (design 12.4 structure 2: G/M reflection rays
+                                       # see the lights M marks stable, FrameResources::areaLightStable, the cache's emissive
+                                       # channel feeds the K path; M skips those lights' LTC specular, 9030b75)
 proxy_error_model = "measured"         # a cut's error for the choice: "measured" = bind-pose Hausdorff x proxy_posed_factor,
                                        # "bound" = the certified posed bound (50-170x the measured error; tests)
 proxy_posed_factor = 1.5               # posed / bind-pose error margin of skin-aware cuts (measured up to 1.32)

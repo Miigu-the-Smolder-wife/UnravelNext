@@ -14,6 +14,15 @@
 // sample. Emissive channel (design 12.4 structure 2): a ray that meets an analytic area light (raytracing.emitters)
 // stores its radiance in the texel (the K path's radiance) but not in the irradiance samples (M's LTC / the hits' NEE
 // are the direct term).
+// Emissive meshes (FEATURES_GAME 12 (ii)): besides its texel ray every thread draws one point of RayScene's emissive
+// triangles from the anchor (HitLocalLights.hlsli) and both estimates of the irradiance are combined by the balance
+// heuristic: the texel rays sample directions with density q = |p|^3 / 2 per sr (uniform in the hemispherical
+// octahedral map), the emitter samples with p_l; power heuristic (beta 2, one sample of each per thread): a texel ray's
+// emission counts with q^2 / (q^2 + p_l^2), an emitter sample with p_l^2 / (q^2 + p_l^2) / p_l (it goes to the irradiance
+// samples after the texel ones, GiIntegrate). A large dim emitter (small p_l) then stays with the texel rays, which see it
+// with little variance (the balance heuristic added light-sampling noise there [measured: reflection furnace, 6 of 11
+// runs failed against 2 of 11]); a small bright one (large p_l) goes to the emitter samples. The texels (the K path's
+// radiance) keep the full emission.
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli: SKY0 atmosphere LUTs, SKY1 constants), ray length; P[3].w = gi.experiment_disable
 // P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view (sun, scene buffers).
 #include "RayTracing/RayShaders.hlsli"
@@ -26,6 +35,9 @@
 #define GI_FOOTPRINT_PER_METRE 0.36
 
 float giBias(GiHeader h, float3 p) { return 1e-3 + 2e-4 * distance(p, h.camera); }
+// Density of the texel rays at direction l (anchor frame, unit): uniform in the hemispherical octahedral map's uv, whose
+// point p = l / (|l.x| + |l.y| + l.z) has dw / (du dv) = 2 / |p|^3.
+float giTexelDensity(float3 l) { const float s = abs(l.x) + abs(l.y) + l.z; return 0.5 / (s * s * s); }
 
 [shader("raygeneration")]
 void GiTraceGen()
@@ -86,6 +98,7 @@ void GiTraceGen()
     }
 
     float3 radiance, sampleRadiance;
+    float3 emissionOut = 0;  // the hit's own emission's share the MIS moves to the emitter samples (1 - w_b) x emission
     bool emitter = false;
     float distanceToHit;
     if (hit.t < 0)
@@ -102,7 +115,7 @@ void GiTraceGen()
         // An analytic area light (raytracing.emitters): the texel keeps its radiance (emissive channel: the K path's
         // radiance), the irradiance samples do not (the direct term is M's analytic one or the hits' NEE sample).
         distanceToHit = hit.t;
-        radiance = rtEmitterRadiance(hit.primitive, r.Origin);
+        radiance = rtEmitterCounts(scene.pad, hit.primitive) ? rtEmitterRadiance(hit.primitive, r.Origin) : float3(0, 0, 0);
         emitter = true;
     }
     else
@@ -175,12 +188,47 @@ void GiTraceGen()
                 }
             }
             radiance = m.emissive + albedo / GI_PI * (irradiance + sun) + local;
+            if (any(m.emissive > 0) && (P[3].w & 256) == 0)  // 256 (attribution): no emitter samples, texel rays alone
+            {
+                RtGeometry g;
+                rtResolve(scene, hit, g);
+                const float pl = rtEmissivePdf(scene, s.sceneInstance, g, hit.primitive, r.Direction, hit.t);
+                if (pl > 0)
+                {
+                    const float q = giTexelDensity(float3(dot(r.Direction, t), dot(r.Direction, bt), dot(r.Direction, n)));
+                    emissionOut = m.emissive * (pl * pl / (q * q + pl * pl));
+                }
+            }
         }
     }
 
     // The raw sample for the per-ray irradiance map and SH (GiIntegrate): radiance, coordinates in the hemisphere map.
     RWStructuredBuffer<uint4> samples = ResourceDescriptorHeap[P[4].y];
-    sampleRadiance = emitter ? float3(0, 0, 0) : radiance;
+    sampleRadiance = emitter ? float3(0, 0, 0) : radiance - emissionOut;
+    // The emitter sample of this thread (MIS partner of the texel rays); 0 without emissive triangles.
+    float3 emitted = 0;
+    float3 emitLocal = float3(0, 0, 1);
+    {
+        const RtEmissiveSample es = rtEmissiveSample(scene, r.Origin, giUnit(seed + 21), giUnit(seed + 22), giUnit(seed + 23));
+        if (es.valid && (P[3].w & 256) == 0)
+        {
+            emitLocal = float3(dot(es.wi, t), dot(es.wi, bt), dot(es.wi, n));
+            if (emitLocal.z > 0)
+            {
+                RayDesc er;
+                er.Origin = r.Origin;
+                er.Direction = es.wi;
+                er.TMin = 0;
+                er.TMax = max(es.distance * (1 - 1e-4) - giBias(h, anchor), 0.0);
+                const float q = giTexelDensity(emitLocal);
+                if (rtVisible(scene, er, RT_MASK_GI)) emitted = es.L * (es.pdf / (q * q + es.pdf * es.pdf));  // x p_l^2 / (q^2 + p_l^2) / p_l
+            }
+        }
+    }
+    {
+        RWStructuredBuffer<uint4> emitterSamples = ResourceDescriptorHeap[P[4].y];
+        emitterSamples[P[0].y + thread] = uint4(asuint(emitted), octEncode(normalize(emitLocal)));
+    }
     samples[thread] = uint4(asuint(sampleRadiance), (uint)round(saturate(uv.x) * 65535.0) | ((uint)round(saturate(uv.y) * 65535.0) << 16));
     const uint address = h.offTexels + (entry * GI_TEXEL_COUNT + texel) * 8;
     const uint2 old = b.Load2(address);

@@ -269,6 +269,13 @@ private:
     // Lights.hlsli): the scene lights normalised like the reference's LightSet and a uniform cell grid of the lights whose
     // range reaches each cell, rebuilt on the CPU when the lights change; one upload-ring slot per frame in flight.
     void updateLightGrid(FramePassContext& fc);
+    // Emissive triangles of rigid instances (GI next-event estimation with MIS, HitLocalLights.hlsli): per triangle of an
+    // instance with an emissive submesh (instance, mesh triangle, submesh, running weight = emission luminance x world
+    // area at build), the total, and per scene instance its first entry (0xFFFFFFFF: none). Rebuilt on a scene revision;
+    // its SRV is word 15 of the local-light data's header.
+    void updateEmissive(FramePassContext& fc);
+    ComPtr<ID3D12Resource> m_emissive;
+    uint32_t m_emissiveSrv = 0xFFFFFFFFu, m_emissiveRevision = 0xFFFFFFFFu;
     std::vector<uint8_t> m_lightImage;       // header 64 B, lights (96 B each), cell starts (cells + 1), cell lights
     uint64_t m_lightHash = 0, m_lightVersion = 0;
     uint64_t m_lightSlotVersion[4] = {};     // kDescSlots
