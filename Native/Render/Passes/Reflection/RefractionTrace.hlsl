@@ -12,7 +12,9 @@
 // Medium 0xFF: the job is a reflection ray (R-W1 water, R-1 glass: a layer pixel's mirror direction from its surface
 // point, written by the layer's owner where its own lookups are not sharp enough): traced and shaded from outside, no
 // absorption, no exit surface.
-// Result per job (8 B, P[0].y): RGBA16F exposed linear radiance (x exposure, as band A), alpha 1 = traced.
+// Result per job (8 B, P[0].y): RGBA16F exposed linear radiance (x exposure, as band A), alpha 1 = traced: for a medium
+// job, the radiance arriving inside the medium at the job's origin along -direction (the caller applies its entry
+// (1 - F_in) / n^2); for a reflection job (0xFF), the radiance arriving at the origin along -direction.
 // Root constants: ReflectionRay.hlsli's P[1..7]; P[0] = { jobs SRV (raw: header 16 B { count, dispatch x, y, z }, then
 // 48 B jobs { float3 origin, uint outputSlot; float3 direction, uint flags (0..7 medium, 8..9 bounces, 31 coverage
 // record); float3 sigmaA (1/m), float iorInside }), results UAV (raw), max jobs, stream table SRV (raw: per triangle
@@ -111,7 +113,9 @@ void RefractionGen()
                 o = x - n * 1e-3;
                 continue;
             }
-            throughput *= 1 - F;
+            // Radiance over n^2 is conserved across the boundary: the air's radiance arrives inside as (1 - F) (n_in/n_out)^2
+            // times it (engine 1's closed-form check below30: F Le_floor + (1 - F) n^2 Le_ceiling, +2.2e-4).
+            throughput *= (1 - F) * ior * ior;
             d = normalize(refract(d, -n, ior));
             o = x + n * 1e-3;
             inside = false;
