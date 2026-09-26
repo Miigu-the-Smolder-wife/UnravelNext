@@ -34,6 +34,7 @@ void place(uint index, uint row, uint birth, NvState s, float elapsed)
     const RowMotion rm = rowMotion[row];
     if ((fxRowEmitterFlags(rm) & FX_EMITTER_KILLED) != 0u) return;
     s.age = 0;
+    fxOrientBirth(index, row, birth, rm, elapsed);  // mesh particles (MeshOrientation.hlsli): before the step
     fxStep(index, row, birth, rm, dynamic[row], s, elapsed, nv_linear_drag(rm.drag, elapsed), true);
 }
 

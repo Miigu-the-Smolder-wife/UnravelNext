@@ -50,6 +50,9 @@ struct RppConfig
     // length m, period s, octaves 3, seed 17), the phase from the packet's World time as the World computes it.
     bool turbulence = true;
     float turbulenceRms = 2.0f, turbulenceLength = 8.0f, turbulencePeriod = 5.0f;
+    // Mesh particles (executor version 4, NV_STREAM_PROGRAM_ORIENTATION): the colliding root programs carry an orientation
+    // (spin 2-8 rad/s at birth, damped by their contacts); --no-mesh gives the version-3 stream.
+    bool mesh = true;
     double anchorShift[3] = { 0, 0, 0 };  // diagnostic: the anchor moved by this much (world stays the same)
     bool delta = true;            // emitter table as NV_STREAM_EMITTER_DELTA packets (rows that changed since they were last sent)
     bool patches = true;          // with delta: a row whose only changes are its per-tick fields goes as a 48 B patch
@@ -679,6 +682,11 @@ private:
                 r.flags |= NV_STREAM_PROGRAM_COLLISION | NV_STREAM_PROGRAM_COLLISION_EVENTS;
                 r.restitution = 0.5f; r.friction = 0.2f; r.separation = 0.001f;
                 x.collisionEvents = true;
+                if (m_c.mesh)
+                {
+                    r.flags |= NV_STREAM_PROGRAM_ORIENTATION;
+                    r.mesh_asset[0] = 0x4d455348u + p; r.spin_min = 2; r.spin_max = 8;
+                }
             }
             if (p % 4 == 0) { x.deathRule = true; r.flags |= NV_STREAM_PROGRAM_DEATH_EVENTS; }  // e.g. surface deposits
             if (p == 2 && m_c.boxShape) { r.shape = NV_STREAM_SHAPE_BOX; r.box[0] = 0.3f; r.box[1] = 0.1f; r.box[2] = 0.2f; }

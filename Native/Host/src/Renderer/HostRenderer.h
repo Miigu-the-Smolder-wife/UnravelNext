@@ -440,6 +440,8 @@ public:
     void vfxSubmit(const uint8_t* packet, uint64_t bytes);
     const fx::TickReadback& vfxReadback(uint64_t stream, uint64_t generation, uint64_t tick);  // valid until the next call
     const std::vector<NV_StreamParticle>& vfxCheckpoint(uint64_t stream, uint64_t generation, uint64_t tick);
+    // executor version 4: the orientations of the last vfxCheckpoint (same records, same order)
+    const std::vector<NV_StreamParticleOrientation>& vfxCheckpointOrientations(uint64_t stream, uint64_t generation, uint64_t tick);
     // Ticks run at once on the compute queue (claimed by a readback or checkpoint) so far (tests, statistics).
     uint64_t vfxImmediateTicks() const { return m_vfxImmediateTicks; }
 
@@ -605,6 +607,7 @@ private:
     std::string m_vfxError;                          // a submit that failed (reported by the next readback/checkpoint)
     fx::TickReadback m_vfxReadback;
     std::vector<NV_StreamParticle> m_vfxCheckpoint;
+    std::vector<NV_StreamParticleOrientation> m_vfxCheckpointOrientations;
     // B11 photo mode: the main thread's request (m_photoMutex) and the submission thread's tracer.
     struct PhotoRequest
     {

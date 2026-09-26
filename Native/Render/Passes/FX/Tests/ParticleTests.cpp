@@ -13,7 +13,7 @@
 //   4. --determinism: the whole run twice from a fresh module; the GPU state of both ticks of the pair (in their layouts),
 //      the layouts and the sorted events are bit identical at every compare tick.
 //      (The depth sort is the render pass's per-frame tile-local sort since 2026-09-26; the tick has no sort.)
-// Options: --ticks N (600) --compare-every K (60) --resync --particles P --emitters E --no-features --no-heightfield --bodies N --no-sheet --no-turbulence --no-reference
+// Options: --ticks N (600) --compare-every K (60) --resync --particles P --emitters E --no-features --no-heightfield --bodies N --no-sheet --no-turbulence --no-mesh --no-reference
 //          --determinism --warp (WARP adapter: another implementation, 4-lane waves) --no-debug-layer --gbv
 //          --yield (pause while a GPU measurement lock or the user's HOLD is present: CPU-heavy runs)
 //          --allow-copy-drift (development only: a stream copy that differs from the original is a warning)
@@ -81,16 +81,16 @@ std::string sha(const std::vector<uint8_t>& bytes)
 }
 
 // 1. byte-identical stream copies of the pinned NativeVfx commit (the copies are updated together with this pin)
-constexpr const char* kStreamCommit = "73def17c";
+constexpr const char* kStreamCommit = "87056534";
 void checkStreamCopies(bool strict)
 {
     const fs::path mine = fs::path(UNX_SOURCE_DIR) / "Native/Render/Passes/FX/Stream";
     const fs::path original = fs::path(UNX_SOURCE_DIR) / "../Unravel/Native/NativeVfx";
     struct Pin { const char* file; const char* sha; };
-    const Pin pins[] = { { "include/NativeVfxStream.h", "c48e512d5c290ae4fdaeb0e2527a35c02586b5e7e6b86b448b0d319f80716b0b" },
-                         { "shaders/VfxParticleMath.hlsli", "25fc6ba8361b3d2f3d535dc77afd1e366d84bb42ce7f64ffa0e63ba9a70cbe07" },
+    const Pin pins[] = { { "include/NativeVfxStream.h", "d59f2f0cce3ba7d2c4a10cfd0b83115595db97d4d8d652623aca9e875632640d" },
+                         { "shaders/VfxParticleMath.hlsli", "516945d0fdc0a55e553de4f848a3155a57f5d3588adc7a066e9731feb3b600d4" },
                          { "shaders/VfxWindTurbulence.hlsli", "d5800916c55e8afc1ac0c3eabc5e040c45047a9ea0a003cafdcb2e3c71f73d4a" },
-                         { "src/VfxStreamCpu.h", "81d785e84c957f87af176b5fe8d1e548ff2d9d2acfc6b5d197b448326b53922f" } };
+                         { "src/VfxStreamCpu.h", "43a9a8da8587540ca51cde66c38c963d936dd7f6637d04c388bb2336ac4bb86d" } };
     for (const Pin& pin : pins)
     {
         const std::string a = sha(readBinaryFile(mine / pin.file));
@@ -247,12 +247,15 @@ template <typename T> T at(const std::vector<uint8_t>& b, size_t i) { T v; std::
 // just run, with the whole emitter table as the stream holds it (per-tick fields cleared) and the given states. GPU and
 // reference both take it, so the next compare measures only the ticks since (the implementation's error per step, not
 // a free-running double trajectory, which diverges at every contact decision within float rounding of its threshold).
-std::vector<uint8_t> statePacket(const NV_StreamHeader& last, std::vector<NV_StreamEmitter> table, const std::vector<NV_StreamParticle>& states)
+std::vector<uint8_t> statePacket(const NV_StreamHeader& last, std::vector<NV_StreamEmitter> table, const std::vector<NV_StreamParticle>& states,
+                                 const std::vector<NV_StreamParticleOrientation>* orientations = nullptr)
 {
     for (NV_StreamEmitter& e : table)
     {
         e.rebase[0] = e.rebase[1] = e.rebase[2] = 0;
         e.flags &= ~uint32_t(NV_STREAM_EMITTER_TRANSPORT | NV_STREAM_EMITTER_SOURCE | NV_STREAM_EMITTER_KILLED);
+        e.parent_event = e.parent_row = NV_STREAM_NONE;  // per-tick: a state packet has no events (a cascade child resolved its
+                                                         // origin in its creating tick; the table keeps the resolved value)
         e.dying_birth = e.death_birth;  // after the tick the live births are [death_birth, next_birth): none is dying
     }
     // a row's live births start at its first restored birth: births that expired in their own tick never had a slot, so
@@ -287,6 +290,12 @@ std::vector<uint8_t> statePacket(const NV_StreamHeader& last, std::vector<NV_Str
     };
     h.emitters = section(table.data(), table.size() * sizeof(NV_StreamEmitter));
     h.restore = section(states.data(), states.size() * sizeof(NV_StreamParticle));
+    if (orientations && !orientations->empty())
+    {
+        // mesh particles (executor version 4): their orientations come back with the states
+        h.flags |= NV_STREAM_ORIENTATION;
+        h.restore_orientations = section(orientations->data(), orientations->size() * sizeof(NV_StreamParticleOrientation));
+    }
     packet.resize((packet.size() + 15) & ~size_t(15));
     h.bytes = packet.size();
     std::memcpy(packet.data(), &h, sizeof h);
@@ -298,6 +307,8 @@ struct Stats
     double maxPos = 0, maxVel = 0, maxAge = 0, sumPos = 0;
     uint64_t n = 0;
     double p99Pos = 0, maxEvent = 0, maxRibbon = 0;
+    double maxTurn = 0, maxSpin = 0;  // mesh particles: rotation angle (rad), spin error / max(|spin|, 1)
+    uint64_t turned = 0;
     uint64_t ribbonPoints = 0;
     uint64_t over = 0;
     int dumped = 0, dumpedEvents = 0;
@@ -496,8 +507,28 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
             {
                 auto ref = cpu.checkpoint();
                 auto gpu = ps.checkpoint(shaders);
+                // orientations in the checkpoint's order, carried through the same sort
+                const std::vector<NV_StreamParticleOrientation> gpuTurnsLayout = ps.checkpointOrientations(shaders);
+                FX_CHECK(gpuTurnsLayout.size() == gpu.size(), "tick %u: %zu orientations for %zu checkpoint records", t, gpuTurnsLayout.size(), gpu.size());
+                for (size_t i = 0; i < gpu.size(); ++i) gpu[i].reserved0 = (uint32_t)i;  // (reserved1 holds the layout index)
                 std::sort(gpu.begin(), gpu.end(), [](const NV_StreamParticle& a, const NV_StreamParticle& b) { return a.emitter != b.emitter ? a.emitter < b.emitter : a.birth < b.birth; });
+                std::vector<NV_StreamParticleOrientation> gpuTurns(gpu.size());
+                for (size_t i = 0; i < gpu.size(); ++i) { gpuTurns[i] = gpuTurnsLayout[gpu[i].reserved0]; gpu[i].reserved0 = 0; }
                 FX_CHECK(gpu.size() == ref.size(), "tick %u: %zu GPU particles, %zu reference", t, gpu.size(), ref.size());
+                for (size_t i = 0; i < gpu.size(); ++i)
+                {
+                    // mesh particles: the GPU's float orientation against the reference's double one (identity elsewhere)
+                    const NV_StreamParticleOrientation& g = gpuTurns[i];
+                    const auto& r = ref[i];
+                    const double s = g.rotation[0] * r.rotation[0] + g.rotation[1] * r.rotation[1] + g.rotation[2] * r.rotation[2] + g.rotation[3] * r.rotation[3] < 0 ? -1.0 : 1.0;
+                    double chord = 0, ds = 0, ss = 0;
+                    for (int a = 0; a < 4; ++a) chord += (g.rotation[a] - s * r.rotation[a]) * (g.rotation[a] - s * r.rotation[a]);
+                    for (int a = 0; a < 3; ++a) { ds += (g.spin[a] - r.spin[a]) * (g.spin[a] - r.spin[a]); ss += r.spin[a] * r.spin[a]; }
+                    const double turn = 4 * std::asin(std::min(1.0, 0.5 * std::sqrt(chord))), spin = std::sqrt(ds) / std::max(std::sqrt(ss), 1.0);
+                    worst.maxTurn = std::max(worst.maxTurn, turn);
+                    worst.maxSpin = std::max(worst.maxSpin, spin);
+                    if (ss > 0) ++worst.turned;
+                }
                 std::vector<double> errs;
                 errs.reserve(gpu.size());
                 for (size_t i = 0; i < gpu.size(); ++i)
@@ -539,7 +570,7 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                 if (o.resync && t < o.ticks)
                 {
                     // both restart from the GPU's states (the GPU's restore path runs too: its states must come back)
-                    const std::vector<uint8_t> sp = statePacket(h, emitterTable, gpu);
+                    const std::vector<uint8_t> sp = statePacket(h, emitterTable, gpu, &gpuTurns);
                     ps.submit(sp.data(), sp.size());
                     cpu.submit(sp.data(), sp.size());
                     FrameResources stateResources;
@@ -552,6 +583,9 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                              srb.counters.status, srb.counters.alive, gpu.size());
                     auto back = ps.checkpoint(shaders);
                     std::sort(back.begin(), back.end(), [](const NV_StreamParticle& a, const NV_StreamParticle& b) { return a.emitter != b.emitter ? a.emitter < b.emitter : a.birth < b.birth; });
+                    // reserved1 is each record's layout index, which the restored layout may order differently (cascade rows)
+                    for (auto& x : back) x.reserved1 = 0;
+                    for (auto& x : gpu) x.reserved1 = 0;
                     FX_CHECK(back.size() == gpu.size() && std::memcmp(back.data(), gpu.data(), gpu.size() * sizeof(NV_StreamParticle)) == 0,
                              "tick %u: the GPU's restored states differ from the states it was given", t);
                 }
@@ -872,6 +906,7 @@ int main(int argc, char** argv)
             else if (a == "--bodies") o.rpp.bodies = (uint32_t)std::stoul(next());
             else if (a == "--no-sheet") o.rpp.sheet = false;
             else if (a == "--no-turbulence") o.rpp.turbulence = false;
+            else if (a == "--no-mesh") o.rpp.mesh = false;
             else if (a == "--no-child-noise") o.rpp.childNoise = false;
             else if (a == "--fields") o.rpp.fields = (uint32_t)std::stoul(next());
             else if (a == "--overflow-dump") o.overflowDump = next();
@@ -936,6 +971,11 @@ int main(int argc, char** argv)
             FX_LOG("reference comparison: %llu particle states, position error max %.3g (p99 %.3g, mean %.3g), velocity %.3g, age %.3g", (unsigned long long)worst.n,
                     worst.maxPos, worst.p99Pos, worst.n ? worst.sumPos / worst.n : 0.0, worst.maxVel, worst.maxAge);
             FX_CHECK(worst.maxPos <= 1e-5, "position error %.3g exceeds 1e-5", worst.maxPos);
+            // mesh particles (executor version 4): float against double over a compare interval (NativeVfx measured 7.8e-6 rad
+            // of float drift over 10 s at 13.4 rad/s); a different contact decision would fail the position gate first
+            FX_LOG("mesh particle orientations: %llu spinning states, rotation error max %.3g rad, spin error %.3g", (unsigned long long)worst.turned, worst.maxTurn, worst.maxSpin);
+            FX_CHECK(worst.maxTurn <= 1e-4 && worst.maxSpin <= 1e-5, "orientation error %.3g rad / spin %.3g exceeds 1e-4 / 1e-5", worst.maxTurn, worst.maxSpin);
+            FX_CHECK(!o.rpp.mesh || worst.turned > 0, "the mesh stream compared no spinning particle");
         }
         if (o.determinism)
         {

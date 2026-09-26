@@ -29,7 +29,7 @@ struct TickConstants
     float reserved27[3]; uint32_t explicitBase;          // birthIndex offset of the explicit births
     float reserved28[3]; uint32_t bodyCount;
     uint32_t posAge, velocity, inRanges, inBlocks;       // posAge/velocity: input state; its layout (InRange, group -> range)
-    uint32_t restoreBase, colliderCapacity, reserved30, counters;  // birthIndex offset of the restore records; collider queue
+    uint32_t restoreBase, colliderCapacity, restoreOrientations, counters;  // birthIndex offset of the restore records; collider queue
     uint32_t reserved31, posAgeOut, reserved20, events;  // *Out: this tick's state
     uint32_t heightFieldCount, heightFields, heightTiles, reserved24;  // heightfields of the tick (FxHeightField, anchor space), tiles (uint words)
     uint32_t hist, programs, curveKeys, emitters;
@@ -45,7 +45,7 @@ struct TickConstants
     float separationMax;  // largest program separation (collision grid motion bound)
     uint32_t volumeRanges, volumeRangeCount;
     uint32_t surfaceBoxes, velocityOut, overflowRecords, overflowCapacity;
-    uint32_t reserved25, reserved26, experiment, colliders;  // experiment_disable (timing only); collider queue
+    uint32_t orientationIn, orientationOut, experiment, colliders;  // experiment_disable (timing only); collider queue
     uint32_t emitterPatches, patchCount, traceRow, traceBirth;  // patches of the tick (FxEmitters); traced particle
     uint32_t trace, rowMotion, pad18, pad19;  // TraceRecord buffer (diagnostic, setTrace); RowMotion per row
 };
@@ -120,6 +120,9 @@ public:
     // NV_StreamExecutor::checkpoint: every live particle after the latest recorded tick, in layout order (waits for the
     // GPU; explicit use only: save, views, CPU projection, tests). reserved1 = its layout index.
     std::vector<NV_StreamParticle> checkpoint(render::ShaderLibrary& shaders);
+    // NV_StreamExecutor::checkpoint_orientations (executor version 4): one per checkpoint() record, same order; identity
+    // rotation and zero spin for slots of programs without NV_STREAM_PROGRAM_ORIENTATION.
+    std::vector<NV_StreamParticleOrientation> checkpointOrientations(render::ShaderLibrary& shaders);
 
     // Raw state for tests (waits for the GPU): the bytes of a named buffer ("posAge", "velocity" in layout(); "posAgePrev",
     // "velocityPrev" in layoutPrevious(); "counters", "volumeRecords", "volumeSide", "overflow", "trace", ...).

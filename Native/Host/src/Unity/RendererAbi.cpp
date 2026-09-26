@@ -359,6 +359,23 @@ int32_t vfxReadbackCallback(void* user, uint64_t stream, uint64_t generation, ui
         return NV_INTERNAL;
     }
 }
+int32_t vfxCheckpointOrientationsCallback(void* user, uint64_t stream, uint64_t generation, uint64_t tick, const NV_StreamParticleOrientation** records, uint64_t* count)
+{
+    try
+    {
+        if (!records || !count) return NV_ARGUMENT;
+        const std::vector<NV_StreamParticleOrientation>& r = static_cast<HostRenderer*>(user)->vfxCheckpointOrientations(stream, generation, tick);
+        *records = r.data();
+        *count = r.size();
+        return NV_OK;
+    }
+    catch (const std::exception& e)
+    {
+        logf("UnravelNext FX executor checkpoint orientations (tick %llu): %s\n", (unsigned long long)tick, e.what());
+        return NV_INTERNAL;
+    }
+}
+
 int32_t vfxCheckpointCallback(void* user, uint64_t stream, uint64_t generation, uint64_t tick, const NV_StreamParticle** records, uint64_t* count)
 {
     try
@@ -752,13 +769,15 @@ UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor)
         if (!h->committed()) fail("UnxVfxStreamExecutor: commit the scene first");
         NV_StreamExecutor e{};
         e.size = sizeof(NV_StreamExecutor);
-        e.version = NV_STREAM_EXECUTOR_WIND_TURBULENCE;  // heightfield sections and World wind turbulence (FX ParticleSystem, Particles.hlsli hooks)
+        e.version = NV_STREAM_EXECUTOR_MESH_ORIENTATION;  // heightfield sections, World wind turbulence and mesh particle
+                                                          // orientation (FX ParticleSystem, Particles.hlsli / MeshOrientation.hlsli)
         e.user = h.get();
         e.submit = vfxSubmitCallback;
         e.readback = vfxReadbackCallback;
         e.checkpoint = vfxCheckpointCallback;
         e.detach = vfxDetachCallback;
-        std::memcpy(executor, &e, sizeof e);
+        e.checkpoint_orientations = vfxCheckpointOrientationsCallback;
+        std::memcpy(executor, &e, sizeof e);  // 56 B (the version-4 struct; NativeVfx 87056534 and later)
     });
 }
 

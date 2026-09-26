@@ -78,6 +78,7 @@ void main(uint3 id : SV_DispatchThreadID)
         if (index >= g_inCount) return;  // (the CPU validated the indices; thread 0 clears the status in this pass)
         posAge[index] = float4(r.position, r.age);
         velocity[index] = float4(r.velocity, 0);
+        fxOrientRestore(i, index);
     }
 #endif
 }

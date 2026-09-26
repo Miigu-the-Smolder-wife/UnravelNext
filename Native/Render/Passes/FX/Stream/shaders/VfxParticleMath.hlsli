@@ -726,4 +726,80 @@ NvState nv_birth_state(NvBirthShape b, uint rng, uint source,
     return s;
 }
 
+// ---- orientation (stream executor version 4: NV_STREAM_PROGRAM_ORIENTATION, mesh particles) --------------------------
+// A slot's orientation is a unit quaternion q = (x, y, z, w) from the mesh's local frame to the anchor frame and its
+// angular velocity w (rad/s, anchor frame). The executor's order (NativeVfxStream.h, NV_STREAM_EXECUTOR_MESH_ORIENTATION):
+// birth, transport, advance over the slot's interval with the spin before it, then spin *= 1 - friction after a tick
+// whose sweep had an impact (a resting slot's contacts damp its spin geometrically to rest).
+// Birth draws come from their own stream of the birth RNG (never shifting the position and velocity draws): q uniform
+// over rotations (Shoemake), the spin axis uniform over the sphere, |w| uniform in [spin_min, spin_max].
+uint nv_orientation_rng(uint rng) { return nv_hash(rng ^ 0x6d657368u); }
+void nv_orientation_birth(uint rng, nv_real spin_min, nv_real spin_max, NV_OUT(nv_real4) q, NV_OUT(nv_real3) w) {
+    uint state = nv_orientation_rng(rng);
+    nv_real u1 = nv_next01(state);
+    nv_real u2 = nv_next01(state);
+    nv_real u3 = nv_next01(state);
+    nv_real a = sqrt(NV_R(1) - u1);
+    nv_real b = sqrt(u1);
+    nv_real t2 = NV_R(6.283185307179586) * u2;
+    nv_real t3 = NV_R(6.283185307179586) * u3;
+    q = nv_make4(a * sin(t2), a * cos(t2), b * sin(t3), b * cos(t3));
+    nv_real z = NV_R(2) * nv_next01(state) - NV_R(1);
+    nv_real phi = NV_R(6.283185307179586) * nv_next01(state);
+    nv_real speed = spin_min + (spin_max - spin_min) * nv_next01(state);
+    nv_real r = sqrt(max(NV_R(0), NV_R(1) - z * z));
+    w = nv_make3(r * cos(phi), r * sin(phi), z) * speed;
+}
+nv_real4 nv_quat_mul(nv_real4 a, nv_real4 b) {
+    return nv_make4(a.w * b.x + b.w * a.x + (a.y * b.z - a.z * b.y),
+                    a.w * b.y + b.w * a.y + (a.z * b.x - a.x * b.z),
+                    a.w * b.z + b.w * a.z + (a.x * b.y - a.y * b.x),
+                    a.w * b.w - (a.x * b.x + a.y * b.y + a.z * b.z));
+}
+nv_real4 nv_quat_normalize(nv_real4 q) {
+    nv_real n = NV_R(1) / sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    return nv_make4(q.x * n, q.y * n, q.z * n, q.w * n);
+}
+// q v q* (unit q): v + 2 w (u x v) + 2 u x (u x v)
+nv_real3 nv_quat_rotate(nv_real4 q, nv_real3 v) {
+    nv_real3 u = nv_make3(q.x, q.y, q.z);
+    nv_real3 t = cross(u, v) * NV_R(2);
+    return v + t * q.w + cross(u, t);
+}
+// exp(w h / 2) q, renormalized. sin(|w| h / 2) / |w| goes to a series below 1e-4 rad (no division by a small |w|).
+nv_real4 nv_orientation_advance(nv_real4 q, nv_real3 w, nv_real h) {
+    nv_real speed = length(w);
+    nv_real half = NV_R(0.5) * speed * h;
+    nv_real s = half < NV_R(1e-4) ? NV_R(0.5) * h * (NV_R(1) - half * half / NV_R(6)) : sin(half) / max(speed, NV_R(1e-30));
+    return nv_quat_normalize(nv_quat_mul(nv_make4(w.x * s, w.y * s, w.z * s, cos(half)), q));
+}
+// The rotation of an affine transport (rows (m_i0, m_i1, m_i2, t_i)): its columns normalized (a scaled source keeps its
+// turn), then the largest-diagonal quaternion form, sign chosen with w >= 0 (q and -q are one rotation).
+nv_real4 nv_quat_from_rows(nv_real4 r0, nv_real4 r1, nv_real4 r2) {
+    nv_real3 c0 = nv_make3(r0.x, r1.x, r2.x);
+    nv_real3 c1 = nv_make3(r0.y, r1.y, r2.y);
+    nv_real3 c2 = nv_make3(r0.z, r1.z, r2.z);
+    c0 = c0 * (NV_R(1) / max(length(c0), NV_R(1e-30)));
+    c1 = c1 * (NV_R(1) / max(length(c1), NV_R(1e-30)));
+    c2 = c2 * (NV_R(1) / max(length(c2), NV_R(1e-30)));
+    nv_real m00 = c0.x, m10 = c0.y, m20 = c0.z, m01 = c1.x, m11 = c1.y, m21 = c1.z, m02 = c2.x, m12 = c2.y, m22 = c2.z;
+    nv_real trace = m00 + m11 + m22;
+    nv_real4 q;
+    if (trace > NV_R(0)) {
+        nv_real k = NV_R(0.5) / sqrt(trace + NV_R(1));
+        q = nv_make4((m21 - m12) * k, (m02 - m20) * k, (m10 - m01) * k, NV_R(0.25) / k);
+    } else if (m00 > m11 && m00 > m22) {
+        nv_real k = NV_R(0.5) / sqrt(NV_R(1) + m00 - m11 - m22);
+        q = nv_make4(NV_R(0.25) / k, (m01 + m10) * k, (m02 + m20) * k, (m21 - m12) * k);
+    } else if (m11 > m22) {
+        nv_real k = NV_R(0.5) / sqrt(NV_R(1) + m11 - m00 - m22);
+        q = nv_make4((m01 + m10) * k, NV_R(0.25) / k, (m12 + m21) * k, (m02 - m20) * k);
+    } else {
+        nv_real k = NV_R(0.5) / sqrt(NV_R(1) + m22 - m00 - m11);
+        q = nv_make4((m02 + m20) * k, (m12 + m21) * k, NV_R(0.25) / k, (m10 - m01) * k);
+    }
+    if (q.w < NV_R(0)) q = nv_make4(-q.x, -q.y, -q.z, -q.w);
+    return nv_quat_normalize(q);
+}
+
 #endif

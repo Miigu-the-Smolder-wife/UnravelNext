@@ -115,6 +115,7 @@ typedef MathT<double> Math;
 struct ExactParticle {
     uint32_t row,birth;
     double position[3],velocity[3],age;
+    double rotation[4]={0,0,0,1},spin[3]={0,0,0}; // NV_STREAM_PROGRAM_ORIENTATION slots (identity, 0 otherwise)
 };
 
 struct StreamFailure:std::runtime_error {using std::runtime_error::runtime_error;};
@@ -192,6 +193,8 @@ public:
         const auto bodies=section<NV_StreamBody>(data,bytes,h.bodies,h.body_count);
         const auto dynamic=section<NV_StreamSurface>(data,bytes,h.dynamic_surfaces,h.dynamic_surface_count);
         const auto restore=section<NV_StreamParticle>(data,bytes,h.restore,h.restore_count);
+        const auto orientations=(h.flags&NV_STREAM_ORIENTATION)?section<NV_StreamParticleOrientation>(data,bytes,h.restore_orientations,h.restore_count):std::vector<NV_StreamParticleOrientation>{};
+        require(!(h.flags&NV_STREAM_ORIENTATION)||(h.flags&NV_STREAM_RESET),"orientation records come with RESET");
         // A state packet (dt == 0) keeps its tick's readback; only alive/status change.
         // It carries no body frames (its surface rows would not resolve) and integrates
         // nothing, so the tick inputs are loaded only for a simulating packet.
@@ -207,11 +210,19 @@ public:
             for(size_t n=0;n<restore.size();++n){
                 Slot s{};const auto& r=restore[n];s.row=r.emitter;s.birth=r.birth;
                 if(exact){const auto& x=(*exact)[n];require(x.row==r.emitter&&x.birth==r.birth,"exact restore identity");
-                    s.state.position={x.position[0],x.position[1],x.position[2]};s.state.velocity={x.velocity[0],x.velocity[1],x.velocity[2]};s.state.age=x.age;}
-                else{s.state.position=real3(r.position);s.state.velocity=real3(r.velocity);s.state.age=r.age;}
+                    s.state.position={x.position[0],x.position[1],x.position[2]};s.state.velocity={x.velocity[0],x.velocity[1],x.velocity[2]};s.state.age=x.age;
+                    s.rotation={x.rotation[0],x.rotation[1],x.rotation[2],x.rotation[3]};s.spin={x.spin[0],x.spin[1],x.spin[2]};}
+                else{s.state.position=real3(r.position);s.state.velocity=real3(r.velocity);s.state.age=r.age;
+                    if(!orientations.empty()){const auto& o=orientations[n];s.rotation={o.rotation[0],o.rotation[1],o.rotation[2],o.rotation[3]};s.spin=real3(o.spin);}}
                 require(s.row<emitters_.size(),"restore row");slots_.push_back(s);
             }
             require(slots_.size()<=h.slot_capacity,"restore capacity");
+            // The GPU executors' rule (render A's resync gate): a row's restored births are the run starting at its
+            // dying birth, [dying_birth, dying_birth + k) mod 2^32 - checked here too, so a packet the GPU refuses fails
+            // the CPU reference first.
+            std::vector<std::vector<uint32_t>> offsets(emitters_.size());
+            for(const auto& s:slots_)offsets[s.row].push_back(s.birth-emitters_[s.row].dying_birth);
+            for(auto& o:offsets){std::sort(o.begin(),o.end());for(size_t k=0;k<o.size();++k)require(o[k]==uint32_t(k),"restore births: not one of the row's contiguous births");}
         }
         origin_.resize(emitters_.size());inherited_.resize(emitters_.size());
         for(size_t e=0;e<emitters_.size();++e){origin_[e]=real3(emitters_[e].origin_anchor);inherited_[e]=real3(emitters_[e].inherited);}
@@ -248,12 +259,14 @@ public:
     const std::vector<NV_StreamEvent>& events()const{return events_;}
     std::vector<ExactParticle> checkpoint()const{
         std::vector<ExactParticle> result;result.reserve(slots_.size());
-        for(const auto& s:slots_)result.push_back({s.row,s.birth,{s.state.position.x,s.state.position.y,s.state.position.z},{s.state.velocity.x,s.state.velocity.y,s.state.velocity.z},s.state.age});
+        for(const auto& s:slots_)result.push_back({s.row,s.birth,{s.state.position.x,s.state.position.y,s.state.position.z},{s.state.velocity.x,s.state.velocity.y,s.state.velocity.z},s.state.age,
+                                                   {s.rotation.x,s.rotation.y,s.rotation.z,s.rotation.w},{s.spin.x,s.spin.y,s.spin.z}});
         std::sort(result.begin(),result.end(),[](const ExactParticle& a,const ExactParticle& b){return a.row!=b.row?a.row<b.row:a.birth<b.birth;});
         return result;
     }
 private:
-    struct Slot {uint32_t row=0,birth=0;Math::NvState state{};bool alive=true,fresh=false;double pending=0;};
+    struct Slot {uint32_t row=0,birth=0;Math::NvState state{};bool alive=true,fresh=false;double pending=0;Real4 rotation{0,0,0,1};Real3 spin{0,0,0};};
+    bool oriented(uint32_t row)const{return (programs_.at(emitters_.at(row).program).flags&NV_STREAM_PROGRAM_ORIENTATION)!=0;}
     static void require(bool ok,const char* message){stream_require(ok,message);}
     template<class T> static std::vector<T> section(const uint8_t* data,uint64_t bytes,uint64_t offset,uint32_t count){return stream_section<T>(data,bytes,offset,count);}
     static Real3 rotate(const float* q,Real3 v){
@@ -330,7 +343,10 @@ private:
         return math_.nv_birth_state(b,math_.nv_birth_rng(e.rng_key,birth),(e.flags&NV_STREAM_EMITTER_SOURCE)?1u:0u,p0,p1,p2,c0,c1,c2,real3(e.spawn_offset),inherited_[row],fraction);
     }
     void place(uint32_t row,uint32_t birth,Math::NvState s,double elapsed,uint32_t& status){
-        (void)status;Slot slot{};slot.row=row;slot.birth=birth;slot.state=s;slot.fresh=true;slot.pending=elapsed;slots_.push_back(slot);
+        (void)status;Slot slot{};slot.row=row;slot.birth=birth;slot.state=s;slot.fresh=true;slot.pending=elapsed;
+        if(oriented(row)){const auto& e=emitters_.at(row);const auto& p=programs_.at(e.program);
+            math_.nv_orientation_birth(math_.nv_birth_rng(e.rng_key,birth),p.spin_min,p.spin_max,slot.rotation,slot.spin);}
+        slots_.push_back(slot);
     }
     void spawn(const NV_StreamHeader& h,const NV_StreamSpawn& r,uint32_t& status){
         require(r.emitter<emitters_.size()&&r.expired<=r.count,"spawn record");
@@ -386,6 +402,8 @@ private:
             if(e.flags&NV_STREAM_EMITTER_TRANSPORT){
                 const float* t=e.transport;const Real4 r0{t[0],t[1],t[2],t[3]},r1{t[4],t[5],t[6],t[7]},r2{t[8],t[9],t[10],t[11]};
                 s.state.position=math_.nv_affine_point(r0,r1,r2,s.state.position);s.state.velocity=math_.nv_affine_vector(r0,r1,r2,s.state.velocity);
+                if(p.flags&NV_STREAM_PROGRAM_ORIENTATION){const Real4 q=math_.nv_quat_from_rows(r0,r1,r2);
+                    s.rotation=math_.nv_quat_normalize(math_.nv_quat_mul(q,s.rotation));s.spin=math_.nv_quat_rotate(q,s.spin);}
             }
             const uint32_t span=e.death_birth-e.dying_birth,offset=s.birth-e.dying_birth;
             if(offset<span){
@@ -402,6 +420,10 @@ private:
             complete=interval(s.row,s.birth,s.pending,s.state,impact);
         }
         if(!complete)status|=NV_STREAM_STATUS_IMPACT_OVERFLOW;
+        if(p.flags&NV_STREAM_PROGRAM_ORIENTATION){
+            s.rotation=math_.nv_orientation_advance(s.rotation,s.spin,h_used);
+            if(impact.count)s.spin=s.spin*(1.0-double(p.friction));
+        }
         if(!finite(s.state)){status|=NV_STREAM_STATUS_NONFINITE;s.alive=false;return;}
         collision_event(s.row,s.birth,impact,h_used);
     }

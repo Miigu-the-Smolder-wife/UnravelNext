@@ -96,18 +96,21 @@ struct Buf
 };
 
 const NV_StreamHeader& headerOf(const std::vector<uint8_t>& packet) { return *reinterpret_cast<const NV_StreamHeader*>(packet.data()); }
+// Header bytes every stream version has (NativeVfx before executor version 4 wrote 320: sections may start there); the
+// v4 fields (restore_orientations) are read only under NV_STREAM_ORIENTATION, which only a 336-byte header carries.
+constexpr uint64_t kStreamHeaderV3 = offsetof(NV_StreamHeader, restore_orientations);
 
 // Everything the CPU sends is checked here (counts, sections, indices into the packet and into the persistent
 // program and surface tables), so the kernels only meet indices the packet declares.
 void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uint32_t programCount, uint32_t surfaceBodyMax)
 {
-    if (!packet || bytes < sizeof(NV_StreamHeader)) fail("FX particles: stream packet of %llu bytes has no header", (unsigned long long)bytes);
+    if (!packet || bytes < kStreamHeaderV3) fail("FX particles: stream packet of %llu bytes has no header", (unsigned long long)bytes);
     const NV_StreamHeader& h = *reinterpret_cast<const NV_StreamHeader*>(packet);
     if (h.magic != NV_STREAM_MAGIC || h.version != NV_STREAM_VERSION) fail("FX particles: stream packet magic/version %llx/%u", (unsigned long long)h.magic, h.version);
     if (h.bytes != bytes) fail("FX particles: stream packet says %llu bytes, got %llu", (unsigned long long)h.bytes, (unsigned long long)bytes);
     auto section = [&](uint64_t offset, uint64_t count, uint64_t stride, const char* what) {
         if (count == 0) return;
-        if (offset % 16 != 0 || offset < sizeof(NV_StreamHeader) || offset + count * stride > bytes)
+        if (offset % 16 != 0 || offset < kStreamHeaderV3 || offset + count * stride > bytes)
             fail("FX particles: stream section %s (offset %llu, %llu x %llu B) outside the %llu-byte packet", what, (unsigned long long)offset,
                  (unsigned long long)count, (unsigned long long)stride, (unsigned long long)bytes);
     };
@@ -156,6 +159,12 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
         section(h.height_tiles, tiles, sizeof(NV_StreamHeightTile), "height tiles");
     }
     section(h.restore, h.restore_count, sizeof(NV_StreamParticle), "restore");
+    if (h.flags & NV_STREAM_ORIENTATION)
+    {
+        // mesh particle orientations of the restore records (executor version 4): with RESET, in a 336-byte header
+        if (!(h.flags & NV_STREAM_RESET) || bytes < sizeof(NV_StreamHeader)) fail("FX particles: NV_STREAM_ORIENTATION without RESET or a v4 header");
+        section(h.restore_orientations, h.restore_count, sizeof(NV_StreamParticleOrientation), "restore orientations");
+    }
     section(h.bodies, h.body_count, sizeof(NV_StreamBody), "bodies");
     section(h.dynamic_surfaces, h.dynamic_surface_count, sizeof(NV_StreamSurface), "dynamic surfaces");
     if (h.alive_after > h.slot_capacity) fail("FX particles: alive_after %u > capacity %u", h.alive_after, h.slot_capacity);
@@ -238,6 +247,13 @@ struct ParticleSystem::Impl
     // particle layout of its tick (Particles.hlsli "Particle layout"); capacity sized
     Buf posAge[2] = { { "fx.posAge0", 16 }, { "fx.posAge1", 16 } }, velocity[2] = { { "fx.velocity0", 16 }, { "fx.velocity1", 16 } };
     bool pairSized[2] = { false, false };  // that parity's buffers are allocated for the current capacity
+    // Mesh particle orientations (executor version 4, MeshOrientation.hlsli): the same pair, once a program of the stream
+    // carries an orientation (sticky: slots of such a program always have their input orientation written)
+    Buf orientation[2] = { { "fx.orientation0", sizeof(NV_StreamParticleOrientation) }, { "fx.orientation1", sizeof(NV_StreamParticleOrientation) } };
+    bool orientationSized[2] = { false, false }, oriented = false;
+    Buf restoreOrientations{ "fx.restoreOrientations", sizeof(NV_StreamParticleOrientation) };
+    std::vector<uint8_t> programOriented;  // per program: NV_STREAM_PROGRAM_ORIENTATION
+    bool restoreTurns = false;             // this tick installs restore orientations
     Buf inRanges{ "fx.inRanges", 32 }, inBlocks{ "fx.inBlocks", 4 };  // the tick's input layout (InRange) and group -> range
     // Render input of the latest tick (ParticleLayerPass.hlsli RenderRange): its layout's ranges, then the ranges of the
     // particles that died in it (drawn from the previous state until their death time); group of 256 threads -> range.
@@ -423,6 +439,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         if (capacity != m_capacity)
         {
             m.pairSized[0] = m.pairSized[1] = false;
+            m.orientationSized[0] = m.orientationSized[1] = false;
             m_capacity = capacity;
         }
         m.gridBlocks.ensure(device, 1024 * 4);
@@ -435,12 +452,15 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             m.programOutput.resize(h.program_count);
             m.programCollides.resize(h.program_count);
             m.programGrid.resize(h.program_count);
+            m.programOriented.assign(h.program_count, 0);
             m.separationMax = 0;
             for (uint32_t k = 0; k < h.program_count; ++k)
             {
                 m.programOutput[k] = programTable[k].output;
                 m.programCollides[k] = (programTable[k].flags & NV_STREAM_PROGRAM_COLLISION) != 0;
                 m.programGrid[k] = programTable[k].medium_grid;
+                m.programOriented[k] = (programTable[k].flags & NV_STREAM_PROGRAM_ORIENTATION) != 0;
+                m.oriented = m.oriented || m.programOriented[k];
                 m.separationMax = std::max(m.separationMax, std::abs(programTable[k].separation));
             }
             m.programs.ensure(device, (uint64_t)h.program_count * sizeof(NV_StreamProgram));
@@ -465,6 +485,19 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         };
         sizePair(cur);
         if (reset) sizePair(cur ^ 1u);
+        auto sizeOrientation = [&](uint32_t p) {
+            if (!m.oriented || m.orientationSized[p]) return;
+            Buf& b = m.orientation[p];
+            if (b.resource) device.deferRelease(b.resource);
+            b.resource.Reset();
+            b.bytes = 0;
+            b.exact(device, (uint64_t)capacity * b.stride);
+            m.orientationSized[p] = true;
+        };
+        sizeOrientation(cur);
+        // the input as posAge's: reallocated only after RESET (it receives the restore records) or when orientations begin
+        // (no oriented slot exists before); a capacity change keeps it, read as it is
+        if (reset || !m.orientation[cur ^ 1u].resource) sizeOrientation(cur ^ 1u);
         // Persistent emitter table: a whole table replaces it, a delta updates the rows it lists (the table only grows).
         // A grown table keeps its rows: the old buffer is copied into the new one at the start of the tick.
         const bool delta = (h.flags & NV_STREAM_EMITTER_DELTA) != 0;
@@ -751,6 +784,10 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         m.ribbonTangents.ensure(device, (uint64_t)ribbonN * 16);
         m.bodies.ensure(device, (uint64_t)h.body_count * sizeof(NV_StreamBody));
         m.restore.ensure(device, (uint64_t)h.restore_count * sizeof(NV_StreamParticle));
+        const bool restoreTurns = (h.flags & NV_STREAM_ORIENTATION) != 0 && h.restore_count != 0;
+        m.restoreTurns = restoreTurns;
+        if (restoreTurns && !m.oriented) fail("FX particles: restore orientations for a stream without an orientation program");
+        m.restoreOrientations.ensure(device, (uint64_t)(restoreTurns ? h.restore_count : 1) * sizeof(NV_StreamParticleOrientation));
 
         // Particle layout of this tick (Particles.hlsli "Particle layout"): the live rows' births [death_birth, next_birth)
         // after the tick, the volume rows first in first-cell order (their layout indices are the volume record indices,
@@ -1030,9 +1067,10 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
                                     &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.volumeRecords, &m.volumeSide,
                                     &m.ribbonRunStart, &m.ribbonTangents, &m.gridBlocks, &m.surfaceBoxes, &m.overflowRecords, &m.colliders, &m.trace, &m.rowMotion,
                                     &m.emitterTable, &m.emitterStamp };
+        if (m.oriented) state.insert(state.end(), { &m.orientation[0], &m.orientation[1] });
         std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitterUpdates, &m.emitterUpdateRows, &m.emitterPatches, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
                                      &m.restore, &m.birthIndex, &m.inRanges, &m.inBlocks, &m.renderRanges, &m.renderBlocks, &m.bodies, &m.dynamicSurfaces, &m.ribbonRanges, &m.volumeRanges,
-                                     &m.ribbonDrawRanges, &m.ribbonDrawRows, &m.heightTiles, &m.heightFields };
+                                     &m.ribbonDrawRanges, &m.ribbonDrawRows, &m.heightTiles, &m.heightFields, &m.restoreOrientations };
         for (Buf* b : state) b->import(g, importIndex);
         for (Buf* b : inputs) b->import(g, importIndex);
 
@@ -1069,6 +1107,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         add(m.bodies, h.bodies, (uint64_t)h.body_count * sizeof(NV_StreamBody));
         add(m.dynamicSurfaces, h.dynamic_surfaces, (uint64_t)h.dynamic_surface_count * sizeof(NV_StreamSurface));
         add(m.restore, h.restore, (uint64_t)h.restore_count * sizeof(NV_StreamParticle));
+        if (restoreTurns) add(m.restoreOrientations, h.restore_orientations, (uint64_t)h.restore_count * sizeof(NV_StreamParticleOrientation));
         copies.push_back({ &m.birthIndex, birthOffset, birthIndex.size() * 4 });
         if (!inRanges.empty()) copies.push_back({ &m.inRanges, inRangesOffset, inRanges.size() * 32 });
         copies.push_back({ &m.inBlocks, inBlocksOffset, inBlocks.size() * 4 });
@@ -1117,6 +1156,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         tc.collisionCapacity = h.collision_capacity;
         tc.aliveAfter = h.alive_after;
         tc.restoreCount = h.restore_count;
+        tc.restoreOrientations = 0u;  // set with the descriptors (m.restoreTurns)
         tc.tickLo = (uint32_t)h.tick;
         tc.tickHi = (uint32_t)(h.tick >> 32);
         tc.streamLo = (uint32_t)h.stream;
@@ -1168,6 +1208,9 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             tc.worldFields = c.srv(m.worldFields.ref);
             tc.surfaces = c.srv(m.surfaces.ref);
             tc.restore = c.srv(m.restore.ref);
+            tc.orientationIn = m.oriented ? c.uav(m.orientation[cur ^ 1u].ref) : 0u;
+            tc.orientationOut = m.oriented ? c.uav(m.orientation[cur].ref) : 0u;
+            tc.restoreOrientations = m.restoreTurns ? c.srv(m.restoreOrientations.ref) : 0u;
             tc.birthIndex = c.srv(m.birthIndex.ref);
             tc.emitterDynamic = c.uav(m.dynamic[cur].ref);
             tc.bodies = c.srv(m.bodies.ref);
@@ -1390,6 +1433,8 @@ std::vector<uint8_t> ParticleSystem::readState(const char* name)
     else if (n == "velocity") b = &m.velocity[last], bytes = total(m.layout) * 16;
     else if (n == "posAgePrev") b = &m.posAge[last ^ 1u], bytes = total(m.layoutPrev) * 16;  // the input (the renderer's previous tick)
     else if (n == "velocityPrev") b = &m.velocity[last ^ 1u], bytes = total(m.layoutPrev) * 16;
+    else if (n == "orientation") b = &m.orientation[last], bytes = m.oriented ? total(m.layout) * sizeof(NV_StreamParticleOrientation) : 0;
+    else if (n == "orientationPrev") b = &m.orientation[last ^ 1u], bytes = m.oriented ? total(m.layoutPrev) * sizeof(NV_StreamParticleOrientation) : 0;
     else if (n == "counters") b = &m.counters, bytes = kCounterWords * 4;
     else if (n == "emitterDynamic") b = &m.dynamic[last], bytes = m.dynamic[last].bytes;
     else if (n == "ribbonPoints") b = &m.ribbonPoints, bytes = m.ribbonPoints.bytes;
@@ -1423,6 +1468,26 @@ std::vector<NV_StreamParticle> ParticleSystem::checkpoint(ShaderLibrary&)
             std::memcpy(&p.age, posAge.data() + i * 16 + 12, 4);
             std::memcpy(p.velocity, vel.data() + i * 16, 12);
             out.push_back(p);
+        }
+    return out;
+}
+
+std::vector<NV_StreamParticleOrientation> ParticleSystem::checkpointOrientations(ShaderLibrary&)
+{
+    // One per checkpoint record, same order; identity and zero spin for slots of programs without an orientation.
+    Impl& m = *m_impl;
+    const std::vector<uint8_t> turns = readState("orientation");
+    std::vector<NV_StreamParticleOrientation> out;
+    for (const LayoutRange& r : m.layout)
+        for (uint32_t k = 0; k < r.count; ++k)
+        {
+            const size_t i = (size_t)r.base + k;
+            NV_StreamParticleOrientation o{};
+            o.rotation[3] = 1;
+            const uint32_t program = r.row < m.table.size() ? m.table[r.row].program : UINT32_MAX;
+            const bool carries = m.oriented && program < m.programOriented.size() && m.programOriented[program];
+            if (carries) std::memcpy(&o, turns.data() + i * sizeof(o), sizeof(o));
+            out.push_back(o);
         }
     return out;
 }

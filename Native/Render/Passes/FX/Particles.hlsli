@@ -48,7 +48,7 @@ cbuffer FxTick : register(b1)
     float3 g_reserved27; uint g_explicitBase;   // birthIndex[g_explicitBase + j]: index of explicit birth j
     float3 g_reserved28; uint g_bodyCount;
     uint g_posAge, g_velocity, g_inRanges, g_inBlocks;  // input state (last tick's output) and its layout (InRange, blocks)
-    uint g_restoreBase, g_colliderCapacity, g_reserved30, g_counters;  // birthIndex[g_restoreBase + j]: input index of restore j;
+    uint g_restoreBase, g_colliderCapacity, g_restoreOrientations, g_counters;  // birthIndex[g_restoreBase + j]: input index of restore j;
                                                                         // colliders: this tick's particles of colliding rows
     uint g_reserved31, g_posAgeOut, g_reserved20, g_events;
     uint g_heightFieldCount, g_heightFields, g_heightTiles, g_reserved24;  // heightfields of the tick (FxHeightField,
@@ -68,7 +68,7 @@ cbuffer FxTick : register(b1)
                                                                                   // volume ranges (record index)
     uint g_surfaceBoxes, g_velocityOut, g_overflowRecords, g_overflowCapacity;  // grown box per surface (candidate filter);
                                                                                 // this tick's velocity; IMPACT_OVERFLOW inputs
-    uint g_reserved25, g_reserved26, g_experiment, g_colliders;  // sort: pass p's histogram is hist[p * g_histRegion + group * 256
+    uint g_orientationIn, g_orientationOut, g_experiment, g_colliders;  // sort: pass p's histogram is hist[p * g_histRegion + group * 256
                                                                   // + digit]; g_colliders: queue of colliding slots (FxCollide)
     uint g_emitterPatches, g_patchCount, g_traceRow, g_traceBirth;  // patches of the tick (FxEmitters); traced particle
     uint g_trace, g_rowMotion, g_pad18, g_pad19;                     // TraceRecord buffer (diagnostic); RowMotion per row
@@ -569,6 +569,7 @@ void fxWriteOutputs(uint index, uint row, uint birth, NvState s, RowMotion rm, E
         side[index] = uint2(fxPackR11G11B10(p.mediumEmission * colour), e.program);
     }
 }
+#include "Passes/FX/MeshOrientation.hlsli"
 // ---- end of a particle's tick (FxIntegrate / FxSpawn for non-colliding particles, FxCollide for colliding ones) ---------
 // nv_integrate_finish (the sweep or start + move, age += h) and everything after it: status, the IMPACT_OVERFLOW
 // diagnostic record (the finish inputs: position = start, velocity = velocity after the motion, drag.xyz = move,
@@ -637,6 +638,7 @@ void fxFinishSlot(uint index, uint row, uint birth, RowMotion rm, EmitterDynamic
     }
     posAgeOut[index] = float4(s.position, s.age);
     velocityOut[index] = float4(s.velocity, 0);
+    fxOrientImpact(index, rm, impact.count);
     fxCountAlive();
     fxWriteOutputs(index, row, birth, s, rm, dyn);
     if (fxTraced(row, birth))

@@ -40,18 +40,22 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID)
         FX_RWBUFFER(float4, velocityOut, g_velocityOut);
         posAgeOut[index] = float4(s.position, s.age);
         velocityOut[index] = float4(s.velocity, 0);
+        fxOrientCarry(i, index, rm, false, 0, 0, 0, 0);
         fxCountAlive();
         fxWriteOutputs(index, row, birth, s, rm, dyn);
         return;
     }
     // a. rebase, transport (every existing particle, dying ones too: event positions are in this tick's origin space)
     s.position -= rm.rebase;
-    if ((ef & FX_EMITTER_TRANSPORT) != 0u)
+    const bool transported = (ef & FX_EMITTER_TRANSPORT) != 0u;
+    float4 t0 = 0, t1 = 0, t2 = 0;
+    if (transported)
     {
         FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
         const StreamEmitter e = emitters[row];
-        s.position = nv_affine_point(e.transport[0], e.transport[1], e.transport[2], s.position);
-        s.velocity = nv_affine_vector(e.transport[0], e.transport[1], e.transport[2], s.velocity);
+        t0 = e.transport[0]; t1 = e.transport[1]; t2 = e.transport[2];
+        s.position = nv_affine_point(t0, t1, t2, s.position);
+        s.velocity = nv_affine_vector(t0, t1, t2, s.velocity);
     }
     if (birth - rm.dyingBirth < rm.deathBirth - rm.dyingBirth)
     {
@@ -65,6 +69,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID)
         return;
     }
     if (rank >= range.outCount || index >= g_outCount) { fxStatus(FX_STATUS_RANGE); return; }
+    fxOrientCarry(i, index, rm, transported, t0, t1, t2, g_dt);  // mesh particles (MeshOrientation.hlsli): before the step
     NvDrag drag;
     drag.velocity = rm.dragVelocity; drag.position = rm.dragPosition; drag.acceleration = rm.dragAcceleration;
     fxStep(index, row, birth, rm, dyn, s, g_dt, drag, false);

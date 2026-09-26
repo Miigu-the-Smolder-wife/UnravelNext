@@ -104,6 +104,7 @@
    output index of a live particle is output_base + (birth - death_birth).
    output_base counts ribbon points (NV_RIBBON) or medium cells (NV_VOLUME,
    grid^3 per particle); header.ribbon_points / medium_cells are the totals. */
+#include <stddef.h>
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
@@ -122,6 +123,17 @@ extern "C" {
    NV_WIND_TURBULENCE hook; shaders/VfxWindTurbulence.hlsli defines it for HLSL executors). A context whose World
    publishes turbulence refuses an executor below 3 (wind it cannot evaluate is an error, not a silent drop). */
 #define NV_STREAM_EXECUTOR_WIND_TURBULENCE 3u
+/* 4 = also particle orientation (mesh particles): slots of programs with NV_STREAM_PROGRAM_ORIENTATION carry a
+   rotation and an angular velocity (NV_StreamParticleOrientation) with VfxParticleMath's orientation rules:
+   birth nv_orientation_birth(birth rng, spin_min, spin_max); a transported slot turns both by the transport's
+   rotation (nv_quat_from_rows, then rotation = q * rotation and spin = q spin q*); every simulated interval h
+   (a birth's pending interval, an existing slot's dt) rotation = nv_orientation_advance(rotation, spin, h) with the
+   spin before the interval; then, when the slot's sweep had an impact in the tick, spin *= 1 - friction. A RESET
+   with NV_STREAM_ORIENTATION installs restore_orientations[n] for restore[n]; checkpoint_orientations returns one
+   record per checkpoint record, same order (identity rotation and zero spin for slots of other programs). The
+   executor struct of version 4 is sizeof(NV_StreamExecutor) with checkpoint_orientations; versions 1-3 pass the
+   size without it (NV_STREAM_EXECUTOR_SIZE_V3). A context with an orientation program refuses executors below 4. */
+#define NV_STREAM_EXECUTOR_MESH_ORIENTATION 4u
 #define NV_STREAM_MAX_DEPTH 4u
 #define NV_STREAM_NONE 0xffffffffu
 
@@ -130,6 +142,7 @@ enum {
     NV_STREAM_PROGRAMS=2u,     /* program table + curve keys replace the previous ones */
     NV_STREAM_SURFACES=4u,     /* surface table replaces the previous one (else the previous stays) */
     NV_STREAM_WIND_TURBULENCE=16u, /* world_fields are NV_StreamWorldFieldTurbulent (executor version >= 3) */
+    NV_STREAM_ORIENTATION=32u,     /* RESET: restore_orientations[restore_count] follows the restore records (version >= 4) */
     NV_STREAM_EMITTER_DELTA=8u /* emitters[] updates only the rows listed in emitter_rows[] of the
                                   persistent table (emitter_table rows); without it emitters[] is the
                                   whole table (emitter_count == emitter_table). A row not sent keeps its
@@ -159,7 +172,8 @@ enum {
     NV_STREAM_PROGRAM_COLLISION_EVENTS=16u,
     NV_STREAM_PROGRAM_BIRTH_EVENTS=32u,
     NV_STREAM_PROGRAM_DEATH_EVENTS=64u,
-    NV_STREAM_PROGRAM_ATTACHED=128u        /* source-affine mode 1: particles transported by the source */
+    NV_STREAM_PROGRAM_ATTACHED=128u,       /* source-affine mode 1: particles transported by the source */
+    NV_STREAM_PROGRAM_ORIENTATION=256u     /* mesh particles: slots carry an orientation (executor version >= 4) */
 };
 enum { NV_STREAM_SHAPE_POINT=0u,NV_STREAM_SHAPE_SPHERE=1u,NV_STREAM_SHAPE_BOX=2u,NV_STREAM_SHAPE_DISC=3u,NV_STREAM_SHAPE_EXPLICIT=4u };
 /* Emitter flags. */
@@ -214,6 +228,10 @@ typedef struct NV_StreamHeader {
                                     0 for version-1 executors (formerly reserved) */
     uint64_t height_fields;      /* byte offset of NV_StreamHeightField[height_field_count] */
     uint64_t height_tiles;       /* byte offset of NV_StreamHeightTile[sum of tiles_x tiles_z] */
+    uint64_t restore_orientations; /* NV_STREAM_ORIENTATION: byte offset of NV_StreamParticleOrientation[restore_count]
+                                      (version >= 4; executors below 4 never receive the flag). Older executors read
+                                      the header's first 320 B only: every field above keeps its offset. */
+    uint64_t reserved_v4;
 } NV_StreamHeader;
 
 /* Static per program (index = program number). Curves are piecewise linear
@@ -244,7 +262,8 @@ typedef struct NV_StreamProgram {
     float medium_scattering[3],ribbon_uv;
     float medium_emission[3],ribbon_break;         /* ribbon_break: FLT_MAX when unset */
     float ribbon_normal[3],reserved5;
-    uint32_t reserved6[4];
+    uint32_t mesh_asset[2];                        /* NV_MESH_SHAPE: the mesh's asset id (lo, hi); the renderer maps it to a mesh */
+    float spin_min,spin_max;                       /* NV_MESH_SHAPE: birth spin speed range (rad/s) */
 } NV_StreamProgram;
 
 /* One row of the dense emitter table (index = arena row; rows are stable for an
@@ -409,6 +428,13 @@ typedef struct NV_StreamParticle {
     float velocity[3],reserved2;
 } NV_StreamParticle;
 
+/* Orientation of a live slot of an NV_STREAM_PROGRAM_ORIENTATION program (executor version 4): unit quaternion
+   (x, y, z, w) from the mesh's local frame to the anchor frame, and the angular velocity (rad/s, anchor frame). */
+typedef struct NV_StreamParticleOrientation {
+    float rotation[4];
+    float spin[3],reserved0;
+} NV_StreamParticleOrientation;
+
 /* Readback of one tick. Slot events [0,event_slots) are at CPU-assigned
    indices; collision events follow in any order (the CPU sorts them). */
 typedef struct NV_StreamEvent {
@@ -447,17 +473,20 @@ typedef struct NV_StreamExecutor {
     int32_t (*readback)(void* user,uint64_t stream,uint64_t generation,uint64_t tick,NV_StreamReadback* output);
     int32_t (*checkpoint)(void* user,uint64_t stream,uint64_t generation,uint64_t tick,const NV_StreamParticle** records,uint64_t* count);
     void (*detach)(void* user,uint64_t stream);
+    /* version >= 4: the orientations of the last checkpoint's records (same count and order), valid until the next call */
+    int32_t (*checkpoint_orientations)(void* user,uint64_t stream,uint64_t generation,uint64_t tick,const NV_StreamParticleOrientation** records,uint64_t* count);
 } NV_StreamExecutor;
+#define NV_STREAM_EXECUTOR_SIZE_V3 ((uint32_t)(sizeof(NV_StreamExecutor)-sizeof(void*)))
 
 #ifdef __cplusplus
 }
-static_assert(sizeof(NV_StreamHeader)==320,"stream header");
+static_assert(sizeof(NV_StreamHeader)==336&&offsetof(NV_StreamHeader,restore_orientations)==320,"stream header");
 static_assert(sizeof(NV_StreamProgram)==320,"stream program");
 static_assert(sizeof(NV_StreamEmitter)==336,"stream emitter");
 static_assert(sizeof(NV_StreamEmitterPatch)==48,"stream emitter patch");
 static_assert(sizeof(NV_StreamSpawn)==48&&sizeof(NV_StreamExplicitBirth)==48&&sizeof(NV_StreamCurveKey)==16,"stream births");
 static_assert(sizeof(NV_StreamField)==32&&sizeof(NV_StreamWorldField)==64&&sizeof(NV_StreamWorldFieldTurbulent)==80&&sizeof(NV_StreamSurface)==128&&sizeof(NV_StreamBody)==80,"stream inputs");
 static_assert(sizeof(NV_StreamHeightField)==80&&sizeof(NV_StreamHeightTile)==1232,"stream heightfields");
-static_assert(sizeof(NV_StreamParticle)==48&&sizeof(NV_StreamEvent)==64&&sizeof(NV_StreamCounters)==48,"stream outputs");
+static_assert(sizeof(NV_StreamParticle)==48&&sizeof(NV_StreamParticleOrientation)==32&&sizeof(NV_StreamEvent)==64&&sizeof(NV_StreamCounters)==48,"stream outputs");
 #endif
 #endif

@@ -2021,6 +2021,19 @@ const std::vector<NV_StreamParticle>& HostRenderer::vfxCheckpoint(uint64_t strea
     return m_vfxCheckpoint;
 }
 
+const std::vector<NV_StreamParticleOrientation>& HostRenderer::vfxCheckpointOrientations(uint64_t stream, uint64_t generation, uint64_t tick)
+{
+    std::lock_guard lock(m_fxMutex);
+    if (!m_vfxError.empty()) fail("FX stream executor: %s", m_vfxError.c_str());
+    fx::ParticleSystem& p = fxModule();
+    if (p.latestTick() != tick) fail("FX stream executor: checkpoint orientations of tick %llu, the latest is %llu", (unsigned long long)tick, (unsigned long long)p.latestTick());
+    (void)stream;
+    (void)generation;
+    m_vfxCheckpointOrientations = p.checkpointOrientations(*m_shaders);
+    if (m_vfxCheckpointOrientations.size() != m_vfxCheckpoint.size()) fail("FX stream executor: %zu orientations for %zu checkpoint records", m_vfxCheckpointOrientations.size(), m_vfxCheckpoint.size());
+    return m_vfxCheckpointOrientations;
+}
+
 void HostRenderer::renderOnHost(uint64_t ticket, const HostExecute& execute)
 {
     if (m_options.standalone) fail("renderOnHost on a standalone renderer");
