@@ -7,6 +7,7 @@
   - GI 화면 조도 텍스처(v1.80)는 M이 읽지 않는다. D0 이득 0 [실측, Results/M/GiScreenAB].
 - 다음 순서:
   1. sheen 면광원: 지평선 절단 구면 삼각형 구적(MATERIAL_LAYERS 1.4 "채택 방향"). 먼저 크기별 오차로 차수 표를 정하고(LtcFit --polygon-check 확장), 그다음 HLSL을 ShadeOpaque LAYERED=2와 CoverageShade sheenOn에 넣는다(DXIL 여유 약 22 KB).
+  2. 빔(엔진 2 계약 NativeVfx e72ca27f nv_copy_beam_paths, NV_BeamPath·점 식은 헤더 주석, 계약 시험 9점 8.9e-9 m): 호스트 ABI UnxFrameSetBeams(두 공개 사이 start·end 보간 + age 진행) → 리본 띠 경로에서 평가, Unity 전달(엔진 2가 복사 호출을 붙이겠다고 함), NativeVfx는 다음 배포와 함께.
   2. 비등방성 → 박막 → 자동차 도장 → 스타일화.
   3. 최적화: D0 10.27 ms, fp_1000 21.87 ms(s.froxel.integrate 4.65).
 
