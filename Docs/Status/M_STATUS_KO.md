@@ -87,6 +87,33 @@
   - CPU 셰이딩한 fragment의 CPU 합성 대비 최악 9.5e-4이고, fragment 없는 픽셀은 비트 동일하다.
 - **층 꺼짐(기본)에서 회귀 없음 [실측, city 4K, 교대 3회]**: 셰이딩 1.184~1.186 → 1.173~1.177 ms. GI를 끈 결정적 영상은 옛 커널과 해시가 같다.
 
+## 2b. 구조적 상한 합성 (4.5 재설계, V v1.41 픽셀 순서 구간) — 재개 지점 (2026-09-26, 7dafff0, D0 정지 지시로 멈춤)
+
+위 2a의 단일 커널을 대체한다. 모든 그룹의 일이 정해져 있다(`CoverageShade.hlsli`).
+- **단계**:
+  - Begin: 상태와 인자를 초기화한다.
+  - E `CoverageComposite`: 목록 타일당 64 레인이다. ≤ 16 fragment 픽셀은 레지스터 bitonic 정렬 후 합성한다. 넘는 픽셀은 무거운 레코드로 넘긴다.
+  - F1 `CoverageHeavySort`: (무거운 픽셀, 1,024 레코드 런)마다 groupshared bitonic 정렬을 해서 M 쌍 버퍼에 쓴다.
+  - F2 `CoverageHeavyRound`: 8라운드 × 32다. 웨이브 병합과 마스크 합집합 접두, 가중치 접두합으로 병렬 셰이딩한다. 한 단계 엿보기가 있어 정확히 경계에서 끝난 픽셀도 끝난 것으로 본다.
+  - F3 `CoverageHeavyFinish`: 대역 A 나머지를 더하고 출력한다. 라운드 뒤에도 안 끝난 픽셀은 0x800을 켠다.
+  - 오류 비트는 M 통계로 가고 게이트 실패다(MGate exit 2).
+- **최악 상한**: 병합 단계당 레인 일 = ⌈런 수 / 32⌉ 로드, 런 수 ≤ 풀 용량 / 1,024다. 그 밖의 모든 그룹은 상수다. 한 픽셀에 풀 전체가 몰린 병적인 경우만 라운드가 풀에 비례한다. 성장 곡선으로 잴 항목이다.
+- **정확성 [실측, 청크 배치(v1.40)에서, GpuLock correctness, 펜스 5 s, hung/removed 없음]** — 시험 11:
+  - 규모: fragment 6,716, 무거운 픽셀 12, 여러 라운드 6, 런 2개(1,081 fragment) 1, 라운드 상한(256) 초과 2.
+  - 초과 픽셀은 상한 지점의 합성과 비교했다.
+  - CPU 합성 대비 최악 9.5e-4이고, 오류 비트는 정확히 0x800이었다.
+  - 이 실행에서 찾은 결함: 라운드 커널에서 켠 0x800이 통계에 닿지 않았다. 그래서 판정을 F3의 done 플래그로 옮겼다.
+- **v1.41 전환(7dafff0)**: V 4517b57 기준이다. M의 A/B/C/D(Scan, Blocks, Offsets)를 없앴다. E는 `coveragePixelStart`로 픽셀 구간을 바로 읽고, F1은 레코드에서 키를 만든다.
+  - 시험 11과 새 `--coverage-growth`(한 타일 N = 10 k~300 k, 64픽셀 분산/한 픽셀, 디스패치마다 GPU 시간, 50 ms를 넘으면 다음 크기를 멈춤)는 `TestCoverageLayer`로 v1.41 배치를 만든다.
+  - **M 빌드는 통과했고 GPU는 미검증이다**(잠금 대기 중 정지 지시). 층은 기본으로 꺼져 있고, 기본 셰이딩 경로는 바뀌지 않았다.
+- **재개 순서**:
+  1. `GpuLock -Kind correctness`로 셰이딩 시험을 돌린다(펜스 5 s, 전체 로그의 hung/removed 확인).
+  2. `--no-debug-layer --coverage-growth` 성장 곡선을 잠금 안에서 잰다.
+  3. V 실제 분포로 CPU 에뮬레이션을 한다(V에게 픽셀별 개수 분포를 직접 받는다).
+  4. waterside·city 1프레임, 펜스 5 s를 돈다. 숲 장면은 브릭 전까지 금지다.
+  5. S 4.3을 통합한다(`shadowFragmentVisibility`·`shadowFragmentSun`, v1.41). 그 뒤 "S 그림자 + 층 = fail" 규칙을 없앤다.
+  6. 그다음 M0 항목: 자동 노출 + SDR 톤 곡선(FEATURES_GAME 6절), FX 입자 층 합성(`Docs/Design/Requests/20260926_FX_particle_render_pass.md` 4절·8c).
+
 ## 3. 가장자리(E) (설계서 2.10)
 
 - **검출** (`EdgeDetect.hlsl`, 설계 개정 1 4.4: 셰이딩 전 얇은 별도 커널 `m.edge.detect`, 타일당 그룹 하나):
