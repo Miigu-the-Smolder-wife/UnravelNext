@@ -1,0 +1,22 @@
+﻿
+PASS heightfield_cuts_are_watertight
+PASS submesh_seam_stays_closed
+    tile 0: 32768 source tris, depth 9, coarsest 136 tris
+    tile 1: 32768 source tris, depth 8, coarsest 253 tris
+    tile 2: 32768 source tris, depth 10, coarsest 63 tris
+    6272 seam edges checked over all clusters of both tiles
+PASS tile_seams_stay_closed_at_every_cut
+PASS feature_width_of_known_shapes
+PASS thin_geometry_is_not_thinned
+PASS wide_surfaces_simplify_fully
+PASS rebuild_reuses_unchanged_meshes
+PASS disk_cache_round_trip
+PASS build_is_deterministic
+PASS cluster_fill_of_scene_meshes
+PASS brick_depth_encoding
+PASS brick_bake_of_a_blade_clump
+PASS brick_model_error_by_elements
+PASS brick_canopy_occupancy
+14/14 passed
+
+

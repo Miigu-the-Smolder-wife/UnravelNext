@@ -370,6 +370,94 @@ UNX_TEST(submesh_seam_stays_closed)
         CHECK(b.data.clusters[c].material == (b.data.clusters[c].counts >> 16));  // submesh s uses material s here
 }
 
+UNX_TEST(tile_seams_stay_closed_at_every_cut)
+{
+    // Two terrain tiles side by side (separate meshes, instances at x = 0 and x = size) and a third far away. The shared
+    // border x = size must keep its source vertices in every cluster of both hierarchies, so any pair of cuts is
+    // watertight: every triangle edge on the seam spans exactly one source step. The lone tile's border meets nothing
+    // and still simplifies (its coarsest cut is as small as without seams).
+    const uint32_t n = 128;
+    const float size = 64.0f, d = size / n;
+    auto tile = [&](float x0) {
+        scene::Mesh m;
+        for (uint32_t i = 0; i <= n; ++i)
+            for (uint32_t j = 0; j <= n; ++j)
+            {
+                const float x = j * d, z = i * d, wx = x0 + x;
+                m.positions.push_back({ x, 3.0f * std::sin(wx * 0.21f) * std::cos(z * 0.27f) + 0.9f * std::sin(wx * 0.93f + z * 0.69f), z });
+                m.normals.push_back({ 0, 1, 0 });
+                m.uv0.push_back({ x / size, z / size });
+            }
+        for (uint32_t i = 0; i < n; ++i)
+            for (uint32_t j = 0; j < n; ++j)
+            {
+                const uint32_t v00 = i * (n + 1) + j, v01 = v00 + 1, v10 = v00 + n + 1, v11 = v10 + 1;
+                m.indices.insert(m.indices.end(), { v00, v10, v01, v01, v10, v11 });
+            }
+        m.submeshes.push_back({ 0, (uint32_t)m.indices.size(), 0 });
+        return m;
+    };
+    scene::Scene sc;
+    sc.materials.resize(1);
+    sc.meshes = { tile(0), tile(size), tile(0) };
+    for (uint32_t k = 0; k < 3; ++k)
+    {
+        scene::Instance in;
+        in.mesh = k;
+        in.transform.m[0][3] = k == 1 ? size : k == 2 ? 1000.0f : 0.0f;
+        sc.instances.push_back(in);
+    }
+    BuildStats bs;
+    const render::ClusterData data = build(sc, settings(), &bs);
+    for (uint32_t k = 0; k < 3; ++k)
+        logf("    tile %u: %u source tris, depth %u, coarsest %u tris\n", k, bs.meshes[k].sourceTriangles, bs.meshes[k].depth, bs.meshes[k].coarsestTriangles);
+    // Seam in each tile's own coordinates: x = size for tile 0, x = 0 for tile 1. In every cut (the stored LOD levels and
+    // errors between them), the cut's border edges (used by one triangle) on the seam each span one source step: the
+    // boundary along the seam is the source chain. (A vertical sliver with all corners on the seam is interior to the
+    // cut; its long edge is shared with the neighbouring triangle.)
+    uint64_t seamEdges = 0;
+    for (uint32_t k = 0; k < 2; ++k)
+    {
+        const float seamX = k == 0 ? size : 0.0f;
+        const scene::Mesh& m = sc.meshes[k];
+        const auto& r = data.meshes[k];
+        std::vector<float> ts;
+        for (uint32_t l = 0; l < r.lodLevelCount; ++l) ts.push_back(data.lodLevels[r.lodLevelOffset + l].error);
+        std::mt19937 rng(11);
+        for (int j = 0; j < 16; ++j) ts.push_back(std::uniform_real_distribution<float>(0.0f, ts.back() * 1.5f)(rng));
+        for (float t : ts)
+        {
+            const auto tris = trianglesOf(data, cutAt(data, k, t));
+            std::map<std::pair<std::pair<float, float>, std::pair<float, float>>, int> edges;  // (z, y) endpoints on the seam
+            for (size_t i = 0; i < tris.size(); i += 3)
+                for (int e = 0; e < 3; ++e)
+                {
+                    const float3 p = m.positions[tris[i + e]], q = m.positions[tris[i + (e + 1) % 3]];
+                    if (p.x != seamX || q.x != seamX) continue;
+                    auto u = std::make_pair(p.z, p.y), w = std::make_pair(q.z, q.y);
+                    if (w < u) std::swap(u, w);
+                    ++edges[{ u, w }];
+                }
+            float covered = 0;
+            for (const auto& [e, count] : edges)
+            {
+                if (count != 1) continue;
+                ++seamEdges;
+                covered += e.second.first - e.first.first;
+                if (std::fabs((e.second.first - e.first.first) - d) > 1e-4f)
+                    fail("tile %u, cut %g: seam border edge z %g..%g spans %g source steps", k, t, e.first.first, e.second.first, (e.second.first - e.first.first) / d);
+            }
+            CHECK(std::fabs(covered - size) < 1e-3f);  // the whole seam is border, one step at a time
+        }
+    }
+    logf("    %llu seam edges checked over all clusters of both tiles\n", (unsigned long long)seamEdges);
+    CHECK(seamEdges >= 2 * n);
+    // The lone tile is not held by seams: as coarse as tile 0 built alone.
+    const Built alone = buildOne(tile(0));
+    CHECK(bs.meshes[2].coarsestTriangles == alone.stats.meshes[0].coarsestTriangles);
+    CHECK(bs.meshes[0].coarsestTriangles > bs.meshes[2].coarsestTriangles);
+}
+
 UNX_TEST(feature_width_of_known_shapes)
 {
     // Grass blade 4 mm x 30 cm: flat sheet, width 4 mm.
@@ -480,6 +568,7 @@ scene::Scene threeMeshScene()
     {
         scene::Instance in;
         in.mesh = m;
+        in.transform.m[0][3] = 100.0f * m;  // apart: no seams between them (findSeams), so mesh 2 still duplicates mesh 0
         sc.instances.push_back(in);
     }
     return sc;

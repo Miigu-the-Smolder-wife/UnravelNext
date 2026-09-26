@@ -108,7 +108,7 @@ std::vector<size_t> foldedTriangles(const clodMesh& mesh, const std::vector<unsi
     return folded;
 }
 
-void buildSubmesh(const Settings& settings, const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& remap, std::vector<unsigned char>& locks,
+void buildSubmesh(const Settings& settings, bool morphed, const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& remap, std::vector<unsigned char>& locks,
                   const detail::MeshWidthContext& widths, uint32_t submesh, MeshOut& out)
 {
     using namespace clod;
@@ -151,6 +151,19 @@ void buildSubmesh(const Settings& settings, const clodConfig& config, const clod
         return (int)out.groups.size() - 1;
     };
 
+    // C4: a mesh with blend shapes or a vertex animation keeps its source clusters only (terminal, one group each): its
+    // simplification errors would be measured on the bind pose, which the morphs leave (a coarse cut could miss the
+    // curvature a shape adds). Exact at every distance; its cost is the source triangle count.
+    if (morphed)
+    {
+        for (int ci : pending)
+        {
+            clodBounds bounds = clusters[ci].bounds;
+            bounds.error = FLT_MAX;
+            emit({ ci }, bounds);
+        }
+        return;
+    }
     while (pending.size() > 1)
     {
         std::vector<std::vector<int>> groups = partition(config, mesh, clusters, pending, remap);
@@ -296,7 +309,7 @@ int32_t orientationClass(const SheetOrientation& o)
     return 1 + (int32_t)(u * kCells) + kCells * (int32_t)(w * kCells);
 }
 
-MeshOut buildMesh(const scene::Mesh& m, const Settings& settings)
+MeshOut buildMesh(const scene::Mesh& m, const Settings& settings, const std::vector<uint32_t>& seamVertices)
 {
     const auto t0 = std::chrono::steady_clock::now();
     MeshOut out;
@@ -339,6 +352,9 @@ MeshOut buildMesh(const scene::Mesh& m, const Settings& settings)
             else if (owner[w] != s) boundaryLock[w] = meshopt_SimplifyVertex_Lock;
         }
     }
+    // Seams with other instances (findSeams): the shared border stays at the source vertices at every level, so two
+    // meshes that meet (terrain tiles, modular pieces) are watertight whatever cut each one draws.
+    for (uint32_t v : seamVertices) boundaryLock[remap[v]] = meshopt_SimplifyVertex_Lock;
     for (size_t v = 0; v < vertexCount; ++v) boundaryLock[v] = boundaryLock[remap[v]];
 
     clodConfig config = clodDefaultConfig(settings.clusterTriangles);
@@ -416,7 +432,7 @@ MeshOut buildMesh(const scene::Mesh& m, const Settings& settings)
                     break;
                 }
         }
-        buildSubmesh(settings, config, mesh, remap, locks, widths, s, out);
+        buildSubmesh(settings, settings.noSimplification || !m.blendShapes.empty() || m.vertexAnimation.framesPerSecond > 0, config, mesh, remap, locks, widths, s, out);
         }
     }
 
@@ -487,7 +503,7 @@ namespace
 {
 // Identity of a mesh's hierarchy: everything buildMesh reads (positions, normals, uv0, indices, submesh ranges) and the
 // settings. Materials are applied when the scene's buffers are assembled, so they are not part of it.
-std::string meshKey(const scene::Mesh& m, const Settings& settings)
+std::string meshKey(const scene::Mesh& m, const Settings& settings, const std::vector<uint32_t>& seamVertices)
 {
     Sha256 h;
     auto add = [&](const auto& v) {
@@ -499,6 +515,9 @@ std::string meshKey(const scene::Mesh& m, const Settings& settings)
     add(m.normals);
     add(m.uv0);
     add(m.indices);
+    const uint32_t morphed = settings.noSimplification || !m.blendShapes.empty() || m.vertexAnimation.framesPerSecond > 0;
+    h.update(&morphed, sizeof morphed);
+    add(seamVertices);
     for (const scene::Submesh& sm : m.submeshes)
     {
         const uint32_t range[2] = { sm.indexOffset, sm.indexCount };
@@ -510,6 +529,113 @@ std::string meshKey(const scene::Mesh& m, const Settings& settings)
     h.update(floats, sizeof floats);
     const std::array<uint8_t, 32> d = h.finish();
     return std::string(reinterpret_cast<const char*>(d.data()), d.size());
+}
+
+// Seam vertices of every mesh (sorted mesh vertex indices): open-border vertices on the mesh's bounding box whose world
+// position (any static instance) coincides with such a vertex of another instance, within 1e-5 of the coordinate
+// magnitude (at least 1e-5 m). Neighbours whose cuts differ would otherwise open a crack of up to both LOD errors along
+// the shared border; a mesh that meets nothing keeps its border free to simplify. Placement is part of the scene, so
+// a moved static instance changes its mesh's key (the builder runs on commit; instance edits after commit do not
+// rebuild hierarchies, INTERFACES 6.3).
+std::vector<std::vector<uint32_t>> findSeams(const scene::Scene& scene)
+{
+    const uint32_t meshCount = (uint32_t)scene.meshes.size();
+    std::vector<std::vector<uint32_t>> candidates(meshCount), seams(meshCount);
+    std::vector<uint8_t> used(meshCount, 0);
+    for (const scene::Instance& in : scene.instances)
+        if (in.mesh < meshCount && !(in.flags & (scene::InstanceDynamic | scene::InstanceSkinned))) used[in.mesh] = 1;
+    Jobs::instance().parallelFor(meshCount, [&](uint32_t mi) {
+        const scene::Mesh& m = scene.meshes[mi];
+        if (!used[mi] || m.positions.empty()) return;
+        float3 lo = m.positions[0], hi = lo;
+        for (const float3& p : m.positions)
+        {
+            lo = { std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z) };
+            hi = { std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z) };
+        }
+        // Welded by exact position; edges counted over every submesh.
+        auto bitsOf = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
+        std::map<std::tuple<uint32_t, uint32_t, uint32_t>, uint32_t> byPosition;
+        std::vector<uint32_t> id(m.positions.size());
+        for (uint32_t v = 0; v < (uint32_t)m.positions.size(); ++v)
+        {
+            const float3 p = m.positions[v];
+            id[v] = byPosition.emplace(std::make_tuple(bitsOf(p.x), bitsOf(p.y), bitsOf(p.z)), v).first->second;
+        }
+        std::unordered_map<uint64_t, uint32_t> edges;
+        for (size_t t = 0; t + 2 < m.indices.size(); t += 3)
+        {
+            const uint32_t a = id[m.indices[t]], b = id[m.indices[t + 1]], c = id[m.indices[t + 2]];
+            if (a == b || b == c || a == c) continue;
+            for (auto [u, w] : { std::pair{ a, b }, std::pair{ b, c }, std::pair{ c, a } }) ++edges[(uint64_t)std::min(u, w) << 32 | std::max(u, w)];
+        }
+        auto onBox = [&](const float3& p) { return p.x == lo.x || p.x == hi.x || p.y == lo.y || p.y == hi.y || p.z == lo.z || p.z == hi.z; };
+        std::vector<uint32_t> out;
+        for (const auto& [e, count] : edges)
+            if (count == 1)
+                for (uint32_t v : { (uint32_t)(e >> 32), (uint32_t)e })
+                    if (onBox(m.positions[v])) out.push_back(v);
+        std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
+        candidates[mi] = std::move(out);
+    });
+    // World positions of every static instance's candidates on a grid of cells twice the tolerance; matches are searched
+    // in the 27 neighbouring cells.
+    struct Point
+    {
+        double x, y, z;
+        uint32_t instance, mesh, vertex;
+    };
+    std::vector<Point> points;
+    for (uint32_t ii = 0; ii < (uint32_t)scene.instances.size(); ++ii)
+    {
+        const scene::Instance& in = scene.instances[ii];
+        if (in.mesh >= meshCount || (in.flags & (scene::InstanceDynamic | scene::InstanceSkinned))) continue;
+        const float3x4& t = in.transform;
+        for (uint32_t v : candidates[in.mesh])
+        {
+            const float3 p = scene.meshes[in.mesh].positions[v];
+            double w[3];
+            for (int r = 0; r < 3; ++r) w[r] = (double)t.m[r][0] * p.x + (double)t.m[r][1] * p.y + (double)t.m[r][2] * p.z + t.m[r][3];
+            points.push_back({ w[0], w[1], w[2], ii, in.mesh, v });
+        }
+    }
+    double extent = 1.0;
+    for (const Point& p : points) extent = std::max({ extent, std::fabs(p.x), std::fabs(p.y), std::fabs(p.z) });
+    const double tolerance = std::max(1e-5, extent * 1e-5), cell = 2 * tolerance;
+    auto cellOf = [&](double c) { return (int64_t)std::floor(c / cell); };
+    auto key = [](int64_t x, int64_t y, int64_t z) { return (uint64_t)(x * 73856093) ^ (uint64_t)(y * 19349663) ^ (uint64_t)(z * 83492791); };
+    std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+    for (uint32_t k = 0; k < (uint32_t)points.size(); ++k) grid[key(cellOf(points[k].x), cellOf(points[k].y), cellOf(points[k].z))].push_back(k);
+    std::vector<uint8_t> seam(points.size(), 0);
+    Jobs::instance().parallelFor((uint32_t)points.size(), [&](uint32_t k) {
+        const Point& p = points[k];
+        const int64_t cx = cellOf(p.x), cy = cellOf(p.y), cz = cellOf(p.z);
+        for (int64_t dx = -1; dx <= 1; ++dx)
+            for (int64_t dy = -1; dy <= 1; ++dy)
+                for (int64_t dz = -1; dz <= 1; ++dz)
+                {
+                    auto it = grid.find(key(cx + dx, cy + dy, cz + dz));
+                    if (it == grid.end()) continue;
+                    for (uint32_t o : it->second)
+                    {
+                        const Point& q = points[o];
+                        if (q.instance != p.instance && std::fabs(q.x - p.x) <= tolerance && std::fabs(q.y - p.y) <= tolerance && std::fabs(q.z - p.z) <= tolerance)
+                        {
+                            seam[k] = 1;
+                            return;
+                        }
+                    }
+                }
+    });
+    for (uint32_t k = 0; k < (uint32_t)points.size(); ++k)
+        if (seam[k]) seams[points[k].mesh].push_back(points[k].vertex);
+    for (std::vector<uint32_t>& list : seams)
+    {
+        std::sort(list.begin(), list.end());
+        list.erase(std::unique(list.begin(), list.end()), list.end());
+    }
+    return seams;
 }
 
 // Hierarchies of the previous build, by mesh identity (D0 editing: a re-commit of an edited level rebuilds only the meshes
@@ -737,7 +863,8 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
     const auto t0 = std::chrono::steady_clock::now();
     const uint32_t meshCount = (uint32_t)scene.meshes.size();
     std::vector<std::string> keys(meshCount);
-    Jobs::instance().parallelFor(meshCount, [&](uint32_t i) { keys[i] = meshKey(scene.meshes[i], settings); });
+    const std::vector<std::vector<uint32_t>> seams = findSeams(scene);
+    Jobs::instance().parallelFor(meshCount, [&](uint32_t i) { keys[i] = meshKey(scene.meshes[i], settings, seams[i]); });
     std::vector<std::shared_ptr<const MeshOut>> built(meshCount);
     {
         std::lock_guard lock(g_meshCacheMutex);
@@ -763,7 +890,7 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
                 fromDisk[k] = 1;
                 return;
             }
-        auto mo = std::make_shared<const MeshOut>(buildMesh(scene.meshes[i], settings));
+        auto mo = std::make_shared<const MeshOut>(buildMesh(scene.meshes[i], settings, seams[i]));
         if (!disk.empty()) storeToDisk(disk, keys[i], *mo);
         built[i] = std::move(mo);
     });

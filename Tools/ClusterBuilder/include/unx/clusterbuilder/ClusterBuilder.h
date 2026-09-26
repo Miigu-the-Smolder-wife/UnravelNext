@@ -31,6 +31,10 @@ struct Settings
     uint32_t clusterMinTriangles = 0;       // visibility.cluster_min_triangles
     float sheetOrientationMinWidth = 0;     // visibility.sheet_orientation_min_width (m)
 
+    // Source clusters only, no LOD DAG (C2b runtime meshes: shallow hierarchies for GpuScene::addRuntimeMesh; meshes with
+    // blend shapes or a vertex animation get this regardless). Not a quality key: exact at every distance.
+    bool noSimplification = false;
+
     static Settings fromQuality(const QualityConfig& quality);
 };
 
