@@ -41,6 +41,13 @@
     m.lit.shade.b0 6.292 / 6.113 → 4.454 / 4.468 ms(−1.74), 프레임 38.93 / 37.83 → 36.00 / 36.08 ms. 이전 쪽은 같은 exe에 M 커널
     20개만 e994280 이전 GiCache.hlsli로 다시 컴파일한 복사본이다. 남은 조회 몫 ≈ 3.4 ms [예상](조회 없는 셰이딩 ≈ 1.0 ms 기준) →
     타일판 A/B가 다음이다.
+- **굴절·반사 광선 서비스(2026-09-27, R-W1/R-W2 물, R-1/R-2 유리)**: core `FrameServices::traceRefractions`(A 43e2af7).
+  - 호출자(W, A)가 작업 목록을 쓴다. 머리 16 B + 작업 48 B { origin, outputSlot; direction, flags; sigmaA, iorInside }.
+  - R(RefractionTrace.hlsl, ReflectionSystem::recordRefraction)은 작업마다 추적하고 RGBA16F(노출 곱한 선형)를 돌려준다.
+  - 매질: 0 = 물(W의 유체 삼각형 스트림을 RayScene이 매 프레임 용량 BLAS로 빌드, 마스크 kRtMaskFluid), 1 = 속찬 유리(Glass 클래스 뒷면이 출구),
+    0xFF = 층 표면의 반사 광선. 출구는 무편광 Fresnel 1 − F, 전반사는 flags 횟수만큼, 장면 hit은 반사 hit 셰이딩이다.
+  - 커밋 08ff57f, 0c64574, 9dfb94a. DXIL 148 / 142 KB. 첫 실행은 W의 합성 시험(엔진 1: 잔잔한 수조 수직 하향, 닫힌 유체 수직 상향 해석 사례)이다.
+    한계: 매질을 나간 뒤 재진입은 다시 굴절하지 않는다.
 - **r.refl.shade 17 ms 구조 결함 해결(2026-09-27)**: 원인은 hit 셰이딩 단가가 아니라 광선 수였다.
   - G 표본 [실측, city 4K 로그]: 19:04 2.5만(반사 2.1 ms) → 일관 격자 19:31 30.6만(6.9 ms) → 거리 합의 규칙 뒤 124만(20.5 ms).
   - 원인: 2ca4b65의 ReflectionResolve 규칙("모서리 hit 거리가 2배 안이 아니면 자기 작업")이 G 표본의 거리로 4광선 평균을 비교했다.
