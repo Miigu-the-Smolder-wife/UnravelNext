@@ -165,6 +165,7 @@ int main(int argc, char** argv)
         logf("W %s %s: water samples %u (%.1f %% of the view; fallbacks %u), jobs %u reflection + %u refraction, traced %u, overflow %u; %u bands, %u record rounds\n",
              sceneName.c_str(), resolutionArg.c_str(), samples, 100.0 * samples / ((double)res.width * res.height), st.fallbacks(), st.reflectJobs, st.refractJobs, st.traced,
              st.rayOverflow, dbg.rayBands, dbg.rayRounds);
+        logf("W %s %s: fallbacks by reason: off screen %u, left the water %u, occluded %u, step bound %u; shaded %u\n", sceneName.c_str(), resolutionArg.c_str(), st.offscreen, st.exited, st.occluded, st.steps, st.shaded);
         logf("W %s %s: calm water (--planar %s): %u reflection cameras, %u samples read them, mask pixels %u\n", sceneName.c_str(), resolutionArg.c_str(),
              planar == 1 ? "on" : planar == 0 ? "off" : "auto", st.planarViews, st.planar, st.planarMask[0]);
         logf("W %s %s: surface passes %.3f ms (of which list clear/args/apply %.3f) | R ray passes (names with 'refract') %.3f ms | pool stream %.3f ms | frame %.3f ms [measured, median of %u]\n",
