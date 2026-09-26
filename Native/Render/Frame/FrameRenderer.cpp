@@ -200,6 +200,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::globalIllumination(fc, main);
     tracks::reflections(fc, main);
     tracks::particles(fc, main);
+    tracks::distortion(fc, main);
     tracks::shadowVisibility(fc, main);
     tracks::shading(fc, main);
     return main;

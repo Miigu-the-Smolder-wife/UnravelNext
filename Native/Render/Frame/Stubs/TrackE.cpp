@@ -1,0 +1,9 @@
+// Core stub of track E's entry points (Tracks.h), compiled only when that track is disabled in this build
+// (cmake/Tracks.cmake, UNX_TRACKS). It declares no passes and logs once. The track's real code lives in its own folders.
+#include "unx/render/Tracks.h"
+
+namespace unx::render::tracks
+{
+TextureRef volumeMedia(FramePassContext&, ViewResources&, BufferRef) { pending("E.volumeMedia (track disabled in this build)"); return {}; }
+void distortion(FramePassContext&, ViewResources&) { pending("E.distortion (track disabled in this build)"); }
+} // namespace unx::render::tracks

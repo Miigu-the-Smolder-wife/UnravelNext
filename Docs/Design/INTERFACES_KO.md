@@ -22,6 +22,7 @@
 | C 기준·콘텐츠 | C 세션 | `Reference/`, `Tools/SceneGen/`, `Config/quality/reference.toml` |
 | I 통합 | I 세션 (v1.6) | `Native/Host/`, `Config/quality/host.toml` (이전 저장소 쪽 `Assets/UnravelNextBridge/`) |
 | FX GPU 시뮬레이션 | FX 세션 (v1.24) | `Native/Render/Passes/FX/`, `Config/quality/fx.toml` |
+| E 엔진 2 (연기·불 매질, 열 아지랑이, 디버그 드로우, 데칼, 머리카락) | 엔진 2 세션 (재배정 2026-09-26 3a708c49) | `Native/Render/Passes/Volume/`, `Native/Render/Passes/Debug/`, `Native/Render/Passes/Decal/`, `Native/Render/Passes/Hair/`, `Config/quality/volume.toml` |
 | RPP RPP-1 장면 | RPP 세션 (v1.40) | `Content/RPP1/`, `Tools/RppBuild/`, `Docs/Status/RPP_STATUS_KO.md`, `Results/RPP/` (이전 저장소 쪽 `Assets/RPP1/`) |
 | 모두 | — | `Docs/Design/Requests/`(새 파일만), `Results/<트랙>/`(자기 결과), `Docs/Status/<트랙>_STATUS_KO.md`(자기 상태) |
 
@@ -257,7 +258,8 @@ void RenderGraph::addPass(std::string_view name, QueueType, SetupFn setup, Execu
 | shadowVisibility | R32_UINT (7.3) | S | M |
 | shadowOverflowTiles / shadowOverflow / shadowOverflowFallbackTiles | 7.3 (v1.20; v1.22부터 평면 뷰도 그 뷰 리스트 기준) | S | M |
 | shadowFragmentVisibility / shadowFragmentSun | 7.3 (v1.41, S 요청 `20260926_S_fragment_visibility.md`) | S | M |
-| particleLayer / particleDepthRange / particleEdges / distortionLayer | FX의 `Passes/FX/ParticleLayer.hlsli` (v1.41, FX 요청 `20260926_FX_particle_render_pass.md` 8a) | FX | M |
+| particleLayer / particleDepthRange / particleEdges | FX의 `Passes/FX/ParticleLayer.hlsli` (v1.41, FX 요청 `20260926_FX_particle_render_pass.md` 8a) | FX | M |
+| distortionOffset / distortionDepth (열 아지랑이) / volumeSlices (입자 매질, 주 뷰) | E의 `Passes/Volume` (FrameResources.h 주석; 요청 `20260925_FX_particle_render_rules.md` 3b, FEATURES_GAME 0.A-8) | E | M(굴절 합성), S(프록셀 적분 합류) |
 | froxelLights / airVolume (뷰 단위, v1.22) | 7.4, v1.15 형식 | S(메인 뷰: 코어가 FrameResources 참조를 넣음) | M |
 | screenProbes | R 내부 형식, HLSL API로 읽음(5.6) | R | M |
 | screenProbeMaps | 화면 프로브가 쓰는 캐시 항목의 K 경로 지도 아틀라스, 하드웨어 필터 가능(형식·배치는 R의 `ScreenProbes.hlsli`가 정한다; 권장: UAV R32_UINT로 쓰고 SRV R9G9B9E5_SHAREDEXP로 읽기, texel 4 B) (v1.13) | R | M(`SrvCompute`) |

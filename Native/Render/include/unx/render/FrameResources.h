@@ -71,7 +71,16 @@ struct ViewResources
     TextureRef particleLayer;      // RGBA16F, 1/4 resolution: premultiplied radiance + transmittance   [FX]
     TextureRef particleDepthRange; // RG16F, 1/4 resolution: the layer's depth range per texel          [FX]
     BufferRef particleEdges;       // raw: full-resolution edge pixels of the layer + count              [FX]
-    TextureRef distortionLayer;    // RG16F, 1/4 resolution: screen-space offsets (after M0)             [FX]
+    // Heat haze (FEATURES_GAME 0.A-8; E's Passes/Volume; invalid = none): M re-reads the HDR target at p + D x (1 - z_p / z_b)
+    // for pixels behind the haze (z_b: the pixel's view depth, z_p: distortionDepth's view depth).
+    TextureRef distortionOffset;   // RG16F, ceil(W/4) x ceil(H/4): deflection D in full-resolution pixels (far-field    [E]
+                                   // limit of the bent view ray; linear sum of the particles' index gradients, exact
+                                   // while |D| < 8 px)
+    TextureRef distortionDepth;    // R16F, same size: device depth (reversed Z) of the nearest haze particle's front;  [E]
+                                   // 0 = no haze; a pixel is displaced when its opaque depth is below it (behind)
+    TextureRef volumeSlices;       // RGBA16F gridX x gridY x 2S on the froxel grid (main view): part 0 the particle      [E]
+                                   // media's optical depth of each slice (rgb), part 1 its source (nit, before exposure,
+                                   // at the slice entry, self-attenuated); S adds them in the froxel integration
     TextureRef color;              // final colour target of this view                      [M]
 };
 

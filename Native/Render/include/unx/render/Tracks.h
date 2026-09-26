@@ -12,7 +12,7 @@ namespace unx::render::tracks
 void simulation(FramePassContext& fc);
 // The particle layer of a view (v1.41, FX request 20260926_FX_particle_render_pass 8a): after reflections and before
 // shadow visibility and shading (VSM pages, froxel light lists, air and the GI cache are ready; M composites the layer
-// before tonemapping). Writes view.particleLayer, particleDepthRange, particleEdges, distortionLayer (invalid = none).
+// before tonemapping). Writes view.particleLayer, particleDepthRange, particleEdges (invalid = none).
 void particles(FramePassContext& fc, ViewResources& view);
 
 // ---- V: visibility (core session) - Native/Render/Passes/Visibility, Tools/ClusterBuilder
@@ -54,4 +54,12 @@ void shadingComposite(FramePassContext& fc, ViewResources& view);               
 void accelerationStructures(FramePassContext& fc);                // static/dynamic TLAS, BLAS refits -> FrameResources
 void globalIllumination(FramePassContext& fc, ViewResources& main);  // cache update rays, screen probes, near occlusion
 void reflections(FramePassContext& fc, ViewResources& main);      // K/G/M rays, planar mirrors (via renderView)
+
+// ---- E: engine 2 (reassigned 2026-09-26) - Passes/Volume, Passes/Debug, Passes/Decal, Passes/Hair
+// Smoke and fire media (request 20260925_FX_particle_render_rules 3b): called by S's froxels() of the main view between
+// its light lists (froxelLights: FroxelGrid header + lists) and the integration; returns the view's volumeSlices texture
+// (invalid: no particle media this frame, the integration unchanged).
+TextureRef volumeMedia(FramePassContext& fc, ViewResources& main, BufferRef froxelLights);
+// Heat haze of a view (FEATURES_GAME 0.A-8): after particles(); writes view.distortionOffset and distortionDepth.
+void distortion(FramePassContext& fc, ViewResources& view);
 } // namespace unx::render::tracks

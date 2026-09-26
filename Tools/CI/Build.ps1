@@ -89,7 +89,7 @@ foreach ($sub in $submodules) {
   }
 }
 if (-not $Tracks) {
-  $Tracks = switch ($Track) { "core" { "V" } "I" { "V;M;S;R;I" } "RPP" { "C;RPP" } "all" { "all" } default { $Track } }
+  $Tracks = switch ($Track) { "core" { "V" } "I" { "V;M;S;R;I" } "RPP" { "C;RPP" } "E" { "FX;E" } "all" { "all" } default { $Track } }
 }
 # A build folder is configured for one track set: Ninja's dyndep state from another set can abort the build
 # (edge->outputs_ready assertion, reported by I). A different set starts the folder over.

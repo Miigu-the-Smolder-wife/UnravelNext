@@ -7,8 +7,8 @@
 # passes. Tools/CI/Build.ps1 -Track <name> selects the tracks of that session.
 include_guard(GLOBAL)
 
-set(UNX_TRACKS "all" CACHE STRING "Enabled tracks: all, or a list of V;M;S;R;C;I;FX;RPP (core is always on)")
-set(UNX_ALL_TRACKS V M S R C I FX RPP)
+set(UNX_TRACKS "all" CACHE STRING "Enabled tracks: all, or a list of V;M;S;R;C;I;FX;RPP;E (core is always on)")
+set(UNX_ALL_TRACKS V M S R C I FX RPP E)
 
 if(NOT UNX_TRACKS STREQUAL "all")
   foreach(t ${UNX_TRACKS})
@@ -37,6 +37,11 @@ set(UNX_TRACK_OF_RppBuild RPP)  # RPP-1 scene build (CPU tool; links unx_scenege
 set(UNX_TRACK_OF_Cook V)       # C: asset cooking (texture chains, caches); needs M for the mip builder (skips itself without)
 set(UNX_TRACK_OF_Terrain V)    # C: terrain
 set(UNX_TRACK_OF_Streaming V)  # C: NVMe -> RAM -> VRAM streaming
+# E (engine 2, reassigned 2026-09-26 3a708c49): smoke/fire media and heat haze, debug draw, decals, hair
+set(UNX_TRACK_OF_Volume E)
+set(UNX_TRACK_OF_Debug E)
+set(UNX_TRACK_OF_Decal E)
+set(UNX_TRACK_OF_Hair E)
 
 function(unx_track_of folder out)
   if(NOT DEFINED UNX_TRACK_OF_${folder})
