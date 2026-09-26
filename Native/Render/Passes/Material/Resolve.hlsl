@@ -17,6 +17,8 @@
 //        RenderGraph::addBandedGroup's split min(H, floor(H b / bands) & ~7).
 //        Decals (A7, E's Passes/Decal/Decal.hlsli; UNX_NONE = none this frame): decalApply modifies the pixel material
 //        after the normal map and before the band limit (FEATURES_GAME 5.2), on the side the shading normal faces.
+// P[5] = { E's surface state constants, table, pool (raw SRVs; UNX_NONE = no field), S's weather record SRV (UNX_NONE =
+//        none) }: the surface state layers over the decals (SurfaceLayers.hlsli).
 // P[3].y experiment mask (material.experiment_disable: cost attribution only, 0 otherwise)
 // PLANAR_MASK=1 (planar reflection views with R's mask; views without one compile none of it):
 // P[3].z R's planar tile mask (R8_UINT per 8 x 8 tile, nonzero = mirror pixels; UNX_NONE = absent), P[3].w R's planar
@@ -31,6 +33,7 @@
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
 #include "Passes/Decal/Decal.hlsli"
+#include "Passes/Material/SurfaceLayers.hlsli"
 
 #define M_PI 3.14159265358979
 
@@ -132,6 +135,16 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 dc.frames = P[4].z; dc.tiles = P[4].w; dc.materialTable = P[2].x;
                 decalApply(dc, pixel, ds, dm);
                 baseColor = dm.baseColor; roughness = dm.roughness; metallic = dm.metallic; n = dm.normal; variance = dm.variance;
+            }
+            if (P[5].x != UNX_NONE || P[5].w != UNX_NONE)
+            {
+                SurfaceLayerInputs li;
+                li.surfaceConstants = P[5].x; li.surfaceTable = P[5].y; li.surfacePool = P[5].z; li.weather = P[5].w;
+                SurfaceLayerMaterial lm;
+                lm.baseColor = baseColor; lm.roughness = roughness; lm.metallic = metallic; lm.normal = n; lm.variance = variance;
+                surfaceLayersApply(li, g_cameraPosition + s.offset, backSide ? -s.geometricNormal : s.geometricNormal,
+                                   (dot(s.dndx, s.dndx) + dot(s.dndy, s.dndy)) / 12.0, lm);
+                baseColor = lm.baseColor; roughness = lm.roughness; metallic = lm.metallic; n = lm.normal; variance = lm.variance;
             }
 
             const float alpha = max(roughness * roughness, 1e-4);

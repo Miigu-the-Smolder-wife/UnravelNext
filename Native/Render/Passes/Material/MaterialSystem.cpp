@@ -213,6 +213,15 @@ void resolve(FramePassContext& fc, ViewResources& view)
 
     const ViewResources v = view;
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
+    // A7 surface layers (SurfaceLayers.hlsli): E's field and S's weather of the frame
+    struct SurfaceInputs
+    {
+        BufferRef surfaceConstants, surfaceTable, surfacePool;
+        uint32_t weather;
+        TextureRef rainShadow;
+    } surface{ fc.resources.surfaceConstants, fc.resources.surfaceTable, fc.resources.surfacePool, fc.resources.weather,
+               fc.resources.rainShadow };
+    if (surface.weather == UINT32_MAX) surface.weather = gpu::kNone;
     fc.graph.addPass(planar ? "m.resolve.planar" : "m.resolve", QueueType::Graphics,
                      [&](PassBuilder& b) {
                          b.use(v.visId, Use::SrvCompute);
@@ -233,19 +242,30 @@ void resolve(FramePassContext& fc, ViewResources& view)
                              b.use(v.decalFrames, Use::SrvCompute);
                              b.use(v.decalTiles, Use::SrvCompute);
                          }
+                         // E's surface state field and S's rain shadow map (A7 layers; invalid = none)
+                         if (surface.surfaceConstants.valid())
+                         {
+                             b.use(surface.surfaceConstants, Use::SrvCompute);
+                             b.use(surface.surfaceTable, Use::SrvCompute);
+                             b.use(surface.surfacePool, Use::SrvCompute);
+                         }
+                         if (surface.rainShadow.valid()) b.use(surface.rainShadow, Use::SrvCompute);
                      },
-                     [kernel, v, o, cb, tileCount, debugBuffer, experiment](PassContext& c) {
+                     [kernel, v, o, cb, tileCount, debugBuffer, experiment, surface](PassContext& c) {
                          const uint32_t tileMask = v.view.planarTileMask.valid() ? c.srv(v.view.planarTileMask) : gpu::kNone;
                          const uint32_t pixelMask = !v.view.planarTileMask.valid() && v.view.planarMask.valid() ? c.srv(v.view.planarMask) : gpu::kNone;
                          const bool decals = v.decalFrames.valid() && v.decalTiles.valid();
-                         const uint32_t k[20] = { c.srv(v.visId), c.srv(v.visibleClusters), c.uav(v.gbuffer), c.uav(o.materialWord),
+                         const bool field = surface.surfaceConstants.valid();
+                         const uint32_t k[24] = { c.srv(v.visId), c.srv(v.visibleClusters), c.uav(v.gbuffer), c.uav(o.materialWord),
                                                   o.emissive.valid() ? c.uav(o.emissive) : gpu::kNone, c.uav(v.reflectionLobeTiles), c.uav(o.tiles), c.uav(o.tileArgs),
                                                   o.textureTableSrv, o.tilesX, o.tilesY, tileCount, debugBuffer.valid() ? c.uav(debugBuffer) : gpu::kNone, experiment,
                                                   tileMask, pixelMask, o.bands, o.height, decals ? c.srv(v.decalFrames) : gpu::kNone,
-                                                  decals ? c.srv(v.decalTiles) : gpu::kNone };
+                                                  decals ? c.srv(v.decalTiles) : gpu::kNone,
+                                                  field ? c.srv(surface.surfaceConstants) : gpu::kNone, field ? c.srv(surface.surfaceTable) : gpu::kNone,
+                                                  field ? c.srv(surface.surfacePool) : gpu::kNone, surface.weather };
                          c.cmd->SetPipelineState(kernel);
                          c.bindFrameConstants(cb);
-                         c.computeConstants(k, 20);
+                         c.computeConstants(k, 24);
                          c.cmd->Dispatch(o.tilesX, o.tilesY, 1);
                      });
 
