@@ -1,3 +1,15 @@
+## 재개 지점 (렌더 A, 2026-09-27 저녁; 주간 87 %, 90 % 상한 앞 정지)
+- 상태: 모든 작업 커밋됨(UnravelNext bdc2b48까지, Unravel 751b8927까지). 마지막 배포 Unravel 751b8927 = 빌드 cbb572a(ShadingTests 하드웨어 통과). 배포 절차는 아래 그대로이며, Deploy.ps1은 상대 -Build 경로 결함을 faa3837로 고쳤다.
+- 이번에 끝낸 것:
+  - A13 UI 합성(Unravel 8df7b698): 파이프라인이 rendersUIOverlay로 그린다. SDR은 직접 그리고, HDR은 검정 위·흰색 위 두 장을 B + (W−B)·장면으로 합성한다(UI 흰색 = 종이 흰색). HDR 모니터 실화면은 확인하지 못했다.
+  - A3 발광 입자 광원 완료(cccff0f, v1.79~v1.82). S·R은 렌더 B(c1bd9cd), 빛 플래그는 엔진 2(d8e0958). 성능 기록은 FX가 있는 게임 캡처에서 한다.
+  - 메시 입자 합류(렌더 C 정의, 호출·UnxVfxMapMeshAsset·gpuInstances). C# 바인딩은 아직 없다(C가 요청하면 추가).
+  - GI 화면 조도 텍스처(v1.80)는 M이 읽지 않는다. D0 이득 0 [실측, Results/M/GiScreenAB].
+- 다음 순서:
+  1. sheen 면광원: 지평선 절단 구면 삼각형 구적(MATERIAL_LAYERS 1.4 "채택 방향"). 먼저 크기별 오차로 차수 표를 정하고(LtcFit --polygon-check 확장), 그다음 HLSL을 ShadeOpaque LAYERED=2와 CoverageShade sheenOn에 넣는다(DXIL 여유 약 22 KB).
+  2. 비등방성 → 박막 → 자동차 도장 → 스타일화.
+  3. 최적화: D0 10.27 ms, fp_1000 21.87 ms(s.froxel.integrate 4.65).
+
 ## 재개 지점 (렌더 A, 2026-09-27 06:20; 문맥 비움 전)
 - 상태:
   - 모든 작업이 커밋되었다(UnravelNext ecb0546까지, Unravel 62724c31 이후 FEATURE_STATUS 측정).
