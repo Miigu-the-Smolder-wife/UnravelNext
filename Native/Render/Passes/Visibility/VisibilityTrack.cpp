@@ -1298,7 +1298,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     for (uint32_t slot = 0; slot < (uint32_t)streams.size(); ++slot)
     {
         const TriangleStream st = streams[slot];
-        if (!st.vertices.valid() || !st.drawArgs.valid() || st.maxTriangles == 0) continue;
+        if (!st.vertices.valid() || !st.drawArgs.valid() || st.maxTriangles == 0 || st.layer != 0) continue;
         if (st.maxTriangles > (1u << 24)) fail("V: triangle stream %u holds %u triangles (at most 2^24)", slot, st.maxTriangles);
         if (g.desc(st.vertices).size < (uint64_t)st.maxTriangles * 96) fail("V: triangle stream %u: vertex buffer below %u triangles", slot, st.maxTriangles);
         const uint32_t groups = (st.maxTriangles + 31) / 32;
@@ -1416,6 +1416,8 @@ void recordStats(FramePassContext& fc, State& s, const Run& r, const std::string
 }
 } // namespace
 
+void waterLayer(FramePassContext& fc, const Run& r, const ViewResources& view);  // below
+
 void visibility(FramePassContext& fc, ViewResources& view)
 {
     State& s = state(fc);
@@ -1488,9 +1490,79 @@ void visibility(FramePassContext& fc, ViewResources& view)
         rasterPass(fc, s, r, view, 2);
         hizPasses(fc, s.mainHiz, r.hiz, view.depth, width, height, "final");
     }
+    waterLayer(fc, r, view);
     if (r.bandMode != kBandModeA) coveragePasses(fc, s, r, view);
     recordStats(fc, s, r, "main");
     s.mainHiz.history = true;  // complete for the next frame once this frame's passes run
+}
+
+// Water layer (v1.61): the layer-1 triangle streams drawn with one sample per pixel over a copy of band A's depth (depth test
+// and write, both faces) into FrameResources::waterVis (vis id) and waterDepth (linear view depth, +inf = none).
+void waterLayer(FramePassContext& fc, const Run& r, const ViewResources& view)
+{
+    std::vector<uint32_t> slots;
+    const std::vector<TriangleStream>& streams = fc.resources.triangleStreams;
+    for (uint32_t slot = 0; slot < (uint32_t)streams.size(); ++slot)
+        if (streams[slot].layer == 1 && streams[slot].vertices.valid() && streams[slot].drawArgs.valid() && streams[slot].maxTriangles > 0) slots.push_back(slot);
+    if (slots.empty()) return;
+    RenderGraph& g = fc.graph;
+    const uint32_t width = view.view.width, height = view.view.height;
+    const TextureRef depthA = view.depth;
+    const TextureRef depth = g.createTexture({ "v.water.depth.test", width, height, 1, 1, DXGI_FORMAT_D32_FLOAT });
+    const TextureRef vis = g.createTexture({ "v.water.vis", width, height, 1, 1, DXGI_FORMAT_R32_UINT });
+    const TextureRef linear = g.createTexture({ "v.water.depth", width, height, 1, 1, DXGI_FORMAT_R32_FLOAT });
+    g.addPass("v.water.copy", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(depthA, Use::CopySrc);
+                  b.use(depth, Use::CopyDst);
+              },
+              [=](PassContext& c) { c.cmd->CopyResource(c.resource(depth), c.resource(depthA)); });
+    MeshPipelineDesc d;
+    d.meshShader = "Passes/Visibility/WaterLayer.ms";
+    d.pixelShader = "Passes/Visibility/WaterLayer.ps";
+    d.renderTargets = { DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_FLOAT };
+    d.depthFormat = DXGI_FORMAT_D32_FLOAT;
+    d.depthFunc = D3D12_COMPARISON_FUNC_GREATER;  // reversed Z: in front of band A and of nearer water
+    d.cull = D3D12_CULL_MODE_NONE;
+    ID3D12PipelineState* pso = fc.shaders.mesh("v.water", d);
+    const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = view.frameConstants;
+    const uint32_t viewsSrv = r.viewsSrv;
+    std::vector<TriangleStream> drawn;
+    for (uint32_t slot : slots) drawn.push_back(streams[slot]);
+    g.addPass("v.water.raster", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(depth, Use::DepthWrite);
+                  b.use(vis, Use::RenderTarget);
+                  b.use(linear, Use::RenderTarget);
+                  for (const TriangleStream& st : drawn)
+                  {
+                      b.use(st.vertices, Use::SrvGraphics);
+                      b.use(st.drawArgs, Use::SrvGraphics);
+                  }
+              },
+              [=](PassContext& c) {
+                  const D3D12_CPU_DESCRIPTOR_HANDLE rtv[2] = { c.rtv(vis), c.rtv(linear) }, dsv = c.dsv(depth);
+                  const float none[4] = { 0, 0, 0, 0 }, infinite[4] = { INFINITY, INFINITY, INFINITY, INFINITY };
+                  c.cmd->ClearRenderTargetView(rtv[0], none, 0, nullptr);
+                  c.cmd->ClearRenderTargetView(rtv[1], infinite, 0, nullptr);
+                  c.cmd->OMSetRenderTargets(2, rtv, FALSE, &dsv);
+                  const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
+                  const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
+                  c.cmd->RSSetViewports(1, &vp);
+                  c.cmd->RSSetScissorRects(1, &sc);
+                  c.bindFrameConstants(frameConstants);
+                  c.cmd->SetPipelineState(pso);
+                  for (size_t k = 0; k < drawn.size(); ++k)
+                  {
+                      const TriangleStream& st = drawn[k];
+                      const uint32_t groups = (st.maxTriangles + 31) / 32;
+                      const uint32_t kc[8] = { c.srv(st.vertices), c.srv(st.drawArgs), st.maxTriangles, slots[k], viewsSrv, 0, 0, 0 };
+                      c.graphicsConstants(kc, 8);
+                      c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
+                  }
+              });
+    fc.resources.waterVis = vis;
+    fc.resources.waterDepth = linear;
 }
 
 void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)

@@ -103,6 +103,9 @@ struct TriangleStream
     uint32_t instance = 0xFFFFFFFFu;    // scene instance it belongs to, or none
     uint32_t maxTriangles = 0;
     float3 boundsMin{}, boundsMax{};    // world AABB (culling)
+    // v1.61: 0 = coverage-layer see-through records (small surfaces: B8 fluid); 1 = the water layer (wide surfaces: B7
+    // ocean and lakes; FrameResources::waterVis / waterDepth, one sample per pixel over band A).
+    uint32_t layer = 0;
 };
 constexpr uint32_t kMaxTriangleStreams = 64;  // vis id slot bits (CoverageTiles.hlsli COV_STREAM_ID)
 
@@ -159,6 +162,10 @@ struct FrameResources
     BufferRef hairSegments, hairBodies;
     // GPU triangle streams of this frame (W, before V: tracks::waterGeometry; V's coverage layer, v1.60).  [W]
     std::vector<TriangleStream> triangleStreams;
+    // Water layer (v1.61, main view; V draws the streams of layer 1 over a copy of band A's depth, band A stays): the nearest
+    // water surface in front of band A per pixel - waterVis R32_UINT (COV_STREAM_ID | slot | triangle, VIS_NONE = no
+    // water), waterDepth R32_FLOAT linear view depth (+inf = no water). Invalid when the frame has no water stream.  [V]
+    TextureRef waterVis, waterDepth;
     // Light functions (E's Passes/Lights LightFunction.hlsli, A8; invalid = no light has one): cookies, IES, gobos,  [E]
     // flicker and animation per light index. Every reader of a light's emission (M shading, S froxel in-scattering, R
     // hit shading and GI) multiplies it by lightFunction(srv, light, forward, right, dir, footprint, g_time) (raw).

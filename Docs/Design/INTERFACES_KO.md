@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.62, 2026-09-26)
+# UnravelNext 인터페이스 (v1.63, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -726,6 +726,8 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.63 (2026-09-26, 렌더 C, 물 층 — A 결정, W 요청 `20260926_W_ocean_patch_stream.md`):
+  - **물 층**: `TriangleStream::layer`(0 = coverage 투과 기록: 좁은 표면(B8 유체), 1 = 물 층: 넓은 표면(B7 바다·호수)). V가 주 뷰에서 layer 1 스트림을 band A 깊이의 복사본 위에 1표본 하드웨어 래스터(깊이 검사·쓰기, 양면)로 그려 `FrameResources::waterVis`(R32_UINT, COV_STREAM_ID | 슬롯 | 삼각형, 물 없으면 VIS_NONE)와 `waterDepth`(R32_FLOAT 선형 view 깊이, 물 없으면 +∞)를 낸다. band A(수중)는 그대로다. 프레임에 물 스트림이 없으면 둘 다 invalid. 근거 [실측] (ea6ff3d): 수면을 coverage 기록으로 넣으면 4K에서 약 5.5 ms. 남은 V 몫: W의 정제 함수(`oceanRefine`, 픽셀 셰이더에서 정확 깊이 또는 discard, SV_DepthLessEqual)와 가장자리 픽셀만의 coverage 기록(A 결정) — W의 include가 들어오면.
 - v1.62 (2026-09-26, 코어·M, 렌더 A):
   - **루트 상수 32 → 48 DWORD(3절)**: `Device::kRootConstantCount = 48`, `Bindless.hlsli`의 `cbuffer PassConstants { uint4 P[12]; }`. P[8..11]이 새로 생겼다. 루트 시그니처는 48 + 루트 CBV 2 = 50 DWORD(한도 64)다. P를 32개 이하로 쓰는 커널과 `computeConstants(k, 32)` 호출은 그대로 유효하다. 필요한 곳만 48까지 쓴다. 이유: coverage 조각 커널(풀·잎)이 표면 층·날씨·광원 함수·머리카락 같은 프레임 전역 SRV를 받을 자리가 없었다. [실측] 전 트랙 빌드 뒤 단위 36/36, visibility 8/8, material·shading·post·lights·decalhits·photo·FX 층·water 3종·호스트 5종 모두 통과, 디버그 층 오류 0.
   - **coverage 조각의 광원 함수(A8)**: P[8].x = `FrameResources::lightFunctions`(없으면 UNX_NONE). CoverageShade의 점·스폿 조도에 ShadeOpaque와 같은 lightFunction을 곱한다.

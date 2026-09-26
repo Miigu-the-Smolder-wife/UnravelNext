@@ -1,0 +1,7 @@
+V: instance hierarchy: 2 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+    13306 water pixels (36 at an edge or tie, not judged): 0 missing, 0 extra, 0 wrong ids, worst depth error 5.53e-06 relative; band A depth equal to the water's at 0 pixels; 0 coverage records
+PASS water_layer_is_exact
+1/1 passed
