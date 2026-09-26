@@ -34,6 +34,9 @@
 groupshared float3 gs_coefficients[(MS_SH_MAX + 1) * (MS_SH_MAX + 2) / 2];
 #define MS_RING_MAX 256u  // largest azimuth node count of the projection grid (groupshared ring)
 groupshared float3 gs_ring[MS_RING_MAX];
+// PASS 1, separable evaluation: the azimuthal terms F_m(mu) = sqrt2^[m>0] sum_l c_lm P~_l^m(mu) of MS_ROWS mu rows at a time.
+#define MS_ROWS 16u
+groupshared float3 gs_rowTerms[MS_ROWS * (MS_SH_MAX + 1)];
 
 struct MsTexel
 {
@@ -135,42 +138,60 @@ void main(uint3 thread : SV_DispatchThreadID)
     GroupMemoryBarrierWithGroupSync();
     RWTexture3D<float4> output = ResourceDescriptorHeap[P[0].w];
     RWStructuredBuffer<float4> acc = ResourceDescriptorHeap[P[1].x];
-    for (uint k = lane; k < n.x * n.z; k += 64)
+    // Separable: for a slice (r, mu_s) the Legendre part depends on mu only. Per chunk of MS_ROWS mu rows: F_m(mu) =
+    // sqrt2^[m>0] sum_{l>=m} c_lm P~_l^m(mu) (lane per (row, m)), then per texel J = sum_m F_m cos(m phi): 33 terms per
+    // texel instead of 561 (the same terms, summed by m).
+    const float sliceAltitude = airMsAltitude(a, float(r) / (n.w - 1));
+    for (uint rowBase = 0; rowBase < n.z; rowBase += MS_ROWS)
     {
-        const uint3 texel = uint3((k % n.x) * n.y + iMus, k / n.x, r);
-        const MsTexel t = msTexel(a, texel);
-        const float sm = sqrt(saturate(1 - t.mu * t.mu)), ss = sqrt(saturate(1 - t.mus * t.mus));
-        const float cphi = sm * ss > 1e-6 ? clamp((t.nu - t.mu * t.mus) / (sm * ss), -1.0, 1.0) : 1.0;
-        float3 J = 0;
-        // Y_lm(v) = P~_l^m(mu) (m > 0: sqrt 2 cos m phi); cos m phi by the Chebyshev recurrence.
-        float cm = 1, cmPrev = cphi;  // cos(m phi), cos((m - 1) phi)
-        float pmm = 0.28209479177387814;  // P~_0^0 = 1 / sqrt(4 pi)
-        for (uint m = 0; m <= L; ++m)
+        const uint rows = min(MS_ROWS, n.z - rowBase);
+        for (uint e = lane; e < rows * (L + 1); e += 64)
         {
-            if (m > 0)
-            {
-                pmm *= -sqrt((2.0 * m + 1) / (2.0 * m)) * sm;
-                const float next = 2 * cphi * cm - cmPrev;
-                cmPrev = cm;
-                cm = next;
-            }
-            const float azimuth = m == 0 ? 1.0 : 1.4142135623730951 * cm;
+            const uint row = e / (L + 1), m = e % (L + 1);
+            const float mu = airMsViewCosine(a, sliceAltitude, rowBase + row);
+            const float sm = sqrt(saturate(1 - mu * mu));
+            float pmm = 0.28209479177387814;  // P~_0^0 = 1 / sqrt(4 pi)
+            for (uint k2 = 1; k2 <= m; ++k2) pmm *= -sqrt((2.0 * k2 + 1) / (2.0 * k2)) * sm;
+            float3 F = gs_coefficients[m * (m + 1) / 2 + m] * pmm;
             float p2 = 0, p1 = pmm;
-            J += gs_coefficients[m * (m + 1) / 2 + m] * (p1 * azimuth);
             for (uint l = m + 1; l <= L; ++l)
             {
-                const float p = l == m + 1 ? sqrt(2.0 * m + 3) * t.mu * pmm
+                const float p = l == m + 1 ? sqrt(2.0 * m + 3) * mu * pmm
                                            : sqrt((4.0 * l * l - 1) / (float(l * l) - float(m * m))) *
-                                                 (t.mu * p1 - sqrt((float((l - 1) * (l - 1)) - float(m * m)) / (4.0 * (l - 1) * (l - 1) - 1)) * p2);
+                                                 (mu * p1 - sqrt((float((l - 1) * (l - 1)) - float(m * m)) / (4.0 * (l - 1) * (l - 1) - 1)) * p2);
                 p2 = p1;
                 p1 = p;
-                J += gs_coefficients[l * (l + 1) / 2 + m] * (p * azimuth);
+                F += gs_coefficients[l * (l + 1) / 2 + m] * p;
             }
+            gs_rowTerms[row * (MS_SH_MAX + 1) + m] = F * (m == 0 ? 1.0 : 1.4142135623730951);
         }
-        J = max(J, 0.0);  // the truncated series of a non-negative convolution (ringing below 6e-4 of the lobe)
-        output[msTexelCoord(a, texel)] = float4(airMsEncode(J), 0);
-        const uint i = msIndex(a, texel);
-        acc[i] = float4(P[1].z != 0 ? J : acc[i].rgb + J, 0);
+        GroupMemoryBarrierWithGroupSync();
+        for (uint k = lane; k < rows * n.x; k += 64)
+        {
+            const uint row = k / n.x;
+            const uint3 texel = uint3((k % n.x) * n.y + iMus, rowBase + row, r);
+            const MsTexel t = msTexel(a, texel);
+            const float sm = sqrt(saturate(1 - t.mu * t.mu)), ss = sqrt(saturate(1 - t.mus * t.mus));
+            const float cphi = sm * ss > 1e-6 ? clamp((t.nu - t.mu * t.mus) / (sm * ss), -1.0, 1.0) : 1.0;
+            // cos(m phi) by the Chebyshev recurrence.
+            float cm = 1, cmPrev = cphi;
+            float3 J = 0;
+            for (uint m = 0; m <= L; ++m)
+            {
+                if (m > 0)
+                {
+                    const float next = 2 * cphi * cm - cmPrev;
+                    cmPrev = cm;
+                    cm = next;
+                }
+                J += gs_rowTerms[row * (MS_SH_MAX + 1) + m] * cm;
+            }
+            J = max(J, 0.0);  // the truncated series of a non-negative convolution (ringing below 6e-4 of the lobe)
+            output[msTexelCoord(a, texel)] = float4(airMsEncode(J), 0);
+            const uint i = msIndex(a, texel);
+            acc[i] = float4(P[1].z != 0 ? J : acc[i].rgb + J, 0);
+        }
+        GroupMemoryBarrierWithGroupSync();
     }
 #elif PASS == 2
     // P[0].z J_n SRV (Texture3D<float4>), P[0].w L_n UAV, P[1].x E SRV (StructuredBuffer<float4>)
