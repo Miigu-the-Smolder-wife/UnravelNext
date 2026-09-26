@@ -3,8 +3,9 @@
 // Refraction rays (R-W2 water, R-2 glass; FrameServices::traceRefractions): one ray generation thread per job of the
 // caller's list (W's or A's fallback samples). A job starts inside the medium at its surface point with the already
 // refracted direction; the ray is traced with absorption e^(-sigma_a t) while inside. It leaves the medium where it meets
-// the medium's own surface from inside (W's fluid triangle streams: RayScene's instances RT_INSTANCE_STREAM_BASE + slot,
-// mask RT_MASK_FLUID, normals from the stream's vertices): refracted out with the exit's transmission 1 - F (Fresnel,
+// the medium's own surface from inside (medium 0, water: W's fluid triangle streams, RayScene's instances
+// RT_INSTANCE_STREAM_BASE + slot, mask RT_MASK_FLUID, normals from the stream's vertices; medium 1, solid glass: a back
+// face of a Glass-class scene surface): refracted out with the exit's transmission 1 - F (Fresnel,
 // unpolarized), or reflected inside on total internal reflection while the job's bounces last. A hit on the scene is
 // shaded as a reflection hit (ReflectionShade.hlsli, the sun by S's VSM or a shadow ray); a miss sees the sky (with the
 // cloud layer). Energy the path loses (internal reflection at the exit, bounces exhausted) is counted, not redistributed.
@@ -76,10 +77,26 @@ void RefractionGen()
         }
         if (inside) throughput *= exp(-sigmaA * hit.t);
         const float3 x = o + d * hit.t;
+        // The medium's own surface, from inside: medium 0 (water) = W's fluid streams; medium 1 (solid glass, A's R-2) = a
+        // back face of a Glass-class surface (its outward normal is the reverse of the shading normal, which faces the ray).
+        bool exits = false;
+        float3 n = 0;
         if (hit.instance >= RT_INSTANCE_STREAM_BASE && hit.instance < RT_INSTANCE_STREAM_BASE + 64)
         {
-            // The medium's own surface, from inside.
-            float3 n = refractStreamNormal(hit.instance - RT_INSTANCE_STREAM_BASE, hit);
+            exits = true;
+            n = refractStreamNormal(hit.instance - RT_INSTANCE_STREAM_BASE, hit);
+        }
+        else if (inside && (flags & 0xFFu) == 1u && hit.instance != RT_INSTANCE_EMITTER)
+        {
+            const RtSurface sg = rtSurface(scene, hit, o, d);
+            if (!sg.frontFace && materialClass(loadMaterial(sg.material)) == MATERIAL_GLASS)
+            {
+                exits = true;
+                n = -sg.normal;
+            }
+        }
+        if (exits)
+        {
             if (dot(n, d) < 0) n = -n;  // along the travel: out of the medium
             const float cosI = dot(d, n);
             const float F = refractFresnel(cosI, ior);
