@@ -11,6 +11,7 @@
 #include "TestRaster.h"
 
 #include "FroxelSystem.h"
+#include "VsmBlockCheck.h"
 #include "VsmSystem.h"
 
 #include <algorithm>
@@ -472,6 +473,20 @@ int main(int argc, char** argv)
                 report(count == over && listedWrong == 0 && word(*rf, 4) == count && word(*rf, 8) == 1 && word(*rf, 12) == 1,
                        "overflow, capacity 1: fallback list = the tiles over capacity, args (n, 1, 1)", (double)count - over + listedWrong, 0);
             }
+        }
+        {
+            // The block hierarchy (VsmPageMax) of every resident page against its atlas texels (VsmBlockCheck.hlsl).
+            std::shared_ptr<std::vector<uint8_t>> check;
+            tf.run([&](FramePassContext& fc) {
+                ViewResources main;
+                main.view = fc.frame.mainView;
+                main.frameConstants = fc.frameConstantsFor(main.view);
+                raster.mainView(fc, main);
+                tracks::shadowPages(fc, main);
+                check = vsmBlockCheck(tf, fc);
+            });
+            tf.frame.time += tf.frame.deltaTime;
+            vsmBlockCheckReport(*check, "local and sun pages", report);
         }
         report(shadow::stats(tf.trackState).errorBitsSeen == 0, "S error bits (INTERFACES 3.6: a shader loop at its hard cap)",
                shadow::stats(tf.trackState).errorBitsSeen, 0);

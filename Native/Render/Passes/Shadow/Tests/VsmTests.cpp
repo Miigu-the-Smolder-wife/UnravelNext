@@ -10,6 +10,7 @@
 //   unx_test_shadow_vsmtests [--no-debug-layer] [--width W --height H] [--dump DIR] [--verbose N] [--set key=value]
 #include "TestRaster.h"
 
+#include "VsmBlockCheck.h"
 #include "VsmSystem.h"
 
 #include <algorithm>
@@ -741,6 +742,20 @@ int main(int argc, char** argv)
             }
         }
 
+        {
+            // The block hierarchy (VsmPageMax) of every resident page against its atlas texels (VsmBlockCheck.hlsl).
+            std::shared_ptr<std::vector<uint8_t>> check;
+            tf.run([&](FramePassContext& fc) {
+                ViewResources main;
+                main.view = fc.frame.mainView;
+                main.frameConstants = fc.frameConstantsFor(main.view);
+                raster.mainView(fc, main);
+                tracks::shadowPages(fc, main);
+                check = vsmBlockCheck(tf, fc);
+            });
+            tf.frame.time += tf.frame.deltaTime;
+            vsmBlockCheckReport(*check, "sun pages", report);
+        }
         report(shadow::stats(tf.trackState).errorBitsSeen == 0, "S error bits (INTERFACES 3.6: a shader loop at its hard cap)",
                shadow::stats(tf.trackState).errorBitsSeen, 0);
         const uint32_t debugErrors = tf.device.drainDebugMessages();

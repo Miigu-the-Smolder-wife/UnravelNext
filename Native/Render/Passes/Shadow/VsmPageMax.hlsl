@@ -67,6 +67,13 @@ groupshared float g_blockRef[256];  // each 8-texel block's highest caster (the 
 // Texel t (0..63, row-major) of 8-texel block b of the page.
 uint2 blockTexel(uint b, uint t) { return uint2(b % 16, b / 16) * 8 + uint2(t % 8, t / 8); }
 
+// Reductions over the 4 lanes of a quad (lanes 4k .. 4k + 3 of the group).
+uint quadMin(uint v) { v = min(v, QuadReadAcrossX(v)); return min(v, QuadReadAcrossY(v)); }
+uint quadMax(uint v) { v = max(v, QuadReadAcrossX(v)); return max(v, QuadReadAcrossY(v)); }
+float quadMin(float v) { v = min(v, QuadReadAcrossX(v)); return min(v, QuadReadAcrossY(v)); }
+float quadMax(float v) { v = max(v, QuadReadAcrossX(v)); return max(v, QuadReadAcrossY(v)); }
+float quadSum(float v) { v += QuadReadAcrossX(v); return v + QuadReadAcrossY(v); }
+
 [numthreads(256, 1, 1)]
 void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
@@ -89,51 +96,49 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         dec.b = l.farM;
     }
 
-    // 1-2. One wave per 8 x 8 block (every texel read once): its lanes hold the block's texels (two per lane on waves of
-    //      32, one on 64; smaller waves read the texels again for the second and third sums), min / max, moments and the
-    //      least-squares plane relative to the block's own highest caster, residual bounds; wave reductions only.
-    const uint L = WaveGetLaneCount(), inWave = WaveGetLaneIndex(), wave = lane / L, waves = 256 / L;
-    [loop] for (uint b = wave; b < 256; b += waves)
+    // 1-2. One quad (4 lanes) per 8 x 8 block, 64 blocks at a time (every texel read once): each lane keeps its 16 texels
+    //      (texel t = 4 i + q: the block's rows in 4-texel runs) in registers; min / max, moments and the least-squares
+    //      plane relative to the block's own highest caster, residual bounds; two quad reads per reduction (a wave per
+    //      block did 13 full-wave reductions and fitted the plane on all 32 lanes: 2.44 ms for 8,445 pages [measured]).
+    const uint q = lane & 3;
+    [loop] for (uint b = lane >> 2; b < 256; b += 64)
     {
-        uint k0 = VSM_EMPTY, k1 = VSM_EMPTY, lo = 0xFFFFFFFFu, hi = VSM_EMPTY;
-        [loop] for (uint t = inWave, i = 0; t < 64; t += L, ++i)
+        uint key[16];
+        uint lo = 0xFFFFFFFFu, hi = VSM_EMPTY;
+        [unroll] for (uint i = 0; i < 16; ++i)
         {
-            const uint k = pageKey(pool, dec, phys, blockTexel(b, t));
-            if (i == 0) k0 = k;
-            else if (i == 1) k1 = k;
-            lo = min(lo, k);
-            hi = max(hi, k);
+            key[i] = pageKey(pool, dec, phys, blockTexel(b, 4 * i + q));
+            lo = min(lo, key[i]);
+            hi = max(hi, key[i]);
         }
-        lo = WaveActiveMin(lo);
-        hi = WaveActiveMax(hi);
+        lo = quadMin(lo);
+        hi = quadMax(hi);
         const float bref = hi == VSM_EMPTY ? 0.0 : vsmDecode(hi);
         Moments m = (Moments)0;
-        [loop] for (uint t2 = inWave, i2 = 0; t2 < 64; t2 += L, ++i2)
+        [unroll] for (uint i2 = 0; i2 < 16; ++i2)
         {
-            const uint k = i2 == 0 ? k0 : i2 == 1 ? k1 : pageKey(pool, dec, phys, blockTexel(b, t2));
-            if (k == VSM_EMPTY) continue;
-            const float2 xy = float2(blockTexel(b, t2)) + 0.5;
-            const float h = vsmDecode(k) - bref;
+            if (key[i2] == VSM_EMPTY) continue;
+            const float2 xy = float2(blockTexel(b, 4 * i2 + q)) + 0.5;
+            const float h = vsmDecode(key[i2]) - bref;
             m.n += 1; m.sx += xy.x; m.sy += xy.y; m.sh += h;
             m.sxx += xy.x * xy.x; m.syy += xy.y * xy.y; m.sxy += xy.x * xy.y; m.sxh += xy.x * h; m.syh += xy.y * h;
         }
-        m.n = WaveActiveSum(m.n); m.sx = WaveActiveSum(m.sx); m.sy = WaveActiveSum(m.sy); m.sh = WaveActiveSum(m.sh);
-        m.sxx = WaveActiveSum(m.sxx); m.syy = WaveActiveSum(m.syy); m.sxy = WaveActiveSum(m.sxy);
-        m.sxh = WaveActiveSum(m.sxh); m.syh = WaveActiveSum(m.syh);
+        m.n = quadSum(m.n); m.sx = quadSum(m.sx); m.sy = quadSum(m.sy); m.sh = quadSum(m.sh);
+        m.sxx = quadSum(m.sxx); m.syy = quadSum(m.syy); m.sxy = quadSum(m.sxy);
+        m.sxh = quadSum(m.sxh); m.syh = quadSum(m.syh);
         const float3 plane = fitPlane(m);
         float rlo = 3.0e38, rhi = -3.0e38;
-        [loop] for (uint t3 = inWave, i3 = 0; t3 < 64; t3 += L, ++i3)
+        [unroll] for (uint i3 = 0; i3 < 16; ++i3)
         {
-            const uint k = i3 == 0 ? k0 : i3 == 1 ? k1 : pageKey(pool, dec, phys, blockTexel(b, t3));
-            if (k == VSM_EMPTY) continue;
-            const float2 xy = float2(blockTexel(b, t3)) + 0.5;
-            const float r = vsmDecode(k) - bref - (plane.x * xy.x + plane.y * xy.y + plane.z);
+            if (key[i3] == VSM_EMPTY) continue;
+            const float2 xy = float2(blockTexel(b, 4 * i3 + q)) + 0.5;
+            const float r = vsmDecode(key[i3]) - bref - (plane.x * xy.x + plane.y * xy.y + plane.z);
             rlo = min(rlo, r);
             rhi = max(rhi, r);
         }
-        rlo = WaveActiveMin(rlo);
-        rhi = WaveActiveMax(rhi);
-        if (WaveIsFirstLane())
+        rlo = quadMin(rlo);
+        rhi = quadMax(rhi);
+        if (q == 0)
         {
             g_moments[b] = m;
             g_range[b] = uint2(lo, hi);
