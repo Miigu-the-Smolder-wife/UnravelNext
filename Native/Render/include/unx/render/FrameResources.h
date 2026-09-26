@@ -134,6 +134,9 @@ struct FrameResources
                                          // filled by shadowPages for shadowSunVisibilityAt (R)
     // Surface state field (E's Passes/Decal SurfaceState.hlsli; invalid = none): surfaceStateAt reads the three (raw).  [E]
     BufferRef surfaceConstants, surfaceTable, surfacePool;
+    // Strand hair (E's Passes/Hair, unx/hair/Hair.h; invalid = no hair): the frame's follow-strand segments (2 float4 each:  [E]
+    // camera-relative p0, r0; p1, r1; r = 0 left out by LOD) and the bodies' header (raw) for V's coverage layer and M.
+    BufferRef hairSegments, hairBodies;
     uint32_t vsmLocalLights = UINT32_MAX;  // SRV descriptors of this frame's local-light shadow [S]
     uint32_t vsmSlotOfLight = UINT32_MAX;  // records (VsmLocalLight, 48 B x shadow slots) and the
                                            // scene light -> shadow slot table (uint, 0xFFFF = none)

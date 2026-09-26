@@ -195,6 +195,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::simulation(fc);  // C0
     tracks::atmosphere(fc);
     tracks::accelerationStructures(fc);
+    tracks::hair(fc, main);  // E (B10): guide ticks and the frame's strand segments, before V
     tracks::visibility(fc, main);
     tracks::decals(fc, main);  // E (A7): decal records and tile lists for the resolve
     tracks::surfaceState(fc);  // E (A7): the surface state field's changes

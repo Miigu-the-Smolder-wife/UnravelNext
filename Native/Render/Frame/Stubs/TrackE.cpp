@@ -10,4 +10,5 @@ uint32_t debugBegin(FramePassContext&) { pending("E.debugBegin (track disabled i
 void debugOverlay(FramePassContext&, ViewResources&) { pending("E.debugOverlay (track disabled in this build)"); }
 void decals(FramePassContext&, ViewResources&) { pending("E.decals (track disabled in this build)"); }
 void surfaceState(FramePassContext&) { pending("E.surfaceState (track disabled in this build)"); }
+void hair(FramePassContext&, ViewResources&) { pending("E.hair (track disabled in this build)"); }
 } // namespace unx::render::tracks

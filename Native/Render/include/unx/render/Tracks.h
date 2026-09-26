@@ -72,6 +72,9 @@ void decals(FramePassContext& fc, ViewResources& view);
 // E (A7, WORLD_VFX 10.4): uploads what changed in the surface state field (surface::surfaceField) and publishes
 // FrameResources::surfaceConstants / surfaceTable / surfacePool (invalid while the field has never had a brick).
 void surfaceState(FramePassContext& fc);
+// E (B10, ARCHITECTURE 2.8 / 2.14): strand hair - the queued ticks' guide simulation, then the frame's follow-strand
+// segments (FrameResources::hairSegments / hairBodies); before visibility (V draws them in the coverage layer).
+void hair(FramePassContext& fc, ViewResources& view);
 // Last in the frame: the buffer visualization (debug.view, replaces the view's colour), then the debug primitives
 // (CPU and GPU appends) and the HUD drawn over view.color.
 void debugOverlay(FramePassContext& fc, ViewResources& view);
