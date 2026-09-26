@@ -2,7 +2,7 @@
 // Clears the cull state words and indirect arguments of a cull run (CullShared.hlsli root layout).
 #include "Passes/Visibility/CullShared.hlsli"
 
-[numthreads(64, 1, 1)]
+[numthreads(128, 1, 1)]  // VS_WORDS, VA_WORDS <= 128
 void main(uint i : SV_DispatchThreadID)
 {
     RWByteAddressBuffer state = ResourceDescriptorHeap[STATE_UAV];

@@ -134,6 +134,11 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
     r.band = r.mixed ? 1u : (!bandB ? 0u : (wFace < BAND_C_MAX_PX ? 2u : 1u));
     const uint drawBand = r.mixed ? 0u : (BAND_MODE == BAND_MODE_A ? 0u : (BAND_MODE == BAND_MODE_COVERAGE ? min(r.band, 1u) : r.band));
     r.list = drawBand == 1 ? LIST_B : (drawBand == 2 ? LIST_C : (alpha ? (cullBack ? LIST_A_ALPHA_BACK : LIST_A_ALPHA_NONE) : (cullBack ? LIST_A_BACK : LIST_A_NONE)));
+    // A6 translucent layer: with the coverage layer on, band A width see-through clusters (glass, water) leave band A (it
+    // keeps what lies behind them) for the translucent lists (their alpha test runs in that layer's pixel kernel).
+    const uint materialClass = m.classFlags & 0xFFu;
+    if (BAND_MODE != BAND_MODE_A && drawBand == 0 && (materialClass == MATERIAL_GLASS || materialClass == MATERIAL_WATER))
+        r.list = cullBack ? LIST_T_BACK : LIST_T_NONE;
     r.list2 = r.mixed ? LIST_B : VS_LISTS;
     r.triangles = clusterTriangleCount(cl);
     r.visible = true;

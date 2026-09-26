@@ -1237,11 +1237,14 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                   if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
               },
               [=](PassContext& c) {
-                  uint32_t k[24];
+                  uint32_t k[32];
                   constants(c, k, 0, true);
                   k[3] = c.uav(stream);
                   k[4] = c.uav(keys);
                   if (!hiz.valid()) k[8] = kNone;
+                  std::memset(&k[24], 0, 8 * 4);
+                  k[24] = kListB;  // COV_RASTER_LIST; P[6].y 0: band B
+                  k[30] = kNone;
                   c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
                   const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
                   const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
@@ -1249,9 +1252,46 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                   c.cmd->RSSetScissorRects(1, &sc);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->SetPipelineState(rasterPso);
-                  c.graphicsConstants(k, 24);
+                  c.graphicsConstants(k, 32);
                   c.cmd->ExecuteIndirect(meshSig, 1, c.resource(run.args), kArgCovMesh * 4, nullptr, 0);
               });
+    // A6: the translucent lists' see-through records in the pixels of translucent class 2 (edges, seams, overlaps).
+    const TextureRef translucentClass = view.translucentClass;
+    if (translucentClass.valid())
+        g.addPass("v.coverage.translucent", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(run.args, Use::IndirectArgs);
+                      b.use(run.visible, Use::SrvGraphics);
+                      b.use(run.lists, Use::SrvGraphics);
+                      b.use(run.state, Use::UavGraphics);
+                      b.use(stream, Use::UavGraphics);
+                      b.use(keys, Use::UavGraphics);
+                      b.use(translucentClass, Use::SrvGraphics);
+                      if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
+                  },
+                  [=](PassContext& c) {
+                      uint32_t k[32];
+                      constants(c, k, 0, true);
+                      k[3] = c.uav(stream);
+                      k[4] = c.uav(keys);
+                      if (!hiz.valid()) k[8] = kNone;
+                      std::memset(&k[24], 0, 8 * 4);
+                      k[25] = 1;  // COV_RASTER_TRANSLUCENT
+                      k[30] = c.srv(translucentClass);
+                      c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+                      const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
+                      const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
+                      c.cmd->RSSetViewports(1, &vp);
+                      c.cmd->RSSetScissorRects(1, &sc);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->SetPipelineState(rasterPso);
+                      for (uint32_t l = kListTBack; l <= kListTNone; ++l)
+                      {
+                          k[24] = l;  // COV_RASTER_LIST
+                          c.graphicsConstants(k, 32);
+                          c.cmd->ExecuteIndirect(meshSig, 1, c.resource(run.args), (kArgCovTMesh + 3 * (l - kListTBack)) * 4, nullptr, 0);
+                      }
+                  });
     // B10 strand hair (E's FrameResources::hairSegments / hairBodies): one mesh group per 32 segments, the same pixel
     // kernel and stream (HairRaster.ms). Its group count is known here (E sizes the buffer per frame).
     const BufferRef hairSegments = fc.resources.hairSegments, hairBodies = fc.resources.hairBodies;
@@ -1431,6 +1471,7 @@ void recordStats(FramePassContext& fc, State& s, const Run& r, const std::string
 } // namespace
 
 void waterLayer(FramePassContext& fc, const Run& r, const ViewResources& view);  // below
+void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& view);
 
 void visibility(FramePassContext& fc, ViewResources& view)
 {
@@ -1505,9 +1546,139 @@ void visibility(FramePassContext& fc, ViewResources& view)
         hizPasses(fc, s.mainHiz, r.hiz, view.depth, width, height, "final");
     }
     waterLayer(fc, r, view);
+    if (r.bandMode != kBandModeA) translucentLayer(fc, s, r, view);
     if (r.bandMode != kBandModeA) coveragePasses(fc, s, r, view);
     recordStats(fc, s, r, "main");
     s.mainHiz.history = true;  // complete for the next frame once this frame's passes run
+}
+
+// A6 translucent layer (v1.67; A's decision): band A width glass and water clusters of the main view (LIST_T_BACK,
+// LIST_T_NONE: every entry of both cull phases), drawn over a copy of band A's depth with the material's alpha test
+// (VisRaster.ms.ALPHA1, TranslucentLayer.ps):
+//   clear    the count (TranslucentClass MODE=0);
+//   count    depth test only (in front of band A): the number of translucent surfaces at each pixel centre;
+//   nearest  depth test and write: the nearest one's vis id and linear view depth (ViewResources::translucentVis, Depth);
+//   class    per pixel (TranslucentClass.hlsl): 0 none, 1 the sample alone covers the pixel, 2 records (count >= 2, or an
+//            edge: a 3 x 3 neighbour with another count or surface, or a depth bend). CoverageRaster then draws the
+//            translucent lists into the coverage layer, keeping class 2 pixels only (coveragePasses).
+// Skipped when the scene has no glass or water material (the layer's full-screen work: a depth copy, the count clear, the
+// target clears and the class pass).
+void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& view)
+{
+    bool any = false;
+    for (const gpu::Material& m : fc.scene.materials())
+        any = any || (m.classFlags & 0xFFu) == 3u || (m.classFlags & 0xFFu) == 4u;  // scene::MaterialClass Water, Glass
+    if (!any) return;
+    RenderGraph& g = fc.graph;
+    const uint32_t width = view.view.width, height = view.view.height;
+    const TextureRef depthA = view.depth;
+    const TextureRef depth = g.createTexture({ "v.translucent.depth.test", width, height, 1, 1, DXGI_FORMAT_D32_FLOAT });
+    const TextureRef count = g.createTexture({ "v.translucent.count", width, height, 1, 1, DXGI_FORMAT_R32_UINT });
+    const TextureRef vis = g.createTexture({ "v.translucent.vis", width, height, 1, 1, DXGI_FORMAT_R32_UINT });
+    const TextureRef linear = g.createTexture({ "v.translucent.depth", width, height, 1, 1, DXGI_FORMAT_R32_FLOAT });
+    const TextureRef cls = g.createTexture({ "v.translucent.class", width, height, 1, 1, DXGI_FORMAT_R8_UINT });
+    g.addPass("v.translucent.copy", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(depthA, Use::CopySrc);
+                  b.use(depth, Use::CopyDst);
+              },
+              [=](PassContext& c) { c.cmd->CopyResource(c.resource(depth), c.resource(depthA)); });
+    ID3D12PipelineState* pso[2][2];  // [count, nearest][back, none]
+    for (uint32_t mode = 0; mode < 2; ++mode)
+        for (uint32_t back = 0; back < 2; ++back)
+        {
+            MeshPipelineDesc d;
+            d.meshShader = "Passes/Visibility/VisRaster.ms.ALPHA1";
+            d.pixelShader = "Passes/Visibility/TranslucentLayer.ps.MODE" + std::to_string(mode);
+            if (mode == 1) d.renderTargets = { DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_FLOAT };
+            d.depthFormat = DXGI_FORMAT_D32_FLOAT;
+            d.depthFunc = D3D12_COMPARISON_FUNC_GREATER;  // reversed Z: in front of band A (and, nearest: of nearer ones)
+            d.depthWrite = mode == 1;
+            d.cull = back == 0 ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+            d.frontCounterClockwise = !view.view.mirrored;
+            pso[mode][back] = fc.shaders.mesh(std::string("v.translucent|") + (mode == 0 ? "count" : "nearest") + (back == 0 ? "|back" : "|none") +
+                                                  (view.view.mirrored ? "|mirrored" : ""),
+                                              d);
+        }
+    ID3D12CommandSignature* sig = s.meshSignature.Get();
+    const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = view.frameConstants;
+    const Run run = r;
+    auto draw = [=](PassContext& c, uint32_t mode, const uint32_t* extra) {
+        const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
+        const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
+        c.cmd->RSSetViewports(1, &vp);
+        c.cmd->RSSetScissorRects(1, &sc);
+        c.bindFrameConstants(frameConstants);
+        for (uint32_t l = kListTBack; l <= kListTNone; ++l)
+        {
+            // VisRaster.ms: P[1].x = 1 draws the list from entry 0; the translucent lists' args cover every entry.
+            const uint32_t k[12] = { c.srv(run.visible), c.srv(run.lists), c.srv(run.state), l, 1, run.cfg.capVisible, run.viewsSrv, 0, extra[0], 0, 0, 0 };
+            c.cmd->SetPipelineState(pso[mode][l - kListTBack]);
+            c.graphicsConstants(k, 12);
+            c.cmd->ExecuteIndirect(sig, 1, c.resource(run.args), (kArgMesh + 3 * l) * 4, nullptr, 0);
+        }
+    };
+    ID3D12PipelineState* clearPso = fc.shaders.compute("Passes/Visibility/TranslucentClass.MODE0");
+    g.addPass("v.translucent.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(count, Use::UavCompute); },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { kNone, kNone, kNone, c.uav(count), kNone, width, height, 0 };
+                  c.cmd->SetPipelineState(clearPso);
+                  c.computeConstants(k, 8);
+                  c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+              });
+    g.addPass("v.translucent.count", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(run.args, Use::IndirectArgs);
+                  b.use(run.visible, Use::SrvGraphics);
+                  b.use(run.lists, Use::SrvGraphics);
+                  b.use(run.state, Use::SrvGraphics);
+                  b.use(depth, Use::DepthWrite);
+                  b.use(count, Use::UavGraphics);
+              },
+              [=](PassContext& c) {
+                  const D3D12_CPU_DESCRIPTOR_HANDLE dsv = c.dsv(depth);
+                  c.cmd->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+                  const uint32_t extra[1] = { c.uav(count) };
+                  draw(c, 0, extra);
+              });
+    g.addPass("v.translucent.nearest", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(run.args, Use::IndirectArgs);
+                  b.use(run.visible, Use::SrvGraphics);
+                  b.use(run.lists, Use::SrvGraphics);
+                  b.use(run.state, Use::SrvGraphics);
+                  b.use(depth, Use::DepthWrite);
+                  b.use(vis, Use::RenderTarget);
+                  b.use(linear, Use::RenderTarget);
+              },
+              [=](PassContext& c) {
+                  const D3D12_CPU_DESCRIPTOR_HANDLE rtv[2] = { c.rtv(vis), c.rtv(linear) }, dsv = c.dsv(depth);
+                  const float none[4] = { 0, 0, 0, 0 }, infinite[4] = { INFINITY, INFINITY, INFINITY, INFINITY };
+                  c.cmd->ClearRenderTargetView(rtv[0], none, 0, nullptr);
+                  c.cmd->ClearRenderTargetView(rtv[1], infinite, 0, nullptr);
+                  c.cmd->OMSetRenderTargets(2, rtv, FALSE, &dsv);
+                  const uint32_t extra[1] = { kNone };
+                  draw(c, 1, extra);
+              });
+    ID3D12PipelineState* classPso = fc.shaders.compute("Passes/Visibility/TranslucentClass.MODE1");
+    g.addPass("v.translucent.class", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(count, Use::SrvCompute);
+                  b.use(vis, Use::SrvCompute);
+                  b.use(linear, Use::SrvCompute);
+                  b.use(cls, Use::UavCompute);
+                  b.use(run.visible, Use::SrvCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { c.srv(count), c.srv(vis), c.srv(linear), c.uav(cls), c.srv(run.visible), width, height, 0 };
+                  c.cmd->SetPipelineState(classPso);
+                  c.bindFrameConstants(frameConstants);
+                  c.computeConstants(k, 8);
+                  c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+              });
+    view.translucentVis = vis;
+    view.translucentDepth = linear;
+    view.translucentClass = cls;
 }
 
 // Water layer (v1.61): the layer-1 triangle streams drawn with one sample per pixel over a copy of band A's depth (depth test
@@ -1633,8 +1804,8 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     // Back-face lists exist only when BACK was requested; shadow casters need every band (band mode A puts all visible
     // clusters in band A lists).
     const bool depthOut = request.depthTarget.valid();
-    ID3D12PipelineState* pso[kLists];
-    for (uint32_t l = 0; l < kLists; ++l)
+    ID3D12PipelineState* pso[kBandLists];
+    for (uint32_t l = 0; l < kBandLists; ++l)
     {
         const bool back = request.cull == D3D12_CULL_MODE_BACK && (l == kListABack || l == kListAAlphaBack);
         MeshPipelineDesc d;
@@ -1688,7 +1859,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          c.cmd->RSSetViewports((UINT)viewports.size(), viewports.data());
                          c.cmd->RSSetScissorRects((UINT)scissors.size(), scissors.data());
                          c.bindFrameConstants(r.frameConstants);
-                         for (uint32_t l = 0; l < kLists; ++l)
+                         for (uint32_t l = 0; l < kBandLists; ++l)
                          {
                              uint32_t k[32] = { c.srv(r.visible), c.srv(r.lists), c.srv(r.state), l, 1, r.cfg.capVisible, r.viewsSrv, sameViewport ? 0u : 1u,
                                                 r.tilePairs.valid() ? c.srv(r.tilePairs) : kNone, req.atlasSlots.valid() ? c.srv(req.atlasSlots) : kNone,

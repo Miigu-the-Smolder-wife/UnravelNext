@@ -116,6 +116,7 @@ void main(float4 position : SV_Position, nointerpolation uint visId : VISID, noi
     const uint pixelInTile = (pixel.x % COV_TILE_PX) + COV_TILE_PX * (pixel.y % COV_TILE_PX);
     bool live = pixel.x < COV_WIDTH && pixel.y < COV_HEIGHT;
     if (live && (flags & COV_FLAG_WATER_EDGE) != 0) live = coverageWaterEdge(pixel);  // v1.64: water layer edges only
+    if (live && (flags & COV_FLAG_TRANSLUCENT) != 0) live = coverageTranslucentRecord(pixel);  // A6: class 2 pixels only
     if (live)
     {
         cs = coveragePolygonGeometry(poly, float2(pixel), mid);

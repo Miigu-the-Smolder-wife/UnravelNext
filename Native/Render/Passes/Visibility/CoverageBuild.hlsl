@@ -87,6 +87,11 @@ void main()
     ByteAddressBuffer list = ResourceDescriptorHeap[COV_TILE_LIST];
     const uint entries = min(state.Load(4 * (VS_LIST_COUNT + LIST_B)), COV_LIST_CAPACITY);
     args.Store3(4 * VA_COV_MESH, uint3(min(entries, 65535u), (entries + 65534u) / 65535u, 1));
+    [unroll] for (uint t = LIST_T_BACK; t <= LIST_T_NONE; ++t)  // A6: the translucent lists' records (class 2 pixels)
+    {
+        const uint te = min(state.Load(4 * (VS_LIST_COUNT + t)), COV_LIST_CAPACITY);
+        args.Store3(4 * (VA_COV_T_MESH + 3 * (t - LIST_T_BACK)), uint3(min(te, 65535u), (te + 65534u) / 65535u, 1));
+    }
     storeDispatch(args, VA_COV_CLEAR, min(list.Load(4 * COV_LIST_COUNT), COV_TILES));
 #else
     const uint stored = min(state.Load(4 * VS_COV_FRAGMENTS), COV_CAP);

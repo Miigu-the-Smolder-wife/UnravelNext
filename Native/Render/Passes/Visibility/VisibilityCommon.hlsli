@@ -100,8 +100,8 @@ uint skinSlot(CullScene cs, uint instance)
 #define VS_DEFER_INSTANCES 6u
 #define VS_DEFER_NODES 7u
 #define VS_DEFER_CLUSTERS 8u
-#define VS_LIST_COUNT 9u      // + list (VS_LISTS lists): entries appended so far (both phases)
-#define VS_LIST_PHASE1 15u    // + list: entries of phase 1 (snapshot)
+#define VS_LIST_COUNT 9u      // + list (VS_LISTS lists, words 9 .. 16): entries appended so far (both phases)
+                              // words 17 .. 20: unused
 #define VS_OVERFLOW 21u       // bits: capacity exceeded (OVERFLOW_*)
 #define VS_STAT_INSTANCES 22u // instances that reached the node pass
 #define VS_STAT_NODES 23u     // node items processed
@@ -123,15 +123,19 @@ uint skinSlot(CullScene cs, uint instance)
 #define VS_CHUNK_ITEMS 42u    // (chunk, view) items of the chunks that passed CullChunks in this phase
 #define VS_DEFER_CHUNKS 43u   // chunks occluded against the previous HiZ in phase 1 (tested again in phase 2)
 #define VS_STAT_CHUNKS 44u    // chunk items expanded to their instances (both phases)
-#define VS_WORDS 48u
+#define VS_LIST_PHASE1 48u    // + list (words 48 .. 55): entries of phase 1 (snapshot)
+#define VS_WORDS 56u
 
-#define VS_LISTS 6u
+#define VS_LISTS 8u
 #define LIST_A_BACK 0u        // band A, opaque, back faces culled
 #define LIST_A_NONE 1u        // band A, opaque, two-sided (or cull none requested)
 #define LIST_A_ALPHA_BACK 2u  // band A, alpha tested
 #define LIST_A_ALPHA_NONE 3u
 #define LIST_B 4u             // coverage layer
 #define LIST_C 5u             // aggregate bricks
+#define LIST_T_BACK 6u        // translucent layer (A6, v1.67): band A width glass and water clusters of the main view with
+#define LIST_T_NONE 7u        // the coverage layer on, back faces culled / two-sided; drawn after both phases (all entries)
+#define VS_BAND_LISTS 6u      // lists of the cull bands (the depth raster service draws these)
 #define VS_A_LISTS 4u         // lists drawn by the vis buffer raster: 0 .. VS_A_LISTS - 1
 
 // Indirect argument words (3 per dispatch).
@@ -140,13 +144,15 @@ uint skinSlot(CullScene cs, uint instance)
 #define VA_DEFERRED_CLUSTERS 6u
 #define VA_DEFERRED_INSTANCES 9u
 #define VA_SEED_NODES 12u
-#define VA_MESH 15u           // + 3 * list
+                              // words 15 .. 32: unused
 #define VA_COV_MESH 33u       // coverage raster: every band B list entry (both phases)
 #define VA_COV_CLEAR 36u      // tile clear over last frame's coverage tiles (one group per tile)
 #define VA_COV_RECORDS 39u    // count and scatter over the stored stream entries (one group per COV_BLOCK)
 #define VA_CHUNK_ITEMS 42u    // instance pass over visible chunk items (one group per item)
 #define VA_DEFERRED_CHUNKS 45u // phase 2 chunk pass over the deferred chunks (64 per group)
-#define VA_WORDS 48u
+#define VA_MESH 48u           // + 3 * list (words 48 .. 71); the translucent lists: all entries (set in phase 1 and 2)
+#define VA_COV_T_MESH 72u     // + 3 * (list - LIST_T_BACK): coverage raster over the translucent lists (A6 records)
+#define VA_WORDS 78u
 
 // Overflow bits (VS_OVERFLOW): a capacity was exceeded; the run's statistics report them (Stats::overflow).
 #define OVERFLOW_NODES 1u

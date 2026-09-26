@@ -9,6 +9,9 @@
 // normals (world, octahedral 16 + 16 bits, so the record's 8 + 8 bits are the only coarse rounding) go along for the
 // record's interpolated normal; COV_FLAG_BACK marks a
 // primitive seen from behind (two-sided materials), whose normals the pixel kernel turns towards the viewer.
+// A6 (v1.67): the same kernel draws the translucent lists (COV_RASTER_LIST, COV_RASTER_TRANSLUCENT): a mixed sheet cluster
+// there keeps its band A triangles (its band B ones are in LIST_B), and every primitive carries COV_FLAG_TRANSLUCENT (the
+// pixel kernel keeps only the pixels of translucent class 2).
 #include "Passes/Visibility/CoverageLayer.hlsli"
 #include "VisBuffer.hlsli"
 
@@ -51,12 +54,14 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     RWByteAddressBuffer state = ResourceDescriptorHeap[COV_STATE];  // the pass writes it (pixel kernel counters)
     ByteAddressBuffer lists = ResourceDescriptorHeap[COV_LISTS];
     const uint capacity = COV_LIST_CAPACITY;
-    const uint count = min(state.Load(4 * (VS_LIST_COUNT + LIST_B)), capacity);
+    const uint list = COV_RASTER_LIST;
+    const bool translucent = COV_RASTER_TRANSLUCENT;
+    const uint count = min(state.Load(4 * (VS_LIST_COUNT + list)), capacity);
     const uint index = group.x + group.y * 65535;
     const bool valid = index < count;  // uniform over the group
-    const uint listEntry = valid ? lists.Load(4 * (LIST_B * capacity + index)) : 0;
+    const uint listEntry = valid ? lists.Load(4 * (list * capacity + index)) : 0;
     const uint visibleIndex = listEntry & ~LIST_ENTRY_MIXED;
-    const bool mixed = (listEntry & LIST_ENTRY_MIXED) != 0;  // this raster keeps the cluster's band B triangles
+    const bool mixed = (listEntry & LIST_ENTRY_MIXED) != 0;  // band B: this raster keeps the cluster's band B triangles
     StructuredBuffer<uint2> visible = ResourceDescriptorHeap[COV_VISIBLE];
     const uint2 entry = valid ? visible[visibleIndex] : uint2(0, 0);
     StructuredBuffer<CullView> views = ResourceDescriptorHeap[COV_VIEWS];
@@ -125,7 +130,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         PrimitiveOut o = (PrimitiveOut)0;
         o.visId = packVisId(visibleIndex, t);
         o.material = material;
-        bool cull = n < 3 || (mixed && !sheetTriangleBandB(v, gs_world[tri.x], gs_world[tri.y], gs_world[tri.z])) || patchDropsTriangle(inst, mesh, cl, tri);  // C5
+        bool cull = n < 3 || (mixed && sheetTriangleBandB(v, gs_world[tri.x], gs_world[tri.y], gs_world[tri.z]) == translucent) || patchDropsTriangle(inst, mesh, cl, tri);  // C5
         if (!cull)
         {
             if (n == 3)
@@ -144,7 +149,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
             // Signed area of the polygon (shoelace), y-down pixels.
             const float area2 = (o.a.x * o.b.y - o.b.x * o.a.y) + (o.b.x * o.c.y - o.c.x * o.b.y) + (o.c.x * o.d.y - o.d.x * o.c.y) + (o.d.x * o.a.y - o.a.x * o.d.y);
             const bool back = COV_FRONT_SIGN * area2 > 0;
-            o.flags = alphaFlag | opaqueFlag | (n == 4 ? COV_FLAG_QUAD : 0u) | (back ? COV_FLAG_BACK : 0u);
+            o.flags = alphaFlag | opaqueFlag | (n == 4 ? COV_FLAG_QUAD : 0u) | (back ? COV_FLAG_BACK : 0u) | (translucent ? COV_FLAG_TRANSLUCENT : 0u);
             cull = area2 == 0 || (oneSided && back);
         }
         o.cull = cull;

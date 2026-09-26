@@ -1,0 +1,10 @@
+V: instance hierarchy: 4 static instances in 3 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+    pane 2 per-pixel differences: 0 pixels, 0.000 px^2 net missing
+    band A glass pixels 0; judged 230346 pixels (14937 with a sample): 0 class, 0 surface, 0 depth mismatches (worst depth 4.28e-07); class 2 pixels 4129
+    pane records 6818 (0 bad, 0 outside class 2); pane 2: 2861 full pixels + 3030.374 px^2 in 3228 records = 5891.374 px^2 vs exact 5891.409 (rounding 1.578)
+PASS translucent_layer_is_exact
+1/1 passed
+GpuLock.ps1: cpu-contended: 1 s >= 4 cores, peak 14.1 cores; top: cl.exe (33120) 6 core-s, cl.exe (29916) 1 core-s, cl.exe (16428) 1 core-s, cl.exe (43032) 1 core-s

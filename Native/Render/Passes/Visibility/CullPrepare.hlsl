@@ -8,7 +8,8 @@
 //   MODE=5: phase 2 chunk pass: deferred chunks -> VA_DEFERRED_CHUNKS (64 per group); runs before MODE=2, whose deferred
 //           instance count then includes the members of the chunks that pass.
 //   MODE=3: DispatchMesh arguments of every list for phase CULL_PHASE (phase 1 snapshots its counts; phase 2 draws
-//           the entries appended after them) and the traversal completeness check.
+//           the entries appended after them; the translucent lists: every entry so far) and the traversal completeness
+//           check.
 #include "Passes/Visibility/CullShared.hlsli"
 
 void storeDispatch(RWByteAddressBuffer args, uint word, uint groups)
@@ -46,7 +47,7 @@ void main()
         uint base = 0;
         if (CULL_PHASE == 1) state.Store(4 * (VS_LIST_PHASE1 + k), count);
         else base = state.Load(4 * (VS_LIST_PHASE1 + k));
-        storeDispatch(args, VA_MESH + 3 * k, count - base);
+        storeDispatch(args, VA_MESH + 3 * k, k >= LIST_T_BACK ? count : count - base);  // translucent lists: drawn once, after phase 2
     }
     if (min(state.Load(4 * VS_NODE_WRITE), CAP_NODES) != state.Load(4 * VS_NODE_END)) state.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_NODE_DEPTH);
 #endif

@@ -1115,6 +1115,10 @@ uint32_t GpuScene::addRuntimeMesh(const scene::Mesh& m, const ClusterData& cd)
     if (!m_source || m_runtimeCap.meshes == 0) fail("GpuScene::addRuntimeMesh: no runtime pool (reserveRuntime before upload)");
     if (cd.meshes.size() != 1) fail("GpuScene::addRuntimeMesh: cluster data of %zu meshes (one expected)", cd.meshes.size());
     if (!m.skin.joints.empty() || !m.blendShapes.empty() || m.vertexAnimation.framesPerSecond > 0) fail("GpuScene::addRuntimeMesh: runtime meshes are rigid");
+    // The scatter writes every pool target through its UAV; the cluster targets get theirs from setClusters (B's report: a
+    // test that skipped setClusters scattered through kNone instead of failing here).
+    for (uint32_t t = RtMeshes; t < RtPatch; ++t)
+        if (m_rtUav[t] == gpu::kNone) fail("GpuScene::addRuntimeMesh: pool target %u has no view (setClusters after upload, before runtime meshes)", t);
     const ClusterData::Named *nodesN = nullptr, *rootsN = nullptr, *spheresN = nullptr, *sheetsN = nullptr;
     for (const auto& n : cd.named)
     {

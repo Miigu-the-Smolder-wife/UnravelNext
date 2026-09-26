@@ -18,7 +18,8 @@ struct Stats
     uint32_t visibleClusters = 0;
     uint32_t triangles[3] = {};        // visible triangles classified band A, B, C
     uint32_t bandClusters[3] = {};     // visible clusters classified band A, B, C (visibleClusters counts list entries)
-    uint32_t listEntries[6] = {};      // draw-list entries (A back, A two-sided, A alpha back, A alpha two-sided, B, C);
+    uint32_t listEntries[8] = {};      // draw-list entries (A back, A two-sided, A alpha back, A alpha two-sided, B, C,
+                                       // translucent back, translucent two-sided);
                                        // tile-local raster runs: (cluster, tile rectangle) pairs
     uint32_t tilePairs = 0;            // tile-local raster runs: pairs drawn (DepthRasterRequest::tileLocal)
     uint32_t deferredInstances = 0, deferredNodes = 0, deferredClusters = 0;  // phase 1 -> phase 2

@@ -34,6 +34,17 @@ struct ViewResources
                                    // (min) depth bits, see-through included; (0, 0xFFFFFFFF) = none
     BufferRef coverageChunkTable;  // v1.40 names until M's composite reads the ranges: the table is   [V]
     BufferRef coverageChunks;      // always invalid (turns the v1.40 readers off), chunks = records
+    // A6 translucent layer (v1.67; main view with the coverage layer on and a glass or water material in the scene;
+    // invalid = none): band A width clusters of the glass and water material classes are not in band A (it keeps what lies
+    // behind them); the nearest of them in front of band A is one sample per pixel, and the pixels where that sample is not
+    // the whole story get the translucent surfaces as see-through coverage records instead.
+    TextureRef translucentVis;     // R32_UINT vis id (VisBuffer.hlsli, this view's visibleClusters) of the nearest   [V]
+                                   // translucent surface in front of band A at the pixel centre; VIS_NONE = none
+    TextureRef translucentDepth;   // R32_FLOAT its linear view depth (+inf = none)                                   [V]
+    TextureRef translucentClass;   // R8_UINT 0 = none; 1 = the sample is the pixel's only translucent surface and   [V]
+                                   // covers the whole pixel; 2 = the pixel's translucent surfaces are coverage records
+                                   // (see-through, exact area and mask; edges on both sides of an outline, seams,
+                                   // overlaps), the sample is unused (it may be none)
     TextureRef gbuffer;            // RG32_UINT (GBuffer.hlsli)                              [M]
     TextureRef shadowVisibility;   // R32_UINT, 4 light slots x 8 bit (7.3)                 [S]
     TextureRef shadowOverflowTiles;  // R32_UINT ceil(W/8) x ceil(H/8) (main view, 7.3, v1.20): [S]

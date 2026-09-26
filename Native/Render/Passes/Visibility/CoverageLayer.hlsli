@@ -73,6 +73,21 @@
 #define COV_FLAG_BACK 8u    // seen from behind (two-sided): the normals are turned towards the viewer
 #define COV_FLAG_HAIR 16u   // a hair ribbon (HairRaster.ms): normals carry asuint(u), the record keeps u in the normal bits
 #define COV_FLAG_WATER_EDGE 32u  // a water-layer triangle (StreamRaster.ms, v1.64): a record only in the layer's edge pixels
+#define COV_FLAG_TRANSLUCENT 64u // a translucent-layer triangle (CoverageRaster.ms over LIST_T_*, A6 v1.67): a record only in
+                                 // the pixels of translucent class 2 (TranslucentClass.hlsl)
+
+// CoverageRaster.ms / ps: P[6].x the list drawn (LIST_B, or LIST_T_BACK / LIST_T_NONE), P[6].y 1 = the translucent layer's
+// records (mixed sheet clusters keep their band A triangles, COV_FLAG_TRANSLUCENT), P[7].z translucent class SRV
+// (Texture2D<uint>; read with COV_FLAG_TRANSLUCENT only).
+#define COV_RASTER_LIST P[6].x
+#define COV_RASTER_TRANSLUCENT (P[6].y != 0)
+#define COV_TRANSLUCENT_CLASS P[7].z
+
+bool coverageTranslucentRecord(uint2 pixel)
+{
+    Texture2D<uint> cls = ResourceDescriptorHeap[COV_TRANSLUCENT_CLASS];
+    return cls[pixel] == 2;
+}
 
 // Water-layer edge pixels (v1.64; A's rule: the exact coverage of the water layer comes from coverage records in its edge
 // pixels only). P[6].z waterVis SRV, P[6].w waterDepth SRV, P[7].x band A depth SRV, P[7].y the stream's slot. A pixel is

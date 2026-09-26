@@ -1,0 +1,14 @@
+visibility_translucenttests exit=0 1/1 passed hung=0
+visibility_visibilitytests exit=0 8/8 passed, D3D12 debug-layer errors: 0 hung=0
+visibility_fragmenttests exit=0 2/2 passed hung=0
+visibility_haircoveragetests exit=0 1/1 passed hung=0
+visibility_instancehierarchytests exit=0 2/2 passed hung=0
+visibility_morphtests exit=0 2/2 passed hung=0
+visibility_originrebasetests exit=0 1/1 passed hung=0
+visibility_runtimepooltests exit=0 2/2 passed hung=0
+visibility_streamcoveragetests exit=0 1/1 passed hung=0
+visibility_wateredgetests exit=0 1/1 passed hung=0
+visibility_waterlayertests exit=0 1/1 passed hung=0
+shadow_vsmtests exit=0  hung=0
+shadow_localshadowtests exit=0  hung=0
+shadow_froxeltests exit=0  hung=0
