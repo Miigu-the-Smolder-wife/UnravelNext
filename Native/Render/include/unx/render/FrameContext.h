@@ -26,6 +26,11 @@ struct FrameContext
     // Either bit: the main view has no previous view (prevViewProj = viewProj). Instance teleports are per instance
     // (InstanceTransformUpdate::flags).
     uint32_t discontinuity = 0;
+    // v1.45 (A4, FEATURES_GAME 6.2): automatic exposure. The renderer meters the main view's luminance and sets
+    // mainView.ev100 each frame (M, Exposure.cpp: one frame of meter latency, exact adaptation over deltaTime; cuts and
+    // restores snap); the host's mainView.ev100 is the starting value. exposureCompensation in stops (+1 = brighter).
+    bool autoExposure = false;
+    float exposureCompensation = 0;
 };
 constexpr uint32_t kGpuSimulationSoft = 1, kGpuSimulationVfx = 2, kGpuSimulationRigid = 4;
 constexpr uint32_t kDiscontinuityRestore = 1, kDiscontinuityCut = 2;

@@ -1,0 +1,21 @@
+  one bin: EV = log2 L - log2(1.2 x 0.18)                                          ok
+  cuts drop exactly the darkest and brightest fractions                            ok
+  an empty histogram is not a meter                                                ok
+UnravelNext host: scene committed, 1 meshes, 1 instances, 12 triangles, 1 clusters, 253.8 ms, hash 022dabf5bb1af50e
+RayScene: 1 static + 0 dynamic instances (0 deformed), 1 mesh BLAS (12 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 19 ms
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+  day EV100: first frames 14.000 14.000 14.300, settled 14.300
+  day: the metered exposure holds (last 6 frames within 0.02 EV)                   ok
+  day: metered, not the starting value                                             ok
+  night EV100 after 8 s: -3.562 (day 14.300)
+  night is several stops below day                                                 ok
+  adaptation: ev0 14.069, after 1 s 8.312, predicted 8.256 (tau 2.50 s)
+  adaptation follows the exponential over delta time (1 s, within 0.03 EV of the closed form) ok
+  cut back to day: -3.562 -3.562 14.224 (night -3.562, settled day 14.300)
+  a cut holds the EV while the meter shows the old view                            ok
+  then snaps the whole way to the new view's target                                ok
+  D3D12 debug layer errors 0                                                       ok
+HOST EXPOSURE TEST PASSED
+GpuLock.ps1: cpu-contended: 3 s >= 4 cores, peak 5.5 cores; top: dotnet.exe (27584) 4 core-s, Unity.exe (42480) 3 core-s, NativePhysicsTireContracts.exe (29108) 3 core-s, unx_test_fx_particletests.exe (47068) 3 core-s

@@ -18,3 +18,14 @@ edge_groups_max = 3
 # composite without cut-out coverage, 2048 = no shadow visibility reads (slots lit), 4096 = no tone map (raw value),
 # 8192 = coverage composite in a frame with S's shadows but without S's fragment visibility (its fragments unshadowed).
 experiment_disable = 0
+# Automatic exposure (FEATURES_GAME 6.2, A4; Exposure.cpp), for cameras without an EV100: the metered log-mean luminance
+# between the darkest and brightest cut fractions of the centre-weighted histogram maps onto the target grey; the EV
+# follows it with exact exponential adaptation (seconds to 63 %), snapping after cuts and restores.
+exposure_min_ev = -6.0
+exposure_max_ev = 22.0
+exposure_target_grey = 0.18
+exposure_adapt_brighter_seconds = 0.6
+exposure_adapt_darker_seconds = 2.5
+exposure_cut_dark = 0.10
+exposure_cut_bright = 0.02
+exposure_centre_sigma = 0.8

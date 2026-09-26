@@ -6,6 +6,11 @@
 namespace unx::render::tracks
 {
 void prepareScene(FramePassContext&) { pending("M.prepareScene (track disabled in this build)"); }
+float autoExposureEv100(TrackState&, Device&, const QualityConfig&, const FrameContext& frame, uint32_t)
+{
+    pending("M.autoExposureEv100 (track disabled in this build)");
+    return frame.mainView.ev100;
+}
 void materialResolve(FramePassContext&, ViewResources&) { pending("M.materialResolve (track disabled in this build)"); }
 void shading(FramePassContext&, ViewResources&) { pending("M.shading (track disabled in this build)"); }
 std::vector<RenderGraph::BandedPass> shadingPasses(FramePassContext&, ViewResources&)

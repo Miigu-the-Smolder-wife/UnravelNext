@@ -153,6 +153,12 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     // palettes. The tracks reset their own temporal state from frame.discontinuity.
     FrameContext frame = in;
     if (frame.discontinuity != 0) frame.mainView.prevViewProj = frame.mainView.viewProj;
+    if (frame.autoExposure)
+    {
+        if (!std::isfinite(frame.mainView.ev100)) frame.mainView.ev100 = 14.0f;  // (the host's starting value, if any)
+        frame.mainView.ev100 = tracks::autoExposureEv100(m_trackState, m_device, m_quality, frame, m_framesInFlight);
+    }
+    m_lastEv100 = frame.mainView.ev100;
     if (frame.discontinuity & kDiscontinuityRestore) m_scene.resetMotion();
     m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);  // transforms, palettes, visibility of this frame
     FrameResources resources;

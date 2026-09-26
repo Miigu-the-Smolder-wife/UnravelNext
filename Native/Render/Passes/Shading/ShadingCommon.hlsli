@@ -277,6 +277,31 @@ float4 shEncodeExposed(float3 e)
 }
 float4 shEncodeOutput(float3 radiance) { return shEncodeExposed(radiance * g_exposure); }
 
+// Automatic exposure (FEATURES_GAME 6.2; Exposure.cpp): the pixel's luminance (nit, before the exposure) into M's 64-bin
+// log2 histogram from 2^-8 nit in half stops, weighted by a Gaussian of the distance from the view's centre (in units of
+// half the view height, sigma 'centreSigma') in 1/64 steps. One atomic per distinct bin of the wave (at most 64 rounds).
+// histogramUav UNX_NONE: not metered (secondary views).
+void shExposureHistogram(uint histogramUav, float3 radiance, uint2 pixel, float centreSigma)
+{
+    if (histogramUav == UNX_NONE) return;
+    const float y = dot(max(radiance, 0.0), float3(0.2126, 0.7152, 0.0722));
+    const uint bin = y > 0 ? (uint)clamp((log2(y) + 8.0) * 2.0, 0.0, 63.0) : 0u;
+    const float2 d = (float2(pixel) + 0.5 - 0.5 * float2(g_viewWidth, g_viewHeight)) / (0.5 * g_viewHeight);
+    const uint weight = (uint)(64.0 * exp(-0.5 * dot(d, d) / (centreSigma * centreSigma)) + 0.5);
+    if (weight == 0) return;
+    RWByteAddressBuffer h = ResourceDescriptorHeap[histogramUav];
+    [loop] for (uint round = 0; round < 64u; ++round)
+    {
+        const uint b = WaveReadLaneFirst(bin);
+        if (bin == b)
+        {
+            const uint sum = WaveActiveSum(weight);
+            if (WaveIsFirstLane()) h.InterlockedAdd(4u * b, sum);
+            break;
+        }
+    }
+}
+
 // COVERAGE 12.4 structure 2 (B2): the light's specular is in R's reflection paths (FrameResources::areaLightStable, 1 bit
 // per light; UNX_NONE: R's emitters are off and M evaluates every area light's LTC specular).
 bool shSpecularInReflections(uint maskSrv, uint lightIndex)

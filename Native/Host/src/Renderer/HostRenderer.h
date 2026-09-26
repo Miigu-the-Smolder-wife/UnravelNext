@@ -167,6 +167,8 @@ public:
     // the RGB10A2 pixels.
     void renderStandalone(uint64_t ticket, void* readback, size_t readbackBytes);
     FrameStats latestStats() const;
+    // Test hook: the main view's EV100 of the last recorded frame (automatic exposure's choice when the camera asked).
+    float lastEv100ForTest() const;
     // Debug-layer errors reported so far (standalone renderers with debugLayer; 0 otherwise).
     uint32_t debugErrors();
     // Test hook (standalone): every following frame gets a newly created output texture, the old one released after the

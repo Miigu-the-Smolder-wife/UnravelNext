@@ -387,6 +387,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].w];
     // P[5].zw: the view's particle layer and edge blocks (UNX_NONE: none).
+    shExposureHistogram(P[4].w, radiance, pixel, asfloat(P[6].z));  // P[4].w histogram, P[6].z centre sigma (main view)
     const float3 withParticles = shParticles(radiance * g_exposure, pixel, P[5].z, P[5].w);
     color[pixel] = (P[4].z & 4096) ? float4(withParticles / g_exposure, 1) : shEncodeExposed(withParticles);
     ShadedPixel o;

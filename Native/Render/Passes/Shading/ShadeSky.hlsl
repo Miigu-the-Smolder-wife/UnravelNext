@@ -79,6 +79,7 @@ float3 shadeSky(uint2 pixel, Texture2D<uint> words)
     }
     radiance += sun * shSunDiskCoverage(D, Dx, Dy);
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].y];
+    shExposureHistogram(P[4].w, radiance, pixel, asfloat(P[4].z));  // P[4].w histogram, P[4].z centre sigma (main view)
     color[pixel] = shEncodeExposed(shParticles(radiance * g_exposure, pixel, P[5].z, P[5].w));  // P[5].zw particle layer
     return radiance;
 }

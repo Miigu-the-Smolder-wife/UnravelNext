@@ -27,6 +27,9 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request);
 // Called first in every frame, before any frame constants of the frame exist: uploads scene textures when the scene
 // changed and publishes them in the material records (GpuScene::setMaterialTextures, INTERFACES_KO.md 6.3).
 void prepareScene(FramePassContext& fc);
+// M (A4): the main view's EV100 of this frame under automatic exposure (FrameContext::autoExposure), before any frame
+// constants; framesInFlight: the lag after which the host waited for a frame's histogram.
+float autoExposureEv100(TrackState& state, Device& device, const QualityConfig& quality, const FrameContext& frame, uint32_t framesInFlight);
 void materialResolve(FramePassContext& fc, ViewResources& view);  // writes view.gbuffer
 void shading(FramePassContext& fc, ViewResources& view);          // writes view.color (+ edge/coverage composite)
 

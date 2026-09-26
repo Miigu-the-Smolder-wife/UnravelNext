@@ -406,6 +406,8 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
     return p;
 }
 
+float HostRenderer::lastEv100ForTest() const { return m_frameRenderer ? m_frameRenderer->lastEv100() : 0.0f; }
+
 uint32_t HostRenderer::debugErrors() { return m_device->drainDebugMessages(); }
 
 void HostRenderer::removeDeviceForTest()
@@ -514,6 +516,8 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     const bool previous = m_havePrev && p.discontinuity == 0;
     fc.mainView = ViewDesc::fromCamera(p.camera, p.width, p.height, previous ? m_prevViewProj : current.viewProj);
     fc.discontinuity = p.discontinuity;
+    // A4: a camera without an exposure (NaN EV100, UnxCameraDesc) asks for automatic exposure.
+    fc.autoExposure = !std::isfinite(p.camera.ev100);
     fc.gpuSimulation = p.gpuSimulation;
     m_lastDiscontinuity = p.discontinuity;
     m_lastGpuSimulation = p.gpuSimulation;

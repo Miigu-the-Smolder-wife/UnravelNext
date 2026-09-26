@@ -1,4 +1,5 @@
 #include "unx/shading/ShadingSystem.h"
+#include "unx/shading/Exposure.h"
 
 #include "unx/core/Log.h"
 #include "unx/material/MaterialSystem.h"
@@ -297,6 +298,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     // FX's particle layer of this view (tracks::particles, before shading): every output writer composites it before its
     // tone map (ShadingCommon.hlsli shParticles); two indices, UNX_NONE when the view has none.
     const bool particles = v.particleLayer.valid() && v.particleEdges.valid();
+    // Automatic exposure: the main view's shading kernels fill M's luminance histogram (Exposure.cpp); read back below.
+    const bool meter = v.view.kind == gpu::ViewKind::Main && part != Part::Composite;
+    const ExposureHistogram histogram = meter ? exposureHistogram(fc) : ExposureHistogram{};
     auto useParticles = [=](PassBuilder& b) {
         if (!particles) return;
         b.use(v.particleLayer, Use::SrvCompute);
@@ -462,6 +466,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             b.use(edgeTiles, Use::SrvCompute);
             if (coverage) b.use(v.coverageTiles, Use::SrvCompute);
             useParticles(b);
+            if (meter) b.use(histogram.buffer, Use::UavCompute);
         };
         shadePass.execute = [=](PassContext& c) {
             const auto [firstBand, lastBand] = listBands(c);
@@ -482,6 +487,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                    atm[0], atm[1], atm[2], atm[3], experiment, 0, 0, 0, 0, 0, c.srv(edgeTiles), 0 };
                 std::memcpy(k + 24, edge, sizeof edge);
                 particleConstants(c, k + 22);  // P[5].zw
+                k[18] = asUint(histogram.centreSigma);                        // P[4].z
+                k[19] = meter ? c.uav(histogram.buffer) : gpu::kNone;          // P[4].w
                 c.computeConstants(k, 32);
                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
             }
@@ -503,6 +510,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 std::memcpy(k32 + 24, edge, sizeof edge);
                 k32[30] = overflow ? c.srv(v.shadowOverflow) : none;  // P[7].z
                 k32[16] = r.areaLightStable;     // P[4].x (B2)
+                k32[19] = meter ? c.uav(histogram.buffer) : gpu::kNone;  // P[4].w exposure histogram
+                k32[26] = asUint(histogram.centreSigma);                 // P[6].z
                 particleConstants(c, k32 + 22);  // P[5].zw
                 c.computeConstants(k32, 32);
                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
@@ -572,6 +581,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              std::memcpy(k32 + 24, edge, sizeof edge);
                              particleConstants(c, k32 + 22);  // P[5].zw
                              k32[16] = r.areaLightStable;     // P[4].x (B2)
+                             k32[19] = gpu::kNone;            // P[4].w: overflow tiles are shaded twice; the main kernel metered them
                              c.cmd->SetPipelineState(fallbackKernel);
                              c.bindFrameConstants(cb);
                              c.computeConstants(k32, 32);
@@ -854,7 +864,12 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
 
 std::vector<RenderGraph::BandedPass> shadingPasses(FramePassContext& fc, ViewResources& view) { return record(fc, view, Part::Banded); }
 
-void shadingComposite(FramePassContext& fc, ViewResources& view) { record(fc, view, Part::Composite); }
+void shadingComposite(FramePassContext& fc, ViewResources& view)
+{
+    record(fc, view, Part::Composite);
+    // The main view's luminance histogram, filled by its shading kernels, into the readback ring (automatic exposure).
+    if (view.view.kind == gpu::ViewKind::Main) exposureReadback(fc, exposureHistogram(fc));
+}
 
 void shade(FramePassContext& fc, ViewResources& view)
 {

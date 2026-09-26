@@ -21,6 +21,8 @@ public:
     ViewResources record(RenderGraph& graph, const FrameContext& frame, TextureRef output);
     // Persistent track state (tests and gates read track statistics through it, e.g. unx::visibility::latestStats).
     TrackState& trackState() { return m_trackState; }
+    // The main view's EV100 of the last recorded frame (automatic exposure's choice when on; tests, statistics).
+    float lastEv100() const { return m_lastEv100; }
     // The b1 constants of a view (what every view's frameConstants slot holds); for tests that build their own context.
     static gpu::FrameConstants frameConstants(const GpuScene& scene, const FrameContext& frame, const ViewDesc& view);
 
@@ -36,5 +38,6 @@ private:
     uint32_t m_slotViews = 0;
     uint64_t m_slotFrame = UINT64_MAX;
     TrackState m_trackState;
+    float m_lastEv100 = 0;
 };
 } // namespace unx::render
