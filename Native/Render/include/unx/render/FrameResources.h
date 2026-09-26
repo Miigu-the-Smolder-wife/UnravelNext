@@ -202,6 +202,12 @@ struct FrameResources
     // oceanDepth R32_FLOAT linear view depth (+inf = no sea), waterSurface RGBA32_FLOAT (rest position x0.xz, depth,
     // marker: W's format). V merges oceanDepth into the water layer (COV_OCEAN_ID; band A rejects what lies behind).
     TextureRef oceanDepth, waterSurface;  // [W]
+    // v1.77 (W stage 2, FEATURES_GAME 1.9; render A calls it from band A shading): the sun-space water map of W's
+    // triangle streams, orthographic along the sun - waterSunDepth D32 (1 = nearest the sun, 0 = no water),
+    // waterSunNormal RG16F octahedral normal, waterSunMedium RGBA16F (1 m transmittance RGB, IOR), and
+    // waterSunConstants (raw: word 0 = valid). Passes/Water/WaterLight.hlsli waterSunLight reads them. Invalid = no water.
+    TextureRef waterSunDepth, waterSunNormal, waterSunMedium;  // [W]
+    BufferRef waterSunConstants;                              // [W]
     // Light functions (E's Passes/Lights LightFunction.hlsli, A8; invalid = no light has one): cookies, IES, gobos,  [E]
     // flicker and animation per light index. Every reader of a light's emission (M shading, S froxel in-scattering, R
     // hit shading and GI) multiplies it by lightFunction(srv, light, forward, right, dir, footprint, g_time) (raw).

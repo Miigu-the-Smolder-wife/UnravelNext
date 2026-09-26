@@ -734,6 +734,17 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.77 (2026-09-27, 엔진 1 W: 물 단계 2, 물 아래 band A의 태양광; 렌더 A 합의):
+  - **`FrameResources::waterSunDepth`(D32, 태양에 가장 가까움 = 1, 물 없음 = 0), `waterSunNormal`(RG16F 팔면체 법선), `waterSunMedium`(RGBA16F: 1 m 투과율 RGB, IOR), `waterSunConstants`(raw 80 B, 0번 워드 = 유효)**: W의 모든 삼각형 스트림을 태양 방향 직교 투영으로 래스터한 지도다(WaterSunMap.ms/.ps, waterGeometry에서 V·M 앞).
+    - 범위는 스트림 경계 상자 합집합이다. 텍셀은 긴 변 / N이다(N = 2 mm 이하가 되는 2의 거듭제곱, 256~2048).
+    - 매질은 스트림 재질에서 온다: baseColor = 1 m 투과율, ior.
+  - **`Passes/Water/WaterLight.hlsli` `waterSunLight(depthSrv, normalSrv, mediumSrv, constSrv, X, sunDir, ior, out lightDir, out transmittance)`**: 태양의 곧은 광선이 X 위에서 물을 지나면 true를 낸다. 그때 값은 다음과 같다.
+    - lightDir = −(S에서 햇빛의 정확한 스넬 굴절)
+    - transmittance = (1 − F(θ_s)) T^d. d는 X에서 S의 접평면까지 lightDir 방향 거리다.
+    - 평평한 면에서 정확하다. 수평 램버트 바닥의 조도는 E cos θ_s (1 − F) T^d다. 굽은 면의 오차 조건은 FEATURES_GAME 1.9에 있다.
+  - 비용: 지도가 없으면 적재 1회, 있으면 4회. 렌더 A가 ShadeOpaque·폴백에서 부르고(l = lightDir, E ×= transmittance), coverage 조각은 합성 분할 뒤에 부른다.
+  - 조건: VSM 그림자는 곧은 태양 방향이다(굴절 그림자는 S). 하늘·GI의 물속 감쇠는 R과 함께. 코스틱은 같은 지도로 뒤에.
+  - 시험 `unx_test_water_waterlighttests` [실측, 하드웨어]: 평평한 수조와 20° 기운 판(매질·IOR 다름), 점 16 692개. 경계 822개를 빼고 분류 불일치 0, 방향 2.8e-4, 투과율 상대 9.3e-4.
 - v1.76 (2026-09-27, 렌더 A: A9 clearcoat 층, MATERIAL_LAYERS 1.1·1.3; 1단계 데이터·모델, 2단계 GPU 레코드·미러):
   - **`scene::Material`**: `clearcoat`(덮임 c), `clearcoatRoughness`(r_c), `clearcoatIor`(표로 만든 코트 1.5 또는 1.33만, Standard 클래스). 장면 파일 "COAT" 블록.
   - **정의(권위: `scene::model::evaluateCoated`)**: C가 측정한 R1 + A2 + S(`Results/C/MaterialLayers/clearcoat_r1e.md`: 유전체 기저는 3절 기준 통과, 코트 아래 금속 기저는 lobe 모양 실패 = 재설계 대상)를 표 형태로 쓴다. 표는 코트마다 E_c, E_ms, A_x, B_x(μ, r), K_ms, Ā, B̄(r), K_0이고 η 1.33 표는 `unx_study_material_layers tables 1.33`으로 만들었다. 표 형태의 3절 기준 측정은 `clearcoat_model` 연구로 하며, 사용자 게임이 끝난 뒤 CPU에서 돌린다.

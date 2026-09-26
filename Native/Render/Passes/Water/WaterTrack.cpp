@@ -2,9 +2,11 @@
 // fluids' reconstructed surfaces into V's triangle streams; the ocean's camera surface follows with the view grid,
 // FEATURES_GAME 1.8 B), water() in M's shading() after the opaque kernel (the water layer's refraction, absorption and
 // reflection: WaterSurface.h, stage 1).
+#include "unx/render/GpuScene.h"
 #include "unx/render/Tracks.h"
 #include "unx/water/FluidSurface.h"
 #include "unx/water/WaterSurface.h"
+#include "unx/water/WaterSunMap.h"
 
 #include "unx/core/Log.h"
 
@@ -31,7 +33,37 @@ struct FluidState
 uint32_t roundUp(uint32_t v, uint32_t m) { return (v + m - 1) / m * m; }
 } // namespace
 
-void waterGeometry(FramePassContext& fc)
+// Stage 2 (FEATURES_GAME 1.9): the sun-space map of W's streams, for band A under water (WaterLight.hlsli).
+static void waterSunMap(FramePassContext& fc)
+{
+    const scene::Scene* source = fc.scene.source();
+    if (!source) return;
+    std::vector<water::WaterSunStream> streams;
+    for (uint32_t i = 0; i < (uint32_t)fc.resources.triangleStreams.size() && i < kMaxTriangleStreams; ++i)
+    {
+        const TriangleStream& t = fc.resources.triangleStreams[i];
+        if (!t.vertices.valid()) continue;
+        water::WaterSunStream w;
+        w.stream = t;
+        if (t.material < source->materials.size())
+        {
+            const scene::Material& m = source->materials[t.material];
+            w.transmittance[0] = m.baseColor.x, w.transmittance[1] = m.baseColor.y, w.transmittance[2] = m.baseColor.z;
+            if (m.ior > 1.0001f) w.ior = m.ior;
+        }
+        streams.push_back(w);
+    }
+    if (streams.empty()) return;
+    auto& map = fc.state<std::unique_ptr<water::WaterSunMap>>("W.sunMap");
+    if (!map) map = std::make_unique<water::WaterSunMap>(fc.device);
+    const water::WaterSunMapOutput out = map->record(fc.graph, fc.shaders, fc.frame.frameIndex, streams, source->sun.direction);
+    if (!out.texels) return;
+    fc.resources.waterSunDepth = out.depth;
+    fc.resources.waterSunNormal = out.normal;
+    fc.resources.waterSunMedium = out.medium;
+    fc.resources.waterSunConstants = out.constants;
+}
+static void waterFluids(FramePassContext& fc)
 {
     const FrameContext& frame = fc.frame;
     if (!frame.fluidCount) return;
@@ -91,6 +123,11 @@ void waterGeometry(FramePassContext& fc)
         stream.layer = 0;  // see-through coverage records (small surfaces)
         fc.resources.triangleStreams.push_back(stream);
     }
+}
+void waterGeometry(FramePassContext& fc)
+{
+    waterFluids(fc);
+    waterSunMap(fc);
 }
 void water(FramePassContext& fc, ViewResources& view) { water::waterSurface(fc, view); }
 } // namespace unx::render::tracks
