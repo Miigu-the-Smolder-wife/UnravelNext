@@ -459,6 +459,127 @@ double lobePolygon(V3 v, double p, double norm, const std::array<V3, 4>& quad, i
     return sum * area / (double(n) * n) / norm;
 }
 
+// Solid-angle quadrature of a rect (option (3) of the sheen area-light study): Urena, Fajardo, King 2013, "An area-preserving
+// parametrization for spherical rectangles" maps (u, v) in [0, 1]^2 onto the rect's solid angle uniformly; an n x n
+// Gauss-Legendre rule in (u, v) then integrates the exact lobe: I ~ Omega sum w_i w_j f(omega_ij).
+struct SphQuad
+{
+    V3 o, x, y, z;
+    double z0, x0, y0, x1, y1, b0, b1, k, S;
+};
+SphQuad sphQuadInit(V3 s, V3 ex, V3 ey)  // s: a corner relative to the shading point, ex / ey: the edges
+{
+    SphQuad q;
+    const double exl = std::sqrt(dot(ex, ex)), eyl = std::sqrt(dot(ey, ey));
+    q.x = ex * (1 / exl), q.y = ey * (1 / eyl), q.z = cross(q.x, q.y);
+    const V3 d = s;
+    q.z0 = dot(d, q.z);
+    if (q.z0 > 0) q.z = q.z * -1.0, q.z0 = -q.z0;
+    q.x0 = dot(d, q.x), q.y0 = dot(d, q.y), q.x1 = q.x0 + exl, q.y1 = q.y0 + eyl;
+    const V3 v00{ q.x0, q.y0, q.z0 }, v01{ q.x0, q.y1, q.z0 }, v10{ q.x1, q.y0, q.z0 }, v11{ q.x1, q.y1, q.z0 };
+    auto nrm = [](V3 a, V3 b) { return normalize(cross(a, b)); };
+    const V3 n0 = nrm(v00, v10), n1 = nrm(v10, v11), n2 = nrm(v11, v01), n3 = nrm(v01, v00);
+    const double g0 = std::acos(std::clamp(-n0.z * n1.z - n0.x * n1.x - n0.y * n1.y, -1.0, 1.0)), g1 = std::acos(std::clamp(-dot(n1, n2), -1.0, 1.0)),
+                 g2 = std::acos(std::clamp(-dot(n2, n3), -1.0, 1.0)), g3 = std::acos(std::clamp(-dot(n3, n0), -1.0, 1.0));
+    q.b0 = n0.z, q.b1 = n2.z, q.k = 2 * kPi - g2 - g3, q.S = g0 + g1 - q.k;
+    return q;
+}
+V3 sphQuadPoint(const SphQuad& q, double u, double v)  // direction (world frame), unit
+{
+    const double au = u * q.S + q.k, fu = (std::cos(au) * q.b0 - q.b1) / std::sin(au);
+    double cu = 1 / std::sqrt(fu * fu + q.b0 * q.b0) * (fu > 0 ? 1 : -1);
+    cu = std::clamp(cu, -1.0, 1.0);
+    double xu = -(cu * q.z0) / std::sqrt(std::max(1e-300, 1 - cu * cu));
+    xu = std::clamp(xu, q.x0, q.x1);
+    const double dd = std::sqrt(xu * xu + q.z0 * q.z0), h0 = q.y0 / std::sqrt(dd * dd + q.y0 * q.y0), h1 = q.y1 / std::sqrt(dd * dd + q.y1 * q.y1);
+    const double hv = h0 + v * (h1 - h0), hv2 = hv * hv;
+    const double yv = hv2 < 1 - 1e-12 ? hv * dd / std::sqrt(1 - hv2) : q.y1;
+    const V3 local{ xu, yv, q.z0 };
+    return normalize(q.x * local.x + q.y * local.y + q.z * local.z);
+}
+double lobeQuadrature(V3 v, double p, double norm, const std::array<V3, 4>& quad, int n)
+{
+    static const double x2[] = { -0.5773502691896257, 0.5773502691896257 }, w2[] = { 1, 1 };
+    static const double x3[] = { -0.7745966692414834, 0, 0.7745966692414834 }, w3[] = { 0.5555555555555556, 0.8888888888888888, 0.5555555555555556 };
+    static const double x4[] = { -0.8611363115940526, -0.3399810435848563, 0.3399810435848563, 0.8611363115940526 },
+                        w4[] = { 0.3478548451374538, 0.6521451548625461, 0.6521451548625461, 0.3478548451374538 };
+    static const double x6[] = { -0.9324695142031521, -0.6612093864662645, -0.2386191860831969, 0.2386191860831969, 0.6612093864662645, 0.9324695142031521 },
+                        w6[] = { 0.1713244923791704, 0.3607615730481386, 0.4679139345726910, 0.4679139345726910, 0.3607615730481386, 0.1713244923791704 };
+    const double* xs = n == 2 ? x2 : n == 3 ? x3 : n == 4 ? x4 : x6;
+    const double* ws = n == 2 ? w2 : n == 3 ? w3 : n == 4 ? w4 : w6;
+    const SphQuad q = sphQuadInit(quad[0], quad[1] - quad[0], quad[3] - quad[0]);
+    double sum = 0;
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i)
+        {
+            const V3 w = sphQuadPoint(q, 0.5 * (xs[i] + 1), 0.5 * (xs[j] + 1));
+            sum += 0.25 * ws[i] * ws[j] * lobeCos(v, w, p);
+        }
+    return sum * q.S / norm;
+}
+
+// Horizon-clipped quadrature: the light polygon clipped to z >= 0 (a plane through the shading point: the part a lobe
+// with zero below the horizon sees, so the integrand has no kink), fanned into spherical triangles, each integrated with
+// Arvo's area-preserving map ("Stratified sampling of spherical triangles", 1995) and an n x n Gauss-Legendre rule.
+V3 arvoPoint(V3 A, V3 B, V3 C, double alpha, double area, double cosC, double u1, double u2)
+{
+    const double ah = u1 * area, sn = std::sin(ah - alpha), cs = std::cos(ah - alpha);
+    const double u = cs - std::cos(alpha), v = sn + std::sin(alpha) * cosC;
+    double q = ((v * cs - u * sn) * std::cos(alpha) - v) / ((v * sn + u * cs) * std::sin(alpha));
+    q = std::clamp(q, -1.0, 1.0);
+    const V3 perpC = normalize(C - A * dot(C, A));
+    const V3 Ch = A * q + perpC * std::sqrt(std::max(0.0, 1 - q * q));
+    const double z = 1 - u2 * (1 - dot(Ch, B));
+    const V3 d = Ch - B * dot(Ch, B);
+    const double dl = std::sqrt(dot(d, d));
+    return dl > 1e-15 ? normalize(B * z + d * (std::sqrt(std::max(0.0, 1 - z * z)) / dl)) : B;
+}
+double sphericalAngle(V3 at, V3 b, V3 c)  // the angle at vertex 'at' of the spherical triangle
+{
+    const V3 n1 = cross(at, b), n2 = cross(at, c);
+    const double l1 = std::sqrt(dot(n1, n1)), l2 = std::sqrt(dot(n2, n2));
+    if (l1 < 1e-15 || l2 < 1e-15) return 0;
+    return std::acos(std::clamp(dot(n1, n2) / (l1 * l2), -1.0, 1.0));
+}
+double lobeClippedQuadrature(V3 v, double p, double norm, const std::array<V3, 4>& quad, int n, const Ltc* control = nullptr)
+{
+    static const double x3[] = { -0.7745966692414834, 0, 0.7745966692414834 }, w3[] = { 0.5555555555555556, 0.8888888888888888, 0.5555555555555556 };
+    static const double x4[] = { -0.8611363115940526, -0.3399810435848563, 0.3399810435848563, 0.8611363115940526 },
+                        w4[] = { 0.3478548451374538, 0.6521451548625461, 0.6521451548625461, 0.3478548451374538 };
+    static const double x6[] = { -0.9324695142031521, -0.6612093864662645, -0.2386191860831969, 0.2386191860831969, 0.6612093864662645, 0.9324695142031521 },
+                        w6[] = { 0.1713244923791704, 0.3607615730481386, 0.4679139345726910, 0.4679139345726910, 0.3607615730481386, 0.1713244923791704 };
+    static const double x2[] = { -0.5773502691896257, 0.5773502691896257 }, w2[] = { 1, 1 };
+    const double* xs = n == 2 ? x2 : n == 3 ? x3 : n == 4 ? x4 : x6;
+    const double* ws = n == 2 ? w2 : n == 3 ? w3 : n == 4 ? w4 : w6;
+    std::vector<V3> poly;
+    for (size_t i = 0; i < 4; ++i)
+    {
+        const V3 a = quad[i], b = quad[(i + 1) % 4];
+        if (a.z >= 0) poly.push_back(a);
+        if ((a.z >= 0) != (b.z >= 0)) poly.push_back(a + (b - a) * (a.z / (a.z - b.z)));
+    }
+    if (poly.size() < 3) return 0;
+    double sum = 0;
+    const V3 A = normalize(poly[0]);
+    for (size_t t = 1; t + 1 < poly.size(); ++t)
+    {
+        const V3 B = normalize(poly[t]), C = normalize(poly[t + 1]);
+        const double alpha = sphericalAngle(A, B, C), beta = sphericalAngle(B, C, A), gamma = sphericalAngle(C, A, B);
+        const double area = alpha + beta + gamma - kPi;
+        if (!(area > 1e-12)) continue;
+        const double cosC = dot(A, B);
+        double tri = 0;
+        for (int j = 0; j < n; ++j)
+            for (int i = 0; i < n; ++i)
+            {
+                const V3 w = arvoPoint(A, B, C, alpha, area, cosC, 0.5 * (xs[i] + 1), 0.5 * (xs[j] + 1));
+                tri += 0.25 * ws[i] * ws[j] * (lobeCos(v, w, p) / norm - (control ? control->eval(w) : 0.0));
+            }
+        sum += tri * area;
+    }
+    return control ? sum + ltcPolygon(*control, quad) : sum;
+}
+
 // A rect of angular half-size h (radians) centred on direction (theta, phi), facing the point, rolled by 'roll'.
 std::array<V3, 4> rectAt(double theta, double phi, double h, double roll)
 {
@@ -623,6 +744,7 @@ int main(int argc, char** argv)
             // degrees half-angle, 2 rolls), error = sum |I_ltc - I_true| / sum I_true over the cell's rects (energy-weighted
             // relative error), I_true by a 96 x 96 midpoint rule; worst and mean over the grid, and the share of cells above 3 %.
             std::vector<double> cellError(rows() * kN, 0.0), cellErrorC(rows() * kN, 0.0), cellErrorF(rows() * kN, 0.0);
+            std::vector<std::vector<double>> cellErrorQ(4, std::vector<double>(rows() * kN, 0.0));
             std::atomic<int> row{ 0 };
             auto check = [&]() {
                 for (int a; (a = row++) < rows();)
@@ -631,7 +753,7 @@ int main(int argc, char** argv)
                         waitWhileHeld();
                         const int k = a * kN + t;
                         const Ltc stored = unpackInverse(packInverse(fits[k]));
-                        double diff = 0, total = 0, diffC = 0, diffF = 0;
+                        double diff = 0, total = 0, diffC = 0, diffF = 0, diffQ[4] = {};
                         for (int d = 0; d < 8; ++d)
                             for (double h : { 5.0, 15.0, 40.0 })
                                 for (double roll : { 0.0, 0.6 })
@@ -654,10 +776,13 @@ int main(int argc, char** argv)
                                     const V3 centre = (quad[0] + quad[2]) * 0.5;
                                     diffC += std::fabs(iltc * ratio(centre) - truth);
                                     diffF += std::fabs(iltc * (dot(ff, ff) > 0 ? ratio(stored.M * ff) : 1.0) - truth);
+                                    const int orders[4] = { 2, 3, 4, 6 };
+                                    for (int m = 0; m < 4; ++m) diffQ[m] += std::fabs(lobeClippedQuadrature(viewAt(t), paramAt(a), norms[k], quad, orders[m], &stored) - truth);
                                 }
                         cellError[k] = total > 0 ? diff / total : 0;
                         cellErrorC[k] = total > 0 ? diffC / total : 0;
                         cellErrorF[k] = total > 0 ? diffF / total : 0;
+                        for (int m = 0; m < 4; ++m) cellErrorQ[m][k] = total > 0 ? diffQ[m] / total : 0;
                     }
             };
             std::vector<std::thread> pool;
@@ -680,6 +805,16 @@ int main(int argc, char** argv)
                 for (int a = 0; a < rows(); ++a)
                     for (int t = 0; t < kN; t += 3) sumE += e[a * kN + t], ++c, o += e[a * kN + t] > 0.03, w = std::max(w, e[a * kN + t]);
                 logf("  x lobe / LTC ratio at the %s: mean %.4f, worst %.4f, cells over 3 %%: %d of %d\n", m == 1 ? "light centre" : "form-factor direction", sumE / c, w, o, c);
+            }
+            for (int m = 0; m < 4; ++m)
+            {
+                const std::vector<double>& e = cellErrorQ[m];
+                double w = 0, sumE = 0;
+                int c = 0, o = 0;
+                for (int a = 0; a < rows(); ++a)
+                    for (int t = 0; t < kN; t += 3) sumE += e[a * kN + t], ++c, o += e[a * kN + t] > 0.03, w = std::max(w, e[a * kN + t]);
+                const int orders[4] = { 2, 3, 4, 6 };
+                logf("  LTC + horizon-clipped quadrature of (lobe - LTC), Gauss-Legendre %d x %d: mean %.4f, worst %.4f, cells over 3 %%: %d of %d\n", orders[m], orders[m], sumE / c, w, o, c);
             }
             logf("polygon check (rect lights, sum |I_ltc - I_true| / sum I_true per cell): mean %.4f, worst %.4f at roughness %.3f NoV %.3f, cells over 3 %%: %d of %d\n",
                  mean / count, worst, g_sheen ? paramAt(wa) : rowValue(wa), viewAt(wt).z, over, count);
