@@ -32,9 +32,16 @@ float nearOcclusion(Texture2D<float> depth, float3 p, float3 n, float radius, ui
         const int2 pixel = int2((ndc * float2(0.5, -0.5) + 0.5) * float2(size));
         total += 1;
         if (any(pixel < 0) || any(pixel >= int2(size))) continue;
-        const float sceneDepth = linearDepth(depth.Load(int3(pixel, 0)));
+        const float device = depth.Load(int3(pixel, 0));
+        const float sceneDepth = linearDepth(device);
         const float sampleDepth = clip.w;  // view distance along the axis (reversed-Z infinite projection: w = view depth)
-        if (sceneDepth < sampleDepth - 1e-3 * sampleDepth && sampleDepth - sceneDepth < radius) occluded += 1;
+        // An occluder is a surface in front of the point that also rises above the probe's tangent plane. The depth
+        // comparison alone made a plane occlude itself at grazing views: its depth changes by much more than the
+        // point's height across one pixel, so the pixel centre's depth read nearer than a point just above it (dark
+        // one-pixel lines on walls at the probe columns, D0 2026-09-26).
+        if (sceneDepth < sampleDepth - 1e-3 * sampleDepth && sampleDepth - sceneDepth < radius &&
+            dot(worldFromDepth(float2(pixel), device) - p, n) > max(0.05 * reach, 2e-4 * sampleDepth))
+            occluded += 1;
     }
     return total > 0 ? 1 - occluded / total : 1;
 }

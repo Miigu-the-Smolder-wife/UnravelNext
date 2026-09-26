@@ -78,6 +78,7 @@ int main(int argc, char** argv)
                                 // between the scene's and +30 % speed / +20 degrees (no reload; the host's path)
         std::vector<std::string> overrides;
         double warmupSeconds = -1;  // --warmup-seconds: the harness default when negative
+        std::string cameraAt6, saveScene;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -96,6 +97,8 @@ int main(int argc, char** argv)
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
             else if (a == "--warmup-seconds") warmupSeconds = std::stod(next());  // repro of early frames (never with timings)
+            else if (a == "--camera-at") cameraAt6 = next();  // "px,py,pz,tx,ty,tz": camera 0 moved to look from p at t (repros)
+            else if (a == "--save-scene") saveScene = next();  // the scene as rendered (with --camera-at) for unx_reference
             else fail("unknown argument %s", a.c_str());
         }
         requireGpuLock("unx_gate_shadow_renderergate");
@@ -114,6 +117,28 @@ int main(int argc, char** argv)
             }
         if (!found) fail("unknown scene %s", sceneName.c_str());
         scene::Scene s = sceneFile ? scene::load(sceneName) : scenegen::generate(request);  // not const: --sun-deg-per-s turns its sun (GpuScene keeps &s)
+        if (!cameraAt6.empty())
+        {
+            float v[6] = {};
+            size_t at = 0;
+            for (int k = 0; k < 6; ++k)
+            {
+                const size_t comma = cameraAt6.find(',', at);
+                if ((comma == std::string::npos) != (k == 5)) fail("--camera-at expects px,py,pz,tx,ty,tz");
+                v[k] = std::stof(cameraAt6.substr(at, comma - at));
+                at = comma + 1;
+            }
+            if (s.cameras.empty()) s.cameras.push_back({});
+            scene::Camera& c = s.cameras[0];
+            c.position = { v[0], v[1], v[2] };
+            c.forward = normalize(float3{ v[3] - v[0], v[4] - v[1], v[5] - v[2] });
+            c.up = normalize(cross(cross(c.forward, float3{ 0, 1, 0 }), c.forward));
+        }
+        if (!saveScene.empty())
+        {
+            scene::save(s, saveScene);
+            logf("saved the scene with its camera 0 to %s\n", saveScene.c_str());
+        }
         const float3 sun0 = normalize(s.sun.direction);
         const float3 sunAxis = normalize(cross(sun0, float3{ 0, 1, 0 }));
         const float wind0 = s.windSpeed;

@@ -319,20 +319,34 @@ float giLevelBand(GiHeader h, float3 worldPos, out uint own)
     const float u = log2(max(size, 1e-30) / h.cellSize0);  // level own holds u in (own - 1, own]
     return own < h.maxLevel ? saturate((u - ((float)own - GI_LEVEL_BAND)) / GI_LEVEL_BAND) : 0.0;
 }
+// One level at a screen point, the trilinear weight of its missing cells filled from the next coarser level (that lookup
+// with the usual level search). Cells no probe landed in are missing: at grazing views a cell spans less than the 8 px
+// probe step along the surface. Renormalising over the corners that exist, or climbing only when none does, jumped where
+// a missing cell began (one-pixel lines on walls seen edge-on, D0 2026-09-26); the filled share goes to 0 with the
+// missing corners' own trilinear weight, so the result is continuous.
+// With the band: E = (1 - beta) E_own + beta E_own+1, E_L = S_L + (1 - W_L) E_L+1 (S_L, W_L: the level's trilinear sum
+// and weight over the cells that have data), evaluated as one loop over levels with the share still unassigned. Up to
+// GI_FILL_LEVELS levels; what remains then is spread over what was found; nothing found: weight 0 (M uses the probes).
+#define GI_FILL_LEVELS 4u
 template <typename B>
 float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, out float weight)
 {
-    uint own;
-    const float beta = giLevelBand(h, worldPos, own);
-    float3 e = giCacheIrradianceAt(b, h, worldPos, normal, own, weight);
-    if (beta > 0)
+    uint level;
+    const float beta = giLevelBand(h, worldPos, level);
+    const uint nc = giNormalClass(normal);
+    float3 result = 0;
+    float remain = 1;
+    [loop] for (uint k = 0; k < GI_FILL_LEVELS && remain > 1e-3 && level <= h.maxLevel; ++k, ++level)
     {
-        float wc;
-        const float3 c = giCacheIrradianceAt(b, h, worldPos, normal, own + 1, wc);
-        if (wc > 0) e = weight > 0 ? lerp(e, c, beta) : c;
-        weight = max(weight, wc);
+        float3 s = 0, unused = 0;
+        float w = 0;
+        giAccumulateLevel(b, h, worldPos, normal, normal, false, nc, level, s, unused, w);
+        const float take = k == 0 ? 1 - beta : 1.0;  // the band passes beta of the point on to the next level
+        result += (remain * take) * s;
+        remain *= 1 - take * w;
     }
-    return e;
+    weight = 1 - remain;
+    return weight > 0 ? result / weight : 0;
 }
 
 float3 giCacheIrradiance(GiSrvs s, float3 worldPos, float3 normal)
