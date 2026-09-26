@@ -9,12 +9,12 @@
 - **공유 헤더**: UnravelNext `Native/Render/Passes/Atmosphere/WindField.hlsli`에 두고, C++에서도 같은 헤더를 `#include`한다(HLSL/C++ 공통 부분집합).
   - CPU 소비자(물리 천·로프·부력의 바람 항, VFX CPU 입자, 오디오 바람 소리)와 GPU 소비자(식생 변위, GPU 입자, 물 FFT 스펙트럼의 풍속·방향)가 **같은 식**을 쓴다.
   - float과 double의 차이만 남는다. CPU 결정성은 World 쪽 double 경로로 지킨다.
-- **입력 레코드(GPU용, 64 B)**: `{ float3 origin(카메라 기준 상대), uint quantityOp(op | shape << 8 | flags << 16); float3x3 inverse basis(행 3개), float3 value; float4 turbulence(1.2) }`.
+- **입력 레코드(GPU용, 80 B, WindField.hlsli `WindRecord`)**: `{ float3 origin(카메라 기준 상대), uint op | shape << 8; float4 row0/row1/row2(역기저 행, w = 값 성분); float4 turbulence(1.2: 진폭, L, T, octaves | seed << 8) }`.
   - 호스트가 World 스냅샷에서 틱마다 채운다: `FrameContext::wind`(레코드 배열 + 개수 + 틱 시각 t). 순서는 World의 평가 순서 그대로다.
 
 ### 1.2 난류 성분 (`NW_COMPONENT_WIND_TURBULENCE`, 32 B — World 쪽 스키마 제안)
 
-- `{ float amplitude (m/s), float lengthScale (m), float timeScale (s), uint octaves (1~4), uint seed, float3 pad }`. 바람 레코드에 붙는다.
+- `{ float amplitude (m/s: 난류의 RMS 속력), float lengthScale (m: 가장 큰 소용돌이), float timeScale (s: 그 회전 시간), uint octaves (1~4), uint seed, float3 pad }`. 바람 레코드에 붙는다. 옥타브마다 속도가 2^(−1/3)배다(Kolmogorov).
 - 값은 **curl noise**다: 스칼라 퍼텐셜 ψ 3개(시드별 3D gradient noise, 옥타브 합, 공간 스케일 = lengthScale, 시간은 4D로 timeScale)의 회전 ∇×ψ이다. 발산이 0이라 입자가 한곳에 모이지 않는다.
 - 그 레코드의 모양 가중으로 곱해 더한다. 상자·구 경계에서 부드럽게 줄어드는 폭(falloff)은 World 스키마의 결정 사항이라 flags로 예약해 둔다.
 
