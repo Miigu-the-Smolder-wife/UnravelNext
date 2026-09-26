@@ -27,6 +27,8 @@
 //         the water's sigma_a and index, 3 internal reflections; results reach their own pixel.
 //      c. statistics: one reflection job per interior pixel, one refraction job per fallback, all traced, no overflow,
 //         ceil(540 / 64) bands
+//   6. calm water (A14): the rest plane's reflection camera (a stand-in returning the fake service's reflection value)
+//      replaces every interior reflection job with the same value (fp16 bound), no reflection job written
 //   unx_test_water_watersurfacetests [--no-debug-layer] [--warp]
 #if __has_include("unx/shading/ShadingSystem.h") && __has_include("unx/material/MaterialSystem.h")
 #include "../../Material/Tests/MTestFrame.h"
@@ -673,6 +675,116 @@ int main(int argc, char** argv)
             const bool counts5 = fakeStats.reflectJobs == interior5 && fakeStats.refractJobs == fallback5 && fakeStats.traced == interior5 + fallback5 &&
                                 fakeStats.rayOverflow == 0 && bands == (H + 63) / 64;
             report(counts5, "5c. one reflection job per pixel, refraction per fallback, all traced, bands", counts5 ? 0 : 1, 0);
+
+            // 6. calm water (A14 planar reflection camera): the flat water's rest plane y = level is a candidate plane and
+            // a stand-in reflection camera (Tests/WaterPlanarStandIn.hlsl) returns per pixel what the fake service returns
+            // for a reflection job along the same mirror direction. With the camera forced on and the service tracing
+            // nothing, band A radiance must equal 5's reflection-only frame (the camera's value in place of the job's,
+            // same weights F x airT), within the two fp16 roundings; no reflection job may be written, every interior
+            // pixel reads the camera, and its mask draws them all.
+            std::shared_ptr<std::vector<uint8_t>> planarBand;
+            water::WaterSurfaceStats planarStats;
+            dbg.rayJobCapacity = 2 * W * 64;
+            dbg.planar = 1;
+            tf.frame.outputLinearHdr = true;
+            tf.run([&](FramePassContext& fc) {
+                ViewResources v = tf.mainView(fc, W, H, 0);
+                v.color = fc.graph.createTexture({ "w.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+                tf.vis.record(fc, v);
+                v.waterVis = uploadTexture(fc, "w.test.water vis", DXGI_FORMAT_R32_UINT, 4, wvis.data());
+                v.waterDepth = uploadTexture(fc, "w.test.water depth", DXGI_FORMAT_R32_FLOAT, 4, wdepth.data());
+                TriangleStream stream;
+                stream.vertices = uploadBuffer(fc, "w.test.water vertices", verts.data(), verts.size() * 4);
+                stream.material = waterIndex;
+                stream.maxTriangles = 2;
+                stream.layer = 1;
+                water::WaterPlane rest;
+                rest.stream = uint32_t(fc.resources.triangleStreams.size());
+                rest.plane = { 0, 1, 0, -(float)level };
+                rest.corners[0] = { -1, (float)level, -1 }, rest.corners[1] = { 1, (float)level, -1 }, rest.corners[2] = { -1, (float)level, 1 }, rest.corners[3] = { 1, (float)level, 1 };
+                water::addWaterPlane(fc, rest);
+                fc.resources.triangleStreams.push_back(stream);
+                fc.state<water::WaterSurfaceDebug>("W.surface.debug").copyRadiance = true;
+                ID3D12PipelineState* stand = fc.shaders.compute("Passes/Water/Tests/WaterFakeRays");
+                fc.services.traceRefractions = [stand](FramePassContext& c, BufferRef jobs, BufferRef results, uint32_t maxJobs) {
+                    c.graph.addPass("w.test.fake rays", QueueType::Graphics,
+                                    [&](PassBuilder& b) {
+                                        b.use(jobs, Use::SrvCompute);
+                                        b.use(results, Use::UavCompute);
+                                    },
+                                    [=](PassContext& pc) {
+                                        const uint32_t k[4] = { pc.srv(jobs), pc.uav(results), maxJobs, 1 };  // zero radiance, traced
+                                        pc.cmd->SetPipelineState(stand);
+                                        pc.computeConstants(k, 4);
+                                        water::dispatchLinear(pc.cmd, (maxJobs + 63) / 64);
+                                    });
+                };
+                ID3D12PipelineState* camera = fc.shaders.compute("Passes/Water/Tests/WaterPlanarStandIn");
+                fc.services.renderView = [camera](FramePassContext& c, const ViewDesc& d) {
+                    ViewResources rv;
+                    rv.view = d;
+                    rv.frameConstants = c.frameConstantsFor(d);
+                    rv.color = c.graph.createTexture({ "w.test.planar colour", d.width, d.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+                    rv.depth = c.graph.createTexture({ "w.test.planar depth", d.width, d.height, 1, 1, DXGI_FORMAT_R32_FLOAT });
+                    const TextureRef colour = rv.color, depthOut = rv.depth;
+                    const D3D12_GPU_VIRTUAL_ADDRESS cb = rv.frameConstants;
+                    const uint32_t w = d.width, h = d.height;
+                    c.graph.addPass("w.test.planar camera", QueueType::Graphics,
+                                    [&](PassBuilder& b) {
+                                        b.use(colour, Use::UavCompute);
+                                        b.use(depthOut, Use::UavCompute);
+                                    },
+                                    [=](PassContext& pc) {
+                                        const uint32_t k[4] = { pc.uav(colour), pc.uav(depthOut), 0, 0 };
+                                        pc.cmd->SetPipelineState(camera);
+                                        pc.bindFrameConstants(cb);
+                                        pc.computeConstants(k, 4);
+                                        pc.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                                    });
+                    return rv;
+                };
+                tracks::materialResolve(fc, v);
+                tracks::shading(fc, v);
+                planarBand = tf.readback(fc, fc.state<water::WaterSurfaceDebug>("W.surface.debug").radiance);
+                fc.resources.triangleStreams.clear();
+            });
+            planarStats = water::latestWaterSurfaceStats(tf.trackState);
+            tf.frame.outputLinearHdr = false;
+            dbg.rayJobCapacity = 0;
+            dbg.planar = -1;
+            double worst6 = 0;
+            uint32_t checked6 = 0, logged6 = 0;
+            for (uint32_t y = 0; y < H; ++y)
+                for (uint32_t x = 0; x < W; ++x)
+                {
+                    if ((*status)[(size_t)y * TestFrame::rowPitch(W, 1) + x] == 0) continue;
+                    ++checked6;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        auto fp16 = [&](const std::vector<uint8_t>& img) {
+                            uint16_t h;
+                            std::memcpy(&h, img.data() + (size_t)y * TestFrame::rowPitch(W, 8) + 8 * x + 2 * k, 2);
+                            const uint32_t sign = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
+                            const double v = e == 0 ? std::ldexp((double)m, -24) : std::ldexp(1.0 + m / 1024.0, (int)e - 15);
+                            return sign ? -v : v;
+                        };
+                        const double got = fp16(*planarBand), want = fp16(*reflBand), noJob = fp16(*zeroBand);
+                        // band A's fp16 rounding of both frames plus the camera colour's fp16 rounding of the reflected term
+                        const double allow = std::ldexp(std::max(std::fabs(got), std::fabs(want)), -10) + std::ldexp(std::fabs(want - noJob), -10) + 1e-7;
+                        if (std::fabs(got - want) > allow && logged6 < 6)
+                        {
+                            ++logged6;
+                            logf("  calm water px (%u,%u) channel %d: camera %.6f, job %.6f, no job %.6f\n", x, y, k, got, want, noJob);
+                        }
+                        worst6 = std::max(worst6, std::fabs(got - want) / allow);
+                    }
+                }
+            logf("calm water: %u interior pixels; reflection camera samples %u, mask %u, cameras %u, reflection jobs %u, refraction jobs %u; worst |planar - job| / fp16 bound %.3f\n",
+                 checked6, planarStats.planar, planarStats.planarMask[0], planarStats.planarViews, planarStats.reflectJobs, planarStats.refractJobs, worst6);
+            report(checked6 > 5000 && worst6 <= 1, "6a. calm water: the reflection camera's value equals the reflection job's (x fp16 bound)", worst6, 1);
+            const bool counts6 = planarStats.planar == interior5 && planarStats.reflectJobs == 0 && planarStats.refractJobs == fallback5 && planarStats.planarViews == 1 &&
+                                 planarStats.planarMask[0] >= interior5;
+            report(counts6, "6b. every interior pixel reads the camera, no reflection job, one camera, mask covers them", counts6 ? 0 : 1, 0);
         }
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;

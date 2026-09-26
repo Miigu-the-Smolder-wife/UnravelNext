@@ -12,6 +12,7 @@
 #include "unx/render/FrameResources.h"
 
 #include <cstdint>
+#include <vector>
 
 namespace unx::water
 {
@@ -22,6 +23,9 @@ struct WaterSurfaceStats
     uint64_t frameIndex = UINT64_MAX;  // UINT64_MAX: no frame shaded water yet
     uint32_t shaded = 0, offscreen = 0, exited = 0, occluded = 0, steps = 0, inside = 0, unlit = 0;
     uint32_t rayOverflow = 0, reflectJobs = 0, refractJobs = 0, traced = 0;  // stage 3 (0 without R's service)
+    uint32_t planar = 0;                  // calm water: samples whose mirror lobe came from a reflection camera
+    uint32_t planarMask[4] = {};          // pixels each candidate plane's mask pass drew (WaterPlanarMask)
+    uint32_t planarViews = 0;             // reflection cameras the frame rendered
     uint32_t fallbacks() const { return offscreen + exited + occluded + steps; }
 };
 // Tests: with `status` on, the next recorded frame also writes an R8_UINT image of each interior pixel's
@@ -36,7 +40,29 @@ struct WaterSurfaceDebug
     uint32_t rayJobCapacity = 0;  // stage 3: jobs per band (0 = the default 2^20); tests set it small to run many bands
     uint32_t rayBands = 0;        // stage 3: bands of the last recorded frame
     uint32_t rayRounds = 0;       // stage 3: record rounds of the last recorded frame (1 without rays)
+    int planar = -1;              // calm water's reflection cameras: -1 by the cost rule, 0 never (rays), 1 always
 };
+
+// Calm water (A14 planar reflection camera, FEATURES_GAME 1.9 stage 3 (i)): a layer-1 stream whose surface rests on a
+// plane (W2 basins: the still level) is pushed here by its producer each frame with its index in
+// FrameResources::triangleStreams. waterSurface draws the stream's reflection from the mirrored camera where the cost
+// rule picks it (measured: camera 1.44 ms + 0.80 ns per mask pixel against 3.0 ns saved per sample it serves, from the
+// counts of the last completed frame; break-even ~650 k pixels, 7.9 % of 4K) and the samples whose surface is that
+// plane within WaterSurface.hlsli's image-shift bound read
+// it in place of a reflection job; the others keep their jobs. corners: the plane region's corners (the camera's
+// rectangle is their projection; any corner behind the eye takes the whole view).
+struct WaterPlane
+{
+    uint32_t stream = 0;
+    float4 plane{};
+    float3 corners[4]{};
+};
+struct WaterPlanes
+{
+    uint64_t frame = UINT64_MAX;
+    std::vector<WaterPlane> list;
+};
+void addWaterPlane(render::FramePassContext& fc, const WaterPlane& plane);
 
 void waterSurface(render::FramePassContext& fc, render::ViewResources& view);
 WaterSurfaceStats latestWaterSurfaceStats(render::TrackState& state);

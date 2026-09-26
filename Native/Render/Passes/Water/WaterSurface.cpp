@@ -15,9 +15,19 @@ namespace unx::water
 using namespace unx::render;
 namespace
 {
-constexpr uint32_t kStatCount = 11, kStatBytes = 64, kRing = 4, kSlots = 64, kRayJobs = 1u << 20;
+constexpr uint32_t kStatCount = 16, kStatBytes = 64, kRing = 4, kSlots = 64, kRayJobs = 1u << 20;
 // After the slot rows: the refraction source's pyramid, count + SRV per level (WaterSurface.hlsli WATER_LEVELS_OFFSET).
-constexpr uint32_t kMaxLevels = 15, kTableBytes = kSlots * 16 + 4 * (1 + kMaxLevels + 0) + 0;
+// Then the calm-water block (WATER_PLANAR_OFFSET): 48 B per candidate plane.
+constexpr uint32_t kMaxLevels = 15, kPlanarMax = 4, kTableBytes = kSlots * 16 + 4 * (1 + kMaxLevels) + 48 * kPlanarMax;
+// The cost rule's terms [measured, RTX 4080, 4K W gate (interior scene, basin 3 m / 12 m: 506,640 / 892,079 water
+// samples), sums of pass medians over 300 frames, camera on vs off, 2026-09-27]:
+//   saved per sample served by the camera (its reflection job in R's ray passes + its share of the surface passes):
+//     2.80 ns (3 m: rays 2.214 -> 1.098 ms, surface 4.182 -> 3.875) and 3.31 ns (12 m: 3.459 -> 1.375, 6.608 -> 5.735);
+//   the camera's passes (mask, V, M resolve, S planar froxels, M shading): 1.85 ms at 511,000 mask pixels, 2.16 ms at
+//     900,758, i.e. 1.44 ms + 0.80 ns per mask pixel; 0.67 ms of the fixed part is S's planar froxel integrate.
+// Timestamps around the camera's passes read 3.2 ms at 900,758 pixels (the span also covers other queues' overlapping
+// work), so they are not its marginal cost; the terms are re-measured with the gate when the camera's passes change.
+constexpr double kPlanarSavedNs = 3.0, kPlanarFixedNs = 1.44e6, kPlanarPixelNs = 0.80;
 
 ComPtr<ID3D12Resource> hostBuffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE type, const wchar_t* name, uint8_t** mapped)
 {
@@ -46,6 +56,8 @@ struct SurfaceState
     uint8_t* readbackMapped = nullptr;
     uint32_t tableSrv[kRing] = {};
     uint64_t frame[kRing] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX }, last = UINT64_MAX;
+    uint32_t planarStream[kRing][kPlanarMax] = {};  // each ring frame's candidate k -> stream index (the counts' owner)
+    uint32_t planarViews[kRing] = {};
     ~SurfaceState()
     {
         if (!device) return;
@@ -85,6 +97,17 @@ struct SurfaceState
     }
 };
 } // namespace
+
+void addWaterPlane(FramePassContext& fc, const WaterPlane& plane)
+{
+    WaterPlanes& planes = fc.state<WaterPlanes>("W.planes");
+    if (planes.frame != fc.frame.frameIndex)
+    {
+        planes.frame = fc.frame.frameIndex;
+        planes.list.clear();
+    }
+    planes.list.push_back(plane);
+}
 
 void waterSurface(FramePassContext& fc, ViewResources& view)
 {
@@ -175,6 +198,120 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
         materials.push_back(r.triangleStreams[s].material);
     }
     const TextureRef vis = view.waterVis, waterDepth = view.waterDepth, depth = view.depth;
+
+    // Calm water (A14; WaterSurface.h WaterPlane): each candidate plane's mask over its rectangle (always: its pixel count
+    // is the cost rule's input), and its reflection camera where the rule picks it: C_planar = fixed + drawn pixels x
+    // ns/px against the reflection jobs and surface work it replaces (kPlanar*: measured), from the mask counts of the
+    // frame that completed last (a new candidate is drawn: no count yet).
+    struct PlanarUse
+    {
+        uint32_t stream, k, rect[4];
+        float4 plane;
+        TextureRef mask, colour, depth;
+    };
+    std::vector<PlanarUse> planar;
+    uint32_t planarViews = 0;
+    if (interiorPass && debug.planar != 0 && fc.services.renderView)
+    {
+        WaterPlanes& wp = fc.state<WaterPlanes>("W.planes");
+        if (wp.frame != fc.frame.frameIndex) wp.list.clear();
+        if (fc.framesInFlight >= kRing) fail("W: %u frames in flight need more statistics ring slots", fc.framesInFlight);
+        const uint64_t done = fc.frame.frameIndex >= fc.framesInFlight ? fc.frame.frameIndex - fc.framesInFlight : UINT64_MAX;
+        const uint32_t doneRing = uint32_t(done % kRing);
+        const bool history = done != UINT64_MAX && st.frame[doneRing] == done;
+        uint32_t counts[kStatCount] = {};
+        if (history) std::memcpy(counts, st.readbackMapped + doneRing * kStatBytes, sizeof counts);
+        const float4x4& vp = view.view.viewProj;
+        const float3 eye = view.view.position;
+        ID3D12PipelineState* pass0 = fc.shaders.compute("Passes/Water/WaterPlanarMask.PASS0");
+        ID3D12PipelineState* pass1 = fc.shaders.compute("Passes/Water/WaterPlanarMask.PASS1");
+        for (const WaterPlane& p : wp.list)
+        {
+            if (std::find(slots.begin(), slots.end(), p.stream) == slots.end() || planar.size() == kPlanarMax) continue;
+            const BufferRef streamVertices = r.triangleStreams[p.stream].vertices;
+            // The plane's normal is the air side's: a camera under it sees the water from inside (not this path).
+            const float len = length(float3{ p.plane.x, p.plane.y, p.plane.z });
+            const float4 plane{ p.plane.x / len, p.plane.y / len, p.plane.z / len, p.plane.w / len };
+            if (plane.x * eye.x + plane.y * eye.y + plane.z * eye.z + plane.w <= 0) continue;
+            // The rectangle: the region's corners projected (a corner behind the eye takes the whole view), 1 px apron.
+            float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+            bool behind = false;
+            for (const float3& c : p.corners)
+            {
+                float h[4];
+                for (int row = 0; row < 4; ++row) h[row] = vp.m[row][0] * c.x + vp.m[row][1] * c.y + vp.m[row][2] * c.z + vp.m[row][3];
+                if (h[3] <= 1e-6f)
+                {
+                    behind = true;
+                    break;
+                }
+                const float px = (h[0] / h[3] * 0.5f + 0.5f) * W, py = (0.5f - h[1] / h[3] * 0.5f) * H;
+                x0 = std::min(x0, px), x1 = std::max(x1, px), y0 = std::min(y0, py), y1 = std::max(y1, py);
+            }
+            if (behind) x0 = 0, y0 = 0, x1 = (float)W, y1 = (float)H;
+            const int ix0 = std::max(0, (int)std::floor(x0) - 1), iy0 = std::max(0, (int)std::floor(y0) - 1);
+            const int ix1 = std::min((int)W, (int)std::ceil(x1) + 1), iy1 = std::min((int)H, (int)std::ceil(y1) + 1);
+            if (ix1 <= ix0 || iy1 <= iy0) continue;
+            PlanarUse u{ p.stream, (uint32_t)planar.size(), { (uint32_t)ix0, (uint32_t)iy0, (uint32_t)(ix1 - ix0), (uint32_t)(iy1 - iy0) }, plane };
+            const uint32_t rw = u.rect[2], rh = u.rect[3], k = u.k;
+            const TextureRef scratch = g.createTexture(TextureDesc{ "w.planar scratch", rw, rh, 1, 1, DXGI_FORMAT_R8_UINT });
+            const TextureRef tiles = g.createTexture(TextureDesc{ "w.planar tile mask", (rw + 7) / 8, (rh + 7) / 8, 1, 1, DXGI_FORMAT_R8_UINT });
+            u.mask = g.createTexture(TextureDesc{ "w.planar mask", rw, rh, 1, 1, DXGI_FORMAT_R8_UINT });
+            const TextureRef mask = u.mask;
+            uint32_t k0[16] = {};
+            std::memcpy(&k0[4], &plane, 16);
+            std::memcpy(&k0[8], u.rect, 16);
+            k0[12] = p.stream, k0[13] = k;
+            const D3D12_GPU_VIRTUAL_ADDRESS mainCb = view.frameConstants;
+            g.addPass("w.planar mask", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(vis, Use::SrvCompute);
+                          b.use(streamVertices, Use::SrvCompute);
+                          b.use(scratch, Use::UavCompute);
+                          b.use(stats, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t kk[16];
+                          std::memcpy(kk, k0, sizeof kk);
+                          kk[0] = c.srv(vis), kk[1] = c.srv(streamVertices), kk[2] = c.uav(scratch), kk[3] = c.uav(stats);
+                          c.cmd->SetPipelineState(pass0);
+                          c.bindFrameConstants(mainCb);
+                          c.computeConstants(kk, 16);
+                          c.cmd->Dispatch((rw + 7) / 8, (rh + 7) / 8, 1);
+                      });
+            g.addPass("w.planar mask apron", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(scratch, Use::SrvCompute);
+                          b.use(mask, Use::UavCompute);
+                          b.use(tiles, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t kk[16];
+                          std::memcpy(kk, k0, sizeof kk);
+                          kk[0] = c.srv(scratch), kk[1] = c.uav(mask), kk[2] = c.uav(tiles), kk[3] = gpu::kNone;
+                          c.cmd->SetPipelineState(pass1);
+                          c.bindFrameConstants(mainCb);
+                          c.computeConstants(kk, 16);
+                          c.cmd->Dispatch((rw + 7) / 8, (rh + 7) / 8, 1);
+                      });
+            const bool known = history && st.planarStream[doneRing][k] == p.stream;
+            st.planarStream[ring][k] = p.stream;
+            const double pixels = known ? counts[12 + k] : 0;
+            if (debug.planar == 1 || !known || pixels * kPlanarSavedNs > kPlanarFixedNs + pixels * kPlanarPixelNs)
+            {
+                ViewDesc d = ViewDesc::planarReflection(view.view, plane, u.rect[0], u.rect[1], rw, rh);
+                d.planarMask = mask;
+                d.planarTileMask = tiles;
+                const ViewResources reflection = fc.services.renderView(fc, d);
+                if (!reflection.color.valid() || !reflection.depth.valid()) fail("W: the reflection camera returned no colour or depth");
+                u.colour = reflection.color;
+                u.depth = reflection.depth;
+                ++planarViews;
+            }
+            planar.push_back(u);  // without a camera: the mask's count only
+        }
+    }
+    st.planarViews[ring] = planarViews;
     const TextureRef particleLayer = view.particleLayer;
     const BufferRef particleEdges = view.particleEdges;
     uint8_t* tableMapped = st.tableMapped[ring];
@@ -182,7 +319,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
     const uint32_t none = gpu::kNone;
     // Inputs both passes read (the shading function's), declared and bound alike.
-    auto shadingUses = [&, vertices, levels](PassBuilder& b) {
+    auto shadingUses = [&, vertices, levels, planar](PassBuilder& b) {
         for (const TextureRef& l : levels) b.use(l, Use::SrvCompute);
         b.use(depth, Use::SrvCompute);
         if (vis.valid()) b.use(vis, Use::SrvCompute);
@@ -195,6 +332,9 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
         for (const BufferRef& x : { r.vsmPageTable, r.vsmBlocks, r.vsmSearchBound, r.vsmLayers })
             if (x.valid()) b.use(x, Use::SrvCompute);
         if (r.vsmAtlas.valid()) b.use(r.vsmAtlas, Use::SrvCompute);
+        for (const PlanarUse& u : planar)
+            if (u.colour.valid())
+                for (const TextureRef& t : { u.colour, u.depth, u.mask }) b.use(t, Use::SrvCompute);
     };
     struct Frame
     {
@@ -216,6 +356,17 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
             uint32_t pyramid[1 + kMaxLevels] = { uint32_t(levels.size()) };
             for (size_t l = 0; l < levels.size(); ++l) pyramid[1 + l] = c.srv(levels[l]);
             std::memcpy(tableMapped + kSlots * 16, pyramid, sizeof pyramid);
+            // Calm water: slot row word 2 = candidate k with a camera; the planar block (WaterSurface.hlsli).
+            for (const PlanarUse& u : planar)
+            {
+                if (!u.colour.valid()) continue;
+                std::memcpy(tableMapped + 16 * u.stream + 8, &u.k, 4);
+                uint8_t* row = tableMapped + kSlots * 16 + 4 * (1 + kMaxLevels) + 48 * u.k;
+                const uint32_t srv[4] = { c.srv(u.colour), c.srv(u.depth), c.srv(u.mask), 0 };
+                std::memcpy(row, &u.plane, 16);
+                std::memcpy(row + 16, u.rect, 16);
+                std::memcpy(row + 32, srv, 16);
+            }
         }
         const bool shadows = fr.pageTable.valid() && fr.vsmConstants != UINT32_MAX;
         const uint32_t values[20] = { first, c.srv(source), c.srv(depth), c.uav(stats),
@@ -425,6 +576,9 @@ WaterSurfaceStats latestWaterSurfaceStats(TrackState& state)
     out.frameIndex = st.frame[ring];
     out.shaded = w[0], out.offscreen = w[1], out.exited = w[2], out.occluded = w[3], out.steps = w[4], out.inside = w[5], out.unlit = w[6];
     out.rayOverflow = w[7], out.reflectJobs = w[8], out.refractJobs = w[9], out.traced = w[10];
+    out.planar = w[11];
+    for (uint32_t k = 0; k < kPlanarMax; ++k) out.planarMask[k] = w[12 + k];
+    out.planarViews = st.planarViews[ring];
     return out;
 }
 } // namespace unx::water

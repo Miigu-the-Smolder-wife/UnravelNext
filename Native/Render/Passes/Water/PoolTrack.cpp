@@ -2,6 +2,7 @@
 // (track state "W.pools"), evolved in the frames where a view can see the basin or it has sources, and pushed as layer-1
 // triangle streams before V. Called by W's waterGeometry.
 #include "unx/water/Pool.h"
+#include "unx/water/WaterSurface.h"
 
 #include "unx/render/Frame.h"
 #include "unx/core/Log.h"
@@ -76,6 +77,15 @@ void poolGeometry(FramePassContext& fc)
         }
         PoolOutput out = slot.pool->record(fc.graph, frame.frameIndex, placement, frame.time, frame.deltaTime, sources);
         out.stream.material = in.material;
+        // Calm water (A14): the still level is the surface's rest plane; the reflection camera serves the samples that lie
+        // on it (WaterSurface.hlsli's image-shift bound), ripples keep their reflection rays.
+        WaterPlane rest;
+        rest.stream = uint32_t(fc.resources.triangleStreams.size());
+        rest.plane = { 0, 1, 0, -float(placement.centre[1]) };
+        const float3 lo = out.stream.boundsMin, hi = out.stream.boundsMax;
+        const float y = float(placement.centre[1]);
+        rest.corners[0] = { lo.x, y, lo.z }, rest.corners[1] = { hi.x, y, lo.z }, rest.corners[2] = { lo.x, y, hi.z }, rest.corners[3] = { hi.x, y, hi.z };
+        addWaterPlane(fc, rest);
         fc.resources.triangleStreams.push_back(out.stream);
     }
 }

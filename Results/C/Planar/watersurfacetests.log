@@ -1,0 +1,26 @@
+  hit px (279,345): GPU H (287.52, 357.48) step 12 band A z 2.6747; CPU H (287.15, 356.92) z 2.6769
+  hit px (278,347): GPU H (286.57, 359.40) step 12 band A z 2.6671; CPU H (286.20, 358.86) z 2.6692
+  hit px (547,389): GPU H (544.88, 399.43) step 10 band A z 2.5171; CPU H (545.12, 398.50) z 2.5206
+  hit px (554,390): GPU H (551.60, 400.41) step 10 band A z 2.5135; CPU H (551.87, 399.49) z 2.5171
+  hit px (561,391): GPU H (558.31, 401.40) step 10 band A z 2.5100; CPU H (558.61, 400.48) z 2.5136
+  hit px (575,393): GPU H (571.74, 403.39) step 10 band A z 2.5030; CPU H (572.09, 402.47) z 2.5066
+  hit px (582,394): GPU H (578.45, 404.39) step 10 band A z 2.4995; CPU H (578.83, 403.47) z 2.5031
+  hit px (596,396): GPU H (591.86, 406.39) step 10 band A z 2.4926; CPU H (592.29, 405.47) z 2.4962
+water surface: 89327 interior pixels (85079 shaded, 0 off-screen, 0 exit, 4248 occluded, 0 inside); 22021 checked against the CPU, 6161 skipped at image edges
+statistics: shaded 85079, off-screen 0, exit 0, occluded 4248, steps 0, inside 0, unlit 0
+1. interior water pixels vs (1 - F) exp(-sigma d) L(H) / n^2 (rel.)            1.440e-03 (limit 1.0e-02) ok
+2. rays that stay in the water to a visible H are shaded (pixels)              0.000e+00 (limit 0.0e+00) ok
+2. rays leaving the water or the screen or passing behind a surface: fallbacks 0.000e+00 (limit 0.0e+00) ok
+3. pixels of tiles without water are unchanged                                 0.000e+00 (limit 0.0e+00) ok
+4. statistics equal the status image                                           0.000e+00 (limit 0.0e+00) ok
+stage 3: 0 pixels over 3e-3 (0 fallbacks) in x 960..0, y 540..0
+stage 3: measured airT (camera air path) r 0.94321..1.04912 g 0.99673..1.00232 b 0.99456..1.00435
+stage 3: 9 bands; 89327 interior pixels, 4248 fallbacks; jobs: 89327 reflection, 4248 refraction, 93575 traced, 0 overflow
+5a. a service that traces nothing: image bit-identical to stage 1              0.000e+00 (limit 0.0e+00) ok
+5b. traced jobs replace the stand-ins: F x refl + (1 - F) / n^2 x refr (rel.)  9.265e-04 (limit 3.0e-03) ok
+5c. one reflection job per pixel, refraction per fallback, all traced, bands   0.000e+00 (limit 0.0e+00) ok
+calm water: 89327 interior pixels; reflection camera samples 89327, mask 90772, cameras 1, reflection jobs 0, refraction jobs 4248; worst |planar - job| / fp16 bound 0.794
+6a. calm water: the reflection camera's value equals the reflection job's (x fp16 bound) 7.943e-01 (limit 1.0e+00) ok
+6b. every interior pixel reads the camera, no reflection job, one camera, mask covers them 0.000e+00 (limit 0.0e+00) ok
+passed: 0 failure(s)
+GpuLock.ps1: cpu-contended: 3 s >= 4 cores, peak 12.6 cores; top: cl.exe (71812) 6 core-s, cl.exe (41524) 6 core-s, cl.exe (37180) 5 core-s, cl.exe (40996) 3 core-s

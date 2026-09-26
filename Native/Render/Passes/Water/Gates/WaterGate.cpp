@@ -6,7 +6,8 @@
 // Performance runs only under the GPU lock, in the integrated build:
 //   powershell -File Tools/CI/GpuLock.ps1 -Track W -Kind timing -- build/all/bin/unx_gate_water_watergate.exe
 //       [--scene interior] [--camera NAME] [--resolution 4K|1440p] [--frames 300] [--pool 3.0] [--ahead 2.5] [--below 1.2]
-//       [--out DIR] [--set key=value ...]
+//       [--out DIR] [--set key=value ...] [--planar auto|on|off]
+//   --planar: calm water's reflection camera (A14): by the cost rule (default), forced, or never (reflection rays).
 //   --pool: the basin's side (m); --ahead / --below: its centre along the camera's horizontal forward and under the eye.
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
@@ -48,6 +49,7 @@ int main(int argc, char** argv)
         uint32_t frames = 300;
         float side = 3.0f, ahead = 2.5f, below = 1.2f;
         std::vector<std::string> overrides;
+        int planar = -1;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -64,6 +66,11 @@ int main(int argc, char** argv)
             else if (a == "--below") below = std::stof(next());
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
+            else if (a == "--planar")
+            {
+                const std::string v = next();
+                planar = v == "on" ? 1 : v == "off" ? 0 : v == "auto" ? -1 : (fail("--planar takes auto, on or off"), -1);
+            }
             else fail("unknown argument %s", a.c_str());
         }
         requireGpuLock("unx_gate_water_watergate");
@@ -104,6 +111,7 @@ int main(int argc, char** argv)
         Harness harness(device, quality);
         const Resolution res = resolutionFromString(resolutionArg, quality);
         FrameRenderer renderer(device, shaders, quality, gpuScene, 2);
+        renderer.trackState().get<water::WaterSurfaceDebug>("W.surface.debug").planar = planar;
         ComPtr<ID3D12Resource> outputTexture;
         {
             D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
@@ -157,10 +165,12 @@ int main(int argc, char** argv)
         logf("W %s %s: water samples %u (%.1f %% of the view; fallbacks %u), jobs %u reflection + %u refraction, traced %u, overflow %u; %u bands, %u record rounds\n",
              sceneName.c_str(), resolutionArg.c_str(), samples, 100.0 * samples / ((double)res.width * res.height), st.fallbacks(), st.reflectJobs, st.refractJobs, st.traced,
              st.rayOverflow, dbg.rayBands, dbg.rayRounds);
+        logf("W %s %s: calm water (--planar %s): %u reflection cameras, %u samples read them, mask pixels %u\n", sceneName.c_str(), resolutionArg.c_str(),
+             planar == 1 ? "on" : planar == 0 ? "off" : "auto", st.planarViews, st.planar, st.planarMask[0]);
         logf("W %s %s: surface passes %.3f ms (of which list clear/args/apply %.3f) | R ray passes (names with 'refract') %.3f ms | pool stream %.3f ms | frame %.3f ms [measured, median of %u]\n",
              sceneName.c_str(), resolutionArg.c_str(), surface, rays, traced, pool0, r.gpuFrameMs.median, frames);
         for (const std::string& n : r.passOrder)
-            if (n.rfind("w.", 0) == 0 || n.find("refract") != std::string::npos || n.rfind("pool", 0) == 0)
+            if (n.rfind("w.", 0) == 0 || n.find("refract") != std::string::npos || n.rfind("pool", 0) == 0 || n.find("planar") != std::string::npos || n.find("secondary") != std::string::npos)
                 logf("  %-40s %.4f ms\n", n.c_str(), r.passMs.at(n).median);
         return 0;
 #endif

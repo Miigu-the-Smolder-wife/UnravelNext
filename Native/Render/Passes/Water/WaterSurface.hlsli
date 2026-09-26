@@ -47,7 +47,9 @@
 #define WATER_STAT_REFLECT_JOBS 8u    // stage 3: reflection jobs written (R-W1)
 #define WATER_STAT_REFRACT_JOBS 9u    // stage 3: refraction jobs written (R-W2: the fallback samples)
 #define WATER_STAT_TRACED 10u         // stage 3: jobs whose result R traced (alpha 1) and the apply pass used
-#define WATER_STAT_COUNT 11u
+#define WATER_STAT_PLANAR 11u         // calm water: interior samples whose mirror lobe is the planar reflection camera's
+#define WATER_STAT_PLANAR_MASK 12u    // words 12..15: pixels WaterPlanarMask gave to candidate plane 0..3 (the CPU's choice)
+#define WATER_STAT_COUNT 16u
 // Stage 3: a reflection job replaces the GI cache's mirror lobe where the surface's lobe is narrower than the cache's
 // resolution (design 2.6: the K path, the cache read, only at half-angles >= 22 degrees; water's 0.02 roughness is ~0.1).
 #define WATER_RAY_LOBE_HALF_ANGLE 0.3839724
@@ -140,6 +142,59 @@ float3 waterProject(float3 w)
     return float3((ndc.x * 0.5 + 0.5) * g_viewWidth, (0.5 - ndc.y * 0.5) * g_viewHeight, dot(w - g_cameraPosition, -g_view[2].xyz));
 }
 float waterBandADepth(Texture2D<float> depth, int2 q) { return g_nearPlane / max(depth[q], 1e-30); }  // reversed-Z infinite
+
+// Calm water (A14 planar reflection camera; FEATURES_GAME 1.9 stage 3 (i), user's reflection policy: a plane rasterised
+// from the mirrored camera is exact where it equals the direct view). A stream with a rest plane (W2 basins) may have a
+// reflection camera this frame (WaterSurface.cpp: cost rule); its slot row's word 2 is the candidate index k, and the
+// table's planar block holds per k (48 B): the plane (normal towards the camera), the camera's rectangle in main-view
+// pixels (x, y, w, h), and the SRVs of its colour (exposed linear radiance), depth and mirror mask (1 = drawn).
+// Its pixel q = pixel - (x, y) is the mirror image of the main pixel's ray at the plane point P0: the radiance arriving
+// at P0 along the mirror direction r0 of the plane normal - what a reflection job from P0 would return (the solar disk
+// excluded as in R's rays: planar views leave it out of the sky, M ShadeSky). The sample at P (normal n, height h off
+// the plane) wants the radiance arriving at P along r = reflect(v, n). Image shift of the camera's value against it:
+//   normal tilt delta turns the reflected ray by 2 delta; P off the plane moves it parallel by 2 |h| sin(theta_i) <= 2 |h|,
+//   a shift of 2 |h| / d at the hit distance d (from the camera's depth: along the main pixel ray, the mirrored hit's view
+//   depth equals the main view's, as the camera is main.view x reflect). Used where shift <= WATER_PLANAR_SHIFT px;
+//   elsewhere the sample keeps its reflection job (R's ray, exact for any surface).
+#define WATER_PLANAR_OFFSET (WATER_LEVELS_OFFSET + 64u)
+#define WATER_PLANAR_MAX 4u
+#define WATER_PLANAR_SHIFT 0.1  // px: the reflection camera's image offset allowed against the exact mirror ray
+float waterPlanarShift(float4 plane, float3 P, float3 n, float d, float pixelAngle)
+{
+    const float delta = asin(min(length(cross(n, plane.xyz)), 1.0));
+    return (2 * delta + 2 * abs(dot(plane.xyz, P) + plane.w) / max(d, 1e-6)) / pixelAngle;
+}
+// The mask pass's test (before the camera is drawn, the hit distance unknown: the camera's distance to P stands in; the
+// shading test below decides with the real one, so this only chooses the pixels the camera draws).
+bool waterPlanarCandidate(float4 plane, float3 P, float3 n, float3 v, float pixelAngle)
+{
+    return dot(n, plane.xyz) > 0 && dot(n, v) > 0 && waterPlanarShift(plane, P, n, distance(g_cameraPosition, P), pixelAngle) <= WATER_PLANAR_SHIFT;
+}
+// The mirror lobe's radiance from the stream's reflection camera (absolute radiance), or false when it has none or the
+// sample is outside its mask or its exactness condition.
+bool waterPlanarReflection(uint table, uint slot, uint2 pixel, float3 P, float3 n, float3 D, float pixelAngle, out float3 L)
+{
+    L = 0;
+    ByteAddressBuffer b = ResourceDescriptorHeap[table];
+    const uint k = b.Load(16 * slot + 8);
+    if (k >= WATER_PLANAR_MAX) return false;
+    const uint at = WATER_PLANAR_OFFSET + 48 * k;
+    const float4 plane = asfloat(b.Load4(at));
+    const uint4 rect = b.Load4(at + 16);
+    const uint3 srv = b.Load3(at + 32);
+    if (any(pixel < rect.xy) || any(pixel >= rect.xy + rect.zw)) return false;
+    const int2 q = int2(pixel - rect.xy);
+    Texture2D<uint> mask = ResourceDescriptorHeap[srv.z];
+    if (mask[q] != 1u) return false;
+    const float3 dir = normalize(D);
+    const float toPlane = -(dot(plane.xyz, g_cameraPosition) + plane.w) / dot(plane.xyz, dir);  // the pixel ray to P0
+    Texture2D<float> depth = ResourceDescriptorHeap[srv.y];
+    const float along = waterBandADepth(depth, q) / max(dot(dir, -g_view[2].xyz), 1e-6);
+    if (waterPlanarShift(plane, P, n, along - toPlane, pixelAngle) > WATER_PLANAR_SHIFT) return false;
+    Texture2D<float4> colour = ResourceDescriptorHeap[srv.x];
+    L = colour.Load(int3(q, 0)).rgb / g_exposure;
+    return true;
+}
 
 // The refraction source at a screen point and pyramid level (fractional: the two levels around it, bilinear each).
 float3 waterSourceAt(WaterShadeSrvs s, float2 pos, float lod)
@@ -377,7 +432,19 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     const float3 l0 = normalize(g_sunDirection);
     if (sunVisibility > 0 && dot(nv, l0) > 0)
         reflected += shSunSpecular(1.0.xxx, rPixel, alphaPixel, 1.0.xxx, nv, v, max(NoV, 1e-4), l0, E, shPixelAngle(D, Dx)) * sunVisibility;
-    if (s.giCache != UNX_NONE)
+    // Calm water: the reflection camera's value where the lobe would take a reflection job and the camera is exact here.
+    float3 planarL;
+    const bool planar = fromAir && lobePixel < WATER_RAY_LOBE_HALF_ANGLE && waterPlanarReflection(s.slots, slot, pixel, P, n, D, shPixelAngle(D, Dx), planarL);
+    if (planar)
+    {
+        reflected += planarL;
+        if (s.statistics != UNX_NONE)
+        {
+            RWByteAddressBuffer st = ResourceDescriptorHeap[s.statistics];
+            st.InterlockedAdd(4 * WATER_STAT_PLANAR, 1);
+        }
+    }
+    else if (s.giCache != UNX_NONE)
     {
         GiSrvs gi;
         gi.cache = s.giCache;
@@ -387,7 +454,7 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
         reflected += mirror;
         rays.reflectFallback = F * mirror * g_exposure;
     }
-    rays.reflect = fromAir && lobePixel < WATER_RAY_LOBE_HALF_ANGLE;
+    rays.reflect = fromAir && lobePixel < WATER_RAY_LOBE_HALF_ANGLE && !planar;
     rays.reflectDir = waterReflect(v, nv);
     rays.reflectWeight = F;
     // Transmission along the refracted ray.

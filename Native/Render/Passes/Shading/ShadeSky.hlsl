@@ -3,7 +3,7 @@
 // Sky pixels (no surface in the vis buffer), one 8 x 8 tile of the sky class list per group: S's sky radiance of the
 // pixel direction with the view's air (atmosphereSkyRadianceView: the far-field sky plus the air volume's sky
 // correction, i.e. local lights' glow against the sky and the scattering casters' shadows remove, as shafts) plus the
-// solar disk (uniform radiance, INTERFACES 8.3) weighted by its coverage of the pixel.
+// solar disk (uniform radiance, INTERFACES 8.3) weighted by its coverage of the pixel (not in planar reflection views).
 // Without S's atmosphere (tracks built alone) the sky is black and the disk has the top-of-atmosphere radiance.
 // P[0] = { material word, color UAV, tile lists (raw), list offset (entries) }
 // P[1] = { atmosphere transmittance, multi-scatter, sky view, this view's air volume } (UNX_NONE = absent)
@@ -89,7 +89,9 @@ float3 shadeSky(uint2 pixel, Texture2D<uint> words)
     // When the frame's directional light is the moon, g_sun* describe the moon: its disk is drawn by atmosphereCelestial
     // with its phase, not as a uniform disk.
     radiance += atmosphereCelestial(atm, P[2].y, D, Dx, Dy);
-    if (!celestialMoonHoldsLight(P[2].y)) radiance += sun * shSunDiskCoverage(D, Dx, Dy);
+    // Planar reflection views leave the disk out: their reader adds the sun's specular lobe analytically over the disk
+    // (M's mirror pixels, W's calm water), as R's reflection rays exclude it - drawn here it would count twice.
+    if (!celestialMoonHoldsLight(P[2].y) && g_viewKind != VIEW_PLANAR_REFLECTION) radiance += sun * shSunDiskCoverage(D, Dx, Dy);
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].y];
     shExposureHistogram(P[4].w, radiance, pixel, asfloat(P[4].z));  // P[4].w histogram, P[4].z centre sigma (main view)
     color[pixel] = shEncodeExposed(shParticles(radiance * g_exposure, pixel, P[5].z, P[5].w));  // P[5].zw particle layer

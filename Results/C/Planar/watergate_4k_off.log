@@ -1,0 +1,44 @@
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"timing","pid":14948,"started":"2026-09-27T06:42:27","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/M/D0Timing_0927/fp_1000.unxscene --resolution 4K --frames 300 --set atmosphere.froxels.experiment_disable=0"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"timing","pid":14948,"started":"2026-09-27T06:42:27","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/M/D0Timing_0927/fp_1000.unxscene --resolution 4K --frames 300 --set atmosphere.froxels.experiment_disable=0"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"timing","pid":14948,"started":"2026-09-27T06:42:27","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/M/D0Timing_0927/fp_1000.unxscene --resolution 4K --frames 300 --set atmosphere.froxels.experiment_disable=0"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"timing","pid":14948,"started":"2026-09-27T06:42:27","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/M/D0Timing_0927/fp_1000.unxscene --resolution 4K --frames 300 --set atmosphere.froxels.experiment_disable=0"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"timing","pid":14948,"started":"2026-09-27T06:42:27","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/M/D0Timing_0927/fp_1000.unxscene --resolution 4K --frames 300 --set atmosphere.froxels.experiment_disable=0"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"timing","pid":14948,"started":"2026-09-27T06:42:27","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/M/D0Timing_0927/fp_1000.unxscene --resolution 4K --frames 300 --set atmosphere.froxels.experiment_disable=0"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"timing","pid":14948,"started":"2026-09-27T06:42:27","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/M/D0Timing_0927/fp_1000.unxscene --resolution 4K --frames 300 --set atmosphere.froxels.experiment_disable=0"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"timing","pid":14948,"started":"2026-09-27T06:42:27","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/M/D0Timing_0927/fp_1000.unxscene --resolution 4K --frames 300 --set atmosphere.froxels.experiment_disable=0"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"timing","pid":14948,"started":"2026-09-27T06:42:27","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/M/D0Timing_0927/fp_1000.unxscene --resolution 4K --frames 300 --set atmosphere.froxels.experiment_disable=0"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"timing","pid":14948,"started":"2026-09-27T06:42:27","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/M/D0Timing_0927/fp_1000.unxscene --resolution 4K --frames 300 --set atmosphere.froxels.experiment_disable=0"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"timing","pid":14948,"started":"2026-09-27T06:42:27","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/M/D0Timing_0927/fp_1000.unxscene --resolution 4K --frames 300 --set atmosphere.froxels.experiment_disable=0"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"timing","pid":14948,"started":"2026-09-27T06:42:27","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/M/D0Timing_0927/fp_1000.unxscene --resolution 4K --frames 300 --set atmosphere.froxels.experiment_disable=0"}
+RayScene: 34 static + 1025 dynamic instances (0 deformed), 36 mesh BLAS (9366 tris, 0.2 MB compacted from 0.7 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.31 MB, load 17 ms (records and mesh BLAS 6.5, proxies 0.1, deformed setup 2.4, static TLAS and records 6.0, first dynamic build 2.4)
+RayScene resident (MB): static BLAS+TLAS 0.3 (BLAS 0.2, TLAS 0.01, descs+scratch 0.01), dynamic AS 0.5 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.52, emitters 0.001), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 34 static instances in 6 chunks (64 m cells, <= 256 each), 1024 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 1 planar reflector planes from 2 flat mirror triangles (3968 smooth-shaded mirror triangles stay on rays), 0.1 ms
+S VSM: 8917 page requests exceeded the 6656-page atlas (frame 1): the atlas grows to 19584 pages
+S shadow overflow: frame 1 needed 16588800 words (127552 tiles over capacity): capacity grows to 33554432 words
+[W interior basin 4K] gpu frame median 44.5972 ms, p95 47.1091, p99 52.7483 (n=300) | cpu frame median 2.3339 ms (record 1.4677, submit 0.1141) | SM clock median 2805 MHz (min 2805) | passes 273, barriers 1248 in 266 batches, cross-queue syncs 0, command lists 1, transients 117 (1726.8 MB aliased / 2640.2 MB unaliased) | quality 3c14221cb135a898
+[W interior basin 4K] outside passes: graphics 1 lists, head 0.0000, tail 0.0000, gap 0.0000 ms (medians)
+W interior 4K: water samples 506640 (6.1 % of the view; fallbacks 183631), jobs 506640 reflection + 183631 refraction, traced 690271, overflow 0; 16 bands, 0 record rounds
+W interior 4K: calm water (--planar off): 0 reflection cameras, 0 samples read them, mask pixels 0
+W interior 4K: surface passes 4.182 ms (of which list clear/args/apply 0.091) | R ray passes (names with 'refract') 2.214 ms | pool stream 0.081 ms | frame 44.597 ms [measured, median of 300]
+  pool evolve                              0.0103 ms
+  pool inverse rows                        0.0125 ms
+  pool inverse columns                     0.0122 ms
+  pool surface                             0.0461 ms
+  w.sun map constants                      0.0010 ms
+  w.sun map raster                         0.0725 ms
+  w.sun map caustic overflow clear         0.0029 ms
+  w.sun map caustics clear                 0.0195 ms
+  w.sun map caustics                       0.3574 ms
+  w.surface.source                         0.0840 ms
+  w.surface.source level                   0.0532 ms
+  w.surface.stats clear                    0.0010 ms
+  w.surface.ray clear                      0.0256 ms
+  w.surface.interior                       3.9509 ms
+  w.surface.ray args                       0.0183 ms
+  r.refract.template                       0.0330 ms
+  r.refract.count                          0.0159 ms
+  r.refract                                2.1648 ms
+  w.surface.ray apply                      0.0466 ms
+  w.surface.stats read                     0.0020 ms
