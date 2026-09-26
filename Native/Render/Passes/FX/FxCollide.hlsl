@@ -10,7 +10,7 @@
 void main(uint3 id : SV_DispatchThreadID)
 {
     FX_RWBUFFER(uint, counters, g_counters);
-    if (id.x >= min(counters[FX_COUNTER_COLLIDERS], g_capacity)) return;
+    if (id.x >= min(counters[FX_COUNTER_COLLIDERS], g_colliderCapacity)) return;
     FX_RWBUFFER(ColliderRecord, colliders, g_colliders);
     const ColliderRecord c = colliders[id.x];
     if (c.index >= g_outCount || c.row >= g_emitterCount) { fxStatus(FX_STATUS_RANGE); return; }

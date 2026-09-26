@@ -8,6 +8,10 @@
 //     FrameRenderer directly in this process; the two RGB10A2 images must match.
 // --content runs part 1 only (no frames rendered); --live runs parts 1 and 1b (one frame rendered).
 // Needs the C track for scenes: Tools/CI/Build.ps1 -Track I -Tracks "V;M;S;R;C;I".
+#if __has_include("unx/cook/TextureCook.h")
+#include "unx/cook/TextureCook.h"
+#include "unx/material/TextureSystem.h"
+#endif
 #include "unx/host/UnravelNextHost.h"
 
 #include "unx/core/Config.h"
@@ -403,6 +407,9 @@ std::vector<uint32_t> renderDirect(const scene::Scene& s, const QualityConfig& q
 
 int main(int argc, char** argv)
 {
+#if __has_include("unx/cook/TextureCook.h") && HOST_ABI_TEST
+    unx::render::material::setChainProvider(&unx::cook::textureChain);
+#endif
     try
     {
 #if !HOST_ABI_TEST

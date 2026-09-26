@@ -9,6 +9,7 @@
 // Devices (host boundary decision, Docs/Status/I_STATUS_KO.md 1.4): on Unity, the Device is built on Unity's device and
 // graphics queue (DeviceOptions::externalDevice / externalGraphicsQueue) and each frame's lists execute through the
 // host's ExecuteCommandList, which declares the output texture's state to Unity. Standalone (tests, tools): own device.
+#include "unx/fx/Particles.h"
 #include "unx/core/Config.h"
 #include "unx/render/Frame.h"
 #include "unx/render/GpuScene.h"
@@ -185,6 +186,18 @@ public:
     void removeDeviceForTest();
     uint32_t outputRecreations() const { return m_outputRecreations; }
 
+    // V3 (WORLD_VFX 3.7 (f), I track): the renderer's FX particle module as the VFX stream executor (NV_StreamExecutor),
+    // called on the host's main thread. submit keeps the committed packet; the next frame's C0 records it on the frame's
+    // queue. readback and checkpoint first claim the ticks no frame has recorded yet (two fixed steps in one Unity frame:
+    // the second step's prepare reads the first) and run them at once on the device's compute queue, after the last
+    // submitted frame on the GPU; the next frame waits for them on the GPU. So every tick runs exactly once and the main
+    // thread never waits for the render thread. Every use of the module, frames included, holds m_fxMutex.
+    void vfxSubmit(const uint8_t* packet, uint64_t bytes);
+    const fx::TickReadback& vfxReadback(uint64_t stream, uint64_t generation, uint64_t tick);  // valid until the next call
+    const std::vector<NV_StreamParticle>& vfxCheckpoint(uint64_t stream, uint64_t generation, uint64_t tick);
+    // Ticks run at once on the compute queue (claimed by a readback or checkpoint) so far (tests, statistics).
+    uint64_t vfxImmediateTicks() const { return m_vfxImmediateTicks; }
+
     // The scene as the host shows it now: the content with the latest transforms, poses, sun and visibility the host
     // set (rendered, queued and pending updates, newest last); hidden instances are left out. Main thread (UnxSceneSave).
     scene::Scene currentScene() const;
@@ -213,6 +226,9 @@ private:
     uint32_t beginFrame(const FramePacket& packet);
     void recordFrame(const FramePacket& packet, render::TextureRef output);
     void endFrame(uint32_t slot, uint64_t hostFrameIndex);
+    fx::ParticleSystem& fxModule();  // (m_fxMutex held) created on first use, explicit copies on the compute queue
+    void fxRunPending();              // (m_fxMutex held) the claimed ticks on the compute queue
+    void fxFrameWait();               // (m_fxMutex held, frame submission) the graphics queue waits for them
 
     HostRendererOptions m_options;
     QualityConfig m_quality;
@@ -257,5 +273,14 @@ private:
     std::vector<render::InstanceTransformUpdate> m_changedTransforms;
     uint64_t m_droppedTransforms = 0, m_droppedPoses = 0;
     uint32_t m_outputReuses = 0, m_outputRecreations = 0;
+    // V3 stream executor state.
+    std::mutex m_fxMutex;
+    std::unique_ptr<render::RenderGraph> m_simGraph;  // the claimed ticks' graph (compute queue)
+    uint64_t m_simIndex = 1ull << 48;                // its import index (apart from frame indices)
+    uint64_t m_simFence = 0, m_simWaited = 0;        // compute fence of the last claimed tick; the frames waited up to
+    uint64_t m_vfxImmediateTicks = 0;
+    std::string m_vfxError;                          // a submit that failed (reported by the next readback/checkpoint)
+    fx::TickReadback m_vfxReadback;
+    std::vector<NV_StreamParticle> m_vfxCheckpoint;
 };
 } // namespace unx::host

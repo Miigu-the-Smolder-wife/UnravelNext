@@ -25,7 +25,6 @@ constexpr uint64_t kFieldRowsOffset = sizeof(TickConstants), kWorldRowsOffset = 
                    kConstBytes = (kWorldRowsOffset + kCbWorldFields * 64 + 255) / 256 * 256;
 static_assert(sizeof(NV_StreamField) == 32 && sizeof(NV_StreamWorldField) == 64, "FxTick field rows");
 static_assert(sizeof(TickConstants) % 16 == 0, "FxTick rows start on a 16-byte boundary");
-constexpr uint32_t kGridSlots = 8;  // FX_GRID_SLOTS (Particles.hlsli)
 constexpr uint32_t kOverflowRecords = 1024, kOverflowRecordBytes = 448;  // IMPACT_OVERFLOW diagnostic records (Particles.hlsli)
 
 uint32_t groups(uint64_t n, uint32_t size) { return (uint32_t)((n + size - 1) / size); }
@@ -60,6 +59,16 @@ struct Buf
     uint64_t importedFrame = UINT64_MAX;
     ID3D12Resource* importedResource = nullptr;
 
+    // Exactly 'need' (64 KiB aligned): the capacity-sized buffers, reallocated only when the capacity changes.
+    void exact(Device& device, uint64_t need)
+    {
+        need = align(std::max<uint64_t>(need, 256), 65536);
+        if (resource && bytes == need) return;
+        if (resource) device.deferRelease(resource);
+        bytes = need;
+        std::wstring w(name, name + std::strlen(name));
+        resource = makeBuffer(device, bytes, D3D12_HEAP_TYPE_DEFAULT, (L"FX " + w).c_str());
+    }
     void ensure(Device& device, uint64_t need)
     {
         need = std::max<uint64_t>(need, 256);
@@ -197,11 +206,17 @@ struct ParticleSystem::Impl
     Buf posAge[2] = { { "fx.posAge0", 16 }, { "fx.posAge1", 16 } }, velocity[2] = { { "fx.velocity0", 16 }, { "fx.velocity1", 16 } };
     bool pairSized[2] = { false, false };  // that parity's buffers are allocated for the current capacity
     Buf inRanges{ "fx.inRanges", 32 }, inBlocks{ "fx.inBlocks", 4 };  // the tick's input layout (InRange) and group -> range
+    // Render input of the latest tick (ParticleLayerPass.hlsli RenderRange): its layout's ranges, then the ranges of the
+    // particles that died in it (drawn from the previous state until their death time); group of 256 threads -> range.
+    Buf renderRanges{ "fx.renderRanges", 32 }, renderBlocks{ "fx.renderBlocks", 4 };
+    uint32_t renderThreads = 0, renderCurrent = 0, renderRangeCount = 0;
+    double anchor[2][3] = {};  // stream anchor of the tick whose state is in that parity
+    float tickDt = 0;          // dt of the latest tick
+    double tickTime = 0;       // context time at the end of the latest tick
     std::vector<LayoutRange> layout, layoutPrev;  // output and input layout of the latest recorded tick
     std::vector<uint32_t> liveRows, livePos;      // rows with live particles (unordered) and each row's place in that list
     std::vector<uint32_t> rowIndex;               // row -> its range in 'layout' (NV_STREAM_NONE: none)
-    Buf emitterTable{ "fx.emitterTable", sizeof(NV_StreamEmitter) };  // persistent (delta updates)
-    Buf rowWindows{ "fx.rowWindows", 8 };  // per 256 rows: first block, first patch at or after the group's first row
+    Buf emitterTable{ "fx.emitterTable", sizeof(NV_StreamEmitter) }, emitterStamp{ "fx.emitterStamp", 4 };  // persistent (delta updates)
     Buf emitterUpdates{ "fx.emitterUpdates", sizeof(NV_StreamEmitter) }, emitterUpdateRows{ "fx.emitterUpdateRows", 4 };
     Buf emitterPatches{ "fx.emitterPatches", sizeof(NV_StreamEmitterPatch) };
     std::vector<NV_StreamEmitter> table;  // CPU mirror of the persistent table (ribbon and volume ranges)
@@ -223,16 +238,16 @@ struct ParticleSystem::Impl
     Buf ribbonPoints{ "fx.ribbonPoints", 32 }, ribbonLinks{ "fx.ribbonLinks", 4 }, ribbonVertices{ "fx.ribbonVertices", 32 };
     Buf ribbonRanges{ "fx.ribbonRanges", 16 }, ribbonRunStart{ "fx.ribbonRunStart", 4 }, ribbonTangents{ "fx.ribbonTangents", 16 };
     std::vector<uint32_t> programOutput;  // output kind per program (the last NV_STREAM_PROGRAMS table)
+    std::vector<uint8_t> programCollides;  // NV_STREAM_PROGRAM_COLLISION per program
     Buf surfaceBoxes{ "fx.surfaceBoxes", 16 };
     Buf colliders{ "fx.colliders", 68 };
     Buf trace{ "fx.trace", 544 };
     Buf rowMotion{ "fx.rowMotion", 112 };  // RowMotion per emitter row (FxBegin; Particles.hlsli)
     Buf overflowRecords{ "fx.overflowRecords", kOverflowRecordBytes };  // IMPACT_OVERFLOW inputs (diagnostic, readState "overflow")
     // local volume particles: record16 + side8 per live volume particle (Particles.hlsli; render rules request 3b)
-    Buf volumeRecords{ "fx.volumeRecords", 16 }, volumeSide{ "fx.volumeSide", 8 }, volumeRanges{ "fx.volumeRanges", 32 };
+    Buf volumeRecords{ "fx.volumeRecords", 16 }, volumeSide{ "fx.volumeSide", 8 }, volumeRanges{ "fx.volumeRanges", 32 }, gridBlocks{ "fx.gridBlocks", 4 };
     uint32_t lastCollisions = 0;  // collision events of the last tick the CPU read (readback prefix size)
-    // collision grid: per bucket count, overflow chain head, FX_GRID_SLOTS slots; overflow nodes {surface, next}; large list
-    Buf gridCount{ "fx.gridCount", 4 }, gridHeads{ "fx.gridHeads", 4 }, gridEntries{ "fx.gridSlots", 4 }, gridNodes{ "fx.gridNodes", 8 }, gridLarge{ "fx.gridLarge", 4 };
+    Buf gridCount{ "fx.gridCount", 4 }, gridStart{ "fx.gridStart", 4 }, gridFill{ "fx.gridFill", 4 }, gridEntries{ "fx.gridEntries", 4 }, gridLarge{ "fx.gridLarge", 4 };
     bool programsValid = false, started = false;
     uint32_t parity = 0;
     uint32_t surfaceCount = 0;                           // persistent surface table (NV_STREAM_SURFACES)
@@ -366,6 +381,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             m.pairSized[0] = m.pairSized[1] = false;
             m_capacity = capacity;
         }
+        m.gridBlocks.ensure(device, 1024 * 4);
         m.counters.ensure(device, kCounterWords * 4);
 
         // Programs persist until a packet replaces them.
@@ -373,11 +389,13 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         {
             const auto* programTable = reinterpret_cast<const NV_StreamProgram*>(base + h.programs);
             m.programOutput.resize(h.program_count);
+            m.programCollides.resize(h.program_count);
             m.programGrid.resize(h.program_count);
             m.separationMax = 0;
             for (uint32_t k = 0; k < h.program_count; ++k)
             {
                 m.programOutput[k] = programTable[k].output;
+                m.programCollides[k] = (programTable[k].flags & NV_STREAM_PROGRAM_COLLISION) != 0;
                 m.programGrid[k] = programTable[k].medium_grid;
                 m.separationMax = std::max(m.separationMax, std::abs(programTable[k].separation));
             }
@@ -397,7 +415,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
                 if (b->resource) device.deferRelease(b->resource);
                 b->resource.Reset();
                 b->bytes = 0;
-                b->ensure(device, (uint64_t)capacity * b->stride);
+                b->exact(device, (uint64_t)capacity * b->stride);
             }
             m.pairSized[p] = true;
         };
@@ -419,6 +437,8 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             }
             m.emitterTable.ensure(device, (uint64_t)tableRows * sizeof(NV_StreamEmitter));
         }
+        // stamps start at 0 in a new buffer (committed resources are zeroed); the serial starts at 1
+        m.emitterStamp.ensure(device, (m.emitterTable.bytes / sizeof(NV_StreamEmitter)) * 4);
         const auto* emitterBlocks = reinterpret_cast<const NV_StreamEmitter*>(base + h.emitters);
         const auto* blockRows = reinterpret_cast<const uint32_t*>(base + h.emitter_rows);
         std::vector<uint32_t> updateRows(std::max<uint32_t>(h.emitter_count, 1)), patchedRows, clearedRows;
@@ -532,22 +552,6 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         m.emitterUpdates.ensure(device, (uint64_t)h.emitter_count * sizeof(NV_StreamEmitter));
         m.emitterUpdateRows.ensure(device, (uint64_t)h.emitter_count * 4);
         m.emitterPatches.ensure(device, (uint64_t)h.emitter_patch_count * sizeof(NV_StreamEmitterPatch));
-        // FxBegin's search windows: per 256 rows the first block and the first patch of a row >= the group's first row
-        const uint32_t rowGroups = groups(std::max<uint32_t>(tableRows, 1), 256);
-        std::vector<uint32_t> rowWindows(2 * ((size_t)rowGroups + 1));
-        {
-            const auto* patchList = reinterpret_cast<const NV_StreamEmitterPatch*>(base + h.emitter_patches);
-            uint32_t b = 0, p = 0;
-            for (uint32_t gi = 0; gi <= rowGroups; ++gi)
-            {
-                const uint32_t first = gi * 256u;
-                while (b < h.emitter_count && updateRows[b] < first) ++b;
-                while (p < h.emitter_patch_count && patchList[p].row < first) ++p;
-                rowWindows[2 * gi] = b;
-                rowWindows[2 * gi + 1] = p;
-            }
-        }
-        m.rowWindows.ensure(device, rowWindows.size() * 4);
         m.dynamic[cur].ensure(device, (uint64_t)tableRows * sizeof(EmitterDynamic));
         m.rowMotion.ensure(device, (uint64_t)std::max<uint32_t>(tableRows, 1) * 112);
         m.spawns.ensure(device, (uint64_t)h.spawn_count * sizeof(NV_StreamSpawn));
@@ -570,12 +574,11 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         while (gridBuckets < 2 * surfaceTotal) gridBuckets <<= 1;
         const uint32_t gridEntryCapacity = std::max<uint32_t>(surfaceTotal, 1) * 64;
         m.gridCount.ensure(device, (uint64_t)gridBuckets * 4);
-        m.gridHeads.ensure(device, (uint64_t)gridBuckets * 4);
-        m.gridEntries.ensure(device, (uint64_t)gridBuckets * kGridSlots * 4);
-        m.gridNodes.ensure(device, (uint64_t)gridEntryCapacity * 8);
+        m.gridStart.ensure(device, (uint64_t)gridBuckets * 4);
+        m.gridFill.ensure(device, (uint64_t)gridBuckets * 4);
+        m.gridEntries.ensure(device, (uint64_t)gridEntryCapacity * 4);
         m.gridLarge.ensure(device, (uint64_t)std::max<uint32_t>(surfaceTotal, 1) * 4);
         m.surfaceBoxes.ensure(device, (uint64_t)std::max<uint32_t>(surfaceTotal, 1) * 32);
-        m.colliders.ensure(device, (uint64_t)std::max<uint32_t>(capacity, 1) * 68);
         m.trace.ensure(device, 544);
         m.overflowRecords.ensure(device, (uint64_t)kOverflowRecords * kOverflowRecordBytes);
         m.ribbonPoints.ensure(device, (uint64_t)h.ribbon_points * 32);
@@ -656,6 +659,14 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             if (m.rowIndex[row] == NV_STREAM_NONE) placeRow(row);
         if (outTotal > capacity) fail("FX particles: %llu live particles after tick %llu exceed capacity %u", (unsigned long long)outTotal, (unsigned long long)h.tick, capacity);
         const bool layoutMismatch = outTotal != h.alive_after;
+        // collider queue bound: this tick's particles of colliding rows (only particles written this tick are queued)
+        uint64_t colliderBound = 0;
+        for (const LayoutRange& r : out)
+        {
+            const uint32_t program = m.table[r.row].program;
+            if (program < m.programCollides.size() && m.programCollides[program]) colliderBound += r.count;
+        }
+        m.colliders.ensure(device, std::max<uint64_t>(colliderBound, 1) * 68);
 
         // Input layout: the last tick's output; after RESET the restore records', per row the contiguous births from the
         // row's dying_birth (every existing birth of a row is at or above it).
@@ -722,6 +733,49 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         }
         if (!inRanges.empty()) inBlocks[inGroups] = (uint32_t)inRanges.size() - 1;
 
+        // Render ranges of this tick (renderer input): per output range the row's input range (the interpolation pair,
+        // render rules request 2), then per input range its births that died in this tick by the row's dying range (drawn
+        // from the input state until their death time; a KILLED row's particles vanish, a state packet kills none).
+        struct RenderRange { uint32_t thread, count, row, stateBase, first, prevBase, prevFirst, prevCountFlags; };
+        std::vector<RenderRange> renderRanges;
+        renderRanges.reserve(out.size() + in.size());
+        uint32_t renderThreads = 0;
+        {
+            std::vector<uint32_t> inOf;  // row -> its input range (only rows of this tick's output are looked up)
+            inOf.assign(tableRows, NV_STREAM_NONE);
+            for (uint32_t k = 0; k < in.size() && !reset; ++k)  // (after RESET no pair: the restore set has no previous tick)
+                if (in[k].row < tableRows && in[k].count) inOf[in[k].row] = k;
+            for (const LayoutRange& r : out)
+            {
+                const uint32_t k = inOf[r.row];
+                RenderRange x{ renderThreads, r.count, r.row, r.base, r.first, 0, 0, 0 };
+                if (k != NV_STREAM_NONE) { x.prevBase = in[k].base; x.prevFirst = in[k].first; x.prevCountFlags = in[k].count; }
+                renderRanges.push_back(x);
+                renderThreads += r.count;
+            }
+            m.renderCurrent = renderThreads;
+            for (const LayoutRange& r : in)
+            {
+                const NV_StreamEmitter& e = m.table[r.row];
+                if (reset || h.dt <= 0 || r.count == 0 || (e.flags & NV_STREAM_EMITTER_KILLED)) continue;
+                const uint32_t d = e.death_birth - r.first;  // births [first, death_birth) of the input range died
+                const uint32_t n = d <= r.count ? d : (d >= 0x80000000u ? 0u : r.count);
+                if (n == 0) continue;
+                renderRanges.push_back({ renderThreads, n, r.row, r.base, r.first, 0, 0, 0x80000000u });
+                renderThreads += n;
+            }
+        }
+        const uint32_t renderGroups = groups(renderThreads, 256);
+        std::vector<uint32_t> renderBlocks(renderGroups + 1, 0);
+        for (uint32_t group = 0, k = 0; group < renderGroups; ++group)
+        {
+            while (k + 1 < renderRanges.size() && renderRanges[k + 1].thread <= group * 256u) ++k;
+            renderBlocks[group] = k;
+        }
+        if (!renderRanges.empty()) renderBlocks[renderGroups] = (uint32_t)renderRanges.size() - 1;
+        m.renderRanges.ensure(device, std::max<size_t>(renderRanges.size(), 1) * 32);
+        m.renderBlocks.ensure(device, renderBlocks.size() * 4);
+
         // Birth threads per depth; layout indices of the births: per spawn record the index of its first birth (birth
         // first_birth; its births below first_birth + expired take no place), per explicit birth its index (none if it is
         // outside its row's range: it expires in the tick), then after RESET the restore records' input indices.
@@ -779,11 +833,12 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         if (slot.recorded) m.waitSlot(slot);  // its upload is free; a replaced tick's readback can no longer be read
         const uint64_t constOffset = 0, packetOffset = kConstBytes, birthOffset = align(packetOffset + packet.size(), 16);
         const uint64_t inRangesOffset = align(birthOffset + birthIndex.size() * 4, 16), inBlocksOffset = align(inRangesOffset + inRanges.size() * 32, 16);
-        const uint64_t rangesOffset = align(inBlocksOffset + inBlocks.size() * 4, 16);
+        const uint64_t renderRangesOffset = align(inBlocksOffset + inBlocks.size() * 4, 16);
+        const uint64_t renderBlocksOffset = align(renderRangesOffset + renderRanges.size() * 32, 16);
+        const uint64_t rangesOffset = align(renderBlocksOffset + renderBlocks.size() * 4, 16);
         const uint64_t volumeOffset = align(rangesOffset + ribbonRanges.size() * 16, 16);
         const uint64_t rowsOffset = align(volumeOffset + volumeRanges.size() * 32, 16);
-        const uint64_t windowsOffset = align(rowsOffset + updateRows.size() * 4, 16);
-        const uint64_t uploadBytes = windowsOffset + rowWindows.size() * 4;
+        const uint64_t uploadBytes = rowsOffset + updateRows.size() * 4;
         if (!slot.upload || slot.uploadBytes < uploadBytes)
         {
             if (slot.upload) { slot.upload->Unmap(0, nullptr); device.deferRelease(slot.upload); }
@@ -801,10 +856,11 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         std::memcpy(slot.mapped + birthOffset, birthIndex.data(), birthIndex.size() * 4);
         if (!inRanges.empty()) std::memcpy(slot.mapped + inRangesOffset, inRanges.data(), inRanges.size() * 32);
         std::memcpy(slot.mapped + inBlocksOffset, inBlocks.data(), inBlocks.size() * 4);
+        if (!renderRanges.empty()) std::memcpy(slot.mapped + renderRangesOffset, renderRanges.data(), renderRanges.size() * 32);
+        std::memcpy(slot.mapped + renderBlocksOffset, renderBlocks.data(), renderBlocks.size() * 4);
         if (!ribbonRanges.empty()) std::memcpy(slot.mapped + rangesOffset, ribbonRanges.data(), ribbonRanges.size() * 16);
         if (!volumeRanges.empty()) std::memcpy(slot.mapped + volumeOffset, volumeRanges.data(), volumeRanges.size() * 32);
         std::memcpy(slot.mapped + rowsOffset, updateRows.data(), updateRows.size() * 4);
-        std::memcpy(slot.mapped + windowsOffset, rowWindows.data(), rowWindows.size() * 4);
         // collision events copied with the tick: twice the last count the CPU read, at least 1024 and at most the configured
         // prefix; more are fetched from the tick's event buffer when read (exact either way)
         const uint32_t collisionPrefix = std::min(m_collisionReadback, std::max<uint32_t>(1024, 2 * m.lastCollisions));
@@ -837,15 +893,21 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         m.latestSlot = thisSlot;
         m_latestTick = h.tick;
         m.layoutPrev = std::move(in);
+        m.renderThreads = renderThreads;
+        m.renderRangeCount = (uint32_t)renderRanges.size();
+        std::memcpy(m.anchor[cur], h.anchor, sizeof h.anchor);
+        m.tickDt = h.dt_float;
+        m.tickTime = h.time;
+        if (reset) std::memcpy(m.anchor[cur ^ 1u], h.anchor, sizeof h.anchor);  // the restore set is in this tick's anchor
         m.layout = std::move(out);
 
         // Graph imports of this frame.
-        std::vector<Buf*> state = { &m.posAge[0], &m.posAge[1], &m.velocity[0], &m.velocity[1], &m.dynamic[cur], &m.counters, &slot.events, &m.tickSurfaces, &m.gridCount, &m.gridHeads, &m.gridEntries, &m.gridNodes, &m.gridLarge,
+        std::vector<Buf*> state = { &m.posAge[0], &m.posAge[1], &m.velocity[0], &m.velocity[1], &m.dynamic[cur], &m.counters, &slot.events, &m.tickSurfaces, &m.gridCount, &m.gridStart, &m.gridFill, &m.gridEntries, &m.gridLarge,
                                     &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.volumeRecords, &m.volumeSide,
-                                    &m.ribbonRunStart, &m.ribbonTangents, &m.surfaceBoxes, &m.overflowRecords, &m.colliders, &m.trace, &m.rowMotion,
-                                    &m.emitterTable };
-        std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitterUpdates, &m.emitterUpdateRows, &m.emitterPatches, &m.rowWindows, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
-                                     &m.restore, &m.birthIndex, &m.inRanges, &m.inBlocks, &m.bodies, &m.dynamicSurfaces, &m.ribbonRanges, &m.volumeRanges };
+                                    &m.ribbonRunStart, &m.ribbonTangents, &m.gridBlocks, &m.surfaceBoxes, &m.overflowRecords, &m.colliders, &m.trace, &m.rowMotion,
+                                    &m.emitterTable, &m.emitterStamp };
+        std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitterUpdates, &m.emitterUpdateRows, &m.emitterPatches, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
+                                     &m.restore, &m.birthIndex, &m.inRanges, &m.inBlocks, &m.renderRanges, &m.renderBlocks, &m.bodies, &m.dynamicSurfaces, &m.ribbonRanges, &m.volumeRanges };
         for (Buf* b : state) b->import(g, importIndex);
         for (Buf* b : inputs) b->import(g, importIndex);
 
@@ -867,7 +929,6 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         add(m.emitterUpdates, h.emitters, (uint64_t)h.emitter_count * sizeof(NV_StreamEmitter));
         add(m.emitterPatches, h.emitter_patches, (uint64_t)h.emitter_patch_count * sizeof(NV_StreamEmitterPatch));
         if (h.emitter_count) copies.push_back({ &m.emitterUpdateRows, rowsOffset, (uint64_t)h.emitter_count * 4 });
-        copies.push_back({ &m.rowWindows, windowsOffset, rowWindows.size() * 4 });
         add(m.spawns, h.spawns, (uint64_t)h.spawn_count * sizeof(NV_StreamSpawn));
         add(m.explicitBirths, h.explicit_births, (uint64_t)h.explicit_count * sizeof(NV_StreamExplicitBirth));
         add(m.fields, h.fields, (uint64_t)h.field_count * sizeof(NV_StreamField));
@@ -879,6 +940,8 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         copies.push_back({ &m.birthIndex, birthOffset, birthIndex.size() * 4 });
         if (!inRanges.empty()) copies.push_back({ &m.inRanges, inRangesOffset, inRanges.size() * 32 });
         copies.push_back({ &m.inBlocks, inBlocksOffset, inBlocks.size() * 4 });
+        if (!renderRanges.empty()) copies.push_back({ &m.renderRanges, renderRangesOffset, renderRanges.size() * 32 });
+        copies.push_back({ &m.renderBlocks, renderBlocksOffset, renderBlocks.size() * 4 });
         if (!ribbonRanges.empty()) copies.push_back({ &m.ribbonRanges, rangesOffset, ribbonRanges.size() * 16 });
         if (!volumeRanges.empty()) copies.push_back({ &m.volumeRanges, volumeOffset, volumeRanges.size() * 32 });
         g.addPass("fx.particles.upload", queueType,
@@ -899,6 +962,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         tc.volumeParticles = volumeParticles;
         tc.explicitBase = explicitBase;
         tc.restoreBase = restoreBase;
+        tc.colliderCapacity = (uint32_t)colliderBound;
         tc.flags = h.flags;
         tc.fieldCount = h.field_count;
         tc.worldFieldCount = h.world_field_count;
@@ -913,7 +977,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         tc.experiment = m_experimentDisable;
         if (m_experimentDisable & 16u) tc.fieldCount = tc.worldFieldCount = 0;  // timing attribution only
         tc.volumeRangeCount = (uint32_t)volumeRanges.size();
-        tc.serial = serialNow;  // (diagnostic: packets recorded)
+        tc.serial = serialNow;
         tc.eventSlots = h.event_slots;
         tc.collisionCapacity = h.collision_capacity;
         tc.aliveAfter = h.alive_after;
@@ -939,6 +1003,14 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             for (Buf* x : state) b.use(x->ref, Use::UavCompute);
             for (Buf* x : inputs) b.use(x->ref, Use::SrvCompute);
         };
+        // Depth-0 spawn and integrate have no dependency on each other: they write disjoint layout indices and disjoint
+        // CPU-assigned event slots, and share only atomics (counters, collider queue, collision events, overflow records);
+        // both read what begin and surfaces wrote. Declared as disjoint writers, the graph puts no barrier between them
+        // (RenderGraph.h UavComputeDisjoint) and they overlap.
+        auto declareOverlap = [state, inputs](PassBuilder& b) {
+            for (Buf* x : state) b.use(x->ref, Use::UavComputeDisjoint);
+            for (Buf* x : inputs) b.use(x->ref, Use::SrvCompute);
+        };
         auto fillConstants = [&m, cur, constantsCpu, tc, sp = &slot](PassContext& c) mutable {
             tc.posAge = c.uav(m.posAge[cur ^ 1u].ref);
             tc.velocity = c.uav(m.velocity[cur ^ 1u].ref);
@@ -954,7 +1026,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             tc.emitterUpdates = c.srv(m.emitterUpdates.ref);
             tc.emitterUpdateRows = c.srv(m.emitterUpdateRows.ref);
             tc.emitterPatches = c.srv(m.emitterPatches.ref);
-            tc.rowWindows = c.srv(m.rowWindows.ref);
+            tc.emitterStamp = c.uav(m.emitterStamp.ref);
             tc.spawns = c.srv(m.spawns.ref);
             tc.explicitBirths = c.srv(m.explicitBirths.ref);
             tc.fields = c.srv(m.fields.ref);
@@ -967,9 +1039,9 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             tc.dynamicSurfaces = c.srv(m.dynamicSurfaces.ref);
             tc.tickSurfaces = c.uav(m.tickSurfaces.ref);
             tc.gridCount = c.uav(m.gridCount.ref);
-            tc.gridHeads = c.uav(m.gridHeads.ref);
+            tc.gridStart = c.uav(m.gridStart.ref);
+            tc.gridFill = c.uav(m.gridFill.ref);
             tc.gridEntries = c.uav(m.gridEntries.ref);
-            tc.gridNodes = c.uav(m.gridNodes.ref);
             tc.gridLarge = c.uav(m.gridLarge.ref);
             tc.ribbonPoints = c.uav(m.ribbonPoints.ref);
             tc.volumeRecords = c.uav(m.volumeRecords.ref);
@@ -981,12 +1053,13 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             tc.rowMotion = c.uav(m.rowMotion.ref);
             tc.overflowRecords = c.uav(m.overflowRecords.ref);
             tc.overflowCapacity = kOverflowRecords;
+            tc.gridBlocks = c.uav(m.gridBlocks.ref);
             std::memcpy(constantsCpu, &tc, sizeof tc);
         };
-        auto dispatch = [&](const char* name, const char* kernel, std::array<uint32_t, 8> p, uint32_t groupCount, bool first = false) {
+        auto dispatch = [&](const char* name, const char* kernel, std::array<uint32_t, 8> p, uint32_t groupCount, bool first = false, bool overlap = false) {
             if (groupCount == 0) return;
             ID3D12PipelineState* pso = shaders.compute(kernel);
-            g.addPass(name, queueType, declare, [=](PassContext& c) mutable {
+            g.addPass(name, queueType, overlap ? RenderGraph::SetupFn(declareOverlap) : RenderGraph::SetupFn(declare), [=](PassContext& c) mutable {
                 if (first) fillConstants(c);
                 c.cmd->SetPipelineState(pso);
                 c.bindFrameConstants(constants);
@@ -1008,21 +1081,26 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
                       [=](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(to), 0, c.resource(from), 0, bytes); });
             device.deferRelease(grownFrom.resource);
         }
+        dispatch("fx.particles.emitters", "Passes/FX/FxEmitters", {}, std::max<uint32_t>(groups(h.emitter_count + h.emitter_patch_count, 64), 1), true);
         const uint32_t beginThreads = std::max<uint32_t>(std::max<uint32_t>(std::max<uint32_t>(tableRows, 1), reset ? h.restore_count : 0),
                                                          collide ? gridBuckets : 0);  // + grid clear
-        dispatch("fx.particles.begin", reset ? "Passes/FX/FxBegin.RESET1" : "Passes/FX/FxBegin.RESET0", {}, groups(beginThreads, 256), true);
+        dispatch("fx.particles.begin", reset ? "Passes/FX/FxBegin.RESET1" : "Passes/FX/FxBegin.RESET0", {}, groups(beginThreads, 256));
         if (collide)
         {
             // grid counts cleared by begin; surfaces = transform + count; one-group scan; fill
             dispatch("fx.particles.surfaces", "Passes/FX/FxSurfaces", {}, groups(surfaceTotal, 64));
+            dispatch("fx.particles.grid.scan", "Passes/FX/FxGrid.STEP2", {}, groups(gridBuckets, 1024));
+            dispatch("fx.particles.grid.blocks", "Passes/FX/FxGrid.STEP4", {}, 1);
+            dispatch("fx.particles.grid.fill", "Passes/FX/FxGrid.STEP3", {}, groups(surfaceTotal, 64));
         }
 
         // 3. depth 0: spawn + integrate of the births (generated + explicit), integrate of the existing particles; depths
         // 1..4: child setup, spawn + integrate of their births (a state packet, dt == 0, has no spawns and no motion:
         // FxIntegrate carries the state over and applies kills only)
         if (h.dt > 0)
-            dispatch("fx.particles.spawn.d0", "Passes/FX/FxSpawn", { h.depth[0], h.depth[1], threads[0], threads[0] + h.explicit_count }, groups(threads[0] + h.explicit_count, 64));
-        dispatch("fx.particles.integrate.d0", "Passes/FX/FxIntegrate", {}, groups(inTotal, 256));
+            dispatch("fx.particles.spawn.d0", "Passes/FX/FxSpawn", { h.depth[0], h.depth[1], threads[0], threads[0] + h.explicit_count }, groups(threads[0] + h.explicit_count, 64),
+                     false, true);
+        dispatch("fx.particles.integrate.d0", "Passes/FX/FxIntegrate", {}, groups(inTotal, 256), false, true);
         for (uint32_t d = 1; d <= NV_STREAM_MAX_DEPTH && h.dt > 0; ++d)
         {
             if (h.depth[d + 1] == h.depth[d]) continue;
@@ -1036,7 +1114,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
                      groups(h.depth[NV_STREAM_MAX_DEPTH + 1] - h.depth[1], 64));
 
         // collision sweeps of every depth's colliding particles (queued by the integrate and spawn passes)
-        if (collide) dispatch("fx.particles.collide", "Passes/FX/FxCollide", {}, groups(capacity, 64));
+        if (collide) dispatch("fx.particles.collide", "Passes/FX/FxCollide", {}, groups(colliderBound, 64));
 
 
         // ribbon strips: one group per ribbon range walks it in chunks with carried scans (FxRibbon.hlsl)
@@ -1119,10 +1197,11 @@ TickReadback ParticleSystem::readback(uint64_t stream, uint64_t generation, uint
         // The rest of the collision events from the tick's GPU event buffer (kept in the ring slot until reused).
         const uint64_t offset = ((uint64_t)s.eventSlots + copied) * sizeof(NV_StreamEvent), rest = (uint64_t)(collisions - copied) * sizeof(NV_StreamEvent);
         ComPtr<ID3D12Resource> rb = makeBuffer(m_device, rest, D3D12_HEAP_TYPE_READBACK, L"FX collision readback");
-        CommandList list = m_device.acquireCommandList(QueueType::Graphics);
+        // (waitSlot above waited for the tick, so the copy needs no GPU wait on the tick's queue)
+        CommandList list = m_device.acquireCommandList(m_explicitQueue);
         list.list->CopyBufferRegion(rb.Get(), 0, s.events.resource.Get(), offset, rest);
         const uint64_t fence = m_device.submit(list);
-        m_device.queue(QueueType::Graphics).waitCpu(fence);
+        m_device.queue(m_explicitQueue).waitCpu(fence);
         uint8_t* q = nullptr;
         D3D12_RANGE rr{ 0, (SIZE_T)rest };
         check(rb->Map(0, &rr, reinterpret_cast<void**>(&q)), "map FX collision readback");
@@ -1135,19 +1214,20 @@ TickReadback ParticleSystem::readback(uint64_t stream, uint64_t generation, uint
 namespace
 {
 // Copies persistent buffers into readback memory with a one-pass graph of its own (explicit readbacks only).
-std::vector<uint8_t> copyOut(Device& device, ID3D12Resource* resource, uint64_t bytes, uint32_t stride, const char* name)
+std::vector<uint8_t> copyOut(Device& device, ID3D12Resource* resource, uint64_t bytes, uint32_t stride, const char* name, QueueType queue)
 {
     RenderGraph graph(device);
+    graph.setAsyncCompute(queue != QueueType::Graphics);  // (off, every pass would run on the graphics queue)
     const BufferRef ref = graph.importBuffer(resource, BufferDesc{ name, std::max<uint64_t>(bytes, 256), stride });
     ComPtr<ID3D12Resource> rb = makeBuffer(device, bytes, D3D12_HEAP_TYPE_READBACK, L"FX state readback");
-    graph.addPass("fx.readstate", QueueType::Graphics,
+    graph.addPass("fx.readstate", queue,
                   [&](PassBuilder& b) {
                       b.use(ref, Use::CopySrc);
                       b.keep();
                   },
                   [&](PassContext& c) { c.cmd->CopyBufferRegion(rb.Get(), 0, c.resource(ref), 0, bytes); });
     graph.execute(nullptr);
-    device.queue(QueueType::Graphics).waitCpu(graph.lastFence(QueueType::Graphics));
+    device.queue(queue).waitCpu(graph.lastFence(queue));
     std::vector<uint8_t> out((size_t)bytes);
     uint8_t* p = nullptr;
     D3D12_RANGE r{ 0, (SIZE_T)bytes };
@@ -1184,7 +1264,7 @@ std::vector<uint8_t> ParticleSystem::readState(const char* name)
     else if (n == "tickSurfaces") b = &m.tickSurfaces, bytes = m.tickSurfaces.bytes;
     else fail("FX particles: no state buffer '%s'", name);
     if (bytes == 0) return {};
-    return copyOut(m_device, b->resource.Get(), bytes, b->stride, b->name);
+    return copyOut(m_device, b->resource.Get(), bytes, b->stride, b->name, m_explicitQueue);
 }
 
 std::vector<NV_StreamParticle> ParticleSystem::checkpoint(ShaderLibrary&)
@@ -1207,6 +1287,54 @@ std::vector<NV_StreamParticle> ParticleSystem::checkpoint(ShaderLibrary&)
             out.push_back(p);
         }
     return out;
+}
+
+uint64_t ParticleSystem::residentBytes() const
+{
+    const Impl& m = *m_impl;
+    uint64_t total = 0;
+    for (const Buf* b : { &m.posAge[0], &m.posAge[1], &m.velocity[0], &m.velocity[1], &m.inRanges, &m.inBlocks, &m.emitterTable, &m.emitterStamp,
+                          &m.emitterUpdates, &m.emitterUpdateRows, &m.emitterPatches, &m.dynamic[0], &m.dynamic[1], &m.counters, &m.programs,
+                          &m.curveKeys, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces, &m.restore, &m.birthIndex,
+                          &m.dynamicSurfaces, &m.bodies, &m.tickSurfaces, &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.ribbonRanges,
+                          &m.ribbonRunStart, &m.ribbonTangents, &m.surfaceBoxes, &m.colliders, &m.trace, &m.rowMotion, &m.overflowRecords,
+                          &m.volumeRecords, &m.volumeSide, &m.volumeRanges, &m.gridBlocks, &m.gridCount, &m.gridStart, &m.gridFill,
+                          &m.gridEntries, &m.gridLarge })
+        total += b->resource ? b->bytes : 0;
+    for (const Impl::Slot& s : m.slots) total += s.events.resource ? s.events.bytes : 0;  // (upload / readback rings: host memory)
+    return total;
+}
+
+ParticleRenderInputs ParticleSystem::renderInputs(RenderGraph& graph, uint64_t importIndex)
+{
+    Impl& m = *m_impl;
+    ParticleRenderInputs r;
+    if (m.latestSlot < 0 || !m.renderRanges.resource) return r;
+    const uint32_t last = m.parity ^ 1u, prev = m.parity;  // output parity of the latest tick; its input
+    Buf* bufs[] = { &m.posAge[prev], &m.posAge[last], &m.velocity[prev], &m.velocity[last], &m.dynamic[prev], &m.dynamic[last], &m.emitterTable,
+                    &m.programs, &m.curveKeys, &m.renderRanges, &m.renderBlocks };
+    for (Buf* b : bufs)
+        if (!b->resource) return r;  // (a previous tick's dynamic rows exist from the second tick on)
+    r.posAge[0] = m.posAge[prev].import(graph, importIndex);
+    r.posAge[1] = m.posAge[last].import(graph, importIndex);
+    r.velocity[0] = m.velocity[prev].import(graph, importIndex);
+    r.velocity[1] = m.velocity[last].import(graph, importIndex);
+    r.dynamic[0] = m.dynamic[prev].import(graph, importIndex);
+    r.dynamic[1] = m.dynamic[last].import(graph, importIndex);
+    r.emitters = m.emitterTable.import(graph, importIndex);
+    r.programs = m.programs.import(graph, importIndex);
+    r.curveKeys = m.curveKeys.import(graph, importIndex);
+    r.renderRanges = m.renderRanges.import(graph, importIndex);
+    r.renderBlocks = m.renderBlocks.import(graph, importIndex);
+    r.threads = m.renderThreads;
+    r.current = m.renderCurrent;
+    r.rangeCount = m.renderRangeCount;
+    std::memcpy(r.anchor[0], m.anchor[prev], sizeof r.anchor[0]);
+    std::memcpy(r.anchor[1], m.anchor[last], sizeof r.anchor[1]);
+    r.dt = m.tickDt;
+    r.tickTime = m.tickTime;
+    r.valid = true;
+    return r;
 }
 
 const std::vector<LayoutRange>& ParticleSystem::layout() const { return m_impl->layout; }

@@ -17,7 +17,7 @@ list(FILTER core_sources EXCLUDE REGEX "/src/Unity/")
 add_library(unx_host_core STATIC ${core_sources})
 unx_target_defaults(unx_host_core)
 target_include_directories(unx_host_core PUBLIC include src)
-target_link_libraries(unx_host_core PUBLIC unx_renderer dxguid)
+target_link_libraries(unx_host_core PUBLIC unx_renderer dxguid $<TARGET_NAME_IF_EXISTS:unx_cook>)  # C1: cooked textures (Tools/Cook)
 add_dependencies(unx_host_core unx_host_shaders)
 
 file(GLOB_RECURSE unity_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/Unity/*.cpp")

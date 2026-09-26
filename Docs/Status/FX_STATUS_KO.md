@@ -1,74 +1,79 @@
-# FX 트랙 상태 (GPU 입자 모듈 V1) — 2026-09-25
+# FX 트랙 상태 (GPU 입자 모듈 V1) — 2026-09-26
 
 소유: `Native/Render/Passes/FX`, `Config/quality/fx.toml`, `Results/FX`, 요청 `Docs/Design/Requests/20260925_FX_*`.
-표기: **[실측]** = 실행 결과(성능 수치는 GPU 잠금 아래, RTX 4080), **[계산]** = 측정 전 계산값, **[추론]** = 실측에서 끌어낸 원인 해석.
-기준 문서: `C:\Users\USER\Unravel\Docs\Rebuild\WORLD_VFX_DESIGN_KO.md` 3·7(V1)·8절, ARCHITECTURE 2.9·2.14·4.1(C0).
+표기: **[실측]** = 실행 결과(성능 수치는 GPU 잠금 아래, RTX 4080), **[계산]** = 측정 전 계산값, **[추정]** = 실측에서 끌어낸 원인 해석.
+기준 문서: `C:\Users\USER\Unravel\Docs\Rebuild\WORLD_VFX_DESIGN_KO.md` 3·7(V1)·8절, ARCHITECTURE 2.9·2.14·4.1(C0), COVERAGE_REDESIGN 14.8.
 
-## 1. 구조
+## 1. 구조 (f13a50d 이후)
 
-- 입력은 VFX 세션의 스트림 계약(`NativeVfxStream.h`, 공유 수식 `VfxParticleMath.hlsli`, CPU 참조 `VfxStreamCpu.h`)이다. `Stream/`에
-  NativeVfx 커밋 f461b7c9의 바이트 동일 사본을 두고, 테스트가 SHA-256으로 확인한다. CPU가 생사·사건 슬롯·자식·개수·용량을 정하고 GPU는
+- 입력은 VFX 세션의 스트림 계약이다(`NativeVfxStream.h`, 공유 수식 `VfxParticleMath.hlsli`, CPU 참조 `VfxStreamCpu.h`). `Stream/`에
+  NativeVfx 2cbfe994의 바이트 동일 사본을 두고, 테스트가 SHA-256으로 확인한다. CPU가 생사·사건 슬롯·자식·개수·용량을 정하고 GPU는
   연속 상태만 채운다.
-- `unx::fx::ParticleSystem`(TrackState `fx.particles`): 호스트가 `submit(packet)`, C0 진입점 `tracks::simulation`이 쌓인 tick을 기록,
-  `readback(stream, generation, tick)`(사건·카운터 링), `checkpoint()`, `readState(name)`(진단).
-- tick 파이프라인(23 패스, core 부하): upload → emitters(델타 블록 → 상주 표) → begin(보내지 않은 행의 tick 필드 지움, 격자·정렬
-  히스토그램 비움; RESET: 복원) → [용량 변경 시 repack] → surfaces(몸체 프레임 + 격자 계수) → grid(scan, fill) → spawn.d0 →
-  integrate.d0 → (깊이 1~4: child → spawn → integrate) → compact(scan·sums·scatter + 정렬 1패스 히스토그램) → cells(셀당 스레드, 그룹
-  단위 연속 쓰기) → ribbon(범위당 그룹 1개, 한 디스패치) → sort(scan·scatter × 3, scatter가 다음 패스 히스토그램을 셈) → readback.
-- 상태는 tick 패리티 두 벌(`posAge[2]`, `velocity[2]`): integrate가 지난 tick 출력을 읽어 이번 tick 출력을 쓴다. 렌더러는 두 벌을
-  그대로 보간한다(별도 렌더 레코드 없음, 요청 20260925_FX_particle_render_rules.md 개정).
-- 이미터 표 델타(`NV_STREAM_EMITTER_DELTA`): GPU 상주 표 + 갱신 산포 + tick 필드 지움. CPU 거울은 O(블록 + tick 필드가 있던 행).
-- 충돌 후보: 표면 = 기준점 + 오프셋(VFX 768e7e16). 움직이는 표면의 상자는 θr + (1+θ)u /(1−θ), 질의 상자는
-  ((1+θmax)Dmax + θmax|d|)/(1−θmax)만큼 키운다(유도는 `Particles.hlsli`, VFX가 `NativeVfxStream.h` e절에 채택). 후보는 격자 셀 + 연속
-  상자 겹침 시험.
-- 결정성: 슬롯 = dead 목록의 순위, 압축 = 접두합, 정렬 = 안정 LSD(그룹 안 순서 먼저, 자릿수 구간 연속 쓰기). 원자 연산은 순서와
-  무관한 결과(충돌 사건 append, 격자 채우기·계수, 정렬 히스토그램 계수, 운동 최대값)에만 쓴다.
-- 이식성: 64비트 정수·double 없음, wave 폭 가정 없음(WARP 4-lane wave에서 검증), WaveMatch(SM 6.5 표준).
-- 상태 패킷(dt = 0): 표면·격자를 만들지 않고 몸체 인덱스를 검사·해석하지 않는다(VFX fa5821b5 계약).
+- **입자 레이아웃(슬롯 없음).** 스트림 계약상 한 이미터 행의 산 출생은 정확히 [death_birth, next_birth) 연속 구간이다. 그래서 CPU가
+  매 tick 스트림 표에서 레이아웃을 계산한다. 산 행마다 출생 순서로 [base, base + count)에 놓고, 볼륨 행을 첫 셀 순서로 앞에 둔다(볼륨
+  레코드 색인 = 상태 색인). integrate는 이전 레이아웃(행 구간 + 256 스레드 그룹당 구간 색인)을 읽고, 입자를 새 레이아웃의
+  base + (birth − first)에 쓴다. 이것으로 meta, 생존 플래그, 생존/죽음/dying 목록, 압축 3패스, repack, 깊이 ≥ 1 integrate 패스가
+  없어졌다. 신생 입자는 spawn이 바로 적분한다. GPU가 쓴 입자 수를 세고, CPU가 alive_after와 대조해 보고를 만든다.
+- tick 파이프라인(core 부하, 12패스): upload → emitters(블록·패치 → 상주 표) → begin(보내지 않은 행의 tick 필드 지움, RowMotion·dynamic,
+  격자 비움; RESET이면 복원 기록을 입력 레이아웃에) → surfaces(몸체 프레임 + 격자 계수) → grid(scan, blocks, fill) → spawn.d0 ∥
+  integrate.d0(서로 의존이 없어 장벽 없이 겹침) → (깊이 1~4: child → spawn) → child.keep → collide → ribbon → readback.
+- 상태는 tick 패리티 두 벌(`posAge[2]`, `velocity[2]`)이고, 각 벌은 그 tick의 레이아웃을 따른다. 렌더러는 두 벌과 두 tick의 행 표로
+  보간한다(요청 20260925_FX_particle_render_rules.md 1~3절, 2026-09-26 개정). 정렬은 렌더 패스가 프레임마다 타일 단위로 한다(14.8
+  판정 1).
+- 충돌: 적분의 운동 단계는 모든 입자에서 돈다. 충돌 프로그램의 입자는 큐(68 B, wave당 원자 1회)로 모으고 FxCollide가 스윕한다. 큐
+  용량은 그 tick 충돌 행의 입자 수다(CPU 계산). 후보는 해시 격자(표면 상자를 운동 한계만큼 키움, 유도는 `Particles.hlsli`)에 연속
+  상자 겹침 시험을 더한 것이다.
+- 호스트 시뮬레이션 큐 진입점: `record(graph, shaders, tick, queue)`(WORLD_VFX 3.7). 링 슬롯의 펜스는 그 큐를 따른다.
+- 결정성: 레이아웃과 출생 색인은 CPU가 계산한다. 원자 연산은 순서와 무관한 결과(충돌 사건 append, 충돌 큐, 격자 채우기·계수, 운동
+  최대값, 입자 수)에만 쓴다.
+- 이식성: 64비트 정수·double 없음, wave 폭 가정 없음(WARP 4-lane wave에서 검증). 데이터 의존 루프는 모두 하드 상한과 오류 비트를
+  갖는다(INTERFACES 3.6: 후보 순회 WATCHDOG, 이진 탐색 guard 32).
 
 ## 2. 정확성 [실측]
 
 | 실행 | 결과 |
 |---|---|
-| WARP, 8,192 루트 × 200 tick, 참조 대조(f461b7c9) | PASS: 위치 오차 최대 3.05e-6 / p99 9.6e-7, 결정성 비트 동일, 충돌 수 GPU = 참조 |
-| WARP, 256 ribbon × 601점(3 청크) | 링크 정확, 꼭짓점/uv 오차 1.26e-6 (순차 double 보행 대비) |
-| RTX, 전체 부하 2400 tick 기록(fa5821b5: 524k 루트 + ribbon 256 + 볼륨 16, 깊이 4, 23.5k 행) | 구조·출력 검사 전부, 결정성 40 비교 tick 비트 동일, IMPACT_OVERFLOW 9 tick(한 지점) → VFX f461b7c9가 해결 |
+| WARP, 8,192 루트 × 130 tick, 참조 대조(레이아웃 빌드 f13a50d) | PASS. 위치 오차 최대 2.9e-6 / p99 9.7e-7, 충돌 사건 수 GPU = 참조(909), 결정성 비트 동일, 용량 변경 14회(repack 없음) |
+| RTX 첫 실행(잠금 안), 레이아웃 빌드 | PASS, 결정성 3 비교 tick 비트 동일 |
+| RTX 전체 부하 2400 tick 기록 rec_T → CPU 재생(참조, 잠금 밖) | 진행 중. tick 60 최대 6.6e-6. tick 180에 행 56의 입자 7개가 1e-5 초과(최대 1.94e-4, 속도 y 차 약 0.003 m/s) → 추적 예정 |
+| WARP 전체 부하 200 tick(패치36 빌드) | tick 120 최대 1.68e-5, tick 131 사망 사건 (56,341) 1.32e-5 — 같은 행 56 [추정: 같은 기구] |
 
-- 찾아서 VFX와 고친 결함: 표면이 float anchor 공간 절대점이라 정밀도가 anchor 거리에 비례(100 m에서 1.4 ulp, 반례: anchor를 36 m
-  옮기면 오차 18배 감소) → 표면 = 기준점 + 오프셋. 출생 원뿔 표본의 1 − z² 상쇄 → w(2 − w). 움직이는 몸체 사이 끼임(쐐기·닫히는 틈)
-  → 마주 보는 표면 극한 규칙.
-- ribbon 끊김 시험(|구간| ≤ break)은 float 길이의 문턱이다. 한계에서 1e-6 이내인 구간은 GPU의 결정을 따르고 센다(2400 tick 중 2
-  tick). 그 밖은 모두 정확 비교.
-- 결정성 해시는 정의된 상태만 덮는다(살아 있는 슬롯의 두 tick 상태, 목록의 개수까지). dead 목록의 오래된 꼬리가 실행마다 달랐다(새
-  버퍼가 받은 메모리, 읽히지 않음).
+## 3. 성능 [실측, GpuLock, 4K core RPP: 622,592 live, 400행]
 
-## 3. 성능 [실측, GpuLock]
-
-| 부하 | 4K ms/tick | 비고 |
+| 빌드 | ms/tick | 비고 |
 |---|---|---|
-| core 524,288(이전 고정물: ribbon·볼륨이 루트 16개에 섞임) | 0.651 → 0.514 → 0.506 | 셀 쓰기 정렬(168 → 29 µs), 상태 두 벌 |
-| core RPP 모양 622,592(루트 524k + ribbon 256×256 + 볼륨 16×2048, 셀 262k) | 0.560 → 0.5625(격자 3패스) | 패스 타임스탬프 끔: 0.5586(계측 비용 없음) |
+| T(충돌 큐 + 필드 상수 버퍼) | 0.357, 0.353 | 2820 MHz |
+| U(행별 RowMotion 112 B, aa91870) | 0.285, 0.291, 0.286, 0.295 | integrate 0.169 → 0.106~0.113 |
+| L(행 레이아웃, f13a50d) | 0.244, 0.242 (2820 MHz), 1440p 0.240 | 압축 0, integrate 0.084~0.086, spawn 0.011(신생 적분 포함) |
+| G(begin 융합 + 한 패스 격자, 9ea7583) | 0.256 | **후퇴 → 되돌림.** begin 28.8 µs(이진 탐색 의존 사슬), surfaces 22.7, collide 56 µs(버킷 넘침 사슬) |
 
-- 기여 분해(524k, 이전 빌드): integrate(충돌 제외) 약 0.10, 충돌 약 0.10, 정렬 0.145, 셀 0.029, ribbon 0.081(→ 한 디스패치로 바꿈).
-- 대역폭 바닥[계산, 약 650 GB/s]: integrate 슬롯당 80 B(약 77 µs), 정렬 3패스 × 16 B/키(약 45 µs), 셀 29, 압축 약 15, 나머지 약 50 →
-  약 0.22 ms. 0.2 ms 게이트는 지금의 tick당 데이터량으로는 대역폭 바닥 아래다. 커널 조정만으로는 닫히지 않고 데이터량(정렬 패스·키
-  폭, 슬롯 상태 이동량)을 줄여야 한다 → 조율 세션에 보고.
-- 델타 패킷: features 7.83 → 1.49 MB/tick(23.5k 행 중 3.8k 블록). 남은 1.28 MB는 tick 필드만 바뀌는 블록이다 → 32 B tick 레코드 제안
-  예정(업로드 시간 실측 뒤).
-- features 부하의 닫힌 고리 측정은 대리 권위(고정물)의 CPU가 GPU를 쉬게 해 클럭이 떨어진다(무효로 표시). `--packets DIR`로 기록된
-  스트림을 열린 고리로 재생해 GPU만 잰다(결정성 덕분에 기록된 패킷이 이번 실행의 사건과 맞는다).
+- L 패스별(µs, 2820 MHz): upload 12.5, emitters 9.8, begin 10.0, surfaces 11.2, grid 4.2 + 3.9 + 11.2, spawn 11.2, integrate 83.7,
+  collide 48.3, ribbon 26.6, readback 5.6. 충돌 큐 65,536, 격자 항목 약 28k, 대형 목록 2.
+- recorded 부하(23,496행, 640k): L 0.246 [실측, 2820 MHz]. 이전의 0.57~0.77은 클럭이 떨어진 실행이라 무효다.
+- 측정 중인 V 빌드: L에 다음을 더했다.
+  - 충돌 큐 원자를 wave당 1회로;
+  - spawn.d0과 integrate.d0을 장벽 없이 겹침;
+  - 충돌 큐와 디스패치를 충돌 행 입자 수로;
+  - 상태 쌍을 정확한 크기로.
 
 ## 4. 사고 기록
 
-- 14:18 TDR(DXGI_ERROR_DEVICE_HUNG, 잠금 없는 정확성 실행). 원인: 코어 렌더 그래프의 뷰 캐시. 코어 4532054에서 고쳐졌고, 우회 없이 통과.
-- 긴 CPU 참조를 잠금 안에서 계산해 다른 트랙을 막았다 → `--record`(잠금 안, GPU만) / `--replay`(잠금 밖).
-- 게이트 CPU 프레임이 고정물 비용(23k 행에서 선형 행 탐색·스폰 오프셋 이차 합)으로 20 ms → 클럭 570 MHz 아래 → 무효 표시, 고정물을
-  O(변경)으로 고침(패킷 바이트 동일 확인).
+- 09-25 14:18 TDR. 원인은 코어 렌더 그래프의 뷰 캐시였고, 코어 4532054에서 고쳐졌다.
+- 긴 CPU 참조를 잠금 안에서 계산해 다른 트랙을 막았다 → `--record`(잠금 안, GPU만) / `--replay`(잠금 밖, 장치 없음, --yield).
+- 09-26: 잠금 없이 연달아 돌린 WARP 실행이 다른 세션의 timing에 `contended`로 잡혔다. PDH가 WARP 소프트웨어 어댑터의 엔진 시간을
+  GPU 사용으로 세고, WARP는 CPU도 포화시킨다. 사용자 결정: 포화시키는 정확성 실행은 잠금(kind correctness) 안에서 돌리고, 시험 묶음은
+  잠금 하나 안에서 돌린다.
+- 917787d에 다른 트랙의 스테이징(Atmosphere 삭제)이 섞였다. 이후로는 `git commit --only -- <FX 경로>`로 커밋하고, 커밋 전에
+  `git diff --cached --stat`으로 확인한다.
 
 ## 5. 남은 일
 
-- V1 게이트: f461b7c9 기록 600 tick CPU 재생(참조 1e-5), WARP 전체, ≤ 0.2 ms/tick(위 대역폭 바닥 문제 → 조율 결정).
-- 성능: 정렬(히스토그램 융합 측정 중), integrate(살아 있는 목록 순회, 충돌 후보 비용), 업로드 tick 레코드(VFX 형식).
-- 요청: `FrameResources::particles`(20260925_FX_simulation_slot.md), 렌더 규칙·셀 키(20260925_FX_particle_render_rules.md, 렌더 패스는
-  조율 세션의 비용식·품질 정의 뒤).
-- 이후: FX 렌더 패스, 물·볼륨·SSS·헤어(비용식·품질 정의 없는 항목은 조율 세션에 먼저).
+- V1 게이트 ≤ 0.2 ms/tick(L 0.242). 다음 항:
+  - collide 48 µs(큐 65k의 후보 순회);
+  - ribbon 27 µs;
+  - 격자 30 µs(원자 계수 2회; 한 패스 실험은 후퇴했다);
+  - upload/readback 18 µs(그래프가 아직 복사 큐를 지원하지 않는다 → 코어 요청 후보);
+  - integrate 84 µs(필드 16개는 전역 지지라 걸러 낼 수 없다; 부하 정의).
+- 행 56 재생 이상값 추적: 추적 기록을 남기고, 같은 입력을 double로 다시 계산해 분기 판정 차이인지 확인한 뒤 VFX에 보고한다.
+- V3: 렌더에 보이는 tick 버퍼의 ≥ 3 링, 슬롯 상태기계(pending → claimed → submitted), 렌더 입력 행 표 업로드.
+- 설계 세션의 VRAM 합계표에 입자 몫을 측정값으로 보고한다.

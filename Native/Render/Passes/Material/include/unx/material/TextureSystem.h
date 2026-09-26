@@ -49,6 +49,12 @@ MipChain buildMipChain(const scene::Scene& scene, uint32_t index);
 // alpha-tested materials that use it as base colour); no levels when no alpha-tested material uses it.
 MipChain buildCoverageChain(const scene::Scene& scene, uint32_t index);
 
+// Stored-form provider (C1: C's cook, Tools/Cook TextureCook.h): the chain of scene texture 'index' (kind 0) or its cut-out
+// coverage (kind 1) as it is uploaded, possibly block-compressed (bytesPerTexel = 0: each level is rows of 4x4 blocks,
+// tightly packed) and served from its memory and disk caches. Null (default): buildMipChain / buildCoverageChain.
+using ChainProvider = MipChain (*)(const scene::Scene& scene, uint32_t index, uint32_t kind);
+void setChainProvider(ChainProvider provider);
+
 class TextureSystem
 {
 public:

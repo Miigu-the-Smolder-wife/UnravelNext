@@ -7,26 +7,6 @@
 #define FX_PARTICLES_HLSLI
 #include "Bindless.hlsli"
 
-#define FX_NONE 0xFFFFFFFFu
-
-// Stream enums (NativeVfxStream.h)
-#define FX_RESET 1u
-#define FX_PROGRAM_NOISE 1u
-#define FX_PROGRAM_WIND 2u
-#define FX_PROGRAM_COLLISION 4u
-#define FX_PROGRAM_COLLIDE_SELF 8u
-#define FX_PROGRAM_COLLISION_EVENTS 16u
-#define FX_PROGRAM_BIRTH_EVENTS 32u
-#define FX_PROGRAM_DEATH_EVENTS 64u
-#define FX_PROGRAM_ATTACHED 128u
-#define FX_EMITTER_ACTIVE 1u
-#define FX_EMITTER_KILLED 2u
-#define FX_EMITTER_TRANSPORT 4u
-#define FX_EMITTER_SOURCE 8u
-#define FX_EMITTER_DEATH_EVENTS 16u
-#define FX_EVENT_BIRTH 0u
-#define FX_EVENT_DEATH 1u
-#define FX_EVENT_COLLISION 2u
 #define FX_STATUS_IMPACT_OVERFLOW 1u
 #define FX_STATUS_NONFINITE 2u
 #define FX_STATUS_ALIVE_MISMATCH 4u
@@ -43,8 +23,8 @@
 #define FX_COUNTER_DYING 4u        // (unused: the dying particles are the rows' dying ranges of the input layout)
 #define FX_COUNTER_LARGE 5u      // surfaces in the collision grid's large list
 #define FX_COUNTER_GRID_ENTRIES 6u
-#define FX_COUNTER_GRID_NODES 7u     // overflow nodes of the collision grid's buckets (FxSurfaces)
-#define FX_COUNTER_TURN 8u           // asuint(max |w| dt over the grid's surfaces) (FxSurfaces, motion bound of the queries)
+#define FX_COUNTER_VOLUMES 7u        // (unused)
+#define FX_COUNTER_TURN 8u           // asuint(max |w| dt over the grid's surfaces) (FxGrid, motion bound of the queries)
 #define FX_COUNTER_CARRY 9u          // asuint(max carrier displacement bound over all surfaces)
 #define FX_COUNTER_COLLIDERS 11u     // colliding slots queued by integrate for FxCollide this tick
 #define FX_COUNTER_OVERFLOWS 10u     // slots of this tick whose sweep needed a fifth impact (diagnostic records)
@@ -68,7 +48,8 @@ cbuffer FxTick : register(b1)
     float3 g_reserved27; uint g_explicitBase;   // birthIndex[g_explicitBase + j]: index of explicit birth j
     float3 g_reserved28; uint g_bodyCount;
     uint g_posAge, g_velocity, g_inRanges, g_inBlocks;  // input state (last tick's output) and its layout (InRange, blocks)
-    uint g_restoreBase, g_reserved29, g_reserved30, g_counters;  // birthIndex[g_restoreBase + j]: input index of restore j
+    uint g_restoreBase, g_colliderCapacity, g_reserved30, g_counters;  // birthIndex[g_restoreBase + j]: input index of restore j;
+                                                                        // colliders: this tick's particles of colliding rows
     uint g_reserved31, g_posAgeOut, g_reserved20, g_events;
     uint g_reserved21, g_reserved22, g_reserved23, g_reserved24;  // (the tick sort moved to the render pass)
     uint g_hist, g_programs, g_curveKeys, g_emitters;
@@ -76,20 +57,19 @@ cbuffer FxTick : register(b1)
     uint g_surfaces, g_restore, g_birthIndex, g_reserved32;  // birthIndex: CPU-computed layout indices (spawn records,
                                                               // explicit births, restore records)
     uint g_report, g_emitterDynamic, g_bodies, g_tickSurfaces;
-    float g_gridCell; uint g_gridMask, g_gridCount, g_gridHeads;     // collision grid (FxSurfaces.hlsl): per bucket count,
-    uint g_reserved33, g_gridEntries, g_gridLarge, g_gridEntryCapacity;  // overflow chain head; slots; large list; node capacity
+    float g_gridCell; uint g_gridMask, g_gridCount, g_gridStart;     // collision grid (FxGrid.hlsl)
+    uint g_gridFill, g_gridEntries, g_gridLarge, g_gridEntryCapacity;
     uint g_staticSurfaceCount, g_dynamicSurfaces, g_ribbonPoints, g_volumeSide;  // g_surfaceCount = static + dynamic; side8
-    uint g_ribbonCapacity, g_cellCapacity, g_volumeRecords, g_gridNodes;  // header ribbon_points, medium_cells; record16;
-                                                                          // grid overflow nodes {surface, next}
-    uint g_emitterUpdates, g_emitterUpdateRows, g_rowWindows, g_updateCount;  // emitter table delta (FxBegin.hlsl): blocks, their
-                                                                              // rows, per-256-row (first block, first patch)
+    uint g_ribbonCapacity, g_cellCapacity, g_volumeRecords, g_gridBlocks;  // header ribbon_points, medium_cells; record16;
+                                                                           // grid block offsets
+    uint g_emitterUpdates, g_emitterUpdateRows, g_emitterStamp, g_updateCount;  // emitter table delta (FxEmitters.hlsl)
     uint g_serial; float g_separationMax; uint g_volumeRanges, g_volumeRangeCount;  // packet serial; largest separation;
                                                                                   // volume ranges (record index)
     uint g_surfaceBoxes, g_velocityOut, g_overflowRecords, g_overflowCapacity;  // grown box per surface (candidate filter);
                                                                                 // this tick's velocity; IMPACT_OVERFLOW inputs
     uint g_reserved25, g_reserved26, g_experiment, g_colliders;  // sort: pass p's histogram is hist[p * g_histRegion + group * 256
                                                                   // + digit]; g_colliders: queue of colliding slots (FxCollide)
-    uint g_emitterPatches, g_patchCount, g_traceRow, g_traceBirth;  // patches of the tick (FxBegin); traced particle
+    uint g_emitterPatches, g_patchCount, g_traceRow, g_traceBirth;  // patches of the tick (FxEmitters); traced particle
     uint g_trace, g_rowMotion, g_pad18, g_pad19;                     // TraceRecord buffer (diagnostic); RowMotion per row
     // The tick's fields, uniform for every particle: read through the constant path (one broadcast load per row) instead of
     // per-particle buffer loads. Filled by the CPU when the counts fit (else the structured buffers are read).
@@ -97,83 +77,7 @@ cbuffer FxTick : register(b1)
     uint4 g_worldFieldRows[FX_CB_WORLD_FIELDS * 4];  // world fields (StreamWorldField, 64 B each)
 };
 
-// ---- stream records (StructuredBuffer layouts: 4-byte packing, same order as NativeVfxStream.h) ------------------
-struct StreamProgram  // 320 B
-{
-    uint output, material, flags, shape;
-    float lifetime, drag, positionRadius, velocityRadius;
-    float3 acceleration; float size;
-    float3 velocity; float coneCos;
-    float3 cone; float noiseFrequency;
-    float3 box; float reserved0;
-    float3 noise; float reserved1;
-    float4 color;
-    float restitution, friction, separation, reserved2;
-    uint sizeKeys, sizeCount, colorKeys, colorCount;
-    uint alphaKeys, alphaCount, rotationKeys, rotationCount;
-    float4 uv;
-    float2 uvScroll; float framesPerSecond, reserved3;
-    uint columns, rows, firstFrame, mediumGrid;
-    float refractionAmplitude, refractionWidth; uint refractionProfile, reserved4;
-    float3 mediumAbsorption; float mediumPhase;
-    float3 mediumScattering; float ribbonUv;
-    float3 mediumEmission; float ribbonBreak;
-    float3 ribbonNormal; float reserved5;
-    uint4 reserved6;
-};
-struct StreamEmitter  // 336 B
-{
-    uint2 origin[3];                 // double world origin (renderer; the GPU never uses it)
-    uint program, flags;
-    float3 originAnchor; uint rngKey;
-    float3 rebase; uint noiseKey;
-    uint nextBirth, deathBirth, dyingBirth, deathEvent;
-    float speed, sizeScale, dragVelocity, dragPosition;
-    float dragAcceleration, reserved0, reserved1, reserved2;
-    float4 colorScale;
-    float3 inherited; uint parentEvent;
-    float4 transport[3];
-    float4 sourcePrevious[3];
-    float4 sourceCurrent[3];
-    float3 spawnOffset; uint parentRow;
-    uint2 entity; uint2 generation;
-    uint outputBase, reserved3, reserved4, reserved5;
-};
-struct StreamEmitterPatch  // 48 B (NV_StreamEmitterPatch): the per-tick fields of a row whose block the GPU holds
-{
-    uint row, flags, nextBirth, deathBirth;
-    uint dyingBirth, deathEvent, outputBase, parentEvent;
-    uint parentRow; float3 rebase;
-};
-struct StreamSpawn  // 48 B
-{
-    uint emitter, count, firstBirth, expired;
-    uint kind, threadOffset, birthEvent, deathEvent;
-    float interval, carry, rate, reserved0;
-};
-struct StreamExplicitBirth  // 48 B
-{
-    uint emitter, birth, birthEvent, deathEvent;
-    float3 position; float elapsed;
-    float3 velocity; float reserved0;
-};
-struct StreamField { float3 position; uint kind; float3 value; float radius; };  // 32 B
-struct StreamWorldField { float3 origin; uint packed; float3 basis0; float3 basis1; float3 basis2; float3 value; };  // 64 B
-struct StreamSurface  // 128 B (body == FX_NONE: anchor space; else a, b, c body-local)
-{
-    uint kind; uint2 entity; uint generation0;
-    uint generation1; float radius; uint body, reserved1;
-    float3 a; float reserved2; float3 b; float reserved3; float3 c; float reserved4;
-    float3 velocity; float reserved5; float3 angular; float reserved6; float3 origin; float reserved7;
-};
-struct StreamBody { float4 rotation; float3 position; float reserved0; float3 velocity; float reserved1; float3 angular; float reserved2; float3 center; float reserved3; };  // 80 B
-struct StreamParticle { uint emitter, birth, reserved0, reserved1; float3 position; float age; float3 velocity; float reserved2; };  // 48 B
-struct StreamEvent { uint emitter, birth, kind, impacts; float3 position; float after; float3 velocity; float reserved0; float3 normal; float reserved1; };  // 64 B
-
-// ---- module records ---------------------------------------------------------------------------------------------------
-// Emitter values the GPU derives in the tick: every row starts from the table (FxBegin); a child row (parent_event)
-// gets origin = float(parent origin_anchor + event position) and inherited = ratio x event velocity at its depth.
-struct EmitterDynamic { float3 originAnchor; uint pad0; float3 inherited; uint pad1; };  // 32 B
+#include "Passes/FX/StreamRecords.hlsli"
 // Render record of a slot for one tick (request 20260925_FX_particle_render_rules.md).
 
 // ---- buffers ----------------------------------------------------------------------------------------------------------
@@ -253,7 +157,7 @@ float4 fxCurveKey(uint i)
 #define NV_CURVE_KEY(i) fxCurveKey(i)
 
 // ---- collision candidates (NV_SURFACE_QUERY hook of the shared mathematics) --------------------------------------------
-// A spatial hash grid of the tick's surfaces (built by FxSurfaces in one pass): every surface whose inflated AABB spans at most
+// A spatial hash grid of the tick's surfaces (FxGrid.hlsl): every surface whose inflated AABB spans at most
 // FX_GRID_SURFACE_CELLS cells is listed in the buckets of those cells; larger ones are in the large list. A segment's
 // candidates are the large list plus the buckets of the cells its AABB spans (hash collisions and duplicates only add
 // candidates; the shared tie rule makes the order irrelevant). A segment spanning more than FX_GRID_QUERY_CELLS cells
@@ -267,15 +171,11 @@ float4 fxCurveKey(uint i)
 // query segment at the same parameter satisfy
 //     |x - y| <= [theta_n r_n + (1 + theta_n) u_n] / (1 - theta_n) + [(1 + theta_n) D_c + theta_n |d|] / (1 - theta_n)
 // (|P - A| <= u_n + theta_n |W - o_n + v h| + D_c and |W - o_n| <= D_c + |d| + |x - y| + r_n). The first term grows the
-// surface's box (FxSurfaces); the second grows the query box with the tick's maxima theta_max over the grid's surfaces and
+// surface's box (FxGrid); the second grows the query box with the tick's maxima theta_max over the grid's surfaces and
 // D_max over all surfaces (FX_COUNTER_TURN / FX_COUNTER_CARRY). A surface with theta >= 1/2 is in the large list (always
 // a candidate). Static surfaces add nothing.
 #define FX_GRID_SURFACE_CELLS 64u
 #define FX_GRID_QUERY_CELLS 64u
-// Bucket b holds its first FX_GRID_SLOTS entries at slots [b * FX_GRID_SLOTS, ...) and the rest in a chain of overflow
-// nodes {surface, next} from heads[b] (FX_NONE ends it): insertion is one atomic per entry, no scan (the order inside a
-// bucket is free: the candidates' order never changes a result).
-#define FX_GRID_SLOTS 8u
 uint fxGridHash(int3 c) { return ((uint)c.x * 73856093u) ^ ((uint)c.y * 19349663u) ^ ((uint)c.z * 83492791u); }
 int3 fxGridCell(float3 p) { return (int3)floor(p / g_gridCell); }
 // Cells of the box [lo, hi] (anchor space): 0 when the box is not finite or spans more than 'limit' cells (the caller
@@ -296,13 +196,19 @@ int3 fxGridCellOf(int3 a, int3 span, uint k) { return a + int3((int)(k % (uint)s
 struct FxSurfaceQuery
 {
     float3 lo, hi;    // grown query box (candidates whose grown box misses it are skipped)
-    uint mode;        // 0 large list, 1 bucket slots, 4 bucket overflow chain, 2 every surface, 3 done
-    uint next, end;   // current list range (large list, bucket slots, surfaces)
-    uint chain;       // mode 1: the bucket's overflow chain (FX_NONE: none); mode 4: the next node
+    uint mode;        // 0 large list, 1 grid cells, 2 every surface, 3 done
+    uint next, end;   // current list range (large list, bucket entries, surfaces)
     int3 a, span;     // cell box
     uint cell, cells; // next cell index, cell count
     uint visited;     // candidates so far (watchdog)
 };
+// Bucket start: exclusive prefix inside its block of 1024 buckets + the block's offset (FxGrid STEP 2 and 4).
+uint fxGridStart(uint b)
+{
+    FX_RWBUFFER(uint, starts, g_gridStart);
+    FX_RWBUFFER(uint, blocks, g_gridBlocks);
+    return starts[b] + blocks[b >> 10];
+}
 // The AABB is inflated by max(1 mm, 1e-5 |coordinate|), so a point the float hit test accepts is inside it, and by the
 // surface's motion over the tick (moving surfaces above); a surface turning by >= 1/2 rad in a tick is large.
 // Box of a tick surface (with its motion bound); turn = |w| dt, carry = its carrier displacement bound D (Particles.hlsli).
@@ -346,17 +252,16 @@ uint fxSurfaceCells(StreamSurface s, out int3 a, out int3 span, out float3 lo, o
 bool fxQueryBucket(inout FxSurfaceQuery q)
 {
     // the next cell of the box with a non-empty bucket; false when the box is done
+    FX_RWBUFFER(uint, starts, g_gridStart);
     FX_RWBUFFER(uint, counts, g_gridCount);
     [loop] while (q.cell < q.cells)
     {
         const uint b = fxGridHash(fxGridCellOf(q.a, q.span, q.cell)) & g_gridMask;
         q.cell++;
-        const uint n = counts[b];
-        q.next = b * FX_GRID_SLOTS;
-        q.end = q.next + min(n, FX_GRID_SLOTS);
-        FX_RWBUFFER(uint, heads, g_gridHeads);
-        q.chain = n > FX_GRID_SLOTS ? heads[b] : FX_NONE;
-        if (n != 0u) return true;
+        q.next = fxGridStart(b);
+        q.end = q.next + counts[b];
+        if (q.end > g_gridEntryCapacity) { fxStatus(FX_STATUS_RANGE); q.end = q.next; }
+        if (q.next < q.end) return true;
     }
     return false;
 }
@@ -371,13 +276,12 @@ FxSurfaceQuery fxSurfaceQuery(float3 p, float3 d)
     q.cells = fxGridBox(q.lo, q.hi, FX_GRID_QUERY_CELLS, q.a, q.span);
     q.cell = 0u;
     q.visited = 0u;
-    q.chain = FX_NONE;
     if (q.cells == 0u) { q.mode = 2u; q.next = 0u; q.end = g_surfaceCount; }
     else { q.mode = 0u; q.next = 0u; q.end = min(counters[FX_COUNTER_LARGE], g_surfaceCount); }
     return q;
 }
 // Watchdog: a legal enumeration visits at most every surface (exhaustive) or the large list plus the grid entries.
-// A candidate whose grown box (FxSurfaces) does not overlap the grown query box cannot be hit (the same bound as the cells,
+// A candidate whose grown box (FxGrid) does not overlap the grown query box cannot be hit (the same bound as the cells,
 // without the cell rounding) and is skipped before the shared sweep loads it. A large-list surface without a bound has an
 // infinite box.
 bool fxSurfaceNext(inout FxSurfaceQuery q, out uint n)
@@ -398,20 +302,8 @@ bool fxSurfaceNext(inout FxSurfaceQuery q, out uint n)
             if (any(bhi < q.lo) || any(blo > q.hi)) continue;
             return true;
         }
-        if (q.mode == 4u && q.chain != FX_NONE)
-        {
-            if (++q.visited > g_surfaceCount + g_gridEntryCapacity || q.chain >= g_gridEntryCapacity) { fxStatus(FX_STATUS_WATCHDOG); q.mode = 3u; return false; }
-            FX_RWBUFFER(uint2, nodes, g_gridNodes);
-            const uint2 node = nodes[q.chain];
-            q.chain = node.y;
-            n = node.x;
-            if (n >= g_surfaceCount) { fxStatus(FX_STATUS_RANGE); n = 0u; return true; }
-            const float3 blo = boxes[2u * n].xyz, bhi = boxes[2u * n + 1u].xyz;
-            if (any(bhi < q.lo) || any(blo > q.hi)) continue;
-            return true;
-        }
-        if (q.mode == 1u && q.chain != FX_NONE) { q.mode = 4u; continue; }  // the bucket's slots are done: its chain
-        if (q.mode == 0u || q.mode == 1u || q.mode == 4u) { q.mode = 1u; if (fxQueryBucket(q)) continue; q.mode = 3u; return false; }
+        if (q.mode == 0u) { q.mode = 1u; if (fxQueryBucket(q)) continue; q.mode = 3u; return false; }
+        if (q.mode == 1u) { if (fxQueryBucket(q)) continue; q.mode = 3u; return false; }
         q.mode = 3u;
         return false;
     }
@@ -550,8 +442,6 @@ StreamEvent fxEvent(uint emitter, uint birth, uint kind, NvState s)
 //              = program coefficients x density (colour alpha scales mass, RGB tints emission) / the support volume (the
 //              old VfxMediaShader rules, in float). Cell coordinates: integer 1024 m cells of the anchor space + float
 //              offsets inside the cell.
-#define FX_OUTPUT_RIBBON 2u
-#define FX_OUTPUT_VOLUME 3u
 struct RibbonPoint { float3 position; float width; float age; uint valid; uint pad0, pad1; };  // 32 B
 float fxCurve1(uint first, uint count, float u) { return count >= 2u ? nv_curve(first, count, u).y : 1.0f; }
 float3 fxCurve3(uint first, uint count, float u) { return count >= 2u ? nv_curve(first, count, u).yzw : float3(1, 1, 1); }
@@ -729,10 +619,13 @@ void fxStep(uint index, uint row, uint birth, RowMotion rm, EmitterDynamic dyn, 
     if (mo.collision != 0u && g_surfaceCount != 0u)
     {
         // the sweep runs in FxCollide, whose waves hold colliding particles only (they no longer stall the other lanes)
+        // one atomic per wave for its colliding lanes (the queue order never changes a result)
         FX_RWBUFFER(uint, counters, g_counters);
-        uint at;
-        InterlockedAdd(counters[FX_COUNTER_COLLIDERS], 1u, at);
-        if (at < g_capacity)
+        const uint lanes = WaveActiveCountBits(true), rank = WavePrefixCountBits(true);
+        uint first = 0u;
+        if (WaveIsFirstLane()) InterlockedAdd(counters[FX_COUNTER_COLLIDERS], lanes, first);
+        const uint at = WaveReadLaneFirst(first) + rank;
+        if (at < g_colliderCapacity)
         {
             FX_RWBUFFER(ColliderRecord, colliders, g_colliders);
             ColliderRecord c;

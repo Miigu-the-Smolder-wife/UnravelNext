@@ -337,6 +337,16 @@ MipChain buildMipChain(const scene::Scene& s, uint32_t index)
     return out;
 }
 
+namespace
+{
+ChainProvider g_chainProvider = nullptr;
+}
+
+void setChainProvider(ChainProvider provider)
+{
+    g_chainProvider = provider;
+}
+
 MipChain buildCoverageChain(const scene::Scene& s, uint32_t index)
 {
     const scene::Texture& t = s.textures.at(index);
@@ -428,6 +438,8 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
             ComPtr<ID3D12Resource> texture;
             MipChain chain;
             std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints;
+            std::vector<UINT> rows;         // per level: texel rows, or block rows of a block-compressed chain
+            std::vector<UINT64> rowBytes;   // per level: bytes of one (block) row, the chain's tight row pitch
             uint64_t offset = 0;
         };
         std::vector<Pending> batch;
@@ -454,8 +466,9 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
                 for (uint32_t l = 0; l < (uint32_t)p.chain.levels.size(); ++l)
                 {
                     const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& fp = p.footprints[l];
-                    const uint32_t rowBytes = fp.Footprint.Width * p.chain.bytesPerTexel;
-                    for (uint32_t y = 0; y < fp.Footprint.Height; ++y)
+                    const size_t rowBytes = (size_t)p.rowBytes[l];
+                    if (p.chain.levels[l].size() != rowBytes * p.rows[l]) fail("M textures: chain level %u has %zu bytes, expected %zu", l, p.chain.levels[l].size(), rowBytes * p.rows[l]);
+                    for (uint32_t y = 0; y < p.rows[l]; ++y)
                         std::memcpy(mapped + p.offset + fp.Offset + (size_t)y * fp.Footprint.RowPitch, p.chain.levels[l].data() + (size_t)y * rowBytes, rowBytes);
                     D3D12_PLACED_SUBRESOURCE_FOOTPRINT placed = fp;
                     placed.Offset += p.offset;
@@ -493,7 +506,7 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
         {
             const uint32_t i = job >> 1, kind = job & 1;
             Pending p;
-            p.chain = kind == 0 ? buildMipChain(*s, i) : buildCoverageChain(*s, i);
+            p.chain = g_chainProvider ? g_chainProvider(*s, i, kind) : kind == 0 ? buildMipChain(*s, i) : buildCoverageChain(*s, i);
             if (p.chain.levels.empty()) continue;
             if (kind == 0) m_slopeRange[i] = p.chain.slopeRange;
             D3D12_RESOURCE_DESC d{};
@@ -507,7 +520,9 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
             d.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
             p.footprints.resize(p.chain.levels.size());
             UINT64 total = 0;
-            device.d3d()->GetCopyableFootprints(&d, 0, (UINT)p.chain.levels.size(), 0, p.footprints.data(), nullptr, nullptr, &total);
+            p.rows.resize(p.chain.levels.size());
+            p.rowBytes.resize(p.chain.levels.size());
+            device.d3d()->GetCopyableFootprints(&d, 0, (UINT)p.chain.levels.size(), 0, p.footprints.data(), p.rows.data(), p.rowBytes.data(), &total);
             const uint64_t aligned = (batchBytes + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) & ~(uint64_t)(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
             if (aligned + total > kBatch && !batch.empty()) flush();
             p.offset = (batchBytes + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) & ~(uint64_t)(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);

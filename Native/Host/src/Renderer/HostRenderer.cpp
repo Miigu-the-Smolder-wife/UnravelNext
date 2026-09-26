@@ -11,6 +11,12 @@
 #define UNX_HOST_HAS_CLUSTERBUILDER 1
 #endif
 
+#if __has_include("unx/cook/TextureCook.h")
+#include "unx/cook/TextureCook.h"
+#include "unx/material/TextureSystem.h"
+#define UNX_HOST_HAS_COOK 1
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -30,6 +36,11 @@ struct HostRenderer::Standalone
 
 HostRenderer::HostRenderer(const HostRendererOptions& options) : m_options(options)
 {
+#if UNX_HOST_HAS_COOK
+    // C1: textures are uploaded in their cooked form (block-compressed within the error bound, memory and disk caches under
+    // UNX_COOK_CACHE, which the Unity editor sets to Library/UnravelNextCook).
+    material::setChainProvider(&cook::textureChain);
+#endif
     if (options.framesInFlight == 0) fail("framesInFlight must be at least 1");
     if (!options.standalone && (!options.hostDevice || !options.hostQueue)) fail("a host renderer needs the host's device and graphics queue");
     m_quality = QualityConfig::loadDirectory(options.qualityDirectory);
@@ -525,10 +536,81 @@ void HostRenderer::endFrame(uint32_t slot, uint64_t)
     m_stats.cpuSubmitMs = m_graph->stats().cpuSubmitMs;
 }
 
+fx::ParticleSystem& HostRenderer::fxModule()
+{
+    requireCommitted();
+    fx::ParticleSystem& p = fx::particles(m_frameRenderer->trackState(), *m_device, m_quality);
+    p.setExplicitQueue(QueueType::Compute);  // main-thread copies never touch the host's graphics queue
+    return p;
+}
+
+void HostRenderer::fxRunPending()
+{
+    fx::ParticleSystem& p = fxModule();
+    if (p.pendingTicks() == 0) return;
+    Queue& graphics = m_device->queue(QueueType::Graphics);
+    Queue& compute = m_device->queue(QueueType::Compute);
+    // After every frame submitted so far (they read the state these ticks overwrite), before any later frame.
+    compute.waitGpu(graphics, graphics.lastSignaled());
+    if (!m_simGraph)
+    {
+        m_simGraph = std::make_unique<RenderGraph>(*m_device);
+        m_simGraph->setAsyncCompute(true);  // (off, every pass would go to the graphics queue)
+    }
+    m_vfxImmediateTicks += p.pendingTicks();
+    p.record(*m_simGraph, *m_shaders, m_simIndex++, QueueType::Compute);
+    m_simGraph->execute(nullptr);
+    m_simFence = compute.lastSignaled();
+}
+
+void HostRenderer::fxFrameWait()
+{
+    if (m_simFence <= m_simWaited) return;
+    m_device->queue(QueueType::Graphics).waitGpu(m_device->queue(QueueType::Compute), m_simFence);
+    m_simWaited = m_simFence;
+}
+
+void HostRenderer::vfxSubmit(const uint8_t* packet, uint64_t bytes)
+{
+    std::lock_guard lock(m_fxMutex);
+    try
+    {
+        fxModule().submit(packet, bytes);
+    }
+    catch (const std::exception& e)
+    {
+        // The commit must not fail (NV_StreamExecutor contract): the next readback reports it.
+        if (m_vfxError.empty()) m_vfxError = e.what();
+    }
+}
+
+const fx::TickReadback& HostRenderer::vfxReadback(uint64_t stream, uint64_t generation, uint64_t tick)
+{
+    std::lock_guard lock(m_fxMutex);
+    if (!m_vfxError.empty()) fail("FX stream executor: %s", m_vfxError.c_str());
+    fxRunPending();
+    m_vfxReadback = fxModule().readback(stream, generation, tick);
+    return m_vfxReadback;
+}
+
+const std::vector<NV_StreamParticle>& HostRenderer::vfxCheckpoint(uint64_t stream, uint64_t generation, uint64_t tick)
+{
+    std::lock_guard lock(m_fxMutex);
+    if (!m_vfxError.empty()) fail("FX stream executor: %s", m_vfxError.c_str());
+    fxRunPending();
+    fx::ParticleSystem& p = fxModule();
+    if (p.latestTick() != tick) fail("FX stream executor: checkpoint of tick %llu, the latest is %llu", (unsigned long long)tick, (unsigned long long)p.latestTick());
+    (void)stream;
+    (void)generation;
+    m_vfxCheckpoint = p.checkpoint(*m_shaders);
+    return m_vfxCheckpoint;
+}
+
 void HostRenderer::renderOnHost(uint64_t ticket, const HostExecute& execute)
 {
     if (m_options.standalone) fail("renderOnHost on a standalone renderer");
     requireCommitted();
+    std::lock_guard fxLock(m_fxMutex);  // the frame's C0 ticks and particle pass use the module
     std::optional<FramePacket> packet = takePacket(ticket);
     if (!packet) return;  // an older ticket already rendered, or dropped: nothing to draw
     const FramePacket& p = *packet;
@@ -552,6 +634,7 @@ void HostRenderer::renderOnHost(uint64_t ticket, const HostExecute& execute)
     graphics.setExecuteHook([&](ID3D12CommandList* list) { execute(list, hostOutput); });
     try
     {
+        fxFrameWait();  // on the host's queue, in its render event
         m_graph->execute(m_profiler.get());
     }
     catch (...)
@@ -601,6 +684,7 @@ void HostRenderer::ensureStandaloneOutput(uint32_t width, uint32_t height)
 
 void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t readbackBytes)
 {
+    std::lock_guard fxLock(m_fxMutex);
     if (!m_options.standalone) fail("renderStandalone on a renderer bound to the host's device");
     requireCommitted();
     std::optional<FramePacket> packet = takePacket(ticket);
@@ -655,6 +739,7 @@ void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t read
                 c.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
             });
     }
+    fxFrameWait();
     m_graph->execute(m_profiler.get());
     endFrame(slot, p.frameIndex);
     if (readback)

@@ -86,7 +86,7 @@ void main(uint i : SV_DispatchThreadID)
     const uint groupsMax = min(P[2].w, EDGE_GROUPS);
     if (P[3].x & 128)
     {
-        color[pixel] = shEncodeExposed(edgeRadiance[pixel].rgb);
+        color[pixel] = shEncodeExposed(shParticles(edgeRadiance[pixel].rgb, pixel, P[5].z, P[5].w));  // P[5].zw particle layer
         if (P[3].w != UNX_NONE)
         {
             RWTexture2D<float4> resolved = ResourceDescriptorHeap[P[3].w];
@@ -241,7 +241,7 @@ void main(uint i : SV_DispatchThreadID)
         used += w;
         sum += w * grp[g2].radiance;
     }
-    color[pixel] = shEncodeExposed(sum);
+    color[pixel] = shEncodeExposed(shParticles(sum, pixel, P[5].z, P[5].w));
     if (P[3].w != UNX_NONE)
     {
         RWTexture2D<float4> resolved = ResourceDescriptorHeap[P[3].w];

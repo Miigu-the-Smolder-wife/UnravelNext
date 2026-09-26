@@ -291,6 +291,21 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     // The froxel grid is the main view's: planar reflection views read neither its lists nor its air volume.
     const bool froxelLists = view.froxelLights.valid();
     const ViewResources v = view;
+    // S's coverage fragment visibility (INTERFACES 7.3 v1.41): with it the fragment kernels shade fragments with S's sun
+    // profile and local slots (CoverageShade.hlsli covFragmentShadow); without it they stay unshadowed.
+    const bool fragmentShadows = v.shadowFragmentVisibility.valid() && v.coverageDepthRange.valid();
+    // FX's particle layer of this view (tracks::particles, before shading): every output writer composites it before its
+    // tone map (ShadingCommon.hlsli shParticles); two indices, UNX_NONE when the view has none.
+    const bool particles = v.particleLayer.valid() && v.particleEdges.valid();
+    auto useParticles = [=](PassBuilder& b) {
+        if (!particles) return;
+        b.use(v.particleLayer, Use::SrvCompute);
+        b.use(v.particleEdges, Use::SrvCompute);
+    };
+    auto particleConstants = [=](PassContext& c, uint32_t* dst) {
+        dst[0] = particles ? c.srv(v.particleLayer) : gpu::kNone;
+        dst[1] = particles ? c.srv(v.particleEdges) : gpu::kNone;
+    };
     const uint32_t tileCount = o.tilesX * o.tilesY, ltcSrv = ltc.srv, experiment = experimentMask(fc.quality);
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
     const EdgeConfig ec = edgeConfig(fc.quality);
@@ -306,7 +321,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     // its capacity, shaded by the fallback kernel with S's VSM.
     const bool overflow = v.shadowOverflowTiles.valid() && v.shadowOverflow.valid();
     const bool fallback = v.shadowOverflowFallbackTiles.valid();
-    const bool vsm = r.vsmPageTable.valid() && r.vsmPool.valid() && r.vsmBlocks.valid() && r.vsmSearchBound.valid() && r.vsmConstants != gpu::kNone &&
+    const bool vsm = r.vsmPageTable.valid() && (r.vsmAtlas.valid() || r.vsmPool.valid()) && r.vsmBlocks.valid() && r.vsmSearchBound.valid() && r.vsmConstants != gpu::kNone &&
                      r.vsmLocalLights != gpu::kNone && r.vsmSlotOfLight != gpu::kNone;
     // Edge pixels' exposed linear radiance, the edge tile masks, the edge pixel list and its dispatch arguments, and the
     // fallback kernel's dispatch arguments (M internal, this view): made by the banded part, used by both.
@@ -433,7 +448,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
             if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
             if (v.reflection.valid()) b.use(v.reflection, Use::SrvCompute);
-            if (r.giCache.valid() && v.view.kind == gpu::ViewKind::PlanarReflection) b.use(r.giCache, Use::SrvCompute);
+            if (r.giCache.valid()) b.use(r.giCache, Use::SrvCompute);  // planar: direct lookups; main: ProbeSrvs.pad1
             if (atmosphere)
                 for (TextureRef t : { r.transmittanceLut, r.multiScatterLut, r.skyViewLut }) b.use(t, Use::SrvCompute);
             if (air) b.use(v.airVolume, Use::SrvCompute);
@@ -446,6 +461,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             b.use(edgeRadiance, Use::UavCompute);
             b.use(edgeTiles, Use::SrvCompute);
             if (coverage) b.use(v.coverageTiles, Use::SrvCompute);
+            useParticles(b);
         };
         shadePass.execute = [=](PassContext& c) {
             const auto [firstBand, lastBand] = listBands(c);
@@ -465,6 +481,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 uint32_t k[32] = { c.srv(o.materialWord), c.uav(v.color), c.srv(o.tiles), o.firstTile(cls, band),
                                    atm[0], atm[1], atm[2], atm[3], experiment, 0, 0, 0, 0, 0, c.srv(edgeTiles), 0 };
                 std::memcpy(k + 24, edge, sizeof edge);
+                particleConstants(c, k + 22);  // P[5].zw
                 c.computeConstants(k, 32);
                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
             }
@@ -478,13 +495,14 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                          c.srv(o.tiles), o.firstTile(cls, band), cls, o.emissive.valid() ? c.srv(o.emissive) : none,
                                          v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                          v.reflection.valid() ? c.srv(v.reflection) : none,
-                                         (r.giCache.valid() && v.view.kind == gpu::ViewKind::PlanarReflection) ? c.srv(r.giCache) : none,
+                                         r.giCache.valid() ? c.srv(r.giCache) : none,
                                          atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], 0, o.textureTableSrv, experiment,
                                          0, fx[0], fx[1] };
                 uint32_t k32[32] = {};
                 std::memcpy(k32, k, sizeof k);
                 std::memcpy(k32 + 24, edge, sizeof edge);
                 k32[30] = overflow ? c.srv(v.shadowOverflow) : none;  // P[7].z
+                particleConstants(c, k32 + 22);  // P[5].zw
                 c.computeConstants(k32, 32);
                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
             }
@@ -519,18 +537,22 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              if (air) b.use(v.airVolume, Use::SrvCompute);
                              if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
                              if (vsm)
-                                 for (BufferRef vb : { r.vsmPageTable, r.vsmPool, r.vsmBlocks, r.vsmSearchBound }) b.use(vb, Use::SrvCompute);
+                                 for (BufferRef vb : { r.vsmPageTable, r.vsmBlocks, r.vsmSearchBound }) b.use(vb, Use::SrvCompute);
+                             // ShadowSrvs.pool: the one-path page atlas (v1.43) once S publishes it, else the page pool
+                             if (vsm && r.vsmAtlas.valid()) b.use(r.vsmAtlas, Use::SrvCompute);
+                             else if (vsm) b.use(r.vsmPool, Use::SrvCompute);
                              if (vsm && r.vsmLayers.valid()) b.use(r.vsmLayers, Use::SrvCompute);
                              b.use(edgeRadiance, Use::UavCompute);
                              b.use(edgeTiles, Use::SrvCompute);
                              if (coverage) b.use(v.coverageTiles, Use::SrvCompute);
+                             useParticles(b);
                          },
                          [=](PassContext& c) {
                              const uint32_t none = gpu::kNone;
                              uint32_t shadowSrvs = none;
                              if (ringPtr)
                              {
-                                 const uint32_t words[8] = { c.srv(r.vsmPageTable), c.srv(r.vsmPool), c.srv(r.vsmBlocks), c.srv(r.vsmSearchBound),
+                                 const uint32_t words[8] = { c.srv(r.vsmPageTable), r.vsmAtlas.valid() ? c.srv(r.vsmAtlas) : c.srv(r.vsmPool), c.srv(r.vsmBlocks), c.srv(r.vsmSearchBound),
                                                              r.vsmConstants, r.vsmLocalLights, r.vsmSlotOfLight,
                                                              r.vsmLayers.valid() ? c.srv(r.vsmLayers) : none };  // S's transmittance layer (v1.26)
                                  shadowSrvs = ringPtr->write(ringSlot, words);
@@ -538,7 +560,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              const uint32_t k[22] = { c.srv(v.gbuffer), c.srv(v.depth), c.srv(o.materialWord), c.uav(v.color),
                                                       c.srv(v.shadowOverflowFallbackTiles), 4, 0xFFFFFFFFu, o.emissive.valid() ? c.srv(o.emissive) : none,
                                                       v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
-                                                      v.reflection.valid() ? c.srv(v.reflection) : none, none,
+                                                      v.reflection.valid() ? c.srv(v.reflection) : none, r.giCache.valid() ? c.srv(r.giCache) : none,
                                                       atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none, none,
                                                       air ? c.srv(v.airVolume) : none, 0, o.textureTableSrv, experiment, 0,
                                                       froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
@@ -547,6 +569,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              uint32_t k32[32] = {};
                              std::memcpy(k32, k, sizeof k);
                              std::memcpy(k32 + 24, edge, sizeof edge);
+                             particleConstants(c, k32 + 22);  // P[5].zw
                              c.cmd->SetPipelineState(fallbackKernel);
                              c.bindFrameConstants(cb);
                              c.computeConstants(k32, 32);
@@ -611,16 +634,18 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                          b.use(edgeArgs, Use::IndirectArgs);
                          if (planarTiles.valid()) b.use(planarTiles, Use::SrvCompute);
                          if (coverage) b.use(edgeResolved, Use::UavCompute);
+                         useParticles(b);
                      },
                      [=](PassContext& c) {
-                         const uint32_t k[16] = { c.srv(v.visId), c.srv(v.visibleClusters), c.srv(o.materialWord), c.srv(v.depth),
+                         uint32_t k[24] = { c.srv(v.visId), c.srv(v.visibleClusters), c.srv(o.materialWord), c.srv(v.depth),
                                                   c.srv(v.gbuffer), c.srv(edgeRadiance), c.uav(v.color), c.srv(edgePixels),
                                                   asUint(ec.cosAngle), asUint(ec.footprintTolerance), asUint(ec.distanceTolerance), ec.groupsMax,
                                                   experiment, o.textureTableSrv, planarTiles.valid() ? c.srv(planarTiles) : gpu::kNone,
                                                   coverage ? c.uav(edgeResolved) : gpu::kNone };
+                         particleConstants(c, k + 22);  // P[5].zw
                          c.cmd->SetPipelineState(composite);
                          c.bindFrameConstants(cb);
-                         c.computeConstants(k, 16);
+                         c.computeConstants(k, 24);
                          c.cmd->ExecuteIndirect(signature, 1, c.resource(edgeArgs), 0, nullptr, 0);
                      });
 
@@ -676,12 +701,25 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (air) b.use(v.airVolume, Use::SrvCompute);
             if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
             if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
+            if (r.giCache.valid()) b.use(r.giCache, Use::SrvCompute);
+            if (fragmentShadows)
+            {
+                b.use(v.shadowFragmentVisibility, Use::SrvCompute);
+                b.use(v.coverageDepthRange, Use::SrvCompute);
+                if (v.shadowFragmentSun.valid()) b.use(v.shadowFragmentSun, Use::SrvCompute);
+            }
+        };
+        // P[6].zw, P[7].x of the fragment kernels (CoverageShade.hlsli): R's GI cache, S's per-record sun, V's depth range.
+        auto fragmentConstants = [=](PassContext& c, uint32_t* k) {
+            k[26] = r.giCache.valid() ? c.srv(r.giCache) : gpu::kNone;
+            k[27] = fragmentShadows && v.shadowFragmentSun.valid() ? c.srv(v.shadowFragmentSun) : gpu::kNone;
+            k[28] = fragmentShadows ? c.srv(v.coverageDepthRange) : gpu::kNone;
         };
         auto shadingConstants = [=](PassContext& c, uint32_t (&k)[24], uint32_t colour) {
             const uint32_t none = gpu::kNone;
             const uint32_t s[16] = { c.srv(v.visibleClusters), o.textureTableSrv, c.srv(v.depth), colour,
                                      0, 0, 0, 0,
-                                     froxelLists ? c.srv(v.froxelLights) : none, ltcSrv, experiment, none,
+                                     froxelLists ? c.srv(v.froxelLights) : none, ltcSrv, experiment, fragmentShadows ? c.srv(v.shadowFragmentVisibility) : none,
                                      atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none,
                                      air ? c.srv(v.airVolume) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none };
             for (uint32_t i = 0; i < 16; ++i)
@@ -706,6 +744,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                       b.use(state, Use::UavCompute);
                       b.use(heavy, Use::UavCompute);
                       b.use(v.color, Use::UavCompute);
+                      useParticles(b);
                   },
                   [=](PassContext& c) {
                       uint32_t k[24] = { c.srv(v.coverageRecords), c.srv(v.coverageTilePixels), c.srv(v.coverageTileList), c.uav(state) };
@@ -716,9 +755,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                       k[11] = c.uav(heavy);
                       k[21] = hcap;
                       k[22] = ccap;
+                      uint32_t k32[32] = {};
+                      std::memcpy(k32, k, sizeof k);
+                      particleConstants(c, k32 + 24);  // P[6].xy
+                      fragmentConstants(c, k32);      // P[6].zw, P[7].x
                       c.cmd->SetPipelineState(light);
                       c.bindFrameConstants(cb);
-                      c.computeConstants(k, 24);
+                      c.computeConstants(k32, 32);
                       c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
                   });
         addBegin("m.coverage.heavy args", 1, 0);
@@ -759,9 +802,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           k[21] = rd;
                           k[22] = hcap;
                           k[23] = c.uav(lists);
+                          uint32_t k32[32] = {};
+                          std::memcpy(k32, k, sizeof k);
+                          k32[24] = k32[25] = gpu::kNone;  // (no particle layer in the rounds)
+                          fragmentConstants(c, k32);      // P[6].zw, P[7].x
                           c.cmd->SetPipelineState(heavyRound);
                           c.bindFrameConstants(cb);
-                          c.computeConstants(k, 24);
+                          c.computeConstants(k32, 32);
                           c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 32, nullptr, 0);
                       });
         }
@@ -773,9 +820,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                       b.use(heavy, Use::SrvCompute);
                       b.use(v.color, Use::UavCompute);
                       b.use(args, Use::IndirectArgs);
+                      useParticles(b);
                   },
                   [=](PassContext& c) {
-                      const uint32_t p[12] = { c.uav(state), c.srv(heavy), hcap, 0, 0, 0, 0, c.uav(v.color), c.srv(edgeRadiance), c.srv(edgeResolved), c.srv(edgeTiles), 0 };
+                      uint32_t p[12] = { c.uav(state), c.srv(heavy), hcap, 0, 0, 0, 0, c.uav(v.color), c.srv(edgeRadiance), c.srv(edgeResolved), c.srv(edgeTiles), 0 };
+                      particleConstants(c, p + 4);  // P[1].xy
                       c.cmd->SetPipelineState(finish);
                       c.bindFrameConstants(cb);
                       c.computeConstants(p, 12);

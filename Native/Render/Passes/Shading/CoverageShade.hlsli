@@ -16,7 +16,8 @@
 //   CoverageHeavyFinish   per heavy pixel: the band A remainder, the output; unfinished = error bit
 // Kernels that shade fragments share the constants P[1] = { visible clusters, M texture table, band A depth, colour UAV },
 // P[3] = { froxel lights or UNX_NONE, LTC table, experiment mask, S fragment visibility or UNX_NONE }, P[4] = { atmosphere
-// transmittance, multi-scatter, air volume, R's screen probes }, P[5].x = R's screen probe maps (UNX_NONE = absent).
+// transmittance, multi-scatter, air volume, R's screen probes }, P[5].x = R's screen probe maps (UNX_NONE = absent),
+// P[6].zw = { R's GI cache, S's per-record sun bytes (shadowFragmentSun) }, P[7].x = V's coverageDepthRange.
 #ifndef UNX_M_COVERAGE_SHADE_HLSLI
 #define UNX_M_COVERAGE_SHADE_HLSLI
 #include "Bindless.hlsli"
@@ -26,6 +27,7 @@
 #include "Passes/Shading/AreaLight.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
+#include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/Visibility/Coverage.hlsli"
 #include "Passes/Visibility/CoverageTiles.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
@@ -90,7 +92,7 @@ uint4 covProbeFetch(uint2 tileCoord, uint lane)
     probes.probes = P[4].w;
     probes.occlusion = P[4].w;
     probes.pad0 = P[5].x;
-    probes.pad1 = 0;
+    probes.pad1 = P[6].z != UNX_NONE ? P[6].z + 1 : 0;  // R's GI cache
     return giProbeTileFetch(probes, tileCoord, lane, giProbeCountOfView());
 }
 
@@ -109,8 +111,61 @@ float3 covProject(float3 offset)
 }
 
 
-// Exposed linear radiance of one fragment (the band A kernel's lighting for a surface point: ShadeOpaque.hlsl).
-float3 covShadeFragment(uint visId, uint2 pixel, uint experiment)
+// S's shadowing of a fragment (INTERFACES 7.3 v1.41, shadowFragmentVisibility): the sun from the 4-point profile along the
+// pixel's ray between its nearest and farthest record, linear in view depth, or the record's own byte where S flagged the
+// pixel a pair (shadowFragmentSun, element 'element' of coverageRecords); local slots 1..3 as S measured them at the two
+// ends (each end's froxel list order), interpolated the same way. valid = 0: S published nothing (all 1).
+struct CovFragmentShadow
+{
+    float sun, t;
+    uint nearSlots, farSlots;
+    bool valid;
+};
+float covByte(uint word, uint b) { return ((word >> (8u * b)) & 255u) / 255.0; }
+CovFragmentShadow covFragmentShadow(uint2 pixel, uint element, float linearZ)
+{
+    CovFragmentShadow o;
+    o.sun = 1;
+    o.t = 0;
+    o.nearSlots = o.farSlots = 0xFFFFFFFFu;
+    o.valid = P[3].w != UNX_NONE && P[7].x != UNX_NONE;
+    if (!o.valid) return o;
+    StructuredBuffer<uint3> visibility = ResourceDescriptorHeap[P[3].w];
+    Texture2D<uint2> range = ResourceDescriptorHeap[P[7].x];
+    const uint3 w = visibility[pixel.y * g_viewWidth + pixel.x];
+    const uint2 r = range[pixel];  // device depth bits: nearest (larger) and farthest
+    const float zNear = linearDepth(asfloat(r.x)), zFar = linearDepth(asfloat(r.y));
+    o.t = zFar > zNear ? saturate((linearZ - zNear) / (zFar - zNear)) : 0;
+    if ((w.y & 1u) != 0 && P[6].w != UNX_NONE)
+    {
+        ByteAddressBuffer sunBytes = ResourceDescriptorHeap[P[6].w];
+        o.sun = covByte(sunBytes.Load((element >> 2) * 4u), element & 3u);
+    }
+    else
+    {
+        const float x = o.t * 3;
+        const uint k = min((uint)x, 2u);
+        o.sun = lerp(covByte(w.x, k), covByte(w.x, k + 1u), x - k);
+    }
+    o.nearSlots = w.y;
+    o.farSlots = w.z;
+    return o;
+}
+// A local light's visibility: its slot in the froxel list at each end (S's shadowSlotOfLight at z_near and z_far); a light
+// past the third shadowed one of a list has no fragment slot there and counts as visible (INTERFACES 7.3 v1.41 carries
+// no overflow for fragments).
+float covLocalVisibility(CovFragmentShadow s, FroxelSrvs froxels, uint2 pixel, float zNear, float zFar, uint lightIndex)
+{
+    if (!s.valid) return 1;
+    const uint a = shadowSlotOfLight(froxels, pixel, zNear, lightIndex), b = shadowSlotOfLight(froxels, pixel, zFar, lightIndex);
+    const float vn = a >= 1 && a <= 3 ? covByte(s.nearSlots, a) : 1;
+    const float vf = b >= 1 && b <= 3 ? covByte(s.farSlots, b) : 1;
+    return lerp(vn, vf, s.t);
+}
+
+// Exposed linear radiance of one fragment (the band A kernel's lighting for a surface point: ShadeOpaque.hlsl); 'element'
+// is its record's element in coverageRecords (S's per-record sun byte).
+float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
 {
     // The triangle and the covered region's centroid in this pixel, where V evaluated the fragment's depth.
     const MTriangleIdentity id = mTriangleIdentity(visId, P[1].x);
@@ -194,7 +249,8 @@ float3 covShadeFragment(uint visId, uint2 pixel, uint experiment)
     }
     const float3 l0 = normalize(g_sunDirection);
     const float NoL = dot(n, l0);
-    const float sunVisibility = 1;  // S's fragment visibility (4.3) once published: see the header
+    const CovFragmentShadow shadow = covFragmentShadow(pixel, element, linearZ);
+    const float sunVisibility = shadow.sun;
     if (sunVisibility > 0 && (experiment & 16) == 0)
     {
         const float3 cap = E * (2 / (1 + cos(g_sunAngularRadius)));
@@ -225,6 +281,14 @@ float3 covShadeFragment(uint visId, uint2 pixel, uint experiment)
         const float e = modelDirectionalAlbedo(max(NoV, 1e-4), s.roughness);
         const float3 compensation = 1 + f0 * (1 / e - 1);
         const uint2 range = froxelLightRange(froxels, pixel, linearZ);
+        float zNear = linearZ, zFar = linearZ;
+        if (shadow.valid)
+        {
+            Texture2D<uint2> depthRange = ResourceDescriptorHeap[P[7].x];
+            const uint2 dr = depthRange[pixel];
+            zNear = linearDepth(asfloat(dr.x));
+            zFar = linearDepth(asfloat(dr.y));
+        }
 #if AREA
         const float3x3 frame = shShadingFrame(n, v, NoV);
         const float3x3 frameBack = float3x3(frame[0], -frame[1], -frame[2]);
@@ -233,8 +297,9 @@ float3 covShadeFragment(uint visId, uint2 pixel, uint experiment)
 #endif
         for (uint i = 0; i < range.y; ++i)
         {
-            const GpuLight light = loadLight(froxelLight(froxels, range.x + i));
-            const float visibility = 1;  // S's fragment slots (4.3) once published
+            const uint lightIndex = froxelLight(froxels, range.x + i);
+            const GpuLight light = loadLight(lightIndex);
+            const float visibility = covLocalVisibility(shadow, froxels, pixel, zNear, zFar, lightIndex);
             if (lightType(light) > LIGHT_SPOT)
             {
 #if AREA
@@ -269,7 +334,7 @@ float3 covShadeFragment(uint visId, uint2 pixel, uint experiment)
         probes.probes = P[4].w;
         probes.occlusion = P[4].w;
         probes.pad0 = P[5].x;
-        probes.pad1 = 0;
+        probes.pad1 = P[6].z != UNX_NONE ? P[6].z + 1 : 0;  // R's GI cache
         const float3 nv = NoV > 0 ? n : -n;
         const float3 r = reflect(-v, n);
         const bool wantRadiance = NoV > 0 && (experiment & 4) == 0;

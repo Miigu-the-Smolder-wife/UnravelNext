@@ -182,9 +182,10 @@ int main(int argc, char** argv)
                     // the last tick's work counts (cost attribution): colliders queued, grid entries, large-list surfaces
                     const std::vector<uint8_t> counters = ps.readState("counters");
                     auto word = [&](size_t k) { uint32_t v = 0; if (counters.size() >= (k + 1) * 4) std::memcpy(&v, counters.data() + k * 4, 4); return v; };
-                    std::printf("FX_PARTICLE_GATE_WORK load=%s colliders=%u grid_entries=%u large_surfaces=%u collide_ms=%.4f ribbon_ms=%.4f begin_ms=%.4f readback_ms=%.4f\n",
+                    std::printf("FX_PARTICLE_GATE_WORK load=%s colliders=%u grid_entries=%u large_surfaces=%u collide_ms=%.4f ribbon_ms=%.4f begin_ms=%.4f readback_ms=%.4f "
+                                "capacity=%u resident_mb=%.2f\n",
                                 l.c_str(), word(11), word(6), word(5), passSum(r, "fx.particles.collide"), passSum(r, "fx.particles.ribbon"),
-                                passSum(r, "fx.particles.begin"), passSum(r, "fx.particles.readback"));
+                                passSum(r, "fx.particles.begin"), passSum(r, "fx.particles.readback"), ps.capacity(), ps.residentBytes() / 1048576.0);
                 }
             }
         return 0;

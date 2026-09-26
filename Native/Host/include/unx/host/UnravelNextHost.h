@@ -31,7 +31,7 @@ enum UnxResult
                             // 4: + UnxFrameSetEnvironment; 5: UNX_DEVICE_REMOVED (the process survives a device removal);
                             // 6: + UnxFrameSetDiscontinuity, UnxFrameSetSimulation, UnxTransformUpdate::flags (teleport);
                             //    later additions within 6 (optional exports, bridges probe for them): UnxFrameGraphStatsLatest,
-                            //    UnxSceneLoad, UnxVideoMemory, UnxSceneEditInstances, UnxSceneEditMaterials
+                            //    UnxSceneLoad, UnxVideoMemory, UnxSceneEditInstances, UnxSceneEditMaterials, UnxVfxStreamExecutor
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -249,6 +249,12 @@ UNX_API int32_t UNX_CALL UnxSceneAddInstance(UnxRenderer r, const UnxInstanceDes
 // instance with UnxFrameSetInstanceVisible(0) and reuse its slot in a later edit.
 UNX_API int32_t UNX_CALL UnxSceneEditInstances(UnxRenderer r, const uint32_t* indices, const UnxInstanceDesc* descs, uint32_t count);
 UNX_API int32_t UNX_CALL UnxSceneEditMaterials(UnxRenderer r, const uint32_t* indices, const UnxMaterialDesc* descs, uint32_t count);
+// V3 (optional export within ABI 6; WORLD_VFX 3.7): fills 'executor' (NV_StreamExecutor of NativeVfxStream.h, 48 B) with
+// the renderer's FX particle module as a VFX stream executor, for nv_stream_attach. Committed renderers only; the
+// executor's user pointer is the renderer, so detach the stream (nv_stream_detach) before UnxRendererDestroy. Its
+// callbacks run on the caller's thread (the host's main thread): a readback of a tick no frame has recorded yet runs
+// that tick at once on the renderer's compute queue, so the caller never waits for the render thread.
+UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor);
 UNX_API int32_t UNX_CALL UnxSceneAddLight(UnxRenderer r, const UnxLightDesc* desc, uint32_t* index);
 UNX_API int32_t UNX_CALL UnxSceneSetEnvironment(UnxRenderer r, const UnxEnvironmentDesc* desc);
 // The renderer's defaults for the environment (scene::Sun, scene::Atmosphere), for callers that set only some fields.

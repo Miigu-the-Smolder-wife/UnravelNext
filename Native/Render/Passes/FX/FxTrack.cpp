@@ -2,8 +2,11 @@
 // pass (G7; request 20260926_FX_particle_render_pass.md).
 // The particle module (unx::fx::ParticleSystem, TrackState key "fx.particles") records the ticks its host submitted
 // since the last frame; without an attached module or pending ticks the entry declares no passes.
+#include "unx/fx/ParticleLayer.h"
 #include "unx/fx/Particles.h"
 #include "unx/render/Tracks.h"
+
+#include <memory>
 
 namespace unx::render::tracks
 {
@@ -13,11 +16,28 @@ void simulation(FramePassContext& fc)
     if (fx::ParticleSystem* particles = fx::findParticles(*fc.trackState)) particles->record(fc);
 }
 
-// G7: the particle layer of a view (after reflections, before M's shading, which composites it). Declares no passes until
-// the render pass lands (the view's particle fields stay invalid: nothing to composite).
+// G7: the particle layer of a view (after reflections, before M's shading, which composites it; ParticleLayer.hlsli).
+// The frame time is fc.frame.time on the particle stream's clock (the host renders between the last two committed ticks);
+// without a particle module or before its first tick the view's particle fields stay invalid (nothing to composite).
 void particles(FramePassContext& fc, ViewResources& view)
 {
-    (void)fc;
-    (void)view;
+    if (!fc.trackState || !view.depth.valid()) return;
+    fx::ParticleSystem* system = fx::findParticles(*fc.trackState);
+    if (!system) return;
+    auto& pass = fc.trackState->get<std::unique_ptr<fx::ParticleLayerPass>>("fx.layer");
+    if (!pass) pass = std::make_unique<fx::ParticleLayerPass>(fc.device);
+    fx::ParticleLayerFrame frame;
+    frame.view = &view.view;
+    frame.frameConstants = view.frameConstants;
+    frame.depth = view.depth;
+    frame.camera[0] = view.view.position.x;
+    frame.camera[1] = view.view.position.y;
+    frame.camera[2] = view.view.position.z;
+    frame.time = fc.frame.time;
+    const fx::ParticleLayerOutput out = pass->record(*system, fc.graph, fc.shaders, fc.frame.frameIndex, frame);
+    if (!out.valid) return;
+    view.particleLayer = out.layer;
+    view.particleDepthRange = out.depthRange;
+    view.particleEdges = out.edges;
 }
 } // namespace unx::render::tracks

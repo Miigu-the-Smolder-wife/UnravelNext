@@ -3,8 +3,8 @@
 // Coverage composite, stage F3 (CoverageShade.hlsli): one thread per heavy pixel after the rounds: the band A surface
 // takes what the fragments left (covBandA), and the sum is tone mapped once into the colour target. A pixel the rounds
 // left unfinished (more than COV_ROUNDS x COV_ROUND fragments needed: a defect) sets COV_M_ERROR_ROUNDS.
-// P[0] = { state UAV (raw), heavy records (raw), heavy capacity, 0 }, P[1].w colour UAV, P[2] = { band A radiance, resolved
-// or UNX_NONE, edge tile mask or UNX_NONE, 0 }
+// P[0] = { state UAV (raw), heavy records (raw), heavy capacity, 0 }, P[1] = { particle layer, particle edge blocks (UNX_NONE:
+// none), 0, colour UAV }, P[2] = { band A radiance, resolved or UNX_NONE, edge tile mask or UNX_NONE, 0 }
 #include "Bindless.hlsli"
 #include "Passes/Shading/CoverageShade.hlsli"
 
@@ -22,5 +22,5 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
     if (heavy.Load(base + 4 * COVH_DONE) == 0) state.InterlockedOr(4 * COVS_ERRORS, COV_M_ERROR_ROUNDS);
     const float3 sum = asfloat(heavy.Load3(base + 4 * COVH_SUM)) + max(1 - used, 0.0) * covBandA(pixel);
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[1].w];
-    color[pixel] = shEncodeExposed(sum);
+    color[pixel] = shEncodeExposed(shParticles(sum, pixel, P[1].x, P[1].y));  // P[1].xy particle layer
 }

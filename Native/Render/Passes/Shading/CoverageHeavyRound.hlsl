@@ -98,7 +98,7 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     const float r = counts ? coverageFragmentArea(f) * seen : 0;
     const float used = asfloat(rec1.z);
     const float w = max(0.0, min(r, 1 - (used + WavePrefixSum(r))));
-    const float3 add = w > 0 ? w * covShadeFragment(f.visId, pixel, P[3].z) : 0;
+    const float3 add = w > 0 ? w * covShadeFragment(f.visId, mine.y, pixel, P[3].z) : 0;
     const float3 sum = asfloat(rec2.xyz) + float3(WaveActiveSum(add.x), WaveActiveSum(add.y), WaveActiveSum(add.z));
     const uint covered = rec1.y | WaveActiveBitOr(counts ? f.mask : 0u);
     const float usedNext = min(1.0, used + WaveActiveSum(r));

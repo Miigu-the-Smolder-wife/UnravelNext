@@ -302,6 +302,71 @@ static scene::Instance toInstance(const UnxInstanceDesc* d)
     return inst;
 }
 
+namespace
+{
+// V3: NV_StreamExecutor callbacks on a renderer (user = its HostRenderer; the bridge detaches before destroying it).
+// Result codes of NativeVfx.h (NV_OK, NV_ARGUMENT, NV_INTERNAL; the stream header does not carry them).
+constexpr int32_t NV_OK = 0, NV_ARGUMENT = 1, NV_INTERNAL = 10;
+int32_t vfxSubmitCallback(void* user, const uint8_t* packet, uint64_t bytes)
+{
+    try { static_cast<HostRenderer*>(user)->vfxSubmit(packet, bytes); }
+    catch (const std::exception& e) { logf("UnravelNext FX executor submit: %s\n", e.what()); }
+    return NV_OK;  // a failure is reported by the next readback (the commit must not fail)
+}
+int32_t vfxReadbackCallback(void* user, uint64_t stream, uint64_t generation, uint64_t tick, NV_StreamReadback* output)
+{
+    try
+    {
+        if (!output || output->size < sizeof(NV_StreamReadback)) return NV_ARGUMENT;
+        const fx::TickReadback& r = static_cast<HostRenderer*>(user)->vfxReadback(stream, generation, tick);
+        output->counters = r.counters;
+        output->events = r.events.data();
+        output->event_count = r.events.size();
+        return NV_OK;
+    }
+    catch (const std::exception& e)
+    {
+        logf("UnravelNext FX executor readback (tick %llu): %s\n", (unsigned long long)tick, e.what());
+        return NV_INTERNAL;
+    }
+}
+int32_t vfxCheckpointCallback(void* user, uint64_t stream, uint64_t generation, uint64_t tick, const NV_StreamParticle** records, uint64_t* count)
+{
+    try
+    {
+        if (!records || !count) return NV_ARGUMENT;
+        const std::vector<NV_StreamParticle>& r = static_cast<HostRenderer*>(user)->vfxCheckpoint(stream, generation, tick);
+        *records = r.data();
+        *count = r.size();
+        return NV_OK;
+    }
+    catch (const std::exception& e)
+    {
+        logf("UnravelNext FX executor checkpoint (tick %llu): %s\n", (unsigned long long)tick, e.what());
+        return NV_INTERNAL;
+    }
+}
+void vfxDetachCallback(void*, uint64_t) {}
+} // namespace
+
+UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor)
+{
+    return call([&] {
+        if (!executor) fail("UnxVfxStreamExecutor: no executor");
+        auto h = find(r);
+        if (!h->committed()) fail("UnxVfxStreamExecutor: commit the scene first");
+        NV_StreamExecutor e{};
+        e.size = sizeof(NV_StreamExecutor);
+        e.version = 1;
+        e.user = h.get();
+        e.submit = vfxSubmitCallback;
+        e.readback = vfxReadbackCallback;
+        e.checkpoint = vfxCheckpointCallback;
+        e.detach = vfxDetachCallback;
+        std::memcpy(executor, &e, sizeof e);
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxSceneEditInstances(UnxRenderer r, const uint32_t* indices, const UnxInstanceDesc* descs, uint32_t count)
 {
     return call([&] {

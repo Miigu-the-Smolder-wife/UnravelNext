@@ -80,7 +80,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     probes.probes = P[2].y;
     probes.occlusion = P[2].y;
     probes.pad0 = P[7].y;
-    probes.pad1 = 0;
+    probes.pad1 = P[2].w != UNX_NONE ? P[2].w + 1 : 0;  // R's GI cache (irradiance from the cache map), UNX_NONE: none
     uint4 probeRecord = 0;
     if (probeTile) probeRecord = giProbeTileFetch(probes, tileCoord, lane, giProbeCountOfView());
 #endif
@@ -348,7 +348,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         probes.probes = P[2].y;
         probes.occlusion = P[2].y;
         probes.pad0 = P[7].y;
-        probes.pad1 = 0;
+        probes.pad1 = P[2].w != UNX_NONE ? P[2].w + 1 : 0;
         const bool specular = NoV > 0 && (experiment & 4) == 0;
         const float4 refl = specular && P[2].z != UNX_NONE ? reflectionRadiance(P[2].z, pixel) : float4(0, 0, 0, 0);
         const bool wantRadiance = specular && refl.a <= 0;
@@ -384,7 +384,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     radiance = radiance * airTransmittance + airInscatter;
 
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].w];
-    color[pixel] = (P[4].z & 4096) ? float4(radiance, 1) : shEncodeOutput(radiance);
+    // P[5].zw: the view's particle layer and edge blocks (UNX_NONE: none).
+    const float3 withParticles = shParticles(radiance * g_exposure, pixel, P[5].z, P[5].w);
+    color[pixel] = (P[4].z & 4096) ? float4(withParticles / g_exposure, 1) : shEncodeExposed(withParticles);
     ShadedPixel o;
     o.radiance = radiance;
     return o;

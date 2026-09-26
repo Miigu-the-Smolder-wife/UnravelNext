@@ -29,24 +29,24 @@ struct TickConstants
     float reserved27[3]; uint32_t explicitBase;          // birthIndex offset of the explicit births
     float reserved28[3]; uint32_t bodyCount;
     uint32_t posAge, velocity, inRanges, inBlocks;       // posAge/velocity: input state; its layout (InRange, group -> range)
-    uint32_t restoreBase, reserved29, reserved30, counters;  // birthIndex offset of the restore records
+    uint32_t restoreBase, colliderCapacity, reserved30, counters;  // birthIndex offset of the restore records; collider queue
     uint32_t reserved31, posAgeOut, reserved20, events;  // *Out: this tick's state
     uint32_t reserved21, reserved22, reserved23, reserved24;  // (the tick sort moved to the render pass)
     uint32_t hist, programs, curveKeys, emitters;
     uint32_t spawns, explicitBirths, fields, worldFields;
     uint32_t surfaces, restore, birthIndex, reserved32;  // birthIndex: layout indices of the births (ParticleSystem.cpp)
     uint32_t report, emitterDynamic, bodies, tickSurfaces;
-    float gridCell; uint32_t gridMask, gridCount, gridHeads;  // collision candidate grid (FxSurfaces.hlsl, Particles.hlsli)
-    uint32_t reserved33, gridEntries, gridLarge, gridEntryCapacity;
+    float gridCell; uint32_t gridMask, gridCount, gridStart;  // collision candidate grid (FxGrid.hlsl)
+    uint32_t gridFill, gridEntries, gridLarge, gridEntryCapacity;
     uint32_t staticSurfaceCount, dynamicSurfaces, ribbonPoints, volumeSide;  // surfaceCount = static + dynamic
-    uint32_t ribbonCapacity, cellCapacity, volumeRecords, gridNodes;
-    uint32_t emitterUpdates, emitterUpdateRows, rowWindows, updateCount;
+    uint32_t ribbonCapacity, cellCapacity, volumeRecords, gridBlocks;
+    uint32_t emitterUpdates, emitterUpdateRows, emitterStamp, updateCount;
     uint32_t serial;
     float separationMax;  // largest program separation (collision grid motion bound)
     uint32_t volumeRanges, volumeRangeCount;
     uint32_t surfaceBoxes, velocityOut, overflowRecords, overflowCapacity;
     uint32_t reserved25, reserved26, experiment, colliders;  // experiment_disable (timing only); collider queue
-    uint32_t emitterPatches, patchCount, traceRow, traceBirth;  // patches of the tick (FxBegin); traced particle
+    uint32_t emitterPatches, patchCount, traceRow, traceBirth;  // patches of the tick (FxEmitters); traced particle
     uint32_t trace, rowMotion, pad18, pad19;  // TraceRecord buffer (diagnostic, setTrace); RowMotion per row
 };
 static_assert(sizeof(TickConstants) == 416);
@@ -65,6 +65,19 @@ struct TickReadback
     NV_StreamCounters counters{};
     std::vector<NV_StreamEvent> events;  // event_slots CPU-assigned records, then the collision events (any order)
     uint32_t dying = 0;                  // particles that died in the tick by their row's dying range (module statistic)
+};
+
+// Render input of the latest recorded tick (the particle render pass, ParticleLayer.h): graph imports of both ticks' state,
+// dynamic rows and the render ranges (ParticleLayerPass.hlsli RenderRange), and the CPU values of the interpolation.
+struct ParticleRenderInputs
+{
+    render::BufferRef posAge[2], velocity[2], dynamic[2];  // [0] previous tick, [1] latest tick
+    render::BufferRef emitters, programs, curveKeys, renderRanges, renderBlocks;
+    uint32_t threads = 0, current = 0, rangeCount = 0;     // render threads (current + died in the tick), current
+    double anchor[2][3] = {};                              // stream anchor of each tick's state
+    float dt = 0;                                          // dt of the latest tick
+    double tickTime = 0;                                   // context time at the end of the latest tick
+    bool valid = false;                                    // a tick was recorded
 };
 
 // Per-tick GPU timing breakdown for the gate (pass name prefixes).
@@ -88,6 +101,11 @@ public:
     // wait on that queue's fence.
     void record(render::RenderGraph& graph, render::ShaderLibrary& shaders, uint64_t tickIndex, render::QueueType queue);
 
+    // Queue of the explicit copies (collision events past the readback slot, checkpoint and state reads): Graphics by
+    // default; a host whose graphics queue belongs to someone else outside its render event (Unity) sets Compute, since
+    // readbacks and checkpoints run on the host's main thread (WORLD_VFX 3.7, I track V3).
+    void setExplicitQueue(render::QueueType queue) { m_explicitQueue = queue; }
+
     // NV_StreamExecutor::readback: counters and events of a recorded tick. Waits for the GPU when the frame that ran it
     // is still executing. Fails (throws) when the tick was never recorded or its ring slot was reused.
     TickReadback readback(uint64_t stream, uint64_t generation, uint64_t tick);
@@ -103,8 +121,13 @@ public:
     // restore records' after RESET): the renderer's interpolation pair (render rules request 2).
     const std::vector<LayoutRange>& layout() const;
     const std::vector<LayoutRange>& layoutPrevious() const;
+    // The render pass's inputs, imported into 'graph' (frame 'importIndex'); valid = false before the first tick.
+    ParticleRenderInputs renderInputs(render::RenderGraph& graph, uint64_t importIndex);
 
     uint32_t capacity() const { return m_capacity; }
+    // Resident device memory of the module (every default-heap buffer it holds, the ring's event buffers included), bytes.
+    // The upload and readback rings are host memory (not counted).
+    uint64_t residentBytes() const;
     uint64_t latestTick() const { return m_latestTick; }
     // Diagnostic: every later tick writes the inputs and the end of this particle's integrate call into a TraceRecord
     // (Particles.hlsli; readState("trace"), 544 B). row = UINT32_MAX switches it off.
@@ -122,6 +145,7 @@ private:
     uint32_t m_experimentDisable = 0;  // timing attribution only (fx.toml experiment_disable); 0 in every product run
     uint32_t m_capacity = 0;
     uint64_t m_latestTick = 0;
+    render::QueueType m_explicitQueue = render::QueueType::Graphics;
     std::deque<std::vector<uint8_t>> m_pending;
 };
 

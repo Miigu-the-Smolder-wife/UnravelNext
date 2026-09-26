@@ -656,6 +656,7 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
             if (!withReference) FX_LOG("tick %u: alive %u, rows %u, event slots %u, collisions %u, state %s", t, nAlive, stream.rows(), h.event_slots, rb.counters.collision_events, hex.substr(0, 16).c_str());
         }
     }
+    FX_LOG("module: capacity %u, resident device memory %.2f MB (every default-heap buffer)", ps.capacity(), ps.residentBytes() / 1048576.0);
     childRows = stream.childRowsCreated();
     FX_LOG("stream: capacity changes %u (without RESET: no repack, the next layout is written into the new buffers), final capacity %u, peak rows %u, ticks with impact overflow %llu", stream.capacityChanges(),
            stream.capacity(), stream.rows(), (unsigned long long)impactOverflowTicks);
@@ -697,6 +698,32 @@ void replay(const Options& o, Stats& worst)
             ++eventsCompared;
         }
         collisionDiff += (uint64_t)std::abs((int64_t)rc.collision_events - (int64_t)gc.collision_events);
+        if (g_traceEmitter != UINT32_MAX)
+        {
+            // diagnostic: the traced particle's reference state after this tick, beside the GPU's traced end (a --trace run's
+            // trace_E_B files in --overflow-dump DIR) and their difference: the tick where the difference jumps is where the
+            // two executions part (a contact decision or an accumulation)
+            for (const auto& r : cpu.checkpoint())
+            {
+                if (r.row != g_traceEmitter || r.birth != g_traceBirth) continue;
+                std::string gpuPart;
+                const fs::path tf = o.overflowDump.empty() ? fs::path() : tickFile(o.overflowDump, format("trace_%u_%u", r.row, r.birth).c_str(), t);
+                if (!tf.empty() && fs::exists(tf))
+                {
+                    const std::vector<uint8_t> rec = readBinaryFile(tf);
+                    float end[8];
+                    uint32_t impacts = 0;
+                    std::memcpy(end, rec.data() + 448, 32);
+                    std::memcpy(&impacts, rec.data() + 476, 4);
+                    double dp = 0, dv = 0;
+                    for (int a = 0; a < 3; ++a) { dp += (end[a] - r.position[a]) * (end[a] - r.position[a]); dv += (end[4 + a] - r.velocity[a]) * (end[4 + a] - r.velocity[a]); }
+                    gpuPart = format(" | GPU p %.9g %.9g %.9g v %.9g %.9g %.9g impacts %u | |dp| %.3g |dv| %.3g", end[0], end[1], end[2], end[4], end[5], end[6], impacts,
+                                     std::sqrt(dp), std::sqrt(dv));
+                }
+                FX_LOG("ref tick %u (%u,%u): p %.9g %.9g %.9g v %.9g %.9g %.9g age %.9g%s", t, r.row, r.birth, r.position[0], r.position[1], r.position[2], r.velocity[0],
+                       r.velocity[1], r.velocity[2], r.age, gpuPart.c_str());
+            }
+        }
         const fs::path cp = tickFile(o.replay, "checkpoint", t);
         if (!fs::exists(cp)) continue;
         const auto gpu = readVector<NV_StreamParticle>(cp);

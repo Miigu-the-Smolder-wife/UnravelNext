@@ -4,6 +4,7 @@
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "MaterialModel.hlsli"
+#include "Passes/FX/ParticleLayer.hlsli"
 
 #define SH_PI 3.14159265358979
 
@@ -275,6 +276,20 @@ float4 shEncodeExposed(float3 e)
 #endif
 }
 float4 shEncodeOutput(float3 radiance) { return shEncodeExposed(radiance * g_exposure); }
+
+// Particle layer composite (FX's ParticleLayer.hlsli; request 20260926_FX_particle_render_pass 4, FEATURES_GAME 0.A 6), in
+// exposed radiance before the tone map: C = C_surface x T + L, where the layer's L already carries the exposure and the air
+// between the camera and each particle, and C_surface the air in front of the surface. Each output writer calls it once on
+// its final value from its linear sources, so a pixel written twice (a shading kernel, then an edge or coverage composite)
+// still takes the particles once. Invalid indices (UNX_NONE): no particle layer in this view.
+float3 shParticles(float3 exposed, uint2 pixel, uint layerSrv, uint edgesSrv)
+{
+    if (layerSrv == UNX_NONE) return exposed;
+    Texture2D<float4> layer = ResourceDescriptorHeap[layerSrv];
+    ByteAddressBuffer edges = ResourceDescriptorHeap[edgesSrv];
+    const float4 lt = fxParticleLayerAt(layer, edges, pixel);
+    return exposed * lt.a + lt.rgb;
+}
 
 // Angular size of one pixel along the view ray (radians): |dD/dx| / |D| for the ray direction D of mPixelRay.
 float shPixelAngle(float3 D, float3 Dx) { return length(Dx) / length(D); }
