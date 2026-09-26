@@ -1206,6 +1206,9 @@ RenderGraph::~RenderGraph()
 
 TextureRef RenderGraph::importTexture(ID3D12Resource* resource, const TextureDesc& desc, D3D12_BARRIER_LAYOUT layout)
 {
+    // An import without a resource would reach view creation and barriers as a null pointer (a native crash in the
+    // host's render event); the owner is named instead.
+    if (!resource) fail("render graph: '%s' is imported without a resource", desc.name ? desc.name : "");
     Impl::ResourceNode n;
     n.texture = true;
     n.imported = true;
@@ -1240,6 +1243,9 @@ BufferRef RenderGraph::createBuffer(const BufferDesc& desc)
 
 BufferRef RenderGraph::importBuffer(ID3D12Resource* resource, const BufferDesc& desc)
 {
+    // An import without a resource would reach view creation and barriers as a null pointer (a native crash in the
+    // host's render event); the owner is named instead.
+    if (!resource) fail("render graph: '%s' is imported without a resource", desc.name ? desc.name : "");
     Impl::ResourceNode n;
     n.texture = false;
     n.imported = true;
