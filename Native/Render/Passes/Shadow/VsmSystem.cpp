@@ -7,6 +7,7 @@
 #include "unx/render/Tracks.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -458,6 +459,13 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.latest.airBlocks32 = w[22];
         s.latest.airBlocks8 = w[23];
         s.latest.airTexels = w[24];
+        s.latest.fragmentPixels = w[25];
+        s.latest.fragmentPairs = w[26];
+        s.latest.fragmentChecked = w[27];
+        s.latest.fragmentMismatch = w[28];
+        s.latest.fragmentMaxDiff = w[29];
+        s.latest.fragmentFirstPixel = w[30];
+        s.latest.fragmentFirstValues = w[31];
         for (uint32_t k = 0; k < kLevels; ++k) s.latest.levelPages[k] = w[32 + k];
         s.latest.sampledSubtiles = w[53];
         s.latest.surfacePixels = w[61];
@@ -516,6 +524,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     c = {};
     c.useStats = useStats ? s.useUav + 1 : 0;
     c.atlasSrv = s.atlasSrv;
+    c.fragmentCheck = (uint32_t)q.integer("shadow.vsm.fragment_check");
     const float3 windDir = src ? src->windDirection : float3{};
     c.windSpeed = std::max(src ? src->windSpeed : 0.0f, 0.0f);
     c.windDirection = c.windSpeed > 0 ? normalize(windDir) : float3{};
@@ -704,6 +713,27 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 8);
                       ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+                  });
+    }
+    if (main.coverageDepthRange.valid())
+    {
+        // The coverage layer's fragments (VsmMarkFragments): the pages their segments cross on their records' levels.
+        ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmMarkFragments");
+        const TextureRef ranges = main.coverageDepthRange;
+        const uint32_t w = main.view.width, h = main.view.height;
+        g.addPass("s.vsm.markfragments", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(ranges, Use::SrvCompute);
+                      b.use(requests, Use::UavCompute);
+                      b.use(statsBuf, Use::UavCompute);
+                      b.keep();
+                  },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.srv(ranges), ctx.uav(requests), ring, ctx.uav(statsBuf) };
+                      ctx.cmd->SetPipelineState(pso);
+                      ctx.bindFrameConstants(mainConstants);
+                      ctx.computeConstants(k, 4);
+                      ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
                   });
     }
     if (s.localUsed > 0 && main.depth.valid())
@@ -1132,6 +1162,74 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.computeConstants(k, 16);
                   ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 0, nullptr, 0);
               });
+    // Fragment visibility of the coverage layer (S request 20260926_S_fragment_visibility, INTERFACES 7.3 v1.41): views
+    // with V's coverage records. Pass 1 per listed tile (pixel depth ranges), pass 2 per block of records (pair pixels).
+    if (view.coverageDepthRange.valid() && view.coverageTileList.valid() && view.coverageRecords.valid())
+    {
+        const BufferRef tileList = view.coverageTileList, records = view.coverageRecords;
+        const TextureRef ranges = view.coverageDepthRange;
+        const uint64_t recordCount = g.desc(records).size / 16;
+        const BufferRef fragments = g.createBuffer(BufferDesc{ "S shadow fragment visibility", (uint64_t)w * h * 12, 12 });
+        const BufferRef fragmentSun = g.createBuffer(BufferDesc{ "S shadow fragment sun", std::max<uint64_t>((recordCount + 3) / 4 * 4, 4), 0 });
+        view.shadowFragmentVisibility = fragments;
+        view.shadowFragmentSun = fragmentSun;
+        ID3D12PipelineState* f0 = fc.shaders.compute("Passes/Shadow/ShadowFragments.MODE0");
+        ID3D12PipelineState* f1 = fc.shaders.compute("Passes/Shadow/ShadowFragments.MODE1");
+        auto words = [=](PassContext& ctx, bool second) {
+            std::array<uint32_t, 20> k = { second ? 0u : ctx.srv(ranges), ctx.srv(tileList), ctx.srv(records), second ? ctx.srv(fragments) : ctx.uav(fragments),
+                                           ctx.srv(table), ctx.srv(atlas), ctx.srv(bound), ctx.srv(blocks),
+                                           ring, localLightsSrv, slotOfSrv, (localSlots && !second) ? ctx.srv(froxelLists) : 0xFFFFFFFFu,
+                                           second ? ctx.uav(fragmentSun) : 0u, ctx.srv(layers), second ? 0u : ctx.srv(depth), second ? 0u : ctx.srv(gbuffer),
+                                           ctx.uav(statsBuf), second ? ctx.srv(ranges) : 0u, 0, 0 };
+            return k;
+        };
+        g.addPass("s.shadow.fragments", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(ranges, Use::SrvCompute);
+                      b.use(tileList, Use::SrvCompute);
+                      b.use(tileList, Use::IndirectArgs);
+                      b.use(records, Use::SrvCompute);
+                      b.use(fragments, Use::UavCompute);
+                      b.use(table, Use::SrvCompute);
+                      b.use(atlas, Use::SrvCompute);
+                      b.use(bound, Use::SrvCompute);
+                      b.use(blocks, Use::SrvCompute);
+                      b.use(layers, Use::SrvCompute);
+                      b.use(depth, Use::SrvCompute);
+                      b.use(gbuffer, Use::SrvCompute);
+                      b.use(statsBuf, Use::UavCompute);
+                      if (localSlots) b.use(froxelLists, Use::SrvCompute);
+                  },
+                  [=](PassContext& ctx) {
+                      const auto k = words(ctx, false);
+                      ctx.cmd->SetPipelineState(f0);
+                      ctx.bindFrameConstants(constants);
+                      ctx.computeConstants(k.data(), 20);
+                      ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(tileList), 0, nullptr, 0);  // V's args over the listed tiles
+                  });
+        g.addPass("s.shadow.fragmentsun", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(tileList, Use::SrvCompute);
+                      b.use(tileList, Use::IndirectArgs);
+                      b.use(records, Use::SrvCompute);
+                      b.use(fragments, Use::SrvCompute);
+                      b.use(fragmentSun, Use::UavCompute);
+                      b.use(ranges, Use::SrvCompute);
+                      b.use(statsBuf, Use::UavCompute);
+                      b.use(table, Use::SrvCompute);
+                      b.use(atlas, Use::SrvCompute);
+                      b.use(bound, Use::SrvCompute);
+                      b.use(blocks, Use::SrvCompute);
+                      b.use(layers, Use::SrvCompute);
+                  },
+                  [=](PassContext& ctx) {
+                      const auto k = words(ctx, true);
+                      ctx.cmd->SetPipelineState(f1);
+                      ctx.bindFrameConstants(constants);
+                      ctx.computeConstants(k.data(), 20);
+                      ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(tileList), 32, nullptr, 0);  // V's args over the record blocks
+                  });
+    }
     if (!overflowList) return;
     // Overflow tiles: recount, one block per tile from the capacity, the lights past the third (indirect, one group per
     // listed tile; without local slots the list is empty and the dispatch has no groups).

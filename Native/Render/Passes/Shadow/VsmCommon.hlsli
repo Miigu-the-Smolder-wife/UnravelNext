@@ -97,7 +97,8 @@ struct VsmConstants
     float windSpeed;         // they were drawn with, the rule bounds the change (windChangeBound, v1.23)
     uint useStats;           // shadow.vsm.use_stats (measurement only): 1 + UAV index of the per-slot read bits, 0 = off
     uint atlasSrv;           // SRV of the page atlas (Texture2D<float>, FrameResources::vsmAtlas): every lookup reads it here
-    uint2 usePad;
+    uint fragmentCheck;      // shadow.vsm.fragment_check (verification only): ShadowFragments evaluates every record
+    uint usePad;
     VsmLevel level[VSM_LEVELS];  // CPU copy of the windows (raster views); kernels use vsmTexel / vsmOrigin
 };
 
@@ -130,6 +131,7 @@ float vsmDecode(uint e) { return asfloat((e & 0x80000000u) ? (e & 0x7FFFFFFFu) :
 #define VSM_STATS_ERROR_BYTE 60u
 #define VSM_ERR_AIR_WALK 0x1u       // vsmAirShadowFraction: a page, block or texel walk stopped at its cap
 #define VSM_ERR_MARK_AIR_WALK 0x2u  // VsmMarkAir: the page walk stopped at its cap
+#define VSM_ERR_MARK_FRAGMENT_WALK 0x4u  // VsmMarkFragments: the page walk stopped at its cap
 
 // Level geometry by arithmetic (a per-pixel level index into the constant buffer would serialise divergent waves):
 // texel 2^(k-10) m and page 2^(k-3) m as exact powers of two; window origin = floor(camera / page) - VSM_TABLE / 2,
@@ -170,6 +172,13 @@ uint vsmLevelForFootprint(ConstantBuffer<VsmConstants> c, float footprint)
 {
     const float k = floor(log2(max(footprint, 1e-30) * 1024.0) + c.lodBias);  // tau_0 = 2^-10 m
     return (uint)clamp(k, 0.0, float(VSM_LEVELS - 1));
+}
+
+// Linear view depth at which a view ray's footprint level (vsmLevelForFootprint of z x pixelScale) reaches k + 1:
+// floor(log2(z pixelScale 1024) + lodBias) = k + 1 at z = 2^(k + 1 - lodBias) / (1024 pixelScale) (fragment segments).
+float vsmFragmentLevelEnd(ConstantBuffer<VsmConstants> c, uint k, float pixelScale)
+{
+    return k + 1 < VSM_LEVELS ? exp2(float(k + 1) - c.lodBias) / (1024.0 * pixelScale) : 3.0e38;
 }
 
 // Absolute texel (integer) of a light-space position at level k; floor division keeps negative coordinates exact.

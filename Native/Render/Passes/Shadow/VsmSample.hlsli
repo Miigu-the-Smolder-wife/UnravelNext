@@ -194,10 +194,12 @@ float vsmSearchHeight(VsmResources r, VsmReceiver rc, uint k)
 #define VSM_REGION_LIT 1u
 #define VSM_REGION_UMBRA 2u
 
-uint vsmRegionClassify(VsmResources r, VsmReceiver rcIn, float radius, uint k)
+// levelOnly: level k alone (MIXED when the square does not fit or a page is not resident there): the classification then
+// speaks for exactly the height field a level-k lookup reads (fragment visibility, vsmFragmentSegmentClassify).
+uint vsmRegionClassify(VsmResources r, VsmReceiver rcIn, float radius, uint k, bool levelOnly = false)
 {
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
-    [loop] for (uint j = k; j < VSM_LEVELS; ++j)
+    [loop] for (uint j = k; j < (levelOnly ? k + 1 : VSM_LEVELS); ++j)
     {
         const VsmReceiver rc = vsmReceiverAt(vc, rcIn, j);
         const float2 uv = rc.uv;
@@ -263,8 +265,11 @@ uint vsmRegionClassify(VsmResources r, VsmReceiver rcIn, float radius, uint k)
 // against that plane raised by the piece's least height above it: every point of the piece is at least delta_min above
 // the plane beside it, so no texel above plane + delta_min - sqrt 2 |side| reach -> lit (the surface itself and any
 // texel behind the piece pass), every texel above plane + delta_max + sqrt 2 |side| reach -> umbra.
+// levelOnly: every region test on level k alone (vsmRegionClassify). marginLit / marginUmbra: the lit test's plane lowered and
+// the umbra test's raised by these heights (fragment visibility: any receiver plane of slope <= maxReceiverSlope through
+// a point of the piece stays within them over the reach square, so the class holds for such a receiver too).
 uint vsmPieceClassify(VsmResources r, ConstantBuffer<VsmConstants> vc, VsmReceiver a, VsmReceiver b, float reach, uint k, float2 side, float3 surface,
-                      bool onSurface)
+                      bool onSurface, bool levelOnly = false, float marginLit = 0, float marginUmbra = 0)
 {
     const float3 axis = vc.level[k].lightZ;
     const float2 lo = min(a.uv, b.uv) - reach, hi = max(a.uv, b.uv) + reach;
@@ -276,12 +281,12 @@ uint vsmPieceClassify(VsmResources r, ConstantBuffer<VsmConstants> vc, VsmReceiv
         const float da = a.h - surface.z - dot(side, a.uv - surface.xy), db = b.h - surface.z - dot(side, b.uv - surface.xy);
         const float base = surface.z + dot(side, c.uv - surface.xy), margin = 1.4142136 * length(side) * reach;
         c.slope = side;
-        c.h = base + min(da, db) - margin;
+        c.h = base + min(da, db) - margin - marginLit;
         c.world = vc.level[k].lightX * c.uv.x + vc.level[k].lightY * c.uv.y + axis * c.h;
-        if (vsmRegionClassify(r, c, radius, k) == VSM_REGION_LIT) return VSM_REGION_LIT;
-        c.h = base + max(da, db) + margin;
+        if (vsmRegionClassify(r, c, radius, k, levelOnly) == VSM_REGION_LIT) return VSM_REGION_LIT;
+        c.h = base + max(da, db) + margin + marginUmbra;
         c.world = vc.level[k].lightX * c.uv.x + vc.level[k].lightY * c.uv.y + axis * c.h;
-        if (vsmRegionClassify(r, c, radius, k) == VSM_REGION_UMBRA) return VSM_REGION_UMBRA;
+        if (vsmRegionClassify(r, c, radius, k, levelOnly) == VSM_REGION_UMBRA) return VSM_REGION_UMBRA;
     }
     const float2 d = b.uv - a.uv;
     const float len = length(d);
@@ -305,13 +310,13 @@ uint vsmPieceClassify(VsmResources r, ConstantBuffer<VsmConstants> vc, VsmReceiv
         hLit += shift;
         hUmbra += shift;
     }
-    c.h = hLit;
-    c.world = vc.level[k].lightX * c.uv.x + vc.level[k].lightY * c.uv.y + axis * hLit;
-    const uint lit = vsmRegionClassify(r, c, radius, k);
+    c.h = hLit - marginLit;
+    c.world = vc.level[k].lightX * c.uv.x + vc.level[k].lightY * c.uv.y + axis * c.h;
+    const uint lit = vsmRegionClassify(r, c, radius, k, levelOnly);
     if (lit == VSM_REGION_LIT) return VSM_REGION_LIT;
-    c.h = hUmbra;
-    c.world = vc.level[k].lightX * c.uv.x + vc.level[k].lightY * c.uv.y + axis * hUmbra;
-    return vsmRegionClassify(r, c, radius, k) == VSM_REGION_UMBRA ? VSM_REGION_UMBRA : VSM_REGION_MIXED;
+    c.h = hUmbra + marginUmbra;
+    c.world = vc.level[k].lightX * c.uv.x + vc.level[k].lightY * c.uv.y + axis * c.h;
+    return vsmRegionClassify(r, c, radius, k, levelOnly) == VSM_REGION_UMBRA ? VSM_REGION_UMBRA : VSM_REGION_MIXED;
 }
 
 // Segment p0 -> p1 (world; a pixel's fragment depth range, COVERAGE_REDESIGN 4.3): VSM_REGION_LIT when every point of it
@@ -322,11 +327,12 @@ uint vsmPieceClassify(VsmResources r, ConstantBuffer<VsmConstants> vc, VsmReceiv
 // (vsmPieceClassify): lit / umbra when every piece is. Level: the pixel's, coarser while the segment is longer than a
 // page (so the search bound of its endpoints covers it).
 #define VSM_SEGMENT_PIECES 8u
-uint vsmSegmentClassify(VsmResources r, float3 p0, float3 p1, float footprint, float tanSun, float3 surfacePoint, float3 surfaceNormal)
+// The segment on level k (its projection at most a page long; vsmSegmentClassify picks k, vsmFragmentSegmentClassify fixes
+// it). anyNormal: the class must also hold for a receiver plane of any slope <= maxReceiverSlope through each point
+// (fragment visibility against the per-record SMRT), and every region test is on level k alone.
+uint vsmSegmentClassifyAt(VsmResources r, float3 p0, float3 p1, uint k, float tanSun, float3 surfacePoint, float3 surfaceNormal, bool anyNormal)
 {
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
-    uint k = vsmLevelForFootprint(vc, footprint);
-    [loop] while (k + 1 < VSM_LEVELS && length(vsmLightSpaceAt(vc, p1, k).xy - vsmLightSpaceAt(vc, p0, k).xy) > vsmPageSize(k)) ++k;
     const float3 axis = vc.level[k].lightZ;
     const VsmReceiver a = vsmMakeReceiver(vc, p0, axis, k), b = vsmMakeReceiver(vc, p1, axis, k);
     // The surface's light-space slope (vsmMakeReceiver's plane of the normal; 0 for no surface).
@@ -337,6 +343,10 @@ uint vsmSegmentClassify(VsmResources r, float3 p0, float3 p1, float footprint, f
     const float dmax = max(vsmSearchHeight(r, a, k), vsmSearchHeight(r, b, k)) - min(a.h, b.h);
     if (dmax <= 0) return VSM_REGION_LIT;
     const float reach = dmax * tanSun;
+    // Any receiver plane: over the reach square (half-diagonal sqrt 2 reach) its height departs from the point's by at most
+    // sqrt 2 slope reach, and its tolerance grows by bias texel slope (vsmPlaneHeight).
+    const float marginLit = anyNormal ? 1.4142136 * vc.maxReceiverSlope * reach : 0;
+    const float marginUmbra = anyNormal ? marginLit + vc.receiverBiasTexels * vsmTexel(k) * vc.maxReceiverSlope : 0;
     const float pieceLen = max(8 * vsmTexel(k), 2.8284271 * reach);
     const uint pieces = clamp((uint)ceil(length(b.uv - a.uv) / pieceLen), 1u, VSM_SEGMENT_PIECES);
     uint lit = 0, umbra = 0;
@@ -350,10 +360,53 @@ uint vsmSegmentClassify(VsmResources r, float3 p0, float3 p1, float footprint, f
         pb.uv = lerp(a.uv, b.uv, t1);
         pb.h = lerp(a.h, b.h, t1);
         pb.world = lerp(p0, p1, t1);
-        const uint cls = vsmPieceClassify(r, vc, pa, pb, reach, k, side, surface, onSurface);
+        const uint cls = vsmPieceClassify(r, vc, pa, pb, reach, k, side, surface, onSurface, anyNormal, marginLit, marginUmbra);
         if (cls == VSM_REGION_MIXED) return VSM_REGION_MIXED;
         lit += cls == VSM_REGION_LIT ? 1u : 0u;
         umbra += cls == VSM_REGION_UMBRA ? 1u : 0u;
+    }
+    return lit == pieces ? VSM_REGION_LIT : umbra == pieces ? VSM_REGION_UMBRA : VSM_REGION_MIXED;
+}
+uint vsmSegmentClassify(VsmResources r, float3 p0, float3 p1, float footprint, float tanSun, float3 surfacePoint, float3 surfaceNormal)
+{
+    ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
+    uint k = vsmLevelForFootprint(vc, footprint);
+    [loop] while (k + 1 < VSM_LEVELS && length(vsmLightSpaceAt(vc, p1, k).xy - vsmLightSpaceAt(vc, p0, k).xy) > vsmPageSize(k)) ++k;
+    return vsmSegmentClassifyAt(r, p0, p1, k, tanSun, surfacePoint, surfaceNormal, false);
+}
+
+// Fragment segments (coverage layer, ShadowFragments): the pixel's view ray from linear depth z0 to z1 (points p0, p1)
+// cut where the footprint level changes (a record at depth z is looked up on vsmLevelForFootprint(z x pixelScale), the
+// per-record SMRT's level), each level's piece cut again into sub-pieces at most a page long, each classified on its own
+// level only (vsmSegmentClassifyAt, anyNormal): lit / umbra when every sub-piece is. Pieces overlap by 1e-4 of the depth
+// at their shared end, so a record at a level boundary is covered on either level. More than VSM_FRAGMENT_PIECES
+// sub-pieces: MIXED (the records are evaluated one by one). VsmMarkFragments requests the same pages.
+#define VSM_FRAGMENT_PIECES 16u
+uint vsmFragmentSegmentClassify(VsmResources r, float3 p0, float3 p1, float z0, float z1, float pixelScale, float tanSun, float3 surfacePoint,
+                                float3 surfaceNormal)
+{
+    ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
+    uint k = vsmLevelForFootprint(vc, z0 * pixelScale);
+    float z = z0;
+    uint lit = 0, umbra = 0, pieces = 0;
+    [loop] for (uint guard = 0; guard < VSM_LEVELS && pieces <= VSM_FRAGMENT_PIECES; ++guard)
+    {
+        const float zEnd = min(z1, vsmFragmentLevelEnd(vc, k, pixelScale) * 1.0001);
+        const float3 a = z1 > z0 ? lerp(p0, p1, (z - z0) / (z1 - z0)) : p0, b = z1 > z0 ? lerp(p0, p1, (zEnd - z0) / (z1 - z0)) : p1;
+        const float len = length(vsmLightSpaceAt(vc, b, k).xy - vsmLightSpaceAt(vc, a, k).xy);
+        const uint n = max(1u, (uint)ceil(len / vsmPageSize(k)));
+        if (pieces + n > VSM_FRAGMENT_PIECES) return VSM_REGION_MIXED;
+        [loop] for (uint i = 0; i < n; ++i)
+        {
+            const uint cls = vsmSegmentClassifyAt(r, lerp(a, b, float(i) / n), lerp(a, b, float(i + 1) / n), k, tanSun, surfacePoint, surfaceNormal, true);
+            if (cls == VSM_REGION_MIXED) return VSM_REGION_MIXED;
+            lit += cls == VSM_REGION_LIT ? 1u : 0u;
+            umbra += cls == VSM_REGION_UMBRA ? 1u : 0u;
+        }
+        pieces += n;
+        if (zEnd >= z1) break;
+        z = zEnd / 1.0002;  // the next level's piece starts just before this one ended (overlap at the boundary)
+        ++k;
     }
     return lit == pieces ? VSM_REGION_LIT : umbra == pieces ? VSM_REGION_UMBRA : VSM_REGION_MIXED;
 }

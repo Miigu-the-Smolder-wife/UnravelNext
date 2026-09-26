@@ -39,7 +39,8 @@ struct VsmConstantsCpu
     float windSpeed;
     uint32_t useStats;  // 1 + UAV index of the read bits (shadow.vsm.use_stats), 0 = off
     uint32_t atlasSrv;  // SRV of the page atlas (every lookup reads it here)
-    uint32_t usePad[2];
+    uint32_t fragmentCheck;  // shadow.vsm.fragment_check (verification only)
+    uint32_t usePad;
     VsmLevelCpu level[20];
 };
 constexpr uint32_t kLevels = 20, kPage = 128, kTable = 128, kVirtual = 16384;
@@ -91,6 +92,11 @@ struct VsmStats
     // S error bits (INTERFACES 3.6; VsmCommon.hlsli VSM_ERR_*): a shader loop reached its hard cap. errorBits: this frame's
     // (stats word 15); errorBitsSeen: every harvested frame's since the state was created. Gates fail on any bit.
     uint32_t errorBits = 0, errorBitsSeen = 0;
+    // Fragment visibility of the coverage layer (ShadowFragments, all views): pixels with records, of them pair pixels
+    // (mixed, per-record SMRT); with shadow.vsm.fragment_check: records checked against a settled pixel and those whose
+    // settled value differs from the per-record SMRT by more than 1/255, and the largest difference (x 255).
+    uint32_t fragmentPixels = 0, fragmentPairs = 0, fragmentChecked = 0, fragmentMismatch = 0, fragmentMaxDiff = 0;
+    uint32_t fragmentFirstPixel = 0, fragmentFirstValues = 0;  // the check's first mismatch (pixel y << 16 | x, + 1; values)
 };
 
 // shadowPages: requests, page assignment and the raster of every requested page for this frame.

@@ -294,6 +294,19 @@ int main(int argc, char** argv)
             if (overTiles) ++gateFailures;
             logf("  S error bits (INTERFACES 3.6, shader loop caps) 0x%x %s\n", st.errorBitsSeen, st.errorBitsSeen ? "FAIL" : "ok");
             if (st.errorBitsSeen) ++gateFailures;
+            // Fragment visibility of the coverage layer (ShadowFragments): pixels with records and pair pixels; with
+            // shadow.vsm.fragment_check the settled pixels' values against the per-record SMRT (limit 1/255).
+            logf("  coverage fragments: %u pixels with records, %u pair (%.1f %%)\n", st.fragmentPixels, st.fragmentPairs,
+                 100.0 * st.fragmentPairs / std::max(st.fragmentPixels, 1u));
+            if (quality.integer("shadow.vsm.fragment_check") != 0)
+            {
+                logf("  fragment check: %u records of settled pixels, %u differ by more than 1/255 (largest %u/255) %s\n", st.fragmentChecked,
+                     st.fragmentMismatch, st.fragmentMaxDiff, st.fragmentMismatch == 0 && st.fragmentChecked > 0 ? "ok" : "FAIL");
+                if (st.fragmentMismatch != 0)
+                    logf("    first mismatch: pixel (%u, %u), settled %u, per-record %u, segment position %.2f of 3\n", (st.fragmentFirstPixel - 1) & 0xFFFF,
+                         (st.fragmentFirstPixel - 1) >> 16, st.fragmentFirstValues & 0xFF, (st.fragmentFirstValues >> 8) & 0xFF, (st.fragmentFirstValues >> 16) / 64.0);
+                if (st.fragmentMismatch != 0 || st.fragmentChecked == 0) ++gateFailures;
+            }
             const double px = st.pathNoCaster + st.pathRegionLit + st.pathRegionUmbra + st.pathSearchLit + st.pathFiltered + st.pathDiskLit + st.pathDiskUmbra;
             logf("  visibility paths (%% of %.2f M pixels): no caster %.1f, reach lit %.1f, reach umbra %.1f, search lit %.1f, disk lit %.1f, disk umbra %.1f, filtered %.1f\n",
                  px / 1e6, 100 * st.pathNoCaster / px, 100 * st.pathRegionLit / px, 100 * st.pathRegionUmbra / px, 100 * st.pathSearchLit / px, 100 * st.pathDiskLit / px,
