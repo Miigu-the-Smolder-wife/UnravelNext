@@ -37,6 +37,9 @@
 // P[7] = { edge radiance UAV (RGBA16F), R's screen probe maps (K path; UNX_NONE = absent), S's shadow overflow list (raw;
 //        FALLBACK: a raw buffer holding this frame's ShadowSrvs), V's water layer vis ids (v1.75; UNX_NONE = none): a
 //        pixel under a water-layer stream surface keeps its radiance too, W's refraction source (tracks::water) }
+// P[8] = { W's sun-space water map (v1.77): waterSunDepth, waterSunNormal, waterSunMedium, waterSunConstants (UNX_NONE:
+//        no water) } - a surface under water from the sun takes the refracted sun direction and the water's transmittance
+//        (Passes/Water/WaterLight.hlsli waterSunLight)
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -44,6 +47,7 @@
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/AreaLight.hlsli"
+#include "Passes/Water/WaterLight.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
@@ -239,7 +243,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     }
 
     // ---- sun (INTERFACES 8.1: reflection on the viewer's side of the shading normal, Foliage transmission across it)
-    const float3 l0 = normalize(g_sunDirection);
+    float3 l0 = normalize(g_sunDirection);
     // S's air volume of this view (v1.22; planar views: integrated from the mirror plane on) gives the air between the
     // camera and the surface and the sun's illuminance at it in one lookup (atmosphereAirView); without one, the sun's
     // transmittance alone.
@@ -255,6 +259,17 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     {
         Texture2D<uint> shadow = ResourceDescriptorHeap[P[2].x];
         sunVisibility = shadowSlot(shadow[pixel], 0);
+    }
+    if (P[8].w != UNX_NONE)
+    {
+        // W stage 2 (v1.77): under water from the sun, the sun arrives along the refracted direction, attenuated by the
+        // surface's transmission and the water's absorption (VSM visibility stays the unrefracted direction's, W's condition)
+        float3 lw, tw;
+        if (waterSunLight(P[8].x, P[8].y, P[8].z, P[8].w, worldPos, l0, 0, lw, tw))
+        {
+            l0 = lw;
+            E *= tw;
+        }
     }
     const float NoL = dot(n, l0);
     const uint experiment = P[4].z;

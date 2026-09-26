@@ -337,6 +337,15 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     const bool coverage = !planar && v.coverageTiles.valid() && v.coverageRecords.valid() && v.coverageTileList.valid() && v.coverageTilePixels.valid();
     // v1.75: band A radiance is kept under V's water layer too (W's refraction source in tracks::water reads bandARadiance).
     const bool keepWater = v.waterVis.valid();
+    // v1.77 W stage 2: the sun-space water map (all four valid or none)
+    const bool waterSun = r.waterSunDepth.valid() && r.waterSunNormal.valid() && r.waterSunMedium.valid() && r.waterSunConstants.valid();
+    auto waterSunConstants = [=](PassContext& c, uint32_t* k) {
+        const uint32_t none = gpu::kNone;
+        k[0] = waterSun ? c.srv(r.waterSunDepth) : none;
+        k[1] = waterSun ? c.srv(r.waterSunNormal) : none;
+        k[2] = waterSun ? c.srv(r.waterSunMedium) : none;
+        k[3] = waterSun ? c.srv(r.waterSunConstants) : none;
+    };
     if (coverage && v.shadowVisibility.valid() && !fragmentShadows && (experiment & 8192) == 0)
         fail("M.shading: V's coverage layer with S's shadows but without S's fragment visibility (COVERAGE_REDESIGN 4.3): its fragments would be unshadowed");
     // S's shadow overflow (INTERFACES 7.3, v1.20; main view): the list the main kernel loads, and the fallback tiles over
@@ -509,6 +518,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             b.use(edgeTiles, Use::SrvCompute);
             if (coverage) b.use(v.coverageTiles, Use::SrvCompute);
             if (keepWater) b.use(v.waterVis, Use::SrvCompute);
+            if (waterSun)
+            {
+                for (TextureRef t : { r.waterSunDepth, r.waterSunNormal, r.waterSunMedium }) b.use(t, Use::SrvCompute);
+                b.use(r.waterSunConstants, Use::SrvCompute);
+            }
             useParticles(b);
             if (meter) b.use(histogram.buffer, Use::UavCompute);
         };
@@ -553,16 +567,17 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                          r.giCache.valid() ? c.srv(r.giCache) : none,
                                          atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], 0, o.textureTableSrv, experiment,
                                          0, fx[0], fx[1] };
-                uint32_t k32[32] = {};
+                uint32_t k32[36] = {};
                 std::memcpy(k32, k, sizeof k);
                 std::memcpy(k32 + 24, edge, sizeof edge);
+                waterSunConstants(c, k32 + 32);                       // P[8] (v1.77)
                 k32[30] = overflow ? c.srv(v.shadowOverflow) : none;  // P[7].z
                 k32[16] = r.areaLightStable;     // P[4].x (B2)
                 k32[19] = meter ? c.uav(histogram.buffer) : gpu::kNone;  // P[4].w exposure histogram
                 k32[26] = asUint(histogram.centreSigma);                 // P[6].z
                 k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
                 particleConstants(c, k32 + 22);  // P[5].zw
-                c.computeConstants(k32, 32);
+                c.computeConstants(k32, 36);
                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
             }
         };
@@ -606,6 +621,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              b.use(edgeTiles, Use::SrvCompute);
                              if (coverage) b.use(v.coverageTiles, Use::SrvCompute);
                              if (keepWater) b.use(v.waterVis, Use::SrvCompute);
+                             if (waterSun)
+                             {
+                                 for (TextureRef t : { r.waterSunDepth, r.waterSunNormal, r.waterSunMedium }) b.use(t, Use::SrvCompute);
+                                 b.use(r.waterSunConstants, Use::SrvCompute);
+                             }
                              useParticles(b);
                          },
                          [=](PassContext& c) {
@@ -628,16 +648,17 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              const uint32_t edge[8] = { c.srv(edgeTiles), coverage ? c.srv(v.coverageTiles) : none, 0, 0, c.uav(edgeRadiance),
                                                         v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, shadowSrvs,
                                                         keepWater ? c.srv(v.waterVis) : none };  // P[7].w (v1.75)
-                             uint32_t k32[32] = {};
+                             uint32_t k32[36] = {};
                              std::memcpy(k32, k, sizeof k);
                              std::memcpy(k32 + 24, edge, sizeof edge);
+                             waterSunConstants(c, k32 + 32);  // P[8] (v1.77)
                              particleConstants(c, k32 + 22);  // P[5].zw
                              k32[16] = r.areaLightStable;     // P[4].x (B2)
                              k32[19] = gpu::kNone;            // P[4].w: overflow tiles are shaded twice; the main kernel metered them
                              k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
                              c.cmd->SetPipelineState(fallbackKernel);
                              c.bindFrameConstants(cb);
-                             c.computeConstants(k32, 32);
+                             c.computeConstants(k32, 36);
                              c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                          });
     }
