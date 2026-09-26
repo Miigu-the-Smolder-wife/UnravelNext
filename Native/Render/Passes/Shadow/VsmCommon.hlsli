@@ -132,6 +132,8 @@ float vsmDecode(uint e) { return asfloat((e & 0x80000000u) ? (e & 0x7FFFFFFFu) :
 #define VSM_ERR_AIR_WALK 0x1u       // vsmAirShadowFraction: a page, block or texel walk stopped at its cap
 #define VSM_ERR_MARK_AIR_WALK 0x2u  // VsmMarkAir: the page walk stopped at its cap
 #define VSM_ERR_MARK_FRAGMENT_WALK 0x4u  // VsmMarkFragments: the page walk stopped at its cap
+#define VSM_ERR_LOCAL_AIR_WALK 0x8u  // FroxelIntegrate: a local light's air walk stopped at VSM_LOCAL_AIR_STEPS
+#define VSM_ERR_MARK_LOCAL_AIR_WALK 0x10u  // VsmLocalMarkAir: the page walk stopped at VSM_LOCAL_AIR_PAGE_STEPS
 
 // Level geometry by arithmetic (a per-pixel level index into the constant buffer would serialise divergent waves):
 // texel 2^(k-10) m and page 2^(k-3) m as exact powers of two; window origin = floor(camera / page) - VSM_TABLE / 2,

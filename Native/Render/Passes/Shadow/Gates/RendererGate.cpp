@@ -369,6 +369,13 @@ int main(int argc, char** argv)
                 logf("  air walk: slices %u, mixed %u (%.1f %%), loads b32 %u b8 %u texel %u (%.1f/mixed)\n",
                      st.airSlices, st.airSlicesMixed, 100.0 * st.airSlicesMixed / std::max(st.airSlices, 1u), st.airBlocks32, st.airBlocks8, st.airTexels,
                      (double)st.airTexels / std::max(st.airSlicesMixed, 1u));
+            if (quality.integer("atmosphere.froxels.walk_stats") != 0)
+                logf("  local air walk: entries %u, cells %u (%.2f per entry), max %u per entry, lit runs %.2f per entry\n", st.localAirEntries,
+                     st.localAirCells, (double)st.localAirCells / std::max(st.localAirEntries, 1u), st.localAirMaxCells,
+                     (double)st.localAirRuns / std::max(st.localAirEntries, 1u));
+            if (quality.integer("atmosphere.froxels.walk_stats") != 0)
+                logf("  local air walk per wave: sum of lane maxima cells %u, entries %u (x 24 points = %u)\n", st.localAirWaveCells, st.localAirWaveEntries,
+                     st.localAirWaveEntries * 24);
             {
                 std::string pagesLine;
                 for (uint32_t k = 0; k < shadow::kLevels; ++k) pagesLine += format(" L%u:%u", k, st.levelPages[k]);

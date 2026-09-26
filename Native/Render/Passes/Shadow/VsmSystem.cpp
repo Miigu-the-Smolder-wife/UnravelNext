@@ -459,6 +459,12 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.latest.airBlocks32 = w[22];
         s.latest.airBlocks8 = w[23];
         s.latest.airTexels = w[24];
+        s.latest.localAirEntries = w[54];
+        s.latest.localAirCells = w[55];
+        s.latest.localAirMaxCells = w[56];
+        s.latest.localAirRuns = w[57];
+        s.latest.localAirWaveCells = w[58];
+        s.latest.localAirWaveEntries = w[59];
         s.latest.fragmentPixels = w[25];
         s.latest.fragmentPairs = w[26];
         s.latest.fragmentChecked = w[27];
@@ -769,10 +775,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                   [&](PassBuilder& b) {
                       b.use(froxelLists, Use::SrvCompute);
                       b.use(requests, Use::UavCompute);
+                      b.use(statsBuf, Use::UavCompute);  // error word (INTERFACES 3.6)
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.uav(requests), ctx.srv(froxelLists), localLightsSrv, slotOfSrv, texelBits, 0, 0, 0 };
+                      const uint32_t k[8] = { ctx.uav(requests), ctx.srv(froxelLists), localLightsSrv, slotOfSrv, texelBits, ctx.uav(statsBuf), 0, 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 8);

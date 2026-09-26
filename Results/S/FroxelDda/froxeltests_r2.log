@@ -1,0 +1,87 @@
+waiting for the GPU measurement lock; held by: {"track":"W","kind":"timing","pid":43624,"started":"2026-09-27T07:53:27","timeoutMinutes":120,"command":"C:\\Program Files\\Unity\\Hub\\Editor\\6000.6.0f1\\Editor\\Unity.exe -projectPath C:\\Users\\USER\\Unravel-UnityB -batchmode -runTests -testPlatform EditMode -testFilter UnravelNextBridge.Tests.UnravelNextD0FluidCaptureTests -testResults C:/Users/USER/Unravel/Artifacts/Engine1/D0Fluid6/results.xml -logFile C:/Users/USER/Unravel/Artifacts/Engine1/D0Fluid6/unity.log"}
+waiting for the GPU measurement lock; held by: {"track":"W","kind":"timing","pid":43624,"started":"2026-09-27T07:53:27","timeoutMinutes":120,"command":"C:\\Program Files\\Unity\\Hub\\Editor\\6000.6.0f1\\Editor\\Unity.exe -projectPath C:\\Users\\USER\\Unravel-UnityB -batchmode -runTests -testPlatform EditMode -testFilter UnravelNextBridge.Tests.UnravelNextD0FluidCaptureTests -testResults C:/Users/USER/Unravel/Artifacts/Engine1/D0Fluid6/results.xml -logFile C:/Users/USER/Unravel/Artifacts/Engine1/D0Fluid6/unity.log"}
+waiting for the GPU measurement lock; held by: {"track":"W","kind":"timing","pid":43624,"started":"2026-09-27T07:53:27","timeoutMinutes":120,"command":"C:\\Program Files\\Unity\\Hub\\Editor\\6000.6.0f1\\Editor\\Unity.exe -projectPath C:\\Users\\USER\\Unravel-UnityB -batchmode -runTests -testPlatform EditMode -testFilter UnravelNextBridge.Tests.UnravelNextD0FluidCaptureTests -testResults C:/Users/USER/Unravel/Artifacts/Engine1/D0Fluid6/results.xml -logFile C:/Users/USER/Unravel/Artifacts/Engine1/D0Fluid6/unity.log"}
+note: track entry point E.lightFunctions (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+note: track entry point E.volumeMedia (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+lists identical over two frames (froxels differing)                0 (limit 0) ok
+lists: 2214007 entries (9.61 per froxel), 10798 froxels truncated (229786 lights dropped), max 91 lights per froxel, 0 tiles over the candidate buffer
+candidate buffer not exceeded (tiles)                              0 (limit 0) ok
+the dense cluster truncates some lists (truncated froxels)         1.08e+04 (limit 1) ok
+froxel lists well formed (count <= lights_max, unique, valid)      0 (limit 0) ok
+conservativeness: 46080 froxels, 368640 points
+lights reaching a froxel point missing from a non-full list        0 (limit 0) ok
+lists out of importance order (entries)                            0 (limit 0) ok
+local-light scene: no truncated list                               0 (limit 0) ok
+air in-scattering of local lights: 3302 nodes compared, largest relative error 0.00139; sum of compared GPU nodes 137.708, reference 137.799
+air in-scattering of local lights vs reference (mean relative)     0.0006649 (limit 0.01) ok
+air in-scattering of local lights vs reference (largest node)      0.001387 (limit 0.03) ok
+S VSM: 848 page requests exceeded the 5376-page atlas (frame 10): the atlas grows to 7808 pages
+shadowed air of local lights: VSM pages requested 6224, allocated 6224, exhausted 0; local slots 24, active 24
+local-light scene: no truncated list                               0 (limit 0) ok
+shadowed air of local lights: 656 nodes compared, largest relative error 0.0471; sum of compared GPU nodes 19.2033, reference 19.1496
+shadowed air of local lights vs reference (mean relative)          0.003468 (limit 0.03) ok
+shadowed air of local lights vs reference (largest node)           0.04708 (limit 0.25) ok
+roof: VSM pages requested 1679 (by pixels 999), allocated 1679, pool exhausted 0, free 0
+roof: VSM pool not exhausted (requests dropped)                    0 (limit 0) ok
+roof: sun shadows in the air: 4520 slices entirely lit or shadowed, 76 with a boundary
+roof: uniform slices beyond storage precision (worst rel.)         0 (limit 0) ok
+roof: slices with a shadow boundary outside the texel bound        0 (limit 0) ok
+roof: shadowed air in-scattering vs reference (mean rel.)          0 (limit 0.03) ok
+ridge 3 km: VSM pages requested 1196 (by pixels 589), allocated 1196, pool exhausted 0, free 0
+ridge 3 km: VSM pool not exhausted (requests dropped)              0 (limit 0) ok
+ridge 3 km: sun shadows in the air: 3142 slices entirely lit or shadowed, 36 with a boundary
+ridge 3 km: uniform slices beyond storage precision (worst rel.)   0 (limit 0) ok
+ridge 3 km: slices with a shadow boundary outside the texel bound  0 (limit 0) ok
+ridge 3 km: shadowed air in-scattering vs reference (mean rel.)    0.0009433 (limit 0.03) ok
+reader bound: 166380 nodes read by surfaces compared (0 differ), 1816 sky corrections compared (0 differ), 177030 slices beyond the surfaces
+reader bound: nodes a surface reads equal every-slice integration (bits) 0 (limit 0) ok
+reader bound: sky corrections equal every-slice integration (bits) 0 (limit 0) ok
+media: 1787 of 3600 tiles with media; nodes worst 1.60e-03 (in-scattering), 1.54e-03 (optical depth); sky correction 8.79e-04, media to far 8.69e-04; air-only sky correction 0.00e+00 (pre-exposed; 0: no shadowed air or local lights here)
+media: scene without shadowed air or lights (air-only sky correction / largest node) 0 (limit 1e-05) ok
+media: in-scattering nodes vs air-only volume composed with the media (rel.) 0.001602 (limit 0.003) ok
+media: optical depth nodes (rel.)                                  0.001542 (limit 0.002) ok
+media: sky correction (rel.)                                       0.0008791 (limit 0.003) ok
+media: optical depth to far_m for sky pixels (rel.)                0.0008686 (limit 0.002) ok
+  air uv (0.10 0.20) z 30000: L gpu 1.3358e-02 2.5018e-02 4.8569e-02 ref 1.3386e-02 2.5069e-02 4.8678e-02  T gpu 0.74241 ref 0.74218  Esun gpu 0.87939 ref 0.87964
+  air uv (0.10 0.55) z 30000: L gpu 2.8466e-02 4.0566e-02 5.6391e-02 ref 2.8481e-02 4.0530e-02 5.6143e-02  T gpu 0.50332 ref 0.50233  Esun gpu 0.70605 ref 0.70615
+  air uv (0.50 0.20) z 3: L gpu 4.0735e-05 3.6076e-05 3.2420e-05 ref 4.1062e-05 3.6359e-05 3.2606e-05  T gpu 0.99994 ref 0.99994  Esun gpu 0.69922 ref 0.69908
+    candidate with the blended optical depth: rel 0.0036 (T 0.9999)
+    candidates: L/(1-T) blend x (1 - T pixel) rel 0.0037; log blend rel 0.0036; T rows 0.9999 / 0.9999 pixel 0.9999
+    exact tile blend: bilinear 3.6106e-05 (rel 0.0075), rows at the pixel column 3.6240e-05 (rel 0.0036); rows 3.6630e-05 / 3.5849e-05, fy 0.500
+  air uv (0.50 0.20) z 40: L gpu 5.3948e-04 4.7837e-04 4.3049e-04 ref 5.4423e-04 4.8208e-04 4.3278e-04  T gpu 0.99924 ref 0.99924  Esun gpu 0.69922 ref 0.69955
+    candidate with the blended optical depth: rel 0.0036 (T 0.9992)
+    candidates: L/(1-T) blend x (1 - T pixel) rel 0.0037; log blend rel 0.0036; T rows 0.9992 / 0.9992 pixel 0.9992
+    exact tile blend: bilinear 4.7873e-04 (rel 0.0075), rows at the pixel column 4.8050e-04 (rel 0.0036); rows 4.8560e-04 / 4.7541e-04, fy 0.500
+  air uv (0.50 0.20) z 700: L gpu 8.5047e-03 7.5921e-03 6.9428e-03 ref 8.5822e-03 7.6540e-03 6.9831e-03  T gpu 0.98730 ref 0.98729  Esun gpu 0.70752 ref 0.70779
+    candidate with the blended optical depth: rel 0.0036 (T 0.9873)
+    candidates: L/(1-T) blend x (1 - T pixel) rel 0.0036; log blend rel 0.0036; T rows 0.9873 / 0.9873 pixel 0.9873
+    exact tile blend: bilinear 7.6012e-03 (rel 0.0075), rows at the pixel column 7.6290e-03 (rel 0.0036); rows 7.6875e-03 / 7.5704e-03, fy 0.500
+  air uv (0.50 0.20) z 5000: L gpu 3.4199e-02 3.1961e-02 3.2261e-02 ref 3.4464e-02 3.2195e-02 3.2432e-02  T gpu 0.92802 ref 0.92800  Esun gpu 0.75146 ref 0.75173
+    candidate with the blended optical depth: rel 0.0034 (T 0.9280)
+    candidates: L/(1-T) blend x (1 - T pixel) rel 0.0035; log blend rel 0.0034; T rows 0.9282 / 0.9278 pixel 0.9280
+    exact tile blend: bilinear 3.1992e-02 (rel 0.0072), rows at the pixel column 3.2100e-02 (rel 0.0034); rows 3.1928e-02 / 3.2272e-02, fy 0.500
+  air uv (0.50 0.20) z 30000: L gpu 4.9009e-02 5.3619e-02 6.8726e-02 ref 4.9319e-02 5.3892e-02 6.8987e-02  T gpu 0.79010 ref 0.78991  Esun gpu 0.87891 ref 0.87930
+    candidate with the blended optical depth: rel 0.0025 (T 0.7898)
+    candidates: L/(1-T) blend x (1 - T pixel) rel 0.0028; log blend rel 0.0026; T rows 0.7924 / 0.7873 pixel 0.7899
+    exact tile blend: bilinear 5.3662e-02 (rel 0.0057), rows at the pixel column 5.3794e-02 (rel 0.0024); rows 5.2954e-02 / 5.4634e-02, fy 0.500
+  air uv (0.50 0.55) z 30000: L gpu 5.4542e-02 5.9470e-02 6.8053e-02 ref 5.5195e-02 5.9980e-02 6.8048e-02  T gpu 0.58615 ref 0.58572  Esun gpu 0.70459 ref 0.70467
+    candidate with the blended optical depth: rel 0.0304 (T 0.5912)
+    candidates: L/(1-T) blend x (1 - T pixel) rel 0.0091; log blend rel 0.0312; T rows 0.5944 / 0.5819 pixel 0.5857
+    exact tile blend: bilinear 5.8749e-02 (rel 0.0318), rows at the pixel column 5.8774e-02 (rel 0.0312); rows 5.9146e-02 / 5.7661e-02, fy 0.250
+  air uv (0.93 0.20) z 30000: L gpu 1.3040e-02 2.4724e-02 4.8230e-02 ref 1.3079e-02 2.4790e-02 4.8356e-02  T gpu 0.73627 ref 0.73587  Esun gpu 0.87939 ref 0.87967
+  air uv (0.93 0.55) z 30000: L gpu 2.7350e-02 3.9671e-02 5.5579e-02 ref 2.7350e-02 3.9609e-02 5.5343e-02  T gpu 0.49287 ref 0.49204  Esun gpu 0.70605 ref 0.70633
+atmosphereAerial and atmosphereAirView agree to 1e-5 (queries differing) 0 (limit 0) ok
+air in-scattering, depth <= 700 m (rel.)                           0.009026 (limit 0.01) ok
+air transmittance, depth <= 700 m (rel.)                           4.134e-05 (limit 0.0001) ok
+air in-scattering, all depths to 30 km (rel.)                      0.01183 (limit 0.02) ok
+air transmittance, all depths to 30 km (rel.)                      0.003372 (limit 0.01) ok
+sun illuminance at the surface (rel.)                              0.00133 (limit 0.002) ok
+S error bits (INTERFACES 3.6: a shader loop at its hard cap)       0 (limit 0) ok
+D3D12 debug layer: enabled (errors abort the run)
+FX lights: 27921 list entries, 22955 (point, FX light) pairs that reach over 302400 points
+FX lights reach the probed froxels (list entries)                  2.792e+04 (limit 1) ok
+FX lights reaching a froxel point missing from a non-full list     0 (limit 0) ok
+FX light entries with the shadow flag                              0 (limit 0) ok
+list entries past the scene and FX lights                          0 (limit 0) ok
+PASS
+GpuLock.ps1: background: cpu 7 s >= 4 cores, peak 6.7 cores
