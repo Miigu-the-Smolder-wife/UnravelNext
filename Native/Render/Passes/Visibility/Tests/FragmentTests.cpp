@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <functional>
 #include <random>
 #include <string>
@@ -510,7 +511,15 @@ int main(int argc, char** argv)
     {
         if (filter && !std::strstr(t.name, filter)) continue;
         ++run;
-        t.fn();
+        try
+        {
+            t.fn();
+        }
+        catch (const std::exception& e)
+        {
+            logf("FAIL %s: %s\n", t.name, e.what());
+            continue;
+        }
         logf("PASS %s\n", t.name);
         ++passed;
     }

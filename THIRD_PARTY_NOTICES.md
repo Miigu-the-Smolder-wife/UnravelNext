@@ -31,3 +31,9 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE
 ```
+
+## DirectStorage (NuGet Microsoft.Direct3D.DirectStorage 1.3.0)
+
+- Source: https://www.nuget.org/packages/Microsoft.Direct3D.DirectStorage/1.3.0 (fetched into External/.cache by Native/Render/Passes/Streaming/module.cmake, SHA-256 pinned; NuGet catalog SHA-512 checked).
+- Use: NVMe -> RAM -> VRAM streaming (Native/Render/Passes/Streaming, render C). dstorage.dll and dstoragecore.dll are redistributed next to the executables.
+- License: MIT (package LICENSE.txt, Copyright (c) Microsoft Corporation).

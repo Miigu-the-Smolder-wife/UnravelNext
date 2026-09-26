@@ -1,0 +1,14 @@
+﻿streaming: VRAM pool 2 heaps x 4 MB (budget 15280 MB, usage 140 MB), RAM cache 5 MB, upload <= 2 MB/frame
+      frame 0: requested 100, resident 0 (requested 0), disk reads 100 (3.18 MB), uploads 0 (0.00 MB), RAM 3.18 MB, fences read 0/1 upload 0/0
+      frame 1: requested 100, resident 0 (requested 0), disk reads 0 (0.00 MB), uploads 62 (2.00 MB), RAM 3.18 MB, fences read 1/1 upload 0/1
+      frame 2: requested 100, resident 62 (requested 62), disk reads 0 (0.00 MB), uploads 38 (1.19 MB), RAM 3.18 MB, fences read 1/1 upload 1/2
+      frame 3: requested 100, resident 100 (requested 100), disk reads 0 (0.00 MB), uploads 0 (0.00 MB), RAM 3.18 MB, fences read 1/1 upload 2/2
+      frame 19: requested 100, resident 100 (requested 100), disk reads 0 (0.00 MB), uploads 0 (0.00 MB), RAM 3.18 MB, fences read 1/1 upload 2/2
+      frame 39: requested 100, resident 128 (requested 100), disk reads 0 (0.00 MB), uploads 0 (0.00 MB), RAM 4.95 MB, fences read 2/2 upload 5/5
+      frame 59: requested 100, resident 128 (requested 100), disk reads 0 (0.00 MB), uploads 0 (0.00 MB), RAM 4.99 MB, fences read 3/3 upload 8/8
+    verified 356 resident pages byte for byte; max upload 2.00 MB/frame (budget 2), max RAM cache 4.99 MB (capacity 5), previous window kept 100, hash failures 0
+PASS pages_stream_exactly
+streaming: VRAM pool 2 heaps x 2 MB (budget 15280 MB, usage 140 MB), RAM cache 16 MB, upload <= 8 MB/frame
+    budget 2 -> 1 -> 2 heaps: eviction and return exact (96 resident pages verified), hash failures 0
+PASS budget_shrink_and_return
+2/2 passed

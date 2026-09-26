@@ -1,0 +1,2 @@
+﻿streaming: VRAM pool 4 heaps x 64 MB (budget 15280 MB, usage 139 MB), RAM cache 256 MB, upload <= 64 MB/frame
+[C6 streaming] 256 MB in 33 frames of 6.06 ms: 201.0 ms wall, 1273 MB/s end to end (upload budget 64 MB/frame = 10560 MB/s at 165 fps) | timing while other GPU/CPU load may run: see the lock line
