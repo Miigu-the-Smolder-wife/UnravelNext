@@ -94,7 +94,7 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
         const uint bits = countbits(fr.mask);
         const float seen = bits > 0 ? countbits(fr.mask & ~covered) / (float)bits : 1 - countbits(covered) / 32.0;
         const float w = min(coverageFragmentArea(fr) * seen, max(1 - used, 0.0));
-        if (w > 0) sum += w * covShadeFragment(fr.visId, key.y, pixel, P[3].z);
+        if (w > 0) sum += w * covFragmentRadiance(fr.visId, key.y, pixel, P[3].z);
         used += w;
         covered |= fr.mask;
         if (covered == COV_MASK_FULL || used >= 1) break;

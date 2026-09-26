@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.74, 2026-09-27)
+# UnravelNext 인터페이스 (v1.75, 2026-09-27)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -734,6 +734,14 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.75 (2026-09-27, 렌더 A: 미리 셰이딩된 coverage 기록(v1.73 목록의 M 쪽), W 유체·바다 기록과 Cut·Terrain 대역 B의 합류):
+  - **`ViewResources::coverageRecordRadiance`**(M, raw): coverageRecords 원소마다 8 B uint2 { f16 r | f16 g << 16, f16 b }. 단위는 합성의 단위(노출된 선형 복사휘도, 앞쪽 공기 포함: (L × T_air + L_inscatter) × g_exposure). coverageSpecial에 있는 원소만 정의된다.
+  - **순서(M shade 안)**: m.lit(대역 A) → `m.coverage.special default`(종류 1·2에 0) → `tracks::water(fc, target)`(W가 종류 2를 덮어씀) → `m.coverage.special material`(Cut, Terrain 각각: 클래스 재질을 목록 칸마다 48 B 임시 버퍼로) → `m.coverage.special`(종류 5 조명) → 합성. 합성과 heavy round는 visId 상위 비트가 00이 아닌 기록을 버퍼에서 읽는다(P[8].y). 면적 × 가려지지 않은 몫으로 가중하고, 뒤의 대역 A는 나머지만 받는다.
+  - **`ViewResources::bandARadiance`**(M, RGBA16F): E·coverage 합성이 조각 뒤에 두는 대역 A 복사휘도. W는 내부 물 픽셀을 `target.color`와 이 텍스처 둘 다에 쓴다(물 위 조각이 물 위에 합성되도록). 물이 있는 뷰는 `postActive`가 참이라 float 영상이다.
+  - **보조 함수**: `Passes/Shading/CoverageSpecial.hlsli`의 `covRecordPixel`(타일 목록 이분 탐색 + 기록의 타일 내 비트), `covPackRadiance`, `covUnpackRadiance`.
+  - **V 목록(CoverageRaster.ms)**: M 선셰이딩 클래스 = Cut, Terrain(렌더 C 정지 중이라 A가 한 줄 반영).
+  - DXIL: CoverageComposite 194.4 KB(이전 198.8 KB), CoverageSpecial 재질 45~48 KB, 조명 141/173 KB. 커널 하나에 재질과 조명을 합치면 202~234 KB라 단계를 나눴다.
+  - 시험: ShadingTests 13(`--preshade`)은 같은 기록으로 Standard 재질과 그와 같은 1레이어 Terrain(종류 5)을 비교한다(f16 반올림 이내). 하드웨어 실행은 GPU 보류 뒤. WARP는 셰이딩 영상이 전부 0이라 판정에 쓸 수 없다.
 - v1.74 (2026-09-27, 렌더 A: Terrain 재질 클래스, C5 쿠킹 지형 타일의 합류; FEATURES_GAME 9 "직접 블렌딩 경로"):
   - **`scene::MaterialClass::Terrain` 7**: `Material::terrainSplat[2]`(Rgba8Linear, 레이어 i의 가중 = 스플랫 ⌊i/4⌋의 채널 i mod 4)·`terrainLayers`(1..8개 { Standard 재질, uv 척도, 오프셋 }). 장면 파일의 "TERR" 블록, `scene::validate`(레이어 재질은 Standard, 4개 넘으면 스플랫 1 필요).
   - **GPU**: `gpu::Material::terrainLayers`(예약 칸 자리: 첫 레이어 | 개수 << 24), `gpu::TerrainLayer` 32 B { 재질, 척도, 오프셋, 스플랫 0·1 크기(폭 | 높이 << 16) }, `FrameConstants::terrainLayers`(framePad0 자리). M 텍스처 세트는 스플랫 SRV를 occlusion·slopeRange 칸에 싣는다(이 클래스에는 없는 슬롯).

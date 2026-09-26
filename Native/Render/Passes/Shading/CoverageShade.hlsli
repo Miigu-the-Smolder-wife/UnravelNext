@@ -19,7 +19,11 @@
 // transmittance, multi-scatter, air volume, R's screen probes }, P[5].x = R's screen probe maps (UNX_NONE = absent),
 // P[6].zw = { R's GI cache, S's per-record sun bytes (shadowFragmentSun) }, P[7].x = V's coverageDepthRange,
 // P[7].zw = { E's surface state field (one raw SRV), S's weather record } (UNX_NONE: none): the surface layers
-// (Passes/Material/SurfaceLayers.hlsli), as in the resolve. P[8].x = E's light function table (A8; UNX_NONE: none).
+// (Passes/Material/SurfaceLayers.hlsli), as in the resolve. P[8].x = E's light function table (A8; UNX_NONE: none),
+// P[8].y = ViewResources::coverageRecordRadiance (raw SRV, v1.75): special records (vis id top bits != 00: hair, streams,
+// M pre-shaded classes) are read from it (their owners shaded them, CoverageSpecial.hlsli), clusters are shaded here.
+// COV_PRESHADE_CLASSES (CoverageSpecial.hlsl MODE=1, 2): covFragmentMaterial takes the material of its class as the
+// resolve - 1 Cut, 2 Terrain; COV_PRESHADE_LIGHT (MODE=3): covShadeFragment lights the material those kernels stored.
 #ifndef UNX_M_COVERAGE_SHADE_HLSLI
 #define UNX_M_COVERAGE_SHADE_HLSLI
 #include "Bindless.hlsli"
@@ -30,6 +34,12 @@
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/AreaLight.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
+#include "Passes/Shading/CoverageSpecial.hlsli"
+#if COV_PRESHADE_CLASSES == 1
+#include "Passes/Material/MaterialCut.hlsli"
+#elif COV_PRESHADE_CLASSES == 2
+#include "Passes/Material/MaterialTerrain.hlsli"
+#endif
 #include "Passes/Atmosphere/Froxel.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/Visibility/Coverage.hlsli"
@@ -169,44 +179,122 @@ float covLocalVisibility(CovFragmentShadow s, FroxelSrvs froxels, uint2 pixel, f
 
 // Exposed linear radiance of one fragment (the band A kernel's lighting for a surface point: ShadeOpaque.hlsl); 'element'
 // is its record's element in coverageRecords (S's per-record sun byte).
+// The covered region's centroid in the pixel, where V evaluated the fragment's depth (the pixel centre when a vertex lies
+// behind the eye).
+float2 covFragmentCentre(MVertex v0, MVertex v1, MVertex v2, uint2 pixel)
+{
+    const float3 a = covProject(v0.world - g_cameraPosition), b = covProject(v1.world - g_cameraPosition), c = covProject(v2.world - g_cameraPosition);
+    float2 centre = float2(pixel) + 0.5;
+    if (min(a.z, min(b.z, c.z)) > 0) coverageTriangleAreaCentroid(a.xy, b.xy, c.xy, float2(pixel), centre);
+    return centre;
+}
+
+// A fragment's material at its footprint (Resolve.hlsl): Standard textures, or with COV_PRESHADE_CLASSES the class's.
+struct CovMaterial
+{
+    float3 baseColor;
+    float roughness, metallic;
+    float3 normal;    // world, unit (before the side and view rules)
+    float variance;   // slope variance (geometric + textures)
+};
+CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTextureSet ts)
+{
+    float3 baseColor = m.baseColor, n;
+    float roughness = m.roughness, metallic = m.metallic;
+    float variance = (dot(sf.dndx, sf.dndx) + dot(sf.dndy, sf.dndy)) / 12.0;
+#if COV_PRESHADE_CLASSES == 1
+    if (materialClass(m) == MATERIAL_CUT)
+    {
+        // A11 cut faces (MaterialCut.hlsli), as the resolve (no material experiments here)
+        const MCutMaterial cm = mCutEvaluate(mCutFrame(visId, P[1].x, sf), sf, m, ts, 0);
+        baseColor = cm.baseColor, roughness = cm.roughness, metallic = cm.metallic, n = cm.normal;
+        variance += cm.variance;
+    }
+    else
+#elif COV_PRESHADE_CLASSES == 2
+    if (materialClass(m) == MATERIAL_TERRAIN)
+    {
+        // C5 terrain layers (MaterialTerrain.hlsli), as the resolve
+        const MTerrainMaterial tm = mTerrainEvaluate(sf, m, P[1].y, 0);
+        baseColor = tm.baseColor, roughness = tm.roughness, metallic = tm.metallic, n = tm.normal;
+        variance += tm.variance;
+    }
+    else
+#endif
+    {
+        if (ts.baseColor != UNX_NONE)
+        {
+            Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
+            baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, sf.uv, sf.duvdx, sf.duvdy).rgb;
+        }
+        if (ts.roughMetal != UNX_NONE)
+        {
+            Texture2D<float4> t = ResourceDescriptorHeap[ts.roughMetal];
+            const float2 rm = mSampleGrad(t, (ts.flags & M_TEX_ROUGH_METAL) != 0, sf.uv, sf.duvdx, sf.duvdy).xy;
+            roughness *= rm.x;
+            metallic *= rm.y;
+        }
+        if (ts.moments != UNX_NONE)
+        {
+            Texture2D<float4> t = ResourceDescriptorHeap[ts.moments];
+            const MSlopeMoments mm = mNormalMoments(t, sf.uv, sf.duvdx, sf.duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
+            const float3 B = sf.tangentSign * cross(sf.normal, sf.tangent);
+            n = normalize(sf.tangent * mm.mean.x + B * mm.mean.y + sf.normal);
+            variance += mm.variance;
+        }
+        else n = normalize(sf.normal);
+    }
+    CovMaterial o;
+    o.baseColor = baseColor;
+    o.roughness = roughness;
+    o.metallic = metallic;
+    o.normal = n;
+    o.variance = variance;
+    return o;
+}
+
+// COV_PRESHADE_LIGHT (CoverageSpecial.hlsl MODE=3): the material a class kernel stored for this special entry
+// (g_covPreshadeSlot; P[5].y raw SRV, 48 B per entry: base colour, roughness, normal, metallic, variance; f32).
+#if COV_PRESHADE_LIGHT
+static uint g_covPreshadeSlot;
+#endif
+void covStoreMaterial(RWByteAddressBuffer b, uint slot, CovMaterial c)
+{
+    b.Store4(48 * slot, uint4(asuint(c.baseColor), asuint(c.roughness)));
+    b.Store4(48 * slot + 16, uint4(asuint(c.normal), asuint(c.metallic)));
+    b.Store(48 * slot + 32, asuint(c.variance));
+}
+CovMaterial covLoadMaterial(ByteAddressBuffer b, uint slot)
+{
+    const uint4 a = b.Load4(48 * slot), d = b.Load4(48 * slot + 16);
+    CovMaterial c;
+    c.baseColor = asfloat(a.xyz);
+    c.roughness = asfloat(a.w);
+    c.normal = asfloat(d.xyz);
+    c.metallic = asfloat(d.w);
+    c.variance = asfloat(b.Load(48 * slot + 32));
+    return c;
+}
+
 float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
 {
     // The triangle and the covered region's centroid in this pixel, where V evaluated the fragment's depth.
     const MTriangleIdentity id = mTriangleIdentity(visId, P[1].x);
     const MVertex v0 = mTriangleVertex(visId, P[1].x, 0), v1 = mTriangleVertex(visId, P[1].x, 1), v2 = mTriangleVertex(visId, P[1].x, 2);
-    const float3 a = covProject(v0.world - g_cameraPosition), b = covProject(v1.world - g_cameraPosition), c = covProject(v2.world - g_cameraPosition);
-    float2 centre = float2(pixel) + 0.5;
-    if (min(a.z, min(b.z, c.z)) > 0) coverageTriangleAreaCentroid(a.xy, b.xy, c.xy, float2(pixel), centre);
+    const float2 centre = covFragmentCentre(v0, v1, v2, pixel);
     const MSurface sf = mSurfaceFromVertices(id, v0, v1, v2, centre);
 
     // Material at the footprint (Resolve.hlsl).
     const GpuMaterial m = loadMaterial(sf.material);
     const MTextureSet ts = mLoadTextureSet(P[1].y, sf.material);
-    float3 baseColor = m.baseColor;
-    if (ts.baseColor != UNX_NONE)
-    {
-        Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
-        baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, sf.uv, sf.duvdx, sf.duvdy).rgb;
-    }
-    float roughness = m.roughness, metallic = m.metallic;
-    if (ts.roughMetal != UNX_NONE)
-    {
-        Texture2D<float4> t = ResourceDescriptorHeap[ts.roughMetal];
-        const float2 rm = mSampleGrad(t, (ts.flags & M_TEX_ROUGH_METAL) != 0, sf.uv, sf.duvdx, sf.duvdy).xy;
-        roughness *= rm.x;
-        metallic *= rm.y;
-    }
-    float variance = (dot(sf.dndx, sf.dndx) + dot(sf.dndy, sf.dndy)) / 12.0;
-    float3 n;
-    if (ts.moments != UNX_NONE)
-    {
-        Texture2D<float4> t = ResourceDescriptorHeap[ts.moments];
-        const MSlopeMoments mm = mNormalMoments(t, sf.uv, sf.duvdx, sf.duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
-        const float3 B = sf.tangentSign * cross(sf.normal, sf.tangent);
-        n = normalize(sf.tangent * mm.mean.x + B * mm.mean.y + sf.normal);
-        variance += mm.variance;
-    }
-    else n = normalize(sf.normal);
+#if COV_PRESHADE_LIGHT
+    ByteAddressBuffer preshaded = ResourceDescriptorHeap[P[5].y];
+    const CovMaterial cmat = covLoadMaterial(preshaded, g_covPreshadeSlot);
+#else
+    const CovMaterial cmat = covFragmentMaterial(visId, sf, m, ts);
+#endif
+    float3 baseColor = cmat.baseColor, n = cmat.normal;
+    float roughness = cmat.roughness, metallic = cmat.metallic, variance = cmat.variance;
     const bool backSide = !sf.front && (m.classFlags & MATERIAL_TWO_SIDED) != 0;
     if (backSide) n = -n;
     if (P[7].z != UNX_NONE || P[7].w != UNX_NONE)
@@ -362,8 +450,14 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         const float3 nv = NoV > 0 ? n : -n;
         const float3 r = reflect(-v, n);
         const bool wantRadiance = NoV > 0 && (experiment & 4) == 0;
+#if COV_PRESHADE_CLASSES
+        // (one thread per record, no tile group: the probes straight from R's texture, the values the tile cache copies)
+        const ScreenProbeLighting g = screenProbeGather(probes, pixel, worldPos, nv, linearZ, foliage && (experiment & 2) == 0, wantRadiance, r,
+                                                        reflectionLobeHalfAngle(s.roughness, NoV));
+#else
         const ScreenProbeLighting g = screenProbeGatherTile(probes, pixel / M_TILE, pixel, worldPos, nv, linearZ, foliage && (experiment & 2) == 0, wantRadiance, r,
                                                             reflectionLobeHalfAngle(s.roughness, NoV));
+#endif
         if ((experiment & 2) == 0)
         {
             if (NoV > 0) radiance += front * (g.irradiance * g.occlusion);
@@ -372,6 +466,19 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         if (wantRadiance) radiance += g.radiance * shSpecularAlbedo(f0, NoV, s.roughness);
     }
     return (radiance * airTransmittance + airInscatter) * g_exposure;
+}
+
+// A fragment's exposed radiance in the composite: a cluster record is shaded here, a special record (top bits != 00) is
+// read from ViewResources::coverageRecordRadiance (P[8].y), where its owner shaded it before the composite (v1.75).
+float3 covFragmentRadiance(uint visId, uint element, uint2 pixel, uint experiment)
+{
+    if ((visId >> 30) != 0)
+    {
+        if (P[8].y == UNX_NONE) return 0;  // (a view without V's special list: nobody shaded it; never a cluster decode)
+        ByteAddressBuffer shaded = ResourceDescriptorHeap[P[8].y];
+        return covUnpackRadiance(shaded.Load2(element * 8));
+    }
+    return covShadeFragment(visId, element, pixel, experiment);
 }
 
 #endif

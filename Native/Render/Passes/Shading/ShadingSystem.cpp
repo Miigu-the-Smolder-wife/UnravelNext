@@ -354,6 +354,30 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         res.edgeArgs = fc.graph.createBuffer({ "m.edge args", 24, 0 });  // dispatch args + pixel count (Edge.hlsli)
         res.edgeTiles = fc.graph.createTexture({ "m.edge tile mask", o.tilesX, o.tilesY, 1, 1, DXGI_FORMAT_R32G32_UINT });  // 64 bits per tile
         table.views.push_back({ view.frameConstants, res });
+        // v1.75: the band A radiance the composites put behind fragments (W writes its interior water here too), and the
+        // special records' radiance (CoverageSpecial.hlsli): kinds 1 and 2 get 0 before tracks::water, their owners
+        // overwrite them (W: kind 2 in tracks::water), M shades kind 5 before the composite.
+        view.bandARadiance = res.edgeRadiance;
+        if (coverage && v.coverageSpecial.valid())
+        {
+            const uint64_t elements = fc.graph.desc(v.coverageRecords).size / 16;
+            const BufferRef shaded = fc.graph.createBuffer({ "m.coverage record radiance", std::max<uint64_t>(elements, 1) * 8, 0 });
+            view.coverageRecordRadiance = shaded;
+            ID3D12PipelineState* defaults = fc.shaders.compute("Passes/Shading/CoverageSpecial.MODE0.AREA0");
+            const BufferRef special = v.coverageSpecial;
+            fc.graph.addPass("m.coverage.special default", QueueType::Graphics,
+                             [&](PassBuilder& b) {
+                                 b.use(special, Use::SrvCompute);
+                                 b.use(special, Use::IndirectArgs);
+                                 b.use(shaded, Use::UavCompute);
+                             },
+                             [=](PassContext& c) {
+                                 const uint32_t k[4] = { gpu::kNone, c.srv(special), gpu::kNone, c.uav(shaded) };
+                                 c.cmd->SetPipelineState(defaults);
+                                 c.computeConstants(k, 4);
+                                 c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
+                             });
+        }
     }
     else
     {
@@ -749,6 +773,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             k[30] = r.surfaceConstants.valid() ? c.srv(r.surfaceConstants) : gpu::kNone;  // P[7].z (A7 surface layers)
             k[31] = r.weather != UINT32_MAX ? r.weather : gpu::kNone;                  // P[7].w
             k[32] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : gpu::kNone;  // P[8].x (A8; the arrays hold 48)
+            k[33] = v.coverageRecordRadiance.valid() ? c.srv(v.coverageRecordRadiance) : gpu::kNone;  // P[8].y (v1.75)
         };
         auto shadingConstants = [=](PassContext& c, uint32_t (&k)[24], uint32_t colour) {
             const uint32_t none = gpu::kNone;
@@ -768,11 +793,66 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         };
 
         addBegin("m.coverage.begin", 0, 0);
+        // v1.75: the special records of M's pre-shaded classes (kind 5: Cut, Terrain), shaded once each before the composite
+        // reads them (CoverageSpecial.hlsl): the material of each class into M's scratch (MODE 1 Cut, 2 Terrain), then the
+        // lighting of every kind 5 entry (MODE 3) - apart, as together they exceed the 200 KB DXIL limit.
+        const BufferRef shaded = v.coverageRecordRadiance, special = v.coverageSpecial;
+        if (shaded.valid())
+        {
+            const uint64_t entries = std::max<uint64_t>((fc.graph.desc(special).size / 4 - 4) / 2, 1);  // header 4 words, 2 per entry
+            const BufferRef scratch = g.createBuffer({ "m.coverage special materials", entries * 48, 0 });
+            for (const char* mode : { "1", "2" })  // Cut, Terrain
+            {
+                ID3D12PipelineState* kernel = fc.shaders.compute((std::string("Passes/Shading/CoverageSpecial.MODE") + mode + ".AREA0").c_str());
+                g.addPass("m.coverage.special material", QueueType::Graphics,
+                          [&](PassBuilder& b) {
+                              b.use(v.coverageRecords, Use::SrvCompute);
+                              b.use(v.visibleClusters, Use::SrvCompute);
+                              b.use(special, Use::SrvCompute);
+                              b.use(special, Use::IndirectArgs);
+                              b.use(v.coverageTileList, Use::SrvCompute);
+                              b.use(scratch, Use::UavComputeDisjoint);  // (each entry is one class: the kernels write disjoint slots)
+                          },
+                          [=](PassContext& c) {
+                              uint32_t k[8] = { c.srv(v.coverageRecords), c.srv(special), c.srv(v.coverageTileList), c.uav(scratch),
+                                                c.srv(v.visibleClusters), o.textureTableSrv, 0, 0 };
+                              c.cmd->SetPipelineState(kernel);
+                              c.bindFrameConstants(cb);
+                              c.computeConstants(k, 8);
+                              c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
+                          });
+            }
+            ID3D12PipelineState* lit = fc.shaders.compute(("Passes/Shading/CoverageSpecial.MODE3.AREA" + area).c_str());
+            g.addPass("m.coverage.special", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          useShading(b);
+                          b.use(special, Use::SrvCompute);
+                          b.use(special, Use::IndirectArgs);
+                          b.use(v.coverageTileList, Use::SrvCompute);
+                          b.use(scratch, Use::SrvCompute);
+                          b.use(shaded, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[24] = { c.srv(v.coverageRecords), c.srv(special), c.srv(v.coverageTileList), c.uav(shaded) };
+                          shadingConstants(c, k, gpu::kNone);
+                          k[21] = c.srv(scratch);  // P[5].y
+                          uint32_t k32[48] = {};
+                          std::memcpy(k32, k, sizeof k);
+                          k32[24] = k32[25] = gpu::kNone;
+                          fragmentConstants(c, k32);  // P[6].zw, P[7], P[8].x
+                          k32[33] = gpu::kNone;       // (the kernel writes the record radiance)
+                          c.cmd->SetPipelineState(lit);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k32, 48);
+                          c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
+                      });
+        }
         // E: per listed tile, light pixels composited, heavy pixels recorded.
         g.addPass("m.coverage", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       useShading(b);
                       useBandA(b);
+                      if (shaded.valid()) b.use(shaded, Use::SrvCompute);
                       b.use(v.coverageTilePixels, Use::SrvCompute);
                       b.use(v.coverageTileList, Use::SrvCompute);
                       b.use(v.coverageTileList, Use::IndirectArgs);
@@ -823,6 +903,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             g.addPass("m.coverage.round", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           useShading(b);
+                          if (shaded.valid()) b.use(shaded, Use::SrvCompute);
                           b.use(state, Use::UavCompute);
                           b.use(heavy, Use::UavCompute);
                           b.use(cursors, Use::UavCompute);

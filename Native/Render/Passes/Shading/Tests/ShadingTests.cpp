@@ -2698,11 +2698,208 @@ void testGlassComposite(TestFrame& tf, Report& report)
     }
 }
 
+// ---------------------------------------------------------------- 13. pre-shaded coverage records (CoverageSpecial.hlsl)
+// v1.75: band B records of an M pre-shaded class (kind 5, COV_PRESHADE_ID) are shaded before the composite into
+// ViewResources::coverageRecordRadiance - the class's material into a scratch per list entry, then the lighting of the
+// record at the pixel found from its element (tile list search) - and the composite reads the value. A ground plane in
+// band A and 120 blades in band B (records from edge functions at 32 subsamples, area = covered share, depth at the pixel
+// centre), rendered twice with the same records: blades of a Standard material, then of a Terrain material with one layer
+// equal to it (splat weight 1: the same base colour, roughness and normal), its records marked kind 5 and listed in the
+// special list. Every pixel must match the first image within the record radiance's f16 rounding (relative 2^-11 of a
+// record's share, plus the float sum's order), and the special list must hold every record.
+void testPreshadedRecords(TestFrame& tf, Report& report)
+{
+    auto buildScene = [](bool terrain) {
+        scene::Scene s;
+        s.name = "preshade test";
+        scene::Material ground;
+        ground.name = "ground";
+        ground.baseColor = { 0.5f, 0.45f, 0.4f };
+        ground.roughness = 0.6f;
+        s.materials.push_back(ground);
+        scene::Material blade;
+        blade.name = "blade";
+        blade.baseColor = { 0.3f, 0.55f, 0.2f };
+        blade.roughness = 0.45f;
+        blade.metallic = 0.2f;
+        if (!terrain)
+            s.materials.push_back(blade);
+        else
+        {
+            scene::Texture splat;
+            splat.name = "splat";
+            splat.width = splat.height = 2;
+            splat.format = scene::TextureFormat::Rgba8Linear;
+            for (int i = 0; i < 4; ++i) splat.texels.insert(splat.texels.end(), { 255, 0, 0, 0 });
+            s.textures.push_back(splat);
+            scene::Material t;
+            t.name = "terrain";
+            t.cls = scene::MaterialClass::Terrain;
+            t.terrainSplat[0] = 0;
+            t.terrainLayers = { { 2, { 1, 1 }, { 0, 0 } } };
+            s.materials.push_back(t);  // index 1, as the Standard blade
+            s.materials.push_back(blade);  // the layer
+        }
+        const uint32_t plane = addPlane(s, 40, 0);
+        std::mt19937 rng(7702);
+        std::uniform_real_distribution<float> u01(0, 1);
+        scene::Mesh bm;
+        bm.name = "blades";
+        for (uint32_t sub = 0; sub < 4; ++sub)
+        {
+            const uint32_t first = (uint32_t)bm.indices.size();
+            for (uint32_t k = 0; k < 30; ++k)
+            {
+                const float3 c{ -1.6f + 3.2f * u01(rng), 0.15f + 1.6f * u01(rng), -1.5f - 2.5f * u01(rng) };
+                const float size = 0.02f + 0.2f * u01(rng);
+                float3 q[3];
+                for (int i = 0; i < 3; ++i) q[i] = c + float3{ size * (2 * u01(rng) - 1), size * (2 * u01(rng) - 1), size * (2 * u01(rng) - 1) };
+                if (dot(cross(q[1] - q[0], q[2] - q[0]), float3{ 0, 0.12f, 1 }) < 0) std::swap(q[1], q[2]);  // facing the camera
+                const float3 fn = normalize(cross(q[1] - q[0], q[2] - q[0]));
+                for (int i = 0; i < 3; ++i)
+                {
+                    bm.indices.push_back((uint32_t)bm.positions.size());
+                    bm.positions.push_back(q[i]);
+                    bm.normals.push_back(fn);
+                    bm.tangents.push_back({ 1, 0, 0, 1 });
+                    bm.uv0.push_back({ u01(rng), u01(rng) });
+                }
+            }
+            bm.submeshes.push_back({ first, (uint32_t)bm.indices.size() - first, 1 });
+        }
+        s.meshes.push_back(bm);
+        scene::Instance a;
+        a.mesh = plane;
+        s.instances.push_back(a);
+        scene::Instance b;
+        b.mesh = (uint32_t)s.meshes.size() - 1;
+        s.instances.push_back(b);
+        s.sun.direction = normalize(float3{ 0.3f, 0.6f, -0.75f });
+        scene::Camera cam;
+        cam.name = "preshade";
+        cam.position = { 0, 1.1f, 1.5f };
+        cam.forward = normalize(float3{ 0, -0.12f, -1 });
+        cam.ev100 = 13;
+        s.cameras.push_back(cam);
+        return s;
+    };
+
+    const uint32_t W = 320, H = 180, tilesX = (W + 7) / 8, tilesY = (H + 7) / 8;
+    std::shared_ptr<std::vector<uint8_t>> images[2];
+    uint32_t recordCount = 0, listedSpecial = 0;
+    for (int run = 0; run < 2; ++run)
+    {
+        const scene::Scene s = buildScene(run == 1);
+        tf.setScene(s, { 1 });
+        ViewDesc desc;
+        tf.run([&](FramePassContext& fc) { desc = tf.mainView(fc, W, H, 0).view; });
+        auto project = [&](float3 w, double& px, double& py, double& z) {
+            const double o[3] = { (double)w.x - desc.position.x, (double)w.y - desc.position.y, (double)w.z - desc.position.z };
+            double vv[3];
+            for (int r = 0; r < 3; ++r) vv[r] = desc.view.m[r][0] * o[0] + desc.view.m[r][1] * o[1] + desc.view.m[r][2] * o[2];
+            double clip[4];
+            for (int r = 0; r < 4; ++r) clip[r] = desc.proj.m[r][0] * vv[0] + desc.proj.m[r][1] * vv[1] + desc.proj.m[r][2] * vv[2] + desc.proj.m[r][3];
+            px = (clip[0] / clip[3] * 0.5 + 0.5) * W;
+            py = (0.5 - clip[1] / clip[3] * 0.5) * H;
+            z = clip[2] / clip[3];
+        };
+        const scene::Mesh& bm = s.meshes.back();
+        const uint32_t visibleBlades = tf.vis.rasterised;
+        std::vector<std::vector<std::array<uint32_t, 4>>> tileRecords(tilesX * tilesY);
+        for (uint32_t t = 0; t < (uint32_t)bm.indices.size() / 3; ++t)
+        {
+            double sx[3], sy[3], sz[3];
+            for (int i = 0; i < 3; ++i) project(bm.positions[bm.indices[3 * t + i]], sx[i], sy[i], sz[i]);
+            const double det = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
+            if (std::fabs(det) < 1e-9) continue;
+            const int x0 = std::max(0, (int)std::floor(std::min({ sx[0], sx[1], sx[2] }))), x1 = std::min((int)W - 1, (int)std::floor(std::max({ sx[0], sx[1], sx[2] })));
+            const int y0 = std::max(0, (int)std::floor(std::min({ sy[0], sy[1], sy[2] }))), y1 = std::min((int)H - 1, (int)std::floor(std::max({ sy[0], sy[1], sy[2] })));
+            const uint32_t visId = ((((visibleBlades + t / 30) << 7) | (t % 30)) + 1) | (run == 1 ? 0x40000000u : 0u);  // COV_PRESHADE_ID
+            for (int py = y0; py <= y1; ++py)
+                for (int px = x0; px <= x1; ++px)
+                {
+                    uint32_t mask = 0;
+                    for (uint32_t i = 0; i < 32; ++i)
+                    {
+                        uint32_t r = 0;
+                        for (int bit = 0; bit < 5; ++bit) r |= ((i >> bit) & 1u) << (4 - bit);
+                        const double qx = px + (i + 0.5) / 32.0, qy = py + r / 32.0 + 1.0 / 64.0;
+                        double w[3];
+                        for (int e = 0; e < 3; ++e)
+                        {
+                            const int e1 = (e + 1) % 3, e2 = (e + 2) % 3;
+                            w[e] = ((sx[e2] - sx[e1]) * (qy - sy[e1]) - (sy[e2] - sy[e1]) * (qx - sx[e1])) / det;
+                        }
+                        if (w[0] >= 0 && w[1] >= 0 && w[2] >= 0) mask |= 1u << i;
+                    }
+                    if (!mask) continue;
+                    double bc[3];
+                    for (int e = 0; e < 3; ++e)
+                    {
+                        const int e1 = (e + 1) % 3, e2 = (e + 2) % 3;
+                        bc[e] = ((sx[e2] - sx[e1]) * (py + 0.5 - sy[e1]) - (sy[e2] - sy[e1]) * (px + 0.5 - sx[e1])) / det;
+                    }
+                    const float depth = (float)(bc[0] * sz[0] + bc[1] * sz[1] + bc[2] * sz[2]);
+                    if (!(depth > 0)) continue;
+                    uint32_t bits = 0;
+                    for (uint32_t m = mask; m; m &= m - 1) ++bits;
+                    uint32_t depthBits;
+                    std::memcpy(&depthBits, &depth, 4);
+                    const uint32_t packed = ((uint32_t)std::lround(bits / 32.0 * 1023) << 16) | ((uint32_t)((px % 8) + 8 * (py % 8)) << 26) | 0x8080u;
+                    tileRecords[(py / 8) * tilesX + px / 8].push_back({ visId, depthBits, mask, packed });
+                }
+        }
+        const TestCoverageLayer layer(tf.device, tilesX, tilesY, tileRecords);
+        recordCount = layer.stored;
+        // V's special list (v1.73): header { count, groups, 1, 1 }, then { element, kind 5 } per pre-shaded record.
+        std::vector<uint32_t> special = { 0, 0, 1, 1 };
+        for (uint32_t e = 0; e < layer.stored; ++e)
+            if ((layer.records[4 * e] >> 30) == 1u) special.insert(special.end(), { e, 5u });
+        const uint32_t count = (uint32_t)(special.size() - 4) / 2;
+        special[0] = count;
+        special[1] = std::max((count + 63) / 64, 1u);
+        if (run == 1) listedSpecial = count;
+        special.resize(special.size() + 2, 0);  // (one spare entry: the capacity is above the count, as V sizes it)
+        const ComPtr<ID3D12Resource> specialBuf = uploadStatic(tf.device, special.data(), special.size() * 4, L"test coverage special");
+        tf.frame.outputLinearHdr = true;
+        tf.run([&](FramePassContext& fc) {
+            ViewResources v = tf.mainView(fc, W, H, 0);
+            v.color = fc.graph.createTexture({ "m.test.preshade color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+            tf.vis.record(fc, v);
+            tracks::materialResolve(fc, v);
+            layer.install(fc.graph, v);
+            v.coverageSpecial = fc.graph.importBuffer(specialBuf.Get(), { "test coverage special", special.size() * 4, 0 });
+            tracks::shading(fc, v);
+            images[run] = tf.readback(fc, v.color);
+        });
+        tf.frame.outputLinearHdr = false;
+    }
+    double worst = 0;
+    uint32_t differing = 0;
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+        {
+            const float4 a = texelOf<float4>(*images[0], W, x, y), b = texelOf<float4>(*images[1], W, x, y);
+            const double da[3] = { a.x, a.y, a.z }, db[3] = { b.x, b.y, b.z };
+            for (int c = 0; c < 3; ++c)
+            {
+                const double rel = std::abs(da[c] - db[c]) / std::max(std::abs(da[c]), 1e-6);
+                differing += rel > 0;
+                worst = std::max(worst, rel);
+            }
+        }
+    logf("preshade: %u records, %u listed as kind 5, %u channel values differ\n", recordCount, listedSpecial, differing);
+    report(recordCount > 1000 && listedSpecial == recordCount, "preshade: every blade record listed as an M pre-shaded record", (double)(recordCount - listedSpecial), 0);
+    // f16 radiance: 2^-11 relative per record share (the band A remainder is the same texel in both)
+    report(worst <= 1.0e-3, "preshade: Terrain(1 layer = Standard) records pre-shaded = Standard records shaded in the composite", worst, 1.0e-3);
+    report(differing > 0, "preshade: the pre-shaded path ran (its f16 rounding shows)", differing > 0 ? 0.0 : 1.0, 0);
+}
+
 int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false;
+        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, preshadeOnly = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -2712,10 +2909,17 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
             if (std::string(argv[i]) == "--coverage-growth") growth = true;
             if (std::string(argv[i]) == "--glass") glassOnly = true;
+            if (std::string(argv[i]) == "--preshade") preshadeOnly = true;
         }
         Report report;
         testTable(report);
         TestFrame tf(debugLayer, gpuValidation);
+        if (preshadeOnly)  // --preshade: test 13 alone
+        {
+            testPreshadedRecords(tf, report);
+            logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
+            return report.failures ? 1 : 0;
+        }
         for (const std::string& o : overrides) tf.quality.applyOverride(o);
         if (growth)
         {
@@ -2740,6 +2944,7 @@ int main(int argc, char** argv)
         testCoverageComposite(tf, report);
         testPlanarProducts(tf, report);
         testGlassComposite(tf, report);
+        testPreshadedRecords(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

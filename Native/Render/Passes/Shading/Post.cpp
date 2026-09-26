@@ -190,6 +190,7 @@ bool postActive(FramePassContext& fc, const ViewResources& view)
     if (view.view.kind != gpu::ViewKind::Main || fc.frame.outputLinearHdr) return false;
     if (fc.frame.displayPeak > 0) return true;  // an HDR display: the chain writes its encoding
     if (translucentActive(fc, view)) return true;  // A10: glass composited over the float image
+    if (view.waterVis.valid()) return true;  // B8/W: tracks::water refracts the float band A image and writes water into it
     if (depthOfFieldActive(fc, view)) return true;  // A5: the lens integral's float image is encoded by the chain
     if (motionBlurActive(fc, view) || distortionActive(fc, view)) return true;  // their float image is encoded by the chain
     const PostParams p = params(fc.quality);

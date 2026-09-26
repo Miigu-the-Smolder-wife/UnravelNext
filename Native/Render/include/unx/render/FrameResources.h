@@ -36,6 +36,13 @@ struct ViewResources
                                    // special record uint2 { coverageRecords element, kind } (1 hair, 2 triangle stream,
                                    // 5 M pre-shaded cluster class: COV_PRESHADE_ID);
                                    // no defined order; past the capacity: OVERFLOW_COVERAGE_SPECIAL (it grows)
+    BufferRef coverageRecordRadiance;  // raw (v1.75), 8 B per coverageRecords element: uint2 { f16 r | f16 g << 16,  [M]
+                                   // f16 b } exposed linear radiance with aerial perspective (the composite's unit) of the
+                                   // records listed in coverageSpecial, written by their owners before the composite:
+                                   // M kind 5 (and 0 for kinds 1, 2 before tracks::water), W kind 2 in tracks::water
+    TextureRef bandARadiance;      // RGBA16F (v1.75): M's band A exposed radiance kept for edge and coverage-tile pixels,  [M]
+                                   // what the E and coverage composites put behind fragments; W writes its interior water
+                                   // pixels here too (tracks::water), so fragments over water composite over the water
     TextureRef coverageDepthRange; // R32G32_UINT per pixel: its records' nearest (max) and farthest  [V]
                                    // (min) depth bits, see-through included; (0, 0xFFFFFFFF) = none
     BufferRef coverageChunkTable;  // v1.40 names until M's composite reads the ranges: the table is   [V]
