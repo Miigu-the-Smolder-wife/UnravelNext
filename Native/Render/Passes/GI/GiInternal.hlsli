@@ -180,6 +180,13 @@ uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anch
         if (previous == key)
         {
             const uint found = b.Load(address + 8);
+            if ((h.flags & 1u) != 0 && found == GI_ENTRY_PENDING)
+            {
+                // Its creator has not published the entry yet: the candidate goes to the table slot (GiDetFold), so the
+                // anchor does not depend on arrival order.
+                uint64_t previousSlot;
+                b.InterlockedMin64(h.offSlotAnchor + slot * 8, giPackAnchorCandidate(h, key, anchor, normal), previousSlot);
+            }
             giDetAnchorCandidate(b, h, found, key, anchor, normal);
             return found;
         }

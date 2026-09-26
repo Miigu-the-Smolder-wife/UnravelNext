@@ -30,7 +30,7 @@ uint32_t asU(float f)
 // Cache buffer layout (GiCache.hlsli header fields 4..11, 24..27).
 struct Layout
 {
-    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, end;
+    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, slotAnchor, end;
 };
 
 Layout layoutOf(const GiSettings& s)
@@ -50,7 +50,8 @@ Layout layoutOf(const GiSettings& s)
     l.mapOwner = l.shTable + 64 * 36;
     l.anchorMin = l.mapOwner + s.capacity * 4;
     l.irr = l.anchorMin + s.capacity * 8;
-    l.end = l.irr + s.capacity * 336;  // GI_IRR_STRIDE
+    l.slotAnchor = l.irr + s.capacity * 336;  // GI_IRR_STRIDE
+    l.end = l.slotAnchor + s.tableSlots * 8;  // deterministic anchors per table slot (GiDetFold)
     return l;
 }
 
@@ -177,6 +178,7 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[37] = l.mapOwner;  // GI_H_MAP_OWNER
     h[60] = l.anchorMin; // deterministic anchors (GiHeader.offAnchorMin)
     h[62] = l.irr;       // irradiance maps (GiHeader.offIrr)
+    h[63] = l.slotAnchor;  // deterministic anchors per table slot (GiHeader.offSlotAnchor)
     for (uint32_t e = 0; e < m_settings.capacity; ++e) head[l.freeList / 4 + e] = m_settings.capacity - 1 - e;  // pops 0, 1, 2 ...
     for (uint32_t t = 0; t < m_settings.tableSlots; ++t) head[l.table / 4 + t * 4 + 2] = 0xFFFFFFFFu;
     std::memcpy(&tail[(l.shTable - l.hitStamp) / 4], shTable.data(), shTable.size() * 4);
@@ -256,6 +258,8 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     uint32_t cam[3];
     std::memcpy(cam, &camera, 12);
     compute("r.gi.begin", "Passes/GI/GiBegin", 1, { frame, m_epoch, s.deterministic ? 1u : 0u, cam[0], cam[1], cam[2] });
+    // Deterministic anchors: last frame's per-slot candidates (its ray passes) into the entries before the table clears.
+    if (s.deterministic) compute("r.gi.det.fold", "Passes/GI/GiDetFold", groups(s.tableSlots), {});
     compute("r.gi.evict", "Passes/GI/GiEvict", groups(s.capacity), {});
     compute("r.gi.clear", "Passes/GI/GiTableClear", groups(s.tableSlots), {});
     compute("r.gi.rehash", "Passes/GI/GiRehash", groups(s.capacity), {});
@@ -272,7 +276,11 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
               });
-    if (s.deterministic) compute("r.gi.det.anchors", "Passes/GI/GiDetAnchors", groups(s.capacity), {});  // before any ray leaves an anchor
+    if (s.deterministic)
+    {
+        compute("r.gi.det.foldplace", "Passes/GI/GiDetFold", groups(s.tableSlots), {});  // the probe placement's candidates
+        compute("r.gi.det.anchors", "Passes/GI/GiDetAnchors", groups(s.capacity), {});  // before any ray leaves an anchor
+    }
     compute("r.gi.carry", "Passes/GI/GiCarry", groups(s.capacity), {});
     compute("r.gi.age", "Passes/GI/GiAgeHistogram", (s.capacity + 127) / 128, {});
     compute("r.gi.setup", "Passes/GI/GiUpdateSetup", 1, { s.updatesPerFrame, asU(s.hitUpdateShare) });

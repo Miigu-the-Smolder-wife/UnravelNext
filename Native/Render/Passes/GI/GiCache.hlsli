@@ -68,6 +68,8 @@ struct GiHeader
     uint hitCount0, hitCount1, jacobiUpdates, historyMax;
     uint offAnchorMin, flags;         // deterministic anchors (per entry 64-bit min of packed candidates); flags bit 0 = gi.deterministic
     uint offIrr;                      // irradiance maps (GI_IRR_STRIDE per entry)
+    uint offSlotAnchor;               // deterministic anchors: per table slot 64-bit min of the candidates of threads that
+                                      // found the key with its entry not yet published (GiDetFold)
 };
 
 template <typename B>
@@ -83,8 +85,8 @@ GiHeader giHeader(B b)
     h.camera = asfloat(r5.xyz); h.maxLevel = r5.w;
     h.offSelected = r6.x; h.offHitStamp = r6.y; h.offHitList = r6.z; h.offShTable = r6.w;
     h.hitCount0 = r7.x; h.hitCount1 = r7.y; h.jacobiUpdates = r7.z; h.historyMax = r7.w;
-    const uint3 r15 = b.Load3(240);
-    h.offAnchorMin = r15.x; h.flags = r15.y; h.offIrr = r15.z;
+    const uint4 r15 = b.Load4(240);
+    h.offAnchorMin = r15.x; h.flags = r15.y; h.offIrr = r15.z; h.offSlotAnchor = r15.w;
     return h;
 }
 
