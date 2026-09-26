@@ -545,7 +545,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     else
         buildStaticTlas();
     {
-        m_descSlotBytes = (uint64_t)(m_dynamicDescs.size() + m_runtimeInstanceCap + m_staticDescs.size() + 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+        m_descSlotBytes = (uint64_t)(m_dynamicDescs.size() + m_runtimeInstanceCap + kMaxTriangleStreams + m_staticDescs.size() + 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
         m_descSlotBytes = (m_descSlotBytes + 255) / 256 * 256;
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_UPLOAD };
         D3D12_RESOURCE_DESC1 d{};
@@ -1564,6 +1564,7 @@ void RayScene::record(FramePassContext& fc)
             }
     }
     recordRuntime(fc, slotDescs);  // runtime geometry after the load-time dynamic instances
+    recordStreams(fc, slotDescs);  // W's triangle streams after those (R-W2)
     // Diagnostics (every 64 frames): what the dynamic TLAS builder is given.
     if (fc.frame.frameIndex % 64 == 0)
     {
@@ -1679,6 +1680,7 @@ void RayScene::record(FramePassContext& fc)
               [&](PassBuilder& b) {
                   if (frame.deformedBlas.valid()) b.use(frame.deformedBlas, Use::AccelerationStructureRead);
                   if (frame.runtimePool.valid()) b.use(frame.runtimePool, Use::AccelerationStructureRead);
+                  if (frame.streamPool.valid()) b.use(frame.streamPool, Use::AccelerationStructureRead);
                   b.use(frame.tlasDynamic, Use::AccelerationStructureWrite);
                   b.use(scratch, Use::AccelerationStructureScratch);
                   if (dynamicDescCopy) b.use(*dynamicDescCopy, Use::AccelerationStructureInput);
@@ -1730,7 +1732,7 @@ void RayScene::recordDynamicTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRT
     {
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS capacity = inputs;
-        capacity.NumDescs = (UINT)(m_dynamicDescs.size() + m_runtimeInstanceCap);  // room for every runtime instance
+        capacity.NumDescs = (UINT)(m_dynamicDescs.size() + m_runtimeInstanceCap + kMaxTriangleStreams);  // room for every runtime instance and stream
         m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&capacity, &sizes);
         m_tlasDynamic = createBuffer(sizes.ResultDataMaxSizeInBytes, false, true, L"RT dynamic TLAS");
         m_tlasScratch = createBuffer(sizes.ScratchDataSizeInBytes, true, false, L"RT dynamic TLAS scratch");
@@ -2302,6 +2304,111 @@ void giveRange(std::vector<std::pair<T, T>>& free, T first, T count)
     }
 }
 } // namespace
+
+void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DESC* slot)
+{
+    m_streamsNow.clear();
+    m_frame.streamPool = {};
+    struct StreamBuild
+    {
+        uint32_t slot;
+        BufferRef vertices;
+        uint32_t triangles;
+        uint64_t offset;
+    };
+    std::vector<StreamBuild> builds;
+    for (uint32_t k = 0; k < kMaxTriangleStreams; ++k)
+    {
+        const TriangleStream& ts = fc.resources.triangleStreams[k];
+        if (!ts.vertices.valid() || ts.maxTriangles == 0) continue;
+        builds.push_back({ k, ts.vertices, ts.maxTriangles, 0 });
+    }
+    if (builds.empty()) return;
+    // One pool for every stream's capacity (it grows with the streams; the old pool is released after its frames).
+    uint64_t total = 0;
+    for (StreamBuild& b : builds)
+    {
+        if (m_streamTriangles[b.slot] != b.triangles)
+        {
+            D3D12_RAYTRACING_GEOMETRY_DESC gd{};
+            gd.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            gd.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+            gd.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+            gd.Triangles.VertexCount = b.triangles * 3;
+            gd.Triangles.VertexBuffer.StrideInBytes = 32;
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
+            in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+            in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+            in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+            in.NumDescs = 1;
+            in.pGeometryDescs = &gd;
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
+            m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
+            m_streamBytes[b.slot] = (info.ResultDataMaxSizeInBytes + 255) / 256 * 256;
+            m_streamTriangles[b.slot] = b.triangles;
+            m_streamScratchBytes = std::max<uint64_t>(m_streamScratchBytes, (info.ScratchDataSizeInBytes + 255) / 256 * 256);
+        }
+        b.offset = total;
+        m_streamOffset[b.slot] = total;
+        total += m_streamBytes[b.slot];
+    }
+    if (m_streamPool.bytes < total)
+    {
+        if (m_streamPool.resource) m_device.deferRelease(m_streamPool.resource);
+        m_streamPool = createBuffer(total, true, true, L"RT stream BLAS pool");
+    }
+    const uint64_t scratchStride = std::max<uint64_t>(m_streamScratchBytes, 256);
+    if (m_streamScratch.bytes < scratchStride * builds.size())
+    {
+        if (m_streamScratch.resource) m_device.deferRelease(m_streamScratch.resource);
+        m_streamScratch = createBuffer(scratchStride * builds.size(), true, false, L"RT stream BLAS scratch");
+    }
+    // Descriptors: after the load-time dynamic and runtime instances; identity transform (the streams are in world space).
+    for (uint32_t j = 0; j < builds.size(); ++j)
+    {
+        D3D12_RAYTRACING_INSTANCE_DESC d{};
+        d.Transform[0][0] = d.Transform[1][1] = d.Transform[2][2] = 1;
+        d.InstanceID = kRtInstanceStreamBase + builds[j].slot;
+        d.InstanceMask = kRtMaskFluid;
+        d.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE | D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE;
+        d.AccelerationStructure = m_streamPool.address() + builds[j].offset;
+        slot[m_dynamicCountNow + j] = d;
+        m_streamsNow.push_back({ builds[j].slot, builds[j].vertices });
+    }
+    m_dynamicCountNow += (uint32_t)builds.size();
+    RenderGraph& g = fc.graph;
+    const BufferRef pool = g.importBuffer(m_streamPool.resource.Get(), { "RT stream BLAS pool", m_streamPool.bytes, 0 });
+    const BufferRef scratch = g.importBuffer(m_streamScratch.resource.Get(), { "RT stream BLAS scratch", m_streamScratch.bytes, 0 });
+    m_frame.streamPool = pool;
+    g.addPass("r.as.streams", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  for (const StreamBuild& s : builds) b.use(s.vertices, Use::AccelerationStructureInput);
+                  b.use(pool, Use::AccelerationStructureWrite);
+                  b.use(scratch, Use::AccelerationStructureScratch);
+              },
+              [builds, pool, scratch, scratchStride](PassContext& c) {
+                  const D3D12_GPU_VIRTUAL_ADDRESS poolAddress = c.resource(pool)->GetGPUVirtualAddress(), scratchAddress = c.resource(scratch)->GetGPUVirtualAddress();
+                  for (size_t j = 0; j < builds.size(); ++j)
+                  {
+                      D3D12_RAYTRACING_GEOMETRY_DESC gd{};
+                      gd.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+                      gd.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+                      gd.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+                      gd.Triangles.VertexCount = builds[j].triangles * 3;
+                      gd.Triangles.VertexBuffer.StartAddress = c.resource(builds[j].vertices)->GetGPUVirtualAddress();
+                      gd.Triangles.VertexBuffer.StrideInBytes = 32;
+                      D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
+                      d.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+                      d.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+                      d.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+                      d.Inputs.NumDescs = 1;
+                      d.Inputs.pGeometryDescs = &gd;
+                      d.DestAccelerationStructureData = poolAddress + builds[j].offset;
+                      d.ScratchAccelerationStructureData = scratchAddress + j * scratchStride;
+                      c.cmd->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
+                  }
+              });
+}
 
 void RayScene::recordRuntime(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DESC* slot)
 {

@@ -45,7 +45,9 @@ struct DeformJob  // 16 B (Deform.hlsl)
 constexpr uint32_t kRtInstanceDeformed = 1u;
 constexpr uint32_t kRtGeometryProxyIndices = 1u;
 constexpr uint32_t kRtMaskGi = 1u, kRtMaskReflection = 2u, kRtMaskEmitter = 4u, kRtMaskAll = 0xFFu;
+constexpr uint32_t kRtMaskFluid = 8u;  // W's triangle streams (refraction rays only: no scene records to shade them)
 constexpr uint32_t kRtInstanceEmitter = 0xFFFFFEu;  // RT_INSTANCE_EMITTER (RayScene.hlsli)
+constexpr uint32_t kRtInstanceStreamBase = 0xFFFF00u;  // + stream slot (< 64): RT_INSTANCE_STREAM (RayScene.hlsli)
 
 struct DynamicTlasCensus  // the dynamic TLAS's instance descriptors (sampled every 64 frames)
 {
@@ -105,6 +107,9 @@ public:
     void record(FramePassContext& fc);
     // Declares what a tracing pass of this frame reads (both TLASes, deformed BLASes and vertices).
     void declareTraversal(PassBuilder& b) const;
+    // W's triangle streams traced this frame (FrameResources::triangleStreams slot, vertex buffer): refraction rays see
+    // them (mask kRtMaskFluid, instance id kRtInstanceStreamBase + slot; R-W2).
+    const std::vector<std::pair<uint32_t, BufferRef>>& streams() const { return m_streamsNow; }
     // Bindless indices for ray libraries: root constants P[6], P[7] (RtSceneSrvs; word 7 = this frame's local-light grid,
     // HitLocalLights.hlsli).
     void rootConstants(uint32_t out[8]) const;
@@ -213,6 +218,13 @@ private:
     // Writes the runtime instances' descriptors after the load-time dynamic ones (slot) and records the frame's BLAS
     // builds and record copy.
     void recordRuntime(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DESC* slot);
+    // W's triangle streams (R-W2): one BLAS per active stream, rebuilt every frame at the stream's capacity (unused
+    // vertices are degenerate: no hit) into m_streamPool, and a dynamic TLAS instance each after the runtime ones.
+    void recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DESC* slot);
+    Buffer m_streamPool, m_streamScratch;
+    uint64_t m_streamOffset[64] = {}, m_streamBytes[64] = {}, m_streamScratchBytes = 0;
+    uint32_t m_streamTriangles[64] = {};
+    std::vector<std::pair<uint32_t, BufferRef>> m_streamsNow;
     // The frame's light-grid slot for the header words written after record() (decals); publishes an empty grid when
     // record() had nothing to publish.
     uint8_t* lightSlot(FramePassContext& fc);
@@ -236,7 +248,7 @@ private:
 
     struct Frame  // graph references of the current frame
     {
-        BufferRef tlasStatic, tlasDynamic, deformedBlas, deformedVertices, exactCounts, instances, jobs, lightFunctions, runtimePool, geometries;
+        BufferRef tlasStatic, tlasDynamic, deformedBlas, deformedVertices, exactCounts, instances, jobs, lightFunctions, runtimePool, geometries, streamPool;
     };
     Frame m_frame;
 

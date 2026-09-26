@@ -53,6 +53,7 @@ const char* const kTraceLibrary[2] = { "Passes/Reflection/ReflectionTrace.SKY0",
 const char* const kInlineLibrary[2][2] = { { "Passes/Reflection/ReflectionTraceInline.SKY0.JOB1", "Passes/Reflection/ReflectionTraceInline.SKY0.JOB2" },
                                            { "Passes/Reflection/ReflectionTraceInline.SKY1.JOB1", "Passes/Reflection/ReflectionTraceInline.SKY1.JOB2" } };
 const char* const kShadeKernel[2] = { "Passes/Reflection/ReflectionShadeRays.SKY0", "Passes/Reflection/ReflectionShadeRays.SKY1" };
+const char* const kRefractLibrary[2] = { "Passes/Reflection/RefractionTrace.SKY0", "Passes/Reflection/RefractionTrace.SKY1" };
 constexpr const char* kShadowLibrary = "Passes/Reflection/ReflectionShadow";
 constexpr const char* kLocalShadowLibrary = "Passes/Reflection/ReflectionLocalShadow";
 } // namespace
@@ -412,6 +413,77 @@ void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
     m_historyHeight = height;
 }
 
+void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, BufferRef results, uint32_t maxJobs)
+{
+    if (!m_refract.valid || m_refract.frameIndex != fc.frame.frameIndex || maxJobs == 0 || !jobs.valid() || !results.valid()) return;
+    const RefractionInputs in = m_refract;
+    RenderGraph& g = fc.graph;
+    if (!m_streamTable)
+    {
+        D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
+        D3D12_RESOURCE_DESC1 d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        d.Width = 4 * 256;
+        d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+        d.SampleDesc.Count = 1;
+        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(m_device.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_streamTable)),
+              "R refraction stream table");
+        D3D12_RANGE none{ 0, 0 };
+        check(m_streamTable->Map(0, &none, reinterpret_cast<void**>(&m_streamTableMapped)), "map R refraction stream table");
+        for (uint32_t k = 0; k < 4; ++k)
+        {
+            m_streamTableSrv[k] = m_device.descriptors().allocateResource();
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sd.Format = DXGI_FORMAT_R32_TYPELESS;
+            sd.Buffer.FirstElement = k * 64;
+            sd.Buffer.NumElements = 64;
+            sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+            m_device.d3d()->CreateShaderResourceView(m_streamTable.Get(), &sd, m_device.descriptors().resourceCpu(m_streamTableSrv[k]));
+        }
+    }
+    const std::vector<std::pair<uint32_t, BufferRef>> streams = in.rays->streams();
+    rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline(kRefractLibrary[in.variant], { "RefractionGen" }));
+    uint8_t* table = m_streamTableMapped + (in.frameIndex % 4) * 256;
+    const uint32_t tableSrv = m_streamTableSrv[in.frameIndex % 4];
+    g.addPass("r.refract", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(jobs, Use::SrvGraphics);
+                  b.use(results, Use::UavGraphics);
+                  b.use(in.cache, Use::UavGraphics);
+                  rt::RayScene::declareVsm(b, in.vsm);
+                  in.rays->declareTraversal(b);
+                  in.rays->declareDecals(b);
+                  for (const auto& st : streams) b.use(st.second, Use::SrvGraphics);
+                  if (in.atmosphere)
+                      for (const TextureRef& t : in.luts) b.use(t, Use::SrvGraphics);
+              },
+              [&pipeline, in, jobs, results, maxJobs, streams, table, tableSrv](PassContext& c) {
+                  // The stream table: each traced stream slot's vertex buffer SRV (known at execution).
+                  uint32_t* t = reinterpret_cast<uint32_t*>(table);
+                  for (uint32_t k = 0; k < 64; ++k) t[k] = 0xFFFFFFFFu;
+                  for (const auto& st : streams) t[st.first] = c.srv(st.second);
+                  uint32_t k[32] = {};
+                  k[0] = c.srv(jobs), k[1] = c.uav(results), k[2] = maxJobs, k[3] = tableSrv;
+                  k[4] = asU(in.sky.x), k[5] = asU(in.sky.y), k[6] = asU(in.sky.z), k[7] = asU(in.rayLength);
+                  for (int i = 0; i < 4; ++i) k[8 + i] = in.atmosphere ? c.srv(in.luts[i]) : 0xFFFFFFFFu;
+                  k[12] = asU(in.sun.x), k[13] = asU(in.sun.y), k[14] = asU(in.sun.z), k[15] = 0xFFFFFFFFu;
+                  k[16] = k[17] = 0xFFFFFFFFu;
+                  k[18] = c.uav(in.cache);
+                  k[19] = 0;
+                  k[20] = (in.frame & 0xFFFFFFu) | (in.experiment << 24);
+                  k[21] = 0xFFFFFFFFu;
+                  k[22] = in.rays->vsmSrvs(c, in.vsm, in.frameIndex, 1);
+                  k[23] = 0xFFFFFFFFu;
+                  std::memcpy(&k[24], in.scene, sizeof in.scene);
+                  c.computeConstants(k, 32);
+                  c.bindFrameConstants(in.frameConstants);
+                  pipeline.dispatch(c.cmd, 0, maxJobs, 1, 1);
+              });
+}
+
 void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& rays)
 {
     RenderGraph& g = fc.graph;
@@ -768,6 +840,14 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const uint64_t frameIndex = fc.frame.frameIndex;
     ID3D12QueryHeap* timestamps = m_timestamps.Get();
     const uint32_t firstTick = ringSlot * kTicks;
+    // The inputs a refraction list traced later this frame binds (recordRefraction).
+    m_refract = {};
+    m_refract.valid = true, m_refract.atmosphere = atmosphere, m_refract.frameIndex = frameIndex;
+    m_refract.sky = sky, m_refract.sun = sun, m_refract.rayLength = rayLength;
+    for (int i = 0; i < 4; ++i) m_refract.luts[i] = luts[i];
+    m_refract.cache = cache, m_refract.vsm = vsm, m_refract.frame = frame, m_refract.experiment = experiment;
+    std::memcpy(m_refract.scene, scene, sizeof scene);
+    m_refract.rays = &rays, m_refract.frameConstants = frameConstants, m_refract.variant = variant;
     // Root constants shared by the trace, shade, shadow and combine passes (ReflectionRay.hlsli).
     auto constantsFor = [jobs, results, modes, probes, depth, gbuffer, cache, luts, atmosphere, sky, sun, rayLength, s, frame, scene, experiment, exactCounts,
                          probeMaps, vsm, rayScene, frameIndex, raysBuffer](PassContext& c, uint32_t k[32]) {

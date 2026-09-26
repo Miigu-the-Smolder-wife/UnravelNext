@@ -53,6 +53,10 @@ public:
     // Declares the reflection passes of the main view and creates view.reflection. Needs this frame's GI
     // (view.screenProbes, FrameResources::giCache) and ray scene.
     void record(FramePassContext& fc, ViewResources& main, rt::RayScene& rays);
+    // Refraction rays of a caller's job list (FrameServices::traceRefractions: W's water R-W2, A's glass R-2;
+    // RefractionTrace.hlsl), with the constants this frame's record() used (sky, sun, cache, VSM, scene). Nothing when
+    // record() did not run this frame (the caller keeps its fallback: alpha 0 in its results).
+    void recordRefraction(FramePassContext& fc, BufferRef jobs, BufferRef results, uint32_t maxJobs);
     // Constant sky radiance (nits) and sun illuminance (lux) when S's atmosphere LUTs are absent (tests).
     void setConstantSky(float3 radiance, float3 sunIlluminance)
     {
@@ -92,6 +96,23 @@ public:
 
 private:
     void ensureHistory(uint32_t width, uint32_t height);
+    struct RefractionInputs  // the frame's reflection constants, kept for recordRefraction
+    {
+        bool valid = false, atmosphere = false;
+        uint64_t frameIndex = 0;
+        float3 sky{}, sun{};
+        float rayLength = 0;
+        TextureRef luts[4];
+        BufferRef cache;
+        rt::RayScene::VsmRefs vsm;
+        uint32_t frame = 0, experiment = 0, scene[8] = {};
+        rt::RayScene* rays = nullptr;
+        D3D12_GPU_VIRTUAL_ADDRESS frameConstants = 0;
+        int variant = 0;
+    } m_refract;
+    ComPtr<ID3D12Resource> m_streamTable;  // per frame slot: each triangle stream slot's vertex buffer SRV (256 B)
+    uint8_t* m_streamTableMapped = nullptr;
+    uint32_t m_streamTableSrv[4] = {};
     Device& m_device;
     ReflectionSettings m_settings;
     ComPtr<ID3D12Resource> m_history;   // R16G16_FLOAT: last frame's reflection hit distance (G spacing), hit motion
