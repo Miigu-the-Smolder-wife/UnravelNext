@@ -14,7 +14,10 @@
 //   5. motion blur's gather (MotionBlur.hlsl) on a uniform velocity (40 px/frame, 180 degree shutter: a 20 px streak ahead
 //      of each pixel) over sinusoids along it: against the exact exposure integral (1/L) int_0^L I(x + t) dt in closed form;
 //   6. heat haze (Distortion.hlsl): D = (3, 0) px under a haze front at device depth 0.5; pixels behind it (0.1) read
-//      I(x + D (1 - 0.1 / 0.5)) = I(x + 2.4) (bilinear of the sinusoids: within 1e-3), pixels in front (0.9) are unchanged.
+//      I(x + D (1 - 0.1 / 0.5)) = I(x + 2.4) (bilinear of the sinusoids: within 1e-3), pixels in front (0.9) are unchanged;
+//   7. motion blur's rotation stage (MotionRotation.hlsl) for a yaw of 0.2 rad per frame (a 31 px streak at the centre) over
+//      an environment image L(direction): against the CPU mean of L over each pixel's arc Q^tau d, tau in [0, s] (pixels
+//      whose arc stays on the image).
 // Options: --levels N (6, test 1).
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
@@ -145,7 +148,8 @@ struct Context
     }
 };
 
-void fill(Context& x, ShaderLibrary& shaders, TextureRef t, uint32_t mode, uint32_t px = 0, uint32_t py = 0, uint32_t value = 0)
+void fill(Context& x, ShaderLibrary& shaders, TextureRef t, uint32_t mode, uint32_t px = 0, uint32_t py = 0, uint32_t value = 0,
+          D3D12_GPU_VIRTUAL_ADDRESS frameConstants = 0)
 {
     const TextureDesc d = x.graph.desc(t);
     ID3D12PipelineState* pso = shaders.compute("Passes/Shading/Tests/PostImpulse");
@@ -153,6 +157,7 @@ void fill(Context& x, ShaderLibrary& shaders, TextureRef t, uint32_t mode, uint3
                     [=](PassContext& c) {
                         const uint32_t k[8] = { c.uav(t), px, py, mode == 0 ? asUint(kEnergy) : value, mode, 0, 0, 0 };
                         c.cmd->SetPipelineState(pso);
+                        if (frameConstants) c.bindFrameConstants(frameConstants);
                         c.computeConstants(k, 8);
                         c.cmd->Dispatch((d.width + 7) / 8, (d.height + 7) / 8, 1);
                     });
@@ -567,6 +572,72 @@ int main(int argc, char** argv)
             logf("heat haze: behind the front vs the image at x + 2.4 (bilinear): worst %.2e; in front unchanged: %s\n", worst, frontSame ? "yes" : "no");
             expect("heat haze: pixels behind read the image at p + D (1 - z_haze / z_pixel)", worst < 1e-3);
             expect("heat haze: pixels in front of the haze are unchanged (bit identical)", frontSame);
+        }
+        // 7. the rotation stage against the exposure integral over the arc
+        {
+            const QualityConfig q = loadQuality();
+            Context x(device, shaders, q);
+            PostView v = postView(device);
+            const TextureRef image = x.graph.createTexture(TextureDesc{ "post.test.rotation.image", kWidth, kHeight, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            const TextureRef blurred = x.graph.createTexture(TextureDesc{ "post.test.rotation.blurred", kWidth, kHeight, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            fill(x, shaders, image, 4, 0, 0, 0, v.view.frameConstants);
+            const float phi = 0.2f, cp = std::cos(phi), sp = std::sin(phi);
+            const float3 Q[3] = { float3{ cp, 0, sp }, float3{ 0, 1, 0 }, float3{ -sp, 0, cp } };  // rotation about +y by phi
+            const bool engaged = shading::motionRotationBlur(x.fc, v.view, image, blurred, Q);
+            std::vector<uint8_t> out;
+            uint32_t op = 0;
+            Readbacks rb{ device };
+            rb.texture(x.graph, blurred, out, op);
+            x.graph.execute(nullptr);
+            rb.finish();
+            if (device.drainDebugMessages() != 0) fail("D3D12 debug layer errors");
+            const double shutter = q.number("shading.motion_blur_shutter");
+            const double tanV = 1.0 / v.view.view.proj.m[1][1], tanH = 1.0 / v.view.view.proj.m[0][0];
+            auto env = [](double dx, double dy, double dz, int ch) {
+                const double lon = std::atan2(dx, -dz);
+                return ch == 0 ? 0.5 + 0.4 * std::sin(8 * lon) : ch == 1 ? 0.5 + 0.3 * dy : 0.5 + 0.2 * std::sin(3 * lon + 2 * dy);
+            };
+            double worst = 0, mean = 0;
+            uint32_t worstX = 0, worstY = 0;
+            int worstCh = 0;
+            double worstGpu = 0, worstCpu = 0;
+            uint64_t n = 0;
+            for (uint32_t y = 0; y < kHeight; y += 3)
+                for (uint32_t xx = 0; xx < kWidth; xx += 3)
+                {
+                    const double nx = (xx + 0.5) / kWidth * 2 - 1, ny = 1 - (y + 0.5) / kHeight * 2;
+                    double dx = nx * tanH, dy = ny * tanV, dz = -1;
+                    const double l = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    dx /= l; dy /= l; dz /= l;
+                    // the arc's end on the image?
+                    const double a1 = shutter * phi, ex = std::cos(a1) * dx + std::sin(a1) * dz, ez = -std::sin(a1) * dx + std::cos(a1) * dz;
+                    // (a latitude circle bends on the image: the arc and its bilinear rows must stay inside both ways, 4 px from the
+                    // border; outside it the frame has no information)
+                    if (std::abs(nx) > 1 - 8.0 / kWidth || std::abs(ny) > 1 - 8.0 / kHeight || !(ez < 0) || std::abs(ex / -ez) > tanH * (1 - 8.0 / kWidth) || std::abs(dy / -ez) > tanV * (1 - 8.0 / kHeight)) continue;
+                    double acc[3] = { 0, 0, 0 };
+                    const int samples = 256;
+                    for (int k = 0; k < samples; ++k)
+                    {
+                        const double a = shutter * phi * (k + 0.5) / samples, c = std::cos(a), s = std::sin(a);
+                        const double rx = c * dx + s * dz, rz = -s * dx + c * dz;
+                        for (int ch = 0; ch < 3; ++ch) acc[ch] += env(rx, dy, rz, ch) / samples;
+                    }
+                    uint16_t h[4];
+                    std::memcpy(h, out.data() + (size_t)y * op + (size_t)xx * 8, 8);
+                    for (int ch = 0; ch < 3; ++ch)
+                    {
+                        const double e = std::abs(halfToFloat(h[ch]) - acc[ch]);
+                        if (e > worst) { worstX = xx; worstY = y; worstCh = ch; worstGpu = halfToFloat(h[ch]); worstCpu = acc[ch]; }
+                        worst = std::max(worst, e);
+                        mean += e;
+                        ++n;
+                    }
+                }
+            logf("rotation stage (yaw 0.2 rad/frame, arc %.3f rad): %s, %llu channels, mean %.2e worst %.2e at (%u, %u) vs the arc integral\n", shutter * phi,
+                 engaged ? "engaged" : "not engaged", (unsigned long long)n, n ? mean / n : 0.0, worst, worstX, worstY);
+            logf("  worst channel %d: GPU %.5f, CPU %.5f\n", worstCh, worstGpu, worstCpu);
+            expect("motion blur rotation: engaged for a 31 px streak with the axis outside the view", engaged);
+            expect("motion blur rotation: the arc mean of the image (worst < 2e-3: half precision)", n > 1000 && worst < 2e-3);
         }
         std::filesystem::remove(cube);
         logf(failures ? "POST TESTS FAILED (%d)\n" : "POST TESTS PASSED\n", failures);

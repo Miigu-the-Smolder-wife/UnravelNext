@@ -4,8 +4,11 @@
 // ray's hit on the deformed triangle the vis buffer names (the plane intersection of mSurfaceFromVertices); its previous
 // position is the same barycentric blend of the three vertices' previous deformed positions (previous transform, bone
 // palette and wind time: deformVertex's prevWorld), projected with the previous view-projection. The sky: the direction at
-// infinity under the previous view (the camera's rotation only). RG16F.
-// P[0] = { vis id SRV, visible clusters SRV, velocity UAV, 0 }, P[1] = { width, height, 0, 0 }; frame constants of the view.
+// infinity under the previous view (the camera's rotation only). RG16F. With the rotation stage (MotionRotation.hlsl,
+// P[1].z = 1) the camera's rotation is taken out: the velocity written is the residual v - v_rot, v_rot(p) = p - the pixel of
+// Q^T d_p (the previous view direction of what p sees now, under the rotation alone).
+// P[0] = { vis id SRV, visible clusters SRV, velocity UAV, 0 }, P[1] = { width, height, rotation stage, 0 },
+// P[2..4] = asfloat rows of Q^T (view space, xyz + 0); frame constants of the view.
 #include "Bindless.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 
@@ -54,6 +57,18 @@ void main(uint2 id : SV_DispatchThreadID)
         prevClip = mul(g_prevViewProj, float4(prev, 1));
     }
     // behind the previous camera (w <= 0): no previous screen position; the pixel keeps no motion
-    const float2 v = prevClip.w > 1e-6f ? pixel - pixelOf(prevClip) : float2(0, 0);
+    float2 v = prevClip.w > 1e-6f ? pixel - pixelOf(prevClip) : float2(0, 0);
+    if (P[1].z != 0)
+    {
+        // the view-space direction of this pixel, then where the rotation alone had it in the previous frame
+        const float2 ndc = float2(pixel.x / g_viewWidth * 2 - 1, 1 - pixel.y / g_viewHeight * 2);
+        const float3 d = float3((ndc.x + g_proj[0][2] - g_proj[0][3]) / g_proj[0][0], (ndc.y + g_proj[1][2] - g_proj[1][3]) / g_proj[1][1], -1);
+        const float3 q = float3(dot(asfloat(P[2].xyz), d), dot(asfloat(P[3].xyz), d), dot(asfloat(P[4].xyz), d));
+        if (q.z < -1e-6f)
+        {
+            const float2 qn = float2(q.x * g_proj[0][0] / -q.z - g_proj[0][2] + g_proj[0][3], q.y * g_proj[1][1] / -q.z - g_proj[1][2] + g_proj[1][3]);
+            v -= pixel - float2((qn.x + 1) * 0.5f * g_viewWidth, (1 - qn.y) * 0.5f * g_viewHeight);
+        }
+    }
     velocity[id] = all(isfinite(v)) ? v : float2(0, 0);
 }

@@ -4,8 +4,11 @@
 //   1: an HDR ramp over the curve's whole range: r = 2^(12 u - 8) (u across the image), g = r (1 - v), b = r v^2 / 2
 //      (v down the image), so every curve region (toe offset, linear part, shoulder) and hue is met (PostFinal's reference);
 //   2: the constant (asfloat P[0].y, asfloat P[0].z, asfloat P[0].w, 1) (a velocity field, a depth);
-//   3: sinusoids along x: r = 0.5 + 0.4 sin(2 pi x / 64), g = 0.5 + 0.4 sin(2 pi x / 23), b = 0.5 (x = pixel centre).
+//   3: sinusoids along x: r = 0.5 + 0.4 sin(2 pi x / 64), g = 0.5 + 0.4 sin(2 pi x / 23), b = 0.5 (x = pixel centre);
+//   4: an environment of the view direction d (the frame constants' projection, the view looking down -z):
+//      r = 0.5 + 0.4 sin(8 atan2(d.x, -d.z)), g = 0.5 + 0.3 d.y, b = 0.5 + 0.2 sin(3 atan2(d.x, -d.z) + 2 d.y).
 #include "Bindless.hlsli"
+#include "Frame.hlsli"
 
 [numthreads(8, 8, 1)]
 void main(uint2 id : SV_DispatchThreadID)
@@ -22,6 +25,14 @@ void main(uint2 id : SV_DispatchThreadID)
     if (P[1].x == 2)
     {
         t[id] = float4(asfloat(P[0].y), asfloat(P[0].z), asfloat(P[0].w), 1);
+        return;
+    }
+    if (P[1].x == 4)
+    {
+        const float2 ndc = float2((id.x + 0.5) / w * 2 - 1, 1 - (id.y + 0.5) / h * 2);
+        const float3 d = normalize(float3(ndc.x / g_proj[0][0], ndc.y / g_proj[1][1], -1));
+        const float lon = atan2(d.x, -d.z);
+        t[id] = float4(0.5 + 0.4 * sin(8 * lon), 0.5 + 0.3 * d.y, 0.5 + 0.2 * sin(3 * lon + 2 * d.y), 1);
         return;
     }
     if (P[1].x == 3)
