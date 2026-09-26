@@ -2774,7 +2774,7 @@ void testGlassComposite(TestFrame& tf, Report& report, int service = 0)
 // record's share, plus the float sum's order), and the special list must hold every record.
 void testPreshadedRecords(TestFrame& tf, Report& report)
 {
-    auto buildScene = [](bool terrain, float coat = 0) {
+    auto buildScene = [](bool terrain, float coat = 0, float sheen = 0) {
         scene::Scene s;
         s.name = "preshade test";
         scene::Material ground;
@@ -2788,6 +2788,7 @@ void testPreshadedRecords(TestFrame& tf, Report& report)
         blade.roughness = 0.45f;
         blade.metallic = 0.2f;
         blade.clearcoat = coat;  // run 2 (A9): a coat of cover 0.001, pre-shaded through MODE 4 / 5 / 6
+        blade.sheenColor = { sheen, sheen, sheen };  // runs 3, 4 (A9): a sheen of colour 0.01 and 0.02, the same path
         if (!terrain)
             s.materials.push_back(blade);
         else
@@ -2851,11 +2852,11 @@ void testPreshadedRecords(TestFrame& tf, Report& report)
     };
 
     const uint32_t W = 320, H = 180, tilesX = (W + 7) / 8, tilesY = (H + 7) / 8;
-    std::shared_ptr<std::vector<uint8_t>> images[3];
+    std::shared_ptr<std::vector<uint8_t>> images[5];
     uint32_t recordCount = 0, listedSpecial = 0;
-    for (int run = 0; run < 3; ++run)
+    for (int run = 0; run < 5; ++run)
     {
-        const scene::Scene s = buildScene(run == 1, run == 2 ? 0.001f : 0.0f);
+        const scene::Scene s = buildScene(run == 1, run == 2 ? 0.001f : 0.0f, run == 3 ? 0.01f : run == 4 ? 0.02f : 0.0f);
         tf.setScene(s, { 1 });
         ViewDesc desc;
         tf.run([&](FramePassContext& fc) { desc = tf.mainView(fc, W, H, 0).view; });
@@ -2940,19 +2941,25 @@ void testPreshadedRecords(TestFrame& tf, Report& report)
         });
         tf.frame.outputLinearHdr = false;
     }
-    double worst = 0, worstCoat = 0;
+    double worst = 0, worstCoat = 0, sheenChange = 0, sheenLinear = 0;
     uint32_t differing = 0;
     for (uint32_t y = 0; y < H; ++y)
         for (uint32_t x = 0; x < W; ++x)
         {
             const float4 a = texelOf<float4>(*images[0], W, x, y), b = texelOf<float4>(*images[1], W, x, y), c3 = texelOf<float4>(*images[2], W, x, y);
-            const double da[3] = { a.x, a.y, a.z }, db[3] = { b.x, b.y, b.z }, dc[3] = { c3.x, c3.y, c3.z };
+            const float4 c4 = texelOf<float4>(*images[3], W, x, y), c5 = texelOf<float4>(*images[4], W, x, y);
+            const double da[3] = { a.x, a.y, a.z }, db[3] = { b.x, b.y, b.z }, dc[3] = { c3.x, c3.y, c3.z }, ds[3] = { c4.x, c4.y, c4.z };
+            const double ds2[3] = { c5.x, c5.y, c5.z };
             for (int c = 0; c < 3; ++c)
             {
                 const double rel = std::abs(da[c] - db[c]) / std::max(std::abs(da[c]), 1e-6);
                 differing += rel > 0;
                 worst = std::max(worst, rel);
                 worstCoat = std::max(worstCoat, std::abs(da[c] - dc[c]) / std::max(std::abs(da[c]), 1e-6));
+                // the sheen's change is linear in C (keepS and the lobe both are): (C 0.02) - base = 2 x ((C 0.01) - base)
+                const double scale = std::max(std::abs(da[c]), 1e-3);
+                sheenChange = std::max(sheenChange, std::abs(ds[c] - da[c]) / scale);
+                sheenLinear = std::max(sheenLinear, std::isfinite(ds[c] + ds2[c]) ? std::abs((ds2[c] - da[c]) - 2 * (ds[c] - da[c])) / scale : 1e9);
             }
         }
     logf("preshade: %u records, %u listed as kind 5, %u channel values differ\n", recordCount, listedSpecial, differing);
@@ -2962,6 +2969,11 @@ void testPreshadedRecords(TestFrame& tf, Report& report)
     report(differing > 0, "preshade: the pre-shaded path ran (its f16 rounding shows)", differing > 0 ? 0.0 : 1.0, 0);
     // A9: cover 0.001 moves the radiance by at most ~0.001 of it (the coat's terms are bounded by the base's here), plus f16
     report(worstCoat <= 3e-3, "preshade: clearcoat records (MODE 4 / 5 / 6, cover 0.001) = Standard records in the composite", worstCoat, 3e-3);
+    // A9 sheen through MODE 4 / 5 / 6: the change from the Standard records is linear in the sheen colour (the model's
+    // values are the band A path's, ShadingTests --sheen); f16 records: 3 x 2^-11 of the value
+    logf("preshade: sheen colour 0.01 changes the records by up to %.3g of their value\n", sheenChange);
+    report(sheenChange > 1e-3, "preshade: sheen records (MODE 4 / 5 / 6) carry the sheen", sheenChange, 1e-3);
+    report(sheenLinear <= 1.5e-3, "preshade: sheen records' change is linear in the colour (0.02 vs 2 x 0.01)", sheenLinear, 1.5e-3);
 }
 
 // ---------------------------------------------------------------- 14. clearcoat sun lobe (A9, CoatSunProbe.hlsl)

@@ -365,6 +365,12 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     ModelCoat coat = modelCoatOf(m);
     coat.roughness = cmat.coatRoughness;
     const float cover = coat.cover, keep = 1 - cover;
+    // A9 sheen (as ShadeOpaque LAYERED=2; MATERIAL_LAYERS 1.4): the layer record's colour (0 without a sheen), the stored
+    // footprint-filtered roughness
+    ModelSheen sheen = modelSheenOf(m);
+    sheen.roughness = max(cmat.coatRoughness, 0.1);
+    const bool sheenOn = max(sheen.color.r, max(sheen.color.g, sheen.color.b)) > 0 && NoV > 0;
+    const float keepS = sheenOn ? modelSheenKeep(sheen, NoV) : 1;
 #endif
 
     // ---- sun (with S's air at the fragment's depth: in-scatter and transmittance in front of it, the sun's illuminance)
@@ -418,6 +424,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             sun = keep * sun + cover * (shSunSpecular(1.0.xxx, coat.roughness, modelAlpha(coat.roughness), 1.0.xxx, n, v, NoV, l0, E, shPixelAngle(D, Dx)) *
                                             shCoatSunWeight(coat, v, l0, NoV, NoL, false) +
                                         (NoL > 0 ? modelCoatUnder(s, coat, n, v, l0) * above * cap : 0));
+        if (sheenOn) sun = keepS * sun + sheen.color * (modelSheenSun(sheen.roughness, n, v, l0, g_sunAngularRadius) * cap);
 #endif
         radiance += sun * sunVisibility;
     }
@@ -480,6 +487,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                 // coat) in the same loop; the diffuse-like part through the coat reuses integral 0
                 float3 coatAdd = 0;
                 float coatId = 0, tvtl = 0;
+                if (sheenOn) scaleBase = keepS;  // (the sheen lobe on area lights: its LTC, sheen step 3)
                 if (cover > 0 && NoV > 0)
                 {
                     scaleBase = keep;
@@ -530,6 +538,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             else if (foliage && NoV * cosL < 0) f = back;
 #if COV_COAT
             if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));
+            if (sheenOn && cosL > 0) f = keepS * f + sheen.color * modelSheenLobe(sheen.roughness, n, v, l);
 #endif
             radiance += f * El * (abs(cosL) * visibility);
         }
@@ -571,6 +580,13 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             const float3 under = tv * tBar * ((front + modelCoatReturned(s, coat, modelCoatRefractedCos(2.0 / 3.0, coat.eta)) / SH_PI) * irr +
                                               inc * shSpecularAlbedo(f0, modelCoatRefractedCos(NoV, coat.eta), modelCoatBaseRoughness(s, coat, NoV)));
             radiance += keep * (front * irr + inc * shSpecularAlbedo(f0, NoV, s.roughness)) + cover * (under + coatIncident * modelCoatEms(coat, NoV));
+        }
+        else if (sheenOn)
+        {
+            // as ShadeOpaque LAYERED=2: the base's indirect light scaled, the sheen's C E_sh(n.v) E / pi
+            const float3 irr = (experiment & 2) == 0 ? g.irradiance * g.occlusion : 0;
+            radiance += keepS * (front * irr + (wantRadiance ? g.radiance * shSpecularAlbedo(f0, NoV, s.roughness) : 0)) +
+                        sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / SH_PI) * irr;
         }
         else
 #endif

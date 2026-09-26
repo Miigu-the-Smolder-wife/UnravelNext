@@ -5,11 +5,11 @@
 //   MODE=0 (before tracks::water): kinds 1 (hair) and 2 (streams) get radiance 0, the defined value their owners
 //          overwrite (W: kind 2 in tracks::water).
 //   MODE=1, 2, 4 (before the composite): kind 5 records (COV_PRESHADE_ID) of M's pre-shaded materials, 1 Cut, 2 Terrain,
-//          4 A9 layered Standard materials (clearcoat): the material at the footprint (CoverageShade.hlsli
+//          4 A9 layered Standard materials (clearcoat, sheen): the material at the footprint (CoverageShade.hlsli
 //          covFragmentMaterial, as the resolve; MODE 4 also the coat's filtered roughness) stored per entry (48 B, M's
 //          scratch). A kernel per material kind and the lighting apart: together they exceed the 200 KB DXIL limit.
 //   MODE=5, 6: every kind 5 entry lit as the composite lights a cluster record, with the stored material (a layered one
-//          with its coat, COV_COAT): 5 the emission, sun and local lights (unexposed, before the air) into M's second
+//          with its coat or sheen, COV_COAT): 5 the emission, sun and local lights (unexposed, before the air) into M's second
 //          scratch (16 B per entry), 6 the indirect light added, then the air and exposure, into the record radiance
 //          (COV_PART 1, 2: one lighting kernel is at the DXIL limit; 2026-09-27 the one-kernel MODE 3 is retired).
 // P[0] = { records (StructuredBuffer<uint4>), special list (raw), tile list (raw), MODE 1, 2, 4: material scratch UAV;
@@ -63,8 +63,10 @@ void main(uint3 id : SV_DispatchThreadID)
     const MSurface sf = mSurfaceFromVertices(tid, v0, v1, v2, covFragmentCentre(v0, v1, v2, pixel));
     CovMaterial cm = covFragmentMaterial(visId, sf, m, mLoadTextureSet(P[1].y, tid.material));
 #if MODE == 4
-    // the coat's roughness band-limited by the footprint like the base's (MATERIAL_LAYERS 3.4, as the resolve)
-    const float ac = modelAlpha(loadMaterialLayers(m.classFlags >> 16).clearcoatRoughness);
+    // the coat's (or the sheen's: one layer kind per material) roughness band-limited by the footprint like the base's
+    // (MATERIAL_LAYERS 3.4, 1.4; as the resolve)
+    const GpuMaterialLayers layers = loadMaterialLayers(m.classFlags >> 16);
+    const float ac = modelAlpha((m.classFlags & MATERIAL_SHEEN) != 0 ? layers.sheenRoughness : layers.clearcoatRoughness);
     cm.coatRoughness = min(sqrt(sqrt(ac * ac + cm.variance)), 1.0);
 #endif
     covStoreMaterial(output, id.x, cm);
