@@ -11,6 +11,7 @@
 // host's ExecuteCommandList, which declares the output texture's state to Unity. Standalone (tests, tools): own device.
 #include "unx/fx/Particles.h"
 #include "unx/core/Config.h"
+#include "unx/decal/SurfaceState.h"
 #include "unx/render/Frame.h"
 #include "unx/render/GpuScene.h"
 #include "unx/scene/SceneData.h"
@@ -94,6 +95,16 @@ struct FramePacket
     // them: index == the count at that point appends. Applied before this packet's transforms.
     std::vector<std::pair<uint32_t, scene::Instance>> instanceEdits;
     std::vector<std::pair<uint32_t, scene::Material>> materialEdits;
+    // A7 surface state field (E's surface::SurfaceField, fed from NativeVfx nv_surface_delta): delta batches in the host's
+    // order (each: removed keys, then changed bricks), changed half-lives, and the frame's VFX context time.
+    struct SurfaceDelta
+    {
+        std::vector<surface::BrickInput> changed;
+        std::vector<int32_t> removed;  // 3 per key
+    };
+    std::vector<SurfaceDelta> surfaceDeltas;
+    std::optional<std::array<double, surface::kChannels>> surfaceHalfLives;
+    double surfaceTime = 0;
 };
 
 // The render graph of one recorded frame (RenderGraphStats, the fields the host reports).
@@ -164,6 +175,13 @@ public:
     void setDiscontinuity(uint32_t flags);
     // The camera's lens for the following frames (depth of field): aperture diameter (m, 0 = pinhole) and focus distance (m).
     void setLens(float aperture, float focus);
+    // A7 surface state (E's SurfaceField): a NativeVfx nv_surface_delta between two publications (changed bricks in the
+    // NV_SurfaceBrickV2 layout, removed keys as 3 int32 each), the channel half-lives (s, 0 = no decay; wet, scorch,
+    // frost, dust, blood, snow) and the VFX context time of the following frames. Applied in this order on the render
+    // thread before the frame they are queued with (a dropped frame's batches go to the next).
+    void surfaceDelta(const surface::BrickInput* changed, size_t changedCount, const int32_t* removedKeys, size_t removedCount);
+    void setSurfaceHalfLives(const std::array<double, surface::kChannels>& halfLife);
+    void setSurfaceTime(double seconds);
     void setSimulation(uint32_t gpuSimulation);
     // Sun, atmosphere and (when set) wind of the following frames.
     void setEnvironment(const scene::Sun& sun, const scene::Atmosphere& atmosphere, std::optional<FramePacket::Wind> wind);
@@ -289,6 +307,7 @@ private:
     std::mutex m_fxMutex;
     uint64_t m_fxRecorded = 0;  // (m_fxMutex held) packets written under UNX_FX_RECORD
     float m_lensAperture = 0, m_lensFocus = 0;  // (m_mutex) the lens every queued frame takes
+    double m_surfaceTime = 0;                   // (m_mutex) the VFX time every queued frame takes
     std::unique_ptr<render::RenderGraph> m_simGraph;  // the claimed ticks' graph (compute queue)
     uint64_t m_simIndex = 1ull << 48;                // its import index (apart from frame indices)
     uint64_t m_simFence = 0, m_simWaited = 0;        // compute fence of the last claimed tick; the frames waited up to

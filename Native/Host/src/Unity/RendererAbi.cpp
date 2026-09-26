@@ -362,6 +362,27 @@ UNX_API int32_t UNX_CALL UnxFrameSetLens(UnxRenderer r, float apertureMetres, fl
     return call([&] { find(r)->setLens(apertureMetres, focusMetres); });
 }
 
+UNX_API int32_t UNX_CALL UnxSurfaceDelta(UnxRenderer r, const void* changed, uint64_t changedCount, const int32_t* removedKeys, uint64_t removedCount)
+{
+    static_assert(sizeof(surface::BrickInput) == 1560, "NV_SurfaceBrickV2");
+    return call([&] { find(r)->surfaceDelta(static_cast<const surface::BrickInput*>(changed), (size_t)changedCount, removedKeys, (size_t)removedCount); });
+}
+
+UNX_API int32_t UNX_CALL UnxSurfaceSetHalfLives(UnxRenderer r, const double* halfLives6)
+{
+    return call([&] {
+        if (!halfLives6) fail("UnxSurfaceSetHalfLives: null");
+        std::array<double, surface::kChannels> h;
+        std::copy(halfLives6, halfLives6 + surface::kChannels, h.begin());
+        find(r)->setSurfaceHalfLives(h);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxSurfaceSetTime(UnxRenderer r, double seconds)
+{
+    return call([&] { find(r)->setSurfaceTime(seconds); });
+}
+
 UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor)
 {
     return call([&] {

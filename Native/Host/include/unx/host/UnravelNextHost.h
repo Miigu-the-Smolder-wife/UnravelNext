@@ -32,7 +32,7 @@ enum UnxResult
                             // 6: + UnxFrameSetDiscontinuity, UnxFrameSetSimulation, UnxTransformUpdate::flags (teleport);
                             //    later additions within 6 (optional exports, bridges probe for them): UnxFrameGraphStatsLatest,
                             //    UnxSceneLoad, UnxVideoMemory, UnxSceneEditInstances, UnxSceneEditMaterials, UnxVfxStreamExecutor,
-                            //    UnxRendererQualityOverride, UnxFrameSetLens
+                            //    UnxRendererQualityOverride, UnxFrameSetLens, UnxSurfaceDelta, UnxSurfaceSetHalfLives, UnxSurfaceSetTime
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -263,6 +263,14 @@ UNX_API int32_t UNX_CALL UnxRendererQualityOverride(UnxRenderer r, const char* u
 // in metres (0 = pinhole: no depth of field) and focus distance in metres along the view axis. Unity: focal length /
 // f-number of a physical camera, and its focus distance.
 UNX_API int32_t UNX_CALL UnxFrameSetLens(UnxRenderer r, float apertureMetres, float focusMetres);
+// Surface state field (A7, E's SurfaceField; optional exports within ABI 6, INTERFACES v1.52): after each VFX commit the
+// host passes NativeVfx nv_surface_delta(previous publication, publication): `changed` NV_SurfaceBrickV2 records (1560 B:
+// int32 key[3], uint32, double t0, float value[384]) and `removedKeys` (3 int32 per key). Half-lives: 6 doubles (s, 0 = no
+// decay; wet, scorch, frost, dust, blood, snow; nv_surface_state_v2). Time: the VFX context seconds of the frames queued
+// from now on (interpolated like the frame's transforms). All three take effect with the next queued frame, in call order.
+UNX_API int32_t UNX_CALL UnxSurfaceDelta(UnxRenderer r, const void* changed, uint64_t changedCount, const int32_t* removedKeys, uint64_t removedCount);
+UNX_API int32_t UNX_CALL UnxSurfaceSetHalfLives(UnxRenderer r, const double* halfLives6);
+UNX_API int32_t UNX_CALL UnxSurfaceSetTime(UnxRenderer r, double seconds);
 UNX_API int32_t UNX_CALL UnxSceneAddLight(UnxRenderer r, const UnxLightDesc* desc, uint32_t* index);
 UNX_API int32_t UNX_CALL UnxSceneSetEnvironment(UnxRenderer r, const UnxEnvironmentDesc* desc);
 // The renderer's defaults for the environment (scene::Sun, scene::Atmosphere), for callers that set only some fields.

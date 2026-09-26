@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.51, 2026-09-26)
+# UnravelNext 인터페이스 (v1.52, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -725,6 +725,8 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.52 (2026-09-26, A7 호스트 경로, 엔진 2 요청):
+  - **표면 상태 장 호스트 입력(E `surface::SurfaceField`)**: 선택 export `UnxSurfaceDelta(r, changed, changedCount, removedKeys, removedCount)`(NativeVfx `nv_surface_delta`의 `NV_SurfaceBrickV2` 1,560 B 기록과 제거 키 int32×3), `UnxSurfaceSetHalfLives(r, double[6])`(젖음·그을음·서리·먼지·핏자국·눈, s, 0 = 감쇠 없음), `UnxSurfaceSetTime(r, seconds)`(이후 큐 프레임의 VFX 시각). `HostRenderer::surfaceDelta/setSurfaceHalfLives/setSurfaceTime`이 다음 큐 프레임과 함께 보내고, 렌더 스레드가 기록 전에 호출 순서대로 `apply`한다. 건너뛴 티켓과 버려진 패킷의 묶음은 다음 렌더 프레임으로 옮긴다. [실측] `HostSurface`: 추가·제거·교체 순서, 건너뛴 두 프레임 뒤의 마지막 값, 버려진 패킷의 묶음, 반감기·시각이 모두 맞았다(디버그 층 오류 0).
 - v1.51 (2026-09-26, A5·A3):
   - **물리 카메라 렌즈(5.5, A5, COVERAGE 14.12 (2c))**: `FrameContext::lensAperture`(조리개 지름 m, 0 = 핀홀: 피사계 심도 없음, 게이트 카메라)와 `lensFocus`(초점 거리 m, 시선 축). 깊이 z의 착란원은 f_px A |1/z − 1/z_focus| 픽셀이다(f_px = (H/2) proj[1][1]). 호스트: `HostRenderer::setLens`, 선택 export `UnxFrameSetLens(r, apertureMetres, focusMetres)`(ABI 6 안). 이후 큐에 들어가는 프레임이 그 렌즈를 쓴다. 조리개 적분(DOF) 커널은 A5가 넣는다. 그 전까지 값은 전달만 된다.
   - **`FrameContext::timing` 채움(I, v1.50)**: 호스트가 `GpuProfiler::lastCompleted()`를 넣는다.

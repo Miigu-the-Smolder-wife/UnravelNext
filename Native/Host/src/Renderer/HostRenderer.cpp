@@ -307,6 +307,31 @@ void HostRenderer::setLens(float aperture, float focus)
     m_lensFocus = focus;
 }
 
+void HostRenderer::surfaceDelta(const surface::BrickInput* changed, size_t changedCount, const int32_t* removedKeys, size_t removedCount)
+{
+    if ((changedCount && !changed) || (removedCount && !removedKeys)) fail("surface delta: null records");
+    FramePacket::SurfaceDelta d;
+    d.changed.assign(changed, changed + changedCount);
+    d.removed.assign(removedKeys, removedKeys + 3 * removedCount);
+    std::lock_guard lock(m_mutex);
+    m_pending.surfaceDeltas.push_back(std::move(d));
+}
+
+void HostRenderer::setSurfaceHalfLives(const std::array<double, surface::kChannels>& halfLife)
+{
+    for (double h : halfLife)
+        if (!(h >= 0) || !std::isfinite(h)) fail("surface half-lives: %g s (>= 0, finite)", h);
+    std::lock_guard lock(m_mutex);
+    m_pending.surfaceHalfLives = halfLife;
+}
+
+void HostRenderer::setSurfaceTime(double seconds)
+{
+    if (!std::isfinite(seconds)) fail("surface time: %g s", seconds);
+    std::lock_guard lock(m_mutex);
+    m_surfaceTime = seconds;
+}
+
 void HostRenderer::setDiscontinuity(uint32_t flags)
 {
     requireCommitted();
@@ -351,6 +376,9 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.visibility = std::move(m_pending.visibility);
     packet.instanceEdits = std::move(m_pending.instanceEdits);
     packet.materialEdits = std::move(m_pending.materialEdits);
+    packet.surfaceDeltas = std::move(m_pending.surfaceDeltas);
+    packet.surfaceHalfLives = m_pending.surfaceHalfLives;
+    packet.surfaceTime = m_surfaceTime;
     m_pending = FramePacket{};
     m_packets.push_back(std::move(packet));
     // A frame the host never renders (camera disabled, event dropped) must not hold its updates back from later
@@ -370,6 +398,8 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
         next.visibility.insert(next.visibility.begin(), dropped.visibility.begin(), dropped.visibility.end());
         next.instanceEdits.insert(next.instanceEdits.begin(), std::make_move_iterator(dropped.instanceEdits.begin()), std::make_move_iterator(dropped.instanceEdits.end()));
         next.materialEdits.insert(next.materialEdits.begin(), std::make_move_iterator(dropped.materialEdits.begin()), std::make_move_iterator(dropped.materialEdits.end()));
+        next.surfaceDeltas.insert(next.surfaceDeltas.begin(), std::make_move_iterator(dropped.surfaceDeltas.begin()), std::make_move_iterator(dropped.surfaceDeltas.end()));
+        if (!next.surfaceHalfLives) next.surfaceHalfLives = dropped.surfaceHalfLives;
     }
     return ticket;
 }
@@ -393,6 +423,8 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         carried.visibility.insert(carried.visibility.end(), old.visibility.begin(), old.visibility.end());
         carried.instanceEdits.insert(carried.instanceEdits.end(), std::make_move_iterator(old.instanceEdits.begin()), std::make_move_iterator(old.instanceEdits.end()));
         carried.materialEdits.insert(carried.materialEdits.end(), std::make_move_iterator(old.materialEdits.begin()), std::make_move_iterator(old.materialEdits.end()));
+        carried.surfaceDeltas.insert(carried.surfaceDeltas.end(), std::make_move_iterator(old.surfaceDeltas.begin()), std::make_move_iterator(old.surfaceDeltas.end()));
+        if (old.surfaceHalfLives) carried.surfaceHalfLives = old.surfaceHalfLives;
         haveCarried = true;
         m_packets.pop_front();
     }
@@ -411,6 +443,8 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         p.visibility.insert(p.visibility.begin(), carried.visibility.begin(), carried.visibility.end());
         p.instanceEdits.insert(p.instanceEdits.begin(), std::make_move_iterator(carried.instanceEdits.begin()), std::make_move_iterator(carried.instanceEdits.end()));
         p.materialEdits.insert(p.materialEdits.begin(), std::make_move_iterator(carried.materialEdits.begin()), std::make_move_iterator(carried.materialEdits.end()));
+        p.surfaceDeltas.insert(p.surfaceDeltas.begin(), std::make_move_iterator(carried.surfaceDeltas.begin()), std::make_move_iterator(carried.surfaceDeltas.end()));
+        if (!p.surfaceHalfLives) p.surfaceHalfLives = carried.surfaceHalfLives;
     }
     // Leaving the queue: its updates join the applied state here, under the queue's lock, so currentScene never misses
     // a packet between the queue and the GPU. Its scene edits join the scene (the GPU scene's source) at the same point;
@@ -556,6 +590,11 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     m_lastGpuSimulation = p.gpuSimulation;
     m_prevViewProj = fc.mainView.viewProj;
     m_havePrev = true;
+    // A7: the surface state field this frame samples (E uploads what changed in tracks::surfaceState)
+    surface::SurfaceField& field = surface::surfaceField(m_frameRenderer->trackState());
+    for (const FramePacket::SurfaceDelta& d : p.surfaceDeltas) field.apply(d.changed.data(), d.changed.size(), d.removed.data(), d.removed.size() / 3);
+    if (p.surfaceHalfLives) field.setHalfLives(*p.surfaceHalfLives);
+    field.setTime(p.surfaceTime);
     m_frameRenderer->record(*m_graph, fc, output);
 }
 
