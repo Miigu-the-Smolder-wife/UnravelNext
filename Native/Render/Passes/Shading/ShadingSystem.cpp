@@ -339,12 +339,15 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     const bool keepWater = v.waterVis.valid();
     // v1.77 W stage 2: the sun-space water map (all four valid or none)
     const bool waterSun = r.waterSunDepth.valid() && r.waterSunNormal.valid() && r.waterSunMedium.valid() && r.waterSunConstants.valid();
-    auto waterSunConstants = [=](PassContext& c, uint32_t* k) {
+    const bool caustics = waterSun && r.waterSunCaustics.valid();
+    // k[0..3] the map, k[causticsAt] its caustics
+    auto waterSunConstants = [=](PassContext& c, uint32_t* k, uint32_t causticsAt) {
         const uint32_t none = gpu::kNone;
         k[0] = waterSun ? c.srv(r.waterSunDepth) : none;
         k[1] = waterSun ? c.srv(r.waterSunNormal) : none;
         k[2] = waterSun ? c.srv(r.waterSunMedium) : none;
         k[3] = waterSun ? c.srv(r.waterSunConstants) : none;
+        k[causticsAt] = caustics ? c.srv(r.waterSunCaustics) : none;
     };
     if (coverage && v.shadowVisibility.valid() && !fragmentShadows && (experiment & 8192) == 0)
         fail("M.shading: V's coverage layer with S's shadows but without S's fragment visibility (COVERAGE_REDESIGN 4.3): its fragments would be unshadowed");
@@ -522,6 +525,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             {
                 for (TextureRef t : { r.waterSunDepth, r.waterSunNormal, r.waterSunMedium }) b.use(t, Use::SrvCompute);
                 b.use(r.waterSunConstants, Use::SrvCompute);
+                if (caustics) b.use(r.waterSunCaustics, Use::SrvCompute);
             }
             useParticles(b);
             if (meter) b.use(histogram.buffer, Use::UavCompute);
@@ -567,17 +571,17 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                          r.giCache.valid() ? c.srv(r.giCache) : none,
                                          atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], 0, o.textureTableSrv, experiment,
                                          0, fx[0], fx[1] };
-                uint32_t k32[36] = {};
+                uint32_t k32[40] = {};
                 std::memcpy(k32, k, sizeof k);
                 std::memcpy(k32 + 24, edge, sizeof edge);
-                waterSunConstants(c, k32 + 32);                       // P[8] (v1.77)
+                waterSunConstants(c, k32 + 32, 4);                    // P[8], P[9].x (v1.77)
                 k32[30] = overflow ? c.srv(v.shadowOverflow) : none;  // P[7].z
                 k32[16] = r.areaLightStable;     // P[4].x (B2)
                 k32[19] = meter ? c.uav(histogram.buffer) : gpu::kNone;  // P[4].w exposure histogram
                 k32[26] = asUint(histogram.centreSigma);                 // P[6].z
                 k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
                 particleConstants(c, k32 + 22);  // P[5].zw
-                c.computeConstants(k32, 36);
+                c.computeConstants(k32, 40);
                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
             }
         };
@@ -625,6 +629,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              {
                                  for (TextureRef t : { r.waterSunDepth, r.waterSunNormal, r.waterSunMedium }) b.use(t, Use::SrvCompute);
                                  b.use(r.waterSunConstants, Use::SrvCompute);
+                                 if (caustics) b.use(r.waterSunCaustics, Use::SrvCompute);
                              }
                              useParticles(b);
                          },
@@ -648,17 +653,17 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              const uint32_t edge[8] = { c.srv(edgeTiles), coverage ? c.srv(v.coverageTiles) : none, 0, 0, c.uav(edgeRadiance),
                                                         v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, shadowSrvs,
                                                         keepWater ? c.srv(v.waterVis) : none };  // P[7].w (v1.75)
-                             uint32_t k32[36] = {};
+                             uint32_t k32[40] = {};
                              std::memcpy(k32, k, sizeof k);
                              std::memcpy(k32 + 24, edge, sizeof edge);
-                             waterSunConstants(c, k32 + 32);  // P[8] (v1.77)
+                             waterSunConstants(c, k32 + 32, 4);  // P[8], P[9].x (v1.77)
                              particleConstants(c, k32 + 22);  // P[5].zw
                              k32[16] = r.areaLightStable;     // P[4].x (B2)
                              k32[19] = gpu::kNone;            // P[4].w: overflow tiles are shaded twice; the main kernel metered them
                              k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
                              c.cmd->SetPipelineState(fallbackKernel);
                              c.bindFrameConstants(cb);
-                             c.computeConstants(k32, 36);
+                             c.computeConstants(k32, 40);
                              c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                          });
     }
@@ -809,6 +814,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             {
                 for (TextureRef t : { r.waterSunDepth, r.waterSunNormal, r.waterSunMedium }) b.use(t, Use::SrvCompute);
                 b.use(r.waterSunConstants, Use::SrvCompute);
+                if (caustics) b.use(r.waterSunCaustics, Use::SrvCompute);
             }
         };
         // P[6].zw, P[7].x of the fragment kernels (CoverageShade.hlsli): R's GI cache, S's per-record sun, V's depth range.
@@ -821,7 +827,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             k[31] = r.weather != UINT32_MAX ? r.weather : gpu::kNone;                  // P[7].w
             k[32] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : gpu::kNone;  // P[8].x (A8; the arrays hold 48)
             k[33] = v.coverageRecordRadiance.valid() ? c.srv(v.coverageRecordRadiance) : gpu::kNone;  // P[8].y (v1.75)
-            waterSunConstants(c, k + 36);  // P[9] (v1.77)
+            waterSunConstants(c, k + 36, 4);  // P[9], P[10].x (v1.77)
         };
         auto shadingConstants = [=](PassContext& c, uint32_t (&k)[24], uint32_t colour) {
             const uint32_t none = gpu::kNone;

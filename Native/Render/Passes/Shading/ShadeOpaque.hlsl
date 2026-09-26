@@ -39,7 +39,7 @@
 //        pixel under a water-layer stream surface keeps its radiance too, W's refraction source (tracks::water) }
 // P[8] = { W's sun-space water map (v1.77): waterSunDepth, waterSunNormal, waterSunMedium, waterSunConstants (UNX_NONE:
 //        no water) } - a surface under water from the sun takes the refracted sun direction and the water's transmittance
-//        (Passes/Water/WaterLight.hlsli waterSunLight)
+//        (Passes/Water/WaterLight.hlsli waterSunLight); P[9].x its caustics (waterSunCaustics, UNX_NONE: none)
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -265,7 +265,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         // W stage 2 (v1.77): under water from the sun, the sun arrives along the refracted direction, attenuated by the
         // surface's transmission and the water's absorption (VSM visibility stays the unrefracted direction's, W's condition)
         float3 lw, tw;
-        if (waterSunLight(P[8].x, P[8].y, P[8].z, P[8].w, worldPos, l0, 0, lw, tw))
+        if (waterSunLight(P[8].x, P[8].y, P[8].z, P[8].w, P[9].x, worldPos, l0, 0, lw, tw))  // P[9].x: W's caustics
         {
             l0 = lw;
             E *= tw;
