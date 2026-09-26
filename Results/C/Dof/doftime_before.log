@@ -1,0 +1,5 @@
+waiting for the GPU measurement lock; held by: {"track":"W","kind":"timing","pid":41076,"started":"2026-09-27T07:06:29","timeoutMinutes":45,"command":"build/Wall/bin/unx_gate_water_watergate.exe --resolution 4K --frames 300 --planar off"}
+waiting for the GPU measurement lock; held by: {"track":"W","kind":"timing","pid":41076,"started":"2026-09-27T07:06:29","timeoutMinutes":45,"command":"build/Wall/bin/unx_gate_water_watergate.exe --resolution 4K --frames 300 --planar off"}
+  dof time [aim] 4K: 1.712 ms (median of 8 frames), clear 0.082, down 0.003, gather 1.255, reach 0.010, setup 0.374
+  dof time [blur] 4K: 3.459 ms (median of 8 frames), clear 0.081, down 0.003, gather 2.961, reach 0.008, setup 0.406
+  dof time [focus] 4K: 0.964 ms (median of 8 frames), clear 0.082, down 0.003, gather 0.499, reach 0.008, setup 0.371
