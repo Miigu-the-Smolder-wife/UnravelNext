@@ -10,6 +10,7 @@
 //   unx_test_volume_volumetests [--no-debug-layer]
 #include "../../Atmosphere/Tests/TestFrame.h"
 
+#include "../../FX/Tests/RppStream.h"
 #include "unx/volume/VolumePass.h"
 
 #include <algorithm>
@@ -394,7 +395,127 @@ int main(int argc, char** argv)
             S_CHECK(maxD > 1.0, "the test haze bends by only %.3f px", maxD);
             std::printf("haze: %u x %u texels, max |D| %.3f px, worst rel %.2e\n", hw, hh, maxD, worst);
         }
-        std::printf("PASS volume: probe, media slices, haze field\n");
+        // ---- 4. media from the FX particle module: the RPP stream's volume program (23: size 0.05, alpha 1, flat curves,
+        // absorption 0.02, scattering 0.3, emission (0.1, 0, 0), g 0.4) after some ticks, the frame at the latest tick's end
+        // (w = 1: each particle at its latest state). Every media record is one live volume particle at its checkpoint
+        // position, with r = 0.025 m, m = 1, extinction 0.32 and source 0.3 E HG(0.4, sun . D) + (0.1, 0, 0) (sun only: no
+        // transmittance LUT, shadows, GI or local lights in this frame).
+        {
+            fx::ParticleSystem& ps = fx::particles(tf.trackState, tf.device, tf.quality);
+            fx::test::RppConfig rc;
+            rc.emitters = 16;
+            rc.particles = 4096;
+            rc.features = false;
+            rc.ribbons = 4;
+            rc.ribbonPoints = 16;
+            rc.volumes = 4;
+            rc.volumeParticles = 256;
+            fx::test::RppStream stream(rc);
+            std::vector<NV_StreamEvent> previous;
+            std::vector<NV_StreamEmitter> table;
+            NV_StreamHeader last{};
+            for (uint32_t t = 1; t <= 40; ++t)
+            {
+                const std::vector<uint8_t> packet = stream.next(t == 1 ? nullptr : &previous);
+                const NV_StreamHeader& h = *reinterpret_cast<const NV_StreamHeader*>(packet.data());
+                nv_stream::apply_emitter_table(table, h, packet.data(), packet.size());
+                ps.submit(packet.data(), packet.size());
+                tf.run([&](FramePassContext& fc) { tracks::simulation(fc); });
+                previous = ps.readback(h.stream, h.generation, h.tick).events;
+                last = h;
+            }
+            const std::vector<NV_StreamParticle> all = ps.checkpoint(tf.shaders);
+            std::vector<D3> expected;  // world positions of the live volume particles
+            for (const NV_StreamParticle& p : all)
+            {
+                const NV_StreamEmitter& e = table[p.emitter];
+                if (e.program != fx::test::RppStream::kVolumeProgram) continue;
+                expected.push_back({ last.anchor[0] + e.origin_anchor[0] + p.position[0], last.anchor[1] + e.origin_anchor[1] + p.position[1],
+                                     last.anchor[2] + e.origin_anchor[2] + p.position[2] });
+            }
+            S_CHECK(!expected.empty(), "no live volume particles after 40 ticks");
+            D3 centre{ 0, 0, 0 };
+            for (const D3& x : expected) centre = centre + x * (1.0 / expected.size());
+            const D3 eye = centre + D3{ -6, 3, -18 };
+            scene::Camera vc;
+            vc.name = "main";
+            vc.position = { (float)eye.x, (float)eye.y, (float)eye.z };
+            vc.forward = normalize(float3{ (float)(centre.x - eye.x), (float)(centre.y - eye.y), (float)(centre.z - eye.z) });
+            scene::Scene s2 = sc;
+            s2.cameras = { vc };
+            s2.sun.direction = normalize(float3{ 0.3f, 0.8f, -0.5f });
+            s2.sun.illuminance = 1000;
+            s2.sun.color = { 1.0f, 0.9f, 0.8f };
+            tf.setScene(s2);
+            const ViewDesc v2 = ViewDesc::fromCamera(vc, W, H, float4x4{});
+            tf.frame.mainView = v2;
+            tf.frame.mainView.prevViewProj = v2.viewProj;
+            uint32_t gridX, gridY, slices, tilePx;
+            volume::froxelGridSize(tf.quality, W, H, gridX, gridY, slices, tilePx);
+            const float nearM = (float)tf.quality.number("atmosphere.froxels.near_m"), farM = (float)tf.quality.number("atmosphere.froxels.far_m");
+            std::shared_ptr<std::vector<uint8_t>> records, counters;
+            uint32_t threads = 0;
+            tf.run([&](FramePassContext& fc) {
+                const std::vector<uint8_t> header = froxelHeader(gridX, gridY, slices, tilePx, nearM, farM);
+                const BufferRef lists = tf.uploadBuffer(fc, header.data(), header.size(), 0, "volume.test.froxels");
+                auto& pass = fc.trackState->get<std::unique_ptr<volume::VolumePass>>("volume.test.pass");
+                if (!pass) pass = std::make_unique<volume::VolumePass>(fc.device);
+                volume::VolumeFrame f;
+                f.view = &tf.frame.mainView;
+                f.frameConstants = fc.frameConstantsFor(tf.frame.mainView);
+                f.camera[0] = eye.x;
+                f.camera[1] = eye.y;
+                f.camera[2] = eye.z;
+                f.time = last.time;
+                f.froxelLights = lists;
+                f.media = true;
+                const volume::VolumeOutput o = pass->record(ps, fc.graph, fc.shaders, fc.quality, fc.frame.frameIndex, f);
+                S_CHECK(o.valid && o.volumeSlices.valid(), "no media output from the particle module");
+                threads = o.threads;
+                records = tf.readbackBuffer(fc, o.records, (uint64_t)o.threads * sizeof(Record));
+                counters = tf.readbackBuffer(fc, o.counters, 32);
+            });
+            const uint32_t* cnt = reinterpret_cast<const uint32_t*>(counters->data());
+            S_CHECK(cnt[2] == 0, "stream media status 0x%x", cnt[2]);
+            const Record* r = reinterpret_cast<const Record*>(records->data());
+            const D3 sun = norm(d3(s2.sun.direction));
+            const double g = 0.4, E[3] = { 1000.0 * 1.0, 1000.0 * 0.9, 1000.0 * 0.8 };
+            uint32_t media = 0;
+            double worstPos = 0, worstSource = 0;
+            std::vector<bool> used(expected.size(), false);
+            for (uint32_t i = 0; i < threads; ++i)
+            {
+                if (r[i].kind != 1) continue;
+                ++media;
+                const D3 rel{ r[i].centre[0], r[i].centre[1], r[i].centre[2] };
+                const D3 world = eye + rel;
+                size_t best = 0;
+                double bestD = 1e30;
+                for (size_t k = 0; k < expected.size(); ++k)
+                {
+                    const double d = len(expected[k] - world);
+                    if (d < bestD) { bestD = d; best = k; }
+                }
+                worstPos = std::max(worstPos, bestD);
+                S_CHECK(bestD <= 2e-3, "record %u at (%.4f, %.4f, %.4f) is %.4g m from every live volume particle", i, world.x, world.y, world.z, bestD);
+                S_CHECK(!used[best], "two records for one particle");
+                used[best] = true;
+                S_CHECK(std::abs(r[i].radius - 0.025f) < 1e-6f && std::abs(r[i].mass - 1.0f) < 1e-6f, "record %u: r %.6g m %.6g", i, r[i].radius, r[i].mass);
+                const double cosTheta = dot(sun, norm(rel));
+                const double hg = (1 - g * g) / (4 * 3.14159265358979323846 * std::pow(1 + g * g - 2 * g * cosTheta, 1.5));
+                for (int k = 0; k < 3; ++k)
+                {
+                    S_CHECK(std::abs(r[i].a[k] - 0.32f) < 1e-6f, "record %u: extinction %.6g", i, r[i].a[k]);
+                    const double b = 0.3 * E[k] * hg + (k == 0 ? 0.1 : 0.0);
+                    const double e = std::abs(r[i].b[k] - b) / b;
+                    worstSource = std::max(worstSource, e);
+                    S_CHECK(e <= 1e-4, "record %u: source[%d] %.6g vs %.6g", i, k, r[i].b[k], b);
+                }
+            }
+            S_CHECK(media == expected.size(), "%u media records for %zu live volume particles", media, expected.size());
+            std::printf("stream media: %u records = live volume particles at the frame time (worst position %.2e m, source rel %.2e)\n", media, worstPos, worstSource);
+        }
+        std::printf("PASS volume: probe, media slices, haze field, stream media\n");
         return 0;
     }
     catch (const std::exception& e)
