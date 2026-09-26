@@ -963,6 +963,13 @@ void HostRenderer::setFluids(std::span<const FluidInput> fluids, const uint64_t 
         if (v.size != sizeof v || v.version != 1) fail("fluids: NP_FluidGpuView size %u version %u", v.size, v.version);
         if (!v.current || !v.count || v.stride < 48 || v.stride % 4 || !(v.dx > 0)) fail("fluids: a view without particles (count %u, stride %u: >= 48 and a multiple of 4, dx %g)", v.count, v.stride, v.dx);
         if (!(in.alpha >= 0 && in.alpha <= 1)) fail("fluids: alpha %g outside [0, 1]", in.alpha);
+        for (void* resource : { v.current, v.startValid ? v.start : nullptr })  // the particles must live on this device
+        {
+            if (!resource) continue;
+            ComPtr<ID3D12Device> owner;
+            if (FAILED(static_cast<ID3D12Resource*>(resource)->GetDevice(IID_PPV_ARGS(&owner))) || owner.Get() != m_device->d3d())
+                fail("fluids: the particle buffers belong to another device (the physics GPU work runs on another renderer's bridge)");
+        }
         FramePacket::Fluid f;
         f.frame.current = static_cast<ID3D12Resource*>(v.current);
         f.frame.start = v.startValid ? static_cast<ID3D12Resource*>(v.start) : nullptr;

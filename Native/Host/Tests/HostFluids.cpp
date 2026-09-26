@@ -5,7 +5,7 @@
 //      the frame's fence (one graphics submission per frame in the bridge's statistics), and frames without fluids admit
 //      nothing;
 //   2. invalid views are refused on the calling thread (size, stride under 48 or not a multiple of 4, no particles, alpha
-//      outside [0, 1], a material that is not Water-class);
+//      outside [0, 1], a material that is not Water-class, particle buffers of another device);
 //   3. the lease and the buffer are released after the frames; no D3D12 debug-layer errors.
 // Correctness run (standalone HostRenderer, hardware GPU; GpuLock -Kind correctness).
 #include "Renderer/HostRenderer.h"
@@ -15,6 +15,7 @@
 #include "unx/core/File.h"
 
 #include <cstring>
+#include <dxgi1_6.h>
 #include <string>
 #include <vector>
 
@@ -156,6 +157,24 @@ int main()
         HostRenderer::FluidInput badAlpha = in;
         badAlpha.alpha = 1.5f;
         expect("alpha outside [0, 1] is refused", throws([&] { h.setFluids({ &badAlpha, 1 }, stamp); }));
+        {
+            // a buffer of another device (the software adapter's): the physics ran on another renderer's bridge
+            ComPtr<IDXGIFactory6> factory;
+            check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "DXGI factory");
+            ComPtr<IDXGIAdapter> adapter;
+            check(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)), "WARP adapter");
+            ComPtr<ID3D12Device> other;
+            check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(&other)), "WARP device");
+            D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
+            D3D12_RESOURCE_DESC rd = buffer->GetDesc();
+            ComPtr<ID3D12Resource> foreign;
+            check(other->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&foreign)), "foreign buffer");
+            FluidGpuView elsewhere = view;
+            elsewhere.current = foreign.Get();
+            HostRenderer::FluidInput foreignIn = in;
+            foreignIn.view = &elsewhere;
+            expect("particle buffers of another device are refused", throws([&] { h.setFluids({ &foreignIn, 1 }, stamp); }));
+        }
         HostRenderer::FluidInput badMaterial = in;
         badMaterial.material = 0;
         expect("a material that is not Water-class is refused", throws([&] { h.setFluids({ &badMaterial, 1 }, stamp); }));
