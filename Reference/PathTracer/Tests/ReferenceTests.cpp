@@ -10,6 +10,10 @@
 //   sky         full atmosphere: forced in-scattering NEE and collision NEE agree (two unbiased estimators)
 //   bsdf        E[f cos / pdf] with BSDF sampling equals E[f cos / p_uniform] (sampling/pdf consistency), per material
 //   atmosphere  optical-depth table error against 8192-panel quadrature (measured, printed)
+//   water       a smooth water interface over an emitting floor (Dielectric.h; black sky, no sun), CPU only:
+//               from above  L = (1 - F(theta)) T^(d / cos theta_t) Le / n^2   (normal incidence and 50 degrees)
+//               from below  past the critical angle L = Le_floor (total internal reflection, sigma = 0); at 30 degrees
+//                           L = F_in Le_floor + (1 - F_in) n^2 Le_ceiling (the radiance gain of leaving the water)
 // With --gpu as the first argument the rendering cases run on the GPU reference tracer (Reference/GpuTracer) against
 // the same closed forms (the validation gate's furnace and energy tests); the CPU-only cases are skipped.
 #include "unx/core/Log.h"
@@ -97,7 +101,7 @@ struct Measured
     double mean = 0, stderr_ = 0;
 };
 
-Measured renderPatch(const scene::Scene& s, uint32_t spp, bool sunCaustics = true)
+Measured renderPatch(const scene::Scene& s, uint32_t spp, bool sunCaustics = true, uint32_t surfaceOrderMax = 0xFFFFFFFFu)
 {
     reference::RenderSettings rs;
     rs.width = 16;
@@ -106,6 +110,7 @@ Measured renderPatch(const scene::Scene& s, uint32_t spp, bool sunCaustics = tru
     rs.russianRouletteStart = 4;
     rs.samplesPerPass = spp / 2;
     rs.sunCaustics = sunCaustics;
+    rs.surfaceOrderMax = surfaceOrderMax;
     const reference::RenderOutput out = renderOn(s, reference::resolveCamera(s, { "down", "", 0 }), rs);
     CHECK(out.stats.nanSamples == 0 && out.stats.truncatedPaths == 0);
     const double exposure = 1.0 / 1.2;
@@ -705,6 +710,91 @@ void testAtmosphereTable()
 //     never;
 //   - 45 degree face: base colour = the mean of the x and y projections' taps (weights 1/2); with no normal texture the
 //     shading normal is the geometric normal (whiteout of a flat texel is exact).
+// Water (Dielectric.h): the plane scene's plane becomes an emitting, non-reflecting floor at y = 0 under a water surface
+// at y = d (a single-sided quad facing up, out of the water); black sky, no sun. Every path from the camera reflects off
+// the interface with probability F (then reaches the black sky or, from below, the floor) or refracts, so the estimate
+// is a Bernoulli mixture of exact terms: no light sampling happens at the delta interface. The emitters are Standard
+// surfaces of albedo 0, which still reflect by Schlick's (1 - v.h)^5 at f0 = 0 (a few % of directional albedo for a
+// rough lobe); light they reflect back into the water is a second-order term of the Standard model, not of the
+// interface, so the renders keep surface order 1 (the interface vertex; the emitters' emission is counted at it).
+double dielectricF(double cosI, double eta)
+{
+    const double s2 = eta * eta * (1 - cosI * cosI);
+    if (s2 >= 1) return 1;
+    const double ct = std::sqrt(1 - s2), rs = (eta * cosI - ct) / (eta * cosI + ct), rp = (eta * ct - cosI) / (eta * ct + cosI);
+    return 0.5 * (rs * rs + rp * rp);
+}
+
+scene::Scene waterScene(float depth, float transmittance, float floorNits, float ceilingNits)
+{
+    scene::Scene s = planeScene(0.0f);
+    s.materials[0].emissive = { floorNits, floorNits, floorNits };
+    scene::Material water;
+    water.name = "water";
+    water.cls = scene::MaterialClass::Water;
+    water.baseColor = { transmittance, transmittance, transmittance };
+    water.roughness = 0.02f;
+    water.ior = 1.333f;
+    s.materials.push_back(water);
+    auto quad = [&](float y, bool up, uint32_t material) {
+        scene::Mesh m = s.meshes[0];
+        m.name = up ? "up" : "down";
+        for (float3& p : m.positions) p.y = y;
+        for (float3& n : m.normals) n = { 0, up ? 1.0f : -1.0f, 0 };
+        if (!up) m.indices = { 0, 2, 1, 0, 3, 2 };
+        m.submeshes = { { 0, 6, material } };
+        s.meshes.push_back(m);
+        scene::Instance in;
+        in.mesh = (uint32_t)s.meshes.size() - 1;
+        s.instances.push_back(in);
+    };
+    quad(depth, true, 1);
+    if (ceilingNits > 0)
+    {
+        scene::Material ceiling = s.materials[0];
+        ceiling.name = "ceiling";
+        ceiling.emissive = { ceilingNits, ceilingNits, ceilingNits };
+        s.materials.push_back(ceiling);
+        quad(depth + 1, false, 2);
+    }
+    return s;
+}
+
+void aim(scene::Scene& s, float3 position, float3 forward)
+{
+    s.cameras[0].position = position;
+    s.cameras[0].forward = normalize(forward);
+    s.cameras[0].up = { 0, 0, -1 };  // every direction here lies in the xy plane
+}
+
+void testWater()
+{
+    const double n = 1.333, d = 0.5, T = 0.945, Le = 100;
+    // From above: normal incidence and 50 degrees from the normal (camera 50 m away, looking at the surface point x = 0).
+    for (double deg : { 0.0, 50.0 })
+    {
+        const double th = deg * kPi / 180, cosI = std::cos(th), sinT = std::sin(th) / n, cosT = std::sqrt(1 - sinT * sinT);
+        scene::Scene s = waterScene((float)d, (float)T, (float)Le, 0);
+        aim(s, { (float)(50 * std::sin(th)), (float)(d + 50 * cosI), 0 }, { (float)-std::sin(th), (float)-cosI, 0 });
+        const double expected = (1 - dielectricF(cosI, 1 / n)) * std::pow(T, d / cosT) * Le / (n * n);
+        expectNear(deg == 0 ? "above0" : "above50", renderPatch(s, 256, true, 1), expected, 1e-5);
+    }
+    // From below (sigma = 0: the camera starts inside the body, which the tracer's medium state only learns at a
+    // refraction through the front face). 60 degrees is past the critical angle asin(1/n) = 48.6: every path reflects.
+    {
+        scene::Scene s = waterScene((float)d, 1.0f, (float)Le, 300);
+        const double th = 60 * kPi / 180;
+        aim(s, { 0, (float)(d - 0.2), 0 }, { (float)std::sin(th), (float)std::cos(th), 0 });
+        expectNear("tir60", renderPatch(s, 64, true, 1), Le, 1e-5);
+    }
+    {
+        scene::Scene s = waterScene((float)d, 1.0f, (float)Le, 300);
+        const double th = 30 * kPi / 180, F = dielectricF(std::cos(th), n);
+        aim(s, { 0, (float)(d - 0.2), 0 }, { (float)std::sin(th), (float)std::cos(th), 0 });
+        expectNear("below30", renderPatch(s, 256, true, 1), F * Le + (1 - F) * n * n * 300, 1e-5);
+    }
+}
+
 void testCutFace()
 {
     using namespace unx::reference;
@@ -796,7 +886,7 @@ int main(int argc, char** argv)
         const char* only = argc > arg ? argv[arg] : nullptr;
         auto run = [&](const char* name, void (*fn)()) {
             if (only && std::strcmp(only, name) != 0) return;
-            const bool cpuOnly = std::strcmp(name, "hold") == 0 || std::strcmp(name, "atmosphere") == 0 || std::strcmp(name, "model") == 0 || std::strcmp(name, "bsdf") == 0 || std::strcmp(name, "cut") == 0;
+            const bool cpuOnly = std::strcmp(name, "hold") == 0 || std::strcmp(name, "atmosphere") == 0 || std::strcmp(name, "model") == 0 || std::strcmp(name, "bsdf") == 0 || std::strcmp(name, "cut") == 0 || std::strcmp(name, "water") == 0;
             if (g_gpu && cpuOnly) return;
             logf("[%s]\n", name);
             fn();
@@ -807,6 +897,7 @@ int main(int argc, char** argv)
         run("model", testModelAgreement);
         run("bsdf", testBsdfSampling);
         run("cut", testCutFace);
+        run("water", testWater);
         run("point", testPoint);
         run("rect", testRect);
         run("sphere", testSphere);

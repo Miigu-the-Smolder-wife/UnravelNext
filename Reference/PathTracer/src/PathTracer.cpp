@@ -16,6 +16,7 @@
 
 #include "Atmosphere.h"
 #include "Bsdf.h"
+#include "Dielectric.h"
 #include "HoldRecord.h"
 #include "Lights.h"
 #include "RtScene.h"
@@ -536,12 +537,16 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
     float tmin = tnear;
     Prev prev = Prev::Camera;
     float prevBsdfPdf = 0;
+    bool prevDelta = false;  // the previous vertex was a delta interface (Dielectric.h): no light sampling there
     float3 prevPos{};
     LightCandidates cands, prevCands;
     uint32_t nVol = 0;  // atmosphere scattering events so far (order diagnostics)
     // Sun caustic class (see Impl): chain = the path so far is camera -> rough x -> smooth vertices, no medium event.
     uint32_t surfVerts = 0;
     bool chain = false, dropSun = false;
+    // Dielectric.h: inside a water body since a refraction through its front face (absorption sigma_a per metre).
+    bool inWater = false;
+    Rgb waterSigma;
 
     for (uint32_t bounce = 0;; ++bounce)
     {
@@ -581,6 +586,9 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
             }
         }
 
+        // Inside water: Beer-Lambert absorption over the segment; the air model does not apply there.
+        if (inWater) beta *= expNeg(waterSigma * (float)segLen);
+
         // --- 1. analytic area-light emission along the segment (after a surface vertex)
         if (prev == Prev::Surface)
         {
@@ -593,7 +601,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                 Rgb Le;
                 if (!lights.intersect(li, prevPos, d, (float)segLen, t, Le, pdfSA)) continue;
                 const float pSel = (prevCands.cumulative[k] - (k ? prevCands.cumulative[k - 1] : 0.0f)) / prevCands.total;
-                const float w = powerHeuristic(prevBsdfPdf, pSel * pdfSA);
+                const float w = prevDelta ? 1.0f : powerHeuristic(prevBsdfPdf, pSel * pdfSA);
                 L += beta * expNeg(atm.opticalDepth(od, d, t)) * Le * (w * orderWeight(nVol, surfVerts));
             }
         }
@@ -604,7 +612,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
         const Rgb Tseg = expNeg(tauSeg);
         const float Tavg = Tseg.avg();
         const SegmentPdf spdf = segmentPdf(od, d, segLen);
-        if (segLen > 0)
+        if (segLen > 0 && !inWater)
         {
             const float pForce = forced ? std::min(1.0f, kForceScale * (1 - Tavg)) : 0.0f;
             if (pForce > 0 && smp.get1D() < pForce)
@@ -647,6 +655,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                 d = w;
                 tmin = 0;
                 prev = Prev::Medium;
+                prevDelta = false;
                 chain = false;
                 dropSun = false;
                 if (++nVol > orderMax) break;  // no later contribution can be inside the order window
@@ -666,7 +675,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
         {
             if (prev != Prev::Medium && !(prev == Prev::Surface && dropSun) && inSun(d))
             {
-                const float w = prev == Prev::Camera ? 1.0f : powerHeuristic(prevBsdfPdf, 1.0f / sunSolidAngle);
+                const float w = prev == Prev::Camera || prevDelta ? 1.0f : powerHeuristic(prevBsdfPdf, 1.0f / sunSolidAngle);
                 L += beta * sunRadiance * (w * orderWeight(nVol, surfVerts));
             }
             break;
@@ -677,6 +686,38 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
         {
             s = rt->surface(hit, d);
             if (!s.emission.isZero()) L += beta * s.emission * orderWeight(nVol, surfVerts);
+            if (s.bsdf.cls == scene::MaterialClass::Water)
+            {
+                // A smooth dielectric interface (Dielectric.h): no light sampling at this delta vertex; the path reflects
+                // with probability F or refracts, entering or leaving the water body.
+                const DielectricSample ds = sampleDielectric(s, -d, s.ior, smp.get1D());
+                beta *= ds.weight;
+                if (ds.refracted)
+                {
+                    inWater = ds.entering;
+                    if (inWater) waterSigma = dielectricAbsorption(s.bsdf.baseColor);
+                }
+                ++surfVerts;
+                chain = false;  // (water scenes refuse sun caustics)
+                dropSun = false;
+                if (surfVerts > surfMax) break;
+                lights.gather(s.p, cands);
+                prevDelta = true;  // light reached by the continuation keeps full weight
+                prevPos = s.p;
+                std::swap(prevCands, cands);
+                prev = Prev::Surface;
+                o = offsetRayOrigin(s.p, dot(s.ng, ds.wi) >= 0 ? s.ng : -s.ng);
+                d = ds.wi;
+                tmin = 0;
+                if (bounce + 1 >= rrStart)
+                {
+                    const float q = std::min(1.0f, beta.max());
+                    if (!(smp.get1D() < q)) break;
+                    beta *= 1.0f / q;
+                }
+                if (beta.isZero()) break;
+                continue;
+            }
             if (!s.frontFacing) break;  // back of a one-sided surface: the BRDF is zero for this view
         }
         else
@@ -757,6 +798,7 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
         if (!bsdf.sample(uLobe, u1, u2, bs)) break;
         beta *= bs.f * (bsdf.cosine(bs.wi) / bs.pdf);
         prevBsdfPdf = bs.pdf;
+        prevDelta = false;
         prevPos = s.p;
         std::swap(prevCands, cands);
         prev = Prev::Surface;
@@ -909,6 +951,10 @@ RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings&
     im.buildCaustics();
     im.caustics = st.sunCaustics && !im.emitTris.empty() && im.sunSolidAngle > 0 && !im.sunRadiance.isZero();
     if (cam.lensAperture > 0 && im.caustics) fail("reference: the thin lens with sun caustics (the light tracer connects to a pinhole camera)");
+    if (im.caustics)
+        for (const scene::Material& m : im.scene.materials)
+            if (m.cls == scene::MaterialClass::Water)
+                fail("reference: water with sun caustics (the light tracer does not refract; Dielectric.h: sunlight through water needs manifold NEE)");
     im.forced = st.forcedInScattering;
     im.orderMin = st.volumeOrderMin;
     im.orderMax = st.volumeOrderMax;

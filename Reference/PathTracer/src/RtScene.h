@@ -37,6 +37,7 @@ struct Surface
     scene::model::Surface bsdf;
     Rgb emission;
     uint32_t material = 0;
+    float ior = 1.5f;  // the material's index of refraction (Water: Dielectric.h)
 };
 
 struct Texel
