@@ -32,12 +32,14 @@
 // P[5] = { froxel lights (raw) (UNX_NONE = absent), LTC table (StructuredBuffer<float4>, AreaLight.hlsli) }
 // P[6] = { edge tile mask SRV (EdgeDetect.hlsl, R32G32_UINT per tile; UNX_NONE = no edge pixels), V's coverage tiles
 //        (raw; UNX_NONE = no coverage layer: a tile with coverage fragments keeps every pixel's exposed radiance for the
-//        coverage composite, CoverageComposite.hlsl), 0, 0 }
+//        coverage composite, CoverageComposite.hlsl), exposure histogram's centre sigma, E's light function table (raw;
+//        UNX_NONE = none: A8 cookies, IES, gobos, animated intensity and colour on point and spot lights) }
 // P[7] = { edge radiance UAV (RGBA16F), R's screen probe maps (K path; UNX_NONE = absent), S's shadow overflow list (raw;
 //        FALLBACK: a raw buffer holding this frame's ShadowSrvs), 0 }
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
+#include "Passes/Lights/LightFunction.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/AreaLight.hlsli"
@@ -326,7 +328,15 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 continue;  // AREA=0: the scene has no area lights (ShadingSystem)
             }
             float3 l;
-            const float3 E = shPunctualIlluminance(light, (light.position - g_cameraPosition) - offset, l);
+            const float3 toLight = (light.position - g_cameraPosition) - offset;
+            float3 E = shPunctualIlluminance(light, toLight, l);
+            if (P[6].w != UNX_NONE)
+            {
+                // A8 (E's table): the light's function in the direction from the light to this point; the footprint is
+                // the pixel's size seen from the light (cookie and gobo mip selection)
+                const float footprint = linearZ * (2 * g_tanHalfFovY / g_viewHeight) / max(length(toLight), 1e-4);
+                E *= lightFunction(P[6].w, lightIndex, light.forward, light.right, -l, footprint, g_time);
+            }
             const float cosL = dot(n, l);
             float3 f = 0;
             if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);

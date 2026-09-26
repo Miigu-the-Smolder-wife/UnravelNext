@@ -454,6 +454,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             b.use(o.tileArgs, Use::IndirectArgs);
             b.use(v.color, Use::UavComputeDisjoint);
             if (v.shadowVisibility.valid()) b.use(v.shadowVisibility, Use::SrvCompute);
+            if (r.lightFunctions.valid()) b.use(r.lightFunctions, Use::SrvCompute);  // A8 light functions (E)
             if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
             if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
             if (v.reflection.valid()) b.use(v.reflection, Use::SrvCompute);
@@ -517,6 +518,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k32[16] = r.areaLightStable;     // P[4].x (B2)
                 k32[19] = meter ? c.uav(histogram.buffer) : gpu::kNone;  // P[4].w exposure histogram
                 k32[26] = asUint(histogram.centreSigma);                 // P[6].z
+                k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
                 particleConstants(c, k32 + 22);  // P[5].zw
                 c.computeConstants(k32, 32);
                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
@@ -544,6 +546,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              b.use(fallbackArgs, Use::IndirectArgs);
                              b.use(v.color, Use::UavComputeDisjoint);
                              if (v.shadowVisibility.valid()) b.use(v.shadowVisibility, Use::SrvCompute);
+                             if (r.lightFunctions.valid()) b.use(r.lightFunctions, Use::SrvCompute);  // A8 light functions (E)
                              if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
                              if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
                              if (v.reflection.valid()) b.use(v.reflection, Use::SrvCompute);
@@ -587,6 +590,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              particleConstants(c, k32 + 22);  // P[5].zw
                              k32[16] = r.areaLightStable;     // P[4].x (B2)
                              k32[19] = gpu::kNone;            // P[4].w: overflow tiles are shaded twice; the main kernel metered them
+                             k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
                              c.cmd->SetPipelineState(fallbackKernel);
                              c.bindFrameConstants(cb);
                              c.computeConstants(k32, 32);
