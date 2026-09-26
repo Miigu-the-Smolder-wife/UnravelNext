@@ -926,16 +926,19 @@ void translucentComposite(FramePassContext& fc, const ViewResources& view, Textu
                       if (x.valid()) b.use(x, Use::SrvCompute);
                   if (r.vsmAtlas.valid()) b.use(r.vsmAtlas, Use::SrvCompute);
               },
-              [=, &fc](PassContext& c) {
-                  const FrameResources& fr = fc.resources;
-                  const bool shadows = fr.vsmPageTable.valid() && fr.vsmConstants != UINT32_MAX;
+              // (by value: the frame context and its resources do not outlive the graph's build; a reference read at
+              // execute time handed the pass other graphs' handles - render C's coverage_layer_is_exact crash)
+              [=, giCache = r.giCache, transmittance = r.transmittanceLut, multiScatter = r.multiScatterLut, pageTable = r.vsmPageTable,
+               blocks = r.vsmBlocks, searchBound = r.vsmSearchBound, layers = r.vsmLayers, vsmConstants = r.vsmConstants,
+               visibleClusters = view.visibleClusters, airVolume = view.airVolume](PassContext& c) {
+                  const bool shadows = pageTable.valid() && vsmConstants != UINT32_MAX;
                   const uint32_t k[20] = { c.srv(vis), c.srv(classes), c.uav(colour), c.uav(stats),
-                                           c.srv(view.visibleClusters), textureTable, fr.giCache.valid() ? c.srv(fr.giCache) : none, 0,
-                                           fr.transmittanceLut.valid() ? c.srv(fr.transmittanceLut) : none, fr.multiScatterLut.valid() ? c.srv(fr.multiScatterLut) : none,
-                                           view.airVolume.valid() ? c.srv(view.airVolume) : none, 0,
-                                           shadows ? c.srv(fr.vsmPageTable) : none, shadows ? c.srv(fr.vsmBlocks) : none,
-                                           shadows && fr.vsmSearchBound.valid() ? c.srv(fr.vsmSearchBound) : none, shadows ? fr.vsmConstants : none,
-                                           shadows && fr.vsmLayers.valid() ? c.srv(fr.vsmLayers) : none, 0, 0, 0 };
+                                           c.srv(visibleClusters), textureTable, giCache.valid() ? c.srv(giCache) : none, 0,
+                                           transmittance.valid() ? c.srv(transmittance) : none, multiScatter.valid() ? c.srv(multiScatter) : none,
+                                           airVolume.valid() ? c.srv(airVolume) : none, 0,
+                                           shadows ? c.srv(pageTable) : none, shadows ? c.srv(blocks) : none,
+                                           shadows && searchBound.valid() ? c.srv(searchBound) : none, shadows ? vsmConstants : none,
+                                           shadows && layers.valid() ? c.srv(layers) : none, 0, 0, 0 };
                   c.cmd->SetPipelineState(kernel);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 20);
