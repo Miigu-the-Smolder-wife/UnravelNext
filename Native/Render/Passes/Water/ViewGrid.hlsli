@@ -110,4 +110,25 @@ bool viewGridWater(ViewGridParams p, float2 x0, float reach)
 {
     return p.lake == 0 || distance(x0, p.lakeCentre) - p.lakeRadius <= reach;
 }
+// Grid point q as a scatter vertex: screen position in 1/256 px, 1 / view depth and the flag (0 invalid, 1 inside the
+// water body, 2 outside). The displacement is low-passed isotropically to the cell's longer side (at most 2.5 pixel
+// footprints: what that removes across the view is below 0.25 px) with SampleLevel, so every evaluation of the same
+// point - the owning group, a neighbouring group's halo, the resolve - runs the same instructions on the same inputs
+// (the scatter's watertightness rests on it; the hole gate checks it on every device).
+void viewGridVertex(ViewGridParams p, int2 q, uint field, out int2 xy, out float inverseDepth, out uint flag, out float2 x0)
+{
+    xy = 0;
+    inverseDepth = 0;
+    flag = 0;
+    x0 = 0;
+    float d;
+    if (any(q >= int2(p.columns, p.rows)) || !viewGridRest(p, q, x0, d)) return;
+    const float2 footprint = viewGridFootprint(p, d, q.y);
+    const float3 disp = viewGridDisplacement(field, p.lengths, x0, max(footprint.x, footprint.y));
+    const float3 s = viewGridProject(p, float3(x0.x + disp.x, p.waterLevel + disp.y, x0.y + disp.z));
+    if (s.z <= 0.01) return;
+    xy = int2(round(clamp(s.xy, -4.0e6, 4.0e6) * 256.0));
+    inverseDepth = 1.0 / s.z;
+    flag = viewGridWater(p, x0, length(footprint)) ? 1 : 2;
+}
 #endif
