@@ -178,6 +178,14 @@ RayScene::~RayScene()
     m_device.deferRelease(m_exactReadback);
     if (m_patchRing) m_patchRing->Unmap(0, nullptr);
     m_device.deferRelease(m_patchRing);
+    static_assert(sizeof(m_lightRingSrv) / sizeof(uint32_t) == kDescSlots && sizeof(m_lightSlotVersion) / sizeof(uint64_t) == kDescSlots);
+    if (m_lightRing)
+    {
+        m_lightRing->Unmap(0, nullptr);
+        m_device.deferRelease(m_lightRing);
+        DescriptorHeaps* lh = &m_device.descriptors();
+        for (uint32_t srv : m_lightRingSrv) m_device.deferCall([lh, srv] { lh->freeResource(srv); });
+    }
     if (m_vsmRing)
     {
         m_vsmRing->Unmap(0, nullptr);
@@ -1325,6 +1333,7 @@ void RayScene::record(FramePassContext& fc)
 {
     RenderGraph& g = fc.graph;
     m_frame = {};
+    updateLightGrid(fc);
     m_frame.tlasStatic = g.importBuffer(m_tlasStatic.resource.Get(), { "RT static TLAS", m_tlasStatic.bytes, 0 });
     m_frame.tlasDynamic = g.importBuffer(m_tlasDynamic.resource.Get(), { "RT dynamic TLAS", m_tlasDynamic.bytes, 0 });
     fc.resources.tlasStatic = m_frame.tlasStatic;
@@ -1557,6 +1566,206 @@ void RayScene::rootConstants(uint32_t out[8]) const
     out[4] = m_indexPool.srv;
     out[5] = m_vertexMap.srv;
     out[6] = m_deformedPool.srv;
-    out[7] = 0;
+    out[7] = m_lightSrvNow;  // HitLocalLights.hlsli (0xFFFFFFFF: no local lights)
+}
+
+namespace
+{
+// Mirror of the shared RtLight (Reference/GpuTracer/shared/Lights.hlsli), 96 B.
+struct RtLightRecord
+{
+    float3 position;
+    uint32_t type;
+    float3 forward;
+    float intensity;
+    float3 right;
+    float range;
+    float3 up;
+    float spotScale;
+    float3 color;
+    float spotOffset;
+    float size[2];
+    uint32_t castShadow, pad;
+};
+static_assert(sizeof(RtLightRecord) == 96);
+// RtLightGrid (48 B) + offsets of the lights, cell starts and cell lights (HitLocalLights.hlsli).
+struct RtLightHeader
+{
+    float3 minCorner;
+    uint32_t count;
+    float3 cell;
+    uint32_t dim[3], pad[2];
+    uint32_t lightsOffset, cellStartOffset, cellLightsOffset, pad2;
+};
+static_assert(sizeof(RtLightHeader) == 64);
+constexpr uint32_t kLightCellsMax = 1u << 18;  // the grid's cell size grows past this many cells (262,144 x 4 B starts)
+} // namespace
+
+// The reference LightSet's normalisation and grid (Reference/PathTracer/src/Lights.cpp: forward unit, right
+// orthogonalised, up = forward x right, spot scale / offset, cells of half the median range within [0.5, 16] m, a light
+// listed in every cell its range sphere touches), with the cell size grown until at most kLightCellsMax cells.
+void RayScene::updateLightGrid(FramePassContext& fc)
+{
+    const scene::Scene* src = fc.scene.source();
+    const std::vector<scene::Light> none;
+    const std::vector<scene::Light>& lights = src ? src->lights : none;
+    uint64_t hash = 1469598103934665603ull;
+    auto mix = [&](const void* p, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        for (size_t i = 0; i < n; ++i) hash = (hash ^ b[i]) * 1099511628211ull;
+    };
+    for (const scene::Light& l : lights)
+    {
+        const uint32_t type = (uint32_t)l.type, shadow = l.castShadow ? 1u : 0u;
+        mix(&type, 4); mix(&l.position, 12); mix(&l.forward, 12); mix(&l.right, 12); mix(&l.color, 12); mix(&l.intensity, 4);
+        mix(&l.range, 4); mix(&l.spotInner, 4); mix(&l.spotOuter, 4); mix(&l.size, 8); mix(&shadow, 4);
+    }
+    const size_t n = lights.size();
+    mix(&n, sizeof n);
+    if (hash != m_lightHash || m_lightImage.empty())
+    {
+        m_lightHash = hash;
+        ++m_lightVersion;
+        std::vector<RtLightRecord> rec(n);
+        RtLightHeader head{};
+        float3 lo{ 1e30f, 1e30f, 1e30f }, hi{ -1e30f, -1e30f, -1e30f };
+        std::vector<float> ranges;
+        for (size_t i = 0; i < n; ++i)
+        {
+            const scene::Light& l = lights[i];
+            RtLightRecord& r = rec[i];
+            r.position = l.position;
+            r.type = (uint32_t)l.type;
+            r.forward = normalize(l.forward);
+            r.right = normalize(l.right - r.forward * dot(l.right, r.forward));
+            r.up = cross(r.forward, r.right);
+            const float ci = std::cos(l.spotInner), co = std::cos(l.spotOuter);
+            r.spotScale = 1.0f / std::max(ci - co, 1e-4f);
+            r.spotOffset = -co * r.spotScale;
+            r.intensity = l.intensity;
+            r.range = std::max(l.range, 1e-3f);
+            r.color = l.color;
+            r.size[0] = l.size.x;
+            r.size[1] = l.size.y;
+            r.castShadow = l.castShadow ? 1u : 0u;
+            lo = { std::min(lo.x, l.position.x - r.range), std::min(lo.y, l.position.y - r.range), std::min(lo.z, l.position.z - r.range) };
+            hi = { std::max(hi.x, l.position.x + r.range), std::max(hi.y, l.position.y + r.range), std::max(hi.z, l.position.z + r.range) };
+            ranges.push_back(r.range);
+        }
+        std::vector<uint32_t> cellStart(2, 0), cellLights;
+        head.count = (uint32_t)n;
+        head.dim[0] = head.dim[1] = head.dim[2] = 1;
+        head.cell = { 1, 1, 1 };
+        if (n > 0)
+        {
+            std::nth_element(ranges.begin(), ranges.begin() + ranges.size() / 2, ranges.end());
+            float cellSize = std::clamp(ranges[ranges.size() / 2] * 0.5f, 0.5f, 16.0f);
+            const float3 ext = hi - lo;
+            const float e[3] = { ext.x, ext.y, ext.z };
+            for (;;)
+            {
+                uint64_t cells = 1;
+                for (int k = 0; k < 3; ++k) cells *= std::clamp((uint32_t)std::ceil(e[k] / cellSize), 1u, 512u);
+                if (cells <= kLightCellsMax) break;
+                cellSize *= 1.25f;
+            }
+            float cs[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                head.dim[k] = std::clamp((uint32_t)std::ceil(e[k] / cellSize), 1u, 512u);
+                cs[k] = e[k] / head.dim[k];
+            }
+            head.minCorner = lo;
+            head.cell = { cs[0], cs[1], cs[2] };
+            const size_t cells = (size_t)head.dim[0] * head.dim[1] * head.dim[2];
+            std::vector<std::vector<uint32_t>> lists(cells);
+            for (uint32_t i = 0; i < (uint32_t)n; ++i)
+            {
+                const RtLightRecord& l = rec[i];
+                const float3 a = l.position - float3{ l.range, l.range, l.range } - lo, b = l.position + float3{ l.range, l.range, l.range } - lo;
+                const int x0 = std::max(0, (int)(a.x / cs[0])), x1 = std::min((int)head.dim[0] - 1, (int)(b.x / cs[0]));
+                const int y0 = std::max(0, (int)(a.y / cs[1])), y1 = std::min((int)head.dim[1] - 1, (int)(b.y / cs[1]));
+                const int z0 = std::max(0, (int)(a.z / cs[2])), z1 = std::min((int)head.dim[2] - 1, (int)(b.z / cs[2]));
+                for (int z = z0; z <= z1; ++z)
+                    for (int y = y0; y <= y1; ++y)
+                        for (int x = x0; x <= x1; ++x)
+                        {
+                            const float3 cmin = lo + float3{ x * cs[0], y * cs[1], z * cs[2] }, cmax = cmin + head.cell;
+                            const float3 q{ std::max(cmin.x, std::min(l.position.x, cmax.x)), std::max(cmin.y, std::min(l.position.y, cmax.y)),
+                                            std::max(cmin.z, std::min(l.position.z, cmax.z)) };
+                            const float3 dd = q - l.position;
+                            if (dot(dd, dd) <= l.range * l.range) lists[((size_t)z * head.dim[1] + y) * head.dim[0] + x].push_back(i);
+                        }
+            }
+            cellStart.assign(cells + 1, 0);
+            for (size_t c = 0; c < cells; ++c)
+            {
+                cellStart[c] = (uint32_t)cellLights.size();
+                cellLights.insert(cellLights.end(), lists[c].begin(), lists[c].end());
+            }
+            cellStart[cells] = (uint32_t)cellLights.size();
+        }
+        if (cellLights.empty()) cellLights.push_back(0);
+        head.lightsOffset = sizeof(RtLightHeader);
+        head.cellStartOffset = head.lightsOffset + (uint32_t)(std::max<size_t>(n, 1) * sizeof(RtLightRecord));
+        head.cellLightsOffset = head.cellStartOffset + (uint32_t)(cellStart.size() * 4);
+        m_lightImage.assign(head.cellLightsOffset + cellLights.size() * 4, 0);
+        std::memcpy(m_lightImage.data(), &head, sizeof head);
+        if (n) std::memcpy(m_lightImage.data() + head.lightsOffset, rec.data(), n * sizeof(RtLightRecord));
+        std::memcpy(m_lightImage.data() + head.cellStartOffset, cellStart.data(), cellStart.size() * 4);
+        std::memcpy(m_lightImage.data() + head.cellLightsOffset, cellLights.data(), cellLights.size() * 4);
+    }
+    if (n == 0)
+    {
+        m_lightSrvNow = 0xFFFFFFFFu;
+        return;
+    }
+    const uint64_t need = (m_lightImage.size() + 255) & ~255ull;
+    if (!m_lightRing || need > m_lightSlotBytes)
+    {
+        if (m_lightRing)
+        {
+            m_lightRing->Unmap(0, nullptr);
+            m_device.deferRelease(m_lightRing);
+            DescriptorHeaps* vh = &m_device.descriptors();
+            for (uint32_t srv : m_lightRingSrv) m_device.deferCall([vh, srv] { vh->freeResource(srv); });
+        }
+        m_lightSlotBytes = std::max<uint64_t>(need * 2, 65536);
+        D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
+        D3D12_RESOURCE_DESC1 d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        d.Width = kDescSlots * m_lightSlotBytes;
+        d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+        d.SampleDesc.Count = 1;
+        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(m_device.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr,
+                                                       IID_PPV_ARGS(&m_lightRing)),
+              "RT light grid ring");
+        m_lightRing->SetName(L"RT local-light grid ring");
+        D3D12_RANGE nothing{ 0, 0 };
+        check(m_lightRing->Map(0, &nothing, reinterpret_cast<void**>(&m_lightRingMapped)), "map RT light grid ring");
+        DescriptorHeaps& h = m_device.descriptors();
+        for (uint32_t k = 0; k < kDescSlots; ++k)
+        {
+            m_lightRingSrv[k] = h.allocateResource();
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sd.Format = DXGI_FORMAT_R32_TYPELESS;
+            sd.Buffer.FirstElement = k * m_lightSlotBytes / 4;
+            sd.Buffer.NumElements = (UINT)(m_lightSlotBytes / 4);
+            sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+            m_device.d3d()->CreateShaderResourceView(m_lightRing.Get(), &sd, h.resourceCpu(m_lightRingSrv[k]));
+            m_lightSlotVersion[k] = 0;
+        }
+    }
+    // Slot of frame % kDescSlots: the frame kDescSlots before has completed (frames in flight <= kDescSlots).
+    const uint32_t slot = (uint32_t)(fc.frame.frameIndex % kDescSlots);
+    if (m_lightSlotVersion[slot] != m_lightVersion)
+    {
+        std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes, m_lightImage.data(), m_lightImage.size());
+        m_lightSlotVersion[slot] = m_lightVersion;
+    }
+    m_lightSrvNow = m_lightRingSrv[slot];
 }
 } // namespace unx::render::rt

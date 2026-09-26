@@ -104,7 +104,8 @@ public:
     void record(FramePassContext& fc);
     // Declares what a tracing pass of this frame reads (both TLASes, deformed BLASes and vertices).
     void declareTraversal(PassBuilder& b) const;
-    // Bindless indices for ray libraries: root constants P[6], P[7] (RtSceneSrvs).
+    // Bindless indices for ray libraries: root constants P[6], P[7] (RtSceneSrvs; word 7 = this frame's local-light grid,
+    // HitLocalLights.hlsli).
     void rootConstants(uint32_t out[8]) const;
     const RaySceneStats& stats() const { return m_stats; }
     uint32_t sceneRevision() const { return m_sceneRevision; }
@@ -264,6 +265,18 @@ private:
     uint64_t m_poolVertices = 1;             // deformed pool size (proxies + exact slots)
     static constexpr uint64_t kPatchSlotBytes = 16384;       // per ring slot: exact set patches, then proxy cut patches
     static constexpr uint64_t kProxyPatchOffset = 1024;
+    // Local lights for next-event estimation at ray hits (HitLocalLights.hlsli, the reference estimator's shared
+    // Lights.hlsli): the scene lights normalised like the reference's LightSet and a uniform cell grid of the lights whose
+    // range reaches each cell, rebuilt on the CPU when the lights change; one upload-ring slot per frame in flight.
+    void updateLightGrid(FramePassContext& fc);
+    std::vector<uint8_t> m_lightImage;       // header 64 B, lights (96 B each), cell starts (cells + 1), cell lights
+    uint64_t m_lightHash = 0, m_lightVersion = 0;
+    uint64_t m_lightSlotVersion[4] = {};     // kDescSlots
+    ComPtr<ID3D12Resource> m_lightRing;
+    uint8_t* m_lightRingMapped = nullptr;
+    uint64_t m_lightSlotBytes = 0;
+    uint32_t m_lightRingSrv[4] = {};         // kDescSlots
+    uint32_t m_lightSrvNow = 0xFFFFFFFFu;
     ComPtr<ID3D12Resource> m_vsmRing;        // kDescSlots x 2 users x 32 B of ShadowSrvs
     uint8_t* m_vsmRingMapped = nullptr;
     uint32_t m_vsmRingSrv[8] = {};           // kDescSlots x 2 users (static_assert in RayScene.cpp)

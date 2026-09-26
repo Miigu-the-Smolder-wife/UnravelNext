@@ -20,6 +20,7 @@
 #include "Passes/GI/GiInternal.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
+#include "RayTracing/HitLocalLights.hlsli"
 
 // Motion of a hit since the previous tick, in units of the ray's footprint there: |x - x_prev| / footprint, x_prev the
 // same barycentric point of the triangle's previous-tick vertices (deformed instances: the pool's per-vertex world -
@@ -68,8 +69,12 @@ struct ReflHitShade
     float motion;  // the hit's displacement since the previous tick over the footprint (reflHitMotion)
 };
 
+// Local lights (HitLocalLights.hlsli): one next-event sample drawn with localSeed; its visibility is localVisible (the
+// compute path: ReflectionLocalShadow traced it before, same seed and hit point) or, with REFL_LOCAL_TRACE (the ray
+// generation paths), traced here. Lights that cast no shadow: visible.
+uint reflLocalSeed(uint owner) { return giRandom(owner * 7919u + (P[5].x & 0xFFFFFFu) * 104729u + 31u); }
 ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RtHit hit, float3 origin, float3 direction, float coneWidth,
-                          float coneSpread)
+                          float coneSpread, uint localSeed, bool localVisible)
 {
     ReflHitShade o;
     o.radiance = o.sunTerm = o.shadowOrigin = 0;
@@ -107,7 +112,20 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return o;  // inside closed geometry
     const uint footprintLevel = giLevelForSize(h, footprint);
     RtHitLighting L;
-    L.irradiance = L.specularRadiance = 0;
+    L.irradiance = L.specularRadiance = L.local = 0;
+    {
+        const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(localSeed), giUnit(localSeed + 1), giUnit(localSeed + 2));
+        if (ls.valid)
+        {
+            const float3 f = rtLocalLightBrdfCos(m, s.normal, -direction, ls.wi, false);
+            bool visible = !ls.castShadow || localVisible;
+#if REFL_LOCAL_TRACE
+            visible = !ls.castShadow ||
+                      rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition)), RT_MASK_REFLECTION);
+#endif
+            if (visible) L.local = f * ls.weight;
+        }
+    }
     if ((experiment & 16) == 0)
     {
         if ((experiment & 256) == 0)  // 256: reflection hits read the cache only (the estimator's bias apart from cache feedback)

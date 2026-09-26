@@ -9,6 +9,10 @@
 //  4. Reflection exact set (ARCHITECTURE 2.6): a mirror floor reflects a skinned emissive panel whose RT proxy (a
 //     hand-made LOD cut of its even triangles, budget 100) has a hole in half of every cell. Once the panel's reflection
 //     hits put it in the exact set it is traced with its original mesh: every reflected panel pixel reads its emission.
+//  5. Local lights at hits (HitLocalLights.hlsli, B2): a mirror floor reflects a diffuse wall (albedo 0.5, f0 0) lit by
+//     one shadowed point light; sun, sky and emission 0, so the wall's only light is the point light (the mirror floor
+//     has no diffuse albedo: no bounce). An M pixel's value is the wall point's radiance rho / pi x I w(d) cos / d^2 (the
+//     next-event sample of a delta light is exact; its shadow ray sees the light).
 //  3. Textures at hits (INTERFACES v1.11): a mirror floor reflects a wall whose emission is modulated by a published
 //     16 x 16 checker texture (black sky, black diffuse): an M pixel's value is the wall's emission x the texture's
 //     bilinear value at the reflected point, computed on the CPU from the mirror direction.
@@ -360,6 +364,56 @@ uint32_t createTexture(Device& device, const std::vector<uint8_t>& rgba, uint32_
     return srv;
 }
 
+// Scene 5: a mirror floor and a diffuse back wall (z = -6, facing +z, x in [-6, 6], y in [0, 6]) lit by one point light.
+constexpr float kLightI = 200, kLightRange = 30;
+const float3 kLightPos{ 0.5f, 3.0f, -3.0f };
+scene::Scene litWallInMirror()
+{
+    scene::Scene s;
+    s.name = "refl_lit_wall";
+    scene::Material floorMaterial;
+    floorMaterial.name = "mirror";
+    floorMaterial.baseColor = { 1, 1, 1 };
+    floorMaterial.metallic = 1;
+    floorMaterial.roughness = 0;
+    s.materials.push_back(floorMaterial);
+    scene::Material wall;
+    wall.name = "diffuse wall";
+    wall.baseColor = { 0.5f, 0.5f, 0.5f };
+    wall.roughness = 1;
+    wall.specular = 0;  // f0 = 0: diffuse only
+    s.materials.push_back(wall);
+    scene::Mesh floor;
+    floor.name = "floor";
+    addQuad(floor, { -40, 0, 20 }, { 40, 0, 20 }, { 40, 0, -6 }, { -40, 0, -6 }, { 0, 1, 0 });
+    floor.submeshes.push_back({ 0, 6, 0 });
+    s.meshes.push_back(floor);
+    scene::Mesh back;
+    back.name = "wall";
+    addQuad(back, { -6, 0, -6 }, { 6, 0, -6 }, { 6, 6, -6 }, { -6, 6, -6 }, { 0, 0, 1 });
+    back.submeshes.push_back({ 0, 6, 1 });
+    s.meshes.push_back(back);
+    s.instances.push_back({});
+    scene::Instance w;
+    w.mesh = 1;
+    s.instances.push_back(w);
+    s.sun.illuminance = 0;
+    scene::Light l;
+    l.type = scene::LightType::Point;
+    l.position = kLightPos;
+    l.intensity = kLightI;
+    l.range = kLightRange;
+    l.castShadow = true;
+    s.lights.push_back(l);
+    scene::Camera cam;
+    cam.name = "low";
+    cam.position = { 0.4f, 1.0f, 8.0f };
+    cam.forward = normalize(float3{ 0, -0.12f, -1 });
+    cam.up = normalize(cross(cross(cam.forward, float3{ 0, 1, 0 }), cam.forward));
+    s.cameras.push_back(cam);
+    return s;
+}
+
 // Scene 4: mirror floor and a skinned emissive panel (8 x 8 cells, x in [-2, 2], y in [0.5, 4.5], z = -4, facing +z).
 scene::Scene skinnedPanelInMirror()
 {
@@ -683,6 +737,15 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             out.excessM = std::max(out.excessM, std::fabs(v / expected - 1) - allowM);
             if (std::fabs(v / expected - 1) > allowM && out.outliersM++ < 6) logf("  M outlier at pixel (%u, %u): %.4f (expected %.4f, sigma %.4f, hit NoV %.3f; surface (%.3f, %.3f, %.3f) roughness %.2f)\n", px, py, v,
                                                                            expected, e.sigma, e.hitNoV, e.surface.x, e.surface.y, e.surface.z, e.roughness);
+            if (std::fabs(v / expected - 1) > allowM && out.outliersM <= 6)
+                for (int dj : { -1, 1 })  // the sampled neighbours in the row: value / expected (a local defect or a smooth mismatch)
+                {
+                    const size_t k = (size_t)((int64_t)i + dj);
+                    if (k >= values.size() / 4 || values[4 * k + 3] != 1) continue;
+                    const double vk = (values[4 * k] + values[4 * k + 1] + values[4 * k + 2]) / 3.0;
+                    const Expectation ek = expectedAt((uint32_t)(k % countX) * stride, (uint32_t)(k / countX) * stride);
+                    logf("    neighbour %+d: %.4f / %.4f\n", dj, vk, ek.mean);
+                }
         }
         else
         {
@@ -852,6 +915,69 @@ int main(int argc, char** argv)
             logf("exact set: %u of %u slot(s) occupied; %u M pixels on the panel's reflection (mean value / expected %.4f, worst %.2f %%, %u beyond 3 %% + z sigma) -> %s\n",
                  c.exactOccupied, c.exactSlots, c.mirror, c.meanM, 100 * c.worstM, c.outliersM, okD ? "PASS" : "FAIL");
             pass = pass && okD;
+        }
+        {
+            // 5. Local lights at hits: the wall point's radiance rho / pi x I w(d) cos / d^2 (INTERFACES 8.3 window).
+            const scene::Scene t = litWallInMirror();
+            const ViewDesc tv = ViewDesc::fromCamera(t.cameras[0], 1920, 1080, float4x4{});
+            double tailSum = 0;  // expected pixels whose single GGX sample moves the value by more than 3 % (sum of P_i)
+            auto expected = [tv, &tailSum](uint32_t px, uint32_t py) {
+                const float4x4& m = tv.invViewProj;
+                auto unproject = [&](float z) {
+                    const float x = (px + 0.5f) / 1920 * 2 - 1, y = 1 - (py + 0.5f) / 1080 * 2;
+                    const float w = m.m[3][0] * x + m.m[3][1] * y + m.m[3][2] * z + m.m[3][3];
+                    return float3{ (m.m[0][0] * x + m.m[0][1] * y + m.m[0][2] * z + m.m[0][3]) / w, (m.m[1][0] * x + m.m[1][1] * y + m.m[1][2] * z + m.m[1][3]) / w,
+                                   (m.m[2][0] * x + m.m[2][1] * y + m.m[2][2] * z + m.m[2][3]) / w };
+                };
+                const float3 a = unproject(1.0f), b = unproject(0.5f), d = normalize(b - a);
+                if (d.y >= 0) return Expectation{ 0, 0 };
+                if (d.z < 0)
+                {
+                    const float3 w = a + d * ((-6 - a.z) / d.z);
+                    if (w.y >= 0 && std::fabs(w.x) <= 6) return Expectation{ 0, 0 };  // the wall itself
+                }
+                const float3 p = a + d * (-a.y / d.y);
+                const float3 r{ d.x, -d.y, d.z };
+                if (r.z >= 0) return Expectation{ 0, 0 };
+                const float tw = (-6 - p.z) / r.z;
+                const float3 q = p + r * tw;
+                const float margin = 2 * tw * 1e-4f * std::sqrt(1 / 1e-5f - 1);  // GGX tail at the silhouette (as scene 3)
+                if (q.x < -6 + margin || q.x > 6 - margin || q.y < margin || q.y > 6 - margin) return Expectation{ 0, 0 };
+                auto radianceAt = [](float3 w) {
+                    const float3 toLight = kLightPos - w;
+                    const double d2 = dot(toLight, toLight), dist = std::sqrt(d2), cosT = toLight.z / dist;
+                    const double x = dist / kLightRange, window = std::pow(std::clamp(1 - x * x * x * x, 0.0, 1.0), 2);
+                    return 0.5 / 3.14159265358979 * kLightI * window * std::max(cosT, 0.0) / d2;
+                };
+                const double f = radianceAt(q);
+                // An M pixel is one GGX (VNDF) sample: a tail normal tilted by theta_h moves the hit by ~2 t theta_h. P_i = the
+                // probability that the sample moves it far enough to change the radiance by 3 % (a^2 / (a^2 + T^2), T =
+                // s / (2 t), s = the smallest such move over 8 directions); their sum bounds the outliers the check allows.
+                double sCrit = 1.0;
+                for (int k = 0; k < 8; ++k)
+                {
+                    const float ang = k * 0.785398f;
+                    const float3 dir{ std::cos(ang), std::sin(ang), 0 };
+                    double lo = 0, hi = 1.0;
+                    if (std::fabs(radianceAt(q + dir * (float)hi) / f - 1) <= 0.03) continue;
+                    for (int it = 0; it < 24; ++it)
+                    {
+                        const double mid = 0.5 * (lo + hi);
+                        (std::fabs(radianceAt(q + dir * (float)mid) / f - 1) > 0.03 ? hi : lo) = mid;
+                    }
+                    sCrit = std::min(sCrit, hi);
+                }
+                const double th = sCrit / (2 * tw), a2 = 1e-8;
+                tailSum += a2 / (a2 + th * th);
+                return Expectation{ f, 0 };
+            };
+            const Outcome c = run(device, shaders, quality, t, { 0, 0, 0 }, expected, 16, 1920, 1080);
+            const double allowed = std::ceil(tailSum + 4 * std::sqrt(tailSum) + 2);
+            const bool okE = c.mirror > 1000 && std::fabs(c.meanM - 1) < 0.01 && c.outliersM <= allowed;
+            logf("local light at hits: %u M pixels on the lit wall's reflection (mean value / expected %.4f, worst %.2f %%, %u beyond 3 %%; "
+                 "GGX-tail expectation %.2f, allowed %.0f) -> %s\n",
+                 c.mirror, c.meanM, 100 * c.worstM, c.outliersM, tailSum, allowed, okE ? "PASS" : "FAIL");
+            pass = pass && okE;
         }
         rt::RayPipeline::releaseDevice(device);
         rt::RayScene::releaseDevice(device);

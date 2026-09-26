@@ -12,7 +12,9 @@
 //                                                 lobe is about a texel wide; narrower lobes see the texel average,
 //                                                 wider ones the bilinear texel instead of the lobe average.
 // Material textures at hits: rtHitMaterial (M's published textures, INTERFACES v1.11, at the ray cone's level of detail).
-// Not yet: local lights (with S's light lists).
+//   local lights                                  one next-event sample per hit (HitLocalLights.hlsli, the reference's
+//                                                 estimator), visibility by one shadow ray: unbiased, averaged by the
+//                                                 hit's history.
 #ifndef UNX_RT_HIT_SHADING_HLSLI
 #define UNX_RT_HIT_SHADING_HLSLI
 #include "Passes/Shading/ShadingCommon.hlsli"
@@ -58,6 +60,7 @@ struct RtHitLighting
     float sunVisibility;      // in [0, 1]: S's VSM disk integral, or one shadow ray (0 or 1)
     float3 irradiance;        // indirect irradiance at the hit
     float3 specularRadiance;  // indirect incident radiance from the hit's mirror direction
+    float3 local;             // local lights: the hit's outgoing radiance from them (HitLocalLights.hlsli, one NEE sample)
 };
 
 // n faces the ray origin side (RtSurface); v = unit vector toward the ray origin; pixelAngle = the ray cone's angular
@@ -89,7 +92,7 @@ float3 rtHitRadiance(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float p
             sun = albedo * s.transmission * L.sunIlluminance * -NoL;  // transmitted through the leaf (model v1)
         sun *= L.sunVisibility;  // fractional in penumbrae (the VSM estimate); was only tested > 0, giving full sun there
     }
-    return m.emissive + sun + diffuseAlbedo * L.irradiance + shSpecularAlbedo(f0, NoV, s.roughness) * L.specularRadiance;
+    return m.emissive + sun + diffuseAlbedo * L.irradiance + shSpecularAlbedo(f0, NoV, s.roughness) * L.specularRadiance + L.local;
 }
 
 #endif

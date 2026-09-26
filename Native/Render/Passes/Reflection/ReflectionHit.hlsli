@@ -3,6 +3,7 @@
 // else ReflectionShade.hlsli's hit shading with its shadow ray traced here. Root constants as ReflectionShade.hlsli.
 #ifndef UNX_REFLECTION_HIT_HLSLI
 #define UNX_REFLECTION_HIT_HLSLI
+#define REFL_LOCAL_TRACE 1  // ray generation: local-light shadow rays are traced in reflShadeHit
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionShade.hlsli"
 
@@ -28,7 +29,7 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
         return giSkyRadiance(r.Direction);
     }
     hitDistance = hit.t;
-    const ReflHitShade o = reflShadeHit(scene, cache, h, hit, r.Origin, r.Direction, coneWidth, coneSpread);
+    const ReflHitShade o = reflShadeHit(scene, cache, h, hit, r.Origin, r.Direction, coneWidth, coneSpread, giRandom(seed * 3u + 101u), false);
     motion = o.motion;
     return o.needsShadowRay ? o.radiance + o.sunTerm * reflSunVisibility(scene, o.shadowOrigin, seed) : o.radiance;
 }

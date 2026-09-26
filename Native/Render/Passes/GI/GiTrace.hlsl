@@ -9,10 +9,16 @@
 // Texels blend with the entry's history weight (GiInternal giHistoryAlpha).
 //
 // P[0] = { cache UAV, ray budget (dispatch width), hit cell footprint scale (float bits), 0 }
+// Local lights at the hit: one next-event sample (HitLocalLights.hlsli) and a shadow ray; with them the cache's
+// irradiance is the indirect light only where the direct local light is shaded analytically (M) or by the hits' own
+// sample. Emissive channel (design 12.4 structure 2): a ray that meets an analytic area light (raytracing.emitters)
+// stores its radiance in the texel (the K path's radiance) but not in the irradiance samples (M's LTC / the hits' NEE
+// are the direct term).
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli: SKY0 atmosphere LUTs, SKY1 constants), ray length; P[3].w = gi.experiment_disable
 // P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view (sun, scene buffers).
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
+#include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 
@@ -79,7 +85,8 @@ void GiTraceGen()
         }
     }
 
-    float3 radiance;
+    float3 radiance, sampleRadiance;
+    bool emitter = false;
     float distanceToHit;
     if (hit.t < 0)
     {
@@ -92,10 +99,11 @@ void GiTraceGen()
     }
     else if (hit.instance == RT_INSTANCE_EMITTER)
     {
-        // An analytic area light (raytracing.emitters): its direct light is LTC's (M), so it adds nothing to the
-        // indirect irradiance; the cache's emissive channel (design 12.4 structure 2) will keep it for the K path.
+        // An analytic area light (raytracing.emitters): the texel keeps its radiance (emissive channel: the K path's
+        // radiance), the irradiance samples do not (the direct term is M's analytic one or the hits' NEE sample).
         distanceToHit = hit.t;
-        radiance = 0;
+        radiance = rtEmitterRadiance(hit.primitive, r.Origin);
+        emitter = true;
     }
     else
     {
@@ -154,13 +162,26 @@ void GiTraceGen()
                     sun = e0 * cosSun * (rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0);
                 }
             }
-            radiance = m.emissive + albedo / GI_PI * (irradiance + sun);
+            // Local lights: one next-event sample and its shadow ray (experiment 128: none).
+            float3 local = 0;
+            if ((P[3].w & 128) == 0)
+            {
+                const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(seed + 11), giUnit(seed + 12), giUnit(seed + 13));
+                if (ls.valid)
+                {
+                    const float3 f = rtLocalLightBrdfCos(m, s.normal, -r.Direction, ls.wi, true);
+                    if (any(f > 0) && (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, giBias(h, s.position)), RT_MASK_GI)))
+                        local = f * ls.weight;
+                }
+            }
+            radiance = m.emissive + albedo / GI_PI * (irradiance + sun) + local;
         }
     }
 
     // The raw sample for the per-ray irradiance map and SH (GiIntegrate): radiance, coordinates in the hemisphere map.
     RWStructuredBuffer<uint4> samples = ResourceDescriptorHeap[P[4].y];
-    samples[thread] = uint4(asuint(radiance), (uint)round(saturate(uv.x) * 65535.0) | ((uint)round(saturate(uv.y) * 65535.0) << 16));
+    sampleRadiance = emitter ? float3(0, 0, 0) : radiance;
+    samples[thread] = uint4(asuint(sampleRadiance), (uint)round(saturate(uv.x) * 65535.0) | ((uint)round(saturate(uv.y) * 65535.0) << 16));
     const uint address = h.offTexels + (entry * GI_TEXEL_COUNT + texel) * 8;
     const uint2 old = b.Load2(address);
     const float3 previous = float3(f16tof32(old.x), f16tof32(old.x >> 16), f16tof32(old.y)) * GI_LOAD_SCALE;

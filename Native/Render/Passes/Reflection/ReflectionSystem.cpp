@@ -46,10 +46,15 @@ float3 xform(const float4 rows[3], float3 p)
 }
 // Arguments buffer: counters, trace descriptions (SKY0, SKY1), shadow description, shade and combine Dispatch arguments.
 constexpr uint32_t kShadowDescOffset = 16 + 2 * kDescStride, kShadeArgsOffset = kShadowDescOffset + kDescStride, kCombineArgsOffset = kShadeArgsOffset + 16;
-constexpr uint32_t kArgumentsBytes = kCombineArgsOffset + 16;
+constexpr uint32_t kLocalDescOffset = kCombineArgsOffset + 16;  // local-light shadow rays (ReflectionLocalShadow)
+constexpr uint32_t kInlineDescOffset = kLocalDescOffset + kDescStride;  // jobs over the ray capacity (ReflectionTraceInline, 2 x 2 variants)
+constexpr uint32_t kArgumentsBytes = kInlineDescOffset + 4 * kDescStride;
 const char* const kTraceLibrary[2] = { "Passes/Reflection/ReflectionTrace.SKY0", "Passes/Reflection/ReflectionTrace.SKY1" };
+const char* const kInlineLibrary[2][2] = { { "Passes/Reflection/ReflectionTraceInline.SKY0.JOB1", "Passes/Reflection/ReflectionTraceInline.SKY0.JOB2" },
+                                           { "Passes/Reflection/ReflectionTraceInline.SKY1.JOB1", "Passes/Reflection/ReflectionTraceInline.SKY1.JOB2" } };
 const char* const kShadeKernel[2] = { "Passes/Reflection/ReflectionShadeRays.SKY0", "Passes/Reflection/ReflectionShadeRays.SKY1" };
 constexpr const char* kShadowLibrary = "Passes/Reflection/ReflectionShadow";
+constexpr const char* kLocalShadowLibrary = "Passes/Reflection/ReflectionLocalShadow";
 } // namespace
 
 ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
@@ -115,6 +120,17 @@ ReflectionSystem::ReflectionSystem(Device& device, ShaderLibrary& shaders, const
     {
         const D3D12_DISPATCH_RAYS_DESC desc = rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kShadowLibrary, { "ReflectionShadowGen" })).dispatchDesc(0, 0, 1, 1);
         std::memcpy(image + kShadowDescOffset, &desc, sizeof desc);
+    }
+    {
+        const D3D12_DISPATCH_RAYS_DESC desc =
+            rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kLocalShadowLibrary, { "ReflectionLocalShadowGen" })).dispatchDesc(0, 0, 1, 1);
+        std::memcpy(image + kLocalDescOffset, &desc, sizeof desc);
+    }
+    for (int v = 0; v < 4; ++v)
+    {
+        const D3D12_DISPATCH_RAYS_DESC desc =
+            rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kInlineLibrary[v / 2][v % 2], { "ReflectionTraceInlineGen" })).dispatchDesc(0, 0, 1, 1);
+        std::memcpy(image + kInlineDescOffset + v * kDescStride, &desc, sizeof desc);
     }
     {
         D3D12_INDIRECT_ARGUMENT_DESC arg{};
@@ -802,14 +818,48 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(raysBuffer, Use::UavCompute);
                   },
                   [&shaders, args, raysBuffer, stage](PassContext& c) {
-                      const uint32_t k[8] = { c.uav(args), c.uav(raysBuffer), stage, 0, kShadeArgsOffset, kCombineArgsOffset,
-                                              kShadowDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), 0 };
+                      const uint32_t k[12] = { c.uav(args), c.uav(raysBuffer), stage, 0, kShadeArgsOffset, kCombineArgsOffset,
+                                               kShadowDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
+                                               kLocalDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
+                                               kInlineDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), kDescStride, 4, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionRayArgs"));
-                      c.computeConstants(k, 8);
+                      c.computeConstants(k, 12);
                       c.cmd->Dispatch(1, 1, 1);
                   });
     };
     rayArgs("r.refl.rayargs", 0);
+    // Jobs over the ray capacity: traced, shaded and combined in their own ray generation library.
+    for (uint32_t mode = 0; mode < 2; ++mode)
+    {
+        rt::RayPipeline& inlinePipeline =
+            rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(kInlineLibrary[variant][mode], { "ReflectionTraceInlineGen" }));
+        g.addPass(mode == 0 ? "r.refl.inline.m" : "r.refl.inline.g", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(args, Use::IndirectArgs);
+                      declareShared(b);
+                  },
+                  [&inlinePipeline, constantsFor, frameConstants, argumentResource, variant, mode](PassContext& c) {
+                      uint32_t k[32] = {};
+                      constantsFor(c, k);
+                      c.computeConstants(k, 32);
+                      c.bindFrameConstants(frameConstants);
+                      inlinePipeline.dispatchIndirect(c.cmd, argumentResource, kInlineDescOffset + (variant * 2 + mode) * kDescStride);
+                  });
+    }
+    // Local-light samples of the hits: their shadow rays before the compute shading (bit 30 of the hit records).
+    rt::RayPipeline& localShadowPipeline = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(kLocalShadowLibrary, { "ReflectionLocalShadowGen" }));
+    g.addPass("r.refl.localshadow", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(args, Use::IndirectArgs);
+                  declareShared(b);
+              },
+              [&localShadowPipeline, constantsFor, frameConstants, argumentResource](PassContext& c) {
+                  uint32_t k[32] = {};
+                  constantsFor(c, k);
+                  c.computeConstants(k, 32);
+                  c.bindFrameConstants(frameConstants);
+                  localShadowPipeline.dispatchIndirect(c.cmd, argumentResource, kLocalDescOffset);
+              });
     ID3D12CommandSignature* dispatchSignature = m_dispatchSignature.Get();
     g.addPass("r.refl.shade", QueueType::Compute,
               [&](PassBuilder& b) {

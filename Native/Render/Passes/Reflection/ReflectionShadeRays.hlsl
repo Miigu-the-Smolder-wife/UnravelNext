@@ -42,13 +42,14 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         const GiHeader h = giHeader(cache);
         RtHit hit;
         hit.t = asfloat(record.w);
-        hit.instance = record.x & 0x7FFFFFFFu;
+        hit.instance = record.x & 0x00FFFFFFu;  // bit 30: the local-light sample is visible (ReflectionLocalShadow)
         hit.frontFace = record.x >> 31;
         hit.geometry = record.y;
         hit.primitive = record.z;
         hit.barycentrics = reflUnpackBarycentrics(rays.Load(reflRaysBaryOffset(capacity, slot)));
         hit.pad = 0;
-        const ReflHitShade o = reflShadeHit(rtSceneSrvs(P[6], P[7]), cache, h, hit, reflRayOrigin(j.s), dir, j.coneWidth, j.coneSpread);
+        const ReflHitShade o = reflShadeHit(rtSceneSrvs(P[6], P[7]), cache, h, hit, reflRayOrigin(j.s), dir, j.coneWidth, j.coneSpread, reflLocalSeed(owner),
+                                            ((record.x >> 30) & 1u) != 0);
         radiance = o.radiance;
         distanceToHit = hit.t;
         motion = o.motion;

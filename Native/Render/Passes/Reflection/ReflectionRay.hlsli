@@ -29,6 +29,7 @@
 #define REFL_RAY_MISS 0xFFFFFFFFu
 #define REFL_RAY_NONE 0xFFFFFFFEu  // no unmasked direction was drawn
 #define REFL_JOB_SPLIT 0xFFFFFFFFu  // results[job].y of a job whose rays are in the rays buffer (never a packed fp16 pair)
+#define REFL_JOB_INLINE 0xFFFFFFFEu  // results[job].y of a job left to ReflectionTraceInline (the distance half is >= 0: never)
 
 uint reflRaysHitOffset(uint slot) { return 16 + slot * 16; }
 uint reflRaysBaryOffset(uint capacity, uint slot) { return 16 + capacity * 16 + slot * 4; }
