@@ -1,0 +1,21 @@
+# Owner: E (A15, FEATURES_GAME 7.1). Debug drawing, buffer visualization and the pass-time HUD. All off by default: off
+# costs nothing (no pass, no buffer access). Passes/Debug/include/unx/debug/DebugDraw.h.
+
+[debug]
+# GPU kernels' debug primitives (DebugDraw.hlsli) are drawn; CPU primitives (debug::drawList) turn drawing on by themselves.
+draw = false
+# Per-pass GPU ms of the last completed frame (FrameContext::timing), top left.
+hud = false
+# Buffer visualization replacing the frame: "none" or visId, instance, depth, hiz, normal, albedo, roughness, shadowSun,
+# reflection, particleLayer, distortion, volumeTau, volumeSource, airTransmittance, coverage, or a view a track registered
+# (debug::registerView).
+view = "none"
+# hiz: the mip; volumeTau / volumeSource / airTransmittance: the froxel slice.
+view_index = 0
+# Pixel whose raw values are printed next to a cross; [-1, -1] = none.
+view_probe = [-1, -1]
+# Capacities (FEATURES_GAME 7.1): appends past them are counted, dropped and reported (status bits, HUD). Buffer bytes =
+# 256 + 32 lines + 48 triangles + 32 glyphs (46.1 MB at these values, allocated on first use).
+max_lines = 1048576
+max_triangles = 262144
+max_glyphs = 65536
