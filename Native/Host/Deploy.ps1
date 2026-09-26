@@ -11,6 +11,9 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 if (-not $Build) { $Build = Join-Path $root "build\I" }
+# Absolute from here on: the kernel paths below are cut from FullName by this prefix's length (a relative -Build put every
+# kernel under Native~/shaders/in/shaders, 2026-09-27).
+$Build = (Resolve-Path $Build).Path
 # The source tree the build came from (<tree>\build\<name>): its quality files go with its DLL and kernels.
 $sourceRoot = Split-Path -Parent (Split-Path -Parent (Resolve-Path $Build).Path)
 $dll = Join-Path $Build "bin\UnravelNext.dll"
