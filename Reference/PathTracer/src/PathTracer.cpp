@@ -873,6 +873,27 @@ float3 cameraRay(const ResolvedCamera& c, uint32_t w, uint32_t h, float px, floa
     const float nx = px / w * 2 - 1, ny = 1 - py / h * 2;
     return normalize(f + right * (nx * th * aspect) + up * (ny * th));
 }
+
+// Thin lens (the GPU tracer's Common.hlsli rule): the lens point o = position + lensRadius x (concentric disk point) in the
+// (right, up) plane; the ray from o through the point where the pinhole ray meets the plane of focus.
+void thinLens(const ResolvedCamera& c, float3 pinholeDir, float u1, float u2, float3& origin, float3& dir)
+{
+    const float3 f = normalize(c.forward);
+    const float3 right = normalize(cross(f, c.up));
+    const float3 up = cross(right, f);
+    const float a = 2 * u1 - 1, b = 2 * u2 - 1;
+    float r = 0, phi = 0;
+    if (a != 0 || b != 0)
+    {
+        constexpr float kQuarterPi = 0.78539816f;
+        if (std::fabs(a) > std::fabs(b)) r = a, phi = kQuarterPi * (b / a);
+        else r = b, phi = 2 * kQuarterPi - kQuarterPi * (a / b);
+    }
+    const float lensRadius = 0.5f * c.lensAperture;
+    origin = c.position + right * (lensRadius * r * std::cos(phi)) + up * (lensRadius * r * std::sin(phi));
+    const float3 focal = c.position + pinholeDir * (c.lensFocus / dot(pinholeDir, f));
+    dir = normalize(focal - origin);
+}
 } // namespace
 
 RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings& st, const Progress& progress)
@@ -881,10 +902,13 @@ RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings&
     if (st.width == 0 || st.height == 0) fail("reference: empty resolution");
     if (st.samplesPerPixel < 2 || (st.samplesPerPixel & 1)) fail("reference: samples per pixel must be even (two halves), got %u", st.samplesPerPixel);
     if (st.russianRouletteStart == 0) fail("reference: russian roulette start bounce must be >= 1");
-    if (cam.lensAperture != 0) fail("reference: the CPU estimator is a pinhole camera (the thin lens is the GPU tracer's photo mode)");
+    if (cam.lensAperture < 0 || !std::isfinite(cam.lensAperture)) fail("reference: lens aperture %g m", cam.lensAperture);
+    if (cam.lensAperture > 0 && !(cam.lensFocus > cam.nearPlane && std::isfinite(cam.lensFocus)))
+        fail("reference: thin lens focus distance %g m must exceed the near plane %g m", cam.lensFocus, cam.nearPlane);
     im.build(cam.time);
     im.buildCaustics();
     im.caustics = st.sunCaustics && !im.emitTris.empty() && im.sunSolidAngle > 0 && !im.sunRadiance.isZero();
+    if (cam.lensAperture > 0 && im.caustics) fail("reference: the thin lens with sun caustics (the light tracer connects to a pinhole camera)");
     im.forced = st.forcedInScattering;
     im.orderMin = st.volumeOrderMin;
     im.orderMax = st.volumeOrderMax;
@@ -960,9 +984,15 @@ RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings&
                             Sampler smp(pixelSeed, si);
                             float jx, jy;
                             smp.get2D(jx, jy);
-                            const float3 dir = cameraRay(cam, W, H, x + jx, y + jy);
+                            float3 dir = cameraRay(cam, W, H, x + jx, y + jy), origin = cam.position;
+                            if (cam.lensAperture > 0)  // (pinhole renders keep their sample stream: bitwise as before)
+                            {
+                                float u1, u2;
+                                smp.get2D(u1, u2);
+                                thinLens(cam, dir, u1, u2, origin, dir);
+                            }
                             const float tn = tnear0 / std::max(dot(dir, normalize(cam.forward)), 1e-3f);
-                            const Rgb v = im.radiance(cam.position, dir, tn, smp, cnt, st.russianRouletteStart);
+                            const Rgb v = im.radiance(origin, dir, tn, smp, cnt, st.russianRouletteStart);
                             if (!v.finite())
                             {
                                 ++localNans;
@@ -1052,6 +1082,24 @@ RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings&
     out.halvesRelMse = metrics::relMse(out.halfA, out.halfB);
     if (!st.checkpoint.empty()) std::filesystem::remove(st.checkpoint);
     return out;
+}
+
+std::vector<float> PathTracer::primaryDepths(const ResolvedCamera& cam, uint32_t W, uint32_t H)
+{
+    Impl& im = *m_impl;
+    im.build(cam.time);
+    std::vector<float> depth((size_t)W * H, INFINITY);
+    const float3 f = normalize(cam.forward);
+    Jobs::instance().parallelFor(H, [&](uint32_t y) {
+        for (uint32_t x = 0; x < W; ++x)
+        {
+            const float3 dir = cameraRay(cam, W, H, x + 0.5f, y + 0.5f);
+            const float tn = cam.nearPlane / std::max(dot(dir, f), 1e-3f);
+            Hit h;
+            if (im.rt->intersect(cam.position, dir, tn, INFINITY, kMaskAll, h)) depth[(size_t)y * W + x] = h.t * dot(dir, f);
+        }
+    });
+    return depth;
 }
 
 std::vector<uint64_t> PathTracer::primaryIdentities(const ResolvedCamera& cam, uint32_t W, uint32_t H, uint32_t x0, uint32_t y0, uint32_t columns,

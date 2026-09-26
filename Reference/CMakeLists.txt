@@ -94,6 +94,15 @@ add_dependencies(unx_test_reference unx_reference_gpu_shaders)
 target_compile_definitions(unx_test_reference PRIVATE UNX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 c_deploy_embree(unx_test_reference)
 
+# A5 depth of field against the CPU thin-lens path tracer (render C): the renderer's DoF passes on the reference's pinhole
+# image vs the reference's thin-lens render (FEATURES_GAME 4.1 gate (ii) on the CPU reference).
+unx_add_executable(unx_test_reference_dof PathTracer/Tests/DofReferenceTests.cpp)
+set_target_properties(unx_test_reference_dof PROPERTIES ARCHIVE_OUTPUT_NAME unx_test_reference_dof_exe)
+target_link_libraries(unx_test_reference_dof PRIVATE unx_reference unx_renderer)
+add_dependencies(unx_test_reference_dof unx_render_shaders)
+target_compile_definitions(unx_test_reference_dof PRIVATE UNX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+c_deploy_embree(unx_test_reference_dof)
+
 # Photo mode on the GPU tracer (FEATURES_GAME 17; E since the B11 handover): thin lens, progressive rendering, EXR.
 unx_add_executable(unx_test_reference_photo GpuTracer/Tests/PhotoTests.cpp)
 set_target_properties(unx_test_reference_photo PROPERTIES ARCHIVE_OUTPUT_NAME unx_test_reference_photo_exe)

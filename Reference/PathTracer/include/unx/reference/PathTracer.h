@@ -37,8 +37,9 @@ struct ResolvedCamera
     float3 position, forward, up;
     float verticalFov = 1.0471976f, nearPlane = 0.05f, ev100 = 14.0f;
     float time = 0;  // scene time for deformations
-    // Thin lens (GPU tracer only: photo mode, FEATURES_GAME 17; the renderer's FrameContext::lensAperture / lensFocus):
-    // aperture diameter (m; 0 = pinhole) and the distance of the plane of focus along forward (m, > nearPlane).
+    // Thin lens (photo mode, FEATURES_GAME 17; the renderer's FrameContext::lensAperture / lensFocus): aperture diameter (m;
+    // 0 = pinhole) and the distance of the plane of focus along forward (m, > nearPlane). The GPU tracer and, since
+    // 2026-09-27 (A5 gate), the CPU camera-path estimator (not with sun caustics: the light tracer connects to a pinhole).
     float lensAperture = 0, lensFocus = 0;
 };
 ResolvedCamera resolveCamera(const scene::Scene& scene, const CameraSelection& selection);
@@ -122,6 +123,9 @@ public:
     std::vector<uint64_t> primaryIdentities(const ResolvedCamera& camera, uint32_t width, uint32_t height,
                                             const std::vector<std::filesystem::path>& pauseWhileExists = {});
     // The same for the pixel rectangle [x0, x0 + columns) x [y0, y0 + rows) only (row-major over the rectangle).
+    // View-space depth (distance along forward) of the pinhole ray through each pixel centre, row-major; +inf where it
+    // meets no surface (A5 gate: the renderer's depth buffer holds the same sample).
+    std::vector<float> primaryDepths(const ResolvedCamera& camera, uint32_t width, uint32_t height);
     std::vector<uint64_t> primaryIdentities(const ResolvedCamera& camera, uint32_t width, uint32_t height, uint32_t x0, uint32_t y0, uint32_t columns,
                                             uint32_t rows);
 

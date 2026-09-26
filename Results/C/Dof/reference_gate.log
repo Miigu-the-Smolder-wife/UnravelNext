@@ -1,0 +1,14 @@
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+[aim] aperture 0.0580 m, focus 20.00 m, max |rho| 15.0 px (480x270, reference 1024 spp):
+  in focus      1764 px  relMSE 6.647e-10  reference noise 8.567e-12  ok
+  focus        71554 px  relMSE 9.431e-05  reference noise 2.064e-07  ok
+  foreground    6996 px  relMSE 5.444e-05  reference noise 4.418e-06  ok
+  edge         49286 px  relMSE 3.371e-03  reference noise 1.636e-06  (reported)
+[background] aperture 0.0974 m, focus 1.50 m, max |rho| 15.6 px (480x270, reference 1024 spp):
+  foreground    6996 px  relMSE 3.079e-05  reference noise 4.595e-06  ok
+  background   73318 px  relMSE 8.888e-05  reference noise 3.576e-06  ok
+  edge         49286 px  relMSE 1.789e-03  reference noise 5.337e-06  (reported)
+PASS depth_of_field_matches_the_thin_lens
