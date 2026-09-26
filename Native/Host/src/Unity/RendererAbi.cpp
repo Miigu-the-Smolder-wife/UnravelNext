@@ -186,13 +186,16 @@ UNX_API int32_t UNX_CALL UnxSceneAddTexture(UnxRenderer r, const UnxTextureDesc*
 
 static scene::Material toMaterial(const UnxMaterialDesc* d)
 {
-    // version 3 or 2 (sizeof; 2 without the sheen and attenuation fields) or version 1 (without the layer fields)
+    // version 4 (sizeof), 3 or 2 (up to attenuationDistance; 2 without the sheen and attenuation fields) or version 1
+    // (without the layer fields)
     if (!d) fail("UnxMaterialDesc is null");
-    const bool v3 = d->size == sizeof(UnxMaterialDesc) && d->version == 3;
-    const bool v2 = v3 || (d->size == sizeof(UnxMaterialDesc) && d->version == 2);
-    if (!v2 && !(d->size == sizeof(UnxMaterialDesc) - 32 && d->version == 1))
-        fail("UnxMaterialDesc ABI mismatch: size %u version %u, native %zu version 3 or 2 (or %zu version 1)", d->size, d->version, sizeof(UnxMaterialDesc),
-             sizeof(UnxMaterialDesc) - 32);
+    const uint32_t v3Size = (uint32_t)offsetof(UnxMaterialDesc, anisotropy);
+    const bool v4 = d->size == sizeof(UnxMaterialDesc) && d->version == 4;
+    const bool v3 = v4 || (d->size == v3Size && d->version == 3);
+    const bool v2 = v3 || (d->size == v3Size && d->version == 2);
+    if (!v2 && !(d->size == v3Size - 32 && d->version == 1))
+        fail("UnxMaterialDesc ABI mismatch: size %u version %u, native %zu version 4 (or %u version 3 or 2, %u version 1)", d->size, d->version,
+             sizeof(UnxMaterialDesc), v3Size, v3Size - 32);
     if (d->materialClass > UNX_MATERIAL_TERRAIN) fail("unknown material class %u", d->materialClass);
     scene::Material m;
     m.name = fixedString(d->name, sizeof d->name);
@@ -222,6 +225,11 @@ static scene::Material toMaterial(const UnxMaterialDesc* d)
         m.sheenColor = f3(d->sheenColor);
         m.sheenRoughness = d->sheenRoughness;
         if (d->attenuationDistance > 0) m.attenuationDistance = d->attenuationDistance;
+    }
+    if (v4)
+    {
+        m.anisotropy = d->anisotropy;
+        m.anisotropyRotation = d->anisotropyRotation;
     }
     return m;
 }

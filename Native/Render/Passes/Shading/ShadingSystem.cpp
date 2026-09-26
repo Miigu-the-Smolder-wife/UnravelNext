@@ -293,7 +293,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     if (const scene::Scene* src = fc.scene.source())
         for (const scene::Material& mt : src->materials)
         {
-            layeredMaterials = layeredMaterials || mt.clearcoat > 0;
+            layeredMaterials = layeredMaterials || mt.clearcoat > 0 || mt.anisotropy > 0;  // (A9 anisotropy shades in the layered variants)
             sheenMaterials = sheenMaterials || mt.sheenColor.x > 0 || mt.sheenColor.y > 0 || mt.sheenColor.z > 0;
         }
     auto opaqueKernel = [&](bool fallbackVariant, uint32_t layered) {
@@ -505,6 +505,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             b.use(v.depth, Use::SrvCompute);
             b.use(o.materialWord, Use::SrvCompute);
             if (o.emissive.valid()) b.use(o.emissive, Use::SrvCompute);
+            if (o.anisoWord.valid()) b.use(o.anisoWord, Use::SrvCompute);
             b.use(o.tiles, Use::SrvCompute);
             b.use(o.tileArgs, Use::IndirectArgs);
             b.use(v.color, Use::UavComputeDisjoint);
@@ -583,6 +584,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 std::memcpy(k32, k, sizeof k);
                 std::memcpy(k32 + 24, edge, sizeof edge);
                 waterSunConstants(c, k32 + 32, 4);                    // P[8], P[9].x (v1.77)
+                k32[37] = o.anisoWord.valid() ? c.srv(o.anisoWord) : none;  // P[9].y (A9 anisotropy word)
                 k32[30] = overflow ? c.srv(v.shadowOverflow) : none;  // P[7].z
                 k32[16] = r.areaLightStable;     // P[4].x (B2)
                 k32[19] = meter ? c.uav(histogram.buffer) : gpu::kNone;  // P[4].w exposure histogram
@@ -615,6 +617,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              b.use(v.depth, Use::SrvCompute);
                              b.use(o.materialWord, Use::SrvCompute);
                              if (o.emissive.valid()) b.use(o.emissive, Use::SrvCompute);
+                             if (o.anisoWord.valid()) b.use(o.anisoWord, Use::SrvCompute);
                              b.use(v.shadowOverflowFallbackTiles, Use::SrvCompute);
                              b.use(fallbackArgs, Use::IndirectArgs);
                              b.use(v.color, Use::UavComputeDisjoint);
@@ -670,6 +673,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              std::memcpy(k32, k, sizeof k);
                              std::memcpy(k32 + 24, edge, sizeof edge);
                              waterSunConstants(c, k32 + 32, 4);  // P[8], P[9].x (v1.77)
+                             k32[37] = o.anisoWord.valid() ? c.srv(o.anisoWord) : gpu::kNone;  // P[9].y (A9 anisotropy word)
                              particleConstants(c, k32 + 22);  // P[5].zw
                              k32[16] = r.areaLightStable;     // P[4].x (B2)
                              k32[19] = gpu::kNone;            // P[4].w: overflow tiles are shaded twice; the main kernel metered them

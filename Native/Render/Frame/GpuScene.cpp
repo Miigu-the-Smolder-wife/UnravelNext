@@ -465,17 +465,24 @@ void GpuScene::upload(const scene::Scene& s)
     m_albedoTable = createStructured(table.data(), sizeof(float), table.size(), L"material model E table");
     const std::vector<float>& specular = scene::model::specularAlbedoTable();
     m_specularTable = createStructured(specular.data(), 2 * sizeof(float), specular.size() / 2, L"material model (A, B) table");
-    // the coat tables, then the sheen table at 2 x kCoatTableStride (MaterialModel.hlsli MODEL_SHEEN_TABLE), then - only
-    // when a material is anisotropic - the anisotropy (A, B) table (Passes/Material/Aniso.hlsli ANISO_TABLE, 832 KB)
-    std::vector<float> coat = scene::model::coatTable();
-    coat.insert(coat.end(), scene::model::sheenTable().begin(), scene::model::sheenTable().end());
     bool anisotropic = false;
     for (const scene::Material& m : s.materials) anisotropic |= m.anisotropy > 0;
-    if (anisotropic) coat.insert(coat.end(), scene::model::anisoAlbedoTable().begin(), scene::model::anisoAlbedoTable().end());
-    m_coatTable = createStructured(coat.data(), sizeof(float), coat.size(), L"clearcoat, sheen and anisotropy tables");
+    buildLayerTables(anisotropic);
     const std::vector<uint32_t>& coverage = coverageMaskTable();
     m_coverageTable = createStructured(coverage.data(), 2 * sizeof(uint32_t), coverage.size() / 2, L"coverage mask LUT");
     if (!m_clusterBuffer.resource) setClusters(ClusterData{});
+}
+
+// The coat tables, then the sheen table at 2 x kCoatTableStride (MaterialModel.hlsli MODEL_SHEEN_TABLE), then - only
+// when a material is anisotropic - the anisotropy (A, B) table (Passes/Material/Aniso.hlsli ANISO_TABLE, 832 KB).
+void GpuScene::buildLayerTables(bool anisotropic)
+{
+    release(m_coatTable);
+    std::vector<float> coat = scene::model::coatTable();
+    coat.insert(coat.end(), scene::model::sheenTable().begin(), scene::model::sheenTable().end());
+    if (anisotropic) coat.insert(coat.end(), scene::model::anisoAlbedoTable().begin(), scene::model::anisoAlbedoTable().end());
+    m_coatTable = createStructured(coat.data(), sizeof(float), coat.size(), L"clearcoat, sheen and anisotropy tables");
+    m_anisotropic = anisotropic;
 }
 
 // Terrain-class layers (v1.74) of every material, in material order; each terrain material's word points at its layers.
@@ -760,6 +767,14 @@ void GpuScene::setMaterials(std::span<const uint32_t> indices)
     release(m_materialBuffer);
     packTerrainLayers(m_materials);
     packMaterialLayers(m_materials);
+    // a runtime edit that makes the first anisotropic material brings the anisotropy table (the table only grows)
+    if (!m_anisotropic)
+        for (uint32_t i : indices)
+            if (s.materials[i].anisotropy > 0)
+            {
+                buildLayerTables(true);
+                break;
+            }
     m_materialBuffer = createStructured(m_materials.data(), sizeof(gpu::Material), m_materials.size(), L"scene materials");
 }
 

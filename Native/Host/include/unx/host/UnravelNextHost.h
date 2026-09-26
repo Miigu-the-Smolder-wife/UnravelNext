@@ -158,7 +158,8 @@ enum UnxMaterialClass  // scene::MaterialClass
 // INTERFACES_KO.md 8.1 material v1.
 typedef struct UnxMaterialDesc
 {
-    uint32_t size, version;     // sizeof, 3 (2: without the sheen and attenuation fields; 1: up to name, sizeof - 32)
+    uint32_t size, version;     // sizeof, 4 (3 and 2: up to attenuationDistance, 2 without its sheen and attenuation fields;
+                                // 1: up to name)
     uint32_t materialClass;     // UnxMaterialClass
     uint32_t twoSided;
     float baseColor[3];         // linear albedo (dielectric) or f0 (metal)
@@ -179,6 +180,10 @@ typedef struct UnxMaterialDesc
     // over it; 0 = the default 0.01 m).
     float sheenColor[3], sheenRoughness;
     float attenuationDistance;
+    // version 4 (A9 anisotropy, MATERIAL_LAYERS 1.5; Standard class; the meshes using it need tangents): strength [0, 1]
+    // (0 = isotropic; alpha_t = alpha + (1 - alpha) s^2, alpha_b = alpha) and the direction's rotation from the tangent
+    // towards the bitangent (radians).
+    float anisotropy, anisotropyRotation;
 } UnxMaterialDesc;
 
 typedef struct UnxSubmesh
@@ -755,7 +760,7 @@ UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming*
 // The managed bridge (Assets/UnravelNextBridge/Runtime/Native/UnravelNextNative.cs) checks the same sizes at start.
 static_assert(sizeof(UnxRendererDesc) == 1040);
 static_assert(sizeof(UnxTextureDesc) == 104);
-static_assert(sizeof(UnxMaterialDesc) == 184);  // versions 3 and 2 (A9 layers); version 1 = 152
+static_assert(sizeof(UnxMaterialDesc) == 192);  // version 4 (A9 anisotropy); versions 3 and 2 = 184 (A9 layers); version 1 = 152
 static_assert(sizeof(UnxSubmesh) == 16);
 static_assert(sizeof(UnxMeshDesc) == 160);
 static_assert(sizeof(UnxInstanceDesc) == 96);

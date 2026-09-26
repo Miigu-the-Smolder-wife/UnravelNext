@@ -19,6 +19,8 @@
 //        after the normal map and before the band limit (FEATURES_GAME 5.2), on the side the shading normal faces.
 // P[5] = { E's surface state constants, table, pool (raw SRVs; UNX_NONE = no field), S's weather record SRV (UNX_NONE =
 //        none) }: the surface state layers over the decals (SurfaceLayers.hlsli).
+// P[6].x A9 anisotropy frame word UAV (R32_UINT; UNX_NONE = no anisotropic material in the scene): Aniso.hlsli's word
+//        for anisotropic pixels, whose G-buffer roughness is then sqrt(sqrt(alpha_t' alpha_b')) (MATERIAL_LAYERS 1.5)
 // P[3].y experiment mask (material.experiment_disable: cost attribution only, 0 otherwise)
 // PLANAR_MASK=1 (planar reflection views with R's mask; views without one compile none of it):
 // P[3].z R's planar tile mask (R8_UINT per 8 x 8 tile, nonzero = mirror pixels; UNX_NONE = absent), P[3].w R's planar
@@ -36,6 +38,7 @@
 #include "Passes/Reflection/Reflection.hlsli"
 #include "Passes/Decal/Decal.hlsli"
 #include "Passes/Material/SurfaceLayers.hlsli"
+#include "Passes/Material/Aniso.hlsli"
 
 #define M_PI 3.14159265358979
 
@@ -176,7 +179,21 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             g.normal = n;
             g.baseColor = baseColor;
             g.roughness = min(sqrt(alphaFiltered), 1.0);
-            const uint2 packed = encodeGBuffer(g);
+            uint2 packed = encodeGBuffer(g);
+            if ((m.classFlags & MATERIAL_ANISOTROPIC) != 0 && P[6].x != UNX_NONE)
+            {
+                // A9 anisotropy (MATERIAL_LAYERS 1.5): the cooked tangent's frame about the final normal, each axis
+                // band-limited by the footprint (the geometric part per axis, the map's and layers' trace on both), the
+                // word measured in the basis of the normal as stored; the G-buffer keeps the equal-area isotropic lobe
+                float3 t, b;
+                anisoFrameOfSurface(s.tangent, s.tangentSign, s.normal, anisoRecordOf(m), n, t, b);
+                const float geometric = (dot(s.dndx, s.dndx) + dot(s.dndy, s.dndy)) / 12.0;
+                const float2 af = anisoBandLimit(anisoAlphas(roughness, anisoRecordOf(m).strength), t, b, s.dndx, s.dndy, max(variance - geometric, 0.0));
+                g.roughness = min(sqrt(sqrt(af.x * af.y)), 1.0);
+                packed = encodeGBuffer(g);
+                RWTexture2D<uint> anisoWords = ResourceDescriptorHeap[P[6].x];
+                anisoWords[pixel] = anisoPackWord(decodeGBuffer(packed).normal, t, af);
+            }
             gbuffer[pixel] = packed;
             float coatRoughness = 0;
             if ((m.classFlags & MATERIAL_LAYERED) != 0)

@@ -39,6 +39,8 @@
 // P[7] = { edge radiance UAV (RGBA16F), R's screen probe maps (K path; UNX_NONE = absent), S's shadow overflow list (raw;
 //        FALLBACK: a raw buffer holding this frame's ShadowSrvs), V's water layer vis ids (v1.75; UNX_NONE = none): a
 //        pixel under a water-layer stream surface keeps its radiance too, W's refraction source (tracks::water) }
+// P[9].y A9 anisotropy word (Resolve.hlsl; UNX_NONE = no anisotropic material): read by the LAYERED variants, whose
+//        anisotropic pixels shade the base specular with the anisotropic lobe (AnisoShading.hlsli)
 // P[8] = { W's sun-space water map (v1.77): waterSunDepth, waterSunNormal, waterSunMedium, waterSunConstants (UNX_NONE:
 //        no water) } - a surface under water from the sun takes the refracted sun direction and the water's transmittance
 //        (Passes/Water/WaterLight.hlsli waterSunLight); P[9].x its caustics (waterSunCaustics, UNX_NONE: none)
@@ -49,6 +51,9 @@
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/AreaLight.hlsli"
+#if LAYERED
+#include "Passes/Shading/AnisoShading.hlsli"
+#endif
 #include "Passes/Water/WaterLight.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
@@ -238,6 +243,10 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     sheen.roughness = max(mWordCoatRoughness(word), 0.1);
     const float keepS = NoV > 0 ? modelSheenKeep(sheen, NoV) : 1;
 #endif
+#if LAYERED
+    // A9 anisotropy (MATERIAL_LAYERS 1.5; anisotropic materials are layered): the base's specular lobe (AnisoShading.hlsli)
+    const ShAniso aniso = shAnisoOf(P[9].y, pixel, m, g.normal, n, v);
+#endif
 
     AtmosphereSrvs atm;
     atm.transmittance = P[3].x;
@@ -315,8 +324,11 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                     const float lr = s.roughness;
 #endif
                     const float la = modelAlpha(lr);
-                    const float3 spec = (experiment & 1) ? (NoL > 0 ? shSpecular(lf0, la, lcomp, n, v, l0, NoV, NoL) * NoL * cap : 0)
-                                                         : shSunSpecular(lf0, lr, la, lcomp, n, v, NoV, l0, E, shPixelAngle(D, Dx));
+                    float3 spec = (experiment & 1) ? (NoL > 0 ? shSpecular(lf0, la, lcomp, n, v, l0, NoV, NoL) * NoL * cap : 0)
+                                                   : shSunSpecular(lf0, lr, la, lcomp, n, v, NoV, l0, E, shPixelAngle(D, Dx));
+#if LAYERED
+                    if (aniso.on && !coatLobe) spec = shAnisoSunSpecular(aniso, f0, n, v, NoV, l0, E, shPixelAngle(D, Dx));
+#endif
 #if LAYERED == 1
                     if (coatLobe)
                     {
@@ -367,8 +379,15 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         // LTC transform of the specular lobe, formed once per pixel.
         const float3x3 frame = shShadingFrame(n, v, NoV);
         const float3x3 frameBack = float3x3(frame[0], -frame[1], -frame[2]);
-        const float3x3 specular = mul(shLtcInverse(P[5].y, max(NoV, 1e-4), s.roughness), frame);
-        const float3 specularAlbedo = shSpecularAlbedo(f0, max(NoV, 1e-4), s.roughness);
+        float3x3 specular = mul(shLtcInverse(P[5].y, max(NoV, 1e-4), s.roughness), frame);
+        float3 specularAlbedo = shSpecularAlbedo(f0, max(NoV, 1e-4), s.roughness);
+#if LAYERED
+        if (aniso.on)
+        {
+            specular = shAnisoLtc(aniso, P[5].y, n, v);
+            specularAlbedo = shAnisoAlbedo(aniso, f0);
+        }
+#endif
 #if LAYERED == 1
         float3x3 coatSpecular = frame, coatBase = frame;
         float coatAlbedo = 0;
@@ -474,6 +493,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             float3 f = 0;
             if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
             else if (foliage && NoV * cosL < 0) f = back;
+#if LAYERED
+            if (aniso.on && NoV > 0 && cosL > 0) f = front + shAnisoSpecular(aniso, f0, n, v, l);
+#endif
 #if LAYERED == 1
             if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));
 #endif
@@ -487,6 +509,11 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     // ---- indirect (R): screen probes (main view) or the world cache (planar views). The viewer's side of the shading
     // normal reflects; Foliage also transmits what arrives on the other side.
     const float3 nv = NoV > 0 ? n : -n;
+    // the base lobe's albedo for the indirect specular (A9 anisotropy: f0 A_a + B_a of its lobe; the cone is the equal-area one)
+    float3 baseAlbedo = shSpecularAlbedo(f0, NoV, s.roughness);
+#if LAYERED
+    if (aniso.on) baseAlbedo = shAnisoAlbedo(aniso, f0);
+#endif
     const float3 r = reflect(-v, n);
     const float halfAngle = reflectionLobeHalfAngle(s.roughness, NoV);
     float3 irradiance = 0, irradianceBack = 0, incident = 0, coatIncident = 0;
@@ -559,17 +586,17 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         const float tv = 1 - modelCoatEms(coat, NoV), tBar = 1 - modelCoatLookup1(coat.coat * MODEL_COAT_STRIDE + 4096, coat.roughness);
         const float3 under = tv * tBar * ((front + modelCoatReturned(s, coat, modelCoatRefractedCos(2.0 / 3.0, coat.eta)) / SH_PI) * irradiance +
                                           incident * shSpecularAlbedo(f0, modelCoatRefractedCos(NoV, coat.eta), modelCoatBaseRoughness(s, coat, NoV)));
-        radiance += keep * (front * irradiance + incident * shSpecularAlbedo(f0, NoV, s.roughness)) + cover * (under + coatIncident * modelCoatEms(coat, NoV));
+        radiance += keep * (front * irradiance + incident * baseAlbedo) + cover * (under + coatIncident * modelCoatEms(coat, NoV));
     }
     else
 #endif
 #if LAYERED == 2
     // the base's indirect light scaled; the sheen's from the irradiance: C E_sh(n.v) E / pi (exact for uniform incident
     // radiance; MATERIAL_LAYERS 1.4 states the shape error)
-    if (NoV > 0) radiance += keepS * (front * irradiance + incident * shSpecularAlbedo(f0, NoV, s.roughness)) + sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / SH_PI) * irradiance;
+    if (NoV > 0) radiance += keepS * (front * irradiance + incident * baseAlbedo) + sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / SH_PI) * irradiance;
     else
 #endif
-    if (NoV > 0) radiance += front * irradiance + incident * shSpecularAlbedo(f0, NoV, s.roughness);
+    if (NoV > 0) radiance += front * irradiance + incident * baseAlbedo;
     radiance += back * irradianceBack;
 
     // ---- air between the camera and the surface (S's air volume: atmosphere, shadowed air, local lights' air)

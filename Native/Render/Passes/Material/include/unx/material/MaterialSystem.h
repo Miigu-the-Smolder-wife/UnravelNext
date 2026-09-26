@@ -32,6 +32,7 @@ struct ResolveOutputs
 {
     TextureRef materialWord;  // R32_UINT: material 16 | metallic 8
     TextureRef emissive;      // RGBA16F, only when the scene has emissive textures (else invalid)
+    TextureRef anisoWord;     // R32_UINT, only when the scene has anisotropic materials: Aniso.hlsli's frame word (else invalid)
     BufferRef tiles;          // raw: class c, band b at entry c * tileCount + tilesX * (bandRow(b) / 8), (x | y << 16)
     BufferRef tileArgs;       // raw: D3D12_DISPATCH_ARGUMENTS (12 B) per (class, band) at 12 (c * bands + b), x = tile
                               // count; then one uint per class, the class's clamped total (ShadeBegin, statistics)

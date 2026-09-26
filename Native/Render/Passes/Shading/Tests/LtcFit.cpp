@@ -103,6 +103,7 @@ double brdfCos(V3 v, V3 l, double alpha)
     return D * Vis * l.z;
 }
 
+int g_quad = 1;  // --quad arvo|cv|fan: the polygon check's quadrature (Arvo triangles, with the LTC control variate, polar fan)
 bool g_sheen = false;  // --sheen: the sheen lobe; 'p' below is then the sheen roughness r, else the GGX alpha
 
 // The fitted lobe times the cosine (F = 1 / C = 1).
@@ -580,6 +581,56 @@ double lobeClippedQuadrature(V3 v, double p, double norm, const std::array<V3, 4
     return control ? sum + ltcPolygon(*control, quad) : sum;
 }
 
+// Horizon-clipped fan quadrature (--quad fan): the clipped polygon fanned from its first vertex A in polar coordinates
+// about A - azimuth psi across each far edge, geodesic distance t from A to the edge (R(psi): the edge's great circle,
+// closed form) with the area-preserving radial variable s = (1 - cos t) / (1 - cos R(psi)), so d omega =
+// (1 - cos R) ds dpsi; n x n Gauss-Legendre. The same map serves curved boundaries (R(psi) from a conic's closed form),
+// which Arvo's triangle map does not.
+double lobeFanQuadrature(V3 v, double p, double norm, const std::array<V3, 4>& quad, int n)
+{
+    static const double x2[] = { -0.5773502691896257, 0.5773502691896257 }, w2[] = { 1, 1 };
+    static const double x3[] = { -0.7745966692414834, 0, 0.7745966692414834 }, w3[] = { 0.5555555555555556, 0.8888888888888888, 0.5555555555555556 };
+    static const double x4[] = { -0.8611363115940526, -0.3399810435848563, 0.3399810435848563, 0.8611363115940526 },
+                        w4[] = { 0.3478548451374538, 0.6521451548625461, 0.6521451548625461, 0.3478548451374538 };
+    static const double x6[] = { -0.9324695142031521, -0.6612093864662645, -0.2386191860831969, 0.2386191860831969, 0.6612093864662645, 0.9324695142031521 },
+                        w6[] = { 0.1713244923791704, 0.3607615730481386, 0.4679139345726910, 0.4679139345726910, 0.3607615730481386, 0.1713244923791704 };
+    const double* xs = n == 2 ? x2 : n == 3 ? x3 : n == 4 ? x4 : x6;
+    const double* ws = n == 2 ? w2 : n == 3 ? w3 : n == 4 ? w4 : w6;
+    std::vector<V3> poly;
+    for (size_t i = 0; i < 4; ++i)
+    {
+        const V3 a = quad[i], b = quad[(i + 1) % 4];
+        if (a.z >= 0) poly.push_back(a);
+        if ((a.z >= 0) != (b.z >= 0)) poly.push_back(a + (b - a) * (a.z / (a.z - b.z)));
+    }
+    if (poly.size() < 3) return 0;
+    const V3 A = normalize(poly[0]);
+    const V3 t1 = normalize(normalize(poly[1]) - A * dot(normalize(poly[1]), A)), t2 = cross(A, t1);
+    double sum = 0;
+    for (size_t i = 1; i + 1 < poly.size(); ++i)
+    {
+        const V3 B = normalize(poly[i]), C = normalize(poly[i + 1]), g = cross(B, C);
+        const double pb = std::atan2(dot(B, t2), dot(B, t1));
+        double d = std::atan2(dot(C, t2), dot(C, t1)) - pb;
+        d -= 2 * kPi * std::floor((d + kPi) / (2 * kPi));
+        const double ag = dot(A, g), sa = ag < 0 ? -1.0 : 1.0;
+        for (int j = 0; j < n; ++j)
+        {
+            const double psi = pb + d * 0.5 * (xs[j] + 1);
+            const V3 e = t1 * std::cos(psi) + t2 * std::sin(psi);
+            const double R = std::atan2(ag * sa, -dot(e, g) * sa), q = 1 - std::cos(R);
+            double inner = 0;
+            for (int k = 0; k < n; ++k)
+            {
+                const double ct = 1 - 0.5 * (xs[k] + 1) * q, st = std::sqrt(std::max(0.0, 1 - ct * ct));
+                inner += 0.5 * ws[k] * lobeCos(v, A * ct + e * st, p);
+            }
+            sum += 0.5 * std::fabs(d) * ws[j] * q * inner;
+        }
+    }
+    return sum / norm;
+}
+
 // A rect of angular half-size h (radians) centred on direction (theta, phi), facing the point, rolled by 'roll'.
 std::array<V3, 4> rectAt(double theta, double phi, double h, double roll)
 {
@@ -611,6 +662,7 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--write") write = true;
             if (std::string(argv[i]) == "--sheen") g_sheen = true;
             if (std::string(argv[i]) == "--polygon-check") polygonCheck = true;
+            if (std::string(argv[i]) == "--quad" && i + 1 < argc) { const std::string q = argv[++i]; g_quad = q == "arvo" ? 0 : q == "fan" ? 2 : 1; }
             if (std::string(argv[i]) == "--refine" && i + 1 < argc) refine = std::stoi(argv[++i]);
             if (std::string(argv[i]) == "--threads" && i + 1 < argc) threadCount = (unsigned)std::stoul(argv[++i]);
         }
@@ -777,7 +829,7 @@ int main(int argc, char** argv)
                                     diffC += std::fabs(iltc * ratio(centre) - truth);
                                     diffF += std::fabs(iltc * (dot(ff, ff) > 0 ? ratio(stored.M * ff) : 1.0) - truth);
                                     const int orders[4] = { 2, 3, 4, 6 };
-                                    for (int m = 0; m < 4; ++m) diffQ[m] += std::fabs(lobeClippedQuadrature(viewAt(t), paramAt(a), norms[k], quad, orders[m], &stored) - truth);
+                                    for (int m = 0; m < 4; ++m) diffQ[m] += std::fabs((g_quad == 2 ? lobeFanQuadrature(viewAt(t), paramAt(a), norms[k], quad, orders[m]) : lobeClippedQuadrature(viewAt(t), paramAt(a), norms[k], quad, orders[m], g_quad == 1 ? &stored : nullptr)) - truth);
                                 }
                         cellError[k] = total > 0 ? diff / total : 0;
                         cellErrorC[k] = total > 0 ? diffC / total : 0;

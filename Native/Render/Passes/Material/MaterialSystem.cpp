@@ -188,6 +188,7 @@ void resolve(FramePassContext& fc, ViewResources& view)
     view.reflectionLobeTiles = fc.graph.createTexture({ "m.reflection lobe tiles", o.tilesX, o.tilesY, 1, 1, DXGI_FORMAT_R8_UNORM });
     o.materialWord = fc.graph.createTexture({ "m.material word", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
     if (textures.anyEmissiveTexture()) o.emissive = fc.graph.createTexture({ "m.emissive", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    if (fc.scene.anyAnisotropic()) o.anisoWord = fc.graph.createTexture({ "m.aniso word", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
     o.tiles = fc.graph.createBuffer({ "m.tiles", (uint64_t)kShadeClassCount * tileCount * 4, 0 });
     o.tileArgs = fc.graph.createBuffer({ "m.tile args", (uint64_t)o.totalsOffset() + kShadeClassCount * 4, 0 });
 
@@ -230,6 +231,7 @@ void resolve(FramePassContext& fc, ViewResources& view)
                          b.use(v.reflectionLobeTiles, Use::UavCompute);
                          b.use(o.materialWord, Use::UavCompute);
                          if (o.emissive.valid()) b.use(o.emissive, Use::UavCompute);
+                         if (o.anisoWord.valid()) b.use(o.anisoWord, Use::UavCompute);
                          b.use(o.tiles, Use::UavCompute);
                          b.use(o.tileArgs, Use::UavCompute);
                          if (debugBuffer.valid()) b.use(debugBuffer, Use::UavCompute);
@@ -256,16 +258,17 @@ void resolve(FramePassContext& fc, ViewResources& view)
                          const uint32_t pixelMask = !v.view.planarTileMask.valid() && v.view.planarMask.valid() ? c.srv(v.view.planarMask) : gpu::kNone;
                          const bool decals = v.decalFrames.valid() && v.decalTiles.valid();
                          const bool field = surface.surfaceConstants.valid();
-                         const uint32_t k[24] = { c.srv(v.visId), c.srv(v.visibleClusters), c.uav(v.gbuffer), c.uav(o.materialWord),
+                         const uint32_t k[28] = { c.srv(v.visId), c.srv(v.visibleClusters), c.uav(v.gbuffer), c.uav(o.materialWord),
                                                   o.emissive.valid() ? c.uav(o.emissive) : gpu::kNone, c.uav(v.reflectionLobeTiles), c.uav(o.tiles), c.uav(o.tileArgs),
                                                   o.textureTableSrv, o.tilesX, o.tilesY, tileCount, debugBuffer.valid() ? c.uav(debugBuffer) : gpu::kNone, experiment,
                                                   tileMask, pixelMask, o.bands, o.height, decals ? c.srv(v.decalFrames) : gpu::kNone,
                                                   decals ? c.srv(v.decalTiles) : gpu::kNone,
                                                   field ? c.srv(surface.surfaceConstants) : gpu::kNone, field ? c.srv(surface.surfaceTable) : gpu::kNone,
-                                                  field ? c.srv(surface.surfacePool) : gpu::kNone, surface.weather };
+                                                  field ? c.srv(surface.surfacePool) : gpu::kNone, surface.weather,
+                                                  o.anisoWord.valid() ? c.uav(o.anisoWord) : gpu::kNone, 0, 0, 0 };
                          c.cmd->SetPipelineState(kernel);
                          c.bindFrameConstants(cb);
-                         c.computeConstants(k, 24);
+                         c.computeConstants(k, 28);
                          c.cmd->Dispatch(o.tilesX, o.tilesY, 1);
                      });
 

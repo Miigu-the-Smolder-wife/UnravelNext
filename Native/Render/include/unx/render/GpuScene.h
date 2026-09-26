@@ -217,6 +217,8 @@ public:
     const scene::Scene* source() const { return m_source; }
     const std::vector<gpu::Instance>& instances() const { return m_instances; }
     const std::vector<gpu::Light>& lights() const { return m_lights; }  // CPU mirror of the light records (revisions)
+    // A9: a material of the scene is anisotropic (the anisotropy table is in coatTable; M's resolve writes the frame word)
+    bool anyAnisotropic() const { return m_anisotropic; }
     const std::vector<gpu::Mesh>& meshes() const { return m_meshes; }
     uint32_t revision() const { return m_revision; }
     ID3D12Resource* buffer(const char* name) const;  // "vertices", "indices", "instances", "bonePalette", "prevBonePalette", ...
@@ -266,6 +268,8 @@ private:
     // v1.76 A9 layer records (gpu::MaterialLayers; a layered material's classFlags bits 16..31) and the coat tables.
     Buffer m_materialLayerBuffer, m_coatTable;
     void packMaterialLayers(std::vector<gpu::Material>& materials);
+    void buildLayerTables(bool anisotropic);
+    bool m_anisotropic = false;
     std::vector<float4> m_morphRows;
     std::vector<uint32_t> m_morphMeshBlock;  // per mesh: word offset of its block in m_morphData, kNone = no morph
     std::vector<uint64_t> m_morphFrame;      // per instance: frame of its latest setMorph

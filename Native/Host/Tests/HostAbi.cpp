@@ -131,8 +131,8 @@ void putAffine(float* d, const float3x4& m)
         for (int c = 0; c < 4; ++c) d[r * 4 + c] = m.m[r][c];
 }
 
-// Layer fields of UnxMaterialDesc version 3 appended to a scene: a sheen (A9) and a solid glass with a non-default
-// attenuation distance (A10), so they cross the ABI and enter the content hash.
+// Layer fields of UnxMaterialDesc version 4 appended to a scene: a sheen (A9), a solid glass with a non-default
+// attenuation distance (A10) and a brushed metal (A9 anisotropy), so they cross the ABI and enter the content hash.
 void addLayerMaterials(scene::Scene& s)
 {
     scene::Material cloth;
@@ -150,6 +150,14 @@ void addLayerMaterials(scene::Scene& s)
     glass.ior = 1.52f;
     glass.attenuationDistance = 0.05f;
     s.materials.push_back(glass);
+    scene::Material brushed;
+    brushed.name = "abi brushed";
+    brushed.baseColor = { 0.9f, 0.9f, 0.88f };
+    brushed.metallic = 1;
+    brushed.roughness = 0.35f;
+    brushed.anisotropy = 0.7f;
+    brushed.anisotropyRotation = 0.3f;
+    s.materials.push_back(brushed);
 }
 
 // A two-bone bar (skinned) appended to a scene, so the skin stream, skeleton and skinned instance cross the ABI.
@@ -228,7 +236,9 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
     {
         UnxMaterialDesc d{};
         d.size = sizeof d;
-        d.version = 3;
+        d.version = 4;
+        d.anisotropy = m.anisotropy;
+        d.anisotropyRotation = m.anisotropyRotation;
         d.clearcoat = m.clearcoat;
         d.clearcoatRoughness = m.clearcoatRoughness;
         d.clearcoatIor = m.clearcoatIor;

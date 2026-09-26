@@ -3192,6 +3192,144 @@ void testSheenFrame(TestFrame& tf, Report& report)
     (void)st;
 }
 
+// A9 anisotropy in a frame (MATERIAL_LAYERS 1.5; render C's lobe and word, render A's shading join): two brushed metal
+// spheres under the sun - r 0.3 s 0.8 (both axes wider than the disk) and r 0.08 s 1 (alpha_b 0.0064 narrower than the
+// disk, alpha_t wide: a streak) - each pixel against a dense disk quadrature (48 area-uniform radii x 192 angles) of the
+// C++ lobe (distributionGgxAniso, visibilitySmithGgxAniso, anisoSpecularAlbedo) with the pixel's word (the frame about the
+// decoded G-buffer normal, the band-limited alphas; the pixel footprint widens the slope density's alphas by p / 4 as the
+// rule does). The terminator band is the per-point quadrature's (skipped here, as for the sheen frame).
+void testAnisoFrame(TestFrame& tf, Report& report)
+{
+    scene::Scene s;
+    s.name = "aniso frame test";
+    scene::Material ground;
+    ground.name = "ground";
+    ground.baseColor = { 0.5f, 0.45f, 0.4f };
+    ground.roughness = 0.5f;
+    scene::Material brushed;
+    brushed.name = "brushed";
+    brushed.baseColor = { 0.95f, 0.93f, 0.88f };
+    brushed.metallic = 1;
+    brushed.roughness = 0.3f;
+    brushed.anisotropy = 0.8f;
+    brushed.anisotropyRotation = 0.4f;
+    scene::Material streak = brushed;
+    streak.name = "streak";
+    streak.roughness = 0.08f;
+    streak.anisotropy = 1;
+    streak.anisotropyRotation = 0;
+    s.materials = { ground, brushed, streak };
+    scene::Instance a;
+    a.mesh = addPlane(s, 40, 0);
+    s.instances.push_back(a);
+    for (uint32_t k = 0; k < 2; ++k)
+    {
+        scene::Instance b;
+        b.mesh = addSphere(s, 1, 48, 96, 1 + k);
+        b.transform = float3x4::translation({ k ? 1.15f : -1.15f, 1, 0 });
+        s.instances.push_back(b);
+    }
+    s.sun.direction = normalize(float3{ 0.25f, 0.55f, 0.8f });  // in front of the spheres: the highlights face the camera
+    scene::Camera cam;
+    cam.name = "aniso";
+    cam.position = { 0, 1.4f, 5.0f };
+    cam.forward = normalize(float3{ 0, -0.08f, -1 });
+    cam.ev100 = 15;
+    s.cameras.push_back(cam);
+    tf.setScene(s);
+
+    const uint32_t W = 960, H = 540;
+    std::shared_ptr<std::vector<uint8_t>> gb, words, aw, lin, depthRb;
+    ViewDesc desc;
+    tf.frame.outputLinearHdr = true;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, W, H, 0);
+        desc = v.view;
+        v.color = fc.graph.createTexture({ "m.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+        tf.vis.record(fc, v);
+        tracks::materialResolve(fc, v);
+        tracks::shading(fc, v);
+        const material::ResolveOutputs o = material::resolveOutputs(fc, v);
+        gb = tf.readback(fc, v.gbuffer);
+        words = tf.readback(fc, o.materialWord);
+        aw = tf.readback(fc, o.anisoWord);
+        lin = tf.readback(fc, v.color);
+        depthRb = tf.readback(fc, v.depth);
+    });
+    tf.frame.outputLinearHdr = false;
+    const double pi = 3.14159265358979323846;
+    const double exposure = 1.0 / (1.2 * std::exp2(15.0)), thetaS = s.sun.angularRadius;
+    const float3 E = s.sun.color * s.sun.illuminance, l0 = normalize(s.sun.direction);
+    const double Lsun = 1 / (pi * std::sin(thetaS) * std::sin(thetaS));
+    const float3 dt = normalize(std::fabs(l0.y) < 0.99f ? cross(float3{ 0, 1, 0 }, l0) : cross(float3{ 1, 0, 0 }, l0)), db = cross(l0, dt);
+    double worst[2] = { 0, 0 }, largest = 0;
+    uint32_t checked[2] = { 0, 0 }, streakNarrow = 0;
+    for (uint32_t y = 0; y < H; y += 2)
+        for (uint32_t x = 0; x < W; x += 2)
+        {
+            if (cpuIsEdge(desc, *words, *gb, *depthRb, W, H, x, y, tf.quality)) continue;
+            const uint32_t word = texelOf<uint32_t>(*words, W, x, y);
+            const uint32_t mi = word & 0xFFFF;
+            if (mi != 1 && mi != 2) continue;
+            const uint2 pk = texelOf<uint2>(*gb, W, x, y);
+            const float3 n = octDecode(pk.x);
+            double D[3], Dx[3];
+            pixelRay(desc, x + 0.5, y + 0.5, D, Dx);
+            const float3 v = normalize(float3{ (float)-D[0], (float)-D[1], (float)-D[2] });
+            const float NoV = dot(n, v), NoL0 = dot(n, l0);
+            if (NoV < 0.05f || NoL0 < 2 * (float)std::sin(thetaS)) continue;
+            // the word (Aniso.hlsli anisoUnpackWord): the angle about the decoded normal's Duff basis, sqrt(alpha) unorm8
+            const uint32_t aword = texelOf<uint32_t>(*aw, W, x, y);
+            const float sg = n.z >= 0 ? 1.0f : -1.0f, ia = -1 / (sg + n.z), c = n.x * n.y * ia;
+            const float3 b1{ 1 + sg * n.x * n.x * ia, sg * c, -sg * n.x }, b2{ c, sg + n.y * n.y * ia, -n.y };
+            const double psi = (aword & 0xFFFF) * (pi / 65536.0);
+            const float3 d = b1 * (float)std::cos(psi) + b2 * (float)std::sin(psi);
+            const float3 t = normalize(d - n * dot(n, d)), bt = cross(n, t);
+            const float rt = ((aword >> 16) & 0xFF) / 255.0f, rb = (aword >> 24) / 255.0f;
+            const float at = std::max(rt * rt, 1e-4f), ab = std::max(rb * rb, 1e-4f);
+            const double p = std::sqrt(Dx[0] * Dx[0] + Dx[1] * Dx[1] + Dx[2] * Dx[2]) / std::sqrt(D[0] * D[0] + D[1] * D[1] + D[2] * D[2]);
+            const float atw = (float)std::sqrt(at * at + p * p / 16), abw = (float)std::sqrt(ab * ab + p * p / 16);
+            if (mi == 2 && ab < 2 * thetaS) ++streakNarrow;
+            const float3 vL{ dot(v, t), dot(v, bt), NoV };
+            const float2 AB = model::anisoSpecularAlbedo(vL, at, ab);
+            const float3 f0{ (float)srgbToLinear((pk.y & 0xFF) / 255.0), (float)srgbToLinear(((pk.y >> 8) & 0xFF) / 255.0), (float)srgbToLinear(((pk.y >> 16) & 0xFF) / 255.0) };
+            double sum[3] = { 0, 0, 0 };
+            const int NR = 48, NA = 192;
+            for (int i = 0; i < NR; ++i)
+            {
+                const double cc = 1 - (i + 0.5) / NR * (1 - std::cos(thetaS)), ss = std::sqrt(std::max(0.0, 1 - cc * cc));
+                for (int k = 0; k < NA; ++k)
+                {
+                    const double ph = (k + 0.5) * 2 * pi / NA;
+                    const float3 l = normalize(l0 * (float)cc + (dt * (float)std::cos(ph) + db * (float)std::sin(ph)) * (float)ss);
+                    const float NoL = dot(n, l);
+                    if (NoL <= 0) continue;
+                    const float3 h = normalize(v + l);
+                    const float3 lL{ dot(l, t), dot(l, bt), NoL };
+                    const float Dh = model::distributionGgxAniso(dot(h, t), dot(h, bt), dot(h, n), atw, abw);
+                    const float Vv = model::visibilitySmithGgxAniso(vL, lL, at, ab);
+                    const float3 F = model::fresnelSchlick(f0, dot(v, h));
+                    for (int q = 0; q < 3; ++q)
+                        sum[q] += (&F.x)[q] * Dh * Vv * (1 + (&f0.x)[q] * (1 / (AB.x + AB.y) - 1)) * NoL;
+                }
+            }
+            const double omega = 2 * pi * (1 - std::cos(thetaS));
+            float3 expected;
+            for (int q = 0; q < 3; ++q) (&expected.x)[q] = (float)(sum[q] / (NR * NA) * omega * Lsun * (&E.x)[q] * exposure);
+            const float4 got = texelOf<float4>(*lin, W, x, y);
+            largest = std::max(largest, (double)expected.x);
+            const double scale = std::max({ expected.x, expected.y, expected.z, 1e-2f });
+            const double e = std::max({ std::abs(got.x - expected.x), std::abs(got.y - expected.y), std::abs(got.z - expected.z) }) / scale;
+            if (e > worst[mi - 1] && e > 5e-3) logf("  aniso px (%u,%u) mat %u n.v %.4f n.l %.4f alpha (%.4f %.4f) got (%.5f %.5f %.5f) expected (%.5f %.5f %.5f)\n", x, y, mi, NoV, NoL0, at, ab, got.x, got.y, got.z, expected.x, expected.y, expected.z);
+            worst[mi - 1] = std::max(worst[mi - 1], e);
+            ++checked[mi - 1];
+        }
+    logf("aniso frame: %u + %u pixels checked (%u streak pixels with alpha_b < 2 theta_s), largest exposed sun specular %.4f\n", checked[0], checked[1], streakNarrow, largest);
+    report(checked[0] > 2000 && worst[0] < 5e-3, "aniso frame: r 0.3 s 0.8 sun (disk rule) vs dense disk quadrature (rel.)", worst[0], 5e-3);
+    report(checked[1] > 2000 && streakNarrow > 500 && worst[1] < 1e-2, "aniso frame: r 0.08 s 1 streak sun vs dense disk quadrature (rel.)", worst[1], 1e-2);
+    report(largest > 0.05, "aniso frame: the highlight is visible (largest exposed sun specular)", largest, 0.05);
+}
+
 void testCoatSun(TestFrame& tf, Report& report)
 {
     {
@@ -3305,7 +3443,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, glassJobsOnly = false, preshadeOnly = false, coatOnly = false, sheenOnly = false, warp = false;
+        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, glassJobsOnly = false, preshadeOnly = false, coatOnly = false, sheenOnly = false, anisoOnly = false, warp = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -3319,6 +3457,7 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--preshade") preshadeOnly = true;
             if (std::string(argv[i]) == "--coat") coatOnly = true;
             if (std::string(argv[i]) == "--sheen") sheenOnly = true;
+            if (std::string(argv[i]) == "--aniso") anisoOnly = true;
             if (std::string(argv[i]) == "--warp") warp = true;  // compute probes only (full frames render black on WARP)
         }
         ComPtr<ID3D12Device> warpDevice;
@@ -3337,6 +3476,12 @@ int main(int argc, char** argv)
         Report report;
         testTable(report);
         TestFrame tf(debugLayer, gpuValidation, warpDevice.Get());
+        if (anisoOnly)  // --aniso: the anisotropy frame alone
+        {
+            testAnisoFrame(tf, report);
+            logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
+            return report.failures ? 1 : 0;
+        }
         if (sheenOnly)  // --sheen: the sheen probe alone
         {
             testSheen(tf, report);
@@ -3393,6 +3538,7 @@ int main(int argc, char** argv)
         testCoatSun(tf, report);
         testSheen(tf, report);
         testSheenFrame(tf, report);
+        testAnisoFrame(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }
