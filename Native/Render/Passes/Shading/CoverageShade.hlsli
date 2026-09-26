@@ -450,7 +450,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         const float3 nv = NoV > 0 ? n : -n;
         const float3 r = reflect(-v, n);
         const bool wantRadiance = NoV > 0 && (experiment & 4) == 0;
-#if COV_PRESHADE_CLASSES
+#if COV_PRESHADE_CLASSES || COV_PRESHADE_LIGHT
         // (one thread per record, no tile group: the probes straight from R's texture, the values the tile cache copies)
         const ScreenProbeLighting g = screenProbeGather(probes, pixel, worldPos, nv, linearZ, foliage && (experiment & 2) == 0, wantRadiance, r,
                                                         reflectionLobeHalfAngle(s.roughness, NoV));
