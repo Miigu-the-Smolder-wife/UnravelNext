@@ -9,6 +9,9 @@
 // unpolarized), or reflected inside on total internal reflection while the job's bounces last. A hit on the scene is
 // shaded as a reflection hit (ReflectionShade.hlsli, the sun by S's VSM or a shadow ray); a miss sees the sky (with the
 // cloud layer). Energy the path loses (internal reflection at the exit, bounces exhausted) is counted, not redistributed.
+// Medium 0xFF: the job is a reflection ray (R-W1 water, R-1 glass: a layer pixel's mirror direction from its surface
+// point, written by the layer's owner where its own lookups are not sharp enough): traced and shaded from outside, no
+// absorption, no exit surface.
 // Result per job (8 B, P[0].y): RGBA16F exposed linear radiance (x exposure, as band A), alpha 1 = traced.
 // Root constants: ReflectionRay.hlsli's P[1..7]; P[0] = { jobs SRV (raw: header 16 B { count, dispatch x, y, z }, then
 // 48 B jobs { float3 origin, uint outputSlot; float3 direction, uint flags (0..7 medium, 8..9 bounces, 31 coverage
@@ -61,7 +64,7 @@ void RefractionGen()
     const GiHeader h = giHeader(cache);
     const uint seed = giRandom(job * 9781u + (P[5].x & 0xFFFFFFu) * 6271u + 17u);
     float3 throughput = 1, L = 0;
-    bool inside = true;
+    bool inside = (flags & 0xFFu) != 0xFFu;  // medium 0xFF: a reflection ray from the layer's surface (R-W1, R-1), outside
     [loop] for (uint segment = 0; segment < REFRACT_SEGMENTS; ++segment)
     {
         RayDesc r;
