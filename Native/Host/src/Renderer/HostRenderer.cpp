@@ -956,7 +956,7 @@ void HostRenderer::setFluids(std::span<const FluidInput> fluids, const uint64_t 
         if (!in.view) fail("fluids: no view");
         std::memcpy(&v, in.view, sizeof v);
         if (v.size != sizeof v || v.version != 1) fail("fluids: NP_FluidGpuView size %u version %u", v.size, v.version);
-        if (!v.current || !v.count || v.stride != 48 || !(v.dx > 0)) fail("fluids: a view without particles (count %u, stride %u, dx %g)", v.count, v.stride, v.dx);
+        if (!v.current || !v.count || v.stride < 48 || v.stride % 4 || !(v.dx > 0)) fail("fluids: a view without particles (count %u, stride %u: >= 48 and a multiple of 4, dx %g)", v.count, v.stride, v.dx);
         if (!(in.alpha >= 0 && in.alpha <= 1)) fail("fluids: alpha %g outside [0, 1]", in.alpha);
         FramePacket::Fluid f;
         f.frame.current = static_cast<ID3D12Resource*>(v.current);

@@ -4,7 +4,8 @@
 //      handed over as an NP_FluidGpuView: every frame queued while it is set is admitted by the bridge and committed with
 //      the frame's fence (one graphics submission per frame in the bridge's statistics), and frames without fluids admit
 //      nothing;
-//   2. invalid views are refused on the calling thread (size, stride, no particles, alpha outside [0, 1]);
+//   2. invalid views are refused on the calling thread (size, stride under 48 or not a multiple of 4, no particles, alpha
+//      outside [0, 1], a material that is not Water-class);
 //   3. the lease and the buffer are released after the frames; no D3D12 debug-layer errors.
 // Correctness run (standalone HostRenderer, hardware GPU; GpuLock -Kind correctness).
 #include "Renderer/HostRenderer.h"
@@ -83,7 +84,7 @@ int main()
             D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
             D3D12_RESOURCE_DESC rd{};
             rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-            rd.Width = (uint64_t)particles * 48;
+            rd.Width = (uint64_t)particles * 80;  // the physics GPU particle (NP_FluidGpuView::stride)
             rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
             rd.SampleDesc.Count = 1;
             rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -110,7 +111,7 @@ int main()
         view.current = buffer.Get();
         view.currentResource = id;
         view.count = particles;
-        view.stride = 48;
+        view.stride = 80;
         view.dx = 0.05f;
         view.origin[0] = 1, view.origin[1] = 2, view.origin[2] = 3;
         view.tick = 42;
@@ -146,7 +147,9 @@ int main()
         expect("a view of another size is refused", throws([&] { h.setFluids({ &badIn, 1 }, stamp); }));
         bad = view;
         bad.stride = 32;
-        expect("a stride other than 48 is refused", throws([&] { h.setFluids({ &badIn, 1 }, stamp); }));
+        expect("a stride under 48 is refused", throws([&] { h.setFluids({ &badIn, 1 }, stamp); }));
+        bad.stride = 82;
+        expect("a stride that is not a multiple of 4 is refused", throws([&] { h.setFluids({ &badIn, 1 }, stamp); }));
         bad = view;
         bad.count = 0;
         expect("a view without particles is refused", throws([&] { h.setFluids({ &badIn, 1 }, stamp); }));

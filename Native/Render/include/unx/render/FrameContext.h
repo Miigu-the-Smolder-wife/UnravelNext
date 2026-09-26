@@ -52,9 +52,9 @@ struct CelestialFrame
 // (GpuBridgeHost::prepareGraphics) before the frame's lists run and commits them with the frame's fence.
 struct FluidFrame
 {
-    ID3D12Resource* current = nullptr;  // particles at the end of the latest tick (NP_FluidParticle, 48 B; COMMON)
+    ID3D12Resource* current = nullptr;  // particles at the end of the latest tick (the physics GPU particle: FluidGpu.hlsl Particle, 'stride' B each; COMMON)
     ID3D12Resource* start = nullptr;    // particles at the start of that tick (null or !startValid: no blend)
-    uint32_t count = 0, startCount = 0, stride = 48, startValid = 0;
+    uint32_t count = 0, startCount = 0, stride = 80, startValid = 0;  // stride: NP_FluidGpuView::stride (>= 48; 80 today)
     double origin[3] = {};              // world position of cell 0 in this frame's coordinates (origin shifts applied)
     float dx = 0;                       // cell size (m); particle positions are in cells
     float alpha = 1;                    // this frame's time between the tick's start (0) and end (1)
