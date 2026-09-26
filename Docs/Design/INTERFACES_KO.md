@@ -725,6 +725,9 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.53 (2026-09-26, E A12 1인칭 뷰 모델):
+  - **`gpu::kInstanceViewModel`(1 << 29, HLSL `INSTANCE_VIEW_MODEL`, GPU 장면 전용)과 `GpuScene::setInstanceViewModel`**: E의 `Passes/ViewModel`이 카메라에 붙은 인스턴스를 매 렌더 프레임 그 프레임의 카메라 × 카메라 공간 자세로 둔다(`tracks::viewModelPrepare`, GPU 장면 flush 앞; 불연속은 순간이동). 그래서 카메라 기준 운동이 0이고(움직임 벡터·회전 블러), 그림자·반사·GI는 화면과 같은 기하를 본다. M은 이 플래그로 회전 블러에서 뷰 모델 픽셀을 뺀다.
+  - **`FrameConstants::viewModelScale`(옛 `spare1`, HLSL `g_viewModelScale`)**: 주 뷰에서 뷰 모델 인스턴스의 투영 재매핑 k(clip.xy × k, 깊이 불변; 1 = 없음이 기본). `viewmodel.fov_override_degrees`가 정하고, 다른 뷰는 늘 1이다. V는 뷰 모델 정점의 현재·이전 clip에 `ViewModel.hlsli`의 `viewModelClip`을 부른다.
 - v1.52 (2026-09-26, A7 호스트 경로, 엔진 2 요청):
   - **표면 상태 장 호스트 입력(E `surface::SurfaceField`)**: 선택 export `UnxSurfaceDelta(r, changed, changedCount, removedKeys, removedCount)`(NativeVfx `nv_surface_delta`의 `NV_SurfaceBrickV2` 1,560 B 기록과 제거 키 int32×3), `UnxSurfaceSetHalfLives(r, double[6])`(젖음·그을음·서리·먼지·핏자국·눈, s, 0 = 감쇠 없음), `UnxSurfaceSetTime(r, seconds)`(이후 큐 프레임의 VFX 시각). `HostRenderer::surfaceDelta/setSurfaceHalfLives/setSurfaceTime`이 다음 큐 프레임과 함께 보내고, 렌더 스레드가 기록 전에 호출 순서대로 `apply`한다. 건너뛴 티켓과 버려진 패킷의 묶음은 다음 렌더 프레임으로 옮긴다. [실측] `HostSurface`: 추가·제거·교체 순서, 건너뛴 두 프레임 뒤의 마지막 값, 버려진 패킷의 묶음, 반감기·시각이 모두 맞았다(디버그 층 오류 0).
 - v1.51 (2026-09-26, A5·A3):

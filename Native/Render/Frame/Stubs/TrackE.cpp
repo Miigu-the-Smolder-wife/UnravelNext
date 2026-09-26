@@ -11,4 +11,5 @@ void debugOverlay(FramePassContext&, ViewResources&) { pending("E.debugOverlay (
 void decals(FramePassContext&, ViewResources&) { pending("E.decals (track disabled in this build)"); }
 void surfaceState(FramePassContext&) { pending("E.surfaceState (track disabled in this build)"); }
 void hair(FramePassContext&, ViewResources&) { pending("E.hair (track disabled in this build)"); }
+float viewModelPrepare(TrackState&, GpuScene&, const QualityConfig&, const FrameContext&) { pending("E.viewModelPrepare (track disabled in this build)"); return 1.0f; }
 } // namespace unx::render::tracks

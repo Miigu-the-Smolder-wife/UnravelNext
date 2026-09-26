@@ -104,6 +104,7 @@ struct GpuVisibleCluster
 // gpu::kInstanceMotionBreak (v1.45): a teleport or restore in this frame; prev* = current (zero motion), breakCentre = where
 // its bounding sphere was in the previous rendered frame (caches keyed by the old place invalidate from it).
 #define INSTANCE_MOTION_BREAK (1u << 30)
+#define INSTANCE_VIEW_MODEL (1u << 29)  // gpu::kInstanceViewModel: a first-person view model (Passes/ViewModel)
 // scene::MaterialClass
 #define MATERIAL_STANDARD 0u
 #define MATERIAL_FOLIAGE 1u

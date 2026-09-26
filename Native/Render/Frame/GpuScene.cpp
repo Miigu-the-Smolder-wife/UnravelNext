@@ -658,6 +658,16 @@ void GpuScene::setInstanceVisible(uint32_t instance, bool visible)
     markRecord(instance);
 }
 
+void GpuScene::setInstanceViewModel(uint32_t instance, bool viewModel)
+{
+    if (instance >= m_instances.size()) fail("GpuScene::setInstanceViewModel: instance %u of %zu", instance, m_instances.size());
+    gpu::Instance& g = m_instances[instance];
+    const uint32_t flags = viewModel ? g.flags | gpu::kInstanceViewModel : g.flags & ~gpu::kInstanceViewModel;
+    if (flags == g.flags) return;
+    g.flags = flags;
+    markRecord(instance);
+}
+
 void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, ShaderLibrary& shaders)
 {
     // Instances changed in the previous frame and not in this one settle: previous = current.
@@ -811,7 +821,7 @@ void GpuScene::fill(gpu::FrameConstants& f) const
     f.coverageMaskLut = m_coverageTable.srv;
     f.giRaysThisFrame = 0;
     f.debugDraw = 0xFFFFFFFFu;  // off; FrameRenderer sets E's debug buffer (FrameRenderer::allocateFrameConstants)
-    f.spare1 = 0;
+    f.viewModelScale = 1.0f;  // no remap; FrameRenderer sets E's value for the main view
     f.instanceCount = (uint32_t)m_instances.size();
     f.meshCount = (uint32_t)m_meshes.size();
     f.clusterCount = m_clusterBuffer.count;

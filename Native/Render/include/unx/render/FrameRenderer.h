@@ -40,5 +40,6 @@ private:
     TrackState m_trackState;
     float m_lastEv100 = 0;
     uint32_t m_debugDraw = 0xFFFFFFFFu;  // this frame's FrameConstants::debugDraw (tracks::debugBegin)
+    float m_viewModelScale = 1.0f;       // this frame's FrameConstants::viewModelScale (tracks::viewModelPrepare)
 };
 } // namespace unx::render

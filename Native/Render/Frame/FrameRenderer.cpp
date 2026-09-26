@@ -112,6 +112,7 @@ D3D12_GPU_VIRTUAL_ADDRESS FrameRenderer::allocateFrameConstants(const FrameConte
     const uint64_t offset = ((frame.frameIndex % m_framesInFlight) * kMaxViewsPerFrame + m_slotViews++) * 1024;
     gpu::FrameConstants c = frameConstants(m_scene, frame, view);
     c.debugDraw = m_debugDraw;
+    c.viewModelScale = view.kind == gpu::ViewKind::Main ? m_viewModelScale : 1.0f;  // other views see the true geometry
     std::memcpy(m_mapped + offset, &c, sizeof c);
     return m_constants->GetGPUVirtualAddress() + offset;
 }
@@ -160,6 +161,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
         frame.mainView.ev100 = tracks::autoExposureEv100(m_trackState, m_device, m_quality, frame, m_framesInFlight);
     }
     m_lastEv100 = frame.mainView.ev100;
+    m_viewModelScale = tracks::viewModelPrepare(m_trackState, m_scene, m_quality, frame);  // E (A12): view models at this frame's camera
     if (frame.discontinuity & kDiscontinuityRestore) m_scene.resetMotion();
     m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);  // transforms, palettes, visibility of this frame
     FrameResources resources;

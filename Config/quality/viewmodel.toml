@@ -1,0 +1,7 @@
+# Owner: E (A12, FEATURES_GAME 3). First-person view model (Passes/ViewModel).
+
+[viewmodel]
+# A separate field of view for view models (degrees, vertical): 0 = off (the default - the view model is drawn with the
+# world's camera, so its shadows, reflections and GI match its image). On: a main-view raster remap clip.xy x
+# tan(fov / 2) / tan(fov_vm / 2); shadows and reflections keep the true geometry (condition recorded, outside the gates).
+fov_override_degrees = 0

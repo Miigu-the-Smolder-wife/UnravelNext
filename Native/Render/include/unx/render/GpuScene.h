@@ -90,6 +90,9 @@ public:
     uint32_t paletteJoints(uint32_t instance) const;
     void updateSkeleton(uint64_t frameIndex, uint32_t skeleton, std::span<const float3x4> jointToModel);
     void setInstanceVisible(uint32_t instance, bool visible);
+    // v1.53 (A12): marks a first-person view model (gpu::kInstanceViewModel; E's Passes/ViewModel sets it every frame, so
+    // a host re-upload of the instance loses nothing).
+    void setInstanceViewModel(uint32_t instance, bool viewModel);
     // Scene motion of the frame being recorded (after flushUpdates; A5 motion blur): an instance moved or re-posed in this
     // frame, or wind-animated instances (they move every frame). The camera's own motion is the view's (prevViewProj).
     bool hasMotion() const { return !m_movedNow.empty() || !m_posedNow.empty() || m_windInstances > 0; }

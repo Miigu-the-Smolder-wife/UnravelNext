@@ -42,6 +42,9 @@ set(UNX_TRACK_OF_Volume E)
 set(UNX_TRACK_OF_Debug E)
 set(UNX_TRACK_OF_Decal E)
 set(UNX_TRACK_OF_Hair E)
+# E (reassigned 2026-09-26 16:35, "¿ÁπË¡§ 2"): first-person view model, light profiles
+set(UNX_TRACK_OF_ViewModel E)
+set(UNX_TRACK_OF_Lights E)
 
 function(unx_track_of folder out)
   if(NOT DEFINED UNX_TRACK_OF_${folder})

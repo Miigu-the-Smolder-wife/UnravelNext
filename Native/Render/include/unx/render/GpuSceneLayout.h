@@ -16,6 +16,10 @@ constexpr uint32_t kInstanceHidden = 1u << 31;  // Instance::flags, GPU scene on
 // current one, so its motion is zero). Caches keyed by where the instance was drawn before (VSM pages) cannot measure the
 // jump from prevObjectToWorld: breakCentre holds the world centre of its bounding sphere in the previous rendered frame.
 constexpr uint32_t kInstanceMotionBreak = 1u << 30;
+// v1.53 (A12, E): a first-person view model (GPU scene only, GpuScene::setInstanceViewModel): a camera-attached instance
+// E places at the frame's camera every rendered frame (Passes/ViewModel). V remaps its main-view projection by
+// FrameConstants::viewModelScale (ViewModel.hlsli); M leaves its pixels out of the camera-rotation blur.
+constexpr uint32_t kInstanceViewModel = 1u << 29;
 
 struct Instance  // 144 B
 {
@@ -204,7 +208,10 @@ struct FrameConstants
     // this frame's share of gi.rays_per_tick (10.3 of the design revision; 0 until the renderer hands it out).
     // v1.50 (A15, E): debugDraw: UAV of this frame's debug primitive buffer (Passes/Debug/DebugDraw.hlsli: debugLine,
     // debugTriangle, debugText append to it from any kernel); 0xFFFFFFFF = debug drawing off (appends are no-ops).
-    uint32_t coverageMaskLut, giRaysThisFrame, debugDraw, spare1;
+    // v1.53 (A12, E): viewModelScale: the main view's projection remap of view-model instances (clip.xy x it; 1 = none,
+    // the default: the view model is drawn with the world's camera; viewmodel.fov_override_degrees sets it).
+    uint32_t coverageMaskLut, giRaysThisFrame, debugDraw;
+    float viewModelScale;
 };
 static_assert(sizeof(FrameConstants) == 544);
 } // namespace unx::render::gpu

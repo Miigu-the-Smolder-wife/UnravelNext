@@ -75,6 +75,9 @@ void surfaceState(FramePassContext& fc);
 // E (B10, ARCHITECTURE 2.8 / 2.14): strand hair - the queued ticks' guide simulation, then the frame's follow-strand
 // segments (FrameResources::hairSegments / hairBodies); before visibility (V draws them in the coverage layer).
 void hair(FramePassContext& fc, ViewResources& view);
+// E (A12, FEATURES_GAME 3): places the view-model instances at this frame's camera (their transforms and view-model flag
+// in the GPU scene, before its flush) and returns the main view's projection remap (FrameConstants::viewModelScale).
+float viewModelPrepare(TrackState& state, GpuScene& scene, const QualityConfig& quality, const FrameContext& frame);
 // Last in the frame: the buffer visualization (debug.view, replaces the view's colour), then the debug primitives
 // (CPU and GPU appends) and the HUD drawn over view.color.
 void debugOverlay(FramePassContext& fc, ViewResources& view);
