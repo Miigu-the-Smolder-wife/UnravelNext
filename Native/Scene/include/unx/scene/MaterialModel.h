@@ -111,6 +111,8 @@ struct Sheen
 constexpr uint32_t kSheenTableMu = 64, kSheenTableR = 32, kSheenTableSize = 2 * kSheenTableMu * kSheenTableR;
 float sheenLookup(const float* table, float mu, float roughness);
 const std::vector<float>& sheenTable();
+std::vector<float> sheenTableReference();  // built now (deterministic; the generated table must equal it)
+bool sheenTableGenerated();                // false: SheenTable.inc absent, sheenTable() built at first use
 float sheenProjectedArea(float mu, float roughness);
 float sheenAlbedo(float NoV, float roughness);
 float evaluateSheenLobe(float roughness, float3 n, float3 v, float3 l);  // D G2 / (4 n.v n.l) (C = 1)
