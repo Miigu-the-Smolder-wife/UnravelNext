@@ -47,13 +47,13 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         const uint k = (m >> 2) & 7u;
         const ReflPlanar pl = reflPlanar(P[1].w, P[2].z, k);
         Texture2D<float4> colour = ResourceDescriptorHeap[P[3][k]];
-        reflection[pixel] = float4(colour.Load(int3(pixel - pl.rect.xy, 0)).rgb / g_exposure, 1);
+        reflection[pixel] = float4(reflStorable(colour.Load(int3(pixel - pl.rect.xy, 0)).rgb / g_exposure), 1);
         return;
     }
     if (mode == REFL_M)
     {
         const uint3 r = results[reflJob(m)];
-        reflection[pixel] = float4(reflResultRadiance(r), 1);
+        reflection[pixel] = float4(reflStorable(reflResultRadiance(r)), 1);
         history[pixel] = float2(reflSmoothedDistance(history[pixel].x, reflResultDistance(r)), reflResultMotion(r));
         return;
     }
@@ -91,7 +91,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         // Its own job; the flag stays while the grid would still not serve it.
         const uint3 r = results[reflJob(m)];
         const float d = max(reflSmoothedDistance(history[pixel].x, reflResultDistance(r)), 1e-3);
-        reflection[pixel] = float4(reflResultRadiance(r), 1);
+        reflection[pixel] = float4(reflStorable(reflResultRadiance(r)), 1);
         history[pixel] = float2(gridServes ? d : -d, reflResultMotion(r));
         return;
     }
@@ -101,6 +101,6 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         history[pixel] = float2(-max(abs(history[pixel].x), 1e-3), 0);  // own job next frame
         return;
     }
-    reflection[pixel] = float4(sum / weight, 1);
+    reflection[pixel] = float4(reflStorable(sum / weight), 1);
     history[pixel] = float2(reflSmoothedDistance(history[pixel].x, dist / weight), motion);
 }

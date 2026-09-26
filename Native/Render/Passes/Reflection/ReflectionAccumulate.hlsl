@@ -143,12 +143,13 @@ void main(uint2 pixel : SV_DispatchThreadID)
     }
     // A non-finite value (from a bad hit: never expected) neither reaches M (a = 0: M's K path there) nor enters the history,
     // where it would stay.
-    if (any(mean != mean) || any(isinf(mean)))
+    if (any(isnan(mean)) || any(isinf(mean)))
     {
         reflection[pixel] = float4(0, 0, 0, 0);
         accumOut[pixel] = float4(0, 0, 0, 0);
         return;
     }
+    mean = reflStorable(mean);  // finite but above RGBA16F's range would store +inf
     reflection[pixel] = (flags & 4u) ? float4(n / 32.0, min(motion, 1.0), state, current.a) : float4(mean, current.a);
     // Nearest-even before the RGBA16F store: this GPU truncates toward zero, a -2.4e-4 bias per store that the running mean
     // (weight down to 1 / historyMax) would amplify to about -2.4e-4 x historyMax in the steady state (RayTracing/HalfNearest.hlsli).

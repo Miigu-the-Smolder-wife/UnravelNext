@@ -168,7 +168,15 @@ int main(int argc, char** argv)
         const std::vector<std::string> list = resolutions == "both" ? std::vector<std::string>{ "4K", "1440p" } : std::vector<std::string>{ resolutions };
         for (const std::string& name : list)
         {
-            const Resolution res = resolutionFromString(name, quality);
+            // A repro at another size (WxH): with --dump only, and its timings are not measurements.
+            Resolution res;
+            if (const size_t x = name.find('x'); x != std::string::npos && name != "3840x2160" && name != "2560x1440")
+            {
+                if (dumpPath.empty()) fail("--resolution %s: other sizes than 4K and 1440p only for a --dump repro", name.c_str());
+                res = { (uint32_t)std::stoul(name.substr(0, x)), (uint32_t)std::stoul(name.substr(x + 1)), name + " (repro, not a measurement)" };
+            }
+            else
+                res = resolutionFromString(name, quality);
             TrackState state;
             HarnessOptions opt;
             opt.frames = frames;

@@ -13,6 +13,10 @@
 #define REFL_PLANAR 3u  // planar mirror pixel: the reflection camera's colour (plane index in the spacing bits)
 #define REFL_NO_JOB 0xFFFFFFu
 #define REFL_SELF (1u << 5)
+// view.reflection and the time integration's history are RGBA16F: radiance is stored at most at the format's largest value
+// (65504 nits: a glint - floor -> glossy surface -> sun - that bright is white at any daytime exposure); above it the
+// store would be +inf, and M's composite would turn inf x 0 into NaN [measured: D0 720p, 3 pixels].
+float3 reflStorable(float3 radiance) { return min(radiance, 65504.0); }
 
 uint reflPackMode(uint mode, uint spacingLog2, uint job) { return mode | (spacingLog2 << 2) | (job << 8); }
 uint reflMode(uint v) { return v & 3u; }
