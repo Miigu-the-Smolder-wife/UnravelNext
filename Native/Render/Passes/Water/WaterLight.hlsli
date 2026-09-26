@@ -5,11 +5,14 @@
 // nearest the sun, its normal and its medium.
 //   waterSunLight(X): when the sun's straight ray to X passes water (a surface S above X towards the sun), X is lit
 //   through that surface: lightDir = -t, t the exact Snell refraction of the incoming sunlight at S (the direction for
-//   the sun's BRDF and cosine), transmittance = (1 - F(theta_s)) T^d: F the exact unpolarised Fresnel at the sun's
-//   incidence, T the medium's 1 m transmittance, d the path from X to the surface along lightDir, measured to the plane
-//   through S with S's normal. Exact for a flat surface (for a horizontal Lambert floor the irradiance is
-//   E cos(theta_s) (1 - F) T^d: the flux per horizontal area is conserved); on a curved surface the error is the
-//   surface's rise over the refracted path's horizontal offset from S (FEATURES_GAME 1.9).
+//   the sun's BRDF and cosine), transmittance = (1 - F(theta_s)) (cos theta_s / cos theta_t) T^d: F the exact
+//   unpolarised Fresnel at the sun's incidence, cos theta_s / cos theta_t the beam's compression across the surface (the
+//   refracted beam is narrower: the transmitted flux (1 - F) E cos theta_s per unit surface area, spread over the area
+//   the beam covers across its own direction), T the medium's 1 m transmittance, d the path from X to the surface along
+//   lightDir, measured to the plane through S with S's normal. The caller lights X with E x transmittance from lightDir,
+//   so a horizontal Lambert floor under flat water gets E (1 - F) cos theta_s T^d: the flux per horizontal area is
+//   conserved. Exact for a flat surface; on a curved surface the error is the surface's rise over the refracted path's
+//   horizontal offset from S (FEATURES_GAME 1.9).
 //   Conditions recorded there: (a) S's VSM shadows use the straight sun direction; (b) sky and GI light entering the
 //   water is not attenuated yet (with R); (c) caustics come on the same map.
 // `ior` > 1 overrides the medium's; otherwise the medium's is used. Returns false (lightDir = sunDir, transmittance = 1)
@@ -63,7 +66,8 @@ bool waterSunLight(uint depthSrv, uint normalSrv, uint mediumSrv, uint constSrv,
     lightDir = -t;
     const float3 S = X + s.xyz * (alongS - alongX);
     const float path = max(dot(S - X, n), 0.0) / max(dot(lightDir, n), 1e-4);
-    transmittance = (1 - waterFresnel(cosS, eta)) * pow(clamp(medium.rgb, 1e-6, 1.0), path);
+    const float cosT = max(dot(lightDir, n), 1e-4);
+    transmittance = (1 - waterFresnel(cosS, eta)) * (cosS / cosT) * pow(clamp(medium.rgb, 1e-6, 1.0), path);
     return true;
 }
 #endif

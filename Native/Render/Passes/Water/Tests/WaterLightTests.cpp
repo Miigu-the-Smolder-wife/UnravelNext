@@ -5,8 +5,10 @@
 //      surface's edge along its plane are boundary cases);
 //   2. the light direction = -(the exact Snell refraction of the sunlight at that surface's normal) (within 2e-3; the
 //      map stores the normal as octahedral fp16);
-//   3. the transmittance = (1 - F(theta_s)) T^d, F the exact unpolarised Fresnel, d the path from the point to the surface
-//      along the light direction (relative 3e-3; the medium is fp16);
+//   3. the transmittance = (1 - F(theta_s)) (cos theta_s / cos theta_t) T^d, F the exact unpolarised Fresnel, the cosine
+//      ratio the beam's compression across the surface, d the path from the point to the surface along the light
+//      direction (relative 3e-3; the medium is fp16); and the energy check: a horizontal floor under the flat pool gets
+//      transmittance x cos(floor normal, light direction) = (1 - F) cos theta_s T^d (relative 3e-3);
 //   4. with the map absent (constants UNX_NONE) nothing is lit.
 //   unx_test_water_waterlighttests [--no-debug-layer] [--warp]
 #include "unx/water/LinearDispatch.h"
@@ -213,7 +215,7 @@ int main(int argc, char** argv)
         }
 
         uint32_t lit = 0, unlit = 0, boundary = 0, wrongLit = 0, wrongUnlit = 0;
-        double worstDir = 0, worstT = 0;
+        double worstDir = 0, worstT = 0, worstEnergy = 0;
         for (uint32_t i = 0; i < count; ++i)
         {
             const V3 X{ points[4 * i], points[4 * i + 1], points[4 * i + 2] };
@@ -256,12 +258,18 @@ int main(int argc, char** argv)
             const V3 t = norm(sun * -eta + q.n * (eta * cosS - std::sqrt(1 - s2)));
             const V3 L = t * -1.0;
             const V3 S = X + sun * bestU;
-            const double path = dot(S - X, q.n) / dot(L, q.n), F = fresnel(cosS, eta);
+            const double path = dot(S - X, q.n) / dot(L, q.n), F = fresnel(cosS, eta), cosT = dot(L, q.n);
             worstDir = std::max({ worstDir, std::fabs(gl[0] - L.x), std::fabs(gl[1] - L.y), std::fabs(gl[2] - L.z) });
             for (int c = 0; c < 3; ++c)
             {
-                const double want = (1 - F) * std::pow((double)q.T[c], path);
+                const double want = (1 - F) * (cosS / cosT) * std::pow((double)q.T[c], path);
                 worstT = std::max(worstT, std::fabs(gt[c] - want) / want);
+                if (hit == 0)
+                {
+                    // energy: the floor's irradiance per E, from the GPU's direction and transmittance
+                    const double floorGpu = gt[c] * std::max(0.0, (double)gl[1]), floorWant = (1 - F) * cosS * std::pow((double)q.T[c], path);
+                    worstEnergy = std::max(worstEnergy, std::fabs(floorGpu - floorWant) / floorWant);
+                }
             }
         }
         std::printf("sun map: %u points lit, %u unlit, %u boundary; misclassified %u lit / %u unlit; light direction within %.2e, transmittance within %.2e (relative)\n", lit,
@@ -270,6 +278,8 @@ int main(int argc, char** argv)
         W_CHECK(wrongLit == 0 && wrongUnlit == 0, "%u / %u points misclassified", wrongLit, wrongUnlit);
         W_CHECK(worstDir <= 2e-3, "light direction off by %.3g", worstDir);
         W_CHECK(worstT <= 3e-3, "transmittance off by %.3g relative", worstT);
+        W_CHECK(worstEnergy <= 3e-3, "floor irradiance under the flat pool off by %.3g relative", worstEnergy);
+        std::printf("energy: a horizontal floor under the flat pool gets (1 - F) cos(theta_s) T^d within %.2e (relative)\n", worstEnergy);
         if (!warp)
         {
             const uint32_t errors = gpu.device.drainDebugMessages();

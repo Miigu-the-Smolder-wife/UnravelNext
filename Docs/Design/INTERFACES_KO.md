@@ -740,7 +740,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
     - 매질은 스트림 재질에서 온다: baseColor = 1 m 투과율, ior.
   - **`Passes/Water/WaterLight.hlsli` `waterSunLight(depthSrv, normalSrv, mediumSrv, constSrv, X, sunDir, ior, out lightDir, out transmittance)`**: 태양의 곧은 광선이 X 위에서 물을 지나면 true를 낸다. 그때 값은 다음과 같다.
     - lightDir = −(S에서 햇빛의 정확한 스넬 굴절)
-    - transmittance = (1 − F(θ_s)) T^d. d는 X에서 S의 접평면까지 lightDir 방향 거리다.
+    - transmittance = (1 − F(θ_s)) (cos θ_s / cos θ_t) T^d. d는 X에서 S의 접평면까지 lightDir 방향 거리다. cos 비는 수면을 지나며 빔이 좁아지는 몫이다. 호출자는 lightDir로 E × transmittance를 쓰므로, 수평 바닥 조도가 E (1 − F) cos θ_s T^d로 보존된다(시험의 에너지 검사 3.5e-4).
     - 평평한 면에서 정확하다. 수평 램버트 바닥의 조도는 E cos θ_s (1 − F) T^d다. 굽은 면의 오차 조건은 FEATURES_GAME 1.9에 있다.
   - 비용: 지도가 없으면 적재 1회, 있으면 4회. 렌더 A가 ShadeOpaque·폴백에서 부르고(l = lightDir, E ×= transmittance), coverage 조각은 합성 분할 뒤에 부른다.
   - 조건: VSM 그림자는 곧은 태양 방향이다(굴절 그림자는 S). 하늘·GI의 물속 감쇠는 R과 함께. 코스틱은 같은 지도로 뒤에.
