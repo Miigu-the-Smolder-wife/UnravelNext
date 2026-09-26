@@ -45,6 +45,9 @@
 // P[2].w experiment mask (atmosphere.froxels.experiment_disable; 0; cost attribution only: 1 air shadows, 2 local lights,
 // 4 air integration, 8 sun transmittance per substep, 16 multiple scattering per substep, 32 air shadow walk stops at
 // the page level; bit 16: walk statistics on)
+// Light functions (A8, E's Passes/Lights/LightFunction.hlsli): P[4].y = FrameResources::lightFunctions (0xFFFFFFFF: none);
+// a point or spot light's in-scattering integrand carries its function toward each quadrature point, at the froxel's
+// lateral size over the distance to the light (the function varies across the light's cone; the points sample it).
 // Particle media (smoke, fire; E's volumeMedia, request 20260925_FX_particle_render_rules 3b), main view: P[4].x = the
 // view's volumeSlices (RGBA16F gridX x gridY x 2S: slice s's media optical depth tau_p, then its self-attenuated source
 // S_p in nits before exposure; 0xFFFFFFFF: none). In each slice air and media are mixed uniformly: with J the sources per
@@ -63,6 +66,7 @@
 #include "Passes/Atmosphere/FroxelCommon.hlsli"
 #include "Passes/Shadow/VsmAir.hlsli"
 #include "Passes/Shadow/VsmLocalSample.hlsli"
+#include "Passes/Lights/LightFunction.hlsli"
 
 #define AIR_SHADOW_POINTS 24u
 groupshared float3 gs_tau[64];
@@ -93,8 +97,9 @@ float airLocalShadow(VsmLocalResources r, VsmLocalLight l, uint slot, float3 p, 
 // Air in-scattering of light l along o + dir t, t in [0, len] (nits), relative to the segment's start; shadowed by its
 // VSM when slot != VSM_LOCAL_NONE.
 float3 airLocalLight(GpuLight l, float3 o, float3 dir, float len, AirCoefficients c, float mieG, VsmLocalResources r, VsmLocalLight sl, uint slot,
-                     float width, float biasTexels)
+                     float width, float biasTexels, uint functions, uint lightIndex, float lateral)
 {
+    const bool withFunction = functions != LIGHT_FUNCTION_NONE && (lightType(l) == LIGHT_POINT || lightType(l) == LIGHT_SPOT);
     const float tc = dot(l.position - o, dir);
     // Distance of the line from the light, not below the emitter's size (1 cm for points): the point-source integrand
     // is singular on the line.
@@ -116,7 +121,8 @@ float3 airLocalLight(GpuLight l, float3 o, float3 dir, float len, AirCoefficient
         const float nu = -sin(th);  // cosine between the light's propagation (w) and the path to the camera (-dir)
         const float3 phase = c.rayleigh * airRayleighPhase(nu) + c.mie * airMiePhase(nu, mieG);
         const float visible = shadowed ? airLocalShadow(r, sl, slot, o + dir * t, width, biasTexels) : 1.0;
-        sum += visible * weight * froxelIntensity(l, w) * froxelWindow(l, d) * phase * exp(-c.extinction * max(t, 0.0));
+        const float3 f = withFunction ? lightFunction(functions, lightIndex, l.forward, l.right, w, lateral / max(d, 1e-4), g_time) : 1.0;
+        sum += visible * weight * froxelIntensity(l, w) * froxelWindow(l, d) * f * phase * exp(-c.extinction * max(t, 0.0));
     }
     return sum * (half / h) * l.color;
 }
@@ -271,7 +277,8 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
                 slot = slotOf[li];
                 if (slot != VSM_LOCAL_NONE) sl = locals[slot];
             }
-            const float3 local = airLocalLight(loadLight(li), o, dir, len, cm, a.mieG, lr, sl, slot, width, biasTexels);
+            const float3 local = airLocalLight(loadLight(li), o, dir, len, cm, a.mieG, lr, sl, slot, width, biasTexels, P[4].y, li,
+                                               froxelTileWidth(g, 0.5 * (z0 + z1)));
             source += local;
             skyTerm += local;
         }

@@ -157,11 +157,13 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     ID3D12PipelineState* pi = fc.shaders.compute("Passes/Atmosphere/FroxelIntegrate");
     // Readers per tile: the integration stops where no reader reaches (FroxelIntegrate.hlsl).
     const bool bounded = readers.valid();
+    const BufferRef functions = fc.resources.lightFunctions;  // E's light functions (A8; invalid: none)
     g.addPass("s.froxel.integrate" + suffix, QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(lights, Use::SrvCompute);
                   if (bounded) b.use(readers, Use::SrvCompute);
                   if (media.valid()) b.use(media, Use::SrvCompute);
+                  if (functions.valid()) b.use(functions, Use::SrvCompute);
                   b.use(tlut, Use::SrvCompute);
                   b.use(mlut, Use::SrvCompute);
                   b.use(volume, Use::UavCompute);
@@ -178,7 +180,8 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
               },
               [=](PassContext& ctx) {
                   uint32_t k[20] = { ctx.srv(lights), ctx.uav(volume), ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
-                                     bounded ? ctx.srv(readers) : 0xFFFFFFFFu, 0xFFFFFFFFu, media.valid() ? ctx.srv(media) : 0xFFFFFFFFu, 0, 0, 0 };
+                                     bounded ? ctx.srv(readers) : 0xFFFFFFFFu, 0xFFFFFFFFu, media.valid() ? ctx.srv(media) : 0xFFFFFFFFu,
+                                     functions.valid() ? ctx.srv(functions) : 0xFFFFFFFFu, 0, 0 };
                   if (shadows)
                   {
                       k[4] = ctx.srv(vsm.table);

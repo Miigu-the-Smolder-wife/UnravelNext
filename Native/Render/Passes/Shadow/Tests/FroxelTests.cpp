@@ -4,7 +4,9 @@
 //     truncation statistics match; lists identical over two frames;
 //  2. local lights' in-scattering by the air (sun below the horizon, lists not truncated): each node of the air volume
 //     with the lights minus without them, against a double-precision integral along the tile-centre ray (every light,
-//     fine steps, continuous air coefficients);
+//     fine steps, continuous air coefficients); then with shadows, then with light functions on the point and spot lights
+//     (A8: IES profiles over both angles, rotation, intensity and colour keys; the reference multiplies its integrand by E's
+//     CPU lights::evaluate);
 //  3. the sun's shadowed air: per slice, the in-scattering removed by a roof (volume with the roof minus without it)
 //     against the exact integral with the roof ray-cast towards the sun; slices entirely lit or entirely shadowed must
 //     match to the storage precision (the block hierarchy classifies them exactly), all slices within the
@@ -23,6 +25,10 @@
 #include "../../Atmosphere/AtmosphereSystem.h"
 #include "FroxelSystem.h"
 #include "VsmSystem.h"
+#if __has_include("unx/lights/LightFunctions.h")  // E's module (A8); without it section 2 skips its third variant
+#include "unx/lights/LightFunctions.h"
+#define FROXEL_TEST_LIGHT_FUNCTIONS 1
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -281,6 +287,7 @@ int main(int argc, char** argv)
                     ViewResources main;
                     main.view = fc.frame.mainView;
                     main.frameConstants = fc.frameConstantsFor(main.view);
+                    tracks::lightFunctions(fc);  // E (A8): FrameResources::lightFunctions (invalid when none is set)
                     tracks::atmosphere(fc);
                     raster.mainView(fc, main);
                     tracks::shadowPages(fc, main);
@@ -434,9 +441,14 @@ int main(int argc, char** argv)
 
         // ---- 2. Local lights in the air (sun below the horizon: no sun term); then the same lights casting shadows (their
         //         VSM shadows their air: the roof above them cuts their glow above it).
-        for (const bool shadowed : { false, true })
+#if defined(FROXEL_TEST_LIGHT_FUNCTIONS)
+        for (const int variant : { 0, 1, 2 })
+#else
+        for (const int variant : { 0, 1 })
+#endif
         {
-            const std::string what = shadowed ? "shadowed air of local lights" : "air in-scattering of local lights";
+            const bool shadowed = variant == 1, functions = variant == 2;
+            const std::string what = shadowed ? "shadowed air of local lights" : (functions ? "air of local lights with light functions" : "air in-scattering of local lights");
             scene::Scene sc = base;
             sc.sun.direction = normalize(float3{ 0.3f, -0.5f, 0.2f });
             for (int i = 0; i < 24; ++i)
@@ -454,10 +466,33 @@ int main(int argc, char** argv)
                 l.castShadow = shadowed;
                 sc.lights.push_back(l);
             }
+            // Light functions (variant 2) on the point and spot lights: IES profiles varying over both angles (the light's
+            // forward and right axes), rotation about forward, intensity and colour keys in time.
+#if defined(FROXEL_TEST_LIGHT_FUNCTIONS)
+            lights::LightFunctions& lfSet = lights::lightFunctions(tf.trackState);
+            std::vector<lights::LightFunction> lf(sc.lights.size());
+            if (functions)
+                for (uint32_t i = 0; i < sc.lights.size(); ++i)
+                {
+                    if (sc.lights[i].type != scene::LightType::Point && sc.lights[i].type != scene::LightType::Spot) continue;
+                    lights::LightFunction& f = lf[i];
+                    f.profile = lights::Profile::Ies;
+                    f.ies.vertical = { 0, 30, 60, 90, 120, 150, 180 };
+                    f.ies.horizontal = { 0, 90, 180, 270, 360 };
+                    for (int v = 0; v < 7; ++v)
+                        for (int h = 0; h < 5; ++h) f.ies.values.push_back(0.15f + 0.1f * ((v * 3 + (h % 4) * 5 + (int)i) % 9));
+                    f.ies.peak = 1;
+                    f.rotationSpeed = 0.2f + 0.1f * (i % 3);
+                    f.intensityKeys = { { 0, 0.7f }, { 5, 1.2f } };
+                    f.colorKeys = { { 0, 1, 0.7f, 0.5f }, { 4, 0.6f, 0.9f, 1 } };
+                    lfSet.set(i, f);
+                }
+#endif
             scene::Scene dark = sc;
             dark.lights.clear();
             run(dark, 1, -2.0f);  // night exposure: the lights' air glow is displayed
             const std::vector<uint8_t> without = lastVolume;
+            const float frameTime = (float)tf.frame.time;  // the frame the comparison reads (run advances the time after it)
             run(sc, shadowed ? 6 : 1, -2.0f);  // shadowed: steady state (a pool the local pages exhaust grows once)
             if (shadowed)
             {
@@ -493,8 +528,9 @@ int main(int argc, char** argv)
                             const ref::D3 p = camPos + dir * t;
                             const ref::Coefficients c = ref::coefficients(model, std::max(0.0, ref::altitudeOf(model, p)));
                             const ref::D3 T = ref::expNeg(tau + c.extinction * (0.5 * dt));
-                            for (const scene::Light& L : sc.lights)
+                            for (uint32_t li = 0; li < sc.lights.size(); ++li)
                             {
+                                const scene::Light& L = sc.lights[li];
                                 const ref::D3 v = p - d3(L.position);
                                 const double d = std::sqrt(ref::dot(v, v));
                                 if (d >= L.range || d < 1e-9) continue;
@@ -512,7 +548,15 @@ int main(int argc, char** argv)
                                         if (hitSegment(bx, p, d3(L.position) - p)) blocked = true;
                                     if (blocked) continue;
                                 }
-                                acc = acc + T * ph * (intensity(L, w) * window(L, d) / (dd * dd) * dt) * d3(L.color);
+                                ref::D3 fl{ 1, 1, 1 };
+#if defined(FROXEL_TEST_LIGHT_FUNCTIONS)
+                                if (lfSet.get(li))
+                                {
+                                    const float3 f = lights::evaluate(*lfSet.get(li), L.forward, L.right, float3{ (float)w.x, (float)w.y, (float)w.z }, frameTime);
+                                    fl = { f.x, f.y, f.z };
+                                }
+#endif
+                                acc = acc + T * ph * (intensity(L, w) * window(L, d) / (dd * dd) * dt) * d3(L.color) * fl;
                             }
                             tau = tau + c.extinction * dt;
                         }
@@ -538,6 +582,9 @@ int main(int argc, char** argv)
             const double meanLimit = shadowed ? 0.03 : 0.01, worstLimit = shadowed ? 0.25 : 0.03;
             report(compared > 100 && sumErr / sumRef < meanLimit, (what + " vs reference (mean relative)").c_str(), sumErr / std::max(sumRef, 1e-30), meanLimit);
             report(worst < worstLimit, (what + " vs reference (largest node)").c_str(), worst, worstLimit);
+#if defined(FROXEL_TEST_LIGHT_FUNCTIONS)
+            for (uint32_t i = 0; i < sc.lights.size(); ++i) lfSet.clear(i);
+#endif
         }
 
         // ---- 3. Sun shadows in the air: the in-scattering a caster removes (volume with it minus without it) against the

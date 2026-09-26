@@ -181,6 +181,8 @@ private:
     // The frame's light-grid slot for the header words written after record() (decals); publishes an empty grid when
     // record() had nothing to publish.
     uint8_t* lightSlot(FramePassContext& fc);
+    // E's light functions (A8) for the hits' local lights: word 20 of the frame's light-grid header.
+    void recordLightFunctions(FramePassContext& fc);
     void publishLightSlot(FramePassContext& fc);
     bool m_emittersEnabled = false;  // raytracing.emitters
     void buildStaticTlas();
@@ -199,7 +201,7 @@ private:
 
     struct Frame  // graph references of the current frame
     {
-        BufferRef tlasStatic, tlasDynamic, deformedBlas, deformedVertices, exactCounts, instances, jobs;
+        BufferRef tlasStatic, tlasDynamic, deformedBlas, deformedVertices, exactCounts, instances, jobs, lightFunctions;
     };
     Frame m_frame;
 

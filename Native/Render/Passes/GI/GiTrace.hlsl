@@ -187,7 +187,8 @@ void GiTraceGen()
             float3 local = 0;
             if ((P[3].w & 128) == 0)
             {
-                const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(seed + 11), giUnit(seed + 12), giUnit(seed + 13));
+                const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(seed + 11), giUnit(seed + 12), giUnit(seed + 13),
+                                                              hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z));  // the hit cell's footprint
                 if (ls.valid)
                 {
                     const float3 f = rtLocalLightBrdfCos(m, s.normal, -r.Direction, ls.wi, true);

@@ -36,7 +36,7 @@ void ReflectionLocalShadowGen()
     const RtSceneSrvs scene = rtScene();
     const RtSurface s = rtSurface(scene, hit, reflRayOrigin(j.s), dir);
     const uint seed = reflLocalSeed(owner);
-    const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(seed), giUnit(seed + 1), giUnit(seed + 2));
+    const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(seed), giUnit(seed + 1), giUnit(seed + 2), 0);  // the choice only
     if (!ls.valid || !ls.castShadow) return;
     if (rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition)), RT_MASK_REFLECTION))
         rays.Store(reflRaysHitOffset(slot), record.x | (1u << 30));

@@ -13,6 +13,7 @@
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Material/MaterialTextures.hlsli"
 #include "../../../Reference/GpuTracer/shared/Lights.hlsli"
+#include "Passes/Lights/LightFunction.hlsli"
 
 static uint g_rtLightData = 0xFFFFFFFFu;
 RtLight rtLightFetch(uint i)
@@ -33,16 +34,19 @@ uint rtLightCellLight(uint k)
 
 // One light sample at x: the light (index, whether it casts shadows), the direction and distance to the sampled point,
 // and L / (pdf P(light)) - the estimate's weight before the BRDF, cosine and visibility. valid = false: no light's range
-// reaches x (or the sample has no contribution).
+// reaches x (or the sample has no contribution). Point and spot lights carry E's light function (A8, LightFunction.hlsli;
+// word 20 of the grid header, 0xFFFFFFFF: none) toward x, at the angular footprint footprintWidth / distance (the hit's ray
+// cone width, or larger for coarse GI hits); it multiplies the weight (the light choice is unchanged: still unbiased).
 struct RtLocalSample
 {
     bool valid;
     bool castShadow;
+    uint light;  // the scene light sampled
     float3 wi;
     float distance;
     float3 weight;
 };
-RtLocalSample rtLocalLightSample(RtSceneSrvs scene, float3 x, float u0, float u1, float u2)
+RtLocalSample rtLocalLightSample(RtSceneSrvs scene, float3 x, float u0, float u1, float u2, float footprintWidth)
 {
     RtLocalSample o = (RtLocalSample)0;
     if (scene.pad == 0xFFFFFFFFu) return o;
@@ -60,9 +64,12 @@ RtLocalSample rtLocalLightSample(RtSceneSrvs scene, float3 x, float u0, float u1
     if (!rtLightSample(l, x, u1, u2, s) || !(s.pdf > 0)) return o;
     o.valid = true;
     o.castShadow = l.castShadow != 0;
+    o.light = li;
     o.wi = s.wi;
     o.distance = s.distance;
     o.weight = s.L / (s.pdf * probability);
+    if (l.type == kRtLightPoint || l.type == kRtLightSpot)
+        o.weight *= lightFunction(b.Load(80), li, l.forward, l.right, -s.wi, footprintWidth / max(s.distance, 1e-4), g_time);
     return o;
 }
 

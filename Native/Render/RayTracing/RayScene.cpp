@@ -1504,6 +1504,7 @@ void RayScene::record(FramePassContext& fc)
     m_changes = std::move(m_buildChanges);
     m_buildChanges.clear();
     updateLightGrid(fc);
+    recordLightFunctions(fc);  // after the grid slot exists (word 20)
     m_frame.tlasStatic = g.importBuffer(m_tlasStatic.resource.Get(), { "RT static TLAS", m_tlasStatic.bytes, 0 });
     m_frame.tlasDynamic = g.importBuffer(m_tlasDynamic.resource.Get(), { "RT dynamic TLAS", m_tlasDynamic.bytes, 0 });
     fc.resources.tlasStatic = m_frame.tlasStatic;
@@ -1687,6 +1688,7 @@ void RayScene::declareTraversal(PassBuilder& b) const
     b.use(m_frame.tlasDynamic, Use::AccelerationStructureRead);
     if (m_frame.deformedBlas.valid()) b.use(m_frame.deformedBlas, Use::AccelerationStructureRead);
     if (m_frame.deformedVertices.valid()) b.use(m_frame.deformedVertices, Use::SrvGraphics);
+    if (m_frame.lightFunctions.valid()) b.use(m_frame.lightFunctions, Use::SrvGraphics);  // the hits' local lights (A8)
 }
 
 void RayScene::recordStaticTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs)
@@ -1770,9 +1772,10 @@ struct RtLightHeader
     uint32_t dim[3], pad[2];
     uint32_t lightsOffset, cellStartOffset, cellLightsOffset, pad2;
     uint32_t decal[4];  // words 16..19, per frame (RayScene::recordDecals; HitDecals.hlsli): TLAS, frames, texture table, count
+    uint32_t functions[4];  // word 20, per frame: E's light functions (FrameResources::lightFunctions, A8), 0xFFFFFFFF none
 };
-static_assert(sizeof(RtLightHeader) == 80);
-constexpr uint32_t kLightDecalOffset = 64;
+static_assert(sizeof(RtLightHeader) == 96);
+constexpr uint32_t kLightDecalOffset = 64, kLightFunctionOffset = 80;
 constexpr uint32_t kLightCellsMax = 1u << 18;  // the grid's cell size grows past this many cells (262,144 x 4 B starts)
 } // namespace
 
@@ -1977,6 +1980,7 @@ void RayScene::updateLightGrid(FramePassContext& fc)
         head.pad2 = m_emissiveSrv;  // word 15: emissive triangles (0xFFFFFFFF: none)
         head.decal[0] = 0xFFFFFFFFu;  // no decals until recordDecals writes them this frame
         head.decal[3] = 0;
+        head.functions[0] = 0xFFFFFFFFu;
         head.lightsOffset = sizeof(RtLightHeader);
         head.cellStartOffset = head.lightsOffset + (uint32_t)(std::max<size_t>(n, 1) * sizeof(RtLightRecord));
         head.cellLightsOffset = head.cellStartOffset + (uint32_t)(cellStart.size() * 4);
@@ -2049,6 +2053,8 @@ void RayScene::publishLightSlot(FramePassContext& fc)
     // Words 16..19, every frame: no decals unless recordDecals writes them after this (a slot keeps an earlier frame's).
     const uint32_t noDecals[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0 };
     std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes + kLightDecalOffset, noDecals, sizeof noDecals);
+    const uint32_t noFunctions = 0xFFFFFFFFu;
+    std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes + kLightFunctionOffset, &noFunctions, 4);
     m_lightSrvNow = m_lightRingSrv[slot];
 }
 
@@ -2185,6 +2191,26 @@ void RayScene::recordDecals(FramePassContext& fc, const ViewResources& main)
               });
     m_decalFrames = frames;
     m_decalTlasRef = tlas;
+}
+
+void RayScene::recordLightFunctions(FramePassContext& fc)
+{
+    m_frame.lightFunctions = {};
+    const BufferRef functions = fc.resources.lightFunctions;
+    if (!functions.valid() || m_lightSrvNow == 0xFFFFFFFFu) return;  // none, or no local lights to apply them to
+    m_frame.lightFunctions = functions;
+    uint8_t* word = m_lightRingMapped + (fc.frame.frameIndex % kDescSlots) * m_lightSlotBytes + kLightFunctionOffset;
+    // The table's SRV exists when a pass executes: this one writes it into the frame's header slot (frames in flight <=
+    // kDescSlots) before the hit passes run.
+    fc.graph.addPass("r.lights.functions", QueueType::Compute,
+                     [&](PassBuilder& b) {
+                         b.use(functions, Use::SrvGraphics);
+                         b.keep();
+                     },
+                     [word, functions](PassContext& c) {
+                         const uint32_t srv = c.srv(functions);
+                         std::memcpy(word, &srv, 4);
+                     });
 }
 
 void RayScene::declareDecals(PassBuilder& b) const

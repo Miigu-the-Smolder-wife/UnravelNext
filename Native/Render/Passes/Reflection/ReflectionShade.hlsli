@@ -119,7 +119,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     RtHitLighting L;
     L.irradiance = L.specularRadiance = L.local = 0;
     {
-        const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(localSeed), giUnit(localSeed + 1), giUnit(localSeed + 2));
+        const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(localSeed), giUnit(localSeed + 1), giUnit(localSeed + 2), footprint);
         if (ls.valid)
         {
             const float3 f = rtLocalLightBrdfCos(m, s.normal, -direction, ls.wi, false);
