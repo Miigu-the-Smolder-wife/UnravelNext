@@ -691,6 +691,19 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch(tilesX, tilesY, 1);
               });
+    g.addPass("r.refl.jobs", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(modes, Use::UavCompute);
+                  b.use(jobs, Use::UavCompute);
+                  b.use(args, Use::UavCompute);
+                  b.use(reflection, Use::UavCompute);
+              },
+              [&shaders, modes, jobs, args, reflection, width, height, tilesX, tilesY](PassContext& c) {
+                  const uint32_t k[12] = { c.uav(modes), c.uav(jobs), c.uav(args), 0, width, height, tilesX, tilesY, c.uav(reflection), height, 0, 0 };
+                  c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionJobs"));
+                  c.computeConstants(k, 12);
+                  c.cmd->Dispatch(tilesX, tilesY, 1);
+              });
     // Mask aprons (v1.28): 3 x 3 dilation of each view's mirror pixels as value 2, tile masks from the dilated masks.
     for (uint32_t v = 0; v < planar.views; ++v)
     {

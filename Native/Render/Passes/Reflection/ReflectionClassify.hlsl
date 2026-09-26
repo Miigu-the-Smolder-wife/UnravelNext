@@ -3,9 +3,16 @@
 // (M's reflectionLobeTiles, INTERFACES v1.3) is at least the K threshold are all K and exit at once; without that input
 // every tile is classified. Per pixel:
 //   K  reflectionLobeHalfAngle(r, NoV) >= reflection.cache_lobe_half_angle_min_deg      -> no rays (M evaluates it)
-//   M  roughness < reflection.mirror_roughness_max, or the lobe's screen blur < 1 px     -> 1 ray (a job)
-//   G  otherwise: blur_px = (d_r / d_view) * lobe * focal_px; spacing s = pow2 clamp(blur / 3, 1, 8); a job at every
-//      pixel of the global s-grid (4 rays), the tile's other G pixels interpolate (ReflectionResolve).
+//   M  roughness < reflection.mirror_roughness_max                                       -> 1 ray (a job)
+//   G  otherwise: blur_px = (d_r / d_view) * lobe * focal_px; spacing s = pow2 clamp(blur / 3, 1, 8) (blur < 3 px: s = 1,
+//      the pixel's own 4-ray job - a sub-pixel blur says nothing about the lobe's angular integral, which a single ray
+//      does not resolve: M's one ray was a biased ratio estimate there, +16 % near walls [measured]), interpolated from
+//      the corners of its cell on the grid of multiples of s (ReflectionResolve); ReflectionJobs puts a job (4 rays) on
+//      every pixel a neighbour needs as a corner (nested grids). (Offset grids s/2 + i s per spacing left pixels whose
+//      corners wanted another spacing without a value: K fallback and a lost history - a fixed speckle where d_r varies,
+//      e.g. near an occluder.)
+//      A G pixel whose corners all disagreed last frame (object edges: d_r < 0 in the history, ReflectionResolve) gets
+//      its own job (REFL_SELF) until its grid would serve it again.
 // d_r is last frame's reflection hit distance at the pixel (0 before any: s = 1, the conservative choice).
 // Jobs are appended with one atomic per wave. The tile's validity texel is set when any pixel is M or G.
 //
@@ -111,9 +118,18 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
             const float lobe = reflectionLobeHalfAngle(s.roughness, dot(s.normal, s.view));
             if (lobe < kThreshold)
             {
-                const float dr = history.Load(int3(pixel, 0));
+                const float hd = history.Load(int3(pixel, 0));
+                const float dr = abs(hd);
                 const float blur = dr / max(s.linearDepth, 1e-4) * lobe * asfloat(P[2].z);
-                if (s.roughness < asfloat(P[2].y) || blur < 1)
+                if (s.roughness >= asfloat(P[2].y) && hd < 0)
+                {
+                    // A G pixel whose grid corners all disagreed last frame (its distance may be a placeholder): its own
+                    // G job, not the mirror path's single ray.
+                    mode = REFL_G | REFL_SELF;
+                    spacingLog2 = (uint)clamp(floor(log2(max(blur / 3, 1.0))), 0.0, (float)P[4].y);
+                    job = true;
+                }
+                else if (s.roughness < asfloat(P[2].y))
                 {
                     mode = REFL_M;
                     job = true;
@@ -122,8 +138,6 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
                 {
                     mode = REFL_G;
                     spacingLog2 = (uint)clamp(floor(log2(max(blur / 3, 1.0))), 0.0, (float)P[4].y);
-                    const uint sp = 1u << spacingLog2;
-                    job = all((pixel % sp) == sp / 2);  // on the global s-grid (s = 1: every pixel)
                 }
             }
         }
@@ -135,7 +149,8 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
     base = WaveReadLaneFirst(base);
     const uint index = job ? base + WavePrefixCountBits(job) : REFL_NO_JOB;
     // Statistics (bytes 4, 8, 12 of the argument buffer): M jobs, G jobs, G pixels.
-    const uint mJobs = WaveActiveCountBits(job && mode == REFL_M), gJobs = WaveActiveCountBits(job && mode == REFL_G), gPixels = WaveActiveCountBits(mode == REFL_G);
+    const uint mJobs = WaveActiveCountBits(job && mode == REFL_M), gJobs = WaveActiveCountBits(job && reflMode(mode) == REFL_G),
+               gPixels = WaveActiveCountBits(reflMode(mode) == REFL_G);
     if (WaveIsFirstLane())
     {
         if (mJobs) counter.InterlockedAdd(4, mJobs);

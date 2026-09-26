@@ -5,12 +5,14 @@
 #include "GBuffer.hlsli"
 
 // Per-pixel reflection mode texture (R32_UINT, written by ReflectionClassify in tiles that need rays):
-//   bits 0-1 mode (REFL_K, REFL_M, REFL_G), bits 2-4 log2 of the G sample spacing, bits 8-31 job index (REFL_NO_JOB).
+//   bits 0-1 mode (REFL_K, REFL_M, REFL_G), bits 2-4 log2 of the G sample spacing, bit 5 REFL_SELF (a G pixel with its
+//   own job: its grid samples all disagreed last frame), bits 8-31 job index (REFL_NO_JOB).
 #define REFL_K 0u
 #define REFL_M 1u
 #define REFL_G 2u
 #define REFL_PLANAR 3u  // planar mirror pixel: the reflection camera's colour (plane index in the spacing bits)
 #define REFL_NO_JOB 0xFFFFFFu
+#define REFL_SELF (1u << 5)
 
 uint reflPackMode(uint mode, uint spacingLog2, uint job) { return mode | (spacingLog2 << 2) | (job << 8); }
 uint reflMode(uint v) { return v & 3u; }
