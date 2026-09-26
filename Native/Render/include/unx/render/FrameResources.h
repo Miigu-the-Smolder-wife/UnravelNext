@@ -4,6 +4,8 @@
 #include "unx/render/GraphTypes.h"
 #include "unx/render/ViewDesc.h"
 
+#include <vector>
+
 namespace unx::render
 {
 // Per-view products (graph resources of the current frame). Producer in brackets.
@@ -88,6 +90,22 @@ struct ViewResources
     TextureRef color;              // final colour target of this view                      [M]
 };
 
+// A triangle stream the GPU makes in the frame (INTERFACES v1.60; W's water surface and fluid surface, request
+// 20260926_W_gpu_triangle_stream): V draws it into the main view's coverage layer as see-through records (band A keeps
+// what lies beneath). Non-indexed triangles, 32 B per vertex: (world position, 1), (normal, 0), counter-clockwise seen
+// from outside; the triangle count is 1/3 of drawArgs' vertex count (D3D12_DRAW_ARGUMENTS, written on the GPU), at most
+// maxTriangles (the vertex buffer's capacity: V's dispatch covers it). velocities (optional, float4 per vertex, world m/s):
+// M's motion (previous position = position - velocity x delta time).
+struct TriangleStream
+{
+    BufferRef vertices, drawArgs, velocities;
+    uint32_t material = 0;              // scene material (M's Water class)
+    uint32_t instance = 0xFFFFFFFFu;    // scene instance it belongs to, or none
+    uint32_t maxTriangles = 0;
+    float3 boundsMin{}, boundsMax{};    // world AABB (culling)
+};
+constexpr uint32_t kMaxTriangleStreams = 64;  // vis id slot bits (CoverageTiles.hlsli COV_STREAM_ID)
+
 // View-independent products of the current frame. Persistent state (VSM pool, GI cache, TLAS) is imported into the
 // graph each frame by its owner.
 struct FrameResources
@@ -139,6 +157,8 @@ struct FrameResources
     // Strand hair (E's Passes/Hair, unx/hair/Hair.h; invalid = no hair): the frame's follow-strand segments (2 float4 each:  [E]
     // camera-relative p0, r0; p1, r1; r = 0 left out by LOD) and the bodies' header (raw) for V's coverage layer and M.
     BufferRef hairSegments, hairBodies;
+    // GPU triangle streams of this frame (W, before V: tracks::waterGeometry; V's coverage layer, v1.60).  [W]
+    std::vector<TriangleStream> triangleStreams;
     // Light functions (E's Passes/Lights LightFunction.hlsli, A8; invalid = no light has one): cookies, IES, gobos,  [E]
     // flicker and animation per light index. Every reader of a light's emission (M shading, S froxel in-scattering, R
     // hit shading and GI) multiplies it by lightFunction(srv, light, forward, right, dir, footprint, g_time) (raw).

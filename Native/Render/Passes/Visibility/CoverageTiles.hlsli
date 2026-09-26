@@ -63,9 +63,14 @@ struct CoverageFragment  // 16 B
 // FrameResources::hairSegments (E: 2 float4 per segment; its body from FrameResources::hairBodies), the normal bits hold
 // the strand coordinate u (root 0, tip 1) as unorm16; M rebuilds the tangent from p1 - p0. Every other vis id has bit 31
 // clear (VisBuffer.hlsli packVisId stays below 2^31).
-#define COV_HAIR_ID 0x80000000u
-bool coverageFragmentIsHair(CoverageFragment f) { return (f.visId & COV_HAIR_ID) != 0; }
-uint coverageFragmentHairSegment(CoverageFragment f) { return f.visId & ~COV_HAIR_ID; }
+#define COV_HAIR_ID 0x80000000u    // top bits 10: hair, segment in bits 0..29
+#define COV_STREAM_ID 0xC0000000u  // top bits 11: GPU triangle stream (v1.60), slot in bits 24..29, triangle in 0..23
+bool coverageFragmentIsHair(CoverageFragment f) { return (f.visId >> 30) == 2u; }
+uint coverageFragmentHairSegment(CoverageFragment f) { return f.visId & 0x3FFFFFFFu; }
+// Stream records (FrameResources::triangleStreams, W): see-through, the normal bits hold the interpolated vertex normal.
+bool coverageFragmentIsStream(CoverageFragment f) { return (f.visId >> 30) == 3u; }
+uint coverageFragmentStreamSlot(CoverageFragment f) { return (f.visId >> 24) & 0x3Fu; }
+uint coverageFragmentStreamTriangle(CoverageFragment f) { return f.visId & 0xFFFFFFu; }
 float coverageFragmentHairU(CoverageFragment f) { return (f.packed & 0xFFFFu) / 65535.0; }
 uint coveragePackHair(float u, float area, uint pixelInTile)
 {

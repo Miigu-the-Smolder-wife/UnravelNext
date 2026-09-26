@@ -1,0 +1,4 @@
+V: instance hierarchy: 1 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+    14146 stream records, area 13781.250 px^2 vs exact 13781.252 (rounding bound 6.914), 0 not see-through, 0 with a wrong slot or triangle
+PASS stream_records_are_exact
+1/1 passed

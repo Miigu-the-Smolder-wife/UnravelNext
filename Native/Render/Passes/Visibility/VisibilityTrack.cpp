@@ -1291,6 +1291,51 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       if (groups > 0) c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
                   });
     }
+    // GPU triangle streams (W's water and fluid surfaces, FrameResources::triangleStreams, v1.60): see-through records, one
+    // mesh group per 32 triangles of each stream's capacity (the live count comes from its draw arguments on the GPU).
+    const std::vector<TriangleStream>& streams = fc.resources.triangleStreams;
+    if (streams.size() > kMaxTriangleStreams) fail("V: %zu triangle streams (at most %u)", streams.size(), kMaxTriangleStreams);
+    for (uint32_t slot = 0; slot < (uint32_t)streams.size(); ++slot)
+    {
+        const TriangleStream st = streams[slot];
+        if (!st.vertices.valid() || !st.drawArgs.valid() || st.maxTriangles == 0) continue;
+        if (st.maxTriangles > (1u << 24)) fail("V: triangle stream %u holds %u triangles (at most 2^24)", slot, st.maxTriangles);
+        if (g.desc(st.vertices).size < (uint64_t)st.maxTriangles * 96) fail("V: triangle stream %u: vertex buffer below %u triangles", slot, st.maxTriangles);
+        const uint32_t groups = (st.maxTriangles + 31) / 32;
+        MeshPipelineDesc sd = d;
+        sd.meshShader = "Passes/Visibility/StreamRaster.ms";
+        ID3D12PipelineState* streamPso = fc.shaders.mesh("v.coverage.stream.stage" + std::to_string(r.cfg.coverageDebugStage), sd);
+        g.addPass("v.coverage.stream", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(st.vertices, Use::SrvGraphics);
+                      b.use(st.drawArgs, Use::SrvGraphics);
+                      b.use(run.state, Use::UavGraphics);
+                      b.use(stream, Use::UavGraphics);
+                      b.use(keys, Use::UavGraphics);
+                      if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
+                  },
+                  [=](PassContext& c) {
+                      uint32_t k[26];
+                      constants(c, k, 0, false);  // the stream inputs take P[3].xyz
+                      k[3] = c.uav(stream);
+                      k[4] = c.uav(keys);
+                      if (!hiz.valid()) k[8] = kNone;
+                      k[12] = c.srv(st.vertices);
+                      k[13] = c.srv(st.drawArgs);
+                      k[14] = st.maxTriangles;
+                      k[24] = slot;
+                      k[25] = st.material;
+                      c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+                      const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
+                      const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
+                      c.cmd->RSSetViewports(1, &vp);
+                      c.cmd->RSSetScissorRects(1, &sc);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->SetPipelineState(streamPso);
+                      c.graphicsConstants(k, 26);
+                      c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
+                  });
+    }
     build("args", 2, 1, 1, 0, kUseArgs);
     build("count", 6, 0, 0, kArgCovRecords, kUseList | kUseTiles | kUseCounters | kUseStream);
     build("scan", 7, 1, 1, 0, kUseList | kUseTiles | kUseScratch);

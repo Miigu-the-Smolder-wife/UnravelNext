@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.59, 2026-09-26)
+# UnravelNext 인터페이스 (v1.60, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -733,6 +733,8 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.55 (2026-09-26, E A8 광원 함수):
   - **`FrameResources::lightFunctions`(raw, 무효 = 광원 함수 없음)와 `tracks::lightFunctions`(prepareScene 직후)**: E의 `Passes/Lights`가 광원 인덱스(`GpuScene::setLights` 순서)마다 쿠키·IES·고보·회전·세기/색 키·깜빡임을 담은 표와 이미지(RGBA16F, 상자 필터 밉)를 올린다. 광원 방출을 읽는 모든 곳(M 셰이딩, S 프록셀 산란, R 적중 셰이딩·GI)은 광원 기여에 `LightFunction.hlsli`의 `lightFunction(srv, light, forward, right, dir, footprint, g_time)`(rgb)을 곱한다. 무효면 `LIGHT_FUNCTION_NONE`을 넘기고 1을 받는다. footprint는 광원에서 본 수신면 발자국 각(라디안)이고, 0이면 가장 선명한 밉을 쓴다. 그림자(VSM)는 f와 무관하다. 표는 바뀔 때만 새 버퍼로 올리고, 이미지는 바뀐 광원만 다시 올린다.
   - **IES 가져오기 `lights::parseIes`**: LM-63, TILT=NONE, C형. 배수 × 안정기 계수를 곱하고 최댓값으로 나누며(광원 세기 = 최대 칸델라), 대칭 0, 0..90, 0..180, 0..360, 90..270을 받는다. [실측] `unx_test_lights_lightfunctiontests`: GPU와 CPU 기준의 차이는 4096 질의에서 IES 4.8e-7, 시간 함수 2.4e-7, 쿠키·고보 7.7e-4(반정밀 텍셀과 필터 분수)였고 불연속 질의는 0이었다. 1텍셀 줄무늬를 8텍셀 발자국으로 보면 평균 0.5가 나왔다.
+- v1.60 (2026-09-26, 렌더 C, W 요청 `20260926_W_gpu_triangle_stream.md` — W 동의):
+  - **GPU 삼각형 스트림**: `render::TriangleStream`{vertices(raw, 32 B: 월드 (xyz,1), (법선,0), 색인 없음, CCW), drawArgs(D3D12_DRAW_ARGUMENTS, GPU가 씀), velocities(선택, float4 월드 m/s: M의 움직임 prev = pos − v·Δt), material, instance, maxTriangles(≤ 2^24, V dispatch 상한), boundsMin/Max}, `FrameResources::triangleStreams`(≤ `kMaxTriangleStreams` = 64; W가 V 앞 `tracks::waterGeometry`에서 채움 — 자리는 A). V의 `StreamRaster.ms`가 용량의 32개 묶음마다 메시 그룹 하나(살아 있는 수 = 인자 정점 수 / 3)로 삼각형을 대역 B 픽셀 커널에 보내 **투과 기록**(COV_DEPTH_SEE_THROUGH)을 만든다: 정확 면적·마스크·중심 깊이·보간 법선, 양면. 대역 A(수중)는 그대로다. vis id: 최상위 두 비트 11 = 스트림, 비트 24–29 슬롯, 0–23 삼각형(`coverageFragmentIsStream/StreamSlot/StreamTriangle`); 머리카락은 10(`coverageFragmentIsHair`가 두 비트로 판정). coverage_layer가 켜져 있어야 그려진다.
 - v1.59 (2026-09-26, 렌더 C, B10 머리카락 V 몫; 요청 `20260926_E_hair_strands.md`):
   - **coverage 층의 가닥 머리카락**: V의 `HairRaster.ms`가 `FrameResources::hairSegments`(E)의 세그먼트마다 카메라를 향한 띠(폭 2r, 끝 캡 없음)를 삼각형 둘로 대역 B 픽셀 커널에 보낸다(픽셀 ∩ 띠의 정확한 면적, 32 부표본 마스크, 덮인 영역 중심의 깊이). 기록: vis id = `COV_HAIR_ID`(0x80000000) | 세그먼트 번호, 법선 비트 = u(뿌리 0 → 끝 1, unorm16). 판독 도우미 `coverageFragmentIsHair/HairSegment/HairU`(CoverageTiles.hlsli). M은 접선을 p1 − p0에서 다시 얻는다. 품질 키 `visibility.coverage_hair`(기본 false: M이 머리카락 기록을 읽기 전까지 기록을 내지 않음; coverage_layer와 함께). 조건: 굽는 곳의 바깥 쐐기 틈·안쪽 겹침 ≈ w² × 각도 / 2, 카메라를 향하는 세그먼트는 빠짐. 대역 C 가닥 브릭은 아직 없다(E의 LOD가 픽셀당 2가닥을 넘지 않게 함).
 - v1.58 (2026-09-26, 렌더 C, A3 메시 입자 경계 — A와 합의):
