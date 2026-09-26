@@ -20,6 +20,7 @@ struct MeshPipelineDesc
     D3D12_CULL_MODE cull = D3D12_CULL_MODE_BACK;
     bool frontCounterClockwise = true;  // false for mirrored (planar reflection) views
     bool conservative = false;
+    bool premultipliedBlend = false;  // render target 0: rgb = src.rgb + dst.rgb (1 - src.a), a = src.a + dst.a (1 - src.a)
 };
 
 struct PipelineStats

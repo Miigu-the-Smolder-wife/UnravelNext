@@ -115,6 +115,14 @@ ID3D12PipelineState* ShaderLibrary::mesh(const std::string& name, const MeshPipe
     for (size_t i = 0; i < desc.renderTargets.size(); ++i) s.rts.value.RTFormats[i] = desc.renderTargets[i];
     s.dsFormat.value = desc.depthFormat;
     for (auto& rt : s.blend.value.RenderTarget) rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (desc.premultipliedBlend)
+    {
+        D3D12_RENDER_TARGET_BLEND_DESC& rt = s.blend.value.RenderTarget[0];
+        rt.BlendEnable = TRUE;
+        rt.SrcBlend = rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+        rt.DestBlend = rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+        rt.BlendOp = rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    }
     s.sample.value = { 1, 0 };
     s.mask.value = UINT_MAX;
     D3D12_PIPELINE_STATE_STREAM_DESC sd{ sizeof s, &s };

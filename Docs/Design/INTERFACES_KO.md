@@ -725,6 +725,10 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.50 (2026-09-26, E A15; v1.47–1.49 are other tracks' open changes):
+  - **디버그 드로우(FEATURES_GAME 7.1, E `Passes/Debug`)**: `FrameConstants::debugDraw`(옛 `spare0`, HLSL `g_debugDraw`) = 이번 프레임 디버그 원시형 버퍼의 UAV, 0xFFFFFFFF = 꺼짐(`GpuScene::fill`이 꺼짐으로 두고 `FrameRenderer`가 `tracks::debugBegin`의 값을 넣는다). 어느 커널이든 `Passes/Debug/DebugDraw.hlsli`의 `debugLine/debugPoint/debugTriangle/debugBox/debugNumber`로 덧붙인다(그래픽 큐 패스는 선언 없이 그려진다: 그리기 패스가 전역 배리어로 시작; 비동기 계산 큐 패스는 `debug::buffer(fc)`를 UAV로 선언). `Tracks.h`: `debugBegin`(프레임 처음, 프레임 상수보다 먼저), `debugOverlay`(프레임 끝: `debug.view` 버퍼 시각화 → 원시형 → HUD를 view.color 위에).
+  - **`MeshPipelineDesc::premultipliedBlend`(core)**: 렌더 타깃 0에 미리 곱한 알파 혼합(src + dst (1 − src.a)).
+  - **`FrameContext::timing`(I가 채움)**: 직전 완료 프레임의 `GpuProfiler::lastCompleted()`, 품질 키 `debug.hud`가 패스별 ms를 그린다. null이면 HUD가 없다고 적는다.
 - v1.46 (2026-09-26):
   - **HDR 디스플레이 출력(5.5, A4)**: `FrameContext::displayPeak`는 0이면 SDR이고(주 뷰 색은 R10G10B10A2, 톤 커브 뒤 sRGB), 1 이상이면 디스플레이 최고 휘도 ÷ 종이 흰색이다. 이때 주 뷰 색은 R16G16B16A16 FLOAT이고, 봉우리에 맞춰 일반화한 커브(M `shPbrNeutralPeak`, 1에서 SDR 커브와 같다)를 거친 디스플레이 기준 선형 Rec.709 빛(1 = 종이 흰색)을 담는다. 인코딩(scRGB, PQ)은 호스트가 한다. 호스트 ABI는 `UnxFrameDesc::displayPeak`로, 옛 `reserved` 자리(0)라 옛 호스트는 SDR을 받는다. 선택 export `UnxRendererQualityOverride`(commit 전 품질 덮어쓰기)도 이때 더했다.
 - v1.45 (2026-09-26):

@@ -6,6 +6,8 @@
 
 namespace unx::render
 {
+struct FrameTiming;
+
 struct FrameContext
 {
     uint64_t frameIndex = 0;
@@ -36,6 +38,9 @@ struct FrameContext
     // display-referred linear Rec.709 light, 1 = paper white, after the tone curve generalised to that peak (M, Post.cpp;
     // at 1 exactly the SDR curve); the host encodes it for the swap chain.
     float displayPeak = 0;
+    // v1.50 (A15, E): GPU pass timings of the last completed frame (GpuProfiler::lastCompleted), shown by the debug HUD
+    // (quality key debug.hud); null = no timings (the HUD says so). The host keeps it valid until record() returns.
+    const FrameTiming* timing = nullptr;
 };
 constexpr uint32_t kGpuSimulationSoft = 1, kGpuSimulationVfx = 2, kGpuSimulationRigid = 4;
 constexpr uint32_t kDiscontinuityRestore = 1, kDiscontinuityCut = 2;

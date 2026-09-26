@@ -202,7 +202,9 @@ struct FrameConstants
                                                                                  // specularAlbedoLut: (A, B) table (8.1, v1.25)
     // v1.34: coverageMaskLut: edge half-plane masks for coverageTriangleMaskLut (Coverage.hlsli, 5.5.1); giRaysThisFrame:
     // this frame's share of gi.rays_per_tick (10.3 of the design revision; 0 until the renderer hands it out).
-    uint32_t coverageMaskLut, giRaysThisFrame, spare0, spare1;
+    // v1.50 (A15, E): debugDraw: UAV of this frame's debug primitive buffer (Passes/Debug/DebugDraw.hlsli: debugLine,
+    // debugTriangle, debugText append to it from any kernel); 0xFFFFFFFF = debug drawing off (appends are no-ops).
+    uint32_t coverageMaskLut, giRaysThisFrame, debugDraw, spare1;
 };
 static_assert(sizeof(FrameConstants) == 544);
 } // namespace unx::render::gpu

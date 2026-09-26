@@ -806,7 +806,8 @@ void GpuScene::fill(gpu::FrameConstants& f) const
     f.specularAlbedoLut = m_specularTable.srv;
     f.coverageMaskLut = m_coverageTable.srv;
     f.giRaysThisFrame = 0;
-    f.spare0 = f.spare1 = 0;
+    f.debugDraw = 0xFFFFFFFFu;  // off; FrameRenderer sets E's debug buffer (FrameRenderer::allocateFrameConstants)
+    f.spare1 = 0;
     f.instanceCount = (uint32_t)m_instances.size();
     f.meshCount = (uint32_t)m_meshes.size();
     f.clusterCount = m_clusterBuffer.count;

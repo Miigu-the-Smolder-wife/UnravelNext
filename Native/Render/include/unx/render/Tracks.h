@@ -62,4 +62,11 @@ void reflections(FramePassContext& fc, ViewResources& main);      // K/G/M rays,
 TextureRef volumeMedia(FramePassContext& fc, ViewResources& main, BufferRef froxelLights);
 // Heat haze of a view (FEATURES_GAME 0.A-8): after particles(); writes view.distortionOffset and distortionDepth.
 void distortion(FramePassContext& fc, ViewResources& view);
+// E (A15, FEATURES_GAME 7.1): debug drawing. debugBegin runs first in the frame (before any frame constants): it opens
+// this frame's debug primitive buffer when debug drawing is on (quality debug.draw / debug.hud / debug.view, or CPU
+// primitives queued in debug::drawList) and returns its UAV for FrameConstants::debugDraw (0xFFFFFFFF = off).
+uint32_t debugBegin(FramePassContext& fc);
+// Last in the frame: the buffer visualization (debug.view, replaces the view's colour), then the debug primitives
+// (CPU and GPU appends) and the HUD drawn over view.color.
+void debugOverlay(FramePassContext& fc, ViewResources& view);
 } // namespace unx::render::tracks

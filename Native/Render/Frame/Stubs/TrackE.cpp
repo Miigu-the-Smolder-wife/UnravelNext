@@ -6,4 +6,6 @@ namespace unx::render::tracks
 {
 TextureRef volumeMedia(FramePassContext&, ViewResources&, BufferRef) { pending("E.volumeMedia (track disabled in this build)"); return {}; }
 void distortion(FramePassContext&, ViewResources&) { pending("E.distortion (track disabled in this build)"); }
+uint32_t debugBegin(FramePassContext&) { pending("E.debugBegin (track disabled in this build)"); return 0xFFFFFFFFu; }
+void debugOverlay(FramePassContext&, ViewResources&) { pending("E.debugOverlay (track disabled in this build)"); }
 } // namespace unx::render::tracks

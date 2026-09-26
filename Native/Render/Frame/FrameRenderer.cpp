@@ -110,7 +110,8 @@ D3D12_GPU_VIRTUAL_ADDRESS FrameRenderer::allocateFrameConstants(const FrameConte
     }
     if (m_slotViews >= kMaxViewsPerFrame) fail("FrameRenderer: more than %u views in one frame", kMaxViewsPerFrame);
     const uint64_t offset = ((frame.frameIndex % m_framesInFlight) * kMaxViewsPerFrame + m_slotViews++) * 1024;
-    const gpu::FrameConstants c = frameConstants(m_scene, frame, view);
+    gpu::FrameConstants c = frameConstants(m_scene, frame, view);
+    c.debugDraw = m_debugDraw;
     std::memcpy(m_mapped + offset, &c, sizeof c);
     return m_constants->GetGPUVirtualAddress() + offset;
 }
@@ -165,6 +166,8 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     FrameServices services;
     FramePassContext fc{ m_device, graph, m_shaders, m_quality, m_scene, frame, resources, services,
                          [this, &frame](const ViewDesc& v) { return allocateFrameConstants(frame, v); }, &m_trackState, m_framesInFlight };
+    m_debugDraw = 0xFFFFFFFFu;
+    m_debugDraw = tracks::debugBegin(fc);  // E (A15): before any frame constants, which carry its buffer
     // Scene textures into the material records before any frame constants (they carry the material buffer's SRV).
     tracks::prepareScene(fc);
     services.rasterizeDepth = [](FramePassContext& c, const DepthRasterRequest& r) { tracks::rasterizeDepth(c, r); };
@@ -203,6 +206,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::distortion(fc, main);
     tracks::shadowVisibility(fc, main);
     tracks::shading(fc, main);
+    tracks::debugOverlay(fc, main);  // E (A15): buffer visualization, debug primitives, HUD over the final colour
     return main;
 }
 } // namespace unx::render

@@ -39,5 +39,6 @@ private:
     uint64_t m_slotFrame = UINT64_MAX;
     TrackState m_trackState;
     float m_lastEv100 = 0;
+    uint32_t m_debugDraw = 0xFFFFFFFFu;  // this frame's FrameConstants::debugDraw (tracks::debugBegin)
 };
 } // namespace unx::render
