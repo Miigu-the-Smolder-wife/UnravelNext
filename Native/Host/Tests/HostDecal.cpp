@@ -8,13 +8,19 @@
 //      blue, the floor inside that volume stays grey (instance rule), the box's sides (normal at 90 degrees to the
 //      decal's +Z) stay grey (angle fade);
 //   3. the frame without decals is grey everywhere (no decal pass effect when none is live);
-//   4. no D3D12 debug-layer errors.
+//   4. host edits (HostRenderer::decalAdd / decalUpdate / decalRemove, the UnxDecal* path; the render thread gets a
+//      snapshot with the next frame): the world decal removed and the box's decal changed to the red material at full
+//      opacity - the floor is grey again, the box top red;
+//   5. debug primitives through the host (UnxDebugPrimitives / UnxDebugText path) reach the frame's debug buffer: 3 lines
+//      and the 2 glyphs of "ok" in the read-back statistics;
+//   6. no D3D12 debug-layer errors.
 // Pixels within 1.5 px of a silhouette or a decal box edge are left out (their centre may fall on either side).
 // Correctness run (standalone HostRenderer, hardware GPU; GpuLock -Kind correctness).
 #include "Renderer/HostRenderer.h"
 
 #include "TestScenes.h"
 #include "unx/core/File.h"
+#include "unx/debug/DebugDraw.h"
 #include "unx/decal/Decals.h"
 
 #include <algorithm>
@@ -87,9 +93,10 @@ uint32_t srgb8(double linear)
     return (uint32_t)std::lround(std::clamp(v, 0.0, 1.0) * 255.0);
 }
 
-// Frame 'frames' of the scene with or without the decals; the G-buffer's sRGB8 base colour per pixel (from the albedo
-// view's 10-bit output: code = round(byte / 255 x 1023)).
-std::vector<uint32_t> renderFrames(bool withDecals, uint32_t& errors)
+// Frames of the scene: 0 without decals, 1 with both decals, 2 with both then edited (world decal removed, the box's
+// decal red at full opacity; debug primitives every frame); the G-buffer's sRGB8 base colour per pixel of the last frame
+// (from the albedo view's 10-bit output: code = round(byte / 255 x 1023)).
+std::vector<uint32_t> renderFrames(int mode, uint32_t& errors, debug::Stats* stats = nullptr)
 {
     HostRendererOptions o;
     o.standalone = true;
@@ -100,25 +107,40 @@ std::vector<uint32_t> renderFrames(bool withDecals, uint32_t& errors)
     HostRenderer h(o);
     h.scene() = floorAndBox();
     h.commit();
-    if (withDecals)
+    uint32_t worldDecal = 0, boxDecal = 0;
+    if (mode >= 1)
     {
-        decal::DecalSet& set = decal::decals(h.trackStateForTest());
-        set.add(box({ 0, 0, 0 }, { 1.5f, 0, 0 }, { 0, 0, 1.5f }, { 0, 0.5f, 0 }, 1, decal::kNone, 0.5f));
+        worldDecal = h.decalAdd(box({ 0, 0, 0 }, { 1.5f, 0, 0 }, { 0, 0, 1.5f }, { 0, 0.5f, 0 }, 1, decal::kNone, 0.5f));
         // object space of the box (instance 0): centre at its middle, 1.5 m half extents across, 1.2 m up and down
-        set.add(box({ 0, 0, 0 }, { 1.5f, 0, 0 }, { 0, 0, 1.5f }, { 0, 1.2f, 0 }, 2, 0, 1.0f));
+        boxDecal = h.decalAdd(box({ 0, 0, 0 }, { 1.5f, 0, 0 }, { 0, 0, 1.5f }, { 0, 1.2f, 0 }, 2, 0, 1.0f));
     }
     std::vector<uint32_t> pixels((size_t)kWidth * kHeight);
-    for (uint32_t f = 0; f < 3; ++f)
+    const uint32_t frames = mode == 2 ? 6 : 3;
+    for (uint32_t f = 0; f < frames; ++f)
     {
+        if (mode == 2 && f == 2)
+        {
+            h.decalRemove(worldDecal);
+            h.decalUpdate(boxDecal, box({ 0, 0, 0 }, { 1.5f, 0, 0 }, { 0, 0, 1.5f }, { 0, 1.2f, 0 }, 1, 0, 1.0f));
+        }
+        if (mode == 2)
+        {
+            const debug::Line lines[3] = { { { -5, 1, 0 }, 0xFF0000FFu, { -4, 1, 0 }, 384 | (debug::DepthTest << 16) },
+                                           { { -5, 1, 0 }, 0xFF00FF00u, { -5, 2, 0 }, 384 | (debug::DepthTest << 16) },
+                                           { { -5, 1, 0 }, 0xFFFF0000u, { -5, 1, 1 }, 384 | (debug::DepthTest << 16) } };
+            h.debugPrimitives(lines, {}, {});
+            h.debugText({ -5, 1, 0 }, "ok", 0xFFFFFFFFu, 16, debug::DepthTest | debug::Shadow, {});
+        }
+        const uint32_t last = frames - 1;
         FramePacket p;
         p.frameIndex = f;
         p.deltaTime = 1.0f / 60;
         p.width = kWidth;
         p.height = kHeight;
         p.camera = h.scene().cameras[0];
-        const bool last = f == 2;
-        h.renderStandalone(h.queueFrame(std::move(p)), last ? pixels.data() : nullptr, last ? pixels.size() * 4 : 0);
+        h.renderStandalone(h.queueFrame(std::move(p)), f == last ? pixels.data() : nullptr, f == last ? pixels.size() * 4 : 0);
     }
+    if (stats) *stats = debug::lastStats(h.trackStateForTest());
     errors += h.debugErrors();
     for (uint32_t& px : pixels)
     {
@@ -165,7 +187,8 @@ int main()
             logf("  %-86s %s\n", what, ok ? "ok" : "FAILED");
             if (!ok) ++failures;
         };
-        const std::vector<uint32_t> plain = renderFrames(false, errors), painted = renderFrames(true, errors);
+        debug::Stats stats;
+        const std::vector<uint32_t> plain = renderFrames(0, errors), painted = renderFrames(1, errors), edited = renderFrames(2, errors, &stats);
         const double tanV = std::tan(test::oneBox().cameras[0].verticalFov * 0.5);
         const uint32_t grey = srgb8(0.5) * 0x010101u;
         const uint32_t red = srgb8(0.7) | srgb8(0.3) << 8 | srgb8(0.3) << 16;  // lerp((0.5, 0.5, 0.5), (0.9, 0.1, 0.1), 0.5)
@@ -205,6 +228,32 @@ int main()
         expect("instance decal: the box's top is blue", count[Blue] > 1000 && wrong[Blue] == 0);
         expect("instance decal: the floor inside its volume stays grey (other instance)", boxFloorPixels > 1000 && boxFloorWrong == 0);
         expect("elsewhere (floor, box sides at 90 degrees) grey", wrong[Grey] == 0);
+
+        // 4. after the host's edits: the world decal's floor grey, the box top red (0.9, 0.1, 0.1); the debug lines and
+        //    text (world (-5..-4, 1..2, 0..1): image x 188..272, y 270..322) are left out
+        const uint32_t fullRed = srgb8(0.9) | srgb8(0.1) << 8 | srgb8(0.1) << 16;
+        uint32_t editedCount[4] = {}, editedWrong[4] = {};
+        for (uint32_t y = 0; y < kHeight; ++y)
+            for (uint32_t x = 0; x < kWidth; ++x)
+            {
+                const Region r = classify(x, y, tanV);
+                if (r == Edge || (x >= 120 && x < 340 && y >= 170 && y < 390)) continue;
+                const size_t i = (size_t)y * kWidth + x;
+                const uint32_t want = r == Blue ? fullRed : grey;
+                ++editedCount[r];
+                bool bad = false;
+                for (int c = 0; c < 3; ++c)
+                    if (std::abs((int)((edited[i] >> (8 * c)) & 255u) - (int)((want >> (8 * c)) & 255u)) > 1) bad = true;
+                if (bad && ++editedWrong[r] <= 3) logf("    edited pixel (%u, %u) region %d: %06x, expected %06x\n", x, y, (int)r, edited[i], want);
+            }
+        logf("  edited: former world-decal floor %u px (wrong %u), box top %u px (wrong %u), grey %u px (wrong %u); debug stats frame %llu: lines %u, triangles %u, glyphs %u, status %u\n",
+             editedCount[Red], editedWrong[Red], editedCount[Blue], editedWrong[Blue], editedCount[Grey], editedWrong[Grey], (unsigned long long)stats.frame,
+             stats.lines, stats.triangles, stats.glyphs, stats.status);
+        expect("host edits: the removed world decal's floor is grey again", editedCount[Red] > 5000 && editedWrong[Red] == 0);
+        expect("host edits: the box decal updated to red at full opacity", editedCount[Blue] > 1000 && editedWrong[Blue] == 0);
+        expect("host edits: grey elsewhere", editedWrong[Grey] == 0);
+        expect("host debug primitives: 3 lines and the 2 glyphs of \"ok\" in the frame's debug buffer",
+               stats.frame != UINT64_MAX && stats.lines == 3 && stats.glyphs == 2 && stats.status == 0);
         expect("D3D12 debug layer errors 0", errors == 0);
         logf(failures ? "HOST DECAL TEST FAILED (%u)\n" : "HOST DECAL TEST PASS\n", failures);
         return failures ? 1 : 0;

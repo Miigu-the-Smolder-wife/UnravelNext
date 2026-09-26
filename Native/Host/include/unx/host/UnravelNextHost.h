@@ -32,7 +32,8 @@ enum UnxResult
                             // 6: + UnxFrameSetDiscontinuity, UnxFrameSetSimulation, UnxTransformUpdate::flags (teleport);
                             //    later additions within 6 (optional exports, bridges probe for them): UnxFrameGraphStatsLatest,
                             //    UnxSceneLoad, UnxVideoMemory, UnxSceneEditInstances, UnxSceneEditMaterials, UnxVfxStreamExecutor,
-                            //    UnxRendererQualityOverride, UnxFrameSetLens, UnxSurfaceDelta, UnxSurfaceSetHalfLives, UnxSurfaceSetTime
+                            //    UnxRendererQualityOverride, UnxFrameSetLens, UnxSurfaceDelta, UnxSurfaceSetHalfLives, UnxSurfaceSetTime,
+                            //    UnxDebugPrimitives, UnxDebugText, UnxDecalAdd, UnxDecalUpdate, UnxDecalRemove
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -271,6 +272,36 @@ UNX_API int32_t UNX_CALL UnxFrameSetLens(UnxRenderer r, float apertureMetres, fl
 UNX_API int32_t UNX_CALL UnxSurfaceDelta(UnxRenderer r, const void* changed, uint64_t changedCount, const int32_t* removedKeys, uint64_t removedCount);
 UNX_API int32_t UNX_CALL UnxSurfaceSetHalfLives(UnxRenderer r, const double* halfLives6);
 UNX_API int32_t UNX_CALL UnxSurfaceSetTime(UnxRenderer r, double seconds);
+// Debug drawing (A15, E's Passes/Debug; optional exports within ABI 6, INTERFACES v1.53) for the next queued frame only
+// (immediate mode: a frame that is never rendered drops its primitives). Records as DebugDraw.h lays them out:
+//   line 32 B     { float a[3]; uint32 rgba; float b[3]; uint32 widthFlags }   (width px in 8.8 fixed point | flags << 16;
+//                                                                              a point is a line with a == b)
+//   triangle 48 B { float a[3]; uint32 rgba; float b[3]; uint32 flags; float c[3]; uint32 0 }
+// rgba: R in the low byte, sRGB, a = opacity. Flags: 1 depth test, 2 screen (positions are pixels), 4 x-ray, 8 text shadow.
+// Text: printable ASCII at a world anchor (or pixel with flag 2), cells sizePx high, offset in px.
+UNX_API int32_t UNX_CALL UnxDebugPrimitives(UnxRenderer r, const void* lines, uint32_t lineCount, const void* triangles, uint32_t triangleCount);
+UNX_API int32_t UNX_CALL UnxDebugText(UnxRenderer r, const float* anchor3, const char* utf8, uint32_t rgba, float sizePx, uint32_t flags, float offsetX,
+                                      float offsetY);
+// Projected decals (A7, E's decal::DecalSet; optional exports within ABI 6, INTERFACES v1.53): an oriented box (the unit
+// cube [-1, 1]^3 -> space, rows of a 3 x 4 matrix: columns = half-extent axes X, Y, Z, then the centre; world space, or the
+// object space of 'instance'), a scene material painted on surfaces facing the box's +Z (angle fade from fadeStart to
+// fadeEnd degrees), priority then creation order, opacity, soft edge fraction of the box depth. Ids are returned by
+// UnxDecalAdd; changes reach the frames queued after the call.
+typedef struct UnxDecalDesc
+{
+    float box[12];
+    uint32_t material;
+    uint32_t instance;  // 0xFFFFFFFF: world space
+    int32_t priority;
+    float opacity, fadeStartDegrees, fadeEndDegrees, edge;
+    uint32_t reserved;  // 0
+} UnxDecalDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxDecalDesc) == 80, "UnxDecalDesc is part of the ABI (Assets/UnravelNextBridge/Runtime/Native/UnravelNextRendererNative.cs)");
+#endif
+UNX_API int32_t UNX_CALL UnxDecalAdd(UnxRenderer r, const UnxDecalDesc* desc, uint32_t* id);
+UNX_API int32_t UNX_CALL UnxDecalUpdate(UnxRenderer r, uint32_t id, const UnxDecalDesc* desc);
+UNX_API int32_t UNX_CALL UnxDecalRemove(UnxRenderer r, uint32_t id);
 UNX_API int32_t UNX_CALL UnxSceneAddLight(UnxRenderer r, const UnxLightDesc* desc, uint32_t* index);
 UNX_API int32_t UNX_CALL UnxSceneSetEnvironment(UnxRenderer r, const UnxEnvironmentDesc* desc);
 // The renderer's defaults for the environment (scene::Sun, scene::Atmosphere), for callers that set only some fields.

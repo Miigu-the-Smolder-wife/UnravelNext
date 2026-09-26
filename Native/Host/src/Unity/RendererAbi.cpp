@@ -383,6 +383,60 @@ UNX_API int32_t UNX_CALL UnxSurfaceSetTime(UnxRenderer r, double seconds)
     return call([&] { find(r)->setSurfaceTime(seconds); });
 }
 
+UNX_API int32_t UNX_CALL UnxDebugPrimitives(UnxRenderer r, const void* lines, uint32_t lineCount, const void* triangles, uint32_t triangleCount)
+{
+    return call([&] {
+        if ((lineCount && !lines) || (triangleCount && !triangles)) fail("UnxDebugPrimitives: null records");
+        find(r)->debugPrimitives({ static_cast<const debug::Line*>(lines), lineCount }, { static_cast<const debug::Triangle*>(triangles), triangleCount }, {});
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxDebugText(UnxRenderer r, const float* anchor3, const char* utf8, uint32_t rgba, float sizePx, uint32_t flags, float offsetX, float offsetY)
+{
+    return call([&] {
+        if (!anchor3 || !utf8) fail("UnxDebugText: null anchor or text");
+        find(r)->debugText(float3{ anchor3[0], anchor3[1], anchor3[2] }, utf8, rgba, sizePx, flags, float2{ offsetX, offsetY });
+    });
+}
+
+namespace
+{
+decal::Decal decalOf(const UnxDecalDesc* desc)
+{
+    if (!desc) fail("decal: null description");
+    if (desc->reserved != 0) fail("decal: reserved is not 0");
+    decal::Decal d;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 4; ++c) d.box.m[r][c] = desc->box[r * 4 + c];
+    d.material = desc->material;
+    d.instance = desc->instance;
+    d.priority = desc->priority;
+    d.opacity = desc->opacity;
+    d.fadeStartDegrees = desc->fadeStartDegrees;
+    d.fadeEndDegrees = desc->fadeEndDegrees;
+    d.edge = desc->edge;
+    return d;
+}
+} // namespace
+
+UNX_API int32_t UNX_CALL UnxDecalAdd(UnxRenderer r, const UnxDecalDesc* desc, uint32_t* id)
+{
+    return call([&] {
+        if (!id) fail("UnxDecalAdd: null id");
+        *id = find(r)->decalAdd(decalOf(desc));
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxDecalUpdate(UnxRenderer r, uint32_t id, const UnxDecalDesc* desc)
+{
+    return call([&] { find(r)->decalUpdate(id, decalOf(desc)); });
+}
+
+UNX_API int32_t UNX_CALL UnxDecalRemove(UnxRenderer r, uint32_t id)
+{
+    return call([&] { find(r)->decalRemove(id); });
+}
+
 UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor)
 {
     return call([&] {

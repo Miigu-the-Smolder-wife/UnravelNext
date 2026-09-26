@@ -332,6 +332,69 @@ void HostRenderer::setSurfaceTime(double seconds)
     m_surfaceTime = seconds;
 }
 
+void HostRenderer::debugPrimitives(std::span<const debug::Line> lines, std::span<const debug::Triangle> triangles, std::span<const debug::Glyph> glyphs)
+{
+    std::lock_guard lock(m_mutex);
+    m_pending.debugLines.insert(m_pending.debugLines.end(), lines.begin(), lines.end());
+    m_pending.debugTriangles.insert(m_pending.debugTriangles.end(), triangles.begin(), triangles.end());
+    m_pending.debugGlyphs.insert(m_pending.debugGlyphs.end(), glyphs.begin(), glyphs.end());
+}
+
+void HostRenderer::debugText(float3 anchor, std::string_view text, uint32_t color, float sizePx, uint32_t flags, float2 offsetPx)
+{
+    debug::DrawList list;  // E's glyph layout, into this frame's records
+    list.text(anchor, text, color, sizePx, flags, offsetPx);
+    std::lock_guard lock(m_mutex);
+    m_pending.debugGlyphs.insert(m_pending.debugGlyphs.end(), list.glyphs.begin(), list.glyphs.end());
+}
+
+namespace
+{
+void checkDecal(const decal::Decal& d, uint32_t materials, uint32_t instances)
+{
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 4; ++c)
+            if (!std::isfinite(d.box.m[r][c])) fail("decal: box is not finite");
+    if (d.material >= materials) fail("decal: material %u of %u", d.material, materials);
+    if (d.instance != decal::kNone && d.instance >= instances) fail("decal: instance %u of %u", d.instance, instances);
+    if (!(d.opacity >= 0 && d.opacity <= 1) || !(d.fadeStartDegrees >= 0 && d.fadeStartDegrees <= d.fadeEndDegrees && d.fadeEndDegrees <= 180) ||
+        !(d.edge >= 0 && d.edge <= 1))
+        fail("decal: opacity %g (0..1), fade %g..%g degrees, edge %g (0..1)", d.opacity, d.fadeStartDegrees, d.fadeEndDegrees, d.edge);
+}
+} // namespace
+
+uint32_t HostRenderer::decalAdd(const decal::Decal& d)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    checkDecal(d, m_hostMaterials, m_hostInstances);
+    const uint32_t id = m_decals.add(d);
+    if (id >= m_decalLive.size()) m_decalLive.resize(id + 1, 0);
+    m_decalLive[id] = 1;
+    m_decalsChanged = true;
+    return id;
+}
+
+void HostRenderer::decalUpdate(uint32_t id, const decal::Decal& d)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    if (id >= m_decalLive.size() || !m_decalLive[id]) fail("decal %u is not live", id);
+    checkDecal(d, m_hostMaterials, m_hostInstances);
+    m_decals.update(id, d);
+    m_decalsChanged = true;
+}
+
+void HostRenderer::decalRemove(uint32_t id)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    if (id >= m_decalLive.size() || !m_decalLive[id]) fail("decal %u is not live", id);
+    m_decals.remove(id);
+    m_decalLive[id] = 0;
+    m_decalsChanged = true;
+}
+
 void HostRenderer::setDiscontinuity(uint32_t flags)
 {
     requireCommitted();
@@ -379,6 +442,11 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.surfaceDeltas = std::move(m_pending.surfaceDeltas);
     packet.surfaceHalfLives = m_pending.surfaceHalfLives;
     packet.surfaceTime = m_surfaceTime;
+    packet.debugLines = std::move(m_pending.debugLines);
+    packet.debugTriangles = std::move(m_pending.debugTriangles);
+    packet.debugGlyphs = std::move(m_pending.debugGlyphs);
+    if (m_decalsChanged) packet.decals = std::make_shared<const decal::DecalSet>(m_decals);
+    m_decalsChanged = false;
     m_pending = FramePacket{};
     m_packets.push_back(std::move(packet));
     // A frame the host never renders (camera disabled, event dropped) must not hold its updates back from later
@@ -400,6 +468,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
         next.materialEdits.insert(next.materialEdits.begin(), std::make_move_iterator(dropped.materialEdits.begin()), std::make_move_iterator(dropped.materialEdits.end()));
         next.surfaceDeltas.insert(next.surfaceDeltas.begin(), std::make_move_iterator(dropped.surfaceDeltas.begin()), std::make_move_iterator(dropped.surfaceDeltas.end()));
         if (!next.surfaceHalfLives) next.surfaceHalfLives = dropped.surfaceHalfLives;
+        if (!next.decals) next.decals = dropped.decals;
     }
     return ticket;
 }
@@ -425,6 +494,7 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         carried.materialEdits.insert(carried.materialEdits.end(), std::make_move_iterator(old.materialEdits.begin()), std::make_move_iterator(old.materialEdits.end()));
         carried.surfaceDeltas.insert(carried.surfaceDeltas.end(), std::make_move_iterator(old.surfaceDeltas.begin()), std::make_move_iterator(old.surfaceDeltas.end()));
         if (old.surfaceHalfLives) carried.surfaceHalfLives = old.surfaceHalfLives;
+        if (old.decals) carried.decals = old.decals;
         haveCarried = true;
         m_packets.pop_front();
     }
@@ -445,6 +515,7 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         p.materialEdits.insert(p.materialEdits.begin(), std::make_move_iterator(carried.materialEdits.begin()), std::make_move_iterator(carried.materialEdits.end()));
         p.surfaceDeltas.insert(p.surfaceDeltas.begin(), std::make_move_iterator(carried.surfaceDeltas.begin()), std::make_move_iterator(carried.surfaceDeltas.end()));
         if (!p.surfaceHalfLives) p.surfaceHalfLives = carried.surfaceHalfLives;
+        if (!p.decals) p.decals = carried.decals;
     }
     // Leaving the queue: its updates join the applied state here, under the queue's lock, so currentScene never misses
     // a packet between the queue and the GPU. Its scene edits join the scene (the GPU scene's source) at the same point;
@@ -595,6 +666,12 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     for (const FramePacket::SurfaceDelta& d : p.surfaceDeltas) field.apply(d.changed.data(), d.changed.size(), d.removed.data(), d.removed.size() / 3);
     if (p.surfaceHalfLives) field.setHalfLives(*p.surfaceHalfLives);
     field.setTime(p.surfaceTime);
+    // A7 decals (the host's latest snapshot) and A15 debug primitives of this frame
+    if (p.decals) decal::decals(m_frameRenderer->trackState()) = *p.decals;
+    debug::DrawList& draw = debug::drawList(m_frameRenderer->trackState());
+    draw.lines.insert(draw.lines.end(), p.debugLines.begin(), p.debugLines.end());
+    draw.triangles.insert(draw.triangles.end(), p.debugTriangles.begin(), p.debugTriangles.end());
+    draw.glyphs.insert(draw.glyphs.end(), p.debugGlyphs.begin(), p.debugGlyphs.end());
     m_frameRenderer->record(*m_graph, fc, output);
 }
 

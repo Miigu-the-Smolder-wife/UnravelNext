@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.52, 2026-09-26)
+# UnravelNext 인터페이스 (v1.53, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -728,6 +728,9 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.53 (2026-09-26, E A12 1인칭 뷰 모델):
   - **`gpu::kInstanceViewModel`(1 << 29, HLSL `INSTANCE_VIEW_MODEL`, GPU 장면 전용)과 `GpuScene::setInstanceViewModel`**: E의 `Passes/ViewModel`이 카메라에 붙은 인스턴스를 매 렌더 프레임 그 프레임의 카메라 × 카메라 공간 자세로 둔다(`tracks::viewModelPrepare`, GPU 장면 flush 앞; 불연속은 순간이동). 그래서 카메라 기준 운동이 0이고(움직임 벡터·회전 블러), 그림자·반사·GI는 화면과 같은 기하를 본다. M은 이 플래그로 회전 블러에서 뷰 모델 픽셀을 뺀다.
   - **`FrameConstants::viewModelScale`(옛 `spare1`, HLSL `g_viewModelScale`)**: 주 뷰에서 뷰 모델 인스턴스의 투영 재매핑 k(clip.xy × k, 깊이 불변; 1 = 없음이 기본). `viewmodel.fov_override_degrees`가 정하고, 다른 뷰는 늘 1이다. V는 뷰 모델 정점의 현재·이전 clip에 `ViewModel.hlsli`의 `viewModelClip`을 부른다.
+- v1.53 (2026-09-26, A15·A7 호스트 경로, 엔진 2 요청):
+  - **디버그 드로우 호스트 입력(E `debug::DrawList`)**: 선택 export `UnxDebugPrimitives(r, lines, n, triangles, m)`(DebugDraw.h 기록 그대로 Line 32 B·Triangle 48 B), `UnxDebugText(r, anchor3, utf8, rgba, sizePx, flags, offsetX, offsetY)`(E의 글리프 배치). 다음 큐 프레임에만 들어간다(즉시 모드: 렌더되지 않는 프레임의 원시형은 버린다).
+  - **투영 데칼 호스트 입력(E `decal::DecalSet`)**: `UnxDecalDesc`(80 B: 상자 3×4 행 우선, 재질, 인스턴스 또는 0xFFFFFFFF, 우선순위, 불투명도, 페이드 시작·끝 도, 가장자리, 0), `UnxDecalAdd(r, desc, &id)` / `UnxDecalUpdate(r, id, desc)` / `UnxDecalRemove(r, id)`. 호스트가 거울 집합을 가지며, 바뀌면 다음 큐 프레임과 함께 스냅숏을 보낸다(늦은 스냅숏이 이긴다). 재질과 인스턴스는 호스트의 현재 개수로 검사한다. [실측] `HostDecal` 4·5: 제거와 갱신이 G-buffer에 정확히 반영됐고, 디버그 통계는 선 3·글리프 2였다.
 - v1.52 (2026-09-26, A7 호스트 경로, 엔진 2 요청):
   - **표면 상태 장 호스트 입력(E `surface::SurfaceField`)**: 선택 export `UnxSurfaceDelta(r, changed, changedCount, removedKeys, removedCount)`(NativeVfx `nv_surface_delta`의 `NV_SurfaceBrickV2` 1,560 B 기록과 제거 키 int32×3), `UnxSurfaceSetHalfLives(r, double[6])`(젖음·그을음·서리·먼지·핏자국·눈, s, 0 = 감쇠 없음), `UnxSurfaceSetTime(r, seconds)`(이후 큐 프레임의 VFX 시각). `HostRenderer::surfaceDelta/setSurfaceHalfLives/setSurfaceTime`이 다음 큐 프레임과 함께 보내고, 렌더 스레드가 기록 전에 호출 순서대로 `apply`한다. 건너뛴 티켓과 버려진 패킷의 묶음은 다음 렌더 프레임으로 옮긴다. [실측] `HostSurface`: 추가·제거·교체 순서, 건너뛴 두 프레임 뒤의 마지막 값, 버려진 패킷의 묶음, 반감기·시각이 모두 맞았다(디버그 층 오류 0).
 - v1.51 (2026-09-26, A5·A3):

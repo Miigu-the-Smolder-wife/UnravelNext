@@ -11,6 +11,8 @@
 // host's ExecuteCommandList, which declares the output texture's state to Unity. Standalone (tests, tools): own device.
 #include "unx/fx/Particles.h"
 #include "unx/core/Config.h"
+#include "unx/debug/DebugDraw.h"
+#include "unx/decal/Decals.h"
 #include "unx/decal/SurfaceState.h"
 #include "unx/render/Frame.h"
 #include "unx/render/GpuScene.h"
@@ -23,7 +25,9 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace unx::render
@@ -105,6 +109,12 @@ struct FramePacket
     std::vector<SurfaceDelta> surfaceDeltas;
     std::optional<std::array<double, surface::kChannels>> surfaceHalfLives;
     double surfaceTime = 0;
+    // A15 debug primitives of this frame (E's DrawList records; immediate mode: a frame that is never rendered drops them).
+    std::vector<debug::Line> debugLines;
+    std::vector<debug::Triangle> debugTriangles;
+    std::vector<debug::Glyph> debugGlyphs;
+    // A7 projected decals: the host's decal set when it changed (a later snapshot replaces an earlier one).
+    std::shared_ptr<const decal::DecalSet> decals;
 };
 
 // The render graph of one recorded frame (RenderGraphStats, the fields the host reports).
@@ -182,6 +192,15 @@ public:
     void surfaceDelta(const surface::BrickInput* changed, size_t changedCount, const int32_t* removedKeys, size_t removedCount);
     void setSurfaceHalfLives(const std::array<double, surface::kChannels>& halfLife);
     void setSurfaceTime(double seconds);
+    // A15 debug drawing (E's debug::DrawList) for the next queued frame only: primitive records as DebugDraw.h lays them
+    // out, and text (printable ASCII) at an anchor.
+    void debugPrimitives(std::span<const debug::Line> lines, std::span<const debug::Triangle> triangles, std::span<const debug::Glyph> glyphs);
+    void debugText(float3 anchor, std::string_view text, uint32_t color, float sizePx, uint32_t flags, float2 offsetPx);
+    // A7 projected decals (E's decal::DecalSet, mirrored here: ids are the set's, the render thread gets a snapshot with
+    // the next queued frame after a change). Materials and instances are the host's current counts.
+    uint32_t decalAdd(const decal::Decal& d);
+    void decalUpdate(uint32_t id, const decal::Decal& d);
+    void decalRemove(uint32_t id);
     void setSimulation(uint32_t gpuSimulation);
     // Sun, atmosphere and (when set) wind of the following frames.
     void setEnvironment(const scene::Sun& sun, const scene::Atmosphere& atmosphere, std::optional<FramePacket::Wind> wind);
@@ -308,6 +327,9 @@ private:
     uint64_t m_fxRecorded = 0;  // (m_fxMutex held) packets written under UNX_FX_RECORD
     float m_lensAperture = 0, m_lensFocus = 0;  // (m_mutex) the lens every queued frame takes
     double m_surfaceTime = 0;                   // (m_mutex) the VFX time every queued frame takes
+    decal::DecalSet m_decals;                   // (m_mutex) the host's decal set
+    std::vector<uint8_t> m_decalLive;           // (m_mutex) per decal id: live
+    bool m_decalsChanged = false;               // (m_mutex) a snapshot goes with the next queued frame
     std::unique_ptr<render::RenderGraph> m_simGraph;  // the claimed ticks' graph (compute queue)
     uint64_t m_simIndex = 1ull << 48;                // its import index (apart from frame indices)
     uint64_t m_simFence = 0, m_simWaited = 0;        // compute fence of the last claimed tick; the frames waited up to
