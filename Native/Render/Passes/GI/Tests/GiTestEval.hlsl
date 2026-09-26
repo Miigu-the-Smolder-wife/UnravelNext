@@ -5,11 +5,35 @@
 // maps, giCacheIrradianceAt, channel mean; -1 = no entry with data). P[2].y = the cache SRV (raw).
 // P[2].z = GGX alpha bits (0 = off): normal .w = the K path by the lobe (screenProbeGatherLobe, channel mean) and radiance
 // .w = the split-sum K path for the same lobe (mirror direction, reflectionLobeHalfAngle; channel mean), for the lobe check.
+// P[2].z = 0: normal .w = M's per-pixel cache irradiance (giCacheIrradianceScreen, channel mean; -1 = none) and radiance
+// .w = the same before the partner corners (giTestFillOnly: the missing weight from coarser levels), for the screen check.
 // P[0] = { probes SRV, depth SRV, gbuffer SRV, output UAV }, P[1] = { probesX, probesY, width, height }, P[2].x = maps atlas SRV;
 // b1 = the view.
 #include "GBuffer.hlsli"
 #include "Passes/GI/ScreenProbes.hlsli"
 #include "Passes/GI/GiCache.hlsli"
+
+// The screen reconstruction before the partner corners (2026-09-26): each level's trilinear sum over the corners with
+// data, the rest of the weight from the next coarser level.
+float3 giTestFillOnly(ByteAddressBuffer b, GiHeader h, float3 worldPos, float3 normal, out float weight)
+{
+    uint level;
+    const float beta = giLevelBand(h, worldPos, level);
+    const uint nc = giNormalClass(normal);
+    float3 result = 0;
+    float remain = 1;
+    [loop] for (uint k = 0; k < GI_FILL_LEVELS && remain > 1e-3 && level <= h.maxLevel; ++k, ++level)
+    {
+        float3 s = 0, unused = 0;
+        float w = 0;
+        giAccumulateLevel(b, h, worldPos, normal, normal, false, nc, level, s, unused, w);
+        const float take = k == 0 ? 1 - beta : 1.0;
+        result += (remain * take) * s;
+        remain *= 1 - take * w;
+    }
+    weight = 1 - remain;
+    return weight > 0 ? result / weight : 0;
+}
 #include "Passes/Reflection/Reflection.hlsli"
 
 [numthreads(8, 8, 1)]
@@ -43,6 +67,15 @@ void main(uint2 probe : SV_DispatchThreadID)
         lobe = (k.radiance.r + k.radiance.g + k.radiance.b) / 3;
         const ScreenProbeLighting q = screenProbeGather(s, pixel, world, n, linearDepth(d), false, true, reflect(-v, n), reflectionLobeHalfAngle(sqrt(alpha), dot(n, v)));
         split = (q.radiance.r + q.radiance.g + q.radiance.b) / 3;
+    }
+    if (alpha <= 0)
+    {
+        ByteAddressBuffer c = ResourceDescriptorHeap[P[2].y];
+        const GiHeader hc = giHeader(c);
+        float ws, wf;
+        const float3 es = giCacheIrradianceScreen(c, hc, world, n, ws), ef = giTestFillOnly(c, hc, world, n, wf);
+        lobe = ws > 0 ? (es.r + es.g + es.b) / 3 : -1.0;
+        split = wf > 0 ? (ef.r + ef.g + ef.b) / 3 : -1.0;
     }
     output[index + 1] = float4(l.radiance, split);
     ByteAddressBuffer cache = ResourceDescriptorHeap[P[2].y];

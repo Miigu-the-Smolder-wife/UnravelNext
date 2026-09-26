@@ -267,6 +267,13 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     compute("r.gi.begin", "Passes/GI/GiBegin", 1, { frame, m_epoch, s.deterministic ? 1u : 0u, cam[0], cam[1], cam[2] });
     // Deterministic anchors: last frame's per-slot candidates (its ray passes) into the entries before the table clears.
     if (s.deterministic) compute("r.gi.det.fold", "Passes/GI/GiDetFold", groups(s.tableSlots), {});
+    // C9 origin rebase: the entries move by whole cells before this frame's rehash files them (GiShift.hlsl).
+    if (fc.frame.originShift.x != 0 || fc.frame.originShift.y != 0 || fc.frame.originShift.z != 0)
+    {
+        uint32_t d[3];
+        std::memcpy(d, &fc.frame.originShift, 12);
+        compute("r.gi.shift", "Passes/GI/GiShift", groups(s.capacity), { d[0], d[1], d[2] });
+    }
     compute("r.gi.evict", "Passes/GI/GiEvict", groups(s.capacity), {});
     compute("r.gi.clear", "Passes/GI/GiTableClear", groups(s.tableSlots), {});
     compute("r.gi.rehash", "Passes/GI/GiRehash", groups(s.capacity), {});
@@ -544,6 +551,76 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   c.computeConstants(k, 8);
                   c.cmd->ExecuteIndirect(signature, 1, c.resource(mapArgs), 0, nullptr, 0);
               });
+    if (m_lookupStatsOn)
+    {
+        if (!m_lookupStats)
+        {
+            D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+            D3D12_RESOURCE_DESC1 d{};
+            d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            d.Width = 512;
+            d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+            d.SampleDesc.Count = 1;
+            d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr,
+                                                           IID_PPV_ARGS(&m_lookupStats)),
+                  "GI lookup stats");
+        }
+        const BufferRef counters = g.importBuffer(m_lookupStats.Get(), { "GI lookup stats", 512, 0 });
+        for (uint32_t clear : { 1u, 0u })
+            g.addPass(clear ? "r.gi.lookupstats.clear" : "r.gi.lookupstats", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(cache, Use::SrvCompute);
+                          b.use(depth, Use::SrvCompute);
+                          b.use(gbuffer, Use::SrvCompute);
+                          b.use(counters, Use::UavCompute);
+                          b.keep();
+                      },
+                      [&shaders, cache, depth, gbuffer, counters, frameConstants, main, clear](PassContext& c) {
+                          const uint32_t k[8] = { c.srv(cache), c.srv(depth), c.srv(gbuffer), c.uav(counters), main.view.width, main.view.height, clear, 0 };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/Gates/GiLookupStats"));
+                          c.computeConstants(k, 8);
+                          c.bindFrameConstants(frameConstants);
+                          if (clear) c.cmd->Dispatch(1, 1, 1);
+                          else c.cmd->Dispatch((main.view.width + 7) / 8, (main.view.height + 7) / 8, 1);
+                      });
+    }
+}
+
+GiLookupStats GiSystem::readLookupStats()
+{
+    GiLookupStats st;
+    if (!m_lookupStats) return st;
+    m_device.waitIdle();
+    D3D12_HEAP_PROPERTIES rb{ D3D12_HEAP_TYPE_READBACK };
+    D3D12_RESOURCE_DESC1 d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = 512;
+    d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;
+    check(m_device.d3d()->CreateCommittedResource3(&rb, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&readback)),
+          "GI lookup stats readback");
+    CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
+    cl.list->CopyBufferRegion(readback.Get(), 0, m_lookupStats.Get(), 0, 512);
+    m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(cl));
+    uint32_t h[128];
+    void* mapped = nullptr;
+    D3D12_RANGE all{ 0, 512 }, none{ 0, 0 };
+    check(readback->Map(0, &all, &mapped), "map GI lookup stats");
+    std::memcpy(h, mapped, 512);
+    readback->Unmap(0, &none);
+    st.pixels = h[0], st.levels = h[1], st.lookups = h[2], st.slots = h[3], st.found = h[4];
+    st.tiles = h[5], st.tileKeys = h[6], st.tileEntries = h[7], st.maxTileKeys = h[8], st.maxTileEntries = h[9], st.multiLevelPixels = h[10];
+    st.tileDiffers = h[11], st.tileMissed = h[13];
+    std::memcpy(&st.tileMaxRel, &h[12], 4);
+    st.evaluated = h[14];
+    std::memcpy(&st.fillMaxRel, &h[80], 4);
+    st.fillSumRel1e3 = h[81], st.fillCompared = h[82], st.fillOver1 = h[83], st.fillOver5 = h[84];
+    for (int i = 0; i < 64; ++i) st.entryHistogram[i] = h[16 + i];
+    return st;
 }
 
 ID3D12CommandSignature* GiSystem::dispatchSignature()

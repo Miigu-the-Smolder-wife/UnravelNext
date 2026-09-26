@@ -192,12 +192,20 @@ float4 giCatmullRom(float t)
     return float4(-0.5 * t3 + t2 - 0.5 * t, 1.5 * t3 - 2.5 * t2 + 1, -1.5 * t3 + 2 * t2 + 0.5 * t, 0.5 * t3 - 0.5 * t2);
 }
 
+// Anchor normal: octahedral snorm16 x 2 (the anchor record's fourth word).
+float3 giUnpackAnchorNormal(uint packed)
+{
+    const float2 e = float2(int2(packed << 16, packed) >> 16) / 32767.0;
+    float3 n = float3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0) n.xy = (1.0 - abs(n.yx)) * select(n.xy >= 0.0, 1.0, -1.0);
+    return normalize(n);
+}
+
 // Irradiance (x 1, not stored scale) of an entry for normal n from its map; normals below the entry's hemisphere use
 // its horizon.
 template <typename B>
-float3 giIrrMap(B b, GiHeader h, uint entry, float3 n)
+float3 giIrrMapAt(B b, GiHeader h, uint entry, float3 na, float3 n)
 {
-    const float3 na = giAnchorNormal(b, h, entry);
     float3 t, bt;
     giBasis(na, t, bt);
     float3 local = float3(dot(n, t), dot(n, bt), max(dot(n, na), 0.0));
@@ -221,6 +229,9 @@ float3 giIrrMap(B b, GiHeader h, uint entry, float3 n)
     }
     return max(sum, 0.0) * GI_LOAD_SCALE;
 }
+// giIrrMapAt with the entry's anchor normal read here.
+template <typename B>
+float3 giIrrMap(B b, GiHeader h, uint entry, float3 n) { return giIrrMapAt(b, h, entry, giAnchorNormal(b, h, entry), n); }
 
 template <typename B>
 float3 giShIrradiance(B b, GiHeader h, uint entry, float3 n, out float sunVisibility)
@@ -319,15 +330,71 @@ float giLevelBand(GiHeader h, float3 worldPos, out uint own)
     const float u = log2(max(size, 1e-30) / h.cellSize0);  // level own holds u in (own - 1, own]
     return own < h.maxLevel ? saturate((u - ((float)own - GI_LEVEL_BAND)) / GI_LEVEL_BAND) : 0.0;
 }
-// One level at a screen point, the trilinear weight of its missing cells filled from the next coarser level (that lookup
-// with the usual level search). Cells no probe landed in are missing: at grazing views a cell spans less than the 8 px
-// probe step along the surface. Renormalising over the corners that exist, or climbing only when none does, jumped where
-// a missing cell began (one-pixel lines on walls seen edge-on, D0 2026-09-26); the filled share goes to 0 with the
-// missing corners' own trilinear weight, so the result is continuous.
-// With the band: E = (1 - beta) E_own + beta E_own+1, E_L = S_L + (1 - W_L) E_L+1 (S_L, W_L: the level's trilinear sum
-// and weight over the cells that have data), evaluated as one loop over levels with the share still unassigned. Up to
-// GI_FILL_LEVELS levels; what remains then is spread over what was found; nothing found: weight 0 (M uses the probes).
+// Screen points (M's per-pixel irradiance): the point's 8 cells of a level, trilinear. Only cells a probe landed in
+// exist, and on a surface those are the cells the surface passes through: the stencil's corners across the surface
+// (above a floor, behind a wall) have none by construction - on the city at 4K 49 % of the corners looked up [measured,
+// GiGate --lookup-stats, 2026-09-26]. A missing corner c therefore takes the value of its partners across the surface:
+// c's weight goes to the corner c ^ axis(a) with the share n_a^2 for each axis a whose partner exists (the shares sum to
+// 1 over the axes; a floor gives all of it to the corner below or above). An entry there would itself be anchored on the
+// surface nearby, so this is the level's own resolution, where a coarser level was blended in before. The shares are
+// continuous in the normal, and a corner's existence only changes where its weight is 0 (the stencil's switch), so the
+// result is continuous. Weight that finds no partner (cells a probe skipped: grazing views, where a cell spans less than
+// the 8 px probe step along the surface) is filled from the next coarser level as before (renormalising or climbing
+// only when nothing was found jumped where a missing cell began: one-pixel lines on walls seen edge-on, D0 2026-09-26).
+// With the band: E = (1 - beta) E_own + beta E_own+1, E_L = S_L + (1 - W_L) E_L+1 (S_L, W_L: the level's weighted sum
+// and weight after the partners), one loop over levels with the share still unassigned, up to GI_FILL_LEVELS levels;
+// what remains then is spread over what was found; nothing found: weight 0 (M uses the probes).
+// Before the partners every pixel climbed 2.9 levels on average (77 % of pixels more than one) and evaluated 11.9
+// entry maps [measured, city 4K].
 #define GI_FILL_LEVELS 4u
+// Corner c's weight after the partners: 'has' = bit c set when corner c has data; t = the trilinear fraction; share =
+// n * n (sums to 1). Computed per corner (no arrays: the caller's loop keeps one map evaluation in the code).
+float giScreenCornerWeight(uint has, uint c, float3 t, float3 share)
+{
+    if ((has & (1u << c)) == 0) return 0;
+    const float3 o = float3(c & 1, (c >> 1) & 1, c >> 2);
+    const float3 wt = lerp(1 - t, t, o);
+    float w = wt.x * wt.y * wt.z;
+    [unroll] for (uint a = 0; a < 3; ++a)
+    {
+        const uint p = c ^ (1u << a);
+        if ((has & (1u << p)) != 0) continue;
+        const float3 wp = lerp(1 - t, t, float3(p & 1, (p >> 1) & 1, p >> 2));
+        w += wp.x * wp.y * wp.z * share[a];
+    }
+    return w;
+}
+uint giScreenPick(uint4 lo, uint4 hi, uint c) { return c < 4 ? lo[c & 3] : hi[c & 3]; }
+// One level from its resolved corners (entries and packed anchor normals of corners 0..3 and 4..7, 'has' as above; the
+// caller resolves them: giScreenCell per pixel, or the group's table, GiCacheTile.hlsli).
+template <typename B>
+void giScreenLevel(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo, uint4 anchorHi, uint has, float3 t, float3 normal, out float3 sum,
+                   out float w)
+{
+    const float3 share = normal * normal;
+    sum = 0;
+    w = 0;
+    [loop] for (uint c = 0; c < 8; ++c)
+    {
+        const float wc = giScreenCornerWeight(has, c, t, share);
+        if (wc <= 0) continue;
+        sum += wc * giIrrMapAt(b, h, giScreenPick(entryLo, entryHi, c), giUnpackAnchorNormal(giScreenPick(anchorLo, anchorHi, c)), normal);
+        w += wc;
+    }
+}
+// A cell's entry with data (GI_ENTRY_PENDING: none, or not updated yet) and its packed anchor normal.
+template <typename B>
+uint giScreenCell(B b, GiHeader h, uint64_t key, out uint anchor)
+{
+    uint entry = giFind(b, h, key);
+    anchor = 0;
+    if (entry != GI_ENTRY_PENDING)
+    {
+        if (b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0) entry = GI_ENTRY_PENDING;
+        else anchor = b.Load(h.offAnchor + entry * 16 + 12);
+    }
+    return entry;
+}
 template <typename B>
 float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, out float weight)
 {
@@ -338,9 +405,21 @@ float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, 
     float remain = 1;
     [loop] for (uint k = 0; k < GI_FILL_LEVELS && remain > 1e-3 && level <= h.maxLevel; ++k, ++level)
     {
-        float3 s = 0, unused = 0;
-        float w = 0;
-        giAccumulateLevel(b, h, worldPos, normal, normal, false, nc, level, s, unused, w);
+        const float3 f = worldPos / giCellSize(h, level) - 0.5;
+        const int3 c0 = int3(floor(f));
+        uint4 entryLo, entryHi, anchorLo, anchorHi;
+        uint has = 0;
+        [unroll] for (uint c = 0; c < 8; ++c)
+        {
+            uint anchor;
+            const uint entry = giScreenCell(b, h, giKey(level, nc, c0 + int3(c & 1, (c >> 1) & 1, c >> 2)), anchor);
+            if (c < 4) entryLo[c] = entry, anchorLo[c] = anchor;
+            else entryHi[c - 4] = entry, anchorHi[c - 4] = anchor;
+            if (entry != GI_ENTRY_PENDING) has |= 1u << c;
+        }
+        float3 s;
+        float w;
+        giScreenLevel(b, h, entryLo, entryHi, anchorLo, anchorHi, has, f - floor(f), normal, s, w);
         const float take = k == 0 ? 1 - beta : 1.0;  // the band passes beta of the point on to the next level
         result += (remain * take) * s;
         remain *= 1 - take * w;
@@ -361,14 +440,7 @@ float3 giCacheIrradiance(GiSrvs s, float3 worldPos, float3 normal)
 template <typename B>
 float3 giAnchorPosition(B b, GiHeader h, uint entry) { return asfloat(b.Load3(h.offAnchor + entry * 16)); }
 template <typename B>
-float3 giAnchorNormal(B b, GiHeader h, uint entry)
-{
-    const uint packed = b.Load(h.offAnchor + entry * 16 + 12);
-    const float2 e = float2(int2(packed << 16, packed) >> 16) / 32767.0;
-    float3 n = float3(e.xy, 1.0 - abs(e.x) - abs(e.y));
-    if (n.z < 0) n.xy = (1.0 - abs(n.yx)) * select(n.xy >= 0.0, 1.0, -1.0);
-    return normalize(n);
-}
+float3 giAnchorNormal(B b, GiHeader h, uint entry) { return giUnpackAnchorNormal(b.Load(h.offAnchor + entry * 16 + 12)); }
 
 // Incident radiance from a direction, bilinear over the 8 x 8 texels of one entry.
 template <typename B>

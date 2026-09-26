@@ -4,8 +4,10 @@
 // side), the K path's reflection direction and lobe half-angle (reflectionLobeHalfAngle), then by P[1].x:
 //   1 = screenProbeIrradiance, 2 = screenProbeRadiance (K path; every pixel, as a worst case), 3 = both,
 //   4 = the four-probe footprint alone (its weights), 0 = none (the kernel's own reads and write),
-//   8 = screenProbeGather (irradiance + K radiance in one footprint, maps atlas; v1.13).
-// P[1].w = view.screenProbeMaps SRV.
+//   8 = screenProbeGather (irradiance + K radiance in one footprint, maps atlas; v1.13),
+//   16 = M's GI cache irradiance alone (giCacheIrradianceScreen, front side: ScreenProbes pad1), in a kernel of its own
+//   occupancy (against its cost inside M's shading kernel).
+// P[1].w = view.screenProbeMaps SRV, P[2].x = GI cache SRV (mode 16).
 // The sum is written to an RGBA16F target so nothing is optimised away.
 // P[0] = { probes SRV, depth SRV, gbuffer SRV, output UAV }, P[1] = { mode, width, height, 0 }; b1 = the main view.
 #include "GBuffer.hlsli"
@@ -47,6 +49,13 @@ void main(uint2 pixel : SV_DispatchThreadID)
         const ProbeSrvs gs = { P[0].x, P[0].x, P[1].w, 0 };
         const ScreenProbeLighting l = screenProbeGather(gs, pixel, position, n, z, false, true, reflect(-v, g.normal), reflectionLobeHalfAngle(g.roughness, abs(NoV)));
         result += float4(l.irradiance + l.radiance, l.occlusion);
+    }
+    if (P[1].x & 16)
+    {
+        ByteAddressBuffer cache = ResourceDescriptorHeap[P[2].x];
+        const GiHeader h = giHeader(cache);
+        float weight;
+        result += float4(giCacheIrradianceScreen(cache, h, position, n, weight), weight);
     }
     if (P[1].x & 2) result.rgb += screenProbeRadiance(probes, pixel, g.normal, z, reflect(-v, g.normal), reflectionLobeHalfAngle(g.roughness, abs(NoV)));
     output[pixel] = result;

@@ -116,6 +116,7 @@ int main(int argc, char** argv)
     {
         std::string scenePath, resolutions = "both", out, qualityPath = std::string(UNX_SOURCE_DIR) + "/Config/quality", dumpPath, comparePath;
         uint32_t frames = 600, cameraIndex = 0, averageFrames = 1, noiseFrames = 0;
+        bool lookupStats = false;
         std::string noiseMapPath;
         bool integrated = false, planarForced = false;
         std::vector<std::string> overrides;
@@ -139,6 +140,7 @@ int main(int argc, char** argv)
             // the harness; per pixel the temporal standard deviation of R, G, B (display units, 1 = full scale), i.e. what a
             // single displayed frame deviates by. --noise-map writes it as a PGM (255 = 8/255 or more).
             else if (a == "--noise") noiseFrames = (uint32_t)std::stoul(next());
+            else if (a == "--lookup-stats") lookupStats = true;  // --integrated: M's GI cache lookup counts (GiLookupStats.hlsl)
             else if (a == "--noise-map") noiseMapPath = next();
             else fail("unknown argument %s", a.c_str());
         }
@@ -362,9 +364,11 @@ int main(int argc, char** argv)
                     const TextureRef probesIn = main.screenProbes, mapsIn = main.screenProbeMaps;
                     const TextureRef benchOut = graph.createTexture({ "bench probe lookups", res.width, res.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
                     const D3D12_GPU_VIRTUAL_ADDRESS benchConstants = main.frameConstants;
-                    for (uint32_t mode : { 0u, 1u, 2u, 3u, 4u, 8u })
+                    const BufferRef giCache = fc.resources.giCache;
+                    for (uint32_t mode : { 0u, 1u, 2u, 3u, 4u, 8u, 16u })
                     {
-                        static const char* const names[9] = { "bench.probe.none", "bench.probe.irradiance", "bench.probe.radiance", "bench.probe.both", "bench.probe.footprint", "", "", "", "bench.probe.gather" };
+                        static const char* const names[17] = { "bench.probe.none", "bench.probe.irradiance", "bench.probe.radiance", "bench.probe.both", "bench.probe.footprint",
+                                                                "", "", "", "bench.probe.gather", "", "", "", "", "", "", "", "bench.probe.cache" };
                         graph.addPass(names[mode], QueueType::Compute,
                                       [&](PassBuilder& b) {
                                           b.use(probesIn, Use::SrvCompute);
@@ -372,12 +376,14 @@ int main(int argc, char** argv)
                                           b.use(depth, Use::SrvCompute);
                                           b.use(gbuffer, Use::SrvCompute);
                                           b.use(benchOut, Use::UavCompute);
+                                          b.use(giCache, Use::SrvCompute);
                                           b.keep();
                                       },
-                                      [&shaders, probesIn, mapsIn, depth, gbuffer, benchOut, benchConstants, mode, res](PassContext& c) {
-                                          const uint32_t k[8] = { c.srv(probesIn), c.srv(depth), c.srv(gbuffer), c.uav(benchOut), mode, res.width, res.height, c.srv(mapsIn) };
+                                      [&shaders, probesIn, mapsIn, depth, gbuffer, benchOut, benchConstants, mode, res, giCache](PassContext& c) {
+                                          const uint32_t k[12] = { c.srv(probesIn), c.srv(depth), c.srv(gbuffer), c.uav(benchOut), mode, res.width, res.height, c.srv(mapsIn),
+                                                                   c.srv(giCache), 0, 0, 0 };
                                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/Gates/ProbeLookupBench"));
-                                          c.computeConstants(k, 8);
+                                          c.computeConstants(k, 12);
                                           c.bindFrameConstants(benchConstants);
                                           c.cmd->Dispatch((res.width + 7) / 8, (res.height + 7) / 8, 1);
                                       });
@@ -393,6 +399,34 @@ int main(int argc, char** argv)
             };
             HarnessResult r = harness.run(res, opt, frameBody);
             harness.printSummary(r);
+            if (lookupStats && renderer)
+            {
+                // One more frame with the lookup counters (untimed), on the cache state the timed frames left.
+                gi::GiSystem* gs = gi::GiSystem::find(renderer->trackState());
+                if (!gs) fail("--lookup-stats: no GI system");
+                device.waitIdle();
+                gs->setLookupStats(true);
+                RenderGraph statsGraph(device);
+                frameBody(statsGraph, res, lastFrame + 1);
+                statsGraph.execute(nullptr);
+                gs->setLookupStats(false);
+                const gi::GiLookupStats l = gs->readLookupStats();
+                const double p = std::max(1u, l.pixels), t = std::max(1u, l.tiles);
+                logf("R %s: GI cache lookup (M, front side) per pixel: levels %.3f (%.2f %% of pixels > 1), cells %.2f, table slots %.2f (%.2f per cell), "
+                     "cells with data %.2f; per 8x8 tile: distinct cells %.1f (max %u), distinct entries %.1f (max %u) over %u tiles, %u pixels\n",
+                     res.name.c_str(), l.levels / p, 100.0 * l.multiLevelPixels / p, l.lookups / p, l.slots / p, (double)l.slots / std::max(1u, l.lookups),
+                     l.found / p, l.tileKeys / t, l.maxTileKeys, l.tileEntries / t, l.maxTileEntries, l.tiles, l.pixels);
+                std::string hist;
+                for (int i = 0; i < 64; ++i)
+                    if (l.entryHistogram[i]) hist += " " + std::to_string(i) + ":" + std::to_string(l.entryHistogram[i]);
+                logf("R %s: tiles by distinct entries:%s\n", res.name.c_str(), hist.c_str());
+                logf("R %s: group-resolved lookup (GiCacheTile.hlsli) vs per-pixel: %u pixels differ (max relative %.3g), %.4f cells per pixel not in the tile table\n",
+                     res.name.c_str(), l.tileDiffers, l.tileMaxRel, l.tileMissed / p);
+                logf("R %s: entries evaluated per pixel %.2f; against the reconstruction before the partner corners: mean relative %.4f, max %.3g, "
+                     "over 1 %% %.2f %%, over 5 %% %.3f %% of %u pixels\n",
+                     res.name.c_str(), l.evaluated / p, l.fillSumRel1e3 * 1e-3 / std::max(1u, l.fillCompared), l.fillMaxRel,
+                     100.0 * l.fillOver1 / std::max(1u, l.fillCompared), 100.0 * l.fillOver5 / std::max(1u, l.fillCompared), l.fillCompared);
+            }
             if (noiseFrames > 0)
             {
                 device.waitIdle();

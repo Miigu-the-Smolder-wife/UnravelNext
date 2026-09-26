@@ -34,6 +34,19 @@ struct GiStats  // header counters of the last completed frame (tests, diagnosti
     uint32_t gZero = 0;                      // G samples with mean g = 0 (not in the histogram)
 };
 
+// The information quantity of M's per-pixel cache lookup on the main view (Gates/GiLookupStats.hlsl; gates only).
+struct GiLookupStats
+{
+    uint32_t pixels = 0, levels = 0, lookups = 0, slots = 0, found = 0, multiLevelPixels = 0, tileDiffers = 0, tileMissed = 0;
+    float tileMaxRel = 0;
+    uint32_t evaluated = 0;  // entries evaluated (weight > 0 after the partner corners)
+    // Against the reconstruction before the partner corners: largest and mean relative difference, pixels over 1 % / 5 %.
+    float fillMaxRel = 0;
+    uint32_t fillSumRel1e3 = 0, fillCompared = 0, fillOver1 = 0, fillOver5 = 0;
+    uint32_t tiles = 0, tileKeys = 0, tileEntries = 0, maxTileKeys = 0, maxTileEntries = 0;
+    uint32_t entryHistogram[64] = {};  // tiles by distinct entries (63 = 63 or more)
+};
+
 class GiSystem
 {
 public:
@@ -68,12 +81,18 @@ public:
     // Blocking readback of the cache header (waits for the GPU).
     GiStats readStats();
     ID3D12Resource* cache() const { return m_cache.Get(); }
+    // Gates: count the main view's cache lookups in the frames recorded while on (GiLookupStats.hlsl, after r.gi.maps:
+    // the cache M reads); readLookupStats (blocking) returns the last such frame's counts.
+    void setLookupStats(bool on) { m_lookupStatsOn = on; }
+    GiLookupStats readLookupStats();
     uint64_t cacheBytes() const { return m_bytes; }
 
 private:
     Device& m_device;
     GiSettings m_settings;
     ComPtr<ID3D12Resource> m_cache;
+    ComPtr<ID3D12Resource> m_lookupStats;  // 128 uint counters (setLookupStats)
+    bool m_lookupStatsOn = false;
     ComPtr<ID3D12CommandSignature> m_dispatchSignature;  // one D3D12_DISPATCH_ARGUMENTS, 16 B stride (radiance maps)
     ID3D12CommandSignature* dispatchSignature();
     uint64_t m_bytes = 0;

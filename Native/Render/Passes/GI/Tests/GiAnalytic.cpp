@@ -354,6 +354,10 @@ struct Outcome
     double mapMean = 0, mapWorst = 0, mapExpectedMean = 0;   // the cache's irradiance maps at the probe points (giCacheIrradianceAt)
     uint32_t mapProbes = 0, mapBeyond3 = 0;                  // probes, and those beyond 3 % (a stale region shows as a cluster)
     double mapP99 = 0, mapWorstExpected = 0, mapWorstValue = 0;  // 99th percentile relative error; the worst probe's E pair
+    // M's per-pixel cache irradiance (giCacheIrradianceScreen) and the same before the partner corners, at the probe
+    // points against the expected E (runs without the lobe check): mean relative error, P99, worst.
+    double screenMean = 0, screenP99 = 0, screenWorst = 0, fillMean = 0, fillP99 = 0, fillWorst = 0;
+    uint32_t screenProbes = 0;
     float3 mapWorstAt{}, mapWorstNormal{};
     double radianceMean = 0, radianceWorst = 0;              // screenProbeRadiance against the uniform radiance
     uint32_t probes = 0;
@@ -591,6 +595,31 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
                     out.mapP99 = rel[std::min(rel.size() - 1, (size_t)(0.99 * rel.size()))];
                 }
             }
+            if (lobeAlpha <= 0)
+            {
+                std::vector<double> rs, rf;
+                for (size_t i = 0; i < values.size() / 16; ++i)
+                {
+                    const float* v = &values[16 * i];
+                    if (v[3] < 0 || v[15] < 0 || v[7] < 0) continue;
+                    const double x = expected({ v[8], v[9], v[10] }, { v[12], v[13], v[14] });
+                    if (x <= 0) continue;
+                    rs.push_back(std::fabs(v[15] / x - 1));
+                    rf.push_back(std::fabs(v[7] / x - 1));
+                }
+                auto summarise = [](std::vector<double>& r, double& mean, double& p99, double& worst) {
+                    if (r.empty()) return;
+                    double sumR = 0;
+                    for (double x : r) sumR += x;
+                    mean = sumR / r.size();
+                    std::sort(r.begin(), r.end());
+                    p99 = r[std::min(r.size() - 1, (size_t)(0.99 * r.size()))];
+                    worst = r.back();
+                };
+                out.screenProbes = (uint32_t)rs.size();
+                summarise(rs, out.screenMean, out.screenP99, out.screenWorst);
+                summarise(rf, out.fillMean, out.fillP99, out.fillWorst);
+            }
             out.radianceMean = n ? rsum / n : 0;
             out.radianceWorst = rworst;
             out.probes = n;
@@ -606,6 +635,10 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
         }
         logf("  cache maps at %u probe points: mean E %.5f (expected %.5f, %+.3f %%), worst %.3f %%\n", out.mapProbes, out.mapMean, out.mapExpectedMean,
              out.mapExpectedMean > 0 ? 100 * (out.mapMean / out.mapExpectedMean - 1) : 0.0, 100 * out.mapWorst);
+        if (out.screenProbes)
+            logf("  M's per-pixel cache irradiance at %u probe points: |error| mean %.3f %%, P99 %.3f %%, worst %.3f %% (partner corners); "
+                 "before (coarser fill): mean %.3f %%, P99 %.3f %%, worst %.3f %%\n",
+                 out.screenProbes, 100 * out.screenMean, 100 * out.screenP99, 100 * out.screenWorst, 100 * out.fillMean, 100 * out.fillP99, 100 * out.fillWorst);
         logf("    P99 %.3f %%; worst at (%.3f, %.3f, %.3f) n (%.2f, %.2f, %.2f): %.5f against %.5f\n", 100 * out.mapP99, out.mapWorstAt.x, out.mapWorstAt.y,
              out.mapWorstAt.z, out.mapWorstNormal.x, out.mapWorstNormal.y, out.mapWorstNormal.z, out.mapWorstValue, out.mapWorstExpected);
         if (giSystem) out.stats = giSystem->readStats();
@@ -747,7 +780,10 @@ int main(int argc, char** argv)
             // its Poisson spread (the single worst probe of ~32k noisy ones varied 4.8 - 6.5 % between identical runs).
             const double beyondLimit = k.mapBeyond3 + 3 * std::sqrt((double)k.mapBeyond3) + 5;
             const bool okE = e.mapProbes > 1000 && std::fabs(e.mapMean / e.mapExpectedMean - 1) < 0.01 && e.mapP99 < k.mapP99 + 0.005 &&
-                             e.mapBeyond3 <= beyondLimit && afterSum > steadyBefore && sameEpoch;
+                             e.mapBeyond3 <= beyondLimit && afterSum > steadyBefore && sameEpoch &&
+                             // M's per-pixel lookup where the irradiance varies (the shadow's edge): P99 1.29 % measured with the
+                             // partner corners, 4.73 % before them (the missing weight from coarser levels).
+                             e.screenProbes > 1000 && e.screenP99 < 0.02;
             logf("  probes beyond 3 %%: %u (control %u, limit %.0f)\n", e.mapBeyond3, k.mapBeyond3, beyondLimit);
             logf("instance edit (B3): a cube appended after %u frames; epoch %s; resets in the 8 frames before %u, after %u (live entries %u); "
                  "ground under the cube's shadow of sky: cache maps at %u probe points, mean E %.5f against %.5f (%+.3f %%), worst %.3f %% -> %s\n",
