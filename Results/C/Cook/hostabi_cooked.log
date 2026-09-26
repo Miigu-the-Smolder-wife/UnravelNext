@@ -1,0 +1,52 @@
+﻿round trip city_block   128 meshes 1378 instances 18 textures 0 lights: hash equal
+round trip forest_thin  14 meshes 1100002 instances 13 textures 0 lights: hash equal
+round trip forest_card  14 meshes 1100002 instances 18 textures 0 lights: hash equal
+round trip waterside    32 meshes 4370 instances 18 textures 0 lights: hash equal
+round trip interior     44 meshes 1059 instances 13 textures 6 lights: hash equal
+round trip city_night   125 meshes 1375 instances 18 textures 512 lights: hash equal
+round trip ridge_sunset 3 meshes 6 instances 13 textures 0 lights: hash equal
+round trip forest_combat 23 meshes 1104132 instances 13 textures 0 lights: hash equal
+UnravelNext host: scene committed, 129 meshes, 1379 instances, 2000684 triangles, 65819 clusters, 13043.4 ms, hash 4054136ef84a3ae6
+note: track entry point FX.simulation (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+RayScene: 353 static + 1026 dynamic instances (2 deformed), 114 mesh BLAS (2000324 tris, 44.6 MB compacted from 133.8 MB), deformed 64 tris / 40 verts (0 above proxy budget), TLAS static 0.1 MB dynamic 0.30 MB, load 93 ms
+RayScene resident (MB): static BLAS+TLAS 47.0 (BLAS 46.8, TLAS 0.11, descs+scratch 0.06), dynamic AS 0.5 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.49, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+GI cache: 200000 entries, 524288 table slots, 198.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 96 planar reflector planes from 34840 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 2.6 ms
+note: track entry point FX.particles (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+UnravelNext: wind needs a speed >= 0 and a unit direction (speed -1.000000, |direction| 1.000000)
+UnravelNext: 2 skeletons hold 4 joints, the pose buffer 3
+UnravelNext: saved scene 'live' (129 meshes, 1378 instances) to C:\Users\USER\UnravelNext-C\build\I\bin\host_abi_live.unxscene, hash 48255cc5165d3ad7
+live scene save: 1378 of 1379 instances (1 hidden), newest transform, bulk poses, sun, atmosphere and wind: as set
+UnravelNext host: scene committed, 44 meshes, 1059 instances, 9590 triangles, 340 clusters, 259.8 ms, hash bd8824949023f8b8
+committed interior: 44 meshes, 1059 instances, 9590 triangles, 340 clusters, 259.8 ms
+RayScene: 34 static + 1026 dynamic instances (1 deformed), 36 mesh BLAS (9366 tris, 0.2 MB compacted from 0.7 MB), deformed 32 tris / 20 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.30 MB, load 75 ms
+RayScene resident (MB): static BLAS+TLAS 0.3 (BLAS 0.2, TLAS 0.01, descs+scratch 0.01), dynamic AS 0.5 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.49, emitters 0.001), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+GI cache: 200000 entries, 524288 table slots, 198.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 1 planar reflector planes from 2 flat mirror triangles (3968 smooth-shaded mirror triangles stay on rays), 0.1 ms
+M shading: experiment mask 6 leaves terms out (cost attribution run, not an image)
+S VSM: 4109 page requests exhausted the 4096-page pool (frame 1): pool grows to 10304 pages
+S shadow overflow: frame 1 needed 7372800 words (55552 tiles over capacity): capacity grows to 16777216 words
+ABI frames: 64, latest completed frame 62: GPU 9.437 ms, 125 passes, CPU record 0.691 ms, submit 0.105 ms (1440p, correctness run, not a measurement)
+ABI graph of frame 62: 125 live passes, 1 command lists, 610 barriers in 116 batches, 0 cross-queue syncs, 66 transients (349.1 MB aliased), plan reused
+ABI queue timing of frame 62: graphics 1 lists, head 0.0000 tail 0.0000 gap 0.0000 ms; compute 0 lists (correctness run, not a measurement)
+ABI video memory of this process: local 1887.1 MB used of 15280.0 MB budget, non-local 82.1 MB (correctness run, 1440p test scene)
+note: track entry point FX.simulation (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+RayScene: 34 static + 1026 dynamic instances (1 deformed), 36 mesh BLAS (9366 tris, 0.2 MB compacted from 0.7 MB), deformed 32 tris / 20 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.30 MB, load 26 ms
+RayScene resident (MB): static BLAS+TLAS 0.3 (BLAS 0.2, TLAS 0.01, descs+scratch 0.01), dynamic AS 0.5 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.49, emitters 0.001), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+GI cache: 200000 entries, 524288 table slots, 198.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 1 planar reflector planes from 2 flat mirror triangles (3968 smooth-shaded mirror triangles stay on rays), 0.1 ms
+note: track entry point FX.particles (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+M shading: experiment mask 6 leaves terms out (cost attribution run, not an image)
+S VSM: 4109 page requests exhausted the 4096-page pool (frame 1): pool grows to 10304 pages
+S shadow overflow: frame 1 needed 7372800 words (55552 tiles over capacity): capacity grows to 16777216 words
+RayScene: 34 static + 1026 dynamic instances (1 deformed), 36 mesh BLAS (9366 tris, 0.2 MB compacted from 0.7 MB), deformed 32 tris / 20 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.30 MB, load 32 ms
+RayScene resident (MB): static BLAS+TLAS 0.3 (BLAS 0.2, TLAS 0.01, descs+scratch 0.01), dynamic AS 0.5 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.49, emitters 0.001), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+GI cache: 200000 entries, 524288 table slots, 198.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 1 planar reflector planes from 2 flat mirror triangles (3968 smooth-shaded mirror triangles stay on rays), 0.1 ms
+S VSM: 4109 page requests exhausted the 4096-page pool (frame 1): pool grows to 10304 pages
+S shadow overflow: frame 1 needed 7372800 words (55552 tiles over capacity): capacity grows to 16777216 words
+frame 64 (2560x1440), channel difference in codes of 1023:
+  ABI vs direct:    mean 0.000  P99 0  P99.9 0  max 0  identical 100.00 %
+  direct vs direct: mean 0.000  P99 0  P99.9 0  max 0  identical 100.00 %  (run-to-run floor)
+HOST ABI TEST PASSED
+GpuLock.ps1: cpu-contended: 9 s >= 4 cores, peak 22.4 cores; top: unx_shaderc.exe (1164) 7 core-s, unx_shaderc.exe (44756) 7 core-s, cl.exe (43256) 6 core-s, unx_shaderc.exe (59728) 5 core-s background: Remnant2-Win64-Shipping (13816) 79 s >= 200 ms/s, peak 706 ms/s; cpu 85 s >= 4 cores, peak 11.8 cores

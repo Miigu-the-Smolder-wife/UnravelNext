@@ -11,6 +11,31 @@ index ae6b84e..40f3640 100644
  add_dependencies(unx_host_core unx_host_shaders)
  
  file(GLOB_RECURSE unity_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/Unity/*.cpp")
+diff --git a/Native/Host/Tests/HostAbi.cpp b/Native/Host/Tests/HostAbi.cpp
+index eb9ba70..4b9cad6 100644
+--- a/Native/Host/Tests/HostAbi.cpp
++++ b/Native/Host/Tests/HostAbi.cpp
+@@ -8,6 +8,10 @@
+ //     FrameRenderer directly in this process; the two RGB10A2 images must match.
+ // --content runs part 1 only (no frames rendered); --live runs parts 1 and 1b (one frame rendered).
+ // Needs the C track for scenes: Tools/CI/Build.ps1 -Track I -Tracks "V;M;S;R;C;I".
++#if __has_include("unx/cook/TextureCook.h")
++#include "unx/cook/TextureCook.h"
++#include "unx/material/TextureSystem.h"
++#endif
+ #include "unx/host/UnravelNextHost.h"
+ 
+ #include "unx/core/Config.h"
+@@ -403,6 +407,9 @@ std::vector<uint32_t> renderDirect(const scene::Scene& s, const QualityConfig& q
+ 
+ int main(int argc, char** argv)
+ {
++#if __has_include("unx/cook/TextureCook.h") && HOST_ABI_TEST
++    unx::render::material::setChainProvider(&unx::cook::textureChain);
++#endif
+     try
+     {
+ #if !HOST_ABI_TEST
 diff --git a/Native/Host/src/Renderer/HostRenderer.cpp b/Native/Host/src/Renderer/HostRenderer.cpp
 index 6bec7f6..562b2a2 100644
 --- a/Native/Host/src/Renderer/HostRenderer.cpp
