@@ -93,6 +93,12 @@ struct Material
     // map i / 4 (Rgba8Linear, over the terrain's uv0), normalised by the weights' sum; 1..8 layers (splat 1 needed above 4).
     uint32_t terrainSplat[2] = { kNone, kNone };
     std::vector<TerrainLayer> terrainLayers;
+    // Clearcoat layer (A9, MATERIAL_LAYERS 1.1; Standard class): a clear dielectric film over the material,
+    // covering the fraction clearcoat of it, with its own perceptual roughness. Its refractive index is one of the
+    // tabulated coats (MaterialModel.h kCoatEtas): 1.5 (glaze, varnish, lacquer) or 1.33 (the water film of wet surfaces).
+    float clearcoat = 0.0f;                  // [0, 1]; 0 = no layer
+    float clearcoatRoughness = 0.05f;        // [0, 1]
+    float clearcoatIor = 1.5f;               // 1.5 or 1.33
 };
 
 struct Submesh

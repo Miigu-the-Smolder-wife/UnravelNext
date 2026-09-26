@@ -1,5 +1,7 @@
 #include "unx/scene/MaterialModel.h"
 
+#include "unx/core/Log.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -78,7 +80,121 @@ const Tables& tables()
     static const Tables t = buildTables();
     return t;
 }
+
+namespace eta150
+{
+#include "CoatTables150.inc"
+}
+namespace eta133
+{
+#include "CoatTables133.inc"
+}
+
+std::vector<float> buildCoatTable()
+{
+    std::vector<float> t(2 * kCoatTableStride, 0.0f);
+    auto put = [&](uint32_t k, const float* ec, const float* ems, const float* ax, const float* bx, const float* kms, const float* ab, const float* bb,
+                   const float* ksingle) {
+        float* o = t.data() + k * kCoatTableStride;
+        std::copy(ec, ec + 1024, o);
+        std::copy(ems, ems + 1024, o + 1024);
+        std::copy(ax, ax + 1024, o + 2048);
+        std::copy(bx, bx + 1024, o + 3072);
+        std::copy(kms, kms + 32, o + 4096);
+        std::copy(ab, ab + 32, o + 4128);
+        std::copy(bb, bb + 32, o + 4160);
+        o[4192] = ksingle[0];  // K(r = 0): the smooth interface
+    };
+    put(0, eta150::kCoatReflectance, eta150::kCoatReflectanceMs, eta150::kBaseEscapeA, eta150::kBaseEscapeB, eta150::kCoatInnerDiffuseReflectanceMs, eta150::kBaseMeanA,
+        eta150::kBaseMeanB, eta150::kCoatInnerDiffuseReflectance);
+    put(1, eta133::kCoatReflectance, eta133::kCoatReflectanceMs, eta133::kBaseEscapeA, eta133::kBaseEscapeB, eta133::kCoatInnerDiffuseReflectanceMs, eta133::kBaseMeanA,
+        eta133::kBaseMeanB, eta133::kCoatInnerDiffuseReflectance);
+    return t;
+}
+
+// Bilinear on the 32 x 32 (mu, r) grid of the albedo tables; 1D on r.
+float coatLookup2(const float* t, float mu, float r)
+{
+    const float last = (float)(kAlbedoTableSize - 1);
+    const float x = std::clamp(mu, 0.0f, 1.0f) * last, y = std::clamp(r, 0.0f, 1.0f) * last;
+    const uint32_t x0 = (uint32_t)x, y0 = (uint32_t)y;
+    const uint32_t x1 = std::min(x0 + 1, kAlbedoTableSize - 1), y1 = std::min(y0 + 1, kAlbedoTableSize - 1);
+    const float fx = x - x0, fy = y - y0;
+    auto at = [&](uint32_t xi, uint32_t yi) { return t[yi * kAlbedoTableSize + xi]; };
+    return (at(x0, y0) * (1 - fx) + at(x1, y0) * fx) * (1 - fy) + (at(x0, y1) * (1 - fx) + at(x1, y1) * fx) * fy;
+}
+float coatLookup1(const float* t, float r)
+{
+    const float y = std::clamp(r, 0.0f, 1.0f) * (float)(kAlbedoTableSize - 1);
+    const uint32_t y0 = (uint32_t)y, y1 = std::min(y0 + 1, kAlbedoTableSize - 1);
+    return t[y0] + (y - y0) * (t[y1] - t[y0]);
+}
 } // namespace
+
+const std::vector<float>& coatTable()
+{
+    static const std::vector<float> t = buildCoatTable();
+    return t;
+}
+
+uint32_t coatIndex(float eta)
+{
+    for (uint32_t k = 0; k < 2; ++k)
+        if (eta == kCoatEtas[k]) return k;
+    fail("clearcoat: eta %g is not a tabulated coat", eta);
+}
+
+float fresnelDielectric(float cosI, float eta)
+{
+    const float c = saturate(cosI);
+    const float s2 = (1 - c * c) / (eta * eta);
+    if (s2 >= 1) return 1;
+    const float ct = std::sqrt(1 - s2);
+    const float rs = (c - eta * ct) / (c + eta * ct), rp = (eta * c - ct) / (eta * c + ct);
+    return 0.5f * (rs * rs + rp * rp);
+}
+
+float3 evaluateCoated(const Surface& s, const Coat& c, float3 n, float3 v, float3 l)
+{
+    const float3 base = evaluate(s, n, v, l);
+    if (!(c.cover > 0)) return base;
+    const float NoV = dot(n, v), NoL = dot(n, l);
+    if (NoV <= 0 || NoL <= 0) return base * (1 - c.cover);
+    const float* t = coatTable().data() + coatIndex(c.eta) * kCoatTableStride;
+    const float eta = c.eta, rc = c.roughness, ac = alphaFromRoughness(rc);
+    // coat reflection (A2)
+    const float ecv = coatLookup2(t, NoV, rc), ecl = coatLookup2(t, NoL, rc), emv = coatLookup2(t + 1024, NoV, rc), eml = coatLookup2(t + 1024, NoL, rc);
+    const float3 h = normalize(v + l);
+    const float NoH = saturate(dot(n, h)), VoH = saturate(dot(v, h));
+    const float3 nxh = cross(n, h);
+    const float scale = ecv > 0 && ecl > 0 ? std::sqrt(emv * eml / (ecv * ecl)) : 1.0f;
+    const float fc = distributionGgx(NoH, dot(nxh, nxh), ac) * visibilitySmithGgxCorrelated(NoV, NoL, ac) * fresnelDielectric(VoH, eta) * scale;
+    const float tv = 1 - emv, tl = 1 - eml;
+    // first pass (S): the base lobe between the refracted directions, widened by the coat's roughness
+    auto refract = [&](float3 w, float mu, float& muIn) {
+        muIn = std::sqrt(std::max(0.0f, 1 - (1 - mu * mu) / (eta * eta)));
+        return (w - n * mu) * (1 / eta) + n * muIn;
+    };
+    float mv, ml;
+    const float3 pv = refract(v, NoV, mv), pl = refract(l, NoL, ml);
+    const float sv = 1 - NoV / (eta * mv), sl = 1 - NoL / (eta * ml);
+    const float ab = alphaFromRoughness(s.roughness);
+    Surface lobe = s;
+    lobe.roughness = std::sqrt(std::sqrt(ab * ab + 0.25f * (sv * sv + sl * sl) * ac * ac));
+    const float3 f1 = evaluate(lobe, n, pv, pl) * (tv * tl / (eta * eta));
+    // light returned by the coat's inside
+    const float3 F = f0(s), rd = s.baseColor * (1 - s.metallic);
+    const float2 abl = specularAlbedo(ml, s.roughness);
+    const float axl = coatLookup2(t + 2048, ml, s.roughness), bxl = coatLookup2(t + 3072, ml, s.roughness);
+    const float3 comp = float3{ 1, 1, 1 } + F * (1 / directionalAlbedo(ml, s.roughness) - 1);
+    const float3 returned = rd * t[4192] + (F * (abl.x - axl) + float3{ 1, 1, 1 } * (abl.y - bxl)) * comp;
+    const float abar = coatLookup1(t + 4128, s.roughness), bbar = coatLookup1(t + 4160, s.roughness);
+    const float3 rho = rd + (F * abar + float3{ 1, 1, 1 } * bbar) * (float3{ 1, 1, 1 } + F * (1 / (abar + bbar) - 1));
+    const float kms = coatLookup1(t + 4096, rc);
+    const float3 fms = float3{ returned.x * rho.x / (1 - rho.x * kms), returned.y * rho.y / (1 - rho.y * kms), returned.z * rho.z / (1 - rho.z * kms) } *
+                       (tl * tv / (kPi * eta * eta));
+    return base * (1 - c.cover) + (float3{ fc, fc, fc } + f1 + fms) * c.cover;
+}
 
 float alphaFromRoughness(float roughness) { return std::max(roughness * roughness, kMinAlpha); }
 

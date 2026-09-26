@@ -1306,6 +1306,64 @@ UNX_TEST(material_model_table)
     CHECK(std::fabs(d * kPi * 1e-8f - 1.0f) < 1e-4f);
 }
 
+UNX_TEST(clearcoat_model)
+{
+    // A9 clearcoat (MaterialModel.h evaluateCoated): no coat = the base; the tables are finite and in [0, 1]; a white base
+    // under a rough coat keeps an albedo near 1 (a gross-error bound only: the v1 base is Lambert + a Schlick lobe, so its
+    // own albedo is not 1; the MATERIAL_LAYERS 3 criteria are judged by C's study tool against the layer model).
+    namespace m = scene::model;
+    const auto& t = m::coatTable();
+    CHECK(t.size() == 2 * m::kCoatTableStride);
+    for (float x : t) CHECK(std::isfinite(x) && x >= 0 && x <= 1);
+    const float3 n{ 0, 0, 1 };
+    m::Surface white;
+    white.baseColor = { 1, 1, 1 };
+    white.roughness = 0.6f;
+    white.specular = 0;
+    m::Coat none;
+    const float3 v0 = normalize(float3{ 0.6f, 0.1f, 0.7f }), l0 = normalize(float3{ -0.3f, 0.4f, 0.8f });
+    const float3 a = m::evaluate(white, n, v0, l0), b = m::evaluateCoated(white, none, n, v0, l0);
+    CHECK(a.x == b.x && a.y == b.y && a.z == b.z);
+    for (float eta : m::kCoatEtas)
+        for (float mu : { 1.0f, 0.7f, 0.4f })
+        {
+            m::Coat coat;
+            coat.cover = 1;
+            coat.roughness = 0.3f;
+            coat.eta = eta;
+            const float3 v{ std::sqrt(1 - mu * mu), 0, mu };
+            // albedo = integral of f cos over the hemisphere (midpoint rule in (cos theta, phi); the lobes are broad)
+            double albedo = 0, baseAlbedo = 0;
+            const int NT = 512, NP = 512;
+            for (int i = 0; i < NT; ++i)
+                for (int j = 0; j < NP; ++j)
+                {
+                    const float c = (i + 0.5f) / NT, sn = std::sqrt(1 - c * c), ph = 2 * m::kPi * (j + 0.5f) / NP;
+                    const float3 l{ sn * std::cos(ph), sn * std::sin(ph), c };
+                    albedo += m::evaluateCoated(white, coat, n, v, l).y * c * (2 * m::kPi / NT / NP);
+                    baseAlbedo += m::evaluate(white, n, v, l).y * c * (2 * m::kPi / NT / NP);
+                }
+            logf("clearcoat eta %.2f r_c 0.3 over a white base, mu %.1f: albedo %.4f (uncoated %.4f)\n", eta, mu, albedo, baseAlbedo);
+            CHECK(albedo > 0.9 && albedo < 1.1);
+        }
+    // the scene block
+    scene::Scene s;
+    scene::Material coated;
+    coated.clearcoat = 0.75f;
+    coated.clearcoatRoughness = 0.1f;
+    coated.clearcoatIor = 1.33f;
+    s.materials.push_back(coated);
+    scene::validate(s);
+    const scene::Scene back = scene::deserialize(scene::serialize(s));
+    CHECK(back.materials[0].clearcoat == 0.75f && back.materials[0].clearcoatRoughness == 0.1f && back.materials[0].clearcoatIor == 1.33f);
+    scene::Scene bad = s;
+    bad.materials[0].clearcoatIor = 1.4f;  // not tabulated
+    CHECK(throws([&] { scene::validate(bad); }));
+    bad = s;
+    bad.materials[0].cls = scene::MaterialClass::Glass;
+    CHECK(throws([&] { scene::validate(bad); }));
+}
+
 UNX_TEST(reflection_view_geometry)
 {
     scene::Camera cam;

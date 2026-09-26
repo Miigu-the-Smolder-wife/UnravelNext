@@ -259,6 +259,34 @@ void writeTerrain(Writer& w, const Scene& s)
     }
 }
 
+// A9 clearcoat extension block, written only when a material has a coat: u32 tag "COAT", u64 count, then per coated
+// material its index, clearcoat, clearcoatRoughness, clearcoatIor.
+constexpr uint32_t kCoatTag = 0x54414F43u;  // "COAT"
+
+bool anyCoat(const Scene& s)
+{
+    for (const Material& m : s.materials)
+        if (m.clearcoat > 0) return true;
+    return false;
+}
+
+void writeCoat(Writer& w, const Scene& s)
+{
+    w.pod(kCoatTag);
+    uint64_t count = 0;
+    for (const Material& m : s.materials) count += m.clearcoat > 0;
+    w.pod(count);
+    for (uint32_t i = 0; i < s.materials.size(); ++i)
+    {
+        const Material& m = s.materials[i];
+        if (!(m.clearcoat > 0)) continue;
+        w.pod(i);
+        w.pod(m.clearcoat);
+        w.pod(m.clearcoatRoughness);
+        w.pod(m.clearcoatIor);
+    }
+}
+
 bool anyMorph(const Scene& s)
 {
     for (const Mesh& m : s.meshes)
@@ -318,6 +346,7 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anyHair(s)) writeHair(w, s);
     if (anyCut(s)) writeCut(w, s);
     if (anyTerrain(s)) writeTerrain(w, s);
+    if (anyCoat(s)) writeCoat(w, s);
     return std::move(w.out);
 }
 
@@ -420,6 +449,19 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kCoatTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.materials.size()) fail("unxscene: clearcoat parameters of material %u of %zu", i, s.materials.size());
+            s.materials[i].clearcoat = r.pod<float>();
+            s.materials[i].clearcoatRoughness = r.pod<float>();
+            s.materials[i].clearcoatIor = r.pod<float>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
     if (tag != 0) fail("unxscene: unknown extension block 0x%08x", tag);
     if (r.at != bytes.size()) fail("unxscene: %zu trailing bytes", bytes.size() - r.at);
     return s;
@@ -462,6 +504,15 @@ void validate(const Scene& s)
             fail("material %zu '%s': hair needs melanin >= 0, beta_N in (0, 1], a finite tilt and ior > 1", i, m.name.c_str());
         if (m.cls == MaterialClass::Cut && !(m.cutScale > 0 && m.cutDamageWidth >= 0 && std::isfinite(m.cutScale) && std::isfinite(m.cutDamageWidth)))
             fail("material %zu '%s': a cut material needs cutScale > 0 and cutDamageWidth >= 0", i, m.name.c_str());
+        if (m.clearcoat != 0)
+        {
+            if (!(m.clearcoat > 0 && m.clearcoat <= 1 && m.clearcoatRoughness >= 0 && m.clearcoatRoughness <= 1))
+                fail("material %zu '%s': clearcoat in (0, 1] and clearcoatRoughness in [0, 1]", i, m.name.c_str());
+            if (m.cls != MaterialClass::Standard)
+                fail("material %zu '%s': a clearcoat is defined on Standard materials", i, m.name.c_str());
+            if (m.clearcoatIor != 1.5f && m.clearcoatIor != 1.33f)
+                fail("material %zu '%s': clearcoatIor %g is not a tabulated coat (1.5 or 1.33)", i, m.name.c_str(), m.clearcoatIor);
+        }
         if (m.cls == MaterialClass::Terrain)
         {
             const size_t layers = m.terrainLayers.size();
