@@ -551,6 +551,26 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   c.computeConstants(k, 8);
                   c.cmd->ExecuteIndirect(signature, 1, c.resource(mapArgs), 0, nullptr, 0);
               });
+    // M's per-pixel cache irradiance (front side) as a pass of its own (GiScreenIrradiance.hlsl; R_STATUS 0, GI tile path
+    // verdict): M reads view.giIrradiance once instead of the lookup inside its shading kernel. Culled while nothing reads it.
+    {
+        const TextureRef screen = g.createTexture({ "GI screen irradiance", main.view.width, main.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        g.addPass("r.gi.screen", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(cache, Use::SrvCompute);
+                      b.use(depth, Use::SrvCompute);
+                      b.use(gbuffer, Use::SrvCompute);
+                      b.use(screen, Use::UavCompute);
+                  },
+                  [&shaders, cache, depth, gbuffer, screen, frameConstants, main](PassContext& c) {
+                      const uint32_t k[8] = { c.srv(cache), c.srv(depth), c.srv(gbuffer), c.uav(screen), main.view.width, main.view.height, 0, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiScreenIrradiance"));
+                      c.computeConstants(k, 8);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch((main.view.width + 7) / 8, (main.view.height + 7) / 8, 1);
+                  });
+        main.giIrradiance = screen;
+    }
     if (m_lookupStatsOn)
     {
         if (!m_lookupStats)
@@ -575,10 +595,12 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                           b.use(depth, Use::SrvCompute);
                           b.use(gbuffer, Use::SrvCompute);
                           b.use(counters, Use::UavCompute);
+                          b.use(main.giIrradiance, Use::SrvCompute);
                           b.keep();
                       },
                       [&shaders, cache, depth, gbuffer, counters, frameConstants, main, clear](PassContext& c) {
-                          const uint32_t k[8] = { c.srv(cache), c.srv(depth), c.srv(gbuffer), c.uav(counters), main.view.width, main.view.height, clear, 0 };
+                          const uint32_t k[8] = { c.srv(cache), c.srv(depth), c.srv(gbuffer), c.uav(counters), main.view.width, main.view.height, clear,
+                                                  c.srv(main.giIrradiance) };
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/Gates/GiLookupStats"));
                           c.computeConstants(k, 8);
                           c.bindFrameConstants(frameConstants);
@@ -619,6 +641,8 @@ GiLookupStats GiSystem::readLookupStats()
     st.evaluated = h[14];
     std::memcpy(&st.fillMaxRel, &h[80], 4);
     st.fillSumRel1e3 = h[81], st.fillCompared = h[82], st.fillOver1 = h[83], st.fillOver5 = h[84];
+    st.screenFlagDiffers = h[85], st.screenOver = h[86], st.screenCompared = h[88];
+    std::memcpy(&st.screenMaxRel, &h[87], 4);
     for (int i = 0; i < 64; ++i) st.entryHistogram[i] = h[16 + i];
     return st;
 }

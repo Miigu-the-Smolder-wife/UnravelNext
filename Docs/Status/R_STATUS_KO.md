@@ -70,6 +70,10 @@
     M 안에 넣어도(LDS 5 KB) 이득이 없으니 GiCacheTile은 M에 넣지 않는다.
     따로 패스(픽셀별 조회를 자기 커널에서 해 텍스처로 쓰고, M은 한 번 읽음)는 2.44 ms + 쓰기·읽기 대 M 안 약 3.4 ms [예상]다. 이득은 약 0.8 ms [예상]이고, 결정은 A의 M 커널과 같이 한다.
     다음 최적화 후보는 지도 평가 정보량 줄이기다(같은 결과를 내는 표현만). 기록만 하고 판정은 하지 않는다.
+  - **r.gi.screen(따로 패스, A 동의) [실측, 2026-09-27]**: GiScreenIrradiance.hlsl이 M과 같은 입력(GiScreenInputs.hlsli: mPixelRay × 선형 깊이, mNormalTowardsViewer)으로
+    giCacheIrradianceScreen(앞면)을 계산해 ViewResources::giIrradiance(RGBA16F, rgb × 노출, a = 캐시 값 있음)에 쓴다. 읽는 곳이 없으면 그래프가 컬링한다.
+    통합 city 4K `--lookup-stats`: 791만 픽셀 중 플래그 불일치 0, 최대 상대 차 9.75e-4(반정밀 1 ULP). Foliage 뒷면은 M 안 조회로 남는다.
+    M 교체와 m.lit.shade.b0 전후 측정은 A가 맡는다. 단독 커널 비용은 2.44 ms 순 [실측, bench.probe.cache].
 - **굴절·반사 광선 서비스(2026-09-27, R-W1/R-W2 물, R-1/R-2 유리)**: core `FrameServices::traceRefractions`(A 43e2af7).
   - 호출자(W, A)가 작업 목록을 쓴다. 머리 16 B + 작업 48 B { origin, outputSlot; direction, flags; sigmaA, iorInside }.
   - R(RefractionTrace.hlsl, ReflectionSystem::recordRefraction)은 작업마다 추적하고 RGBA16F(노출 곱한 선형)를 돌려준다.

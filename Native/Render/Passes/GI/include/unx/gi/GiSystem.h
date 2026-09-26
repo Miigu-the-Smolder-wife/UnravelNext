@@ -45,6 +45,10 @@ struct GiLookupStats
     uint32_t fillSumRel1e3 = 0, fillCompared = 0, fillOver1 = 0, fillOver5 = 0;
     uint32_t tiles = 0, tileKeys = 0, tileEntries = 0, maxTileKeys = 0, maxTileEntries = 0;
     uint32_t entryHistogram[64] = {};  // tiles by distinct entries (63 = 63 or more)
+    // r.gi.screen's texture (view.giIrradiance) against the per-pixel lookup on M's inputs: pixels whose data flag differs,
+    // pixels compared (both with data, value in the half's normal range), those over 1e-3 relative, the largest relative.
+    uint32_t screenFlagDiffers = 0, screenCompared = 0, screenOver = 0;
+    float screenMaxRel = 0;
 };
 
 class GiSystem

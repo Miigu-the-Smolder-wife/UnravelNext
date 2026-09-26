@@ -428,6 +428,10 @@ int main(int argc, char** argv)
                      "over 1 %% %.2f %%, over 5 %% %.3f %% of %u pixels\n",
                      res.name.c_str(), l.evaluated / p, l.fillSumRel1e3 * 1e-3 / std::max(1u, l.fillCompared), l.fillMaxRel,
                      100.0 * l.fillOver1 / std::max(1u, l.fillCompared), 100.0 * l.fillOver5 / std::max(1u, l.fillCompared), l.fillCompared);
+                const bool screenOk = l.screenFlagDiffers == 0 && l.screenOver == 0 && l.screenCompared > 0;
+                logf("R %s: r.gi.screen texture vs per-pixel lookup on M's inputs: %u pixels with a different data flag, %u compared, %u over 1.1e-3 "
+                     "relative (max %.3g) %s\n",
+                     res.name.c_str(), l.screenFlagDiffers, l.screenCompared, l.screenOver, l.screenMaxRel, screenOk ? "PASS" : "FAIL");
             }
             if (noiseFrames > 0)
             {

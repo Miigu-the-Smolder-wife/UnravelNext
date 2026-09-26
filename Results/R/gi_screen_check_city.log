@@ -1,0 +1,61 @@
+﻿powershell : scene city_block (ee15d94a67cda9b3), camera 'street', 353 instances, quality 3c14221cb135a898
+At line:1 char:342
++ ... nravelNext; powershell -ExecutionPolicy Bypass -File Tools/CI/GpuLock ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (scene city_bloc...c14221cb135a898:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+RayScene: 353 static + 0 dynamic instances (0 deformed), 110 mesh BLAS (2000276 tris, 44.6 MB compacted from 133.7 MB),
+ deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.1 MB dynamic 0.02 MB, load 176 ms (records and mesh BL
+AS 168.1, proxies 0.1, deformed setup 3.2, static TLAS and records 3.4, first dynamic build 1.1)
+RayScene resident (MB): static BLAS+TLAS 47.0 (BLAS 46.8, TLAS 0.11, descs+scratch 0.06), dynamic AS 0.0 (deformed BLAS
+ 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries,
+ proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 353 static instances in 55 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 join
+t spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 ray
+s = 7812 hemisphere updates per frame
+R reflections: 96 planar reflector planes from 34840 flat mirror triangles (0 smooth-shaded mirror triangles stay on ra
+ys), 1.8 ms
+[city_block_street_4K_integrated 4K] gpu frame median 21.3779 ms, p95 25.3276, p99 30.2715 (n=60) | cpu frame median 1.
+0007 ms (record 0.5601, submit 0.0846) | SM clock median 2820 MHz (min 2820) | passes 182, barriers 1108 in 173 batches
+, cross-queue syncs 0, command lists 1, transients 101 (1586.6 MB aliased / 2479.2 MB unaliased) | quality 3c14221cb135
+a898
+[city_block_street_4K_integrated 4K] outside passes: graphics 1 lists, head 0.0000, tail 0.0000, gap 0.0000 ms (medians
+)
+R 4K: GI cache lookup (M, front side) per pixel: levels 1.479 (27.70 % of pixels > 1), cells 11.83, table slots 15.80 (
+1.34 per cell), cells with data 6.88; per 8x8 tile: distinct cells 23.8 (max 386), distinct entries 13.0 (max 270) over
+ 123815 tiles, 7912206 pixels
+R 4K: tiles by distinct entries: 2:13 3:10 4:9275 5:905 6:20525 7:2665 8:19484 9:7798 10:6027 11:3510 12:11661 13:3311 
+14:4401 15:3524 16:3891 17:2897 18:4107 19:2301 20:2395 21:1572 22:1609 23:1358 24:1354 25:961 26:851 27:643 28:628 29:
+429 30:465 31:363 32:303 33:248 34:203 35:164 36:184 37:169 38:158 39:148 40:139 41:127 42:142 43:109 44:107 45:119 46:
+100 47:111 48:87 49:77 50:83 51:72 52:75 53:85 54:61 55:71 56:65 57:55 58:66 59:48 60:54 61:50 62:46 63:1356
+R 4K: group-resolved lookup (GiCacheTile.hlsli) vs per-pixel: 0 pixels differ (max relative 0), 2.5232 cells per pixel 
+not in the tile table
+R 4K: entries evaluated per pixel 6.87; against the reconstruction before the partner corners: mean relative 0.0335, ma
+x 0.983, over 1 % 62.14 %, over 5 % 22.954 % of 7912144 pixels
+R 4K: r.gi.screen texture vs per-pixel lookup on M's inputs: 0 pixels with a different data flag, 7912144 compared, 0 o
+ver 1e-3 relative (max 0.000975) PASS
+R 4K: reflections 4.421 ms (trace 0.315 ms, classify 0.137, resolve 0.139)
+R 4K: integrated frame 21.378 ms GPU (median)
+R 4K: GI 1.237 ms (trace 0.721 ms = 0.69 G rays/s incl. hit shading), acceleration structures 0.013 ms; stand-in primar
+y visibility 0.000 ms (not R)
+R 4K: over 63 frames: exact set 0.00 of 0 slots occupied, 0.000 slot builds / frame (0), 0 exact vertices deformed / fr
+ame; proxy cut switches 0.000 / frame (0); per frame 0.00 instances wanted, 0.00 hit often but within their proxy's err
+or bound
+R 4K: dynamic TLAS input: 0 instances, 0 distinct BLAS, 0 non-finite transforms, 0 mask 0, 0 null BLAS, max scale 0.000
+, translation span -2000000030094932439753377710080.0 x -2000000030094932439753377710080.0 x -2000000030094932439753377
+710080.0 m
+R 4K: last frame: proxy cuts 0 triangles refit, 0 vertices deformed; finest cut's posed error bound up to 0.0 x V's bin
+d-pose error
+R 4K: reflection jobs 560509 (M 368017 = rays 368017; G samples 111655 = rays 446620), G pixels 1894004
+R 4K: planar candidates 21 visible, largest plane 404616 mirror pixels, 1 views (404616 px), CPU 0.017 ms
+R 4K: planar cost choice: rays 4.531 ns/ray (measured), views 1.127 ms + 0.000 ns per mirror pixel (fit of measured vie
+ws), last views 1.197 ms over 4227840 rectangle px
+R 4K: cache 179980 live, 86982 requested, 7812 selected + 0 background updates, 118297 hit entries, 3230 created, 0 all
+ocation failures, 0 table overflows
+R 4K: reflection hits' cache lookups 633309, with no data at any level searched 0 (0.000 %)
+R 4K: reflection G samples 111655, estimated by the ratio branch (beta < 1) 14066 (12.60 %)
+R 4K: G samples by log2(mean L / mean g): <-3 13088, -3 3827, -2 10444, -1 30437, 0 41307, 1 9747, 2 1976, 3 525, >=4 2
+56; mean g = 0 48
+GpuLock.ps1: background: cpu 20 s >= 4 cores, peak 6.2 cores

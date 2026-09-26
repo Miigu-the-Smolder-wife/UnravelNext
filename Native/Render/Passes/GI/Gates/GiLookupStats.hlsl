@@ -10,11 +10,16 @@
 //   relative difference (float bits), 13 cells the tile table did not hold (per-pixel path), 14 entries evaluated
 //   (weight > 0 after the partner corners), 16..79 histogram of distinct entries per tile (63 = 63 or more); against the
 //   reconstruction before the partner corners (statsFillOnly): 80 largest relative difference (float bits), 81 sum of
-//   relative differences x 1e3, 82 pixels compared, 83 over 1 %, 84 over 5 %.
-// P[0] = { cache SRV, depth SRV, gbuffer SRV, counters UAV }, P[1] = { width, height, clear, 0 }; b1 = the main view.
+//   relative differences x 1e3, 82 pixels compared, 83 over 1 %, 84 over 5 %; r.gi.screen's texture (P[1].w) against
+//   giCacheIrradianceScreen on M's inputs (GiScreenInputs.hlsli): 85 pixels whose data flag differs, 86 pixels over 1.1e-3
+//   relative (one half ULP), 87 the largest relative difference (float bits), 88 pixels compared (both with data, the stored value in
+//   the half's normal range: 2^-11 rounding).
+// P[0] = { cache SRV, depth SRV, gbuffer SRV, counters UAV }, P[1] = { width, height, clear, screen irradiance SRV };
+// b1 = the main view.
 // clear = 1: one group zeroes the 80 counters (dispatched first).
 #include "GBuffer.hlsli"
 #include "Passes/GI/GiCacheTile.hlsli"
+#include "Passes/GI/GiScreenInputs.hlsli"
 
 #define STATS_SET 1024u
 groupshared uint gs_keys[STATS_SET];     // distinct cell keys of the tile (32-bit hashes of the 64-bit keys)
@@ -182,6 +187,26 @@ void main(uint2 pixel : SV_DispatchThreadID, uint lane : SV_GroupIndex)
             }
             const float take = k == 0 ? 1 - beta : 1.0;
             remain *= 1 - take * w;
+        }
+        {
+            // r.gi.screen's stored value against the lookup on M's own inputs.
+            float3 pm, nm;
+            if (giScreenInputs(pixel, d, gbuffer.Load(int3(pixel, 0)), pm, nm))
+            {
+                Texture2D<float4> screen = ResourceDescriptorHeap[P[1].w];
+                const float4 stored = screen.Load(int3(pixel, 0));
+                float we;
+                const float3 e = giCacheIrradianceScreen(cache, h, pm, nm, we);
+                if ((stored.a > 0) != (we > 0)) counters.InterlockedAdd(340, 1u);
+                else if (we > 0 && max(max(e.x, e.y), e.z) * g_exposure > 6.2e-5)
+                {
+                    const float3 back = stored.rgb / g_exposure;
+                    const float rel = max(max(abs(back.x - e.x), abs(back.y - e.y)), abs(back.z - e.z)) / max(max(e.x, e.y), e.z);
+                    counters.InterlockedAdd(352, 1u);
+                    counters.InterlockedMax(348, asuint(rel));
+                    if (rel > 1.1e-3) counters.InterlockedAdd(344, 1u);  // one half ULP 2^-10: D3D's float -> half store may round either way
+                }
+            }
         }
         counters.InterlockedAdd(0, 1u);
         counters.InterlockedAdd(4, levels);
