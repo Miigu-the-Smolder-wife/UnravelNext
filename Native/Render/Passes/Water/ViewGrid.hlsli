@@ -1,0 +1,113 @@
+// Water view grid (FEATURES_GAME 1.8 B): the camera's water surface at the density its visible detail needs. Far field:
+// a grid of the camera's world azimuth phi (spacing theta: one pixel across) x rest distance r_j from the camera (a row
+// table: spacing min(one pixel row on the still plane, 2.5 pixel footprints), because a crest's height projects to
+// a / f pixels while its length along the view is foreshortened: a crest 0.5 px tall (wavelength >= 10 f in the spectrum
+// tail) needs samples 2.5 f apart along the view). The displaced grid is scattered into the pixels with a 64-bit atomic
+// min of (view depth | triangle id): each pixel's first intersection with the displaced mesh.
+// Parameter buffer (raw):
+//   float4 rows 0 camera position (x, y, z), water level        1 right (x, y, z), tan(fov x / 2)
+//               2 up (x, y, z), tan(fov y / 2)                  3 forward (x, y, z), far ring (m: the water body's extent)
+//               4 phi_0 (rad: the first column), 0, theta (rad), near-field radius r_n (m, horizontal)
+//               5 columns, rows, width, height (uint)
+//               6 cascade lengths (m) 0..2, 0
+//               7 mask: lake centre x, z, radius (m), enabled (uint; 0 = open sea)
+//   from byte 128: per row j, (r_j, along spacing at r_j) float2
+#ifndef UNX_WATER_VIEW_GRID_HLSLI
+#define UNX_WATER_VIEW_GRID_HLSLI
+#include "Bindless.hlsli"
+
+#define VG_TRIANGLE_PIXELS 8  // pixels per triangle and axis tested in the scatter thread (structural; excess counted)
+#define VG_ROW_TABLE 128u     // byte offset of the row table in the parameter buffer
+
+struct ViewGridParams
+{
+    float3 camera; float waterLevel;
+    float3 right; float tanX;
+    float3 up; float tanY;
+    float3 forward; float far;
+    float phi0, theta, nearRadius;
+    uint columns, rows, width, height;
+    float3 lengths;
+    float2 lakeCentre; float lakeRadius; uint lake;
+    uint srv;
+};
+ViewGridParams viewGridParams(uint srv)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[srv];
+    ViewGridParams p;
+    float4 r;
+    r = asfloat(b.Load4(0));   p.camera = r.xyz; p.waterLevel = r.w;
+    r = asfloat(b.Load4(16));  p.right = r.xyz; p.tanX = r.w;
+    r = asfloat(b.Load4(32));  p.up = r.xyz; p.tanY = r.w;
+    r = asfloat(b.Load4(48));  p.forward = r.xyz; p.far = r.w;
+    r = asfloat(b.Load4(64));  p.phi0 = r.x; p.theta = r.z; p.nearRadius = r.w;
+    const uint4 u = b.Load4(80); p.columns = u.x; p.rows = u.y; p.width = u.z; p.height = u.w;
+    r = asfloat(b.Load4(96));  p.lengths = r.xyz;
+    const uint4 m = b.Load4(112); p.lakeCentre = asfloat(m.xy); p.lakeRadius = asfloat(m.z); p.lake = m.w;
+    p.srv = srv;
+    return p;
+}
+// Row j: (rest distance r_j, spacing along the view there).
+float2 viewGridRow(ViewGridParams p, uint row)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[p.srv];
+    return asfloat(b.Load2(VG_ROW_TABLE + 8 * min(row, p.rows - 1)));
+}
+
+// Rest position (x, z) of grid point (column i, row j) and its horizontal distance; false with the camera under water.
+// The row table ends at the far ring (the water body's extent; open sea: the horizon), so the mesh reaches it.
+bool viewGridRest(ViewGridParams p, int2 ij, out float2 x0, out float distance)
+{
+    const float phi = p.phi0 + float(ij.x) * p.theta;
+    distance = viewGridRow(p, uint(ij.y)).x;
+    x0 = p.camera.xz + distance * float2(cos(phi), sin(phi));
+    return p.camera.y > p.waterLevel;
+}
+// Rest-plane footprint of a grid cell (m): across (azimuth) d theta, along (the view direction) the row spacing.
+float2 viewGridFootprint(ViewGridParams p, float distance, int row)
+{
+    return float2(distance * p.theta, viewGridRow(p, uint(row)).y);
+}
+// Displacement (Dx, h, Dz) at rest position x0, low-passed to the isotropic footprint s (each cascade's mip), trilinear.
+float3 viewGridDisplacement(uint field, float3 lengths, float2 x0, float s)
+{
+    Texture2DArray<float4> f = ResourceDescriptorHeap[field];
+    float3 d = 0;
+    [unroll] for (uint c = 0; c < 3; ++c)
+    {
+        const float L = lengths[c];
+        const float mip = clamp(log2(s * 512.0 / L), 0.0, 9.0);
+        d += f.SampleLevel(g_linearWrap, float3(x0 / L + 0.5 / 512.0, c), mip).xyz;
+    }
+    return d;
+}
+// The same with the anisotropic footprint (across, along in rest-plane metres, along the direction `along`): SampleGrad
+// on the anisotropic-16 sampler.
+float3 viewGridDisplacementAniso(uint field, float3 lengths, float2 x0, float2 footprint, float2 along)
+{
+    Texture2DArray<float4> f = ResourceDescriptorHeap[field];
+    const float2 across = float2(-along.y, along.x);
+    float3 d = 0;
+    [unroll] for (uint c = 0; c < 3; ++c)
+    {
+        const float L = lengths[c];
+        d += f.SampleGrad(g_anisoWrap, float3(x0 / L + 0.5 / 512.0, c), across * footprint.x / L, along * footprint.y / L).xyz;
+    }
+    return d;
+}
+// Screen position (pixels, x right, y down) and view depth of a world point; depth <= 0 behind the camera.
+float3 viewGridProject(ViewGridParams p, float3 world)
+{
+    const float3 v = world - p.camera;
+    const float z = dot(v, p.forward);
+    const float x = dot(v, p.right) / (z * p.tanX), y = dot(v, p.up) / (z * p.tanY);
+    return float3((x * 0.5 + 0.5) * float(p.width), (0.5 - y * 0.5) * float(p.height), z);
+}
+// Whether the water body reaches within `reach` of rest position x0 (its signed distance <= reach). With reach = the
+// grid cell's diagonal, every triangle that touches the water has a vertex that passes: the surface is kept up to one
+// cell past the shore, where the terrain covers it.
+bool viewGridWater(ViewGridParams p, float2 x0, float reach)
+{
+    return p.lake == 0 || distance(x0, p.lakeCentre) - p.lakeRadius <= reach;
+}
+#endif
