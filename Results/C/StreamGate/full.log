@@ -1,0 +1,21 @@
+﻿waiting for the GPU measurement lock; held by: (unknown)
+powershell : ocean stream: 320 x 1708 cells, 1093120 triangles (all drawn), 100.1 MB of vertices
+At line:1 char:562
++ ... .Count-1)]; powershell -NoProfile -File Tools/CI/GpuLock.ps1 -Track V ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ocean stream: 3... MB of vertices:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+V: instance hierarchy: 1 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint s
+pheres)
+V: capacity exceeded in 'main', frame 0 (bits 0x100): raise visibility.max_* (Stats::overflow; 0x100: the coverage reco
+rd pool ran out, it grows from the next completed frame; 0x400: a shader loop reached its iteration bound or a coverage
+ consistency check failed, a defect)
+[V ocean stream 4K] gpu frame median 6.0211 ms, p95 6.4636, p99 6.7073 (n=240) | cpu frame median 0.2926 ms (record 0.1
+600, submit 0.0591) | SM clock median 2820 MHz (min 2565) | passes 41, barriers 279 in 42 batches, cross-queue syncs 0,
+ command lists 1, transients 17 (989.0 MB aliased / 1120.7 MB unaliased) | quality 8bdf1be41e4365f2
+[V ocean stream 4K] outside passes: graphics 1 lists, head 0.0000, tail 0.0000, gap 0.0000 ms (medians)
+[stream gate 4K] 1093120 triangles in 34160 groups: stream raster 2.301 ms (2.105 ns per triangle, 67.4 ns per group), 
+17445876 coverage records (2.10 per pixel, 0.132 ns per record), rest of the coverage layer 3.201 ms | gpu frame 6.021 
+ms [measured]
+GpuLock.ps1: cpu-contended: 7 s >= 4 cores, peak 29.4 cores; top: unx_test_reference.exe (61692) 177 core-s, Unity Hub.exe (31484) 0 core-s

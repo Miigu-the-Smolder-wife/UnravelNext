@@ -1,0 +1,20 @@
+﻿waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+powershell : ocean stream: 320 x 1708 cells, 1093120 triangles (draw arguments 0), 100.1 MB of vertices
+At line:1 char:562
++ ... .Count-1)]; powershell -NoProfile -File Tools/CI/GpuLock.ps1 -Track V ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ocean stream: 3... MB of vertices:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+V: instance hierarchy: 1 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint s
+pheres)
+[V ocean stream empty 4K] gpu frame median 0.2007 ms, p95 0.2134, p99 0.4673 (n=240) | cpu frame median 0.2180 ms (reco
+rd 0.1202, submit 0.0439) | SM clock median 2820 MHz (min 2820) | passes 41, barriers 279 in 42 batches, cross-queue sy
+ncs 0, command lists 1, transients 17 (357.6 MB aliased / 489.3 MB unaliased) | quality 8bdf1be41e4365f2
+[V ocean stream empty 4K] outside passes: graphics 1 lists, head 0.0000, tail 0.0000, gap 0.0000 ms (medians)
+[stream gate 4K] 1093120 triangles in 34160 groups (none drawn): stream raster 0.030 ms (0.027 ns per triangle, 0.9 ns 
+per group), 9 coverage records (0.00 per pixel, 3309.462 ns per record), rest of the coverage layer 0.017 ms | gpu fram
+e 0.201 ms [measured]
+GpuLock.ps1: cpu-contended: 3 s >= 4 cores, peak 31.2 cores; top: unx_test_reference.exe (61692) 73 core-s, Unity Hub.exe (18428) 0 core-s, Unity Hub.exe (31484) 0 core-s
