@@ -280,6 +280,7 @@ private:
     uint32_t m_outputReuses = 0, m_outputRecreations = 0;
     // V3 stream executor state.
     std::mutex m_fxMutex;
+    uint64_t m_fxRecorded = 0;  // (m_fxMutex held) packets written under UNX_FX_RECORD
     std::unique_ptr<render::RenderGraph> m_simGraph;  // the claimed ticks' graph (compute queue)
     uint64_t m_simIndex = 1ull << 48;                // its import index (apart from frame indices)
     uint64_t m_simFence = 0, m_simWaited = 0;        // compute fence of the last claimed tick; the frames waited up to

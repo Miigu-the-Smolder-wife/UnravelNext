@@ -20,7 +20,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 
 namespace unx::host
 {
@@ -594,6 +596,17 @@ void HostRenderer::vfxSubmit(const uint8_t* packet, uint64_t bytes)
         // compute queue before the ring fills.
         fx::ParticleSystem& p = fxModule();
         if (p.pendingTicks() + 1 >= p.readbackSlots()) fxRunPending();
+        // Diagnostic capture (UNX_FX_RECORD=<existing directory>): every packet as packet_<n>.bin in submission order, so
+        // a game's stream replays natively (Host Tests/HostParticleLight --stream).
+        char dir[1024];
+        const DWORD n = GetEnvironmentVariableA("UNX_FX_RECORD", dir, sizeof dir);
+        if (n > 0 && n < sizeof dir)
+        {
+            char name[64];
+            std::snprintf(name, sizeof name, "packet_%06llu.bin", (unsigned long long)m_fxRecorded++);
+            std::ofstream f(std::filesystem::path(std::string(dir, n)) / name, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(packet), (std::streamsize)bytes);
+        }
         p.submit(packet, bytes);
     }
     catch (const std::exception& e)
