@@ -321,12 +321,14 @@ std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const s
         const reference::GpuRenderInfo& g = gpt->info();
         gpuJson = format(",\n  \"device\": \"gpu\",\n  \"render_seed\": %llu,\n  \"adapter\": \"%s\",\n  \"driver\": \"%s\",\n  \"vram_scene_mb\": %.1f,\n"
                          "  \"vram_process_peak_mb\": %.1f,\n  \"gpu_build_seconds\": %.1f,\n  \"lock_wait_seconds\": %.1f,\n  \"slices\": %u,\n"
-                         "  \"longest_slice_seconds\": %.2f,\n  \"dispatches\": %u,\n  \"longest_dispatch_ms\": %.2f,\n  \"mean_dispatch_ms\": %.2f",
+                         "  \"longest_slice_seconds\": %.2f,\n  \"dispatches\": %u,\n  \"longest_dispatch_ms\": %.2f,\n  \"mean_dispatch_ms\": %.2f,\n"
+                         "  \"max_candidates_per_ray\": %u",
                          (unsigned long long)rs.seed, g.adapter.c_str(), g.driver.c_str(), g.vramSceneBytes / 1048576.0, g.vramProcessPeakBytes / 1048576.0, g.buildSeconds,
-                         g.lockWaitSeconds, g.slices, g.longestSliceSeconds, g.dispatches, g.longestDispatchMs, g.meanDispatchMs);
-        logf("reference: gpu %s, scene %.0f MB, process peak %.0f MB, %u slices (longest %.1f s), %u dispatches (longest %.1f ms, mean %.1f ms), lock wait %.0f s\n",
+                         g.lockWaitSeconds, g.slices, g.longestSliceSeconds, g.dispatches, g.longestDispatchMs, g.meanDispatchMs, g.maxCandidatesPerRay);
+        logf("reference: gpu %s, scene %.0f MB, process peak %.0f MB, %u slices (longest %.1f s), %u dispatches (longest %.1f ms, mean %.1f ms), lock wait %.0f s, "
+             "most alpha candidates on one ray %u (cap 4096)\n",
              g.adapter.c_str(), g.vramSceneBytes / 1048576.0, g.vramProcessPeakBytes / 1048576.0, g.slices, g.longestSliceSeconds, g.dispatches, g.longestDispatchMs,
-             g.meanDispatchMs, g.lockWaitSeconds);
+             g.meanDispatchMs, g.lockWaitSeconds, g.maxCandidatesPerRay);
     }
     metrics::writePfm(pfm, out.image);
     const std::string stem = pfm.string().substr(0, pfm.string().size() - 4);

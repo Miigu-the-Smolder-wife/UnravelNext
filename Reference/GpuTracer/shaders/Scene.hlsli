@@ -32,6 +32,7 @@ RtConstants rtC()
 
 static uint g_rays = 0;
 static uint g_errors = 0;
+static uint g_maxCandidates = 0;  // most candidates one ray of this thread visited (kRtCounterMaxCandidates)
 
 float rtAlbedoTableFetch(uint i)
 {
@@ -175,7 +176,10 @@ struct RtHit
 
 static const uint kRtMaskAll = 1u;
 static const uint kRtMaskShadow = 2u;
-static const uint kRtMaxCandidates = 1u << 20;
+// Candidates (non-opaque triangles resolved by the alpha test) one ray may visit: a structural term of a path iteration's
+// worst cost (PathTrace.hlsl). Beyond it the ray stops with kRtErrorTraversal and the render fails - never a silent
+// answer; the largest count a render met is reported (kRtCounterMaxCandidates).
+static const uint kRtMaxCandidates = 4096;
 static const float kRtFarT = 3.402823e38f;
 
 bool rtIntersect(float3 o, float3 d, float tnear, float tfar, uint mask, out RtHit hit)
@@ -204,6 +208,7 @@ bool rtIntersect(float3 o, float3 d, float tnear, float tfar, uint mask, out RtH
             if (rtAlphaOpaque(q.CandidateInstanceID(), q.CandidateGeometryIndex(), q.CandidatePrimitiveIndex(), bc.x, bc.y)) q.CommitNonOpaqueTriangleHit();
         }
     }
+    g_maxCandidates = max(g_maxCandidates, n);
     hit.instance = 0;
     hit.geometry = 0;
     hit.primitive = 0;
@@ -246,6 +251,7 @@ bool rtOccluded(float3 o, float3 d, float tnear, float tfar)
             if (rtAlphaOpaque(q.CandidateInstanceID(), q.CandidateGeometryIndex(), q.CandidatePrimitiveIndex(), bc.x, bc.y)) q.CommitNonOpaqueTriangleHit();
         }
     }
+    g_maxCandidates = max(g_maxCandidates, n);
     return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
 }
 
@@ -387,7 +393,7 @@ void rtFlushCounters(uint nans, uint truncated, uint splatNans)
 {
     RWByteAddressBuffer c = ResourceDescriptorHeap[rtC().b.counters];
     const uint rays = WaveActiveSum(g_rays), n = WaveActiveSum(nans), t = WaveActiveSum(truncated), sn = WaveActiveSum(splatNans);
-    const uint e = WaveActiveBitOr(g_errors);
+    const uint e = WaveActiveBitOr(g_errors), mc = WaveActiveMax(g_maxCandidates);
     if (WaveIsFirstLane())
     {
         if (rays) c.InterlockedAdd(4 * kRtCounterRays, rays);
@@ -395,6 +401,7 @@ void rtFlushCounters(uint nans, uint truncated, uint splatNans)
         if (t) c.InterlockedAdd(4 * kRtCounterTruncated, t);
         if (sn) c.InterlockedAdd(4 * kRtCounterSplatNans, sn);
         if (e) c.InterlockedOr(4 * kRtCounterErrors, e);
+        if (mc) c.InterlockedMax(4 * kRtCounterMaxCandidates, mc);
     }
 }
 #endif

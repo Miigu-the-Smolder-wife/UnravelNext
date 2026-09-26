@@ -197,6 +197,7 @@ RT_CONST uint kRtCounterNans = 1;       // non-finite camera samples (dropped, a
 RT_CONST uint kRtCounterTruncated = 2;  // paths that reached kMaxBounces
 RT_CONST uint kRtCounterErrors = 3;     // OR of kRtError* bits
 RT_CONST uint kRtCounterSplatNans = 4;  // non-finite caustic splats (dropped, as on the CPU)
+RT_CONST uint kRtCounterMaxCandidates = 5;  // most non-opaque candidates one ray visited (max over the render)
 RT_CONST uint kRtCounterCount = 8;
 
 // Error bits (INTERFACES 3.6: every data-dependent loop has a hard limit; reaching it is an error, never a silent cut).

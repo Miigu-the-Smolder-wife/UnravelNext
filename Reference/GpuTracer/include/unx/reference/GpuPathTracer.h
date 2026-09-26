@@ -37,6 +37,7 @@ struct GpuRenderInfo
     double longestDispatchMs = 0;     // GPU timestamps
     double meanDispatchMs = 0;
     uint32_t errors = 0;              // kRtError* bits (non-zero: the render failed)
+    uint32_t maxCandidatesPerRay = 0; // most non-opaque candidates one ray visited (cap kRtMaxCandidates = 4096)
 };
 
 // Shutter time integral (photo and cinematic mode, FEATURES_GAME 17; README 6). The scene (instance transforms,

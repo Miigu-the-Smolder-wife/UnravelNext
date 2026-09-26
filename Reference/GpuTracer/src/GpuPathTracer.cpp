@@ -141,6 +141,22 @@ struct GpuPathTracer::Impl
     uint32_t width = 0, height = 0;
     float sceneTime = -1;
     bool built = false;
+    // The wavefront's worst-dispatch bound (README 3): the scene's structural maxima (set by build) and the device's
+    // measured unit costs (calibrate), from which the path iterations per dispatch and the slots per dispatch follow.
+    struct Bound
+    {
+        uint32_t lightsPerCell = 0;      // most area lights in one light-grid cell (the MIS loop of an iteration)
+        bool valley = false;             // scene geometry below the planet surface (direct quadrature up to 4096 panels)
+        bool alpha = false;              // alpha-tested geometry (non-opaque candidates, <= kRtMaxCandidates per ray)
+        uint32_t alphaInstance = 0, alphaGeometry = 0;
+        bool calibrated = false;
+        double evalNs = 0, candidateNs = 0;  // per-lane cost of one quadrature point, of one alpha candidate
+        double residentLanes = 0;            // lanes of this kernel the device runs at once
+        double iterationMs = 0;              // worst path iteration: evaluations x evalNs + candidates x candidateNs
+        uint32_t budget = 0, slots = 0;      // path iterations per dispatch, slots per dispatch
+    } bound;
+    void calibrate();
+    std::vector<std::pair<float3, float3>> meshBounds;  // object-space bounds per mesh (the valley test)
 
     Impl(const scene::Scene& s, std::filesystem::path r, std::string w) : scene(s), repo(std::move(r)), what(std::move(w)) {}
 
@@ -517,7 +533,39 @@ void GpuPathTracer::Impl::build(float time)
         std::vector<uint8_t>& op = deformed[i] ? opaque[instanceRecord[i]] : opaque[in.mesh];
         if (op.empty()) op.assign(m.submeshes.size(), 1);
         for (size_t k = 0; k < m.submeshes.size(); ++k)
-            if (materialAlpha(in.materialOverrides.empty() ? m.submeshes[k].material : in.materialOverrides[k])) op[k] = 0;
+            if (materialAlpha(in.materialOverrides.empty() ? m.submeshes[k].material : in.materialOverrides[k]))
+            {
+                op[k] = 0;
+                if (!bound.alpha)
+                {
+                    bound.alpha = true;
+                    bound.alphaInstance = (uint32_t)i;
+                    bound.alphaGeometry = (uint32_t)k;
+                }
+            }
+        // geometry below the planet surface (conservative: any corner of the instance's bounds; mesh bounds cached)
+        if (!bound.valley && !m.positions.empty())
+        {
+            if (meshBounds.size() != s.meshes.size()) meshBounds.assign(s.meshes.size(), { float3{ 1, 1, 1 }, float3{ -1, -1, -1 } });
+            auto& mb = meshBounds[in.mesh];
+            if (mb.first.x > mb.second.x)
+            {
+                mb = { m.positions[0], m.positions[0] };
+                for (const float3& q : m.positions)
+                {
+                    mb.first = { std::min(mb.first.x, q.x), std::min(mb.first.y, q.y), std::min(mb.first.z, q.z) };
+                    mb.second = { std::max(mb.second.x, q.x), std::max(mb.second.y, q.y), std::max(mb.second.z, q.z) };
+                }
+            }
+            const float3 lo = mb.first, hi = mb.second;
+            const double R = s.atmosphere.bottomRadius;
+            for (int c = 0; c < 8 && !bound.valley; ++c)
+            {
+                const float3 w = in.transform.transformPoint({ c & 1 ? hi.x : lo.x, c & 2 ? hi.y : lo.y, c & 4 ? hi.z : lo.z });
+                const double y = (double)w.y + R;
+                if (std::sqrt((double)w.x * w.x + y * y + (double)w.z * w.z) < R) bound.valley = true;
+            }
+        }
     }
     if (overrides.empty()) overrides.push_back(0);
 
@@ -543,6 +591,8 @@ void GpuPathTracer::Impl::build(float time)
         g.castShadow = l.castShadow ? 1 : 0;
     }
     std::vector<uint32_t> cellStart = lights.cellStart(), cellLights = lights.cellLights();
+    bound.lightsPerCell = 0;
+    for (size_t c = 0; c + 1 < cellStart.size(); ++c) bound.lightsPerCell = std::max(bound.lightsPerCell, cellStart[c + 1] - cellStart[c]);
     for (size_t c = 0; c + 1 < cellStart.size(); ++c)
         if (cellStart[c + 1] - cellStart[c] > lights.count()) fail("gpu reference: light cell %zu lists more lights than exist", c);
     if (cellStart.empty()) cellStart.push_back(0);
@@ -1374,6 +1424,85 @@ void GpuPathTracer::Impl::start(const ResolvedCamera& cam, const RenderSettings&
     R.lastCheckpoint = R.lastProgress = std::chrono::steady_clock::now();
 }
 
+void GpuPathTracer::Impl::calibrate()
+{
+    Bound& B = bound;
+    if (B.calibrated) return;
+    // Per-thread outputs (16 bytes) for the largest calibration dispatch.
+    constexpr uint32_t kWide = 1u << 15, kPanels = 512, kCandidates = 4096;
+    Buffer out = createBuffer((uint64_t)kWide * 16, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, false);
+    rawUav(out);
+    owned.push_back(out);
+    const double tsFreq = (double)device->queue(render::QueueType::Compute).timestampFrequency();
+    // One timed dispatch of mode 3 (PathTrace.hlsl): the slowest of three runs (a bound, not a mean).
+    auto timed = [&](uint32_t threads, uint32_t panels, uint32_t candidates) {
+        double worst = 0;
+        for (int rep = 0; rep < 3; ++rep)
+        {
+            ensureSlice();
+            render::CommandList cl = device->acquireCommandList(render::QueueType::Compute);
+            ID3D12DescriptorHeap* heaps[] = { device->descriptors().resourceHeap(), device->descriptors().samplerHeap() };
+            cl.list->SetDescriptorHeaps(2, heaps);
+            cl.list->SetComputeRootSignature(device->rootSignature());
+            cl.list->SetPipelineState(psoPath);
+            Root r{};
+            r.constants = constantsBuffer.view;
+            r.y0 = out.view;
+            r.sampleBegin = 3;
+            r.sampleEnd = panels;
+            r.pathBase = candidates;
+            r.w = B.alphaInstance;
+            r.h = B.alphaGeometry;
+            r.passIndex = 0;
+            cl.list->SetComputeRoot32BitConstants(0, sizeof(Root) / 4, &r, 0);
+            cl.list->EndQuery(queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+            cl.list->Dispatch((threads + 63) / 64, 1, 1);
+            cl.list->EndQuery(queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+            cl.list->ResolveQueryData(queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, timestampReadback.res.Get(), 0);
+            submitWait(cl);
+            uint64_t* ts = nullptr;
+            const D3D12_RANGE rr{ 0, 16 };
+            check(timestampReadback.res->Map(0, &rr, (void**)&ts), "Map timestamps");
+            worst = std::max(worst, (double)(ts[1] - ts[0]) * 1000.0 / tsFreq);
+            const D3D12_RANGE none{ 0, 0 };
+            timestampReadback.res->Unmap(0, &none);
+        }
+        return worst;
+    };
+    // A quadrature point: one group (two waves) doing 512 panels x 8 points per lane.
+    const double oneGroupMs = timed(64, kPanels, 0);
+    B.evalNs = oneGroupMs * 1e6 / (kPanels * 8.0);
+    // Lanes at once: 2^15 threads doing the same work take (2^15 / resident lanes) times as long.
+    const double wideMs = timed(kWide, kPanels, 0);
+    const double waves = std::max(1.0, wideMs / std::max(oneGroupMs, 1e-6));
+    B.residentLanes = std::max(64.0, kWide / waves);
+    // An alpha candidate (the alpha test of the scene's alpha-tested geometry), doubled for the traversal step that
+    // precedes it (an assumption until the traversal is measured on its own).
+    if (B.alpha)
+    {
+        const double ms = timed(64, 1, kCandidates);
+        B.candidateNs = 2.0 * std::max(0.0, ms * 1e6 - 8.0 * B.evalNs) / kCandidates;
+    }
+    // The worst path iteration (Common.hlsli rtPathStep): quadrature calls - the segment (2 with the non-finite retry), the
+    // two medium points, the area lights of one cell, and <= 4 next-event queries - of <= 50 panels (a segment's 100 km
+    // altitude span in 2 km panels) or, with a valley, one of <= 4096; and 5 rays of <= kRtMaxCandidates candidates.
+    const double evaluations = 400.0 * (8.0 + B.lightsPerCell) + (B.valley ? 32768.0 : 0.0);
+    const double candidates = B.alpha ? 5.0 * 4096.0 : 0.0;
+    B.iterationMs = (evaluations * B.evalNs + candidates * B.candidateNs) * 1e-6;
+    constexpr double kDispatchLimitMs = 40.0;
+    if (B.iterationMs > kDispatchLimitMs)
+        fail("gpu reference: the scene's worst path iteration (%.1f ms: %u area lights in a light-grid cell%s%s) exceeds a dispatch's %.0f ms on this "
+             "device; the tracer does not split iterations yet",
+             B.iterationMs, B.lightsPerCell, B.valley ? ", geometry below the planet surface" : "", B.alpha ? ", alpha-tested geometry" : "", kDispatchLimitMs);
+    B.budget = (uint32_t)std::clamp(std::floor(kDispatchLimitMs / std::max(B.iterationMs, 1e-9)), 1.0, (double)kPathBudget);
+    B.slots = (uint32_t)std::clamp(std::floor(B.residentLanes / 64.0) * 64.0, 64.0, (double)kMaxSlots);
+    B.calibrated = true;
+    logf("gpu reference: wavefront bound - quadrature point %.1f ns, alpha candidate %.1f ns (x2 for traversal), %.0f lanes at once; worst iteration "
+         "%.2f ms (%u lights per cell%s%s) -> %u iterations x %u slots per dispatch (<= %.1f ms)\n",
+         B.evalNs, B.candidateNs / 2, B.residentLanes, B.iterationMs, B.lightsPerCell, B.valley ? ", valley" : "", B.alpha ? ", alpha" : "", B.budget, B.slots,
+         B.budget * B.iterationMs);
+}
+
 void GpuPathTracer::Impl::runCameraRect(uint32_t halfBase, uint32_t halves, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h, uint32_t c0, uint32_t c1)
 {
     Run& R = *run;
@@ -1410,12 +1539,14 @@ void GpuPathTracer::Impl::runCameraRect(uint32_t halfBase, uint32_t halves, uint
     const double tsFreq = (double)device->queue(render::QueueType::Compute).timestampFrequency();
     const auto t0 = std::chrono::steady_clock::now();
     // Diagnostics: UNX_REFERENCE_WAVE_BUDGET lowers the path iterations per dispatch (never above kPathBudget).
-    static const uint32_t budget = [] {
+    static const uint32_t budgetOverride = [] {
         char v[16] = {};
         const DWORD n = GetEnvironmentVariableA("UNX_REFERENCE_WAVE_BUDGET", v, sizeof v);
         const uint32_t b = n > 0 && n < sizeof v ? (uint32_t)std::strtoul(v, nullptr, 10) : kPathBudget;
         return std::clamp(b, 1u, kPathBudget);
     }();
+    calibrate();
+    const uint32_t budget = std::min(budgetOverride, bound.budget);
     auto root = [&](uint32_t mode) {
         Root r{};
         r.constants = constantsBuffer.view;
@@ -1632,6 +1763,7 @@ void GpuPathTracer::Impl::readCounters()
     stats.nanSamples += cnt[sh::kRtCounterNans];
     stats.truncatedPaths += cnt[sh::kRtCounterTruncated];
     info.errors |= cnt[sh::kRtCounterErrors];
+    info.maxCandidatesPerRay = std::max(info.maxCandidatesPerRay, cnt[sh::kRtCounterMaxCandidates]);
     const D3D12_RANGE none{ 0, 0 };
     countersReadback.res->Unmap(0, &none);
 }
@@ -1660,7 +1792,8 @@ void GpuPathTracer::Impl::dispatchSamples(uint32_t half, uint32_t begin, uint32_
     for (uint32_t c0 = begin; c0 < end; c0 += kMaxSamplesPerThread)
     {
         const uint32_t c1 = std::min(end, c0 + kMaxSamplesPerThread);
-        const uint32_t pixelCap = std::max(R.slotCap / halves, 1u);
+        calibrate();
+        const uint32_t pixelCap = std::max(std::min(R.slotCap, bound.slots) / halves, 1u);
         const uint32_t cols = std::min(W, pixelCap);
         for (uint32_t y0 = 0; y0 < H;)
         {

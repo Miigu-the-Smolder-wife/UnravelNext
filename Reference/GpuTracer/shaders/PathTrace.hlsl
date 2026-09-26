@@ -16,6 +16,10 @@
 // rectangle: x0, y0, width, height, halves, first half, c0, c1), y0 = path states (RWByteAddressBuffer, kStateBytes per
 // slot), w = list 0, h = list 1 (RWByteAddressBuffer, slot indices), sampleBegin = mode (0: start - thread = slot, every
 // slot -> list 1; 1: list 0 -> list 1; 2: list 1 -> list 0), sampleEnd = budget. The output list's count must be 0.
+// Mode 3 (GpuPathTracer::calibrate, on this kernel's pipeline so with its occupancy): fixed work per thread - an
+// atmosphere quadrature of sampleEnd panels (8 points each) and pathBase alpha tests of (instance w, geometry h, primitive
+// passIndex) - its sums to y0 (RWByteAddressBuffer, 16 bytes per thread): the per-lane cost of a quadrature point and of
+// an alpha candidate, and from the time of many threads against one group, the lanes the GPU runs at once.
 #include "Common.hlsli"
 
 static const uint kStateBytes = 140;
@@ -98,6 +102,17 @@ void main(uint3 id : SV_DispatchThreadID)
     RWByteAddressBuffer list0 = ResourceDescriptorHeap[g_root.w];
     RWByteAddressBuffer list1 = ResourceDescriptorHeap[g_root.h];
     const uint mode = g_root.sampleBegin, budget = g_root.sampleEnd;
+    if (mode == 3)  // calibration: uniform over the dispatch, so the early return keeps the wave operations uniform
+    {
+        RWByteAddressBuffer out_ = ResourceDescriptorHeap[g_root.y0];
+        const float3 o = float3(0, 1 + (float)id.x * 1e-3f, 0), d = normalize(float3(1, 0.05f, 0));
+        const float3 tau = rtAtmIntegrate(C.atm, o, d, 0, 50000.0f, budget);
+        uint opaque = 0;
+        [loop] for (uint k = 0; k < g_root.pathBase; ++k)
+            opaque += rtAlphaOpaque(g_root.w, g_root.h, g_root.passIndex, frac((float)(k + id.x) * 0.6180339f), frac((float)k * 0.3819660f) * 0.5f) ? 1u : 0u;
+        out_.Store4(id.x * 16, uint4(asuint(tau), opaque));
+        return;
+    }
     const uint4 rect = wave.Load4(16);   // x0, y0, width, height
     const uint4 rect2 = wave.Load4(32);  // halves, first half, c0, c1
     const uint pixels = rect.z * rect.w, slots = pixels * rect2.x;
