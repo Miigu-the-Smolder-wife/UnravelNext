@@ -33,7 +33,8 @@ enum UnxResult
                             //    later additions within 6 (optional exports, bridges probe for them): UnxFrameGraphStatsLatest,
                             //    UnxSceneLoad, UnxVideoMemory, UnxSceneEditInstances, UnxSceneEditMaterials, UnxVfxStreamExecutor,
                             //    UnxRendererQualityOverride, UnxFrameSetLens, UnxSurfaceDelta, UnxSurfaceSetHalfLives, UnxSurfaceSetTime,
-                            //    UnxDebugPrimitives, UnxDebugText, UnxDecalAdd, UnxDecalUpdate, UnxDecalRemove
+                            //    UnxDebugPrimitives, UnxDebugText, UnxDecalAdd, UnxDecalUpdate, UnxDecalRemove, UnxViewModelAdd,
+                            //    UnxViewModelSetPose, UnxViewModelRemove
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -302,6 +303,15 @@ static_assert(sizeof(UnxDecalDesc) == 80, "UnxDecalDesc is part of the ABI (Asse
 UNX_API int32_t UNX_CALL UnxDecalAdd(UnxRenderer r, const UnxDecalDesc* desc, uint32_t* id);
 UNX_API int32_t UNX_CALL UnxDecalUpdate(UnxRenderer r, uint32_t id, const UnxDecalDesc* desc);
 UNX_API int32_t UNX_CALL UnxDecalRemove(UnxRenderer r, uint32_t id);
+// First-person view models (A12, E's Passes/ViewModel; optional exports within ABI 6, INTERFACES v1.54): a scene instance
+// posed in the camera's frame - cameraLocal12 is its object -> view space transform (rows of a 3 x 4 matrix; view space:
+// x right, y up, looking down -z; the renderer's axes, i.e. Unity camera space with z negated) - composed with the camera
+// of every rendered frame (so it follows the camera at the display rate; the host sends no world transform for it, and
+// one it sends is overridden). Pose it every frame from the animation's view-model rig. Changes reach the frames queued
+// after the call.
+UNX_API int32_t UNX_CALL UnxViewModelAdd(UnxRenderer r, uint32_t instance, const float* cameraLocal12, uint32_t* id);
+UNX_API int32_t UNX_CALL UnxViewModelSetPose(UnxRenderer r, uint32_t id, const float* cameraLocal12);
+UNX_API int32_t UNX_CALL UnxViewModelRemove(UnxRenderer r, uint32_t id);
 UNX_API int32_t UNX_CALL UnxSceneAddLight(UnxRenderer r, const UnxLightDesc* desc, uint32_t* index);
 UNX_API int32_t UNX_CALL UnxSceneSetEnvironment(UnxRenderer r, const UnxEnvironmentDesc* desc);
 // The renderer's defaults for the environment (scene::Sun, scene::Atmosphere), for callers that set only some fields.

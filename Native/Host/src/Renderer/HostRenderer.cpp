@@ -395,6 +395,52 @@ void HostRenderer::decalRemove(uint32_t id)
     m_decalsChanged = true;
 }
 
+namespace
+{
+void checkPose(const float3x4& p, const char* what)
+{
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 4; ++c)
+            if (!std::isfinite(p.m[r][c])) fail("%s: the camera-space pose is not finite", what);
+}
+} // namespace
+
+uint32_t HostRenderer::viewModelAdd(uint32_t instance, const float3x4& cameraLocal)
+{
+    requireCommitted();
+    checkPose(cameraLocal, "view model add");
+    std::lock_guard lock(m_mutex);
+    if (instance >= m_hostInstances) fail("view model: instance %u of %u", instance, m_hostInstances);
+    for (const auto& e : m_viewModels.entries())
+        if (e.live && e.instance == instance) fail("view model: instance %u is already one", instance);
+    const uint32_t id = m_viewModels.add(instance, cameraLocal);
+    m_pending.viewModelOps.push_back({ FramePacket::ViewModelOp::Add, id, instance, cameraLocal });
+    return id;
+}
+
+void HostRenderer::viewModelSetPose(uint32_t id, const float3x4& cameraLocal)
+{
+    requireCommitted();
+    checkPose(cameraLocal, "view model pose");
+    std::lock_guard lock(m_mutex);
+    const auto& e = m_viewModels.entries();
+    if (id >= e.size() || !e[id].live) fail("view model %u is not live", id);
+    m_viewModels.setPose(id, cameraLocal);
+    m_pending.viewModelOps.push_back({ FramePacket::ViewModelOp::SetPose, id, e[id].instance, cameraLocal });
+}
+
+void HostRenderer::viewModelRemove(uint32_t id)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    const auto& e = m_viewModels.entries();
+    if (id >= e.size() || !e[id].live) fail("view model %u is not live", id);
+    const uint32_t instance = e[id].instance;
+    m_viewModels.remove(id);
+    m_viewModels.takeRemovedInstances();  // (the mirror keeps no transforms)
+    m_pending.viewModelOps.push_back({ FramePacket::ViewModelOp::Remove, id, instance, {} });
+}
+
 void HostRenderer::setDiscontinuity(uint32_t flags)
 {
     requireCommitted();
@@ -446,6 +492,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.debugTriangles = std::move(m_pending.debugTriangles);
     packet.debugGlyphs = std::move(m_pending.debugGlyphs);
     if (m_decalsChanged) packet.decals = std::make_shared<const decal::DecalSet>(m_decals);
+    packet.viewModelOps = std::move(m_pending.viewModelOps);
     m_decalsChanged = false;
     m_pending = FramePacket{};
     m_packets.push_back(std::move(packet));
@@ -469,6 +516,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
         next.surfaceDeltas.insert(next.surfaceDeltas.begin(), std::make_move_iterator(dropped.surfaceDeltas.begin()), std::make_move_iterator(dropped.surfaceDeltas.end()));
         if (!next.surfaceHalfLives) next.surfaceHalfLives = dropped.surfaceHalfLives;
         if (!next.decals) next.decals = dropped.decals;
+        next.viewModelOps.insert(next.viewModelOps.begin(), dropped.viewModelOps.begin(), dropped.viewModelOps.end());
     }
     return ticket;
 }
@@ -495,6 +543,7 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         carried.surfaceDeltas.insert(carried.surfaceDeltas.end(), std::make_move_iterator(old.surfaceDeltas.begin()), std::make_move_iterator(old.surfaceDeltas.end()));
         if (old.surfaceHalfLives) carried.surfaceHalfLives = old.surfaceHalfLives;
         if (old.decals) carried.decals = old.decals;
+        carried.viewModelOps.insert(carried.viewModelOps.end(), old.viewModelOps.begin(), old.viewModelOps.end());
         haveCarried = true;
         m_packets.pop_front();
     }
@@ -516,6 +565,7 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         p.surfaceDeltas.insert(p.surfaceDeltas.begin(), std::make_move_iterator(carried.surfaceDeltas.begin()), std::make_move_iterator(carried.surfaceDeltas.end()));
         if (!p.surfaceHalfLives) p.surfaceHalfLives = carried.surfaceHalfLives;
         if (!p.decals) p.decals = carried.decals;
+        p.viewModelOps.insert(p.viewModelOps.begin(), carried.viewModelOps.begin(), carried.viewModelOps.end());
     }
     // Leaving the queue: its updates join the applied state here, under the queue's lock, so currentScene never misses
     // a packet between the queue and the GPU. Its scene edits join the scene (the GPU scene's source) at the same point;
@@ -668,6 +718,18 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     field.setTime(p.surfaceTime);
     // A7 decals (the host's latest snapshot) and A15 debug primitives of this frame
     if (p.decals) decal::decals(m_frameRenderer->trackState()) = *p.decals;
+    // A12 view models: the host's operations in order (the same ids as the host's mirror)
+    viewmodel::ViewModels& viewModels = viewmodel::viewModels(m_frameRenderer->trackState());
+    for (const FramePacket::ViewModelOp& op : p.viewModelOps)
+    {
+        if (op.kind == FramePacket::ViewModelOp::Add)
+        {
+            const uint32_t id = viewModels.add(op.instance, op.pose);
+            if (id != op.id) fail("view model replay: id %u, the host's %u", id, op.id);
+        }
+        else if (op.kind == FramePacket::ViewModelOp::SetPose) viewModels.setPose(op.id, op.pose);
+        else viewModels.remove(op.id);
+    }
     debug::DrawList& draw = debug::drawList(m_frameRenderer->trackState());
     draw.lines.insert(draw.lines.end(), p.debugLines.begin(), p.debugLines.end());
     draw.triangles.insert(draw.triangles.end(), p.debugTriangles.begin(), p.debugTriangles.end());

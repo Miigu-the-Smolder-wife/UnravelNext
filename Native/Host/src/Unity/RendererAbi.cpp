@@ -437,6 +437,36 @@ UNX_API int32_t UNX_CALL UnxDecalRemove(UnxRenderer r, uint32_t id)
     return call([&] { find(r)->decalRemove(id); });
 }
 
+namespace
+{
+float3x4 poseOf(const float* m12)
+{
+    if (!m12) fail("view model: null pose");
+    float3x4 p;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 4; ++c) p.m[r][c] = m12[r * 4 + c];
+    return p;
+}
+} // namespace
+
+UNX_API int32_t UNX_CALL UnxViewModelAdd(UnxRenderer r, uint32_t instance, const float* cameraLocal12, uint32_t* id)
+{
+    return call([&] {
+        if (!id) fail("UnxViewModelAdd: null id");
+        *id = find(r)->viewModelAdd(instance, poseOf(cameraLocal12));
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxViewModelSetPose(UnxRenderer r, uint32_t id, const float* cameraLocal12)
+{
+    return call([&] { find(r)->viewModelSetPose(id, poseOf(cameraLocal12)); });
+}
+
+UNX_API int32_t UNX_CALL UnxViewModelRemove(UnxRenderer r, uint32_t id)
+{
+    return call([&] { find(r)->viewModelRemove(id); });
+}
+
 UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor)
 {
     return call([&] {

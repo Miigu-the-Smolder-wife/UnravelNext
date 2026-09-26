@@ -14,6 +14,7 @@
 #include "unx/debug/DebugDraw.h"
 #include "unx/decal/Decals.h"
 #include "unx/decal/SurfaceState.h"
+#include "unx/viewmodel/ViewModel.h"
 #include "unx/render/Frame.h"
 #include "unx/render/GpuScene.h"
 #include "unx/scene/SceneData.h"
@@ -115,6 +116,15 @@ struct FramePacket
     std::vector<debug::Glyph> debugGlyphs;
     // A7 projected decals: the host's decal set when it changed (a later snapshot replaces an earlier one).
     std::shared_ptr<const decal::DecalSet> decals;
+    // A12 view models (E's viewmodel::ViewModels): the host's operations in call order, replayed on the render thread
+    // (the same id allocation as the host's mirror).
+    struct ViewModelOp
+    {
+        enum Kind : uint8_t { Add, SetPose, Remove } kind;
+        uint32_t id, instance;
+        float3x4 pose;
+    };
+    std::vector<ViewModelOp> viewModelOps;
 };
 
 // The render graph of one recorded frame (RenderGraphStats, the fields the host reports).
@@ -201,6 +211,11 @@ public:
     uint32_t decalAdd(const decal::Decal& d);
     void decalUpdate(uint32_t id, const decal::Decal& d);
     void decalRemove(uint32_t id);
+    // A12 first-person view models (E's viewmodel::ViewModels, mirrored here): a scene instance posed in the camera's
+    // frame (object -> view space: x right, y up, looking down -z), composed with each rendered frame's camera.
+    uint32_t viewModelAdd(uint32_t instance, const float3x4& cameraLocal);
+    void viewModelSetPose(uint32_t id, const float3x4& cameraLocal);
+    void viewModelRemove(uint32_t id);
     void setSimulation(uint32_t gpuSimulation);
     // Sun, atmosphere and (when set) wind of the following frames.
     void setEnvironment(const scene::Sun& sun, const scene::Atmosphere& atmosphere, std::optional<FramePacket::Wind> wind);
@@ -330,6 +345,7 @@ private:
     decal::DecalSet m_decals;                   // (m_mutex) the host's decal set
     std::vector<uint8_t> m_decalLive;           // (m_mutex) per decal id: live
     bool m_decalsChanged = false;               // (m_mutex) a snapshot goes with the next queued frame
+    viewmodel::ViewModels m_viewModels;         // (m_mutex) the host's mirror (ids, live entries)
     std::unique_ptr<render::RenderGraph> m_simGraph;  // the claimed ticks' graph (compute queue)
     uint64_t m_simIndex = 1ull << 48;                // its import index (apart from frame indices)
     uint64_t m_simFence = 0, m_simWaited = 0;        // compute fence of the last claimed tick; the frames waited up to

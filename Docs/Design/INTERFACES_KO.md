@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.53, 2026-09-26)
+# UnravelNext 인터페이스 (v1.54, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -728,6 +728,8 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - v1.53 (2026-09-26, E A12 1인칭 뷰 모델):
   - **`gpu::kInstanceViewModel`(1 << 29, HLSL `INSTANCE_VIEW_MODEL`, GPU 장면 전용)과 `GpuScene::setInstanceViewModel`**: E의 `Passes/ViewModel`이 카메라에 붙은 인스턴스를 매 렌더 프레임 그 프레임의 카메라 × 카메라 공간 자세로 둔다(`tracks::viewModelPrepare`, GPU 장면 flush 앞; 불연속은 순간이동). 그래서 카메라 기준 운동이 0이고(움직임 벡터·회전 블러), 그림자·반사·GI는 화면과 같은 기하를 본다. M은 이 플래그로 회전 블러에서 뷰 모델 픽셀을 뺀다.
   - **`FrameConstants::viewModelScale`(옛 `spare1`, HLSL `g_viewModelScale`)**: 주 뷰에서 뷰 모델 인스턴스의 투영 재매핑 k(clip.xy × k, 깊이 불변; 1 = 없음이 기본). `viewmodel.fov_override_degrees`가 정하고, 다른 뷰는 늘 1이다. V는 뷰 모델 정점의 현재·이전 clip에 `ViewModel.hlsli`의 `viewModelClip`을 부른다.
+- v1.54 (2026-09-26, A12 호스트 경로, 엔진 2 요청):
+  - **1인칭 뷰 모델 호스트 입력(E `viewmodel::ViewModels`)**: 선택 export `UnxViewModelAdd(r, instance, cameraLocal12, &id)` / `UnxViewModelSetPose(r, id, cameraLocal12)` / `UnxViewModelRemove(r, id)`. 자세는 객체 → 뷰 공간(x 오른쪽, y 위, −z를 봄)의 3×4 행 우선 행렬이고, 렌더러가 렌더 프레임마다 그 프레임의 카메라와 합성한다. 호스트가 거울로 id를 즉시 돌려주고 연산을 다음 큐 프레임과 함께 보낸다. 렌더 스레드가 순서대로 재생해 같은 id가 나온다(건너뛴·버려진 프레임의 연산은 이월). [실측] `HostViewModel`: 돌고 움직이는 카메라의 12프레임 모두 중앙을 덮었고, 0.5 m 자세 이동이 투영 예측과 0.08 px 안에서 맞았으며, 제거 뒤에는 장면 자리로 돌아갔다.
 - v1.53 (2026-09-26, A15·A7 호스트 경로, 엔진 2 요청):
   - **디버그 드로우 호스트 입력(E `debug::DrawList`)**: 선택 export `UnxDebugPrimitives(r, lines, n, triangles, m)`(DebugDraw.h 기록 그대로 Line 32 B·Triangle 48 B), `UnxDebugText(r, anchor3, utf8, rgba, sizePx, flags, offsetX, offsetY)`(E의 글리프 배치). 다음 큐 프레임에만 들어간다(즉시 모드: 렌더되지 않는 프레임의 원시형은 버린다).
   - **투영 데칼 호스트 입력(E `decal::DecalSet`)**: `UnxDecalDesc`(80 B: 상자 3×4 행 우선, 재질, 인스턴스 또는 0xFFFFFFFF, 우선순위, 불투명도, 페이드 시작·끝 도, 가장자리, 0), `UnxDecalAdd(r, desc, &id)` / `UnxDecalUpdate(r, id, desc)` / `UnxDecalRemove(r, id)`. 호스트가 거울 집합을 가지며, 바뀌면 다음 큐 프레임과 함께 스냅숏을 보낸다(늦은 스냅숏이 이긴다). 재질과 인스턴스는 호스트의 현재 개수로 검사한다. [실측] `HostDecal` 4·5: 제거와 갱신이 G-buffer에 정확히 반영됐고, 디버그 통계는 선 3·글리프 2였다.
