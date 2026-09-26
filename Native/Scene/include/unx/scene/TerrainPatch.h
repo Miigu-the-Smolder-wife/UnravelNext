@@ -10,8 +10,8 @@
 //     edges exactly (no T-junction); D is 0 there because the neighbour's closure shares that line;
 //   - sides between two replaced blocks carry every texel vertex on both sides (identical positions);
 //   - with D = 0 the patch is the source surface and shades as it does (interpolated source normals, uv, tangents).
-// Cost [예상]: per replaced block (4 x 4 cells of 0.5 m at 5 cm texels: 41^2 vertices, ~3,200 triangles) about 0.1 ms of
-// CPU to build on the calling thread; raster of the patches at D resolution (5 cm quads project >= 4 px inside 25 m at
+// Cost: per replaced block (4 x 4 cells of 0.5 m at 5 cm texels: 41^2 vertices, ~3,100 triangles) 0.15-0.19 ms of CPU
+// for the mesh [실측, 게임 중, unx_test_scene_terrainpatch] plus its clusters (no simplification) on the calling thread; raster of the patches at D resolution (5 cm quads project >= 4 px inside 25 m at
 // 4K), and the forced source clusters of the tile inside the window.
 #include "unx/core/Math.h"
 #include "unx/scene/SceneData.h"

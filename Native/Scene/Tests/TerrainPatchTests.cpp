@@ -7,6 +7,8 @@
 #include "unx/core/Log.h"
 #include "unx/scene/TerrainPatch.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <map>
@@ -138,6 +140,18 @@ void run(float zSign)
     }
     logf("  patches: %llu vertices, %llu triangles; worst |y - (source + D)| %.2e m\n", (unsigned long long)patchVertices, (unsigned long long)patchTriangles, worstHeight);
     CHECK(worstHeight < 2e-6);
+    {
+        // CPU cost of one block's patch (logged, no verdict): median of 5 rounds over the replaced blocks.
+        std::vector<double> ms;
+        for (int round = 0; round < 5; ++round)
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            for (uint32_t b : active) (void)buildTerrainPatch(grid, d, b % blocks, b / blocks);
+            ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / active.size());
+        }
+        std::sort(ms.begin(), ms.end());
+        logf("  build: %.3f ms per block (median of 5)\n", ms[2]);
+    }
 
     // Watertight: edges by exact endpoint bits. Border edges (used once) lie on the tile's outer border or around holes.
     auto key = [](const float3& p) { return std::make_tuple(p.x, p.y, p.z); };
