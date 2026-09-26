@@ -6,6 +6,7 @@
 #include "unx/core/Log.h"
 #include "unx/material/MaterialSystem.h"
 #include "unx/render/GpuScene.h"
+#include "unx/render/Tracks.h"
 #include "unx/scene/MaterialModel.h"
 
 #include <algorithm>
@@ -893,6 +894,7 @@ void shade(FramePassContext& fc, ViewResources& view)
     const std::vector<RenderGraph::BandedPass> passes = shadingPasses(fc, target);
     const material::ResolveOutputs& o = material::resolveOutputs(fc, target);
     fc.graph.addBandedGroup(view.view.kind != gpu::ViewKind::Main ? "m.lit.planar" : "m.lit", o.height, o.bands, passes);
+    tracks::water(fc, target);  // W (engine 1): the water surfaces' refraction targets are the shaded opaque scene and its depth
     shadingComposite(fc, target);
     TextureRef image = target.color;
     if (haze)
