@@ -14,6 +14,7 @@
 #include "unx/scene/SceneData.h"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace unx::clusterbuilder
@@ -53,11 +54,22 @@ struct BuildStats
 {
     std::vector<MeshStats> meshes;
     double wallMs = 0;
+    uint32_t reusedMeshes = 0;  // meshes whose hierarchy came from the previous build (same content and settings)
+    uint32_t diskMeshes = 0;    // meshes not in memory whose hierarchy was read from the disk cache (setDiskCache)
 };
 
 // Builds the hierarchy of every mesh (meshes in parallel on the job pool). Deterministic: the same scene and
-// settings give byte-identical output.
+// settings give byte-identical output. A mesh whose content (positions, normals, uv0, indices, submesh ranges) and
+// settings match one of the previous build's reuses its hierarchy (SHA-256 identity), so re-building an edited scene
+// costs only the new and changed meshes; identical meshes in one scene are built once.
 render::ClusterData build(const scene::Scene& scene, const Settings& settings, BuildStats* stats = nullptr);
+// Forgets the previous build's hierarchies (tests that compare two cold builds).
+void clearMeshCache();
+// Disk cache of hierarchies (C1, incremental cooking): a mesh whose key (content, settings, builder source hash) has an
+// entry in <directory>/clusters is read instead of built, and new builds are written there. Empty: no disk cache. Until
+// this is called, the directory is the environment variable UNX_COOK_CACHE (unset: none). Output is byte-identical
+// either way.
+void setDiskCache(const std::string& directory);
 
 // Named V buffers inside ClusterData (ClusterHierarchy.h).
 constexpr const char* kClusterNodes = "clusterNodes";

@@ -1,0 +1,16 @@
+# Writes OUT: #define UNX_CLUSTERBUILDER_SOURCE_HASH "<sha256>" over FILES (';'-separated, sorted by the caller), so
+# the disk cache of cluster hierarchies (ClusterBuilder.cpp) is invalidated by any change to the code that builds them.
+set(text "")
+foreach(f ${FILES})
+  file(SHA256 "${f}" h)
+  get_filename_component(n "${f}" NAME)
+  string(APPEND text "${n}:${h}\n")
+endforeach()
+string(SHA256 all "${text}")
+set(content "#pragma once\n#define UNX_CLUSTERBUILDER_SOURCE_HASH \"${all}\"\n")
+if(EXISTS "${OUT}")
+  file(READ "${OUT}" have)
+endif()
+if(NOT have STREQUAL content)
+  file(WRITE "${OUT}" "${content}")
+endif()

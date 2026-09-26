@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -21,6 +22,8 @@
 #include <random>
 #include <string>
 #include <vector>
+
+#include <windows.h>
 
 using namespace unx;
 using namespace unx::clusterbuilder;
@@ -456,9 +459,117 @@ UNX_TEST(wide_surfaces_simplify_fully)
     }
 }
 
+bool sameClusterData(const render::ClusterData& a, const render::ClusterData& b)
+{
+    bool same = a.clusters.size() == b.clusters.size() && a.named.size() == b.named.size() && a.clusterVertexIndices == b.clusterVertexIndices &&
+                a.clusterTriangles == b.clusterTriangles && a.lodLevelClusters == b.lodLevelClusters && a.meshes.size() == b.meshes.size() &&
+                a.lodLevels.size() == b.lodLevels.size();
+    if (same) same = std::memcmp(a.clusters.data(), b.clusters.data(), a.clusters.size() * sizeof(render::gpu::Cluster)) == 0;
+    if (same) same = std::memcmp(a.meshes.data(), b.meshes.data(), a.meshes.size() * sizeof(a.meshes[0])) == 0;
+    if (same) same = std::memcmp(a.lodLevels.data(), b.lodLevels.data(), a.lodLevels.size() * sizeof(a.lodLevels[0])) == 0;
+    for (size_t i = 0; same && i < a.named.size(); ++i) same = a.named[i].name == b.named[i].name && a.named[i].bytes == b.named[i].bytes;
+    return same;
+}
+
+scene::Scene threeMeshScene()
+{
+    scene::Scene sc = oneMesh(heightfield(64, 20.0f, 1.0f, true));
+    sc.meshes.push_back(heightfield(48, 10.0f, 0.5f, false));
+    sc.meshes.push_back(sc.meshes[0]);  // a duplicate of mesh 0
+    for (uint32_t m = 1; m < 3; ++m)
+    {
+        scene::Instance in;
+        in.mesh = m;
+        sc.instances.push_back(in);
+    }
+    return sc;
+}
+
+UNX_TEST(rebuild_reuses_unchanged_meshes)
+{
+    // D0 editing: re-building a scene reuses the hierarchies of meshes whose content and settings did not change, builds
+    // identical meshes once, and gives byte-identical output to a cold build; a changed mesh is rebuilt.
+    setDiskCache("");
+    scene::Scene sc = threeMeshScene();
+    clearMeshCache();
+    BuildStats cold, warm, edited;
+    const render::ClusterData a = build(sc, settings(), &cold);
+    const render::ClusterData b = build(sc, settings(), &warm);
+    logf("    cold build: %u of 3 meshes reused, %.1f ms; warm: %u reused, %.1f ms\n", cold.reusedMeshes, cold.wallMs, warm.reusedMeshes, warm.wallMs);
+    CHECK(cold.reusedMeshes == 1 && warm.reusedMeshes == 3 && sameClusterData(a, b));
+    clearMeshCache();
+    const render::ClusterData c = build(sc, settings());
+    CHECK(sameClusterData(a, c));
+    sc.meshes[1].positions[0].y += 0.25f;
+    const render::ClusterData d = build(sc, settings(), &edited);
+    CHECK(edited.reusedMeshes == 2 && !sameClusterData(a, d));
+    clearMeshCache();
+    CHECK(sameClusterData(d, build(sc, settings())));
+}
+
+UNX_TEST(disk_cache_round_trip)
+{
+    // C1 incremental cooking: a fresh process (memory cache cleared) reads every unchanged mesh's hierarchy from the disk
+    // cache and gives output byte-identical to a cold build; a settings change misses; a corrupted entry is detected by
+    // its checksum and rebuilt (never used); a truncated entry is rebuilt.
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / ("unx_cluster_cache_test_" + std::to_string(GetCurrentProcessId()));
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    setDiskCache(dir.string());
+    const scene::Scene sc = threeMeshScene();
+    clearMeshCache();
+    BuildStats cold, fromDisk, otherSettings, repaired;
+    const render::ClusterData a = build(sc, settings(), &cold);
+    uint32_t files = 0;
+    for (const auto& e : std::filesystem::directory_iterator(dir / "clusters"))
+        if (e.path().extension() == ".unxcl") ++files;
+    CHECK(cold.diskMeshes == 0 && files == 2);  // mesh 2 duplicates mesh 0
+    clearMeshCache();
+    const render::ClusterData b = build(sc, settings(), &fromDisk);
+    logf("    cold %.1f ms, from disk %.1f ms (%u of 3 meshes read)\n", cold.wallMs, fromDisk.wallMs, fromDisk.diskMeshes);
+    CHECK(fromDisk.diskMeshes == 2 && sameClusterData(a, b));
+    for (size_t m = 0; m < fromDisk.meshes.size(); ++m)
+        CHECK(fromDisk.meshes[m].clusters == cold.meshes[m].clusters && fromDisk.meshes[m].lodLevels == cold.meshes[m].lodLevels);
+    clearMeshCache();
+    Settings other = settings();
+    other.maxRelativeWidthError *= 0.5f;
+    build(sc, other, &otherSettings);
+    CHECK(otherSettings.diskMeshes == 0);
+    // Corrupt one byte in the middle of every entry of the original settings, and truncate one.
+    std::vector<std::filesystem::path> entries;
+    for (const auto& e : std::filesystem::directory_iterator(dir / "clusters")) entries.push_back(e.path());
+    std::sort(entries.begin(), entries.end());
+    bool truncated = false;
+    for (const auto& path : entries)
+    {
+        std::vector<char> bytes;
+        {
+            std::ifstream f(path, std::ios::binary);
+            bytes.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        }
+        if (!truncated) { bytes.resize(bytes.size() / 2); truncated = true; }
+        else bytes[bytes.size() / 2] ^= 0x5A;
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        f.write(bytes.data(), (std::streamsize)bytes.size());
+    }
+    clearMeshCache();
+    const render::ClusterData c = build(sc, settings(), &repaired);
+    CHECK(repaired.diskMeshes == 0 && sameClusterData(a, c));
+    clearMeshCache();
+    BuildStats again;
+    const render::ClusterData d = build(sc, settings(), &again);  // the rebuilt entries were written back
+    CHECK(again.diskMeshes == 2 && sameClusterData(a, d));
+    setDiskCache("");
+    clearMeshCache();
+    std::filesystem::remove_all(dir, ec);
+}
+
 UNX_TEST(build_is_deterministic)
 {
+    setDiskCache("");
+    clearMeshCache();  // two cold builds (a warm one would reuse the first's hierarchy)
     const Built a = buildOne(heightfield(96, 20.0f, 1.0f, true));
+    clearMeshCache();
     const Built b = buildOne(heightfield(96, 20.0f, 1.0f, true));
     CHECK(a.data.clusters.size() == b.data.clusters.size());
     CHECK(std::memcmp(a.data.clusters.data(), b.data.clusters.data(), a.data.clusters.size() * sizeof(render::gpu::Cluster)) == 0);

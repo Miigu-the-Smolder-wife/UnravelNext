@@ -3,9 +3,12 @@
 #include "FeatureWidth.h"
 #include "unx/clusterbuilder/ClusterHierarchy.h"
 #include "unx/core/Jobs.h"
+#include "unx/core/Sha256.h"
 #include "unx/core/Log.h"
+#include "ClusterBuilderSourceHash.generated.h"
 
 #include <meshoptimizer.h>
+#include <windows.h>
 
 // meshoptimizer's cluster LOD scheme (demo/clusterlod.h, MIT, Arseny Kapoulkine): its helpers (clusterize, partition,
 // lockBoundary, boundsCompute, mergeGroups) are used as is; the build loop below is ours because it adds the
@@ -20,7 +23,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <string>
 #include <unordered_map>
 
 namespace unx::clusterbuilder
@@ -475,11 +483,301 @@ Settings Settings::fromQuality(const QualityConfig& q)
     return s;
 }
 
+namespace
+{
+// Identity of a mesh's hierarchy: everything buildMesh reads (positions, normals, uv0, indices, submesh ranges) and the
+// settings. Materials are applied when the scene's buffers are assembled, so they are not part of it.
+std::string meshKey(const scene::Mesh& m, const Settings& settings)
+{
+    Sha256 h;
+    auto add = [&](const auto& v) {
+        const uint64_t n = v.size();
+        h.update(&n, sizeof n);
+        if (n) h.update(v.data(), n * sizeof(v[0]));
+    };
+    add(m.positions);
+    add(m.normals);
+    add(m.uv0);
+    add(m.indices);
+    for (const scene::Submesh& sm : m.submeshes)
+    {
+        const uint32_t range[2] = { sm.indexOffset, sm.indexCount };
+        h.update(range, sizeof range);
+    }
+    const uint32_t ints[3] = { settings.clusterTriangles, settings.clusterVertices, settings.clusterMinTriangles };
+    const float floats[3] = { settings.maxRelativeWidthError, settings.widthAreaPercentile, settings.sheetOrientationMinWidth };
+    h.update(ints, sizeof ints);
+    h.update(floats, sizeof floats);
+    const std::array<uint8_t, 32> d = h.finish();
+    return std::string(reinterpret_cast<const char*>(d.data()), d.size());
+}
+
+// Hierarchies of the previous build, by mesh identity (D0 editing: a re-commit of an edited level rebuilds only the meshes
+// that are new or changed). The cache keeps exactly the meshes of the latest build.
+std::mutex g_meshCacheMutex;
+std::unordered_map<std::string, std::shared_ptr<const MeshOut>> g_meshCache;
+std::string g_diskCache;  // empty: no disk cache
+bool g_diskCacheSet = false;
+
+// ---- Disk cache (C1: a reopened project or an editor reload rebuilds nothing that was built before) ---------------------
+// File <dir>/clusters/<key hex>.unxcl: magic, format version, the builder's source hash (UNX_CLUSTERBUILDER_SOURCE_HASH:
+// SHA-256 of this builder's sources and meshoptimizer's, so any code change invalidates every entry), the mesh key, the
+// payload, and the payload's SHA-256 (a torn or corrupted file is rebuilt, never used). Written to a temporary file and
+// renamed, so readers never see a partial entry.
+constexpr uint32_t kDiskMagic = 0x4C43584Eu;  // "NXCL"
+constexpr uint32_t kDiskFormat = 1;
+
+std::string hexOf(const std::string& key)
+{
+    static const char* digits = "0123456789abcdef";
+    std::string out;
+    for (unsigned char c : key)
+    {
+        out += digits[c >> 4];
+        out += digits[c & 15];
+    }
+    return out;
+}
+
+std::string diskCacheDirectory()
+{
+    {
+        std::lock_guard lock(g_meshCacheMutex);
+        if (g_diskCacheSet) return g_diskCache;
+    }
+    // Default: UNX_COOK_CACHE (the Unity editor sets it to Library/UnravelNextCook before the renderer loads content).
+    // GetEnvironmentVariableW sees values the process set after start-up, unlike the CRT's copy.
+    wchar_t buffer[1024];
+    const DWORD n = GetEnvironmentVariableW(L"UNX_COOK_CACHE", buffer, 1024);
+    if (n == 0 || n >= 1024) return {};
+    return std::filesystem::path(std::wstring(buffer, n)).string();
+}
+
+struct Writer
+{
+    std::vector<uint8_t> bytes;
+    void raw(const void* p, size_t n) { bytes.insert(bytes.end(), (const uint8_t*)p, (const uint8_t*)p + n); }
+    template <class T> void pod(const T& v) { raw(&v, sizeof v); }
+    template <class T> void vec(const std::vector<T>& v)
+    {
+        pod((uint64_t)v.size());
+        if (!v.empty()) raw(v.data(), v.size() * sizeof(T));
+    }
+};
+
+struct Reader
+{
+    const uint8_t* p;
+    size_t left;
+    bool ok = true;
+    void raw(void* out, size_t n)
+    {
+        if (n > left)
+        {
+            ok = false;
+            return;
+        }
+        std::memcpy(out, p, n);
+        p += n;
+        left -= n;
+    }
+    template <class T> void pod(T& v) { raw(&v, sizeof v); }
+    template <class T> void vec(std::vector<T>& v)
+    {
+        uint64_t n = 0;
+        pod(n);
+        if (!ok || n > left / sizeof(T))
+        {
+            ok = false;
+            return;
+        }
+        v.resize((size_t)n);
+        if (n) raw(v.data(), (size_t)n * sizeof(T));
+    }
+};
+
+std::vector<uint8_t> serialize(const MeshOut& mo)
+{
+    Writer w;
+    w.pod((uint64_t)mo.clusters.size());
+    for (const ClusterOut& c : mo.clusters)
+    {
+        w.vec(c.indices);
+        w.pod(c.refined);
+        w.pod(c.lod);
+        w.pod(c.submesh);
+        w.pod(c.width);
+    }
+    w.vec(mo.groups);
+    w.vec(mo.nodes);
+    w.pod(mo.levelCount);
+    w.pod(mo.stats);
+    return std::move(w.bytes);
+}
+
+bool deserialize(const uint8_t* p, size_t n, MeshOut& mo)
+{
+    Reader r{ p, n };
+    uint64_t clusters = 0;
+    r.pod(clusters);
+    if (!r.ok || clusters > n) return false;
+    mo.clusters.resize((size_t)clusters);
+    for (ClusterOut& c : mo.clusters)
+    {
+        r.vec(c.indices);
+        r.pod(c.refined);
+        r.pod(c.lod);
+        r.pod(c.submesh);
+        r.pod(c.width);
+        if (!r.ok) return false;
+    }
+    r.vec(mo.groups);
+    r.vec(mo.nodes);
+    r.pod(mo.levelCount);
+    r.pod(mo.stats);
+    return r.ok && r.left == 0;
+}
+
+std::filesystem::path diskPath(const std::string& dir, const std::string& key)
+{
+    return std::filesystem::path(dir) / "clusters" / (hexOf(key) + ".unxcl");
+}
+
+// Header: magic, format, source hash (32), key (32); then the payload; then the payload's SHA-256 (32).
+constexpr size_t kHeaderBytes = 8 + 32 + 32;
+
+std::string sourceHash()
+{
+    // UNX_CLUSTERBUILDER_SOURCE_HASH is 64 hex digits; the file stores its 32 bytes.
+    const char* hex = UNX_CLUSTERBUILDER_SOURCE_HASH;
+    std::string out(32, '\0');
+    auto v = [](char c) { return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; };
+    for (int i = 0; i < 32; ++i) out[i] = (char)(v(hex[2 * i]) * 16 + v(hex[2 * i + 1]));
+    return out;
+}
+
+std::shared_ptr<const MeshOut> loadFromDisk(const std::string& dir, const std::string& key)
+{
+    std::ifstream f(diskPath(dir, key), std::ios::binary);
+    if (!f) return nullptr;
+    std::vector<uint8_t> file((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (file.size() < kHeaderBytes + 32) return nullptr;
+    uint32_t head[2];
+    std::memcpy(head, file.data(), 8);
+    const std::string source = sourceHash();
+    if (head[0] != kDiskMagic || head[1] != kDiskFormat || std::memcmp(file.data() + 8, source.data(), 32) != 0 ||
+        std::memcmp(file.data() + 40, key.data(), 32) != 0)
+        return nullptr;
+    const size_t payload = file.size() - kHeaderBytes - 32;
+    Sha256 h;
+    h.update(file.data() + kHeaderBytes, payload);
+    const std::array<uint8_t, 32> d = h.finish();
+    if (std::memcmp(d.data(), file.data() + kHeaderBytes + payload, 32) != 0)
+    {
+        logf("UnravelNext cluster cache: %s is corrupted (checksum); rebuilding it\n", diskPath(dir, key).string().c_str());
+        return nullptr;
+    }
+    auto mo = std::make_shared<MeshOut>();
+    if (!deserialize(file.data() + kHeaderBytes, payload, *mo)) return nullptr;
+    return mo;
+}
+
+void storeToDisk(const std::string& dir, const std::string& key, const MeshOut& mo)
+{
+    std::error_code ec;
+    const std::filesystem::path path = diskPath(dir, key);
+    std::filesystem::create_directories(path.parent_path(), ec);
+    const std::vector<uint8_t> payload = serialize(mo);
+    Sha256 h;
+    h.update(payload.data(), payload.size());
+    const std::array<uint8_t, 32> d = h.finish();
+    const uint32_t head[2] = { kDiskMagic, kDiskFormat };
+    const std::string source = sourceHash();
+    const std::filesystem::path tmp = path.string() + ".tmp" + std::to_string(GetCurrentThreadId());
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f)
+        {
+            logf("UnravelNext cluster cache: cannot write %s\n", tmp.string().c_str());
+            return;
+        }
+        f.write((const char*)head, 8);
+        f.write(source.data(), 32);
+        f.write(key.data(), 32);
+        f.write((const char*)payload.data(), (std::streamsize)payload.size());
+        f.write((const char*)d.data(), 32);
+        if (!f)
+        {
+            logf("UnravelNext cluster cache: writing %s failed\n", tmp.string().c_str());
+            f.close();
+            std::filesystem::remove(tmp, ec);
+            return;
+        }
+    }
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) std::filesystem::remove(tmp, ec);
+}
+} // namespace
+
+void clearMeshCache()
+{
+    std::lock_guard lock(g_meshCacheMutex);
+    g_meshCache.clear();
+}
+
+void setDiskCache(const std::string& directory)
+{
+    std::lock_guard lock(g_meshCacheMutex);
+    g_diskCache = directory;
+    g_diskCacheSet = true;
+}
+
 render::ClusterData build(const scene::Scene& scene, const Settings& settings, BuildStats* stats)
 {
     const auto t0 = std::chrono::steady_clock::now();
-    std::vector<MeshOut> meshes(scene.meshes.size());
-    Jobs::instance().parallelFor((uint32_t)scene.meshes.size(), [&](uint32_t i) { meshes[i] = buildMesh(scene.meshes[i], settings); });
+    const uint32_t meshCount = (uint32_t)scene.meshes.size();
+    std::vector<std::string> keys(meshCount);
+    Jobs::instance().parallelFor(meshCount, [&](uint32_t i) { keys[i] = meshKey(scene.meshes[i], settings); });
+    std::vector<std::shared_ptr<const MeshOut>> built(meshCount);
+    {
+        std::lock_guard lock(g_meshCacheMutex);
+        for (uint32_t i = 0; i < meshCount; ++i)
+            if (auto it = g_meshCache.find(keys[i]); it != g_meshCache.end()) built[i] = it->second;
+    }
+    std::vector<uint32_t> missing;
+    for (uint32_t i = 0; i < meshCount; ++i)
+        if (!built[i]) missing.push_back(i);
+    // Duplicate meshes in one scene build once.
+    std::unordered_map<std::string, uint32_t> firstOf;
+    std::vector<uint32_t> toBuild;
+    for (uint32_t i : missing)
+        if (firstOf.emplace(keys[i], i).second) toBuild.push_back(i);
+    const std::string disk = diskCacheDirectory();
+    std::vector<uint8_t> fromDisk(toBuild.size(), 0);
+    Jobs::instance().parallelFor((uint32_t)toBuild.size(), [&](uint32_t k) {
+        const uint32_t i = toBuild[k];
+        if (!disk.empty())
+            if (auto cached = loadFromDisk(disk, keys[i]))
+            {
+                built[i] = std::move(cached);
+                fromDisk[k] = 1;
+                return;
+            }
+        auto mo = std::make_shared<const MeshOut>(buildMesh(scene.meshes[i], settings));
+        if (!disk.empty()) storeToDisk(disk, keys[i], *mo);
+        built[i] = std::move(mo);
+    });
+    uint32_t diskMeshes = 0;
+    for (uint8_t f : fromDisk) diskMeshes += f;
+    for (uint32_t i : missing) built[i] = built[firstOf[keys[i]]];
+    {
+        std::lock_guard lock(g_meshCacheMutex);
+        g_meshCache.clear();
+        for (uint32_t i = 0; i < meshCount; ++i) g_meshCache[keys[i]] = built[i];
+    }
+    const uint32_t reused = meshCount - (uint32_t)toBuild.size();
+    std::vector<MeshStats> meshStats(meshCount);
+    for (uint32_t i = 0; i < meshCount; ++i) meshStats[i] = built[i]->stats;
 
     render::ClusterData data;
     data.meshes.resize(scene.meshes.size());
@@ -489,9 +787,9 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
     appendNamed(data, kClusterLodSpheres, nullptr, 0, sizeof(float4));
     appendNamed(data, kClusterSheets, nullptr, 0, sizeof(float4));
     uint32_t nodeBase = 0;
-    for (size_t mi = 0; mi < meshes.size(); ++mi)
+    for (size_t mi = 0; mi < built.size(); ++mi)
     {
-        MeshOut& mo = meshes[mi];
+        const MeshOut& mo = *built[mi];
         const scene::Mesh& m = scene.meshes[mi];
         const uint32_t clusterBase = (uint32_t)data.clusters.size();
         render::ClusterData::MeshRange& range = data.meshes[mi];
@@ -600,13 +898,15 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
             data.lodLevels.push_back(level);
         }
         range.lodLevelCount = (uint32_t)data.lodLevels.size() - range.lodLevelOffset;
-        mo.stats.lodLevels = range.lodLevelCount;
-        mo.stats.coarsestTriangles = range.lodLevelCount ? data.lodLevels.back().triangleCount : 0;
+        meshStats[mi].lodLevels = range.lodLevelCount;
+        meshStats[mi].coarsestTriangles = range.lodLevelCount ? data.lodLevels.back().triangleCount : 0;
     }
     if (stats)
     {
         stats->meshes.clear();
-        for (const MeshOut& mo : meshes) stats->meshes.push_back(mo.stats);
+        stats->meshes = meshStats;
+        stats->reusedMeshes = reused;
+        stats->diskMeshes = diskMeshes;
         stats->wallMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     }
     return data;
