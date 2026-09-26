@@ -32,6 +32,7 @@
 #include "unx/core/Log.h"
 #include "unx/render/Device.h"
 #include "unx/render/Frame.h"
+#include "unx/render/GpuProfiler.h"
 #include "unx/render/GpuScene.h"
 #include "unx/render/GpuSceneLayout.h"
 #include "unx/render/RenderGraph.h"
@@ -49,6 +50,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -670,15 +672,126 @@ int testDepthOfField(Device& device, ShaderLibrary& shaders, const LoadQuality& 
 }
 } // namespace
 
+// --dof-time (render C, A5 cost): the depth of field passes at 3840 x 2160 on synthetic depth, GPU time per pass
+// (GpuProfiler, median of 8 frames after 2 warm-up frames):
+//   aim     the aiming case: a weapon (15 % of the view, 0.35 m, rho about -30 px) over a scene at 15..40 m in focus at 20 m;
+//   blur    the whole view blurred: a wall at 50 m, focus 1 m, rho about +20 px;
+//   focus   the whole view near focus: |rho| <= 0.4 px.
+// Input and output are RGBA16F as in the frame (ShadingSystem's intermediate).
+template <typename LoadQuality>
+void timeDepthOfField(Device& device, ShaderLibrary& shaders, const LoadQuality& loadQuality)
+{
+    const uint32_t w = 3840, h = 2160;
+    const ViewDesc desc = ViewDesc::fromCamera(scene::Camera{}, w, h, float4x4{});
+    const double zNear = desc.nearPlane, fpx = 0.5 * h * desc.proj.m[1][1];
+    auto apertureFor = [&](double r, double z, double zf) { return (float)(2 * r / (fpx * std::abs(1 / zf - 1 / z))); };
+    struct Case
+    {
+        const char* name;
+        float aperture, focus;
+        std::vector<float> depth, colour;
+        std::vector<uint16_t> half;  // the colour as RGBA16F (the frame's intermediate format)
+    };
+    auto toHalf = [](float f) {  // round to nearest even, finite inputs
+        uint32_t x;
+        std::memcpy(&x, &f, 4);
+        const uint32_t sign = (x >> 16) & 0x8000u;
+        const int32_t e = (int32_t)((x >> 23) & 0xFF) - 127 + 15;
+        uint32_t m = x & 0x7FFFFFu;
+        if (e <= 0) return (uint16_t)sign;
+        if (e >= 31) return (uint16_t)(sign | 0x7C00u);
+        uint32_t hv = sign | (uint32_t)e << 10 | m >> 13;
+        const uint32_t rest = m & 0x1FFFu;
+        if (rest > 0x1000u || (rest == 0x1000u && (hv & 1))) ++hv;
+        return (uint16_t)hv;
+    };
+    auto make = [&](const char* name, float aperture, float focus, auto&& depthAt) {
+        Case c{ name, aperture, focus, {}, {}, {} };
+        c.depth.resize((size_t)w * h);
+        c.colour.resize((size_t)w * h * 4);
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+            {
+                c.depth[(size_t)y * w + x] = (float)(zNear / depthAt(x, y));
+                const float n = hashUnit(x, y, 7);
+                float* o = &c.colour[((size_t)y * w + x) * 4];
+                o[0] = 0.3f + 0.2f * n, o[1] = 0.3f + 0.2f * std::sin(0.01f * x), o[2] = 0.3f + 0.2f * std::cos(0.013f * y), o[3] = 1;
+                if (x % 97 == 13 && y % 89 == 7) o[0] = o[1] = o[2] = 40;  // sparse HDR points
+            }
+        c.half.resize(c.colour.size());
+        for (size_t i = 0; i < c.colour.size(); ++i) c.half[i] = toHalf(c.colour[i]);
+        return c;
+    };
+    std::vector<Case> cases;
+    auto weapon = [&](uint32_t x, uint32_t y) { return x >= 0.55 * w && x < 0.95 * w && y >= 0.62 * h; };
+    cases.push_back(make("aim", apertureFor(30, 0.35, 20), 20.0f, [&](uint32_t x, uint32_t y) { return weapon(x, y) ? 0.35 : 15.0 + 25.0 * y / h; }));
+    cases.push_back(make("blur", apertureFor(20, 50, 1), 1.0f, [&](uint32_t, uint32_t) { return 50.0; }));
+    const double zMid = 3.0;
+    cases.push_back(make("focus", apertureFor(0.4, 1.5, zMid), (float)zMid, [&](uint32_t x, uint32_t) { return 1.0 / (1 / 1.5 + (1 / 6.0 - 1 / 1.5) * (x + 0.5) / w); }));
+    GpuProfiler profiler(device, 2, 256);
+    for (const Case& c : cases)
+    {
+        std::map<std::string, std::vector<double>> passMs;
+        std::vector<double> totals;
+        const uint32_t warm = 2, frames = 8;
+        auto collect = [&](bool keep) {
+            if (const FrameTiming* t = profiler.lastCompleted())
+            {
+                double sum = 0;
+                for (const PassTiming& pt : t->passes)
+                    if (pt.name.rfind("m.dof.", 0) == 0)
+                    {
+                        if (keep) passMs[pt.name].push_back(pt.durationMs());
+                        sum += pt.durationMs();
+                    }
+                if (keep) totals.push_back(sum);
+            }
+        };
+        static uint64_t frameIndex = 0;
+        for (uint32_t i = 0; i < warm + frames + 2; ++i)
+        {
+            profiler.beginFrame(frameIndex++);
+            collect(i >= warm + 2);
+            if (i >= warm + frames) continue;  // the last two only read back
+            const QualityConfig q = loadQuality();
+            Context x(device, shaders, q);
+            x.frame.lensAperture = c.aperture;
+            x.frame.lensFocus = c.focus;
+            ViewResources v;
+            v.view = desc;
+            std::vector<ComPtr<ID3D12Resource>> keep;
+            const TextureRef image = uploadTexture(x, device, "post.time.dof.image", w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, 8, c.half.data(), keep);
+            v.depth = uploadTexture(x, device, "post.time.dof.depth", w, h, DXGI_FORMAT_R32_FLOAT, 4, c.depth.data(), keep);
+            const TextureRef focused = x.graph.createTexture(TextureDesc{ "post.time.dof.out", w, h, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });  // the frame's intermediate format
+            shading::depthOfField(x.fc, v, image, focused, nullptr);
+            x.graph.addPass("post.time.keep", QueueType::Graphics, [&](PassBuilder& b) {
+                b.use(focused, Use::SrvCompute);
+                b.keep();
+            }, [](PassContext&) {});
+            x.graph.execute(&profiler);
+            device.waitIdle();
+        }
+        auto median = [](std::vector<double> v) {
+            if (v.empty()) return 0.0;
+            std::sort(v.begin(), v.end());
+            return v[v.size() / 2];
+        };
+        logf("  dof time [%s] 4K: %.3f ms (median of %zu frames)", c.name, median(totals), totals.size());
+        for (const auto& [name, v] : passMs) logf(", %s %.3f", name.c_str() + 6, median(v));
+        logf("\n");
+    }
+}
+
 int main(int argc, char** argv)
 {
     try
     {
         if (argc > 2 && std::strcmp(argv[1], "--levels") == 0) kLevels = (uint32_t)std::atoi(argv[2]);
-        bool dofOnly = false, warp = false;
+        bool dofOnly = false, warp = false, dofTime = false;
         for (int i = 1; i < argc; ++i)
         {
             dofOnly = dofOnly || std::strcmp(argv[i], "--dof") == 0;
+            dofTime = dofTime || std::strcmp(argv[i], "--dof-time") == 0;
             warp = warp || std::strcmp(argv[i], "--warp") == 0;
             g_dofProfile = g_dofProfile || std::strcmp(argv[i], "--dof-profile") == 0;
         }
@@ -699,6 +812,11 @@ int main(int argc, char** argv)
         Device device(o);
         ShaderLibrary shaders(device, executableDirectory() / "shaders");
         auto loadQuality = [] { return QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality"); };
+        if (dofTime)
+        {
+            timeDepthOfField(device, shaders, loadQuality);
+            return 0;
+        }
         if (dofOnly)
         {
             const int f = testDepthOfField(device, shaders, loadQuality);

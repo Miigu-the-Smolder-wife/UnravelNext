@@ -1,0 +1,3 @@
+  dof time [aim] 4K: 2.101 ms (median of 8 frames), clear 0.090, down 0.004, gather 1.385, reach 0.194, setup 0.366
+  dof time [blur] 4K: 3.514 ms (median of 8 frames), clear 0.082, down 0.003, gather 2.876, reach 0.176, setup 0.378
+  dof time [focus] 4K: 1.285 ms (median of 8 frames), clear 0.083, down 0.003, gather 0.504, reach 0.176, setup 0.349
