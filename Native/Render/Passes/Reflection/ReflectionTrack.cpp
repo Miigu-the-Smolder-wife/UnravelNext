@@ -4,6 +4,8 @@
 
 namespace unx::render::tracks
 {
+// R-W2 / R-2 placeholder (core's service, 2026-09-27): render B replaces this with the refraction tracer.
+void refraction(FramePassContext&, BufferRef, BufferRef, uint32_t) { pending("R.refraction (tracer not implemented yet)"); }
 void reflections(FramePassContext& fc, ViewResources& main)
 {
     // Inputs: V's depth, M's G-buffer (and reflection lobe tiles when M provides them), R's GI of this frame.

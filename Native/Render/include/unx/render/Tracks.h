@@ -57,6 +57,8 @@ void shadingComposite(FramePassContext& fc, ViewResources& view);               
 void accelerationStructures(FramePassContext& fc);                // static/dynamic TLAS, BLAS refits -> FrameResources
 void globalIllumination(FramePassContext& fc, ViewResources& main);  // cache update rays, screen probes, near occlusion
 void reflections(FramePassContext& fc, ViewResources& main);      // K/G/M rays, planar mirrors (via renderView)
+// R-W2 / R-2: refraction rays for a job list (FrameServices::traceRefractions, its format); declares its passes.
+void refraction(FramePassContext& fc, BufferRef jobs, BufferRef results, uint32_t maxJobs);
 
 // ---- E: engine 2 (reassigned 2026-09-26) - Passes/Volume, Passes/Debug, Passes/Decal, Passes/Hair
 // Smoke and fire media (request 20260925_FX_particle_render_rules 3b): called by S's froxels() of the main view between

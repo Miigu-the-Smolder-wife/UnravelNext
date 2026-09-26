@@ -236,6 +236,9 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::prepareScene(fc);
     tracks::lightFunctions(fc);  // E (A8): light function table and images, before every consumer
     services.rasterizeDepth = [](FramePassContext& c, const DepthRasterRequest& r) { tracks::rasterizeDepth(c, r); };
+    services.traceRefractions = [](FramePassContext& c, BufferRef jobs, BufferRef results, uint32_t maxJobs) {
+        tracks::refraction(c, jobs, results, maxJobs);
+    };
     services.renderView = [](FramePassContext& c, const ViewDesc& v) {
         if (v.kind == gpu::ViewKind::Main) fail("renderView is for secondary views");
         ViewResources view;

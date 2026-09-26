@@ -64,6 +64,13 @@ struct FrameServices
     // v1.73: called by V inside a view's coverage passes after its rasters and before the count, so another track can
     // append coverage records (W's ocean edges: ViewResources::oceanEdgePixels, coverageAppend). Empty = none.
     std::function<void(FramePassContext&, const ViewResources&)> coverageAppend;
+    // R-W2 / R-2 (render B's request, 2026-09-27; format agreed with engine 1): traces refraction rays for W's water and
+    // M's glass composite after they write the job list and before they composite. jobs (raw): a 16 B head { count,
+    // indirect dispatch x, y, z } then 48 B per job { float3 origin, uint outputSlot; float3 direction, uint flags (bits
+    // 0..7 medium, 8..9 total internal reflections left, 31 coverage record); float3 sigmaA, float iorInside }, at most
+    // maxJobs; results: 8 B per output slot (RGBA16F, linear radiance x exposure, absorption included). Filled by the
+    // renderer from tracks::refraction; empty (a build without R) = the caller keeps its own path.
+    std::function<void(FramePassContext&, BufferRef jobs, BufferRef results, uint32_t maxJobs)> traceRefractions;
 };
 
 struct FramePassContext
