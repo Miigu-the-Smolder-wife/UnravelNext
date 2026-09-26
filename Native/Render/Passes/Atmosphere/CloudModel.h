@@ -64,6 +64,19 @@ struct RayResult
 RayResult referenceSingleScattering(const CloudNoise& n, const CloudLayer& layer, const CloudOffsets& o, double bottomRadius, const double origin[3],
                                     const double dir[3], const double sunDir[3], double sunIlluminance, double background, double maxDistance, double step);
 
+// Reference multiple scattering (tests): a volumetric path tracer in the density field, sun only (no sky light, black
+// background): delta tracking with the majorant sigma_max, at each collision the albedo, next-event estimation toward the
+// sun (the transmittance by 'step' midpoint steps, as referenceSingleScattering) and a new direction from the dual-lobe
+// HG phase; Russian roulette past 16 collisions. 'firstOrder' returns the mean of the first collision's estimate (its
+// expectation is referenceSingleScattering's radiance), so total - firstOrder is the multiple scattering.
+struct PathResult
+{
+    double radiance, firstOrder, stdError;  // stdError: of the radiance's mean
+    double meanCollisions;
+};
+PathResult referencePathTraced(const CloudNoise& n, const CloudLayer& layer, const CloudOffsets& o, double bottomRadius, const double origin[3],
+                               const double dir[3], const double sunDir[3], double sunIlluminance, uint32_t paths, uint32_t seed, double step);
+
 double phase(const CloudLayer& layer, double cosTheta);                            // the dual-lobe HG phase (1/sr)
 double altitudeOf(const CloudOffsets& o, double bottomRadius, const double x[3]);  // above the planet's surface (m)
 } // namespace unx::render::clouds

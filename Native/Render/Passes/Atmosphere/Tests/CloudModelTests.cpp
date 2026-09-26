@@ -137,6 +137,32 @@ int main()
             report(r5.transmittance < 0.999, "the test ray crosses cloud (T at 5 m steps)", r5.transmittance, 0.999);
             report(e < 0.01, "reference converged: |L(10 m) - L(5 m)| / L(5 m)", e, 0.01);
         }
+        // Multiple scattering reference: the path tracer's first-collision estimate agrees with the deterministic single
+        // scattering (4 standard errors), and the multiple-scattering share is reported (the GPU approximation's target).
+        {
+            const CloudOffsets o = offsetsFor(layer, origin0, 0);
+            const double camera[3] = { 0, 1.8, 0 }, sun[3] = { -0.5, 0.35, 0.7921 };
+            const double sl = std::sqrt(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
+            const double s[3] = { sun[0] / sl, sun[1] / sl, sun[2] / sl };
+            uint32_t checked = 0, agree = 0;
+            for (uint32_t a = 0; a < 360 && checked < 6; a += 7)
+            {
+                const double az = a * 3.141592653589793 / 180;
+                const double e[3] = { std::cos(az) * 0.9563, 0.2924, std::sin(az) * 0.9563 };
+                const RayResult ss = referenceSingleScattering(noise, layer, o, R, camera, e, s, 1.0, 0.0, 60000, 20);
+                if (ss.transmittance > 0.9 || ss.transmittance < 0.01) continue;
+                const PathResult pt = referencePathTraced(noise, layer, o, R, camera, e, s, 1.0, 4000, a + 1, 20);
+                // The first-collision term's own error: the total's standard error scaled by the share.
+                const double firstErr = pt.stdError * std::sqrt(std::max(pt.firstOrder / std::max(pt.radiance, 1e-30), 0.05));
+                const bool ok = std::abs(pt.firstOrder - ss.radiance) < 4 * firstErr + 0.01 * ss.radiance;
+                logf("  azimuth %3u deg: T %.3f, SS %.4e, path-traced first %.4e total %.4e (+- %.1e), multiple scattering %.1f %% of total, %.1f collisions -> %s\n",
+                     a, ss.transmittance, ss.radiance, pt.firstOrder, pt.radiance, pt.stdError, 100 * (1 - pt.firstOrder / std::max(pt.radiance, 1e-30)),
+                     pt.meanCollisions, ok ? "ok" : "FAIL");
+                ++checked;
+                agree += ok ? 1u : 0u;
+            }
+            report(checked >= 4 && agree == checked, "path tracer's first collision = single scattering (rays)", agree, checked);
+        }
         logf("RESULT %s\n", pass ? "PASS" : "FAIL");
         return pass ? 0 : 1;
     }

@@ -220,4 +220,130 @@ RayResult referenceSingleScattering(const CloudNoise& n, const CloudLayer& layer
     }
     return { L + T * background, T };
 }
+namespace
+{
+struct Rng
+{
+    uint64_t s;
+    double next()
+    {
+        s = s * 6364136223846793005ull + 1442695040888963407ull;
+        return ((s >> 11) + 0.5) * (1.0 / 9007199254740992.0);
+    }
+};
+// Distance along (p, d) to leave the layer's shell [base, top] from inside it (or to enter and leave it from outside): the
+// span [t0, t1] of the first stretch inside; false when the ray never is inside.
+bool shellSpan(const CloudLayer& layer, const CloudOffsets& o, double R, const double p[3], const double d[3], double& t0, double& t1)
+{
+    const double w[3] = { p[0] + o.origin[0], p[1] + o.origin[1] + R, p[2] + o.origin[2] };
+    const double b = w[0] * d[0] + w[1] * d[1] + w[2] * d[2], r2 = w[0] * w[0] + w[1] * w[1] + w[2] * w[2];
+    const double rb = R + layer.baseAltitude, rt = R + layer.topAltitude;
+    const double discT = b * b - (r2 - rt * rt);
+    if (discT <= 0) return false;
+    double enter = std::max(-b - std::sqrt(discT), 0.0), leave = -b + std::sqrt(discT);
+    const double discB = b * b - (r2 - rb * rb);
+    if (discB > 0)
+    {
+        const double sB = std::sqrt(discB), inA = -b - sB, inB = -b + sB;
+        if (r2 < rb * rb) enter = std::max(enter, inB);
+        else if (inA > 0) leave = std::min(leave, inA);
+    }
+    t0 = enter, t1 = leave;
+    return t1 > t0;
+}
+double sunTau(const CloudNoise& n, const CloudLayer& layer, const CloudOffsets& o, double R, const double x[3], const double s[3], double step)
+{
+    double tau = 0;
+    for (double t = 0.5 * step;; t += step)
+    {
+        const double y[3] = { x[0] + s[0] * t, x[1] + s[1] * t, x[2] + s[2] * t };
+        const double a = altitudeOf(o, R, y);
+        if (a > layer.topAltitude || a < layer.baseAltitude - 1 || t > 50000) break;
+        tau += density(n, layer, o, R, y) * step;
+        if (tau > 30) break;
+    }
+    return tau;
+}
+// Samples a direction from HG(g) about the axis d.
+void sampleHg(double g, const double d[3], Rng& rng, double out[3])
+{
+    const double u = rng.next(), v = rng.next();
+    double cosT;
+    if (std::abs(g) < 1e-3) cosT = 1 - 2 * u;
+    else
+    {
+        const double q = (1 - g * g) / (1 - g + 2 * g * u);
+        cosT = (1 + g * g - q * q) / (2 * g);
+    }
+    cosT = std::clamp(cosT, -1.0, 1.0);
+    const double sinT = std::sqrt(std::max(0.0, 1 - cosT * cosT)), phi = 2 * 3.141592653589793 * v;
+    const double sgn = d[2] >= 0 ? 1.0 : -1.0, a = -1.0 / (sgn + d[2]), b = d[0] * d[1] * a;
+    const double t[3] = { 1 + sgn * d[0] * d[0] * a, sgn * b, -sgn * d[0] }, bt[3] = { b, sgn + d[1] * d[1] * a, -d[1] };
+    for (int k = 0; k < 3; ++k) out[k] = sinT * std::cos(phi) * t[k] + sinT * std::sin(phi) * bt[k] + cosT * d[k];
+}
+} // namespace
+
+PathResult referencePathTraced(const CloudNoise& n, const CloudLayer& layer, const CloudOffsets& o, double R, const double origin[3], const double dir[3],
+                               const double sunDir[3], double E, uint32_t paths, uint32_t seed, double step)
+{
+    Rng rng{ 0x9E3779B97F4A7C15ull ^ ((uint64_t)seed * 0x100000001B3ull) };
+    const double sigmaMax = layer.sigmaMax;
+    double sum = 0, sum2 = 0, first = 0, collisions = 0;
+    for (uint32_t p = 0; p < paths; ++p)
+    {
+        double x[3] = { origin[0], origin[1], origin[2] }, d[3] = { dir[0], dir[1], dir[2] };
+        double throughput = 1, L = 0;
+        bool firstCollision = true;
+        for (uint32_t bounce = 0; bounce < 4096; ++bounce)
+        {
+            double t0, t1;
+            if (!shellSpan(layer, o, R, x, d, t0, t1)) break;
+            double t = t0;
+            bool hit = false;
+            while (true)
+            {
+                t += -std::log(1 - rng.next()) / sigmaMax;
+                if (t >= t1) break;
+                const double y[3] = { x[0] + d[0] * t, x[1] + d[1] * t, x[2] + d[2] * t };
+                if (rng.next() * sigmaMax < density(n, layer, o, R, y))
+                {
+                    hit = true;
+                    break;
+                }
+            }
+            if (!hit)
+            {
+                // Left this stretch of the shell: continue along the ray (it may enter the layer again further on).
+                for (int k = 0; k < 3; ++k) x[k] += d[k] * (t1 + 1e-3);
+                if (!firstCollision || t1 > 60000) break;
+                continue;
+            }
+            for (int k = 0; k < 3; ++k) x[k] += d[k] * t;
+            collisions += 1;
+            throughput *= layer.albedo;
+            const double cosSun = d[0] * sunDir[0] + d[1] * sunDir[1] + d[2] * sunDir[2];
+            const double nee = throughput * phase(layer, cosSun) * E * std::exp(-sunTau(n, layer, o, R, x, sunDir, step));
+            L += nee;
+            if (firstCollision) first += nee, firstCollision = false;
+            if (bounce >= 16)
+            {
+                const double q = std::min(0.95, throughput);
+                if (rng.next() >= q) break;
+                throughput /= q;
+            }
+            double nd[3];
+            const bool back = rng.next() < layer.lobeBlend;
+            sampleHg(back ? layer.g1 : layer.g0, d, rng, nd);
+            d[0] = nd[0], d[1] = nd[1], d[2] = nd[2];
+        }
+        sum += L;
+        sum2 += L * L;
+    }
+    PathResult r;
+    r.radiance = sum / paths;
+    r.firstOrder = first / paths;
+    r.stdError = std::sqrt(std::max(0.0, sum2 / paths - r.radiance * r.radiance) / paths);
+    r.meanCollisions = collisions / paths;
+    return r;
+}
 } // namespace unx::render::clouds
