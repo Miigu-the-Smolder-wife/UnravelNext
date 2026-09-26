@@ -120,7 +120,9 @@ static void waterFluids(FramePassContext& fc)
         slot.surface->bounds(lo, hi);
         stream.boundsMin = { lo[0], lo[1], lo[2] };
         stream.boundsMax = { hi[0], hi[1], hi[2] };
-        stream.layer = 0;  // see-through coverage records (small surfaces)
+        // The water layer (v1.63): one sample per pixel with edge records - a fluid seen from close by fills the screen,
+        // where coverage records cost ~5.5 ms at 4K (ea6ff3d); W's water shading refracts through it (FEATURES_GAME 1.9).
+        stream.layer = 1;
         fc.resources.triangleStreams.push_back(stream);
     }
 }

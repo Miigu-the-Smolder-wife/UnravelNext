@@ -1,5 +1,5 @@
 // Track W entry point correctness (B8: tracks::waterGeometry consumes FrameContext::fluids, INTERFACES v1.70):
-//   1. a fluid of the frame becomes one layer-0 triangle stream with the fluid's material, the node grid's world bounds
+//   1. a fluid of the frame becomes one layer-1 (water layer) triangle stream with the fluid's material, the node grid's world bounds
 //      and a capacity for its particles; its vertices and draw arguments are bit-identical to a FluidSurface recorded
 //      directly with the same description and input
 //   2. origin rebase: the same particles with the fluid's origin moved by -1024 m in x give the same triangles moved by
@@ -183,7 +183,7 @@ int main(int argc, char** argv)
             W_CHECK(resources.triangleStreams.size() == 1, "%zu streams for one fluid", resources.triangleStreams.size());
             const TriangleStream& st = resources.triangleStreams[0];
             maxTriangles = st.maxTriangles;
-            W_CHECK(st.material == 1 && st.layer == 0 && st.instance == 0xFFFFFFFFu, "stream material %u layer %u instance %u", st.material, st.layer, st.instance);
+            W_CHECK(st.material == 1 && st.layer == 1 && st.instance == 0xFFFFFFFFu, "stream material %u layer %u instance %u", st.material, st.layer, st.instance);
             W_CHECK(maxTriangles == 2 * std::max<uint32_t>(4096, count * 5 / 4), "capacity %u for %u particles", maxTriangles, count);
             const float h = 0.025f;
             W_CHECK(st.boundsMin.x == 10.5f && st.boundsMin.y == 2.0f && st.boundsMin.z == -3.0f && std::abs(st.boundsMax.x - (10.5f + 64 * h)) < 1e-5f,
@@ -211,7 +211,7 @@ int main(int argc, char** argv)
         }
         W_CHECK(viaTrack.drawn > 0 && viaTrack.drawn == direct.drawn, "vertices %u via the track, %u direct", viaTrack.drawn, direct.drawn);
         W_CHECK(std::memcmp(viaTrack.vertices.data(), direct.vertices.data(), viaTrack.vertices.size() * 4) == 0, "the track's vertices differ from the direct record");
-        std::printf("waterGeometry: %u particles -> 1 layer-0 stream, material 1, %u triangles (capacity %u), bit-identical to a direct FluidSurface record\n", count,
+        std::printf("waterGeometry: %u particles -> 1 layer-1 stream, material 1, %u triangles (capacity %u), bit-identical to a direct FluidSurface record\n", count,
                     viaTrack.drawn / 3, maxTriangles);
 
         // 2. origin rebase
