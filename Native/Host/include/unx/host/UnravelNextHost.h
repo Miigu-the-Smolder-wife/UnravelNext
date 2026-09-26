@@ -306,10 +306,14 @@ typedef struct UnxFrameDesc
     double time;                // seconds (wind, animation clocks)
     float deltaTime;
     uint32_t outputWidth, outputHeight;
-    uint32_t reserved;
+    float displayPeak;          // HDR display (A4): its peak over paper-white luminance (>= 1); the output is then
+                                // R16G16B16A16 FLOAT holding display-referred linear Rec.709 light, 1 = paper white (the
+                                // host encodes it for the swap chain: scRGB or PQ). 0 = SDR: R10G10B10A2, sRGB-encoded.
+                                // (This was 'reserved', always 0: older hosts get SDR.)
     UnxCameraDesc camera;
-    uint64_t output;            // ID3D12Resource* of the output (R10G10B10A2 UNORM, random write), Unity leaves it in
-                                // UNORDERED_ACCESS for the frame's list and in its own state otherwise
+    uint64_t output;            // ID3D12Resource* of the output (R10G10B10A2 UNORM, or R16G16B16A16 FLOAT with a
+                                // displayPeak; random write), Unity leaves it in UNORDERED_ACCESS for the frame's list
+                                // and in its own state otherwise
 } UnxFrameDesc;
 
 // Per-frame scene changes (after UnxSceneCommit), collected into the next UnxFrameQueue. Transforms and poses are the

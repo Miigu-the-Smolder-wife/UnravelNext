@@ -31,6 +31,11 @@ struct FrameContext
     // restores snap); the host's mainView.ev100 is the starting value. exposureCompensation in stops (+1 = brighter).
     bool autoExposure = false;
     float exposureCompensation = 0;
+    // v1.46 (A4, FEATURES_GAME 6): HDR display output. 0: SDR (the main view's colour is R10G10B10A2, sRGB-encoded after
+    // the tone curve). >= 1: the display's peak over paper-white luminance; the colour is R16G16B16A16 FLOAT holding
+    // display-referred linear Rec.709 light, 1 = paper white, after the tone curve generalised to that peak (M, Post.cpp;
+    // at 1 exactly the SDR curve); the host encodes it for the swap chain.
+    float displayPeak = 0;
 };
 constexpr uint32_t kGpuSimulationSoft = 1, kGpuSimulationVfx = 2, kGpuSimulationRigid = 4;
 constexpr uint32_t kDiscontinuityRestore = 1, kDiscontinuityCut = 2;

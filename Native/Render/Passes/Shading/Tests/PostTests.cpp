@@ -7,7 +7,10 @@
 //      projection, PBR Neutral, an identity 33^3 LUT, sRGB, the triangular 10-bit dither of the same hash): every channel
 //      within 1 10-bit step, at most 0.01 % of them off by one (float pow/exp at rounding boundaries; without the
 //      shader's explicit rounding the hardware's UNORM conversion put 3 % one code low);
-//   3. grain and bloom: two runs bit identical (hashes of pixel and frame index), grain zero-mean (|mean| < 0.1 step).
+//   3. grain and bloom: two runs bit identical (hashes of pixel and frame index), grain zero-mean (|mean| < 0.1 step);
+//   4. an HDR display (FrameContext::displayPeak): the RGBA16F output against the CPU reference of the curve generalised
+//      to the peak (4 x paper white, vignetting 0.7) within half precision, never above the peak; at peak 1 the HDR
+//      output equals the SDR curve before its encoding (half precision).
 // Options: --levels N (6, test 1).
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
@@ -204,13 +207,15 @@ PostView postView(Device& device)
 
 // The chain over the ramp; the HDR input and the RGB10A2 output read back.
 void chain(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, std::vector<uint8_t>& hdrBytes, uint32_t& hdrPitch, std::vector<uint8_t>& outBytes,
-           uint32_t& outPitch)
+           uint32_t& outPitch, float displayPeak = 0)
 {
     Context x(device, shaders, quality);
     x.frame.frameIndex = kFrame;
+    x.frame.displayPeak = displayPeak;
     PostView v = postView(device);
     const TextureRef hdr = x.graph.createTexture(TextureDesc{ "post.test.ramp", kWidth, kHeight, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
-    v.view.color = x.graph.createTexture(TextureDesc{ "post.test.output", kWidth, kHeight, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
+    v.view.color = x.graph.createTexture(
+        TextureDesc{ "post.test.output", kWidth, kHeight, 1, 1, displayPeak > 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R10G10B10A2_UNORM });
     fill(x, shaders, hdr, 1);
     if (!shading::postActive(x.fc, v.view)) fail("the chain is not active with post terms set");
     shading::postChain(x.fc, v.view, hdr);
@@ -223,6 +228,22 @@ void chain(Device& device, ShaderLibrary& shaders, const QualityConfig& quality,
 }
 
 // CPU reference of PostFinal.hlsl without bloom and grain.
+// CPU references of ShadingCommon.hlsli: shPbrNeutralPeak (peak 1 = shPbrNeutral).
+float pbrNeutralPeak(float c[3], float peak)
+{
+    const float startCompression = 0.8f * peak - 0.04f, desaturation = 0.15f;
+    const float x = std::min(c[0], std::min(c[1], c[2]));
+    const float offset = x < 0.08f ? x - 6.25f * x * x : 0.04f;
+    for (int i = 0; i < 3; ++i) c[i] -= offset;
+    const float top = std::max(c[0], std::max(c[1], c[2]));
+    if (top < startCompression) return top;
+    const float d = peak - startCompression;
+    const float newPeak = peak - d * d / (top + d - startCompression);
+    for (int i = 0; i < 3; ++i) c[i] *= newPeak / top;
+    const float g = 1 - 1 / (desaturation * (top - newPeak) / peak + 1);
+    for (int i = 0; i < 3; ++i) c[i] = c[i] * (1 - g) + newPeak * g;
+    return top;
+}
 float pbrNeutral(float c[3])
 {
     const float startCompression = 0.8f - 0.04f, desaturation = 0.15f;
@@ -392,6 +413,43 @@ int main(int argc, char** argv)
             logf("grain 0.01: %.1f %% of the channels it cannot clip changed, mean %+.4f steps\n", 100.0 * changed / n, sum / n);
             expect("grain and bloom: two runs bit identical", a == b);
             expect("grain: changes the image, zero-mean (|mean| < 0.1 step)", changed > n / 2 && std::abs(sum / n) < 0.1);
+        }
+        // 4. HDR display output: peak 4 against the generalised curve, peak 1 against the SDR curve.
+        {
+            const float4x4 proj = ViewDesc::fromCamera(scene::Camera{}, kWidth, kHeight, float4x4{}).proj;
+            for (const float peak : { 4.0f, 1.0f })
+            {
+                QualityConfig q = loadQuality();
+                q.applyOverride("shading.post_vignette=0.7");
+                std::vector<uint8_t> hdr, out;
+                uint32_t hp = 0, op = 0;
+                chain(device, shaders, q, hdr, hp, out, op, peak);
+                double worst = 0, top = 0;
+                for (uint32_t y = 0; y < kHeight; ++y)
+                    for (uint32_t x = 0; x < kWidth; ++x)
+                    {
+                        uint16_t h[4], ov[4];
+                        std::memcpy(h, hdr.data() + (size_t)y * hp + (size_t)x * 8, 8);
+                        std::memcpy(ov, out.data() + (size_t)y * op + (size_t)x * 8, 8);
+                        float e[3] = { halfToFloat(h[0]), halfToFloat(h[1]), halfToFloat(h[2]) };
+                        const float nx = (x + 0.5f) / kWidth * 2 - 1, ny = (y + 0.5f) / kHeight * 2 - 1;
+                        const float tx = nx / proj.m[0][0], ty = ny / proj.m[1][1];
+                        const float c2 = 1.0f / (1.0f + tx * tx + ty * ty);
+                        const float vig = 1.0f + (c2 * c2 - 1.0f) * 0.7f;
+                        for (float& c : e) c = std::max(c * vig, 0.0f);
+                        if (peak == 1.0f) pbrNeutral(e);
+                        else pbrNeutralPeak(e, peak);
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            const float expected = saturate(e[c] / peak) * peak, got = halfToFloat(ov[c]);
+                            worst = std::max(worst, (double)std::abs(got - expected) / std::max(expected, 1e-3f));
+                            top = std::max(top, (double)got);
+                        }
+                    }
+                logf("HDR display peak %.0f: worst relative error %.2e vs the CPU curve, largest output %.4f\n", peak, worst, top);
+                expect(peak == 1.0f ? "HDR peak 1: the SDR curve before encoding (half precision)" : "HDR peak 4: the generalised curve (half precision)", worst < 2e-3);
+                expect("HDR: never above the peak", top <= peak * (1 + 1e-3));
+            }
         }
         std::filesystem::remove(cube);
         logf(failures ? "POST TESTS FAILED (%d)\n" : "POST TESTS PASSED\n", failures);

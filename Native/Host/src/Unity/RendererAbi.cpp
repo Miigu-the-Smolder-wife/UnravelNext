@@ -629,6 +629,9 @@ UNX_API int32_t UNX_CALL UnxFrameQueue(UnxRenderer r, const UnxFrameDesc* d, uin
         p.camera.nearPlane = d->camera.nearPlane;
         p.camera.ev100 = d->camera.ev100;
         p.output = reinterpret_cast<ID3D12Resource*>(d->output);
+        p.displayPeak = d->displayPeak;
+        if (!(p.displayPeak == 0 || (std::isfinite(p.displayPeak) && p.displayPeak >= 1)))
+            fail("displayPeak %g: 0 (SDR) or the HDR display's peak over paper white (>= 1)", p.displayPeak);
         *ticket = globalTicket(r, find(r)->queueFrame(p));
     });
 }

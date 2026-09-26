@@ -32,6 +32,7 @@ struct HostRenderer::Standalone
 {
     ComPtr<ID3D12Resource> output, readback;
     uint32_t width = 0, height = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     uint64_t readbackBytes = 0;
 };
@@ -529,6 +530,7 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.discontinuity = p.discontinuity;
     // A4: a camera without an exposure (NaN EV100, UnxCameraDesc) asks for automatic exposure.
     fc.autoExposure = !std::isfinite(p.camera.ev100);
+    fc.displayPeak = p.displayPeak;
     fc.gpuSimulation = p.gpuSimulation;
     m_lastDiscontinuity = p.discontinuity;
     m_lastGpuSimulation = p.gpuSimulation;
@@ -651,12 +653,16 @@ void HostRenderer::renderOnHost(uint64_t ticket, const HostExecute& execute)
     if (od.Width != p.width || od.Height != p.height || !(od.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
         fail("output texture is %llux%u flags 0x%x; the frame needs %ux%u with random write", (unsigned long long)od.Width, od.Height, (unsigned)od.Flags, p.width,
              p.height);
+    const DXGI_FORMAT format = p.displayPeak > 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R10G10B10A2_UNORM;
+    if (od.Format != format && !(format == DXGI_FORMAT_R10G10B10A2_UNORM && od.Format == DXGI_FORMAT_R10G10B10A2_TYPELESS) &&
+        !(format == DXGI_FORMAT_R16G16B16A16_FLOAT && od.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS))
+        fail("output texture format %u; the frame needs %s", (unsigned)od.Format, p.displayPeak > 0 ? "R16G16B16A16 FLOAT (HDR display)" : "R10G10B10A2 UNORM");
     const uint32_t slot = beginFrame(p);
     TextureDesc desc;
     desc.name = "host output";
     desc.width = p.width;
     desc.height = p.height;
-    desc.format = DXGI_FORMAT_R10G10B10A2_UNORM;
+    desc.format = format;
     // The host executes every list with the output declared UNORDERED_ACCESS before and after, so the graph sees it in
     // that layout at frame start and leaves it there.
     const TextureRef output = m_graph->importTexture(p.output, desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
@@ -678,10 +684,10 @@ void HostRenderer::renderOnHost(uint64_t ticket, const HostExecute& execute)
     endFrame(slot, p.frameIndex);
 }
 
-void HostRenderer::ensureStandaloneOutput(uint32_t width, uint32_t height)
+void HostRenderer::ensureStandaloneOutput(uint32_t width, uint32_t height, DXGI_FORMAT format)
 {
     Standalone& s = *m_standalone;
-    if (s.output && s.width == width && s.height == height) return;
+    if (s.output && s.width == width && s.height == height && s.format == format) return;
     m_device->waitIdle();
     D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
     D3D12_RESOURCE_DESC1 d{};
@@ -690,7 +696,7 @@ void HostRenderer::ensureStandaloneOutput(uint32_t width, uint32_t height)
     d.Height = height;
     d.DepthOrArraySize = 1;
     d.MipLevels = 1;
-    d.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+    d.Format = format;
     d.SampleDesc.Count = 1;
     d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     check(m_device->d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
@@ -712,6 +718,7 @@ void HostRenderer::ensureStandaloneOutput(uint32_t width, uint32_t height)
           "standalone readback");
     s.width = width;
     s.height = height;
+    s.format = format;
 }
 
 void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t readbackBytes)
@@ -722,7 +729,11 @@ void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t read
     std::optional<FramePacket> packet = takePacket(ticket);
     if (!packet) fail("frame ticket %llu is not queued (dropped or already rendered)", (unsigned long long)ticket);
     const FramePacket& p = *packet;
-    if (readback && readbackBytes < (size_t)p.width * p.height * 4) fail("readback buffer holds %zu bytes, needs %u", readbackBytes, p.width * p.height * 4);
+    // RGB10A2 (4 B per pixel), or RGBA16F (8 B) for an HDR display
+    const DXGI_FORMAT format = p.displayPeak > 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R10G10B10A2_UNORM;
+    const size_t pixelBytes = p.displayPeak > 0 ? 8 : 4;
+    if (readback && readbackBytes < (size_t)p.width * p.height * pixelBytes)
+        fail("readback buffer holds %zu bytes, needs %zu", readbackBytes, (size_t)p.width * p.height * pixelBytes);
     const void* previousOutput = m_standalone->output.Get();
     if (m_recreateOutput && m_standalone->output)
     {
@@ -730,7 +741,7 @@ void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t read
         m_standalone->output.Reset();
         m_standalone->width = m_standalone->height = 0;
     }
-    ensureStandaloneOutput(p.width, p.height);
+    ensureStandaloneOutput(p.width, p.height, format);
     if (m_recreateOutput && previousOutput)
     {
         ++m_outputRecreations;
@@ -743,7 +754,7 @@ void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t read
     od.name = "host output";
     od.width = p.width;
     od.height = p.height;
-    od.format = DXGI_FORMAT_R10G10B10A2_UNORM;
+    od.format = format;
     const TextureRef output = m_graph->importTexture(s.output.Get(), od, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     recordFrame(p, output);
     if (readback)
@@ -781,7 +792,8 @@ void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t read
         D3D12_RANGE range{ 0, (SIZE_T)s.readbackBytes };
         check(s.readback->Map(0, &range, (void**)&mapped), "readback Map");
         for (uint32_t y = 0; y < p.height; ++y)
-            std::memcpy((uint8_t*)readback + (size_t)y * p.width * 4, mapped + s.footprint.Offset + (size_t)y * s.footprint.Footprint.RowPitch, (size_t)p.width * 4);
+            std::memcpy((uint8_t*)readback + (size_t)y * p.width * pixelBytes, mapped + s.footprint.Offset + (size_t)y * s.footprint.Footprint.RowPitch,
+                        (size_t)p.width * pixelBytes);
         D3D12_RANGE none{ 0, 0 };
         s.readback->Unmap(0, &none);
     }

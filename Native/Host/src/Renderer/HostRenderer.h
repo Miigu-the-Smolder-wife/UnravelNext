@@ -73,7 +73,9 @@ struct FramePacket
     float deltaTime = 0;
     uint32_t width = 0, height = 0;
     scene::Camera camera;
-    ID3D12Resource* output = nullptr;              // host-owned RGB10A2 random-write texture; null standalone
+    ID3D12Resource* output = nullptr;              // host-owned RGB10A2 (RGBA16F with displayPeak) random-write texture;
+                                                   // null standalone
+    float displayPeak = 0;                         // FrameContext::displayPeak: 0 SDR, else HDR peak / paper white
     std::optional<scene::Sun> sun;                 // changed sun (time of day)
     std::optional<scene::Atmosphere> atmosphere;   // changed atmosphere (weather); the atmosphere track rebuilds its LUTs
     struct Wind
@@ -226,7 +228,7 @@ private:
     };
     static void overlay(const FramePacket& p, HostState& state);
     static void applyEdits(const FramePacket& p, scene::Scene& s);
-    void ensureStandaloneOutput(uint32_t width, uint32_t height);
+    void ensureStandaloneOutput(uint32_t width, uint32_t height, DXGI_FORMAT format);
     // Paces the frame slot, applies the packet's scene updates, declares the frame; returns the frame slot.
     uint32_t beginFrame(const FramePacket& packet);
     void recordFrame(const FramePacket& packet, render::TextureRef output);

@@ -2,7 +2,9 @@
 // Post chain, final pass (Post.cpp): exposed HDR -> bloom mix -> natural vignetting -> PBR Neutral -> grading LUT ->
 // grain -> sRGB OETF -> 10-bit triangular dither -> the display output (RGB10A2).
 // P[0] = { HDR SRV, bloom SRV (half resolution; UNX_NONE: off), output UAV, LUT SRV (UNX_NONE: none) },
-// P[1] = { asfloat bloom strength, asfloat vignette, asfloat grain, frame index }, P[2] = { width, height, 0, 0 }.
+// P[1] = { asfloat bloom strength, asfloat vignette, asfloat grain, frame index }, P[2] = { width, height, asfloat display
+// peak, 0 }: peak 0 = SDR (above); peak >= 1 = an HDR display (peak over paper white): the curve generalised to that peak,
+// the LUT on its output over the peak, grain, then linear light with 1 = paper white (RGBA16F output, no OETF, no dither).
 // Frame constants of the view (its projection gives the field angle).
 #include "Bindless.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
@@ -45,7 +47,11 @@ void main(uint2 id : SV_DispatchThreadID)
         const float c2 = 1.0 / (1.0 + dot(t, t));
         e *= lerp(1.0, c2 * c2, vignette);
     }
-    float3 d = saturate(shPbrNeutral(max(e, 0.0)));
+    const float peak = asfloat(P[2].z);
+    const bool hdrDisplay = peak > 0;
+    const float range = hdrDisplay ? peak : 1.0;
+    // d: the curve's output over the display's range (0..1), so the LUT and grain act the same in SDR and HDR
+    float3 d = hdrDisplay ? saturate(shPbrNeutralPeak(max(e, 0.0), peak) / peak) : saturate(shPbrNeutral(max(e, 0.0)));
     if (P[0].w != UNX_NONE)
     {
         Texture3D<float4> lut = ResourceDescriptorHeap[P[0].w];
@@ -72,6 +78,12 @@ void main(uint2 id : SV_DispatchThreadID)
         // an additive grain clipped at 0 lifted the shadows (PostTests: +6.9 10-bit steps at 0.01).
         const float n = hashUnit(uint3(id, P[1].w)) + hashUnit(uint3(id, P[1].w + 7919u)) - 1.0;
         d = saturate(d * (1.0 + n * grain * 2.4494897));
+    }
+    if (hdrDisplay)
+    {
+        RWTexture2D<float4> linearOutput = ResourceDescriptorHeap[P[0].z];
+        linearOutput[id] = float4(d * range, 1);
+        return;
     }
     float3 o = float3(shSrgbOetf(d.r), shSrgbOetf(d.g), shSrgbOetf(d.b));
     const float n = hashUnit(uint3(id, P[1].w ^ 0x5bd1e995u)) + hashUnit(uint3(id.yx, P[1].w + 104729u)) - 1.0;

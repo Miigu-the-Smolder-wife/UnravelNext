@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.45, 2026-09-26)
+# UnravelNext 인터페이스 (v1.46, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -723,6 +723,8 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.46 (2026-09-26):
+  - **HDR 디스플레이 출력(5.5, A4)**: `FrameContext::displayPeak`는 0이면 SDR이고(주 뷰 색은 R10G10B10A2, 톤 커브 뒤 sRGB), 1 이상이면 디스플레이 최고 휘도 ÷ 종이 흰색이다. 이때 주 뷰 색은 R16G16B16A16 FLOAT이고, 봉우리에 맞춰 일반화한 커브(M `shPbrNeutralPeak`, 1에서 SDR 커브와 같다)를 거친 디스플레이 기준 선형 Rec.709 빛(1 = 종이 흰색)을 담는다. 인코딩(scRGB, PQ)은 호스트가 한다. 호스트 ABI는 `UnxFrameDesc::displayPeak`로, 옛 `reserved` 자리(0)라 옛 호스트는 SDR을 받는다. 선택 export `UnxRendererQualityOverride`(commit 전 품질 덮어쓰기)도 이때 더했다.
 - v1.45 (2026-09-26):
   - **움직임 끊김 플래그(6.3, A0 복원 검사)**: `gpu::kInstanceMotionBreak`와 `Instance::breakCentre`. S의 `VsmMoved`는 끊긴 인스턴스의 모든 단계를 무효화하고(기준점은 마지막으로 그린 자리에 남는다), `VsmLocalInvalidate`는 옛 구를 `breakCentre`에서 잡는다.
   - **안정 면광원 마스크(B2, COVERAGE 12.4 구조 2)**: `FrameResources::areaLightStable`(M `prepareScene`, raw SRV, 광원당 1비트 = revision이 8프레임 이상 그대로). `raytracing.emitters`가 켜졌을 때만 게시하고, 꺼지면 UINT32_MAX다. M은 비트가 선 면광원의 LTC 스펙큘러를 R의 반사 경로(K/G/M)에 넘기고, R은 비트가 없는 광원을 직접 발광체 hit에서 뺀다. `GpuScene::lights()`(광원 레코드 CPU 사본).

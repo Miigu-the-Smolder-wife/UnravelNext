@@ -4,7 +4,10 @@
 // shading.post_bloom_strength of the energy) -> natural vignetting (cos^4 of the field angle) -> tone curve (PBR Neutral,
 // INTERFACES 8.4) -> grading LUT (33^3 .cube, after the curve) -> film grain (deterministic hash, after the curve) ->
 // triangular dither of the 10-bit output -> sRGB. With every term off the chain is not recorded and the writers encode
-// directly (gates and reference comparisons are unchanged: the quality keys default to off).
+// directly (gates and reference comparisons are unchanged: the quality keys default to off). An HDR display
+// (FrameContext::displayPeak = peak / paper white) always runs the chain: the curve generalised to that peak (at 1 the
+// SDR curve exactly), the LUT on the curve's output over the peak, grain, then display-referred linear light
+// (1 = paper white) into the RGBA16F output without OETF or dither; the host encodes it (scRGB or PQ).
 #include "unx/shading/Post.h"
 
 #include "unx/core/Config.h"
@@ -173,6 +176,7 @@ uint32_t asUint(float f)
 bool postActive(FramePassContext& fc, const ViewResources& view)
 {
     if (view.view.kind != gpu::ViewKind::Main || fc.frame.outputLinearHdr) return false;
+    if (fc.frame.displayPeak > 0) return true;  // an HDR display: the chain writes its encoding
     const PostParams p = params(fc.quality);
     return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty();
 }
@@ -258,6 +262,7 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
     ID3D12PipelineState* final = fc.shaders.compute("Passes/Shading/PostFinal");
     const TextureRef output = view.color;
     const uint32_t lutSrv = lut ? lut->srv : 0xFFFFFFFFu, frame = (uint32_t)fc.frame.frameIndex;
+    const float peak = fc.frame.displayPeak;  // 0: SDR
     g.addPass("m.post.final", QueueType::Graphics,
               [&](PassBuilder& b) {
                   b.use(hdr, Use::SrvCompute);
@@ -266,7 +271,7 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
               },
               [=](PassContext& c) {
                   const uint32_t k[12] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
-                                           asUint(p.bloom), asUint(p.vignette), asUint(p.grain), frame, w, h, 0, 0 };
+                                           asUint(p.bloom), asUint(p.vignette), asUint(p.grain), frame, w, h, asUint(peak), 0 };
                   c.cmd->SetPipelineState(final);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 12);

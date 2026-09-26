@@ -10,14 +10,19 @@
 //   2. vignetting only (1.0): the centre block within 1 step (mean; cos^4 is not flat there), the corners much darker;
 //   3. every term on (bloom 0.04, vignette 0.5, grain 0.01, the LUT): two renderers bit identical, the frame differs
 //      from the plain one;
-//   4. an override after commit is refused (the render threads read the config).
+//   4. an override after commit is refused (the render threads read the config);
+//   5. an HDR display (FramePacket::displayPeak 4): the RGBA16F output is finite, within [0, peak], and where the SDR
+//      frame is below the curve's shoulder the two agree (the HDR curve's linear part through sRGB within 2 steps).
 // Correctness run (standalone HostRenderer, hardware GPU; GpuLock -Kind correctness).
 #include "Renderer/HostRenderer.h"
 
 #include "TestScenes.h"
 #include "unx/core/File.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <limits>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -31,7 +36,8 @@ namespace
 {
 constexpr uint32_t kWidth = 640, kHeight = 360, kFrames = 6;
 
-std::vector<uint32_t> renderFrames(const std::vector<std::string>& overrides, uint32_t& debugErrors)
+// The frames' last output: RGB10A2 words (SDR) or RGBA16F halves (displayPeak > 0; 4 per pixel).
+std::vector<uint32_t> renderFrames(const std::vector<std::string>& overrides, uint32_t& debugErrors, float displayPeak = 0)
 {
     HostRendererOptions o;
     o.standalone = true;
@@ -44,7 +50,7 @@ std::vector<uint32_t> renderFrames(const std::vector<std::string>& overrides, ui
     h.scene() = test::oneBox();
     h.commit();
     const scene::Camera camera = h.scene().cameras[0];
-    std::vector<uint32_t> pixels((size_t)kWidth * kHeight);
+    std::vector<uint32_t> pixels((size_t)kWidth * kHeight * (displayPeak > 0 ? 2 : 1));
     for (uint32_t f = 0; f < kFrames; ++f)
     {
         FramePacket p;
@@ -53,6 +59,7 @@ std::vector<uint32_t> renderFrames(const std::vector<std::string>& overrides, ui
         p.width = kWidth;
         p.height = kHeight;
         p.camera = camera;
+        p.displayPeak = displayPeak;
         const bool last = f + 1 == kFrames;
         h.renderStandalone(h.queueFrame(std::move(p)), last ? pixels.data() : nullptr, last ? pixels.size() * 4 : 0);
     }
@@ -177,6 +184,42 @@ int main()
             }
             expect("an override after commit is refused", refused);
             errors += h.debugErrors();
+        }
+        // 5. HDR display output
+        {
+            const float peak = 4.0f;
+            const std::vector<uint32_t> hdr = renderFrames({}, errors, peak);
+            auto half = [&](size_t pixel, int c) {
+                uint16_t h;
+                std::memcpy(&h, reinterpret_cast<const uint8_t*>(hdr.data()) + pixel * 8 + c * 2, 2);
+                const uint32_t sign = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
+                if (e == 31) return m ? std::numeric_limits<float>::quiet_NaN() : (sign ? -INFINITY : INFINITY);
+                const float f = e == 0 ? std::ldexp((float)m, -24) : std::ldexp(1.0f + m / 1024.0f, (int)e - 15);
+                return sign ? -f : f;
+            };
+            bool finite = true;
+            float top = 0, bottom = 0;
+            int worst = 0;
+            uint64_t compared = 0;
+            for (size_t i = 0; i < plain.size(); ++i)
+                for (int c = 0; c < 3; ++c)
+                {
+                    const float v = half(i, c);
+                    finite = finite && std::isfinite(v);
+                    top = std::max(top, v);
+                    bottom = std::min(bottom, v);
+                    // below the SDR shoulder (display 0.76 -> 10-bit 900) both curves are the same toe and linear part
+                    const int sdr = channel(plain[i], c);
+                    if (sdr > 16 && sdr < 880 && v < 0.7f)
+                    {
+                        const float o = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+                        worst = std::max(worst, std::abs((int)std::lround(o * 1023.0f) - sdr));
+                        ++compared;
+                    }
+                }
+            logf("  HDR peak %.0f: output in [%.4f, %.4f], %llu channels below the shoulder vs SDR: worst %d steps\n", peak, bottom, top, (unsigned long long)compared, worst);
+            expect("HDR: finite output within [0, peak]", finite && bottom >= 0 && top <= peak * 1.001f);
+            expect("HDR: below the shoulder the same image as SDR (2 steps: dither + half)", compared > 1000 && worst <= 2);
         }
         expect("D3D12 debug layer errors 0", errors == 0);
         std::filesystem::remove(cube);

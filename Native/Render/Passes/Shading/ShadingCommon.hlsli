@@ -263,6 +263,25 @@ float3 shPbrNeutral(float3 color)
     return lerp(color, newPeak.xxx, g);
 }
 
+// PBR Neutral generalised to an HDR display whose peak is 'peak' x paper white (the input and output in paper-white
+// units): the same toe (absolute, below 0.08), the shoulder starting at 0.8 peak - 0.04 and reaching the peak
+// asymptotically, desaturation by the compression relative to the peak. At peak 1 every operation is shPbrNeutral's.
+float3 shPbrNeutralPeak(float3 color, float peak)
+{
+    const float startCompression = 0.8 * peak - 0.04;
+    const float desaturation = 0.15;
+    const float x = min(color.r, min(color.g, color.b));
+    const float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= offset;
+    const float top = max(color.r, max(color.g, color.b));
+    if (top < startCompression) return color;
+    const float d = peak - startCompression;
+    const float newPeak = peak - d * d / (top + d - startCompression);
+    color *= newPeak / top;
+    const float g = 1 - 1 / (desaturation * (top - newPeak) / peak + 1);
+    return lerp(color, newPeak.xxx, g);
+}
+
 float shSrgbOetf(float c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
 
 // Display: sRGB OETF of the tone-mapped value; linear outputs (validation, secondary views): radiance x exposure.
