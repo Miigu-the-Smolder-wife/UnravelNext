@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.65, 2026-09-26)
+# UnravelNext 인터페이스 (v1.66, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -545,6 +545,8 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - 셰이딩 법선 규칙(v1.65, 기준 `RtScene.cpp`와 같다): 최종 셰이딩 법선이 기하 법선 반대쪽이면 삼각형 평면에 대해 반사한다. 셰이딩하는 면을 보는 경우(앞면, 또는 two-sided의 뒷면)에 n·v < 1e-4이면 n ← normalize(n + v (1e-4 − n·v))로 굽힌다. BRDF는 n·v > 0에서만 정의되므로, 이 규칙이 없으면 비스듬히 보는 노멀맵 텍셀이 빛을 전혀 반사하지 않는다(U2의 검은 점). 실시간: M의 해석과 coverage 조각(`mNormalOnGeometricSide`, `mNormalTowardsViewer`), 그리고 ShadeOpaque가 G버퍼 양자화 뒤에 다시 굽힌다.
 - 텍스처: 기준은 mip 0 쌍선형(표본 수로 픽셀 필터를 적분), 실시간은 footprint 밉·이방성 + 노멀→거칠기 필터(설계서 2.2). 이 차이는 품질 정의(설계서 3절 "재질")의 허용 항목이다.
 - Hair, Water, Glass, Subsurface 클래스 모델은 해당 단계(P3/P4) 전에 0절 절차로 이 절에 추가한다.
+- Hair 클래스(v1.66, B10): 셰이딩은 E의 `Passes/Hair/HairBsdf.hlsli`(d'Eon·Chiang 섬유 산란, 모든 내부 차수)다. 매개변수는 β_M = roughness, η = ior(케라틴 1.55), `hairBetaN`, `hairTilt`, 흡수 σ_a = `scene::model::hairAbsorption`이다. 멜라닌(`hairEumelanin`, `hairPheomelanin`)이 있으면 d'Eon 2011, 없으면 baseColor를 목표 색으로 보고 Chiang 2016 역변환을 쓴다. 단위는 PBRT 규약(섬유 반지름당)이다. 간접광 = 캐시 조도 × 섬유 방향 알베도이며, 정확 조건은 섬유 둘레 방향 입사 복사가 평탄하고 캐시 텍셀 각 폭이 섬유 로브보다 좁은 것이다.
+- Cut 클래스(v1.66, A11): 셰이딩은 Standard 그대로이고, 텍스처를 객체 공간 삼면 투영(`cutScale` 반복/m)으로 읽는다. 삼각형 경계 변을 따라 폭 `cutDamageWidth`(m)의 손상 층이 있다(C의 `Passes/Material/CutFace.hlsli`, M 해석이 합류).
 
 ### 8.2 광원
 - 점: 조도 = I / d² · w(d), w(d) = saturate(1 − (d/range)⁴)². 스폿: × saturate(cosθ · spotScale + spotOffset)², cosθ = dot(−l, forward).
@@ -727,6 +729,11 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.66 (2026-09-26, 렌더 A·core: Hair·Cut 재질 필드, 엔진 2·렌더 C 합의):
+  - **scene::Material**: `hairEumelanin`, `hairPheomelanin`, `hairBetaN`(0.3), `hairTilt`(0.0349 rad), `cutScale`(1), `cutDamageWidth`(0.01 m), `MaterialClass::Cut = 6`(HLSL `MATERIAL_CUT`). validate는 Hair(멜라닌 ≥ 0, β_N ∈ (0, 1], ior > 1)와 Cut(cutScale > 0, 폭 ≥ 0)을 검사한다.
+  - **장면 파일**: 확장 블록 "HAIR"와 "CUTS"는 해당 클래스 재질이 있을 때만 쓴다. 그래서 형식 버전과 기존 장면의 바이트·contentHash는 그대로다. 읽기는 확장 블록(MRPH, HAIR, CUTS)을 순서대로 받는다.
+  - **gpu::Material 80 → 112 B**(HLSL `GpuMaterial`): `hairAbsorption`(σ_a), `hairBetaN`, `hairTilt`, `cutScale`, `cutDamageWidth`, 예비 1워드(A9)다. `scene::model::hairAbsorption(m)`은 CPU·GPU 기준 추적기와 GPU 레코드가 같은 식을 쓰게 하는 공용 함수다.
+  - 셰이더 ABI 도장이 바뀐다(Scene.hlsli). 모든 build 폴더를 다시 빌드해야 한다. [실측] unit 38/38(장면 왕복·흡수 식 포함). material·shading·decal hits·host decal·surface layers·visibility 시험을 통과했다.
 - v1.65 (2026-09-26, 렌더 A: B11 사진 모드 호스트, 셰이딩 법선 규칙):
   - **사진 모드 호스트(FEATURES_GAME 17, E의 `GpuPathTracer`를 렌더러 장치 위에서)**: `HostRenderer::photoBegin(camera, PhotoSettings)`, `photoSave(exr, png)`, `photoEnd()`, `photoStatus()`, `photoScene()`. 선택 export는 `UnxPhotoBegin(UnxPhotoDesc 64 B)`, `UnxPhotoSave`, `UnxPhotoEnd`, `UnxPhotoGetStatus(UnxPhotoStatus 312 B)`(ABI 6 안)다.
     - 스냅숏은 호스트가 지금 보여 주는 장면이다: 최신 변환·자세·태양·가시성, C2b 런타임 메시와 인스턴스, C5 지형 패치(패치된 타일은 V의 무게중심 규칙으로 교체 삼각형을 뺀다), 최신 프레임 카메라 × 자세의 A12 뷰 모델. 렌즈는 호스트 렌즈를 쓰고, EV100이 유한하지 않으면 자동 노출의 마지막 값을 쓴다.

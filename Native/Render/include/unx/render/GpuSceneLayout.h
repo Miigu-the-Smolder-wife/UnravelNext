@@ -132,7 +132,7 @@ struct LodLevel  // 16 B: one uniform-error cut of a mesh's hierarchy (ray traci
 };
 static_assert(sizeof(LodLevel) == 16);
 
-struct Material  // 80 B
+struct Material  // 112 B
 {
     float3 baseColor;
     float roughness;         // perceptual
@@ -150,8 +150,16 @@ struct Material  // 80 B
     uint32_t occlusionTexture;
     uint32_t revision;
     uint32_t textureClamp;   // bit per texture (MaterialTextureBit): 1 = clamp addressing (g_anisoClamp), 0 = wrap
+    // Hair class (v1.66): sigma_a (scene::model::hairAbsorption), beta_N, cuticle tilt; beta_M = roughness, eta = ior.
+    float3 hairAbsorption;
+    float hairBetaN;
+    float hairTilt;
+    // Cut class (v1.66): triplanar texture repeats per metre, damage band width (m).
+    float cutScale;
+    float cutDamageWidth;
+    uint32_t reserved;       // (A9 material layers)
 };
-static_assert(sizeof(Material) == 80);
+static_assert(sizeof(Material) == 112);
 
 // Textures of one material as M's texture system publishes them (GpuScene::setMaterialTextures, INTERFACES 6.3 v1.10):
 // bindless SRV indices (kNone = none; the SRVs belong to M) and clamp bits (MaterialTextureBit).

@@ -1203,6 +1203,40 @@ UNX_TEST(scene_roundtrip_and_validation)
     bad = s;
     bad.materials[0].normalTexture = 0;  // normal map without tangents (and a missing texture)
     CHECK(throws([&] { scene::validate(bad); }));
+
+    // v1.66 extension blocks: hair and cut parameters survive the round trip; a scene without such materials keeps its
+    // bytes (the blocks are written only when used), so earlier content hashes stay valid.
+    scene::Scene ext = s;
+    scene::Material hair = s.materials[0];
+    hair.cls = scene::MaterialClass::Hair;
+    hair.ior = 1.55f;
+    hair.hairEumelanin = 1.3f, hair.hairPheomelanin = 0.2f, hair.hairBetaN = 0.4f, hair.hairTilt = 0.05f;
+    scene::Material cut = s.materials[0];
+    cut.cls = scene::MaterialClass::Cut;
+    cut.cutScale = 2.5f, cut.cutDamageWidth = 0.03f;
+    ext.materials.push_back(hair);
+    ext.materials.push_back(cut);
+    scene::validate(ext);
+    const scene::Scene extBack = scene::deserialize(scene::serialize(ext));
+    const scene::Material& h2 = extBack.materials[extBack.materials.size() - 2];
+    const scene::Material& c2 = extBack.materials.back();
+    CHECK(h2.hairEumelanin == 1.3f && h2.hairPheomelanin == 0.2f && h2.hairBetaN == 0.4f && h2.hairTilt == 0.05f);
+    CHECK(c2.cutScale == 2.5f && c2.cutDamageWidth == 0.03f);
+    CHECK(scene::serialize(extBack) == scene::serialize(ext));
+    CHECK(scene::serialize(s) == bytes);
+    scene::Scene badCut = ext;
+    badCut.materials.back().cutScale = 0;
+    CHECK(throws([&] { scene::validate(badCut); }));
+
+    // hair absorption: melanin (d'Eon 2011) and target colour (Chiang 2016, the inverse of its albedo fit)
+    const float3 melanin = scene::model::hairAbsorption(hair);
+    CHECK(std::abs(melanin.x - (0.419f * 1.3f + 0.187f * 0.2f)) < 1e-6f && std::abs(melanin.z - (1.37f * 1.3f + 1.05f * 0.2f)) < 1e-6f);
+    scene::Material colour = hair;
+    colour.hairEumelanin = colour.hairPheomelanin = 0;
+    colour.baseColor = { 1.0f, 0.5f, 0.1f };
+    const float3 sa = scene::model::hairAbsorption(colour);
+    const double b = 0.4, d = 5.969 - 0.215 * b + 2.532 * b * b - 10.73 * b * b * b + 5.574 * b * b * b * b + 0.245 * b * b * b * b * b;
+    CHECK(sa.x == 0.0f && std::abs(sa.y - std::pow(std::log(0.5) / d, 2)) < 1e-6 && std::abs(sa.z - std::pow(std::log(0.1) / d, 2)) < 1e-5);
 }
 
 UNX_TEST(material_model_table)

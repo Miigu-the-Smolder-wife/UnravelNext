@@ -156,4 +156,16 @@ float3 evaluate(const Surface& s, float3 n, float3 v, float3 l)
     const float3 diffuse = s.cls == MaterialClass::Foliage ? albedo * (1 - s.transmission) : albedo;
     return diffuse + single * compensation;
 }
+float3 hairAbsorption(const Material& m)
+{
+    if (m.hairEumelanin + m.hairPheomelanin > 0)
+        return float3{ 0.419f, 0.697f, 1.37f } * m.hairEumelanin + float3{ 0.187f, 0.4f, 1.05f } * m.hairPheomelanin;
+    const float b = m.hairBetaN;
+    const float d = 5.969f - 0.215f * b + 2.532f * b * b - 10.73f * b * b * b + 5.574f * b * b * b * b + 0.245f * b * b * b * b * b;
+    auto channel = [&](float c) {
+        const float l = std::log(std::clamp(c, 1e-4f, 1.0f)) / d;
+        return l * l;
+    };
+    return float3{ channel(m.baseColor.x), channel(m.baseColor.y), channel(m.baseColor.z) };
+}
 } // namespace unx::scene::model

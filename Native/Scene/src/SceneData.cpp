@@ -167,6 +167,63 @@ bool unit(float3 v) { return std::fabs(length(v) - 1.0f) < 1e-3f; }
 // vertex animation) and per instance (weights, time).
 constexpr uint32_t kMorphTag = 0x4850524Du;  // "MRPH"
 
+// B10 hair extension block (INTERFACES 8.1 v1.66), written only when the scene has a Hair-class material (other scenes
+// keep their bytes and content hashes): u32 tag "HAIR", u64 count, then per hair material its index and eumelanin,
+// pheomelanin, beta_N, tilt.
+constexpr uint32_t kHairTag = 0x52494148u;  // "HAIR"
+
+bool anyHair(const Scene& s)
+{
+    for (const Material& m : s.materials)
+        if (m.cls == MaterialClass::Hair) return true;
+    return false;
+}
+
+void writeHair(Writer& w, const Scene& s)
+{
+    w.pod(kHairTag);
+    uint64_t count = 0;
+    for (const Material& m : s.materials) count += m.cls == MaterialClass::Hair;
+    w.pod(count);
+    for (uint32_t i = 0; i < s.materials.size(); ++i)
+    {
+        const Material& m = s.materials[i];
+        if (m.cls != MaterialClass::Hair) continue;
+        w.pod(i);
+        w.pod(m.hairEumelanin);
+        w.pod(m.hairPheomelanin);
+        w.pod(m.hairBetaN);
+        w.pod(m.hairTilt);
+    }
+}
+
+// A11 cut extension block, written only when the scene has a Cut-class material: u32 tag "CUTS", u64 count, then per
+// cut material its index, cutScale, cutDamageWidth.
+constexpr uint32_t kCutTag = 0x53545543u;  // "CUTS"
+
+bool anyCut(const Scene& s)
+{
+    for (const Material& m : s.materials)
+        if (m.cls == MaterialClass::Cut) return true;
+    return false;
+}
+
+void writeCut(Writer& w, const Scene& s)
+{
+    w.pod(kCutTag);
+    uint64_t count = 0;
+    for (const Material& m : s.materials) count += m.cls == MaterialClass::Cut;
+    w.pod(count);
+    for (uint32_t i = 0; i < s.materials.size(); ++i)
+    {
+        const Material& m = s.materials[i];
+        if (m.cls != MaterialClass::Cut) continue;
+        w.pod(i);
+        w.pod(m.cutScale);
+        w.pod(m.cutDamageWidth);
+    }
+}
+
 bool anyMorph(const Scene& s)
 {
     for (const Mesh& m : s.meshes)
@@ -223,6 +280,8 @@ std::vector<uint8_t> serialize(const Scene& s)
     writeList(w, s.cameras);
     writeList(w, s.paths);
     if (anyMorph(s)) writeMorph(w, s);
+    if (anyHair(s)) writeHair(w, s);
+    if (anyCut(s)) writeCut(w, s);
     return std::move(w.out);
 }
 
@@ -249,9 +308,9 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
     s.windSpeed = r.pod<float>();
     readList(r, s.cameras);
     readList(r, s.paths);
-    if (r.at < bytes.size())
+    uint32_t tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    if (tag == kMorphTag)
     {
-        if (r.pod<uint32_t>() != kMorphTag) fail("unxscene: unknown extension block");
         for (Mesh& m : s.meshes)
         {
             m.blendShapes.resize((size_t)r.pod<uint64_t>());
@@ -274,7 +333,36 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
             r.podArray(i.blendWeights);
             i.vertexAnimationTime = r.pod<float>();
         }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kHairTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.materials.size()) fail("unxscene: hair parameters of material %u of %zu", i, s.materials.size());
+            Material& m = s.materials[i];
+            m.hairEumelanin = r.pod<float>();
+            m.hairPheomelanin = r.pod<float>();
+            m.hairBetaN = r.pod<float>();
+            m.hairTilt = r.pod<float>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
+    if (tag == kCutTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.materials.size()) fail("unxscene: cut parameters of material %u of %zu", i, s.materials.size());
+            s.materials[i].cutScale = r.pod<float>();
+            s.materials[i].cutDamageWidth = r.pod<float>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
+    if (tag != 0) fail("unxscene: unknown extension block 0x%08x", tag);
     if (r.at != bytes.size()) fail("unxscene: %zu trailing bytes", bytes.size() - r.at);
     return s;
 }
@@ -312,6 +400,10 @@ void validate(const Scene& s)
         if (!texOk(m.baseColorTexture) || !texOk(m.normalTexture) || !texOk(m.roughMetalTexture) || !texOk(m.emissiveTexture) || !texOk(m.occlusionTexture))
             fail("material %zu '%s': texture index out of range", i, m.name.c_str());
         if (m.roughness < 0 || m.roughness > 1 || m.metallic < 0 || m.metallic > 1) fail("material %zu '%s': roughness/metallic outside [0,1]", i, m.name.c_str());
+        if (m.cls == MaterialClass::Hair && !(m.hairEumelanin >= 0 && m.hairPheomelanin >= 0 && m.hairBetaN > 0 && m.hairBetaN <= 1 && std::isfinite(m.hairTilt) && m.ior > 1))
+            fail("material %zu '%s': hair needs melanin >= 0, beta_N in (0, 1], a finite tilt and ior > 1", i, m.name.c_str());
+        if (m.cls == MaterialClass::Cut && !(m.cutScale > 0 && m.cutDamageWidth >= 0 && std::isfinite(m.cutScale) && std::isfinite(m.cutDamageWidth)))
+            fail("material %zu '%s': a cut material needs cutScale > 0 and cutDamageWidth >= 0", i, m.name.c_str());
     }
     for (size_t i = 0; i < s.meshes.size(); ++i)
     {

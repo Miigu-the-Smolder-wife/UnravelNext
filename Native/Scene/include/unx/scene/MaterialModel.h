@@ -58,4 +58,11 @@ float2 specularAlbedo(float NoV, float roughness);
 
 // BRDF value (without the cosine), world-space unit vectors: n shading normal, v towards the viewer, l towards the light.
 float3 evaluate(const Surface& s, float3 n, float3 v, float3 l);
+
+// Hair class (INTERFACES 8.1 v1.66): the fibre's absorption sigma_a (PBRT 4e's convention: per unit fibre radius, the
+// chord of the unit-radius cross-section is the path length; HairBsdf.hlsli hairAttenuation). With melanin (eumelanin +
+// pheomelanin > 0): d'Eon et al. 2011, eu (0.419, 0.697, 1.37) + pheo (0.187, 0.4, 1.05). Otherwise baseColor is the
+// target colour c (clamped to [1e-4, 1]): Chiang et al. 2016, sigma_a = (ln c / (5.969 - 0.215 bN + 2.532 bN^2 -
+// 10.73 bN^3 + 5.574 bN^4 + 0.245 bN^5))^2 with bN = hairBetaN. The reference tracers and the GPU material record call it.
+float3 hairAbsorption(const Material& m);
 } // namespace unx::scene::model

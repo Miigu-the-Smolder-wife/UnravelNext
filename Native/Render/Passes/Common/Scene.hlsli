@@ -77,6 +77,12 @@ struct GpuMaterial
     float specular, alphaCutoff, transmission, ior;
     uint classFlags, baseColorTexture, normalTexture, roughMetalTexture;
     uint emissiveTexture, occlusionTexture, revision, textureClamp;  // textureClamp: bit per texture, 1 = g_anisoClamp
+    float3 hairAbsorption;  // Hair class (v1.66): sigma_a, beta_N, cuticle tilt (beta_M = roughness, eta = ior)
+    float hairBetaN;
+    float hairTilt;
+    float cutScale;          // Cut class (v1.66): triplanar repeats per metre, damage band width (m)
+    float cutDamageWidth;
+    uint reserved;
 };
 
 struct GpuLight
@@ -116,6 +122,7 @@ struct GpuVisibleCluster
 #define MATERIAL_WATER 3u
 #define MATERIAL_GLASS 4u
 #define MATERIAL_SUBSURFACE 5u
+#define MATERIAL_CUT 6u  // destruction cut faces (A11): Standard shading, triplanar textures
 // gpu::MaterialFlags (bits 8..)
 #define MATERIAL_TWO_SIDED (1u << 8)
 #define MATERIAL_ALPHA_TESTED (1u << 9)

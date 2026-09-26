@@ -482,6 +482,17 @@ gpu::Material GpuScene::packMaterial(const scene::Material& m) const
     g.baseColorTexture = g.normalTexture = g.roughMetalTexture = g.emissiveTexture = g.occlusionTexture = gpu::kNone;  // setMaterialTextures
     g.textureClamp = 0;
     g.revision = m_revision;
+    if (m.cls == scene::MaterialClass::Hair)
+    {
+        g.hairAbsorption = scene::model::hairAbsorption(m);
+        g.hairBetaN = m.hairBetaN;
+        g.hairTilt = m.hairTilt;
+    }
+    if (m.cls == scene::MaterialClass::Cut)
+    {
+        g.cutScale = m.cutScale;
+        g.cutDamageWidth = m.cutDamageWidth;
+    }
     return g;
 }
 

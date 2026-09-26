@@ -48,6 +48,7 @@ enum class MaterialClass : uint8_t
     Water = 3,       // water surface (P4)
     Glass = 4,       // thin/solid dielectric (P4)
     Subsurface = 5,  // skin and similar (P4)
+    Cut = 6,         // destruction cut faces (A11): Standard shading, textures by object-space triplanar projection
 };
 
 struct Material
@@ -68,6 +69,17 @@ struct Material
     uint32_t roughMetalTexture = kNone;      // Rg8RoughMetal; multiplies roughness/metallic
     uint32_t emissiveTexture = kNone;        // Rgba16Float or Rgba8Srgb; multiplies emissive
     uint32_t occlusionTexture = kNone;       // R8Linear; ambient/specular occlusion (baked cavities only)
+    // Hair class (strands, B10; Passes/Hair/HairBsdf.hlsli, INTERFACES 8.1 v1.66): longitudinal roughness beta_M =
+    // roughness, eta = ior (keratin 1.55), absorption from melanin (d'Eon 2011) or, both concentrations 0, from baseColor as
+    // the target colour (Chiang 2016): scene::model::hairAbsorption.
+    float hairEumelanin = 0.0f, hairPheomelanin = 0.0f;  // concentrations (>= 0)
+    float hairBetaN = 0.3f;                  // azimuthal roughness (0, 1]
+    float hairTilt = 0.0349f;                // cuticle scale tilt (radians; 2 degrees)
+    // Cut class (destruction cut faces, A11; Passes/Material/CutFace.hlsli, INTERFACES 8.1 v1.66): the textures are read
+    // by an object-space triplanar projection at cutScale repeats per metre; the damage band along the triangle's
+    // boundary edges is cutDamageWidth metres wide.
+    float cutScale = 1.0f;                   // > 0
+    float cutDamageWidth = 0.01f;            // >= 0
 };
 
 struct Submesh
