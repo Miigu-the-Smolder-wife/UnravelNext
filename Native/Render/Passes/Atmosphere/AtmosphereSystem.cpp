@@ -1,5 +1,6 @@
 #include "AtmosphereSystem.h"
 
+#include "Celestial.h"
 #include "SResources.h"
 
 #include "unx/render/GpuScene.h"
@@ -32,7 +33,93 @@ struct State
     float skyAltitude = -1;
     bool skyValid = false;
     AtmosphereStats stats;
+    // Celestial objects (B4, Celestial.h): the star buffer (static, built at the first frame that draws stars) and the
+    // per-frame record ring (upload heap, kRingSlots x 128 B, raw SRVs).
+    static constexpr uint32_t kRingSlots = 4;
+    ComPtr<ID3D12Resource> stars, starsStaging, ring;
+    uint32_t starsSrv = UINT32_MAX, starCount = 0, ringSrv[kRingSlots] = {};
+    uint64_t starsBytes = 0;
+    bool starsPending = false;
+    uint8_t* ringMapped = nullptr;
+    Device* device = nullptr;
+    ~State()
+    {
+        if (!device) return;
+        if (ring) ring->Unmap(0, nullptr);
+        for (ComPtr<ID3D12Resource>* r : { std::addressof(stars), std::addressof(starsStaging), std::addressof(ring) })
+            if (*r) device->deferRelease(*r);
+        DescriptorHeaps* h = &device->descriptors();
+        for (uint32_t srv : ringSrv)
+            if (srv) device->deferCall([h, srv] { h->freeResource(srv); });
+        if (starsSrv != UINT32_MAX) device->deferCall([h, srv = starsSrv] { h->freeResource(srv); });
+    }
 };
+
+uint32_t rawSrv(Device& device, ID3D12Resource* buffer, uint64_t firstByte, uint64_t bytes)
+{
+    DescriptorHeaps& h = device.descriptors();
+    const uint32_t index = h.allocateResource();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Format = DXGI_FORMAT_R32_TYPELESS;
+    sd.Buffer.FirstElement = firstByte / 4;  // 16-byte aligned (raw views)
+    sd.Buffer.NumElements = (UINT)(bytes / 4);
+    sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+    device.d3d()->CreateShaderResourceView(buffer, &sd, h.resourceCpu(index));
+    return index;
+}
+
+// This frame's celestial record (FrameContext::celestial) into the ring, and the star buffer the first time stars are
+// drawn; publishes fc.resources.celestial (UINT32_MAX when nothing is drawn).
+void publishCelestial(FramePassContext& fc, State& s)
+{
+    const CelestialFrame& f = fc.frame.celestial;
+    if ((f.flags & 6u) == 0 && f.airglowRadiance <= 0) return;
+    s.device = &fc.device;
+    if ((f.flags & 4u) != 0 && !s.stars)
+    {
+        // A statistically real field until a catalogue is supplied (Celestial.h syntheticStars).
+        const std::vector<uint32_t> words = sky::packStars(sky::syntheticStars());
+        s.starCount = (uint32_t)sky::syntheticStars().size();
+        s.starsBytes = (words.size() * 4 + 15) & ~15ull;
+        s.stars = createBuffer(fc.device, L"S star cells and records", s.starsBytes);
+        s.starsStaging = createBuffer(fc.device, L"S star staging", s.starsBytes, D3D12_HEAP_TYPE_UPLOAD);
+        void* mapped = nullptr;
+        D3D12_RANGE none{ 0, 0 };
+        check(s.starsStaging->Map(0, &none, &mapped), "map star staging");
+        std::memcpy(mapped, words.data(), words.size() * 4);
+        s.starsStaging->Unmap(0, nullptr);
+        s.starsSrv = rawSrv(fc.device, s.stars.Get(), 0, s.starsBytes);
+        s.starsPending = true;
+    }
+    if (s.starsPending)
+    {
+        const BufferRef starsRef = fc.graph.importBuffer(s.stars.Get(), BufferDesc{ "S star cells and records", s.starsBytes, 0 });
+        ID3D12Resource* staging = s.starsStaging.Get();
+        const uint64_t bytes = s.starsBytes;
+        fc.graph.addPass("s.atmosphere.stars", QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             b.use(starsRef, Use::CopyDst);
+                             b.keep();
+                         },
+                         [starsRef, staging, bytes](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(starsRef), 0, staging, 0, bytes); });
+        s.starsPending = false;  // the staging buffer is kept (released with the state)
+    }
+    if (!s.ring)
+    {
+        s.ring = createBuffer(fc.device, L"S celestial record ring", State::kRingSlots * 128, D3D12_HEAP_TYPE_UPLOAD);
+        D3D12_RANGE none{ 0, 0 };
+        check(s.ring->Map(0, &none, reinterpret_cast<void**>(&s.ringMapped)), "map celestial ring");
+        for (uint32_t k = 0; k < State::kRingSlots; ++k) s.ringSrv[k] = rawSrv(fc.device, s.ring.Get(), k * 128ull, 128);
+    }
+    // Slot of frame % kRingSlots: that slot's frame has completed (frames in flight <= kRingSlots).
+    const uint32_t slot = (uint32_t)(fc.frame.frameIndex % State::kRingSlots);
+    uint32_t words[32];
+    sky::packCelestialFrame(f, s.stars ? s.starCount : 0, s.stars ? s.starsSrv : UINT32_MAX, words);
+    std::memcpy(s.ringMapped + slot * 128ull, words, 128);
+    fc.resources.celestial = s.ringSrv[slot];
+}
 
 TextureDesc desc(const char* name, uint32_t w, uint32_t h, uint16_t d, D3D12_RESOURCE_DIMENSION dim, DXGI_FORMAT format = DXGI_FORMAT_R32G32B32A32_FLOAT)
 {
@@ -363,5 +450,6 @@ void record(FramePassContext& fc)
         s.skyValid = true;
         ++s.stats.skyViewBuilds;
     }
+    publishCelestial(fc, s);
 }
 } // namespace unx::render::atmosphere

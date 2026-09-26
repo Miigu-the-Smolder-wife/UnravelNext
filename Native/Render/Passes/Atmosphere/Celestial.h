@@ -12,7 +12,11 @@
 // (J2000 positions: 0.35 deg in 2026 along the ecliptic, the same order as the moon's model).
 // World frame: +x east, +y up, -z north (the scene's y-up convention; north is a game's authored choice of -z).
 #include "unx/core/Math.h"
+#include "unx/render/FrameContext.h"
 #include "unx/scene/SceneData.h"
+
+#include <string>
+#include <vector>
 
 namespace unx::render::sky
 {
@@ -53,4 +57,36 @@ struct DirectionalLight
     bool moon = false;    // the slot holds the moon (the sky draws the moon's disk with its phase, not a uniform disk)
 };
 DirectionalLight directionalLight(const CelestialState& s, const scene::Sun& sunAtTop, float moonAlbedo = 0.12f);
+
+// The sky's celestial objects for a frame (FrameContext::celestial; Celestial.hlsli atmosphereCelestial): the moon's disk
+// (a Lambert sphere lit by the true sun: its phase and terminator exact for that model), the stars (point sources spread
+// by a pixel-scale Gaussian, energy exact), the airglow (a constant emission layer at 90 km, van Rhijn's slant factor),
+// each times the atmosphere's transmittance to space. celestialFrame sets flags 2 | 4 (moon and stars), and 1 when the
+// moon holds the directional light.
+using CelestialFrame = unx::render::CelestialFrame;
+CelestialFrame celestialFrame(const CelestialState& s, const DirectionalLight& light, const scene::Sun& sunAtTop, float moonAlbedo = 0.12f,
+                              float airglowRadiance = 2.0e-4f);
+
+// A star: J2000 equatorial unit vector and its illuminance above the atmosphere (RGB lux, V magnitude m:
+// Y = 2.54e-6 x 10^(-0.4 m), colour of a black body at the B-V temperature).
+struct Star
+{
+    float3 equatorial;
+    float3 illuminance;
+};
+// A statistically real field until a catalogue is supplied (the Yale Bright Star Catalogue is the design's source; it
+// needs the user's approval to download): counts N(< m) = 10^(0.5 m + 0.7) to m 6.5 (~8,900 stars), density toward
+// the galactic plane (1 + 2 exp(-|b| / 15 deg)), B-V drawn from 0 to 1.6. Deterministic in 'seed'.
+std::vector<Star> syntheticStars(uint64_t seed = 1);
+// Binary catalogue: records of { RA deg, Dec deg, V mag, B-V } float32 (converted from any source); empty on failure.
+std::vector<Star> loadStarCatalogue(const std::string& path);
+
+// GPU layout (Celestial.hlsli): the frame record (32 words, a raw buffer per frame; word 28 = the star buffer's SRV), and
+// the star buffer (static): cells (6 cube faces x n x n cells of { first record, count }) then records ({ equatorial xyz,
+// 0 }, { illuminance rgb, 0 }), cell by cell. A star goes into every cell within kStarMargin of it (its spread never
+// crosses a cell it is not in).
+constexpr uint32_t kStarCellsPerFace = 32;
+constexpr float kStarMargin = 0.0087f;  // 0.5 deg: 3 x the spread at a 0.17 deg pixel
+std::vector<uint32_t> packStars(const std::vector<Star>& stars);
+void packCelestialFrame(const CelestialFrame& f, uint32_t starCount, uint32_t starBufferSrv, uint32_t words[32]);
 } // namespace unx::render::sky

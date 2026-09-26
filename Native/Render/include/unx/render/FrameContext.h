@@ -8,6 +8,23 @@ namespace unx::render
 {
 struct FrameTiming;
 
+// v1.49 (B4, FEATURES_GAME 11): the sky's celestial objects of this frame, set by the host from its time and place
+// (Passes/Atmosphere/Celestial.h: sky::celestial, sky::directionalLight, sky::celestialFrame). flags: bit 0 the frame's
+// directional light (Scene::sun) is the moon (the sky pass leaves out its uniform solar disk), bit 1 the moon's disk is
+// drawn (a Lambert sphere lit by sunDirection), bit 2 the stars are drawn. 0 (the default): none of them, as before.
+struct CelestialFrame
+{
+    float3 moonDirection{ 0, -1, 0 };
+    float moonAngularRadius = 0.00452f;
+    float3 sunDirection{ 0, 1, 0 };  // the true sun (it lights the moon)
+    float sunIlluminance = 128000;   // lux at the top of the atmosphere
+    float3 sunColor{ 1, 1, 1 };
+    float moonAlbedo = 0.12f;
+    float3x4 equatorialToWorld;      // J2000 equatorial -> world rotation (3 x 3 part)
+    float airglowRadiance = 0;       // nits at the zenith (natural night sky ~2e-4); 0 = none
+    uint32_t flags = 0;
+};
+
 struct FrameContext
 {
     uint64_t frameIndex = 0;
@@ -41,6 +58,7 @@ struct FrameContext
     // v1.50 (A15, E): GPU pass timings of the last completed frame (GpuProfiler::lastCompleted), shown by the debug HUD
     // (quality key debug.hud); null = no timings (the HUD says so). The host keeps it valid until record() returns.
     const FrameTiming* timing = nullptr;
+    CelestialFrame celestial;  // v1.49 (B4): moon, stars, airglow (S publishes FrameResources::celestial)
 };
 constexpr uint32_t kGpuSimulationSoft = 1, kGpuSimulationVfx = 2, kGpuSimulationRigid = 4;
 constexpr uint32_t kDiscontinuityRestore = 1, kDiscontinuityCut = 2;

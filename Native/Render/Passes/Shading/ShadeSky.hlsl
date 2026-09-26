@@ -17,6 +17,7 @@
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
+#include "Passes/Atmosphere/Celestial.hlsli"
 #include "Passes/Visibility/CoverageTiles.hlsli"
 
 float3 shadeSky(uint2 pixel, Texture2D<uint> words);
@@ -77,7 +78,11 @@ float3 shadeSky(uint2 pixel, Texture2D<uint> words)
         radiance = 0;
         sun = g_sunIlluminance * g_sunColor / (SH_PI * sinS * sinS);
     }
-    radiance += sun * shSunDiskCoverage(D, Dx, Dy);
+    // S's celestial objects (v1.49, B4; P[2].y = FrameResources::celestial): the moon with its phase, the stars, the airglow.
+    // When the frame's directional light is the moon, g_sun* describe the moon: its disk is drawn by atmosphereCelestial
+    // with its phase, not as a uniform disk.
+    radiance += atmosphereCelestial(atm, P[2].y, D, Dx, Dy);
+    if (!celestialMoonHoldsLight(P[2].y)) radiance += sun * shSunDiskCoverage(D, Dx, Dy);
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].y];
     shExposureHistogram(P[4].w, radiance, pixel, asfloat(P[4].z));  // P[4].w histogram, P[4].z centre sigma (main view)
     color[pixel] = shEncodeExposed(shParticles(radiance * g_exposure, pixel, P[5].z, P[5].w));  // P[5].zw particle layer

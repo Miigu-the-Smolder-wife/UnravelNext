@@ -16,6 +16,7 @@
 #endif
 #include "FroxelSystem.h"
 #include "VsmSystem.h"
+#include "../../Atmosphere/Celestial.h"
 
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
@@ -79,6 +80,8 @@ int main(int argc, char** argv)
         std::vector<std::string> overrides;
         double warmupSeconds = -1;  // --warmup-seconds: the harness default when negative
         std::string cameraAt6, saveScene;
+        std::string timeArg, placeArg;
+        bool autoExposure = false;  // --time YYYY-MM-DDTHH:MM (UT), --place lat,lon: sun, moon, stars (B4)
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -99,6 +102,9 @@ int main(int argc, char** argv)
             else if (a == "--warmup-seconds") warmupSeconds = std::stod(next());  // repro of early frames (never with timings)
             else if (a == "--camera-at") cameraAt6 = next();  // "px,py,pz,tx,ty,tz": camera 0 moved to look from p at t (repros)
             else if (a == "--save-scene") saveScene = next();  // the scene as rendered (with --camera-at) for unx_reference
+            else if (a == "--time") timeArg = next();
+            else if (a == "--place") placeArg = next();
+            else if (a == "--auto-exposure") autoExposure = true;  // A4 metering instead of the camera's EV100
             else fail("unknown argument %s", a.c_str());
         }
         requireGpuLock("unx_gate_shadow_renderergate");
@@ -138,6 +144,31 @@ int main(int argc, char** argv)
         {
             scene::save(s, saveScene);
             logf("saved the scene with its camera 0 to %s\n", saveScene.c_str());
+        }
+        // Time of day (B4): the directional light (sun, or the moon below civil twilight) and the celestial record.
+        CelestialFrame celestial;
+        if (!timeArg.empty())
+        {
+            sky::CelestialTime t;
+            if (timeArg.size() != 16 || timeArg[4] != '-' || timeArg[7] != '-' || timeArg[10] != 'T' || timeArg[13] != ':') fail("--time expects YYYY-MM-DDTHH:MM (UT)");
+            t.year = std::stoi(timeArg.substr(0, 4));
+            t.month = std::stoi(timeArg.substr(5, 2));
+            t.day = std::stoi(timeArg.substr(8, 2));
+            t.hoursUt = std::stoi(timeArg.substr(11, 2)) + std::stoi(timeArg.substr(14, 2)) / 60.0;
+            if (!placeArg.empty())
+            {
+                const size_t comma = placeArg.find(',');
+                if (comma == std::string::npos) fail("--place expects lat,lon");
+                t.latitudeDeg = std::stod(placeArg.substr(0, comma));
+                t.longitudeDeg = std::stod(placeArg.substr(comma + 1));
+            }
+            const sky::CelestialState st = sky::celestial(t);
+            const sky::DirectionalLight light = sky::directionalLight(st, s.sun);
+            celestial = sky::celestialFrame(st, light, s.sun);
+            s.sun = light.sun;
+            logf("moon direction (%.4f, %.4f, %.4f), sun direction (%.4f, %.4f, %.4f)\n", st.moon.x, st.moon.y, st.moon.z, st.sun.x, st.sun.y, st.sun.z);
+            logf("time %s at (%.4f, %.4f): sun altitude %.2f deg, moon altitude %.2f deg, phase angle %.1f deg; light = %s (%.4g lux)\n", timeArg.c_str(),
+                 t.latitudeDeg, t.longitudeDeg, st.sunAltitudeDeg, st.moonAltitudeDeg, st.moonPhaseAngleDeg, light.moon ? "moon" : "sun", s.sun.illuminance);
         }
         const float3 sun0 = normalize(s.sun.direction);
         const float3 sunAxis = normalize(cross(sun0, float3{ 0, 1, 0 }));
@@ -200,6 +231,8 @@ int main(int argc, char** argv)
                 }
                 prev = fc.mainView.viewProj;
                 fc.outputLinearHdr = !capturePath.empty();
+                fc.celestial = celestial;
+                fc.autoExposure = autoExposure;
                 captureEv100 = fc.mainView.ev100;
                 const TextureRef output = g.createTexture({ "gate output", rr.width, rr.height, 1, 1,
                                                             capturePath.empty() ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R32G32B32A32_FLOAT });

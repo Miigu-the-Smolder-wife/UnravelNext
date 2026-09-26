@@ -114,6 +114,9 @@ struct FrameResources
     // see the emitters); R excludes the unset ones from direct emitter hits, so no light is counted twice or missed.
     // UINT32_MAX when raytracing.emitters is off (M evaluates every area light's specular).
     uint32_t areaLightStable = UINT32_MAX;
+    // v1.49 (B4): raw SRV of this frame's celestial record (Celestial.hlsli atmosphereCelestial; upload ring, not a graph  [S]
+    // resource); UINT32_MAX when FrameContext::celestial draws nothing.
+    uint32_t celestial = UINT32_MAX;
                                          // (upload ring, not a graph resource; v1.18). With
                                          // the four buffers: ShadowSrvs (ShadowVisibility.hlsli),
                                          // filled by shadowPages for shadowSunVisibilityAt (R)
