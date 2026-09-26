@@ -736,15 +736,19 @@ void testCutFace(TestFrame& tf, Report& report)
     scene::Scene s;
     s.name = "cut face test";
     const uint32_t T = 32;
+    // Periodic over the T texels (whole periods), so the wrap seam is as smooth as the rest: the base colour bound assumes
+    // a smooth field (a non-periodic field steps by ~180 codes across the seam, where the texture unit's fixed-point
+    // weights legitimately move the filtered value by a few codes on hardware).
+    const double w = 2 * 3.14159265358979323846 / T;
     scene::Texture base;  // smooth colour field (sRGB)
     base.name = "cut base";
     base.width = base.height = T;
     for (uint32_t y = 0; y < T; ++y)
         for (uint32_t x = 0; x < T; ++x)
         {
-            base.texels.push_back((uint8_t)(128 + 100 * std::sin(0.4 * x)));
-            base.texels.push_back((uint8_t)(128 + 90 * std::cos(0.3 * y)));
-            base.texels.push_back((uint8_t)(128 + 80 * std::sin(0.25 * (x + y))));
+            base.texels.push_back((uint8_t)(128 + 100 * std::sin(2 * w * x)));
+            base.texels.push_back((uint8_t)(128 + 90 * std::cos(2 * w * y)));
+            base.texels.push_back((uint8_t)(128 + 80 * std::sin(w * (x + y))));
             base.texels.push_back(255);
         }
     s.textures.push_back(base);
@@ -755,8 +759,8 @@ void testCutFace(TestFrame& tf, Report& report)
     for (uint32_t y = 0; y < T; ++y)
         for (uint32_t x = 0; x < T; ++x)
         {
-            bumps.texels.push_back((uint8_t)(128 + 30 * std::sin(0.5 * x + 0.2 * y)));
-            bumps.texels.push_back((uint8_t)(128 + 30 * std::cos(0.35 * y)));
+            bumps.texels.push_back((uint8_t)(128 + 30 * std::sin(w * (3 * x + y))));
+            bumps.texels.push_back((uint8_t)(128 + 30 * std::cos(2 * w * y)));
         }
     s.textures.push_back(bumps);
     scene::Material cut;
