@@ -14,6 +14,12 @@ void simulation(FramePassContext& fc);
 // shadow visibility and shading (VSM pages, froxel light lists, air and the GI cache are ready; M composites the layer
 // before tonemapping). Writes view.particleLayer, particleDepthRange, particleEdges (invalid = none).
 void particles(FramePassContext& fc, ViewResources& view);
+// A3 mesh particles (render C, unx/fx/MeshParticles.h): after simulation, before every view's visibility.
+void particleMeshes(FramePassContext& fc);
+// A3 FX particle lights (FxLights.cpp): the tail's capacity for this frame (before the frame's imports and frame constants,
+// GpuScene::setFxLightCapacity), then after simulation the lights of this frame at FrameResources::fxLights (before S).
+void particleLightCapacity(TrackState& state, GpuScene& scene);
+void particleLights(FramePassContext& fc, const ViewResources& main);
 
 // ---- V: visibility (core session) - Native/Render/Passes/Visibility, Tools/ClusterBuilder
 // Culling (two phase), band A/B/C classification, band A vis buffer + depth, HiZ, coverage layer (bands B/C).

@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.81, 2026-09-27)
+# UnravelNext 인터페이스 (v1.82, 2026-09-27)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -735,6 +735,10 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.82 (2026-09-27, 렌더 A: A3 발광 입자 광원 쓰는 쪽 + 렌더 C의 메시 입자 합류):
+  - **`tracks::particleLightCapacity(TrackState&, GpuScene&)`**(프레임 import·frame constants 전)와 **`tracks::particleLights(fc, main)`**(simulation 바로 뒤, V·S 전): 최신 tick의 빛 플래그 행(NV_STREAM_PROGRAM_LIGHT, 발광 스프라이트)마다 점광원 1개. I = Σ α L π(s/2)², 위치 = Y 가중 중심, 색 = I/Y, size.x = Y 가중 RMS 반경 + 평균 반경, range = √(Y·노출/(π 2⁻¹⁰))(창이 버리는 조도 < 현재 노출의 1 표시 코드), 그림자 없음. 청크(≤ 2048 입자) 그룹 트리 합 → 행별 순서 합: 원자 연산 없이 결정적. 용량은 max(F, 2 × 용량, 16)으로만 는다.
+  - **`tracks::particleMeshes(fc)`**(렌더 C, simulation 뒤): FrameRenderer가 부른다.
+  - **호스트 `UnxVfxMapMeshAsset(UnxRenderer, uint64_t asset, uint32_t mesh)`**: 커밋 메시 색인, 런타임 메시 id(비트 31) 또는 0xFFFFFFFF(해제). 바뀔 때 프레임 패킷으로 가고 렌더 스레드가 런타임 id를 GPU 색인으로 풀어 `fx::meshAssets`에 넣는다(제거된 런타임 메시 = kNone, 그리지 않고 unmapped로 센다). 커밋 때 `RuntimeCapacity::gpuInstances = fx.particles.mesh_instances_max`.
 - v1.81 (2026-09-27, 렌더 B 요청: FX 광원 꼬리의 그래프 순서):
   - **`FrameResources::fxLights`**(장면 광원 버퍼 전체, stride 80)와 **`fxLightCount`**(StructuredBuffer<uint>, 요소 0 = F): core(FrameRenderer)가 프레임마다 한 번 import한다(RenderGraph::importBuffer는 같은 자원의 여러 import를 합치지 않는다). 쓰는 쪽(FX)은 Uav, S·R·M은 Srv로 선언한다. 꼬리가 없으면 무효.
   - v1.80 `giIrradiance`의 M 읽기는 **넣지 않았다**. D0 4K GpuLock 2쌍 [실측, Results/M/GiScreenAB]: m.lit.shade.b0 3.33/3.45 → 1.83/1.87 ms, r.gi.screen +1.38/+1.53 ms, 패스 합 9.652 → 9.612, 9.834 → 9.806 ms(변화 없음). M이 읽지 않으니 r.gi.screen은 컬링된다.

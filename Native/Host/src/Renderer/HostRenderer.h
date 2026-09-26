@@ -9,6 +9,7 @@
 // Devices (host boundary decision, Docs/Status/I_STATUS_KO.md 1.4): on Unity, the Device is built on Unity's device and
 // graphics queue (DeviceOptions::externalDevice / externalGraphicsQueue) and each frame's lists execute through the
 // host's ExecuteCommandList, which declares the output texture's state to Unity. Standalone (tests, tools): own device.
+#include "unx/fx/MeshParticles.h"
 #include "unx/fx/Particles.h"
 #include "unx/core/Config.h"
 #include "unx/debug/DebugDraw.h"
@@ -26,6 +27,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -92,6 +94,9 @@ struct FramePacket
                                                    // null standalone
     float displayPeak = 0;                         // FrameContext::displayPeak: 0 SDR, else HDR peak / paper white
     float lensAperture = 0, lensFocus = 0;         // FrameContext::lensAperture / lensFocus (the host's current lens)
+    // A3 mesh particles (render C): the host's asset -> mesh table when it changed (mesh = committed mesh index, a runtime
+    // mesh id with bit 31, or 0xFFFFFFFF = unmapped); resolved on the render thread (fx::meshAssets)
+    std::optional<std::vector<std::pair<uint64_t, uint32_t>>> meshAssets;
     std::optional<scene::Sun> sun;                 // changed sun (time of day)
     std::optional<scene::Atmosphere> atmosphere;   // changed atmosphere (weather); the atmosphere track rebuilds its LUTs
     struct Wind
@@ -316,6 +321,9 @@ public:
     void setDiscontinuity(uint32_t flags);
     // The camera's lens for the following frames (depth of field): aperture diameter (m, 0 = pinhole) and focus distance (m).
     void setLens(float aperture, float focus);
+    // A3 mesh particles (render C): the scene mesh a program's mesh_asset draws (committed mesh index or runtime mesh id;
+    // 0xFFFFFFFF removes the mapping: its particles are not drawn and counted unmapped)
+    void mapMeshAsset(uint64_t asset, uint32_t mesh);
     // A7 surface state (E's SurfaceField): a NativeVfx nv_surface_delta between two publications (changed bricks in the
     // NV_SurfaceBrickV2 layout, removed keys as 3 int32 each), the channel half-lives (s, 0 = no decay; wet, scorch,
     // frost, dust, blood, snow) and the VFX context time of the following frames. Applied in this order on the render
@@ -581,6 +589,9 @@ private:
     std::mutex m_fxMutex;
     uint64_t m_fxRecorded = 0;  // (m_fxMutex held) packets written under UNX_FX_RECORD
     float m_lensAperture = 0, m_lensFocus = 0;  // (m_mutex) the lens every queued frame takes
+    std::map<uint64_t, uint32_t> m_meshAssetMap;  // (m_mutex) A3 mesh particles: asset -> mesh
+    bool m_meshAssetsChanged = false;             // (m_mutex)
+    std::vector<std::pair<uint64_t, uint32_t>> m_meshAssetsRender;  // render thread: the latest table received
     double m_surfaceTime = 0;                   // (m_mutex) the VFX time every queued frame takes
     decal::DecalSet m_decals;                   // (m_mutex) the host's decal set
     std::vector<uint8_t> m_decalLive;           // (m_mutex) per decal id: live

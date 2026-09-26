@@ -177,7 +177,9 @@ SceneCommitInfo HostRenderer::commit()
     fail("this build has no cluster builder (track V): build with Tools/CI/Build.ps1 -Track I");
 #endif
     m_gpuScene = std::make_unique<GpuScene>(*m_device);
-    if (m_runtimeCapacity.meshes || m_runtimeCapacity.instances) m_gpuScene->reserveRuntime(m_runtimeCapacity);  // C2b
+    // A3 mesh particles (render C): GPU-written instances after the CPU-known ones (fx.particles.mesh_instances_max)
+    m_runtimeCapacity.gpuInstances = (uint32_t)std::max<int64_t>(0, m_quality.integer("fx.particles.mesh_instances_max"));
+    if (m_runtimeCapacity.meshes || m_runtimeCapacity.instances || m_runtimeCapacity.gpuInstances) m_gpuScene->reserveRuntime(m_runtimeCapacity);  // C2b
     m_gpuScene->upload(m_scene);
     m_gpuScene->setClusters(std::move(clusters));
     m_frameRenderer = std::make_unique<FrameRenderer>(*m_device, *m_shaders, m_quality, *m_gpuScene, m_options.framesInFlight);
@@ -773,6 +775,18 @@ void HostRenderer::setLens(float aperture, float focus)
     m_lensFocus = focus;
 }
 
+void HostRenderer::mapMeshAsset(uint64_t asset, uint32_t mesh)
+{
+    requireCommitted();
+    if (mesh != 0xFFFFFFFFu && !(mesh & 0x80000000u) && mesh >= m_scene.meshes.size())
+        fail("mesh asset %llu: mesh %u of %zu committed meshes", (unsigned long long)asset, mesh, m_scene.meshes.size());
+    if (mesh != 0xFFFFFFFFu && (mesh & 0x80000000u) && !m_runtimeMeshLive.count(mesh)) fail("mesh asset %llu: runtime mesh %u is not live", (unsigned long long)asset, mesh);
+    std::lock_guard lock(m_mutex);
+    if (mesh == 0xFFFFFFFFu) m_meshAssetMap.erase(asset);
+    else m_meshAssetMap[asset] = mesh;
+    m_meshAssetsChanged = true;
+}
+
 void HostRenderer::surfaceDelta(const surface::BrickInput* changed, size_t changedCount, const int32_t* removedKeys, size_t removedCount)
 {
     if ((changedCount && !changed) || (removedCount && !removedKeys)) fail("surface delta: null records");
@@ -1228,6 +1242,11 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.discontinuity = m_pending.discontinuity;
     packet.lensAperture = m_lensAperture;
     packet.lensFocus = m_lensFocus;
+    if (m_meshAssetsChanged)
+    {
+        packet.meshAssets.emplace(m_meshAssetMap.begin(), m_meshAssetMap.end());
+        m_meshAssetsChanged = false;
+    }
     packet.gpuSimulation = m_pending.gpuSimulation;
     packet.transforms = std::move(m_pending.transforms);
     packet.skeletons = std::move(m_pending.skeletons);
@@ -1604,6 +1623,22 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     field.setTime(p.surfaceTime);
     // A7 decals (the host's latest snapshot) and A15 debug primitives of this frame
     if (p.decals) decal::decals(m_frameRenderer->trackState()) = *p.decals;
+    // A3 mesh particles (render C): the table of this frame, runtime mesh ids resolved now (a removed one draws nothing)
+    if (p.meshAssets) m_meshAssetsRender = *p.meshAssets;
+    if (!m_meshAssetsRender.empty() || !fx::meshAssets(m_frameRenderer->trackState()).empty())
+    {
+        std::vector<fx::MeshAsset>& table = fx::meshAssets(m_frameRenderer->trackState());
+        table.clear();
+        for (auto [asset, mesh] : m_meshAssetsRender)
+        {
+            if (mesh & 0x80000000u)
+            {
+                auto it = m_runtimeMeshIndex.find(mesh);
+                mesh = it == m_runtimeMeshIndex.end() ? gpu::kNone : it->second;
+            }
+            table.push_back({ asset, mesh });
+        }
+    }
     // A12 view models: the host's operations in order (the same ids as the host's mirror)
     viewmodel::ViewModels& viewModels = viewmodel::viewModels(m_frameRenderer->trackState());
     for (const FramePacket::ViewModelOp& op : p.viewModelOps)

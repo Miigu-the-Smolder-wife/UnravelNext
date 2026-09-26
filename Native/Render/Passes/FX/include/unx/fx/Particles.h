@@ -10,6 +10,7 @@
 #include "NativeVfxStream.h"
 #include "unx/render/Frame.h"
 
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -139,6 +140,18 @@ public:
     const std::vector<LayoutRange>& layoutPrevious() const;
     // The render pass's inputs, imported into 'graph' (frame 'importIndex'); valid = false before the first tick.
     ParticleRenderInputs renderInputs(render::RenderGraph& graph, uint64_t importIndex);
+    // A3 FX particle lights (NV_STREAM_PROGRAM_LIGHT, render A's contract): of the latest recorded tick, one light slot per
+    // active emitter row whose program has the flag (emissive sprites: material 0), in row order, and the chunks of its
+    // particles in the render ranges (range index, offset in the range, count <= kLightChunk, slot), ordered by slot then
+    // range; slotChunks[s] = (first chunk, chunk count). FxLights (tracks::particleLights) reduces them per frame.
+    static constexpr uint32_t kLightChunk = 2048;
+    struct LightChunk { uint32_t range, offset, count, slot; };
+    struct LightTables
+    {
+        std::vector<LightChunk> chunks;
+        std::vector<std::array<uint32_t, 2>> slotChunks;
+    };
+    const LightTables& lightTables() const;
 
     uint32_t capacity() const { return m_capacity; }
     // Resident device memory of the module (every default-heap buffer it holds, the ring's event buffers included), bytes.

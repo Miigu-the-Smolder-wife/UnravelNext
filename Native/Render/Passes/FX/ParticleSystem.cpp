@@ -255,6 +255,8 @@ struct ParticleSystem::Impl
     uint64_t tickSerial = 0;   // recorded ticks (the render passes' continuity check)
     Buf restoreOrientations{ "fx.restoreOrientations", sizeof(NV_StreamParticleOrientation) };
     std::vector<uint8_t> programOriented;  // per program: NV_STREAM_PROGRAM_ORIENTATION
+    std::vector<uint8_t> programLight;     // per program: NV_STREAM_PROGRAM_LIGHT on an emissive sprite (A3 FX lights)
+    ParticleSystem::LightTables lights;    // of the latest recorded tick (lightTables())
     bool restoreTurns = false;             // this tick installs restore orientations
     Buf inRanges{ "fx.inRanges", 32 }, inBlocks{ "fx.inBlocks", 4 };  // the tick's input layout (InRange) and group -> range
     // Render input of the latest tick (ParticleLayerPass.hlsli RenderRange): its layout's ranges, then the ranges of the
@@ -455,6 +457,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             m.programCollides.resize(h.program_count);
             m.programGrid.resize(h.program_count);
             m.programOriented.assign(h.program_count, 0);
+            m.programLight.assign(h.program_count, 0);
             m.separationMax = 0;
             for (uint32_t k = 0; k < h.program_count; ++k)
             {
@@ -462,6 +465,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
                 m.programCollides[k] = (programTable[k].flags & NV_STREAM_PROGRAM_COLLISION) != 0;
                 m.programGrid[k] = programTable[k].medium_grid;
                 m.programOriented[k] = (programTable[k].flags & NV_STREAM_PROGRAM_ORIENTATION) != 0;
+                m.programLight[k] = (programTable[k].flags & NV_STREAM_PROGRAM_LIGHT) != 0 && programTable[k].output == 0u && programTable[k].material == 0u;
                 m.oriented = m.oriented || m.programOriented[k];
                 m.separationMax = std::max(m.separationMax, std::abs(programTable[k].separation));
             }
@@ -917,6 +921,34 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
                 renderThreads += n;
             }
         }
+        // A3 FX lights of this tick: a slot per active light row (row order), its particles' render ranges in chunks.
+        ParticleSystem::LightTables lights;
+        {
+            std::vector<uint32_t> slotOf(tableRows, NV_STREAM_NONE);
+            for (uint32_t row = 0; row < tableRows; ++row)
+            {
+                const NV_StreamEmitter& e = m.table[row];
+                if ((e.flags & NV_STREAM_EMITTER_ACTIVE) && e.program < m.programLight.size() && m.programLight[e.program])
+                {
+                    slotOf[row] = (uint32_t)lights.slotChunks.size();
+                    lights.slotChunks.push_back({ 0u, 0u });
+                }
+            }
+            std::vector<std::vector<ParticleSystem::LightChunk>> perSlot(lights.slotChunks.size());
+            for (uint32_t k = 0; k < renderRanges.size(); ++k)
+            {
+                const RenderRange& rr = renderRanges[k];
+                const uint32_t slot = rr.row < tableRows ? slotOf[rr.row] : NV_STREAM_NONE;
+                if (slot == NV_STREAM_NONE) continue;
+                for (uint32_t o = 0; o < rr.count; o += ParticleSystem::kLightChunk)
+                    perSlot[slot].push_back({ k, o, std::min(ParticleSystem::kLightChunk, rr.count - o), slot });
+            }
+            for (uint32_t s = 0; s < perSlot.size(); ++s)
+            {
+                lights.slotChunks[s] = { (uint32_t)lights.chunks.size(), (uint32_t)perSlot[s].size() };
+                lights.chunks.insert(lights.chunks.end(), perSlot[s].begin(), perSlot[s].end());
+            }
+        }
         const uint32_t renderGroups = groups(renderThreads, 256);
         std::vector<uint32_t> renderBlocks(renderGroups + 1, 0);
         for (uint32_t group = 0, k = 0; group < renderGroups; ++group)
@@ -1060,6 +1092,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         m.layoutPrev = std::move(in);
         m.renderThreads = renderThreads;
         m.renderRangeCount = (uint32_t)renderRanges.size();
+        m.lights = std::move(lights);
         std::memcpy(m.anchor[cur], h.anchor, sizeof h.anchor);
         m.tickDt = h.dt_float;
         m.tickTime = h.time;
@@ -1511,6 +1544,8 @@ uint64_t ParticleSystem::residentBytes() const
     for (const Impl::Slot& s : m.slots) total += s.events.resource ? s.events.bytes : 0;  // (upload / readback rings: host memory)
     return total;
 }
+
+const ParticleSystem::LightTables& ParticleSystem::lightTables() const { return m_impl->lights; }
 
 ParticleRenderInputs ParticleSystem::renderInputs(RenderGraph& graph, uint64_t importIndex)
 {

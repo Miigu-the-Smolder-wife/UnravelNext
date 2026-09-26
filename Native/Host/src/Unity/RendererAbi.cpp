@@ -408,6 +408,14 @@ UNX_API int32_t UNX_CALL UnxFrameSetLens(UnxRenderer r, float apertureMetres, fl
     return call([&] { find(r)->setLens(apertureMetres, focusMetres); });
 }
 
+// A3 mesh particles (render C, v1.82): the scene mesh a stream program's mesh_asset draws - a committed mesh index, a
+// runtime mesh id (UnxSceneAddRuntimeMesh, bit 31 set) or 0xFFFFFFFF to remove the mapping. Takes effect from the next
+// queued frame; particles of an unmapped asset (or of a removed runtime mesh) are not drawn and counted unmapped.
+UNX_API int32_t UNX_CALL UnxVfxMapMeshAsset(UnxRenderer r, uint64_t asset, uint32_t mesh)
+{
+    return call([&] { find(r)->mapMeshAsset(asset, mesh); });
+}
+
 UNX_API int32_t UNX_CALL UnxSurfaceDelta(UnxRenderer r, const void* changed, uint64_t changedCount, const int32_t* removedKeys, uint64_t removedCount)
 {
     static_assert(sizeof(surface::BrickInput) == 1560, "NV_SurfaceBrickV2");

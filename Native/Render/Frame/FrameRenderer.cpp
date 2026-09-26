@@ -236,6 +236,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
         for (int r = 0; r < 4; ++r) pv.m[r][3] += pv.m[r][0] * frame.originShift.x + pv.m[r][1] * frame.originShift.y + pv.m[r][2] * frame.originShift.z;
     }
     m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);  // transforms, palettes, visibility of this frame
+    tracks::particleLightCapacity(m_trackState, m_scene);  // A3: before the imports and every frame constants
     FrameResources resources;
     importFxLights(graph, m_scene, resources);
     FrameServices services;
@@ -275,6 +276,8 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     // every view's visibility, the shadow pages once, the auxiliary views' shading, then the main view's resolve (its
     // materials read the auxiliary outputs of this frame).
     tracks::simulation(fc);  // C0
+    tracks::particleMeshes(fc);  // A3 (render C): mesh particle instances, before V's culling
+    tracks::particleLights(fc, main);  // A3: FX particle lights into the scene light tail, before S's lists
     tracks::waterGeometry(fc);  // W (B7/B8): ocean FFT and fluid surface into V's triangle streams
     tracks::atmosphere(fc);
     tracks::accelerationStructures(fc);
@@ -314,6 +317,7 @@ void FrameRenderer::recordImage(RenderGraph& graph, const FrameContext& in, Text
     m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);
     m_debugDraw = 0xFFFFFFFFu;
     m_viewModelScale = 1.0f;
+    tracks::particleLightCapacity(m_trackState, m_scene);  // A3: before the imports and every frame constants
     FrameResources resources;
     importFxLights(graph, m_scene, resources);
     FrameServices services;
