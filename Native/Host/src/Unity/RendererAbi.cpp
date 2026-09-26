@@ -3,6 +3,7 @@
 #include "unx/host/UnravelNextHost.h"
 
 #include "Renderer/HostRenderer.h"
+#include "GpuBridge/GpuBridge.h"
 #include "Unity/PluginState.h"
 
 #include "IUnityGraphics.h"
@@ -483,6 +484,32 @@ std::filesystem::path utf8Path(const char* s)
 }
 } // namespace
 
+UNX_API int32_t UNX_CALL UnxAcquireGpuBridge(UnxRenderer r, NRC_GpuBridge* bridge, uint32_t size)
+{
+    return call([&] {
+        if (!bridge || size != sizeof(NRC_GpuBridge)) fail("UnxAcquireGpuBridge: NRC_GpuBridge of %u bytes, this build's is %zu", size, sizeof(NRC_GpuBridge));
+        *bridge = find(r)->gpuBridge().acquire();
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxReleaseGpuBridge(NRC_GpuBridge* bridge, uint32_t size)
+{
+    return call([&] {
+        if (!bridge || size != sizeof(NRC_GpuBridge)) fail("UnxReleaseGpuBridge: NRC_GpuBridge of %u bytes, this build's is %zu", size, sizeof(NRC_GpuBridge));
+        if (bridge->release && bridge->context) bridge->release(bridge->context);
+        std::memset(bridge, 0, sizeof *bridge);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxGpuBridgeStatistics(UnxRenderer r, NRC_GpuStatistics* statistics, uint32_t size)
+{
+    return call([&] {
+        if (!statistics || size != sizeof(NRC_GpuStatistics))
+            fail("UnxGpuBridgeStatistics: NRC_GpuStatistics of %u bytes, this build's is %zu", size, sizeof(NRC_GpuStatistics));
+        *statistics = find(r)->gpuBridge().statistics();
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxPhotoBegin(UnxRenderer r, const UnxPhotoDesc* desc)
 {
     return call([&] {
@@ -539,7 +566,8 @@ UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor)
         if (!h->committed()) fail("UnxVfxStreamExecutor: commit the scene first");
         NV_StreamExecutor e{};
         e.size = sizeof(NV_StreamExecutor);
-        e.version = NV_STREAM_EXECUTOR_HEIGHTFIELDS;  // heightfield sections (FX ParticleSystem, Particles.hlsli hooks)
+        e.version = NV_STREAM_EXECUTOR_WIND_TURBULENCE;  // heightfield sections and World wind turbulence (FX ParticleSystem,
+                                                         // Particles.hlsli hooks)
         e.user = h.get();
         e.submit = vfxSubmitCallback;
         e.readback = vfxReadbackCallback;

@@ -1,5 +1,7 @@
 #include "Renderer/HostRenderer.h"
 
+#include "GpuBridge/GpuBridge.h"
+
 #include "unx/render/Device.h"
 #include "unx/render/FrameContext.h"
 #include "unx/render/FrameRenderer.h"
@@ -23,6 +25,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -119,6 +122,12 @@ HostRenderer::HostRenderer(const HostRendererOptions& options) : m_options(optio
         d.externalGraphicsQueue = options.hostQueue;
     }
     m_device = std::make_unique<Device>(d);
+    {
+        // engine 1's GPU bridge on this device: a device of its own is a generation of its own (fences never compare across)
+        static std::atomic<uint64_t> generations{ 0 };
+        Queue& graphics = m_device->queue(QueueType::Graphics);
+        m_gpuBridge = std::make_shared<GpuBridgeHost>(m_device->d3d(), graphics.get(), graphics.fence(), ++generations);
+    }
     m_shaders = std::make_unique<ShaderLibrary>(*m_device, options.shaderDirectory);
     m_slotFence.assign(options.framesInFlight, std::array<uint64_t, 3>{});
     m_slotHostFrame.assign(options.framesInFlight, UINT64_MAX);
@@ -129,6 +138,8 @@ HostRenderer::HostRenderer(const HostRendererOptions& options) : m_options(optio
 HostRenderer::~HostRenderer()
 {
     if (m_device) m_device->waitIdle();
+    if (m_gpuBridge) m_gpuBridge->quiesce();  // the modules' work on the bridge's queues ends before the device
+    m_gpuBridge.reset();
     m_photo.reset();  // (B11) the tracer returns its descriptors while the device lives
     m_profiler.reset();
     m_graph.reset();
@@ -1551,6 +1562,12 @@ void HostRenderer::photoAfterExecute()
 }
 
 ID3D12Device* HostRenderer::d3dDevice() const { return m_device ? m_device->d3d() : nullptr; }
+
+GpuBridgeHost& HostRenderer::gpuBridge()
+{
+    if (!m_gpuBridge) fail("the renderer has no GPU bridge");
+    return *m_gpuBridge;
+}
 
 void HostRenderer::endFrame(uint32_t slot, uint64_t)
 {

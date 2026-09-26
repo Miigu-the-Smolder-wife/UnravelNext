@@ -35,6 +35,7 @@ enum UnxResult
                             //    UnxRendererQualityOverride, UnxFrameSetLens, UnxSurfaceDelta, UnxSurfaceSetHalfLives, UnxSurfaceSetTime,
                             //    UnxDebugPrimitives, UnxDebugText, UnxDecalAdd, UnxDecalUpdate, UnxDecalRemove, UnxViewModelAdd,
                             //    UnxViewModelSetPose, UnxViewModelRemove, UnxPhotoBegin, UnxPhotoSave, UnxPhotoEnd, UnxPhotoGetStatus,
+                            //    UnxAcquireGpuBridge, UnxReleaseGpuBridge, UnxGpuBridgeStatistics,
                             //    UnxSceneAddBlendShape, UnxSceneSetVertexAnimation, UnxFrameSetMorphs (C4),
                             //    UnxFrameSetOriginShift (C9), UnxSceneReserveRuntime, UnxFrameAddRuntimeMesh,
                             //    UnxFrameRemoveRuntimeMesh, UnxFrameAddRuntimeInstance, UnxFrameRemoveRuntimeInstance,
@@ -394,6 +395,16 @@ UNX_API int32_t UNX_CALL UnxPhotoBegin(UnxRenderer r, const UnxPhotoDesc* desc);
 UNX_API int32_t UNX_CALL UnxPhotoSave(UnxRenderer r, const char* utf8Exr, const char* utf8Png);
 UNX_API int32_t UNX_CALL UnxPhotoEnd(UnxRenderer r);
 UNX_API int32_t UNX_CALL UnxPhotoGetStatus(UnxRenderer r, UnxPhotoStatus* status);
+
+// Engine 1's shared GPU bridge (optional exports within ABI 6; coordination decision (a), 84922cc): the renderer's device
+// runs NativePhysics / NativeVfx GPU work through an NRC_GpuBridge table (Unravel Native/RuntimeCommon/GpuExecutionAbi.h,
+// 136 B) - the same shape as the old TnrAcquireGpuBridge / TnrReleaseGpuBridge / TnrGetSharedGpuStatistics. Acquire
+// leases a table (size = sizeof(NRC_GpuBridge)); release gives it back (calls its release, then zeroes it).
+typedef struct NRC_GpuBridge NRC_GpuBridge;
+typedef struct NRC_GpuStatistics NRC_GpuStatistics;
+UNX_API int32_t UNX_CALL UnxAcquireGpuBridge(UnxRenderer r, NRC_GpuBridge* bridge, uint32_t size);
+UNX_API int32_t UNX_CALL UnxReleaseGpuBridge(NRC_GpuBridge* bridge, uint32_t size);
+UNX_API int32_t UNX_CALL UnxGpuBridgeStatistics(UnxRenderer r, NRC_GpuStatistics* statistics, uint32_t size);
 
 // Loads a .unxscene file (INTERFACES 6.2) as the renderer's content: textures, materials, meshes, skeletons, instances
 // (their flags included), lights, sun, atmosphere and wind, with the file's indices. Only before any content was added and

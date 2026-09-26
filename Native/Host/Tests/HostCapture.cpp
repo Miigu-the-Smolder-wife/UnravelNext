@@ -4,7 +4,8 @@
 // diagnosis (--quality <folder>), before/after comparisons across renderer commits. Not a measurement; a hardware GPU
 // run (GpuLock -Track I -Kind correctness while the temporary lock rule holds):
 //   unx_test_host_hostcapture.exe --scene <file.unxscene> --out <file.rgb10> [--resolution 4K|1440p|WxH] [--frames 600]
-//       [--quality <folder>] [--set key=value ...] [--walk m/s] [--turn rad/s] [--ppm <file.ppm>]
+//       [--quality <folder>] [--set key=value ...] [--walk m/s] [--turn rad/s] [--ppm <file.ppm>] [--first WxH:N]
+// --first renders N frames at WxH before the run (an output size change, as a host whose first frames had another size).
 // --walk / --turn move camera 0 during the run like a first-person player (forward along its horizontal heading, yaw
 // about +y), so the last frame shows what a moving camera sees (history, disocclusion); --ppm also writes the last
 // frame as 8-bit PPM (the output's display encoding, top 8 of 10 bits) for viewing.
@@ -26,7 +27,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        std::string scenePath, outPath, resolution = "4K", quality, ppmPath;
+        std::string scenePath, outPath, resolution = "4K", quality, ppmPath, first;
         uint32_t frames = 600;
         std::vector<std::string> overrides;
         float walk = 0, turn = 0;
@@ -46,6 +47,7 @@ int main(int argc, char** argv)
             else if (a == "--walk") walk = std::stof(next());
             else if (a == "--turn") turn = std::stof(next());
             else if (a == "--ppm") ppmPath = next();
+            else if (a == "--first") first = next();
             else fail("unknown argument %s", a.c_str());
         }
         if (scenePath.empty() || outPath.empty()) fail("--scene <file.unxscene> and --out <file.rgb10> are required");
@@ -72,10 +74,31 @@ int main(int argc, char** argv)
         const scene::Camera camera = r.scene().cameras[0];
         r.commit();
         std::vector<uint32_t> pixels((size_t)w * h);
+        uint64_t index = 0;
+        if (!first.empty())
+        {
+            uint32_t fw = 0, fh = 0, fn = 0;
+            const size_t x = first.find('x'), c = first.find(':');
+            if (x == std::string::npos || c == std::string::npos) fail("--first WxH:N");
+            fw = (uint32_t)std::stoul(first.substr(0, x));
+            fh = (uint32_t)std::stoul(first.substr(x + 1, c - x - 1));
+            fn = (uint32_t)std::stoul(first.substr(c + 1));
+            for (uint32_t f = 0; f < fn; ++f)
+            {
+                FramePacket p;
+                p.frameIndex = index++;
+                p.time = f / 60.0;
+                p.deltaTime = 1.0f / 60;
+                p.width = fw;
+                p.height = fh;
+                p.camera = camera;
+                r.renderStandalone(r.queueFrame(std::move(p)), nullptr, 0);
+            }
+        }
         for (uint32_t f = 0; f < frames; ++f)
         {
             FramePacket p;
-            p.frameIndex = f;
+            p.frameIndex = index++;
             p.time = f / 60.0;
             p.deltaTime = 1.0f / 60;
             p.width = w;

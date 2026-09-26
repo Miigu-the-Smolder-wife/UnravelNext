@@ -44,6 +44,8 @@ class GpuProfiler;
 
 namespace unx::host
 {
+class GpuBridgeHost;
+
 struct HostRendererOptions
 {
     bool standalone = true;                        // own device and queue (tests, tools)
@@ -309,6 +311,9 @@ public:
     const render::gpu::Instance& gpuInstanceForTest(uint32_t instance) const { return m_gpuScene->instances().at(instance); }
     // The D3D12 device the renderer records on (Unity's inside Unity).
     ID3D12Device* d3dDevice() const;
+    // Engine 1's shared GPU bridge on this renderer's device (src/GpuBridge; NativePhysics / NativeVfx GPU work runs on its
+    // queues, graphics reads of their buffers go through prepareGraphics / commitGraphics). One per renderer device.
+    GpuBridgeHost& gpuBridge();
     // Test hook: transform and pose updates that matched the GPU scene bit for bit and were not applied (beginFrame).
     std::pair<uint64_t, uint64_t> droppedUpdatesForTest() const { return { m_droppedTransforms, m_droppedPoses }; }
     // Test hook (C5): terrain patch blocks built so far.
@@ -393,6 +398,7 @@ private:
     std::unique_ptr<render::FrameRenderer> m_frameRenderer;
     std::unique_ptr<render::RenderGraph> m_graph;
     std::unique_ptr<render::GpuProfiler> m_profiler;
+    std::shared_ptr<GpuBridgeHost> m_gpuBridge;  // quiesced and released before the device
 
     mutable std::mutex m_mutex;  // packets, pending updates, stats
     std::deque<FramePacket> m_packets;

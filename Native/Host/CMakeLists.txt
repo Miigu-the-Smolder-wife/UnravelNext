@@ -12,6 +12,9 @@ set(UNX_UNITY_PLUGIN_API "C:/Program Files/Unity/Hub/Editor/6000.6.0f1/Editor/Da
 unx_add_shaders(unx_host_shaders ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Kernels" OUTPUT "${UNX_SHADER_OUTPUT}/Host"
   INCLUDES "${CMAKE_SOURCE_DIR}/Native/Render/Passes/Common" "${CMAKE_SOURCE_DIR}/Native/Render")
 
+# Engine 1's GPU bridge (src/GpuBridge, 84922cc): its ABI headers must be Unravel's RuntimeCommon files byte for byte.
+include(src/GpuBridge/AbiIdentity.cmake)
+
 file(GLOB_RECURSE core_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 list(FILTER core_sources EXCLUDE REGEX "/src/Unity/")
 add_library(unx_host_core STATIC ${core_sources})
