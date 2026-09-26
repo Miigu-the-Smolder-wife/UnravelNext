@@ -16,6 +16,10 @@ struct GpuInstance
     uint deformRevision;
     float windStiffness, windPhase, windAnchor;
     float3 breakCentre;  // INSTANCE_MOTION_BREAK: world centre of the bounding sphere in the previous rendered frame
+    uint morph;          // C4: first morph record row, UNX_NONE = no blend shapes / vertex animation
+    float morphRadius;   // C4: object-space bound of the morph offset (culling inflation)
+    uint patch;          // C5: terrain patch slot (g_patchData), UNX_NONE = none
+    uint morphPad;
 };
 
 struct GpuMesh

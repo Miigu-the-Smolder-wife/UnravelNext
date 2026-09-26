@@ -30,8 +30,60 @@ struct CullView
     float3 prevPosition;               // the previous frame's camera position (band hysteresis; = position after a cut)
     float bandAMinPx;                  // visibility.band_a_min_width_px
     float bandAHysteresisPx;           // visibility.band_a_hysteresis_px: band B stays B below this if it was B last frame
-    float3 pad;
+    uint cullSceneSrv;                 // CullScene (instance chunks, flat list, skinned bounds) of the run
+    uint runtimeFirst, runtimeCount;   // C2b: runtime instances [first, first + count) follow the flat list
+    uint gpuFirst, gpuCapacity;        // GPU-written instances (A3 mesh particles) after them; live count gpuInstanceCount()
+    uint gpuPad0, gpuPad1;
 };
+
+// Live count of the GPU-written instances (GpuScene::gpuInstanceRange; GpuSceneLayout.h kGpuInstanceCountElement).
+uint gpuInstanceCount(CullView v)
+{
+    if (v.gpuCapacity == 0) return 0;
+    StructuredBuffer<uint4> slots = ResourceDescriptorHeap[g_patchData];
+    return min(slots[64 * 35].x, v.gpuCapacity);
+}
+
+// Instance hierarchy and skinned bounds of a cull run (C3; VisibilityTrack refreshScene / skinBoundsPass). Static
+// instances (not dynamic, not skinned) are grouped by 64 m cell and cut into chunks of at most CHUNK_INSTANCES; a chunk's
+// sphere bounds its members' world spheres (worldSphere, wind included; ChunkBounds.hlsl at each scene revision; static
+// instances never move, the contract R's static TLAS and S's page caching rely on too). Every other instance is in the
+// flat list. Skinned instances have a world sphere per frame (SkinBounds.hlsl) over the palette-transformed spheres of
+// the joints that influence their vertices.
+struct CullScene
+{
+    uint chunkSrv, chunkInstancesSrv, chunkCount, flatSrv;
+    uint flatCount, skinBoundsSrv, skinListSrv, skinCount;
+};
+
+struct CullChunk
+{
+    float4 sphere;  // world; radius < 0 until ChunkBounds ran
+    uint first, count, pad0, pad1;
+};
+
+#define CHUNK_INSTANCES 256u
+
+CullScene loadCullScene(uint srv)
+{
+    StructuredBuffer<CullScene> b = ResourceDescriptorHeap[srv];
+    return b[0];
+}
+
+// Slot of 'instance' in the run's sorted skinned-instance list, UNX_NONE when absent (binary search, <= 32 steps).
+uint skinSlot(CullScene cs, uint instance)
+{
+    if (cs.skinCount == 0) return UNX_NONE;
+    StructuredBuffer<uint> list = ResourceDescriptorHeap[cs.skinListSrv];
+    uint lo = 0, hi = cs.skinCount;
+    [loop] for (uint it = 0; it < 32 && lo < hi; ++it)
+    {
+        const uint mid = (lo + hi) >> 1;
+        if (list[mid] < instance) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < cs.skinCount && list[lo] == instance ? lo : UNX_NONE;
+}
 
 #define CULL_VIEW_OCCLUSION 1u   // HiZ occlusion (two-phase) for this view
 #define CULL_VIEW_CULL_BACK 2u   // back faces of one-sided materials are culled (cone test allowed)
@@ -67,6 +119,9 @@ struct CullView
 #define VS_COV_HEAVY 39u      // listed tiles of more than one block
 #define VS_STAT_MIXED_CLUSTERS 40u  // sheet clusters drawn in both rasters, split per triangle by the mesh kernels
 #define VS_STAT_MIXED_TRIANGLES 41u // their triangles
+#define VS_CHUNK_ITEMS 42u    // (chunk, view) items of the chunks that passed CullChunks in this phase
+#define VS_DEFER_CHUNKS 43u   // chunks occluded against the previous HiZ in phase 1 (tested again in phase 2)
+#define VS_STAT_CHUNKS 44u    // chunk items expanded to their instances (both phases)
 #define VS_WORDS 48u
 
 #define VS_LISTS 6u
@@ -88,7 +143,9 @@ struct CullView
 #define VA_COV_MESH 33u       // coverage raster: every band B list entry (both phases)
 #define VA_COV_CLEAR 36u      // tile clear over last frame's coverage tiles (one group per tile)
 #define VA_COV_RECORDS 39u    // count and scatter over the stored stream entries (one group per COV_BLOCK)
-#define VA_WORDS 42u
+#define VA_CHUNK_ITEMS 42u    // instance pass over visible chunk items (one group per item)
+#define VA_DEFERRED_CHUNKS 45u // phase 2 chunk pass over the deferred chunks (64 per group)
+#define VA_WORDS 48u
 
 // Overflow bits (VS_OVERFLOW): a capacity was exceeded; the run's statistics report them (Stats::overflow).
 #define OVERFLOW_NODES 1u
@@ -102,6 +159,8 @@ struct CullView
 #define OVERFLOW_COVERAGE 256u         // the coverage record pool ran out (its fragments are lost; the pool grows)
 #define OVERFLOW_COVERAGE_DEPTH 512u   // unused since v1.41 (was: a coverage tile past its extension tree)
 #define OVERFLOW_ITERATION_LIMIT 1024u // a data-dependent shader loop reached its hard bound (INTERFACES 3.6)
+#define OVERFLOW_CHUNK_ITEMS 2048u     // visible chunk items past the deferred-item capacity (their instances are lost)
+#define OVERFLOW_DEFER_CHUNKS 4096u    // deferred chunks past the capacity
 
 // Wave-aggregated append of 'n' entries per lane to a counter word; returns this lane's first index. Must be called
 // from uniform control flow (every active lane of the wave). Entries at or beyond 'capacity' set 'overflowBit'.
@@ -127,7 +186,8 @@ float4 worldSphere(GpuInstance inst, float4 rows[3], float4 objectSphere)
 {
     const float scale = instanceScale(inst);
     const float wind = windOffsetBound(inst, objectSphere.xyz, objectSphere.w);
-    return float4(transformPoint(rows, objectSphere.xyz), (objectSphere.w + wind) * scale);
+    // C4: blend shapes / vertex animation move vertices by at most morphRadius (object space) from the bind pose.
+    return float4(transformPoint(rows, objectSphere.xyz), (objectSphere.w + wind + inst.morphRadius) * scale);
 }
 
 bool frustumVisible(CullView v, float4 s)
@@ -136,6 +196,49 @@ bool frustumVisible(CullView v, float4 s)
         if (dot(v.planes[i].xyz, s.xyz) + v.planes[i].w < -s.w) return false;
     if (any(v.clipPlane != 0) && dot(v.clipPlane.xyz, s.xyz) + v.clipPlane.w < -s.w) return false;
     return true;
+}
+
+// C5 terrain deformation patches (GpuScene::setPatchRegion, GpuSceneLayout.h kPatchSlotElements): a terrain tile
+// instance whose blocks are replaced by patch meshes. (1) Every simplified cluster (own error > 0) whose own LOD sphere
+// reaches the replaced rectangle is not drawn, and every hierarchy node whose sphere reaches it is traversed: the cut
+// there is the source clusters. The leaf node of a group and the clusters simplified from that group test the same
+// sphere, so the forced cut stays consistent (no overlap, no gap) and it is monotone up the hierarchy (parents enclose
+// children). (2) Source triangles whose object-space centroid is in a replaced block are dropped (a patch block's
+// boundary is on source cell edges, so every source triangle is wholly in or out).
+bool patchForcesSource(GpuInstance inst, float4 objectSphere)
+{
+    if (inst.patch == UNX_NONE) return false;
+    StructuredBuffer<uint4> slots = ResourceDescriptorHeap[g_patchData];
+    const float4 rect = asfloat(slots[inst.patch * 35 + 1]);
+    const float2 d = max(max(rect.xy - objectSphere.xz, objectSphere.xz - rect.zw), 0.0);
+    return dot(d, d) <= objectSphere.w * objectSphere.w;
+}
+
+bool patchReplaced(GpuInstance inst, float3 objectCentroid)
+{
+    if (inst.patch == UNX_NONE) return false;
+    StructuredBuffer<uint4> slots = ResourceDescriptorHeap[g_patchData];
+    const uint base = inst.patch * 35;
+    const float4 grid = asfloat(slots[base]);
+    const uint side = slots[base + 2].x;
+    const float2 b = floor((objectCentroid.xz - grid.xy) / grid.zw);
+    if (any(b < 0) || any(b >= (float)side)) return false;
+    const uint k = (uint)b.y * side + (uint)b.x;
+    const uint4 words = slots[base + 3 + k / 128];
+    const uint w = (k / 32) % 4;
+    const uint word = w == 0 ? words.x : w == 1 ? words.y : w == 2 ? words.z : words.w;
+    return ((word >> (k % 32)) & 1u) != 0;
+}
+
+// A source triangle of a patched instance: its centroid from the mesh's object-space positions.
+bool patchDropsTriangle(GpuInstance inst, GpuMesh mesh, GpuCluster cl, uint3 tri)
+{
+    if (inst.patch == UNX_NONE || cl.lodError > 0) return false;
+    StructuredBuffer<uint> clusterVertices = ResourceDescriptorHeap[g_clusterVertexIndices];
+    const float3 a = loadVertex(mesh, clusterVertices[cl.vertexOffset + tri.x]).position;
+    const float3 b = loadVertex(mesh, clusterVertices[cl.vertexOffset + tri.y]).position;
+    const float3 c = loadVertex(mesh, clusterVertices[cl.vertexOffset + tri.z]).position;
+    return patchReplaced(inst, (a + b + c) / 3.0);
 }
 
 // Screen-space error in pixels of an object-space error measured on a world sphere.

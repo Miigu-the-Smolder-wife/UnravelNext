@@ -1,0 +1,27 @@
+UnravelNext host: scene committed, 1 meshes, 1 instances, 12 triangles, 1 clusters, 291.2 ms, hash 022dabf5bb1af50e
+RayScene: 1 static + 0 dynamic instances (0 deformed), 1 mesh BLAS (12 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 19 ms
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 1 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+  (noise between two renders of the same scene: 0 pixels)
+  same scene twice: no pixel differs by more than 0.1                      ok
+  (runtime box: 13860 pixels, mean column 910 of 1280)
+  runtime box drawn to the right of the scene box                          ok
+  runtime instance takes the first slot after the scene's                  ok
+  (moved runtime box: 17298 pixels, mean column 383)
+  runtime transform moves the box to the left                              ok
+  a runtime mesh with a live instance cannot be removed                    ok
+  (removed: 0 pixels above 0.1, worst channel 3/1023)
+  removed: the image returns to the scene without it (worst <= 0.25)       ok
+  (re-added: 222 pixels above 0.1, mean column 854, worst channel 143/1023)
+  re-added box in reused slots: same geometry as the first add (worst <= 0.25) ok
+  re-added instance reuses the freed slot                                  ok
+  (origin shift: 3328 pixels above 0.1, mean column 839, worst channel 168/1023)
+  origin shift with the camera: same geometry (worst <= 0.25)              ok
+  origin shift moves the scene instance                                    ok
+  origin shift moves the runtime instance                                  ok
+  (shift back: 222 pixels above 0.1, mean column 854, worst channel 143/1023)
+  move queued before a shift back: same geometry as before (worst <= 0.25) ok
+  the runtime instance is back at x = 1.2 (float rounding of the round trip) ok
+HOST RUNTIME TEST PASSED

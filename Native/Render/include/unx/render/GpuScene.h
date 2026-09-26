@@ -5,6 +5,7 @@
 #include "unx/render/GpuSceneLayout.h"
 #include "unx/scene/SceneData.h"
 
+#include <functional>
 #include <span>
 #include <string>
 #include <utility>
@@ -55,6 +56,19 @@ struct InstanceTransformUpdate
 };
 constexpr uint32_t kTransformTeleport = 1;
 
+// C2b (render C): room for meshes and instances added at run time (CARVE destruction fragments, generated geometry):
+// every scene buffer keeps a tail of this many elements past the uploaded content.
+struct RuntimeCapacity
+{
+    uint32_t meshes = 0, submeshes = 0, vertices = 0, indices = 0;
+    uint32_t clusters = 0, clusterVertexIndices = 0, clusterTriangles = 0, nodes = 0;
+    uint32_t instances = 0;
+    // GPU-written instances (A3 mesh particles, fx.mesh_instances_max): records the GPU fills every frame after the
+    // CPU-known ones; see gpuInstanceRange.
+    uint32_t gpuInstances = 0;
+};
+constexpr uint32_t kRuntimeMaxDepth = 6;  // hierarchy depth limit of a runtime mesh (V runs at least this many node passes)
+
 class GpuScene
 {
 public:
@@ -96,6 +110,59 @@ public:
     // Scene motion of the frame being recorded (after flushUpdates; A5 motion blur): an instance moved or re-posed in this
     // frame, or wind-animated instances (they move every frame). The camera's own motion is the view's (prevViewProj).
     bool hasMotion() const { return !m_movedNow.empty() || !m_posedNow.empty() || m_windInstances > 0; }
+    // C2b runtime pool (call reserveRuntime before upload): meshes and instances added between frames without a scene
+    // revision (no track rebuilds). addRuntimeMesh takes the mesh and its own cluster hierarchy (clusterbuilder::build of
+    // a one-mesh scene, depth <= kRuntimeMaxDepth) and returns its mesh index, kNone when the pool is full. A runtime
+    // instance takes a slot after the uploaded instances (staticInstanceCount()), reusing freed slots; removal hides it
+    // and frees the slot framesInFlight + 1 flushes later (frames in flight may still read it); a removed mesh's ranges
+    // are reused the same way (the caller removes its instances first). Ray tracing does not see runtime geometry yet
+    // (R's event BLAS, FEATURES_GAME 2.1); raster, shadows and materials do.
+    void reserveRuntime(const RuntimeCapacity& capacity);
+    uint32_t addRuntimeMesh(const scene::Mesh& mesh, const ClusterData& clusters);
+    void removeRuntimeMesh(uint32_t mesh);
+    uint32_t addRuntimeInstance(const scene::Instance& instance);
+    void removeRuntimeInstance(uint32_t instance);
+    uint32_t staticInstanceCount() const { return m_staticInstances; }
+    // C5 terrain deformation (scene/TerrainPatch.h): the replaced blocks of a terrain tile instance (the host adds their
+    // patch meshes as runtime geometry in the same frame). V forces the instance's source clusters inside the rectangle
+    // of the replaced blocks and drops its source triangles whose centroid is in a replaced block. An empty block list
+    // clears it (the slot is reused framesInFlight + 1 flushes later). Needs the runtime pool; kPatchSlots instances.
+    struct PatchRegion
+    {
+        float originX = 0, originZ = 0;  // object xz of the block grid's corner (the tile's vertex 0)
+        float blockX = 0, blockZ = 0;    // object size of a block along x and z (signed like the grid)
+        uint32_t blocksPerSide = 0;
+        std::vector<uint32_t> blocks;    // replaced blocks, bj * blocksPerSide + bi
+    };
+    void setPatchRegion(uint32_t instance, const PatchRegion& region);
+    // GPU-written instance range (A3 mesh particles, INTERFACES v1.58): instance ids [first, first + capacity) at the tail
+    // of the instance buffer, after the uploaded and the C2b runtime ones. A pass before V's culling writes gpu::Instance
+    // records there through instanceUav (raw, the whole instance buffer) and the live count (uint) at countByteOffset
+    // through countUav (raw); the count is zeroed by every frame's scene update, so a frame without the writer draws none.
+    // Records: prevObjectToWorld set, flags without SKINNED / WIND, bonePalette, morph, patch = kNone. V culls them like
+    // the other dynamic instances; readers of instances see them through the usual loadInstance. The range moves when
+    // scene edits change the uploaded count: query it every frame. capacity 0: none.
+    struct GpuInstanceRange
+    {
+        uint32_t first = 0, capacity = 0;
+        uint32_t instanceUav = gpu::kNone, countUav = gpu::kNone, countByteOffset = 0;
+        // For the writer's barriers: both are read as shader resources during the frame (after the scene update).
+        ID3D12Resource* instanceBuffer = nullptr;
+        ID3D12Resource* countBuffer = nullptr;
+    };
+    GpuInstanceRange gpuInstanceRange() const;
+    uint32_t staticMeshCount() const { return m_staticMeshes; }
+    const RuntimeCapacity& runtimeCapacity() const { return m_runtimeCap; }
+    //   setMorph (C4):    blend shape weights (one per shape of the instance's mesh) and vertex animation time of a morph
+    //                     instance; the previous weights / time = the previous rendered frame's, deformRevision += 1, the
+    //                     culling radius covers both; the same settling rule as palettes.
+    void setMorph(uint64_t frameIndex, uint32_t instance, std::span<const float> weights, float vertexAnimationTime);
+    // Origin rebase (C9): every instance's current and previous transform, its break centre and every light move by
+    // -shift (no motion: both move), exactly (shift is a multiple of 1024 m, float translations stay exact where they
+    // are representable after the move). The instance table is shifted on the GPU by the next flushUpdates (one pass
+    // over the instances, no re-upload); lights are re-uploaded. Call before the frame's transform updates.
+    void rebase(float3 shift);
+    float3 originOffset() const { return m_originOffset; }  // sum of the shifts applied since upload
     // Material textures published by M's texture system (INTERFACES_KO.md 6.3, v1.10): one entry per scene material.
     // Rewrites the material buffer (new SRV; the old one is released when the GPU is done) and bumps the revision of the
     // materials whose textures changed and the scene revision. Call before any frame constants of the frame are
@@ -134,7 +201,7 @@ private:
         uint32_t srv = gpu::kNone;
         uint32_t count = 0;
     };
-    Buffer createStructured(const void* data, size_t stride, size_t count, const wchar_t* name, bool uav = false);
+    Buffer createStructured(const void* data, size_t stride, size_t count, const wchar_t* name, bool uav = false, size_t capacity = 0);
     void release(Buffer& b);
     void markRecord(uint32_t instance);
     void writePalette(uint32_t instance, std::vector<float4>& palette);  // jointToModel x inverseBind of its skeleton
@@ -159,6 +226,16 @@ private:
     Buffer m_instanceBuffer, m_meshBuffer, m_submeshBuffer, m_vertexBuffer, m_indexBuffer, m_materialBuffer, m_materialRemapBuffer,
         m_lightBuffer, m_skinBuffer, m_bonePalette, m_prevBonePalette, m_albedoTable, m_specularTable, m_coverageTable;
     Buffer m_clusterBuffer, m_lodLevelBuffer, m_lodLevelClusterBuffer, m_clusterVertexIndexBuffer, m_clusterTriangleBuffer;
+    // C4 morphs: records (float4 rows, updatable), mesh data (raw words), CPU mirrors.
+    Buffer m_morphRecords, m_morphData;
+    std::vector<float4> m_morphRows;
+    std::vector<uint32_t> m_morphMeshBlock;  // per mesh: word offset of its block in m_morphData, kNone = no morph
+    std::vector<uint64_t> m_morphFrame;      // per instance: frame of its latest setMorph
+    std::vector<uint32_t> m_morphedNow, m_morphedBefore;
+    uint32_t m_morphUav = gpu::kNone;
+    void writeMorphRows(uint32_t instance, bool settle);  // previous = current (settle) and the rows' upload marks
+    std::vector<uint32_t> m_morphRowsDirty;
+    float morphRadiusOf(uint32_t instance) const;
     std::vector<std::pair<std::string, Buffer>> m_named;
     ClusterData m_clusterData;
     uint32_t m_revision = 0;
@@ -175,6 +252,39 @@ private:
     std::vector<uint8_t> m_brokenMarked;
     void markBreak(uint32_t instance, const float4 (&before)[3]);
     std::vector<uint32_t> m_records;
+    // C2b runtime pool: capacity, first element of each runtime region, free ranges, CPU mirrors of the written ranges.
+    struct RangeAllocator
+    {
+        std::vector<std::pair<uint32_t, uint32_t>> free;  // (first, count), sorted
+        uint32_t allocate(uint32_t count);                // kNone when no range fits
+        void release(uint32_t first, uint32_t count);
+    };
+    enum RuntimeTarget : uint32_t { RtMeshes = 4, RtSubmeshes, RtVertices, RtIndices, RtClusters, RtClusterVertexIndices, RtClusterTriangles, RtNodes, RtRoots, RtSpheres, RtSheets, RtPatch, RtTargetEnd };
+    Buffer m_patchData;                      // C5 terrain patch slots (target RtPatch)
+    std::vector<uint32_t> m_patchSlotOf;     // per instance, kNone
+    std::vector<uint32_t> m_patchFreeSlots;
+    RuntimeCapacity m_runtimeCap;
+    uint32_t m_staticInstances = 0, m_staticMeshes = 0;
+    RangeAllocator m_rtAlloc[RtTargetEnd];  // per target (meshes: mesh slots; roots follow the mesh slots)
+    std::vector<uint8_t> m_rtBytes[RtTargetEnd];      // mirror of each target's whole runtime region
+    uint32_t m_rtFirst[RtTargetEnd] = {};             // first element of the runtime region (target element size)
+    uint32_t m_rtStride[RtTargetEnd] = {};
+    uint32_t m_rtUav[RtTargetEnd];
+    std::vector<std::pair<uint32_t, uint32_t>> m_rtDirty;  // (target, 16-byte element within the whole buffer)
+    struct RuntimeMesh
+    {
+        bool live = false;
+        uint32_t vertices = 0, vertexCount = 0, indices = 0, indexCount = 0, submeshes = 0, submeshCount = 0;
+        uint32_t clusters = 0, clusterCount = 0, cvi = 0, cviCount = 0, ct = 0, ctCount = 0, nodes = 0, nodeCount = 0;
+    };
+    std::vector<RuntimeMesh> m_runtimeMeshes;  // by mesh index - staticMeshCount
+    std::vector<uint8_t> m_runtimeInstanceLive;
+    std::vector<std::pair<uint64_t, std::function<void()>>> m_rtReleases;  // (flush count at which it is safe, release)
+    uint64_t m_flushes = 0;
+    uint32_t m_framesInFlightSeen = 2;
+    void writeRuntime(uint32_t target, uint32_t element, const void* data, uint32_t count);  // element in target units
+    Buffer* runtimeBuffer(uint32_t target);
+    float3 m_pendingShift{}, m_originOffset{};
     std::vector<uint8_t> m_recordMarked;
     std::vector<Upload> m_uploads;
     uint32_t m_instanceUav = gpu::kNone, m_paletteUav = gpu::kNone, m_prevPaletteUav = gpu::kNone;

@@ -31,6 +31,8 @@ struct Stats
     uint32_t coverageInvocations = 0;  // coverage pixel kernel invocations (visibility.coverage_debug_stage != 0 only)
     uint32_t mixedClusters = 0;        // sheet clusters drawn in both rasters, split per triangle (counted in bandClusters[1])
     uint32_t mixedTriangles = 0;       // their triangles (counted in triangles[1]'s cluster rule: see the mesh kernels)
+    uint32_t chunkItems = 0;           // C3: (chunk, view) items that passed chunk culling in phase 1
+    uint32_t deferredChunks = 0;       // C3: chunks occluded against the previous HiZ (retested in phase 2)
     uint32_t overflow = 0;             // capacity bits (0 = every list fit); nonzero means geometry was dropped
                                        // (0x100: the coverage record pool ran out; it grows from the next
                                        // completed frame)

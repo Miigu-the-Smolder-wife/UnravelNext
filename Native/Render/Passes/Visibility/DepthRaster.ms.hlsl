@@ -29,9 +29,7 @@ struct PrimitiveOut
     uint material : MATERIAL;
     uint instance : INSTANCE;
     uint viewport : SV_ViewportArrayIndex;
-#if TILE
-    bool cull : SV_CullPrimitive;
-#endif
+    bool cull : SV_CullPrimitive;  // tile rectangle (TILE), C5 terrain patch blocks
 };
 
 #if TILE
@@ -121,7 +119,10 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         // Outside the rectangle: its pixel box misses [lo, hi] (triangles reaching behind the eye are kept).
         const float3 a = g_pixel[tri.x], b = g_pixel[tri.y], c = g_pixel[tri.z];
         const float2 boxLo = min(a.xy, min(b.xy, c.xy)), boxHi = max(a.xy, max(b.xy, c.xy));
-        prims[t].cull = a.z * b.z * c.z > 0 && (boxHi.x < lo.x || boxLo.x > hi.x || boxHi.y < lo.y || boxLo.y > hi.y);
+        const bool outside = a.z * b.z * c.z > 0 && (boxHi.x < lo.x || boxLo.x > hi.x || boxHi.y < lo.y || boxLo.y > hi.y);
+        prims[t].cull = outside || patchDropsTriangle(inst, mesh, cl, tri);  // C5: replaced terrain blocks
+#else
+        prims[t].cull = patchDropsTriangle(inst, mesh, cl, tri);  // C5
 #endif
     }
 }

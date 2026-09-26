@@ -125,7 +125,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         PrimitiveOut o = (PrimitiveOut)0;
         o.visId = packVisId(visibleIndex, t);
         o.material = material;
-        bool cull = n < 3 || (mixed && !sheetTriangleBandB(v, gs_world[tri.x], gs_world[tri.y], gs_world[tri.z]));
+        bool cull = n < 3 || (mixed && !sheetTriangleBandB(v, gs_world[tri.x], gs_world[tri.y], gs_world[tri.z])) || patchDropsTriangle(inst, mesh, cl, tri);  // C5
         if (!cull)
         {
             if (n == 3)

@@ -163,6 +163,12 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     m_lastEv100 = frame.mainView.ev100;
     m_viewModelScale = tracks::viewModelPrepare(m_trackState, m_scene, m_quality, frame);  // E (A12): view models at this frame's camera
     if (frame.discontinuity & kDiscontinuityRestore) m_scene.resetMotion();
+    // C9 origin rebase: the previous view is expressed in the new coordinates (a point p now was p + shift before).
+    if (frame.originShift.x != 0 || frame.originShift.y != 0 || frame.originShift.z != 0)
+    {
+        float4x4& pv = frame.mainView.prevViewProj;
+        for (int r = 0; r < 4; ++r) pv.m[r][3] += pv.m[r][0] * frame.originShift.x + pv.m[r][1] * frame.originShift.y + pv.m[r][2] * frame.originShift.z;
+    }
     m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);  // transforms, palettes, visibility of this frame
     FrameResources resources;
     FrameServices services;

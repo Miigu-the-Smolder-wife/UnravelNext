@@ -1,6 +1,7 @@
 #include "Renderer/HostRenderer.h"
 
 #include "unx/render/Device.h"
+#include "unx/render/FrameContext.h"
 #include "unx/render/FrameRenderer.h"
 #include "unx/render/GpuProfiler.h"
 #include "unx/render/RenderGraph.h"
@@ -21,6 +22,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include "unx/scene/TerrainPatch.h"
 #include <cstring>
 #include <fstream>
 
@@ -102,6 +104,7 @@ SceneCommitInfo HostRenderer::commit()
     fail("this build has no cluster builder (track V): build with Tools/CI/Build.ps1 -Track I");
 #endif
     m_gpuScene = std::make_unique<GpuScene>(*m_device);
+    if (m_runtimeCapacity.meshes || m_runtimeCapacity.instances) m_gpuScene->reserveRuntime(m_runtimeCapacity);  // C2b
     m_gpuScene->upload(m_scene);
     m_gpuScene->setClusters(std::move(clusters));
     m_frameRenderer = std::make_unique<FrameRenderer>(*m_device, *m_shaders, m_quality, *m_gpuScene, m_options.framesInFlight);
@@ -211,6 +214,240 @@ void HostRenderer::applyEdits(const FramePacket& p, scene::Scene& s)
         else s.instances[i] = inst;
 }
 
+void HostRenderer::addBlendShape(uint32_t mesh, scene::BlendShape shape)
+{
+    requireOpen();
+    if (mesh >= m_scene.meshes.size()) fail("blend shape of mesh %u of %zu", mesh, m_scene.meshes.size());
+    m_scene.meshes[mesh].blendShapes.push_back(std::move(shape));
+}
+
+void HostRenderer::setVertexAnimation(uint32_t mesh, scene::VertexAnimation animation)
+{
+    requireOpen();
+    if (mesh >= m_scene.meshes.size()) fail("vertex animation of mesh %u of %zu", mesh, m_scene.meshes.size());
+    m_scene.meshes[mesh].vertexAnimation = std::move(animation);
+}
+
+void HostRenderer::setMorph(uint32_t instance, std::vector<float> weights, float time)
+{
+    requireCommitted();
+    if (instance >= m_scene.instances.size()) fail("morph of instance %u of %zu", instance, m_scene.instances.size());
+    const scene::Mesh& m = m_scene.meshes[m_scene.instances[instance].mesh];
+    if (m.blendShapes.empty() && m.vertexAnimation.framesPerSecond <= 0) fail("instance %u: its mesh '%s' has no blend shapes or vertex animation", instance, m.name.c_str());
+    if (weights.size() != m.blendShapes.size()) fail("instance %u: %zu weights for %zu blend shapes", instance, weights.size(), m.blendShapes.size());
+    for (float w : weights)
+        if (!std::isfinite(w)) fail("instance %u: blend weight not finite", instance);
+    if (!std::isfinite(time)) fail("instance %u: vertex animation time not finite", instance);
+    std::lock_guard lock(m_mutex);
+    m_pending.morphs.push_back({ instance, std::move(weights), time });
+}
+
+// C9: runtime adds and moves queued in older coordinates follow an origin shift like transform updates.
+static void shiftRuntime(std::vector<FramePacket::RuntimeOp>& ops, float3 shift)
+{
+    for (FramePacket::RuntimeOp& op : ops)
+        if (op.kind == FramePacket::RuntimeOp::AddInstance || op.kind == FramePacket::RuntimeOp::Transform)
+            op.transform.m[0][3] -= shift.x, op.transform.m[1][3] -= shift.y, op.transform.m[2][3] -= shift.z;
+}
+
+void HostRenderer::setOriginShift(float3 shift)
+{
+    requireCommitted();
+    for (float c : { shift.x, shift.y, shift.z })
+        if (!std::isfinite(c) || std::fabs(c / kOriginGrid - std::round(c / kOriginGrid)) != 0.0f) fail("origin shift (%g, %g, %g) is not on the 1024 m grid", shift.x, shift.y, shift.z);
+    std::lock_guard lock(m_mutex);
+    m_mainOriginOffset = m_mainOriginOffset + shift;
+    m_pending.originShift = m_pending.originShift + shift;
+    for (InstanceTransformUpdate& u : m_pending.transforms)  // queued for this frame in the old coordinates
+        u.objectToWorld.m[0][3] -= shift.x, u.objectToWorld.m[1][3] -= shift.y, u.objectToWorld.m[2][3] -= shift.z;
+    shiftRuntime(m_pending.runtime, shift);
+}
+
+void HostRenderer::reserveRuntime(const render::RuntimeCapacity& capacity)
+{
+    requireOpen();
+    m_runtimeCapacity = capacity;
+}
+
+uint32_t HostRenderer::addRuntimeMesh(scene::Mesh mesh)
+{
+    requireCommitted();
+    if (m_runtimeCapacity.meshes == 0) fail("runtime mesh: no runtime room (UnxSceneReserveRuntime before commit)");
+    for (const scene::Submesh& sm : mesh.submeshes)
+        if (sm.material >= m_scene.materials.size()) fail("runtime mesh '%s': material %u of %zu", mesh.name.c_str(), sm.material, m_scene.materials.size());
+    // Clusters on the calling thread (no simplification: a shallow hierarchy, exact at every distance).
+    scene::Scene one;
+    one.materials = m_scene.materials;
+    one.textures.resize(m_scene.textures.size());  // empty placeholders: validation checks indices only; clusters need no texels
+    one.meshes.push_back(mesh);
+    scene::validate(one);
+#if UNX_HOST_HAS_CLUSTERBUILDER
+    clusterbuilder::Settings settings = clusterbuilder::Settings::fromQuality(m_quality);
+    settings.noSimplification = true;
+    auto clusters = std::make_shared<const ClusterData>(clusterbuilder::build(one, settings));
+#else
+    fail("this build has no cluster builder");
+#endif
+    std::lock_guard lock(m_mutex);
+    const uint32_t id = 0x80000000u | m_nextRuntimeMesh++;
+    FramePacket::RuntimeOp op;
+    op.kind = FramePacket::RuntimeOp::AddMesh;
+    op.id = id;
+    op.meshData = std::make_shared<const scene::Mesh>(std::move(mesh));
+    op.clusters = std::move(clusters);
+    m_pending.runtime.push_back(std::move(op));
+    m_runtimeMeshLive.insert(id);
+    return id;
+}
+
+void HostRenderer::removeRuntimeMesh(uint32_t id)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    if (!m_runtimeMeshLive.count(id)) fail("runtime mesh %u is not live", id);
+    for (const auto& [instance, mesh] : m_runtimeInstanceMesh)
+        if (mesh == id) fail("runtime mesh %u: runtime instance %u still uses it (remove the instances first)", id, instance);
+    m_runtimeMeshLive.erase(id);
+    FramePacket::RuntimeOp op;
+    op.kind = FramePacket::RuntimeOp::RemoveMesh;
+    op.id = id;
+    m_pending.runtime.push_back(std::move(op));
+}
+
+uint32_t HostRenderer::addRuntimeInstance(uint32_t mesh, const float3x4& transform, uint32_t flags)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    if ((mesh & 0x80000000u) ? !m_runtimeMeshLive.count(mesh) : mesh >= m_scene.meshes.size()) fail("runtime instance: mesh %u is neither committed nor a live runtime mesh", mesh);
+    const uint32_t id = m_nextRuntimeInstance++;
+    FramePacket::RuntimeOp op;
+    op.kind = FramePacket::RuntimeOp::AddInstance;
+    op.id = id, op.mesh = mesh, op.flags = flags & ~(uint32_t)scene::InstanceSkinned, op.transform = transform;
+    m_pending.runtime.push_back(std::move(op));
+    m_runtimeInstanceMesh[id] = mesh;
+    return id;
+}
+
+void HostRenderer::removeRuntimeInstance(uint32_t id)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    if (!m_runtimeInstanceMesh.erase(id)) fail("runtime instance %u is not live", id);
+    FramePacket::RuntimeOp op;
+    op.kind = FramePacket::RuntimeOp::RemoveInstance;
+    op.id = id;
+    m_pending.runtime.push_back(std::move(op));
+}
+
+void HostRenderer::setRuntimeTransform(uint32_t id, const float3x4& transform)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    if (!m_runtimeInstanceMesh.count(id)) fail("runtime instance %u is not live", id);
+    FramePacket::RuntimeOp op;
+    op.kind = FramePacket::RuntimeOp::Transform;
+    op.id = id, op.transform = transform;
+    m_pending.runtime.push_back(std::move(op));
+}
+
+void HostRenderer::setTerrainDeformation(double originX, double originZ, float spacing, uint32_t texels, const float* heights, std::span<const uint32_t> tiles)
+{
+    requireCommitted();
+    if (texels && !heights) fail("terrain deformation: %u^2 texels without heights", texels);
+    std::unordered_set<uint32_t> listed(tiles.begin(), tiles.end());
+    auto dropTile = [&](uint32_t tile) {
+        auto it = m_terrainPatches.find(tile);
+        if (it == m_terrainPatches.end()) return;
+        for (const auto& [block, p] : it->second)
+        {
+            removeRuntimeInstance(p.instance);
+            removeRuntimeMesh(p.mesh);
+        }
+        m_terrainPatches.erase(it);
+        FramePacket::RuntimeOp op;
+        op.kind = FramePacket::RuntimeOp::Patch;
+        op.id = tile;
+        op.region = std::make_shared<const render::GpuScene::PatchRegion>();
+        std::lock_guard lock(m_mutex);
+        m_pending.runtime.push_back(std::move(op));
+    };
+    std::vector<uint32_t> gone;
+    for (const auto& [tile, blocks] : m_terrainPatches)
+        if (!listed.count(tile)) gone.push_back(tile);
+    for (uint32_t tile : gone) dropTile(tile);
+    for (uint32_t tile : listed)
+    {
+        if (tile >= m_scene.instances.size()) fail("terrain deformation: tile instance %u of %zu", tile, m_scene.instances.size());
+        const scene::Instance& in = m_scene.instances[tile];
+        const float3x4& t = in.transform;
+        if (t.m[0][0] != 1 || t.m[1][1] != 1 || t.m[2][2] != 1 || t.m[0][1] != 0 || t.m[0][2] != 0 || t.m[1][0] != 0 || t.m[1][2] != 0 || t.m[2][0] != 0 || t.m[2][1] != 0)
+            fail("terrain deformation: tile instance %u is not placed by a translation", tile);
+        const scene::TerrainGrid grid = scene::terrainGrid(m_scene.meshes[in.mesh]);
+        // The tile's translation in this frame's coordinates; D in the tile's object space.
+        float3x4 now = t;
+        now.m[0][3] -= m_mainOriginOffset.x, now.m[1][3] -= m_mainOriginOffset.y, now.m[2][3] -= m_mainOriginOffset.z;
+        scene::TerrainDeformation d;
+        d.originX = (float)(originX - now.m[0][3]);
+        d.originZ = (float)(originZ - now.m[2][3]);
+        d.spacing = spacing;
+        d.size = texels;
+        d.height = heights;
+        const std::vector<uint32_t> active = texels ? scene::activePatchBlocks(grid, d) : std::vector<uint32_t>{};
+        const uint32_t side = scene::patchBlocksPerSide(grid);
+        std::unordered_map<uint32_t, PatchBlock>& state = m_terrainPatches[tile];
+        std::unordered_map<uint32_t, PatchBlock> next;
+        for (uint32_t b : active)
+        {
+            const uint64_t hash = scene::patchBlockHash(grid, d, b % side, b / side);
+            auto old = state.find(b);
+            if (old != state.end() && old->second.hash == hash)
+            {
+                next[b] = old->second;
+                state.erase(old);
+                continue;
+            }
+            PatchBlock p;
+            p.hash = hash;
+            p.mesh = addRuntimeMesh(scene::buildTerrainPatch(grid, d, b % side, b / side));
+            ++m_patchBuilds;
+            p.instance = addRuntimeInstance(p.mesh, now, in.flags);
+            next[b] = p;
+        }
+        for (const auto& [block, p] : state)  // changed or no longer replaced
+        {
+            removeRuntimeInstance(p.instance);
+            removeRuntimeMesh(p.mesh);
+        }
+        state = std::move(next);
+        auto region = std::make_shared<render::GpuScene::PatchRegion>();
+        region->originX = grid.originX, region->originZ = grid.originZ;
+        region->blockX = grid.stepX * scene::kPatchBlockCells, region->blockZ = grid.stepZ * scene::kPatchBlockCells;
+        region->blocksPerSide = side;
+        region->blocks = active;
+        FramePacket::RuntimeOp op;
+        op.kind = FramePacket::RuntimeOp::Patch;
+        op.id = tile;
+        op.region = std::move(region);
+        {
+            std::lock_guard lock(m_mutex);
+            m_pending.runtime.push_back(std::move(op));
+        }
+        if (active.empty()) m_terrainPatches.erase(tile);
+    }
+}
+
+uint32_t HostRenderer::meshVertexCount(uint32_t mesh) const
+{
+    if (mesh >= m_scene.meshes.size()) fail("mesh %u of %zu", mesh, m_scene.meshes.size());
+    return (uint32_t)m_scene.meshes[mesh].positions.size();
+}
+
+uint32_t HostRenderer::blendShapeCount(uint32_t instance) const
+{
+    if (instance >= m_scene.instances.size()) fail("instance %u of %zu", instance, m_scene.instances.size());
+    return (uint32_t)m_scene.meshes[m_scene.instances[instance].mesh].blendShapes.size();
+}
+
 void HostRenderer::setSkeleton(uint32_t skeleton, std::vector<float3x4> jointToModel)
 {
     requireCommitted();
@@ -243,7 +480,14 @@ void HostRenderer::overlay(const FramePacket& p, HostState& state)
         state.transforms[i] = inst.transform;
         state.visible[i] = 1;
     }
+    if (p.originShift.x != 0 || p.originShift.y != 0 || p.originShift.z != 0)
+        for (float3x4& t : state.transforms) t.m[0][3] -= p.originShift.x, t.m[1][3] -= p.originShift.y, t.m[2][3] -= p.originShift.z;
     for (const InstanceTransformUpdate& u : p.transforms) state.transforms[u.instance] = u.objectToWorld;
+    for (const FramePacket::Morph& m : p.morphs)
+    {
+        if (state.morphs.size() <= m.instance) state.morphs.resize(m.instance + 1);
+        state.morphs[m.instance] = { m.weights, m.time };
+    }
     for (const SkeletonPose& s : p.skeletons) state.poses[s.skeleton] = s.jointToModel;
     for (const auto& [instance, visible] : p.visibility) state.visible[instance] = visible ? 1 : 0;
 }
@@ -278,6 +522,13 @@ scene::Scene HostRenderer::currentScene() const
         if (!state.visible[i]) continue;
         shown.push_back(std::move(s.instances[i]));
         shown.back().transform = state.transforms[i];
+        if (i < state.morphs.size() && !state.morphs[i].first.empty())  // C4: the current weights and time
+        {
+            shown.back().blendWeights = state.morphs[i].first;
+            shown.back().vertexAnimationTime = state.morphs[i].second;
+        }
+        else if (i < state.morphs.size() && state.morphs[i].second != 0)
+            shown.back().vertexAnimationTime = state.morphs[i].second;
     }
     s.instances = std::move(shown);
     for (size_t k = 0; k < s.skeletons.size(); ++k) s.skeletons[k].jointToModel = *state.poses[k];
@@ -483,6 +734,9 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.transforms = std::move(m_pending.transforms);
     packet.skeletons = std::move(m_pending.skeletons);
     packet.visibility = std::move(m_pending.visibility);
+    packet.morphs = std::move(m_pending.morphs);
+    packet.runtime = std::move(m_pending.runtime);
+    packet.originShift = m_pending.originShift;
     packet.instanceEdits = std::move(m_pending.instanceEdits);
     packet.materialEdits = std::move(m_pending.materialEdits);
     packet.surfaceDeltas = std::move(m_pending.surfaceDeltas);
@@ -508,6 +762,13 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
         if (!next.wind) next.wind = dropped.wind;
         next.discontinuity |= dropped.discontinuity;
         next.gpuSimulation |= dropped.gpuSimulation;
+        // C9: the dropped packet's transforms are in its coordinates; the next packet's shift moves them.
+        for (InstanceTransformUpdate& u : dropped.transforms)
+            u.objectToWorld.m[0][3] -= next.originShift.x, u.objectToWorld.m[1][3] -= next.originShift.y, u.objectToWorld.m[2][3] -= next.originShift.z;
+        shiftRuntime(dropped.runtime, next.originShift);
+        next.originShift = next.originShift + dropped.originShift;
+        next.morphs.insert(next.morphs.begin(), std::make_move_iterator(dropped.morphs.begin()), std::make_move_iterator(dropped.morphs.end()));
+        next.runtime.insert(next.runtime.begin(), std::make_move_iterator(dropped.runtime.begin()), std::make_move_iterator(dropped.runtime.end()));
         next.transforms.insert(next.transforms.begin(), dropped.transforms.begin(), dropped.transforms.end());
         next.skeletons.insert(next.skeletons.begin(), dropped.skeletons.begin(), dropped.skeletons.end());
         next.visibility.insert(next.visibility.begin(), dropped.visibility.begin(), dropped.visibility.end());
@@ -535,6 +796,13 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         if (old.wind) carried.wind = old.wind;
         carried.discontinuity |= old.discontinuity;
         carried.gpuSimulation |= old.gpuSimulation;
+        // C9: transforms carried so far are in older coordinates; this packet's shift moves them.
+        for (InstanceTransformUpdate& u : carried.transforms)
+            u.objectToWorld.m[0][3] -= old.originShift.x, u.objectToWorld.m[1][3] -= old.originShift.y, u.objectToWorld.m[2][3] -= old.originShift.z;
+        shiftRuntime(carried.runtime, old.originShift);
+        carried.originShift = carried.originShift + old.originShift;
+        carried.morphs.insert(carried.morphs.end(), std::make_move_iterator(old.morphs.begin()), std::make_move_iterator(old.morphs.end()));
+        carried.runtime.insert(carried.runtime.end(), std::make_move_iterator(old.runtime.begin()), std::make_move_iterator(old.runtime.end()));
         carried.transforms.insert(carried.transforms.end(), old.transforms.begin(), old.transforms.end());
         carried.skeletons.insert(carried.skeletons.end(), std::make_move_iterator(old.skeletons.begin()), std::make_move_iterator(old.skeletons.end()));
         carried.visibility.insert(carried.visibility.end(), old.visibility.begin(), old.visibility.end());
@@ -557,6 +825,12 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         if (!p.wind) p.wind = carried.wind;
         p.discontinuity |= carried.discontinuity;
         p.gpuSimulation |= carried.gpuSimulation;
+        for (InstanceTransformUpdate& u : carried.transforms)
+            u.objectToWorld.m[0][3] -= p.originShift.x, u.objectToWorld.m[1][3] -= p.originShift.y, u.objectToWorld.m[2][3] -= p.originShift.z;
+        shiftRuntime(carried.runtime, p.originShift);
+        p.originShift = p.originShift + carried.originShift;
+        p.morphs.insert(p.morphs.begin(), std::make_move_iterator(carried.morphs.begin()), std::make_move_iterator(carried.morphs.end()));
+        p.runtime.insert(p.runtime.begin(), std::make_move_iterator(carried.runtime.begin()), std::make_move_iterator(carried.runtime.end()));
         p.transforms.insert(p.transforms.begin(), carried.transforms.begin(), carried.transforms.end());
         p.skeletons.insert(p.skeletons.begin(), std::make_move_iterator(carried.skeletons.begin()), std::make_move_iterator(carried.skeletons.end()));
         p.visibility.insert(p.visibility.begin(), carried.visibility.begin(), carried.visibility.end());
@@ -662,6 +936,12 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
     // listed for the local lights' shadow pages and the static TLAS rebuilt every frame. A bit-identical update changes
     // nothing else: without it the settling rule (GpuScene.h) gives prev = current, as the update itself would, and a
     // teleport to where the instance already is has no motion either way.
+    // C9: the origin shift moves the GPU scene (and this dedupe mirror) before the packet's transforms.
+    if (p.originShift.x != 0 || p.originShift.y != 0 || p.originShift.z != 0)
+    {
+        m_gpuScene->rebase(p.originShift);
+        for (float3x4& t : m_gpuTransforms) t.m[0][3] -= p.originShift.x, t.m[1][3] -= p.originShift.y, t.m[2][3] -= p.originShift.z;
+    }
     m_changedTransforms.clear();
     for (const InstanceTransformUpdate& u : p.transforms)
     {
@@ -686,6 +966,65 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
         m_gpuScene->updateSkeleton(frame, s.skeleton, *s.jointToModel);
     }
     for (const auto& [instance, visible] : p.visibility) m_gpuScene->setInstanceVisible(instance, visible);
+    for (const FramePacket::Morph& m : p.morphs) m_gpuScene->setMorph(frame, m.instance, m.weights, m.time);  // C4
+    // C2b runtime geometry, in call order.
+    std::vector<InstanceTransformUpdate> runtimeMoves;
+    for (const FramePacket::RuntimeOp& op : p.runtime)
+        switch (op.kind)
+        {
+        case FramePacket::RuntimeOp::AddMesh:
+        {
+            const uint32_t index = m_gpuScene->addRuntimeMesh(*op.meshData, *op.clusters);
+            if (index == gpu::kNone) logf("UnravelNext host: runtime mesh pool full; runtime mesh %u not drawn\n", op.id);
+            m_runtimeMeshIndex[op.id] = index;
+            break;
+        }
+        case FramePacket::RuntimeOp::RemoveMesh:
+        {
+            auto it = m_runtimeMeshIndex.find(op.id);
+            if (it != m_runtimeMeshIndex.end() && it->second != gpu::kNone) m_gpuScene->removeRuntimeMesh(it->second);
+            if (it != m_runtimeMeshIndex.end()) m_runtimeMeshIndex.erase(it);
+            break;
+        }
+        case FramePacket::RuntimeOp::AddInstance:
+        {
+            uint32_t mesh = op.mesh;
+            if (mesh & 0x80000000u)
+            {
+                auto it = m_runtimeMeshIndex.find(mesh);
+                mesh = it == m_runtimeMeshIndex.end() ? gpu::kNone : it->second;
+            }
+            uint32_t index = gpu::kNone;
+            if (mesh != gpu::kNone)
+            {
+                scene::Instance in;
+                in.mesh = mesh;
+                in.transform = op.transform;
+                in.flags = op.flags;
+                index = m_gpuScene->addRuntimeInstance(in);
+                if (index == gpu::kNone) logf("UnravelNext host: runtime instance pool full; runtime instance %u not drawn\n", op.id);
+            }
+            m_runtimeInstanceIndex[op.id] = index;
+            break;
+        }
+        case FramePacket::RuntimeOp::RemoveInstance:
+        {
+            auto it = m_runtimeInstanceIndex.find(op.id);
+            if (it != m_runtimeInstanceIndex.end() && it->second != gpu::kNone) m_gpuScene->removeRuntimeInstance(it->second);
+            if (it != m_runtimeInstanceIndex.end()) m_runtimeInstanceIndex.erase(it);
+            break;
+        }
+        case FramePacket::RuntimeOp::Transform:
+        {
+            auto it = m_runtimeInstanceIndex.find(op.id);
+            if (it != m_runtimeInstanceIndex.end() && it->second != gpu::kNone) runtimeMoves.push_back({ it->second, op.transform, 0 });
+            break;
+        }
+        case FramePacket::RuntimeOp::Patch:  // C5: after the patch meshes of this call (earlier in the list)
+            m_gpuScene->setPatchRegion(op.id, *op.region);
+            break;
+        }
+    if (!runtimeMoves.empty()) m_gpuScene->updateTransforms(frame, runtimeMoves);
     return slot;
 }
 
@@ -706,6 +1045,7 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.lensAperture = p.lensAperture;
     fc.lensFocus = p.lensFocus;
     fc.timing = m_profiler ? m_profiler->lastCompleted() : nullptr;  // (the debug HUD, E)
+    fc.originShift = p.originShift;  // C9
     fc.gpuSimulation = p.gpuSimulation;
     m_lastDiscontinuity = p.discontinuity;
     m_lastGpuSimulation = p.gpuSimulation;

@@ -10,6 +10,12 @@
 // pipeline lists; the band A lists are drawn by mesh shaders (vis id + depth). With visibility.coverage_layer the main
 // view draws bands B and C into the coverage layer instead (CoverageLayer.hlsli): conservative raster with exact pixel
 // areas appended to a stream, sorted into each tile's pixel-major range (INTERFACES 7.1 v1.41).
+//
+// Instance hierarchy (C3, ARCHITECTURE 2.1 "64 m cell BVH"): static instances (neither dynamic nor skinned) are grouped
+// by 64 m cell and cut into chunks of at most 256 (Morton order inside a cell); a chunk is culled first (CullChunks) and
+// only the members of visible chunks are tested one by one; dynamic and skinned instances form the flat list. Chunk
+// spheres come from the GPU (ChunkBounds, each scene revision) with the same worldSphere as the instance test, plus the
+// wind term at the frame's wind speed. Skinned instances are culled by per-frame palette bounds (SkinBounds).
 #include "unx/render/Tracks.h"
 
 #include "VisibilityInternal.h"
@@ -21,8 +27,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <map>
+#include <tuple>
 
 namespace unx::render::tracks
 {
@@ -116,6 +124,19 @@ struct State
     uint32_t sceneRevision = UINT32_MAX;
     uint32_t traversalLevels = 0;  // deepest per-depth tree of any mesh (node passes per phase)
 
+    // C3: instance chunks, flat list, skinned bounds (persistent; rebuilt at each scene revision).
+    struct VBuffer
+    {
+        ComPtr<ID3D12Resource> resource;
+        uint32_t srv = kNone, uav = kNone;
+        uint64_t bytes = 0;
+    };
+    VBuffer cullScene, chunks, chunkInstances, flat, skinList, skinSlots, jointSpheres, skinBounds;
+    uint32_t chunkCount = 0, flatCount = 0, skinCount = 0;
+    bool chunkBoundsPending = false;
+    uint64_t preparedFrame = UINT64_MAX;  // frame whose graph has the imports and the bounds passes below
+    BufferRef chunksRef, skinBoundsRef;
+
     ~State()
     {
         if (!device) return;
@@ -127,6 +148,11 @@ struct State
         if (upload) upload->Unmap(0, nullptr);
         for (auto& [name, run] : stats)
             if (run.readback) run.readback->Unmap(0, nullptr);
+        for (VBuffer* b : { &cullScene, &chunks, &chunkInstances, &flat, &skinList, &skinSlots, &jointSpheres, &skinBounds })
+        {
+            if (b->srv != kNone) h.freeResource(b->srv);
+            if (b->uav != kNone) h.freeResource(b->uav);
+        }
     }
 };
 
@@ -186,6 +212,241 @@ State& state(FramePassContext& fc)
     return s;
 }
 
+void releaseBuffer(Device& d, State::VBuffer& b)
+{
+    if (b.resource) d.deferRelease(b.resource);
+    DescriptorHeaps* h = &d.descriptors();
+    for (uint32_t i : { b.srv, b.uav })
+        if (i != kNone) d.deferCall([h, i] { h->freeResource(i); });
+    b = {};
+}
+
+// A default-heap structured buffer with 'count' elements of 'stride' bytes (at least one, zeroed), filled from 'data'
+// (blocking upload: scene revisions only), with an SRV and optionally a UAV.
+State::VBuffer structuredBuffer(Device& d, const void* data, uint32_t stride, uint32_t count, bool uav, const wchar_t* name)
+{
+    std::vector<uint8_t> zero;
+    if (count == 0 || !data)
+    {
+        zero.assign((size_t)stride * std::max(count, 1u), 0);
+        data = zero.data();
+        count = std::max(count, 1u);
+    }
+    State::VBuffer b;
+    b.bytes = (uint64_t)stride * count;
+    D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC1 rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = b.bytes;
+    rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (uav) rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    check(d.d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&b.resource)), "V buffer");
+    b.resource->SetName(name);
+    ComPtr<ID3D12Resource> staging = createBuffer(d, b.bytes, D3D12_HEAP_TYPE_UPLOAD, L"V staging");
+    void* mapped = nullptr;
+    D3D12_RANGE none{ 0, 0 };
+    check(staging->Map(0, &none, &mapped), "map V staging");
+    std::memcpy(mapped, data, (size_t)b.bytes);
+    staging->Unmap(0, nullptr);
+    CommandList cl = d.acquireCommandList(QueueType::Graphics);
+    cl.list->CopyBufferRegion(b.resource.Get(), 0, staging.Get(), 0, b.bytes);
+    d.queue(QueueType::Graphics).waitCpu(d.submit(cl));
+    DescriptorHeaps& h = d.descriptors();
+    b.srv = h.allocateResource();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Format = DXGI_FORMAT_UNKNOWN;
+    sd.Buffer.NumElements = count;
+    sd.Buffer.StructureByteStride = stride;
+    d.d3d()->CreateShaderResourceView(b.resource.Get(), &sd, h.resourceCpu(b.srv));
+    if (uav)
+    {
+        b.uav = h.allocateResource();
+        D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        ud.Format = DXGI_FORMAT_UNKNOWN;
+        ud.Buffer.NumElements = count;
+        ud.Buffer.StructureByteStride = stride;
+        d.d3d()->CreateUnorderedAccessView(b.resource.Get(), nullptr, &ud, h.resourceCpu(b.uav));
+    }
+    return b;
+}
+
+// Interleaves the low 6 bits of x, y, z (Morton order of 1 m sub-cells inside a 64 m cell).
+uint32_t morton6(uint32_t x, uint32_t y, uint32_t z)
+{
+    uint32_t m = 0;
+    for (uint32_t b = 0; b < 6; ++b) m |= ((x >> b) & 1) << (3 * b) | ((y >> b) & 1) << (3 * b + 1) | ((z >> b) & 1) << (3 * b + 2);
+    return m;
+}
+
+// C3 instance hierarchy and skinned-bounds inputs of the current scene revision (VisibilityCommon.hlsli CullScene).
+void buildCullScene(State& s, FramePassContext& fc)
+{
+    Device& d = fc.device;
+    for (State::VBuffer* b : { &s.cullScene, &s.chunks, &s.chunkInstances, &s.flat, &s.skinList, &s.skinSlots, &s.jointSpheres, &s.skinBounds }) releaseBuffer(d, *b);
+    const std::vector<gpu::Instance>& instances = fc.scene.instances();
+    const std::vector<gpu::Mesh>& meshes = fc.scene.meshes();
+    const scene::Scene* src = fc.scene.source();
+    struct Item
+    {
+        int32_t cx, cy, cz;
+        uint32_t fine, index;
+    };
+    std::vector<Item> items;
+    std::vector<uint32_t> flat, skinned;
+    for (uint32_t i = 0; i < fc.scene.staticInstanceCount(); ++i)  // runtime instances (C2b) follow via the views
+    {
+        const gpu::Instance& in = instances[i];
+        const bool skin = (in.flags & scene::InstanceSkinned) != 0;
+        if (skin && in.bonePalette != kNone && meshes[in.mesh].skinOffset != kNone) skinned.push_back(i);
+        if ((in.flags & (scene::InstanceDynamic | scene::InstanceSkinned)) != 0)
+        {
+            flat.push_back(i);
+            continue;
+        }
+        const float4& c = meshes[in.mesh].boundsSphere;
+        const float3 w{ in.objectToWorld[0].x * c.x + in.objectToWorld[0].y * c.y + in.objectToWorld[0].z * c.z + in.objectToWorld[0].w,
+                        in.objectToWorld[1].x * c.x + in.objectToWorld[1].y * c.y + in.objectToWorld[1].z * c.z + in.objectToWorld[1].w,
+                        in.objectToWorld[2].x * c.x + in.objectToWorld[2].y * c.y + in.objectToWorld[2].z * c.z + in.objectToWorld[2].w };
+        const float fx = std::floor(w.x / kChunkCell), fy = std::floor(w.y / kChunkCell), fz = std::floor(w.z / kChunkCell);
+        auto sub = [](float v, float cell) { return (uint32_t)std::clamp((int)std::floor((v - cell * kChunkCell) / (kChunkCell / 64)), 0, 63); };
+        items.push_back({ (int32_t)std::clamp(fx, -1e8f, 1e8f), (int32_t)std::clamp(fy, -1e8f, 1e8f), (int32_t)std::clamp(fz, -1e8f, 1e8f),
+                          morton6(sub(w.x, fx), sub(w.y, fy), sub(w.z, fz)), i });
+    }
+    std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+        return std::tie(a.cx, a.cy, a.cz, a.fine, a.index) < std::tie(b.cx, b.cy, b.cz, b.fine, b.index);
+    });
+    std::vector<CullChunk> chunks;
+    std::vector<uint32_t> members;
+    for (size_t k = 0; k < items.size(); ++k)
+    {
+        const bool newCell = k == 0 || items[k].cx != items[k - 1].cx || items[k].cy != items[k - 1].cy || items[k].cz != items[k - 1].cz;
+        if (newCell || chunks.back().count == kChunkInstances) chunks.push_back({ float4{ 0, 0, 0, -1 }, (uint32_t)members.size(), 0, 0, 0 });
+        members.push_back(items[k].index);
+        ++chunks.back().count;
+    }
+    // Skinned instances: per mesh, the bind-space sphere of the vertices each joint influences (weight > 0), and one
+    // origin point when a vertex has no weight at all (skinning leaves it at the object origin).
+    std::vector<uint32_t> slots;  // uint4 per skinned instance: instance, first sphere, sphere count, 0
+    std::vector<SkinJointSphere> spheres;
+    std::map<uint32_t, std::pair<uint32_t, uint32_t>> meshSpheres;
+    for (uint32_t i : skinned)
+    {
+        const uint32_t m = instances[i].mesh;
+        auto it = meshSpheres.find(m);
+        if (it == meshSpheres.end())
+        {
+            const uint32_t first = (uint32_t)spheres.size();
+            if (src && m < src->meshes.size())
+            {
+                const scene::Mesh& mesh = src->meshes[m];
+                const scene::SkinStream& sk = mesh.skin;
+                const size_t vertices = mesh.positions.size();
+                std::map<uint32_t, std::pair<float3, float3>> box;  // joint -> AABB
+                bool origin = false;
+                for (size_t v = 0; v < vertices && 4 * v + 3 < sk.joints.size() && 4 * v + 3 < sk.weights.size(); ++v)
+                {
+                    float total = 0;
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        const float wgt = sk.weights[4 * v + k];
+                        if (!(wgt > 0)) continue;
+                        total += wgt;
+                        const float3 p = mesh.positions[v];
+                        auto [b, inserted] = box.try_emplace(sk.joints[4 * v + k], std::pair<float3, float3>{ p, p });
+                        if (!inserted)
+                        {
+                            b->second.first = { std::min(b->second.first.x, p.x), std::min(b->second.first.y, p.y), std::min(b->second.first.z, p.z) };
+                            b->second.second = { std::max(b->second.second.x, p.x), std::max(b->second.second.y, p.y), std::max(b->second.second.z, p.z) };
+                        }
+                    }
+                    if (!(total > 0)) origin = true;
+                }
+                std::map<uint32_t, float> radius;
+                for (size_t v = 0; v < vertices && 4 * v + 3 < sk.joints.size() && 4 * v + 3 < sk.weights.size(); ++v)
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        if (!(sk.weights[4 * v + k] > 0)) continue;
+                        const auto& b = box[sk.joints[4 * v + k]];
+                        const float3 c = (b.first + b.second) * 0.5f, q = mesh.positions[v] - c;
+                        float& r = radius[sk.joints[4 * v + k]];
+                        r = std::max(r, std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z));
+                    }
+                for (const auto& [joint, b] : box)
+                {
+                    const float3 c = (b.first + b.second) * 0.5f;
+                    spheres.push_back({ float4{ c.x, c.y, c.z, radius[joint] * (1 + 1e-6f) + 1e-6f }, joint, { 0, 0, 0 } });
+                }
+                if (origin) spheres.push_back({ float4{ 0, 0, 0, 0 }, kSkinJointOrigin, { 0, 0, 0 } });
+            }
+            it = meshSpheres.emplace(m, std::make_pair(first, (uint32_t)spheres.size() - first)).first;
+        }
+        slots.insert(slots.end(), { i, it->second.first, it->second.second, 0 });
+    }
+    s.chunkCount = (uint32_t)chunks.size();
+    s.flatCount = (uint32_t)flat.size();
+    s.skinCount = (uint32_t)skinned.size();
+    s.chunks = structuredBuffer(d, chunks.data(), sizeof(CullChunk), s.chunkCount, true, L"V instance chunks");
+    s.chunkInstances = structuredBuffer(d, members.data(), 4, (uint32_t)members.size(), false, L"V chunk instances");
+    s.flat = structuredBuffer(d, flat.data(), 4, s.flatCount, false, L"V flat instances");
+    s.skinList = structuredBuffer(d, skinned.data(), 4, s.skinCount, false, L"V skinned instances");
+    s.skinSlots = structuredBuffer(d, slots.data(), 16, s.skinCount, false, L"V skin slots");
+    s.jointSpheres = structuredBuffer(d, spheres.data(), sizeof(SkinJointSphere), (uint32_t)spheres.size(), false, L"V joint spheres");
+    s.skinBounds = structuredBuffer(d, nullptr, 16, 2 * std::max(s.skinCount, 1u), true, L"V skinned bounds");
+    const CullScene cs{ s.chunks.srv, s.chunkInstances.srv, s.chunkCount, s.flat.srv, s.flatCount, s.skinBounds.srv, s.skinList.srv, s.skinCount };
+    s.cullScene = structuredBuffer(d, &cs, sizeof(CullScene), 1, false, L"V cull scene");
+    s.chunkBoundsPending = s.chunkCount > 0;
+    s.preparedFrame = UINT64_MAX;
+    logf("V: instance hierarchy: %u static instances in %u chunks (64 m cells, <= %u each), %u flat instances, %u skinned (%zu joint spheres)\n",
+         (uint32_t)members.size(), s.chunkCount, kChunkInstances, s.flatCount, s.skinCount, spheres.size());
+}
+
+// Once per frame, before the first cull run: imports the persistent C3 buffers into the frame's graph, computes the
+// chunk bounds after a scene revision and the skinned bounds of this frame (current and previous palettes).
+void prepareCullScene(FramePassContext& fc, State& s, D3D12_GPU_VIRTUAL_ADDRESS frameConstants)
+{
+    if (s.preparedFrame == fc.frame.frameIndex) return;
+    s.preparedFrame = fc.frame.frameIndex;
+    // C9: an origin shift moved every instance; the chunk spheres (world space) follow from the shifted table.
+    if (fc.frame.originShift.x != 0 || fc.frame.originShift.y != 0 || fc.frame.originShift.z != 0) s.chunkBoundsPending = s.chunkCount > 0;
+    RenderGraph& g = fc.graph;
+    s.chunksRef = g.importBuffer(s.chunks.resource.Get(), { "v.cull.chunks", s.chunks.bytes, (uint32_t)sizeof(CullChunk) });
+    s.skinBoundsRef = g.importBuffer(s.skinBounds.resource.Get(), { "v.cull.skinBounds", s.skinBounds.bytes, 16 });
+    if (s.chunkBoundsPending)
+    {
+        s.chunkBoundsPending = false;
+        ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/ChunkBounds");
+        const BufferRef chunks = s.chunksRef;
+        const uint32_t k[4] = { s.chunks.uav, s.chunkInstances.srv, s.chunkCount, 0 };
+        const uint32_t groups = (s.chunkCount + 63) / 64;
+        g.addPass("v.cull.chunkBounds", QueueType::Graphics, [&](PassBuilder& b) { b.use(chunks, Use::UavCompute); },
+                  [=](PassContext& c) {
+                      c.cmd->SetPipelineState(pso);
+                      c.bindFrameConstants(frameConstants);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(groups, 1, 1);
+                  });
+    }
+    if (s.skinCount > 0)
+    {
+        ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/SkinBounds");
+        const BufferRef bounds = s.skinBoundsRef;
+        const uint32_t k[4] = { s.skinSlots.srv, s.jointSpheres.srv, s.skinBounds.uav, s.skinCount };
+        const uint32_t groups = s.skinCount;
+        g.addPass("v.cull.skinBounds", QueueType::Graphics, [&](PassBuilder& b) { b.use(bounds, Use::UavCompute); },
+                  [=](PassContext& c) {
+                      c.cmd->SetPipelineState(pso);
+                      c.bindFrameConstants(frameConstants);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(groups, 1, 1);
+                  });
+    }
+}
+
 // Deepest per-depth tree over all meshes (the node passes each phase needs), and the 24-bit packing limits.
 void refreshScene(State& s, FramePassContext& fc)
 {
@@ -228,9 +489,11 @@ void refreshScene(State& s, FramePassContext& fc)
             if (src->materials[i].alphaCutoff > 0 && src->materials[i].baseColorTexture != UINT32_MAX && gpuMaterials[i].baseColorTexture == gpu::kNone) ++untextured;
         if (untextured) logf("V: %u alpha-tested materials have a baseColor texture that is not in the GPU scene (M.prepareScene not run): drawn uncut\n", untextured);
     }
-    s.traversalLevels = deepest;
+    // C2b: runtime meshes arrive without a revision; their hierarchies are at most kRuntimeMaxDepth deep.
+    s.traversalLevels = fc.scene.runtimeCapacity().meshes > 0 ? std::max(deepest, kRuntimeMaxDepth) : deepest;
     s.sceneRevision = fc.scene.revision();
     s.mainHiz.history = false;
+    buildCullScene(s, fc);
 }
 
 float4 normalisedPlane(float4 p)
@@ -350,6 +613,12 @@ uint32_t uploadViews(State& s, FramePassContext& fc, const std::vector<CullView>
     const uint32_t slot = (uint32_t)(fc.frame.frameIndex % s.slots);
     const uint32_t first = slot * kViewsPerSlot + s.viewsUsed;
     std::memcpy(s.uploadMapped + (uint64_t)first * sizeof(CullView), views.data(), views.size() * sizeof(CullView));
+    // Every view of a run culls the same scene (C3) and the same runtime instances (C2b).
+    const GpuScene::GpuInstanceRange gpuRange = fc.scene.gpuInstanceRange();
+    const uint32_t runtime[5] = { s.cullScene.srv, fc.scene.staticInstanceCount(),
+                                  (uint32_t)fc.scene.instances().size() > fc.scene.staticInstanceCount() ? (uint32_t)fc.scene.instances().size() - fc.scene.staticInstanceCount() : 0u,
+                                  gpuRange.first, gpuRange.capacity };
+    for (size_t v = 0; v < views.size(); ++v) std::memcpy(s.uploadMapped + (uint64_t)(first + v) * sizeof(CullView) + offsetof(CullView, cullSceneSrv), runtime, sizeof runtime);
     std::vector<uint32_t>& srvs = s.runSrvs[slot];
     if (s.runsUsed == srvs.size()) srvs.push_back(fc.device.descriptors().allocateResource());
     const uint32_t srv = srvs[s.runsUsed++];
@@ -420,6 +689,9 @@ struct Run
     BufferRef state, args, nodeItems, groupItems, visible, lists, deferInstances, deferNodes, deferClusters, tileMask;
     BufferRef tilePairs;  // tile-local raster runs: uint3 (visible index, tile rectangle) per list entry
     BufferRef tileCoarse;  // runs with a tile mask: bit per 8 x 8 tiles (TileMaskCoarse.hlsl)
+    BufferRef chunkWork;   // C3: visible chunk items [0, capDeferred), deferred chunks [capDeferred, 2 capDeferred)
+    BufferRef chunks, skinBounds;  // C3 persistent buffers imported for this frame (read by the cull kernels)
+    uint32_t chunkCount = 0, flatCount = 0;
     uint32_t tileCoarseWords = 0;  // per view
     TextureRef hiz;
     uint32_t hizSrv = kNone, hizMips = 0, hizWidth = 0, hizHeight = 0;
@@ -447,16 +719,24 @@ Run createRun(FramePassContext& fc, const Settings& cfg, const std::string& pref
     r.deferInstances = g.createBuffer({ "v.cull.deferredInstances", (uint64_t)cfg.capDeferred * 4, 4 });
     r.deferNodes = g.createBuffer({ "v.cull.deferredNodes", (uint64_t)cfg.capDeferred * 8, 8 });
     r.deferClusters = g.createBuffer({ "v.cull.deferredClusters", (uint64_t)cfg.capDeferred * 8, 8 });
+    r.chunkWork = g.createBuffer({ "v.cull.chunkWork", (uint64_t)cfg.capDeferred * 8, 4 });
     r.nodesSrv = fc.scene.srv(clusterbuilder::kClusterNodes);
     r.rootsSrv = fc.scene.srv(clusterbuilder::kMeshClusterRoots);
     r.spheresSrv = fc.scene.srv(clusterbuilder::kClusterLodSpheres);
     r.sheetsSrv = fc.scene.srv(clusterbuilder::kClusterSheets);
+    const State& st = fc.state<State>("v.state");
+    r.chunks = st.chunksRef;
+    r.skinBounds = st.skinBoundsRef;
+    r.chunkCount = st.chunkCount;
+    r.flatCount = st.flatCount;
     return r;
 }
 
 void declareCull(PassBuilder& b, const Run& r, Use argsUse)
 {
-    for (BufferRef x : { r.state, r.nodeItems, r.groupItems, r.visible, r.lists, r.deferInstances, r.deferNodes, r.deferClusters }) b.use(x, Use::UavCompute);
+    for (BufferRef x : { r.state, r.nodeItems, r.groupItems, r.visible, r.lists, r.deferInstances, r.deferNodes, r.deferClusters, r.chunkWork }) b.use(x, Use::UavCompute);
+    for (BufferRef x : { r.chunks, r.skinBounds })
+        if (x.valid()) b.use(x, Use::SrvCompute);
     b.use(r.args, argsUse);
     if (r.hiz.valid()) b.use(r.hiz, Use::SrvCompute);
     if (r.tileMask.valid()) b.use(r.tileMask, Use::SrvCompute);
@@ -479,7 +759,8 @@ void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t 
     k[9] = c.uav(r.deferNodes);
     k[10] = c.uav(r.deferClusters);
     k[11] = r.hizSrv;
-    k[12] = r.hizMips;
+    if (r.hizMips > 31) fail("V: %u HiZ mips do not fit the 5-bit field", r.hizMips);
+    k[12] = r.hizMips | c.uav(r.chunkWork) << 5;
     k[13] = r.hizWidth;
     k[14] = r.hizHeight;
     k[15] = r.instanceMask;
@@ -584,15 +865,30 @@ void cullPhase(FramePassContext& fc, State& s, const Run& r, uint32_t phase)
 {
     const uint32_t instances = (uint32_t)fc.scene.instances().size();
     const std::string p = std::to_string(phase);
+    (void)instances;
     if (phase == 1)
     {
         cullPass(fc, s, r, "reset", "Passes/Visibility/CullReset", phase, 1, 1, 0);
-        cullPass(fc, s, r, "instances.p1", "Passes/Visibility/CullInstances.PHASE1", phase, std::max((instances + 63) / 64, 1u), r.viewCount, 0);
+        if (r.chunkCount > 0)
+            cullPass(fc, s, r, "chunks.p1", "Passes/Visibility/CullChunks.PHASE1", phase, (r.chunkCount + 63) / 64, r.viewCount, 0);
+        const uint32_t runtime = (uint32_t)fc.scene.instances().size() - fc.scene.staticInstanceCount();  // C2b
+        const uint32_t gpuCapacity = fc.scene.gpuInstanceRange().capacity;  // A3 mesh particles (count on the GPU)
+        cullPass(fc, s, r, "instances.p1", "Passes/Visibility/CullInstances.PHASE1.SOURCE0", phase, std::max((r.flatCount + runtime + gpuCapacity + 63) / 64, 1u), r.viewCount, 0);
+        if (r.chunkCount > 0)
+        {
+            cullPass(fc, s, r, "prepare.chunks.p1", "Passes/Visibility/CullPrepare.MODE4", phase, 1, 1, 0);
+            cullPass(fc, s, r, "instances.chunks.p1", "Passes/Visibility/CullInstances.PHASE1.SOURCE1", phase, 0, 0, kArgChunkItems);
+        }
     }
     else
     {
+        if (r.chunkCount > 0)
+        {
+            cullPass(fc, s, r, "prepare.chunks.p2", "Passes/Visibility/CullPrepare.MODE5", phase, 1, 1, 0);
+            cullPass(fc, s, r, "chunks.p2", "Passes/Visibility/CullChunks.PHASE2", phase, 0, 0, kArgDeferredChunks);
+        }
         cullPass(fc, s, r, "prepare.p2", "Passes/Visibility/CullPrepare.MODE2", phase, 1, 1, 0);
-        cullPass(fc, s, r, "instances.p2", "Passes/Visibility/CullInstances.PHASE2", phase, 0, 0, kArgDeferredInstances);
+        cullPass(fc, s, r, "instances.p2", "Passes/Visibility/CullInstances.PHASE2.SOURCE0", phase, 0, 0, kArgDeferredInstances);
         cullPass(fc, s, r, "seed.p2", "Passes/Visibility/CullSeed", phase, 0, 0, kArgSeedNodes);
     }
     for (uint32_t level = 0; level < s.traversalLevels; ++level)
@@ -977,6 +1273,8 @@ void readStats(FramePassContext& fc, State& s, const std::string& name)
         st.coverageInvocations = w[kStateCovInvocations];
         st.mixedClusters = w[kStateStatMixedClusters];
         st.mixedTriangles = w[kStateStatMixedTriangles];
+        st.chunkItems = w[kStateChunkItems];
+        st.deferredChunks = w[kStateDeferChunks];
         st.overflow = w[kStateOverflow];
         if (st.overflow && !run.overflowReported)
         {
@@ -1024,6 +1322,7 @@ void visibility(FramePassContext& fc, ViewResources& view)
 
     view.depth = g.createTexture({ "v.depth", width, height, 1, 1, DXGI_FORMAT_D32_FLOAT });
     view.visId = g.createTexture({ "v.visId", width, height, 1, 1, DXGI_FORMAT_R32_UINT });
+    prepareCullScene(fc, s, view.frameConstants);
     Run r = createRun(fc, cfg, main ? "v.cull." : "v.cull.secondary.", view.frameConstants);
     view.visibleClusters = r.visible;
     r.viewCount = 1;
@@ -1051,6 +1350,8 @@ void visibility(FramePassContext& fc, ViewResources& view)
     {
         // Band hysteresis (a) re-evaluates the band from the previous frame's camera; a history discontinuity (cut,
         // restore) starts over from this frame's.
+        // C9: the previous camera position in this frame's coordinates.
+        if (s.hasPrevMainPosition) s.prevMainPosition = s.prevMainPosition - fc.frame.originShift;
         if (s.hasPrevMainPosition && fc.frame.discontinuity == 0) cullView.prevPosition = s.prevMainPosition;
         s.prevMainPosition = view.view.position;
         s.hasPrevMainPosition = true;
@@ -1121,6 +1422,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
         fail("rasterizeDepth '%s': %zu views with different viewports (limit %u)", request.name.c_str(), request.views.size(),
              (unsigned)D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE);
 
+    prepareCullScene(fc, s, s.mainFrameConstants);
     Run r = createRun(fc, cfg, request.name + ".", s.mainFrameConstants);
     r.tileMask = request.cullMask;
     if (request.tileLocal) r.tilePairs = fc.graph.createBuffer({ "v.cull.tilePairs", (uint64_t)cfg.capVisible * 12, 12 });

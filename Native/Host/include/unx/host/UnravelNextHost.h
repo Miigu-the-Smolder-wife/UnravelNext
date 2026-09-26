@@ -34,7 +34,11 @@ enum UnxResult
                             //    UnxSceneLoad, UnxVideoMemory, UnxSceneEditInstances, UnxSceneEditMaterials, UnxVfxStreamExecutor,
                             //    UnxRendererQualityOverride, UnxFrameSetLens, UnxSurfaceDelta, UnxSurfaceSetHalfLives, UnxSurfaceSetTime,
                             //    UnxDebugPrimitives, UnxDebugText, UnxDecalAdd, UnxDecalUpdate, UnxDecalRemove, UnxViewModelAdd,
-                            //    UnxViewModelSetPose, UnxViewModelRemove
+                            //    UnxViewModelSetPose, UnxViewModelRemove,
+                            //    UnxSceneAddBlendShape, UnxSceneSetVertexAnimation, UnxFrameSetMorphs (C4),
+                            //    UnxFrameSetOriginShift (C9), UnxSceneReserveRuntime, UnxFrameAddRuntimeMesh,
+                            //    UnxFrameRemoveRuntimeMesh, UnxFrameAddRuntimeInstance, UnxFrameRemoveRuntimeInstance,
+                            //    UnxFrameSetRuntimeTransforms (C2b), UnxFrameSetTerrainDeformation (C5)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -242,6 +246,15 @@ typedef struct UnxEnvironmentDesc
 UNX_API int32_t UNX_CALL UnxSceneAddTexture(UnxRenderer r, const UnxTextureDesc* desc, uint32_t* index);
 UNX_API int32_t UNX_CALL UnxSceneAddMaterial(UnxRenderer r, const UnxMaterialDesc* desc, uint32_t* index);
 UNX_API int32_t UNX_CALL UnxSceneAddMesh(UnxRenderer r, const UnxMeshDesc* desc, uint32_t* index);
+// C4 (before UnxSceneCommit): a blend shape of a mesh: vertexCount strictly ascending mesh vertices, their position
+// offsets (3 floats each, renderer space) and normal offsets (3 floats each, or null). Shapes keep the order of the calls.
+UNX_API int32_t UNX_CALL UnxSceneAddBlendShape(UnxRenderer r, uint32_t mesh, const char* name, uint32_t vertexCount, const uint32_t* vertices,
+                                               const float* deltaPositions, const float* deltaNormals);
+// C4 (before UnxSceneCommit): the mesh's vertex animation: frameCount x vertex count positions (3 floats each, frame-major)
+// and normals (same layout, or null) at framesPerSecond, looping or held at the ends. The mesh then has no skin and no
+// blend shapes.
+UNX_API int32_t UNX_CALL UnxSceneSetVertexAnimation(UnxRenderer r, uint32_t mesh, float framesPerSecond, uint32_t frameCount, uint32_t loop,
+                                                    const float* positions, const float* normals);
 // jointToModel: 12 floats per joint (row-major 3x4), the skeleton's current pose in model space.
 UNX_API int32_t UNX_CALL UnxSceneAddSkeleton(UnxRenderer r, const float* jointToModel, uint32_t jointCount, uint32_t* index);
 UNX_API int32_t UNX_CALL UnxSceneAddInstance(UnxRenderer r, const UnxInstanceDesc* desc, uint32_t* index);
@@ -389,6 +402,52 @@ UNX_API int32_t UNX_CALL UnxFrameSetSkeleton(UnxRenderer r, uint32_t skeleton, c
 // skeleton's joint count (12 floats per joint); jointCount is the buffer's total, checked before anything is recorded.
 UNX_API int32_t UNX_CALL UnxFrameSetSkeletons(UnxRenderer r, uint32_t count, const uint32_t* skeletons, const float* jointToModel, uint64_t jointCount);
 UNX_API int32_t UNX_CALL UnxFrameSetInstanceVisible(UnxRenderer r, uint32_t instance, uint32_t visible);
+// C4: blend shape weights and vertex animation times of the next queued frame: weights holds each listed instance's
+// weights back to back (its mesh's blend shape count each; weightCount is the total, checked first); times one per
+// instance (null = 0). An instance not listed keeps its last values.
+UNX_API int32_t UNX_CALL UnxFrameSetMorphs(UnxRenderer r, uint32_t count, const uint32_t* instances, const float* weights, uint64_t weightCount,
+                                           const float* times);
+// C9: origin rebase of the next queued frame: its coordinates are the previous frame's minus shift (whole multiples of
+// 1024 m per axis). Send the frame's transforms and camera in the new coordinates (transforms already queued for the frame
+// are moved).
+UNX_API int32_t UNX_CALL UnxFrameSetOriginShift(UnxRenderer r, const double shift[3]);
+
+// C2b runtime geometry (CARVE destruction fragments, generated meshes): meshes and instances added and removed between
+// frames without rebuilding the scene. Room is reserved before UnxSceneCommit; ids are the host's (a runtime mesh id has
+// bit 31 set and can be used as the mesh of UnxFrameAddRuntimeInstance, as can any committed mesh index). Adds and removals
+// take effect with the next queued frame, in call order; a removal waits until no frame in flight draws it. Raster,
+// shadows and materials see runtime geometry; ray tracing (reflections, GI) does not yet (FEATURES_GAME 2.1 event BLAS).
+typedef struct UnxRuntimeCapacity
+{
+    uint32_t size, version;  // sizeof, 1
+    uint32_t meshes, submeshes, vertices, indices, clusters, clusterVertexIndices, clusterTriangles, nodes, instances;
+} UnxRuntimeCapacity;
+UNX_API int32_t UNX_CALL UnxSceneReserveRuntime(UnxRenderer r, const UnxRuntimeCapacity* capacity);
+UNX_API int32_t UNX_CALL UnxFrameAddRuntimeMesh(UnxRenderer r, const UnxMeshDesc* desc, uint32_t* id);
+UNX_API int32_t UNX_CALL UnxFrameRemoveRuntimeMesh(UnxRenderer r, uint32_t id);
+UNX_API int32_t UNX_CALL UnxFrameAddRuntimeInstance(UnxRenderer r, uint32_t mesh, const float objectToWorld[12], uint32_t flags, uint32_t* id);
+UNX_API int32_t UNX_CALL UnxFrameRemoveRuntimeInstance(UnxRenderer r, uint32_t id);
+UNX_API int32_t UNX_CALL UnxFrameSetRuntimeTransforms(UnxRenderer r, uint32_t count, const uint32_t* ids, const float* objectToWorld);
+
+// C5 terrain deformation D (FEATURES_GAME 9, PHYSICS 9.7): footprints, wheel ruts, craters as geometry. Each call gives
+// the whole current window (physics' D after its tick). Texel (i, j) is at world (originX + i spacing, originZ + j spacing)
+// in this frame's coordinates (after origin shifts); texels lie on the terrain grid (cell size / spacing an integer) and
+// D is 0 at the window's edge. 'tiles' are the scene instances of cooked terrain tiles (Unravel UnravelNextTerrainCook:
+// placed by translation) the window may touch; tiles patched before and not listed lose their patches. Every 4 x 4 cell
+// block whose closure has non-zero D is replaced by a mesh at D's resolution (runtime geometry: reserve room with
+// UnxSceneReserveRuntime, per block (4 cells / spacing + 1)^2 vertices); unchanged blocks are kept. Rays (GI,
+// reflections) see the tile without D (condition: D depth <= 10 cm).
+typedef struct UnxTerrainDeformation
+{
+    uint32_t size, version;   // sizeof, 1
+    uint32_t texels;          // per side (0: no deformation)
+    float spacing;            // metres per texel
+    double originX, originZ;  // world xz of texel (0, 0)
+    const float* heights;     // texels^2, rows along +z, metres added to the terrain height (negative = pressed in)
+    uint32_t tileCount;
+    const uint32_t* tiles;
+} UnxTerrainDeformation;
+UNX_API int32_t UNX_CALL UnxFrameSetTerrainDeformation(UnxRenderer r, const UnxTerrainDeformation* d);
 
 // History discontinuity of the next queued frame (INTERFACES 5.5.2): RESTORE for a World snapshot restore, save load
 // or branch change (every temporal state resets), CUT for a camera cut (view-bound histories reset, world-space caches

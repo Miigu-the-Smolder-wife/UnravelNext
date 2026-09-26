@@ -1,0 +1,45 @@
+UnravelNext host: scene committed, 1 meshes, 1 instances, 12 triangles, 1 clusters, 269.0 ms, hash 022dabf5bb1af50e
+RayScene: 1 static + 0 dynamic instances (0 deformed), 1 mesh BLAS (12 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 16 ms
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 1 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+    red 0 0 0, blue 17670 21182 16785, grey 38520 38340 38340
+  committed box: grey in the middle, nothing red                           ok
+  host counts include the edits at once                                    ok
+RayScene: 2 static + 0 dynamic instances (0 deformed), 0 mesh BLAS (0 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 5 ms
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 2 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+    red 0 3878 14625, blue 17670 21182 16785, grey 38520 34344 23590
+  appended red box drawn on the right, middle still grey                   ok
+RayScene: 2 static + 0 dynamic instances (0 deformed), 0 mesh BLAS (0 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 4 ms
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 2 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+    red 0 1125 14625, blue 17670 36682 16785, grey 38520 18603 23590
+  replaced material: middle box blue (blue +, grey - in the middle), red box unchanged ok
+    red 0 0 0, blue 17670 36682 16785, grey 38520 22590 38340
+  hidden: no red anywhere                                                  ok
+RayScene: 2 static + 0 dynamic instances (0 deformed), 0 mesh BLAS (0 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 5 ms
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 2 static instances in 2 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+    red 14750 3798 0, blue 17670 36682 16785, grey 23645 18726 38340
+  reused slot: visible again, red on the left only                         ok
+  current scene: 2 instances, 2 materials, material 0 blue, instance 1 at x = -1.3 ok
+    (refused: instance edit 5 of 2 (append in order))
+  append out of order (index 5 of 2) is refused                            ok
+    (refused: instance edit 2: mesh 3 of 1 (a new mesh needs a new renderer))
+  a mesh that is not in the scene is refused                               ok
+    (refused: instance edit 2: a skinned instance needs a new renderer (its palette slot is fixed at commit))
+  a skinned instance is refused                                            ok
+    (refused: instance edit 2: material 7 of 2)
+  a material override beyond the materials is refused                      ok
+    (refused: material edit 2: texture 9 of 0 (textures are fixed at commit))
+  a texture that is not in the scene is refused                            ok
+  refused edits left the counts alone                                      ok
+    red 14750 3804 0, blue 17670 36682 16785, grey 23645 18725 38340
+  and the image: blue middle, red left                                     ok
+  D3D12 debug layer errors 0                                               ok
+HOST SCENE EDITS TEST PASSED

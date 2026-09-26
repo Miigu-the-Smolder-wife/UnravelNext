@@ -28,9 +28,35 @@ struct CullView  // 320 B
     float3 prevPosition;
     float bandAMinPx;
     float bandAHysteresisPx;
-    float pad[3];
+    uint32_t cullSceneSrv;  // CullScene of the run (C3: instance chunks, flat list, skinned bounds)
+    uint32_t runtimeFirst, runtimeCount;  // C2b runtime instances (GpuScene::staticInstanceCount onwards)
+    uint32_t gpuFirst, gpuCapacity;       // GPU-written instances (GpuScene::gpuInstanceRange; live count in g_patchData)
+    uint32_t gpuPad0, gpuPad1;
 };
-static_assert(sizeof(CullView) == 352);
+
+// C3 instance hierarchy (VisibilityCommon.hlsli CullScene, CullChunk).
+struct CullScene
+{
+    uint32_t chunkSrv, chunkInstancesSrv, chunkCount, flatSrv;
+    uint32_t flatCount, skinBoundsSrv, skinListSrv, skinCount;
+};
+static_assert(sizeof(CullScene) == 32);
+struct CullChunk
+{
+    float4 sphere;  // world; radius < 0 until ChunkBounds ran
+    uint32_t first, count, windBits, pad1;
+};
+static_assert(sizeof(CullChunk) == 32);
+struct SkinJointSphere  // SkinBounds.hlsl
+{
+    float4 sphere;
+    uint32_t joint, pad[3];
+};
+static_assert(sizeof(SkinJointSphere) == 32);
+constexpr uint32_t kChunkInstances = 256;  // CHUNK_INSTANCES
+constexpr float kChunkCell = 64.0f;         // metres (ARCHITECTURE 2.1: 64 m cells)
+constexpr uint32_t kSkinJointOrigin = 0xFFFFFFFFu;
+static_assert(sizeof(CullView) == 368);
 
 constexpr uint32_t kViewOcclusion = 1;
 constexpr uint32_t kViewCullBack = 2;
@@ -41,14 +67,14 @@ constexpr uint32_t kStateNodeWrite = 0, kStateNodeEnd = 2, kStateGroupWrite = 3,
                    kStateDeferClusters = 8, kStateListCount = 9, kStateOverflow = 21, kStateStatInstances = 22, kStateStatNodes = 23, kStateStatClusters = 24,
                    kStateStatTriangles = 25, kStateTilePairs = 29, kStateCovPool = 30, kStateCovInvocations = 31, kStateCovFragments = 32, kStateCovTiles = 33, kStateCovMeasured = 34,
                    kStateStatBandClusters = 35, kStateCovBlocks = 38, kStateCovHeavy = 39, kStateStatMixedClusters = 40,
-                   kStateStatMixedTriangles = 41, kStateWords = 48;
+                   kStateStatMixedTriangles = 41, kStateChunkItems = 42, kStateDeferChunks = 43, kStateStatChunks = 44, kStateWords = 48;
 constexpr uint32_t kLists = 6;
 constexpr uint32_t kListABack = 0, kListANone = 1, kListAAlphaBack = 2, kListAAlphaNone = 3, kListB = 4, kListC = 5;
 constexpr uint32_t kAListCount = 4;  // lists drawn by the vis buffer raster
 
 // Indirect argument words.
 constexpr uint32_t kArgNodes = 0, kArgGroups = 3, kArgDeferredClusters = 6, kArgDeferredInstances = 9, kArgSeedNodes = 12, kArgMesh = 15, kArgCovMesh = 33,
-                   kArgCovClear = 36, kArgCovRecords = 39, kArgWords = 42;
+                   kArgCovClear = 36, kArgCovRecords = 39, kArgChunkItems = 42, kArgDeferredChunks = 45, kArgWords = 48;
 
 // Band modes of a cull run (CullShared.hlsli BAND_MODE_*): A = every band in the band A lists (raster service, secondary
 // views; classification still runs and is reported in Stats::triangles); Coverage = bands B and C in the coverage layer

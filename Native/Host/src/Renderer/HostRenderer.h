@@ -30,6 +30,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <unordered_set>
+#include <unordered_map>
 
 namespace unx::render
 {
@@ -96,6 +98,28 @@ struct FramePacket
     std::vector<render::InstanceTransformUpdate> transforms;
     std::vector<SkeletonPose> skeletons;
     std::vector<std::pair<uint32_t, bool>> visibility;
+    // C4: blend shape weights and vertex animation time per instance (in order; later ones win).
+    struct Morph
+    {
+        uint32_t instance = 0;
+        std::vector<float> weights;
+        float time = 0;
+    };
+    std::vector<Morph> morphs;
+    // C9: origin shift applied before this packet's transforms (sum when packets merge; the older packets' transforms
+    // are moved into the newer coordinates when they merge).
+    float3 originShift{};
+    // C2b runtime geometry, in call order (ids are the host's; HostRenderer maps them to GPU scene indices).
+    struct RuntimeOp
+    {
+        enum Kind : uint32_t { AddMesh, RemoveMesh, AddInstance, RemoveInstance, Transform, Patch } kind = AddMesh;
+        uint32_t id = 0, mesh = 0, flags = 0;  // Patch: id = the terrain tile's scene instance
+        float3x4 transform;
+        std::shared_ptr<const scene::Mesh> meshData;
+        std::shared_ptr<const render::ClusterData> clusters;
+        std::shared_ptr<const render::GpuScene::PatchRegion> region;  // Patch (C5)
+    };
+    std::vector<RuntimeOp> runtime;
     // Scene edits after commit (INTERFACES 6.3 v1.44, GpuScene::setInstances / setMaterials), in the order the host made
     // them: index == the count at that point appends. Applied before this packet's transforms.
     std::vector<std::pair<uint32_t, scene::Instance>> instanceEdits;
@@ -181,6 +205,26 @@ public:
     void setSkeleton(uint32_t skeleton, std::vector<float3x4> jointToModel);
     uint32_t jointCount(uint32_t skeleton) const;
     void setInstanceVisible(uint32_t instance, bool visible);
+    // C4 (before commit): a blend shape or the vertex animation of a mesh; (after commit) an instance's weights and time.
+    void addBlendShape(uint32_t mesh, scene::BlendShape shape);
+    void setVertexAnimation(uint32_t mesh, scene::VertexAnimation animation);
+    void setMorph(uint32_t instance, std::vector<float> weights, float time);
+    // C9: the next frame's origin shift (1024 m grid); transforms queued earlier for that frame move with it.
+    void setOriginShift(float3 shift);
+    uint32_t meshVertexCount(uint32_t mesh) const;
+    // C2b runtime geometry (see UnravelNextHost.h).
+    void reserveRuntime(const render::RuntimeCapacity& capacity);
+    uint32_t addRuntimeMesh(scene::Mesh mesh);
+    void removeRuntimeMesh(uint32_t id);
+    uint32_t addRuntimeInstance(uint32_t mesh, const float3x4& transform, uint32_t flags);
+    void removeRuntimeInstance(uint32_t id);
+    void setRuntimeTransform(uint32_t id, const float3x4& transform);
+    // C5 terrain deformation D (scene/TerrainPatch.h, UnravelNextHost.h UnxFrameSetTerrainDeformation): the whole current
+    // window, world xz of texel (0, 0) in this frame's coordinates; 'tiles' = the cooked terrain tile instances it may
+    // touch. Blocks whose inputs changed are rebuilt on the calling thread as runtime meshes; tiles no longer listed lose
+    // their patches.
+    void setTerrainDeformation(double originX, double originZ, float spacing, uint32_t texels, const float* heights, std::span<const uint32_t> tiles);
+    uint32_t blendShapeCount(uint32_t instance) const;  // of the instance's mesh
     // Scene edits after commit (main thread; A2, INTERFACES 6.3 v1.44): each instance at its index takes the new value
     // (index == instanceCount() appends, in order; its transform has no motion and it is visible); skinned instances and
     // new meshes need a new renderer. Materials likewise (their textures must already be in the scene). They reach the
@@ -245,6 +289,8 @@ public:
     ID3D12Device* d3dDevice() const;
     // Test hook: transform and pose updates that matched the GPU scene bit for bit and were not applied (beginFrame).
     std::pair<uint64_t, uint64_t> droppedUpdatesForTest() const { return { m_droppedTransforms, m_droppedPoses }; }
+    // Test hook (C5): terrain patch blocks built so far.
+    uint64_t patchBuildsForTest() const { return m_patchBuilds; }
     // Test hook: removes this renderer's D3D12 device (ID3D12Device5::RemoveDevice: this process only, no GPU reset), as a
     // TDR would, so the device-removal path can be exercised.
     void removeDeviceForTest();
@@ -279,6 +325,7 @@ private:
         std::vector<float3x4> transforms;
         std::vector<std::shared_ptr<const std::vector<float3x4>>> poses;
         std::vector<uint8_t> visible;
+        std::vector<std::pair<std::vector<float>, float>> morphs;  // C4: per instance (empty weights: not set)
         scene::Sun sun;
         scene::Atmosphere atmosphere;
         FramePacket::Wind wind;
@@ -308,6 +355,21 @@ private:
     mutable std::mutex m_mutex;  // packets, pending updates, stats
     std::deque<FramePacket> m_packets;
     FramePacket m_pending;       // updates for the next queued frame
+    // C2b: host ids (main thread) and their GPU scene indices (render thread, at apply time).
+    render::RuntimeCapacity m_runtimeCapacity;
+    uint32_t m_nextRuntimeMesh = 0, m_nextRuntimeInstance = 0;
+    std::unordered_map<uint32_t, uint32_t> m_runtimeMeshIndex, m_runtimeInstanceIndex;
+    std::unordered_set<uint32_t> m_runtimeMeshLive;                  // main-thread view (validation)
+    std::unordered_map<uint32_t, uint32_t> m_runtimeInstanceMesh;    // live runtime instance id -> its mesh (validation)
+    // C5 terrain patches (main thread): per tile instance, its replaced blocks' runtime mesh / instance and input hash.
+    struct PatchBlock
+    {
+        uint32_t mesh = 0, instance = 0;
+        uint64_t hash = 0;
+    };
+    std::unordered_map<uint32_t, std::unordered_map<uint32_t, PatchBlock>> m_terrainPatches;
+    float3 m_mainOriginOffset{};
+    uint64_t m_patchBuilds = 0;  // sum of setOriginShift calls (main thread): committed transforms minus this = now
     uint32_t m_hostInstances = 0, m_hostMaterials = 0;  // counts with every edit the host made (m_mutex)
     std::vector<uint8_t> m_hostSkinned;                 // per instance, with the host's edits (m_mutex)
     // Latest state of every packet taken for rendering (takePacket, under m_mutex then m_appliedMutex): with the queued

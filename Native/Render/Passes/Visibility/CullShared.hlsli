@@ -2,7 +2,8 @@
 //   P[0] views SRV, state UAV (raw), args UAV (raw), phase (1 | 2)
 //   P[1] node items UAV (uint2), group items UAV (uint2), visible UAV (uint2: instance, cluster | view << 24), lists UAV (raw)
 //   P[2] deferred instances UAV (uint), deferred nodes UAV (uint2), deferred clusters UAV (uint2), HiZ SRV
-//   P[3] HiZ mips, HiZ width, HiZ height, instance mask
+//   P[3] HiZ mips (bits 0-4) | chunk work UAV << 5 (uint: CullChunks items and deferred chunks), HiZ width, HiZ height,
+//        instance mask
 //   P[4] cluster nodes SRV, mesh roots SRV, cluster LOD spheres SRV, tile mask SRV (UNX_NONE = none)
 //   P[5] capacity: node items, group items, visible (= each list), deferred items
 //   P[6] view count, instance count, band mode (BAND_MODE_*), tile pairs UAV (uint3; UNX_NONE = not tile-local: list
@@ -25,7 +26,8 @@
 #define DEFER_NODES_UAV P[2].y
 #define DEFER_CLUSTERS_UAV P[2].z
 #define HIZ_SRV P[2].w
-#define HIZ_MIPS P[3].x
+#define HIZ_MIPS (P[3].x & 31u)
+#define CHUNK_WORK_UAV (P[3].x >> 5)
 #define HIZ_SIZE P[3].yz
 #define INSTANCE_MASK P[3].w
 #define NODES_SRV P[4].x

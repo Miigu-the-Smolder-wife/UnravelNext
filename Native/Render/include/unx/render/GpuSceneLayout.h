@@ -21,7 +21,7 @@ constexpr uint32_t kInstanceMotionBreak = 1u << 30;
 // FrameConstants::viewModelScale (ViewModel.hlsli); M leaves its pixels out of the camera-rotation blur.
 constexpr uint32_t kInstanceViewModel = 1u << 29;
 
-struct Instance  // 144 B
+struct Instance  // 160 B
 {
     float4 objectToWorld[3];      // rows of the affine object -> world transform (this tick)
     float4 prevObjectToWorld[3];  // previous rendered frame's objectToWorld (motion, HiZ phase 1, VSM invalidation); equal when static
@@ -33,8 +33,28 @@ struct Instance  // 144 B
     uint32_t deformRevision;      // increments when skinning/wind changes this instance's vertices beyond a tick
     float windStiffness, windPhase, windAnchor;
     float3 breakCentre;           // kInstanceMotionBreak: world centre of the bounding sphere in the previous rendered frame
+    // C4 (render C): blend shapes / vertex animation. morph = first row of the instance's record in the morph records
+    // (FrameConstants::morphRecords), kNone when its mesh has neither; morphRadius = object-space bound of the offset
+    // from the bind pose at the current and previous weights (scene::morphBound), added to every culling sphere.
+    uint32_t morph;
+    float morphRadius;
+    // C5 (render C): terrain deformation patches. patch = slot in FrameConstants::patchData (kPatchSlotElements uint4 per
+    // slot), kNone when no block of this instance is replaced. Only V reads it (forced source clusters in the replaced
+    // rectangle, source triangles of replaced blocks dropped).
+    uint32_t patch;
+    uint32_t morphPad;
 };
-static_assert(sizeof(Instance) == 144);
+static_assert(sizeof(Instance) == 160);
+
+// C5 terrain patch slot (FrameConstants::patchData, StructuredBuffer<uint4>): element 0 = float4 (block grid origin x,
+// z, block size x, z; object space, signed), 1 = float4 rectangle of the replaced blocks (min x, min z, max x, max z),
+// 2 = uint4 (blocks per side, replaced count, 0, 0), 3..34 = the replaced-block bit mask (block bj * side + bi), 4096 bits.
+constexpr uint32_t kPatchSlotElements = 35;
+constexpr uint32_t kPatchMaxBlocksPerSide = 64;
+constexpr uint32_t kPatchSlots = 64;
+// GPU-written instances (A3 mesh particles, GpuScene::gpuInstanceRange): their live count is element
+// kGpuInstanceCountElement of patchData (.x), zeroed by the scene update every frame before the writer runs.
+constexpr uint32_t kGpuInstanceCountElement = kPatchSlots * kPatchSlotElements;
 
 struct Mesh  // 80 B
 {
@@ -212,6 +232,11 @@ struct FrameConstants
     // the default: the view model is drawn with the world's camera; viewmodel.fov_override_degrees sets it).
     uint32_t coverageMaskLut, giRaysThisFrame, debugDraw;
     float viewModelScale;
+    // C4 (render C): morphRecords (StructuredBuffer<float4>: per morph instance {mesh block, weights row, time, previous
+    // time}, then weight rows) and morphData (raw: per morph mesh a block, Passes/Common/Deformation.hlsli morphVertex).
+    // C5: patchData (StructuredBuffer<uint4>, kPatchSlots slots of kPatchSlotElements, then the GPU-written instance count;
+    // kNone without a runtime pool).
+    uint32_t morphRecords, morphData, patchData, framePad0;
 };
-static_assert(sizeof(FrameConstants) == 544);
+static_assert(sizeof(FrameConstants) == 560);
 } // namespace unx::render::gpu

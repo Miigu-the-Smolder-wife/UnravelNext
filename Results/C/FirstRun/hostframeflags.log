@@ -1,0 +1,15 @@
+UnravelNext host: scene committed, 1 meshes, 1 instances, 12 triangles, 1 clusters, 240.9 ms, hash dd9329678ce6e7e0
+RayScene: 0 static + 1 dynamic instances (0 deformed), 1 mesh BLAS (12 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 17 ms
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 0 static instances in 0 chunks (64 m cells, <= 256 each), 1 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+  plain frame: no discontinuity, no GPU simulation               ok
+  cut + VFX step reach the frame                                 ok
+  the next frame is clean again                                  ok
+  restore + soft step of a dropped frame carry into the rendered one ok
+  ordinary move: previous transform differs (motion)             ok
+  teleport: previous transform equals the new one (no motion)    ok
+  identical transform x3: no revision, no motion, all dropped    ok
+  changed transform after rest: one revision, motion             ok
+HOST FRAME FLAGS TEST PASSED

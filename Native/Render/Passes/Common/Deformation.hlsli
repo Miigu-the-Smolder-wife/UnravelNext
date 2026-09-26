@@ -101,11 +101,84 @@ float windChangeBound(float scale, float t0, float s0, float3 d0, float t1, floa
     return scale * (s1 * s1 * 0.4 * min(2.0, 1.7 * abs(t1 - t0)) + abs(s1 * s1 - s0 * s0) + length(d1 - d0) * s0 * s0);
 }
 
+// C4 (render C) morphs before skinning: scene::evaluateMorph is the definition (same additions in the same order, so the
+// GPU position equals the CPU reference bit for bit for blend shapes). Mesh block in g_morphData (words):
+//   (StructuredBuffer<uint>) h0 = { kind (1 blend shapes, 2 vertex animation), vertex count, shape / frame count, flags (1 loop, 2 normals) }
+//   h1 = { frames per second (float bits), rows | positions offset, records | normals offset, 0 }
+//   blend: rows[vertexCount + 1] = first record of each vertex; record = 8 words { shape, dp.xyz, dn.xyz, 0 }, per vertex
+//          in ascending shape order. vertex animation: float3 positions (and normals) frame-major.
+// Record rows (g_morphRecords): { mesh block (bits), weights row (bits), time, previous time }; weights rows: current
+// weights (4 per row), then the previous frame's.
+#define MORPH_MAX_SHAPES_PER_VERTEX 256u
+
+void morphVertex(GpuInstance inst, uint meshVertex, bool previous, inout float3 pOut, inout float3 nOut)
+{
+    // precise: one rounding per multiply and per add, as the CPU reference (no fused multiply-add).
+    precise float3 p = pOut, n = nOut;
+    StructuredBuffer<float4> records = ResourceDescriptorHeap[g_morphRecords];
+    StructuredBuffer<uint> data = ResourceDescriptorHeap[g_morphData];
+    const float4 r = records[inst.morph];
+    const uint block = asuint(r.x), weightsRow = asuint(r.y);
+    const uint4 h0 = uint4(data[block], data[block + 1], data[block + 2], data[block + 3]);
+    const uint4 h1 = uint4(data[block + 4], data[block + 5], data[block + 6], data[block + 7]);
+    if (h0.x == 1)
+    {
+        const uint shapes = h0.z;
+        const uint row = weightsRow + (previous ? (shapes + 3) / 4 : 0);
+        const uint first = data[h1.y + meshVertex], last = min(data[h1.y + meshVertex + 1], first + MORPH_MAX_SHAPES_PER_VERTEX);
+        [loop] for (uint k = first; k < last; ++k)
+        {
+            const uint at = h1.z + 8 * k;
+            const uint shape = data[at];
+            const float w = records[row + shape / 4][shape % 4];
+            if (w == 0) continue;
+            p = p + asfloat(uint3(data[at + 1], data[at + 2], data[at + 3])) * w;
+            n = n + asfloat(uint3(data[at + 4], data[at + 5], data[at + 6])) * w;
+        }
+    }
+    else if (h0.x == 2)
+    {
+        const uint frames = h0.z, vertices = h0.y;
+        const float fps = asfloat(h1.x), time = previous ? r.w : r.z;
+        const float f = time * fps;
+        float base = floor(f);
+        const float a = f - base;
+        uint f0, f1;
+        if ((h0.w & 1u) != 0)
+        {
+            base = base - frames * floor(base / frames);
+            f0 = min((uint)base, frames - 1);
+            f1 = (f0 + 1) % frames;
+        }
+        else
+        {
+            f0 = (uint)clamp(base, 0.0, (float)frames - 1);
+            f1 = (base < 0 || base >= (float)frames - 1) ? f0 : f0 + 1;
+        }
+        const uint a0 = h1.y + 3 * (f0 * vertices + meshVertex), a1 = h1.y + 3 * (f1 * vertices + meshVertex);
+        const float3 p0 = asfloat(uint3(data[a0], data[a0 + 1], data[a0 + 2])), p1 = asfloat(uint3(data[a1], data[a1 + 1], data[a1 + 2]));
+        p = p0 + (p1 - p0) * a;
+        if ((h0.w & 2u) != 0)
+        {
+            const uint b0 = h1.z + 3 * (f0 * vertices + meshVertex), b1 = h1.z + 3 * (f1 * vertices + meshVertex);
+            const float3 n0 = asfloat(uint3(data[b0], data[b0 + 1], data[b0 + 2])), n1 = asfloat(uint3(data[b1], data[b1 + 1], data[b1 + 2]));
+            n = n0 + (n1 - n0) * a;
+        }
+    }
+    pOut = p;
+    nOut = normalize(n);
+}
+
 DeformedVertex deformVertex(GpuInstance inst, GpuMesh mesh, uint meshVertex)
 {
     const VertexData v = loadVertex(mesh, meshVertex);
     float3 p = v.position, n = v.normal, t = v.tangent;
     float3 pp = p, pn = n, pt = t;
+    if (inst.morph != UNX_NONE)
+    {
+        morphVertex(inst, meshVertex, false, p, n);
+        morphVertex(inst, meshVertex, true, pp, pn);
+    }
     if ((inst.flags & INSTANCE_SKINNED) != 0 && inst.bonePalette != UNX_NONE && mesh.skinOffset != UNX_NONE)
     {
         skin(mesh, inst, meshVertex, g_bonePalette, p, n, t);

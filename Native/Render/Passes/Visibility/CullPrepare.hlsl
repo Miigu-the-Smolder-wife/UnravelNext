@@ -1,9 +1,12 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: MODE=0,1,2,3
+// unx-variants: MODE=0,1,2,3,4,5
 // Single-thread indirect-argument setup between cull passes (CullShared.hlsli root layout).
 //   MODE=0: next traversal level: node items [previous end, written) -> VA_NODES (64 per group).
 //   MODE=1: cluster pass: group items [previous end, written) -> VA_GROUPS (one group per item, 65535 per row).
 //   MODE=2: phase 2 inputs: deferred instances, deferred nodes (seed), deferred clusters (64 per group).
+//   MODE=4: chunk instance pass: one group per visible chunk item (CullChunks PHASE=1) -> VA_CHUNK_ITEMS.
+//   MODE=5: phase 2 chunk pass: deferred chunks -> VA_DEFERRED_CHUNKS (64 per group); runs before MODE=2, whose deferred
+//           instance count then includes the members of the chunks that pass.
 //   MODE=3: DispatchMesh arguments of every list for phase CULL_PHASE (phase 1 snapshots its counts; phase 2 draws
 //           the entries appended after them) and the traversal completeness check.
 #include "Passes/Visibility/CullShared.hlsli"
@@ -32,6 +35,10 @@ void main()
     args.Store3(4 * VA_DEFERRED_INSTANCES, uint3((min(state.Load(4 * VS_DEFER_INSTANCES), CAP_DEFERRED) + 63) / 64, 1, 1));
     args.Store3(4 * VA_SEED_NODES, uint3((min(state.Load(4 * VS_DEFER_NODES), CAP_DEFERRED) + 63) / 64, 1, 1));
     args.Store3(4 * VA_DEFERRED_CLUSTERS, uint3((min(state.Load(4 * VS_DEFER_CLUSTERS), CAP_DEFERRED) + 63) / 64, 1, 1));
+#elif MODE == 4
+    storeDispatch(args, VA_CHUNK_ITEMS, min(state.Load(4 * VS_CHUNK_ITEMS), CAP_DEFERRED));
+#elif MODE == 5
+    args.Store3(4 * VA_DEFERRED_CHUNKS, uint3((min(state.Load(4 * VS_DEFER_CHUNKS), CAP_DEFERRED) + 63) / 64, 1, 1));
 #else
     for (uint k = 0; k < VS_LISTS; ++k)
     {

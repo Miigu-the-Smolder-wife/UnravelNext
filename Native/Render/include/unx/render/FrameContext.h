@@ -87,7 +87,13 @@ struct FrameContext
     CelestialFrame celestial;  // v1.49 (B4): moon, stars, airglow (S publishes FrameResources::celestial)
     WindFrame wind;            // v1.50 (B6): the World's wind records of this tick (S publishes FrameResources::wind)
     WeatherFrame weather;      // v1.50 (B6): rain, wetness, snow, fog, cloud cover
+    // Origin rebase (C9, request 20260926_C_origin_rebase.md): this frame's world coordinates are the previous frame's
+    // minus originShift (whole multiples of 1024 m per axis). The host calls GpuScene::rebase(originShift) before it
+    // applies the frame's transforms; FrameRenderer moves the previous view; tracks move their world-space state (V's
+    // previous camera position and instance chunks, S's clipmap pages, R's GI cells and TLAS) by the same amount.
+    float3 originShift{};
 };
+constexpr float kOriginGrid = 1024.0f;
 constexpr uint32_t kGpuSimulationSoft = 1, kGpuSimulationVfx = 2, kGpuSimulationRigid = 4;
 constexpr uint32_t kDiscontinuityRestore = 1, kDiscontinuityCut = 2;
 } // namespace unx::render

@@ -1,0 +1,21 @@
+scene debris (scale 1.00): 1001 meshes, 1001 instances, 108768 instanced triangles, 3128 clusters; generated in 6 ms, clusters built in 49 ms
+RayScene: 1 static + 1000 dynamic instances (0 deformed), 1001 mesh BLAS (108768 tris, 4.2 MB compacted from 9.3 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.29 MB, load 45 ms
+RayScene resident (MB): static BLAS+TLAS 4.4 (BLAS 4.4, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.5 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.48, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 1 static instances in 1 chunks (64 m cells, <= 256 each), 1000 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+[V debris static 4K] gpu frame median 42.5165 ms, p95 87.8040, p99 115.7959 (n=120) | cpu frame median 1.2966 ms (record 0.7582, submit 0.1079) | SM clock median 2790 MHz (min 2790) | passes 111, barriers 596 in 105 batches, cross-queue syncs 0, command lists 1, transients 58 (845.9 MB aliased / 1262.4 MB unaliased) | quality a0c860ed19e41275
+[V debris static 4K] outside passes: graphics 1 lists, head 0.0000, tail 0.0000, gap 0.0000 ms (medians)
+V debris 4K: cull 0.126 ms (design 0.000 on 740 instances, 2339 clusters tested) | HiZ 0.057 ms (design 0.020) | band A raster 1.254 ms (design 0.001 on 1540 clusters, 1516 triangles) | total V 1.437 ms of frame 42.516 ms
+  visible clusters by band A/B/C 50/1490/0 (of B: 0 mixed sheet clusters split per triangle, 0 triangles)
+  nodes tested 1742, triangles by band A/B/C 1516/77468/0, deferred 123/5/31, overflow 0x0 (stats of frame 119)
+RayScene: 1 static + 1000 dynamic instances (0 deformed), 1001 mesh BLAS (108768 tris, 4.2 MB compacted from 9.3 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.29 MB, load 41 ms
+RayScene resident (MB): static BLAS+TLAS 4.4 (BLAS 4.4, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.5 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.48, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 1 static instances in 1 chunks (64 m cells, <= 256 each), 1000 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+[V debris static 1440p] gpu frame median 26.3264 ms, p95 34.1892, p99 35.8462 (n=120) | cpu frame median 1.2848 ms (record 0.7423, submit 0.1049) | SM clock median 2790 MHz (min 2790) | passes 111, barriers 597 in 105 batches, cross-queue syncs 0, command lists 1, transients 58 (405.0 MB aliased / 717.1 MB unaliased) | quality a0c860ed19e41275
+[V debris static 1440p] outside passes: graphics 1 lists, head 0.0000, tail 0.0000, gap 0.0000 ms (medians)
+V debris 1440p: cull 0.125 ms (design 0.000 on 740 instances, 2306 clusters tested) | HiZ 0.034 ms (design 0.020) | band A raster 0.749 ms (design 0.001 on 1524 clusters, 1462 triangles) | total V 0.908 ms of frame 26.326 ms
+  visible clusters by band A/B/C 49/1475/0 (of B: 0 mixed sheet clusters split per triangle, 0 triangles)
+  nodes tested 1750, triangles by band A/B/C 1462/76696/0, deferred 123/13/28, overflow 0x0 (stats of frame 124)

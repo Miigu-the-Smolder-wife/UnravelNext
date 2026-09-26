@@ -214,58 +214,65 @@ UNX_API int32_t UNX_CALL UnxSceneAddMaterial(UnxRenderer r, const UnxMaterialDes
     });
 }
 
+// The scene mesh of a mesh description (checks shared by scene meshes and C2b runtime meshes).
+static scene::Mesh meshFromDesc(const UnxMeshDesc* d)
+{
+    requireStruct(d, "UnxMeshDesc");
+    scene::Mesh m;
+    m.name = fixedString(d->name, sizeof d->name);
+    const uint32_t n = d->vertexCount;
+    if (!d->positions || !d->normals || !d->indices || !d->submeshes || n == 0 || d->indexCount == 0 || d->submeshCount == 0)
+        fail("mesh '%s': positions, normals, indices and submeshes are required", m.name.c_str());
+    m.positions.resize(n);
+    m.normals.resize(n);
+    for (uint32_t v = 0; v < n; ++v)
+    {
+        m.positions[v] = f3(d->positions + 3 * v);
+        m.normals[v] = f3(d->normals + 3 * v);
+    }
+    if (d->tangents)
+    {
+        m.tangents.resize(n);
+        for (uint32_t v = 0; v < n; ++v) m.tangents[v] = { d->tangents[4 * v], d->tangents[4 * v + 1], d->tangents[4 * v + 2], d->tangents[4 * v + 3] };
+    }
+    if (d->uv0)
+    {
+        m.uv0.resize(n);
+        for (uint32_t v = 0; v < n; ++v) m.uv0[v] = { d->uv0[2 * v], d->uv0[2 * v + 1] };
+    }
+    m.indices.assign(d->indices, d->indices + d->indexCount);
+    for (uint32_t s = 0; s < d->submeshCount; ++s) m.submeshes.push_back({ d->submeshes[s].indexOffset, d->submeshes[s].indexCount, d->submeshes[s].material });
+    if (d->jointCount)
+    {
+        if (!d->joints || !d->weights || !d->inverseBind) fail("mesh '%s': jointCount %u without joints, weights and inverseBind", m.name.c_str(), d->jointCount);
+        m.skin.joints.assign(d->joints, d->joints + 4ull * n);
+        m.skin.weights.assign(d->weights, d->weights + 4ull * n);
+        for (uint32_t j = 0; j < d->jointCount; ++j) m.skin.inverseBind.push_back(affine(d->inverseBind + 12ull * j));
+    }
+    // Front faces are counter-clockwise: cross(b - a, c - a) points along the vertex normals. A mesh whose winding
+    // opposes its own normals almost everywhere is an exporter convention error (e.g. a handedness mirror without
+    // reversing the triangle order), and every renderer path would shade it from behind.
+    uint64_t agree = 0, oppose = 0;
+    for (size_t t = 0; t + 2 < m.indices.size(); t += 3)
+    {
+        const uint32_t a = m.indices[t], b = m.indices[t + 1], c = m.indices[t + 2];
+        if (a >= n || b >= n || c >= n) fail("mesh '%s': index out of range (%u vertices)", m.name.c_str(), n);
+        const float3 g = cross(m.positions[b] - m.positions[a], m.positions[c] - m.positions[a]);
+        const float s = dot(g, m.normals[a] + m.normals[b] + m.normals[c]);
+        if (s > 0) ++agree;
+        else if (s < 0) ++oppose;
+    }
+    if (oppose > 0 && oppose >= 99 * agree)
+        fail("mesh '%s': %llu of %llu triangles wind against their vertex normals; front faces are counter-clockwise in renderer space (a Z-mirrored "
+             "exporter reverses each triangle: a, c, b)",
+             m.name.c_str(), (unsigned long long)oppose, (unsigned long long)(agree + oppose));
+    return m;
+}
+
 UNX_API int32_t UNX_CALL UnxSceneAddMesh(UnxRenderer r, const UnxMeshDesc* d, uint32_t* index)
 {
     return call([&] {
-        requireStruct(d, "UnxMeshDesc");
-        scene::Mesh m;
-        m.name = fixedString(d->name, sizeof d->name);
-        const uint32_t n = d->vertexCount;
-        if (!d->positions || !d->normals || !d->indices || !d->submeshes || n == 0 || d->indexCount == 0 || d->submeshCount == 0)
-            fail("mesh '%s': positions, normals, indices and submeshes are required", m.name.c_str());
-        m.positions.resize(n);
-        m.normals.resize(n);
-        for (uint32_t v = 0; v < n; ++v)
-        {
-            m.positions[v] = f3(d->positions + 3 * v);
-            m.normals[v] = f3(d->normals + 3 * v);
-        }
-        if (d->tangents)
-        {
-            m.tangents.resize(n);
-            for (uint32_t v = 0; v < n; ++v) m.tangents[v] = { d->tangents[4 * v], d->tangents[4 * v + 1], d->tangents[4 * v + 2], d->tangents[4 * v + 3] };
-        }
-        if (d->uv0)
-        {
-            m.uv0.resize(n);
-            for (uint32_t v = 0; v < n; ++v) m.uv0[v] = { d->uv0[2 * v], d->uv0[2 * v + 1] };
-        }
-        m.indices.assign(d->indices, d->indices + d->indexCount);
-        for (uint32_t s = 0; s < d->submeshCount; ++s) m.submeshes.push_back({ d->submeshes[s].indexOffset, d->submeshes[s].indexCount, d->submeshes[s].material });
-        if (d->jointCount)
-        {
-            if (!d->joints || !d->weights || !d->inverseBind) fail("mesh '%s': jointCount %u without joints, weights and inverseBind", m.name.c_str(), d->jointCount);
-            m.skin.joints.assign(d->joints, d->joints + 4ull * n);
-            m.skin.weights.assign(d->weights, d->weights + 4ull * n);
-            for (uint32_t j = 0; j < d->jointCount; ++j) m.skin.inverseBind.push_back(affine(d->inverseBind + 12ull * j));
-        }
-        // Front faces are counter-clockwise: cross(b - a, c - a) points along the vertex normals. A mesh whose winding
-        // opposes its own normals almost everywhere is an exporter convention error (e.g. a handedness mirror without
-        // reversing the triangle order), and every renderer path would shade it from behind.
-        uint64_t agree = 0, oppose = 0;
-        for (size_t t = 0; t + 2 < m.indices.size(); t += 3)
-        {
-            const uint32_t a = m.indices[t], b = m.indices[t + 1], c = m.indices[t + 2];
-            if (a >= n || b >= n || c >= n) fail("mesh '%s': index out of range (%u vertices)", m.name.c_str(), n);
-            const float3 g = cross(m.positions[b] - m.positions[a], m.positions[c] - m.positions[a]);
-            const float s = dot(g, m.normals[a] + m.normals[b] + m.normals[c]);
-            if (s > 0) ++agree;
-            else if (s < 0) ++oppose;
-        }
-        if (oppose > 0 && oppose >= 99 * agree)
-            fail("mesh '%s': %llu of %llu triangles wind against their vertex normals; front faces are counter-clockwise in renderer space (a Z-mirrored "
-                 "exporter reverses each triangle: a, c, b)",
-                 m.name.c_str(), (unsigned long long)oppose, (unsigned long long)(agree + oppose));
+        scene::Mesh m = meshFromDesc(d);
         auto h = find(r);
         const uint32_t i = h->add(h->scene().meshes, std::move(m));
         if (index) *index = i;
@@ -821,6 +828,124 @@ UNX_API int32_t UNX_CALL UnxFrameSetSkeletons(UnxRenderer r, uint32_t count, con
 UNX_API int32_t UNX_CALL UnxFrameSetInstanceVisible(UnxRenderer r, uint32_t instance, uint32_t visible)
 {
     return call([&] { find(r)->setInstanceVisible(instance, visible != 0); });
+}
+
+UNX_API int32_t UNX_CALL UnxSceneAddBlendShape(UnxRenderer r, uint32_t mesh, const char* name, uint32_t vertexCount, const uint32_t* vertices,
+                                               const float* deltaPositions, const float* deltaNormals)
+{
+    return call([&] {
+        if (vertexCount && (!vertices || !deltaPositions)) fail("blend shape: vertices or position offsets are null");
+        scene::BlendShape b;
+        b.name = name ? name : "";
+        b.vertices.assign(vertices, vertices + vertexCount);
+        for (uint32_t v = 0; v < vertexCount; ++v) b.deltaPositions.push_back(f3(deltaPositions + 3ull * v));
+        if (deltaNormals)
+            for (uint32_t v = 0; v < vertexCount; ++v) b.deltaNormals.push_back(f3(deltaNormals + 3ull * v));
+        find(r)->addBlendShape(mesh, std::move(b));
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxSceneSetVertexAnimation(UnxRenderer r, uint32_t mesh, float framesPerSecond, uint32_t frameCount, uint32_t loop,
+                                                    const float* positions, const float* normals)
+{
+    return call([&] {
+        const auto h = find(r);
+        const uint32_t n = h->meshVertexCount(mesh);
+        if (!(framesPerSecond > 0) || frameCount == 0 || !positions) fail("vertex animation: rate, frame count and positions are required");
+        scene::VertexAnimation a;
+        a.framesPerSecond = framesPerSecond;
+        a.frameCount = frameCount;
+        a.loop = loop != 0;
+        const uint64_t count = (uint64_t)frameCount * n;
+        for (uint64_t k = 0; k < count; ++k) a.positions.push_back(f3(positions + 3 * k));
+        if (normals)
+            for (uint64_t k = 0; k < count; ++k) a.normals.push_back(f3(normals + 3 * k));
+        h->setVertexAnimation(mesh, std::move(a));
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameSetMorphs(UnxRenderer r, uint32_t count, const uint32_t* instances, const float* weights, uint64_t weightCount, const float* times)
+{
+    return call([&] {
+        if (count && !instances) fail("morphs: instance list is null");
+        const auto h = find(r);
+        uint64_t total = 0;
+        for (uint32_t i = 0; i < count; ++i) total += h->blendShapeCount(instances[i]);
+        if (total != weightCount) fail("%u instances hold %llu blend shapes, the weight buffer %llu", count, (unsigned long long)total, (unsigned long long)weightCount);
+        if (weightCount && !weights) fail("morphs: weights are null");
+        const float* at = weights;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const uint32_t n = h->blendShapeCount(instances[i]);
+            h->setMorph(instances[i], std::vector<float>(at, at + n), times ? times[i] : 0.0f);
+            at += n;
+        }
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxSceneReserveRuntime(UnxRenderer r, const UnxRuntimeCapacity* c)
+{
+    return call([&] {
+        requireStruct(c, "UnxRuntimeCapacity");
+        render::RuntimeCapacity rc;
+        rc.meshes = c->meshes, rc.submeshes = c->submeshes, rc.vertices = c->vertices, rc.indices = c->indices, rc.clusters = c->clusters;
+        rc.clusterVertexIndices = c->clusterVertexIndices, rc.clusterTriangles = c->clusterTriangles, rc.nodes = c->nodes, rc.instances = c->instances;
+        find(r)->reserveRuntime(rc);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameAddRuntimeMesh(UnxRenderer r, const UnxMeshDesc* d, uint32_t* id)
+{
+    return call([&] {
+        scene::Mesh m = meshFromDesc(d);
+        const uint32_t k = find(r)->addRuntimeMesh(std::move(m));
+        if (id) *id = k;
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameRemoveRuntimeMesh(UnxRenderer r, uint32_t id)
+{
+    return call([&] { find(r)->removeRuntimeMesh(id); });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameAddRuntimeInstance(UnxRenderer r, uint32_t mesh, const float objectToWorld[12], uint32_t flags, uint32_t* id)
+{
+    return call([&] {
+        if (!objectToWorld) fail("runtime instance: transform is null");
+        const uint32_t k = find(r)->addRuntimeInstance(mesh, affine(objectToWorld), flags);
+        if (id) *id = k;
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameRemoveRuntimeInstance(UnxRenderer r, uint32_t id)
+{
+    return call([&] { find(r)->removeRuntimeInstance(id); });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameSetRuntimeTransforms(UnxRenderer r, uint32_t count, const uint32_t* ids, const float* objectToWorld)
+{
+    return call([&] {
+        if (count && (!ids || !objectToWorld)) fail("runtime transforms: ids or transforms are null");
+        const auto h = find(r);
+        for (uint32_t k = 0; k < count; ++k) h->setRuntimeTransform(ids[k], affine(objectToWorld + 12ull * k));
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameSetTerrainDeformation(UnxRenderer r, const UnxTerrainDeformation* d)
+{
+    return call([&] {
+        requireStruct(d, "UnxTerrainDeformation");
+        if (d->tileCount && !d->tiles) fail("terrain deformation: tiles is null");
+        find(r)->setTerrainDeformation(d->originX, d->originZ, d->spacing, d->texels, d->heights, { d->tiles, d->tileCount });
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameSetOriginShift(UnxRenderer r, const double shift[3])
+{
+    return call([&] {
+        if (!shift) fail("origin shift is null");
+        find(r)->setOriginShift({ (float)shift[0], (float)shift[1], (float)shift[2] });
+    });
 }
 
 UNX_API int32_t UNX_CALL UnxFrameSetDiscontinuity(UnxRenderer r, uint32_t flags)

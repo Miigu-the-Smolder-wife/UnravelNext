@@ -29,7 +29,8 @@ void main(uint i : SV_DispatchThreadID)
         const bool skinned = (inst.flags & INSTANCE_SKINNED) != 0;
         const float4 s = worldSphere(inst, inst.objectToWorld, node.lodSphere);
         bool keep = skinned || frustumVisible(v, s);
-        keep = keep && projectedError(v, s, node.lodError * instanceScale(inst)) > v.lodThreshold;
+        // C5: a node reaching a terrain patch's replaced rectangle is traversed down to the source clusters.
+        keep = keep && (patchForcesSource(inst, node.lodSphere) || projectedError(v, s, node.lodError * instanceScale(inst)) > v.lodThreshold);
         keep = keep && (skinned || tileVisible(v, itemView(packed), s));
         if (keep && !skinned && (v.flags & CULL_VIEW_OCCLUSION) != 0)
         {

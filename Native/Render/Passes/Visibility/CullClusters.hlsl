@@ -31,11 +31,16 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
     const CullView v = loadView(view);
     const float scale = instanceScale(inst);
     const bool skinned = (inst.flags & INSTANCE_SKINNED) != 0, wind = (inst.flags & INSTANCE_WIND) != 0;
+    // C4: blend shapes / vertex animation change positions (inside the inflated spheres) and normals: bind-pose normal
+    // cones and sheet orientations do not bound them, as for skinned instances.
+    const bool deformed = skinned || inst.morph != UNX_NONE;
     // Own error: drawn only where its own simplification is fine enough (source clusters: error 0).
     if (cl.lodError > 0)
     {
         StructuredBuffer<float4> spheres = ResourceDescriptorHeap[LOD_SPHERES_SRV];
-        if (projectedError(v, worldSphere(inst, inst.objectToWorld, spheres[clusterIndex]), cl.lodError * scale) > v.lodThreshold) return r;
+        const float4 lodSphere = spheres[clusterIndex];
+        if (patchForcesSource(inst, lodSphere)) return r;  // C5: the source clusters are drawn there instead
+        if (projectedError(v, worldSphere(inst, inst.objectToWorld, lodSphere), cl.lodError * scale) > v.lodThreshold) return r;
     }
     const float4 s = worldSphere(inst, inst.objectToWorld, cl.boundsSphere);
     if (!skinned && !frustumVisible(v, s)) return r;
@@ -45,7 +50,7 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
     const float3 axis = normalize(transformVector(inst.objectToWorld, cl.normalCone.xyz));
     const float3 toCluster = s.xyz - v.position;
     const float dist = length(toCluster);
-    if (cullBack && !skinned && !wind && cl.normalCone.w < 1)
+    if (cullBack && !deformed && !wind && cl.normalCone.w < 1)
     {
         const bool back = v.orthographic ? dot(v.viewDirection.xyz, axis) >= cl.normalCone.w : dot(toCluster, axis) >= cl.normalCone.w * dist + s.w;
         if (back) return r;
@@ -76,7 +81,7 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
     const float w = cl.minFeatureWidth;
     const float wFace = projectedLength(v, s, abs(w) * scale);
     float wMin = wFace;
-    if (w < 0 && !skinned)
+    if (w < 0 && !deformed)
     {
         // Flat sheet of width r: its projected width shrinks with the view angle. The builder's sheet orientation
         // (clusterSheets: winding-independent axis, spread, slab) bounds it:
@@ -117,7 +122,7 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
     // per element; the cluster bound above only says which clusters can be mixed). Others keep the cluster rule, with
     // hysteresis (a): band B until the width reaches the hysteresis width if it was band B from the previous camera
     // (solid clusters: the width scales with 1 / distance).
-    const bool sheet = w < 0 && !skinned;
+    const bool sheet = w < 0 && !deformed;
     r.mixed = BAND_MODE != BAND_MODE_A && sheet && wFace >= BAND_C_MAX_PX && wMin < v.bandAHysteresisPx;
     bool bandB = wMin < BAND_A_MIN_PX;
     if (!bandB && !sheet && wMin < v.bandAHysteresisPx && !v.orthographic)

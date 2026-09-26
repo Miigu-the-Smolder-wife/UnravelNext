@@ -78,7 +78,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         const uint3 tri = uint3(packed & 0xFFu, (packed >> 8) & 0xFFu, (packed >> 16) & 0xFFu);
         tris[t] = tri;
         prims[t].visId = packVisId(visibleIndex, t);
-        prims[t].cull = mixed && sheetTriangleBandB(v, gs_world[tri.x], gs_world[tri.y], gs_world[tri.z]);
+        prims[t].cull = (mixed && sheetTriangleBandB(v, gs_world[tri.x], gs_world[tri.y], gs_world[tri.z])) || patchDropsTriangle(inst, mesh, cl, tri);
 #if ALPHA
         prims[t].material = material;
 #endif
