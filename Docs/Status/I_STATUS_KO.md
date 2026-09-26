@@ -4,6 +4,11 @@
 빌드: `Tools/CI/Build.ps1 -Track I` (build/I, 트랙 V;M;S;R;I). 성능 측정은 `Tools/CI/GpuLock.ps1 -Track I` 아래에서만.
 소유: UnravelNext `Native/Host/`, `Config/quality/host.toml`, 이 문서, `Results/I/` / 이전 저장소 `Assets/UnravelNextBridge/`.
 
+> **재개 지점 (2026-09-26 전체 중단)**
+> - D0 끝난 것: 없음(Unity 안 검증 0). 레벨 로더(UnravelNextScene·콘텐츠 변환·씬뷰 미리보기)와 1인칭 카메라(InterpolatedRoot, 렌더 시점 마우스)는 오프라인 컴파일만 통과했다. 이전 저장소 `Assets/UnravelNextBridge/Staging~/D0`(f0a8deb6)에 있다. D0 시험은 돌리지 못했다.
+> - 반쯤 된 것: ① 변환기 단위·재질 규칙이 INTERFACES 8.5(core 5d13383)와 다르다. 텍스처 셰이더만 8.5로 고쳤다. ② 정적 콜라이더 호출 자리, 조준 밀기, F5/F9 시험 스크립트는 아직 없다. 물리 API는 `NativeDataStaticLevel.AddToStartup`, `PhysicsRayCast`, `PhysicsPushes`로 약속됐고 World의 `NativeWorldGame`은 c0798de1에 있다. ③ HostDynamic `--bench`(b7bf2bc)는 검증되지 않았다(첫 실행 exit 1). ④ turn 4 결과(1eb6f1b): restore 검사 exit 1, head Player 실행 0xC0000005 충돌, 둘 다 분석하지 않았다.
+> - 다음 첫 단계: Unity를 모두 닫은 상태에서 Staging~/D0을 Assets로 옮기고, 변환기를 8.5에 맞추고, 슬롯 A에서 편집·플레이 Game view로 레벨이 보이는지 확인한다. 그다음 콜라이더·밀기·저장 스크립트와 D0 시험 순서다.
+
 ## 1. 호스트 경계 결정 (설계서 7.1-5)
 
 ### 1.1 Unity가 싣는 런타임 [실측]
