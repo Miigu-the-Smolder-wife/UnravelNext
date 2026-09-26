@@ -13,7 +13,7 @@
 //   4. --determinism: the whole run twice from a fresh module; the GPU state of both ticks of the pair (in their layouts),
 //      the layouts and the sorted events are bit identical at every compare tick.
 //      (The depth sort is the render pass's per-frame tile-local sort since 2026-09-26; the tick has no sort.)
-// Options: --ticks N (600) --compare-every K (60) --particles P --emitters E --no-features --no-heightfield --bodies N --no-sheet --no-turbulence --no-reference
+// Options: --ticks N (600) --compare-every K (60) --resync --particles P --emitters E --no-features --no-heightfield --bodies N --no-sheet --no-turbulence --no-reference
 //          --determinism --warp (WARP adapter: another implementation, 4-lane waves) --no-debug-layer --gbv
 //          --yield (pause while a GPU measurement lock or the user's HOLD is present: CPU-heavy runs)
 //          --allow-copy-drift (development only: a stream copy that differs from the original is a warning)
@@ -64,6 +64,7 @@ uint32_t g_traceEmitter = UINT32_MAX, g_traceBirth = 0;  // diagnostic: --trace 
 struct Options
 {
     uint32_t ticks = 600, compareEvery = 60;
+    bool resync = false;  // --resync: GPU and reference restart from the GPU's states after every compare
     fx::test::RppConfig rpp;
     std::string record, replay, overflowDump;
     bool reference = true, determinism = false, warp = false, debugLayer = true, gbv = false, yield = false, strictCopies = true;
@@ -241,6 +242,56 @@ void applyEmitters(std::vector<NV_StreamEmitter>& table, const std::vector<uint8
 }
 
 template <typename T> T at(const std::vector<uint8_t>& b, size_t i) { T v; std::memcpy(&v, b.data() + i * sizeof(T), sizeof(T)); return v; }
+
+// --resync: a state packet (NativeVfxStream.h: dt == 0, RESET installs the restore records; no tick inputs) of the tick
+// just run, with the whole emitter table as the stream holds it (per-tick fields cleared) and the given states. GPU and
+// reference both take it, so the next compare measures only the ticks since (the implementation's error per step, not
+// a free-running double trajectory, which diverges at every contact decision within float rounding of its threshold).
+std::vector<uint8_t> statePacket(const NV_StreamHeader& last, std::vector<NV_StreamEmitter> table, const std::vector<NV_StreamParticle>& states)
+{
+    for (NV_StreamEmitter& e : table)
+    {
+        e.rebase[0] = e.rebase[1] = e.rebase[2] = 0;
+        e.flags &= ~uint32_t(NV_STREAM_EMITTER_TRANSPORT | NV_STREAM_EMITTER_SOURCE | NV_STREAM_EMITTER_KILLED);
+        e.dying_birth = e.death_birth;  // after the tick the live births are [death_birth, next_birth): none is dying
+    }
+    // a row's live births start at its first restored birth: births that expired in their own tick never had a slot, so
+    // the first live birth can lie above death_birth (the restore contract: contiguous births from dying_birth)
+    for (size_t i = 0; i < states.size(); ++i)
+        if (i == 0 || states[i].emitter != states[i - 1].emitter) table[states[i].emitter].dying_birth = table[states[i].emitter].death_birth = states[i].birth;
+    NV_StreamHeader h{};
+    h.magic = NV_STREAM_MAGIC;
+    h.version = NV_STREAM_VERSION;
+    h.flags = NV_STREAM_RESET;
+    h.stream = last.stream;
+    h.generation = last.generation;
+    h.tick = last.tick;
+    h.dt = 0;
+    h.time = last.time;
+    std::memcpy(h.anchor, last.anchor, sizeof h.anchor);
+    h.dt_float = 0;
+    h.time_float = last.time_float;
+    h.slot_capacity = std::max<uint32_t>(last.slot_capacity, (uint32_t)states.size());
+    h.alive_after = (uint32_t)states.size();
+    h.emitter_count = h.emitter_table = (uint32_t)table.size();
+    h.restore_count = (uint32_t)states.size();
+    h.ribbon_points = last.ribbon_points;  // (the table's rows address the tick's output ranges)
+    h.medium_cells = last.medium_cells;
+    std::vector<uint8_t> packet(sizeof(NV_StreamHeader));
+    auto section = [&](const void* data, size_t bytes) -> uint64_t {
+        if (!bytes) return 0;
+        packet.resize((packet.size() + 15) & ~size_t(15));
+        const uint64_t offset = packet.size();
+        packet.insert(packet.end(), (const uint8_t*)data, (const uint8_t*)data + bytes);
+        return offset;
+    };
+    h.emitters = section(table.data(), table.size() * sizeof(NV_StreamEmitter));
+    h.restore = section(states.data(), states.size() * sizeof(NV_StreamParticle));
+    packet.resize((packet.size() + 15) & ~size_t(15));
+    h.bytes = packet.size();
+    std::memcpy(packet.data(), &h, sizeof h);
+    return packet;
+}
 
 struct Stats
 {
@@ -485,6 +536,25 @@ std::vector<std::string> run(Device& device, const Options& o, bool withReferenc
                 worst.p99Pos = std::max(worst.p99Pos, p99);
                 FX_LOG("tick %u: %zu particles, rows %u, event slots %u, collisions %u; position error max %.3g p99 %.3g, velocity %.3g, age %.3g", t,
                         gpu.size(), stream.rows(), h.event_slots, rb.counters.collision_events, errs.empty() ? 0.0 : errs.back(), p99, worst.maxVel, worst.maxAge);
+                if (o.resync && t < o.ticks)
+                {
+                    // both restart from the GPU's states (the GPU's restore path runs too: its states must come back)
+                    const std::vector<uint8_t> sp = statePacket(h, emitterTable, gpu);
+                    ps.submit(sp.data(), sp.size());
+                    cpu.submit(sp.data(), sp.size());
+                    FrameResources stateResources;
+                    FramePassContext sfc{ device, graph, shaders, quality, scene, frame, stateResources, services, [](const ViewDesc&) -> D3D12_GPU_VIRTUAL_ADDRESS { return 0; }, &state };
+                    tracks::simulation(sfc);
+                    graph.execute(nullptr);
+                    ++frame.frameIndex;
+                    const fx::TickReadback srb = ps.readback(h.stream, h.generation, h.tick);
+                    FX_CHECK((srb.counters.status & ~1u) == 0 && srb.counters.alive == gpu.size(), "tick %u: state packet status 0x%x alive %u (restored %zu)", t,
+                             srb.counters.status, srb.counters.alive, gpu.size());
+                    auto back = ps.checkpoint(shaders);
+                    std::sort(back.begin(), back.end(), [](const NV_StreamParticle& a, const NV_StreamParticle& b) { return a.emitter != b.emitter ? a.emitter < b.emitter : a.birth < b.birth; });
+                    FX_CHECK(back.size() == gpu.size() && std::memcmp(back.data(), gpu.data(), gpu.size() * sizeof(NV_StreamParticle)) == 0,
+                             "tick %u: the GPU's restored states differ from the states it was given", t);
+                }
             }
             // tick surfaces: the GPU's float anchor-space body surfaces against the double transform of the same inputs
             // (reported, not checked: the stream defines surfaces in float anchor space)
@@ -784,6 +854,7 @@ int main(int argc, char** argv)
             auto next = [&]() -> std::string { if (i + 1 >= argc) fail("missing value after %s", a.c_str()); return argv[++i]; };
             if (a == "--ticks") o.ticks = (uint32_t)std::stoul(next());
             else if (a == "--compare-every") o.compareEvery = (uint32_t)std::stoul(next());
+            else if (a == "--resync") o.resync = true;
             else if (a == "--particles") o.rpp.particles = (uint32_t)std::stoul(next());
             else if (a == "--emitters") o.rpp.emitters = (uint32_t)std::stoul(next());
             else if (a == "--no-features") o.rpp.features = false;
