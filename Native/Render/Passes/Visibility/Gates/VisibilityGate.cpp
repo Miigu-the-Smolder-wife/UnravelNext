@@ -652,7 +652,10 @@ int main(int argc, char** argv)
             });
             harness.printSummary(r);
             const visibility::Stats st = visibility::latestStats(renderer.trackState());
-            const double raster = sumPasses(r, [](const std::string& n) { return n.find(".raster.") != std::string::npos; });
+            // Main view: V's own passes (v.*). Passes of the raster service run for other tracks' views (s.vsm.raster.*,
+            // ...: V's kernels, the requester's views) are reported apart.
+            const double raster = sumPasses(r, [](const std::string& n) { return startsWith(n, "v.") && n.find(".raster.") != std::string::npos; });
+            const double serviceMs = sumPasses(r, [](const std::string& n) { return !startsWith(n, "v.") && n.find(".raster.") != std::string::npos; });
             const double hiz = sumPasses(r, [](const std::string& n) { return startsWith(n, "v.hiz."); });
             const double cull = sumPasses(r, [](const std::string& n) { return startsWith(n, "v.cull.") && n.find(".raster.") == std::string::npos; });
             const uint32_t trianglesA = st.triangles[0];
@@ -661,9 +664,20 @@ int main(int argc, char** argv)
             const double designCull = st.instancesVisible * 32.0 / 600e9 * 1e3 + st.clustersTested * 64.0 / 600e9 * 1e3 * 1.5;
             const double designRaster = st.visibleClusters * 0.87e-6 + trianglesA / 17e9 * 1e3;
             logf("V %s %s: cull %.3f ms (design %.3f on %u instances, %u clusters tested) | HiZ %.3f ms (design 0.020) | band A raster %.3f ms "
-                 "(design %.3f on %u clusters, %u triangles) | total V %.3f ms of frame %.3f ms\n",
+                 "(design %.3f on %u clusters, %u triangles) | total V %.3f ms of frame %.3f ms | raster service for other tracks' views %.3f ms\n",
                  sceneName.c_str(), rs.c_str(), cull, designCull, st.instancesVisible, st.clustersTested, hiz, raster, designRaster, st.visibleClusters, trianglesA,
-                 cull + hiz + raster, r.gpuFrameMs.median);
+                 cull + hiz + raster, r.gpuFrameMs.median, serviceMs);
+            {
+                // The raster passes behind "band A raster" (every pass named *.raster.*: the main view's and the raster
+                // service's views for other tracks), largest first.
+                std::vector<std::pair<double, std::string>> rasters;
+                for (const auto& [name, d] : r.passMs)
+                    if (name.find(".raster.") != std::string::npos) rasters.push_back({ d.median, name });
+                std::sort(rasters.rbegin(), rasters.rend());
+                std::string list;
+                for (size_t k = 0; k < rasters.size() && k < 8; ++k) list += format("%s%s %.3f", k ? ", " : "", rasters[k].second.c_str(), rasters[k].first);
+                logf("  raster passes (%zu): %s\n", rasters.size(), list.c_str());
+            }
             logf("  visible clusters by band A/B/C %u/%u/%u (of B: %u mixed sheet clusters split per triangle, %u triangles)\n", st.bandClusters[0], st.bandClusters[1],
                  st.bandClusters[2], st.mixedClusters, st.mixedTriangles);
             logf("  nodes tested %u, triangles by band A/B/C %u/%u/%u, deferred %u/%u/%u, overflow 0x%x (stats of frame %llu)\n", st.nodesTested, st.triangles[0],
