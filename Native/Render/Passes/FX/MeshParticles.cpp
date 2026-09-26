@@ -120,16 +120,20 @@ void MeshParticlePass::record(ParticleSystem& particles, FramePassContext& fc, c
         return;
     }
 
-    // drawn records: one per slot of the particle capacity (a new size breaks the history)
+    // drawn records: one per slot of the particle capacity; a grown capacity keeps the previous frame's records (the
+    // layout indices do not move), copied into the larger buffer
     const uint32_t slots = std::max<uint32_t>(particles.capacity(), 1);
+    ComPtr<ID3D12Resource> grownFrom;
+    const uint32_t oldSlots = m.drawnSlots;
     if (slots > m.drawnSlots)
     {
+        grownFrom = m.drawn[m.parity];  // the previous frame's output: this frame's input
         for (auto& d : m.drawn)
             if (d) m.device.deferRelease(d);
         m.drawnSlots = std::max(slots, m.drawnSlots * 2);
         m.drawn[0] = makeBuffer(m.device, (uint64_t)m.drawnSlots * kDrawnBytes, D3D12_HEAP_TYPE_DEFAULT, L"FX mesh particle drawn 0");
         m.drawn[1] = makeBuffer(m.device, (uint64_t)m.drawnSlots * kDrawnBytes, D3D12_HEAP_TYPE_DEFAULT, L"FX mesh particle drawn 1");
-        m.drawnValid = false;
+        if (!grownFrom) m.drawnValid = false;
     }
 
     // mesh table sorted by (hi, lo), the lookup's order
@@ -187,6 +191,17 @@ void MeshParticlePass::record(ParticleSystem& particles, FramePassContext& fc, c
     const BufferRef counters = g.importBuffer(m.counters.Get(), BufferDesc{ "fx.mesh.counters", 16, 4 });
     const BufferRef drawnIn = g.importBuffer(m.drawn[out ^ 1u].Get(), BufferDesc{ "fx.mesh.drawnIn", (uint64_t)m.drawnSlots * kDrawnBytes, kDrawnBytes });
     const BufferRef drawnOut = g.importBuffer(m.drawn[out].Get(), BufferDesc{ "fx.mesh.drawnOut", (uint64_t)m.drawnSlots * kDrawnBytes, kDrawnBytes });
+
+    if (grownFrom && mode != 0)
+    {
+        const BufferRef old = g.importBuffer(grownFrom.Get(), BufferDesc{ "fx.mesh.drawnGrown", (uint64_t)oldSlots * kDrawnBytes, kDrawnBytes });
+        g.addPass("fx.mesh.grow", QueueType::Graphics,
+                  [=](PassBuilder& b) {
+                      b.use(old, Use::CopySrc);
+                      b.use(drawnIn, Use::CopyDst);
+                  },
+                  [=](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(drawnIn), 0, c.resource(old), 0, (uint64_t)oldSlots * kDrawnBytes); });
+    }
 
     const uint32_t slot = m.next;
     m.next = (m.next + 1) % kSlots;

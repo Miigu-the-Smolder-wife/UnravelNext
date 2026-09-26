@@ -1,0 +1,5 @@
+device: NVIDIA GeForce RTX 4080
+mesh particles: 103435 transforms vs reference (103435 spinning): position 4.47e-07 (/ max(1 m, |p|)), rotation 4.01e-05 rad, scale 5.29e-07; count slack 0; unmapped seen 103435
+tick boundary: 34121 particles, position 5.96e-08 (relative), rotation 5.9e-07 rad; previous transforms: 102668, position 5.96e-08 (relative), rotation 0 rad
+PASS
+GpuLock.ps1: cpu-contended: 1 s >= 4 cores, peak 5.8 cores; top: Unity.exe (64116) 5 core-s, dotnet.exe (52300) 1 core-s, Unity.Licensing.Client.exe (11740) 0 core-s, Unity Hub.exe (31484) 0 core-s
