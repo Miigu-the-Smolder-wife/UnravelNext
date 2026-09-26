@@ -42,7 +42,15 @@
 #define WATER_STAT_STEPS 4u      // fallbacks: the march's step bound (never reached by the bound's proof; counted)
 #define WATER_STAT_INSIDE 5u     // samples seen from inside the water (the underwater camera, 1.3 (b): not in stage 1)
 #define WATER_STAT_UNLIT 6u      // samples whose sun visibility had no resident page (lit)
-#define WATER_STAT_COUNT 7u
+#define WATER_STAT_RAY_OVERFLOW 7u    // stage 3: samples whose jobs did not fit the band's list (never by the band sizing)
+#define WATER_STAT_REFLECT_JOBS 8u    // stage 3: reflection jobs written (R-W1)
+#define WATER_STAT_REFRACT_JOBS 9u    // stage 3: refraction jobs written (R-W2: the fallback samples)
+#define WATER_STAT_TRACED 10u         // stage 3: jobs whose result R traced (alpha 1) and the apply pass used
+#define WATER_STAT_COUNT 11u
+// Stage 3: a reflection job replaces the GI cache's mirror lobe where the surface's lobe is narrower than the cache's
+// resolution (design 2.6: the K path, the cache read, only at half-angles >= 22 degrees; water's 0.02 roughness is ~0.1).
+#define WATER_RAY_LOBE_HALF_ANGLE 0.3839724
+#define WATER_RAY_TIR_BOUNCES 3u      // total internal reflections a refraction job may take (flags bits 8..9)
 #define WATER_MARCH_STEPS 9000u  // one step per pixel of the ray's screen path clipped to the image (<= its diagonal: 8K 8,812)
 
 // Tests: the march's hit screen position (x, y), the step it ended at, and band A's view depth there (WaterInterior's
@@ -238,9 +246,28 @@ bool waterMarch(WaterShadeSrvs s, float3 P, float3 t, uint slot, out float3 H, o
     return false;
 }
 
+// Stage 3 (FEATURES_GAME 1.9; R-W1 / R-W2 through FrameServices::traceRefractions): the terms of a sample that R's rays
+// replace. The shaded value keeps stage 1's stand-ins; where a job's result is traced the apply pass
+// (WaterRayApply.hlsl) rebuilds the value as base + (traced ? weight x result : fallback) per term, base being the
+// value without the replaceable terms (fp32; a difference taken from the stored fp16 value would lose up to 2^-11 of
+// the stand-in, which can exceed the traced term many times over):
+//   reflection  (medium 0xFF) from P along the mirror direction: F x airT x the radiance arriving at P, in place of the
+//               GI cache's mirror lobe (the sun's disk stays the analytic GGX term: R's hit shading and sky exclude it)
+//   refraction  (medium 0, the water's streams) from P along the exact Snell direction, for fallback samples only:
+//               (1 - F) / n^2 x airT x the radiance arriving inside the water at P (R: absorption, exits, reflections),
+//               in place of the straight-view stand-in
+struct WaterRayTerms
+{
+    float3 P, reflectDir, refractDir, sigmaA;
+    float ior;
+    bool reflect, refract;
+    float3 reflectWeight, reflectFallback, refractWeight, refractFallback;
+    float3 base;  // the returned value without the two fallback terms
+};
+
 // The radiance (exposed linear, aerial perspective applied) a water sample at `pixel` of stream (slot, tri) sends to
-// the camera; stat receives the WATER_STAT_* the sample counts under.
-float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out uint stat)
+// the camera; stat receives the WATER_STAT_* the sample counts under; rays the stage 3 terms.
+float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out uint stat, out WaterRayTerms rays)
 {
     const WaterSlot ws = waterSlot(s.slots, slot);
     const float2 centre = float2(pixel) + 0.5;
@@ -258,6 +285,9 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     const float NoV = saturate(dot(nv, v));
     const float F = waterFresnel(NoV, fromAir ? 1.0 / ior : ior);
     stat = fromAir ? WATER_STAT_SHADED : WATER_STAT_INSIDE;
+    rays = (WaterRayTerms)0;
+    rays.P = P;
+    rays.ior = ior;
 
     // Air of the camera's path to P, sun illuminance there.
     const float z = dot(P - g_cameraPosition, -g_view[2].xyz);
@@ -285,12 +315,18 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
         gi.cache = s.giCache;
         gi.hash = s.giCache;
         gi.pad0 = gi.pad1 = 0;
-        reflected += giCacheRadiance(gi, P, nv, waterReflect(v, nv), reflectionLobeHalfAngle(r, NoV));
+        const float3 mirror = giCacheRadiance(gi, P, nv, waterReflect(v, nv), reflectionLobeHalfAngle(r, NoV));
+        reflected += mirror;
+        rays.reflectFallback = F * mirror * g_exposure;
     }
+    rays.reflect = fromAir && reflectionLobeHalfAngle(r, NoV) < WATER_RAY_LOBE_HALF_ANGLE;
+    rays.reflectDir = waterReflect(v, nv);
+    rays.reflectWeight = F;
     // Transmission along the refracted ray.
     // Absorption from the material: baseColor = the medium's transmittance over 1 m (sigma_a = -ln T; authoring rule
     // agreed with engine 2 for W2). Pure water (Pope & Fry 1997, 650 / 550 / 450 nm) is T = (0.712, 0.945, 0.991).
     const float3 sigmaA = -log(clamp(m.baseColor, 1e-6, 1.0));
+    rays.sigmaA = sigmaA;
     float3 transmitted = 0;
     float3 t;
     if (fromAir && waterRefract(v, nv, 1.0 / ior, t))
@@ -310,10 +346,85 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
             const float along = max(zA - z, 0.0) / max(dot(-v, -g_view[2].xyz), 1e-4);
             transmitted = waterAbsorption(sigmaA, along) * waterSurfaceRadiance(s, centre, zA) / (ior * ior);
             stat = status;
+            rays.refract = true;
+            rays.refractDir = t;
+            rays.refractWeight = (1 - F) / (ior * ior);
+            rays.refractFallback = (1 - F) * transmitted;
         }
     }
     // (1 - F) of the light crossing; the exposure is in the band A values; the reflected terms are absolute radiance.
     const float3 surface = F * reflected * g_exposure + (1 - F) * transmitted;
-    return surface * airT + inscatter * g_exposure;
+    // (the camera's air path applies to the replaced terms as to the rest)
+    rays.reflectWeight *= airT;
+    rays.reflectFallback *= airT;
+    rays.refractWeight *= airT;
+    rays.refractFallback *= airT;
+    const float3 value = surface * airT + inscatter * g_exposure;
+    rays.base = value - rays.reflectFallback - rays.refractFallback;
+    return value;
+}
+float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out uint stat)
+{
+    WaterRayTerms rays;
+    return waterSurfaceShade(s, pixel, slot, tri, stat, rays);
+}
+
+#define WATER_RAY_SAMPLE_BYTES 80u   // a sample record (WaterRayApply.hlsl)
+#define WATER_RAY_RECORD 0x80000000u  // a sample's target: a coverage record (entry index) instead of a pixel (x | y << 16)
+
+// Stage 3: appends a sample's jobs and its sample record (WaterRayApply.hlsl, 80 B) to the band's lists, the results zeroed
+// (alpha 0 = not traced: the stage 1 value stays). Lists: P[6] = { jobs UAV, results UAV, samples UAV, job capacity },
+// P[7].z = sample capacity (UNX_NONE in P[6].x: no lists). The caller sizes the band so both capacities hold every sample.
+void waterAppendRays(WaterRayTerms rays, uint target, uint statisticsUav)
+{
+    if (P[6].x == UNX_NONE || !(rays.reflect || rays.refract)) return;
+    RWByteAddressBuffer jobs = ResourceDescriptorHeap[P[6].x];
+    RWByteAddressBuffer results = ResourceDescriptorHeap[P[6].y];
+    RWByteAddressBuffer samples = ResourceDescriptorHeap[P[6].z];
+    const uint n = (rays.reflect ? 1u : 0u) + (rays.refract ? 1u : 0u);
+    const uint record = (target & WATER_RAY_RECORD) != 0 ? 1u << 31 : 0u;  // job flags bit 31: a coverage record's
+    uint j, k;
+    jobs.InterlockedAdd(0, n, j);
+    samples.InterlockedAdd(0, 1, k);
+    if (j + n > P[6].w || k >= P[7].z)
+    {
+        if (statisticsUav != UNX_NONE)
+        {
+            RWByteAddressBuffer statistics = ResourceDescriptorHeap[statisticsUav];
+            statistics.InterlockedAdd(4 * WATER_STAT_RAY_OVERFLOW, 1);
+        }
+        return;
+    }
+    uint reflectJob = UNX_NONE, refractJob = UNX_NONE;
+    if (rays.reflect)
+    {
+        reflectJob = j++;
+        const uint at = 16 + 48 * reflectJob;
+        jobs.Store4(at, uint4(asuint(rays.P), reflectJob));
+        jobs.Store4(at + 16, uint4(asuint(rays.reflectDir), 0xFFu | record));
+        jobs.Store4(at + 32, uint4(0, 0, 0, asuint(1.0)));
+        results.Store2(8 * reflectJob, uint2(0, 0));
+    }
+    if (rays.refract)
+    {
+        refractJob = j++;
+        const uint at = 16 + 48 * refractJob;
+        jobs.Store4(at, uint4(asuint(rays.P), refractJob));
+        jobs.Store4(at + 16, uint4(asuint(rays.refractDir), (WATER_RAY_TIR_BOUNCES << 8) | record));
+        jobs.Store4(at + 32, uint4(asuint(rays.sigmaA), asuint(rays.ior)));
+        results.Store2(8 * refractJob, uint2(0, 0));
+    }
+    const uint at = 16 + WATER_RAY_SAMPLE_BYTES * k;
+    samples.Store4(at, uint4(target, reflectJob, refractJob, 0));
+    samples.Store4(at + 16, uint4(asuint(rays.reflectWeight), asuint(rays.reflectFallback.x)));
+    samples.Store4(at + 32, uint4(asuint(rays.reflectFallback.yz), asuint(rays.refractWeight.xy)));
+    samples.Store4(at + 48, uint4(asuint(rays.refractWeight.z), asuint(rays.refractFallback)));
+    samples.Store4(at + 64, uint4(asuint(rays.base), 0));
+    if (statisticsUav != UNX_NONE)
+    {
+        RWByteAddressBuffer statistics = ResourceDescriptorHeap[statisticsUav];
+        if (rays.reflect) statistics.InterlockedAdd(4 * WATER_STAT_REFLECT_JOBS, 1);
+        if (rays.refract) statistics.InterlockedAdd(4 * WATER_STAT_REFRACT_JOBS, 1);
+    }
 }
 #endif

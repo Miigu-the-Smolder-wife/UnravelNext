@@ -11,6 +11,12 @@
 // P[3] VSM page table (UNX_NONE: no sun shadow), blocks, search bound, constants CBV; P[4] VSM transmittance layers,
 // debug image UAV (tests: RGBA32F, WaterSurface.hlsli g_waterMarchDebug; UNX_NONE)
 // P[5] bandARadiance UAV (RGBA16F), particle layer SRV, particle edges SRV (UNX_NONE: no particle layer)
+// P[6] stage 3 (UNX_NONE: none): jobs UAV (raw, FrameServices::traceRefractions: head 16 B { count, x, y, z }, 48 B per
+//      job), results UAV (raw, 8 B per job), samples UAV (raw: head 16 B { count }, 64 B per sample, WaterRayApply.hlsl),
+//      job capacity; P[7] first row of the band, rows in it, sample capacity, 0
+// With stage 3 the pass runs once per band of rows; each interior sample writes its stage 1 value as without it, and its
+// jobs (a reflection job where the surface's lobe is sharper than the GI cache, a refraction job for a fallback) with
+// their results zeroed (alpha 0: not traced, the stage 1 value stays) and one sample record for the apply pass.
 #include "WaterSurface.hlsli"
 
 // V's water-edge rule (CoverageLayer.hlsli coverageWaterEdge, v1.64) for the stream `slot`: a pixel is an edge when in
@@ -37,8 +43,8 @@ bool waterEdge(Texture2D<uint> vis, Texture2D<float> water, Texture2D<float> ban
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
 {
-    const uint2 pixel = id.xy;
-    if (any(pixel >= uint2(g_viewWidth, g_viewHeight))) return;
+    const uint2 pixel = uint2(id.x, id.y + P[7].x);
+    if (id.y >= P[7].y || any(pixel >= uint2(g_viewWidth, g_viewHeight))) return;
     Texture2D<uint> vis = ResourceDescriptorHeap[P[1].x];
     const uint v = vis[pixel];
     if ((v >> 30) != 3u) return;
@@ -70,7 +76,9 @@ void main(uint3 id : SV_DispatchThreadID)
     s.shadow.pad0 = UNX_NONE;
     s.shadow.layers = P[4].x;
     uint stat;
-    const float3 radiance = waterSurfaceShade(s, pixel, slot, tri, stat);
+    WaterRayTerms rays;
+    const float3 radiance = waterSurfaceShade(s, pixel, slot, tri, stat, rays);
+    waterAppendRays(rays, pixel.x | (pixel.y << 16), P[0].w);
     if (P[5].x != UNX_NONE)
     {
         RWTexture2D<float4> bandARadiance = ResourceDescriptorHeap[P[5].x];

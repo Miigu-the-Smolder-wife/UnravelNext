@@ -1,10 +1,12 @@
 // Water surface shading, stage 1 (track W). See include/unx/water/WaterSurface.h and WaterSurface.hlsli.
 #include "unx/water/WaterSurface.h"
+#include "unx/water/LinearDispatch.h"
 
 #include "unx/core/Log.h"
 #include "unx/render/Device.h"
 #include "unx/render/Shaders.h"
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -13,7 +15,7 @@ namespace unx::water
 using namespace unx::render;
 namespace
 {
-constexpr uint32_t kStatCount = 7, kRing = 4, kSlots = 64;
+constexpr uint32_t kStatCount = 11, kStatBytes = 64, kRing = 4, kSlots = 64, kRayJobs = 1u << 20;
 
 ComPtr<ID3D12Resource> hostBuffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE type, const wchar_t* name, uint8_t** mapped)
 {
@@ -70,7 +72,7 @@ struct SurfaceState
             tableSrv[i] = d.descriptors().allocateResource();
             d.d3d()->CreateShaderResourceView(table[i].Get(), &sd, d.descriptors().resourceCpu(tableSrv[i]));
         }
-        readback = hostBuffer(d, kRing * 32, D3D12_HEAP_TYPE_READBACK, L"water surface statistics", &readbackMapped);
+        readback = hostBuffer(d, kRing * kStatBytes, D3D12_HEAP_TYPE_READBACK, L"water surface statistics", &readbackMapped);
         D3D12_INDIRECT_ARGUMENT_DESC arg{};
         arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
         D3D12_COMMAND_SIGNATURE_DESC sig{};
@@ -115,11 +117,11 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
     const TextureRef source = g.createTexture(TextureDesc{ "w.surface.source", fromDesc.width, fromDesc.height, 1, 1, fromDesc.format });
     g.addPass("w.surface.source", QueueType::Graphics, [&](PassBuilder& b) { b.use(from, Use::CopySrc); b.use(source, Use::CopyDst); },
               [=](PassContext& c) { c.cmd->CopyResource(c.resource(source), c.resource(from)); });
-    const BufferRef stats = g.createBuffer({ "w.surface.stats", 32, 0 });
+    const BufferRef stats = g.createBuffer({ "w.surface.stats", kStatBytes, 0 });
     ID3D12PipelineState* clear = fc.shaders.compute("Passes/Water/ViewGridClear");
     g.addPass("w.surface.stats clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(stats, Use::UavCompute); },
               [=](PassContext& c) {
-                  const uint32_t k[4] = { 0, 0, c.uav(stats), 8 };  // ViewGridClear: the counter words only
+                  const uint32_t k[4] = { 0, 0, c.uav(stats), kStatBytes / 4 };  // ViewGridClear: the counter words only
                   c.cmd->SetPipelineState(clear);
                   c.computeConstants(k, 4);
                   c.cmd->Dispatch(1, 1, 1);
@@ -200,62 +202,168 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
         k[20] = k[21] = k[22] = k[23] = none;
     };
 
+    // Stage 3: R's ray service. Lists sized for a band of rows (2 jobs per pixel: a reflection and, for a fallback, a
+    // refraction) and reused by the record rounds; without the service nothing is written and each pass runs once.
+    ID3D12CommandSignature* signature = st.signature.Get();
+    const bool rays = static_cast<bool>(fc.services.traceRefractions) && (!interiorPass || bandARadiance.valid());
+    const uint32_t jobCapacity = std::max(debug.rayJobCapacity ? debug.rayJobCapacity : kRayJobs, 2 * W);
+    const uint32_t bandRows = rays ? std::min(H, jobCapacity / (2 * W)) : H, sampleCapacity = W * bandRows, jobs = 2 * sampleCapacity;
+    BufferRef jobList, results, samples, applyArgs;
+    ID3D12PipelineState* heads = rays ? fc.shaders.compute("Passes/Water/ViewGridClear") : nullptr;
+    ID3D12PipelineState* argsKernel = rays ? fc.shaders.compute("Passes/Water/WaterRayArgs") : nullptr;
+    ID3D12PipelineState* applyKernel = rays ? fc.shaders.compute("Passes/Water/WaterRayApply") : nullptr;
+    if (rays)
+    {
+        jobList = g.createBuffer({ "w.surface.ray jobs", 16 + 48ull * jobs, 0 });
+        results = g.createBuffer({ "w.surface.ray results", 8ull * jobs, 0 });
+        samples = g.createBuffer({ "w.surface.ray samples", 16 + 80ull * sampleCapacity, 0 });  // (WATER_RAY_SAMPLE_BYTES)
+        applyArgs = g.createBuffer({ "w.surface.ray apply args", 16, 0 });
+    }
+    auto clearLists = [&] {
+        g.addPass("w.surface.ray clear", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(jobList, Use::UavCompute);
+                      b.use(samples, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      c.cmd->SetPipelineState(heads);
+                      const uint32_t a[4] = { 0, 0, c.uav(jobList), 4 }, s[4] = { 0, 0, c.uav(samples), 4 };  // the heads only
+                      c.computeConstants(a, 4);
+                      c.cmd->Dispatch(1, 1, 1);
+                      c.computeConstants(s, 4);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+    };
+    // After a band's or round's shading pass: the apply dispatch's size, R's rays, the apply pass (pixels: band A radiance
+    // and colour; records: coverageRecordRadiance).
+    auto traceAndApply = [&](BufferRef recordRadiance) {
+        g.addPass("w.surface.ray args", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(samples, Use::UavCompute);
+                      b.use(applyArgs, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[4] = { c.uav(samples), c.uav(applyArgs), sampleCapacity, 0 };
+                      c.cmd->SetPipelineState(argsKernel);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+        fc.services.traceRefractions(fc, jobList, results, jobs);
+        const bool pixels = !recordRadiance.valid();
+        g.addPass("w.surface.ray apply", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(samples, Use::SrvCompute);
+                      b.use(applyArgs, Use::IndirectArgs);
+                      b.use(results, Use::SrvCompute);
+                      b.use(stats, Use::UavCompute);
+                      if (pixels)
+                      {
+                          b.use(bandARadiance, Use::UavCompute);
+                          b.use(colour, Use::UavCompute);
+                          if (particleLayer.valid()) b.use(particleLayer, Use::SrvCompute);
+                          if (particleEdges.valid()) b.use(particleEdges, Use::SrvCompute);
+                      }
+                      else b.use(recordRadiance, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[8] = { c.srv(samples), c.srv(results), pixels ? c.uav(bandARadiance) : none, pixels ? c.uav(colour) : none,
+                                              pixels && particleLayer.valid() ? c.srv(particleLayer) : none,
+                                              pixels && particleLayer.valid() && particleEdges.valid() ? c.srv(particleEdges) : none, c.uav(stats),
+                                              pixels ? none : c.uav(recordRadiance) };
+                      c.cmd->SetPipelineState(applyKernel);
+                      c.computeConstants(k, 8);
+                      c.cmd->ExecuteIndirect(signature, 1, c.resource(applyArgs), 0, nullptr, 0);
+                  });
+    };
+    uint32_t rounds = 0;
+
     if (interiorPass)
     {
         ID3D12PipelineState* kernel = fc.shaders.compute("Passes/Water/WaterInterior");
-        g.addPass("w.surface.interior", QueueType::Graphics,
-                  [&](PassBuilder& b) {
-                      shadingUses(b);
-                      b.use(colour, Use::UavCompute);
-                      if (bandARadiance.valid()) b.use(bandARadiance, Use::UavCompute);
-                      if (status.valid()) b.use(status, Use::UavCompute);
-                      if (marchImage.valid()) b.use(marchImage, Use::UavCompute);
-                      if (particleLayer.valid()) b.use(particleLayer, Use::SrvCompute);
-                      if (particleEdges.valid()) b.use(particleEdges, Use::SrvCompute);
-                  },
-                  [=](PassContext& c) {
-                      uint32_t k[24];
-                      shadingConstants(c, k, 1);
-                      k[0] = c.uav(colour);
-                      k[11] = status.valid() ? c.uav(status) : none;
-                      k[17] = marchImage.valid() ? c.uav(marchImage) : none;
-                      k[20] = bandARadiance.valid() ? c.uav(bandARadiance) : none;
-                      k[21] = particleLayer.valid() ? c.srv(particleLayer) : none;
-                      k[22] = particleLayer.valid() && particleEdges.valid() ? c.srv(particleEdges) : none;
-                      c.cmd->SetPipelineState(kernel);
-                      c.bindFrameConstants(cb);
-                      c.computeConstants(k, 24);
-                      c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
-                  });
+        uint32_t bands = 0;
+        for (uint32_t row0 = 0; row0 < H; row0 += bandRows, ++bands)
+        {
+            const uint32_t rows = std::min(bandRows, H - row0), first = row0 == 0 ? 1 : 0;
+            if (rays) clearLists();
+            g.addPass("w.surface.interior", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          shadingUses(b);
+                          b.use(colour, Use::UavCompute);
+                          if (bandARadiance.valid()) b.use(bandARadiance, Use::UavCompute);
+                          if (status.valid()) b.use(status, Use::UavCompute);
+                          if (marchImage.valid()) b.use(marchImage, Use::UavCompute);
+                          if (particleLayer.valid()) b.use(particleLayer, Use::SrvCompute);
+                          if (particleEdges.valid()) b.use(particleEdges, Use::SrvCompute);
+                          if (rays)
+                              for (const BufferRef& x : { jobList, results, samples }) b.use(x, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[32];
+                          shadingConstants(c, k, first);
+                          k[0] = c.uav(colour);
+                          k[11] = status.valid() ? c.uav(status) : none;
+                          k[17] = marchImage.valid() ? c.uav(marchImage) : none;
+                          k[20] = bandARadiance.valid() ? c.uav(bandARadiance) : none;
+                          k[21] = particleLayer.valid() ? c.srv(particleLayer) : none;
+                          k[22] = particleLayer.valid() && particleEdges.valid() ? c.srv(particleEdges) : none;
+                          k[24] = rays ? c.uav(jobList) : none;
+                          k[25] = rays ? c.uav(results) : none;
+                          k[26] = rays ? c.uav(samples) : none;
+                          k[27] = jobs;
+                          k[28] = row0, k[29] = rows, k[30] = sampleCapacity, k[31] = 0;
+                          c.cmd->SetPipelineState(kernel);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 32);
+                          c.cmd->Dispatch((W + 7) / 8, (rows + 7) / 8, 1);
+                      });
+            if (rays) traceAndApply(BufferRef{});
+        }
+        debug.rayBands = rays ? bands : 0;
     }
     if (recordPass)
     {
         ID3D12PipelineState* kernel = fc.shaders.compute("Passes/Water/WaterRecords");
-        ID3D12CommandSignature* signature = st.signature.Get();
         const BufferRef special = view.coverageSpecial, records = view.coverageRecords, tileList = view.coverageTileList, radiance = view.coverageRecordRadiance;
-        const bool fillsTable = !interiorPass;
-        g.addPass("w.surface.records", QueueType::Graphics,
-                  [&](PassBuilder& b) {
-                      shadingUses(b);
-                      b.use(special, Use::SrvCompute);
-                      b.use(special, Use::IndirectArgs);
-                      b.use(records, Use::SrvCompute);
-                      b.use(tileList, Use::SrvCompute);
-                      b.use(radiance, Use::UavCompute);
-                  },
-                  [=](PassContext& c) {
-                      uint32_t k[24];
-                      shadingConstants(c, k, fillsTable ? 1 : 0);
-                      k[0] = 0;
-                      k[17] = c.srv(special);
-                      k[18] = c.srv(records);
-                      k[19] = c.srv(tileList);
-                      k[20] = c.uav(radiance);
-                      c.cmd->SetPipelineState(kernel);
-                      c.bindFrameConstants(cb);
-                      c.computeConstants(k, 24);
-                      c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
-                  });
+        // Without rays one indirect pass over the list's header; with them rounds of sampleCapacity entries over the list's
+        // capacity (its count is known only on the GPU: rounds past it do nothing).
+        const uint32_t specialEntries = uint32_t((g.desc(special).size / 4 - 4) / 2);  // (CoverageLayer.hlsli COV_SPECIAL_HEADER = 4)
+        const uint32_t roundSize = rays ? std::max(1u, std::min(sampleCapacity, specialEntries)) : UINT32_MAX;
+        for (uint32_t base = 0; base == 0 || (rays && base < specialEntries); base += roundSize, ++rounds)
+        {
+            const uint32_t fillsTable = !interiorPass && base == 0 ? 1 : 0;
+            if (rays) clearLists();
+            g.addPass("w.surface.records", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          shadingUses(b);
+                          b.use(special, Use::SrvCompute);
+                          if (!rays) b.use(special, Use::IndirectArgs);
+                          b.use(records, Use::SrvCompute);
+                          b.use(tileList, Use::SrvCompute);
+                          b.use(radiance, Use::UavCompute);
+                          if (rays)
+                              for (const BufferRef& x : { jobList, results, samples }) b.use(x, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[32];
+                          shadingConstants(c, k, fillsTable);
+                          k[0] = 0;
+                          k[17] = c.srv(special);
+                          k[18] = c.srv(records);
+                          k[19] = c.srv(tileList);
+                          k[20] = c.uav(radiance);
+                          k[24] = rays ? c.uav(jobList) : none;
+                          k[25] = rays ? c.uav(results) : none;
+                          k[26] = rays ? c.uav(samples) : none;
+                          k[27] = jobs;
+                          k[28] = base, k[29] = roundSize, k[30] = sampleCapacity, k[31] = 0;
+                          c.cmd->SetPipelineState(kernel);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 32);
+                          if (rays) dispatchLinear(c.cmd, (roundSize + 63) / 64);
+                          else c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
+                      });
+            if (rays) traceAndApply(radiance);
+        }
     }
     ID3D12Resource* readback = st.readback.Get();
     g.addPass("w.surface.stats read", QueueType::Graphics,
@@ -263,7 +371,18 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                   b.use(stats, Use::CopySrc);
                   b.keep();
               },
-              [=](PassContext& c) { c.cmd->CopyBufferRegion(readback, ring * 32, c.resource(stats), 0, 4 * kStatCount); });
+              [=](PassContext& c) { c.cmd->CopyBufferRegion(readback, ring * kStatBytes, c.resource(stats), 0, 4 * kStatCount); });
+    debug.rayRounds = rounds;
+    if (debug.copyRadiance && bandARadiance.valid())
+    {
+        // (M's edge composite, after tracks::water, rewrites band A radiance at outline pixels)
+        const TextureDesc rd = g.desc(bandARadiance);
+        const TextureRef copy = g.createTexture(TextureDesc{ "w.surface.radiance copy", rd.width, rd.height, 1, 1, rd.format });
+        g.addPass("w.surface.radiance copy", QueueType::Graphics, [&](PassBuilder& b) { b.use(bandARadiance, Use::CopySrc); b.use(copy, Use::CopyDst); },
+                  [=](PassContext& c) { c.cmd->CopyResource(c.resource(copy), c.resource(bandARadiance)); });
+        debug.radiance = copy;
+        debug.copyRadiance = false;
+    }
     st.frame[ring] = fc.frame.frameIndex;
     st.last = fc.frame.frameIndex;
 }
@@ -275,9 +394,10 @@ WaterSurfaceStats latestWaterSurfaceStats(TrackState& state)
     if (st.last == UINT64_MAX || !st.readbackMapped) return out;
     const uint32_t ring = uint32_t(st.last % kRing);
     uint32_t w[kStatCount];
-    std::memcpy(w, st.readbackMapped + ring * 32, sizeof w);
+    std::memcpy(w, st.readbackMapped + ring * kStatBytes, sizeof w);
     out.frameIndex = st.frame[ring];
     out.shaded = w[0], out.offscreen = w[1], out.exited = w[2], out.occluded = w[3], out.steps = w[4], out.inside = w[5], out.unlit = w[6];
+    out.rayOverflow = w[7], out.reflectJobs = w[8], out.refractJobs = w[9], out.traced = w[10];
     return out;
 }
 } // namespace unx::water

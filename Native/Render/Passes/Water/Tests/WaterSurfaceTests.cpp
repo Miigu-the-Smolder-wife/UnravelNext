@@ -16,9 +16,21 @@
 //   3. every pixel of an 8 x 8 tile without water-layer pixels is bit-identical to the no-water image (M's edge composite
 //      blends edge pixels from their tile's representatives, which in water tiles now hold water);
 //   4. the statistics equal the status image's counts.
+//   5. stage 3 (R-W1 / R-W2 through FrameServices::traceRefractions, here a stand-in, Tests/WaterFakeRays.hlsl, that writes
+//      a known result per job from its fields), in bands of 64 rows (the job capacity set small):
+//      a. a service that traces nothing leaves the image bit-identical to stage 1
+//      b. band A radiance at each interior pixel (the value the apply pass writes; the shaded colour is M's edge
+//         composite of it), against the same frame with zero results: tracing only the reflection jobs changes it by
+//         airT x F x result, with airT (the camera's air path to P, M's air volume) <= 1; tracing only the refraction
+//         jobs changes each fallback pixel by that airT x (1 - F) / n^2 x result, exactly (relative 3e-3 plus the fp16
+//         roundings: results and band A radiance are RGBA16F). The jobs carry the exact mirror and Snell directions,
+//         the water's sigma_a and index, 3 internal reflections; results reach their own pixel.
+//      c. statistics: one reflection job per interior pixel, one refraction job per fallback, all traced, no overflow,
+//         ceil(540 / 64) bands
 //   unx_test_water_watersurfacetests [--no-debug-layer] [--warp]
 #if __has_include("unx/shading/ShadingSystem.h") && __has_include("unx/material/MaterialSystem.h")
 #include "../../Material/Tests/MTestFrame.h"
+#include "unx/water/LinearDispatch.h"
 #include "unx/water/WaterSurface.h"
 
 #include <dxgi1_6.h>
@@ -530,6 +542,138 @@ int main(int argc, char** argv)
         report(worstOther == 0, "3. pixels of tiles without water are unchanged", worstOther, 0);
         const bool statsMatch = st.shaded == counts[0] && st.offscreen == counts[1] && st.exited == counts[2] && st.occluded == counts[3] && st.inside == counts[5];
         report(statsMatch && insideTotal > 0, "4. statistics equal the status image", statsMatch ? 0 : 1, 0);
+        // 5. stage 3 with a stand-in ray service
+        {
+            water::WaterSurfaceDebug& dbg = tf.trackState.get<water::WaterSurfaceDebug>("W.surface.debug");
+            dbg.rayJobCapacity = 2 * W * 64;
+            // Without air: the camera's air path to P (airT) multiplies the replaced terms, and the default atmosphere's
+            // transmittance over these metres (about 0.99 in red) is not what this check is about. Stage 1 is rendered
+            // again in the airless scene for 5a (mode -1: no service).
+            scene::Scene airless = s;
+            airless.atmosphere.rayleighScattering = { 0, 0, 0 };
+            airless.atmosphere.mieScattering = { 0, 0, 0 };
+            airless.atmosphere.mieAbsorption = { 0, 0, 0 };
+            airless.atmosphere.ozoneAbsorption = { 0, 0, 0 };
+            tf.setScene(airless);
+            std::shared_ptr<std::vector<uint8_t>> stage1, none, zero, fake, noneBand, zeroBand, reflBand, refrBand;
+            water::WaterSurfaceStats fakeStats;
+            uint32_t bands = 0;
+            tf.frame.outputLinearHdr = true;
+            for (int mode = -1; mode < 4; ++mode)
+            {
+                tf.run([&](FramePassContext& fc) {
+                    ViewResources v = tf.mainView(fc, W, H, 0);
+                    v.color = fc.graph.createTexture({ "w.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+                    tf.vis.record(fc, v);
+                    v.waterVis = uploadTexture(fc, "w.test.water vis", DXGI_FORMAT_R32_UINT, 4, wvis.data());
+                    v.waterDepth = uploadTexture(fc, "w.test.water depth", DXGI_FORMAT_R32_FLOAT, 4, wdepth.data());
+                    TriangleStream stream;
+                    stream.vertices = uploadBuffer(fc, "w.test.water vertices", verts.data(), verts.size() * 4);
+                    stream.material = waterIndex;
+                    stream.maxTriangles = 2;
+                    stream.layer = 1;
+                    fc.resources.triangleStreams.push_back(stream);
+                    fc.state<water::WaterSurfaceDebug>("W.surface.debug").copyRadiance = mode >= 0;
+                    ID3D12PipelineState* stand = fc.shaders.compute("Passes/Water/Tests/WaterFakeRays");
+                    if (mode >= 0) fc.services.traceRefractions = [stand, mode](FramePassContext& c, BufferRef jobs, BufferRef results, uint32_t maxJobs) {
+                        if (mode == 0) return;  // a. nothing traced
+                        c.graph.addPass("w.test.fake rays", QueueType::Graphics,
+                                        [&](PassBuilder& b) {
+                                            b.use(jobs, Use::SrvCompute);
+                                            b.use(results, Use::UavCompute);
+                                        },
+                                        [=](PassContext& pc) {
+                                            const uint32_t k[4] = { pc.srv(jobs), pc.uav(results), maxJobs, (uint32_t)mode };  // 1 zero, 2 reflection only, 3 refraction only
+                                            pc.cmd->SetPipelineState(stand);
+                                            pc.computeConstants(k, 4);
+                                            water::dispatchLinear(pc.cmd, (maxJobs + 63) / 64);
+                                        });
+                    };
+                    tracks::materialResolve(fc, v);
+                    tracks::shading(fc, v);
+                    (mode < 0 ? stage1 : mode == 0 ? none : mode == 1 ? zero : fake) = tf.readback(fc, v.color);  // (fake: the last frame's)
+                    if (mode >= 0) (mode == 0 ? noneBand : mode == 1 ? zeroBand : mode == 2 ? reflBand : refrBand) = tf.readback(fc, fc.state<water::WaterSurfaceDebug>("W.surface.debug").radiance);
+                    fc.resources.triangleStreams.clear();
+                });
+                if (mode == 3)
+                {
+                    fakeStats = water::latestWaterSurfaceStats(tf.trackState);
+                    bands = dbg.rayBands;
+                }
+            }
+            tf.frame.outputLinearHdr = false;
+            dbg.rayJobCapacity = 0;
+            double worstNone = 0, worst5 = 0;
+            double airT5[3][2] = { { 2, 0 }, { 2, 0 }, { 2, 0 } };
+            uint32_t interior5 = 0, fallback5 = 0, logged5 = 0, bad5 = 0, badFallback5 = 0, badX5 = W, badX5b = 0, badY5 = H, badY5b = 0;
+            for (uint32_t y = 0; y < H; ++y)
+                for (uint32_t x = 0; x < W; ++x)
+                {
+                    const float4 a5 = texelOf<float4>(*stage1, W, x, y), b0 = texelOf<float4>(*none, W, x, y);
+                    worstNone = std::max({ worstNone, (double)std::fabs(a5.x - b0.x), (double)std::fabs(a5.y - b0.y), (double)std::fabs(a5.z - b0.z) });
+                    const uint8_t sv = (*status)[(size_t)y * TestFrame::rowPitch(W, 1) + x];
+                    if (sv == 0) continue;
+                    ++interior5;
+                    const bool fallback = sv != 1;
+                    fallback5 += fallback ? 1 : 0;
+                    V3 D;
+                    pixelRay(desc, x + 0.5, y + 0.5, D);
+                    const V3 P = camPos + D * ((level - camPos.y) / D.y), view = norm(camPos - P);
+                    const double cosI = view.y, eta = 1 / ior, F = fresnel(cosI, eta);
+                    const V3 r = V3{ 0, 2 * cosI, 0 } - view;
+                    const double s2 = eta * eta * (1 - cosI * cosI);
+                    const V3 t = norm(view * -eta + V3{ 0, 1, 0 } * (eta * cosI - std::sqrt(1 - s2)));
+                    const double rd[3] = { r.x, r.y, r.z }, td[3] = { t.x, t.y, t.z };
+                    // band A's radiance at the pixel (RGBA16F): the value the apply pass updates. The shaded colour is M's edge
+                    // composite of it, which blends a pixel on a band A outline with its tile's representatives.
+                    auto fp16 = [&](const std::vector<uint8_t>& img, int k) {
+                        uint16_t h;
+                        std::memcpy(&h, img.data() + (size_t)y * TestFrame::rowPitch(W, 8) + 8 * x + 2 * k, 2);
+                        const uint32_t sign = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
+                        const double v = e == 0 ? std::ldexp((double)m, -24) : std::ldexp(1.0 + m / 1024.0, (int)e - 15);
+                        return (float)(sign ? -v : v);
+                    };
+                    const float4 z{ fp16(*zeroBand, 0), fp16(*zeroBand, 1), fp16(*zeroBand, 2), 1 }, fr{ fp16(*reflBand, 0), fp16(*reflBand, 1), fp16(*reflBand, 2), 1 },
+                                 ft{ fp16(*refrBand, 0), fp16(*refrBand, 1), fp16(*refrBand, 2), 1 };
+                    double e = 0;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        // The camera's air path to P (M's air volume) multiplies both replaced terms: measured from the
+                        // reflection-only frame, airT = change / (F x its result), then required of the refraction-only frame.
+                        const double reflWant = F * (std::fabs(rd[k]) * 20 + 1), reflGot = (&fr.x)[k] - (&z.x)[k];
+                        const double airT = reflGot / reflWant;
+                        const double allowR = std::ldexp(std::max((double)(&fr.x)[k], (double)(&z.x)[k]), -10) / reflWant;  // 2 fp16 roundings, relative
+                        airT5[k][0] = std::min(airT5[k][0], airT), airT5[k][1] = std::max(airT5[k][1], airT);
+                        e = std::max(e, std::max({ 0.0, airT - 1 - allowR, 0.5 - airT }));  // 0.5 <= airT <= 1 (a camera air path of metres)
+                        if (!fallback) continue;
+                        const double refrWant = airT * (1 - F) / (ior * ior) * (std::fabs(td[k]) * 0.2 + sigma[k] * 0.01 + ior * 0.02 + 3 * 0.003);
+                        const double got = (&ft.x)[k] - (&z.x)[k];
+                        const double allow = 3e-3 * refrWant + std::ldexp(std::max((double)(&ft.x)[k], (double)(&z.x)[k]), -10) + allowR * refrWant;
+                        e = std::max(e, std::fabs(got - refrWant) / allow * 3e-3);
+                        if (std::fabs(got - refrWant) > allow && logged5 < 6)
+                        {
+                            ++logged5;
+                            logf("  stage 3 px (%u,%u) channel %d: refraction change %.6f want %.6f (airT %.5f, F %.4f; band A stage 1 %.6f zero %.6f refl %.6f refr %.6f)\n", x, y, k, got, refrWant, airT, F, fp16(*noneBand, k), (&z.x)[k], (&fr.x)[k], (&ft.x)[k]);
+                        }
+                    }
+                    worst5 = std::max(worst5, e);
+                    if (e > 3e-3)
+                    {
+                        ++bad5;
+                        badX5 = std::min(badX5, x), badX5b = std::max(badX5b, x), badY5 = std::min(badY5, y), badY5b = std::max(badY5b, y);
+                        badFallback5 += fallback ? 1 : 0;
+                    }
+                }
+            logf("stage 3: %u pixels over 3e-3 (%u fallbacks) in x %u..%u, y %u..%u\n", bad5, badFallback5, badX5, badX5b, badY5, badY5b);
+            logf("stage 3: measured airT (camera air path) r %.5f..%.5f g %.5f..%.5f b %.5f..%.5f\n", airT5[0][0], airT5[0][1], airT5[1][0], airT5[1][1], airT5[2][0], airT5[2][1]);
+            logf("stage 3: %u bands; %u interior pixels, %u fallbacks; jobs: %u reflection, %u refraction, %u traced, %u overflow\n", bands, interior5, fallback5,
+                 fakeStats.reflectJobs, fakeStats.refractJobs, fakeStats.traced, fakeStats.rayOverflow);
+            report(worstNone == 0, "5a. a service that traces nothing: image bit-identical to stage 1", worstNone, 0);
+            report(interior5 > 5000 && fallback5 > 0 && worst5 <= 3e-3, "5b. traced jobs replace the stand-ins: F x refl + (1 - F) / n^2 x refr (rel.)", worst5, 3e-3);
+            const bool counts5 = fakeStats.reflectJobs == interior5 && fakeStats.refractJobs == fallback5 && fakeStats.traced == interior5 + fallback5 &&
+                                fakeStats.rayOverflow == 0 && bands == (H + 63) / 64;
+            report(counts5, "5c. one reflection job per pixel, refraction per fallback, all traced, bands", counts5 ? 0 : 1, 0);
+        }
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

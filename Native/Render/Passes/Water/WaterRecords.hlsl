@@ -10,16 +10,21 @@
 // P[2] atmosphere transmittance, multi-scatter, air volume, 0; P[3] VSM page table, blocks, search bound, constants CBV
 // P[4] VSM transmittance layers, coverageSpecial SRV (raw), coverageRecords SRV, coverage tile list SRV (raw)
 // P[5].x coverageRecordRadiance UAV (raw)
+// P[6], P[7] stage 3 (WaterSurface.hlsli waterAppendRays; P[6].x UNX_NONE: none): the round's entries are
+// [P[7].x, P[7].x + P[7].y) of coverageSpecial (dispatched directly, rows of groups); without lists the whole list,
+// indirectly from its header.
 #include "WaterSurface.hlsli"
+#include "WaterLinear.hlsli"
 #include "Passes/Shading/CoverageSpecial.hlsli"
 #include "Passes/Visibility/CoverageLayer.hlsli"
 
 [numthreads(64, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint thread : SV_GroupThreadID)
 {
     ByteAddressBuffer special = ResourceDescriptorHeap[P[4].y];
-    if (id.x >= special.Load(0)) return;  // (the count is clamped to the list's capacity by V)
-    const uint2 entry = special.Load2(4 * (COV_SPECIAL_HEADER + 2 * id.x));
+    const uint local = waterLinear(group, thread, 64), index = P[7].x + local;
+    if (local >= P[7].y || index >= special.Load(0)) return;  // (the count is clamped to the list's capacity by V)
+    const uint2 entry = special.Load2(4 * (COV_SPECIAL_HEADER + 2 * index));
     if (entry.y != COV_SPECIAL_STREAM) return;
     StructuredBuffer<uint4> records = ResourceDescriptorHeap[P[4].z];
     const CoverageFragment f = coverageUnpackRecord(records[entry.x]);
@@ -50,7 +55,9 @@ void main(uint3 id : SV_DispatchThreadID)
     s.shadow.pad0 = UNX_NONE;
     s.shadow.layers = P[4].x;
     uint stat;
-    const float3 radiance = waterSurfaceShade(s, pixel, slot, tri, stat);
+    WaterRayTerms rays;
+    const float3 radiance = waterSurfaceShade(s, pixel, slot, tri, stat, rays);
+    waterAppendRays(rays, WATER_RAY_RECORD | entry.x, P[0].w);
     RWByteAddressBuffer output = ResourceDescriptorHeap[P[5].x];
     output.Store2(entry.x * 8, covPackRadiance(radiance));
     if (P[0].w != UNX_NONE)
