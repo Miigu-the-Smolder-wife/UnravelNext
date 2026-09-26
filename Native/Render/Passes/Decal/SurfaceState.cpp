@@ -311,8 +311,21 @@ public:
             const float inv = h > 0 ? (float)(1.0 / h) : 0.0f;
             std::memcpy(&c[5 + k], &inv, 4);
         }
+        // The bricks are keyed in the VFX World's axes and coordinates (stream space); a renderer frame point maps to it as
+        // streamAxes x (point + worldOrigin) (render A's host-boundary rule, FrameContext). The origin is whole multiples
+        // of 1024 m, so it goes as whole voxels (exact at any distance); the shader adds them after the float part.
+        uint32_t m[6] = {};
+        for (int a = 0; a < 3; ++a)
+        {
+            const float axis = fc.frame.streamAxes[a];
+            std::memcpy(&m[a], &axis, 4);
+            const double voxels = fc.frame.worldOrigin[a] / 0.25;  // SURFACE_VOXEL
+            if (voxels != std::floor(voxels) || std::abs(voxels) > 2.0e9) fail("surface state: world origin %.9g m is not a whole number of voxels", fc.frame.worldOrigin[a]);
+            m[3 + a] = (uint32_t)(int32_t)(axis * voxels);  // stream-space voxels of the origin
+        }
         std::memset(p, 0, 256);
         std::memcpy(p, c, sizeof c);
+        std::memcpy(p + 48, m, sizeof m);
         uint8_t* q = p + 256;
         for (uint32_t s : slots)
         {

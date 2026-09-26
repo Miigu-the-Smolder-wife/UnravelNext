@@ -75,7 +75,11 @@ SurfaceSample surfaceStateAt(SurfaceContext c, float3 worldPos)
     const uint poolOffset = constants.Load(44);
     float inv[6];
     [unroll] for (uint k = 0; k < 6; ++k) inv[k] = asfloat(constants.Load(20 + 4 * k));
-    const float3 q = worldPos / SURFACE_VOXEL - 0.5f;
+    // Stream space (the bricks' keys: the VFX World's axes; render A's host-boundary rule): the frame point times the
+    // axis signs, plus the world origin in whole voxels (constants 48: streamAxes, 60: origin voxels, stream space).
+    const float3 axes = asfloat(constants.Load3(48));
+    const int3 originVoxels = asint(constants.Load3(60));
+    const float3 q = axes * worldPos / SURFACE_VOXEL - 0.5f;
     const float3 b = floor(q), f = q - b;
     int3 cachedKey = int3(0x7FFFFFFF, 0, 0);
     uint cachedSlot = SURFACE_NONE;
@@ -83,7 +87,7 @@ SurfaceSample surfaceStateAt(SurfaceContext c, float3 worldPos)
     [unroll] for (uint corner = 0; corner < 8; ++corner)
     {
         const int3 o = int3(corner & 1, (corner >> 1) & 1, corner >> 2);
-        const int3 voxel = int3(b) + o;
+        const int3 voxel = int3(b) + o + originVoxels;
         const float w = (o.x ? f.x : 1 - f.x) * (o.y ? f.y : 1 - f.y) * (o.z ? f.z : 1 - f.z);
         const int3 key = int3(surfaceFloorDiv4(voxel.x), surfaceFloorDiv4(voxel.y), surfaceFloorDiv4(voxel.z));
         if (any(key != cachedKey))

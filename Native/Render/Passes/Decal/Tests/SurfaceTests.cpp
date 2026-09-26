@@ -260,6 +260,66 @@ int main(int argc, char** argv)
             nonzero += any;
         }
         S_CHECK(nonzero > 500, "only %u sample points met bricks", nonzero);
+        // The VFX World mirrored in z against the renderer and the frame shifted by a world origin (render A's host-boundary
+        // rule: stream = streamAxes x (frame + worldOrigin)): the same stream-space points, given in frame coordinates
+        // (quantised to 1/1024 m so they are exact in float at these distances), read the same values.
+        {
+            const float axes[3] = { 1, 1, -1 };
+            const double origin[3] = { 1024, -2048, 3072 };
+            std::vector<std::array<float, 4>> framePoints(count);
+            std::vector<std::array<double, 3>> streamPoints(count);
+            for (uint32_t n = 0; n < count; ++n)
+                for (int a = 0; a < 3; ++a)
+                {
+                    streamPoints[n][a] = std::round((double)points[n][a] * 1024.0) / 1024.0;
+                    framePoints[n][a] = (float)(axes[a] * streamPoints[n][a] - origin[a]);
+                }
+            for (int a = 0; a < 3; ++a) { tf.frame.streamAxes[a] = axes[a]; tf.frame.worldOrigin[a] = origin[a]; }
+            std::shared_ptr<std::vector<uint8_t>> mirrored;
+            tf.run([&](FramePassContext& fc) {
+                tracks::surfaceState(fc);
+                const FrameResources& r = fc.resources;
+                const BufferRef pts = tf.uploadBuffer(fc, framePoints.data(), framePoints.size() * 16, 16, "surface.test.points");
+                const BufferRef out = fc.graph.createBuffer(BufferDesc{ "surface.test.results", (uint64_t)count * 32, 16 });
+                const BufferRef cb = r.surfaceConstants, table = r.surfaceTable, pool = r.surfacePool;
+                ID3D12PipelineState* pso = fc.shaders.compute("Passes/Decal/Tests/SurfaceProbe");
+                fc.graph.addPass("surface.test.probe", QueueType::Graphics,
+                                 [&](PassBuilder& b) {
+                                     b.use(pts, Use::SrvCompute);
+                                     b.use(out, Use::UavCompute);
+                                     for (BufferRef x : { cb, table, pool }) b.use(x, Use::SrvCompute);
+                                 },
+                                 [=](PassContext& c) {
+                                     const uint32_t k[8] = { c.srv(pts), c.uav(out), count, 0, c.srv(cb), c.srv(table), c.srv(pool), 0 };
+                                     c.cmd->SetPipelineState(pso);
+                                     c.computeConstants(k, 8);
+                                     c.cmd->Dispatch((count + 63) / 64, 1, 1);
+                                 });
+                mirrored = tf.readbackBuffer(fc, out, (uint64_t)count * 32);
+            });
+            for (int a = 0; a < 3; ++a) { tf.frame.streamAxes[a] = 1; tf.frame.worldOrigin[a] = 0; }
+            const float* m = reinterpret_cast<const float*>(mirrored->data());
+            double worstMirror = 0;
+            uint32_t met = 0;
+            for (uint32_t n = 0; n < count; ++n)
+            {
+                const double q[3] = { streamPoints[n][0], streamPoints[n][1], streamPoints[n][2] };
+                const std::array<double, 6> ref = reference(live, halfLife, (double)(float)now, q);
+                bool any = false;
+                for (int c = 0; c < 6; ++c)
+                {
+                    const double e = std::abs(m[8 * n + c] - ref[c]);
+                    worstMirror = std::max(worstMirror, e / (1e-6 + std::abs(ref[c])));
+                    any |= ref[c] != 0;
+                    S_CHECK(e <= 2e-6 + 2e-6 * std::abs(ref[c]) + 1e-5 * std::abs(ref[c]), "mirrored point %u (stream %.4f, %.4f, %.4f) channel %d: %.7g vs %.7g", n, q[0], q[1], q[2], c,
+                            m[8 * n + c], ref[c]);
+                }
+                met += any;
+            }
+            S_CHECK(met > 500, "mirrored: only %u sample points met bricks", met);
+            std::printf("surface: World mirrored in z and origin (1024, -2048, 3072) m: %u points (%u inside bricks) match the stream-space reference (worst rel %.2e)\n",
+                        count, met, worstMirror);
+        }
         const uint32_t errors = tf.device.drainDebugMessages();
         S_CHECK(errors == 0, "%u debug-layer errors", errors);
         std::printf("surface: %zu bricks after 3 deltas (max probe %u), %u points (%u inside bricks) match the reference (worst rel %.2e)\n", live.size(),
