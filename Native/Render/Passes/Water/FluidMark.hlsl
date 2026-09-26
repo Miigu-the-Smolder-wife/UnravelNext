@@ -2,10 +2,12 @@
 // Fluid surface: mark the blocks a particle reaches: its 3^3 splat nodes, the marching cubes cells that use them and
 // the gradient neighbours of their corners (nodes [base - 2, base + 4]).
 #include "FluidSurface.hlsli"
+#include "WaterLinear.hlsli"
 
 [numthreads(256, 1, 1)]
-void main(uint i : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint thread : SV_GroupThreadID)
 {
+    const uint i = waterLinear(group, thread, 256);
     if (i >= fsCount()) return;
     RWByteAddressBuffer table = ResourceDescriptorHeap[P[4].x];
     int3 base = (int3)floor(fsParticle(i) - 0.5);

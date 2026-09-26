@@ -1,10 +1,12 @@
 // unx-kernel: cs_6_6 main
 // Fluid surface: clear the density of the active blocks (indirect, argument 0).
 #include "FluidSurface.hlsli"
+#include "WaterLinear.hlsli"
 
 [numthreads(256, 1, 1)]
-void main(uint i : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint thread : SV_GroupThreadID)
 {
+    const uint i = waterLinear(group, thread, 256);
     RWByteAddressBuffer counters = ResourceDescriptorHeap[P[4].w];
     if (i >= min(counters.Load(4 * FS_COUNTER_ACTIVE), fsMaxBlocks()) * FS_BLOCK_NODES) return;
     RWByteAddressBuffer density = ResourceDescriptorHeap[P[4].z];

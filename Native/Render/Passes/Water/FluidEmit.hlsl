@@ -4,6 +4,7 @@
 // negated density gradient (central differences at the corners, blended along the edge). Vertex = (world xyz, 1),
 // (normal xyz, 0); velocities (world m/s, 0) in their own buffer.
 #include "FluidSurface.hlsli"
+#include "WaterLinear.hlsli"
 
 groupshared float g_density[FS_WINDOW * FS_WINDOW * FS_WINDOW];
 groupshared float3 g_momentum[FS_WINDOW * FS_WINDOW * FS_WINDOW];
@@ -13,8 +14,11 @@ float3 fsGradient(int3 n)
     return float3(fsAt(n + int3(1, 0, 0)) - fsAt(n - int3(1, 0, 0)), fsAt(n + int3(0, 1, 0)) - fsAt(n - int3(0, 1, 0)), fsAt(n + int3(0, 0, 1)) - fsAt(n - int3(0, 0, 1)));
 }
 [numthreads(512, 1, 1)]
-void main(uint t : SV_GroupThreadID, uint g : SV_GroupID)
+void main(uint t : SV_GroupThreadID, uint3 group : SV_GroupID)
 {
+    const uint g = group.y * WATER_LINEAR_ROW + group.x;  // the active block (rows of WATER_LINEAR_ROW groups)
+    RWByteAddressBuffer blockCounters = ResourceDescriptorHeap[P[4].w];
+    if (g >= min(blockCounters.Load(4 * FS_COUNTER_ACTIVE), fsMaxBlocks())) return;  // the last row's extra groups
     RWByteAddressBuffer scan = ResourceDescriptorHeap[P[4].y];
     RWByteAddressBuffer info = ResourceDescriptorHeap[P[5].x];
     RWByteAddressBuffer blockTris = ResourceDescriptorHeap[P[5].y];

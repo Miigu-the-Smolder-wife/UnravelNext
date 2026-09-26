@@ -2,10 +2,12 @@
 // Fluid surface: each particle adds its quadratic B-spline weights (and weight x velocity) to its 3^3 nodes in fixed
 // point (integer atomics: the sums do not depend on the order).
 #include "FluidSurface.hlsli"
+#include "WaterLinear.hlsli"
 
 [numthreads(256, 1, 1)]
-void main(uint i : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint thread : SV_GroupThreadID)
 {
+    const uint i = waterLinear(group, thread, 256);
     if (i >= fsCount()) return;
     RWByteAddressBuffer table = ResourceDescriptorHeap[P[4].x];
     RWByteAddressBuffer density = ResourceDescriptorHeap[P[4].z];

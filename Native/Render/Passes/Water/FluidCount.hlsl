@@ -3,12 +3,16 @@
 // against the 0.5 level and its triangle count, a block prefix sum (the cell's first triangle in the block), and the
 // block total.
 #include "FluidSurface.hlsli"
+#include "WaterLinear.hlsli"
 
 groupshared uint g_density[FS_WINDOW * FS_WINDOW * FS_WINDOW];
 groupshared uint g_prefix[FS_BLOCK_NODES];
 [numthreads(512, 1, 1)]
-void main(uint t : SV_GroupThreadID, uint g : SV_GroupID)
+void main(uint t : SV_GroupThreadID, uint3 group : SV_GroupID)
 {
+    const uint g = group.y * WATER_LINEAR_ROW + group.x;  // the active block (rows of WATER_LINEAR_ROW groups)
+    RWByteAddressBuffer blockCounters = ResourceDescriptorHeap[P[4].w];
+    if (g >= min(blockCounters.Load(4 * FS_COUNTER_ACTIVE), fsMaxBlocks())) return;  // the last row's extra groups
     RWByteAddressBuffer scan = ResourceDescriptorHeap[P[4].y];
     RWByteAddressBuffer info = ResourceDescriptorHeap[P[5].x];
     RWByteAddressBuffer blockTris = ResourceDescriptorHeap[P[5].y];

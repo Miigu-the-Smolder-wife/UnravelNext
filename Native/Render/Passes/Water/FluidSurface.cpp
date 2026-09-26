@@ -1,5 +1,6 @@
 // Fluid surface reconstruction (track W, B8). See include/unx/water/FluidSurface.h and FluidSurface.hlsli.
 #include "unx/water/FluidSurface.h"
+#include "unx/water/LinearDispatch.h"
 
 #include "unx/core/Log.h"
 
@@ -277,7 +278,7 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
     auto direct = [&](const char* name, const char* kernel, uint32_t x) {
         ID3D12PipelineState* pso = m_shaders.compute(kernel);
         g.addPass(name, QueueType::Graphics, [&](PassBuilder& pb) { uses(pb, false); },
-                  [=](PassContext& c) { c.cmd->SetPipelineState(pso); constants(c); if (x) c.cmd->Dispatch(x, 1, 1); });
+                  [=](PassContext& c) { c.cmd->SetPipelineState(pso); constants(c); dispatchLinear(c.cmd, x); });
     };
     auto indirectPass = [&](const char* name, const char* kernel, uint32_t argument) {
         ID3D12PipelineState* pso = m_shaders.compute(kernel);

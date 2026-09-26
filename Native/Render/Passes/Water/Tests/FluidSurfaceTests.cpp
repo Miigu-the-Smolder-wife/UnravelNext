@@ -8,12 +8,17 @@
 //   4. blended ticks: the previous tick's buffer shuffled (indexed by each particle's tick-start slot), positions and
 //      velocities blended at alpha 0.3: equal to the reference of the blended particles
 //   5. isolated particles (spray) produce no surface (peak density 0.42 < 0.5)
+//   6. many blocks: 1,280 separate 2 x 2 x 2-cell clusters, one per block of a 256 x 8 x 320-node domain (more than
+//      WATER_LINEAR_ROW = 1,024 active blocks, so the per-block and per-node passes run on two-dimensional dispatches of
+//      rows): equal to the reference and closed
 //   Every mesh also carries vertex velocities (the density-weighted particle velocity), equal to the reference.
-//   unx_test_water_fluidsurfacetests [--no-debug-layer]
+//   unx_test_water_fluidsurfacetests [--no-debug-layer] [--warp]
 #include "unx/water/FluidSurface.h"
 
 #include "unx/core/File.h"
 #include "unx/core/Log.h"
+
+#include <dxgi1_6.h>
 
 #include <algorithm>
 #include <array>
@@ -153,12 +158,29 @@ Mesh reference(const unx::water::FluidSurfaceDesc& d, const std::vector<Particle
     return m;
 }
 
+ComPtr<ID3D12Device> warpDevice()
+{
+    ComPtr<IDXGIFactory4> factory;
+    check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "DXGI factory");
+    ComPtr<IDXGIAdapter> adapter;
+    check(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)), "WARP adapter");
+    ComPtr<ID3D12Device> device;
+    check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)), "WARP device");
+    return device;
+}
 struct Gpu
 {
+    ComPtr<ID3D12Device> external;
     Device device;
     ShaderLibrary shaders;
-    explicit Gpu(bool debugLayer)
-        : device([&] { DeviceOptions o; o.debugLayer = debugLayer; return o; }()), shaders(device, executableDirectory() / "shaders") {}
+    Gpu(bool debugLayer, bool warp)
+        : external(warp ? warpDevice() : nullptr), device([&] {
+              DeviceOptions o;
+              o.debugLayer = debugLayer && !warp;
+              o.externalDevice = external.Get();
+              return o;
+          }()),
+          shaders(device, executableDirectory() / "shaders") {}
 };
 
 ComPtr<ID3D12Resource> buffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE type)
@@ -311,10 +333,13 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true;
+        bool debugLayer = true, warp = false;
         for (int i = 1; i < argc; ++i)
+        {
             if (std::string(argv[i]) == "--no-debug-layer") debugLayer = false;
-        Gpu gpu(debugLayer);
+            if (std::string(argv[i]) == "--warp") warp = true;
+        }
+        Gpu gpu(debugLayer, warp);
         unx::water::FluidSurfaceDesc desc;
         desc.nodes[0] = desc.nodes[1] = desc.nodes[2] = 64;  // a 32^3-cell fluid domain at dx = 5 cm (h = 2.5 cm)
         desc.scale = 2; desc.h = 0.025f; desc.origin[0] = 10; desc.origin[1] = -2; desc.origin[2] = 3;
@@ -364,8 +389,27 @@ int main(int argc, char** argv)
         for (int i = 0; i < 20; ++i) { Particle p{}; p.x[0] = 4.0f + 1.2f * i; p.x[1] = 20; p.x[2] = 8; spray.push_back(p); }
         const auto sprayMesh = run(gpu, surface, spray, nullptr, 1);
         W_CHECK(sprayMesh.triangles == 0, "isolated particles made %u triangles", sprayMesh.triangles);
-        const uint32_t errors = gpu.device.drainDebugMessages();
-        W_CHECK(errors == 0, "%u debug-layer errors", errors);
+        // 6. many blocks
+        unx::water::FluidSurfaceDesc wide = desc;
+        wide.nodes[0] = 256; wide.nodes[1] = 8; wide.nodes[2] = 320;
+        wide.maxParticles = 100000; wide.maxTriangles = 400000;
+        FluidSurface wideSurface(gpu.device, gpu.shaders, wide);
+        std::vector<Particle> clusters;
+        for (int bz = 0; bz < 40; ++bz)
+            for (int bx = 0; bx < 32; ++bx)
+            {
+                const auto c = lattice(4 * bx + 1, 1, 4 * bz + 1, 4 * bx + 3, 3, 4 * bz + 3, all);
+                clusters.insert(clusters.end(), c.begin(), c.end());
+            }
+        const auto wideMesh = run(gpu, wideSurface, clusters, nullptr, 1), wideRef = reference(wide, clusters, nullptr, 1);
+        compare(wideMesh, wideRef, "many blocks");
+        checkClosed(wideMesh, wideRef, "many blocks");
+        std::printf("many blocks: 1280 clusters, %zu particles -> %u triangles, equal to the reference and closed\n", clusters.size(), wideMesh.triangles);
+        if (!warp)
+        {
+            const uint32_t errors = gpu.device.drainDebugMessages();
+            W_CHECK(errors == 0, "%u debug-layer errors", errors);
+        }
         std::printf("fluid surface: case table max %u triangles; box %zu particles -> %u triangles, volume %.4f %% off; sphere %zu -> %u, %.4f %%; cloud %zu -> %u; blend -> %u; "
                     "spray 0; all equal to the reference and closed\n",
                     maxCase, box.size(), boxMesh.triangles, 100 * (boxVolume / boxExpected - 1), sphere.size(), sphereMesh.triangles,
