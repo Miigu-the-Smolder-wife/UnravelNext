@@ -1,0 +1,24 @@
+note: track entry point W.waterGeometry (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+RayScene: 1 static + 0 dynamic instances (0 deformed), 1 mesh BLAS (12 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 7 ms (records and mesh BLAS 3.8, proxies 0.0, deformed setup 1.1, static TLAS and records 1.8, first dynamic build 0.9)
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 1 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+M shading: experiment mask 8192 leaves terms out (cost attribution run, not an image)
+note: track entry point W.water (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+    GPU: worst frame 509.880 ms over 4 frames; 139 passes; longest passes (worst of the frames):
+       237.089 ms  s.atmosphere.ms.single
+        31.220 ms  s.atmosphere.ms.radiance
+         4.792 ms  s.atmosphere.ms.project
+         2.735 ms  s.atmosphere.ms.density
+         1.591 ms  s.atmosphere.ms.irradiance
+         1.559 ms  s.atmosphere.transmittance
+         0.520 ms  s.atmosphere.ms.final
+         0.261 ms  s.atmosphere.skyview
+         0.192 ms  s.froxel.tiledepth
+         0.161 ms  test.readback
+         0.057 ms  s.vsm.pagemax
+         0.049 ms  m.lit.shade.b0
+FAIL hair_records_are_exact: C:\Users\USER\UnravelNext-Cint\Native\Render\Passes\Visibility\Tests\HairCoverageTests.cpp:208: CHECK failed: !byTime.empty() && byTime.front().first < 50.0
+0/1 passed
+GpuLock.ps1: background: cpu 22 s >= 4 cores, peak 6.0 cores

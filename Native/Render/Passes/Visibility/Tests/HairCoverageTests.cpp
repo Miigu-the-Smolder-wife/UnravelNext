@@ -14,10 +14,13 @@
 #include "unx/core/Log.h"
 #include "unx/hair/Hair.h"
 #include "unx/render/FrameRenderer.h"
+#include "unx/render/GpuProfiler.h"
 #include "unx/render/GpuScene.h"
 #include "unx/render/Tracks.h"
 
+#include <algorithm>
 #include <cmath>
+#include <map>
 #include <cstring>
 #include <exception>
 #include <string>
@@ -142,8 +145,22 @@ int main()
         std::vector<uint32_t> tiles, records;
         float4x4 vp{};
         const float4x4 first = ViewDesc::fromCamera(cam, width, height, {}).viewProj;
+        // Worst GPU time of every pass over the frames, reported (the 2026-09-26 TDR ran this test beside a game; INTERFACES
+        // 3.6 bounds each dispatch).
+        GpuProfiler profiler(device(), 2, 4096);
+        std::map<std::string, double> worstPass;
+        double worstFrame = 0;
+        auto collect = [&]() {
+            if (const FrameTiming* t = profiler.lastCompleted())
+            {
+                worstFrame = std::max(worstFrame, t->gpuFrameMs);
+                for (const PassTiming& pt : t->passes) worstPass[pt.name] = std::max(worstPass[pt.name], pt.durationMs());
+            }
+        };
         for (uint32_t f = 0; f < 4; ++f)
         {
+            profiler.beginFrame(f);
+            collect();
             hs.tick(body, &joint, 1, nullptr, 0, { 0, 0, 0 }, 1.0f / 60);
             FrameContext fr;
             fr.frameIndex = f;
@@ -172,10 +189,24 @@ int main()
                               c.cmd->CopyBufferRegion(tl, 0, c.resource(main.coverageTiles), 0, tileCount * 32);
                               c.cmd->CopyBufferRegion(rc, 0, c.resource(main.coverageRecords), 0, poolBytes);
                           });
-            graph.execute(nullptr);
+            graph.execute(&profiler);
             device().waitIdle();
             tiles = readWords(tl, tileCount * 8);
             records = readWords(rc, poolBytes / 4);
+        }
+        for (uint32_t f = 4; f < 6; ++f)
+        {
+            profiler.beginFrame(f);  // reads back frames 2 and 3
+            collect();
+        }
+        {
+            std::vector<std::pair<double, std::string>> byTime;
+            for (const auto& [name, ms] : worstPass) byTime.push_back({ ms, name });
+            std::sort(byTime.rbegin(), byTime.rend());
+            logf("    GPU: worst frame %.3f ms over 4 frames; %zu passes; longest passes (worst of the frames):\n", worstFrame, byTime.size());
+            for (size_t i = 0; i < byTime.size() && i < 12; ++i) logf("      %8.3f ms  %s\n", byTime[i].first, byTime[i].second.c_str());
+            // A pass may hold many dispatches (S builds its multiple-scattering table in 32 slices); the per-dispatch bound
+            // (INTERFACES 3.6) is judged from these with the pass split per dispatch (Results/C/Tdr).
         }
 
         // Expected: the ribbons of the rest pose (world = joint + rest position), built as HairRaster.ms builds them.

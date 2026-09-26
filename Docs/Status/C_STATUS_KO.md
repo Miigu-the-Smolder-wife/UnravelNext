@@ -71,7 +71,7 @@ powershell -File Reference/Tools/RenderQueue.ps1                   게이트 기
 
 ## 재개 지점 (2026-09-27, 분류 결정으로 정지; 9/30 초기화 뒤 재개)
 
-0. **먼저**: haircoverage 시험의 dispatch별 최장 시간을 게임 없이 실측해 적고, 약 50 ms를 넘는 것은 구조로 쪼갠다(INTERFACES 3.6). 경합에서 TDR이 났다면 혼자서도 수백 ms급 dispatch가 있을 가능성이 크다(조정 지적).
+0. (9/27 완료) haircoverage 시험 dispatch 최장 시간 실측(`Results/C/Tdr`): 모든 dispatch가 약 1 ms 이하다(S 다중 산란 표 PASS 0은 z 조각 32개로 조각당 0.44~0.86 ms, ms.radiance 32 dispatch 합 31 ms). 50 ms 넘는 dispatch가 없어 쪼갤 것이 없다. 첫 프레임 합계는 0.28~0.51 s이고 S의 1회성 다중 산란 표 빌드가 대부분이다(첫 실행 한 번 ms.single 237 ms, 다음 실행 13.9 ms: 첫 실행 클럭·초기화 차이). 결론: 이 시험에는 긴 dispatch가 없다. 9/26 TDR은 게임과 GPU를 나눠 쓰는 중 0.3~0.5 s 첫 프레임 명령 목록이 걸린 것으로 보이며 근본 원인(드라이버 선점)은 이 시험으로 더 가를 수 없다. 첫 프레임 멈칫은 S에 알림.
 1. 착지: A6 투과 층(f0f1031, v1.67), A11 단면 재질(8335200, v1.71), 특수 기록 목록·M 선셰이딩 비트·A14 V/코어 부분·바다 V 부분·HiZ 크기 변경 결함 수정(v1.73). TDR(9/26 23:15): 세 변경은 원인이 아님(게임 없는 하드웨어에서 켜고 끈 실행 모두 통과, `Results/C/Bisect`). 게임 경합은 계기일 뿐이다. 구조로 묶인 dispatch는 경합에서도 2 s에 닿지 않으므로 근본 원인은 미확정이다.
 2. A14 나머지: 보조 뷰의 froxels·GI·reflections·particles 뷰별 호출은 각 트랙 일반화 뒤(요청 20260926_C_per_view_history 5절: S는 shadowMarkView·froxels(view)·뷰별 클립맵 조건, R은 renderView 두 단계 분할). Split 뷰 post·FrameConstants viewOutputs는 렌더 A. FrameRenderer 수준 A14 시험(주 뷰 + 크기가 다른 보조 뷰 2개)이 남았다.
 3. 바다: W가 waterGeometry에서 oceanDepth·waterSurface를 채우고, W의 가장자리 32 부표본 패스를 FrameServices::coverageAppend에 건다(W 몫). 합류 뒤 바다 가장자리 기록의 면적 정확성 시험을 V 쪽에 추가한다.
