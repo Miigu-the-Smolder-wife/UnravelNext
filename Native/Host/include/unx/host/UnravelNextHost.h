@@ -40,7 +40,7 @@ enum UnxResult
                             //    UnxSceneAddBlendShape, UnxSceneSetVertexAnimation, UnxFrameSetMorphs (C4),
                             //    UnxFrameSetOriginShift (C9), UnxSceneReserveRuntime, UnxFrameAddRuntimeMesh,
                             //    UnxFrameRemoveRuntimeMesh, UnxFrameAddRuntimeInstance, UnxFrameRemoveRuntimeInstance,
-                            //    UnxFrameSetRuntimeTransforms (C2b), UnxFrameSetTerrainDeformation (C5)
+                            //    UnxFrameSetRuntimeTransforms (C2b), UnxFrameSetTerrainDeformation (C5), UnxFrameSetOcean (B7)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -474,6 +474,25 @@ typedef struct UnxFluidInput
 static_assert(sizeof(UnxFluidInput) == 32, "UnxFluidInput is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxFrameSetFluids(UnxRenderer r, const UnxFluidInput* fluids, uint32_t count, const uint64_t stamp[6]);
+
+// B7 the sea (optional export within ABI 6, INTERFACES v1.72; engine 1's W: FFT spectrum and view grid): the frames queued
+// from now on draw this sea until the next call (null: none). World coordinates (the renderer applies its origin shifts
+// to the level and the lake centre). windDirection in radians; horizontalBound / verticalBound: the roughest sea's
+// horizontal and vertical displacement bounds R and A (m); lake: 0 the open sea, 1 a circular lake.
+typedef struct UnxOceanDesc
+{
+    uint32_t size, version;             // sizeof (72), 1
+    float windSpeed, windDirection, fetch, spread;
+    uint32_t seed, lake;
+    double level;                       // still water height, world (m)
+    double lakeCentre[2];               // world (x, z), m
+    float horizontalBound, verticalBound, lakeRadius;
+    uint32_t reserved;                  // 0
+} UnxOceanDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxOceanDesc) == 72, "UnxOceanDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetOcean(UnxRenderer r, const UnxOceanDesc* ocean);
 
 // Loads a .unxscene file (INTERFACES 6.2) as the renderer's content: textures, materials, meshes, skeletons, instances
 // (their flags included), lights, sun, atmosphere and wind, with the file's indices. Only before any content was added and

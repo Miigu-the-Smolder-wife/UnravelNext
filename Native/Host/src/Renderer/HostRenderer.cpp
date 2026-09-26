@@ -114,6 +114,11 @@ HostRenderer::HostRenderer(const HostRendererOptions& options) : m_options(optio
     {
         d.debugLayer = options.debugLayer;
         d.gpuValidation = options.gpuValidation;
+        if (options.standaloneDevice)
+        {
+            if (options.debugLayer || options.gpuValidation) fail("a standalone renderer on a given device has no debug layer");
+            d.externalDevice = options.standaloneDevice;
+        }
     }
     else
     {
@@ -984,6 +989,42 @@ void HostRenderer::setFluids(std::span<const FluidInput> fluids, const uint64_t 
     std::copy(std::begin(stamp), std::end(stamp), m_fluidStamp.begin());
 }
 
+void HostRenderer::setOcean(const OceanInput* ocean)
+{
+    requireCommitted();
+    if (ocean)
+    {
+        const OceanInput& o = *ocean;
+        const bool finite = std::isfinite(o.windSpeed) && std::isfinite(o.windDirection) && std::isfinite(o.fetch) && std::isfinite(o.spread) && std::isfinite(o.level) &&
+                            std::isfinite(o.lakeCentre[0]) && std::isfinite(o.lakeCentre[1]);
+        if (!finite || !(o.windSpeed >= 0) || !(o.fetch > 0) || !(o.spread >= 0) || !(o.horizontalBound > 0) || !(o.verticalBound > 0) || (o.lake && !(o.lakeRadius > 0)))
+            fail("ocean: wind speed %g (>= 0), fetch %g (> 0), spread %g (>= 0), bounds %g %g (> 0), lake radius %g (> 0 for a lake)", o.windSpeed, o.fetch, o.spread,
+                 o.horizontalBound, o.verticalBound, o.lakeRadius);
+    }
+    std::lock_guard lock(m_mutex);
+    m_ocean = ocean ? std::optional<OceanInput>(*ocean) : std::nullopt;
+}
+
+std::optional<render::OceanFrame> HostRenderer::oceanFrameLocked() const
+{
+    if (!m_ocean) return std::nullopt;
+    const OceanInput& o = *m_ocean;
+    render::OceanFrame f;
+    f.windSpeed = o.windSpeed, f.windDirection = o.windDirection, f.fetch = o.fetch, f.spread = o.spread, f.seed = o.seed;
+    f.level = (float)(o.level - m_mainOriginOffset.y);
+    f.horizontalBound = o.horizontalBound, f.verticalBound = o.verticalBound;
+    f.lake = o.lake ? 1u : 0u;
+    f.lakeCentre[0] = (float)(o.lakeCentre[0] - m_mainOriginOffset.x), f.lakeCentre[1] = (float)(o.lakeCentre[1] - m_mainOriginOffset.z);
+    f.lakeRadius = o.lakeRadius;
+    return f;
+}
+
+std::optional<render::OceanFrame> HostRenderer::queuedOcean()
+{
+    std::lock_guard lock(m_mutex);
+    return oceanFrameLocked();
+}
+
 void HostRenderer::fluidsBeforeExecute(const FramePacket& p)
 {
     m_fluidTicket = 0;
@@ -1105,6 +1146,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.hairFraction = m_pending.hairFraction;
     packet.fluids = m_fluids;  // (a state: every frame reads the latest until the host sets another)
     packet.fluidStamp = m_fluidStamp;
+    packet.ocean = oceanFrameLocked();  // in this frame's coordinates (the origin shifts applied so far)
     m_decalsChanged = false;
     m_pending = FramePacket{};
     m_packets.push_back(std::move(packet));
@@ -1417,6 +1459,7 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
         for (const FramePacket::Fluid& f : *p.fluids) fluidFrames.push_back(f.frame);
     fc.fluids = fluidFrames.empty() ? nullptr : fluidFrames.data();
     fc.fluidCount = (uint32_t)fluidFrames.size();
+    fc.ocean = p.ocean ? &*p.ocean : nullptr;
     m_lastDiscontinuity = p.discontinuity;
     m_lastGpuSimulation = p.gpuSimulation;
     m_prevViewProj = fc.mainView.viewProj;

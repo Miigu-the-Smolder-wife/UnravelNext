@@ -502,6 +502,27 @@ UNX_API int32_t UNX_CALL UnxFrameSetFluids(UnxRenderer r, const UnxFluidInput* f
     });
 }
 
+UNX_API int32_t UNX_CALL UnxFrameSetOcean(UnxRenderer r, const UnxOceanDesc* ocean)
+{
+    return call([&] {
+        if (!ocean)
+        {
+            find(r)->setOcean(nullptr);
+            return;
+        }
+        if (ocean->size != sizeof(UnxOceanDesc) || ocean->version != 1) fail("UnxFrameSetOcean: UnxOceanDesc size %u version %u", ocean->size, ocean->version);
+        HostRenderer::OceanInput in;
+        in.windSpeed = ocean->windSpeed, in.windDirection = ocean->windDirection, in.fetch = ocean->fetch, in.spread = ocean->spread;
+        in.seed = ocean->seed;
+        in.level = ocean->level;
+        in.horizontalBound = ocean->horizontalBound, in.verticalBound = ocean->verticalBound;
+        in.lake = ocean->lake != 0;
+        in.lakeCentre[0] = ocean->lakeCentre[0], in.lakeCentre[1] = ocean->lakeCentre[1];
+        in.lakeRadius = ocean->lakeRadius;
+        find(r)->setOcean(&in);
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxHairAddBody(UnxRenderer r, const UnxHairBodyDesc* desc, uint32_t* body)
 {
     return call([&] {
@@ -647,7 +668,8 @@ UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor)
         if (!h->committed()) fail("UnxVfxStreamExecutor: commit the scene first");
         NV_StreamExecutor e{};
         e.size = sizeof(NV_StreamExecutor);
-        e.version = NV_STREAM_EXECUTOR_HEIGHTFIELDS;  // heightfield sections (FX ParticleSystem, Particles.hlsli hooks)
+        e.version = NV_STREAM_EXECUTOR_WIND_TURBULENCE;  // heightfield sections and World wind turbulence (FX ParticleSystem,
+                                                         // Particles.hlsli hooks)
         e.user = h.get();
         e.submit = vfxSubmitCallback;
         e.readback = vfxReadbackCallback;

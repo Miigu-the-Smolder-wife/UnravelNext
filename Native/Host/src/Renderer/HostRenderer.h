@@ -55,6 +55,7 @@ struct HostRendererOptions
     uint32_t framesInFlight = 2;
     bool debugLayer = false;                       // standalone only: D3D12 debug layer (correctness runs)
     bool gpuValidation = false;                    // standalone only: GPU-based validation (implies debugLayer)
+    ID3D12Device* standaloneDevice = nullptr;      // standalone on this device with queues of its own (tests on WARP; no debug layer)
     std::filesystem::path shaderDirectory;
     std::filesystem::path qualityDirectory;
     std::vector<std::string> qualityOverrides;     // "section.key=value" applied after the directory (a game's settings)
@@ -175,6 +176,7 @@ struct FramePacket
     };
     std::shared_ptr<const std::vector<Fluid>> fluids;
     std::array<uint64_t, 6> fluidStamp{};  // NRC_GpuWorldStamp of their tick (world, generation, epoch, tick, branch, phase)
+    std::optional<render::OceanFrame> ocean;  // B7: the sea in this frame's coordinates (FrameContext::ocean)
 };
 
 // The render graph of one recorded frame (RenderGraphStats, the fields the host reports).
@@ -327,6 +329,21 @@ public:
         uint32_t material = 0;       // the scene material of its surface (Water class)
     };
     void setFluids(std::span<const FluidInput> fluids, const uint64_t (&stamp)[6]);
+    // B7 the sea for the frames queued from now on until the next call (null: none). World coordinates; each frame takes
+    // it in its own coordinates (level and lake centre less the origin shifts applied by then).
+    struct OceanInput
+    {
+        float windSpeed = 0, windDirection = 0, fetch = 0, spread = 0;
+        uint32_t seed = 0;
+        double level = 0;
+        float horizontalBound = 0, verticalBound = 0;
+        bool lake = false;
+        double lakeCentre[2] = {};
+        float lakeRadius = 0;
+    };
+    void setOcean(const OceanInput* ocean);
+    // The sea the next queued frame takes, in that frame's coordinates (tests).
+    std::optional<render::OceanFrame> queuedOcean();
     void setSimulation(uint32_t gpuSimulation);
     // Sun, atmosphere and (when set) wind of the following frames.
     void setEnvironment(const scene::Sun& sun, const scene::Atmosphere& atmosphere, std::optional<FramePacket::Wind> wind);
@@ -520,6 +537,8 @@ private:
     std::vector<uint32_t> m_hairFree;           // (m_mutex) free ids, reused last-freed first (HairSystem's rule)
     std::shared_ptr<const std::vector<FramePacket::Fluid>> m_fluids;  // (m_mutex) the fluids every queued frame takes
     std::array<uint64_t, 6> m_fluidStamp{};                          // (m_mutex)
+    std::optional<OceanInput> m_ocean;                               // (m_mutex) the sea every queued frame takes
+    std::optional<render::OceanFrame> oceanFrameLocked() const;      // (m_mutex held) m_ocean in the current coordinates
     uint64_t m_fluidTicket = 0;                  // submission thread: the frame's bridge admission (0: none)
     std::vector<render::FluidFrame> m_fluidFrames;  // submission thread: FrameContext::fluids of the frame being recorded
     std::unique_ptr<render::RenderGraph> m_simGraph;  // the claimed ticks' graph (compute queue)

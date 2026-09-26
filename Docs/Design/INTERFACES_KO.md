@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.71, 2026-09-26)
+# UnravelNext 인터페이스 (v1.72, 2026-09-27)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -734,6 +734,11 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.72 (2026-09-27, 렌더 A: B7 바다 입력, 엔진 1 W 제안):
+  - **`FrameContext::ocean`(core)와 `render::OceanFrame`**: 바람 속도·방향(rad)·fetch·spread·seed(unx::water::OceanDesc), 수위(이 프레임 좌표), 가장 거친 바다의 수평·수직 변위 한계 R·A(m), 물 몸체(0 열린 바다, 1 원형 호수: 중심 (x, z)·반경). null이면 바다가 없다. record()가 끝날 때까지 유효하다. 시간은 `time`, 카메라는 mainView다. W의 waterGeometry가 FFT와 뷰 격자로 `FrameResources::oceanDepth`와 `waterSurface`를 채운다(두 칸과 바다 id `COV_STREAM_ID | 63 << 24`, 가장자리 kind 4는 W·V 합의).
+  - **호스트**: `HostRenderer::setOcean(const OceanInput*)`(null = 끔)와 선택 export `UnxFrameSetOcean(r, const UnxOceanDesc* 72 B)`. 설정은 상태다. 입력은 월드 좌표이고, 각 프레임은 큐에 넣을 때 그때까지의 원점 이동(1024 m 격자)을 수위와 호수 중심에서 뺀 값을 받는다. 스펙트럼은 바뀌지 않는다. W는 FFT 위상을 위해 `originShift` 누적(1024 m 법)을 스스로 유지한다. 검증은 호출 스레드에서 한다: 유한값, 바람 ≥ 0, fetch > 0, spread ≥ 0, R·A > 0, 호수면 반경 > 0.
+  - `HostRendererOptions::standaloneDevice`: 주어진 장치(WARP 등)에서 독립 렌더러를 만든다(디버그 계층 없음). 소프트웨어 어댑터의 독립 프레임 경로는 시스템의 디스플레이 mux 조회(`QueryMuxDListForApplication`)에서 정수 0 나눗셈으로 멈추므로, WARP 시험은 프레임 없는 부분만 돈다.
+  - [실측, WARP] `unx_test_host_hostocean --warp`: 원점 이동 (1024, −2048, 3072) 뒤 수위 2.5 → 2050.5, 호수 중심 (100, −40) → (−924, −3112), 스펙트럼 불변. 잘못된 입력 5종 거부. 프레임 렌더 부분은 하드웨어 보류가 풀린 뒤 돈다.
 - v1.71 (2026-09-26, 렌더 C, A11 파괴 단면 재질):
   - 8.1 Cut 정의(위). 클러스터 삼각형 워드 비트 24..26 = Cut 삼각형의 경계 변(다른 재질 삼각형은 0). 지금의 판독은 모두 하위 24비트만 가려 읽는다.
   - `Passes/Material/CutFace.hlsli`: `cutFaceProjection`, `cutFaceWhiteout`, `cutFaceEdgeDistance`, `cutFaceDamage`, `cutFaceApplyDamage`. M 해석 합류는 렌더 A(MSurface에 객체 공간 p·도함수·bary·꼭짓점 추가).

@@ -63,6 +63,18 @@ struct FluidFrame
     uint32_t material = 0;              // the scene material of its surface (Water class)
 };
 
+// B7 (engine 1 W, INTERFACES v1.72): the frame's sea - unx::water::OceanDesc's spectrum, the still water level and the
+// water body - read by W's waterGeometry (FFT, view grid) into FrameResources::oceanDepth / waterSurface.
+struct OceanFrame
+{
+    float windSpeed = 0, windDirection = 0, fetch = 0, spread = 0;  // unx::water::OceanDesc
+    uint32_t seed = 0;
+    float level = 0;                          // still water height (this frame's coordinates: origin shifts applied)
+    float horizontalBound = 0, verticalBound = 0;  // the roughest sea's R and A (m), used until the sea is measured
+    uint32_t lake = 0;                        // water body: 0 the open sea, 1 a circular lake
+    float lakeCentre[2] = {}, lakeRadius = 0; // (x, z) in this frame's coordinates, m
+};
+
 struct FrameContext
 {
     uint64_t frameIndex = 0;
@@ -111,6 +123,8 @@ struct FrameContext
     // v1.70 (B8, engine 1 W): this frame's GPU fluids (valid until record() returns; none: fluidCount 0).
     const FluidFrame* fluids = nullptr;
     uint32_t fluidCount = 0;
+    // v1.72 (B7, engine 1 W): this frame's sea (null: none; valid until record() returns). Time: 'time', camera: mainView.
+    const OceanFrame* ocean = nullptr;
 };
 constexpr float kOriginGrid = 1024.0f;
 constexpr uint32_t kGpuSimulationSoft = 1, kGpuSimulationVfx = 2, kGpuSimulationRigid = 4;
