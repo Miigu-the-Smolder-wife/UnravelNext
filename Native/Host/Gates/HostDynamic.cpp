@@ -9,8 +9,11 @@
 //       [--characters 256] [--bones 64] [--triangles 60000] [--frames 600] [--resolution 4K|1440p|both]
 //   unx_gate_host_hostdynamic.exe --scene ... --save-scene <file.unxscene>   (content only, no lock; inspect with
 //       unx_gate_host_hostscene --scene <file> --describe)
+//   ... --bench <dir>/gamebench_<variant>.json: the game bench's scene, bodies and camera track (BenchTrack.h): one frame
+//       per tick of the track, cuts as camera cuts, results per case (and the first frame after every cut).
 // The bodies file must come from the same generator build as the scene (every body's instance is dynamic and starts at the
 // file's position); a missing or mismatched file stops the gate (no fallback placement).
+#include "BenchTrack.h"
 #include "BodiesFile.h"
 #include "Contention.h"
 
@@ -62,6 +65,7 @@ struct Api
     UNX_FN(UnxFrameStatsLatest)
     UNX_FN(UnxFramePassTimingsLatest)
     UNX_FN(UnxFrameGraphStatsLatest)
+    UNX_FN(UnxFrameSetDiscontinuity)
 #undef UNX_FN
     void load(const std::filesystem::path& path)
     {
@@ -89,6 +93,7 @@ struct Api
         UNX_FN(UnxFrameStatsLatest)
         UNX_FN(UnxFramePassTimingsLatest)
         UNX_FN(UnxFrameGraphStatsLatest)
+        UNX_FN(UnxFrameSetDiscontinuity)
 #undef UNX_FN
     }
     void ok(int32_t r, const char* what) const
@@ -247,7 +252,8 @@ int main(int argc, char** argv)
     try
     {
         uint32_t characters = 256, bones = 64, triangles = 60000, frames = 600;
-        std::string resolutionArg = "both", saveScene, scenePath, bodiesPath;
+        std::string resolutionArg = "both", saveScene, scenePath, bodiesPath, benchPath;
+        bool charactersGiven = false;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -257,13 +263,21 @@ int main(int argc, char** argv)
             };
             if (a == "--scene") scenePath = next();
             else if (a == "--bodies-file") bodiesPath = next();
-            else if (a == "--characters") characters = (uint32_t)std::stoul(next());
+            else if (a == "--characters") { characters = (uint32_t)std::stoul(next()); charactersGiven = true; }
+            else if (a == "--bench") benchPath = next();
             else if (a == "--bones") bones = (uint32_t)std::stoul(next());
             else if (a == "--triangles") triangles = (uint32_t)std::stoul(next());
             else if (a == "--frames") frames = (uint32_t)std::stoul(next());
             else if (a == "--resolution") resolutionArg = next();
             else if (a == "--save-scene") saveScene = next();
             else fail("unknown argument %s", a.c_str());
+        }
+        gate::BenchTrack bench;
+        if (!benchPath.empty())
+        {
+            bench = gate::loadBench(benchPath);
+            if (scenePath.empty()) scenePath = bench.scene.string();
+            if (bodiesPath.empty()) bodiesPath = bench.bodies.string();
         }
         if (scenePath.empty()) fail("--scene <dir>/<s>.unxscene is required (unx_scenegen --scene <s> --out <dir> --bodies <dir>/<s>_bodies.json)");
         if (bodiesPath.empty())
@@ -289,6 +303,7 @@ int main(int argc, char** argv)
                 bodyInstance[k] = b.instance;
                 std::memcpy(placement.bodies[k].base, in.transform.m, sizeof placement.bodies[k].base);
             }
+            if (!benchPath.empty() && !charactersGiven) characters = (uint32_t)placement.characters.size();  // a bench fills its slots
             if (characters > placement.characters.size()) fail("%u characters, the file has %zu slots", characters, placement.characters.size());
         }
         // --save-scene writes the content and stops before commit: a correctness/content tool, no measurement, no lock.
@@ -387,9 +402,23 @@ int main(int argc, char** argv)
             // Frames queued before the 1.5 s warm-up ends never count, even when their timings arrive later (the first frame
             // creates pipelines and builds the atmosphere LUTs).
             uint64_t firstMeasured = UINT64_MAX;
-            for (uint64_t frame = 0; gpuMs.size() < frames; ++frame)
+            // Bench: one frame per tick of the track, then a few more (the last ticks' timings arrive frames later).
+            const uint64_t benchTicks = bench.samples.size();
+            std::vector<std::vector<double>> caseGpu(bench.cases.size()), caseClean(bench.cases.size());
+            std::vector<std::pair<uint64_t, double>> cutFrames;  // (tick, GPU ms) of the first frame after every cut
+            std::map<uint64_t, double> gpuByTick;
+            for (uint64_t frame = 0; benchTicks ? frame < benchTicks + 4 : gpuMs.size() < frames; ++frame)
             {
                 const float t = (float)frame / 60.0f;
+                if (benchTicks)
+                {
+                    const gate::BenchSample& b = bench.samples[std::min<uint64_t>(frame, benchTicks - 1)];
+                    std::memcpy(camera.position, b.position, sizeof camera.position);
+                    std::memcpy(camera.forward, b.forward, sizeof camera.forward);
+                    gate::benchUp(b.forward, camera.up);
+                    camera.verticalFov = b.verticalFovDeg * 3.14159265f / 180.0f;
+                    if (b.cut && frame < benchTicks) api.ok(api.UnxFrameSetDiscontinuity(r, UNX_DISCONTINUITY_CUT), "UnxFrameSetDiscontinuity");
+                }
                 // The host's values (a World's interpolated bodies, an animation system's poses) exist before the calls;
                 // only the calls are timed.
                 for (uint32_t b = 0; b < bodies; ++b)
@@ -431,8 +460,10 @@ int main(int argc, char** argv)
                 if (s.frameIndex != UINT64_MAX && s.frameIndex >= firstMeasured && s.frameIndex != lastStats)
                 {
                     lastStats = s.frameIndex;
+                    if (benchTicks && s.frameIndex >= benchTicks) continue;  // the drain frames after the track
                     gpuMs.push_back(s.gpuMs);
                     gpuFrames.push_back(s.frameIndex);
+                    if (benchTicks) gpuByTick[s.frameIndex] = s.gpuMs;
                     UnxFrameGraphStats gs{};
                     gs.size = sizeof gs;
                     gs.version = 2;
@@ -474,6 +505,33 @@ int main(int argc, char** argv)
                 if (at != submittedAt.end() && contention.contended(at->second)) ++contendedFrames;
                 else clean.push_back(gpuMs[i]);
             }
+            std::string casesJson;
+            if (benchTicks)
+            {
+                // Per case over its measured ticks (ticks before the warm-up end have no timing), contended frames apart.
+                for (size_t i = 0; i < gpuMs.size(); ++i)
+                {
+                    const int c = bench.caseOf(gpuFrames[i]);
+                    if (c < 0) continue;
+                    caseGpu[c].push_back(gpuMs[i]);
+                    const auto at = submittedAt.find(gpuFrames[i]);
+                    if (!(at != submittedAt.end() && contention.contended(at->second))) caseClean[c].push_back(gpuMs[i]);
+                }
+                for (size_t c = 0; c < bench.cases.size(); ++c)
+                    casesJson += format("%s\"%s\": {\"ticks\": [%llu, %llu], \"gpuFrameMs\": %s, \"gpuFrameMsUncontended\": %s}", casesJson.empty() ? "" : ", ",
+                                        bench.cases[c].name.c_str(), (unsigned long long)bench.cases[c].begin, (unsigned long long)bench.cases[c].end,
+                                        distJson(caseGpu[c]).c_str(), distJson(caseClean[c]).c_str());
+                std::string cuts;
+                for (uint64_t k = 0; k < benchTicks; ++k)
+                    if (bench.samples[k].cut)
+                    {
+                        const auto g = gpuByTick.find(k);
+                        cuts += format("%s{\"tick\": %llu, \"gpuFrameMs\": %s}", cuts.empty() ? "" : ", ", (unsigned long long)k,
+                                       g != gpuByTick.end() ? format("%.5f", g->second).c_str() : "null");
+                    }
+                casesJson = format("\"bench\": {\"name\": \"%s\", \"ticks\": %llu, \"lens\": \"focal length, aperture and focus in the track are not used (no lens in the renderer yet)\", \"cases\": {%s}, \"cutFrames\": [%s]}, ",
+                                   bench.name.c_str(), (unsigned long long)benchTicks, casesJson.c_str(), cuts.c_str());
+            }
             std::string samples;
             for (const std::string& line : contention.samples) samples += (samples.empty() ? "" : ", ") + line;
             const std::string contentionJson = contention.sampled
@@ -494,8 +552,8 @@ int main(int argc, char** argv)
             std::string passJson;
             // Per pass over the frames it ran in (passes that run only on some frames, e.g. LUT rebuilds, have count < frames).
             for (const std::string& name : order) passJson += format("%s\n      \"%s\": %s", passJson.empty() ? "" : ",", name.c_str(), distJson(passMs[name]).c_str());
-            json += format("%s    {\"resolution\": \"%s\", \"meshTriangles\": %llu, \"instances\": %u, \"bodyRestarts\": %llu, \"clusters\": %llu, \"sceneBuildMs\": %.1f, \"gpuFrameMs\": %s, \"hostUpdateMs\": %s, \"cpuRecordMs\": %s, \"cpuSubmitMs\": %s, \"graph\": %s, \"gpuContention\": %s, \"passMs\": {%s}}",
-                           firstRun ? "" : ",\n", rs.c_str(), (unsigned long long)info.triangles, info.instances, (unsigned long long)teleports, (unsigned long long)info.clusters,
+            json += format("%s    {%s\"resolution\": \"%s\", \"meshTriangles\": %llu, \"instances\": %u, \"bodyRestarts\": %llu, \"clusters\": %llu, \"sceneBuildMs\": %.1f, \"gpuFrameMs\": %s, \"hostUpdateMs\": %s, \"cpuRecordMs\": %s, \"cpuSubmitMs\": %s, \"graph\": %s, \"gpuContention\": %s, \"passMs\": {%s}}",
+                           firstRun ? "" : ",\n", casesJson.c_str(), rs.c_str(), (unsigned long long)info.triangles, info.instances, (unsigned long long)teleports, (unsigned long long)info.clusters,
                            info.buildMs, distJson(gpuMs).c_str(), distJson(updateMs).c_str(), distJson(recordMs).c_str(),
                            distJson(submitMs).c_str(), graphJson.c_str(), contentionJson.c_str(), passJson.c_str());
             firstRun = false;
