@@ -266,6 +266,7 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
         k.p[4][0] = c.uav(table); k.p[4][1] = c.uav(scan); k.p[4][2] = c.uav(density); k.p[4][3] = c.uav(counters);
         k.p[5][0] = c.uav(info); k.p[5][1] = c.uav(blockTris); k.p[5][2] = c.uav(vertices); k.p[5][3] = c.srv(cases);
         k.p[6][0] = c.uav(dispatch); k.p[6][1] = c.uav(draw); k.p[6][2] = c.uav(velocities);
+        k.p[6][3] = (in.axes[0] < 0 ? 1u : 0u) | (in.axes[1] < 0 ? 2u : 0u) | (in.axes[2] < 0 ? 4u : 0u);
         k.p[7][0] = in.velocityOffset; std::memcpy(&k.p[7][1], &in.velocityScale, 4); k.p[7][2] = in.previousSlotOffset; k.p[7][3] = first ? 1 : 0;
         c.computeConstants(&k, 32);
     };

@@ -2,7 +2,9 @@
 // Fluid surface: one group per active block (indirect, argument 1): each cell writes its triangles at its block's
 // first triangle + its prefix. Vertices sit on the cube edges where the density crosses 0.5 (linear), normals are the
 // negated density gradient (central differences at the corners, blended along the edge). Vertex = (world xyz, 1),
-// (normal xyz, 0); velocities (world m/s, 0) in their own buffer.
+// (normal xyz, 0); velocities (world m/s, 0) in their own buffer. The grid lives in the particles' space; positions,
+// normals and velocities are written in the renderer's (fsAxes: the host's World is the renderer's mirrored in z), a
+// mirror swapping each triangle's last two vertices so its outside stays counter-clockwise.
 #include "FluidSurface.hlsli"
 #include "WaterLinear.hlsli"
 
@@ -39,6 +41,8 @@ void main(uint t : SV_GroupThreadID, uint3 group : SV_GroupID)
     uint first = blockTris.Load(4 * (fsMaxBlocks() + g)) + (cell >> 8);
     int3 c = int3(t % 8, (t / 8) % 8, t / 64);
     float h = fsH(); float3 world0 = fsOrigin() + (float3)(block * 8 + c) * h;
+    const float3 axes = fsAxes();
+    const bool mirrored = fsMirrored();
     for (uint k2 = 0; k2 < count; ++k2)
     {
         uint tri = first + k2; if (tri >= fsMaxTriangles()) break;
@@ -51,13 +55,14 @@ void main(uint t : SV_GroupThreadID, uint3 group : SV_GroupID)
             float3 grad = lerp(fsGradient(ca), fsGradient(cb), s);
             float len = length(grad);
             float3 n = len > 0 ? -grad / len : float3(0, 1, 0);
-            uint at = (tri * 3 + v) * 32;
-            vertices.Store4(at, asuint(float4(world0 + p * h, 1)));
-            vertices.Store4(at + 16, asuint(float4(n, 0)));
+            const uint slot = mirrored && v != 0 ? 3 - v : v;
+            uint at = (tri * 3 + slot) * 32;
+            vertices.Store4(at, asuint(float4(axes * (world0 + p * h), 1)));
+            vertices.Store4(at + 16, asuint(float4(axes * n, 0)));
             // Velocity: the density-weighted mean along the edge (the vertex density is 0.5 of the rest density).
             uint ia = (ca.z * FS_WINDOW + ca.y) * FS_WINDOW + ca.x, ib = (cb.z * FS_WINDOW + cb.y) * FS_WINDOW + cb.x;
             float mass = lerp(da, db, s); float3 velocity = mass > 0 ? lerp(g_momentum[ia], g_momentum[ib], s) / mass : float3(0, 0, 0);
-            velocities.Store4((tri * 3 + v) * 16, asuint(float4(velocity, 0)));
+            velocities.Store4((tri * 3 + slot) * 16, asuint(float4(axes * velocity, 0)));
         }
     }
 }

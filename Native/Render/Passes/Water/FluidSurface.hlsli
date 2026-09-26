@@ -12,7 +12,8 @@
 //   P[3] origin xyz (world position of node 0), triangle capacity
 //   P[4] table UAV, scan UAV, density UAV, counters UAV
 //   P[5] cell info UAV, block triangles UAV, vertices UAV, case table SRV
-//   P[6] dispatch arguments UAV, draw arguments UAV, velocities UAV, 0
+//   P[6] dispatch arguments UAV, draw arguments UAV, velocities UAV, axis signs (bit a: axis a of the particles' space is
+//        negated in the output's; an odd count also reverses each triangle's winding: CCW outside stays CCW outside)
 //   P[7] particle velocity offset (bytes; 0xFFFFFFFF = none), velocity scale (particle units -> m/s), previous slot
 //        offset (bytes to the uint index of the particle in the previous buffer; 0xFFFFFFFF = the same index), first
 //        record (1: every triangle past the drawn ones is retired, FluidTail.hlsl)
@@ -49,6 +50,8 @@ uint fsMaxBlocks() { return P[2].w; }
 float3 fsOrigin() { return asfloat(P[3].xyz); }
 uint fsMaxTriangles() { return P[3].w; }
 bool fsFirstRecord() { return P[7].w != 0; }
+float3 fsAxes() { return float3((P[6].w & 1u) ? -1.0 : 1.0, (P[6].w & 2u) ? -1.0 : 1.0, (P[6].w & 4u) ? -1.0 : 1.0); }
+bool fsMirrored() { return (countbits(P[6].w & 7u) & 1u) != 0; }
 
 uint fsBlockIndex(int3 b) { uint3 n = fsBlocks(); return ((uint)b.z * n.y + (uint)b.y) * n.x + (uint)b.x; }
 bool fsInside(int3 b) { uint3 n = fsBlocks(); return all(b >= 0) && all(b < (int3)n); }

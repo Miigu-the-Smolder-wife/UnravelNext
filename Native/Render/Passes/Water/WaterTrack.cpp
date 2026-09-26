@@ -111,6 +111,9 @@ static void waterFluids(FramePassContext& fc)
         input.alpha = in.alpha;
         input.velocityOffset = 16;       // NP_FluidParticle velocity, cells per second
         input.velocityScale = in.dx;
+        // The fluid's particles and origin are in the physics World's axes, which are the particle streams' (the Unity host's
+        // World is the renderer's mirrored in z: FrameContext::streamAxes); the surface is written in renderer axes.
+        for (int a = 0; a < 3; ++a) input.axes[a] = frame.streamAxes[a] < 0 ? -1.0f : 1.0f;
         const water::FluidSurfaceOutput out = slot.surface->record(g, input);
         TriangleStream stream;
         stream.vertices = out.vertices;
@@ -120,6 +123,13 @@ static void waterFluids(FramePassContext& fc)
         stream.maxTriangles = slot.surface->desc().maxTriangles;
         float lo[3], hi[3];
         slot.surface->bounds(lo, hi);
+        for (int a = 0; a < 3; ++a)
+            if (input.axes[a] < 0)
+            {
+                const float l = -hi[a];
+                hi[a] = -lo[a];
+                lo[a] = l;
+            }
         stream.boundsMin = { lo[0], lo[1], lo[2] };
         stream.boundsMax = { hi[0], hi[1], hi[2] };
         // The water layer (v1.63): one sample per pixel with edge records - a fluid seen from close by fills the screen,

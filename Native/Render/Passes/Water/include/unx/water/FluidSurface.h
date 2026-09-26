@@ -32,6 +32,8 @@ struct FluidSurfaceInput
     float alpha = 1.0f;                   // frame time between the previous (0) and current (1) tick
     uint32_t velocityOffset = UINT32_MAX; // bytes to the particle velocity float3 (physics fluid: 16); UINT32_MAX = none
     float velocityScale = 0;              // particle velocity units -> m/s (physics fluid: dx, cells/s -> m/s)
+    float axes[3] = { 1, 1, 1 };  // particle space -> output (renderer) axis signs (FrameContext::streamAxes: the host's
+                                  // World is the renderer's mirrored in z); the grid, origin and bounds stay in particle space
     uint32_t previousSlotOffset = UINT32_MAX;  // bytes to the uint index of each particle in `previous` (physics fluid:
                                                // 44, Particle.origin); UINT32_MAX = the same index
 };
@@ -60,7 +62,7 @@ public:
     // The node grid's world position for the next record (the fluid's origin in this frame's coordinates: origin rebase).
     void setOrigin(const float origin[3]) { for (int a = 0; a < 3; ++a) m_desc.origin[a] = origin[a]; }
     uint32_t blocks() const { return m_blocks[0] * m_blocks[1] * m_blocks[2]; }
-    // World bounds of every possible vertex (the node grid): the stream's culling box.
+    // World bounds of every possible vertex (the node grid, particle space): the stream's culling box (map with the axes).
     void bounds(float minimum[3], float maximum[3]) const;
 
     // Marching cubes case table: per case (bit c = corner c inside, corner bits x, y, z), the triangle count, then 3 edge

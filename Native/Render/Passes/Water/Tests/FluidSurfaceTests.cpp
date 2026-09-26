@@ -15,6 +15,9 @@
 //   7. retired tail: after every record, every vertex past the drawn triangles up to the capacity has a NaN position
 //      (FluidTail.hlsl: a ray tracing build over the capacity sees them inactive); the cases run in an order where the
 //      triangle count both grows and shrinks (box -> sphere -> cloud -> blend -> spray 0)
+//   8. axes: the box with the output mirrored in z (the Unity host's World -> the renderer, FrameContext::streamAxes)
+//      equals the reference with z negated in positions, normals and velocities and each triangle's last two vertices
+//      swapped (the outside stays counter-clockwise), and it is closed with the mirrored orientation
 //   unx_test_water_fluidsurfacetests [--no-debug-layer] [--warp]
 #include "unx/water/FluidSurface.h"
 
@@ -200,7 +203,7 @@ ComPtr<ID3D12Resource> buffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE ty
     return r;
 }
 
-Mesh run(Gpu& gpu, FluidSurface& surface, const std::vector<Particle>& now, const std::vector<Particle>* previous, float alpha)
+Mesh run(Gpu& gpu, FluidSurface& surface, const std::vector<Particle>& now, const std::vector<Particle>* previous, float alpha, const float* axes = nullptr)
 {
     const uint64_t bytes = std::max<size_t>(now.size(), 1) * sizeof(Particle);
     auto upload = buffer(gpu.device, bytes * (previous ? 2 : 1), D3D12_HEAP_TYPE_UPLOAD);
@@ -227,6 +230,7 @@ Mesh run(Gpu& gpu, FluidSurface& surface, const std::vector<Particle>& now, cons
     unx::water::FluidSurfaceInput in;
     in.particles = particles; in.previous = old; in.count = (uint32_t)now.size(); in.stride = sizeof(Particle); in.alpha = alpha;
     in.velocityOffset = 16; in.velocityScale = kVelocityScale; in.previousSlotOffset = previous ? 44 : UINT32_MAX;
+    if (axes) for (int a = 0; a < 3; ++a) in.axes[a] = axes[a];
     const auto out = surface.record(g, in);
     ID3D12Resource* rv = readVertices.Get();
     ID3D12Resource* rs = readSmall.Get();
@@ -362,6 +366,36 @@ int main(int argc, char** argv)
         checkClosed(boxMesh, boxRef, "box");
         const double h3 = double(desc.h) * desc.h * desc.h, boxVolume = volume(boxMesh), boxExpected = box.size() * h3;
         W_CHECK(std::abs(boxVolume / boxExpected - 1) <= 0.01, "box volume %.6g m3, particles %.6g m3", boxVolume, boxExpected);
+        // 8. axes: mirrored in z
+        {
+            const float mirror[3] = { 1, 1, -1 };
+            const auto m = run(gpu, surface, box, nullptr, 1, mirror);
+            W_CHECK(m.triangles == boxRef.triangles && m.vertices.size() == boxRef.vertices.size(), "mirrored box: %u triangles, reference %u", m.triangles, boxRef.triangles);
+            double worst = 0, velocity = 0;
+            for (size_t t = 0; t + 2 < boxRef.vertices.size(); t += 3)
+                for (int v = 0; v < 3; ++v)
+                {
+                    const size_t gi = t + (v == 0 ? 0 : 3 - v), ri = t + v;  // (0, 1, 2) -> (0, 2, 1)
+                    for (int a = 0; a < 6; ++a)
+                    {
+                        const double sign = (a % 3) == 2 ? -1 : 1;
+                        const auto& unmirrored = a < 3 ? boxRef.vertices[ri] : boxMesh.vertices[ri];  // (the reference has no normals)
+                        worst = std::max(worst, (double)std::abs(m.vertices[gi][a] - sign * unmirrored[a]));
+                    }
+                    for (int a = 0; a < 3; ++a)
+                        velocity = std::max(velocity, (double)std::abs(m.velocities[gi][a] - (a == 2 ? -1 : 1) * boxMesh.velocities[ri][a]));
+                }
+            W_CHECK(worst <= 1e-5, "mirrored box: vertex differs from the mirrored reference by %.3g", worst);
+            W_CHECK(velocity == 0, "mirrored box: velocity differs from the mirrored GPU box by %.3g", velocity);
+            double mirroredVolume = 0;  // signed volume stays positive: outside still counter-clockwise
+            for (size_t t = 0; t + 2 < m.vertices.size(); t += 3)
+            {
+                const auto& a = m.vertices[t]; const auto& b = m.vertices[t + 1]; const auto& c = m.vertices[t + 2];
+                mirroredVolume += (double(a[0]) * (double(b[1]) * c[2] - double(b[2]) * c[1]) - double(a[1]) * (double(b[0]) * c[2] - double(b[2]) * c[0]) + double(a[2]) * (double(b[0]) * c[1] - double(b[1]) * c[0])) / 6;
+            }
+            W_CHECK(std::abs(mirroredVolume / volume(boxMesh) - 1) <= 1e-5, "mirrored box volume %.6g, box %.6g (orientation)", mirroredVolume, volume(boxMesh));
+            std::printf("mirrored box: vertices within %.3g of the mirrored reference, volume %.6g m3 (orientation kept)\n", worst, mirroredVolume);
+        }
         // 3. sphere and jittered cloud
         auto inSphere = [](float x, float y, float z) { const float dx = x - 16, dy = y - 16, dz = z - 16; return dx * dx + dy * dy + dz * dz <= 100; };
         const auto sphere = lattice(4, 4, 4, 28, 28, 28, inSphere);
