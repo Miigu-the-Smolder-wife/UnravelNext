@@ -191,6 +191,7 @@ int main(int argc, char** argv)
         waterMaterial.name = "water";
         waterMaterial.cls = scene::MaterialClass::Water;
         waterMaterial.roughness = 0.02f;
+        waterMaterial.baseColor = { (float)std::exp(-sigma[0]), (float)std::exp(-sigma[1]), (float)std::exp(-sigma[2]) };  // T over 1 m
         waterMaterial.ior = (float)ior;
         wall.name = "wall";
         wall.baseColor = { 0.55f, 0.45f, 0.35f };

@@ -10,8 +10,9 @@
 //   Transmission  the refracted ray (exact Snell) marched in screen space through band A's depth: where it meets band A
 //        (H, refined by bisection) the light behind is the shaded band A radiance there, the water path d = |H - P| is
 //        exact, and the transmitted radiance is (1 - F) exp(-sigma_a d) L_surface(H) / n^2 (radiance leaving water for
-//        air, WaterShading.hlsli). sigma_a: pure water, Pope & Fry 1997 at 650 / 550 / 450 nm (0.340, 0.0565, 0.00922
-//        1/m) for R / G / B. M's aerial perspective is removed at H and applied once for the camera's air path to P.
+//        air, WaterShading.hlsli). sigma_a = -ln(baseColor): the material's baseColor is the transmittance over 1 m
+//        (pure water, Pope & Fry 1997 at 650 / 550 / 450 nm: 0.712, 0.945, 0.991). M's aerial perspective is removed at
+//        H and applied once for the camera's air path to P.
 //   Exact condition (else the sample is a counted fallback, awaiting R's refraction rays, request R-2 like solid glass):
 //        the refracted ray stays inside the water until band A (water resting on geometry: pools, basins, puddles). The
 //        march leaves the water where its point comes in front of the water layer's front surface or where the layer
@@ -287,7 +288,9 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
         reflected += giCacheRadiance(gi, P, nv, waterReflect(v, nv), reflectionLobeHalfAngle(r, NoV));
     }
     // Transmission along the refracted ray.
-    const float3 sigmaA = float3(0.340, 0.0565, 0.00922);  // pure water, Pope & Fry 1997 (1/m)
+    // Absorption from the material: baseColor = the medium's transmittance over 1 m (sigma_a = -ln T; authoring rule
+    // agreed with engine 2 for W2). Pure water (Pope & Fry 1997, 650 / 550 / 450 nm) is T = (0.712, 0.945, 0.991).
+    const float3 sigmaA = -log(clamp(m.baseColor, 1e-6, 1.0));
     float3 transmitted = 0;
     float3 t;
     if (fromAir && waterRefract(v, nv, 1.0 / ior, t))
