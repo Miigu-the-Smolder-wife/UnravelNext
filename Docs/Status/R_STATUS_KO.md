@@ -1,3 +1,19 @@
+# 렌더 B 재개 지점 (2026-09-27, 문맥 비우기 전; 모두 커밋됨)
+
+- **구름 B5**(S, 기본 꺼짐): `Passes/Atmosphere/Cloud*.{h,cpp,hlsl,hlsli}`, `Tests/Cloud{Model,,MsFit}Tests.cpp`, S_STATUS 9, FEATURES_GAME 13 개정 1.
+  ① 격자 다중 산란: 카메라 중심 구름층 격자(128×24×128), 유사 관계 σ_s(1−g)와 26방향 스윕. CPU 원형을 `referencePathTraced`와 비교한다(목표 평균 ≤ 10 %).
+  옥타브 근사는 기각했다(39 %/72 %). ⑤ 비용: 지금 흐린 1/4 해상도 텍셀당 0.11~0.19 µs → 4K 30~95 ms. 타일별 해상도, 태양 적분 구조가 과제이고, 성장 걸음은 11 %라 기각했다.
+  ③ 구름 뒤 표면은 S 패스로 한다(M 인라인 금지, DXIL 한도).
+- **발광 입자 광원 A3**: 계약은 S_STATUS 10. A의 core(광원 버퍼 꼬리 F_max = 빛 행 수, fxLightCount) 뒤에
+  S FroxelLists 루프 상한 +F, R rtLocalLightSample에 FX 누적 분포(log2 F). N + F_max ≤ 65,535.
+- **GI 타일판**: `Passes/GI/GiCacheTile.hlsli`(비트 동일, 게이트 `--lookup-stats`에 대조 있음). M 커널 안(LDS 5 KB) 대 따로 패스를
+  A/B로 재고 A와 맞춘다. 짝 모서리 재구성(e994280)으로 M 셰이딩 −1.74 ms를 실측했다.
+- **물·유리 광선 서비스**: FrameServices::traceRefractions → ReflectionSystem::recordRefraction, `RefractionTrace.hlsl`/`RefractionArgs.hlsl`,
+  RayScene::recordStreams(유체 BLAS). 매질 0 = 물, 1 = 속찬 유리, 0xFF = 반사. 출구는 (1−F)·n²이고 간접 디스패치다.
+  W 연결 완료(4K 69만 작업 2.22 ms). A 유리 연결 확인 대기. W 해석 대조는 9/30 뒤다.
+- **그다음**: B4(매질 고도 매핑, 태양 띠 표, J_ms ≤ 33 ms·다프레임 분할) → B6 나머지 → B11. A14 뷰별 S는 C의 단계 분할 뒤다.
+- 규칙: 공유 헤더는 전 커널 빌드와 DXIL 확인 뒤 저장한다. 새 GPU 코드는 작은 하드웨어 실행 뒤 커밋한다. 경로 지정 add/commit만 쓴다.
+
 # R 트랙 상태 (광선·GI·반사) — 2026-09-25
 
 표기: [실측] = 이 기계(RTX 4080, 드라이버 591.86)에서 실행한 결과, [예상] = 비용식·가정.
