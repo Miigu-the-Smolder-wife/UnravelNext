@@ -172,6 +172,19 @@ struct TerrainLayer  // 32 B
 };
 static_assert(sizeof(TerrainLayer) == 32);
 
+// A9 material layers (MATERIAL_LAYERS 1.3): the layer parameters of a layered material, in their own buffer
+// (FrameConstants::materialLayers) so the hot 112 B record is unchanged; a layered material has MaterialLayered and
+// its record index in classFlags bits 16..31.
+struct MaterialLayers  // 64 B
+{
+    float clearcoat;            // cover c (0 = none)
+    float clearcoatRoughness;   // perceptual r_c
+    uint32_t coat;              // tabulated coat (scene::model::coatIndex: 0 eta 1.5, 1 eta 1.33)
+    float coatEta;
+    float reserved[12];         // (thin film, sheen, anisotropy: later layers)
+};
+static_assert(sizeof(MaterialLayers) == 64);
+
 // Textures of one material as M's texture system publishes them (GpuScene::setMaterialTextures, INTERFACES 6.3 v1.10):
 // bindless SRV indices (kNone = none; the SRVs belong to M) and clamp bits (MaterialTextureBit).
 struct MaterialTextures
@@ -193,6 +206,7 @@ enum MaterialFlags : uint32_t
 {
     MaterialTwoSided = 1u << 0,
     MaterialAlphaTested = 1u << 1,
+    MaterialLayered = 1u << 2,  // A9: a MaterialLayers record, index in classFlags bits 16..31
 };
 
 struct Light  // 80 B
@@ -257,6 +271,9 @@ struct FrameConstants
     // kNone without a runtime pool).
     uint32_t morphRecords, morphData, patchData;
     uint32_t terrainLayers;  // v1.74: StructuredBuffer<TerrainLayer> of the Terrain-class materials (kNone: none)
+    // v1.76 (A9): materialLayers: StructuredBuffer<MaterialLayers> (kNone: no layered material); coatTable:
+    // StructuredBuffer<float> scene::model::coatTable() (kCoatTableStride floats per tabulated coat).
+    uint32_t materialLayers, coatTable, framePad0, framePad1;
 };
-static_assert(sizeof(FrameConstants) == 560);
+static_assert(sizeof(FrameConstants) == 576);
 } // namespace unx::render::gpu

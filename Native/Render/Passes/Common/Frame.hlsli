@@ -34,6 +34,7 @@ cbuffer FrameConstants : register(b1)
     float g_viewModelScale;  // view-model projection remap, 1 = none (ViewModel.hlsli)  // g_debugDraw: DebugDraw.hlsli (0xFFFFFFFF = off)
     uint g_morphRecords, g_morphData, g_patchData;  // C4 morphs, C5 terrain patch slots (VisibilityCommon.hlsli)
     uint g_terrainLayers;                           // v1.74 Terrain-class material layers (Scene.hlsli GpuTerrainLayer)
+    uint g_materialLayers, g_coatTable, g_framePad0, g_framePad1;  // v1.76 A9 layer records, coat tables (MaterialModel.hlsli)
 };
 
 // Reversed-Z infinite projection: device depth d = near / viewDistance (1 at the near plane, 0 = sky).

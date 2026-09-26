@@ -242,6 +242,9 @@ private:
     // v1.74 Terrain-class material layers (gpu::TerrainLayer; each terrain material's terrainLayers word points here).
     Buffer m_terrainLayerBuffer;
     void packTerrainLayers(std::vector<gpu::Material>& materials);
+    // v1.76 A9 layer records (gpu::MaterialLayers; a layered material's classFlags bits 16..31) and the coat tables.
+    Buffer m_materialLayerBuffer, m_coatTable;
+    void packMaterialLayers(std::vector<gpu::Material>& materials);
     std::vector<float4> m_morphRows;
     std::vector<uint32_t> m_morphMeshBlock;  // per mesh: word offset of its block in m_morphData, kNone = no morph
     std::vector<uint64_t> m_morphFrame;      // per instance: frame of its latest setMorph

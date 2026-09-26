@@ -3,6 +3,8 @@
 //   unx_unit_tests [filter]
 #include "EmptyFrameScene.h"
 
+#include <dxgi1_6.h>
+
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/core/Jobs.h"
@@ -60,9 +62,31 @@ bool throws(F&& f)
 }
 
 Device* g_device = nullptr;
+// UNX_WARP=1: the software adapter (no debug layer), for compute checks while the GPU is reserved.
+ID3D12Device* warpDeviceIfAsked()
+{
+    char* env = nullptr;
+    size_t length = 0;
+    const bool warp = _dupenv_s(&env, &length, "UNX_WARP") == 0 && env != nullptr;
+    std::free(env);
+    if (!warp) return nullptr;
+    static ComPtr<ID3D12Device> device;
+    ComPtr<IDXGIFactory6> factory;
+    check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "DXGI factory");
+    ComPtr<IDXGIAdapter> adapter;
+    check(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)), "WARP adapter");
+    if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_2, IID_PPV_ARGS(&device))))
+        check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(&device)), "WARP device");
+    return device.Get();
+}
 Device& testDevice()
 {
-    static Device device([] { DeviceOptions o; o.debugLayer = true; return o; }());
+    static Device device([] {
+        DeviceOptions o;
+        o.externalDevice = warpDeviceIfAsked();
+        o.debugLayer = o.externalDevice == nullptr;
+        return o;
+    }());
     g_device = &device;
     return device;
 }
@@ -1756,6 +1780,86 @@ UNX_TEST(material_tables_on_the_gpu)
     rb->Unmap(0, nullptr);
     logf("    GPU table reads vs scene::model over %u points: worst |dA|, |dB| %.2e, |dE| %.2e\n", n * n, worstAB, worstE);
     CHECK(worstAB < 1e-6f && worstE < 1e-6f);
+    testDevice().deferRelease(constants);
+    testDevice().deferRelease(rb);
+}
+
+UNX_TEST(clearcoat_model_on_the_gpu)
+{
+    // A9 (v1.76): GpuScene uploads the coat tables (FrameConstants::coatTable) and MaterialModel.hlsli's
+    // modelEvaluateCoated equals scene::model::evaluateCoated to float rounding at 4096 points over both coats, metal and
+    // dielectric bases, every roughness and cover (Passes/Test/CoatModel.hlsl).
+    const scene::Scene s = tinyScene();
+    GpuScene gs(testDevice());
+    gs.upload(s);
+    gpu::FrameConstants fc{};
+    gs.fill(fc);
+    CHECK(fc.coatTable != gpu::kNone);
+    ComPtr<ID3D12Resource> constants, rb;
+    const uint32_t n = 4096, bytes = n * 80;
+    {
+        D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD }, rp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = (sizeof(gpu::FrameConstants) + 255) / 256 * 256;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(testDevice().d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&constants)),
+              "constants");
+        void* mapped = nullptr;
+        check(constants->Map(0, nullptr, &mapped), "map constants");
+        std::memcpy(mapped, &fc, sizeof fc);
+        constants->Unmap(0, nullptr);
+        rd.Width = bytes;
+        check(testDevice().d3d()->CreateCommittedResource3(&rp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)), "readback");
+    }
+    ID3D12PipelineState* pso = shaders().compute("Passes/Test/CoatModel");
+    RenderGraph g(testDevice());
+    const BufferRef out = g.createBuffer({ "coat out", bytes, 0 });
+    const D3D12_GPU_VIRTUAL_ADDRESS address = constants->GetGPUVirtualAddress();
+    g.addPass("coat", QueueType::Graphics, [&](PassBuilder& b) { b.use(out, Use::UavCompute); },
+              [=](PassContext& ctx) {
+                  const uint32_t k[4] = { ctx.uav(out), n, 0, 0 };
+                  ctx.cmd->SetPipelineState(pso);
+                  ctx.bindFrameConstants(address);
+                  ctx.computeConstants(k, 4);
+                  ctx.cmd->Dispatch((n + 63) / 64, 1, 1);
+              });
+    ID3D12Resource* dst = rb.Get();
+    g.addPass("coat readback", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(out, Use::CopySrc);
+                  b.keep();
+              },
+              [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(dst, 0, ctx.resource(out), 0, bytes); });
+    g.execute(nullptr);
+    for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+    const float* v = nullptr;
+    check(rb->Map(0, nullptr, (void**)&v), "map readback");
+    double worst = 0;
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const float* p = v + 20 * i;
+        scene::model::Surface su;
+        su.baseColor = { p[6], p[7], p[8] };
+        su.roughness = p[9];
+        su.metallic = p[10];
+        su.specular = 0.5f;
+        scene::model::Coat c;
+        c.cover = p[11];
+        c.roughness = p[12];
+        uint32_t coat;
+        std::memcpy(&coat, p + 13, 4);
+        c.eta = p[14];
+        CHECK(scene::model::coatIndex(c.eta) == coat);
+        const float3 want = scene::model::evaluateCoated(su, c, { 0, 0, 1 }, { p[0], p[1], p[2] }, { p[3], p[4], p[5] });
+        const float got[3] = { p[15], p[16], p[17] }, w[3] = { want.x, want.y, want.z };
+        for (int k = 0; k < 3; ++k) worst = std::max(worst, std::fabs((double)got[k] - w[k]) / std::max(std::fabs((double)w[k]), 1e-3));
+    }
+    rb->Unmap(0, nullptr);
+    logf("    coated BRDF on the GPU vs scene::model over %u points: worst relative %.2e\n", n, worst);
+    CHECK(worst < 1e-4);
     testDevice().deferRelease(constants);
     testDevice().deferRelease(rb);
 }

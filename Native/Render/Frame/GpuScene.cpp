@@ -110,7 +110,7 @@ GpuScene::~GpuScene()
     for (Buffer* b : { &m_instanceBuffer, &m_meshBuffer, &m_submeshBuffer, &m_vertexBuffer, &m_indexBuffer, &m_materialBuffer, &m_materialRemapBuffer, &m_lightBuffer,
                        &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable, &m_coverageTable, &m_clusterBuffer, &m_lodLevelBuffer,
                        &m_lodLevelClusterBuffer,
-                       &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer, &m_morphRecords, &m_morphData, &m_patchData, &m_terrainLayerBuffer })
+                       &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer, &m_morphRecords, &m_morphData, &m_patchData, &m_terrainLayerBuffer, &m_materialLayerBuffer, &m_coatTable })
         release(*b);
     for (auto& [name, b] : m_named) release(b);
     DescriptorHeaps& h = m_device.descriptors();
@@ -379,7 +379,7 @@ void GpuScene::upload(const scene::Scene& s)
     }
 
     for (Buffer* b : { &m_instanceBuffer, &m_meshBuffer, &m_submeshBuffer, &m_vertexBuffer, &m_indexBuffer, &m_materialBuffer, &m_materialRemapBuffer, &m_lightBuffer,
-                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable, &m_coverageTable, &m_morphRecords, &m_morphData })
+                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable, &m_coverageTable, &m_coatTable, &m_morphRecords, &m_morphData })
         release(*b);
     // C2b runtime regions start 16-byte aligned after the content (the scatter writes 16-byte elements).
     auto regionStart = [](size_t count, uint32_t stride) { return (uint32_t)((count * stride + 15) / 16 * 16 / stride); };
@@ -427,6 +427,7 @@ void GpuScene::upload(const scene::Scene& s)
     }
     m_patchSlotOf.assign(m_instances.size() + rc.instances, gpu::kNone);
     packTerrainLayers(materials);
+    packMaterialLayers(materials);
     m_materialBuffer = createStructured(materials.data(), sizeof(gpu::Material), materials.size(), L"scene materials");
     m_materialRemapBuffer = createStructured(remap.data(), sizeof(uint32_t), remap.size(), L"scene material remap");
     m_lightBuffer = createStructured(lights.data(), sizeof(gpu::Light), lights.size(), L"scene lights");
@@ -463,6 +464,8 @@ void GpuScene::upload(const scene::Scene& s)
     m_albedoTable = createStructured(table.data(), sizeof(float), table.size(), L"material model E table");
     const std::vector<float>& specular = scene::model::specularAlbedoTable();
     m_specularTable = createStructured(specular.data(), 2 * sizeof(float), specular.size() / 2, L"material model (A, B) table");
+    const std::vector<float>& coat = scene::model::coatTable();
+    m_coatTable = createStructured(coat.data(), sizeof(float), coat.size(), L"clearcoat tables");
     const std::vector<uint32_t>& coverage = coverageMaskTable();
     m_coverageTable = createStructured(coverage.data(), 2 * sizeof(uint32_t), coverage.size() / 2, L"coverage mask LUT");
     if (!m_clusterBuffer.resource) setClusters(ClusterData{});
@@ -489,6 +492,29 @@ void GpuScene::packTerrainLayers(std::vector<gpu::Material>& materials)
     }
     release(m_terrainLayerBuffer);
     if (!layers.empty()) m_terrainLayerBuffer = createStructured(layers.data(), sizeof(gpu::TerrainLayer), layers.size(), L"terrain layers");
+}
+
+// A9 layer records (v1.76) of every layered material, in material order; its classFlags gain MaterialLayered and the index.
+void GpuScene::packMaterialLayers(std::vector<gpu::Material>& materials)
+{
+    const scene::Scene& s = *m_source;
+    std::vector<gpu::MaterialLayers> layers;
+    for (size_t i = 0; i < materials.size() && i < s.materials.size(); ++i)
+    {
+        const scene::Material& m = s.materials[i];
+        materials[i].classFlags &= 0xFFFFu & ~(gpu::MaterialLayered << 8);
+        if (!(m.clearcoat > 0)) continue;
+        if (layers.size() >= 0xFFFFu) fail("GpuScene: more than 65535 layered materials");
+        gpu::MaterialLayers l{};
+        l.clearcoat = m.clearcoat;
+        l.clearcoatRoughness = m.clearcoatRoughness;
+        l.coat = scene::model::coatIndex(m.clearcoatIor);
+        l.coatEta = m.clearcoatIor;
+        materials[i].classFlags |= (gpu::MaterialLayered << 8) | (uint32_t)layers.size() << 16;
+        layers.push_back(l);
+    }
+    release(m_materialLayerBuffer);
+    if (!layers.empty()) m_materialLayerBuffer = createStructured(layers.data(), sizeof(gpu::MaterialLayers), layers.size(), L"material layers");
 }
 
 gpu::Material GpuScene::packMaterial(const scene::Material& m) const
@@ -662,6 +688,7 @@ void GpuScene::setMaterials(std::span<const uint32_t> indices)
     }
     release(m_materialBuffer);
     packTerrainLayers(m_materials);
+    packMaterialLayers(m_materials);
     m_materialBuffer = createStructured(m_materials.data(), sizeof(gpu::Material), m_materials.size(), L"scene materials");
 }
 
@@ -764,6 +791,7 @@ void GpuScene::setMaterialTextures(const std::vector<gpu::MaterialTextures>& per
     m_revision = revision;
     release(m_materialBuffer);
     packTerrainLayers(m_materials);
+    packMaterialLayers(m_materials);
     m_materialBuffer = createStructured(m_materials.data(), sizeof(gpu::Material), m_materials.size(), L"scene materials");
 }
 
@@ -1583,6 +1611,9 @@ void GpuScene::fill(gpu::FrameConstants& f) const
     f.morphData = m_morphData.srv;
     f.patchData = m_patchData.resource ? m_patchData.srv : gpu::kNone;
     f.terrainLayers = m_terrainLayerBuffer.resource ? m_terrainLayerBuffer.srv : gpu::kNone;
+    f.materialLayers = m_materialLayerBuffer.resource ? m_materialLayerBuffer.srv : gpu::kNone;
+    f.coatTable = m_coatTable.resource ? m_coatTable.srv : gpu::kNone;
+    f.framePad0 = f.framePad1 = 0;
     f.instanceCount = (uint32_t)m_instances.size();
     f.meshCount = (uint32_t)m_meshes.size();
     f.clusterCount = m_clusterBuffer.count;

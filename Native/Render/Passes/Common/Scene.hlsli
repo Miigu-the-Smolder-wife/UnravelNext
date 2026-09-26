@@ -85,6 +85,15 @@ struct GpuMaterial
     uint terrainLayers;      // Terrain class (v1.74): first layer | count << 24 in g_terrainLayers
 };
 
+struct GpuMaterialLayers  // v1.76 (A9): gpu::MaterialLayers, 64 B
+{
+    float clearcoat, clearcoatRoughness;
+    uint coat;
+    float coatEta;
+    float4 reserved[3];
+};
+GpuMaterialLayers loadMaterialLayers(uint i) { StructuredBuffer<GpuMaterialLayers> b = ResourceDescriptorHeap[g_materialLayers]; return b[i]; }
+
 struct GpuTerrainLayer  // v1.74: a Standard material read at terrain uv0 x scale + offset
 {
     uint material;
@@ -136,6 +145,7 @@ struct GpuVisibleCluster
 // gpu::MaterialFlags (bits 8..)
 #define MATERIAL_TWO_SIDED (1u << 8)
 #define MATERIAL_ALPHA_TESTED (1u << 9)
+#define MATERIAL_LAYERED (1u << 10)  // v1.76 A9: layer record index in classFlags bits 16..31 (loadMaterialLayers)
 // scene::LightType
 #define LIGHT_POINT 0u
 #define LIGHT_SPOT 1u

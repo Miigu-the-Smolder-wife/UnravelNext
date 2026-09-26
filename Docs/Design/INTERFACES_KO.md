@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.75, 2026-09-27)
+# UnravelNext 인터페이스 (v1.76, 2026-09-27)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -734,6 +734,13 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.76 (2026-09-27, 렌더 A: A9 clearcoat 층, MATERIAL_LAYERS 1.1·1.3; 1단계 데이터·모델, 2단계 GPU 레코드·미러):
+  - **`scene::Material`**: `clearcoat`(덮임 c), `clearcoatRoughness`(r_c), `clearcoatIor`(표로 만든 코트 1.5 또는 1.33만, Standard 클래스). 장면 파일 "COAT" 블록.
+  - **정의(권위: `scene::model::evaluateCoated`)**: C가 측정한 R1 + A2 + S(`Results/C/MaterialLayers/clearcoat_r1e.md`: 유전체 기저는 3절 기준 통과, 코트 아래 금속 기저는 lobe 모양 실패 = 재설계 대상)를 표 형태로 쓴다. 표는 코트마다 E_c, E_ms, A_x, B_x(μ, r), K_ms, Ā, B̄(r), K_0이고 η 1.33 표는 `unx_study_material_layers tables 1.33`으로 만들었다. 표 형태의 3절 기준 측정은 `clearcoat_model` 연구로 하며, 사용자 게임이 끝난 뒤 CPU에서 돌린다.
+  - **GPU**: `gpu::MaterialLayers` 64 B(별도 버퍼 `FrameConstants::materialLayers`), `MaterialLayered` 플래그(classFlags 비트 10)와 레코드 번호(비트 16~31). `FrameConstants::coatTable`(코트마다 4224 float). FrameConstants 560 → 576 B(끝에 materialLayers, coatTable, 예비 2).
+  - **HLSL 미러**: `MaterialModel.hlsli` `modelEvaluateCoated`, `modelCoatOf(GpuMaterial)`, `modelFresnelDielectric`.
+  - 시험: unit clearcoat_model(정의·표·장면 블록), clearcoat_model_on_the_gpu(4096점, 두 코트, 금속·유전체, 최악 상대 1.39e-6 [실측, WARP]). unit 시험 장치는 `UNX_WARP=1`로 WARP를 쓸 수 있다.
+  - 남음: M 셰이딩(층 셰이드 클래스, 태양 원반·면광원·간접), R 적중·C 기준 요청, 호스트 ABI·Unity 대응(URP Complex Lit `_ClearCoatMask`/`_ClearCoatSmoothness`).
 - v1.75 (2026-09-27, 렌더 A: 미리 셰이딩된 coverage 기록(v1.73 목록의 M 쪽), W 유체·바다 기록과 Cut·Terrain 대역 B의 합류):
   - **`ViewResources::coverageRecordRadiance`**(M, raw): coverageRecords 원소마다 8 B uint2 { f16 r | f16 g << 16, f16 b }. 단위는 합성의 단위(노출된 선형 복사휘도, 앞쪽 공기 포함: (L × T_air + L_inscatter) × g_exposure). coverageSpecial에 있는 원소만 정의된다.
   - **순서(M shade 안)**: m.lit(대역 A) → `m.coverage.special default`(종류 1·2에 0) → `tracks::water(fc, target)`(W가 종류 2를 덮어씀) → `m.coverage.special material`(Cut, Terrain 각각: 클래스 재질을 목록 칸마다 48 B 임시 버퍼로) → `m.coverage.special`(종류 5 조명) → 합성. 합성과 heavy round는 visId 상위 비트가 00이 아닌 기록을 버퍼에서 읽는다(P[8].y). 면적 × 가려지지 않은 몫으로 가중하고, 뒤의 대역 A는 나머지만 받는다.
