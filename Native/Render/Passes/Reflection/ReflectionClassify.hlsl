@@ -13,7 +13,7 @@
 //      e.g. near an occluder.)
 //      A G pixel whose corners all disagreed last frame (object edges: d_r < 0 in the history, ReflectionResolve) gets
 //      its own job (REFL_SELF) until its grid would serve it again.
-// d_r is last frame's reflection hit distance at the pixel (0 before any: s = 1, the conservative choice).
+// d_r is last frame's nearest reflection hit distance at the pixel (the lobe's nearest ray hit, smoothed; 0 before any: s = 1).
 // Jobs are appended with one atomic per wave. The tile's validity texel is set when any pixel is M or G.
 //
 // P[0] = { depth SRV, gbuffer SRV, lobe tiles SRV (UNX_NONE = none), distance history SRV }

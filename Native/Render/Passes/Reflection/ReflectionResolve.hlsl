@@ -4,8 +4,7 @@
 //   M: its own job's result;
 //   G: the jobs at the corners of its cell on its spacing's grid (multiples of s; ReflectionJobs makes each G corner a
 //      job), weighted by bilinear position, distance to the pixel's tangent plane and normal agreement; when none agrees
-//      (an object edge), or their hit distances differ by more than 2x (a reflected edge inside the cell), a = 0 this
-//      frame (K fallback) and the history's distance is stored negative: next frame the pixel
+//      (an object edge) a = 0 this frame (K fallback) and the history's distance is stored negative: next frame the pixel
 //      has its own job (REFL_SELF, ReflectionClassify). An own-job pixel takes its result and keeps the negative flag while
 //      its grid still would not serve it.
 // Also stores the reflection hit distance for next frame's G spacing and the value's hit motion (history, RG16F:
@@ -66,7 +65,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     const float2 fr = f - floor(f);
     float3 sum = 0;
     float dist = 0, weight = 0;
-    float motion = 0, nearest = 3.0e38, farthest = 0;
+    float motion = 0;
     [unroll] for (uint k = 0; k < 4; ++k)
     {
         const int2 o = int2(k & 1, k >> 1);
@@ -84,14 +83,14 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         sum += w * reflResultRadiance(r);
         dist += w * reflResultDistance(r);
         weight += w;
-        nearest = min(nearest, reflResultDistance(r));
-        farthest = max(farthest, reflResultDistance(r));
         motion = max(motion, reflResultMotion(r));
     }
-    // The corners' lobes see the same content when their hit distances agree; more than 2x apart (a reflected edge inside
-    // the cell: a nearby wall against far content, an object against the sky) the bilinear value is no estimate of this
-    // pixel's lobe [measured: -16.6 % near a furnace wall] - the pixel then gets its own job, as at object edges.
-    const bool gridServes = weight >= 1e-4 && farthest <= 2 * max(nearest, 1e-3);
+    // Reflected edges inside a cell (a nearby wall against far content: -16.6 % near a furnace wall [measured]) are handled
+    // by the spacing: a job's distance is its lobe's nearest hit (ReflectionCombine), so near content sets the blur and the
+    // grid is fine where the reflection is sharp. (A per-pixel rule "corner distances within 2x, else an own job" compared
+    // 4-ray means that one sky ray moves by orders of magnitude: 1.24 M G samples and r.refl.shade 17 ms at city 4K
+    // against 0.31 M [measured, 2026-09-27].)
+    const bool gridServes = weight >= 1e-4;
     if ((m & REFL_SELF) != 0)
     {
         // Its own job; the flag stays while the grid would still not serve it.
