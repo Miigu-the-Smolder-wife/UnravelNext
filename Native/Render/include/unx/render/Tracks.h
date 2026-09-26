@@ -72,6 +72,9 @@ void decals(FramePassContext& fc, ViewResources& view);
 // E (A7, WORLD_VFX 10.4): uploads what changed in the surface state field (surface::surfaceField) and publishes
 // FrameResources::surfaceConstants / surfaceTable / surfacePool (invalid while the field has never had a brick).
 void surfaceState(FramePassContext& fc);
+// E (A8, FEATURES_GAME 12): the light function table and its images (lights::lightFunctions), right after prepareScene
+// so every view and every consumer (S, R, M) sees it: FrameResources::lightFunctions (invalid when no light has one).
+void lightFunctions(FramePassContext& fc);
 // E (B10, ARCHITECTURE 2.8 / 2.14): strand hair - the queued ticks' guide simulation, then the frame's follow-strand
 // segments (FrameResources::hairSegments / hairBodies); before visibility (V draws them in the coverage layer).
 void hair(FramePassContext& fc, ViewResources& view);

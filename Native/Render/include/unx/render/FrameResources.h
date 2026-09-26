@@ -137,6 +137,10 @@ struct FrameResources
     // Strand hair (E's Passes/Hair, unx/hair/Hair.h; invalid = no hair): the frame's follow-strand segments (2 float4 each:  [E]
     // camera-relative p0, r0; p1, r1; r = 0 left out by LOD) and the bodies' header (raw) for V's coverage layer and M.
     BufferRef hairSegments, hairBodies;
+    // Light functions (E's Passes/Lights LightFunction.hlsli, A8; invalid = no light has one): cookies, IES, gobos,  [E]
+    // flicker and animation per light index. Every reader of a light's emission (M shading, S froxel in-scattering, R
+    // hit shading and GI) multiplies it by lightFunction(srv, light, forward, right, dir, footprint, g_time) (raw).
+    BufferRef lightFunctions;
     uint32_t vsmLocalLights = UINT32_MAX;  // SRV descriptors of this frame's local-light shadow [S]
     uint32_t vsmSlotOfLight = UINT32_MAX;  // records (VsmLocalLight, 48 B x shadow slots) and the
                                            // scene light -> shadow slot table (uint, 0xFFFF = none)

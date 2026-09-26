@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.54, 2026-09-26)
+# UnravelNext 인터페이스 (v1.55, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -730,6 +730,9 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **`FrameConstants::viewModelScale`(옛 `spare1`, HLSL `g_viewModelScale`)**: 주 뷰에서 뷰 모델 인스턴스의 투영 재매핑 k(clip.xy × k, 깊이 불변; 1 = 없음이 기본). `viewmodel.fov_override_degrees`가 정하고, 다른 뷰는 늘 1이다. V는 뷰 모델 정점의 현재·이전 clip에 `ViewModel.hlsli`의 `viewModelClip`을 부른다.
 - v1.54 (2026-09-26, A12 호스트 경로, 엔진 2 요청):
   - **1인칭 뷰 모델 호스트 입력(E `viewmodel::ViewModels`)**: 선택 export `UnxViewModelAdd(r, instance, cameraLocal12, &id)` / `UnxViewModelSetPose(r, id, cameraLocal12)` / `UnxViewModelRemove(r, id)`. 자세는 객체 → 뷰 공간(x 오른쪽, y 위, −z를 봄)의 3×4 행 우선 행렬이고, 렌더러가 렌더 프레임마다 그 프레임의 카메라와 합성한다. 호스트가 거울로 id를 즉시 돌려주고 연산을 다음 큐 프레임과 함께 보낸다. 렌더 스레드가 순서대로 재생해 같은 id가 나온다(건너뛴·버려진 프레임의 연산은 이월). [실측] `HostViewModel`: 돌고 움직이는 카메라의 12프레임 모두 중앙을 덮었고, 0.5 m 자세 이동이 투영 예측과 0.08 px 안에서 맞았으며, 제거 뒤에는 장면 자리로 돌아갔다.
+- v1.55 (2026-09-26, E A8 광원 함수):
+  - **`FrameResources::lightFunctions`(raw, 무효 = 광원 함수 없음)와 `tracks::lightFunctions`(prepareScene 직후)**: E의 `Passes/Lights`가 광원 인덱스(`GpuScene::setLights` 순서)마다 쿠키·IES·고보·회전·세기/색 키·깜빡임을 담은 표와 이미지(RGBA16F, 상자 필터 밉)를 올린다. 광원 방출을 읽는 모든 곳(M 셰이딩, S 프록셀 산란, R 적중 셰이딩·GI)은 광원 기여에 `LightFunction.hlsli`의 `lightFunction(srv, light, forward, right, dir, footprint, g_time)`(rgb)을 곱한다. 무효면 `LIGHT_FUNCTION_NONE`을 넘기고 1을 받는다. footprint는 광원에서 본 수신면 발자국 각(라디안)이고, 0이면 가장 선명한 밉을 쓴다. 그림자(VSM)는 f와 무관하다. 표는 바뀔 때만 새 버퍼로 올리고, 이미지는 바뀐 광원만 다시 올린다.
+  - **IES 가져오기 `lights::parseIes`**: LM-63, TILT=NONE, C형. 배수 × 안정기 계수를 곱하고 최댓값으로 나누며(광원 세기 = 최대 칸델라), 대칭 0, 0..90, 0..180, 0..360, 90..270을 받는다. [실측] `unx_test_lights_lightfunctiontests`: GPU와 CPU 기준의 차이는 4096 질의에서 IES 4.8e-7, 시간 함수 2.4e-7, 쿠키·고보 7.7e-4(반정밀 텍셀과 필터 분수)였고 불연속 질의는 0이었다. 1텍셀 줄무늬를 8텍셀 발자국으로 보면 평균 0.5가 나왔다.
 - v1.53 (2026-09-26, A15·A7 호스트 경로, 엔진 2 요청):
   - **디버그 드로우 호스트 입력(E `debug::DrawList`)**: 선택 export `UnxDebugPrimitives(r, lines, n, triangles, m)`(DebugDraw.h 기록 그대로 Line 32 B·Triangle 48 B), `UnxDebugText(r, anchor3, utf8, rgba, sizePx, flags, offsetX, offsetY)`(E의 글리프 배치). 다음 큐 프레임에만 들어간다(즉시 모드: 렌더되지 않는 프레임의 원시형은 버린다).
   - **투영 데칼 호스트 입력(E `decal::DecalSet`)**: `UnxDecalDesc`(80 B: 상자 3×4 행 우선, 재질, 인스턴스 또는 0xFFFFFFFF, 우선순위, 불투명도, 페이드 시작·끝 도, 가장자리, 0), `UnxDecalAdd(r, desc, &id)` / `UnxDecalUpdate(r, id, desc)` / `UnxDecalRemove(r, id)`. 호스트가 거울 집합을 가지며, 바뀌면 다음 큐 프레임과 함께 스냅숏을 보낸다(늦은 스냅숏이 이긴다). 재질과 인스턴스는 호스트의 현재 개수로 검사한다. [실측] `HostDecal` 4·5: 제거와 갱신이 G-buffer에 정확히 반영됐고, 디버그 통계는 선 3·글리프 2였다.

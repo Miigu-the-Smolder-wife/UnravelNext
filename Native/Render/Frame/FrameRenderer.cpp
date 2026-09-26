@@ -172,6 +172,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     m_debugDraw = tracks::debugBegin(fc);  // E (A15): before any frame constants, which carry its buffer
     // Scene textures into the material records before any frame constants (they carry the material buffer's SRV).
     tracks::prepareScene(fc);
+    tracks::lightFunctions(fc);  // E (A8): light function table and images, before every consumer
     services.rasterizeDepth = [](FramePassContext& c, const DepthRasterRequest& r) { tracks::rasterizeDepth(c, r); };
     services.renderView = [](FramePassContext& c, const ViewDesc& v) {
         if (v.kind == gpu::ViewKind::Main) fail("renderView is for secondary views");
