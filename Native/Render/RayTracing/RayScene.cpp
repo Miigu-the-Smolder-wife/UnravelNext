@@ -1,4 +1,7 @@
 #include "unx/rt/RayScene.h"
+#if defined(UNX_HAS_MATERIAL)
+#include "unx/material/MaterialSystem.h"  // M's texture table for decals at hits (recordDecals)
+#endif
 
 #include <algorithm>
 #include <cfloat>
@@ -186,8 +189,14 @@ RayScene::~RayScene()
     for (Buffer& b : m_inheritedPools) release(b);
     for (Buffer* b : { &m_meshBlasPool, &m_emitterAabbs, &m_emitterBlas, &m_deformedPool, &m_deformedBlasPool, &m_deformedScratch, &m_deformJobs, &m_deformGroups, &m_instanceBuffer, &m_geometryBuffer,
                        &m_indexPool, &m_vertexMap, &m_tlasStatic, &m_tlasDynamic, &m_tlasScratch, &m_staticDescBuffer, &m_dynamicDescBuffer, &m_staticScratch,
-                       &m_exactCounts, &m_exactZero })
+                       &m_exactCounts, &m_exactZero, &m_decalAabbs, &m_decalBlas, &m_decalBlasScratch, &m_decalTlas, &m_decalTlasScratch, &m_decalDesc })
         release(*b);
+    if (m_decalTlasSrv != 0xFFFFFFFFu)
+    {
+        DescriptorHeaps* dh = &m_device.descriptors();
+        const uint32_t srv = m_decalTlasSrv;
+        m_device.deferCall([dh, srv] { dh->freeResource(srv); });
+    }
     if (m_exactReadback) m_exactReadback->Unmap(0, nullptr);
     m_device.deferRelease(m_exactReadback);
     if (m_patchRing) m_patchRing->Unmap(0, nullptr);
@@ -1760,8 +1769,10 @@ struct RtLightHeader
     float3 cell;
     uint32_t dim[3], pad[2];
     uint32_t lightsOffset, cellStartOffset, cellLightsOffset, pad2;
+    uint32_t decal[4];  // words 16..19, per frame (RayScene::recordDecals; HitDecals.hlsli): TLAS, frames, texture table, count
 };
-static_assert(sizeof(RtLightHeader) == 64);
+static_assert(sizeof(RtLightHeader) == 80);
+constexpr uint32_t kLightDecalOffset = 64;
 constexpr uint32_t kLightCellsMax = 1u << 18;  // the grid's cell size grows past this many cells (262,144 x 4 B starts)
 } // namespace
 
@@ -1964,6 +1975,8 @@ void RayScene::updateLightGrid(FramePassContext& fc)
         }
         if (cellLights.empty()) cellLights.push_back(0);
         head.pad2 = m_emissiveSrv;  // word 15: emissive triangles (0xFFFFFFFF: none)
+        head.decal[0] = 0xFFFFFFFFu;  // no decals until recordDecals writes them this frame
+        head.decal[3] = 0;
         head.lightsOffset = sizeof(RtLightHeader);
         head.cellStartOffset = head.lightsOffset + (uint32_t)(std::max<size_t>(n, 1) * sizeof(RtLightRecord));
         head.cellLightsOffset = head.cellStartOffset + (uint32_t)(cellStart.size() * 4);
@@ -1978,6 +1991,11 @@ void RayScene::updateLightGrid(FramePassContext& fc)
         m_lightSrvNow = 0xFFFFFFFFu;
         return;
     }
+    publishLightSlot(fc);
+}
+
+void RayScene::publishLightSlot(FramePassContext& fc)
+{
     const uint64_t need = (m_lightImage.size() + 255) & ~255ull;
     if (!m_lightRing || need > m_lightSlotBytes)
     {
@@ -2028,6 +2046,151 @@ void RayScene::updateLightGrid(FramePassContext& fc)
     // areaLightStable, published by prepareScene before this record). An emitter hit counts only for stable lights; M
     // shades the others' specular with LTC. UINT32_MAX (no M, or emitters off): every emitter counts.
     std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes + 44, &fc.resources.areaLightStable, 4);
+    // Words 16..19, every frame: no decals unless recordDecals writes them after this (a slot keeps an earlier frame's).
+    const uint32_t noDecals[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0 };
+    std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes + kLightDecalOffset, noDecals, sizeof noDecals);
     m_lightSrvNow = m_lightRingSrv[slot];
+}
+
+uint8_t* RayScene::lightSlot(FramePassContext& fc)
+{
+    if (m_lightSrvNow == 0xFFFFFFFFu) publishLightSlot(fc);  // an empty grid (record() had no lights to publish)
+    return m_lightRingMapped + (fc.frame.frameIndex % kDescSlots) * m_lightSlotBytes;
+}
+
+void RayScene::recordDecals(FramePassContext& fc, const ViewResources& main)
+{
+    if (m_decalFrame == fc.frame.frameIndex) return;
+    m_decalFrame = fc.frame.frameIndex;
+    m_decalFrames = {};
+    m_decalTlasRef = {};
+    if (!main.decalFrames.valid()) return;  // record() left words 16..19 at "no decals"
+    RenderGraph& g = fc.graph;
+    constexpr uint32_t kFrameBytes = 128;  // DecalFrame (Decal.hlsli)
+    const uint32_t count = (uint32_t)(g.desc(main.decalFrames).size / kFrameBytes);
+    if (count == 0) return;
+    if (count > m_decalCapacity)
+    {
+        for (Buffer* b : { &m_decalAabbs, &m_decalBlas, &m_decalBlasScratch, &m_decalTlas, &m_decalTlasScratch, &m_decalDesc }) release(*b);
+        if (m_decalTlasSrv != 0xFFFFFFFFu)
+        {
+            DescriptorHeaps* h = &m_device.descriptors();
+            const uint32_t srv = m_decalTlasSrv;
+            m_device.deferCall([h, srv] { h->freeResource(srv); });
+        }
+        m_decalCapacity = std::max(count, 2 * m_decalCapacity);
+        m_decalAabbs = createBuffer((uint64_t)m_decalCapacity * sizeof(D3D12_RAYTRACING_AABB), true, false, L"RT decal AABBs");
+        D3D12_RAYTRACING_GEOMETRY_DESC geo{};
+        geo.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
+        geo.AABBs.AABBCount = m_decalCapacity;
+        geo.AABBs.AABBs = { m_decalAabbs.address(), sizeof(D3D12_RAYTRACING_AABB) };
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
+        in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+        in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        in.NumDescs = 1;
+        in.pGeometryDescs = &geo;
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
+        m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&in, &sizes);
+        m_decalBlas = createBuffer(sizes.ResultDataMaxSizeInBytes, false, true, L"RT decal BLAS");
+        m_decalBlasScratch = createBuffer(sizes.ScratchDataSizeInBytes, true, false, L"RT decal BLAS scratch");
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS top{};
+        top.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+        top.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+        top.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        top.NumDescs = 1;
+        m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&top, &sizes);
+        m_decalTlas = createBuffer(sizes.ResultDataMaxSizeInBytes, false, true, L"RT decal TLAS");
+        m_decalTlasScratch = createBuffer(sizes.ScratchDataSizeInBytes, true, false, L"RT decal TLAS scratch");
+        D3D12_RAYTRACING_INSTANCE_DESC desc{};
+        desc.Transform[0][0] = desc.Transform[1][1] = desc.Transform[2][2] = 1;  // world-space boxes
+        desc.InstanceMask = 0xFF;
+        desc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE;
+        desc.AccelerationStructure = m_decalBlas.address();
+        m_decalDesc = createBuffer(sizeof desc, false, false, L"RT decal instance");
+        upload(m_decalDesc, &desc, sizeof desc);
+        m_decalTlasSrv = tlasSrv(m_decalTlas.address());
+    }
+    const BufferRef frames = main.decalFrames;
+    const BufferRef aabbs = g.importBuffer(m_decalAabbs.resource.Get(), { "RT decal AABBs", m_decalAabbs.bytes, 0 });
+    const BufferRef blas = g.importBuffer(m_decalBlas.resource.Get(), { "RT decal BLAS", m_decalBlas.bytes, 0 });
+    const BufferRef blasScratch = g.importBuffer(m_decalBlasScratch.resource.Get(), { "RT decal BLAS scratch", m_decalBlasScratch.bytes, 0 });
+    const BufferRef tlas = g.importBuffer(m_decalTlas.resource.Get(), { "RT decal TLAS", m_decalTlas.bytes, 0 });
+    const BufferRef tlasScratch = g.importBuffer(m_decalTlasScratch.resource.Get(), { "RT decal TLAS scratch", m_decalTlasScratch.bytes, 0 });
+    ID3D12PipelineState* boxes = fc.shaders.compute("RayTracing/DecalBoxes");
+    const D3D12_GPU_VIRTUAL_ADDRESS constants = fc.frameConstantsFor(fc.frame.mainView);  // the decal frames' camera
+    g.addPass("r.decals.boxes", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(frames, Use::SrvCompute);
+                  b.use(aabbs, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[4] = { c.srv(frames), c.uav(aabbs), count, 0 };
+                  c.cmd->SetPipelineState(boxes);
+                  c.bindFrameConstants(constants);
+                  c.computeConstants(k, 4);
+                  c.cmd->Dispatch((count + 63) / 64, 1, 1);
+              });
+    const D3D12_GPU_VIRTUAL_ADDRESS aabbAddress = m_decalAabbs.address(), blasAddress = m_decalBlas.address(), blasScratchAddress = m_decalBlasScratch.address();
+    g.addPass("r.decals.blas", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(aabbs, Use::AccelerationStructureInput);
+                  b.use(blas, Use::AccelerationStructureWrite);
+                  b.use(blasScratch, Use::AccelerationStructureScratch);
+              },
+              [=](PassContext& c) {
+                  D3D12_RAYTRACING_GEOMETRY_DESC geo{};
+                  geo.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
+                  geo.AABBs.AABBCount = count;
+                  geo.AABBs.AABBs = { aabbAddress, sizeof(D3D12_RAYTRACING_AABB) };
+                  D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
+                  d.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+                  d.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+                  d.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+                  d.Inputs.NumDescs = 1;
+                  d.Inputs.pGeometryDescs = &geo;
+                  d.DestAccelerationStructureData = blasAddress;
+                  d.ScratchAccelerationStructureData = blasScratchAddress;
+                  c.cmd->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
+              });
+    // The header words (words 16..19 of this frame's light-grid slot) are written when this pass executes: the frames'
+    // SRV exists then (the ring slot is the frame's own, frames in flight <= kDescSlots).
+    uint8_t* slot = lightSlot(fc);
+#if defined(UNX_HAS_MATERIAL)
+    const uint32_t textures = material::textureTable(fc);
+#else
+    const uint32_t textures = 0xFFFFFFFFu;  // no M in this build: decal material constants only
+#endif
+    const D3D12_GPU_VIRTUAL_ADDRESS descAddress = m_decalDesc.address(), tlasAddress = m_decalTlas.address(), tlasScratchAddress = m_decalTlasScratch.address();
+    const uint32_t tlasSrvIndex = m_decalTlasSrv;
+    g.addPass("r.decals.tlas", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(blas, Use::AccelerationStructureRead);
+                  b.use(tlas, Use::AccelerationStructureWrite);
+                  b.use(tlasScratch, Use::AccelerationStructureScratch);
+                  b.use(frames, Use::SrvCompute);
+              },
+              [=](PassContext& c) {
+                  D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
+                  d.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+                  d.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+                  d.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+                  d.Inputs.NumDescs = 1;
+                  d.Inputs.InstanceDescs = descAddress;
+                  d.DestAccelerationStructureData = tlasAddress;
+                  d.ScratchAccelerationStructureData = tlasScratchAddress;
+                  c.cmd->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
+                  const uint32_t words[4] = { tlasSrvIndex, c.srv(frames), textures, count };
+                  std::memcpy(slot + kLightDecalOffset, words, sizeof words);
+              });
+    m_decalFrames = frames;
+    m_decalTlasRef = tlas;
+}
+
+void RayScene::declareDecals(PassBuilder& b) const
+{
+    if (!m_decalTlasRef.valid()) return;
+    b.use(m_decalTlasRef, Use::AccelerationStructureRead);
+    b.use(m_decalFrames, Use::SrvGraphics);  // as declareTraversal: ray and compute passes of R
 }
 } // namespace unx::render::rt

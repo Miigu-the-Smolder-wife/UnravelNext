@@ -28,6 +28,7 @@
 // P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view (sun, scene buffers).
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
+#include "RayTracing/HitDecals.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
 #include "Passes/GI/GiSky.hlsli"
@@ -125,7 +126,11 @@ void GiTraceGen()
         const RtSurface s = rtSurface(scene, hit, r.Origin, r.Direction);
         // Textures at the GI ray's texel-cone footprint (the width its cache cell is sized by).
         GpuMaterial m = loadMaterial(s.material);
-        if ((P[3].w & 8) == 0) m = rtHitMaterial(m, s, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z), dot(s.normal, r.Direction));
+        if ((P[3].w & 8) == 0)
+        {
+            m = rtHitMaterial(m, s, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z), dot(s.normal, r.Direction));
+            rtHitDecals(scene, s, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z), m);  // the direct view's decals (A7)
+        }
         const bool twoSided = (m.classFlags & MATERIAL_TWO_SIDED) != 0;
         if (!s.frontFace && !twoSided)
         {

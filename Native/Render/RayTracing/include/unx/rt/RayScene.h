@@ -108,6 +108,12 @@ public:
     // Bindless indices for ray libraries: root constants P[6], P[7] (RtSceneSrvs; word 7 = this frame's local-light grid,
     // HitLocalLights.hlsli).
     void rootConstants(uint32_t out[8]) const;
+    // Decals at ray hits (RayTracing/HitDecals.hlsli, FEATURES_GAME 5.2): once per frame, before the first pass that shades
+    // hits reads rootConstants (GI, reflections), builds the decal query TLAS (one BLAS of procedural AABBs from
+    // main.decalFrames, rebuilt each frame the main view has decals) and writes words 16..19 of this frame's light-grid
+    // header. declareDecals adds its reads to a pass that shades hits.
+    void recordDecals(FramePassContext& fc, const ViewResources& main);
+    void declareDecals(PassBuilder& b) const;
     const RaySceneStats& stats() const { return m_stats; }
     // B3: whether this object was rebuilt from the previous one for an instance edit (meshes and materials kept), and the
     // world AABBs of the geometry that changed (instances added, removed, re-meshed, hidden or moved while static) at
@@ -166,6 +172,16 @@ private:
     void buildEmitters();
     Buffer m_emitterAabbs, m_emitterBlas;
     uint32_t m_emitterLights = 0;
+    // Decal query structure (recordDecals): AABBs written by RayTracing/DecalBoxes, the BLAS over them, a one-instance TLAS
+    // (descriptor in m_decalDesc), sized for m_decalCapacity decals.
+    Buffer m_decalAabbs, m_decalBlas, m_decalBlasScratch, m_decalTlas, m_decalTlasScratch, m_decalDesc;
+    uint32_t m_decalCapacity = 0, m_decalTlasSrv = 0xFFFFFFFFu;
+    uint64_t m_decalFrame = ~0ull;
+    BufferRef m_decalFrames, m_decalTlasRef;
+    // The frame's light-grid slot for the header words written after record() (decals); publishes an empty grid when
+    // record() had nothing to publish.
+    uint8_t* lightSlot(FramePassContext& fc);
+    void publishLightSlot(FramePassContext& fc);
     bool m_emittersEnabled = false;  // raytracing.emitters
     void buildStaticTlas();
     void recordDeform(ID3D12GraphicsCommandList7* cmd) const;
@@ -315,7 +331,7 @@ private:
     void updateEmissive(FramePassContext& fc);
     ComPtr<ID3D12Resource> m_emissive;
     uint32_t m_emissiveSrv = 0xFFFFFFFFu, m_emissiveRevision = 0xFFFFFFFFu;
-    std::vector<uint8_t> m_lightImage;       // header 64 B, lights (96 B each), cell starts (cells + 1), cell lights
+    std::vector<uint8_t> m_lightImage;       // header 80 B, lights (96 B each), cell starts (cells + 1), cell lights
     uint64_t m_lightHash = 0, m_lightVersion = 0;
     uint64_t m_lightSlotVersion[4] = {};     // kDescSlots
     ComPtr<ID3D12Resource> m_lightRing;

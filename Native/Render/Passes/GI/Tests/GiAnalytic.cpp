@@ -352,7 +352,7 @@ struct Outcome
     double mean = 0, minimum = 0, maximum = 0, worst = 0;  // worst = max |E / expected - 1| over valid probes
     double expectedMean = 0;                                 // mean expected E over the same probes
     double mapMean = 0, mapWorst = 0, mapExpectedMean = 0;   // the cache's irradiance maps at the probe points (giCacheIrradianceAt)
-    uint32_t mapProbes = 0;
+    uint32_t mapProbes = 0, mapBeyond3 = 0;                  // probes, and those beyond 3 % (a stale region shows as a cluster)
     double mapP99 = 0, mapWorstExpected = 0, mapWorstValue = 0;  // 99th percentile relative error; the worst probe's E pair
     float3 mapWorstAt{}, mapWorstNormal{};
     double radianceMean = 0, radianceWorst = 0;              // screenProbeRadiance against the uniform radiance
@@ -556,6 +556,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             out.expectedMean = n ? esum / n : 0;
             {
                 double msum = 0, mexp = 0, mworst = 0;
+                uint32_t beyond3 = 0;
                 uint32_t mn = 0;
                 std::vector<double> rel;
                 for (size_t i = 0; i < values.size() / 16; ++i)
@@ -575,12 +576,14 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
                         out.mapWorstValue = v[11];
                     }
                     mworst = std::max(mworst, r);
+                    beyond3 += r > 0.03 ? 1u : 0u;
                     rel.push_back(r);
                     ++mn;
                 }
                 out.mapMean = mn ? msum / mn : 0;
                 out.mapExpectedMean = mn ? mexp / mn : 0;
                 out.mapWorst = mworst;
+                out.mapBeyond3 = beyond3;
                 out.mapProbes = mn;
                 if (!rel.empty())
                 {
@@ -740,8 +743,12 @@ int main(int argc, char** argv)
             const Outcome k = run(device, shaders, quality, controlScene, { 1, 1, 1 }, { 0, 0, 0 }, withCube, -1, frames - editFrame, 1920, 1080);
             logf("  control (the cube from the first frame, %u frames): mean E %.5f against %.5f (%+.3f %%), worst %.3f %%, P99 %.3f %%\n", frames - editFrame,
                  k.mapMean, k.mapExpectedMean, 100 * (k.mapMean / k.mapExpectedMean - 1), 100 * k.mapWorst, 100 * k.mapP99);
+            // Stale entries after the edit show as a cluster of probes beyond 3 %: their count against the control's within
+            // its Poisson spread (the single worst probe of ~32k noisy ones varied 4.8 - 6.5 % between identical runs).
+            const double beyondLimit = k.mapBeyond3 + 3 * std::sqrt((double)k.mapBeyond3) + 5;
             const bool okE = e.mapProbes > 1000 && std::fabs(e.mapMean / e.mapExpectedMean - 1) < 0.01 && e.mapP99 < k.mapP99 + 0.005 &&
-                             e.mapWorst < k.mapWorst + 0.005 && afterSum > steadyBefore && sameEpoch;
+                             e.mapBeyond3 <= beyondLimit && afterSum > steadyBefore && sameEpoch;
+            logf("  probes beyond 3 %%: %u (control %u, limit %.0f)\n", e.mapBeyond3, k.mapBeyond3, beyondLimit);
             logf("instance edit (B3): a cube appended after %u frames; epoch %s; resets in the 8 frames before %u, after %u (live entries %u); "
                  "ground under the cube's shadow of sky: cache maps at %u probe points, mean E %.5f against %.5f (%+.3f %%), worst %.3f %% -> %s\n",
                  editFrame, sameEpoch ? "kept" : "CHANGED", steadyBefore, afterSum, e.stats.live, e.mapProbes, e.mapMean, e.mapExpectedMean, 100 * (e.mapMean / e.mapExpectedMean - 1),

@@ -437,6 +437,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     }
 
     uint32_t scene[8];
+    rays.recordDecals(fc, main);  // decals at hits (HitDecals.hlsli): header words before rootConstants
     rays.rootConstants(scene);
     // Escaping rays see S's sky and sun when the atmosphere LUTs exist this frame (variant SKY0); otherwise the constant
     // sky of setConstantSky (SKY1: tests, and builds without the S track).
@@ -456,6 +457,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   b.use(cache, Use::UavGraphics);
                   b.use(samples, Use::UavGraphics);
                   rays.declareTraversal(b);
+                  rays.declareDecals(b);
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },

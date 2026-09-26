@@ -736,6 +736,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
               });
 
     uint32_t scene[8];
+    rays.recordDecals(fc, main);  // decals at hits (HitDecals.hlsli): header words before rootConstants
     rays.rootConstants(scene);
     const FrameResources& fr = fc.resources;
     const bool atmosphere = fr.transmittanceLut.valid() && fr.multiScatterLut.valid() && fr.skyViewLut.valid() && fr.aerialPerspective.valid();
@@ -794,6 +795,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         if (exactCounts.valid()) b.use(exactCounts, Use::UavGraphics);
         rt::RayScene::declareVsm(b, vsm);
         rays.declareTraversal(b);
+        rays.declareDecals(b);
         if (atmosphere)
             for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
     };
