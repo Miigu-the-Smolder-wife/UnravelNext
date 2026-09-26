@@ -231,7 +231,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     dispatch("fx.layer.setup", "Passes/FX/FxLayerSetup.STEP0", groups(threads, 256), [=](PassBuilder& b) {
         for (const BufferRef& x : inputBuffers)
             if (x.valid()) b.use(x, Use::SrvCompute);
-        for (const BufferRef& x : { lighting.vsmPageTable, lighting.vsmPool, lighting.vsmBlocks, lighting.vsmSearchBound, lighting.vsmLayers, lighting.giCache, lighting.froxelLights })
+        for (const BufferRef& x : { lighting.vsmPageTable, lighting.vsmPool, lighting.vsmBlocks, lighting.vsmSearchBound, lighting.vsmLayers, lighting.giCache, lighting.froxelLights, lighting.fxLights })
             if (x.valid()) b.use(x, Use::SrvCompute);
         for (const TextureRef& x : { lighting.vsmAtlas, lighting.airVolume, lighting.transmittanceLut, lighting.multiScatterLut })
             if (x.valid()) b.use(x, Use::SrvCompute);

@@ -518,6 +518,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 for (TextureRef t : { r.transmittanceLut, r.multiScatterLut, r.skyViewLut }) b.use(t, Use::SrvCompute);
             if (air) b.use(v.airVolume, Use::SrvCompute);
             if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
+            if (froxelLists && r.fxLights.valid()) b.use(r.fxLights, Use::SrvCompute);  // v1.81: the lists index the FX light tail
             if (overflow)
             {
                 b.use(v.shadowOverflowTiles, Use::SrvCompute);
@@ -626,6 +627,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  for (TextureRef t : { r.transmittanceLut, r.multiScatterLut }) b.use(t, Use::SrvCompute);
                              if (air) b.use(v.airVolume, Use::SrvCompute);
                              if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
+            if (froxelLists && r.fxLights.valid()) b.use(r.fxLights, Use::SrvCompute);  // v1.81: the lists index the FX light tail
                              if (vsm)
                                  for (BufferRef vb : { r.vsmPageTable, r.vsmBlocks, r.vsmSearchBound }) b.use(vb, Use::SrvCompute);
                              // ShadowSrvs.pool: the one-path page atlas (v1.43) once S publishes it, else the page pool
@@ -810,6 +812,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             b.use(v.visibleClusters, Use::SrvCompute);
             b.use(v.depth, Use::SrvCompute);
             if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
+            if (froxelLists && r.fxLights.valid()) b.use(r.fxLights, Use::SrvCompute);  // v1.81: the lists index the FX light tail
             if (atmosphere)
                 for (TextureRef t : { r.transmittanceLut, r.multiScatterLut }) b.use(t, Use::SrvCompute);
             if (air) b.use(v.airVolume, Use::SrvCompute);

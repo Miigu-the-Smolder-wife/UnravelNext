@@ -15,6 +15,7 @@ namespace unx::fx
 struct ParticleLighting
 {
     render::BufferRef vsmPageTable, vsmPool, vsmBlocks, vsmSearchBound, vsmLayers, giCache, froxelLights;
+    render::BufferRef fxLights;  // v1.81: the scene light buffer with the FX tail (declared so the FX writer comes first)
     render::TextureRef vsmAtlas, airVolume, transmittanceLut, multiScatterLut;
     uint32_t vsmConstants = 0xFFFFFFFFu, vsmLocalLights = 0xFFFFFFFFu, vsmSlotOfLight = 0xFFFFFFFFu;
 };
