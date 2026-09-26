@@ -80,6 +80,21 @@ ViewGrid::ViewGrid(Device& device, ShaderLibrary& shaders, uint32_t framesInFlig
             device.d3d()->CreateUnorderedAccessView(m_pyramid.Get(), nullptr, &ud, device.descriptors().resourceCpu(m_pyramidUav[m]));
         }
     }
+    for (uint32_t s = 0; s <= framesInFlight; ++s)
+    {
+        D3D12_HEAP_PROPERTIES rheap{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = 3 * 256;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> rb;
+        check(device.d3d()->CreateCommittedResource3(&rheap, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)),
+              "view grid bounds readback");
+        m_boundsReadback.push_back(rb);
+        m_boundsFrame.push_back(0);
+    }
     for (uint32_t s = 0; s < framesInFlight; ++s)
     {
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_UPLOAD };
@@ -119,6 +134,7 @@ ViewGrid::~ViewGrid()
     for (uint32_t srv : m_srv) m_device.descriptors().freeResource(srv);
     m_device.deferRelease(m_pyramid);
     m_device.deferRelease(m_drawn);
+    for (auto& rb : m_boundsReadback) m_device.deferRelease(rb);
     m_device.descriptors().freeResource(m_drawnUav);
     for (uint32_t uav : m_pyramidUav) m_device.descriptors().freeResource(uav);
 }
@@ -259,7 +275,36 @@ ViewGridLayout ViewGrid::layout(const ViewGridCamera& c, const ViewGridWater& w,
 ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutput& fields, const float lengths[3], const ViewGridCamera& camera, const ViewGridWater& water,
                                 bool diagnostics)
 {
-    ViewGridLayout l = layout(camera, water, lengths);
+    // The ocean's measured bounds: the slot written framesInFlight + 1 records ago (its GPU work has completed: the caller
+    // waited for frame - framesInFlight before recording this one).
+    const uint32_t ring = uint32_t(m_boundsReadback.size()), readSlot = uint32_t((frame + 1) % ring), writeSlot = uint32_t(frame % ring);
+    if (m_boundsFrame[readSlot] && m_boundsFrame[readSlot] + ring - 1 == frame + 1)
+    {
+        const uint8_t* m = nullptr;
+        D3D12_RANGE all{ 0, 3 * 256 };
+        check(m_boundsReadback[readSlot]->Map(0, &all, (void**)&m), "map view grid bounds");
+        float r = 0, top = 0, bottom = 0;
+        for (uint32_t c = 0; c < 3; ++c)
+        {
+            float b[4];
+            std::memcpy(b, m + 256 * c, 16);
+            top += b[0];
+            bottom += b[1];
+            r += b[2];
+        }
+        D3D12_RANGE none{ 0, 0 };
+        m_boundsReadback[readSlot]->Unmap(0, &none);
+        m_measuredBounds[0] = r;
+        m_measuredBounds[1] = std::max(top, -bottom);
+        m_measured = true;
+    }
+    ViewGridWater effective = water;
+    if (m_measured)
+    {
+        effective.horizontalBound = 1.25f * m_measuredBounds[0];
+        effective.verticalBound = 1.25f * m_measuredBounds[1];
+    }
+    ViewGridLayout l = layout(camera, effective, lengths);
     const uint32_t drawnUav = diagnostics ? m_drawnUav : 0;
     std::memcpy(&l.params[104], &drawnUav, 4);  // byte 416
     const uint32_t slot = uint32_t(frame % m_upload.size());
@@ -268,6 +313,8 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
     ViewGridOutput out;
     out.columns = l.columns;
     out.rows = l.rows;
+    out.layout = l;
+    out.water = effective;
     out.keys = g.createBuffer({ "view grid keys", uint64_t(pixels) * 8, 0 });
     out.counters = g.createBuffer({ "view grid counters", 256, 0 });
     out.surface = g.createTexture(TextureDesc{ "view grid surface", width, height, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
@@ -282,8 +329,39 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
                   c.computeConstants(k, 4);
                   c.cmd->Dispatch((pixels + 63) / 64, 1, 1);
               });
+    // The ocean bounds pyramid (the adaptive near field's distances; its top mip is the measured R and A).
+    const TextureRef pyramid = g.importTexture(m_pyramid.Get(), TextureDesc{ "ocean bounds pyramid", 512, 512, 3, 10, DXGI_FORMAT_R32G32B32A32_FLOAT }, D3D12_BARRIER_LAYOUT_COMMON);
+    ID3D12PipelineState* bounds = m_shaders.compute("Passes/Water/OceanBounds");
+    const float texels[3] = { lengths[0] / 512, lengths[1] / 512, lengths[2] / 512 };
+    for (uint32_t mip = 0; mip < 10; ++mip)
+    {
+        const uint32_t dst = m_pyramidUav[mip], src = mip ? m_pyramidUav[mip - 1] : 0, size = 512u >> mip;
+        g.addPass("ocean bounds pyramid", QueueType::Graphics,
+                  [&](PassBuilder& pb) { pb.use(displacement, Use::SrvCompute); pb.use(slopes, Use::SrvCompute); pb.use(pyramid, Use::UavCompute); },
+                  [=](PassContext& c) {
+                      uint32_t k[12] = { c.srv(displacement), c.srv(slopes), dst, src, mip };
+                      std::memcpy(&k[8], texels, 12);
+                      c.cmd->SetPipelineState(bounds);
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch((size + 7) / 8, (size + 7) / 8, 3);
+                  });
+    }
+    ID3D12Resource* readback = m_boundsReadback[writeSlot].Get();
+    g.addPass("ocean bounds readback", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(pyramid, Use::CopySrc); pb.keep(); },
+              [=](PassContext& c) {
+                  for (uint32_t cascade = 0; cascade < 3; ++cascade)
+                  {
+                      D3D12_TEXTURE_COPY_LOCATION dst{ readback, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+                      dst.PlacedFootprint.Offset = 256 * cascade;
+                      dst.PlacedFootprint.Footprint = { DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 1, 1, 256 };
+                      D3D12_TEXTURE_COPY_LOCATION src{ c.resource(pyramid), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                      src.SubresourceIndex = 9 + 10 * cascade;
+                      c.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                  }
+              });
+    m_boundsFrame[writeSlot] = frame + 1;
     const uint32_t groupsX = (l.columns + 7) / 8, groupsY = (l.rows + 7) / 8;
-    const float bound = water.bound();
+    const float bound = effective.bound();
     const float window[4] = { l.window[0], l.window[1], l.window[2], l.window[3] };
     const BufferRef big = g.createBuffer({ "view grid big triangles", uint64_t(kBigCapacity) * 48, 0 });
     const BufferRef prefix = g.createBuffer({ "view grid big prefix", uint64_t(kBigCapacity) * 4, 0 });
@@ -310,24 +388,8 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
         });
     if (l.nearLevels)
     {
-        // Adaptive near field: the bounds pyramid, then level L - 1 over the rectangle and each finer level over the blocks
-        // its parent level split (indirect), ping-ponging two lists.
-        const TextureRef pyramid = g.importTexture(m_pyramid.Get(), TextureDesc{ "ocean bounds pyramid", 512, 512, 3, 10, DXGI_FORMAT_R32G32B32A32_FLOAT }, D3D12_BARRIER_LAYOUT_COMMON);
-        ID3D12PipelineState* bounds = m_shaders.compute("Passes/Water/OceanBounds");
-        const float texels[3] = { lengths[0] / 512, lengths[1] / 512, lengths[2] / 512 };
-        for (uint32_t mip = 0; mip < 10; ++mip)
-        {
-            const uint32_t dst = m_pyramidUav[mip], src = mip ? m_pyramidUav[mip - 1] : 0, size = 512u >> mip;
-            g.addPass("ocean bounds pyramid", QueueType::Graphics,
-                      [&](PassBuilder& pb) { pb.use(displacement, Use::SrvCompute); pb.use(slopes, Use::SrvCompute); pb.use(pyramid, Use::UavCompute); },
-                      [=](PassContext& c) {
-                          uint32_t k[12] = { c.srv(displacement), c.srv(slopes), dst, src, mip };
-                          std::memcpy(&k[8], texels, 12);
-                          c.cmd->SetPipelineState(bounds);
-                          c.computeConstants(k, 12);
-                          c.cmd->Dispatch((size + 7) / 8, (size + 7) / 8, 3);
-                      });
-        }
+        // Adaptive near field: level L - 1 over the rectangle and each finer level over the blocks its parent level split
+        // (indirect), ping-ponging two lists.
         const BufferRef lists[2] = { g.createBuffer({ "view grid near blocks A", 16 + uint64_t(kNearBlocks) * 8, 0 }),
                                      g.createBuffer({ "view grid near blocks B", 16 + uint64_t(kNearBlocks) * 8, 0 }) };
         const BufferRef levelArgs = g.createBuffer({ "view grid near dispatch", 256, 0 });

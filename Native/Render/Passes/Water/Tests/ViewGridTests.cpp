@@ -35,6 +35,7 @@ using unx::water::Ocean;
 using unx::water::OceanDesc;
 using unx::water::ViewGrid;
 using unx::water::ViewGridCamera;
+using unx::water::ViewGridLayout;
 using unx::water::ViewGridWater;
 
 #define W_CHECK(cond, ...)                                                                                            \
@@ -158,7 +159,19 @@ int main(int argc, char** argv)
             water.lakeCentre[0] = float(scene.lakeCentre[0]);
             water.lakeCentre[1] = float(scene.lakeCentre[1]);
             water.lakeRadius = float(scene.lakeRadius);
-            const auto layout = ViewGrid::layout(camera, water, od.lengths);
+            // Warm-up records: the grid measures the ocean's bounds from its pyramid a few frames later (the records below then
+            // use the same measured bounds: the same ocean time).
+            for (int warm = 0; warm < 4; ++warm)
+            {
+                RenderGraph gw(gpu.device);
+                const auto fw = (calm ? calmOcean : ocean).record(gw, 37.25);
+                const auto ow = grid.record(gw, frame++, fw, od.lengths, camera, water);
+                gw.addPass("view grid warm-up keep", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(ow.depth, Use::SrvCompute); pb.keep(); }, [](PassContext&) {});
+                gw.execute(nullptr);
+                for (uint32_t q = 0; q < kQueueTypeCount; ++q) gpu.device.queue((QueueType)q).waitCpu(gw.lastFence((QueueType)q));
+            }
+            ViewGridLayout layout;
+            ViewGridWater used = water;
             // The adaptive near field's drawn blocks (a first frame; the second frame decides the same blocks: the same ocean
             // time and camera).
             std::vector<uint32_t> drawnBlocks;  // (level, x, z, 0) per block
@@ -166,6 +179,8 @@ int main(int argc, char** argv)
                 RenderGraph g0(gpu.device);
                 const auto f0 = (calm ? calmOcean : ocean).record(g0, 37.25);
                 const auto o0 = grid.record(g0, frame++, f0, od.lengths, camera, water, true);
+                layout = o0.layout;
+                used = o0.water;
                 if (o0.nearDrawn.valid())
                 {
                     ComPtr<ID3D12Resource> rb0 = buffer(gpu.device, 16 + (uint64_t(1) << 20) * 16, D3D12_HEAP_TYPE_READBACK);
@@ -214,6 +229,9 @@ int main(int argc, char** argv)
             RenderGraph g(gpu.device);
             const auto fields = (calm ? calmOcean : ocean).record(g, 37.25);
             const auto out = grid.record(g, frame++, fields, od.lengths, camera, water, true);
+            // Bytes, not floats: the parameters hold integers' bits too (a NaN pattern never compares equal as a float).
+            W_CHECK(out.layout.params.size() == layout.params.size() && std::memcmp(out.layout.params.data(), layout.params.data(), layout.params.size() * 4) == 0,
+                    "%s: the second record's layout differs from the first's", scene.name);
             // The probe reads the same parameters: upload them once more for it.
             ComPtr<ID3D12Resource> params = buffer(gpu.device, layout.params.size() * 4, D3D12_HEAP_TYPE_UPLOAD);
             {
@@ -406,8 +424,8 @@ int main(int argc, char** argv)
                     }
                     if (v[1] >= 0) continue;
                     const double t = hCam / -v[1], horizontal = t * std::hypot(v[0], v[2]);
-                    if (horizontal > water.extent - water.bound() - 1) continue;
-                    const double reach = water.bound() * (1 + horizontal / hCam) + 1;
+                    if (horizontal > used.extent - used.bound() - 1) continue;
+                    const double reach = used.bound() * (1 + horizontal / hCam) + 1;
                     if (scene.lake && std::hypot(scene.position[0] + t * v[0] - scene.lakeCentre[0], scene.position[2] + t * v[2] - scene.lakeCentre[1]) > scene.lakeRadius - reach) continue;
                     ++required;
                     if (!hit)
@@ -434,9 +452,9 @@ int main(int argc, char** argv)
             std::sort(err.begin(), err.end());
             std::sort(moved.begin(), moved.end());
             const double p999 = err.empty() ? 0 : err[std::min(err.size() - 1, size_t(0.999 * err.size()))];
-            std::printf("%s: grid %u x %u + %u near levels (%zu blocks drawn), %u big triangles (largest box %lld px); water pixels %llu (required %llu, holes %llu); CPU raster: coverage mismatches %llu, depth max rel %.2e; polished %.2f %% (moved %.3f px at 99.9 %%); "
+            std::printf("%s (measured R %.2f m, A %.2f m, x 1.25): grid %u x %u + %u near levels (%zu blocks drawn), %u big triangles (largest box %lld px); water pixels %llu (required %llu, holes %llu); CPU raster: coverage mismatches %llu, depth max rel %.2e; polished %.2f %% (moved %.3f px at 99.9 %%); "
                         "output point to the surface <= median %.3f px, 99.9 %% %.3f px, max %.3f px (%llu > 0.5 px)\n",
-                        scene.name, layout.columns, layout.rows, layout.nearLevels, drawnBlocks.size() / 4, bigCounts[0], (long long)largestBox, (unsigned long long)water2, (unsigned long long)required, (unsigned long long)holes,
+                        scene.name, used.horizontalBound / 1.25, used.verticalBound / 1.25, layout.columns, layout.rows, layout.nearLevels, drawnBlocks.size() / 4, bigCounts[0], (long long)largestBox, (unsigned long long)water2, (unsigned long long)required, (unsigned long long)holes,
                         (unsigned long long)coverageMismatch, worstDepth, water2 ? 100.0 * polished / water2 : 0.0,
                         moved.empty() ? 0 : moved[std::min(moved.size() - 1, size_t(0.999 * moved.size()))], err.empty() ? 0 : err[err.size() / 2], p999,
                         err.empty() ? 0 : err.back(), (unsigned long long)over);

@@ -24,6 +24,8 @@ struct ViewGridWater
     float level = 0;          // still water height (m)
     float extent = 1.0e6f;    // the water body's extent from the camera (m, horizontal; open sea: the horizon)
     float nearRadius = 16;    // the far field starts here (m, horizontal)
+    // R and A until the ocean's own bounds are measured (the bounds pyramid's top mip, read back framesInFlight + 1 frames
+    // later, times 1.25 for the sea's change over those frames); then the measured ones.
     float horizontalBound = 1.5f;  // R: bound of the horizontal displacement (m)
     float verticalBound = 2.0f;    // A: bound of the displacement's height above and below the still water (m)
     float bound() const { return horizontalBound + verticalBound; }
@@ -48,6 +50,8 @@ struct ViewGridOutput
     render::TextureRef error;    // diagnostics only: R32F normal distance to the surface / pixel footprint of each output point
     render::BufferRef nearDrawn; // diagnostics only: the adaptive near field's drawn blocks (raw: count, then (level, x, z) x 16 B)
     uint32_t columns = 0, rows = 0;
+    ViewGridLayout layout;       // the layout this record used
+    ViewGridWater water;         // its water description (the measured bounds once available)
 };
 
 class ViewGrid
@@ -74,5 +78,9 @@ private:
     uint32_t m_pyramidUav[10] = {};
     render::ComPtr<ID3D12Resource> m_drawn;  // diagnostics' drawn-block list
     uint32_t m_drawnUav = 0;
+    std::vector<render::ComPtr<ID3D12Resource>> m_boundsReadback;  // the pyramid's top mip per frame slot
+    std::vector<uint64_t> m_boundsFrame;                           // the frame whose bounds a slot holds (+1; 0 = none)
+    bool m_measured = false;
+    float m_measuredBounds[2] = {};                                // R, A
 };
 } // namespace unx::water
