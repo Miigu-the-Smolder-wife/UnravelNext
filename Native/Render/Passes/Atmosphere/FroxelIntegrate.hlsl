@@ -44,7 +44,7 @@
 // P[2].x VSM search bound SRV (raw), P[2].y shadow texels per tile (float bits), P[2].z air step altitude m (float bits),
 // P[2].w experiment mask (atmosphere.froxels.experiment_disable; 0; cost attribution only: 1 air shadows, 2 local lights,
 // 4 air integration, 8 sun transmittance per substep, 16 multiple scattering per substep, 32 air shadow walk stops at
-// the page level; bit 16: walk statistics on)
+// the page level, 64 local lights' air shadows; bit 16: walk statistics on)
 // Light functions (A8, E's Passes/Lights/LightFunction.hlsli): P[4].y = FrameResources::lightFunctions (0xFFFFFFFF: none);
 // a point or spot light's in-scattering integrand carries its function toward each quadrature point, at the froxel's
 // lateral size over the distance to the light (the function varies across the light's cone; the points sample it).
@@ -256,7 +256,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         lr.table = ResourceDescriptorHeap[P[1].x];
         lr.pool = ResourceDescriptorHeap[P[1].y];
         lr.blocks = ResourceDescriptorHeap[P[1].z];
-        const bool localShadows = P[3].x != 0xFFFFFFFFu && P[1].w != 0xFFFFFFFFu;
+        const bool localShadows = P[3].x != 0xFFFFFFFFu && P[1].w != 0xFFFFFFFFu && (experiment & 64) == 0;
         const float width = froxelTileWidth(g, 0.5 * (z0 + z1)) / asfloat(P[2].y);
         float biasTexels = 1;
         if (P[1].w != 0xFFFFFFFFu)
