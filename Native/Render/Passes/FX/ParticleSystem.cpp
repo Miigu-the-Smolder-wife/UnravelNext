@@ -133,6 +133,25 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
     section(h.fields, h.field_count, sizeof(NV_StreamField), "fields");
     section(h.world_fields, h.world_field_count, sizeof(NV_StreamWorldField), "world fields");
     section(h.surfaces, h.surface_count, sizeof(NV_StreamSurface), "surfaces");
+    if ((h.flags & (NV_STREAM_SURFACES | NV_STREAM_RESET)) && h.height_field_count)
+    {
+        // heightfields (executor version 2): tiles and triangle ranges consecutive, as the CPU reference requires
+        section(h.height_fields, h.height_field_count, sizeof(NV_StreamHeightField), "height fields");
+        const auto* fields = reinterpret_cast<const NV_StreamHeightField*>(packet + h.height_fields);
+        uint64_t tiles = 0, triangles = 0;
+        for (uint32_t k = 0; k < h.height_field_count; ++k)
+        {
+            const NV_StreamHeightField& f = fields[k];
+            if (!(f.cells_x > 0 && f.cells_z > 0 && f.tiles_x == (f.cells_x + 15) / 16 && f.tiles_z == (f.cells_z + 15) / 16 && f.first_tile == tiles &&
+                  f.first_triangle == triangles && f.spacing_x > 0 && f.spacing_z > 0))
+                fail("FX particles: heightfield %u: cells %u x %u, tiles %u x %u from %u, triangles from %u, spacing %g x %g", k, f.cells_x, f.cells_z, f.tiles_x,
+                     f.tiles_z, f.first_tile, f.first_triangle, f.spacing_x, f.spacing_z);
+            tiles += (uint64_t)f.tiles_x * f.tiles_z;
+            triangles += 2ull * f.cells_x * f.cells_z;
+        }
+        if (tiles > UINT32_MAX || triangles > UINT32_MAX) fail("FX particles: heightfield table size");
+        section(h.height_tiles, tiles, sizeof(NV_StreamHeightTile), "height tiles");
+    }
     section(h.restore, h.restore_count, sizeof(NV_StreamParticle), "restore");
     section(h.bodies, h.body_count, sizeof(NV_StreamBody), "bodies");
     section(h.dynamic_surfaces, h.dynamic_surface_count, sizeof(NV_StreamSurface), "dynamic surfaces");
@@ -199,6 +218,8 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
         const auto* surfaces = reinterpret_cast<const NV_StreamSurface*>(packet + h.surfaces);
         for (uint32_t k = 0; k < h.surface_count; ++k)
             if (surfaces[k].body != NV_STREAM_NONE) bodyMax = std::max(bodyMax, surfaces[k].body + 1);
+        const auto* heightRows = reinterpret_cast<const NV_StreamHeightField*>(packet + h.height_fields);
+        for (uint32_t k = 0; k < h.height_field_count; ++k) bodyMax = std::max(bodyMax, heightRows[k].body + 1);
     }
     const auto* dynamicRows = reinterpret_cast<const NV_StreamSurface*>(packet + h.dynamic_surfaces);
     for (uint32_t k = 0; k < h.dynamic_surface_count; ++k)
@@ -264,6 +285,11 @@ struct ParticleSystem::Impl
     bool programsValid = false, started = false;
     uint32_t parity = 0;
     uint32_t surfaceCount = 0;                           // persistent surface table (NV_STREAM_SURFACES)
+    // heightfields of the surface table (executor version 2): the rows (their bodies place them each tick) and the tiles
+    // (uploaded with the table, 308 words each); per tick the anchor-space frames (HeightRecord, Particles.hlsli
+    // FxHeightField)
+    std::vector<NV_StreamHeightField> heightTable;
+    Buf heightTiles{ "fx.heightTiles", 4 }, heightFields{ "fx.heightFields", 112 };
     uint32_t submittedPrograms = 0, submittedBodyMax = 0;  // tables as of the last submitted packet (validation)
 
     struct Slot
@@ -353,6 +379,8 @@ void ParticleSystem::submit(const uint8_t* packet, uint64_t bytes)
         const auto* surfaces = reinterpret_cast<const NV_StreamSurface*>(packet + h.surfaces);
         for (uint32_t k = 0; k < h.surface_count; ++k)
             if (surfaces[k].body != NV_STREAM_NONE) m.submittedBodyMax = std::max(m.submittedBodyMax, surfaces[k].body + 1);
+        const auto* heightRows = reinterpret_cast<const NV_StreamHeightField*>(packet + h.height_fields);
+        for (uint32_t k = 0; k < h.height_field_count; ++k) m.submittedBodyMax = std::max(m.submittedBodyMax, heightRows[k].body + 1);
     }
     m_pending.emplace_back(packet, packet + bytes);
 }
@@ -575,11 +603,53 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         {
             m.surfaces.ensure(device, (uint64_t)h.surface_count * sizeof(NV_StreamSurface));
             m.surfaceCount = h.surface_count;
+            const auto* heightRows = reinterpret_cast<const NV_StreamHeightField*>(base + h.height_fields);
+            m.heightTable.assign(heightRows, heightRows + h.height_field_count);
+            uint64_t tiles = 0;
+            for (const NV_StreamHeightField& f : m.heightTable) tiles += (uint64_t)f.tiles_x * f.tiles_z;
+            m.heightTiles.ensure(device, tiles * sizeof(NV_StreamHeightTile));
         }
         const uint32_t surfaceTotal = m.surfaceCount + h.dynamic_surface_count;  // static table + this tick's dynamic rows
         // collision surfaces exist only in a simulating packet: a state packet (dt == 0) carries no body frames or dynamic
         // surfaces, so nothing resolves a body index or builds the grid (NativeVfxStream.h, state packets)
-        const bool collide = surfaceTotal != 0 && h.dt > 0 && !(m_experimentDisable & 8u);
+        const bool collide = (surfaceTotal != 0 || !m.heightTable.empty()) && h.dt > 0 && !(m_experimentDisable & 8u);
+        // The heightfields' anchor-space frames of this tick from their (static) bodies, in double as the CPU reference's
+        // load_inputs: origin = R o + position, axes R (spacing_x, 0, 0), R (0, 1, 0), R (0, 0, spacing_z).
+        struct HeightRecord
+        {
+            uint32_t entity0, entity1, generation0, generation1, cellsX, cellsZ, firstTile, tilesX, firstTriangle, pad[3];
+            float origin[3], pad3, axisX[3], pad4, axisY[3], pad5, axisZ[3], pad6;
+        };
+        static_assert(sizeof(HeightRecord) == 112);
+        std::vector<HeightRecord> heightRecords;
+        if (collide)
+        {
+            const auto* bodyRows = reinterpret_cast<const NV_StreamBody*>(base + h.bodies);
+            for (const NV_StreamHeightField& f : m.heightTable)
+            {
+                if (f.body >= h.body_count) fail("FX particles: heightfield body %u, the packet has %u bodies", f.body, h.body_count);
+                const NV_StreamBody& b = bodyRows[f.body];
+                for (int k = 0; k < 3; ++k)
+                    if (b.velocity[k] != 0 || b.angular_velocity[k] != 0) fail("FX particles: heightfield body %u moves (heightfield bodies are static)", f.body);
+                auto rotate = [&](double x, double y, double z, float* out) {
+                    const double qx = b.rotation[0], qy = b.rotation[1], qz = b.rotation[2], qw = b.rotation[3];
+                    const double tx = 2 * (qy * z - qz * y), ty = 2 * (qz * x - qx * z), tz = 2 * (qx * y - qy * x);
+                    const double r[3] = { x + qw * tx + (qy * tz - qz * ty), y + qw * ty + (qz * tx - qx * tz), z + qw * tz + (qx * ty - qy * tx) };
+                    for (int k = 0; k < 3; ++k) out[k] = (float)r[k];
+                    return std::array<double, 3>{ r[0], r[1], r[2] };
+                };
+                HeightRecord r{};
+                r.entity0 = f.entity[0], r.entity1 = f.entity[1], r.generation0 = f.generation0, r.generation1 = f.generation1;
+                r.cellsX = f.cells_x, r.cellsZ = f.cells_z, r.firstTile = f.first_tile, r.tilesX = f.tiles_x, r.firstTriangle = f.first_triangle;
+                const std::array<double, 3> o = rotate(f.origin[0], f.origin[1], f.origin[2], r.origin);
+                for (int k = 0; k < 3; ++k) r.origin[k] = (float)(o[k] + (double)b.position[k]);
+                rotate(f.spacing_x, 0, 0, r.axisX);
+                rotate(0, 1, 0, r.axisY);
+                rotate(0, 0, f.spacing_z, r.axisZ);
+                heightRecords.push_back(r);
+            }
+        }
+        m.heightFields.ensure(device, heightRecords.size() * sizeof(HeightRecord));
         m.dynamicSurfaces.ensure(device, (uint64_t)h.dynamic_surface_count * sizeof(NV_StreamSurface));
         m.tickSurfaces.ensure(device, (uint64_t)surfaceTotal * sizeof(NV_StreamSurface));
         // Collision grid: buckets = the power of two >= 2 x surfaces (>= 1024); at most 64 cells per listed surface.
@@ -879,7 +949,8 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         const uint64_t volumeOffset = align(rangesOffset + ribbonRanges.size() * 16, 16);
         const uint64_t drawRangesOffset = align(volumeOffset + volumeRanges.size() * 32, 16);
         const uint64_t drawRowsOffset = align(drawRangesOffset + ribbonDraw.size() * 16, 16);
-        const uint64_t rowsOffset = align(drawRowsOffset + ribbonDrawRows.size() * 4, 16);
+        const uint64_t heightOffset = align(drawRowsOffset + ribbonDrawRows.size() * 4, 16);
+        const uint64_t rowsOffset = align(heightOffset + heightRecords.size() * sizeof(HeightRecord), 16);
         const uint64_t uploadBytes = rowsOffset + updateRows.size() * 4;
         if (!slot.upload || slot.uploadBytes < uploadBytes)
         {
@@ -904,6 +975,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         if (!volumeRanges.empty()) std::memcpy(slot.mapped + volumeOffset, volumeRanges.data(), volumeRanges.size() * 32);
         if (!ribbonDraw.empty()) std::memcpy(slot.mapped + drawRangesOffset, ribbonDraw.data(), ribbonDraw.size() * 16);
         if (!ribbonDrawRows.empty()) std::memcpy(slot.mapped + drawRowsOffset, ribbonDrawRows.data(), ribbonDrawRows.size() * 4);
+        if (!heightRecords.empty()) std::memcpy(slot.mapped + heightOffset, heightRecords.data(), heightRecords.size() * sizeof(HeightRecord));
         std::memcpy(slot.mapped + rowsOffset, updateRows.data(), updateRows.size() * 4);
         // collision events copied with the tick: twice the last count the CPU read, at least 1024 and at most the configured
         // prefix; more are fetched from the tick's event buffer when read (exact either way)
@@ -952,7 +1024,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
                                     &m.emitterTable, &m.emitterStamp };
         std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitterUpdates, &m.emitterUpdateRows, &m.emitterPatches, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
                                      &m.restore, &m.birthIndex, &m.inRanges, &m.inBlocks, &m.renderRanges, &m.renderBlocks, &m.bodies, &m.dynamicSurfaces, &m.ribbonRanges, &m.volumeRanges,
-                                     &m.ribbonDrawRanges, &m.ribbonDrawRows };
+                                     &m.ribbonDrawRanges, &m.ribbonDrawRows, &m.heightTiles, &m.heightFields };
         for (Buf* b : state) b->import(g, importIndex);
         for (Buf* b : inputs) b->import(g, importIndex);
 
@@ -978,7 +1050,14 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         add(m.explicitBirths, h.explicit_births, (uint64_t)h.explicit_count * sizeof(NV_StreamExplicitBirth));
         add(m.fields, h.fields, (uint64_t)h.field_count * sizeof(NV_StreamField));
         add(m.worldFields, h.world_fields, (uint64_t)h.world_field_count * sizeof(NV_StreamWorldField));
-        if (h.flags & (NV_STREAM_SURFACES | NV_STREAM_RESET)) add(m.surfaces, h.surfaces, (uint64_t)h.surface_count * sizeof(NV_StreamSurface));
+        if (h.flags & (NV_STREAM_SURFACES | NV_STREAM_RESET))
+        {
+            add(m.surfaces, h.surfaces, (uint64_t)h.surface_count * sizeof(NV_StreamSurface));
+            uint64_t tiles = 0;
+            for (const NV_StreamHeightField& f : m.heightTable) tiles += (uint64_t)f.tiles_x * f.tiles_z;
+            add(m.heightTiles, h.height_tiles, tiles * sizeof(NV_StreamHeightTile));
+        }
+        if (!heightRecords.empty()) copies.push_back({ &m.heightFields, heightOffset, heightRecords.size() * sizeof(HeightRecord) });
         add(m.bodies, h.bodies, (uint64_t)h.body_count * sizeof(NV_StreamBody));
         add(m.dynamicSurfaces, h.dynamic_surfaces, (uint64_t)h.dynamic_surface_count * sizeof(NV_StreamSurface));
         add(m.restore, h.restore, (uint64_t)h.restore_count * sizeof(NV_StreamParticle));
@@ -1015,6 +1094,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         tc.worldFieldCount = h.world_field_count;
         tc.surfaceCount = collide ? surfaceTotal : 0u;
         tc.staticSurfaceCount = m.surfaceCount;
+        tc.heightFieldCount = collide ? (uint32_t)heightRecords.size() : 0u;
         tc.emitterCount = tableRows;
         tc.updateCount = h.emitter_count;
         tc.patchCount = h.emitter_patch_count;
@@ -1101,6 +1181,8 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             tc.overflowRecords = c.uav(m.overflowRecords.ref);
             tc.overflowCapacity = kOverflowRecords;
             tc.gridBlocks = c.uav(m.gridBlocks.ref);
+            tc.heightFields = c.srv(m.heightFields.ref);
+            tc.heightTiles = c.srv(m.heightTiles.ref);
             std::memcpy(constantsCpu, &tc, sizeof tc);
         };
         auto dispatch = [&](const char* name, const char* kernel, std::array<uint32_t, 8> p, uint32_t groupCount, bool first = false, bool overlap = false) {

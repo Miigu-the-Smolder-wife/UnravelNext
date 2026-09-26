@@ -51,7 +51,8 @@ cbuffer FxTick : register(b1)
     uint g_restoreBase, g_colliderCapacity, g_reserved30, g_counters;  // birthIndex[g_restoreBase + j]: input index of restore j;
                                                                         // colliders: this tick's particles of colliding rows
     uint g_reserved31, g_posAgeOut, g_reserved20, g_events;
-    uint g_reserved21, g_reserved22, g_reserved23, g_reserved24;  // (the tick sort moved to the render pass)
+    uint g_heightFieldCount, g_heightFields, g_heightTiles, g_reserved24;  // heightfields of the tick (FxHeightField,
+                                                                          // anchor space), their tiles (uint words)
     uint g_hist, g_programs, g_curveKeys, g_emitters;
     uint g_spawns, g_explicitBirths, g_fields, g_worldFields;
     uint g_surfaces, g_restore, g_birthIndex, g_reserved32;  // birthIndex: CPU-computed layout indices (spawn records,
@@ -143,6 +144,38 @@ NvSurface fxSurface(uint i)
     r.radius = s.radius; r.a = s.a; r.b = s.b; r.c = s.c; r.velocity = s.velocity; r.angular = s.angular; r.origin = s.origin;
     return r;
 }
+// The tick's heightfields (NV_StreamExecutor version 2): anchor-space frames the CPU built from the static bodies (as the
+// CPU reference's load_inputs), tiles as the stream sent them (NV_StreamHeightTile: holes[16], heights[17 x 17]).
+struct FxHeightField  // 112 B (ParticleSystem.cpp HeightRecord)
+{
+    uint entity0, entity1, generation0, generation1;
+    uint cellsX, cellsZ, firstTile, tilesX;
+    uint firstTriangle, pad0, pad1, pad2;
+    float3 origin; float pad3;
+    float3 axisX; float pad4;
+    float3 axisY; float pad5;
+    float3 axisZ; float pad6;
+};
+NvHeightfield fxHeightfield(uint i)
+{
+    FX_BUFFER(FxHeightField, fields, g_heightFields);
+    const FxHeightField f = fields[i];
+    NvHeightfield h;
+    h.entity0 = f.entity0; h.entity1 = f.entity1; h.generation0 = f.generation0; h.generation1 = f.generation1;
+    h.cells_x = f.cellsX; h.cells_z = f.cellsZ; h.first_tile = f.firstTile; h.tiles_x = f.tilesX; h.first_triangle = f.firstTriangle;
+    h.origin = f.origin; h.axis_x = f.axisX; h.axis_y = f.axisY; h.axis_z = f.axisZ;
+    return h;
+}
+float fxHeight(uint tile, uint sample)
+{
+    FX_BUFFER(uint, tiles, g_heightTiles);  // 308 words per tile: holes[16], heights[289], reserved[3]
+    return asfloat(tiles[tile * 308u + 16u + sample]);
+}
+uint fxHeightHoles(uint tile, uint word)
+{
+    FX_BUFFER(uint, tiles, g_heightTiles);
+    return tiles[tile * 308u + word];
+}
 float4 fxCurveKey(uint i)
 {
     FX_BUFFER(float4, keys, g_curveKeys);
@@ -155,6 +188,10 @@ float4 fxCurveKey(uint i)
 #define NV_SURFACE_COUNT g_surfaceCount
 #define NV_SURFACE(i) fxSurface(i)
 #define NV_CURVE_KEY(i) fxCurveKey(i)
+#define NV_HEIGHTFIELD_COUNT g_heightFieldCount
+#define NV_HEIGHTFIELD(i) fxHeightfield(i)
+#define NV_HEIGHT(tile, sample) fxHeight(tile, sample)
+#define NV_HEIGHT_HOLES(tile, word) fxHeightHoles(tile, word)
 
 // ---- collision candidates (NV_SURFACE_QUERY hook of the shared mathematics) --------------------------------------------
 // A spatial hash grid of the tick's surfaces (FxGrid.hlsl): every surface whose inflated AABB spans at most
@@ -526,9 +563,18 @@ void fxWriteOutputs(uint index, uint row, uint birth, NvState s, RowMotion rm, E
 // diagnostic record (the finish inputs: position = start, velocity = velocity after the motion, drag.xyz = move,
 // accel = effective acceleration, newborn = 2 marks this layout), the collision event, this tick's state at its layout
 // index and the outputs.
+// FX_FINISH_SWEEP 0 (FxIntegrate, FxSpawn): the kernel finishes non-colliding slots only - a colliding slot reaches it
+// only when the tick has no surface and no heightfield (fxStep queues it for FxCollide otherwise), where the sweep finds
+// nothing and nv_collide's result is exactly start + move (its no-hit path) - so the sweep is not compiled in.
+#ifndef FX_FINISH_SWEEP
+#define FX_FINISH_SWEEP 1
+#endif
 void fxFinishSlot(uint index, uint row, uint birth, RowMotion rm, EmitterDynamic dyn, NvMotion mo, float h, float3 start, float3 move,
                   float3 accel, NvState s)
 {
+#if !FX_FINISH_SWEEP
+    mo.collision = 0u;
+#endif
     const NvState before = s;
     NvImpact impact;
     const bool complete = nv_integrate_finish(mo, h, start, move, accel, s, impact);
@@ -616,7 +662,7 @@ void fxStep(uint index, uint row, uint birth, RowMotion rm, EmitterDynamic dyn, 
     }
     float3 start, move, accel;
     nv_integrate_motion(mo, h, drag, s, start, move, accel);
-    if (mo.collision != 0u && g_surfaceCount != 0u)
+    if (mo.collision != 0u && (g_surfaceCount != 0u || g_heightFieldCount != 0u))
     {
         // the sweep runs in FxCollide, whose waves hold colliding particles only (they no longer stall the other lanes)
         // one atomic per wave for its colliding lanes (the queue order never changes a result)

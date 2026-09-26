@@ -111,6 +111,11 @@ extern "C" {
 
 #define NV_STREAM_MAGIC UINT64_C(0x314d525453564e55) /* "UNVSTRM1" */
 #define NV_STREAM_VERSION 1u
+/* NV_StreamExecutor.version: 1, or 2 = the executor also executes the heightfield
+   sections (height_fields, height_tiles; VfxParticleMath NV_HEIGHTFIELD hooks).
+   A context whose World publishes heightfields refuses a version-1 executor
+   (a terrain it cannot collide with is an error, not a silent pass-through). */
+#define NV_STREAM_EXECUTOR_HEIGHTFIELDS 2u
 #define NV_STREAM_MAX_DEPTH 4u
 #define NV_STREAM_NONE 0xffffffffu
 
@@ -197,8 +202,11 @@ typedef struct NV_StreamHeader {
                                   (ascending, section padded to 16 B), row of each emitters[] block */
     uint64_t emitter_patches;  /* NV_STREAM_EMITTER_DELTA: byte offset of NV_StreamEmitterPatch[emitter_patch_count]
                                   (rows ascending, none also in emitter_rows) */
-    uint32_t emitter_patch_count,reserved0;
-    uint64_t reserved[2];
+    uint32_t emitter_patch_count;
+    uint32_t height_field_count; /* heightfields of the surface table (sent with it: NV_STREAM_SURFACES / RESET);
+                                    0 for version-1 executors (formerly reserved) */
+    uint64_t height_fields;      /* byte offset of NV_StreamHeightField[height_field_count] */
+    uint64_t height_tiles;       /* byte offset of NV_StreamHeightTile[sum of tiles_x tiles_z] */
 } NV_StreamHeader;
 
 /* Static per program (index = program number). Curves are piecewise linear
@@ -341,6 +349,33 @@ typedef struct NV_StreamSurface {
     float a[3],reserved2;float b[3],reserved3;float c[3],reserved4;
     float velocity[3],reserved5;float angular_velocity[3],reserved6;float origin[3],reserved7;
 } NV_StreamSurface;
+/* Static heightfield (a terrain body, World NW_COMPONENT_BODY_HEIGHT_TILE), part
+   of the surface table. Body frame: sample (x, z) at origin + (x spacing_x,
+   h, z spacing_z), h = the sample's height; cell (x, z) splits along
+   (x, z)-(x + 1, z + 1) into triangle 0 {(x,z),(x+1,z+1),(x+1,z)} and 1
+   {(x,z),(x,z+1),(x+1,z+1)}, each colliding only on its upward (+y body axis)
+   face. Its tiles are tiles_x x tiles_z consecutive NV_StreamHeightTile records
+   from first_tile, row-major (tile (tx, tz) = cells [16 tx, 16 tx + 16) x
+   [16 tz, 16 tz + 16)). `body` indexes the tick's body frames (the body must be
+   static: zero velocities). For the collision tie rule, heightfield triangle
+   (cell (cx, cz), t) has index surface_count + dynamic_surface_count +
+   first_triangle + (cz cells_x + cx) 2 + t, first_triangle = sum of
+   2 cells_x cells_z over the earlier heightfields. */
+typedef struct NV_StreamHeightField {
+    uint32_t body,entity[2],generation0;
+    uint32_t generation1,cells_x,cells_z,first_tile;
+    uint32_t tiles_x,tiles_z,first_triangle,reserved0;
+    float origin[3],spacing_x;   /* body frame */
+    float spacing_z,reserved1,reserved2,reserved3;
+} NV_StreamHeightField;
+/* 16 x 16 cells of a heightfield: holes bit (z 16 + x) 2 + t set = that
+   triangle does not exist; heights of the 17 x 17 samples [z 17 + x] (samples
+   past the heightfield are 0 and their triangles holes). */
+typedef struct NV_StreamHeightTile {
+    uint32_t holes[16];
+    float heights[17*17];
+    float reserved[3];
+} NV_StreamHeightTile;
 /* Rigid body frame of this tick (anchor space): unit quaternion (x, y, z, w),
    body origin, centre of mass, and the centre-of-mass velocities. */
 typedef struct NV_StreamBody {
@@ -406,6 +441,7 @@ static_assert(sizeof(NV_StreamEmitter)==336,"stream emitter");
 static_assert(sizeof(NV_StreamEmitterPatch)==48,"stream emitter patch");
 static_assert(sizeof(NV_StreamSpawn)==48&&sizeof(NV_StreamExplicitBirth)==48&&sizeof(NV_StreamCurveKey)==16,"stream births");
 static_assert(sizeof(NV_StreamField)==32&&sizeof(NV_StreamWorldField)==64&&sizeof(NV_StreamSurface)==128&&sizeof(NV_StreamBody)==80,"stream inputs");
+static_assert(sizeof(NV_StreamHeightField)==80&&sizeof(NV_StreamHeightTile)==1232,"stream heightfields");
 static_assert(sizeof(NV_StreamParticle)==48&&sizeof(NV_StreamEvent)==64&&sizeof(NV_StreamCounters)==48,"stream outputs");
 #endif
 #endif

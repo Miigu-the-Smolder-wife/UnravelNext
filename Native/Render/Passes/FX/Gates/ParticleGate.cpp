@@ -8,7 +8,8 @@
 //   --load features core + cascades to depth 4, moving source, transport, rebase, explicit births (the fixture reads each
 //                   tick's events back before writing the next packet, so frames do not overlap)
 //   GpuLock.ps1 -Track FX -- unx_gate_fx_particlegate [--load core|features|both] [--resolution 4K|1440p|both]
-//                                                     [--frames N] [--out DIR] [--set key=value ...]
+//                                                     [--frames N] [--out DIR] [--set key=value ...] [--no-heightfield]
+//   The load includes the RppStream terrain (60 x 30 cells of 1.6 m, holes) unless --no-heightfield.
 #include "../Tests/RppStream.h"
 
 #include "unx/core/Config.h"
@@ -47,7 +48,7 @@ int main(int argc, char** argv)
     {
         std::string load = "both", resolution = "both", out = std::string(UNX_SOURCE_DIR) + "/Results/FX/ParticleGate";
         uint32_t frames = 600;
-        bool delta = true, patchesOn = true;
+        bool delta = true, patchesOn = true, heightfield = true;
         bool passTimestamps = true;  // --no-pass-timestamps: frame timing only (the per-pass queries serialise the queue)  // emitter table as NV_STREAM_EMITTER_DELTA packets (--no-delta: whole table every tick, A/B)
         // --packets DIR: submit a recorded stream (ParticleTests --record: packet_NNNN.bin) open loop. The GPU tick is then
         // timed without the stand-in authority's CPU in the loop (a closed-loop features run leaves the GPU idle while the
@@ -65,6 +66,7 @@ int main(int argc, char** argv)
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
             else if (a == "--no-delta") delta = false;
+            else if (a == "--no-heightfield") heightfield = false;
             else if (a == "--no-patches") patchesOn = false;
             else if (a == "--no-pass-timestamps") passTimestamps = false;
             else if (a == "--packets") packets = next();
@@ -89,6 +91,7 @@ int main(int argc, char** argv)
                 const Resolution res = resolutionFromString(rn, quality);
                 fx::test::RppConfig cfg;
                 cfg.features = l == "features";
+                cfg.heightfield = heightfield;
                 cfg.killTick = UINT32_MAX;  // the population stays at the RPP load
                 cfg.delta = delta;
                 cfg.patches = patchesOn;

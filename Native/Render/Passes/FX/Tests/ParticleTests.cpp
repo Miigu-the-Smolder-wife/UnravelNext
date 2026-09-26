@@ -13,7 +13,7 @@
 //   4. --determinism: the whole run twice from a fresh module; the GPU state of both ticks of the pair (in their layouts),
 //      the layouts and the sorted events are bit identical at every compare tick.
 //      (The depth sort is the render pass's per-frame tile-local sort since 2026-09-26; the tick has no sort.)
-// Options: --ticks N (600) --compare-every K (60) --particles P --emitters E --no-features --no-reference
+// Options: --ticks N (600) --compare-every K (60) --particles P --emitters E --no-features --no-heightfield --bodies N --no-sheet --no-reference
 //          --determinism --warp (WARP adapter: another implementation, 4-lane waves) --no-debug-layer --gbv
 //          --yield (pause while a GPU measurement lock or the user's HOLD is present: CPU-heavy runs)
 //          --allow-copy-drift (development only: a stream copy that differs from the original is a warning)
@@ -80,15 +80,15 @@ std::string sha(const std::vector<uint8_t>& bytes)
 }
 
 // 1. byte-identical stream copies of the pinned NativeVfx commit (the copies are updated together with this pin)
-constexpr const char* kStreamCommit = "2cbfe994";
+constexpr const char* kStreamCommit = "213b4a4c";
 void checkStreamCopies(bool strict)
 {
     const fs::path mine = fs::path(UNX_SOURCE_DIR) / "Native/Render/Passes/FX/Stream";
     const fs::path original = fs::path(UNX_SOURCE_DIR) / "../Unravel/Native/NativeVfx";
     struct Pin { const char* file; const char* sha; };
-    const Pin pins[] = { { "include/NativeVfxStream.h", "4776e03ca49d45c8f0eb8b03a8b6538605578b8f64bd61a7795e6d5209fc5b91" },
-                         { "shaders/VfxParticleMath.hlsli", "c07a4f32b89457ee4803be0d066464e71b4edbd385f9717cb3650c0e6f7419ae" },
-                         { "src/VfxStreamCpu.h", "1cc51d81facdb9b208fc8253379d1290f6fe7f824584746a14fca8c6444272e9" } };
+    const Pin pins[] = { { "include/NativeVfxStream.h", "d861ac94c3518871cb8dbb13929737989d0618d4a5f11bbedfb4415563ce776f" },
+                         { "shaders/VfxParticleMath.hlsli", "1b94c957a81ab1fbae2ad22ad383e1b6a191266ee932fc4f31b1ba41bca5d5c7" },
+                         { "src/VfxStreamCpu.h", "cb4683bab8ba881e043da713ecd6cf42aaf933535cbca593c51b8844269a45c5" } };
     for (const Pin& pin : pins)
     {
         const std::string a = sha(readBinaryFile(mine / pin.file));
@@ -796,6 +796,9 @@ int main(int argc, char** argv)
             else if (a == "--yield") o.yield = true;
             else if (a == "--allow-copy-drift") o.strictCopies = false;
             else if (a == "--no-box") o.rpp.boxShape = false;
+            else if (a == "--no-heightfield") o.rpp.heightfield = false;
+            else if (a == "--bodies") o.rpp.bodies = (uint32_t)std::stoul(next());
+            else if (a == "--no-sheet") o.rpp.sheet = false;
             else if (a == "--no-child-noise") o.rpp.childNoise = false;
             else if (a == "--fields") o.rpp.fields = (uint32_t)std::stoul(next());
             else if (a == "--overflow-dump") o.overflowDump = next();

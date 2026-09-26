@@ -14,6 +14,9 @@
 // stream contract requires; the GPU module and the CPU reference executor only fill continuous state.
 // Collision surfaces: the ground (two anchor-space triangles) and RppConfig::bodies rigid bodies, each with a sphere, a
 // capsule and a two-triangle plate in body space; the body frames (translation, rotation about y) come every tick.
+// Terrain (RppConfig::heightfield, executor version 2): a 60 x 30 cell heightfield of 1.6 m cells (4 x 2 tiles, the last
+// ones partial) on one more body, static, turned 0.12 rad about y, hills 0.3..1.2 m over the ground under the emitters,
+// with holes (whole cells and single triangles) through which particles fall to the ground.
 #include "NativeVfxStream.h"
 #include "../Stream/src/VfxStreamCpu.h"
 
@@ -41,6 +44,8 @@ struct RppConfig
     uint32_t killRow = 10, killTick = 400;
     bool boxShape = true;         // program 2 emits from a box (development switch while the shared box draws are fixed)
     uint32_t bodies = 1728;
+    bool heightfield = true;      // terrain on body `bodies` (NV_StreamHeightField; the executor must be version 2)
+    bool sheet = true;            // the waving dynamic sheet (NV_StreamHeader::dynamic_surfaces)
     double anchorShift[3] = { 0, 0, 0 };  // diagnostic: the anchor moved by this much (world stays the same)
     bool delta = true;            // emitter table as NV_STREAM_EMITTER_DELTA packets (rows that changed since they were last sent)
     bool patches = true;          // with delta: a row whose only changes are its per-tick fields goes as a 48 B patch
@@ -416,6 +421,7 @@ public:
         h.field_count = (uint32_t)m_fields.size();
         h.world_field_count = (uint32_t)m_world.size();
         h.surface_count = first ? (uint32_t)m_surfaces.size() : 0;
+        h.height_field_count = first ? (uint32_t)m_heightFields.size() : 0;
         const std::vector<NV_StreamBody> bodies = bodyFrames(tEnd);
         h.body_count = (uint32_t)bodies.size();
         const std::vector<NV_StreamSurface> dynamicRows = dynamicSurfaces(tEnd);
@@ -429,7 +435,8 @@ public:
         packet.reserve(sizeof(NV_StreamHeader) + 16 * 16 + blocks.size() * sizeof(NV_StreamEmitter) + blockRows.size() * 4 + patches.size() * sizeof(NV_StreamEmitterPatch) + all.size() * sizeof(NV_StreamSpawn) +
                        explicitBirths.size() * sizeof(NV_StreamExplicitBirth) + m_fields.size() * sizeof(NV_StreamField) + m_world.size() * sizeof(NV_StreamWorldField) +
                        (first ? m_programs.size() * sizeof(NV_StreamProgram) + m_keys.size() * sizeof(NV_StreamCurveKey) + m_surfaces.size() * sizeof(NV_StreamSurface) : 0) +
-                       bodies.size() * sizeof(NV_StreamBody) + dynamicRows.size() * sizeof(NV_StreamSurface));
+                       bodies.size() * sizeof(NV_StreamBody) + dynamicRows.size() * sizeof(NV_StreamSurface) +
+                       (first ? m_heightFields.size() * sizeof(NV_StreamHeightField) + m_heightTiles.size() * sizeof(NV_StreamHeightTile) + 64 : 0));
         auto section = [&](const void* data, size_t bytes) -> uint64_t {
             if (!bytes) return 0;
             packet.resize((packet.size() + 15) & ~size_t(15));
@@ -453,6 +460,8 @@ public:
         h.fields = section(m_fields.data(), m_fields.size() * sizeof(NV_StreamField));
         h.world_fields = section(m_world.data(), m_world.size() * sizeof(NV_StreamWorldField));
         if (first) h.surfaces = section(m_surfaces.data(), m_surfaces.size() * sizeof(NV_StreamSurface));
+        if (first) h.height_fields = section(m_heightFields.data(), m_heightFields.size() * sizeof(NV_StreamHeightField));
+        if (first) h.height_tiles = section(m_heightTiles.data(), m_heightTiles.size() * sizeof(NV_StreamHeightTile));
         h.bodies = section(bodies.data(), bodies.size() * sizeof(NV_StreamBody));
         h.dynamic_surfaces = section(dynamicRows.data(), dynamicRows.size() * sizeof(NV_StreamSurface));
         packet.resize((packet.size() + 15) & ~size_t(15));
@@ -781,6 +790,41 @@ private:
             corner(s.a, 0); corner(s.b, 2); corner(s.c, 3);
             m_surfaces.push_back(s);
         }
+        if (m_c.heightfield)
+        {
+            NV_StreamHeightField f{};
+            f.body = m_c.bodies;
+            f.entity[0] = 300000;
+            f.generation0 = 1;
+            f.cells_x = 60; f.cells_z = 30;
+            f.tiles_x = (f.cells_x + 15) / 16; f.tiles_z = (f.cells_z + 15) / 16;
+            f.first_tile = 0; f.first_triangle = 0;
+            f.origin[0] = 0.5f; f.origin[1] = 0; f.origin[2] = 0.25f;  // body frame
+            f.spacing_x = 1.6f; f.spacing_z = 1.6f;
+            m_heightFields.push_back(f);
+            m_heightTiles.assign((size_t)f.tiles_x * f.tiles_z, NV_StreamHeightTile{});
+            for (uint32_t tz = 0; tz < f.tiles_z; ++tz)
+                for (uint32_t tx = 0; tx < f.tiles_x; ++tx)
+                {
+                    NV_StreamHeightTile& tile = m_heightTiles[(size_t)tz * f.tiles_x + tx];
+                    for (uint32_t z = 0; z <= 16; ++z)
+                        for (uint32_t x = 0; x <= 16; ++x)
+                        {
+                            const uint32_t gx = tx * 16 + x, gz = tz * 16 + z;  // samples past the field stay 0
+                            if (gx <= f.cells_x && gz <= f.cells_z)
+                                tile.heights[z * 17 + x] = (float)(0.3 + 0.45 * (1 + std::sin(0.23 * gx + 0.4) * std::cos(0.19 * gz)));
+                        }
+                    for (uint32_t z = 0; z < 16; ++z)
+                        for (uint32_t x = 0; x < 16; ++x)
+                        {
+                            const uint32_t cx = tx * 16 + x, cz = tz * 16 + z, bit = (z * 16 + x) * 2;
+                            const bool outside = cx >= f.cells_x || cz >= f.cells_z;
+                            const bool cellHole = (cx * 5 + cz * 11) % 17 == 0, triangleHole = (cx + cz) % 13 == 0;
+                            if (outside || cellHole) tile.holes[bit >> 5] |= 3u << (bit & 31);
+                            else if (triangleHole) tile.holes[bit >> 5] |= 2u << (bit & 31);
+                        }
+                }
+        }
     }
 
     // Deformable surfaces written in anchor space every tick (soft bodies, ropes): a waving 8 x 8 m sheet of 32
@@ -788,6 +832,7 @@ private:
     std::vector<NV_StreamSurface> dynamicSurfaces(double t) const
     {
         std::vector<NV_StreamSurface> out;
+        if (!m_c.sheet) return out;
         auto point = [&](int i, int j, double* p, double* v) {
             const double x = 40.0 + 2.0 * i, z = 16.0 + 2.0 * j, w = 1.7, k = 0.35;
             p[0] = x - m_c.anchorShift[0]; p[1] = 2.8 + 0.4 * std::sin(k * x + w * t) - m_c.anchorShift[1]; p[2] = z - m_c.anchorShift[2];
@@ -842,6 +887,16 @@ private:
             // centre of mass 0.1 m off the body origin (body space x), so the rotation adds to the surface velocity
             f.center[0] = f.position[0] + (float)(0.1 * std::cos(a)); f.center[1] = f.position[1]; f.center[2] = f.position[2] - (float)(0.1 * std::sin(a));
         }
+        if (m_c.heightfield)
+        {
+            // static terrain body (zero velocities; its frame still comes every tick)
+            NV_StreamBody f{};
+            const double turn = 0.12;
+            f.rotation[1] = (float)std::sin(0.5 * turn); f.rotation[3] = (float)std::cos(0.5 * turn);
+            f.position[0] = (float)(-3.0 - m_c.anchorShift[0]); f.position[1] = (float)(0.0 - m_c.anchorShift[1]); f.position[2] = (float)(-4.0 - m_c.anchorShift[2]);
+            std::memcpy(f.center, f.position, sizeof f.center);
+            out.push_back(f);
+        }
         return out;
     }
 
@@ -860,6 +915,8 @@ private:
     std::vector<NV_StreamField> m_fields;
     std::vector<NV_StreamWorldField> m_world;
     std::vector<NV_StreamSurface> m_surfaces;
+    std::vector<NV_StreamHeightField> m_heightFields;
+    std::vector<NV_StreamHeightTile> m_heightTiles;
     std::vector<Row> m_rows;
     std::vector<EventTime> m_events;
     std::vector<uint32_t> m_created;

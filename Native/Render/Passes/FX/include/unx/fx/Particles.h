@@ -31,7 +31,7 @@ struct TickConstants
     uint32_t posAge, velocity, inRanges, inBlocks;       // posAge/velocity: input state; its layout (InRange, group -> range)
     uint32_t restoreBase, colliderCapacity, reserved30, counters;  // birthIndex offset of the restore records; collider queue
     uint32_t reserved31, posAgeOut, reserved20, events;  // *Out: this tick's state
-    uint32_t reserved21, reserved22, reserved23, reserved24;  // (the tick sort moved to the render pass)
+    uint32_t heightFieldCount, heightFields, heightTiles, reserved24;  // heightfields of the tick (FxHeightField, anchor space), tiles (uint words)
     uint32_t hist, programs, curveKeys, emitters;
     uint32_t spawns, explicitBirths, fields, worldFields;
     uint32_t surfaces, restore, birthIndex, reserved32;  // birthIndex: layout indices of the births (ParticleSystem.cpp)

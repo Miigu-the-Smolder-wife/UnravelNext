@@ -7,6 +7,7 @@
 // runs b-f over h = dt with the row's full-dt drag factors (fxStep) and writes this tick's state at its output index
 // outBase + (birth - outFirst) in the other buffer of the pair (the renderer interpolates the two ticks of a particle from
 // the state itself). A state packet (dt == 0) only carries the state over (and applies KILLED).
+#define FX_FINISH_SWEEP 0  // colliding slots go to FxCollide (fxFinishSlot)
 #include "Passes/FX/Particles.hlsli"
 
 [numthreads(256, 1, 1)]

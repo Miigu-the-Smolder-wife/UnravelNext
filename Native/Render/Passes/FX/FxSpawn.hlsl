@@ -7,6 +7,7 @@
 // for a generated birth (the CPU's index of the record's first birth), birthIndex[g_explicitBase + j] for an explicit
 // one (Particles.hlsli "Particle layout"). A birth of a KILLED row is not placed (FX_NONE).
 // P[0] = (record begin, record end, generated threads, total threads)
+#define FX_FINISH_SWEEP 0  // colliding births go to FxCollide (fxFinishSlot)
 #include "Passes/FX/Particles.hlsli"
 
 uint findRecord(uint t, uint begin, uint end)
@@ -46,6 +47,10 @@ void main(uint3 id : SV_DispatchThreadID)
     FX_RWBUFFER(StreamEmitter, emitters, g_emitters);
     FX_BUFFER(StreamProgram, programs, g_programs);
     FX_RWBUFFER(EmitterDynamic, dynamic, g_emitterDynamic);
+    // a birth that dies inside this tick: its death state is integrated over its whole lifetime (one call site for the
+    // generated and the explicit births: the sweep is inlined once)
+    uint deathSlot = FX_NONE, deathRow = 0u, deathBirth = 0u;
+    NvState deathState = (NvState)0;
     if (t < P[0].z)
     {
         FX_BUFFER(StreamSpawn, spawns, g_spawns);
@@ -69,17 +74,14 @@ void main(uint3 id : SV_DispatchThreadID)
         if (sp.birthEvent != FX_NONE) writeEvent(sp.birthEvent + r, fxEvent(row, birth, FX_EVENT_BIRTH, s));
         if (r < sp.expired)
         {
-            // Born and dead inside this tick: its death state is integrated over its whole lifetime.
-            if (sp.deathEvent != FX_NONE)
-            {
-                NvImpact impact;
-                nv_integrate(fxMotion(p, e, dyn, birth), p.lifetime, nv_linear_drag(p.drag, p.lifetime), s, impact);
-                writeEvent(sp.deathEvent + r, fxEvent(row, birth, FX_EVENT_DEATH, s));
-            }
-            return;
+            // Born and dead inside this tick: no slot, the death event below.
+            if (sp.deathEvent != FX_NONE) { deathSlot = sp.deathEvent + r; deathRow = row; deathBirth = birth; deathState = s; }
         }
-        const uint first = birthIndex[k];
-        place(first == FX_NONE ? FX_NONE : first + r, row, birth, s, elapsed);
+        else
+        {
+            const uint first = birthIndex[k];
+            place(first == FX_NONE ? FX_NONE : first + r, row, birth, s, elapsed);
+        }
     }
     else
     {
@@ -90,18 +92,21 @@ void main(uint3 id : SV_DispatchThreadID)
         if (x.birthEvent != FX_NONE) writeEvent(x.birthEvent, fxEvent(x.emitter, x.birth, FX_EVENT_BIRTH, s));
         if (x.elapsed >= programs[emitters[x.emitter].program].lifetime)
         {
-            // Expires inside this tick: no slot (its rank stays unused), death event over its whole lifetime.
-            if (x.deathEvent != FX_NONE)
-            {
-                const StreamEmitter e = emitters[x.emitter];
-                const StreamProgram p = programs[e.program];
-                NvImpact impact;
-                nv_integrate(fxMotion(p, e, dynamic[x.emitter], x.birth), p.lifetime, nv_linear_drag(p.drag, p.lifetime), s, impact);
-                writeEvent(x.deathEvent, fxEvent(x.emitter, x.birth, FX_EVENT_DEATH, s));
-            }
-            return;
+            // Expires inside this tick: no slot (its rank stays unused), the death event below.
+            if (x.deathEvent != FX_NONE) { deathSlot = x.deathEvent; deathRow = x.emitter; deathBirth = x.birth; deathState = s; }
         }
-        FX_BUFFER(uint, birthIndex, g_birthIndex);
-        place(birthIndex[g_explicitBase + (t - P[0].z)], x.emitter, x.birth, s, x.elapsed);
+        else
+        {
+            FX_BUFFER(uint, birthIndex, g_birthIndex);
+            place(birthIndex[g_explicitBase + (t - P[0].z)], x.emitter, x.birth, s, x.elapsed);
+        }
+    }
+    if (deathSlot != FX_NONE)
+    {
+        const StreamEmitter e = emitters[deathRow];
+        const StreamProgram p = programs[e.program];
+        NvImpact impact;
+        nv_integrate(fxMotion(p, e, dynamic[deathRow], deathBirth), p.lifetime, nv_linear_drag(p.drag, p.lifetime), deathState, impact);
+        writeEvent(deathSlot, fxEvent(deathRow, deathBirth, FX_EVENT_DEATH, deathState));
     }
 }

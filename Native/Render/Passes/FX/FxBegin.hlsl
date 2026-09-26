@@ -34,7 +34,7 @@ void main(uint3 id : SV_DispatchThreadID)
         counters[FX_COUNTER_TURN] = 0u;
         counters[FX_COUNTER_CARRY] = 0u;
     }
-    if (i <= g_gridMask && g_surfaceCount != 0u)
+    if (i <= g_gridMask && (g_surfaceCount != 0u || g_heightFieldCount != 0u))
     {
         FX_RWBUFFER(uint, counts, g_gridCount);
         FX_RWBUFFER(uint, fills, g_gridFill);

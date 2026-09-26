@@ -49,12 +49,15 @@ template<class R> struct MathT {
     static nv_real3 min(nv_real3 a,nv_real3 b){return {min(a.x,b.x),min(a.y,b.y),min(a.z,b.z)};}
     static nv_real3 max(nv_real3 a,nv_real3 b){return {max(a.x,b.x),max(a.y,b.y),max(a.z,b.z)};}
     static R clamp(R v,R a,R b){return v<a?a:v>b?b:v;}
+    static R floor(R v){return std::floor(v);}
 #define NV_PARTICLE_MATH_TYPES_ONLY
 #include "../shaders/VfxParticleMath.hlsli"
 #undef NV_PARTICLE_MATH_TYPES_ONLY
     const NvField* field_data=nullptr;uint field_count=0;
     const NvWorldField* world_data=nullptr;uint world_count=0;
     const NvSurface* surface_data=nullptr;uint surface_count=0;
+    const NvHeightfield* height_data=nullptr;uint height_count=0;
+    const NV_StreamHeightTile* tile_data=nullptr;
     const Real4* key_data=nullptr;
 #define NV_FIELD_COUNT field_count
 #define NV_FIELD(i) field_data[i]
@@ -62,6 +65,10 @@ template<class R> struct MathT {
 #define NV_WORLD_FIELD(i) world_data[i]
 #define NV_SURFACE_COUNT surface_count
 #define NV_SURFACE(i) surface_data[i]
+#define NV_HEIGHTFIELD_COUNT height_count
+#define NV_HEIGHTFIELD(i) height_data[i]
+#define NV_HEIGHT(tile, sample) R(tile_data[tile].heights[sample])
+#define NV_HEIGHT_HOLES(tile, word) tile_data[tile].holes[word]
 #define NV_CURVE_KEY(i) key_data[i]
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -77,6 +84,10 @@ template<class R> struct MathT {
 #undef NV_WORLD_FIELD
 #undef NV_SURFACE_COUNT
 #undef NV_SURFACE
+#undef NV_HEIGHTFIELD_COUNT
+#undef NV_HEIGHTFIELD
+#undef NV_HEIGHT
+#undef NV_HEIGHT_HOLES
 #undef NV_CURVE_KEY
 };
 typedef MathT<double> Math;
@@ -144,7 +155,19 @@ public:
         const auto explicits=section<NV_StreamExplicitBirth>(data,bytes,h.explicit_births,h.explicit_count);
         const auto fields=section<NV_StreamField>(data,bytes,h.fields,h.field_count);
         const auto world=section<NV_StreamWorldField>(data,bytes,h.world_fields,h.world_field_count);
-        if(h.flags&(NV_STREAM_SURFACES|NV_STREAM_RESET))surface_table_=section<NV_StreamSurface>(data,bytes,h.surfaces,h.surface_count);
+        if(h.flags&(NV_STREAM_SURFACES|NV_STREAM_RESET)){
+            surface_table_=section<NV_StreamSurface>(data,bytes,h.surfaces,h.surface_count);
+            height_table_=section<NV_StreamHeightField>(data,bytes,h.height_fields,h.height_field_count);
+            // Tiles of each heightfield consecutive, the triangle ranges consecutive (NV_StreamHeightField).
+            uint64_t tiles=0,triangles=0;
+            for(const auto& f:height_table_){
+                require(f.cells_x>0&&f.cells_z>0&&f.tiles_x==(f.cells_x+15)/16&&f.tiles_z==(f.cells_z+15)/16&&f.first_tile==tiles&&f.first_triangle==triangles&&
+                        f.spacing_x>0&&f.spacing_z>0,"heightfield table");
+                tiles+=uint64_t(f.tiles_x)*f.tiles_z;triangles+=2ull*f.cells_x*f.cells_z;
+            }
+            require(tiles<=UINT32_MAX&&triangles<=UINT32_MAX,"heightfield table size");
+            height_tiles_=section<NV_StreamHeightTile>(data,bytes,h.height_tiles,uint32_t(tiles));
+        }
         const auto bodies=section<NV_StreamBody>(data,bytes,h.bodies,h.body_count);
         const auto dynamic=section<NV_StreamSurface>(data,bytes,h.dynamic_surfaces,h.dynamic_surface_count);
         const auto restore=section<NV_StreamParticle>(data,bytes,h.restore,h.restore_count);
@@ -228,9 +251,19 @@ private:
                 const Real3 lever=real3(b.position)-real3(b.center);
                 x.a=rotate(b.rotation,x.a)+lever;x.b=rotate(b.rotation,x.b)+lever;x.c=rotate(b.rotation,x.c)+lever;x.velocity=real3(b.velocity);x.angular=real3(b.angular_velocity);x.origin=real3(b.center);}
             surfaces_.push_back(x);}
+        // Heightfields: the body frame places origin and axes (the body is static: its surfaces do not move).
+        heights_.clear();
+        for(const auto& f:height_table_){require(f.body<bodies.size(),"heightfield body");const auto& b=bodies[f.body];
+            require(b.velocity[0]==0&&b.velocity[1]==0&&b.velocity[2]==0&&b.angular_velocity[0]==0&&b.angular_velocity[1]==0&&b.angular_velocity[2]==0,"heightfield bodies are static");
+            Math::NvHeightfield x{};x.entity0=f.entity[0];x.entity1=f.entity[1];x.generation0=f.generation0;x.generation1=f.generation1;
+            x.cells_x=f.cells_x;x.cells_z=f.cells_z;x.first_tile=f.first_tile;x.tiles_x=f.tiles_x;x.first_triangle=f.first_triangle;
+            x.origin=rotate(b.rotation,real3(f.origin))+real3(b.position);
+            x.axis_x=rotate(b.rotation,Real3{double(f.spacing_x),0,0});x.axis_y=rotate(b.rotation,Real3{0,1,0});x.axis_z=rotate(b.rotation,Real3{0,0,double(f.spacing_z)});
+            heights_.push_back(x);}
         math_.field_data=fields_.data();math_.field_count=uint32_t(fields_.size());
         math_.world_data=world_.data();math_.world_count=uint32_t(world_.size());
         math_.surface_data=surfaces_.data();math_.surface_count=uint32_t(surfaces_.size());
+        math_.height_data=heights_.data();math_.height_count=uint32_t(heights_.size());math_.tile_data=height_tiles_.data();
         math_.key_data=keys_.data();
     }
     Math::NvMotion motion(uint32_t row,uint32_t birth){
@@ -355,6 +388,7 @@ private:
     std::vector<NV_StreamProgram> programs_;std::vector<Real4> keys_;
     std::vector<NV_StreamEmitter> emitters_;std::vector<Real3> origin_,inherited_;
     std::vector<Math::NvField> fields_;std::vector<Math::NvWorldField> world_;std::vector<Math::NvSurface> surfaces_;std::vector<NV_StreamSurface> surface_table_;
+    std::vector<NV_StreamHeightField> height_table_;std::vector<NV_StreamHeightTile> height_tiles_;std::vector<Math::NvHeightfield> heights_;
     std::vector<Slot> slots_;
     std::vector<NV_StreamEvent> events_,collisions_;
     NV_StreamCounters readback_{};

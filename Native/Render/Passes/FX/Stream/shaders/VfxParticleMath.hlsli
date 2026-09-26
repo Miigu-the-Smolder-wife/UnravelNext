@@ -18,6 +18,10 @@
 //   NV_SURFACE_COUNT, NV_SURFACE(i)         -> NvSurface
 //   NV_CURVE_KEY(i)                         -> nv_real4 (t, v0, v1, v2)
 //   optional NV_SURFACE_QUERY_TYPE / NV_SURFACE_QUERY / NV_SURFACE_NEXT (see nv_collide)
+//   optional heightfields (stream executor version 2; none when undefined):
+//   NV_HEIGHTFIELD_COUNT, NV_HEIGHTFIELD(i) -> NvHeightfield (anchor space)
+//   NV_HEIGHT(tile, sample)                 -> nv_real (NV_StreamHeightTile.heights)
+//   NV_HEIGHT_HOLES(tile, word)             -> uint    (NV_StreamHeightTile.holes)
 //
 // Rule for this file: at most one call that changes an inout state per
 // expression (C++ and HLSL evaluate function arguments in different orders).
@@ -52,6 +56,11 @@ typedef float4 nv_real4;
 struct NvField { nv_real3 position; uint kind; nv_real3 value; nv_real radius; };
 struct NvWorldField { nv_real3 origin; uint quantity; uint shape; uint operation; nv_real3 basis0; nv_real3 basis1; nv_real3 basis2; nv_real3 value; };
 struct NvSurface { uint kind; uint entity0; uint entity1; uint generation0; uint generation1; nv_real radius; nv_real3 a; nv_real3 b; nv_real3 c; nv_real3 velocity; nv_real3 angular; nv_real3 origin; };
+// A static heightfield (NV_StreamHeightField, placed by its body frame): body-frame sample (x, z) with height h is at
+// origin + axis_x x + axis_y h + axis_z z (axis_x, axis_z: the body axes times the spacings; axis_y: the unit up axis).
+// Its triangles are surfaces of kind 3 (one-sided: only the face whose normal is up collides) with indices
+// NV_SURFACE_COUNT + first_triangle + (cz cells_x + cx) 2 + t (NV_StreamHeightField).
+struct NvHeightfield { uint entity0; uint entity1; uint generation0; uint generation1; uint cells_x; uint cells_z; uint first_tile; uint tiles_x; uint first_triangle; nv_real3 origin; nv_real3 axis_x; nv_real3 axis_y; nv_real3 axis_z; };
 struct NvState { nv_real3 position; nv_real3 velocity; nv_real age; };
 struct NvDrag { nv_real velocity; nv_real position; nv_real acceleration; };
 struct NvImpact { uint count; nv_real3 contact; nv_real3 velocity; nv_real3 normal; nv_real fraction; };
@@ -216,7 +225,7 @@ bool nv_hit(NvSurface s, nv_real3 p, nv_real3 offset, nv_real3 d, NV_OUT(nv_real
     t = NV_R(0); normal = nv_make3(NV_R(0), NV_R(0), NV_R(0));
     p = p - s.origin;   // the segment start relative to the surface's reference point
     if (s.kind == 0u) return nv_hit_sphere(p, offset, d, s.a, s.radius, t, normal);
-    if (s.kind == 2u) {
+    if (s.kind == 2u || s.kind == 3u) {
         nv_real3 e1 = s.b - s.a, e2 = s.c - s.a, h = cross(d, e2);
         nv_real determinant = dot(e1, h); if (determinant == NV_R(0)) return false;
         nv_real3 delta = (p - s.a) + offset, q = cross(delta, e1);
@@ -224,6 +233,10 @@ bool nv_hit(NvSurface s, nv_real3 p, nv_real3 offset, nv_real3 d, NV_OUT(nv_real
         if (!(candidate >= NV_R(0) && candidate <= NV_R(1)) || u < NV_R(0) || v < NV_R(0) || u + v > NV_R(1)) return false;
         normal = cross(e1, e2); nv_real size = length(normal);
         if (!(size > NV_R(0))) return false;
+        if (s.kind == 3u) {  // one-sided (heightfield): the wound normal is up; a segment moving along it passes
+            if (!(dot(normal, d) < NV_R(0))) return false;
+            normal = normal * (NV_R(1) / size); t = candidate; return true;
+        }
         normal = normal * ((dot(normal, d) > NV_R(0) ? NV_R(-1) : NV_R(1)) / size); t = candidate; return true;
     }
     nv_real3 axis = s.b - s.a, delta = (p - s.a) + offset;
@@ -295,6 +308,174 @@ NvSurface nv_surface_local(NvSurface s, nv_real3 origin) {
     s.origin = s.origin - origin;
     return s;
 }
+// ---- heightfields (static terrain) ------------------------------------------------------------
+#ifndef NV_HEIGHTFIELD_COUNT
+#define NV_HEIGHTFIELD_COUNT 0u
+#define NV_HEIGHTFIELD(i) nv_no_heightfield()
+#define NV_HEIGHT(tile, sample) NV_R(0)
+#define NV_HEIGHT_HOLES(tile, word) 0u
+NvHeightfield nv_no_heightfield() {
+    NvHeightfield h;
+    h.entity0 = 0u; h.entity1 = 0u; h.generation0 = 0u; h.generation1 = 0u; h.cells_x = 1u; h.cells_z = 1u; h.first_tile = 0u; h.tiles_x = 1u; h.first_triangle = 0u;
+    h.origin = nv_make3(NV_R(0), NV_R(0), NV_R(0)); h.axis_x = h.origin; h.axis_y = h.origin; h.axis_z = h.origin;
+    return h;
+}
+#endif
+// The triangle of heightfield triangle index id (id = surface index - NV_SURFACE_COUNT): a static surface of kind 3
+// with offsets from the heightfield's origin.
+NvSurface nv_height_triangle(uint id) {
+    uint f = 0u;
+    NV_LOOP for (uint i = 1u; i < NV_HEIGHTFIELD_COUNT; ++i) { if (NV_HEIGHTFIELD(i).first_triangle <= id) f = i; }
+    NvHeightfield h = NV_HEIGHTFIELD(f);
+    uint local = id - h.first_triangle, t = local & 1u, cell = local >> 1u;
+    uint cx = cell % h.cells_x, cz = cell / h.cells_x;
+    uint tile = h.first_tile + (cz / 16u) * h.tiles_x + cx / 16u, base = (cz % 16u) * 17u + cx % 16u;
+    nv_real x0 = NV_R(cx), z0 = NV_R(cz), x1 = NV_R(cx + 1u), z1 = NV_R(cz + 1u);
+    nv_real3 p00 = h.axis_x * x0 + h.axis_y * NV_HEIGHT(tile, base) + h.axis_z * z0;
+    nv_real3 p10 = h.axis_x * x1 + h.axis_y * NV_HEIGHT(tile, base + 1u) + h.axis_z * z0;
+    nv_real3 p01 = h.axis_x * x0 + h.axis_y * NV_HEIGHT(tile, base + 17u) + h.axis_z * z1;
+    nv_real3 p11 = h.axis_x * x1 + h.axis_y * NV_HEIGHT(tile, base + 18u) + h.axis_z * z1;
+    NvSurface s;
+    s.kind = 3u; s.entity0 = h.entity0; s.entity1 = h.entity1; s.generation0 = h.generation0; s.generation1 = h.generation1; s.radius = NV_R(0);
+    s.a = p00;
+    if (t == 0u) { s.b = p11; s.c = p10; } else { s.b = p01; s.c = p11; }
+    s.velocity = nv_make3(NV_R(0), NV_R(0), NV_R(0)); s.angular = s.velocity; s.origin = h.origin;
+    return s;
+}
+// Surface n of the collision index space: the table and dynamic surfaces, then the heightfield triangles.
+NvSurface nv_surface_at(uint n) {
+    if (n < NV_SURFACE_COUNT) return NV_SURFACE(n);
+    return nv_height_triangle(n - NV_SURFACE_COUNT);
+}
+// One sweep's candidate state (nv_collide): its inputs and the earliest contact so far; for the separation push the
+// struck surface, the contact, its carry, the lift and the push so far.
+struct NvSweep {
+    NvMotion m; nv_real3 origin; nv_real3 local; nv_real3 back; nv_real3 displacement; nv_real remaining; uint carrier;
+    nv_real earliest; uint selected; nv_real3 normal; nv_real3 offset; nv_real3 path;
+    uint struck; nv_real3 contact; nv_real3 atContact; nv_real tau; nv_real3 lift; nv_real push;
+};
+bool nv_same_owner(NvMotion m, NvSurface s) {
+    return m.self == 0u && s.entity0 == m.entity0 && s.entity1 == m.entity1 && s.generation0 == m.generation0 && s.generation1 == m.generation1;
+}
+// Mode 0: surface n as a contact candidate of the sweep (the tie rule: earliest, then the smaller index).
+void nv_consider(NV_INOUT(NvSweep) w, uint n) {
+    NvSurface surface = nv_surface_local(nv_surface_at(n), w.origin);
+    if (nv_same_owner(w.m, surface)) return;
+    // The path relative to this surface starts at local + delta (tick-end frame).
+    nv_real3 delta = nv_make3(NV_R(0), NV_R(0), NV_R(0));
+    if (n != w.carrier) {
+        delta = w.back;
+        if (nv_surface_moves(surface)) delta = delta + nv_surface_carry_delta(surface, w.remaining, w.local + w.back);
+    }
+    nv_real3 d = w.displacement - delta;
+    nv_real t; nv_real3 direction;
+    if (nv_hit(surface, w.local, delta, d, t, direction) && (t < w.earliest || (t == w.earliest && n < w.selected))) { w.earliest = t; w.selected = n; w.normal = direction; w.offset = delta; w.path = d; }
+}
+// Mode 1: surface n as a blocker of the separation push (each other surface in its own frame at the contact time).
+void nv_consider_push(NV_INOUT(NvSweep) w, uint n) {
+    if (n == w.struck) return;
+    NvSurface blocker = nv_surface_local(nv_surface_at(n), w.origin);
+    if (nv_same_owner(w.m, blocker)) return;
+    nv_real3 shift = w.atContact;
+    if (nv_surface_moves(blocker)) shift = shift + nv_surface_carry_delta(blocker, w.tau, w.contact + w.atContact);
+    nv_real reach; nv_real3 facing;
+    // A surface the push starts on (a coplanar neighbour of the struck one,
+    // reach ~ 0 up to the float error of a point on its plane, about
+    // eps L / separation) is left, not blocking.
+    if (nv_hit(blocker, w.contact, shift, w.lift, reach, facing) && reach > NV_R(0.01)) {
+        nv_real limit = NV_R(0.5) * reach * w.m.separation;
+        if (limit < w.push) w.push = limit;
+    }
+}
+// Candidate enumeration of heightfield triangles (an iterator, so each sweep loop tests candidates in one place): every
+// triangle whose cell the anchor-space segment p0 -> p1 crosses on the field's plane, and the cells within 1e-3 cell
+// of the edges it runs along (float rounding of the walk never leaves out the cell of a contact on an edge), holes
+// left out. The segment is clipped to each field first, so a walk takes at most cells_x + cells_z + 1 steps of at most
+// 3 x 3 cells: a structural bound, independent of where particles are.
+struct NvHeightWalk {
+    nv_real3 p0; nv_real3 p1;
+    uint field; uint live; uint k; uint steps; uint t;
+    int cx; int cz; int sx; int sz; int ox; int oz; int nx0; int nx1; int nz0; int nz1;
+    nv_real u0; nv_real v0; nv_real du; nv_real dv; nv_real t1; nv_real tx; nv_real tz; nv_real tdx; nv_real tdz; nv_real ta;
+};
+NvHeightWalk nv_height_walk_begin(nv_real3 p0, nv_real3 p1) {
+    NvHeightWalk w;
+    w.p0 = p0; w.p1 = p1; w.field = 0u; w.live = 0u; w.k = 0u; w.steps = 0u; w.t = 0u;
+    w.cx = 0; w.cz = 0; w.sx = 1; w.sz = 1; w.ox = 0; w.oz = 0; w.nx0 = 0; w.nx1 = 0; w.nz0 = 0; w.nz1 = 0;
+    w.u0 = NV_R(0); w.v0 = NV_R(0); w.du = NV_R(0); w.dv = NV_R(0); w.t1 = NV_R(0); w.tx = NV_R(0); w.tz = NV_R(0); w.tdx = NV_R(0); w.tdz = NV_R(0); w.ta = NV_R(0);
+    return w;
+}
+// The neighbour range of the current cell from the segment's part in it (parameters ta .. the next crossing).
+void nv_height_walk_cell(NV_INOUT(NvHeightWalk) w) {
+    nv_real e = NV_R(0.001), tb = min(min(w.tx, w.tz), w.t1);
+    nv_real ub0 = w.u0 + w.du * w.ta, ub1 = w.u0 + w.du * tb, vb0 = w.v0 + w.dv * w.ta, vb1 = w.v0 + w.dv * tb;
+    nv_real ulo = min(ub0, ub1) - NV_R(w.cx), uhi = max(ub0, ub1) - NV_R(w.cx), vlo = min(vb0, vb1) - NV_R(w.cz), vhi = max(vb0, vb1) - NV_R(w.cz);
+    w.nx0 = ulo < e ? -1 : 0; w.nx1 = uhi > NV_R(1) - e ? 1 : 0; w.nz0 = vlo < e ? -1 : 0; w.nz1 = vhi > NV_R(1) - e ? 1 : 0;
+    w.ox = w.nx0; w.oz = w.nz0; w.t = 0u;
+}
+// Starts the walk over heightfield h; false when the segment misses it.
+bool nv_height_walk_field(NV_INOUT(NvHeightWalk) w, NvHeightfield h) {
+    nv_real3 r0 = w.p0 - h.origin, r1 = w.p1 - h.origin;
+    nv_real ix = NV_R(1) / dot(h.axis_x, h.axis_x), iz = NV_R(1) / dot(h.axis_z, h.axis_z);
+    w.u0 = dot(r0, h.axis_x) * ix; w.v0 = dot(r0, h.axis_z) * iz;
+    w.du = dot(r1, h.axis_x) * ix - w.u0; w.dv = dot(r1, h.axis_z) * iz - w.v0;
+    nv_real e = NV_R(0.001), t0 = NV_R(0), t1 = NV_R(1), ucells = NV_R(h.cells_x), vcells = NV_R(h.cells_z);
+    if (w.du != NV_R(0)) { nv_real a = (-e - w.u0) / w.du, b = (ucells + e - w.u0) / w.du; t0 = max(t0, min(a, b)); t1 = min(t1, max(a, b)); }
+    else if (w.u0 < -e || w.u0 > ucells + e) return false;
+    if (w.dv != NV_R(0)) { nv_real a = (-e - w.v0) / w.dv, b = (vcells + e - w.v0) / w.dv; t0 = max(t0, min(a, b)); t1 = min(t1, max(a, b)); }
+    else if (w.v0 < -e || w.v0 > vcells + e) return false;
+    if (!(t0 <= t1)) return false;
+    nv_real ua = w.u0 + w.du * t0, va = w.v0 + w.dv * t0;
+    w.cx = int(floor(ua)); w.cz = int(floor(va));
+    int ex = int(floor(w.u0 + w.du * t1)), ez = int(floor(w.v0 + w.dv * t1));
+    w.sx = w.du > NV_R(0) ? 1 : -1; w.sz = w.dv > NV_R(0) ? 1 : -1;
+    nv_real big = NV_R(1e30);
+    w.tdx = w.du != NV_R(0) ? abs(NV_R(1) / w.du) : big; w.tdz = w.dv != NV_R(0) ? abs(NV_R(1) / w.dv) : big;
+    w.tx = w.du != NV_R(0) ? t0 + (w.sx > 0 ? (NV_R(w.cx + 1) - ua) : (ua - NV_R(w.cx))) * w.tdx : big;
+    w.tz = w.dv != NV_R(0) ? t0 + (w.sz > 0 ? (NV_R(w.cz + 1) - va) : (va - NV_R(w.cz))) * w.tdz : big;
+    int spanx = ex - w.cx, spanz = ez - w.cz;
+    if (spanx < 0) spanx = -spanx;
+    if (spanz < 0) spanz = -spanz;
+    w.steps = uint(spanx + spanz);
+    if (w.steps > h.cells_x + h.cells_z + 1u) w.steps = h.cells_x + h.cells_z + 1u;
+    w.k = 0u; w.t1 = t1; w.ta = t0;
+    nv_height_walk_cell(w);
+    return true;
+}
+// The next (cell, triangle) slot: triangle, then the neighbour cells, then the next walk step; false after the last.
+bool nv_height_walk_advance(NV_INOUT(NvHeightWalk) w) {
+    w.t = w.t + 1u; if (w.t < 2u) return true;
+    w.t = 0u; w.ox = w.ox + 1; if (w.ox <= w.nx1) return true;
+    w.ox = w.nx0; w.oz = w.oz + 1; if (w.oz <= w.nz1) return true;
+    if (w.k >= w.steps) return false;
+    w.k = w.k + 1u; w.ta = min(min(w.tx, w.tz), w.t1);
+    if (w.tx < w.tz) { w.cx = w.cx + w.sx; w.tx = w.tx + w.tdx; } else { w.cz = w.cz + w.sz; w.tz = w.tz + w.tdz; }
+    nv_height_walk_cell(w);
+    return true;
+}
+// The next heightfield triangle candidate (its surface index), false at the end.
+bool nv_height_next(NV_INOUT(NvHeightWalk) w, NV_OUT(uint) n) {
+    n = 0u;
+    NV_LOOP while (true) {
+        if (w.live == 0u) {
+            if (w.field >= NV_HEIGHTFIELD_COUNT) return false;
+            bool entered = nv_height_walk_field(w, NV_HEIGHTFIELD(w.field));
+            if (!entered) { w.field = w.field + 1u; continue; }
+            w.live = 1u;
+        }
+        NvHeightfield h = NV_HEIGHTFIELD(w.field);
+        int x = w.cx + w.ox, z = w.cz + w.oz; uint t = w.t;
+        bool more = nv_height_walk_advance(w);
+        if (!more) { w.live = 0u; w.field = w.field + 1u; }
+        if (x >= 0 && z >= 0 && uint(x) < h.cells_x && uint(z) < h.cells_z) {
+            uint ux = uint(x), uz = uint(z);
+            uint tile = h.first_tile + (uz / 16u) * h.tiles_x + ux / 16u, bit = ((uz % 16u) * 16u + ux % 16u) * 2u + t;
+            if (((NV_HEIGHT_HOLES(tile, bit >> 5u) >> (bit & 31u)) & 1u) == 0u) { n = NV_SURFACE_COUNT + h.first_triangle + (uz * h.cells_x + ux) * 2u + t; return true; }
+        }
+    }
+    return false;
+}
+
 // The response follows the analytic motion (dv/dt = accel - k v, k = m.drag): the
 // velocity at a contact is the segment's velocity at that time (propagated back
 // from its end velocity over the remaining time), the bounce acts on it, and the
@@ -321,28 +502,26 @@ bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, nv_real3 a
         // Where the particle was when this sweep's time started, relative to `local`
         // (it moved with its carrier since its last contact; zero before any contact).
         nv_real3 back = nv_make3(NV_R(0), NV_R(0), NV_R(0));
-        if (carrier != 0xffffffffu) back = nv_surface_uncarry_delta(nv_surface_local(NV_SURFACE(carrier), origin), remaining, local);
+        if (carrier != 0xffffffffu) back = nv_surface_uncarry_delta(nv_surface_local(nv_surface_at(carrier), origin), remaining, local);
         // Candidates may come from an acceleration structure (duplicates allowed):
         // the tie rule makes the result independent of their order. The query is
         // anchor space; the hit test is emitter-origin space (error ~ D 2^-24 with
         // D the distance from the emitter origin, not from the anchor).
+        NvSweep sweep;
+        sweep.m = m; sweep.origin = origin; sweep.local = local; sweep.back = back; sweep.displacement = displacement; sweep.remaining = remaining; sweep.carrier = carrier;
+        sweep.earliest = earliest; sweep.selected = selected; sweep.normal = normal; sweep.offset = offset; sweep.path = path;
+        sweep.struck = 0xffffffffu; sweep.contact = back; sweep.atContact = back; sweep.tau = NV_R(0); sweep.lift = back; sweep.push = NV_R(0);
         NV_SURFACE_QUERY_TYPE query = NV_SURFACE_QUERY(origin + local, displacement); uint n = 0u;
-        NV_LOOP while (NV_SURFACE_NEXT(query, n)) {
-            NvSurface surface = nv_surface_local(NV_SURFACE(n), origin);
-            if (m.self == 0u && surface.entity0 == m.entity0 && surface.entity1 == m.entity1 && surface.generation0 == m.generation0 && surface.generation1 == m.generation1) continue;
-            // The path relative to this surface starts at local + delta (tick-end frame).
-            nv_real3 delta = nv_make3(NV_R(0), NV_R(0), NV_R(0));
-            if (n != carrier) {
-                delta = back;
-                if (nv_surface_moves(surface)) delta = delta + nv_surface_carry_delta(surface, remaining, local + back);
-            }
-            nv_real3 d = displacement - delta;
-            nv_real t; nv_real3 direction;
-            if (nv_hit(surface, local, delta, d, t, direction) && (t < earliest || (t == earliest && n < selected))) { earliest = t; selected = n; normal = direction; offset = delta; path = d; }
+        // then the heightfield triangles along the swept path (static: it runs from local + back to local + displacement)
+        NvHeightWalk walk = nv_height_walk_begin(origin + (local + back), origin + (local + displacement));
+        NV_LOOP while (true) {
+            if (!NV_SURFACE_NEXT(query, n)) { if (!nv_height_next(walk, n)) break; }
+            nv_consider(sweep, n);
         }
+        earliest = sweep.earliest; selected = sweep.selected; normal = sweep.normal; offset = sweep.offset; path = sweep.path;
         if (selected == 0xffffffffu) { local = local + displacement; break; }
         if (bounce == 4u) { complete = false; break; }
-        NvSurface hitSurface = nv_surface_local(NV_SURFACE(selected), origin);
+        NvSurface hitSurface = nv_surface_local(nv_surface_at(selected), origin);
         nv_real3 contactLocal = local + (offset + path * earliest);
         nv_real3 surfaceVelocity = hitSurface.velocity + cross(hitSurface.angular, contactLocal - hitSurface.origin);
         nv_real3 rest = path * (NV_R(1) - earliest);
@@ -355,7 +534,7 @@ bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, nv_real3 a
         // (constant velocity s2) the motion keeps acceleration accel - k s2.
         nv_real3 u = nv_bounce(contactVelocity - surfaceVelocity, normal, m.restitution, m.friction);
         nv_real3 bounced = u * after.position + (accel - surfaceVelocity * m.drag) * after.acceleration;
-        if (first.count > 0u) { NvSurface previous = nv_surface_local(NV_SURFACE(carrier), origin); s1 = previous.velocity + cross(previous.angular, contactLocal - previous.origin); }
+        if (first.count > 0u) { NvSurface previous = nv_surface_local(nv_surface_at(carrier), origin); s1 = previous.velocity + cross(previous.angular, contactLocal - previous.origin); }
         // Measured in the last struck surface's frame: a closing gap brings it to the
         // particle even when the bounce itself leaves it.
         if (first.count > 0u && dot(bounced + (surfaceVelocity - s1) * tau, lastNormal) < NV_R(0)) {
@@ -404,19 +583,17 @@ bool nv_collide(NvMotion m, nv_real h, nv_real3 start, nv_real3 move, nv_real3 a
         if (push > NV_R(0)) {
             nv_real3 lift = normal * push;
             nv_real3 atContact = nv_surface_uncarry_delta(hitSurface, tau, contactLocal);
+            NvSweep blockers;
+            blockers.m = m; blockers.origin = origin; blockers.local = contactLocal; blockers.back = atContact; blockers.displacement = lift; blockers.remaining = tau;
+            blockers.carrier = selected; blockers.earliest = NV_R(2); blockers.selected = 0xffffffffu; blockers.normal = lift; blockers.offset = lift; blockers.path = lift;
+            blockers.struck = selected; blockers.contact = contactLocal; blockers.atContact = atContact; blockers.tau = tau; blockers.lift = lift; blockers.push = push;
             NV_SURFACE_QUERY_TYPE pushQuery = NV_SURFACE_QUERY(origin + contactLocal, lift); uint other = 0u;
-            NV_LOOP while (NV_SURFACE_NEXT(pushQuery, other)) {
-                if (other == selected) continue;
-                NvSurface blocker = nv_surface_local(NV_SURFACE(other), origin);
-                if (m.self == 0u && blocker.entity0 == m.entity0 && blocker.entity1 == m.entity1 && blocker.generation0 == m.generation0 && blocker.generation1 == m.generation1) continue;
-                nv_real3 shift = atContact;
-                if (nv_surface_moves(blocker)) shift = shift + nv_surface_carry_delta(blocker, tau, contactLocal + atContact);
-                nv_real reach; nv_real3 facing;
-                // A surface the push starts on (a coplanar neighbour of the struck one,
-                // reach ~ 0 up to the float error of a point on its plane, about
-                // eps L / separation) is left, not blocking.
-                if (nv_hit(blocker, contactLocal, shift, lift, reach, facing) && reach > NV_R(0.01)) { nv_real limit = NV_R(0.5) * reach * m.separation; if (limit < push) push = limit; }
+            NvHeightWalk pushWalk = nv_height_walk_begin(origin + (contactLocal + atContact), origin + (contactLocal + atContact + lift));
+            NV_LOOP while (true) {
+                if (!NV_SURFACE_NEXT(pushQuery, other)) { if (!nv_height_next(pushWalk, other)) break; }
+                nv_consider_push(blockers, other);
             }
+            push = blockers.push;
         }
         local = contactLocal + normal * push;
         remaining = remaining * (NV_R(1) - earliest);
