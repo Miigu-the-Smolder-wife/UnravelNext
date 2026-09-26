@@ -157,6 +157,12 @@ public:
     };
     GpuInstanceRange gpuInstanceRange() const;
     uint32_t staticMeshCount() const { return m_staticMeshes; }
+    // C2b readers for ray tracing (R's runtime BLAS, B's request): the submesh records of a live runtime mesh (mesh-relative
+    // index ranges, as the GPU table holds them; empty when the mesh is not a live runtime mesh), and the slot's generation:
+    // it increases each time a runtime mesh is added into that slot, so a reused slot is told apart. Runtime instances are
+    // instances()[i] for i >= staticInstanceCount(); a removed one carries gpu::kInstanceHidden until its slot is reused.
+    std::vector<gpu::Submesh> runtimeSubmeshes(uint32_t mesh) const;
+    uint64_t runtimeMeshGeneration(uint32_t mesh) const;
     const RuntimeCapacity& runtimeCapacity() const { return m_runtimeCap; }
     //   setMorph (C4):    blend shape weights (one per shape of the instance's mesh) and vertex animation time of a morph
     //                     instance; the previous weights / time = the previous rendered frame's, deformRevision += 1, the
@@ -281,6 +287,7 @@ private:
     struct RuntimeMesh
     {
         bool live = false;
+        uint64_t generation = 0;  // adds into this slot so far
         uint32_t vertices = 0, vertexCount = 0, indices = 0, indexCount = 0, submeshes = 0, submeshCount = 0;
         uint32_t clusters = 0, clusterCount = 0, cvi = 0, cviCount = 0, ct = 0, ctCount = 0, nodes = 0, nodeCount = 0;
     };

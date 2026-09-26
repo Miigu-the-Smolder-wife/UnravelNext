@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.63, 2026-09-26)
+# UnravelNext 인터페이스 (v1.64, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -726,6 +726,9 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.64 (2026-09-26, 렌더 C, 물 층 가장자리 — A 결정; R 접근자 — B 요청):
+  - **물 층 가장자리 기록**: layer 1 스트림은 coverage 층이 켜져 있을 때 가장자리 픽셀에만 투과 기록을 낸다(`COV_FLAG_WATER_EDGE`, `coverageWaterEdge`: 3 × 3 안에 이 스트림의 물이 아닌 픽셀·band A 뒤의 물이 있거나 물 깊이 2차 차분 > 1e-3 × 깊이). 그 밖의 물 픽셀은 물 층 표본이 픽셀 전체다. M은 가장자리 픽셀에서 기록을, 나머지에서 waterVis·waterDepth를 쓴다. 시험 `unx_test_visibility_wateredgetests`: 전체 표본 픽셀 13,266 + 가장자리 기록 515.250 px² = 13781.250 대 정확 13781.252.
+  - **`GpuScene::runtimeSubmeshes(mesh)`, `runtimeMeshGeneration(mesh)`**(R의 런타임 BLAS): 살아 있는 런타임 메시의 서브메시 기록(메시 기준 인덱스 범위)과 슬롯 세대(그 슬롯에 추가될 때마다 +1). 런타임 인스턴스 = instances()[i ≥ staticInstanceCount()], 제거된 것은 슬롯 재사용 전까지 kInstanceHidden.
 - v1.63 (2026-09-26, 렌더 C, 물 층 — A 결정, W 요청 `20260926_W_ocean_patch_stream.md`):
   - **물 층**: `TriangleStream::layer`(0 = coverage 투과 기록: 좁은 표면(B8 유체), 1 = 물 층: 넓은 표면(B7 바다·호수)). V가 주 뷰에서 layer 1 스트림을 band A 깊이의 복사본 위에 1표본 하드웨어 래스터(깊이 검사·쓰기, 양면)로 그려 `FrameResources::waterVis`(R32_UINT, COV_STREAM_ID | 슬롯 | 삼각형, 물 없으면 VIS_NONE)와 `waterDepth`(R32_FLOAT 선형 view 깊이, 물 없으면 +∞)를 낸다. band A(수중)는 그대로다. 프레임에 물 스트림이 없으면 둘 다 invalid. 근거 [실측] (ea6ff3d): 수면을 coverage 기록으로 넣으면 4K에서 약 5.5 ms. 남은 V 몫: W의 정제 함수(`oceanRefine`, 픽셀 셰이더에서 정확 깊이 또는 discard, SV_DepthLessEqual)와 가장자리 픽셀만의 coverage 기록(A 결정) — W의 include가 들어오면.
 - v1.62 (2026-09-26, 코어·M, 렌더 A):

@@ -1153,6 +1153,7 @@ uint32_t GpuScene::addRuntimeMesh(const scene::Mesh& m, const ClusterData& cd)
         return gpu::kNone;
     }
     r.live = true;
+    r.generation = m_runtimeMeshes[slot].generation + 1;
     r.vertexCount = n, r.indexCount = (uint32_t)m.indices.size(), r.submeshCount = (uint32_t)m.submeshes.size();
     r.clusterCount = (uint32_t)cd.clusters.size(), r.cviCount = (uint32_t)cd.clusterVertexIndices.size(), r.ctCount = (uint32_t)cd.clusterTriangles.size();
     r.nodeCount = (uint32_t)nodes.size();
@@ -1214,6 +1215,22 @@ uint32_t GpuScene::addRuntimeMesh(const scene::Mesh& m, const ClusterData& cd)
     if (m_morphMeshBlock.size() <= meshIndex) m_morphMeshBlock.resize(meshIndex + 1, gpu::kNone);
     m_runtimeMeshes[slot] = r;
     return meshIndex;
+}
+
+std::vector<gpu::Submesh> GpuScene::runtimeSubmeshes(uint32_t mesh) const
+{
+    if (mesh < m_rtFirst[RtMeshes] || mesh - m_rtFirst[RtMeshes] >= m_runtimeMeshes.size()) return {};
+    const RuntimeMesh& r = m_runtimeMeshes[mesh - m_rtFirst[RtMeshes]];
+    if (!r.live) return {};
+    std::vector<gpu::Submesh> out(r.submeshCount);
+    std::memcpy(out.data(), m_rtBytes[RtSubmeshes].data() + (size_t)r.submeshes * sizeof(gpu::Submesh), out.size() * sizeof(gpu::Submesh));
+    return out;
+}
+
+uint64_t GpuScene::runtimeMeshGeneration(uint32_t mesh) const
+{
+    if (mesh < m_rtFirst[RtMeshes] || mesh - m_rtFirst[RtMeshes] >= m_runtimeMeshes.size()) return 0;
+    return m_runtimeMeshes[mesh - m_rtFirst[RtMeshes]].generation;
 }
 
 void GpuScene::removeRuntimeMesh(uint32_t mesh)

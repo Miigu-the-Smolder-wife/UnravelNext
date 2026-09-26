@@ -286,7 +286,13 @@ int main()
         const auto frames = run(wallScene(), true, 14, [&](uint32_t f, GpuScene& gs) {
             if (f == 3) add(gs), firstMeshes = meshes;
             if (f == 6) remove(gs);
-            if (f == 10) add(gs);  // after the release delay: the freed ranges come back
+            if (f == 10)
+            {
+                add(gs);  // after the release delay: the freed ranges come back
+                // R's readers: the reused slot's generation moved on, its submeshes are the fragment's.
+                CHECK(gs.runtimeMeshGeneration(meshes[0]) == 2 && gs.runtimeSubmeshes(meshes[0]).size() == c.fragments[0].submeshes.size());
+                CHECK(gs.runtimeSubmeshes(0).empty());  // an uploaded mesh is not a runtime mesh
+            }
         });
         const size_t before = differing(frames[2], wall.back()), added = differing(frames[4], reference.back()), gone = differing(frames[8], wall.back()),
                      again = differing(frames[12], reference.back()), withFragments = differing(reference.back(), wall.back());

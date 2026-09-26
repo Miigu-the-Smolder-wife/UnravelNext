@@ -72,6 +72,33 @@
                             // otherwise the record's depth word carries COV_DEPTH_SEE_THROUGH
 #define COV_FLAG_BACK 8u    // seen from behind (two-sided): the normals are turned towards the viewer
 #define COV_FLAG_HAIR 16u   // a hair ribbon (HairRaster.ms): normals carry asuint(u), the record keeps u in the normal bits
+#define COV_FLAG_WATER_EDGE 32u  // a water-layer triangle (StreamRaster.ms, v1.64): a record only in the layer's edge pixels
+
+// Water-layer edge pixels (v1.64; A's rule: the exact coverage of the water layer comes from coverage records in its edge
+// pixels only). P[6].z waterVis SRV, P[6].w waterDepth SRV, P[7].x band A depth SRV, P[7].y the stream's slot. A pixel is
+// an edge when in its 3 x 3 block (clamped) some pixel is not this stream's water (no water, another stream, or water
+// behind band A there), or the water depth bends there (second difference along x or y above 1e-3 of the depth:
+// a fold or a silhouette of the surface over itself). Pixels with the layer's full coverage keep the layer sample.
+bool coverageWaterEdge(uint2 pixel)
+{
+    Texture2D<uint> vis = ResourceDescriptorHeap[P[6].z];
+    Texture2D<float> water = ResourceDescriptorHeap[P[6].w];
+    Texture2D<float> bandA = ResourceDescriptorHeap[P[7].x];
+    const int2 hi = int2(COV_WIDTH, COV_HEIGHT) - 1;
+    float d[3][3];
+    [unroll] for (int y = -1; y <= 1; ++y)
+        [unroll] for (int x = -1; x <= 1; ++x)
+        {
+            const int2 q = clamp(int2(pixel) + int2(x, y), 0, hi);
+            const uint v = vis[q];
+            if ((v >> 30) != 3u || ((v >> 24) & 0x3Fu) != P[7].y) return true;
+            const float w = water[q];
+            if (!(w < g_nearPlane / max(bandA[q], 1e-30))) return true;
+            d[y + 1][x + 1] = w;
+        }
+    const float c = d[1][1];
+    return abs(d[1][0] + d[1][2] - 2 * c) > 1e-3 * c || abs(d[0][1] + d[2][1] - 2 * c) > 1e-3 * c;
+}
 
 // Vertex normals between the mesh and pixel kernels: octahedral 16 + 16 bits (the record keeps 8 + 8).
 uint coverageOct32(float3 n)

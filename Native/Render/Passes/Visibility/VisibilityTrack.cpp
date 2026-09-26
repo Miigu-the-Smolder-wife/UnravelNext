@@ -1298,7 +1298,11 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     for (uint32_t slot = 0; slot < (uint32_t)streams.size(); ++slot)
     {
         const TriangleStream st = streams[slot];
-        if (!st.vertices.valid() || !st.drawArgs.valid() || st.maxTriangles == 0 || st.layer != 0) continue;
+        if (!st.vertices.valid() || !st.drawArgs.valid() || st.maxTriangles == 0) continue;
+        // v1.64: a water-layer stream gives records only in the layer's edge pixels (its interior is the layer's sample).
+        const bool edgeOnly = st.layer == 1;
+        const TextureRef waterVis = fc.resources.waterVis, waterDepth = fc.resources.waterDepth, bandADepth = view.depth;
+        if (edgeOnly && !waterVis.valid()) continue;
         if (st.maxTriangles > (1u << 24)) fail("V: triangle stream %u holds %u triangles (at most 2^24)", slot, st.maxTriangles);
         if (g.desc(st.vertices).size < (uint64_t)st.maxTriangles * 96) fail("V: triangle stream %u: vertex buffer below %u triangles", slot, st.maxTriangles);
         const uint32_t groups = (st.maxTriangles + 31) / 32;
@@ -1309,13 +1313,19 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                   [&](PassBuilder& b) {
                       b.use(st.vertices, Use::SrvGraphics);
                       b.use(st.drawArgs, Use::SrvGraphics);
+                      if (edgeOnly)
+                      {
+                          b.use(waterVis, Use::SrvGraphics);
+                          b.use(waterDepth, Use::SrvGraphics);
+                          b.use(bandADepth, Use::SrvGraphics);
+                      }
                       b.use(run.state, Use::UavGraphics);
                       b.use(stream, Use::UavGraphics);
                       b.use(keys, Use::UavGraphics);
                       if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
                   },
                   [=](PassContext& c) {
-                      uint32_t k[26];
+                      uint32_t k[30];
                       constants(c, k, 0, false);  // the stream inputs take P[3].xyz
                       k[3] = c.uav(stream);
                       k[4] = c.uav(keys);
@@ -1325,6 +1335,10 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       k[14] = st.maxTriangles;
                       k[24] = slot;
                       k[25] = st.material;
+                      k[26] = edgeOnly ? c.srv(waterVis) : kNone;
+                      k[27] = edgeOnly ? c.srv(waterDepth) : kNone;
+                      k[28] = edgeOnly ? c.srv(bandADepth) : kNone;
+                      k[29] = slot;
                       c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
                       const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
                       const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
@@ -1332,7 +1346,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       c.cmd->RSSetScissorRects(1, &sc);
                       c.bindFrameConstants(frameConstants);
                       c.cmd->SetPipelineState(streamPso);
-                      c.graphicsConstants(k, 26);
+                      c.graphicsConstants(k, 30);
                       c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
                   });
     }

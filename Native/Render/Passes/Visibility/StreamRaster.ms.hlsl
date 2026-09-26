@@ -6,7 +6,9 @@
 // the covered centroid, the interpolated vertex normal; band A keeps what lies beneath (the refraction reads it). Both
 // faces are drawn (a water surface is seen from below too); the normal stays the authored one (M reads the triangle).
 //   P[3].x vertices SRV (raw, 32 B per vertex), P[3].y draw arguments SRV (raw), P[3].z capacity (triangles),
-//   P[3].w views SRV (the main view is element 0); P[6].x stream slot, P[6].y material; the rest as CoverageRaster.ms.
+//   P[3].w views SRV (the main view is element 0); P[6].x stream slot, P[6].y material; P[6].z waterVis SRV (UNX_NONE: a
+//   coverage-layer stream; else a water-layer stream: records only in the layer's edge pixels, COV_FLAG_WATER_EDGE),
+//   P[6].w waterDepth SRV, P[7].x band A depth SRV, P[7].y slot again (the pixel kernel's test); the rest as CoverageRaster.ms.
 #include "Passes/Visibility/CoverageLayer.hlsli"
 #include "VisBuffer.hlsli"
 
@@ -106,7 +108,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         o.d = toScreen(q[3], v.viewportSize);
         o.normals = uint4(coverageOct32(nq[0]), coverageOct32(nq[1]), coverageOct32(nq[2]), coverageOct32(nq[3]));
         const float area2 = (o.a.x * o.b.y - o.b.x * o.a.y) + (o.b.x * o.c.y - o.c.x * o.b.y) + (o.c.x * o.d.y - o.d.x * o.c.y) + (o.d.x * o.a.y - o.a.x * o.d.y);
-        o.flags = m == 4 ? COV_FLAG_QUAD : 0u;  // see-through: no COV_FLAG_OPAQUE
+        o.flags = (m == 4 ? COV_FLAG_QUAD : 0u) | (P[6].z != UNX_NONE ? COV_FLAG_WATER_EDGE : 0u);  // see-through: no COV_FLAG_OPAQUE
         cull = area2 == 0;
     }
     o.cull = cull;

@@ -1,12 +1,11 @@
-// Water layer (render C; A's decision on W's request 20260926_W_ocean_patch_stream; INTERFACES v1.61), real device with the
-// debug layer, V called directly (tracks::visibility) with a layer-1 triangle stream in FrameResources::triangleStreams:
-//   water_layer_is_exact   a tilted water quad (2 triangles) in front of a far box, a small box standing in front of part of
-//                          it: at every pixel whose centre sees the quad in front of band A, waterVis names slot 0 and
-//                          triangle 0 or 1 and waterDepth is the ray-plane hit's view depth (relative error <= 1e-5);
-//                          elsewhere VIS_NONE and +inf (pixels within 0.01 px of a quad edge or of a depth tie with band A are
-//                          not judged: the rasteriser's tie rule); band A's depth is not written by the water (its edge
-//                          coverage records, v1.64, are unx_test_visibility_wateredgetests).
-//   unx_test_visibility_waterlayertests
+// Water layer edges (render C; A's rule, INTERFACES v1.64), real device with the debug layer, V called directly with a layer-1
+// triangle stream and the coverage layer on:
+//   water_edges_are_exact   a tilted water quad (2 triangles) alone in front of a far box: the layer's pixels without
+//                           coverage records (the layer's full samples) plus the areas of the water records in the edge
+//                           pixels add up to the quad's exact projected area within the records' 10-bit rounding; records
+//                           come only from pixels next to the quad's outline (none inside), every one see-through with
+//                           slot 0 and triangle 0 or 1.
+//   unx_test_visibility_wateredgetests
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
@@ -123,13 +122,11 @@ int main()
         scene::Scene s;
         s.name = "water layer";
         s.materials.resize(2);
-        s.meshes = { box({ 3, 3, 0.5f }), box({ 0.05f, 0.05f, 0.05f }) };
-        scene::Instance farBox, nearBox;
+        s.meshes = { box({ 3, 3, 0.5f }) };
+        scene::Instance farBox;
         farBox.mesh = 0;
         farBox.transform.m[2][3] = 20;
-        nearBox.mesh = 1;
-        nearBox.transform.m[0][3] = 0.1f, nearBox.transform.m[2][3] = 1.5f;  // in front of the quad's middle
-        s.instances = { farBox, nearBox };
+        s.instances = { farBox };
         scene::Camera cam;
         cam.name = "front";
         cam.forward = { 0, 0, 1 };
@@ -161,9 +158,11 @@ int main()
         const uint64_t texBytes = (uint64_t)rowPitch(width) * height;
         ComPtr<ID3D12Resource> visRb = buffer(texBytes, D3D12_HEAP_TYPE_READBACK, L"rb vis"), depthRb = buffer(texBytes, D3D12_HEAP_TYPE_READBACK, L"rb water depth"),
                                bandARb = buffer(texBytes, D3D12_HEAP_TYPE_READBACK, L"rb band A depth");
-        std::vector<uint32_t> vis;
+        std::vector<uint32_t> vis, tiles, records;
         std::vector<float> waterDepth, bandA;
-        uint32_t coverageFragments = 0;
+        const uint64_t tileCount = (uint64_t)((width + 7) / 8) * ((height + 7) / 8);
+        ComPtr<ID3D12Resource> tilesRb = buffer(tileCount * 32, D3D12_HEAP_TYPE_READBACK, L"rb tiles"), recordsRb;
+        uint64_t recordBytes = 0;
         for (uint32_t f = 0; f < 3; ++f)
         {
             FrameContext frame;
@@ -188,85 +187,102 @@ int main()
             tracks::visibility(fc, main);
             CHECK(resources.waterVis.valid() && resources.waterDepth.valid());
             const TextureRef wv = resources.waterVis, wd = resources.waterDepth, da = main.depth;
-            ID3D12Resource *v = visRb.Get(), *d = depthRb.Get(), *a = bandARb.Get();
+            CHECK(main.coverageTiles.valid() && main.coverageRecords.valid());
+            const BufferRef ct = main.coverageTiles, cr = main.coverageRecords;
+            const uint64_t poolBytes = graph.desc(cr).size;
+            if (poolBytes != recordBytes)
+            {
+                if (recordsRb) device().deferRelease(recordsRb);
+                recordsRb = buffer(poolBytes, D3D12_HEAP_TYPE_READBACK, L"rb records");
+                recordBytes = poolBytes;
+            }
+            ID3D12Resource *v = visRb.Get(), *d = depthRb.Get(), *a = bandARb.Get(), *tl = tilesRb.Get(), *rc = recordsRb.Get();
             graph.addPass("test.readback", QueueType::Graphics,
                           [&](PassBuilder& b) {
                               b.use(wv, Use::CopySrc);
                               b.use(wd, Use::CopySrc);
                               b.use(da, Use::CopySrc);
+                              b.use(ct, Use::CopySrc);
+                              b.use(cr, Use::CopySrc);
                               b.keep();
                           },
                           [=](PassContext& c) {
                               copyTexture(c, wv, v, width, height);
                               copyTexture(c, wd, d, width, height);
                               copyTexture(c, da, a, width, height);
+                              c.cmd->CopyBufferRegion(tl, 0, c.resource(ct), 0, tileCount * 32);
+                              c.cmd->CopyBufferRegion(rc, 0, c.resource(cr), 0, poolBytes);
                           });
             graph.execute(nullptr);
             device().waitIdle();
             vis = readTexture<uint32_t>(v, width, height);
             waterDepth = readTexture<float>(d, width, height);
             bandA = readTexture<float>(a, width, height);
-            coverageFragments = visibility::latestStats(trackState).coverageFragments;
+            auto words = [](ID3D12Resource* r, uint64_t n) {
+                std::vector<uint32_t> w(n);
+                uint8_t* p = nullptr;
+                check(r->Map(0, nullptr, reinterpret_cast<void**>(&p)), "map");
+                std::memcpy(w.data(), p, n * 4);
+                r->Unmap(0, nullptr);
+                return w;
+            };
+            tiles = words(tl, tileCount * 8);
+            records = words(rc, poolBytes / 4);
         }
 
-        // Reference per pixel centre: the ray through it, its hit with the quad's plane (inside the quad?), the hit's view
-        // depth (camera at the origin looking along +z: the hit's z) and band A's view depth there (near / device depth).
-        const float4x4 inv = inverse(mainView.viewProj);
-        auto rayAt = [&](double px, double py) {
-            const double ndc[2] = { px / width * 2 - 1, 1 - py / height * 2 };
-            double w[4];
-            for (int r = 0; r < 4; ++r) w[r] = inv.m[r][0] * ndc[0] + inv.m[r][1] * ndc[1] + inv.m[r][2] * 1.0 + inv.m[r][3];
-            const double x = w[0] / w[3], y = w[1] / w[3], z = w[2] / w[3];
-            const double l = std::sqrt(x * x + y * y + z * z);
-            return std::array<double, 3>{ x / l, y / l, z / l };
-        };
-        const double nx = normal.x, ny = normal.y, nz = normal.z;
-        const double planeD = nx * corners[0].x + ny * corners[0].y + nz * corners[0].z;
-        const double focal = 0.5 * height / std::tan(0.5 * cam.verticalFov), nearPlane = mainView.nearPlane;
-        uint64_t waterPixels = 0, missing = 0, extra = 0, badId = 0, bandTouched = 0, skipped = 0;
-        double worstDepth = 0;
-        for (uint32_t py = 0; py < height; ++py)
-            for (uint32_t px = 0; px < width; ++px)
+        // Records per pixel (tile headers: records, base, listed index + 1; the record's pixel in its tile).
+        const uint32_t tilesX = (width + 7) / 8;
+        std::vector<uint8_t> hasRecord((size_t)width * height, 0);
+        double recordArea = 0;
+        uint64_t streamRecords = 0, badRecords = 0;
+        for (uint64_t t = 0; t < tileCount; ++t)
+        {
+            const uint32_t count = tiles[8 * t], base = tiles[8 * t + 1], listed = tiles[8 * t + 2];
+            if (listed == 0) continue;
+            for (uint32_t r = 0; r < count; ++r)
             {
-                const size_t i = (size_t)py * width + px;
-                const auto dir = rayAt(px + 0.5, py + 0.5);
-                const double t = planeD / (nx * dir[0] + ny * dir[1] + nz * dir[2]);
-                const double hx = dir[0] * t, hz = dir[2] * t;
-                const double sl = (hz - 1.8) / 0.6;  // 0 at the near edge, 1 at the far edge
-                const bool inside = t > 0 && hx > -0.5 && hx < 0.5 && sl > 0 && sl < 1;
-                const double viewDepth = hz;
-                const double bandDepth = bandA[i] > 0 ? nearPlane / bandA[i] : std::numeric_limits<double>::infinity();
-                const bool expect = inside && viewDepth < bandDepth;
-                // Tie zones: within 0.01 px of a quad edge (world length at the hit's depth), or a depth tie with band A.
-                const double pixelWorld = viewDepth / focal;
-                const double edge = std::min({ std::fabs(hx + 0.5), std::fabs(hx - 0.5), std::fabs(sl) * 0.67, std::fabs(sl - 1) * 0.67 });
-                if (t > 0 && (edge < 0.01 * pixelWorld || std::fabs(viewDepth - bandDepth) < 1e-4))
-                {
-                    ++skipped;
-                    continue;
-                }
-                if (bandA[i] > 0 && std::fabs(nearPlane / bandA[i] - viewDepth) < 1e-5 * viewDepth) ++bandTouched;
-                if (expect)
-                {
-                    ++waterPixels;
-                    if (vis[i] == 0) ++missing;
-                    else if ((vis[i] >> 30) != 3u || ((vis[i] >> 24) & 0x3Fu) != 0 || (vis[i] & 0xFFFFFFu) >= 2) ++badId;
-                    else worstDepth = std::max(worstDepth, std::fabs(waterDepth[i] - viewDepth) / viewDepth);
-                }
-                else if (vis[i] != 0 || !std::isinf(waterDepth[i])) ++extra;
+                const uint32_t* rec = &records[4 * (size_t)(base + r)];
+                if ((rec[0] >> 30) != 3u) continue;
+                ++streamRecords;
+                if ((rec[1] & 0x80000000u) == 0 || ((rec[0] >> 24) & 0x3Fu) != 0 || (rec[0] & 0xFFFFFFu) >= 2) ++badRecords;
+                recordArea += ((rec[3] >> 16) & 0x3FFu) / 1023.0;
+                const uint32_t p = rec[3] >> 26, px = (uint32_t)(t % tilesX) * 8 + p % 8, py = (uint32_t)(t / tilesX) * 8 + p / 8;
+                if (px < width && py < height) hasRecord[(size_t)py * width + px] = 1;
             }
-        logf("    %llu water pixels (%llu at an edge or tie, not judged): %llu missing, %llu extra, %llu wrong ids, worst depth error %.2e relative; band A depth "
-             "equal to the water's at %llu pixels; %u coverage records\n",
-             (unsigned long long)waterPixels, (unsigned long long)skipped, (unsigned long long)missing, (unsigned long long)extra, (unsigned long long)badId, worstDepth,
-             (unsigned long long)bandTouched, coverageFragments);
-        CHECK(waterPixels > 10000 && missing == 0 && extra == 0 && badId == 0 && worstDepth <= 1e-5);
-        CHECK(bandTouched == 0);  // edge records (v1.64, coverage layer on) are unx_test_visibility_wateredgetests
-        logf("PASS water_layer_is_exact\n1/1 passed\n");
+        }
+        uint64_t interior = 0, recordPixels = 0;
+        for (size_t i = 0; i < vis.size(); ++i)
+        {
+            recordPixels += hasRecord[i];
+            if (vis[i] != 0 && !hasRecord[i]) ++interior;
+        }
+        // The quad's exact projected area (it lies inside the view).
+        auto toPixel = [&](float3 p) {
+            double c[4];
+            for (int r = 0; r < 4; ++r) c[r] = (double)mainView.viewProj.m[r][0] * p.x + (double)mainView.viewProj.m[r][1] * p.y + (double)mainView.viewProj.m[r][2] * p.z + mainView.viewProj.m[r][3];
+            return std::array<double, 2>{ (c[0] / c[3] * 0.5 + 0.5) * width, (0.5 - c[1] / c[3] * 0.5) * height };
+        };
+        double area2 = 0, perimeter = 0;
+        for (int k = 0; k < 4; ++k)
+        {
+            const auto a = toPixel(corners[k]), b = toPixel(corners[(k + 1) % 4]);
+            area2 += a[0] * b[1] - b[0] * a[1];
+            perimeter += std::hypot(b[0] - a[0], b[1] - a[1]);
+        }
+        const double exact = std::fabs(area2) * 0.5, total = (double)interior + recordArea, rounding = streamRecords * 0.5 / 1023.0;
+        logf("    water layer: %llu full pixels + %.3f px^2 in %llu edge records (%llu pixels) = %.3f px^2 vs the quad's exact %.3f (rounding bound %.3f); outline "
+             "%.0f px; %llu bad records\n",
+             (unsigned long long)interior, recordArea, (unsigned long long)streamRecords, (unsigned long long)recordPixels, total, exact, rounding, perimeter,
+             (unsigned long long)badRecords);
+        CHECK(streamRecords > 0 && badRecords == 0);
+        CHECK(recordPixels <= (uint64_t)(4 * perimeter));  // the outline's pixels (and their 3 x 3 neighbours), not the interior
+        CHECK(std::fabs(total - exact) <= rounding + 1e-4 * exact);
+        logf("PASS water_edges_are_exact\n1/1 passed\n");
         return 0;
     }
     catch (const std::exception& e)
     {
-        logf("FAIL water_layer_is_exact: %s\n0/1 passed\n", e.what());
+        logf("FAIL water_edges_are_exact: %s\n0/1 passed\n", e.what());
         return 1;
     }
 }
