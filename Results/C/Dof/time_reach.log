@@ -1,0 +1,4 @@
+  dof time [aim] 4K: 1.844 ms (median of 8 frames), clear 0.090, down 0.004, gather 1.171, reach 0.010, setup 0.366
+  dof time [blur] 4K: 3.282 ms (median of 8 frames), clear 0.085, down 0.004, gather 2.799, reach 0.007, setup 0.387
+  dof time [focus] 4K: 0.968 ms (median of 8 frames), clear 0.085, down 0.004, gather 0.514, reach 0.007, setup 0.357
+GpuLock.ps1: cpu-contended: 1 s >= 4 cores, peak 6.0 cores; top: cl.exe (74640) 4 core-s, unx_shaderc.exe (50128) 1 core-s, unx_shaderc.exe (61376) 1 core-s, ninja.exe (64856) 0 core-s

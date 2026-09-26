@@ -43,7 +43,7 @@ BufferRef depthOfField(FramePassContext& fc, const ViewResources& view, TextureR
     const BufferRef maxima = g.createBuffer({ "m.dof.tile maxima", tiles * kOctaves * 4, 0 });
     const BufferRef reach = g.createBuffer({ "m.dof.reach", tiles * kOctaves * 4, 0 });
     const BufferRef sums = g.createBuffer({ "m.dof.tile sums", tiles * 80, 0 });
-    const BufferRef stats = g.createBuffer({ "m.dof.stats", 8, 0 });
+    const BufferRef stats = g.createBuffer({ "m.dof.stats", 40, 0 });  // pixels gathered, radii clamped, 8 octave maxima
     TextureRef A[kOctaves], S[kOctaves];  // [1..7]: colour and area share, shape (DofCommon.hlsli)
     for (uint32_t c = 1; c < kOctaves; ++c)
     {
@@ -58,7 +58,7 @@ BufferRef depthOfField(FramePassContext& fc, const ViewResources& view, TextureR
     ID3D12PipelineState* gather = fc.shaders.compute("Passes/Shading/DofGather");
     g.addPass("m.dof.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(stats, Use::UavCompute); },
               [=](PassContext& c) {
-                  const uint32_t k[4] = { c.uav(stats), 2, 0, 0 };
+                  const uint32_t k[4] = { c.uav(stats), 10, 0, 0 };
                   c.cmd->SetPipelineState(clear);
                   c.computeConstants(k, 4);
                   c.cmd->Dispatch(1, 1, 1);
@@ -107,12 +107,13 @@ BufferRef depthOfField(FramePassContext& fc, const ViewResources& view, TextureR
     g.addPass("m.dof.reach", QueueType::Graphics,
               [&](PassBuilder& b) {
                   b.use(maxima, Use::SrvCompute);
+                  b.use(stats, Use::SrvCompute);
                   b.use(reach, Use::UavCompute);
               },
               [=](PassContext& c) {
-                  const uint32_t k[4] = { c.srv(maxima), c.uav(reach), tilesX, tilesY };
+                  const uint32_t k[8] = { c.srv(maxima), c.uav(reach), tilesX, tilesY, c.srv(stats), 0, 0, 0 };
                   c.cmd->SetPipelineState(reachPso);
-                  c.computeConstants(k, 4);
+                  c.computeConstants(k, 8);
                   c.cmd->Dispatch((tilesX + 7) / 8, (tilesY + 7) / 8, 1);
               });
     g.addPass("m.dof.gather", QueueType::Graphics,

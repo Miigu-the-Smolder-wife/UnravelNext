@@ -155,6 +155,12 @@ void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_Gro
     {
         RWByteAddressBuffer maxima = ResourceDescriptorHeap[P[0].w];
         maxima.Store(4 * (tile * DOF_CATEGORIES + gi), s_max[gi]);
+        // the view's largest |rho| + 1 per octave (statistics words 2..9): DofReach scans only as far as it reaches
+        if (s_max[gi] != 0)
+        {
+            RWByteAddressBuffer stats = ResourceDescriptorHeap[P[1].w];
+            stats.InterlockedMax(8 + 4 * gi, s_max[gi]);
+        }
     }
     if (all((tid.xy & 1) == 0))  // octave 3: 2 x 2 threads = one 8 px texel
     {

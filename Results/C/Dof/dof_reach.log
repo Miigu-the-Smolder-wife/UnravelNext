@@ -1,0 +1,31 @@
+  depth of field [tilted plane, texture only, |rho| <= 12 px]: two runs bit identical ok
+depth of field [tilted plane, texture only, |rho| <= 12 px]: aperture 0.8752 m, focus 2.678 m; 16262 pixels judged, 4474 with hidden surfaces showing (left out), relMSE 3.217e-05, worst 5.075e-02 at (17, 26), 0 pixels bit identical to the input
+  depth of field [tilted plane, texture only, |rho| <= 12 px]: vs the CPU thin-lens ray cast (relMSE < 1e-03) ok
+  depth of field [tilted plane, |rho| <= 12 px]: two runs bit identical        ok
+depth of field [tilted plane, |rho| <= 12 px]: aperture 0.8752 m, focus 2.678 m; 16262 pixels judged, 4474 with hidden surfaces showing (left out), relMSE 4.288e-04, worst 3.596e-01 at (169, 34), 0 pixels bit identical to the input
+  depth of field [tilted plane, |rho| <= 12 px]: vs the CPU thin-lens ray cast (relMSE < 1e-03) ok
+  depth of field [tilted plane, |rho| <= 60 px]: two runs bit identical        ok
+depth of field [tilted plane, |rho| <= 60 px]: aperture 4.3761 m, focus 2.678 m; 5862 pixels judged, 14874 with hidden surfaces showing (left out), relMSE 4.062e-03, worst 2.285e-01 at (69, 71), 1 pixels bit identical to the input
+  depth of field [tilted plane, |rho| <= 60 px]: vs the CPU thin-lens ray cast (relMSE < 1e-02) ok
+  depth of field [blurred near card (rho -15 px) over a sharp wall]: two runs bit identical ok
+depth of field [blurred near card (rho -15 px) over a sharp wall]: aperture 0.2047 m, focus 10.000 m; 18335 pixels judged, 2401 with hidden surfaces showing (left out), relMSE 3.454e-06, worst 3.477e-02 at (63, 41), 13602 pixels bit identical to the input
+  depth of field [blurred near card (rho -15 px) over a sharp wall]: vs the CPU thin-lens ray cast (relMSE < 1e-03) ok
+  depth of field [sharp card over a blurred wall (rho +14 px) with HDR points]: two runs bit identical ok
+depth of field [sharp card over a blurred wall (rho +14 px) with HDR points]: aperture 0.1911 m, focus 0.600 m; 9428 pixels judged, 11308 with hidden surfaces showing (left out), relMSE 4.525e-04, worst 1.509e-01 at (156, 34), 91 pixels bit identical to the input
+  depth of field [sharp card over a blurred wall (rho +14 px) with HDR points]: vs the CPU thin-lens ray cast (relMSE < 1e-03) ok
+  depth of field [near focus (|rho| <= 0.4 px)]: two runs bit identical        ok
+depth of field [near focus (|rho| <= 0.4 px)]: aperture 0.0292 m, focus 2.678 m; 20140 pixels judged, 596 with hidden surfaces showing (left out), relMSE 1.868e-05, worst 2.471e-01 at (77, 63), 0 pixels bit identical to the input
+  depth of field [near focus (|rho| <= 0.4 px)]: vs the CPU thin-lens ray cast (relMSE < 1e-03) ok
+  depth of field [a wall at the focus distance]: two runs bit identical        ok
+depth of field [a wall at the focus distance]: aperture 0.5132 m, focus 3.000 m; 20736 pixels judged, 0 with hidden surfaces showing (left out), relMSE 9.464e-14, worst 6.287e-05 at (16, 50), 40 pixels bit identical to the input
+  a wall at the focus distance: largest change 5.25e-05 of the input
+  depth of field: a wall at the focus distance keeps the image (float rounding of rho = 0: < 1e-4) ok
+  depth of field [tilted plane, texture only, |rho| <= 12 px]: a later run (other memory contents) bit identical ok
+  depth of field [tilted plane, |rho| <= 12 px]: a later run (other memory contents) bit identical ok
+  depth of field [tilted plane, |rho| <= 60 px]: a later run (other memory contents) bit identical ok
+  depth of field [blurred near card (rho -15 px) over a sharp wall]: a later run (other memory contents) bit identical ok
+  depth of field [sharp card over a blurred wall (rho +14 px) with HDR points]: a later run (other memory contents) bit identical ok
+  depth of field [near focus (|rho| <= 0.4 px)]: a later run (other memory contents) bit identical ok
+  depth of field [a wall at the focus distance]: a later run (other memory contents) bit identical ok
+POST TESTS PASSED
+GpuLock.ps1: cpu-contended: 19 s >= 4 cores, peak 10.8 cores; top: unx_shaderc.exe (31440) 6 core-s, unx_shaderc.exe (48452) 6 core-s, unx_shaderc.exe (77572) 6 core-s, unx_shaderc.exe (37984) 5 core-s background: cpu 16 s >= 4 cores, peak 6.7 cores
