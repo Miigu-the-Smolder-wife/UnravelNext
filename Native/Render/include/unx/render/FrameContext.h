@@ -76,6 +76,19 @@ struct OceanFrame
     float lakeCentre[2] = {}, lakeRadius = 0; // (x, z) in this frame's coordinates, m
 };
 
+// B5 (render B, INTERFACES v1.77): the frame's cloud layer - weather content (an environment input, not a quality key).
+// coverage 0 = no cloud pass. Altitudes in world metres (S keeps the layer fixed to the world across origin shifts with
+// FrameContext::originShift); the wind advects in FrameContext::time (World time).
+struct CloudLayerDesc
+{
+    float coverage = 0;                          // [0, 1]
+    float baseAltitude = 1500, topAltitude = 4000;  // m
+    float sigmaMax = 0.04f;                      // peak extinction (1/m)
+    float albedo = 0.99f;                        // single-scattering albedo
+    float windX = 0, windZ = 0;                  // m/s
+    uint32_t seed = 1;
+};
+
 // A14 (FEATURES_GAME 8; Requests/20260926_C_per_view_history.md): a full auxiliary view drawn in this frame before the
 // main view (render-texture camera, mirror, portal, split screen). Its id is stable across frames (the key of every
 // track's per-view history; nonzero, unique). 'reads' lists the views whose outputs this view's materials read: those
@@ -95,6 +108,7 @@ struct FrameContext
     double time = 0;
     float deltaTime = 0;
     ViewDesc mainView;
+    CloudLayerDesc clouds;  // B5 (v1.77): coverage 0 = none
     // Validation runs: the main view's colour is linear radiance x exposure in RGBA32F (metrics, INTERFACES 9)
     // instead of the display-encoded RGB10A2.
     bool outputLinearHdr = false;

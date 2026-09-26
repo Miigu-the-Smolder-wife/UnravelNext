@@ -143,6 +143,21 @@ int main(int argc, char** argv)
         bad.level = std::numeric_limits<double>::quiet_NaN();
         expect("a non-finite level is refused", throws([&] { h.setOcean(&bad); }));
         expect("a refused sea leaves none set", !h.queuedOcean());
+        // B5 clouds (v1.77): held until changed, refused when inconsistent (the previous layer stays)
+        render::CloudLayerDesc cl;
+        cl.coverage = 0.5f;
+        cl.windX = 8;
+        h.setClouds(cl);
+        expect("a cloud layer is held", h.clouds().coverage == 0.5f && h.clouds().windX == 8);
+        render::CloudLayerDesc badCl = cl;
+        badCl.topAltitude = badCl.baseAltitude - 1;
+        expect("clouds with top below base are refused", throws([&] { h.setClouds(badCl); }));
+        badCl = cl;
+        badCl.coverage = 1.5f;
+        expect("coverage above 1 is refused", throws([&] { h.setClouds(badCl); }));
+        expect("a refused layer leaves the previous one", h.clouds().coverage == 0.5f);
+        h.setClouds(render::CloudLayerDesc{});
+        expect("coverage 0 clears the layer", h.clouds().coverage == 0);
         expect("D3D12 debug layer errors 0", h.debugErrors() == 0);
         logf(failures ? "HOST OCEAN TEST FAILED (%u)\n" : "HOST OCEAN TEST PASS\n", failures);
         return failures ? 1 : 0;

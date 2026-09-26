@@ -1012,6 +1012,18 @@ void HostRenderer::setOcean(const OceanInput* ocean)
     m_ocean = ocean ? std::optional<OceanInput>(*ocean) : std::nullopt;
 }
 
+void HostRenderer::setClouds(const render::CloudLayerDesc& c)
+{
+    requireCommitted();
+    const bool finite = std::isfinite(c.coverage) && std::isfinite(c.baseAltitude) && std::isfinite(c.topAltitude) && std::isfinite(c.sigmaMax) &&
+                        std::isfinite(c.albedo) && std::isfinite(c.windX) && std::isfinite(c.windZ);
+    if (!finite || c.coverage < 0 || c.coverage > 1 || (c.coverage > 0 && !(c.topAltitude > c.baseAltitude && c.sigmaMax > 0 && c.albedo >= 0 && c.albedo <= 1)))
+        fail("clouds: coverage %g in [0, 1]; with coverage: base %g < top %g, sigma_max %g > 0, albedo %g in [0, 1]", c.coverage, c.baseAltitude, c.topAltitude, c.sigmaMax,
+             c.albedo);
+    std::lock_guard lock(m_mutex);
+    m_clouds = c;
+}
+
 std::optional<render::OceanFrame> HostRenderer::oceanFrameLocked() const
 {
     if (!m_ocean) return std::nullopt;
@@ -1154,6 +1166,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.fluids = m_fluids;  // (a state: every frame reads the latest until the host sets another)
     packet.fluidStamp = m_fluidStamp;
     packet.ocean = oceanFrameLocked();  // in this frame's coordinates (the origin shifts applied so far)
+    packet.clouds = m_clouds;
     m_decalsChanged = false;
     m_pending = FramePacket{};
     m_packets.push_back(std::move(packet));
@@ -1467,6 +1480,7 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.fluids = fluidFrames.empty() ? nullptr : fluidFrames.data();
     fc.fluidCount = (uint32_t)fluidFrames.size();
     fc.ocean = p.ocean ? &*p.ocean : nullptr;
+    fc.clouds = p.clouds;
     m_lastDiscontinuity = p.discontinuity;
     m_lastGpuSimulation = p.gpuSimulation;
     m_prevViewProj = fc.mainView.viewProj;

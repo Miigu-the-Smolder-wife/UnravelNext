@@ -525,6 +525,23 @@ UNX_API int32_t UNX_CALL UnxSceneSetTerrainLayers(UnxRenderer r, uint32_t materi
     });
 }
 
+UNX_API int32_t UNX_CALL UnxFrameSetClouds(UnxRenderer r, const UnxCloudDesc* clouds)
+{
+    return call([&] {
+        render::CloudLayerDesc c;  // null: no clouds (coverage 0)
+        if (clouds)
+        {
+            if (clouds->size != sizeof(UnxCloudDesc) || clouds->version != 1) fail("UnxFrameSetClouds: UnxCloudDesc size %u version %u", clouds->size, clouds->version);
+            c.coverage = clouds->coverage;
+            c.baseAltitude = clouds->baseAltitude, c.topAltitude = clouds->topAltitude;
+            c.sigmaMax = clouds->sigmaMax, c.albedo = clouds->albedo;
+            c.windX = clouds->windX, c.windZ = clouds->windZ;
+            c.seed = clouds->seed;
+        }
+        find(r)->setClouds(c);
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxFrameSetOcean(UnxRenderer r, const UnxOceanDesc* ocean)
 {
     return call([&] {

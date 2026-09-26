@@ -177,6 +177,7 @@ struct FramePacket
     std::shared_ptr<const std::vector<Fluid>> fluids;
     std::array<uint64_t, 6> fluidStamp{};  // NRC_GpuWorldStamp of their tick (world, generation, epoch, tick, branch, phase)
     std::optional<render::OceanFrame> ocean;  // B7: the sea in this frame's coordinates (FrameContext::ocean)
+    render::CloudLayerDesc clouds;            // B5: the cloud layer (FrameContext::clouds)
 };
 
 // The render graph of one recorded frame (RenderGraphStats, the fields the host reports).
@@ -355,6 +356,13 @@ public:
         float lakeRadius = 0;
     };
     void setOcean(const OceanInput* ocean);
+    // B5 clouds (v1.77): held until changed; every queued frame takes the current layer.
+    void setClouds(const render::CloudLayerDesc& clouds);
+    render::CloudLayerDesc clouds()
+    {
+        std::lock_guard lock(m_mutex);
+        return m_clouds;
+    }
     // The sea the next queued frame takes, in that frame's coordinates (tests).
     std::optional<render::OceanFrame> queuedOcean();
     void setSimulation(uint32_t gpuSimulation);
@@ -551,6 +559,7 @@ private:
     std::shared_ptr<const std::vector<FramePacket::Fluid>> m_fluids;  // (m_mutex) the fluids every queued frame takes
     std::array<uint64_t, 6> m_fluidStamp{};                          // (m_mutex)
     std::optional<OceanInput> m_ocean;                               // (m_mutex) the sea every queued frame takes
+    render::CloudLayerDesc m_clouds;                                 // (m_mutex) B5 the cloud layer every queued frame takes
     std::optional<render::OceanFrame> oceanFrameLocked() const;      // (m_mutex held) m_ocean in the current coordinates
     uint64_t m_fluidTicket = 0;                  // submission thread: the frame's bridge admission (0: none)
     std::vector<render::FluidFrame> m_fluidFrames;  // submission thread: FrameContext::fluids of the frame being recorded

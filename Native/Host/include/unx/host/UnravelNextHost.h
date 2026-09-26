@@ -41,7 +41,7 @@ enum UnxResult
                             //    UnxFrameSetOriginShift (C9), UnxSceneReserveRuntime, UnxFrameAddRuntimeMesh,
                             //    UnxFrameRemoveRuntimeMesh, UnxFrameAddRuntimeInstance, UnxFrameRemoveRuntimeInstance,
                             //    UnxFrameSetRuntimeTransforms (C2b), UnxFrameSetTerrainDeformation (C5), UnxFrameSetOcean (B7),
-                            //    UnxSceneSetTerrainLayers (C5 terrain material, v1.74)
+                            //    UnxSceneSetTerrainLayers (C5 terrain material, v1.74), UnxFrameSetClouds (B5, v1.77)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -500,6 +500,23 @@ typedef struct UnxOceanDesc
 static_assert(sizeof(UnxOceanDesc) == 72, "UnxOceanDesc is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxFrameSetOcean(UnxRenderer r, const UnxOceanDesc* ocean);
+
+// B5 clouds (optional export within ABI 6, INTERFACES v1.77; after commit, any time): the frame's cloud layer, weather
+// content held until changed (render::CloudLayerDesc). Null or coverage 0 = no clouds.
+typedef struct UnxCloudDesc
+{
+    uint32_t size, version;             // sizeof (48), 1
+    float coverage;                     // [0, 1]
+    float baseAltitude, topAltitude;    // world metres, base < top
+    float sigmaMax, albedo;             // peak extinction (1/m) > 0, single-scattering albedo [0, 1]
+    float windX, windZ;                 // m/s (advection in World time)
+    uint32_t seed;
+    uint32_t reserved[2];               // 0
+} UnxCloudDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxCloudDesc) == 48, "UnxCloudDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetClouds(UnxRenderer r, const UnxCloudDesc* clouds);
 
 // C5 terrain material (optional export within ABI 6, INTERFACES v1.74; before UnxSceneCommit): the layers of a material
 // added with UNX_MATERIAL_TERRAIN - 1..8 Standard materials read at layer uv = uv0 x scale + offset, weighted by channel
