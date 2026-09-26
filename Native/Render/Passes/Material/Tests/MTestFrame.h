@@ -140,9 +140,12 @@ public:
     // Installs the clusters into the GPU scene and builds the visible cluster list (all instances x clusters). Instances
     // in 'notRasterised' stay in the list (their vis ids decode, e.g. for coverage fragments) but come after the others
     // and the band-A raster skips them.
-    void install(Device& device, GpuScene& gpuScene, const scene::Scene& s, const std::vector<uint32_t>& notRasterised = {})
+    // 'patch' (optional) edits the cluster records before they are installed (e.g. the builder's triangle-word flags).
+    void install(Device& device, GpuScene& gpuScene, const scene::Scene& s, const std::vector<uint32_t>& notRasterised = {},
+                 const std::function<void(ClusterData&)>& patch = {})
     {
         ClusterData d = chunkClusters(s);
+        if (patch) patch(d);
         const ClusterData::MeshRange* ranges = d.meshes.data();
         visible.clear();
         for (int pass = 0; pass < 2; ++pass)
@@ -216,8 +219,15 @@ class TestFrame
 {
 public:
     // gpuValidation: GPU-based validation (implies the debug layer; out-of-range and state errors reported per access).
-    explicit TestFrame(bool debugLayer = true, bool gpuValidation = false)
-        : device([&] { DeviceOptions o; o.debugLayer = debugLayer || gpuValidation; o.gpuValidation = gpuValidation; return o; }()),
+    // external: a device to build on (the software adapter; no debug layer).
+    explicit TestFrame(bool debugLayer = true, bool gpuValidation = false, ID3D12Device* external = nullptr)
+        : device([&] {
+              DeviceOptions o;
+              o.externalDevice = external;
+              o.debugLayer = !external && (debugLayer || gpuValidation);
+              o.gpuValidation = !external && gpuValidation;
+              return o;
+          }()),
           shaders(device, executableDirectory() / "shaders"),
           quality(QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality")),
           gpuScene(device)
@@ -228,11 +238,11 @@ public:
     }
 
     // Uploads the scene and installs the stand-in visibility's clusters ('notRasterised': FakeVisibility::install).
-    void setScene(const scene::Scene& s, const std::vector<uint32_t>& notRasterised = {})
+    void setScene(const scene::Scene& s, const std::vector<uint32_t>& notRasterised = {}, const std::function<void(ClusterData&)>& patch = {})
     {
         sceneData = s;
         gpuScene.upload(sceneData);
-        vis.install(device, gpuScene, sceneData, notRasterised);
+        vis.install(device, gpuScene, sceneData, notRasterised, patch);
     }
 
     D3D12_GPU_VIRTUAL_ADDRESS frameConstantsFor(const ViewDesc& view)

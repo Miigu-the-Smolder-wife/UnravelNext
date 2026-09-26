@@ -31,6 +31,7 @@
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
+#include "Passes/Material/MaterialCut.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
 #include "Passes/Decal/Decal.hlsli"
 #include "Passes/Material/SurfaceLayers.hlsli"
@@ -90,34 +91,45 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             const GpuMaterial m = loadMaterial(s.material);
             const MTextureSet ts = mLoadTextureSet(P[2].x, s.material);
 
-            float3 baseColor = m.baseColor;
-            if (ts.baseColor != UNX_NONE && (P[3].y & 1) == 0)
+            float3 baseColor, n;
+            float roughness, metallic, variance;
+            if (materialClass(m) == MATERIAL_CUT)
             {
-                Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
-                baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, s.uv, s.duvdx, s.duvdy).rgb;
+                // A11 cut faces: textures through three object-space projections, the edge damage band (MaterialCut.hlsli)
+                const MCutMaterial cm = mCutEvaluate(mCutFrame(visId, P[0].y, s), s, m, ts, P[3].y);
+                baseColor = cm.baseColor, roughness = cm.roughness, metallic = cm.metallic, n = cm.normal;
+                variance = (dot(s.dndx, s.dndx) + dot(s.dndy, s.dndy)) / 12.0 + cm.variance;
             }
-            float roughness = m.roughness, metallic = m.metallic;
-            if (ts.roughMetal != UNX_NONE && (P[3].y & 1) == 0)
+            else
             {
-                Texture2D<float4> t = ResourceDescriptorHeap[ts.roughMetal];
-                const float2 rm = mSampleGrad(t, (ts.flags & M_TEX_ROUGH_METAL) != 0, s.uv, s.duvdx, s.duvdy).xy;
-                roughness *= rm.x;
-                metallic *= rm.y;
-            }
+                baseColor = m.baseColor;
+                if (ts.baseColor != UNX_NONE && (P[3].y & 1) == 0)
+                {
+                    Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
+                    baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, s.uv, s.duvdx, s.duvdy).rgb;
+                }
+                roughness = m.roughness, metallic = m.metallic;
+                if (ts.roughMetal != UNX_NONE && (P[3].y & 1) == 0)
+                {
+                    Texture2D<float4> t = ResourceDescriptorHeap[ts.roughMetal];
+                    const float2 rm = mSampleGrad(t, (ts.flags & M_TEX_ROUGH_METAL) != 0, s.uv, s.duvdx, s.duvdy).xy;
+                    roughness *= rm.x;
+                    metallic *= rm.y;
+                }
 
-            // Shading normal (INTERFACES 8.1: TBN = (tangent, sign cross(n, t), normal) of the interpolants, result
-            // normalised) and the footprint's slope variance trace.
-            float variance = (dot(s.dndx, s.dndx) + dot(s.dndy, s.dndy)) / 12.0;
-            float3 n;
-            if (ts.moments != UNX_NONE && (P[3].y & 2) == 0)
-            {
-                Texture2D<float4> t = ResourceDescriptorHeap[ts.moments];
-                const MSlopeMoments mm = mNormalMoments(t, s.uv, s.duvdx, s.duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
-                const float3 B = s.tangentSign * cross(s.normal, s.tangent);
-                n = normalize(s.tangent * mm.mean.x + B * mm.mean.y + s.normal);
-                variance += mm.variance;
+                // Shading normal (INTERFACES 8.1: TBN = (tangent, sign cross(n, t), normal) of the interpolants, result
+                // normalised) and the footprint's slope variance trace.
+                variance = (dot(s.dndx, s.dndx) + dot(s.dndy, s.dndy)) / 12.0;
+                if (ts.moments != UNX_NONE && (P[3].y & 2) == 0)
+                {
+                    Texture2D<float4> t = ResourceDescriptorHeap[ts.moments];
+                    const MSlopeMoments mm = mNormalMoments(t, s.uv, s.duvdx, s.duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
+                    const float3 B = s.tangentSign * cross(s.normal, s.tangent);
+                    n = normalize(s.tangent * mm.mean.x + B * mm.mean.y + s.normal);
+                    variance += mm.variance;
+                }
+                else n = normalize(s.normal);
             }
-            else n = normalize(s.normal);
             const bool backSide = !s.front && (m.classFlags & MATERIAL_TWO_SIDED) != 0;
             if (backSide) n = -n;
 

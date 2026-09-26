@@ -9,11 +9,14 @@
 //   5. the reference's shading-normal rules: a mapped normal facing away from the viewer is bent to n.v = 1e-4.
 //   unx_test_material_materialtests [--no-debug-layer]
 #include "MTestFrame.h"
+#include "../../../../../Reference/PathTracer/src/CutFace.h"
 
 #include "unx/material/TextureSystem.h"
 #include "unx/scene/MaterialModel.h"
 
 #include <cstdio>
+#include <dxgi1_6.h>
+#include <map>
 #include <random>
 #include <set>
 
@@ -717,21 +720,271 @@ void testFacingAway(TestFrame& tf, Report& report)
     report(away > 20000 && worstAway < 2e-4, "facing away: G-buffer normal = the mapped normal bent to n.v = 1e-4 (octahedral 2 x 16 bits)", worstAway, 2e-4);
     report(facing > 1000 && worstFacing < 2e-4, "facing away: where the mapped normal faces the viewer it is kept", worstFacing, 2e-4);
 }
+
+// 6. A11 cut faces (MaterialCut.hlsli over render C's CutFace.hlsli) against the Cut definition of the CPU reference
+// (Reference/PathTracer/src/CutFace.h): an open 2 m grid of Cut material whose object-space normal is oblique (all three
+// projections weigh in), in a rigidly rotated instance, with a base colour texture, a normal map and an edge damage band
+// along the grid's border (the cluster triangle words' boundary bits, as the cluster builder sets them). Magnified
+// (a texel spans many pixels: the footprint filter is bilinear mip 0, the reference's). Per pixel, from the pixel's own
+// barycentrics: base colour (the three projections' taps x weights, damage applied; pixels within two footprints of the
+// damage threshold left out: the resolve filters the band's edge, the reference steps) and the shading normal (whiteout
+// of the taps' mean slopes in object space, to world through the instance). Also: interior pixels far from the border
+// have no damage, and the band covers pixels next to the border.
+void testCutFace(TestFrame& tf, Report& report)
+{
+    namespace cf = unx::reference::cutface;
+    scene::Scene s;
+    s.name = "cut face test";
+    const uint32_t T = 32;
+    scene::Texture base;  // smooth colour field (sRGB)
+    base.name = "cut base";
+    base.width = base.height = T;
+    for (uint32_t y = 0; y < T; ++y)
+        for (uint32_t x = 0; x < T; ++x)
+        {
+            base.texels.push_back((uint8_t)(128 + 100 * std::sin(0.4 * x)));
+            base.texels.push_back((uint8_t)(128 + 90 * std::cos(0.3 * y)));
+            base.texels.push_back((uint8_t)(128 + 80 * std::sin(0.25 * (x + y))));
+            base.texels.push_back(255);
+        }
+    s.textures.push_back(base);
+    scene::Texture bumps;  // gentle smooth slopes
+    bumps.name = "cut bumps";
+    bumps.width = bumps.height = T;
+    bumps.format = scene::TextureFormat::Rg8Normal;
+    for (uint32_t y = 0; y < T; ++y)
+        for (uint32_t x = 0; x < T; ++x)
+        {
+            bumps.texels.push_back((uint8_t)(128 + 30 * std::sin(0.5 * x + 0.2 * y)));
+            bumps.texels.push_back((uint8_t)(128 + 30 * std::cos(0.35 * y)));
+        }
+    s.textures.push_back(bumps);
+    scene::Material cut;
+    cut.name = "cut";
+    cut.cls = scene::MaterialClass::Cut;
+    cut.baseColor = { 0.9f, 0.8f, 0.7f };
+    cut.roughness = 0.6f;
+    cut.baseColorTexture = 0;
+    cut.normalTexture = 1;
+    cut.cutScale = 0.5f;
+    cut.cutDamageWidth = 0.12f;
+    s.materials.push_back(cut);
+    const uint32_t mesh = addGridPlane(s, 2.0f, 8, 1.0f, 0);
+    // object space: the grid turned so its normal is (1, 2, 3) / |.| (every projection has a weight)
+    const float3 nObj = normalize(float3{ 1, 2, 3 });
+    {
+        const float3 t = normalize(cross(float3{ 0, 0, 1 }, nObj)), b = cross(t, nObj);  // (t, n, b) = the new (x, y, z): a rotation
+        scene::Mesh& m = s.meshes[mesh];
+        for (float3& p : m.positions) p = t * p.x + nObj * p.y + b * p.z;
+        for (float3& n : m.normals) n = nObj;
+        for (float4& tg : m.tangents) tg = { t.x, t.y, t.z, 1 };
+    }
+    scene::Instance inst;
+    inst.mesh = mesh;
+    {
+        // rigid: a rotation taking nObj towards the camera (+z), then 4 m in front of it
+        const float3 a = normalize(cross(nObj, float3{ 0, 0, 1 }));
+        const float angle = std::acos(dot(nObj, float3{ 0, 0, 1 }));
+        const float c = std::cos(angle), sn = std::sin(angle), k = 1 - c;
+        float3x4& m = inst.transform;
+        m.m[0][0] = c + a.x * a.x * k, m.m[0][1] = a.x * a.y * k - a.z * sn, m.m[0][2] = a.x * a.z * k + a.y * sn;
+        m.m[1][0] = a.y * a.x * k + a.z * sn, m.m[1][1] = c + a.y * a.y * k, m.m[1][2] = a.y * a.z * k - a.x * sn;
+        m.m[2][0] = a.z * a.x * k - a.y * sn, m.m[2][1] = a.z * a.y * k + a.x * sn, m.m[2][2] = c + a.z * a.z * k;
+        m.m[0][3] = 0.1f, m.m[1][3] = 0.05f, m.m[2][3] = -2.0f;
+    }
+    s.instances.push_back(inst);
+    s.cameras.push_back(lookAt({ 0.2f, 0.1f, 1.0f }, { 0.1f, 0.05f, -2.0f }, "cut"));
+    // boundary edges (the builder's rule at LOD 0: an edge the submesh uses once), in each cluster triangle's corner order
+    const scene::Mesh& gm = s.meshes[mesh];
+    std::map<std::pair<uint32_t, uint32_t>, uint32_t> uses;
+    for (size_t i = 0; i < gm.indices.size(); i += 3)
+        for (int e = 0; e < 3; ++e)
+        {
+            const uint32_t a = gm.indices[i + (e + 1) % 3], b = gm.indices[i + (e + 2) % 3];
+            ++uses[{ std::min(a, b), std::max(a, b) }];
+        }
+    tf.setScene(s, {}, [&](ClusterData& d) {
+        for (const gpu::Cluster& c : d.clusters)
+        {
+            const uint32_t triangles = (c.counts >> 8) & 0xFF;
+            for (uint32_t t = 0; t < triangles; ++t)
+            {
+                uint32_t& word = d.clusterTriangles[c.triangleOffset + t];
+                uint32_t mv[3];
+                for (int k = 0; k < 3; ++k) mv[k] = d.clusterVertexIndices[c.vertexOffset + ((word >> (8 * k)) & 0xFF)];
+                for (uint32_t i = 0; i < 3; ++i)
+                {
+                    const uint32_t a = mv[(i + 1) % 3], b = mv[(i + 2) % 3];
+                    if (uses[{ std::min(a, b), std::max(a, b) }] == 1) word |= 1u << (24 + i);
+                }
+            }
+        }
+    });
+
+    const uint32_t W = 960, H = 540;
+    std::shared_ptr<std::vector<uint8_t>> vis, gb;
+    ViewDesc viewDesc;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, W, H, 0);
+        viewDesc = v.view;
+        tf.vis.record(fc, v);
+        tracks::materialResolve(fc, v);
+        vis = tf.readback(fc, v.visId);
+        gb = tf.readback(fc, v.gbuffer);
+    });
+
+    // mip 0 of the moments exactly as uploaded (the normal map's LEAN means), and the base colour texels in linear
+    const material::MipChain chain = material::buildMipChain(s, 1);
+    const double S = chain.slopeRange;
+    auto wrap = [&](int i) { return ((i % (int)T) + (int)T) % (int)T; };
+    auto mean0 = [&](int ix, int iy, int k) {
+        uint16_t v;
+        std::memcpy(&v, chain.levels[0].data() + ((size_t)wrap(iy) * T + wrap(ix)) * 8 + 2 * k, 2);
+        return ((double)(float)(v / 65535.0) * 2 - 1) * S;
+    };
+    auto srgbToLinear = [](double c) { return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4); };
+    auto oetf = [](double c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * std::pow(c, 1 / 2.4) - 0.055; };
+    auto bilinear = [&](double u, double v, auto&& texel) {  // texel(ix, iy) -> D3, wrap addressing, texel centres at +0.5
+        const double pu = u * T - 0.5, pv = v * T - 0.5;
+        const int iu = (int)std::floor(pu), iv = (int)std::floor(pv);
+        const double fu = pu - iu, fv = pv - iv;
+        return texel(iu, iv) * ((1 - fu) * (1 - fv)) + texel(iu + 1, iv) * (fu * (1 - fv)) + texel(iu, iv + 1) * ((1 - fu) * fv) + texel(iu + 1, iv + 1) * (fu * fv);
+    };
+    auto baseTexel = [&](int ix, int iy) {
+        const uint8_t* t = &base.texels[((size_t)wrap(iy) * T + wrap(ix)) * 4];
+        return D3{ srgbToLinear(t[0] / 255.0), srgbToLinear(t[1] / 255.0), srgbToLinear(t[2] / 255.0) };
+    };
+    auto slopeTexel = [&](int ix, int iy) { return D3{ mean0(ix, iy, 0), mean0(ix, iy, 1), 0 }; };
+
+    {
+        uint32_t covered = 0;
+        for (uint32_t i = 0; i < W * H; ++i) covered += texelOf<uint32_t>(*vis, W, i % W, i / W) != 0;
+        logf("cut face: %u pixels rasterised, %zu clusters, first word %08x, camera (%g %g %g)\n", covered, tf.vis.clusters.clusters.size(),
+             tf.vis.clusters.clusterTriangles.empty() ? 0u : tf.vis.clusters.clusterTriangles[0], viewDesc.position.x, viewDesc.position.y, viewDesc.position.z);
+    }
+    double worstBase = 0, worstNormal = 0;
+    uint32_t judged = 0, damaged = 0, bandSkipped = 0, interiorDamaged = 0, interior = 0;
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+        {
+            const uint32_t id = texelOf<uint32_t>(*vis, W, x, y);
+            if (id == 0) continue;
+            const gpu::VisibleCluster vc = tf.vis.visible.at((id - 1) >> 7);
+            const gpu::Cluster& c = tf.vis.clusters.clusters.at(vc.cluster);
+            const uint32_t word = tf.vis.clusters.clusterTriangles.at(c.triangleOffset + ((id - 1) & 127));
+            uint32_t mv[3];
+            D3 Pw[3];
+            float3 Po[3], No[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                mv[k] = tf.vis.clusters.clusterVertexIndices.at(c.vertexOffset + ((word >> (8 * k)) & 0xFF));
+                Po[k] = gm.positions[mv[k]];
+                const D3 q = quantised(gm.normals[mv[k]]);
+                No[k] = float3{ (float)q.x, (float)q.y, (float)q.z };
+                Pw[k] = d3(inst.transform.transformPoint(Po[k]));
+            }
+            D3 D, Dx, Dy;
+            pixelRay(viewDesc, x + 0.5, y + 0.5, D, Dx, Dy);
+            const D3 C = d3(viewDesc.position);
+            const D3 r0 = Pw[0] - C, e1 = Pw[1] - Pw[0], e2 = Pw[2] - Pw[0], n = cross(e1, e2);
+            const double nD = dot(n, D), t = dot(n, r0) / nD, inv = 1 / dot(n, n);
+            const D3 r = D * t - r0, rx = (Dx - D * (dot(n, Dx) / nD)) * t, ry = (Dy - D * (dot(n, Dy) / nD)) * t;
+            const double b1 = dot(n, cross(r, e2)) * inv, b2 = dot(n, cross(e1, r)) * inv;
+            const double b1x = dot(n, cross(rx, e2)) * inv, b2x = dot(n, cross(e1, rx)) * inv, b1y = dot(n, cross(ry, e2)) * inv, b2y = dot(n, cross(e1, ry)) * inv;
+            const double b[3] = { 1 - b1 - b2, b1, b2 }, bx[3] = { -b1x - b2x, b1x, b2x }, by[3] = { -b1y - b2y, b1y, b2y };
+            float3 p{}, dpdx{}, dpdy{}, ni{};
+            for (int k = 0; k < 3; ++k)
+            {
+                p = p + Po[k] * (float)b[k];
+                dpdx = dpdx + Po[k] * (float)bx[k];
+                dpdy = dpdy + Po[k] * (float)by[k];
+                ni = ni + No[k] * (float)b[k];
+            }
+            ni = normalize(ni);
+            const float3 ng = normalize(cross(Po[1] - Po[0], Po[2] - Po[0]));
+            D3 baseSum{}, normalSum{};
+            for (uint32_t k = 0; k < 3; ++k)
+            {
+                const cf::Projection pr = cf::projection(k, p, ng, cut.cutScale);
+                if (!(pr.weight > 0)) continue;
+                baseSum = baseSum + bilinear(pr.uv.x, pr.uv.y, baseTexel) * pr.weight;
+                const D3 slope = bilinear(pr.uv.x, pr.uv.y, slopeTexel);
+                const float3 tn = normalize(float3{ (float)slope.x, (float)slope.y, 1.0f });
+                normalSum = normalSum + d3(cf::whiteout(tn, pr, ni)) * pr.weight;
+            }
+            // damage: the reference's threshold and the pixel's object footprint
+            const uint32_t edges = (word >> 24) & 7;
+            const float distance = cf::edgeDistance(float3{ (float)b[0], (float)b[1], (float)b[2] }, Po[0], Po[1], Po[2], edges);
+            const float3 q = p * (1.0f / cut.cutDamageWidth);
+            const float noise = 0.5f * cf::noise(q) + 0.3f * cf::noise(q * 2.03f + float3{ 17.1f, 17.1f, 17.1f }) + 0.2f * cf::noise(q * 4.01f + float3{ 41.7f, 41.7f, 41.7f });
+            const double threshold = cut.cutDamageWidth * (0.35 + 0.65 * noise), footprint = std::max(length(dpdx), length(dpdy));
+            const bool bandEdge = std::isfinite(distance) && std::abs(threshold - distance) < 2 * footprint;
+            const float dmg = cf::damage(p, distance, cut.cutDamageWidth);
+            if (distance > 0.3f)
+            {
+                ++interior;
+                interiorDamaged += dmg > 0;
+            }
+            if (bandEdge)
+            {
+                ++bandSkipped;
+                continue;
+            }
+            damaged += dmg > 0;
+            const D3 expectedBase = D3{ baseSum.x * cut.baseColor.x, baseSum.y * cut.baseColor.y, baseSum.z * cut.baseColor.z } * (1 - 0.45 * dmg);
+            const uint2 packed = texelOf<uint2>(*gb, W, x, y);
+            const double got[3] = { srgbToLinear((packed.y & 0xFF) / 255.0), srgbToLinear(((packed.y >> 8) & 0xFF) / 255.0),
+                                    srgbToLinear(((packed.y >> 16) & 0xFF) / 255.0) };
+            const double want[3] = { expectedBase.x, expectedBase.y, expectedBase.z };
+            for (int k = 0; k < 3; ++k)  // in sRGB codes: the G-buffer's 8-bit quantisation
+                worstBase = std::max(worstBase, std::abs(oetf(got[k]) - oetf(std::min(want[k], 1.0))) * 255);
+            const D3 nw = norm(d3(inst.transform.transformVector(normalize(float3{ (float)normalSum.x, (float)normalSum.y, (float)normalSum.z }))));
+            worstNormal = std::max(worstNormal, len(octDecode(packed.x) - nw));
+            ++judged;
+        }
+    logf("cut face: %u pixels judged (%u in the damage band), %u at the band's edge left out; interior (> 0.3 m from the border) %u, damaged %u\n", judged,
+         damaged, bandSkipped, interior, interiorDamaged);
+    // (the G-buffer's rounding, half a code, and the texture unit's fixed-point bilinear weights, 8 subtexel bits)
+    report(judged > 50000 && worstBase <= 2.0, "cut face: base colour = three projections x weights, damage applied (sRGB codes)", worstBase, 2.0);
+    report(worstNormal < 5e-3, "cut face: shading normal = whiteout of the taps, object -> world (octahedral 16 bits)", worstNormal, 5e-3);
+    report(damaged > 1000 && interiorDamaged == 0, "cut face: the damage band lies along the border only", interiorDamaged, 0);
+}
 } // namespace
 
 int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true;
+        bool debugLayer = true, warp = false, cutOnly = false;
         for (int i = 1; i < argc; ++i)
+        {
             if (std::string(argv[i]) == "--no-debug-layer") debugLayer = false;
+            if (std::string(argv[i]) == "--warp") warp = true;
+            if (std::string(argv[i]) == "--cut") cutOnly = true;
+        }
+        ComPtr<ID3D12Device> warpDevice;
+        if (warp)  // --warp: the software adapter (no debug layer)
+        {
+            ComPtr<IDXGIFactory6> factory;
+            check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "DXGI factory");
+            ComPtr<IDXGIAdapter> adapter;
+            check(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)), "WARP adapter");
+            if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_2, IID_PPV_ARGS(&warpDevice))))
+                check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(&warpDevice)), "WARP device");
+        }
         Report report;
+        TestFrame tf(debugLayer, false, warpDevice.Get());
+        if (cutOnly)  // --cut: test 6 alone
+        {
+            testCutFace(tf, report);
+            logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
+            return report.failures ? 1 : 0;
+        }
         testMipChains(report);
-        TestFrame tf(debugLayer);
         testResolve(tf, report);
         testLean(tf, report);
         testFacingAway(tf, report);
+        testCutFace(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }
