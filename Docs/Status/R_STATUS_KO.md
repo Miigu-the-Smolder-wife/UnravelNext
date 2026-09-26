@@ -1,18 +1,12 @@
-# 렌더 B 재개 지점 (2026-09-27, 문맥 비우기 전; 모두 커밋됨)
+# 렌더 B 재개 지점 (2026-09-27 오후; 모두 커밋됨)
 
-- **구름 B5**(S, 기본 꺼짐): `Passes/Atmosphere/Cloud*.{h,cpp,hlsl,hlsli}`, `Tests/Cloud{Model,,MsFit}Tests.cpp`, S_STATUS 9, FEATURES_GAME 13 개정 1.
-  ① 격자 다중 산란: 카메라 중심 구름층 격자(128×24×128), 유사 관계 σ_s(1−g)와 26방향 스윕. CPU 원형을 `referencePathTraced`와 비교한다(목표 평균 ≤ 10 %).
-  옥타브 근사는 기각했다(39 %/72 %). ⑤ 비용: 지금 흐린 1/4 해상도 텍셀당 0.11~0.19 µs → 4K 30~95 ms. 타일별 해상도, 태양 적분 구조가 과제이고, 성장 걸음은 11 %라 기각했다.
-  ③ 구름 뒤 표면은 S 패스로 한다(M 인라인 금지, DXIL 한도).
-- **발광 입자 광원 A3**: 계약은 S_STATUS 10. A의 core(광원 버퍼 꼬리 F_max = 빛 행 수, fxLightCount) 뒤에
-  S FroxelLists 루프 상한 +F, R rtLocalLightSample에 FX 누적 분포(log2 F). N + F_max ≤ 65,535.
-- **GI 타일판**: `Passes/GI/GiCacheTile.hlsli`(비트 동일, 게이트 `--lookup-stats`에 대조 있음). M 커널 안(LDS 5 KB) 대 따로 패스를
-  A/B로 재고 A와 맞춘다. 짝 모서리 재구성(e994280)으로 M 셰이딩 −1.74 ms를 실측했다.
-- **물·유리 광선 서비스**: FrameServices::traceRefractions → ReflectionSystem::recordRefraction, `RefractionTrace.hlsl`/`RefractionArgs.hlsl`,
-  RayScene::recordStreams(유체 BLAS). 매질 0 = 물, 1 = 속찬 유리, 0xFF = 반사. 출구는 (1−F)·n²이고 간접 디스패치다.
-  W 연결 완료(4K 69만 작업 2.22 ms). A 유리 연결 확인 대기. W 해석 대조는 9/30 뒤다.
-- **그다음**: B4(매질 고도 매핑, 태양 띠 표, J_ms ≤ 33 ms·다프레임 분할) → B6 나머지 → B11. A14 뷰별 S는 C의 단계 분할 뒤다.
-- 규칙: 공유 헤더는 전 커널 빌드와 DXIL 확인 뒤 저장한다. 새 GPU 코드는 작은 하드웨어 실행 뒤 커밋한다. 경로 지정 add/commit만 쓴다.
+- **끝남(이번)**: 구름 근사 다중 산란+하늘빛(8e1e3cf, 근사·기본 꺼짐), GI 타일판 기각(ccc1275), r.gi.screen(c1628d9; A 측정에서 이득 0이라 M은 읽지 않음),
+  A3 FX 광원 S·R(c1bd9cd, 32개 묶음 선택), froxel 비용 분해(aa68b56).
+- **반드시 할 일(주간 초기화 뒤, 사용자 결정)**: 구름 ① 격자 다중 산란 정확 풀이(CPU 원형 → 경로추적 대비 → GPU), ⑤ 비용(4K 30~95 ms 외삽), ③ 구름 뒤 표면(S 패스).
+- **다음 최적화**: S_STATUS 9b — fp_1000 국소광 공기 그림자 3.47 ms. 항목당 건너는 텍셀 수를 먼저 재고, 그다음 텍셀 경계 DDA로 정확히 적분한다.
+  GI 조회(4K 2.4 ms, 지도 평가 6.9 × 16텍셀)의 정보량 줄이기, C가 넘긴 평면 뷰 froxel 마스크 타일만 적분(0.67 ms)도 남아 있다.
+- **열린 결함**: FroxelTests 2 최대 노드가 앞 프레임 수에 따라 달라진다(S_STATUS 10). FX 광원을 쓰는 쪽(FX 모듈)이 들어오면 발광 장면에서 비용을 잰다.
+- 그 밖: B4(매질 고도 매핑, J_ms ≤ 33 ms), B6 나머지, B11, A14 뷰별 S — 이전 순서 그대로.
 
 # R 트랙 상태 (광선·GI·반사) — 2026-09-25
 
