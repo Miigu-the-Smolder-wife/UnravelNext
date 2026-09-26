@@ -83,6 +83,7 @@ int main(int argc, char** argv)
         std::string timeArg, placeArg;
         bool autoExposure = false;
         uint64_t shiftAt = UINT64_MAX;  // --origin-shift-at F --origin-shift x,y,z: a C9 rebase at frame F (repros)
+        float cloudCoverage = 0;         // --clouds C: B5 cloud layer (FrameContext::clouds) with coverage C, other fields default
         float3 shiftBy{};  // --time YYYY-MM-DDTHH:MM (UT), --place lat,lon: sun, moon, stars (B4)
         for (int i = 1; i < argc; ++i)
         {
@@ -108,6 +109,7 @@ int main(int argc, char** argv)
             else if (a == "--place") placeArg = next();
             else if (a == "--auto-exposure") autoExposure = true;
             else if (a == "--origin-shift-at") shiftAt = std::stoull(next());
+            else if (a == "--clouds") cloudCoverage = std::stof(next());
             else if (a == "--origin-shift")
             {
                 const std::string v = next();
@@ -236,6 +238,7 @@ int main(int argc, char** argv)
                 const float3 offset = gpuScene.originOffset();
                 cam.position = cam.position - offset;
                 fc.mainView = ViewDesc::fromCamera(cam, rr.width, rr.height, prev);
+                fc.clouds.coverage = cloudCoverage;
                 if (gustPeriodS > 0)
                 {
                     const bool gust = ((uint64_t)(fc.time / gustPeriodS) & 1) != 0;

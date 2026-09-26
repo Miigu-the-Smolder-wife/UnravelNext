@@ -22,12 +22,14 @@
 // P[4].x planar mask SRV (R8_UINT per pixel), P[4].y planar tile mask SRV (R8_UINT per 8 x 8 tile = this group)
 // (planar reflection views, v1.22; 0xFFFFFFFF: every pixel): tiles without mirror pixels are skipped whole (head 0),
 // pixels that are not mirror pixels are left as sky (M shades neither). P[4].z transmittance layer SRV (raw,
-// FrameResources::vsmLayers; 0xFFFFFFFF: none): slot 0 = opaque visibility x the thin casters' T (v1.26).
+// FrameResources::vsmLayers; 0xFFFFFFFF: none): slot 0 = opaque visibility x the thin casters' T (v1.26). P[4].w the
+// transmittance LUT (0xFFFFFFFF: none): slot 0 also x the cloud layer's sun transmittance (B5, CloudShadowCommon.hlsli).
 // Frame constants of the view. Mixed pixels get their local slots here and their sun slot in pass 2.
 #include "Frame.hlsli"
 #include "Scene.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
+#include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 
 // One pixel's classification: sky, settled (packed visibility), or mixed (goes to pass 2).
 void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out uint overflow, out uint facing)
@@ -114,6 +116,8 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
         ts.layers = P[4].z;
         sunT = shadowSunTransmittanceAt(ts, world, footprint, max(reach, footprint));
     }
+    // B5 cloud shadow: the sun through the cloud layer at the receiver (P[4].w = transmittance LUT, UNX_NONE: none).
+    if (cls != VSM_REGION_UMBRA && P[4].w != 0xFFFFFFFFu) sunT *= cloudSunTransmittanceFromLut(P[4].w, world);
     packed = (cls == VSM_REGION_UMBRA ? 0u : (uint)round(saturate(sunT) * 255.0)) | local;
 }
 

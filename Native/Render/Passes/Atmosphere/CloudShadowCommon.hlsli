@@ -83,6 +83,19 @@ float cloudSunTau(CloudRecord c, float3 x)
     }
     return tau;
 }
+// The sun's transmittance through the cloud layer at a surface point, for S's shadow visibility (B5 cloud shadows): the
+// record named by the atmosphere record in the transmittance LUT (AtmosphereParams.clouds.x, SRV + 1), its sun map's
+// optical depth at the point (1 without clouds or outside the map).
+float cloudSunTransmittanceFromLut(uint transmittanceLut, float3 world)
+{
+    Texture2D<float4> p = ResourceDescriptorHeap[transmittanceLut];
+    uint pw, ph;
+    p.GetDimensions(pw, ph);
+    const uint record = asuint(p.Load(int3(10, ph - 1, 0)).z);
+    if (record == 0) return 1;
+    return exp(-cloudSunTau(cloudLoad(record - 1), world));
+}
+
 // The sun's optical depth at a sample in the layer (single scattering): integrated along the sun ray in
 // CLOUD_SUN_STEP midpoint steps until it leaves the layer or tau > CLOUD_SUN_TAU_MAX (T < 1.2e-4: the sample's
 // contribution is below every error considered); past CLOUD_SUN_MAX_STEPS (the structural bound: long paths of a low

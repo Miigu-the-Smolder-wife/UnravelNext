@@ -1069,6 +1069,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     const D3D12_GPU_VIRTUAL_ADDRESS constants = view.frameConstants;
     const char* variant = s.debugPaths ? ".PATHS1" : ".PATHS0";
     ID3D12PipelineState* pc = fc.shaders.compute("Passes/Shadow/ShadowListClear");
+    const TextureRef tlut = fc.resources.transmittanceLut;  // B5 cloud shadows (the atmosphere record names the cloud record)
     ID3D12PipelineState* p1 = fc.shaders.compute(std::string("Passes/Shadow/ShadowVisibility") + variant);
     ID3D12PipelineState* pa = fc.shaders.compute("Passes/Shadow/ShadowListArgs");
     ID3D12PipelineState* p2 = fc.shaders.compute(std::string("Passes/Shadow/ShadowPenumbra") + variant);
@@ -1114,6 +1115,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   if (mirrorMask.valid()) b.use(mirrorMask, Use::SrvCompute);
                   if (mirrorTiles.valid()) b.use(mirrorTiles, Use::SrvCompute);
                   b.use(layers, Use::SrvCompute);
+                  if (tlut.valid()) b.use(tlut, Use::SrvCompute);
                   if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
               },
               [=](PassContext& ctx) {
@@ -1122,7 +1124,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                                            localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv,
                                            overflowList ? ctx.uav(heads) : 0xFFFFFFFFu,
                                            mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu, mirrorTiles.valid() ? ctx.srv(mirrorTiles) : 0xFFFFFFFFu,
-                                           ctx.srv(layers), 0 };
+                                           ctx.srv(layers), tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu };
                   ctx.cmd->SetPipelineState(p1);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 20);
@@ -1152,11 +1154,13 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   b.use(statsBuf, Use::UavCompute);
                   b.use(out, Use::UavCompute);
                   b.use(layers, Use::SrvCompute);
+                  if (tlut.valid()) b.use(tlut, Use::SrvCompute);
                   if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
               },
               [=](PassContext& ctx) {
                   const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, off, ctx.srv(table), ctx.srv(atlas), ctx.srv(bound),
-                                           ctx.srv(list), ctx.srv(blocks), ctx.uav(statsBuf), 0, rays, steps, ctx.srv(layers), 0 };
+                                           ctx.srv(list), ctx.srv(blocks), ctx.uav(statsBuf), 0, rays, steps, ctx.srv(layers),
+                                           tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu };
                   ctx.cmd->SetPipelineState(p2);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 16);

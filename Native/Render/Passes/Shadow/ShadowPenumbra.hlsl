@@ -6,11 +6,13 @@
 // P[0].x depth SRV, P[0].y G-buffer SRV, P[0].z output UAV (R32_UINT), P[0].w VSM constants CBV
 // P[1].x unused, P[1].y page table SRV (raw), P[1].z pool SRV, P[1].w search bound SRV (raw)
 // P[2].x penumbra list SRV (raw), P[2].y blocks SRV (raw), P[2].z statistics UAV (raw), P[2].w -
+// P[3].w the transmittance LUT (0xFFFFFFFF: none): the sun slot also x the cloud layer's sun transmittance (B5).
 // P[3].x blocker search taps, P[3].y penumbra filter taps, P[3].z transmittance layer SRV (raw; 0xFFFFFFFF: none):
 // the result is multiplied by the thin casters' T over the penumbra's reach (v1.26). Frame constants of the view.
 #include "Frame.hlsli"
 #include "Passes/Shadow/ShadowReceiver.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
+#include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 
 [numthreads(64, 1, 1)]
 void main(uint i : SV_DispatchThreadID)
@@ -51,6 +53,7 @@ void main(uint i : SV_DispatchThreadID)
             ts.layers = P[3].z;
             sun *= shadowSunTransmittanceAt(ts, world, footprint, max(reach, footprint));
         }
+        if (P[3].w != 0xFFFFFFFFu && sun > 0) sun *= cloudSunTransmittanceFromLut(P[3].w, world);  // B5 cloud shadow
 #if PATHS
         output[px] = path;
 #else
