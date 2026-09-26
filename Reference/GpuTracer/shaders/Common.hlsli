@@ -20,18 +20,48 @@ float3 rtCameraRay(RtCamera c, uint w, uint h, float px, float py)
     return normalize(c.forward + c.right * (nx * c.tanHalfFov * c.aspect) + c.up * (ny * c.tanHalfFov));
 }
 
+// Uniform point of the unit disk (Shirley-Chiu concentric map: area preserving, continuous).
+float2 rtConcentricDisk(float u1, float u2)
+{
+    const float a = 2 * u1 - 1, b = 2 * u2 - 1;
+    if (a == 0 && b == 0) return float2(0, 0);
+    float r, phi;
+    if (abs(a) > abs(b))
+    {
+        r = a;
+        phi = (kRtPi / 4) * (b / a);
+    }
+    else
+    {
+        r = b;
+        phi = (kRtPi / 2) - (kRtPi / 4) * (a / b);
+    }
+    return r * float2(cos(phi), sin(phi));
+}
+// Thin lens (lensRadius > 0): the lens point o = position + lensRadius x (disk point) in the (right, up) plane, the ray
+// from o through the point where the pixel's pinhole ray meets the plane of focus (focusDistance along forward). The
+// pixel's footprint on that plane is the pinhole's, so at a fixed o the pixel measure is the pinhole's at o: the light
+// tracer (Caustic.hlsl) connects to a uniform lens point with the pinhole weight evaluated from it.
+void rtLensRay(RtCamera c, float3 pinholeDir, float u1, float u2, out float3 origin, out float3 dir)
+{
+    const float2 d = rtConcentricDisk(u1, u2) * c.lensRadius;
+    origin = c.position + c.right * d.x + c.up * d.y;
+    const float3 focal = c.position + pinholeDir * (c.focusDistance / dot(pinholeDir, c.forward));
+    dir = normalize(focal - origin);
+}
+
 float rtOrderWeight(RtConstants C, uint kVol, uint kSurf)
 {
     return kVol >= C.orderMin && kVol <= C.orderMax && kSurf >= C.surfMin && kSurf <= C.surfMax ? 1.0f : 0.0f;
 }
 
 // Sun radiance arriving at p from direction w (in the cone): planet, atmosphere and scene visibility.
-float3 rtSunArriving(RtConstants C, float3 p, float3 w, float3 offsetNormal, bool useOffset)
+float3 rtSunArriving(RtConstants C, float3 p, float3 w, float3 offsetNormal, float offsetExtent, bool useOffset)
 {
     if (rtAtmGroundDistance(C.atm, p, w) > 0) return float3(0, 0, 0);
     const float3 tau = rtAtmDepthToTop(C.atm, p, w);
     if (!rtFinite3(tau)) return float3(0, 0, 0);
-    const float3 o = useOffset ? rtOffsetRayOrigin(p, offsetNormal) : p;
+    const float3 o = useOffset ? rtOffsetRayOrigin(p, offsetNormal, offsetExtent) : p;
     if (rtOccluded(o, w, 0.0f, kRtFarT)) return float3(0, 0, 0);
     return C.sun.radiance * rtExpNeg3(tau);
 }
@@ -56,11 +86,11 @@ struct RtQueries
     uint n;
 };
 
-void rtQueueSun(inout RtQueries qs, RtConstants C, float3 p, float3 w, float3 offsetNormal, bool useOffset, float3 weight)
+void rtQueueSun(inout RtQueries qs, RtConstants C, float3 p, float3 w, float3 offsetNormal, float offsetExtent, bool useOffset, float3 weight)
 {
     RtQuery q;
     q.p = p;
-    q.o = useOffset ? rtOffsetRayOrigin(p, offsetNormal) : p;
+    q.o = useOffset ? rtOffsetRayOrigin(p, offsetNormal, offsetExtent) : p;
     q.dir = w;
     q.tfar = kRtFarT;
     q.dist = 0;
@@ -69,11 +99,11 @@ void rtQueueSun(inout RtQueries qs, RtConstants C, float3 p, float3 w, float3 of
     qs.q[qs.n] = q;
     qs.n += 1;
 }
-void rtQueueLight(inout RtQueries qs, RtLight l, float3 p, float3 offsetNormal, bool useOffset, RtLightSample ls, float3 weight)
+void rtQueueLight(inout RtQueries qs, RtLight l, float3 p, float3 offsetNormal, float offsetExtent, bool useOffset, RtLightSample ls, float3 weight)
 {
     RtQuery q;
     q.p = p;
-    q.o = useOffset ? rtOffsetRayOrigin(p, offsetNormal) : p;
+    q.o = useOffset ? rtOffsetRayOrigin(p, offsetNormal, offsetExtent) : p;
     q.dir = ls.wi;
     q.tfar = ls.distance * (1 - 1e-4f);
     q.dist = ls.distance;
@@ -116,7 +146,7 @@ void rtMediumNee(RtConstants C, float3 y, RtAtmCoefficients c, float3 d, inout R
     const float3 ws = rtSampleSun(C.sun, u1, u2);
     const float cs = dot(ws, d);
     const float3 phaseS = c.scatteringRayleigh * rtPhaseRayleigh(cs) + c.scatteringMie * rtPhaseMie(C.atm, cs);
-    if (!rtIsZero3(phaseS)) rtQueueSun(qs, C, y, ws, float3(0, 0, 0), false, scale * phaseS * C.sun.solidAngle);
+    if (!rtIsZero3(phaseS)) rtQueueSun(qs, C, y, ws, float3(0, 0, 0), 0.0f, false, scale * phaseS * C.sun.solidAngle);
     const float uSel = rtGet1D(smp);
     rtGet2D(smp, u1, u2);
     if (C.grid.count > 0)
@@ -133,7 +163,7 @@ void rtMediumNee(RtConstants C, float3 y, RtAtmCoefficients c, float3 d, inout R
             {
                 const float cl = dot(ls.wi, d);
                 const float3 phaseL = c.scatteringRayleigh * rtPhaseRayleigh(cl) + c.scatteringMie * rtPhaseMie(C.atm, cl);
-                rtQueueLight(qs, l, y, float3(0, 0, 0), false, ls, scale * phaseL * (1.0f / (pSel * ls.pdf)));
+                rtQueueLight(qs, l, y, float3(0, 0, 0), 0.0f, false, ls, scale * phaseL * (1.0f / (pSel * ls.pdf)));
             }
         }
     }
@@ -362,7 +392,7 @@ float3 rtRadiance(RtConstants C, float3 origin, float3 dir, float tnear, inout R
             {
                 const float3 side = dot(s.ng, ws) >= 0 ? s.ng : -s.ng;
                 const float pl = 1.0f / C.sun.solidAngle;
-                rtQueueSun(qs, C, s.p, ws, side, true,
+                rtQueueSun(qs, C, s.p, ws, side, s.extent, true,
                            beta * f * (rtBsdfCosine(bsdf, ws) * rtPowerHeuristic(pl, rtBsdfPdf(bsdf, ws)) * rtOrderWeight(C, nVol, surfVerts) / pl));
             }
         }
@@ -388,7 +418,7 @@ float3 rtRadiance(RtConstants C, float3 origin, float3 dir, float tnear, inout R
                         const float pl = pSel * ls.pdf;
                         const bool mis = !ls.delta && l.castShadow != 0;
                         const float w = mis ? rtPowerHeuristic(pl, rtBsdfPdf(bsdf, ls.wi)) : 1.0f;
-                        rtQueueLight(qs, l, s.p, side, true, ls, beta * f * (rtBsdfCosine(bsdf, ls.wi) * w * rtOrderWeight(C, nVol, surfVerts) / pl));
+                        rtQueueLight(qs, l, s.p, side, s.extent, true, ls, beta * f * (rtBsdfCosine(bsdf, ls.wi) * w * rtOrderWeight(C, nVol, surfVerts) / pl));
                     }
                 }
             }
@@ -410,7 +440,7 @@ float3 rtRadiance(RtConstants C, float3 origin, float3 dir, float tnear, inout R
         prevCell = cell;
         prevTotal = total;
         prev = kRtPrevSurface;
-        o = rtOffsetRayOrigin(s.p, dot(s.ng, wi) >= 0 ? s.ng : -s.ng);
+        o = rtOffsetRayOrigin(s.p, dot(s.ng, wi) >= 0 ? s.ng : -s.ng, s.extent);
         d = wi;
         tmin = 0;
         if (bounce + 1 >= C.rrStart)

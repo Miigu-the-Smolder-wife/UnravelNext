@@ -30,12 +30,26 @@ struct GpuRenderInfo
     uint32_t errors = 0;              // kRtError* bits (non-zero: the render failed)
 };
 
+// Shutter time integral (photo and cinematic mode, FEATURES_GAME 17; README 6). The scene (instance transforms,
+// skeleton poses) and the camera given to start() are the state at shutter open (scene time `open`: wind); this gives the
+// state at close. Each pixel then integrates over the shutter: every epoch renders one half at its own time sample
+// t = open + (close - open) u (u stratified per half), with the game's tick interpolation rule - positions and scales
+// linear, rotations slerp - for the instances, the skeletons' joints (model space) and the camera.
+struct ShutterMotion
+{
+    float open = 0, close = 0;                   // scene time (s)
+    float3 cameraPosition, cameraForward, cameraUp;  // at close (used when close > open)
+    std::vector<float3x4> instances;             // per scene instance, object -> world at close; empty: none moves
+    std::vector<std::vector<float3x4>> skeletons;  // per skeleton, jointToModel at close; empty: poses fixed
+};
+
 class GpuPathTracer
 {
 public:
     static constexpr double kTargetDispatchMs = 25.0;
 
-    // repoRoot: for .gpulock (slices) and the kernels next to the executable (bin/shaders/Reference).
+    // repoRoot: for .gpulock (slices) and the kernels next to the executable (bin/shaders/Reference). An empty root
+    // (photo mode inside a game) runs without the measurement-lock protocol.
     GpuPathTracer(const scene::Scene& scene, std::filesystem::path repoRoot, std::string what);
     ~GpuPathTracer();
     GpuPathTracer(const GpuPathTracer&) = delete;
@@ -45,6 +59,22 @@ public:
     // Same settings and output as PathTracer::render (checkpoints use their own file format).
     RenderOutput render(const ResolvedCamera& camera, const RenderSettings& settings, const Progress& progress = {});
     const GpuRenderInfo& info() const;
+
+    // Progressive rendering (photo and cinematic mode, FEATURES_GAME 17): render() is start, passes until
+    // settings.samplesPerPixel, then the output; the caller drives the same steps. Samples are those of render()
+    // whatever the pass sizes (each sample index has its own sampler state), so stopping at n samples gives the image
+    // render() gives for n, up to float rounding (a pass sums its samples in float before the double accumulation).
+    // settings.samplesPerPixel is the target (the accumulation stops there).
+    void start(const ResolvedCamera& camera, const RenderSettings& settings);
+    // Before start() or render(): the shutter's motion (a default ShutterMotion: none - the static estimator, unchanged).
+    void setMotion(const ShutterMotion& motion);
+    // One pass: at most maxHalfSamples samples per pixel and half (the pass is also sized to about kTargetDispatchMs
+    // per dispatch). Returns the samples per pixel done, both halves together.
+    uint32_t pass(uint32_t maxHalfSamples = UINT32_MAX);
+    uint32_t samplesDone() const;
+    // The accumulation so far: image = mean of both halves (radiance x exposure), halvesRelMse between the halves.
+    // The image's own relMSE against the converged image is about halvesRelMse / 4 (two independent halves).
+    RenderOutput current();
 
     struct Impl;
 

@@ -43,6 +43,7 @@ private:
     std::string m_track, m_what;
     void* m_mutex = nullptr;
     bool m_held = false;
+    bool m_inherited = false;  // a parent process (GpuLock.ps1 wrapper) holds the lock for our whole run
     uint32_t m_slices = 0, m_totalEstimate = 0;
     double m_waited = 0, m_longest = 0;
     std::chrono::steady_clock::time_point m_start;

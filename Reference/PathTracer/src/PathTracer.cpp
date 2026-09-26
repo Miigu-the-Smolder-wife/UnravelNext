@@ -881,6 +881,7 @@ RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings&
     if (st.width == 0 || st.height == 0) fail("reference: empty resolution");
     if (st.samplesPerPixel < 2 || (st.samplesPerPixel & 1)) fail("reference: samples per pixel must be even (two halves), got %u", st.samplesPerPixel);
     if (st.russianRouletteStart == 0) fail("reference: russian roulette start bounce must be >= 1");
+    if (cam.lensAperture != 0) fail("reference: the CPU estimator is a pinhole camera (the thin lens is the GPU tracer's photo mode)");
     im.build(cam.time);
     im.buildCaustics();
     im.caustics = st.sunCaustics && !im.emitTris.empty() && im.sunSolidAngle > 0 && !im.sunRadiance.isZero();

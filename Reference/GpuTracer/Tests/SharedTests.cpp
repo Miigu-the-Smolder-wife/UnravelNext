@@ -137,6 +137,7 @@ void testMaterial()
         gs.bsdf = { (uint32_t)s.bsdf.cls, S(s.bsdf.baseColor), s.bsdf.roughness, s.bsdf.metallic, s.bsdf.specular, s.bsdf.transmission };
         gs.emission = {};
         gs.material = 0;
+        gs.extent = 0;
         const sh::RtBsdf gpu = sh::rtBsdfInit(gs, S(wo), false);
         // Sampled direction (same uniforms) and its value / pdf.
         const float ul = r.u(), u1 = r.u(), u2 = r.u();

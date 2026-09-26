@@ -48,7 +48,7 @@ void rtTraceCaustic(RtConstants C, uint half_, inout RtPcg32 rng)
     if (!s.frontFacing || !rtSmooth(s)) return;
     const float nsl = dot(s.ns, ws);
     if (dot(s.ng, ws) <= 0 || nsl <= 0) return;
-    const float3 Ls = rtSunArriving(C, s.p, ws, s.ng, true);
+    const float3 Ls = rtSunArriving(C, s.p, ws, s.ng, s.extent, true);
     if (rtIsZero3(Ls)) return;
     float3 beta = Ls * (float)(emitArea * (double)C.sun.solidAngle * (double)nsl);
     float3 l = ws;
@@ -67,7 +67,7 @@ void rtTraceCaustic(RtConstants C, uint half_, inout RtPcg32 rng)
         beta *= f * (abs(dot(l, s.ns)) / abs(dot(l, s.ng)) * gv / pdfv);
         // Next vertex (scene surface or planet ground); transmittance along the segment (no medium event here: that
         // path class belongs to the camera paths).
-        const float3 o = rtOffsetRayOrigin(s.p, s.ng);
+        const float3 o = rtOffsetRayOrigin(s.p, s.ng, s.extent);
         RtHit hn;
         RtSurface x;
         bool lambert = false;
@@ -94,14 +94,26 @@ void rtTraceCaustic(RtConstants C, uint half_, inout RtPcg32 rng)
             s = x;
             continue;
         }
-        // First rough vertex x: connect to the pinhole camera.
-        const float3 toCam = C.camera.position - x.p;
+        // First rough vertex x: connect to the pinhole camera, or to a uniform point o of the thin lens (the pixel
+        // measure at a fixed lens point is the pinhole's at o; the pixel is where the ray o -> x meets the plane of
+        // focus: u = (d.right) / (d.forward) + o_right / focus).
+        float3 camO = C.camera.position;
+        float2 lens = float2(0, 0);
+        if (C.camera.lensRadius > 0)
+        {
+            const float u1 = rtPcgUniform(rng), u2 = rtPcgUniform(rng);
+            lens = rtConcentricDisk(u1, u2) * C.camera.lensRadius;
+            camO += C.camera.right * lens.x + C.camera.up * lens.y;
+        }
+        const float3 toCam = camO - x.p;
         const float d2 = dot(toCam, toCam), dist = sqrt(d2);
         const float3 wc = toCam * (1.0f / dist), dc = -wc;
         const float zc = dot(dc, C.camera.forward);
         if (zc <= 1e-6f) return;
         const float th = C.camera.tanHalfFov, aspect = C.camera.aspect;
-        const float nx = dot(dc, C.camera.right) / (zc * th * aspect), ny = dot(dc, C.camera.up) / (zc * th);
+        const float shiftX = C.camera.lensRadius > 0 ? lens.x / C.camera.focusDistance : 0.0f;
+        const float shiftY = C.camera.lensRadius > 0 ? lens.y / C.camera.focusDistance : 0.0f;
+        const float nx = (dot(dc, C.camera.right) / zc + shiftX) / (th * aspect), ny = (dot(dc, C.camera.up) / zc + shiftY) / th;
         const float px = (nx + 1) * 0.5f * (float)C.width, py = (1 - ny) * 0.5f * (float)C.height;
         if (!(px >= 0 && px < (float)C.width && py >= 0 && py < (float)C.height)) return;
         const float tn = C.camera.nearPlane / zc;
@@ -117,9 +129,9 @@ void rtTraceCaustic(RtConstants C, uint half_, inout RtPcg32 rng)
         const float3 fx = rtBsdfEval(rtBsdfInit(xc, wc, lambert), l);
         if (rtIsZero3(fx)) return;
         RtHit hv;
-        if (rtIntersect(C.camera.position, dc, tn, dist * (1 - 1e-4f), kRtMaskAll, hv)) return;
-        if (!surf && rtAtmGroundDistance(C.atm, C.camera.position, dc) < dist * (1 - 1e-4f)) return;
-        const float3 T = rtExpNeg3(rtAtmOpticalDepth(C.atm, C.camera.position, dc, dist));
+        if (rtIntersect(camO, dc, tn, dist * (1 - 1e-4f), kRtMaskAll, hv)) return;
+        if (!surf && rtAtmGroundDistance(C.atm, camO, dc) < dist * (1 - 1e-4f)) return;
+        const float3 T = rtExpNeg3(rtAtmOpticalDepth(C.atm, camO, dc, dist));
         const float Ap = (2 * th * aspect / (float)C.width) * (2 * th / (float)C.height);
         const float scale = 1.0f / ((float)C.width * (float)C.height);
         const float3 val = beta * fx * T * (abs(dot(l, xc.ns)) / abs(dot(l, xc.ng)) * gc / (d2 * Ap * zc * zc * zc) * rtOrderWeight(C, 0, depth + 2) * scale);
@@ -139,7 +151,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const RtConstants C = rtC();
     if (id.x < g_root.pathCount)
     {
-        const uint half_ = id.z, path = g_root.pathBase + id.x;
+        const uint half_ = id.z + g_root.halfBase, path = g_root.pathBase + id.x;
         const uint seed = rtHashCombine(rtHashCombine(rtHashCombine(rtHashCombine(C.seedLo ^ C.seedHi ^ 0xCA057105u, half_), g_root.passIndex), path >> 16), path & 0xFFFFu);
         RtPcg32 rng = rtPcgInit((uint64_t)seed, 0xC0FFEEull + (uint64_t)half_);
         rtTraceCaustic(C, half_, rng);

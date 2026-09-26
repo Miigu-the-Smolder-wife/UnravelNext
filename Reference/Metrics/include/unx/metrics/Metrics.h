@@ -23,6 +23,10 @@ struct Image
 
 Image readPfm(const std::filesystem::path& path);
 void writePfm(const std::filesystem::path& path, const Image& image);
+// OpenEXR 2 scanline file, no compression, channels B, G, R as 32-bit float (lossless linear HDR; photo mode's
+// output, FEATURES_GAME 17). readExr reads exactly that layout back (tests).
+void writeExr(const std::filesystem::path& path, const Image& image);
+Image readExr(const std::filesystem::path& path);
 
 double relMse(const Image& reference, const Image& test);
 

@@ -19,7 +19,7 @@ struct RtRoot
     uint pathBase;     // caustic kernel: first light path of this dispatch (per half)
     uint pathCount;
     uint passIndex;    // caustic kernel: sample pass (seeds)
-    uint pad0;
+    uint halfBase;     // first half of the dispatch (Z = halves): 0; a shutter epoch renders one half, 0 or 1
     uint pad1;
 };
 ConstantBuffer<RtRoot> g_root : register(b0);
@@ -274,6 +274,7 @@ RtSurface rtSurfaceAt(RtHit hit, float3 rayDir)
     RtSurface s;
     s.p = p0 * w + p1 * u + p2 * v;
     s.ng = normalize(cross(p1 - p0, p2 - p0));
+    s.extent = sqrt(max(max(dot(p0 - s.p, p0 - s.p), dot(p1 - s.p, p1 - s.p)), dot(p2 - s.p, p2 - s.p)));
     float3 nObj = N[md.vertexOffset + tri.x] * w + N[md.vertexOffset + tri.y] * u + N[md.vertexOffset + tri.z] * v;
     float3 n = normalize(world ? nObj : rtXformVectorExact(in_, nObj));
     s.material = matIndex;
@@ -352,6 +353,7 @@ RtSurface rtGroundSurface(RtAtmosphere a, float3 p)
     s.bsdf.transmission = 0;
     s.emission = float3(0, 0, 0);
     s.material = kRtNone;
+    s.extent = 0;
     return s;
 }
 
@@ -362,14 +364,22 @@ bool rtSmooth(RtSurface s)
 }
 
 // Robust ray origin offset (Waechter & Binder, Ray Tracing Gems ch. 6), RtScene.cpp offsetRayOrigin.
-float3 rtOffsetRayOrigin(float3 p, float3 n)
+// Ray origin off a surface (Waechter and Binder, Ray Tracing Gems 6) plus a triangle term. Their offset covers the
+// rounding of p at its own magnitude; a hit point interpolated from a large triangle, and the hardware's intersection of
+// the next ray with that triangle, carry errors of about eps x the triangle's extent (the watertight test shears the
+// vertices, relative to the origin, by the ray's dominant axis): on a 4 km ground quad seen at 30 degrees half of the
+// sun's shadow rays hit their own triangle (unx_test_reference --gpu sunparts). So the origin also moves along n by
+// kRtTriangleOffset x extent (16 float ulps of the extent: < 1e-5 m for triangles below 10 m, 1.9 mm for a 2 km
+// half-diagonal). Condition: geometry closer to the surface than that is not seen by rays leaving it.
+static const float kRtTriangleOffset = 16.0f / 16777216.0f;
+float3 rtOffsetRayOrigin(float3 p, float3 n, float extent)
 {
     const float origin = 1.0f / 32.0f, floatScale = 1.0f / 65536.0f, intScale = 256.0f;
     const int3 oi = int3((int)(intScale * n.x), (int)(intScale * n.y), (int)(intScale * n.z));
     const float3 pi = float3(asfloat(asint(p.x) + (p.x < 0 ? -oi.x : oi.x)), asfloat(asint(p.y) + (p.y < 0 ? -oi.y : oi.y)),
                              asfloat(asint(p.z) + (p.z < 0 ? -oi.z : oi.z)));
     return float3(abs(p.x) < origin ? p.x + floatScale * n.x : pi.x, abs(p.y) < origin ? p.y + floatScale * n.y : pi.y,
-                  abs(p.z) < origin ? p.z + floatScale * n.z : pi.z);
+                  abs(p.z) < origin ? p.z + floatScale * n.z : pi.z) + n * (kRtTriangleOffset * extent);
 }
 
 // Wave-aggregated counters.

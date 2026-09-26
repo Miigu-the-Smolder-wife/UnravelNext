@@ -11,7 +11,7 @@ void main(uint3 id : SV_DispatchThreadID)
     uint nans = 0, truncated = 0;
     if (id.x < g_root.w && id.y < g_root.h)
     {
-        const uint x = g_root.x0 + id.x, y = g_root.y0 + id.y, half_ = id.z;
+        const uint x = g_root.x0 + id.x, y = g_root.y0 + id.y, half_ = id.z + g_root.halfBase;
         const uint pi = y * C.width + x;
         const uint pixelSeed = rtHashCombine(rtHashCombine(C.seedLo ^ C.seedHi, half_), pi);
         float3 acc = float3(0, 0, 0);
@@ -20,10 +20,17 @@ void main(uint3 id : SV_DispatchThreadID)
             RtSampler smp = rtSamplerInit(pixelSeed, si);
             float jx, jy;
             rtGet2D(smp, jx, jy);
-            const float3 dir = rtCameraRay(C.camera, C.width, C.height, (float)x + jx, (float)y + jy);
+            float3 dir = rtCameraRay(C.camera, C.width, C.height, (float)x + jx, (float)y + jy);
+            float3 origin = C.camera.position;
+            if (C.camera.lensRadius > 0)  // thin lens: two more sample dimensions (none for the pinhole)
+            {
+                float lu, lv;
+                rtGet2D(smp, lu, lv);
+                rtLensRay(C.camera, dir, lu, lv, origin, dir);
+            }
             const float tn = C.camera.nearPlane / max(dot(dir, C.camera.forward), 1e-3f);
             bool trunc = false;
-            const float3 v = rtRadiance(C, C.camera.position, dir, tn, smp, trunc);
+            const float3 v = rtRadiance(C, origin, dir, tn, smp, trunc);
             truncated += trunc ? 1 : 0;
             if (!rtFinite3(v))
             {

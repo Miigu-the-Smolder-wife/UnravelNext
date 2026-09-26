@@ -8,6 +8,9 @@
 #include <fstream>
 
 #include <windows.h>
+#include <tlhelp32.h>
+
+#include <vector>
 
 namespace unx::reference::gpu
 {
@@ -91,6 +94,30 @@ void writeReplace(const std::filesystem::path& file, const std::string& text)
     logf("gpu slice: could not write %s\n", file.string().c_str());
 }
 
+// True when pid is an ancestor of this process (a GpuLock.ps1 wrapper around it holds the lock for all of its run).
+bool isAncestor(uint32_t pid)
+{
+    if (pid == 0) return false;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    std::vector<std::pair<uint32_t, uint32_t>> parentOf;  // (process, parent)
+    PROCESSENTRY32W e{};
+    e.dwSize = sizeof e;
+    for (BOOL ok = Process32FirstW(snap, &e); ok; ok = Process32NextW(snap, &e)) parentOf.push_back({ e.th32ProcessID, e.th32ParentProcessID });
+    CloseHandle(snap);
+    uint32_t at = GetCurrentProcessId();
+    for (int depth = 0; depth < 32; ++depth)
+    {
+        uint32_t parent = 0;
+        for (const auto& [p, q] : parentOf)
+            if (p == at) parent = q;
+        if (parent == 0 || parent == at) return false;
+        if (parent == pid) return true;
+        at = parent;
+    }
+    return false;
+}
+
 bool processAlive(uint32_t pid)
 {
     HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
@@ -162,6 +189,21 @@ GpuSlice::~GpuSlice()
 double GpuSlice::acquire()
 {
     if (m_held) return 0;
+    // Run under a GpuLock.ps1 wrapper (it holds the lock for the whole run): waiting for our own wrapper would deadlock
+    // (2026-09-26: a wrapped reference render held the lock 45 minutes while its own slices waited). Work under the
+    // wrapper's lock instead; no slice records.
+    {
+        const std::string holder = readShared(m_dir / "current.json");
+        const std::string pid = holder.empty() ? std::string() : field(holder, "pid");
+        if (!pid.empty() && isAncestor((uint32_t)std::strtoul(pid.c_str(), nullptr, 10)))
+        {
+            if (!m_inherited) logf("gpu slice: running under the GPU lock of a parent process (%s) - no slices\n", field(holder, "command").c_str());
+            m_inherited = true;
+            m_held = true;
+            m_start = std::chrono::steady_clock::now();
+            return 0;
+        }
+    }
     const auto t0 = std::chrono::steady_clock::now();
     const uint32_t self = GetCurrentProcessId();
     const std::filesystem::path hold = m_dir / "HOLD", current = m_dir / "current.json", history = m_dir / "history.log";
@@ -241,6 +283,11 @@ double GpuSlice::acquire()
 void GpuSlice::release()
 {
     if (!m_held) return;
+    if (m_inherited)
+    {
+        m_held = false;  // the parent's lock stays; nothing of ours to release
+        return;
+    }
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - m_start).count();
     m_longest = std::max(m_longest, sec);
     appendHistory(m_dir / "history.log", nowText() + " release " + m_track + " (correctness) exit 0 " + sliceText(m_slices, m_totalEstimate) + " " +
@@ -255,6 +302,6 @@ void GpuSlice::release()
 
 bool GpuSlice::sliceExpired() const
 {
-    return m_held && std::chrono::duration<double>(std::chrono::steady_clock::now() - m_start).count() >= kSliceSeconds;
+    return m_held && !m_inherited && std::chrono::duration<double>(std::chrono::steady_clock::now() - m_start).count() >= kSliceSeconds;
 }
 } // namespace unx::reference::gpu

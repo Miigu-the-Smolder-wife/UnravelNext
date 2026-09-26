@@ -7,7 +7,9 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <sstream>
+#include <string>
 
 #pragma warning(push, 0)
 #include "FLIP.h"
@@ -80,6 +82,114 @@ void writePfm(const std::filesystem::path& path, const Image& img)
     f << "PF\n" << img.width << " " << img.height << "\n-1.0\n";
     for (uint32_t row = 0; row < img.height; ++row)
         f.write(reinterpret_cast<const char*>(img.pixel(0, img.height - 1 - row)), (std::streamsize)img.width * 3 * sizeof(float));
+}
+
+namespace
+{
+void putU32(std::string& s, uint32_t v) { s.append(reinterpret_cast<const char*>(&v), 4); }
+void putF32(std::string& s, float v) { s.append(reinterpret_cast<const char*>(&v), 4); }
+void attribute(std::string& h, const char* name, const char* type, const std::string& value)
+{
+    h += name;
+    h += '\0';
+    h += type;
+    h += '\0';
+    putU32(h, (uint32_t)value.size());
+    h += value;
+}
+std::string exrHeader(uint32_t w, uint32_t h)
+{
+    std::string head;
+    putU32(head, 20000630u);  // magic 76 2f 31 01
+    putU32(head, 2u);         // version 2, single-part scanline
+    std::string channels;
+    for (const char* c : { "B", "G", "R" })  // alphabetical, as the format requires
+    {
+        channels += c;
+        channels += '\0';
+        putU32(channels, 2u);  // FLOAT
+        channels += std::string(4, '\0');  // pLinear, reserved
+        putU32(channels, 1u);
+        putU32(channels, 1u);
+    }
+    channels += '\0';
+    attribute(head, "channels", "chlist", channels);
+    attribute(head, "compression", "compression", std::string(1, '\0'));
+    std::string box;
+    putU32(box, 0);
+    putU32(box, 0);
+    putU32(box, w - 1);
+    putU32(box, h - 1);
+    attribute(head, "dataWindow", "box2i", box);
+    attribute(head, "displayWindow", "box2i", box);
+    attribute(head, "lineOrder", "lineOrder", std::string(1, '\0'));
+    std::string one;
+    putF32(one, 1.0f);
+    attribute(head, "pixelAspectRatio", "float", one);
+    std::string centre;
+    putF32(centre, 0.0f);
+    putF32(centre, 0.0f);
+    attribute(head, "screenWindowCenter", "v2f", centre);
+    attribute(head, "screenWindowWidth", "float", one);
+    head += '\0';
+    return head;
+}
+} // namespace
+
+void writeExr(const std::filesystem::path& path, const Image& img)
+{
+    if (img.width == 0 || img.height == 0 || img.rgb.size() != (size_t)img.width * img.height * 3) fail("writeExr: empty or malformed image");
+    if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path());
+    const std::string head = exrHeader(img.width, img.height);
+    const uint64_t lineBytes = 8 + (uint64_t)img.width * 12;
+    std::ofstream f(path, std::ios::binary);
+    if (!f) fail("cannot write %s", path.string().c_str());
+    f.write(head.data(), (std::streamsize)head.size());
+    const uint64_t first = head.size() + 8ull * img.height;
+    for (uint32_t y = 0; y < img.height; ++y)
+    {
+        const uint64_t o = first + y * lineBytes;
+        f.write(reinterpret_cast<const char*>(&o), 8);
+    }
+    std::vector<float> line((size_t)img.width * 3);
+    for (uint32_t y = 0; y < img.height; ++y)
+    {
+        const int32_t yy = (int32_t)y;
+        const uint32_t size = img.width * 12;
+        f.write(reinterpret_cast<const char*>(&yy), 4);
+        f.write(reinterpret_cast<const char*>(&size), 4);
+        for (uint32_t c = 0; c < 3; ++c)  // B, G, R planes
+            for (uint32_t x = 0; x < img.width; ++x) line[(size_t)c * img.width + x] = img.pixel(x, y)[2 - c];
+        f.write(reinterpret_cast<const char*>(line.data()), (std::streamsize)size);
+    }
+    if (!f) fail("cannot write %s", path.string().c_str());
+}
+
+Image readExr(const std::filesystem::path& path)
+{
+    std::ifstream f(path, std::ios::binary);
+    if (!f) fail("cannot read %s", path.string().c_str());
+    const std::string all((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    // The layout writeExr produces: find the data window, then the offset table after the header's terminator.
+    const size_t dw = all.find(std::string("dataWindow\0box2i\0", 17));
+    if (all.size() < 8 || dw == std::string::npos) fail("%s: not an EXR written by writeExr", path.string().c_str());
+    int32_t box[4];
+    std::memcpy(box, all.data() + dw + 17 + 4, 16);
+    Image img;
+    img.width = (uint32_t)(box[2] - box[0] + 1);
+    img.height = (uint32_t)(box[3] - box[1] + 1);
+    const std::string head = exrHeader(img.width, img.height);
+    if (all.compare(0, head.size(), head) != 0) fail("%s: EXR header differs from writeExr's layout", path.string().c_str());
+    img.rgb.resize((size_t)img.width * img.height * 3);
+    const uint64_t lineBytes = 8 + (uint64_t)img.width * 12;
+    if (all.size() != head.size() + 8ull * img.height + lineBytes * img.height) fail("%s: truncated EXR", path.string().c_str());
+    for (uint32_t y = 0; y < img.height; ++y)
+    {
+        const char* p = all.data() + head.size() + 8ull * img.height + y * lineBytes + 8;
+        for (uint32_t c = 0; c < 3; ++c)
+            for (uint32_t x = 0; x < img.width; ++x) std::memcpy(&img.pixel(x, y)[2 - c], p + ((size_t)c * img.width + x) * 4, 4);
+    }
+    return img;
 }
 
 double relMse(const Image& reference, const Image& test)

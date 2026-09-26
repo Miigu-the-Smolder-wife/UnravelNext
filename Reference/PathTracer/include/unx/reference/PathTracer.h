@@ -37,6 +37,9 @@ struct ResolvedCamera
     float3 position, forward, up;
     float verticalFov = 1.0471976f, nearPlane = 0.05f, ev100 = 14.0f;
     float time = 0;  // scene time for deformations
+    // Thin lens (GPU tracer only: photo mode, FEATURES_GAME 17; the renderer's FrameContext::lensAperture / lensFocus):
+    // aperture diameter (m; 0 = pinhole) and the distance of the plane of focus along forward (m, > nearPlane).
+    float lensAperture = 0, lensFocus = 0;
 };
 ResolvedCamera resolveCamera(const scene::Scene& scene, const CameraSelection& selection);
 

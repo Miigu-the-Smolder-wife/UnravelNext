@@ -34,6 +34,9 @@ struct RtSurface
     RtBsdfParams bsdf;
     float3 emission;
     uint material;
+    // Largest distance from p to the hit triangle's vertices (world; 0 = no triangle): the triangle term of the
+    // ray-origin offset (Scene.hlsli rtOffsetRayOrigin).
+    float extent;
 };
 
 RT_INLINE float rtAlphaFromRoughness(float r) { return max(r * r, kRtMinAlpha); }

@@ -145,6 +145,11 @@ bool instanceNeedsDeformation(const scene::Scene& s, const scene::Instance& in)
 
 DeformedGeometry deformInstance(const scene::Scene& s, uint32_t instance, float time)
 {
+    return deformInstanceAt(s, instance, time, s.instances[instance].transform, nullptr);
+}
+
+DeformedGeometry deformInstanceAt(const scene::Scene& s, uint32_t instance, float time, const float3x4& transform, const std::vector<float3x4>* jointToModel)
+{
     const scene::Instance& in = s.instances[instance];
     const scene::Mesh& m = s.meshes[in.mesh];
     DeformedGeometry out;
@@ -157,8 +162,10 @@ DeformedGeometry deformInstance(const scene::Scene& s, uint32_t instance, float 
     {
         const scene::Skeleton& sk = s.skeletons[in.skeleton];
         if (sk.jointToModel.size() < m.skin.inverseBind.size()) fail("reference: skeleton '%s' has fewer joints than mesh '%s'", sk.name.c_str(), m.name.c_str());
+        const std::vector<float3x4>& joints = jointToModel ? *jointToModel : sk.jointToModel;
+        if (joints.size() < m.skin.inverseBind.size()) fail("reference: pose of skeleton '%s' has fewer joints than mesh '%s'", sk.name.c_str(), m.name.c_str());
         palette.resize(m.skin.inverseBind.size());
-        for (size_t j = 0; j < palette.size(); ++j) palette[j] = mul34(sk.jointToModel[j], m.skin.inverseBind[j]);
+        for (size_t j = 0; j < palette.size(); ++j) palette[j] = mul34(joints[j], m.skin.inverseBind[j]);
     }
     for (size_t v = 0; v < n; ++v)
     {
@@ -180,11 +187,11 @@ DeformedGeometry deformInstance(const scene::Scene& s, uint32_t instance, float 
             if (!m.tangents.empty()) t = normalize(st);
         }
         if (windActive(s, in)) p = p + windOffset(s, in, p, time);
-        out.positions[v] = in.transform.transformPoint(p);
-        out.normals[v] = normalize(xformVector(in.transform, nn));
+        out.positions[v] = transform.transformPoint(p);
+        out.normals[v] = normalize(xformVector(transform, nn));
         if (!m.tangents.empty())
         {
-            const float3 tw = normalize(xformVector(in.transform, t));
+            const float3 tw = normalize(xformVector(transform, t));
             out.tangents[v] = { tw.x, tw.y, tw.z, m.tangents[v].w };
         }
     }

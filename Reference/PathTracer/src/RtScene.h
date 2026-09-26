@@ -114,6 +114,9 @@ struct DeformedGeometry
 };
 bool instanceNeedsDeformation(const scene::Scene& scene, const scene::Instance& instance);
 DeformedGeometry deformInstance(const scene::Scene& scene, uint32_t instance, float time);
+// The same with the instance's object -> world transform and its skeleton's jointToModel given (the GPU tracer's shutter
+// integral: the state at a time inside the shutter); jointToModel null = the scene's pose.
+DeformedGeometry deformInstanceAt(const scene::Scene& scene, uint32_t instance, float time, const float3x4& transform, const std::vector<float3x4>* jointToModel);
 
 // Robust ray origin offset (Waechter & Binder, Ray Tracing Gems ch. 6).
 float3 offsetRayOrigin(float3 p, float3 n);

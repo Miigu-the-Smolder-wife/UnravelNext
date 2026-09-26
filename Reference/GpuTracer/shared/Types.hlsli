@@ -41,6 +41,9 @@ RT_INLINE bool rtInSun(RtSun s, float3 d)
 
 // Pinhole camera (PathTracer.cpp cameraRay): forward, right = normalize(cross(forward, up)), up' = cross(right, forward),
 // tanHalfFov = tan(fov / 2), aspect = W / H, all computed on the CPU exactly as the CPU estimator does.
+// Thin lens (photo mode, FEATURES_GAME 17; the renderer's FrameContext::lensAperture / lensFocus): lensRadius = aperture
+// diameter / 2 (0 = the pinhole: no lens sample is drawn, so pinhole images are those of the CPU estimator),
+// focusDistance along forward (Common.hlsli rtLensRay).
 struct RtCamera
 {
     float3 position;
@@ -51,6 +54,10 @@ struct RtCamera
     float nearPlane;
     float3 up;
     float exposure;
+    float lensRadius;
+    float focusDistance;
+    float lensPad0;
+    float lensPad1;
 };
 
 struct RtInstance

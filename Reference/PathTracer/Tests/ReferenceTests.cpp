@@ -289,6 +289,41 @@ void testSunAbsorbing()
     expectNear("sun", m, expected, 2e-4);  // allowance: the 0.27 deg disk is integrated, the closed form uses its centre
 }
 
+// The sun case split by medium (the GPU tracer once failed "sun" by -46 %): no absorbing air, ozone only, Mie absorption
+// only; each against its closed form (optical depth by fine quadrature, the view ray's share included).
+void testSunParts()
+{
+    struct Part
+    {
+        const char* name;
+        float ozone, mie, elevationDegrees;
+    };
+    for (const Part p : { Part{ "clear90", 0, 0, 90 }, Part{ "clear60", 0, 0, 60 }, Part{ "clear", 0, 0, 30 }, Part{ "ozone", 1.881e-6f, 0, 30 },
+                          Part{ "mie", 0, 2e-6f, 30 } })
+    {
+        const float elev = p.elevationDegrees * kPi / 180;
+        scene::Scene s = planeScene(0.5f);
+        s.atmosphere.ozoneAbsorption = { p.ozone, p.ozone, p.ozone };
+        s.atmosphere.mieAbsorption = { p.mie, p.mie, p.mie };
+        s.sun.direction = { std::cos(elev), std::sin(elev), 0 };
+        s.sun.illuminance = 100000;
+        const Measured m = renderPatch(s, 256);
+        const double R = s.atmosphere.bottomRadius, Rt = s.atmosphere.topRadius, mu = std::sin(elev);
+        const double len = -R * mu + std::sqrt(R * R * (mu * mu - 1) + Rt * Rt);
+        const int n = 200000;
+        double tau = 0;
+        for (int i = 0; i < n; ++i)
+        {
+            const double t = (i + 0.5) * len / n;
+            const double x = t * std::cos(elev), y = R + t * mu;
+            const double h = std::sqrt(x * x + y * y) - R;
+            tau += (p.mie * std::exp(-h / 1200.0) + p.ozone * std::max(0.0, 1 - std::fabs(h - 25000.0) / 15000.0)) * len / n;
+        }
+        const double tauView = p.mie * 1200.0 * (1 - std::exp(-50.0 / 1200.0));
+        expectNear(p.name, m, lambert(0.5f) * 100000 * std::exp(-tau) * std::sin(elev) * std::exp(-tauView), 2e-4);
+    }
+}
+
 // Sun caustic: a 2 x 2 m mirror (metal, base colour 1, roughness 0.03 -> alpha 9e-4) reflects the sun onto a Lambert
 // floor (albedo 0.1). Floor irradiance at the viewed patch = E_sun (cos(direct) + R cos(mirror image)), R = the mirror's
 // directional albedo (v1 metal, F0 = 1: 1 within 0.1 % at this angle, v1_metal_furnace.md). The light tracer
@@ -639,6 +674,7 @@ int main(int argc, char** argv)
         run("sphere", testSphere);
         run("disk", testDiskAndTube);
         run("shadow", testShadow);
+        run("sunparts", testSunParts);
         run("sun", testSunAbsorbing);
         run("caustic", testSunCaustic);
         run("skythin", testSkySingleScatter);

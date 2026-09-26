@@ -94,6 +94,14 @@ add_dependencies(unx_test_reference unx_reference_gpu_shaders)
 target_compile_definitions(unx_test_reference PRIVATE UNX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 c_deploy_embree(unx_test_reference)
 
+# Photo mode on the GPU tracer (FEATURES_GAME 17; E since the B11 handover): thin lens, progressive rendering, EXR.
+unx_add_executable(unx_test_reference_photo GpuTracer/Tests/PhotoTests.cpp)
+set_target_properties(unx_test_reference_photo PROPERTIES ARCHIVE_OUTPUT_NAME unx_test_reference_photo_exe)
+target_link_libraries(unx_test_reference_photo PRIVATE unx_reference unx_reference_gpu)
+add_dependencies(unx_test_reference_photo unx_reference_gpu_shaders)
+target_compile_definitions(unx_test_reference_photo PRIVATE UNX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+c_deploy_embree(unx_test_reference_photo)
+
 # Census cross-check against the microbench's GPU census (same scene rebuilt from the same RNG stream).
 add_executable(unx_test_census_replica PathTracer/Tests/CensusReplica.cpp)
 unx_target_defaults(unx_test_census_replica)
