@@ -31,6 +31,7 @@
 #define FX_LAYER_STATUS_TILE_OVERFLOW 2u    // a tile holds more than FX_LAYER_TILE_ENTRIES entries (the farthest dropped)
 #define FX_LAYER_STATUS_EDGE_OVERFLOW 4u    // the edge blocks exceed their buffer (those blocks keep the layer value)
 #define FX_LAYER_STATUS_RANGE 8u            // an index outside its buffer
+#define FX_LAYER_STATUS_MATERIAL 16u        // a sprite program's material is neither 0 (emissive) nor 1 (lit): not drawn
 
 struct LayerConstants
 {

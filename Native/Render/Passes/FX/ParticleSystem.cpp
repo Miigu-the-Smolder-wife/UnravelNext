@@ -109,6 +109,15 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
                  (unsigned long long)count, (unsigned long long)stride, (unsigned long long)bytes);
     };
     section(h.programs, h.program_count, sizeof(NV_StreamProgram), "programs");
+    // Sprite materials outside the contract (0 emissive nit, 1 lit albedo) are not drawn (FX_LAYER_STATUS_MATERIAL); said
+    // once per program table sent, since the kernels only set a status bit.
+    if ((h.flags & NV_STREAM_PROGRAMS) && h.program_count)
+    {
+        const auto* table = reinterpret_cast<const NV_StreamProgram*>(packet + h.programs);
+        for (uint32_t k = 0; k < h.program_count; ++k)
+            if (table[k].output == 0 && table[k].material > 1)  // output 0: sprites (StreamRecords.hlsli FX_OUTPUT_SPRITE)
+                logf("FX particles: program %u has material %u (0 = emissive nit, 1 = lit albedo): its sprites are not drawn\n", k, table[k].material);
+    }
     section(h.curve_keys, h.curve_key_count, sizeof(NV_StreamCurveKey), "curve keys");
     section(h.emitters, h.emitter_count, sizeof(NV_StreamEmitter), "emitters");
     section(h.emitter_patches, h.emitter_patch_count, sizeof(NV_StreamEmitterPatch), "emitter patches");

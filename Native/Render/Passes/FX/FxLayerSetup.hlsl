@@ -156,7 +156,11 @@ LayerRecord setup(LayerConstants c, uint t, uint group)
     StructuredBuffer<StreamProgram> programs = ResourceDescriptorHeap[c.programs];
     const StreamEmitter e = emitters[row];
     const StreamProgram p = programs[e.program];
-    if (p.output != FX_OUTPUT_SPRITE || (e.flags & FX_EMITTER_KILLED) != 0u || !(p.lifetime > 0)) return rec;
+    // The particle material contract (0 emissive: colour = nit; 1 lit: colour = albedo): any other value is refused, not
+    // guessed (an old material-table index drew as emissive at the wrong scale).
+    const bool badMaterial = p.output == FX_OUTPUT_SPRITE && p.material > 1u;
+    if (WaveActiveAnyTrue(badMaterial) && WaveIsFirstLane()) fxLayerStatus(c, FX_LAYER_STATUS_MATERIAL);
+    if (badMaterial || p.output != FX_OUTPUT_SPRITE || (e.flags & FX_EMITTER_KILLED) != 0u || !(p.lifetime > 0)) return rec;
 
     // the particle at the frame time, relative to the camera
     const float wdt = c.w * c.dt, rest = (1.0f - c.w) * c.dt;

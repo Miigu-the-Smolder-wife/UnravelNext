@@ -179,12 +179,14 @@ struct RunResult
     std::vector<uint8_t> layer, edgeMask, composite;
     std::vector<uint8_t> records;  // the pass's particle records (32 B each)
     ViewDesc view;
+    uint32_t status = 0, drawn = 0;  // the pass's status bits and records drawn
 };
 // Stage 2 check: the sun of the lit run (frame constants; no shadow pages, GI, local lights or air in this test).
 const float3 kTestSunDirection = normalize(float3{ 0.3f, 0.8f, -0.5f }), kTestSunColor{ 1.0f, 0.9f, 0.8f };
 constexpr float kTestSunIlluminance = 1000.0f, kTestPhase = 0.6f;
 
-RunResult run(Device& device, const Options& o, bool verify, bool lit = false)
+// material >= 0: every program's material (the refusal check uses 2, outside the contract).
+RunResult run(Device& device, const Options& o, bool verify, bool lit = false, int material = -1)
 {
     ShaderLibrary shaders(device, executableDirectory() / "shaders");
     const QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
@@ -198,6 +200,7 @@ RunResult run(Device& device, const Options& o, bool verify, bool lit = false)
         rpp.material = 1;
         rpp.phase = kTestPhase;
     }
+    if (material >= 0) rpp.material = (uint32_t)material;
     fx::test::RppStream stream(rpp);
     FrameContext frame;
     FrameServices services;
@@ -360,6 +363,8 @@ RunResult run(Device& device, const Options& o, bool verify, bool lit = false)
     result.composite = *cmpBytes;
     result.records = *recordData;
     result.view = view;
+    result.status = counters[2];
+    result.drawn = counters[3];
     result.edgeMask.resize((size_t)out.layerWidth * out.layerHeight);
     for (size_t i = 0; i < result.edgeMask.size(); ++i)
     {
@@ -511,6 +516,11 @@ int main(int argc, char** argv)
         }
         FX_LOG("stage 2: %u lit records vs albedo x E_sun x HG(g %.1f): worst relative error %.2e (half precision + the centre's pixel ray)", checked, kTestPhase, worst);
         FX_CHECK(checked > 100 && worst < 1e-2, "stage 2: lit records differ from the analytic sun term (worst %.3e over %u)", worst, checked);
+
+        // A material outside the contract (0 emissive nit, 1 lit albedo) is refused: nothing drawn, status bit 16.
+        const RunResult refused = run(device, o, false, false, 2);
+        FX_LOG("material 2: %u records drawn, status 0x%x", refused.drawn, refused.status);
+        FX_CHECK(refused.drawn == 0 && (refused.status & 16u) != 0, "material 2 was drawn (%u records) or not reported (status 0x%x)", refused.drawn, refused.status);
         FX_LOG("FX particle layer tests PASS");
         return 0;
     }
