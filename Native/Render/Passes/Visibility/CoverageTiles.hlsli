@@ -59,6 +59,20 @@ struct CoverageFragment  // 16 B
     uint packed;      // octahedral normal 8 + 8 bits | area x 1023 (10 bits) << 16 | pixel in the tile (x + 8 y) << 26
 };
 
+// Strand hair records (B10, V's HairRaster.ms; INTERFACES v1.59): vis id COV_HAIR_ID | the segment's record in
+// FrameResources::hairSegments (E: 2 float4 per segment; its body from FrameResources::hairBodies), the normal bits hold
+// the strand coordinate u (root 0, tip 1) as unorm16; M rebuilds the tangent from p1 - p0. Every other vis id has bit 31
+// clear (VisBuffer.hlsli packVisId stays below 2^31).
+#define COV_HAIR_ID 0x80000000u
+bool coverageFragmentIsHair(CoverageFragment f) { return (f.visId & COV_HAIR_ID) != 0; }
+uint coverageFragmentHairSegment(CoverageFragment f) { return f.visId & ~COV_HAIR_ID; }
+float coverageFragmentHairU(CoverageFragment f) { return (f.packed & 0xFFFFu) / 65535.0; }
+uint coveragePackHair(float u, float area, uint pixelInTile)
+{
+    const uint a = (uint)round(saturate(area) * 1023);
+    return (uint)round(saturate(u) * 65535) | (a << 16) | (pixelInTile << 26);
+}
+
 uint coverageFragmentPixel(CoverageFragment f) { return f.packed >> 26; }                         // 0..63
 float coverageFragmentDepth(CoverageFragment f) { return asfloat(f.depthBits & ~COV_DEPTH_SEE_THROUGH); }
 bool coverageFragmentOpaque(CoverageFragment f) { return (f.depthBits & COV_DEPTH_SEE_THROUGH) == 0; }

@@ -71,6 +71,7 @@
 #define COV_FLAG_OPAQUE 4u  // opaque for the view (not glass or water; alpha-tested: its mask after the test);
                             // otherwise the record's depth word carries COV_DEPTH_SEE_THROUGH
 #define COV_FLAG_BACK 8u    // seen from behind (two-sided): the normals are turned towards the viewer
+#define COV_FLAG_HAIR 16u   // a hair ribbon (HairRaster.ms): normals carry asuint(u), the record keeps u in the normal bits
 
 // Vertex normals between the mesh and pixel kernels: octahedral 16 + 16 bits (the record keeps 8 + 8).
 uint coverageOct32(float3 n)

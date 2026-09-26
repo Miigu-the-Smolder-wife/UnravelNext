@@ -47,6 +47,7 @@ struct Settings
 {
     uint32_t capVisible = 0, capNodes = 0, capGroups = 0, capDeferred = 0;
     uint32_t coverageDebugStage = 0;
+    bool coverageHair = false;  // visibility.coverage_hair (B10 strands in the coverage layer)
     double coveragePoolMinPerPixel = 0;
     float lodErrorPx = 0, bandAMinPx = 0, bandCMaxPx = 0, bandAHysteresisPx = 0;
     bool occlusion = true, coverageLayer = false, coverageBandC = true;
@@ -66,6 +67,7 @@ struct Settings
         s.occlusion = q.boolean("visibility.occlusion_culling");
         s.coverageLayer = q.boolean("visibility.coverage_layer");
         s.coverageBandC = q.boolean("visibility.coverage_band_c");
+        s.coverageHair = q.boolean("visibility.coverage_hair");
         const int64_t stage = q.integer("visibility.coverage_debug_stage");
         if (stage < 0 || stage > 4) fail("visibility.coverage_debug_stage = %lld: 0 (the layer), 1 .. 4 (measurement variants)", (long long)stage);
         s.coverageDebugStage = (uint32_t)stage;
@@ -1250,6 +1252,45 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                   c.graphicsConstants(k, 24);
                   c.cmd->ExecuteIndirect(meshSig, 1, c.resource(run.args), kArgCovMesh * 4, nullptr, 0);
               });
+    // B10 strand hair (E's FrameResources::hairSegments / hairBodies): one mesh group per 32 segments, the same pixel
+    // kernel and stream (HairRaster.ms). Its group count is known here (E sizes the buffer per frame).
+    const BufferRef hairSegments = fc.resources.hairSegments, hairBodies = fc.resources.hairBodies;
+    if (r.cfg.coverageHair && hairSegments.valid() && hairBodies.valid())
+    {
+        const uint32_t segments = (uint32_t)(g.desc(hairSegments).size / 32);
+        const uint32_t groups = (segments + 31) / 32;
+        MeshPipelineDesc hd = d;
+        hd.meshShader = "Passes/Visibility/HairRaster.ms";
+        ID3D12PipelineState* hairPso = fc.shaders.mesh("v.coverage.hair.stage" + std::to_string(r.cfg.coverageDebugStage), hd);
+        g.addPass("v.coverage.hair", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(hairSegments, Use::SrvGraphics);
+                      b.use(hairBodies, Use::SrvGraphics);
+                      b.use(run.state, Use::UavGraphics);
+                      b.use(stream, Use::UavGraphics);
+                      b.use(keys, Use::UavGraphics);
+                      if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
+                  },
+                  [=](PassContext& c) {
+                      uint32_t k[24];
+                      constants(c, k, 0, false);  // not the cluster lists: the hair inputs take P[3].xyz
+                      k[3] = c.uav(stream);
+                      k[4] = c.uav(keys);
+                      if (!hiz.valid()) k[8] = kNone;
+                      k[12] = c.srv(hairSegments);
+                      k[13] = c.srv(hairBodies);
+                      k[14] = segments;
+                      c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+                      const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
+                      const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
+                      c.cmd->RSSetViewports(1, &vp);
+                      c.cmd->RSSetScissorRects(1, &sc);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->SetPipelineState(hairPso);
+                      c.graphicsConstants(k, 24);
+                      if (groups > 0) c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
+                  });
+    }
     build("args", 2, 1, 1, 0, kUseArgs);
     build("count", 6, 0, 0, kArgCovRecords, kUseList | kUseTiles | kUseCounters | kUseStream);
     build("scan", 7, 1, 1, 0, kUseList | kUseTiles | kUseScratch);

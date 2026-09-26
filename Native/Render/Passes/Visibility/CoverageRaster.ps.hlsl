@@ -60,6 +60,30 @@ float3 coveragePolygonNormal(CoveragePolygon p, uint4 normals, float2 s, bool ba
     return back ? -n : n;
 }
 
+// Hair ribbons (COV_FLAG_HAIR): u at screen point s, perspective-correct like the normals (asuint(u) per polygon vertex).
+float coveragePolygonU(CoveragePolygon p, uint4 u, float2 s)
+{
+    float3 w = coveragePolygonBarycentric(p.a.xy, p.b.xy, p.c.xy, s);
+    float2 v1 = float2(p.b.w, p.c.w);
+    float2 u12 = asfloat(u.yz);
+    if (p.quad && min(w.x, min(w.y, w.z)) < 0)
+    {
+        w = coveragePolygonBarycentric(p.a.xy, p.c.xy, p.d.xy, s);
+        v1 = float2(p.c.w, p.d.w);
+        u12 = asfloat(u.zw);
+    }
+    const float3 q = w * float3(p.a.w, v1);
+    const float sum = q.x + q.y + q.z;
+    return sum > 0 ? (asfloat(u.x) * q.x + u12.x * q.y + u12.y * q.z) / sum : asfloat(u.x);
+}
+
+// The record's last word: the interpolated normal, or u for a hair ribbon.
+uint coveragePackPrimitive(CoveragePolygon poly, uint flags, uint4 normals, float2 mid, float area, uint pixelInTile)
+{
+    if ((flags & COV_FLAG_HAIR) != 0) return coveragePackHair(coveragePolygonU(poly, normals, mid), area, pixelInTile);
+    return coveragePackFragment(coveragePolygonNormal(poly, normals, mid, (flags & COV_FLAG_BACK) != 0), area, pixelInTile);
+}
+
 void main(float4 position : SV_Position, nointerpolation uint visId : VISID, nointerpolation uint flags : COVFLAGS, nointerpolation uint material : MATERIAL,
           nointerpolation float4 a : TRIA, nointerpolation float4 b : TRIB, nointerpolation float4 c : TRIC, nointerpolation float4 d : TRID,
           nointerpolation float4 tab : UVAB, nointerpolation float4 tcd : UVCD, nointerpolation uint4 normals : NRMS)
@@ -124,8 +148,7 @@ void main(float4 position : SV_Position, nointerpolation uint visId : VISID, noi
     {
         // Measurement: the record's values are computed as in STAGE 0 and folded into one wave value, so the compiler
         // keeps the work; the fragments are counted.
-        const float3 normal = live ? coveragePolygonNormal(poly, normals, mid, (flags & COV_FLAG_BACK) != 0) : float3(0, 0, 0);
-        const uint folded = WaveActiveBitXor(live ? cs.mask ^ asuint(cs.depth) ^ coveragePackFragment(normal, cs.area, pixelInTile) : 0u);
+        const uint folded = WaveActiveBitXor(live ? cs.mask ^ asuint(cs.depth) ^ coveragePackPrimitive(poly, flags, normals, mid, cs.area, pixelInTile) : 0u);
         if (WaveIsFirstLane() && folded == 0x9E3779B9u) state.InterlockedAdd(4 * VS_COV_MEASURED, 0x80000000u);
     }
 #endif
@@ -145,9 +168,8 @@ void main(float4 position : SV_Position, nointerpolation uint visId : VISID, noi
     {
         RWStructuredBuffer<uint4> stream = ResourceDescriptorHeap[COV_STREAM];
         RWByteAddressBuffer keys = ResourceDescriptorHeap[COV_KEYS];
-        const float3 normal = coveragePolygonNormal(poly, normals, mid, (flags & COV_FLAG_BACK) != 0);
         const uint depthBits = asuint(cs.depth) | ((flags & COV_FLAG_OPAQUE) != 0 ? 0u : COV_DEPTH_SEE_THROUGH);
-        stream[slot] = uint4(visId, depthBits, cs.mask, coveragePackFragment(normal, cs.area, pixelInTile));
+        stream[slot] = uint4(visId, depthBits, cs.mask, coveragePackPrimitive(poly, flags, normals, mid, cs.area, pixelInTile));
         keys.Store(4 * slot, tile * COV_TILE_PIXELS + pixelInTile);
     }
 #endif
