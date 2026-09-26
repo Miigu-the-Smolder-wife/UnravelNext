@@ -60,6 +60,7 @@ struct FluidFrame
     float alpha = 1;                    // this frame's time between the tick's start (0) and end (1)
     uint64_t tick = 0;
     uint32_t domainCells[3] = {};       // the fluid domain (FluidSurfaceDesc::nodes = 2 x cells)
+    uint32_t material = 0;              // the scene material of its surface (Water class)
 };
 
 struct FrameContext

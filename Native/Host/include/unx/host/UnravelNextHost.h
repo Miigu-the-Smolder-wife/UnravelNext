@@ -467,9 +467,11 @@ typedef struct UnxFluidInput
     const void* view;
     float alpha;
     uint32_t domainCells[3];
+    uint32_t material;                  // the scene material of its surface (Water class)
+    uint32_t reserved;                  // 0
 } UnxFluidInput;
 #ifdef __cplusplus
-static_assert(sizeof(UnxFluidInput) == 24, "UnxFluidInput is part of the ABI");
+static_assert(sizeof(UnxFluidInput) == 32, "UnxFluidInput is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxFrameSetFluids(UnxRenderer r, const UnxFluidInput* fluids, uint32_t count, const uint64_t stamp[6]);
 

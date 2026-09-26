@@ -730,9 +730,9 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
 - v1.70 (2026-09-26, 렌더 A: B8 GPU 유체 입력, 엔진 1 제안):
-  - **`FrameContext::fluids / fluidCount`(core)와 `render::FluidFrame`**: current/start 입자 버퍼(NP_FluidParticle 48 B, COMMON), 개수, stride, startValid, 이 프레임 좌표의 원점(double, 원점 이동 반영), dx, alpha(틱 안 시각), tick, domainCells다. record()가 끝날 때까지 유효하다. W의 waterGeometry가 읽는다.
-  - **호스트**: `HostRenderer::setFluids(FluidInput{NP_FluidGpuView*, alpha, domainCells}, stamp[6])`, 선택 export `UnxFrameSetFluids(r, UnxFluidInput 24 B[], count, stamp[6])`. 설정은 상태다(다음 호출까지 모든 프레임이 읽고, 빈 목록은 없음). 각 프레임은 목록을 실행하기 전 GPU 브리지에서 `prepareGraphics({current, start: READ}, 틱 stamp)`로 허가받는다(그래픽 큐 대기). 실행 뒤에는 그래픽 fence로 `commitGraphics`를 부른다. 예외가 나도 커밋해 브리지 잠금을 푼다.
-  - [실측] `unx_test_host_hostfluids`: 물리 도메인에 예약·결합한 버퍼를 넘기면 유체 프레임마다 그래픽 제출이 1회 늘고, 유체가 없는 프레임은 0이다. 잘못된 view·stride·개수·alpha는 호출 스레드에서 거부한다. 디버그 오류 0.
+  - **`FrameContext::fluids / fluidCount`(core)와 `render::FluidFrame`**: current/start 입자 버퍼(NP_FluidParticle 48 B, COMMON), 개수, stride, startValid, 이 프레임 좌표의 원점(double, 원점 이동 반영), dx, alpha(틱 안 시각), tick, domainCells, material(표면의 Water 클래스 장면 재질)이다. record()가 끝날 때까지 유효하다. W의 waterGeometry가 읽는다.
+  - **호스트**: `HostRenderer::setFluids(FluidInput{NP_FluidGpuView*, alpha, domainCells}, stamp[6])`, 선택 export `UnxFrameSetFluids(r, UnxFluidInput 32 B[], count, stamp[6])`. 설정은 상태다(다음 호출까지 모든 프레임이 읽고, 빈 목록은 없음). 각 프레임은 목록을 실행하기 전 GPU 브리지에서 `prepareGraphics({current, start: READ}, 틱 stamp)`로 허가받는다(그래픽 큐 대기). 실행 뒤에는 그래픽 fence로 `commitGraphics`를 부른다. 예외가 나도 커밋해 브리지 잠금을 푼다.
+  - [실측] `unx_test_host_hostfluids`: 물리 도메인에 예약·결합한 버퍼를 넘기면 유체 프레임마다 그래픽 제출이 1회 늘고, 유체가 없는 프레임은 0이다. 잘못된 view·stride·개수·alpha와 Water 클래스가 아닌 재질은 호출 스레드에서 거부한다. 디버그 오류 0.
 - v1.69 (2026-09-26, 렌더 A: 머리카락 호스트, GPU 브리지 호스트; v1.67·v1.68은 렌더 C의 A6 투과 층과 coverageSpecial):
   - **머리카락 호스트(B10, E의 hair::HairSystem과 1:1)**: `HostRenderer::hairAddBody / hairTick / hairSetFrameFraction / hairRemoveBody`, 선택 export `UnxHairAddBody(UnxHairBodyDesc 112 B) / UnxHairTick(관절 3×4, UnxHairCapsule 32 B, 바람, dt) / UnxHairSetFrameFraction / UnxHairRemoveBody`.
     - 몸체 id는 호스트 거울이 정하고, 렌더 스레드가 연산을 순서대로 재생해 같은 id를 얻는다(해제된 id는 마지막 해제부터 재사용). 검증은 호출 스레드에서 E의 addBody와 Hair 클래스 재질 검사로 한다.

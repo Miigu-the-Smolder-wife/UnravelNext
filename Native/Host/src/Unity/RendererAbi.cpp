@@ -494,6 +494,7 @@ UNX_API int32_t UNX_CALL UnxFrameSetFluids(UnxRenderer r, const UnxFluidInput* f
             in[i].view = fluids[i].view;
             in[i].alpha = fluids[i].alpha;
             std::memcpy(in[i].domainCells, fluids[i].domainCells, sizeof in[i].domainCells);
+            in[i].material = fluids[i].material;
         }
         uint64_t s[6];
         std::memcpy(s, stamp, sizeof s);

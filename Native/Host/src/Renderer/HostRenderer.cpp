@@ -973,6 +973,9 @@ void HostRenderer::setFluids(std::span<const FluidInput> fluids, const uint64_t 
         f.frame.alpha = in.alpha;
         f.frame.tick = v.tick;
         std::memcpy(f.frame.domainCells, in.domainCells, sizeof f.frame.domainCells);
+        if (in.material >= m_scene.materials.size() || m_scene.materials[in.material].cls != scene::MaterialClass::Water)
+            fail("fluids: material %u is not a Water-class material", in.material);
+        f.frame.material = in.material;
         f.currentResource = v.currentResource;
         f.startResource = v.startResource;
         list->push_back(f);

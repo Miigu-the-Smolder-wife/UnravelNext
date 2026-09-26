@@ -324,6 +324,7 @@ public:
         const void* view = nullptr;  // NP_FluidGpuView
         float alpha = 1;
         uint32_t domainCells[3] = {};
+        uint32_t material = 0;       // the scene material of its surface (Water class)
     };
     void setFluids(std::span<const FluidInput> fluids, const uint64_t (&stamp)[6]);
     void setSimulation(uint32_t gpuSimulation);

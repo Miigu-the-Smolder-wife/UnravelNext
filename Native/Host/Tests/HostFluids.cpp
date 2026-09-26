@@ -59,6 +59,10 @@ int main()
         o.qualityDirectory = std::filesystem::path(UNX_SOURCE_DIR) / "Config/quality";
         HostRenderer h(o);
         h.scene() = host::test::oneBox();
+        scene::Material water = h.scene().materials[0];
+        water.cls = scene::MaterialClass::Water;
+        water.ior = 1.33f;
+        h.scene().materials.push_back(water);
         h.commit();
         uint64_t index = 0;
         auto frames = [&](uint32_t n) {
@@ -122,6 +126,7 @@ int main()
         in.view = &view;
         in.alpha = 0.5f;
         in.domainCells[0] = in.domainCells[1] = in.domainCells[2] = 64;
+        in.material = 1;
         h.setFluids({ &in, 1 }, stamp);
         frames(3);
         const uint64_t with = submissions();
@@ -148,6 +153,9 @@ int main()
         HostRenderer::FluidInput badAlpha = in;
         badAlpha.alpha = 1.5f;
         expect("alpha outside [0, 1] is refused", throws([&] { h.setFluids({ &badAlpha, 1 }, stamp); }));
+        HostRenderer::FluidInput badMaterial = in;
+        badMaterial.material = 0;
+        expect("a material that is not Water-class is refused", throws([&] { h.setFluids({ &badMaterial, 1 }, stamp); }));
 
         // 3.
         bridge.release_resource(bridge.context, id);
