@@ -30,8 +30,8 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint index 
         const float height = p.camera.y - p.waterLevel;
         const float nearest = viewGridRow(p, uint(base.y)).x, farthest = viewGridRow(p, uint(base.y) + 8).x;
         const float eLo = -atan(height / max(nearest, 1e-3)), eHi = -atan(height / max(farthest, 1e-3));
-        const float widen = viewGridWiden(p, nearest, asfloat(P[1].x));
-        g_run = (phiHi + widen >= asfloat(P[1].y) && phiLo - widen <= asfloat(P[1].z) && eHi + widen >= asfloat(P[1].w) && eLo - widen <= asfloat(P[2].x)) ? 1 : 0;
+        const float widen = viewGridWiden(p, nearest, asfloat(P[1].x)), widenAzimuth = viewGridWidenAzimuth(nearest, asfloat(P[1].x));
+        g_run = (phiHi + widenAzimuth >= asfloat(P[1].y) && phiLo - widenAzimuth <= asfloat(P[1].z) && eHi + widen >= asfloat(P[1].w) && eLo - widen <= asfloat(P[2].x)) ? 1 : 0;
     }
     GroupMemoryBarrierWithGroupSync();
     if (!g_run) return;

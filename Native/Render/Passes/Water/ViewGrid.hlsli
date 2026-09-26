@@ -11,9 +11,11 @@
 //               5 columns, rows, width, height (uint)
 //               6 cascade lengths (m) 0..2, near plane (m: view depth; points nearer are invalid)
 //               7 mask: lake centre x, z, radius (m), enabled (uint; 0 = open sea)
-//               8 near-field levels K (uint), 0, 0, 0
+//               8 near-field levels K (uint), spacing coefficient (s(t) = coefficient sqrt(t)), distance floor t_floor (m), 0
 //   from byte 144, per near level i (32 B): (inner radius, outer radius (m, horizontal), spacing s_i (m), points per side
 //               n_i (uint)), (lattice origin x, z (int: point (a, b) is at (origin + (a, b)) s_i), 0, 0)
+//   byte 400: the screen's angular window (azimuth min, max, elevation min, max; rad)
+//   byte 416: diagnostics' drawn-block list UAV (raw: count, then (level, block x, z) from byte 16; 0 = none)
 //   from byte 512: per far row j, (r_j, along spacing at r_j) float2
 #ifndef UNX_WATER_VIEW_GRID_HLSLI
 #define UNX_WATER_VIEW_GRID_HLSLI
@@ -72,6 +74,26 @@ ViewGridNearLevel viewGridNearLevel(ViewGridParams p, uint level)
     l.inner = asfloat(r0.x); l.outer = asfloat(r0.y); l.spacing = asfloat(r0.z); l.points = r0.w;
     l.origin = asint(r1.xy);
     return l;
+}
+float viewGridNearCoefficient(ViewGridParams p)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[p.srv];
+    return asfloat(b.Load(132));
+}
+float viewGridNearFloor(ViewGridParams p)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[p.srv];
+    return asfloat(b.Load(136));
+}
+uint viewGridDrawnList(ViewGridParams p)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[p.srv];
+    return b.Load(416);
+}
+float4 viewGridWindow(ViewGridParams p)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[p.srv];
+    return asfloat(b.Load4(400));
 }
 // Row j: (rest distance r_j, spacing along the view there).
 float2 viewGridRow(ViewGridParams p, uint row)
@@ -134,13 +156,18 @@ float3 viewGridProject(ViewGridParams p, float3 world)
     const float x = dot(v, p.right) / (z * p.tanX), y = dot(v, p.up) / (z * p.tanY);
     return float3((x * 0.5 + 0.5) * float(p.width), (0.5 - y * 0.5) * float(p.height), z);
 }
-// Angular radius (rad) of the displacement bound's sphere (radius `bound`) around a rest point at horizontal distance r:
-// asin(bound / D), D = |(r, h)| its distance from the camera; the whole sphere of directions (4 rad: no culling) when
-// the camera is inside it.
+// How far a displacement of at most `bound` moves a rest point's direction at horizontal distance r: in elevation at most
+// the sphere's angular radius asin(bound / D), D = |(r, h)| (4 rad: no culling when the camera is inside the sphere); in
+// azimuth at most asin(bound / r) about the vertical axis - near the nadir a small horizontal move turns the azimuth far
+// (4 rad when bound >= r).
 float viewGridWiden(ViewGridParams p, float r, float bound)
 {
     const float h = p.camera.y - p.waterLevel, distance = sqrt(r * r + h * h);
     return bound >= distance ? 4.0 : asin(bound / distance);
+}
+float viewGridWidenAzimuth(float r, float bound)
+{
+    return bound >= r ? 4.0 : asin(bound / r);
 }
 // Whether the water body reaches within `reach` of rest position x0 (its signed distance <= reach). With reach = the
 // grid cell's diagonal, every triangle that touches the water has a vertex that passes: the surface is kept up to one

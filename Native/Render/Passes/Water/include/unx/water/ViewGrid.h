@@ -35,7 +35,9 @@ struct ViewGridLayout
     std::vector<float> params;  // the parameter buffer (ViewGrid.hlsli): 32 floats of header, then the row table
     uint32_t columns = 0, rows = 0;
     float window[4] = {};       // the screen's angular window: azimuth min, max, elevation min, max (rad)
-    uint32_t nearLevels = 0, nearPoints = 0;  // near-field lattices and the largest one's points per side
+    uint32_t nearLevels = 0;       // adaptive near-field levels
+    int32_t nearFirst[2] = {};      // the top level's first block (level-local block coordinates)
+    uint32_t nearWidth = 0;        // the top level's blocks per side
 };
 struct ViewGridOutput
 {
@@ -43,7 +45,8 @@ struct ViewGridOutput
     render::TextureRef depth;    // R32F view depth, +inf where no water
     render::BufferRef keys;      // raw, 8 B per pixel: triangle id (low), depth bits (high); ~0 = none
     render::BufferRef counters;  // uint: big triangles (rasterised by tiles), big triangles lost past the list (0), big tiles
-    render::TextureRef error;    // diagnostics only: R32F |S(x0) - P| / pixel footprint of each output point (tests)
+    render::TextureRef error;    // diagnostics only: R32F normal distance to the surface / pixel footprint of each output point
+    render::BufferRef nearDrawn; // diagnostics only: the adaptive near field's drawn blocks (raw: count, then (level, x, z) x 16 B)
     uint32_t columns = 0, rows = 0;
 };
 
@@ -67,5 +70,9 @@ private:
     std::vector<uint8_t*> m_mapped;
     std::vector<uint32_t> m_srv;
     render::ComPtr<ID3D12CommandSignature> m_dispatch;
+    render::ComPtr<ID3D12Resource> m_pyramid;  // ocean bounds pyramid (OceanBounds.hlsl)
+    uint32_t m_pyramidUav[10] = {};
+    render::ComPtr<ID3D12Resource> m_drawn;  // diagnostics' drawn-block list
+    uint32_t m_drawnUav = 0;
 };
 } // namespace unx::water

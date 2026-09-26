@@ -16,6 +16,7 @@ namespace
 constexpr double kPi = 3.14159265358979323846;
 constexpr uint64_t kParamBytes = 512 + uint64_t(ViewGrid::kMaxRows) * 8;
 constexpr uint32_t kNearLevels = 8;        // ViewGrid.hlsli VG_NEAR_LEVELS
+constexpr uint32_t kNearBlocks = 262144;   // near-field blocks per level list (past it the parent level draws)
 constexpr uint32_t kBigCapacity = 65536;   // big-triangle list (48 B records; past it the triangles are counted as lost)
 
 double wrapNear(double phi, double reference)
@@ -36,6 +37,49 @@ ViewGrid::ViewGrid(Device& device, ShaderLibrary& shaders, uint32_t framesInFlig
     signature.NumArgumentDescs = 1;
     signature.pArgumentDescs = &argument;
     check(device.d3d()->CreateCommandSignature(&signature, nullptr, IID_PPV_ARGS(&m_dispatch)), "view grid dispatch signature");
+    {
+        // The ocean bounds pyramid (OceanBounds.hlsl): 3 cascades x 512^2, 10 mips, a UAV per mip.
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC1 d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        d.Width = d.Height = 512;
+        d.DepthOrArraySize = 3;
+        d.MipLevels = 10;
+        d.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        d.SampleDesc.Count = 1;
+        d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_COMMON, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_pyramid)),
+              "ocean bounds pyramid");
+        m_pyramid->SetName(L"ocean bounds pyramid");
+        // Diagnostics' drawn-block list (count, then 16 B per block, 2^20 blocks), with a fixed UAV for the parameters.
+        D3D12_RESOURCE_DESC1 b{};
+        b.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        b.Width = 16 + (uint64_t(1) << 20) * 16;
+        b.Height = b.DepthOrArraySize = b.MipLevels = 1;
+        b.SampleDesc.Count = 1;
+        b.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        b.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &b, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_drawn)),
+              "view grid drawn blocks");
+        m_drawn->SetName(L"view grid drawn blocks");
+        m_drawnUav = device.descriptors().allocateResource();
+        D3D12_UNORDERED_ACCESS_VIEW_DESC du{};
+        du.Format = DXGI_FORMAT_R32_TYPELESS;
+        du.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        du.Buffer.NumElements = UINT(b.Width / 4);
+        du.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        device.d3d()->CreateUnorderedAccessView(m_drawn.Get(), nullptr, &du, device.descriptors().resourceCpu(m_drawnUav));
+        for (uint32_t m = 0; m < 10; ++m)
+        {
+            m_pyramidUav[m] = device.descriptors().allocateResource();
+            D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+            ud.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+            ud.Texture2DArray.MipSlice = m;
+            ud.Texture2DArray.ArraySize = 3;
+            device.d3d()->CreateUnorderedAccessView(m_pyramid.Get(), nullptr, &ud, device.descriptors().resourceCpu(m_pyramidUav[m]));
+        }
+    }
     for (uint32_t s = 0; s < framesInFlight; ++s)
     {
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_UPLOAD };
@@ -73,6 +117,10 @@ ViewGrid::~ViewGrid()
         m_device.deferRelease(u);
     }
     for (uint32_t srv : m_srv) m_device.descriptors().freeResource(srv);
+    m_device.deferRelease(m_pyramid);
+    m_device.deferRelease(m_drawn);
+    m_device.descriptors().freeResource(m_drawnUav);
+    for (uint32_t uav : m_pyramidUav) m_device.descriptors().freeResource(uav);
 }
 
 ViewGridLayout ViewGrid::layout(const ViewGridCamera& c, const ViewGridWater& w, const float lengths[3])
@@ -150,40 +198,60 @@ ViewGridLayout ViewGrid::layout(const ViewGridCamera& c, const ViewGridWater& w,
     std::memcpy(p, row0, 16); std::memcpy(p + 4, row1, 16); std::memcpy(p + 8, row2, 16); std::memcpy(p + 12, row3, 16);
     std::memcpy(p + 16, row4, 16); std::memcpy(p + 20, row5, 16); std::memcpy(p + 24, row6, 16); std::memcpy(p + 28, lake, 12); std::memcpy(p + 31, &lakeOn, 4);
     if (uint64_t(out.columns) * out.rows * 2 >= (1ull << 31)) fail("view grid: %u x %u far-field quads exceed the triangle ids", out.columns, out.rows);
-    // Near field (FEATURES_GAME 1.8 B.2): rings of rest distance r_n, r_n / 4, ... down to the camera's height, each a
-    // world lattice whose spacing (lambda_min / 2 pi) sqrt(8 e t theta / A_min) at the ring's nearest possible distance
-    // to the displaced surface, t = |(max(inner - R, 0), max(h - A, 0))| (at least 5 cm), keeps
-    // the linear interpolation error within e = 0.4 px (0.1 px under the definition's 0.5 for the rest of the chain):
-    // band k contributes (k s)^2 / 8 A_k with A_k = 0.048 lambda (3 sigma in the saturation range), so the octaves sum to
-    // twice the finest band's (lambda_min = two finest-cascade texels) - measured on WARP: the finest band alone gave
-    // 0.67 px at the 99.9th percentile against a 0.4 px target.
+    // Near field (FEATURES_GAME 1.8 B.2, adaptive): world lattices with spacing s_0 2^l; each 8 x 8-quad block takes the
+    // coarsest level whose spacing fits s(t) = coefficient sqrt(t) at the block's nearest possible distance t to the
+    // displaced surface (bounded on the GPU from the ocean bounds pyramid). coefficient = (lambda_min / 2 pi)
+    // sqrt(8 e theta / (2 A_min)): the linear interpolation error within e = 0.4 px, the octaves' sum twice the finest
+    // band's (lambda_min = two finest-cascade texels, 3 sigma height A_min = 0.048 lambda_min in the saturation range;
+    // measured on WARP: the finest band alone gave 0.67 px at the 99.9th percentile against a 0.4 px target).
+    // s_0 = s(t_floor) with t_floor the near plane (at least 2 cm); the top level fits the farthest possible surface.
+    // Level origins are aligned so a block's children are whole blocks one level down; ids hold 8191 quads per axis.
+    const float window[4] = { out.window[0], out.window[1], out.window[2], out.window[3] };
+    std::memcpy(p + 100, window, 16);
     if (h > 0)
     {
         const double lambdaMin = 2.0 * lengths[2] / 512, aMin = 0.048 * lambdaMin;
         const double coefficient = lambdaMin / (2 * kPi) * std::sqrt(8 * 0.4 * theta / (2 * aMin));
-        std::vector<double> outer;
-        for (double r = w.nearRadius;; r /= 4)
-        {
-            outer.push_back(r);
-            if (r <= std::max(h, 0.25) || outer.size() == kNearLevels) break;
-        }
-        std::reverse(outer.begin(), outer.end());
-        const uint32_t levels = uint32_t(outer.size());
+        const double tFloor = std::max(double(c.nearPlane), 0.02), s0 = coefficient * std::sqrt(tFloor);
+        const double tFar = std::hypot(double(w.nearRadius) + w.horizontalBound, h + w.verticalBound);
+        const uint32_t levels = std::min<uint32_t>(kNearLevels, uint32_t(std::max(1.0, std::ceil(std::log2(coefficient * std::sqrt(tFar) / s0)) + 1)));
+        const float header[3] = { 0, float(coefficient), float(tFloor) };
         std::memcpy(p + 32, &levels, 4);
-        for (uint32_t i = 0; i < levels; ++i)
+        std::memcpy(p + 33, &header[1], 8);
+        int64_t origin[kNearLevels][2] = {};
+        for (int32_t l = int32_t(levels) - 1; l >= 0; --l)
         {
-            const double inner = i ? outer[i - 1] : 0.0;
-            const double spacing = coefficient * std::sqrt(std::max(std::hypot(std::max(inner - w.horizontalBound, 0.0), std::max(h - w.verticalBound, 0.0)), 0.05));
-            const uint32_t n = 2 * uint32_t(std::ceil((outer[i] + 2 * spacing) / spacing)) + 2;
-            if (n - 1 > 11585) fail("view grid: near level %u has %u points per side (the triangle ids hold 11585 quads)", i, n);
-            const int32_t origin[2] = { int32_t(std::floor(c.position[0] / spacing)) - int32_t(n / 2), int32_t(std::floor(c.position[2] / spacing)) - int32_t(n / 2) };
-            const float row[3] = { float(inner), float(outer[i]), float(spacing) };
-            std::memcpy(p + 36 + 8 * i, row, 12);
-            std::memcpy(p + 36 + 8 * i + 3, &n, 4);
-            std::memcpy(p + 36 + 8 * i + 4, origin, 8);
-            out.nearPoints = std::max(out.nearPoints, n);
+            const double spacing = s0 * double(1u << l);
+            for (int a = 0; a < 2; ++a)
+            {
+                const double camera = a ? c.position[2] : c.position[0];
+                if (l == int32_t(levels) - 1) origin[l][a] = int64_t(std::floor((camera / spacing - 4096) / 8)) * 8;
+                else origin[l][a] = 2 * origin[l + 1][a] + 8 * int64_t(std::llround((camera / spacing - 4096 - 2.0 * origin[l + 1][a]) / 8));
+            }
+            if (std::abs(origin[l][0]) > (1ll << 30) || std::abs(origin[l][1]) > (1ll << 30)) fail("view grid: near level %d origin out of range", l);
+            const float row[3] = { 0, w.nearRadius, float(spacing) };
+            const uint32_t points = 8192;
+            const int32_t o[2] = { int32_t(origin[l][0]), int32_t(origin[l][1]) };
+            std::memcpy(p + 36 + 8 * l, row, 12);
+            std::memcpy(p + 36 + 8 * l + 3, &points, 4);
+            std::memcpy(p + 36 + 8 * l + 4, o, 8);
         }
+        // The top level's blocks covering the near disk (with a cell of overlap into the far field).
+        const double top = s0 * double(1u << (levels - 1));
+        const double reach = w.nearRadius + 2 * top;
+        int32_t first[2];
+        for (int a = 0; a < 2; ++a)
+        {
+            const double camera = a ? c.position[2] : c.position[0];
+            first[a] = int32_t(std::floor(((camera - reach) / top - double(origin[levels - 1][a])) / 8));
+        }
+        const uint32_t width = uint32_t(std::ceil(2 * reach / (8 * top))) + 2;
+        if (first[0] < 1 || first[1] < 1 || (first[0] + int32_t(width)) * 8 + 9 >= 8191 || (first[1] + int32_t(width)) * 8 + 9 >= 8191)
+            fail("view grid: the near disk does not fit the top level's id range");
         out.nearLevels = levels;
+        out.nearFirst[0] = first[0];
+        out.nearFirst[1] = first[1];
+        out.nearWidth = width;
     }
     return out;
 }
@@ -191,7 +259,9 @@ ViewGridLayout ViewGrid::layout(const ViewGridCamera& c, const ViewGridWater& w,
 ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutput& fields, const float lengths[3], const ViewGridCamera& camera, const ViewGridWater& water,
                                 bool diagnostics)
 {
-    const ViewGridLayout l = layout(camera, water, lengths);
+    ViewGridLayout l = layout(camera, water, lengths);
+    const uint32_t drawnUav = diagnostics ? m_drawnUav : 0;
+    std::memcpy(&l.params[104], &drawnUav, 4);  // byte 416
     const uint32_t slot = uint32_t(frame % m_upload.size());
     std::memcpy(m_mapped[slot], l.params.data(), l.params.size() * 4);
     const uint32_t paramSrv = m_srv[slot], width = camera.width, height = camera.height, pixels = width * height;
@@ -240,15 +310,79 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
         });
     if (l.nearLevels)
     {
-        ID3D12PipelineState* nearScatter = m_shaders.compute("Passes/Water/ViewGridNearScatter");
-        const uint32_t nearGroups = (l.nearPoints - 1 + 7) / 8, levels = l.nearLevels;
-        g.addPass("view grid near scatter", QueueType::Graphics, scatterUses, [=](PassContext& c) {
-            uint32_t k[12];
-            scatterConstants(c, k);
-            c.cmd->SetPipelineState(nearScatter);
-            c.computeConstants(k, 12);
-            c.cmd->Dispatch(nearGroups, nearGroups, levels);
-        });
+        // Adaptive near field: the bounds pyramid, then level L - 1 over the rectangle and each finer level over the blocks
+        // its parent level split (indirect), ping-ponging two lists.
+        const TextureRef pyramid = g.importTexture(m_pyramid.Get(), TextureDesc{ "ocean bounds pyramid", 512, 512, 3, 10, DXGI_FORMAT_R32G32B32A32_FLOAT }, D3D12_BARRIER_LAYOUT_COMMON);
+        ID3D12PipelineState* bounds = m_shaders.compute("Passes/Water/OceanBounds");
+        const float texels[3] = { lengths[0] / 512, lengths[1] / 512, lengths[2] / 512 };
+        for (uint32_t mip = 0; mip < 10; ++mip)
+        {
+            const uint32_t dst = m_pyramidUav[mip], src = mip ? m_pyramidUav[mip - 1] : 0, size = 512u >> mip;
+            g.addPass("ocean bounds pyramid", QueueType::Graphics,
+                      [&](PassBuilder& pb) { pb.use(displacement, Use::SrvCompute); pb.use(slopes, Use::SrvCompute); pb.use(pyramid, Use::UavCompute); },
+                      [=](PassContext& c) {
+                          uint32_t k[12] = { c.srv(displacement), c.srv(slopes), dst, src, mip };
+                          std::memcpy(&k[8], texels, 12);
+                          c.cmd->SetPipelineState(bounds);
+                          c.computeConstants(k, 12);
+                          c.cmd->Dispatch((size + 7) / 8, (size + 7) / 8, 3);
+                      });
+        }
+        const BufferRef lists[2] = { g.createBuffer({ "view grid near blocks A", 16 + uint64_t(kNearBlocks) * 8, 0 }),
+                                     g.createBuffer({ "view grid near blocks B", 16 + uint64_t(kNearBlocks) * 8, 0 }) };
+        const BufferRef levelArgs = g.createBuffer({ "view grid near dispatch", 256, 0 });
+        const BufferRef firstList = lists[0];
+        const BufferRef drawn = g.importBuffer(m_drawn.Get(), { "view grid drawn blocks", m_drawn->GetDesc().Width, 0 });
+        out.nearDrawn = diagnostics ? drawn : BufferRef{};
+        const uint32_t drawnUavFixed = m_drawnUav;
+        g.addPass("view grid near list clear", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(firstList, Use::UavCompute); pb.use(drawn, Use::UavCompute); },
+                  [=](PassContext& c) {
+                      c.cmd->SetPipelineState(clear);  // ViewGridClear: the counts only
+                      const uint32_t k[4] = { 0, 0, c.uav(firstList), 4 };
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(1, 1, 1);
+                      const uint32_t d[4] = { 0, 0, drawnUavFixed, 4 };
+                      c.computeConstants(d, 4);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+        ID3D12PipelineState* adaptive = m_shaders.compute("Passes/Water/ViewGridAdaptive");
+        ID3D12PipelineState* args = m_shaders.compute("Passes/Water/ViewGridAdaptiveArgs");
+        ID3D12CommandSignature* signature = m_dispatch.Get();
+        const int32_t rect[2] = { l.nearFirst[0], l.nearFirst[1] };
+        const uint32_t rectWidth = l.nearWidth;
+        for (int32_t level = int32_t(l.nearLevels) - 1; level >= 0; --level)
+        {
+            const bool top = level == int32_t(l.nearLevels) - 1;
+            const uint32_t step = uint32_t(int32_t(l.nearLevels) - 1 - level);  // passes since the top
+            const BufferRef in = lists[(step + 1) & 1], outList = lists[step & 1];
+            if (!top)
+                g.addPass("view grid near args", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(in, Use::UavCompute); pb.use(levelArgs, Use::UavCompute); pb.use(outList, Use::UavCompute); },
+                          [=](PassContext& c) {
+                              const uint32_t k[4] = { c.uav(in), c.uav(levelArgs), kNearBlocks, c.uav(outList) };
+                              c.cmd->SetPipelineState(args);
+                              c.computeConstants(k, 4);
+                              c.cmd->Dispatch(1, 1, 1);
+                          });
+            g.addPass("view grid near level", QueueType::Graphics,
+                      [&](PassBuilder& pb) {
+                          scatterUses(pb);
+                          pb.use(pyramid, Use::SrvCompute);
+                          pb.use(drawn, Use::UavCompute);
+                          pb.use(outList, Use::UavCompute);
+                          if (!top) { pb.use(in, Use::SrvCompute); pb.use(levelArgs, Use::IndirectArgs); }
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[16] = { paramSrv, c.srv(displacement), c.uav(keys), c.uav(counters), c.uav(big), kBigCapacity, c.srv(slopes), c.srv(pyramid),
+                                             uint32_t(level), top ? 0u : c.srv(in), c.uav(outList), kNearBlocks };
+                          std::memcpy(&k[12], rect, 8);
+                          k[14] = rectWidth;
+                          k[15] = top ? 1u : 0u;
+                          c.cmd->SetPipelineState(adaptive);
+                          c.computeConstants(k, 16);
+                          if (top) c.cmd->Dispatch(rectWidth, rectWidth, 1);
+                          else c.cmd->ExecuteIndirect(signature, 1, c.resource(levelArgs), 0, nullptr, 0);
+                      });
+        }
     }
     // Big triangles: prefix of their 8 x 8 tiles, then one thread per tile (indirect).
     ID3D12PipelineState* bigScan = m_shaders.compute("Passes/Water/ViewGridBigScan");

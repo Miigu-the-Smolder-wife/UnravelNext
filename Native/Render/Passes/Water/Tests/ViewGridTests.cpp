@@ -7,8 +7,8 @@
 //   2. continuous surface: every output point's distance to the continuous surface along its normal, (S(x0) - P) . n
 //      (the resolve's diagnostic output; a polished point's residual, else the mesh point's), is <= 0.5 px at 99.9 % of
 //      the water pixels; the polished fraction and the mesh-to-polished move along the view are printed
-// Scenes (cameras above the crests: h > A; a camera within the wave height needs the adaptive near field, FEATURES_GAME
-// 1.8 B.2): open sea (camera 12 m, pitch -10 deg), a waterside lake, looking down at the water under the camera (2 m,
+// Scenes: open sea (camera 12 m, pitch -10 deg), a waterside lake, swimming (0.3 m: the camera within the wave height,
+// the adaptive near field), looking down at the water under the camera (2 m,
 // pitch -70 deg: the near field fills the screen), a calm sea (wind 2 m/s, bounds 0.15 m) under a camera 0.17 m above it
 // (pitch -80 deg, twice the resolution: near-field triangles past 8 x 8 px go through the big-triangle tiles; the scene
 // requires some).
@@ -140,6 +140,7 @@ int main(int argc, char** argv)
         const Scene scenes[] = {
             { "open sea, camera 12 m, pitch -10 deg", { 3.7, 12.0, -5.3 }, 0.3, -10 * kPi / 180, false, {}, 0 },
             { "waterside lake (r 150 m, 220 m ahead)", { 3.7, 12.0, -5.3 }, 0.3, -4 * kPi / 180, true, { 3.7 + 220 * std::cos(0.3), -5.3 + 220 * std::sin(0.3) }, 150 },
+            { "swimming, camera 0.3 m, pitch 0", { 3.7, 0.3, -5.3 }, 0.3, 0, false, {}, 0 },
             { "looking down, camera 2 m, pitch -70 deg", { 3.7, 2.0, -5.3 }, 0.3, -70 * kPi / 180, false, {}, 0 },
             { "calm sea, camera 0.17 m, pitch -80 deg, twice the resolution", { 3.7, 0.17, -5.3 }, 0.3, -80 * kPi / 180, false, {}, 0 },
         };
@@ -158,15 +159,55 @@ int main(int argc, char** argv)
             water.lakeCentre[1] = float(scene.lakeCentre[1]);
             water.lakeRadius = float(scene.lakeRadius);
             const auto layout = ViewGrid::layout(camera, water, od.lengths);
-            // The grids: the far field, then every near level (points per side from the parameter header).
-            struct GridPart { uint32_t nearField, level, across, points; };
-            std::vector<GridPart> parts = { { 0, 0, layout.columns, layout.columns * layout.rows } };
-            for (uint32_t l = 0; l < layout.nearLevels; ++l)
+            // The adaptive near field's drawn blocks (a first frame; the second frame decides the same blocks: the same ocean
+            // time and camera).
+            std::vector<uint32_t> drawnBlocks;  // (level, x, z, 0) per block
             {
-                uint32_t n;
-                std::memcpy(&n, &layout.params[36 + 8 * l + 3], 4);
-                parts.push_back({ 1, l, n, n * n });
+                RenderGraph g0(gpu.device);
+                const auto f0 = (calm ? calmOcean : ocean).record(g0, 37.25);
+                const auto o0 = grid.record(g0, frame++, f0, od.lengths, camera, water, true);
+                if (o0.nearDrawn.valid())
+                {
+                    ComPtr<ID3D12Resource> rb0 = buffer(gpu.device, 16 + (uint64_t(1) << 20) * 16, D3D12_HEAP_TYPE_READBACK);
+                    ID3D12Resource* r0 = rb0.Get();
+                    const BufferRef nd = o0.nearDrawn;
+                    g0.addPass("view grid drawn read", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(nd, Use::CopySrc); pb.keep(); },
+                               [=](PassContext& c) { c.cmd->CopyBufferRegion(r0, 0, c.resource(nd), 0, 16 + (uint64_t(1) << 20) * 16); });
+                    g0.execute(nullptr);
+                    for (uint32_t q = 0; q < kQueueTypeCount; ++q) gpu.device.queue((QueueType)q).waitCpu(g0.lastFence((QueueType)q));
+                    const uint32_t* m0 = nullptr;
+                    check(rb0->Map(0, nullptr, (void**)&m0), "map drawn blocks");
+                    const uint32_t count = std::min(m0[0], 1u << 20);
+                    drawnBlocks.assign(m0 + 4, m0 + 4 + size_t(count) * 4);
+                    rb0->Unmap(0, nullptr);
+                    W_CHECK(m0[0] <= (1u << 20), "%s: %u drawn blocks exceed the diagnostic list", scene.name, m0[0]);
+                }
+                else
+                {
+                    g0.execute(nullptr);
+                    for (uint32_t q = 0; q < kQueueTypeCount; ++q) gpu.device.queue((QueueType)q).waitCpu(g0.lastFence((QueueType)q));
+                }
             }
+            // The grids: the far field, then the drawn near blocks (11 x 11 vertices each).
+            struct GridPart { uint32_t mode, across, points; };
+            std::vector<GridPart> parts = { { 0, layout.columns, layout.columns * layout.rows } };
+            if (!drawnBlocks.empty()) parts.push_back({ 2, 11, uint32_t(drawnBlocks.size() / 4) * 121 });
+            ComPtr<ID3D12Resource> entries = buffer(gpu.device, std::max<size_t>(drawnBlocks.size() * 4, 16), D3D12_HEAP_TYPE_UPLOAD);
+            if (!drawnBlocks.empty())
+            {
+                void* m = nullptr;
+                check(entries->Map(0, nullptr, &m), "map entries");
+                std::memcpy(m, drawnBlocks.data(), drawnBlocks.size() * 4);
+                entries->Unmap(0, nullptr);
+            }
+            D3D12_SHADER_RESOURCE_VIEW_DESC ed{};
+            ed.Format = DXGI_FORMAT_R32_TYPELESS;
+            ed.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            ed.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            ed.Buffer.NumElements = UINT(std::max<size_t>(drawnBlocks.size(), 64));
+            ed.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+            const uint32_t entrySrv = gpu.device.descriptors().allocateResource();
+            gpu.device.d3d()->CreateShaderResourceView(entries.Get(), &ed, gpu.device.descriptors().resourceCpu(entrySrv));
             uint64_t points = 0;
             for (const GridPart& part : parts) points += part.points;
 
@@ -197,7 +238,7 @@ int main(int argc, char** argv)
                 const BufferRef partOut = g.createBuffer({ "view grid probe part", uint64_t(part.points) * 16 + 256, 0 });
                 g.addPass("view grid probe", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(displacement, Use::SrvCompute); pb.use(slopeField, Use::SrvCompute); pb.use(partOut, Use::UavCompute); },
                           [=](PassContext& c) {
-                              const uint32_t k[8] = { paramSrv, c.srv(displacement), c.uav(partOut), part.points, part.nearField, part.level, c.srv(slopeField), 0 };
+                              const uint32_t k[8] = { paramSrv, c.srv(displacement), c.uav(partOut), part.points, part.mode, 0, c.srv(slopeField), entrySrv };
                               c.cmd->SetPipelineState(probe);
                               c.computeConstants(k, 8);
                               c.cmd->Dispatch((part.points + 63) / 64, 1, 1);
@@ -228,7 +269,7 @@ int main(int argc, char** argv)
                           D3D12_TEXTURE_COPY_LOCATION src{ c.resource(surface), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
                           c.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
                           c.cmd->CopyBufferRegion(r, keyBytes + surfaceBytes, c.resource(probeOut), 0, probeBytes);
-                          c.cmd->CopyBufferRegion(r, keyBytes + surfaceBytes + probeBytes, c.resource(counters), 0, 8);
+                          c.cmd->CopyBufferRegion(r, keyBytes + surfaceBytes + probeBytes, c.resource(counters), 0, 16);
                           D3D12_TEXTURE_COPY_LOCATION edst{ r, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
                           edst.PlacedFootprint.Offset = errorAt;
                           edst.PlacedFootprint.Footprint = { DXGI_FORMAT_R32_FLOAT, w, h, 1, errorPitch };
@@ -238,6 +279,7 @@ int main(int argc, char** argv)
             g.execute(nullptr);
             for (uint32_t q = 0; q < kQueueTypeCount; ++q) gpu.device.queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
             gpu.device.descriptors().freeResource(paramSrv);
+            gpu.device.descriptors().freeResource(entrySrv);
             const uint8_t* m = nullptr;
             check(rb->Map(0, nullptr, (void**)&m), "map readback");
             std::vector<uint64_t> key((const uint64_t*)m, (const uint64_t*)(m + keyBytes));
@@ -245,10 +287,11 @@ int main(int argc, char** argv)
             std::vector<int32_t> vert((const int32_t*)(m + keyBytes + surfaceBytes), (const int32_t*)(m + keyBytes + surfaceBytes + probeBytes));
             std::vector<float> pointError(pixels);
             for (uint32_t y = 0; y < sceneHeight; ++y) std::memcpy(&pointError[size_t(y) * sceneWidth], m + errorAt + uint64_t(y) * errorPitch, sceneWidth * 4);
-            uint32_t bigCounts[2] = {};
-            std::memcpy(bigCounts, m + keyBytes + surfaceBytes + probeBytes, 8);
+            uint32_t bigCounts[4] = {};  // big appended, big lost, big tiles, near blocks the lists or ids could not hold
+            std::memcpy(bigCounts, m + keyBytes + surfaceBytes + probeBytes, 16);
             rb->Unmap(0, nullptr);
             W_CHECK(bigCounts[1] == 0, "%s: %u big triangles lost past the list", scene.name, bigCounts[1]);
+            W_CHECK(bigCounts[3] == 0, "%s: %u near blocks drawn at a coarser level (lists or ids full)", scene.name, bigCounts[3]);
 
             // 1. CPU raster of the probe's vertices.
             std::vector<double> ref(pixels, std::numeric_limits<double>::infinity());
@@ -288,16 +331,20 @@ int main(int argc, char** argv)
             for (const GridPart& part : parts)
             {
                 partAcross = part.across;
-                const uint32_t down = part.points / part.across;
-                for (uint32_t j = 0; j + 1 < down; ++j)
-                    for (uint32_t i = 0; i + 1 < part.across; ++i)
-                    {
-                        who = (uint64_t(&part - parts.data()) << 32) | ((j * (part.across - 1) + i) * 2);
-                        tri(vtx(i, j), vtx(i + 1, j), vtx(i + 1, j + 1));
-                        ++who;
-                        tri(vtx(i, j), vtx(i + 1, j + 1), vtx(i, j + 1));
-                    }
-                partBase += size_t(part.points) * 4;
+                // The far field is one grid; the drawn blocks are 11 x 11-vertex grids one after another.
+                const uint32_t grids = part.mode == 2 ? part.points / 121 : 1, down = part.mode == 2 ? 11 : part.points / part.across;
+                for (uint32_t gIndex = 0; gIndex < grids; ++gIndex)
+                {
+                    for (uint32_t j = 0; j + 1 < down; ++j)
+                        for (uint32_t i = 0; i + 1 < part.across; ++i)
+                        {
+                            who = (uint64_t(&part - parts.data()) << 32) | ((j * (part.across - 1) + i) * 2);
+                            tri(vtx(i, j), vtx(i + 1, j), vtx(i + 1, j + 1));
+                            ++who;
+                            tri(vtx(i, j), vtx(i + 1, j + 1), vtx(i, j + 1));
+                        }
+                    partBase += size_t(part.across) * down * 4;
+                }
             }
             uint64_t coverageMismatch = 0, covered = 0;
             double worstDepth = 0;
@@ -310,9 +357,8 @@ int main(int argc, char** argv)
                     {
                         const uint64_t winner = refWho[p];
                         const uint32_t part = uint32_t(winner >> 32), local = uint32_t(winner), across = parts[part].across - 1;
-                        std::printf("  pixel %u: GPU %s, CPU winner part %u (near %u level %u) quad (%u, %u) triangle %u of %u x %u\n", p, g1 ? "covered" : "empty", part,
-                                    parts[part].nearField, parts[part].level, (local >> 1) % across, (local >> 1) / across, local & 1, parts[part].across,
-                                    parts[part].points / parts[part].across);
+                        std::printf("  pixel %u: GPU %s, CPU winner part %u (mode %u) quad (%u, %u) triangle %u\n", p, g1 ? "covered" : "empty", part, parts[part].mode,
+                                    (local >> 1) % across, (local >> 1) / across, local & 1);
                     }
                     ++coverageMismatch;
                     continue;
@@ -364,14 +410,33 @@ int main(int argc, char** argv)
                     const double reach = water.bound() * (1 + horizontal / hCam) + 1;
                     if (scene.lake && std::hypot(scene.position[0] + t * v[0] - scene.lakeCentre[0], scene.position[2] + t * v[2] - scene.lakeCentre[1]) > scene.lakeRadius - reach) continue;
                     ++required;
-                    if (!hit) ++holes;
+                    if (!hit)
+                    {
+                        if (holes < 4)
+                        {
+                            const double hx = scene.position[0] + t * v[0], hz = scene.position[2] + t * v[2];
+                            std::printf("  hole at pixel (%u, %u): still water at (%.3f, %.3f), %.3f m from the camera's foot; drawn blocks over it:", x, y, hx, hz, horizontal);
+                            for (size_t e = 0; e < drawnBlocks.size(); e += 4)
+                            {
+                                const uint32_t lv = drawnBlocks[e];
+                                float sp;
+                                int32_t o[2];
+                                std::memcpy(&sp, &layout.params[36 + 8 * lv + 2], 4);
+                                std::memcpy(o, &layout.params[36 + 8 * lv + 4], 8);
+                                const double x0 = (o[0] + int32_t(drawnBlocks[e + 1]) * 8 - 1) * double(sp), z0 = (o[1] + int32_t(drawnBlocks[e + 2]) * 8 - 1) * double(sp);
+                                if (hx >= x0 && hx <= x0 + 10 * sp && hz >= z0 && hz <= z0 + 10 * sp) std::printf(" (level %u, %d, %d)", lv, int32_t(drawnBlocks[e + 1]), int32_t(drawnBlocks[e + 2]));
+                            }
+                            std::printf("\n");
+                        }
+                        ++holes;
+                    }
                 }
             std::sort(err.begin(), err.end());
             std::sort(moved.begin(), moved.end());
             const double p999 = err.empty() ? 0 : err[std::min(err.size() - 1, size_t(0.999 * err.size()))];
-            std::printf("%s: grid %u x %u + %u near levels, %u big triangles (largest box %lld px); water pixels %llu (required %llu, holes %llu); CPU raster: coverage mismatches %llu, depth max rel %.2e; polished %.2f %% (moved %.3f px at 99.9 %%); "
+            std::printf("%s: grid %u x %u + %u near levels (%zu blocks drawn), %u big triangles (largest box %lld px); water pixels %llu (required %llu, holes %llu); CPU raster: coverage mismatches %llu, depth max rel %.2e; polished %.2f %% (moved %.3f px at 99.9 %%); "
                         "output point to the surface <= median %.3f px, 99.9 %% %.3f px, max %.3f px (%llu > 0.5 px)\n",
-                        scene.name, layout.columns, layout.rows, layout.nearLevels, bigCounts[0], (long long)largestBox, (unsigned long long)water2, (unsigned long long)required, (unsigned long long)holes,
+                        scene.name, layout.columns, layout.rows, layout.nearLevels, drawnBlocks.size() / 4, bigCounts[0], (long long)largestBox, (unsigned long long)water2, (unsigned long long)required, (unsigned long long)holes,
                         (unsigned long long)coverageMismatch, worstDepth, water2 ? 100.0 * polished / water2 : 0.0,
                         moved.empty() ? 0 : moved[std::min(moved.size() - 1, size_t(0.999 * moved.size()))], err.empty() ? 0 : err[err.size() / 2], p999,
                         err.empty() ? 0 : err.back(), (unsigned long long)over);
