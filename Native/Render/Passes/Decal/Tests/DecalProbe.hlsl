@@ -5,7 +5,7 @@
 //   MODE 1: per floor pixel, decalApply over the start material (base 0.5, roughness 0.5, metallic 0, normal +Y) with the
 //           tile lists and frames P[0].z / P[0].w (materials: constants only) -> P[0].y RWStructuredBuffer<float4>, two per
 //           pixel: (base colour, roughness), (normal, metallic); sky pixels (0, 0, 0, -1)
-// P[1].x floor height as float bits; frame constants b1 = the view.
+// P[1].x floor height as float bits, P[1].y the floor's instance id; frame constants b1 = the view.
 #include "Passes/Decal/Decal.hlsli"
 
 float3 probeRay(float2 pixel)  // camera-relative, unit view depth
@@ -52,7 +52,7 @@ void main(uint3 id : SV_DispatchThreadID)
     s.dpdx = px - p;
     s.dpdy = py - p;
     s.geometricNormal = float3(0, 1, 0);
-    s.instance = 0;
+    s.instance = P[1].y;
     s.geometricVariance = 0;
     DecalMaterial m;
     m.baseColor = 0.5f;

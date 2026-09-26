@@ -99,6 +99,33 @@ int main(int argc, char** argv)
             m.metallic = (float)mats[k].metallic;
             sc.materials.push_back(m);
         }
+        // two instances of a small quad (only their transforms matter here): 0 identity, 1 turned 30 degrees about y and
+        // standing on the floor at (1, -1.5, -6) - the instance-attached decal of section 3 lives in its object space
+        {
+            scene::Mesh mesh;
+            mesh.name = "decal test quad";
+            for (float3 q : { float3{ -1, 0, -1 }, float3{ -1, 0, 1 }, float3{ 1, 0, 1 }, float3{ 1, 0, -1 } })
+            {
+                mesh.positions.push_back(q);
+                mesh.normals.push_back({ 0, 1, 0 });
+                mesh.uv0.push_back({ q.x, q.z });
+            }
+            mesh.indices = { 0, 1, 2, 0, 2, 3 };
+            mesh.submeshes.push_back({ 0, 6, 0 });
+            sc.meshes.push_back(mesh);
+            sc.instances.push_back({});
+            scene::Instance turned;
+            const float a = 30 * 3.14159265f / 180;
+            turned.transform.m[0][0] = std::cos(a);
+            turned.transform.m[0][2] = std::sin(a);
+            turned.transform.m[0][3] = 1;
+            turned.transform.m[1][1] = 1;
+            turned.transform.m[1][3] = kFloor;
+            turned.transform.m[2][0] = -std::sin(a);
+            turned.transform.m[2][2] = std::cos(a);
+            turned.transform.m[2][3] = -6;
+            sc.instances.push_back(turned);
+        }
         tf.setScene(sc);
         const ViewDesc view = ViewDesc::fromCamera(cam, W, H, float4x4{});
         tf.frame.mainView = view;
@@ -116,6 +143,7 @@ int main(int argc, char** argv)
         const uint32_t materialOf[4] = { 1, 2, 3, 3 };
         for (size_t k = 0; k < ref.size(); ++k) set.add(toDecal(ref[k], materialOf[k]));
 
+        uint32_t probeInstance = 0;
         auto runFrame = [&](bool probe) {
             std::shared_ptr<std::vector<uint8_t>> out;
             tf.run([&](FramePassContext& fc) {
@@ -142,6 +170,7 @@ int main(int argc, char** argv)
                 S_CHECK(v.decalFrames.valid() && v.decalTiles.valid(), "no decal lists");
                 const BufferRef result = fc.graph.createBuffer(BufferDesc{ "decal.test.result", (uint64_t)W * H * 32, 16 });
                 const BufferRef frames = v.decalFrames, tiles = v.decalTiles;
+                const uint32_t instance = probeInstance;
                 ID3D12PipelineState* pso = fc.shaders.compute("Passes/Decal/Tests/DecalProbe.MODE1");
                 fc.graph.addPass("decal.test.apply", QueueType::Graphics,
                                  [&](PassBuilder& b) {
@@ -150,7 +179,7 @@ int main(int argc, char** argv)
                                      b.use(tiles, Use::SrvCompute);
                                  },
                                  [=](PassContext& c) {
-                                     const uint32_t k[8] = { 1, c.uav(result), c.srv(tiles), c.srv(frames), floorBits, 0, 0, 0 };
+                                     const uint32_t k[8] = { 1, c.uav(result), c.srv(tiles), c.srv(frames), floorBits, instance, 0, 0 };
                                      c.cmd->SetPipelineState(pso);
                                      c.bindFrameConstants(cb);
                                      c.computeConstants(k, 8);
@@ -162,7 +191,7 @@ int main(int argc, char** argv)
         };
 
         // ---- 1. every floor pixel vs the reference
-        {
+        auto compare = [&](const std::vector<RefDecal>& ref, const char* what) {
             const auto data = runFrame(true);
             const float* r = reinterpret_cast<const float*>(data->data());
             // the probe's ray: invViewProj of the view, as in HLSL
@@ -222,8 +251,32 @@ int main(int argc, char** argv)
                     S_CHECK(e <= 2e-4, "pixel (%u, %u): (%.4f %.4f %.4f r %.4f m %.4f) expected (%.4f %.4f %.4f r %.4f m %.4f)", x, y, o[0], o[1], o[2], o[3], o[7], m.base.x,
                             m.base.y, m.base.z, m.roughness, m.metallic);
                 }
-            S_CHECK(covered > 1000, "only %u floor pixels under decals", covered);
-            std::printf("decals: %u floor pixels compared (%u under decals, %u at box faces left out), worst %.2e\n", compared, covered, ambiguous, worst);
+            std::printf("%s: %u floor pixels compared (%u under decals, %u at box faces left out), worst %.2e\n", what, compared, covered, ambiguous, worst);
+            return covered;
+        };
+        S_CHECK(compare(ref, "decals") > 1000, "too few floor pixels under decals");
+
+        // ---- 3. an instance-attached decal: applied through its instance's transform, and only to that instance
+        {
+            set.clear();
+            RefDecal local{ { 0.5, 0, 0 }, { 0, 0, -0.5 }, { 0, 0.3, 0 }, { 0, 0, 0 }, 0, 4, 1.0, c60, c80, 0.25, mats[2] };
+            decal::Decal d = toDecal(local, 2);
+            d.instance = 1;
+            set.add(d);
+            // the reference in world space: R (30 degrees about y) and t = (1, -1.5, -6)
+            const double a = 30 * 3.14159265358979 / 180;
+            auto rot = [&](V3 v) { return V3{ std::cos(a) * v.x + std::sin(a) * v.z, v.y, -std::sin(a) * v.x + std::cos(a) * v.z }; };
+            RefDecal world = local;
+            world.x = rot(local.x);
+            world.y = rot(local.y);
+            world.z = rot(local.z);
+            world.c = V3{ 1, kFloor, -6 };
+            probeInstance = 1;
+            const uint32_t on = compare({ world }, "attached decal on its instance");
+            S_CHECK(on > 100, "the attached decal covered %u pixels of its instance", on);
+            probeInstance = 0;
+            compare({}, "attached decal seen from another instance");  // the reference without it: no pixel changes
+            set.clear();
         }
 
         // ---- 2. 20 decals in one tile: 16 kept, the full tile reported (statistics read back two frames later)
