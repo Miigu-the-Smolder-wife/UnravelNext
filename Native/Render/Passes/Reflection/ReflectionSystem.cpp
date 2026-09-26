@@ -893,7 +893,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                                                     D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
         const TextureRef visId = main.visId;
         const BufferRef visibleClusters = main.visibleClusters;
-        const uint32_t flags = (m_accumReset ? 1u : 0u) | ((s.experimentDisable & 512) ? 2u : 0u);
+        const uint32_t flags = (m_accumReset ? 1u : 0u) | ((s.experimentDisable & 512) ? 2u : 0u) | ((s.experimentDisable & 1024) ? 4u : 0u);
         m_accumReset = false;
         const float3 prevCamera = m_prevCamera;
         m_prevCamera = main.view.position;

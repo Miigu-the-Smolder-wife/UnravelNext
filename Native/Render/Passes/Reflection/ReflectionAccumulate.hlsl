@@ -20,7 +20,7 @@
 // P[0] = { reflection UAV, modes SRV, depth SRV, gbuffer SRV }
 // P[1] = { vis id SRV, visible clusters SRV, distance history UAV, previous accumulation UAV (RGBA16F: mean, n) }
 // P[2] = { previous keys UAV (RG32: instance + 1, linear depth), accumulation out UAV, keys out UAV, historyMax }
-// P[3] = { width, height, asuint(lobe shift), flags (bit 0 reset, bit 1 off) }
+// P[3] = { width, height, asuint(lobe shift), flags (bit 0 reset, bit 1 off, bit 2 diagnostics: rgb = n / 32, moving, state) }
 // P[4] = { asuint(previous camera position xyz), asuint(pixel angle) }; frame constants b1 = main view.
 #include "Passes/Reflection/ReflectionInternal.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
@@ -66,6 +66,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
     const uint flags = P[3].w;
     uint n = 0;
     float3 mean = current.rgb;
+    float state = 0;  // diagnostics (flags bit 2): 0 no valid tap, 0.25 behind the camera, 0.5 taps valid with no history, 0.75 window 0, 1 integrated
     if ((flags & 3u) == 0 && !movingContent)
     {
         // The pixel's point one frame ago: barycentric in its triangle, previous-tick vertices.
@@ -86,8 +87,10 @@ void main(uint2 pixel : SV_DispatchThreadID)
             if (dot(ngPrev, ngPrev) > 1e-20) prevNormal = normalize(rotateBetween(normalize(ng), normalize(ngPrev), s.normal));
         }
         const float4 clip = mul(g_prevViewProj, float4(prevPosition, 1));
+        state = 0.25;
         if (clip.w > 0)
         {
+            state = 0;
             const float2 ndc = clip.xy / clip.w;
             const float2 prevPixel = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * float2(size) - 0.5;
             const float3 prevCamera = asfloat(P[4].xyz);
@@ -115,8 +118,10 @@ void main(uint2 pixel : SV_DispatchThreadID)
                 weight += w;
                 nPrev = min(nPrev, (uint)a.a);
             }
+            if (weight > 0) state = 0.5;
             if (weight > 0 && nPrev != 0xFFFFFFFFu && nPrev > 0)
             {
+                state = 0.75;
                 // View: the reflected direction's change since last frame against the lobe half-angle.
                 const float3 r = reflect(-s.view, s.normal);
                 const float3 vPrev = normalize(prevCamera - prevPosition);
@@ -125,10 +130,14 @@ void main(uint2 pixel : SV_DispatchThreadID)
                 const float lobe = reflectionLobeHalfAngle(s.roughness, max(dot(s.normal, s.view), 1e-4));
                 const float windowMax = shift > 1e-7 ? asfloat(P[3].z) * lobe / shift : 1e9;
                 n = (uint)min((float)min(nPrev, P[2].w), floor(windowMax));
-                if (n > 0) mean = lerp(sum / weight, current.rgb, 1.0 / (n + 1));
+                if (n > 0)
+                {
+                    mean = lerp(sum / weight, current.rgb, 1.0 / (n + 1));
+                    state = 1;
+                }
             }
         }
     }
-    reflection[pixel] = float4(mean, current.a);
+    reflection[pixel] = (flags & 4u) ? float4(n / 32.0, movingContent ? 1.0 : 0.0, state, current.a) : float4(mean, current.a);
     accumOut[pixel] = float4(mean, movingContent ? 0.0 : (float)min(n + 1, P[2].w));
 }

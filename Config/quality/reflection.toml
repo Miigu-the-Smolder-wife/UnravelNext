@@ -23,5 +23,6 @@ experiment_disable = 0                 # cost attribution only (recorded in the 
                                        # lookup at hits, 32 = traversal only (a hit returns 1), 64 = every job traced and shaded
                                        # in the ray generation shader (no compute split), 128 = G jobs by the difference estimator alone
                                        # (reflLobeEstimate), 256 = reflection hits read the GI cache only (no cells created,
-                                       # touched or requested), 512 = no time integration (each frame's own estimate). Never nonzero
+                                       # touched or requested), 512 = no time integration (each frame's own estimate),
+                                       # 1024 = the time integration's state instead of the value (diagnostics). Never nonzero
                                        # outside measurements.
