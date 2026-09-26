@@ -18,7 +18,7 @@ void main(uint i : SV_DispatchThreadID)
         const float2 footprint = viewGridFootprint(p, d, q.y);
         const float2 along = normalize(x0 - p.camera.xz);
         const float3 disp = P[1].x ? viewGridDisplacementAniso(P[0].y, p.lengths, x0, footprint, along)
-                                   : viewGridDisplacement(P[0].y, p.lengths, x0, footprint.x);
+                                   : viewGridDisplacementTrilinear(P[0].y, p.lengths, x0, footprint.x);
         sum = disp.x + disp.y + disp.z;
     }
     sum = WaveActiveSum(sum);

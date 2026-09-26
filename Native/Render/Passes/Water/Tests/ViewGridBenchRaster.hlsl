@@ -96,7 +96,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint index 
             const float2 footprint = viewGridFootprint(p, d, q.y);
             const float2 along = normalize(x0 - p.camera.xz);
             const float3 disp = (P[1].x & 1) ? viewGridDisplacementAniso(P[0].y, p.lengths, x0, footprint, along)
-                                       : viewGridDisplacement(P[0].y, p.lengths, x0, footprint.x);
+                                       : viewGridDisplacementTrilinear(P[0].y, p.lengths, x0, footprint.x);
             if (any(!isfinite(disp)))
             {
                 RWByteAddressBuffer counter = ResourceDescriptorHeap[P[0].w];

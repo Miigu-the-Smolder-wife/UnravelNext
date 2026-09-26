@@ -22,7 +22,7 @@ void main(uint i : SV_DispatchThreadID)
         const float2 footprint = viewGridFootprint(p, d, q.y);
         const float2 along = normalize(x0 - p.camera.xz);
         const float3 disp = P[1].x ? viewGridDisplacementAniso(P[0].y, p.lengths, x0, footprint, along)
-                                   : viewGridDisplacement(P[0].y, p.lengths, x0, footprint.x);
+                                   : viewGridDisplacementTrilinear(P[0].y, p.lengths, x0, footprint.x);
         const float3 s = viewGridProject(p, float3(x0.x + disp.x, p.waterLevel + disp.y, x0.y + disp.z));
         if (s.z > 0.01) v = uint3(asuint(int2(round(clamp(s.xy, -4.0e6, 4.0e6) * 256.0))), asuint((viewGridWater(p, x0, length(footprint)) ? 1.0 : -1.0) / s.z));
     }

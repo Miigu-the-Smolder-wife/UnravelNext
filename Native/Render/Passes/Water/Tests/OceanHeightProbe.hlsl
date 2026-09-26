@@ -6,7 +6,7 @@
 //   mode 2 (timing): a pinhole image; input = (origin, tan(fov x / 2) | forward, width | right, height | up, 0); pixel i
 //          searches from tShell 0 like mode 1
 // P[0] displacement SRV, height SRV, output UAV (raw), count; P[1] camera x, z, s_0, water level (OceanHeight.hlsli);
-// P[2] cascade lengths; P[3] refine parameter SRV (raw), input SRV (raw), mode, 0
+// P[2] cascade lengths; P[3] refine parameter SRV (raw), input SRV (raw), mode, slopes SRV
 #include "Bindless.hlsli"
 #include "../OceanRefine.hlsli"
 

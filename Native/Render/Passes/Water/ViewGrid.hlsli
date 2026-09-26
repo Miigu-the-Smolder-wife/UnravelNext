@@ -9,15 +9,20 @@
 //               2 up (x, y, z), tan(fov y / 2)                  3 forward (x, y, z), far ring (m: the water body's extent)
 //               4 phi_0 (rad: the first column), 0, theta (rad), near-field radius r_n (m, horizontal)
 //               5 columns, rows, width, height (uint)
-//               6 cascade lengths (m) 0..2, 0
+//               6 cascade lengths (m) 0..2, near plane (m: view depth; points nearer are invalid)
 //               7 mask: lake centre x, z, radius (m), enabled (uint; 0 = open sea)
-//   from byte 128: per row j, (r_j, along spacing at r_j) float2
+//               8 near-field levels K (uint), 0, 0, 0
+//   from byte 144, per near level i (32 B): (inner radius, outer radius (m, horizontal), spacing s_i (m), points per side
+//               n_i (uint)), (lattice origin x, z (int: point (a, b) is at (origin + (a, b)) s_i), 0, 0)
+//   from byte 512: per far row j, (r_j, along spacing at r_j) float2
 #ifndef UNX_WATER_VIEW_GRID_HLSLI
 #define UNX_WATER_VIEW_GRID_HLSLI
 #include "Bindless.hlsli"
+#include "OceanSample.hlsli"
 
 #define VG_TRIANGLE_PIXELS 8  // pixels per triangle and axis tested in the scatter thread (structural; excess counted)
-#define VG_ROW_TABLE 128u     // byte offset of the row table in the parameter buffer
+#define VG_ROW_TABLE 512u     // byte offset of the row table in the parameter buffer
+#define VG_NEAR_LEVELS 8u     // at most (ids: level in bits 28..30 of a near-field triangle id)
 
 struct ViewGridParams
 {
@@ -28,6 +33,7 @@ struct ViewGridParams
     float phi0, theta, nearRadius;
     uint columns, rows, width, height;
     float3 lengths;
+    float nearPlane;
     float2 lakeCentre; float lakeRadius; uint lake;
     uint srv;
 };
@@ -42,10 +48,30 @@ ViewGridParams viewGridParams(uint srv)
     r = asfloat(b.Load4(48));  p.forward = r.xyz; p.far = r.w;
     r = asfloat(b.Load4(64));  p.phi0 = r.x; p.theta = r.z; p.nearRadius = r.w;
     const uint4 u = b.Load4(80); p.columns = u.x; p.rows = u.y; p.width = u.z; p.height = u.w;
-    r = asfloat(b.Load4(96));  p.lengths = r.xyz;
+    r = asfloat(b.Load4(96));  p.lengths = r.xyz; p.nearPlane = r.w;
     const uint4 m = b.Load4(112); p.lakeCentre = asfloat(m.xy); p.lakeRadius = asfloat(m.z); p.lake = m.w;
     p.srv = srv;
     return p;
+}
+struct ViewGridNearLevel
+{
+    float inner, outer, spacing;
+    uint points;
+    int2 origin;
+};
+uint viewGridNearLevels(ViewGridParams p)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[p.srv];
+    return b.Load(128);
+}
+ViewGridNearLevel viewGridNearLevel(ViewGridParams p, uint level)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[p.srv];
+    const uint4 r0 = b.Load4(144 + 32 * level), r1 = b.Load4(160 + 32 * level);
+    ViewGridNearLevel l;
+    l.inner = asfloat(r0.x); l.outer = asfloat(r0.y); l.spacing = asfloat(r0.z); l.points = r0.w;
+    l.origin = asint(r1.xy);
+    return l;
 }
 // Row j: (rest distance r_j, spacing along the view there).
 float2 viewGridRow(ViewGridParams p, uint row)
@@ -68,8 +94,13 @@ float2 viewGridFootprint(ViewGridParams p, float distance, int row)
 {
     return float2(distance * p.theta, viewGridRow(p, uint(row)).y);
 }
-// Displacement (Dx, h, Dz) at rest position x0, low-passed to the isotropic footprint s (each cascade's mip), trilinear.
-float3 viewGridDisplacement(uint field, float3 lengths, float2 x0, float s)
+// Displacement (Dx, h, Dz) at rest position x0 for the isotropic footprint s: OceanSample.hlsli (C1 below a texel).
+float3 viewGridDisplacement(uint field, uint slopes, float3 lengths, float2 x0, float s)
+{
+    return oceanSample(field, slopes, lengths, x0, s).D;
+}
+// The trilinear filter alone (the microbench's sampling floor).
+float3 viewGridDisplacementTrilinear(uint field, float3 lengths, float2 x0, float s)
 {
     Texture2DArray<float4> f = ResourceDescriptorHeap[field];
     float3 d = 0;
@@ -103,6 +134,14 @@ float3 viewGridProject(ViewGridParams p, float3 world)
     const float x = dot(v, p.right) / (z * p.tanX), y = dot(v, p.up) / (z * p.tanY);
     return float3((x * 0.5 + 0.5) * float(p.width), (0.5 - y * 0.5) * float(p.height), z);
 }
+// Angular radius (rad) of the displacement bound's sphere (radius `bound`) around a rest point at horizontal distance r:
+// asin(bound / D), D = |(r, h)| its distance from the camera; the whole sphere of directions (4 rad: no culling) when
+// the camera is inside it.
+float viewGridWiden(ViewGridParams p, float r, float bound)
+{
+    const float h = p.camera.y - p.waterLevel, distance = sqrt(r * r + h * h);
+    return bound >= distance ? 4.0 : asin(bound / distance);
+}
 // Whether the water body reaches within `reach` of rest position x0 (its signed distance <= reach). With reach = the
 // grid cell's diagonal, every triangle that touches the water has a vertex that passes: the surface is kept up to one
 // cell past the shore, where the terrain covers it.
@@ -112,10 +151,10 @@ bool viewGridWater(ViewGridParams p, float2 x0, float reach)
 }
 // Grid point q as a scatter vertex: screen position in 1/256 px, 1 / view depth and the flag (0 invalid, 1 inside the
 // water body, 2 outside). The displacement is low-passed isotropically to the cell's longer side (at most 2.5 pixel
-// footprints: what that removes across the view is below 0.25 px) with SampleLevel, so every evaluation of the same
+// footprints: what that removes across the view is below 0.25 px; OceanSample.hlsli), so every evaluation of the same
 // point - the owning group, a neighbouring group's halo, the resolve - runs the same instructions on the same inputs
 // (the scatter's watertightness rests on it; the hole gate checks it on every device).
-void viewGridVertex(ViewGridParams p, int2 q, uint field, out int2 xy, out float inverseDepth, out uint flag, out float2 x0)
+void viewGridVertex(ViewGridParams p, int2 q, uint field, uint slopes, out int2 xy, out float inverseDepth, out uint flag, out float2 x0)
 {
     xy = 0;
     inverseDepth = 0;
@@ -124,11 +163,31 @@ void viewGridVertex(ViewGridParams p, int2 q, uint field, out int2 xy, out float
     float d;
     if (any(q >= int2(p.columns, p.rows)) || !viewGridRest(p, q, x0, d)) return;
     const float2 footprint = viewGridFootprint(p, d, q.y);
-    const float3 disp = viewGridDisplacement(field, p.lengths, x0, max(footprint.x, footprint.y));
+    const float3 disp = viewGridDisplacement(field, slopes, p.lengths, x0, max(footprint.x, footprint.y));
     const float3 s = viewGridProject(p, float3(x0.x + disp.x, p.waterLevel + disp.y, x0.y + disp.z));
-    if (s.z <= 0.01) return;
+    if (s.z <= p.nearPlane) return;
     xy = int2(round(clamp(s.xy, -4.0e6, 4.0e6) * 256.0));
     inverseDepth = 1.0 / s.z;
     flag = viewGridWater(p, x0, length(footprint)) ? 1 : 2;
+}
+// Near-field point q of level `level` as a scatter vertex (the same outputs): rest position (origin + q) s_i, the
+// displacement low-passed to s_i (the level's own sampling; its spacing keeps the linear interpolation error of the
+// finest band within 0.5 px, FEATURES_GAME 1.8 B.2). Flag 1 = inside the level's ring and the water body (a triangle
+// with such a vertex is drawn, so neighbouring rings and the far field overlap by a cell).
+void viewGridNearVertex(ViewGridParams p, uint level, int2 q, uint field, uint slopes, out int2 xy, out float inverseDepth, out uint flag, out float2 x0)
+{
+    xy = 0;
+    inverseDepth = 0;
+    flag = 0;
+    const ViewGridNearLevel l = viewGridNearLevel(p, level);
+    x0 = float2(l.origin + q) * l.spacing;
+    if (any(q >= int(l.points)) || p.camera.y <= p.waterLevel) return;
+    const float3 disp = viewGridDisplacement(field, slopes, p.lengths, x0, l.spacing);
+    const float3 s = viewGridProject(p, float3(x0.x + disp.x, p.waterLevel + disp.y, x0.y + disp.z));
+    if (s.z <= p.nearPlane) return;
+    xy = int2(round(clamp(s.xy, -4.0e6, 4.0e6) * 256.0));
+    inverseDepth = 1.0 / s.z;
+    const float r = distance(x0, p.camera.xz);
+    flag = (r >= l.inner && r <= l.outer && viewGridWater(p, x0, l.spacing * 1.4142136)) ? 1 : 2;
 }
 #endif

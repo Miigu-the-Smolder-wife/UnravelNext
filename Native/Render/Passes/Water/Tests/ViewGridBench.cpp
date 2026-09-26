@@ -202,7 +202,7 @@ Grid makeGrid(const Scene& s, const View& v, float waterLevel, const float lengt
         r = std::min(r + step, rEnd);
     }
     g.rows = uint32_t(table.size() / 2);
-    g.params.assign(32, 0.0f);
+    g.params.assign(128, 0.0f);  // ViewGrid.hlsli header (512 B; no near levels in the bench)
     g.params.insert(g.params.end(), table.begin(), table.end());
     float* p = g.params.data();
     const float row0[4] = { float(s.camera.x), float(s.camera.y), float(s.camera.z), waterLevel };

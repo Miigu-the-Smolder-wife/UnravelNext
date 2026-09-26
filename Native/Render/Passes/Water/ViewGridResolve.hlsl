@@ -4,29 +4,25 @@
 // perspective-correct rest position x0; the triangle's vertices evaluated again, bit-identical to the scatter's) is
 // polished onto the continuous surface S_px (the same band limit as the vertices) along the pixel's ray: Newton steps on
 //   x0 + D_xz(x0) = o_xz + t v_xz,  water level + h(x0) = o_y + t v_y     (unknowns x0, t; Jacobian from the slopes)
-// kept when the residual is within 0.02 of the cell's across footprint and x0 stays within two cell diagonals of the
+// kept when the residual is within 0.05 of the pixel footprint and x0 stays within two cell diagonals of the
 // mesh's x0 (the same sheet); otherwise the mesh point is kept.
 // Outputs: surface RGBA32F (x0.x, x0.z, view depth, flags: 0 no water, 1 polished, 2 mesh point), depth R32F (view
 // depth, +inf where no water).
-// P[0] params SRV, 0, key SRV (raw), displacement SRV; P[1] slopes SRV, surface UAV, depth UAV, 0
+// P[0] params SRV, 0, key SRV (raw), displacement SRV; P[1] slopes SRV, surface UAV, depth UAV, error UAV (R32F, 0 =
+// none: the output point's distance to the surface along its normal, (S(x0) - P) . n over the pixel footprint; tests)
 #include "ViewGrid.hlsli"
 
-#define VG_POLISH 2
+#define VG_POLISH 4  // Newton steps at most; a converged pixel stops (most take one or two)
 
-void vgSample(ViewGridParams p, float2 x0, float footprint, out float4 d, out float4 s)
+// F(x0, t) = S(x0) - ray(t) with S(x0) = (x0.x + Dx, water level + h, x0.y + Dz), in (x, z, y) order, and the normal.
+float3 vgResidual(ViewGridParams p, OceanPoint o, float2 x0, float t, float3 ray)
 {
-    Texture2DArray<float4> field = ResourceDescriptorHeap[P[0].w];
-    Texture2DArray<float4> slopes = ResourceDescriptorHeap[P[1].x];
-    d = 0;
-    s = 0;
-    [unroll] for (uint c = 0; c < 3; ++c)
-    {
-        const float L = p.lengths[c];
-        const float3 uv = float3(x0 / L + 0.5 / 512.0, c);
-        const float mip = clamp(log2(footprint * 512.0 / L), 0.0, 9.0);
-        d += field.SampleLevel(g_linearWrap, uv, mip);
-        s += slopes.SampleLevel(g_linearWrap, uv, mip);
-    }
+    return float3(x0.x + o.D.x - (p.camera.x + t * ray.x), x0.y + o.D.z - (p.camera.z + t * ray.z), p.waterLevel + o.D.y - (p.camera.y + t * ray.y));
+}
+float3 vgNormal(OceanPoint o)
+{
+    // Tangents (1 + dDx/dx, dh/dx, dDz/dx) and (dDx/dz, dh/dz, 1 + dDz/dz).
+    return normalize(cross(float3(o.dDdz.x, o.dDdz.y, 1 + o.dDdz.z), float3(1 + o.dDdx.x, o.dDdx.y, o.dDdx.z)));
 }
 
 [numthreads(8, 8, 1)]
@@ -45,16 +41,20 @@ void main(uint2 pixel : SV_DispatchThreadID)
         return;
     }
     // The triangle's grid points (tri 0: 00 10 11, tri 1: 00 11 01).
-    const uint quad = key.x >> 1;
-    const int2 q = int2(quad % p.columns, quad / p.columns);
-    const int2 corner[3] = { q, (key.x & 1) ? q + int2(1, 1) : q + int2(1, 0), (key.x & 1) ? q + int2(0, 1) : q + int2(1, 1) };
+    // Far field: id = quad x 2 + triangle; near field: 0x80000000 | level << 28 | (quad x 2 + triangle).
+    const bool isNear = (key.x & 0x80000000u) != 0;
+    const uint level = (key.x >> 28) & 7u, local = isNear ? (key.x & 0x0FFFFFFFu) : key.x;
+    const uint quad = local >> 1, across = isNear ? viewGridNearLevel(p, level).points - 1 : p.columns;
+    const int2 q = int2(quad % across, quad / across);
+    const int2 corner[3] = { q, (local & 1) ? q + int2(1, 1) : q + int2(1, 0), (local & 1) ? q + int2(0, 1) : q + int2(1, 1) };
     float2 xy[3], x0v[3];
     float iz[3];
     [unroll] for (uint k = 0; k < 3; ++k)
     {
         int2 fixedXy;
         uint flag;
-        viewGridVertex(p, corner[k], P[0].w, fixedXy, iz[k], flag, x0v[k]);
+        if (isNear) viewGridNearVertex(p, level, corner[k], P[0].w, P[1].x, fixedXy, iz[k], flag, x0v[k]);
+        else viewGridVertex(p, corner[k], P[0].w, P[1].x, fixedXy, iz[k], flag, x0v[k]);
         xy[k] = float2(fixedXy) / 256.0;
     }
     // Screen barycentrics of the pixel centre, then perspective-correct weights.
@@ -75,25 +75,39 @@ void main(uint2 pixel : SV_DispatchThreadID)
     float t = meshDepth / along;
     float2 x0 = meshX0;
     const float r = distance(meshX0, p.camera.xz);
-    const float2 footprint = float2(r * p.theta, viewGridRow(p, uint(q.y)).y);
-    const float filter = max(footprint.x, footprint.y);  // the vertices' band limit
-    float4 d, s;
-    [unroll] for (uint n = 0; n < VG_POLISH; ++n)
+    // The cell (across, along) and the vertices' band limit: far rows, or the near level's lattice spacing.
+    const float nearSpacing = isNear ? viewGridNearLevel(p, level).spacing : 0;
+    const float2 footprint = isNear ? float2(nearSpacing, nearSpacing) : float2(r * p.theta, viewGridRow(p, uint(q.y)).y);
+    const float filter = max(footprint.x, footprint.y);
+    const float pixelFootprint = max(t, 1e-3) * p.theta;
+    float meshResidual = 0;
+    [loop] for (uint n = 0; n < VG_POLISH; ++n)
     {
-        vgSample(p, x0, filter, d, s);
-        const float3 f = float3(x0.x + d.x - (p.camera.x + t * ray.x), x0.y + d.z - (p.camera.z + t * ray.z), p.waterLevel + d.y - (p.camera.y + t * ray.y));
-        // J = [[1 + dDx/dx, dDx/dz, -v.x], [dDx/dz, 1 + dDz/dz, -v.z], [dh/dx, dh/dz, -v.y]]; solve J delta = -f (Cramer).
-        const float3 c0 = float3(1 + s.z, d.w, s.x), c1 = float3(d.w, 1 + s.w, s.y), c2 = -float3(ray.x, ray.z, ray.y);
+        const OceanPoint o = oceanSample(P[0].w, P[1].x, p.lengths, x0, filter);
+        const float3 f = vgResidual(p, o, x0, t, ray);
+        const bool converged = length(f) <= 0.05 * pixelFootprint;
+        if (n == 0)
+        {
+            meshResidual = abs(dot(float3(f.x, f.z, f.y), vgNormal(o)));  // along the surface normal at x0
+        }
+        if (converged) break;
+        // J = [[1 + dDx/dx, dDx/dz, -v.x], [dDz/dx, 1 + dDz/dz, -v.z], [dh/dx, dh/dz, -v.y]]; solve J delta = -f (Cramer).
+        const float3 c0 = float3(1 + o.dDdx.x, o.dDdx.z, o.dDdx.y), c1 = float3(o.dDdz.x, 1 + o.dDdz.z, o.dDdz.y), c2 = -float3(ray.x, ray.z, ray.y);
         const float det = dot(c0, cross(c1, c2));
         if (abs(det) < 1e-8) break;
         const float3 delta = float3(dot(-f, cross(c1, c2)), dot(c0, cross(-f, c2)), dot(c0, cross(c1, -f))) / det;
         x0 += delta.xy;
         t += delta.z;
     }
-    vgSample(p, x0, filter, d, s);
-    const float3 residual = float3(x0.x + d.x - (p.camera.x + t * ray.x), x0.y + d.z - (p.camera.z + t * ray.z), p.waterLevel + d.y - (p.camera.y + t * ray.y));
-    const bool polished = length(residual) <= 0.02 * footprint.x && distance(x0, meshX0) <= 2 * length(footprint) && t > 0;
+    const OceanPoint final = oceanSample(P[0].w, P[1].x, p.lengths, x0, filter);
+    const float3 residual = vgResidual(p, final, x0, t, ray);
+    const bool polished = length(residual) <= 0.05 * pixelFootprint && distance(x0, meshX0) <= 2 * length(footprint) && t > 0;
     const float depth = polished ? t * along : meshDepth;
     surface[pixel] = polished ? float4(x0, depth, 1) : float4(meshX0, depth, 2);
     depthOut[pixel] = depth;
+    if (P[1].w)
+    {
+        RWTexture2D<float> error = ResourceDescriptorHeap[P[1].w];
+        error[pixel] = (polished ? abs(dot(float3(residual.x, residual.z, residual.y), vgNormal(final))) : meshResidual) / pixelFootprint;
+    }
 }

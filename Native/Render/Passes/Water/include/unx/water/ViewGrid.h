@@ -17,13 +17,16 @@ struct ViewGridCamera
     float forward[3] = { 1, 0, 0 }, right[3] = { 0, 0, 1 }, up[3] = { 0, 1, 0 };  // orthonormal, world
     float tanX = 0.57735f, tanY = 0.32476f;  // tan of the half field of view
     uint32_t width = 0, height = 0;
+    float nearPlane = 0.05f;  // view depth (m) of the renderer's near plane (ViewDesc::nearPlane)
 };
 struct ViewGridWater
 {
     float level = 0;          // still water height (m)
     float extent = 1.0e6f;    // the water body's extent from the camera (m, horizontal; open sea: the horizon)
     float nearRadius = 16;    // the far field starts here (m, horizontal)
-    float bound = 3.5f;       // horizontal + vertical displacement bound (m)
+    float horizontalBound = 1.5f;  // R: bound of the horizontal displacement (m)
+    float verticalBound = 2.0f;    // A: bound of the displacement's height above and below the still water (m)
+    float bound() const { return horizontalBound + verticalBound; }
     bool lake = false;        // a circular water body (tests) instead of the open sea
     float lakeCentre[2] = {}, lakeRadius = 0;
 };
@@ -32,13 +35,15 @@ struct ViewGridLayout
     std::vector<float> params;  // the parameter buffer (ViewGrid.hlsli): 32 floats of header, then the row table
     uint32_t columns = 0, rows = 0;
     float window[4] = {};       // the screen's angular window: azimuth min, max, elevation min, max (rad)
+    uint32_t nearLevels = 0, nearPoints = 0;  // near-field lattices and the largest one's points per side
 };
 struct ViewGridOutput
 {
     render::TextureRef surface;  // RGBA32F: rest position x0 (x, z), view depth, flags (0 none, 1 polished, 2 mesh)
     render::TextureRef depth;    // R32F view depth, +inf where no water
     render::BufferRef keys;      // raw, 8 B per pixel: triangle id (low), depth bits (high); ~0 = none
-    render::BufferRef counters;  // uint: triangles past the scatter's 8 x 8 loop
+    render::BufferRef counters;  // uint: big triangles (rasterised by tiles), big triangles lost past the list (0), big tiles
+    render::TextureRef error;    // diagnostics only: R32F |S(x0) - P| / pixel footprint of each output point (tests)
     uint32_t columns = 0, rows = 0;
 };
 
@@ -53,7 +58,7 @@ public:
     // The far-field grid of a camera: its angular window widened by the displacement bound, the rows by rest distance.
     static ViewGridLayout layout(const ViewGridCamera& camera, const ViewGridWater& water, const float cascadeLengths[3]);
     ViewGridOutput record(render::RenderGraph& graph, uint64_t frame, const OceanOutput& fields, const float cascadeLengths[3], const ViewGridCamera& camera,
-                          const ViewGridWater& water);
+                          const ViewGridWater& water, bool diagnostics = false);
 
 private:
     render::Device& m_device;
@@ -61,5 +66,6 @@ private:
     std::vector<render::ComPtr<ID3D12Resource>> m_upload;
     std::vector<uint8_t*> m_mapped;
     std::vector<uint32_t> m_srv;
+    render::ComPtr<ID3D12CommandSignature> m_dispatch;
 };
 } // namespace unx::water

@@ -153,10 +153,10 @@ Result frame(Gpu& gpu, Ocean& ocean, OceanHeight& clip, const Scene& scene, cons
         inputs.push_back(std::make_unique<Input>(gpu.device, data, bytes));
         const uint32_t inputSrv = inputs.back()->srv;
         const BufferRef result = g.createBuffer({ "ocean height probe", uint64_t(count) * 16, 0 });
-        const auto displacement = fields.displacement;
+        const auto displacement = fields.displacement, slopes = fields.slopes;
         g.addPass(mode == 2 ? "ocean refine image" : "ocean height probe", QueueType::Graphics,
                   [&](PassBuilder& pb) {
-                      pb.use(displacement, Use::SrvCompute); pb.use(out.height, Use::SrvCompute); pb.use(out.bounds, Use::SrvCompute); pb.use(out.params, Use::SrvCompute);
+                      pb.use(displacement, Use::SrvCompute); pb.use(slopes, Use::SrvCompute); pb.use(out.height, Use::SrvCompute); pb.use(out.bounds, Use::SrvCompute); pb.use(out.params, Use::SrvCompute);
                       pb.use(result, Use::UavCompute);
                       if (mode == 2) pb.keep();
                   },
@@ -169,6 +169,7 @@ Result frame(Gpu& gpu, Ocean& ocean, OceanHeight& clip, const Scene& scene, cons
                       k[12] = c.srv(out.params);
                       k[13] = inputSrv;
                       k[14] = mode;
+                      k[15] = c.srv(slopes);
                       c.cmd->SetPipelineState(probe);
                       c.computeConstants(k, 16);
                       c.cmd->Dispatch((count + 63) / 64, 1, 1);

@@ -14,7 +14,9 @@ using namespace unx::render;
 namespace
 {
 constexpr double kPi = 3.14159265358979323846;
-constexpr uint64_t kParamBytes = 128 + uint64_t(ViewGrid::kMaxRows) * 8;
+constexpr uint64_t kParamBytes = 512 + uint64_t(ViewGrid::kMaxRows) * 8;
+constexpr uint32_t kNearLevels = 8;        // ViewGrid.hlsli VG_NEAR_LEVELS
+constexpr uint32_t kBigCapacity = 65536;   // big-triangle list (48 B records; past it the triangles are counted as lost)
 
 double wrapNear(double phi, double reference)
 {
@@ -27,6 +29,13 @@ double wrapNear(double phi, double reference)
 ViewGrid::ViewGrid(Device& device, ShaderLibrary& shaders, uint32_t framesInFlight) : m_device(device), m_shaders(shaders)
 {
     if (!framesInFlight) fail("view grid: no frames in flight");
+    D3D12_INDIRECT_ARGUMENT_DESC argument{};
+    argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    D3D12_COMMAND_SIGNATURE_DESC signature{};
+    signature.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
+    signature.NumArgumentDescs = 1;
+    signature.pArgumentDescs = &argument;
+    check(device.d3d()->CreateCommandSignature(&signature, nullptr, IID_PPV_ARGS(&m_dispatch)), "view grid dispatch signature");
     for (uint32_t s = 0; s < framesInFlight; ++s)
     {
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_UPLOAD };
@@ -68,7 +77,7 @@ ViewGrid::~ViewGrid()
 
 ViewGridLayout ViewGrid::layout(const ViewGridCamera& c, const ViewGridWater& w, const float lengths[3])
 {
-    if (!c.width || !c.height || !(c.tanX > 0) || !(c.tanY > 0) || !(w.nearRadius > 0) || !(w.bound >= 0) || !(w.extent > w.nearRadius))
+    if (!c.width || !c.height || !(c.tanX > 0) || !(c.tanY > 0) || !(c.nearPlane > 0) || !(w.nearRadius > 0) || !(w.horizontalBound >= 0) || !(w.verticalBound >= 0) || !(w.extent > w.nearRadius))
         fail("view grid: invalid camera or water description");
     ViewGridLayout out;
     const double theta = 2.0 * c.tanX / c.width;  // one pixel at the image centre
@@ -87,7 +96,7 @@ ViewGridLayout ViewGrid::layout(const ViewGridCamera& c, const ViewGridWater& w,
     for (uint32_t x = 0; x <= c.width; x += 4) { add(x, 0); add(x, c.height); }
     for (uint32_t y = 0; y <= c.height; y += 4) { add(0, y); add(c.width, y); }
     out.window[0] = float(phiLo); out.window[1] = float(phiHi); out.window[2] = float(eLo); out.window[3] = float(eHi);
-    const double h = double(c.position[1]) - w.level, margin = w.bound / w.nearRadius;
+    const double h = double(c.position[1]) - w.level, margin = w.bound() / w.nearRadius;
     double phi0 = phiLo - margin, phi1 = phiHi + margin;
     double e0 = eLo - margin, e1 = std::min(eHi + margin, 0.0);  // rows at the horizon end at the far ring
     if (h > 0) e0 = std::max(e0, -std::atan(h / w.nearRadius));
@@ -96,7 +105,7 @@ ViewGridLayout ViewGrid::layout(const ViewGridCamera& c, const ViewGridWater& w,
         // The lake's angular box (its boundary widened by the bound, and its inside) narrows the window.
         double lp0 = 1e9, lp1 = -1e9, le0 = 1e9, le1 = -1e9;
         for (int k = 0; k < 720; ++k)
-            for (double r : { double(w.lakeRadius) + w.bound, 0.5 * w.lakeRadius, 0.0 })
+            for (double r : { double(w.lakeRadius) + w.bound(), 0.5 * w.lakeRadius, 0.0 })
             {
                 const double a = 2 * kPi * k / 720;
                 const double x = w.lakeCentre[0] + r * std::cos(a) - c.position[0], z = w.lakeCentre[1] + r * std::sin(a) - c.position[2];
@@ -116,7 +125,7 @@ ViewGridLayout ViewGrid::layout(const ViewGridCamera& c, const ViewGridWater& w,
         const double rEnd = e1 >= 0 ? double(w.extent) : std::min(double(w.extent), h / std::tan(-e1));
         for (double r = rStart;;)
         {
-            const double flat = theta * (h * h + r * r) / h, crest = r <= 2 * w.bound / theta ? 2.5 * r * theta : 1e30;
+            const double flat = theta * (h * h + r * r) / h, crest = r <= 2 * w.verticalBound / theta ? 2.5 * r * theta : 1e30;
             const double step = std::min(flat, crest);
             table.push_back(float(r));
             table.push_back(float(step));
@@ -126,7 +135,7 @@ ViewGridLayout ViewGrid::layout(const ViewGridCamera& c, const ViewGridWater& w,
     }
     out.rows = uint32_t(table.size() / 2);
     if (out.rows > kMaxRows) fail("view grid: %u rows exceed the table's %u", out.rows, kMaxRows);
-    out.params.assign(32, 0.0f);
+    out.params.assign(128, 0.0f);  // header (512 B), near levels filled below
     out.params.insert(out.params.end(), table.begin(), table.end());
     float* p = out.params.data();
     const float row0[4] = { c.position[0], c.position[1], c.position[2], w.level };
@@ -135,15 +144,52 @@ ViewGridLayout ViewGrid::layout(const ViewGridCamera& c, const ViewGridWater& w,
     const float row3[4] = { c.forward[0], c.forward[1], c.forward[2], w.extent };
     const float row4[4] = { float(phi0), 0, float(theta), w.nearRadius };
     const uint32_t row5[4] = { out.columns, out.rows, c.width, c.height };
-    const float row6[4] = { lengths[0], lengths[1], lengths[2], 0 };
+    const float row6[4] = { lengths[0], lengths[1], lengths[2], c.nearPlane };
     const float lake[3] = { w.lakeCentre[0], w.lakeCentre[1], w.lakeRadius };
     const uint32_t lakeOn = w.lake ? 1 : 0;
     std::memcpy(p, row0, 16); std::memcpy(p + 4, row1, 16); std::memcpy(p + 8, row2, 16); std::memcpy(p + 12, row3, 16);
     std::memcpy(p + 16, row4, 16); std::memcpy(p + 20, row5, 16); std::memcpy(p + 24, row6, 16); std::memcpy(p + 28, lake, 12); std::memcpy(p + 31, &lakeOn, 4);
+    if (uint64_t(out.columns) * out.rows * 2 >= (1ull << 31)) fail("view grid: %u x %u far-field quads exceed the triangle ids", out.columns, out.rows);
+    // Near field (FEATURES_GAME 1.8 B.2): rings of rest distance r_n, r_n / 4, ... down to the camera's height, each a
+    // world lattice whose spacing (lambda_min / 2 pi) sqrt(8 e t theta / A_min) at the ring's nearest possible distance
+    // to the displaced surface, t = |(max(inner - R, 0), max(h - A, 0))| (at least 5 cm), keeps
+    // the linear interpolation error within e = 0.4 px (0.1 px under the definition's 0.5 for the rest of the chain):
+    // band k contributes (k s)^2 / 8 A_k with A_k = 0.048 lambda (3 sigma in the saturation range), so the octaves sum to
+    // twice the finest band's (lambda_min = two finest-cascade texels) - measured on WARP: the finest band alone gave
+    // 0.67 px at the 99.9th percentile against a 0.4 px target.
+    if (h > 0)
+    {
+        const double lambdaMin = 2.0 * lengths[2] / 512, aMin = 0.048 * lambdaMin;
+        const double coefficient = lambdaMin / (2 * kPi) * std::sqrt(8 * 0.4 * theta / (2 * aMin));
+        std::vector<double> outer;
+        for (double r = w.nearRadius;; r /= 4)
+        {
+            outer.push_back(r);
+            if (r <= std::max(h, 0.25) || outer.size() == kNearLevels) break;
+        }
+        std::reverse(outer.begin(), outer.end());
+        const uint32_t levels = uint32_t(outer.size());
+        std::memcpy(p + 32, &levels, 4);
+        for (uint32_t i = 0; i < levels; ++i)
+        {
+            const double inner = i ? outer[i - 1] : 0.0;
+            const double spacing = coefficient * std::sqrt(std::max(std::hypot(std::max(inner - w.horizontalBound, 0.0), std::max(h - w.verticalBound, 0.0)), 0.05));
+            const uint32_t n = 2 * uint32_t(std::ceil((outer[i] + 2 * spacing) / spacing)) + 2;
+            if (n - 1 > 11585) fail("view grid: near level %u has %u points per side (the triangle ids hold 11585 quads)", i, n);
+            const int32_t origin[2] = { int32_t(std::floor(c.position[0] / spacing)) - int32_t(n / 2), int32_t(std::floor(c.position[2] / spacing)) - int32_t(n / 2) };
+            const float row[3] = { float(inner), float(outer[i]), float(spacing) };
+            std::memcpy(p + 36 + 8 * i, row, 12);
+            std::memcpy(p + 36 + 8 * i + 3, &n, 4);
+            std::memcpy(p + 36 + 8 * i + 4, origin, 8);
+            out.nearPoints = std::max(out.nearPoints, n);
+        }
+        out.nearLevels = levels;
+    }
     return out;
 }
 
-ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutput& fields, const float lengths[3], const ViewGridCamera& camera, const ViewGridWater& water)
+ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutput& fields, const float lengths[3], const ViewGridCamera& camera, const ViewGridWater& water,
+                                bool diagnostics)
 {
     const ViewGridLayout l = layout(camera, water, lengths);
     const uint32_t slot = uint32_t(frame % m_upload.size());
@@ -167,28 +213,77 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
                   c.cmd->Dispatch((pixels + 63) / 64, 1, 1);
               });
     const uint32_t groupsX = (l.columns + 7) / 8, groupsY = (l.rows + 7) / 8;
-    const float bound = water.bound;
+    const float bound = water.bound();
     const float window[4] = { l.window[0], l.window[1], l.window[2], l.window[3] };
+    const BufferRef big = g.createBuffer({ "view grid big triangles", uint64_t(kBigCapacity) * 48, 0 });
+    const BufferRef prefix = g.createBuffer({ "view grid big prefix", uint64_t(kBigCapacity) * 4, 0 });
+    const BufferRef arguments = g.createBuffer({ "view grid big dispatch", 256, 0 });
+    auto scatterConstants = [=](PassContext& c, uint32_t (&k)[12]) {
+        k[0] = paramSrv; k[1] = c.srv(displacement); k[2] = c.uav(keys); k[3] = c.uav(counters);
+        std::memcpy(&k[4], &bound, 4);
+        std::memcpy(&k[5], window, 16);
+        k[9] = c.uav(big);
+        k[10] = kBigCapacity;
+        k[11] = c.srv(slopes);
+    };
+    auto scatterUses = [&](PassBuilder& pb) {
+        pb.use(displacement, Use::SrvCompute); pb.use(slopes, Use::SrvCompute); pb.use(keys, Use::UavCompute); pb.use(counters, Use::UavCompute); pb.use(big, Use::UavCompute);
+    };
     ID3D12PipelineState* scatter = m_shaders.compute("Passes/Water/ViewGridScatter");
     if (groupsY)
-        g.addPass("view grid scatter", QueueType::Graphics,
-                  [&](PassBuilder& pb) { pb.use(displacement, Use::SrvCompute); pb.use(keys, Use::UavCompute); pb.use(counters, Use::UavCompute); },
-                  [=](PassContext& c) {
-                      uint32_t k[12] = { paramSrv, c.srv(displacement), c.uav(keys), c.uav(counters) };
-                      std::memcpy(&k[4], &bound, 4);
-                      std::memcpy(&k[5], window, 16);
-                      c.cmd->SetPipelineState(scatter);
-                      c.computeConstants(k, 12);
-                      c.cmd->Dispatch(groupsX, groupsY, 1);
-                  });
+        g.addPass("view grid scatter", QueueType::Graphics, scatterUses, [=](PassContext& c) {
+            uint32_t k[12];
+            scatterConstants(c, k);
+            c.cmd->SetPipelineState(scatter);
+            c.computeConstants(k, 12);
+            c.cmd->Dispatch(groupsX, groupsY, 1);
+        });
+    if (l.nearLevels)
+    {
+        ID3D12PipelineState* nearScatter = m_shaders.compute("Passes/Water/ViewGridNearScatter");
+        const uint32_t nearGroups = (l.nearPoints - 1 + 7) / 8, levels = l.nearLevels;
+        g.addPass("view grid near scatter", QueueType::Graphics, scatterUses, [=](PassContext& c) {
+            uint32_t k[12];
+            scatterConstants(c, k);
+            c.cmd->SetPipelineState(nearScatter);
+            c.computeConstants(k, 12);
+            c.cmd->Dispatch(nearGroups, nearGroups, levels);
+        });
+    }
+    // Big triangles: prefix of their 8 x 8 tiles, then one thread per tile (indirect).
+    ID3D12PipelineState* bigScan = m_shaders.compute("Passes/Water/ViewGridBigScan");
+    g.addPass("view grid big scan", QueueType::Graphics,
+              [&](PassBuilder& pb) { pb.use(counters, Use::UavCompute); pb.use(big, Use::UavCompute); pb.use(prefix, Use::UavCompute); pb.use(arguments, Use::UavCompute); },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { c.uav(counters), c.uav(big), c.uav(prefix), kBigCapacity, width, height, c.uav(arguments), 0 };
+                  c.cmd->SetPipelineState(bigScan);
+                  c.computeConstants(k, 8);
+                  c.cmd->Dispatch(1, 1, 1);
+              });
+    ID3D12PipelineState* bigRaster = m_shaders.compute("Passes/Water/ViewGridBigRaster");
+    ID3D12CommandSignature* signature = m_dispatch.Get();
+    g.addPass("view grid big raster", QueueType::Graphics,
+              [&](PassBuilder& pb) {
+                  pb.use(counters, Use::SrvCompute); pb.use(big, Use::SrvCompute); pb.use(prefix, Use::SrvCompute); pb.use(arguments, Use::IndirectArgs);
+                  pb.use(keys, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { c.srv(counters), c.srv(big), c.srv(prefix), kBigCapacity, width, height, c.uav(keys), 0 };
+                  c.cmd->SetPipelineState(bigRaster);
+                  c.computeConstants(k, 8);
+                  c.cmd->ExecuteIndirect(signature, 1, c.resource(arguments), 0, nullptr, 0);
+              });
     ID3D12PipelineState* resolve = m_shaders.compute("Passes/Water/ViewGridResolve");
+    if (diagnostics) out.error = g.createTexture(TextureDesc{ "view grid error", width, height, 1, 1, DXGI_FORMAT_R32_FLOAT });
+    const TextureRef error = out.error;
     g.addPass("view grid resolve", QueueType::Graphics,
               [&](PassBuilder& pb) {
                   pb.use(displacement, Use::SrvCompute); pb.use(slopes, Use::SrvCompute); pb.use(keys, Use::SrvCompute);
                   pb.use(surface, Use::UavCompute); pb.use(depth, Use::UavCompute);
+                  if (diagnostics) pb.use(error, Use::UavCompute);
               },
               [=](PassContext& c) {
-                  const uint32_t k[8] = { paramSrv, 0, c.srv(keys), c.srv(displacement), c.srv(slopes), c.uav(surface), c.uav(depth), 0 };
+                  const uint32_t k[8] = { paramSrv, 0, c.srv(keys), c.srv(displacement), c.srv(slopes), c.uav(surface), c.uav(depth), diagnostics ? c.uav(error) : 0 };
                   c.cmd->SetPipelineState(resolve);
                   c.computeConstants(k, 8);
                   c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);

@@ -15,6 +15,7 @@
 #ifndef UNX_WATER_OCEAN_HEIGHT_HLSLI
 #define UNX_WATER_OCEAN_HEIGHT_HLSLI
 #include "Bindless.hlsli"
+#include "OceanSample.hlsli"
 
 #define OH_N 512u
 #define OH_CELLS 511u
@@ -27,37 +28,17 @@ float ohLevelSpacing(uint level) { return ohS0() * float(1u << level); }
 int2 ohOrigin(uint level, float2 camera) { return int2(floor(camera / ohLevelSpacing(level))) - int2(256, 256); }
 float ohCascadeLength(uint c) { return asfloat(c == 0 ? P[2].x : (c == 1 ? P[2].y : P[2].z)); }
 
-// Displacement (Dx, h, Dz) of the ocean at rest position x0, low-passed to spacing s (each cascade's mip whose texel is
-// s, trilinear). Texel (x, z) of mip 0 is the rest position (x, z) L / 512 (Ocean.h), so uv = x0 / L + 0.5 / 512 on
-// every mip.
+// Displacement (Dx, h, Dz) of the ocean at rest position x0 for spacing s: OceanSample.hlsli (C1 Hermite below a
+// cascade's texel, trilinear above: the same surface as the view grid's).
 float3 ohDisplacement(float2 x0, float s)
 {
-    Texture2DArray<float4> field = ResourceDescriptorHeap[P[0].x];
-    float3 d = 0;
-    [unroll] for (uint c = 0; c < 3; ++c)
-    {
-        const float L = ohCascadeLength(c);
-        const float mip = clamp(log2(s * 512.0 / L), 0.0, 9.0);
-        d += field.SampleLevel(g_linearWrap, float3(x0 / L + 0.5 / 512.0, c), mip).xyz;
-    }
-    return d;
+    return oceanSample(P[0].x, P[3].w, float3(ohCascadeLength(0), ohCascadeLength(1), ohCascadeLength(2)), x0, s).D;
 }
-// The same low-passed field with its Jacobian: (Dx, h, Dz) and (dDx/dx, dDx/dz, dDz/dz) (dDz/dx = dDx/dz: the horizontal
-// displacement is a gradient field).
+// The same with its Jacobian: d = (Dx, h, Dz), j = (dDx/dx, dDx/dz, dDz/dz) (dDz/dx = dDx/dz).
 void ohDisplacementJacobian(float2 x0, float s, out float3 d, out float3 j)
 {
-    Texture2DArray<float4> field = ResourceDescriptorHeap[P[0].x];
-    Texture2DArray<float4> slopes = ResourceDescriptorHeap[P[3].w];
-    d = 0;
-    j = 0;
-    [unroll] for (uint c = 0; c < 3; ++c)
-    {
-        const float L = ohCascadeLength(c);
-        const float mip = clamp(log2(s * 512.0 / L), 0.0, 9.0);
-        const float3 uv = float3(x0 / L + 0.5 / 512.0, c);
-        const float4 a = field.SampleLevel(g_linearWrap, uv, mip), b = slopes.SampleLevel(g_linearWrap, uv, mip);
-        d += a.xyz;
-        j += float3(b.z, a.w, b.w);
-    }
+    const OceanPoint o = oceanSample(P[0].x, P[3].w, float3(ohCascadeLength(0), ohCascadeLength(1), ohCascadeLength(2)), x0, s);
+    d = o.D;
+    j = float3(o.dDdx.x, o.dDdz.x, o.dDdz.z);
 }
 #endif
