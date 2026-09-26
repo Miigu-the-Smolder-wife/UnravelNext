@@ -1,0 +1,56 @@
+#pragma once
+// Time of day (FEATURES_GAME 11, B4; owner S, time and place from the World): the sun's and the moon's directions, the
+// moon's phase and the star field's rotation for a date, a time and a place on Earth, and the one directional light of
+// the frame (the VSM path has one): the sun, or the moon once the sun is below civil twilight's end.
+//
+// Models (low-precision series of the Astronomical Almanac / Meeus, "Astronomical Algorithms" 2nd ed.):
+//   sun   ecliptic longitude L + 1.915 sin g + 0.020 sin 2g, obliquity 23.439 - 4e-7 n: 0.01 deg (1950-2050);
+//   moon  the six largest longitude terms, four latitude terms, the parallax series: ~0.3 deg in longitude, ~0.2 deg in
+//         latitude (the disk is 0.5 deg wide: its place is right to about half its size), topocentric by the parallax;
+//   stars equatorial directions turned by the local sidereal time (GMST, IAU 1982 linear terms: 0.1 s over decades).
+// No refraction (0.5 deg at the horizon: the atmosphere LUT has no refraction either), no precession of the catalogue
+// (J2000 positions: 0.35 deg in 2026 along the ecliptic, the same order as the moon's model).
+// World frame: +x east, +y up, -z north (the scene's y-up convention; north is a game's authored choice of -z).
+#include "unx/core/Math.h"
+#include "unx/scene/SceneData.h"
+
+namespace unx::render::sky
+{
+struct CelestialTime
+{
+    int year = 2026, month = 6, day = 21;
+    double hoursUt = 12;          // Universal Time (hours; fractional; may be outside [0, 24): days carry)
+    double latitudeDeg = 37.5665;  // north positive
+    double longitudeDeg = 126.978; // east positive
+};
+
+struct CelestialState
+{
+    float3 sun{ 0, 1, 0 };   // unit, towards the sun
+    float3 moon{ 0, 1, 0 };  // unit, towards the moon (topocentric)
+    double sunAltitudeDeg = 0, moonAltitudeDeg = 0;
+    double moonPhaseAngleDeg = 0;   // angle sun - moon - observer (0 = full, 180 = new)
+    double moonIlluminatedFraction = 0;
+    double moonDistanceKm = 384400;
+    float3x4 equatorialToWorld;     // rotation (3 x 3 part): J2000 equatorial unit vectors (x to RA 0, z to the pole) -> world
+    double julianDay = 0;
+    double gmstDeg = 0;                                // Greenwich mean sidereal time
+    float3 sunEquatorial{}, moonEquatorial{};          // geocentric equatorial unit vectors (tests, star-field work)
+    double moonGeocentricDistanceKm = 384400;
+};
+
+double julianDay(int year, int month, int day, double hoursUt);
+CelestialState celestial(const CelestialTime& t);
+
+// The frame's directional light (the scene's Sun record): the sun while its altitude is >= civil twilight's end
+// (-6 deg), else the moon (FEATURES_GAME 11: below that, moonlight's shadows are above the sky's light; before, they are
+// buried under it). Moon illuminance at the observer: a Lambert sphere of albedo 'moonAlbedo' lit by the sun,
+// E = albedo x E_sun x (R_moon / d)^2 x (2 / 3) x phi(alpha), phi(alpha) = (sin alpha + (pi - alpha) cos alpha) / pi,
+// no opposition surge (the full moon ~0.2 lux here against 0.25-0.3 lux measured: condition recorded).
+struct DirectionalLight
+{
+    scene::Sun sun;       // what to put into Scene::sun
+    bool moon = false;    // the slot holds the moon (the sky draws the moon's disk with its phase, not a uniform disk)
+};
+DirectionalLight directionalLight(const CelestialState& s, const scene::Sun& sunAtTop, float moonAlbedo = 0.12f);
+} // namespace unx::render::sky
