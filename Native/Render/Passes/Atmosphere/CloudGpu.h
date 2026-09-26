@@ -22,7 +22,8 @@ struct CloudRecord
     float albedo, detailStrength, g0, g1;
     float lobeBlend, invShape, invDetail, invWeather;
     float shapeOffset[3], bottomRadius;
-    float detailOffset[3], pad0;
+    float detailOffset[3];
+    uint32_t skySrv;  // the sky dome (the layer seen from the camera in every direction; R's escaping rays)
     float weatherOffset[2];
     uint32_t layerSrv, distanceSrv;  // the frame's cloud layer textures (readers; CloudSystem.cpp)
     float origin[3], pad2;

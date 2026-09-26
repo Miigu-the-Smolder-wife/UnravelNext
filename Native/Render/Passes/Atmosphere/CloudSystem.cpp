@@ -18,6 +18,7 @@ namespace
 using namespace s_detail;
 const char* const kCloudKey = "s.clouds";
 constexpr uint32_t kRingSlots = 4, kRecordBytes = 256, kMapTexels = 256, kBandRows = 64;
+constexpr uint32_t kDomeWidth = 256, kDomeHeight = 96;  // the sky dome (CloudCommon.hlsli cloudDomeUv): 1.4 deg azimuth
 constexpr float kMapHalfExtent = 16000;
 
 struct CloudState
@@ -28,8 +29,8 @@ struct CloudState
     clouds::CloudTextures noise;
     bool noiseReady = false;
     uint32_t noiseSeed = 0;
-    ComPtr<ID3D12Resource> radiance, distance, map, ring, stats, zeros, statsReadback, record;
-    uint32_t radianceSrv = 0, distanceSrv = 0, mapSrv = 0, recordSrv = 0;
+    ComPtr<ID3D12Resource> radiance, distance, map, ring, stats, zeros, statsReadback, record, dome;
+    uint32_t radianceSrv = 0, distanceSrv = 0, mapSrv = 0, recordSrv = 0, domeSrv = 0;
     uint8_t* ringMapped = nullptr;
     uint32_t width = 0, height = 0;
     uint64_t frames = 0;
@@ -37,11 +38,11 @@ struct CloudState
     {
         if (!device) return;
         DescriptorHeaps& h = device->descriptors();
-        for (uint32_t i : { radianceSrv, distanceSrv, mapSrv, recordSrv })
+        for (uint32_t i : { radianceSrv, distanceSrv, mapSrv, recordSrv, domeSrv })
             if (i) h.freeResource(i);
         if (noiseReady) clouds::releaseTextures(*device, noise);
         for (ComPtr<ID3D12Resource>* r : { std::addressof(radiance), std::addressof(distance), std::addressof(map), std::addressof(ring), std::addressof(stats),
-                                           std::addressof(zeros), std::addressof(statsReadback), std::addressof(record) })
+                                           std::addressof(zeros), std::addressof(statsReadback), std::addressof(record), std::addressof(dome) })
             if (*r) device->deferRelease(*r);
     }
 };
@@ -120,6 +121,9 @@ void cloudsPrepare(FramePassContext& fc, uint32_t srvs[2])
         s.map = createTexture(device, L"S cloud sun map", D3D12_RESOURCE_DIMENSION_TEXTURE2D, kMapTexels * 2, kMapTexels, 1, DXGI_FORMAT_R32G32B32A32_UINT,
                               D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
         s.mapSrv = textureSrv(device, s.map.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
+        s.dome = createTexture(device, L"S cloud sky dome", D3D12_RESOURCE_DIMENSION_TEXTURE2D, kDomeWidth, kDomeHeight, 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                               D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+        s.domeSrv = textureSrv(device, s.dome.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
         s.ring = createBuffer(device, L"S cloud record ring", kRingSlots * kRecordBytes, D3D12_HEAP_TYPE_UPLOAD);
         D3D12_RANGE none{ 0, 0 };
         check(s.ring->Map(0, &none, reinterpret_cast<void**>(&s.ringMapped)), "map cloud record ring");
@@ -159,7 +163,7 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
     const float centre[3] = { mv.position.x, 0.5f * (s.layer.baseAltitude + s.layer.topAltitude), mv.position.z };
     clouds::CloudRecord rec = clouds::makeRecord(s.layer, offsets, s.noise, bottomRadius, sd, one, centre, kMapHalfExtent, kMapTexels);
     rec.shadow = s.mapSrv;
-    rec.layerSrv = s.radianceSrv, rec.distanceSrv = s.distanceSrv;
+    rec.layerSrv = s.radianceSrv, rec.distanceSrv = s.distanceSrv, rec.skySrv = s.domeSrv;
     const uint32_t slot = (uint32_t)(s.frames++ % kRingSlots);
     std::memcpy(s.ringMapped + slot * kRecordBytes, &rec, sizeof rec);
     const uint32_t recordSrv = s.recordSrv;
@@ -170,6 +174,7 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
     const TextureRef map = g.importTexture(s.map.Get(), textureDesc("S cloud sun map", kMapTexels * 2, kMapTexels, DXGI_FORMAT_R32G32B32A32_UINT), L);
     const TextureRef radiance = g.importTexture(s.radiance.Get(), textureDesc("S cloud layer", s.width, s.height, DXGI_FORMAT_R16G16B16A16_FLOAT), L);
     const TextureRef distance = g.importTexture(s.distance.Get(), textureDesc("S cloud distance", s.width, s.height, DXGI_FORMAT_R16_FLOAT), L);
+    const TextureRef dome = g.importTexture(s.dome.Get(), textureDesc("S cloud sky dome", kDomeWidth, kDomeHeight, DXGI_FORMAT_R16G16B16A16_FLOAT), L);
     const BufferRef stats = g.importBuffer(s.stats.Get(), BufferDesc{ "S cloud stats", 256, 0 });
     ShaderLibrary& sh = fc.shaders;
     ID3D12Resource* zeros = s.zeros.Get();
@@ -223,12 +228,30 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
                       c.cmd->Dispatch(groups(w, 8), groups(std::min(kBandRows, h - row), 8), 1);
                   }
               });
-    // The readers (S's atmosphere functions in M's passes) sample the layer through the record's SRVs: this pass puts the
-    // textures in the shader-resource layout for them.
+    // The sky dome for R's escaping rays (GiSky.hlsli: atmosphereSkyRadianceCloudy): mode 3, one dispatch (24,576 texels).
+    g.addPass("s.cloud.sky", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(record, Use::SrvCompute);
+                  b.use(map, Use::SrvCompute);
+                  b.use(transmittanceLut, Use::SrvCompute);
+                  b.use(msTable, Use::SrvCompute);
+                  b.use(dome, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  c.cmd->SetPipelineState(pc);
+                  c.bindFrameConstants(cb);
+                  const uint32_t k[12] = { recordSrv, c.uav(dome), 0xFFFFFFFFu, 1, kDomeWidth, kDomeHeight, 3, 0, c.srv(transmittanceLut), 0xFFFFFFFFu, 0xFFFFFFFFu,
+                                           c.srv(msTable) };
+                  c.computeConstants(k, 12);
+                  c.cmd->Dispatch(groups(kDomeWidth, 8), groups(kDomeHeight, 8), 1);
+              });
+    // The readers (S's atmosphere functions in M's passes, R's sky) sample the layer through the record's SRVs: this pass
+    // puts the textures in the shader-resource layout for them.
     g.addPass("s.cloud.publish", QueueType::Graphics,
               [&](PassBuilder& b) {
                   b.use(radiance, Use::SrvCompute);
                   b.use(distance, Use::SrvCompute);
+                  b.use(dome, Use::SrvCompute);
                   b.use(map, Use::SrvCompute);
                   b.use(record, Use::SrvCompute);
                   b.keep();

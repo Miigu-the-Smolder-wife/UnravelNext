@@ -6,7 +6,7 @@
 //   [1]  albedo, detail strength, g0, g1
 //   [2]  lobe blend, 1 / shape period, 1 / detail period, 1 / weather period
 //   [3]  shape offset xyz (periods), planet bottom radius (m)
-//   [4]  detail offset xyz, 0
+//   [4]  detail offset xyz, sky dome SRV (RGBA16F, cloudDomeUv: the layer seen from the camera in every direction)
 //   [5]  weather offset xy, cloud layer SRV (RGBA16F), cloud distance SRV (R16F, km) (the frame's; readers)
 //   [6]  world origin offset xyz (world = renderer space + origin), 0
 //   [7]  SRVs: shape (Texture3D R8), detail (Texture3D R8), weather (Texture2D RG8), shadow (Texture2D RGBA32_UINT)
@@ -25,6 +25,7 @@ struct CloudRecord
     float3 shapeOffset;
     float bottomRadius;
     float3 detailOffset;
+    uint skySrv;
     float2 weatherOffset;
     uint layerSrv, distanceSrv;
     float3 origin;
@@ -48,6 +49,7 @@ CloudRecord cloudLoad(uint rawBuffer)
     c.lobeBlend = q2.x, c.invShape = q2.y, c.invDetail = q2.z, c.invWeather = q2.w;
     c.shapeOffset = q3.xyz, c.bottomRadius = q3.w;
     c.detailOffset = q4.xyz;
+    c.skySrv = asuint(q4.w);
     c.weatherOffset = q5.xy;
     c.layerSrv = asuint(q5.z), c.distanceSrv = asuint(q5.w);
     c.origin = q6.xyz;
@@ -83,6 +85,22 @@ float cloudDensity(CloudRecord c, float3 x)
     Texture3D<float> detail = ResourceDescriptorHeap[c.detail];
     const float erosion = detail.SampleLevel(g_linearWrap, x * c.invDetail + c.detailOffset, 0) * c.detailStrength;
     return c.sigmaMax * saturate((base - erosion) / max(1 - erosion, 1e-4));
+}
+
+// The sky dome's parameterization (the cloud layer seen from the camera, every azimuth: clouds have no symmetry about the
+// sun's plane): u = azimuth / 2 pi, v = sqrt((e - e0) / (pi/2 - e0)) with elevation e from e0 = -10 deg (dense near the
+// horizon, where the clouds' angular features are smallest).
+#define CLOUD_DOME_E0 (-0.17453293)
+float2 cloudDomeUv(float3 d)
+{
+    const float azimuth = atan2(d.z, d.x);
+    const float e = asin(clamp(d.y, -1.0, 1.0));
+    return float2(azimuth * (0.5 / 3.14159265) + 0.5, sqrt(saturate((e - CLOUD_DOME_E0) / (1.57079633 - CLOUD_DOME_E0))));
+}
+float3 cloudDomeDir(float2 uv)
+{
+    const float azimuth = (uv.x - 0.5) * 2 * 3.14159265, e = CLOUD_DOME_E0 + uv.y * uv.y * (1.57079633 - CLOUD_DOME_E0);
+    return float3(cos(e) * cos(azimuth), sin(e), cos(e) * sin(azimuth));
 }
 
 float cloudHg(float g, float cosTheta) { return (1 - g * g) / (4 * 3.14159265 * pow(max(1 + g * g - 2 * g * cosTheta, 1e-6), 1.5)); }

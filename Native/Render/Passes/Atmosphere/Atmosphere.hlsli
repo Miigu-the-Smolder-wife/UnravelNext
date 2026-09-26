@@ -14,6 +14,7 @@
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "Passes/Atmosphere/AtmosphereCommon.hlsli"
+#include "Passes/Atmosphere/CloudCommon.hlsli"  // definitions only (the dome's parameterization); no code unless called
 
 struct AtmosphereSrvs
 {
@@ -202,6 +203,27 @@ void airApplyClouds(AtmosphereSrvs s, float2 uv, float surfaceM, inout float3 in
     const float4 v = layer.SampleLevel(g_linearClamp, uv, 0);
     inscatter = v.rgb + v.a * inscatter;
     transmittance *= v.a;
+}
+
+// The far-field sky with the cloud layer in front, for a direction from the camera (R's escaping GI and reflection rays;
+// not called by M's kernels): the sky dome (CloudMarch.hlsl mode 3: the layer with the air in front folded in) over
+// atmosphereSkyRadiance. Without clouds: atmosphereSkyRadiance.
+float3 atmosphereSkyRadianceCloudy(AtmosphereSrvs s, float3 worldDir)
+{
+    const float3 sky = atmosphereSkyRadiance(s, worldDir);
+    Texture2D<float4> p = ResourceDescriptorHeap[s.transmittance];
+    uint pw, ph;
+    p.GetDimensions(pw, ph);
+    const uint r = asuint(p.Load(int3(10, ph - 1, 0)).z);
+    if (r == 0) return sky;
+    ByteAddressBuffer b = ResourceDescriptorHeap[r - 1];
+    Texture2D<float4> dome = ResourceDescriptorHeap[b.Load(76)];  // CloudRecord skySrv
+    uint dw, dh;
+    dome.GetDimensions(dw, dh);
+    float2 uv = cloudDomeUv(worldDir);
+    uv.y = clamp(uv.y, 0.5 / dh, 1 - 0.5 / dh);  // wrap in azimuth only
+    const float4 v = dome.SampleLevel(g_linearWrap, uv, 0);
+    return v.rgb + v.a * sky;
 }
 
 // Sky pixels of a view with an air volume (ShadeSky; INTERFACES 5.6): the far-field sky (atmosphereSkyRadiance) plus

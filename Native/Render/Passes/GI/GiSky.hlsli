@@ -12,6 +12,7 @@
 #include "Frame.hlsli"
 #if SKY == SKY_ATMOSPHERE
 #include "Passes/Atmosphere/Atmosphere.hlsli"
+#include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 #endif
 
 uint giRandom(uint x)
@@ -31,7 +32,7 @@ float3 giSkyRadiance(float3 dir)
 {
 #if SKY == SKY_ATMOSPHERE
     AtmosphereSrvs a = { P[2].x, P[2].y, P[2].z, P[2].w };
-    return P[2].z == UNX_NONE ? 0 : atmosphereSkyRadiance(a, dir);
+    return P[2].z == UNX_NONE ? 0 : atmosphereSkyRadianceCloudy(a, dir);  // B5: the cloud layer in front of the sky
 #else
     return asfloat(P[1].xyz);
 #endif
@@ -42,7 +43,8 @@ float3 giSunIlluminance(float3 p)
 {
 #if SKY == SKY_ATMOSPHERE
     AtmosphereSrvs a = { P[2].x, P[2].y, P[2].z, P[2].w };
-    return P[2].x == UNX_NONE ? 0 : atmosphereSunIlluminance(a, p);
+    // B5: the sun through the cloud layer at p (cloud shadow at GI and reflection hits).
+    return P[2].x == UNX_NONE ? 0 : atmosphereSunIlluminance(a, p) * cloudSunTransmittanceFromLut(P[2].x, p);
 #else
     return asfloat(P[3].xyz);
 #endif
