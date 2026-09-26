@@ -14,7 +14,8 @@
 //   P[5] cell info UAV, block triangles UAV, vertices UAV, case table SRV
 //   P[6] dispatch arguments UAV, draw arguments UAV, velocities UAV, 0
 //   P[7] particle velocity offset (bytes; 0xFFFFFFFF = none), velocity scale (particle units -> m/s), previous slot
-//        offset (bytes to the uint index of the particle in the previous buffer; 0xFFFFFFFF = the same index), 0
+//        offset (bytes to the uint index of the particle in the previous buffer; 0xFFFFFFFF = the same index), first
+//        record (1: every triangle past the drawn ones is retired, FluidTail.hlsl)
 // Nodes hold 4 uints: density (fixed point 2^20) and the density-weighted velocity (signed, m/s x 2^16) for the surface
 // velocities (motion vectors: V's triangle stream, request 20260926_W_gpu_triangle_stream.md).
 #ifndef UNX_WATER_FLUID_SURFACE_HLSLI
@@ -31,6 +32,9 @@
 #define FS_COUNTER_ACTIVE 0u
 #define FS_COUNTER_TRIANGLES 1u
 #define FS_COUNTER_OVERFLOW 2u      // pool or triangle capacity exceeded (counted, reported)
+#define FS_COUNTER_TAIL_FROM 3u     // triangles [from, to) to retire this record (drawn now, drawn before: FluidTail.hlsl)
+#define FS_COUNTER_TAIL_TO 4u
+#define FS_COUNTER_DRAWN 15u        // triangles drawn by the previous record (kept across records; FluidClear skips it)
 #define FS_SUMS(tableSize) (tableSize)
 #define FS_SLOTS(tableSize) (tableSize + 2048u)
 
@@ -44,6 +48,7 @@ uint3 fsBlocks() { return P[2].xyz; }
 uint fsMaxBlocks() { return P[2].w; }
 float3 fsOrigin() { return asfloat(P[3].xyz); }
 uint fsMaxTriangles() { return P[3].w; }
+bool fsFirstRecord() { return P[7].w != 0; }
 
 uint fsBlockIndex(int3 b) { uint3 n = fsBlocks(); return ((uint)b.z * n.y + (uint)b.y) * n.x + (uint)b.x; }
 bool fsInside(int3 b) { uint3 n = fsBlocks(); return all(b >= 0) && all(b < (int3)n); }

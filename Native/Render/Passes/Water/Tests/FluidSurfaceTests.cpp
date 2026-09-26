@@ -12,6 +12,9 @@
 //      WATER_LINEAR_ROW = 1,024 active blocks, so the per-block and per-node passes run on two-dimensional dispatches of
 //      rows): equal to the reference and closed
 //   Every mesh also carries vertex velocities (the density-weighted particle velocity), equal to the reference.
+//   7. retired tail: after every record, every vertex past the drawn triangles up to the capacity has a NaN position
+//      (FluidTail.hlsl: a ray tracing build over the capacity sees them inactive); the cases run in an order where the
+//      triangle count both grows and shrinks (box -> sphere -> cloud -> blend -> spray 0)
 //   unx_test_water_fluidsurfacetests [--no-debug-layer] [--warp]
 #include "unx/water/FluidSurface.h"
 
@@ -248,7 +251,11 @@ Mesh run(Gpu& gpu, FluidSurface& surface, const std::vector<Particle>& now, cons
     const float* v = nullptr;
     check(readVertices->Map(0, nullptr, (void**)&v), "map vertices");
     for (uint32_t i = 0; i < std::min(m.triangles, d.maxTriangles) * 3; ++i) m.vertices.push_back({ v[8 * i], v[8 * i + 1], v[8 * i + 2], v[8 * i + 4], v[8 * i + 5], v[8 * i + 6] });
+    uint32_t live = 0;
+    for (uint64_t i = uint64_t(std::min(m.triangles, d.maxTriangles)) * 3; i < uint64_t(d.maxTriangles) * 3; ++i)
+        if (!(std::isnan(v[8 * i]) && std::isnan(v[8 * i + 1]) && std::isnan(v[8 * i + 2]))) ++live;
     readVertices->Unmap(0, nullptr);
+    W_CHECK(live == 0, "%u vertices past the %u drawn triangles (capacity %u) are not retired", live, m.triangles, d.maxTriangles);
     check(readVelocities->Map(0, nullptr, (void**)&v), "map velocities");
     for (uint32_t i = 0; i < std::min(m.triangles, d.maxTriangles) * 3; ++i) m.velocities.push_back({ v[4 * i], v[4 * i + 1], v[4 * i + 2] });
     readVelocities->Unmap(0, nullptr);

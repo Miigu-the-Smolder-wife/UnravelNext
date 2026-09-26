@@ -255,7 +255,9 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
     if (in.velocityOffset != UINT32_MAX && (in.velocityOffset % 4 || in.velocityOffset + 12 > in.stride)) fail("fluid surface: the particle velocity must be a float3 inside the element");
     if (in.previousSlotOffset != UINT32_MAX && (in.previousSlotOffset % 4 || in.previousSlotOffset + 4 > in.stride)) fail("fluid surface: the previous slot must be a uint inside the element");
     struct Constants { uint32_t p[8][4]; };
-    auto constants = [this, in, table, scan, density, counters, info, blockTris, vertices, velocities, cases, dispatch, draw](const PassContext& c) {
+    const bool first = !m_recorded;
+    m_recorded = true;
+    auto constants = [this, first, in, table, scan, density, counters, info, blockTris, vertices, velocities, cases, dispatch, draw](const PassContext& c) {
         Constants k{};
         k.p[0][0] = in.count ? c.srv(in.particles) : 0; k.p[0][1] = in.previous.valid() ? c.srv(in.previous) : 0xFFFFFFFFu; k.p[0][2] = in.count; k.p[0][3] = in.stride;
         std::memcpy(&k.p[1][0], &in.alpha, 4); std::memcpy(&k.p[1][1], &m_desc.scale, 4); std::memcpy(&k.p[1][2], &m_desc.h, 4); k.p[1][3] = m_tableSize;
@@ -264,7 +266,7 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
         k.p[4][0] = c.uav(table); k.p[4][1] = c.uav(scan); k.p[4][2] = c.uav(density); k.p[4][3] = c.uav(counters);
         k.p[5][0] = c.uav(info); k.p[5][1] = c.uav(blockTris); k.p[5][2] = c.uav(vertices); k.p[5][3] = c.srv(cases);
         k.p[6][0] = c.uav(dispatch); k.p[6][1] = c.uav(draw); k.p[6][2] = c.uav(velocities);
-        k.p[7][0] = in.velocityOffset; std::memcpy(&k.p[7][1], &in.velocityScale, 4); k.p[7][2] = in.previousSlotOffset;
+        k.p[7][0] = in.velocityOffset; std::memcpy(&k.p[7][1], &in.velocityScale, 4); k.p[7][2] = in.previousSlotOffset; k.p[7][3] = first ? 1 : 0;
         c.computeConstants(&k, 32);
     };
     // Every pass declares all the module's buffers it can touch (the constants carry every view).
@@ -296,6 +298,7 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
     indirectPass("fluid count", "Passes/Water/FluidCount", 1);
     direct("fluid block scan", "Passes/Water/FluidBlockScan", 1);
     indirectPass("fluid emit", "Passes/Water/FluidEmit", 1);
+    direct("fluid tail", "Passes/Water/FluidTail", groups(m_desc.maxTriangles));
     return { vertices, velocities, draw, counters };
 }
 } // namespace unx::water

@@ -10,5 +10,5 @@ void main(uint3 group : SV_GroupID, uint thread : SV_GroupThreadID)
     RWByteAddressBuffer table = ResourceDescriptorHeap[P[4].x];
     RWByteAddressBuffer counters = ResourceDescriptorHeap[P[4].w];
     if (i < fsTableSize()) table.Store(4 * i, 0);
-    if (i < 16) counters.Store(4 * i, 0);
+    if (i < FS_COUNTER_DRAWN) counters.Store(4 * i, 0);
 }

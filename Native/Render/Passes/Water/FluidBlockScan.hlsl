@@ -1,6 +1,7 @@
 // unx-kernel: cs_6_6 main
 // Fluid surface: one group scans the active blocks' triangle counts in block order (first triangle per block), writes
-// the total and the draw arguments (vertices = 3 x triangles, capped at the capacity; a cut is counted).
+// the total and the draw arguments (vertices = 3 x triangles, capped at the capacity; a cut is counted), and the range of
+// triangles drawn before but not now, which FluidTail.hlsl retires.
 #include "FluidSurface.hlsli"
 
 groupshared uint g_scan[1024];
@@ -25,6 +26,11 @@ void main(uint t : SV_GroupThreadID)
     {
         counters.Store(4 * FS_COUNTER_TRIANGLES, carry);
         if (carry > fsMaxTriangles()) counters.InterlockedAdd(4 * FS_COUNTER_OVERFLOW, 1);
-        draw.Store4(0, uint4(min(carry, fsMaxTriangles()) * 3, 1, 0, 0));
+        const uint drawn = min(carry, fsMaxTriangles());
+        draw.Store4(0, uint4(drawn * 3, 1, 0, 0));
+        const uint before = fsFirstRecord() ? fsMaxTriangles() : counters.Load(4 * FS_COUNTER_DRAWN);
+        counters.Store(4 * FS_COUNTER_TAIL_FROM, drawn);
+        counters.Store(4 * FS_COUNTER_TAIL_TO, max(before, drawn));
+        counters.Store(4 * FS_COUNTER_DRAWN, drawn);
     }
 }

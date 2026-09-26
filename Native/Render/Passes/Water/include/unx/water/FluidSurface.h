@@ -37,7 +37,8 @@ struct FluidSurfaceInput
 };
 struct FluidSurfaceOutput
 {
-    render::BufferRef vertices;  // 32 B per vertex: world position (w = 1), normal (w = 0); 3 per triangle, CCW outside
+    render::BufferRef vertices;  // 32 B per vertex: world position (w = 1), normal (w = 0); 3 per triangle, CCW outside;
+                                 // triangles past the drawn count have NaN positions (inactive in a BLAS over the capacity)
     render::BufferRef velocities;  // 16 B per vertex: world velocity m/s (w = 0); zero without particle velocities
     render::BufferRef draw;      // D3D12_DRAW_ARGUMENTS
     render::BufferRef counters;  // uint: active blocks, triangles, overflow (pool or triangle capacity)
@@ -76,6 +77,7 @@ private:
     render::ComPtr<ID3D12Resource> m_table, m_scan, m_density, m_counters, m_info, m_blockTris, m_vertices, m_velocities, m_cases, m_dispatch, m_draw;
     render::ComPtr<ID3D12CommandSignature> m_signature;
     bool m_casesUploaded = false;
+    bool m_recorded = false;  // FluidTail: the first record retires the whole capacity
     render::ComPtr<ID3D12Resource> m_caseUpload;
 };
 } // namespace unx::water
