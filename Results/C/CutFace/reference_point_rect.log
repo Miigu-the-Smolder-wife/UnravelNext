@@ -1,0 +1,6 @@
+[point]
+  point    measured 17.68  expected 17.6803  rel.err -1.74e-05  (tolerance 1.04e-04)
+reference tests passed
+[rect]
+  rect     measured 106.654  expected 106.659  rel.err -4.37e-05  (tolerance 1.04e-04)
+reference tests passed

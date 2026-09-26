@@ -1,0 +1,132 @@
+    relief 0.3: 73728 source tris, 2384 clusters (1155 source), 151 groups, depth 12, 178 nodes, 12 LOD cuts, coarsest 36 tris, 16 fold retries (0 terminal), 283 ms
+    relief 1.0: 73728 source tris, 1199 clusters (1165 source), 72 groups, depth 2, 85 nodes, 2 LOD cuts, coarsest 72277 tris, 544 fold retries (66 terminal), 400 ms
+PASS heightfield_cuts_are_watertight
+PASS submesh_seam_stays_closed
+    tile 0: 32768 source tris, depth 9, coarsest 136 tris
+    tile 1: 32768 source tris, depth 8, coarsest 253 tris
+    tile 2: 32768 source tris, depth 10, coarsest 63 tris
+    6272 seam edges checked over all clusters of both tiles
+PASS tile_seams_stay_closed_at_every_cut
+    blade source cluster width -0.00400 m (flat if < 0)
+    blade source cluster width -0.00400 m (flat if < 0)
+    blade source cluster width -0.00400 m (flat if < 0)
+    tube source cluster width 0.01961 m (expected 0.01962, solid)
+    terrain narrowest cluster width 8.004 m (quad 0.25 m)
+PASS feature_width_of_known_shapes
+    thin set: 7000 source tris, 460 clusters, 32 groups (4 terminal), 4 LOD cuts, coarsest 1401 tris
+PASS thin_geometry_is_not_thinned
+    relief 0.3, guard off: 151 groups, 1 terminal, depth 12, coarsest 35 of 73728 tris
+    relief 0.3, guard on : 151 groups, 1 terminal, depth 12, coarsest 36 of 73728 tris
+    relief 1.0, guard off: 72 groups, 68 terminal, depth 2, coarsest 72277 of 73728 tris
+    relief 1.0, guard on : 72 groups, 68 terminal, depth 2, coarsest 72277 of 73728 tris
+PASS wide_surfaces_simplify_fully
+    cold build: 1 of 3 meshes reused, 52.0 ms; warm: 3 reused, 9.8 ms
+PASS rebuild_reuses_unchanged_meshes
+    cold 57.7 ms, from disk 13.1 ms (2 of 3 meshes read)
+UnravelNext cluster cache: C:\Users\USER\AppData\Local\Temp\unx_cluster_cache_test_74664\clusters\573438f52568b61f20ce0cdbe92a59ba9e95e701167d51643d4e56998f46225c.unxcl is corrupted (checksum); rebuilding it
+UnravelNext cluster cache: C:\Users\USER\AppData\Local\Temp\unx_cluster_cache_test_74664\clusters\f9e986109b3307fff9b02275e56eec05eec488c615fd015319874422796a425c.unxcl is corrupted (checksum); rebuilding it
+PASS disk_cache_round_trip
+PASS build_is_deterministic
+    forest_thin: per mesh (instances): source clusters, triangles per source cluster median / P10, bounding radius median (m)
+      terrain                  (      1):  32861,  64 /  64, 8.39
+      tree_thin_0              (  25000):   3817,  21 /  21, 0.231
+      tree_thin_1              (  25000):   3817,  21 /  21, 0.232
+      tree_thin_2              (  25000):   3818,  21 /  21, 0.231
+      tree_thin_3              (  25000):   3817,  21 /  21, 0.232
+      grass_thin_0             ( 125000):     23,   6 /   2, 0.513
+      grass_thin_1             ( 125000):     23,   6 /   2, 0.45
+      grass_thin_2             ( 125000):     24,   6 /   2, 0.539
+      grass_thin_3             ( 125000):     28,   6 /   2, 0.492
+      grass_thin_4             ( 125000):     27,   6 /   2, 0.501
+      grass_thin_5             ( 125000):     24,   6 /   2, 0.501
+      grass_thin_6             ( 125000):     27,   6 /   2, 0.467
+      grass_thin_7             ( 125000):     25,   6 /   2, 0.467
+    forest_thin: instance-weighted source clusters 406882861, triangles 8246897152, 20.3 triangles per cluster (median 21 of 64)
+    forest_card: per mesh (instances): source clusters, triangles per source cluster median / P10, bounding radius median (m)
+      terrain                  (      1):  32861,  64 /  64, 8.39
+      tree_card_0              (  25000):    208,  16 /   4, 2.97
+      tree_card_1              (  25000):    213,  16 /   4, 2.98
+      tree_card_2              (  25000):    219,  14 /   4, 2.93
+      tree_card_3              (  25000):    211,  16 /   6, 2.98
+      grass_card_0             ( 125000):      6,   2 /   2, 0.31
+      grass_card_1             ( 125000):      6,   2 /   2, 0.379
+      grass_card_2             ( 125000):      7,   2 /   2, 0.344
+      grass_card_3             ( 125000):      6,   2 /   2, 0.301
+      grass_card_4             ( 125000):      4,   4 /   2, 0.587
+      grass_card_5             ( 125000):      6,   2 /   2, 0.362
+      grass_card_6             ( 125000):      7,   2 /   2, 0.328
+      grass_card_7             ( 125000):      7,   2 /   2, 0.235
+    forest_card: instance-weighted source clusters 27432861, triangles 362897152, 13.2 triangles per cluster (median 12 of 64)
+    waterside: per mesh (instances): source clusters, triangles per source cluster median / P10, bounding radius median (m)
+      terrain                  (      1):  11294,  64 /  64, 8.55
+      water_waves              (      1):  31330,  64 /  64, 1.28
+      tree_card_0              (    750):    210,  16 /   4, 2.98
+      tree_card_1              (    750):    214,  16 /   4, 2.96
+      tree_card_2              (    750):    208,  16 /   6, 2.97
+      tree_card_3              (    750):    208,  16 /   6, 3.04
+      reeds                    (    258):     19,  56 /  30, 0.812
+    waterside: instance-weighted source clusters 679855, triangles 13386056, 19.7 triangles per cluster (median 18 of 64)
+    city_block: per mesh (instances): source clusters, triangles per source cluster median / P10, bounding radius median (m)
+      terrain                  (      1):  30176,  64 /  64, 8.55
+      tree_card_0              (     30):    206,  16 /   4, 3.05
+      tree_card_1              (     30):    213,  16 /   4, 2.93
+      tree_card_2              (     30):    213,  16 /   4, 2.98
+      tree_card_3              (     30):    210,  16 /   4, 3.07
+      building                 (      1):     77,  32 /  22, 8.71
+      overhead_wires           (      1):    797,  24 /  24, 1.9
+    city_block: instance-weighted source clusters 59464, triangles 2433614, 40.9 triangles per cluster (median 64 of 64)
+PASS cluster_fill_of_scene_meshes
+PASS brick_depth_encoding
+    cut triangles 1980 (simplified cut clusters 16), boundary edges flagged 354, wrong 0, hull triangles with bits 0
+PASS cut_face_border_edges
+    clump of 60 blades: width 0.0040 m, v0 0.0160 m, 2 levels, 9 bricks, 2078 voxels; residual P99/max r 0.1017/0.2045, half 0.1687/0.2458, brick shape 0.2483/0.4207; bake 59 ms
+    clump of 60 blades:
+    nearest   bundle 1x: level 0 (voxel 0.0160 m): bundle transmittance |model - exact| mean 0.1046, P90 0.2006, P99 0.3620, max 0.4412; signed mean -0.0363 (mean exact T 0.633); by occupied voxels crossed 1 / 2-3 / 4-7 / 8+: 0.067 (6) / 0.092 (19) / 0.104 (79) / 0.110 (96)
+    nearest   bundle 1x: level 1 (voxel 0.0320 m): bundle transmittance |model - exact| mean 0.0827, P90 0.1621, P99 0.2572, max 0.2663; signed mean -0.0402 (mean exact T 0.606); by occupied voxels crossed 1 / 2-3 / 4-7 / 8+: 0.000 (0) / 0.057 (1) / 0.066 (39) / 0.087 (160)
+    nearest   bundle 2x: level 0 (voxel 0.0160 m): bundle transmittance |model - exact| mean 0.0580, P90 0.1211, P99 0.1738, max 0.2167; signed mean -0.0185 (mean exact T 0.608); by occupied voxels crossed 1 / 2-3 / 4-7 / 8+: 0.035 (3) / 0.065 (18) / 0.056 (81) / 0.059 (98)
+    nearest   bundle 2x: level 1 (voxel 0.0320 m): bundle transmittance |model - exact| mean 0.0700, P90 0.1432, P99 0.2678, max 0.2690; signed mean -0.0476 (mean exact T 0.614); by occupied voxels crossed 1 / 2-3 / 4-7 / 8+: 0.000 (0) / 0.049 (2) / 0.075 (29) / 0.069 (169)
+    clump of 240 blades:
+    nearest   bundle 1x: level 0 (voxel 0.0160 m): bundle transmittance |model - exact| mean 0.0705, P90 0.1638, P99 0.2936, max 0.3746; signed mean -0.0320 (mean exact T 0.187); by occupied voxels crossed 1 / 2-3 / 4-7 / 8+: 0.000 (0) / 0.000 (0) / 0.037 (1) / 0.071 (199)
+    nearest   bundle 1x: level 1 (voxel 0.0320 m): bundle transmittance |model - exact| mean 0.0494, P90 0.1087, P99 0.2530, max 0.2782; signed mean -0.0032 (mean exact T 0.162); by occupied voxels crossed 1 / 2-3 / 4-7 / 8+: 0.000 (0) / 0.000 (0) / 0.000 (0) / 0.049 (200)
+    nearest   bundle 2x: level 0 (voxel 0.0160 m): bundle transmittance |model - exact| mean 0.0446, P90 0.0931, P99 0.1711, max 0.1732; signed mean -0.0175 (mean exact T 0.168); by occupied voxels crossed 1 / 2-3 / 4-7 / 8+: 0.000 (0) / 0.000 (0) / 0.000 (0) / 0.045 (200)
+    nearest   bundle 2x: level 1 (voxel 0.0320 m): bundle transmittance |model - exact| mean 0.0406, P90 0.0907, P99 0.2357, max 0.2383; signed mean -0.0059 (mean exact T 0.163); by occupied voxels crossed 1 / 2-3 / 4-7 / 8+: 0.000 (0) / 0.000 (0) / 0.025 (1) / 0.041 (199)
+    clump of 960 blades:
+    nearest   bundle 1x: level 0 (voxel 0.0160 m): bundle transmittance |model - exact| mean 0.0039, P90 0.0132, P99 0.0465, max 0.0572; signed mean +0.0010 (mean exact T 0.003); by occupied voxels crossed 1 / 2-3 / 4-7 / 8+: 0.000 (0) / 0.000 (0) / 0.000 (0) / 0.004 (200)
+    nearest   bundle 1x: level 1 (voxel 0.0320 m): bundle transmittance |model - exact| mean 0.0048, P90 0.0145, P99 0.0687, max 0.0708; signed mean +0.0033 (mean exact T 0.003); by occupied voxels crossed 1 / 2-3 / 4-7 / 8+: 0.000 (0) / 0.000 (0) / 0.000 (0) / 0.005 (200)
+    nearest   bundle 2x: level 0 (voxel 0.0160 m): bundle transmittance |model - exact| mean 0.0032, P90 0.0092, P99 0.0404, max 0.0476; signed mean +0.0008 (mean exact T 0.004); by occupied voxels crossed 1 / 2-3 / 4-7 / 8+: 0.000 (0) / 0.000 (0) / 0.000 (0) / 0.003 (200)
+    nearest   bundle 2x: level 1 (voxel 0.0320 m): bundle transmittance |model - exact| mean 0.0053, P90 0.0143, P99 0.1036, max 0.1424; signed mean +0.0023 (mean exact T 0.005); by occupied voxels crossed 1 / 2-3 / 4-7 / 8+: 0.000 (0) / 0.000 (0) / 0.000 (0) / 0.005 (200)
+PASS brick_bake_of_a_blade_clump
+    blades met 1   :  199 bundles, |model - exact| mean 0.0694, P90 0.1368, P99 0.3301; signed mean -0.0228
+    blades met 2   :  133 bundles, |model - exact| mean 0.0801, P90 0.1756, P99 0.2701; signed mean -0.0004
+    blades met 3-4 :  194 bundles, |model - exact| mean 0.0792, P90 0.1631, P99 0.2775; signed mean +0.0075
+    blades met 5-8 :  200 bundles, |model - exact| mean 0.0961, P90 0.1983, P99 0.2904; signed mean +0.0285
+    blades met 9-16:  475 bundles, |model - exact| mean 0.0378, P90 0.0926, P99 0.1987; signed mean +0.0085
+    blades met 17+ :  265 bundles, |model - exact| mean 0.0100, P90 0.0308, P99 0.1162; signed mean +0.0078
+PASS brick_model_error_by_elements
+    occupancy bake of 12 meshes: 17.0 s
+    tree_thin_0    (25000 inst) level 0 (voxel 0.109 m, 5 x 6 x 5 bricks): per ray occupied bricks P10/P50/P90 0.00/1.00/1.00, 4^3 cells 0.00/0.40/0.95, voxels 0.000/0.043/0.444 | mean voxels crossed 51.2, in occupied bricks 41.7, in occupied cells 25.7 (2000 rays)
+    tree_thin_0    (25000 inst) level 1 (voxel 0.217 m, 3 x 3 x 3 bricks): per ray occupied bricks P10/P50/P90 0.67/1.00/1.00, 4^3 cells 0.00/0.64/1.00, voxels 0.000/0.268/0.846 | mean voxels crossed 26.9, in occupied bricks 26.6, in occupied cells 16.2 (2000 rays)
+    tree_thin_1    (25000 inst) level 0 (voxel 0.109 m, 5 x 6 x 5 bricks): per ray occupied bricks P10/P50/P90 0.00/0.88/1.00, 4^3 cells 0.00/0.30/0.92, voxels 0.000/0.000/0.421 | mean voxels crossed 50.9, in occupied bricks 40.3, in occupied cells 24.1 (2000 rays)
+    tree_thin_1    (25000 inst) level 1 (voxel 0.217 m, 3 x 3 x 3 bricks): per ray occupied bricks P10/P50/P90 0.67/1.00/1.00, 4^3 cells 0.00/0.64/1.00, voxels 0.000/0.167/0.843 | mean voxels crossed 26.4, in occupied bricks 26.1, in occupied cells 16.1 (2000 rays)
+    tree_thin_2    (25000 inst) level 0 (voxel 0.109 m, 5 x 6 x 5 bricks): per ray occupied bricks P10/P50/P90 0.00/1.00/1.00, 4^3 cells 0.00/0.38/0.94, voxels 0.000/0.034/0.433 | mean voxels crossed 51.0, in occupied bricks 41.0, in occupied cells 25.2 (2000 rays)
+    tree_thin_2    (25000 inst) level 1 (voxel 0.217 m, 3 x 3 x 3 bricks): per ray occupied bricks P10/P50/P90 0.67/1.00/1.00, 4^3 cells 0.00/0.62/1.00, voxels 0.000/0.188/0.840 | mean voxels crossed 26.4, in occupied bricks 26.1, in occupied cells 15.5 (2000 rays)
+    tree_thin_3    (25000 inst) level 0 (voxel 0.109 m, 5 x 6 x 5 bricks): per ray occupied bricks P10/P50/P90 0.00/0.89/1.00, 4^3 cells 0.00/0.38/0.92, voxels 0.000/0.028/0.422 | mean voxels crossed 52.3, in occupied bricks 42.4, in occupied cells 25.7 (2000 rays)
+    tree_thin_3    (25000 inst) level 1 (voxel 0.217 m, 3 x 3 x 3 bricks): per ray occupied bricks P10/P50/P90 0.75/1.00/1.00, 4^3 cells 0.00/0.60/1.00, voxels 0.000/0.178/0.846 | mean voxels crossed 26.3, in occupied bricks 26.1, in occupied cells 15.6 (2000 rays)
+    grass_thin_0   (125000 inst) level 0 (voxel 0.011 m, 6 x 5 x 6 bricks): per ray occupied bricks P10/P50/P90 0.33/0.83/1.00, 4^3 cells 0.00/0.07/0.32, voxels 0.000/0.000/0.031 | mean voxels crossed 55.3, in occupied bricks 47.1, in occupied cells 7.3 (2000 rays)
+    grass_thin_0   (125000 inst) level 1 (voxel 0.021 m, 3 x 3 x 3 bricks): per ray occupied bricks P10/P50/P90 0.50/1.00/1.00, 4^3 cells 0.00/0.36/0.80, voxels 0.000/0.000/0.100 | mean voxels crossed 27.2, in occupied bricks 26.6, in occupied cells 11.5 (2000 rays)
+    grass_thin_1   (125000 inst) level 0 (voxel 0.011 m, 7 x 5 x 6 bricks): per ray occupied bricks P10/P50/P90 0.00/0.71/1.00, 4^3 cells 0.00/0.04/0.28, voxels 0.000/0.000/0.023 | mean voxels crossed 57.4, in occupied bricks 44.6, in occupied cells 6.9 (2000 rays)
+    grass_thin_1   (125000 inst) level 1 (voxel 0.021 m, 4 x 3 x 3 bricks): per ray occupied bricks P10/P50/P90 0.50/1.00/1.00, 4^3 cells 0.00/0.29/0.73, voxels 0.000/0.000/0.087 | mean voxels crossed 27.9, in occupied bricks 27.0, in occupied cells 10.2 (2000 rays)
+    grass_thin_2   (125000 inst) level 0 (voxel 0.011 m, 7 x 5 x 6 bricks): per ray occupied bricks P10/P50/P90 0.25/0.75/1.00, 4^3 cells 0.00/0.05/0.29, voxels 0.000/0.000/0.026 | mean voxels crossed 54.8, in occupied bricks 43.1, in occupied cells 6.2 (2000 rays)
+    grass_thin_2   (125000 inst) level 1 (voxel 0.021 m, 4 x 3 x 3 bricks): per ray occupied bricks P10/P50/P90 0.50/1.00/1.00, 4^3 cells 0.00/0.31/0.69, voxels 0.000/0.000/0.083 | mean voxels crossed 27.7, in occupied bricks 26.9, in occupied cells 10.0 (2000 rays)
+    grass_thin_3   (125000 inst) level 0 (voxel 0.011 m, 7 x 5 x 6 bricks): per ray occupied bricks P10/P50/P90 0.33/0.75/1.00, 4^3 cells 0.00/0.06/0.29, voxels 0.000/0.000/0.029 | mean voxels crossed 55.7, in occupied bricks 47.1, in occupied cells 7.1 (2000 rays)
+    grass_thin_3   (125000 inst) level 1 (voxel 0.021 m, 4 x 3 x 3 bricks): per ray occupied bricks P10/P50/P90 0.50/1.00/1.00, 4^3 cells 0.00/0.33/0.75, voxels 0.000/0.000/0.095 | mean voxels crossed 27.5, in occupied bricks 26.6, in occupied cells 10.9 (2000 rays)
+    grass_thin_4   (125000 inst) level 0 (voxel 0.011 m, 7 x 5 x 6 bricks): per ray occupied bricks P10/P50/P90 0.33/0.75/1.00, 4^3 cells 0.00/0.03/0.26, voxels 0.000/0.000/0.029 | mean voxels crossed 53.9, in occupied bricks 46.4, in occupied cells 6.1 (2000 rays)
+    grass_thin_4   (125000 inst) level 1 (voxel 0.021 m, 4 x 3 x 3 bricks): per ray occupied bricks P10/P50/P90 0.50/1.00/1.00, 4^3 cells 0.00/0.31/0.67, voxels 0.000/0.000/0.088 | mean voxels crossed 27.1, in occupied bricks 26.1, in occupied cells 10.7 (2000 rays)
+    grass_thin_5   (125000 inst) level 0 (voxel 0.011 m, 7 x 5 x 6 bricks): per ray occupied bricks P10/P50/P90 0.25/0.75/1.00, 4^3 cells 0.00/0.04/0.27, voxels 0.000/0.000/0.025 | mean voxels crossed 54.9, in occupied bricks 45.5, in occupied cells 6.2 (2000 rays)
+    grass_thin_5   (125000 inst) level 1 (voxel 0.021 m, 4 x 3 x 3 bricks): per ray occupied bricks P10/P50/P90 0.50/1.00/1.00, 4^3 cells 0.00/0.33/0.71, voxels 0.000/0.000/0.091 | mean voxels crossed 28.7, in occupied bricks 27.7, in occupied cells 10.8 (2000 rays)
+    grass_thin_6   (125000 inst) level 0 (voxel 0.011 m, 7 x 5 x 6 bricks): per ray occupied bricks P10/P50/P90 0.33/0.80/1.00, 4^3 cells 0.00/0.06/0.31, voxels 0.000/0.000/0.030 | mean voxels crossed 55.2, in occupied bricks 47.8, in occupied cells 6.9 (2000 rays)
+    grass_thin_6   (125000 inst) level 1 (voxel 0.021 m, 4 x 3 x 3 bricks): per ray occupied bricks P10/P50/P90 0.50/1.00/1.00, 4^3 cells 0.00/0.33/0.67, voxels 0.000/0.000/0.092 | mean voxels crossed 27.9, in occupied bricks 27.4, in occupied cells 11.0 (2000 rays)
+    grass_thin_7   (125000 inst) level 0 (voxel 0.011 m, 7 x 5 x 6 bricks): per ray occupied bricks P10/P50/P90 0.25/0.71/1.00, 4^3 cells 0.00/0.04/0.28, voxels 0.000/0.000/0.025 | mean voxels crossed 55.6, in occupied bricks 44.8, in occupied cells 6.9 (2000 rays)
+    grass_thin_7   (125000 inst) level 1 (voxel 0.021 m, 4 x 3 x 3 bricks): per ray occupied bricks P10/P50/P90 0.50/1.00/1.00, 4^3 cells 0.00/0.30/0.75, voxels 0.000/0.000/0.091 | mean voxels crossed 27.7, in occupied bricks 26.7, in occupied cells 10.7 (2000 rays)
+PASS brick_canopy_occupancy
+15/15 passed

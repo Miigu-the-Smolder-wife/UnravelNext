@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.70, 2026-09-26)
+# UnravelNext 인터페이스 (v1.71, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -546,7 +546,12 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - 텍스처: 기준은 mip 0 쌍선형(표본 수로 픽셀 필터를 적분), 실시간은 footprint 밉·이방성 + 노멀→거칠기 필터(설계서 2.2). 이 차이는 품질 정의(설계서 3절 "재질")의 허용 항목이다.
 - Hair, Water, Glass, Subsurface 클래스 모델은 해당 단계(P3/P4) 전에 0절 절차로 이 절에 추가한다.
 - Hair 클래스(v1.66, B10): 셰이딩은 E의 `Passes/Hair/HairBsdf.hlsli`(d'Eon·Chiang 섬유 산란, 모든 내부 차수)다. 매개변수는 β_M = roughness, η = ior(케라틴 1.55), `hairBetaN`, `hairTilt`, 흡수 σ_a = `scene::model::hairAbsorption`이다. 멜라닌(`hairEumelanin`, `hairPheomelanin`)이 있으면 d'Eon 2011, 없으면 baseColor를 목표 색으로 보고 Chiang 2016 역변환을 쓴다. 단위는 PBRT 규약(섬유 반지름당)이다. 간접광 = 캐시 조도 × 섬유 방향 알베도이며, 정확 조건은 섬유 둘레 방향 입사 복사가 평탄하고 캐시 텍셀 각 폭이 섬유 로브보다 좁은 것이다.
-- Cut 클래스(v1.66, A11): 셰이딩은 Standard 그대로이고, 텍스처를 객체 공간 삼면 투영(`cutScale` 반복/m)으로 읽는다. 삼각형 경계 변을 따라 폭 `cutDamageWidth`(m)의 손상 층이 있다(C의 `Passes/Material/CutFace.hlsli`, M 해석이 합류).
+- Cut 클래스(v1.66 필드, v1.71 정의, A11): 셰이딩은 Standard 그대로이고 텍스처 값만 uv0 대신 객체 공간 투영 셋에서 온다(`Passes/Material/CutFace.hlsli`, CPU 기준 `Reference/PathTracer/src/CutFace.h`).
+  - 투영 k(k = x, y, z): uv_k = cutScale·(s_k p_b, p_c), (b, c) = ((k+1)%3, (k+2)%3), s_k = 객체 공간 기하 법선의 k 성분 부호. 가중치 w_k = |n_k|⁴ / Σ. 틀은 접선 s_k e_b, 종접선 e_c, 법선 s_k e_k다.
+  - 기본색·거칠기 계수·금속 계수 = Σ w_k · tap_k(mip 0 기준).
+  - 셰이딩 법선 = normalize(Σ w_k r_k). r_k = `cutFaceWhiteout`(탭 k의 접선 공간 법선, 투영 k, 객체 공간 보간 법선 n) = (tn.x + n·T) T + (tn.y + n·B) B + tn.z (n·N) N. 평평한 텍셀이면 정확히 n이다. M의 필터 판은 각 틀에서 기울기 모멘트를 w_k로 섞는다.
+  - 가장자리 손상(외관 모델): 삼각형의 경계 변(클러스터 삼각형 워드 비트 24..26, 비트 i = 꼭짓점 i 맞은편 변)까지 객체 거리 d. 문턱 t = cutDamageWidth·(0.35 + 0.65·잡음)(값 잡음 3옥타브, 셀 = 폭, 해시는 두 구현이 같음). 덮임 = saturate(0.5 + (t − d)/발자국)이고 기준은 발자국 0이라 계단 함수다. 적용: 기본색 × (1 − 0.45 d), 거칠기 → 1 쪽으로 0.6 d.
+  - 경계 변: LOD 0에서 Cut 서브메시가 한 번만 쓰는 변(이웃이 다른 재질이거나 없음, 정확 위치 용접)이다. 단순화 클러스터에서는 두 끝이 경계 꼭짓점이고 중점이 LOD 0 경계 위(클러스터 자기 오차 안)인 변도 포함한다. 열린 테두리는 단순화에서 잠기지 않아 테두리 위 새 변이 생기기 때문이다.
 
 ### 8.2 광원
 - 점: 조도 = I / d² · w(d), w(d) = saturate(1 − (d/range)⁴)². 스폿: × saturate(cosθ · spotScale + spotOffset)², cosθ = dot(−l, forward).
@@ -729,6 +734,11 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.71 (2026-09-26, 렌더 C, A11 파괴 단면 재질):
+  - 8.1 Cut 정의(위). 클러스터 삼각형 워드 비트 24..26 = Cut 삼각형의 경계 변(다른 재질 삼각형은 0). 지금의 판독은 모두 하위 24비트만 가려 읽는다.
+  - `Passes/Material/CutFace.hlsli`: `cutFaceProjection`, `cutFaceWhiteout`, `cutFaceEdgeDistance`, `cutFaceDamage`, `cutFaceApplyDamage`. M 해석 합류는 렌더 A(MSurface에 객체 공간 p·도함수·bary·꼭짓점 추가).
+  - CPU 기준 추적기(RtScene)가 Cut을 평가한다. GPU 기준(E)은 아직 Cut을 거부한다(엔진 2에 요청).
+  - 시험: `unx_test_clusterbuilder cut_face_border_edges`(32 × 32 격자, 절반 Cut: 모든 LOD의 Cut 삼각형 1,980개, 단순화 클러스터 16개, 경계 변 354개 표시, 틀림 0, 외피 비트 0), 빌더 시험 15/15; `unx_test_reference cut`(축 방향 면 1,385 표본 = z 투영 탭, 손상 띠 79 표본 = 0.55 × 탭·거칠기 0.8, 45° 면 = x·y 탭 평균, 평평한 화이트아웃 법선 = 기하 법선), point·rect 기준 불변; CutFace.hlsli는 cs_6_6로 컴파일된다.
 - v1.70 (2026-09-26, 렌더 A: B8 GPU 유체 입력, 엔진 1 제안):
   - **`FrameContext::fluids / fluidCount`(core)와 `render::FluidFrame`**: current/start 입자 버퍼(물리의 GPU 입자 FluidGpu.hlsl Particle, 원소 크기 = view의 stride ≥ 48·4의 배수, 현재 80 B, COMMON), 개수, stride, startValid, 이 프레임 좌표의 원점(double, 원점 이동 반영), dx, alpha(틱 안 시각), tick, domainCells, material(표면의 Water 클래스 장면 재질)이다. record()가 끝날 때까지 유효하다. W의 waterGeometry가 읽는다.
   - **호스트**: `HostRenderer::setFluids(FluidInput{NP_FluidGpuView*, alpha, domainCells}, stamp[6])`, 선택 export `UnxFrameSetFluids(r, UnxFluidInput 32 B[], count, stamp[6])`. 설정은 상태다(다음 호출까지 모든 프레임이 읽고, 빈 목록은 없음). 각 프레임은 목록을 실행하기 전 GPU 브리지에서 `prepareGraphics({current, start: READ}, 틱 stamp)`로 허가받는다(그래픽 큐 대기). 실행 뒤에는 그래픽 fence로 `commitGraphics`를 부른다. 예외가 나도 커밋해 브리지 잠금을 푼다.

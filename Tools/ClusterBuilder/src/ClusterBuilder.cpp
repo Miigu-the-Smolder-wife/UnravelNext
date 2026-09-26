@@ -20,6 +20,7 @@
 #pragma warning(pop)
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -30,6 +31,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace unx::clusterbuilder
 {
@@ -501,6 +503,101 @@ Settings Settings::fromQuality(const QualityConfig& q)
 
 namespace
 {
+// A11 cut faces (CutFace.hlsli, INTERFACES 8.1 Cut): bits 24..26 of a Cut-class triangle's word mark its edges on the
+// cut polygon's boundary (bit i: the edge opposite corner i). At LOD 0 a boundary edge is one the submesh's own triangles
+// use once (the neighbour across it has another material, or there is none), with vertices welded by exact position.
+// Borders shared with another submesh are locked in simplification, but the mesh's open border is not: a simplified
+// cluster may join two border vertices along it by an edge LOD 0 does not have. So an edge of a simplified cluster also
+// counts when both ends are border vertices and its midpoint lies on the LOD 0 border within the cluster's own error
+// (a chord along the border; a chord across a corner or the face does not).
+constexpr uint32_t kCutEdgeShift = 24;
+
+struct CutEdges
+{
+    std::vector<uint8_t> isCut;                 // per submesh
+    std::map<std::array<uint32_t, 3>, uint32_t> weld;  // exact position bits -> welded id (Cut submeshes' vertices)
+    std::unordered_set<uint64_t> border;        // welded edge keys
+    std::unordered_set<uint32_t> borderVertex;  // welded ids on a border edge
+    std::vector<std::array<float3, 2>> segments;  // the LOD 0 border edges
+    std::vector<uint32_t> welded;               // per mesh vertex (kNone outside Cut submeshes)
+    bool cutSubmesh(uint32_t s) const { return s < isCut.size() && isCut[s]; }
+    static uint64_t key(uint32_t a, uint32_t b) { return a < b ? (uint64_t)a << 32 | b : (uint64_t)b << 32 | a; }
+    bool onBorder(float3 p, float tolerance) const
+    {
+        for (const auto& sg : segments)
+        {
+            const float3 d = sg[1] - sg[0];
+            const float l2 = dot(d, d);
+            const float t = l2 > 0 ? std::clamp(dot(p - sg[0], d) / l2, 0.0f, 1.0f) : 0.0f;
+            const float3 q = sg[0] + d * t - p;
+            if (dot(q, q) <= tolerance * tolerance) return true;
+        }
+        return false;
+    }
+    uint32_t flags(const unsigned int* tri, const std::vector<float3>& positions, float lodError) const
+    {
+        uint32_t f = 0;
+        for (uint32_t i = 0; i < 3; ++i)
+        {
+            const uint32_t va = tri[(i + 1) % 3], vb = tri[(i + 2) % 3], a = welded[va], b = welded[vb];
+            if (a == render::gpu::kNone || b == render::gpu::kNone) continue;
+            if (border.count(key(a, b))) f |= 1u << i;
+            else if (borderVertex.count(a) && borderVertex.count(b))
+            {
+                const float3 m = (positions[va] + positions[vb]) * 0.5f;
+                const float3 e = positions[vb] - positions[va];
+                if (onBorder(m, std::max(lodError, 1e-6f * std::sqrt(dot(e, e))))) f |= 1u << i;
+            }
+        }
+        return f;
+    }
+};
+
+CutEdges cutFaceBorderEdges(const scene::Scene& scene, const scene::Mesh& m)
+{
+    CutEdges e;
+    e.isCut.resize(m.submeshes.size(), 0);
+    bool any = false;
+    for (size_t s = 0; s < m.submeshes.size(); ++s)
+    {
+        const uint32_t mat = m.submeshes[s].material;
+        e.isCut[s] = mat < scene.materials.size() && scene.materials[mat].cls == scene::MaterialClass::Cut;
+        any = any || e.isCut[s];
+    }
+    if (!any) return e;
+    e.welded.assign(m.positions.size(), render::gpu::kNone);
+    auto weldOf = [&](uint32_t v) {
+        if (e.welded[v] != render::gpu::kNone) return e.welded[v];
+        const float3 p = m.positions[v];
+        std::array<uint32_t, 3> bits;
+        std::memcpy(bits.data(), &p, sizeof p);
+        const uint32_t id = e.weld.emplace(bits, v).first->second;  // exact position identity
+        return e.welded[v] = id;
+    };
+    std::unordered_map<uint64_t, uint32_t> uses;
+    for (size_t s = 0; s < m.submeshes.size(); ++s)
+    {
+        if (!e.isCut[s]) continue;
+        const scene::Submesh& sm = m.submeshes[s];
+        for (uint32_t t = 0; t < sm.indexCount; t += 3)
+            for (uint32_t i = 0; i < 3; ++i)
+                ++uses[CutEdges::key(weldOf(m.indices[sm.indexOffset + t + i]), weldOf(m.indices[sm.indexOffset + t + (i + 1) % 3]))];
+    }
+    std::map<uint32_t, float3> at;
+    for (size_t v = 0; v < m.positions.size(); ++v)
+        if (e.welded[v] != render::gpu::kNone) at.emplace(e.welded[v], m.positions[v]);
+    for (const auto& [k, n] : uses)
+        if (n == 1)
+        {
+            e.border.insert(k);
+            const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)k;
+            e.borderVertex.insert(a);
+            e.borderVertex.insert(b);
+            e.segments.push_back({ at[a], at[b] });
+        }
+    return e;
+}
+
 // Identity of a mesh's hierarchy: everything buildMesh reads (positions, normals, uv0, indices, submesh ranges) and the
 // settings. Materials are applied when the scene's buffers are assembled, so they are not part of it.
 std::string meshKey(const scene::Mesh& m, const Settings& settings, const std::vector<uint32_t>& seamVertices)
@@ -919,6 +1016,7 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
         const MeshOut& mo = *built[mi];
         const scene::Mesh& m = scene.meshes[mi];
         const uint32_t clusterBase = (uint32_t)data.clusters.size();
+        const CutEdges cutEdges = cutFaceBorderEdges(scene, m);
         render::ClusterData::MeshRange& range = data.meshes[mi];
         range.clusterOffset = clusterBase;
         range.clusterCount = (uint32_t)mo.clusters.size();
@@ -949,8 +1047,10 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
                 rc.minFeatureWidth = c.width;
                 rc.brick = render::gpu::kNone;
                 data.clusterVertexIndices.insert(data.clusterVertexIndices.end(), localVertices, localVertices + vertexCount);
+                const bool cut = cutEdges.cutSubmesh(c.submesh);
                 for (size_t t = 0; t < triangleCount; ++t)
-                    data.clusterTriangles.push_back((uint32_t)localTriangles[3 * t] | (uint32_t)localTriangles[3 * t + 1] << 8 | (uint32_t)localTriangles[3 * t + 2] << 16);
+                    data.clusterTriangles.push_back((uint32_t)localTriangles[3 * t] | (uint32_t)localTriangles[3 * t + 1] << 8 | (uint32_t)localTriangles[3 * t + 2] << 16 |
+                                                    (cut ? cutEdges.flags(&c.indices[3 * t], m.positions, rc.lodError) << kCutEdgeShift : 0u));
                 data.clusters.push_back(rc);
                 const float4 sphere{ c.lod.center[0], c.lod.center[1], c.lod.center[2], c.lod.radius };
                 appendNamed(data, kClusterLodSpheres, &sphere, sizeof sphere, sizeof(float4));

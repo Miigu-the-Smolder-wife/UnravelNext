@@ -1,0 +1,3 @@
+    cut triangles 1980 (simplified cut clusters 16), boundary edges flagged 354, wrong 0, hull triangles with bits 0
+PASS cut_face_border_edges
+1/1 passed

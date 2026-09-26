@@ -1,10 +1,14 @@
 #include "RtScene.h"
 
+#include "CutFace.h"
+
 #include "unx/core/Log.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
+#include <map>
 
 namespace unx::reference
 {
@@ -203,13 +207,49 @@ RtScene::RtScene(const scene::Scene& s, float time, uint32_t threads) : m_scene(
     scene::validate(s);
     for (const scene::Material& m : s.materials)
     {
-        if (m.cls != scene::MaterialClass::Standard && m.cls != scene::MaterialClass::Foliage)
-            fail("reference: material '%s' uses a class without a v1 model (INTERFACES 8.1 defines Standard and Foliage)", m.name.c_str());
+        if (m.cls != scene::MaterialClass::Standard && m.cls != scene::MaterialClass::Foliage && m.cls != scene::MaterialClass::Cut)
+            fail("reference: material '%s' uses a class without a model here (INTERFACES 8.1: Standard, Foliage, Cut)", m.name.c_str());
         if (m.occlusionTexture != scene::kNone)
             fail("reference: material '%s' has an occlusion texture; its use is not defined in INTERFACES 8.1 v1", m.name.c_str());
     }
     m_textures.reserve(s.textures.size());
     for (const scene::Texture& t : s.textures) m_textures.emplace_back(t);
+    // A11: boundary edges of Cut triangles (the cluster builder's rule: an edge its submesh's triangles use once, vertices
+    // welded by exact position); bit i = the edge opposite corner i.
+    m_cutEdges.resize(s.meshes.size());
+    for (size_t mi = 0; mi < s.meshes.size(); ++mi)
+    {
+        const scene::Mesh& m = s.meshes[mi];
+        bool any = false;
+        for (const scene::Submesh& sm : m.submeshes) any = any || s.materials[sm.material].cls == scene::MaterialClass::Cut;
+        if (!any) continue;
+        std::map<std::array<uint32_t, 3>, uint32_t> weld;
+        std::vector<uint32_t> id(m.positions.size());
+        for (size_t v = 0; v < m.positions.size(); ++v)
+        {
+            std::array<uint32_t, 3> bits;
+            std::memcpy(bits.data(), &m.positions[v], sizeof(float3));
+            id[v] = weld.emplace(bits, (uint32_t)v).first->second;
+        }
+        auto key = [&](uint32_t a, uint32_t b) { const uint64_t x = id[a], y = id[b]; return x < y ? x << 32 | y : y << 32 | x; };
+        std::vector<uint8_t>& edges = m_cutEdges[mi];
+        edges.assign(m.indices.size() / 3, 0);
+        for (const scene::Submesh& sm : m.submeshes)
+        {
+            if (s.materials[sm.material].cls != scene::MaterialClass::Cut) continue;
+            std::map<uint64_t, uint32_t> uses;
+            for (uint32_t t = 0; t < sm.indexCount; t += 3)
+                for (uint32_t i = 0; i < 3; ++i) ++uses[key(m.indices[sm.indexOffset + t + i], m.indices[sm.indexOffset + t + (i + 1) % 3])];
+            for (uint32_t t = 0; t < sm.indexCount; t += 3)
+            {
+                const uint32_t* tri = &m.indices[sm.indexOffset + t];
+                uint8_t f = 0;
+                for (uint32_t i = 0; i < 3; ++i)
+                    if (uses[key(tri[(i + 1) % 3], tri[(i + 2) % 3])] == 1) f |= (uint8_t)(1u << i);
+                edges[(sm.indexOffset + t) / 3] = f;
+            }
+        }
+    }
 
     const std::string config = threads ? format("threads=%u,set_affinity=0", threads) : std::string("set_affinity=0");
     m_device = rtcNewDevice(config.c_str());
@@ -497,19 +537,56 @@ Surface RtScene::surface(const Hit& hit, float3 rayDir) const
         uv = { a.x * w + b.x * u + c.x * v, a.y * w + b.y * u + c.y * v };
     }
     float3 base = mat.baseColor;
-    if (mat.baseColorTexture != scene::kNone)
+    float rough = mat.roughness, metal = mat.metallic;
+    if (mat.cls == scene::MaterialClass::Cut)
+    {
+        // A11 (CutFace.h): three object-space projections instead of uv0, whiteout normals, the edge damage band.
+        if (world) fail("reference: Cut material '%s' on a deformed instance (cut fragments are rigid)", mat.name.c_str());
+        const float3 o0 = P[tri[0]], o1 = P[tri[1]], o2 = P[tri[2]];
+        const float3 po = o0 * w + o1 * u + o2 * v, ng = normalize(cross(o1 - o0, o2 - o0));
+        const float3 no = normalize(N[tri[0]] * w + N[tri[1]] * u + N[tri[2]] * v);
+        float3 b{ 0, 0, 0 }, nb{ 0, 0, 0 };
+        float rf = 0, mf = 0;
+        for (uint32_t k = 0; k < 3; ++k)
+        {
+            const cutface::Projection pr = cutface::projection(k, po, ng, mat.cutScale);
+            if (pr.weight == 0) continue;
+            const Texel c = mat.baseColorTexture != scene::kNone ? m_textures[mat.baseColorTexture].sample(pr.uv) : Texel{ 1, 1, 1, 1 };
+            const Texel rm = mat.roughMetalTexture != scene::kNone ? m_textures[mat.roughMetalTexture].sample(pr.uv) : Texel{ 1, 1, 1, 1 };
+            b = b + float3{ c.r, c.g, c.b } * pr.weight;
+            rf += pr.weight * rm.r;
+            mf += pr.weight * rm.g;
+            float3 tn{ 0, 0, 1 };
+            if (mat.normalTexture != scene::kNone)
+            {
+                const Texel nt = m_textures[mat.normalTexture].sample(pr.uv);
+                const float x = 2 * nt.r - 1, y = 2 * nt.g - 1;
+                tn = { x, y, std::sqrt(std::max(0.0f, 1 - x * x - y * y)) };
+            }
+            nb = nb + cutface::whiteout(tn, pr, no) * pr.weight;
+        }
+        base = base * b;
+        rough *= rf;
+        metal *= mf;
+        n = normalize(toWorldV(normalize(nb)));
+        const std::vector<uint8_t>& edges = m_cutEdges[md.meshIndex];
+        const uint32_t mask = edges.empty() ? 0u : edges[hit.triangle];
+        const float d = cutface::damage(po, cutface::edgeDistance({ w, u, v }, o0, o1, o2, mask), mat.cutDamageWidth);
+        base = base * (1 - 0.45f * d);
+        rough = rough + (1 - rough) * (0.6f * d);
+    }
+    else if (mat.baseColorTexture != scene::kNone)
     {
         const Texel t = m_textures[mat.baseColorTexture].sample(uv);
         base = base * float3{ t.r, t.g, t.b };
     }
-    float rough = mat.roughness, metal = mat.metallic;
-    if (mat.roughMetalTexture != scene::kNone)
+    if (mat.cls != scene::MaterialClass::Cut && mat.roughMetalTexture != scene::kNone)
     {
         const Texel t = m_textures[mat.roughMetalTexture].sample(uv);
         rough *= t.r;
         metal *= t.g;
     }
-    if (mat.normalTexture != scene::kNone && T)
+    if (mat.cls != scene::MaterialClass::Cut && mat.normalTexture != scene::kNone && T)
     {
         const float4 t0 = T[tri[0]], t1 = T[tri[1]], t2 = T[tri[2]];
         const float3 tl{ t0.x * w + t1.x * u + t2.x * v, t0.y * w + t1.y * u + t2.y * v, t0.z * w + t1.z * u + t2.z * v };

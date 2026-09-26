@@ -880,6 +880,62 @@ UNX_TEST(brick_depth_encoding)
     CHECK(brickEncodeDepth(0) == 0 && brickDecodeDepth(0) == 0 && brickEncodeDepth(100) == 255);
 }
 
+// A11 cut faces: a flat 32 x 32 grid, the left half a Standard hull, the right half a Cut face (the neighbour across its
+// x = 2 edge has another material; its other sides are the mesh border). At every LOD level, bit 24 + i of a Cut
+// triangle's word is set exactly when its edge opposite corner i lies on the right half's outline (both ends on one side
+// of the rectangle); hull triangles have no bits; simplified Cut clusters exist, so the rule is checked past LOD 0.
+UNX_TEST(cut_face_border_edges)
+{
+    scene::Scene sc = oneMesh(heightfield(32, 4.0f, 0.0f, true));
+    sc.materials[1].cls = scene::MaterialClass::Cut;
+    sc.materials[1].cutScale = 2.0f;
+    sc.materials[1].cutDamageWidth = 0.02f;
+    scene::validate(sc);
+    const render::ClusterData d = build(sc, settings());
+    const scene::Mesh& m = sc.meshes[0];
+    auto side = [](float3 p) {
+        uint32_t s = 0;
+        if (p.x == 2.0f) s |= 1;
+        if (p.x == 4.0f) s |= 2;
+        if (p.z == 0.0f) s |= 4;
+        if (p.z == 4.0f) s |= 8;
+        return s;
+    };
+    uint32_t cutTriangles = 0, flagged = 0, wrong = 0, hullBits = 0, simplifiedCut = 0;
+    const auto& r = d.meshes[0];
+    for (uint32_t ci = r.clusterOffset; ci < r.clusterOffset + r.clusterCount; ++ci)
+    {
+        const render::gpu::Cluster& c = d.clusters[ci];
+        const bool cut = c.material == 1;
+        simplifiedCut += cut && c.lodError > 0;
+        const uint32_t tris = (c.counts >> 8) & 0xFFu;
+        for (uint32_t t = 0; t < tris; ++t)
+        {
+            const uint32_t w = d.clusterTriangles[c.triangleOffset + t];
+            const uint32_t bits = (w >> 24) & 7u;
+            if (!cut)
+            {
+                hullBits += bits != 0 || (w >> 27) != 0;
+                continue;
+            }
+            ++cutTriangles;
+            float3 p[3];
+            for (int k = 0; k < 3; ++k) p[k] = m.positions[d.clusterVertexIndices[c.vertexOffset + ((w >> (8 * k)) & 0xFFu)]];
+            for (uint32_t i = 0; i < 3; ++i)
+            {
+                const bool want = (side(p[(i + 1) % 3]) & side(p[(i + 2) % 3])) != 0;
+                const bool got = (bits >> i) & 1u;
+                flagged += got;
+                wrong += want != got;
+            }
+        }
+    }
+    logf("    cut triangles %u (simplified cut clusters %u), boundary edges flagged %u, wrong %u, hull triangles with bits %u\n", cutTriangles, simplifiedCut, flagged,
+         wrong, hullBits);
+    CHECK(cutTriangles > 0 && flagged > 0 && simplifiedCut > 0);
+    CHECK(wrong == 0 && hullBits == 0);
+}
+
 UNX_TEST(brick_bake_of_a_blade_clump)
 {
     // Bake, cache round trip, cut-out alpha, and the model against exact ray casting: ray bundles of one voxel's width

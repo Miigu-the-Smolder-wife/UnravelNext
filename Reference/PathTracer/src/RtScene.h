@@ -102,6 +102,7 @@ private:
     std::vector<int32_t> m_geomToGroup;                  // top-level geomID -> group or -1
     std::vector<int32_t> m_geomToDeformed;               // top-level geomID -> deformed index or -1
     std::vector<Texture> m_textures;
+    std::vector<std::vector<uint8_t>> m_cutEdges;         // per scene mesh, per triangle: Cut boundary edge bits (A11)
     DeformationReport m_deform;
 };
 

@@ -19,6 +19,8 @@
 
 #include "Atmosphere.h"
 #include "Bsdf.h"
+#include "CutFace.h"
+#include "RtScene.h"
 #include "HoldRecord.h"
 #include "Sampler.h"
 
@@ -654,6 +656,91 @@ void testAtmosphereTable()
 }
 } // namespace
 
+// A11 cut face surface (CutFace.h, INTERFACES 8.1 Cut): an axis-facing square and a 45 degree square, each one Cut
+// submesh (its outline is the mesh border, so every outline edge is a boundary edge), a 4 x 4 texture of distinct colours.
+//   - axis face: base colour = the texture at (cutScale p_x, cutScale p_y) away from the outline; within 0.35 x the damage
+//     width of the outline the damage band always covers (d = 1: base x 0.55, roughness 1 - 0.4 (1 - r)); beyond the width
+//     never;
+//   - 45 degree face: base colour = the mean of the x and y projections' taps (weights 1/2); with no normal texture the
+//     shading normal is the geometric normal (whiteout of a flat texel is exact).
+void testCutFace()
+{
+    using namespace unx::reference;
+    scene::Scene sc;
+    sc.name = "cut face";
+    scene::Texture tex;
+    tex.width = tex.height = 4;
+    tex.format = scene::TextureFormat::Rgba8Linear;
+    for (uint32_t i = 0; i < 16; ++i) tex.texels.insert(tex.texels.end(), { (uint8_t)(16 * i), (uint8_t)(255 - 12 * i), (uint8_t)(40 + 9 * i), 255 });
+    sc.textures.push_back(tex);
+    sc.materials.resize(1);
+    sc.materials[0].cls = scene::MaterialClass::Cut;
+    sc.materials[0].baseColor = { 1, 1, 1 };
+    sc.materials[0].roughness = 0.5f;
+    sc.materials[0].baseColorTexture = 0;
+    sc.materials[0].cutScale = 0.5f;
+    sc.materials[0].cutDamageWidth = 0.04f;
+    auto square = [](float3 a, float3 b, float3 c, float3 d) {
+        scene::Mesh m;
+        m.name = "cut square";
+        m.positions = { a, b, c, d };
+        const float3 n = normalize(cross(b - a, d - a));
+        m.normals = { n, n, n, n };
+        m.indices = { 0, 1, 2, 0, 2, 3 };
+        m.submeshes.push_back({ 0, 6, 0 });
+        return m;
+    };
+    sc.meshes.push_back(square({ 0, 0, 0 }, { 1, 0, 0 }, { 1, 1, 0 }, { 0, 1, 0 }));                  // faces +z
+    sc.meshes.push_back(square({ 3, 0, 0 }, { 3, 0, 1 }, { 4, 1, 1 }, { 4, 1, 0 }));                  // faces (-1, 1, 0) / sqrt 2
+    sc.instances.resize(2);
+    sc.instances[0].mesh = 0;
+    sc.instances[1].mesh = 1;
+    scene::validate(sc);
+    RtScene rt(sc, 0.0f, 1);
+    Texture reference(tex);
+    auto hitAt = [&](float3 o, float3 dir) {
+        Hit h;
+        if (!rt.intersect(o, dir, 0, 100, ~0u, h)) fail("cut face: ray missed");
+        return rt.surface(h, dir);
+    };
+    auto near3 = [](float3 a, float3 b, float tol) { return std::fabs(a.x - b.x) <= tol && std::fabs(a.y - b.y) <= tol && std::fabs(a.z - b.z) <= tol; };
+    auto rgb = [](Texel t) { return float3{ t.r, t.g, t.b }; };
+    uint32_t checked = 0, damaged = 0;
+    for (uint32_t i = 0; i < 40; ++i)
+        for (uint32_t j = 0; j < 40; ++j)
+        {
+            const float x = (i + 0.37f) / 40, y = (j + 0.61f) / 40;
+            const Surface s = hitAt({ x, y, 1 }, { 0, 0, -1 });
+            const float edge = std::min(std::min(x, 1 - x), std::min(y, 1 - y));
+            const float3 tap = rgb(reference.sample({ 0.5f * x, 0.5f * y }));
+            if (edge > 0.04f)
+            {
+                if (!near3(s.bsdf.baseColor, tap, 1e-5f)) fail("cut face: base colour at (%.3f, %.3f) is not the z projection's tap", x, y);
+                if (std::fabs(s.bsdf.roughness - 0.5f) > 1e-6f) fail("cut face: damage outside the band at (%.3f, %.3f)", x, y);
+                ++checked;
+            }
+            else if (edge < 0.35f * 0.04f)
+            {
+                if (!near3(s.bsdf.baseColor, tap * 0.55f, 1e-5f) || std::fabs(s.bsdf.roughness - 0.8f) > 1e-5f) fail("cut face: no damage at (%.3f, %.3f), %.4f from the outline", x, y, edge);
+                ++damaged;
+            }
+        }
+    // 45 degree face: object normal (-1, 1, 0) / sqrt 2 -> projections x (sign -1) and y (sign +1) at weight 1/2 each.
+    const float3 ng = normalize(float3{ -1, 1, 0 });
+    for (uint32_t k = 0; k < 16; ++k)
+    {
+        const float a = 0.2f + 0.04f * k, z = 0.3f + 0.025f * k;
+        const float3 p{ 3 + a, a, z };
+        const Surface s = hitAt(p + ng * 2.0f, -ng);
+        const float3 tapX = rgb(reference.sample({ -0.5f * p.y, 0.5f * p.z })), tapY = rgb(reference.sample({ 0.5f * p.z, 0.5f * p.x }));
+        if (!near3(s.bsdf.baseColor, (tapX + tapY) * 0.5f, 1e-4f)) fail("cut face: 45 degree base colour is not the mean of the x and y taps");
+        if (!near3(s.ns, ng, 1e-5f)) fail("cut face: flat whiteout moved the normal");
+        ++checked;
+    }
+    logf("  %u undamaged and %u damaged samples match the definition\n", checked, damaged);
+    if (damaged == 0) fail("cut face: no sample inside the damage band");
+}
+
 int main(int argc, char** argv)
 {
     try
@@ -667,7 +754,7 @@ int main(int argc, char** argv)
         const char* only = argc > arg ? argv[arg] : nullptr;
         auto run = [&](const char* name, void (*fn)()) {
             if (only && std::strcmp(only, name) != 0) return;
-            const bool cpuOnly = std::strcmp(name, "hold") == 0 || std::strcmp(name, "atmosphere") == 0 || std::strcmp(name, "model") == 0 || std::strcmp(name, "bsdf") == 0;
+            const bool cpuOnly = std::strcmp(name, "hold") == 0 || std::strcmp(name, "atmosphere") == 0 || std::strcmp(name, "model") == 0 || std::strcmp(name, "bsdf") == 0 || std::strcmp(name, "cut") == 0;
             if (g_gpu && cpuOnly) return;
             logf("[%s]\n", name);
             fn();
@@ -676,6 +763,7 @@ int main(int argc, char** argv)
         run("atmosphere", testAtmosphereTable);
         run("model", testModelAgreement);
         run("bsdf", testBsdfSampling);
+        run("cut", testCutFace);
         run("point", testPoint);
         run("rect", testRect);
         run("sphere", testSphere);
