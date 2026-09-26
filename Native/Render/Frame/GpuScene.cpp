@@ -110,11 +110,12 @@ GpuScene::~GpuScene()
     for (Buffer* b : { &m_instanceBuffer, &m_meshBuffer, &m_submeshBuffer, &m_vertexBuffer, &m_indexBuffer, &m_materialBuffer, &m_materialRemapBuffer, &m_lightBuffer,
                        &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable, &m_coverageTable, &m_clusterBuffer, &m_lodLevelBuffer,
                        &m_lodLevelClusterBuffer,
-                       &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer, &m_morphRecords, &m_morphData, &m_patchData, &m_terrainLayerBuffer, &m_materialLayerBuffer, &m_coatTable })
+                       &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer, &m_morphRecords, &m_morphData, &m_patchData, &m_terrainLayerBuffer, &m_materialLayerBuffer, &m_coatTable,
+                       &m_fxLightCount })
         release(*b);
     for (auto& [name, b] : m_named) release(b);
     DescriptorHeaps& h = m_device.descriptors();
-    for (uint32_t u : { m_instanceUav, m_paletteUav, m_prevPaletteUav, m_morphUav })
+    for (uint32_t u : { m_instanceUav, m_paletteUav, m_prevPaletteUav, m_morphUav, m_lightUav, m_fxCountUav })
         if (u != gpu::kNone) h.freeResource(u);
     for (uint32_t u : m_rtUav)
         if (u != gpu::kNone) h.freeResource(u);
@@ -430,7 +431,7 @@ void GpuScene::upload(const scene::Scene& s)
     packMaterialLayers(materials);
     m_materialBuffer = createStructured(materials.data(), sizeof(gpu::Material), materials.size(), L"scene materials");
     m_materialRemapBuffer = createStructured(remap.data(), sizeof(uint32_t), remap.size(), L"scene material remap");
-    m_lightBuffer = createStructured(lights.data(), sizeof(gpu::Light), lights.size(), L"scene lights");
+    createLightBuffer(lights);
     m_lights = lights;
     m_skinBuffer = createStructured(skin.data(), sizeof(gpu::SkinVertex), skin.size(), L"scene skin");
     m_bonePalette = createStructured(palette.data(), sizeof(float4), palette.size(), L"bone palette", true);
@@ -600,6 +601,55 @@ gpu::Instance GpuScene::packInstance(const scene::Instance& in, std::vector<floa
 
 // Raw UAV of an updatable buffer (SceneUpdate.hlsl). fresh: the buffer was replaced while frames may still read the old
 // descriptor, so the view goes to a new descriptor and the old one is freed when the GPU is done.
+void GpuScene::createLightBuffer(const std::vector<gpu::Light>& lights)
+{
+    // Without an FX tail the table is read-only as before; with one it is UAV-writable and its tail zeroed (type 0,
+    // intensity 0), and the count word exists (0 until the FX module writes it).
+    const bool tail = m_fxLightCapacity > 0;
+    m_lightBuffer = createStructured(lights.data(), sizeof(gpu::Light), lights.size(), L"scene lights", tail, tail ? lights.size() + m_fxLightCapacity : 0);
+    if (!tail) return;
+    rawUav(m_lightUav, m_lightBuffer, (uint64_t)m_lightBuffer.count * sizeof(gpu::Light), true);
+    if (!m_fxLightCount.resource) createFxLightCount();
+}
+
+void GpuScene::createFxLightCount()
+{
+    const uint32_t zero[4] = {};
+    m_fxLightCount = createStructured(zero, sizeof(uint32_t), 4, L"FX light count", true);
+    rawUav(m_fxCountUav, m_fxLightCount, 16, true);
+}
+
+bool GpuScene::setFxLightCapacity(uint32_t capacity)
+{
+    const size_t lights = m_lights.size();
+    if (lights + capacity > kMaxSceneLights)
+    {
+        logf("GpuScene: %zu scene lights + %u FX lights exceed %u (16-bit light lists); the FX light tail is unchanged\n", lights, capacity, kMaxSceneLights);
+        return false;
+    }
+    if (capacity == m_fxLightCapacity) return true;
+    m_fxLightCapacity = capacity;
+    // A new capacity starts with no FX lights (the old count may exceed the new tail); the writer's next frame sets it.
+    if (m_fxLightCount.resource) release(m_fxLightCount);
+    release(m_lightBuffer);
+    createLightBuffer(m_lights);
+    return true;
+}
+
+GpuScene::FxLightRange GpuScene::fxLightRange() const
+{
+    FxLightRange r;
+    if (m_fxLightCapacity == 0 || !m_lightBuffer.resource || !m_fxLightCount.resource) return r;
+    r.first = (uint32_t)m_lights.size();
+    r.capacity = m_fxLightCapacity;
+    r.lightUav = m_lightUav;
+    r.countUav = m_fxCountUav;
+    r.countSrv = m_fxLightCount.srv;
+    r.lightBuffer = m_lightBuffer.resource.Get();
+    r.countBuffer = m_fxLightCount.resource.Get();
+    return r;
+}
+
 void GpuScene::rawUav(uint32_t& index, const Buffer& b, uint64_t bytes, bool fresh)
 {
     if (bytes < 4 || !b.resource) fail("GpuScene: raw UAV of %llu bytes (buffer %p)", (unsigned long long)bytes, (void*)b.resource.Get());
@@ -1032,7 +1082,8 @@ void GpuScene::rebase(float3 shift)
             lights.push_back(g);
         }
         release(m_lightBuffer);
-        m_lightBuffer = createStructured(lights.data(), sizeof(gpu::Light), lights.size(), L"scene lights");
+        createLightBuffer(lights);
+        m_lights = std::move(lights);  // the CPU mirror follows (an FX tail rebuild copies it)
     }
 }
 
@@ -1624,7 +1675,8 @@ void GpuScene::fill(gpu::FrameConstants& f) const
     f.terrainLayers = m_terrainLayerBuffer.resource ? m_terrainLayerBuffer.srv : gpu::kNone;
     f.materialLayers = m_materialLayerBuffer.resource ? m_materialLayerBuffer.srv : gpu::kNone;
     f.coatTable = m_coatTable.resource ? m_coatTable.srv : gpu::kNone;
-    f.framePad0 = f.framePad1 = 0;
+    f.fxLightCount = m_fxLightCapacity > 0 && m_fxLightCount.resource ? m_fxLightCount.srv : gpu::kNone;
+    f.fxLightCapacity = m_fxLightCapacity;
     f.instanceCount = (uint32_t)m_instances.size();
     f.meshCount = (uint32_t)m_meshes.size();
     f.clusterCount = m_clusterBuffer.count;

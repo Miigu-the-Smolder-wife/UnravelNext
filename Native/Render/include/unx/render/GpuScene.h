@@ -156,6 +156,22 @@ public:
         ID3D12Resource* countBuffer = nullptr;
     };
     GpuInstanceRange gpuInstanceRange() const;
+    // A3 FX particle lights (v1.79, S_STATUS 10): a tail of 'capacity' gpu::Light records after the scene's lights that the
+    // FX module writes every frame on the GPU (point lights, renderer world, castShadow 0 / shadowIndex 0xFFFF) with its
+    // count F in the count buffer's element 0 (0 after a capacity change). Readers loop to lightCount + min(F, capacity)
+    // (FrameConstants::fxLightCount / fxLightCapacity). setFxLightCapacity rebuilds the light buffer when the capacity
+    // changes (the FX stream's light rows changed) and refuses a total above kMaxSceneLights (16-bit light lists: S).
+    struct FxLightRange
+    {
+        uint32_t first = 0, capacity = 0;
+        uint32_t lightUav = gpu::kNone, countUav = gpu::kNone, countSrv = gpu::kNone;  // raw UAVs; count SRV (StructuredBuffer<uint>)
+        // For the writer's barriers: both are read as shader resources during the frame.
+        ID3D12Resource* lightBuffer = nullptr;
+        ID3D12Resource* countBuffer = nullptr;
+    };
+    static constexpr uint32_t kMaxSceneLights = 65535;
+    bool setFxLightCapacity(uint32_t capacity);
+    FxLightRange fxLightRange() const;
     uint32_t staticMeshCount() const { return m_staticMeshes; }
     // C2b readers for ray tracing (R's runtime BLAS, B's request): the submesh records of a live runtime mesh (mesh-relative
     // index ranges, as the GPU table holds them; empty when the mesh is not a live runtime mesh), and the slot's generation:
@@ -219,6 +235,8 @@ private:
     gpu::Instance packInstance(const scene::Instance& in, std::vector<float4>* palette);  // overrides appended to m_remap
     gpu::Material packMaterial(const scene::Material& m) const;
     void rawUav(uint32_t& index, const Buffer& b, uint64_t bytes, bool fresh);  // fresh: a new descriptor, the old freed later
+    void createLightBuffer(const std::vector<gpu::Light>& lights);  // lights + the FX tail (m_fxLightCapacity)
+    void createFxLightCount();
     struct Upload
     {
         ComPtr<ID3D12Resource> buffer;
@@ -236,6 +254,8 @@ private:
     std::vector<uint32_t> m_remap;  // material override table (gpu::Instance::materialRemap)
     Buffer m_instanceBuffer, m_meshBuffer, m_submeshBuffer, m_vertexBuffer, m_indexBuffer, m_materialBuffer, m_materialRemapBuffer,
         m_lightBuffer, m_skinBuffer, m_bonePalette, m_prevBonePalette, m_albedoTable, m_specularTable, m_coverageTable;
+    uint32_t m_fxLightCapacity = 0, m_lightUav = gpu::kNone, m_fxCountUav = gpu::kNone;  // A3 FX light tail
+    Buffer m_fxLightCount;
     Buffer m_clusterBuffer, m_lodLevelBuffer, m_lodLevelClusterBuffer, m_clusterVertexIndexBuffer, m_clusterTriangleBuffer;
     // C4 morphs: records (float4 rows, updatable), mesh data (raw words), CPU mirrors.
     Buffer m_morphRecords, m_morphData;

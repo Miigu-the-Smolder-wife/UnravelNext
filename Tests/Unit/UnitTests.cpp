@@ -2066,3 +2066,74 @@ int main(int argc, char** argv)
     logf("%d/%d passed, D3D12 debug-layer errors: %u\n", run - failed, run, debugErrors);
     return failed == 0 && debugErrors == 0 ? 0 : 1;
 }
+
+UNX_TEST(gpu_scene_fx_light_tail)
+{
+    // A3 FX particle lights (v1.79, S_STATUS 10): the light buffer's tail of F_max records after the scene lights, the count
+    // word (0 after every capacity change), the frame constants, the 16-bit limit, and the tail kept across an origin rebase.
+    scene::Scene s = tinyScene();
+    GpuScene gs(testDevice());
+    gs.upload(s);
+    const uint32_t n = (uint32_t)s.lights.size();
+    CHECK(n == 1);
+    gpu::FrameConstants f{};
+    gs.fill(f);
+    CHECK(gs.fxLightRange().capacity == 0 && f.fxLightCount == gpu::kNone && f.fxLightCapacity == 0 && f.lightCount == n);
+
+    auto readBack = [&](ID3D12Resource* buffer, uint64_t bytes) {
+        std::vector<uint8_t> out(bytes);
+        D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = bytes;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> rb;
+        check(testDevice().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)), "readback");
+        CommandList cl = testDevice().acquireCommandList(QueueType::Graphics);
+        cl.list->CopyBufferRegion(rb.Get(), 0, buffer, 0, bytes);
+        testDevice().queue(QueueType::Graphics).waitCpu(testDevice().submit(cl));
+        uint8_t* p = nullptr;
+        check(rb->Map(0, nullptr, reinterpret_cast<void**>(&p)), "map");
+        std::memcpy(out.data(), p, bytes);
+        rb->Unmap(0, nullptr);
+        return out;
+    };
+    auto checkTail = [&](uint32_t capacity) {
+        const GpuScene::FxLightRange r = gs.fxLightRange();
+        CHECK(r.first == n && r.capacity == capacity && r.lightUav != gpu::kNone && r.countUav != gpu::kNone && r.countSrv != gpu::kNone);
+        CHECK(r.lightBuffer && r.countBuffer);
+        CHECK(r.lightBuffer->GetDesc().Width >= (uint64_t)(n + capacity) * sizeof(gpu::Light));
+        CHECK((r.lightBuffer->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0);
+        const std::vector<uint8_t> lights = readBack(r.lightBuffer, (uint64_t)(n + capacity) * sizeof(gpu::Light));
+        CHECK(std::memcmp(lights.data(), gs.lights().data(), n * sizeof(gpu::Light)) == 0);  // the scene lights unchanged
+        bool zero = true;
+        for (size_t i = n * sizeof(gpu::Light); i < lights.size(); ++i) zero = zero && lights[i] == 0;
+        CHECK(zero);  // the tail starts as type 0 / intensity 0
+        const std::vector<uint8_t> count = readBack(r.countBuffer, 4);
+        uint32_t c = ~0u;
+        std::memcpy(&c, count.data(), 4);
+        CHECK(c == 0);
+        gpu::FrameConstants fc{};
+        gs.fill(fc);
+        CHECK(fc.fxLightCount == r.countSrv && fc.fxLightCapacity == capacity && fc.lightCount == n);
+    };
+    CHECK(gs.setFxLightCapacity(5));
+    checkTail(5);
+    CHECK(gs.setFxLightCapacity(5));  // unchanged: no rebuild needed
+    checkTail(5);
+    CHECK(gs.setFxLightCapacity(300));
+    checkTail(300);
+    CHECK(!gs.setFxLightCapacity(GpuScene::kMaxSceneLights - n + 1));  // over 65,535 lights: refused, tail unchanged
+    checkTail(300);
+    CHECK(gs.setFxLightCapacity(GpuScene::kMaxSceneLights - n));  // exactly at the limit
+    checkTail(GpuScene::kMaxSceneLights - n);
+    CHECK(gs.setFxLightCapacity(12));
+    gs.rebase(float3{ 1024, 0, -2048 });  // the table is rebuilt from the source with the offset, tail included
+    checkTail(12);
+    CHECK(gs.lights()[0].position.x == s.lights[0].position.x - 1024);
+    CHECK(gs.setFxLightCapacity(0));
+    gs.fill(f);
+    CHECK(gs.fxLightRange().capacity == 0 && f.fxLightCount == gpu::kNone && f.fxLightCapacity == 0);
+}

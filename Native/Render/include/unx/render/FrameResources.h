@@ -97,6 +97,11 @@ struct ViewResources
                                    // contiguous: records 0..79, mips 0/1/2 fp16 RGB 80..583, spare
                                    // (the table R and M agreed); M reads SrvCompute (ProbeSrvs)
     TextureRef reflection;         // RGBA16F reflection radiance + weight (main view only) [R]
+    // v1.80 (render B, M's GI lookup moved out of shading): RGBA16F W x H of the main view, written by R's r.gi.screen at
+    // the end of globalIllumination: rgb = giCacheIrradianceScreen at M's surface point (camera + mPixelRay x linear z, the
+    // normal turned towards the viewer) x g_exposure; a = 1 where the cache has the value, 0 where M uses the probes.
+    // Front faces only (M keeps its own lookup for Foliage back faces). Invalid = M looks the cache up itself.  [R]
+    TextureRef giIrradiance;
     TextureRef reflectionLobeTiles;  // R8_UNORM ceil(W/8) x ceil(H/8): min over the tile's      [M]
                                      // surface pixels of reflectionLobeHalfAngle(r, NoV) / pi
                                      // (Reflection.hlsli; sky-only tile = 1); R skips ray

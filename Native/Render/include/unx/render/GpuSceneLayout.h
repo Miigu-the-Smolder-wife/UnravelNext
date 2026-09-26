@@ -277,7 +277,10 @@ struct FrameConstants
     uint32_t terrainLayers;  // v1.74: StructuredBuffer<TerrainLayer> of the Terrain-class materials (kNone: none)
     // v1.76 (A9): materialLayers: StructuredBuffer<MaterialLayers> (kNone: no layered material); coatTable:
     // StructuredBuffer<float> scene::model::coatTable() (kCoatTableStride floats per tabulated coat).
-    uint32_t materialLayers, coatTable, framePad0, framePad1;
+    // v1.79 (A3 FX particle lights, S_STATUS 10): fxLightCount: StructuredBuffer<uint> SRV whose element 0 is F, the FX
+    // lights the GPU wrote this frame at lights[lightCount, lightCount + F) (kNone: no FX light tail); fxLightCapacity:
+    // F_max, the tail's size (readers use min(F, fxLightCapacity)). lightCount + fxLightCapacity <= 65535.
+    uint32_t materialLayers, coatTable, fxLightCount, fxLightCapacity;
 };
 static_assert(sizeof(FrameConstants) == 576);
 } // namespace unx::render::gpu
