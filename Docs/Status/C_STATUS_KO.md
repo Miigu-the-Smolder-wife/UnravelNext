@@ -68,3 +68,11 @@ powershell -File Reference/Tools/RenderQueue.ps1                   게이트 기
 1. 게이트 기준 영상 렌더(대기열 진행 중) → 장면별 기준 잡음(절반 relMSE, 절반 간 FLIP) 실측.
 2. 그 잡음 위에 `Config/quality/reference.toml`의 장면별 임계값(FLIP 평균·P99, relMSE, 시간 안정성) 결정. `unx_reference compare`가 이 키를 읽는다(지금은 키가 없어 비교가 실패한다 — 값 없이 기본값을 두지 않는다).
 3. 숲 규모의 정확한 바람(순회 중 변형).
+
+## 재개 지점 (2026-09-27, 분류 결정으로 정지; 9/30 초기화 뒤 재개)
+
+1. 착지: A6 투과 층(f0f1031, v1.67), A11 단면 재질(8335200, v1.71), 특수 기록 목록·M 선셰이딩 비트·A14 V/코어 부분·바다 V 부분·HiZ 크기 변경 결함 수정(v1.73). TDR(9/26 23:15)은 사용자 게임과의 경합으로 판단(게임 없는 하드웨어에서 변경을 켜고 끈 실행 모두 통과, `Results/C/Bisect`).
+2. A14 나머지: 보조 뷰의 froxels·GI·reflections·particles 뷰별 호출은 각 트랙 일반화 뒤(요청 20260926_C_per_view_history 5절: S는 shadowMarkView·froxels(view)·뷰별 클립맵 조건, R은 renderView 두 단계 분할). Split 뷰 post·FrameConstants viewOutputs는 렌더 A. FrameRenderer 수준 A14 시험(주 뷰 + 크기가 다른 보조 뷰 2개)이 남았다.
+3. 바다: W가 waterGeometry에서 oceanDepth·waterSurface를 채우고, W의 가장자리 32 부표본 패스를 FrameServices::coverageAppend에 건다(W 몫). 합류 뒤 바다 가장자리 기록의 면적 정확성 시험을 V 쪽에 추가한다.
+4. C5·C6 나머지(FEATURE_STATUS 렌더 C 표)와 C7·C8 HLOD 보류분은 재개 때 표에서 다시 순서를 정한다. 하드웨어에서 아직 안 돌린 것: 이번 커밋 뒤 shadow 3종(vsm·localshadow·froxel) 재실행.
+5. 알려진 main 결함(내 변경 무관): visibilitytests coverage_layer_is_exact가 1a616eb에서 같은 자리에서 실패(렌더 A의 f056694 투과 합성 추정, A에 알림). WARP로 전체 프레임 시험을 돌리면 RayScene AS 빌드에서 d3d10warp 정수 0 나누기(렌더 B/R에 알림 예정).

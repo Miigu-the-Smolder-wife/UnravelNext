@@ -1,0 +1,5 @@
+visibility_auxviewtests exit=1 0/1 passed hung=0
+visibility_wateredgetests exit=0 1/1 passed hung=0
+visibility_translucenttests exit=0 1/1 passed hung=0
+visibility_haircoveragetests exit=87  hung=1
+STOP: device hung/removed in visibility_haircoveragetests

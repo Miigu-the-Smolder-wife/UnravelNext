@@ -61,6 +61,9 @@ struct FrameServices
     // Records V -> M(resolve) -> S(shadow visibility) -> M(shading) for a secondary view and returns its products;
     // color is linear radiance x exposure in RGBA16F, sized view.width x view.height. Used by R for planar mirrors.
     std::function<ViewResources(FramePassContext&, const ViewDesc&)> renderView;
+    // v1.73: called by V inside a view's coverage passes after its rasters and before the count, so another track can
+    // append coverage records (W's ocean edges: ViewResources::oceanEdgePixels, coverageAppend). Empty = none.
+    std::function<void(FramePassContext&, const ViewResources&)> coverageAppend;
 };
 
 struct FramePassContext

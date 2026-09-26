@@ -64,7 +64,7 @@ constexpr uint32_t kViewTileSingle = 4;  // tile-local pairs are single tiles (a
 
 // Cull state words.
 constexpr uint32_t kStateNodeWrite = 0, kStateNodeEnd = 2, kStateGroupWrite = 3, kStateVisible = 5, kStateDeferInstances = 6, kStateDeferNodes = 7,
-                   kStateDeferClusters = 8, kStateListCount = 9, kStateOverflow = 21, kStateStatInstances = 22, kStateStatNodes = 23, kStateStatClusters = 24,
+                   kStateDeferClusters = 8, kStateListCount = 9, kStateCovSpecial = 17, kStateOceanEdges = 18, kStateOverflow = 21, kStateStatInstances = 22, kStateStatNodes = 23, kStateStatClusters = 24,
                    kStateStatTriangles = 25, kStateTilePairs = 29, kStateCovPool = 30, kStateCovInvocations = 31, kStateCovFragments = 32, kStateCovTiles = 33, kStateCovMeasured = 34,
                    kStateStatBandClusters = 35, kStateCovBlocks = 38, kStateCovHeavy = 39, kStateStatMixedClusters = 40,
                    kStateStatMixedTriangles = 41, kStateChunkItems = 42, kStateDeferChunks = 43, kStateStatChunks = 44, kStateListPhase1 = 48, kStateWords = 56;

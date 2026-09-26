@@ -1,0 +1,5 @@
+V: instance hierarchy: 66 static instances in 4 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+    frame 5 (steady): main deferred 0 (stats of frame 3), view7 deferred 0 (frame 3)
+FAIL aux_views_keep_their_own_history: C:\Users\USER\UnravelNext-Cint\Native\Render\Passes\Visibility\Tests\AuxViewTests.cpp:238: CHECK failed: steadyMain > 0 && steadyAux > 0
+0/1 passed
+GpuLock.ps1: cpu-contended: 1 s >= 4 cores, peak 4.2 cores; top: unx_shaderc.exe (67608) 1 core-s, unx_shaderc.exe (33664) 1 core-s, unx_shaderc.exe (49448) 1 core-s, unx_shaderc.exe (15756) 1 core-s

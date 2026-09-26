@@ -1,0 +1,9 @@
+note: track entry point W.waterGeometry (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+RayScene: 6 static + 0 dynamic instances (0 deformed), 6 mesh BLAS (8640 tris, 0.2 MB compacted from 0.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 8 ms (records and mesh BLAS 4.5, proxies 0.0, deformed setup 0.9, static TLAS and records 1.8, first dynamic build 1.1)
+RayScene resident (MB): static BLAS+TLAS 0.3 (BLAS 0.2, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 6 static instances in 3 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+note: track entry point W.water (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+GpuLock.ps1: cpu-contended: 1 s >= 4 cores, peak 4.0 cores; top: unx_study_material_layers.exe (47752) 4 core-s, unx_test_water_foamtests.exe (43084) 0 core-s, Unity.Licensing.Client.exe (39724) 0 core-s

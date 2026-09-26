@@ -3,6 +3,7 @@
 #include "unx/render/ViewDesc.h"
 
 #include <cstdint>
+#include <vector>
 
 namespace unx::render
 {
@@ -75,6 +76,19 @@ struct OceanFrame
     float lakeCentre[2] = {}, lakeRadius = 0; // (x, z) in this frame's coordinates, m
 };
 
+// A14 (FEATURES_GAME 8; Requests/20260926_C_per_view_history.md): a full auxiliary view drawn in this frame before the
+// main view (render-texture camera, mirror, portal, split screen). Its id is stable across frames (the key of every
+// track's per-view history; nonzero, unique). 'reads' lists the views whose outputs this view's materials read: those
+// are drawn first; an edge on a cycle reads that view's previous-frame output instead.
+struct AuxView
+{
+    uint32_t id = 0;
+    ViewDesc view;                // kind RenderTexture, Mirror, Portal or Split
+    TextureRef output;            // RenderTexture / Mirror / Portal: RGBA16F linear radiance (exposed); Split: the display
+                                  // target (per-view post: render A)
+    std::vector<uint32_t> reads;
+};
+
 struct FrameContext
 {
     uint64_t frameIndex = 0;
@@ -125,6 +139,8 @@ struct FrameContext
     uint32_t fluidCount = 0;
     // v1.72 (B7, engine 1 W): this frame's sea (null: none; valid until record() returns). Time: 'time', camera: mainView.
     const OceanFrame* ocean = nullptr;
+    // A14: this frame's auxiliary views (at most FrameRenderer::kMaxViewsPerFrame - 1 with the main view).
+    std::vector<AuxView> auxViews;
 };
 constexpr float kOriginGrid = 1024.0f;
 constexpr uint32_t kGpuSimulationSoft = 1, kGpuSimulationVfx = 2, kGpuSimulationRigid = 4;

@@ -4,6 +4,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <vector>
 
 namespace unx::render
 {
@@ -149,6 +151,60 @@ gpu::FrameConstants FrameRenderer::frameConstants(const GpuScene& scene, const F
     return c;
 }
 
+// A14: the frame's auxiliary views in drawing order. A view is drawn after the views it reads (Kahn's order, ties by
+// id); the views left on cycles are drawn by id and read each other's previous-frame outputs (FEATURES_GAME 8).
+static std::vector<ViewResources> auxiliaryViews(FramePassContext& fc, const FrameContext& frame)
+{
+    const std::vector<AuxView>& in = frame.auxViews;
+    if (in.size() + 1 > FrameRenderer::kMaxViewsPerFrame) fail("A14: %zu auxiliary views (at most %u with the main view)", in.size(), FrameRenderer::kMaxViewsPerFrame - 1);
+    std::map<uint32_t, size_t> index;
+    for (size_t i = 0; i < in.size(); ++i)
+    {
+        const AuxView& a = in[i];
+        if (a.id == 0) fail("A14: auxiliary view id 0 (the main view's)");
+        if (!index.emplace(a.id, i).second) fail("A14: auxiliary view id %u twice", a.id);
+        const gpu::ViewKind k = a.view.kind;
+        if (k != gpu::ViewKind::RenderTexture && k != gpu::ViewKind::Mirror && k != gpu::ViewKind::Portal && k != gpu::ViewKind::Split)
+            fail("A14: auxiliary view %u has kind %u (RenderTexture, Mirror, Portal or Split)", a.id, (uint32_t)k);
+        if (!a.output.valid()) fail("A14: auxiliary view %u has no output", a.id);
+    }
+    std::vector<uint32_t> pending(in.size(), 0);
+    for (size_t i = 0; i < in.size(); ++i)
+        for (uint32_t r : in[i].reads)
+            if (r != 0 && index.count(r) && r != in[i].id) ++pending[i];
+    std::vector<size_t> order;
+    std::vector<uint8_t> done(in.size(), 0);
+    for (;;)
+    {
+        size_t pick = in.size();
+        for (size_t i = 0; i < in.size(); ++i)
+            if (!done[i] && pending[i] == 0 && (pick == in.size() || in[i].id < in[pick].id)) pick = i;
+        if (pick == in.size())
+        {
+            for (size_t i = 0; i < in.size(); ++i)  // cycles: the lowest id next; its unresolved reads are previous-frame reads
+                if (!done[i] && (pick == in.size() || in[i].id < in[pick].id)) pick = i;
+            if (pick == in.size()) break;
+        }
+        done[pick] = 1;
+        order.push_back(pick);
+        for (size_t i = 0; i < in.size(); ++i)
+            if (!done[i])
+                for (uint32_t r : in[i].reads)
+                    if (r == in[pick].id && pending[i] > 0) --pending[i];
+    }
+    std::vector<ViewResources> out;
+    for (size_t i : order)
+    {
+        ViewResources v;
+        v.view = in[i].view;
+        v.viewId = in[i].id;
+        v.frameConstants = fc.frameConstantsFor(v.view);
+        v.color = in[i].output;
+        out.push_back(v);
+    }
+    return out;
+}
+
 ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, TextureRef output)
 {
     // History discontinuity (v1.35): no previous view in this frame; a restore also has no previous transforms or
@@ -198,19 +254,32 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     main.view = frame.mainView;
     main.frameConstants = fc.frameConstantsFor(main.view);
     main.color = output;
+    std::vector<ViewResources> aux = auxiliaryViews(fc, frame);  // A14: in drawing order
 
     // ARCHITECTURE 4.1, one graphics queue (4.3). Order matters only through declared dependencies; it follows the
-    // design so the reader can map passes to the budget table.
+    // design so the reader can map passes to the budget table. A14 phases (Requests/20260926_C_per_view_history.md 5):
+    // every view's visibility, the shadow pages once, the auxiliary views' shading, then the main view's resolve (its
+    // materials read the auxiliary outputs of this frame).
     tracks::simulation(fc);  // C0
     tracks::waterGeometry(fc);  // W (B7/B8): ocean FFT and fluid surface into V's triangle streams
     tracks::atmosphere(fc);
     tracks::accelerationStructures(fc);
     tracks::hair(fc, main);  // E (B10): guide ticks and the frame's strand segments, before V
+    for (ViewResources& v : aux) tracks::visibility(fc, v);
     tracks::visibility(fc, main);
+    tracks::shadowPages(fc, main);  // reads V's products only (S, 2026-09-26); per-view marking: S (shadowMarkView)
+    for (ViewResources& v : aux)
+    {
+        // The auxiliary chain of the planar reflection path; froxels, GI and reflections per view follow the tracks'
+        // per-view generalisation (request section 5).
+        tracks::decals(fc, v);
+        tracks::materialResolve(fc, v);
+        tracks::shadowVisibility(fc, v);
+        tracks::shading(fc, v);
+    }
     tracks::decals(fc, main);  // E (A7): decal records and tile lists for the resolve
     tracks::surfaceState(fc);  // E (A7): the surface state field's changes
     tracks::materialResolve(fc, main);
-    tracks::shadowPages(fc, main);
     tracks::froxels(fc, main);
     main.froxelLights = resources.froxelLights;  // the main view's per-view S products (v1.22)
     main.airVolume = resources.aerialPerspective;

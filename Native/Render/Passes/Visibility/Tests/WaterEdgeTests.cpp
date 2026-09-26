@@ -4,7 +4,8 @@
 //                           coverage records (the layer's full samples) plus the areas of the water records in the edge
 //                           pixels add up to the quad's exact projected area within the records' 10-bit rounding; records
 //                           come only from pixels next to the quad's outline (none inside), every one see-through with
-//                           slot 0 and triangle 0 or 1.
+//                           slot 0 and triangle 0 or 1. The special record list (v1.73) names exactly those records:
+//                           as many entries as stream records, each a distinct element holding a stream id, kind 2.
 //   unx_test_visibility_wateredgetests
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/core/Config.h"
@@ -161,8 +162,9 @@ int main()
         std::vector<uint32_t> vis, tiles, records;
         std::vector<float> waterDepth, bandA;
         const uint64_t tileCount = (uint64_t)((width + 7) / 8) * ((height + 7) / 8);
-        ComPtr<ID3D12Resource> tilesRb = buffer(tileCount * 32, D3D12_HEAP_TYPE_READBACK, L"rb tiles"), recordsRb;
-        uint64_t recordBytes = 0;
+        ComPtr<ID3D12Resource> tilesRb = buffer(tileCount * 32, D3D12_HEAP_TYPE_READBACK, L"rb tiles"), recordsRb, specialRb;
+        uint64_t recordBytes = 0, specialBytes = 0;
+        std::vector<uint32_t> special;
         for (uint32_t f = 0; f < 3; ++f)
         {
             FrameContext frame;
@@ -188,15 +190,22 @@ int main()
             CHECK(resources.waterVis.valid() && resources.waterDepth.valid());
             const TextureRef wv = resources.waterVis, wd = resources.waterDepth, da = main.depth;
             CHECK(main.coverageTiles.valid() && main.coverageRecords.valid());
-            const BufferRef ct = main.coverageTiles, cr = main.coverageRecords;
-            const uint64_t poolBytes = graph.desc(cr).size;
+            const BufferRef ct = main.coverageTiles, cr = main.coverageRecords, cs = main.coverageSpecial;
+            CHECK(cs.valid());
+            const uint64_t poolBytes = graph.desc(cr).size, listBytes = graph.desc(cs).size;
+            if (listBytes != specialBytes)
+            {
+                if (specialRb) device().deferRelease(specialRb);
+                specialRb = buffer(listBytes, D3D12_HEAP_TYPE_READBACK, L"rb special");
+                specialBytes = listBytes;
+            }
             if (poolBytes != recordBytes)
             {
                 if (recordsRb) device().deferRelease(recordsRb);
                 recordsRb = buffer(poolBytes, D3D12_HEAP_TYPE_READBACK, L"rb records");
                 recordBytes = poolBytes;
             }
-            ID3D12Resource *v = visRb.Get(), *d = depthRb.Get(), *a = bandARb.Get(), *tl = tilesRb.Get(), *rc = recordsRb.Get();
+            ID3D12Resource *v = visRb.Get(), *d = depthRb.Get(), *a = bandARb.Get(), *tl = tilesRb.Get(), *rc = recordsRb.Get(), *sp = specialRb.Get();
             graph.addPass("test.readback", QueueType::Graphics,
                           [&](PassBuilder& b) {
                               b.use(wv, Use::CopySrc);
@@ -204,6 +213,7 @@ int main()
                               b.use(da, Use::CopySrc);
                               b.use(ct, Use::CopySrc);
                               b.use(cr, Use::CopySrc);
+                              b.use(cs, Use::CopySrc);
                               b.keep();
                           },
                           [=](PassContext& c) {
@@ -212,6 +222,7 @@ int main()
                               copyTexture(c, da, a, width, height);
                               c.cmd->CopyBufferRegion(tl, 0, c.resource(ct), 0, tileCount * 32);
                               c.cmd->CopyBufferRegion(rc, 0, c.resource(cr), 0, poolBytes);
+                              c.cmd->CopyBufferRegion(sp, 0, c.resource(cs), 0, listBytes);
                           });
             graph.execute(nullptr);
             device().waitIdle();
@@ -228,6 +239,7 @@ int main()
             };
             tiles = words(tl, tileCount * 8);
             records = words(rc, poolBytes / 4);
+            special = words(sp, listBytes / 4);
         }
 
         // Records per pixel (tile headers: records, base, listed index + 1; the record's pixel in its tile).
@@ -274,6 +286,19 @@ int main()
              "%.0f px; %llu bad records\n",
              (unsigned long long)interior, recordArea, (unsigned long long)streamRecords, (unsigned long long)recordPixels, total, exact, rounding, perimeter,
              (unsigned long long)badRecords);
+        // Special list: header { count, groups, 1, 1 }, then { element, kind }.
+        const uint32_t specialCount = special[0];
+        uint64_t specialBad = 0;
+        std::vector<uint8_t> seen(records.size() / 4, 0);
+        for (uint32_t k = 0; k < specialCount && 4 + 2 * (size_t)k + 1 < special.size(); ++k)
+        {
+            const uint32_t element = special[4 + 2 * k], kind = special[4 + 2 * k + 1];
+            if (element >= seen.size() || seen[element] || kind != 2 || (records[4 * (size_t)element] >> 30) != 3u) ++specialBad;
+            else seen[element] = 1;
+        }
+        logf("    special list: %u entries (args %u, %u, %u), %llu bad\n", specialCount, special[1], special[2], special[3], (unsigned long long)specialBad);
+        CHECK(specialCount == streamRecords && specialBad == 0);
+        CHECK(special[1] == (specialCount + 63) / 64 && special[2] == 1 && special[3] == 1);
         CHECK(streamRecords > 0 && badRecords == 0);
         CHECK(recordPixels <= (uint64_t)(4 * perimeter));  // the outline's pixels (and their 3 x 3 neighbours), not the interior
         CHECK(std::fabs(total - exact) <= rounding + 1e-4 * exact);

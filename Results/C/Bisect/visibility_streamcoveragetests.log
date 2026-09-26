@@ -1,0 +1,6 @@
+waiting for the GPU measurement lock; held by: (unknown)
+V: instance hierarchy: 1 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+V: capacity exceeded in 'main', frame 0 (bits 0x2000): raise visibility.max_* (Stats::overflow; 0x100: the coverage record pool ran out, it grows from the next completed frame; 0x400: a shader loop reached its iteration bound or a coverage consistency check failed, a defect)
+    14146 stream records, area 13781.250 px^2 vs exact 13781.252 (rounding bound 6.914), 0 not see-through, 0 with a wrong slot or triangle
+PASS stream_records_are_exact
+1/1 passed

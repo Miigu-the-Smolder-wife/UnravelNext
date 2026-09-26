@@ -1,0 +1,12 @@
+note: track entry point W.waterGeometry (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+RayScene: 1 static + 0 dynamic instances (0 deformed), 1 mesh BLAS (12 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 18 ms (records and mesh BLAS 6.3, proxies 0.0, deformed setup 3.1, static TLAS and records 6.7, first dynamic build 1.7)
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 1 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+M shading: experiment mask 8192 leaves terms out (cost attribution run, not an image)
+note: track entry point W.water (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+[d3d12 ERROR 232] ID3D12Device::RemoveDevice: Device removal has been triggered for the following reason (DXGI_ERROR_DEVICE_HUNG: The Device took an unreasonable amount of time to execute its commands, or the hardware crashed/hung. As a result, the TDR (Timeout Detection and Recovery) mechanism has been triggered. The current Device Context was executing commands when the hang occurred. The application may want to respawn and fallback to less aggressive use of the display hardware).
+UNX_DEVICE_REMOVED Queue::waitCpu(graphics) hr 0x887A0005 reason 0x887A0006
+UNX_DEVICE_REMOVED Queue::waitCpu(graphics) hr 0x887A0005 reason 0x887A0006
+GpuLock.ps1: DEVICE_REMOVED cpu-contended: 2 s >= 4 cores, peak 4.4 cores; top: cl.exe (24728) 2 core-s, unx_shaderc.exe (57656) 1 core-s, unx_shaderc.exe (72532) 1 core-s, unx_shaderc.exe (73384) 1 core-s background: Remnant2-Win64-Shipping (31604) 17 s >= 200 ms/s, peak 835 ms/s; cpu 21 s >= 4 cores, peak 10.2 cores

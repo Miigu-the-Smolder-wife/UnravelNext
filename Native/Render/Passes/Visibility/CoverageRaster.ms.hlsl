@@ -77,6 +77,8 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     // hides what its mask covers after the test).
     const uint materialClass = m.classFlags & 0xFFu;
     const uint opaqueFlag = materialClass != MATERIAL_GLASS && materialClass != MATERIAL_WATER ? COV_FLAG_OPAQUE : 0u;
+    // v1.73: M pre-shaded classes (shaded by M before the composite, which then only reads the value): Cut.
+    const uint preshade = materialClass == MATERIAL_CUT ? COV_PRESHADE_ID : 0u;
     const uint vertexCount = valid ? clusterVertexCount(cl) : 0, triangleCount = valid ? clusterTriangleCount(cl) : 0;
     SetMeshOutputCounts(vertexCount, triangleCount);
     StructuredBuffer<uint> clusterVertices = ResourceDescriptorHeap[g_clusterVertexIndices];
@@ -128,7 +130,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
             }
         }
         PrimitiveOut o = (PrimitiveOut)0;
-        o.visId = packVisId(visibleIndex, t);
+        o.visId = packVisId(visibleIndex, t) | preshade;
         o.material = material;
         bool cull = n < 3 || (mixed && sheetTriangleBandB(v, gs_world[tri.x], gs_world[tri.y], gs_world[tri.z]) == translucent) || patchDropsTriangle(inst, mesh, cl, tri);  // C5
         if (!cull)

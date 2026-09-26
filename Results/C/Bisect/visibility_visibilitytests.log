@@ -1,0 +1,75 @@
+waiting for the GPU measurement lock; held by: (unknown)
+note: track entry point W.waterGeometry (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+RayScene: 84 static + 0 dynamic instances (0 deformed), 3 mesh BLAS (53840 tris, 1.4 MB compacted from 3.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 8 ms (records and mesh BLAS 4.5, proxies 0.0, deformed setup 1.0, static TLAS and records 1.7, first dynamic build 0.9)
+RayScene resident (MB): static BLAS+TLAS 1.6 (BLAS 1.5, TLAS 0.03, descs+scratch 0.02), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+note: track entry point W.water (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+RayScene: 84 static + 0 dynamic instances (0 deformed), 3 mesh BLAS (53840 tris, 1.4 MB compacted from 3.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 6 ms (records and mesh BLAS 2.6, proxies 0.0, deformed setup 1.1, static TLAS and records 1.7, first dynamic build 0.8)
+RayScene resident (MB): static BLAS+TLAS 1.6 (BLAS 1.5, TLAS 0.03, descs+scratch 0.02), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+    occlusion on : frame 5, 38 instances, 373 nodes, 1984 clusters tested, 611 visible, triangles A/B/C 37154/680/0, deferred 41/0/146, overflow 0x0
+    occlusion off: frame 5, 74 instances, 625 nodes, 2468 clusters tested, 970 visible, triangles A/B/C 58600/680/0, deferred 0/0/0, overflow 0x0
+    frame 0: 1267624 of 3686400 pixels sky
+    8 frames: depth identical to rendering without occlusion culling
+PASS occlusion_is_conservative
+RayScene: 84 static + 0 dynamic instances (0 deformed), 3 mesh BLAS (53840 tris, 1.4 MB compacted from 3.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 6 ms (records and mesh BLAS 2.0, proxies 0.0, deformed setup 1.4, static TLAS and records 2.0, first dynamic build 0.9)
+RayScene resident (MB): static BLAS+TLAS 1.6 (BLAS 1.5, TLAS 0.03, descs+scratch 0.02), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+    289897 pixels: vis id -> (instance, cluster, triangle) covers the pixel centre at the stored depth (18 within 1/64 px of an edge)
+PASS vis_id_decodes_to_the_covering_triangle
+RayScene: 84 static + 0 dynamic instances (0 deformed), 3 mesh BLAS (53840 tris, 1.4 MB compacted from 3.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 6 ms (records and mesh BLAS 1.4, proxies 0.0, deformed setup 1.1, static TLAS and records 2.1, first dynamic build 1.0)
+RayScene resident (MB): static BLAS+TLAS 1.6 (BLAS 1.5, TLAS 0.03, descs+scratch 0.02), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+RayScene: 84 static + 0 dynamic instances (0 deformed), 3 mesh BLAS (53840 tris, 1.4 MB compacted from 3.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 6 ms (records and mesh BLAS 2.0, proxies 0.0, deformed setup 1.1, static TLAS and records 2.0, first dynamic build 1.4)
+RayScene resident (MB): static BLAS+TLAS 1.6 (BLAS 1.5, TLAS 0.03, descs+scratch 0.02), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+    LOD 1 px : frame 0, 84 instances, 601 nodes, 926 clusters tested, 445 visible, triangles A/B/C 23721/128/0, deferred 0/0/0, overflow 0x0
+    source   : frame 0, 84 instances, 918 nodes, 7526 clusters tested, 2947 visible, triangles A/B/C 183253/640/0, deferred 0/0/0, overflow 0x0
+    115658 covered pixels at source detail; LOD cut: 0 holes, 0 extra pixels away from silhouettes
+PASS lod_cut_has_no_holes
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+[d3d12 WARNING 926] WriteBufferImmediate: 5 resources contain the GPU Virtual Address range [0x00000002e6c00000, 0x00000002e6c00003] on a Heap (0x000001EEA0709420:'unx render graph transients').  This may be OK as long as only one of these resources is actively being used. However, there is no definitive way for the debug layer to identify which resource is intended. Consider using AssertResourceState to help with state validation.
+[d3d12 WARNING 926] WriteBufferImmediate: 5 resources contain the GPU Virtual Address range [0x00000002e6c00004, 0x00000002e6c00007] on a Heap (0x000001EEA0709420:'unx render graph transients').  This may be OK as long as only one of these resources is actively being used. However, there is no definitive way for the debug layer to identify which resource is intended. Consider using AssertResourceState to help with state validation.
+[d3d12 WARNING 926] WriteBufferImmediate: 5 resources contain the GPU Virtual Address range [0x00000002e6c00000, 0x00000002e6c00003] on a Heap (0x000001EEA0709420:'unx render graph transients').  This may be OK as long as only one of these resources is actively being used. However, there is no definitive way for the debug layer to identify which resource is intended. Consider using AssertResourceState to help with state validation.
+[d3d12 WARNING 926] WriteBufferImmediate: 5 resources contain the GPU Virtual Address range [0x00000002e6c00004, 0x00000002e6c00007] on a Heap (0x000001EEA0709420:'unx render graph transients').  This may be OK as long as only one of these resources is actively being used. However, there is no definitive way for the debug layer to identify which resource is intended. Consider using AssertResourceState to help with state validation.
+[d3d12 WARNING 926] WriteBufferImmediate: 5 resources contain the GPU Virtual Address range [0x00000002e6c00000, 0x00000002e6c00003] on a Heap (0x000001EEA0709420:'unx render graph transients').  This may be OK as long as only one of these resources is actively being used. However, there is no definitive way for the debug layer to identify which resource is intended. Consider using AssertResourceState to help with state validation.
+[d3d12 WARNING 926] WriteBufferImmediate: 5 resources contain the GPU Virtual Address range [0x00000002e6c00004, 0x00000002e6c00007] on a Heap (0x000001EEA0709420:'unx render graph transients').  This may be OK as long as only one of these resources is actively being used. However, there is no definitive way for the debug layer to identify which resource is intended. Consider using AssertResourceState to help with state validation.
+    service, hardware depth: frame 0, 84 instances, 586 nodes, 1072 clusters tested, 500 visible, triangles A/B/C 27471/320/0, deferred 0/0/0, overflow 0x0
+    service, pixel kernel  : frame 0, 44 instances, 312 nodes, 652 clusters tested, 264 visible, triangles A/B/C 14591/128/0, deferred 0/0/0, overflow 0x0
+    service, source detail : frame 0, 84 instances, 918 nodes, 7526 clusters tested, 3620 visible, triangles A/B/C 223808/0/0, deferred 0/0/0, overflow 0x0
+    service, sparse mask   : frame 0, 60 instances, 418 nodes, 808 clusters tested, 357 visible, triangles A/B/C 19592/320/0, deferred 0/0/0, overflow 0x0
+    service, tile-local    : frame 0, 60 instances, 418 nodes, 808 clusters tested, 357 visible, triangles A/B/C 19592/320/0, deferred 0/0/0, overflow 0x0
+    hardware depth: 0 uncovered; LOD vs source on 487084 terrain pixels (normal distance, 39156 silhouette pixels excluded): worst 0.120 m = 1.53 LOD px, 4292 beyond 1 LOD px; pixel kernel (masked left half, 524288 px): 0 depth mismatches, 0 bad instance/userData
+    tile-local vs whole-view raster, sparse mask (491520 px in set tiles): fragments inside 526072 vs 526072, outside 0 vs 504639; per-pixel differences in set tiles: fragments 0, depth 94662, ids at equal depth 0, whole-view vs hardware depth 0; pixels written outside 0; 449 pairs; depth difference worst 1025 ulp = 3.05e-05 = 0.0068 px lateral (0 px beyond 1/64 px)
+PASS raster_service
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+    491520 texels in 30 set tiles (491520 covered): 428306 exact, 63214 within the snap bound (worst 0.67 snap steps x G), 0 edge flips, 0 other; D16 worst 8.55e-06 (1 step 1.53e-05), 0 beyond; 0 texels written in unused slots
+PASS raster_service_tile_atlas
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+    153995 mirror pixels (95982 covered): 0 differ from the unmasked view; 0 other pixels not VIS_NONE at depth 1
+    unmasked: frame 0, 78 instances, 621 nodes, 1696 clusters tested, 654 visible, triangles A/B/C 37363/1536/0, deferred 0/0/0, overflow 0x0
+    masked  : frame 1, 26 instances, 263 nodes, 1082 clusters tested, 214 visible, triangles A/B/C 12713/448/0, deferred 0/0/0, overflow 0x0
+PASS planar_mask_draws_only_mirror_pixels
+    within 0.75 px: 220101 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 2.84 per cutting triangle (worst 14), 2.57 per triangle overall
+    within 3 px: 122718 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 1.88 per cutting triangle (worst 12), 0.91 per triangle overall
+    within 30 px: 15893 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 1.50 per cutting triangle (worst 10), 0.09 per triangle overall
+PASS coverage_mask_lut_matches_exact
+RayScene: 6 static + 0 dynamic instances (0 deformed), 6 mesh BLAS (8640 tris, 0.2 MB compacted from 0.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 6 ms (records and mesh BLAS 2.0, proxies 0.0, deformed setup 1.0, static TLAS and records 1.8, first dynamic build 1.5)
+RayScene resident (MB): static BLAS+TLAS 0.3 (BLAS 0.2, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 6 static instances in 3 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+FAIL coverage_layer_is_exact: invalid unordered_map<K, T> key
+7/8 passed, D3D12 debug-layer errors: 0
+GpuLock.ps1: background: cpu 13 s >= 4 cores, peak 8.5 cores

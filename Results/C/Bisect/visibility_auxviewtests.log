@@ -1,0 +1,8 @@
+waiting for the GPU measurement lock; held by: (unknown)
+V: instance hierarchy: 66 static instances in 4 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+    frame 5 (steady): main deferred 34 (stats of frame 3), view7 deferred 19 (frame 3)
+    resize frame 6: main deferred 34, view7 deferred 0 (stats frames 6, 6)
+V: instance hierarchy: 66 static instances in 4 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+    auxiliary depth vs a fresh main view: 0 of 24000 pixels differ
+PASS aux_views_keep_their_own_history
+1/1 passed

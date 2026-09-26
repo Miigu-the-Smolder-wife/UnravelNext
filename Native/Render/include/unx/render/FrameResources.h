@@ -12,6 +12,8 @@ namespace unx::render
 struct ViewResources
 {
     ViewDesc view;
+    uint32_t viewId = 0;           // A14: the view's stable id (0 = main; FrameContext::auxViews ids); tracks key their
+                                   // per-view histories and persistent resources by it (Requests/20260926_C_per_view_history)
     D3D12_GPU_VIRTUAL_ADDRESS frameConstants = 0;  // root CBV b1 for passes of this view [core]
     TextureRef depth;              // D32_FLOAT reversed Z                                   [V]
     TextureRef visId;              // R32_UINT (VisBuffer.hlsli)                             [V]
@@ -30,6 +32,10 @@ struct ViewResources
                                    // { tile, records, record base, block base }
     BufferRef coverageTilePixels;  // raw: 64 words per listed tile, pixel p's first record in the  [V]
                                    // tile's range
+    BufferRef coverageSpecial;     // raw (v1.73): header { count, DispatchIndirect args (64 per group, 1, 1) }, then per  [V]
+                                   // special record uint2 { coverageRecords element, kind } (1 hair, 2 triangle stream,
+                                   // 5 M pre-shaded cluster class: COV_PRESHADE_ID);
+                                   // no defined order; past the capacity: OVERFLOW_COVERAGE_SPECIAL (it grows)
     TextureRef coverageDepthRange; // R32G32_UINT per pixel: its records' nearest (max) and farthest  [V]
                                    // (min) depth bits, see-through included; (0, 0xFFFFFFFF) = none
     BufferRef coverageChunkTable;  // v1.40 names until M's composite reads the ranges: the table is   [V]
@@ -45,6 +51,14 @@ struct ViewResources
                                    // covers the whole pixel; 2 = the pixel's translucent surfaces are coverage records
                                    // (see-through, exact area and mask; edges on both sides of an outline, seams,
                                    // overlaps), the sample is unused (it may be none)
+    // v1.73 ocean edges (W's view grid): the water layer's ocean edge pixels for W's subsample pass, raw: header    [V]
+    // { count, DispatchIndirect args (64 pixels per group), 1, 1 }, then y << 16 | x per pixel; and what that pass needs to
+    // append coverage records (CoverageLayer.hlsli coverageAppend) inside FrameServices::coverageAppend.
+    BufferRef oceanEdgePixels;
+    BufferRef coverageState, coverageStream, coverageKeys;  // UAV targets of coverageAppend (valid inside the hook)   [V]
+    uint32_t coverageCapacity = 0, coverageTilesX = 0;
+    TextureRef waterVis, waterDepth;  // A14: this view's water layer (v1.63 formats); the main view's are also  [V]
+                                      // FrameResources::waterVis / waterDepth
     TextureRef gbuffer;            // RG32_UINT (GBuffer.hlsli)                              [M]
     TextureRef shadowVisibility;   // R32_UINT, 4 light slots x 8 bit (7.3)                 [S]
     TextureRef shadowOverflowTiles;  // R32_UINT ceil(W/8) x ceil(H/8) (main view, 7.3, v1.20): [S]
@@ -118,7 +132,7 @@ struct TriangleStream
     // ocean and lakes; FrameResources::waterVis / waterDepth, one sample per pixel over band A).
     uint32_t layer = 0;
 };
-constexpr uint32_t kMaxTriangleStreams = 64;  // vis id slot bits (CoverageTiles.hlsli COV_STREAM_ID)
+constexpr uint32_t kMaxTriangleStreams = 63;  // slot 63 is the view-grid ocean's (v1.73, COV_OCEAN_ID)  // vis id slot bits (CoverageTiles.hlsli COV_STREAM_ID)
 
 // View-independent products of the current frame. Persistent state (VSM pool, GI cache, TLAS) is imported into the
 // graph each frame by its owner.
@@ -177,6 +191,10 @@ struct FrameResources
     // water surface in front of band A per pixel - waterVis R32_UINT (COV_STREAM_ID | slot | triangle, VIS_NONE = no
     // water), waterDepth R32_FLOAT linear view depth (+inf = no water). Invalid when the frame has no water stream.  [V]
     TextureRef waterVis, waterDepth;
+    // v1.73 (B7, W's view grid; W fills them in waterGeometry, before V): the sea per pixel of the main view -
+    // oceanDepth R32_FLOAT linear view depth (+inf = no sea), waterSurface RGBA32_FLOAT (rest position x0.xz, depth,
+    // marker: W's format). V merges oceanDepth into the water layer (COV_OCEAN_ID; band A rejects what lies behind).
+    TextureRef oceanDepth, waterSurface;  // [W]
     // Light functions (E's Passes/Lights LightFunction.hlsli, A8; invalid = no light has one): cookies, IES, gobos,  [E]
     // flicker and animation per light index. Every reader of a light's emission (M shading, S froxel in-scattering, R
     // hit shading and GI) multiplies it by lightFunction(srv, light, forward, right, dir, footprint, g_time) (raw).

@@ -39,6 +39,10 @@ max_group_items = 1048576         # hierarchy leaves reached (instance, group)
 max_deferred_items = 1048576      # phase-1 occluded instances / nodes / clusters retested in phase 2
 coverage_table_slots = 32         # unused since INTERFACES v1.41 (tile ranges replace the chunk tables); kept so binaries
                                   # built before it still start
+ocean_edges_min = 65536           # ocean edge pixel list capacity floor (v1.73, W's subsample pass); 1.5 x the need when
+                                  # larger (4 B per pixel)
+coverage_special_min = 262144     # special record list capacity floor (hair, stream records for their owners' shading,
+                                  # v1.73); the capacity is 1.5 x the latest need when larger (8 B per entry)
 coverage_pool_min_fragments_per_pixel = 1.0  # coverage record capacity floor (4K: 8.3 M records); the capacity is 1.5 x the
                                   # latest measured need when larger (37 B per record: stream 20 + ranges 16 + scratch 1)
 coverage_heavy_tile_fragments = 1024  # unused since INTERFACES v1.41 (kept like coverage_table_slots)

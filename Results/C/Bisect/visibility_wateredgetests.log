@@ -1,0 +1,10 @@
+waiting for the GPU measurement lock; held by: (unknown)
+V: instance hierarchy: 1 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+    water layer: 13266 full pixels + 515.250 px^2 in 640 edge records (636 pixels) = 13781.250 px^2 vs the quad's exact 13781.252 (rounding bound 0.313); outline 490 px; 0 bad records
+    special list: 640 entries (args 10, 1, 1), 0 bad
+PASS water_edges_are_exact
+1/1 passed
+GpuLock.ps1: cpu-contended: 1 s >= 4 cores, peak 5.0 cores; top: unx_study_material_layers.exe (47752) 2 core-s, unx_shaderc.exe (42356) 1 core-s, unx_shaderc.exe (74524) 1 core-s, unx_shaderc.exe (16776) 1 core-s

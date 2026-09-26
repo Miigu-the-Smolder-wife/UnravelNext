@@ -49,6 +49,8 @@ struct Settings
     uint32_t coverageDebugStage = 0;
     bool coverageHair = false;  // visibility.coverage_hair (B10 strands in the coverage layer)
     double coveragePoolMinPerPixel = 0;
+    uint32_t oceanEdgesMin = 0;  // ocean edge pixel list capacity floor (entries)
+    uint32_t coverageSpecialMin = 0;  // special record list capacity floor (entries)
     float lodErrorPx = 0, bandAMinPx = 0, bandCMaxPx = 0, bandAHysteresisPx = 0;
     bool occlusion = true, coverageLayer = false, coverageBandC = true;
 
@@ -56,6 +58,9 @@ struct Settings
     {
         Settings s;
         s.capVisible = (uint32_t)q.integer("visibility.max_visible_clusters");
+        // Cluster vis ids ((index << 7 | triangle) + 1) must stay below 2^30: the coverage records' top two bits name
+        // their kind (CoverageTiles.hlsli COV_PRESHADE_ID, COV_HAIR_ID, COV_STREAM_ID).
+        if (s.capVisible > (1u << 23)) fail("visibility.max_visible_clusters = %u: at most 2^23 (coverage record kinds use vis id bits 30, 31)", s.capVisible);
         s.capNodes = (uint32_t)q.integer("visibility.max_node_items");
         s.capGroups = (uint32_t)q.integer("visibility.max_group_items");
         s.capDeferred = (uint32_t)q.integer("visibility.max_deferred_items");
@@ -72,6 +77,8 @@ struct Settings
         if (stage < 0 || stage > 4) fail("visibility.coverage_debug_stage = %lld: 0 (the layer), 1 .. 4 (measurement variants)", (long long)stage);
         s.coverageDebugStage = (uint32_t)stage;
         s.coveragePoolMinPerPixel = q.number("visibility.coverage_pool_min_fragments_per_pixel");
+        s.coverageSpecialMin = (uint32_t)q.integer("visibility.coverage_special_min");
+        s.oceanEdgesMin = (uint32_t)q.integer("visibility.ocean_edges_min");
         if (!(s.coveragePoolMinPerPixel > 0)) fail("visibility.coverage_pool_min_fragments_per_pixel = %g: must be positive", s.coveragePoolMinPerPixel);
         return s;
     }
@@ -95,14 +102,24 @@ struct Coverage
     ComPtr<ID3D12Resource> headers, counters, list, depthRange;
     uint32_t width = 0, height = 0, tilesX = 0, tiles = 0;
     uint32_t capacity = 0;  // records
+    uint32_t specialCapacity = 0;  // special record list entries (v1.73)
+    uint32_t oceanEdgeCapacity = 0;  // ocean edge pixel list entries (v1.73)
     bool fresh = true;      // every tile still to be emptied (CoverageBuild MODE 4)
+};
+
+// A14: what a full view (main, render texture, mirror, portal, split) keeps between frames, per ViewResources::viewId.
+struct ViewState
+{
+    Hiz hiz;
+    Coverage coverage;
+    float3 prevPosition{};  // the view's camera position of the previous frame (band hysteresis)
+    bool hasPrevPosition = false;
+    uint64_t lastFrame = UINT64_MAX;  // frame index of its latest use (views unseen for framesInFlight + 1 frames are freed)
 };
 
 struct State
 {
     Device* device = nullptr;
-    float3 prevMainPosition{};  // the main view's camera position of the previous frame (band hysteresis)
-    bool hasPrevMainPosition = false;
     ComPtr<ID3D12CommandSignature> dispatchSignature, meshSignature;
     ComPtr<ID3D12Resource> upload;
     uint8_t* uploadMapped = nullptr;
@@ -119,8 +136,7 @@ struct State
         bool overflowReported = false;
     };
     std::map<std::string, StatsRun> stats;
-    Hiz mainHiz;
-    Coverage mainCoverage;
+    std::map<uint32_t, ViewState> views;  // A14: full views by id (0 = main)
     D3D12_GPU_VIRTUAL_ADDRESS mainFrameConstants = 0;  // this frame's main view constants (scene indices, time, wind)
     uint64_t mainFrameConstantsFrame = UINT64_MAX;
     uint32_t sceneRevision = UINT32_MAX;
@@ -147,8 +163,11 @@ struct State
         DescriptorHeaps& h = device->descriptors();
         for (auto& slot : runSrvs)
             for (uint32_t i : slot) h.freeResource(i);
-        if (mainHiz.srv != kNone) h.freeResource(mainHiz.srv);
-        for (uint32_t i : mainHiz.uavs) h.freeResource(i);
+        for (auto& [id, v] : views)
+        {
+            if (v.hiz.srv != kNone) h.freeResource(v.hiz.srv);
+            for (uint32_t i : v.hiz.uavs) h.freeResource(i);
+        }
         if (upload) upload->Unmap(0, nullptr);
         for (auto& [name, run] : stats)
             if (run.readback) run.readback->Unmap(0, nullptr);
@@ -518,7 +537,7 @@ void refreshScene(State& s, FramePassContext& fc)
     s.traversalLevels = fc.scene.runtimeCapacity().meshes > 0 ? std::max(deepest, kRuntimeMaxDepth) : deepest;
     s.sceneRevision = fc.scene.revision();
     s.viewModelRevision = fc.scene.viewModelRevision();
-    s.mainHiz.history = false;
+    for (auto& [id, v] : s.views) v.hiz.history = false;
     buildCullScene(s, fc);
 }
 
@@ -664,6 +683,7 @@ void ensureHiz(Device& device, Hiz& h, uint32_t width, uint32_t height)
 {
     const uint32_t w = (width + 1) / 2, hh = (height + 1) / 2;
     if (h.texture && h.width == w && h.height == hh) return;
+    h.history = false;  // a new texture (first use or a size change) holds no previous frame
     DescriptorHeaps& heaps = device.descriptors();
     if (h.texture) device.deferRelease(h.texture);
     if (h.srv != kNone) heaps.freeResource(h.srv);
@@ -1098,21 +1118,28 @@ void readStats(FramePassContext& fc, State& s, const std::string& name);
 void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources& view)
 {
     const uint32_t width = view.view.width, height = view.view.height;
-    Coverage& cv = s.mainCoverage;
+    ViewState& vs = s.views[view.viewId];
+    Coverage& cv = vs.coverage;
+    const std::string statsName = view.viewId == 0 ? std::string("main") : "view" + std::to_string(view.viewId);
     ensureCoverage(fc.device, cv, width, height);
     // Record capacity: 1.5 x the latest measured need (fragments appended in the latest completed frame, read here before
     // the frame's own passes), at least the floor, in
     // steps of 64 K records (1 MB); it grows at once and shrinks only below half, so the graph keeps its placed buffers
     // between changes. A frame whose need jumps past the capacity before the statistics catch up loses fragments and
     // reports OVERFLOW_COVERAGE.
-    readStats(fc, s, "main");
+    readStats(fc, s, statsName);
     {
         uint64_t want = (uint64_t)std::ceil(r.cfg.coveragePoolMinPerPixel * width * height);
-        const auto it = s.stats.find("main");
+        const auto it = s.stats.find(statsName);
         if (it != s.stats.end() && it->second.latest.frameIndex != UINT64_MAX) want = std::max<uint64_t>(want, (it->second.latest.coverageFragments * 3ull + 1) / 2);
         constexpr uint64_t kStep = 1u << 16;
         want = std::min<uint64_t>((want + kStep - 1) / kStep * kStep, kCovPoolMaxRecords);
         if (want > cv.capacity || want * 2 < cv.capacity) cv.capacity = (uint32_t)want;
+        // Special list: the same rule over its own need (the latest frame's special records).
+        uint64_t special = r.cfg.coverageSpecialMin;
+        if (it != s.stats.end() && it->second.latest.frameIndex != UINT64_MAX) special = std::max<uint64_t>(special, (it->second.latest.coverageSpecial * 3ull + 1) / 2);
+        special = std::min<uint64_t>((special + kStep - 1) / kStep * kStep, kCovPoolMaxRecords);
+        if (special > cv.specialCapacity || special * 2 < cv.specialCapacity) cv.specialCapacity = (uint32_t)special;
     }
     RenderGraph& g = fc.graph;
     const uint32_t capacity = cv.capacity, tiles = cv.tiles, tilesX = cv.tilesX, slots = coverageScratchSlots(capacity);
@@ -1126,6 +1153,9 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     const BufferRef records = g.createBuffer({ "v.coverage.records", (uint64_t)capacity * 16, 16 });
     const BufferRef starts = g.createBuffer({ "v.coverage.tilePixels", (uint64_t)tiles * kCovTilePixels * 4, 0 });
     const BufferRef scratch = g.createBuffer({ "v.coverage.scratch", (uint64_t)slots * (kCovScratchWords + 1) * 4, 0 });
+    const uint32_t specialCapacity = cv.specialCapacity;
+    const BufferRef special = g.createBuffer({ "v.coverage.special", 16 + (uint64_t)specialCapacity * 8, 0 });
+    view.coverageSpecial = special;
     view.coverageTiles = headers;
     view.coverageRecords = records;
     view.coverageTileList = list;
@@ -1133,7 +1163,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     view.coverageDepthRange = depthRange;
     view.coverageChunkTable = {};  // v1.40 names (Frame.h): off until M's composite reads the ranges
     view.coverageChunks = records;
-    const uint32_t hizSrv = s.mainHiz.srv, hizSize = s.mainHiz.width | s.mainHiz.height << 16;
+    const uint32_t hizSrv = vs.hiz.srv, hizSize = vs.hiz.width | vs.hiz.height << 16;
     const float frontSign = view.view.mirrored ? -1.0f : 1.0f;
     const Run run = r;
     const TextureRef depthA = view.depth;
@@ -1141,10 +1171,10 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     enum : uint32_t
     {
         kUseArgs = 1, kUseList = 2, kUseListRead = 4, kUseTiles = 8, kUseCounters = 16, kUseStream = 32, kUseRecords = 64, kUseRecordsRead = 128,
-        kUseStarts = 256, kUseRange = 512, kUseScratch = 1024, kUseDepthA = 2048
+        kUseStarts = 256, kUseRange = 512, kUseScratch = 1024, kUseDepthA = 2048, kUseSpecial = 4096
     };
-    auto constants = [=](const PassContext& c, uint32_t k[24], uint32_t uses, bool raster) {
-        std::memset(k, 0, 24 * 4);
+    auto constants = [=](const PassContext& c, uint32_t k[28], uint32_t uses, bool raster) {
+        std::memset(k, 0, 28 * 4);
         k[0] = c.uav(run.state);
         k[1] = (uses & kUseArgs) ? c.uav(run.args) : kNone;
         k[2] = (uses & kUseRecords) ? c.uav(records) : ((uses & kUseRecordsRead) ? c.srv(records) : kNone);
@@ -1169,6 +1199,8 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         k[21] = (uses & kUseRange) ? c.uav(depthRange) : kNone;
         k[22] = (uses & kUseScratch) ? c.uav(scratch) : kNone;
         k[23] = slots;
+        k[24] = (uses & kUseSpecial) ? c.uav(special) : kNone;
+        k[25] = specialCapacity;
     };
     ID3D12CommandSignature* dispatchSig = s.dispatchSignature.Get();
     ID3D12CommandSignature* meshSig = s.meshSignature.Get();
@@ -1198,12 +1230,13 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       if (uses & kUseRange) b.use(depthRange, Use::UavCompute);
                       if (uses & kUseScratch) b.use(scratch, Use::UavCompute);
                       if (uses & kUseDepthA) b.use(depthA, Use::SrvCompute);
+                      if (uses & kUseSpecial) b.use(special, Use::UavCompute);
                   },
                   [=](PassContext& c) {
-                      uint32_t k[24];
+                      uint32_t k[28];
                       constants(c, k, (indirect && !fromList) ? uses & ~kUseArgs : uses, false);  // indirect: the args are read as arguments here
                       c.cmd->SetPipelineState(pso);
-                      c.computeConstants(k, 24);
+                      c.computeConstants(k, 28);
                       if (indirect) c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(fromList ? list : run.args), argWord * 4, nullptr, 0);
                       else c.cmd->Dispatch(groupsX, groupsY, 1);
                   });
@@ -1312,7 +1345,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
                   },
                   [=](PassContext& c) {
-                      uint32_t k[24];
+                      uint32_t k[28];
                       constants(c, k, 0, false);  // not the cluster lists: the hair inputs take P[3].xyz
                       k[3] = c.uav(stream);
                       k[4] = c.uav(keys);
@@ -1341,7 +1374,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         if (!st.vertices.valid() || !st.drawArgs.valid() || st.maxTriangles == 0) continue;
         // v1.64: a water-layer stream gives records only in the layer's edge pixels (its interior is the layer's sample).
         const bool edgeOnly = st.layer == 1;
-        const TextureRef waterVis = fc.resources.waterVis, waterDepth = fc.resources.waterDepth, bandADepth = view.depth;
+        const TextureRef waterVis = view.waterVis, waterDepth = view.waterDepth, bandADepth = view.depth;
         if (edgeOnly && !waterVis.valid()) continue;
         if (st.maxTriangles > (1u << 24)) fail("V: triangle stream %u holds %u triangles (at most 2^24)", slot, st.maxTriangles);
         if (g.desc(st.vertices).size < (uint64_t)st.maxTriangles * 96) fail("V: triangle stream %u: vertex buffer below %u triangles", slot, st.maxTriangles);
@@ -1390,11 +1423,19 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
                   });
     }
+    // v1.73: other tracks append coverage records here (W's ocean edges), before the count.
+    view.coverageState = run.state;
+    view.coverageStream = stream;
+    view.coverageKeys = keys;
+    view.coverageCapacity = capacity;
+    view.coverageTilesX = tilesX;
+    if (fc.services.coverageAppend) fc.services.coverageAppend(fc, view);
     build("args", 2, 1, 1, 0, kUseArgs);
     build("count", 6, 0, 0, kArgCovRecords, kUseList | kUseTiles | kUseCounters | kUseStream);
     build("scan", 7, 1, 1, 0, kUseList | kUseTiles | kUseScratch);
     build("offsets", 9, 0, 0, kCovListArgs, kUseListRead | kUseTiles | kUseCounters | kUseStarts | kUseScratch, true);
-    build("scatter", 8, 0, 0, kArgCovRecords, kUseCounters | kUseStream | kUseRecords);
+    build("scatter", 8, 0, 0, kArgCovRecords, kUseCounters | kUseStream | kUseRecords | kUseSpecial);
+    build("special", 10, 1, 1, 0, kUseSpecial);
     build("blocks", 3, 0, 0, kCovListBlockArgs, kUseListRead | kUseTiles | kUseRecordsRead | kUseRange | kUseScratch | kUseDepthA, true);
     build("heavy", 5, 0, 0, kCovListHeavyArgs, kUseListRead | kUseTiles | kUseRange | kUseScratch | kUseDepthA, true);
 }
@@ -1433,6 +1474,8 @@ void readStats(FramePassContext& fc, State& s, const std::string& name)
         st.coverageBlocks = w[kStateCovBlocks];
         st.coverageHeavyTiles = w[kStateCovHeavy];
         st.coveragePoolRecords = w[kStateCovPool];
+        st.coverageSpecial = w[kStateCovSpecial];
+        st.oceanEdges = w[kStateOceanEdges];
         st.coverageMeasured = w[kStateCovMeasured];
         st.coverageInvocations = w[kStateCovInvocations];
         st.mixedClusters = w[kStateStatMixedClusters];
@@ -1470,7 +1513,7 @@ void recordStats(FramePassContext& fc, State& s, const Run& r, const std::string
 }
 } // namespace
 
-void waterLayer(FramePassContext& fc, const Run& r, const ViewResources& view);  // below
+void waterLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& view);  // below
 void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& view);
 
 void visibility(FramePassContext& fc, ViewResources& view)
@@ -1479,49 +1522,73 @@ void visibility(FramePassContext& fc, ViewResources& view)
     refreshScene(s, fc);
     const Settings cfg = Settings::load(fc.quality);
     const bool main = view.view.kind == gpu::ViewKind::Main;
+    // A14: every view but a planar reflection is a full view: two-phase occlusion against its own HiZ, the coverage,
+    // water and translucent layers, its own histories (ViewState under view.viewId).
+    const bool full = view.view.kind != gpu::ViewKind::PlanarReflection;
+    if (main && view.viewId != 0) fail("V: the main view has view id 0");
+    if (!main && full && view.viewId == 0) fail("V: an auxiliary view needs a nonzero view id");
     const uint32_t width = view.view.width, height = view.view.height;
     RenderGraph& g = fc.graph;
     if (main)
     {
         s.mainFrameConstants = view.frameConstants;
         s.mainFrameConstantsFrame = fc.frame.frameIndex;
+        // Views not drawn for framesInFlight + 1 frames give their persistent resources back.
+        for (auto it = s.views.begin(); it != s.views.end();)
+        {
+            if (it->first != 0 && it->second.lastFrame != UINT64_MAX && it->second.lastFrame + fc.framesInFlight + 1 < fc.frame.frameIndex)
+            {
+                DescriptorHeaps& h = fc.device.descriptors();
+                if (it->second.hiz.texture) fc.device.deferRelease(it->second.hiz.texture);
+                if (it->second.hiz.srv != kNone) h.freeResource(it->second.hiz.srv);
+                for (uint32_t i : it->second.hiz.uavs) h.freeResource(i);
+                for (ComPtr<ID3D12Resource>* b : { std::addressof(it->second.coverage.headers), std::addressof(it->second.coverage.counters), std::addressof(it->second.coverage.list), std::addressof(it->second.coverage.depthRange) })
+                    if (*b) fc.device.deferRelease(*b);
+                it = s.views.erase(it);
+            }
+            else
+                ++it;
+        }
     }
+    ViewState* vs = full ? &s.views[view.viewId] : nullptr;
+    if (vs) vs->lastFrame = fc.frame.frameIndex;
+    const std::string statsName = main ? std::string("main") : (full ? "view" + std::to_string(view.viewId) : std::string("secondary"));
 
     view.depth = g.createTexture({ "v.depth", width, height, 1, 1, DXGI_FORMAT_D32_FLOAT });
     view.visId = g.createTexture({ "v.visId", width, height, 1, 1, DXGI_FORMAT_R32_UINT });
     prepareCullScene(fc, s, view.frameConstants);
-    Run r = createRun(fc, cfg, main ? "v.cull." : "v.cull.secondary.", view.frameConstants);
+    Run r = createRun(fc, cfg, main ? "v.cull." : (full ? "v.cull.view" + std::to_string(view.viewId) + "." : "v.cull.secondary."), view.frameConstants);
     view.visibleClusters = r.visible;
     r.viewCount = 1;
     // Secondary views (planar reflections) still draw every band in the vis buffer: their coverage layer needs its own
     // persistent heads and M's composite in that view (V status).
-    r.bandMode = main && cfg.coverageLayer ? (cfg.coverageBandC ? kBandModeCoverage : kBandModeFull) : kBandModeA;
+    r.bandMode = full && cfg.coverageLayer ? (cfg.coverageBandC ? kBandModeCoverage : kBandModeFull) : kBandModeA;
 
-    // Main view: two-phase occlusion against its persistent HiZ once a previous frame produced one. Secondary views
-    // (planar reflections) have no history: one phase without occlusion, no HiZ.
+    // Full views: two-phase occlusion against their persistent HiZ once a previous frame produced one. Planar
+    // reflection views have no history: one phase without occlusion, no HiZ.
     bool occlusion = false;
-    if (main)
+    if (vs)
     {
-        ensureHiz(fc.device, s.mainHiz, width, height);
-        occlusion = cfg.occlusion && s.mainHiz.history;
-        r.hiz = g.importTexture(s.mainHiz.texture.Get(), { "v.hiz", s.mainHiz.allocWidth, s.mainHiz.allocHeight, 1, (uint16_t)s.mainHiz.mips, DXGI_FORMAT_R32_FLOAT },
+        ensureHiz(fc.device, vs->hiz, width, height);
+        occlusion = cfg.occlusion && vs->hiz.history;
+        r.hiz = g.importTexture(vs->hiz.texture.Get(), { main ? "v.hiz" : "v.hiz.view", vs->hiz.allocWidth, vs->hiz.allocHeight, 1, (uint16_t)vs->hiz.mips, DXGI_FORMAT_R32_FLOAT },
                                 D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
         view.hiz = r.hiz;
-        r.hizSrv = s.mainHiz.srv;
-        r.hizMips = s.mainHiz.mips;
-        r.hizWidth = s.mainHiz.width;
-        r.hizHeight = s.mainHiz.height;
+        r.hizSrv = vs->hiz.srv;
+        r.hizMips = vs->hiz.mips;
+        r.hizWidth = vs->hiz.width;
+        r.hizHeight = vs->hiz.height;
     }
     CullView cullView = viewOf(view.view, cfg, occlusion);
-    if (main)
+    if (vs)
     {
         // Band hysteresis (a) re-evaluates the band from the previous frame's camera; a history discontinuity (cut,
         // restore) starts over from this frame's.
         // C9: the previous camera position in this frame's coordinates.
-        if (s.hasPrevMainPosition) s.prevMainPosition = s.prevMainPosition - fc.frame.originShift;
-        if (s.hasPrevMainPosition && fc.frame.discontinuity == 0) cullView.prevPosition = s.prevMainPosition;
-        s.prevMainPosition = view.view.position;
-        s.hasPrevMainPosition = true;
+        if (vs->hasPrevPosition) vs->prevPosition = vs->prevPosition - fc.frame.originShift;
+        if (vs->hasPrevPosition && fc.frame.discontinuity == 0) cullView.prevPosition = vs->prevPosition;
+        vs->prevPosition = view.view.position;
+        vs->hasPrevPosition = true;
     }
     r.viewsSrv = uploadViews(s, fc, { cullView });
     if (view.view.planarMask.valid())
@@ -1533,23 +1600,23 @@ void visibility(FramePassContext& fc, ViewResources& view)
 
     cullPhase(fc, s, r, 1);
     rasterPass(fc, s, r, view, 1);
-    if (!main)
+    if (!vs)
     {
-        recordStats(fc, s, r, "secondary");  // the frame's last secondary view (R's planar reflection costs)
+        recordStats(fc, s, r, statsName);  // the frame's last planar reflection view (R's planar reflection costs)
         return;
     }
-    hizPasses(fc, s.mainHiz, r.hiz, view.depth, width, height, occlusion ? "p1" : "final");
+    hizPasses(fc, vs->hiz, r.hiz, view.depth, width, height, occlusion ? "p1" : "final");
     if (occlusion)
     {
         cullPhase(fc, s, r, 2);
         rasterPass(fc, s, r, view, 2);
-        hizPasses(fc, s.mainHiz, r.hiz, view.depth, width, height, "final");
+        hizPasses(fc, vs->hiz, r.hiz, view.depth, width, height, "final");
     }
-    waterLayer(fc, r, view);
+    waterLayer(fc, s, r, view);
     if (r.bandMode != kBandModeA) translucentLayer(fc, s, r, view);
     if (r.bandMode != kBandModeA) coveragePasses(fc, s, r, view);
-    recordStats(fc, s, r, "main");
-    s.mainHiz.history = true;  // complete for the next frame once this frame's passes run
+    recordStats(fc, s, r, statsName);
+    vs->hiz.history = true;  // complete for the next frame once this frame's passes run
 }
 
 // A6 translucent layer (v1.67; A's decision): band A width glass and water clusters of the main view (LIST_T_BACK,
@@ -1683,13 +1750,15 @@ void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResource
 
 // Water layer (v1.61): the layer-1 triangle streams drawn with one sample per pixel over a copy of band A's depth (depth test
 // and write, both faces) into FrameResources::waterVis (vis id) and waterDepth (linear view depth, +inf = none).
-void waterLayer(FramePassContext& fc, const Run& r, const ViewResources& view)
+void waterLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& view)
 {
     std::vector<uint32_t> slots;
     const std::vector<TriangleStream>& streams = fc.resources.triangleStreams;
     for (uint32_t slot = 0; slot < (uint32_t)streams.size(); ++slot)
         if (streams[slot].layer == 1 && streams[slot].vertices.valid() && streams[slot].drawArgs.valid() && streams[slot].maxTriangles > 0) slots.push_back(slot);
-    if (slots.empty()) return;
+    // v1.73: W's view-grid ocean (main view): merged into the same layer (COV_OCEAN_ID).
+    const TextureRef oceanDepth = view.viewId == 0 ? fc.resources.oceanDepth : TextureRef{};
+    if (slots.empty() && !oceanDepth.valid()) return;
     RenderGraph& g = fc.graph;
     const uint32_t width = view.view.width, height = view.view.height;
     const TextureRef depthA = view.depth;
@@ -1710,6 +1779,14 @@ void waterLayer(FramePassContext& fc, const Run& r, const ViewResources& view)
     d.depthFunc = D3D12_COMPARISON_FUNC_GREATER;  // reversed Z: in front of band A and of nearer water
     d.cull = D3D12_CULL_MODE_NONE;
     ID3D12PipelineState* pso = fc.shaders.mesh("v.water", d);
+    ID3D12PipelineState* oceanPso = nullptr;
+    if (oceanDepth.valid())
+    {
+        MeshPipelineDesc od = d;
+        od.meshShader = "Passes/Visibility/PlanarFill.ms";  // one triangle over the view
+        od.pixelShader = "Passes/Visibility/OceanLayer.ps";
+        oceanPso = fc.shaders.mesh("v.water.ocean", od);
+    }
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = view.frameConstants;
     const uint32_t viewsSrv = r.viewsSrv;
     std::vector<TriangleStream> drawn;
@@ -1724,6 +1801,7 @@ void waterLayer(FramePassContext& fc, const Run& r, const ViewResources& view)
                       b.use(st.vertices, Use::SrvGraphics);
                       b.use(st.drawArgs, Use::SrvGraphics);
                   }
+                  if (oceanDepth.valid()) b.use(oceanDepth, Use::SrvGraphics);
               },
               [=](PassContext& c) {
                   const D3D12_CPU_DESCRIPTOR_HANDLE rtv[2] = { c.rtv(vis), c.rtv(linear) }, dsv = c.dsv(depth);
@@ -1745,9 +1823,62 @@ void waterLayer(FramePassContext& fc, const Run& r, const ViewResources& view)
                       c.graphicsConstants(kc, 8);
                       c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
                   }
+                  if (oceanPso)
+                  {
+                      const uint32_t kc[4] = { c.srv(oceanDepth), 0, 0, 0 };
+                      c.cmd->SetPipelineState(oceanPso);
+                      c.graphicsConstants(kc, 4);
+                      c.cmd->DispatchMesh(1, 1, 1);
+                  }
               });
-    fc.resources.waterVis = vis;
-    fc.resources.waterDepth = linear;
+    if (oceanDepth.valid())
+    {
+        // Ocean edge pixels for W's subsample pass (OceanEdges.hlsl): capacity 1.5 x the latest need, at least the floor.
+        ViewState& vs = s.views[view.viewId];
+        const std::string statsName = view.viewId == 0 ? std::string("main") : "view" + std::to_string(view.viewId);
+        readStats(fc, s, statsName);
+        uint64_t want = r.cfg.oceanEdgesMin;
+        const auto it = s.stats.find(statsName);
+        if (it != s.stats.end() && it->second.latest.frameIndex != UINT64_MAX) want = std::max<uint64_t>(want, (it->second.latest.oceanEdges * 3ull + 1) / 2);
+        constexpr uint64_t kStep = 1u << 14;
+        want = std::min<uint64_t>((want + kStep - 1) / kStep * kStep, (uint64_t)width * height);
+        if (want > vs.coverage.oceanEdgeCapacity || want * 2 < vs.coverage.oceanEdgeCapacity) vs.coverage.oceanEdgeCapacity = (uint32_t)want;
+        const uint32_t cap = vs.coverage.oceanEdgeCapacity;
+        const BufferRef list = g.createBuffer({ "v.water.oceanEdges", 16 + (uint64_t)cap * 4, 0 });
+        const BufferRef state = r.state;
+        for (uint32_t mode = 0; mode < 2; ++mode)
+        {
+            ID3D12PipelineState* epso = fc.shaders.compute("Passes/Visibility/OceanEdges.MODE" + std::to_string(mode));
+            g.addPass(mode == 0 ? "v.water.oceanEdges" : "v.water.oceanEdges.args", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          if (mode == 0)
+                          {
+                              b.use(vis, Use::SrvCompute);
+                              b.use(linear, Use::SrvCompute);
+                              b.use(depthA, Use::SrvCompute);
+                          }
+                          b.use(list, Use::UavCompute);
+                          b.use(state, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          const uint32_t k[8] = { mode == 0 ? c.srv(vis) : kNone, mode == 0 ? c.srv(linear) : kNone, mode == 0 ? c.srv(depthA) : kNone, c.uav(list),
+                                                  c.uav(state), cap, width, height };
+                          c.cmd->SetPipelineState(epso);
+                          c.bindFrameConstants(frameConstants);
+                          c.computeConstants(k, 8);
+                          if (mode == 0) c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                          else c.cmd->Dispatch(1, 1, 1);
+                      });
+        }
+        view.oceanEdgePixels = list;
+    }
+    view.waterVis = vis;
+    view.waterDepth = linear;
+    if (view.viewId == 0)
+    {
+        fc.resources.waterVis = vis;
+        fc.resources.waterDepth = linear;
+    }
 }
 
 void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)

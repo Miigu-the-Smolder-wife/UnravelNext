@@ -1,0 +1,19 @@
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+note: track entry point W.waterGeometry (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+RayScene: 41 static + 0 dynamic instances (0 deformed), 2 mesh BLAS (960 tris, 0.0 MB compacted from 0.1 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 8 ms (records and mesh BLAS 4.4, proxies 0.0, deformed setup 1.2, static TLAS and records 2.0, first dynamic build 1.0)
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.01, descs+scratch 0.01), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 41 static instances in 5 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+note: track entry point W.water (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+RayScene: 41 static + 0 dynamic instances (0 deformed), 2 mesh BLAS (960 tris, 0.0 MB compacted from 0.1 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 7 ms (records and mesh BLAS 2.5, proxies 0.0, deformed setup 1.3, static TLAS and records 2.1, first dynamic build 0.8)
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.01, descs+scratch 0.01), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 41 static instances in 5 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+    frames 7-11 after the rebase at frame 6: 2682187 covered pixels, 0 differ from the run in the new coordinates
+PASS rebase_is_seamless
+1/1 passed
+GpuLock.ps1: cpu-contended: 3 s >= 4 cores, peak 9.0 cores; top: cl.exe (79416) 8 core-s, unx_study_material_layers.exe (47752) 6 core-s, cl.exe (74576) 4 core-s, cl.exe (36468) 1 core-s background: cpu 9 s >= 4 cores, peak 7.3 cores

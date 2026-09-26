@@ -1,0 +1,8 @@
+V: instance hierarchy: 2 static instances in 2 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+    230400 judged pixels (85122 ocean): 0 wrong vis ids, 0 wrong depths; edge list 6800 entries (args 107, 1, 1), 6800 wanted, 0 missing, 0 extra, 0 duplicate or outside
+PASS ocean_layer_merges_and_lists_edges
+1/1 passed
+GpuLock.ps1: cpu-contended: 2 s >= 4 cores, peak 4.4 cores; top: unx_study_material_layers.exe (47752) 5 core-s, unx_shaderc.exe (14156) 1 core-s, unx_shaderc.exe (30084) 1 core-s, unx_reference.exe (27204) 1 core-s

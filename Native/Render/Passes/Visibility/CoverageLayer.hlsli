@@ -79,9 +79,39 @@
 // CoverageRaster.ms / ps: P[6].x the list drawn (LIST_B, or LIST_T_BACK / LIST_T_NONE), P[6].y 1 = the translucent layer's
 // records (mixed sheet clusters keep their band A triangles, COV_FLAG_TRANSLUCENT), P[7].z translucent class SRV
 // (Texture2D<uint>; read with COV_FLAG_TRANSLUCENT only).
+// CoverageBuild (v1.73): P[6].x special record list UAV (raw, ViewResources::coverageSpecial; UNX_NONE = none), P[6].y
+// its capacity (entries).
+#define COV_SPECIAL P[6].x
+#define COV_SPECIAL_CAP P[6].y
+#define COV_SPECIAL_HAIR 1u     // kinds: a hair record (COV_HAIR_ID)
+#define COV_SPECIAL_STREAM 2u   // a triangle-stream record (COV_STREAM_ID: water edges, fluid surfaces)
+#define COV_SPECIAL_PRESHADE 5u // a cluster record of an M pre-shaded material class (COV_PRESHADE_ID, v1.73)
+#define COV_SPECIAL_HEADER 4u   // header words: count (clamped to the capacity), DispatchIndirect args (64 per group, 1, 1)
+
 #define COV_RASTER_LIST P[6].x
 #define COV_RASTER_TRANSLUCENT (P[6].y != 0)
 #define COV_TRANSLUCENT_CLASS P[7].z
+
+// Public append (v1.73) for coverage producers outside V (W's ocean edges), called from V's coverage append hook
+// (FrameServices::coverageAppend) with the view's ViewResources::coverageState / coverageStream / coverageKeys UAVs,
+// coverageCapacity and coverageTilesX: one fragment at 'pixel' (live lanes), exactly as CoverageRaster.ps stores it -
+// depth is the device depth (reversed Z) at the covered region's centroid, 'mask' the 32 subsamples, 'area' the exact
+// covered fraction, 'normal' the unit world normal on the viewer's side. Call from uniform control flow (wave append).
+void coverageAppend(uint stateUav, uint streamUav, uint keysUav, uint capacity, uint tilesX, bool live, uint2 pixel, uint visId, float depth,
+                    bool seeThrough, uint mask, float3 normal, float area)
+{
+    RWByteAddressBuffer state = ResourceDescriptorHeap[stateUav];
+    const uint slot = waveAppend(state, VS_COV_FRAGMENTS, live ? 1 : 0, capacity, OVERFLOW_COVERAGE);
+    if (live && slot < capacity)
+    {
+        RWStructuredBuffer<uint4> stream = ResourceDescriptorHeap[streamUav];
+        RWByteAddressBuffer keys = ResourceDescriptorHeap[keysUav];
+        const uint tile = (pixel.y / COV_TILE_PX) * tilesX + pixel.x / COV_TILE_PX;
+        const uint pixelInTile = (pixel.x % COV_TILE_PX) + COV_TILE_PX * (pixel.y % COV_TILE_PX);
+        stream[slot] = uint4(visId, asuint(depth) | (seeThrough ? COV_DEPTH_SEE_THROUGH : 0u), mask, coveragePackFragment(normal, area, pixelInTile));
+        keys.Store(4 * slot, tile * COV_TILE_PIXELS + pixelInTile);
+    }
+}
 
 bool coverageTranslucentRecord(uint2 pixel)
 {

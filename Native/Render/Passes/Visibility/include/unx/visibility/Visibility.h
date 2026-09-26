@@ -28,6 +28,8 @@ struct Stats
     uint32_t coverageBlocks = 0;       // blocks of 1,024 records over the listed tiles
     uint32_t coverageHeavyTiles = 0;   // tiles of more than one block
     uint32_t coveragePoolRecords = 0;  // the frame's record capacity
+    uint32_t coverageSpecial = 0;      // special records (hair, streams) listed for their owners' shading (v1.73)
+    uint32_t oceanEdges = 0;           // ocean edge pixels listed for W (v1.73)
     uint32_t coverageMeasured = 0;     // fragments of the raster measurement stages (nothing stored)
     uint32_t coverageInvocations = 0;  // coverage pixel kernel invocations (visibility.coverage_debug_stage != 0 only)
     uint32_t mixedClusters = 0;        // sheet clusters drawn in both rasters, split per triangle (counted in bandClusters[1])
@@ -40,7 +42,7 @@ struct Stats
 };
 
 // Statistics of the latest frame whose readback has completed (frameIndex = UINT64_MAX before the first): "main" for
-// the main view, "secondary" for the last secondary view (planar reflection) of the frame, or a depth-raster
-// request's name (DepthRasterRequest::name) for that request's cull run.
+// the main view, "view<id>" for an auxiliary full view (A14, ViewResources::viewId), "secondary" for the last planar
+// reflection view of the frame, or a depth-raster request's name (DepthRasterRequest::name) for that request's cull run.
 Stats latestStats(render::TrackState& state, const std::string& run = "main");
 } // namespace unx::visibility

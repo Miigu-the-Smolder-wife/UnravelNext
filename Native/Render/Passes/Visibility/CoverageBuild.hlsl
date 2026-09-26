@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: MODE=0,1,2,3,4,5,6,7,8,9
+// unx-variants: MODE=0,1,2,3,4,5,6,7,8,9,10
 // Coverage layer bookkeeping (CoverageLayer.hlsli: root constants and the pass order; layout CoverageTiles.hlsli). The
 // raster appends to a stream; these passes sort it into the tiles' pixel-major ranges and derive the per-pixel products.
 // Every pass does a fixed amount of work per group and takes as many groups as the data needs (INTERFACES 3.6):
@@ -15,7 +15,10 @@
 //   MODE=9 offsets (one group per listed tile): the pixels' starts inside the tile (64-wide prefix); the counters set to
 //          the pixels' absolute ends; the tile's scratch slot initialised.
 //   MODE=8 scatter (one group per COV_BLOCK stream entries): each record to its pixel's range (one decrement per key and
-//          wave; a pixel's records land in no defined order).
+//          wave; a pixel's records land in no defined order); hair and stream records also get an entry in the special
+//          list (v1.73, A's request: their owners shade them before the composite): { final record element, kind }, one
+//          atomic per wave, in no defined order.
+//   MODE=10 (1 thread, after the scatter): the special list's header (count clamped, DispatchIndirect args).
 //   MODE=3 blocks (one group per block of COV_BLOCK records): per pixel the opaque mask union, the farthest opaque depth,
 //          the nearest and farthest depth; a one-block tile finishes here, a longer one merges into its scratch slot.
 //   MODE=5 heavy (one group per tile of more than one block): finishes it from its scratch slot.
@@ -97,7 +100,19 @@ void main()
     const uint stored = min(state.Load(4 * VS_COV_FRAGMENTS), COV_CAP);
     storeDispatch(args, VA_COV_RECORDS, (stored + COV_BLOCK - 1) / COV_BLOCK);
     state.Store(4 * VS_COV_POOL, COV_CAP);
+    state.Store(4 * VS_COV_SPECIAL, 0);
 #endif
+}
+
+#elif MODE == 10
+[numthreads(1, 1, 1)]
+void main()
+{
+    if (COV_SPECIAL == UNX_NONE) return;
+    RWByteAddressBuffer state = ResourceDescriptorHeap[COV_STATE];
+    RWByteAddressBuffer special = ResourceDescriptorHeap[COV_SPECIAL];
+    const uint count = min(state.Load(4 * VS_COV_SPECIAL), COV_SPECIAL_CAP);
+    special.Store4(0, uint4(count, (count + 63) / 64, 1, 1));
 }
 #elif MODE == 1
 [numthreads(64, 1, 1)]
@@ -170,6 +185,7 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
         const bool valid = key != 0xFFFFFFFFu;
         const uint4 samePixel = WaveMatch(key);
         const uint rank = count4(samePixel & below);
+        uint specialElement = 0xFFFFFFFFu;
         if (valid && rank == 0)
         {
             uint end = 0;
@@ -182,8 +198,29 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
             const uint dst = gs_end[waveBase + firstLane4(samePixel)] - 1 - rank;
             if (dst < COV_CAP) records[dst] = stream[e];
             else state.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_ITERATION_LIMIT);  // a defect: counts and stream disagree
+            specialElement = dst;
         }
         GroupMemoryBarrierWithGroupSync();
+        // Special records: hair, stream and pre-shaded cluster ids, by the top two bits of the vis id.
+        if (COV_SPECIAL != UNX_NONE)
+        {
+            const uint top = valid && specialElement < COV_CAP ? stream[e].x >> 30 : 0u;
+            const uint kind = top == 2 ? COV_SPECIAL_HAIR : (top == 3 ? COV_SPECIAL_STREAM : (top == 1 ? COV_SPECIAL_PRESHADE : 0u));
+            const uint n = WaveActiveCountBits(kind != 0), prefix = WavePrefixCountBits(kind != 0);
+            uint base = 0;
+            if (WaveIsFirstLane() && n > 0) state.InterlockedAdd(4 * VS_COV_SPECIAL, n, base);
+            base = WaveReadLaneFirst(base);
+            if (kind != 0)
+            {
+                const uint slot = base + prefix;
+                if (slot < COV_SPECIAL_CAP)
+                {
+                    RWByteAddressBuffer special = ResourceDescriptorHeap[COV_SPECIAL];
+                    special.Store2(4 * (COV_SPECIAL_HEADER + 2 * slot), uint2(specialElement, kind));
+                }
+                else state.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_COVERAGE_SPECIAL);
+            }
+        }
     }
 #endif
 }

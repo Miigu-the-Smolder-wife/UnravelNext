@@ -1,0 +1,25 @@
+note: track entry point W.waterGeometry (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+RayScene: 50 static + 0 dynamic instances (0 deformed), 50 mesh BLAS (6432 tris, 0.2 MB compacted from 0.5 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 9 ms (records and mesh BLAS 5.0, proxies 0.0, deformed setup 1.3, static TLAS and records 2.0, first dynamic build 0.9)
+RayScene resident (MB): static BLAS+TLAS 0.2 (BLAS 0.2, TLAS 0.02, descs+scratch 0.01), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 50 static instances in 3 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+note: track entry point W.water (track disabled in this build) is not implemented yet; it declares no passes (INTERFACES_KO.md 5.2)
+       4 m: wall pixels 1417981, on the event frame fragment pixels 1417981, other 0; coverage changed 2 (all within 1.1e-03 px of the edge: yes), depth max relative difference 9.58e-07; visible clusters 16 -> 16, overflow 0x0
+RayScene: 50 static + 0 dynamic instances (0 deformed), 50 mesh BLAS (6432 tris, 0.2 MB compacted from 0.5 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 7 ms (records and mesh BLAS 3.0, proxies 0.0, deformed setup 1.3, static TLAS and records 2.0, first dynamic build 1.0)
+RayScene resident (MB): static BLAS+TLAS 0.2 (BLAS 0.2, TLAS 0.02, descs+scratch 0.01), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 50 static instances in 3 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+      30 m: wall pixels 23688, on the event frame fragment pixels 23688, other 0; coverage changed 0 (all within 0.0e+00 px of the edge: yes), depth max relative difference 2.09e-07; visible clusters 4 -> 4, overflow 0x0
+PASS fragment_transition_is_exact
+RayScene: 50 static + 0 dynamic instances (0 deformed), 50 mesh BLAS (6432 tris, 0.2 MB compacted from 0.5 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 9 ms (records and mesh BLAS 2.9, proxies 0.0, deformed setup 1.3, static TLAS and records 3.1, first dynamic build 1.3)
+RayScene resident (MB): static BLAS+TLAS 0.2 (BLAS 0.2, TLAS 0.02, descs+scratch 0.01), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 50 static instances in 3 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+    frame 1: fragment pixels (every 2nd) 59056, vis ids not covering their pixel 0, visible clusters 0, overflow 0x0
+    frame 11: fragment pixels (every 2nd) 56213, vis ids not covering their pixel 0, visible clusters 54, overflow 0x0
+PASS fragments_fly_apart
+2/2 passed
+GpuLock.ps1: cpu-contended: 1 s >= 4 cores, peak 4.0 cores; top: unx_study_material_layers.exe (47752) 4 core-s, unx_test_water_foamtests.exe (43084) 0 core-s background: cpu 7 s >= 4 cores, peak 7.8 cores

@@ -61,11 +61,18 @@ struct CoverageFragment  // 16 B
 
 // Strand hair records (B10, V's HairRaster.ms; INTERFACES v1.59): vis id COV_HAIR_ID | the segment's record in
 // FrameResources::hairSegments (E: 2 float4 per segment; its body from FrameResources::hairBodies), the normal bits hold
-// the strand coordinate u (root 0, tip 1) as unorm16; M rebuilds the tangent from p1 - p0. Every other vis id has bit 31
-// clear (VisBuffer.hlsli packVisId stays below 2^31).
+// the strand coordinate u (root 0, tip 1) as unorm16; M rebuilds the tangent from p1 - p0. Cluster vis ids stay below
+// 2^30 (V's visible-list capacity <= 2^23, checked when the settings load), so the top two bits name the record's kind.
+#define COV_PRESHADE_ID 0x40000000u  // top bits 01 (v1.73): a cluster record of an M pre-shaded material class (the list
+                                     // in CoverageRaster.ms: Cut); M shades it before the composite (coverageSpecial kind
+                                     // 5, coverageRecordRadiance). Decode its cluster with coverageClusterVisId.
 #define COV_HAIR_ID 0x80000000u    // top bits 10: hair, segment in bits 0..29
 #define COV_STREAM_ID 0xC0000000u  // top bits 11: GPU triangle stream (v1.60), slot in bits 24..29, triangle in 0..23
+#define COV_OCEAN_SLOT 63u         // v1.73: the stream slot reserved for W's view-grid ocean (FrameResources::oceanDepth)
+#define COV_OCEAN_ID (COV_STREAM_ID | (COV_OCEAN_SLOT << 24))  // its vis id in waterVis and in coverage records
 bool coverageFragmentIsHair(CoverageFragment f) { return (f.visId >> 30) == 2u; }
+// The VisBuffer.hlsli vis id of a cluster record (top bits 00 or 01): clears the pre-shade marker.
+uint coverageClusterVisId(uint visId) { return visId & ~COV_PRESHADE_ID; }
 uint coverageFragmentHairSegment(CoverageFragment f) { return f.visId & 0x3FFFFFFFu; }
 // Stream records (FrameResources::triangleStreams, W): see-through, the normal bits hold the interpolated vertex normal.
 bool coverageFragmentIsStream(CoverageFragment f) { return (f.visId >> 30) == 3u; }

@@ -101,7 +101,9 @@ uint skinSlot(CullScene cs, uint instance)
 #define VS_DEFER_NODES 7u
 #define VS_DEFER_CLUSTERS 8u
 #define VS_LIST_COUNT 9u      // + list (VS_LISTS lists, words 9 .. 16): entries appended so far (both phases)
-                              // words 17 .. 20: unused
+#define VS_COV_SPECIAL 17u    // special coverage records appended by the scatter (may exceed the capacity: the need)
+#define VS_OCEAN_EDGES 18u    // ocean edge pixels listed for W (OceanEdges.hlsl; may exceed the capacity: the need)
+                              // words 19 .. 20: unused
 #define VS_OVERFLOW 21u       // bits: capacity exceeded (OVERFLOW_*)
 #define VS_STAT_INSTANCES 22u // instances that reached the node pass
 #define VS_STAT_NODES 23u     // node items processed
@@ -168,6 +170,8 @@ uint skinSlot(CullScene cs, uint instance)
 #define OVERFLOW_ITERATION_LIMIT 1024u // a data-dependent shader loop reached its hard bound (INTERFACES 3.6)
 #define OVERFLOW_CHUNK_ITEMS 2048u     // visible chunk items past the deferred-item capacity (their instances are lost)
 #define OVERFLOW_DEFER_CHUNKS 4096u    // deferred chunks past the capacity
+#define OVERFLOW_COVERAGE_SPECIAL 8192u // special record list past its capacity (entries lost; the capacity grows)
+#define OVERFLOW_OCEAN_EDGES 16384u    // ocean edge pixel list past its capacity (pixels lost; the capacity grows)
 
 // Wave-aggregated append of 'n' entries per lane to a counter word; returns this lane's first index. Must be called
 // from uniform control flow (every active lane of the wave). Entries at or beyond 'capacity' set 'overflowBit'.
