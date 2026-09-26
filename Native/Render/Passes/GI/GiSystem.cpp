@@ -2,6 +2,7 @@
 
 #include "unx/rt/RayPipeline.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <optional>
@@ -208,6 +209,13 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
 
 GiSystem::~GiSystem()
 {
+    if (m_changeRing)
+    {
+        m_changeRing->Unmap(0, nullptr);
+        m_device.deferRelease(m_changeRing);
+        DescriptorHeaps* dh = &m_device.descriptors();
+        for (uint32_t srv : m_changeSrv) m_device.deferCall([dh, srv] { dh->freeResource(srv); });
+    }
     m_device.deferRelease(m_cache);
     m_device.deferRelease(m_dispatchSignature);
 }
@@ -219,11 +227,10 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     // Lighting epoch: a new scene upload (geometry, materials, lights), new sky constants or a restore discontinuity
     // (snapshot restore, save load: every temporal state resets, world-space caches included; Frame.h) reset every
     // entry's history. A camera cut keeps the cache.
-    if (fc.scene.revision() != m_sceneRevision || (fc.frame.discontinuity & kDiscontinuityRestore) != 0)
-    {
-        m_sceneRevision = fc.scene.revision();
-        ++m_epoch;
-    }
+    // An instance edit (B3: destruction events; the ray scene rebuilt incrementally with the same meshes, materials and
+    // lights) keeps the epoch: GiInvalidate restarts only the entries whose texel rays can see a changed box.
+    if ((fc.frame.discontinuity & kDiscontinuityRestore) != 0 || (fc.scene.revision() != m_sceneRevision && !rays.incrementalRebuild())) ++m_epoch;
+    m_sceneRevision = fc.scene.revision();
     const BufferRef cache = g.importBuffer(m_cache.Get(), { "GI cache", m_bytes, 0 });
     fc.resources.giCache = cache;
     // Probes at the tile corners (design revision 12.3): one more column and row than tiles.
@@ -280,6 +287,67 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     {
         compute("r.gi.det.foldplace", "Passes/GI/GiDetFold", groups(s.tableSlots), {});  // the probe placement's candidates
         compute("r.gi.det.anchors", "Passes/GI/GiDetAnchors", groups(s.capacity), {});  // before any ray leaves an anchor
+    }
+    // Local invalidation (B3): the ray scene's change boxes of this frame (instance edits keep the epoch).
+    if (!rays.changes().empty())
+    {
+        if (!m_changeRing)
+        {
+            D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
+            D3D12_RESOURCE_DESC1 d{};
+            d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            d.Width = (uint64_t)kChangeSlots * kChangeSlotBytes;
+            d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+            d.SampleDesc.Count = 1;
+            d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            check(fc.device.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr,
+                                                           IID_PPV_ARGS(&m_changeRing)),
+                  "GI change boxes");
+            m_changeRing->SetName(L"GI change boxes ring");
+            D3D12_RANGE nothing{ 0, 0 };
+            check(m_changeRing->Map(0, &nothing, reinterpret_cast<void**>(&m_changeMapped)), "map GI change boxes");
+            DescriptorHeaps& dh = fc.device.descriptors();
+            for (uint32_t k = 0; k < kChangeSlots; ++k)
+            {
+                m_changeSrv[k] = dh.allocateResource();
+                D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+                sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                sd.Format = DXGI_FORMAT_R32_TYPELESS;
+                sd.Buffer.FirstElement = k * kChangeSlotBytes / 4;  // slots are 16-byte multiples (raw views need 16 B alignment)
+                sd.Buffer.NumElements = kChangeSlotBytes / 4;
+                sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                fc.device.d3d()->CreateShaderResourceView(m_changeRing.Get(), &sd, dh.resourceCpu(m_changeSrv[k]));
+            }
+        }
+        // Slot of frame % kChangeSlots: that slot's frame has completed (frames in flight <= kChangeSlots). More boxes
+        // than the slot holds: the rest merge into the last one (a larger box invalidates more, never less).
+        static_assert(kChangeSlotBytes % 16 == 0, "raw view offsets");
+        const uint32_t slot = (uint32_t)(fc.frame.frameIndex % kChangeSlots);
+        uint8_t* dst = m_changeMapped + (size_t)slot * kChangeSlotBytes;
+        const auto& changes = rays.changes();
+        const uint32_t count = (uint32_t)std::min<size_t>(changes.size(), kChangeBoxesMax);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            float3 lo = changes[i].first, hi = changes[i].second;
+            if (i == count - 1)
+                for (size_t j = count; j < changes.size(); ++j)
+                {
+                    lo = { std::min(lo.x, changes[j].first.x), std::min(lo.y, changes[j].first.y), std::min(lo.z, changes[j].first.z) };
+                    hi = { std::max(hi.x, changes[j].second.x), std::max(hi.y, changes[j].second.y), std::max(hi.z, changes[j].second.z) };
+                }
+            const float box[8] = { lo.x, lo.y, lo.z, 0, hi.x, hi.y, hi.z, 0 };
+            std::memcpy(dst + 16 + i * 32, box, 32);
+        }
+        std::memcpy(dst, &count, 4);
+        const uint32_t boxesSrv = m_changeSrv[slot];
+        g.addPass("r.gi.invalidate", QueueType::Compute, [&](PassBuilder& b) { b.use(cache, Use::UavCompute); },
+                  [&shaders, cache, boxesSrv, capacity = s.capacity](PassContext& c) {
+                      const uint32_t k[4] = { c.uav(cache), boxesSrv, 0, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiInvalidate"));
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(512, (capacity + 511) / 512, 1);
+                  });
     }
     compute("r.gi.carry", "Passes/GI/GiCarry", groups(s.capacity), {});
     compute("r.gi.age", "Passes/GI/GiAgeHistogram", (s.capacity + 127) / 128, {});
@@ -525,6 +593,7 @@ GiStats GiSystem::readStats()
     st.tableFull = h[34];
     st.evicted = h[35];
     st.resets = h[36];
+    st.epoch = h[18];  // GI_H_EPOCH
     st.hitLookups = h[38];  // GI_H_STAT_HIT_LOOKUPS
     st.hitMisses = h[39];
     st.gSamples = h[48];  // GI_H_STAT_G_SAMPLES

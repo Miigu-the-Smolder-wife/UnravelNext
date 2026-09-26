@@ -125,9 +125,13 @@ void RayScene::upload(Buffer& target, const void* data, uint64_t bytes)
     check(staging->Map(0, &none, &mapped), "map RayScene staging");
     std::memcpy(mapped, data, (size_t)bytes);
     staging->Unmap(0, nullptr);
+    // No CPU wait (B3: each upload's wait added up to milliseconds per rebuild): later work on the graphics queue runs
+    // after the copy, and the constructor's last build waits for the queue before the object is used; the staging buffer
+    // is released when the GPU is done with it.
     CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
     cl.list->CopyBufferRegion(target.resource.Get(), 0, staging.Get(), 0, bytes);
-    m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(cl));
+    m_device.submit(cl);
+    m_device.deferRelease(staging);
 }
 
 RayScene::Buffer RayScene::createStructured(const void* data, uint32_t stride, uint32_t count, const wchar_t* name)
@@ -324,14 +328,21 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     for (uint32_t i : dynamicRigid) m_meshBlas[instances[i].mesh].geometryBase = geometryBase(instances[i].mesh);
     m_meshRecords = meshes;
     m_materialRecords = scene.materials();
+    m_lightRecords = scene.lights();
     m_instanceRecords = instances;
     for (uint32_t m = 0; m < (uint32_t)meshes.size(); ++m) m_meshBlas[m].alphaMask = alphaMaskOf(m);
+    m_proxyCache.assign(meshes.size(), {});
     if (previous)
     {
+        for (uint32_t m = 0; m < (uint32_t)std::min(meshes.size(), previous->m_meshRecords.size()); ++m)
+            if (m < previous->m_proxyCache.size() && std::memcmp(&previous->m_meshRecords[m], &meshes[m], sizeof(gpu::Mesh)) == 0)
+                m_proxyCache[m] = std::move(previous->m_proxyCache[m]);
         // B3: inherit the previous object's BLAS of every mesh whose record and alpha layout are unchanged.
         m_incremental = true;
         m_materialsChanged = previous->m_materialRecords.size() != m_materialRecords.size() ||
                              (m_materialRecords.size() && std::memcmp(previous->m_materialRecords.data(), m_materialRecords.data(), m_materialRecords.size() * sizeof(gpu::Material)) != 0);
+        m_lightsChanged = previous->m_lightRecords.size() != m_lightRecords.size() ||
+                          (m_lightRecords.size() && std::memcmp(previous->m_lightRecords.data(), m_lightRecords.data(), m_lightRecords.size() * sizeof(gpu::Light)) != 0);
         for (uint32_t m = 0; m < (uint32_t)std::min(meshes.size(), previous->m_meshRecords.size()); ++m)
         {
             const MeshBlas& old = previous->m_meshBlas[m];
@@ -358,6 +369,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         }
     }
     buildMeshBlas();
+    const auto tMeshBlas = std::chrono::steady_clock::now();
 
     auto transformOf = [&](const gpu::Instance& in, D3D12_RAYTRACING_INSTANCE_DESC& d) {
         for (int r = 0; r < 3; ++r)
@@ -415,6 +427,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         m_deformed.push_back(std::move(d));
     }
     m_stats.deformedVertices = vertexBase;
+    const auto tProxies = std::chrono::steady_clock::now();
     // Reflection exact set slots after the proxies in the deformed pool (ARCHITECTURE 2.6).
     m_exactMinHits = (uint32_t)quality.integer("raytracing.exact_set_min_hits");
     {
@@ -434,6 +447,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     m_indexPool = createStructured(m_indexPoolData.data(), sizeof(uint32_t), (uint32_t)m_indexPoolData.size(), L"RT proxy indices");
     m_vertexMap = createStructured(m_vertexMapData.data(), sizeof(uint32_t), (uint32_t)m_vertexMapData.size(), L"RT vertex map");
     buildDeformed();
+    const auto tDeformed = std::chrono::steady_clock::now();
     for (size_t k = 0; k < m_deformed.size(); ++k)
     {
         Deformed& d = m_deformed[k];
@@ -535,6 +549,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         check(m_descRing->Map(0, &none, reinterpret_cast<void**>(&m_descRingMapped)), "map RT descriptor ring");
     }
     // Dynamic TLAS and deformed BLASes: first full build at load.
+    const auto tRecords = std::chrono::steady_clock::now();
     {
         CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
         gpu::FrameConstants fcData{};
@@ -543,18 +558,25 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         upload(constants, &fcData, sizeof fcData);
         cl.list->SetComputeRootConstantBufferView(1, constants.address());
         updateDynamic(cl.list.Get(), false);
-        m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(cl));
+        // No CPU wait (B3: rebuilds at scene edits must not stall the frame): the other queues wait on the GPU for this
+        // build and the uploads before it (graphics queue order), so every later frame's work sees them.
+        const uint64_t fence = m_device.submit(cl);
+        for (uint32_t q = 0; q < kQueueTypeCount; ++q)
+            if (q != (uint32_t)QueueType::Graphics) m_device.queue((QueueType)q).waitGpu(m_device.queue(QueueType::Graphics), fence);
         release(constants);
     }
     m_tlasStaticSrv = tlasSrv(m_tlasStatic.address());
     m_tlasDynamicSrv = tlasSrv(m_tlasDynamic.address());
-    m_stats.loadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const auto tEnd = std::chrono::steady_clock::now();
+    m_stats.loadMs = std::chrono::duration<double, std::milli>(tEnd - t0).count();
+    auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
     logf("RayScene: %u static + %u dynamic instances (%u deformed), %u mesh BLAS (%llu tris, %.1f MB compacted from %.1f MB), deformed %llu tris / %llu verts "
-         "(%u above proxy budget), TLAS static %.1f MB dynamic %.2f MB, load %.0f ms\n",
+         "(%u above proxy budget), TLAS static %.1f MB dynamic %.2f MB, load %.0f ms (records and mesh BLAS %.1f, proxies %.1f, deformed setup %.1f, "
+         "static TLAS and records %.1f, first dynamic build %.1f)\n",
          m_stats.staticInstances, m_stats.dynamicInstances, m_stats.deformedInstances, m_stats.meshBlas, (unsigned long long)m_stats.meshBlasTriangles,
          m_stats.meshBlasBytes / 1048576.0, m_stats.meshBlasBytesBeforeCompaction / 1048576.0, (unsigned long long)m_stats.deformedTriangles,
          (unsigned long long)m_stats.deformedVertices, m_stats.deformedAboveProxyBudget, m_stats.tlasStaticBytes / 1048576.0, m_stats.tlasDynamicBytes / 1048576.0,
-         m_stats.loadMs);
+         m_stats.loadMs, ms(t0, tMeshBlas), ms(tMeshBlas, tProxies), ms(tProxies, tDeformed), ms(tDeformed, tRecords), ms(tRecords, tEnd));
     {
         // Resident video memory by use (the buffers this object keeps; upload rings are in system memory).
         auto mb = [](std::initializer_list<const Buffer*> list) {
@@ -713,7 +735,7 @@ void RayScene::buildMeshBlas()
         m_meshBlas[builds[k].mesh].address = m_meshBlasPool.address() + compactOffset[k];
         m_meshBlas[builds[k].mesh].built = true;
     }
-    m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(copy));
+    m_device.submit(copy);  // later graphics work is ordered after it; the build pool below is released when the GPU is done
     m_stats.meshBlasBytes = compactBytes;
     release(buildPool);
     release(scratch);
@@ -726,13 +748,32 @@ const std::vector<RayScene::ProxyMesh>& RayScene::proxyLevels(uint32_t mesh)
     if (m_proxyLevelsBuilt[mesh]) return levels;
     m_proxyLevelsBuilt[mesh] = 1;
     if (m_proxySkeletons.size() < m_proxyLevels.size()) m_proxySkeletons.resize(m_proxyLevels.size());
+    ProxyCache& cache = m_proxyCache[mesh];
+    if (cache.valid)
+    {
+        m_proxySkeletons[mesh] = cache.skeleton;
+        for (const ProxyRecipe& r : cache.levels)
+        {
+            ProxyMesh p = buildProxyFromLists(mesh, r.lists, r.reduced, &r.pose);
+            p.error = r.error;
+            levels.push_back(std::move(p));
+        }
+        return levels;
+    }
     m_proxySkeletons[mesh] = proxyPoseSkeleton(m_scene.source()->meshes[mesh]);
+    cache.skeleton = m_proxySkeletons[mesh];
+    cache.valid = true;
+    auto record = [&](const std::vector<std::vector<uint32_t>>& lists, const ProxyMesh& p) { cache.levels.push_back({ lists, p.reduced, p.error, p.pose }); };
     // Skinned meshes: R's skin-aware cuts (ProxyPoseBound.h) unless raytracing.skinned_proxy_cuts = "cluster_lod".
     if (m_skinAwareCuts)
     {
         const scene::Mesh& sm = m_scene.source()->meshes[mesh];
         const auto cuts = skinAwareCuts(sm, m_proxySkeletons[mesh], m_proxyBudget, m_proxySkinWeight);
-        for (size_t l = 0; l < cuts.size(); ++l) levels.push_back(buildProxyFromLists(mesh, cuts[l], !(l == 0 && sm.indices.size() / 3 <= m_proxyBudget)));
+        for (size_t l = 0; l < cuts.size(); ++l)
+        {
+            levels.push_back(buildProxyFromLists(mesh, cuts[l], !(l == 0 && sm.indices.size() / 3 <= m_proxyBudget)));
+            record(cuts[l], levels.back());
+        }
         if (!levels.empty()) return levels;
     }
     const ClusterData& cd = m_scene.clusters();
@@ -740,16 +781,29 @@ const std::vector<RayScene::ProxyMesh>& RayScene::proxyLevels(uint32_t mesh)
     {
         const auto& range = cd.meshes[mesh];
         // Levels run finest to coarsest: every cut within the budget, else the coarsest alone.
+        std::vector<std::vector<uint32_t>> lists;
         for (uint32_t l = range.lodLevelOffset; l < range.lodLevelOffset + range.lodLevelCount; ++l)
-            if (cd.lodLevels[l].triangleCount <= m_proxyBudget) levels.push_back(buildProxy(mesh, l));
-        if (levels.empty()) levels.push_back(buildProxy(mesh, range.lodLevelOffset + range.lodLevelCount - 1));
+            if (cd.lodLevels[l].triangleCount <= m_proxyBudget)
+            {
+                levels.push_back(buildProxy(mesh, l, &lists));
+                record(lists, levels.back());
+            }
+        if (levels.empty())
+        {
+            levels.push_back(buildProxy(mesh, range.lodLevelOffset + range.lodLevelCount - 1, &lists));
+            record(lists, levels.back());
+        }
     }
     else
-        levels.push_back(buildProxy(mesh, gpu::kNone));
+    {
+        std::vector<std::vector<uint32_t>> lists;
+        levels.push_back(buildProxy(mesh, gpu::kNone, &lists));
+        record(lists, levels.back());
+    }
     return levels;
 }
 
-RayScene::ProxyMesh RayScene::buildProxy(uint32_t mesh, uint32_t lodLevel)
+RayScene::ProxyMesh RayScene::buildProxy(uint32_t mesh, uint32_t lodLevel, std::vector<std::vector<uint32_t>>* listsOut)
 {
     const scene::Mesh& sm = m_scene.source()->meshes[mesh];
     const ClusterData& cd = m_scene.clusters();
@@ -777,12 +831,13 @@ RayScene::ProxyMesh RayScene::buildProxy(uint32_t mesh, uint32_t lodLevel)
             perSubmesh[s].assign(sm.indices.begin() + sm.submeshes[s].indexOffset, sm.indices.begin() + sm.submeshes[s].indexOffset + sm.submeshes[s].indexCount);
     ProxyMesh p = buildProxyFromLists(mesh, perSubmesh, reduced);
     if (lodLevel != gpu::kNone) p.error = cd.lodLevels[lodLevel].error;
+    if (listsOut) *listsOut = std::move(perSubmesh);
     return p;
 }
 
 // A proxy from per-submesh triangle lists (mesh vertex indices); 'reduced' = not the source mesh. Its error is the
 // measured bind-pose Hausdorff distance (ProxyPoseCoefficients::bindError), its pose terms bound it in any pose.
-RayScene::ProxyMesh RayScene::buildProxyFromLists(uint32_t mesh, const std::vector<std::vector<uint32_t>>& perSubmesh, bool reduced)
+RayScene::ProxyMesh RayScene::buildProxyFromLists(uint32_t mesh, const std::vector<std::vector<uint32_t>>& perSubmesh, bool reduced, const ProxyPoseCoefficients* pose)
 {
     ProxyMesh p;
     p.reduced = reduced;
@@ -809,9 +864,14 @@ RayScene::ProxyMesh RayScene::buildProxyFromLists(uint32_t mesh, const std::vect
     p.vertexCount = (uint32_t)(m_vertexMapData.size() - p.vertexMap);
     if (p.reduced)
     {
-        std::vector<uint32_t> cut;
-        for (const std::vector<uint32_t>& list : perSubmesh) cut.insert(cut.end(), list.begin(), list.end());
-        p.pose = proxyPoseCoefficients(sm, m_proxySkeletons[mesh], cut);
+        if (pose)
+            p.pose = *pose;  // cached (ProxyCache)
+        else
+        {
+            std::vector<uint32_t> cut;
+            for (const std::vector<uint32_t>& list : perSubmesh) cut.insert(cut.end(), list.begin(), list.end());
+            p.pose = proxyPoseCoefficients(sm, m_proxySkeletons[mesh], cut);
+        }
         p.error = p.pose.bindError;
     }
     return p;

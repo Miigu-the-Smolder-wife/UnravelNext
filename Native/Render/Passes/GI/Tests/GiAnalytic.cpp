@@ -283,6 +283,36 @@ scene::Scene emissivePanel(float radiance)
     return s;
 }
 
+// The open sky scene with a second mesh, a black 2 m cube (centre at the origin), that no instance uses at upload: the
+// instance edit test appends one (B3).
+scene::Scene openSkyWithCube(float albedo)
+{
+    scene::Scene s = openSky(albedo);
+    scene::Material black;
+    black.name = "black";
+    black.baseColor = { 0, 0, 0 };
+    s.materials.push_back(black);
+    scene::Mesh cube;
+    cube.name = "cube";
+    const float3 axes[3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+    for (int a = 0; a < 3; ++a)
+        for (float sign : { -1.0f, 1.0f })
+        {
+            const float3 n = axes[a] * sign, u = axes[(a + 1) % 3], v = axes[(a + 2) % 3] * sign;
+            const uint32_t base = (uint32_t)cube.positions.size();
+            for (auto [x, y] : { std::pair{ -1.f, -1.f }, { 1.f, -1.f }, { 1.f, 1.f }, { -1.f, 1.f } })
+            {
+                cube.positions.push_back(n + u * x + v * y);
+                cube.normals.push_back(n);
+                cube.uv0.push_back({ x, y });
+            }
+            cube.indices.insert(cube.indices.end(), { base, base + 1, base + 2, base, base + 2, base + 3 });
+        }
+    cube.submeshes.push_back({ 0, 36, 1 });
+    s.meshes.push_back(cube);
+    return s;
+}
+
 double viewFactor(float3 p, float3 n, const std::vector<float3>& polygon)
 {
     double sum = 0;
@@ -331,13 +361,15 @@ struct Outcome
     gi::GiStats stats;
     uint32_t tilePixels = 0, tileMismatches = 0;  // screenProbeGatherTile vs screenProbeGather (ProbeTileCompare), all frames
     std::vector<float> values;                    // the last frame's probe evaluations (GiTestEval), for determinism checks
+    std::vector<uint32_t> resetsPerFrame;         // with an edit hook: each frame's entries updated from a reset history
+    std::vector<uint32_t> epochPerFrame;          // with an edit hook: each frame's lighting epoch
 };
 
 // expected(position, normal): the analytic irradiance at a probe, < 0 to leave the probe out. expectedRadiance <= 0: the K
 // radiance is not checked (not uniform).
 Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky, float3 sun,
             const std::function<double(float3, float3)>& expected, double expectedRadiance, uint32_t frames, uint32_t width, uint32_t height,
-            float skyBand = 1, float lobeAlpha = 0)
+            float skyBand = 1, float lobeAlpha = 0, const std::function<void(uint32_t, GpuScene&)>& edit = {})
 {
     GpuScene gpuScene(device);
     gpuScene.upload(s);
@@ -361,6 +393,7 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
 
         for (uint32_t f = 0; f < frames; ++f)
         {
+            if (edit) edit(f, gpuScene);  // scene edits between frames (GpuScene::setInstances, as a host does)
             FrameContext frame;
             frame.frameIndex = f;
             frame.time = f / 60.0;
@@ -494,6 +527,12 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             check(readback.resource->Map(0, &all, &rb), "map result");
             std::memcpy(values.data(), rb, values.size() * 4);
             readback.resource->Unmap(0, &none);
+            if (edit && giSystem)
+            {
+                const gi::GiStats st = giSystem->readStats();
+                out.resetsPerFrame.push_back(st.resets);
+                out.epochPerFrame.push_back(st.epoch);
+            }
 
             double sum = 0, esum = 0, lo = 1e30, hi = -1e30, worst = 0, rsum = 0, rworst = 0;
             uint32_t n = 0;
@@ -646,6 +685,71 @@ int main(int argc, char** argv)
         logf("open sky: %u probes, mean %+.3f %%, worst probe %.3f %%, within 1 %% from frame %d; K radiance worst %.3f %% -> %s\n", b.probes, 100 * (b.mean / kPi - 1),
              100 * b.worst, b.converged, 100 * b.radianceWorst, okB ? "PASS" : "FAIL");
         pass = pass && okB;
+        {
+            // Instance edit (B3): after the cache converged under the open sky, a black 2 m cube appears as a new instance
+            // of a mesh already uploaded (a destruction fragment's path: GpuScene::setInstances, an incremental ray scene).
+            // The epoch stays; GiInvalidate restarts the entries whose texel rays can see the cube's box. Expected ground
+            // irradiance: pi L (1 - F), F = the view factor of the cube faces the point sees (Lambert per face).
+            scene::Scene cubeScene = openSkyWithCube(0.5f);
+            const float3 centre{ 5, 1, -14 };
+            const uint32_t editFrame = frames / 2;
+            auto edit = [&](uint32_t f, GpuScene& gs) {
+                if (f != editFrame) return;
+                scene::Instance cube;
+                cube.mesh = 1;
+                cube.transform.m[0][3] = centre.x;
+                cube.transform.m[1][3] = centre.y;
+                cube.transform.m[2][3] = centre.z;
+                cubeScene.instances.push_back(cube);
+                const uint32_t added[1] = { (uint32_t)cubeScene.instances.size() - 1 };
+                gs.setInstances(added);
+            };
+            auto withCube = [&](float3 p, float3 n) -> double {
+                if (n.y < 0.99f || std::fabs(p.y) > 0.05f) return -1;  // ground probes only
+                // Within 0.5 m of the cube (about 4 cache cells there): the irradiance falls faster at the contact than the
+                // cells resolve; contact occlusion is the screen's near occlusion (M), not the cache's.
+                if (std::fabs(p.x - centre.x) < 1.5f && std::fabs(p.z - centre.z) < 1.5f) return -1;
+                double f = 0;
+                const float3 axes[3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+                for (int a = 0; a < 3; ++a)
+                    for (float sign : { -1.0f, 1.0f })
+                    {
+                        const float3 fn = axes[a] * sign, u = axes[(a + 1) % 3], v = axes[(a + 2) % 3];
+                        const float3 fc = centre + fn;
+                        if (dot(fn, p - fc) <= 0) continue;  // a face the point does not see
+                        f += viewFactor(p, { 0, 1, 0 }, { fc - u - v, fc + u - v, fc + u + v, fc - u + v });
+                    }
+                return kPi * (1 - f);
+            };
+            const Outcome e = run(device, shaders, quality, cubeScene, { 1, 1, 1 }, { 0, 0, 0 }, withCube, -1, frames, 1920, 1080, 1, 0, edit);
+            uint32_t afterSum = 0, steadyBefore = 0;  // entries updated from a reset history, 8 frames each side of the edit
+            for (uint32_t f = editFrame; f < e.resetsPerFrame.size() && f < editFrame + 8; ++f) afterSum += e.resetsPerFrame[f];
+            for (uint32_t f = editFrame >= 8 ? editFrame - 8 : 0; f < editFrame; ++f) steadyBefore += e.resetsPerFrame[f];
+            const bool sameEpoch = e.epochPerFrame.size() == frames && e.epochPerFrame[editFrame - 1] == e.epochPerFrame.back();
+            // Control: the same cube there from the first frame (the cache's own resolution near the cube); the edited
+            // run must match it (invalidation leaves no stale entry), both against the analytic answer.
+            scene::Scene controlScene = openSkyWithCube(0.5f);
+            {
+                scene::Instance cube;
+                cube.mesh = 1;
+                cube.transform.m[0][3] = centre.x;
+                cube.transform.m[1][3] = centre.y;
+                cube.transform.m[2][3] = centre.z;
+                controlScene.instances.push_back(cube);
+            }
+            const Outcome k = run(device, shaders, quality, controlScene, { 1, 1, 1 }, { 0, 0, 0 }, withCube, -1, frames - editFrame, 1920, 1080);
+            logf("  control (the cube from the first frame, %u frames): mean E %.5f against %.5f (%+.3f %%), worst %.3f %%, P99 %.3f %%\n", frames - editFrame,
+                 k.mapMean, k.mapExpectedMean, 100 * (k.mapMean / k.mapExpectedMean - 1), 100 * k.mapWorst, 100 * k.mapP99);
+            const bool okE = e.mapProbes > 1000 && std::fabs(e.mapMean / e.mapExpectedMean - 1) < 0.01 && e.mapP99 < k.mapP99 + 0.005 &&
+                             e.mapWorst < k.mapWorst + 0.005 && afterSum > steadyBefore && sameEpoch;
+            logf("instance edit (B3): a cube appended after %u frames; epoch %s; resets in the 8 frames before %u, after %u (live entries %u); "
+                 "ground under the cube's shadow of sky: cache maps at %u probe points, mean E %.5f against %.5f (%+.3f %%), worst %.3f %% -> %s\n",
+                 editFrame, sameEpoch ? "kept" : "CHANGED", steadyBefore, afterSum, e.stats.live, e.mapProbes, e.mapMean, e.mapExpectedMean, 100 * (e.mapMean / e.mapExpectedMean - 1),
+                 100 * e.mapWorst, okE ? "PASS" : "FAIL");
+            logf("  P99 %.3f %%; worst at (%.3f, %.3f, %.3f): %.5f against %.5f\n", 100 * e.mapP99, e.mapWorstAt.x, e.mapWorstAt.y, e.mapWorstAt.z,
+                 e.mapWorstValue, e.mapWorstExpected);
+            pass = pass && okE;
+        }
         {
             const float groundAlbedo = 0.5f;
             const float3 l = normalize(float3{ 1, 1.2f, 0.4f });

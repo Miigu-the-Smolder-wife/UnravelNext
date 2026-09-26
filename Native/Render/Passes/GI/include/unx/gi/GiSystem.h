@@ -27,6 +27,7 @@ struct GiStats  // header counters of the last completed frame (tests, diagnosti
 {
     uint32_t live = 0, free = 0, requested = 0, selected = 0, background = 0, hits = 0;
     uint32_t created = 0, allocationFailures = 0, tableFull = 0, evicted = 0, resets = 0;
+    uint32_t epoch = 0;  // the lighting epoch (a whole-cache restart increments it)
     uint32_t hitLookups = 0, hitMisses = 0;  // reflection hits' cache lookups and those with no data at any level
     uint32_t gSamples = 0, gRatio = 0;       // reflection G samples, and those estimated by the ratio branch (reflLobeEstimate)
     uint32_t gHistogram[9] = {};             // G samples by log2(mean L / mean g), bins [-4, 5)
@@ -79,5 +80,10 @@ private:
     float3 m_skyRadiance{}, m_sunIlluminance{};
     float m_skyBand = 1;
     uint32_t m_epoch = 1, m_sceneRevision = 0;
+    // Change boxes for GiInvalidate (B3): a mapped upload ring, one slot per frame of kChangeSlots, raw SRVs.
+    static constexpr uint32_t kChangeSlots = 4, kChangeBoxesMax = 256, kChangeSlotBytes = 16 + kChangeBoxesMax * 32 + 240;
+    ComPtr<ID3D12Resource> m_changeRing;
+    uint8_t* m_changeMapped = nullptr;
+    uint32_t m_changeSrv[kChangeSlots] = {};
 };
 } // namespace unx::render::gi

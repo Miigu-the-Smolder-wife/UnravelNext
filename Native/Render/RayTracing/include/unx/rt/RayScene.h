@@ -113,7 +113,7 @@ public:
     // world AABBs of the geometry that changed (instances added, removed, re-meshed, hidden or moved while static) at
     // this build or in this frame's record. GI invalidates the cache entries whose texel rays cross them instead of a new
     // lighting epoch.
-    bool incrementalRebuild() const { return m_incremental && !m_materialsChanged; }
+    bool incrementalRebuild() const { return m_incremental && !m_materialsChanged && !m_lightsChanged; }
     const std::vector<std::pair<float3, float3>>& changes() const { return m_changes; }
     uint32_t sceneRevision() const { return m_sceneRevision; }
 
@@ -209,8 +209,9 @@ private:
     std::vector<Buffer> m_inheritedPools;
     std::vector<gpu::Mesh> m_meshRecords;          // the meshes this object's BLASes were built from
     std::vector<gpu::Material> m_materialRecords;  // the materials (a change: GI's lighting epoch)
+    std::vector<gpu::Light> m_lightRecords;        // the lights (a change: GI's lighting epoch)
     std::vector<gpu::Instance> m_instanceRecords;  // the instances at build (change bounds of the next rebuild)
-    bool m_incremental = false, m_materialsChanged = false;
+    bool m_incremental = false, m_materialsChanged = false, m_lightsChanged = false;
     std::vector<std::pair<float3, float3>> m_changes;       // world AABBs whose geometry changed at this build or this frame
     std::vector<std::pair<float3, float3>> m_buildChanges;  // this build's, handed to the first record
     uint32_t alphaMaskOf(uint32_t mesh) const;
@@ -229,8 +230,25 @@ private:
         std::vector<uint32_t> submesh;
     };
     const std::vector<ProxyMesh>& proxyLevels(uint32_t mesh);
-    ProxyMesh buildProxy(uint32_t mesh, uint32_t lodLevel);  // lodLevel = kNone: the full mesh
-    ProxyMesh buildProxyFromLists(uint32_t mesh, const std::vector<std::vector<uint32_t>>& perSubmesh, bool reduced);
+    ProxyMesh buildProxy(uint32_t mesh, uint32_t lodLevel, std::vector<std::vector<uint32_t>>* listsOut = nullptr);  // lodLevel = kNone: the full mesh
+    ProxyMesh buildProxyFromLists(uint32_t mesh, const std::vector<std::vector<uint32_t>>& perSubmesh, bool reduced, const ProxyPoseCoefficients* pose = nullptr);
+    // The CPU work of a mesh's proxy levels (skin-aware or LOD cuts, pose coefficients): cached per mesh and carried into
+    // an incremental rebuild for meshes whose record is unchanged (B3: a destruction event rebuilt every character's
+    // cuts, ~55 ms [measured]); the pools and geometry records are rebuilt from it, which is cheap.
+    struct ProxyRecipe
+    {
+        std::vector<std::vector<uint32_t>> lists;  // per submesh, mesh vertex indices
+        bool reduced = false;
+        float error = 0;
+        ProxyPoseCoefficients pose;
+    };
+    struct ProxyCache
+    {
+        bool valid = false;
+        ProxyPoseSkeleton skeleton;
+        std::vector<ProxyRecipe> levels;
+    };
+    std::vector<ProxyCache> m_proxyCache;  // per scene mesh
     std::vector<std::vector<ProxyMesh>> m_proxyLevels;      // per scene mesh (built on demand)
     std::vector<ProxyPoseSkeleton> m_proxySkeletons;        // per scene mesh: joint centres, reference joint
     ProxyPoseTerms m_poseTerms;                             // scratch: this frame's palette terms of one instance
