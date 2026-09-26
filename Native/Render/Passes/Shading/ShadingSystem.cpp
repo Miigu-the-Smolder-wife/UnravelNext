@@ -1,4 +1,5 @@
 #include "unx/shading/ShadingSystem.h"
+#include "unx/shading/DepthOfField.h"
 #include "unx/shading/Exposure.h"
 #include "unx/shading/MotionBlur.h"
 #include "unx/shading/Post.h"
@@ -178,6 +179,7 @@ struct StatsRing
     uint32_t tiles[kSlots] = {};
     bool coverage[kSlots] = {};  // the frame ran the coverage composite (its error word at byte 20 is this frame's)
     bool glass[kSlots] = {};     // the frame ran the glass composite (its counts at bytes 24..35 are this frame's)
+    bool dof[kSlots] = {};       // the frame ran the depth of field (its counts at bytes 36..43 are this frame's)
     uint64_t last = UINT64_MAX;
     ~StatsRing()
     {
@@ -228,6 +230,7 @@ Stats latestStats(TrackState& state)
     st.edgePixels = w[4];
     st.coverageErrors = ring.coverage[slot] ? w[5] : 0;
     if (ring.glass[slot]) st.glassPanePixels = w[6], st.glassSolidPixels = w[7], st.glassUnlitPixels = w[8];
+    if (ring.dof[slot]) st.dofPixels = w[9], st.dofClampedPixels = w[10];
     st.tiles = ring.tiles[slot];
     return st;
 }
@@ -610,6 +613,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         ring.tiles[slot] = tileCount;
         ring.coverage[slot] = coverage;
         ring.glass[slot] = false;  // (set again by the glass composite when it runs)
+        ring.dof[slot] = false;    // (and by the depth of field)
         ring.last = fc.frame.frameIndex;
         ID3D12Resource* dst = ring.buffer.Get();
         const BufferRef classArgs = o.tileArgs;
@@ -961,13 +965,14 @@ void shade(FramePassContext& fc, ViewResources& view)
     // Motion blur (the shutter's time integral) reads the shaded image around each pixel: with it the view is shaded into
     // a float target first, then blurred into the chain's input (display) or into the linear capture itself.
     // Heat haze re-reads it at displaced points too (before the exposure integral: the haze bends what the lens sees).
+    // Depth of field (the lens's aperture integral) follows the time integral (FEATURES_GAME 4: time, then lens).
     const bool post = postActive(fc, view);
-    const bool blur = motionBlurActive(fc, view), haze = distortionActive(fc, view);
+    const bool blur = motionBlurActive(fc, view), haze = distortionActive(fc, view), dof = depthOfFieldActive(fc, view);
     const DXGI_FORMAT floatFormat = post ? DXGI_FORMAT_R16G16B16A16_FLOAT : fc.graph.desc(view.color).format;
     auto intermediate = [&](const char* name) { return fc.graph.createTexture(TextureDesc{ name, view.view.width, view.view.height, 1, 1, floatFormat }); };
     ViewResources target = view;
     if (post) target.color = postTarget(fc, view);
-    else if (blur || haze) target.color = intermediate("m.shaded");
+    else if (blur || haze || dof) target.color = intermediate("m.shaded");
     const std::vector<RenderGraph::BandedPass> passes = shadingPasses(fc, target);
     const material::ResolveOutputs& o = material::resolveOutputs(fc, target);
     fc.graph.addBandedGroup(view.view.kind != gpu::ViewKind::Main ? "m.lit.planar" : "m.lit", o.height, o.bands, passes);
@@ -977,15 +982,35 @@ void shade(FramePassContext& fc, ViewResources& view)
     TextureRef image = target.color;
     if (haze)
     {
-        const TextureRef displaced = (blur || post) ? intermediate("m.distorted") : view.color;
+        const TextureRef displaced = (blur || dof || post) ? intermediate("m.distorted") : view.color;
         distortion(fc, view, image, displaced);
         image = displaced;
     }
     if (blur)
     {
-        const TextureRef blurred = post ? postTarget(fc, view) : view.color;
+        const TextureRef blurred = dof ? intermediate("m.blurred") : post ? postTarget(fc, view) : view.color;
         motionBlur(fc, view, image, blurred);
         image = blurred;
+    }
+    if (dof)
+    {
+        const TextureRef focused = post ? postTarget(fc, view) : view.color;
+        const BufferRef stats = depthOfField(fc, view, image, focused);
+        image = focused;
+        if (fc.trackState)
+        {
+            StatsRing& ring = fc.state<StatsRing>("M.statsRing");
+            ring.ensure(fc.device);
+            ID3D12Resource* dst = ring.buffer.Get();
+            const uint32_t slot = (uint32_t)(fc.frame.frameIndex % StatsRing::kSlots);
+            ring.dof[slot] = true;
+            fc.graph.addPass("m.dof.stats", QueueType::Graphics,
+                             [&](PassBuilder& b) {
+                                 b.use(stats, Use::CopySrc);
+                                 b.keep();
+                             },
+                             [dst, slot, stats](PassContext& c) { c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 36, c.resource(stats), 0, 8); });
+        }
     }
     if (post) postChain(fc, view, image);
 }

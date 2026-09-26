@@ -34,6 +34,9 @@ struct Stats
     // A10 glass over the translucent layer (TranslucentComposite.hlsl, class 1 pixels): panes composited, solid glass
     // drawn without refraction (until R's refraction rays), pixels whose sun visibility had no resident VSM page (lit).
     uint32_t glassPanePixels = 0, glassSolidPixels = 0, glassUnlitPixels = 0;
+    // A5 depth of field (DepthOfField.cpp): pixels gathered (a blurred source reaches them), pixels whose circle of
+    // confusion was clamped to the 512 px radius bound.
+    uint32_t dofPixels = 0, dofClampedPixels = 0;
 };
 Stats latestStats(TrackState& state);
 } // namespace unx::render::shading

@@ -18,7 +18,14 @@
 //   7. motion blur's rotation stage (MotionRotation.hlsl) for a yaw of 0.2 rad per frame (a 31 px streak at the centre) over
 //      an environment image L(direction): against the CPU mean of L over each pixel's arc Q^tau d, tau in [0, s] (pixels
 //      whose arc stays on the image).
-// Options: --levels N (6, test 1).
+//   8. depth of field (DepthOfField.cpp, FEATURES_GAME 4.1) against the thin lens ray-cast on the CPU over the same scene:
+//      each ray (4 x 4 jittered subsamples x 1,024 stratified lens points per pixel) solved exactly for the nearest surface's
+//      pinhole position q (q + u rho(q) = p) and textured with the pinhole image there; pixels where a ray meets a surface
+//      that the pinhole image does not hold (hidden behind a nearer one, or outside the frame) are counted and left out.
+//      Scenes: a tilted plane (1/z linear across the view, |rho| <= 12 and <= 60 px) with HDR points, a blurred near card
+//      over a sharp wall, a sharp card over a blurred wall with HDR points (no halo on the card), and a lens so small that
+//      every pixel is in focus (output bit identical to the input).
+// Options: --levels N (6, test 1), --dof (test 8 alone).
 #include "FilmCurve.h"
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
@@ -30,6 +37,7 @@
 #include "unx/render/RenderGraph.h"
 #include "unx/render/Shaders.h"
 #include "unx/scene/SceneData.h"
+#include "unx/shading/DepthOfField.h"
 #include "unx/shading/MotionBlur.h"
 #include "unx/shading/Post.h"
 
@@ -116,6 +124,34 @@ struct Readbacks
                       dst.PlacedFootprint = item->fp;
                       D3D12_TEXTURE_COPY_LOCATION s{ src, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
                       c.cmd->CopyTextureRegion(&dst, 0, 0, 0, &s, nullptr);
+                  });
+    }
+    // A buffer's first 'bytes' (read back as rows = 1, pitch = bytes).
+    void buffer(RenderGraph& g, BufferRef buf, uint64_t bytes, std::vector<uint8_t>& out, uint32_t& pitch)
+    {
+        auto item = std::make_shared<Item>();
+        item->out = &out;
+        item->pitch = &pitch;
+        item->rows = 1;
+        item->fp.Footprint.RowPitch = (uint32_t)bytes;
+        items.push_back(item);
+        Device* dev = &device;
+        g.addPass("post.test.readback buffer", QueueType::Graphics,
+                  [=](PassBuilder& b) {
+                      b.use(buf, Use::CopySrc);
+                      b.keep();
+                  },
+                  [=](PassContext& c) {
+                      D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_READBACK };
+                      D3D12_RESOURCE_DESC bd{};
+                      bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                      bd.Width = bytes;
+                      bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
+                      bd.SampleDesc.Count = 1;
+                      bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                      check(dev->d3d()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&item->buffer)),
+                            "readback");
+                      c.cmd->CopyBufferRegion(item->buffer.Get(), 0, c.resource(buf), 0, bytes);
                   });
     }
     void finish()
@@ -256,6 +292,382 @@ float hashUnit(uint32_t x, uint32_t y, uint32_t z)
     return (float)(v[0] >> 8) * (1.0f / 16777216.0f);
 }
 float saturate(float v) { return std::min(1.0f, std::max(0.0f, v)); }
+
+// ---------------------------------------------------------------- 8
+// A texture filled from CPU rows (the staging buffer lives until the graph executed: 'keep').
+TextureRef uploadTexture(Context& x, Device& device, const char* name, uint32_t w, uint32_t h, DXGI_FORMAT format, uint32_t texelBytes, const void* data,
+                         std::vector<ComPtr<ID3D12Resource>>& keep)
+{
+    const TextureRef t = x.graph.createTexture(TextureDesc{ name, w, h, 1, 1, format });
+    const uint32_t pitch = (w * texelBytes + 255) & ~255u;
+    D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_UPLOAD };
+    D3D12_RESOURCE_DESC bd{};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = (uint64_t)pitch * h;
+    bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
+    bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> staging;
+    check(device.d3d()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging)), "staging");
+    uint8_t* p = nullptr;
+    check(staging->Map(0, nullptr, reinterpret_cast<void**>(&p)), "map staging");
+    for (uint32_t y = 0; y < h; ++y) std::memcpy(p + (size_t)y * pitch, static_cast<const uint8_t*>(data) + (size_t)y * w * texelBytes, (size_t)w * texelBytes);
+    staging->Unmap(0, nullptr);
+    ID3D12Resource* src = staging.Get();
+    keep.push_back(staging);
+    x.graph.addPass("post.test.upload", QueueType::Graphics, [&](PassBuilder& b) { b.use(t, Use::CopyDst); },
+                    [=](PassContext& c) {
+                        D3D12_TEXTURE_COPY_LOCATION to{ c.resource(t), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX }, from{ src, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+                        from.PlacedFootprint.Footprint = { format, w, h, 1, pitch };
+                        c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+                    });
+    return t;
+}
+
+// A test 8 scene: the pinhole image, its depth, the lens, and the scene's surfaces for the reference. hit(p, u, k0, k1, q):
+// for the receiver point p (px) and the lens point u (unit disk) with rho = k0 - k1 x device depth, the pinhole position q
+// of the nearest surface point the thin-lens ray meets (the solution of q + u rho(q) = p); false when that point is not in
+// the pinhole image (hidden behind a nearer surface or outside the frame: no data).
+struct DofScene
+{
+    const char* name;
+    uint32_t w = 0, h = 0;
+    std::vector<float> device;      // reversed-Z device depth near / z (the view's depth buffer)
+    std::vector<float> colour;      // RGBA32F
+    float aperture = 0, focus = 0;  // m
+    std::function<bool(double px, double py, double ux, double uy, double k0, double k1, double& qx, double& qy)> hit;
+};
+
+// The thin lens over the scene's surfaces, textured by the pinhole image (pixel-constant): per receiver the mean over
+// 4 x 4 subsamples and 32 x 32 stratified lens points (concentric map) of the colour at the ray's pinhole position.
+// holes[i]: the receiver's (subsample, lens point) pairs without data (left out by the test).
+void dofReference(const DofScene& s, double k0, double k1, std::vector<double>& out, std::vector<uint32_t>& holes)
+{
+    const uint32_t S = 4, N = 32;
+    out.assign((size_t)s.w * s.h * 3, 0.0);
+    holes.assign((size_t)s.w * s.h, 0);
+    std::vector<double> lens;
+    for (uint32_t a = 0; a < N; ++a)
+        for (uint32_t b = 0; b < N; ++b)
+        {
+            const double sx = 2 * (a + 0.5) / N - 1, sy = 2 * (b + 0.5) / N - 1;
+            double r, phi;
+            if (std::abs(sx) > std::abs(sy)) r = sx, phi = 0.7853981633974483 * (sy / sx);
+            else r = sy, phi = 1.5707963267948966 - 0.7853981633974483 * (sx / sy);
+            lens.push_back(r * std::cos(phi));
+            lens.push_back(r * std::sin(phi));
+        }
+    for (uint32_t y = 0; y < s.h; ++y)
+        for (uint32_t x = 0; x < s.w; ++x)
+        {
+            const size_t rcv = (size_t)y * s.w + x;
+            for (uint32_t j = 0; j < S; ++j)
+                for (uint32_t i = 0; i < S; ++i)
+                    for (size_t l = 0; l < lens.size(); l += 2)
+                    {
+                        // stratified subsample position, jittered per ray (a fixed grid cannot see sub-stratum shifts)
+                        const double jx = hashUnit(x * 4 + i, y * 4 + j, (uint32_t)l * 2), jy = hashUnit(x * 4 + i, y * 4 + j, (uint32_t)l * 2 + 1);
+                        double qx, qy;
+                        if (!s.hit(x + (i + jx) / S, y + (j + jy) / S, lens[l], lens[l + 1], k0, k1, qx, qy) || qx < 0 || qy < 0 || qx >= s.w || qy >= s.h)
+                        {
+                            ++holes[rcv];
+                            continue;
+                        }
+                        const float* c = &s.colour[((size_t)qy * s.w + (size_t)qx) * 4];
+                        for (int ch = 0; ch < 3; ++ch) out[rcv * 3 + ch] += c[ch];
+                    }
+        }
+    const double inv = 1.0 / ((double)S * S * N * N);
+    for (double& v : out) v *= inv;
+}
+
+bool g_dofProfile = false;
+
+// Test 8: returns the failures.
+template <typename LoadQuality>
+int testDepthOfField(Device& device, ShaderLibrary& shaders, const LoadQuality& loadQuality)
+{
+    int failures = 0;
+    auto expect = [&](const char* what, bool ok) {
+        logf("  %-76s %s\n", what, ok ? "ok" : "FAILED");
+        if (!ok) ++failures;
+    };
+    const uint32_t w = 192, h = 108;
+    const ViewDesc desc = ViewDesc::fromCamera(scene::Camera{}, w, h, float4x4{});
+    const double zNear = desc.nearPlane, fpx = 0.5 * h * desc.proj.m[1][1];
+    auto texture = [&](uint32_t x, uint32_t y, uint32_t seed) {  // a textured surface: smooth hues + hashed detail
+        const float n = hashUnit(x, y, seed);
+        return float3{ 0.25f + 0.2f * std::sin(0.21f * x + seed) + 0.15f * n, 0.3f + 0.2f * std::cos(0.17f * y + 2 * seed) + 0.1f * n,
+                       0.35f + 0.15f * std::sin(0.11f * (x + y)) + 0.1f * n };
+    };
+    auto scene = [&](const char* name, float aperture, float focus, auto&& depthAt, auto&& colourAt, auto&& hit) {
+        DofScene s;
+        s.name = name;
+        s.w = w;
+        s.h = h;
+        s.aperture = aperture;
+        s.focus = focus;
+        s.hit = hit;
+        s.device.resize((size_t)w * h);
+        s.colour.resize((size_t)w * h * 4);
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+            {
+                const double z = depthAt(x, y);
+                s.device[(size_t)y * w + x] = (float)(zNear / z);
+                const float3 c = colourAt(x, y);
+                float* o = &s.colour[((size_t)y * w + x) * 4];
+                o[0] = c.x, o[1] = c.y, o[2] = c.z, o[3] = 1;
+            }
+        return s;
+    };
+    // the aperture giving rho = r px at depth z for focus zf: r = fpx A (1/zf - 1/z) / 2
+    auto apertureFor = [&](double r, double z, double zf) { return (float)(2 * r / (fpx * std::abs(1 / zf - 1 / z))); };
+    auto points = [&](uint32_t x, uint32_t y, float3 c) {  // sparse HDR points (bokeh)
+        return (x % 23 == 7 && y % 19 == 5) ? float3{ 40, 36, 30 } : c;
+    };
+    std::vector<DofScene> scenes;
+    // tilted plane: 1/z linear across x (device depth zNear/z linear in the pinhole x), in focus at the middle
+    const double inv0 = 1 / 1.5, inv1 = 1 / 12.0;
+    auto plane = [&](uint32_t x, uint32_t) { return 1.0 / (inv0 + (inv1 - inv0) * (x + 0.5) / w); };
+    auto planeHit = [&](double px, double py, double ux, double uy, double k0, double k1, double& qx, double& qy) {
+        // rho(q) = k0 - k1 zNear (inv0 + (inv1 - inv0) qx / w) = alpha + beta qx; q + u rho(q) = p
+        const double alpha = k0 - k1 * zNear * inv0, beta = -k1 * zNear * (inv1 - inv0) / w;
+        qx = (px - ux * alpha) / (1 + ux * beta);
+        qy = py - uy * (alpha + beta * qx);
+        return true;
+    };
+    const double zMid = plane(w / 2, 0);
+    auto planeColour = [&](uint32_t x, uint32_t y) { return points(x, y, texture(x, y, 1)); };
+    scenes.push_back(scene("tilted plane, texture only, |rho| <= 12 px", apertureFor(12, 1.5, zMid), (float)zMid, plane, [&](uint32_t x, uint32_t y) { return texture(x, y, 1); }, planeHit));
+    scenes.push_back(scene("tilted plane, |rho| <= 12 px", apertureFor(12, 1.5, zMid), (float)zMid, plane, planeColour, planeHit));
+    scenes.push_back(scene("tilted plane, |rho| <= 60 px", apertureFor(60, 1.5, zMid), (float)zMid, plane, planeColour, planeHit));
+    // a card 0.6 m away over a wall 10 m away
+    auto card = [&](double x, double y) { return x >= 70 && x < 130 && y >= 30 && y < 80; };
+    auto cardScene = [&](uint32_t x, uint32_t y) { return card(x + 0.5, y + 0.5) ? 0.6 : 10.0; };
+    const float cardDevice = (float)(zNear / 0.6), wallDevice = (float)(zNear / 10.0);
+    auto cardHit = [&](double px, double py, double ux, double uy, double k0, double k1, double& qx, double& qy) {
+        const double rc = k0 - k1 * cardDevice, rw = k0 - k1 * wallDevice;
+        qx = px - ux * rc, qy = py - uy * rc;
+        if (card(qx, qy)) return true;
+        qx = px - ux * rw, qy = py - uy * rw;
+        return !card(qx, qy);  // (the wall behind the card: not in the pinhole image)
+    };
+    scenes.push_back(scene("blurred near card (rho -15 px) over a sharp wall", apertureFor(15, 0.6, 10), 10.0f, cardScene,
+                           [&](uint32_t x, uint32_t y) { return card(x + 0.5, y + 0.5) ? texture(x, y, 3) * 1.5f : texture(x, y, 4); }, cardHit));
+    scenes.push_back(scene("sharp card over a blurred wall (rho +14 px) with HDR points", apertureFor(14, 10, 0.6), 0.6f, cardScene,
+                           [&](uint32_t x, uint32_t y) { return card(x + 0.5, y + 0.5) ? texture(x, y, 3) : points(x, y, texture(x, y, 4)); }, cardHit));
+    scenes.push_back(scene("near focus (|rho| <= 0.4 px)", apertureFor(0.4, 1.5, zMid), (float)zMid, plane, planeColour, planeHit));
+    // a wall at the focus distance: rho = 0 up to float rounding, the image unchanged
+    scenes.push_back(scene("a wall at the focus distance", apertureFor(8, 1.5, 3.0), 3.0f, [&](uint32_t, uint32_t) { return 3.0; }, planeColour,
+                           [&](double px, double py, double ux, double uy, double k0, double k1, double& qx, double& qy) {
+                               const double rw = k0 - k1 * (double)(float)(zNear / 3.0);
+                               qx = px - ux * rw, qy = py - uy * rw;
+                               return true;
+                           }));
+    auto run = [&](const DofScene& s, std::vector<uint8_t>& out, uint32_t& op) {
+        const QualityConfig q = loadQuality();
+        Context x(device, shaders, q);
+        x.frame.lensAperture = s.aperture;
+        x.frame.lensFocus = s.focus;
+        ViewResources v;
+        v.view = desc;
+        std::vector<ComPtr<ID3D12Resource>> keep;
+        const TextureRef image = uploadTexture(x, device, "post.test.dof.image", w, h, DXGI_FORMAT_R32G32B32A32_FLOAT, 16, s.colour.data(), keep);
+        v.depth = uploadTexture(x, device, "post.test.dof.depth", w, h, DXGI_FORMAT_R32_FLOAT, 4, s.device.data(), keep);
+        const TextureRef focused = x.graph.createTexture(TextureDesc{ "post.test.dof.out", w, h, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+        if (!shading::depthOfFieldActive(x.fc, v)) fail("depth of field inactive with a lens set");
+        shading::DepthOfFieldProducts products;
+        shading::depthOfField(x.fc, v, image, focused, &products);
+        Readbacks rb{ device };
+        rb.texture(x.graph, focused, out, op);
+        const uint32_t tilesX = (w + 31) / 32, tilesY = (h + 31) / 32;
+        std::vector<uint8_t> maxima, reach;
+        uint32_t mp = 0, rp = 0;
+        std::vector<uint8_t> cocBytes, levels[16];
+        uint32_t cp = 0, lp[16] = {};
+        if (g_dofProfile)
+        {
+            rb.buffer(x.graph, products.maxima, (uint64_t)tilesX * tilesY * 32, maxima, mp);
+            rb.buffer(x.graph, products.reach, (uint64_t)tilesX * tilesY * 32, reach, rp);
+            rb.texture(x.graph, products.coc, cocBytes, cp);
+            for (uint32_t c = 1; c < 8; ++c)
+            {
+                rb.texture(x.graph, products.colour[c], levels[2 * c], lp[2 * c]);
+                rb.texture(x.graph, products.shape[c], levels[2 * c + 1], lp[2 * c + 1]);
+            }
+        }
+        x.graph.execute(nullptr);
+        rb.finish();
+        if (device.drainDebugMessages() != 0) fail("D3D12 debug layer errors");
+        if (g_dofProfile)
+        {
+            auto fnv = [](const std::vector<uint8_t>& v) {
+                uint64_t hv = 1469598103934665603ull;
+                for (uint8_t b8 : v) hv = (hv ^ b8) * 1099511628211ull;
+                return (unsigned long long)hv;
+            };
+            logf("    intermediate hashes: maxima %016llx reach %016llx coc %016llx\n", fnv(maxima), fnv(reach), fnv(cocBytes));
+            for (uint32_t c = 1; c < 8; ++c) logf("      level %u: colour %016llx shape %016llx\n", c, fnv(levels[2 * c]), fnv(levels[2 * c + 1]));
+            for (uint32_t ty = 0; ty < tilesY; ++ty)
+            {
+                std::string row;
+                for (uint32_t tx = 0; tx < tilesX; ++tx)
+                {
+                    uint32_t zeros = 0;
+                    for (uint32_t y = ty * 32; y < std::min(h, ty * 32 + 32); ++y)
+                        for (uint32_t xx = tx * 32; xx < tx * 32 + 32; ++xx)
+                        {
+                            float r;
+                            std::memcpy(&r, cocBytes.data() + (size_t)y * cp + (size_t)xx * 4, 4);
+                            zeros += r == 0.0f;
+                        }
+                    row += unx::format(" %4u", zeros);
+                }
+                logf("      zero radii per tile, row %u:%s\n", ty, row.c_str());
+            }
+            std::string cols;
+            for (uint32_t xx = 0; xx < 64; ++xx)
+            {
+                uint32_t zeros = 0;
+                for (uint32_t y = 0; y < 64; ++y)
+                {
+                    float r;
+                    std::memcpy(&r, cocBytes.data() + (size_t)y * cp + (size_t)xx * 4, 4);
+                    zeros += r == 0.0f;
+                }
+                cols += zeros == 64 ? '0' : zeros == 0 ? '.' : 'p';
+            }
+            logf("      zero columns x 0..63 (rows 0..63): %s\n", cols.c_str());
+            for (uint32_t y = 0; y < 32; ++y)
+            {
+                std::string line;
+                for (uint32_t xx = 0; xx < 32; ++xx)
+                {
+                    float r;
+                    std::memcpy(&r, cocBytes.data() + (size_t)y * cp + (size_t)xx * 4, 4);
+                    line += r == 0.0f ? '0' : '.';
+                }
+                logf("      tile 0 row %2u: %s\n", y, line.c_str());
+            }
+        }
+    };
+    std::vector<std::vector<uint8_t>> firstRuns;
+    for (const DofScene& s : scenes)
+    {
+        std::vector<uint8_t> out, again;
+        uint32_t op = 0, ap = 0;
+        run(s, out, op);
+        run(s, again, ap);
+        expect(unx::format("depth of field [%s]: two runs bit identical", s.name).c_str(), out == again);
+        firstRuns.push_back(out);
+        if (g_dofProfile)
+        {
+            uint64_t hGpu = 1469598103934665603ull, hIn = 1469598103934665603ull;
+            for (uint8_t v : out) hGpu = (hGpu ^ v) * 1099511628211ull;
+            for (float v : s.colour) hIn = (hIn ^ asUint(v)) * 1099511628211ull;
+            for (float v : s.device) hIn = (hIn ^ asUint(v)) * 1099511628211ull;
+            logf("    hashes: input %016llx, GPU output %016llx\n", (unsigned long long)hIn, (unsigned long long)hGpu);
+        }
+        const double k0 = 0.5 * fpx * s.aperture / s.focus, k1 = 0.5 * fpx * s.aperture / zNear;
+        std::vector<double> ref;
+        std::vector<uint32_t> holes;
+        dofReference(s, k0, k1, ref, holes);
+        double se = 0, sr = 0, worst = 0, sum = 0;
+        uint64_t judged = 0, holed = 0, bitSame = 0, worstX = 0, worstY = 0;
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t xx = 0; xx < w; ++xx)
+                for (int c = 0; c < 3; ++c) sum += ref[((size_t)y * w + xx) * 3 + c];
+        const double mean = sum / (3.0 * w * h);
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t xx = 0; xx < w; ++xx)
+            {
+                const size_t i = (size_t)y * w + xx;
+                float g[4];
+                std::memcpy(g, out.data() + (size_t)y * op + (size_t)xx * 16, 16);
+                bitSame += std::memcmp(g, &s.colour[i * 4], 16) == 0;
+                if (holes[i])
+                {
+                    ++holed;
+                    continue;
+                }
+                ++judged;
+                for (int c = 0; c < 3; ++c)
+                {
+                    const double r = ref[i * 3 + c], e = g[c] - r;
+                    se += e * e;
+                    sr += r * r;
+                    const double rel = std::abs(e) / std::max(r, 0.25 * mean);
+                    if (rel > worst) worst = rel, worstX = xx, worstY = y;
+                }
+            }
+        const double relMse = se / std::max(sr, 1e-30);
+        if (g_dofProfile)  // (--dof-profile) GPU / reference (green) around the worst pixel
+            for (int dy = -2; dy <= 2; ++dy)
+            {
+                std::string line;
+                for (int dx = -2; dx <= 2; ++dx)
+                {
+                    const int xx = (int)worstX + dx, y = (int)worstY + dy;
+                    if (xx < 0 || y < 0 || xx >= (int)w || y >= (int)h) continue;
+                    float g[4];
+                    std::memcpy(g, out.data() + (size_t)y * op + (size_t)xx * 16, 16);
+                    line += unx::format(" %7.3f/%7.3f", g[1], ref[((size_t)y * w + xx) * 3 + 1]);
+                }
+                logf("    around the worst:%s\n", line.c_str());
+            }
+        if (g_dofProfile)  // (--dof-profile) mean GPU and reference per 16 px column band
+            for (uint32_t b0 = 0; b0 < w; b0 += 16)
+            {
+                double g0 = 0, r0 = 0;
+                uint32_t n0 = 0;
+                for (uint32_t y = 0; y < h; ++y)
+                    for (uint32_t xx = b0; xx < b0 + 16; ++xx)
+                    {
+                        const size_t i = (size_t)y * w + xx;
+                        if (holes[i]) continue;
+                        float g[4];
+                        std::memcpy(g, out.data() + (size_t)y * op + (size_t)xx * 16, 16);
+                        g0 += g[1];
+                        r0 += ref[i * 3 + 1];
+                        ++n0;
+                    }
+                const double rho = 0.5 * fpx * s.aperture * (1 / s.focus - 1 / (s.w ? zNear / s.device[(size_t)(h / 2) * w + b0 + 8] : 1));
+                logf("    columns %3u..%3u (rho %+.1f): gpu %.4f ref %.4f (%u px)\n", b0, b0 + 15, rho, n0 ? g0 / n0 : 0.0, n0 ? r0 / n0 : 0.0, n0);
+            }
+        logf("depth of field [%s]: aperture %.4f m, focus %.3f m; %llu pixels judged, %llu with hidden surfaces showing (left out), relMSE %.3e, worst %.3e at "
+             "(%llu, %llu), %llu pixels bit identical to the input\n",
+             s.name, s.aperture, s.focus, (unsigned long long)judged, (unsigned long long)holed, relMse, worst, (unsigned long long)worstX,
+             (unsigned long long)worstY, (unsigned long long)bitSame);
+        if (std::string(s.name).rfind("a wall at the focus", 0) == 0)
+        {
+            double change = 0;  // largest |output - input| relative to the input
+            for (size_t i = 0; i < (size_t)w * h; ++i)
+            {
+                float g[4];
+                std::memcpy(g, out.data() + (i / w) * op + (i % w) * 16, 16);
+                for (int c = 0; c < 3; ++c) change = std::max(change, (double)std::abs(g[c] - s.colour[i * 4 + c]) / std::max(s.colour[i * 4 + c], 1e-3f));
+            }
+            logf("  a wall at the focus distance: largest change %.2e of the input\n", change);
+            expect("depth of field: a wall at the focus distance keeps the image (float rounding of rho = 0: < 1e-4)", change < 1e-4);
+        }
+        else
+        {
+            // the coarse octaves' texels smooth a steep plane's bokeh edges (|rho| changes 0.625 px per px at 60 px)
+            const double limit = std::string(s.name).find("60 px") != std::string::npos ? 1e-2 : 1e-3;
+            expect(unx::format("depth of field [%s]: vs the CPU thin-lens ray cast (relMSE < %.0e)", s.name, limit).c_str(), relMse < limit);
+        }
+    }
+    // every scene again after all the others (the transient memory holds other data now): the same image
+    for (size_t k = 0; k < scenes.size(); ++k)
+    {
+        std::vector<uint8_t> later;
+        uint32_t lp = 0;
+        run(scenes[k], later, lp);
+        expect(unx::format("depth of field [%s]: a later run (other memory contents) bit identical", scenes[k].name).c_str(), later == firstRuns[k]);
+    }
+    return failures;
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -263,11 +675,36 @@ int main(int argc, char** argv)
     try
     {
         if (argc > 2 && std::strcmp(argv[1], "--levels") == 0) kLevels = (uint32_t)std::atoi(argv[2]);
+        bool dofOnly = false, warp = false;
+        for (int i = 1; i < argc; ++i)
+        {
+            dofOnly = dofOnly || std::strcmp(argv[i], "--dof") == 0;
+            warp = warp || std::strcmp(argv[i], "--warp") == 0;
+            g_dofProfile = g_dofProfile || std::strcmp(argv[i], "--dof-profile") == 0;
+        }
         DeviceOptions o;
         o.debugLayer = true;
+        ComPtr<ID3D12Device> warpDevice;
+        if (warp)  // --warp: the software adapter (correctness while hardware runs are held)
+        {
+            ComPtr<IDXGIFactory6> factory;
+            check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "DXGI factory");
+            ComPtr<IDXGIAdapter> adapter;
+            check(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)), "WARP adapter");
+            if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_2, IID_PPV_ARGS(&warpDevice))))
+                check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(&warpDevice)), "WARP device");
+            o.externalDevice = warpDevice.Get();
+            o.debugLayer = false;
+        }
         Device device(o);
         ShaderLibrary shaders(device, executableDirectory() / "shaders");
         auto loadQuality = [] { return QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality"); };
+        if (dofOnly)
+        {
+            const int f = testDepthOfField(device, shaders, loadQuality);
+            logf(f ? "POST TESTS FAILED (%d)\n" : "POST TESTS PASSED\n", f);
+            return f ? 1 : 0;
+        }
         const QualityConfig quality = loadQuality();
         int failures = 0;
         auto expect = [&](const char* what, bool ok) {
@@ -609,6 +1046,7 @@ int main(int argc, char** argv)
             expect("motion blur rotation: engaged for a 31 px streak with the axis outside the view", engaged);
             expect("motion blur rotation: the arc mean of the image (worst < 2e-3: half precision)", n > 1000 && worst < 2e-3);
         }
+        failures += testDepthOfField(device, shaders, loadQuality);
         std::filesystem::remove(cube);
         logf(failures ? "POST TESTS FAILED (%d)\n" : "POST TESTS PASSED\n", failures);
         return failures ? 1 : 0;
