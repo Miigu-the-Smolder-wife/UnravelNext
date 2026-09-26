@@ -17,7 +17,8 @@
 //   unx_study_material_layers metalfinal <out.md> [photons]      the shipped form (published g table, core E, w(r) from
 //                                                                UNX_W_POINTS=r:w,...) vs the MS conductor
 //   unx_study_material_layers coatfilm     <out.md> [photons]   R1 + film under the coat vs the layer model
-//   unx_study_material_layers tables       <out.inc>  E_c, K, A_x, B_x, Abar, Bbar tables for the definition
+//   unx_study_material_layers tables       <out.inc> [eta]  E_c, K, A_x, B_x, Abar, Bbar tables for the definition (the
+//                                                     coat's eta, default 1.5; 1.33 for the water film of wet surfaces)
 // CPU only, at most 4 worker threads, below-normal priority (the machine is shared with measurements and the user).
 // Optics: ThinFilm.h; layer model and definitions: Layers.cpp.
 #include "Studies.h"
@@ -225,7 +226,11 @@ int main(int argc, char** argv)
         else if (cmd == "metalmix") study::metalMixStudy(out, photons);
         else if (cmd == "metalfinal") study::metalFinal(out, photons);
         else if (cmd == "coatfilm") study::coatFilmStudy(out, photons);
-        else if (cmd == "tables") study::exportTables(out);
+        else if (cmd == "tables")
+        {
+            if (argc > 3) study::setCoatEta(std::stod(argv[3]));  // (here the third argument is the coat's eta, not photons)
+            study::exportTables(out);
+        }
         else fail("unknown study %s", cmd.c_str());
         return 0;
     }

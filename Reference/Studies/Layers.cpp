@@ -39,7 +39,9 @@ namespace unx::study
 namespace
 {
 constexpr double kPi = 3.14159265358979323846;
-constexpr double kEta = 1.5;
+// The coat's refractive index: 1.5 for the definition's clearcoat; the tables command sets another (the water film of
+// wet surfaces, 1.33: A9) before any work starts.
+double kEta = 1.5;
 constexpr int NI = 90, NT = 90, NP = 90;   // theta_i, theta_o (1 deg), |dphi| (2 deg)
 constexpr int CT = 18, CP = 18;            // L1 aggregates: 5 deg x 10 deg
 using reference::Rgb;
@@ -899,6 +901,12 @@ std::string row(const std::string& name, double rc, const char* def, const Metri
     return b;
 }
 } // namespace
+
+void setCoatEta(double eta)
+{
+    if (!(eta > 1.0 && eta < 3.0)) fail("coat eta %g outside (1, 3)", eta);
+    kEta = eta;
+}
 
 void clearcoatR1Study(const std::string& out, uint32_t photons, bool msCoat, bool candA, bool candB, bool candC, bool candD, bool candE)
 {

@@ -51,4 +51,6 @@ void metalMixStudy(const std::string& out, uint32_t photons);
 void metalFinal(const std::string& out, uint32_t photons);
 void coatFilmStudy(const std::string& out, uint32_t photons);
 void exportTables(const std::string& out);
+// The coat's refractive index for the following studies and tables (default 1.5).
+void setCoatEta(double eta);
 } // namespace unx::study
