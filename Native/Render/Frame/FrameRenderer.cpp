@@ -202,6 +202,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     // ARCHITECTURE 4.1, one graphics queue (4.3). Order matters only through declared dependencies; it follows the
     // design so the reader can map passes to the budget table.
     tracks::simulation(fc);  // C0
+    tracks::waterGeometry(fc);  // W (B7/B8): ocean FFT and fluid surface into V's triangle streams
     tracks::atmosphere(fc);
     tracks::accelerationStructures(fc);
     tracks::hair(fc, main);  // E (B10): guide ticks and the frame's strand segments, before V

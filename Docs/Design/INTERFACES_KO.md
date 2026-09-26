@@ -23,6 +23,7 @@
 | I 통합 | I 세션 (v1.6) | `Native/Host/`, `Config/quality/host.toml` (이전 저장소 쪽 `Assets/UnravelNextBridge/`) |
 | FX GPU 시뮬레이션 | FX 세션 (v1.24) | `Native/Render/Passes/FX/`, `Config/quality/fx.toml` |
 | E 엔진 2 (연기·불 매질, 열 아지랑이, 디버그 드로우, 데칼, 머리카락) | 엔진 2 세션 (재배정 2026-09-26 3a708c49) | `Native/Render/Passes/Volume/`, `Native/Render/Passes/Debug/`, `Native/Render/Passes/Decal/`, `Native/Render/Passes/Hair/`, `Config/quality/volume.toml`, `Config/quality/debug.toml` |
+| W 물 (물 표면, 수중, 유체 표면 재구성 B7·B8) | 엔진 1 세션 (재배정 2026-09-26, 조정) | `Native/Render/Passes/Water/`, `Config/quality/water.toml` |
 | RPP RPP-1 장면 | RPP 세션 (v1.40) | `Content/RPP1/`, `Tools/RppBuild/`, `Docs/Status/RPP_STATUS_KO.md`, `Results/RPP/` (이전 저장소 쪽 `Assets/RPP1/`) |
 | 모두 | — | `Docs/Design/Requests/`(새 파일만), `Results/<트랙>/`(자기 결과), `Docs/Status/<트랙>_STATUS_KO.md`(자기 상태) |
 

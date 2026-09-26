@@ -7,8 +7,8 @@
 # passes. Tools/CI/Build.ps1 -Track <name> selects the tracks of that session.
 include_guard(GLOBAL)
 
-set(UNX_TRACKS "all" CACHE STRING "Enabled tracks: all, or a list of V;M;S;R;C;I;FX;RPP;E (core is always on)")
-set(UNX_ALL_TRACKS V M S R C I FX RPP E)
+set(UNX_TRACKS "all" CACHE STRING "Enabled tracks: all, or a list of V;M;S;R;C;I;FX;RPP;E;W (core is always on)")
+set(UNX_ALL_TRACKS V M S R C I FX RPP E W)
 
 if(NOT UNX_TRACKS STREQUAL "all")
   foreach(t ${UNX_TRACKS})
@@ -45,6 +45,8 @@ set(UNX_TRACK_OF_Hair E)
 # E (reassigned 2026-09-26 16:35, "¿ÁπË¡§ 2"): first-person view model, light profiles
 set(UNX_TRACK_OF_ViewModel E)
 set(UNX_TRACK_OF_Lights E)
+# W (engine 1, B7/B8 reassigned 2026-09-26 by the coordination session): water surface, underwater, fluid surface
+set(UNX_TRACK_OF_Water W)
 
 function(unx_track_of folder out)
   if(NOT DEFINED UNX_TRACK_OF_${folder})

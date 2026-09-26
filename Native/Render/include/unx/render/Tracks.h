@@ -84,4 +84,14 @@ float viewModelPrepare(TrackState& state, GpuScene& scene, const QualityConfig& 
 // Last in the frame: the buffer visualization (debug.view, replaces the view's colour), then the debug primitives
 // (CPU and GPU appends) and the HUD drawn over view.color.
 void debugOverlay(FramePassContext& fc, ViewResources& view);
+
+// ---- W: water (engine 1, B7/B8) - Native/Render/Passes/Water
+// After simulation() and before accelerationStructures() and V (render A, 2026-09-26): the frame's water geometry - the
+// ocean cascades' FFT and the fluid surface reconstructed from the physics particles - appended to
+// FrameResources::triangleStreams for V's coverage layer (INTERFACES v1.60). Declares no passes without water.
+void waterGeometry(FramePassContext& fc);
+// Called by M's shading() right after the opaque shading kernel and before compositing (render A's join point,
+// 2026-09-26): view.color holds the shaded opaque scene and view.depth its depth, the refraction targets of the water
+// surface and the reconstructed fluid surface. Declares no passes while the frame has no water.
+void water(FramePassContext& fc, ViewResources& view);
 } // namespace unx::render::tracks
