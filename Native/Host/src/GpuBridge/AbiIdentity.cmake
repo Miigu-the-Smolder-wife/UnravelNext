@@ -1,0 +1,16 @@
+# The GPU bridge's ABI headers are Unravel's Native/RuntimeCommon files (NativePhysics.dll and NativeVfx.dll are built
+# against them): the host refuses copies that differ from the sibling repository's originals when those are present.
+foreach(header GpuExecutionAbi.h GpuDependencyGraph.h GpuAllocationLedger.h)
+  set(unx_bridge_copy "${CMAKE_CURRENT_LIST_DIR}/${header}")
+  get_filename_component(unx_bridge_original "${CMAKE_CURRENT_LIST_DIR}/../../../../../Unravel/Native/RuntimeCommon/${header}" ABSOLUTE)
+  if(EXISTS "${unx_bridge_original}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${unx_bridge_original}" "${unx_bridge_copy}")
+    file(SHA256 "${unx_bridge_original}" unx_bridge_a)
+    file(SHA256 "${unx_bridge_copy}" unx_bridge_b)
+    if(NOT unx_bridge_a STREQUAL unx_bridge_b)
+      message(FATAL_ERROR "Native/Host/src/GpuBridge/${header} differs from ${unx_bridge_original}: copy the engine's file")
+    endif()
+  else()
+    message(WARNING "Unravel's RuntimeCommon/${header} not found next to this repository: the GPU bridge ABI copy is not checked")
+  endif()
+endforeach()
