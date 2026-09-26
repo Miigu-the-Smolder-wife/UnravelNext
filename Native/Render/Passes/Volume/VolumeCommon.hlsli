@@ -44,6 +44,8 @@ struct VolumeConstants
     uint shadow[8];                     // S's ShadowSrvs (page table, pool/atlas, blocks, search bound, constants, lights,
                                         // slot of light, layers)
     uint giCache, airVolume, transmittance, multiScatter;
+    float3 streamAxes; uint pad0;  // stream (VFX World) -> renderer axis signs (FrameContext::streamAxes): the offsets and
+                                   // the particles are in stream space, volumeParticleAt maps each camera-relative position
 };
 
 // One particle of the frame, 48 B (index = render thread).

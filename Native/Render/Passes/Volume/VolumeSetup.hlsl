@@ -138,7 +138,8 @@ RenderRange volumeRange(VolumeConstants c, uint t, uint group)
     return ranges[lo];
 }
 
-// The particle of render thread t at the frame time (camera-relative), with its age; false when not alive then.
+// The particle of render thread t at the frame time (camera-relative, renderer axes: computed in stream space - the
+// anchor offsets, origins, positions and velocities are - and mapped by c.streamAxes), with its age; false when not alive then.
 bool volumeParticleAt(VolumeConstants c, RenderRange rr, uint k, StreamProgram p, out float3 pos, out float age)
 {
     const uint birth = rr.first + k, row = rr.row;
@@ -152,7 +153,7 @@ bool volumeParticleAt(VolumeConstants c, RenderRange rr, uint k, StreamProgram p
         StructuredBuffer<EmitterDynamic> dynamic = ResourceDescriptorHeap[c.dynamicPrev];
         const float4 pa = posAge[rr.stateBase + k];
         if (!(wdt < p.lifetime - pa.w)) return false;
-        pos = c.offsetPrev + dynamic[row].originAnchor + pa.xyz + velocity[rr.stateBase + k].xyz * wdt;
+        pos = (c.offsetPrev + dynamic[row].originAnchor + pa.xyz + velocity[rr.stateBase + k].xyz * wdt) * c.streamAxes;
         age = pa.w + wdt;
         return true;
     }
@@ -172,11 +173,11 @@ bool volumeParticleAt(VolumeConstants c, RenderRange rr, uint k, StreamProgram p
         const float3 p0 = c.offsetPrev + dynamic0[row].originAnchor + posAge0[rr.prevBase + rel].xyz;
         const float3 v0 = velocity0[rr.prevBase + rel].xyz;
         const float w = c.w, w2 = w * w, w3 = w2 * w;
-        pos = (2 * w3 - 3 * w2 + 1) * p0 + (w3 - 2 * w2 + w) * c.dt * v0 + (3 * w2 - 2 * w3) * p1 + (w3 - w2) * c.dt * v1;
+        pos = ((2 * w3 - 3 * w2 + 1) * p0 + (w3 - 2 * w2 + w) * c.dt * v0 + (3 * w2 - 2 * w3) * p1 + (w3 - w2) * c.dt * v1) * c.streamAxes;
         return true;
     }
     if (age < 0) return false;
-    pos = p1 - v1 * rest;
+    pos = (p1 - v1 * rest) * c.streamAxes;
     return true;
 }
 

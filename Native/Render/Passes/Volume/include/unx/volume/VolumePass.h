@@ -16,7 +16,8 @@ struct VolumeFrame
 {
     const render::ViewDesc* view = nullptr;
     D3D12_GPU_VIRTUAL_ADDRESS frameConstants = 0;
-    double camera[3] = {};
+    double camera[3] = {};        // renderer world (frame + FrameContext::worldOrigin)
+    float streamAxes[3] = { 1, 1, 1 };  // FrameContext::streamAxes: stream (VFX World) -> renderer axis signs
     double time = 0;              // the particle stream's context time of this frame (s)
     fx::ParticleLighting lighting;  // media lighting (the lit sprites' inputs)
     render::BufferRef froxelLights;  // S's lists of this view (FroxelGrid header): required for media

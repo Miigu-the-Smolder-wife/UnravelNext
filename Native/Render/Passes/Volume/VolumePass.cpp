@@ -31,8 +31,9 @@ struct VolumeConstants
     uint32_t mediaEntries, mediaEntryCapacity, volumeSlices, mediaTiles;
     uint32_t shadow[8];
     uint32_t giCache, airVolume, transmittance, multiScatter;
+    float streamAxes[3]; uint32_t pad0;
 };
-static_assert(sizeof(VolumeConstants) == 224);
+static_assert(sizeof(VolumeConstants) == 240);
 constexpr uint32_t kConstantSlots = 64, kConstantSlotBytes = 256;
 constexpr uint32_t kHazeScale = 4, kHazeTile = 8;  // VOLUME_HAZE_SCALE, VOLUME_HAZE_TILE
 constexpr uint32_t kRecordBytes = 48;
@@ -131,8 +132,11 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
     VolumeConstants vc{};
     for (int a = 0; a < 3; ++a)
     {
-        vc.offsetCur[a] = (float)(in.anchor[1][a] - f.camera[a]);
-        vc.offsetPrev[a] = (float)(in.anchor[0][a] - f.camera[a]);
+        // stream-space camera (the axis signs are their own inverse): anchor - camera, a stream-space double difference
+        const double camera = f.camera[a] * f.streamAxes[a];
+        vc.offsetCur[a] = (float)(in.anchor[1][a] - camera);
+        vc.offsetPrev[a] = (float)(in.anchor[0][a] - camera);
+        vc.streamAxes[a] = f.streamAxes[a];
     }
     vc.w = (float)w;
     vc.dt = in.dt;

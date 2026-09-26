@@ -19,9 +19,10 @@ volume::VolumeFrame frameOf(FramePassContext& fc, const ViewResources& view)
     volume::VolumeFrame f;
     f.view = &view.view;
     f.frameConstants = view.frameConstants;
-    f.camera[0] = view.view.position.x;
-    f.camera[1] = view.view.position.y;
-    f.camera[2] = view.view.position.z;
+    f.camera[0] = view.view.position.x + fc.frame.worldOrigin[0];  // renderer world; the pass maps it to stream space
+    f.camera[1] = view.view.position.y + fc.frame.worldOrigin[1];
+    f.camera[2] = view.view.position.z + fc.frame.worldOrigin[2];
+    for (int a = 0; a < 3; ++a) f.streamAxes[a] = fc.frame.streamAxes[a];
     f.time = fc.frame.time;
     const FrameResources& r = fc.resources;
     fx::ParticleLighting& l = f.lighting;
