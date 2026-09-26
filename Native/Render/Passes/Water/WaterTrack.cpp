@@ -1,9 +1,10 @@
 // Track entry points of W (INTERFACES_KO.md 5.2, Tracks.h): waterGeometry() after the simulation and before V (the GPU
 // fluids' reconstructed surfaces into V's triangle streams; the ocean's camera surface follows with the view grid,
-// FEATURES_GAME 1.8 B), water() in M's shading() after the opaque kernel (refraction, absorption, reflection of the
-// water pixels; declares no passes until the water shading lands).
+// FEATURES_GAME 1.8 B), water() in M's shading() after the opaque kernel (the water layer's refraction, absorption and
+// reflection: WaterSurface.h, stage 1).
 #include "unx/render/Tracks.h"
 #include "unx/water/FluidSurface.h"
+#include "unx/water/WaterSurface.h"
 
 #include "unx/core/Log.h"
 
@@ -91,5 +92,5 @@ void waterGeometry(FramePassContext& fc)
         fc.resources.triangleStreams.push_back(stream);
     }
 }
-void water(FramePassContext&, ViewResources&) {}
+void water(FramePassContext& fc, ViewResources& view) { water::waterSurface(fc, view); }
 } // namespace unx::render::tracks
