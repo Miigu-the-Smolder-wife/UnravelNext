@@ -9,7 +9,7 @@
 // refraction rays (request R-2) they are drawn with the pane's weights and a straight path (counted in the statistics as
 // solid glass without refraction). L_refl: the GI cache's radiance of the mirror lobe until R's reflection jobs for the
 // translucent layer (R-1). Air: the behind value holds the air in front of it; the glass terms take S's air at the
-// glass's depth. Class 2 pixels (records) go through the coverage composite (coverageSpecial, v1.68).
+// glass's depth. Class 2 pixels (records) go through the coverage composite (coverageSpecial, v1.73).
 // P[0] = { translucentVis, translucentClass, colour (exposed linear, read-write), statistics (raw; UNX_NONE: none) }
 // P[1] = { visible clusters, M texture table, R's GI cache (UNX_NONE: none), 0 }
 // P[2] = { atmosphere transmittance, multi-scatter, air volume, 0 } (UNX_NONE: none)

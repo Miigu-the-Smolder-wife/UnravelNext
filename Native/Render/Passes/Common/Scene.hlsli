@@ -82,8 +82,17 @@ struct GpuMaterial
     float hairTilt;
     float cutScale;          // Cut class (v1.66): triplanar repeats per metre, damage band width (m)
     float cutDamageWidth;
-    uint reserved;
+    uint terrainLayers;      // Terrain class (v1.74): first layer | count << 24 in g_terrainLayers
 };
+
+struct GpuTerrainLayer  // v1.74: a Standard material read at terrain uv0 x scale + offset
+{
+    uint material;
+    float2 scale, offset;
+    uint2 splatSize;  // the material's splats 0 and 1: width | height << 16 (0: none)
+    uint pad;
+};
+GpuTerrainLayer loadTerrainLayer(uint i) { StructuredBuffer<GpuTerrainLayer> b = ResourceDescriptorHeap[g_terrainLayers]; return b[i]; }
 
 struct GpuLight
 {
@@ -123,6 +132,7 @@ struct GpuVisibleCluster
 #define MATERIAL_GLASS 4u
 #define MATERIAL_SUBSURFACE 5u
 #define MATERIAL_CUT 6u  // destruction cut faces (A11): Standard shading, triplanar textures
+#define MATERIAL_TERRAIN 7u  // terrain layer blending (C5): Standard shading of up to 8 splat-weighted layers
 // gpu::MaterialFlags (bits 8..)
 #define MATERIAL_TWO_SIDED (1u << 8)
 #define MATERIAL_ALPHA_TESTED (1u << 9)

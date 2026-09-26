@@ -184,7 +184,7 @@ UNX_API int32_t UNX_CALL UnxSceneAddTexture(UnxRenderer r, const UnxTextureDesc*
 static scene::Material toMaterial(const UnxMaterialDesc* d)
 {
     requireStruct(d, "UnxMaterialDesc");
-    if (d->materialClass > UNX_MATERIAL_SUBSURFACE) fail("unknown material class %u", d->materialClass);
+    if (d->materialClass > UNX_MATERIAL_TERRAIN) fail("unknown material class %u", d->materialClass);
     scene::Material m;
     m.name = fixedString(d->name, sizeof d->name);
     m.cls = (scene::MaterialClass)d->materialClass;
@@ -499,6 +499,18 @@ UNX_API int32_t UNX_CALL UnxFrameSetFluids(UnxRenderer r, const UnxFluidInput* f
         uint64_t s[6];
         std::memcpy(s, stamp, sizeof s);
         find(r)->setFluids(in, s);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxSceneSetTerrainLayers(UnxRenderer r, uint32_t material, uint32_t splat0, uint32_t splat1, const UnxTerrainLayer* layers, uint32_t count)
+{
+    return call([&] {
+        if (count && !layers) fail("UnxSceneSetTerrainLayers: no layers");
+        auto h = find(r);
+        std::vector<scene::TerrainLayer> in(count);
+        for (uint32_t i = 0; i < count; ++i)
+            in[i] = { layers[i].material, float2{ layers[i].scale[0], layers[i].scale[1] }, float2{ layers[i].offset[0], layers[i].offset[1] } };
+        h->setTerrainLayers(material, splat0, splat1, in);
     });
 }
 

@@ -416,7 +416,7 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
     for (const scene::Material& m : s->materials)
     {
         const float cut = m.alphaCutoff;
-        const uint32_t refs[4] = { m.baseColorTexture, m.normalTexture, m.roughMetalTexture, m.emissiveTexture };
+        const uint32_t refs[6] = { m.baseColorTexture, m.normalTexture, m.roughMetalTexture, m.emissiveTexture, m.terrainSplat[0], m.terrainSplat[1] };
         h = fnv1a(&cut, sizeof cut, h);
         h = fnv1a(refs, sizeof refs, h);
     }
@@ -592,6 +592,18 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
         e.flags = clampBit(m.baseColorTexture, gpu::MaterialTextureBaseColor) | clampBit(m.normalTexture, gpu::MaterialTextureNormal) |
                   clampBit(m.roughMetalTexture, gpu::MaterialTextureRoughMetal) | clampBit(m.emissiveTexture, gpu::MaterialTextureEmissive);
         e.coverage = (m.alphaCutoff > 0 && m.baseColorTexture != scene::kNone && m.baseColorTexture < m_coverage.size()) ? m_coverage[m.baseColorTexture].srv : gpu::kNone;
+        if (m.cls == scene::MaterialClass::Terrain)
+        {
+            // v1.74 Terrain class: the set carries the two splat maps in slots no other pass reads for it - occlusion =
+            // splat 0, slopeRange = the bits of splat 1's SRV index (there is no normal map) - and no colour textures, so
+            // paths without the class (band B until M's pre-shading, R hits) see the material's constants; the layers'
+            // own sets are their materials' (MaterialTerrain.hlsli)
+            e.baseColor = e.moments = e.roughMetal = e.emissive = e.coverage = gpu::kNone;
+            e.occlusion = srvOf(m.terrainSplat[0], scene::TextureFormat::Rgba8Linear, scene::TextureFormat::Rgba8Linear, m, "terrain splat 0");
+            const uint32_t splat1 = srvOf(m.terrainSplat[1], scene::TextureFormat::Rgba8Linear, scene::TextureFormat::Rgba8Linear, m, "terrain splat 1");
+            std::memcpy(&e.slopeRange, &splat1, 4);
+            e.flags = clampBit(m.terrainSplat[0], gpu::MaterialTextureBaseColor) | clampBit(m.terrainSplat[1], gpu::MaterialTextureEmissive);
+        }
         if (e.emissive != gpu::kNone) m_anyEmissive = true;
         table.push_back(e);
         gpu::MaterialTextures pub;

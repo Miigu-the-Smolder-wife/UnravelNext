@@ -157,9 +157,20 @@ struct Material  // 112 B
     // Cut class (v1.66): triplanar texture repeats per metre, damage band width (m).
     float cutScale;
     float cutDamageWidth;
-    uint32_t reserved;       // (A9 material layers)
+    // Terrain class (v1.74): its layers in FrameConstants::terrainLayers, first | count << 24 (count 1..8).
+    uint32_t terrainLayers;
 };
 static_assert(sizeof(Material) == 112);
+
+// One layer of a Terrain-class material (v1.74): a Standard material read at terrain uv0 x scale + offset.
+struct TerrainLayer  // 32 B
+{
+    uint32_t material;
+    float scaleU, scaleV, offsetU, offsetV;
+    uint32_t splatSize[2];  // the material's splats 0 and 1: width | height << 16 (0: none), in every record of the material
+    uint32_t pad;
+};
+static_assert(sizeof(TerrainLayer) == 32);
 
 // Textures of one material as M's texture system publishes them (GpuScene::setMaterialTextures, INTERFACES 6.3 v1.10):
 // bindless SRV indices (kNone = none; the SRVs belong to M) and clamp bits (MaterialTextureBit).
@@ -244,7 +255,8 @@ struct FrameConstants
     // time}, then weight rows) and morphData (raw: per morph mesh a block, Passes/Common/Deformation.hlsli morphVertex).
     // C5: patchData (StructuredBuffer<uint4>, kPatchSlots slots of kPatchSlotElements, then the GPU-written instance count;
     // kNone without a runtime pool).
-    uint32_t morphRecords, morphData, patchData, framePad0;
+    uint32_t morphRecords, morphData, patchData;
+    uint32_t terrainLayers;  // v1.74: StructuredBuffer<TerrainLayer> of the Terrain-class materials (kNone: none)
 };
 static_assert(sizeof(FrameConstants) == 560);
 } // namespace unx::render::gpu

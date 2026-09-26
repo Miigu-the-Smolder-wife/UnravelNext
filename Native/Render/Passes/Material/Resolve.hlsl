@@ -32,6 +32,7 @@
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Material/MaterialCut.hlsli"
+#include "Passes/Material/MaterialTerrain.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
 #include "Passes/Decal/Decal.hlsli"
 #include "Passes/Material/SurfaceLayers.hlsli"
@@ -99,6 +100,13 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 const MCutMaterial cm = mCutEvaluate(mCutFrame(visId, P[0].y, s), s, m, ts, P[3].y);
                 baseColor = cm.baseColor, roughness = cm.roughness, metallic = cm.metallic, n = cm.normal;
                 variance = (dot(s.dndx, s.dndx) + dot(s.dndy, s.dndy)) / 12.0 + cm.variance;
+            }
+            else if (materialClass(m) == MATERIAL_TERRAIN)
+            {
+                // C5 terrain: up to 8 splat-weighted Standard layers (MaterialTerrain.hlsli)
+                const MTerrainMaterial tm = mTerrainEvaluate(s, m, P[2].x, P[3].y);
+                baseColor = tm.baseColor, roughness = tm.roughness, metallic = tm.metallic, n = tm.normal;
+                variance = (dot(s.dndx, s.dndx) + dot(s.dndy, s.dndy)) / 12.0 + tm.variance;
             }
             else
             {

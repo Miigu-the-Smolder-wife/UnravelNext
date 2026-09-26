@@ -949,18 +949,199 @@ void testCutFace(TestFrame& tf, Report& report)
     report(worstNormal < 5e-3, "cut face: shading normal = whiteout of the taps, object -> world (octahedral 16 bits)", worstNormal, 5e-3);
     report(damaged > 1000 && interiorDamaged == 0, "cut face: the damage band lies along the border only", interiorDamaged, 0);
 }
+
+// 7. Terrain class (v1.74, MaterialTerrain.hlsli; FEATURES_GAME 9 direct blending): a 20 m grid whose uv0 spans the
+// terrain (0..1), 6 Standard layers weighted by two smooth splat maps (layers 4 and 5 in splat 1), each with its own base
+// colour texture, two of them with normal maps; magnified (texels span many pixels: footprint filters are bilinear mip 0).
+// Per pixel against a double replica: weights = bilinear splats (texel centres at the grid's corners) normalised by their sum, base colour = sum w (material
+// colour x bilinear tap) (sRGB codes), normal = normalize(T m + B m_y + N) of the weighted mean slope (moments mip 0).
+void testTerrain(TestFrame& tf, Report& report)
+{
+    scene::Scene s;
+    s.name = "terrain test";
+    const uint32_t SP = 16, LT = 8;
+    std::vector<uint32_t> splatTex(2), layerTex(6), normalTex(2);
+    auto weightAt = [&](uint32_t layer, uint32_t x, uint32_t y) {  // smooth, overlapping bumps per layer
+        const double cx = 3 + 2.0 * layer, cy = 4 + 1.3 * layer;
+        const double d2 = ((x - cx) * (x - cx) + (y - cy) * (y - cy)) / 18.0;
+        return std::exp(-d2);
+    };
+    for (uint32_t k = 0; k < 2; ++k)
+    {
+        scene::Texture t;
+        t.name = "splat";
+        t.width = t.height = SP;
+        t.format = scene::TextureFormat::Rgba8Linear;
+        t.wrap = false;
+        for (uint32_t y = 0; y < SP; ++y)
+            for (uint32_t x = 0; x < SP; ++x)
+                for (uint32_t c = 0; c < 4; ++c)
+                {
+                    const uint32_t layer = 4 * k + c;
+                    t.texels.push_back(layer < 6 ? (uint8_t)std::lround(255 * weightAt(layer, x, y)) : 0);
+                }
+        splatTex[k] = (uint32_t)s.textures.size();
+        s.textures.push_back(t);
+    }
+    for (uint32_t l = 0; l < 6; ++l)
+    {
+        scene::Texture t;
+        t.name = "layer";
+        t.width = t.height = LT;
+        for (uint32_t y = 0; y < LT; ++y)
+            for (uint32_t x = 0; x < LT; ++x)
+            {
+                t.texels.push_back((uint8_t)(120 + 60 * std::sin(0.7 * x + l)));
+                t.texels.push_back((uint8_t)(110 + 70 * std::cos(0.5 * y + 2 * l)));
+                t.texels.push_back((uint8_t)(100 + 50 * std::sin(0.3 * (x + y) + l)));
+                t.texels.push_back(255);
+            }
+        layerTex[l] = (uint32_t)s.textures.size();
+        s.textures.push_back(t);
+    }
+    for (uint32_t k = 0; k < 2; ++k)
+    {
+        scene::Texture t;
+        t.name = "layer bumps";
+        t.width = t.height = LT;
+        t.format = scene::TextureFormat::Rg8Normal;
+        for (uint32_t y = 0; y < LT; ++y)
+            for (uint32_t x = 0; x < LT; ++x)
+            {
+                t.texels.push_back((uint8_t)(128 + 35 * std::sin(0.8 * x + 3 * k)));
+                t.texels.push_back((uint8_t)(128 + 35 * std::cos(0.6 * y + k)));
+            }
+        normalTex[k] = (uint32_t)s.textures.size();
+        s.textures.push_back(t);
+    }
+    for (uint32_t l = 0; l < 6; ++l)
+    {
+        scene::Material m;
+        m.name = "layer";
+        m.baseColor = { 0.9f - 0.1f * l, 0.8f, 0.7f + 0.05f * l };
+        m.roughness = 0.5f;
+        m.baseColorTexture = layerTex[l];
+        if (l == 1 || l == 4) m.normalTexture = normalTex[l == 1 ? 0 : 1];
+        s.materials.push_back(m);
+    }
+    scene::Material terrain;
+    terrain.name = "terrain";
+    terrain.cls = scene::MaterialClass::Terrain;
+    terrain.terrainSplat[0] = splatTex[0];
+    terrain.terrainSplat[1] = splatTex[1];
+    for (uint32_t l = 0; l < 6; ++l) terrain.terrainLayers.push_back({ l, { 3.0f + l, 2.5f + 0.5f * l }, { 0.1f * l, -0.05f * l } });
+    const uint32_t terrainMaterial = (uint32_t)s.materials.size();
+    s.materials.push_back(terrain);
+    const uint32_t grid = addGridPlane(s, 20, 8, 0.05f, terrainMaterial, { 10, 0, 10 });  // uv0 = x / 20, z / 20 over [0, 20]
+    scene::Instance inst;
+    inst.mesh = grid;
+    s.instances.push_back(inst);
+    s.cameras.push_back(lookAt({ 10, 9, 21 }, { 10, 0, 9 }, "terrain"));
+    tf.setScene(s);
+
+    const uint32_t W = 960, H = 540;
+    std::shared_ptr<std::vector<uint8_t>> vis, gb;
+    ViewDesc viewDesc;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, W, H, 0);
+        viewDesc = v.view;
+        tf.vis.record(fc, v);
+        tracks::materialResolve(fc, v);
+        vis = tf.readback(fc, v.visId);
+        gb = tf.readback(fc, v.gbuffer);
+    });
+
+    auto srgbToLinear = [](double c) { return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4); };
+    auto oetf = [](double c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * std::pow(c, 1 / 2.4) - 0.055; };
+    auto bilinear = [](double u, double v, uint32_t size, bool wrap, auto&& texel) {
+        const double pu = u * size - 0.5, pv = v * size - 0.5;
+        const int iu = (int)std::floor(pu), iv = (int)std::floor(pv);
+        const double fu = pu - iu, fv = pv - iv;
+        auto at = [&](int x, int y) {
+            if (wrap) x = ((x % (int)size) + (int)size) % (int)size, y = ((y % (int)size) + (int)size) % (int)size;
+            else x = std::clamp(x, 0, (int)size - 1), y = std::clamp(y, 0, (int)size - 1);
+            return texel(x, y);
+        };
+        return at(iu, iv) * ((1 - fu) * (1 - fv)) + at(iu + 1, iv) * (fu * (1 - fv)) + at(iu, iv + 1) * ((1 - fu) * fv) + at(iu + 1, iv + 1) * (fu * fv);
+    };
+    // mip 0 of the two normal maps' moments as uploaded
+    material::MipChain chains[2] = { material::buildMipChain(s, normalTex[0]), material::buildMipChain(s, normalTex[1]) };
+    double worstBase = 0, worstNormal = 0;
+    uint32_t judged = 0, blended = 0;
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+        {
+            const uint32_t id = texelOf<uint32_t>(*vis, W, x, y);
+            if (id == 0) continue;
+            const Replica r = replicate(tf, viewDesc, id, x, y);
+            double w[6], sum = 0;
+            for (uint32_t l = 0; l < 6; ++l)
+            {
+                const scene::Texture& st = s.textures[splatTex[l / 4]];
+                const double k = (SP - 1.0) / SP, h = 0.5 / SP;  // texel centres at the terrain's corners
+                w[l] = bilinear(r.uv[0] * k + h, r.uv[1] * k + h, SP, false, [&](int tx, int ty) { return D3{ st.texels[((size_t)ty * SP + tx) * 4 + l % 4] / 255.0, 0, 0 }; }).x;
+                sum += w[l];
+            }
+            if (!(sum > 0)) continue;
+            int active = 0;
+            D3 base{};
+            double mx = 0, my = 0;
+            for (uint32_t l = 0; l < 6; ++l)
+            {
+                const double wl = w[l] / sum;
+                if (wl <= 0) continue;
+                active += wl > 0.01;
+                const scene::TerrainLayer& tl = terrain.terrainLayers[l];
+                const double u = r.uv[0] * tl.scale.x + tl.offset.x, v = r.uv[1] * tl.scale.y + tl.offset.y;
+                const scene::Texture& bt = s.textures[layerTex[l]];
+                const D3 tap = bilinear(u, v, LT, true, [&](int tx, int ty) {
+                    const uint8_t* p = &bt.texels[((size_t)ty * LT + tx) * 4];
+                    return D3{ srgbToLinear(p[0] / 255.0), srgbToLinear(p[1] / 255.0), srgbToLinear(p[2] / 255.0) };
+                });
+                const scene::Material& lm = s.materials[l];
+                base = base + D3{ tap.x * lm.baseColor.x, tap.y * lm.baseColor.y, tap.z * lm.baseColor.z } * wl;
+                if (lm.normalTexture != scene::kNone)
+                {
+                    const material::MipChain& ch = chains[l == 1 ? 0 : 1];
+                    const double S = ch.slopeRange;
+                    const D3 mean = bilinear(u, v, LT, true, [&](int tx, int ty) {
+                        uint16_t a, b;
+                        std::memcpy(&a, ch.levels[0].data() + ((size_t)ty * LT + tx) * 8, 2);
+                        std::memcpy(&b, ch.levels[0].data() + ((size_t)ty * LT + tx) * 8 + 2, 2);
+                        return D3{ ((double)(float)(a / 65535.0) * 2 - 1) * S, ((double)(float)(b / 65535.0) * 2 - 1) * S, 0 };
+                    });
+                    mx += wl * mean.x;
+                    my += wl * mean.y;
+                }
+            }
+            blended += active >= 2;
+            // the grid: N = +y, T = +x (tangents (1, 0, 0, 1)), B = sign x cross(N, T) = (0, 0, -1)
+            const D3 expectedNormal = norm(D3{ mx, 1, -my });
+            const uint2 packed = texelOf<uint2>(*gb, W, x, y);
+            const double got[3] = { (packed.y & 0xFF) / 255.0, ((packed.y >> 8) & 0xFF) / 255.0, ((packed.y >> 16) & 0xFF) / 255.0 };
+            const double want[3] = { base.x, base.y, base.z };
+            for (int c = 0; c < 3; ++c) worstBase = std::max(worstBase, std::abs(got[c] - oetf(std::min(want[c], 1.0))) * 255);
+            worstNormal = std::max(worstNormal, len(octDecode(packed.x) - expectedNormal));
+            ++judged;
+        }
+    logf("terrain: %u pixels judged, %u with two or more layers above 1 %%\n", judged, blended);
+    // (the G-buffer's rounding, half a code, and the texture unit's fixed-point bilinear weights: splat and layer taps)
+    report(judged > 100000 && blended > 20000 && worstBase <= 2.5, "terrain: base colour = splat-weighted layer taps (sRGB codes)", worstBase, 2.5);
+    report(worstNormal < 5e-3, "terrain: normal = weighted mean slope of the layers' moments (octahedral 16 bits)", worstNormal, 5e-3);
+}
 } // namespace
 
 int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, warp = false, cutOnly = false;
+        bool debugLayer = true, warp = false, cutOnly = false, terrainOnly = false;
         for (int i = 1; i < argc; ++i)
         {
             if (std::string(argv[i]) == "--no-debug-layer") debugLayer = false;
             if (std::string(argv[i]) == "--warp") warp = true;
             if (std::string(argv[i]) == "--cut") cutOnly = true;
+            if (std::string(argv[i]) == "--terrain") terrainOnly = true;
         }
         ComPtr<ID3D12Device> warpDevice;
         if (warp)  // --warp: the software adapter (no debug layer)
@@ -974,6 +1155,12 @@ int main(int argc, char** argv)
         }
         Report report;
         TestFrame tf(debugLayer, false, warpDevice.Get());
+        if (terrainOnly)  // --terrain: test 7 alone
+        {
+            testTerrain(tf, report);
+            logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
+            return report.failures ? 1 : 0;
+        }
         if (cutOnly)  // --cut: test 6 alone
         {
             testCutFace(tf, report);
@@ -985,6 +1172,7 @@ int main(int argc, char** argv)
         testLean(tf, report);
         testFacingAway(tf, report);
         testCutFace(tf, report);
+        testTerrain(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

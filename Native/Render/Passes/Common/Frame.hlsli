@@ -32,7 +32,8 @@ cbuffer FrameConstants : register(b1)
     uint g_materialCount, g_sceneRevision, g_lodLevelClusters, g_specularAlbedoLut;
     uint g_coverageMaskLut, g_giRaysThisFrame, g_debugDraw;
     float g_viewModelScale;  // view-model projection remap, 1 = none (ViewModel.hlsli)  // g_debugDraw: DebugDraw.hlsli (0xFFFFFFFF = off)
-    uint g_morphRecords, g_morphData, g_patchData, g_framePad0;  // C4 morphs, C5 terrain patch slots (VisibilityCommon.hlsli)
+    uint g_morphRecords, g_morphData, g_patchData;  // C4 morphs, C5 terrain patch slots (VisibilityCommon.hlsli)
+    uint g_terrainLayers;                           // v1.74 Terrain-class material layers (Scene.hlsli GpuTerrainLayer)
 };
 
 // Reversed-Z infinite projection: device depth d = near / viewDistance (1 at the near plane, 0 = sky).

@@ -1228,6 +1228,32 @@ UNX_TEST(scene_roundtrip_and_validation)
     badCut.materials.back().cutScale = 0;
     CHECK(throws([&] { scene::validate(badCut); }));
 
+    // v1.74 terrain block: splats and layers survive the round trip; layer materials must be Standard, splats Rgba8Linear
+    scene::Scene ter = s;
+    scene::Texture splat;
+    splat.name = "splat";
+    splat.width = splat.height = 2;
+    splat.format = scene::TextureFormat::Rgba8Linear;
+    splat.texels.assign(16, 64);
+    ter.textures.push_back(splat);
+    scene::Material t = s.materials[0];
+    t.cls = scene::MaterialClass::Terrain;
+    t.terrainSplat[0] = (uint32_t)ter.textures.size() - 1;
+    t.terrainLayers = { { 0, { 4, 5 }, { 0.25f, -0.5f } }, { 0, { 2, 2 }, { 0, 0 } } };
+    ter.materials.push_back(t);
+    scene::validate(ter);
+    const scene::Scene terBack = scene::deserialize(scene::serialize(ter));
+    const scene::Material& t2 = terBack.materials.back();
+    CHECK(t2.cls == scene::MaterialClass::Terrain && t2.terrainSplat[0] == t.terrainSplat[0] && t2.terrainSplat[1] == scene::kNone && t2.terrainLayers.size() == 2 &&
+          t2.terrainLayers[0].scale.y == 5 && t2.terrainLayers[0].offset.y == -0.5f);
+    CHECK(scene::serialize(terBack) == scene::serialize(ter));
+    scene::Scene badTer = ter;
+    badTer.materials.back().terrainLayers.resize(5);  // above 4 layers without splat 1
+    CHECK(throws([&] { scene::validate(badTer); }));
+    badTer = ter;
+    badTer.materials.back().terrainLayers[1].material = (uint32_t)badTer.materials.size() - 1;  // a terrain layer that is not Standard
+    CHECK(throws([&] { scene::validate(badTer); }));
+
     // hair absorption: melanin (d'Eon 2011) and target colour (Chiang 2016, the inverse of its albedo fit)
     const float3 melanin = scene::model::hairAbsorption(hair);
     CHECK(std::abs(melanin.x - (0.419f * 1.3f + 0.187f * 0.2f)) < 1e-6f && std::abs(melanin.z - (1.37f * 1.3f + 1.05f * 0.2f)) < 1e-6f);

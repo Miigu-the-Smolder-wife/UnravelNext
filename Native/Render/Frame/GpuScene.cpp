@@ -110,7 +110,7 @@ GpuScene::~GpuScene()
     for (Buffer* b : { &m_instanceBuffer, &m_meshBuffer, &m_submeshBuffer, &m_vertexBuffer, &m_indexBuffer, &m_materialBuffer, &m_materialRemapBuffer, &m_lightBuffer,
                        &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable, &m_coverageTable, &m_clusterBuffer, &m_lodLevelBuffer,
                        &m_lodLevelClusterBuffer,
-                       &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer, &m_morphRecords, &m_morphData, &m_patchData })
+                       &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer, &m_morphRecords, &m_morphData, &m_patchData, &m_terrainLayerBuffer })
         release(*b);
     for (auto& [name, b] : m_named) release(b);
     DescriptorHeaps& h = m_device.descriptors();
@@ -426,6 +426,7 @@ void GpuScene::upload(const scene::Scene& s)
         for (uint32_t slot = gpu::kPatchSlots; slot-- > 0;) m_patchFreeSlots.push_back(slot);
     }
     m_patchSlotOf.assign(m_instances.size() + rc.instances, gpu::kNone);
+    packTerrainLayers(materials);
     m_materialBuffer = createStructured(materials.data(), sizeof(gpu::Material), materials.size(), L"scene materials");
     m_materialRemapBuffer = createStructured(remap.data(), sizeof(uint32_t), remap.size(), L"scene material remap");
     m_lightBuffer = createStructured(lights.data(), sizeof(gpu::Light), lights.size(), L"scene lights");
@@ -465,6 +466,29 @@ void GpuScene::upload(const scene::Scene& s)
     const std::vector<uint32_t>& coverage = coverageMaskTable();
     m_coverageTable = createStructured(coverage.data(), 2 * sizeof(uint32_t), coverage.size() / 2, L"coverage mask LUT");
     if (!m_clusterBuffer.resource) setClusters(ClusterData{});
+}
+
+// Terrain-class layers (v1.74) of every material, in material order; each terrain material's word points at its layers.
+void GpuScene::packTerrainLayers(std::vector<gpu::Material>& materials)
+{
+    const scene::Scene& s = *m_source;
+    std::vector<gpu::TerrainLayer> layers;
+    for (size_t i = 0; i < materials.size() && i < s.materials.size(); ++i)
+    {
+        const scene::Material& m = s.materials[i];
+        materials[i].terrainLayers = 0;
+        if (m.cls != scene::MaterialClass::Terrain) continue;
+        materials[i].terrainLayers = (uint32_t)layers.size() | (uint32_t)m.terrainLayers.size() << 24;
+        // every record carries the splat sizes (width | height << 16; 0 = none) for the texel-centre rule (MaterialTerrain.hlsli)
+        uint32_t splatSize[2] = { 0, 0 };
+        for (uint32_t k = 0; k < 2; ++k)
+            if (m.terrainSplat[k] != scene::kNone && m.terrainSplat[k] < s.textures.size())
+                splatSize[k] = s.textures[m.terrainSplat[k]].width | s.textures[m.terrainSplat[k]].height << 16;
+        for (const scene::TerrainLayer& l : m.terrainLayers)
+            layers.push_back({ l.material, l.scale.x, l.scale.y, l.offset.x, l.offset.y, { splatSize[0], splatSize[1] }, 0 });
+    }
+    release(m_terrainLayerBuffer);
+    if (!layers.empty()) m_terrainLayerBuffer = createStructured(layers.data(), sizeof(gpu::TerrainLayer), layers.size(), L"terrain layers");
 }
 
 gpu::Material GpuScene::packMaterial(const scene::Material& m) const
@@ -637,6 +661,7 @@ void GpuScene::setMaterials(std::span<const uint32_t> indices)
         else m_materials.push_back(g);
     }
     release(m_materialBuffer);
+    packTerrainLayers(m_materials);
     m_materialBuffer = createStructured(m_materials.data(), sizeof(gpu::Material), m_materials.size(), L"scene materials");
 }
 
@@ -738,6 +763,7 @@ void GpuScene::setMaterialTextures(const std::vector<gpu::MaterialTextures>& per
     if (!changed) return;
     m_revision = revision;
     release(m_materialBuffer);
+    packTerrainLayers(m_materials);
     m_materialBuffer = createStructured(m_materials.data(), sizeof(gpu::Material), m_materials.size(), L"scene materials");
 }
 
@@ -1556,6 +1582,7 @@ void GpuScene::fill(gpu::FrameConstants& f) const
     f.morphRecords = m_morphRecords.srv;
     f.morphData = m_morphData.srv;
     f.patchData = m_patchData.resource ? m_patchData.srv : gpu::kNone;
+    f.terrainLayers = m_terrainLayerBuffer.resource ? m_terrainLayerBuffer.srv : gpu::kNone;
     f.instanceCount = (uint32_t)m_instances.size();
     f.meshCount = (uint32_t)m_meshes.size();
     f.clusterCount = m_clusterBuffer.count;

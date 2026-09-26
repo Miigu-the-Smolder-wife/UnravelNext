@@ -239,6 +239,9 @@ private:
     Buffer m_clusterBuffer, m_lodLevelBuffer, m_lodLevelClusterBuffer, m_clusterVertexIndexBuffer, m_clusterTriangleBuffer;
     // C4 morphs: records (float4 rows, updatable), mesh data (raw words), CPU mirrors.
     Buffer m_morphRecords, m_morphData;
+    // v1.74 Terrain-class material layers (gpu::TerrainLayer; each terrain material's terrainLayers word points here).
+    Buffer m_terrainLayerBuffer;
+    void packTerrainLayers(std::vector<gpu::Material>& materials);
     std::vector<float4> m_morphRows;
     std::vector<uint32_t> m_morphMeshBlock;  // per mesh: word offset of its block in m_morphData, kNone = no morph
     std::vector<uint64_t> m_morphFrame;      // per instance: frame of its latest setMorph

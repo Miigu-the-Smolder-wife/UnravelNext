@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.73, 2026-09-27)
+# UnravelNext 인터페이스 (v1.74, 2026-09-27)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -734,6 +734,13 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.74 (2026-09-27, 렌더 A: Terrain 재질 클래스, C5 쿠킹 지형 타일의 합류; FEATURES_GAME 9 "직접 블렌딩 경로"):
+  - **`scene::MaterialClass::Terrain` 7**: `Material::terrainSplat[2]`(Rgba8Linear, 레이어 i의 가중 = 스플랫 ⌊i/4⌋의 채널 i mod 4)·`terrainLayers`(1..8개 { Standard 재질, uv 척도, 오프셋 }). 장면 파일의 "TERR" 블록, `scene::validate`(레이어 재질은 Standard, 4개 넘으면 스플랫 1 필요).
+  - **GPU**: `gpu::Material::terrainLayers`(예약 칸 자리: 첫 레이어 | 개수 << 24), `gpu::TerrainLayer` 32 B { 재질, 척도, 오프셋, 스플랫 0·1 크기(폭 | 높이 << 16) }, `FrameConstants::terrainLayers`(framePad0 자리). M 텍스처 세트는 스플랫 SRV를 occlusion·slopeRange 칸에 싣는다(이 클래스에는 없는 슬롯).
+  - **해석(M, MaterialTerrain.hlsli)**: 스플랫 텍셀 중심은 지형 모서리(Unity 규칙, uv0 × (N−1)/N + 0.5/N), 가중 = footprint 필터 표본 / 합, 기본색·거칠기·금속 = 가중 합, 법선 = LEAN 혼합(평균 Σw m, 분산 Σw(v + |m|²) − |m̄|²).
+  - **호스트**: `UNX_MATERIAL_CUT` 6·`UNX_MATERIAL_TERRAIN` 7, 선택 내보내기 `UnxSceneSetTerrainLayers`(ABI 6 안, 커밋 전; `UnxTerrainLayer` 32 B). Unity 브리지는 쿠킹 타일("UnravelNext Terrain Cook" 자식)의 재질을 지형의 Terrain 재질로 바꾼다(TerrainLayer → Standard, 알파맵 → 스플랫).
+  - 아직 없는 곳: 대역 B coverage 조각(coverageSpecial 종류 5로 M 선셰이딩, Cut과 같이), R 적중 셰이딩과 C 기준(RtScene)은 상수 색을 본다 → 각 트랙 요청.
+  - 시험: MaterialTests 7(--terrain, WARP): 6 레이어·스플랫 2장, 286,898 px, 기본색 ≤ 0.87 sRGB 코드(한계 2.5), 법선 8.5e-4(한계 5e-3); unit scene_roundtrip_and_validation(TERR 왕복·거부 2건). 하드웨어 실행은 GPU 보류 뒤.
 - v1.73 (2026-09-27, 렌더 C: 특수 기록 목록(A 요청), M 선셰이딩 클래스(A 요청), A14 보조 뷰의 V·프레임 부분, 바다 뷰 격자의 V 부분(W 합의)):
   - **`ViewResources::coverageSpecial`**(raw): 머리 { 개수, DispatchIndirect(64/그룹, 1, 1) }, 이어서 uint2 { coverageRecords 원소, 종류 }. 종류 1 머리카락(COV_HAIR_ID), 2 스트림(COV_STREAM_ID: 물 가장자리·유체·바다), 5 M 선셰이딩 클러스터 기록. scatter가 파동당 원자 1회로 채우고 순서는 정해지지 않는다. 용량은 필요량의 1.5배(바닥 `visibility.coverage_special_min`)이고 넘치면 OVERFLOW_COVERAGE_SPECIAL. 소유 패스가 `coverageRecordRadiance[element]`에 미리 셰이딩하고 합성은 값만 읽는다.
   - **`COV_PRESHADE_ID` 0x40000000**(기록 visId 접두 01): CoverageRaster.ms가 M 선셰이딩 클래스(지금 목록: Cut)의 클러스터 기록에 켠다. 해독은 `coverageClusterVisId(id)`. V 설정이 `visibility.max_visible_clusters` ≤ 2^23을 강제한다(클러스터 visId < 2^30).

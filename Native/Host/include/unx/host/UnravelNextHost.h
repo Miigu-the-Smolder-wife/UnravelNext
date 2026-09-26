@@ -40,7 +40,8 @@ enum UnxResult
                             //    UnxSceneAddBlendShape, UnxSceneSetVertexAnimation, UnxFrameSetMorphs (C4),
                             //    UnxFrameSetOriginShift (C9), UnxSceneReserveRuntime, UnxFrameAddRuntimeMesh,
                             //    UnxFrameRemoveRuntimeMesh, UnxFrameAddRuntimeInstance, UnxFrameRemoveRuntimeInstance,
-                            //    UnxFrameSetRuntimeTransforms (C2b), UnxFrameSetTerrainDeformation (C5), UnxFrameSetOcean (B7)
+                            //    UnxFrameSetRuntimeTransforms (C2b), UnxFrameSetTerrainDeformation (C5), UnxFrameSetOcean (B7),
+                            //    UnxSceneSetTerrainLayers (C5 terrain material, v1.74)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -149,6 +150,8 @@ enum UnxMaterialClass  // scene::MaterialClass
     UNX_MATERIAL_WATER = 3,
     UNX_MATERIAL_GLASS = 4,
     UNX_MATERIAL_SUBSURFACE = 5,
+    UNX_MATERIAL_CUT = 6,       // destruction cut faces (A11; default cutScale 1, damage width 0.01 m)
+    UNX_MATERIAL_TERRAIN = 7,   // terrain layer blending (v1.74): its layers come from UnxSceneSetTerrainLayers
 };
 
 // INTERFACES_KO.md 8.1 material v1.
@@ -493,6 +496,20 @@ typedef struct UnxOceanDesc
 static_assert(sizeof(UnxOceanDesc) == 72, "UnxOceanDesc is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxFrameSetOcean(UnxRenderer r, const UnxOceanDesc* ocean);
+
+// C5 terrain material (optional export within ABI 6, INTERFACES v1.74; before UnxSceneCommit): the layers of a material
+// added with UNX_MATERIAL_TERRAIN - 1..8 Standard materials read at layer uv = uv0 x scale + offset, weighted by channel
+// i % 4 of splat texture i / 4 (UNX_TEXTURE_RGBA8_LINEAR; splat1 = UNX_NONE with at most 4 layers).
+typedef struct UnxTerrainLayer
+{
+    uint32_t material;                  // a Standard-class material of the scene
+    float scale[2], offset[2];
+    uint32_t reserved[3];               // 0
+} UnxTerrainLayer;
+#ifdef __cplusplus
+static_assert(sizeof(UnxTerrainLayer) == 32, "UnxTerrainLayer is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxSceneSetTerrainLayers(UnxRenderer r, uint32_t material, uint32_t splat0, uint32_t splat1, const UnxTerrainLayer* layers, uint32_t count);
 
 // Loads a .unxscene file (INTERFACES 6.2) as the renderer's content: textures, materials, meshes, skeletons, instances
 // (their flags included), lights, sun, atmosphere and wind, with the file's indices. Only before any content was added and

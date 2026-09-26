@@ -224,6 +224,41 @@ void writeCut(Writer& w, const Scene& s)
     }
 }
 
+// C5 terrain extension block, written only when the scene has a Terrain-class material: u32 tag "TERR", u64 count, then
+// per terrain material its index, the two splat textures, the layer count and per layer (material, scale xy, offset xy).
+constexpr uint32_t kTerrainTag = 0x52524554u;  // "TERR"
+
+bool anyTerrain(const Scene& s)
+{
+    for (const Material& m : s.materials)
+        if (m.cls == MaterialClass::Terrain) return true;
+    return false;
+}
+
+void writeTerrain(Writer& w, const Scene& s)
+{
+    w.pod(kTerrainTag);
+    uint64_t count = 0;
+    for (const Material& m : s.materials) count += m.cls == MaterialClass::Terrain;
+    w.pod(count);
+    for (uint32_t i = 0; i < s.materials.size(); ++i)
+    {
+        const Material& m = s.materials[i];
+        if (m.cls != MaterialClass::Terrain) continue;
+        w.pod(i);
+        w.pod(m.terrainSplat[0]);
+        w.pod(m.terrainSplat[1]);
+        const uint32_t layers = (uint32_t)m.terrainLayers.size();
+        w.pod(layers);
+        for (const TerrainLayer& l : m.terrainLayers)
+        {
+            w.pod(l.material);
+            w.pod(l.scale);
+            w.pod(l.offset);
+        }
+    }
+}
+
 bool anyMorph(const Scene& s)
 {
     for (const Mesh& m : s.meshes)
@@ -282,6 +317,7 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anyMorph(s)) writeMorph(w, s);
     if (anyHair(s)) writeHair(w, s);
     if (anyCut(s)) writeCut(w, s);
+    if (anyTerrain(s)) writeTerrain(w, s);
     return std::move(w.out);
 }
 
@@ -362,6 +398,28 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kTerrainTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.materials.size()) fail("unxscene: terrain parameters of material %u of %zu", i, s.materials.size());
+            Material& m = s.materials[i];
+            m.terrainSplat[0] = r.pod<uint32_t>();
+            m.terrainSplat[1] = r.pod<uint32_t>();
+            const uint32_t layers = r.pod<uint32_t>();
+            if (layers > 8) fail("unxscene: terrain material %u has %u layers (at most 8)", i, layers);
+            m.terrainLayers.resize(layers);
+            for (TerrainLayer& l : m.terrainLayers)
+            {
+                l.material = r.pod<uint32_t>();
+                l.scale = r.pod<float2>();
+                l.offset = r.pod<float2>();
+            }
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
     if (tag != 0) fail("unxscene: unknown extension block 0x%08x", tag);
     if (r.at != bytes.size()) fail("unxscene: %zu trailing bytes", bytes.size() - r.at);
     return s;
@@ -404,6 +462,21 @@ void validate(const Scene& s)
             fail("material %zu '%s': hair needs melanin >= 0, beta_N in (0, 1], a finite tilt and ior > 1", i, m.name.c_str());
         if (m.cls == MaterialClass::Cut && !(m.cutScale > 0 && m.cutDamageWidth >= 0 && std::isfinite(m.cutScale) && std::isfinite(m.cutDamageWidth)))
             fail("material %zu '%s': a cut material needs cutScale > 0 and cutDamageWidth >= 0", i, m.name.c_str());
+        if (m.cls == MaterialClass::Terrain)
+        {
+            const size_t layers = m.terrainLayers.size();
+            if (layers < 1 || layers > 8) fail("material %zu '%s': a terrain material needs 1..8 layers (has %zu)", i, m.name.c_str(), layers);
+            for (uint32_t k = 0; k < (layers > 4 ? 2u : 1u); ++k)
+                if (m.terrainSplat[k] >= s.textures.size() || s.textures[m.terrainSplat[k]].format != TextureFormat::Rgba8Linear)
+                    fail("material %zu '%s': terrain splat map %u must be an Rgba8Linear texture", i, m.name.c_str(), k);
+            for (const TerrainLayer& l : m.terrainLayers)
+            {
+                if (l.material >= s.materials.size() || s.materials[l.material].cls != MaterialClass::Standard)
+                    fail("material %zu '%s': terrain layer material %u must be a Standard-class material", i, m.name.c_str(), l.material);
+                if (!(std::isfinite(l.scale.x) && std::isfinite(l.scale.y) && l.scale.x != 0 && l.scale.y != 0 && std::isfinite(l.offset.x) && std::isfinite(l.offset.y)))
+                    fail("material %zu '%s': terrain layer uv scale must be finite and non-zero, offset finite", i, m.name.c_str());
+            }
+        }
     }
     for (size_t i = 0; i < s.meshes.size(); ++i)
     {

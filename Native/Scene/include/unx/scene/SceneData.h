@@ -49,6 +49,15 @@ enum class MaterialClass : uint8_t
     Glass = 4,       // thin/solid dielectric (P4)
     Subsurface = 5,  // skin and similar (P4)
     Cut = 6,         // destruction cut faces (A11): Standard shading, textures by object-space triplanar projection
+    Terrain = 7,     // terrain layer blending (C5, FEATURES_GAME 9): Standard shading of up to 8 splat-weighted layers
+};
+
+// A layer of a Terrain-class material: a Standard material read at layer uv = terrain uv0 x scale + offset.
+struct TerrainLayer
+{
+    uint32_t material = kNone;  // a Standard-class material of the scene
+    float2 scale{ 1, 1 };
+    float2 offset{ 0, 0 };
 };
 
 struct Material
@@ -80,6 +89,10 @@ struct Material
     // boundary edges is cutDamageWidth metres wide.
     float cutScale = 1.0f;                   // > 0
     float cutDamageWidth = 0.01f;            // >= 0
+    // Terrain class (C5 cooked terrain tiles, FEATURES_GAME 9 direct blending): layer i's weight is channel i % 4 of splat
+    // map i / 4 (Rgba8Linear, over the terrain's uv0), normalised by the weights' sum; 1..8 layers (splat 1 needed above 4).
+    uint32_t terrainSplat[2] = { kNone, kNone };
+    std::vector<TerrainLayer> terrainLayers;
 };
 
 struct Submesh

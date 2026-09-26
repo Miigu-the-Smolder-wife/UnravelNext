@@ -245,6 +245,19 @@ public:
         list.push_back(std::move(value));
         return (uint32_t)(list.size() - 1);
     }
+    // C5 terrain material (before commit): the layers and splat textures of a Terrain-class material (the rest is checked
+    // by scene::validate at commit).
+    void setTerrainLayers(uint32_t material, uint32_t splat0, uint32_t splat1, const std::vector<scene::TerrainLayer>& layers)
+    {
+        requireOpen();
+        if (material >= m_scene.materials.size() || m_scene.materials[material].cls != scene::MaterialClass::Terrain)
+            fail("terrain layers: material %u is not a Terrain-class material", material);
+        if (layers.empty() || layers.size() > 8) fail("terrain layers: %zu layers (1..8)", layers.size());
+        scene::Material& m = m_scene.materials[material];
+        m.terrainSplat[0] = splat0;
+        m.terrainSplat[1] = splat1;
+        m.terrainLayers = layers;
+    }
     SceneCommitInfo commit();
     // Quality override before commit ("section.key=value", QualityConfig::applyOverride): a game's post terms, for example.
     void overrideQuality(const std::string& assignment);
