@@ -4,6 +4,7 @@
 // point and spot lights), so the renderer's hits and the reference agree term by term. The light data is RayScene's
 // local-light grid (RtSceneSrvs.pad = its raw SRV, 0xFFFFFFFF: no local lights): header (RtLightGrid, then the offsets of
 // the lights, cell starts and cell lights), the lights as RtLight.
+// FX particle lights (A3) join the choice (rtFxWeight below).
 // Estimate of the hit's outgoing radiance from local lights: f(v, wi) L cos / (pdf x P(light)), times the light's
 // visibility (one shadow ray; lights that cast no shadow: 1, as in the reference). Unbiased for the sum over the cell's
 // lights; the hit's history (GI texels, reflection time integration) averages the one-sample noise.
@@ -32,6 +33,93 @@ uint rtLightCellLight(uint k)
     return b.Load(b.Load(56) + k * 4);
 }
 
+// FX particle lights (A3, S_STATUS_KO.md 10): gpu::Light point records at the scene light buffer's tail [N, N + F), no
+// shadows, in groups of 32 consecutive lights (FxLightGroups.hlsl; the light data header's word 21, 0xFFFFFFFF: none):
+// { F, G } then per group its bounding sphere (of the lights' range spheres), sum of phi = intensity x luminance, first
+// light and count. At x a group weighs w_g = sum phi / max(|x - centre|^2, 1 m^2) inside its sphere and 0 outside (where
+// none of its lights reaches: exact), W = sum w_g; the FX set is taken with probability W / (W_grid + W) (the grid's
+// total is the same kind of quantity, intensity x luminance / d^2), a group with w_g / W, then one of its lights with
+// its exact importance at x (rtLightImportance) over the group's sum. Every light that reaches x has a nonzero
+// probability, so the estimate stays unbiased; the weights put the choices near x (a power-only choice starved near FX
+// lights beside a bright far one: FxLightHits). Cost per hit: G sphere tests twice (sum, then choice) + 32 records;
+// G <= 1024 at the 32,768-light limit.
+RtLight rtFxLight(uint j)
+{
+    const GpuLight g = loadLight(g_lightCount + j);
+    RtLight l;
+    l.position = g.position;
+    l.type = kRtLightPoint;
+    l.forward = g.forward;
+    l.intensity = g.intensity;
+    l.right = g.right;
+    l.range = max(g.range, 1e-3);
+    l.up = cross(g.forward, g.right);
+    l.spotScale = g.spotScale;
+    l.color = g.color;
+    l.spotOffset = g.spotOffset;
+    l.size = g.size;
+    l.castShadow = 0;
+    l.pad = 0;
+    return l;
+}
+float rtFxGroupWeight(ByteAddressBuffer f, uint g, float3 x)
+{
+    const float4 sphere = asfloat(f.Load4(16 + 32 * g));
+    const float3 d = x - sphere.xyz;
+    const float d2 = dot(d, d);
+    return d2 < sphere.w * sphere.w ? asfloat(f.Load(32 + 32 * g)) / max(d2, 1.0) : 0.0;
+}
+// The FX set's weight W at x (0: none reaches) and the groups' SRV.
+float rtFxWeight(ByteAddressBuffer header, float3 x, out uint groups)
+{
+    groups = header.Load(84);
+    if (groups == 0xFFFFFFFFu) return 0;
+    ByteAddressBuffer f = ResourceDescriptorHeap[groups];
+    const uint G = f.Load(4);
+    float W = 0;
+    [loop] for (uint g = 0; g < G; ++g) W += rtFxGroupWeight(f, g, x);
+    return W;
+}
+// A light j (0-based in the tail) with its probability given the FX set: w_g / W x importance_j / sum over the group;
+// ~0u when the chosen group's lights do not reach x (the sample then has no contribution).
+uint rtFxChoose(uint groups, float3 x, float W, float u, out float probability)
+{
+    ByteAddressBuffer f = ResourceDescriptorHeap[groups];
+    const uint G = f.Load(4);
+    probability = 0;
+    const float target = u * W;
+    float cum = 0, wg = 0;
+    uint g = ~0u;
+    [loop] for (uint k = 0; k < G; ++k)
+    {
+        const float w = rtFxGroupWeight(f, k, x);
+        if (w <= 0) continue;
+        cum += w;
+        g = k, wg = w;
+        if (cum > target) break;
+    }
+    if (g == ~0u) return ~0u;
+    const uint2 range = f.Load2(32 + 32 * g + 4);  // first, count
+    float total = 0;
+    for (uint k = 0; k < range.y; ++k) total += rtLightImportance(rtFxLight(range.x + k), x);
+    if (!(total > 0)) return ~0u;
+    // The draw's remainder inside the chosen group's interval: uniform in [0, 1) given the group.
+    const float t2 = saturate((target - (cum - wg)) / wg) * total;
+    float c2 = 0;
+    uint j = ~0u;
+    float imp = 0;
+    for (uint k = 0; k < range.y; ++k)
+    {
+        const float i = rtLightImportance(rtFxLight(range.x + k), x);
+        if (i <= 0) continue;
+        c2 += i;
+        j = range.x + k, imp = i;
+        if (c2 > t2) break;
+    }
+    probability = wg / W * imp / total;
+    return j;
+}
+
 // One light sample at x: the light (index, whether it casts shadows), the direction and distance to the sampled point,
 // and L / (pdf P(light)) - the estimate's weight before the BRDF, cosine and visibility. valid = false: no light's range
 // reaches x (or the sample has no contribution). Point and spot lights carry E's light function (A8, LightFunction.hlsli;
@@ -55,11 +143,29 @@ RtLocalSample rtLocalLightSample(RtSceneSrvs scene, float3 x, float u0, float u1
     const RtLightGrid grid = b.Load<RtLightGrid>(0);
     const uint cell = rtLightCell(grid, x);
     const float total = rtLightTotal(cell, x);
-    if (!(total > 0)) return o;
+    uint cdf;
+    const float fxW = rtFxWeight(b, x, cdf);
+    if (!(total + fxW > 0)) return o;
+    const float pFx = fxW / (total + fxW);
     float probability;
-    const uint li = rtLightChoose(cell, x, total, u0, probability);
-    if (li == ~0u || !(probability > 0)) return o;
-    const RtLight l = rtLightFetch(li);
+    uint li;
+    RtLight l;
+    if (u0 < pFx)
+    {
+        const uint j = rtFxChoose(cdf, x, fxW, u0 / pFx, probability);
+        if (j == ~0u) return o;
+        probability *= pFx;
+        li = g_lightCount + j;
+        l = rtFxLight(j);
+    }
+    else
+    {
+        li = rtLightChoose(cell, x, total, pFx > 0 ? (u0 - pFx) / (1 - pFx) : u0, probability);
+        if (li == ~0u) return o;
+        probability *= 1 - pFx;
+        l = rtLightFetch(li);
+    }
+    if (!(probability > 0)) return o;
     RtLightSample s;
     if (!rtLightSample(l, x, u1, u2, s) || !(s.pdf > 0)) return o;
     o.valid = true;

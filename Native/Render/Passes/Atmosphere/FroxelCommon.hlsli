@@ -98,4 +98,18 @@ float froxelIntensity(GpuLight l, float3 toPoint)
     return l.intensity * (2 * l.size.y * l.size.x + 3.14159265 * l.size.y * l.size.y);  // tube: capsule silhouette
 }
 
+// Lights the froxel lists take: the scene's g_lightCount, then the FX particle lights at the buffer's tail (A3, INTERFACES
+// v1.79: StructuredBuffer<uint> g_fxLightCount [0] = F, at most g_fxLightCapacity; kNone: none). FX lights have no shadow
+// slot. List entries are 16 bits with bit 15 the shadow flag, so every index is below 0x8000 (core: N + F_max <= 32,768).
+uint froxelLightTotal()
+{
+    uint n = g_lightCount;
+    if (g_fxLightCount != 0xFFFFFFFFu)
+    {
+        StructuredBuffer<uint> fx = ResourceDescriptorHeap[g_fxLightCount];
+        n += min(fx[0], g_fxLightCapacity);
+    }
+    return min(n, 0x8000u);
+}
+
 #endif

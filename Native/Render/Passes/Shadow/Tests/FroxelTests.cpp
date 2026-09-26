@@ -1,7 +1,8 @@
 // S froxels, correctness (no GPU lock). Test stand-ins for V's raster and M's G-buffer (TestRaster.h).
 //  1. light lists (scene of scattered lights plus a dense cluster): every light that reaches a point of a froxel is in
 //     its list unless the list is full with lights at least as important; lists ordered by importance; no duplicates;
-//     truncation statistics match; lists identical over two frames;
+//     truncation statistics match; lists identical over two frames; 1b. FX particle lights (A3) at the light buffer's tail
+//     join the lists the same way, without the shadow flag;
 //  2. local lights' in-scattering by the air (sun below the horizon, lists not truncated): each node of the air volume
 //     with the lights minus without them, against a double-precision integral along the tile-centre ray (every light,
 //     fine steps, continuous air coefficients); then with shadows, then with light functions on the point and spot lights
@@ -269,6 +270,7 @@ int main(int argc, char** argv)
         std::vector<uint8_t> lastLists, lastVolume, lastDepth;
         bool wantDepth = false;
         std::function<TextureRef(FramePassContext&)> injectMedia;  // section 7: the view's volumeSlices before froxels()
+        std::function<void(FramePassContext&)> beforeFroxels;      // section 1b: writes the FX light tail
         // Node-by-node comparisons need every slice integrated (production integrates only the slices a reader reaches;
         // section 6 checks that those are the same numbers).
         shadow::setFroxelFullDepth(tf.trackState, true);
@@ -292,6 +294,7 @@ int main(int argc, char** argv)
                     raster.mainView(fc, main);
                     tracks::shadowPages(fc, main);
                     if (injectMedia) main.volumeSlices = injectMedia(fc);
+                    if (beforeFroxels) beforeFroxels(fc);
                     tracks::froxels(fc, main);
                     if (read)
                     {
@@ -1095,6 +1098,116 @@ int main(int argc, char** argv)
         report(shadow::stats(tf.trackState).errorBitsSeen == 0, "S error bits (INTERFACES 3.6: a shader loop at its hard cap)",
                shadow::stats(tf.trackState).errorBitsSeen, 0);
         if (debugLayer) logf("D3D12 debug layer: enabled (errors abort the run)\n");
+        // ---- 1b (run last: section 2's largest-node check depends on the frames run before it, S_STATUS 10). FX particle
+        // lights (A3, INTERFACES v1.79): gpu::Light point records after the scene lights, written by a
+        // copy as the FX module's pass would (FrameResources::fxLights / fxLightCount); the lists take them like scene lights
+        // (froxelLightTotal) and never flag them as shadowed.
+        {
+            // Its own random numbers: the later sections keep the scenes they had before this one existed.
+            std::mt19937 rngFx(77);
+            auto uniFx = [&](float a, float b) { return std::uniform_real_distribution<float>(a, b)(rngFx); };
+            scene::Scene sc = base;
+            sc.sun.direction = normalize(float3{ 0.3f, 0.8f, 0.2f });
+            for (int i = 0; i < 3; ++i)
+            {
+                scene::Light l;
+                l.position = { uniFx(-4, 4), uniFx(1, 4), uniFx(6, 30) };
+                l.intensity = uniFx(100, 1000);
+                l.range = uniFx(4, 10);
+                sc.lights.push_back(l);
+            }
+            std::vector<scene::Light> fxLights;
+            std::vector<gpu::Light> records;
+            for (int i = 0; i < 12; ++i)
+            {
+                scene::Light l;
+                l.position = { uniFx(-5, 5), uniFx(0.5f, 4), uniFx(4, 40) };
+                l.intensity = uniFx(200, 5000);
+                l.range = uniFx(3, 7);
+                fxLights.push_back(l);
+                gpu::Light g{};
+                g.position = l.position;
+                g.typeFlags = (uint32_t)scene::LightType::Point | (0xFFFFu << 16);
+                g.forward = { 0, 0, 1 };
+                g.right = { 1, 0, 0 };
+                g.range = l.range;
+                g.intensity = l.intensity;
+                g.color = { 1, 0.6f, 0.3f };
+                records.push_back(g);
+            }
+            tf.setScene(sc);
+            if (!tf.gpuScene.setFxLightCapacity(16)) fail("FX light capacity refused");
+            const uint32_t fxCount = (uint32_t)records.size();
+            beforeFroxels = [&](FramePassContext& fc) {
+                const GpuScene::FxLightRange r = tf.gpuScene.fxLightRange();
+                fc.resources.fxLights = fc.graph.importBuffer(r.lightBuffer, BufferDesc{ "scene lights (FX tail)", (uint64_t)(r.first + r.capacity) * sizeof(gpu::Light), (uint32_t)sizeof(gpu::Light) });
+                fc.resources.fxLightCount = fc.graph.importBuffer(r.countBuffer, BufferDesc{ "FX light count", 16, 4 });
+                const uint32_t countWords[4] = { fxCount, 0, 0, 0 };
+                const BufferRef src = tf.uploadBuffer(fc, records.data(), records.size() * sizeof(gpu::Light), 0, "fx.lights");
+                const BufferRef srcCount = tf.uploadBuffer(fc, countWords, 16, 0, "fx.count");
+                const BufferRef lights = fc.resources.fxLights, count = fc.resources.fxLightCount;
+                fc.graph.addPass("test.fx.lights", QueueType::Graphics,
+                                 [&](PassBuilder& b) {
+                                     b.use(src, Use::CopySrc);
+                                     b.use(srcCount, Use::CopySrc);
+                                     b.use(lights, Use::CopyDst);
+                                     b.use(count, Use::CopyDst);
+                                 },
+                                 [=](PassContext& c) {
+                                     c.cmd->CopyBufferRegion(c.resource(lights), (uint64_t)r.first * sizeof(gpu::Light), c.resource(src), 0, records.size() * sizeof(gpu::Light));
+                                     c.cmd->CopyBufferRegion(c.resource(count), 0, c.resource(srcCount), 0, 16);
+                                 });
+            };
+            run(sc, 2);
+            beforeFroxels = nullptr;
+            const Lists lists{ lastLists };
+            const uint32_t N = (uint32_t)sc.lights.size(), indexBase = lists.word(36);
+            uint32_t flagged = 0, outOfRange = 0, fxEntries = 0, missing = 0, points = 0, fxReaching = 0;
+            for (uint32_t f = 0; f < F; ++f)
+            {
+                const uint32_t h = lists.header(f), first = h >> 6, n = h & 63;
+                for (uint32_t i = 0; i < n; ++i)
+                {
+                    const uint32_t w = lists.word(indexBase + ((first + i) >> 1) * 4), e = (first + i) & 1 ? w >> 16 : w & 0xFFFF, li = e & 0x7FFF;
+                    if (li >= N + fxCount) ++outOfRange;
+                    if (li >= N)
+                    {
+                        ++fxEntries;
+                        if (e & 0x8000) ++flagged;
+                    }
+                }
+            }
+            const ref::D3 camPos = d3(grid.view.position);
+            for (uint32_t s = 0; s + 1 < fg.slices; ++s)
+                for (uint32_t ty = 0; ty < fg.gridY; ++ty)
+                    for (uint32_t tx = 0; tx < fg.gridX; ++tx)
+                    {
+                        if ((tx * 7 + ty * 13 + s * 3) % 3 != 0) continue;
+                        const uint32_t f = (s * fg.gridY + ty) * fg.gridX + tx;
+                        const std::vector<uint32_t> li = lists.list(f);
+                        const std::set<uint32_t> in(li.begin(), li.end());
+                        for (int k = 0; k < 4; ++k)
+                        {
+                            const double px = std::min((tx + uniFx(0, 1)) * fg.tilePx, (float)W - 1e-3f), py = std::min((ty + uniFx(0, 1)) * fg.tilePx, (float)H - 1e-3f);
+                            const double z = grid.node(s) + (grid.node(s + 1) - grid.node(s)) * uniFx(0, 1);
+                            const ref::D3 p = camPos + grid.rayAt(px, py) * z;
+                            ++points;
+                            for (uint32_t j = 0; j < fxCount; ++j)
+                            {
+                                if (!reaches(fxLights[j], p)) continue;
+                                ++fxReaching;
+                                if (!in.count(N + j) && li.size() < listMax) ++missing;
+                            }
+                        }
+                    }
+            logf("FX lights: %u list entries, %u (point, FX light) pairs that reach over %u points\n", fxEntries, fxReaching, points);
+            report(fxEntries > 0 && fxReaching > 50, "FX lights reach the probed froxels (list entries)", fxEntries, 1);
+            report(missing == 0, "FX lights reaching a froxel point missing from a non-full list", missing, 0);
+            report(flagged == 0, "FX light entries with the shadow flag", flagged, 0);
+            report(outOfRange == 0, "list entries past the scene and FX lights", outOfRange, 0);
+            if (!tf.gpuScene.setFxLightCapacity(0)) fail("FX light capacity 0 refused");
+        }
+
         logf(failures ? "FAIL (%d)\n" : "PASS\n", failures);
         return failures ? 1 : 0;
     }

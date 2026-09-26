@@ -89,6 +89,9 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
               [&](PassBuilder& b) {
                   b.use(lights, Use::UavCompute);
                   if (readers.valid()) b.use(readers, Use::SrvCompute);
+                  // A3: the FX light tail (read through the scene's SRVs; declared so the FX writer runs first).
+                  if (fc.resources.fxLights.valid()) b.use(fc.resources.fxLights, Use::SrvCompute);
+                  if (fc.resources.fxLightCount.valid()) b.use(fc.resources.fxLightCount, Use::SrvCompute);
               },
               [=](PassContext& ctx) {
                   const uint32_t k[4] = { ctx.uav(lights), listMax, slotOfLightSrv, readers.valid() ? ctx.srv(readers) : 0xFFFFFFFFu };

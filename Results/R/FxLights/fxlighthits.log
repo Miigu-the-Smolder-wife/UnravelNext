@@ -1,0 +1,17 @@
+﻿powershell : RayScene: 1 static + 0 dynamic instances (0 deformed), 1 mesh BLAS (2 tris, 0.0 MB compacted from 0.0 MB),
+ deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 14 ms (records and mesh BLA
+S 6.1, proxies 0.0, deformed setup 2.1, static TLAS and records 3.7, first dynamic build 2.0)
+At line:1 char:633
++ ... ct -Last 1; powershell -ExecutionPolicy Bypass -File Tools/CI/GpuLock ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (RayScene: 1 sta...amic build 2.0):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0
+.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, p
+roxy indices, vertex map, deform jobs)
+grid + 5 FX lights (one bright one out of reach), one group: 96 points compared, mean weight vs the exact sum: mean 2.08e-04, worst 6.39e-04; FX lights reach 95 points, chosen where none reaches 0, missing where they reach 0
+grid + 40 FX lights, two groups: 96 points compared, mean weight vs the exact sum: mean 2.91e-04, worst 1.32e-03; FX lights reach 96 points, chosen where none reaches 0, missing where they reach 0
+count word 0 (grid alone): 96 points compared, mean weight vs the exact sum: mean 1.37e-04, worst 2.55e-04; FX lights reach 0 points, chosen where none reaches 0, missing where they reach 0
+PASS
+GpuLock.ps1: cpu-contended: 1 s >= 4 cores, peak 18.7 cores; top: unx_shaderc.exe (32052) 1 core-s, unx_shaderc.exe (26524) 1 core-s, unx_shaderc.exe (77776) 1 core-s, unx_shaderc.exe (73648) 1 core-s

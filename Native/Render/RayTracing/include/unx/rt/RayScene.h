@@ -230,6 +230,7 @@ private:
     uint8_t* lightSlot(FramePassContext& fc);
     // E's light functions (A8) for the hits' local lights: word 20 of the frame's light-grid header.
     void recordLightFunctions(FramePassContext& fc);
+    void recordFxLights(FramePassContext& fc);  // A3 FX particle lights at the hits (word 21)
     void publishLightSlot(FramePassContext& fc);
     bool m_emittersEnabled = false;  // raytracing.emitters
     void buildStaticTlas();
@@ -249,6 +250,7 @@ private:
     struct Frame  // graph references of the current frame
     {
         BufferRef tlasStatic, tlasDynamic, deformedBlas, deformedVertices, exactCounts, instances, jobs, lightFunctions, runtimePool, geometries, streamPool;
+        BufferRef fxCdf, fxLights;  // A3: the FX lights' groups (FxLightGroups.hlsl) and the scene light buffer they index
     };
     Frame m_frame;
 

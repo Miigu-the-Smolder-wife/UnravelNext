@@ -74,6 +74,8 @@
     giCacheIrradianceScreen(앞면)을 계산해 ViewResources::giIrradiance(RGBA16F, rgb × 노출, a = 캐시 값 있음)에 쓴다. 읽는 곳이 없으면 그래프가 컬링한다.
     통합 city 4K `--lookup-stats`: 791만 픽셀 중 플래그 불일치 0, 최대 상대 차 9.75e-4(반정밀 1 ULP). Foliage 뒷면은 M 안 조회로 남는다.
     M 교체와 m.lit.shade.b0 전후 측정은 A가 맡는다. 단독 커널 비용은 2.44 ms 순 [실측, bench.probe.cache].
+    **A의 D0 4K 측정 [실측, GpuLock 2쌍, Results/M/GiScreenAB]**: m.lit.shade.b0 3.33/3.45 → 1.83/1.87 ms, 대신 r.gi.screen +1.38/+1.53 ms라 패스 합의 이득이 없다(9.652 → 9.612, 9.834 → 9.806 ms).
+    그래서 M은 읽지 않고, r.gi.screen은 컬링된다. 조회 자체의 정보량(지도 평가 6.9 × 16텍셀)을 줄이는 구조가 나오면 다시 붙인다.
 - **굴절·반사 광선 서비스(2026-09-27, R-W1/R-W2 물, R-1/R-2 유리)**: core `FrameServices::traceRefractions`(A 43e2af7).
   - 호출자(W, A)가 작업 목록을 쓴다. 머리 16 B + 작업 48 B { origin, outputSlot; direction, flags; sigmaA, iorInside }.
   - R(RefractionTrace.hlsl, ReflectionSystem::recordRefraction)은 작업마다 추적하고 RGBA16F(노출 곱한 선형)를 돌려준다.

@@ -1,7 +1,8 @@
 // unx-kernel: cs_6_6 main
 // Froxel light lists (ARCHITECTURE 2.4, INTERFACES 7.4). One group per screen tile, one thread per depth slice:
-//  1. the tile's frustum (four planes through the camera) culls every scene light's bounding sphere, the group's
-//     threads taking the lights in turn (512 lights x 14.4 k tiles at 4K = 7.4 M sphere tests);
+//  1. the tile's frustum (four planes through the camera) culls every light's bounding sphere, the group's threads taking
+//     the lights in turn (512 lights x 14.4 k tiles at 4K = 7.4 M sphere tests): the scene's, then the FX particle lights
+//     of the buffer's tail (froxelLightTotal, A3: + 14.4 k F tests at 4K);
 //  2. each slice keeps the candidates whose bounds reach its froxel: view-depth range, bounding sphere of the froxel
 //     (not for the last slice, which extends to infinity), spot cone, emitter plane of one-sided area lights;
 //  3. ordered by importance at the froxel (peak intensity x distance window / squared distance), at most lights_max
@@ -84,10 +85,11 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     GroupMemoryBarrierWithGroupSync();
 
     // 1. Tile frustum.
-    for (uint base = 0; base < g_lightCount; base += 64)
+    const uint lightTotal = froxelLightTotal();
+    for (uint base = 0; base < lightTotal; base += 64)
     {
         const uint li = base + s;
-        if (li >= g_lightCount) break;
+        if (li >= lightTotal) break;
         const GpuLight l = loadLight(li);
         const float3 c = l.position - g_cameraPosition;
         const float r = froxelLightRadius(l);
@@ -190,8 +192,8 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         if (P[0].z != 0xFFFFFFFFu)
         {
             StructuredBuffer<uint> slotOf = ResourceDescriptorHeap[P[0].z];
-            a |= slotOf[a] != 0xFFFFu ? 0x8000u : 0u;
-            if (e + 1 < count) b |= slotOf[b] != 0xFFFFu ? 0x8000u : 0u;
+            a |= a < g_lightCount && slotOf[a] != 0xFFFFu ? 0x8000u : 0u;  // FX lights (index >= g_lightCount): no slot
+            if (e + 1 < count) b |= b < g_lightCount && slotOf[b] != 0xFFFFu ? 0x8000u : 0u;
         }
         buffer.Store(g.indexBase + (first + e) * 2, a | b << 16);
     }

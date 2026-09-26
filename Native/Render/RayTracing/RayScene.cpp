@@ -1508,6 +1508,7 @@ void RayScene::record(FramePassContext& fc)
     m_buildChanges.clear();
     updateLightGrid(fc);
     recordLightFunctions(fc);  // after the grid slot exists (word 20)
+    recordFxLights(fc);        // word 21
     m_frame.tlasStatic = g.importBuffer(m_tlasStatic.resource.Get(), { "RT static TLAS", m_tlasStatic.bytes, 0 });
     m_frame.tlasDynamic = g.importBuffer(m_tlasDynamic.resource.Get(), { "RT dynamic TLAS", m_tlasDynamic.bytes, 0 });
     fc.resources.tlasStatic = m_frame.tlasStatic;
@@ -1707,6 +1708,8 @@ void RayScene::declareTraversal(PassBuilder& b) const
     if (m_frame.runtimePool.valid()) b.use(m_frame.runtimePool, Use::AccelerationStructureRead);  // runtime geometry BLASes
     if (m_frame.geometries.valid()) b.use(m_frame.geometries, Use::SrvGraphics);
     if (m_frame.lightFunctions.valid()) b.use(m_frame.lightFunctions, Use::SrvGraphics);  // the hits' local lights (A8)
+    if (m_frame.fxCdf.valid()) b.use(m_frame.fxCdf, Use::SrvGraphics);  // A3 FX lights: their distribution and records
+    if (m_frame.fxLights.valid()) b.use(m_frame.fxLights, Use::SrvGraphics);
 }
 
 void RayScene::recordStaticTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs)
@@ -1792,7 +1795,8 @@ struct RtLightHeader
     uint32_t dim[3], pad[2];
     uint32_t lightsOffset, cellStartOffset, cellLightsOffset, pad2;
     uint32_t decal[4];  // words 16..19, per frame (RayScene::recordDecals; HitDecals.hlsli): TLAS, frames, texture table, count
-    uint32_t functions[4];  // word 20, per frame: E's light functions (FrameResources::lightFunctions, A8), 0xFFFFFFFF none
+    uint32_t functions[4];  // word 20, per frame: E's light functions (FrameResources::lightFunctions, A8), 0xFFFFFFFF none;
+                            // word 21, per frame: the FX lights' groups (recordFxLights, A3), 0xFFFFFFFF none
 };
 static_assert(sizeof(RtLightHeader) == 96);
 constexpr uint32_t kLightDecalOffset = 64, kLightFunctionOffset = 80;
@@ -2075,8 +2079,8 @@ void RayScene::publishLightSlot(FramePassContext& fc)
     // Words 16..19, every frame: no decals unless recordDecals writes them after this (a slot keeps an earlier frame's).
     const uint32_t noDecals[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0 };
     std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes + kLightDecalOffset, noDecals, sizeof noDecals);
-    const uint32_t noFunctions = 0xFFFFFFFFu;
-    std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes + kLightFunctionOffset, &noFunctions, 4);
+    const uint32_t noFunctions[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu };  // word 20 (light functions), word 21 (FX lights, recordFxLights)
+    std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes + kLightFunctionOffset, noFunctions, sizeof noFunctions);
     m_lightSrvNow = m_lightRingSrv[slot];
 }
 
@@ -2582,6 +2586,38 @@ void RayScene::recordRuntime(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
                       d.ScratchAccelerationStructureData = b.scratch;
                       c.cmd->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
                   }
+              });
+}
+
+// A3 FX particle lights (S_STATUS_KO.md 10): the groups of the scene light buffer's tail for the hits' choice
+// (FxLightGroups.hlsl; HitLocalLights.hlsli rtFxWeight / rtFxChoose), one pass per frame after the FX writer (the tail and its count are
+// graph resources: FrameResources::fxLights / fxLightCount); its SRV goes into the frame's header slot at execution
+// (word 21), as the light functions' (word 20).
+void RayScene::recordFxLights(FramePassContext& fc)
+{
+    const GpuScene::FxLightRange range = m_scene.fxLightRange();
+    if (range.capacity == 0 || !fc.resources.fxLights.valid() || !fc.resources.fxLightCount.valid()) return;
+    uint8_t* word = lightSlot(fc) + kLightFunctionOffset + 4;
+    RenderGraph& g = fc.graph;
+    const BufferRef cdf = g.createBuffer({ "RT FX light groups", 16ull + 32ull * ((range.capacity + 31) / 32), 0 });
+    const BufferRef lights = fc.resources.fxLights, count = fc.resources.fxLightCount;
+    m_frame.fxCdf = cdf;
+    m_frame.fxLights = lights;
+    ID3D12PipelineState* pso = m_shaders.compute("RayTracing/FxLightGroups");
+    g.addPass("r.lights.fxgroups", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(lights, Use::SrvCompute);
+                  b.use(count, Use::SrvCompute);
+                  b.use(cdf, Use::UavCompute);
+              },
+              [word, pso, cdf, constants = fc.frameConstantsFor(fc.frame.mainView), first = range.first, capacity = range.capacity](PassContext& c) {
+                  const uint32_t srv = c.srv(cdf);
+                  std::memcpy(word, &srv, 4);
+                  const uint32_t k[8] = { c.uav(cdf), 0, 0, first, capacity, 0, 0, 0 };
+                  c.cmd->SetPipelineState(pso);
+                  c.computeConstants(k, 8);
+                  c.bindFrameConstants(constants);
+                  c.cmd->Dispatch(1, 1, 1);
               });
 }
 
