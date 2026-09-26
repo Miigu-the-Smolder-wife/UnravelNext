@@ -153,6 +153,16 @@ gpu::FrameConstants FrameRenderer::frameConstants(const GpuScene& scene, const F
 
 // A14: the frame's auxiliary views in drawing order. A view is drawn after the views it reads (Kahn's order, ties by
 // id); the views left on cycles are drawn by id and read each other's previous-frame outputs (FEATURES_GAME 8).
+// A3 FX light tail (v1.81): one import per frame of the scene light buffer and the FX count word, so every writer and
+// reader declares the same graph resource.
+static void importFxLights(RenderGraph& graph, const GpuScene& scene, FrameResources& resources)
+{
+    const GpuScene::FxLightRange r = scene.fxLightRange();
+    if (r.capacity == 0) return;
+    resources.fxLights = graph.importBuffer(r.lightBuffer, BufferDesc{ "scene lights (FX tail)", (uint64_t)(r.first + r.capacity) * sizeof(gpu::Light), (uint32_t)sizeof(gpu::Light) });
+    resources.fxLightCount = graph.importBuffer(r.countBuffer, BufferDesc{ "FX light count", 16, 4 });
+}
+
 static std::vector<ViewResources> auxiliaryViews(FramePassContext& fc, const FrameContext& frame)
 {
     const std::vector<AuxView>& in = frame.auxViews;
@@ -227,6 +237,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     }
     m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);  // transforms, palettes, visibility of this frame
     FrameResources resources;
+    importFxLights(graph, m_scene, resources);
     FrameServices services;
     FramePassContext fc{ m_device, graph, m_shaders, m_quality, m_scene, frame, resources, services,
                          [this, &frame](const ViewDesc& v) { return allocateFrameConstants(frame, v); }, &m_trackState, m_framesInFlight };
@@ -304,6 +315,7 @@ void FrameRenderer::recordImage(RenderGraph& graph, const FrameContext& in, Text
     m_debugDraw = 0xFFFFFFFFu;
     m_viewModelScale = 1.0f;
     FrameResources resources;
+    importFxLights(graph, m_scene, resources);
     FrameServices services;
     FramePassContext fc{ m_device, graph, m_shaders, m_quality, m_scene, frame, resources, services,
                          [this, &frame](const ViewDesc& v) { return allocateFrameConstants(frame, v); }, &m_trackState, m_framesInFlight };

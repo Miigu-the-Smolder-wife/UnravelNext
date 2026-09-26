@@ -197,6 +197,11 @@ struct FrameResources
     // Strand hair (E's Passes/Hair, unx/hair/Hair.h; invalid = no hair): the frame's follow-strand segments (2 float4 each:  [E]
     // camera-relative p0, r0; p1, r1; r = 0 left out by LOD) and the bodies' header (raw) for V's coverage layer and M.
     BufferRef hairSegments, hairBodies;
+    // A3 FX particle lights (v1.81, render B's request): the whole scene light buffer (gpu::Light, stride 80; the FX tail at
+    // [lightCount, lightCount + F)) and the count word (StructuredBuffer<uint>, element 0 = F), imported once per frame by
+    // core so the graph orders the FX writer (Uav) before S, R and M (Srv). Invalid when the scene has no FX light tail
+    // (GpuScene::fxLightRange().capacity == 0).  [core]
+    BufferRef fxLights, fxLightCount;
     // GPU triangle streams of this frame (W, before V: tracks::waterGeometry; V's coverage layer, v1.60).  [W]
     std::vector<TriangleStream> triangleStreams;
     // Water layer (v1.61, main view; V draws the streams of layer 1 over a copy of band A's depth, band A stays): the nearest

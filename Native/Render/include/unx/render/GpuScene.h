@@ -160,7 +160,8 @@ public:
     // FX module writes every frame on the GPU (point lights, renderer world, castShadow 0 / shadowIndex 0xFFFF) with its
     // count F in the count buffer's element 0 (0 after a capacity change). Readers loop to lightCount + min(F, capacity)
     // (FrameConstants::fxLightCount / fxLightCapacity). setFxLightCapacity rebuilds the light buffer when the capacity
-    // changes (the FX stream's light rows changed) and refuses a total above kMaxSceneLights (16-bit light lists: S).
+    // changes (the FX stream's light rows changed) and refuses a total above kMaxSceneLights (S's 16-bit light list
+    // entries carry the shadow flag in bit 15, so light indices end at 0x7FFF).
     struct FxLightRange
     {
         uint32_t first = 0, capacity = 0;
@@ -169,7 +170,7 @@ public:
         ID3D12Resource* lightBuffer = nullptr;
         ID3D12Resource* countBuffer = nullptr;
     };
-    static constexpr uint32_t kMaxSceneLights = 65535;
+    static constexpr uint32_t kMaxSceneLights = 32768;
     bool setFxLightCapacity(uint32_t capacity);
     FxLightRange fxLightRange() const;
     uint32_t staticMeshCount() const { return m_staticMeshes; }

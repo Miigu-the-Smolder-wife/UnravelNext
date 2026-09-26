@@ -2070,7 +2070,7 @@ int main(int argc, char** argv)
 UNX_TEST(gpu_scene_fx_light_tail)
 {
     // A3 FX particle lights (v1.79, S_STATUS 10): the light buffer's tail of F_max records after the scene lights, the count
-    // word (0 after every capacity change), the frame constants, the 16-bit limit, and the tail kept across an origin rebase.
+    // word (0 after every capacity change), the frame constants, the 32,768 limit, and the tail kept across an origin rebase.
     scene::Scene s = tinyScene();
     GpuScene gs(testDevice());
     gs.upload(s);
@@ -2125,7 +2125,7 @@ UNX_TEST(gpu_scene_fx_light_tail)
     checkTail(5);
     CHECK(gs.setFxLightCapacity(300));
     checkTail(300);
-    CHECK(!gs.setFxLightCapacity(GpuScene::kMaxSceneLights - n + 1));  // over 65,535 lights: refused, tail unchanged
+    CHECK(!gs.setFxLightCapacity(GpuScene::kMaxSceneLights - n + 1));  // over 32,768 lights: refused, tail unchanged
     checkTail(300);
     CHECK(gs.setFxLightCapacity(GpuScene::kMaxSceneLights - n));  // exactly at the limit
     checkTail(GpuScene::kMaxSceneLights - n);

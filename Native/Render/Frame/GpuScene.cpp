@@ -624,7 +624,8 @@ bool GpuScene::setFxLightCapacity(uint32_t capacity)
     const size_t lights = m_lights.size();
     if (lights + capacity > kMaxSceneLights)
     {
-        logf("GpuScene: %zu scene lights + %u FX lights exceed %u (16-bit light lists); the FX light tail is unchanged\n", lights, capacity, kMaxSceneLights);
+        logf("GpuScene: %zu scene lights + %u FX lights exceed %u (16-bit light lists, bit 15 = shadow flag); the FX light tail is unchanged\n", lights, capacity,
+             kMaxSceneLights);
         return false;
     }
     if (capacity == m_fxLightCapacity) return true;
