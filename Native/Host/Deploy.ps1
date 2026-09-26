@@ -47,7 +47,7 @@ Get-ChildItem $shaders -Recurse -Filter *.dxil | ForEach-Object {
 }
 # The kernels' ABI stamp (ShaderLibrary refuses kernels built for another binding contract).
 $stamp = Join-Path $shaders "abi.stamp"
-if (-not (Test-Path $stamp)) { throw "no $stamp: build the shader targets (unx_render_shaders) before deploying" }
+if (-not (Test-Path $stamp)) { throw "no ${stamp}: build the shader targets (unx_render_shaders) before deploying" }
 Copy-Item $stamp (Join-Path $dest "abi.stamp")
 # Quality files (Config/quality): the renderer refuses to start without every key (no code defaults).
 $qualityDest = Join-Path $Bridge "Native~\quality"
