@@ -3,8 +3,10 @@
 //      Dx = -A sin(...) (the deep-water orbit: crests sharpen), dh/dx, dDx/dx and J = 1 + dDx/dx in closed form at
 //      t = 0 and t = 37.3 s (|d| <= 1e-5 A), zero on the other channels and cascades; the crest travels along +k
 //   2. sea state: the GPU initial spectrum equals a double-precision replica of the same hash, Box-Muller and JONSWAP
-//      spreading per bin; each pair holds conj(h0(-k)) bit-exactly (the field is real); the band sum of the bin
-//      variances equals the integral of S(w) over the band (units of E(k) = S(w) D (dw/dk) / k, within 2 %)
+//      spreading per bin; each pair holds conj(h0(-k)) bit-exactly (the field is real); the expected surface variance
+//      of the band (sum of E|h(k, t)|^2, with E|h0|^2 = E(k) dk^2 / 2) equals the integral of S(w) over the band
+//      (E(k) = S(w) D (dw/dk) / k, within 2 %), and the realised surface's mean h^2 equals it within 5 standard
+//      deviations of the realisation spread (a factor-2 amplitude convention error fails this)
 //   3. fields: all 8 fields of all 3 cascades equal a double-precision CPU FFT of the same spectrum (independent code;
 //      each field's inverse transform is real to 1e-9 of its rms: the packing's Hermitian pairs), max |d| <= 4e-5 rms
 //      (float FFT with the host's exact twiddles; hardware sin/cos twiddles measured 6.4e-5)
@@ -410,7 +412,7 @@ int main(int argc, char** argv)
         const uint64_t mipValues = checkMips(f0);
         std::printf("mips: %llu values of levels 1..9 equal the mean of their children (float rounding)\n", (unsigned long long)mipValues);
         {
-            double worst = 0, bandSum = 0;
+            double worst = 0, bandSum = 0, pairSquares = 0;
             uint32_t mismatched = 0;
             for (uint32_t c = 0; c < C; ++c)
                 for (uint32_t z = 0; z < N; ++z)
@@ -421,10 +423,13 @@ int main(int argc, char** argv)
                         const bool nyquist = x == 0 || z == 0;
                         const double L = desc.lengths[c];
                         const double var = nyquist ? 0 : variance(desc, kOf(x, L), kOf(z, L), c), varM = nyquist ? 0 : variance(desc, kOf(mx, L), kOf(mz, L), c);
-                        if (c == 1) bandSum += var;
-                        const cd h = gaussian(desc.seed, c, uint32_t(z * N + x)) * std::sqrt(0.5 * var);
-                        const cd hm = std::conj(gaussian(desc.seed, c, uint32_t(mz * N + mx)) * std::sqrt(0.5 * varM));
-                        const double sigma = std::sqrt(0.5 * var), sigmaM = std::sqrt(0.5 * varM);
+                        // Expected surface variance: sum over bins of E|h(k, t)|^2 = E|h0(k)|^2 + E|h0(-k)|^2 = (var(k) + var(-k)) / 2.
+                        if (c == 1) bandSum += 0.5 * (var + varM);
+                        // Realisation spread: a pair (k, -k) carries X = |h(k)|^2 + |h(-k)|^2 with std(X) = E(X) = var(k) + var(-k).
+                        if (c == 1 && (uint64_t(z) * N + x) < (uint64_t(mz) * N + mx)) pairSquares += (var + varM) * (var + varM);
+                        const cd h = gaussian(desc.seed, c, uint32_t(z * N + x)) * std::sqrt(0.25 * var);
+                        const cd hm = std::conj(gaussian(desc.seed, c, uint32_t(mz * N + mx)) * std::sqrt(0.25 * varM));
+                        const double sigma = std::sqrt(0.25 * var), sigmaM = std::sqrt(0.25 * varM);
                         const double e0 = std::abs(cd(f0.h0[4 * bin], f0.h0[4 * bin + 1]) - h), e1 = std::abs(cd(f0.h0[4 * bin + 2], f0.h0[4 * bin + 3]) - hm);
                         // Float holds variances down to 1.2e-38 m^2 (amplitude 1e-19 m): bins below it (the upwind tail of
                         // the spreading lobe) are zero on the GPU. The 1e-18 m floor admits exactly those. Upwind, the
@@ -449,9 +454,17 @@ int main(int argc, char** argv)
             double integral = 0;
             const int steps = 200000;
             for (int i = 0; i < steps; ++i) integral += jonswap(desc, w0 + (w1 - w0) * (i + 0.5) / steps) * (w1 - w0) / steps;
-            W_CHECK(std::abs(bandSum / integral - 1) <= 0.02, "cascade 1 band variance %.6g m^2, integral of S %.6g m^2", bandSum, integral);
-            std::printf("spectrum: every bin equals the replica (worst %.2e relative); pairs Hermitian; band variance %.6g m^2 vs integral %.6g (%.2f %%)\n", worst, bandSum, integral,
-                        100 * (bandSum / integral - 1));
+            W_CHECK(std::abs(bandSum / integral - 1) <= 0.02, "cascade 1 expected surface variance %.6g m^2, integral of S %.6g m^2", bandSum, integral);
+            // The realised surface: the spatial mean of h^2 of cascade 1 (Parseval: the realisation's sum of |h(k, t)|^2)
+            // against the expected variance, within 5 standard deviations of the realisation spread.
+            double realised = 0;
+            for (uint32_t z = 0; z < N; ++z)
+                for (uint32_t x = 0; x < N; ++x) realised += double(f0.at(1, 1, x, z)) * f0.at(1, 1, x, z);
+            realised /= double(N) * N;
+            const double spread = std::sqrt(pairSquares) / bandSum;
+            W_CHECK(std::abs(realised / bandSum - 1) <= 5 * spread, "cascade 1 realised height variance %.6g m^2, expected %.6g m^2 (spread %.3g)", realised, bandSum, spread);
+            std::printf("spectrum: every bin equals the replica (worst %.2e relative); pairs Hermitian; expected band variance %.6g m^2 vs integral of S %.6g (%.2f %%); realised %.6g (%+.2f %%, spread %.2f %%)\n",
+                        worst, bandSum, integral, 100 * (bandSum / integral - 1), realised, 100 * (realised / bandSum - 1), 100 * spread);
         }
 
         // 3. fields

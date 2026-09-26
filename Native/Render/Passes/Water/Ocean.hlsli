@@ -6,7 +6,9 @@
 //   Spectrum: JONSWAP (fetch-limited: alpha = 0.076 (U^2 / (F g))^0.22, omega_p = 22 (g^2 / (U F))^(1/3), gamma = 3.3)
 //             with a cos^(2s)(theta/2) directional spreading about the wind (s = spread), converted to wavenumber space:
 //             E(kx, kz) = S(omega) D(theta) (d omega / d k) / k, amplitude variance per bin E dk^2 (dk = 2 pi / L).
-//   h0(k) = (xi_r + i xi_i) sqrt(E dk^2 / 2), xi standard normal from a hash of (seed, cascade, index): deterministic.
+//   h0(k) = (xi_r + i xi_i) sqrt(E dk^2 / 4), xi standard normal from a hash of (seed, cascade, index): deterministic.
+//   E|h0|^2 = E dk^2 / 2, so the real field's variance sum_k E|h(k, t)|^2 = sum_k E dk^2 = the integral of S(w) dw (a
+//   wave A cos(k.x - w t) has |h(k)|^2 + |h(-k)|^2 = A^2 / 2).
 //   h(k, t) = h0(k) e^{-i w t} + conj(h0(-k)) e^{i w t}, w = sqrt(g |k|) (a real field; the h0(k) term travels along +k,
 //   so the spectrum's wind direction is the direction the waves travel).
 //   Time: the dispersion is quantised to w_m = m w_0, m = round(w / w_0), w_0 = 2 pi / T (T = 4096 s, Tessendorf's

@@ -40,7 +40,7 @@ void main(uint i : SV_DispatchThreadID)
     float L = oceanLength(cascade);
     RWByteAddressBuffer h0 = ResourceDescriptorHeap[P[0].x];
     if (index.x == 0 || index.y == 0) { h0.Store4(16 * i, 0); return; }  // Nyquist (Ocean.hlsli)
-    float2 h = oceanGaussian(cascade, bin) * sqrt(0.5 * oceanVariance(oceanK(index, L), L, cascade));
-    float2 hm = oceanGaussian(cascade, mirror.y * OCEAN_N + mirror.x) * sqrt(0.5 * oceanVariance(oceanK(mirror, L), L, cascade));
+    float2 h = oceanGaussian(cascade, bin) * sqrt(0.25 * oceanVariance(oceanK(index, L), L, cascade));
+    float2 hm = oceanGaussian(cascade, mirror.y * OCEAN_N + mirror.x) * sqrt(0.25 * oceanVariance(oceanK(mirror, L), L, cascade));
     h0.Store4(16 * i, asuint(float4(h, hm.x, -hm.y)));
 }
