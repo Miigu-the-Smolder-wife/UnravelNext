@@ -76,7 +76,7 @@ float3 shadeSky(uint2 pixel, Texture2D<uint> words)
     float3 sun;
     if (atm.transmittance != UNX_NONE)
     {
-        radiance = atmosphereSkyRadianceView(atm, dir, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight));
+        radiance = atmosphereSkyRadianceClouded(atm, dir, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight));  // B5: the view sky with the cloud layer (none: atmosphereSkyRadianceView)
         sun = atmosphereSunRadiance(atm, g_cameraPosition);
     }
     else
