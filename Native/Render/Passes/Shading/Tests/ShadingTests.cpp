@@ -18,7 +18,12 @@
 //      shapes, the scenes' sizes, the horizon through the light): P99 and worst relative error of every integral.
 //  11. coverage composite: band B triangles as V's coverage records (exact area, subsample masks, centroid depth) over
 //      a band A ground, each pixel with fragments against a CPU composite of CPU-shaded fragments, the rest unchanged.
-//   unx_test_shading_shadingtests [--no-debug-layer] [--gbv] [--set key=value ...]   (--gbv: GPU-based validation;
+//  12. glass over the translucent layer (A10, TranslucentComposite.hlsl): a two-sided Glass pane given to the shading
+//      track as V's translucent layer (vis ids and classes from a CPU ray cast) over the stand-in band A scene; every
+//      class 1 pixel against R_p x (single-scatter GGX sun specular with F = 1) x exposure + T_p x (the same pixel
+//      shaded without the layer), with the exact dielectric Fresnel in double; every other pixel unchanged; the
+//      statistics count the pane's pixels.
+//   unx_test_shading_shadingtests [--no-debug-layer] [--gbv] [--glass] [--set key=value ...]   (--gbv: GPU-based validation;
 //   --set output.band_pixels=65536 runs the banded passes with 8 bands at the tests' 960 x 540)
 #include "FilmCurve.h"
 #include "../../Material/Tests/MTestFrame.h"
@@ -2471,11 +2476,233 @@ void testPlanarProducts(TestFrame& tf, Report& report)
     report(error.find("froxel lists") != std::string::npos, "planar view without S's froxel lists while the main view has them fails", error.empty() ? 0 : 1, 1);
 }
 
+// ---------------------------------------------------------------- 12
+double dielectricFresnel(double cosI, double eta)  // unpolarised, eta = n1 / n2; 1 under total internal reflection
+{
+    cosI = std::clamp(cosI, 0.0, 1.0);
+    const double sin2T = eta * eta * (1 - cosI * cosI);
+    if (sin2T >= 1) return 1;
+    const double cosT = std::sqrt(1 - sin2T);
+    const double rs = (eta * cosI - cosT) / (eta * cosI + cosT), rp = (eta * cosT - cosI) / (eta * cosT + cosI);
+    return 0.5 * (rs * rs + rp * rp);
+}
+
+void testGlassComposite(TestFrame& tf, Report& report)
+{
+    const uint32_t W = 480, H = 270;
+    struct Case
+    {
+        const char* name;
+        float ior, roughness;
+        float3 tint, sun;
+    };
+    const Case cases[] = {
+        { "index 1 (T_p = tint, R_p = 0)", 1.0f, 0.05f, { 0.6f, 0.3f, 0.9f }, { 0.3f, 0.6f, -0.75f } },
+        { "index 1.5, sun behind the pane (R_p, T_p)", 1.5f, 0.05f, { 0.8f, 0.5f, 0.2f }, { 0.3f, 0.6f, -0.75f } },
+        { "index 1.5, rough, sun in front (R_p x sun specular)", 1.5f, 0.4f, { 0.9f, 0.9f, 0.7f }, { 0.6f, 0.5f, 0.6f } },
+    };
+    for (const Case& k : cases)
+    {
+        scene::Scene s;
+        s.name = "glass composite";
+        scene::Material ground;
+        ground.name = "ground";
+        ground.baseColor = { 0.5f, 0.45f, 0.4f };
+        ground.roughness = 0.5f;
+        scene::Material ball;
+        ball.name = "ball";
+        ball.baseColor = { 0.2f, 0.4f, 0.7f };
+        ball.roughness = 0.3f;
+        scene::Material glass;
+        glass.name = "glass";
+        glass.cls = scene::MaterialClass::Glass;
+        glass.twoSided = true;
+        glass.baseColor = k.tint;
+        glass.roughness = k.roughness;
+        glass.ior = k.ior;
+        s.materials = { ground, ball, glass };
+        const uint32_t plane = addPlane(s, 40, 0), sphere = addSphere(s, 1, 48, 96, 1), pane = addPlane(s, 2, 2);
+        s.instances.resize(3);
+        s.instances[0].mesh = plane;
+        s.instances[1].mesh = sphere;
+        s.instances[1].transform = float3x4::translation({ 0, 1, 0 });
+        s.instances[2].mesh = pane;
+        {
+            // upright (plane normal +y -> +z), turned 40 deg about y, 3.3 m in front of the camera
+            const float c = std::cos(0.698132f), sn = std::sin(0.698132f);
+            float3x4& m = s.instances[2].transform;
+            m = float3x4::translation({ 0.3f, 1.3f, 2.2f });
+            m.m[0][0] = c, m.m[0][1] = sn, m.m[0][2] = 0;
+            m.m[1][0] = 0, m.m[1][1] = 0, m.m[1][2] = -1;
+            m.m[2][0] = -sn, m.m[2][1] = c, m.m[2][2] = 0;
+        }
+        s.sun.direction = normalize(k.sun);
+        scene::Camera cam;
+        cam.name = "glass";
+        cam.position = { 0.5f, 1.6f, 5.5f };
+        cam.forward = normalize(float3{ -0.1f, -0.15f, -1 });
+        cam.ev100 = 13;
+        s.cameras.push_back(cam);
+        tf.setScene(s, { 2 });  // the pane is not in band A: its clusters are listed for its vis ids only
+
+        uint32_t element = UINT32_MAX;
+        for (uint32_t e = 0; e < (uint32_t)tf.vis.visible.size(); ++e)
+            if (tf.vis.visible[e].instance == 2) element = e;
+        M_CHECK(element != UINT32_MAX, "pane cluster listed");
+        const scene::Mesh& pm = s.meshes[pane];
+        float3 corner[4];
+        for (int i = 0; i < 4; ++i) corner[i] = s.instances[2].transform.transformPoint(pm.positions[i]);
+        const float3 n0 = normalize(s.instances[2].transform.transformVector(float3{ 0, 1, 0 }));
+
+        // CPU ray cast of the pane per pixel centre: vis id (element, triangle) and class (1: all of the 3 x 3 block's
+        // centres on the pane, 2: the pane's outline)
+        const ViewDesc desc = ViewDesc::fromCamera(cam, W, H, float4x4{});
+        std::vector<int8_t> hitTri((size_t)W * H, -1);
+        for (uint32_t y = 0; y < H; ++y)
+            for (uint32_t x = 0; x < W; ++x)
+            {
+                double D[3], Dx[3];
+                pixelRay(desc, x + 0.5, y + 0.5, D, Dx);
+                for (uint32_t t = 0; t < 2; ++t)
+                {
+                    const uint32_t* ix = &pm.indices[3 * t];
+                    const float3 a = corner[ix[0]], b = corner[ix[1]], c = corner[ix[2]];
+                    const double e1[3] = { b.x - a.x, b.y - a.y, b.z - a.z }, e2[3] = { c.x - a.x, c.y - a.y, c.z - a.z };
+                    const double p[3] = { D[1] * e2[2] - D[2] * e2[1], D[2] * e2[0] - D[0] * e2[2], D[0] * e2[1] - D[1] * e2[0] };
+                    const double det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
+                    if (std::fabs(det) < 1e-12) continue;
+                    const double o[3] = { cam.position.x - a.x, cam.position.y - a.y, cam.position.z - a.z };
+                    const double u = (o[0] * p[0] + o[1] * p[1] + o[2] * p[2]) / det;
+                    const double q[3] = { o[1] * e1[2] - o[2] * e1[1], o[2] * e1[0] - o[0] * e1[2], o[0] * e1[1] - o[1] * e1[0] };
+                    const double v = (D[0] * q[0] + D[1] * q[1] + D[2] * q[2]) / det, dist = (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) / det;
+                    if (u >= 0 && v >= 0 && u + v <= 1 && dist > 0)
+                    {
+                        hitTri[(size_t)y * W + x] = (int8_t)t;
+                        break;
+                    }
+                }
+            }
+        std::vector<uint32_t> tvis((size_t)W * H, 0);
+        std::vector<uint8_t> tcls((size_t)W * H, 0);
+        uint32_t class1 = 0;
+        for (uint32_t y = 0; y < H; ++y)
+            for (uint32_t x = 0; x < W; ++x)
+            {
+                const size_t i = (size_t)y * W + x;
+                bool all = true, any = false;
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx)
+                    {
+                        const int xx = (int)x + dx, yy = (int)y + dy;
+                        const bool on = xx >= 0 && yy >= 0 && xx < (int)W && yy < (int)H && hitTri[(size_t)yy * W + xx] >= 0;
+                        all = all && on;
+                        any = any || on;
+                    }
+                if (hitTri[i] >= 0) tvis[i] = (element << 7) + (uint32_t)hitTri[i] + 1;
+                tcls[i] = all ? 1 : any ? 2 : 0;
+                class1 += tcls[i] == 1;
+            }
+
+        auto upload = [&](FramePassContext& fc, const char* name, DXGI_FORMAT format, uint32_t bytesPerTexel, const void* data) {
+            const TextureRef t = fc.graph.createTexture({ name, W, H, 1, 1, format });
+            const uint32_t pitch = TestFrame::rowPitch(W, bytesPerTexel);
+            ComPtr<ID3D12Resource> staging = makeBuffer(tf.device, (uint64_t)pitch * H, D3D12_HEAP_TYPE_UPLOAD);
+            uint8_t* p = nullptr;
+            D3D12_RANGE none{ 0, 0 };
+            check(staging->Map(0, &none, reinterpret_cast<void**>(&p)), "map");
+            for (uint32_t y = 0; y < H; ++y) std::memcpy(p + (size_t)y * pitch, static_cast<const uint8_t*>(data) + (size_t)y * W * bytesPerTexel, (size_t)W * bytesPerTexel);
+            staging->Unmap(0, nullptr);
+            ID3D12Resource* src = staging.Get();
+            tf.keep(staging);
+            fc.graph.addPass("m.test.upload layer", QueueType::Graphics, [&](PassBuilder& b) { b.use(t, Use::CopyDst); },
+                             [=](PassContext& c) {
+                                 D3D12_TEXTURE_COPY_LOCATION to{}, from{};
+                                 to.pResource = c.resource(t);
+                                 to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                                 from.pResource = src;
+                                 from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                                 from.PlacedFootprint.Footprint = { format, W, H, 1, pitch };
+                                 c.cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+                             });
+            return t;
+        };
+        std::shared_ptr<std::vector<uint8_t>> base, with;
+        tf.frame.outputLinearHdr = true;
+        for (int pass = 0; pass < 2; ++pass)
+            tf.run([&](FramePassContext& fc) {
+                ViewResources v = tf.mainView(fc, W, H, 0);
+                v.color = fc.graph.createTexture({ "m.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+                tf.vis.record(fc, v);
+                if (pass == 1)
+                {
+                    v.translucentVis = upload(fc, "m.test.translucent vis", DXGI_FORMAT_R32_UINT, 4, tvis.data());
+                    v.translucentClass = upload(fc, "m.test.translucent class", DXGI_FORMAT_R8_UINT, 1, tcls.data());
+                }
+                tracks::materialResolve(fc, v);
+                tracks::shading(fc, v);
+                (pass == 0 ? base : with) = tf.readback(fc, v.color);
+            });
+        tf.frame.outputLinearHdr = false;
+        const shading::Stats st = shading::latestStats(tf.trackState);
+
+        const double exposure = 1.0 / (1.2 * std::exp2(13.0)), thetaS = s.sun.angularRadius;
+        const float3 E = s.sun.color * s.sun.illuminance, l0 = normalize(s.sun.direction);
+        model::Surface mirror;  // F = 1: the GGX lobe of the pane's specular, compensation removed below
+        mirror.baseColor = { 1, 1, 1 };
+        mirror.metallic = 1;
+        mirror.roughness = k.roughness;
+        double worst = 0, worstOther = 0, minF = 1, maxF = 0, maxSpec = 0;
+        uint32_t checked = 0;
+        for (uint32_t y = 0; y < H; ++y)
+            for (uint32_t x = 0; x < W; ++x)
+            {
+                const size_t i = (size_t)y * W + x;
+                const float4 a = texelOf<float4>(*base, W, x, y), g = texelOf<float4>(*with, W, x, y);
+                if (tcls[i] != 1)
+                {
+                    worstOther = std::max({ worstOther, (double)std::fabs(g.x - a.x), (double)std::fabs(g.y - a.y), (double)std::fabs(g.z - a.z) });
+                    continue;
+                }
+                double D[3], Dx[3];
+                pixelRay(desc, x + 0.5, y + 0.5, D, Dx);
+                const float3 v = normalize(float3{ (float)-D[0], (float)-D[1], (float)-D[2] });
+                const float3 n = dot(n0, v) >= 0 ? n0 : n0 * -1.0f;
+                const double NoV = std::max(0.0, (double)dot(n, v));
+                const double F = dielectricFresnel(NoV, 1.0 / std::max(k.ior, 1.0001f));
+                minF = std::min(minF, F);
+                maxF = std::max(maxF, F);
+                float3 spec{};
+                if (dot(n, l0) > 0)
+                    spec = cpuSun(mirror, n, v, l0, thetaS) * model::directionalAlbedo((float)NoV, k.roughness) * E * (float)exposure;
+                double want[3];
+                for (int c = 0; c < 3; ++c)
+                {
+                    const double t = std::clamp((double)(&k.tint.x)[c], 0.0, 1.0), d = 1 - F * F * t * t;
+                    const double Rp = F + (1 - F) * (1 - F) * F * t * t / d, Tp = (1 - F) * (1 - F) * t / d;
+                    want[c] = Rp * (&spec.x)[c] + Tp * (&a.x)[c];
+                }
+                maxSpec = std::max(maxSpec, (double)spec.y);
+                const double scale = std::max({ want[0], want[1], want[2], 1e-2 });
+                const double e = std::max({ std::fabs(g.x - want[0]), std::fabs(g.y - want[1]), std::fabs(g.z - want[2]) }) / scale;
+                if (e > 5e-3 && e > worst)
+                    logf("  glass px (%u,%u): got (%.5f %.5f %.5f) want (%.5f %.5f %.5f), behind (%.5f %.5f %.5f), F %.5f\n", x, y, g.x, g.y, g.z, want[0], want[1], want[2], a.x, a.y, a.z, F);
+                worst = std::max(worst, e);
+                ++checked;
+            }
+        logf("glass [%s]: %u class 1 pixels checked, F %.4f .. %.4f, largest sun specular %.4f (exposed); statistics: %u pane, %u solid, %u unlit\n", k.name, checked, minF,
+             maxF, maxSpec, st.glassPanePixels, st.glassSolidPixels, st.glassUnlitPixels);
+        report(checked > 5000 && worst < 5e-3, unx::format("glass [%s]: class 1 pixels vs R_p x sun specular + T_p x behind (rel.)", k.name).c_str(), worst, 5e-3);
+        report(worstOther == 0, unx::format("glass [%s]: pixels outside class 1 unchanged", k.name).c_str(), worstOther, 0);
+        report(st.glassPanePixels == class1 && st.glassSolidPixels == 0 && st.glassUnlitPixels == 0, unx::format("glass [%s]: statistics count the pane's class 1 pixels", k.name).c_str(),
+               std::fabs((double)st.glassPanePixels - class1), 0);
+    }
+}
+
 int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, gpuValidation = false, growth = false;
+        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -2484,6 +2711,7 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--area-dump") g_areaDump = true;
             if (std::string(argv[i]) == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
             if (std::string(argv[i]) == "--coverage-growth") growth = true;
+            if (std::string(argv[i]) == "--glass") glassOnly = true;
         }
         Report report;
         testTable(report);
@@ -2495,6 +2723,12 @@ int main(int argc, char** argv)
             logf("%s: %d failure(s)\n", failures ? "FAILED" : "passed", failures);
             return failures ? 1 : 0;
         }
+        if (glassOnly)  // --glass: test 12 alone
+        {
+            testGlassComposite(tf, report);
+            logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
+            return report.failures ? 1 : 0;
+        }
         testScene(tf, report);
         testSunSpecular(tf, report);
         testLocalLights(tf, report);
@@ -2505,6 +2739,7 @@ int main(int argc, char** argv)
         testAreaLightContours(tf, report);
         testCoverageComposite(tf, report);
         testPlanarProducts(tf, report);
+        testGlassComposite(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

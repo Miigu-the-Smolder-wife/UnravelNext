@@ -179,10 +179,16 @@ uint32_t asUint(float f)
 }
 } // namespace
 
+bool translucentActive(FramePassContext&, const ViewResources& view)
+{
+    return view.view.kind == gpu::ViewKind::Main && view.translucentVis.valid() && view.translucentClass.valid();
+}
+
 bool postActive(FramePassContext& fc, const ViewResources& view)
 {
     if (view.view.kind != gpu::ViewKind::Main || fc.frame.outputLinearHdr) return false;
     if (fc.frame.displayPeak > 0) return true;  // an HDR display: the chain writes its encoding
+    if (translucentActive(fc, view)) return true;  // A10: glass composited over the float image
     if (motionBlurActive(fc, view) || distortionActive(fc, view)) return true;  // their float image is encoded by the chain
     const PostParams p = params(fc.quality);
     // (the shading kernels' own display encoding is the film curve: another curve needs the chain)

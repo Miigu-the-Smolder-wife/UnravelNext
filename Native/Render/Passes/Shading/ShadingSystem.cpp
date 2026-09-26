@@ -177,6 +177,7 @@ struct StatsRing
     uint64_t frame[kSlots] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
     uint32_t tiles[kSlots] = {};
     bool coverage[kSlots] = {};  // the frame ran the coverage composite (its error word at byte 20 is this frame's)
+    bool glass[kSlots] = {};     // the frame ran the glass composite (its counts at bytes 24..35 are this frame's)
     uint64_t last = UINT64_MAX;
     ~StatsRing()
     {
@@ -226,6 +227,7 @@ Stats latestStats(TrackState& state)
     for (uint32_t c = 0; c < 4; ++c) st.classTiles[c] = w[c];
     st.edgePixels = w[4];
     st.coverageErrors = ring.coverage[slot] ? w[5] : 0;
+    if (ring.glass[slot]) st.glassPanePixels = w[6], st.glassSolidPixels = w[7], st.glassUnlitPixels = w[8];
     st.tiles = ring.tiles[slot];
     return st;
 }
@@ -607,6 +609,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         ring.frame[slot] = fc.frame.frameIndex;
         ring.tiles[slot] = tileCount;
         ring.coverage[slot] = coverage;
+        ring.glass[slot] = false;  // (set again by the glass composite when it runs)
         ring.last = fc.frame.frameIndex;
         ID3D12Resource* dst = ring.buffer.Get();
         const BufferRef classArgs = o.tileArgs;
@@ -886,6 +889,70 @@ void shadingComposite(FramePassContext& fc, ViewResources& view)
     if (view.view.kind == gpu::ViewKind::Main) exposureReadback(fc, exposureHistogram(fc));
 }
 
+// A10 glass over V's translucent layer (FEATURES_GAME 14.1): class 1 pixels composited in place on the float image.
+void translucentComposite(FramePassContext& fc, const ViewResources& view, TextureRef colour)
+{
+    RenderGraph& g = fc.graph;
+    const FrameResources& r = fc.resources;
+    const TextureRef vis = view.translucentVis, classes = view.translucentClass;
+    const BufferRef stats = g.createBuffer({ "m.glass.stats", 16, 0 });  // raw
+    ID3D12PipelineState* clear = fc.shaders.compute("Passes/Shading/ExposureClear");  // (zeroes a raw buffer: P[0].x, count P[0].y)
+    ID3D12PipelineState* kernel = fc.shaders.compute("Passes/Shading/TranslucentComposite");
+    const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
+    const uint32_t w = view.view.width, h = view.view.height, none = gpu::kNone;
+    const uint32_t textureTable = material::resolveOutputs(fc, view).textureTableSrv;
+    g.addPass("m.glass.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(stats, Use::UavCompute); },
+              [=](PassContext& c) {
+                  const uint32_t k[4] = { c.uav(stats), 4, 0, 0 };
+                  c.cmd->SetPipelineState(clear);
+                  c.computeConstants(k, 4);
+                  c.cmd->Dispatch(1, 1, 1);
+              });
+    g.addPass("m.glass", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(vis, Use::SrvCompute);
+                  b.use(classes, Use::SrvCompute);
+                  b.use(colour, Use::UavCompute);
+                  b.use(stats, Use::UavCompute);
+                  if (view.visibleClusters.valid()) b.use(view.visibleClusters, Use::SrvCompute);
+                  if (r.giCache.valid()) b.use(r.giCache, Use::SrvCompute);
+                  for (const TextureRef& t : { r.transmittanceLut, r.multiScatterLut, view.airVolume })
+                      if (t.valid()) b.use(t, Use::SrvCompute);
+                  for (const BufferRef& x : { r.vsmPageTable, r.vsmBlocks, r.vsmSearchBound, r.vsmLayers })
+                      if (x.valid()) b.use(x, Use::SrvCompute);
+                  if (r.vsmAtlas.valid()) b.use(r.vsmAtlas, Use::SrvCompute);
+              },
+              [=, &fc](PassContext& c) {
+                  const FrameResources& fr = fc.resources;
+                  const bool shadows = fr.vsmPageTable.valid() && fr.vsmConstants != UINT32_MAX;
+                  const uint32_t k[20] = { c.srv(vis), c.srv(classes), c.uav(colour), c.uav(stats),
+                                           c.srv(view.visibleClusters), textureTable, fr.giCache.valid() ? c.srv(fr.giCache) : none, 0,
+                                           fr.transmittanceLut.valid() ? c.srv(fr.transmittanceLut) : none, fr.multiScatterLut.valid() ? c.srv(fr.multiScatterLut) : none,
+                                           view.airVolume.valid() ? c.srv(view.airVolume) : none, 0,
+                                           shadows ? c.srv(fr.vsmPageTable) : none, shadows ? c.srv(fr.vsmBlocks) : none,
+                                           shadows && fr.vsmSearchBound.valid() ? c.srv(fr.vsmSearchBound) : none, shadows ? fr.vsmConstants : none,
+                                           shadows && fr.vsmLayers.valid() ? c.srv(fr.vsmLayers) : none, 0, 0, 0 };
+                  c.cmd->SetPipelineState(kernel);
+                  c.bindFrameConstants(cb);
+                  c.computeConstants(k, 20);
+                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+              });
+    if (fc.trackState)
+    {
+        StatsRing& ring = fc.state<StatsRing>("M.statsRing");
+        ring.ensure(fc.device);
+        ID3D12Resource* dst = ring.buffer.Get();
+        const uint32_t slot = (uint32_t)(fc.frame.frameIndex % StatsRing::kSlots);
+        ring.glass[slot] = true;
+        g.addPass("m.glass.stats", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(stats, Use::CopySrc);
+                      b.keep();
+                  },
+                  [dst, slot, stats](PassContext& c) { c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 24, c.resource(stats), 0, 12); });
+    }
+}
+
 void shade(FramePassContext& fc, ViewResources& view)
 {
     // Views the frame does not record as the lighting group (planar reflection views through renderView, tests): M's own
@@ -906,6 +973,7 @@ void shade(FramePassContext& fc, ViewResources& view)
     fc.graph.addBandedGroup(view.view.kind != gpu::ViewKind::Main ? "m.lit.planar" : "m.lit", o.height, o.bands, passes);
     tracks::water(fc, target);  // W (engine 1): the water surfaces' refraction targets are the shaded opaque scene and its depth
     shadingComposite(fc, target);
+    if (translucentActive(fc, view)) translucentComposite(fc, view, target.color);  // A10 glass over the composited image
     TextureRef image = target.color;
     if (haze)
     {

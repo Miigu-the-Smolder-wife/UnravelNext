@@ -324,6 +324,19 @@ float3 shFilm(float3 color, float peak)
     return d;
 }
 
+// Unpolarised dielectric Fresnel reflectance (the mean of the s and p reflectances) for light meeting the interface at
+// cos(theta_i) = cosI from the medium n1 into n2, eta = n1 / n2; 1 under total internal reflection. The glass class's F
+// (INTERFACES 8.1, FEATURES_GAME 14.1) and the same equations as W's waterFresnel.
+float shDielectricFresnel(float cosI, float eta)
+{
+    cosI = saturate(cosI);
+    const float sin2T = eta * eta * (1.0 - cosI * cosI);
+    if (sin2T >= 1.0) return 1.0;
+    const float cosT = sqrt(1.0 - sin2T);
+    const float rs = (eta * cosI - cosT) / (eta * cosI + cosT), rp = (eta * cosT - cosI) / (eta * cosT + cosI);
+    return 0.5 * (rs * rs + rp * rp);
+}
+
 float shSrgbOetf(float c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
 
 // Display: sRGB OETF of the tone-mapped value; linear outputs (validation, secondary views): radiance x exposure.

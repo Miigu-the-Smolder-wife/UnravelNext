@@ -6,6 +6,9 @@ namespace unx::render::shading
 {
 // A post term is on for this view (the main view of a display frame with shading.post_* set).
 bool postActive(FramePassContext& fc, const ViewResources& view);
+// A10: the view has glass on V's translucent layer (the main view's translucentVis): M composites it over the shaded
+// float image (TranslucentComposite.hlsl), so the view is shaded linear and encoded by the post chain.
+bool translucentActive(FramePassContext& fc, const ViewResources& view);
 // The exposed-linear RGBA16F target the view is shaded into when the chain is on.
 TextureRef postTarget(FramePassContext& fc, const ViewResources& view);
 // The lens PSF's tail of 'hdr' at half resolution (energy-normalised pyramid over 'levels' octaves; tests read it).
