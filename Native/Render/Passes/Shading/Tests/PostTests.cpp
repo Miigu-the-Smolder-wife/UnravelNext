@@ -19,6 +19,7 @@
 //      an environment image L(direction): against the CPU mean of L over each pixel's arc Q^tau d, tau in [0, s] (pixels
 //      whose arc stays on the image).
 // Options: --levels N (6, test 1).
+#include "FilmCurve.h"
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/core/Log.h"
@@ -239,37 +240,7 @@ void chain(Device& device, ShaderLibrary& shaders, const QualityConfig& quality,
 }
 
 // CPU reference of PostFinal.hlsl without bloom and grain.
-// CPU references of ShadingCommon.hlsli: shPbrNeutralPeak (peak 1 = shPbrNeutral).
-float pbrNeutralPeak(float c[3], float peak)
-{
-    const float startCompression = 0.8f * peak - 0.04f, desaturation = 0.15f;
-    const float x = std::min(c[0], std::min(c[1], c[2]));
-    const float offset = x < 0.08f ? x - 6.25f * x * x : 0.04f;
-    for (int i = 0; i < 3; ++i) c[i] -= offset;
-    const float top = std::max(c[0], std::max(c[1], c[2]));
-    if (top < startCompression) return top;
-    const float d = peak - startCompression;
-    const float newPeak = peak - d * d / (top + d - startCompression);
-    for (int i = 0; i < 3; ++i) c[i] *= newPeak / top;
-    const float g = 1 - 1 / (desaturation * (top - newPeak) / peak + 1);
-    for (int i = 0; i < 3; ++i) c[i] = c[i] * (1 - g) + newPeak * g;
-    return top;
-}
-float pbrNeutral(float c[3])
-{
-    const float startCompression = 0.8f - 0.04f, desaturation = 0.15f;
-    const float x = std::min(c[0], std::min(c[1], c[2]));
-    const float offset = x < 0.08f ? x - 6.25f * x * x : 0.04f;
-    for (int i = 0; i < 3; ++i) c[i] -= offset;
-    const float peak = std::max(c[0], std::max(c[1], c[2]));
-    if (peak < startCompression) return peak;
-    const float d = 1 - startCompression;
-    const float newPeak = 1 - d * d / (peak + d - startCompression);
-    for (int i = 0; i < 3; ++i) c[i] *= newPeak / peak;
-    const float g = 1 - 1 / (desaturation * (peak - newPeak) + 1);
-    for (int i = 0; i < 3; ++i) c[i] = c[i] * (1 - g) + newPeak * g;
-    return peak;
-}
+// (the tone curve's CPU reference: FilmCurve.h)
 float srgb(float c) { return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f; }
 float hashUnit(uint32_t x, uint32_t y, uint32_t z)
 {
@@ -368,7 +339,7 @@ int main(int argc, char** argv)
                     const float c2 = 1.0f / (1.0f + tx * tx + ty * ty);
                     const float vig = 1.0f + (c2 * c2 - 1.0f) * 0.7f;
                     for (float& c : e) c = std::max(c * vig, 0.0f);
-                    pbrNeutral(e);
+                    unx::test::filmCurve(e, 1.0f);
                     const float n = hashUnit(x, y, kFrame ^ 0x5bd1e995u) + hashUnit(y, x, kFrame + 104729u) - 1.0f;
                     uint32_t word;
                     std::memcpy(&word, out.data() + (size_t)y * op + (size_t)x * 4, 4);
@@ -448,8 +419,7 @@ int main(int argc, char** argv)
                         const float c2 = 1.0f / (1.0f + tx * tx + ty * ty);
                         const float vig = 1.0f + (c2 * c2 - 1.0f) * 0.7f;
                         for (float& c : e) c = std::max(c * vig, 0.0f);
-                        if (peak == 1.0f) pbrNeutral(e);
-                        else pbrNeutralPeak(e, peak);
+                        unx::test::filmCurve(e, peak);
                         for (int c = 0; c < 3; ++c)
                         {
                             const float expected = saturate(e[c] / peak) * peak, got = halfToFloat(ov[c]);

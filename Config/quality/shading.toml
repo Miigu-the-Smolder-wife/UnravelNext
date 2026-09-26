@@ -39,6 +39,9 @@ post_bloom_levels = 6
 post_vignette = 0.0
 post_grain = 0.0
 post_lut = ""
+# Display rendering (U2): "film" (default; ShadingCommon.hlsli shFilm: filmic toe and shoulder, highlights roll off to
+# white, scene grey 0.18 stays 0.18) or "neutral" (Khronos PBR Neutral: base colours kept, flatter).
+post_tone_curve = "film"
 
 # Motion blur (A5; COVERAGE 14.12 (2); MotionBlur.cpp): the shutter's open time as a fraction of the frame interval,
 # the exposure [t - s dt, t]; 0.5 = 180 degrees (the user's gate camera, 2026-09-26), 0 = instantaneous. Frames without

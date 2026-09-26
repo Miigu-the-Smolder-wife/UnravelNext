@@ -282,13 +282,55 @@ float3 shPbrNeutralPeak(float3 color, float peak)
     return lerp(color, newPeak.xxx, g);
 }
 
+// Film curve (the default display rendering since U2): a filmic toe / straight / shoulder in log10 exposure, per channel
+// in ACEScg (AP1) primaries between the ACES pre- and post-desaturation (0.96, 0.93), with the parameters games of the
+// Unreal family ship by default (slope 0.88, toe 0.55, shoulder 0.26, black clip 0, white clip 0.04): scene grey 0.18
+// stays 0.18, contrast 0.88 per decade around it, a smooth toe to black and a shoulder that rolls highlights off towards
+// white (the per-channel shoulder desaturates them: the path to white of film). Input linear Rec.709 x exposure, output
+// linear Rec.709 display light (1 = paper white). An HDR display (peak x paper white): below the knee 0.8 per channel
+// the SDR image exactly; above it the SDR shoulder's range [0.8, 1.04) is expanded monotonically onto [0.8, 1.04 peak)
+// by E(u) = u / (1 - u (1 - 1 / r)) (slope 1 at the knee, r = the ranges' ratio; the identity at peak 1).
+float3 shFilm(float3 color, float peak)
+{
+    const float3x3 toAp1 = float3x3(0.6130973, 0.3395229, 0.0473793, 0.0701942, 0.9163556, 0.0134526, 0.0206156, 0.1095698, 0.8698151);
+    const float3x3 toSrgb = float3x3(1.7050510, -0.6217921, -0.0832589, -0.1302564, 1.1408047, -0.0105483, -0.0240033, -0.1289690, 1.1529723);
+    const float3 ap1Y = float3(0.2722287, 0.6740818, 0.0536895);
+    const float slope = 0.88, toe = 0.55, shoulder = 0.26, blackClip = 0.0, whiteClip = 0.04;
+    float3 a = mul(toAp1, color);
+    a = max(lerp(dot(a, ap1Y).xxx, a, 0.96), 0.0);
+    const float toeScale = 1 + blackClip - toe, shoulderScale = 1 + whiteClip - shoulder;
+    const float bt = (0.18 + blackClip) / toeScale - 1;
+    const float toeMatch = log10(0.18) - 0.5 * log((1 + bt) / (1 - bt)) * (toeScale / slope);
+    const float straightMatch = (1 - toe) / slope - toeMatch;
+    const float shoulderMatch = shoulder / slope - straightMatch;
+    const float3 l = log10(max(a, 1e-10));
+    const float3 straight = slope * (l + straightMatch);
+    float3 toeColor = -blackClip + 2 * toeScale / (1 + exp((-2 * slope / toeScale) * (l - toeMatch)));
+    float3 shoulderColor = (1 + whiteClip) - 2 * shoulderScale / (1 + exp((2 * slope / shoulderScale) * (l - shoulderMatch)));
+    toeColor = select(l < toeMatch, toeColor, straight);
+    shoulderColor = select(l > shoulderMatch, shoulderColor, straight);
+    float3 t = saturate((l - toeMatch) / (shoulderMatch - toeMatch));
+    t = shoulderMatch < toeMatch ? 1 - t : t;
+    t = (3 - 2 * t) * t * t;
+    a = lerp(toeColor, shoulderColor, t);
+    a = max(lerp(dot(a, ap1Y).xxx, a, 0.93), 0.0);
+    float3 d = max(mul(toSrgb, a), 0.0);
+    if (peak > 1)
+    {
+        const float knee = 0.8, top = 1 + whiteClip, r = (top * peak - knee) / (top - knee);
+        const float3 u = min(max(d - knee, 0.0) / (top - knee), 0.999999);
+        d = select(d > knee, knee + (top - knee) * (u / (1 - u * (1 - 1 / r))), d);
+    }
+    return d;
+}
+
 float shSrgbOetf(float c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
 
 // Display: sRGB OETF of the tone-mapped value; linear outputs (validation, secondary views): radiance x exposure.
 float4 shEncodeExposed(float3 e)
 {
 #if OUTPUT == 0
-    const float3 t = saturate(shPbrNeutral(max(e, 0.0)));
+    const float3 t = saturate(shFilm(max(e, 0.0), 1.0));
     return float4(shSrgbOetf(t.r), shSrgbOetf(t.g), shSrgbOetf(t.b), 1);
 #else
     return float4(e, 1);

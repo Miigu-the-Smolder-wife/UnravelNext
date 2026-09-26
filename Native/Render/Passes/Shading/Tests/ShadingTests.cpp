@@ -20,6 +20,7 @@
 //      a band A ground, each pixel with fragments against a CPU composite of CPU-shaded fragments, the rest unchanged.
 //   unx_test_shading_shadingtests [--no-debug-layer] [--gbv] [--set key=value ...]   (--gbv: GPU-based validation;
 //   --set output.band_pixels=65536 runs the banded passes with 8 bands at the tests' 960 x 540)
+#include "FilmCurve.h"
 #include "../../Material/Tests/MTestFrame.h"
 
 #include "unx/scene/MaterialModel.h"
@@ -122,21 +123,6 @@ float3 sunSpecularReference(const model::Surface& s, float3 n, float3 v, float3 
 
 double srgbToLinear(double c) { return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4); }
 double oetf(double c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * std::pow(c, 1 / 2.4) - 0.055; }
-
-float3 pbrNeutral(float3 c)
-{
-    const float startCompression = 0.8f - 0.04f, desaturation = 0.15f;
-    const float x = std::min(c.x, std::min(c.y, c.z));
-    const float offset = x < 0.08f ? x - 6.25f * x * x : 0.04f;
-    c = c - float3{ offset, offset, offset };
-    const float peak = std::max(c.x, std::max(c.y, c.z));
-    if (peak < startCompression) return c;
-    const float d = 1 - startCompression;
-    const float newPeak = 1 - d * d / (peak + d - startCompression);
-    c = c * (newPeak / peak);
-    const float g = 1 - 1 / (desaturation * (peak - newPeak) + 1);
-    return c + (float3{ newPeak, newPeak, newPeak } - c) * g;
-}
 
 void pixelRay(const ViewDesc& v, double px, double py, double D[3], double Dx[3])
 {
@@ -613,11 +599,13 @@ void testScene(TestFrame& tf, Report& report)
         {
             const float4 l = texelOf<float4>(*lin, W, x, y);
             const uint32_t d = texelOf<uint32_t>(*disp, W, x, y);
-            const float3 t = pbrNeutral({ std::max(l.x, 0.f), std::max(l.y, 0.f), std::max(l.z, 0.f) });
+            float tc[3] = { std::max(l.x, 0.f), std::max(l.y, 0.f), std::max(l.z, 0.f) };
+            unx::test::filmCurve(tc, 1.0f);
+            const float3 t{ tc[0], tc[1], tc[2] };
             const double want[3] = { oetf(std::clamp(t.x, 0.f, 1.f)) * 1023, oetf(std::clamp(t.y, 0.f, 1.f)) * 1023, oetf(std::clamp(t.z, 0.f, 1.f)) * 1023 };
             for (int k = 0; k < 3; ++k) worstLsb = std::max(worstLsb, std::abs((double)((d >> (10 * k)) & 0x3FF) - want[k]));
         }
-    report(worstLsb <= 1.0, "display: RGB10A2 = sRGB OETF(PBR Neutral(linear)) (10-bit LSB)", worstLsb, 1.0);
+    report(worstLsb <= 1.0, "display: RGB10A2 = sRGB OETF(film curve(linear)) (10-bit LSB)", worstLsb, 1.0);
 
     };
     auto sunCamera = [&]() {

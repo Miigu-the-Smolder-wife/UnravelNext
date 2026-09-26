@@ -33,6 +33,7 @@ struct PostParams
     float bloom = 0, vignette = 0, grain = 0;
     uint32_t levels = 6;
     std::string lut;
+    uint32_t curve = 0;  // 0 film (shFilm), 1 PBR Neutral
 };
 
 PostParams params(const QualityConfig& q)
@@ -44,6 +45,10 @@ PostParams params(const QualityConfig& q)
     p.grain = num("shading.post_grain", 0);
     p.levels = q.has("shading.post_bloom_levels") ? (uint32_t)q.integer("shading.post_bloom_levels") : 6u;
     p.lut = q.has("shading.post_lut") ? q.string("shading.post_lut") : std::string();
+    const std::string curve = q.has("shading.post_tone_curve") ? q.string("shading.post_tone_curve") : std::string("film");
+    if (curve == "film") p.curve = 0;
+    else if (curve == "neutral") p.curve = 1;
+    else fail("shading.post_tone_curve = \"%s\": film or neutral", curve.c_str());
     if (p.bloom < 0 || p.bloom > 1 || p.vignette < 0 || p.vignette > 1 || p.grain < 0 || p.grain >= 0.4f || p.levels < 1 || p.levels > 10)
         fail("shading.post_*: bloom strength and vignette in [0, 1], 0 <= grain < 0.4, 1 <= bloom levels <= 10");
     return p;
@@ -180,7 +185,8 @@ bool postActive(FramePassContext& fc, const ViewResources& view)
     if (fc.frame.displayPeak > 0) return true;  // an HDR display: the chain writes its encoding
     if (motionBlurActive(fc, view) || distortionActive(fc, view)) return true;  // their float image is encoded by the chain
     const PostParams p = params(fc.quality);
-    return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty();
+    // (the shading kernels' own display encoding is the film curve: another curve needs the chain)
+    return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty() || p.curve != 0;
 }
 
 TextureRef postTarget(FramePassContext& fc, const ViewResources& view)
@@ -273,7 +279,7 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
               },
               [=](PassContext& c) {
                   const uint32_t k[12] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
-                                           asUint(p.bloom), asUint(p.vignette), asUint(p.grain), frame, w, h, asUint(peak), 0 };
+                                           asUint(p.bloom), asUint(p.vignette), asUint(p.grain), frame, w, h, asUint(peak), p.curve };
                   c.cmd->SetPipelineState(final);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 12);

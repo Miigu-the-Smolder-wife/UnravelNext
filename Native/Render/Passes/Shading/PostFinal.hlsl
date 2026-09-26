@@ -1,9 +1,10 @@
 // unx-kernel: cs_6_6 main
-// Post chain, final pass (Post.cpp): exposed HDR -> bloom mix -> natural vignetting -> PBR Neutral -> grading LUT ->
+// Post chain, final pass (Post.cpp): exposed HDR -> bloom mix -> natural vignetting -> tone curve -> grading LUT ->
 // grain -> sRGB OETF -> 10-bit triangular dither -> the display output (RGB10A2).
 // P[0] = { HDR SRV, bloom SRV (half resolution; UNX_NONE: off), output UAV, LUT SRV (UNX_NONE: none) },
 // P[1] = { asfloat bloom strength, asfloat vignette, asfloat grain, frame index }, P[2] = { width, height, asfloat display
-// peak, 0 }: peak 0 = SDR (above); peak >= 1 = an HDR display (peak over paper white): the curve generalised to that peak,
+// peak, tone curve (0 film shFilm, 1 PBR Neutral) }: peak 0 = SDR (above); peak >= 1 = an HDR display (peak over paper
+// white): the curve generalised to that peak,
 // the LUT on its output over the peak, grain, then linear light with 1 = paper white (RGBA16F output, no OETF, no dither).
 // Frame constants of the view (its projection gives the field angle).
 #include "Bindless.hlsli"
@@ -51,7 +52,9 @@ void main(uint2 id : SV_DispatchThreadID)
     const bool hdrDisplay = peak > 0;
     const float range = hdrDisplay ? peak : 1.0;
     // d: the curve's output over the display's range (0..1), so the LUT and grain act the same in SDR and HDR
-    float3 d = hdrDisplay ? saturate(shPbrNeutralPeak(max(e, 0.0), peak) / peak) : saturate(shPbrNeutral(max(e, 0.0)));
+    float3 d;
+    if (P[2].w == 1u) d = hdrDisplay ? saturate(shPbrNeutralPeak(max(e, 0.0), peak) / peak) : saturate(shPbrNeutral(max(e, 0.0)));
+    else d = saturate(shFilm(max(e, 0.0), range) / range);
     if (P[0].w != UNX_NONE)
     {
         Texture3D<float4> lut = ResourceDescriptorHeap[P[0].w];
