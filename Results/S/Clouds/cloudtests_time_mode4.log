@@ -1,0 +1,18 @@
+﻿powershell : clouds on the hardware device
+At line:1 char:879
++ ... _mode1.log; powershell -ExecutionPolicy Bypass -File Tools/CI/GpuLock ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (clouds on the hardware device:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  240x135, map 512^2: shadow map + march mode 4 (approximate multiple scattering + sky), median 9.098 ms over 30 (submi
+ssion included)
+  144 rays, 40 with radiance above 5 % of the brightest (1.8077e-02)
+  the view shows lit cloud (rays)                                    4.000e+01 (limit 2.0e+01) ok
+  transmittance |GPU - CPU| (worst)                                  4.760e-03 (limit 3.0e-02) ok
+  radiance |GPU - CPU| / CPU (mean)                                  8.109e-03 (limit 2.0e-02) ok
+  radiance |GPU - CPU| / CPU (worst)                                 4.454e-02 (limit 1.0e-01) ok
+  approximate model (mode 4) |GPU - CPU twin| / CPU (mean)           1.014e-03 (limit 2.0e-02) ok
+  approximate model (mode 4) |GPU - CPU twin| / CPU (worst)          1.527e-02 (limit 1.0e-01) ok
+  attribution: the deep opacity map alone (mode 2): mean 0.0619, worst 0.182
+RESULT PASS

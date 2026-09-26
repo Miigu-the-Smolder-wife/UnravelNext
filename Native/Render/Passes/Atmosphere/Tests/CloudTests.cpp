@@ -1,10 +1,13 @@
 // B5 volumetric clouds, GPU part (S_STATUS_KO.md 9 step b): the sun's deep opacity map (CloudShadow.hlsl) and the march
 // (CloudMarch.hlsl, single scattering of the sun) against the CPU reference (CloudModel.cpp: exact transmittance toward
-// the camera and the sun, 20 m steps, double precision) on the same rays. The view is 96 x 54 pixels with the pixel angle
+// the camera and the sun, 20 m steps, double precision) on the same rays; mode 4 (the APPROXIMATE multiple scattering and
+// sky light the frame uses, not exact) against its CPU twin referenceApproximate (the implementation, not the model's
+// error: that is Tests/CloudMsFit.cpp). The view is 96 x 54 pixels with the pixel angle
 // of a quarter-resolution 4K view (2.1e-3 rad), so the march takes the step lengths it takes in a frame.
-//   unx_test_atmosphere_cloudtests [--warp] [--no-debug-layer] [--texels N] [--size W H] [--time N]
+//   unx_test_atmosphere_cloudtests [--warp] [--no-debug-layer] [--texels N] [--size W H] [--time N [--time-mode M]]
 // --time N repeats the shadow map + march N more times and reports the median wall time of a submission and wait (an
-// upper bound of the GPU time: includes the submission; run under GpuLock -Kind timing).
+// upper bound of the GPU time: includes the submission; run under GpuLock -Kind timing); --time-mode M times the shadow map
+// and march mode M alone (1: single scattering, 4: the approximate multiple scattering and sky light).
 #include "../CloudGpu.h"
 #include "unx/core/File.h"
 #include "unx/core/Log.h"
@@ -71,7 +74,7 @@ int main(int argc, char** argv)
     {
         bool warp = false, debugLayer = true;
         uint32_t texelsArg = 0;  // --texels N: the deep opacity map's size (attribution runs)
-        uint32_t sizeArg[2] = { 96, 54 }, timeRuns = 0;  // --size W H (the pixel angle stays 2.1e-3); --time N: N timed frames
+        uint32_t sizeArg[2] = { 96, 54 }, timeRuns = 0, timeMode = 0;  // --size W H (the pixel angle stays 2.1e-3); --time N: N timed frames
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -80,6 +83,7 @@ int main(int argc, char** argv)
             else if (a == "--texels" && i + 1 < argc) texelsArg = (uint32_t)std::stoul(argv[++i]);
             else if (a == "--size" && i + 2 < argc) sizeArg[0] = (uint32_t)std::stoul(argv[++i]), sizeArg[1] = (uint32_t)std::stoul(argv[++i]);
             else if (a == "--time" && i + 1 < argc) timeRuns = (uint32_t)std::stoul(argv[++i]);
+            else if (a == "--time-mode" && i + 1 < argc) timeMode = (uint32_t)std::stoul(argv[++i]);
             else fail("unknown argument %s", a.c_str());
         }
         bool pass = true;
@@ -140,13 +144,16 @@ int main(int argc, char** argv)
         const uint32_t texels = texelsArg ? texelsArg : warp ? 256u : 512u;
         const float centre[3] = { std::cos(azimuth) * 8000, 2750, std::sin(azimuth) * 8000 };
         CloudRecord rec = makeRecord(layer, offsets, textures, R, sun, illuminance, centre, 12000, texels);
+        const float skyTest = 0.5f;  // mode 4's sky radiance (relative to the sun's illuminance 1)
+        rec.skyRadianceTest = skyTest;
 
         ComPtr<ID3D12Resource> constants = buffer(device, 1024, D3D12_HEAP_TYPE_UPLOAD, false);
         ComPtr<ID3D12Resource> recordBuffer = buffer(device, 256, D3D12_HEAP_TYPE_UPLOAD, false);
-        // Two runs: the deep opacity map (mode 1) and the exact sun path (mode 2, attribution).
+        // Three runs: the march (mode 1), the deep opacity map alone (mode 2, attribution), the approximate model (mode 4).
         const uint64_t outBytes = (uint64_t)W * H * 32;
-        ComPtr<ID3D12Resource> outs[2] = { buffer(device, outBytes, D3D12_HEAP_TYPE_DEFAULT, true), buffer(device, outBytes, D3D12_HEAP_TYPE_DEFAULT, true) };
-        ComPtr<ID3D12Resource> readback = buffer(device, 2 * outBytes, D3D12_HEAP_TYPE_READBACK, false);
+        ComPtr<ID3D12Resource> outs[3] = { buffer(device, outBytes, D3D12_HEAP_TYPE_DEFAULT, true), buffer(device, outBytes, D3D12_HEAP_TYPE_DEFAULT, true),
+                                           buffer(device, outBytes, D3D12_HEAP_TYPE_DEFAULT, true) };
+        ComPtr<ID3D12Resource> readback = buffer(device, 3 * outBytes, D3D12_HEAP_TYPE_READBACK, false);
         {
             void* m = nullptr;
             D3D12_RANGE none{ 0, 0 };
@@ -162,7 +169,8 @@ int main(int argc, char** argv)
             RenderGraph graph(device);
             TextureDesc sd{ "cloud shadow map", texels * 2, texels, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT };
             const TextureRef shadow = graph.createTexture(sd);
-            const BufferRef os[2] = { graph.importBuffer(outs[0].Get(), { "cloud march out", outBytes, 0 }), graph.importBuffer(outs[1].Get(), { "cloud march exact sun", outBytes, 0 }) };
+            const BufferRef os[3] = { graph.importBuffer(outs[0].Get(), { "cloud march out", outBytes, 0 }), graph.importBuffer(outs[1].Get(), { "cloud march exact sun", outBytes, 0 }),
+                                      graph.importBuffer(outs[2].Get(), { "cloud march approximate", outBytes, 0 }) };
             const D3D12_GPU_VIRTUAL_ADDRESS cb = constants->GetGPUVirtualAddress();
             graph.addPass("test.cloud.shadow", QueueType::Graphics, [&](PassBuilder& b) { b.use(shadow, Use::UavCompute); },
                           [&, shadow](PassContext& c) {
@@ -171,10 +179,11 @@ int main(int argc, char** argv)
                               c.computeConstants(k, 4);
                               c.cmd->Dispatch((texels + 7) / 8, (texels + 7) / 8, 1);
                           });
-            for (uint32_t mode : { 1u, 2u })
+            for (uint32_t mode : { 1u, 2u, 4u })
             {
-            const BufferRef o = os[mode - 1];
-            graph.addPass(mode == 1 ? "test.cloud.march" : "test.cloud.march.exact", QueueType::Graphics,
+            if (iter > 0 && timeMode && mode != timeMode) continue;
+            const BufferRef o = os[mode == 4 ? 2 : mode - 1];
+            graph.addPass(mode == 1 ? "test.cloud.march" : mode == 2 ? "test.cloud.march.exact" : "test.cloud.march.approximate", QueueType::Graphics,
                           [&](PassBuilder& b) {
                               b.use(shadow, Use::SrvCompute);
                               b.use(o, Use::UavCompute);
@@ -206,26 +215,28 @@ int main(int argc, char** argv)
         if (!times.empty())
         {
             std::sort(times.begin(), times.end());
-            logf("  %ux%u, map %u^2: shadow map + both marches (map and exact sun), median %.3f ms over %zu (submission included)\n", W, H, texels,
+            logf("  %ux%u, map %u^2: shadow map + march %s, median %.3f ms over %zu (submission included)\n", W, H, texels,
+                 timeMode == 1 ? "mode 1 (single scattering)" : timeMode == 4 ? "mode 4 (approximate multiple scattering + sky)" : timeMode ? "(one mode)" : "modes 1, 2, 4",
                  times[times.size() / 2], times.size());
         }
         CommandList cl = device.acquireCommandList(QueueType::Graphics);
         cl.list->CopyBufferRegion(readback.Get(), 0, outs[0].Get(), 0, outBytes);
         cl.list->CopyBufferRegion(readback.Get(), outBytes, outs[1].Get(), 0, outBytes);
+        cl.list->CopyBufferRegion(readback.Get(), 2 * outBytes, outs[2].Get(), 0, outBytes);
         device.queue(QueueType::Graphics).waitCpu(device.submit(cl));
-        std::vector<float> v(W * H * 16);
+        std::vector<float> v(W * H * 24);
         {
             void* m = nullptr;
-            D3D12_RANGE all{ 0, (SIZE_T)(2 * outBytes) }, none{ 0, 0 };
+            D3D12_RANGE all{ 0, (SIZE_T)(3 * outBytes) }, none{ 0, 0 };
             check(readback->Map(0, &all, &m), "map readback");
-            std::memcpy(v.data(), m, (size_t)(2 * outBytes));
+            std::memcpy(v.data(), m, (size_t)(3 * outBytes));
             readback->Unmap(0, &none);
         }
         // The CPU reference on every 6th pixel of every 6th row (the kernel's own directions).
         double maxL = 0;
         struct Pair
         {
-            double gpuL, cpuL, gpuT, cpuT, exactL;
+            double gpuL, cpuL, gpuT, cpuT, exactL, approxGpu, approxCpu;
         };
         std::vector<Pair> pairs;
         const double o3[3] = { camera.position.x, camera.position.y, camera.position.z }, s3[3] = { sun[0], sun[1], sun[2] };
@@ -236,10 +247,12 @@ int main(int argc, char** argv)
                 const float* p = &v[(y * W + x) * 8];
                 const double d[3] = { p[4], p[5], p[6] };
                 const RayResult r = referenceSingleScattering(noise, layer, offsets, R, o3, d, s3, 1.0, 0.0, 20000, 20);
-                pairs.push_back({ p[0], r.radiance, p[3], r.transmittance, v[(size_t)W * H * 8 + (y * W + x) * 8] });
+                const RayResult ra = referenceApproximate(noise, layer, offsets, R, o3, d, s3, 1.0, skyTest, 20000, 20);
+                pairs.push_back({ p[0], r.radiance, p[3], r.transmittance, v[(size_t)W * H * 8 + (y * W + x) * 8], v[(size_t)W * H * 16 + (y * W + x) * 8],
+                                  ra.radiance });
                 maxL = std::max(maxL, r.radiance);
             }
-        double worstT = 0, sumRel = 0, worstRel = 0, sumExact = 0, worstExact = 0;
+        double worstT = 0, sumRel = 0, worstRel = 0, sumExact = 0, worstExact = 0, sumApprox = 0, worstApprox = 0;
         uint32_t cloudy = 0;
         for (const Pair& q : pairs)
         {
@@ -252,6 +265,9 @@ int main(int argc, char** argv)
                 const double relExact = std::abs(q.exactL - q.cpuL) / q.cpuL;
                 sumExact += relExact;
                 worstExact = std::max(worstExact, relExact);
+                const double relApprox = std::abs(q.approxGpu - q.approxCpu) / q.approxCpu;
+                sumApprox += relApprox;
+                worstApprox = std::max(worstApprox, relApprox);
                 ++cloudy;
             }
         }
@@ -260,6 +276,8 @@ int main(int argc, char** argv)
         report(worstT < 0.03, "transmittance |GPU - CPU| (worst)", worstT, 0.03);
         report(cloudy && sumRel / cloudy < 0.02, "radiance |GPU - CPU| / CPU (mean)", cloudy ? sumRel / cloudy : 1, 0.02);
         report(worstRel < 0.1, "radiance |GPU - CPU| / CPU (worst)", worstRel, 0.1);
+        report(cloudy && sumApprox / cloudy < 0.02, "approximate model (mode 4) |GPU - CPU twin| / CPU (mean)", cloudy ? sumApprox / cloudy : 1, 0.02);
+        report(worstApprox < 0.1, "approximate model (mode 4) |GPU - CPU twin| / CPU (worst)", worstApprox, 0.1);
         logf("  attribution: the deep opacity map alone (mode 2): mean %.4f, worst %.3f\n", cloudy ? sumExact / cloudy : 0.0, worstExact);
         releaseTextures(device, textures);
         device.waitIdle();

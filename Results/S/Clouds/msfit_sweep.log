@@ -1,0 +1,60 @@
+  ray  1: sun 0, elevation 0.40, azimuth  39: T 0.004, sun 1.4562e-02 +- 1.5e-03, sky 3.0013e-01 +- 8.8e-03
+  ray  2: sun 0, elevation 0.40, azimuth  51: T 0.113, sun 2.1541e-02 +- 1.7e-03, sky 6.7551e-01 +- 8.6e-03
+  ray  3: sun 0, elevation 0.40, azimuth 114: T 0.376, sun 5.2453e-01 +- 9.7e-03, sky 3.9032e-01 +- 9.0e-03
+  ray  4: sun 0, elevation 0.40, azimuth 135: T 0.010, sun 1.8687e-01 +- 6.5e-03, sky 5.6264e-01 +- 9.7e-03
+  ray  5: sun 0, elevation 0.40, azimuth 147: T 0.009, sun 3.3353e-02 +- 2.4e-03, sky 4.6456e-01 +- 9.0e-03
+  ray  6: sun 0, elevation 0.40, azimuth 174: T 0.889, sun 1.1385e-02 +- 9.6e-04, sky 9.0608e-02 +- 5.2e-03
+  ray  7: sun 0, elevation 0.40, azimuth 303: T 0.008, sun 2.1211e-02 +- 2.3e-03, sky 2.9191e-01 +- 8.7e-03
+  ray  8: sun 0, elevation 0.40, azimuth 354: T 0.129, sun 2.6031e-02 +- 1.8e-03, sky 4.5006e-01 +- 9.1e-03
+  ray  9: sun 0, elevation 0.29, azimuth 159: T 0.095, sun 1.4641e-01 +- 5.3e-03, sky 6.7640e-01 +- 9.8e-03
+  ray 10: sun 0, elevation 0.29, azimuth 180: T 0.132, sun 3.2409e-02 +- 2.4e-03, sky 4.9229e-01 +- 9.1e-03
+  ray 11: sun 0, elevation 0.29, azimuth 201: T 0.909, sun 4.3498e-03 +- 3.9e-04, sky 7.0777e-02 +- 4.7e-03
+  ray 12: sun 0, elevation 0.29, azimuth 309: T 0.111, sun 8.3105e-02 +- 4.2e-03, sky 4.8721e-01 +- 9.3e-03
+  ray 13: sun 0, elevation 0.24, azimuth 312: T 0.446, sun 3.5725e-02 +- 3.0e-03, sky 3.6888e-01 +- 8.8e-03
+  ray 14: sun 0, elevation 0.20, azimuth 306: T 0.004, sun 1.0387e-02 +- 1.6e-03, sky 2.0761e-01 +- 9.0e-03
+  ray 15: sun 0, elevation 0.20, azimuth 315: T 0.009, sun 8.8977e-02 +- 3.7e-03, sky 6.7836e-01 +- 9.0e-03
+  ray 16: sun 1, elevation 0.40, azimuth  39: T 0.004, sun 4.5681e-02 +- 3.1e-03, sky 2.9678e-01 +- 1.0e-02
+  ray 17: sun 1, elevation 0.40, azimuth  51: T 0.113, sun 9.6612e-02 +- 3.4e-03, sky 6.7617e-01 +- 9.1e-03
+  ray 18: sun 1, elevation 0.40, azimuth 114: T 0.376, sun 4.0162e-02 +- 2.5e-03, sky 3.9426e-01 +- 9.2e-03
+  ray 19: sun 1, elevation 0.40, azimuth 135: T 0.010, sun 1.1873e-01 +- 4.5e-03, sky 5.7621e-01 +- 9.3e-03
+  ray 20: sun 1, elevation 0.40, azimuth 147: T 0.009, sun 7.2473e-02 +- 3.0e-03, sky 4.8472e-01 +- 9.5e-03
+  ray 21: sun 1, elevation 0.40, azimuth 174: T 0.889, sun 4.5255e-03 +- 4.1e-04, sky 8.6116e-02 +- 5.1e-03
+  ray 22: sun 1, elevation 0.40, azimuth 303: T 0.008, sun 1.2013e-01 +- 5.1e-03, sky 3.0421e-01 +- 1.3e-02
+  ray 23: sun 1, elevation 0.40, azimuth 354: T 0.129, sun 1.1854e-01 +- 3.7e-03, sky 4.3789e-01 +- 9.1e-03
+  ray 24: sun 1, elevation 0.29, azimuth 159: T 0.095, sun 9.7645e-02 +- 3.9e-03, sky 6.8001e-01 +- 8.8e-03
+  ray 25: sun 1, elevation 0.29, azimuth 180: T 0.132, sun 7.1244e-02 +- 3.2e-03, sky 4.9641e-01 +- 9.2e-03
+  ray 26: sun 1, elevation 0.29, azimuth 201: T 0.909, sun 5.0519e-03 +- 6.8e-04, sky 7.8463e-02 +- 5.1e-03
+  ray 27: sun 1, elevation 0.29, azimuth 309: T 0.111, sun 8.1223e-02 +- 3.9e-03, sky 5.0353e-01 +- 1.0e-02
+  ray 28: sun 1, elevation 0.24, azimuth 312: T 0.446, sun 6.1031e-02 +- 3.2e-03, sky 3.7668e-01 +- 8.9e-03
+  ray 29: sun 1, elevation 0.20, azimuth 306: T 0.004, sun 7.4097e-02 +- 4.0e-03, sky 2.0340e-01 +- 7.8e-03
+  ray 30: sun 1, elevation 0.20, azimuth 315: T 0.009, sun 1.9847e-01 +- 5.0e-03, sky 6.8373e-01 +- 9.6e-03
+  ray 31: sun 2, elevation 0.40, azimuth  39: T 0.004, sun 1.1013e-02 +- 1.7e-03, sky 2.9323e-01 +- 9.5e-03
+  ray 32: sun 2, elevation 0.40, azimuth  51: T 0.113, sun 1.3139e-01 +- 4.9e-03, sky 6.9418e-01 +- 1.5e-02
+  ray 33: sun 2, elevation 0.40, azimuth 114: T 0.376, sun 1.8733e-04 +- 8.2e-05, sky 3.9145e-01 +- 8.8e-03
+  ray 34: sun 2, elevation 0.40, azimuth 135: T 0.010, sun 3.7967e-03 +- 4.3e-04, sky 5.6692e-01 +- 9.5e-03
+  ray 35: sun 2, elevation 0.40, azimuth 147: T 0.009, sun 6.7960e-03 +- 9.5e-04, sky 4.5309e-01 +- 9.1e-03
+  ray 36: sun 2, elevation 0.40, azimuth 174: T 0.889, sun 4.6253e-03 +- 3.7e-04, sky 9.6681e-02 +- 6.0e-03
+  ray 37: sun 2, elevation 0.40, azimuth 303: T 0.008, sun 1.9785e-03 +- 1.1e-03, sky 3.1165e-01 +- 9.9e-03
+  ray 38: sun 2, elevation 0.40, azimuth 354: T 0.129, sun 5.2058e-03 +- 1.1e-03, sky 4.4974e-01 +- 1.2e-02
+  ray 39: sun 2, elevation 0.29, azimuth 159: T 0.095, sun 1.7059e-02 +- 1.7e-03, sky 6.8770e-01 +- 9.7e-03
+  ray 40: sun 2, elevation 0.29, azimuth 180: T 0.132, sun 3.8528e-02 +- 2.2e-03, sky 5.1979e-01 +- 9.2e-03
+  ray 41: sun 2, elevation 0.29, azimuth 201: T 0.909, sun 5.4334e-03 +- 1.2e-03, sky 6.6910e-02 +- 4.6e-03
+  ray 42: sun 2, elevation 0.29, azimuth 309: T 0.111, sun 2.1739e-03 +- 4.3e-04, sky 4.8632e-01 +- 9.4e-03
+  ray 43: sun 2, elevation 0.24, azimuth 312: T 0.446, sun 4.4199e-03 +- 3.0e-03, sky 3.7156e-01 +- 8.9e-03
+  ray 44: sun 2, elevation 0.20, azimuth 306: T 0.004, sun 7.1198e-04 +- 1.6e-04, sky 1.9673e-01 +- 7.9e-03
+  ray 45: sun 2, elevation 0.20, azimuth 315: T 0.009, sun 1.0413e-03 +- 2.0e-04, sky 6.8718e-01 +- 9.3e-03
+45 rays; single scattering only: mean 0.826, worst 1.000 of the path-traced sun radiance
+octaves best: N 2, a 0.70, b 0.15, c 0.60, d0 0.0000, d1 0.0000: mean 0.471, worst 0.960
+octaves + diffuse best: N 2, a 0.70, b 0.15, c 0.60, d0 0.0047, d1 -0.0170: mean 0.456, worst 0.926
+sky best (least squares): s0 0.152, s1 1.451: mean 0.169, worst 0.449
+APPROXIMATION (not exact) sun, GPU values N 6 a 0.75 b 0.30 c 0.50 d0 0.0000 d1 0.0000: mean 10.165, worst 183.773
+  sun 0: mean 1.989, worst 5.762
+  sun 1: mean 1.047, worst 3.447
+  sun 2: mean 27.458, worst 183.773
+APPROXIMATION (not exact) sky, GPU values s0 0.200 s1 0.400: mean 0.436, worst 0.625
+  gates (recorded errors + margin): sun mean <= 1.00 worst <= 1.00 FAIL; sky mean <= 1.00 worst <= 1.00 ok
+RESULT FAIL
+
+real	0m21.737s
+user	0m0.000s
+sys	0m0.015s

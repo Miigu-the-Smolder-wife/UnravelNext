@@ -492,7 +492,7 @@ int main(int argc, char** argv)
             dark.lights.clear();
             run(dark, 1, -2.0f);  // night exposure: the lights' air glow is displayed
             const std::vector<uint8_t> without = lastVolume;
-            const float frameTime = (float)tf.frame.time;  // the frame the comparison reads (run advances the time after it)
+            [[maybe_unused]] const float frameTime = (float)tf.frame.time;  // the frame the comparison reads (run advances the time after it)
             run(sc, shadowed ? 6 : 1, -2.0f);  // shadowed: steady state (a pool the local pages exhaust grows once)
             if (shadowed)
             {

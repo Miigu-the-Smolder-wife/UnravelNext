@@ -12,7 +12,7 @@
 //   [7]  SRVs: shape (Texture3D R8), detail (Texture3D R8), weather (Texture2D RG8), shadow (Texture2D RGBA32_UINT)
 //   [8]  toward the sun xyz (unit), shadow half extent (m)
 //   [9]  shadow centre xyz (renderer space), shadow texels per side
-//   [10] sun illuminance at the layer (lux, rgb), 0
+//   [10] sun illuminance at the layer (lux, rgb), sky radiance over the upper hemisphere (tests, CloudMarch mode 4)
 #ifndef UNX_CLOUD_COMMON_HLSLI
 #define UNX_CLOUD_COMMON_HLSLI
 #include "Bindless.hlsli"
@@ -35,6 +35,7 @@ struct CloudRecord
     float3 shadowCentre;
     float shadowTexels;
     float3 sunIlluminance;
+    float skyRadianceTest;
 };
 
 CloudRecord cloudLoad(uint rawBuffer)
@@ -57,6 +58,7 @@ CloudRecord cloudLoad(uint rawBuffer)
     c.sunDir = q8.xyz, c.shadowHalfExtent = q8.w;
     c.shadowCentre = q9.xyz, c.shadowTexels = q9.w;
     c.sunIlluminance = q10.xyz;
+    c.skyRadianceTest = q10.w;
     return c;
 }
 
@@ -105,6 +107,44 @@ float3 cloudDomeDir(float2 uv)
 
 float cloudHg(float g, float cosTheta) { return (1 - g * g) / (4 * 3.14159265 * pow(max(1 + g * g - 2 * g * cosTheta, 1e-6), 1.5)); }
 float cloudPhase(CloudRecord c, float cosTheta) { return (1 - c.lobeBlend) * cloudHg(c.g0, cosTheta) + c.lobeBlend * cloudHg(c.g1, cosTheta); }
+
+// APPROXIMATION, NOT EXACT (user decision 2026-09-27 06:40; S_STATUS_KO.md 9): multiple scattering by the octave series
+// and the sky's light by a height ramp, fitted to the CPU path tracer (Tests/CloudMsFit.cpp; the errors are recorded there
+// and in S_STATUS). Same values as CloudModel.h kMs* / kSky*. The exact grid solve replaces it after the weekly reset.
+//   sun: sum_{k < N} a^k p_k(theta) exp(-b^k tau_sun), p_k the dual-lobe HG at (g0 c^k, g1 c^k) (k = 0: single scattering)
+//   sky: L_sky max(0, s0 + s1 h_n)
+#define CLOUD_MS_A 0.70
+#define CLOUD_MS_B 0.15
+#define CLOUD_MS_C 0.60
+#define CLOUD_MS_OCTAVES 2
+#define CLOUD_SKY_S0 0.152
+#define CLOUD_SKY_S1 1.451
+struct CloudMsPhases
+{
+    float p[CLOUD_MS_OCTAVES];  // a^k p_k(theta): constant along a view ray
+};
+CloudMsPhases cloudMsPhases(CloudRecord c, float cosTheta)
+{
+    CloudMsPhases m;
+    float ak = 1, ck = 1;
+    [unroll] for (uint k = 0; k < CLOUD_MS_OCTAVES; ++k)
+    {
+        m.p[k] = ak * ((1 - c.lobeBlend) * cloudHg(c.g0 * ck, cosTheta) + c.lobeBlend * cloudHg(c.g1 * ck, cosTheta));
+        ak *= CLOUD_MS_A, ck *= CLOUD_MS_C;
+    }
+    return m;
+}
+float cloudMsSun(CloudMsPhases m, float tauSun)
+{
+    float sum = 0, bk = 1;
+    [unroll] for (uint k = 0; k < CLOUD_MS_OCTAVES; ++k)
+    {
+        sum += m.p[k] * exp(-bk * tauSun);
+        bk *= CLOUD_MS_B;
+    }
+    return sum;
+}
+float cloudSkyRamp(CloudRecord c, float3 x) { return max(0.0, CLOUD_SKY_S0 + CLOUD_SKY_S1 * (cloudAltitude(c, x) - c.base) / (c.top - c.base)); }
 
 // Roots of t^2 + 2 b t + C = 0 (a ray against a sphere: b = (p - centre) . d, C = |p - centre|^2 - r^2) in the stable
 // form (no cancellation between -b and the square root). False when the ray misses the sphere.

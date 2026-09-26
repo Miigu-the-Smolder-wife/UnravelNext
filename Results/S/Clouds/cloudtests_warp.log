@@ -1,0 +1,10 @@
+clouds on WARP
+  144 rays, 85 with radiance above 5 % of the brightest (1.9270e-02)
+  the view shows lit cloud (rays)                                    8.500e+01 (limit 2.0e+01) ok
+  transmittance |GPU - CPU| (worst)                                  8.223e-03 (limit 3.0e-02) ok
+  radiance |GPU - CPU| / CPU (mean)                                  1.035e-02 (limit 2.0e-02) ok
+  radiance |GPU - CPU| / CPU (worst)                                 4.884e-02 (limit 1.0e-01) ok
+  approximate model (mode 4) |GPU - CPU twin| / CPU (mean)           1.564e-03 (limit 2.0e-02) ok
+  approximate model (mode 4) |GPU - CPU twin| / CPU (worst)          3.111e-02 (limit 1.0e-01) ok
+  attribution: the deep opacity map alone (mode 2): mean 0.1591, worst 0.528
+RESULT PASS

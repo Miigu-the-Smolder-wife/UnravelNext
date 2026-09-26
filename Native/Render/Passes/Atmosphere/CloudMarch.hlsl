@@ -5,7 +5,11 @@
 // (distance x pixel angle x resolution scale, 25..400 m) and at most CLOUD_MARCH_STEPS per span (the structural bound).
 // Per step: the density (CloudCommon.hlsli), the sun's single scattering with the sun's transmittance integrated along
 // the sun ray (cloudSunTauMarch; the map only past its structural bound), the exact in-interval transmittance.
-// [Single scattering of the sun only; multiple scattering and the sky's light are step (d).]
+// Modes 0, 3 and 4 add multiple scattering and the sky's light by an APPROXIMATION, NOT EXACT (user decision 2026-09-27
+// 06:40; CloudCommon.hlsli cloudMsSun / cloudSkyRamp, fitted to the CPU path tracer: sun mean 47 %, sky mean 17 %
+// relative error, S_STATUS_KO.md 9); the exact grid solve replaces it after the weekly reset. Modes 1 and 2 stay single
+// scattering (the tests' exact comparison). The sky's radiance at the cloud is the atmosphere's horizontal-ground sky
+// irradiance / pi (airGroundIndirect: at the ground, not at the layer's altitude; part of the approximation).
 // Mode 0 (the frame, CloudSystem.cpp): the whole view ray (no depth clip: the readers apply the layer per full-resolution
 // pixel where the surface lies beyond the cloud, so no upsampling halo at geometry edges), the sun's illuminance at the
 // cloud through the atmosphere (transmittance LUT at the span's middle), rows [P[1].w, P[1].w + 64) of the output (the
@@ -14,7 +18,8 @@
 // P[0] = { cloud record SRV, output UAV, depth SRV (tests: UNX_NONE), scale (pixels of the view per output texel) }
 // P[1] = { output width, height, mode (0 = RGBA16F texture: radiance, transmittance; 1 = tests: raw buffer of 8 floats
 // per texel { radiance rgb, transmittance, direction xyz, 0 }; 2 = as 1 with the sun's transmittance from the deep
-// opacity map alone (attribution); 3 = the sky dome: texel (u, v) is the direction cloudDomeDir from the camera, output
+// opacity map alone (attribution); 4 = as 1 with the approximate multiple scattering and the record's test sky radiance
+// (CloudModel.cpp referenceApproximate is its CPU twin); 3 = the sky dome: texel (u, v) is the direction cloudDomeDir from the camera, output
 // as mode 0 without distance or counters (R's escaping rays: atmosphereSkyRadianceCloudy)), max distance (float bits,
 // modes 1-2) or first row (mode 0) };
 // P[2] = { transmittance LUT SRV (mode 0), stats UAV (mode 0), distance UAV (mode 0: R16F, km, extinction-weighted mean),
@@ -35,7 +40,7 @@
 [numthreads(8, 8, 1)]
 void main(uint2 id : SV_DispatchThreadID)
 {
-    const bool test = P[1].z == 1 || P[1].z == 2, dome = P[1].z == 3;
+    const bool test = P[1].z == 1 || P[1].z == 2 || P[1].z == 4, dome = P[1].z == 3, approximate = P[1].z == 0 || P[1].z >= 3;
     if (P[1].z == 0) id.y += P[1].w;
     if (any(id >= P[1].xy)) return;
     const CloudRecord c = cloudLoad(P[0].x);
@@ -44,7 +49,7 @@ void main(uint2 id : SV_DispatchThreadID)
     const float3 far = worldFromDepth(pixel, 1e-6);
     const float3 dir = dome ? cloudDomeDir((float2(id) + 0.5) / float2(P[1].xy)) : normalize(far - g_cameraPosition);
     const float tMax = test ? asfloat(P[1].w) : 3.0e38;
-    float3 L = 0, sunIlluminance = c.sunIlluminance;
+    float3 L = 0, sunIlluminance = c.sunIlluminance, skyRadiance = P[1].z == 4 ? c.skyRadianceTest : 0;
     float distanceSum = 0, distanceWeight = 0;
     uint capped = 0, sunCapped = 0;
     float T = 1;
@@ -62,9 +67,11 @@ void main(uint2 id : SV_DispatchThreadID)
             const AtmosphereParams ap = airParamsFromTexels(P[2].x);
             const float3 mid = g_cameraPosition + dir * (0.5 * (t0 + t1));
             sunIlluminance = g_sunIlluminance * g_sunColor * airSunTransmittance(ap, P[2].x, mid, c.sunDir);
+            skyRadiance = g_sunIlluminance * g_sunColor * airGroundIndirect(ap, P[2].x, dot(airUp(ap, mid), c.sunDir)) * (1 / 3.14159265);
         }
         const float dt = (t1 - t0) / steps;
         const float phase = cloudPhase(c, dot(dir, c.sunDir));
+        const CloudMsPhases ms = cloudMsPhases(c, dot(dir, c.sunDir));
         [loop] for (uint s = 0; s < steps && T > 1e-4; ++s)
         {
             const float3 x = g_cameraPosition + dir * (t0 + (s + 0.5) * dt);
@@ -75,7 +82,8 @@ void main(uint2 id : SV_DispatchThreadID)
             const float tauSun = P[1].z == 2 ? cloudSunTau(c, x) : cloudSunTauMarch(c, x);
             if (tauSun < 0) sunCapped = 1;
             const float w = T * (1 - exp(-rho * dt));
-            L += T * c.albedo * rho * phase * sunIlluminance * exp(-abs(tauSun)) * segment;
+            const float sun = approximate ? cloudMsSun(ms, abs(tauSun)) : phase * exp(-abs(tauSun));
+            L += T * c.albedo * rho * (sun * sunIlluminance + (approximate ? cloudSkyRamp(c, x) : 0.0) * skyRadiance) * segment;
             distanceSum += w * (t0 + (s + 0.5) * dt);
             distanceWeight += w;
             T *= exp(-rho * dt);

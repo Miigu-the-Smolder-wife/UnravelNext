@@ -284,7 +284,7 @@ void sampleHg(double g, const double d[3], Rng& rng, double out[3])
 } // namespace
 
 PathResult referencePathTraced(const CloudNoise& n, const CloudLayer& layer, const CloudOffsets& o, double R, const double origin[3], const double dir[3],
-                               const double sunDir[3], double E, uint32_t paths, uint32_t seed, double step)
+                               const double sunDir[3], double E, uint32_t paths, uint32_t seed, double step, double skyRadiance)
 {
     Rng rng{ 0x9E3779B97F4A7C15ull ^ ((uint64_t)seed * 0x100000001B3ull) };
     const double sigmaMax = layer.sigmaMax;
@@ -315,14 +315,21 @@ PathResult referencePathTraced(const CloudNoise& n, const CloudLayer& layer, con
             {
                 // Left this stretch of the shell: continue along the ray (it may enter the layer again further on).
                 for (int k = 0; k < 3; ++k) x[k] += d[k] * (t1 + 1e-3);
-                if (!firstCollision || t1 > 60000) break;
+                if (!firstCollision)
+                {
+                    // Left the layer after scattering: upward (local up) sees the sky, downward the black ground.
+                    const double up[3] = { x[0] + o.origin[0], x[1] + o.origin[1] + R, x[2] + o.origin[2] };
+                    if (skyRadiance > 0 && up[0] * d[0] + up[1] * d[1] + up[2] * d[2] > 0) L += throughput * skyRadiance;
+                    break;
+                }
+                if (t1 > 60000) break;
                 continue;
             }
             for (int k = 0; k < 3; ++k) x[k] += d[k] * t;
             collisions += 1;
             throughput *= layer.albedo;
             const double cosSun = d[0] * sunDir[0] + d[1] * sunDir[1] + d[2] * sunDir[2];
-            const double nee = throughput * phase(layer, cosSun) * E * std::exp(-sunTau(n, layer, o, R, x, sunDir, step));
+            const double nee = E > 0 ? throughput * phase(layer, cosSun) * E * std::exp(-sunTau(n, layer, o, R, x, sunDir, step)) : 0.0;
             L += nee;
             if (firstCollision) first += nee, firstCollision = false;
             if (bounce >= 16)
@@ -345,5 +352,36 @@ PathResult referencePathTraced(const CloudNoise& n, const CloudLayer& layer, con
     r.stdError = std::sqrt(std::max(0.0, sum2 / paths - r.radiance * r.radiance) / paths);
     r.meanCollisions = collisions / paths;
     return r;
+}
+
+RayResult referenceApproximate(const CloudNoise& n, const CloudLayer& layer, const CloudOffsets& o, double R, const double origin[3], const double dir[3],
+                               const double sunDir[3], double E, double skyRadiance, double maxDistance, double step, double a, double b, double c, int octaves,
+                               double s0, double s1)
+{
+    const double cosTheta = dir[0] * sunDir[0] + dir[1] * sunDir[1] + dir[2] * sunDir[2];
+    auto hg = [&](double g) { return (1 - g * g) / (4 * 3.141592653589793 * std::pow(1 + g * g - 2 * g * cosTheta, 1.5)); };
+    double pk[16], ak[16], bk[16];
+    for (int k = 0, K = std::min(octaves, 16); k < K; ++k)
+    {
+        const double ck = std::pow(c, k);
+        pk[k] = (1 - layer.lobeBlend) * hg(layer.g0 * ck) + layer.lobeBlend * hg(layer.g1 * ck);
+        ak[k] = std::pow(a, k), bk[k] = std::pow(b, k);
+    }
+    double T = 1, L = 0;
+    for (double s = 0; s < maxDistance && T > 1e-6; s += step)
+    {
+        const double ds = std::min(step, maxDistance - s), mid = s + 0.5 * ds;
+        const double x[3] = { origin[0] + dir[0] * mid, origin[1] + dir[1] * mid, origin[2] + dir[2] * mid };
+        const double rho = density(n, layer, o, R, x);
+        if (rho <= 0) continue;
+        const double tauSun = E > 0 ? sunTau(n, layer, o, R, x, sunDir, step) : 0.0;
+        double sun = 0;
+        for (int k = 0, K = std::min(octaves, 16); k < K; ++k) sun += ak[k] * pk[k] * std::exp(-bk[k] * tauSun);
+        const double hn = (altitudeOf(o, R, x) - layer.baseAltitude) / (layer.topAltitude - layer.baseAltitude);
+        const double segment = (1 - std::exp(-rho * ds)) / rho;
+        L += T * layer.albedo * rho * (sun * E + skyRadiance * std::max(0.0, s0 + s1 * hn)) * segment;
+        T *= std::exp(-rho * ds);
+    }
+    return { L, T };
 }
 } // namespace unx::render::clouds

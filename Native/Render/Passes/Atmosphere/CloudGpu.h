@@ -30,7 +30,7 @@ struct CloudRecord
     uint32_t shape, detail, weather, shadow;
     float sunDir[3], shadowHalfExtent;
     float shadowCentre[3], shadowTexels;
-    float sunIlluminance[3], pad3;
+    float sunIlluminance[3], skyRadianceTest;  // skyRadianceTest: CloudMarch mode 4 only (tests; the frame takes the sky from the air)
 };
 static_assert(sizeof(CloudRecord) == 176);
 // shadow: the deep opacity map's SRV (filled per frame); sunDir: unit, toward the sun; shadow area: centre (renderer

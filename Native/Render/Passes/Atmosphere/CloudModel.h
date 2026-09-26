@@ -74,8 +74,29 @@ struct PathResult
     double radiance, firstOrder, stdError;  // stdError: of the radiance's mean
     double meanCollisions;
 };
+// skyRadiance > 0 adds a sky of that uniform radiance over the upper hemisphere (local up; the ground stays black): a path
+// that leaves the layer upward after at least one collision gathers throughput x skyRadiance (the sky seen directly
+// through the layer is the reader's T x sky, not part of this). With sunIlluminance 0 the sun's estimates are skipped.
 PathResult referencePathTraced(const CloudNoise& n, const CloudLayer& layer, const CloudOffsets& o, double bottomRadius, const double origin[3],
-                               const double dir[3], const double sunDir[3], double sunIlluminance, uint32_t paths, uint32_t seed, double step);
+                               const double dir[3], const double sunDir[3], double sunIlluminance, uint32_t paths, uint32_t seed, double step,
+                               double skyRadiance = 0);
+
+// APPROXIMATION, NOT EXACT (user decision 2026-09-27 06:40; FEATURE_STATUS B5): the multiple scattering the GPU march
+// uses until the exact grid solve (S_STATUS_KO.md 9 step 1, a must-do after the weekly reset) replaces it.
+//   sun:  sum_{k < N} a^k T sigma_s p_k(theta) E exp(-b^k tau_sun) segment, p_k the dual-lobe HG at (g0 c^k, g1 c^k)
+//         (k = 0 is the exact single scattering);
+//   sky:  T sigma_s L_sky max(0, s0 + s1 h_n) segment, L_sky the sky's radiance over the upper hemisphere, h_n the height
+//         in the layer (the octaves carry no light from the sky, which lights the undersides through the layer).
+// Fitted against referencePathTraced (Tests/CloudMsFit.cpp --sweep; the errors are in S_STATUS_KO.md 9). CloudCommon.hlsli
+// CLOUD_MS_* repeats these values.
+constexpr double kMsA = 0.70, kMsB = 0.15, kMsC = 0.60, kSkyS0 = 0.152, kSkyS1 = 1.451;
+constexpr int kMsOctaves = 2;
+// The approximate model along a view ray with the reference's exact transmittances (steps of 'step' metres, as
+// referenceSingleScattering): the CPU twin of CloudMarch.hlsl mode 4 (the tests compare the GPU's march against it).
+RayResult referenceApproximate(const CloudNoise& n, const CloudLayer& layer, const CloudOffsets& o, double bottomRadius, const double origin[3],
+                               const double dir[3], const double sunDir[3], double sunIlluminance, double skyRadiance, double maxDistance, double step,
+                               double a = kMsA, double b = kMsB, double c = kMsC, int octaves = kMsOctaves, double s0 = kSkyS0,
+                               double s1 = kSkyS1);
 
 double phase(const CloudLayer& layer, double cosTheta);                            // the dual-lobe HG phase (1/sr)
 double altitudeOf(const CloudOffsets& o, double bottomRadius, const double x[3]);  // above the planet's surface (m)
