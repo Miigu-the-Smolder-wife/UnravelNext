@@ -298,7 +298,7 @@ void testSunParts()
         const char* name;
         float ozone, mie, elevationDegrees;
     };
-    for (const Part p : { Part{ "clear90", 0, 0, 90 }, Part{ "clear60", 0, 0, 60 }, Part{ "clear", 0, 0, 30 }, Part{ "ozone", 1.881e-6f, 0, 30 },
+    for (const Part p : { Part{ "clear90", 0, 0, 90 }, Part{ "clear60", 0, 0, 60 }, Part{ "clear", 0, 0, 30 }, Part{ "clear10", 0, 0, 10 }, Part{ "ozone", 1.881e-6f, 0, 30 },
                           Part{ "mie", 0, 2e-6f, 30 } })
     {
         const float elev = p.elevationDegrees * kPi / 180;
@@ -320,7 +320,14 @@ void testSunParts()
             tau += (p.mie * std::exp(-h / 1200.0) + p.ozone * std::max(0.0, 1 - std::fabs(h - 25000.0) / 15000.0)) * len / n;
         }
         const double tauView = p.mie * 1200.0 * (1 - std::exp(-50.0 / 1200.0));
-        expectNear(p.name, m, lambert(0.5f) * 100000 * std::exp(-tau) * std::sin(elev) * std::exp(-tauView), 2e-4);
+        // the floor's full model BRDF (specular 0 means f0 = 0, but the Schlick term (1 - cos)^5 is 0.39 at 80 degrees'
+        // incidence: the Lambert-only closed form is off by +6e-4 at a 10 degree sun), viewed straight down
+        scene::model::Surface floor;
+        floor.baseColor = { 0.5f, 0.5f, 0.5f };
+        floor.roughness = 1.0f;
+        floor.specular = 0.0f;
+        const float f = scene::model::evaluate(floor, float3{ 0, 1, 0 }, float3{ 0, 1, 0 }, s.sun.direction).y;
+        expectNear(p.name, m, f * 100000 * std::exp(-tau) * std::sin(elev) * std::exp(-tauView), 2e-4);
     }
 }
 
