@@ -81,7 +81,8 @@ struct AreaLightStability
     uint32_t publish(Device& d, const std::vector<gpu::Light>& lights, uint64_t frame)
     {
         device = &d;
-        const uint32_t n = (uint32_t)lights.size(), need = std::max<uint32_t>((n + 31) / 32, 1);
+        // Raw views start on 16-byte boundaries (D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT): each slot is a whole number of 4 words.
+        const uint32_t n = (uint32_t)lights.size(), need = std::max<uint32_t>(((n + 31) / 32 + 3) & ~3u, 4);
         if (revision.size() != n)
         {
             revision.assign(n, UINT32_MAX);
