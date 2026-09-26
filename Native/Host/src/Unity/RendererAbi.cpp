@@ -474,6 +474,63 @@ UNX_API int32_t UNX_CALL UnxViewModelRemove(UnxRenderer r, uint32_t id)
     return call([&] { find(r)->viewModelRemove(id); });
 }
 
+namespace
+{
+std::filesystem::path utf8Path(const char* s)
+{
+    const std::string p(s);
+    return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(p.data()), p.size()));
+}
+} // namespace
+
+UNX_API int32_t UNX_CALL UnxPhotoBegin(UnxRenderer r, const UnxPhotoDesc* desc)
+{
+    return call([&] {
+        if (!desc || desc->size != sizeof(UnxPhotoDesc) || desc->version != 1) fail("UnxPhotoBegin: UnxPhotoDesc size %u version %u", desc ? desc->size : 0, desc ? desc->version : 0);
+        scene::Camera c;
+        c.name = "photo";
+        c.position = f3(desc->camera.position);
+        c.forward = f3(desc->camera.forward);
+        c.up = f3(desc->camera.up);
+        c.verticalFov = desc->camera.verticalFov;
+        c.nearPlane = desc->camera.nearPlane;
+        c.ev100 = desc->camera.ev100;
+        PhotoSettings s;
+        s.samplesPerPixel = desc->samplesPerPixel;
+        s.halfSamplesPerFrame = desc->halfSamplesPerFrame;
+        find(r)->photoBegin(c, s);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxPhotoSave(UnxRenderer r, const char* utf8Exr, const char* utf8Png)
+{
+    return call([&] {
+        find(r)->photoSave(utf8Exr && *utf8Exr ? utf8Path(utf8Exr) : std::filesystem::path(), utf8Png && *utf8Png ? utf8Path(utf8Png) : std::filesystem::path());
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxPhotoEnd(UnxRenderer r)
+{
+    return call([&] { find(r)->photoEnd(); });
+}
+
+UNX_API int32_t UNX_CALL UnxPhotoGetStatus(UnxRenderer r, UnxPhotoStatus* status)
+{
+    return call([&] {
+        if (!status || status->size != sizeof(UnxPhotoStatus) || status->version != 1) fail("UnxPhotoGetStatus: UnxPhotoStatus size or version");
+        const PhotoStatus s = find(r)->photoStatus();
+        status->active = s.active ? 1u : 0u;
+        status->width = s.width, status->height = s.height, status->samples = s.samples, status->target = s.target;
+        status->saves = s.saves;
+        status->relMse = s.relMse;
+        status->startSeconds = s.startSeconds;
+        status->generation = s.generation;
+        const size_t n = std::min(s.error.size(), sizeof status->error - 1);
+        std::memcpy(status->error, s.error.data(), n);
+        status->error[n] = 0;
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor)
 {
     return call([&] {

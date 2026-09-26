@@ -34,7 +34,7 @@ enum UnxResult
                             //    UnxSceneLoad, UnxVideoMemory, UnxSceneEditInstances, UnxSceneEditMaterials, UnxVfxStreamExecutor,
                             //    UnxRendererQualityOverride, UnxFrameSetLens, UnxSurfaceDelta, UnxSurfaceSetHalfLives, UnxSurfaceSetTime,
                             //    UnxDebugPrimitives, UnxDebugText, UnxDecalAdd, UnxDecalUpdate, UnxDecalRemove, UnxViewModelAdd,
-                            //    UnxViewModelSetPose, UnxViewModelRemove,
+                            //    UnxViewModelSetPose, UnxViewModelRemove, UnxPhotoBegin, UnxPhotoSave, UnxPhotoEnd, UnxPhotoGetStatus,
                             //    UnxSceneAddBlendShape, UnxSceneSetVertexAnimation, UnxFrameSetMorphs (C4),
                             //    UnxFrameSetOriginShift (C9), UnxSceneReserveRuntime, UnxFrameAddRuntimeMesh,
                             //    UnxFrameRemoveRuntimeMesh, UnxFrameAddRuntimeInstance, UnxFrameRemoveRuntimeInstance,
@@ -359,6 +359,42 @@ typedef struct UnxCameraDesc
 // added so far. After: the scene as the host shows it now (the latest transforms, poses, sun and visibility it set,
 // including the ones not yet rendered), hidden instances left out.
 UNX_API int32_t UNX_CALL UnxSceneSave(UnxRenderer r, const char* utf8Path, const char* utf8Name, const UnxCameraDesc* camera);
+// B11 photo mode (FEATURES_GAME 17; optional exports within ABI 6, INTERFACES v1.65): E's GPU reference path tracer on
+// the renderer's device renders a snapshot of the scene as the host shows it now - the committed content with the latest
+// transforms, poses, sun and visibility, the runtime geometry and terrain patches, and the view models at the latest
+// frame camera - from 'camera' with the host's lens (UnxFrameSetLens), progressively: every frame rendered after
+// UnxPhotoBegin adds halfSamplesPerFrame samples per pixel and half until samplesPerPixel (both halves) and shows the
+// image through the post chain (the frame's camera is not used; its output size is the photo's, a new size restarts).
+// Pause the game first; UnxPhotoBegin again restarts (a moved photo camera), UnxPhotoEnd returns to the scene (its
+// first frame is a history cut). A camera EV100 that is not finite takes automatic exposure's last choice.
+typedef struct UnxPhotoDesc
+{
+    uint32_t size, version;          // sizeof, 1
+    uint32_t samplesPerPixel;        // the target, both halves together (>= 2)
+    uint32_t halfSamplesPerFrame;    // per rendered frame and half (>= 1; each dispatch is also kept near 25 ms)
+    UnxCameraDesc camera;
+} UnxPhotoDesc;
+typedef struct UnxPhotoStatus
+{
+    uint32_t size, version;          // sizeof, 1 (set by the caller)
+    uint32_t active;                 // the frames show the photo
+    uint32_t width, height, samples, target;
+    uint32_t saves;                  // saves completed since UnxPhotoBegin
+    double relMse;                   // the image's relMSE against the converged one at the last save (-1 before one)
+    double startSeconds;             // snapshot upload and acceleration structures on the render thread
+    uint64_t generation;             // counts UnxPhotoBegin / UnxPhotoEnd calls
+    char error[256];                 // the last start or save failure (UTF-8, empty when none)
+} UnxPhotoStatus;
+#ifdef __cplusplus
+static_assert(sizeof(UnxPhotoDesc) == 64 && sizeof(UnxPhotoStatus) == 312, "UnxPhoto* are part of the ABI (UnravelNextRendererNative.cs)");
+#endif
+UNX_API int32_t UNX_CALL UnxPhotoBegin(UnxRenderer r, const UnxPhotoDesc* desc);
+// Saved when the next frame renders: 'utf8Exr' (nullable) linear radiance x exposure (OpenEXR, 32-bit float), 'utf8Png'
+// (nullable) the post chain's SDR display encoding as 16-bit RGB. Completion and failures show in UnxPhotoGetStatus.
+UNX_API int32_t UNX_CALL UnxPhotoSave(UnxRenderer r, const char* utf8Exr, const char* utf8Png);
+UNX_API int32_t UNX_CALL UnxPhotoEnd(UnxRenderer r);
+UNX_API int32_t UNX_CALL UnxPhotoGetStatus(UnxRenderer r, UnxPhotoStatus* status);
+
 // Loads a .unxscene file (INTERFACES 6.2) as the renderer's content: textures, materials, meshes, skeletons, instances
 // (their flags included), lights, sun, atmosphere and wind, with the file's indices. Only before any content was added and
 // before UnxSceneCommit; content added afterwards appends. 'camera0' (nullable) receives the file's camera 0 (fails when

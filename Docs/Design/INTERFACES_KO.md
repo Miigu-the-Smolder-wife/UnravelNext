@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.64, 2026-09-26)
+# UnravelNext 인터페이스 (v1.65, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -542,6 +542,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - Foliage: 앞면 f_d × (1 − transmission), 뒷면으로 가는 빛 transmission × (1 − metallic) baseColor / π.
 - two-sided: 뒷면에서 법선을 뒤집는다. alpha test: baseColor 텍스처 alpha ≥ alphaCutoff면 불투명(광선 any-hit도 같다).
 - 노멀맵: `n_ts = (2r−1, 2g−1, √(1−x²−y²))`, TBN = (정점 보간 탄젠트, sign·cross(n, t), 정점 보간 법선), 결과 정규화. 탄젠트는 장면 데이터에 있는 값만 쓴다(재계산 금지).
+- 셰이딩 법선 규칙(v1.65, 기준 `RtScene.cpp`와 같다): 최종 셰이딩 법선이 기하 법선 반대쪽이면 삼각형 평면에 대해 반사한다. 셰이딩하는 면을 보는 경우(앞면, 또는 two-sided의 뒷면)에 n·v < 1e-4이면 n ← normalize(n + v (1e-4 − n·v))로 굽힌다. BRDF는 n·v > 0에서만 정의되므로, 이 규칙이 없으면 비스듬히 보는 노멀맵 텍셀이 빛을 전혀 반사하지 않는다(U2의 검은 점). 실시간: M의 해석과 coverage 조각(`mNormalOnGeometricSide`, `mNormalTowardsViewer`), 그리고 ShadeOpaque가 G버퍼 양자화 뒤에 다시 굽힌다.
 - 텍스처: 기준은 mip 0 쌍선형(표본 수로 픽셀 필터를 적분), 실시간은 footprint 밉·이방성 + 노멀→거칠기 필터(설계서 2.2). 이 차이는 품질 정의(설계서 3절 "재질")의 허용 항목이다.
 - Hair, Water, Glass, Subsurface 클래스 모델은 해당 단계(P3/P4) 전에 0절 절차로 이 절에 추가한다.
 
@@ -726,6 +727,14 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.65 (2026-09-26, 렌더 A: B11 사진 모드 호스트, 셰이딩 법선 규칙):
+  - **사진 모드 호스트(FEATURES_GAME 17, E의 `GpuPathTracer`를 렌더러 장치 위에서)**: `HostRenderer::photoBegin(camera, PhotoSettings)`, `photoSave(exr, png)`, `photoEnd()`, `photoStatus()`, `photoScene()`. 선택 export는 `UnxPhotoBegin(UnxPhotoDesc 64 B)`, `UnxPhotoSave`, `UnxPhotoEnd`, `UnxPhotoGetStatus(UnxPhotoStatus 312 B)`(ABI 6 안)다.
+    - 스냅숏은 호스트가 지금 보여 주는 장면이다: 최신 변환·자세·태양·가시성, C2b 런타임 메시와 인스턴스, C5 지형 패치(패치된 타일은 V의 무게중심 규칙으로 교체 삼각형을 뺀다), 최신 프레임 카메라 × 자세의 A12 뷰 모델. 렌즈는 호스트 렌즈를 쓰고, EV100이 유한하지 않으면 자동 노출의 마지막 값을 쓴다.
+    - 켜져 있는 동안 렌더되는 프레임마다 `pass(halfSamplesPerFrame)`를 하고, `currentImageResource()`(COMMON)를 그래프에 가져와 M의 후처리 사슬로 출력한다. 출력 크기가 바뀌면 다시 시작한다. 끝난 뒤 첫 프레임은 이력 컷이다.
+    - 저장: EXR은 `current()`의 선형 복사휘도 × 노출이고, PNG는 같은 프레임 사슬의 SDR 인코딩(16비트 RGB, WIC)이다.
+    - [실측] `unx_test_host_hostphoto`: 표시 프레임 = EXR의 필름 곡선 + OETF(≤ 1 코드, 평균 +0.001), PNG = 표시 코드와 정확히 같음, 자체 추적기 렌더와 relMSE 2.6e-15, 크기 변경 시 재시작, 디버그 레이어 오류 0이다.
+  - **`FrameRenderer::recordImage(graph, frame, image, output, sdrCopy)`(core)와 `tracks::imagePost(fc, view, image)`(M)**: 다른 곳에서 만든 노출 선형 영상을 장면 렌더 대신 후처리 사슬로 보낸다. GPU 장면은 그 프레임의 갱신을 계속 받는다.
+  - **셰이딩 법선 규칙(8.1)**: 기준과 같은 두 규칙(기하 법선 쪽 유지, 시선 쪽 1e-4 굽힘)을 실시간 해석·coverage 조각·셰이딩에 넣었다. [실측] D0 고정 장면 1920×1080에서 순검정 점 2,869 → 0(가장자리 검출 끔, coverage 끔 변형도 0). `unx_test_material_materialtests` 5번: 등진 픽셀 73,697개에서 G버퍼 법선이 기준 굽힘과 5.1e-5 안으로 같고, 등지지 않은 픽셀 33,631개는 매핑 법선 그대로다.
 - v1.64 (2026-09-26, 렌더 C, 물 층 가장자리 — A 결정; R 접근자 — B 요청):
   - **물 층 가장자리 기록**: layer 1 스트림은 coverage 층이 켜져 있을 때 가장자리 픽셀에만 투과 기록을 낸다(`COV_FLAG_WATER_EDGE`, `coverageWaterEdge`: 3 × 3 안에 이 스트림의 물이 아닌 픽셀·band A 뒤의 물이 있거나 물 깊이 2차 차분 > 1e-3 × 깊이). 그 밖의 물 픽셀은 물 층 표본이 픽셀 전체다. M은 가장자리 픽셀에서 기록을, 나머지에서 waterVis·waterDepth를 쓴다. 시험 `unx_test_visibility_wateredgetests`: 전체 표본 픽셀 13,266 + 가장자리 기록 515.250 px² = 13781.250 대 정확 13781.252.
   - **`GpuScene::runtimeSubmeshes(mesh)`, `runtimeMeshGeneration(mesh)`**(R의 런타임 BLAS): 살아 있는 런타임 메시의 서브메시 기록(메시 기준 인덱스 범위)과 슬롯 세대(그 슬롯에 추가될 때마다 +1). 런타임 인스턴스 = instances()[i ≥ staticInstanceCount()], 제거된 것은 슬롯 재사용 전까지 kInstanceHidden.

@@ -19,6 +19,11 @@ public:
     // Declares the whole frame into 'graph'; 'output' is the main view's colour target (imported by the caller:
     // RGB10A2 display output, or RGBA32F linear radiance when frame.outputLinearHdr). Returns the main view products.
     ViewResources record(RenderGraph& graph, const FrameContext& frame, TextureRef output);
+    // Photo mode (B11, FEATURES_GAME 17; render A): the frame shows 'image', an exposed-linear image made elsewhere (the
+    // GPU reference tracer's progressive image), through M's post chain into 'output' (the display encoding of
+    // frame.displayPeak) instead of rendering the scene; 'sdrCopy' (optional, RGB10A2) also gets the chain's SDR
+    // encoding (a saved PNG). The GPU scene still takes the frame's updates, so record() continues where it left off.
+    void recordImage(RenderGraph& graph, const FrameContext& frame, TextureRef image, TextureRef output, TextureRef sdrCopy = {});
     // Persistent track state (tests and gates read track statistics through it, e.g. unx::visibility::latestStats).
     TrackState& trackState() { return m_trackState; }
     // The main view's EV100 of the last recorded frame (automatic exposure's choice when on; tests, statistics).

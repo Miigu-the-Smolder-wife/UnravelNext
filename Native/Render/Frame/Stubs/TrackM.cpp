@@ -13,6 +13,7 @@ float autoExposureEv100(TrackState&, Device&, const QualityConfig&, const FrameC
 }
 void materialResolve(FramePassContext&, ViewResources&) { pending("M.materialResolve (track disabled in this build)"); }
 void shading(FramePassContext&, ViewResources&) { pending("M.shading (track disabled in this build)"); }
+void imagePost(FramePassContext&, ViewResources&, TextureRef) { pending("M.imagePost (track disabled in this build)"); }
 std::vector<RenderGraph::BandedPass> shadingPasses(FramePassContext&, ViewResources&)
 {
     pending("M.shadingPasses (track disabled in this build)");

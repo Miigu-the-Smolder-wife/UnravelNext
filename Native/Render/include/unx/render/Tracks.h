@@ -32,6 +32,9 @@ void prepareScene(FramePassContext& fc);
 float autoExposureEv100(TrackState& state, Device& device, const QualityConfig& quality, const FrameContext& frame, uint32_t framesInFlight);
 void materialResolve(FramePassContext& fc, ViewResources& view);  // writes view.gbuffer
 void shading(FramePassContext& fc, ViewResources& view);          // writes view.color (+ edge/coverage composite)
+// M (B11 photo mode, FEATURES_GAME 17): an exposed-linear image made elsewhere (the GPU reference tracer's progressive
+// image) through the post chain (bloom, vignetting, tone curve, grading, grain, dither, encoding) into view.color.
+void imagePost(FramePassContext& fc, ViewResources& view, TextureRef image);
 
 // ---- S: shadows and sky - Passes/Shadow, Passes/Atmosphere
 void atmosphere(FramePassContext& fc);                            // sky/aerial LUTs -> FrameResources

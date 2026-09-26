@@ -1,5 +1,6 @@
 // Track entry point of M (shading) (INTERFACES_KO.md 5.2). Signatures fixed by Tracks.h.
 #include "unx/shading/Exposure.h"
+#include "unx/shading/Post.h"
 #include "unx/render/Tracks.h"
 #include "unx/shading/ShadingSystem.h"
 
@@ -8,6 +9,11 @@ namespace unx::render::tracks
 void shading(FramePassContext& fc, ViewResources& view)
 {
     shading::shade(fc, view);
+}
+
+void imagePost(FramePassContext& fc, ViewResources& view, TextureRef image)
+{
+    shading::postChain(fc, view, image);
 }
 
 // The banded lighting group (v1.31): M's edge detection and shading kernels, band by band after S's visibility passes.

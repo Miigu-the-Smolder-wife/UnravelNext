@@ -175,6 +175,28 @@ struct FrameStats
     std::vector<std::pair<std::string, double>> passMs;  // the same frame's passes in graph order
 };
 
+// B11 photo mode (FEATURES_GAME 17): E's GPU reference tracer on the renderer's device renders a snapshot of the scene
+// progressively; while it is on, every rendered frame shows its image through M's post chain.
+struct PhotoSettings
+{
+    uint32_t samplesPerPixel = 4096;   // the accumulation's target (both halves together)
+    uint32_t halfSamplesPerFrame = 1;  // samples per pixel and half added per rendered frame (the tracer also keeps each
+                                       // dispatch near GpuPathTracer::kTargetDispatchMs)
+};
+
+struct PhotoStatus
+{
+    bool active = false;               // a photo is being shown
+    uint64_t generation = 0;           // the photoBegin / photoEnd call this status belongs to (1, 2, ...)
+    uint32_t width = 0, height = 0;
+    uint32_t samples = 0, target = 0;  // samples per pixel done (both halves), the target
+    double relMse = -1;                // the image's relMSE against the converged image (halvesRelMse / 4) at the last
+                                       // save; -1 before one
+    double startSeconds = 0;           // the tracer's creation: snapshot upload, BLAS/TLAS, tables (render thread)
+    uint32_t saves = 0;                // saves completed for this generation
+    std::string error;                 // the last failure (start or save); empty when none
+};
+
 // Executes one of the frame's command lists on the host queue; 'output' is the host texture the list may touch.
 using HostExecute = std::function<void(ID3D12CommandList* list, ID3D12Resource* output)>;
 
@@ -311,6 +333,21 @@ public:
     // The scene as the host shows it now: the content with the latest transforms, poses, sun and visibility the host
     // set (rendered, queued and pending updates, newest last); hidden instances are left out. Main thread (UnxSceneSave).
     scene::Scene currentScene() const;
+    // Photo mode's snapshot (main thread): currentScene() with what the frames draw beyond the committed content - the
+    // C2b runtime meshes and instances, the C5 terrain patches (a patched tile's replaced triangles left out, V's centroid
+    // rule) and the A12 view models at the host's latest frame camera.
+    scene::Scene photoScene() const;
+
+    // B11 photo mode (main thread; FEATURES_GAME 17). photoBegin snapshots the scene now (photoScene), with 'camera' (an
+    // EV100 that is not finite takes automatic exposure's last choice) and the host's lens, and every frame rendered
+    // after it shows the tracer's image at the frame's output size (a new size restarts the accumulation) through M's
+    // post chain. Calling it again restarts with a new snapshot and camera (a moved photo camera). photoSave writes the
+    // image when the next frame renders: 'exr' (optional) the linear radiance x exposure (metrics::writeExr), 'png'
+    // (optional) the post chain's SDR encoding as 16-bit RGB. photoEnd returns to the scene's frames.
+    void photoBegin(const scene::Camera& camera, const PhotoSettings& settings);
+    void photoSave(std::filesystem::path exr, std::filesystem::path png);
+    void photoEnd();
+    PhotoStatus photoStatus() const;
 
     const HostRendererOptions& options() const { return m_options; }
     const QualityConfig& quality() const { return m_quality; }
@@ -340,6 +377,11 @@ private:
     fx::ParticleSystem& fxModule();  // (m_fxMutex held) created on first use, explicit copies on the compute queue
     void fxRunPending();              // (m_fxMutex held) the claimed ticks on the compute queue
     void fxFrameWait();               // (m_fxMutex held, frame submission) the graphics queue waits for them
+    scene::Scene snapshot(bool photo) const;
+    // Submission thread: photo mode's part of a frame. photoFrame records it (false: no photo, render the scene);
+    // photoAfterExecute finishes a save once the frame's lists were submitted.
+    bool photoFrame(render::FrameContext& fc, const FramePacket& p, render::TextureRef output);
+    void photoAfterExecute();
 
     HostRendererOptions m_options;
     QualityConfig m_quality;
@@ -361,6 +403,19 @@ private:
     std::unordered_map<uint32_t, uint32_t> m_runtimeMeshIndex, m_runtimeInstanceIndex;
     std::unordered_set<uint32_t> m_runtimeMeshLive;                  // main-thread view (validation)
     std::unordered_map<uint32_t, uint32_t> m_runtimeInstanceMesh;    // live runtime instance id -> its mesh (validation)
+    // B11: the host's live runtime geometry (m_mutex; photo snapshots): mesh data by id, instance placement by id (in
+    // the host's current coordinates: origin shifts move them).
+    std::unordered_map<uint32_t, std::shared_ptr<const scene::Mesh>> m_runtimeMeshData;
+    struct RuntimePlacement
+    {
+        float3x4 transform;
+        uint32_t flags = 0;
+    };
+    std::unordered_map<uint32_t, RuntimePlacement> m_runtimeInstancePlacement;
+    std::unordered_map<uint32_t, std::shared_ptr<const render::GpuScene::PatchRegion>> m_patchRegions;  // (m_mutex) per tile
+    scene::Camera m_lastCamera;                  // (m_mutex) the camera of the latest queued frame (view models)
+    double m_lastTime = 0;                       // (m_mutex) its time
+    bool m_haveLastCamera = false;
     // C5 terrain patches (main thread): per tile instance, its replaced blocks' runtime mesh / instance and input hash.
     struct PatchBlock
     {
@@ -415,5 +470,25 @@ private:
     std::string m_vfxError;                          // a submit that failed (reported by the next readback/checkpoint)
     fx::TickReadback m_vfxReadback;
     std::vector<NV_StreamParticle> m_vfxCheckpoint;
+    // B11 photo mode: the main thread's request (m_photoMutex) and the submission thread's tracer.
+    struct PhotoRequest
+    {
+        scene::Scene scene;
+        scene::Camera camera;
+        float lensAperture = 0, lensFocus = 0;
+        double time = 0;
+        PhotoSettings settings;
+    };
+    struct PhotoSaveRequest
+    {
+        std::filesystem::path exr, png;
+    };
+    struct Photo;
+    mutable std::mutex m_photoMutex;
+    std::shared_ptr<const PhotoRequest> m_photoRequest;  // null: off
+    uint64_t m_photoGeneration = 0;
+    std::vector<PhotoSaveRequest> m_photoSaves;
+    PhotoStatus m_photoStatus;
+    std::unique_ptr<Photo> m_photo;  // submission thread
 };
 } // namespace unx::host

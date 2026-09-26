@@ -223,4 +223,30 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::debugOverlay(fc, main);  // E (A15): buffer visualization, debug primitives, HUD over the final colour
     return main;
 }
+
+void FrameRenderer::recordImage(RenderGraph& graph, const FrameContext& in, TextureRef image, TextureRef output, TextureRef sdrCopy)
+{
+    FrameContext frame = in;
+    if (frame.discontinuity & kDiscontinuityRestore) m_scene.resetMotion();
+    m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);
+    m_debugDraw = 0xFFFFFFFFu;
+    m_viewModelScale = 1.0f;
+    FrameResources resources;
+    FrameServices services;
+    FramePassContext fc{ m_device, graph, m_shaders, m_quality, m_scene, frame, resources, services,
+                         [this, &frame](const ViewDesc& v) { return allocateFrameConstants(frame, v); }, &m_trackState, m_framesInFlight };
+    ViewResources main;
+    main.view = frame.mainView;
+    main.frameConstants = fc.frameConstantsFor(main.view);
+    main.color = output;
+    tracks::imagePost(fc, main, image);
+    if (!sdrCopy.valid()) return;
+    FrameContext sdr = frame;
+    sdr.displayPeak = 0;
+    FramePassContext sc{ m_device, graph, m_shaders, m_quality, m_scene, sdr, resources, services,
+                         [this, &frame](const ViewDesc& v) { return allocateFrameConstants(frame, v); }, &m_trackState, m_framesInFlight };
+    ViewResources copy = main;
+    copy.color = sdrCopy;
+    tracks::imagePost(sc, copy, image);
+}
 } // namespace unx::render

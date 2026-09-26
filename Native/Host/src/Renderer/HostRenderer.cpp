@@ -6,6 +6,10 @@
 #include "unx/render/GpuProfiler.h"
 #include "unx/render/RenderGraph.h"
 #include "unx/render/Shaders.h"
+#include "unx/metrics/Metrics.h"
+#include "unx/reference/GpuPathTracer.h"
+
+#include <wincodec.h>
 
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h")
 #include "unx/clusterbuilder/ClusterBuilder.h"
@@ -29,6 +33,58 @@
 namespace unx::host
 {
 using namespace unx::render;
+
+// B11 photo mode, submission thread.
+struct HostRenderer::Photo
+{
+    uint64_t generation = 0;                        // the request the tracer belongs to
+    std::unique_ptr<reference::GpuPathTracer> tracer;
+    uint32_t width = 0, height = 0, target = 0;
+    bool failed = false;                            // this generation's start failed (not retried)
+    bool shown = false;                             // the last frame showed the photo
+    // A save's SDR encoding (RGB10A2) and its read-back; the PNGs written once the frame's lists were submitted.
+    ComPtr<ID3D12Resource> sdr, readback;
+    uint32_t sdrWidth = 0, sdrHeight = 0;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    uint64_t readbackBytes = 0;
+    std::vector<std::filesystem::path> pngs;
+};
+
+namespace
+{
+// 16-bit RGB PNG through WIC (Windows' own codecs; photo mode's display-encoded image).
+void writePng16(const std::filesystem::path& path, uint32_t width, uint32_t height, const std::vector<uint16_t>& rgb)
+{
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    struct Uninit
+    {
+        bool on;
+        ~Uninit()
+        {
+            if (on) CoUninitialize();
+        }
+    } uninit{ SUCCEEDED(init) };
+    ComPtr<IWICImagingFactory> factory;
+    check(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)), "WIC imaging factory");
+    ComPtr<IWICStream> stream;
+    check(factory->CreateStream(&stream), "WIC stream");
+    check(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE), "photo PNG file");
+    ComPtr<IWICBitmapEncoder> encoder;
+    check(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder), "WIC PNG encoder");
+    check(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache), "WIC encoder");
+    ComPtr<IWICBitmapFrameEncode> frame;
+    ComPtr<IPropertyBag2> properties;
+    check(encoder->CreateNewFrame(&frame, &properties), "WIC frame");
+    check(frame->Initialize(properties.Get()), "WIC frame");
+    check(frame->SetSize(width, height), "WIC frame size");
+    WICPixelFormatGUID format = GUID_WICPixelFormat48bppRGB;
+    check(frame->SetPixelFormat(&format), "WIC pixel format");
+    if (format != GUID_WICPixelFormat48bppRGB) fail("the PNG encoder does not take 16-bit RGB");
+    check(frame->WritePixels(height, width * 6, (UINT)(rgb.size() * 2), (BYTE*)rgb.data()), "WIC pixels");
+    check(frame->Commit(), "WIC frame commit");
+    check(encoder->Commit(), "WIC encoder commit");
+}
+} // namespace
 
 struct HostRenderer::Standalone
 {
@@ -73,6 +129,7 @@ HostRenderer::HostRenderer(const HostRendererOptions& options) : m_options(optio
 HostRenderer::~HostRenderer()
 {
     if (m_device) m_device->waitIdle();
+    m_photo.reset();  // (B11) the tracer returns its descriptors while the device lives
     m_profiler.reset();
     m_graph.reset();
     m_frameRenderer.reset();
@@ -261,6 +318,8 @@ void HostRenderer::setOriginShift(float3 shift)
     for (InstanceTransformUpdate& u : m_pending.transforms)  // queued for this frame in the old coordinates
         u.objectToWorld.m[0][3] -= shift.x, u.objectToWorld.m[1][3] -= shift.y, u.objectToWorld.m[2][3] -= shift.z;
     shiftRuntime(m_pending.runtime, shift);
+    for (auto& [id, p] : m_runtimeInstancePlacement) p.transform.m[0][3] -= shift.x, p.transform.m[1][3] -= shift.y, p.transform.m[2][3] -= shift.z;
+    m_lastCamera.position = m_lastCamera.position - shift;
 }
 
 void HostRenderer::reserveRuntime(const render::RuntimeCapacity& capacity)
@@ -295,6 +354,7 @@ uint32_t HostRenderer::addRuntimeMesh(scene::Mesh mesh)
     op.id = id;
     op.meshData = std::make_shared<const scene::Mesh>(std::move(mesh));
     op.clusters = std::move(clusters);
+    m_runtimeMeshData[id] = op.meshData;
     m_pending.runtime.push_back(std::move(op));
     m_runtimeMeshLive.insert(id);
     return id;
@@ -308,6 +368,7 @@ void HostRenderer::removeRuntimeMesh(uint32_t id)
     for (const auto& [instance, mesh] : m_runtimeInstanceMesh)
         if (mesh == id) fail("runtime mesh %u: runtime instance %u still uses it (remove the instances first)", id, instance);
     m_runtimeMeshLive.erase(id);
+    m_runtimeMeshData.erase(id);
     FramePacket::RuntimeOp op;
     op.kind = FramePacket::RuntimeOp::RemoveMesh;
     op.id = id;
@@ -323,6 +384,7 @@ uint32_t HostRenderer::addRuntimeInstance(uint32_t mesh, const float3x4& transfo
     FramePacket::RuntimeOp op;
     op.kind = FramePacket::RuntimeOp::AddInstance;
     op.id = id, op.mesh = mesh, op.flags = flags & ~(uint32_t)scene::InstanceSkinned, op.transform = transform;
+    m_runtimeInstancePlacement[id] = { transform, op.flags };
     m_pending.runtime.push_back(std::move(op));
     m_runtimeInstanceMesh[id] = mesh;
     return id;
@@ -333,6 +395,7 @@ void HostRenderer::removeRuntimeInstance(uint32_t id)
     requireCommitted();
     std::lock_guard lock(m_mutex);
     if (!m_runtimeInstanceMesh.erase(id)) fail("runtime instance %u is not live", id);
+    m_runtimeInstancePlacement.erase(id);
     FramePacket::RuntimeOp op;
     op.kind = FramePacket::RuntimeOp::RemoveInstance;
     op.id = id;
@@ -344,6 +407,7 @@ void HostRenderer::setRuntimeTransform(uint32_t id, const float3x4& transform)
     requireCommitted();
     std::lock_guard lock(m_mutex);
     if (!m_runtimeInstanceMesh.count(id)) fail("runtime instance %u is not live", id);
+    m_runtimeInstancePlacement[id].transform = transform;
     FramePacket::RuntimeOp op;
     op.kind = FramePacket::RuntimeOp::Transform;
     op.id = id, op.transform = transform;
@@ -369,6 +433,7 @@ void HostRenderer::setTerrainDeformation(double originX, double originZ, float s
         op.id = tile;
         op.region = std::make_shared<const render::GpuScene::PatchRegion>();
         std::lock_guard lock(m_mutex);
+        m_patchRegions.erase(tile);
         m_pending.runtime.push_back(std::move(op));
     };
     std::vector<uint32_t> gone;
@@ -430,6 +495,8 @@ void HostRenderer::setTerrainDeformation(double originX, double originZ, float s
         op.region = std::move(region);
         {
             std::lock_guard lock(m_mutex);
+            if (op.region->blocks.empty()) m_patchRegions.erase(tile);
+            else m_patchRegions[tile] = op.region;
             m_pending.runtime.push_back(std::move(op));
         }
         if (active.empty()) m_terrainPatches.erase(tile);
@@ -492,11 +559,69 @@ void HostRenderer::overlay(const FramePacket& p, HostState& state)
     for (const auto& [instance, visible] : p.visibility) state.visible[instance] = visible ? 1 : 0;
 }
 
-scene::Scene HostRenderer::currentScene() const
+scene::Scene HostRenderer::currentScene() const { return snapshot(false); }
+
+scene::Scene HostRenderer::photoScene() const { return snapshot(true); }
+
+namespace
+{
+float3x4 compose(const float3x4& a, const float3x4& b)  // a * b (affine; viewmodel::compose's operations)
+{
+    float3x4 r;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 4; ++j)
+        {
+            r.m[i][j] = a.m[i][0] * b.m[0][j] + a.m[i][1] * b.m[1][j] + a.m[i][2] * b.m[2][j];
+            if (j == 3) r.m[i][j] += a.m[i][3];
+        }
+    return r;
+}
+
+// A patched terrain tile's mesh without the triangles V leaves out (VisibilityCommon.hlsli patchReplaced: the object-space
+// centroid's block, floor((c.xz - origin) / block), is a replaced one), in the same float operations.
+// keptSubmeshes: the source submesh of each output submesh (a submesh left without triangles is dropped).
+scene::Mesh withoutReplaced(const scene::Mesh& mesh, const render::GpuScene::PatchRegion& r, std::vector<uint32_t>& keptSubmeshes)
+{
+    std::unordered_set<uint32_t> replaced(r.blocks.begin(), r.blocks.end());
+    scene::Mesh out = mesh;
+    out.indices.clear();
+    out.submeshes.clear();
+    for (uint32_t k = 0; k < mesh.submeshes.size(); ++k)
+    {
+        const scene::Submesh& sm = mesh.submeshes[k];
+        scene::Submesh kept{ (uint32_t)out.indices.size(), 0, sm.material };
+        for (uint32_t t = 0; t < sm.indexCount; t += 3)
+        {
+            const uint32_t* i = &mesh.indices[sm.indexOffset + t];
+            const float3 a = mesh.positions[i[0]], b = mesh.positions[i[1]], c = mesh.positions[i[2]];
+            const float cx = (a.x + b.x + c.x) / 3.0f, cz = (a.z + b.z + c.z) / 3.0f;
+            const float bx = std::floor((cx - r.originX) / r.blockX), bz = std::floor((cz - r.originZ) / r.blockZ);
+            const bool inside = bx >= 0 && bz >= 0 && bx < (float)r.blocksPerSide && bz < (float)r.blocksPerSide;
+            if (inside && replaced.count((uint32_t)bz * r.blocksPerSide + (uint32_t)bx)) continue;
+            out.indices.insert(out.indices.end(), i, i + 3);
+            kept.indexCount += 3;
+        }
+        if (!kept.indexCount) continue;
+        out.submeshes.push_back(kept);
+        keptSubmeshes.push_back(k);
+    }
+    return out;
+}
+} // namespace
+
+scene::Scene HostRenderer::snapshot(bool photo) const
 {
     requireCommitted();
     scene::Scene s;
     HostState state;
+    float3 originOffset;
+    std::unordered_map<uint32_t, std::shared_ptr<const scene::Mesh>> runtimeMeshes;
+    std::unordered_map<uint32_t, RuntimePlacement> runtimeInstances;
+    std::unordered_map<uint32_t, uint32_t> runtimeInstanceMesh;
+    std::unordered_map<uint32_t, std::shared_ptr<const render::GpuScene::PatchRegion>> patches;
+    std::vector<viewmodel::ViewModels::Entry> viewModels;
+    scene::Camera camera;
+    bool haveCamera = false;
     {
         std::lock_guard lock(m_mutex);
         {
@@ -511,6 +636,50 @@ scene::Scene HostRenderer::currentScene() const
         }
         applyEdits(m_pending, s);
         overlay(m_pending, state);
+        originOffset = m_mainOriginOffset;
+        if (photo)
+        {
+            runtimeMeshes = m_runtimeMeshData;
+            runtimeInstances = m_runtimeInstancePlacement;
+            runtimeInstanceMesh = m_runtimeInstanceMesh;
+            patches = m_patchRegions;
+            viewModels = m_viewModels.entries();
+            camera = m_lastCamera;
+            haveCamera = m_haveLastCamera;
+        }
+    }
+    // Lights stay where they were added; the GPU scene moves them by every origin shift (GpuScene::rebase).
+    for (scene::Light& l : s.lights) l.position = l.position - originOffset;
+    if (photo)
+    {
+        // A12: view models where the frames draw them, the host's latest frame camera x their pose
+        if (haveCamera)
+        {
+            const float3x4 cameraToWorld = viewmodel::cameraToWorld(ViewDesc::fromCamera(camera, 16, 9, {}));
+            for (const viewmodel::ViewModels::Entry& e : viewModels)
+                if (e.live && e.instance < state.transforms.size()) state.transforms[e.instance] = compose(cameraToWorld, e.cameraLocal);
+        }
+        // C5: a patched tile draws its mesh without the replaced triangles (the patch meshes are runtime meshes)
+        for (const auto& [tile, region] : patches)
+        {
+            if (tile >= s.instances.size() || region->blocks.empty()) continue;
+            std::vector<uint32_t> kept;
+            scene::Mesh cut = withoutReplaced(s.meshes[s.instances[tile].mesh], *region, kept);
+            if (cut.submeshes.empty())
+            {
+                state.visible[tile] = 0;  // every triangle replaced
+                continue;
+            }
+            scene::Instance& in = s.instances[tile];
+            if (!in.materialOverrides.empty())
+            {
+                std::vector<uint32_t> overrides;
+                for (uint32_t k : kept) overrides.push_back(in.materialOverrides[k]);
+                in.materialOverrides = std::move(overrides);
+            }
+            s.meshes.push_back(std::move(cut));
+            in.mesh = (uint32_t)s.meshes.size() - 1;
+        }
     }
     s.sun = state.sun;
     s.atmosphere = state.atmosphere;
@@ -532,6 +701,30 @@ scene::Scene HostRenderer::currentScene() const
     }
     s.instances = std::move(shown);
     for (size_t k = 0; k < s.skeletons.size(); ++k) s.skeletons[k].jointToModel = *state.poses[k];
+    if (photo)
+    {
+        // C2b: the live runtime meshes and instances (ids in creation order, so the snapshot is deterministic)
+        std::vector<uint32_t> meshIds, instanceIds;
+        for (const auto& [id, m] : runtimeMeshes) meshIds.push_back(id);
+        for (const auto& [id, p] : runtimeInstances) instanceIds.push_back(id);
+        std::sort(meshIds.begin(), meshIds.end());
+        std::sort(instanceIds.begin(), instanceIds.end());
+        std::unordered_map<uint32_t, uint32_t> meshIndex;
+        for (uint32_t id : meshIds)
+        {
+            meshIndex[id] = (uint32_t)s.meshes.size();
+            s.meshes.push_back(*runtimeMeshes[id]);
+        }
+        for (uint32_t id : instanceIds)
+        {
+            const uint32_t mesh = runtimeInstanceMesh.at(id);
+            scene::Instance in;
+            in.mesh = (mesh & 0x80000000u) ? meshIndex.at(mesh) : mesh;
+            in.transform = runtimeInstances[id].transform;
+            in.flags = runtimeInstances[id].flags;
+            s.instances.push_back(std::move(in));
+        }
+    }
     return s;
 }
 
@@ -724,6 +917,9 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     std::lock_guard lock(m_mutex);
     const uint64_t ticket = m_nextTicket++;
     packet.ticket = ticket;
+    m_lastCamera = packet.camera;  // (B11: the view models of a photo snapshot)
+    m_lastTime = packet.time;
+    m_haveLastCamera = true;
     packet.sun = std::move(m_pending.sun);
     packet.atmosphere = std::move(m_pending.atmosphere);
     packet.wind = std::move(m_pending.wind);
@@ -1074,7 +1270,284 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     draw.lines.insert(draw.lines.end(), p.debugLines.begin(), p.debugLines.end());
     draw.triangles.insert(draw.triangles.end(), p.debugTriangles.begin(), p.debugTriangles.end());
     draw.glyphs.insert(draw.glyphs.end(), p.debugGlyphs.begin(), p.debugGlyphs.end());
+    if (photoFrame(fc, p, output)) return;  // B11: the photo's image instead of the scene
     m_frameRenderer->record(*m_graph, fc, output);
+}
+
+void HostRenderer::photoBegin(const scene::Camera& camera, const PhotoSettings& settings)
+{
+    requireCommitted();
+    if (settings.samplesPerPixel < 2 || settings.halfSamplesPerFrame == 0)
+        fail("photo: %u samples per pixel (>= 2, both halves), %u per frame and half (>= 1)", settings.samplesPerPixel, settings.halfSamplesPerFrame);
+    auto request = std::make_shared<PhotoRequest>();
+    request->scene = photoScene();
+    request->camera = camera;
+    request->settings = settings;
+    {
+        std::lock_guard lock(m_mutex);
+        request->lensAperture = m_lensAperture;
+        request->lensFocus = m_lensFocus;
+        request->time = m_lastTime;
+    }
+    std::lock_guard lock(m_photoMutex);
+    m_photoRequest = std::move(request);
+    m_photoSaves.clear();
+    m_photoStatus = {};
+    m_photoStatus.generation = ++m_photoGeneration;
+    m_photoStatus.target = settings.samplesPerPixel;
+}
+
+void HostRenderer::photoSave(std::filesystem::path exr, std::filesystem::path png)
+{
+    if (exr.empty() && png.empty()) fail("photo save: no file");
+    std::lock_guard lock(m_photoMutex);
+    if (!m_photoRequest) fail("photo save: photo mode is off");
+    m_photoSaves.push_back({ std::move(exr), std::move(png) });
+}
+
+void HostRenderer::photoEnd()
+{
+    std::lock_guard lock(m_photoMutex);
+    m_photoRequest.reset();
+    m_photoSaves.clear();
+    m_photoStatus = {};
+    m_photoStatus.generation = ++m_photoGeneration;
+}
+
+PhotoStatus HostRenderer::photoStatus() const
+{
+    std::lock_guard lock(m_photoMutex);
+    return m_photoStatus;
+}
+
+bool HostRenderer::photoFrame(FrameContext& fc, const FramePacket& p, TextureRef output)
+{
+    std::shared_ptr<const PhotoRequest> request;
+    uint64_t generation = 0;
+    std::vector<PhotoSaveRequest> saves;
+    {
+        std::lock_guard lock(m_photoMutex);
+        request = m_photoRequest;
+        generation = m_photoGeneration;
+        saves.swap(m_photoSaves);
+    }
+    if (!m_photo) m_photo = std::make_unique<Photo>();
+    Photo& ph = *m_photo;
+    if (generation != ph.generation || (ph.tracer && (ph.width != p.width || ph.height != p.height)))
+    {
+        ph.tracer.reset();  // (its destructor waits for the device's queues)
+        ph.generation = generation;
+        ph.failed = false;
+    }
+    auto leave = [&] {
+        // Back to the scene: its histories (GI, exposure, motion) are as old as the photo; the first frame starts them anew.
+        if (ph.shown) fc.discontinuity |= kDiscontinuityCut;
+        ph.shown = false;
+        return false;
+    };
+    if (!request || ph.failed) return leave();
+    auto setStatus = [&](auto&& f) {
+        std::lock_guard lock(m_photoMutex);
+        if (m_photoStatus.generation == generation) f(m_photoStatus);
+    };
+    if (!ph.tracer)
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        try
+        {
+            ph.tracer = std::make_unique<reference::GpuPathTracer>(request->scene, *m_device, m_options.shaderDirectory / "Reference", "photo");
+            const scene::Camera& cam = request->camera;
+            reference::ResolvedCamera c;
+            c.position = cam.position;
+            c.forward = cam.forward;
+            c.up = cam.up;
+            c.verticalFov = cam.verticalFov;
+            c.nearPlane = cam.nearPlane;
+            c.ev100 = std::isfinite(cam.ev100) ? cam.ev100 : m_frameRenderer->lastEv100();  // automatic exposure's last choice
+            c.time = (float)request->time;
+            c.lensAperture = request->lensAperture;
+            c.lensFocus = request->lensFocus;
+            reference::RenderSettings settings;
+            settings.width = p.width;
+            settings.height = p.height;
+            settings.samplesPerPixel = request->settings.samplesPerPixel;
+            settings.russianRouletteStart = (uint32_t)m_quality.number("reference.russian_roulette_start_bounce");
+            ph.tracer->start(c, settings);
+            ph.width = p.width;
+            ph.height = p.height;
+            ph.target = request->settings.samplesPerPixel;
+        }
+        catch (const std::exception& e)
+        {
+            ph.tracer.reset();
+            ph.failed = true;
+            logf("UnravelNext: photo mode could not start: %s\n", e.what());
+            setStatus([&](PhotoStatus& s) { s.error = e.what(); });
+            return leave();
+        }
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        setStatus([&](PhotoStatus& s) {
+            s.startSeconds = seconds;
+            s.width = p.width;
+            s.height = p.height;
+        });
+    }
+    if (ph.tracer->samplesDone() < ph.target) ph.tracer->pass(request->settings.halfSamplesPerFrame);
+    // The image is rewritten on the compute queue: after every earlier frame's read of it on the graphics queue.
+    Queue& graphics = m_device->queue(QueueType::Graphics);
+    m_device->queue(QueueType::Compute).waitGpu(graphics, graphics.lastSignaled());
+    ID3D12Resource* image = ph.tracer->currentImageResource();
+    TextureDesc id;
+    id.name = "photo image";
+    id.width = p.width;
+    id.height = p.height;
+    id.format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    const TextureRef imageRef = m_graph->importTexture(image, id, D3D12_BARRIER_LAYOUT_COMMON);
+
+    // Saves: the linear image now (a read-back of the accumulation), the display encoding with this frame.
+    TextureRef sdr;
+    std::string error;
+    double relMse = -1;
+    uint32_t exrOnly = 0;
+    ph.pngs.clear();
+    if (!saves.empty())
+    {
+        try
+        {
+            const reference::RenderOutput out = ph.tracer->current();
+            relMse = out.halvesRelMse / 4;
+            for (const PhotoSaveRequest& s : saves)
+            {
+                if (!s.exr.empty()) metrics::writeExr(s.exr, out.image);
+                if (!s.png.empty()) ph.pngs.push_back(s.png);
+                else ++exrOnly;
+            }
+        }
+        catch (const std::exception& e)
+        {
+            error = e.what();
+            ph.pngs.clear();
+        }
+    }
+    if (!ph.pngs.empty())
+    {
+        if (!ph.sdr || ph.sdrWidth != p.width || ph.sdrHeight != p.height)
+        {
+            m_device->waitIdle();  // (a size change: the old pair may still be in use)
+            D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+            D3D12_RESOURCE_DESC1 td{};
+            td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            td.Width = p.width;
+            td.Height = p.height;
+            td.DepthOrArraySize = td.MipLevels = 1;
+            td.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+            td.SampleDesc.Count = 1;
+            td.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            ph.sdr.Reset();
+            ph.readback.Reset();
+            check(m_device->d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &td, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                           IID_PPV_ARGS(&ph.sdr)),
+                  "photo SDR image");
+            ph.sdr->SetName(L"UnravelNext photo SDR");
+            const D3D12_RESOURCE_DESC legacy = ph.sdr->GetDesc();
+            UINT64 total = 0;
+            m_device->d3d()->GetCopyableFootprints(&legacy, 0, 1, 0, &ph.footprint, nullptr, nullptr, &total);
+            D3D12_HEAP_PROPERTIES rheap{ D3D12_HEAP_TYPE_READBACK };
+            D3D12_RESOURCE_DESC bd{};
+            bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            bd.Width = total;
+            bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
+            bd.SampleDesc.Count = 1;
+            bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            check(m_device->d3d()->CreateCommittedResource(&rheap, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&ph.readback)),
+                  "photo read-back");
+            ph.readbackBytes = total;
+            ph.sdrWidth = p.width;
+            ph.sdrHeight = p.height;
+        }
+        TextureDesc sd;
+        sd.name = "photo SDR";
+        sd.width = p.width;
+        sd.height = p.height;
+        sd.format = DXGI_FORMAT_R10G10B10A2_UNORM;
+        sdr = m_graph->importTexture(ph.sdr.Get(), sd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    }
+    m_frameRenderer->recordImage(*m_graph, fc, imageRef, output, sdr);
+    if (sdr.valid())
+    {
+        BufferDesc bd;
+        bd.name = "photo read-back";
+        bd.size = ph.readbackBytes;
+        const BufferRef rb = m_graph->importBuffer(ph.readback.Get(), bd);
+        Photo* photo = &ph;
+        m_graph->addPass(
+            "host.photo.readback", QueueType::Graphics,
+            [&](PassBuilder& b) {
+                b.use(sdr, Use::CopySrc);
+                b.use(rb, Use::CopyDst);
+                b.keep();
+            },
+            [photo](PassContext& c) {
+                D3D12_TEXTURE_COPY_LOCATION dst{};
+                dst.pResource = photo->readback.Get();
+                dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                dst.PlacedFootprint = photo->footprint;
+                D3D12_TEXTURE_COPY_LOCATION src{};
+                src.pResource = photo->sdr.Get();
+                src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                c.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            });
+    }
+    ph.shown = true;
+    const uint32_t samples = ph.tracer->samplesDone();
+    setStatus([&](PhotoStatus& s) {
+        s.active = true;
+        s.samples = samples;
+        if (relMse >= 0) s.relMse = relMse;
+        s.saves += exrOnly;
+        if (!error.empty()) s.error = "photo save: " + error;
+    });
+    return true;
+}
+
+void HostRenderer::photoAfterExecute()
+{
+    if (!m_photo || m_photo->pngs.empty()) return;
+    Photo& ph = *m_photo;
+    Queue& graphics = m_device->queue(QueueType::Graphics);
+    graphics.waitCpu(graphics.lastSignaled());
+    std::string error;
+    uint32_t written = 0;
+    try
+    {
+        std::vector<uint16_t> rgb((size_t)ph.sdrWidth * ph.sdrHeight * 3);
+        const uint8_t* mapped = nullptr;
+        D3D12_RANGE range{ 0, (SIZE_T)ph.readbackBytes };
+        check(ph.readback->Map(0, &range, (void**)&mapped), "photo read-back Map");
+        for (uint32_t y = 0; y < ph.sdrHeight; ++y)
+        {
+            const uint32_t* row = (const uint32_t*)(mapped + ph.footprint.Offset + (size_t)y * ph.footprint.Footprint.RowPitch);
+            for (uint32_t x = 0; x < ph.sdrWidth; ++x)
+                for (uint32_t c = 0; c < 3; ++c)  // the 10-bit code v as v / 1023 of the 16-bit range, rounded
+                    rgb[((size_t)y * ph.sdrWidth + x) * 3 + c] = (uint16_t)((((row[x] >> (10 * c)) & 1023u) * 65535u + 511u) / 1023u);
+        }
+        D3D12_RANGE none{ 0, 0 };
+        ph.readback->Unmap(0, &none);
+        for (const std::filesystem::path& png : ph.pngs)
+        {
+            writePng16(png, ph.sdrWidth, ph.sdrHeight, rgb);
+            ++written;
+        }
+    }
+    catch (const std::exception& e)
+    {
+        error = e.what();
+    }
+    ph.pngs.clear();
+    std::lock_guard lock(m_photoMutex);
+    if (m_photoStatus.generation != ph.generation) return;
+    m_photoStatus.saves += written;
+    if (!error.empty()) m_photoStatus.error = "photo save: " + error;
 }
 
 ID3D12Device* HostRenderer::d3dDevice() const { return m_device ? m_device->d3d() : nullptr; }
@@ -1212,6 +1685,7 @@ void HostRenderer::renderOnHost(uint64_t ticket, const HostExecute& execute)
     {
         fxFrameWait();  // on the host's queue, in its render event
         m_graph->execute(m_profiler.get());
+        photoAfterExecute();
     }
     catch (...)
     {
@@ -1322,6 +1796,7 @@ void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t read
     }
     fxFrameWait();
     m_graph->execute(m_profiler.get());
+    photoAfterExecute();
     endFrame(slot, p.frameIndex);
     if (readback)
     {
