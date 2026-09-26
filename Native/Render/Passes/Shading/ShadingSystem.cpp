@@ -320,10 +320,10 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     const bool planar = view.view.kind != gpu::ViewKind::Main;
     // V's coverage layer (INTERFACES 7.1 v1.41; main view): its fragments are composited over band A
     // (CoverageComposite.hlsl, design COVERAGE_REDESIGN 4.5). The fragments' shadows come from S's fragment visibility
-    // (4.3); until S publishes it, the layer is shaded only in frames without S's shadows (shading bit 8192 allows it for
-    // cost attribution, never an image).
+    // (4.3, fragmentShadows): a frame with S's shadows but without it would leave fragments unshadowed, so it fails
+    // (shading bit 8192 allows it for cost attribution, never an image).
     const bool coverage = !planar && v.coverageTiles.valid() && v.coverageRecords.valid() && v.coverageTileList.valid() && v.coverageTilePixels.valid();
-    if (coverage && v.shadowVisibility.valid() && (experiment & 8192) == 0)
+    if (coverage && v.shadowVisibility.valid() && !fragmentShadows && (experiment & 8192) == 0)
         fail("M.shading: V's coverage layer with S's shadows but without S's fragment visibility (COVERAGE_REDESIGN 4.3): its fragments would be unshadowed");
     // S's shadow overflow (INTERFACES 7.3, v1.20; main view): the list the main kernel loads, and the fallback tiles over
     // its capacity, shaded by the fallback kernel with S's VSM.
