@@ -719,6 +719,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
             if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
             if (r.giCache.valid()) b.use(r.giCache, Use::SrvCompute);
+            if (r.surfaceConstants.valid()) b.use(r.surfaceConstants, Use::SrvCompute);  // A7 surface layers (one buffer)
+            if (r.rainShadow.valid()) b.use(r.rainShadow, Use::SrvCompute);
             if (fragmentShadows)
             {
                 b.use(v.shadowFragmentVisibility, Use::SrvCompute);
@@ -732,6 +734,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             k[27] = fragmentShadows && v.shadowFragmentSun.valid() ? c.srv(v.shadowFragmentSun) : gpu::kNone;
             k[28] = fragmentShadows ? c.srv(v.coverageDepthRange) : gpu::kNone;
             k[29] = r.areaLightStable;  // P[7].y (B2)
+            k[30] = r.surfaceConstants.valid() ? c.srv(r.surfaceConstants) : gpu::kNone;  // P[7].z (A7 surface layers)
+            k[31] = r.weather != UINT32_MAX ? r.weather : gpu::kNone;                  // P[7].w
         };
         auto shadingConstants = [=](PassContext& c, uint32_t (&k)[24], uint32_t colour) {
             const uint32_t none = gpu::kNone;

@@ -17,12 +17,15 @@
 // Kernels that shade fragments share the constants P[1] = { visible clusters, M texture table, band A depth, colour UAV },
 // P[3] = { froxel lights or UNX_NONE, LTC table, experiment mask, S fragment visibility or UNX_NONE }, P[4] = { atmosphere
 // transmittance, multi-scatter, air volume, R's screen probes }, P[5].x = R's screen probe maps (UNX_NONE = absent),
-// P[6].zw = { R's GI cache, S's per-record sun bytes (shadowFragmentSun) }, P[7].x = V's coverageDepthRange.
+// P[6].zw = { R's GI cache, S's per-record sun bytes (shadowFragmentSun) }, P[7].x = V's coverageDepthRange,
+// P[7].zw = { E's surface state field (one raw SRV), S's weather record } (UNX_NONE: none): the surface layers
+// (Passes/Material/SurfaceLayers.hlsli), as in the resolve.
 #ifndef UNX_M_COVERAGE_SHADE_HLSLI
 #define UNX_M_COVERAGE_SHADE_HLSLI
 #include "Bindless.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
+#include "Passes/Material/SurfaceLayers.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/AreaLight.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
@@ -203,7 +206,19 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         variance += mm.variance;
     }
     else n = normalize(sf.normal);
-    if (!sf.front && (m.classFlags & MATERIAL_TWO_SIDED) != 0) n = -n;
+    const bool backSide = !sf.front && (m.classFlags & MATERIAL_TWO_SIDED) != 0;
+    if (backSide) n = -n;
+    if (P[7].z != UNX_NONE || P[7].w != UNX_NONE)
+    {
+        // the surface state layers, as in the resolve (a grass blade or leaf gets wet, frost, snow like any surface)
+        SurfaceLayerInputs li;
+        li.surfaceConstants = P[7].z; li.surfaceTable = P[7].z; li.surfacePool = P[7].z; li.weather = P[7].w;
+        SurfaceLayerMaterial lm;
+        lm.baseColor = baseColor; lm.roughness = roughness; lm.metallic = metallic; lm.normal = n; lm.variance = variance;
+        surfaceLayersApply(li, g_cameraPosition + sf.offset, backSide ? -sf.geometricNormal : sf.geometricNormal,
+                           (dot(sf.dndx, sf.dndx) + dot(sf.dndy, sf.dndy)) / 12.0, lm);
+        baseColor = lm.baseColor; roughness = lm.roughness; metallic = lm.metallic; n = lm.normal; variance = lm.variance;
+    }
     const float alphaIn = max(roughness * roughness, 1e-4);
 
     ModelSurface s;
