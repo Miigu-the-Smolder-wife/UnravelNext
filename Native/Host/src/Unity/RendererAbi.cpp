@@ -183,7 +183,12 @@ UNX_API int32_t UNX_CALL UnxSceneAddTexture(UnxRenderer r, const UnxTextureDesc*
 
 static scene::Material toMaterial(const UnxMaterialDesc* d)
 {
-    requireStruct(d, "UnxMaterialDesc");
+    // version 2 (sizeof) or version 1 (without the layer fields)
+    if (!d) fail("UnxMaterialDesc is null");
+    const bool v2 = d->size == sizeof(UnxMaterialDesc) && d->version == 2;
+    if (!v2 && !(d->size == sizeof(UnxMaterialDesc) - 32 && d->version == 1))
+        fail("UnxMaterialDesc ABI mismatch: size %u version %u, native %zu version 2 (or %zu version 1)", d->size, d->version, sizeof(UnxMaterialDesc),
+             sizeof(UnxMaterialDesc) - 32);
     if (d->materialClass > UNX_MATERIAL_TERRAIN) fail("unknown material class %u", d->materialClass);
     scene::Material m;
     m.name = fixedString(d->name, sizeof d->name);
@@ -202,6 +207,12 @@ static scene::Material toMaterial(const UnxMaterialDesc* d)
     m.roughMetalTexture = d->roughMetalTexture;
     m.emissiveTexture = d->emissiveTexture;
     m.occlusionTexture = d->occlusionTexture;
+    if (v2)
+    {
+        m.clearcoat = d->clearcoat;
+        m.clearcoatRoughness = d->clearcoatRoughness;
+        m.clearcoatIor = d->clearcoatIor;
+    }
     return m;
 }
 
@@ -705,7 +716,10 @@ UNX_API int32_t UNX_CALL UnxSceneEditMaterials(UnxRenderer r, const uint32_t* in
     return call([&] {
         if (count && (!indices || !descs)) fail("UnxSceneEditMaterials: %u edits without indices or descriptions", count);
         std::vector<std::pair<uint32_t, scene::Material>> edits;
-        for (uint32_t k = 0; k < count; ++k) edits.emplace_back(indices[k], toMaterial(&descs[k]));
+        // the array's stride is its descriptions' size (version 1 or 2)
+        const uint32_t stride = count ? descs->size : 0;
+        for (uint32_t k = 0; k < count; ++k)
+            edits.emplace_back(indices[k], toMaterial((const UnxMaterialDesc*)((const uint8_t*)descs + (size_t)k * stride)));
         find(r)->editMaterials(edits);
     });
 }

@@ -207,7 +207,10 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
     {
         UnxMaterialDesc d{};
         d.size = sizeof d;
-        d.version = 1;
+        d.version = 2;
+        d.clearcoat = m.clearcoat;
+        d.clearcoatRoughness = m.clearcoatRoughness;
+        d.clearcoatIor = m.clearcoatIor;
         d.materialClass = (uint32_t)m.cls;
         d.twoSided = m.twoSided ? 1 : 0;
         put3(d.baseColor, m.baseColor);
