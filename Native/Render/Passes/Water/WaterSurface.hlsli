@@ -268,6 +268,15 @@ float waterInvDepthAt(Texture2D<float> t, float2 pos, bool bandA, out bool conti
     return c;
 }
 
+// The four texels of the bilinear quad at screen position pos (texel centres floor(pos - 0.5) and + 1, clamped to the
+// image as waterInvDepthAt's block is), gathered at the quad's shared corner: a whole texel from every footprint
+// boundary, so the hardware's sub-texel rounding cannot pick another quad.
+float4 waterQuad(Texture2D<float> t, float2 pos)
+{
+    return t.GatherRed(g_linearClamp, (floor(pos - 0.5) + 1) / float2(g_viewWidth, g_viewHeight));
+}
+float waterMax4(float4 v) { return max(max(v.x, v.y), max(v.z, v.w)); }
+
 // The refracted ray from P along t, marched in screen space: true with the hit H (world) when it meets band A inside
 // the water; status a WATER_STAT_* fallback otherwise. Steps follow the ray's screen path one pixel at a time; along it
 // the ray's 1 / z is affine (exact for the 3D line) and so is a planar surface's, so where band A is continuous the
@@ -276,6 +285,11 @@ float waterInvDepthAt(Texture2D<float> t, float2 pos, bool bandA, out bool conti
 // (plus 1e-3): otherwise the steps straddle an outline, and a surface nearer than the ray at the previous step means the
 // ray passed behind it (occluded), a farther one that it meets that surface at this step.
 // Inside the water: the water layer (this stream, continuous 1 / z likewise) must lie in front of the ray point.
+// Fast step (cost: 2 gathers + 1 load instead of two 3 x 3 blocks + 1 load): waterInvDepthAt's value at pos is the
+// bilinear quad's or the nearest texel's (one of the quad's), so it lies within the quad's range. Where the ray is in
+// front of the quad's nearest band A texel and behind the quad's farthest water texel (with a margin of several ulps),
+// the full step would continue too: the fast step continues and the full values of that step are recomputed only if the
+// next step needs them. Every decision, hit and status is the full march's.
 bool waterMarch(WaterShadeSrvs s, float3 P, float3 t, uint slot, out float3 H, out uint status)
 {
     Texture2D<float> bandA = ResourceDescriptorHeap[s.bandADepth];
@@ -308,12 +322,31 @@ bool waterMarch(WaterShadeSrvs s, float3 P, float3 t, uint slot, out float3 H, o
     float prevStep;
     float prevInvA = waterInvDepthAt(bandA, a.xy, true, prevContinuous, prevStep);
     float prevF = 0, prevDiff = 1.0 / a.z - prevInvA, prevZ = a.z;  // (> 0: band A behind P)
+    bool prevFull = true;  // false: the previous step was fast, its band A values are recomputed when needed
     for (uint i = 1; i <= steps; ++i)
     {
         const float f = float(i) / float(steps);
         const float invRay = lerp(1.0 / a.z, 1.0 / b.z, f), z = 1.0 / invRay;
         const float2 pos = a.xy + d * f;
         if (any(pos < 0) || pos.x >= size.x || pos.y >= size.y) { status = WATER_STAT_OFFSCREEN; return false; }
+        const int2 q = clamp(int2(floor(pos)), 0, int2(size) - 1);
+        const uint v = wvis[q];
+        if (invRay > waterMax4(waterQuad(bandA, pos)) / g_nearPlane * (1 + 1e-6) && (v >> 30) == 3u && ((v >> 24) & 0x3Fu) == slot)
+        {
+            const float farW = waterMax4(waterQuad(wdepth, pos));
+            if (farW < 3.0e38 && (1.0 / farW) * (1 - 1e-6) >= invRay * (1 - 1e-5))
+            {
+                prevF = f;
+                prevZ = z;
+                prevFull = false;
+                continue;
+            }
+        }
+        if (!prevFull)
+        {
+            prevInvA = waterInvDepthAt(bandA, a.xy + d * prevF, true, prevContinuous, prevStep);
+            prevDiff = lerp(1.0 / a.z, 1.0 / b.z, prevF) - prevInvA;
+        }
         bool continuous;
         float texelStep;
         const float invA = waterInvDepthAt(bandA, pos, true, continuous, texelStep);
@@ -339,8 +372,6 @@ bool waterMarch(WaterShadeSrvs s, float3 P, float3 t, uint slot, out float3 H, o
             return true;
         }
         // Still inside the water: this stream's water layer must lie in front of the ray point here.
-        const int2 q = clamp(int2(floor(pos)), 0, int2(size) - 1);
-        const uint v = wvis[q];
         bool waterContinuous;
         float waterStep;
         const float invW = waterInvDepthAt(wdepth, pos, false, waterContinuous, waterStep);
@@ -356,6 +387,7 @@ bool waterMarch(WaterShadeSrvs s, float3 P, float3 t, uint slot, out float3 H, o
         prevInvA = invA;
         prevContinuous = continuous;
         prevStep = texelStep;
+        prevFull = true;
     }
     status = WATER_STAT_OFFSCREEN;  // the clipped path ended at the image border without meeting band A
     return false;
