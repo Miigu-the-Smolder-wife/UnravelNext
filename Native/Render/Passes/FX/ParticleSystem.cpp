@@ -509,7 +509,9 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         const bool delta = (h.flags & NV_STREAM_EMITTER_DELTA) != 0;
         const uint32_t tableRows = h.emitter_table;
         Buf grownFrom{ "fx.emitterTableOld", sizeof(NV_StreamEmitter) };  // a delta keeps the rows of a grown table (copied below)
-        if (m.emitterTable.bytes < (uint64_t)tableRows * sizeof(NV_StreamEmitter))
+        // (a first tick with no rows still makes the table: every tick binds it - 0 rows left it without a resource, which
+        // the tick imported as a UAV: Unity's native crash on a data World with no emitter rows yet, 2026-09-27)
+        if (!m.emitterTable.resource || m.emitterTable.bytes < (uint64_t)tableRows * sizeof(NV_StreamEmitter))
         {
             if (m.emitterTable.resource && delta)
             {
