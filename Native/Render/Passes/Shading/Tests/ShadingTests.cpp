@@ -2709,7 +2709,7 @@ void testGlassComposite(TestFrame& tf, Report& report)
 // record's share, plus the float sum's order), and the special list must hold every record.
 void testPreshadedRecords(TestFrame& tf, Report& report)
 {
-    auto buildScene = [](bool terrain) {
+    auto buildScene = [](bool terrain, float coat = 0) {
         scene::Scene s;
         s.name = "preshade test";
         scene::Material ground;
@@ -2722,6 +2722,7 @@ void testPreshadedRecords(TestFrame& tf, Report& report)
         blade.baseColor = { 0.3f, 0.55f, 0.2f };
         blade.roughness = 0.45f;
         blade.metallic = 0.2f;
+        blade.clearcoat = coat;  // run 2 (A9): a coat of cover 0.001, pre-shaded through MODE 4 / 5 / 6
         if (!terrain)
             s.materials.push_back(blade);
         else
@@ -2785,11 +2786,11 @@ void testPreshadedRecords(TestFrame& tf, Report& report)
     };
 
     const uint32_t W = 320, H = 180, tilesX = (W + 7) / 8, tilesY = (H + 7) / 8;
-    std::shared_ptr<std::vector<uint8_t>> images[2];
+    std::shared_ptr<std::vector<uint8_t>> images[3];
     uint32_t recordCount = 0, listedSpecial = 0;
-    for (int run = 0; run < 2; ++run)
+    for (int run = 0; run < 3; ++run)
     {
-        const scene::Scene s = buildScene(run == 1);
+        const scene::Scene s = buildScene(run == 1, run == 2 ? 0.001f : 0.0f);
         tf.setScene(s, { 1 });
         ViewDesc desc;
         tf.run([&](FramePassContext& fc) { desc = tf.mainView(fc, W, H, 0).view; });
@@ -2814,7 +2815,7 @@ void testPreshadedRecords(TestFrame& tf, Report& report)
             if (std::fabs(det) < 1e-9) continue;
             const int x0 = std::max(0, (int)std::floor(std::min({ sx[0], sx[1], sx[2] }))), x1 = std::min((int)W - 1, (int)std::floor(std::max({ sx[0], sx[1], sx[2] })));
             const int y0 = std::max(0, (int)std::floor(std::min({ sy[0], sy[1], sy[2] }))), y1 = std::min((int)H - 1, (int)std::floor(std::max({ sy[0], sy[1], sy[2] })));
-            const uint32_t visId = ((((visibleBlades + t / 30) << 7) | (t % 30)) + 1) | (run == 1 ? 0x40000000u : 0u);  // COV_PRESHADE_ID
+            const uint32_t visId = ((((visibleBlades + t / 30) << 7) | (t % 30)) + 1) | (run >= 1 ? 0x40000000u : 0u);  // COV_PRESHADE_ID
             for (int py = y0; py <= y1; ++py)
                 for (int px = x0; px <= x1; ++px)
                 {
@@ -2874,18 +2875,19 @@ void testPreshadedRecords(TestFrame& tf, Report& report)
         });
         tf.frame.outputLinearHdr = false;
     }
-    double worst = 0;
+    double worst = 0, worstCoat = 0;
     uint32_t differing = 0;
     for (uint32_t y = 0; y < H; ++y)
         for (uint32_t x = 0; x < W; ++x)
         {
-            const float4 a = texelOf<float4>(*images[0], W, x, y), b = texelOf<float4>(*images[1], W, x, y);
-            const double da[3] = { a.x, a.y, a.z }, db[3] = { b.x, b.y, b.z };
+            const float4 a = texelOf<float4>(*images[0], W, x, y), b = texelOf<float4>(*images[1], W, x, y), c3 = texelOf<float4>(*images[2], W, x, y);
+            const double da[3] = { a.x, a.y, a.z }, db[3] = { b.x, b.y, b.z }, dc[3] = { c3.x, c3.y, c3.z };
             for (int c = 0; c < 3; ++c)
             {
                 const double rel = std::abs(da[c] - db[c]) / std::max(std::abs(da[c]), 1e-6);
                 differing += rel > 0;
                 worst = std::max(worst, rel);
+                worstCoat = std::max(worstCoat, std::abs(da[c] - dc[c]) / std::max(std::abs(da[c]), 1e-6));
             }
         }
     logf("preshade: %u records, %u listed as kind 5, %u channel values differ\n", recordCount, listedSpecial, differing);
@@ -2893,6 +2895,8 @@ void testPreshadedRecords(TestFrame& tf, Report& report)
     // f16 radiance: 2^-11 relative per record share (the band A remainder is the same texel in both)
     report(worst <= 1.0e-3, "preshade: Terrain(1 layer = Standard) records pre-shaded = Standard records shaded in the composite", worst, 1.0e-3);
     report(differing > 0, "preshade: the pre-shaded path ran (its f16 rounding shows)", differing > 0 ? 0.0 : 1.0, 0);
+    // A9: cover 0.001 moves the radiance by at most ~0.001 of it (the coat's terms are bounded by the base's here), plus f16
+    report(worstCoat <= 3e-3, "preshade: clearcoat records (MODE 4 / 5 / 6, cover 0.001) = Standard records in the composite", worstCoat, 3e-3);
 }
 
 // ---------------------------------------------------------------- 14. clearcoat sun lobe (A9, CoatSunProbe.hlsl)

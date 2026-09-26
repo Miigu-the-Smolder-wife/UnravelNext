@@ -196,6 +196,7 @@ struct CovMaterial
     float roughness, metallic;
     float3 normal;    // world, unit (before the side and view rules)
     float variance;   // slope variance (geometric + textures)
+    float coatRoughness;  // A9: the coat's footprint-filtered perceptual roughness (layered materials; 0 otherwise)
 };
 CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTextureSet ts)
 {
@@ -250,11 +251,15 @@ CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTexture
     o.metallic = metallic;
     o.normal = n;
     o.variance = variance;
+    o.coatRoughness = 0;
     return o;
 }
 
 // COV_PRESHADE_LIGHT (CoverageSpecial.hlsl MODE=3): the material a class kernel stored for this special entry
-// (g_covPreshadeSlot; P[5].y raw SRV, 48 B per entry: base colour, roughness, normal, metallic, variance; f32).
+// (g_covPreshadeSlot; P[5].y raw SRV, 48 B per entry: base colour, roughness, normal, metallic, variance, coat roughness;
+// f32). A9 coats (CoverageSpecial MODE 5 / 6): COV_COAT adds the coat terms as ShadeOpaque LAYERED; COV_PART 1 is the
+// emission, sun and local lights before the air (unexposed, into M's scratch P[5].z), COV_PART 2 the indirect light plus
+// that part, then the air and the exposure - two kernels, as one exceeds the 200 KB DXIL limit.
 #if COV_PRESHADE_LIGHT
 static uint g_covPreshadeSlot;
 #endif
@@ -262,7 +267,7 @@ void covStoreMaterial(RWByteAddressBuffer b, uint slot, CovMaterial c)
 {
     b.Store4(48 * slot, uint4(asuint(c.baseColor), asuint(c.roughness)));
     b.Store4(48 * slot + 16, uint4(asuint(c.normal), asuint(c.metallic)));
-    b.Store(48 * slot + 32, asuint(c.variance));
+    b.Store2(48 * slot + 32, uint2(asuint(c.variance), asuint(c.coatRoughness)));
 }
 CovMaterial covLoadMaterial(ByteAddressBuffer b, uint slot)
 {
@@ -272,7 +277,9 @@ CovMaterial covLoadMaterial(ByteAddressBuffer b, uint slot)
     c.roughness = asfloat(a.w);
     c.normal = asfloat(d.xyz);
     c.metallic = asfloat(d.w);
-    c.variance = asfloat(b.Load(48 * slot + 32));
+    const uint2 vr = b.Load2(48 * slot + 32);
+    c.variance = asfloat(vr.x);
+    c.coatRoughness = asfloat(vr.y);
     return c;
 }
 
@@ -326,6 +333,12 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         Texture2D<float4> t = ResourceDescriptorHeap[ts.emissive];
         radiance = m.emissive * mSampleGrad(t, (ts.flags & M_TEX_EMISSIVE) != 0, sf.uv, sf.duvdx, sf.duvdy).rgb;
     }
+#if COV_PART == 2
+    {
+        ByteAddressBuffer direct = ResourceDescriptorHeap[P[5].z];  // part 1: emission, sun, local lights
+        radiance = asfloat(direct.Load3(16 * g_covPreshadeSlot));
+    }
+#endif
 
     float3 D, Dx, Dy;
     mPixelRay(centre, D, Dx, Dy);
@@ -340,6 +353,11 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     const bool foliage = s.cls == MATERIAL_FOLIAGE;
     const float3 front = foliage ? diffuse * (1 - s.transmission) : diffuse;
     const float3 back = foliage ? diffuse * s.transmission : 0;
+#if COV_COAT
+    ModelCoat coat = modelCoatOf(m);
+    coat.roughness = cmat.coatRoughness;
+    const float cover = coat.cover, keep = 1 - cover;
+#endif
 
     // ---- sun (with S's air at the fragment's depth: in-scatter and transmittance in front of it, the sun's illuminance)
     AtmosphereSrvs atm;
@@ -358,6 +376,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     const float NoL = dot(n, l0);
     const CovFragmentShadow shadow = covFragmentShadow(pixel, element, linearZ);
     const float sunVisibility = shadow.sun;
+#if COV_PART != 2
     if (sunVisibility > 0 && (experiment & 16) == 0)
     {
         const float3 cap = E * (2 / (1 + cos(g_sunAngularRadius)));
@@ -374,6 +393,12 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             if (foliage) sun += back * below * cap;
         }
         else if (foliage) sun = back * above * cap;
+#if COV_COAT
+        if (cover > 0 && NoV > 0)
+            sun = keep * sun + cover * (shSunSpecular(1.0.xxx, coat.roughness, modelAlpha(coat.roughness), 1.0.xxx, n, v, NoV, l0, E, shPixelAngle(D, Dx)) *
+                                            shCoatSunWeight(coat, v, l0, NoV, NoL, false) +
+                                        (NoL > 0 ? modelCoatUnder(s, coat, n, v, l0) * above * cap : 0));
+#endif
         radiance += sun * sunVisibility;
     }
 
@@ -401,6 +426,19 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         const float3x3 frameBack = float3x3(frame[0], -frame[1], -frame[2]);
         const float3x3 specular = mul(shLtcInverse(P[3].y, max(NoV, 1e-4), s.roughness), frame);
         const float3 specularAlbedo = shSpecularAlbedo(f0, max(NoV, 1e-4), s.roughness);
+#if COV_COAT
+        float3x3 coatSpecular = frame, coatBase = frame;
+        float coatAlbedo = 0;
+        float3 coatBaseAlbedo = 0;
+        if (cover > 0 && NoV > 0)
+        {
+            const float rEq = modelCoatBaseRoughness(s, coat, NoV);
+            coatSpecular = mul(shLtcInverse(P[3].y, max(NoV, 1e-4), coat.roughness), frame);
+            coatBase = mul(shLtcInverse(P[3].y, max(NoV, 1e-4), rEq), frame);
+            coatAlbedo = modelCoatEms(coat, NoV);
+            coatBaseAlbedo = shSpecularAlbedo(f0, modelCoatRefractedCos(NoV, coat.eta), rEq);
+        }
+#endif
 #endif
         for (uint i = 0; i < range.y; ++i)
         {
@@ -414,15 +452,50 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                 const float window = shAreaWindow(light, p);
                 if (window <= 0) continue;
                 const float3 Lw = light.color * (light.intensity * window * visibility);
-                const uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
+                uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
                 const bool specularInReflections = shSpecularInReflections(P[7].y, lightIndex);  // P[7].y: B2 mask
+                float scaleBase = 1;
+#if COV_COAT
+                // as ShadeOpaque LAYERED (MATERIAL_LAYERS 3.1): integrals 3 (coat lobe) and 4 (the base lobe through the
+                // coat) in the same loop; the diffuse-like part through the coat reuses integral 0
+                float3 coatAdd = 0;
+                float coatId = 0, tvtl = 0;
+                if (cover > 0 && NoV > 0)
+                {
+                    scaleBase = keep;
+                    last = 5;
+                    const float muL = max(dot(n, normalize(p)), 1e-4);
+                    tvtl = (1 - modelCoatEms(coat, NoV)) * (1 - modelCoatEms(coat, muL)) / (coat.eta * coat.eta);
+                }
+#endif
                 [loop] for (uint j = first; j < last; ++j)
                 {
-                    if (j == 1 && specularInReflections) continue;
+                    if ((j == 1 || j >= 3) && specularInReflections) continue;
+                    if (j == 2 && !foliage) continue;
+#if COV_COAT
+                    const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (j == 3 ? coatSpecular : (j == 4 ? coatBase : (NoV > 0 ? frameBack : frame))));
+#else
                     const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (NoV > 0 ? frameBack : frame));
-                    const float I = shAreaIntegral(light, p, T, j != 1);
-                    radiance += Lw * (j == 0 ? front * (SH_PI * I) : (j == 1 ? specularAlbedo * I : back * (SH_PI * I)));
+#endif
+                    const float I = shAreaIntegral(light, p, T, j == 0 || j == 2);
+#if COV_COAT
+                    if (j == 0) coatId = I;
+                    if (j >= 3)
+                    {
+                        coatAdd += (j == 3 ? coatAlbedo : tvtl * coatBaseAlbedo) * I;
+                        continue;
+                    }
+#endif
+                    radiance += scaleBase * Lw * (j == 0 ? front * (SH_PI * I) : (j == 1 ? specularAlbedo * I : back * (SH_PI * I)));
                 }
+#if COV_COAT
+                if (last == 5)
+                {
+                    const float muIn = modelCoatRefractedCos(max(dot(n, normalize(p)), 1e-4), coat.eta);
+                    coatAdd += tvtl * (diffuse + modelCoatReturned(s, coat, muIn) / SH_PI) * (SH_PI * coatId);
+                    radiance += cover * Lw * coatAdd;
+                }
+#endif
 #endif
                 continue;
             }
@@ -435,10 +508,17 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             float3 f = 0;
             if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
             else if (foliage && NoV * cosL < 0) f = back;
+#if COV_COAT
+            if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));
+#endif
             radiance += f * El * (abs(cosL) * visibility);
         }
     }
 
+#endif
+#if COV_PART == 1
+    return radiance;  // before the air (CoverageSpecial MODE 5 keeps it for MODE 6)
+#endif
     // ---- indirect: R's screen probes from the tile cache (irradiance; the K path for the specular lobe)
     if (P[4].w != UNX_NONE && (experiment & 6) != 6)
     {
@@ -458,12 +538,28 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         const ScreenProbeLighting g = screenProbeGatherTile(probes, pixel / M_TILE, pixel, worldPos, nv, linearZ, foliage && (experiment & 2) == 0, wantRadiance, r,
                                                             reflectionLobeHalfAngle(s.roughness, NoV));
 #endif
-        if ((experiment & 2) == 0)
+#if COV_COAT
+        if (cover > 0 && NoV > 0)
         {
-            if (NoV > 0) radiance += front * (g.irradiance * g.occlusion);
-            radiance += back * (g.irradianceBack * g.occlusion);
+            // as ShadeOpaque LAYERED: the coat cone's K-path radiance, the base through the coat
+            const float3 irr = (experiment & 2) == 0 ? g.irradiance * g.occlusion : 0;
+            const float3 inc = wantRadiance ? g.radiance : 0;
+            const float3 coatIncident = (experiment & 4) == 0 ? screenProbeGather(probes, pixel, worldPos, nv, linearZ, false, true, r, reflectionLobeHalfAngle(coat.roughness, NoV)).radiance : 0;
+            const float tv = 1 - modelCoatEms(coat, NoV), tBar = 1 - modelCoatLookup1(coat.coat * MODEL_COAT_STRIDE + 4096, coat.roughness);
+            const float3 under = tv * tBar * ((front + modelCoatReturned(s, coat, modelCoatRefractedCos(2.0 / 3.0, coat.eta)) / SH_PI) * irr +
+                                              inc * shSpecularAlbedo(f0, modelCoatRefractedCos(NoV, coat.eta), modelCoatBaseRoughness(s, coat, NoV)));
+            radiance += keep * (front * irr + inc * shSpecularAlbedo(f0, NoV, s.roughness)) + cover * (under + coatIncident * modelCoatEms(coat, NoV));
         }
-        if (wantRadiance) radiance += g.radiance * shSpecularAlbedo(f0, NoV, s.roughness);
+        else
+#endif
+        {
+            if ((experiment & 2) == 0)
+            {
+                if (NoV > 0) radiance += front * (g.irradiance * g.occlusion);
+                radiance += back * (g.irradianceBack * g.occlusion);
+            }
+            if (wantRadiance) radiance += g.radiance * shSpecularAlbedo(f0, NoV, s.roughness);
+        }
     }
     return (radiance * airTransmittance + airInscatter) * g_exposure;
 }

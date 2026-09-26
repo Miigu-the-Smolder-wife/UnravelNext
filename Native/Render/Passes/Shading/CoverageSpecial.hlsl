@@ -1,22 +1,30 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: MODE=0,1,2,3 AREA=0,1
+// unx-variants: MODE=0,1,2,3,4,5,6 AREA=0,1
 // Special coverage records (CoverageSpecial.hlsli, INTERFACES 7.1 v1.75), one thread per entry of
 // ViewResources::coverageSpecial, dispatched indirectly from its header (64 per group):
 //   MODE=0 (before tracks::water): kinds 1 (hair) and 2 (streams) get radiance 0, the defined value their owners
 //          overwrite (W: kind 2 in tracks::water).
-//   MODE=1, 2 (before the composite): kind 5 records (COV_PRESHADE_ID) of M's pre-shaded classes, 1 Cut, 2 Terrain: the
-//          material of the record's class at its footprint (CoverageShade.hlsli covFragmentMaterial, as the resolve),
-//          stored per entry (48 B, M's scratch). A kernel per class and the lighting apart: together they exceed the
-//          200 KB DXIL limit.
-//   MODE=3: every kind 5 entry lit as the composite lights a cluster record, with the stored material
+//   MODE=1, 2, 4 (before the composite): kind 5 records (COV_PRESHADE_ID) of M's pre-shaded materials, 1 Cut, 2 Terrain,
+//          4 A9 layered Standard materials (clearcoat): the material at the footprint (CoverageShade.hlsli
+//          covFragmentMaterial, as the resolve; MODE 4 also the coat's filtered roughness) stored per entry (48 B, M's
+//          scratch). A kernel per material kind and the lighting apart: together they exceed the 200 KB DXIL limit.
+//   MODE=3: kind 5 entries without layers lit as the composite lights a cluster record, with the stored material
 //          (COV_PRESHADE_LIGHT), into ViewResources::coverageRecordRadiance.
-// P[0] = { records (StructuredBuffer<uint4>), special list (raw), tile list (raw), MODE 1, 2: scratch UAV (raw); MODE 3:
-// record radiance UAV (raw) }; MODE 1..3: P[1] (visible clusters, M texture table); MODE 3: P[3], P[4], P[5].x, P[6].zw,
-// P[7], P[8].x (the shading constants, CoverageShade.hlsli) and P[5].y the scratch SRV.
+//   MODE=5, 6: layered entries (A9 COV_COAT): 5 the emission, sun and local lights (unexposed, before the air) into M's
+//          second scratch (16 B per entry), 6 the indirect light added, then the air and exposure, into the record
+//          radiance (COV_PART 1, 2: one kernel with the coat exceeds the DXIL limit).
+// P[0] = { records (StructuredBuffer<uint4>), special list (raw), tile list (raw), MODE 1, 2, 4: material scratch UAV;
+// MODE 3, 6: record radiance UAV; MODE 5: direct scratch UAV (raw) }; MODE 1..6: P[1] (visible clusters, M texture
+// table); MODE 3, 5, 6: P[3], P[4], P[5].x, P[6].zw, P[7], P[8].x (the shading constants, CoverageShade.hlsli), P[5].y the
+// material scratch SRV, MODE 6: P[5].z the direct scratch SRV.
 #if MODE == 1 || MODE == 2
 #define COV_PRESHADE_CLASSES MODE
 #elif MODE == 3
 #define COV_PRESHADE_LIGHT 1
+#elif MODE == 5 || MODE == 6
+#define COV_PRESHADE_LIGHT 1
+#define COV_COAT 1
+#define COV_PART (MODE - 4)
 #endif
 #include "Bindless.hlsli"
 #include "Passes/Shading/CoverageShade.hlsli"
@@ -37,17 +45,33 @@ void main(uint3 id : SV_DispatchThreadID)
     ByteAddressBuffer list = ResourceDescriptorHeap[P[0].z];
     const CoverageFragment f = coverageUnpackRecord(records[entry.x]);
     const uint visId = coverageClusterVisId(f.visId);
-    const uint2 pixel = covRecordPixel(list, entry.x, f);
-#if MODE == 3
-    g_covPreshadeSlot = id.x;
-    output.Store2(entry.x * 8, covPackRadiance(covShadeFragment(visId, entry.x, pixel, P[3].z)));
-#else
     const MTriangleIdentity tid = mTriangleIdentity(visId, P[1].x);
     const GpuMaterial m = loadMaterial(tid.material);
+    const bool layered = (m.classFlags & MATERIAL_LAYERED) != 0 && materialClass(m) == MATERIAL_STANDARD;
+    const uint2 pixel = covRecordPixel(list, entry.x, f);
+#if MODE == 3 || MODE == 5 || MODE == 6
+    if (layered != (MODE != 3)) return;
+    g_covPreshadeSlot = id.x;
+#if MODE == 5
+    output.Store3(16 * id.x, asuint(covShadeFragment(visId, entry.x, pixel, P[3].z)));
+#else
+    output.Store2(entry.x * 8, covPackRadiance(covShadeFragment(visId, entry.x, pixel, P[3].z)));
+#endif
+#else
+#if MODE == 4
+    if (!layered) return;
+#else
     if (materialClass(m) != (MODE == 1 ? MATERIAL_CUT : MATERIAL_TERRAIN)) return;
+#endif
     const MVertex v0 = mTriangleVertex(visId, P[1].x, 0), v1 = mTriangleVertex(visId, P[1].x, 1), v2 = mTriangleVertex(visId, P[1].x, 2);
     const MSurface sf = mSurfaceFromVertices(tid, v0, v1, v2, covFragmentCentre(v0, v1, v2, pixel));
-    covStoreMaterial(output, id.x, covFragmentMaterial(visId, sf, m, mLoadTextureSet(P[1].y, tid.material)));
+    CovMaterial cm = covFragmentMaterial(visId, sf, m, mLoadTextureSet(P[1].y, tid.material));
+#if MODE == 4
+    // the coat's roughness band-limited by the footprint like the base's (MATERIAL_LAYERS 3.4, as the resolve)
+    const float ac = modelAlpha(loadMaterialLayers(m.classFlags >> 16).clearcoatRoughness);
+    cm.coatRoughness = min(sqrt(sqrt(ac * ac + cm.variance)), 1.0);
+#endif
+    covStoreMaterial(output, id.x, cm);
 #endif
 #endif
 }

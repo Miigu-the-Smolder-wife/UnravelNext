@@ -816,7 +816,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         {
             const uint64_t entries = std::max<uint64_t>((fc.graph.desc(special).size / 4 - 4) / 2, 1);  // header 4 words, 2 per entry
             const BufferRef scratch = g.createBuffer({ "m.coverage special materials", entries * 48, 0 });
-            for (const char* mode : { "1", "2" })  // Cut, Terrain
+            for (const char* mode : { "1", "2", "4" })  // Cut, Terrain, A9 layered Standard
             {
                 ID3D12PipelineState* kernel = fc.shaders.compute((std::string("Passes/Shading/CoverageSpecial.MODE") + mode + ".AREA0").c_str());
                 g.addPass("m.coverage.special material", QueueType::Graphics,
@@ -837,30 +837,44 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                               c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
                           });
             }
-            ID3D12PipelineState* lit = fc.shaders.compute(("Passes/Shading/CoverageSpecial.MODE3.AREA" + area).c_str());
-            g.addPass("m.coverage.special", QueueType::Graphics,
-                      [&](PassBuilder& b) {
-                          useShading(b);
-                          b.use(special, Use::SrvCompute);
-                          b.use(special, Use::IndirectArgs);
-                          b.use(v.coverageTileList, Use::SrvCompute);
-                          b.use(scratch, Use::SrvCompute);
-                          b.use(shaded, Use::UavCompute);
-                      },
-                      [=](PassContext& c) {
-                          uint32_t k[24] = { c.srv(v.coverageRecords), c.srv(special), c.srv(v.coverageTileList), c.uav(shaded) };
-                          shadingConstants(c, k, gpu::kNone);
-                          k[21] = c.srv(scratch);  // P[5].y
-                          uint32_t k32[48] = {};
-                          std::memcpy(k32, k, sizeof k);
-                          k32[24] = k32[25] = gpu::kNone;
-                          fragmentConstants(c, k32);  // P[6].zw, P[7], P[8].x
-                          k32[33] = gpu::kNone;       // (the kernel writes the record radiance)
-                          c.cmd->SetPipelineState(lit);
-                          c.bindFrameConstants(cb);
-                          c.computeConstants(k32, 48);
-                          c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
-                      });
+            // the lighting: MODE 3 (no layers) into the record radiance; A9 layered entries in two kernels (DXIL limit):
+            // MODE 5 the direct part into a second scratch, MODE 6 the indirect part plus it into the record radiance
+            const BufferRef direct = g.createBuffer({ "m.coverage special direct", entries * 16, 0 });
+            auto addLight = [&](const char* mode) {
+                ID3D12PipelineState* lit = fc.shaders.compute((std::string("Passes/Shading/CoverageSpecial.MODE") + mode + ".AREA" + area).c_str());
+                const bool toDirect = mode[0] == '5', fromDirect = mode[0] == '6';
+                g.addPass("m.coverage.special", QueueType::Graphics,
+                          [&](PassBuilder& b) {
+                              useShading(b);
+                              b.use(special, Use::SrvCompute);
+                              b.use(special, Use::IndirectArgs);
+                              b.use(v.coverageTileList, Use::SrvCompute);
+                              b.use(scratch, Use::SrvCompute);
+                              if (fromDirect) b.use(direct, Use::SrvCompute);
+                              b.use(toDirect ? direct : shaded, Use::UavCompute);
+                          },
+                          [=](PassContext& c) {
+                              uint32_t k[24] = { c.srv(v.coverageRecords), c.srv(special), c.srv(v.coverageTileList), toDirect ? c.uav(direct) : c.uav(shaded) };
+                              shadingConstants(c, k, gpu::kNone);
+                              k[21] = c.srv(scratch);                         // P[5].y
+                              k[22] = fromDirect ? c.srv(direct) : gpu::kNone;  // P[5].z
+                              uint32_t k32[48] = {};
+                              std::memcpy(k32, k, sizeof k);
+                              k32[24] = k32[25] = gpu::kNone;
+                              fragmentConstants(c, k32);  // P[6].zw, P[7], P[8].x
+                              k32[33] = gpu::kNone;       // (the kernels write the record radiance)
+                              c.cmd->SetPipelineState(lit);
+                              c.bindFrameConstants(cb);
+                              c.computeConstants(k32, 48);
+                              c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
+                          });
+            };
+            addLight("3");
+            if (layeredMaterials)
+            {
+                addLight("5");
+                addLight("6");
+            }
         }
         // E: per listed tile, light pixels composited, heavy pixels recorded.
         g.addPass("m.coverage", QueueType::Graphics,
