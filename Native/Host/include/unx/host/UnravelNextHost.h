@@ -158,7 +158,7 @@ enum UnxMaterialClass  // scene::MaterialClass
 // INTERFACES_KO.md 8.1 material v1.
 typedef struct UnxMaterialDesc
 {
-    uint32_t size, version;     // sizeof, 2 (version 1: the description up to name, sizeof - 32; no layers)
+    uint32_t size, version;     // sizeof, 3 (2: without the sheen and attenuation fields; 1: up to name, sizeof - 32)
     uint32_t materialClass;     // UnxMaterialClass
     uint32_t twoSided;
     float baseColor[3];         // linear albedo (dielectric) or f0 (metal)
@@ -174,7 +174,11 @@ typedef struct UnxMaterialDesc
     // version 2 (A9 clearcoat, INTERFACES v1.76; Standard class): cover [0, 1] (0 = none), perceptual roughness, index
     // (a tabulated coat: 1.5 glaze / varnish, 1.33 the water film of wet surfaces).
     float clearcoat, clearcoatRoughness, clearcoatIor;
-    uint32_t reserved2[5];      // 0
+    // version 3 (A9 sheen, MATERIAL_LAYERS 1.4; Standard class, not with a clearcoat): colour (linear, [0, 1]; 0 = none) and
+    // perceptual roughness [0.1, 1]; (A10) a Glass solid body's attenuation distance in m (baseColor = its transmittance
+    // over it; 0 = the default 0.01 m).
+    float sheenColor[3], sheenRoughness;
+    float attenuationDistance;
 } UnxMaterialDesc;
 
 typedef struct UnxSubmesh
@@ -751,7 +755,7 @@ UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming*
 // The managed bridge (Assets/UnravelNextBridge/Runtime/Native/UnravelNextNative.cs) checks the same sizes at start.
 static_assert(sizeof(UnxRendererDesc) == 1040);
 static_assert(sizeof(UnxTextureDesc) == 104);
-static_assert(sizeof(UnxMaterialDesc) == 184);  // version 2 (A9 layers); version 1 = 152
+static_assert(sizeof(UnxMaterialDesc) == 184);  // versions 3 and 2 (A9 layers); version 1 = 152
 static_assert(sizeof(UnxSubmesh) == 16);
 static_assert(sizeof(UnxMeshDesc) == 160);
 static_assert(sizeof(UnxInstanceDesc) == 96);

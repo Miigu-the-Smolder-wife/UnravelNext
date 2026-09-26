@@ -186,11 +186,12 @@ UNX_API int32_t UNX_CALL UnxSceneAddTexture(UnxRenderer r, const UnxTextureDesc*
 
 static scene::Material toMaterial(const UnxMaterialDesc* d)
 {
-    // version 2 (sizeof) or version 1 (without the layer fields)
+    // version 3 or 2 (sizeof; 2 without the sheen and attenuation fields) or version 1 (without the layer fields)
     if (!d) fail("UnxMaterialDesc is null");
-    const bool v2 = d->size == sizeof(UnxMaterialDesc) && d->version == 2;
+    const bool v3 = d->size == sizeof(UnxMaterialDesc) && d->version == 3;
+    const bool v2 = v3 || (d->size == sizeof(UnxMaterialDesc) && d->version == 2);
     if (!v2 && !(d->size == sizeof(UnxMaterialDesc) - 32 && d->version == 1))
-        fail("UnxMaterialDesc ABI mismatch: size %u version %u, native %zu version 2 (or %zu version 1)", d->size, d->version, sizeof(UnxMaterialDesc),
+        fail("UnxMaterialDesc ABI mismatch: size %u version %u, native %zu version 3 or 2 (or %zu version 1)", d->size, d->version, sizeof(UnxMaterialDesc),
              sizeof(UnxMaterialDesc) - 32);
     if (d->materialClass > UNX_MATERIAL_TERRAIN) fail("unknown material class %u", d->materialClass);
     scene::Material m;
@@ -215,6 +216,12 @@ static scene::Material toMaterial(const UnxMaterialDesc* d)
         m.clearcoat = d->clearcoat;
         m.clearcoatRoughness = d->clearcoatRoughness;
         m.clearcoatIor = d->clearcoatIor;
+    }
+    if (v3)
+    {
+        m.sheenColor = f3(d->sheenColor);
+        m.sheenRoughness = d->sheenRoughness;
+        if (d->attenuationDistance > 0) m.attenuationDistance = d->attenuationDistance;
     }
     return m;
 }

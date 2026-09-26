@@ -131,6 +131,27 @@ void putAffine(float* d, const float3x4& m)
         for (int c = 0; c < 4; ++c) d[r * 4 + c] = m.m[r][c];
 }
 
+// Layer fields of UnxMaterialDesc version 3 appended to a scene: a sheen (A9) and a solid glass with a non-default
+// attenuation distance (A10), so they cross the ABI and enter the content hash.
+void addLayerMaterials(scene::Scene& s)
+{
+    scene::Material cloth;
+    cloth.name = "abi cloth";
+    cloth.baseColor = { 0.3f, 0.1f, 0.2f };
+    cloth.roughness = 0.8f;
+    cloth.sheenColor = { 0.7f, 0.5f, 0.6f };
+    cloth.sheenRoughness = 0.35f;
+    s.materials.push_back(cloth);
+    scene::Material glass;
+    glass.name = "abi glass";
+    glass.cls = scene::MaterialClass::Glass;
+    glass.baseColor = { 0.8f, 0.9f, 0.85f };
+    glass.roughness = 0.02f;
+    glass.ior = 1.52f;
+    glass.attenuationDistance = 0.05f;
+    s.materials.push_back(glass);
+}
+
 // A two-bone bar (skinned) appended to a scene, so the skin stream, skeleton and skinned instance cross the ABI.
 void addSkinnedCharacter(scene::Scene& s)
 {
@@ -207,10 +228,13 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
     {
         UnxMaterialDesc d{};
         d.size = sizeof d;
-        d.version = 2;
+        d.version = 3;
         d.clearcoat = m.clearcoat;
         d.clearcoatRoughness = m.clearcoatRoughness;
         d.clearcoatIor = m.clearcoatIor;
+        put3(d.sheenColor, m.sheenColor);
+        d.sheenRoughness = m.sheenRoughness;
+        d.attenuationDistance = m.attenuationDistance;
         d.materialClass = (uint32_t)m.cls;
         d.twoSided = m.twoSided ? 1 : 0;
         put3(d.baseColor, m.baseColor);
@@ -435,6 +459,7 @@ int main(int argc, char** argv)
             request.id = id;
             scene::Scene s = scenegen::generate(request);
             addSkinnedCharacter(s);
+            addLayerMaterials(s);
             scene::validate(s);
             UnxRenderer r = 0;
             api.ok(api.UnxRendererCreate(&desc, &r), "UnxRendererCreate");
