@@ -1663,7 +1663,8 @@ void RayScene::record(FramePassContext& fc)
     const Frame frame = m_frame;
     if (staticChanged)
     {
-        const uint64_t staticOffset = slotOffset + m_dynamicDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+        // After the dynamic region (load-time dynamic, runtime and stream instances), which the same slot holds.
+        const uint64_t staticOffset = slotOffset + (m_dynamicDescs.size() + m_runtimeInstanceCap + kMaxTriangleStreams) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
         std::memcpy(m_descRingMapped + staticOffset, m_staticDescs.data(), m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
         const D3D12_GPU_VIRTUAL_ADDRESS staticDescs = m_descRing->GetGPUVirtualAddress() + staticOffset;
         const BufferRef staticScratch = g.importBuffer(m_staticScratch.resource.Get(), { "RT static TLAS scratch", m_staticScratch.bytes, 0 });
@@ -2317,7 +2318,9 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
         uint64_t offset;
     };
     std::vector<StreamBuild> builds;
-    for (uint32_t k = 0; k < kMaxTriangleStreams; ++k)
+    // FrameResources::triangleStreams is the list the producers append to (slot = index, at most kMaxTriangleStreams).
+    const uint32_t streamCount = (uint32_t)std::min<size_t>(fc.resources.triangleStreams.size(), kMaxTriangleStreams);
+    for (uint32_t k = 0; k < streamCount; ++k)
     {
         const TriangleStream& ts = fc.resources.triangleStreams[k];
         if (!ts.vertices.valid() || ts.maxTriangles == 0) continue;
