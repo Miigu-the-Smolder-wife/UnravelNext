@@ -30,26 +30,29 @@ double cubicWeight(double t, int k)
 }
 } // namespace
 
-AtmosphereModel::AtmosphereModel(const scene::Atmosphere& a) : m_a(a)
+AtmosphereModel::AtmosphereModel(const scene::Atmosphere& a, bool buildTable) : m_a(a)
 {
     m_R = a.bottomRadius;
     m_Rt = a.topRadius;
     if (!(m_Rt > m_R && m_R > 0)) fail("atmosphere: invalid radii");
     m_H = std::sqrt(m_Rt * m_Rt - m_R * m_R);
+    if (!buildTable) return;
     m_table.resize((size_t)kTableMu * kTableR);
     Jobs::instance().parallelFor(kTableR, [&](uint32_t ir) {
-        const double xr = (double)ir / (kTableR - 1);
-        const double rho = m_H * xr, r = std::sqrt(rho * rho + m_R * m_R);
-        const double dMin = m_Rt - r, dMax = rho + m_H;
-        for (uint32_t im = 0; im < kTableMu; ++im)
-        {
-            const double xm = (double)im / (kTableMu - 1);
-            const double d = dMin + xm * (dMax - dMin);
-            const double mu = d <= 0 ? 1.0 : std::clamp((m_H * m_H - rho * rho - d * d) / (2.0 * r * d), -1.0, 1.0);
-            const Rgb t = depthTopDirect(r, mu, 256);
-            m_table[(size_t)ir * kTableMu + im] = { t.r, t.g, t.b };
-        }
+        for (uint32_t im = 0; im < kTableMu; ++im) m_table[(size_t)ir * kTableMu + im] = tableEntry(ir, im);
     });
+}
+
+std::array<float, 3> AtmosphereModel::tableEntry(uint32_t ir, uint32_t im) const
+{
+    const double xr = (double)ir / (kTableR - 1);
+    const double rho = m_H * xr, r = std::sqrt(rho * rho + m_R * m_R);
+    const double dMin = m_Rt - r, dMax = rho + m_H;
+    const double xm = (double)im / (kTableMu - 1);
+    const double d = dMin + xm * (dMax - dMin);
+    const double mu = d <= 0 ? 1.0 : std::clamp((m_H * m_H - rho * rho - d * d) / (2.0 * r * d), -1.0, 1.0);
+    const Rgb t = depthTopDirect(r, mu, 256);
+    return { t.r, t.g, t.b };
 }
 
 AtmosphereModel::Coefficients AtmosphereModel::at(double h) const
@@ -159,6 +162,7 @@ Rgb AtmosphereModel::depthTopDirect(double r, double mu, uint32_t panels) const
 
 Rgb AtmosphereModel::depthTopTable(double r, double mu) const
 {
+    if (m_table.empty()) fail("atmosphere: no tau_top table (the model was built without it)");
     r = std::clamp(r, m_R, m_Rt);
     const double rho = std::sqrt(std::max(0.0, r * r - m_R * m_R));
     const double d = -r * mu + std::sqrt(std::max(0.0, r * r * (mu * mu - 1) + m_Rt * m_Rt));

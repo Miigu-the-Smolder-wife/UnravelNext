@@ -39,6 +39,21 @@
 ## 3. 다른 세션과의 공존
 
 - dispatch는 타임스탬프로 크기를 맞춰 약 25 ms로 한다. 배치는 약 250 ms이고, 배치마다 카운터·오류 비트를 읽는다.
+- dispatch 최악 시간은 구조로 묶는다(2026-09-26 D0 TDR 뒤, 데이터·시간 모형과 무관).
+  - 경로 수: dispatch당 최대 2^19개(`kMaxPathsPerDispatch`)다. 실측 적응 상한 unitCap은 4096에서 시작해, 이 값 아래에서 낮추기만 하고 넘지 않는다.
+  - 스레드: 한 스레드는 표본을 한 번에 16개까지만 이어서 처리한다. 패스의 k개는 16개 묶음 dispatch로 나눈다.
+  - 경로 길이: maxDepth 이하다.
+  - 전에는 unitCap이 2^26까지 자랐고, 하늘 같은 싼 윗줄에서 보정된 값이 무거운 아랫줄에 그대로 쓰였다.
+  - 참고치 [실측, forest_thin 2560×1440]: 경로당 약 13 ns라 2^19개면 약 7 ms다.
+  - 남은 꼬리(다음 항목): 경로 하나는 한 스레드 안에서 최대 4096 반사(kRtMaxBounces)를 연속으로 돈다. 그래서 스레드의 최악 일은 표본 16 × 4096 반사 × 반사 비용이고, 이것은 장면에 따라 달라진다(거울 복도, 공기 속 다중 산란).
+    - 구조적 해법: 경로 상태(처리량, 광선, 표본기, MIS 항)를 버퍼에 두고, dispatch마다 경로를 최대 B 반사만 진행한 뒤 다음 dispatch가 이어 가게 한다(wavefront 연속). 그러면 dispatch당 일은 스레드 수 × B 반사로 정해진다.
+    - B와 상태 크기는 하드웨어 최장 dispatch 측정(게임 뒤) 뒤에 정한다.
+- 잠금 사용법: 추적기가 잠금을 스스로 잡으니 직접 실행한다. `Tools/CI/GpuLock.ps1`로 감싸지 않는다.
+  - 감싸면 조상 프로세스의 잠금을 이어받아 교착은 없다. 대신 전체 실행 동안 조각 없이 잡고 있어서 다른 세션이 기다린다.
+- WARP: `GpuPathTracer::setWarp`, `unx_reference --device warp`, `unx_test_reference_photo --warp tiny|atmtable`로 커널 변경 뒤 첫 실행을 GPU 없이 한다.
+  - WARP는 이 커널을 코어 하나로 돌려 매우 느리다(첫 dispatch에 수 분 이상).
+  - 그래서 WARP로는 끝나는지(무한 루프 아님)와 오류 비트만 본다.
+  - WARP에서는 대기 표를 CPU로 만든다.
 - GPU 잠금: 15 s 조각이다(kind correctness, Track C, INTERFACES 3.3 v1.40 규약).
   - 대기자 파일을 쓰고, timing 대기자가 있으면 양보한다(얻은 직후 재확인 포함).
   - `.gpulock/HOLD`가 있으면 멈춘다.
@@ -58,6 +73,14 @@ GPU 영상의 키에는 `estimator.device = gpu`가 붙는다. 기본 render see
 2. 마스크별(하늘, 경계, 잎, 금속, 지면, 기타) 평균 편향 / 표준오차가 잡음 수준이어야 한다.
 3. relMSE(CPU, GPU)는 (h_CPU + h_GPU)/4 수준이어야 한다.
 4. furnace·에너지 시험이 CPU와 같아야 한다.
+
+5. 정밀도 수준의 바이어스(조정 판단, 2026-09-26): 표본이 아주 많으면 정밀도 수준의 차이도 σ로는 커진다. 그래서 크기로 판정한다.
+   - 기준: 마스크의 상대 바이어스가 1e-4 이하이고 공간 구조가 없으면 통과다. 1e-4는 10비트 출력 한 단계의 1/10이다.
+   - 근거: CPU는 double로 누적하고, GPU는 패스 안의 float 합을 double 누적에 더한다. 표시 양자화가 1/1023이다.
+   - 예: ridge_sunset 지면 −1.8e-5(7.2σ)는 통과다.
+   - 풀잎처럼 국소 구조가 있는 차이는 이 기준에 들지 않는다. 원인을 찾아 두 추정기를 같게 만든다.
+
+진단: `unx_reference probe --pixel X,Y --rows N [--device gpu]`는 한 열의 1차 광선 적중을 보여 준다. 픽셀마다 4×4 계층 표본과 중심을 쓴다. CPU 결과를 내고, `--device gpu`면 GPU 결과(`GpuPathTracer::primaryIdentities`, Census.hlsl)와 표본별로 다른 적중도 함께 낸다.
 
 결과는 `Results/C/GpuTracer/`에 둔다.
 
@@ -87,3 +110,8 @@ GPU 영상의 키에는 `estimator.device = gpu`가 붙는다. 기본 render see
   - 코스틱 가장자리 바로 밖에서 광추적과 카메라 경로 사이 차이 최대 1.3e-4(렌즈와 무관). 조사할 것.
   - 호스트 쪽: 일시 정지 스냅숏, 자유 카메라, 사진 모드 UI, M 곡선을 거친 PNG(core·I·렌더 A).
   - 5절 검증 게이트 실행.
+  - (해결, 하드웨어 확인은 게임 뒤) 사진 진입 지연의 원인은 대기 τ_top 표였다. 2048×1024 항목, 항목마다 256구간 × 8점 = 2048번 계산해서 CPU로 22.4 s가 걸렸다 [실측, CPU 경합 중].
+    - 이제 GPU에서 만든다(AtmosphereTable.hlsl): CPU `AtmosphereModel::tableEntry`와 같은 연산, 같은 순서다.
+    - 기본 double 연산만 쓴다. 나눗셈·sqrt는 float 근사에 Newton 보정을 더하고, exp는 Cody–Waite + 13차 다항식, 정수↔double 변환은 float을 거친다. 확장 double 없이 D3D12 기본 기능만 쓴다.
+    - dispatch는 16384항목 단위다. 시험 `atmtable`이 CPU 항목과 비트 단위로 비교한다(상대 1e-6 이하).
+  - (해결) 진행 표시용 `currentHalvesRelMse()`: Mean.hlsl이 8×8 그룹 합을 내고, MeanSum.hlsl이 한 그룹에서 고정 순서로 더한다. 8바이트만 읽어 온다. `current()`와의 차이는 double 덧셈 순서뿐이다.

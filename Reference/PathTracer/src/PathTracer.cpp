@@ -1054,6 +1054,30 @@ RenderOutput PathTracer::render(const ResolvedCamera& cam, const RenderSettings&
     return out;
 }
 
+std::vector<uint64_t> PathTracer::primaryIdentities(const ResolvedCamera& cam, uint32_t W, uint32_t H, uint32_t x0, uint32_t y0, uint32_t columns,
+                                                    uint32_t rows)
+{
+    if (columns == 0 || rows == 0 || x0 >= W || y0 >= H || columns > W - x0 || rows > H - y0)
+        fail("reference: census rectangle %u,%u %ux%u outside %ux%u", x0, y0, columns, rows, W, H);
+    Impl& im = *m_impl;
+    im.build(cam.time);
+    std::vector<uint64_t> ids((size_t)columns * rows * 17);
+    Jobs::instance().parallelFor(rows, [&](uint32_t r) {
+        const uint32_t y = y0 + r;
+        for (uint32_t c = 0; c < columns; ++c)
+            for (uint32_t s = 0; s < 17; ++s)
+            {
+                const uint32_t x = x0 + c;
+                const float jx = s < 16 ? ((s & 3) + 0.5f) / 4.0f : 0.5f, jy = s < 16 ? ((s >> 2) + 0.5f) / 4.0f : 0.5f;
+                const float3 dir = cameraRay(cam, W, H, x + jx, y + jy);
+                const float tn = cam.nearPlane / std::max(dot(dir, normalize(cam.forward)), 1e-3f);
+                Hit h;
+                ids[((size_t)r * columns + c) * 17 + s] = im.rt->intersect(cam.position, dir, tn, INFINITY, kMaskAll, h) ? ((uint64_t)h.instance << 32 | h.triangle) : kSkyIdentity;
+            }
+    });
+    return ids;
+}
+
 std::vector<uint64_t> PathTracer::primaryIdentities(const ResolvedCamera& cam, uint32_t W, uint32_t H,
                                                     const std::vector<std::filesystem::path>& pauseWhileExists)
 {

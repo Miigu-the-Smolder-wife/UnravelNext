@@ -4,8 +4,11 @@
 // the same sampler, material, atmosphere and light code (Reference/GpuTracer/shared, compiled for both CPU tests and
 // GPU), the same path structure, MIS, forced in-scattering, Russian roulette and sun-caustic light tracing, over the
 // scene's original geometry (its own BLAS/TLAS; alpha-tested leaves resolved exactly on non-opaque candidates).
-// Coexistence: dispatches of about kTargetDispatchMs, the GPU measurement lock held in <= 15 s slices (kind
-// correctness), pauses while .gpulock/HOLD exists.
+// Coexistence: dispatches of about kTargetDispatchMs, structurally at most 2^19 paths of at most 16 samples per thread
+// each (GpuPathTracer.cpp kMaxPathsPerDispatch), the GPU measurement lock held in <= 15 s slices (kind correctness),
+// pauses while .gpulock/HOLD exists. The tracer takes the lock itself: run it directly, not under a GpuLock.ps1
+// wrapper (under one it detects the wrapper as its ancestor and works inside that lock, without slices, so other
+// sessions wait for the whole run).
 #include "unx/reference/PathTracer.h"
 
 #include <filesystem>
@@ -80,6 +83,9 @@ public:
     void start(const ResolvedCamera& camera, const RenderSettings& settings);
     // Before start() or render(): the shutter's motion (a default ShutterMotion: none - the static estimator, unchanged).
     void setMotion(const ShutterMotion& motion);
+    // Before the first start() or render(), on the tracer's own device: build it on WARP (software rasteriser) instead of
+    // the GPU - correctness runs that cannot hang the GPU (no measurement-lock slices; timings are the CPU's).
+    void setWarp(bool warp);
     // One pass: at most maxHalfSamples samples per pixel and half (the pass is also sized to about kTargetDispatchMs
     // per dispatch). Returns the samples per pixel done, both halves together.
     uint32_t pass(uint32_t maxHalfSamples = UINT32_MAX);
@@ -93,6 +99,26 @@ public:
     // on each call once samples were added; the revision is samplesDone() at that update. Owned by the tracer.
     ID3D12Resource* currentImageResource();
     uint32_t currentImageRevision() const;
+    // halvesRelMse of that update, reduced on the GPU with it (render A request: progress without a read-back of the
+    // halves): metrics::relMse(halfA, halfB) on the same float halves, summed in a fixed order (8x8 groups, then one group
+    // of 1024), so it differs from current().halvesRelMse only by the order of the double additions. 0 before the first
+    // update. Costs one extra dispatch and an 8-byte read-back per update.
+    double currentHalvesRelMse() const;
+
+    // The atmosphere's tau_top table is built on the GPU (AtmosphereTable.hlsl); this builds entries [first, first + count)
+    // and compares each with the CPU's AtmosphereModel::tableEntry: channels that differ (bitwise) and the largest
+    // relative difference. Tests only.
+    struct AtmosphereTableCheck
+    {
+        uint32_t entries = 0, differing = 0;
+        double maxRelative = 0, seconds = 0;  // seconds: the GPU build of the entries
+    };
+    AtmosphereTableCheck checkAtmosphereTable(uint32_t first, uint32_t count);
+    // Diagnostics (unx_reference probe --device gpu): PathTracer::primaryIdentities on the GPU for the pixel rectangle
+    // [x0, x0 + columns) x [y0, y0 + rows) of a width x height image: 17 identities per pixel (4 x 4 stratum centres,
+    // then the centre), row-major over the rectangle; (instance << 32 | mesh triangle) or kSkyIdentity.
+    std::vector<uint64_t> primaryIdentities(const ResolvedCamera& camera, uint32_t width, uint32_t height, uint32_t x0, uint32_t y0, uint32_t columns,
+                                            uint32_t rows);
 
     struct Impl;
 

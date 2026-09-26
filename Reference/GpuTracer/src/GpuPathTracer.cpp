@@ -10,6 +10,7 @@
 
 #include "shared/Types.hlsli"
 
+#include "unx/core/Jobs.h"
 #include "unx/core/Log.h"
 #include "unx/render/Device.h"
 #include "unx/render/Shaders.h"
@@ -17,6 +18,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -79,6 +81,7 @@ struct GpuPathTracer::Impl
     GpuRenderInfo info;
 
     std::unique_ptr<render::Device> ownedDevice;  // the tracer's own device (tools); null when given the renderer's
+    ComPtr<ID3D12Device> warpDevice;              // setWarp(): the WARP device ownedDevice is built on
     render::Device* device = nullptr;
     std::filesystem::path shaderDir;              // empty: bin/shaders/Reference beside the executable
     std::vector<uint32_t> views;                  // every descriptor allocated (freed with a shared device)
@@ -93,7 +96,13 @@ struct GpuPathTracer::Impl
     ID3D12PipelineState* psoCaustic = nullptr;
     ID3D12PipelineState* psoResolve = nullptr;
     ID3D12PipelineState* psoMean = nullptr;
+    ID3D12PipelineState* psoMeanSum = nullptr;
+    ID3D12PipelineState* psoAtmosphereTable = nullptr;
+    ID3D12PipelineState* psoCensus = nullptr;
     ComPtr<ID3D12Resource> meanImage;  // currentImageResource()
+    // currentHalvesRelMse(): Mean.hlsl's per-group sums, MeanSum.hlsl's result and its read-back (8 bytes)
+    Buffer meanSums, meanResult, meanResultReadback;
+    double meanRelMse = 0;
     uint32_t meanUav = sh::kRtNone, meanRevision = 0, meanWidth = 0, meanHeight = 0;
     void updateMeanImage();
     std::unique_ptr<gpu::GpuSlice> slice;
@@ -106,6 +115,15 @@ struct GpuPathTracer::Impl
     Buffer countersReadback, timestampReadback;
     ComPtr<ID3D12QueryHeap> queryHeap;
     static constexpr uint32_t kMaxQueries = 512;
+    // Structural dispatch bound (2026-09-26 TDR on D0; rule: a dispatch's worst case is fixed by its structure, not by the
+    // data or a time model): a dispatch runs at most kMaxPathsPerDispatch camera or light paths, a thread at most
+    // kMaxSamplesPerThread of them in turn, and a path at most maxDepth segments (plus its shadow rays). The measured cap
+    // (Run::unitCap) only lowers the path count below it. At the heaviest per-path cost measured (forest_thin 2560x1440,
+    // 13 ns per path amortised [measured]) 2^19 paths take about 7 ms, so a dispatch reaches 50 ms only for paths 7x
+    // heavier than that forest, before the measured cap halves it.
+    static constexpr uint64_t kMaxPathsPerDispatch = 1ull << 19;
+    static constexpr uint32_t kMaxSamplesPerThread = 16;
+    bool warp = false;  // setWarp(): WARP (software) device - correctness runs without the GPU
     ComPtr<ID3D12Resource> staging;
     uint8_t* stagingPtr = nullptr;
     static constexpr uint64_t kStagingBytes = 64ull << 20;
@@ -124,6 +142,16 @@ struct GpuPathTracer::Impl
         o.queuePriority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;  // a background job: never ahead of other sessions' work
         if (!device)
         {
+            if (warp)
+            {
+                // WARP through the host-device path of render::Device (it takes a created device and its adapter LUID)
+                ComPtr<IDXGIFactory4> factory;
+                check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
+                ComPtr<IDXGIAdapter> adapter;
+                check(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)), "EnumWarpAdapter");
+                check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&warpDevice)), "D3D12CreateDevice(WARP)");
+                o.externalDevice = warpDevice.Get();
+            }
             ownedDevice = std::make_unique<render::Device>(o);
             device = ownedDevice.get();
         }
@@ -149,6 +177,9 @@ struct GpuPathTracer::Impl
         psoCaustic = shaders->compute("Caustic");
         psoResolve = shaders->compute("Resolve");
         psoMean = shaders->compute("Mean");
+        psoAtmosphereTable = shaders->compute("AtmosphereTable");
+        psoCensus = shaders->compute("Census");
+        psoMeanSum = shaders->compute("MeanSum");
         D3D12_QUERY_HEAP_DESC qd{};
         qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
         qd.Count = kMaxQueries;
@@ -160,7 +191,7 @@ struct GpuPathTracer::Impl
         check(device->d3d()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging)), "staging buffer");
         check(staging->Map(0, nullptr, (void**)&stagingPtr), "Map staging");
         // An empty repository root (photo mode inside a game) has no measurement-lock protocol: no slices.
-        if (!repo.empty()) slice = std::make_unique<gpu::GpuSlice>(repo / ".gpulock", "E", what);  // E owns the tracer since the B11 handover
+        if (!repo.empty() && !warp) slice = std::make_unique<gpu::GpuSlice>(repo / ".gpulock", "E", what);  // E owns the tracer since the B11 handover
     }
 
     static D3D12_RESOURCE_DESC bufferDesc(uint64_t bytes, D3D12_RESOURCE_FLAGS flags)
@@ -284,6 +315,9 @@ struct GpuPathTracer::Impl
 
     // --- scene
     void build(float time);
+    // tau_top entries [first, first + count) into out (12 bytes each, entry first at offset (first - outBase) x 12) with
+    // AtmosphereTable.hlsl: dispatches of at most 16384 entries, submitted four at a time (about 25 ms each).
+    void buildAtmosphereTable(const AtmosphereModel& atm, Buffer& out, uint32_t first, uint32_t count, uint32_t outBase);
     void buildAccelerationStructures(const std::vector<sh::RtMesh>& meshRecords, const std::vector<std::vector<uint8_t>>& opaqueBySubmesh,
                                      const std::vector<int32_t>& instanceRecord, const std::vector<uint32_t>& meshVertexCount);
 
@@ -472,6 +506,7 @@ void GpuPathTracer::Impl::build(float time)
     }
     if (overrides.empty()) overrides.push_back(0);
 
+    const auto tLights = std::chrono::steady_clock::now();
     // Lights (LightSet: normalised lights, grid).
     const LightSet lights(s);
     std::vector<sh::RtLight> glights(std::max<size_t>(lights.count(), 1));
@@ -498,6 +533,7 @@ void GpuPathTracer::Impl::build(float time)
     if (cellStart.empty()) cellStart.push_back(0);
     if (cellLights.empty()) cellLights.push_back(0);
 
+    const auto tCaustic = std::chrono::steady_clock::now();
     // Sun-caustic emission set (PathTracer::Impl::buildCaustics): smooth triangles of rigid instances, world space.
     rt.deformed = deformed;
     rt.recordOf = instanceRecord;
@@ -513,12 +549,16 @@ void GpuPathTracer::Impl::build(float time)
         for (size_t i = 0; i < s.instances.size(); ++i) transforms[i] = s.instances[i].transform;
         buildEmit(transforms, emit, emitCdf, emitArea);
     }
-    // Atmosphere table (built in double by the CPU model) and the material albedo table.
-    const AtmosphereModel atm(s.atmosphere);
-    std::vector<sh::float3> atmTable(atm.table().size());
-    for (size_t i = 0; i < atmTable.size(); ++i) atmTable[i] = { atm.table()[i][0], atm.table()[i][1], atm.table()[i][2] };
+    const auto tAtmosphere = std::chrono::steady_clock::now();
+    // The material albedo table (the atmosphere's tau_top table is built on the GPU below: 22 s on the CPU [measured,
+    // contended], the photo-mode start).
+    const AtmosphereModel atm(s.atmosphere, warp);  // WARP: the CPU's table (the GPU build would take hours in software)
     const std::vector<float>& albedo = scene::model::directionalAlbedoTable();
-    const double setupSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const auto tSetup = std::chrono::steady_clock::now();
+    const double setupSec = std::chrono::duration<double>(tSetup - t0).count();
+    auto sec = [](auto a, auto b) { return std::chrono::duration<double>(b - a).count(); };
+    logf("gpu reference: CPU setup %.2f s (geometry and materials %.2f, lights %.2f, caustic set %.2f, albedo table %.2f)\n", setupSec,
+         sec(t0, tLights), sec(tLights, tCaustic), sec(tCaustic, tAtmosphere), sec(tAtmosphere, tSetup));
 
     // --- GPU (inside a slice).
     ensureSlice();
@@ -546,7 +586,15 @@ void GpuPathTracer::Impl::build(float time)
     const Buffer idxBuf = structured(indices);
     b.indices = idxBuf.view;
     b.albedoTable = structured(albedo).view;
-    b.atmTable = structured(atmTable).view;
+    {
+        Buffer table = createBuffer((uint64_t)AtmosphereModel::tableMu() * AtmosphereModel::tableR() * 12, D3D12_HEAP_TYPE_DEFAULT,
+                                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+        if (warp) upload(table, atm.table().data(), atm.table().size() * 12);
+        else buildAtmosphereTable(atm, table, 0, AtmosphereModel::tableMu() * AtmosphereModel::tableR(), 0);
+        structuredView(table, 12);
+        owned.push_back(table);
+        b.atmTable = table.view;
+    }
     b.lights = structured(glights).view;
     b.cellStart = structured(cellStart).view;
     b.cellLights = structured(cellLights).view;
@@ -641,6 +689,50 @@ void GpuPathTracer::Impl::build(float time)
          s.instances.size(), emitCdf.size(), info.vramSceneBytes / 1048576.0, info.buildSeconds);
     sceneTime = time;
     built = true;
+}
+
+void GpuPathTracer::Impl::buildAtmosphereTable(const AtmosphereModel& atm, Buffer& out, uint32_t first, uint32_t count, uint32_t outBase)
+{
+    const scene::Atmosphere& a = atm.params();
+    const float params[20] = { a.rayleighScaleHeight, a.mieScaleHeight, a.ozoneCenter, a.ozoneWidth,
+                               a.rayleighScattering.x, a.rayleighScattering.y, a.rayleighScattering.z, a.bottomRadius,
+                               a.mieScattering.x, a.mieScattering.y, a.mieScattering.z, a.topRadius,
+                               a.mieAbsorption.x, a.mieAbsorption.y, a.mieAbsorption.z, 0,
+                               a.ozoneAbsorption.x, a.ozoneAbsorption.y, a.ozoneAbsorption.z, 0 };
+    Buffer p = createBuffer(sizeof params, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON, false);
+    upload(p, params, sizeof params);
+    rawView(p);
+    owned.push_back(p);
+    rawUav(out);
+    const uint32_t outUav = out.view;
+    const double H = atm.tableH();
+    uint64_t hb;
+    std::memcpy(&hb, &H, 8);
+    constexpr uint32_t kChunk = 16384, kPerList = 4;
+    for (uint32_t base = first; base < first + count;)
+    {
+        render::CommandList cl = device->acquireCommandList(render::QueueType::Compute);
+        ID3D12DescriptorHeap* heaps[] = { device->descriptors().resourceHeap(), device->descriptors().samplerHeap() };
+        cl.list->SetDescriptorHeaps(2, heaps);
+        cl.list->SetComputeRootSignature(device->rootSignature());
+        cl.list->SetPipelineState(psoAtmosphereTable);
+        for (uint32_t k = 0; k < kPerList && base < first + count; ++k)
+        {
+            const uint32_t n = std::min(kChunk, first + count - base);
+            Root r{};
+            r.x0 = outUav;
+            r.y0 = base;
+            r.w = n;
+            r.h = (uint32_t)hb;
+            r.sampleBegin = (uint32_t)(hb >> 32);
+            r.sampleEnd = p.view;
+            r.pathCount = outBase;
+            cl.list->SetComputeRoot32BitConstants(0, sizeof(Root) / 4, &r, 0);
+            cl.list->Dispatch((n + 63) / 64, 1, 1);
+            base += n;
+        }
+        submitWait(cl);
+    }
 }
 
 void GpuPathTracer::Impl::buildAccelerationStructures(const std::vector<sh::RtMesh>& meshRecords, const std::vector<std::vector<uint8_t>>& opaqueBySubmesh,
@@ -1352,8 +1444,8 @@ void GpuPathTracer::Impl::runBatch()
     {
         const double target = kTargetDispatchMs;
         if (batchMaxMs > 2 * target) R.unitCap = std::max<uint64_t>(R.unitCap / 2, 1024);
-        else if (batchMaxMs < 0.5 * target) R.unitCap = std::min<uint64_t>(R.unitCap * 2, 1ull << 26);
-        if (batchMaxMs >= 0.25 * target || R.unitCap >= (1ull << 26)) R.calibrated = true;
+        else if (batchMaxMs < 0.5 * target) R.unitCap = std::min<uint64_t>(R.unitCap * 2, kMaxPathsPerDispatch);
+        if (batchMaxMs >= 0.25 * target || R.unitCap >= kMaxPathsPerDispatch) R.calibrated = true;
     }
     batch.clear();
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -1380,8 +1472,12 @@ void GpuPathTracer::Impl::dispatchSamples(uint32_t half, uint32_t begin, uint32_
     const bool useCaustics = R.useCaustics;
     double* msPer = R.msPer;
     const uint32_t halves = half == 2 ? 2u : 1u, halfBase = half == 2 ? 0u : half, end = begin + k;
-    // Camera paths: rectangles of whole rows (or of columns of one row band), at most unitCap paths each.
-    const uint64_t perPixel = (uint64_t)halves * k;
+    // Camera paths: rectangles of whole rows (or of columns of one row band), at most unitCap paths each, a thread's
+    // samples in chunks of at most kMaxSamplesPerThread (cols >= 8 x perPixel <= 32 stays under unitCap's floor 1024).
+    for (uint32_t c0 = begin; c0 < end; c0 += kMaxSamplesPerThread)
+    {
+    const uint32_t c1 = std::min(end, c0 + kMaxSamplesPerThread);
+    const uint64_t perPixel = (uint64_t)halves * (c1 - c0);
     const uint32_t cols = (uint32_t)std::clamp<uint64_t>(R.unitCap / perPixel, 8, W);
     for (uint32_t y0 = 0; y0 < H;)
     {
@@ -1393,7 +1489,7 @@ void GpuPathTracer::Impl::dispatchSamples(uint32_t half, uint32_t begin, uint32_
             const uint32_t wc = std::min(cols, W - x0);
             WorkItem w{};
             w.kind = Kind::Path;
-            w.root = { 0, x0, y0, wc, rows, begin, end, 0, 0, 0, halfBase, 0 };
+            w.root = { 0, x0, y0, wc, rows, c0, c1, 0, 0, 0, halfBase, 0 };
             w.groupsX = (wc + 7) / 8;
             w.groupsY = (rows + 7) / 8;
             w.groupsZ = halves;
@@ -1401,6 +1497,7 @@ void GpuPathTracer::Impl::dispatchSamples(uint32_t half, uint32_t begin, uint32_
             add(w);
         }
         y0 += rows;
+    }
     }
     // Sun-caustic light paths: W H per sample per half (the CPU's count), then the splat resolve.
     if (useCaustics)
@@ -1554,6 +1651,22 @@ void GpuPathTracer::Impl::updateMeanImage()
         u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
         u.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         device->d3d()->CreateUnorderedAccessView(meanImage.Get(), nullptr, &u, device->descriptors().resourceCpu(meanUav));
+        const uint32_t sumsView = meanSums.view;
+        meanSums = createBuffer(8ull * ((R.W + 7) / 8) * ((R.H + 7) / 8), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                D3D12_RESOURCE_STATE_COMMON, false);
+        meanSums.view = sumsView == sh::kRtNone ? allocView() : sumsView;
+        D3D12_UNORDERED_ACCESS_VIEW_DESC raw{};
+        raw.Format = DXGI_FORMAT_R32_TYPELESS;
+        raw.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        raw.Buffer.NumElements = (UINT)(meanSums.size / 4);
+        raw.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        device->d3d()->CreateUnorderedAccessView(meanSums.res.Get(), nullptr, &raw, device->descriptors().resourceCpu(meanSums.view));
+        if (!meanResult.res)
+        {
+            meanResult = createBuffer(8, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, false);
+            rawUav(meanResult);
+            meanResultReadback = createBuffer(8, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST, false);
+        }
         meanWidth = R.W;
         meanHeight = R.H;
         meanRevision = UINT32_MAX;
@@ -1578,14 +1691,51 @@ void GpuPathTracer::Impl::updateMeanImage()
     r.sampleEnd = (uint32_t)b1;
     r.pathBase = (uint32_t)(b1 >> 32);
     r.pathCount = e;
+    r.passIndex = meanSums.view;
+    const uint32_t groupsX = (R.W + 7) / 8, groupsY = (R.H + 7) / 8;
+    const double invTerms = 1.0 / (3.0 * (double)R.W * (double)R.H);
+    uint64_t bt;
+    std::memcpy(&bt, &invTerms, 8);
+    Root rs{};
+    rs.constants = constantsBuffer.view;
+    rs.x0 = meanSums.view;
+    rs.y0 = groupsX * groupsY;
+    rs.w = meanResult.view;
+    rs.h = (uint32_t)bt;
+    rs.sampleBegin = (uint32_t)(bt >> 32);
     render::CommandList cl = device->acquireCommandList(render::QueueType::Compute);
     ID3D12DescriptorHeap* heaps[] = { device->descriptors().resourceHeap(), device->descriptors().samplerHeap() };
     cl.list->SetDescriptorHeaps(2, heaps);
     cl.list->SetComputeRootSignature(device->rootSignature());
     cl.list->SetPipelineState(psoMean);
     cl.list->SetComputeRoot32BitConstants(0, sizeof(Root) / 4, &r, 0);
-    cl.list->Dispatch((R.W + 7) / 8, (R.H + 7) / 8, 1);
+    cl.list->Dispatch(groupsX, groupsY, 1);
+    // the halves' relMSE: the group sums added in one group (fixed order), then 8 bytes read back
+    D3D12_RESOURCE_BARRIER uav{};
+    uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uav.UAV.pResource = meanSums.res.Get();
+    cl.list->ResourceBarrier(1, &uav);
+    cl.list->SetPipelineState(psoMeanSum);
+    cl.list->SetComputeRoot32BitConstants(0, sizeof(Root) / 4, &rs, 0);
+    cl.list->Dispatch(1, 1, 1);
+    D3D12_RESOURCE_BARRIER tb{};
+    tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    tb.Transition.pResource = meanResult.res.Get();
+    tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    tb.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;  // promoted from COMMON by the dispatch
+    tb.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    cl.list->ResourceBarrier(1, &tb);
+    cl.list->CopyBufferRegion(meanResultReadback.res.Get(), 0, meanResult.res.Get(), 0, 8);
+    tb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    tb.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+    cl.list->ResourceBarrier(1, &tb);
     submitWait(cl);
+    double* v = nullptr;
+    const D3D12_RANGE rr{ 0, 8 };
+    check(meanResultReadback.res->Map(0, &rr, (void**)&v), "Map relMSE");
+    meanRelMse = *v;
+    const D3D12_RANGE none{ 0, 0 };
+    meanResultReadback.res->Unmap(0, &none);
     meanRevision = samples;
 }
 
@@ -1686,6 +1836,11 @@ uint32_t GpuPathTracer::pass(uint32_t maxHalfSamples)
     m_impl->pass(maxHalfSamples);
     return 2 * m_impl->run->done;
 }
+void GpuPathTracer::setWarp(bool warp)
+{
+    if (m_impl->device) fail("gpu reference: setWarp() before the first start() or render(), on the tracer's own device");
+    m_impl->warp = warp;
+}
 uint32_t GpuPathTracer::samplesDone() const { return m_impl->run ? 2 * m_impl->run->done : 0; }
 ID3D12Resource* GpuPathTracer::currentImageResource()
 {
@@ -1693,6 +1848,83 @@ ID3D12Resource* GpuPathTracer::currentImageResource()
     m_impl->updateMeanImage();
     return m_impl->meanImage.Get();
 }
+std::vector<uint64_t> GpuPathTracer::primaryIdentities(const ResolvedCamera& camera, uint32_t width, uint32_t height, uint32_t x0, uint32_t y0, uint32_t columns,
+                                                       uint32_t rows)
+{
+    Impl& m = *m_impl;
+    if (columns == 0 || rows == 0 || x0 >= width || y0 >= height || columns > width - x0 || rows > height - y0)
+        fail("gpu reference: census rectangle %u,%u %ux%u outside %ux%u", x0, y0, columns, rows, width, height);
+    RenderSettings st;
+    st.width = width;
+    st.height = height;
+    st.samplesPerPixel = 2;
+    st.russianRouletteStart = 4;
+    m.start(camera, st, {});  // the camera constants and the scene (no samples are rendered)
+    m.upload(m.constantsBuffer, &m.constants, sizeof m.constants);
+    const uint64_t threads = (uint64_t)columns * rows * 17;
+    Buffer out = m.createBuffer(threads * 8, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, false);
+    m.rawUav(out);
+    m.owned.push_back(out);
+    m.ensureSlice();
+    for (uint64_t base = 0; base < threads;)
+    {
+        const uint32_t n = (uint32_t)std::min<uint64_t>(threads - base, 1u << 19);
+        render::CommandList cl = m.device->acquireCommandList(render::QueueType::Compute);
+        ID3D12DescriptorHeap* heaps[] = { m.device->descriptors().resourceHeap(), m.device->descriptors().samplerHeap() };
+        cl.list->SetDescriptorHeaps(2, heaps);
+        cl.list->SetComputeRootSignature(m.device->rootSignature());
+        cl.list->SetPipelineState(m.psoCensus);
+        Root r{};
+        r.constants = m.constantsBuffer.view;
+        r.x0 = out.view;
+        r.y0 = y0;
+        r.w = columns;
+        r.h = rows;
+        r.sampleBegin = x0;
+        r.pathBase = (uint32_t)base;
+        r.pathCount = n;
+        cl.list->SetComputeRoot32BitConstants(0, sizeof(Root) / 4, &r, 0);
+        cl.list->Dispatch((n + 63) / 64, 1, 1);
+        m.submitWait(cl);
+        base += n;
+    }
+    std::vector<uint32_t> raw(threads * 2);
+    m.readback(out, raw.data(), threads * 8);
+    std::vector<uint64_t> ids(threads);
+    for (uint64_t i = 0; i < threads; ++i) ids[i] = raw[2 * i] == 0xFFFFFFFFu ? kSkyIdentity : ((uint64_t)raw[2 * i + 1] << 32 | raw[2 * i]);
+    return ids;
+}
+GpuPathTracer::AtmosphereTableCheck GpuPathTracer::checkAtmosphereTable(uint32_t first, uint32_t count)
+{
+    Impl& m = *m_impl;
+    m.createDevice();
+    m.ensureSlice();
+    const AtmosphereModel atm(m.scene.atmosphere, false);
+    const uint32_t total = AtmosphereModel::tableMu() * AtmosphereModel::tableR();
+    if (count == 0 || first >= total || count > total - first) fail("gpu reference: atmosphere table entries %u + %u outside 0..%u", first, count, total);
+    Buffer out = m.createBuffer((uint64_t)count * 12, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON, false);
+    const auto t0 = std::chrono::steady_clock::now();
+    m.buildAtmosphereTable(atm, out, first, count, first);
+    AtmosphereTableCheck c;
+    c.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::vector<float> gpu((size_t)count * 3);
+    m.readback(out, gpu.data(), (uint64_t)count * 12);
+    m.owned.push_back(out);
+    std::vector<std::array<float, 3>> cpu(count);
+    Jobs::instance().parallelFor(count, [&](uint32_t i) { cpu[i] = atm.tableEntry((first + i) / AtmosphereModel::tableMu(), (first + i) % AtmosphereModel::tableMu()); });
+    c.entries = count;
+    for (uint32_t i = 0; i < count; ++i)
+        for (int ch = 0; ch < 3; ++ch)
+        {
+            const float g = gpu[3 * (size_t)i + ch], e = cpu[i][ch];
+            if (g != e) ++c.differing;
+            if (!std::isfinite(g)) c.maxRelative = INFINITY;
+            else if (e != 0) c.maxRelative = std::max(c.maxRelative, std::abs((double)g - e) / std::abs((double)e));
+            else if (g != 0) c.maxRelative = INFINITY;
+        }
+    return c;
+}
+double GpuPathTracer::currentHalvesRelMse() const { return m_impl->meanRevision == UINT32_MAX ? 0.0 : m_impl->meanRelMse; }
 uint32_t GpuPathTracer::currentImageRevision() const { return m_impl->meanRevision == UINT32_MAX ? 0 : m_impl->meanRevision; }
 RenderOutput GpuPathTracer::current()
 {

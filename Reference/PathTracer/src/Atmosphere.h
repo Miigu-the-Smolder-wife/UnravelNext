@@ -50,7 +50,9 @@ class AtmosphereModel
 public:
     static constexpr double kShortSegment = 20000.0;  // m
 
-    explicit AtmosphereModel(const scene::Atmosphere& a);
+    // buildTable false: no tau_top table (the GPU tracer builds it on the GPU, GpuTracer/shaders/AtmosphereTable.hlsl);
+    // opticalDepthToTop() then must not be called.
+    explicit AtmosphereModel(const scene::Atmosphere& a, bool buildTable = true);
 
     struct Coefficients
     {
@@ -83,6 +85,9 @@ public:
     static constexpr uint32_t tableMu() { return kTableMu; }
     static constexpr uint32_t tableR() { return kTableR; }
     const std::vector<std::array<float, 3>>& table() const { return m_table; }
+    // One table entry, computed as the constructor computes it (the GPU build's check); sqrt(Rt^2 - R^2) of the table.
+    std::array<float, 3> tableEntry(uint32_t ir, uint32_t im) const;
+    double tableH() const { return m_H; }
     double bottomRadius() const { return m_a.bottomRadius; }
 
 private:

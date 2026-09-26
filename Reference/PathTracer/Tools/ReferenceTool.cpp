@@ -2,7 +2,7 @@
 //
 //   unx_reference render  --scene <name|file.unxscene> (--camera <name> | --path <name> --time <s>) --res <WxH>
 //                         [--seed N] [--scale S] [--no-wind] [--sun-illuminance lux] [--write-scene <file>] [--spp N] [--force]
-//                         [--device cpu|gpu] [--render-seed N]
+//                         [--device cpu|gpu|warp] [--render-seed N]
 //                         [--volume-order MIN:MAX]
 //       Renders into / reuses Cache/Reference/<scene>/<camera>_<W>x<H>_<spp>_<sceneHash16>_<qualityHash16>.pfm (+ .json,
 //       + .halfA.pfm / .halfB.pfm). --spp overrides reference.samples_per_pixel (recorded in the name and the hash);
@@ -25,6 +25,10 @@
 //       CPU/GPU validation gate: tile z-scores, per-mask bias, relMSE against both noises (halves beside the images).
 //   unx_reference selfcheck
 //       Measured error of the atmosphere optical-depth table against direct quadrature.
+// --device gpu takes the GPU measurement lock itself in <= 15 s slices (kind correctness, track E) and bounds each
+// dispatch structurally (Reference/GpuTracer/include/unx/reference/GpuPathTracer.h): run it directly, never under a
+// Tools/CI/GpuLock.ps1 wrapper (a wrapped run works inside the wrapper's lock for its whole length, no slices).
+// --device warp runs the same GPU kernels on WARP (CPU): first runs after kernel changes, no GPU hang possible.
 // render and census pause while another session holds the GPU measurement lock (.gpulock/current.json with a live
 // holder) or while the manual marker .gpulock/HOLD exists (e.g. the user plays a game); --no-hold disables.
 // Scenes by name come from Tools/SceneGen (seed 1, scale 1 unless given). --no-wind sets the wind speed to 0 before
@@ -42,6 +46,7 @@
 #include "../src/Atmosphere.h"
 
 #include <algorithm>
+#include <map>
 #include <array>
 #include <chrono>
 #include <sstream>
@@ -76,7 +81,9 @@ struct Args
     std::string cpuImage, gpuImage;                  // gatecompare --cpu-image / --gpu-image (full images; halves beside them)
     bool stripDynamic = false;                       // --strip-dynamic: drop the RPP-1 dynamic bodies (the scene before 2026-09-26)
     bool gpu = false;                                // --device gpu: the GPU reference path tracer (Reference/GpuTracer)
+    bool warp = false;                               // --device warp: the GPU tracer on WARP (correctness, no GPU)
     uint64_t renderSeed = 0;                         // --render-seed N (0 = the device default)
+    uint32_t probeX = 0, probeY = 0, probeRows = 1;  // probe --pixel X,Y [--rows N]
 };
 
 Args parse(int argc, char** argv)
@@ -103,6 +110,15 @@ Args parse(int argc, char** argv)
             a.height = (uint32_t)std::stoul(r.substr(x + 1));
         }
         else if (k == "--spp") a.spp = (uint32_t)std::stoul(next());
+        else if (k == "--pixel")
+        {
+            const std::string r = next();
+            const size_t c = r.find(',');
+            if (c == std::string::npos) fail("--pixel expects X,Y");
+            a.probeX = (uint32_t)std::stoul(r.substr(0, c));
+            a.probeY = (uint32_t)std::stoul(r.substr(c + 1));
+        }
+        else if (k == "--rows") a.probeRows = (uint32_t)std::stoul(next());
         else if (k == "--no-wind") a.noWind = true;
         else if (k == "--no-hold") a.noHold = true;
         else if (k == "--sun-illuminance") a.sunIlluminance = std::stof(next());
@@ -117,8 +133,9 @@ Args parse(int argc, char** argv)
         else if (k == "--device")
         {
             const std::string d = next();
-            if (d != "cpu" && d != "gpu") fail("--device expects cpu or gpu");
-            a.gpu = d == "gpu";
+            if (d != "cpu" && d != "gpu" && d != "warp") fail("--device expects cpu, gpu or warp");
+            a.gpu = d != "cpu";
+            a.warp = d == "warp";
         }
         else if (k == "--render-seed") a.renderSeed = std::stoull(next());
         else if (k == "--strip-dynamic") a.stripDynamic = true;
@@ -260,20 +277,22 @@ std::string nowIso()
 std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const std::string& label, const reference::ResolvedCamera& cam, const QualityConfig& q)
 {
     const ReferenceKeys k = referenceKeys(q, a.spp, reference::hasSunCausticSurfaces(s), a.orderMin, a.orderMax, a.surfMin, a.surfMax, a.gpu, a.renderSeed);
-    const std::filesystem::path pfm = cachePath(s, label, a.width, a.height, k);
+    std::filesystem::path pfm = cachePath(s, label, a.width, a.height, k);
+    if (a.warp) pfm.replace_filename(pfm.stem().string() + "_warp.pfm");  // never mistaken for a GPU reference
     if (std::filesystem::exists(pfm) && !a.force)
     {
         logf("reference: cached %s\n", pfm.string().c_str());
         return pfm;
     }
     logf("reference: rendering %s camera %s %ux%u at %u spp (quality %s, %s) -> %s\n", s.name.c_str(), label.c_str(), a.width, a.height, k.spp, k.hash16.c_str(),
-         a.gpu ? "gpu" : "cpu", pfm.string().c_str());
+         a.warp ? "warp" : a.gpu ? "gpu" : "cpu", pfm.string().c_str());
     if (!a.gpu) reference::waitWhileHeld(holdFiles(a));
     const auto t0 = std::chrono::steady_clock::now();
     std::unique_ptr<reference::PathTracer> pt;
     std::unique_ptr<reference::GpuPathTracer> gpt;
     if (a.gpu) gpt = std::make_unique<reference::GpuPathTracer>(s, root(), format("unx_reference gpu %s/%s %ux%u %u spp", s.name.c_str(), label.c_str(), a.width, a.height, k.spp));
     else pt = std::make_unique<reference::PathTracer>(s);
+    if (a.warp) gpt->setWarp(true);
     const double buildSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     reference::RenderSettings rs;
     rs.seed = a.renderSeed ? a.renderSeed : a.gpu ? 0x6E5EEDull : 0x5EEDull;
@@ -699,6 +718,73 @@ int main(int argc, char** argv)
         if (a.command == "render")
         {
             renderCached(a, s, label, cam, q);
+            return 0;
+        }
+        if (a.command == "probe")
+        {
+            // Diagnostics (GPU gate outliers): the primary hits of pixel column X, rows Y .. Y + rows - 1 (16 stratified
+            // sub-samples + the centre each): per surface, the share of sub-samples and its triangle - of the CPU estimator,
+            // and with --device gpu also of the GPU tracer, with the sub-samples where the two differ.
+            const uint32_t rows = std::min(a.probeRows, a.height - std::min(a.probeY, a.height));
+            reference::PathTracer pt(s);
+            const std::vector<uint64_t> cpu = pt.primaryIdentities(cam, a.width, a.height, a.probeX, a.probeY, 1, rows);
+            std::vector<uint64_t> gpu;
+            if (a.gpu)
+            {
+                reference::GpuPathTracer gpt(s, root(), format("unx_reference probe %s", s.name.c_str()));
+                if (a.warp) gpt.setWarp(true);
+                gpu = gpt.primaryIdentities(cam, a.width, a.height, a.probeX, a.probeY, 1, rows);
+            }
+            std::map<uint64_t, std::pair<uint32_t, uint32_t>> count;  // id -> (CPU, GPU) sub-samples
+            for (size_t i = 0; i < cpu.size(); ++i)
+            {
+                ++count[cpu[i]].first;
+                if (!gpu.empty()) ++count[gpu[i]].second;
+            }
+            const uint32_t total = (uint32_t)cpu.size();
+            std::vector<std::pair<uint32_t, uint64_t>> order;
+            for (const auto& [id, n] : count) order.push_back({ std::max(n.first, n.second), id });
+            std::sort(order.rbegin(), order.rend());
+            logf("probe %s/%s %ux%u column %u rows %u..%u: %zu surfaces over %u sub-samples%s\n", s.name.c_str(), label.c_str(), a.width, a.height, a.probeX, a.probeY,
+                 a.probeY + rows - 1, order.size(), total, gpu.empty() ? "" : " (CPU %, GPU %)");
+            auto describe = [&](uint64_t id) -> std::string {
+                if (id == reference::kSkyIdentity) return "sky";
+                const uint32_t inst = (uint32_t)(id >> 32), tri = (uint32_t)id;
+                const scene::Instance& in = s.instances[inst];
+                const scene::Mesh& m = s.meshes[in.mesh];
+                uint32_t mat = scene::kNone;
+                for (size_t k = 0; k < m.submeshes.size(); ++k)
+                    if (3 * tri >= m.submeshes[k].indexOffset && 3 * tri < m.submeshes[k].indexOffset + m.submeshes[k].indexCount)
+                        mat = in.materialOverrides.empty() ? m.submeshes[k].material : in.materialOverrides[k];
+                const float3 p0 = in.transform.transformPoint(m.positions[m.indices[3 * tri]]), p1 = in.transform.transformPoint(m.positions[m.indices[3 * tri + 1]]),
+                             p2 = in.transform.transformPoint(m.positions[m.indices[3 * tri + 2]]);
+                const float e0 = length(p1 - p0), e1 = length(p2 - p1), e2 = length(p0 - p2), area = 0.5f * length(cross(p1 - p0, p2 - p0));
+                const float3 c = (p0 + p1 + p2) * (1.0f / 3);
+                const scene::Material& mm = s.materials[mat];
+                return format("instance %u (mesh '%s', flags 0x%x) triangle %u, material %u '%s' (alpha cutoff %.3f, base texture %d), edges %.4g %.4g %.4g m, "
+                              "area %.3g m2, distance %.3f m",
+                              inst, m.name.c_str(), in.flags, tri, mat, mm.name.c_str(), mm.alphaCutoff, (int)(mm.baseColorTexture != scene::kNone), e0, e1, e2, area,
+                              length(c - cam.position));
+            };
+            for (const auto& [n, id] : order)
+            {
+                const auto& c = count[id];
+                if (gpu.empty()) logf("  %6.2f %%  %s\n", 100.0 * c.first / total, describe(id).c_str());
+                else logf("  %6.2f %% %6.2f %%  %s\n", 100.0 * c.first / total, 100.0 * c.second / total, describe(id).c_str());
+            }
+            if (!gpu.empty())
+            {
+                // sub-samples whose first hit differs: CPU surface -> GPU surface, counted
+                std::map<std::pair<uint64_t, uint64_t>, uint32_t> flips;
+                for (size_t i = 0; i < cpu.size(); ++i)
+                    if (cpu[i] != gpu[i]) ++flips[{ cpu[i], gpu[i] }];
+                uint32_t differ = 0;
+                for (const auto& [k, n] : flips) differ += n;
+                logf("  %u of %u sub-samples hit a different surface on the GPU\n", differ, total);
+                for (const auto& [k, n] : flips)
+                    logf("    %4u x  CPU %s  ->  GPU %s\n", n, k.first == reference::kSkyIdentity ? "sky" : format("%u/%u", (uint32_t)(k.first >> 32), (uint32_t)k.first).c_str(),
+                         k.second == reference::kSkyIdentity ? "sky" : format("%u/%u", (uint32_t)(k.second >> 32), (uint32_t)k.second).c_str());
+            }
             return 0;
         }
         if (a.command == "census")

@@ -16,14 +16,17 @@
 #include "unx/reference/PathTracer.h"
 #include "unx/render/Device.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <vector>
 
 using namespace unx;
 
 namespace
 {
+bool g_warp = false;  // --warp
 constexpr double kPi = 3.14159265358979323846;
 #define CHECK(c, ...) do { if (!(c)) fail(__VA_ARGS__); } while (0)
 
@@ -108,6 +111,7 @@ void testDefocus()
     const double fpx = (H / 2.0) / tanHalf;  // 200 px per unit tangent; the edge is at image x = 64
     const double exposure = 1.0 / 1.2;
     reference::GpuPathTracer gpt(s, UNX_SOURCE_DIR, "unx_test_reference_photo defocus");
+    gpt.setWarp(g_warp);
     struct Case
     {
         float aperture, focus;
@@ -180,6 +184,7 @@ void testLensLightTracer()
 
     const uint32_t W = 48, H = 8;
     reference::GpuPathTracer gpt(s, UNX_SOURCE_DIR, "unx_test_reference_photo lenslight");
+    gpt.setWarp(g_warp);
     // column means and their standard errors from the halves (8 pixels per column: 8 degrees of freedom)
     auto column = [&](const reference::RenderOutput& o, uint32_t x, double& mean, double& se) {
         double m = 0, v = 0;
@@ -239,24 +244,35 @@ void testProgressive()
     cam.lensAperture = 0.5f;
     cam.lensFocus = 5;
     reference::GpuPathTracer gpt(s, UNX_SOURCE_DIR, "unx_test_reference_photo progress");
-    const reference::RenderOutput full = gpt.render(cam, settings(128, 8, 256));
-    gpt.start(cam, settings(128, 8, 1024));
+    gpt.setWarp(g_warp);
+    // WARP (about 15 ms per path in software): 16 x 8 pixels to 32 samples - the kernels, the sample chunks and the GPU
+    // reduction; the noise ratio (a statistic of the whole image) is checked on the GPU size only
+    const uint32_t W = g_warp ? 16 : 128, total = g_warp ? 32 : 256, early = total / 4;
+    const reference::RenderOutput full = gpt.render(cam, settings(W, 8, total));
+    gpt.start(cam, settings(W, 8, 4 * total));
     double relAt64 = 0;
-    while (gpt.samplesDone() < 256)
+    while (gpt.samplesDone() < total)
     {
         const uint32_t done = gpt.pass(8);
-        if (done == 64) relAt64 = gpt.current().halvesRelMse;
+        if (done == early) relAt64 = gpt.current().halvesRelMse;
     }
     const reference::RenderOutput part = gpt.current();
-    CHECK(gpt.samplesDone() == 256, "progress: %u samples", gpt.samplesDone());
+    CHECK(gpt.samplesDone() == total, "progress: %u samples", gpt.samplesDone());
+    // the GPU-reduced halves' relMSE (currentHalvesRelMse, updated with the image) = the read-back one up to the order
+    // of the double additions
+    gpt.currentImageResource();
+    const double gpuRel = gpt.currentHalvesRelMse();
+    CHECK(std::abs(gpuRel - part.halvesRelMse) <= 1e-12 * part.halvesRelMse, "progress: GPU halves' relMSE %.17g, read back %.17g", gpuRel,
+          part.halvesRelMse);
     double worst = 0;
     for (size_t i = 0; i < full.image.rgb.size(); ++i) worst = std::max(worst, (double)std::abs(full.image.rgb[i] - part.image.rgb[i]));
-    CHECK(worst <= 1e-5, "progress: 256 samples in passes of 8 differ from render(256) by %.3g", worst);
+    CHECK(worst <= 1e-5, "progress: %u samples in passes of 8 differ from render(%u) by %.3g", total, total, worst);
     // the halves' relMSE is the noise of a half: 1 / samples
     const double ratio = relAt64 / part.halvesRelMse;
-    CHECK(ratio > 2.5 && ratio < 6.5, "progress: halves' relMSE 64 -> 256 samples fell by %.2f (expected ~4)", ratio);
-    logf("  progress  passes of 8 samples reach render()'s image (worst %.1e); halves' relMSE %.3g at 64 -> %.3g at 256 samples (x%.2f)\n", worst, relAt64,
-         part.halvesRelMse, ratio);
+    if (!g_warp) CHECK(ratio > 2.5 && ratio < 6.5, "progress: halves' relMSE 64 -> 256 samples fell by %.2f (expected ~4)", ratio);
+    logf("  progress  passes of 8 samples reach render()'s image (worst %.1e); halves' relMSE %.3g at %u -> %.3g at %u samples (x%.2f); "
+         "GPU-reduced %.3g (relative difference %.1e)\n",
+         worst, relAt64, early, part.halvesRelMse, total, ratio, gpuRel, std::abs(gpuRel - part.halvesRelMse) / part.halvesRelMse);
 }
 
 // Shutter time integral: a 0.4 m emitting square (1 nit) moves 1 m along +x during the shutter over a black floor, seen
@@ -292,6 +308,7 @@ void testMotionBlur()
     motion.cameraUp = cam.up;
     motion.instances = { s.instances[0].transform, close };
     reference::GpuPathTracer gpt(s, UNX_SOURCE_DIR, "unx_test_reference_photo motion");
+    gpt.setWarp(g_warp);
     gpt.setMotion(motion);
     reference::RenderSettings rs = settings(W, H, 4096);
     const reference::RenderOutput out = gpt.render(cam, rs);
@@ -344,6 +361,7 @@ void testSharedDevice()
     reference::RenderOutput own;
     {
         reference::GpuPathTracer gpt(s, UNX_SOURCE_DIR, "unx_test_reference_photo shared (own device)");
+        gpt.setWarp(g_warp);
         own = gpt.render(cam, settings(128, 8, 256));
     }
     render::DeviceOptions o;
@@ -401,6 +419,51 @@ void testSharedDevice()
     logf("  shared  the renderer's device: same image as the tracer's own device (worst %.1e), GPU image = read-back image (%u px bit exact), all %u descriptors returned\n", worst, imageBits, peak - before);
 }
 
+// WARP termination check (first run of kernel changes, before the GPU): 2 x 2 pixels, 2 samples, the full path depth
+// and the sun-caustic light paths - every dispatch completes (a looping kernel never would) with error bits 0.
+void testTiny()
+{
+    const scene::Scene s = edgeScene();
+    reference::ResolvedCamera cam = downCamera(10, 0.02f);
+    cam.lensAperture = 0.5f;
+    cam.lensFocus = 5;
+    reference::GpuPathTracer gpt(s, UNX_SOURCE_DIR, "unx_test_reference_photo tiny");
+    gpt.setWarp(g_warp);
+    const reference::RenderOutput out = gpt.render(cam, settings(2, 2, 2));
+    const reference::GpuRenderInfo& info = gpt.info();
+    CHECK(info.errors == 0, "tiny: kernel error bits 0x%x", info.errors);
+    CHECK(out.stats.nanSamples == 0, "tiny: %llu NaN samples", (unsigned long long)out.stats.nanSamples);
+    gpt.currentImageResource();
+    const double gpuRel = gpt.currentHalvesRelMse(), rel = gpt.current().halvesRelMse;
+    CHECK(std::abs(gpuRel - rel) <= 1e-12 * std::max(rel, 1e-300), "tiny: GPU halves' relMSE %.17g, read back %.17g", gpuRel, rel);
+    logf("  tiny  2 x 2 px, 2 spp on %s: %u dispatches all completed (longest %.1f ms, %.1f s in all), error bits 0, %llu paths, %llu rays, "
+         "%llu truncated\n",
+         g_warp ? "WARP" : "the GPU", info.dispatches, info.longestDispatchMs, info.gpuSeconds, (unsigned long long)out.stats.paths,
+         (unsigned long long)out.stats.rays, (unsigned long long)out.stats.truncatedPaths);
+}
+
+// The atmosphere's tau_top table built on the GPU (the photo-mode start) against the CPU model's entries: on WARP 16
+// entries at the ground, middle and top rows, on the GPU the whole table (1024 x 2048).
+void testAtmosphereTable()
+{
+    const scene::Scene s = blankScene("photo_atmosphere");
+    reference::GpuPathTracer gpt(s, UNX_SOURCE_DIR, "unx_test_reference_photo atmtable");
+    gpt.setWarp(g_warp);
+    const uint32_t mu = 2048, rows = 1024;
+    reference::GpuPathTracer::AtmosphereTableCheck all;
+    for (uint32_t row : g_warp ? std::vector<uint32_t>{ 0, rows / 2, rows - 1 } : std::vector<uint32_t>{ 0 })
+    {
+        const reference::GpuPathTracer::AtmosphereTableCheck c = gpt.checkAtmosphereTable(row * mu + (g_warp ? 1000 : 0), g_warp ? 16 : rows * mu);
+        all.entries += c.entries;
+        all.differing += c.differing;
+        all.maxRelative = std::max(all.maxRelative, c.maxRelative);
+        all.seconds += c.seconds;
+    }
+    CHECK(all.maxRelative <= 1e-6, "atmtable: GPU entries differ from the CPU's by up to %.3g (relative)", all.maxRelative);
+    logf("  atmtable  %u entries built on the %s in %.3f s: %u of %u channels differ from the CPU's bitwise, largest relative difference %.2e\n", all.entries,
+         g_warp ? "WARP" : "GPU", all.seconds, all.differing, 3 * all.entries, all.maxRelative);
+}
+
 void testExr()
 {
     metrics::Image im;
@@ -420,18 +483,23 @@ int main(int argc, char** argv)
 {
     try
     {
-        const char* only = argc > 1 ? argv[1] : nullptr;
+        const char* only = nullptr;
+        for (int i = 1; i < argc; ++i)
+            if (std::strcmp(argv[i], "--warp") == 0) g_warp = true;  // the tracer's kernels on WARP (no GPU): first runs
+            else only = argv[i];
         auto run = [&](const char* name, void (*fn)()) {
             if (only && std::strcmp(only, name) != 0) return;
             logf("[%s]\n", name);
             fn();
         };
         run("exr", testExr);
+        run("tiny", testTiny);
+        run("atmtable", testAtmosphereTable);
         run("defocus", testDefocus);
         run("progress", testProgressive);
         run("lenslight", testLensLightTracer);
         run("motion", testMotionBlur);
-        run("shared", testSharedDevice);
+        if (!g_warp) run("shared", testSharedDevice);  // the renderer's device is the GPU
         logf("photo mode tests passed\n");
         return 0;
     }

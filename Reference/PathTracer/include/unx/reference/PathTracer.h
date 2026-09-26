@@ -121,6 +121,9 @@ public:
     // Returns width * height * 17 identities.
     std::vector<uint64_t> primaryIdentities(const ResolvedCamera& camera, uint32_t width, uint32_t height,
                                             const std::vector<std::filesystem::path>& pauseWhileExists = {});
+    // The same for the pixel rectangle [x0, x0 + columns) x [y0, y0 + rows) only (row-major over the rectangle).
+    std::vector<uint64_t> primaryIdentities(const ResolvedCamera& camera, uint32_t width, uint32_t height, uint32_t x0, uint32_t y0, uint32_t columns,
+                                            uint32_t rows);
 
     struct Impl;
 

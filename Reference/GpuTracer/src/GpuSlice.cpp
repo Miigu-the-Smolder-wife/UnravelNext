@@ -197,7 +197,10 @@ double GpuSlice::acquire()
         const std::string pid = holder.empty() ? std::string() : field(holder, "pid");
         if (!pid.empty() && isAncestor((uint32_t)std::strtoul(pid.c_str(), nullptr, 10)))
         {
-            if (!m_inherited) logf("gpu slice: running under the GPU lock of a parent process (%s) - no slices\n", field(holder, "command").c_str());
+            if (!m_inherited)
+                logf("gpu slice: running under the GPU lock of a parent process (%s) - no slices, other sessions wait for the whole run. "
+                     "The GPU reference takes the lock itself: run it directly, not under Tools/CI/GpuLock.ps1\n",
+                     field(holder, "command").c_str());
             m_inherited = true;
             m_held = true;
             m_start = std::chrono::steady_clock::now();
