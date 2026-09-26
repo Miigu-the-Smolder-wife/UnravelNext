@@ -10,7 +10,11 @@
 //   3. grain and bloom: two runs bit identical (hashes of pixel and frame index), grain zero-mean (|mean| < 0.1 step);
 //   4. an HDR display (FrameContext::displayPeak): the RGBA16F output against the CPU reference of the curve generalised
 //      to the peak (4 x paper white, vignetting 0.7) within half precision, never above the peak; at peak 1 the HDR
-//      output equals the SDR curve before its encoding (half precision).
+//      output equals the SDR curve before its encoding (half precision);
+//   5. motion blur's gather (MotionBlur.hlsl) on a uniform velocity (40 px/frame, 180 degree shutter: a 20 px streak ahead
+//      of each pixel) over sinusoids along it: against the exact exposure integral (1/L) int_0^L I(x + t) dt in closed form;
+//   6. heat haze (Distortion.hlsl): D = (3, 0) px under a haze front at device depth 0.5; pixels behind it (0.1) read
+//      I(x + D (1 - 0.1 / 0.5)) = I(x + 2.4) (bilinear of the sinusoids: within 1e-3), pixels in front (0.9) are unchanged.
 // Options: --levels N (6, test 1).
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
@@ -22,6 +26,7 @@
 #include "unx/render/RenderGraph.h"
 #include "unx/render/Shaders.h"
 #include "unx/scene/SceneData.h"
+#include "unx/shading/MotionBlur.h"
 #include "unx/shading/Post.h"
 
 #include <algorithm>
@@ -140,13 +145,13 @@ struct Context
     }
 };
 
-void fill(Context& x, ShaderLibrary& shaders, TextureRef t, uint32_t mode, uint32_t px = 0, uint32_t py = 0)
+void fill(Context& x, ShaderLibrary& shaders, TextureRef t, uint32_t mode, uint32_t px = 0, uint32_t py = 0, uint32_t value = 0)
 {
     const TextureDesc d = x.graph.desc(t);
     ID3D12PipelineState* pso = shaders.compute("Passes/Shading/Tests/PostImpulse");
     x.graph.addPass("post.test.input", QueueType::Graphics, [&](PassBuilder& b) { b.use(t, Use::UavCompute); },
                     [=](PassContext& c) {
-                        const uint32_t k[8] = { c.uav(t), px, py, asUint(kEnergy), mode, 0, 0, 0 };
+                        const uint32_t k[8] = { c.uav(t), px, py, mode == 0 ? asUint(kEnergy) : value, mode, 0, 0, 0 };
                         c.cmd->SetPipelineState(pso);
                         c.computeConstants(k, 8);
                         c.cmd->Dispatch((d.width + 7) / 8, (d.height + 7) / 8, 1);
@@ -196,6 +201,7 @@ PostView postView(Device& device)
     c.proj = v.view.view.proj;
     c.viewWidth = kWidth;
     c.viewHeight = kHeight;
+    c.nearPlane = v.view.view.nearPlane;
     c.exposure = 1.0f;
     void* p = nullptr;
     check(v.constants->Map(0, nullptr, &p), "map constants");
@@ -450,6 +456,117 @@ int main(int argc, char** argv)
                 expect(peak == 1.0f ? "HDR peak 1: the SDR curve before encoding (half precision)" : "HDR peak 4: the generalised curve (half precision)", worst < 2e-3);
                 expect("HDR: never above the peak", top <= peak * (1 + 1e-3));
             }
+        }
+        // 5. motion blur's gather against the exact exposure integral
+        {
+            const QualityConfig q = loadQuality();
+            Context x(device, shaders, q);
+            x.frame.frameIndex = kFrame;
+            PostView v = postView(device);
+            const TextureRef image = x.graph.createTexture(TextureDesc{ "post.test.motion.image", kWidth, kHeight, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            const TextureRef velocity = x.graph.createTexture(TextureDesc{ "post.test.motion.velocity", kWidth, kHeight, 1, 1, DXGI_FORMAT_R16G16_FLOAT });
+            const TextureRef depthTexture = x.graph.createTexture(TextureDesc{ "post.test.motion.depth", kWidth, kHeight, 1, 1, DXGI_FORMAT_R32_FLOAT });
+            const TextureRef blurred = x.graph.createTexture(TextureDesc{ "post.test.motion.blurred", kWidth, kHeight, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            const float vx = 40.0f;
+            fill(x, shaders, image, 3);
+            fill(x, shaders, velocity, 2, asUint(vx), asUint(0.0f), 0);
+            fill(x, shaders, depthTexture, 2, asUint(0.01f), 0, 0);
+            v.view.depth = depthTexture;
+            shading::motionBlurWithVelocity(x.fc, v.view, image, blurred, velocity);
+            std::vector<uint8_t> out;
+            uint32_t op = 0;
+            Readbacks rb{ device };
+            rb.texture(x.graph, blurred, out, op);
+            x.graph.execute(nullptr);
+            rb.finish();
+            if (device.drainDebugMessages() != 0) fail("D3D12 debug layer errors");
+            const double L = 0.5 * vx, pi2 = 6.283185307179586;
+            double worst[2] = { 0, 0 }, mean[2] = { 0, 0 };
+            uint64_t n = 0;
+            for (uint32_t y = 0; y < kHeight; ++y)
+                for (uint32_t xx = 8; xx + 48 < kWidth; ++xx)
+                {
+                    uint16_t h[4];
+                    std::memcpy(h, out.data() + (size_t)y * op + (size_t)xx * 8, 8);
+                    const double x0 = xx + 0.5;
+                    for (int ch = 0; ch < 2; ++ch)
+                    {
+                        const double lambda = ch == 0 ? 64.0 : 23.0, k = pi2 / lambda;
+                        const double exact = 0.5 + 0.4 * (std::cos(k * x0) - std::cos(k * (x0 + L))) / (k * L);
+                        const double e = std::abs(halfToFloat(h[ch]) - exact);
+                        worst[ch] = std::max(worst[ch], e);
+                        mean[ch] += e;
+                    }
+                    ++n;
+                }
+            logf("motion blur 20 px streak vs the exact integral: period 64 px mean %.4f worst %.4f, period 23 px mean %.4f worst %.4f\n", mean[0] / n, worst[0],
+                 mean[1] / n, worst[1]);
+            // the midpoint rule's error h^2 / 24 max|f''| with h = 2 px: 6.4e-4 (period 64) and 5.0e-3 (period 23), + half precision
+            expect("motion blur: the gather matches the exposure integral (period 64: worst < 1.5e-3)", worst[0] < 1.5e-3);
+            expect("motion blur: ... near a full period inside the streak (period 23: worst < 6e-3)", worst[1] < 6e-3);
+        }
+        // 6. heat haze
+        {
+            const QualityConfig q = loadQuality();
+            Context x(device, shaders, q);
+            PostView v = postView(device);
+            const uint32_t qw = (kWidth + 3) / 4, qh = (kHeight + 3) / 4;
+            const TextureRef image = x.graph.createTexture(TextureDesc{ "post.test.haze.image", kWidth, kHeight, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            const TextureRef offset = x.graph.createTexture(TextureDesc{ "post.test.haze.offset", qw, qh, 1, 1, DXGI_FORMAT_R16G16_FLOAT });
+            const TextureRef haze = x.graph.createTexture(TextureDesc{ "post.test.haze.depth", qw, qh, 1, 1, DXGI_FORMAT_R16_FLOAT });
+            const TextureRef behind = x.graph.createTexture(TextureDesc{ "post.test.haze.behind", kWidth, kHeight, 1, 1, DXGI_FORMAT_R32_FLOAT });
+            const TextureRef front = x.graph.createTexture(TextureDesc{ "post.test.haze.front", kWidth, kHeight, 1, 1, DXGI_FORMAT_R32_FLOAT });
+            const TextureRef outBehind = x.graph.createTexture(TextureDesc{ "post.test.haze.outBehind", kWidth, kHeight, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            const TextureRef outFront = x.graph.createTexture(TextureDesc{ "post.test.haze.outFront", kWidth, kHeight, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            fill(x, shaders, image, 3);
+            fill(x, shaders, offset, 2, asUint(3.0f), asUint(0.0f), 0);
+            fill(x, shaders, haze, 2, asUint(0.5f), 0, 0);
+            fill(x, shaders, behind, 2, asUint(0.1f), 0, 0);
+            fill(x, shaders, front, 2, asUint(0.9f), 0, 0);
+            v.view.distortionOffset = offset;
+            v.view.distortionDepth = haze;
+            v.view.depth = behind;
+            shading::distortion(x.fc, v.view, image, outBehind);
+            v.view.depth = front;
+            shading::distortion(x.fc, v.view, image, outFront);
+            std::vector<uint8_t> in, ob, of;
+            uint32_t ip = 0, bp = 0, fp = 0;
+            Readbacks rb{ device };
+            rb.texture(x.graph, image, in, ip);
+            rb.texture(x.graph, outBehind, ob, bp);
+            rb.texture(x.graph, outFront, of, fp);
+            x.graph.execute(nullptr);
+            rb.finish();
+            if (device.drainDebugMessages() != 0) fail("D3D12 debug layer errors");
+            double worst = 0;
+            bool frontSame = true;
+            for (uint32_t y = 0; y < kHeight; ++y)
+                for (uint32_t xx = 0; xx < kWidth; ++xx)
+                {
+                    frontSame = frontSame && std::memcmp(in.data() + (size_t)y * ip + (size_t)xx * 8, of.data() + (size_t)y * fp + (size_t)xx * 8, 8) == 0;
+                    if (xx < 4 || xx + 8 >= kWidth) continue;
+                    uint16_t h[4];
+                    std::memcpy(h, ob.data() + (size_t)y * bp + (size_t)xx * 8, 8);
+                    // the bilinear image at x + 2.4: texel values at centres j + 0.5, linear between them
+                    const double xs = xx + 0.5 + 2.4 - 0.5;
+                    const int j = (int)std::floor(xs);
+                    const double f = xs - j;
+                    for (int ch = 0; ch < 2; ++ch)
+                    {
+                        const double lambda = ch == 0 ? 64.0 : 23.0;
+                        auto texel = [&](int t) {
+                            uint16_t v4[4];
+                            std::memcpy(v4, in.data() + (size_t)y * ip + (size_t)t * 8, 8);
+                            return (double)halfToFloat(v4[ch]);
+                        };
+                        (void)lambda;
+                        const double expected = texel(j) * (1 - f) + texel(j + 1) * f;
+                        worst = std::max(worst, std::abs(halfToFloat(h[ch]) - expected));
+                    }
+                }
+            logf("heat haze: behind the front vs the image at x + 2.4 (bilinear): worst %.2e; in front unchanged: %s\n", worst, frontSame ? "yes" : "no");
+            expect("heat haze: pixels behind read the image at p + D (1 - z_haze / z_pixel)", worst < 1e-3);
+            expect("heat haze: pixels in front of the haze are unchanged (bit identical)", frontSame);
         }
         std::filesystem::remove(cube);
         logf(failures ? "POST TESTS FAILED (%d)\n" : "POST TESTS PASSED\n", failures);

@@ -39,3 +39,8 @@ post_bloom_levels = 6
 post_vignette = 0.0
 post_grain = 0.0
 post_lut = ""
+
+# Motion blur (A5; COVERAGE 14.12 (2); MotionBlur.cpp): the shutter's open time as a fraction of the frame interval,
+# the exposure [t - s dt, t]; 0.5 = 180 degrees (the user's gate camera, 2026-09-26), 0 = instantaneous. Frames without
+# motion (static camera and scene) are unchanged.
+motion_blur_shutter = 0.5

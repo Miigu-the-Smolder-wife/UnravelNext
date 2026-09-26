@@ -254,6 +254,8 @@ void GpuScene::upload(const scene::Scene& s)
     m_instances.clear();
     m_remap.clear();
     for (const scene::Instance& in : s.instances) m_instances.push_back(packInstance(in, &palette));
+    m_windInstances = 0;
+    for (const gpu::Instance& g : m_instances) m_windInstances += (g.flags & scene::InstanceWind) != 0;
     const std::vector<uint32_t>& remap = m_remap;
 
     // Lights.
@@ -413,6 +415,8 @@ void GpuScene::setInstances(std::span<const uint32_t> indices)
         for (uint32_t m : in.materialOverrides)
             if (m >= m_materials.size()) fail("GpuScene::setInstances: instance %u overrides with material %u of %zu", i, m, m_materials.size());
         const gpu::Instance g = packInstance(in, nullptr);
+        if (i < m_instances.size()) m_windInstances -= (m_instances[i].flags & scene::InstanceWind) != 0;
+        m_windInstances += (g.flags & scene::InstanceWind) != 0;
         if (i == m_instances.size())
         {
             m_instances.push_back(g);

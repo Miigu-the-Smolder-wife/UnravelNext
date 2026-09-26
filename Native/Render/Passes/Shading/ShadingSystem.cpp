@@ -1,5 +1,6 @@
 #include "unx/shading/ShadingSystem.h"
 #include "unx/shading/Exposure.h"
+#include "unx/shading/MotionBlur.h"
 #include "unx/shading/Post.h"
 
 #include "unx/core/Log.h"
@@ -275,7 +276,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
 
     // Linear writers (exposed radiance in a float target): secondary views, validation frames, and the main view shaded
     // into the post chain's HDR target (Post.cpp).
-    const bool linear = view.view.kind != gpu::ViewKind::Main || fc.frame.outputLinearHdr || postActive(fc, view);
+    const bool linear = view.view.kind != gpu::ViewKind::Main || fc.frame.outputLinearHdr || postActive(fc, view) || motionBlurActive(fc, view) || distortionActive(fc, view);
     // Area-light code only in scenes with area lights (ShadeOpaque AREA variant: exact either way, fewer registers without).
     bool areaLights = false;
     if (const scene::Scene* src = fc.scene.source())
@@ -487,7 +488,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             {
                 const uint32_t cls = (uint32_t)material::ShadeClass::Sky;
                 uint32_t k[32] = { c.srv(o.materialWord), c.uav(v.color), c.srv(o.tiles), o.firstTile(cls, band),
-                                   atm[0], atm[1], atm[2], atm[3], experiment, 0, 0, 0, 0, 0, c.srv(edgeTiles), 0 };
+                                   atm[0], atm[1], atm[2], atm[3], experiment, r.celestial, 0, 0, 0, 0, c.srv(edgeTiles), 0 };  // P[2].y: S's celestial record (v1.49)
                 std::memcpy(k + 24, edge, sizeof edge);
                 particleConstants(c, k + 22);  // P[5].zw
                 k[18] = asUint(histogram.centreSigma);                        // P[4].z
@@ -879,13 +880,33 @@ void shade(FramePassContext& fc, ViewResources& view)
     // Views the frame does not record as the lighting group (planar reflection views through renderView, tests): M's own
     // group over the frame's bands (output.band_pixels; one band by default, v1.31). The banded part checks the view first.
     // With a post term on, the main view is shaded into the chain's HDR target and the chain writes the display output.
+    // Motion blur (the shutter's time integral) reads the shaded image around each pixel: with it the view is shaded into
+    // a float target first, then blurred into the chain's input (display) or into the linear capture itself.
+    // Heat haze re-reads it at displaced points too (before the exposure integral: the haze bends what the lens sees).
     const bool post = postActive(fc, view);
+    const bool blur = motionBlurActive(fc, view), haze = distortionActive(fc, view);
+    const DXGI_FORMAT floatFormat = post ? DXGI_FORMAT_R16G16B16A16_FLOAT : fc.graph.desc(view.color).format;
+    auto intermediate = [&](const char* name) { return fc.graph.createTexture(TextureDesc{ name, view.view.width, view.view.height, 1, 1, floatFormat }); };
     ViewResources target = view;
     if (post) target.color = postTarget(fc, view);
+    else if (blur || haze) target.color = intermediate("m.shaded");
     const std::vector<RenderGraph::BandedPass> passes = shadingPasses(fc, target);
     const material::ResolveOutputs& o = material::resolveOutputs(fc, target);
     fc.graph.addBandedGroup(view.view.kind != gpu::ViewKind::Main ? "m.lit.planar" : "m.lit", o.height, o.bands, passes);
     shadingComposite(fc, target);
-    if (post) postChain(fc, view, target.color);
+    TextureRef image = target.color;
+    if (haze)
+    {
+        const TextureRef displaced = (blur || post) ? intermediate("m.distorted") : view.color;
+        distortion(fc, view, image, displaced);
+        image = displaced;
+    }
+    if (blur)
+    {
+        const TextureRef blurred = post ? postTarget(fc, view) : view.color;
+        motionBlur(fc, view, image, blurred);
+        image = blurred;
+    }
+    if (post) postChain(fc, view, image);
 }
 } // namespace unx::render::shading

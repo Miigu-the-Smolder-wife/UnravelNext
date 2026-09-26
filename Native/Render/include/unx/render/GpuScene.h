@@ -90,6 +90,9 @@ public:
     uint32_t paletteJoints(uint32_t instance) const;
     void updateSkeleton(uint64_t frameIndex, uint32_t skeleton, std::span<const float3x4> jointToModel);
     void setInstanceVisible(uint32_t instance, bool visible);
+    // Scene motion of the frame being recorded (after flushUpdates; A5 motion blur): an instance moved or re-posed in this
+    // frame, or wind-animated instances (they move every frame). The camera's own motion is the view's (prevViewProj).
+    bool hasMotion() const { return !m_movedNow.empty() || !m_posedNow.empty() || m_windInstances > 0; }
     // Material textures published by M's texture system (INTERFACES_KO.md 6.3, v1.10): one entry per scene material.
     // Rewrites the material buffer (new SRV; the old one is released when the GPU is done) and bumps the revision of the
     // materials whose textures changed and the scene revision. Call before any frame constants of the frame are
@@ -163,6 +166,7 @@ private:
     std::vector<scene::Skeleton> m_poses;  // current joint-to-model per skeleton
     std::vector<uint64_t> m_transformFrame, m_paletteFrame;
     std::vector<uint32_t> m_movedNow, m_movedBefore, m_posedNow, m_posedBefore;
+    uint32_t m_windInstances = 0;  // instances with the wind flag (hasMotion)
     // Instances flagged gpu::kInstanceMotionBreak in this frame and in the previous flushed one (the flag lasts one frame).
     std::vector<uint32_t> m_brokenNow, m_brokenBefore;
     std::vector<uint8_t> m_brokenMarked;

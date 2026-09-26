@@ -9,6 +9,7 @@
 // SDR curve exactly), the LUT on the curve's output over the peak, grain, then display-referred linear light
 // (1 = paper white) into the RGBA16F output without OETF or dither; the host encodes it (scRGB or PQ).
 #include "unx/shading/Post.h"
+#include "unx/shading/MotionBlur.h"
 
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
@@ -177,6 +178,7 @@ bool postActive(FramePassContext& fc, const ViewResources& view)
 {
     if (view.view.kind != gpu::ViewKind::Main || fc.frame.outputLinearHdr) return false;
     if (fc.frame.displayPeak > 0) return true;  // an HDR display: the chain writes its encoding
+    if (motionBlurActive(fc, view) || distortionActive(fc, view)) return true;  // their float image is encoded by the chain
     const PostParams p = params(fc.quality);
     return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty();
 }
