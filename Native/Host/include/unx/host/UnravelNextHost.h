@@ -32,7 +32,7 @@ enum UnxResult
                             // 6: + UnxFrameSetDiscontinuity, UnxFrameSetSimulation, UnxTransformUpdate::flags (teleport);
                             //    later additions within 6 (optional exports, bridges probe for them): UnxFrameGraphStatsLatest,
                             //    UnxSceneLoad, UnxVideoMemory, UnxSceneEditInstances, UnxSceneEditMaterials, UnxVfxStreamExecutor,
-                            //    UnxRendererQualityOverride
+                            //    UnxRendererQualityOverride, UnxFrameSetLens
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -259,6 +259,10 @@ UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor);
 // Quality override before commit (optional export within ABI 6): "section.key=value" in TOML syntax, e.g. a game's
 // "shading.post_bloom_strength=0.04". Refused after commit.
 UNX_API int32_t UNX_CALL UnxRendererQualityOverride(UnxRenderer r, const char* utf8Assignment);
+// The camera's lens for the frames queued from now on (optional export within ABI 6; INTERFACES v1.51): aperture diameter
+// in metres (0 = pinhole: no depth of field) and focus distance in metres along the view axis. Unity: focal length /
+// f-number of a physical camera, and its focus distance.
+UNX_API int32_t UNX_CALL UnxFrameSetLens(UnxRenderer r, float apertureMetres, float focusMetres);
 UNX_API int32_t UNX_CALL UnxSceneAddLight(UnxRenderer r, const UnxLightDesc* desc, uint32_t* index);
 UNX_API int32_t UNX_CALL UnxSceneSetEnvironment(UnxRenderer r, const UnxEnvironmentDesc* desc);
 // The renderer's defaults for the environment (scene::Sun, scene::Atmosphere), for callers that set only some fields.

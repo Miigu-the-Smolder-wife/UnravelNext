@@ -298,6 +298,15 @@ void HostRenderer::setSun(const scene::Sun& sun)
     m_pending.sun = sun;
 }
 
+void HostRenderer::setLens(float aperture, float focus)
+{
+    if (!(aperture >= 0) || !std::isfinite(aperture) || (aperture > 0 && !(focus > 0 && std::isfinite(focus))))
+        fail("lens: aperture %g m (>= 0) and focus %g m (> 0 with an aperture)", aperture, focus);
+    std::lock_guard lock(m_mutex);
+    m_lensAperture = aperture;
+    m_lensFocus = focus;
+}
+
 void HostRenderer::setDiscontinuity(uint32_t flags)
 {
     requireCommitted();
@@ -334,6 +343,8 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.atmosphere = std::move(m_pending.atmosphere);
     packet.wind = std::move(m_pending.wind);
     packet.discontinuity = m_pending.discontinuity;
+    packet.lensAperture = m_lensAperture;
+    packet.lensFocus = m_lensFocus;
     packet.gpuSimulation = m_pending.gpuSimulation;
     packet.transforms = std::move(m_pending.transforms);
     packet.skeletons = std::move(m_pending.skeletons);
@@ -531,6 +542,9 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     // A4: a camera without an exposure (NaN EV100, UnxCameraDesc) asks for automatic exposure.
     fc.autoExposure = !std::isfinite(p.camera.ev100);
     fc.displayPeak = p.displayPeak;
+    fc.lensAperture = p.lensAperture;
+    fc.lensFocus = p.lensFocus;
+    fc.timing = m_profiler ? m_profiler->lastCompleted() : nullptr;  // (the debug HUD, E)
     fc.gpuSimulation = p.gpuSimulation;
     m_lastDiscontinuity = p.discontinuity;
     m_lastGpuSimulation = p.gpuSimulation;

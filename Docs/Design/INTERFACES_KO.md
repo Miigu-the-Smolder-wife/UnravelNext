@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.46, 2026-09-26)
+# UnravelNext 인터페이스 (v1.51, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -725,6 +725,10 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.51 (2026-09-26, A5·A3):
+  - **물리 카메라 렌즈(5.5, A5, COVERAGE 14.12 (2c))**: `FrameContext::lensAperture`(조리개 지름 m, 0 = 핀홀: 피사계 심도 없음, 게이트 카메라)와 `lensFocus`(초점 거리 m, 시선 축). 깊이 z의 착란원은 f_px A |1/z − 1/z_focus| 픽셀이다(f_px = (H/2) proj[1][1]). 호스트: `HostRenderer::setLens`, 선택 export `UnxFrameSetLens(r, apertureMetres, focusMetres)`(ABI 6 안). 이후 큐에 들어가는 프레임이 그 렌즈를 쓴다. 조리개 적분(DOF) 커널은 A5가 넣는다. 그 전까지 값은 전달만 된다.
+  - **`FrameContext::timing` 채움(I, v1.50)**: 호스트가 `GpuProfiler::lastCompleted()`를 넣는다.
+  - **VFX 실행기 version 2(`NV_STREAM_EXECUTOR_HEIGHTFIELDS`, 엔진 1 P12 높이 타일, 엔진 2 요청)**: FX가 높이장 절(`NV_StreamHeightField` 80 B, `NV_StreamHeightTile` 1,232 B)을 표면 표와 함께 받아 보관한다. 틱마다 정적 몸체 프레임으로 앵커 공간 프레임을 만든다(CPU 참조 `load_inputs`와 같은 식, double에서 float로). `Particles.hlsli`가 `NV_HEIGHTFIELD*` 훅을 채운다. `UnxVfxStreamExecutor`는 version 2를 등록한다.
 - v1.50 (2026-09-26, E A15; v1.47–1.49 are other tracks' open changes):
   - **디버그 드로우(FEATURES_GAME 7.1, E `Passes/Debug`)**: `FrameConstants::debugDraw`(옛 `spare0`, HLSL `g_debugDraw`) = 이번 프레임 디버그 원시형 버퍼의 UAV, 0xFFFFFFFF = 꺼짐(`GpuScene::fill`이 꺼짐으로 두고 `FrameRenderer`가 `tracks::debugBegin`의 값을 넣는다). 어느 커널이든 `Passes/Debug/DebugDraw.hlsli`의 `debugLine/debugPoint/debugTriangle/debugBox/debugNumber`로 덧붙인다(그래픽 큐 패스는 선언 없이 그려진다: 그리기 패스가 전역 배리어로 시작; 비동기 계산 큐 패스는 `debug::buffer(fc)`를 UAV로 선언). `Tracks.h`: `debugBegin`(프레임 처음, 프레임 상수보다 먼저), `debugOverlay`(프레임 끝: `debug.view` 버퍼 시각화 → 원시형 → HUD를 view.color 위에).
   - **`MeshPipelineDesc::premultipliedBlend`(core)**: 렌더 타깃 0에 미리 곱한 알파 혼합(src + dst (1 − src.a)).

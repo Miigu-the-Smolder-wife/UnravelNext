@@ -76,6 +76,7 @@ struct FramePacket
     ID3D12Resource* output = nullptr;              // host-owned RGB10A2 (RGBA16F with displayPeak) random-write texture;
                                                    // null standalone
     float displayPeak = 0;                         // FrameContext::displayPeak: 0 SDR, else HDR peak / paper white
+    float lensAperture = 0, lensFocus = 0;         // FrameContext::lensAperture / lensFocus (the host's current lens)
     std::optional<scene::Sun> sun;                 // changed sun (time of day)
     std::optional<scene::Atmosphere> atmosphere;   // changed atmosphere (weather); the atmosphere track rebuilds its LUTs
     struct Wind
@@ -161,6 +162,8 @@ public:
     // History discontinuity and GPU simulation steps of the next queued frame (INTERFACES 5.5.2, v1.35); bits of a
     // dropped packet are ORed into the next one.
     void setDiscontinuity(uint32_t flags);
+    // The camera's lens for the following frames (depth of field): aperture diameter (m, 0 = pinhole) and focus distance (m).
+    void setLens(float aperture, float focus);
     void setSimulation(uint32_t gpuSimulation);
     // Sun, atmosphere and (when set) wind of the following frames.
     void setEnvironment(const scene::Sun& sun, const scene::Atmosphere& atmosphere, std::optional<FramePacket::Wind> wind);
@@ -283,6 +286,7 @@ private:
     // V3 stream executor state.
     std::mutex m_fxMutex;
     uint64_t m_fxRecorded = 0;  // (m_fxMutex held) packets written under UNX_FX_RECORD
+    float m_lensAperture = 0, m_lensFocus = 0;  // (m_mutex) the lens every queued frame takes
     std::unique_ptr<render::RenderGraph> m_simGraph;  // the claimed ticks' graph (compute queue)
     uint64_t m_simIndex = 1ull << 48;                // its import index (apart from frame indices)
     uint64_t m_simFence = 0, m_simWaited = 0;        // compute fence of the last claimed tick; the frames waited up to

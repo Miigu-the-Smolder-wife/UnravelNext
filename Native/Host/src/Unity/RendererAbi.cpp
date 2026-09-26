@@ -357,6 +357,11 @@ UNX_API int32_t UNX_CALL UnxRendererQualityOverride(UnxRenderer r, const char* u
     });
 }
 
+UNX_API int32_t UNX_CALL UnxFrameSetLens(UnxRenderer r, float apertureMetres, float focusMetres)
+{
+    return call([&] { find(r)->setLens(apertureMetres, focusMetres); });
+}
+
 UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor)
 {
     return call([&] {
