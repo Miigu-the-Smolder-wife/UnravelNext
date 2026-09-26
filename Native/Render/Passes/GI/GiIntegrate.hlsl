@@ -43,7 +43,11 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         const float2 ab = float2((xy.x + xy.y) * 0.5, (xy.x - xy.y) * 0.5);
         const float3 q = float3(ab, 1 - abs(ab.x) - abs(ab.y));
         const float len = length(q);
-        gs_sample[lane] = float4(asfloat(s.xyz), 2 / (len * len * len) / (float)GI_TEXEL_COUNT);
+        // A non-finite ray value (from a bad hit: never expected) is left out, not averaged in: a texel or SH value that
+        // became NaN would stay so and spread through every bounce that reads it.
+        const float3 value = asfloat(s.xyz);
+        const bool finite = all(value == value) && all(abs(value) < 3.0e38);
+        gs_sample[lane] = finite ? float4(value, 2 / (len * len * len) / (float)GI_TEXEL_COUNT) : float4(0, 0, 0, 0);
         gs_local[lane] = q / len;
         const uint w = samples[2 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane].w;
         gs_bounce[lane] = float2((w >> 17) & 1u, (w >> 16) & 1u);
@@ -51,7 +55,9 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     else if (lane < 2 * GI_TEXEL_COUNT)
     {
         const uint4 s = samples[P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane - GI_TEXEL_COUNT];
-        gs_sample[lane] = float4(asfloat(s.xyz), 1.0 / GI_TEXEL_COUNT);
+        const float3 value = asfloat(s.xyz);
+        const bool finite = all(value == value) && all(abs(value) < 3.0e38);
+        gs_sample[lane] = finite ? float4(value, 1.0 / GI_TEXEL_COUNT) : float4(0, 0, 0, 0);
         gs_local[lane] = octDecode(s.w);
     }
     GroupMemoryBarrierWithGroupSync();
@@ -67,8 +73,11 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         const uint address = h.offTexels + (entry * GI_TEXEL_COUNT + lane) * 8;
         const uint2 old = b.Load2(address);
         const float3 previous = float3(f16tof32(old.x), f16tof32(old.x >> 16), f16tof32(old.y)) * GI_LOAD_SCALE;
-        const float3 value = lerp(previous, asfloat(s.xyz), alpha) * GI_STORE_SCALE;
-        const float dist = lerp(f16tof32(old.y >> 16), f16tof32(s.w & 0xFFFFu), alpha);
+        const float3 sample = asfloat(s.xyz);
+        const bool finite = all(sample == sample) && all(abs(sample) < 3.0e38);
+        const float a = finite ? alpha : 0.0;  // a non-finite value keeps the texel as it was
+        const float3 value = lerp(previous, finite ? sample : previous, a) * GI_STORE_SCALE;
+        const float dist = lerp(f16tof32(old.y >> 16), f16tof32(s.w & 0xFFFFu), a);
         b.Store2(address, uint2(giPackHalf2(value.r, value.g), giPackHalf2(value.b, dist)));
     }
 
