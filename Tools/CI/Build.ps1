@@ -124,7 +124,8 @@ foreach ($line in (& $ninja -C $buildDir -t deps 2>$null)) {
   if ((Test-Path $source) -and (Select-String -Path $source -Pattern '^\s*#\s*include\s+"' -Quiet)) { $missing += $obj }
 }
 if ($missing.Count -gt 0) {
-  throw ("{0} objects in {1} include project headers but Ninja recorded none (built outside Build.ps1 under another code page?): {2}. " +
-         "Rebuild them through Build.ps1 after deleting those .obj files." -f $missing.Count, $buildDir, ($missing -join ", "))
+  # (the concatenation in parentheses: -f binds tighter than +, which formatted only the second string)
+  throw (("{0} objects in {1} include project headers but Ninja recorded none (built outside Build.ps1 under another code page?): {2}. " +
+          "Rebuild them through Build.ps1 after deleting those .obj files.") -f $missing.Count, $buildDir, ($missing -join ", "))
 }
 "build ok in {0:N1} s -> {1} (tracks: core;{2})" -f $sw.Elapsed.TotalSeconds, $buildDir, $Tracks
