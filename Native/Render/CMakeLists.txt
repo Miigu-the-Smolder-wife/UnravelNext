@@ -41,7 +41,27 @@ list(REMOVE_DUPLICATES disabled_tracks)
 set(UNX_SHADER_OUTPUT "${CMAKE_BINARY_DIR}/bin/shaders" CACHE INTERNAL "")
 unx_add_shaders(unx_render_shaders ROOT "${CMAKE_CURRENT_SOURCE_DIR}" OUTPUT "${UNX_SHADER_OUTPUT}"
   INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/Passes/Common" "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Passes/Atmosphere"  # WindField.hlsli for FX's stream copy (VfxWindTurbulence.hlsli, byte-identical to NativeVfx)
   EXCLUDE ${disabled_module_dirs})
+
+# Shader ABI stamp (coordination 2026-09-26): the headers that fix every kernel's binding contract - root constants
+# (Bindless.hlsli), frame constants (Frame.hlsli), scene records (Scene.hlsli) - hashed at configure time. The shader
+# target writes the hash next to the kernels (bin/shaders/abi.stamp, after all of them compiled) and the renderer
+# compiles it in; ShaderLibrary refuses a kernel folder with another stamp (an executable and kernels from different
+# builds removed the device twice after the 32 -> 48 root constant change).
+set(unx_abi_text "")
+foreach(h Passes/Common/Bindless.hlsli Passes/Common/Frame.hlsli Passes/Common/Scene.hlsli)
+  file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${h}" unx_abi_part)
+  string(APPEND unx_abi_text "${unx_abi_part}")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${h}")
+endforeach()
+string(SHA256 UNX_SHADER_ABI "${unx_abi_text}")
+string(SUBSTRING "${UNX_SHADER_ABI}" 0 16 UNX_SHADER_ABI)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/abi.stamp" "${UNX_SHADER_ABI}")
+add_custom_command(TARGET unx_render_shaders POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/abi.stamp" "${UNX_SHADER_OUTPUT}/abi.stamp"
+  VERBATIM)
+set_source_files_properties(src/Shaders.cpp PROPERTIES COMPILE_DEFINITIONS "UNX_SHADER_ABI=\"${UNX_SHADER_ABI}\"")
 
 # An engine executable: Agility exports, runtime DLLs in bin/D3D12, and the compiled kernels.
 function(unx_add_executable name)

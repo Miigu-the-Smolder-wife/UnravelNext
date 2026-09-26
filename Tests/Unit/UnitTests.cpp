@@ -653,6 +653,63 @@ UNX_TEST(graph_imported_views_follow_their_resource)
     CHECK(wrong == 0);
 }
 
+UNX_TEST(shader_library_refuses_kernels_of_another_abi)
+{
+    // bin/shaders/abi.stamp (Native/Render/CMakeLists.txt): kernels built for another binding contract (root constants,
+    // frame constants, scene records) are refused when the library opens, and so is a folder without a stamp; the real
+    // kernel folder (and a sub-folder of it) opens.
+    const std::filesystem::path root = executableDirectory() / "abi_check";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "none");
+    std::filesystem::create_directories(root / "other");
+    {
+        std::ofstream(root / "other" / "abi.stamp") << "0123456789abcdef";
+    }
+    auto message = [&](const std::filesystem::path& dir) {
+        try { ShaderLibrary lib(testDevice(), dir); } catch (const std::exception& e) { return std::string(e.what()); }
+        return std::string();
+    };
+    const std::string other = message(root / "other"), none = message(root / "none");
+    logf("    %s\n    %s\n", other.c_str(), none.c_str());
+    CHECK(other.find("ABI mismatch") != std::string::npos && other.find("0123456789abcdef") != std::string::npos);
+    CHECK(none.find("no abi.stamp") != std::string::npos);
+    CHECK(message(executableDirectory() / "shaders").empty());
+    CHECK(message(executableDirectory() / "shaders" / "Passes").empty());
+    std::filesystem::remove_all(root);
+}
+
+UNX_TEST(graph_import_without_view_flag_fails_at_record)
+{
+    // An imported resource used as a UAV without D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS: the graph refuses it with an
+    // error naming the resource before anything reaches the GPU (without the check, a run without the debug layer removed
+    // the device - engine 2's volume gate, twice).
+    D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC1 rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = 4096;
+    rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> r;
+    check(testDevice().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&r)),
+          "buffer without UAV flag");
+    std::string message;
+    try
+    {
+        RenderGraph g(testDevice());
+        const BufferRef b = g.importBuffer(r.Get(), { "no uav flag", 4096, 0 });
+        g.addPass("write", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(b, Use::UavCompute); }, [=](PassContext& c) { (void)c.uav(b); });
+        g.execute(nullptr);
+    }
+    catch (const std::exception& e)
+    {
+        message = e.what();
+    }
+    logf("    %s\n", message.c_str());
+    CHECK(message.find("no uav flag") != std::string::npos && message.find("UAV") != std::string::npos);
+    CHECK(testDevice().drainDebugMessages() == 0);
+}
+
 UNX_TEST(graph_banded_group_covers_every_row)
 {
     // RenderGraph::addBandedGroup: a producer and a consumer pass over a W x H grid recorded band by band (A0 B0 A1 B1

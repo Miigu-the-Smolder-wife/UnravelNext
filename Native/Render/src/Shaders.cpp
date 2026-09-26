@@ -25,6 +25,18 @@ struct alignas(void*) Subobject
 ShaderLibrary::ShaderLibrary(Device& device, std::filesystem::path directory) : m_device(device), m_directory(std::move(directory))
 {
     if (!std::filesystem::exists(m_directory)) fail("shader directory %s does not exist (build the shader targets)", m_directory.string().c_str());
+    // The kernels' binding contract must be the one this executable was built with (abi.stamp: Native/Render/CMakeLists.txt).
+    // A sub-folder of the kernel root (Host, Reference) takes the root's stamp.
+    std::filesystem::path stamp = m_directory / "abi.stamp";
+    if (!std::filesystem::exists(stamp)) stamp = m_directory.parent_path() / "abi.stamp";
+    if (!std::filesystem::exists(stamp))
+        fail("shader directory %s has no abi.stamp: its kernels predate the ABI check or were not built (rebuild the shader targets)", m_directory.string().c_str());
+    const std::vector<uint8_t> bytes = readBinaryFile(stamp);
+    const std::string kernels(bytes.begin(), bytes.end()), mine = UNX_SHADER_ABI;
+    if (kernels.substr(0, mine.size()) != mine)
+        fail("shader ABI mismatch: the kernels in %s were built for ABI %s, this executable for %s (root constants, frame constants or "
+             "scene records changed between the two builds): rebuild the executable and the shader targets from the same source "
+             "(build/all)", m_directory.string().c_str(), kernels.substr(0, 16).c_str(), mine.c_str());
 }
 
 std::vector<uint8_t> ShaderLibrary::load(const std::string& kernel) const

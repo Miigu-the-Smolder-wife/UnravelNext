@@ -13,6 +13,15 @@ namespace
 {
 constexpr D3D12_BARRIER_SUBRESOURCE_RANGE kAllSubresources = { 0xffffffffu, 0, 0, 0, 0, 0 };
 
+// A view the graph is about to create needs its flag on the resource. Imported resources come from outside the graph
+// (the host's output, a module's persistent buffer); without the flag the view is invalid, which the debug layer reports
+// but a run without it turns into a removed device. Fail at record time instead, naming the resource.
+void requireFlag(ID3D12Resource* resource, D3D12_RESOURCE_FLAGS flag, const char* use, const char* name)
+{
+    if (!(resource->GetDesc().Flags & flag))
+        fail("render graph: '%s' is used as a %s but its resource was created without the flag that allows it (0x%x)", name ? name : "", use, (unsigned)flag);
+}
+
 struct UseInfo
 {
     bool write;
@@ -964,6 +973,7 @@ struct RenderGraph::Impl
             }
             if (uav && v.uav == UINT32_MAX)
             {
+                requireFlag(res, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, "random write (UAV)", n.tdesc.name);
                 D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
                 ud.Format = n.tdesc.uavFormat != DXGI_FORMAT_UNKNOWN ? n.tdesc.uavFormat : n.tdesc.format;
                 if (volume) { ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D; ud.Texture3D.WSize = n.tdesc.depthOrArraySize; }
@@ -974,11 +984,13 @@ struct RenderGraph::Impl
             }
             if (rt && v.rtv == UINT32_MAX)
             {
+                requireFlag(res, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, "render target", n.tdesc.name);
                 v.rtv = h.allocateRtv();
                 d->CreateRenderTargetView(res, nullptr, h.rtv(v.rtv));
             }
             if (ds && v.dsv == UINT32_MAX)
             {
+                requireFlag(res, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, "depth target", n.tdesc.name);
                 D3D12_DEPTH_STENCIL_VIEW_DESC dd{};
                 dd.Format = n.tdesc.format;
                 dd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
@@ -1013,6 +1025,7 @@ struct RenderGraph::Impl
             }
             if (uav && v.uav == UINT32_MAX)
             {
+                requireFlag(res, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, "random write (UAV)", n.bdesc.name);
                 D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
                 ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
                 ud.Format = stride ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;
