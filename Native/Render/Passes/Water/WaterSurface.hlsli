@@ -34,6 +34,7 @@
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
 #include "WaterShading.hlsli"
+#include "WaterFootprint.hlsli"
 
 #define WATER_STAT_SHADED 0u     // samples whose refracted ray met band A inside the water (exact path)
 #define WATER_STAT_OFFSCREEN 1u  // fallbacks: the refracted ray left the screen
@@ -60,6 +61,9 @@ static float4 g_waterMarchDebug = float4(-1, -1, -1, -1);
 // The frame's water slot table (raw, 16 B per stream slot): vertices SRV (UNX_NONE: not a W stream), material, 0, 0
 // (W's upload ring).
 struct WaterSlot { uint vertices, material; };
+// After the 64 slots: the refraction source's box pyramid (WaterFootprint.hlsli): level count, then the SRV of each level
+// (level 0 = the source copy itself; WaterSurface.cpp, at most 15 levels).
+#define WATER_LEVELS_OFFSET (16u * 64u)
 WaterSlot waterSlot(uint table, uint slot)
 {
     ByteAddressBuffer b = ResourceDescriptorHeap[table];
@@ -99,6 +103,35 @@ bool waterTriangleHit(uint vertices, uint tri, float3 origin, float3 dir, out fl
     return s > 0;
 }
 
+// waterTriangleHit plus what the pixel footprint needs (WaterFootprint.hlsli): the ray parameter s (P = origin + s dir),
+// the edges, the vertex normals and the unnormalised interpolated normal m.
+bool waterTriangleHitFull(uint vertices, uint tri, float3 origin, float3 dir, out float3 p, out float3 n, out float s, out float3 e1, out float3 e2,
+                          out float3 na, out float3 nb, out float3 nc, out float3 m)
+{
+    ByteAddressBuffer v = ResourceDescriptorHeap[vertices];
+    const float3 a = asfloat(v.Load3(96 * tri)), b = asfloat(v.Load3(96 * tri + 32)), c = asfloat(v.Load3(96 * tri + 64));
+    na = asfloat(v.Load3(96 * tri + 16));
+    nb = asfloat(v.Load3(96 * tri + 48));
+    nc = asfloat(v.Load3(96 * tri + 80));
+    e1 = b - a;
+    e2 = c - a;
+    const float3 g = cross(e1, e2);
+    const float denom = dot(g, dir);
+    p = origin;
+    n = float3(0, 1, 0);
+    m = n;
+    s = 0;
+    if (abs(denom) < 1e-30) return false;
+    s = dot(g, a - origin) / denom;
+    p = origin + s * dir;
+    const float gg = dot(g, g);
+    const float wb = dot(cross(p - a, e2), g) / gg, wc = dot(cross(e1, p - a), g) / gg;
+    m = na * (1 - wb - wc) + nb * wb + nc * wc;
+    if (!(dot(m, m) > 0)) m = normalize(g);
+    n = normalize(m);
+    return s > 0;
+}
+
 // Linear view depth and screen position (pixels) of a world point.
 float3 waterProject(float3 w)
 {
@@ -107,6 +140,33 @@ float3 waterProject(float3 w)
     return float3((ndc.x * 0.5 + 0.5) * g_viewWidth, (0.5 - ndc.y * 0.5) * g_viewHeight, dot(w - g_cameraPosition, -g_view[2].xyz));
 }
 float waterBandADepth(Texture2D<float> depth, int2 q) { return g_nearPlane / max(depth[q], 1e-30); }  // reversed-Z infinite
+
+// The refraction source at a screen point and pyramid level (fractional: the two levels around it, bilinear each).
+float3 waterSourceAt(WaterShadeSrvs s, float2 pos, float lod)
+{
+    const float2 uv = pos / float2(g_viewWidth, g_viewHeight);
+    ByteAddressBuffer t = ResourceDescriptorHeap[s.slots];
+    const uint count = t.Load(WATER_LEVELS_OFFSET);
+    if (count <= 1u || !(lod > 0))
+    {
+        Texture2D<float4> src = ResourceDescriptorHeap[s.source];
+        return src.SampleLevel(g_linearClamp, uv, 0).rgb;
+    }
+    const float l = min(lod, float(count - 1));
+    const uint l0 = uint(l), l1 = min(l0 + 1u, count - 1u);
+    Texture2D<float4> a = ResourceDescriptorHeap[t.Load(WATER_LEVELS_OFFSET + 4u * (1u + l0))];
+    Texture2D<float4> b = ResourceDescriptorHeap[t.Load(WATER_LEVELS_OFFSET + 4u * (1u + l1))];
+    return lerp(a.SampleLevel(g_linearClamp, uv, 0).rgb, b.SampleLevel(g_linearClamp, uv, 0).rgb, l - float(l0));
+}
+// Band A's own exposed radiance at a screen point and level (waterSurfaceRadiance's air removal).
+float3 waterSurfaceRadianceLod(WaterShadeSrvs s, float2 pos, float z, float lod)
+{
+    const float3 shaded = waterSourceAt(s, pos, lod);
+    if (s.atm.transmittance == UNX_NONE || s.atm.aerial == UNX_NONE) return shaded;
+    float3 inscatter = 0, transmittance = 1, E = 0;
+    atmosphereAirView(s.atm, pos / float2(g_viewWidth, g_viewHeight), z, inscatter, transmittance, E);
+    return max(shaded - inscatter * g_exposure, 0) / max(transmittance, 1e-6);
+}
 
 // Band A radiance at a screen point (bilinear over the exposed linear copy) with M's aerial perspective removed: the
 // surface's own exposed radiance there (air in-scatter and transmittance of the camera's path to depth z).
@@ -273,8 +333,9 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     const float2 centre = float2(pixel) + 0.5;
     float3 D, Dx, Dy;
     mPixelRay(centre, D, Dx, Dy);
-    float3 P, n;
-    waterTriangleHit(ws.vertices, tri, g_cameraPosition, D, P, n);
+    float3 P, n, e1, e2, na, nb, nc, mRaw;
+    float sHit;
+    waterTriangleHitFull(ws.vertices, tri, g_cameraPosition, D, P, n, sHit, e1, e2, na, nb, nc, mRaw);
     const float3 v = normalize(g_cameraPosition - P);
     const GpuMaterial m = loadMaterial(ws.material);
     const float ior = m.ior > 1.0001 ? m.ior : kWaterIor;
@@ -284,6 +345,13 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     const float3 nv = fromAir ? n : -n;  // the normal on the camera's side
     const float NoV = saturate(dot(nv, v));
     const float F = waterFresnel(NoV, fromAir ? 1.0 / ior : ior);
+    // The pixel footprint (WaterFootprint.hlsli): ray differentials through the interpolated normal. The reflection's
+    // direction sweeps `spread` over the pixel: the mirror cone and the sun lobe are integrated over it.
+    const WaterDifferentials dif = waterDifferentials(D, Dx, Dy, sHit, e1, e2, na, nb, nc, mRaw, fromAir ? 1.0 : -1.0);
+    const float spread = waterReflectionSpread(-v, nv, dif);
+    const float alphaPixel = sqrt(max(r * r, 1e-4) * max(r * r, 1e-4) + spread * spread / 6.0);  // GGX alpha^2 + the normals' variance x 2
+    const float rPixel = min(sqrt(alphaPixel), 1.0);
+    const float lobePixel = max(reflectionLobeHalfAngle(r, NoV), spread);
     stat = fromAir ? WATER_STAT_SHADED : WATER_STAT_INSIDE;
     rays = (WaterRayTerms)0;
     rays.P = P;
@@ -308,18 +376,18 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     }
     const float3 l0 = normalize(g_sunDirection);
     if (sunVisibility > 0 && dot(nv, l0) > 0)
-        reflected += shSunSpecular(1.0.xxx, r, max(r * r, 1e-4), 1.0.xxx, nv, v, max(NoV, 1e-4), l0, E, shPixelAngle(D, Dx)) * sunVisibility;
+        reflected += shSunSpecular(1.0.xxx, rPixel, alphaPixel, 1.0.xxx, nv, v, max(NoV, 1e-4), l0, E, shPixelAngle(D, Dx)) * sunVisibility;
     if (s.giCache != UNX_NONE)
     {
         GiSrvs gi;
         gi.cache = s.giCache;
         gi.hash = s.giCache;
         gi.pad0 = gi.pad1 = 0;
-        const float3 mirror = giCacheRadiance(gi, P, nv, waterReflect(v, nv), reflectionLobeHalfAngle(r, NoV));
+        const float3 mirror = giCacheRadiance(gi, P, nv, waterReflect(v, nv), lobePixel);
         reflected += mirror;
         rays.reflectFallback = F * mirror * g_exposure;
     }
-    rays.reflect = fromAir && reflectionLobeHalfAngle(r, NoV) < WATER_RAY_LOBE_HALF_ANGLE;
+    rays.reflect = fromAir && lobePixel < WATER_RAY_LOBE_HALF_ANGLE;
     rays.reflectDir = waterReflect(v, nv);
     rays.reflectWeight = F;
     // Transmission along the refracted ray.
@@ -336,7 +404,25 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
         if (waterMarch(s, P, t, slot, H, status))
         {
             const float3 h = waterProject(H);
-            transmitted = waterAbsorption(sigmaA, distance(P, H)) * waterSurfaceRadiance(s, h.xy, h.z) / (ior * ior);
+            // The pixel's footprint through the refraction onto band A (the surface's tangent plane at H), integrated:
+            // taps along the long side at the level of its width, each with its own path length's absorption.
+            const float eta = 1.0 / ior, L = distance(P, H);
+            const float3 d = normalize(D);
+            const float3 dtx = waterRefractDerivative(d, nv, eta, dif.dDx, dif.dNx), dty = waterRefractDerivative(d, nv, eta, dif.dDy, dif.dNy);
+            Texture2D<float> bandADepthTex = ResourceDescriptorHeap[s.bandADepth];
+            const float3 nA = waterBandANormal(bandADepthTex, h.xy);
+            float dLx, dLy;
+            const float3 dHx = waterTransfer(dif.dPx, dtx, t, L, nA, dLx), dHy = waterTransfer(dif.dPy, dty, t, L, nA, dLy);
+            const WaterFootprint fp = waterFootprint(waterScreenDerivative(H, dHx), waterScreenDerivative(H, dHy));
+            const float dLmajor = fp.majorIsX ? dLx : dLy;
+            float3 sum = 0;
+            for (uint i = 0; i < fp.count; ++i)
+            {
+                float along;
+                const float2 off = waterFootprintOffset(fp, i, along);
+                sum += waterAbsorption(sigmaA, max(L + along * dLmajor, 0.0)) * waterSurfaceRadianceLod(s, h.xy + off, h.z, fp.lod);
+            }
+            transmitted = sum / float(fp.count) / (ior * ior);
         }
         else
         {

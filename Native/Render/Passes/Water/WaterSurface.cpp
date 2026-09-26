@@ -16,6 +16,8 @@ using namespace unx::render;
 namespace
 {
 constexpr uint32_t kStatCount = 11, kStatBytes = 64, kRing = 4, kSlots = 64, kRayJobs = 1u << 20;
+// After the slot rows: the refraction source's pyramid, count + SRV per level (WaterSurface.hlsli WATER_LEVELS_OFFSET).
+constexpr uint32_t kMaxLevels = 15, kTableBytes = kSlots * 16 + 4 * (1 + kMaxLevels + 0) + 0;
 
 ComPtr<ID3D12Resource> hostBuffer(Device& device, uint64_t bytes, D3D12_HEAP_TYPE type, const wchar_t* name, uint8_t** mapped)
 {
@@ -62,12 +64,12 @@ struct SurfaceState
         device = &d;
         for (uint32_t i = 0; i < kRing; ++i)
         {
-            table[i] = hostBuffer(d, kSlots * 16, D3D12_HEAP_TYPE_UPLOAD, L"water slot table", &tableMapped[i]);
+            table[i] = hostBuffer(d, kTableBytes, D3D12_HEAP_TYPE_UPLOAD, L"water slot table", &tableMapped[i]);
             D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
             sd.Format = DXGI_FORMAT_R32_TYPELESS;
             sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
             sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            sd.Buffer.NumElements = kSlots * 4;
+            sd.Buffer.NumElements = kTableBytes / 4;
             sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
             tableSrv[i] = d.descriptors().allocateResource();
             d.d3d()->CreateShaderResourceView(table[i].Get(), &sd, d.descriptors().resourceCpu(tableSrv[i]));
@@ -117,6 +119,28 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
     const TextureRef source = g.createTexture(TextureDesc{ "w.surface.source", fromDesc.width, fromDesc.height, 1, 1, fromDesc.format });
     g.addPass("w.surface.source", QueueType::Graphics, [&](PassBuilder& b) { b.use(from, Use::CopySrc); b.use(source, Use::CopyDst); },
               [=](PassContext& c) { c.cmd->CopyResource(c.resource(source), c.resource(from)); });
+    // Its box pyramid (WaterSourceMips.hlsl; WaterFootprint.hlsli integrates the refracted pixel footprint over it): level
+    // k + 1 = the 2 x 2 means of level k, down to 1 x 1 (at most kMaxLevels levels, the source being level 0).
+    std::vector<TextureRef> levels{ source };
+    {
+        ID3D12PipelineState* mips = fc.shaders.compute("Passes/Water/WaterSourceMips");
+        uint32_t lw = fromDesc.width, lh = fromDesc.height;
+        while ((lw > 1 || lh > 1) && levels.size() < kMaxLevels)
+        {
+            lw = std::max(1u, (lw + 1) / 2);
+            lh = std::max(1u, (lh + 1) / 2);
+            const TextureRef prev = levels.back(), next = g.createTexture(TextureDesc{ "w.surface.source level", lw, lh, 1, 1, fromDesc.format });
+            const uint32_t w2 = lw, h2 = lh;
+            g.addPass("w.surface.source level", QueueType::Graphics, [&](PassBuilder& b) { b.use(prev, Use::SrvCompute); b.use(next, Use::UavCompute); },
+                      [=](PassContext& c) {
+                          const uint32_t k[4] = { c.srv(prev), c.uav(next), w2, h2 };
+                          c.cmd->SetPipelineState(mips);
+                          c.computeConstants(k, 4);
+                          c.cmd->Dispatch((w2 + 7) / 8, (h2 + 7) / 8, 1);
+                      });
+            levels.push_back(next);
+        }
+    }
     const BufferRef stats = g.createBuffer({ "w.surface.stats", kStatBytes, 0 });
     ID3D12PipelineState* clear = fc.shaders.compute("Passes/Water/ViewGridClear");
     g.addPass("w.surface.stats clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(stats, Use::UavCompute); },
@@ -158,8 +182,8 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
     const uint32_t none = gpu::kNone;
     // Inputs both passes read (the shading function's), declared and bound alike.
-    auto shadingUses = [&, vertices](PassBuilder& b) {
-        b.use(source, Use::SrvCompute);
+    auto shadingUses = [&, vertices, levels](PassBuilder& b) {
+        for (const TextureRef& l : levels) b.use(l, Use::SrvCompute);
         b.use(depth, Use::SrvCompute);
         if (vis.valid()) b.use(vis, Use::SrvCompute);
         if (waterDepth.valid()) b.use(waterDepth, Use::SrvCompute);
@@ -189,6 +213,9 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                 const uint32_t row[2] = { c.srv(vertices[i]), materials[i] };
                 std::memcpy(tableMapped + 16 * slots[i], row, 8);
             }
+            uint32_t pyramid[1 + kMaxLevels] = { uint32_t(levels.size()) };
+            for (size_t l = 0; l < levels.size(); ++l) pyramid[1 + l] = c.srv(levels[l]);
+            std::memcpy(tableMapped + kSlots * 16, pyramid, sizeof pyramid);
         }
         const bool shadows = fr.pageTable.valid() && fr.vsmConstants != UINT32_MAX;
         const uint32_t values[20] = { first, c.srv(source), c.srv(depth), c.uav(stats),
