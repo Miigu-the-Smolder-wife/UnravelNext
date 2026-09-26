@@ -220,6 +220,9 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                            (dot(sf.dndx, sf.dndx) + dot(sf.dndy, sf.dndy)) / 12.0, lm);
         baseColor = lm.baseColor; roughness = lm.roughness; metallic = lm.metallic; n = lm.normal; variance = lm.variance;
     }
+    // the reference's rules on the final shading normal (MaterialInternal.hlsli), as in the resolve
+    n = mNormalOnGeometricSide(n, backSide ? -sf.geometricNormal : sf.geometricNormal);
+    if (sf.front || backSide) n = mNormalTowardsViewer(n, sf.view);
     const float alphaIn = max(roughness * roughness, 1e-4);
 
     ModelSurface s;

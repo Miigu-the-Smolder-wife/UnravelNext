@@ -6,6 +6,7 @@
 //   3. G-buffer normal / base colour / roughness, tile class lists and dispatch counts, R's reflection lobe tiles;
 //   4. LEAN at the two footprint limits: magnified (no added variance) and a footprint covering whole tiles of the map
 //      (exact total slope variance of the texture).
+//   5. the reference's shading-normal rules: a mapped normal facing away from the viewer is bent to n.v = 1e-4.
 //   unx_test_material_materialtests [--no-debug-layer]
 #include "MTestFrame.h"
 
@@ -138,6 +139,7 @@ struct Replica
     double variance;
     bool front;
     D3 normal;  // normalised interpolated normal (no normal map), not flipped
+    D3 geometric;  // unit normal of the triangle's plane on its counter-clockwise side
 };
 
 void pixelRay(const ViewDesc& v, double px, double py, D3& D, D3& Dx, D3& Dy)
@@ -200,6 +202,7 @@ Replica replicate(const TestFrame& tf, const ViewDesc& view, uint32_t visId, uin
     const D3 gx = (nx - nh * dot(nh, nx)) * (1 / l), gy = (ny - nh * dot(nh, ny)) * (1 / l);
     out.variance = (dot(gx, gx) + dot(gy, gy)) / 12.0;
     out.normal = nh;
+    out.geometric = norm(n);
     return out;
 }
 
@@ -419,12 +422,17 @@ void testResolve(TestFrame& tf, Report& report)
                 const double rough = std::min(std::sqrt(std::sqrt(alpha * alpha + r.variance)), 1.0);
                 const uint2 packed = texelOf<uint2>(*gb, W, x, y);
                 eRough = std::max(eRough, std::abs((packed.y >> 24) / 255.0 - rough));
-                D3 n = r.normal;
+                D3 n = r.normal, ng = r.geometric;
                 if (!r.front && mat.twoSided)
                 {
                     n = n * -1;
+                    ng = ng * -1;
                     ++backSheet;
                 }
+                // the reference's rules (MaterialInternal.hlsli): on the geometric side, bent to n.v = 1e-4 if needed
+                if (dot(n, ng) < 0) n = n - ng * (2 * dot(n, ng));
+                const D3 view = norm(r.offset) * -1.0;
+                if ((r.front || mat.twoSided) && dot(n, view) < 1e-4) n = norm(n + view * (1e-4 - dot(n, view)));
                 eNormal = std::max(eNormal, len(octDecode(packed.x) - n));
                 for (int k = 0; k < 3; ++k)
                 {
@@ -628,6 +636,87 @@ void testLean(TestFrame& tf, Report& report)
         logf("lean [%s]: mean roughness %.4f over %u pixels\n", cam == 0 ? "magnified" : "whole tiles", sum / n, n);
     }
 }
+
+// 5. The reference's shading-normal rules (Reference/PathTracer/src/RtScene.cpp, INTERFACES 8.1 v1.65): a constant
+// normal map tilting the normal 52 degrees towards +x, seen from above looking along +x at 30 degrees down, so the mapped
+// normal faces away from the viewer below 52 degrees of elevation. The G-buffer normal must be the mapped normal bent
+// towards the pixel's view direction until n.v = 1e-4 (normalize(n + v (1e-4 - n.v))), and the mapped normal itself
+// where it already faces the viewer (U2: without the bend those texels reflected nothing).
+void testFacingAway(TestFrame& tf, Report& report)
+{
+    scene::Scene s;
+    s.name = "facing away";
+    scene::Texture nt;
+    nt.name = "tilt";
+    nt.width = nt.height = 4;
+    nt.format = scene::TextureFormat::Rg8Normal;
+    for (uint32_t i = 0; i < 16; ++i)
+    {
+        nt.texels.push_back(228);
+        nt.texels.push_back(128);
+    }
+    s.textures.push_back(nt);
+    scene::Material m;
+    m.name = "tilted";
+    m.baseColor = { 0.5f, 0.5f, 0.5f };
+    m.roughness = 0.5f;
+    m.normalTexture = 0;
+    s.materials.push_back(m);
+    addGridPlane(s, 40, 8, 1.0f, 0);
+    scene::Instance a;
+    a.mesh = 0;
+    s.instances.push_back(a);
+    s.cameras.push_back(lookAt({ 0, 1, 0.01f }, { 1.7320508f, 0, 0.01f }, "grazing"));
+    tf.setScene(s);
+    // The map's mean slope as uploaded (mip 0, unorm16 x slope range; constant texture)
+    const material::MipChain chain = material::buildMipChain(s, 0);
+    double mean[2];
+    for (int k = 0; k < 2; ++k)
+    {
+        uint16_t v;
+        std::memcpy(&v, chain.levels[0].data() + 2 * k, 2);
+        mean[k] = ((double)(float)(v / 65535.0) * 2 - 1) * chain.slopeRange;
+    }
+    const D3 mapped = norm(D3{ mean[0], 1, -mean[1] });  // T = +x, B = cross(N, T) = -z, N = +y
+
+    const uint32_t W = 640, H = 360;
+    std::shared_ptr<std::vector<uint8_t>> gb;
+    ViewDesc view;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, W, H, 0);
+        view = v.view;
+        tf.vis.record(fc, v);
+        tracks::materialResolve(fc, v);
+        gb = tf.readback(fc, v.gbuffer);
+    });
+    double worstAway = 0, worstFacing = 0, minNv = 1;
+    uint32_t away = 0, facing = 0;
+    for (uint32_t y = H / 2 + 8; y < H; ++y)
+        for (uint32_t x = 8; x < W - 8; ++x)
+        {
+            D3 D, Dx, Dy;
+            pixelRay(view, x + 0.5, y + 0.5, D, Dx, Dy);
+            if (D.y >= -1e-3) continue;  // (the plane only)
+            const D3 v = norm(D) * -1.0;
+            const double nv = dot(mapped, v);
+            const D3 expected = nv < 1e-4 ? norm(mapped + v * (1e-4 - nv)) : mapped;
+            const D3 got = octDecode(texelOf<uint2>(*gb, W, x, y).x);
+            if (nv < 1e-4)
+            {
+                ++away;
+                worstAway = std::max(worstAway, len(got - expected));
+                minNv = std::min(minNv, dot(got, v));
+            }
+            else
+            {
+                ++facing;
+                worstFacing = std::max(worstFacing, len(got - expected));
+            }
+        }
+    logf("facing away: %u pixels with the mapped normal facing away (n.v < 1e-4), %u facing; G-buffer n.v >= %.2e\n", away, facing, minNv);
+    report(away > 20000 && worstAway < 2e-4, "facing away: G-buffer normal = the mapped normal bent to n.v = 1e-4 (octahedral 2 x 16 bits)", worstAway, 2e-4);
+    report(facing > 1000 && worstFacing < 2e-4, "facing away: where the mapped normal faces the viewer it is kept", worstFacing, 2e-4);
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -642,6 +731,7 @@ int main(int argc, char** argv)
         TestFrame tf(debugLayer);
         testResolve(tf, report);
         testLean(tf, report);
+        testFacingAway(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

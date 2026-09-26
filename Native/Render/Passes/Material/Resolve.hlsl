@@ -146,6 +146,9 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                                    (dot(s.dndx, s.dndx) + dot(s.dndy, s.dndy)) / 12.0, lm);
                 baseColor = lm.baseColor; roughness = lm.roughness; metallic = lm.metallic; n = lm.normal; variance = lm.variance;
             }
+            // the reference's rules on the final shading normal (MaterialInternal.hlsli)
+            n = mNormalOnGeometricSide(n, backSide ? -s.geometricNormal : s.geometricNormal);
+            if (s.front || backSide) n = mNormalTowardsViewer(n, s.view);
 
             const float alpha = max(roughness * roughness, 1e-4);
             const float alphaFiltered = sqrt(alpha * alpha + variance);

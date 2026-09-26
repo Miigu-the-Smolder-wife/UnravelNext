@@ -139,4 +139,20 @@ MSlopeMoments mNormalMoments(Texture2D<float4> t, float2 uv, float2 duvdx, float
     return r;
 }
 
+// The reference's shading-normal rules (Reference/PathTracer/src/RtScene.cpp; INTERFACES 8.1, v1.65). A mapped normal
+// stays on the geometric side of the surface it belongs to (mirrored across the triangle's plane; ng: the geometric
+// normal of the side being shaded). On a surface seen from its shaded side (front, or a two-sided material's back), a
+// normal facing away from the viewer is bent towards it just enough for n.v = 1e-4: the BRDF is defined for n.v > 0 only,
+// and without the bend such texels (normal-mapped detail at grazing views) reflected no light at all (U2's black dots).
+float3 mNormalOnGeometricSide(float3 n, float3 ng)
+{
+    const float g = dot(n, ng);
+    return g < 0 ? n - ng * (2 * g) : n;
+}
+float3 mNormalTowardsViewer(float3 n, float3 v)
+{
+    const float nv = dot(n, v);
+    return nv < 1e-4 ? normalize(n + v * (1e-4 - nv)) : n;
+}
+
 #endif

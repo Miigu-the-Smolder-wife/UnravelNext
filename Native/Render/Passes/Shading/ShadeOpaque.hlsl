@@ -192,7 +192,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     const float3 offset = D * linearZ;  // camera-relative position (D has unit depth along the view axis)
     const float3 worldPos = g_cameraPosition + offset;
     const float3 v = -normalize(D);
-    const float3 n = g.normal;
+    // The resolve bent the normal to n.v >= 1e-4 (mNormalTowardsViewer); the G-buffer's octahedral 2 x 16 bits can take
+    // it back below: the same bend on the decoded normal (a no-op elsewhere).
+    const float3 n = mNormalTowardsViewer(g.normal, v);
     const float NoV = dot(n, v);
 
     ModelSurface s;
