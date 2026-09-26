@@ -21,7 +21,7 @@
 struct VsmLocalResources
 {
     ByteAddressBuffer table;
-    ByteAddressBuffer pool;
+    Texture2D<float> pool;     // the page atlas (VsmCommon.hlsli vsmAtlasTexel)
     ByteAddressBuffer blocks;  // VsmPageMax: per physical page, the page block's range.y = nearest caster key
 };
 
@@ -51,7 +51,7 @@ uint vsmLocalKeyAt(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, ui
         if ((e.x & VSM_FLAG_RESIDENT) != 0 && e.y == l.generation)
         {
             mipUsed = (uint)j;
-            return r.pool.Load(vsmPoolAddress(e.x & VSM_PHYS_MASK, t & (VSM_PAGE - 1)));
+            return vsmLocalKeyOfDepth(r.pool.Load(vsmAtlasTexel(e.x & VSM_PHYS_MASK, t & (VSM_PAGE - 1))), l.nearM, l.farM);
         }
     }
     return VSM_EMPTY;

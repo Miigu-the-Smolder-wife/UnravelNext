@@ -13,7 +13,9 @@
 float shadowSlot(uint packed, uint slot) { return ((packed >> (8 * slot)) & 0xFFu) / 255.0; }
 
 // This frame's virtual shadow maps (Docs/Design/Requests/20260925_S_sun_visibility_at.md): bindless indices of the page
-// table, the physical pool (raw buffers), the pages' block hierarchy, the search bound grid, the VSM constants CBV, and for
+// table, the page atlas (pool: an SRV of FrameResources::vsmAtlas; v1.43 one path, the lookups read the atlas SRV from
+// the VSM constants, VsmConstants::atlasSrv, so this word is not read), the pages' block hierarchy, the search bound
+// grid, the VSM constants CBV, and for
 // the local lights their shadow-slot records (lights: FrameResources::vsmLocalLights) and the scene light -> shadow slot
 // map (pad0: FrameResources::vsmSlotOfLight; Docs/Design/Requests/20260925_S_local_shadow_lookups.md), and the thin
 // casters' transmittance layer (layers = FrameResources::vsmLayers, INTERFACES 5.6 v1.26; 0xFFFFFFFF or 0 = no layer,
@@ -53,7 +55,7 @@ float shadowVisibilityDirect(ShadowSrvs s, uint lightIndex, float3 worldPos, flo
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[s.constants];
     VsmLocalResources r;
     r.table = ResourceDescriptorHeap[s.pageTable];
-    r.pool = ResourceDescriptorHeap[s.pool];
+    r.pool = ResourceDescriptorHeap[vsmAtlasSrv(s.constants)];  // the atlas (VsmConstants; ShadowSrvs.pool is not read)
     r.blocks = ResourceDescriptorHeap[s.blocks];
     return vsmLocalVisibility(r, lights[slot], slot, worldPos, normal, 0.0, c.receiverBiasTexels, c.maxReceiverSlope, c.searchTaps, c.filterTaps);
 }
@@ -93,7 +95,7 @@ float shadowLocalVisibilityAtReceiver(ShadowSrvs s, uint lightIndex, ShadowPixel
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[s.constants];
     VsmLocalResources r;
     r.table = ResourceDescriptorHeap[s.pageTable];
-    r.pool = ResourceDescriptorHeap[s.pool];
+    r.pool = ResourceDescriptorHeap[vsmAtlasSrv(s.constants)];  // the atlas (VsmConstants; ShadowSrvs.pool is not read)
     r.blocks = ResourceDescriptorHeap[s.blocks];
     return vsmLocalVisibility(r, lights[slot], slot, rc.world, rc.normal, rc.footprint, c.receiverBiasTexels, c.maxReceiverSlope, c.searchTaps,
                               c.filterTaps);
@@ -115,7 +117,7 @@ float shadowSunTransmittanceAt(ShadowSrvs s, float3 worldPos, float footprint, f
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[s.constants];
     VsmResources r;
     r.table = ResourceDescriptorHeap[s.pageTable];
-    r.pool = ResourceDescriptorHeap[s.pool];
+    r.pool = ResourceDescriptorHeap[vsmAtlasSrv(s.constants)];  // the atlas (VsmConstants; ShadowSrvs.pool is not read)
     r.blocks = ResourceDescriptorHeap[s.blocks];
     r.searchBound = ResourceDescriptorHeap[s.searchBound];
     r.cbv = s.constants;
@@ -135,7 +137,7 @@ float shadowSunVisibilityAt(ShadowSrvs s, float3 worldPos, float3 normal, float 
 {
     VsmResources r;
     r.table = ResourceDescriptorHeap[s.pageTable];
-    r.pool = ResourceDescriptorHeap[s.pool];
+    r.pool = ResourceDescriptorHeap[vsmAtlasSrv(s.constants)];  // the atlas (VsmConstants; ShadowSrvs.pool is not read)
     r.blocks = ResourceDescriptorHeap[s.blocks];
     r.searchBound = ResourceDescriptorHeap[s.searchBound];
     r.cbv = s.constants;
@@ -165,7 +167,7 @@ float shadowSunVisibilityInAir(ShadowSrvs s, float3 worldPos, float footprint, o
 {
     VsmResources r;
     r.table = ResourceDescriptorHeap[s.pageTable];
-    r.pool = ResourceDescriptorHeap[s.pool];
+    r.pool = ResourceDescriptorHeap[vsmAtlasSrv(s.constants)];  // the atlas (VsmConstants; ShadowSrvs.pool is not read)
     r.blocks = ResourceDescriptorHeap[s.blocks];
     r.searchBound = ResourceDescriptorHeap[s.searchBound];
     r.cbv = s.constants;

@@ -10,7 +10,7 @@
 struct VsmResources
 {
     ByteAddressBuffer table;
-    ByteAddressBuffer pool;
+    Texture2D<float> pool;          // the page atlas (VsmCommon.hlsli vsmAtlasTexel)
     ByteAddressBuffer searchBound;  // VsmSearchGrid MODE 1: per slot, highest caster over its 3 x 3 pages
     ByteAddressBuffer blocks;       // VsmPageMax: min/max hierarchy per physical page
     uint cbv;  // VsmConstants constant buffer view (a ConstantBuffer member makes DXC fail; bound per function)
@@ -87,7 +87,7 @@ uint vsmHeightAt(VsmResources r, VsmReceiver rc, int2 texel, uint k)
             t = int2(floor(vsmLightSpaceAt(vc, w, j).xy / vsmTexel(j)));
         }
         const uint e = vsmEntry(r, t >> (int)VSM_PAGE_SHIFT, j);
-        if (e != 0) return r.pool.Load(vsmPoolAddress(e & VSM_PHYS_MASK, uint2(t & (int)(VSM_PAGE - 1))));
+        if (e != 0) return vsmSunKey(r.pool.Load(vsmAtlasTexel(e & VSM_PHYS_MASK, uint2(t & (int)(VSM_PAGE - 1)))), vc.hMin, vc.hMax);
     }
     return VSM_EMPTY;
 }
@@ -132,14 +132,17 @@ VsmQuad vsmFetchQuad(VsmResources r, VsmReceiver rc, float2 offset, uint k)
         const uint2 local = uint2(t0 & (int)(VSM_PAGE - 1));
         if (all(local < VSM_PAGE - 1))
         {
-            // Two rows of two adjacent texels.
-            const uint2 row0 = r.pool.Load2(vsmPoolAddress(e & VSM_PHYS_MASK, local));
-            const uint2 row1 = r.pool.Load2(vsmPoolAddress(e & VSM_PHYS_MASK, local + uint2(0, 1)));
-            q.h = uint4(row0.x, row0.y, row1.x, row1.y);
+            // The 2 x 2 texels in one gather (point sampler at their shared corner: the footprint centre is half a texel
+            // from every texel edge, so float rounding cannot pick another quad). Gather order: w (0,0), z (1,0),
+            // x (0,1), y (1,1).
+            const int3 a = vsmAtlasTexel(e & VSM_PHYS_MASK, local);
+            const float2 atlasSize = float2(vc.poolPagesX, vc.poolPagesY) * VSM_PAGE;
+            const float4 g = r.pool.GatherRed(g_pointClamp, (float2(a.xy) + 1.0) / atlasSize);
+            q.h = uint4(vsmSunKey(g.w, vc.hMin, vc.hMax), vsmSunKey(g.z, vc.hMin, vc.hMax), vsmSunKey(g.x, vc.hMin, vc.hMax), vsmSunKey(g.y, vc.hMin, vc.hMax));
         }
         else
         {
-            q.h.x = r.pool.Load(vsmPoolAddress(e & VSM_PHYS_MASK, local));
+            q.h.x = vsmSunKey(r.pool.Load(vsmAtlasTexel(e & VSM_PHYS_MASK, local)), vc.hMin, vc.hMax);
             q.h.y = vsmHeightAt(r, rj, t0 + int2(1, 0), j);
             q.h.z = vsmHeightAt(r, rj, t0 + int2(0, 1), j);
             q.h.w = vsmHeightAt(r, rj, t0 + int2(1, 1), j);

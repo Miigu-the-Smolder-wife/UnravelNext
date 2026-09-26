@@ -274,15 +274,17 @@ int main(int argc, char** argv)
             return n;
         };
 
-        // 1. First frame renders every requested page; the second renders none.
+        // 1. One path (S request 20260926_S_vsm_one_path): every frame assigns and draws every requested page, and the
+        //    assignment is a deterministic scan (the same requests give the same page table).
         Frame f1 = runFrame(true);
         const shadow::VsmStats s1 = statsAfter();
         logf("frame %llu: requested %u, allocated %u, dirty %u, exhausted %u, free %u\n", (unsigned long long)s1.frame, s1.requested, s1.allocated, s1.dirty, s1.exhausted, s1.freePages);
         report(s1.requested > 0 && s1.allocated == s1.requested && s1.dirty == s1.requested && s1.exhausted == 0, "first frame: every requested page allocated and rendered",
                s1.dirty, s1.requested);
         const shadow::VsmStats s2 = statsAfter();
-        report(s2.requested == s1.requested && s2.dirty == 0 && s2.allocated == 0, "steady camera: nothing rendered (dirty pages)", s2.dirty, 0);
+        report(s2.requested == s1.requested && s2.dirty == s2.requested && s2.exhausted == 0, "steady camera: every requested page drawn again", s2.dirty, s2.requested);
         Frame f2 = runFrame(true);
+        report(f1.table == f2.table, "steady camera: the same page table (deterministic assignment)", f1.table == f2.table ? 0 : 1, 0);
         compare(f2, "static", 2);
 
         // shadowSunVisibilityAt at the receivers of f2, footprints of 1, 4 and 16 pixels (ray cones wider than a pixel).
@@ -518,17 +520,17 @@ int main(int argc, char** argv)
             report(settled[1] > total[1] / 2, "segment classification: settles most free-air segments", (double)settled[1] / std::max(total[1], 1u), 0.5);
         }
 
-        // 2. Small camera move: only newly visible pages render.
+        // 2. Small camera move: the moved window's pages, all drawn.
         setCamera(cam.position + float3{ 0.3f, 0, 0.1f });
         runFrame(false);
         const shadow::VsmStats s3 = statsAfter();
         logf("camera move 0.32 m: requested %u, allocated %u, dirty %u\n", s3.requested, s3.allocated, s3.dirty);
-        report(s3.dirty > 0 && s3.dirty < s1.dirty / 3, "camera move: dirty pages well below a full re-render", s3.dirty, s1.dirty / 3.0);
+        report(s3.dirty == s3.requested && s3.exhausted == 0, "camera move: every requested page drawn", s3.dirty, s3.requested);
         setCamera(cam.position);
         runFrame(false);
         runFrame(false);
 
-        // 3. Moved caster: pages under the old and new bounds re-render; the result matches the reference again.
+        // 3. Moved caster: the next frame's pages hold it at its new place (no invalidation rule to get wrong).
         {
             std::vector<gpu::Instance> inst = tf.gpuScene.instances();
             gpu::Instance& pole = inst[2];
@@ -549,16 +551,14 @@ int main(int argc, char** argv)
             Frame moved = runFrame(true);
             const shadow::VsmStats sm = statsAfter();
             logf("moved caster: requested %u, dirty %u\n", sm.requested, sm.dirty);
-            report(sm.dirty > 0 && sm.dirty < s1.dirty, "moved caster: some pages re-rendered, not all", sm.dirty, s1.dirty);
+            report(sm.dirty == sm.requested, "moved caster: every requested page drawn", sm.dirty, sm.requested);
             compare(moved, "after caster move", 2);
-            // Next frame: the revision is unchanged -> nothing re-renders.
             const shadow::VsmStats sn = statsAfter();
-            report(sn.dirty == 0, "caster at rest again: nothing rendered", sn.dirty, 0);
+            report(sn.dirty == sn.requested, "caster at rest again: every requested page drawn", sn.dirty, sn.requested);
         }
 
-        // 3b. Slow drift (2 mm per frame for 30 frames, 6 cm in all): a level re-renders the caster's pages only once
-        //     the accumulated motion reaches one of its texels, so levels with texels coarser than 6 cm never do, the
-        //     finest do often, and the shadow still matches the reference at the end.
+        // 3b. Slow drift (2 mm per frame for 30 frames, 6 cm in all): every level is drawn every frame, and the shadow
+        //     matches the reference at the end (no accumulated-motion rule).
         {
             std::vector<uint32_t> dirty(shadow::kLevels, 0);
             Frame last;
@@ -587,11 +587,8 @@ int main(int argc, char** argv)
             std::string line;
             for (uint32_t k = 0; k < 10; ++k) line += format(" %u:%u", k, dirty[k]);
             logf("slow drift 6 cm over 30 frames, dirty pages by level:%s\n", line.c_str());
-            uint32_t coarse = 0, fine = 0;
-            for (uint32_t k = 0; k < shadow::kLevels; ++k)
-                (std::ldexp(1.0, (int)k - 10) > 0.06 ? coarse : fine) += dirty[k];
-            report(coarse == 0, "slow drift: no re-render on levels with texel > the 6 cm drift", coarse, 0);
-            report(fine > 0, "slow drift: levels with texel <= the drift re-render", fine, 1);
+            const shadow::VsmStats sd = shadow::stats(tf.trackState);
+            report(sd.dirty == sd.requested, "slow drift: every requested page drawn each frame", sd.dirty, sd.requested);
             boxes[2].centre = boxes[2].centre + float3{ 0.06f, 0, 0 };
             compare(last, "after slow drift", 2);
         }
@@ -606,8 +603,8 @@ int main(int argc, char** argv)
             compare(f, "after sun change", 2);
         }
 
-        // 4b. Moving sun (time of day): each level keeps the basis it was rendered with and refreshes before its age
-        //     exceeds dthetaMax = (pi / 2) tan(theta_s) shadow.vsm.sun_refresh_error; the refreshes spread over frames.
+        // 4b. Moving sun (time of day, any speed): every level is drawn on the current sun every frame, so there is no
+        //     basis age; the shadow matches the reference at slow and fast turns.
         {
             const float tanSun = std::tan(tf.sceneData.sun.angularRadius);
             const float dthetaMax = 1.5707963f * tanSun * (float)tf.quality.number("shadow.vsm.sun_refresh_error");
@@ -640,21 +637,13 @@ int main(int argc, char** argv)
                 }
                 logf("moving sun %.1f x dthetaMax per frame (dthetaMax %.3g rad): levels refreshed per frame %u .. %u, largest basis age %.3g rad"
                      "\n", step, dthetaMax, minRefreshed, maxRefreshed, maxAge);
-                report(maxAge <= dthetaMax * 1.0001f, format("moving sun x%.1f: no level older than dthetaMax", step).c_str(), maxAge, dthetaMax);
-                if (step < 1)
-                {
-                    // Spread by pages: at most the budget (1.1 x total x step: the schedule's slack) plus one level.
-                    const double limit = 1.1 * totalPages * step + largestLevel;
-                    logf("  pages refreshed per frame at most %u (requested %u, largest level %u)\n", maxPages, totalPages, largestLevel);
-                    report(maxPages <= limit && minRefreshed >= 1, "moving sun x0.3: refreshes spread by pages (<= 1.1 x total x step + largest level)", maxPages, limit);
-                }
-                else
-                    report(minRefreshed == shadow::kLevels, "moving sun x3: every level refreshes every frame", minRefreshed, shadow::kLevels);
+                const shadow::VsmStats& sf = shadow::stats(tf.trackState);
+                report(maxAge == 0 && sf.dirty == sf.requested, format("moving sun x%.1f: every page drawn on the current sun", step).c_str(), maxAge, 0);
                 compare(last, step < 1 ? "moving sun (slow)" : "moving sun (fast)", 2);
             }
         }
 
-        // 5. Wind: levels whose texel exceeds the sway never re-render; finer levels do.
+        // 5. Wind: every requested page is drawn each frame with the current sway.
         {
             scene::Scene windy = tf.sceneData;
             windy.windSpeed = 6;
@@ -684,8 +673,8 @@ int main(int argc, char** argv)
                 line += format(" L%u:%u", k, total[k]);
             }
             logf("wind (sway range %.4f m) dirty pages over 20 frames by level:%s\n", sway, line.c_str());
-            report(coarseDirty == 0, "wind: no re-render on levels with texel >= sway", coarseDirty, 0);
-            report(fineDirty > 0, "wind: fine levels re-render (pages)", fineDirty, 1);
+            const shadow::VsmStats sw = shadow::stats(tf.trackState);
+            report(sw.dirty == sw.requested && fineDirty + coarseDirty > 0, "wind: every requested page drawn each frame", sw.dirty, sw.requested);
 
             // 6. Wind change after commit (v1.23): the source scene's wind is edited before a frame (the host's path, no
             //    scene reload). (a) The endpoint bound holds for the v1 model over random transitions (C++ twin of
@@ -747,8 +736,8 @@ int main(int argc, char** argv)
                     gustLine += format(" L%u:%u", k, n[k]);
                 }
                 logf("wind gust %.1f -> %.1f m/s, +3 deg (bound <= %.4f m, gust term %.4f m): dirty pages by level:%s" "\n", ws0, ws1, worst, change, gustLine.c_str());
-                report(coarse == 0, "wind change: no re-render on levels with texel > the bound", coarse, 0);
-                report(fine > 0, "wind change: levels finer than the gust's displacement re-render", fine, 1);
+                const shadow::VsmStats sg = shadow::stats(tf.trackState);
+                report(sg.dirty == sg.requested && coarse + fine > 0, "wind change: every requested page drawn with the gust", sg.dirty, sg.requested);
             }
         }
 

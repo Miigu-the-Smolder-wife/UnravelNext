@@ -167,7 +167,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
                   if (shadows)
                   {
                       b.use(vsm.table, Use::SrvCompute);
-                      b.use(vsm.pool, Use::SrvCompute);
+                      b.use(vsm.atlas, Use::SrvCompute);
                       b.use(vsm.blocks, Use::SrvCompute);
                       b.use(vsm.bound, Use::SrvCompute);
                       b.use(vsm.stats, Use::UavCompute);  // error word (INTERFACES 3.6); walk statistics with walkStats
@@ -180,7 +180,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
                   if (shadows)
                   {
                       k[4] = ctx.srv(vsm.table);
-                      k[5] = ctx.srv(vsm.pool);
+                      k[5] = ctx.srv(vsm.atlas);
                       k[6] = ctx.srv(vsm.blocks);
                       k[7] = vsm.constantsCbv;
                       k[8] = ctx.srv(vsm.bound);

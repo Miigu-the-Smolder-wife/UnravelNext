@@ -10,8 +10,9 @@
 //
 // Face coordinates: for face f with basis (right, up, axis), a point at d = p - light position has depth z = dot(d, axis)
 // and tangent coordinates (x, y) = (dot(d, right), dot(d, up)) / z in [-1, 1]. Texel (tx, ty) of mip m covers
-// x in [-1 + 2 tx / res, ...], y from +1 downwards (row 0 on top), res = 128 x 2^m. Stored: vsmEncode(-z) of the nearest
-// caster (InterlockedMax keeps the nearest; 0 = no caster).
+// x in [-1 + 2 tx / res, ...], y from +1 downwards (row 0 on top), res = 128 x 2^m. Stored in the atlas: the reversed-Z
+// face depth d = n (f - z) / ((f - n) z) of the nearest caster (hardware depth test; 0 = no caster); lookups use the key
+// vsmEncode(-z) (vsmLocalKeyOfDepth).
 //
 // Penumbra geometry (a light of radius r_L: sphere, disk, or the half-diagonal of a rect / the half-length of a tube,
 // seen from the receiver as a disk): a caster point at depth z_b occludes part of the light for a receiver at depth z_r
@@ -43,6 +44,11 @@ struct VsmLocalLight
 };
 
 uint vsmLocalMipBase(uint m) { return ((1u << (2 * m)) - 1) / 3; }
+// Raster tile masks of the local views (VsmLocalCullMask, VsmSystem.cpp): mip m's view has 4^m tile bits in
+// max(1, 4^m / 32) words; views packed mip after mip (offsets 0, 1, 2, 3, 5, 13, 45), face after face, light after light.
+#define VSM_LOCAL_FACE_WORDS 173u
+#define VSM_LOCAL_LIGHT_WORDS (6u * VSM_LOCAL_FACE_WORDS)
+uint vsmLocalViewWordOffset(uint m) { return m == 0 ? 0u : m == 1 ? 1u : m == 2 ? 2u : m == 3 ? 3u : m == 4 ? 5u : m == 5 ? 13u : 45u; }
 uint vsmLocalRes(uint m) { return VSM_PAGE << m; }
 uint vsmLocalSlot(uint light, uint face, uint mip, uint2 page)
 {

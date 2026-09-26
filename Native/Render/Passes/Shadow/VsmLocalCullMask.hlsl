@@ -1,28 +1,39 @@
 // unx-kernel: cs_6_6 main
-// Tile masks of the local-light raster views (V's cull mask, INTERFACES 5.3): view v = (active light a, face, mip) with
-// v = a x 42 + face x 7 + mip, 128 x 128 tiles of 128 px over the shared 16384^2 viewport (512 words per view); a bit
-// is set where the tile is a page of the view's mip that is resident and dirty (rendered this frame).
-// P[0].x page table SRV (raw), P[0].y local mask UAV (raw), P[0].z view count, P[0].w active slots SRV
-// (StructuredBuffer<uint>: active light a -> shadow slot)
+// Tile masks and atlas slots of the local-light raster views (V's cull mask and tile atlas, INTERFACES 5.3): view =
+// (active light a, face, mip) with a viewport of res = 128 x 2^mip texels, 2^mip x 2^mip tiles of 128 px. The views'
+// masks are packed (VsmLocal.hlsli VSM_LOCAL_*_WORDS): mip after mip, face after face, light after light. A bit is set
+// where the tile is a page of that mip with a physical page this frame; its atlas slot goes to word (mask word) x 32 +
+// bit of the slots buffer. One thread per mask word.
+// P[0].x page table SRV (raw), P[0].y local mask UAV (raw), P[0].z active light count, P[0].w active slots SRV
+// (StructuredBuffer<uint>: active light a -> shadow slot); P[1].x local atlas slots UAV (raw)
 #include "Bindless.hlsli"
 #include "Passes/Shadow/VsmLocal.hlsli"
 
 [numthreads(64, 1, 1)]
 void main(uint id : SV_DispatchThreadID)
 {
-    const uint view = id / 512, word = id % 512;
-    if (view >= P[0].z) return;
+    const uint a = id / VSM_LOCAL_LIGHT_WORDS, w = id % VSM_LOCAL_LIGHT_WORDS;
+    if (a >= P[0].z) return;
     ByteAddressBuffer table = ResourceDescriptorHeap[P[0].x];
     RWByteAddressBuffer mask = ResourceDescriptorHeap[P[0].y];
+    RWByteAddressBuffer slots = ResourceDescriptorHeap[P[1].x];
     StructuredBuffer<uint> active = ResourceDescriptorHeap[P[0].w];
-    const uint light = active[view / 42], face = (view % 42) / 7, mip = view % 7;
-    const uint n = 1u << mip, y = word / 4, x0 = (word % 4) * 32;
+    const uint light = active[a], face = w / VSM_LOCAL_FACE_WORDS, r = w % VSM_LOCAL_FACE_WORDS;
+    uint mip = 0;
+    [unroll] for (uint m = 1; m < VSM_LOCAL_MIPS; ++m)
+        if (r >= vsmLocalViewWordOffset(m)) mip = m;
+    const uint n = 1u << mip, wordInView = r - vsmLocalViewWordOffset(mip);
     uint bits = 0;
-    if (y < n)
-        [loop] for (uint b = 0; b < 32 && x0 + b < n; ++b)
+    [loop] for (uint b = 0; b < 32; ++b)
+    {
+        const uint tile = wordInView * 32 + b;
+        if (tile >= n * n) break;
+        const uint e = table.Load(vsmLocalSlot(light, face, mip, uint2(tile % n, tile / n)) * 8);
+        if (e & VSM_FLAG_RESIDENT)
         {
-            const uint e = table.Load(vsmLocalSlot(light, face, mip, uint2(x0 + b, y)) * 8);
-            if ((e & (VSM_FLAG_RESIDENT | VSM_FLAG_DIRTY)) == (VSM_FLAG_RESIDENT | VSM_FLAG_DIRTY)) bits |= 1u << b;
+            bits |= 1u << b;
+            slots.Store((id * 32 + b) * 4, e & VSM_PHYS_MASK);
         }
+    }
     mask.Store(id * 4, bits);
 }

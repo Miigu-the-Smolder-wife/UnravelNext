@@ -42,6 +42,11 @@ public:
 
     void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& r)
     {
+        if (r.depthTarget.valid() && r.atlasSlots.valid())
+        {
+            rasterizeAtlas(fc, r);
+            return;
+        }
         const std::vector<uint4> ch = chunks(r.instanceMask);
         if (ch.empty() || r.pixelKernel.empty()) return;
         std::vector<TestView> views;
@@ -87,6 +92,87 @@ public:
                                  c.cmd->DispatchMesh(std::min(65535u, groups), (groups + 65534) / 65535, 1);
                              }
                          });
+    }
+
+    // Tile atlas mode (v1.32): every view over its whole viewport through TestAtlasPixel into a R32_UINT copy of the atlas
+    // (one per atlas and frame, started from the requester's cleared atlas), then copied to the atlas after each request
+    // (the copy accumulates the frame's requests, so later copies keep earlier requests' pages).
+    void rasterizeAtlas(FramePassContext& fc, const DepthRasterRequest& r)
+    {
+        const std::vector<uint4> ch = chunks(r.instanceMask);
+        const TextureRef atlas = r.depthTarget;
+        const TextureDesc ad = fc.graph.desc(atlas);
+        if (m_atlasFrame != fc.frame.frameIndex || m_atlasTarget != atlas.id)
+        {
+            m_atlasFrame = fc.frame.frameIndex;
+            m_atlasTarget = atlas.id;
+            m_atlasCopy = fc.graph.createTexture(TextureDesc{ "test atlas copy", ad.width, ad.height, 1, 1, DXGI_FORMAT_R32_UINT });
+            const TextureRef copy = m_atlasCopy;
+            fc.graph.addPass(r.name + ".test.init", QueueType::Graphics,
+                             [&](PassBuilder& b) {
+                                 b.use(atlas, Use::CopySrc);
+                                 b.use(copy, Use::CopyDst);
+                             },
+                             [=](PassContext& c) { c.cmd->CopyResource(c.resource(copy), c.resource(atlas)); });
+        }
+        const TextureRef copy = m_atlasCopy;
+        if (!ch.empty())
+        {
+            std::vector<TestView> views;
+            for (const RasterView& v : r.views) views.push_back({ v.viewProj, v.userData, { 0, 0, 0 } });
+            const BufferRef chunkBuf = m_tf.uploadBuffer(fc, ch.data(), ch.size() * 16, 16, "test atlas chunks");
+            const BufferRef viewBuf = m_tf.uploadBuffer(fc, views.data(), views.size() * sizeof(TestView), sizeof(TestView), "test atlas views");
+            MeshPipelineDesc d;
+            d.meshShader = "Passes/Shadow/Tests/TestRaster.GBUFFER0";
+            d.pixelShader = "Passes/Shadow/Tests/TestAtlasPixel";
+            d.depthWrite = false;
+            d.cull = r.cull;
+            ID3D12PipelineState* pso = fc.shaders.mesh("s.test.atlas", d);
+            const D3D12_GPU_VIRTUAL_ADDRESS constants = fc.frameConstantsFor(fc.frame.mainView);
+            const DepthRasterRequest req = r;
+            const uint32_t groups = (uint32_t)ch.size();
+            fc.graph.addPass(r.name + ".test", QueueType::Graphics,
+                             [&](PassBuilder& b) {
+                                 b.use(copy, Use::UavGraphics);
+                                 b.use(req.cullMask, Use::SrvGraphics);
+                                 b.use(req.atlasSlots, Use::SrvGraphics);
+                                 b.use(chunkBuf, Use::SrvGraphics);
+                                 b.use(viewBuf, Use::SrvGraphics);
+                             },
+                             [=](PassContext& c) {
+                                 c.cmd->SetPipelineState(pso);
+                                 c.bindFrameConstants(constants);
+                                 c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+                                 for (uint32_t i = 0; i < (uint32_t)req.views.size(); ++i)
+                                 {
+                                     const RasterView& v = req.views[i];
+                                     uint32_t k[32] = {};
+                                     k[0] = c.srv(chunkBuf);
+                                     k[1] = c.srv(viewBuf);
+                                     k[2] = i;
+                                     k[3] = groups;
+                                     k[16] = c.uav(copy);
+                                     k[17] = c.srv(req.cullMask);
+                                     k[18] = c.srv(req.atlasSlots);
+                                     k[19] = v.cullMaskOffset;
+                                     k[20] = v.viewportWidth / req.cullTilePx;
+                                     k[21] = req.atlasTilesPerRow;
+                                     k[22] = req.cullTilePx;
+                                     c.graphicsConstants(k, 32);
+                                     D3D12_VIEWPORT vp{ 0, 0, (float)v.viewportWidth, (float)v.viewportHeight, 0, 1 };
+                                     D3D12_RECT sc{ 0, 0, (LONG)v.viewportWidth, (LONG)v.viewportHeight };
+                                     c.cmd->RSSetViewports(1, &vp);
+                                     c.cmd->RSSetScissorRects(1, &sc);
+                                     c.cmd->DispatchMesh(std::min(65535u, groups), (groups + 65534) / 65535, 1);
+                                 }
+                             });
+        }
+        fc.graph.addPass(r.name + ".test.copy", QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             b.use(copy, Use::CopySrc);
+                             b.use(atlas, Use::CopyDst);
+                         },
+                         [=](PassContext& c) { c.cmd->CopyResource(c.resource(atlas), c.resource(copy)); });
     }
 
     // Main-view depth (D32, reversed Z) and G-buffer (RG32_UINT) of every instance.
@@ -136,6 +222,9 @@ public:
 
 private:
     TestFrame& m_tf;
+    uint64_t m_atlasFrame = UINT64_MAX;
+    uint32_t m_atlasTarget = UINT32_MAX;
+    TextureRef m_atlasCopy;
 };
 
 // Axis-aligned box mesh (outward normals, counter-clockwise front faces) with half extents e around the origin.

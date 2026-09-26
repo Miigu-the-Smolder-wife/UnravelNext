@@ -208,6 +208,9 @@ struct Gate
     // Depth raster service for the warm-up frames (S pages).
     void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& r)
     {
+        // The one-path VSM draws into V's tile atlas (hardware depth); this stand-in has only the pixel-kernel mode.
+        if (r.depthTarget.valid() || r.pixelKernel.empty())
+            fail("ShadowGate: request '%s' uses the depth atlas; measure the VSM with RendererGate (V's raster service)", r.name.c_str());
         for (size_t i = 0; i < r.views.size(); ++i)
         {
             stest::TestView tv{ r.views[i].viewProj, r.views[i].userData, { 0, 0, 0 } };

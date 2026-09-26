@@ -122,11 +122,13 @@ public:
     // and returns the raw SRV the kernel loads it from (UNX_NONE without a VSM).
     struct VsmRefs
     {
-        BufferRef pageTable, pool, blocks, searchBound, layers;  // layers: S's transmittance layer (v1.26; invalid = none)
+        BufferRef pageTable;
+        TextureRef atlas;  // v1.43: the page atlas (the lookups take its SRV from the VSM constants)
+        BufferRef blocks, searchBound, layers;  // layers: S's transmittance layer (v1.26; invalid = none)
         uint32_t constants = 0xFFFFFFFFu;
-        bool valid() const { return pageTable.valid() && pool.valid() && blocks.valid() && searchBound.valid() && constants != 0xFFFFFFFFu; }
+        bool valid() const { return pageTable.valid() && atlas.valid() && blocks.valid() && searchBound.valid() && constants != 0xFFFFFFFFu; }
     };
-    static VsmRefs vsmRefs(const FrameResources& r) { return { r.vsmPageTable, r.vsmPool, r.vsmBlocks, r.vsmSearchBound, r.vsmLayers, r.vsmConstants }; }
+    static VsmRefs vsmRefs(const FrameResources& r) { return { r.vsmPageTable, r.vsmAtlas, r.vsmBlocks, r.vsmSearchBound, r.vsmLayers, r.vsmConstants }; }
     static void declareVsm(PassBuilder& b, const VsmRefs& v);
     uint32_t vsmSrvs(PassContext& c, const VsmRefs& v, uint64_t frame, uint32_t user);
 

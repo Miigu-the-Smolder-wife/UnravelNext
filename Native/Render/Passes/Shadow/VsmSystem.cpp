@@ -29,18 +29,15 @@ constexpr uint32_t kBlockBytes = 341 * 32;  // VSM_BLOCK_ENTRIES x VsmBlock
 struct State
 {
     bool initialized = false;
-    bool needsInit = false;  // pool (re)created: the next frame resets tables and free list
-    uint32_t poolPagesX = 0, poolPagesY = 0;
-    ComPtr<ID3D12Resource> pool, table, requests, meta, blocks, freeList, dirtyList, cullMask, args, stats, lastRevision, movedList, ring;
+    bool needsInit = false;  // atlas (re)created: the next frame resets the table, requests, metadata and layers
+    uint32_t atlasPages = 0;  // physical pages (128 per atlas row)
+    ComPtr<ID3D12Resource> atlas;  // D32 page atlas (FrameResources::vsmAtlas)
+    ComPtr<ID3D12Resource> table, requests, meta, blocks, pageList, cullMask, atlasSlots, groups, args, stats, ring;
     ComPtr<ID3D12Resource> layers;  // transmittance layer (VsmLayer.hlsli): per physical page words, then layer pages
     uint64_t layersBytes = 0;
-    ComPtr<ID3D12Resource> motion, jointCounts, jointStaging;  // dirty rule (a): per instance x level motion state; joints
-    uint32_t jointsRevision = UINT32_MAX;
-    bool jointsPending = false;
     ComPtr<ID3D12CommandSignature> dispatchSignature;
-    uint32_t poolUav = UINT32_MAX, tableSrv = UINT32_MAX, ringSrv = UINT32_MAX, metaUav = UINT32_MAX;
+    uint32_t atlasSrv = UINT32_MAX;  // the atlas SRV every lookup reads (VsmConstants::atlasSrv)
     uint32_t ringCbv[kRingSlots] = {};  // constant buffer view of each ring slot (ConstantBuffer<VsmConstants>)
-    uint32_t instanceCapacity = 0;
     uint8_t* ringMapped = nullptr;
     // Stats readback ring: slot i holds the counters of frame statsFrame[i], complete once the graphics queue passes
     // statsFence[i] (the fence of the frame after it was recorded is known at the next record).
@@ -50,30 +47,19 @@ struct State
     int lastStatsSlot = -1;
     uint32_t errorBitsSeen = 0;  // OR of the error words of every harvested frame (INTERFACES 3.6)
     VsmStats latest;
-    // CPU view of the clipmap.
-    float3 sun{};
-    // Moving sun (S_STATUS_KO.md 7): each level's basis (the sun it was rendered with), id and caster height range.
-    float3 levelSun[kLevels] = {};
-    uint32_t levelBasis[kLevels] = {};
-    float levelHMin[kLevels] = {}, levelHMax[kLevels] = {};
-    uint32_t basisCounter = 0;
-    double refreshCredit = 0;  // pages the spread may still refresh (budget accumulated per frame, spent per level)
-    float3 windDirection{};
-    float windSpeed = -1;
-    uint32_t sceneRevision = UINT32_MAX;
-    float hMin = 0, hMax = 0;
+    uint32_t prevSlotsUsed = 0;  // slots the previous frame scanned (a shrinking local-light set clears its old slots)
     uint64_t frames = 0;
     VsmConstantsCpu constants{};
     uint32_t constantsOffset = 0;
     // This frame's graph handles (valid between shadowPages and the end of the frame's recording).
     uint64_t recordedFrame = UINT64_MAX;
-    BufferRef poolRef;
+    TextureRef atlasRef;
     BufferRef tableRef, metaRef, boundRef, blocksRef, statsRef, layersRef, useRef;
     ComPtr<ID3D12Resource> use;  // shadow.vsm.use_stats read bits (created on first use)
     uint32_t useUav = UINT32_MAX;
     bool pagesRecorded = false;
     bool debugPaths = false;
-    // Pool growth: a frame whose requests exhausted the pool sets the next size (never shrinks while running).
+    // Atlas growth: a frame whose requests exceeded it sets the next size (never shrinks while running).
     uint32_t poolTarget = 0;
     uint64_t grownAtFrame = 0;
     // Overflow list capacity in words (power of two, at least kOverflowMinWords): 1.5 x the last completed frame's need.
@@ -88,45 +74,23 @@ struct State
     uint32_t localUsed = 0;              // highest assigned slot + 1
     uint32_t localSceneRevision = UINT32_MAX;
     uint32_t localWithoutSlot = 0;
-    ComPtr<ID3D12Resource> localRing, localMask;
+    ComPtr<ID3D12Resource> localRing, localMask, localSlots;
     uint8_t* localMapped = nullptr;
     uint32_t localStride = 0, localCap = 0;
     uint32_t localLightsSrv[kRingSlots] = {}, localSlotOfSrv[kRingSlots] = {}, localActiveSrv[kRingSlots] = {};
     uint32_t localLightsNow = UINT32_MAX, slotOfNow = UINT32_MAX, activeNow = UINT32_MAX;
 };
 
-// Views of the page-count-dependent resources: new descriptor indices each time (frames in flight keep the old ones).
-void createPoolViews(Device& device, State& s)
-{
-    DescriptorHeaps& h = device.descriptors();
-    s.poolUav = h.allocateResource();
-    D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
-    ud.Format = DXGI_FORMAT_R32_TYPELESS;
-    ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-    ud.Buffer.NumElements = s.poolPagesX * s.poolPagesY * kPage * kPage;
-    ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-    device.d3d()->CreateUnorderedAccessView(s.pool.Get(), nullptr, &ud, h.resourceCpu(s.poolUav));
-    s.metaUav = h.allocateResource();
-    D3D12_UNORDERED_ACCESS_VIEW_DESC md{};
-    md.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-    md.Format = DXGI_FORMAT_UNKNOWN;
-    md.Buffer.NumElements = s.poolPagesX * s.poolPagesY;
-    md.Buffer.StructureByteStride = kMetaBytes;
-    device.d3d()->CreateUnorderedAccessView(s.meta.Get(), nullptr, &md, h.resourceCpu(s.metaUav));
-}
+constexpr uint32_t kAtlasPagesPerRow = 128;                                        // VsmCommon.hlsli VSM_ATLAS_PAGES_PER_ROW
+constexpr uint32_t kLocalFaceWords = 173, kLocalLightWords = 6 * kLocalFaceWords;  // VsmLocal.hlsli
+constexpr uint32_t kLocalViewWordOffset[kLocalMips] = { 0, 1, 2, 3, 5, 13, 45 };
+constexpr uint32_t kScanGroupSlots = 1024;  // VsmScan.hlsl
+constexpr uint32_t kScanGroupsMax = (kTotalSlots + kScanGroupSlots - 1) / kScanGroupSlots;
 
-// Views of the resources created once (page table, constants ring).
+// Views of the resources created once (constants ring).
 void createFixedViews(Device& device, State& s)
 {
     DescriptorHeaps& h = device.descriptors();
-    s.tableSrv = h.allocateResource();
-    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
-    sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sd.Format = DXGI_FORMAT_R32_TYPELESS;
-    sd.Buffer.NumElements = (UINT)((uint64_t)kTotalSlots * 8 / 4);
-    sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-    device.d3d()->CreateShaderResourceView(s.table.Get(), &sd, h.resourceCpu(s.tableSrv));
     for (uint32_t i = 0; i < kRingSlots; ++i)
     {
         s.ringCbv[i] = h.allocateResource();
@@ -135,37 +99,61 @@ void createFixedViews(Device& device, State& s)
     }
 }
 
-// Page-count-dependent resources (pool, metadata, blocks, free and dirty lists); the first call also creates the fixed
-// ones. A regrown pool starts empty: the next frame resets the page table and free list (VsmInit) and re-renders.
+// Page-count-dependent resources (atlas, metadata, blocks, page list, layers); the first call also creates the fixed
+// ones. A regrown atlas: the next frame resets the table (VsmInit); every frame draws all its pages anyway.
 void createState(FramePassContext& fc, State& s, uint32_t pages)
 {
     const QualityConfig& q = fc.quality;
     if (q.integer("shadow.vsm.virtual_resolution") != kVirtual || q.integer("shadow.vsm.page_texels") != kPage || q.integer("shadow.vsm.clipmap_levels") != kLevels)
         fail("shadow.vsm: virtual_resolution / page_texels / clipmap_levels are compiled into the S kernels (16384 / 128 / 20)");
-    const uint32_t perRow = 64;  // 8192 texels
-    if (pages == 0 || pages % perRow) fail("VSM pool: %u pages is not a positive multiple of %u", pages, perRow);
+    if (pages == 0 || pages % kAtlasPagesPerRow || pages / kAtlasPagesPerRow * kPage > 16384)
+        fail("VSM atlas: %u pages is not a positive multiple of %u within one 16384^2 atlas", pages, kAtlasPagesPerRow);
     Device& d = fc.device;
-    for (ComPtr<ID3D12Resource>* r : { std::addressof(s.pool), std::addressof(s.meta), std::addressof(s.blocks), std::addressof(s.freeList), std::addressof(s.dirtyList),
-                                       std::addressof(s.layers) })
+    for (ComPtr<ID3D12Resource>* r : { std::addressof(s.atlas), std::addressof(s.meta), std::addressof(s.blocks), std::addressof(s.pageList), std::addressof(s.layers) })
         if (*r) d.deferRelease(*r);
-    s.poolPagesX = perRow;
-    s.poolPagesY = pages / perRow;
-    s.pool = createBuffer(d, L"S VSM pool", (uint64_t)pages * kPage * kPage * 4);
+    s.atlasPages = pages;
+    {
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width = kAtlasPagesPerRow * kPage;
+        rd.Height = pages / kAtlasPagesPerRow * kPage;
+        rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_R32_TYPELESS;
+        rd.SampleDesc.Count = 1;
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        D3D12_CLEAR_VALUE clear{};
+        clear.Format = DXGI_FORMAT_D32_FLOAT;
+        clear.DepthStencil.Depth = 0.0f;  // no caster
+        check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, &clear, nullptr, 0, nullptr,
+                                                IID_PPV_ARGS(&s.atlas)),
+              "S VSM atlas");
+        s.atlas->SetName(L"S VSM atlas");
+        DescriptorHeaps& h = d.descriptors();
+        s.atlasSrv = h.allocateResource();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = DXGI_FORMAT_R32_FLOAT;
+        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Texture2D.MipLevels = 1;
+        d.d3d()->CreateShaderResourceView(s.atlas.Get(), &sd, h.resourceCpu(s.atlasSrv));
+    }
     s.meta = createBuffer(d, L"S VSM page metadata", (uint64_t)pages * kMetaBytes);
     s.blocks = createBuffer(d, L"S VSM page blocks", (uint64_t)pages * kBlockBytes);
-    s.freeList = createBuffer(d, L"S VSM free list", 4 + (uint64_t)pages * 4);
-    s.dirtyList = createBuffer(d, L"S VSM dirty list", 8 + (uint64_t)pages * 8);
+    s.pageList = createBuffer(d, L"S VSM page list", 8 + (uint64_t)pages * 8);
     // Transmittance layer: the per-page words (0 = no layer) until V's coverage-mode raster fills layer pages (v1.26).
     s.layersBytes = ((uint64_t)pages * 4 + 255) & ~255ull;
     s.layers = createBuffer(d, L"S VSM transmittance layer", s.layersBytes);
-    createPoolViews(d, s);
     if (!s.table)
     {
         s.table = createBuffer(d, L"S VSM page table", (uint64_t)kTotalSlots * 8);
         s.requests = createBuffer(d, L"S VSM requests", (uint64_t)kTotalSlots * 4);
-        s.localMask = createBuffer(d, L"S VSM local cull mask", (uint64_t)kLocalLights * kLocalViewsPerLight * 512 * 4);
+        s.localMask = createBuffer(d, L"S VSM local cull mask", (uint64_t)kLocalLights * kLocalLightWords * 4);
+        s.localSlots = createBuffer(d, L"S VSM local atlas slots", (uint64_t)kLocalLights * kLocalLightWords * 32 * 4);
         s.cullMask = createBuffer(d, L"S VSM cull mask", (uint64_t)kSlots / 8);
-        s.args = createBuffer(d, L"S VSM indirect args", 48);  // dirty pages at 0, moved x levels at 16, moved x local lights at 32
+        s.atlasSlots = createBuffer(d, L"S VSM atlas slots", (uint64_t)kSlots * 4);
+        s.groups = createBuffer(d, L"S VSM scan groups", (uint64_t)kScanGroupsMax * 4);
+        s.args = createBuffer(d, L"S VSM indirect args", 16);
         s.stats = createBuffer(d, L"S VSM stats", kStatsBytes);
         s.ring = createBuffer(d, L"S VSM constants ring", (uint64_t)kRingSlots * kRingStride, D3D12_HEAP_TYPE_UPLOAD);
         s.statsReadback = createBuffer(d, L"S VSM stats readback", (uint64_t)kStatsSlots * kStatsBytes, D3D12_HEAP_TYPE_READBACK);
@@ -223,7 +211,8 @@ float4x4 levelViewProj(const VsmConstantsCpu& c, uint32_t k)
     float4x4 m;
     m.m[0][0] = 2 * L.lightX.x / (t * V); m.m[0][1] = 2 * L.lightX.y / (t * V); m.m[0][2] = 2 * L.lightX.z / (t * V); m.m[0][3] = -2 * ox / V - 1;
     m.m[1][0] = -2 * L.lightY.x / (t * V); m.m[1][1] = -2 * L.lightY.y / (t * V); m.m[1][2] = -2 * L.lightY.z / (t * V); m.m[1][3] = 1 + 2 * oy / V;
-    m.m[2][0] = -L.lightZ.x / range; m.m[2][1] = -L.lightZ.y / range; m.m[2][2] = -L.lightZ.z / range; m.m[2][3] = L.hMax / range;
+    // Depth v = (h - hMin) / (hMax - hMin): reversed-Z (the surface nearest the sun has the largest value), 0 = cleared.
+    m.m[2][0] = L.lightZ.x / range; m.m[2][1] = L.lightZ.y / range; m.m[2][2] = L.lightZ.z / range; m.m[2][3] = -L.hMin / range;
     m.m[3][0] = 0; m.m[3][1] = 0; m.m[3][2] = 0; m.m[3][3] = 1;
     return m;
 }
@@ -240,17 +229,16 @@ void cubeBasis(uint32_t face, float3& right, float3& up, float3& axis)
     right = cross(up, axis);
 }
 
-// View-projection of a local face at a mip: the face's tangent square [-1, 1]^2 onto the top-left res x res pixels of
-// the 16384^2 viewport (s = res / 16384), depth d = f (z - n) / ((f - n) z) (VsmLocalPixel.hlsl inverts it).
-float4x4 localViewProj(const VsmLocalLightCpu& l, uint32_t face, uint32_t mip)
+// View-projection of a local face: the face's tangent square [-1, 1]^2 onto the view's res x res viewport (res = 128 x
+// 2^mip, the mip's tile grid in V's atlas mode), reversed-Z depth d = n (f - z) / ((f - n) z) (near 1, far 0;
+// VsmCommon.hlsli vsmLocalKeyOfDepth inverts it).
+float4x4 localViewProj(const VsmLocalLightCpu& l, uint32_t face)
 {
     float3 right, up, axis;
     cubeBasis(face, right, up, axis);
-    const float sc = (float)(kPage << mip) / kVirtual;
-    const float n = l.nearM, f = l.farM, A = f / (f - n), B = -f * n / (f - n);
-    const float3 r0 = right * sc + axis * (sc - 1), r1 = up * sc + axis * (1 - sc), r2 = axis * A, r3 = axis;
+    const float n = l.nearM, f = l.farM, A = -n / (f - n), B = f * n / (f - n);
+    const float3 rows[4] = { right, up, axis * A, axis };
     float4x4 m;
-    const float3 rows[4] = { r0, r1, r2, r3 };
     for (int i = 0; i < 4; ++i)
     {
         m.m[i][0] = rows[i].x;
@@ -307,7 +295,7 @@ bool frameRefs(FramePassContext& fc, VsmFrameRefs& out)
 {
     State& s = fc.state<State>(kStateKey);
     if (!s.pagesRecorded || s.recordedFrame != fc.frame.frameIndex) return false;
-    out.pool = s.poolRef;
+    out.atlas = s.atlasRef;
     out.table = s.tableRef;
     out.blocks = s.blocksRef;
     out.bound = s.boundRef;
@@ -455,7 +443,12 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         D3D12_RANGE r{ i * kStatsBytes, i * kStatsBytes + kStatsBytes };
         check(s.statsReadback->Map(0, &r, reinterpret_cast<void**>(&p)), "map VSM stats");
         const uint32_t* w = reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(p) + i * kStatsBytes);
-        s.latest = { s.statsFrame[i], w[0], w[1], w[2], w[3], w[4], w[5], w[8], w[9], w[10], w[11], w[12], w[13], w[14] };
+        const VsmStats keep = s.latest;
+        s.latest = { s.statsFrame[i], w[0], w[1], w[2], w[3], 0, w[5], w[8], w[9], w[10], w[11], w[12], w[13], w[14] };
+        s.latest.localAssigned = keep.localAssigned;
+        s.latest.localActive = keep.localActive;
+        s.latest.localWithoutSlot = keep.localWithoutSlot;
+        s.latest.overflowCapacity = keep.overflowCapacity;
         s.latest.overflowWords = w[16];
         s.latest.overflowOverTiles = w[17];
         s.latest.overflowOverPixels = w[18];
@@ -467,13 +460,6 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.latest.airTexels = w[24];
         for (uint32_t k = 0; k < kLevels; ++k) s.latest.levelPages[k] = w[32 + k];
         s.latest.sampledSubtiles = w[53];
-        s.latest.usePixel = w[54];
-        s.latest.usePixelRead = w[55];
-        s.latest.useAir = w[56];
-        s.latest.useAirRead = w[57];
-        s.latest.usePropagated = w[58];
-        s.latest.usePropagatedRead = w[59];
-        s.latest.useCachedRead = w[60];
         s.latest.surfacePixels = w[61];
         s.latest.backfacePixels = w[62];
         s.latest.backfaceMixed = w[63];
@@ -487,115 +473,31 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.statsReadback->Unmap(0, &none);
     }
 
-    // Pool size: shadow.vsm.pool_pages_per_mpixel of the main view (at least pool_pages), grown to 1.25 x the requests
-    // of a completed frame that exhausted it, so requests are not dropped in steady state (a dropped page is a missing
-    // shadow). The frame that exhausts renders without those pages; the frames after the growth have them.
+    // Atlas size: shadow.vsm.pool_pages_per_mpixel of the main view (at least pool_pages), grown to 1.25 x the requests
+    // of a completed frame that exceeded it, so requests are not dropped in steady state (a dropped page is a missing
+    // shadow). The frame that exceeds renders without those pages; the frames after the growth have them.
     if (s.latest.exhausted > 0 && s.latest.frame > s.grownAtFrame)
     {
-        const uint32_t current = s.poolPagesX * s.poolPagesY;
-        s.poolTarget = std::max(current + 64, (uint32_t)((uint64_t)s.latest.requested * 5 / 4));
-        s.grownAtFrame = s.frames + 1;  // stats of frames recorded with the old pool do not count
-        logf("S VSM: %u page requests exhausted the %u-page pool (frame %llu): pool grows to %u pages\n", s.latest.exhausted, current,
-             (unsigned long long)s.latest.frame, (s.poolTarget + 63) / 64 * 64);
+        s.poolTarget = std::max(s.atlasPages + kAtlasPagesPerRow, (uint32_t)((uint64_t)s.latest.requested * 5 / 4));
+        s.grownAtFrame = s.frames + 1;  // stats of frames recorded with the old atlas do not count
+        logf("S VSM: %u page requests exceeded the %u-page atlas (frame %llu): the atlas grows to %u pages\n", s.latest.exhausted, s.atlasPages,
+             (unsigned long long)s.latest.frame, (s.poolTarget + kAtlasPagesPerRow - 1) / kAtlasPagesPerRow * kAtlasPagesPerRow);
     }
-    // Local lights first: their count sizes the pool's initial budget with the view's pixels.
+    // Local lights first: their count sizes the atlas's initial budget with the view's pixels.
     updateLocalLights(fc, s, main);
     const double mpixels = (double)main.view.width * main.view.height / 1e6;
     const double budget = mpixels * q.number("shadow.vsm.pool_pages_per_mpixel") + s.latest.localAssigned * q.number("shadow.vsm.pool_pages_per_local_light");
     uint32_t pages = std::max((uint32_t)q.integer("shadow.vsm.pool_pages"), (uint32_t)budget);
-    pages = (std::max(pages, s.poolTarget) + 63) / 64 * 64;
-    if (!s.pool || s.poolPagesX * s.poolPagesY < pages) createState(fc, s, pages);
+    pages = (std::max(pages, s.poolTarget) + kAtlasPagesPerRow - 1) / kAtlasPagesPerRow * kAtlasPagesPerRow;
+    pages = std::min(pages, 16384u / kPage * kAtlasPagesPerRow);  // one 16384^2 atlas (16,384 pages)
+    if (!s.atlas || s.atlasPages < pages) createState(fc, s, pages);
 
-    // Light basis, caster range, scene-wide invalidation.
+    // One path (S request 20260926_S_vsm_one_path): every level on the current sun and this frame's caster height range;
+    // every requested page is drawn this frame, so there is no basis age, no stale page and no dirty rule.
     const scene::Scene* src = fc.scene.source();
     const float3 sunDir = normalize(src ? src->sun.direction : scene::Sun{}.direction);
-    // Scene reload (or first frame): every page stale, every level on the current sun. A moving sun: each level keeps the
-    // basis its pages were rendered with and refreshes to the current sun before its age exceeds
-    // dthetaMax = (pi / 2) tan(theta_s) e (visibility error e = shadow.vsm.sun_refresh_error: a basis dtheta old shifts
-    // a shadow by d dtheta under a penumbra of width 2 d tan(theta_s), slope <= 4 / (pi w), so |dV| <= 2 dtheta /
-    // (pi tan(theta_s)), independent of d and the level); besides the levels that must refresh, ceil(20 x
-    // (sun change this frame) / dthetaMax) of the oldest refresh every frame so the load spreads evenly. The spread is
-    // by pages: the oldest levels refresh until their requested pages (the last completed frame's, per level) reach
-    // total x change / dthetaMax on average: a running credit gains the budget every frame and pays each refreshed
-    // level's pages, so the mean equals the budget and a frame exceeds it by at most one level (levels that must refresh
-    // are paid too, the credit may go negative).
-    const bool sceneChanged = !s.initialized || fc.scene.revision() != s.sceneRevision;
     const float margin = (float)q.number("shadow.vsm.height_margin_m");
-    uint32_t invalidateMask = 0;
-    // Angles between unit vectors by atan2(|a x b|, a . b): acos(a . b) is 0 in float below ~3e-4 rad.
-    auto angleBetween = [](float3 a, float3 b) { return std::atan2(length(cross(a, b)), dot(a, b)); };
-    const float sunAngle = angleBetween(sunDir, s.sun);  // this frame's change
     const float tanSun = std::tan(src ? src->sun.angularRadius : scene::Sun{}.angularRadius);
-    const float dthetaMax = 1.5707963f * tanSun * (float)q.number("shadow.vsm.sun_refresh_error");
-    auto refresh = [&](uint32_t k) {
-        s.levelSun[k] = sunDir;
-        s.levelBasis[k] = ++s.basisCounter;
-        float lo, hi;
-        casterHeightRange(fc.scene, sunDir, lo, hi);
-        s.levelHMin[k] = lo - margin;
-        s.levelHMax[k] = hi + margin;
-        invalidateMask |= 1u << k;
-    };
-    uint32_t refreshed = 0, pagesRefreshed = 0;
-    float oldest = 0;
-    if (sceneChanged)
-    {
-        s.sceneRevision = fc.scene.revision();
-        for (uint32_t k = 0; k < kLevels; ++k) refresh(k);
-        invalidateMask = 0x80000000u;
-        refreshed = kLevels;
-    }
-    else if (sunAngle > 0)
-    {
-        float age[kLevels];
-        for (uint32_t k = 0; k < kLevels; ++k) age[k] = angleBetween(s.levelSun[k], sunDir);
-        const float share = sunAngle / std::max(dthetaMax, 1e-12f);
-        uint64_t totalPages = 0;
-        for (uint32_t k = 0; k < kLevels; ++k) totalPages += s.latest.levelPages[k];
-        const bool weighted = totalPages > 0;
-        // 10 % above the steady-state need: the round robin completes before any level reaches the must bound.
-        const double pageBudget = 1.1 * (weighted ? (double)totalPages * share : (double)kLevels * share);
-        uint32_t order[kLevels];
-        for (uint32_t k = 0; k < kLevels; ++k) order[k] = k;
-        std::sort(order, order + kLevels, [&](uint32_t a, uint32_t b) { return age[a] > age[b]; });
-        s.refreshCredit = std::min(s.refreshCredit + pageBudget, weighted ? (double)totalPages : (double)kLevels);
-        bool spreading = true;
-        for (uint32_t i = 0; i < kLevels; ++i)
-        {
-            const uint32_t k = order[i];
-            const double cost = weighted ? s.latest.levelPages[k] : 1.0;
-            // Must: by the next frame the basis would be older than the bound. Spread: strictly oldest first, stopping at
-            // the first level the credit does not cover (it waits for the credit, alone, instead of younger levels
-            // taking the credit until it becomes a must together with others).
-            const bool must = age[k] + sunAngle > dthetaMax;
-            spreading = spreading && s.refreshCredit >= cost;
-            if (must || spreading)
-            {
-                refresh(k);
-                s.refreshCredit -= cost;
-            }
-        }
-        for (uint32_t k = 0; k < kLevels; ++k)
-        {
-            if (invalidateMask >> k & 1u)
-            {
-                ++refreshed;
-                pagesRefreshed += s.latest.levelPages[k];
-            }
-            else oldest = std::max(oldest, age[k]);
-        }
-    }
-    s.sun = sunDir;
-    s.latest.levelsRefreshed = refreshed;
-    s.latest.pagesRefreshed = pagesRefreshed;
-    s.latest.largestBasisAge = oldest;
-    s.hMin = s.levelHMin[0];
-    s.hMax = s.levelHMax[0];
-    const float3 windDir = src ? src->windDirection : float3{};
-    const float windSpeed = src ? src->windSpeed : 0.0f;
-    const bool windChanged = std::memcmp(&windDir, &s.windDirection, sizeof windDir) != 0 || windSpeed != s.windSpeed;
-    s.windDirection = windDir;
-    s.windSpeed = windSpeed;
     // shadow.vsm.use_stats (measurement only): the per-slot read bits and their persistent UAV (VsmSample.hlsli vsmEntry).
     const bool useStats = q.integer("shadow.vsm.use_stats") != 0;
     if (useStats && !s.use)
@@ -613,8 +515,9 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     VsmConstantsCpu& c = s.constants;
     c = {};
     c.useStats = useStats ? s.useUav + 1 : 0;
-    c.windChanged = windChanged ? 1u : 0u;
-    c.windSpeed = std::max(windSpeed, 0.0f);
+    c.atlasSrv = s.atlasSrv;
+    const float3 windDir = src ? src->windDirection : float3{};
+    c.windSpeed = std::max(src ? src->windSpeed : 0.0f, 0.0f);
     c.windDirection = c.windSpeed > 0 ? normalize(windDir) : float3{};
     c.lightZ = sunDir;
     lightBasis(sunDir, c.lightX, c.lightY);
@@ -625,17 +528,14 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         c.hMax = hi + margin;
     }
     c.tanSunRadius = tanSun;
-    c.poolPagesX = s.poolPagesX;
-    c.poolPagesY = s.poolPagesY;
+    c.poolPagesX = kAtlasPagesPerRow;
+    c.poolPagesY = s.atlasPages / kAtlasPagesPerRow;
     c.frame = (uint32_t)++s.frames;
-    c.sceneInvalidate = invalidateMask;
     c.time = (float)fc.frame.time;
     c.lodBias = (float)q.number("shadow.vsm.lod_bias");
     c.receiverBiasTexels = (float)q.number("shadow.vsm.receiver_bias_texels");
     c.maxReceiverSlope = (float)q.number("shadow.vsm.max_receiver_slope");
-    c.cacheFrames = (uint32_t)q.integer("shadow.vsm.cache_frames");
     c.instanceCount = (uint32_t)fc.scene.instances().size();
-    c.windTexels = (uint32_t)q.integer("shadow.vsm.wind_texels");
     c.searchTaps = (uint32_t)q.integer("shadow.vsm.search_taps");
     c.filterTaps = (uint32_t)q.integer("shadow.vsm.filter_taps");
     const float3 cam = main.view.position;
@@ -644,13 +544,14 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     for (uint32_t k = 0; k < kLevels; ++k)
     {
         VsmLevelCpu& L = c.level[k];
-        L.lightZ = s.levelSun[k];
-        lightBasis(L.lightZ, L.lightX, L.lightY);
-        L.basis = s.levelBasis[k];
-        L.hMin = s.levelHMin[k];
-        L.hMax = s.levelHMax[k];
-        L.cameraU = dot(cam, L.lightX);
-        L.cameraV = dot(cam, L.lightY);
+        L.lightX = c.lightX;
+        L.lightY = c.lightY;
+        L.lightZ = c.lightZ;
+        L.basis = 1;  // one basis for every level (nested grids)
+        L.hMin = c.hMin;
+        L.hMax = c.hMax;
+        L.cameraU = c.cameraUV[0];
+        L.cameraV = c.cameraUV[1];
         const float pageSize = std::ldexp(1.0f, (int)k - 10) * kPage;
         L.origin[0] = (int32_t)std::floor(L.cameraU / pageSize) - (int32_t)kTable / 2;
         L.origin[1] = (int32_t)std::floor(L.cameraV / pageSize) - (int32_t)kTable / 2;
@@ -659,90 +560,50 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     std::memcpy(s.ringMapped + s.constantsOffset, &c, sizeof c);
     s.initialized = true;
 
-    // Instances' last seen revisions (dirty rule a).
-    if (c.instanceCount > s.instanceCapacity)
-    {
-        if (s.lastRevision) fc.device.deferRelease(s.lastRevision);
-        s.instanceCapacity = std::max(c.instanceCount, 1u);
-        s.lastRevision = createBuffer(fc.device, L"S VSM instance revisions", (uint64_t)s.instanceCapacity * 8);
-        if (s.movedList) fc.device.deferRelease(s.movedList);
-        s.movedList = createBuffer(fc.device, L"S VSM moved instances", 4 + (uint64_t)s.instanceCapacity * 8);
-        if (s.motion) fc.device.deferRelease(s.motion);
-        s.motion = createBuffer(fc.device, L"S VSM instance motion", (uint64_t)s.instanceCapacity * kLevels * 16);
-        if (s.jointCounts) fc.device.deferRelease(s.jointCounts);
-        s.jointCounts = createBuffer(fc.device, L"S VSM joint counts", (uint64_t)s.instanceCapacity * 4);
-        s.jointsRevision = UINT32_MAX;
-    }
-    // Joint counts of the skinned instances (displacement bound of their palettes), when the scene changes.
-    if (s.jointsRevision != fc.scene.revision())
-    {
-        std::vector<uint32_t> counts(s.instanceCapacity, 0);
-        if (const scene::Scene* scn = fc.scene.source())
-            for (uint32_t i = 0; i < c.instanceCount && i < scn->instances.size(); ++i)
-            {
-                const scene::Instance& in = scn->instances[i];
-                if ((in.flags & scene::InstanceSkinned) && in.skeleton < scn->skeletons.size()) counts[i] = (uint32_t)scn->skeletons[in.skeleton].jointToModel.size();
-            }
-        if (s.jointStaging) fc.device.deferRelease(s.jointStaging);
-        s.jointStaging = createBuffer(fc.device, L"S VSM joint counts staging", (uint64_t)s.instanceCapacity * 4, D3D12_HEAP_TYPE_UPLOAD);
-        void* p = nullptr;
-        D3D12_RANGE none{ 0, 0 };
-        check(s.jointStaging->Map(0, &none, &p), "map VSM joint counts");
-        std::memcpy(p, counts.data(), counts.size() * 4);
-        s.jointStaging->Unmap(0, nullptr);
-        s.jointsRevision = fc.scene.revision();
-        s.jointsPending = true;
-    }
-
     RenderGraph& g = fc.graph;
-    const BufferRef pool = g.importBuffer(s.pool.Get(), BufferDesc{ "S VSM pool", (uint64_t)pages * kPage * kPage * 4, 0 });
+    const TextureRef atlas = g.importTexture(s.atlas.Get(),
+                                             TextureDesc{ "S VSM atlas", kAtlasPagesPerRow * kPage, s.atlasPages / kAtlasPagesPerRow * kPage, 1, 1, DXGI_FORMAT_D32_FLOAT },
+                                             D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
     const BufferRef table = g.importBuffer(s.table.Get(), BufferDesc{ "S VSM page table", (uint64_t)kTotalSlots * 8, 0 });
     const BufferRef requests = g.importBuffer(s.requests.Get(), BufferDesc{ "S VSM requests", (uint64_t)kTotalSlots * 4, 0 });
-    const BufferRef localMask = g.importBuffer(s.localMask.Get(), BufferDesc{ "S VSM local cull mask", (uint64_t)kLocalLights * kLocalViewsPerLight * 512 * 4, 0 });
-    // Slots the per-slot passes cover: the sun's and those of the assigned local lights.
+    const BufferRef localMask = g.importBuffer(s.localMask.Get(), BufferDesc{ "S VSM local cull mask", (uint64_t)kLocalLights * kLocalLightWords * 4, 0 });
+    const BufferRef localSlots = g.importBuffer(s.localSlots.Get(), BufferDesc{ "S VSM local atlas slots", (uint64_t)kLocalLights * kLocalLightWords * 32 * 4, 0 });
+    // Slots the scan covers: the sun's and those of the assigned local lights (and last frame's, so a shrinking set of
+    // local lights clears its old slots).
     const uint32_t slotsUsed = kSlots + s.localUsed * kLocalLightSlots;
+    const uint32_t scanSlots = std::max(slotsUsed, s.prevSlotsUsed);
+    s.prevSlotsUsed = slotsUsed;
+    const uint32_t scanGroups = groups(scanSlots, kScanGroupSlots);
     const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow, activeSrv = s.activeNow;
     const uint32_t activeLocal = (uint32_t)s.localActive.size();
     // Froxel light lists (with each entry's shadow-slot bit): the local page marks and the visibility slots read them.
     recordFroxelLists(fc, main, slotOfSrv);
     const BufferRef froxelLists = fc.resources.froxelLights;
-    const BufferRef meta = g.importBuffer(s.meta.Get(), BufferDesc{ "S VSM page metadata", (uint64_t)pages * kMetaBytes, kMetaBytes });
-    const BufferRef blocks = g.importBuffer(s.blocks.Get(), BufferDesc{ "S VSM page blocks", (uint64_t)pages * kBlockBytes, 0 });
+    const uint32_t pagesNow = s.atlasPages;
+    const BufferRef meta = g.importBuffer(s.meta.Get(), BufferDesc{ "S VSM page metadata", (uint64_t)pagesNow * kMetaBytes, kMetaBytes });
+    const BufferRef blocks = g.importBuffer(s.blocks.Get(), BufferDesc{ "S VSM page blocks", (uint64_t)pagesNow * kBlockBytes, 0 });
     s.blocksRef = blocks;
-    const BufferRef freeList = g.importBuffer(s.freeList.Get(), BufferDesc{ "S VSM free list", 4 + (uint64_t)pages * 4, 0 });
-    const BufferRef dirty = g.importBuffer(s.dirtyList.Get(), BufferDesc{ "S VSM dirty list", 8 + (uint64_t)pages * 8, 0 });
+    const BufferRef pageList = g.importBuffer(s.pageList.Get(), BufferDesc{ "S VSM page list", 8 + (uint64_t)pagesNow * 8, 0 });
     const BufferRef layers = g.importBuffer(s.layers.Get(), BufferDesc{ "S VSM transmittance layer", s.layersBytes, 0 });
     s.layersRef = layers;
     fc.resources.vsmLayers = layers;  // v1.26: ShadowSrvs.layers (the pad1 word)
     const BufferRef mask = g.importBuffer(s.cullMask.Get(), BufferDesc{ "S VSM cull mask", (uint64_t)kSlots / 8, 0 });
-    const BufferRef args = g.importBuffer(s.args.Get(), BufferDesc{ "S VSM indirect args", 48, 0 });
-    const BufferRef moved = g.importBuffer(s.movedList.Get(), BufferDesc{ "S VSM moved instances", 4 + (uint64_t)s.instanceCapacity * 8, 0 });
-    const BufferRef motion = g.importBuffer(s.motion.Get(), BufferDesc{ "S VSM instance motion", (uint64_t)s.instanceCapacity * kLevels * 16, 16 });
-    const BufferRef joints = g.importBuffer(s.jointCounts.Get(), BufferDesc{ "S VSM joint counts", (uint64_t)s.instanceCapacity * 4, 4 });
-    if (s.jointsPending)
-    {
-        ID3D12Resource* staging = s.jointStaging.Get();
-        const uint64_t bytes = (uint64_t)s.instanceCapacity * 4;
-        g.addPass("s.vsm.joints", QueueType::Graphics,
-                  [&](PassBuilder& b) {
-                      b.use(joints, Use::CopyDst);
-                      b.keep();
-                  },
-                  [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(ctx.resource(joints), 0, staging, 0, bytes); });
-        s.jointsPending = false;
-    }
+    const BufferRef atlasSlots = g.importBuffer(s.atlasSlots.Get(), BufferDesc{ "S VSM atlas slots", (uint64_t)kSlots * 4, 0 });
+    const BufferRef scanGroupsBuf = g.importBuffer(s.groups.Get(), BufferDesc{ "S VSM scan groups", (uint64_t)kScanGroupsMax * 4, 0 });
+    const BufferRef args = g.importBuffer(s.args.Get(), BufferDesc{ "S VSM indirect args", 16, 0 });
     const BufferRef statsBuf = g.importBuffer(s.stats.Get(), BufferDesc{ "S VSM stats", kStatsBytes, 0 });
     s.statsRef = statsBuf;
     s.useRef = c.useStats ? g.importBuffer(s.use.Get(), BufferDesc{ "S VSM read bits", (uint64_t)kSlots * 4, 0 }) : BufferRef{};
-    const BufferRef useBuf = s.useRef;
-    const BufferRef revisions = g.importBuffer(s.lastRevision.Get(), BufferDesc{ "S VSM instance revisions", (uint64_t)s.instanceCapacity * 8, 8 });
     s.recordedFrame = fc.frame.frameIndex;
-    s.poolRef = pool;
+    s.atlasRef = atlas;
     s.tableRef = table;
     s.metaRef = meta;
     s.pagesRecorded = true;
-    // FrameResources (v1.18): other tracks read the VSM through ShadowVisibility.hlsli (ShadowSrvs).
-    fc.resources.vsmPool = pool;
+    // FrameResources (v1.18, v1.43): other tracks read the VSM through ShadowVisibility.hlsli (ShadowSrvs); the lookups
+    // take the atlas SRV from the VSM constants. vsmPool stays valid (the blocks buffer, a read-only S buffer) until the
+    // readers declare vsmAtlas (their ShadowSrvs.pool word is no longer read).
+    fc.resources.vsmAtlas = atlas;
+    fc.resources.vsmPool = blocks;
     fc.resources.vsmBlocks = blocks;
     fc.resources.vsmConstants = s.ringCbv[s.constantsOffset / kRingStride];
     fc.resources.vsmLocalLights = s.localLightsNow;  // v1.19: ShadowSrvs.lights / .pad0 (shadowVisibilityDirect)
@@ -761,15 +622,14 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.use(table, Use::UavCompute);
                       b.use(requests, Use::UavCompute);
                       b.use(meta, Use::UavCompute);
-                      b.use(freeList, Use::UavCompute);
                       b.use(layers, Use::UavCompute);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.uav(table), ctx.uav(requests), ctx.uav(meta), ctx.uav(freeList), kTotalSlots, pages, ctx.uav(layers), 0 };
+                      const uint32_t k[8] = { ctx.uav(table), ctx.uav(requests), ctx.uav(meta), 0, kTotalSlots, pagesNow, ctx.uav(layers), 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(std::max(kTotalSlots, pages), 256), 1, 1);
+                      ctx.cmd->Dispatch(groups(std::max(kTotalSlots, pagesNow), 256), 1, 1);
                   });
         s.needsInit = false;
     }
@@ -793,13 +653,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmBegin");
         g.addPass("s.vsm.begin", QueueType::Compute,
                   [&](PassBuilder& b) {
-                      b.use(dirty, Use::UavCompute);
                       b.use(statsBuf, Use::UavCompute);
-                      b.use(moved, Use::UavCompute);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.uav(dirty), ctx.uav(statsBuf), ctx.uav(moved), 0 };
+                      const uint32_t k[4] = { 0, ctx.uav(statsBuf), 0, 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, 4);
                       ctx.cmd->Dispatch(1, 1, 1);
@@ -906,178 +764,113 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                   });
     }
     ID3D12CommandSignature* signature = s.dispatchSignature.Get();
-    if (c.instanceCount > 0)
     {
-        // Dirty rule (a): instances whose revisions changed -> list -> one group per (instance, level).
-        ID3D12PipelineState* pm = sh.compute("Passes/Shadow/VsmMoved");
-        ID3D12PipelineState* pa = sh.compute("Passes/Shadow/VsmMovedArgs");
-        ID3D12PipelineState* pi = sh.compute("Passes/Shadow/VsmInvalidate");
-        const uint32_t n = c.instanceCount;
-        g.addPass("s.vsm.moved", QueueType::Compute,
+        // Deterministic page assignment (VsmScan): count per group, prefix, assign.
+        ID3D12PipelineState* p0 = sh.compute("Passes/Shadow/VsmScan.MODE0");
+        ID3D12PipelineState* p1 = sh.compute("Passes/Shadow/VsmScan.MODE1");
+        ID3D12PipelineState* p2 = sh.compute("Passes/Shadow/VsmScan.MODE2");
+        auto words = [=](PassContext& ctx, uint32_t k[12]) {
+            const uint32_t w[12] = { ctx.uav(requests), ctx.uav(table), ctx.uav(scanGroupsBuf), ctx.uav(statsBuf), scanSlots, pagesNow, ring, scanGroups,
+                                     ctx.uav(pageList), ctx.uav(meta), localLightsSrv, ctx.uav(args) };
+            std::memcpy(k, w, sizeof w);
+        };
+        g.addPass("s.vsm.scan.count", QueueType::Compute,
                   [&](PassBuilder& b) {
-                      b.use(revisions, Use::UavCompute);
-                      b.use(moved, Use::UavCompute);
-                      b.use(motion, Use::UavCompute);
-                      b.use(joints, Use::SrvCompute);
+                      b.use(requests, Use::UavCompute);
+                      b.use(scanGroupsBuf, Use::UavCompute);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.uav(revisions), ctx.uav(moved), n, ctx.uav(motion), ctx.srv(joints), ring, 0, 0 };
-                      ctx.cmd->SetPipelineState(pm);
-                      ctx.bindFrameConstants(mainConstants);
-                      ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(n, 64), 1, 1);
+                      uint32_t k[12];
+                      const uint32_t w[12] = { ctx.uav(requests), 0, ctx.uav(scanGroupsBuf), 0, scanSlots, pagesNow, ring, scanGroups, 0, 0, 0, 0 };
+                      std::memcpy(k, w, sizeof w);
+                      ctx.cmd->SetPipelineState(p0);
+                      ctx.computeConstants(k, 12);
+                      ctx.cmd->Dispatch(scanGroups, 1, 1);
                   });
-        g.addPass("s.vsm.movedargs", QueueType::Compute,
+        g.addPass("s.vsm.scan.prefix", QueueType::Compute,
                   [&](PassBuilder& b) {
-                      b.use(moved, Use::SrvCompute);
+                      b.use(scanGroupsBuf, Use::UavCompute);
+                      b.use(statsBuf, Use::UavCompute);
+                      b.use(pageList, Use::UavCompute);
                       b.use(args, Use::UavCompute);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.srv(moved), ctx.uav(args), activeLocal, 0 };
-                      ctx.cmd->SetPipelineState(pa);
-                      ctx.computeConstants(k, 4);
+                      const uint32_t k[12] = { 0, 0, ctx.uav(scanGroupsBuf), ctx.uav(statsBuf), scanSlots, pagesNow, ring, scanGroups, ctx.uav(pageList), 0, 0,
+                                               ctx.uav(args) };
+                      ctx.cmd->SetPipelineState(p1);
+                      ctx.computeConstants(k, 12);
                       ctx.cmd->Dispatch(1, 1, 1);
                   });
-        g.addPass("s.vsm.invalidate", QueueType::Compute,
+        g.addPass("s.vsm.scan.assign", QueueType::Compute,
                   [&](PassBuilder& b) {
-                      b.use(table, Use::UavCompute);
-                      b.use(moved, Use::SrvCompute);
-                      b.use(motion, Use::UavCompute);
-                      b.use(args, Use::IndirectArgs);
-                      b.keep();
-                  },
-                  [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.uav(table), ctx.srv(moved), ring, ctx.uav(motion) };
-                      ctx.cmd->SetPipelineState(pi);
-                      ctx.bindFrameConstants(mainConstants);
-                      ctx.computeConstants(k, 4);
-                      ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 16, nullptr, 0);
-                  });
-    }
-        if (activeLocal > 0)
-        {
-            ID3D12PipelineState* pl = sh.compute("Passes/Shadow/VsmLocalInvalidate");
-            g.addPass("s.vsm.localinvalidate", QueueType::Compute,
-                      [&](PassBuilder& b) {
-                          b.use(table, Use::UavCompute);
-                          b.use(moved, Use::SrvCompute);
-                          b.use(args, Use::IndirectArgs);
-                          b.keep();
-                      },
-                      [=](PassContext& ctx) {
-                          const uint32_t k[8] = { ctx.uav(table), ctx.srv(moved), localLightsSrv, activeSrv, activeLocal, 0, 0, 0 };
-                          ctx.cmd->SetPipelineState(pl);
-                          ctx.bindFrameConstants(mainConstants);
-                          ctx.computeConstants(k, 8);
-                          ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 32, nullptr, 0);
-                      });
-        }
-    {
-        ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmRelease");
-        g.addPass("s.vsm.release", QueueType::Compute,
-                  [&](PassBuilder& b) {
-                      b.use(table, Use::UavCompute);
-                      b.use(requests, Use::SrvCompute);
-                      b.use(meta, Use::UavCompute);
-                      b.use(freeList, Use::UavCompute);
-                      b.keep();
-                  },
-                  [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.uav(table), ctx.srv(requests), ctx.uav(meta), ctx.uav(freeList), ring, localLightsSrv, 0, 0 };
-                      ctx.cmd->SetPipelineState(pso);
-                      ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(slotsUsed, 256), 1, 1);
-                  });
-    }
-    {
-        ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmAllocate");
-        g.addPass("s.vsm.allocate", QueueType::Compute,
-                  [&](PassBuilder& b) {
-                      b.use(table, Use::UavCompute);
                       b.use(requests, Use::UavCompute);
-                      b.use(meta, Use::UavCompute);
-                      b.use(freeList, Use::UavCompute);
-                      b.use(dirty, Use::UavCompute);
+                      b.use(table, Use::UavCompute);
+                      b.use(scanGroupsBuf, Use::UavCompute);
                       b.use(statsBuf, Use::UavCompute);
-                      if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
+                      b.use(pageList, Use::UavCompute);
+                      b.use(meta, Use::UavCompute);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.uav(table), ctx.uav(requests), ctx.uav(meta), ctx.uav(freeList), ctx.uav(dirty), ctx.uav(statsBuf), ring, localLightsSrv };
-                      ctx.cmd->SetPipelineState(pso);
-                      ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(slotsUsed, 256), 1, 1);
+                      uint32_t k[12];
+                      words(ctx, k);
+                      ctx.cmd->SetPipelineState(p2);
+                      ctx.computeConstants(k, 12);
+                      ctx.cmd->Dispatch(scanGroups, 1, 1);
                   });
     }
     {
         ID3D12PipelineState* pm = sh.compute("Passes/Shadow/VsmCullMask");
-        ID3D12PipelineState* pf = sh.compute("Passes/Shadow/VsmFinalize");
         g.addPass("s.vsm.cullmask", QueueType::Compute,
                   [&](PassBuilder& b) {
                       b.use(table, Use::SrvCompute);
                       b.use(mask, Use::UavCompute);
+                      b.use(atlasSlots, Use::UavCompute);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.srv(table), ctx.uav(mask), ring, off };
+                      const uint32_t k[4] = { ctx.srv(table), ctx.uav(mask), ring, ctx.uav(atlasSlots) };
                       ctx.cmd->SetPipelineState(pm);
                       ctx.computeConstants(k, 4);
                       ctx.cmd->Dispatch(groups(kSlots / 32, 64), 1, 1);
                   });
-        g.addPass("s.vsm.finalize", QueueType::Compute,
-                  [&](PassBuilder& b) {
-                      b.use(dirty, Use::SrvCompute);
-                      b.use(args, Use::UavCompute);
-                      b.use(freeList, Use::SrvCompute);
-                      b.use(statsBuf, Use::UavCompute);
-                      b.keep();
-                  },
-                  [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.srv(dirty), ctx.uav(args), ctx.srv(freeList), ctx.uav(statsBuf) };
-                      ctx.cmd->SetPipelineState(pf);
-                      ctx.computeConstants(k, 4);
-                      ctx.cmd->Dispatch(1, 1, 1);
-                  });
     }
+    if (fc.services.rasterizeDepth && activeLocal > 0)
     {
-        ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmClear");
-        g.addPass("s.vsm.clear", QueueType::Compute,
+        ID3D12PipelineState* pm = sh.compute("Passes/Shadow/VsmLocalCullMask");
+        g.addPass("s.vsm.localcullmask", QueueType::Compute,
                   [&](PassBuilder& b) {
-                      b.use(dirty, Use::SrvCompute);
-                      b.use(args, Use::IndirectArgs);
-                      b.use(pool, Use::UavCompute);
+                      b.use(table, Use::SrvCompute);
+                      b.use(localMask, Use::UavCompute);
+                      b.use(localSlots, Use::UavCompute);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.srv(dirty), ctx.uav(pool), ring, off };
-                      ctx.cmd->SetPipelineState(pso);
-                      ctx.computeConstants(k, 4);
-                      ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 0, nullptr, 0);
+                      const uint32_t k[8] = { ctx.srv(table), ctx.uav(localMask), activeLocal, activeSrv, ctx.uav(localSlots), 0, 0, 0 };
+                      ctx.cmd->SetPipelineState(pm);
+                      ctx.computeConstants(k, 8);
+                      ctx.cmd->Dispatch(groups(activeLocal * kLocalLightWords, 64), 1, 1);
                   });
     }
+    g.addPass("s.vsm.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(atlas, Use::DepthWrite); },
+              [=](PassContext& ctx) { ctx.cmd->ClearDepthStencilView(ctx.dsv(atlas), D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr); });
 
-    // Dirty pages through V's cluster pipeline: one orthographic view per level over its whole window; the tile mask
-    // limits the raster to dirty pages, the pixel kernel writes only into dirty pages.
+    // Every requested page through V's cluster pipeline into its atlas slot (tile atlas, hardware depth, no pixel
+    // kernel): one orthographic view per level over its whole window; the tile mask limits the raster to the pages
+    // with a slot this frame.
     if (fc.services.rasterizeDepth)
     {
         DepthRasterRequest r;
         r.name = "s.vsm.raster";
         r.instanceMask = scene::InstanceCastShadow;
-        r.pixelKernel = "Passes/Shadow/VsmPagePixel";
-        r.bufferUses.push_back({ pool, Use::UavGraphics });
-        r.bufferUses.push_back({ table, Use::SrvGraphics });
-        r.bufferUses.push_back({ meta, Use::UavGraphics });
-        r.pixelConstants[0] = s.poolUav;
-        r.pixelConstants[1] = s.tableSrv;
-        r.pixelConstants[2] = s.ringCbv[s.constantsOffset / kRingStride];  // each level's hMin / hMax (its basis)
-        r.pixelConstants[3] = 0;
-        r.pixelConstants[4] = s.poolPagesX;
-        r.pixelConstants[5] = s.metaUav;
+        r.depthTarget = atlas;
+        r.atlasSlots = atlasSlots;
+        r.atlasTilesPerRow = kAtlasPagesPerRow;
         r.cullMask = mask;
         r.cullTilePx = kPage;
-        r.tileLocal = true;  // fragments only inside dirty pages (INTERFACES 5.3 v1.7)
+        r.tileLocal = true;
         r.cull = D3D12_CULL_MODE_NONE;
         for (uint32_t k = 0; k < kLevels; ++k)
         {
@@ -1086,48 +879,29 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             v.viewportX = v.viewportY = 0;
             v.viewportWidth = v.viewportHeight = kVirtual;
             v.lodPixelsPerMetre = 1.0f / std::ldexp(1.0f, (int)k - 10);
-            v.userData = k | ((uint32_t)(c.level[k].origin[0] & 127) << 5) | ((uint32_t)(c.level[k].origin[1] & 127) << 12);
+            v.userData = k;
             v.cullMaskOffset = k * (kTable * kTable / 32);
             r.views.push_back(v);
         }
         fc.services.rasterizeDepth(fc, r);
     }
-    if (fc.services.rasterizeDepth && !s.localActive.empty())
+    if (fc.services.rasterizeDepth && activeLocal > 0)
     {
-        // Local lights: tile masks of the (light, face, mip) views, then the raster of their dirty pages; one request per
-        // 6 lights (42 views each, V's 255-view limit), all views in one 16384^2 viewport (VsmLocalPixel.hlsl).
-        const uint32_t views = (uint32_t)s.localActive.size() * kLocalViewsPerLight;
-        ID3D12PipelineState* pm = sh.compute("Passes/Shadow/VsmLocalCullMask");
-        g.addPass("s.vsm.localcullmask", QueueType::Compute,
-                  [&](PassBuilder& b) {
-                      b.use(table, Use::SrvCompute);
-                      b.use(localMask, Use::UavCompute);
-                      b.keep();
-                  },
-                  [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.srv(table), ctx.uav(localMask), views, activeSrv };
-                      ctx.cmd->SetPipelineState(pm);
-                      ctx.computeConstants(k, 4);
-                      ctx.cmd->Dispatch(groups(views * 512, 64), 1, 1);
-                  });
-        for (uint32_t first = 0; first < s.localActive.size(); first += 6)
+        // Local lights: the (light, face, mip) views of 6 lights per request (42 views each, V's 255-view limit); each
+        // view's viewport is its mip's resolution, the tile masks and slots are packed per light (VsmLocalCullMask).
+        for (uint32_t first = 0; first < activeLocal; first += 6)
         {
             DepthRasterRequest r;
             r.name = "s.vsm.localraster" + std::to_string(first / 6);
             r.instanceMask = scene::InstanceCastShadow;
-            r.pixelKernel = "Passes/Shadow/VsmLocalPixel";
-            r.bufferUses.push_back({ pool, Use::UavGraphics });
-            r.bufferUses.push_back({ table, Use::SrvGraphics });
-            r.bufferUses.push_back({ meta, Use::UavGraphics });
-            r.pixelConstants[0] = s.poolUav;
-            r.pixelConstants[1] = s.tableSrv;
-            r.pixelConstants[2] = localLightsSrv;
-            r.pixelConstants[5] = s.metaUav;
+            r.depthTarget = atlas;
+            r.atlasSlots = localSlots;
+            r.atlasTilesPerRow = kAtlasPagesPerRow;
             r.cullMask = localMask;
             r.cullTilePx = kPage;
             r.tileLocal = true;
             r.cull = D3D12_CULL_MODE_NONE;
-            for (uint32_t a = first; a < std::min<uint32_t>(first + 6, (uint32_t)s.localActive.size()); ++a)
+            for (uint32_t a = first; a < std::min<uint32_t>(first + 6, activeLocal); ++a)
             {
                 const uint32_t slot = s.localActive[a];
                 const VsmLocalLightCpu& l = s.localData[slot];
@@ -1135,12 +909,12 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                     for (uint32_t mip = 0; mip < kLocalMips; ++mip)
                     {
                         RasterView v;
-                        v.viewProj = localViewProj(l, face, mip);
+                        v.viewProj = localViewProj(l, face);
                         v.viewportX = v.viewportY = 0;
-                        v.viewportWidth = v.viewportHeight = kVirtual;
+                        v.viewportWidth = v.viewportHeight = kPage << mip;
                         v.lodPixelsPerMetre = 0.5f * (float)(kPage << mip);  // focal length in texels (90 degree face)
                         v.userData = slot | face << 7 | mip << 10;
-                        v.cullMaskOffset = (a * kLocalViewsPerLight + face * kLocalMips + mip) * 512;
+                        v.cullMaskOffset = a * kLocalLightWords + face * kLocalFaceWords + kLocalViewWordOffset[mip];
                         r.views.push_back(v);
                     }
             }
@@ -1152,15 +926,15 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmPageMax");
         g.addPass("s.vsm.pagemax", QueueType::Compute,
                   [&](PassBuilder& b) {
-                      b.use(dirty, Use::SrvCompute);
+                      b.use(pageList, Use::SrvCompute);
                       b.use(args, Use::IndirectArgs);
-                      b.use(pool, Use::SrvCompute);
+                      b.use(atlas, Use::SrvCompute);
                       b.use(meta, Use::UavCompute);
                       b.use(blocks, Use::UavCompute);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.srv(dirty), ctx.srv(pool), ctx.uav(meta), ring, off, ctx.uav(blocks), 0, 0 };
+                      const uint32_t k[8] = { ctx.srv(pageList), ctx.srv(atlas), ctx.uav(meta), ring, localLightsSrv, ctx.uav(blocks), 0, 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, 8);
                       ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 0, nullptr, 0);
@@ -1215,7 +989,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     view.shadowVisibility = out;
     const TextureRef depth = view.depth, gbuffer = view.gbuffer;
     const TextureRef mirrorMask = view.view.planarMask, mirrorTiles = view.view.planarTileMask;  // planar views: mirror pixels only
-    const BufferRef pool = s.poolRef;
+    const TextureRef atlas = s.atlasRef;
     // Local slots (1-3) and the overflow list from the view's froxel lists (INTERFACES 7.3, 7.4, v1.22): the main view's
     // (FrameRenderer sets them after froxels; tests without froxels: shadowPages' lists), a planar reflection view's own
     // (recorded here with its air volume from the mirror plane on).
@@ -1294,7 +1068,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
                   b.use(gbuffer, Use::SrvCompute);
-                  b.use(pool, Use::SrvCompute);
+                  b.use(atlas, Use::SrvCompute);
                   b.use(table, Use::SrvCompute);
                   b.use(bound, Use::SrvCompute);
                   b.use(blocks, Use::SrvCompute);
@@ -1314,7 +1088,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
               },
               [=](PassContext& ctx) {
                   const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu,
-                                           ctx.srv(table), ctx.srv(pool), ctx.srv(bound), ctx.uav(list), ctx.srv(blocks), ctx.uav(statsBuf), 0,
+                                           ctx.srv(table), ctx.srv(atlas), ctx.srv(bound), ctx.uav(list), ctx.srv(blocks), ctx.uav(statsBuf), 0,
                                            localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv,
                                            overflowList ? ctx.uav(heads) : 0xFFFFFFFFu,
                                            mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu, mirrorTiles.valid() ? ctx.srv(mirrorTiles) : 0xFFFFFFFFu,
@@ -1339,7 +1113,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
                   b.use(gbuffer, Use::SrvCompute);
-                  b.use(pool, Use::SrvCompute);
+                  b.use(atlas, Use::SrvCompute);
                   b.use(table, Use::SrvCompute);
                   b.use(bound, Use::SrvCompute);
                   b.use(blocks, Use::SrvCompute);
@@ -1351,7 +1125,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
               },
               [=](PassContext& ctx) {
-                  const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, off, ctx.srv(table), ctx.srv(pool), ctx.srv(bound),
+                  const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, off, ctx.srv(table), ctx.srv(atlas), ctx.srv(bound),
                                            ctx.srv(list), ctx.srv(blocks), ctx.uav(statsBuf), 0, rays, steps, ctx.srv(layers), 0 };
                   ctx.cmd->SetPipelineState(p2);
                   ctx.bindFrameConstants(constants);
@@ -1365,7 +1139,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
                   b.use(gbuffer, Use::SrvCompute);
-                  b.use(pool, Use::SrvCompute);
+                  b.use(atlas, Use::SrvCompute);
                   b.use(table, Use::SrvCompute);
                   b.use(blocks, Use::SrvCompute);
                   b.use(overflowTiles, Use::SrvCompute);
@@ -1380,7 +1154,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
               },
               [=](PassContext& ctx) {
-                  const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(heads), ring, ctx.srv(overflowTiles), ctx.srv(table), ctx.srv(pool),
+                  const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(heads), ring, ctx.srv(overflowTiles), ctx.srv(table), ctx.srv(atlas),
                                            ctx.srv(blocks), ctx.uav(overflow), capacity, ctx.uav(fallback), ctx.uav(statsBuf),
                                            localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv, ctx.uav(counter),
                                            mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu, 0, 0, 0 };

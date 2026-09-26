@@ -145,7 +145,8 @@ float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k, inout Vsm
                 [loop] for (uint g1 = 0; g1 < 24 && vsmAirWalkNext(w1, xa, xb, c1); ++g1)
                 {
                     ++count.texels;
-                    const uint hv = r.pool.Load(vsmPoolAddress(e & VSM_PHYS_MASK, uint2(clamp(c1 - page * (int)VSM_PAGE, 0, (int)VSM_PAGE - 1))));
+                    const uint hv = vsmSunKey(r.pool.Load(vsmAtlasTexel(e & VSM_PHYS_MASK, uint2(clamp(c1 - page * (int)VSM_PAGE, 0, (int)VSM_PAGE - 1)))),
+                                              vc.hMin, vc.hMax);
                     if (hv == VSM_EMPTY) continue;
                     const float H = vsmDecode(hv), ha = h0 + dh * xa, hb = h0 + dh * xb, lo = min(ha, hb), hi = max(ha, hb);
                     shadowed += (xb - xa) * (hi > lo ? saturate((H - lo) / (hi - lo)) : (lo < H ? 1.0 : 0.0));

@@ -4,11 +4,13 @@
 // Sun: a clipmap of VSM_LEVELS orthographic levels around the camera, level k covering 2^(k+4) m with VSM_VIRTUAL
 // texels (texel tau_k = 2^(k-10) m), cut into VSM_TABLE x VSM_TABLE virtual pages of VSM_PAGE^2 texels. A level's window
 // is [origin, origin + VSM_TABLE) pages in absolute page coordinates of its light-space grid; a page lives in table
-// slot (absolute page mod VSM_TABLE) and carries its wrap generation (absolute page div VSM_TABLE) as a tag, so the
-// window scrolls without moving cached pages.
+// slot (absolute page mod VSM_TABLE) and carries its wrap generation (absolute page div VSM_TABLE) as a tag.
 //
-// Stored values are light-space heights h = dot(p, towardSun) of the surface nearest the sun, as order-preserving
-// uints (vsmEncode) so rasterisation resolves them with InterlockedMax; 0 = no caster.
+// One path (S request 20260926_S_vsm_one_path): no page cache. Every frame the requested pages get physical pages by a
+// deterministic scan (VsmScan), the depth atlas is cleared and V rasterises every requested page with hardware depth,
+// all levels on the current sun. Stored in the atlas: sun pages v = (h - hMin) / (hMax - hMin) of the surface nearest the
+// sun (h = dot(p, towardSun), hMin / hMax the frame's caster range), local pages the reversed-Z face depth; 0 = no
+// caster. Lookups turn a texel into an order-preserving uint key (vsmEncode of h; of -z for local faces), 0 = empty.
 #ifndef UNX_VSM_COMMON_HLSLI
 #define UNX_VSM_COMMON_HLSLI
 #include "Bindless.hlsli"
@@ -94,7 +96,8 @@ struct VsmConstants
     float3 windDirection;    // this frame's scene wind (unit; zero without wind) and speed (m/s): pages store the wind
     float windSpeed;         // they were drawn with, the rule bounds the change (windChangeBound, v1.23)
     uint useStats;           // shadow.vsm.use_stats (measurement only): 1 + UAV index of the per-slot read bits, 0 = off
-    uint3 usePad;
+    uint atlasSrv;           // SRV of the page atlas (Texture2D<float>, FrameResources::vsmAtlas): every lookup reads it here
+    uint2 usePad;
     VsmLevel level[VSM_LEVELS];  // CPU copy of the windows (raster views); kernels use vsmTexel / vsmOrigin
 };
 
@@ -185,8 +188,22 @@ int2 vsmSlotAbsPage(ConstantBuffer<VsmConstants> c, uint slotInLevel, uint k)
     return o + ((s - (o & (int)(VSM_TABLE - 1))) & (int)(VSM_TABLE - 1));
 }
 
-// Physical pool: a raw buffer (no texture layouts to transition between the raster's writes and the lookups' reads),
-// pages of VSM_PAGE^2 texels, row-major inside a page. Byte address of texel 'local' of physical page 'phys'.
-uint vsmPoolAddress(uint phys, uint2 local) { return ((phys << 14) + local.y * VSM_PAGE + local.x) * 4; }
+// Physical atlas (FrameResources::vsmAtlas, D32_FLOAT): page p at pixel ((p % 128), (p / 128)) x VSM_PAGE; texel
+// 'local' of page 'phys'.
+#define VSM_ATLAS_PAGES_PER_ROW 128u
+int3 vsmAtlasTexel(uint phys, uint2 local)
+{
+    return int3(((phys & (VSM_ATLAS_PAGES_PER_ROW - 1)) << VSM_PAGE_SHIFT) + local.x, ((phys >> 7) << VSM_PAGE_SHIFT) + local.y, 0);
+}
+// Key of a sun texel v = (h - hMin) / (hMax - hMin): vsmEncode(h), VSM_EMPTY for v = 0 (no caster).
+uint vsmSunKey(float v, float hMin, float hMax) { return v > 0 ? vsmEncode(hMin + v * (hMax - hMin)) : VSM_EMPTY; }
+// Key of a local face texel of reversed-Z depth d = n (f - z) / ((f - n) z): vsmEncode(-z), VSM_EMPTY for d = 0.
+uint vsmLocalKeyOfDepth(float d, float nearM, float farM) { return d > 0 ? vsmEncode(-(nearM * farM / (nearM + d * (farM - nearM)))) : VSM_EMPTY; }
+// The atlas SRV of this frame (VsmConstants::atlasSrv), for callers that hold ShadowSrvs.
+uint vsmAtlasSrv(uint constantsCbv)
+{
+    ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[constantsCbv];
+    return c.atlasSrv;
+}
 
 #endif

@@ -1232,7 +1232,8 @@ void RayScene::selectProxyLevels(FramePassContext& fc)
 void RayScene::declareVsm(PassBuilder& b, const VsmRefs& v)
 {
     if (!v.valid()) return;
-    for (const BufferRef& r : { v.pageTable, v.pool, v.blocks, v.searchBound }) b.use(r, Use::SrvGraphics);
+    for (const BufferRef& r : { v.pageTable, v.blocks, v.searchBound }) b.use(r, Use::SrvGraphics);
+    b.use(v.atlas, Use::SrvGraphics);
     if (v.layers.valid()) b.use(v.layers, Use::SrvGraphics);
 }
 
@@ -1270,7 +1271,7 @@ uint32_t RayScene::vsmSrvs(PassContext& c, const VsmRefs& v, uint64_t frame, uin
     // Slot of frame % kDescSlots: frame f - kDescSlots has completed (frames in flight <= kDescSlots, record()).
     const uint32_t slot = (uint32_t)(frame % kDescSlots) * 2 + user;
     // ShadowSrvs: { page table, pool, blocks, search bound, constants, lights (none), 0, transmittance layer (UNX_NONE: T = 1) }.
-    const uint32_t words[8] = { c.srv(v.pageTable), c.srv(v.pool), c.srv(v.blocks), c.srv(v.searchBound), v.constants, 0xFFFFFFFFu, 0,
+    const uint32_t words[8] = { c.srv(v.pageTable), c.srv(v.atlas), c.srv(v.blocks), c.srv(v.searchBound), v.constants, 0xFFFFFFFFu, 0,
                                 v.layers.valid() ? c.srv(v.layers) : 0xFFFFFFFFu };
     std::memcpy(m_vsmRingMapped + slot * 32, words, sizeof words);
     return m_vsmRingSrv[slot];

@@ -1,7 +1,8 @@
 #pragma once
-// S track, virtual shadow maps (ARCHITECTURE 2.3, 2.4, 2.11). Persistent page pool and tables live in the renderer's
-// track state (key "s.vsm"); each frame requests pages from the main view's depth, applies the dirty rules, renders
-// dirty pages through V's depth raster service and evaluates shadow visibility per pixel (shadowVisibility).
+// S track, virtual shadow maps (ARCHITECTURE 2.3, 2.4, 2.11). One path (S request 20260926_S_vsm_one_path): the page
+// atlas and tables live in the renderer's track state (key "s.vsm"); each frame requests pages from the main view's
+// depth and air, assigns every requested page a slot of the depth atlas (deterministic scan), draws them all through V's
+// depth raster service (tile atlas, hardware depth) and evaluates shadow visibility per pixel (shadowVisibility).
 #include "unx/render/Frame.h"
 
 #include <cstdint>
@@ -36,7 +37,9 @@ struct VsmConstantsCpu
     uint32_t searchTaps, filterTaps;
     float3 windDirection;
     float windSpeed;
-    uint32_t useStats, usePad[3];  // 1 + UAV index of the read bits (shadow.vsm.use_stats), 0 = off
+    uint32_t useStats;  // 1 + UAV index of the read bits (shadow.vsm.use_stats), 0 = off
+    uint32_t atlasSrv;  // SRV of the page atlas (every lookup reads it here)
+    uint32_t usePad[2];
     VsmLevelCpu level[20];
 };
 constexpr uint32_t kLevels = 20, kPage = 128, kTable = 128, kVirtual = 16384;
@@ -90,7 +93,7 @@ struct VsmStats
     uint32_t errorBits = 0, errorBitsSeen = 0;
 };
 
-// shadowPages: requests, dirty rules, allocation and the dirty-page raster for this frame.
+// shadowPages: requests, page assignment and the raster of every requested page for this frame.
 void recordPages(FramePassContext& fc, const ViewResources& main);
 // shadowVisibility: 4 B per pixel (INTERFACES 7.3) for any view whose depth and G-buffer are in 'view'.
 void recordVisibility(FramePassContext& fc, ViewResources& view);
@@ -99,7 +102,8 @@ void recordVisibility(FramePassContext& fc, ViewResources& view);
 // not recorded this frame.
 struct VsmFrameRefs
 {
-    BufferRef pool, table, blocks, bound, stats;  // stats: raw VSM counters (walk statistics, words 20..24)
+    TextureRef atlas;  // the page atlas (D32; SrvCompute / SrvGraphics for readers)
+    BufferRef table, blocks, bound, stats;  // stats: raw VSM counters (walk statistics, words 20..24)
     BufferRef use;  // read bits (shadow.vsm.use_stats; invalid when off): readers declare it as UAV
     uint32_t constantsCbv = UINT32_MAX;  // ConstantBuffer<VsmConstants> of this frame
 };
