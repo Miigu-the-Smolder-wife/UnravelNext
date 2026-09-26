@@ -7,6 +7,10 @@
 // intersector. Round 7 (B3, destruction events): instances appended after upload (GpuScene::setInstances) rebuild the
 // ray scene from the previous one: no mesh BLAS is built again, the static TLAS is kept while only dynamic instances were
 // added, the rays match the CPU reference with the new instances, and the changed geometry's bounds are reported.
+// Round 8 (runtime geometry, C2b; integrated builds with the cluster builder): a runtime mesh and two runtime instances
+// added after upload (GpuScene::addRuntimeMesh / addRuntimeInstance, no scene revision) are traced through their own
+// BLAS and dynamic TLAS instances (RayScene::recordRuntime) against a CPU reference holding the same geometry; one moved,
+// then one removed: its rays pass through; appearing and disappearing instances report their bounds (B3).
 //
 //   unx_test_raytracing_rayscene [--rays N] [--validate]     --validate: debug layer + GPU-based validation
 #include "unx/core/Config.h"
@@ -14,6 +18,9 @@
 #include "unx/render/GpuScene.h"
 #include "unx/rt/RayPipeline.h"
 #include "unx/rt/RayScene.h"
+#if defined(UNX_HAS_CLUSTERBUILDER)
+#include "unx/clusterbuilder/ClusterBuilder.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -1087,6 +1094,114 @@ int main(int argc, char** argv)
             pass = pass && ok;
             rt::RayScene::release(device, editScene);
         }
+#if defined(UNX_HAS_CLUSTERBUILDER)
+        {
+            // Round 8 (C2b): runtime geometry.
+            scene::Scene ref = makeScene(8);
+            const uint32_t baseCount = (uint32_t)ref.instances.size(), baseMeshes = (uint32_t)ref.meshes.size();
+            GpuScene rtScene(device);
+            RuntimeCapacity cap;
+            cap.meshes = 4, cap.submeshes = 8, cap.vertices = 4096, cap.indices = 16384;
+            cap.clusters = 256, cap.clusterVertexIndices = 16384, cap.clusterTriangles = 16384, cap.nodes = 256;
+            cap.instances = 16;
+            rtScene.reserveRuntime(cap);
+            rtScene.upload(ref);
+            {
+                // The pool's cluster targets exist once V's cluster data is installed (as the host does).
+                clusterbuilder::Settings bs = clusterbuilder::Settings::fromQuality(quality);
+                bs.noSimplification = true;
+                rtScene.setClusters(clusterbuilder::build(ref, bs));
+            }
+            QualityConfig rtQuality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            rtQuality.applyOverride("raytracing.proxy_error_px=0");  // the CPU reference holds the skinned tube's full mesh (as round 7)
+            rt::RayScene& rsR = rt::RayScene::get(device, shaders, rtScene, rtQuality);
+            uint64_t index = 1;
+            auto frameOf = [&]() {
+                rtScene.flushUpdates(index, 2, shaders);
+                gpu::FrameConstants fcr{};
+                rtScene.fill(fcr);
+                GpuBuffer cr = createBuffer(device, 1024, D3D12_HEAP_TYPE_UPLOAD, false);
+                void* mr = nullptr;
+                D3D12_RANGE nothing{ 0, 0 };
+                check(cr.resource->Map(0, &nothing, &mr), "map constants");
+                std::memcpy(mr, &fcr, sizeof fcr);
+                cr.resource->Unmap(0, nullptr);
+                RenderGraph graph(device);
+                FrameContext frame;
+                frame.frameIndex = index++;
+                FrameResources resources;
+                FrameServices services;
+                TrackState state;
+                FramePassContext fctx{ device, graph, shaders, rtQuality, rtScene, frame, resources, services,
+                                       [&](const ViewDesc&) { return cr.resource->GetGPUVirtualAddress(); }, &state };
+                rsR.record(fctx);
+                graph.execute(nullptr);
+                device.queue(QueueType::Graphics).waitCpu(graph.lastFence(QueueType::Graphics));
+                const size_t changed = rsR.changes().size();
+                // The traces below read this frame's records with this frame's constants.
+                return std::pair<GpuBuffer, size_t>{ std::move(cr), changed };
+            };
+            auto traceRef = [&](const GpuBuffer& constants, const char* label) {
+                const std::vector<CpuTri> tris = worldTriangles(ref);
+                std::vector<CpuHit> cpu(rayCount);
+                std::vector<uint8_t> vis(rayCount, 0);
+                for (uint32_t i = 0; i < rayCount; ++i)
+                {
+                    cpu[i] = intersect(tris, rays[i].origin, rays[i].direction, rays[i].tMax);
+                    if (rays[i].visibleTMax > 0) vis[i] = intersect(tris, rays[i].origin, rays[i].direction, rays[i].visibleTMax).t < 0 ? 1 : 0;
+                }
+                const std::vector<TestResult> gpu = trace(device, shaders, rsR, constants.resource->GetGPUVirtualAddress(), rays);
+                const Check c = compare(ref, tris, rays, gpu, cpu, vis);
+                uint32_t onRuntime = 0;
+                for (uint32_t i = 0; i < rayCount; ++i)
+                    if (cpu[i].t >= 0 && tris[cpu[i].tri].instance >= baseCount) ++onRuntime;
+                const bool ok = c.hitMismatch == 0 && c.tMismatch == 0 && c.faceMismatch == 0 && c.normalMismatch == 0 && c.visibilityMismatch == 0 &&
+                                c.coincident <= std::max<uint32_t>(2, c.hits / 2000);
+                logf("  %s: %u hits (%u on runtime instances); hit/miss mismatches %u, t mismatches %u, identity ties %u, facing %u, normal %u, visibility %u\n",
+                     label, c.hits, onRuntime, c.hitMismatch, c.tMismatch, c.coincident, c.faceMismatch, c.normalMismatch, c.visibilityMismatch);
+                return std::pair<bool, uint32_t>{ ok, onRuntime };
+            };
+            auto [c0, changes0] = frameOf();
+            const auto [ok0, on0] = traceRef(c0, "before runtime geometry");
+            // A runtime mesh (the box, stretched: new geometry) and two instances of it.
+            scene::Mesh frag = ref.meshes[1];
+            for (float3& q : frag.positions) q = float3{ q.x * 1.6f, q.y * 0.7f, q.z * 1.1f };
+            scene::Scene one;
+            one.materials = ref.materials;
+            one.meshes.push_back(frag);
+            clusterbuilder::Settings cs = clusterbuilder::Settings::fromQuality(rtQuality);
+            cs.noSimplification = true;
+            const uint32_t runtimeMesh = rtScene.addRuntimeMesh(frag, clusterbuilder::build(one, cs));
+            scene::Instance a, b;
+            a.mesh = b.mesh = runtimeMesh;
+            a.transform = transform({ 0.2f, 1, 0.1f }, 0.3f, 1.0f, { -1.5f, 1.2f, 5.0f });
+            b.transform = transform({ 0, 1, 0 }, 1.1f, 1.3f, { 1.8f, 0.9f, 7.0f });
+            const uint32_t ia = rtScene.addRuntimeInstance(a), ib = rtScene.addRuntimeInstance(b);
+            ref.meshes.push_back(frag);
+            a.mesh = b.mesh = baseMeshes;
+            ref.instances.push_back(a);
+            ref.instances.push_back(b);
+            auto [c1, changes1] = frameOf();
+            const auto [ok1, on1] = traceRef(c1, "two runtime instances");
+            // One moves.
+            const float3x4 moved = transform({ 0.2f, 1, 0.1f }, 0.9f, 1.0f, { -1.0f, 1.6f, 5.5f });
+            const InstanceTransformUpdate update{ ia, moved, 0 };
+            rtScene.updateTransforms(index, std::span<const InstanceTransformUpdate>(&update, 1));
+            ref.instances[baseCount].transform = moved;
+            auto [c2, changes2] = frameOf();
+            const auto [ok2, on2] = traceRef(c2, "one moved");
+            // One removed.
+            rtScene.removeRuntimeInstance(ib);
+            ref.instances.pop_back();
+            auto [c3, changes3] = frameOf();
+            const auto [ok3, on3] = traceRef(c3, "one removed");
+            const bool ok = ok0 && on0 == 0 && ok1 && on1 > 0 && ok2 && on2 > 0 && ok3 && on3 > 0 && on3 < on1 + on2 && changes1 >= 2 && changes2 == 0 && changes3 == 1 &&
+                            ia == baseCount && ib == baseCount + 1;
+            logf("runtime geometry (C2b): changed bounds on add %zu, move %zu, remove %zu -> %s\n", changes1, changes2, changes3, ok ? "PASS" : "FAIL");
+            pass = pass && ok;
+            rt::RayScene::release(device, rtScene);
+        }
+#endif
         rt::RayPipeline::releaseDevice(device);
         rt::RayScene::releaseDevice(device);
         device.waitIdle();

@@ -178,6 +178,41 @@ private:
     uint32_t m_decalCapacity = 0, m_decalTlasSrv = 0xFFFFFFFFu;
     uint64_t m_decalFrame = ~0ull;
     BufferRef m_decalFrames, m_decalTlasRef;
+    // Runtime geometry (C2b pool: CARVE fragments, generated meshes; GpuScene::addRuntimeMesh / addRuntimeInstance): one
+    // object-space BLAS per runtime mesh generation, built the frame the mesh is first used (the pool m_runtimePool, a
+    // first-fit allocator over it), and each live runtime instance a dynamic TLAS instance with its transform - rigid
+    // motion is the transform, so nothing is refit and a sleeping fragment costs nothing. Its RtInstance / RtGeometry
+    // records live after the load-time ones (m_runtimeRecordBase, m_runtimeGeometryBase) and are copied every frame
+    // from an upload ring. Hit shading then follows the static mesh path (GpuScene's vertex, index, submesh records).
+    struct RuntimeBlas
+    {
+        uint64_t generation = 0;           // GpuScene::runtimeMeshGeneration; 0 = none
+        uint64_t offset = 0, bytes = 0;    // in m_runtimePool
+        uint32_t geometryBase = 0, geometryCount = 0;
+        bool anyAlpha = false;
+    };
+    struct RuntimeFree
+    {
+        uint64_t frame;                    // reusable once this frame has completed
+        uint64_t offset, bytes;
+        uint32_t geometryBase, geometryCount;
+    };
+    std::vector<RuntimeBlas> m_runtimeBlas;  // by mesh index - staticMeshCount()
+    std::vector<RuntimeFree> m_runtimeFrees;
+    std::vector<std::pair<uint64_t, uint64_t>> m_runtimePoolFree;      // (offset, bytes), sorted
+    std::vector<std::pair<uint32_t, uint32_t>> m_runtimeGeometryFree;  // (first, count), sorted
+    Buffer m_runtimePool, m_runtimeScratch;
+    ComPtr<ID3D12Resource> m_runtimeRing;    // kDescSlots x (instances + geometries) x 16 B of records
+    uint8_t* m_runtimeRingMapped = nullptr;
+    uint32_t m_runtimeInstanceCap = 0, m_runtimeGeometryCap = 0, m_runtimeRecordBase = 0, m_runtimeGeometryBase = 0;
+    std::vector<RtInstance> m_runtimeRecords;
+    std::vector<RtGeometry> m_runtimeGeometries;
+    std::vector<uint8_t> m_runtimeSeen;      // per GpuScene instance: drawn last frame (appear / disappear -> GI changes)
+    uint32_t m_dynamicCountNow = 0;          // dynamic TLAS instances this frame (load-time ones + live runtime ones)
+    void setupRuntime();
+    // Writes the runtime instances' descriptors after the load-time dynamic ones (slot) and records the frame's BLAS
+    // builds and record copy.
+    void recordRuntime(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DESC* slot);
     // The frame's light-grid slot for the header words written after record() (decals); publishes an empty grid when
     // record() had nothing to publish.
     uint8_t* lightSlot(FramePassContext& fc);
@@ -201,7 +236,7 @@ private:
 
     struct Frame  // graph references of the current frame
     {
-        BufferRef tlasStatic, tlasDynamic, deformedBlas, deformedVertices, exactCounts, instances, jobs, lightFunctions;
+        BufferRef tlasStatic, tlasDynamic, deformedBlas, deformedVertices, exactCounts, instances, jobs, lightFunctions, runtimePool, geometries;
     };
     Frame m_frame;
 

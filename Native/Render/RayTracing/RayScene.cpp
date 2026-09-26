@@ -189,7 +189,7 @@ RayScene::~RayScene()
     for (Buffer& b : m_inheritedPools) release(b);
     for (Buffer* b : { &m_meshBlasPool, &m_emitterAabbs, &m_emitterBlas, &m_deformedPool, &m_deformedBlasPool, &m_deformedScratch, &m_deformJobs, &m_deformGroups, &m_instanceBuffer, &m_geometryBuffer,
                        &m_indexPool, &m_vertexMap, &m_tlasStatic, &m_tlasDynamic, &m_tlasScratch, &m_staticDescBuffer, &m_dynamicDescBuffer, &m_staticScratch,
-                       &m_exactCounts, &m_exactZero, &m_decalAabbs, &m_decalBlas, &m_decalBlasScratch, &m_decalTlas, &m_decalTlasScratch, &m_decalDesc })
+                       &m_exactCounts, &m_exactZero, &m_runtimePool, &m_runtimeScratch, &m_decalAabbs, &m_decalBlas, &m_decalBlasScratch, &m_decalTlas, &m_decalTlasScratch, &m_decalDesc })
         release(*b);
     if (m_decalTlasSrv != 0xFFFFFFFFu)
     {
@@ -200,6 +200,8 @@ RayScene::~RayScene()
     if (m_exactReadback) m_exactReadback->Unmap(0, nullptr);
     m_device.deferRelease(m_exactReadback);
     if (m_patchRing) m_patchRing->Unmap(0, nullptr);
+    if (m_runtimeRing) m_runtimeRing->Unmap(0, nullptr);
+    m_device.deferRelease(m_runtimeRing);
     m_device.deferRelease(m_patchRing);
     static_assert(sizeof(m_lightRingSrv) / sizeof(uint32_t) == kDescSlots && sizeof(m_lightSlotVersion) / sizeof(uint64_t) == kDescSlots);
     if (m_emissive)
@@ -482,6 +484,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     m_stats.dynamicInstances = (uint32_t)m_dynamicDescs.size();
     m_stats.deformedInstances = (uint32_t)m_deformed.size();
 
+    setupRuntime();  // runtime records after the load-time ones (placeholders), before the record buffers are made
     m_instanceBuffer = createStructured(m_instances.data(), sizeof(RtInstance), (uint32_t)m_instances.size(), L"RT instances");
     if (!m_exact.empty())
     {
@@ -542,7 +545,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     else
         buildStaticTlas();
     {
-        m_descSlotBytes = (uint64_t)(m_dynamicDescs.size() + m_staticDescs.size() + 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+        m_descSlotBytes = (uint64_t)(m_dynamicDescs.size() + m_runtimeInstanceCap + m_staticDescs.size() + 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
         m_descSlotBytes = (m_descSlotBytes + 255) / 256 * 256;
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_UPLOAD };
         D3D12_RESOURCE_DESC1 d{};
@@ -1540,9 +1543,11 @@ void RayScene::record(FramePassContext& fc)
     const auto& sceneInstances = m_scene.instances();
     for (size_t k = 0; k < m_dynamicDescs.size(); ++k)
     {
-        if (m_dynamicRecord[k] == 0xFFFFFFFFu)  // the emitter instance: world-space boxes, nothing to refresh
+        if (m_dynamicRecord[k] == 0xFFFFFFFFu)  // the emitter instance: boxes at the lights' source positions
         {
             slotDescs[k] = m_dynamicDescs[k];
+            const float3 origin = m_scene.originOffset();  // C9: moved with the frame's origin (its lights are)
+            slotDescs[k].Transform[0][3] = -origin.x, slotDescs[k].Transform[1][3] = -origin.y, slotDescs[k].Transform[2][3] = -origin.z;
             continue;
         }
         const RtInstance& ri = m_instances[m_dynamicRecord[k]];
@@ -1558,6 +1563,7 @@ void RayScene::record(FramePassContext& fc)
                 slotDescs[k].AccelerationStructure = m_deformedBlasPool.address() + e.blasOffset;
             }
     }
+    recordRuntime(fc, slotDescs);  // runtime geometry after the load-time dynamic instances
     // Diagnostics (every 64 frames): what the dynamic TLAS builder is given.
     if (fc.frame.frameIndex % 64 == 0)
     {
@@ -1606,15 +1612,21 @@ void RayScene::record(FramePassContext& fc)
         dynamicDescs = m_dynamicDescBuffer.address();
     }
     bool staticChanged = false;
+    const float3 shift = fc.frame.originShift;
+    const bool rebase = shift.x != 0 || shift.y != 0 || shift.z != 0;
     for (size_t k = 0; k < m_staticDescs.size(); ++k)
     {
         const gpu::Instance& in = sceneInstances[m_staticScene[k]];
-        if (staticKey(in) == m_staticKeys[k]) continue;
+        // A rebase moves every transform without a revision (GpuScene::rebase): all static instances are refreshed.
+        if (staticKey(in) == m_staticKeys[k] && !rebase) continue;
         m_staticKeys[k] = staticKey(in);
         const float4 sphere = m_scene.meshes()[in.mesh].boundsSphere;
-        if (m_staticDescs[k].InstanceMask != 0) m_changes.push_back(descBounds(m_staticDescs[k], sphere));  // where it was (B3)
+        // An origin rebase (C9) moves every instance by -delta with the frame: nothing changed in the world, so GI keeps
+        // its cells (GiShift moves them) and only the TLAS is rebuilt.
+        const bool change = !rebase;
+        if (change && m_staticDescs[k].InstanceMask != 0) m_changes.push_back(descBounds(m_staticDescs[k], sphere));  // where it was (B3)
         refreshDesc(m_staticDescs[k], in, false);
-        if (m_staticDescs[k].InstanceMask != 0) m_changes.push_back(descBounds(m_staticDescs[k], sphere));  // where it is now
+        if (change && m_staticDescs[k].InstanceMask != 0) m_changes.push_back(descBounds(m_staticDescs[k], sphere));  // where it is now
         staticChanged = true;
     }
     if (!m_deformed.empty())
@@ -1666,6 +1678,7 @@ void RayScene::record(FramePassContext& fc)
     g.addPass("r.as.tlas.sync", QueueType::Compute,
               [&](PassBuilder& b) {
                   if (frame.deformedBlas.valid()) b.use(frame.deformedBlas, Use::AccelerationStructureRead);
+                  if (frame.runtimePool.valid()) b.use(frame.runtimePool, Use::AccelerationStructureRead);
                   b.use(frame.tlasDynamic, Use::AccelerationStructureWrite);
                   b.use(scratch, Use::AccelerationStructureScratch);
                   if (dynamicDescCopy) b.use(*dynamicDescCopy, Use::AccelerationStructureInput);
@@ -1688,6 +1701,8 @@ void RayScene::declareTraversal(PassBuilder& b) const
     b.use(m_frame.tlasDynamic, Use::AccelerationStructureRead);
     if (m_frame.deformedBlas.valid()) b.use(m_frame.deformedBlas, Use::AccelerationStructureRead);
     if (m_frame.deformedVertices.valid()) b.use(m_frame.deformedVertices, Use::SrvGraphics);
+    if (m_frame.runtimePool.valid()) b.use(m_frame.runtimePool, Use::AccelerationStructureRead);  // runtime geometry BLASes
+    if (m_frame.geometries.valid()) b.use(m_frame.geometries, Use::SrvGraphics);
     if (m_frame.lightFunctions.valid()) b.use(m_frame.lightFunctions, Use::SrvGraphics);  // the hits' local lights (A8)
 }
 
@@ -1710,11 +1725,13 @@ void RayScene::recordDynamicTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRT
     inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
     inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
     inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    inputs.NumDescs = (UINT)m_dynamicDescs.size();
+    inputs.NumDescs = (UINT)(descs ? m_dynamicCountNow : (uint32_t)m_dynamicDescs.size());  // the ring has the runtime ones too
     if (!m_tlasDynamic.resource)
     {
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
-        m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &sizes);
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS capacity = inputs;
+        capacity.NumDescs = (UINT)(m_dynamicDescs.size() + m_runtimeInstanceCap);  // room for every runtime instance
+        m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&capacity, &sizes);
         m_tlasDynamic = createBuffer(sizes.ResultDataMaxSizeInBytes, false, true, L"RT dynamic TLAS");
         m_tlasScratch = createBuffer(sizes.ScratchDataSizeInBytes, true, false, L"RT dynamic TLAS scratch");
         m_dynamicDescBuffer = createBuffer(std::max<size_t>(m_dynamicDescs.size(), 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), false, false, L"RT dynamic instance descs");
@@ -1892,6 +1909,8 @@ void RayScene::updateLightGrid(FramePassContext& fc)
     }
     const size_t n = lights.size();
     mix(&n, sizeof n);
+    const float3 origin = m_scene.originOffset();  // C9: positions relative to the frame's origin
+    mix(&origin, sizeof origin);
     mix(&m_emissiveSrv, 4);  // the header carries it
     if (hash != m_lightHash || m_lightImage.empty())
     {
@@ -1905,7 +1924,7 @@ void RayScene::updateLightGrid(FramePassContext& fc)
         {
             const scene::Light& l = lights[i];
             RtLightRecord& r = rec[i];
-            r.position = l.position;
+            r.position = l.position - origin;  // the frame's origin (C9 rebase: GpuScene's lights move the same way)
             r.type = (uint32_t)l.type;
             r.forward = normalize(l.forward);
             r.right = normalize(l.right - r.forward * dot(l.right, r.forward));
@@ -1919,8 +1938,8 @@ void RayScene::updateLightGrid(FramePassContext& fc)
             r.size[0] = l.size.x;
             r.size[1] = l.size.y;
             r.castShadow = l.castShadow ? 1u : 0u;
-            lo = { std::min(lo.x, l.position.x - r.range), std::min(lo.y, l.position.y - r.range), std::min(lo.z, l.position.z - r.range) };
-            hi = { std::max(hi.x, l.position.x + r.range), std::max(hi.y, l.position.y + r.range), std::max(hi.z, l.position.z + r.range) };
+            lo = { std::min(lo.x, r.position.x - r.range), std::min(lo.y, r.position.y - r.range), std::min(lo.z, r.position.z - r.range) };
+            hi = { std::max(hi.x, r.position.x + r.range), std::max(hi.y, r.position.y + r.range), std::max(hi.z, r.position.z + r.range) };
             ranges.push_back(r.range);
         }
         std::vector<uint32_t> cellStart(2, 0), cellLights;
@@ -2191,6 +2210,269 @@ void RayScene::recordDecals(FramePassContext& fc, const ViewResources& main)
               });
     m_decalFrames = frames;
     m_decalTlasRef = tlas;
+}
+
+void RayScene::setupRuntime()
+{
+    const RuntimeCapacity& cap = m_scene.runtimeCapacity();
+    m_dynamicCountNow = (uint32_t)m_dynamicDescs.size();
+    if (cap.instances == 0 || cap.meshes == 0 || cap.indices < 3) return;
+    m_runtimeInstanceCap = cap.instances;
+    m_runtimeGeometryCap = std::max(cap.submeshes, 1u);
+    m_runtimeRecordBase = (uint32_t)m_instances.size();
+    m_runtimeGeometryBase = (uint32_t)m_geometries.size();
+    m_instances.resize(m_instances.size() + m_runtimeInstanceCap, RtInstance{});
+    m_geometries.resize(m_geometries.size() + m_runtimeGeometryCap, RtGeometry{});
+    m_runtimeRecords.assign(m_runtimeInstanceCap, RtInstance{});
+    m_runtimeGeometries.assign(m_runtimeGeometryCap, RtGeometry{});
+    m_runtimeGeometryFree = { { 0u, m_runtimeGeometryCap } };
+    m_runtimeBlas.assign(cap.meshes, RuntimeBlas{});
+    // Pool and scratch: the prebuild sizes of every runtime triangle in one BLAS, twice (per-mesh BLAS overheads, first-fit
+    // fragmentation), plus a page per mesh; a frame's builds never need more scratch than all runtime triangles at once.
+    D3D12_RAYTRACING_GEOMETRY_DESC g{};
+    g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+    g.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+    g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+    g.Triangles.VertexCount = std::max(cap.vertices, 3u);
+    g.Triangles.VertexBuffer.StrideInBytes = sizeof(gpu::Vertex);
+    g.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+    g.Triangles.IndexCount = cap.indices / 3 * 3;
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
+    in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    in.NumDescs = 1;
+    in.pGeometryDescs = &g;
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
+    m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&in, &sizes);
+    const uint64_t pool = alignUp(2 * sizes.ResultDataMaxSizeInBytes + (uint64_t)cap.meshes * 4096, kAsAlign);
+    const uint64_t scratch = alignUp(2 * sizes.ScratchDataSizeInBytes + (uint64_t)cap.meshes * kAsAlign, kAsAlign);
+    m_runtimePool = createBuffer(pool, false, true, L"RT runtime BLAS pool");
+    m_runtimeScratch = createBuffer(scratch, true, false, L"RT runtime BLAS scratch");
+    m_runtimePoolFree = { { 0ull, pool } };
+    D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
+    D3D12_RESOURCE_DESC1 d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = (uint64_t)kDescSlots * (m_runtimeInstanceCap + m_runtimeGeometryCap) * 16;
+    d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    check(m_device.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_runtimeRing)),
+          "RT runtime record ring");
+    m_runtimeRing->SetName(L"RT runtime record ring");
+    D3D12_RANGE none{ 0, 0 };
+    check(m_runtimeRing->Map(0, &none, reinterpret_cast<void**>(&m_runtimeRingMapped)), "map RT runtime record ring");
+}
+
+namespace
+{
+// First fit in a sorted free list of (first, count); returns UINT64_MAX when nothing fits.
+template <class T>
+uint64_t takeRange(std::vector<std::pair<T, T>>& free, T count, T align)
+{
+    for (size_t k = 0; k < free.size(); ++k)
+    {
+        const T first = (free[k].first + align - 1) / align * align, end = free[k].first + free[k].second;
+        if (first + count > end) continue;
+        const T before = first - free[k].first, after = end - (first + count);
+        const T start = free[k].first;
+        free.erase(free.begin() + (std::ptrdiff_t)k);
+        if (after) free.insert(free.begin() + (std::ptrdiff_t)k, { first + count, after });
+        if (before) free.insert(free.begin() + (std::ptrdiff_t)k, { start, before });
+        return (uint64_t)first;
+    }
+    return UINT64_MAX;
+}
+template <class T>
+void giveRange(std::vector<std::pair<T, T>>& free, T first, T count)
+{
+    if (count == 0) return;
+    auto it = std::lower_bound(free.begin(), free.end(), std::pair<T, T>{ first, 0 });
+    it = free.insert(it, { first, count });
+    const size_t k = (size_t)(it - free.begin());
+    if (k + 1 < free.size() && free[k].first + free[k].second == free[k + 1].first)
+    {
+        free[k].second += free[k + 1].second;
+        free.erase(free.begin() + (std::ptrdiff_t)k + 1);
+    }
+    if (k > 0 && free[k - 1].first + free[k - 1].second == free[k].first)
+    {
+        free[k - 1].second += free[k].second;
+        free.erase(free.begin() + (std::ptrdiff_t)k);
+    }
+}
+} // namespace
+
+void RayScene::recordRuntime(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DESC* slot)
+{
+    m_dynamicCountNow = (uint32_t)m_dynamicDescs.size();
+    if (m_runtimeInstanceCap == 0) return;
+    const uint64_t frame = fc.frame.frameIndex;
+    // Ranges of replaced meshes return once the frames that could still trace them have completed.
+    for (size_t k = 0; k < m_runtimeFrees.size();)
+    {
+        const RuntimeFree& f = m_runtimeFrees[k];
+        if (frame < f.frame + fc.framesInFlight + 1)
+        {
+            ++k;
+            continue;
+        }
+        giveRange(m_runtimePoolFree, f.offset, f.bytes);
+        giveRange(m_runtimeGeometryFree, f.geometryBase, f.geometryCount);
+        m_runtimeFrees.erase(m_runtimeFrees.begin() + (std::ptrdiff_t)k);
+    }
+    const scene::Scene* src = m_scene.source();
+    auto materialAlpha = [&](uint32_t material) { return src && material < src->materials.size() && src->materials[material].alphaCutoff > 0; };
+    const auto& instances = m_scene.instances();
+    const auto& meshes = m_scene.meshes();
+    const uint32_t staticCount = m_scene.staticInstanceCount(), staticMeshes = m_scene.staticMeshCount();
+    const D3D12_GPU_VIRTUAL_ADDRESS vertices = m_scene.buffer("vertices")->GetGPUVirtualAddress();
+    const D3D12_GPU_VIRTUAL_ADDRESS indices = m_scene.buffer("indices")->GetGPUVirtualAddress();
+    struct Build
+    {
+        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;
+        D3D12_GPU_VIRTUAL_ADDRESS dest = 0, scratch = 0;
+    };
+    auto builds = std::make_shared<std::vector<Build>>();
+    uint64_t scratchUsed = 0;
+    if (m_runtimeSeen.size() < instances.size()) m_runtimeSeen.resize(instances.size(), 0);
+    uint32_t live = 0;
+    for (uint32_t i = staticCount; i < (uint32_t)instances.size(); ++i)
+    {
+        const gpu::Instance& in = instances[i];
+        D3D12_RAYTRACING_INSTANCE_DESC desc{};
+        for (int r = 0; r < 3; ++r)
+        {
+            desc.Transform[r][0] = in.objectToWorld[r].x;
+            desc.Transform[r][1] = in.objectToWorld[r].y;
+            desc.Transform[r][2] = in.objectToWorld[r].z;
+            desc.Transform[r][3] = in.objectToWorld[r].w;
+        }
+        const bool runtimeMesh = in.mesh >= staticMeshes && in.mesh - staticMeshes < (uint32_t)m_runtimeBlas.size();
+        const bool visible = (in.flags & gpu::kInstanceHidden) == 0 && runtimeMesh && in.mesh < meshes.size();
+        if (!visible)
+        {
+            // Gone this frame: where it was changed (B3: GI invalidates the cells whose rays crossed it).
+            if (m_runtimeSeen[i] && in.mesh < meshes.size()) m_changes.push_back(descBounds(desc, meshes[in.mesh].boundsSphere));
+            m_runtimeSeen[i] = 0;
+            continue;
+        }
+        RuntimeBlas& rb = m_runtimeBlas[in.mesh - staticMeshes];
+        const uint64_t generation = m_scene.runtimeMeshGeneration(in.mesh);
+        if (rb.generation != generation)
+        {
+            if (rb.generation != 0) m_runtimeFrees.push_back({ frame, rb.offset, rb.bytes, rb.geometryBase, rb.geometryCount });
+            rb = RuntimeBlas{};
+            const gpu::Mesh& gm = meshes[in.mesh];
+            const std::vector<gpu::Submesh> subs = m_scene.runtimeSubmeshes(in.mesh);
+            Build b;
+            std::vector<uint32_t> submeshOf;
+            for (uint32_t s = 0; s < (uint32_t)subs.size(); ++s)
+            {
+                if (subs[s].indexCount == 0) continue;
+                const bool alpha = materialAlpha(subs[s].material);
+                rb.anyAlpha |= alpha;
+                D3D12_RAYTRACING_GEOMETRY_DESC g{};
+                g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+                g.Flags = alpha ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+                g.Triangles.VertexBuffer = { vertices + (uint64_t)gm.vertexOffset * sizeof(gpu::Vertex), sizeof(gpu::Vertex) };
+                g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+                g.Triangles.VertexCount = gm.vertexCount;
+                g.Triangles.IndexBuffer = indices + ((uint64_t)gm.indexOffset + subs[s].indexOffset) * sizeof(uint32_t);
+                g.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+                g.Triangles.IndexCount = subs[s].indexCount;
+                b.geometries.push_back(g);
+                submeshOf.push_back(s);
+            }
+            if (b.geometries.empty()) continue;  // nothing to trace
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+            inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+            inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+            inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+            inputs.NumDescs = (UINT)b.geometries.size();
+            inputs.pGeometryDescs = b.geometries.data();
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
+            m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &sizes);
+            const uint64_t bytes = alignUp(sizes.ResultDataMaxSizeInBytes, kAsAlign), scratch = alignUp(sizes.ScratchDataSizeInBytes, kAsAlign);
+            if (scratchUsed + scratch > m_runtimeScratch.bytes) continue;  // this frame's scratch is spent: built next frame
+            const uint64_t offset = takeRange<uint64_t>(m_runtimePoolFree, bytes, kAsAlign);
+            const uint64_t geometryBase = offset == UINT64_MAX ? UINT64_MAX : takeRange<uint32_t>(m_runtimeGeometryFree, (uint32_t)b.geometries.size(), 1u);
+            if (offset == UINT64_MAX || geometryBase == UINT64_MAX)
+            {
+                if (offset != UINT64_MAX) giveRange(m_runtimePoolFree, offset, bytes);
+                static bool warned = false;
+                if (!warned) logf("RayScene: runtime BLAS pool or geometry records full (mesh %u, %llu B): not traced until space returns\n", in.mesh, (unsigned long long)bytes);
+                warned = true;
+                continue;
+            }
+            rb.generation = generation;
+            rb.offset = offset;
+            rb.bytes = bytes;
+            rb.geometryBase = (uint32_t)geometryBase;
+            rb.geometryCount = (uint32_t)b.geometries.size();
+            for (uint32_t k = 0; k < rb.geometryCount; ++k)
+                m_runtimeGeometries[rb.geometryBase + k] = { gm.indexOffset + subs[submeshOf[k]].indexOffset, submeshOf[k], 0, gpu::kNone };
+            b.dest = m_runtimePool.address() + offset;
+            b.scratch = m_runtimeScratch.address() + scratchUsed;
+            scratchUsed += scratch;
+            builds->push_back(std::move(b));
+        }
+        if (live >= m_runtimeInstanceCap) break;  // GpuScene's own capacity: never reached
+        desc.InstanceID = m_runtimeRecordBase + live;
+        desc.InstanceMask = kRtMaskAll;
+        desc.InstanceContributionToHitGroupIndex = 0;
+        desc.AccelerationStructure = m_runtimePool.address() + rb.offset;
+        slot[m_dynamicDescs.size() + live] = desc;
+        m_runtimeRecords[live] = { i, m_runtimeGeometryBase + rb.geometryBase, gpu::kNone, 0 };
+        if (!m_runtimeSeen[i]) m_changes.push_back(descBounds(desc, meshes[in.mesh].boundsSphere));  // appeared (B3)
+        m_runtimeSeen[i] = 1;
+        ++live;
+    }
+    m_dynamicCountNow = (uint32_t)m_dynamicDescs.size() + live;
+
+    // Records of this frame (runtime instances, then the runtime geometries) through the ring into the record buffers.
+    RenderGraph& g = fc.graph;
+    const uint64_t slotBytes = (uint64_t)(m_runtimeInstanceCap + m_runtimeGeometryCap) * 16, slotOffset = (frame % kDescSlots) * slotBytes;
+    std::memcpy(m_runtimeRingMapped + slotOffset, m_runtimeRecords.data(), (size_t)m_runtimeInstanceCap * 16);
+    std::memcpy(m_runtimeRingMapped + slotOffset + (uint64_t)m_runtimeInstanceCap * 16, m_runtimeGeometries.data(), (size_t)m_runtimeGeometryCap * 16);
+    const BufferRef records = m_frame.instances;
+    const BufferRef geometries = g.importBuffer(m_geometryBuffer.resource.Get(), { "RT geometries", m_geometryBuffer.bytes, sizeof(RtGeometry) });
+    m_frame.geometries = geometries;  // declareTraversal orders the hit passes' reads after this copy
+    ID3D12Resource* ring = m_runtimeRing.Get();
+    const uint64_t recordDst = (uint64_t)m_runtimeRecordBase * 16, geometryDst = (uint64_t)m_runtimeGeometryBase * 16;
+    const uint64_t recordBytes = (uint64_t)m_runtimeInstanceCap * 16, geometryBytes = (uint64_t)m_runtimeGeometryCap * 16;
+    g.addPass("r.as.runtime.records", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(records, Use::CopyDst);
+                  b.use(geometries, Use::CopyDst);
+              },
+              [=](PassContext& c) {
+                  c.cmd->CopyBufferRegion(c.resource(records), recordDst, ring, slotOffset, recordBytes);
+                  c.cmd->CopyBufferRegion(c.resource(geometries), geometryDst, ring, slotOffset + recordBytes, geometryBytes);
+              });
+    const BufferRef pool = g.importBuffer(m_runtimePool.resource.Get(), { "RT runtime BLAS pool", m_runtimePool.bytes, 0 });
+    m_frame.runtimePool = pool;
+    if (builds->empty()) return;
+    const BufferRef scratch = g.importBuffer(m_runtimeScratch.resource.Get(), { "RT runtime BLAS scratch", m_runtimeScratch.bytes, 0 });
+    g.addPass("r.as.runtime.blas", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(pool, Use::AccelerationStructureWrite);
+                  b.use(scratch, Use::AccelerationStructureScratch);
+              },
+              [builds](PassContext& c) {
+                  for (Build& b : *builds)
+                  {
+                      D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
+                      d.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+                      d.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+                      d.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+                      d.Inputs.NumDescs = (UINT)b.geometries.size();
+                      d.Inputs.pGeometryDescs = b.geometries.data();
+                      d.DestAccelerationStructureData = b.dest;
+                      d.ScratchAccelerationStructureData = b.scratch;
+                      c.cmd->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
+                  }
+              });
 }
 
 void RayScene::recordLightFunctions(FramePassContext& fc)

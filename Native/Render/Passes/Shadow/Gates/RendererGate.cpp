@@ -81,7 +81,9 @@ int main(int argc, char** argv)
         double warmupSeconds = -1;  // --warmup-seconds: the harness default when negative
         std::string cameraAt6, saveScene;
         std::string timeArg, placeArg;
-        bool autoExposure = false;  // --time YYYY-MM-DDTHH:MM (UT), --place lat,lon: sun, moon, stars (B4)
+        bool autoExposure = false;
+        uint64_t shiftAt = UINT64_MAX;  // --origin-shift-at F --origin-shift x,y,z: a C9 rebase at frame F (repros)
+        float3 shiftBy{};  // --time YYYY-MM-DDTHH:MM (UT), --place lat,lon: sun, moon, stars (B4)
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -104,7 +106,15 @@ int main(int argc, char** argv)
             else if (a == "--save-scene") saveScene = next();  // the scene as rendered (with --camera-at) for unx_reference
             else if (a == "--time") timeArg = next();
             else if (a == "--place") placeArg = next();
-            else if (a == "--auto-exposure") autoExposure = true;  // A4 metering instead of the camera's EV100
+            else if (a == "--auto-exposure") autoExposure = true;
+            else if (a == "--origin-shift-at") shiftAt = std::stoull(next());
+            else if (a == "--origin-shift")
+            {
+                const std::string v = next();
+                const size_t c0 = v.find(','), c1 = v.find(',', c0 + 1);
+                if (c0 == std::string::npos || c1 == std::string::npos) fail("--origin-shift x,y,z");
+                shiftBy = { std::stof(v.substr(0, c0)), std::stof(v.substr(c0 + 1, c1 - c0 - 1)), std::stof(v.substr(c1 + 1)) };
+            }  // A4 metering instead of the camera's EV100
             else fail("unknown argument %s", a.c_str());
         }
         requireGpuLock("unx_gate_shadow_renderergate");
@@ -215,7 +225,17 @@ int main(int argc, char** argv)
                 fc.frameIndex = frame;
                 fc.time = frame / 60.0;
                 fc.deltaTime = 1.0f / 60;
-                fc.mainView = ViewDesc::fromCamera(cameraAt(s, moving, fc.time, cameraName), rr.width, rr.height, prev);
+                scene::Camera cam = cameraAt(s, moving, fc.time, cameraName);
+                if (frame == shiftAt)
+                {
+                    // The rebase (C9): the GPU scene moves by -delta, the frame says so, and the camera is given in the new
+                    // coordinates from here on; the previous view moves with it (FrameRenderer).
+                    gpuScene.rebase(shiftBy);
+                    fc.originShift = shiftBy;
+                }
+                const float3 offset = gpuScene.originOffset();
+                cam.position = cam.position - offset;
+                fc.mainView = ViewDesc::fromCamera(cam, rr.width, rr.height, prev);
                 if (gustPeriodS > 0)
                 {
                     const bool gust = ((uint64_t)(fc.time / gustPeriodS) & 1) != 0;
