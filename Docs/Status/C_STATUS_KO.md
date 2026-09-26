@@ -71,7 +71,8 @@ powershell -File Reference/Tools/RenderQueue.ps1                   게이트 기
 
 ## 재개 지점 (2026-09-27, 분류 결정으로 정지; 9/30 초기화 뒤 재개)
 
-1. 착지: A6 투과 층(f0f1031, v1.67), A11 단면 재질(8335200, v1.71), 특수 기록 목록·M 선셰이딩 비트·A14 V/코어 부분·바다 V 부분·HiZ 크기 변경 결함 수정(v1.73). TDR(9/26 23:15)은 사용자 게임과의 경합으로 판단(게임 없는 하드웨어에서 변경을 켜고 끈 실행 모두 통과, `Results/C/Bisect`).
+0. **먼저**: haircoverage 시험의 dispatch별 최장 시간을 게임 없이 실측해 적고, 약 50 ms를 넘는 것은 구조로 쪼갠다(INTERFACES 3.6). 경합에서 TDR이 났다면 혼자서도 수백 ms급 dispatch가 있을 가능성이 크다(조정 지적).
+1. 착지: A6 투과 층(f0f1031, v1.67), A11 단면 재질(8335200, v1.71), 특수 기록 목록·M 선셰이딩 비트·A14 V/코어 부분·바다 V 부분·HiZ 크기 변경 결함 수정(v1.73). TDR(9/26 23:15): 세 변경은 원인이 아님(게임 없는 하드웨어에서 켜고 끈 실행 모두 통과, `Results/C/Bisect`). 게임 경합은 계기일 뿐이다. 구조로 묶인 dispatch는 경합에서도 2 s에 닿지 않으므로 근본 원인은 미확정이다.
 2. A14 나머지: 보조 뷰의 froxels·GI·reflections·particles 뷰별 호출은 각 트랙 일반화 뒤(요청 20260926_C_per_view_history 5절: S는 shadowMarkView·froxels(view)·뷰별 클립맵 조건, R은 renderView 두 단계 분할). Split 뷰 post·FrameConstants viewOutputs는 렌더 A. FrameRenderer 수준 A14 시험(주 뷰 + 크기가 다른 보조 뷰 2개)이 남았다.
 3. 바다: W가 waterGeometry에서 oceanDepth·waterSurface를 채우고, W의 가장자리 32 부표본 패스를 FrameServices::coverageAppend에 건다(W 몫). 합류 뒤 바다 가장자리 기록의 면적 정확성 시험을 V 쪽에 추가한다.
 4. C5·C6 나머지(FEATURE_STATUS 렌더 C 표)와 C7·C8 HLOD 보류분은 재개 때 표에서 다시 순서를 정한다. 하드웨어에서 아직 안 돌린 것: 이번 커밋 뒤 shadow 3종(vsm·localshadow·froxel) 재실행.
