@@ -9,8 +9,11 @@
 //   eta' = eta cos(w dt) + (K / w) phi sin(w dt),  phi' = phi cos(w dt) - (w / K) eta sin(w dt).
 // Sources are impulsive surface pressures: a vertical impulse I (N s) spread over a Gaussian footprint changes phi by
 // -(I / rho) g(x), sum g h^2 = 1 over the footprint (a Gaussian sampled out to 4 sigma and normalised by its own
-// discrete sum: the water's vertical momentum rho sum phi h^2 changes by exactly -I). They are accumulated in 32-bit
-// fixed point (order independent) and consumed by the next frame.
+// discrete sum: the water's vertical momentum rho sum phi h^2 changes by exactly -I). A source can also displace a
+// volume V (m^3, positive = water pushed out of the footprint: a body entering, or a moving body's new waterline):
+// eta changes by -V w(x) over the same normalised footprint, so sum eta h^2 changes by exactly -V (a floating body that
+// stays put adds nothing; one that moves adds -V at its new position and +V at its old one: its wake). Both are
+// accumulated in 32-bit fixed point (order independent) and consumed by the next frame.
 // Open boundary: an absorbing sponge (the outer 48 texels) damps both fields each frame, so waves leave the window
 // instead of wrapping around the periodic domain. The window follows the focus in whole texels (RippleShift).
 // Layout: the spectrum is stored in natural order (index m <-> wavenumber (m < N/2 ? m : m - N) 2 pi / (N h)), the
@@ -49,10 +52,12 @@ float rippleSponge(uint2 t)
     const float ramp = 1.0 - edge / float(RIPPLE_SPONGE);
     return exp(-asfloat(P[3].w) * rippleDt() * ramp * ramp);
 }
-struct RippleSource
+struct RippleSource  // 32 B
 {
     float2 position;  // window-relative texel coordinates of the centre (float)
     float radius;     // Gaussian sigma (m)
     float impulse;    // vertical impulse on the water (N s, positive = downward push)
+    float volume;     // displaced volume (m^3, positive = water pushed out of the footprint)
+    float3 reserved;
 };
 #endif

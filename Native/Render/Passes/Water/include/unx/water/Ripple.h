@@ -28,6 +28,10 @@ struct RippleSource
     float x = 0, z = 0;       // world position (m)
     float radius = 0.05f;     // Gaussian footprint sigma (m); clamped to >= one texel
     float impulse = 0;        // vertical impulse on the water surface (N s, positive = pushed down)
+    float volume = 0;         // displaced volume (m^3, positive = water pushed out of the footprint). A body that
+                              // floats in water adds, per frame, +V_prev at its previous waterline centre and -V_now at
+                              // its current one (NativePhysicsEnvironmentOutput: SubmergedVolume, Point; footprint
+                              // sigma about half its waterline radius): splashes and wakes with the volume conserved.
 };
 struct RippleOutput
 {

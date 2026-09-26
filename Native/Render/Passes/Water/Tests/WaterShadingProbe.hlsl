@@ -5,6 +5,7 @@
 // P[0].x output UAV (raw), P[0].y angle count
 #include "Bindless.hlsli"
 #include "../WaterShading.hlsli"
+#include "../WaterFragment.hlsli"  // compiled here so the interface file is always built
 
 [numthreads(64, 1, 1)]
 void main(uint i : SV_DispatchThreadID)
@@ -15,6 +16,6 @@ void main(uint i : SV_DispatchThreadID)
     float3 n = float3(0, 1, 0), v = float3(sin(theta), cos(theta), 0);
     float3 tAir, tWater;
     bool okAir = waterRefract(v, n, 1.0 / kWaterIor, tAir), okWater = waterRefract(v, n, kWaterIor, tWater);
-    float out12[12] = { waterFresnel(v.y, 1.0 / kWaterIor), waterFresnel(v.y, kWaterIor), tAir.x, tAir.y, okAir ? 1.0 : 0.0, tWater.x, tWater.y, okWater ? 1.0 : 0.0, v.y, v.x, 0, 0 };
+    float out12[12] = { waterFresnel(v.y, 1.0 / kWaterIor), waterFresnel(v.y, kWaterIor), tAir.x, tAir.y, okAir ? 1.0 : 0.0, tWater.x, tWater.y, okWater ? 1.0 : 0.0, v.y, v.x, waterFragmentRadiance(uint2(i, 0), 1.0, n, 0, 0, 0).x, 0 };
     [unroll] for (uint k = 0; k < 12; ++k) o.Store(4 * (12 * i + k), asuint(out12[k]));
 }

@@ -3,7 +3,7 @@
 // potential changes by -(I / rho) w_i / (h^2 sum_j w_j) over a Gaussian footprint w (sigma >= h) sampled at texel
 // centres out to 4 sigma, normalised by its own discrete sum (the fixed-order group reduction), so the water receives
 // exactly the impulse I whatever sigma is; 2^24 fixed point (order independent). Footprint texels outside the window
-// are dropped (the impulse left the simulated patch).
+// are dropped (the impulse left the simulated patch). A displaced volume lowers eta by the same normalised footprint.
 #include "Ripple.hlsli"
 
 #define RIPPLE_RHO 1000.0
@@ -17,7 +17,8 @@ void main(uint t : SV_GroupThreadID, uint g : SV_GroupID)
     if (g >= P[2].y) return;
     ByteAddressBuffer sources = ResourceDescriptorHeap[P[2].x];
     RWByteAddressBuffer accum = ResourceDescriptorHeap[P[0].w];
-    const float4 s = asfloat(sources.Load4(16 * g));
+    const float4 s = asfloat(sources.Load4(32 * g));
+    const float volume = asfloat(sources.Load(32 * g + 16));
     const float h = rippleH(), sigma = max(s.z, h);
     const int reach = min(int(ceil(4.0 * sigma / h)), RIPPLE_MAX_REACH), width = 2 * reach + 1;
     const int2 centre = int2(floor(s.xy + 0.5));
@@ -35,13 +36,15 @@ void main(uint t : SV_GroupThreadID, uint g : SV_GroupID)
         if (t < stride) g_sum[t] += g_sum[t + stride];
         GroupMemoryBarrierWithGroupSync();
     }
-    const float amplitude = -(s.w / RIPPLE_RHO) / (g_sum[0] * h * h);
+    const float amplitude = -(s.w / RIPPLE_RHO) / (g_sum[0] * h * h), lowering = -volume / (g_sum[0] * h * h);
     for (int j = int(t); j < width * width; j += 256)
     {
         const int2 texel = centre + int2(j % width - reach, j / width - reach);
         if (any(texel < 0) || any(texel >= int(RIPPLE_N))) continue;
         const float2 d = (float2(texel) - s.xy) * h;
-        const float value = amplitude * exp(-dot(d, d) * inv2s2);
-        accum.InterlockedAdd(8 * (texel.y * RIPPLE_N + texel.x) + 4, int(round(value * RIPPLE_FIXED)));
+        const float w = exp(-dot(d, d) * inv2s2);
+        const uint at = 8 * (texel.y * RIPPLE_N + texel.x);
+        if (volume != 0) accum.InterlockedAdd(at, int(round(lowering * w * RIPPLE_FIXED)));
+        if (s.w != 0) accum.InterlockedAdd(at + 4, int(round(amplitude * w * RIPPLE_FIXED)));
     }
 }

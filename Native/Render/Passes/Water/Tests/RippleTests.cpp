@@ -4,6 +4,7 @@
 //      where capillarity moves w by 1.5 %, and the same on 0.3 m of water (tanh)
 //   2. the whole frame (sources, sponge, window shift, viscous decay, slopes) equals a double-precision reference of
 //      the same algorithm over 4 frames (|d| <= 1e-4 of the field's peak)
+//   2b. a displaced-volume source changes the water volume by exactly -V (|d| <= 1e-8 m^3 for 1 litre)
 //   3. open boundary: a splash at the centre leaves the window through the sponge: after 90 s (the slowest resolved
 //      ripple, 10 cm, needs 64 s to reach the edge) the peak |eta| is below 1e-3 of its early peak (no wrap-around)
 //   4. two runs are bit-identical
@@ -145,7 +146,7 @@ struct Reference
                 const int ox = int(x) + shift[0], oz = int(z) + shift[1];
                 if (ox >= 0 && oz >= 0 && ox < int(N) && oz < int(N)) { e[z * N + x] = eta[oz * N + ox]; p[z * N + x] = phi[oz * N + ox]; }
             }
-        std::vector<int64_t> accum(kTexels, 0);
+        std::vector<int64_t> accum(kTexels, 0), lower(kTexels, 0);
         for (const auto& s : sources)
         {
             const float px = float(s.x / d.texel - o[0]), pz = float(s.z / d.texel - o[1]);
@@ -159,13 +160,15 @@ struct Reference
                 const double dx = (cx + i % width - reach - double(px)) * d.texel, dz = (cz + i / width - reach - double(pz)) * d.texel;
                 sum += std::exp(-(dx * dx + dz * dz) / (2 * sigma * sigma));
             }
-            const double amplitude = -(double(s.impulse) / 1000.0) / (sum * double(d.texel) * d.texel);
+            const double amplitude = -(double(s.impulse) / 1000.0) / (sum * double(d.texel) * d.texel), lowering = -double(s.volume) / (sum * double(d.texel) * d.texel);
             for (int i = 0; i < width * width; ++i)
             {
                 const int tx = cx + i % width - reach, tz = cz + i / width - reach;
                 if (tx < 0 || tz < 0 || tx >= int(N) || tz >= int(N)) continue;
                 const double dx = (tx - double(px)) * d.texel, dz = (tz - double(pz)) * d.texel;
-                accum[size_t(tz) * N + tx] += std::llround(amplitude * std::exp(-(dx * dx + dz * dz) / (2 * sigma * sigma)) * 16777216.0);
+                const double w = std::exp(-(dx * dx + dz * dz) / (2 * sigma * sigma));
+                if (s.impulse != 0) accum[size_t(tz) * N + tx] += std::llround(amplitude * w * 16777216.0);
+                if (s.volume != 0) lower[size_t(tz) * N + tx] += std::llround(lowering * w * 16777216.0);
             }
         }
         std::vector<cd> Z(kTexels);
@@ -176,7 +179,7 @@ struct Reference
                 double m = 1;
                 if (edge < Ripples::kSponge) { const double ramp = 1 - edge / Ripples::kSponge; m = std::exp(-double(d.spongeRate) * dt * ramp * ramp); }
                 const size_t i = size_t(z) * N + x;
-                Z[i] = std::conj(cd(e[i], p[i] + double(accum[i]) / 16777216.0) * m);
+                Z[i] = std::conj(cd(e[i] + double(lower[i]) / 16777216.0, p[i] + double(accum[i]) / 16777216.0) * m);
             }
         ifft2(Z);
         for (auto& v : Z) v = std::conj(v) / double(kTexels);
@@ -290,7 +293,7 @@ int main(int argc, char** argv)
             RippleDesc d;
             Ripples ripples(gpu.device, gpu.shaders, d);
             Reference ref(d);
-            std::vector<RippleSource> sources = { { 0.3f, -0.4f, 0.12f, 2.0f }, { -1.1f, 0.7f, 0.02f, 0.5f }, { 2.0f, 1.0f, 0.3f, -1.0f } };
+            std::vector<RippleSource> sources = { { 0.3f, -0.4f, 0.12f, 2.0f, 0 }, { -1.1f, 0.7f, 0.02f, 0.5f, 0 }, { 2.0f, 1.0f, 0.3f, -1.0f, 0 }, { -0.5f, -1.2f, 0.15f, 0, 2e-4f } };
             const double focus[4][2] = { { 0, 0 }, { 0.12, -0.08 }, { 0.37, 0.2 }, { 0.37, 0.2 } };
             double worst = 0, peak = 0;
             for (int n = 0; n < 4; ++n)
@@ -314,7 +317,17 @@ int main(int argc, char** argv)
                 worst = std::max(worst, e / p);
                 peak = std::max(peak, p);
             }
-            std::printf("frames: 4 frames (3 sources, window moved twice, sponge, viscosity) equal the double reference within %.2e of the peak\n", worst);
+            std::printf("frames: 4 frames (3 impulse sources and a volume source, window moved twice, sponge, viscosity) equal the double reference within %.2e of the peak\n", worst);
+        }
+
+        // 2b. displaced volume: a body pushing V = 1 litre out of its footprint lowers the mean surface by exactly V
+        {
+            Ripples ripples(gpu.device, gpu.shaders, RippleDesc{});
+            const auto f = step(gpu, ripples, 0, 0, 0, dt, { { 0.4f, -0.3f, 0.1f, 0, 1e-3f } }, true);
+            double volume = 0;
+            for (size_t i = 0; i < kTexels; ++i) volume += double(f[4 * i]) * 0.05 * 0.05;
+            W_CHECK(std::abs(volume + 1e-3) <= 1e-8, "a 1 litre source changed the water volume by %.9g m^3", volume);
+            std::printf("volume: a 1 litre source lowers the surface by %.9g m^3 in total (exact: -0.001)\n", volume);
         }
 
         // 3. open boundary

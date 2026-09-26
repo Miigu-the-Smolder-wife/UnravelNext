@@ -54,7 +54,7 @@ Ripples::Ripples(Device& device, ShaderLibrary& shaders, const RippleDesc& desc)
     m_output->SetName(L"ripple field");
     for (uint32_t s = 0; s < desc.framesInFlight; ++s)
     {
-        m_sourceUpload.push_back(makeBuffer(device, uint64_t(desc.maxSources) * 16 + kN * 4, D3D12_HEAP_TYPE_UPLOAD, L"ripple upload"));
+        m_sourceUpload.push_back(makeBuffer(device, uint64_t(desc.maxSources) * 32 + kN * 4, D3D12_HEAP_TYPE_UPLOAD, L"ripple upload"));
         uint8_t* mapped = nullptr;
         D3D12_RANGE none{ 0, 0 };
         check(m_sourceUpload.back()->Map(0, &none, (void**)&mapped), "map ripple upload");
@@ -63,7 +63,7 @@ Ripples::Ripples(Device& device, ShaderLibrary& shaders, const RippleDesc& desc)
         sd.Format = DXGI_FORMAT_R32_TYPELESS;
         sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
         sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sd.Buffer.NumElements = UINT(desc.maxSources) * 4;
+        sd.Buffer.NumElements = UINT(desc.maxSources) * 8;
         sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
         m_sourceSrv.push_back(device.descriptors().allocateResource());
         device.d3d()->CreateShaderResourceView(m_sourceUpload.back().Get(), &sd, device.descriptors().resourceCpu(m_sourceSrv.back()));
@@ -108,8 +108,8 @@ RippleOutput Ripples::record(RenderGraph& g, uint64_t frame, double focusX, doub
     uint8_t* mapped = m_sourceMapped[slot];
     for (size_t i = 0; i < sources.size(); ++i)
     {
-        const float s[4] = { float(sources[i].x / m_desc.texel - origin[0]), float(sources[i].z / m_desc.texel - origin[1]), sources[i].radius, sources[i].impulse };
-        std::memcpy(mapped + 16 * i, s, 16);
+        const float s[8] = { float(sources[i].x / m_desc.texel - origin[0]), float(sources[i].z / m_desc.texel - origin[1]), sources[i].radius, sources[i].impulse, sources[i].volume, 0, 0, 0 };
+        std::memcpy(mapped + 32 * i, s, 32);
     }
     auto import = [&](ID3D12Resource* r, const char* name) { return g.importBuffer(r, { name, r->GetDesc().Width, 0 }); };
     const BufferRef state = import(m_state.Get(), "ripple state"), accum = import(m_accum.Get(), "ripple sources"), twiddles = import(m_twiddles.Get(), "ripple twiddles");
@@ -117,9 +117,9 @@ RippleOutput Ripples::record(RenderGraph& g, uint64_t frame, double focusX, doub
     ID3D12Resource* upload = m_sourceUpload[slot].Get();
     if (!m_twiddlesUploaded)
     {
-        float* tw = (float*)(mapped + uint64_t(m_desc.maxSources) * 16);
+        float* tw = (float*)(mapped + uint64_t(m_desc.maxSources) * 32);
         for (uint32_t j = 0; j < kN / 2; ++j) { tw[2 * j] = float(std::cos(2 * kPi * j / kN)); tw[2 * j + 1] = float(std::sin(2 * kPi * j / kN)); }
-        const uint64_t at = uint64_t(m_desc.maxSources) * 16;
+        const uint64_t at = uint64_t(m_desc.maxSources) * 32;
         g.addPass("ripple twiddles", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(twiddles, Use::CopyDst); pb.keep(); },
                   [=](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(twiddles), 0, upload, at, kN * 4); });
         ID3D12PipelineState* clear = m_shaders.compute("Passes/Water/RippleClear");  // a calm surface
