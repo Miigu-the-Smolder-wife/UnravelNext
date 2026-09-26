@@ -10,8 +10,13 @@
 // Beams, not points: texel (i, j) carries the light of the cell between the texel centres (i, j), (i+1, j), (i+1, j+1),
 // (i, j+1) - one texel of area - and lays it on the cell spanned by those four centres' landing points, split into two
 // triangles that share it by their areas (|area|: a fold, where the landing map's Jacobian changes sign, keeps each
-// triangle convex and the share positive). Each triangle deposits on every caustic texel it overlaps its flux x the
-// exactly clipped overlap / its area, in fixed point (2^-16). So light that spreads leaves no gaps between the texels'
+// triangle convex and the share positive). Sharing by area gives both triangles one density, unit / (|a1| + |a2|), so the
+// cell is deposited in one pass over its bounding box: on every caustic texel, density x (|S1| + |S2|), S1 and S2 the two
+// triangles' exact overlaps with the texel as signed boundary integrals -sum_edges int clamp(y(x)) dx over the texel's
+// x-range (clamp to the texel's y-range; between its crossings of the two bounds clamp(y) is affine, so the midpoint rule
+// per piece is exact) - five edges per texel (four sides and the shared diagonal, whose two uses cancel when the cell does
+// not fold), all in registers; fixed point (2^-16). (It replaced a Sutherland-Hodgman clip on local arrays, which spilled
+// to scratch memory: 78-106 ms on the D0 fluid's 2048^2 map [measured].) So light that spreads leaves no gaps between the texels'
 // landing points (a point splat of width one texel did: holes at the map's spacing where the surface diverges, a grid
 // seen through a rippled bath - engine 2's finding). Where a corner is not water or refracts totally (the pool's edge),
 // the texel's light lands as its own square, one map texel wide, centred on its landing point. A triangle spanning more than
@@ -73,56 +78,43 @@ void causticPoint(RWTexture2DArray<uint> caustics, float2 p, uint slice, float a
     causticAdd(caustics, i0 + int2(1, 1), slice, amount * f.x * f.y, nc);
 }
 
-// Area of triangle (a, b, c) inside the square [lo, lo + 1]^2 (Sutherland-Hodgman against the four edges), in
-// coordinates relative to lo: the shoelace sum on absolute grid positions (hundreds) cancels away a small polygon's
-// area in fp32 (measured: flat water off by 5 %).
-float causticClipArea(float2 a, float2 b, float2 c, float2 corner)
+// -int clamp(y(x), 0, 1) dx along edge p -> q over x in [0, 1] (coordinates relative to the texel's corner): the edge's
+// part of the signed boundary integral of a polygon's overlap with the texel [0, 1]^2.
+float causticEdge(float2 p, float2 q)
 {
-    float2 poly[10], next[10];
-    uint count = 3;
-    poly[0] = a - corner;
-    poly[1] = b - corner;
-    poly[2] = c - corner;
-    const float2 lo = 0;
-    [unroll] for (uint e = 0; e < 4; ++e)
+    const float u = max(min(p.x, q.x), 0.0), v = min(max(p.x, q.x), 1.0);
+    if (!(v > u)) return 0;
+    const float slope = (q.y - p.y) / (q.x - p.x);  // q.x != p.x: the x-range is not empty
+    const float yu = p.y + slope * (u - p.x), dy = slope * (v - u);
+    float integral;
+    if (dy == 0) integral = saturate(yu);
+    else
     {
-        const uint axis = e & 1;
-        const float bound = (e < 2) ? lo[axis] : lo[axis] + 1;
-        const float sgn = (e < 2) ? 1.0 : -1.0;  // inside: sgn x (v - bound) >= 0
-        uint kept = 0;
-        for (uint i = 0; i < count; ++i)
-        {
-            const float2 p = poly[i], q = poly[(i + 1) % count];
-            const float dp = sgn * (p[axis] - bound), dq = sgn * (q[axis] - bound);
-            if (dp >= 0) next[kept++] = p;
-            if ((dp >= 0) != (dq >= 0)) next[kept++] = p + (q - p) * (dp / (dp - dq));
-        }
-        count = kept;
-        for (uint i2 = 0; i2 < count; ++i2) poly[i2] = next[i2];
-        if (count < 3) return 0;
+        // Pieces between the crossings of y = 0 and y = 1 (t along [u, v]); clamp(y) is affine on each: midpoint rule.
+        const float t0 = saturate(-yu / dy), t1 = saturate((1 - yu) / dy), ta = min(t0, t1), tb = max(t0, t1);
+        integral = ta * saturate(yu + dy * 0.5 * ta) + (tb - ta) * saturate(yu + dy * 0.5 * (ta + tb)) + (1 - tb) * saturate(yu + dy * 0.5 * (1 + tb));
     }
-    float twice = 0;
-    for (uint i3 = 0; i3 < count; ++i3) twice += poly[i3].x * poly[(i3 + 1) % count].y - poly[(i3 + 1) % count].x * poly[i3].y;
-    return 0.5 * abs(twice);
+    integral *= v - u;
+    return q.x > p.x ? -integral : integral;
 }
 
-// Deposits `flux` over triangle (a, b, c) by exact overlap; false (nothing deposited) when it spans too many texels.
-bool causticTriangle(RWTexture2DArray<uint> caustics, float2 a, float2 b, float2 c, uint slice, float flux, uint nc)
+// Deposits light of density `density` (per caustic texel of area) over the cell (c0, c1, c2, c3) = triangles (c0, c1, c2)
+// and (c0, c2, c3), each counted by its unsigned overlap with every texel of the bounding box; false (nothing deposited)
+// when it spans too many texels.
+bool causticCell(RWTexture2DArray<uint> caustics, float2 c0, float2 c1, float2 c2, float2 c3, uint slice, float density, uint nc)
 {
-    const float area = 0.5 * abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y));
-    if (!(flux > 0)) return true;
-    const float2 lo = floor(min(a, min(b, c))), hi = floor(max(a, max(b, c)));
+    const float2 lo = floor(min(min(c0, c1), min(c2, c3))), hi = floor(max(max(c0, c1), max(c2, c3)));
     if (hi.x - lo.x >= WATER_CAUSTIC_SPAN || hi.y - lo.y >= WATER_CAUSTIC_SPAN) return false;
-    if (area < 1e-12)
-    {
-        causticPoint(caustics, (a + b + c) / 3, slice, flux, nc);  // a focus: all of it at one point
-        return true;
-    }
     for (float y = lo.y; y <= hi.y; y += 1)
         for (float x = lo.x; x <= hi.x; x += 1)
         {
-            const float part = causticClipArea(a, b, c, float2(x, y));
-            if (part > 0) causticAdd(caustics, int2(x, y), slice, flux * part / area, nc);
+            // Relative to the texel's corner: the shoelace-type sums on absolute grid positions (hundreds) cancel a small
+            // polygon's area away in fp32 (measured: flat water off by 5 %).
+            const float2 k = float2(x, y), p0 = c0 - k, p1 = c1 - k, p2 = c2 - k, p3 = c3 - k;
+            const float diagonal = causticEdge(p2, p0);
+            const float s1 = causticEdge(p0, p1) + causticEdge(p1, p2) + diagonal, s2 = causticEdge(p2, p3) + causticEdge(p3, p0) - diagonal;
+            const float part = abs(s1) + abs(s2);
+            if (part > 0) causticAdd(caustics, int2(k), slice, density * part, nc);
         }
     return true;
 }
@@ -163,20 +155,23 @@ void main(uint3 id : SV_DispatchThreadID)
             // the two tile (a point splat one caustic texel wide beside them did not: edges off by up to 25 %).
             const float half = 0.5 * float(nc) / float(m.n);
             const float2 p0 = c0 + float2(-half, -half), p1 = c0 + float2(half, -half), p2 = c0 + float2(half, half), p3 = c0 + float2(-half, half);
-            if (!causticTriangle(caustics, p0, p1, p2, slice, 0.5 * unit, nc) || !causticTriangle(caustics, p0, p2, p3, slice, 0.5 * unit, nc))
-                ++overflow;  // (a square of one map texel never spans the bound)
+            if (!causticCell(caustics, p0, p1, p2, p3, slice, unit / (4 * half * half), nc)) ++overflow;  // (a square of one map texel never spans the bound)
             continue;
         }
         const float2 c1 = causticGrid(m, S1 + d1 * zk, float(nc)), c2 = causticGrid(m, S2 + d2 * zk, float(nc)), c3 = causticGrid(m, S3 + d3 * zk, float(nc));
         const float a1 = 0.5 * abs((c1.x - c0.x) * (c2.y - c0.y) - (c2.x - c0.x) * (c1.y - c0.y));
         const float a2 = 0.5 * abs((c2.x - c0.x) * (c3.y - c0.y) - (c3.x - c0.x) * (c2.y - c0.y));
         const float total = a1 + a2;
-        const float f1 = total > 0 ? unit * a1 / total : 0.5 * unit, f2 = unit - f1;
         // The cell between the four texel centres lands half a texel on from texel q's own light: shifted back by half its
         // edges so its centre lands where q's centre does (flat water: the texel grid moved whole, every caustic texel 1).
         const float2 shift = -0.5 * ((c1 - c0) + (c3 - c0));
-        if (!causticTriangle(caustics, c0 + shift, c1 + shift, c2 + shift, slice, f1, nc)) { causticPoint(caustics, (c0 + c1 + c2) / 3 + shift, slice, f1, nc); ++overflow; }
-        if (!causticTriangle(caustics, c0 + shift, c2 + shift, c3 + shift, slice, f2, nc)) { causticPoint(caustics, (c0 + c2 + c3) / 3 + shift, slice, f2, nc); ++overflow; }
+        if (!(total >= 1e-12)) { causticPoint(caustics, (c0 + c2) * 0.5 + shift, slice, unit, nc); continue; }  // a focus: all of it at one point
+        if (!causticCell(caustics, c0 + shift, c1 + shift, c2 + shift, c3 + shift, slice, unit / total, nc))
+        {
+            causticPoint(caustics, (c0 + c1 + c2) / 3 + shift, slice, unit * a1 / total, nc);
+            causticPoint(caustics, (c0 + c2 + c3) / 3 + shift, slice, unit * a2 / total, nc);
+            overflow += 2;
+        }
     }
     if (overflow != 0 && P[1].y != UNX_NONE)
     {
