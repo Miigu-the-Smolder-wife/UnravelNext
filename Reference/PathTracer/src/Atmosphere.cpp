@@ -211,6 +211,20 @@ Rgb AtmosphereModel::depthTopTable(double r, double mu) const
     return { (float)std::max(0.0, acc[0]), (float)std::max(0.0, acc[1]), (float)std::max(0.0, acc[2]) };
 }
 
+Rgb AtmosphereModel::valleyChordDepth(const Double3& o, float3 d, double& tExit, uint32_t& panels) const
+{
+    // One 8-point panel per 2 km of the chord's altitude span (the short-segment rule): the chord's lowest point is o or its
+    // closest approach to the centre; its highest is the surface crossing.
+    const double ox = o.x, oy = o.y + m_R, oz = o.z;
+    const double r = std::sqrt(ox * ox + oy * oy + oz * oz);
+    const double b = ox * d.x + oy * d.y + oz * d.z, c = r * r - m_R * m_R;
+    tExit = -b + std::sqrt(b * b - c);
+    double hMin = r - m_R;
+    if (-b > 0 && -b < tExit) hMin = std::min(hMin, std::sqrt(std::max(0.0, r * r - b * b)) - m_R);
+    panels = std::max(1u, (uint32_t)std::ceil(-hMin / 2000.0));
+    return integrate(o, d, 0, tExit, panels);
+}
+
 Rgb AtmosphereModel::opticalDepthToTop(const Double3& o, float3 d) const
 {
     const double ox = o.x, oy = o.y + m_R, oz = o.z;
@@ -218,19 +232,16 @@ Rgb AtmosphereModel::opticalDepthToTop(const Double3& o, float3 d) const
     const double mu = (ox * d.x + oy * d.y + oz * d.z) / r;
     if (r < m_R)
     {
-        // Below the planet surface (inside a scene valley): integrate directly up to the surface crossing, one 8-point panel
-        // per 2 km of the chord's altitude span (the short-segment rule; the chord's lowest point is o or its closest
-        // approach to the centre), then the table from the surface.
-        const double b = r * mu, c = r * r - m_R * m_R;
-        const double tExit = -b + std::sqrt(b * b - c);
+        // Below the planet surface (inside a scene valley): the chord up to the surface crossing (valleyChordDepth), then
+        // the table from the surface.
+        double tExit;
+        uint32_t panels;
+        const Rgb chord = valleyChordDepth(o, d, tExit, panels);
         const Double3 e{ o.x + d.x * tExit, o.y + d.y * tExit, o.z + d.z * tExit };
         const double ex = e.x, ey = e.y + m_R, ez = e.z;
         const double re = std::sqrt(ex * ex + ey * ey + ez * ez);
         const double mue = (ex * d.x + ey * d.y + ez * d.z) / re;
-        double hMin = r - m_R;
-        if (-b > 0 && -b < tExit) hMin = std::min(hMin, std::sqrt(std::max(0.0, r * r - b * b)) - m_R);
-        const uint32_t panels = std::max(1u, (uint32_t)std::ceil(-hMin / 2000.0));
-        return integrate(o, d, 0, tExit, panels) + depthTopTable(m_R, std::max(mue, 0.0));
+        return chord + depthTopTable(m_R, std::max(mue, 0.0));
     }
     if (r > m_Rt) return {};
     // Ground intersection: rays below the horizon never reach the top.

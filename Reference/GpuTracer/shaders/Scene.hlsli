@@ -225,6 +225,116 @@ bool rtIntersect(float3 o, float3 d, float tnear, float tfar, uint mask, out RtH
     return true;
 }
 
+// Resumable traversal (the wavefront's Trace and Query stages): one visit traces the interval [a, b] of the ray with at
+// most maxCandidates non-opaque candidates. A completed interval gives its closest accepted hit, which is the ray's (the
+// intervals before a had none); without one the next visit takes [b, tfar]. An interval with more candidates is halved
+// for the next visit. So every visit is bounded and a ray of any number of alpha candidates finishes - unless more than
+// maxCandidates lie within a float step of one another (kRtErrorTraversal). True when the ray is done.
+bool rtIntervalSplit(inout float a, inout float b)
+{
+    const float m = a + 0.5f * (b - a);
+    if (!(m > a && m < b))
+    {
+        g_errors |= kRtErrorTraversal;  // candidates stacked within a float step: cannot split further
+        return false;
+    }
+    b = m;
+    return true;
+}
+
+bool rtIntersectPart(float3 o, float3 d, inout float a, inout float b, float tfar, uint mask, uint maxCandidates, out RtHit hit, out bool found)
+{
+    found = false;
+    hit.instance = 0;
+    hit.geometry = 0;
+    hit.primitive = 0;
+    hit.u = hit.v = hit.t = 0;
+    RaytracingAccelerationStructure tlas = ResourceDescriptorHeap[rtC().b.tlas];
+    RayQuery<RAY_FLAG_NONE> q;
+    RayDesc r;
+    r.Origin = o;
+    r.Direction = d;
+    r.TMin = a;
+    r.TMax = b;
+    q.TraceRayInline(tlas, RAY_FLAG_NONE, mask, r);
+    g_rays += 1;
+    uint n = 0;
+    bool over = false;
+    while (q.Proceed())
+    {
+        if (++n > maxCandidates)
+        {
+            over = true;
+            q.Abort();
+            break;
+        }
+        if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
+        {
+            const float2 bc = q.CandidateTriangleBarycentrics();
+            if (rtAlphaOpaque(q.CandidateInstanceID(), q.CandidateGeometryIndex(), q.CandidatePrimitiveIndex(), bc.x, bc.y)) q.CommitNonOpaqueTriangleHit();
+        }
+    }
+    g_maxCandidates = max(g_maxCandidates, n);
+    if (over) return !rtIntervalSplit(a, b);  // an unsplittable interval ends the ray (with the error bit)
+    if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+    {
+        found = true;
+        hit.instance = q.CommittedInstanceID();
+        hit.geometry = q.CommittedGeometryIndex();
+        hit.primitive = q.CommittedPrimitiveIndex();
+        const float2 bc = q.CommittedTriangleBarycentrics();
+        hit.u = bc.x;
+        hit.v = bc.y;
+        hit.t = q.CommittedRayT();
+        return true;
+    }
+    if (!(b < tfar)) return true;
+    a = b;
+    b = tfar;
+    return false;
+}
+
+bool rtOccludedPart(float3 o, float3 d, inout float a, inout float b, float tfar, uint maxCandidates, out bool occluded)
+{
+    occluded = false;
+    RaytracingAccelerationStructure tlas = ResourceDescriptorHeap[rtC().b.tlas];
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
+    RayDesc r;
+    r.Origin = o;
+    r.Direction = d;
+    r.TMin = a;
+    r.TMax = b;
+    q.TraceRayInline(tlas, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, kRtMaskShadow, r);
+    g_rays += 1;
+    uint n = 0;
+    bool over = false;
+    while (q.Proceed())
+    {
+        if (++n > maxCandidates)
+        {
+            over = true;
+            q.Abort();
+            break;
+        }
+        if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
+        {
+            const float2 bc = q.CandidateTriangleBarycentrics();
+            if (rtAlphaOpaque(q.CandidateInstanceID(), q.CandidateGeometryIndex(), q.CandidatePrimitiveIndex(), bc.x, bc.y)) q.CommitNonOpaqueTriangleHit();
+        }
+    }
+    g_maxCandidates = max(g_maxCandidates, n);
+    if (!over && q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+    {
+        occluded = true;
+        return true;
+    }
+    if (over) return !rtIntervalSplit(a, b);
+    if (!(b < tfar)) return true;
+    a = b;
+    b = tfar;
+    return false;
+}
+
 // Shadow casters only (RtScene::occluded).
 bool rtOccluded(float3 o, float3 d, float tnear, float tfar)
 {

@@ -79,6 +79,11 @@ public:
     // Measured maximum absolute error of opticalDepthToTop() against 8192-panel direct quadrature over random
     // (r, mu) in the scene-relevant range (altitude 0-100 km, all non-ground directions).
     double selfCheck(uint32_t samples, double* maxRelTransmittanceError = nullptr, bool verbose = false) const;
+    // Below the planet surface (o inside the planet sphere, a scene valley): the optical depth of the chord from o to the
+    // surface crossing by opticalDepthToTop's rule (one 8-point panel per 2 km of the chord's altitude span), its length
+    // and panel count; and the same chord with any number of panels (the rule's convergence check).
+    Rgb valleyChordDepth(const Double3& o, float3 d, double& tExit, uint32_t& panels) const;
+    Rgb directIntegral(const Double3& o, float3 d, double t0, double t1, uint32_t panels) const { return integrate(o, d, t0, t1, panels); }
 
     const scene::Atmosphere& params() const { return m_a; }
     // tau_top table (GPU tracer upload): [ir * kTableMu + imu], kTableMu x kTableR entries.

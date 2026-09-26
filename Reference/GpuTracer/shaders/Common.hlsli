@@ -138,6 +138,35 @@ float3 rtResolveQueries(RtConstants C, inout RtQueries qs)
     return sum;
 }
 
+// One query of rtResolveQueries with a resumable shadow ray (the wavefront's Query stage): the ray's interval [a, b]
+// (start: [0, q.tfar]) advances by rtOccludedPart with at most maxCandidates candidates per visit. False while the shadow
+// ray is not done (a and b hold its progress); then contrib is the query's term of the sum.
+bool rtResolveQueryPart(RtConstants C, RtQuery q, inout float a, inout float b, uint maxCandidates, out float3 contrib)
+{
+    contrib = float3(0, 0, 0);
+    bool visible = true;
+    float3 T = float3(0, 0, 0);
+    if (q.kind == 0)
+    {
+        if (rtAtmGroundDistance(C.atm, q.p, q.dir) > 0) visible = false;
+        else
+        {
+            const float3 tau = rtAtmDepthToTop(C.atm, q.p, q.dir);
+            if (!rtFinite3(tau)) visible = false;
+            else T = rtExpNeg3(tau);
+        }
+    }
+    if (visible && q.kind != 1)
+    {
+        bool occluded;
+        if (!rtOccludedPart(q.o, q.dir, a, b, q.tfar, maxCandidates, occluded)) return false;
+        visible = !occluded;
+    }
+    if (visible && q.kind != 0) T = rtExpNeg3(rtAtmOpticalDepth(C.atm, q.p, q.dir, q.dist));
+    if (visible) contrib = q.weight * T;
+    return true;
+}
+
 // Direct light (sun + one local light) scattered at y towards -d (Impl::mediumNee), queued with the factor 'scale'.
 void rtMediumNee(RtConstants C, float3 y, RtAtmCoefficients c, float3 d, inout RtSampler smp, float3 scale, inout RtQueries qs)
 {
@@ -213,8 +242,9 @@ struct RtSegment
 };
 
 // Section 1 of a path iteration (the CPU loop body, verbatim): the segment from the current vertex - its end (a surface
-// hit, the ground, space) and length. False when the path ended here (below the planet heading down).
-bool rtPathTrace(RtConstants C, inout RtPath p, out RtSegment g)
+// hit, the ground, space) and length - given the ray's first surface hit from p.o along p.d beyond p.tmin (rtIntersect,
+// or the wavefront's resumable rtIntersectPart). False when the path ended here (below the planet heading down).
+bool rtPathTraceGiven(RtConstants C, inout RtPath p, out RtSegment g, bool surfGiven, RtHit hitGiven)
 {
     float3 L = p.L, beta = p.beta, o = p.o, d = p.d, prevPos = p.prevPos;
     float tmin = p.tmin, prevBsdfPdf = p.prevBsdfPdf, prevTotal = p.prevTotal;
@@ -222,15 +252,14 @@ bool rtPathTrace(RtConstants C, inout RtPath p, out RtSegment g)
     const uint bounce = p.bounce;
     bool chain = p.chain, dropSun = p.dropSun, alive = p.alive;
     const bool forced = C.forced != 0, caustics = C.caustics != 0;
-    RtHit hit;
+    RtHit hit = hitGiven;
     uint end = 2;
     float segLen = 0;
-    bool surf = false;
+    bool surf = surfGiven;
     bool proceed = false;
     [loop] for (uint once = 0; once < 1; ++once)
     {
             // --- trace the segment
-            surf = rtIntersect(o, d, tmin, kRtFarT, kRtMaskAll, hit);
             if (surf)
             {
                 end = 0;
@@ -281,8 +310,49 @@ bool rtPathTrace(RtConstants C, inout RtPath p, out RtSegment g)
     return proceed;
 }
 
-// Section 2: the analytic area-light emission along the segment and the atmosphere on it (forced next-event point,
-// tracked collision). False when the iteration ended here (a medium scattering event, or the path ended).
+bool rtPathTrace(RtConstants C, inout RtPath p, out RtSegment g)
+{
+    RtHit hit;
+    const bool surf = rtIntersect(p.o, p.d, p.tmin, kRtFarT, kRtMaskAll, hit);
+    return rtPathTraceGiven(C, p, g, surf, hit);
+}
+
+// Section 1b (the CPU loop's "1."): the analytic area-light emission along the segment after a surface vertex - the MIS
+// share of the BSDF-sampled direction for every shadowing light of the previous vertex's light-grid cell. Resumable: at
+// most maxLights of the cell's lights from light k (kRtNone: the cell's first) with the importance sum cum so far, the
+// contributions added to L in the cell's order; true when the cell is done.
+bool rtPathEmission(RtConstants C, inout RtPath p, RtSegment g, inout uint k, inout float cum, uint maxLights)
+{
+    if (!(p.prev == kRtPrevSurface && p.prevCell != ~0u && p.prevTotal > 0)) return true;
+    if (k == kRtNone)
+    {
+        k = rtLightCellStart(p.prevCell);
+        cum = 0;
+    }
+    const uint k1 = rtLightCellStart(p.prevCell + 1);
+    float3 L = p.L;
+    [loop] for (uint n = 0; n < maxLights && k < k1; ++n, ++k)
+    {
+        const uint li = rtLightCellLight(k);
+        const RtLight l = rtLightFetch(li);
+        const float imp = rtLightImportance(l, p.prevPos);
+        if (imp <= 0) continue;
+        const float prevCum = cum;
+        cum += imp;
+        if (l.castShadow == 0) continue;  // unshadowed lights are estimated by NEE alone
+        float t, pdfSA;
+        float3 Le;
+        if (!rtLightIntersect(l, p.prevPos, p.d, g.segLen, t, Le, pdfSA)) continue;
+        const float pSel = (cum - prevCum) / p.prevTotal;
+        const float w = rtPowerHeuristic(p.prevBsdfPdf, pSel * pdfSA);
+        L += p.beta * rtExpNeg3(rtAtmOpticalDepth(C.atm, p.o, p.d, t)) * Le * (w * rtOrderWeight(C, p.nVol, p.surfVerts));
+    }
+    p.L = L;
+    return k >= k1;
+}
+
+// Section 2: the atmosphere on the segment (forced next-event point, tracked collision), after rtPathEmission. False when
+// the iteration ended here (a medium scattering event, or the path ended).
 bool rtPathMedium(RtConstants C, inout RtPath p, inout RtSampler smp, inout RtQueries qs, RtSegment g)
 {
     float3 L = p.L, beta = p.beta, o = p.o, d = p.d, prevPos = p.prevPos;
@@ -297,29 +367,6 @@ bool rtPathMedium(RtConstants C, inout RtPath p, inout RtSampler smp, inout RtQu
     bool proceed = false;
     [loop] for (uint once = 0; once < 1; ++once)
     {
-            // --- 1. analytic area-light emission along the segment (after a surface vertex)
-            if (prev == kRtPrevSurface && prevCell != ~0u && prevTotal > 0)
-            {
-                float cum = 0;
-                const uint k1 = rtLightCellStart(prevCell + 1);
-                for (uint k = rtLightCellStart(prevCell); k < k1; ++k)
-                {
-                    const uint li = rtLightCellLight(k);
-                    const RtLight l = rtLightFetch(li);
-                    const float imp = rtLightImportance(l, prevPos);
-                    if (imp <= 0) continue;
-                    const float prevCum = cum;
-                    cum += imp;
-                    if (l.castShadow == 0) continue;  // unshadowed lights are estimated by NEE alone
-                    float t, pdfSA;
-                    float3 Le;
-                    if (!rtLightIntersect(l, prevPos, d, segLen, t, Le, pdfSA)) continue;
-                    const float pSel = (cum - prevCum) / prevTotal;
-                    const float w = rtPowerHeuristic(prevBsdfPdf, pSel * pdfSA);
-                    L += beta * rtExpNeg3(rtAtmOpticalDepth(C.atm, o, d, t)) * Le * (w * rtOrderWeight(C, nVol, surfVerts));
-                }
-            }
-
             // --- 2./3. atmosphere on the segment
             float3 tauSeg = end == 2 ? rtAtmDepthToTop(C.atm, o, d) : rtAtmOpticalDepth(C.atm, o, d, segLen);
             if (!rtFinite3(tauSeg)) tauSeg = rtAtmOpticalDepth(C.atm, o, d, segLen);
@@ -590,7 +637,13 @@ bool rtPathStep(RtConstants C, inout RtPath p, inout RtSampler smp)
     RtQueries qs;
     qs.n = 0;
     RtSegment g;
-    if (rtPathTrace(C, p, g) && rtPathMedium(C, p, smp, qs, g)) rtPathSurface(C, p, smp, qs, g);
+    if (rtPathTrace(C, p, g))
+    {
+        uint k = kRtNone;
+        float cum = 0;
+        rtPathEmission(C, p, g, k, cum, ~0u);
+        if (rtPathMedium(C, p, smp, qs, g)) rtPathSurface(C, p, smp, qs, g);
+    }
     if (qs.n > 0) p.L += rtResolveQueries(C, qs);
     p.bounce += 1;
     return true;

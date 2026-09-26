@@ -1172,7 +1172,9 @@ struct GpuPathTracer::Impl::Run
     // dispatch has been measured near the target (the time model then sizes batches).
     uint64_t unitCap = 4096;
     bool calibrated = false;
-    uint32_t slotCap = 4096;  // camera-path slots per rectangle (the wavefront's measured cap, <= kMaxSlots)
+    // Camera-path slots per rectangle: calibrate()'s bound (the structural one) from the start; this measured cap only halves
+    // it after a dispatch over twice the target and grows back when a cap-limited rectangle ran under half of it.
+    uint32_t slotCap = kMaxSlots;
     RenderStats stats;
     // Time model (ms per unit) per kernel, refined from GPU timestamps; start conservative.
     double msPer[3] = { 2e-5, 2e-5, 2e-6 };
@@ -1501,11 +1503,16 @@ void GpuPathTracer::Impl::calibrate()
         }
     // Each section's worst per slot (Wave.hlsli, Common.hlsli rtPathTrace / rtPathMedium / rtPathSurface /
     // rtResolveQueries). A quadrature call is <= 50 panels x 8 points (a segment's <= 100 km altitude span in 2 km panels),
-    // one more of <= 64 in a valley; a ray visits <= kRtMaxCandidates alpha candidates.
-    const double ray = B.alpha ? 4096.0 * B.candidateNs : 0.0, quad = 400.0 * B.evalNs, valley = B.valley ? 512.0 * B.evalNs : 0.0;
-    B.stageMs[0] = ray * 1e-6;                                                       // Trace: one ray
-    B.stageMs[1] = ((B.lightsPerCell + 4.0) * quad + valley) * 1e-6;                 // Segment: cell lights + segment + 2 medium points
-    B.stageMs[2] = ((B.lightsPerCell + 1.0) * B.evalNs + quad) * 1e-6;               // Surface: light choice over a cell, textures (bounded by a quadrature)
+    // one more of <= 64 in a valley.
+    // A ray step visits <= 1024 alpha candidates (Wave.hlsli kWaveCandidatesPerVisit; a ray with more resumes next round).
+    const double ray = B.alpha ? 1024.0 * B.candidateNs : 0.0, quad = 400.0 * B.evalNs, valley = B.valley ? 512.0 * B.evalNs : 0.0;
+    // Light choice (next-event estimation) walks one cell twice (its total, then the choice), a few operations per light -
+    // bounded here by a quadrature point each; the area-light MIS loop takes at most 4 of the cell's lights per Segment
+    // visit (Wave.hlsli kWaveLightsPerVisit, resumed in the next round).
+    const double choice = 2.0 * B.lightsPerCell * B.evalNs;
+    B.stageMs[0] = ray * 1e-6;                                                             // Trace: one ray
+    B.stageMs[1] = ((std::min(B.lightsPerCell, 4u) + 4.0) * quad + choice + valley) * 1e-6;  // Segment: <= 4 lights + segment + 2 medium points
+    B.stageMs[2] = (choice + quad) * 1e-6;                                                 // Surface: light choice, textures (bounded by a quadrature)
     B.stageMs[3] = (4.0 * (ray + quad) + valley) * 1e-6;                             // Query: <= 4 shadow rays and transmittances
     const double worst = *std::max_element(B.stageMs, B.stageMs + 4);
     constexpr double kDispatchLimitMs = 40.0;
@@ -1667,7 +1674,7 @@ void GpuPathTracer::Impl::runCameraRect(uint32_t halfBase, uint32_t halves, uint
     }
     const double target = kTargetDispatchMs;
     if (rectMaxMs > 2 * target) R.slotCap = std::max(R.slotCap / 2, 256u);
-    else if (rectMaxMs < 0.5 * target && slots >= R.slotCap) R.slotCap = std::min(R.slotCap * 2, kMaxSlots);
+    else if (rectMaxMs < 0.5 * target && slots + w * halves > R.slotCap) R.slotCap = std::min(R.slotCap * 2, kMaxSlots);  // cap-limited
 }
 
 void GpuPathTracer::Impl::runBatch()

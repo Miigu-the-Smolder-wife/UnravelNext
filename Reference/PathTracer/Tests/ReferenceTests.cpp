@@ -645,6 +645,48 @@ void testHold()
     if (reused) fail("a lock record older than its pid's process (reused pid) held the render");
 }
 
+// Scene valleys (geometry below the planet surface): the chord's optical depth by opticalDepthToTop's rule (one 8-point
+// panel per 2 km of the chord's altitude span) against the same chord with 65,536 panels, for short, long, grazing, deep
+// and steep chords: relative error of tau and of the transmittance both <= 1e-4 (a tenth of a 10-bit output step).
+void testValleyChords()
+{
+    scene::Atmosphere atm;
+    const reference::AtmosphereModel m(atm, false);
+    struct Case
+    {
+        const char* name;
+        reference::Double3 o;
+        float3 d;
+    };
+    const Case cases[] = {
+        { "short steep (50 m deep, 73 deg up)", { 0, -50, 0 }, normalize(float3{ 0.3f, 1, 0 }) },
+        { "long horizontal (2 km deep)", { 0, -2000, 0 }, float3{ 1, 0, 0 } },
+        { "grazing (10 m deep, 0.03 deg up)", { 0, -10, 0 }, normalize(float3{ 1, 0.0005f, 0 }) },
+        { "deep, first down (5 km deep)", { 0, -5000, 0 }, normalize(float3{ 1, -0.01f, 0 }) },
+        { "middle (800 m deep, 11 deg up)", { 0, -800, 0 }, normalize(float3{ 1, 0.2f, 0 }) },
+    };
+    double worstTau = 0, worstT = 0;
+    for (const Case& c : cases)
+    {
+        double tExit;
+        uint32_t panels;
+        const reference::Rgb rule = m.valleyChordDepth(c.o, c.d, tExit, panels);
+        const reference::Rgb ref = m.directIntegral(c.o, c.d, 0, tExit, 1u << 16);
+        const double rt[3] = { rule.r, rule.g, rule.b }, ft[3] = { ref.r, ref.g, ref.b };
+        double relTau = 0, relT = 0;
+        for (int k = 0; k < 3; ++k)
+        {
+            relTau = std::max(relTau, std::abs(rt[k] - ft[k]) / std::max(ft[k], 1e-30));
+            relT = std::max(relT, std::abs(std::exp(-rt[k]) - std::exp(-ft[k])) / std::exp(-ft[k]));
+        }
+        worstTau = std::max(worstTau, relTau);
+        worstT = std::max(worstT, relT);
+        logf("  valley %-38s chord %.4g km, %u panels: tau %.6g %.6g %.6g (65536 panels %.6g %.6g %.6g), relative error tau %.2e, T %.2e\n", c.name,
+             tExit / 1000, panels, rule.r, rule.g, rule.b, ref.r, ref.g, ref.b, relTau, relT);
+    }
+    if (worstTau > 1e-4 || worstT > 1e-4) fail("valley chord quadrature error: tau %.3g, T %.3g (> 1e-4)", worstTau, worstT);
+}
+
 void testAtmosphereTable()
 {
     scene::Atmosphere atm;
@@ -760,6 +802,7 @@ int main(int argc, char** argv)
             fn();
         };
         run("hold", testHold);
+        run("valley", testValleyChords);
         run("atmosphere", testAtmosphereTable);
         run("model", testModelAgreement);
         run("bsdf", testBsdfSampling);

@@ -4,8 +4,8 @@
 // section's code and a dispatch's worst time is one section's (README 3), not a whole iteration's.
 //
 // A slot is one (pixel, half) of the rectangle, running samples [c0, c1) of that half in turn; its state (kWaveStateBytes)
-// is the path, its sampler, the sample index, the float sum of its finished samples, the iteration's segment and its queued
-// queries. A slot sits in exactly one stage's list. Every stage consumes its whole list and appends each slot to the next
+// is the path, its sampler, the sample index, the float sum of its finished samples, the iteration's segment, its queued
+// queries and the Segment stage's cursor over the cell's area lights. A slot sits in exactly one stage's list. Every stage consumes its whole list and appends each slot to the next
 // stage's list: Trace -> Segment -> Surface, a section's end -> Query when it queued queries, and an iteration's end ->
 // Trace (the bounce count advances there). Trace starts an iteration: a path that ended (or reached kRtMaxBounces) adds
 // its sample to the slot's sum and the slot starts its next sample - or, after its last, adds the sum to the half's double
@@ -19,7 +19,9 @@
 #define UNX_RT_WAVE_HLSLI
 #include "Common.hlsli"
 
-static const uint kWaveStateBytes = 416;
+static const uint kWaveStateBytes = 460;
+static const uint kWaveCandidatesPerVisit = 1024;  // alpha candidates per ray per visit (rtIntersectPart, rtOccludedPart)
+static const uint kWaveLightsPerVisit = 4;  // area lights of a cell per Segment visit (rtPathEmission resumes)
 static const uint kWaveTrace = 0, kWaveSegment = 1, kWaveSurface = 2, kWaveQuery = 3;
 
 struct WaveSlot
@@ -30,6 +32,13 @@ struct WaveSlot
     float3 acc;
     RtSegment g;
     RtQueries qs;
+    uint emitK;      // rtPathEmission's cursor (kRtNone: the cell's first light)
+    float emitCum;   // its importance sum so far
+    float traceA, traceB;  // Trace's resumable ray: the interval of the next visit
+    uint traceResume;      // 1: the segment's ray is not done (the iteration has started)
+    uint queryI;           // Query's cursor: the query in progress (kRtNone: the iteration's first)
+    float queryA, queryB;  // its shadow ray's interval
+    float3 querySum;       // the sum of the queries done
 };
 
 struct WaveRect
@@ -71,6 +80,10 @@ void waveStore(RWByteAddressBuffer b, uint slot, WaveSlot w)
     b.Store4(a + 140, uint4(w.g.hit.instance, w.g.hit.geometry, w.g.hit.primitive, asuint(w.g.hit.u)));
     b.Store4(a + 156, uint4(asuint(w.g.hit.v), asuint(w.g.hit.t), w.g.end, asuint(w.g.segLen)));
     b.Store(a + 172, w.qs.n);
+    b.Store2(a + 416, uint2(w.emitK, asuint(w.emitCum)));
+    b.Store4(a + 424, uint4(asuint(w.traceA), asuint(w.traceB), w.traceResume, w.queryI));
+    b.Store4(a + 440, uint4(asuint(w.queryA), asuint(w.queryB), asuint(w.querySum.x), asuint(w.querySum.y)));
+    b.Store(a + 456, asuint(w.querySum.z));
     [unroll] for (uint i = 0; i < kRtMaxQueries; ++i)
     {
         const uint q = a + 176 + i * 60;
@@ -125,6 +138,17 @@ WaveSlot waveLoad(RWByteAddressBuffer b, uint slot)
     w.g.end = h1.z;
     w.g.segLen = asfloat(h1.w);
     w.qs.n = b.Load(a + 172);
+    const uint2 em = b.Load2(a + 416);
+    w.emitK = em.x;
+    w.emitCum = asfloat(em.y);
+    const uint4 tr = b.Load4(a + 424), qa = b.Load4(a + 440);
+    w.traceA = asfloat(tr.x);
+    w.traceB = asfloat(tr.y);
+    w.traceResume = tr.z;
+    w.queryI = tr.w;
+    w.queryA = asfloat(qa.x);
+    w.queryB = asfloat(qa.y);
+    w.querySum = float3(asfloat(qa.z), asfloat(qa.w), asfloat(b.Load(a + 456)));
     [unroll] for (uint i = 0; i < kRtMaxQueries; ++i)
     {
         const uint q = a + 176 + i * 60;
@@ -195,6 +219,7 @@ void waveEndIteration(RWByteAddressBuffer wave, RWByteAddressBuffer lists, RWByt
 {
     if (w.qs.n > 0)
     {
+        w.queryI = kRtNone;
         waveStore(states, slot, w);
         waveAppend(wave, lists, maxSlots, kWaveQuery, slot);
         return;

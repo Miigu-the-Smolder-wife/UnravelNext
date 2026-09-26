@@ -2,8 +2,9 @@
 // Wavefront stage Trace (Wave.hlsli): an iteration's start. A path that has ended (or reached kRtMaxBounces) adds its
 // sample to the slot's float sum and the slot starts its next sample, or after its last adds the sum to the half's double
 // accumulator and leaves the lists; then section 1 (rtPathTrace: the segment) -> Segment, or the iteration's end.
-// Mode 0 (start): thread = slot, every slot of the rectangle starts its first sample. Worst per slot: one ray (alpha
-// candidates <= kRtMaxCandidates) and a camera ray.
+// The segment's ray is resumable (rtIntersectPart: at most kWaveCandidatesPerVisit alpha candidates per visit; a ray with
+// more comes back to Trace until done, the iteration's start not repeated). Mode 0 (start): thread = slot, every slot of the
+// rectangle starts its first sample. Worst per slot: one ray step of <= kWaveCandidatesPerVisit candidates and a camera ray.
 #include "Wave.hlsli"
 
 [numthreads(64, 1, 1)]
@@ -31,6 +32,7 @@ void main(uint3 id : SV_DispatchThreadID)
         bool active = true;
         if (mode == 0)
         {
+            w.traceResume = 0;
             w.si = r.c0;
             w.acc = float3(0, 0, 0);
             w.p = waveStartSample(C, x, y, pixelSeed, w.si, w.smp);
@@ -38,6 +40,8 @@ void main(uint3 id : SV_DispatchThreadID)
         else
         {
             w = waveLoad(states, slot);
+            if (w.traceResume == 0)  // not a resumed ray: the iteration's start
+            {
             // rtPathStep's top: an ended path (or one at the iteration cap) is its sample's value
             if (w.p.alive && w.p.bounce >= kRtMaxBounces)
             {
@@ -57,16 +61,36 @@ void main(uint3 id : SV_DispatchThreadID)
                 }
                 else w.p = waveStartSample(C, x, y, pixelSeed, w.si, w.smp);
             }
+            }
         }
         if (active)
         {
-            w.qs.n = 0;
-            if (rtPathTrace(C, w.p, w.g))
+            if (w.traceResume == 0)
             {
-                waveStore(states, slot, w);
-                waveAppend(wave, lists, maxSlots, kWaveSegment, slot);
+                w.qs.n = 0;
+                w.traceA = w.p.tmin;
+                w.traceB = kRtFarT;
             }
-            else waveEndIteration(wave, lists, states, maxSlots, slot, w);
+            RtHit hit;
+            bool found;
+            if (!rtIntersectPart(w.p.o, w.p.d, w.traceA, w.traceB, kRtFarT, kRtMaskAll, kWaveCandidatesPerVisit, hit, found))
+            {
+                w.traceResume = 1;  // the ray's next interval in the next round
+                waveStore(states, slot, w);
+                waveAppend(wave, lists, maxSlots, kWaveTrace, slot);
+            }
+            else
+            {
+                w.traceResume = 0;
+                if (rtPathTraceGiven(C, w.p, w.g, found, hit))
+                {
+                    w.emitK = kRtNone;
+                    w.emitCum = 0;
+                    waveStore(states, slot, w);
+                    waveAppend(wave, lists, maxSlots, kWaveSegment, slot);
+                }
+                else waveEndIteration(wave, lists, states, maxSlots, slot, w);
+            }
         }
     }
     rtFlushCounters(nans, truncated, 0);
