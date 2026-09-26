@@ -5,7 +5,7 @@
 
 cbuffer PassConstants : register(b0)
 {
-    uint4 P[8];
+    uint4 P[12];  // Device::kRootConstantCount (48)
 };
 
 SamplerState g_pointClamp : register(s0);

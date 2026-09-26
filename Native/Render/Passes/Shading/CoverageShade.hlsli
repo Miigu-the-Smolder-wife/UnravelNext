@@ -19,13 +19,14 @@
 // transmittance, multi-scatter, air volume, R's screen probes }, P[5].x = R's screen probe maps (UNX_NONE = absent),
 // P[6].zw = { R's GI cache, S's per-record sun bytes (shadowFragmentSun) }, P[7].x = V's coverageDepthRange,
 // P[7].zw = { E's surface state field (one raw SRV), S's weather record } (UNX_NONE: none): the surface layers
-// (Passes/Material/SurfaceLayers.hlsli), as in the resolve.
+// (Passes/Material/SurfaceLayers.hlsli), as in the resolve. P[8].x = E's light function table (A8; UNX_NONE: none).
 #ifndef UNX_M_COVERAGE_SHADE_HLSLI
 #define UNX_M_COVERAGE_SHADE_HLSLI
 #include "Bindless.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Material/SurfaceLayers.hlsli"
+#include "Passes/Lights/LightFunction.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/AreaLight.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
@@ -335,7 +336,10 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                 continue;
             }
             float3 l;
-            const float3 El = shPunctualIlluminance(light, (light.position - g_cameraPosition) - offset, l);
+            const float3 toLight = (light.position - g_cameraPosition) - offset;
+            float3 El = shPunctualIlluminance(light, toLight, l);
+            if (P[8].x != UNX_NONE)  // A8: the light's function towards this fragment (as ShadeOpaque)
+                El *= lightFunction(P[8].x, lightIndex, light.forward, light.right, -l, linearZ * (2 * g_tanHalfFovY / g_viewHeight) / max(length(toLight), 1e-4), g_time);
             const float cosL = dot(n, l);
             float3 f = 0;
             if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);

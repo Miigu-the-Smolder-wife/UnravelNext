@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.61, 2026-09-26)
+# UnravelNext 인터페이스 (v1.62, 2026-09-26)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -726,6 +726,9 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.62 (2026-09-26, 코어·M, 렌더 A):
+  - **루트 상수 32 → 48 DWORD(3절)**: `Device::kRootConstantCount = 48`, `Bindless.hlsli`의 `cbuffer PassConstants { uint4 P[12]; }`. P[8..11]이 새로 생겼다. 루트 시그니처는 48 + 루트 CBV 2 = 50 DWORD(한도 64)다. P를 32개 이하로 쓰는 커널과 `computeConstants(k, 32)` 호출은 그대로 유효하다. 필요한 곳만 48까지 쓴다. 이유: coverage 조각 커널(풀·잎)이 표면 층·날씨·광원 함수·머리카락 같은 프레임 전역 SRV를 받을 자리가 없었다. [실측] 전 트랙 빌드 뒤 단위 36/36, visibility 8/8, material·shading·post·lights·decalhits·photo·FX 층·water 3종·호스트 5종 모두 통과, 디버그 층 오류 0.
+  - **coverage 조각의 광원 함수(A8)**: P[8].x = `FrameResources::lightFunctions`(없으면 UNX_NONE). CoverageShade의 점·스폿 조도에 ShadeOpaque와 같은 lightFunction을 곱한다.
 - v1.53 (2026-09-26, E A12 1인칭 뷰 모델):
   - **`gpu::kInstanceViewModel`(1 << 29, HLSL `INSTANCE_VIEW_MODEL`, GPU 장면 전용)과 `GpuScene::setInstanceViewModel`**: E의 `Passes/ViewModel`이 카메라에 붙은 인스턴스를 매 렌더 프레임 그 프레임의 카메라 × 카메라 공간 자세로 둔다(`tracks::viewModelPrepare`, GPU 장면 flush 앞; 불연속은 순간이동). 그래서 카메라 기준 운동이 0이고(움직임 벡터·회전 블러), 그림자·반사·GI는 화면과 같은 기하를 본다. M은 이 플래그로 회전 블러에서 뷰 모델 픽셀을 뺀다.
   - **`FrameConstants::viewModelScale`(옛 `spare1`, HLSL `g_viewModelScale`)**: 주 뷰에서 뷰 모델 인스턴스의 투영 재매핑 k(clip.xy × k, 깊이 불변; 1 = 없음이 기본). `viewmodel.fov_override_degrees`가 정하고, 다른 뷰는 늘 1이다. V는 뷰 모델 정점의 현재·이전 clip에 `ViewModel.hlsli`의 `viewModelClip`을 부른다.

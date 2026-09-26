@@ -724,6 +724,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
             if (r.giCache.valid()) b.use(r.giCache, Use::SrvCompute);
             if (r.surfaceConstants.valid()) b.use(r.surfaceConstants, Use::SrvCompute);  // A7 surface layers (one buffer)
+            if (r.lightFunctions.valid()) b.use(r.lightFunctions, Use::SrvCompute);    // A8 light functions
             if (r.rainShadow.valid()) b.use(r.rainShadow, Use::SrvCompute);
             if (fragmentShadows)
             {
@@ -740,6 +741,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             k[29] = r.areaLightStable;  // P[7].y (B2)
             k[30] = r.surfaceConstants.valid() ? c.srv(r.surfaceConstants) : gpu::kNone;  // P[7].z (A7 surface layers)
             k[31] = r.weather != UINT32_MAX ? r.weather : gpu::kNone;                  // P[7].w
+            k[32] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : gpu::kNone;  // P[8].x (A8; the arrays hold 48)
         };
         auto shadingConstants = [=](PassContext& c, uint32_t (&k)[24], uint32_t colour) {
             const uint32_t none = gpu::kNone;
@@ -781,13 +783,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                       k[11] = c.uav(heavy);
                       k[21] = hcap;
                       k[22] = ccap;
-                      uint32_t k32[32] = {};
+                      uint32_t k32[48] = {};
                       std::memcpy(k32, k, sizeof k);
                       particleConstants(c, k32 + 24);  // P[6].xy
-                      fragmentConstants(c, k32);      // P[6].zw, P[7].x
+                      fragmentConstants(c, k32);      // P[6].zw, P[7], P[8].x
                       c.cmd->SetPipelineState(light);
                       c.bindFrameConstants(cb);
-                      c.computeConstants(k32, 32);
+                      c.computeConstants(k32, 48);
                       c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
                   });
         addBegin("m.coverage.heavy args", 1, 0);
@@ -828,13 +830,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           k[21] = rd;
                           k[22] = hcap;
                           k[23] = c.uav(lists);
-                          uint32_t k32[32] = {};
+                          uint32_t k32[48] = {};
                           std::memcpy(k32, k, sizeof k);
                           k32[24] = k32[25] = gpu::kNone;  // (no particle layer in the rounds)
-                          fragmentConstants(c, k32);      // P[6].zw, P[7].x
+                          fragmentConstants(c, k32);      // P[6].zw, P[7], P[8].x
                           c.cmd->SetPipelineState(heavyRound);
                           c.bindFrameConstants(cb);
-                          c.computeConstants(k32, 32);
+                          c.computeConstants(k32, 48);
                           c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 32, nullptr, 0);
                       });
         }

@@ -112,7 +112,7 @@ public:
     // The single bindless root signature: 32 root constants (b0), a root CBV (b1), static samplers s0-s5,
     // heaps directly indexed. Every compute and mesh pipeline uses it.
     ID3D12RootSignature* rootSignature() const { return m_rootSignature.Get(); }
-    static constexpr uint32_t kRootConstantCount = 32;
+    static constexpr uint32_t kRootConstantCount = 48;  // b0 = uint4 P[12] (Bindless.hlsli; v1.62: P[8..11] added for the frame-global SRVs of the fragment kernels)
 
     // Command lists come from a pool; submit() executes and recycles them once the queue fence passes.
     CommandList acquireCommandList(QueueType type);
