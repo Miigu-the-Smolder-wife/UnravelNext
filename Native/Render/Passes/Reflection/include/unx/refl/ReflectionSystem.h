@@ -113,6 +113,7 @@ private:
     ComPtr<ID3D12Resource> m_streamTable;  // per frame slot: each triangle stream slot's vertex buffer SRV (256 B)
     uint8_t* m_streamTableMapped = nullptr;
     uint32_t m_streamTableSrv[4] = {};
+    ComPtr<ID3D12Resource> m_refractTemplate;  // the refraction library's DispatchRays description per sky variant (upload)
     Device& m_device;
     ReflectionSettings m_settings;
     ComPtr<ID3D12Resource> m_history;   // R16G16_FLOAT: last frame's reflection hit distance (G spacing), hit motion

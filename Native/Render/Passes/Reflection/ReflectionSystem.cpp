@@ -446,10 +446,53 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
     }
     const std::vector<std::pair<uint32_t, BufferRef>> streams = in.rays->streams();
     rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline(kRefractLibrary[in.variant], { "RefractionGen" }));
+    if (!m_refractTemplate)
+    {
+        D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
+        D3D12_RESOURCE_DESC1 d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        d.Width = 2 * kDescStride;
+        d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+        d.SampleDesc.Count = 1;
+        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(m_device.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr,
+                                                       IID_PPV_ARGS(&m_refractTemplate)),
+              "R refraction dispatch template");
+        uint8_t* m = nullptr;
+        D3D12_RANGE none{ 0, 0 };
+        check(m_refractTemplate->Map(0, &none, reinterpret_cast<void**>(&m)), "map R refraction template");
+        for (int v = 0; v < 2; ++v)
+        {
+            const D3D12_DISPATCH_RAYS_DESC desc =
+                rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline(kRefractLibrary[v], { "RefractionGen" })).dispatchDesc(0, 0, 1, 1);
+            std::memcpy(m + v * kDescStride, &desc, sizeof desc);
+        }
+        m_refractTemplate->Unmap(0, nullptr);
+    }
+    // The dispatch size from the list's header (an empty list launches nothing): template copy -> count -> indirect rays.
+    const BufferRef args = g.createBuffer(BufferDesc{ "R refraction dispatch", kDescStride, 0 });
+    ID3D12Resource* templ = m_refractTemplate.Get();
+    const uint32_t variant = (uint32_t)in.variant;
+    ID3D12PipelineState* countPso = fc.shaders.compute("Passes/Reflection/RefractionArgs");
+    g.addPass("r.refract.template", QueueType::Graphics,
+              [&](PassBuilder& b) { b.use(args, Use::CopyDst); },
+              [args, templ, variant](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(args), 0, templ, variant * kDescStride, kDescStride); });
+    g.addPass("r.refract.count", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(args, Use::UavCompute);
+                  b.use(jobs, Use::SrvCompute);
+              },
+              [args, jobs, maxJobs, countPso](PassContext& c) {
+                  const uint32_t k[4] = { c.uav(args), c.srv(jobs), maxJobs, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width) };
+                  c.cmd->SetPipelineState(countPso);
+                  c.computeConstants(k, 4);
+                  c.cmd->Dispatch(1, 1, 1);
+              });
     uint8_t* table = m_streamTableMapped + (in.frameIndex % 4) * 256;
     const uint32_t tableSrv = m_streamTableSrv[in.frameIndex % 4];
     g.addPass("r.refract", QueueType::Compute,
               [&](PassBuilder& b) {
+                  b.use(args, Use::IndirectArgs);
                   b.use(jobs, Use::SrvGraphics);
                   b.use(results, Use::UavGraphics);
                   b.use(in.cache, Use::UavGraphics);
@@ -460,7 +503,7 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
                   if (in.atmosphere)
                       for (const TextureRef& t : in.luts) b.use(t, Use::SrvGraphics);
               },
-              [&pipeline, in, jobs, results, maxJobs, streams, table, tableSrv](PassContext& c) {
+              [&pipeline, in, jobs, results, maxJobs, streams, table, tableSrv, args](PassContext& c) {
                   // The stream table: each traced stream slot's vertex buffer SRV (known at execution).
                   uint32_t* t = reinterpret_cast<uint32_t*>(table);
                   for (uint32_t k = 0; k < 64; ++k) t[k] = 0xFFFFFFFFu;
@@ -480,7 +523,7 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
                   std::memcpy(&k[24], in.scene, sizeof in.scene);
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(in.frameConstants);
-                  pipeline.dispatch(c.cmd, 0, maxJobs, 1, 1);
+                  pipeline.dispatchIndirect(c.cmd, c.resource(args), 0);
               });
 }
 
