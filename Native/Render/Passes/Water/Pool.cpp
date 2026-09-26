@@ -82,9 +82,6 @@ Pool::Pool(Device& device, ShaderLibrary& shaders, const PoolDesc& desc) : m_dev
         std::memcpy(mapped, table.data(), kSamples * 16);
         m_tableUpload->Unmap(0, nullptr);
     }
-    m_vertices = makeBuffer(device, kVertices * 32, D3D12_HEAP_TYPE_DEFAULT, L"pool surface vertices");
-    m_velocities = makeBuffer(device, kVertices * 16, D3D12_HEAP_TYPE_DEFAULT, L"pool surface velocities");
-    m_draw = makeBuffer(device, 16, D3D12_HEAP_TYPE_DEFAULT, L"pool surface draw");
     D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
     D3D12_RESOURCE_DESC1 t{};
     t.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -115,7 +112,7 @@ Pool::Pool(Device& device, ShaderLibrary& shaders, const PoolDesc& desc) : m_dev
 Pool::~Pool()
 {
     for (auto& u : m_sourceUpload) u->Unmap(0, nullptr);
-    for (const ComPtr<ID3D12Resource>& r : { m_modes, m_input, m_accum, m_previous, m_twiddles, m_table, m_tableUpload, m_output, m_vertices, m_velocities, m_draw, m_stateUpload })
+    for (const ComPtr<ID3D12Resource>& r : { m_modes, m_input, m_accum, m_previous, m_twiddles, m_table, m_tableUpload, m_output, m_stateUpload })
         if (r) m_device.deferRelease(r);
     for (auto& u : m_sourceUpload) m_device.deferRelease(u);
     for (uint32_t srv : m_sourceSrv) m_device.descriptors().freeResource(srv);
@@ -129,6 +126,29 @@ void Pool::toSamples(const PoolDesc& desc, const PoolPlacement& placement, doubl
     const double lx = dx * ax[0] + dz * ax[1] + 0.5 * desc.sizeX, lz = dx * az[0] + dz * az[1] + 0.5 * desc.sizeZ;
     u = float(lx * kCells / desc.sizeX);
     v = float(lz * kCells / desc.sizeZ);
+}
+bool Pool::visible(const PoolDesc& desc, const PoolPlacement& placement, const float4x4& viewProj)
+{
+    double ax[2], az[2];
+    axes(placement.yaw, ax, az);
+    const double vertical = desc.depth > 0 ? desc.depth : 1.0;
+    uint32_t outside[5] = {};  // corners beyond x < -w, x > w, y < -w, y > w, w <= 0
+    for (int c = 0; c < 8; ++c)
+    {
+        const double sx = (c & 1) ? 0.5 : -0.5, sz = (c & 2) ? 0.5 : -0.5, sy = (c & 4) ? 1.0 : -1.0;
+        const double p[3] = { placement.centre[0] + sx * desc.sizeX * ax[0] + sz * desc.sizeZ * az[0], placement.centre[1] + sy * vertical,
+                              placement.centre[2] + sx * desc.sizeX * ax[1] + sz * desc.sizeZ * az[1] };
+        double clip[4];
+        for (int r = 0; r < 4; ++r) clip[r] = viewProj.m[r][0] * p[0] + viewProj.m[r][1] * p[1] + viewProj.m[r][2] * p[2] + viewProj.m[r][3];
+        outside[0] += clip[0] < -clip[3];
+        outside[1] += clip[0] > clip[3];
+        outside[2] += clip[1] < -clip[3];
+        outside[3] += clip[1] > clip[3];
+        outside[4] += clip[3] <= 0;
+    }
+    for (uint32_t o : outside)
+        if (o == 8) return false;
+    return true;
 }
 bool Pool::contains(const PoolDesc& desc, const PoolPlacement& placement, double x, double z)
 {
@@ -280,9 +300,9 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
     m_time = time;
     m_started = true;
 
-    // The surface's triangle stream.
-    const BufferRef vertices = import(m_vertices.Get(), "pool surface vertices"),
-                    velocities = import(m_velocities.Get(), "pool surface velocities"), draw = import(m_draw.Get(), "pool surface draw");
+    // The surface's triangle stream: frame buffers (the graph's transient memory; only the drawn basins hold any).
+    const BufferRef vertices = g.createBuffer({ "pool surface vertices", kVertices * 32, 0 }), velocities = g.createBuffer({ "pool surface velocities", kVertices * 16, 0 }),
+                    draw = g.createBuffer({ "pool surface draw", 16, 0 });
     double ax[2], az[2];
     axes(placement.yaw, ax, az);
     const float hx = m_desc.sizeX / kCells, hz = m_desc.sizeZ / kCells;

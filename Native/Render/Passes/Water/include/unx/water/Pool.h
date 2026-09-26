@@ -13,8 +13,17 @@
 #include <cstdint>
 #include <vector>
 
+namespace unx::render
+{
+struct FramePassContext;
+}
+
 namespace unx::water
 {
+// W's waterGeometry step for FrameContext::pools (PoolTrack.cpp): each basin in view or with sources this frame becomes a
+// layer-1 triangle stream.
+void poolGeometry(render::FramePassContext& fc);
+
 struct PoolDesc
 {
     float sizeX = 4.0f, sizeZ = 3.0f;       // inner basin Lx, Lz (m): walls at local 0 and L on each axis
@@ -72,6 +81,9 @@ public:
     static bool contains(const PoolDesc& desc, const PoolPlacement& placement, double x, double z);
     const PoolDesc& desc() const { return m_desc; }
     bool started() const { return m_started; }
+    // Conservative visibility of the basin's bounds (still level +- vertical) in a view: false when all eight corners lie
+    // outside one clip plane (x, y against w, or behind the camera).
+    static bool visible(const PoolDesc& desc, const PoolPlacement& placement, const float4x4& viewProj);
     double time() const { return m_time; }
 
 private:
@@ -85,7 +97,7 @@ private:
     render::Device& m_device;
     render::ShaderLibrary& m_shaders;
     PoolDesc m_desc;
-    render::ComPtr<ID3D12Resource> m_modes, m_input, m_accum, m_previous, m_twiddles, m_table, m_tableUpload, m_output, m_vertices, m_velocities, m_draw, m_stateUpload;
+    render::ComPtr<ID3D12Resource> m_modes, m_input, m_accum, m_previous, m_twiddles, m_table, m_tableUpload, m_output, m_stateUpload;
     std::vector<render::ComPtr<ID3D12Resource>> m_sourceUpload;
     std::vector<uint8_t*> m_sourceMapped;
     std::vector<uint32_t> m_sourceSrv;

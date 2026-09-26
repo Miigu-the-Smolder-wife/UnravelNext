@@ -76,6 +76,31 @@ struct OceanFrame
     float lakeCentre[2] = {}, lakeRadius = 0; // (x, z) in this frame's coordinates, m
 };
 
+// W2 (engine 2 W, INTERFACES v1.78; FEATURES_GAME 1.10): a closed basin (bath, pool) of this frame, read by W's
+// waterGeometry (unx::water::Pool: exact basin-mode ripples, a layer-1 triangle stream). id is stable across frames (the
+// basin's simulation state; a basin absent from a frame's list is released); a basin out of every view and without
+// sources is not evolved in that frame and catches up exactly when drawn again. Sources are this frame's only (the host
+// hands each one to exactly one frame), in this frame's coordinates.
+struct PoolSourceFrame
+{
+    double x = 0, z = 0;     // centre (m), inside the basin
+    float radius = 0.05f;    // Gaussian footprint sigma (m)
+    float impulse = 0;       // vertical impulse on the water (N s, positive = pushed down)
+    float volume = 0;        // change of the displaced volume there (m^3, positive = water pushed out)
+};
+struct PoolFrame
+{
+    uint32_t id = 0;              // nonzero, unique in the frame
+    uint32_t material = 0;        // scene material of the surface (M's Water class)
+    float sizeX = 0, sizeZ = 0;   // inner basin (m): walls at local 0 and size
+    float depth = 0;              // uniform water depth (m); 0 = deep water
+    float surfaceFilm = 0;        // 0: a clean surface; 1: an inextensible film (bathers, soap)
+    double centre[3] = {};        // the still surface's centre (y = the level with no bodies), this frame's coordinates
+    float yaw = 0;                // about +y (rad): local x -> (cos, 0, -sin), local z -> (sin, 0, cos)
+    const PoolSourceFrame* sources = nullptr;
+    uint32_t sourceCount = 0;
+};
+
 // B5 (render B, INTERFACES v1.77): the frame's cloud layer - weather content (an environment input, not a quality key).
 // coverage 0 = no cloud pass. Altitudes in world metres (S keeps the layer fixed to the world across origin shifts with
 // FrameContext::originShift); the wind advects in FrameContext::time (World time).
@@ -153,6 +178,9 @@ struct FrameContext
     uint32_t fluidCount = 0;
     // v1.72 (B7, engine 1 W): this frame's sea (null: none; valid until record() returns). Time: 'time', camera: mainView.
     const OceanFrame* ocean = nullptr;
+    // v1.78 (W2, engine 2 W): this frame's closed basins (valid until record() returns; none: poolCount 0). Time: 'time'.
+    const PoolFrame* pools = nullptr;
+    uint32_t poolCount = 0;
     // A14: this frame's auxiliary views (at most FrameRenderer::kMaxViewsPerFrame - 1 with the main view).
     std::vector<AuxView> auxViews;
 };

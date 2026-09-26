@@ -563,6 +563,40 @@ UNX_API int32_t UNX_CALL UnxFrameSetOcean(UnxRenderer r, const UnxOceanDesc* oce
     });
 }
 
+UNX_API int32_t UNX_CALL UnxFrameSetPools(UnxRenderer r, const UnxPoolDesc* pools, uint32_t count)
+{
+    return call([&] {
+        if (count && !pools) fail("UnxFrameSetPools: no basins");
+        std::vector<HostRenderer::PoolInput> in(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const UnxPoolDesc& d = pools[i];
+            if (d.size != sizeof(UnxPoolDesc) || d.version != 1) fail("UnxFrameSetPools: UnxPoolDesc %u size %u version %u", i, d.size, d.version);
+            HostRenderer::PoolInput& p = in[i];
+            p.id = d.id, p.material = d.material;
+            p.sizeX = d.sizeX, p.sizeZ = d.sizeZ, p.depth = d.depth, p.surfaceFilm = d.surfaceFilm;
+            p.centre[0] = d.centre[0], p.centre[1] = d.centre[1], p.centre[2] = d.centre[2];
+            p.yaw = d.yaw;
+        }
+        find(r)->setPools(in);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameAddPoolSources(UnxRenderer r, const UnxPoolSource* sources, uint32_t count)
+{
+    return call([&] {
+        if (count && !sources) fail("UnxFrameAddPoolSources: no sources");
+        std::vector<FramePacket::PoolSource> in(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const UnxPoolSource& s = sources[i];
+            in[i].pool = s.pool;
+            in[i].source = render::PoolSourceFrame{ s.x, s.z, s.radius, s.impulse, s.volume };
+        }
+        find(r)->addPoolSources(in);
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxHairAddBody(UnxRenderer r, const UnxHairBodyDesc* desc, uint32_t* body)
 {
     return call([&] {

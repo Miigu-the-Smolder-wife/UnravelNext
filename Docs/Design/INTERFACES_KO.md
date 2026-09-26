@@ -734,6 +734,14 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.78 (2026-09-27, 엔진 2 W: W2 닫힌 수체(욕탕·수영장), FEATURES_GAME 1.10):
+  - **`render::PoolFrame`, `render::PoolSourceFrame`, `FrameContext::pools` / `poolCount`**: 이 프레임의 수조와 이 프레임의 원천.
+    - 수조: id(0이 아니고 프레임 안에서 유일; 물결 상태의 열쇠 — 목록에서 빠지면 해제), 재질(Water 클래스), 안쪽 크기 Lx·Lz, 균일 수심, 표면막 0/1, 고요 수면 중심(이 프레임 좌표, y = 물체가 없을 때 수위), yaw.
+    - 원천: {x, z, 반지름 σ, 충격량 N·s(아래 +), 밀어낸 부피 변화 m³(+ 밀어냄)}. 한 원천은 정확히 한 프레임에 간다.
+  - **W `waterGeometry`가 `water::poolGeometry`를 먼저 부른다**(PoolTrack.cpp): 어느 뷰(주 뷰, 보조 뷰)에 보이거나 원천이 있는 수조만 진행하고, layer 1 TriangleStream(재질 = 수조 재질)을 넣는다. 보이지 않고 원천도 없는 수조는 다음에 그려질 때 경과 시간만큼 정확히 따라잡는다. 복원(kDiscontinuityRestore)은 모든 수조를 잔잔하게 시작한다(물결은 World 상태가 아니다).
+  - **호스트**: `HostRenderer::setPools`(보유, 월드 좌표, 호출 스레드에서 검증: id, 크기, 수심, 막 0/1, 유한) / `addPoolSources`(다음 대기 프레임 하나에; 알 수 없는 수조·수조 밖·반지름 0·유한 아님은 거부). 대기 프레임은 원점 이동을 뺀 자기 좌표로 받는다. 그려지지 않고 버려진 프레임의 원천은 다음 프레임으로 옮겨진다(변환처럼 이동량을 뺌).
+  - **ABI 6 선택 내보내기** `UnxFrameSetPools(UnxPoolDesc[64 B])`, `UnxFrameAddPoolSources(UnxPoolSource[32 B])`. C# `UnravelNextRenderer.TrySetPools` / `TryAddPoolSources`(Unity 브리지, 렌더러 축 = z 반전).
+  - 시험: `unx_test_water_pooltests`, `unx_test_host_hostpools`(하드웨어 통과: 원점 이동 뒤 좌표, 한 번만 전달, 원천이 있는 프레임 렌더, 거부 9가지, 디버그 층 오류 0).
 - v1.77 (2026-09-27, 엔진 1 W: 물 단계 2, 물 아래 band A의 태양광; 렌더 A 합의):
   - **`FrameResources::waterSunDepth`(D32, 태양에 가장 가까움 = 1, 물 없음 = 0), `waterSunNormal`(RG16F 팔면체 법선), `waterSunMedium`(RGBA16F: 1 m 투과율 RGB, IOR), `waterSunConstants`(raw 80 B, 0번 워드 = 유효)**: W의 모든 삼각형 스트림을 태양 방향 직교 투영으로 래스터한 지도다(WaterSunMap.ms/.ps, waterGeometry에서 V·M 앞).
     - 범위는 스트림 경계 상자 합집합이다. 텍셀은 긴 변 / N이다(N = 2 mm 이하가 되는 2의 거듭제곱, 256~2048).

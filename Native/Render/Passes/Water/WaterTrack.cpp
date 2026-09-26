@@ -5,6 +5,7 @@
 #include "unx/render/GpuScene.h"
 #include "unx/render/Tracks.h"
 #include "unx/water/FluidSurface.h"
+#include "unx/water/Pool.h"
 #include "unx/water/WaterSurface.h"
 #include "unx/water/WaterSunMap.h"
 
@@ -129,6 +130,7 @@ static void waterFluids(FramePassContext& fc)
 }
 void waterGeometry(FramePassContext& fc)
 {
+    water::poolGeometry(fc);  // W2 closed basins (FEATURES_GAME 1.10): before the sun map, which takes every layer-1 stream
     waterFluids(fc);
     waterSunMap(fc);
 }

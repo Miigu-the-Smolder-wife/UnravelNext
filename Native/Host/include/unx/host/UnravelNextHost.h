@@ -41,7 +41,8 @@ enum UnxResult
                             //    UnxFrameSetOriginShift (C9), UnxSceneReserveRuntime, UnxFrameAddRuntimeMesh,
                             //    UnxFrameRemoveRuntimeMesh, UnxFrameAddRuntimeInstance, UnxFrameRemoveRuntimeInstance,
                             //    UnxFrameSetRuntimeTransforms (C2b), UnxFrameSetTerrainDeformation (C5), UnxFrameSetOcean (B7),
-                            //    UnxSceneSetTerrainLayers (C5 terrain material, v1.74), UnxFrameSetClouds (B5, v1.77)
+                            //    UnxSceneSetTerrainLayers (C5 terrain material, v1.74), UnxFrameSetClouds (B5, v1.77),
+                            //    UnxFrameSetPools, UnxFrameAddPoolSources (W2, v1.78)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -500,6 +501,39 @@ typedef struct UnxOceanDesc
 static_assert(sizeof(UnxOceanDesc) == 72, "UnxOceanDesc is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxFrameSetOcean(UnxRenderer r, const UnxOceanDesc* ocean);
+
+// W2 closed basins (optional exports within ABI 6, INTERFACES v1.78; FEATURES_GAME 1.10): the baths and pools the frames
+// queued from now on draw, until the next call (count 0: none). World coordinates (the renderer applies its origin
+// shifts); id: stable and nonzero (the basin's ripples live under it; a basin left out of a later call is released);
+// centre: the still surface's centre, y = the level with no bodies in the water; yaw about +y (rad, the renderer's
+// right-handed world: local x -> (cos, 0, -sin)); surfaceFilm 0 (clean) or 1 (inextensible: bathers, soap).
+typedef struct UnxPoolDesc
+{
+    uint32_t size, version;             // sizeof (64), 1
+    uint32_t id, material;              // material: the scene material of the surface (Water class)
+    float sizeX, sizeZ, depth, surfaceFilm;
+    double centre[3];                   // world, m
+    float yaw;
+    uint32_t reserved;                  // 0
+} UnxPoolDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxPoolDesc) == 64, "UnxPoolDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetPools(UnxRenderer r, const UnxPoolDesc* pools, uint32_t count);
+// Disturbances of the basins (physics contacts, bodies entering and moving: FEATURES_GAME 1.10): each one goes to exactly
+// one frame, the next queued (with a frame that is never drawn, to the one after it). World coordinates, inside its basin.
+// impulse: vertical impulse on the water (N s, + downward); volume: the change of the volume the body displaces there (m^3,
+// + water pushed out); radius: the footprint's Gaussian sigma (m, > 0).
+typedef struct UnxPoolSource
+{
+    double x, z;
+    float radius, impulse, volume;
+    uint32_t pool;                      // UnxPoolDesc::id
+} UnxPoolSource;
+#ifdef __cplusplus
+static_assert(sizeof(UnxPoolSource) == 32, "UnxPoolSource is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameAddPoolSources(UnxRenderer r, const UnxPoolSource* sources, uint32_t count);
 
 // B5 clouds (optional export within ABI 6, INTERFACES v1.77; after commit, any time): the frame's cloud layer, weather
 // content held until changed (render::CloudLayerDesc). Null or coverage 0 = no clouds.

@@ -1024,6 +1024,84 @@ void HostRenderer::setClouds(const render::CloudLayerDesc& c)
     m_clouds = c;
 }
 
+namespace
+{
+// Whether world (x, z) lies in the basin (its samples 0..256 per axis, half a sample of slack for rounding).
+bool poolContains(const HostRenderer::PoolInput& p, double x, double z)
+{
+    const double c = std::cos(double(p.yaw)), s = std::sin(double(p.yaw)), dx = x - p.centre[0], dz = z - p.centre[2];
+    const double u = (dx * c - dz * s) / p.sizeX + 0.5, v = (dx * s + dz * c) / p.sizeZ + 0.5, slackU = 0.5 / 256, slackV = 0.5 / 256;
+    return u >= -slackU && u <= 1 + slackU && v >= -slackV && v <= 1 + slackV;
+}
+} // namespace
+
+void HostRenderer::setPools(std::span<const PoolInput> pools)
+{
+    requireCommitted();
+    for (size_t i = 0; i < pools.size(); ++i)
+    {
+        const PoolInput& p = pools[i];
+        const bool finite = std::isfinite(p.sizeX) && std::isfinite(p.sizeZ) && std::isfinite(p.depth) && std::isfinite(p.yaw) && std::isfinite(p.centre[0]) &&
+                            std::isfinite(p.centre[1]) && std::isfinite(p.centre[2]);
+        if (!p.id || !finite || !(p.sizeX > 0) || !(p.sizeZ > 0) || !(p.depth >= 0) || !(p.surfaceFilm == 0 || p.surfaceFilm == 1))
+            fail("pools: basin %zu (id %u): id nonzero, sizes %g x %g (> 0), depth %g (>= 0), film %g (0 or 1), finite", i, p.id, p.sizeX, p.sizeZ, p.depth, p.surfaceFilm);
+        for (size_t j = 0; j < i; ++j)
+            if (pools[j].id == p.id) fail("pools: id %u appears twice", p.id);
+    }
+    std::lock_guard lock(m_mutex);
+    m_pools.assign(pools.begin(), pools.end());
+    // Sources of basins that are gone are dropped with them.
+    std::erase_if(m_pendingPoolSources, [&](const FramePacket::PoolSource& s) { return std::none_of(m_pools.begin(), m_pools.end(), [&](const PoolInput& p) { return p.id == s.pool; }); });
+}
+
+void HostRenderer::addPoolSources(std::span<const FramePacket::PoolSource> sources)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    for (size_t i = 0; i < sources.size(); ++i)
+    {
+        const FramePacket::PoolSource& s = sources[i];
+        const auto basin = std::find_if(m_pools.begin(), m_pools.end(), [&](const PoolInput& p) { return p.id == s.pool; });
+        const render::PoolSourceFrame& f = s.source;
+        if (basin == m_pools.end()) fail("pool sources: source %zu names basin %u, which is not in the current set", i, s.pool);
+        if (!std::isfinite(f.x) || !std::isfinite(f.z) || !(f.radius > 0) || !std::isfinite(f.radius) || !std::isfinite(f.impulse) || !std::isfinite(f.volume))
+            fail("pool sources: source %zu is not finite or has radius %g (> 0)", i, f.radius);
+        if (!poolContains(*basin, f.x, f.z)) fail("pool sources: source %zu at (%g, %g) lies outside basin %u", i, f.x, f.z, s.pool);
+    }
+    m_pendingPoolSources.insert(m_pendingPoolSources.end(), sources.begin(), sources.end());
+}
+
+void HostRenderer::poolsLocked(FramePacket& packet)
+{
+    packet.pools.clear();
+    for (const PoolInput& p : m_pools)
+    {
+        render::PoolFrame f;
+        f.id = p.id, f.material = p.material;
+        f.sizeX = p.sizeX, f.sizeZ = p.sizeZ, f.depth = p.depth, f.surfaceFilm = p.surfaceFilm;
+        f.centre[0] = p.centre[0] - m_mainOriginOffset.x, f.centre[1] = p.centre[1] - m_mainOriginOffset.y, f.centre[2] = p.centre[2] - m_mainOriginOffset.z;
+        f.yaw = p.yaw;
+        packet.pools.push_back(f);
+    }
+    for (FramePacket::PoolSource& s : m_pendingPoolSources)
+    {
+        s.source.x -= m_mainOriginOffset.x;
+        s.source.z -= m_mainOriginOffset.z;
+    }
+    packet.poolSources = std::move(m_pendingPoolSources);
+    m_pendingPoolSources.clear();
+}
+
+std::pair<std::vector<render::PoolFrame>, std::vector<FramePacket::PoolSource>> HostRenderer::queuedPools()
+{
+    std::lock_guard lock(m_mutex);
+    FramePacket p;
+    const std::vector<FramePacket::PoolSource> keep = m_pendingPoolSources;
+    poolsLocked(p);
+    m_pendingPoolSources = keep;
+    return { p.pools, p.poolSources };
+}
+
 std::optional<render::OceanFrame> HostRenderer::oceanFrameLocked() const
 {
     if (!m_ocean) return std::nullopt;
@@ -1167,6 +1245,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.fluidStamp = m_fluidStamp;
     packet.ocean = oceanFrameLocked();  // in this frame's coordinates (the origin shifts applied so far)
     packet.clouds = m_clouds;
+    poolsLocked(packet);  // W2: the basins (a state) and this frame's sources (handed over once)
     m_decalsChanged = false;
     m_pending = FramePacket{};
     m_packets.push_back(std::move(packet));
@@ -1200,6 +1279,8 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
         next.viewModelOps.insert(next.viewModelOps.begin(), dropped.viewModelOps.begin(), dropped.viewModelOps.end());
         next.hairOps.insert(next.hairOps.begin(), std::make_move_iterator(dropped.hairOps.begin()), std::make_move_iterator(dropped.hairOps.end()));
         if (!next.hairFraction) next.hairFraction = dropped.hairFraction;
+        for (FramePacket::PoolSource& s : dropped.poolSources) s.source.x -= next.originShift.x, s.source.z -= next.originShift.z;
+        next.poolSources.insert(next.poolSources.begin(), dropped.poolSources.begin(), dropped.poolSources.end());
     }
     return ticket;
 }
@@ -1236,6 +1317,8 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         carried.viewModelOps.insert(carried.viewModelOps.end(), old.viewModelOps.begin(), old.viewModelOps.end());
         carried.hairOps.insert(carried.hairOps.end(), std::make_move_iterator(old.hairOps.begin()), std::make_move_iterator(old.hairOps.end()));
         if (old.hairFraction) carried.hairFraction = old.hairFraction;
+        for (FramePacket::PoolSource& s : carried.poolSources) s.source.x -= old.originShift.x, s.source.z -= old.originShift.z;
+        carried.poolSources.insert(carried.poolSources.end(), old.poolSources.begin(), old.poolSources.end());
         haveCarried = true;
         m_packets.pop_front();
     }
@@ -1266,6 +1349,8 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         p.viewModelOps.insert(p.viewModelOps.begin(), carried.viewModelOps.begin(), carried.viewModelOps.end());
         p.hairOps.insert(p.hairOps.begin(), std::make_move_iterator(carried.hairOps.begin()), std::make_move_iterator(carried.hairOps.end()));
         if (!p.hairFraction) p.hairFraction = carried.hairFraction;
+        for (FramePacket::PoolSource& s : carried.poolSources) s.source.x -= p.originShift.x, s.source.z -= p.originShift.z;
+        p.poolSources.insert(p.poolSources.begin(), carried.poolSources.begin(), carried.poolSources.end());
     }
     // Leaving the queue: its updates join the applied state here, under the queue's lock, so currentScene never misses
     // a packet between the queue and the GPU. Its scene edits join the scene (the GPU scene's source) at the same point;
@@ -1481,6 +1566,21 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.fluidCount = (uint32_t)fluidFrames.size();
     fc.ocean = p.ocean ? &*p.ocean : nullptr;
     fc.clouds = p.clouds;
+    // W2: the basins with their sources grouped (valid until record() returns); sources of basins no longer present drop.
+    m_poolFrames = p.pools;
+    m_poolSourceFrames.clear();
+    std::vector<size_t> firstSource(m_poolFrames.size());
+    for (size_t i = 0; i < m_poolFrames.size(); ++i)
+    {
+        firstSource[i] = m_poolSourceFrames.size();
+        for (const FramePacket::PoolSource& s : p.poolSources)
+            if (s.pool == m_poolFrames[i].id) m_poolSourceFrames.push_back(s.source);
+        m_poolFrames[i].sourceCount = uint32_t(m_poolSourceFrames.size() - firstSource[i]);
+    }
+    for (size_t i = 0; i < m_poolFrames.size(); ++i)
+        m_poolFrames[i].sources = m_poolFrames[i].sourceCount ? m_poolSourceFrames.data() + firstSource[i] : nullptr;
+    fc.pools = m_poolFrames.empty() ? nullptr : m_poolFrames.data();
+    fc.poolCount = uint32_t(m_poolFrames.size());
     m_lastDiscontinuity = p.discontinuity;
     m_lastGpuSimulation = p.gpuSimulation;
     m_prevViewProj = fc.mainView.viewProj;

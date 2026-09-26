@@ -178,6 +178,15 @@ struct FramePacket
     std::array<uint64_t, 6> fluidStamp{};  // NRC_GpuWorldStamp of their tick (world, generation, epoch, tick, branch, phase)
     std::optional<render::OceanFrame> ocean;  // B7: the sea in this frame's coordinates (FrameContext::ocean)
     render::CloudLayerDesc clouds;            // B5: the cloud layer (FrameContext::clouds)
+    // W2 closed basins (v1.78): the basins every frame takes (this frame's coordinates; the sources pointers are set when
+    // the frame is recorded) and this frame's sources (each handed to one frame; a dropped frame's carry into the next).
+    std::vector<render::PoolFrame> pools;
+    struct PoolSource
+    {
+        uint32_t pool = 0;
+        render::PoolSourceFrame source;  // this frame's coordinates
+    };
+    std::vector<PoolSource> poolSources;
 };
 
 // The render graph of one recorded frame (RenderGraphStats, the fields the host reports).
@@ -356,6 +365,20 @@ public:
         float lakeRadius = 0;
     };
     void setOcean(const OceanInput* ocean);
+    // W2 closed basins (v1.78): held until the next call (empty: none); world coordinates, each queued frame takes them
+    // in its own. Validated here (ids unique and nonzero, sizes, film 0 or 1).
+    struct PoolInput
+    {
+        uint32_t id = 0, material = 0;
+        float sizeX = 0, sizeZ = 0, depth = 0, surfaceFilm = 0;
+        double centre[3] = {};
+        float yaw = 0;
+    };
+    void setPools(std::span<const PoolInput> pools);
+    // Sources for the next queued frame (world coordinates; the basin must be in the current set, the centre inside it).
+    void addPoolSources(std::span<const FramePacket::PoolSource> sources);
+    // The basins and sources the next queued frame takes, in that frame's coordinates (tests).
+    std::pair<std::vector<render::PoolFrame>, std::vector<FramePacket::PoolSource>> queuedPools();
     // B5 clouds (v1.77): held until changed; every queued frame takes the current layer.
     void setClouds(const render::CloudLayerDesc& clouds);
     render::CloudLayerDesc clouds()
@@ -561,6 +584,11 @@ private:
     std::optional<OceanInput> m_ocean;                               // (m_mutex) the sea every queued frame takes
     render::CloudLayerDesc m_clouds;                                 // (m_mutex) B5 the cloud layer every queued frame takes
     std::optional<render::OceanFrame> oceanFrameLocked() const;      // (m_mutex held) m_ocean in the current coordinates
+    std::vector<PoolInput> m_pools;                                  // (m_mutex) W2 basins every queued frame takes (world)
+    std::vector<FramePacket::PoolSource> m_pendingPoolSources;       // (m_mutex) for the next queued frame (world)
+    void poolsLocked(FramePacket& packet);                           // (m_mutex held) basins and sources into the packet's coordinates
+    std::vector<render::PoolFrame> m_poolFrames;                     // submission thread: FrameContext::pools of the frame being recorded
+    std::vector<render::PoolSourceFrame> m_poolSourceFrames;         // submission thread: their sources, grouped by basin
     uint64_t m_fluidTicket = 0;                  // submission thread: the frame's bridge admission (0: none)
     std::vector<render::FluidFrame> m_fluidFrames;  // submission thread: FrameContext::fluids of the frame being recorded
     std::unique_ptr<render::RenderGraph> m_simGraph;  // the claimed ticks' graph (compute queue)
