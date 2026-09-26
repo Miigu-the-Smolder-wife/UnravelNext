@@ -10,7 +10,8 @@
 //   gather nor thin out; amplitude = the RMS turbulent speed (m/s), L = the largest eddy (m), T = its turnover time (s).
 // Positions are relative to the frame's reference point in float (the host subtracts it in double first, as the World's
 // sampler subtracts the origin in double: large-world precision). The turbulence is added to the record's value before
-// its operation.
+// its operation; its noise is evaluated at the record-local offset x - origin (the same on every frame reference, and the
+// World sampler's double (position - origin) in float).
 #ifndef UNX_ATMOSPHERE_WIND_FIELD_HLSLI
 #define UNX_ATMOSPHERE_WIND_FIELD_HLSLI
 
@@ -151,7 +152,9 @@ WF_FN float3 windAt(WF_RECORDS records, uint count, float3 x, float t)
             uint octaves = bits & 0xFFu;
             if (octaves < 1u) octaves = 1u;
             if (octaves > 4u) octaves = 4u;
-            value = value + wfCurl(x * (1 / w.turbulence.y), t / w.turbulence.z, octaves, bits >> 8) * w.turbulence.x;
+            // In the record's own coordinates (d = x - origin): independent of the frame's reference point (moving it
+            // does not shift the pattern) and the World sampler's double (position - origin) gives the same float input.
+            value = value + wfCurl(d * (1 / w.turbulence.y), t / w.turbulence.z, octaves, bits >> 8) * w.turbulence.x;
         }
         if (op == kWindAdd) v = v + value;
         else if (op == kWindReplace) v = value;
