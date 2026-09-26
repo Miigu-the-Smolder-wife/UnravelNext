@@ -227,14 +227,22 @@ void resolve(FramePassContext& fc, ViewResources& view)
                          // Planar reflection views (v1.22): tiles without mirror pixels go to no class list.
                          if (v.view.planarTileMask.valid()) b.use(v.view.planarTileMask, Use::SrvCompute);
                          else if (v.view.planarMask.valid()) b.use(v.view.planarMask, Use::SrvCompute);
+                         // E's decals of the view (A7; both invalid when none is live)
+                         if (v.decalFrames.valid() && v.decalTiles.valid())
+                         {
+                             b.use(v.decalFrames, Use::SrvCompute);
+                             b.use(v.decalTiles, Use::SrvCompute);
+                         }
                      },
                      [kernel, v, o, cb, tileCount, debugBuffer, experiment](PassContext& c) {
                          const uint32_t tileMask = v.view.planarTileMask.valid() ? c.srv(v.view.planarTileMask) : gpu::kNone;
                          const uint32_t pixelMask = !v.view.planarTileMask.valid() && v.view.planarMask.valid() ? c.srv(v.view.planarMask) : gpu::kNone;
+                         const bool decals = v.decalFrames.valid() && v.decalTiles.valid();
                          const uint32_t k[20] = { c.srv(v.visId), c.srv(v.visibleClusters), c.uav(v.gbuffer), c.uav(o.materialWord),
                                                   o.emissive.valid() ? c.uav(o.emissive) : gpu::kNone, c.uav(v.reflectionLobeTiles), c.uav(o.tiles), c.uav(o.tileArgs),
                                                   o.textureTableSrv, o.tilesX, o.tilesY, tileCount, debugBuffer.valid() ? c.uav(debugBuffer) : gpu::kNone, experiment,
-                                                  tileMask, pixelMask, o.bands, o.height, 0, 0 };
+                                                  tileMask, pixelMask, o.bands, o.height, decals ? c.srv(v.decalFrames) : gpu::kNone,
+                                                  decals ? c.srv(v.decalTiles) : gpu::kNone };
                          c.cmd->SetPipelineState(kernel);
                          c.bindFrameConstants(cb);
                          c.computeConstants(k, 20);

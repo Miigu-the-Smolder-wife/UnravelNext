@@ -431,6 +431,12 @@ void HostRenderer::overrideQuality(const std::string& assignment)
 
 float HostRenderer::lastEv100ForTest() const { return m_frameRenderer ? m_frameRenderer->lastEv100() : 0.0f; }
 
+render::TrackState& HostRenderer::trackStateForTest()
+{
+    requireCommitted();
+    return m_frameRenderer->trackState();
+}
+
 uint32_t HostRenderer::debugErrors() { return m_device->drainDebugMessages(); }
 
 void HostRenderer::removeDeviceForTest()

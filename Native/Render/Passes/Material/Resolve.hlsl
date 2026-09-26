@@ -12,9 +12,11 @@
 // P[0] = { visId SRV, visibleClusters SRV, gbuffer UAV, material word UAV }
 // P[1] = { emissive UAV or UNX_NONE, lobe tiles UAV, tile lists UAV (raw), tile args UAV (raw) }
 // P[2] = { texture table SRV, tilesX, tilesY, tileCount }
-// P[4] = { screen bands, view height, 0, 0 }: the class tile lists are split by band (MaterialSystem.h ResolveOutputs):
+// P[4] = { screen bands, view height, decal frames SRV, decal tiles SRV }: the class tile lists are split by band (MaterialSystem.h ResolveOutputs):
 //        class c, band b at entry c * tileCount + tilesX * (row(b) / 8), arguments at 12 (c * bands + b), where row(b) is
 //        RenderGraph::addBandedGroup's split min(H, floor(H b / bands) & ~7).
+//        Decals (A7, E's Passes/Decal/Decal.hlsli; UNX_NONE = none this frame): decalApply modifies the pixel material
+//        after the normal map and before the band limit (FEATURES_GAME 5.2), on the side the shading normal faces.
 // P[3].y experiment mask (material.experiment_disable: cost attribution only, 0 otherwise)
 // PLANAR_MASK=1 (planar reflection views with R's mask; views without one compile none of it):
 // P[3].z R's planar tile mask (R8_UINT per 8 x 8 tile, nonzero = mirror pixels; UNX_NONE = absent), P[3].w R's planar
@@ -28,6 +30,7 @@
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
+#include "Passes/Decal/Decal.hlsli"
 
 #define M_PI 3.14159265358979
 
@@ -112,7 +115,24 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 variance += mm.variance;
             }
             else n = normalize(s.normal);
-            if (!s.front && (m.classFlags & MATERIAL_TWO_SIDED) != 0) n = -n;
+            const bool backSide = !s.front && (m.classFlags & MATERIAL_TWO_SIDED) != 0;
+            if (backSide) n = -n;
+
+            if (P[4].z != UNX_NONE)
+            {
+                // decals as upper layers of the material (their geometric normal: the side this pixel shades)
+                DecalMaterial dm;
+                dm.baseColor = baseColor; dm.roughness = roughness; dm.metallic = metallic; dm.normal = n; dm.variance = variance;
+                DecalSurface ds;
+                ds.position = s.offset; ds.dpdx = s.dpdx; ds.dpdy = s.dpdy;
+                ds.geometricNormal = backSide ? -s.geometricNormal : s.geometricNormal;
+                ds.instance = s.instance;
+                ds.geometricVariance = (dot(s.dndx, s.dndx) + dot(s.dndy, s.dndy)) / 12.0;
+                DecalContext dc;
+                dc.frames = P[4].z; dc.tiles = P[4].w; dc.materialTable = P[2].x;
+                decalApply(dc, pixel, ds, dm);
+                baseColor = dm.baseColor; roughness = dm.roughness; metallic = dm.metallic; n = dm.normal; variance = dm.variance;
+            }
 
             const float alpha = max(roughness * roughness, 1e-4);
             const float alphaFiltered = sqrt(alpha * alpha + variance);

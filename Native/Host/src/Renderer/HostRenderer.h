@@ -177,6 +177,8 @@ public:
     FrameStats latestStats() const;
     // Test hook: the main view's EV100 of the last recorded frame (automatic exposure's choice when the camera asked).
     float lastEv100ForTest() const;
+    // The committed renderer's track state (standalone tests: E's decal set; the host ABI for decals is E's).
+    render::TrackState& trackStateForTest();
     // Debug-layer errors reported so far (standalone renderers with debugLayer; 0 otherwise).
     uint32_t debugErrors();
     // Test hook (standalone): every following frame gets a newly created output texture, the old one released after the

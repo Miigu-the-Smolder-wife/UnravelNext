@@ -34,6 +34,8 @@ struct MSurface
 {
     uint instance, cluster, material;
     float3 offset;          // hit position relative to the camera (world axes)
+    float3 dpdx, dpdy;      // its screen derivatives on the triangle's plane (per pixel)
+    float3 geometricNormal; // unit normal of the triangle's plane, on its counter-clockwise (authored) side
     float3 view;            // unit, towards the camera
     bool front;             // ray meets the counter-clockwise (authored) side
     float3 normal;          // interpolated vertex normal (not normalised; MikkTSpace per-pixel convention)
@@ -159,6 +161,9 @@ MSurface mSurfaceFromVertices(MTriangleIdentity id, MVertex v0, MVertex v1, MVer
     s.baryDy = float3(-b1y - b2y, b1y, b2y);
 
     s.offset = t * D;
+    s.dpdx = rx;
+    s.dpdy = ry;
+    s.geometricNormal = n * rsqrt(dot(n, n));
     s.view = -normalize(D);
     s.front = nD < 0;
 
