@@ -131,13 +131,14 @@ TextureRef recordReaders(FramePassContext& fc, const ViewResources& view, bool f
 }
 
 // Air volume of one view from its lists (FroxelIntegrate.hlsl; a view with a clip plane integrates from the plane on).
-TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, BufferRef lights, bool keepVolume, TextureRef readers, const std::string& suffix)
+TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, BufferRef lights, bool keepVolume, TextureRef readers, const std::string& suffix,
+                              TextureRef media = {})
 {
     const QualityConfig& q = fc.quality;
     const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height);
     RenderGraph& g = fc.graph;
     // Air volume: in-scattering, optical depth, sun transmittance; nodes 0..S each (FroxelIntegrate.hlsl).
-    const TextureRef volume = g.createTexture(TextureDesc{ suffix.empty() ? "S air volume" : "S air volume (planar view)", grid.gridX, grid.gridY, (uint16_t)(3 * (grid.slices + 1) + 1), 1,
+    const TextureRef volume = g.createTexture(TextureDesc{ suffix.empty() ? "S air volume" : "S air volume (planar view)", grid.gridX, grid.gridY, (uint16_t)(3 * (grid.slices + 1) + 2), 1,
                                                            DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D });
     // Substep altitude: the configured bound, and at most 1/12 of the medium's shortest scale height (midpoint error
     // (dh / H)^2 / 24 <= 0.03 %: mist with H_Mie 300 m steps at 25 m).
@@ -160,6 +161,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
               [&](PassBuilder& b) {
                   b.use(lights, Use::SrvCompute);
                   if (bounded) b.use(readers, Use::SrvCompute);
+                  if (media.valid()) b.use(media, Use::SrvCompute);
                   b.use(tlut, Use::SrvCompute);
                   b.use(mlut, Use::SrvCompute);
                   b.use(volume, Use::UavCompute);
@@ -175,8 +177,8 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
                   }
               },
               [=](PassContext& ctx) {
-                  uint32_t k[16] = { ctx.srv(lights), ctx.uav(volume), ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
-                                     bounded ? ctx.srv(readers) : 0xFFFFFFFFu, 0xFFFFFFFFu };
+                  uint32_t k[20] = { ctx.srv(lights), ctx.uav(volume), ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
+                                     bounded ? ctx.srv(readers) : 0xFFFFFFFFu, 0xFFFFFFFFu, media.valid() ? ctx.srv(media) : 0xFFFFFFFFu, 0, 0, 0 };
                   if (shadows)
                   {
                       k[4] = ctx.srv(vsm.table);
@@ -191,7 +193,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
                   k[11] = experiment | (walkStats ? 0x10000u : 0u);
                   ctx.cmd->SetPipelineState(pi);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 16);
+                  ctx.computeConstants(k, 20);
                   ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
               });
     if (!shadows) tracks::pending("S.froxels: sun shadows of the air (shadowPages not recorded this frame)");
@@ -252,7 +254,11 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     if (s.listsFrame != fc.frame.frameIndex) recordFroxelLists(fc, main, 0xFFFFFFFFu);  // no shadowPages this frame
     RenderGraph& g = fc.graph;
     const BufferRef lights = s.lists;
-    const TextureRef volume = recordIntegration(fc, main, lights, s.keep, recordReaders(fc, main, s.fullDepth, ""), "");
+    // E's particle media (smoke, fire) on this grid, between the lists and the integration (invalid: none this frame); a
+    // view whose volumeSlices a producer already set keeps them (tests: FroxelTests 7).
+    ViewResources mediaView = main;
+    const TextureRef media = main.volumeSlices.valid() ? main.volumeSlices : tracks::volumeMedia(fc, mediaView, lights);
+    const TextureRef volume = recordIntegration(fc, main, lights, s.keep, recordReaders(fc, main, s.fullDepth, ""), "", media);
     fc.resources.froxels = volume;
     fc.resources.aerialPerspective = volume;  // atmosphereAerial / atmosphereAirView read it (Atmosphere.hlsli)
 

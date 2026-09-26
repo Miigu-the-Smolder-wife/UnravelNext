@@ -11,7 +11,11 @@
 //     texel-resolution bound;
 //  4. the air perspective (atmosphereAirView = atmosphereAerial + sun illuminance, no casters or lights) at arbitrary
 //     (uv, depth) against the double-precision atmosphere reference along the pixel's own ray (AtmosphereReference.h);
-//  5. D3D12 debug layer clean.
+//  5. D3D12 debug layer clean;
+//  7. particle media (E's volumeSlices; synthetic, MediaSlices.hlsl): the air volume with media against the air-only
+//     volume of the same view composed with them on the CPU (uniform mixture per slice: L = air g(ta + tp) / g(ta) +
+//     S_p g(ta + tp) / g(tp), optical depth ta + tp), node by node; the sky correction (source' - air e^-(tp to far after
+//     the slice)) and the media's optical depth to far_m (sky pixels).
 //   unx_test_shadow_froxeltests [--no-debug-layer] [--width W --height H] [--set key=value]
 #include "TestRaster.h"
 
@@ -22,6 +26,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <functional>
 #include <random>
 #include <set>
 
@@ -44,6 +49,17 @@ float halfToFloat(uint16_t h)
     else if (e == 31) v = m ? NAN : INFINITY;
     else v = std::ldexp((float)(m | 1024), (int)e - 25);
     return s ? -v : v;
+}
+
+// Nearest fp16 value of v (normal and subnormal range, ties to even): what a float written to an RGBA16F texel stores.
+double roundHalf(double v)
+{
+    if (v == 0) return 0;
+    const double a = std::abs(v);
+    const int e = std::max(std::ilogb(a), -14);  // subnormals share the smallest exponent's spacing
+    const double spacing = std::ldexp(1.0, e - 10);
+    const double q = std::nearbyint(a / spacing) * spacing;  // default rounding mode: ties to even
+    return v < 0 ? -q : q;
 }
 
 struct Box
@@ -246,6 +262,7 @@ int main(int argc, char** argv)
 
         std::vector<uint8_t> lastLists, lastVolume, lastDepth;
         bool wantDepth = false;
+        std::function<TextureRef(FramePassContext&)> injectMedia;  // section 7: the view's volumeSlices before froxels()
         // Node-by-node comparisons need every slice integrated (production integrates only the slices a reader reaches;
         // section 6 checks that those are the same numbers).
         shadow::setFroxelFullDepth(tf.trackState, true);
@@ -267,6 +284,7 @@ int main(int argc, char** argv)
                     tracks::atmosphere(fc);
                     raster.mainView(fc, main);
                     tracks::shadowPages(fc, main);
+                    if (injectMedia) main.volumeSlices = injectMedia(fc);
                     tracks::froxels(fc, main);
                     if (read)
                     {
@@ -726,6 +744,132 @@ int main(int argc, char** argv)
                  "\n", compared, differing, skyCompared, skyDiffering, skipped);
             report(compared > 1000 && differing == 0, "reader bound: nodes a surface reads equal every-slice integration (bits)", differing, 0);
             report(skyCompared > 10 && skyDiffering == 0, "reader bound: sky corrections equal every-slice integration (bits)", skyDiffering, 0);
+        }
+
+        // ---- 7. Particle media in the air volume (FroxelIntegrate.hlsl, E's volumeSlices): the volume with synthetic
+        //         media against the air-only volume composed with them on the CPU.
+        {
+            scene::Scene sc;
+            sc.name = "media";
+            sc.materials.push_back({});
+            sc.meshes.push_back(boxMesh("far box", { 1, 1, 1 }));
+            sc.instances.push_back(instanceAt(0, { -3000, 1, -3000 }));  // behind the camera: no shadow in the view's air
+            sc.sun.direction = normalize(float3{ 0.55f, 0.35f, 0.2f });
+            scene::Camera c;
+            c.name = "main";
+            c.position = { 3, 1.7f, -2 };
+            c.forward = normalize(float3{ 0.8f, 0.05f, 0.3f });
+            sc.cameras.push_back(c);
+            run(sc, 1);
+            const std::vector<uint8_t> air = lastVolume;
+            injectMedia = [&](FramePassContext& fc) {
+                const TextureRef t = fc.graph.createTexture(TextureDesc{ "test media slices", fg.gridX, fg.gridY, (uint16_t)(2 * fg.slices), 1,
+                                                                        DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D });
+                ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shadow/Tests/MediaSlices");
+                const uint32_t gx = fg.gridX, gy = fg.gridY, sl = fg.slices;
+                fc.graph.addPass("s.test.media", QueueType::Compute, [&](PassBuilder& b) { b.use(t, Use::UavCompute); },
+                                 [=](PassContext& ctx) {
+                                     const uint32_t k[4] = { ctx.uav(t), gx, gy, sl };
+                                     ctx.cmd->SetPipelineState(pso);
+                                     ctx.computeConstants(k, 4);
+                                     ctx.cmd->Dispatch((gx * gy + 7) / 8, (sl + 7) / 8, 1);
+                                 });
+                return t;
+            };
+            run(sc, 1);
+            injectMedia = nullptr;
+            const std::vector<uint8_t> mixed = lastVolume;
+            // MediaSlices.hlsl's formula (fp16 as stored).
+            auto mediaAt = [&](uint32_t tx, uint32_t ty, uint32_t s, ref::D3& tau, ref::D3& source) {
+                tau = { 0, 0, 0 };
+                source = { 0, 0, 0 };
+                if ((tx + ty) % 3 == 0 && s >= 6 && s < 18)
+                {
+                    const double k = 0.08 * (1 + 0.1 * (s - 6.0)), q = 1 + 0.03 * s;
+                    tau = { k, k * 0.85, k * 0.7 };
+                    source = { 900 * q, 1200 * q, 1500 * q };
+                }
+                if (ty % 4 == 1 && s >= 30 && s < 34)
+                {
+                    tau = { tau.x + 0.5, tau.y + 0.5, tau.z + 0.5 };
+                    source = { source.x + 300, source.y + 250, source.z + 200 };
+                }
+                auto h = [](double v) { return roundHalf((double)(float)v); };  // as stored (fp16 nearest)
+                tau = { h(tau.x), h(tau.y), h(tau.z) };
+                source = { h(source.x), h(source.y), h(source.z) };
+            };
+            auto g = [](double x) { return x > 1e-6 ? (1 - std::exp(-x)) / x : 1 - 0.5 * x; };
+            const uint32_t N = fg.slices + 1;
+            const double exposure = 1.0 / (1.2 * std::exp2(grid.view.ev100));
+            auto rawSlice = [&](const std::vector<uint8_t>& vol, uint32_t tx, uint32_t ty, uint32_t slice) {
+                uint16_t hv[4];
+                std::memcpy(hv, vol.data() + (size_t)slice * volumePitch * fg.gridY + (size_t)ty * volumePitch + (size_t)tx * 8, 8);
+                return ref::D3{ halfToFloat(hv[0]), halfToFloat(hv[1]), halfToFloat(hv[2]) };
+            };
+            double worstL = 0, worstTau = 0, worstSky = 0, worstMedia = 0, airSky = 0, maxL = 0;
+            uint32_t mediaTiles = 0;
+            for (uint32_t ty = 0; ty < fg.gridY; ++ty)
+                for (uint32_t tx = 0; tx < fg.gridX; ++tx)
+                    for (uint32_t n = 0; n <= fg.slices; ++n)
+                    {
+                        const ref::D3 l = nodeOf(air, tx, ty, n);
+                        maxL = std::max({ maxL, l.x, l.y, l.z });
+                    }
+            for (uint32_t ty = 0; ty < fg.gridY; ++ty)
+                for (uint32_t tx = 0; tx < fg.gridX; ++tx)
+                {
+                    double L[3] = {}, T[3] = {}, sky[3] = {}, mTotal[3] = {}, mBefore[3] = {};
+                    for (uint32_t s = 0; s < fg.slices; ++s)
+                    {
+                        ref::D3 tp, sp;
+                        mediaAt(tx, ty, s, tp, sp);
+                        mTotal[0] += tp.x, mTotal[1] += tp.y, mTotal[2] += tp.z;
+                    }
+                    mediaTiles += mTotal[0] > 0;
+                    for (uint32_t s = 0; s < fg.slices; ++s)
+                    {
+                        const ref::D3 l0 = nodeOf(air, tx, ty, s), l1 = nodeOf(air, tx, ty, s + 1);
+                        const ref::D3 t0 = nodeOf(air, tx, ty, s, 1), t1 = nodeOf(air, tx, ty, s + 1, 1);
+                        ref::D3 tp, sp;
+                        mediaAt(tx, ty, s, tp, sp);
+                        const double la[3] = { l0.x, l0.y, l0.z }, lb[3] = { l1.x, l1.y, l1.z }, ta0[3] = { t0.x, t0.y, t0.z }, ta1[3] = { t1.x, t1.y, t1.z };
+                        const double tps[3] = { tp.x, tp.y, tp.z }, sps[3] = { sp.x, sp.y, sp.z };
+                        for (int ch = 0; ch < 3; ++ch)
+                        {
+                            const double ta = std::max(0.0, ta1[ch] - ta0[ch]), src = (lb[ch] - la[ch]) * std::exp(ta0[ch]);  // the slice's air alone
+                            const double mix = g(ta + tps[ch]);
+                            const double src2 = tps[ch] > 0 ? src * mix / g(ta) + sps[ch] * mix / g(tps[ch]) : src;
+                            const double skyTerm = src2 - src * std::exp(-(mTotal[ch] - mBefore[ch]));  // mBefore: media before the slice
+                            L[ch] += std::exp(-T[ch]) * src2;
+                            sky[ch] += std::exp(-T[ch]) * skyTerm;
+                            T[ch] += ta + tps[ch];
+                            mBefore[ch] += tps[ch];
+                        }
+                        const ref::D3 gl = nodeOf(mixed, tx, ty, s + 1), gt = nodeOf(mixed, tx, ty, s + 1, 1);
+                        const double gls[3] = { gl.x, gl.y, gl.z }, gts[3] = { gt.x, gt.y, gt.z };
+                        for (int ch = 0; ch < 3; ++ch)
+                        {
+                            worstL = std::max(worstL, std::abs(gls[ch] - L[ch]) / std::max(std::abs(L[ch]), 1e-3 * maxL));
+                            worstTau = std::max(worstTau, std::abs(gts[ch] - T[ch]) / std::max(T[ch], 1e-3));
+                        }
+                    }
+                    const ref::D3 gs = rawSlice(mixed, tx, ty, 3 * N), gm = rawSlice(mixed, tx, ty, 3 * N + 1), as = rawSlice(air, tx, ty, 3 * N);
+                    const double gss[3] = { gs.x / exposure, gs.y / exposure, gs.z / exposure }, gms[3] = { gm.x, gm.y, gm.z };
+                    airSky = std::max({ airSky, std::abs(as.x), std::abs(as.y), std::abs(as.z) });
+                    for (int ch = 0; ch < 3; ++ch)
+                    {
+                        worstSky = std::max(worstSky, std::abs(gss[ch] - sky[ch]) / std::max(std::abs(sky[ch]), 1e-3 * maxL));
+                        worstMedia = std::max(worstMedia, std::abs(gms[ch] - mTotal[ch]) / std::max(mTotal[ch], 1e-3));
+                    }
+                }
+            logf("media: %u of %u tiles with media; nodes worst %.2e (in-scattering), %.2e (optical depth); sky correction %.2e, media to far %.2e; "
+                 "air-only sky correction %.2e (pre-exposed; 0: no shadowed air or local lights here)\n",
+                 mediaTiles, fg.gridX * fg.gridY, worstL, worstTau, worstSky, worstMedia, airSky);
+            report(mediaTiles > 10 && airSky / exposure < 1e-5 * maxL, "media: scene without shadowed air or lights (air-only sky correction / largest node)", airSky / exposure / maxL, 1e-5);
+            report(worstL < 3e-3, "media: in-scattering nodes vs air-only volume composed with the media (rel.)", worstL, 3e-3);
+            report(worstTau < 2e-3, "media: optical depth nodes (rel.)", worstTau, 2e-3);
+            report(worstSky < 3e-3, "media: sky correction (rel.)", worstSky, 3e-3);
+            report(worstMedia < 2e-3, "media: optical depth to far_m for sky pixels (rel.)", worstMedia, 2e-3);
         }
 
         // ---- 4. Air perspective at arbitrary (uv, depth) vs the atmosphere reference (no casters, no lights).

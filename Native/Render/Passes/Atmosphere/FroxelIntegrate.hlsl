@@ -45,6 +45,16 @@
 // P[2].w experiment mask (atmosphere.froxels.experiment_disable; 0; cost attribution only: 1 air shadows, 2 local lights,
 // 4 air integration, 8 sun transmittance per substep, 16 multiple scattering per substep, 32 air shadow walk stops at
 // the page level; bit 16: walk statistics on)
+// Particle media (smoke, fire; E's volumeMedia, request 20260925_FX_particle_render_rules 3b), main view: P[4].x = the
+// view's volumeSlices (RGBA16F gridX x gridY x 2S: slice s's media optical depth tau_p, then its self-attenuated source
+// S_p in nits before exposure; 0xFFFFFFFF: none). In each slice air and media are mixed uniformly: with J the sources per
+// unit optical depth, L = (J_a tau_a + J_p tau_p) g(tau_a + tau_p), g(x) = (1 - e^-x) / x; the slice's air alone is
+// J_a tau_a g(tau_a) and S_p = J_p tau_p g(tau_p), so L = air g(tau_a + tau_p) / g(tau_a) + S_p g(tau_a + tau_p) / g(tau_p)
+// (exact for a uniform mixture, the froxel's condition for both), and the slice's optical depth is tau_a + tau_p. Sky
+// pixels multiply the far-field sky by the media transmittance to far_m (slice 3 (S + 1) + 1: media optical depth) and add
+// the sky correction, which then holds per slice source' - A_lut e^-(tau_p,total - tau_p,before) (A_lut: the slice's air
+// in-scattering the sky LUT has), so the sum is exact given the LUT's air: the LUT's air behind the media is attenuated
+// by them, the air in front is not.
 // Frame constants of the view (main, or a planar reflection view).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -60,6 +70,8 @@ groupshared float3 gs_source[64];
 groupshared float4 gs_hat[64];  // L / (1 - T) of node s + 1, .w = 1 where the node has air
 groupshared float3 gs_sky[64];  // slice s's sky correction attenuated to the camera
 groupshared uint gs_lastSky;    // 1 + the last slice the sky correction needs
+
+float3 froxelSelfAttenuation(float3 x) { return select(x > 1e-4, (1 - exp(-x)) / max(x, 1e-4), 1 - 0.5 * x); }
 
 static const float kGaussX[8] = { -0.9602898564975363, -0.7966664774136267, -0.5255324099163290, -0.1834346424956498,
                                   0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363 };
@@ -147,6 +159,31 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             }
     }
     if (s == 0) gs_lastSky = 0;
+    // Particle media of this slice (P[4].x) and their optical depth before it and to far_m (inclusive scan in gs_tau,
+    // reused below).
+    const bool media = P[4].x != 0xFFFFFFFFu;
+    float3 mediaTau = 0, mediaSource = 0;
+    if (media && s < g.slices)
+    {
+        Texture3D<float4> slices = ResourceDescriptorHeap[P[4].x];
+        mediaTau = slices.Load(int4(tile, s, 0)).rgb;
+        mediaSource = slices.Load(int4(tile, g.slices + s, 0)).rgb;
+    }
+    float3 mediaBefore = 0, mediaTotal = 0;
+    if (media)
+    {
+        gs_tau[s] = mediaTau;
+        GroupMemoryBarrierWithGroupSync();
+        [unroll] for (uint dm = 1; dm < 64; dm <<= 1)
+        {
+            const float3 add = s >= dm ? gs_tau[s - dm] : 0;
+            GroupMemoryBarrierWithGroupSync();
+            gs_tau[s] += add;
+            GroupMemoryBarrierWithGroupSync();
+        }
+        mediaBefore = gs_tau[s] - mediaTau;
+        mediaTotal = gs_tau[63];
+    }
     GroupMemoryBarrierWithGroupSync();
     if (skyRead && hasAir)
     {
@@ -159,6 +196,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             const float h0 = dot(g_cameraPosition + dir * t0, vcs.lightZ), h1 = dot(g_cameraPosition + dir * t1, vcs.lightZ);
             active = active || min(h0, h1) < vcs.hMax;
         }
+        active = active || any(mediaTau > 0);  // sky pixels behind the media
         if (active) InterlockedMax(gs_lastSky, s + 1);
     }
     GroupMemoryBarrierWithGroupSync();
@@ -237,6 +275,18 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             source += local;
             skyTerm += local;
         }
+    }
+    if (media)
+    {
+        const float3 lut = source - skyTerm;  // the slice's air in-scattering as the sky LUT holds it
+        if (any(mediaTau > 0))
+        {
+            const float3 mixed = froxelSelfAttenuation(tau + mediaTau);
+            source = source * mixed / froxelSelfAttenuation(tau) + mediaSource * mixed / froxelSelfAttenuation(mediaTau);
+            tau += mediaTau;
+        }
+        // Every slice (air in front of the media too): the reader attenuates the whole LUT sky by the media to far_m.
+        skyTerm = source - lut * exp(-(mediaTotal - mediaBefore));
     }
     // Exclusive scan of the optical depth, inclusive scan of the attenuated sources (Hillis-Steele over 64 slices).
     gs_tau[s] = tau;
@@ -320,6 +370,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             float3 sky = 0;
             for (uint j = 0; j < g.slices; ++j) sky += gs_sky[j];
             volume[uint3(tile, 3 * N)] = float4(clamp(sky * g_exposure, -65504.0, 65504.0), 0);
+            volume[uint3(tile, 3 * N + 1)] = float4(mediaTotal, 0);  // sky pixels: the media's transmittance to far_m
         }
     }
 }

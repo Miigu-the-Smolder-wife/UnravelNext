@@ -94,10 +94,12 @@ struct FrameResources
 {
     TextureRef transmittanceLut, multiScatterLut, skyViewLut;  // [S]
     TextureRef aerialPerspective;  // the air volume (froxels(), v1.15): Texture3D RGBA16F      [S]
-                                   // gridX x gridY x 3(S+1) on the froxel grid, part 0 in-scattering
+                                   // gridX x gridY x 3(S+1) + 2 on the froxel grid, part 0 in-scattering
                                    // camera -> node (x exposure; atmosphere, caster-shadowed air, local
-                                   // lights), part 1 optical depth, part 2 sun transmittance at the node;
-                                   // read with atmosphereAerial / atmosphereAirView (Atmosphere.hlsli)
+                                   // lights, E's particle media), part 1 optical depth, part 2 sun
+                                   // transmittance at the node, then the sky correction and the media's
+                                   // optical depth to far_m (sky pixels); read with atmosphereAerial /
+                                   // atmosphereAirView / atmosphereSkyRadianceView (Atmosphere.hlsli)
     BufferRef vsmPool;             // physical page pool (raw buffer; v1.18); replaced by vsmAtlas [S]
                                    // (v1.43): invalid once S publishes the atlas
     TextureRef vsmAtlas;           // v1.43 (S request 20260926_S_vsm_one_path): the page atlas,  [S]

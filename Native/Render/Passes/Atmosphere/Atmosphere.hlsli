@@ -83,7 +83,7 @@ float4 airVolumeCoord(Texture3D<float4> v, Texture2D<float4> p, float2 uv, float
     const float farM = p.Load(int3(4, ph - 1, 0)).w;
     const float4 q8 = p.Load(int3(8, ph - 1, 0));
     const float tilePx = asuint(q8.z), nearM = q8.w;
-    N = (depth - 1) / 3;  // nodes per part (S + 1); the last slice is the sky correction
+    N = (depth - 1) / 3;  // nodes per part (S + 1); then the sky correction and the media's optical depth to far_m
     d = depth;
     const float z = min(linearDepth, farM);
     const float c = airNodeCoord(nearM, farM, N - 1, z);
@@ -194,8 +194,12 @@ float3 atmosphereSkyRadianceView(AtmosphereSrvs s, float3 worldDir, float2 uv)
     const float tilePx = asuint(p.Load(int3(8, ph - 1, 0)).z);
     const float2 cell = uv * float2(g_viewWidth, g_viewHeight) / tilePx - 0.5;
     const float2 t = (clamp(cell, 0.0, float2(w, h) - 1) + 0.5) / float2(w, h);
-    const float3 correction = v.SampleLevel(g_linearClamp, float3(t, (depth - 0.5) / depth), 0).rgb / g_exposure;
-    return max(radiance + correction, 0.0);
+    // Slices 3 (S + 1) and 3 (S + 1) + 1 (FroxelIntegrate.hlsl): the sky correction, and the particle media's optical
+    // depth to far_m (the far-field sky seen through smoke and fire).
+    const float N = (depth - 1) / 3;
+    const float3 correction = v.SampleLevel(g_linearClamp, float3(t, (3 * N + 0.5) / depth), 0).rgb / g_exposure;
+    const float3 media = v.SampleLevel(g_linearClamp, float3(t, (3 * N + 1.5) / depth), 0).rgb;
+    return max(radiance * exp(-media) + correction, 0.0);
 }
 
 // Air between the main camera and the surface at screen uv (main view, [0,1]^2) and view-space depth linearDepth
