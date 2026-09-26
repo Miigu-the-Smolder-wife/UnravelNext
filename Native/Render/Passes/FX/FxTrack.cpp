@@ -30,9 +30,10 @@ void particles(FramePassContext& fc, ViewResources& view)
     frame.view = &view.view;
     frame.frameConstants = view.frameConstants;
     frame.depth = view.depth;
-    frame.camera[0] = view.view.position.x;
-    frame.camera[1] = view.view.position.y;
-    frame.camera[2] = view.view.position.z;
+    frame.camera[0] = view.view.position.x + fc.frame.worldOrigin[0];
+    frame.camera[1] = view.view.position.y + fc.frame.worldOrigin[1];
+    frame.camera[2] = view.view.position.z + fc.frame.worldOrigin[2];
+    for (int a = 0; a < 3; ++a) frame.streamAxes[a] = fc.frame.streamAxes[a];
     frame.time = fc.frame.time;
     const FrameResources& r = fc.resources;
     frame.lighting.vsmPageTable = r.vsmPageTable;

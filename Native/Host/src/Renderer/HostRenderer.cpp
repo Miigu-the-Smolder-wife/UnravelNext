@@ -194,6 +194,7 @@ SceneCommitInfo HostRenderer::commit()
     m_gpuPoses = m_applied.poses;
     m_hostInstances = (uint32_t)m_scene.instances.size();
     m_hostMaterials = (uint32_t)m_scene.materials.size();
+    for (const scene::Material& m : m_scene.materials) m_hostMaterialClasses.push_back(m.cls);
     for (const scene::Instance& i : m_scene.instances) m_hostSkinned.push_back((i.flags & scene::InstanceSkinned) ? 1 : 0);
     info.contentHash = scene::contentHash(m_scene);
     info.buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -272,7 +273,12 @@ void HostRenderer::editMaterials(std::span<const std::pair<uint32_t, scene::Mate
     }
     for (const auto& e : edits)
     {
-        if (e.first == m_hostMaterials) ++m_hostMaterials;
+        if (e.first == m_hostMaterials)
+        {
+            ++m_hostMaterials;
+            m_hostMaterialClasses.push_back(e.second.cls);
+        }
+        else m_hostMaterialClasses[e.first] = e.second.cls;
         m_pending.materialEdits.push_back(e);
     }
 }
@@ -985,7 +991,7 @@ void HostRenderer::setFluids(std::span<const FluidInput> fluids, const uint64_t 
         f.frame.alpha = in.alpha;
         f.frame.tick = v.tick;
         std::memcpy(f.frame.domainCells, in.domainCells, sizeof f.frame.domainCells);
-        if (in.material >= m_scene.materials.size() || m_scene.materials[in.material].cls != scene::MaterialClass::Water)
+        if (in.material >= m_hostMaterials || m_hostMaterialClasses[in.material] != scene::MaterialClass::Water)
             fail("fluids: material %u is not a Water-class material", in.material);
         f.frame.material = in.material;
         f.currentResource = v.currentResource;
@@ -1229,6 +1235,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.morphs = std::move(m_pending.morphs);
     packet.runtime = std::move(m_pending.runtime);
     packet.originShift = m_pending.originShift;
+    packet.worldOrigin = m_mainOriginOffset;
     packet.instanceEdits = std::move(m_pending.instanceEdits);
     packet.materialEdits = std::move(m_pending.materialEdits);
     packet.surfaceDeltas = std::move(m_pending.surfaceDeltas);
@@ -1557,6 +1564,11 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.lensFocus = p.lensFocus;
     fc.timing = m_profiler ? m_profiler->lastCompleted() : nullptr;  // (the debug HUD, E)
     fc.originShift = p.originShift;  // C9
+    for (int a = 0; a < 3; ++a)
+    {
+        fc.worldOrigin[a] = (double)(&p.worldOrigin.x)[a];
+        fc.streamAxes[a] = m_options.streamAxes[a];
+    }
     fc.gpuSimulation = p.gpuSimulation;
     std::vector<FluidFrame>& fluidFrames = m_fluidFrames;  // B8: valid until record() returns
     fluidFrames.clear();

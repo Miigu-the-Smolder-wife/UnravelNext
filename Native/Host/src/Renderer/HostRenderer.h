@@ -59,6 +59,9 @@ struct HostRendererOptions
     std::filesystem::path shaderDirectory;
     std::filesystem::path qualityDirectory;
     std::vector<std::string> qualityOverrides;     // "section.key=value" applied after the directory (a game's settings)
+    // Particle stream space -> renderer world axis signs (FrameContext::streamAxes): {1, 1, -1} for Unity's World
+    // (UnxRendererCreate), identity for native callers that stream in renderer axes.
+    float streamAxes[3] = { 1, 1, 1 };
 };
 
 struct SceneCommitInfo
@@ -113,6 +116,7 @@ struct FramePacket
     // C9: origin shift applied before this packet's transforms (sum when packets merge; the older packets' transforms
     // are moved into the newer coordinates when they merge).
     float3 originShift{};
+    float3 worldOrigin{};  // the host's accumulated origin shift at this packet (FrameContext::worldOrigin)
     // C2b runtime geometry, in call order (ids are the host's; HostRenderer maps them to GPU scene indices).
     struct RuntimeOp
     {
@@ -540,6 +544,9 @@ private:
     float3 m_mainOriginOffset{};
     uint64_t m_patchBuilds = 0;  // sum of setOriginShift calls (main thread): committed transforms minus this = now
     uint32_t m_hostInstances = 0, m_hostMaterials = 0;  // counts with every edit the host made (m_mutex)
+    // Each material's class with every edit the host made (m_mutex): setFluids checks a material appended or changed by an
+    // edit, which m_scene (the committed scene) does not hold (engine 1's D0 finding, 2026-09-27).
+    std::vector<scene::MaterialClass> m_hostMaterialClasses;
     std::vector<uint8_t> m_hostSkinned;                 // per instance, with the host's edits (m_mutex)
     // Latest state of every packet taken for rendering (takePacket, under m_mutex then m_appliedMutex): with the queued
     // packets and m_pending on top it is the host's current scene. m_appliedMutex also guards m_scene.sun,

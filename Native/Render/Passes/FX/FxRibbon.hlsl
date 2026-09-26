@@ -15,7 +15,11 @@
 // since a point's pv or strip start may lie in an earlier chunk (visible after the device barriers of the same group).
 // A range is drawn over its valid window (the particle render pass writes this frame's points: births after the frame time
 // are its tail, births dead by then its head, both flagged invalid); the simulation writes only valid points.
-// P[0] = (points, links, vertices, ranges SRV), P[1] = (runStart, tangents, range count, programs SRV)
+// P[0] = (points, links, vertices, ranges SRV), P[1] = (runStart, tangents, range count, programs SRV), P[2].xyz = the
+// output axis signs (asfloat): the points and the whole frame transport are in stream space (the program's ribbon normal
+// is a stream direction; the fallback side axes are the stream's), and only the vertices' positions and normals are
+// mapped - (1, 1, 1) in the simulation, the stream -> renderer signs (FrameContext::streamAxes) in the render pass, so a
+// mirrored World draws exactly the mirror of the same strips (the quad diagonals and the across coordinate included).
 #include "Passes/FX/Particles.hlsli"
 
 struct RibbonVertex { float3 position; float3 normal; float2 uv; };
@@ -100,6 +104,7 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         if (i2 < first || i2 >= end) links[i2] = FX_NONE;
     const StreamProgram pr = programs[range.program];
     const float3 normal = pr.ribbonNormal;
+    const float3 axes = asfloat(P[2].xyz);
     const float uvScale = pr.ribbonUv > 0 ? pr.ribbonUv : 1.0f;
     uint runCarry = 0u;
     FrameElement carry = identityElement();
@@ -157,7 +162,7 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         {
             const RibbonPoint pt = points[k];
             RibbonVertex v;
-            v.position = pt.position; v.normal = normal; v.uv = float2(0, 0);
+            v.position = pt.position * axes; v.normal = normal * axes; v.uv = float2(0, 0);
             links[k] = FX_NONE;
             if (!strip)
             {
@@ -175,9 +180,9 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
                 if (g.before) links[k] = g.pv;
                 const float3 n = unitOr(cross(side, g.tangent), normal);
                 const float halfWidth = 0.5f * pt.width;
-                v.position = pt.position - side * halfWidth; v.normal = n; v.uv = float2(e.distance / uvScale, 0);
+                v.position = (pt.position - side * halfWidth) * axes; v.normal = n * axes; v.uv = float2(e.distance / uvScale, 0);
                 vertices[k * 2u] = v;
-                v.position = pt.position + side * halfWidth; v.uv.y = 1;
+                v.position = (pt.position + side * halfWidth) * axes; v.uv.y = 1;
                 vertices[k * 2u + 1u] = v;
             }
         }

@@ -136,6 +136,9 @@ UNX_API int32_t UNX_CALL UnxRendererCreate(const UnxRendererDesc* desc, UnxRende
             o.hostDevice = d3d->GetDevice();
             o.hostQueue = d3d->GetCommandQueue();
         }
+        // The one World -> renderer axis mapping of the particle stream (engine 2's N2 finding, 2026-09-27): Unity's World is
+        // the renderer's world mirrored in z (the bridge's Space.ToAffine for everything else it sends).
+        o.streamAxes[0] = 1, o.streamAxes[1] = 1, o.streamAxes[2] = -1;
         o.framesInFlight = desc->framesInFlight;
         o.shaderDirectory = utf8Path(desc->shaderDirectory, sizeof desc->shaderDirectory);
         o.qualityDirectory = utf8Path(desc->qualityDirectory, sizeof desc->qualityDirectory);

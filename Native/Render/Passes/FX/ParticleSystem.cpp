@@ -1261,11 +1261,12 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             const uint32_t rangeCount = (uint32_t)ribbonRanges.size();
             ID3D12PipelineState* pso = shaders.compute("Passes/FX/FxRibbon");
             g.addPass("fx.particles.ribbon", queueType, declare, [=](PassContext& c) {
-                const std::array<uint32_t, 8> p = { c.uav(mi->ribbonPoints.ref), c.uav(mi->ribbonLinks.ref), c.uav(mi->ribbonVertices.ref), c.srv(mi->ribbonRanges.ref),
-                                                    c.uav(mi->ribbonRunStart.ref), c.uav(mi->ribbonTangents.ref), rangeCount, c.srv(mi->programs.ref) };
+                const uint32_t one = 0x3F800000u;  // 1.0f: the simulation's points are in stream space
+                const std::array<uint32_t, 12> p = { c.uav(mi->ribbonPoints.ref), c.uav(mi->ribbonLinks.ref), c.uav(mi->ribbonVertices.ref), c.srv(mi->ribbonRanges.ref),
+                                                     c.uav(mi->ribbonRunStart.ref), c.uav(mi->ribbonTangents.ref), rangeCount, c.srv(mi->programs.ref), one, one, one, 0 };
                 c.cmd->SetPipelineState(pso);
                 c.bindFrameConstants(constants);
-                c.computeConstants(p.data(), 8);
+                c.computeConstants(p.data(), 12);
                 c.cmd->Dispatch(rangeCount, 1, 1);
             });
         }

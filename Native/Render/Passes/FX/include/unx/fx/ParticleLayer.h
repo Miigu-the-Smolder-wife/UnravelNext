@@ -24,7 +24,9 @@ struct ParticleLayerFrame
     const render::ViewDesc* view = nullptr;        // size, matrices
     D3D12_GPU_VIRTUAL_ADDRESS frameConstants = 0;  // the view's frame constants (root CBV b1 of the pass's kernels)
     render::TextureRef depth;                      // the view's opaque depth (D32, reversed Z)
-    double camera[3] = {};                         // the camera's world position (double: the anchor offset is a difference)
+    double camera[3] = {};                         // the camera's position in the renderer's world (frame + worldOrigin; double:
+                                                   // the anchor offset is a difference)
+    float streamAxes[3] = { 1, 1, 1 };             // stream space -> renderer world axis signs (FrameContext::streamAxes)
     double time = 0;                               // the particle stream's context time of this frame (s)
     ParticleLighting lighting;
 };

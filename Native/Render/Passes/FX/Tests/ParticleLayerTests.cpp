@@ -186,7 +186,10 @@ const float3 kTestSunDirection = normalize(float3{ 0.3f, 0.8f, -0.5f }), kTestSu
 constexpr float kTestSunIlluminance = 1000.0f, kTestPhase = 0.6f;
 
 // material >= 0: every program's material (the refusal check uses 2, outside the contract).
-RunResult run(Device& device, const Options& o, bool verify, bool lit = false, int material = -1)
+// mirror: the renderer sees the stream through FrameContext::streamAxes (1, 1, -1) (the Unity World's mapping): the camera
+// and the sun are the identity run's mirrored in z and the wall is left out, so every sprite lands mirrored across the
+// view's vertical centre line (wall = false: the identity run without the wall, its counterpart).
+RunResult run(Device& device, const Options& o, bool verify, bool lit = false, int material = -1, bool mirror = false, bool wall = true)
 {
     ShaderLibrary shaders(device, executableDirectory() / "shaders");
     const QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
@@ -238,9 +241,10 @@ RunResult run(Device& device, const Options& o, bool verify, bool lit = false, i
     double centre[3], extent = 0;
     for (int a = 0; a < 3; ++a) { centre[a] = 0.5 * (lo[a] + hi[a]); extent = std::max(extent, hi[a] - lo[a]); }
     const double eye[3] = { centre[0], centre[1] + 0.35 * extent, centre[2] - 1.1 * extent };
+    const float zs = mirror ? -1.0f : 1.0f;  // stream -> renderer z sign
     scene::Camera cam;
-    cam.position = { (float)eye[0], (float)eye[1], (float)eye[2] };
-    cam.forward = normalize(float3{ (float)(centre[0] - eye[0]), (float)(centre[1] - eye[1]), (float)(centre[2] - eye[2]) });
+    cam.position = { (float)eye[0], (float)eye[1], zs * (float)eye[2] };
+    cam.forward = normalize(float3{ (float)(centre[0] - eye[0]), (float)(centre[1] - eye[1]), zs * (float)(centre[2] - eye[2]) });
     const ViewDesc view = ViewDesc::fromCamera(cam, o.width, o.height, float4x4{});
     const double wallDistance = std::sqrt((centre[0] - eye[0]) * (centre[0] - eye[0]) + (centre[1] - eye[1]) * (centre[1] - eye[1]) +
                                           (centre[2] - eye[2]) * (centre[2] - eye[2]));
@@ -260,7 +264,7 @@ RunResult run(Device& device, const Options& o, bool verify, bool lit = false, i
         c.viewHeight = view.height;
         c.exposure = 1.0f;
         c.tanHalfFovY = std::tan(view.verticalFov * 0.5f);
-        c.sunDirection = kTestSunDirection;
+        c.sunDirection = { kTestSunDirection.x, kTestSunDirection.y, zs * kTestSunDirection.z };
         c.sunIlluminance = kTestSunIlluminance;
         c.sunColor = kTestSunColor;
         void* p = nullptr;
@@ -275,7 +279,7 @@ RunResult run(Device& device, const Options& o, bool verify, bool lit = false, i
     Readbacks rb{ device };
     const TextureRef depth = graph.createTexture(TextureDesc{ "fx.test.depth", o.width, o.height, 1, 1, DXGI_FORMAT_R32_FLOAT });
     const float wallDepth = (float)(view.nearPlane / wallDistance);
-    const uint32_t wallWidth = o.width / 2;
+    const uint32_t wallWidth = wall && !mirror ? o.width / 2 : 0;
     {
         ID3D12PipelineState* pso = shaders.compute("Passes/FX/Tests/FxLayerTestDepth");
         const uint32_t gx = (o.width + 7) / 8, gy = (o.height + 7) / 8;
@@ -295,7 +299,8 @@ RunResult run(Device& device, const Options& o, bool verify, bool lit = false, i
     lf.view = &view;
     lf.frameConstants = frameConstants;
     lf.depth = depth;
-    for (int a = 0; a < 3; ++a) lf.camera[a] = eye[a];
+    for (int a = 0; a < 3; ++a) lf.camera[a] = a == 2 ? zs * eye[a] : eye[a];
+    lf.streamAxes[2] = zs;
     lf.time = last.time - 0.5 * last.dt;
     const fx::ParticleLayerOutput out = pass.record(ps, graph, shaders, frame.frameIndex, lf);
     FX_CHECK(out.valid, "the pass has no input");
@@ -535,6 +540,68 @@ int main(int argc, char** argv)
         }
         FX_LOG("stage 2: %u lit records vs albedo x E_sun x HG(g %.1f): worst relative error %.2e (half precision + the centre's pixel ray)", checked, kTestPhase, worst);
         FX_CHECK(checked > 100 && worst < 1e-2, "stage 2: lit records differ from the analytic sun term (worst %.3e over %u)", worst, checked);
+
+        // The stream seen through the Unity World's axes (FrameContext::streamAxes (1, 1, -1), engine 2's N2 finding): the
+        // same particles under a z-mirrored camera and sun land mirrored across the view's vertical centre line - each sprite
+        // record's centre x -> width - x with the same y, radius and depth - and the composite is the plain one flipped.
+        {
+            const RunResult plain = run(device, o, false, false, -1, false, false);
+            const RunResult mirrored = run(device, o, false, false, -1, true, false);
+            FX_CHECK(plain.records.size() == mirrored.records.size() && plain.drawn == mirrored.drawn && plain.drawn > 0,
+                     "mirror: %zu vs %zu record bytes, %u vs %u drawn", plain.records.size(), mirrored.records.size(), plain.drawn, mirrored.drawn);
+            double worstCentre = 0, worstOther = 0;
+            uint32_t compared = 0;
+            for (size_t i = 0; i + 32 <= plain.records.size(); i += 32)
+            {
+                float ra[4], rm[4];
+                std::memcpy(ra, plain.records.data() + i, 16);
+                std::memcpy(rm, mirrored.records.data() + i, 16);
+                if (!(ra[2] > 0) && !(rm[2] > 0)) continue;
+                worstCentre = std::max({ worstCentre, (double)std::abs(rm[0] - ((float)o.width - ra[0])), (double)std::abs(rm[1] - ra[1]) });
+                worstOther = std::max({ worstOther, (double)std::abs(rm[2] - ra[2]) / std::max(ra[2], 1e-3f), (double)std::abs(rm[3] - ra[3]) / std::max(std::abs(ra[3]), 1e-9f) });
+                ++compared;
+            }
+            double worstPixel = 0;
+            uint64_t over = 0, covered = 0;
+            uint32_t wx = 0, wy = 0;
+            const size_t rowBytes = plain.composite.size() / o.height;
+            for (uint32_t y = 0; y < o.height; ++y)
+                for (uint32_t x = 0; x < o.width; ++x)
+                {
+                    const float* pa = reinterpret_cast<const float*>(plain.composite.data() + y * rowBytes) + 4 * x;
+                    const float* pb = reinterpret_cast<const float*>(mirrored.composite.data() + y * rowBytes) + 4 * (o.width - 1 - x);
+                    double d = 0;
+                    for (int k = 0; k < 4; ++k) d = std::max(d, (double)std::abs(pa[k] - pb[k]) / std::max(1.0, (double)std::abs(pa[k])));
+                    covered += pa[3] < 1.0f;
+                    over += d > 2e-3;
+                    if (d > worstPixel) { worstPixel = d; wx = x; wy = y; }
+                }
+            {
+                const float* pa = reinterpret_cast<const float*>(plain.composite.data() + wy * rowBytes) + 4 * wx;
+                const float* pb = reinterpret_cast<const float*>(mirrored.composite.data() + wy * rowBytes) + 4 * (o.width - 1 - wx);
+                FX_LOG("mirror: %llu of %llu covered pixels differ by more than 2e-3; worst at (%u, %u): (%.4f %.4f %.4f %.4f) vs (%.4f %.4f %.4f %.4f)", (unsigned long long)over,
+                       (unsigned long long)covered, wx, wy, pa[0], pa[1], pa[2], pa[3], pb[0], pb[1], pb[2], pb[3]);
+                for (int dy = -2; dy <= 2 && over > 0; ++dy)  // (the neighbourhood of the worst pixel when any differ)
+                {
+                    std::string lp, lm;
+                    for (int dx = -8; dx <= 8; ++dx)
+                    {
+                        const int x = (int)wx + dx, y = (int)wy + dy;
+                        if (x < 0 || y < 0 || x >= (int)o.width || y >= (int)o.height) continue;
+                        const float* qa = reinterpret_cast<const float*>(plain.composite.data() + y * rowBytes) + 4 * x;
+                        const float* qb = reinterpret_cast<const float*>(mirrored.composite.data() + y * rowBytes) + 4 * (o.width - 1 - x);
+                        lp += format(" %.2f", qa[3]);
+                        lm += format(" %.2f", qb[3]);
+                    }
+                    FX_LOG("  T plain  %s", lp.c_str());
+                    FX_LOG("  T mirror %s", lm.c_str());
+                }
+            }
+            FX_LOG("mirror (stream axes 1, 1, -1): %u records, centre |dx|, |dy| max %.3g px, radius / depth relative max %.3g; composite flipped max %.3g",
+                   compared, worstCentre, worstOther, worstPixel);
+            FX_CHECK(compared > 100 && worstCentre <= 2e-3 && worstOther <= 1e-5, "mirror: records do not land mirrored (centre %.3g px, other %.3g)", worstCentre, worstOther);
+            FX_CHECK(worstPixel <= 2e-3, "mirror: the composite is not the plain one flipped (%.3g)", worstPixel);
+        }
 
         // A material outside the contract (0 emissive nit, 1 lit albedo) is refused: nothing drawn, status bit 16.
         const RunResult refused = run(device, o, false, false, 2);

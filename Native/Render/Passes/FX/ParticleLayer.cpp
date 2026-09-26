@@ -35,7 +35,8 @@ struct LayerConstants
     uint32_t shadow[8];
     uint32_t giCache, froxelLights, airVolume, transmittance;
     uint32_t multiScatter, ribbonAppearance, ribbonCapacity, stripBase;
-    uint32_t ribbonRows, pad6, pad7, pad8;
+    uint32_t ribbonRows;
+    float streamAxes[3];  // stream space -> renderer axis signs: fxParticleAt maps each camera-relative position
 };
 static_assert(sizeof(LayerConstants) == 256);
 constexpr uint32_t kConstantSlots = 64, kConstantSlotBytes = 256;
@@ -119,12 +120,15 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     out.depthRange = g.createTexture(TextureDesc{ "fx.layer.depthRange", lw, lh, 1, 1, DXGI_FORMAT_R16G16_FLOAT });
     out.edges = g.createBuffer(BufferDesc{ "fx.layer.edges", edgeIndexBytes + (uint64_t)edgeCapacity * kEdgeBlockBytes, 0 });
 
-    // constants: stream anchors relative to the camera (double differences), then the views of this frame's resources
+    // constants: stream anchors relative to the camera in stream space (double differences; the axis signs are their own
+    // inverse), then the views of this frame's resources
     LayerConstants lc{};
     for (int a = 0; a < 3; ++a)
     {
-        lc.offsetCur[a] = (float)(in.anchor[1][a] - f.camera[a]);
-        lc.offsetPrev[a] = (float)(in.anchor[0][a] - f.camera[a]);
+        const double camera = f.camera[a] * f.streamAxes[a];
+        lc.offsetCur[a] = (float)(in.anchor[1][a] - camera);
+        lc.offsetPrev[a] = (float)(in.anchor[0][a] - camera);
+        lc.streamAxes[a] = f.streamAxes[a];
     }
     lc.w = (float)w;
     lc.dt = in.dt;
@@ -244,6 +248,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         ID3D12PipelineState* ribbonPso = shaders.compute("Passes/FX/FxRibbon");
         const BufferRef ranges = in.ribbonRanges, programs = in.programs;  // (the rows table is the setup's input)
         const uint32_t rangeCount = in.ribbonRangeCount;
+        const std::array<float, 3> streamAxes = { f.streamAxes[0], f.streamAxes[1], f.streamAxes[2] };
         g.addPass("fx.layer.ribbon", QueueType::Graphics,
                   [=](PassBuilder& b) {
                       for (const BufferRef& x : { ribbonPoints, ribbonLinks, o.ribbonVertices, ribbonRunStart, ribbonTangents }) b.use(x, Use::UavCompute);
@@ -251,11 +256,13 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
                       b.use(programs, Use::SrvCompute);
                   },
                   [=](PassContext& c) {
-                      const std::array<uint32_t, 8> p = { c.uav(ribbonPoints), c.uav(ribbonLinks), c.uav(o.ribbonVertices), c.srv(ranges),
-                                                          c.uav(ribbonRunStart), c.uav(ribbonTangents), rangeCount, c.srv(programs) };
+                      uint32_t axes[3];
+                      std::memcpy(axes, streamAxes.data(), sizeof axes);  // the render pass's points are in renderer axes
+                      const std::array<uint32_t, 12> p = { c.uav(ribbonPoints), c.uav(ribbonLinks), c.uav(o.ribbonVertices), c.srv(ranges),
+                                                           c.uav(ribbonRunStart), c.uav(ribbonTangents), rangeCount, c.srv(programs), axes[0], axes[1], axes[2], 0 };
                       c.cmd->SetPipelineState(ribbonPso);
                       c.bindFrameConstants(frameConstants);
-                      c.computeConstants(p.data(), 8);
+                      c.computeConstants(p.data(), 12);
                       c.cmd->Dispatch(rangeCount, 1, 1);
                   });
         dispatch("fx.layer.strips", "Passes/FX/FxLayerStrips.STEP1", groups(ribbons, 256), [=](PassBuilder& b) {

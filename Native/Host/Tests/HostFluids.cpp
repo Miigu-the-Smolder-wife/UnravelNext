@@ -5,7 +5,8 @@
 //      the frame's fence (one graphics submission per frame in the bridge's statistics), and frames without fluids admit
 //      nothing;
 //   2. invalid views are refused on the calling thread (size, stride under 48 or not a multiple of 4, no particles, alpha
-//      outside [0, 1], a material that is not Water-class, particle buffers of another device);
+//      outside [0, 1], a material that is not Water-class, particle buffers of another device); the Water check follows
+//      material edits after the commit (an appended Water material is accepted, one edited away from Water refused);
 //   3. the lease and the buffer are released after the frames; no D3D12 debug-layer errors.
 // Correctness run (standalone HostRenderer, hardware GPU; GpuLock -Kind correctness).
 #include "Renderer/HostRenderer.h"
@@ -178,6 +179,27 @@ int main()
         HostRenderer::FluidInput badMaterial = in;
         badMaterial.material = 0;
         expect("a material that is not Water-class is refused", throws([&] { h.setFluids({ &badMaterial, 1 }, stamp); }));
+        // Materials edited after the commit (engine 1's D0 finding): a Water material appended by an edit is accepted, the
+        // committed Water material edited to Standard is refused, and a committed Standard one stays refused.
+        {
+            const uint32_t appended = (uint32_t)h.scene().materials.size(), committedWater = appended - 1;
+            scene::Material water2 = h.scene().materials[committedWater];
+            scene::Material standard = h.scene().materials[0];
+            const std::pair<uint32_t, scene::Material> add[1] = { { appended, water2 } };
+            h.editMaterials(add);
+            HostRenderer::FluidInput edited = in;
+            edited.material = appended;
+            expect("a Water material appended by an edit is accepted", !throws([&] { h.setFluids({ &edited, 1 }, stamp); }));
+            frames(1);
+            const std::pair<uint32_t, scene::Material> change[1] = { { committedWater, standard } };
+            h.editMaterials(change);
+            HostRenderer::FluidInput changed = in;
+            changed.material = committedWater;
+            expect("a Water material edited to Standard is refused", throws([&] { h.setFluids({ &changed, 1 }, stamp); }));
+            expect("a committed Standard material stays refused", throws([&] { h.setFluids({ &badMaterial, 1 }, stamp); }));
+            h.setFluids({}, stamp);
+            frames(1);
+        }
 
         // 3.
         bridge.release_resource(bridge.context, id);

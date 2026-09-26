@@ -173,6 +173,13 @@ struct FrameContext
     // applies the frame's transforms; FrameRenderer moves the previous view; tracks move their world-space state (V's
     // previous camera position and instance chunks, S's clipmap pages, R's GI cells and TLAS) by the same amount.
     float3 originShift{};
+    // The frame's coordinates in the renderer's world: world = frame + worldOrigin (the host's accumulated origin shifts;
+    // 0 without any). Consumers of world-anchored data that does not rebase (the particle stream's anchors) use it.
+    double worldOrigin[3] = { 0, 0, 0 };
+    // Particle stream space (the VFX World's axes, NativeVfxStream.h) -> the renderer's world, axis signs: the Unity host's
+    // World is the renderer's world mirrored in z ({1, 1, -1}, set once at the host boundary: UnxRendererCreate); tools and
+    // tests stream in renderer axes ({1, 1, 1}). The particle module simulates in stream space and maps at its outputs.
+    float streamAxes[3] = { 1, 1, 1 };
     // v1.70 (B8, engine 1 W): this frame's GPU fluids (valid until record() returns; none: fluidCount 0).
     const FluidFrame* fluids = nullptr;
     uint32_t fluidCount = 0;
