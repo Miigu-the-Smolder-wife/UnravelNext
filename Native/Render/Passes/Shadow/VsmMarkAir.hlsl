@@ -4,8 +4,8 @@
 // with InterlockedOr of VSM_REQ_PROPAGATED (the pixel marks' VSM_REQ_PIXEL stay; air pages need no neighbourhood
 // propagation).
 // P[0].x requests UAV (raw), P[0].y VSM constants CBV, P[0].z gridX | gridY << 16, P[0].w slices | tilePx << 16
-// P[1].x nearM (float bits), P[1].y farM (float bits), P[1].z shadow texels per tile (float bits). Frame constants of the
-// main view.
+// P[1].x nearM (float bits), P[1].y farM (float bits), P[1].z shadow texels per tile (float bits), P[1].w VSM stats UAV
+// (raw; error word, VsmCommon.hlsli VSM_STATS_ERROR_BYTE). Frame constants of the main view.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "Passes/Atmosphere/FroxelCommon.hlsli"
@@ -38,4 +38,9 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     int2 page;
     [loop] for (uint guard = 0; guard < 512 && vsmAirWalkNext(w, ta, tb, page); ++guard)
         if (vsmInWindow(c, page, k)) requests.InterlockedOr(vsmSlot(page, k) * 4, VSM_REQ_PROPAGATED | VSM_REQ_AIR);
+    if (w.t < w.tEnd)  // the walk's hard cap (INTERFACES 3.6): a missing air page is an error, not a silent gap
+    {
+        RWByteAddressBuffer stats = ResourceDescriptorHeap[P[1].w];
+        stats.InterlockedOr(VSM_STATS_ERROR_BYTE, VSM_ERR_MARK_AIR_WALK);
+    }
 }

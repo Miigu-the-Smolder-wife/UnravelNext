@@ -292,6 +292,8 @@ int main(int argc, char** argv)
             logf("  shadow overflow: lights past the third max %u, words needed max %u, tiles over capacity %u %s\n", overflowLightsMax, overflowWordsMax, overTiles,
                  overTiles ? "FAIL" : "ok");
             if (overTiles) ++gateFailures;
+            logf("  S error bits (INTERFACES 3.6, shader loop caps) 0x%x %s\n", st.errorBitsSeen, st.errorBitsSeen ? "FAIL" : "ok");
+            if (st.errorBitsSeen) ++gateFailures;
             const double px = st.pathNoCaster + st.pathRegionLit + st.pathRegionUmbra + st.pathSearchLit + st.pathFiltered + st.pathDiskLit + st.pathDiskUmbra;
             logf("  visibility paths (%% of %.2f M pixels): no caster %.1f, reach lit %.1f, reach umbra %.1f, search lit %.1f, disk lit %.1f, disk umbra %.1f, filtered %.1f\n",
                  px / 1e6, 100 * st.pathNoCaster / px, 100 * st.pathRegionLit / px, 100 * st.pathRegionUmbra / px, 100 * st.pathSearchLit / px, 100 * st.pathDiskLit / px,

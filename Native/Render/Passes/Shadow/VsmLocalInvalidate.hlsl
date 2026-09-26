@@ -72,5 +72,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     const float scale = length(inst.objectToWorld[0].xyz);
     const float radius = (mesh.boundsSphere.w + windOffsetBound(inst, mesh.boundsSphere.xyz, mesh.boundsSphere.w)) * scale;
     markSphere(table, l, slot, transformPoint(inst.objectToWorld, mesh.boundsSphere.xyz), radius, lane);
-    markSphere(table, l, slot, transformPoint(inst.prevObjectToWorld, mesh.boundsSphere.xyz), radius, lane);
+    // A motion break (teleport, restore; v1.45) zeroes prev: the pages hold it at breakCentre, the previous frame's place.
+    const float3 before = (inst.flags & INSTANCE_MOTION_BREAK) != 0 ? inst.breakCentre : transformPoint(inst.prevObjectToWorld, mesh.boundsSphere.xyz);
+    markSphere(table, l, slot, before, radius, lane);
 }

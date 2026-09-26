@@ -156,4 +156,34 @@ float shadowSunVisibilityAt(ShadowSrvs s, float3 worldPos, float3 normal, float 
            shadowSunTransmittanceAt(s, worldPos, footprint, footprint);
 }
 
+// Sun visibility in [0, 1] at a point in the air (particle centres, FX request 20260926_FX_particle_render_pass 8e): no
+// receiver surface (the receiver plane faces the sun, as the air walk's points), the level for 'footprint' (metres: the
+// larger of the particle's radius and the pixel footprint at its depth) or the nearest resident one, finer levels first
+// (up to three), then coarser (the air's pages, VsmMarkAir, are resident along every on-screen view ray), times the thin
+// casters' transmittance. resident = false when no level holds the point (off-screen): the caller uses 1 or a ray.
+float shadowSunVisibilityInAir(ShadowSrvs s, float3 worldPos, float footprint, out bool resident)
+{
+    VsmResources r;
+    r.table = ResourceDescriptorHeap[s.pageTable];
+    r.pool = ResourceDescriptorHeap[s.pool];
+    r.blocks = ResourceDescriptorHeap[s.blocks];
+    r.searchBound = ResourceDescriptorHeap[s.searchBound];
+    r.cbv = s.constants;
+    ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[s.constants];
+    const uint k = vsmLevelForFootprint(c, footprint);
+    uint level = 0xFFFFFFFFu;
+    // Candidates k, k - 1, .., k - 3, then k + 1, .., VSM_LEVELS - 1: at most VSM_LEVELS + 3 probes (INTERFACES 3.6 cap).
+    [loop] for (uint j = 0; j < VSM_LEVELS + 3 && level == 0xFFFFFFFFu; ++j)
+    {
+        const uint candidate = j < 4 ? k - j : k + (j - 3);
+        if ((j < 4 && j > k) || candidate >= VSM_LEVELS) continue;
+        if (vsmEntry(r, vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, candidate).xy, candidate)), candidate) != 0) level = candidate;
+    }
+    resident = level != 0xFFFFFFFFu;
+    if (!resident) return 1;
+    uint path;
+    return vsmSunVisibility(r, worldPos, c.level[level].lightZ, vsmTexel(level), c.tanSunRadius, c.searchTaps, c.filterTaps, path) *
+           shadowSunTransmittanceAt(s, worldPos, max(footprint, vsmTexel(level)), max(footprint, vsmTexel(level)));
+}
+
 #endif

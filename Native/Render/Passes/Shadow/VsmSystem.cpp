@@ -48,6 +48,7 @@ struct State
     uint64_t statsFrame[kStatsSlots] = {};
     uint64_t statsFence[kStatsSlots] = {};
     int lastStatsSlot = -1;
+    uint32_t errorBitsSeen = 0;  // OR of the error words of every harvested frame (INTERFACES 3.6)
     VsmStats latest;
     // CPU view of the clipmap.
     float3 sun{};
@@ -476,6 +477,12 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.latest.surfacePixels = w[61];
         s.latest.backfacePixels = w[62];
         s.latest.backfaceMixed = w[63];
+        s.latest.errorBits = w[15];
+        if (w[15] & ~s.errorBitsSeen)
+            logf("S VSM: error bits 0x%x (frame %llu): a shader loop reached its hard cap (INTERFACES 3.6; VsmCommon.hlsli VSM_ERR_*)\n", w[15],
+                 (unsigned long long)s.statsFrame[i]);
+        s.errorBitsSeen |= w[15];
+        s.latest.errorBitsSeen = s.errorBitsSeen;
         D3D12_RANGE none{ 0, 0 };
         s.statsReadback->Unmap(0, &none);
     }
@@ -829,10 +836,12 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         g.addPass("s.vsm.markair", QueueType::Compute,
                   [&](PassBuilder& b) {
                       b.use(requests, Use::UavCompute);
+                      b.use(statsBuf, Use::UavCompute);  // error word (INTERFACES 3.6)
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.uav(requests), ring, grid.gridX | grid.gridY << 16, grid.slices | grid.tilePx << 16, nearBits, farBits, texelBits, 0 };
+                      const uint32_t k[8] = { ctx.uav(requests), ring, grid.gridX | grid.gridY << 16, grid.slices | grid.tilePx << 16, nearBits, farBits, texelBits,
+                                              ctx.uav(statsBuf) };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 8);

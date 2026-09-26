@@ -7,6 +7,9 @@
 // accumulates per (instance, level); where the sum reaches the level's threshold the level's bit is set and the sum
 // restarts (VsmInvalidate marks the pages and moves the level's anchor). Sub-texel motion therefore never re-renders a
 // coarse page, and accumulated motion does once it matters. Newly seen instances and scene invalidation reset.
+// A motion break (INSTANCE_MOTION_BREAK: teleport or restore, v1.45) has zero frame motion by definition, so the bound
+// above cannot see its jump: every level's bit is set and the anchors stay where the levels last rendered it, so
+// VsmInvalidate makes the old and the new footprint stale (the restore check showed pre-restore shadows otherwise).
 // Every moved caster is listed with bit 31 set (the local lights' pages, VsmLocalInvalidate), with or without levels.
 // P[0].x last revisions UAV (uint2 per instance), P[0].y moved list UAV (raw: count, then (instance, level mask) pairs),
 // P[0].z instance count, P[0].w motion state UAV (float4 per instance x level: anchor centre, accumulated displacement)
@@ -58,13 +61,14 @@ void main(uint i : SV_DispatchThreadID)
     }
     d += skin * length(inst.objectToWorld[0].xyz);
     const bool firstSeen = all(last == 0);
+    const bool broken = (inst.flags & INSTANCE_MOTION_BREAK) != 0;
     uint mask = 0;
     [loop] for (uint k = 0; k < VSM_LEVELS; ++k)
     {
         float4 s = motion[i * VSM_LEVELS + k];
-        if (firstSeen) s = float4(prevCentre, 0);  // never moved before: its pages hold it where it was last frame
+        if (firstSeen) s = float4(broken ? inst.breakCentre : prevCentre, 0);  // never moved before: its pages hold it where it was last frame
         s.w += d;
-        if (firstSeen || s.w >= vsmTexel(k) * c.windTexels)
+        if (firstSeen || broken || s.w >= vsmTexel(k) * c.windTexels)
         {
             mask |= 1u << k;
             s.w = 0;

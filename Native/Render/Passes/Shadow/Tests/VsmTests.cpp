@@ -293,8 +293,12 @@ int main(int argc, char** argv)
             const float tanTheta = std::tan(tf.sceneData.sun.angularRadius);
             std::vector<float4> points, normals;
             std::vector<float> refs, direct;
+            // Groups 0-2: surface points (footprints x1, x4, x16); group 3: air points halfway along the pixel's view ray
+            // (shadowSunVisibilityInAir, the particle lookup; pixel footprint at that depth).
             const float factors[3] = { 1, 4, 16 };
-            for (float factor : factors)
+            for (uint32_t group = 0; group < 4; ++group)
+            {
+                const float factor = group < 3 ? factors[group] : 1;
                 for (uint32_t y = 0; y < H; y += 6)
                     for (uint32_t x = 0; x < W; x += 6)
                     {
@@ -311,13 +315,33 @@ int main(int argc, char** argv)
                         const float3 p{ wp[0] / wp[3], wp[1] / wp[3], wp[2] / wp[3] };
                         const float3 n = octDecodeCpu(g[0]);
                         const float z = v.nearPlane / d;
+                        if (group == 3)
+                        {
+                            const float3 q = v.position + (p - v.position) * 0.5f;
+                            points.push_back({ q.x, q.y, q.z, 2 * 0.5f * z * std::tan(0.5f * v.verticalFov) / H });
+                            normals.push_back({ 0, 0, 0, 1 });
+                            refs.push_back(referenceVisibility(boxes, q, sun, tanTheta));
+                            direct.push_back(refs.back());
+                            continue;
+                        }
                         const float footprint = 2 * z * std::tan(0.5f * v.verticalFov) / H * factor;
                         points.push_back({ p.x, p.y, p.z, footprint });
                         normals.push_back({ n.x, n.y, n.z, 0 });
                         refs.push_back(referenceVisibility(boxes, p + n * 2e-4f, sun, tanTheta));
                         direct.push_back((packed & 0xFF) / 255.0f);
                     }
-            const uint32_t count = (uint32_t)points.size(), perFactor = count / 3;
+            }
+            // Air walk hard cap (INTERFACES 3.6): level-0 segments (page 0.125 m) of 200 m (1600 pages > the cap of 512)
+            // and 10 m (80 pages), horizontal across the scene; after the four groups.
+            const uint32_t perFactor = (uint32_t)points.size() / 4;
+            for (float length : { 200.0f, 10.0f })
+            {
+                points.push_back({ -length * 0.5f, 1.0f, 0.3f, 0.0f });
+                normals.push_back({ length, 0, 0, 2 });
+                refs.push_back(0);
+                direct.push_back(0);
+            }
+            const uint32_t count = (uint32_t)points.size();
             std::shared_ptr<std::vector<uint8_t>> out;
             ++recorded;  // a VSM frame like runFrame's (the statistics checks count them)
             tf.run([&](FramePassContext& fc) {
@@ -355,7 +379,13 @@ int main(int argc, char** argv)
                 out = tf.readbackBuffer(fc, o, (uint64_t)count * 8);
             });
             tf.frame.time += tf.frame.deltaTime;
-            for (uint32_t fi = 0; fi < 3; ++fi)
+            {
+                float g[4];
+                std::memcpy(g, out->data() + (size_t)(count - 2) * 8, 16);
+                logf("air walk cap: 200 m level-0 segment capped %.0f, 10 m capped %.0f" "\n", g[1], g[3]);
+                report(g[1] == 1 && g[3] == 0, "air walk hard cap flags the 1600-page segment only (INTERFACES 3.6)", g[1] - g[3], 1);
+            }
+            for (uint32_t fi = 0; fi < 4; ++fi)
             {
                 double sumAbs = 0, sumSigned = 0, sumDirect = 0;
                 uint32_t resident = 0;
@@ -370,6 +400,15 @@ int main(int argc, char** argv)
                     sumDirect += std::abs(g[0] - direct[i]);
                 }
                 const double n = std::max(resident, 1u);
+                if (fi == 3)
+                {
+                    logf("shadowSunVisibilityInAir (air points): %u of %u resident, mean |V - V_ref| %.5f, bias %+.5f\n", resident, perFactor,
+                         sumAbs / n, sumSigned / n);
+                    report(resident > perFactor * 0.9, "shadowSunVisibilityInAir: resident fraction", (double)resident / std::max(perFactor, 1u), 0.9);
+                    report(sumAbs / n < 0.01, "shadowSunVisibilityInAir: mean |V - V_ref|", sumAbs / n, 0.01);
+                    report(std::abs(sumSigned / n) < 0.004, "shadowSunVisibilityInAir: |bias|", std::abs(sumSigned / n), 0.004);
+                    continue;
+                }
                 logf("shadowSunVisibilityAt, footprint x%.0f: %u of %u resident, mean |V - V_ref| %.5f, bias %+.5f, mean |V - direct view| %.5f" "\n", factors[fi],
                      resident, perFactor, sumAbs / n, sumSigned / n, sumDirect / n);
                 const double absLimit = fi == 0 ? 0.005 : fi == 1 ? 0.01 : 0.02;
@@ -713,6 +752,8 @@ int main(int argc, char** argv)
             }
         }
 
+        report(shadow::stats(tf.trackState).errorBitsSeen == 0, "S error bits (INTERFACES 3.6: a shader loop at its hard cap)",
+               shadow::stats(tf.trackState).errorBitsSeen, 0);
         const uint32_t debugErrors = tf.device.drainDebugMessages();
         report(debugErrors == 0, "D3D12 debug layer errors", debugErrors, 0);
         logf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);

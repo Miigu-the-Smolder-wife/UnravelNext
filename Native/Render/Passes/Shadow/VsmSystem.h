@@ -85,6 +85,9 @@ struct VsmStats
     // Air shadow walk of the froxel integration (atmosphere.froxels.walk_stats = 1, measurement only; main and planar
     // views): slices walked, slices with a mixed page (descended), 32-texel and 8-texel block loads, texel loads.
     uint32_t airSlices = 0, airSlicesMixed = 0, airBlocks32 = 0, airBlocks8 = 0, airTexels = 0;
+    // S error bits (INTERFACES 3.6; VsmCommon.hlsli VSM_ERR_*): a shader loop reached its hard cap. errorBits: this frame's
+    // (stats word 15); errorBitsSeen: every harvested frame's since the state was created. Gates fail on any bit.
+    uint32_t errorBits = 0, errorBitsSeen = 0;
 };
 
 // shadowPages: requests, dirty rules, allocation and the dirty-page raster for this frame.

@@ -901,6 +901,8 @@ int main(int argc, char** argv)
             report(worstE < 2e-3, "sun illuminance at the surface (rel.)", worstE, 2e-3);
         }
 
+        report(shadow::stats(tf.trackState).errorBitsSeen == 0, "S error bits (INTERFACES 3.6: a shader loop at its hard cap)",
+               shadow::stats(tf.trackState).errorBitsSeen, 0);
         if (debugLayer) logf("D3D12 debug layer: enabled (errors abort the run)\n");
         logf(failures ? "FAIL (%d)\n" : "PASS\n", failures);
         return failures ? 1 : 0;

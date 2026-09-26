@@ -85,10 +85,14 @@ uint vsmAirBlock(VsmBlock blk, float2 qa, float2 qb, float ha, float hb)
 // 8-texel block it crosses is settled against the segment's own heights at the block's entry and exit (vsmAirBlock);
 // only mixed blocks are walked at the next size, and at texel size the fraction below the texel's height is exact.
 // Pages not resident at level k hold no caster information for the air (VsmMarkAir requests them): lit.
-// Loads of one walk (atmosphere.froxels.walk_stats): pages classified mixed, 32- and 8-texel blocks, texels.
+// Loads of one walk (atmosphere.froxels.walk_stats): pages classified mixed, 32- and 8-texel blocks, texels. capped: a
+// walk stopped at its hard cap with cells left (INTERFACES 3.6; the caller raises VSM_ERR_AIR_WALK). The caps are above
+// the walks' lengths: a segment crosses at most 7 cells of a 4 x 4 grid (blocks) and 15 of an 8 x 8 one (texels), and a
+// froxel slice about one page at its level (512 pages is a slice 64 k texels long).
 struct VsmAirWalkCount
 {
     uint slices, mixedPages, blocks32, blocks8, texels;  // slices: filled by the caller
+    uint capped;
 };
 // pageOnly (cost attribution only, atmosphere.froxels.experiment_disable 32): mixed pages are not descended.
 float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k, inout VsmAirWalkCount count, bool pageOnly = false)
@@ -146,9 +150,13 @@ float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k, inout Vsm
                     const float H = vsmDecode(hv), ha = h0 + dh * xa, hb = h0 + dh * xb, lo = min(ha, hb), hi = max(ha, hb);
                     shadowed += (xb - xa) * (hi > lo ? saturate((H - lo) / (hi - lo)) : (lo < H ? 1.0 : 0.0));
                 }
+                if (w1.t < w1.tEnd) count.capped = 1;
             }
+            if (w8.t < w8.tEnd) count.capped = 1;
         }
+        if (w32.t < w32.tEnd) count.capped = 1;
     }
+    if (wp.t < wp.tEnd) count.capped = 1;
     return shadowed;
 }
 float vsmAirShadowFraction(VsmResources r, float3 a, float3 b, uint k)

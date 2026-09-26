@@ -170,7 +170,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
                       b.use(vsm.pool, Use::SrvCompute);
                       b.use(vsm.blocks, Use::SrvCompute);
                       b.use(vsm.bound, Use::SrvCompute);
-                      if (walkStats) b.use(vsm.stats, Use::UavCompute);
+                      b.use(vsm.stats, Use::UavCompute);  // error word (INTERFACES 3.6); walk statistics with walkStats
                       if (vsm.use.valid()) b.use(vsm.use, Use::UavCompute);  // shadow.vsm.use_stats (vsmEntry)
                   }
               },
@@ -185,10 +185,10 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
                       k[7] = vsm.constantsCbv;
                       k[8] = ctx.srv(vsm.bound);
                       std::memcpy(&k[9], &grid.shadowTexelsPerTile, 4);
-                      if (walkStats) k[15] = ctx.uav(vsm.stats);
+                      k[15] = ctx.uav(vsm.stats);
                   }
                   std::memcpy(&k[10], &stepAltitude, 4);
-                  k[11] = experiment;
+                  k[11] = experiment | (walkStats ? 0x10000u : 0u);
                   ctx.cmd->SetPipelineState(pi);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 16);

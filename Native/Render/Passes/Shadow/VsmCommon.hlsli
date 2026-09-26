@@ -122,6 +122,12 @@ uint vsmEncode(float h)
 float vsmDecode(uint e) { return asfloat((e & 0x80000000u) ? (e & 0x7FFFFFFFu) : ~e); }
 #define VSM_EMPTY 0u
 
+// S error bits (INTERFACES 3.6): VSM stats word 15, OR-ed by a kernel whose data-dependent loop reached its hard cap
+// (the result is then truncated, not silently accepted); any bit fails the gates (VsmStats::errorBits).
+#define VSM_STATS_ERROR_BYTE 60u
+#define VSM_ERR_AIR_WALK 0x1u       // vsmAirShadowFraction: a page, block or texel walk stopped at its cap
+#define VSM_ERR_MARK_AIR_WALK 0x2u  // VsmMarkAir: the page walk stopped at its cap
+
 // Level geometry by arithmetic (a per-pixel level index into the constant buffer would serialise divergent waves):
 // texel 2^(k-10) m and page 2^(k-3) m as exact powers of two; window origin = floor(camera / page) - VSM_TABLE / 2,
 // the same float operations as VsmSystem.cpp.

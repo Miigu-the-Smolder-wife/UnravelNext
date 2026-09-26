@@ -473,6 +473,8 @@ int main(int argc, char** argv)
                        "overflow, capacity 1: fallback list = the tiles over capacity, args (n, 1, 1)", (double)count - over + listedWrong, 0);
             }
         }
+        report(shadow::stats(tf.trackState).errorBitsSeen == 0, "S error bits (INTERFACES 3.6: a shader loop at its hard cap)",
+               shadow::stats(tf.trackState).errorBitsSeen, 0);
         const uint32_t debugErrors = tf.device.drainDebugMessages();
         report(debugErrors == 0, "D3D12 debug layer errors", debugErrors, 0);
         logf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);

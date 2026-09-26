@@ -38,12 +38,13 @@
 // P[0].x froxelLights SRV (raw), P[0].y volume UAV (RWTexture3D<float4>), P[0].z transmittance LUT, P[0].w multi-scatter LUT
 // P[1].x VSM page table SRV (raw), .y pool SRV (raw), .z blocks SRV (raw), .w VSM constants CBV (0xFFFFFFFF: no VSM)
 // P[3].x local lights SRV (StructuredBuffer<VsmLocalLight>; 0xFFFFFFFF: none), P[3].y slot of light SRV, P[3].z tile
-// readers SRV (Texture2D<float2>, FroxelTileDepth.hlsl; 0xFFFFFFFF: every slice, tests), P[3].w walk statistics UAV (the
-// VSM stats, words 20..24; 0xFFFFFFFF: none; atmosphere.froxels.walk_stats, measurement only)
+// readers SRV (Texture2D<float2>, FroxelTileDepth.hlsl; 0xFFFFFFFF: every slice, tests), P[3].w VSM stats UAV (raw; with
+// the VSM: the error word VSM_STATS_ERROR_BYTE, and with P[2].w bit 16 the walk statistics, words 20..24,
+// atmosphere.froxels.walk_stats, measurement only)
 // P[2].x VSM search bound SRV (raw), P[2].y shadow texels per tile (float bits), P[2].z air step altitude m (float bits),
 // P[2].w experiment mask (atmosphere.froxels.experiment_disable; 0; cost attribution only: 1 air shadows, 2 local lights,
 // 4 air integration, 8 sun transmittance per substep, 16 multiple scattering per substep, 32 air shadow walk stops at
-// the page level)
+// the page level; bit 16: walk statistics on)
 // Frame constants of the view (main, or a planar reflection view).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -280,7 +281,12 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
                 hat0 = gs_hat[j0].xyz;
                 break;
             }
-    if (P[3].w != 0xFFFFFFFFu)  // walk statistics (measurement only): one atomic per wave and counter
+    if (P[3].w != 0xFFFFFFFFu && WaveActiveAnyTrue(walk.capped != 0) && WaveIsFirstLane())  // a walk's hard cap (INTERFACES 3.6)
+    {
+        RWByteAddressBuffer st = ResourceDescriptorHeap[P[3].w];
+        st.InterlockedOr(VSM_STATS_ERROR_BYTE, VSM_ERR_AIR_WALK);
+    }
+    if (P[3].w != 0xFFFFFFFFu && (P[2].w & 0x10000u) != 0)  // walk statistics (measurement only): one atomic per wave and counter
     {
         const uint slices = WaveActiveSum(walk.slices), mixed = WaveActiveSum(walk.mixedPages > 0 ? 1u : 0u);
         const uint b32 = WaveActiveSum(walk.blocks32), b8 = WaveActiveSum(walk.blocks8), texels = WaveActiveSum(walk.texels);
