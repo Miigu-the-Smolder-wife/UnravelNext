@@ -175,7 +175,12 @@ int main(int argc, char** argv)
             opt.outputDirectory = out;
             opt.label = s.name + "_" + s.cameras[cameraIndex].name + "_" + res.name + (integrated ? "_integrated" : "");
             Constants constants = createConstants(device, opt.framesInFlight);
-            const ViewDesc view = ViewDesc::fromCamera(s.cameras[cameraIndex], res.width, res.height, float4x4{});
+            // A still camera: the previous view is this view (a zero previous matrix made every reprojection fail, so no
+            // time integration could engage in the gate).
+            const ViewDesc view = [&] {
+                const float4x4 still = ViewDesc::fromCamera(s.cameras[cameraIndex], res.width, res.height, float4x4{}).viewProj;
+                return ViewDesc::fromCamera(s.cameras[cameraIndex], res.width, res.height, still);
+            }();
             gi::GiSystem* giSystem = nullptr;
             refl::ReflectionSystem* reflSystem = nullptr;
             rt::RayScene* rayScene = nullptr;
