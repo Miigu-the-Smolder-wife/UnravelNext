@@ -1,0 +1,20 @@
+﻿    braided-woven-co_715fc89e-1841-4bba-9315-a713fc87a0d5         512 x  512: worst level PSNR 26.43 dB, max error 183, encode 271 ms
+    concrete-wall_17698a14-ae19-4979-a402-7f12fcdc7f62            512 x  512: worst level PSNR 27.96 dB, max error 183, encode 124 ms
+    cotton-fabric_e2e8a08f-a53c-43d3-a5ee-bd1bcdc70e32            512 x  512: worst level PSNR 27.63 dB, max error 183, encode 119 ms
+    quats-procedural_fad9913c-af01-40d6-9006-00edc30d3844         512 x  512: worst level PSNR 30.63 dB, max error 183, encode 116 ms
+    stone-slate-wall_c74a3617-e3a8-4c03-8516-4963ef16f91e         512 x  512: worst level PSNR 25.04 dB, max error 183, encode 114 ms
+    stone-wall_8d7d09f7-f542-4658-920e-05d9e6b11d60               512 x  512: worst level PSNR 27.31 dB, max error 171, encode 128 ms
+    stone-wall_d0285dc3-5d2f-4dfa-907a-1c2ea3f257af               512 x  512: worst level PSNR 27.18 dB, max error 183, encode 130 ms
+    stone-wall_d360a9e7-6986-4bac-a891-0a1911e7b366               512 x  512: worst level PSNR 25.87 dB, max error 183, encode 110 ms
+    stucco-wall_fe09e4aa-b8bb-4542-8ce0-57ec962afd9e              512 x  512: worst level PSNR 27.62 dB, max error 183, encode 107 ms
+    wood-panelling-b_4e9f0fda-d237-4dee-bea3-0cf50ea43b2f         512 x  512: worst level PSNR 28.59 dB, max error 173, encode 109 ms
+    wood-parquet_8481c0f3-37d5-4608-925a-d41b187d8fd3             512 x  512: worst level PSNR 29.69 dB, max error 169, encode 104 ms
+    wood-planks_c610ac23-0299-4832-ae66-79156a171ea0              512 x  512: worst level PSNR 28.19 dB, max error 183, encode 105 ms
+    wood-white_cb1de2b5-0be8-4668-a295-9a3dbd78fe09               512 x  512: worst level PSNR 30.27 dB, max error 183, encode 104 ms
+    wood_3078a426-bffc-4d05-b509-616caf64befc                     512 x  512: worst level PSNR 26.82 dB, max error 123, encode 103 ms
+    wood_5f51123d-4cca-4900-a6c6-6cceef30cf61                     512 x  512: worst level PSNR 27.63 dB, max error 171, encode 100 ms
+    wood_7539d587-e371-4bfb-a35e-2dd3ed1f0e4a                     512 x  512: worst level PSNR 26.99 dB, max error 183, encode 109 ms
+    wood_96b0c14f-8eb9-4398-ba91-27fb1c4f26fb                     512 x  512: worst level PSNR 27.49 dB, max error 183, encode 116 ms
+    0 of 17 images within the bound (PSNR >= 44 dB, max <= 24); worst PSNR 25.04 dB
+PASS approved_asset_images
+1/1 passed

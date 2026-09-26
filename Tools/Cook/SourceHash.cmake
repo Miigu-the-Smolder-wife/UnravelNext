@@ -1,0 +1,16 @@
+# Writes OUT: #define ${NAME} "<sha256>" over FILES (';'-separated, sorted by the caller), so
+# a disk cache is invalidated by any change to the code that produces its entries.
+set(text "")
+foreach(f ${FILES})
+  file(SHA256 "${f}" h)
+  get_filename_component(n "${f}" NAME)
+  string(APPEND text "${n}:${h}\n")
+endforeach()
+string(SHA256 all "${text}")
+set(content "#pragma once\n#define ${NAME} \"${all}\"\n")
+if(EXISTS "${OUT}")
+  file(READ "${OUT}" have)
+endif()
+if(NOT have STREQUAL content)
+  file(WRITE "${OUT}" "${content}")
+endif()

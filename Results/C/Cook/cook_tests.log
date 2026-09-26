@@ -1,0 +1,26 @@
+﻿    4 channels -> format 98: PSNR 53.68 dB, max error 3, 149.8 ms
+    2 channels -> format 83: PSNR 55.38 dB, max error 2, 2.0 ms
+    1 channels -> format 80: PSNR 55.70 dB, max error 1, 1.2 ms
+PASS block_encoders_round_trip
+    base       format 99, 9 levels, 131072 -> 32768 bytes at level 0
+    leaf       format 29, 8 levels, 65536 -> 65536 bytes at level 0
+    normal     format 11, 8 levels, 131072 -> 131072 bytes at level 0
+    roughmetal format 83, 8 levels, 16384 -> 8192 bytes at level 0
+    occlusion  format 80, 7 levels, 4096 -> 2048 bytes at level 0
+UnravelNext cook: texture 'noise' kept uncompressed (block error at level 0 of 7: PSNR 17.4 dB, max 142 of 255; bound 44.0 dB, 24)
+    noise      format 29, 7 levels, 16384 -> 16384 bytes at level 0
+    compressed 3 (worst level PSNR 44.34 dB, max error 6), kept exact 2, missed the bound 1
+PASS chain_formats_and_levels
+UnravelNext cook: texture 'noise' kept uncompressed (block error at level 0 of 7: PSNR 17.4 dB, max 142 of 255; bound 44.0 dB, 24)
+    from disk: 6 of 6, 5.6 ms total
+UnravelNext cook cache: C:\Users\USER\AppData\Local\Temp\unx_cook_test_22512\textures\92a57d71797538689eea2feb1b6852c242add16db7e60a395d777a11d3a9b90d.unxcook is corrupted (checksum); cooking it again
+UnravelNext cook cache: C:\Users\USER\AppData\Local\Temp\unx_cook_test_22512\textures\e6640e4e73f50f9b8d98649c35f23295c22f1cc16f2f7b73b2ebdf3e1cb6c0a2.unxcook is corrupted (checksum); cooking it again
+UnravelNext cook cache: C:\Users\USER\AppData\Local\Temp\unx_cook_test_22512\textures\bc6a48b6b8dbf13342ee7a3bbeaa97c58b3ef6f68975268f3970eb6517416f94.unxcook is corrupted (checksum); cooking it again
+UnravelNext cook cache: C:\Users\USER\AppData\Local\Temp\unx_cook_test_22512\textures\438c07fce4b66ca6d4c4d85e85bba7bcee8c1bcc6ced3f3a350c385f6227cece.unxcook is corrupted (checksum); cooking it again
+UnravelNext cook cache: C:\Users\USER\AppData\Local\Temp\unx_cook_test_22512\textures\2fc95585a639c9708c4f13a02f4e15c5d0fa43ecee9a97dbf7841e871a90e87a.unxcook is corrupted (checksum); cooking it again
+UnravelNext cook cache: C:\Users\USER\AppData\Local\Temp\unx_cook_test_22512\textures\eb164e2ddbff453d6373fa77a19e74b1c67a4987d9e398dd44ddd7cb3cd0824c.unxcook is corrupted (checksum); cooking it again
+UnravelNext cook: texture 'noise' kept uncompressed (block error at level 0 of 7: PSNR 17.4 dB, max 142 of 255; bound 44.0 dB, 24)
+PASS texture_disk_cache_round_trip
+    (UNX_COOK_TEST_IMAGES not set: skipped)
+PASS approved_asset_images
+4/4 passed

@@ -1,0 +1,24 @@
+﻿waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+waiting for the GPU measurement lock; held by: {"track":"S","kind":"correctness","pid":32368,"started":"2026-09-26T10:39:08","timeoutMinutes":45,"command":"build/S/bin/unx_test_atmosphere_atmospheretests.exe"}
+powershell :     4 channels -> format 98: PSNR 41.46 dB, max error 17, 223.7 ms
+At line:1 char:395
++ ... | Out-Null; powershell -NoProfile -File Tools/CI/GpuLock.ps1 -Track V ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    4 channels ...or 17, 223.7 ms:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+GpuLock.ps1: cpu-contended: 1 s >= 4 cores, peak 4.1 cores; top: Unity.exe (72168) 3 core-s, dotnet.exe (54008) 1 core-s, UnityPackageManager.exe (81332) 0 core-s, Unity.Licensing.Client.exe (41088) 0 core-s

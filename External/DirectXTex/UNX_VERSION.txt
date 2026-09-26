@@ -1,0 +1,1 @@
+may2026 4feb3e11a020f35b796fc769a74216a555d4f5ef (github.com/microsoft/DirectXTex, MIT); only the DirectXTex library folder is vendored.

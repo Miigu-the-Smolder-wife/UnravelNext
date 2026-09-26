@@ -1,0 +1,121 @@
+diff --git a/Native/Host/CMakeLists.txt b/Native/Host/CMakeLists.txt
+index ae6b84e..40f3640 100644
+--- a/Native/Host/CMakeLists.txt
++++ b/Native/Host/CMakeLists.txt
+@@ -17,7 +17,7 @@ list(FILTER core_sources EXCLUDE REGEX "/src/Unity/")
+ add_library(unx_host_core STATIC ${core_sources})
+ unx_target_defaults(unx_host_core)
+ target_include_directories(unx_host_core PUBLIC include src)
+-target_link_libraries(unx_host_core PUBLIC unx_renderer dxguid)
++target_link_libraries(unx_host_core PUBLIC unx_renderer dxguid $<TARGET_NAME_IF_EXISTS:unx_cook>)  # C1: cooked textures (Tools/Cook)
+ add_dependencies(unx_host_core unx_host_shaders)
+ 
+ file(GLOB_RECURSE unity_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/Unity/*.cpp")
+diff --git a/Native/Host/src/Renderer/HostRenderer.cpp b/Native/Host/src/Renderer/HostRenderer.cpp
+index 6bec7f6..562b2a2 100644
+--- a/Native/Host/src/Renderer/HostRenderer.cpp
++++ b/Native/Host/src/Renderer/HostRenderer.cpp
+@@ -11,6 +11,12 @@
+ #define UNX_HOST_HAS_CLUSTERBUILDER 1
+ #endif
+ 
++#if __has_include("unx/cook/TextureCook.h")
++#include "unx/cook/TextureCook.h"
++#include "unx/material/TextureSystem.h"
++#define UNX_HOST_HAS_COOK 1
++#endif
++
+ #include <chrono>
+ #include <cstring>
+ 
+@@ -28,6 +34,11 @@ struct HostRenderer::Standalone
+ 
+ HostRenderer::HostRenderer(const HostRendererOptions& options) : m_options(options)
+ {
++#if UNX_HOST_HAS_COOK
++    // C1: textures are uploaded in their cooked form (block-compressed within the error bound, memory and disk caches under
++    // UNX_COOK_CACHE, which the Unity editor sets to Library/UnravelNextCook).
++    material::setChainProvider(&cook::textureChain);
++#endif
+     if (options.framesInFlight == 0) fail("framesInFlight must be at least 1");
+     if (!options.standalone && (!options.hostDevice || !options.hostQueue)) fail("a host renderer needs the host's device and graphics queue");
+     m_quality = QualityConfig::loadDirectory(options.qualityDirectory);
+diff --git a/Native/Render/Passes/Material/TextureSystem.cpp b/Native/Render/Passes/Material/TextureSystem.cpp
+index 03fb18b..17234f3 100644
+--- a/Native/Render/Passes/Material/TextureSystem.cpp
++++ b/Native/Render/Passes/Material/TextureSystem.cpp
+@@ -337,6 +337,16 @@ MipChain buildMipChain(const scene::Scene& s, uint32_t index)
+     return out;
+ }
+ 
++namespace
++{
++ChainProvider g_chainProvider = nullptr;
++}
++
++void setChainProvider(ChainProvider provider)
++{
++    g_chainProvider = provider;
++}
++
+ MipChain buildCoverageChain(const scene::Scene& s, uint32_t index)
+ {
+     const scene::Texture& t = s.textures.at(index);
+@@ -428,6 +438,8 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
+             ComPtr<ID3D12Resource> texture;
+             MipChain chain;
+             std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints;
++            std::vector<UINT> rows;         // per level: texel rows, or block rows of a block-compressed chain
++            std::vector<UINT64> rowBytes;   // per level: bytes of one (block) row, the chain's tight row pitch
+             uint64_t offset = 0;
+         };
+         std::vector<Pending> batch;
+@@ -454,8 +466,9 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
+                 for (uint32_t l = 0; l < (uint32_t)p.chain.levels.size(); ++l)
+                 {
+                     const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& fp = p.footprints[l];
+-                    const uint32_t rowBytes = fp.Footprint.Width * p.chain.bytesPerTexel;
+-                    for (uint32_t y = 0; y < fp.Footprint.Height; ++y)
++                    const size_t rowBytes = (size_t)p.rowBytes[l];
++                    if (p.chain.levels[l].size() != rowBytes * p.rows[l]) fail("M textures: chain level %u has %zu bytes, expected %zu", l, p.chain.levels[l].size(), rowBytes * p.rows[l]);
++                    for (uint32_t y = 0; y < p.rows[l]; ++y)
+                         std::memcpy(mapped + p.offset + fp.Offset + (size_t)y * fp.Footprint.RowPitch, p.chain.levels[l].data() + (size_t)y * rowBytes, rowBytes);
+                     D3D12_PLACED_SUBRESOURCE_FOOTPRINT placed = fp;
+                     placed.Offset += p.offset;
+@@ -493,7 +506,7 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
+         {
+             const uint32_t i = job >> 1, kind = job & 1;
+             Pending p;
+-            p.chain = kind == 0 ? buildMipChain(*s, i) : buildCoverageChain(*s, i);
++            p.chain = g_chainProvider ? g_chainProvider(*s, i, kind) : kind == 0 ? buildMipChain(*s, i) : buildCoverageChain(*s, i);
+             if (p.chain.levels.empty()) continue;
+             if (kind == 0) m_slopeRange[i] = p.chain.slopeRange;
+             D3D12_RESOURCE_DESC d{};
+@@ -507,7 +520,9 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
+             d.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+             p.footprints.resize(p.chain.levels.size());
+             UINT64 total = 0;
+-            device.d3d()->GetCopyableFootprints(&d, 0, (UINT)p.chain.levels.size(), 0, p.footprints.data(), nullptr, nullptr, &total);
++            p.rows.resize(p.chain.levels.size());
++            p.rowBytes.resize(p.chain.levels.size());
++            device.d3d()->GetCopyableFootprints(&d, 0, (UINT)p.chain.levels.size(), 0, p.footprints.data(), p.rows.data(), p.rowBytes.data(), &total);
+             const uint64_t aligned = (batchBytes + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) & ~(uint64_t)(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
+             if (aligned + total > kBatch && !batch.empty()) flush();
+             p.offset = (batchBytes + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) & ~(uint64_t)(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
+diff --git a/Native/Render/Passes/Material/include/unx/material/TextureSystem.h b/Native/Render/Passes/Material/include/unx/material/TextureSystem.h
+index e35cefa..db1d04f 100644
+--- a/Native/Render/Passes/Material/include/unx/material/TextureSystem.h
++++ b/Native/Render/Passes/Material/include/unx/material/TextureSystem.h
+@@ -49,6 +49,12 @@ MipChain buildMipChain(const scene::Scene& scene, uint32_t index);
+ // alpha-tested materials that use it as base colour); no levels when no alpha-tested material uses it.
+ MipChain buildCoverageChain(const scene::Scene& scene, uint32_t index);
+ 
++// Stored-form provider (C1: C's cook, Tools/Cook TextureCook.h): the chain of scene texture 'index' (kind 0) or its cut-out
++// coverage (kind 1) as it is uploaded, possibly block-compressed (bytesPerTexel = 0: each level is rows of 4x4 blocks,
++// tightly packed) and served from its memory and disk caches. Null (default): buildMipChain / buildCoverageChain.
++using ChainProvider = MipChain (*)(const scene::Scene& scene, uint32_t index, uint32_t kind);
++void setChainProvider(ChainProvider provider);
++
+ class TextureSystem
+ {
+ public:
