@@ -7,7 +7,10 @@
 #define UNX_WATER_OCEAN_FFT_HLSLI
 #include "Ocean.hlsli"
 
-groupshared float2 g_fft[4][OCEAN_N];
+#ifndef FFT_CHANNELS
+#define FFT_CHANNELS 4u  // complex channels transformed together (Ocean: 4; Ripple: 2)
+#endif
+groupshared float2 g_fft[FFT_CHANNELS][OCEAN_N];
 groupshared float2 g_twiddle[OCEAN_N / 2];
 uint bitReverse9(uint v) { return reversebits(v) >> (32u - OCEAN_LOG2N); }
 void fftInverse(uint t)
@@ -20,7 +23,7 @@ void fftInverse(uint t)
         uint halfSpan = 1u << (stage - 1), span = halfSpan << 1;
         uint pos = t % halfSpan, i0 = (t / halfSpan) * span + pos, i1 = i0 + halfSpan;
         float2 w = g_twiddle[pos << (OCEAN_LOG2N - stage)];  // e^{2 pi i pos / span}
-        [unroll] for (uint c = 0; c < 4; ++c)
+        [unroll] for (uint c = 0; c < FFT_CHANNELS; ++c)
         {
             float2 a = g_fft[c][i0], b = cmul(w, g_fft[c][i1]);
             g_fft[c][i0] = a + b;
