@@ -7,8 +7,10 @@
 
 #include "AtmosphereReference.h"
 #include "AtmosphereSystem.h"
+#include "Planets.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <iterator>
 #include <thread>
@@ -88,7 +90,11 @@ int main(int argc, char** argv)
             sc.atmosphere.mieG = rain ? 0.829f : 0.85f;
             sc.atmosphere.groundAlbedo = rain ? float3{ 0.050f, 0.078f, 0.042f } : float3{ 0.055f, 0.085f, 0.046f };
         }
-        else if (medium != "clear") fail("--medium clear|rain|mist");
+        else if (medium == "mars")
+        {
+            if (!sky::planetPreset("mars", sc.atmosphere, sc.sun)) fail("no mars preset");  // B4: another planet (Planets.h)
+        }
+        else if (medium != "clear") fail("--medium clear|rain|mist|mars");
         scene::Camera cam;
         cam.name = "main";
         cam.position = { 3, 1.7f, -2 };
@@ -406,6 +412,10 @@ int main(int argc, char** argv)
                 const ref::MsTable F = msTable(*fine, pf);
                 const double floor = 1e-4 * maxValue(F);
                 double e = 0, byMus[3] = {};
+                // Error map: worst texel per fine altitude node and sun-cosine bin (where along r and mu_s the grid misses).
+                static const double musEdges[7] = { -0.2, -0.05, 0, 0.02, 0.1, 0.3, 2 };
+                std::vector<std::array<double, 7>> errMap(F.n[3], std::array<double, 7>{});
+                std::vector<double> nodeAltitude(F.n[3]);
                 for (uint32_t r = 0; r < F.n[3]; ++r)
                     for (uint32_t mu = 0; mu < F.n[2]; ++mu)
                         for (uint32_t nu = 0; nu < F.n[0]; ++nu)
@@ -413,9 +423,18 @@ int main(int argc, char** argv)
                             {
                                 const ref::MsTexelCoords c = ref::msTexel(m, F, nu, ms, mu, r);
                                 const ref::D3 x = ref::msTableLookup(m, B, c.altitude, c.mu, c.mus, c.nu), y = ref::msTexelValue(F, nu, ms, mu, r);
-                                worst(e, relErr(x, y, floor), F, nu, ms, mu, r, x, y, byMus);
+                                const double err = relErr(x, y, floor);
+                                worst(e, err, F, nu, ms, mu, r, x, y, byMus);
+                                int bin = 0;
+                                while (c.mus >= musEdges[bin]) ++bin;
+                                errMap[r][bin] = std::max(errMap[r][bin], err);
+                                nodeAltitude[r] = c.altitude;
                             }
                 logf("    by sun cosine: < -0.2 %.3e, [-0.2, 0) %.3e, >= 0 %.3e\n", byMus[0], byMus[1], byMus[2]);
+                logf("    error map, mu_s bins <-0.2 | -0.05 | 0 | 0.02 | 0.1 | 0.3 | 1:\n");
+                for (uint32_t r = 0; r < F.n[3]; ++r)
+                    logf("      r %2u h %7.0f: %.1e %.1e %.1e %.1e %.1e %.1e %.1e\n", r, nodeAltitude[r], errMap[r][0], errMap[r][1], errMap[r][2],
+                         errMap[r][3], errMap[r][4], errMap[r][5], errMap[r][6]);
                 logf("  J_ms 2x %s: texels %.3e\n", axes[axis], e);
                 compareRadiance(radiance(F, *lastTransmittance, pf), format("J_ms: 2x %s resolution", axes[axis]).c_str(), 3e-3, 4e-3);
             }
