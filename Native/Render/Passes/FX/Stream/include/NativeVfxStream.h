@@ -116,6 +116,12 @@ extern "C" {
    A context whose World publishes heightfields refuses a version-1 executor
    (a terrain it cannot collide with is an error, not a silent pass-through). */
 #define NV_STREAM_EXECUTOR_HEIGHTFIELDS 2u
+/* 3 = also the wind turbulence of World wind fields (NW_WindTurbulence, B6/P12): a packet with
+   NV_STREAM_WIND_TURBULENCE carries its world fields as NV_StreamWorldFieldTurbulent records (80 B) and the
+   executor adds each record's curl-noise term with RuntimeCommon/WindField.hlsli's wfCurl (VfxParticleMath
+   NV_WIND_TURBULENCE hook; shaders/VfxWindTurbulence.hlsli defines it for HLSL executors). A context whose World
+   publishes turbulence refuses an executor below 3 (wind it cannot evaluate is an error, not a silent drop). */
+#define NV_STREAM_EXECUTOR_WIND_TURBULENCE 3u
 #define NV_STREAM_MAX_DEPTH 4u
 #define NV_STREAM_NONE 0xffffffffu
 
@@ -123,6 +129,7 @@ enum {
     NV_STREAM_RESET=1u,        /* all slots dead, then restore records installed */
     NV_STREAM_PROGRAMS=2u,     /* program table + curve keys replace the previous ones */
     NV_STREAM_SURFACES=4u,     /* surface table replaces the previous one (else the previous stays) */
+    NV_STREAM_WIND_TURBULENCE=16u, /* world_fields are NV_StreamWorldFieldTurbulent (executor version >= 3) */
     NV_STREAM_EMITTER_DELTA=8u /* emitters[] updates only the rows listed in emitter_rows[] of the
                                   persistent table (emitter_table rows); without it emitters[] is the
                                   whole table (emitter_count == emitter_table). A row not sent keeps its
@@ -325,6 +332,15 @@ typedef struct NV_StreamWorldField {
     float origin[3];uint32_t packed;
     float inverse_basis[9];float value[3];
 } NV_StreamWorldField;
+/* With NV_STREAM_WIND_TURBULENCE: the record plus its wind turbulence (rms 0 = none), prepared on the CPU with
+   the World sampler's float operations (RuntimeCommon/WindTurbulence.h add_turbulence): the term added to value
+   before the operation is wfCurl(d * inv_length, phase, octaves_seed & 255, octaves_seed >> 8) * rms, d = the
+   sampled position minus origin, inv_length = 1 / length_m (float), phase = float(seconds) / period_s (float),
+   seconds = the packet's World time (tick x dt, the host's fixed step). */
+typedef struct NV_StreamWorldFieldTurbulent {
+    NV_StreamWorldField field;
+    float rms,inv_length,phase;uint32_t octaves_seed;
+} NV_StreamWorldFieldTurbulent;
 
 /* Collision surface. kind 0 sphere (a, radius), 1 capsule (a, b, radius), 2
    double-sided triangle (a, b, c). body == NV_STREAM_NONE: origin is an anchor-
@@ -440,7 +456,7 @@ static_assert(sizeof(NV_StreamProgram)==320,"stream program");
 static_assert(sizeof(NV_StreamEmitter)==336,"stream emitter");
 static_assert(sizeof(NV_StreamEmitterPatch)==48,"stream emitter patch");
 static_assert(sizeof(NV_StreamSpawn)==48&&sizeof(NV_StreamExplicitBirth)==48&&sizeof(NV_StreamCurveKey)==16,"stream births");
-static_assert(sizeof(NV_StreamField)==32&&sizeof(NV_StreamWorldField)==64&&sizeof(NV_StreamSurface)==128&&sizeof(NV_StreamBody)==80,"stream inputs");
+static_assert(sizeof(NV_StreamField)==32&&sizeof(NV_StreamWorldField)==64&&sizeof(NV_StreamWorldFieldTurbulent)==80&&sizeof(NV_StreamSurface)==128&&sizeof(NV_StreamBody)==80,"stream inputs");
 static_assert(sizeof(NV_StreamHeightField)==80&&sizeof(NV_StreamHeightTile)==1232,"stream heightfields");
 static_assert(sizeof(NV_StreamParticle)==48&&sizeof(NV_StreamEvent)==64&&sizeof(NV_StreamCounters)==48,"stream outputs");
 #endif

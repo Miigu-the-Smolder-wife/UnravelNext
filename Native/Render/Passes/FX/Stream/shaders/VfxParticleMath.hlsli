@@ -15,6 +15,9 @@
 // The includer defines these hooks before the second include:
 //   NV_FIELD_COUNT, NV_FIELD(i)             -> NvField   (context fields, anchor space)
 //   NV_WORLD_FIELD_COUNT, NV_WORLD_FIELD(i) -> NvWorldField
+//   NV_WIND_TURBULENCE(d, field) -> nv_real3: the turbulence term of a wind record at record-local d (executor
+//     version 3; shaders/VfxWindTurbulence.hlsli for HLSL, VfxStreamCpu.h for C++). Undefined: records carry no
+//     turbulence (rms 0), which the CPU guarantees for executors below version 3.
 //   NV_SURFACE_COUNT, NV_SURFACE(i)         -> NvSurface
 //   NV_CURVE_KEY(i)                         -> nv_real4 (t, v0, v1, v2)
 //   optional NV_SURFACE_QUERY_TYPE / NV_SURFACE_QUERY / NV_SURFACE_NEXT (see nv_collide)
@@ -54,7 +57,8 @@ typedef float4 nv_real4;
 
 // Inputs in the form the formulas need (filled from the stream records).
 struct NvField { nv_real3 position; uint kind; nv_real3 value; nv_real radius; };
-struct NvWorldField { nv_real3 origin; uint quantity; uint shape; uint operation; nv_real3 basis0; nv_real3 basis1; nv_real3 basis2; nv_real3 value; };
+struct NvWorldField { nv_real3 origin; uint quantity; uint shape; uint operation; nv_real3 basis0; nv_real3 basis1; nv_real3 basis2; nv_real3 value;
+                      nv_real rms; nv_real inv_length; nv_real phase; uint octaves_seed; };
 struct NvSurface { uint kind; uint entity0; uint entity1; uint generation0; uint generation1; nv_real radius; nv_real3 a; nv_real3 b; nv_real3 c; nv_real3 velocity; nv_real3 angular; nv_real3 origin; };
 // A static heightfield (NV_StreamHeightField, placed by its body frame): body-frame sample (x, z) with height h is at
 // origin + axis_x x + axis_y h + axis_z z (axis_x, axis_z: the body axes times the spacings; axis_y: the unit up axis).
@@ -162,6 +166,9 @@ nv_real3 nv_context_fields(nv_real3 q) {
     }
     return a;
 }
+#ifndef NV_WIND_TURBULENCE
+#define NV_WIND_TURBULENCE(d, field) nv_make3(NV_R(0), NV_R(0), NV_R(0))
+#endif
 // World field sample of quantity 0 (gravity) or 1 (wind) at anchor-space q.
 nv_real3 nv_world_field(uint quantity, nv_real3 q) {
     nv_real3 result = nv_make3(NV_R(0), NV_R(0), NV_R(0)); uint contributors = 0u;
@@ -175,10 +182,13 @@ nv_real3 nv_world_field(uint quantity, nv_real3 q) {
             if (field.shape == 1u && dot(l, l) > NV_R(1)) continue;
         }
         bool first = contributors == 0u;
-        if (field.operation == 0u) result = result + field.value;
-        else if (field.operation == 1u || first) result = field.value;
-        else if (field.operation == 2u) result = min(result, field.value);
-        else result = max(result, field.value);
+        nv_real3 value = field.value;
+        // wind turbulence: added to the record's value before its operation (World sampler, WindField.hlsli windAt)
+        if (field.rms > NV_R(0)) value = value + NV_WIND_TURBULENCE(q - field.origin, field);
+        if (field.operation == 0u) result = result + value;
+        else if (field.operation == 1u || first) result = value;
+        else if (field.operation == 2u) result = min(result, value);
+        else result = max(result, value);
         ++contributors;
     }
     return result;

@@ -75,7 +75,8 @@ cbuffer FxTick : register(b1)
     // The tick's fields, uniform for every particle: read through the constant path (one broadcast load per row) instead of
     // per-particle buffer loads. Filled by the CPU when the counts fit (else the structured buffers are read).
     uint4 g_fieldRows[FX_CB_FIELDS * 2];             // context fields (StreamField, 32 B each)
-    uint4 g_worldFieldRows[FX_CB_WORLD_FIELDS * 4];  // world fields (StreamWorldField, 64 B each)
+    uint4 g_worldFieldRows[FX_CB_WORLD_FIELDS * 5];  // world fields (StreamWorldField, 64 B, then its turbulence row:
+                                                    // rms, inv_length, phase, octaves_seed; zero without turbulence)
 };
 
 #include "Passes/FX/StreamRecords.hlsli"
@@ -113,25 +114,32 @@ NvField fxField(uint i)
     r.position = f.position; r.kind = f.kind; r.value = f.value; r.radius = f.radius;
     return r;
 }
+#define FX_STREAM_WIND_TURBULENCE 16u  // NV_STREAM_WIND_TURBULENCE: the packet's world fields are 80 B turbulent records
+// Rows of 16 B: the 64 B record (4 rows), then with NV_STREAM_WIND_TURBULENCE its turbulence row (rms, inv_length, phase,
+// octaves_seed). The constant rows always hold 5 per field (a zero turbulence row without turbulence); the buffer holds
+// the packet's records as they are (4 or 5 rows each).
 NvWorldField fxWorldField(uint i)
 {
-    StreamWorldField f;
+    uint4 row[5];
     if (g_worldFieldCount <= FX_CB_WORLD_FIELDS && (g_experiment & 64u) == 0u)
     {
-        const uint4 a = g_worldFieldRows[4u * i], b = g_worldFieldRows[4u * i + 1u], c = g_worldFieldRows[4u * i + 2u], d = g_worldFieldRows[4u * i + 3u];
-        f.origin = asfloat(a.xyz); f.packed = a.w;
-        f.basis0 = asfloat(b.xyz); f.basis1 = asfloat(uint3(b.w, c.x, c.y)); f.basis2 = asfloat(uint3(c.z, c.w, d.x));
-        f.value = asfloat(d.yzw);
+        [unroll] for (uint k = 0; k < 5u; ++k) row[k] = g_worldFieldRows[5u * i + k];
     }
     else
     {
-        FX_BUFFER(StreamWorldField, fields, g_worldFields);
-        f = fields[i];
+        FX_BUFFER(uint4, rows, g_worldFields);
+        const bool turbulent = (g_flags & FX_STREAM_WIND_TURBULENCE) != 0u;
+        const uint n = turbulent ? 5u : 4u;
+        [unroll] for (uint k = 0; k < 4u; ++k) row[k] = rows[n * i + k];
+        row[4] = turbulent ? rows[n * i + 4u] : uint4(0, 0, 0, 0);
     }
     NvWorldField r;
-    r.origin = f.origin;
-    r.quantity = f.packed & 0xFFu; r.shape = (f.packed >> 8) & 0xFFu; r.operation = (f.packed >> 16) & 0xFFu;
-    r.basis0 = f.basis0; r.basis1 = f.basis1; r.basis2 = f.basis2; r.value = f.value;
+    r.origin = asfloat(row[0].xyz);
+    const uint packed = row[0].w;
+    r.quantity = packed & 0xFFu; r.shape = (packed >> 8) & 0xFFu; r.operation = (packed >> 16) & 0xFFu;
+    r.basis0 = asfloat(row[1].xyz); r.basis1 = asfloat(uint3(row[1].w, row[2].x, row[2].y)); r.basis2 = asfloat(uint3(row[2].z, row[2].w, row[3].x));
+    r.value = asfloat(row[3].yzw);
+    r.rms = asfloat(row[4].x); r.inv_length = asfloat(row[4].y); r.phase = asfloat(row[4].z); r.octaves_seed = row[4].w;
     return r;
 }
 // The tick's surfaces in anchor space (FxSurfaces resolves body-local surfaces with this tick's body frames).
@@ -350,6 +358,9 @@ bool fxSurfaceNext(inout FxSurfaceQuery q, out uint n)
 #define NV_SURFACE_QUERY_TYPE FxSurfaceQuery
 #define NV_SURFACE_QUERY(p, d) fxSurfaceQuery(p, d)
 #define NV_SURFACE_NEXT(q, n) fxSurfaceNext(q, n)
+// Executor version 3: the World wind fields' turbulence (VfxWindTurbulence.hlsli; WindField.hlsli from Passes/Atmosphere
+// through the FX kernels' include path).
+#include "Passes/FX/Stream/shaders/VfxWindTurbulence.hlsli"
 #include "Passes/FX/Stream/shaders/VfxParticleMath.hlsli"
 
 // Motion parameters of one slot (NvMotion of the shared mathematics).

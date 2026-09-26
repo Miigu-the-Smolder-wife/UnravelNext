@@ -46,6 +46,10 @@ struct RppConfig
     uint32_t bodies = 1728;
     bool heightfield = true;      // terrain on body `bodies` (NV_StreamHeightField; the executor must be version 2)
     bool sheet = true;            // the waving dynamic sheet (NV_StreamHeader::dynamic_surfaces)
+    // World wind turbulence on the wind record (executor version 3: NV_STREAM_WIND_TURBULENCE, 80 B records; rms m/s,
+    // length m, period s, octaves 3, seed 17), the phase from the packet's World time as the World computes it.
+    bool turbulence = true;
+    float turbulenceRms = 2.0f, turbulenceLength = 8.0f, turbulencePeriod = 5.0f;
     double anchorShift[3] = { 0, 0, 0 };  // diagnostic: the anchor moved by this much (world stays the same)
     bool delta = true;            // emitter table as NV_STREAM_EMITTER_DELTA packets (rows that changed since they were last sent)
     bool patches = true;          // with delta: a row whose only changes are its per-tick fields goes as a 48 B patch
@@ -402,6 +406,24 @@ public:
         h.magic = NV_STREAM_MAGIC;
         h.version = NV_STREAM_VERSION;
         h.flags = first ? (NV_STREAM_RESET | NV_STREAM_PROGRAMS | NV_STREAM_SURFACES) : (delta ? NV_STREAM_EMITTER_DELTA : 0u);
+        if (m_c.turbulence) h.flags |= NV_STREAM_WIND_TURBULENCE;
+        // world fields as the packet sends them: turbulent records (the wind's term; gravity has rms 0) or plain ones
+        std::vector<NV_StreamWorldFieldTurbulent> turbulent;
+        if (m_c.turbulence)
+            for (size_t i = 0; i < m_world.size(); ++i)
+            {
+                NV_StreamWorldFieldTurbulent t{};
+                t.field = m_world[i];
+                if ((m_world[i].packed & 255u) == 1u)  // wind
+                {
+                    const double seconds = (double)m_tick * m_c.dt;
+                    t.rms = m_c.turbulenceRms;
+                    t.inv_length = 1.0f / m_c.turbulenceLength;
+                    t.phase = (float)seconds / m_c.turbulencePeriod;
+                    t.octaves_seed = 3u | (17u << 8);
+                }
+                turbulent.push_back(t);
+            }
         h.stream = 0x5354524541ull;
         h.generation = 1;
         h.tick = m_tick;
@@ -458,7 +480,8 @@ public:
         h.spawns = section(all.data(), all.size() * sizeof(NV_StreamSpawn));
         h.explicit_births = section(explicitBirths.data(), explicitBirths.size() * sizeof(NV_StreamExplicitBirth));
         h.fields = section(m_fields.data(), m_fields.size() * sizeof(NV_StreamField));
-        h.world_fields = section(m_world.data(), m_world.size() * sizeof(NV_StreamWorldField));
+        h.world_fields = m_c.turbulence ? section(turbulent.data(), turbulent.size() * sizeof(NV_StreamWorldFieldTurbulent))
+                                        : section(m_world.data(), m_world.size() * sizeof(NV_StreamWorldField));
         if (first) h.surfaces = section(m_surfaces.data(), m_surfaces.size() * sizeof(NV_StreamSurface));
         if (first) h.height_fields = section(m_heightFields.data(), m_heightFields.size() * sizeof(NV_StreamHeightField));
         if (first) h.height_tiles = section(m_heightTiles.data(), m_heightTiles.size() * sizeof(NV_StreamHeightTile));

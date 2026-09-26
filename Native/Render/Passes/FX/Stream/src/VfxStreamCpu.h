@@ -6,6 +6,16 @@
 // It is O(particles) on the CPU: the executor of GPU-less contexts and tests,
 // never the product path of a rendered World.
 #include "NativeVfxStream.h"
+// wfCurl in float (the World sampler's and the GPU's formula; WindField.hlsli in its C++ mode): UnravelNext's core
+// math and its Atmosphere file when this copy is built there (Passes/FX/Stream/src -> Passes/Atmosphere), else
+// Unravel's RuntimeCommon adapter.
+#if __has_include("../../../Atmosphere/WindField.hlsli")
+#include "unx/core/Math.h"
+#include <cstring>
+#include "../../../Atmosphere/WindField.hlsli"
+#else
+#include "../../RuntimeCommon/WindTurbulence.h"
+#endif
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -70,6 +80,14 @@ template<class R> struct MathT {
 #define NV_HEIGHT(tile, sample) R(tile_data[tile].heights[sample])
 #define NV_HEIGHT_HOLES(tile, word) tile_data[tile].holes[word]
 #define NV_CURVE_KEY(i) key_data[i]
+    // Wind turbulence (executor version 3): the World sampler's term in float - the record-local offset rounded to
+    // float, times the CPU-prepared 1 / length, curl noise at the prepared phase, times rms.
+    static nv_real3 wind_turbulence(nv_real3 d,const NvWorldField& f){
+        const unx::float3 p{float(d.x),float(d.y),float(d.z)};
+        const unx::float3 c=unx::render::wind::wfCurl(p*float(f.inv_length),float(f.phase),f.octaves_seed&255u,f.octaves_seed>>8)*float(f.rms);
+        return {R(c.x),R(c.y),R(c.z)};
+    }
+#define NV_WIND_TURBULENCE(d, field) wind_turbulence(d, field)
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable:4100) // default candidate query ignores the segment
@@ -89,6 +107,7 @@ template<class R> struct MathT {
 #undef NV_HEIGHT
 #undef NV_HEIGHT_HOLES
 #undef NV_CURVE_KEY
+#undef NV_WIND_TURBULENCE
 };
 typedef MathT<double> Math;
 
@@ -154,7 +173,9 @@ public:
         const auto spawns=section<NV_StreamSpawn>(data,bytes,h.spawns,h.spawn_count);
         const auto explicits=section<NV_StreamExplicitBirth>(data,bytes,h.explicit_births,h.explicit_count);
         const auto fields=section<NV_StreamField>(data,bytes,h.fields,h.field_count);
-        const auto world=section<NV_StreamWorldField>(data,bytes,h.world_fields,h.world_field_count);
+        std::vector<NV_StreamWorldFieldTurbulent> world;
+        if(h.flags&NV_STREAM_WIND_TURBULENCE)world=section<NV_StreamWorldFieldTurbulent>(data,bytes,h.world_fields,h.world_field_count);
+        else for(const auto& w:section<NV_StreamWorldField>(data,bytes,h.world_fields,h.world_field_count)){NV_StreamWorldFieldTurbulent x{};x.field=w;world.push_back(x);}
         if(h.flags&(NV_STREAM_SURFACES|NV_STREAM_RESET)){
             surface_table_=section<NV_StreamSurface>(data,bytes,h.surfaces,h.surface_count);
             height_table_=section<NV_StreamHeightField>(data,bytes,h.height_fields,h.height_field_count);
@@ -239,11 +260,12 @@ private:
         const Real3 u{q[0],q[1],q[2]};const double w=q[3];
         const Real3 t=Math::cross(u,v)*2.0;return v+t*w+Math::cross(u,t);
     }
-    void load_inputs(const std::vector<NV_StreamField>& fields,const std::vector<NV_StreamWorldField>& world,const std::vector<NV_StreamBody>& bodies,const std::vector<NV_StreamSurface>& dynamic){
+    void load_inputs(const std::vector<NV_StreamField>& fields,const std::vector<NV_StreamWorldFieldTurbulent>& world,const std::vector<NV_StreamBody>& bodies,const std::vector<NV_StreamSurface>& dynamic){
         std::vector<NV_StreamSurface> surfaces=surface_table_;surfaces.insert(surfaces.end(),dynamic.begin(),dynamic.end());
         fields_.clear();for(const auto& f:fields)fields_.push_back({real3(f.position),f.kind,real3(f.value),f.radius});
-        world_.clear();for(const auto& w:world){Math::NvWorldField x{};x.origin=real3(w.origin);x.quantity=w.packed&255u;x.shape=(w.packed>>8)&255u;x.operation=(w.packed>>16)&255u;
-            x.basis0=real3(w.inverse_basis);x.basis1=real3(w.inverse_basis+3);x.basis2=real3(w.inverse_basis+6);x.value=real3(w.value);world_.push_back(x);}
+        world_.clear();for(const auto& t:world){const auto& w=t.field;Math::NvWorldField x{};x.origin=real3(w.origin);x.quantity=w.packed&255u;x.shape=(w.packed>>8)&255u;x.operation=(w.packed>>16)&255u;
+            x.basis0=real3(w.inverse_basis);x.basis1=real3(w.inverse_basis+3);x.basis2=real3(w.inverse_basis+6);x.value=real3(w.value);
+            x.rms=t.rms;x.inv_length=t.inv_length;x.phase=t.phase;x.octaves_seed=t.octaves_seed;world_.push_back(x);}
         surfaces_.clear();for(const auto& s:surfaces){Math::NvSurface x{};x.kind=s.kind;x.entity0=s.entity[0];x.entity1=s.entity[1];x.generation0=s.generation0;x.generation1=s.generation1;
             x.radius=s.radius;x.a=real3(s.a);x.b=real3(s.b);x.c=real3(s.c);x.velocity=real3(s.velocity);x.angular=real3(s.angular_velocity);x.origin=real3(s.origin);
             if(s.body!=NV_STREAM_NONE){require(s.body<bodies.size(),"surface body");const auto& b=bodies[s.body];

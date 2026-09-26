@@ -21,9 +21,12 @@ namespace
 constexpr uint32_t kReportBytes = kCounterWords * 4;  // readback: the counters, then the events
 // FxTick constant buffer: TickConstants, then kCbFields context fields and kCbWorldFields world fields (Particles.hlsli)
 constexpr uint32_t kCbFields = 64, kCbWorldFields = 16;
+// World field rows: 5 x 16 B each (the 64 B record, then rms, inv_length, phase, octaves_seed; zero without turbulence).
 constexpr uint64_t kFieldRowsOffset = sizeof(TickConstants), kWorldRowsOffset = kFieldRowsOffset + kCbFields * 32,
-                   kConstBytes = (kWorldRowsOffset + kCbWorldFields * 64 + 255) / 256 * 256;
-static_assert(sizeof(NV_StreamField) == 32 && sizeof(NV_StreamWorldField) == 64, "FxTick field rows");
+                   kConstBytes = (kWorldRowsOffset + kCbWorldFields * 80 + 255) / 256 * 256;
+static_assert(sizeof(NV_StreamField) == 32 && sizeof(NV_StreamWorldField) == 64 && sizeof(NV_StreamWorldFieldTurbulent) == 80, "FxTick field rows");
+// Bytes of one world field record of a packet (executor version 3: turbulent records with NV_STREAM_WIND_TURBULENCE).
+uint32_t worldFieldBytes(uint32_t flags) { return (flags & NV_STREAM_WIND_TURBULENCE) ? (uint32_t)sizeof(NV_StreamWorldFieldTurbulent) : (uint32_t)sizeof(NV_StreamWorldField); }
 static_assert(sizeof(TickConstants) % 16 == 0, "FxTick rows start on a 16-byte boundary");
 constexpr uint32_t kOverflowRecords = 1024, kOverflowRecordBytes = 448;  // IMPACT_OVERFLOW diagnostic records (Particles.hlsli)
 
@@ -131,7 +134,7 @@ void validate(const uint8_t* packet, uint64_t bytes, uint32_t chainDepthMax, uin
     section(h.spawns, h.spawn_count, sizeof(NV_StreamSpawn), "spawns");
     section(h.explicit_births, h.explicit_count, sizeof(NV_StreamExplicitBirth), "explicit births");
     section(h.fields, h.field_count, sizeof(NV_StreamField), "fields");
-    section(h.world_fields, h.world_field_count, sizeof(NV_StreamWorldField), "world fields");
+    section(h.world_fields, h.world_field_count, worldFieldBytes(h.flags), "world fields");
     section(h.surfaces, h.surface_count, sizeof(NV_StreamSurface), "surfaces");
     if ((h.flags & (NV_STREAM_SURFACES | NV_STREAM_RESET)) && h.height_field_count)
     {
@@ -262,7 +265,7 @@ struct ParticleSystem::Impl
     // inputs
     Buf programs{ "fx.programs", sizeof(NV_StreamProgram) }, curveKeys{ "fx.curveKeys", 16 };
     Buf spawns{ "fx.spawns", sizeof(NV_StreamSpawn) }, explicitBirths{ "fx.explicitBirths", sizeof(NV_StreamExplicitBirth) };
-    Buf fields{ "fx.fields", sizeof(NV_StreamField) }, worldFields{ "fx.worldFields", sizeof(NV_StreamWorldField) };
+    Buf fields{ "fx.fields", sizeof(NV_StreamField) }, worldFields{ "fx.worldFields", 16 };  // rows of 16 B (4 or 5 per record)
     Buf surfaces{ "fx.surfaces", sizeof(NV_StreamSurface) }, restore{ "fx.restore", sizeof(NV_StreamParticle) }, birthIndex{ "fx.birthIndex", 4 };
     Buf dynamicSurfaces{ "fx.dynamicSurfaces", sizeof(NV_StreamSurface) };
     Buf bodies{ "fx.bodies", sizeof(NV_StreamBody) }, tickSurfaces{ "fx.tickSurfaces", sizeof(NV_StreamSurface) };
@@ -598,7 +601,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         m.spawns.ensure(device, (uint64_t)h.spawn_count * sizeof(NV_StreamSpawn));
         m.explicitBirths.ensure(device, (uint64_t)h.explicit_count * sizeof(NV_StreamExplicitBirth));
         m.fields.ensure(device, (uint64_t)h.field_count * sizeof(NV_StreamField));
-        m.worldFields.ensure(device, (uint64_t)h.world_field_count * sizeof(NV_StreamWorldField));
+        m.worldFields.ensure(device, (uint64_t)h.world_field_count * worldFieldBytes(h.flags));
         if (h.flags & (NV_STREAM_SURFACES | NV_STREAM_RESET))
         {
             m.surfaces.ensure(device, (uint64_t)h.surface_count * sizeof(NV_StreamSurface));
@@ -965,7 +968,12 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         if (h.field_count && h.field_count <= kCbFields)
             std::memcpy(slot.mapped + constOffset + kFieldRowsOffset, base + h.fields, (size_t)h.field_count * sizeof(NV_StreamField));
         if (h.world_field_count && h.world_field_count <= kCbWorldFields)
-            std::memcpy(slot.mapped + constOffset + kWorldRowsOffset, base + h.world_fields, (size_t)h.world_field_count * sizeof(NV_StreamWorldField));
+            for (uint32_t i = 0; i < h.world_field_count; ++i)  // 80 B rows; a record without turbulence gets a zero row
+            {
+                uint8_t* row = slot.mapped + constOffset + kWorldRowsOffset + (size_t)i * 80;
+                std::memset(row + 64, 0, 16);
+                std::memcpy(row, base + h.world_fields + (size_t)i * worldFieldBytes(h.flags), worldFieldBytes(h.flags));
+            }
         std::memcpy(slot.mapped + birthOffset, birthIndex.data(), birthIndex.size() * 4);
         if (!inRanges.empty()) std::memcpy(slot.mapped + inRangesOffset, inRanges.data(), inRanges.size() * 32);
         std::memcpy(slot.mapped + inBlocksOffset, inBlocks.data(), inBlocks.size() * 4);
@@ -1049,7 +1057,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         add(m.spawns, h.spawns, (uint64_t)h.spawn_count * sizeof(NV_StreamSpawn));
         add(m.explicitBirths, h.explicit_births, (uint64_t)h.explicit_count * sizeof(NV_StreamExplicitBirth));
         add(m.fields, h.fields, (uint64_t)h.field_count * sizeof(NV_StreamField));
-        add(m.worldFields, h.world_fields, (uint64_t)h.world_field_count * sizeof(NV_StreamWorldField));
+        add(m.worldFields, h.world_fields, (uint64_t)h.world_field_count * worldFieldBytes(h.flags));
         if (h.flags & (NV_STREAM_SURFACES | NV_STREAM_RESET))
         {
             add(m.surfaces, h.surfaces, (uint64_t)h.surface_count * sizeof(NV_StreamSurface));

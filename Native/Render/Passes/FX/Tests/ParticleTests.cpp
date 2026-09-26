@@ -13,7 +13,7 @@
 //   4. --determinism: the whole run twice from a fresh module; the GPU state of both ticks of the pair (in their layouts),
 //      the layouts and the sorted events are bit identical at every compare tick.
 //      (The depth sort is the render pass's per-frame tile-local sort since 2026-09-26; the tick has no sort.)
-// Options: --ticks N (600) --compare-every K (60) --particles P --emitters E --no-features --no-heightfield --bodies N --no-sheet --no-reference
+// Options: --ticks N (600) --compare-every K (60) --particles P --emitters E --no-features --no-heightfield --bodies N --no-sheet --no-turbulence --no-reference
 //          --determinism --warp (WARP adapter: another implementation, 4-lane waves) --no-debug-layer --gbv
 //          --yield (pause while a GPU measurement lock or the user's HOLD is present: CPU-heavy runs)
 //          --allow-copy-drift (development only: a stream copy that differs from the original is a warning)
@@ -80,15 +80,16 @@ std::string sha(const std::vector<uint8_t>& bytes)
 }
 
 // 1. byte-identical stream copies of the pinned NativeVfx commit (the copies are updated together with this pin)
-constexpr const char* kStreamCommit = "213b4a4c";
+constexpr const char* kStreamCommit = "73def17c";
 void checkStreamCopies(bool strict)
 {
     const fs::path mine = fs::path(UNX_SOURCE_DIR) / "Native/Render/Passes/FX/Stream";
     const fs::path original = fs::path(UNX_SOURCE_DIR) / "../Unravel/Native/NativeVfx";
     struct Pin { const char* file; const char* sha; };
-    const Pin pins[] = { { "include/NativeVfxStream.h", "d861ac94c3518871cb8dbb13929737989d0618d4a5f11bbedfb4415563ce776f" },
-                         { "shaders/VfxParticleMath.hlsli", "1b94c957a81ab1fbae2ad22ad383e1b6a191266ee932fc4f31b1ba41bca5d5c7" },
-                         { "src/VfxStreamCpu.h", "cb4683bab8ba881e043da713ecd6cf42aaf933535cbca593c51b8844269a45c5" } };
+    const Pin pins[] = { { "include/NativeVfxStream.h", "c48e512d5c290ae4fdaeb0e2527a35c02586b5e7e6b86b448b0d319f80716b0b" },
+                         { "shaders/VfxParticleMath.hlsli", "25fc6ba8361b3d2f3d535dc77afd1e366d84bb42ce7f64ffa0e63ba9a70cbe07" },
+                         { "shaders/VfxWindTurbulence.hlsli", "d5800916c55e8afc1ac0c3eabc5e040c45047a9ea0a003cafdcb2e3c71f73d4a" },
+                         { "src/VfxStreamCpu.h", "81d785e84c957f87af176b5fe8d1e548ff2d9d2acfc6b5d197b448326b53922f" } };
     for (const Pin& pin : pins)
     {
         const std::string a = sha(readBinaryFile(mine / pin.file));
@@ -799,6 +800,7 @@ int main(int argc, char** argv)
             else if (a == "--no-heightfield") o.rpp.heightfield = false;
             else if (a == "--bodies") o.rpp.bodies = (uint32_t)std::stoul(next());
             else if (a == "--no-sheet") o.rpp.sheet = false;
+            else if (a == "--no-turbulence") o.rpp.turbulence = false;
             else if (a == "--no-child-noise") o.rpp.childNoise = false;
             else if (a == "--fields") o.rpp.fields = (uint32_t)std::stoul(next());
             else if (a == "--overflow-dump") o.overflowDump = next();

@@ -691,7 +691,7 @@ UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor)
         if (!h->committed()) fail("UnxVfxStreamExecutor: commit the scene first");
         NV_StreamExecutor e{};
         e.size = sizeof(NV_StreamExecutor);
-        e.version = NV_STREAM_EXECUTOR_HEIGHTFIELDS;  // heightfield sections (FX ParticleSystem, Particles.hlsli hooks)
+        e.version = NV_STREAM_EXECUTOR_WIND_TURBULENCE;  // heightfield sections and World wind turbulence (FX ParticleSystem, Particles.hlsli hooks)
         e.user = h.get();
         e.submit = vfxSubmitCallback;
         e.readback = vfxReadbackCallback;
