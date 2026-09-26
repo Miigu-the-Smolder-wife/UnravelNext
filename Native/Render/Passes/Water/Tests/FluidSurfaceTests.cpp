@@ -18,6 +18,16 @@
 //   8. axes: the box with the output mirrored in z (the Unity host's World -> the renderer, FrameContext::streamAxes)
 //      equals the reference with z negated in positions, normals and velocities and each triangle's last two vertices
 //      swapped (the outside stays counter-clockwise), and it is closed with the mirrored orientation
+//   9. W3 seam (engine 2): basins cut the surface exactly (see the case)
+//   10. the node field's low-pass (FluidSmooth.hlsl; every case above runs with it, against the reference with it):
+//      a. a jittered slab (24 x 8 x 24 cells, 8 particles per cell, each moved up to half a spacing at random, as a
+//         settled MPM fluid's are): the top face's height RMS (its interior) at most 0.6 of the unfiltered one's, the
+//         volume within 1 % of the particles' (the unfiltered surface's noise costs volume: -1.3 %), equal to the
+//         reference; on the noise-free box and sphere the filter changes the volume by at most 0.2 %;
+//      b. a crest (the top on the particle rows at 2 h sin(2 pi x / 8 h)): the fitted amplitude within 3 % of the
+//         unfiltered surface's;
+//      c. jets along x 2 and 4 spacings thick (2 x 2 and 4 x 4 particles across): the middle's mean radius within 5 % of
+//         the unfiltered one's, the thin jet drawn over its whole length
 //   unx_test_water_fluidsurfacetests [--no-debug-layer] [--warp]
 #include "unx/water/FluidSurface.h"
 
@@ -123,6 +133,33 @@ Mesh reference(const unx::water::FluidSurfaceDesc& d, const std::vector<Particle
                 for (int a = 0; a < 3; ++a) m[a] += (int32_t)std::lround(weight * vel[a] * 65536.0f);
             }
     }
+    // The node field's low-pass (FluidSmooth.hlsl): [1, -6, 15, 44, 15, -6, 1] / 64 along x, y, z in integers (floor of
+    // (sum + 32) / 64), inactive nodes read 0 and are not written, the density clamped at 0 after the last axis.
+    if (d.smooth)
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            std::vector<std::array<int32_t, 4>> in(density.size()), out(density.size());
+            for (size_t k = 0; k < density.size(); ++k) in[k] = { int32_t(density[k]), momentum[k][0], momentum[k][1], momentum[k][2] };
+            auto read = [&](int x, int y, int z) -> std::array<int32_t, 4> { uint32_t* n = node(x, y, z); return n ? in[size_t(n - density.data())] : std::array<int32_t, 4>{}; };
+            static const int32_t taps[7] = { 1, -6, 15, 44, 15, -6, 1 };
+            for (size_t s = 0; s < blockOf.size(); ++s)
+            {
+                const int b = blockOf[s], bx = b % nb[0], by = (b / nb[0]) % nb[1], bz = b / (nb[0] * nb[1]);
+                for (int t = 0; t < 512; ++t)
+                {
+                    const int j[3] = { bx * 8 + t % 8, by * 8 + (t / 8) % 8, bz * 8 + t / 64 };
+                    std::array<int32_t, 4> sum{};
+                    for (int k = -3; k <= 3; ++k)
+                    {
+                        const auto v = read(j[0] + (axis == 0 ? k : 0), j[1] + (axis == 1 ? k : 0), j[2] + (axis == 2 ? k : 0));
+                        for (int c = 0; c < 4; ++c) sum[c] += taps[k + 3] * v[c];
+                    }
+                    for (int c = 0; c < 4; ++c) out[s * 512 + t][c] = (sum[c] + 32) >> 6;
+                    if (axis == 2) out[s * 512 + t][0] = std::max(out[s * 512 + t][0], 0);
+                }
+            }
+            for (size_t k = 0; k < density.size(); ++k) { density[k] = uint32_t(out[k][0]); momentum[k] = { out[k][1], out[k][2], out[k][3] }; }
+        }
     auto at = [&](int x, int y, int z) { uint32_t* n = node(x, y, z); return n ? *n : 0u; };
     auto momentumAt = [&](int x, int y, int z, int a) { uint32_t* n = node(x, y, z); return n ? (float)momentum[size_t(n - density.data())][a] / 65536.0f : 0.0f; };
     const auto& cases = FluidSurface::caseTable();
@@ -397,6 +434,9 @@ int main(int argc, char** argv)
         desc.scale = 2; desc.h = 0.025f; desc.origin[0] = 10; desc.origin[1] = -2; desc.origin[2] = 3;
         desc.maxParticles = 300000; desc.maxTriangles = 400000;
         FluidSurface surface(gpu.device, gpu.shaders, desc);
+        unx::water::FluidSurfaceDesc rawDesc = desc;  // the particles' own density, unfiltered (the reconstruction's baseline)
+        rawDesc.smooth = false;
+        FluidSurface rawSurface(gpu.device, gpu.shaders, rawDesc);
         uint32_t maxCase = 0;
         for (uint32_t c = 0; c < 256; ++c) maxCase = std::max(maxCase, FluidSurface::caseTable()[c * FluidSurface::kCaseStride]);
         auto all = [](float, float, float) { return true; };
@@ -406,7 +446,11 @@ int main(int argc, char** argv)
         compare(boxMesh, boxRef, "box");
         checkClosed(boxMesh, boxRef, "box");
         const double h3 = double(desc.h) * desc.h * desc.h, boxVolume = volume(boxMesh), boxExpected = box.size() * h3;
-        W_CHECK(std::abs(boxVolume / boxExpected - 1) <= 0.01, "box volume %.6g m3, particles %.6g m3", boxVolume, boxExpected);
+        // The reconstruction's own volume (the 0.5 level of the unfiltered sum rounds the box's edges at the spacing:
+        // -0.94 %), and the low-pass's change of it (FluidSmooth.hlsl: flat faces exact, shrinkage 4th order in h).
+        const double boxRawVolume = volume(run(gpu, rawSurface, box, nullptr, 1));
+        W_CHECK(std::abs(boxRawVolume / boxExpected - 1) <= 0.01, "box volume (unfiltered) %.6g m3, particles %.6g m3", boxRawVolume, boxExpected);
+        W_CHECK(std::abs(boxVolume / boxRawVolume - 1) <= 0.002, "box volume %.6g m3, unfiltered %.6g m3", boxVolume, boxRawVolume);
         // 9. W3 seam (engine 2): a basin far from the fluid changes nothing (bit identical); a tilted bath surface through
         // the box cuts it exactly - no vertex of a drawn triangle under the water, and the kept area equals the unclipped
         // mesh clipped on the CPU in double against the same surface
@@ -499,8 +543,85 @@ int main(int argc, char** argv)
         const auto sphereRef = reference(desc, sphere, nullptr, 1);
         compare(sphereMesh, sphereRef, "sphere");
         checkClosed(sphereMesh, sphereRef, "sphere");
-        const double sphereVolume = volume(sphereMesh), sphereExpected = sphere.size() * h3;
+        const double sphereVolume = volume(sphereMesh), sphereExpected = sphere.size() * h3, sphereRawVolume = volume(run(gpu, rawSurface, sphere, nullptr, 1));
         W_CHECK(std::abs(sphereVolume / sphereExpected - 1) <= 0.01, "sphere volume %.6g m3, particles %.6g m3", sphereVolume, sphereExpected);
+        W_CHECK(std::abs(sphereVolume / sphereRawVolume - 1) <= 0.002, "sphere volume %.6g m3, unfiltered %.6g m3", sphereVolume, sphereRawVolume);
+        std::printf("volumes vs the particles: box %.3f %% (unfiltered %.3f %%), sphere %.3f %% (unfiltered %.3f %%)\n", 100 * (boxVolume / boxExpected - 1),
+                    100 * (boxRawVolume / boxExpected - 1), 100 * (sphereVolume / sphereExpected - 1), 100 * (sphereRawVolume / sphereExpected - 1));
+        // 10. the low-pass removes the particles' sampling noise and keeps the water's shape (FluidSmooth.hlsl): see the head.
+        {
+            const double cell = 2.0 * desc.h;  // a fluid cell (two spacings) in m
+            auto world = [&](int a, double c) { return desc.origin[a] + c * cell; };
+            std::mt19937 smoothRng(11);
+            std::uniform_real_distribution<float> half(-0.25f, 0.25f);  // half a spacing (cells)
+            auto slab = lattice(4, 4, 4, 28, 12, 28, all);
+            for (auto& p : slab) for (float& x : p.x) x += half(smoothRng);
+            const auto slabMesh = run(gpu, surface, slab, nullptr, 1), slabRaw = run(gpu, rawSurface, slab, nullptr, 1);
+            compare(slabMesh, reference(desc, slab, nullptr, 1), "jittered slab");
+            auto topRms = [&](const Mesh& m) {
+                double sum = 0, sum2 = 0;
+                size_t n = 0;
+                for (const auto& v : m.vertices)
+                    if (v[1] > world(1, 11) && v[0] > world(0, 5.5) && v[0] < world(0, 26.5) && v[2] > world(2, 5.5) && v[2] < world(2, 26.5)) sum += v[1], sum2 += double(v[1]) * v[1], ++n;
+                const double mean = sum / n;
+                return std::sqrt(std::max(0.0, sum2 / n - mean * mean));
+            };
+            const double rmsRaw = topRms(slabRaw), rms = topRms(slabMesh), slabExpected = slab.size() * h3, slabV = volume(slabMesh), slabRawV = volume(slabRaw);
+            std::printf("jittered slab: top height RMS %.3f mm -> %.3f mm (%.2f x); volume %.3f %% vs particles (unfiltered %.3f %%)\n", 1e3 * rmsRaw, 1e3 * rms, rmsRaw / rms,
+                        100 * (slabV / slabExpected - 1), 100 * (slabRawV / slabExpected - 1));
+            W_CHECK(rms <= 0.6 * rmsRaw, "jittered slab: top RMS %.4g m, unfiltered %.4g m", rms, rmsRaw);
+            W_CHECK(std::abs(slabV / slabExpected - 1) <= 0.01, "jittered slab volume %.6g, unfiltered %.6g, particles %.6g", slabV, slabRawV, slabExpected);
+            // b. crest
+            const double k = 2 * 3.14159265358979 / 4.0;  // per cell: wavelength 4 cells = 8 spacings
+            auto crest = lattice(4, 4, 4, 28, 14, 28, [&](float x, float y, float) { return y < 10 + std::sin(k * x); });
+            const auto crestMesh = run(gpu, surface, crest, nullptr, 1), crestRaw = run(gpu, rawSurface, crest, nullptr, 1);
+            auto amplitude = [&](const Mesh& m) {
+                // least squares y = a + b sin(kx) + c cos(kx) over the top vertices (upward normals) of the interior
+                double A[3][3] = {}, r[3] = {};
+                for (const auto& v : m.vertices)
+                {
+                    if (!(v[4] > 0.3f) || v[1] < world(1, 7) || v[0] < world(0, 6) || v[0] > world(0, 26) || v[2] < world(2, 6) || v[2] > world(2, 26)) continue;
+                    const double x = (v[0] - desc.origin[0]) / cell, f[3] = { 1, std::sin(k * x), std::cos(k * x) };
+                    for (int i = 0; i < 3; ++i) { r[i] += f[i] * v[1]; for (int j = 0; j < 3; ++j) A[i][j] += f[i] * f[j]; }
+                }
+                for (int i = 0; i < 3; ++i)  // Gauss-Jordan on the 3 x 3 normal equations
+                {
+                    const double p = A[i][i];
+                    for (int j = 0; j < 3; ++j) A[i][j] /= p;
+                    r[i] /= p;
+                    for (int e = 0; e < 3; ++e)
+                        if (e != i) { const double q = A[e][i]; for (int j = 0; j < 3; ++j) A[e][j] -= q * A[i][j]; r[e] -= q * r[i]; }
+                }
+                return std::sqrt(r[1] * r[1] + r[2] * r[2]);
+            };
+            const double crestA = amplitude(crestMesh), crestRawA = amplitude(crestRaw);
+            std::printf("crest (wavelength 8 h, particle amplitude 2 h): fitted amplitude %.3f mm, unfiltered %.3f mm (%.4f)\n", 1e3 * crestA, 1e3 * crestRawA, crestA / crestRawA);
+            W_CHECK(std::abs(crestA / crestRawA - 1) <= 0.03, "crest amplitude %.4g m, unfiltered %.4g m", crestA, crestRawA);
+            // c. jets
+            for (const float R : { 0.75f, 1.25f })
+            {
+                auto jet = lattice(4, 12, 12, 28, 20, 20, [&](float, float y, float z) { return (y - 16) * (y - 16) + (z - 16) * (z - 16) <= R * R; });
+                const auto jetMesh = run(gpu, surface, jet, nullptr, 1), jetRaw = run(gpu, rawSurface, jet, nullptr, 1);
+                std::vector<char> covered(48, 0);
+                auto radius = [&](const Mesh& m, bool mark) {
+                    double sum = 0;
+                    size_t n = 0;
+                    for (const auto& v : m.vertices)
+                    {
+                        const double x = (v[0] - desc.origin[0]) / cell;
+                        if (mark && x >= 4 && x < 28) covered[size_t((x - 4) * 2)] = 1;
+                        if (x < 12 || x > 20) continue;
+                        sum += std::hypot(v[1] - world(1, 16), v[2] - world(2, 16)), ++n;
+                    }
+                    return n ? sum / n : 0.0;
+                };
+                const double r = radius(jetMesh, true), rRaw = radius(jetRaw, false);
+                const size_t spans = size_t(std::count(covered.begin(), covered.end(), 1));
+                std::printf("jet %.0f spacings thick: mean radius %.3f mm, unfiltered %.3f mm (%.4f), drawn over %zu of 48 half cells\n", 4 * R - 1, 1e3 * r, 1e3 * rRaw, r / rRaw, spans);
+                W_CHECK(rRaw > 0 && std::abs(r / rRaw - 1) <= 0.05, "jet R %.2f: mean radius %.4g m, unfiltered %.4g m", R, r, rRaw);
+                W_CHECK(spans == 48, "jet R %.2f: drawn over %zu of 48 half cells", R, spans);
+            }
+        }
         std::mt19937 rng(7);
         std::uniform_real_distribution<float> jitter(-0.2f, 0.2f);
         auto cloud = lattice(6, 6, 6, 26, 18, 26, all);

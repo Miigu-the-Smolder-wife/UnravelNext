@@ -25,6 +25,8 @@ struct FluidSurfaceDesc
     uint32_t maxParticles = 0;
     uint32_t maxBlocks = 0;      // active block pool (0 = every block of the grid)
     uint32_t maxTriangles = 0;
+    bool smooth = true;          // the node field's low-pass before the level set (FluidSmooth.hlsl); false only for the
+                                 // tests' comparison with the raw particle density
 };
 struct FluidSurfaceInput
 {
@@ -90,7 +92,7 @@ private:
     render::ShaderLibrary& m_shaders;
     FluidSurfaceDesc m_desc;
     uint32_t m_blocks[3] = {}, m_tableSize = 0, m_maxBlocks = 0;
-    render::ComPtr<ID3D12Resource> m_table, m_scan, m_density, m_counters, m_info, m_blockTris, m_vertices, m_velocities, m_cases, m_dispatch, m_draw;
+    render::ComPtr<ID3D12Resource> m_table, m_scan, m_density, m_smooth, m_counters, m_info, m_blockTris, m_vertices, m_velocities, m_cases, m_dispatch, m_draw;
     render::ComPtr<ID3D12Resource> m_basinTable;  // W3 seam: 64 basin records of 48 B (FluidBasin.hlsl)
     render::ComPtr<ID3D12CommandSignature> m_signature;
     bool m_casesUploaded = false;
