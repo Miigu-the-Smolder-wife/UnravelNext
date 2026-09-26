@@ -287,6 +287,7 @@ void GpuScene::upload(const scene::Scene& s)
     m_materialBuffer = createStructured(materials.data(), sizeof(gpu::Material), materials.size(), L"scene materials");
     m_materialRemapBuffer = createStructured(remap.data(), sizeof(uint32_t), remap.size(), L"scene material remap");
     m_lightBuffer = createStructured(lights.data(), sizeof(gpu::Light), lights.size(), L"scene lights");
+    m_lights = lights;
     m_skinBuffer = createStructured(skin.data(), sizeof(gpu::SkinVertex), skin.size(), L"scene skin");
     m_bonePalette = createStructured(palette.data(), sizeof(float4), palette.size(), L"bone palette", true);
     m_prevBonePalette = createStructured(palette.data(), sizeof(float4), palette.size(), L"bone palette (previous)", true);

@@ -308,8 +308,10 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                 if (window <= 0) continue;
                 const float3 Lw = light.color * (light.intensity * window * visibility);
                 const uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
+                const bool specularInReflections = shSpecularInReflections(P[7].y, lightIndex);  // P[7].y: B2 mask
                 [loop] for (uint j = first; j < last; ++j)
                 {
+                    if (j == 1 && specularInReflections) continue;
                     const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (NoV > 0 ? frameBack : frame));
                     const float I = shAreaIntegral(light, p, T, j != 1);
                     radiance += Lw * (j == 0 ? front * (SH_PI * I) : (j == 1 ? specularAlbedo * I : back * (SH_PI * I)));

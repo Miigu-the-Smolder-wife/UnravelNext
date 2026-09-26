@@ -725,6 +725,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
 - v1.45 (2026-09-26):
   - **움직임 끊김 플래그(6.3, A0 복원 검사)**: `gpu::kInstanceMotionBreak`와 `Instance::breakCentre`. S의 `VsmMoved`는 끊긴 인스턴스의 모든 단계를 무효화하고(기준점은 마지막으로 그린 자리에 남는다), `VsmLocalInvalidate`는 옛 구를 `breakCentre`에서 잡는다.
+  - **안정 면광원 마스크(B2, COVERAGE 12.4 구조 2)**: `FrameResources::areaLightStable`(M `prepareScene`, raw SRV, 광원당 1비트 = revision이 8프레임 이상 그대로). `raytracing.emitters`가 켜졌을 때만 게시하고, 꺼지면 UINT32_MAX다. M은 비트가 선 면광원의 LTC 스펙큘러를 R의 반사 경로(K/G/M)에 넘기고, R은 비트가 없는 광원을 직접 발광체 hit에서 뺀다. `GpuScene::lights()`(광원 레코드 CPU 사본).
 - v1.44 (2026-09-26):
   - **commit 뒤 장면 편집(6.3, I 요청, D0)**: `GpuScene::setInstances`, `setMaterials`.
   - **Unity 콘텐츠 매핑(8.5, D0, core 결정)**: 좌표·UV·재질(URP Lit, Standard)·광원·메시 규칙. 8.1로 정확히 옮길 수 없는 입력은 콘텐츠 보고로 남긴다.

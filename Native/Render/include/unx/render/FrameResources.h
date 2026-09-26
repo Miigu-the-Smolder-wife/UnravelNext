@@ -100,6 +100,11 @@ struct FrameResources
                                    // page its layer + 1 (0 = none, T = 1), then the layer pages (4
                                    // knots per texel) and block profiles; ShadowSrvs.layers
     uint32_t vsmConstants = UINT32_MAX;  // CBV descriptor of this frame's VSM constants    [S]
+    // v1.45 (B2, COVERAGE 12.4 structure 2): raw SRV of 1 bit per scene light, set when the light's revision has held for  [M]
+    // >= 8 frames and raytracing.emitters is on. M leaves those area lights' LTC specular to R's reflection paths (K/G/M
+    // see the emitters); R excludes the unset ones from direct emitter hits, so no light is counted twice or missed.
+    // UINT32_MAX when raytracing.emitters is off (M evaluates every area light's specular).
+    uint32_t areaLightStable = UINT32_MAX;
                                          // (upload ring, not a graph resource; v1.18). With
                                          // the four buffers: ShadowSrvs (ShadowVisibility.hlsli),
                                          // filled by shadowPages for shadowSunVisibilityAt (R)

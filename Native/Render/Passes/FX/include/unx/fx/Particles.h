@@ -93,6 +93,9 @@ public:
     void submit(const uint8_t* packet, uint64_t bytes);
     // Ticks submitted and not yet recorded.
     size_t pendingTicks() const { return m_pending.size(); }
+    // Readback ring slots: at most this many ticks may be recorded into one graph (a later tick reuses the slot of the
+    // tick 'readbackSlots()' before it, which must have executed); a host bounds its pending ticks below it.
+    uint32_t readbackSlots() const { return m_readbackSlots; }
 
     // C0: records every pending tick in order, in the graph of fc (one graphics queue, one list).
     void record(render::FramePassContext& fc);

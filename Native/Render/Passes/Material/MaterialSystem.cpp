@@ -4,6 +4,8 @@
 #include "unx/material/TextureSystem.h"
 #include "unx/render/GpuScene.h"
 
+#include <algorithm>
+#include <cstring>
 #include <utility>
 #include <vector>
 
@@ -45,12 +47,101 @@ uint32_t experimentMask(const QualityConfig& q)
 }
 } // namespace
 
+namespace
+{
+// COVERAGE 12.4 structure 2 (B2): per scene light, the frame its revision last changed; per frame a bit mask of the lights
+// whose revision held for >= kStableFrames (the GI cache's reconvergence, design 2.5), in an upload ring read by M's
+// shading and R's reflection paths through FrameResources::areaLightStable.
+struct AreaLightStability
+{
+    static constexpr uint32_t kFrames = 4, kStableFrames = 8;
+    Device* device = nullptr;
+    ComPtr<ID3D12Resource> buffer;
+    uint8_t* mapped = nullptr;
+    uint32_t words = 0;
+    uint32_t srv[kFrames] = { gpu::kNone, gpu::kNone, gpu::kNone, gpu::kNone };
+    std::vector<uint32_t> revision;
+    std::vector<uint64_t> since;
+    void releaseViews()
+    {
+        if (!device) return;
+        DescriptorHeaps* h = &device->descriptors();
+        for (uint32_t& s : srv)
+            if (s != gpu::kNone)
+            {
+                const uint32_t v = s;
+                device->deferCall([h, v] { h->freeResource(v); });
+                s = gpu::kNone;
+            }
+        if (buffer) device->deferRelease(buffer);
+        buffer.Reset();
+        mapped = nullptr;
+    }
+    ~AreaLightStability() { releaseViews(); }
+    uint32_t publish(Device& d, const std::vector<gpu::Light>& lights, uint64_t frame)
+    {
+        device = &d;
+        const uint32_t n = (uint32_t)lights.size(), need = std::max<uint32_t>((n + 31) / 32, 1);
+        if (revision.size() != n)
+        {
+            revision.assign(n, UINT32_MAX);
+            since.assign(n, frame);
+        }
+        if (need > words)
+        {
+            releaseViews();
+            words = need;
+            D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
+            D3D12_RESOURCE_DESC1 bd{};
+            bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            bd.Width = (uint64_t)kFrames * words * 4;
+            bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
+            bd.SampleDesc.Count = 1;
+            bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            check(d.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &bd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&buffer)),
+                  "M area light stability ring");
+            buffer->SetName(L"M area light stability ring");
+            D3D12_RANGE none{ 0, 0 };
+            check(buffer->Map(0, &none, reinterpret_cast<void**>(&mapped)), "map M area light stability ring");
+            for (uint32_t k = 0; k < kFrames; ++k)
+            {
+                srv[k] = d.descriptors().allocateResource();
+                D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+                sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                sd.Format = DXGI_FORMAT_R32_TYPELESS;
+                sd.Buffer.FirstElement = (uint64_t)k * words;
+                sd.Buffer.NumElements = words;
+                sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                d.d3d()->CreateShaderResourceView(buffer.Get(), &sd, d.descriptors().resourceCpu(srv[k]));
+            }
+        }
+        const uint32_t slot = (uint32_t)(frame % kFrames);
+        uint32_t* out = reinterpret_cast<uint32_t*>(mapped + (size_t)slot * words * 4);
+        std::memset(out, 0, (size_t)words * 4);
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            if (lights[i].revision != revision[i])
+            {
+                revision[i] = lights[i].revision;
+                since[i] = frame;
+            }
+            if (frame - since[i] >= kStableFrames) out[i / 32] |= 1u << (i % 32);
+        }
+        return srv[slot];
+    }
+};
+} // namespace
+
 void prepareScene(FramePassContext& fc)
 {
     TextureSystem& t = fc.state<TextureSystem>("M.textures");
     t.sync(fc.device, fc.scene);
     // A no-op when nothing changed (GpuScene keeps the buffer and the revision).
     fc.scene.setMaterialTextures(t.published());
+    // B2: which lights' specular R's reflection paths carry (only with R's emitters on; frames in flight use their own slot).
+    if (fc.quality.has("raytracing.emitters") && fc.quality.boolean("raytracing.emitters"))
+        fc.resources.areaLightStable = fc.state<AreaLightStability>("M.areaLightStability").publish(fc.device, fc.scene.lights(), fc.frame.frameIndex);
 }
 
 uint32_t textureTable(FramePassContext& fc)

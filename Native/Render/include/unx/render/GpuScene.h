@@ -115,6 +115,7 @@ public:
 
     const scene::Scene* source() const { return m_source; }
     const std::vector<gpu::Instance>& instances() const { return m_instances; }
+    const std::vector<gpu::Light>& lights() const { return m_lights; }  // CPU mirror of the light records (revisions)
     const std::vector<gpu::Mesh>& meshes() const { return m_meshes; }
     uint32_t revision() const { return m_revision; }
     ID3D12Resource* buffer(const char* name) const;  // "vertices", "indices", "instances", "bonePalette", "prevBonePalette", ...
@@ -145,6 +146,7 @@ private:
     Device& m_device;
     const scene::Scene* m_source = nullptr;
     std::vector<gpu::Instance> m_instances;
+    std::vector<gpu::Light> m_lights;
     std::vector<gpu::Mesh> m_meshes;
     std::vector<gpu::Material> m_materials;
     std::vector<uint32_t> m_remap;  // material override table (gpu::Instance::materialRemap)

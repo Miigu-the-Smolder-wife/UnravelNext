@@ -575,7 +575,13 @@ void HostRenderer::vfxSubmit(const uint8_t* packet, uint64_t bytes)
     std::lock_guard lock(m_fxMutex);
     try
     {
-        fxModule().submit(packet, bytes);
+        // A frame records every pending tick into one graph, and a tick reuses the readback slot of the tick one ring
+        // before it: more pending ticks than the ring holds would wait on a slot of the same unexecuted graph. Ticks
+        // submitted without frames or readbacks in between (a hitch, a long fixed-step catch-up) run at once on the
+        // compute queue before the ring fills.
+        fx::ParticleSystem& p = fxModule();
+        if (p.pendingTicks() + 1 >= p.readbackSlots()) fxRunPending();
+        p.submit(packet, bytes);
     }
     catch (const std::exception& e)
     {

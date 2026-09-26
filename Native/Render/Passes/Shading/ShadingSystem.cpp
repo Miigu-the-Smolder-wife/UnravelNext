@@ -502,6 +502,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 std::memcpy(k32, k, sizeof k);
                 std::memcpy(k32 + 24, edge, sizeof edge);
                 k32[30] = overflow ? c.srv(v.shadowOverflow) : none;  // P[7].z
+                k32[16] = r.areaLightStable;     // P[4].x (B2)
                 particleConstants(c, k32 + 22);  // P[5].zw
                 c.computeConstants(k32, 32);
                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
@@ -570,6 +571,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              std::memcpy(k32, k, sizeof k);
                              std::memcpy(k32 + 24, edge, sizeof edge);
                              particleConstants(c, k32 + 22);  // P[5].zw
+                             k32[16] = r.areaLightStable;     // P[4].x (B2)
                              c.cmd->SetPipelineState(fallbackKernel);
                              c.bindFrameConstants(cb);
                              c.computeConstants(k32, 32);
@@ -714,6 +716,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             k[26] = r.giCache.valid() ? c.srv(r.giCache) : gpu::kNone;
             k[27] = fragmentShadows && v.shadowFragmentSun.valid() ? c.srv(v.shadowFragmentSun) : gpu::kNone;
             k[28] = fragmentShadows ? c.srv(v.coverageDepthRange) : gpu::kNone;
+            k[29] = r.areaLightStable;  // P[7].y (B2)
         };
         auto shadingConstants = [=](PassContext& c, uint32_t (&k)[24], uint32_t colour) {
             const uint32_t none = gpu::kNone;

@@ -277,6 +277,15 @@ float4 shEncodeExposed(float3 e)
 }
 float4 shEncodeOutput(float3 radiance) { return shEncodeExposed(radiance * g_exposure); }
 
+// COVERAGE 12.4 structure 2 (B2): the light's specular is in R's reflection paths (FrameResources::areaLightStable, 1 bit
+// per light; UNX_NONE: R's emitters are off and M evaluates every area light's LTC specular).
+bool shSpecularInReflections(uint maskSrv, uint lightIndex)
+{
+    if (maskSrv == UNX_NONE) return false;
+    ByteAddressBuffer mask = ResourceDescriptorHeap[maskSrv];
+    return ((mask.Load(4u * (lightIndex >> 5)) >> (lightIndex & 31u)) & 1u) != 0;
+}
+
 // Particle layer composite (FX's ParticleLayer.hlsli; request 20260926_FX_particle_render_pass 4, FEATURES_GAME 0.A 6), in
 // exposed radiance before the tone map: C = C_surface x T + L, where the layer's L already carries the exposure and the air
 // between the camera and each particle, and C_surface the air in front of the surface. Each output writer calls it once on
