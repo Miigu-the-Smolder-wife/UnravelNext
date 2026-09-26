@@ -292,6 +292,39 @@ float evaluateSheenLobe(float roughness, float3 n, float3 v, float3 l)
     return sheenD(saturate(dot(n, normalize(v + l))), alphaFromRoughness(roughness)) * G2 / (4 * NoV * NoL);
 }
 
+float sheenSunRule(float roughness, float3 n, float3 v, float3 l0, float rho)
+{
+    const float3 du = normalize(cross(std::fabs(l0.z) < 0.9f ? float3{ 0, 0, 1 } : float3{ 1, 0, 0 }, l0)), dw = cross(l0, du);
+    const float NoL0 = dot(n, l0), gu = dot(n, du), gw = dot(n, dw), k = std::sqrt(gu * gu + gw * gw);
+    if (NoL0 <= -k * rho) return 0;
+    float sum = 0;
+    if (NoL0 >= k * rho)
+    {
+        const float q = rho * 0.70710678f;
+        for (int i = 0; i < 4; ++i)
+        {
+            const float3 l = normalize(l0 + ((i & 2) ? dw : du) * ((i & 1) ? -q : q));
+            sum += 0.25f * evaluateSheenLobe(roughness, n, v, l) * std::max(dot(n, l), 0.0f);
+        }
+        return sum;
+    }
+    const float eu = gu / std::max(k, 1e-8f), ew = gw / std::max(k, 1e-8f);
+    const float phi0 = std::asin(std::clamp(-NoL0 / (k * rho), -1.0f, 1.0f)), half = 0.5f * (0.5f * kPi - phi0), mid = 0.5f * (0.5f * kPi + phi0);
+    const float x4[4] = { -0.86113631f, -0.33998104f, 0.33998104f, 0.86113631f }, w4[4] = { 0.34785485f, 0.65214515f, 0.65214515f, 0.34785485f };
+    const float x3[3] = { -0.77459667f, 0, 0.77459667f }, w3[3] = { 0.55555556f, 0.88888889f, 0.55555556f };
+    for (int i = 0; i < 4; ++i)
+    {
+        const float phi = mid + half * x4[i], t = rho * std::sin(phi), w = rho * std::cos(phi);
+        for (int j = 0; j < 3; ++j)
+        {
+            const float s = w * x3[j], ou = eu * t - ew * s, ow = ew * t + eu * s;
+            const float3 l = normalize(l0 + du * ou + dw * ow);
+            sum += w4[i] * w3[j] * evaluateSheenLobe(roughness, n, v, l) * std::max(dot(n, l), 0.0f) * w * w;
+        }
+    }
+    return sum * half / (kPi * rho * rho);
+}
+
 float3 evaluateSheen(const Surface& s, const Sheen& sh, float3 n, float3 v, float3 l)
 {
     const float3 base = evaluate(s, n, v, l);

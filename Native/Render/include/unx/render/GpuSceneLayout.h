@@ -182,7 +182,9 @@ struct MaterialLayers  // 64 B
     float clearcoatRoughness;   // perceptual r_c
     uint32_t coat;              // tabulated coat (scene::model::coatIndex: 0 eta 1.5, 1 eta 1.33)
     float coatEta;
-    float reserved[12];         // (thin film, sheen, anisotropy: later layers)
+    float sheenColor[3];        // A9 sheen (MaterialSheen; MATERIAL_LAYERS 1.4): colour C (0 = none), perceptual r_sh
+    float sheenRoughness;
+    float reserved[8];          // (thin film, anisotropy: later layers)
 };
 static_assert(sizeof(MaterialLayers) == 64);
 
@@ -208,6 +210,7 @@ enum MaterialFlags : uint32_t
     MaterialTwoSided = 1u << 0,
     MaterialAlphaTested = 1u << 1,
     MaterialLayered = 1u << 2,  // A9: a MaterialLayers record, index in classFlags bits 16..31
+    MaterialSheen = 1u << 3,    // A9: the record's layer is a sheen (shade class Sheen; else a clearcoat)
 };
 
 struct Light  // 80 B

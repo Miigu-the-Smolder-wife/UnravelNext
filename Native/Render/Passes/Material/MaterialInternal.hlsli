@@ -25,8 +25,9 @@
 #define M_CLASS_OPAQUE 1u      // Standard and Foliage (INTERFACES 8.1)
 #define M_CLASS_SUBSURFACE 2u
 #define M_CLASS_WATER 3u
-#define M_CLASS_LAYERED 4u     // A9: Standard materials with layers (MATERIAL_LAYERED): ShadeOpaque LAYERED=1
-#define M_CLASS_COUNT 5u
+#define M_CLASS_LAYERED 4u     // A9: Standard materials with a clearcoat (MATERIAL_LAYERED): ShadeOpaque LAYERED=1
+#define M_CLASS_SHEEN 5u       // A9: Standard materials with a sheen (MATERIAL_LAYERED | MATERIAL_SHEEN): ShadeOpaque LAYERED=2
+#define M_CLASS_COUNT 6u
 
 uint mShadeClass(uint materialClass)
 {
@@ -38,7 +39,7 @@ uint mShadeClass(uint materialClass)
 // The material's shade class (A9: a layered Standard material shades in the layered class).
 uint mShadeClassOf(GpuMaterial m)
 {
-    if ((m.classFlags & MATERIAL_LAYERED) != 0 && materialClass(m) == MATERIAL_STANDARD) return M_CLASS_LAYERED;
+    if ((m.classFlags & MATERIAL_LAYERED) != 0 && materialClass(m) == MATERIAL_STANDARD) return (m.classFlags & MATERIAL_SHEEN) != 0 ? M_CLASS_SHEEN : M_CLASS_LAYERED;
     return mShadeClass(materialClass(m));
 }
 

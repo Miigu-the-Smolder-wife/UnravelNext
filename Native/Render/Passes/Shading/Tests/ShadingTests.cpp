@@ -2968,6 +2968,218 @@ void testPreshadedRecords(TestFrame& tf, Report& report)
 // The coat lobe's sun term as ShadeOpaque LAYERED forms it (shSunSpecular with F = 1 at the coat's roughness times
 // shCoatSunWeight) against a dense quadrature of scene::model::evaluateCoatLobe x cos over the disk, for both coats, with
 // the mirror direction at 0 .. 6 disk radii from the centre; relative to the peak of the case's roughness (as test 2).
+// A9 sheen (MATERIAL_LAYERS 1.4): the HLSL mirror against the C++ model on the GPU - the lobe and E_sh against
+// evaluateSheenLobe / sheenAlbedo, and the 4-point sun term against the same rule in double and against a dense
+// quadrature of the disk (the rule's own error, measured on the CPU at 1.5e-3).
+void testSheen(TestFrame& tf, Report& report)
+{
+    {
+        scene::Scene s;  // the scene's tables (coat + sheen in one buffer)
+        s.name = "sheen test";
+        s.materials.push_back(scene::Material{});
+        scene::Instance plane;
+        plane.mesh = addPlane(s, 10, 0);
+        s.instances.push_back(plane);
+        scene::Camera cam;
+        cam.name = "sheen";
+        cam.position = { 0, 1, 3 };
+        cam.forward = normalize(float3{ 0, -0.3f, -1 });
+        s.cameras.push_back(cam);
+        tf.setScene(s);
+    }
+    struct Case { float3 n, v, l; float r, rho; };
+    std::vector<Case> cases;
+    const float rho = 0.2725f * 3.14159265f / 180;
+    for (float r : { 0.1f, 0.2f, 0.35f, 0.6f, 1.0f })
+        for (float mu : { 0.03f, 0.2f, 0.5f, 0.9f })
+            for (float el : { -0.15f, 0.0f, 0.12f, 3.0f, 20.0f, 60.0f })
+                for (float az : { 0.0f, 100.0f, 180.0f })
+                {
+                    const float t = el * 3.14159265f / 180, ph = az * 3.14159265f / 180;
+                    cases.push_back({ { 0, 0, 1 }, { std::sqrt(1 - mu * mu), 0, mu }, { std::cos(t) * std::cos(ph), std::cos(t) * std::sin(ph), std::sin(t) }, r, rho });
+                }
+    std::vector<float4> q;
+    for (const Case& c : cases)
+    {
+        q.push_back({ c.n.x, c.n.y, c.n.z, c.r });
+        q.push_back({ c.v.x, c.v.y, c.v.z, 0 });
+        q.push_back({ c.l.x, c.l.y, c.l.z, c.rho });
+    }
+    std::shared_ptr<std::vector<uint8_t>> out;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, 64, 64);
+        BufferRef in = fc.graph.createBuffer({ "m.test.sheen queries", q.size() * 16, 16 });
+        BufferRef res = fc.graph.createBuffer({ "m.test.sheen results", cases.size() * 16, 16 });
+        ComPtr<ID3D12Resource> staging = makeBuffer(tf.device, q.size() * 16, D3D12_HEAP_TYPE_UPLOAD);
+        void* p = nullptr;
+        D3D12_RANGE none{ 0, 0 };
+        check(staging->Map(0, &none, &p), "map");
+        std::memcpy(p, q.data(), q.size() * 16);
+        staging->Unmap(0, nullptr);
+        tf.keep(staging);
+        fc.graph.addPass("m.test.upload", QueueType::Graphics, [&](PassBuilder& b) { b.use(in, Use::CopyDst); },
+                         [staging, in, bytes = q.size() * 16](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(in), 0, staging.Get(), 0, bytes); });
+        ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shading/Tests/SheenProbe");
+        const D3D12_GPU_VIRTUAL_ADDRESS cb = v.frameConstants;
+        const uint32_t count = (uint32_t)cases.size();
+        fc.graph.addPass("m.test.sheen probe", QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             b.use(in, Use::SrvCompute);
+                             b.use(res, Use::UavCompute);
+                         },
+                         [=](PassContext& c) {
+                             const uint32_t k[4] = { c.srv(in), c.uav(res), count, 0 };
+                             c.cmd->SetPipelineState(pso);
+                             c.bindFrameConstants(cb);
+                             c.computeConstants(k, 4);
+                             c.cmd->Dispatch((count + 63) / 64, 1, 1);
+                         });
+        out = tf.readbackBuffer(fc, res, cases.size() * 16);
+    });
+    double lobeErr = 0, albedoErr = 0, ruleErr = 0, diskErr = 0;
+    for (size_t i = 0; i < cases.size(); ++i)
+    {
+        const Case& c = cases[i];
+        float g[4];
+        std::memcpy(g, out->data() + i * 16, 16);
+        const float lobe = model::evaluateSheenLobe(c.r, c.n, c.v, c.l), albedo = model::sheenAlbedo(c.v.z, c.r);
+        const double scale = std::max((double)albedo / 3.14159265, 1e-3);  // the lobe's cosine-weighted scale
+        if (c.l.z > 0.01f) lobeErr = std::max(lobeErr, std::abs(g[0] - lobe) * std::max((double)c.l.z, 0.0) / scale);
+        albedoErr = std::max(albedoErr, (double)std::abs(g[1] - albedo));
+        // the 4-point rule in double, and the disk average (polar midpoint, 16 x 32)
+        const float3 du = normalize(cross(std::fabs(c.l.z) < 0.9f ? float3{ 0, 0, 1 } : float3{ 1, 0, 0 }, c.l)), dw = cross(c.l, du);
+        const double rule = model::sheenSunRule(c.r, c.n, c.v, c.l, c.rho);
+        double disk = 0;
+        for (int a = 0; a < 16; ++a)
+            for (int b = 0; b < 32; ++b)
+            {
+                const float rr = c.rho * std::sqrt((a + 0.5f) / 16), ph = 2 * 3.14159265f * (b + 0.5f) / 32;
+                const float3 lk = normalize(c.l + du * (rr * std::cos(ph)) + dw * (rr * std::sin(ph)));
+                disk += model::evaluateSheenLobe(c.r, c.n, c.v, lk) * std::max(lk.z, 0.0f) / 512;
+            }
+        ruleErr = std::max(ruleErr, std::abs(g[2] - rule) / std::max(rule, scale));
+        diskErr = std::max(diskErr, std::abs(g[2] - disk) / std::max(disk, scale));
+    }
+    logf("sheen probe: %zu cases; lobe x cos vs C++ %.2e, E_sh %.2e, sun rule vs double %.2e, vs disk average %.2e (relative to max(value, E_sh / pi))\n",
+         cases.size(), lobeErr, albedoErr, ruleErr, diskErr);
+    report(lobeErr < 1e-3, "sheen: modelSheenLobe x cos vs evaluateSheenLobe (rel. to E_sh / pi)", lobeErr, 1e-3);
+    report(albedoErr < 1e-5, "sheen: modelSheenAlbedo vs sheenAlbedo (abs.)", albedoErr, 1e-5);
+    report(ruleErr < 1e-3, "sheen: modelSheenSun vs the 4-point rule in double (rel.)", ruleErr, 1e-3);
+    report(diskErr < 3e-3, "sheen: modelSheenSun vs the disk average (rel.)", diskErr, 3e-3);
+}
+
+// A9 sheen in a frame (shade class Sheen, ShadeOpaque LAYERED=2): a sphere of cloth (sheen C (0.8, 0.6, 0.4), r_sh 0.4
+// over a Standard base) on the ground under the sun alone (the test frame has no GI, shadows or air). Every non-edge pixel
+// of the cloth against keepS x the base's sun term + C x the 4-point sheen sun term (C++ model, the G-buffer's normal and
+// base, the word's footprint-filtered sheen roughness); the ground as the plain model.
+void testSheenFrame(TestFrame& tf, Report& report)
+{
+    scene::Scene s;
+    s.name = "sheen frame test";
+    scene::Material ground;
+    ground.name = "ground";
+    ground.baseColor = { 0.5f, 0.45f, 0.4f };
+    ground.roughness = 0.5f;
+    scene::Material cloth;
+    cloth.name = "cloth";
+    cloth.baseColor = { 0.25f, 0.1f, 0.3f };
+    cloth.roughness = 0.7f;
+    cloth.sheenColor = { 0.8f, 0.6f, 0.4f };
+    cloth.sheenRoughness = 0.4f;
+    s.materials = { ground, cloth };
+    scene::Instance a;
+    a.mesh = addPlane(s, 40, 0);
+    s.instances.push_back(a);
+    scene::Instance b;
+    b.mesh = addSphere(s, 1, 48, 96, 1);
+    b.transform = float3x4::translation({ 0, 1, 0 });
+    s.instances.push_back(b);
+    s.sun.direction = normalize(float3{ -0.4f, 0.35f, -0.85f });  // low and behind the sphere: grazing sheen on its rim
+    scene::Camera cam;
+    cam.name = "sheen";
+    cam.position = { 0.5f, 1.6f, 4.5f };
+    cam.forward = normalize(float3{ -0.1f, -0.15f, -1 });
+    cam.ev100 = 13;
+    s.cameras.push_back(cam);
+    tf.setScene(s);
+
+    const uint32_t W = 960, H = 540;
+    std::shared_ptr<std::vector<uint8_t>> gb, words, lin, depthRb;
+    ViewDesc desc;
+    tf.frame.outputLinearHdr = true;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, W, H, 0);
+        desc = v.view;
+        v.color = fc.graph.createTexture({ "m.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+        tf.vis.record(fc, v);
+        tracks::materialResolve(fc, v);
+        tracks::shading(fc, v);
+        gb = tf.readback(fc, v.gbuffer);
+        words = tf.readback(fc, material::resolveOutputs(fc, v).materialWord);
+        lin = tf.readback(fc, v.color);
+        depthRb = tf.readback(fc, v.depth);
+    });
+    tf.frame.outputLinearHdr = false;
+    const double exposure = 1.0 / (1.2 * std::exp2(13.0)), thetaS = s.sun.angularRadius;
+    const float3 E = s.sun.color * s.sun.illuminance, l0 = normalize(s.sun.direction);
+    const float cap = (float)(2 / (1 + std::cos(thetaS)));
+    const float3 du = normalize(cross(std::fabs(l0.z) < 0.9f ? float3{ 0, 0, 1 } : float3{ 1, 0, 0 }, l0)), dw = cross(l0, du);
+    double worst = 0, largestSheen = 0;
+    uint32_t checked = 0, clothPixels = 0, glint = 0, backlit = 0, terminator = 0;
+    for (uint32_t y = 0; y < H; y += 2)
+        for (uint32_t x = 0; x < W; x += 2)
+        {
+            if (cpuIsEdge(desc, *words, *gb, *depthRb, W, H, x, y, tf.quality)) continue;
+            const uint32_t word = texelOf<uint32_t>(*words, W, x, y);
+            if ((word & 0xFFFF) == 0xFFFF) continue;
+            const scene::Material& mat = s.materials[word & 0xFFFF];
+            const uint2 pk = texelOf<uint2>(*gb, W, x, y);
+            model::Surface su;
+            su.cls = mat.cls;
+            su.baseColor = { (float)srgbToLinear((pk.y & 0xFF) / 255.0), (float)srgbToLinear(((pk.y >> 8) & 0xFF) / 255.0), (float)srgbToLinear(((pk.y >> 16) & 0xFF) / 255.0) };
+            su.roughness = (pk.y >> 24) / 255.0f;
+            su.metallic = ((word >> 16) & 0xFF) / 255.0f;
+            su.specular = mat.specular;
+            const float3 n = octDecode(pk.x);
+            double D[3], Dx[3];
+            pixelRay(desc, x + 0.5, y + 0.5, D, Dx);
+            const float3 v = normalize(float3{ (float)-D[0], (float)-D[1], (float)-D[2] });
+            // Pixels whose sun disk straddles the horizon (|n.l| < 1.5 theta_S) are left to the probe and the CPU test (same
+            // inputs): there the value is ill-conditioned in the G-buffer's 16-bit normal (CPU and GPU decodes differ by
+            // ~1e-5 in n.l against a band 4.8e-3 wide).
+            if ((word & 0xFFFF) == 1 && std::fabs(dot(n, l0)) < 1.5f * (float)thetaS)
+            {
+                ++terminator;
+                continue;
+            }
+            float3 expected = cpuSun(su, n, v, l0, thetaS, &glint, &backlit) * E;
+            if ((word & 0xFFFF) == 1 && dot(n, v) > 0)
+            {
+                ++clothPixels;
+                const float r = std::max((word >> 24) / 255.0f, 0.1f);
+                const float cmax = std::max(mat.sheenColor.x, std::max(mat.sheenColor.y, mat.sheenColor.z));
+                const float keep = 1 - cmax * model::sheenAlbedo(std::max(dot(n, v), 1e-4f), r);
+                const double rule = model::sheenSunRule(r, n, v, l0, (float)thetaS);
+                const float3 sheen = mat.sheenColor * (float)(rule * cap) * E;
+                largestSheen = std::max(largestSheen, (double)sheen.x * exposure);
+                expected = expected * keep + sheen;
+            }
+            expected = expected * (float)exposure;
+            const float4 got = texelOf<float4>(*lin, W, x, y);
+            const double scale = std::max({ expected.x, expected.y, expected.z, 1e-2f });
+            const double e = std::max({ std::abs(got.x - expected.x), std::abs(got.y - expected.y), std::abs(got.z - expected.z) }) / scale;
+            if (e > worst && e > 5e-3) logf("  sheen px (%u,%u) word %08x n.v %.4f n.l %.4f got (%.5f %.5f %.5f) expected (%.5f %.5f %.5f)\n", x, y, word, dot(n, v), dot(n, l0), got.x, got.y, got.z, expected.x, expected.y, expected.z);
+            worst = std::max(worst, e);
+            ++checked;
+        }
+    const shading::Stats st = shading::latestStats(tf.trackState);
+    logf("sheen frame: %u pixels checked (%u cloth, %u cloth terminator pixels left to the probe), largest sheen sun term %.4f (exposed)\n", checked,
+         clothPixels, terminator, largestSheen);
+    report(clothPixels > 5000 && worst < 5e-3, "sheen frame: pixels vs keepS x base sun + C x 4-point sheen sun (rel.)", worst, 5e-3);
+    report(largestSheen > 0.05, "sheen frame: the sheen term is visible (largest exposed sun sheen)", largestSheen, 0.05);
+    (void)st;
+}
+
 void testCoatSun(TestFrame& tf, Report& report)
 {
     {
@@ -3081,7 +3293,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, glassJobsOnly = false, preshadeOnly = false, coatOnly = false, warp = false;
+        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, glassJobsOnly = false, preshadeOnly = false, coatOnly = false, sheenOnly = false, warp = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -3094,6 +3306,7 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--glass-jobs") glassJobsOnly = true;
             if (std::string(argv[i]) == "--preshade") preshadeOnly = true;
             if (std::string(argv[i]) == "--coat") coatOnly = true;
+            if (std::string(argv[i]) == "--sheen") sheenOnly = true;
             if (std::string(argv[i]) == "--warp") warp = true;  // compute probes only (full frames render black on WARP)
         }
         ComPtr<ID3D12Device> warpDevice;
@@ -3112,6 +3325,13 @@ int main(int argc, char** argv)
         Report report;
         testTable(report);
         TestFrame tf(debugLayer, gpuValidation, warpDevice.Get());
+        if (sheenOnly)  // --sheen: the sheen probe alone
+        {
+            testSheen(tf, report);
+            testSheenFrame(tf, report);
+            logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
+            return report.failures ? 1 : 0;
+        }
         if (coatOnly)  // --coat: test 14 alone
         {
             testCoatSun(tf, report);
@@ -3159,6 +3379,8 @@ int main(int argc, char** argv)
         testGlassComposite(tf, report);
         testPreshadedRecords(tf, report);
         testCoatSun(tf, report);
+        testSheen(tf, report);
+        testSheenFrame(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

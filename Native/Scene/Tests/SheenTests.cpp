@@ -161,14 +161,14 @@ int main(int argc, char** argv)
                 CHECK(std::abs(x - y) <= 1e-6f * std::max(1.0f, x));
             }
 
-    // 5. The sun's disk (0.2725 deg radius, rho): the renderer's 4-point rule (the lobe at c +- rho / sqrt(2) along both
-    // disk axes, averaged: exact for quadratics over the disk) against the disk average (polar midpoint quadrature over
-    // the cap), over roughness, view and sun elevation down to 2 degrees above the horizon.
+    // 5. The sun's disk (0.2725 deg radius, rho): the renderer's rule (sheenSunRule: the lobe continued across the horizon
+    // by the 4-point rule times the exact disk mean of the clipped cosine) against the disk average (polar midpoint
+    // quadrature over the cap), over roughness, view and sun elevation, the disk straddling the horizon included.
     const float radius = 0.2725f * kPiF / 180;
-    double diskWorst = 0;
+    double diskWorst = 0, diskDim = 0;  // relative where the value is >= 5 % of the peak sheen; absolute / peak elsewhere
     for (float r : { 0.1f, 0.3f, 1.0f })
         for (float mu : { 0.02f, 0.3f, 1.0f })
-            for (float el : { 2.0f, 10.0f, 45.0f, 90.0f })
+            for (float el : { -0.2f, 0.0f, 0.1f, 0.25f, 2.0f, 10.0f, 45.0f, 90.0f })
                 for (float az : { 0.0f, 90.0f, 180.0f })
                 {
                     const float3 n{ 0, 0, 1 }, v = dirAt(mu);
@@ -176,29 +176,38 @@ int main(int argc, char** argv)
                     const float3 c{ std::cos(t) * std::cos(p), std::cos(t) * std::sin(p), std::sin(t) };
                     const float3 u = normalize(cross(std::abs(c.z) < 0.9f ? float3{ 0, 0, 1 } : float3{ 1, 0, 0 }, c)), w = cross(c, u);
                     double sum = 0, wsum = 0;
-                    for (uint32_t i = 0; i < 16; ++i)
-                        for (uint32_t j = 0; j < 32; ++j)
+                    for (uint32_t i = 0; i < 128; ++i)
+                        for (uint32_t j = 0; j < 256; ++j)
                         {
-                            const float rr = radius * std::sqrt((i + 0.5f) / 16), ph = 2 * kPiF * (j + 0.5f) / 32;
+                            const float rr = radius * std::sqrt((i + 0.5f) / 128), ph = 2 * kPiF * (j + 0.5f) / 256;
                             const float3 l = normalize(c + u * (rr * std::cos(ph)) + w * (rr * std::sin(ph)));
                             sum += evaluateSheenLobe(r, n, v, l) * std::max(0.0f, l.z);
                             wsum += 1;
                         }
                     // relative to the lobe's cosine-weighted scale E_sh / pi where the lobe is near 0 (its zero at h = n)
-                    double centre = 0;
-                    const float q = radius / std::sqrt(2.0f);
-                    for (const float3 d : { u * q, u * -q, w * q, w * -q })
-                    {
-                        const float3 l = normalize(c + d);
-                        centre += 0.25 * evaluateSheenLobe(r, n, v, l) * std::max(0.0f, l.z);
-                    }
+                    const double centre = sheenSunRule(r, n, v, c, radius);
                     const double avg = sum / wsum;
-                    const double rel = std::abs(centre - avg) / std::max(avg, sheenAlbedo(mu, r) / 3.14159265358979);
-                    if (rel > diskWorst) std::printf("  disk r %.2f mu %.2f el %.0f az %.0f: %.2e\n", r, mu, el, az, rel);
-                    diskWorst = std::max(diskWorst, rel);
+                    // relative to the value, floored at 1 % of the brightest sheen of this roughness (the scale the frame tests
+                    // judge dim pixels on: 1 % of a sunlit surface) - near-zero configurations are judged on that scale
+                    double peak = 0;
+                    for (uint32_t i = 0; i < kSheenTableMu; ++i) peak = std::max(peak, (double)sheenAlbedo((float)(i * i) / ((kSheenTableMu - 1) * (kSheenTableMu - 1)), r) / 3.14159265358979);
+                    if (avg >= 5e-2 * peak)
+                    {
+                        const double rel = std::abs(centre - avg) / avg;
+                        if (rel > diskWorst) std::printf("  disk r %.2f mu %.2f el %.2f az %.0f: relative %.2e\n", r, mu, el, az, rel);
+                        diskWorst = std::max(diskWorst, rel);
+                    }
+                    else
+                    {
+                        const double rel = std::abs(centre - avg) / peak;
+                        if (rel > diskDim) std::printf("  disk r %.2f mu %.2f el %.2f az %.0f: dim, |error| / peak %.2e\n", r, mu, el, az, rel);
+                        diskDim = std::max(diskDim, rel);
+                    }
                 }
-    std::printf("sun disk: centre vs disk average, worst relative %.2e\n", diskWorst);
-    CHECK(diskWorst <= 2e-3);
+    std::printf("sun disk: the renderer's rule vs the disk average: worst relative %.2e (values >= 5 %% of the peak sheen), dim values |error| / peak %.2e\n",
+                diskWorst, diskDim);
+    CHECK(diskWorst <= 5e-3);  // (measured 2.9e-3 at a horizon crossing; MATERIAL_LAYERS 3: render dE76 <= 1, albedo 2 %)
+    CHECK(diskDim <= 2e-3);    // (measured 1.3e-3 of the peak at retro-grazing, where the half vector swings across the disk)
 
     // 6. .unxscene: the sheen block round-trips; validation rejects a sheen with a clearcoat, off-range values and a
     // non-Standard class.

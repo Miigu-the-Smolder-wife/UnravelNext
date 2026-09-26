@@ -287,18 +287,24 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     bool areaLights = false;
     if (const scene::Scene* src = fc.scene.source())
         for (const scene::Light& l : src->lights) areaLights = areaLights || l.type > scene::LightType::Spot;
-    // A9: layered materials (clearcoat) shade in their own class with the LAYERED variant; the fallback kernel takes
-    // every class, so it is the LAYERED variant when the scene has layered materials.
-    bool layeredMaterials = false;
+    // A9: clearcoat materials shade in their own class with the LAYERED=1 variant, sheen materials in theirs with LAYERED=2;
+    // the fallback kernel runs once per variant the scene needs, each over its classes (P[1].z mask).
+    bool layeredMaterials = false, sheenMaterials = false;
     if (const scene::Scene* src = fc.scene.source())
-        for (const scene::Material& mt : src->materials) layeredMaterials = layeredMaterials || mt.clearcoat > 0;
-    auto opaqueKernel = [&](bool fallbackVariant, bool layered) {
+        for (const scene::Material& mt : src->materials)
+        {
+            layeredMaterials = layeredMaterials || mt.clearcoat > 0;
+            sheenMaterials = sheenMaterials || mt.sheenColor.x > 0 || mt.sheenColor.y > 0 || mt.sheenColor.z > 0;
+        }
+    auto opaqueKernel = [&](bool fallbackVariant, uint32_t layered) {
         const std::string name = std::string("Passes/Shading/ShadeOpaque.OUTPUT") + (linear ? "1" : "0") + ".FALLBACK" + (fallbackVariant ? "1" : "0") +
-                                 ".AREA" + (areaLights ? "1" : "0") + ".PLANAR" + (view.view.kind != gpu::ViewKind::Main ? "1" : "0") + ".LAYERED" + (layered ? "1" : "0");
+                                 ".AREA" + (areaLights ? "1" : "0") + ".PLANAR" + (view.view.kind != gpu::ViewKind::Main ? "1" : "0") + ".LAYERED" +
+                                 std::to_string(layered);
         return fc.shaders.compute(name.c_str());
     };
-    ID3D12PipelineState* opaque = opaqueKernel(false, false);
-    ID3D12PipelineState* opaqueLayered = layeredMaterials ? opaqueKernel(false, true) : nullptr;
+    ID3D12PipelineState* opaque = opaqueKernel(false, 0);
+    ID3D12PipelineState* opaqueLayered = layeredMaterials ? opaqueKernel(false, 1) : nullptr;
+    ID3D12PipelineState* opaqueSheen = sheenMaterials ? opaqueKernel(false, 2) : nullptr;
     ID3D12PipelineState* sky = fc.shaders.compute(linear ? "Passes/Shading/ShadeSky.OUTPUT1" : "Passes/Shading/ShadeSky.OUTPUT0");
     const FrameResources r = fc.resources;
     const bool atmosphere = r.transmittanceLut.valid() && r.multiScatterLut.valid() && r.skyViewLut.valid();
@@ -557,12 +563,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             }
             // Surface classes (Subsurface and Water use the opaque model until theirs are defined; A9 layered materials
             // with the LAYERED variant).
-            for (material::ShadeClass shadeClass :
-                 { material::ShadeClass::Opaque, material::ShadeClass::Subsurface, material::ShadeClass::Water, material::ShadeClass::Layered })
+            for (material::ShadeClass shadeClass : { material::ShadeClass::Opaque, material::ShadeClass::Subsurface, material::ShadeClass::Water,
+                                                     material::ShadeClass::Layered, material::ShadeClass::Sheen })
             for (uint32_t band = firstBand; band < lastBand; ++band)
             {
                 if (shadeClass == material::ShadeClass::Layered && !opaqueLayered) break;
-                c.cmd->SetPipelineState(shadeClass == material::ShadeClass::Layered ? opaqueLayered : opaque);
+                if (shadeClass == material::ShadeClass::Sheen && !opaqueSheen) break;
+                c.cmd->SetPipelineState(shadeClass == material::ShadeClass::Layered ? opaqueLayered : (shadeClass == material::ShadeClass::Sheen ? opaqueSheen : opaque));
                 const uint32_t cls = (uint32_t)shadeClass;
                 const uint32_t k[22] = { c.srv(v.gbuffer), c.srv(v.depth), c.srv(o.materialWord), c.uav(v.color),
                                          c.srv(o.tiles), o.firstTile(cls, band), cls, o.emissive.valid() ? c.srv(o.emissive) : none,
@@ -592,7 +599,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     // VSM directly (FALLBACK=1; its extra registers stay out of the main kernel). An empty list costs one argument read.
     if (fallback)
     {
-        ID3D12PipelineState* fallbackKernel = opaqueKernel(true, layeredMaterials);
+        // one run per LAYERED variant over its classes (P[1].z mask, bit 31): the clearcoat or plain variant over every
+        // class but Sheen, then the sheen variant over Sheen
+        const uint32_t sheenBit = 1u << (uint32_t)material::ShadeClass::Sheen;
+        std::vector<std::pair<ID3D12PipelineState*, uint32_t>> fallbackRuns = { { opaqueKernel(true, layeredMaterials ? 1 : 0), 0xFFFFFFFFu & ~(sheenMaterials ? sheenBit : 0u) } };
+        if (sheenMaterials) fallbackRuns.push_back({ opaqueKernel(true, 2), 0x80000000u | sheenBit });
         ShadowSrvRing& ring = fc.state<ShadowSrvRing>("M.shadowSrvRing");
         if (vsm) ring.ensure(fc.device);
         ShadowSrvRing* ringPtr = vsm ? &ring : nullptr;
@@ -661,10 +672,14 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              k32[16] = r.areaLightStable;     // P[4].x (B2)
                              k32[19] = gpu::kNone;            // P[4].w: overflow tiles are shaded twice; the main kernel metered them
                              k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
-                             c.cmd->SetPipelineState(fallbackKernel);
-                             c.bindFrameConstants(cb);
-                             c.computeConstants(k32, 40);
-                             c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
+                             for (const auto& [kernel, classes] : fallbackRuns)
+                             {
+                                 k32[6] = classes;  // P[1].z
+                                 c.cmd->SetPipelineState(kernel);
+                                 c.bindFrameConstants(cb);
+                                 c.computeConstants(k32, 40);
+                                 c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
+                             }
                          });
     }
 

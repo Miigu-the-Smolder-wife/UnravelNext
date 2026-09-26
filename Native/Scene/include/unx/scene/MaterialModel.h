@@ -116,6 +116,9 @@ bool sheenTableGenerated();                // false: SheenTable.inc absent, shee
 float sheenProjectedArea(float mu, float roughness);
 float sheenAlbedo(float NoV, float roughness);
 float evaluateSheenLobe(float roughness, float3 n, float3 v, float3 l);  // D G2 / (4 n.v n.l) (C = 1)
+// The renderer's sun rule (MaterialModel.hlsli modelSheenSun): the mean of f_sh max(0, n.l) over a disk of angular radius
+// rho - the 4-point rule above the horizon, Gauss-Legendre over the visible segment (4 in phi x 3) when it straddles it.
+float sheenSunRule(float roughness, float3 n, float3 v, float3 l0, float rho);
 float3 evaluateSheen(const Surface& s, const Sheen& sh, float3 n, float3 v, float3 l);
 
 // Hair class (INTERFACES 8.1 v1.66): the fibre's absorption sigma_a (PBRT 4e's convention: per unit fibre radius, the

@@ -91,7 +91,9 @@ struct GpuMaterialLayers  // v1.76 (A9): gpu::MaterialLayers, 64 B
     float clearcoat, clearcoatRoughness;
     uint coat;
     float coatEta;
-    float4 reserved[3];
+    float3 sheenColor;  // A9 sheen (MATERIAL_SHEEN): colour C, perceptual roughness
+    float sheenRoughness;
+    float4 reserved[2];
 };
 GpuMaterialLayers loadMaterialLayers(uint i) { StructuredBuffer<GpuMaterialLayers> b = ResourceDescriptorHeap[g_materialLayers]; return b[i]; }
 
@@ -147,6 +149,7 @@ struct GpuVisibleCluster
 #define MATERIAL_TWO_SIDED (1u << 8)
 #define MATERIAL_ALPHA_TESTED (1u << 9)
 #define MATERIAL_LAYERED (1u << 10)  // v1.76 A9: layer record index in classFlags bits 16..31 (loadMaterialLayers)
+#define MATERIAL_SHEEN (1u << 11)    // A9: the record's layer is a sheen (shade class Sheen), else a clearcoat
 // scene::LightType
 #define LIGHT_POINT 0u
 #define LIGHT_SPOT 1u

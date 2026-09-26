@@ -181,8 +181,10 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             float coatRoughness = 0;
             if ((m.classFlags & MATERIAL_LAYERED) != 0)
             {
-                // A9: the coat's roughness band-limited by the footprint like the base's (MATERIAL_LAYERS 3.4)
-                const float rc = loadMaterialLayers(m.classFlags >> 16).clearcoatRoughness;
+                // A9: the coat's (or the sheen's) roughness band-limited by the footprint like the base's (MATERIAL_LAYERS
+                // 3.4, 1.4): one layer kind per material, so both use the word's bits 24..31
+                const GpuMaterialLayers layers = loadMaterialLayers(m.classFlags >> 16);
+                const float rc = (m.classFlags & MATERIAL_SHEEN) != 0 ? layers.sheenRoughness : layers.clearcoatRoughness;
                 const float ac = max(rc * rc, 1e-4);
                 coatRoughness = min(sqrt(sqrt(ac * ac + variance)), 1.0);
             }

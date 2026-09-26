@@ -115,6 +115,95 @@ float modelCoatLookup1(uint base, float r)
     return t[base + y0] + (y - y0) * (t[base + y1] - t[base + y0]);
 }
 
+// ---- A9 sheen (MaterialModel.h evaluateSheen, MATERIAL_LAYERS 1.4): mirror of the C++ definition; its table follows the
+// two coats' in g_coatTable (A, then E_sh: 64 columns at sqrt(mu), 32 rows at sqrt((r - 0.1) / 0.9)).
+#define MODEL_SHEEN_TABLE (2u * MODEL_COAT_STRIDE)
+#define MODEL_SHEEN_MU 64u
+#define MODEL_SHEEN_R 32u
+struct ModelSheen
+{
+    float3 color;      // C (0: none)
+    float roughness;   // r_sh
+};
+float modelSheenLookup(uint base, float mu, float r)
+{
+    StructuredBuffer<float> t = ResourceDescriptorHeap[g_coatTable];
+    const float x = sqrt(saturate(mu)) * (MODEL_SHEEN_MU - 1), y = sqrt(saturate((r - 0.1) / 0.9)) * (MODEL_SHEEN_R - 1);
+    const uint x0 = min(uint(x), MODEL_SHEEN_MU - 2), y0 = min(uint(y), MODEL_SHEEN_R - 2);
+    const float fx = x - x0, fy = y - y0;
+    const uint b = base + y0 * MODEL_SHEEN_MU + x0;
+    return (t[b] * (1 - fx) + t[b + 1] * fx) * (1 - fy) + (t[b + MODEL_SHEEN_MU] * (1 - fx) + t[b + MODEL_SHEEN_MU + 1] * fx) * fy;
+}
+float modelSheenArea(float mu, float r) { return modelSheenLookup(MODEL_SHEEN_TABLE, mu, r); }
+float modelSheenAlbedo(float mu, float r) { return modelSheenLookup(MODEL_SHEEN_TABLE + MODEL_SHEEN_MU * MODEL_SHEEN_R, mu, r); }
+// D G2 / (4 n.v n.l) with C = 1 (Charlie D, Smith masking from the tabulated projected area).
+float modelSheenLobe(float r, float3 n, float3 v, float3 l)
+{
+    const float NoV = dot(n, v), NoL = dot(n, l);
+    if (NoV <= 0 || NoL <= 0) return 0;
+    const float alpha = modelAlpha(r), inv = 1 / alpha, NoH = saturate(dot(n, normalize(v + l)));
+    const float D = (2 + inv) * pow(max(0.0, 1 - NoH * NoH), 0.5 * inv) / (2 * MODEL_PI);
+    const float G2 = 1 / max(modelSheenArea(NoV, r) / NoV + modelSheenArea(NoL, r) / NoL - 1, 1.0);
+    return D * G2 / (4 * NoV * NoL);
+}
+// The lobe times the clipped cosine averaged over a sun disk of angular radius rho centred on l0 (MATERIAL_LAYERS 1.4):
+//   disk above the horizon: the 4-point rule (l0 +- rho / sqrt(2) along both disk axes: exact to second order);
+//   disk straddling it: the visible circular segment by Gauss-Legendre - 4 points in phi (t = rho sin phi along the
+//   direction of increasing n.l, which absorbs the segment's square-root edge) x 3 across (the terminator band only);
+//   below it: 0.
+float modelSheenSun(float r, float3 n, float3 v, float3 l0, float rho)
+{
+    const float3 du = normalize(cross(abs(l0.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0), l0)), dw = cross(l0, du);
+    const float NoL0 = dot(n, l0), gu = dot(n, du), gw = dot(n, dw), k = sqrt(gu * gu + gw * gw);
+    if (NoL0 <= -k * rho) return 0;
+    float sum = 0;
+    if (NoL0 >= k * rho)
+    {
+        const float q = rho * 0.70710678;
+        [unroll] for (uint i = 0; i < 4; ++i)
+        {
+            const float3 l = normalize(l0 + ((i & 2u) ? dw : du) * ((i & 1u) ? -q : q));
+            sum += 0.25 * modelSheenLobe(r, n, v, l) * max(dot(n, l), 0.0);
+        }
+        return sum;
+    }
+    const float2 e = float2(gu, gw) / max(k, 1e-8), ep = float2(-e.y, e.x);
+    const float phi0 = asin(clamp(-NoL0 / (k * rho), -1.0, 1.0)), half = 0.5 * (0.5 * MODEL_PI - phi0), mid = 0.5 * (0.5 * MODEL_PI + phi0);
+    const float x4[4] = { -0.86113631, -0.33998104, 0.33998104, 0.86113631 }, w4[4] = { 0.34785485, 0.65214515, 0.65214515, 0.34785485 };
+    const float x3[3] = { -0.77459667, 0, 0.77459667 }, w3[3] = { 0.55555556, 0.88888889, 0.55555556 };
+    [unroll] for (uint i = 0; i < 4; ++i)
+    {
+        const float phi = mid + half * x4[i], t = rho * sin(phi), w = rho * cos(phi);
+        [unroll] for (uint j = 0; j < 3; ++j)
+        {
+            const float2 o = e * t + ep * (w * x3[j]);
+            const float3 l = normalize(l0 + du * o.x + dw * o.y);
+            sum += w4[i] * w3[j] * modelSheenLobe(r, n, v, l) * max(dot(n, l), 0.0) * w * w;  // (dt = w dphi, ds = w dx)
+        }
+    }
+    return sum * half / (MODEL_PI * rho * rho);
+}
+// The base's scale 1 - max(C) E_sh(n.v) (view side only).
+float modelSheenKeep(ModelSheen sh, float NoV) { return 1 - max(sh.color.r, max(sh.color.g, sh.color.b)) * modelSheenAlbedo(max(NoV, 1e-4), sh.roughness); }
+float3 modelEvaluateSheen(ModelSurface s, ModelSheen sh, float3 n, float3 v, float3 l)
+{
+    const float3 base = modelEvaluate(s, n, v, l);
+    if (!(max(sh.color.r, max(sh.color.g, sh.color.b)) > 0)) return base;
+    if (dot(n, v) <= 0 || dot(n, l) <= 0) return base;
+    return sh.color * modelSheenLobe(sh.roughness, n, v, l) + base * modelSheenKeep(sh, dot(n, v));
+}
+// The sheen of a material (MATERIAL_SHEEN; none: colour 0).
+ModelSheen modelSheenOf(GpuMaterial m)
+{
+    ModelSheen sh = (ModelSheen)0;
+    sh.roughness = 0.5;
+    if ((m.classFlags & (MATERIAL_LAYERED | MATERIAL_SHEEN)) != (MATERIAL_LAYERED | MATERIAL_SHEEN)) return sh;
+    const GpuMaterialLayers layers = loadMaterialLayers(m.classFlags >> 16);
+    sh.color = layers.sheenColor;
+    sh.roughness = layers.sheenRoughness;
+    return sh;
+}
+
 // exact unpolarised dielectric Fresnel; eta = n_t / n_i; 1 past the critical angle
 float modelFresnelDielectric(float cosI, float eta)
 {
