@@ -74,8 +74,10 @@ struct ParticleRenderInputs
     render::BufferRef posAge[2], velocity[2], dynamic[2];  // [0] previous tick, [1] latest tick
     render::BufferRef emitters, programs, curveKeys, renderRanges, renderBlocks;
     uint32_t threads = 0, current = 0, rangeCount = 0;     // render threads (current + died in the tick), current
-    render::BufferRef ribbonRanges;                        // the latest tick's ribbon ranges (FxRibbon.hlsl RibbonRange)
-    uint32_t ribbonRangeCount = 0, ribbonCapacity = 0;     // ... and its ribbon points (header ribbon_points); 0 = none
+    render::BufferRef ribbonRanges, ribbonRows;            // the render pass's ribbon layout (FxRibbon.hlsl RibbonRange) of the
+                                                           // latest tick: per ribbon row births [dying_birth, next_birth) at
+                                                           // [base, base + count); rows: uint2 (base, dying_birth) per emitter row
+    uint32_t ribbonRangeCount = 0, ribbonCapacity = 0;     // its ranges and points; 0 = none
     double anchor[2][3] = {};                              // stream anchor of each tick's state
     float dt = 0;                                          // dt of the latest tick
     double tickTime = 0;                                   // context time at the end of the latest tick

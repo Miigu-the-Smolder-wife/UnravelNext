@@ -195,23 +195,25 @@ bool fxParticleAt(LayerConstants c, RenderRange rr, uint k, uint birth, uint row
     return true;
 }
 
-// A ribbon particle's point of this frame at its place in the stream's ribbon layout (output_base + birth - death_birth of
-// the latest tick; FxRibbon then builds the strips): camera-relative position at the frame time, width after the
+// A ribbon particle's point of this frame in the render pass's ribbon layout (ParticleSystem: per ribbon row the births
+// [dying_birth, next_birth) of the latest tick, the ones that died in it first; FxRibbon then builds the strips over each
+// range's valid window): camera-relative position at the frame time, width after the
 // pixel-footprint prefilter across it (the strip's profile widened to h' = sqrt(h^2 + 1/4) px, h its half width, at the same
 // integrated opacity: alpha h / h'), and its appearance before the air (the strip samples the air at each hit):
-// radiance x exposure (material 1 lit at the point like a sprite, 0 emissive), opacity. A point born after the frame time
-// is written invalid: those are the newest births, the range's tail, and FxRibbon ends the range at the first one. A point
-// of the previous state only (died in the latest tick) has no place in the latest layout and is not drawn this frame (its
-// alpha is the end of its life's curve). A killed emitter or a refused material writes invalid points (nothing drawn).
+// radiance x exposure (material 1 lit at the point like a sprite, 0 emissive), opacity. A point not alive at the frame time
+// is written invalid: born after it (the newest births, the range's tail) or already dead (the oldest dying ones, its head);
+// the valid points are one window. A killed emitter or a refused material writes invalid points (nothing drawn).
 void ribbonPoint(LayerConstants c, RenderRange rr, uint k, uint birth, uint row, StreamEmitter e, StreamProgram p, bool drawn)
 {
     float3 pos;
     float age;
     bool dying;
     const bool alive = drawn && fxParticleAt(c, rr, k, birth, row, p, pos, age, dying);
-    dying = (rr.prevCountFlags & 0x80000000u) != 0u;
-    if (dying) return;
-    const uint index = e.outputBase + (birth - e.deathBirth);
+    if (c.ribbonRows == UNX_NONE) return;
+    StructuredBuffer<uint2> rows = ResourceDescriptorHeap[c.ribbonRows];
+    const uint2 place = rows[row];
+    if (place.x == FX_NONE) return;
+    const uint index = place.x + (birth - place.y);
     if (index >= c.ribbonCapacity) { fxLayerStatus(c, FX_LAYER_STATUS_RANGE); return; }
     RWStructuredBuffer<FxRibbonPoint> points = ResourceDescriptorHeap[c.ribbonPoints];
     RWStructuredBuffer<uint2> appearance = ResourceDescriptorHeap[c.ribbonAppearance];

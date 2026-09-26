@@ -53,6 +53,7 @@ struct LayerConstants
     uint giCache, froxelLights, airVolume, transmittance;
     uint multiScatter, ribbonAppearance, ribbonCapacity, stripBase;  // per-point half4 appearance; points; strip records at
                                                                       // stripBase + point (after the sprite records)
+    uint ribbonRows, pad6, pad7, pad8;  // per emitter row uint2 (first point, its birth: the row's dying_birth); x = none: no ribbon
 };
 
 // One render range (ParticleSystem.cpp): render threads [thread, thread + count) are births [first, first + count) of

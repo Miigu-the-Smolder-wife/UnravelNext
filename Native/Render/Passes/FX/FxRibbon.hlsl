@@ -13,8 +13,8 @@
 // and scan elements, the segmented scan (carried), vertices. The combination order is fixed (in-chunk Hillis-Steele,
 // then the carry of the earlier chunks), so the result is deterministic. runStart and tangents are written to memory,
 // since a point's pv or strip start may lie in an earlier chunk (visible after the device barriers of the same group).
-// A range ends at its first point whose valid flag is 0 (the particle render pass writes this frame's points, and the
-// newest births may not exist yet at the frame time: they are the range's tail); the simulation writes only valid points.
+// A range is drawn over its valid window (the particle render pass writes this frame's points: births after the frame time
+// are its tail, births dead by then its head, both flagged invalid); the simulation writes only valid points.
 // P[0] = (points, links, vertices, ranges SRV), P[1] = (runStart, tangents, range count, programs SRV)
 #include "Passes/FX/Particles.hlsli"
 
@@ -72,7 +72,7 @@ PointGeometry geometry(uint c, uint first, uint end, float limit)
 }
 
 groupshared uint gs_run[CHUNK];
-groupshared uint gs_end;
+groupshared uint gs_begin, gs_end;
 groupshared FrameElement gs_elem[CHUNK];
 
 [numthreads(256, 1, 1)]
@@ -88,15 +88,16 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     FX_RWBUFFER(uint, links, P[0].y);
     FX_RWBUFFER(RibbonPoint, points, P[0].x);
     const RibbonRange range = ranges[gid.x];
-    const uint first = range.base;
-    // the end: the first invalid point (the tail of births after the frame time), else the range's end
-    if (t == 0u) gs_end = range.base + range.count;
+    const uint rangeEnd = range.base + range.count;
+    // the valid window [first valid, last valid + 1) (empty: begin = end)
+    if (t == 0u) { gs_begin = rangeEnd; gs_end = range.base; }
     GroupMemoryBarrierWithGroupSync();
-    for (uint i = first + t; i < range.base + range.count; i += CHUNK)
-        if (points[i].valid == 0u) InterlockedMin(gs_end, i);
+    for (uint i = range.base + t; i < rangeEnd; i += CHUNK)
+        if (points[i].valid != 0u) { InterlockedMin(gs_begin, i); InterlockedMax(gs_end, i + 1u); }
     GroupMemoryBarrierWithGroupSync();
-    const uint end = gs_end;
-    for (uint i2 = end + t; i2 < range.base + range.count; i2 += CHUNK) links[i2] = FX_NONE;
+    const uint first = gs_begin, end = max(gs_end, gs_begin);
+    for (uint i2 = range.base + t; i2 < rangeEnd; i2 += CHUNK)
+        if (i2 < first || i2 >= end) links[i2] = FX_NONE;
     const StreamProgram pr = programs[range.program];
     const float3 normal = pr.ribbonNormal;
     const float uvScale = pr.ribbonUv > 0 ? pr.ribbonUv : 1.0f;

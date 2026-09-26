@@ -35,8 +35,9 @@ struct LayerConstants
     uint32_t shadow[8];
     uint32_t giCache, froxelLights, airVolume, transmittance;
     uint32_t multiScatter, ribbonAppearance, ribbonCapacity, stripBase;
+    uint32_t ribbonRows, pad6, pad7, pad8;
 };
-static_assert(sizeof(LayerConstants) == 240);
+static_assert(sizeof(LayerConstants) == 256);
 constexpr uint32_t kConstantSlots = 64, kConstantSlotBytes = 256;
 constexpr uint32_t kLayerScale = 4, kTilePixels = 32;  // FX_LAYER_SCALE, FX_LAYER_TILE x FX_LAYER_SCALE
 constexpr uint32_t kRecordBytes = 32, kEdgeBlockBytes = 128;
@@ -145,6 +146,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     ID3D12Resource* upload = m_upload.Get();
     const uint64_t uploadOffset = (uint64_t)slot * kConstantSlotBytes;
     const ParticleRenderInputs inputs = in;
+    const BufferRef ribbonRowsRef = ribbons ? in.ribbonRows : BufferRef{};
     const ParticleLayerOutput o = out;
     g.addPass("fx.layer.constants", QueueType::Graphics, [=](PassBuilder& b) { b.use(o.constants, Use::CopyDst); },
               [=](PassContext& c) mutable {
@@ -175,6 +177,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
                   lc.ribbonLinks = c.uav(ribbonLinks);
                   lc.ribbonVertices = c.uav(o.ribbonVertices);
                   lc.ribbonAppearance = c.uav(o.ribbonAppearance);
+                  lc.ribbonRows = ribbonRowsRef.valid() ? c.srv(ribbonRowsRef) : 0xFFFFFFFFu;
                   const ParticleLighting& L = f.lighting;
                   const uint32_t none = 0xFFFFFFFFu;
                   const bool sun = L.vsmPageTable.valid() && (L.vsmAtlas.valid() || L.vsmPool.valid()) && L.vsmBlocks.valid() && L.vsmSearchBound.valid();
@@ -213,7 +216,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
                   });
     };
     const BufferRef inputBuffers[] = { in.posAge[0], in.posAge[1], in.velocity[0], in.velocity[1], in.dynamic[0], in.dynamic[1], in.emitters, in.programs,
-                                       in.curveKeys, in.renderRanges, in.renderBlocks };
+                                       in.curveKeys, in.renderRanges, in.renderBlocks, ribbons ? in.ribbonRows : BufferRef{} };
     dispatch("fx.layer.clear", "Passes/FX/FxLayerScan.STEP0", groups(tiles, 1024), [=](PassBuilder& b) {
         b.use(o.tileCounts, Use::UavCompute);
         b.use(tileFill, Use::UavCompute);
@@ -222,7 +225,8 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     });
     const ParticleLighting lighting = f.lighting;
     dispatch("fx.layer.setup", "Passes/FX/FxLayerSetup.STEP0", groups(threads, 256), [=](PassBuilder& b) {
-        for (const BufferRef& x : inputBuffers) b.use(x, Use::SrvCompute);
+        for (const BufferRef& x : inputBuffers)
+            if (x.valid()) b.use(x, Use::SrvCompute);
         for (const BufferRef& x : { lighting.vsmPageTable, lighting.vsmPool, lighting.vsmBlocks, lighting.vsmSearchBound, lighting.vsmLayers, lighting.giCache, lighting.froxelLights })
             if (x.valid()) b.use(x, Use::SrvCompute);
         for (const TextureRef& x : { lighting.vsmAtlas, lighting.airVolume, lighting.transmittanceLut, lighting.multiScatterLut })
@@ -238,7 +242,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         // the strips of this frame's points (FxRibbon, the simulation's kernel: same geometry rules), then their segments
         dispatch("fx.layer.ribbon.clear", "Passes/FX/FxLayerStrips.STEP0", groups(ribbons, 256), [=](PassBuilder& b) { b.use(ribbonLinks, Use::UavCompute); });
         ID3D12PipelineState* ribbonPso = shaders.compute("Passes/FX/FxRibbon");
-        const BufferRef ranges = in.ribbonRanges, programs = in.programs;
+        const BufferRef ranges = in.ribbonRanges, programs = in.programs;  // (the rows table is the setup's input)
         const uint32_t rangeCount = in.ribbonRangeCount;
         g.addPass("fx.layer.ribbon", QueueType::Graphics,
                   [=](PassBuilder& b) {

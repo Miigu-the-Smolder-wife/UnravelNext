@@ -219,7 +219,7 @@ struct ParticleSystem::Impl
     // particles that died in it (drawn from the previous state until their death time); group of 256 threads -> range.
     Buf renderRanges{ "fx.renderRanges", 32 }, renderBlocks{ "fx.renderBlocks", 4 };
     uint32_t renderThreads = 0, renderCurrent = 0, renderRangeCount = 0;
-    uint32_t ribbonRangeCount = 0, ribbonCapacity = 0;  // the latest tick's ribbon ranges and points (render pass strips)
+    uint32_t ribbonRangeCount = 0, ribbonCapacity = 0;  // the latest tick's draw ranges and points (render pass strips)
     double anchor[2][3] = {};  // stream anchor of the tick whose state is in that parity
     float tickDt = 0;          // dt of the latest tick
     double tickTime = 0;       // context time at the end of the latest tick
@@ -247,6 +247,9 @@ struct ParticleSystem::Impl
     Buf bodies{ "fx.bodies", sizeof(NV_StreamBody) }, tickSurfaces{ "fx.tickSurfaces", sizeof(NV_StreamSurface) };
     Buf ribbonPoints{ "fx.ribbonPoints", 32 }, ribbonLinks{ "fx.ribbonLinks", 4 }, ribbonVertices{ "fx.ribbonVertices", 32 };
     Buf ribbonRanges{ "fx.ribbonRanges", 16 }, ribbonRunStart{ "fx.ribbonRunStart", 4 }, ribbonTangents{ "fx.ribbonTangents", 16 };
+    // the render pass's ribbon layout (strips at the frame time): per ribbon row its births [dying_birth, next_birth) - the
+    // ones that died in the latest tick first - at [base, base + count); rows: (base, dying_birth) per emitter row
+    Buf ribbonDrawRanges{ "fx.ribbonDrawRanges", 16 }, ribbonDrawRows{ "fx.ribbonDrawRows", 8 };
     std::vector<uint32_t> programOutput;  // output kind per program (the last NV_STREAM_PROGRAMS table)
     std::vector<uint8_t> programCollides;  // NV_STREAM_PROGRAM_COLLISION per program
     Buf surfaceBoxes{ "fx.surfaceBoxes", 16 };
@@ -610,8 +613,33 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             if (ribbonRanges.size() > 65535u) fail("FX particles: %zu ribbon ranges exceed one dispatch (65535 groups)", ribbonRanges.size());
         }
         const uint32_t ribbonN = ribbonRanges.empty() ? 0 : h.ribbon_points;
-        m.ribbonRangeCount = (uint32_t)ribbonRanges.size();
-        m.ribbonCapacity = ribbonN;
+        // the render pass's layout: each ribbon row's births [dying_birth, next_birth) (the dying ones are still drawn
+        // between the ticks while their age is below the lifetime)
+        std::vector<RibbonRange> ribbonDraw;
+        std::vector<uint32_t> ribbonDrawRows;
+        uint32_t ribbonDrawPoints = 0;
+        if (!ribbonRanges.empty())
+        {
+            ribbonDrawRows.assign((size_t)h.emitter_table * 2, 0xFFFFFFFFu);
+            for (uint32_t e : m.outputRows)
+            {
+                const NV_StreamEmitter& x = m.table[e];
+                const uint32_t count = x.next_birth - x.dying_birth;
+                if (!(x.flags & NV_STREAM_EMITTER_ACTIVE) || count == 0 || x.program >= m.programOutput.size() || m.programOutput[x.program] != 2u) continue;
+                if (e >= h.emitter_table) continue;
+                if ((uint64_t)ribbonDrawPoints + count > 0x7FFFFFFFull) fail("FX particles: %llu ribbon points to draw", (unsigned long long)ribbonDrawPoints + count);
+                ribbonDraw.push_back({ ribbonDrawPoints, count, x.program, 0 });
+                ribbonDrawRows[(size_t)e * 2] = ribbonDrawPoints;
+                ribbonDrawRows[(size_t)e * 2 + 1] = x.dying_birth;
+                ribbonDrawPoints += count;
+            }
+            if (ribbonDraw.size() > 65535u) fail("FX particles: %zu ribbon ranges exceed one dispatch (65535 groups)", ribbonDraw.size());
+        }
+        // (allocated on every tick: the tick imports them with its other inputs)
+        m.ribbonDrawRanges.ensure(device, ribbonDraw.size() * 16);
+        m.ribbonDrawRows.ensure(device, ribbonDrawRows.size() * 4);
+        m.ribbonRangeCount = (uint32_t)ribbonDraw.size();
+        m.ribbonCapacity = ribbonDrawPoints;
         // volume ranges (active NV_VOLUME rows, by first cell): the record index of a volume particle (Particles.hlsli)
         struct VolumeRange { uint32_t first, cells, grid, program, particleBase, pad[3]; };
         std::vector<VolumeRange> volumeRanges;
@@ -849,7 +877,9 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         const uint64_t renderBlocksOffset = align(renderRangesOffset + renderRanges.size() * 32, 16);
         const uint64_t rangesOffset = align(renderBlocksOffset + renderBlocks.size() * 4, 16);
         const uint64_t volumeOffset = align(rangesOffset + ribbonRanges.size() * 16, 16);
-        const uint64_t rowsOffset = align(volumeOffset + volumeRanges.size() * 32, 16);
+        const uint64_t drawRangesOffset = align(volumeOffset + volumeRanges.size() * 32, 16);
+        const uint64_t drawRowsOffset = align(drawRangesOffset + ribbonDraw.size() * 16, 16);
+        const uint64_t rowsOffset = align(drawRowsOffset + ribbonDrawRows.size() * 4, 16);
         const uint64_t uploadBytes = rowsOffset + updateRows.size() * 4;
         if (!slot.upload || slot.uploadBytes < uploadBytes)
         {
@@ -872,6 +902,8 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         std::memcpy(slot.mapped + renderBlocksOffset, renderBlocks.data(), renderBlocks.size() * 4);
         if (!ribbonRanges.empty()) std::memcpy(slot.mapped + rangesOffset, ribbonRanges.data(), ribbonRanges.size() * 16);
         if (!volumeRanges.empty()) std::memcpy(slot.mapped + volumeOffset, volumeRanges.data(), volumeRanges.size() * 32);
+        if (!ribbonDraw.empty()) std::memcpy(slot.mapped + drawRangesOffset, ribbonDraw.data(), ribbonDraw.size() * 16);
+        if (!ribbonDrawRows.empty()) std::memcpy(slot.mapped + drawRowsOffset, ribbonDrawRows.data(), ribbonDrawRows.size() * 4);
         std::memcpy(slot.mapped + rowsOffset, updateRows.data(), updateRows.size() * 4);
         // collision events copied with the tick: twice the last count the CPU read, at least 1024 and at most the configured
         // prefix; more are fetched from the tick's event buffer when read (exact either way)
@@ -919,7 +951,8 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
                                     &m.ribbonRunStart, &m.ribbonTangents, &m.gridBlocks, &m.surfaceBoxes, &m.overflowRecords, &m.colliders, &m.trace, &m.rowMotion,
                                     &m.emitterTable, &m.emitterStamp };
         std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitterUpdates, &m.emitterUpdateRows, &m.emitterPatches, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
-                                     &m.restore, &m.birthIndex, &m.inRanges, &m.inBlocks, &m.renderRanges, &m.renderBlocks, &m.bodies, &m.dynamicSurfaces, &m.ribbonRanges, &m.volumeRanges };
+                                     &m.restore, &m.birthIndex, &m.inRanges, &m.inBlocks, &m.renderRanges, &m.renderBlocks, &m.bodies, &m.dynamicSurfaces, &m.ribbonRanges, &m.volumeRanges,
+                                     &m.ribbonDrawRanges, &m.ribbonDrawRows };
         for (Buf* b : state) b->import(g, importIndex);
         for (Buf* b : inputs) b->import(g, importIndex);
 
@@ -956,6 +989,8 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         copies.push_back({ &m.renderBlocks, renderBlocksOffset, renderBlocks.size() * 4 });
         if (!ribbonRanges.empty()) copies.push_back({ &m.ribbonRanges, rangesOffset, ribbonRanges.size() * 16 });
         if (!volumeRanges.empty()) copies.push_back({ &m.volumeRanges, volumeOffset, volumeRanges.size() * 32 });
+        if (!ribbonDraw.empty()) copies.push_back({ &m.ribbonDrawRanges, drawRangesOffset, ribbonDraw.size() * 16 });
+        if (!ribbonDrawRows.empty()) copies.push_back({ &m.ribbonDrawRows, drawRowsOffset, ribbonDrawRows.size() * 4 });
         g.addPass("fx.particles.upload", queueType,
                   [&](PassBuilder& b) {
                       for (const Copy& c : copies) b.use(c.dst->ref, Use::CopyDst);
@@ -1338,9 +1373,10 @@ ParticleRenderInputs ParticleSystem::renderInputs(RenderGraph& graph, uint64_t i
     r.curveKeys = m.curveKeys.import(graph, importIndex);
     r.renderRanges = m.renderRanges.import(graph, importIndex);
     r.renderBlocks = m.renderBlocks.import(graph, importIndex);
-    if (m.ribbonRangeCount && m.ribbonRanges.resource)
+    if (m.ribbonRangeCount && m.ribbonDrawRanges.resource && m.ribbonDrawRows.resource)
     {
-        r.ribbonRanges = m.ribbonRanges.import(graph, importIndex);
+        r.ribbonRanges = m.ribbonDrawRanges.import(graph, importIndex);
+        r.ribbonRows = m.ribbonDrawRows.import(graph, importIndex);
         r.ribbonRangeCount = m.ribbonRangeCount;
         r.ribbonCapacity = m.ribbonCapacity;
     }
