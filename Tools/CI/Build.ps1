@@ -91,6 +91,19 @@ foreach ($sub in $submodules) {
 if (-not $Tracks) {
   $Tracks = switch ($Track) { "core" { "V" } "I" { "V;M;S;R;I" } "RPP" { "C;RPP" } "E" { "FX;E" } "all" { "all" } default { $Track } }
 }
+# One build per folder at a time (2026-09-27): sessions building the same folder at once (every stream uses
+# build\all) race on build.ninja regeneration and Ninja's logs, and the VS Ninja then aborts with a modal
+# "abort() has been called" dialog on the user's desktop. A named mutex per folder makes a second build wait.
+$folderKey = [BitConverter]::ToString([Security.Cryptography.SHA1]::Create().ComputeHash(
+  [Text.Encoding]::UTF8.GetBytes(([IO.Path]::GetFullPath($buildDir)).ToLowerInvariant()))).Replace("-", "").Substring(0, 16)
+$folderMutex = New-Object System.Threading.Mutex($false, "Global\UnravelNextBuild_$folderKey")
+$held = $false
+try { $held = $folderMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $held = $true }
+if (-not $held) {
+  Write-Host "build\$Track is being built by another session: waiting for it"
+  try { [void]$folderMutex.WaitOne() } catch [System.Threading.AbandonedMutexException] { }
+}
+try {
 # A build folder is configured for one track set: Ninja's dyndep state from another set can abort the build
 # (edge->outputs_ready assertion, reported by I). A different set starts the folder over.
 $cacheFile = Join-Path $buildDir "CMakeCache.txt"
@@ -129,3 +142,4 @@ if ($missing.Count -gt 0) {
           "Rebuild them through Build.ps1 after deleting those .obj files.") -f $missing.Count, $buildDir, ($missing -join ", "))
 }
 "build ok in {0:N1} s -> {1} (tracks: core;{2})" -f $sw.Elapsed.TotalSeconds, $buildDir, $Tracks
+} finally { $folderMutex.ReleaseMutex() }
