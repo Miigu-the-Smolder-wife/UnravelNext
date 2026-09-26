@@ -260,6 +260,9 @@ CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTexture
 // f32). A9 coats (CoverageSpecial MODE 5 / 6): COV_COAT adds the coat terms as ShadeOpaque LAYERED; COV_PART 1 is the
 // emission, sun and local lights before the air (unexposed, into M's scratch P[5].z), COV_PART 2 the indirect light plus
 // that part, then the air and the exposure - two kernels, as one exceeds the 200 KB DXIL limit.
+// COV_PART_EXPOSED (the composite and heavy rounds, split the same way for the DXIL limit): part 1 returns the emission,
+// sun and local lights exposed and through the air's transmittance, part 2 the indirect light the same way plus the air's
+// in-scattering - their sum is the one-kernel value; part 2 loads no earlier part (the caller sums).
 #if COV_PRESHADE_LIGHT
 static uint g_covPreshadeSlot;
 #endif
@@ -333,7 +336,9 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         Texture2D<float4> t = ResourceDescriptorHeap[ts.emissive];
         radiance = m.emissive * mSampleGrad(t, (ts.flags & M_TEX_EMISSIVE) != 0, sf.uv, sf.duvdx, sf.duvdy).rgb;
     }
-#if COV_PART == 2
+#if COV_PART == 2 && COV_PART_EXPOSED
+    radiance = 0;  // (the emission is part 1's)
+#elif COV_PART == 2
     {
         ByteAddressBuffer direct = ResourceDescriptorHeap[P[5].z];  // part 1: emission, sun, local lights
         radiance = asfloat(direct.Load3(16 * g_covPreshadeSlot));
@@ -516,7 +521,9 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     }
 
 #endif
-#if COV_PART == 1
+#if COV_PART == 1 && COV_PART_EXPOSED
+    return radiance * airTransmittance * g_exposure;  // (the in-scattering is part 2's)
+#elif COV_PART == 1
     return radiance;  // before the air (CoverageSpecial MODE 5 keeps it for MODE 6)
 #endif
     // ---- indirect: R's screen probes from the tile cache (irradiance; the K path for the specular lobe)
@@ -570,6 +577,9 @@ float3 covFragmentRadiance(uint visId, uint element, uint2 pixel, uint experimen
 {
     if ((visId >> 30) != 0)
     {
+#if COV_PART == 1 && COV_PART_EXPOSED
+        return 0;  // (a pre-shaded record's value is whole: counted once, in part 2)
+#endif
         if (P[8].y == UNX_NONE) return 0;  // (a view without V's special list: nobody shaded it; never a cluster decode)
         ByteAddressBuffer shaded = ResourceDescriptorHeap[P[8].y];
         return covUnpackRadiance(shaded.Load2(element * 8));

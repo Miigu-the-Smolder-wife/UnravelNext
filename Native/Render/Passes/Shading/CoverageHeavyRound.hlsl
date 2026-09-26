@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: AREA=0,1
+// unx-variants: PART=1,2 AREA=0,1
 // Coverage composite, stage F2 (CoverageShade.hlsli): heavy round r (P[5].y; COV_ROUNDS dispatches a frame), one group of
 // 32 threads per open heavy pixel (round 0: every heavy pixel; round r: active list r % 2, which round r - 1 filled).
 //   1. The next COV_ROUND fragments nearer first, merged from the pixel's sorted runs: each lane holds the heads of runs
@@ -16,6 +16,10 @@
 // P[0] = { chunk records (StructuredBuffer<uint4>), state UAV (raw), heavy records UAV (raw), run cursors UAV (raw) }
 // P[1], P[3], P[4], P[5].x: the shading constants (CoverageShade.hlsli)
 // P[2] = { 0, 0, 0, pairs (raw, CoverageHeavySort) }, P[5] = { .., round, heavy capacity, active lists UAV (raw, 2 x heavy capacity words) }
+// PART=1, 2 (the composite's split, CoverageComposite.hlsl): the rounds run once per part - part 1's direct light, then
+// (CoverageHeavyReset between) part 2's indirect light - with the same merge and weights, adding into the record's sum.
+#define COV_PART PART
+#define COV_PART_EXPOSED 1
 #include "Bindless.hlsli"
 #include "Passes/Shading/CoverageShade.hlsli"
 
@@ -41,9 +45,11 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     const uint4 rec2 = heavy.Load4(base + 32);   // sum rgb, last depth
     const uint lastVisId = heavy.Load(base + 48);
     const uint2 pixel = uint2(rec0.x & 0xFFFFu, rec0.x >> 16);
+#if PART == 2
     const uint4 probeRecord = covProbeFetch(pixel / COV_TILE_PX, lane);
     if (P[4].w != UNX_NONE && (P[3].z & 6) != 6) giProbeTileStore(lane, probeRecord);
     GroupMemoryBarrierWithGroupSync();
+#endif
     Texture2D<float> bandDepth = ResourceDescriptorHeap[P[1].z];
     const uint bandA = asuint(bandDepth[pixel]);
 

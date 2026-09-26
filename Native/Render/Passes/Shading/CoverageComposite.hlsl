@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: OUTPUT=0,1 AREA=0,1
+// unx-variants: PART=1,2 OUTPUT=0,1 AREA=0,1
 // Coverage composite, stage E (CoverageShade.hlsli; design COVERAGE_REDESIGN 4.5): one group of 64 threads per listed
 // tile (V's list arguments), one pixel per lane, reading the pixel's range of V's records (pixel-major, v1.41). A light
 // pixel (1..COV_LIGHT fragments) loads its depth keys, sorts them with an unrolled bitonic network in registers (nearer
@@ -11,9 +11,16 @@
 // shadings per lane: the group's work is bounded whatever the tile holds.
 // Fragment shading (covShadeFragment): the triangle through the covered region's centroid with the material resolve's
 // surface, then the band A kernel's lighting. Shadows: S's fragment visibility (4.3) once published (P[3].w).
+// Two kernels (the DXIL limit, 2026-09-27): PART=1 walks and weights the fragments exactly as below, shades their emission,
+// sun and local lights (CoverageShade.hlsli COV_PART_EXPOSED) and keeps the weighted sum per pixel (P[8].z: RGBA16F UAV)
+// and records the heavy pixels; PART=2 walks again (same weights), adds the fragments' indirect light and air to that sum,
+// the band A remainder, the particles, and writes the output. Heavy pixels: CoverageHeavy* (their rounds run once per part).
 // P[0] = { V's records (StructuredBuffer<uint4>), V's tile pixels (raw), V's tile list (raw), state UAV (raw) }
 // P[1], P[3], P[4], P[5].x: the shading constants (CoverageShade.hlsli); P[2] = { band A radiance, resolved or UNX_NONE,
-// edge tile mask or UNX_NONE, heavy records UAV (raw) }, P[5] = { .., heavy capacity (records), cursor capacity, 0 }
+// edge tile mask or UNX_NONE, heavy records UAV (raw) }, P[5] = { .., heavy capacity (records), cursor capacity, 0 },
+// P[8].z the direct sum (PART=1 UAV, PART=2 SRV)
+#define COV_PART PART
+#define COV_PART_EXPOSED 1
 #include "Bindless.hlsli"
 #include "Passes/Shading/CoverageShade.hlsli"
 
@@ -30,15 +37,20 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
     const uint4 info = coverageTileInfo(list, listed);  // tile, records, record base, block base
     const uint tilesX = list.Load(4 * COV_LIST_TILES_X);
     const uint2 tileCoord = uint2(info.x % tilesX, info.x / tilesX);
-    const uint4 probeRecord = covProbeFetch(tileCoord, gi);
     const uint first = info.z + coveragePixelStart(tilePixels, info, listed, gi);
     const uint count = info.z + coveragePixelStart(tilePixels, info, listed, gi + 1) - first;
+#if PART == 2
+    const uint4 probeRecord = covProbeFetch(tileCoord, gi);  // (the indirect light is part 2's)
     if (P[4].w != UNX_NONE && (P[3].z & 6) != 6) giProbeTileStore(gi, probeRecord);
     GroupMemoryBarrierWithGroupSync();
+#endif
     const uint2 pixel = tileCoord * COV_TILE_PX + uint2(gi % COV_TILE_PX, gi / COV_TILE_PX);
     if (count == 0 || any(pixel >= uint2(g_viewWidth, g_viewHeight))) return;
     if (count > COV_LIGHT)
     {
+#if PART == 2
+        return;  // (recorded by part 1)
+#endif
         RWByteAddressBuffer state = ResourceDescriptorHeap[P[0].w];
         const uint runs = (count + COV_BLOCK - 1) / COV_BLOCK;
         uint h, cursor;
@@ -99,7 +111,13 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
         covered |= fr.mask;
         if (covered == COV_MASK_FULL || used >= 1) break;
     }
-    sum += max(1 - used, 0.0) * covBandA(pixel);
+#if PART == 1
+    RWTexture2D<float4> direct = ResourceDescriptorHeap[P[8].z];
+    direct[pixel] = float4(sum, 0);
+#else
+    Texture2D<float4> direct = ResourceDescriptorHeap[P[8].z];
+    sum += direct[pixel].rgb + max(1 - used, 0.0) * covBandA(pixel);
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[1].w];
     color[pixel] = shEncodeExposed(shParticles(sum, pixel, P[6].x, P[6].y));  // P[6].xy particle layer
+#endif
 }

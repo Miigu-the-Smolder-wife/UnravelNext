@@ -759,9 +759,15 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         const std::string area = areaLights ? "1" : "0", output = linear ? "1" : "0";
         ID3D12PipelineState* begin[3] = { fc.shaders.compute("Passes/Shading/CoverageBegin.MODE0"), fc.shaders.compute("Passes/Shading/CoverageBegin.MODE1"),
                                           fc.shaders.compute("Passes/Shading/CoverageBegin.MODE2") };
-        ID3D12PipelineState* light = fc.shaders.compute(("Passes/Shading/CoverageComposite.OUTPUT" + output + ".AREA" + area).c_str());
+        // The fragment shading is split in two parts (the DXIL limit, CoverageComposite.hlsl): part 1 the direct light into
+        // a per-pixel sum, part 2 the indirect light and the output; the heavy rounds run once per part.
+        ID3D12PipelineState* light1 = fc.shaders.compute(("Passes/Shading/CoverageComposite.PART1.OUTPUT" + output + ".AREA" + area).c_str());
+        ID3D12PipelineState* light2 = fc.shaders.compute(("Passes/Shading/CoverageComposite.PART2.OUTPUT" + output + ".AREA" + area).c_str());
+        ID3D12PipelineState* heavyReset = fc.shaders.compute("Passes/Shading/CoverageHeavyReset");
+        const TextureRef directSum = g.createTexture({ "m.coverage direct", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
         ID3D12PipelineState* sort = fc.shaders.compute("Passes/Shading/CoverageHeavySort");
-        ID3D12PipelineState* heavyRound = fc.shaders.compute(("Passes/Shading/CoverageHeavyRound.AREA" + area).c_str());
+        ID3D12PipelineState* heavyRounds[2] = { fc.shaders.compute(("Passes/Shading/CoverageHeavyRound.PART1.AREA" + area).c_str()),
+                                                fc.shaders.compute(("Passes/Shading/CoverageHeavyRound.PART2.AREA" + area).c_str()) };
         ID3D12PipelineState* finish = fc.shaders.compute(("Passes/Shading/CoverageHeavyFinish.OUTPUT" + output).c_str());
 
         // CoverageBegin: MODE 0 reset, 1 heavy arguments, 2 round r's arguments.
@@ -897,38 +903,51 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 addLight("6");
             }
         }
-        // E: per listed tile, light pixels composited, heavy pixels recorded.
-        g.addPass("m.coverage", QueueType::Graphics,
-                  [&](PassBuilder& b) {
-                      useShading(b);
-                      useBandA(b);
-                      if (shaded.valid()) b.use(shaded, Use::SrvCompute);
-                      b.use(v.coverageTilePixels, Use::SrvCompute);
-                      b.use(v.coverageTileList, Use::SrvCompute);
-                      b.use(v.coverageTileList, Use::IndirectArgs);
-                      b.use(state, Use::UavCompute);
-                      b.use(heavy, Use::UavCompute);
-                      b.use(v.color, Use::UavCompute);
-                      useParticles(b);
-                  },
-                  [=](PassContext& c) {
-                      uint32_t k[24] = { c.srv(v.coverageRecords), c.srv(v.coverageTilePixels), c.srv(v.coverageTileList), c.uav(state) };
-                      shadingConstants(c, k, c.uav(v.color));
-                      k[8] = c.srv(edgeRadiance);
-                      k[9] = c.srv(edgeResolved);
-                      k[10] = c.srv(edgeTiles);
-                      k[11] = c.uav(heavy);
-                      k[21] = hcap;
-                      k[22] = ccap;
-                      uint32_t k32[48] = {};
-                      std::memcpy(k32, k, sizeof k);
-                      particleConstants(c, k32 + 24);  // P[6].xy
-                      fragmentConstants(c, k32);      // P[6].zw, P[7], P[8].x
-                      c.cmd->SetPipelineState(light);
-                      c.bindFrameConstants(cb);
-                      c.computeConstants(k32, 48);
-                      c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
-                  });
+        // E: per listed tile and part, the light pixels' fragments walked and weighted (part 1 records the heavy pixels).
+        auto addComposite = [&](uint32_t stage) {
+            g.addPass(stage == 1 ? "m.coverage direct" : "m.coverage", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          useShading(b);
+                          if (shaded.valid()) b.use(shaded, Use::SrvCompute);
+                          b.use(v.coverageTilePixels, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::IndirectArgs);
+                          b.use(state, Use::UavCompute);
+                          if (stage == 1)
+                          {
+                              b.use(heavy, Use::UavCompute);
+                              b.use(directSum, Use::UavCompute);
+                          }
+                          else
+                          {
+                              useBandA(b);
+                              b.use(directSum, Use::SrvCompute);
+                              b.use(v.color, Use::UavCompute);
+                              useParticles(b);
+                          }
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[24] = { c.srv(v.coverageRecords), c.srv(v.coverageTilePixels), c.srv(v.coverageTileList), c.uav(state) };
+                          shadingConstants(c, k, stage == 2 ? c.uav(v.color) : gpu::kNone);
+                          k[8] = stage == 2 ? c.srv(edgeRadiance) : gpu::kNone;
+                          k[9] = stage == 2 ? c.srv(edgeResolved) : gpu::kNone;
+                          k[10] = stage == 2 ? c.srv(edgeTiles) : gpu::kNone;
+                          k[11] = stage == 1 ? c.uav(heavy) : gpu::kNone;
+                          k[21] = hcap;
+                          k[22] = ccap;
+                          uint32_t k32[48] = {};
+                          std::memcpy(k32, k, sizeof k);
+                          if (stage == 2) particleConstants(c, k32 + 24);  // P[6].xy
+                          else k32[24] = k32[25] = gpu::kNone;
+                          fragmentConstants(c, k32);      // P[6].zw, P[7], P[8].xy
+                          k32[34] = stage == 1 ? c.uav(directSum) : c.srv(directSum);  // P[8].z
+                          c.cmd->SetPipelineState(stage == 1 ? light1 : light2);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k32, 48);
+                          c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
+                      });
+        };
+        addComposite(1);
         addBegin("m.coverage.heavy args", 1, 0);
         // F1: heavy pixels' runs of COV_BLOCK records sorted into the pair buffer.
         g.addPass("m.coverage.sort", QueueType::Graphics,
@@ -946,38 +965,60 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                       c.computeConstants(p, 8);
                       c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 16, nullptr, 0);
                   });
-        // F2: COV_ROUNDS rounds, each over the heavy pixels the previous one left open.
-        for (uint32_t rd = 0; rd < kRounds; ++rd)
+        // F2: COV_ROUNDS rounds per stage, each over the heavy pixels the previous one left open; between the parts every
+        // heavy pixel's merge goes back to its start (CoverageHeavyReset), keeping stage 1's sum.
+        for (uint32_t stage = 1; stage <= 2; ++stage)
         {
-            if (rd > 0) addBegin("m.coverage.round args", 2, rd);
-            g.addPass("m.coverage.round", QueueType::Graphics,
-                      [&](PassBuilder& b) {
-                          useShading(b);
-                          if (shaded.valid()) b.use(shaded, Use::SrvCompute);
-                          b.use(state, Use::UavCompute);
-                          b.use(heavy, Use::UavCompute);
-                          b.use(cursors, Use::UavCompute);
-                          b.use(pairs, Use::SrvCompute);
-                          b.use(lists, Use::UavCompute);
-                          b.use(args, Use::IndirectArgs);
-                      },
-                      [=](PassContext& c) {
-                          uint32_t k[24] = { c.srv(v.coverageRecords), c.uav(state), c.uav(heavy), c.uav(cursors) };
-                          shadingConstants(c, k, gpu::kNone);
-                          k[11] = c.srv(pairs);
-                          k[21] = rd;
-                          k[22] = hcap;
-                          k[23] = c.uav(lists);
-                          uint32_t k32[48] = {};
-                          std::memcpy(k32, k, sizeof k);
-                          k32[24] = k32[25] = gpu::kNone;  // (no particle layer in the rounds)
-                          fragmentConstants(c, k32);      // P[6].zw, P[7], P[8].x
-                          c.cmd->SetPipelineState(heavyRound);
-                          c.bindFrameConstants(cb);
-                          c.computeConstants(k32, 48);
-                          c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 32, nullptr, 0);
-                      });
+            if (stage == 2)
+            {
+                addBegin("m.coverage.heavy args", 1, 0);  // round 0's arguments again (every heavy pixel)
+                g.addPass("m.coverage.heavy reset", QueueType::Graphics,
+                          [&](PassBuilder& b) {
+                              b.use(state, Use::UavCompute);
+                              b.use(heavy, Use::UavCompute);
+                              b.use(cursors, Use::UavCompute);
+                              b.use(args, Use::IndirectArgs);
+                          },
+                          [=](PassContext& c) {
+                              const uint32_t p[4] = { c.uav(state), c.uav(heavy), c.uav(cursors), hcap };
+                              c.cmd->SetPipelineState(heavyReset);
+                              c.computeConstants(p, 4);
+                              c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 48, nullptr, 0);  // the finish grid: 64 per group
+                          });
+            }
+            for (uint32_t rd = 0; rd < kRounds; ++rd)
+            {
+                if (rd > 0) addBegin("m.coverage.round args", 2, rd);
+                g.addPass("m.coverage.round", QueueType::Graphics,
+                          [&](PassBuilder& b) {
+                              useShading(b);
+                              if (shaded.valid()) b.use(shaded, Use::SrvCompute);
+                              b.use(state, Use::UavCompute);
+                              b.use(heavy, Use::UavCompute);
+                              b.use(cursors, Use::UavCompute);
+                              b.use(pairs, Use::SrvCompute);
+                              b.use(lists, Use::UavCompute);
+                              b.use(args, Use::IndirectArgs);
+                          },
+                          [=](PassContext& c) {
+                              uint32_t k[24] = { c.srv(v.coverageRecords), c.uav(state), c.uav(heavy), c.uav(cursors) };
+                              shadingConstants(c, k, gpu::kNone);
+                              k[11] = c.srv(pairs);
+                              k[21] = rd;
+                              k[22] = hcap;
+                              k[23] = c.uav(lists);
+                              uint32_t k32[48] = {};
+                              std::memcpy(k32, k, sizeof k);
+                              k32[24] = k32[25] = gpu::kNone;  // (no particle layer in the rounds)
+                              fragmentConstants(c, k32);      // P[6].zw, P[7], P[8].x
+                              c.cmd->SetPipelineState(heavyRounds[stage - 1]);
+                              c.bindFrameConstants(cb);
+                              c.computeConstants(k32, 48);
+                              c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 32, nullptr, 0);
+                          });
+            }
         }
+        addComposite(2);
         // F3: heavy pixels' band A remainder and output; a pixel the rounds left open sets the error bit.
         g.addPass("m.coverage.finish", QueueType::Graphics,
                   [&](PassBuilder& b) {
