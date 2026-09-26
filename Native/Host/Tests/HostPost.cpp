@@ -1,13 +1,15 @@
 // HDR post chain through the host (render A item A4; FEATURES_GAME 4 and 6, M Post.cpp), quality overrides before commit
 // (HostRendererOptions::qualityOverrides / overrideQuality, ABI UnxRendererQualityOverride):
-// Two renderers given the same frames do not produce bit identical images (the baseline: two plain renderers differ in
-// about 2 % of the pixels, by up to 6 10-bit steps [실측]), so these checks compare against that baseline; the chain's exact
-// terms are checked on synthetic inputs by Render's PostTests.
+// Every renderer runs with gi.deterministic = true (the GI's update selection by key priority instead of atomic order;
+// the default false makes two renderers differ in about 4 % of the channels by up to 7 10-bit steps [실측]), so frames of
+// different renderers compare exactly; the chain's exact terms are checked on synthetic inputs by Render's PostTests.
+//   0. baseline: two plain renderers bit identical;
 //   1. identity grading LUT only: the chain path (writers' linear variant into the RGBA16F target -> PostFinal's curve,
-//      LUT and 10-bit dither) matches the direct writers' encoding: channels beyond 2 10-bit steps (the dither is one
-//      triangular step) no more often than two plain renderers differ at all, the mean difference within 0.1 step;
-//   2. vignetting only (1.0): the centre block within 1 step (mean), the corners much darker;
-//   3. every term on (bloom 0.04, vignette 0.5, grain 0.01, the LUT): the frame differs from the plain one;
+//      LUT and 10-bit dither) matches the direct writers' encoding: every channel within 2 10-bit steps (the dither is
+//      one triangular step), the mean difference within 0.1 step;
+//   2. vignetting only (1.0): the centre block within 1 step (mean; cos^4 is not flat there), the corners much darker;
+//   3. every term on (bloom 0.04, vignette 0.5, grain 0.01, the LUT): two renderers bit identical, the frame differs
+//      from the plain one;
 //   4. an override after commit is refused (the render threads read the config).
 // Correctness run (standalone HostRenderer, hardware GPU; GpuLock -Kind correctness).
 #include "Renderer/HostRenderer.h"
@@ -37,6 +39,7 @@ std::vector<uint32_t> renderFrames(const std::vector<std::string>& overrides, ui
     o.shaderDirectory = executableDirectory() / "shaders";
     o.qualityDirectory = std::filesystem::path(UNX_SOURCE_DIR) / "Config/quality";
     o.qualityOverrides = overrides;
+    o.qualityOverrides.insert(o.qualityOverrides.begin(), "gi.deterministic=true");
     HostRenderer h(o);
     h.scene() = test::oneBox();
     h.commit();
@@ -125,17 +128,18 @@ int main()
         const Diff base = diff(plain, plainAgain, 0, 0, kWidth, kHeight);
         const double baseDiffering = beyond(plain, plainAgain, 0);
         logf("  baseline, two plain renderers: max %d steps, mean %+.4f, %.3f %% of channels differ\n", base.maxAbs, base.mean, 100.0 * baseDiffering);
+        expect("baseline: two plain renderers bit identical (gi.deterministic)", plain == plainAgain);
         const std::vector<uint32_t> graded = renderFrames({ lut }, errors);
         const std::vector<uint32_t> vignetted = renderFrames({ "shading.post_vignette=1.0" }, errors);
         const std::vector<std::string> all = { "shading.post_bloom_strength=0.04", "shading.post_vignette=0.5", "shading.post_grain=0.01", lut };
-        const std::vector<uint32_t> full = renderFrames(all, errors);
+        const std::vector<uint32_t> full = renderFrames(all, errors), fullAgain = renderFrames(all, errors);
 
         // 1. the chain path with an identity LUT against the direct writers
         const Diff g = diff(plain, graded, 0, 0, kWidth, kHeight);
         const double gBeyond = beyond(plain, graded, 2);
         logf("  identity LUT vs direct: max %d steps, mean %+.4f steps, %.3f %% of channels beyond 2 steps (plain mean value %.1f)\n", g.maxAbs, g.mean,
              100.0 * gBeyond, meanValue(plain, 0, 0, kWidth, kHeight));
-        expect("identity LUT: beyond the dither (2 steps) no more often than two plain renderers differ", gBeyond <= baseDiffering);
+        expect("identity LUT: every channel within 2 10-bit steps of the direct writers (dither 1 step)", gBeyond == 0);
         expect("identity LUT: no bias (mean difference within 0.1 step)", std::abs(g.mean) < 0.1);
 
         // 2. vignetting: the centre block unchanged, the corners darker
@@ -146,9 +150,10 @@ int main()
         expect("vignette: the centre block unchanged (mean within 1 step)", std::abs(centre.mean) < 1.0);
         expect("vignette: the corners much darker (more than 100 steps)", cornerVignetted < cornerPlain - 200);
 
-        // 3. every term: visibly applied
+        // 3. every term: deterministic, visibly applied
         const Diff f = diff(plain, full, 0, 0, kWidth, kHeight);
         logf("  every term vs plain: max %d steps, mean %+.3f\n", f.maxAbs, f.mean);
+        expect("every term: two renderers bit identical", full == fullAgain);
         expect("every term: the frame differs from the plain one", f.maxAbs > 4);
 
         // 4. overrides after commit are refused
