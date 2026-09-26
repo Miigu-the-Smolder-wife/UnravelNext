@@ -484,6 +484,23 @@ std::filesystem::path utf8Path(const char* s)
 }
 } // namespace
 
+UNX_API int32_t UNX_CALL UnxFrameSetFluids(UnxRenderer r, const UnxFluidInput* fluids, uint32_t count, const uint64_t stamp[6])
+{
+    return call([&] {
+        if ((count && !fluids) || !stamp) fail("UnxFrameSetFluids: missing arrays");
+        std::vector<HostRenderer::FluidInput> in(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            in[i].view = fluids[i].view;
+            in[i].alpha = fluids[i].alpha;
+            std::memcpy(in[i].domainCells, fluids[i].domainCells, sizeof in[i].domainCells);
+        }
+        uint64_t s[6];
+        std::memcpy(s, stamp, sizeof s);
+        find(r)->setFluids(in, s);
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxHairAddBody(UnxRenderer r, const UnxHairBodyDesc* desc, uint32_t* body)
 {
     return call([&] {

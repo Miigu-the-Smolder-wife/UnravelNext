@@ -166,6 +166,15 @@ struct FramePacket
     };
     std::vector<HairOp> hairOps;
     std::optional<float> hairFraction;
+    // B8 GPU fluids of this frame (the latest set replaces an earlier one): FrameContext::fluids plus what the GPU bridge
+    // admits (the resources' bridge ids and the tick's World stamp).
+    struct Fluid
+    {
+        render::FluidFrame frame;
+        uint64_t currentResource = 0, startResource = 0;  // bridge resource ids (0: a standalone device)
+    };
+    std::shared_ptr<const std::vector<Fluid>> fluids;
+    std::array<uint64_t, 6> fluidStamp{};  // NRC_GpuWorldStamp of their tick (world, generation, epoch, tick, branch, phase)
 };
 
 // The render graph of one recorded frame (RenderGraphStats, the fields the host reports).
@@ -307,6 +316,16 @@ public:
     void hairTick(uint32_t body, std::span<const float3x4> joints, std::span<const hair::Capsule> capsules, float3 wind, float dt);
     void hairSetFrameFraction(float fraction);
     void hairRemoveBody(uint32_t body);
+    // B8 GPU fluids (engine 1's shared-mode physics fluids) for the frames queued from now on until the next call: each
+    // one's NP_FluidGpuView (96 B, as np_fluid_gpu_view filled it), the frame's time within their tick and its domain in
+    // cells; stamp = the tick's NRC_GpuWorldStamp (6 x 64 bit). An empty list: no fluids.
+    struct FluidInput
+    {
+        const void* view = nullptr;  // NP_FluidGpuView
+        float alpha = 1;
+        uint32_t domainCells[3] = {};
+    };
+    void setFluids(std::span<const FluidInput> fluids, const uint64_t (&stamp)[6]);
     void setSimulation(uint32_t gpuSimulation);
     // Sun, atmosphere and (when set) wind of the following frames.
     void setEnvironment(const scene::Sun& sun, const scene::Atmosphere& atmosphere, std::optional<FramePacket::Wind> wind);
@@ -410,6 +429,10 @@ private:
     // photoAfterExecute finishes a save once the frame's lists were submitted.
     bool photoFrame(render::FrameContext& fc, const FramePacket& p, render::TextureRef output);
     void photoAfterExecute();
+    // Submission thread: B8 fluids - the GPU bridge admits the frame's reads (queue waits on the graphics queue) before its
+    // lists run, and takes the frame's fence after them.
+    void fluidsBeforeExecute(const FramePacket& p);
+    void fluidsAfterExecute();
 
     HostRendererOptions m_options;
     QualityConfig m_quality;
@@ -494,6 +517,10 @@ private:
     viewmodel::ViewModels m_viewModels;         // (m_mutex) the host's mirror (ids, live entries)
     std::vector<uint32_t> m_hairJoints;         // (m_mutex) per hair body id: its joint count (0 = free)
     std::vector<uint32_t> m_hairFree;           // (m_mutex) free ids, reused last-freed first (HairSystem's rule)
+    std::shared_ptr<const std::vector<FramePacket::Fluid>> m_fluids;  // (m_mutex) the fluids every queued frame takes
+    std::array<uint64_t, 6> m_fluidStamp{};                          // (m_mutex)
+    uint64_t m_fluidTicket = 0;                  // submission thread: the frame's bridge admission (0: none)
+    std::vector<render::FluidFrame> m_fluidFrames;  // submission thread: FrameContext::fluids of the frame being recorded
     std::unique_ptr<render::RenderGraph> m_simGraph;  // the claimed ticks' graph (compute queue)
     uint64_t m_simIndex = 1ull << 48;                // its import index (apart from frame indices)
     uint64_t m_simFence = 0, m_simWaited = 0;        // compute fence of the last claimed tick; the frames waited up to

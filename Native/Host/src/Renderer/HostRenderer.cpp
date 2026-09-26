@@ -927,6 +927,83 @@ void HostRenderer::hairRemoveBody(uint32_t body)
     m_pending.hairOps.push_back(std::move(op));
 }
 
+namespace
+{
+// NP_FluidGpuView (Unravel Native/NativePhysics/include/NativePhysicsFluid.h, 96 B): the layout the host reads.
+struct FluidGpuView
+{
+    uint32_t size, version;
+    void* current;
+    void* start;
+    uint64_t currentResource, startResource;
+    uint32_t count, startCount, stride, startValid;
+    double origin[3];
+    float dx;
+    uint32_t reserved;
+    uint64_t tick;
+};
+static_assert(sizeof(FluidGpuView) == 96, "NP_FluidGpuView");
+} // namespace
+
+void HostRenderer::setFluids(std::span<const FluidInput> fluids, const uint64_t (&stamp)[6])
+{
+    requireCommitted();
+    auto list = std::make_shared<std::vector<FramePacket::Fluid>>();
+    std::lock_guard lock(m_mutex);
+    for (const FluidInput& in : fluids)
+    {
+        FluidGpuView v;
+        if (!in.view) fail("fluids: no view");
+        std::memcpy(&v, in.view, sizeof v);
+        if (v.size != sizeof v || v.version != 1) fail("fluids: NP_FluidGpuView size %u version %u", v.size, v.version);
+        if (!v.current || !v.count || v.stride != 48 || !(v.dx > 0)) fail("fluids: a view without particles (count %u, stride %u, dx %g)", v.count, v.stride, v.dx);
+        if (!(in.alpha >= 0 && in.alpha <= 1)) fail("fluids: alpha %g outside [0, 1]", in.alpha);
+        FramePacket::Fluid f;
+        f.frame.current = static_cast<ID3D12Resource*>(v.current);
+        f.frame.start = v.startValid ? static_cast<ID3D12Resource*>(v.start) : nullptr;
+        f.frame.count = v.count;
+        f.frame.startCount = v.startCount;
+        f.frame.stride = v.stride;
+        f.frame.startValid = v.startValid && v.start ? 1u : 0u;
+        // world -> this frame's coordinates (the origin shifts the host applied so far, whole 1024 m steps)
+        f.frame.origin[0] = v.origin[0] - m_mainOriginOffset.x;
+        f.frame.origin[1] = v.origin[1] - m_mainOriginOffset.y;
+        f.frame.origin[2] = v.origin[2] - m_mainOriginOffset.z;
+        f.frame.dx = v.dx;
+        f.frame.alpha = in.alpha;
+        f.frame.tick = v.tick;
+        std::memcpy(f.frame.domainCells, in.domainCells, sizeof f.frame.domainCells);
+        f.currentResource = v.currentResource;
+        f.startResource = v.startResource;
+        list->push_back(f);
+    }
+    m_fluids = list->empty() ? nullptr : std::shared_ptr<const std::vector<FramePacket::Fluid>>(std::move(list));
+    std::copy(std::begin(stamp), std::end(stamp), m_fluidStamp.begin());
+}
+
+void HostRenderer::fluidsBeforeExecute(const FramePacket& p)
+{
+    m_fluidTicket = 0;
+    if (!p.fluids || p.fluids->empty()) return;
+    std::vector<GpuBridgeHost::GraphicsUse> uses;
+    for (const FramePacket::Fluid& f : *p.fluids)
+    {
+        uses.push_back({ f.frame.current, 0, 0, NRC_GPU_READ });  // buffers decay to COMMON at the bridge's boundaries
+        if (f.frame.startValid) uses.push_back({ f.frame.start, 0, 0, NRC_GPU_READ });
+    }
+    NRC_GpuWorldStamp stamp{};
+    stamp.world = p.fluidStamp[0], stamp.world_generation = p.fluidStamp[1], stamp.epoch = p.fluidStamp[2], stamp.tick = p.fluidStamp[3];
+    stamp.branch = p.fluidStamp[4], stamp.phase = (uint32_t)p.fluidStamp[5];
+    m_fluidTicket = gpuBridge().prepareGraphics(uses, stamp);
+}
+
+void HostRenderer::fluidsAfterExecute()
+{
+    if (!m_fluidTicket) return;
+    gpuBridge().commitGraphics(m_fluidTicket, m_device->queue(QueueType::Graphics).lastSignaled());
+    m_fluidTicket = 0;
+}
+
 uint32_t HostRenderer::viewModelAdd(uint32_t instance, const float3x4& cameraLocal)
 {
     requireCommitted();
@@ -1023,6 +1100,8 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.viewModelOps = std::move(m_pending.viewModelOps);
     packet.hairOps = std::move(m_pending.hairOps);
     packet.hairFraction = m_pending.hairFraction;
+    packet.fluids = m_fluids;  // (a state: every frame reads the latest until the host sets another)
+    packet.fluidStamp = m_fluidStamp;
     m_decalsChanged = false;
     m_pending = FramePacket{};
     m_packets.push_back(std::move(packet));
@@ -1329,6 +1408,12 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.timing = m_profiler ? m_profiler->lastCompleted() : nullptr;  // (the debug HUD, E)
     fc.originShift = p.originShift;  // C9
     fc.gpuSimulation = p.gpuSimulation;
+    std::vector<FluidFrame>& fluidFrames = m_fluidFrames;  // B8: valid until record() returns
+    fluidFrames.clear();
+    if (p.fluids)
+        for (const FramePacket::Fluid& f : *p.fluids) fluidFrames.push_back(f.frame);
+    fc.fluids = fluidFrames.empty() ? nullptr : fluidFrames.data();
+    fc.fluidCount = (uint32_t)fluidFrames.size();
     m_lastDiscontinuity = p.discontinuity;
     m_lastGpuSimulation = p.gpuSimulation;
     m_prevViewProj = fc.mainView.viewProj;
@@ -1790,12 +1875,15 @@ void HostRenderer::renderOnHost(uint64_t ticket, const HostExecute& execute)
     try
     {
         fxFrameWait();  // on the host's queue, in its render event
+        fluidsBeforeExecute(p);
         m_graph->execute(m_profiler.get());
+        fluidsAfterExecute();
         photoAfterExecute();
     }
     catch (...)
     {
         graphics.setExecuteHook({});
+        fluidsAfterExecute();  // the admission holds the bridge's lock until committed (what ran is behind the last signal)
         throw;
     }
     graphics.setExecuteHook({});
@@ -1901,7 +1989,17 @@ void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t read
             });
     }
     fxFrameWait();
-    m_graph->execute(m_profiler.get());
+    fluidsBeforeExecute(p);
+    try
+    {
+        m_graph->execute(m_profiler.get());
+    }
+    catch (...)
+    {
+        fluidsAfterExecute();
+        throw;
+    }
+    fluidsAfterExecute();
     photoAfterExecute();
     endFrame(slot, p.frameIndex);
     if (readback)

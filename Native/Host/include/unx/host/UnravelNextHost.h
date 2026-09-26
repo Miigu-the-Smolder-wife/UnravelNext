@@ -36,7 +36,7 @@ enum UnxResult
                             //    UnxDebugPrimitives, UnxDebugText, UnxDecalAdd, UnxDecalUpdate, UnxDecalRemove, UnxViewModelAdd,
                             //    UnxViewModelSetPose, UnxViewModelRemove, UnxPhotoBegin, UnxPhotoSave, UnxPhotoEnd, UnxPhotoGetStatus,
                             //    UnxAcquireGpuBridge, UnxReleaseGpuBridge, UnxGpuBridgeStatistics, UnxHairAddBody, UnxHairTick,
-                            //    UnxHairSetFrameFraction, UnxHairRemoveBody,
+                            //    UnxHairSetFrameFraction, UnxHairRemoveBody, UnxFrameSetFluids,
                             //    UnxSceneAddBlendShape, UnxSceneSetVertexAnimation, UnxFrameSetMorphs (C4),
                             //    UnxFrameSetOriginShift (C9), UnxSceneReserveRuntime, UnxFrameAddRuntimeMesh,
                             //    UnxFrameRemoveRuntimeMesh, UnxFrameAddRuntimeInstance, UnxFrameRemoveRuntimeInstance,
@@ -456,6 +456,22 @@ UNX_API int32_t UNX_CALL UnxHairTick(UnxRenderer r, uint32_t body, const float* 
                                      uint32_t capsuleCount, const float wind[3], float dt);
 UNX_API int32_t UNX_CALL UnxHairSetFrameFraction(UnxRenderer r, float fraction);
 UNX_API int32_t UNX_CALL UnxHairRemoveBody(UnxRenderer r, uint32_t body);
+
+// B8 GPU fluids (optional export within ABI 6, INTERFACES v1.70; engine 1's shared-mode physics fluids on the renderer's
+// device): the frames queued from now on draw these fluids until the next call (count 0: none). view = the
+// NP_FluidGpuView (96 B) np_fluid_gpu_view filled for the tick, alpha = the frame's time within that tick, domainCells = the
+// fluid's domain in cells; stamp = the tick's NRC_GpuWorldStamp (world, world_generation, epoch, tick, branch, phase).
+// The renderer admits the reads through the GPU bridge before each frame's lists and commits them with its fence.
+typedef struct UnxFluidInput
+{
+    const void* view;
+    float alpha;
+    uint32_t domainCells[3];
+} UnxFluidInput;
+#ifdef __cplusplus
+static_assert(sizeof(UnxFluidInput) == 24, "UnxFluidInput is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetFluids(UnxRenderer r, const UnxFluidInput* fluids, uint32_t count, const uint64_t stamp[6]);
 
 // Loads a .unxscene file (INTERFACES 6.2) as the renderer's content: textures, materials, meshes, skeletons, instances
 // (their flags included), lights, sun, atmosphere and wind, with the file's indices. Only before any content was added and

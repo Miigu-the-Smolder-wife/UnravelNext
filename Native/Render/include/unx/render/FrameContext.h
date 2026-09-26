@@ -47,6 +47,21 @@ struct CelestialFrame
     uint32_t flags = 0;
 };
 
+// B8 (engine 1 W, INTERFACES v1.70): one GPU fluid of this frame - the physics module's particles on the renderer's device
+// (shared mode, NP_FluidGpuView), read by W's waterGeometry. The host admitted the reads through the GPU bridge
+// (GpuBridgeHost::prepareGraphics) before the frame's lists run and commits them with the frame's fence.
+struct FluidFrame
+{
+    ID3D12Resource* current = nullptr;  // particles at the end of the latest tick (NP_FluidParticle, 48 B; COMMON)
+    ID3D12Resource* start = nullptr;    // particles at the start of that tick (null or !startValid: no blend)
+    uint32_t count = 0, startCount = 0, stride = 48, startValid = 0;
+    double origin[3] = {};              // world position of cell 0 in this frame's coordinates (origin shifts applied)
+    float dx = 0;                       // cell size (m); particle positions are in cells
+    float alpha = 1;                    // this frame's time between the tick's start (0) and end (1)
+    uint64_t tick = 0;
+    uint32_t domainCells[3] = {};       // the fluid domain (FluidSurfaceDesc::nodes = 2 x cells)
+};
+
 struct FrameContext
 {
     uint64_t frameIndex = 0;
@@ -92,6 +107,9 @@ struct FrameContext
     // applies the frame's transforms; FrameRenderer moves the previous view; tracks move their world-space state (V's
     // previous camera position and instance chunks, S's clipmap pages, R's GI cells and TLAS) by the same amount.
     float3 originShift{};
+    // v1.70 (B8, engine 1 W): this frame's GPU fluids (valid until record() returns; none: fluidCount 0).
+    const FluidFrame* fluids = nullptr;
+    uint32_t fluidCount = 0;
 };
 constexpr float kOriginGrid = 1024.0f;
 constexpr uint32_t kGpuSimulationSoft = 1, kGpuSimulationVfx = 2, kGpuSimulationRigid = 4;
