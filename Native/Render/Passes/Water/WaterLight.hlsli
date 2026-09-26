@@ -13,8 +13,11 @@
 //   so a horizontal Lambert floor under flat water gets E (1 - F) cos theta_s T^d: the flux per horizontal area is
 //   conserved. Exact for a flat surface; on a curved surface the error is the surface's rise over the refracted path's
 //   horizontal offset from S (FEATURES_GAME 1.9).
+//   Caustics (causticsSrv = FrameResources::waterSunCaustics): the transmittance is multiplied by the caustic factor at X
+//   (waterCausticFactor; exact at the slice depths for the forward mapping of the map's texels, interpolated between;
+//   the factor's per-photon Fresnel, compression and absorption are X's own surface point's).
 //   Conditions recorded there: (a) S's VSM shadows use the straight sun direction; (b) sky and GI light entering the
-//   water is not attenuated yet (with R); (c) caustics come on the same map.
+//   water is not attenuated yet (with R).
 // `ior` > 1 overrides the medium's; otherwise the medium's is used. Returns false (lightDir = sunDir, transmittance = 1)
 // when X is not under water from the sun or the map is absent (constSrv UNX_NONE or its valid word 0).
 #ifndef UNX_WATER_LIGHT_HLSLI
@@ -22,6 +25,12 @@
 #include "Bindless.hlsli"
 #include "Passes/Common/Frame.hlsli"
 #include "Passes/Water/WaterShading.hlsli"
+
+// Caustics (WaterCaustics.hlsl): slices at depths z_k = 0.25 * 2^k m below the surface along its normal, on a grid of min(map texels, 1024) per side over the same extent; fixed point 2^-16, flat water =
+// 1 per texel (a unit of light per surface texel of the grid's size).
+#define WATER_CAUSTIC_SLICES 5u
+#define WATER_CAUSTIC_MAX 1024u
+float waterCausticDepth(uint slice) { return 0.25 * float(1u << slice); }
 
 // waterSunConstants (raw, 80 B): valid, texels per side, 0, 0; right.xyz, origin along right; up.xyz, origin along up;
 // sun.xyz (towards the sun), smallest along the sun; 1 / extent along right, 1 / extent along up, depth range along the
@@ -38,7 +47,24 @@ float2 waterOctEncode(float3 n)
     return n.z >= 0 ? n.xy : (1 - abs(n.yx)) * float2(n.x >= 0 ? 1 : -1, n.y >= 0 ? 1 : -1);
 }
 
-bool waterSunLight(uint depthSrv, uint normalSrv, uint mediumSrv, uint constSrv, float3 X, float3 sunDir, float ior, out float3 lightDir, out float3 transmittance)
+// The caustic factor at X (the light arriving there per unit of the light a flat surface would bring): the slice texel of
+// X's projection, interpolated between the slices bracketing X's depth below its surface point along that point's normal
+// on a log2 scale (from 1 at the surface to the first slice). 1 without caustics.
+float waterCausticFactor(uint causticsSrv, uint n, float2 uv, float depthBelowTop)  // (depth below the surface)
+{
+    if (causticsSrv == UNX_NONE) return 1;
+    Texture2DArray<uint> caustics = ResourceDescriptorHeap[causticsSrv];
+    const uint nc = min(n, WATER_CAUSTIC_MAX);
+    const int2 texel = int2(uv * float(nc));
+    const float fi = log2(max(depthBelowTop, 1e-6) / waterCausticDepth(0));
+    if (fi <= 0) return lerp(1.0, float(caustics[uint3(texel, 0)]) / 65536.0, saturate(depthBelowTop / waterCausticDepth(0)));
+    const uint i = min(uint(fi), WATER_CAUSTIC_SLICES - 1);
+    if (i + 1 >= WATER_CAUSTIC_SLICES) return float(caustics[uint3(texel, WATER_CAUSTIC_SLICES - 1)]) / 65536.0;
+    return lerp(float(caustics[uint3(texel, i)]), float(caustics[uint3(texel, i + 1)]), fi - float(i)) / 65536.0;
+}
+
+bool waterSunLight(uint depthSrv, uint normalSrv, uint mediumSrv, uint constSrv, uint causticsSrv, float3 X, float3 sunDir, float ior, out float3 lightDir,
+                   out float3 transmittance)
 {
     lightDir = sunDir;
     transmittance = 1;
@@ -68,6 +94,12 @@ bool waterSunLight(uint depthSrv, uint normalSrv, uint mediumSrv, uint constSrv,
     const float path = max(dot(S - X, n), 0.0) / max(dot(lightDir, n), 1e-4);
     const float cosT = max(dot(lightDir, n), 1e-4);
     transmittance = (1 - waterFresnel(cosS, eta)) * (cosS / cosT) * pow(clamp(medium.rgb, 1e-6, 1.0), path);
+    transmittance *= waterCausticFactor(causticsSrv, head.y, uv, max(dot(S - X, n), 0.0));
     return true;
+}
+// Without caustics (the first form of the join; INTERFACES v1.77).
+bool waterSunLight(uint depthSrv, uint normalSrv, uint mediumSrv, uint constSrv, float3 X, float3 sunDir, float ior, out float3 lightDir, out float3 transmittance)
+{
+    return waterSunLight(depthSrv, normalSrv, mediumSrv, constSrv, UNX_NONE, X, sunDir, ior, lightDir, transmittance);
 }
 #endif

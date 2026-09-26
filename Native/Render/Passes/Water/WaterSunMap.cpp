@@ -144,6 +144,33 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
                       c.cmd->DispatchMesh(std::min(65535u, groups), (groups + 65534) / 65535, 1);
                   }
               });
+    // Caustics (WaterCaustics.hlsl): the map's texels' refracted sunlight splatted onto the slices.
+    const uint32_t nc = std::min(n, kCausticMax);
+    out.caustics = g.createTexture(TextureDesc{ "w.sun map caustics", nc, nc, uint16_t(kCausticSlices), 1, DXGI_FORMAT_R32_UINT });
+    const TextureRef caustics = out.caustics;
+    ID3D12PipelineState* zero = shaders.compute("Passes/Water/WaterCausticsClear");
+    ID3D12PipelineState* splat = shaders.compute("Passes/Water/WaterCaustics");
+    g.addPass("w.sun map caustics clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(caustics, Use::UavCompute); },
+              [=](PassContext& c) {
+                  const uint32_t k[4] = { c.uav(caustics), nc, kCausticSlices, 0 };
+                  c.cmd->SetPipelineState(zero);
+                  c.computeConstants(k, 4);
+                  c.cmd->Dispatch((nc + 7) / 8, (nc + 7) / 8, kCausticSlices);
+              });
+    g.addPass("w.sun map caustics", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(depth, Use::SrvCompute);
+                  b.use(normal, Use::SrvCompute);
+                  b.use(medium, Use::SrvCompute);
+                  b.use(constants, Use::SrvCompute);
+                  b.use(caustics, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { c.srv(depth), c.srv(normal), c.srv(medium), c.srv(constants), c.uav(caustics), 0, 0, 0 };
+                  c.cmd->SetPipelineState(splat);
+                  c.computeConstants(k, 8);
+                  c.cmd->Dispatch((n + 7) / 8, (n + 7) / 8, 1);
+              });
     return out;
 }
 } // namespace unx::water

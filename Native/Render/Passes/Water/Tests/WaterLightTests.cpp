@@ -9,7 +9,9 @@
 //      ratio the beam's compression across the surface, d the path from the point to the surface along the light
 //      direction (relative 3e-3; the medium is fp16); and the energy check: a horizontal floor under the flat pool gets
 //      transmittance x cos(floor normal, light direction) = (1 - F) cos theta_s T^d (relative 3e-3);
-//   4. with the map absent (constants UNX_NONE) nothing is lit.
+//   4. with the map absent (constants UNX_NONE) nothing is lit;
+//   5. caustics on (a third run): flat water focuses nothing, so where the light reaching the point entered the water more
+//      than 4 caustic texels inside a plate the transmittance is unchanged (relative 3e-3).
 //   unx_test_water_waterlighttests [--no-debug-layer] [--warp]
 #include "unx/water/LinearDispatch.h"
 #include "unx/water/WaterSunMap.h"
@@ -136,8 +138,9 @@ int main(int argc, char** argv)
                 for (double x = -1.5; x <= 3.8; x += 0.05) points.insert(points.end(), { (float)x, (float)y, (float)z, 0 });
         const uint32_t count = uint32_t(points.size() / 4);
 
-        std::vector<uint8_t> result[2];
-        for (int run = 0; run < 2; ++run)
+        std::vector<uint8_t> result[3];
+        const double causticMargin = 0.03;  // 4 caustic texels and more (the grid's extent here is ~5 m over 1024)
+        for (int run = 0; run < 3; ++run)
         {
             RenderGraph g(gpu.device);
             std::vector<ComPtr<ID3D12Resource>> keep;
@@ -180,7 +183,8 @@ int main(int argc, char** argv)
             ComPtr<ID3D12Resource> rb = hostBuffer(gpu.device, uint64_t(count) * 32, D3D12_HEAP_TYPE_READBACK);
             ID3D12Resource* rbp = rb.Get();
             ID3D12PipelineState* probe = gpu.shaders.compute("Passes/Water/Tests/WaterLightProbe");
-            const TextureRef depth = out.depth, normal = out.normal, medium = out.medium;
+            const TextureRef depth = out.depth, normal = out.normal, medium = out.medium, caustics = out.caustics;
+            const bool withCaustics = run == 2;
             const BufferRef constants = out.constants;
             const bool absent = run == 1;
             const float sunF[3] = { (float)sun.x, (float)sun.y, (float)sun.z };
@@ -192,10 +196,12 @@ int main(int argc, char** argv)
                           pb.use(normal, Use::SrvCompute);
                           pb.use(medium, Use::SrvCompute);
                           pb.use(constants, Use::SrvCompute);
+                          pb.use(caustics, Use::SrvCompute);
                       },
                       [=](PassContext& c) {
                           uint32_t k[12] = { c.srv(pts), c.uav(res), count, 0, c.srv(depth), c.srv(normal), c.srv(medium), absent ? gpu::kNone : c.srv(constants) };
                           std::memcpy(&k[8], sunF, 12);
+                          k[11] = withCaustics ? c.srv(caustics) : gpu::kNone;
                           c.cmd->SetPipelineState(probe);
                           c.computeConstants(k, 12);
                           water::dispatchLinear(c.cmd, (count + 63) / 64);
@@ -215,7 +221,8 @@ int main(int argc, char** argv)
         }
 
         uint32_t lit = 0, unlit = 0, boundary = 0, wrongLit = 0, wrongUnlit = 0;
-        double worstDir = 0, worstT = 0, worstEnergy = 0;
+        double worstDir = 0, worstT = 0, worstEnergy = 0, worstCaustic = 0;
+        uint32_t causticChecked = 0, loggedCaustic = 0;
         for (uint32_t i = 0; i < count; ++i)
         {
             const V3 X{ points[4 * i], points[4 * i + 1], points[4 * i + 2] };
@@ -264,6 +271,38 @@ int main(int argc, char** argv)
             {
                 const double want = (1 - F) * (cosS / cosT) * std::pow((double)q.T[c], path);
                 worstT = std::max(worstT, std::fabs(gt[c] - want) / want);
+                // caustics (third run): where the arriving light entered the plate well inside its edges
+                {
+                    // The light the GPU reads at X comes, for each slice depth z_k bracketing X's depth h (the surface itself
+                    // below the first slice), from the entry point whose refracted ray at depth z_k lands on X's sun column:
+                    // S_k = X + sun alpha - t z_k / cos(theta_t), on the plate. All of them well inside the plate.
+                    const double h = dot(S - X, q.n), fi = std::log2(std::max(h, 1e-6) / 0.25);
+                    std::vector<double> depths;
+                    if (fi <= 0) depths = { 0.0, 0.25 };
+                    else if (fi >= 4) depths = { 4.0 };
+                    else depths = { 0.25 * std::exp2(std::floor(fi)), 0.25 * std::exp2(std::floor(fi) + 1) };
+                    bool inside = true;
+                    for (double zk : depths)
+                    {
+                        const V3 back = t * (zk / cosT);  // (t: the refracted direction into the water)
+                        const double alpha = (dot(q.centre - X, q.n) + dot(back, q.n)) / dot(sun, q.n);
+                        const V3 rel = X + sun * alpha - back - q.centre;
+                        inside = inside && q.ha - std::fabs(dot(rel, q.a)) > causticMargin && q.hb - std::fabs(dot(rel, q.b)) > causticMargin;
+                    }
+                    if (inside)
+                    {
+                        float gc[4];
+                        std::memcpy(gc, &result[2][32 * i + 16], 16);
+                        if (std::fabs(gc[c] - want) / want > 3e-3 && loggedCaustic < 6 && c == 1)
+                        {
+                            ++loggedCaustic;
+                            std::printf("  caustic point (%.2f, %.2f, %.2f) plate %d: ratio %.4f, depth below the surface %.3f%c", X.x, X.y, X.z, hit, gc[c] / want,
+                                        dot(S - X, q.n), 10);
+                        }
+                        worstCaustic = std::max(worstCaustic, std::fabs(gc[c] - want) / want);
+                        ++causticChecked;
+                    }
+                }
                 if (hit == 0)
                 {
                     // energy: the floor's irradiance per E, from the GPU's direction and transmittance
@@ -279,6 +318,8 @@ int main(int argc, char** argv)
         W_CHECK(worstDir <= 2e-3, "light direction off by %.3g", worstDir);
         W_CHECK(worstT <= 3e-3, "transmittance off by %.3g relative", worstT);
         W_CHECK(worstEnergy <= 3e-3, "floor irradiance under the flat pool off by %.3g relative", worstEnergy);
+        W_CHECK(causticChecked > 1000 && worstCaustic <= 3e-3, "caustics on flat water: %u checks, off by %.3g relative", causticChecked, worstCaustic);
+        std::printf("caustics: flat water keeps the transmittance at %u checks within %.2e (relative)%c", causticChecked, worstCaustic, 10);
         std::printf("energy: a horizontal floor under the flat pool gets (1 - F) cos(theta_s) T^d within %.2e (relative)\n", worstEnergy);
         if (!warp)
         {

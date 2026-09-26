@@ -62,6 +62,7 @@ static void waterSunMap(FramePassContext& fc)
     fc.resources.waterSunNormal = out.normal;
     fc.resources.waterSunMedium = out.medium;
     fc.resources.waterSunConstants = out.constants;
+    fc.resources.waterSunCaustics = out.caustics;
 }
 static void waterFluids(FramePassContext& fc)
 {

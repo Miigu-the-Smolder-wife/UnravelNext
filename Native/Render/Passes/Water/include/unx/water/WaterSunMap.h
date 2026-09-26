@@ -21,6 +21,7 @@ struct WaterSunStream
 struct WaterSunMapOutput
 {
     render::TextureRef depth, normal, medium;
+    render::TextureRef caustics;  // R32_UINT array: WaterLight.hlsli WATER_CAUSTIC_SLICES slices of min(texels, 1024)^2
     render::BufferRef constants;
     uint32_t texels = 0;  // per side; 0 = no map (no streams)
 };
@@ -29,6 +30,7 @@ class WaterSunMap
 {
 public:
     static constexpr uint32_t kRing = 4, kConstantBytes = 80;
+    static constexpr uint32_t kCausticSlices = 5, kCausticMax = 1024;  // WaterLight.hlsli WATER_CAUSTIC_SLICES / _MAX
     explicit WaterSunMap(render::Device& device);
     ~WaterSunMap();
     WaterSunMap(const WaterSunMap&) = delete;

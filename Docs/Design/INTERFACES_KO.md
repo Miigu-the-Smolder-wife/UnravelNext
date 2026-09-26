@@ -742,6 +742,10 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
     - lightDir = −(S에서 햇빛의 정확한 스넬 굴절)
     - transmittance = (1 − F(θ_s)) (cos θ_s / cos θ_t) T^d. d는 X에서 S의 접평면까지 lightDir 방향 거리다. cos 비는 수면을 지나며 빔이 좁아지는 몫이다. 호출자는 lightDir로 E × transmittance를 쓰므로, 수평 바닥 조도가 E (1 − F) cos θ_s T^d로 보존된다(시험의 에너지 검사 3.5e-4).
     - 평평한 면에서 정확하다. 수평 램버트 바닥의 조도는 E cos θ_s (1 − F) T^d다. 굽은 면의 오차 조건은 FEATURES_GAME 1.9에 있다.
+  - **코스틱(추가, 같은 v1.77)**: `FrameResources::waterSunCaustics`(R32_UINT 배열, 5겹, min(지도 텍셀, 1024)² 격자)와 `waterSunLight(…, constSrv, causticsSrv, X, …)` 오버로드(첫 형태는 causticsSrv = UNX_NONE과 같다).
+    - WaterCaustics.hlsl: 지도 텍셀마다 햇빛을 정확한 스넬로 굴절시켜, 입사점 법선 방향 수심 z_k = 0.25·2^k m(k = 0..4)에서 내린 점을 X와 같은 태양 방향 투영 좌표에 쌍선형 고정소수점으로 뿌린다.
+    - 받는 쪽도 자기 수면점 법선 방향 수심으로 겹 사이를 log2 보간한다. 평평한 물은 격자가 똑같이 밀리므로 정확히 1이다. 에너지는 보존된다.
+    - 적재 +2(겹 두 개). [실측, 하드웨어] 평평한 물 9 864점에서 투과율 불변 8.6e-4.
   - 비용: 지도가 없으면 적재 1회, 있으면 4회. 렌더 A가 ShadeOpaque·폴백에서 부르고(l = lightDir, E ×= transmittance), coverage 조각은 합성 분할 뒤에 부른다.
   - 조건: VSM 그림자는 곧은 태양 방향이다(굴절 그림자는 S). 하늘·GI의 물속 감쇠는 R과 함께. 코스틱은 같은 지도로 뒤에.
   - 시험 `unx_test_water_waterlighttests` [실측, 하드웨어]: 평평한 수조와 20° 기운 판(매질·IOR 다름), 점 16 692개. 경계 822개를 빼고 분류 불일치 0, 방향 2.8e-4, 투과율 상대 9.3e-4.

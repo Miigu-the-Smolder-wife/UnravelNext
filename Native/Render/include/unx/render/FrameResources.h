@@ -207,6 +207,7 @@ struct FrameResources
     // waterSunNormal RG16F octahedral normal, waterSunMedium RGBA16F (1 m transmittance RGB, IOR), and
     // waterSunConstants (raw: word 0 = valid). Passes/Water/WaterLight.hlsli waterSunLight reads them. Invalid = no water.
     TextureRef waterSunDepth, waterSunNormal, waterSunMedium;  // [W]
+    TextureRef waterSunCaustics;  // R32_UINT array, 5 slices (WaterLight.hlsli waterCausticFactor; waterSunLight's causticsSrv)  [W]
     BufferRef waterSunConstants;                              // [W]
     // Light functions (E's Passes/Lights LightFunction.hlsli, A8; invalid = no light has one): cookies, IES, gobos,  [E]
     // flicker and animation per light index. Every reader of a light's emission (M shading, S froxel in-scattering, R
