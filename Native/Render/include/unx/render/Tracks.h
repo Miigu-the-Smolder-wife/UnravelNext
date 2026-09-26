@@ -69,6 +69,9 @@ uint32_t debugBegin(FramePassContext& fc);
 // E (A7, FEATURES_GAME 5): the view's projected decals, after visibility (reads view.depth) and before the material
 // resolve: writes view.decalFrames and view.decalTiles (invalid when no decal is live).
 void decals(FramePassContext& fc, ViewResources& view);
+// E (A7, WORLD_VFX 10.4): uploads what changed in the surface state field (surface::surfaceField) and publishes
+// FrameResources::surfaceConstants / surfaceTable / surfacePool (invalid while the field has never had a brick).
+void surfaceState(FramePassContext& fc);
 // Last in the frame: the buffer visualization (debug.view, replaces the view's colour), then the debug primitives
 // (CPU and GPU appends) and the HUD drawn over view.color.
 void debugOverlay(FramePassContext& fc, ViewResources& view);

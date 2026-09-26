@@ -1,0 +1,6 @@
+# Owner: E (A7, WORLD_VFX 10.4). The renderer's copy of the VFX surface state field (Passes/Decal SurfaceState).
+
+[surface]
+# Bricks the GPU copy holds at most (WORLD_VFX 10.4: active <= 64 k -> 30.4 MB pool + 2.1 MB table). More live bricks
+# is an error (the VFX authority's budget), not a silent drop.
+max_bricks = 65536

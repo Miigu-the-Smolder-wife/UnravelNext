@@ -197,6 +197,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::accelerationStructures(fc);
     tracks::visibility(fc, main);
     tracks::decals(fc, main);  // E (A7): decal records and tile lists for the resolve
+    tracks::surfaceState(fc);  // E (A7): the surface state field's changes
     tracks::materialResolve(fc, main);
     tracks::shadowPages(fc, main);
     tracks::froxels(fc, main);

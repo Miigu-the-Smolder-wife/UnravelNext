@@ -9,4 +9,5 @@ void distortion(FramePassContext&, ViewResources&) { pending("E.distortion (trac
 uint32_t debugBegin(FramePassContext&) { pending("E.debugBegin (track disabled in this build)"); return 0xFFFFFFFFu; }
 void debugOverlay(FramePassContext&, ViewResources&) { pending("E.debugOverlay (track disabled in this build)"); }
 void decals(FramePassContext&, ViewResources&) { pending("E.decals (track disabled in this build)"); }
+void surfaceState(FramePassContext&) { pending("E.surfaceState (track disabled in this build)"); }
 } // namespace unx::render::tracks
