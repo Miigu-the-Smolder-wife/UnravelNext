@@ -1,0 +1,100 @@
+diff --git a/Assets/UnravelNextBridge/Runtime/Native/UnravelNextRendererNative.cs b/Assets/UnravelNextBridge/Runtime/Native/UnravelNextRendererNative.cs
+index 751a5eeb..0ff51786 100644
+--- a/Assets/UnravelNextBridge/Runtime/Native/UnravelNextRendererNative.cs
++++ b/Assets/UnravelNextBridge/Runtime/Native/UnravelNextRendererNative.cs
+@@ -53,6 +53,9 @@ namespace UnravelNextBridge.Native
+             public float EmissiveR, EmissiveG, EmissiveB, Ior;
+             public uint BaseColorTexture, NormalTexture, RoughMetalTexture, EmissiveTexture, OcclusionTexture, Reserved;
+             public fixed byte Name[64];
++            // version 2 (A9 clearcoat, INTERFACES v1.76; Standard class): cover (0 = none), perceptual roughness, index (1.5 or 1.33)
++            public float Clearcoat, ClearcoatRoughness, ClearcoatIor;
++            public fixed uint Reserved2[5];
+         }
+ 
+         [StructLayout(LayoutKind.Sequential)]
+@@ -310,7 +313,7 @@ namespace UnravelNextBridge.Native
+                 int actual = sizeof(T);
+                 if (actual != expected) throw new InvalidOperationException(typeof(T).Name + " is " + actual + " B managed, " + expected + " B native.");
+             }
+-            Size<RendererDesc>(1040); Size<TextureDesc>(104); Size<MaterialDesc>(152); Size<Submesh>(16); Size<MeshDesc>(160);
++            Size<RendererDesc>(1040); Size<TextureDesc>(104); Size<MaterialDesc>(184); Size<Submesh>(16); Size<MeshDesc>(160);
+             Size<InstanceDesc>(96); Size<LightDesc>(96); Size<EnvironmentDesc>(152); Size<SceneInfo>(128); Size<CameraDesc>(48);
+             Size<FrameDesc>(96); Size<FrameStats>(48); Size<TransformUpdate>(56); Size<PassTiming>(56); Size<FluidInput>(32); Size<OceanDesc>(72);
+         }
+diff --git a/Assets/UnravelNextBridge/Runtime/UnravelNextRenderer.cs b/Assets/UnravelNextBridge/Runtime/UnravelNextRenderer.cs
+index 6e1b1a00..77619710 100644
+--- a/Assets/UnravelNextBridge/Runtime/UnravelNextRenderer.cs
++++ b/Assets/UnravelNextBridge/Runtime/UnravelNextRenderer.cs
+@@ -75,7 +75,8 @@ namespace UnravelNextBridge
+         public uint AddMaterial(MaterialDesc material, string name)
+         {
+             material.Size = (uint)sizeof(MaterialDesc);
+-            material.Version = 1;
++            material.Version = 2;
++            if (material.ClearcoatIor == 0) material.ClearcoatIor = 1.5f;
+             WriteUtf8(material.Name, 64, name);
+             uint index;
+             Check(UnxSceneAddMaterial(Handle, &material, &index), "UnxSceneAddMaterial " + name);
+@@ -351,7 +352,8 @@ namespace UnravelNextBridge
+             for (int k = 0; k < count; ++k)
+             {
+                 descs[k].Size = (uint)sizeof(MaterialDesc);
+-                descs[k].Version = 1;
++                descs[k].Version = 2;
++                if (descs[k].ClearcoatIor == 0) descs[k].ClearcoatIor = 1.5f;
+                 fixed (MaterialDesc* d = &descs[k]) WriteUtf8(d->Name, 64, names[k]);
+             }
+             try
+diff --git a/Assets/UnravelNextBridge/Runtime/UnravelNextUnityContent.cs b/Assets/UnravelNextBridge/Runtime/UnravelNextUnityContent.cs
+index 3f4cf3b6..4711418a 100644
+--- a/Assets/UnravelNextBridge/Runtime/UnravelNextUnityContent.cs
++++ b/Assets/UnravelNextBridge/Runtime/UnravelNextUnityContent.cs
+@@ -92,7 +92,7 @@ namespace UnravelNextBridge
+         public bool Refresh(Material m)
+         {
+             if (!m || terrainOf.ContainsKey(m) || !materials.TryGetValue(m, out uint index)) return false;  // (a terrain's cook material is not drawn)
+-            PendingMaterials.Add((index, Describe(m), m.name));
++            PendingMaterials.Add((index, Layers(m, Describe(m)), m.name));
+             return true;
+         }
+ 
+@@ -198,7 +198,7 @@ namespace UnravelNextBridge
+                 materials.Add(m, index);
+                 return index;
+             }
+-            var desc = Describe(m);
++            var desc = Layers(m, Describe(m));
+             if (Locked)
+             {
+                 index = renderer.MaterialCount + (uint)PendingMaterials.FindAll(p => p.index >= renderer.MaterialCount).Count;
+@@ -296,6 +296,30 @@ namespace UnravelNextBridge
+             return renderer.AddTexture(data.name + " splat" + k, w, h, (uint)UnravelNextRendererNative.TextureFormat.Rgba8Linear, false, texels);
+         }
+ 
++        /// <summary>A9 layers of a Unity material: URP Complex Lit's clear coat (_ClearCoatMask, _ClearCoatSmoothness) as the
++        /// 1.5 coat (glaze, varnish, lacquer); _UnravelWetness (any shader, 0..1) as the 1.33 water film of a wet surface
++        /// (smoothness _UnravelWetSmoothness, default 0.95). One coat per material: a wet coated material keeps the film.</summary>
++        MaterialDesc Layers(Material m, MaterialDesc d)
++        {
++            d.ClearcoatIor = 1.5f;
++            if (d.MaterialClass != (uint)MaterialClass.Standard) return d;
++            float wet = Float(m, "_UnravelWetness", 0), coat = m.IsKeywordEnabled("_CLEARCOAT") || m.IsKeywordEnabled("_CLEARCOATMAP") ? Float(m, "_ClearCoatMask", 0) : 0;
++            if (Map(m, "_ClearCoatMap")) Reports.Add(m.name + ": clear coat map is not read (the coat's cover and smoothness are the material's constants)");
++            if (wet > 0)
++            {
++                if (coat > 0) Reports.Add(m.name + ": wet and clear-coated: the water film is drawn (one coat per material)");
++                d.Clearcoat = Mathf.Clamp01(wet);
++                d.ClearcoatRoughness = 1 - Mathf.Clamp01(Float(m, "_UnravelWetSmoothness", 0.95f));
++                d.ClearcoatIor = 1.33f;
++            }
++            else if (coat > 0)
++            {
++                d.Clearcoat = Mathf.Clamp01(coat);
++                d.ClearcoatRoughness = 1 - Mathf.Clamp01(Float(m, "_ClearCoatSmoothness", 1));
++            }
++            return d;
++        }
++
+         /// <summary>The renderer material description of a Unity material (8.5), converting its textures.</summary>
+         MaterialDesc Describe(Material m)
+         {
