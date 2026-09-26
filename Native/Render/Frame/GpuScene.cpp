@@ -859,6 +859,7 @@ void GpuScene::setInstanceViewModel(uint32_t instance, bool viewModel)
     const uint32_t flags = viewModel ? g.flags | gpu::kInstanceViewModel : g.flags & ~gpu::kInstanceViewModel;
     if (flags == g.flags) return;
     g.flags = flags;
+    ++m_viewModelRevision;  // C3: V keeps view models out of its static chunks
     if (viewModel) ++m_viewModelInstances;
     else --m_viewModelInstances;
     markRecord(instance);

@@ -111,6 +111,10 @@ public:
     // Scene motion of the frame being recorded (after flushUpdates; A5 motion blur): an instance moved or re-posed in this
     // frame, or wind-animated instances (they move every frame). The camera's own motion is the view's (prevViewProj).
     bool hasMotion() const { return !m_movedNow.empty() || !m_posedNow.empty() || m_windInstances > 0; }
+    // Instances whose transform changed in the frame being recorded (after flushUpdates; C3: V refreshes its chunk spheres).
+    const std::vector<uint32_t>& movedInstances() const { return m_movedNow; }
+    // Changes of the view-model flag (setInstanceViewModel; C3: V rebuilds its instance hierarchy with view models flat).
+    uint64_t viewModelRevision() const { return m_viewModelRevision; }
     // C2b runtime pool (call reserveRuntime before upload): meshes and instances added between frames without a scene
     // revision (no track rebuilds). addRuntimeMesh takes the mesh and its own cluster hierarchy (clusterbuilder::build of
     // a one-mesh scene, depth <= kRuntimeMaxDepth) and returns its mesh index, kNone when the pool is full. A runtime
@@ -248,7 +252,8 @@ private:
     std::vector<uint64_t> m_transformFrame, m_paletteFrame;
     std::vector<uint32_t> m_movedNow, m_movedBefore, m_posedNow, m_posedBefore;
     uint32_t m_windInstances = 0;  // instances with the wind flag (hasMotion)
-    uint32_t m_viewModelInstances = 0;  // instances with gpu::kInstanceViewModel
+    uint32_t m_viewModelInstances = 0;
+    uint64_t m_viewModelRevision = 0;  // instances with gpu::kInstanceViewModel
     // Instances flagged gpu::kInstanceMotionBreak in this frame and in the previous flushed one (the flag lasts one frame).
     std::vector<uint32_t> m_brokenNow, m_brokenBefore;
     std::vector<uint8_t> m_brokenMarked;

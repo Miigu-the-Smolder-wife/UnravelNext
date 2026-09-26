@@ -6,6 +6,7 @@
 #include "Deformation.hlsli"
 #include "Scene.hlsli"
 #include "Passes/Visibility/ClusterHierarchy.hlsli"
+#include "Passes/ViewModel/ViewModel.hlsli"
 
 // One view of a cull run (main view: one; depth raster service: one per RasterView). 320 B.
 struct CullView

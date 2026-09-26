@@ -122,6 +122,7 @@ struct State
     D3D12_GPU_VIRTUAL_ADDRESS mainFrameConstants = 0;  // this frame's main view constants (scene indices, time, wind)
     uint64_t mainFrameConstantsFrame = UINT64_MAX;
     uint32_t sceneRevision = UINT32_MAX;
+    uint64_t viewModelRevision = UINT64_MAX;  // GpuScene::viewModelRevision the instance hierarchy was built with
     uint32_t traversalLevels = 0;  // deepest per-depth tree of any mesh (node passes per phase)
 
     // C3: instance chunks, flat list, skinned bounds (persistent; rebuilt at each scene revision).
@@ -134,6 +135,7 @@ struct State
     VBuffer cullScene, chunks, chunkInstances, flat, skinList, skinSlots, jointSpheres, skinBounds;
     uint32_t chunkCount = 0, flatCount = 0, skinCount = 0;
     bool chunkBoundsPending = false;
+    std::vector<uint8_t> chunked;  // per instance: a member of a chunk (its moves invalidate the chunk spheres)
     uint64_t preparedFrame = UINT64_MAX;  // frame whose graph has the imports and the bounds passes below
     BufferRef chunksRef, skinBoundsRef;
 
@@ -303,7 +305,9 @@ void buildCullScene(State& s, FramePassContext& fc)
         const gpu::Instance& in = instances[i];
         const bool skin = (in.flags & scene::InstanceSkinned) != 0;
         if (skin && in.bonePalette != kNone && meshes[in.mesh].skinOffset != kNone) skinned.push_back(i);
-        if ((in.flags & (scene::InstanceDynamic | scene::InstanceSkinned)) != 0)
+        // Dynamic, skinned and view-model instances (A12: moved with the camera every frame, after V's preparation) are
+        // tested one by one.
+        if ((in.flags & (scene::InstanceDynamic | scene::InstanceSkinned | gpu::kInstanceViewModel)) != 0)
         {
             flat.push_back(i);
             continue;
@@ -329,6 +333,8 @@ void buildCullScene(State& s, FramePassContext& fc)
         members.push_back(items[k].index);
         ++chunks.back().count;
     }
+    s.chunked.assign(instances.size(), 0);
+    for (uint32_t m : members) s.chunked[m] = 1;
     // Skinned instances: per mesh, the bind-space sphere of the vertices each joint influences (weight > 0), and one
     // origin point when a vertex has no weight at all (skinning leaves it at the object origin).
     std::vector<uint32_t> slots;  // uint4 per skinned instance: instance, first sphere, sphere count, 0
@@ -413,6 +419,14 @@ void prepareCullScene(FramePassContext& fc, State& s, D3D12_GPU_VIRTUAL_ADDRESS 
     s.preparedFrame = fc.frame.frameIndex;
     // C9: an origin shift moved every instance; the chunk spheres (world space) follow from the shifted table.
     if (fc.frame.originShift.x != 0 || fc.frame.originShift.y != 0 || fc.frame.originShift.z != 0) s.chunkBoundsPending = s.chunkCount > 0;
+    // A chunked (static) instance moved by a transform update in this frame (no scene revision: an editor move, a view
+    // model, E's A12 pose): the chunk spheres are recomputed from the moved table (one ChunkBounds pass, all chunks).
+    for (uint32_t i : fc.scene.movedInstances())
+        if (i < s.chunked.size() && s.chunked[i])
+        {
+            s.chunkBoundsPending = s.chunkCount > 0;
+            break;
+        }
     RenderGraph& g = fc.graph;
     s.chunksRef = g.importBuffer(s.chunks.resource.Get(), { "v.cull.chunks", s.chunks.bytes, (uint32_t)sizeof(CullChunk) });
     s.skinBoundsRef = g.importBuffer(s.skinBounds.resource.Get(), { "v.cull.skinBounds", s.skinBounds.bytes, 16 });
@@ -450,7 +464,16 @@ void prepareCullScene(FramePassContext& fc, State& s, D3D12_GPU_VIRTUAL_ADDRESS 
 // Deepest per-depth tree over all meshes (the node passes each phase needs), and the 24-bit packing limits.
 void refreshScene(State& s, FramePassContext& fc)
 {
-    if (s.sceneRevision == fc.scene.revision()) return;
+    if (s.sceneRevision == fc.scene.revision())
+    {
+        // A view model was marked or unmarked (no scene revision): only the instance hierarchy changes.
+        if (s.viewModelRevision != fc.scene.viewModelRevision())
+        {
+            s.viewModelRevision = fc.scene.viewModelRevision();
+            buildCullScene(s, fc);
+        }
+        return;
+    }
     const ClusterData& d = fc.scene.clusters();
     const ClusterData::Named* nodesNamed = nullptr;
     const ClusterData::Named* rootsNamed = nullptr;
@@ -492,6 +515,7 @@ void refreshScene(State& s, FramePassContext& fc)
     // C2b: runtime meshes arrive without a revision; their hierarchies are at most kRuntimeMaxDepth deep.
     s.traversalLevels = fc.scene.runtimeCapacity().meshes > 0 ? std::max(deepest, kRuntimeMaxDepth) : deepest;
     s.sceneRevision = fc.scene.revision();
+    s.viewModelRevision = fc.scene.viewModelRevision();
     s.mainHiz.history = false;
     buildCullScene(s, fc);
 }

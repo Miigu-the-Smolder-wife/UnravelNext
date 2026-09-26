@@ -63,7 +63,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     {
         const uint meshVertex = clusterVertices[cl.vertexOffset + i];
         const DeformedVertex d = deformVertex(inst, mesh, meshVertex);
-        verts[i].position = mul(v.viewProj, float4(d.world, 1));
+        verts[i].position = viewModelClip(inst, mul(v.viewProj, float4(d.world, 1)));  // A12: 1 outside the main view
         verts[i].clip = clip ? dot(v.clipPlane.xyz, d.world) + v.clipPlane.w : 1.0;
         gs_world[i] = d.world;
 #if ALPHA

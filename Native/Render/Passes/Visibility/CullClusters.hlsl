@@ -43,7 +43,8 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
         if (projectedError(v, worldSphere(inst, inst.objectToWorld, lodSphere), cl.lodError * scale) > v.lodThreshold) return r;
     }
     const float4 s = worldSphere(inst, inst.objectToWorld, cl.boundsSphere);
-    if (!skinned && !frustumVisible(v, s)) return r;
+    const bool unbounded = skinned || (inst.flags & INSTANCE_VIEW_MODEL) != 0;  // A12 view models: remapped projection
+    if (!unbounded && !frustumVisible(v, s)) return r;
     const GpuMaterial m = loadMaterial(clusterMaterial(inst, cl));
     const bool twoSided = (m.classFlags & MATERIAL_TWO_SIDED) != 0, alpha = (m.classFlags & MATERIAL_ALPHA_TESTED) != 0;
     const bool cullBack = (v.flags & CULL_VIEW_CULL_BACK) != 0 && !twoSided;
@@ -55,7 +56,7 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
         const bool back = v.orthographic ? dot(v.viewDirection.xyz, axis) >= cl.normalCone.w : dot(toCluster, axis) >= cl.normalCone.w * dist + s.w;
         if (back) return r;
     }
-    if (!skinned && (v.flags & CULL_VIEW_OCCLUSION) != 0)
+    if (!unbounded && (v.flags & CULL_VIEW_OCCLUSION) != 0)
     {
         if (CULL_PHASE == 1)
         {

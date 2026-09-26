@@ -40,6 +40,9 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
                     bounded = bounds.w >= 0 && prevBounds.w >= 0;
                 }
             }
+            // A12 view models: the main view draws them with its projection remapped (ViewModel.hlsli viewModelClip), so the
+            // view's planes and HiZ do not bound them; a few clusters, drawn untested.
+            if ((inst.flags & INSTANCE_VIEW_MODEL) != 0) bounded = false;
             visible = roots.rootCount > 0 && (!bounded || (frustumVisible(v, bounds) && tileVisible(v, view, bounds)));
             if (visible && bounded && (v.flags & CULL_VIEW_OCCLUSION) != 0)
             {

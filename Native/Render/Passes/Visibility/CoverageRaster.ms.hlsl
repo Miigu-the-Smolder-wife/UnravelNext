@@ -79,7 +79,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     {
         const uint meshVertex = clusterVertices[cl.vertexOffset + i];
         const DeformedVertex dv = deformVertex(inst, mesh, meshVertex);
-        const float4 p = mul(v.viewProj, float4(dv.world, 1));
+        const float4 p = viewModelClip(inst, mul(v.viewProj, float4(dv.world, 1)));  // A12: 1 outside the main view
         verts[i].position = p;
         gs_clip[i] = p;
         gs_uv[i] = loadVertex(mesh, meshVertex).uv;

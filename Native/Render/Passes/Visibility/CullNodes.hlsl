@@ -26,7 +26,7 @@ void main(uint i : SV_DispatchThreadID)
         node = nodes[itemIndex(packed)];
         const GpuInstance inst = loadInstance(instance);
         const CullView v = loadView(itemView(packed));
-        const bool skinned = (inst.flags & INSTANCE_SKINNED) != 0;
+        const bool skinned = (inst.flags & (INSTANCE_SKINNED | INSTANCE_VIEW_MODEL)) != 0;  // untested bounds (A12 view models: remapped projection)
         const float4 s = worldSphere(inst, inst.objectToWorld, node.lodSphere);
         bool keep = skinned || frustumVisible(v, s);
         // C5: a node reaching a terrain patch's replaced rectangle is traversed down to the source clusters.

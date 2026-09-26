@@ -1,0 +1,17 @@
+UnravelNext host: scene committed, 1 meshes, 1 instances, 12 triangles, 1 clusters, 205.3 ms, hash 022dabf5bb1af50e
+RayScene: 1 static + 0 dynamic instances (0 deformed), 1 mesh BLAS (12 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.00 MB, load 7 ms (records and mesh BLAS 3.5, proxies 0.0, deformed setup 1.0, static TLAS and records 1.6, first dynamic build 0.8)
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.00, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 1 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+V: instance hierarchy: 0 static instances in 0 chunks (64 m cells, <= 256 each), 1 flat instances, 0 skinned (0 joint spheres)
+  before: centre sky; with the view model: centre covered in 12 of 12 turning, moving frames, corners sky in 12
+  before the add the centre is sky (the box is out of view)                              ok
+  the view model covers the image centre in every frame of a turning, moving camera      ok
+  pose 0.5 m right: centre column 320.00 -> 424.00 px (shift 104.00, predicted 103.92)
+  a new pose moves the image by the projected amount (within 1 px)                       ok
+V: instance hierarchy: 1 static instances in 1 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+  after remove: centre sky
+  after the remove the box is back at its scene transform (centre sky)                   ok
+  D3D12 debug layer errors 0                                                             ok
+HOST VIEW MODEL TEST PASS
