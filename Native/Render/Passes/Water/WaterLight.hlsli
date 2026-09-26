@@ -35,14 +35,19 @@ float waterCausticDepth(uint slice) { return 0.25 * float(1u << slice); }
 // waterSunConstants (raw, 80 B): valid, texels per side, 0, 0; right.xyz, origin along right; up.xyz, origin along up;
 // sun.xyz (towards the sun), smallest along the sun; 1 / extent along right, 1 / extent along up, depth range along the
 // sun, 0.
+// Octahedral normals about +y (the octahedron's pole is world up): a water surface's normals lie near the pole, where the
+// encoding's values are small and fp16 resolves them to ~1e-5. About +z (the usual form) an upward normal sat on the
+// octahedron's equator or in its folded half, with values near +-1 where fp16 steps by 4.9e-4: half a milliradian, which
+// moved a caustic's landing point 4 m down by a quarter texel (measured: 25-35 % spikes in a spreading bowl's caustics).
 float3 waterOctDecode(float2 e)
 {
     float3 n = float3(e, 1 - abs(e.x) - abs(e.y));
     if (n.z < 0) n.xy = (1 - abs(n.yx)) * float2(n.x >= 0 ? 1 : -1, n.y >= 0 ? 1 : -1);
-    return normalize(n);
+    return normalize(n.xzy);  // (x, z, y) -> world (x, y, z)
 }
-float2 waterOctEncode(float3 n)
+float2 waterOctEncode(float3 world)
 {
+    float3 n = world.xzy;  // world up to the octahedron's pole
     n /= abs(n.x) + abs(n.y) + abs(n.z);
     return n.z >= 0 ? n.xy : (1 - abs(n.yx)) * float2(n.x >= 0 ? 1 : -1, n.y >= 0 ? 1 : -1);
 }

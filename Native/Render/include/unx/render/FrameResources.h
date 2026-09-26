@@ -204,7 +204,7 @@ struct FrameResources
     TextureRef oceanDepth, waterSurface;  // [W]
     // v1.77 (W stage 2, FEATURES_GAME 1.9; render A calls it from band A shading): the sun-space water map of W's
     // triangle streams, orthographic along the sun - waterSunDepth D32 (1 = nearest the sun, 0 = no water),
-    // waterSunNormal RG16F octahedral normal, waterSunMedium RGBA16F (1 m transmittance RGB, IOR), and
+    // waterSunNormal RG32F octahedral normal (about +y), waterSunMedium RGBA16F (1 m transmittance RGB, IOR), and
     // waterSunConstants (raw: word 0 = valid). Passes/Water/WaterLight.hlsli waterSunLight reads them. Invalid = no water.
     TextureRef waterSunDepth, waterSunNormal, waterSunMedium;  // [W]
     TextureRef waterSunCaustics;  // R32_UINT array, 5 slices (WaterLight.hlsli waterCausticFactor; waterSunLight's causticsSrv)  [W]

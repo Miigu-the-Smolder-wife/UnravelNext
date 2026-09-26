@@ -76,6 +76,10 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
     // One texel of margin on each side (the rasteriser's pixel-centre rule at the bounds' edges).
     const double texel = side / (n - 2);
     minR -= texel, minU -= texel;
+    // Depth 0 means "no water" (the clear value): the range starts a margin below the bounds so the surface's lowest
+    // point along the sun (a flat pool under an overhead sun: all of it) is stored above 0.
+    const double margin = std::max(1e-3, 1e-3 * (maxS - minS));
+    minS -= margin;
     const double extent = texel * n, range = std::max(maxS - minS, 1e-3) * (1 + 1e-4);
     const uint32_t head[4] = { 1, n, 0, 0 };
     const float rows[16] = { (float)r[0], (float)r[1], (float)r[2], (float)minR, (float)u[0], (float)u[1], (float)u[2], (float)minU,
@@ -86,7 +90,7 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
 
     out.texels = n;
     out.depth = g.createTexture(TextureDesc{ "w.sun map depth", n, n, 1, 1, DXGI_FORMAT_D32_FLOAT });
-    out.normal = g.createTexture(TextureDesc{ "w.sun map normal", n, n, 1, 1, DXGI_FORMAT_R16G16_FLOAT });
+    out.normal = g.createTexture(TextureDesc{ "w.sun map normal", n, n, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
     out.medium = g.createTexture(TextureDesc{ "w.sun map medium", n, n, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     out.constants = g.createBuffer({ "w.sun map constants", kConstantBytes, 0 });
     const BufferRef constants = out.constants;
@@ -96,7 +100,7 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
     MeshPipelineDesc d;
     d.meshShader = "Passes/Water/WaterSunMap.ms";
     d.pixelShader = "Passes/Water/WaterSunMap.ps";
-    d.renderTargets = { DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT };
+    d.renderTargets = { DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT };
     d.depthFormat = DXGI_FORMAT_D32_FLOAT;
     d.depthFunc = D3D12_COMPARISON_FUNC_GREATER;
     d.cull = D3D12_CULL_MODE_NONE;
@@ -148,6 +152,16 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
     const uint32_t nc = std::min(n, kCausticMax);
     out.caustics = g.createTexture(TextureDesc{ "w.sun map caustics", nc, nc, uint16_t(kCausticSlices), 1, DXGI_FORMAT_R32_UINT });
     const TextureRef caustics = out.caustics;
+    out.causticOverflow = g.createBuffer({ "w.sun map caustic overflow", 16, 0 });
+    const BufferRef overflow = out.causticOverflow;
+    ID3D12PipelineState* counterClear = shaders.compute("Passes/Water/ViewGridClear");
+    g.addPass("w.sun map caustic overflow clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(overflow, Use::UavCompute); },
+              [=](PassContext& c) {
+                  const uint32_t k[4] = { 0, 0, c.uav(overflow), 4 };  // ViewGridClear: the counter words only
+                  c.cmd->SetPipelineState(counterClear);
+                  c.computeConstants(k, 4);
+                  c.cmd->Dispatch(1, 1, 1);
+              });
     ID3D12PipelineState* zero = shaders.compute("Passes/Water/WaterCausticsClear");
     ID3D12PipelineState* splat = shaders.compute("Passes/Water/WaterCaustics");
     g.addPass("w.sun map caustics clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(caustics, Use::UavCompute); },
@@ -164,9 +178,10 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
                   b.use(medium, Use::SrvCompute);
                   b.use(constants, Use::SrvCompute);
                   b.use(caustics, Use::UavCompute);
+                  b.use(overflow, Use::UavCompute);
               },
               [=](PassContext& c) {
-                  const uint32_t k[8] = { c.srv(depth), c.srv(normal), c.srv(medium), c.srv(constants), c.uav(caustics), 0, 0, 0 };
+                  const uint32_t k[8] = { c.srv(depth), c.srv(normal), c.srv(medium), c.srv(constants), c.uav(caustics), c.uav(overflow), 0, 0 };
                   c.cmd->SetPipelineState(splat);
                   c.computeConstants(k, 8);
                   c.cmd->Dispatch((n + 7) / 8, (n + 7) / 8, 1);

@@ -1,5 +1,5 @@
 // unx-kernel: ps_6_6 main
-// Water stage 2 sun-space map (WaterSunMap.ms): the surface's normal (octahedral, RG16F) and the stream's medium (1 m
+// Water stage 2 sun-space map (WaterSunMap.ms): the surface's normal (octahedral about +y, RG32F) and the stream's medium (1 m
 // transmittance RGB, IOR; RGBA16F). P[1] the medium (floats).
 #include "Bindless.hlsli"
 #include "WaterLight.hlsli"

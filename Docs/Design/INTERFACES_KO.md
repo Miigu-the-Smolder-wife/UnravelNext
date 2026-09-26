@@ -744,7 +744,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **ABI 6 선택 내보내기** `UnxFrameSetPools(UnxPoolDesc[64 B])`, `UnxFrameAddPoolSources(UnxPoolSource[32 B])`. C# `UnravelNextRenderer.TrySetPools` / `TryAddPoolSources`(Unity 브리지, 렌더러 축 = z 반전).
   - 시험: `unx_test_water_pooltests`, `unx_test_host_hostpools`(하드웨어 통과: 원점 이동 뒤 좌표, 한 번만 전달, 원천이 있는 프레임 렌더, 거부 9가지, 디버그 층 오류 0).
 - v1.77 (2026-09-27, 엔진 1 W: 물 단계 2, 물 아래 band A의 태양광; 렌더 A 합의):
-  - **`FrameResources::waterSunDepth`(D32, 태양에 가장 가까움 = 1, 물 없음 = 0), `waterSunNormal`(RG16F 팔면체 법선), `waterSunMedium`(RGBA16F: 1 m 투과율 RGB, IOR), `waterSunConstants`(raw 80 B, 0번 워드 = 유효)**: W의 모든 삼각형 스트림을 태양 방향 직교 투영으로 래스터한 지도다(WaterSunMap.ms/.ps, waterGeometry에서 V·M 앞).
+  - **`FrameResources::waterSunDepth`(D32, 태양에 가장 가까움 = 1, 물 없음 = 0), `waterSunNormal`(RG32F 팔면체 법선, +y 극: 2026-09-27에 RG16F·+z에서 바꿈. 물 법선이 fp16 4.9e-4 간격 구간에 있어 코스틱 착지가 4 m에서 텍셀의 1/4씩 흔들렸다. 읽기는 WaterLight.hlsli waterOctDecode만 쓴다), `waterSunMedium`(RGBA16F: 1 m 투과율 RGB, IOR), `waterSunConstants`(raw 80 B, 0번 워드 = 유효)**: W의 모든 삼각형 스트림을 태양 방향 직교 투영으로 래스터한 지도다(WaterSunMap.ms/.ps, waterGeometry에서 V·M 앞).
     - 범위는 스트림 경계 상자 합집합이다. 텍셀은 긴 변 / N이다(N = 2 mm 이하가 되는 2의 거듭제곱, 256~2048).
     - 매질은 스트림 재질에서 온다: baseColor = 1 m 투과율, ior.
   - **`Passes/Water/WaterLight.hlsli` `waterSunLight(depthSrv, normalSrv, mediumSrv, constSrv, X, sunDir, ior, out lightDir, out transmittance)`**: 태양의 곧은 광선이 X 위에서 물을 지나면 true를 낸다. 그때 값은 다음과 같다.
