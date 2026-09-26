@@ -8,7 +8,9 @@
 // P[0] = { material word, color UAV, tile lists (raw), list offset (entries) }
 // P[1] = { atmosphere transmittance, multi-scatter, sky view, this view's air volume } (UNX_NONE = absent)
 // P[2] = { experiment mask (shading.experiment_disable; not read here since edge detection moved to EdgeDetect), 0, 0, 0 }
-// P[3] = { 0, 0, edge tile mask SRV (EdgeDetect.hlsl; UNX_NONE = no edge pixels), 0 }, P[7].x edge radiance UAV
+// P[3] = { 0, 0, edge tile mask SRV (EdgeDetect.hlsl; UNX_NONE = no edge pixels), 0 }, P[7].x edge radiance UAV, P[7].w
+// V's water layer vis ids (v1.75; UNX_NONE = none: a sky pixel under a water-layer stream surface keeps its radiance, W's
+// refraction source)
 // (RGBA16F): a sky edge pixel (a neighbour shows a surface) keeps its exposed linear radiance for the composite, and so
 // does every pixel of a tile with coverage fragments (P[6].y: V's coverage tiles, UNX_NONE = no coverage layer), whose
 // band A remainder the coverage composite adds (CoverageComposite.hlsl).
@@ -45,6 +47,11 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
         const uint2 edgeMask = edgeTiles[tileCoord];
         const uint bit = tid.y * M_TILE + tid.x;
         keep = (((bit < 32 ? edgeMask.x : edgeMask.y) >> (bit & 31)) & 1u) != 0;
+    }
+    if (!keep && P[7].w != UNX_NONE)
+    {
+        Texture2D<uint> waterVis = ResourceDescriptorHeap[P[7].w];
+        keep = (waterVis[pixel] >> 30) == 3u;  // COV_STREAM_ID: W's water surfaces
     }
     if (keep)
     {

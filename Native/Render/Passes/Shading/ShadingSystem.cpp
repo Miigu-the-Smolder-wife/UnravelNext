@@ -329,6 +329,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     // (4.3, fragmentShadows): a frame with S's shadows but without it would leave fragments unshadowed, so it fails
     // (shading bit 8192 allows it for cost attribution, never an image).
     const bool coverage = !planar && v.coverageTiles.valid() && v.coverageRecords.valid() && v.coverageTileList.valid() && v.coverageTilePixels.valid();
+    // v1.75: band A radiance is kept under V's water layer too (W's refraction source in tracks::water reads bandARadiance).
+    const bool keepWater = v.waterVis.valid();
     if (coverage && v.shadowVisibility.valid() && !fragmentShadows && (experiment & 8192) == 0)
         fail("M.shading: V's coverage layer with S's shadows but without S's fragment visibility (COVERAGE_REDESIGN 4.3): its fragments would be unshadowed");
     // S's shadow overflow (INTERFACES 7.3, v1.20; main view): the list the main kernel loads, and the fallback tiles over
@@ -500,6 +502,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             b.use(edgeRadiance, Use::UavCompute);
             b.use(edgeTiles, Use::SrvCompute);
             if (coverage) b.use(v.coverageTiles, Use::SrvCompute);
+            if (keepWater) b.use(v.waterVis, Use::SrvCompute);
             useParticles(b);
             if (meter) b.use(histogram.buffer, Use::UavCompute);
         };
@@ -512,7 +515,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             c.bindFrameConstants(cb);
             ID3D12Resource* args = c.resource(o.tileArgs);
             const uint32_t edge[8] = { c.srv(edgeTiles), coverage ? c.srv(v.coverageTiles) : none, 0, 0, c.uav(edgeRadiance),
-                                       v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, 0, 0 };
+                                       v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, 0,
+                                       keepWater ? c.srv(v.waterVis) : none };  // P[7].w (v1.75)
             // Sky tiles of the list bands in this pass band.
             c.cmd->SetPipelineState(sky);
             for (uint32_t band = firstBand; band < lastBand; ++band)
@@ -592,6 +596,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              b.use(edgeRadiance, Use::UavCompute);
                              b.use(edgeTiles, Use::SrvCompute);
                              if (coverage) b.use(v.coverageTiles, Use::SrvCompute);
+                             if (keepWater) b.use(v.waterVis, Use::SrvCompute);
                              useParticles(b);
                          },
                          [=](PassContext& c) {
@@ -612,7 +617,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                                       air ? c.srv(v.airVolume) : none, 0, o.textureTableSrv, experiment, 0,
                                                       froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
                              const uint32_t edge[8] = { c.srv(edgeTiles), coverage ? c.srv(v.coverageTiles) : none, 0, 0, c.uav(edgeRadiance),
-                                                        v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, shadowSrvs, 0 };
+                                                        v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, shadowSrvs,
+                                                        keepWater ? c.srv(v.waterVis) : none };  // P[7].w (v1.75)
                              uint32_t k32[32] = {};
                              std::memcpy(k32, k, sizeof k);
                              std::memcpy(k32 + 24, edge, sizeof edge);

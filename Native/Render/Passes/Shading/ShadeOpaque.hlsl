@@ -35,7 +35,8 @@
 //        coverage composite, CoverageComposite.hlsl), exposure histogram's centre sigma, E's light function table (raw;
 //        UNX_NONE = none: A8 cookies, IES, gobos, animated intensity and colour on point and spot lights) }
 // P[7] = { edge radiance UAV (RGBA16F), R's screen probe maps (K path; UNX_NONE = absent), S's shadow overflow list (raw;
-//        FALLBACK: a raw buffer holding this frame's ShadowSrvs), 0 }
+//        FALLBACK: a raw buffer holding this frame's ShadowSrvs), V's water layer vis ids (v1.75; UNX_NONE = none): a
+//        pixel under a water-layer stream surface keeps its radiance too, W's refraction source (tracks::water) }
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -134,6 +135,11 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
         const uint2 edgeMask = edgeTiles[tileCoord];
         const uint bit = tid.y * M_TILE + tid.x;
         keep = (((bit < 32 ? edgeMask.x : edgeMask.y) >> (bit & 31)) & 1u) != 0;
+    }
+    if (!keep && P[7].w != UNX_NONE)
+    {
+        Texture2D<uint> waterVis = ResourceDescriptorHeap[P[7].w];
+        keep = (waterVis[pixel] >> 30) == 3u;  // COV_STREAM_ID: W's water surfaces
     }
     if (keep)
     {
