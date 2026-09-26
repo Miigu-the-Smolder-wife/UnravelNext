@@ -78,6 +78,12 @@ powershell -File Reference/Tools/RenderQueue.ps1                   게이트 기
 4. C5·C6 나머지(FEATURE_STATUS 렌더 C 표)와 C7·C8 HLOD 보류분은 재개 때 표에서 다시 순서를 정한다. 하드웨어에서 아직 안 돌린 것: 이번 커밋 뒤 shadow 3종(vsm·localshadow·froxel) 재실행.
 5. 알려진 main 결함(내 변경 무관): visibilitytests coverage_layer_is_exact가 1a616eb에서 같은 자리에서 실패(렌더 A의 f056694 투과 합성 추정, A에 알림). WARP로 전체 프레임 시험을 돌리면 RayScene AS 빌드에서 d3d10warp 정수 0 나누기(렌더 B/R에 알림 예정).
 
+## 잔잔한 물 평면 반사 (최종 스프린트, 2026-09-27) — 완료 c8737fb
+
+- 구조: `Passes/Water` — PoolTrack이 정지 수면 평면을 `addWaterPlane`로 올림 → `waterSurface`가 마스크 2패스(`WaterPlanarMask.PASS0/1`) → 비용 규칙 → `renderView`(W의 water() 훅 안에서 호출, shade(main) 재진입) → 표 뒤 평면 블록(48 B × 4) → `waterPlanarReflection`(WaterSurface.hlsli)이 마스크 1·영상 이동 ≤ 0.1 px인 표본에서 GI 거울 로브/반사 작업을 대체.
+- 비용 상수는 `WaterSurface.cpp` kPlanar*(패스 합 실측). 타임스탬프 구간은 다른 큐 겹침을 포함해 3.2 ms로 과대(한계 비용 아님) — 온라인 적합은 넣었다가 뺐다. 카메라 패스가 바뀌면 게이트(`--planar on/off`, `--pool 3`/`12 --ahead 4`)로 다시 잰다.
+- 남음: 기록(가장자리) 표본도 마스크 1이면 카메라를 쓰지만 기록 경로 전용 시험은 없음; 물속 카메라(아래에서 본 수면)의 거울상·스넬 창 카메라(1.3 (b)); 여러 수조가 겹칠 때 후보 4개 상한; S 평면 froxel 고정비 0.67 ms(B).
+
 ## A5 피사계 심도 (재배정 4, 2026-09-27)
 
 - 프레임 합류는 이미 되어 있다(ShadingSystem: 시간 적분 뒤, RGBA16F 중간 영상; 렌즈 값은 호스트 → FrameContext). 정확성: PostTests --dof 하드웨어 통과(relMSE 3.2e-5 ~ 4.1e-3, 두 번·다른 메모리 뒤 비트 동일).
