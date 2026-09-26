@@ -6,7 +6,9 @@
 // palette and wind time: deformVertex's prevWorld), projected with the previous view-projection. The sky: the direction at
 // infinity under the previous view (the camera's rotation only). RG16F. With the rotation stage (MotionRotation.hlsl,
 // P[1].z = 1) the camera's rotation is taken out: the velocity written is the residual v - v_rot, v_rot(p) = p - the pixel of
-// Q^T d_p (the previous view direction of what p sees now, under the rotation alone).
+// Q^T d_p (the previous view direction of what p sees now, under the rotation alone). A first-person view model
+// (INSTANCE_VIEW_MODEL, A12) turns with the camera: it keeps its own velocity (zero relative to the camera), the rotation
+// stage leaves its pixels as they are.
 // P[0] = { vis id SRV, visible clusters SRV, velocity UAV, 0 }, P[1] = { width, height, rotation stage, 0 },
 // P[2..4] = asfloat rows of Q^T (view space, xyz + 0); frame constants of the view.
 #include "Bindless.hlsli"
@@ -25,6 +27,7 @@ void main(uint2 id : SV_DispatchThreadID)
     mPixelRay(pixel, D, Dx, Dy);
     const uint visId = vis.Load(int3(id, 0));
     float4 prevClip;
+    bool viewModel = false;
     if (visId == VIS_NONE)
     {
         prevClip = mul(g_prevViewProj, float4(D, 0));  // a direction: the previous view's rotation only
@@ -33,6 +36,7 @@ void main(uint2 id : SV_DispatchThreadID)
     {
         const GpuVisibleCluster vc = loadVisibleCluster(P[0].y, visVisibleCluster(visId));
         const GpuInstance inst = loadInstance(vc.instance);
+        viewModel = (inst.flags & INSTANCE_VIEW_MODEL) != 0;
         const GpuCluster c = loadCluster(vc.cluster);
         const GpuMesh mesh = loadMesh(inst.mesh);
         const uint3 tri = loadClusterTriangle(c, visTriangle(visId));
@@ -58,7 +62,7 @@ void main(uint2 id : SV_DispatchThreadID)
     }
     // behind the previous camera (w <= 0): no previous screen position; the pixel keeps no motion
     float2 v = prevClip.w > 1e-6f ? pixel - pixelOf(prevClip) : float2(0, 0);
-    if (P[1].z != 0)
+    if (P[1].z != 0 && !viewModel)
     {
         // the view-space direction of this pixel, then where the rotation alone had it in the previous frame
         const float2 ndc = float2(pixel.x / g_viewWidth * 2 - 1, 1 - pixel.y / g_viewHeight * 2);

@@ -859,6 +859,8 @@ void GpuScene::setInstanceViewModel(uint32_t instance, bool viewModel)
     const uint32_t flags = viewModel ? g.flags | gpu::kInstanceViewModel : g.flags & ~gpu::kInstanceViewModel;
     if (flags == g.flags) return;
     g.flags = flags;
+    if (viewModel) ++m_viewModelInstances;
+    else --m_viewModelInstances;
     markRecord(instance);
 }
 

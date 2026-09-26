@@ -107,6 +107,7 @@ public:
     // v1.53 (A12): marks a first-person view model (gpu::kInstanceViewModel; E's Passes/ViewModel sets it every frame, so
     // a host re-upload of the instance loses nothing).
     void setInstanceViewModel(uint32_t instance, bool viewModel);
+    uint32_t viewModelInstances() const { return m_viewModelInstances; }  // instances marked now (A5: the rotation blur's exclusion)
     // Scene motion of the frame being recorded (after flushUpdates; A5 motion blur): an instance moved or re-posed in this
     // frame, or wind-animated instances (they move every frame). The camera's own motion is the view's (prevViewProj).
     bool hasMotion() const { return !m_movedNow.empty() || !m_posedNow.empty() || m_windInstances > 0; }
@@ -247,6 +248,7 @@ private:
     std::vector<uint64_t> m_transformFrame, m_paletteFrame;
     std::vector<uint32_t> m_movedNow, m_movedBefore, m_posedNow, m_posedBefore;
     uint32_t m_windInstances = 0;  // instances with the wind flag (hasMotion)
+    uint32_t m_viewModelInstances = 0;  // instances with gpu::kInstanceViewModel
     // Instances flagged gpu::kInstanceMotionBreak in this frame and in the previous flushed one (the flag lasts one frame).
     std::vector<uint32_t> m_brokenNow, m_brokenBefore;
     std::vector<uint8_t> m_brokenMarked;

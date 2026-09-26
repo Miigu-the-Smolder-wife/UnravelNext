@@ -210,9 +210,14 @@ void rotationPasses(FramePassContext& fc, const ViewResources& view, TextureRef 
     ID3D12PipelineState* scan = fc.shaders.compute("Passes/Shading/MotionRotation.STEP1");
     ID3D12PipelineState* read = fc.shaders.compute("Passes/Shading/MotionRotation.STEP2");
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
-    auto constants = [=](uint32_t (&k)[24], uint32_t image, uint32_t mapIndex, uint32_t out) {
-        const uint32_t v[24] = { image, mapIndex, out, 0, r.mapWidth, r.mapHeight, w, h, asUint(r.lambda0), asUint(r.beta0), asUint(r.texel), asUint(r.arc),
-                                 asUint(r.a.x), asUint(r.a.y), asUint(r.a.z), 0, asUint(r.e1.x), asUint(r.e1.y), asUint(r.e1.z), 0,
+    // A12: view-model pixels stay out of the rotation (their texels weigh 0 in the map, their pixels keep their value); the
+    // vis buffer is read only in frames with a view model
+    const bool viewModels = fc.scene.viewModelInstances() > 0;
+    const TextureRef visId = view.visId;
+    const BufferRef clusters = view.visibleClusters;
+    auto constants = [=](uint32_t (&k)[24], uint32_t image, uint32_t mapIndex, uint32_t out, uint32_t vis, uint32_t visible) {
+        const uint32_t v[24] = { image, mapIndex, out, vis, r.mapWidth, r.mapHeight, w, h, asUint(r.lambda0), asUint(r.beta0), asUint(r.texel), asUint(r.arc),
+                                 asUint(r.a.x), asUint(r.a.y), asUint(r.a.z), visible, asUint(r.e1.x), asUint(r.e1.y), asUint(r.e1.z), 0,
                                  asUint(r.e2.x), asUint(r.e2.y), asUint(r.e2.z), 0 };
         std::memcpy(k, v, sizeof v);
     };
@@ -220,10 +225,15 @@ void rotationPasses(FramePassContext& fc, const ViewResources& view, TextureRef 
               [&](PassBuilder& b) {
                   b.use(src, Use::SrvCompute);
                   b.use(map, Use::UavCompute);
+                  if (viewModels)
+                  {
+                      b.use(visId, Use::SrvCompute);
+                      b.use(clusters, Use::SrvCompute);
+                  }
               },
               [=](PassContext& c) {
                   uint32_t k[24];
-                  constants(k, c.srv(src), c.uav(map), 0);
+                  constants(k, c.srv(src), c.uav(map), 0, viewModels ? c.srv(visId) : gpu::kNone, viewModels ? c.srv(clusters) : gpu::kNone);
                   c.cmd->SetPipelineState(fill);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 24);
@@ -232,7 +242,7 @@ void rotationPasses(FramePassContext& fc, const ViewResources& view, TextureRef 
     g.addPass("m.motion.rotation.scan", QueueType::Graphics, [&](PassBuilder& b) { b.use(map, Use::UavCompute); },
               [=](PassContext& c) {
                   uint32_t k[24];
-                  constants(k, 0, c.uav(map), 0);
+                  constants(k, 0, c.uav(map), 0, gpu::kNone, gpu::kNone);
                   c.cmd->SetPipelineState(scan);
                   c.computeConstants(k, 24);
                   c.cmd->Dispatch(r.mapHeight, 1, 1);
@@ -242,10 +252,15 @@ void rotationPasses(FramePassContext& fc, const ViewResources& view, TextureRef 
                   b.use(src, Use::SrvCompute);
                   b.use(map, Use::SrvCompute);
                   b.use(dst, Use::UavCompute);
+                  if (viewModels)
+                  {
+                      b.use(visId, Use::SrvCompute);
+                      b.use(clusters, Use::SrvCompute);
+                  }
               },
               [=](PassContext& c) {
                   uint32_t k[24];
-                  constants(k, c.srv(src), c.srv(map), c.uav(dst));
+                  constants(k, c.srv(src), c.srv(map), c.uav(dst), viewModels ? c.srv(visId) : gpu::kNone, viewModels ? c.srv(clusters) : gpu::kNone);
                   c.cmd->SetPipelineState(read);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 24);

@@ -7,7 +7,10 @@
 //      pixels at the image centre, x sec^2 of the angle off the axis elsewhere (velocity from the vis buffer's surfaces
 //      and the previous view, then the gather): the ramp's 10-90 % width is 0.8 of the streak at the edge for a box blur,
 //      within 12 % (one pixel of the count); the sharp frame's edge is a step (<= 2 px);
-//   3. no D3D12 debug-layer errors.
+//   3. a first-person view model (A12: the box posed 2 m ahead of the camera, which it turns with) under the 0.15 rad
+//      turn: its interior is the unblurred frame's (<= 2 codes, the two final paths; its silhouette band is reported), and the sky around it
+//      is the sky of the same turn without the view model (its texels weigh 0 in the rotation map: no smear of it);
+//   4. no D3D12 debug-layer errors.
 // Correctness run (standalone HostRenderer, hardware GPU; GpuLock -Kind correctness).
 #include "Renderer/HostRenderer.h"
 
@@ -30,8 +33,9 @@ namespace
 {
 constexpr uint32_t kWidth = 960, kHeight = 540, kFrames = 8;
 
-// Frames of a camera turning 'yaw' radians per frame about +y (0: static); the last frame's pixels.
-std::vector<uint32_t> renderTurn(float shutter, float yaw, uint32_t& errors)
+// Frames of a camera turning 'yaw' radians per frame about +y (0: static); the last frame's pixels. box: 0 the scene's
+// box, 1 the box far out of view, 2 the box as a view model 2 m ahead of the camera.
+std::vector<uint32_t> renderTurn(float shutter, float yaw, uint32_t& errors, int box = 0)
 {
     HostRendererOptions o;
     o.standalone = true;
@@ -41,7 +45,14 @@ std::vector<uint32_t> renderTurn(float shutter, float yaw, uint32_t& errors)
     o.qualityOverrides = { "gi.deterministic=true", "shading.motion_blur_shutter=" + std::to_string(shutter) };
     HostRenderer h(o);
     h.scene() = test::oneBox();
+    if (box != 0) h.scene().instances[0].transform.m[1][3] = -100.0f;
     h.commit();
+    if (box == 2)
+    {
+        float3x4 pose;
+        pose.m[2][3] = -2.0f;
+        h.viewModelAdd(0, pose);
+    }
     const scene::Camera base = h.scene().cameras[0];
     std::vector<uint32_t> pixels((size_t)kWidth * kHeight);
     for (uint32_t f = 0; f < kFrames; ++f)
@@ -143,6 +154,60 @@ int main(int argc, char** argv)
                  yaw, streak, ratio, sharpWidth, ratios.size());
             expect("turning: the sharp frame has a step edge (<= 2 px)", sharpWidth >= 0 && sharpWidth <= 2);
             expect("turning: the blurred edge is a ramp of 0.8 x the streak there (within 12 %)", ratio > 0 && std::abs(ratio - 1) < 0.12);
+        }
+
+        // 3. view model under the rotation stage's turn
+        {
+            const float yaw = 0.15f;
+            const std::vector<uint32_t> vmBlurred = renderTurn(0.5f, yaw, errors, 2), vmSharp = renderTurn(0.0f, yaw, errors, 2),
+                                        skyBlurred = renderTurn(0.5f, yaw, errors, 1);
+            const double px = 2 * tanH / kWidth, edge = 0.5 / 1.5;  // tangent units per pixel; the front face's half size
+            uint32_t inside = 0, insideDiffer = 0, insideWorst = 0, around = 0, aroundWorst = 0;
+            for (uint32_t y = 0; y < kHeight; ++y)
+                for (uint32_t x = 0; x < kWidth; ++x)
+                {
+                    const double tx = ((x + 0.5) / kWidth * 2 - 1) * tanH, ty = (1 - (y + 0.5) / kHeight * 2) * tanV;
+                    const double m = std::max(std::abs(tx), std::abs(ty));
+                    const size_t i = (size_t)y * kWidth + x;
+                    if (m < edge - 3 * px)
+                    {
+                        ++inside;
+                        insideDiffer += vmBlurred[i] != vmSharp[i];
+                        for (int c = 0; c < 3; ++c)
+                            insideWorst = std::max<uint32_t>(insideWorst, (uint32_t)std::abs((int)((vmBlurred[i] >> (10 * c)) & 1023u) - (int)((vmSharp[i] >> (10 * c)) & 1023u)));
+                    }
+                    else if (m > edge + 2 * px && m < edge + 60 * px)
+                    {
+                        ++around;
+                        for (int c = 0; c < 3; ++c)
+                            aroundWorst = std::max<uint32_t>(aroundWorst, (uint32_t)std::abs((int)((vmBlurred[i] >> (10 * c)) & 1023u) - (int)((skyBlurred[i] >> (10 * c)) & 1023u)));
+                    }
+                }
+            // the silhouette band between the two regions: against the unblurred frame
+            uint32_t band = 0, bandOver = 0, bandWorst = 0;
+            for (uint32_t y = 0; y < kHeight; ++y)
+                for (uint32_t x = 0; x < kWidth; ++x)
+                {
+                    const double tx = ((x + 0.5) / kWidth * 2 - 1) * tanH, ty = (1 - (y + 0.5) / kHeight * 2) * tanV;
+                    const double m = std::max(std::abs(tx), std::abs(ty));
+                    if (m < edge - 3 * px || m > edge + 2 * px) continue;
+                    const size_t i = (size_t)y * kWidth + x;
+                    uint32_t d = 0;
+                    for (int c = 0; c < 3; ++c) d = std::max<uint32_t>(d, (uint32_t)std::abs((int)((vmBlurred[i] >> (10 * c)) & 1023u) - (int)((vmSharp[i] >> (10 * c)) & 1023u)));
+                    ++band;
+                    bandOver += d > 2;
+                    if (d > 2 && bandOver <= 4)
+                        logf("    band pixel (%u, %u): blurred %08x unblurred %08x (%u codes)\n", x, y, vmBlurred[i], vmSharp[i], d);
+                    bandWorst = std::max(bandWorst, d);
+                }
+            logf("  view model under a %.2f rad/frame turn: %u interior px, %u differ from the unblurred frame (worst %u codes: its final path); silhouette band %u px, %u over 2 codes from the unblurred frame (worst %u); %u sky px around it, worst %u codes from the turn without it\n",
+                 yaw, inside, insideDiffer, insideWorst, band, bandOver, bandWorst, around, aroundWorst);
+            // (the blurred frame goes through the float target and PostFinal, the unblurred one straight to its output: <= 2
+            // codes apart where nothing moves)
+            expect("view model: its interior is the unblurred frame's (<= 2 codes: the two final paths)", inside > 10000 && insideWorst <= 2);
+            // (reported, not yet a gate: 4 px where the silhouette crosses the horizon rows differ by up to 70 codes - the
+            // velocity gather before the rotation stage moves their edge composite; FEATURE_STATUS A5 open defect)
+            expect("view model: the sky around it is the sky without it (no smear; <= 2 codes)", around > 10000 && aroundWorst <= 2);
         }
         expect("D3D12 debug layer errors 0", errors == 0);
         logf(failures ? "HOST MOTION TEST FAILED (%u)\n" : "HOST MOTION TEST PASSED\n", failures);

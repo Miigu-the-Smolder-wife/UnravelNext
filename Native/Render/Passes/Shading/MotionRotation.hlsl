@@ -10,11 +10,24 @@
 //   STEP=1: inclusive prefix sums along each row (one group per row, 1024 threads, deterministic order);
 //   STEP=2: each pixel's arc mean (bilinear on the prefix map); a pixel whose arc left the image keeps its value where
 //           no sample remains.
-// P[0] = { image SRV, map UAV / SRV, output UAV, 0 }, P[1] = { map width, map height, width, height },
-// P[2] = asfloat { lambda0, beta0, texel angle, arc s phi }, P[3..5] = asfloat axis a, e1, e2 (view space, xyz + 0);
-// frame constants of the view (projection).
+// A first-person view model (INSTANCE_VIEW_MODEL, A12) turns with the camera, so it is no part of the rotated world: its
+// texels have weight 0 in the map (a direction behind it is unknown now, like one off the image) and its pixels keep
+// their value, as do the pixels with it in their 3 x 3 neighbourhood (their edge composite may hold a share of it).
+// P[0] = { image SRV, map UAV / SRV, output UAV, vis id SRV or UNX_NONE (no view model this frame) }, P[1] = { map width,
+// map height, width, height }, P[2] = asfloat { lambda0, beta0, texel angle, arc s phi }, P[3..5] = asfloat axis a, e1, e2
+// (view space, xyz), P[3].w = visible clusters SRV (with a vis id SRV); frame constants of the view (projection).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
+#include "Passes/Material/MaterialSurface.hlsli"
+
+bool isViewModel(int2 pixel)
+{
+    if (P[0].w == UNX_NONE) return false;
+    Texture2D<uint> vis = ResourceDescriptorHeap[P[0].w];
+    const uint visId = vis.Load(int3(pixel, 0));
+    if (visId == VIS_NONE) return false;
+    return (loadInstance(loadVisibleCluster(P[3].w, visVisibleCluster(visId)).instance).flags & INSTANCE_VIEW_MODEL) != 0;
+}
 
 float3 axisOf(uint k) { return asfloat(uint3(P[3 + k].x, P[3 + k].y, P[3 + k].z)); }
 
@@ -42,7 +55,24 @@ void main(uint2 id : SV_DispatchThreadID)
         const float2 ndc = float2(d.x * g_proj[0][0] / -d.z - g_proj[0][2] + g_proj[0][3], d.y * g_proj[1][1] / -d.z - g_proj[1][2] + g_proj[1][3]);
         const float2 pixel = float2((ndc.x + 1) * 0.5f * g_viewWidth, (1 - ndc.y) * 0.5f * g_viewHeight);
         if (all(pixel >= 0) && all(pixel <= float2(g_viewWidth, g_viewHeight)))
-            value = float4(image.SampleLevel(g_linearClamp, pixel / float2(g_viewWidth, g_viewHeight), 0).rgb, 1);
+        {
+            if (P[0].w == UNX_NONE) value = float4(image.SampleLevel(g_linearClamp, pixel / float2(g_viewWidth, g_viewHeight), 0).rgb, 1);
+            else
+            {
+                // the same bilinear taps (clamped) without the view model's texels: premultiplied colour and the kept weight
+                const float2 t = pixel - 0.5f;
+                const int2 i0 = int2(floor(t));
+                const float2 f = t - float2(i0);
+                const int2 last = int2(g_viewWidth, g_viewHeight) - 1;
+                [unroll] for (uint k = 0; k < 4; ++k)
+                {
+                    const int2 o = int2(k & 1, k >> 1);
+                    const int2 texelAt = clamp(i0 + o, int2(0, 0), last);
+                    const float w = (o.x ? f.x : 1 - f.x) * (o.y ? f.y : 1 - f.y);
+                    if (w > 0 && !isViewModel(texelAt)) value += float4(w * image.Load(int3(texelAt, 0)).rgb, w);
+                }
+            }
+        }
     }
     map[id] = value;
 }
@@ -100,6 +130,19 @@ void main(uint2 id : SV_DispatchThreadID)
     Texture2D<float4> map = ResourceDescriptorHeap[P[0].y];
     RWTexture2D<float4> output = ResourceDescriptorHeap[P[0].z];
     const float4 own = image.Load(int3(id, 0));
+    // a view-model pixel, or one with a view-model pixel in its 3 x 3 neighbourhood: M's edge composite builds an edge
+    // pixel from that neighbourhood (Edge.hlsli), so its value may hold a share of the view model, which must not move
+    if (P[0].w != UNX_NONE)
+    {
+        const int2 last = int2(P[1].zw) - 1;
+        bool keep = false;
+        [unroll] for (uint k = 0; k < 9 && !keep; ++k) keep = isViewModel(clamp(int2(id) + int2(int(k % 3) - 1, int(k / 3) - 1), int2(0, 0), last));
+        if (keep)
+        {
+            output[id] = own;
+            return;
+        }
+    }
     const float3 d = pixelDirection(float2(id) + 0.5f);
     const float3 a = axisOf(0), e1 = axisOf(1), e2 = axisOf(2);
     const float texel = asfloat(P[2].z), arc = asfloat(P[2].w);
