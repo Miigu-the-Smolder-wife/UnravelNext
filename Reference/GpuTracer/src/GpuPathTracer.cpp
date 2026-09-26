@@ -92,6 +92,10 @@ struct GpuPathTracer::Impl
     ID3D12PipelineState* psoPath = nullptr;
     ID3D12PipelineState* psoCaustic = nullptr;
     ID3D12PipelineState* psoResolve = nullptr;
+    ID3D12PipelineState* psoMean = nullptr;
+    ComPtr<ID3D12Resource> meanImage;  // currentImageResource()
+    uint32_t meanUav = sh::kRtNone, meanRevision = 0, meanWidth = 0, meanHeight = 0;
+    void updateMeanImage();
     std::unique_ptr<gpu::GpuSlice> slice;
 
     // Scene.
@@ -144,6 +148,7 @@ struct GpuPathTracer::Impl
         psoPath = shaders->compute("PathTrace");
         psoCaustic = shaders->compute("Caustic");
         psoResolve = shaders->compute("Resolve");
+        psoMean = shaders->compute("Mean");
         D3D12_QUERY_HEAP_DESC qd{};
         qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
         qd.Count = kMaxQueries;
@@ -1526,6 +1531,64 @@ void GpuPathTracer::Impl::pass(uint32_t maxHalfSamples)
     }
 }
 
+void GpuPathTracer::Impl::updateMeanImage()
+{
+    Run& R = *run;
+    if (!meanImage || meanWidth != R.W || meanHeight != R.H)
+    {
+        D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        d.Width = R.W;
+        d.Height = R.H;
+        d.DepthOrArraySize = 1;
+        d.MipLevels = 1;
+        d.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        d.SampleDesc.Count = 1;
+        d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        meanImage.Reset();
+        check(device->d3d()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&meanImage)), "photo image");
+        meanImage->SetName(L"gpu reference: current image");
+        if (meanUav == sh::kRtNone) meanUav = allocView();
+        D3D12_UNORDERED_ACCESS_VIEW_DESC u{};
+        u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        u.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        device->d3d()->CreateUnorderedAccessView(meanImage.Get(), nullptr, &u, device->descriptors().resourceCpu(meanUav));
+        meanWidth = R.W;
+        meanHeight = R.H;
+        meanRevision = UINT32_MAX;
+    }
+    const uint32_t samples = R.doneHalf[0] + R.doneHalf[1];
+    if (samples == meanRevision) return;
+    ensureSlice();
+    const double inv0 = R.doneHalf[0] ? 1.0 / R.doneHalf[0] : 0.0, inv1 = R.doneHalf[1] ? 1.0 / R.doneHalf[1] : 0.0;
+    uint64_t b0, b1;
+    std::memcpy(&b0, &inv0, 8);
+    std::memcpy(&b1, &inv1, 8);
+    const float exposure = 1.0f / (1.2f * std::pow(2.0f, R.cam.ev100));
+    uint32_t e;
+    std::memcpy(&e, &exposure, 4);
+    Root r{};
+    r.constants = constantsBuffer.view;
+    r.x0 = meanUav;
+    r.y0 = R.W;
+    r.w = R.H;
+    r.h = (uint32_t)b0;
+    r.sampleBegin = (uint32_t)(b0 >> 32);
+    r.sampleEnd = (uint32_t)b1;
+    r.pathBase = (uint32_t)(b1 >> 32);
+    r.pathCount = e;
+    render::CommandList cl = device->acquireCommandList(render::QueueType::Compute);
+    ID3D12DescriptorHeap* heaps[] = { device->descriptors().resourceHeap(), device->descriptors().samplerHeap() };
+    cl.list->SetDescriptorHeaps(2, heaps);
+    cl.list->SetComputeRootSignature(device->rootSignature());
+    cl.list->SetPipelineState(psoMean);
+    cl.list->SetComputeRoot32BitConstants(0, sizeof(Root) / 4, &r, 0);
+    cl.list->Dispatch((R.W + 7) / 8, (R.H + 7) / 8, 1);
+    submitWait(cl);
+    meanRevision = samples;
+}
+
 RenderOutput GpuPathTracer::Impl::output(bool final)
 {
     Run& R = *run;
@@ -1624,6 +1687,13 @@ uint32_t GpuPathTracer::pass(uint32_t maxHalfSamples)
     return 2 * m_impl->run->done;
 }
 uint32_t GpuPathTracer::samplesDone() const { return m_impl->run ? 2 * m_impl->run->done : 0; }
+ID3D12Resource* GpuPathTracer::currentImageResource()
+{
+    if (!m_impl->run) fail("gpu reference: currentImageResource() before start()");
+    m_impl->updateMeanImage();
+    return m_impl->meanImage.Get();
+}
+uint32_t GpuPathTracer::currentImageRevision() const { return m_impl->meanRevision == UINT32_MAX ? 0 : m_impl->meanRevision; }
 RenderOutput GpuPathTracer::current()
 {
     if (!m_impl->run) fail("gpu reference: current() before start()");

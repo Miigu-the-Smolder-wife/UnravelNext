@@ -350,10 +350,46 @@ void testSharedDevice()
     render::Device device(o);
     const uint32_t before = device.descriptors().resourcesInUse();
     reference::RenderOutput shared;
-    uint32_t peak = 0;
+    uint32_t peak = 0, imageBits = 0;
     {
         reference::GpuPathTracer gpt(s, device, unx::executableDirectory() / "shaders" / "Reference", "unx_test_reference_photo shared");
-        shared = gpt.render(cam, settings(128, 8, 256));
+        gpt.start(cam, settings(128, 8, 256));
+        while (gpt.samplesDone() < 256) gpt.pass();
+        shared = gpt.current();
+        // the progressive image on the GPU (render A's display path) = the read-back image, bit for bit
+        ID3D12Resource* image = gpt.currentImageResource();
+        CHECK(image && gpt.currentImageRevision() == 256, "shared: no GPU image (revision %u)", gpt.currentImageRevision());
+        const D3D12_RESOURCE_DESC d = image->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+        UINT rows = 0;
+        UINT64 rowBytes = 0, total = 0;
+        device.d3d()->GetCopyableFootprints(&d, 0, 1, 0, &fp, &rows, &rowBytes, &total);
+        D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC bd{};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = total;
+        bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
+        bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        render::ComPtr<ID3D12Resource> rb;
+        render::check(device.d3d()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&rb)), "readback");
+        render::CommandList cl = device.acquireCommandList(render::QueueType::Compute);
+        D3D12_TEXTURE_COPY_LOCATION dst{ rb.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT }, src{ image, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+        dst.PlacedFootprint = fp;
+        cl.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        device.queue(render::QueueType::Compute).waitCpu(device.submit(cl));
+        float* p = nullptr;
+        render::check(rb->Map(0, nullptr, reinterpret_cast<void**>(&p)), "map readback");
+        uint32_t differ = 0;
+        for (uint32_t y = 0; y < 8; ++y)
+            for (uint32_t x = 0; x < 128; ++x)
+            {
+                const float* g = reinterpret_cast<const float*>(reinterpret_cast<const uint8_t*>(p) + (size_t)y * fp.Footprint.RowPitch) + 4 * x;
+                differ += std::memcmp(g, shared.image.pixel(x, y), 12) != 0 ? 1 : 0;
+                imageBits += 1;
+            }
+        rb->Unmap(0, nullptr);
+        CHECK(differ == 0, "shared: %u of %u GPU image pixels differ from current()", differ, imageBits);
         peak = device.descriptors().resourcesInUse();
         CHECK(peak > before, "shared: the tracer allocated no descriptors on the shared device");
     }
@@ -362,7 +398,7 @@ void testSharedDevice()
     for (size_t i = 0; i < own.image.rgb.size(); ++i) worst = std::max(worst, (double)std::abs(own.image.rgb[i] - shared.image.rgb[i]));
     CHECK(worst <= 1e-5, "shared: the image differs from the own-device render by %.3g", worst);
     CHECK(after == before, "shared: %u descriptors left on the device (%u before)", after, before);
-    logf("  shared  the renderer's device: same image as the tracer's own device (worst %.1e), all %u descriptors returned\n", worst, peak - before);
+    logf("  shared  the renderer's device: same image as the tracer's own device (worst %.1e), GPU image = read-back image (%u px bit exact), all %u descriptors returned\n", worst, imageBits, peak - before);
 }
 
 void testExr()

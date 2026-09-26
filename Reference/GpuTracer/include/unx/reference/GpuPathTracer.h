@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 
+struct ID3D12Resource;
 namespace unx::render
 {
 class Device;
@@ -86,6 +87,12 @@ public:
     // The accumulation so far: image = mean of both halves (radiance x exposure), halvesRelMse between the halves.
     // The image's own relMSE against the converged image is about halvesRelMse / 4 (two independent halves).
     RenderOutput current();
+    // The same image on the GPU, without a read-back (photo mode's progressive display, render A request): mean of the
+    // halves x exposure (current().image's operations and order), width x height DXGI_FORMAT_R32G32B32A32_FLOAT, alpha 1,
+    // in the COMMON layout (D3D12_BARRIER_LAYOUT_COMMON), complete when this returns (the tracer's queue waited). Updated
+    // on each call once samples were added; the revision is samplesDone() at that update. Owned by the tracer.
+    ID3D12Resource* currentImageResource();
+    uint32_t currentImageRevision() const;
 
     struct Impl;
 
