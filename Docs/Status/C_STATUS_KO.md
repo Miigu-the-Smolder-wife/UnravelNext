@@ -77,3 +77,10 @@ powershell -File Reference/Tools/RenderQueue.ps1                   게이트 기
 3. 바다: W가 waterGeometry에서 oceanDepth·waterSurface를 채우고, W의 가장자리 32 부표본 패스를 FrameServices::coverageAppend에 건다(W 몫). 합류 뒤 바다 가장자리 기록의 면적 정확성 시험을 V 쪽에 추가한다.
 4. C5·C6 나머지(FEATURE_STATUS 렌더 C 표)와 C7·C8 HLOD 보류분은 재개 때 표에서 다시 순서를 정한다. 하드웨어에서 아직 안 돌린 것: 이번 커밋 뒤 shadow 3종(vsm·localshadow·froxel) 재실행.
 5. 알려진 main 결함(내 변경 무관): visibilitytests coverage_layer_is_exact가 1a616eb에서 같은 자리에서 실패(렌더 A의 f056694 투과 합성 추정, A에 알림). WARP로 전체 프레임 시험을 돌리면 RayScene AS 빌드에서 d3d10warp 정수 0 나누기(렌더 B/R에 알림 예정).
+
+## A5 피사계 심도 (재배정 4, 2026-09-27)
+
+- 프레임 합류는 이미 되어 있다(ShadingSystem: 시간 적분 뒤, RGBA16F 중간 영상; 렌즈 값은 호스트 → FrameContext). 정확성: PostTests --dof 하드웨어 통과(relMSE 3.2e-5 ~ 4.1e-3, 두 번·다른 메모리 뒤 비트 동일).
+- 4K 비용 [실측, `PostTests --dof-time`, RGBA16F, 중앙값 8프레임]: 조준(무기 15 %, ρ −30 px) 1.84 ms, 화면 전체 흐림(ρ +20) 3.28 ms, 초점 근처 0.97 ms. reach를 화면 최대 반경까지만 보게 해 0.19 → 0.01 ms(23b31bb, 비트 동일). 설계 행(조준 0.2~0.3 ms)의 약 6~7배다.
+- 음의 결과(기록, 되돌림): gather 옥타브 0 원천을 공유 메모리에 올리기(1.17 → 1.38 ms), 픽셀 커널 표를 공유 메모리로(0.51 → 0.74 ms), 옥타브 0만 남기기 실험(0.51 → 0.46 ms). 비용은 탭 로드나 레지스터가 아니라 정확 픽셀 커널의 탭당 연산(9~13탭)과 setup의 전 화면 고정비(0.36 ms)다.
+- 남은 것: (a) 비용 재설계(옥타브 ≥ 1을 낮은 해상도에서 모으기, 초점 근처 경로, setup을 흐린 타일에만) — 오차는 같은 기준으로; (b) 기준 추적기(얇은 렌즈, GPU 경로추적기) 대 렌더러의 조준 장면 비교와 캡처 — 두 경로로 같은 장면을 그리는 도구가 필요하다.

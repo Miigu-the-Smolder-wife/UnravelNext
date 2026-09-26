@@ -1,0 +1,15 @@
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+waiting for the GPU measurement lock; held by: (unknown)
+  dof time [aim] 4K: 0.920 ms (median of 8 frames), clear 0.090, down 0.004, gather 0.453, reach 0.010, setup 0.365
+  dof time [blur] 4K: 0.818 ms (median of 8 frames), clear 0.091, down 0.004, gather 0.312, reach 0.007, setup 0.404
+  dof time [focus] 4K: 0.910 ms (median of 8 frames), clear 0.086, down 0.004, gather 0.457, reach 0.007, setup 0.358
