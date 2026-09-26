@@ -34,7 +34,10 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <chrono>
+#include <cstdlib>
 #include <random>
+#include <span>
 #include <thread>
 
 using namespace unx;
@@ -2487,7 +2490,15 @@ double dielectricFresnel(double cosI, double eta)  // unpolarised, eta = n1 / n2
     return 0.5 * (rs * rs + rp * rp);
 }
 
-void testGlassComposite(TestFrame& tf, Report& report)
+// service: 0 = no refraction service (JOBS=0), 1 = FakeRefraction.hlsl traces every job (R-1 / R-2 through
+// TranslucentComposite JOBS=1 and TranslucentApply), 2 = a service that traces nothing (every job's fallback).
+double secondsSinceStart()
+{
+    static const auto t0 = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+void testGlassComposite(TestFrame& tf, Report& report, int service = 0)
 {
     const uint32_t W = 480, H = 270;
     struct Case
@@ -2495,13 +2506,22 @@ void testGlassComposite(TestFrame& tf, Report& report)
         const char* name;
         float ior, roughness;
         float3 tint, sun;
+        bool solid;
     };
-    const Case cases[] = {
-        { "index 1 (T_p = tint, R_p = 0)", 1.0f, 0.05f, { 0.6f, 0.3f, 0.9f }, { 0.3f, 0.6f, -0.75f } },
-        { "index 1.5, sun behind the pane (R_p, T_p)", 1.5f, 0.05f, { 0.8f, 0.5f, 0.2f }, { 0.3f, 0.6f, -0.75f } },
-        { "index 1.5, rough, sun in front (R_p x sun specular)", 1.5f, 0.4f, { 0.9f, 0.9f, 0.7f }, { 0.6f, 0.5f, 0.6f } },
+    const Case plain[] = {
+        { "index 1 (T_p = tint, R_p = 0)", 1.0f, 0.05f, { 0.6f, 0.3f, 0.9f }, { 0.3f, 0.6f, -0.75f }, false },
+        { "index 1.5, sun behind the pane (R_p, T_p)", 1.5f, 0.05f, { 0.8f, 0.5f, 0.2f }, { 0.3f, 0.6f, -0.75f }, false },
+        { "index 1.5, rough, sun in front (R_p x sun specular)", 1.5f, 0.4f, { 0.9f, 0.9f, 0.7f }, { 0.6f, 0.5f, 0.6f }, false },
     };
-    for (const Case& k : cases)
+    // (the sun behind the glass for the mirror cases: the sun specular is the plain cases' check, and the CPU disk integral of
+    // a mirror lobe takes minutes)
+    const Case jobbed[] = {
+        { "jobs: mirror pane (R-1)", 1.5f, 0.05f, { 0.8f, 0.5f, 0.2f }, { 0.3f, 0.6f, -0.75f }, false },
+        { "jobs: mirror solid (R-1 + R-2)", 1.5f, 0.05f, { 0.8f, 0.5f, 0.2f }, { 0.3f, 0.6f, -0.75f }, true },
+        { "jobs: rough solid (straight path)", 1.5f, 0.4f, { 0.9f, 0.9f, 0.7f }, { 0.6f, 0.5f, 0.6f }, true },
+    };
+    const float mirrorMax = (float)tf.quality.number("reflection.mirror_roughness_max");
+    for (const Case& k : service == 0 ? std::span<const Case>(plain) : std::span<const Case>(jobbed))
     {
         scene::Scene s;
         s.name = "glass composite";
@@ -2516,7 +2536,7 @@ void testGlassComposite(TestFrame& tf, Report& report)
         scene::Material glass;
         glass.name = "glass";
         glass.cls = scene::MaterialClass::Glass;
-        glass.twoSided = true;
+        glass.twoSided = !k.solid;
         glass.baseColor = k.tint;
         glass.roughness = k.roughness;
         glass.ior = k.ior;
@@ -2544,6 +2564,7 @@ void testGlassComposite(TestFrame& tf, Report& report)
         cam.ev100 = 13;
         s.cameras.push_back(cam);
         tf.setScene(s, { 2 });  // the pane is not in band A: its clusters are listed for its vis ids only
+        logf("glass [%s]: scene set (%.1f s)\n", k.name, secondsSinceStart());
 
         uint32_t element = UINT32_MAX;
         for (uint32_t e = 0; e < (uint32_t)tf.vis.visible.size(); ++e)
@@ -2638,12 +2659,31 @@ void testGlassComposite(TestFrame& tf, Report& report)
                     v.translucentVis = upload(fc, "m.test.translucent vis", DXGI_FORMAT_R32_UINT, 4, tvis.data());
                     v.translucentClass = upload(fc, "m.test.translucent class", DXGI_FORMAT_R8_UINT, 1, tcls.data());
                 }
+                if (service != 0)
+                {
+                    ID3D12PipelineState* fake = fc.shaders.compute("Passes/Shading/Tests/FakeRefraction");
+                    fc.services.traceRefractions = [fake, service](FramePassContext& c, BufferRef jobs, BufferRef results, uint32_t maxJobs) {
+                        if (service != 1) return;
+                        c.graph.addPass("m.test.fake refraction", QueueType::Graphics,
+                                        [&](PassBuilder& b) {
+                                            b.use(jobs, Use::SrvCompute);
+                                            b.use(results, Use::UavCompute);
+                                        },
+                                        [=](PassContext& pc) {
+                                            const uint32_t k[4] = { pc.srv(jobs), pc.uav(results), maxJobs, 0 };
+                                            pc.cmd->SetPipelineState(fake);
+                                            pc.computeConstants(k, 4);
+                                            pc.cmd->Dispatch((maxJobs + 63) / 64, 1, 1);
+                                        });
+                    };
+                }
                 tracks::materialResolve(fc, v);
                 tracks::shading(fc, v);
                 (pass == 0 ? base : with) = tf.readback(fc, v.color);
             });
         tf.frame.outputLinearHdr = false;
         const shading::Stats st = shading::latestStats(tf.trackState);
+        logf("glass [%s]: rendered (%.1f s)\n", k.name, secondsSinceStart());
 
         const double exposure = 1.0 / (1.2 * std::exp2(13.0)), thetaS = s.sun.angularRadius;
         const float3 E = s.sun.color * s.sun.illuminance, l0 = normalize(s.sun.direction);
@@ -2674,18 +2714,40 @@ void testGlassComposite(TestFrame& tf, Report& report)
                 float3 spec{};
                 if (dot(n, l0) > 0)
                     spec = cpuSun(mirror, n, v, l0, thetaS) * model::directionalAlbedo((float)NoV, k.roughness) * E * (float)exposure;
+                // JOBS=1: a mirror pixel's reflection job, and a solid body's refraction job (front face: F and 1 - F)
+                const bool mirrorJob = service != 0 && k.roughness < mirrorMax, refractJob = mirrorJob && k.solid;
+                const float3 dr = v * -1.0f + n * (2 * (float)NoV);
+                float3 fakeReflect = { std::fabs(dr.x) * 0.05f + 0.003f, std::fabs(dr.y) * 0.05f + 0.003f, std::fabs(dr.z) * 0.05f + 0.003f }, fakeRefract{};
+                if (refractJob)
+                {
+                    const float eta = 1 / k.ior, c = (float)NoV, k2 = 1 - eta * eta * (1 - c * c);
+                    const float3 dt = v * -eta + n * (eta * c - std::sqrt(k2));
+                    for (int ch = 0; ch < 3; ++ch)
+                    {
+                        const float sigma = -std::log(std::max((&k.tint.x)[ch], 1e-4f)) / 0.01f;
+                        (&fakeRefract.x)[ch] = std::fabs((&dt.x)[ch]) * 0.05f + sigma * 1e-3f + k.ior * 0.01f + 0.002f;
+                    }
+                }
                 double want[3];
                 for (int c = 0; c < 3; ++c)
                 {
                     const double t = std::clamp((double)(&k.tint.x)[c], 0.0, 1.0), d = 1 - F * F * t * t;
                     const double Rp = F + (1 - F) * (1 - F) * F * t * t / d, Tp = (1 - F) * (1 - F) * t / d;
-                    want[c] = Rp * (&spec.x)[c] + Tp * (&a.x)[c];
+                    const double Rs = refractJob ? F : Rp;
+                    want[c] = Rs * (&spec.x)[c];
+                    if (service == 1 && mirrorJob) want[c] += Rs * (&fakeReflect.x)[c];
+                    want[c] += service == 1 && refractJob ? (1 - F) / ((double)k.ior * k.ior) * (&fakeRefract.x)[c] : Tp * (&a.x)[c];
                 }
                 maxSpec = std::max(maxSpec, (double)spec.y);
                 const double scale = std::max({ want[0], want[1], want[2], 1e-2 });
                 const double e = std::max({ std::fabs(g.x - want[0]), std::fabs(g.y - want[1]), std::fabs(g.z - want[2]) }) / scale;
                 if (e > 5e-3 && e > worst)
+                {
                     logf("  glass px (%u,%u): got (%.5f %.5f %.5f) want (%.5f %.5f %.5f), behind (%.5f %.5f %.5f), F %.5f\n", x, y, g.x, g.y, g.z, want[0], want[1], want[2], a.x, a.y, a.z, F);
+                    if (service == 1)
+                        logf("    mirror %d refract %d: dr (%.4f %.4f %.4f), fake reflect (%.5f %.5f %.5f), fake refract (%.5f %.5f %.5f)\n", mirrorJob, refractJob, dr.x, dr.y,
+                             dr.z, fakeReflect.x, fakeReflect.y, fakeReflect.z, fakeRefract.x, fakeRefract.y, fakeRefract.z);
+                }
                 worst = std::max(worst, e);
                 ++checked;
             }
@@ -2693,8 +2755,11 @@ void testGlassComposite(TestFrame& tf, Report& report)
              maxF, maxSpec, st.glassPanePixels, st.glassSolidPixels, st.glassUnlitPixels);
         report(checked > 5000 && worst < 5e-3, unx::format("glass [%s]: class 1 pixels vs R_p x sun specular + T_p x behind (rel.)", k.name).c_str(), worst, 5e-3);
         report(worstOther == 0, unx::format("glass [%s]: pixels outside class 1 unchanged", k.name).c_str(), worstOther, 0);
-        report(st.glassPanePixels == class1 && st.glassSolidPixels == 0 && st.glassUnlitPixels == 0, unx::format("glass [%s]: statistics count the pane's class 1 pixels", k.name).c_str(),
-               std::fabs((double)st.glassPanePixels - class1), 0);
+        logf("glass [%s]: evaluated (%.1f s)\n", k.name, secondsSinceStart());
+        const bool straight = k.solid && !(service != 0 && k.roughness < mirrorMax);  // solid glass without refraction
+        const uint32_t exact = straight ? st.glassSolidPixels : st.glassPanePixels, other = straight ? st.glassPanePixels : st.glassSolidPixels;
+        report(exact == class1 && other == 0 && st.glassUnlitPixels == 0, unx::format("glass [%s]: statistics count the class 1 pixels", k.name).c_str(),
+               std::fabs((double)exact - class1), 0);
     }
 }
 
@@ -3016,7 +3081,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, preshadeOnly = false, coatOnly = false, warp = false;
+        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, glassJobsOnly = false, preshadeOnly = false, coatOnly = false, warp = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -3026,6 +3091,7 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
             if (std::string(argv[i]) == "--coverage-growth") growth = true;
             if (std::string(argv[i]) == "--glass") glassOnly = true;
+            if (std::string(argv[i]) == "--glass-jobs") glassJobsOnly = true;
             if (std::string(argv[i]) == "--preshade") preshadeOnly = true;
             if (std::string(argv[i]) == "--coat") coatOnly = true;
             if (std::string(argv[i]) == "--warp") warp = true;  // compute probes only (full frames render black on WARP)
@@ -3040,6 +3106,9 @@ int main(int argc, char** argv)
             if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_2, IID_PPV_ARGS(&warpDevice))))
                 check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(&warpDevice)), "WARP device");
         }
+        for (int i = 1; i + 1 < argc; ++i)
+            if (std::string(argv[i]) == "--log") logOpenFile(argv[i + 1]);  // a flushed copy of the log (runs under GpuLock)
+        secondsSinceStart();
         Report report;
         testTable(report);
         TestFrame tf(debugLayer, gpuValidation, warpDevice.Get());
@@ -3062,9 +3131,18 @@ int main(int argc, char** argv)
             logf("%s: %d failure(s)\n", failures ? "FAILED" : "passed", failures);
             return failures ? 1 : 0;
         }
+        if (glassJobsOnly)  // --glass-jobs: test 12's refraction-service cases alone
+        {
+            testGlassComposite(tf, report, 1);
+            testGlassComposite(tf, report, 2);
+            logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
+            return report.failures ? 1 : 0;
+        }
         if (glassOnly)  // --glass: test 12 alone
         {
             testGlassComposite(tf, report);
+            testGlassComposite(tf, report, 1);
+            testGlassComposite(tf, report, 2);
             logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
             return report.failures ? 1 : 0;
         }

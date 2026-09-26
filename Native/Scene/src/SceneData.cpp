@@ -316,6 +316,33 @@ void writeSheen(Writer& w, const Scene& s)
     }
 }
 
+// A10 glass extension block, written only when a Glass material's attenuation distance is not the default: u32 tag
+// "GATT", u64 count, then per material its index and attenuationDistance.
+constexpr uint32_t kGlassTag = 0x54544147u;  // "GATT"
+
+bool hasAttenuation(const Material& m) { return m.cls == MaterialClass::Glass && m.attenuationDistance != 0.01f; }
+
+bool anyAttenuation(const Scene& s)
+{
+    for (const Material& m : s.materials)
+        if (hasAttenuation(m)) return true;
+    return false;
+}
+
+void writeAttenuation(Writer& w, const Scene& s)
+{
+    w.pod(kGlassTag);
+    uint64_t count = 0;
+    for (const Material& m : s.materials) count += hasAttenuation(m);
+    w.pod(count);
+    for (uint32_t i = 0; i < s.materials.size(); ++i)
+        if (hasAttenuation(s.materials[i]))
+        {
+            w.pod(i);
+            w.pod(s.materials[i].attenuationDistance);
+        }
+}
+
 bool anyMorph(const Scene& s)
 {
     for (const Mesh& m : s.meshes)
@@ -377,6 +404,7 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anyTerrain(s)) writeTerrain(w, s);
     if (anyCoat(s)) writeCoat(w, s);
     if (anySheen(s)) writeSheen(w, s);
+    if (anyAttenuation(s)) writeAttenuation(w, s);
     return std::move(w.out);
 }
 
@@ -504,6 +532,17 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kGlassTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.materials.size()) fail("unxscene: glass attenuation of material %u of %zu", i, s.materials.size());
+            s.materials[i].attenuationDistance = r.pod<float>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
     if (tag != 0) fail("unxscene: unknown extension block 0x%08x", tag);
     if (r.at != bytes.size()) fail("unxscene: %zu trailing bytes", bytes.size() - r.at);
     return s;
@@ -555,6 +594,8 @@ void validate(const Scene& s)
             if (m.clearcoatIor != 1.5f && m.clearcoatIor != 1.33f)
                 fail("material %zu '%s': clearcoatIor %g is not a tabulated coat (1.5 or 1.33)", i, m.name.c_str(), m.clearcoatIor);
         }
+        if (m.cls == MaterialClass::Glass && !(m.attenuationDistance > 0))
+            fail("material %zu '%s': attenuationDistance > 0 (m)", i, m.name.c_str());
         if (hasSheen(m))
         {
             if (!(m.sheenColor.x >= 0 && m.sheenColor.x <= 1 && m.sheenColor.y >= 0 && m.sheenColor.y <= 1 && m.sheenColor.z >= 0 && m.sheenColor.z <= 1))

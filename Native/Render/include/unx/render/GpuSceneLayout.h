@@ -151,6 +151,7 @@ struct Material  // 112 B
     uint32_t revision;
     uint32_t textureClamp;   // bit per texture (MaterialTextureBit): 1 = clamp addressing (g_anisoClamp), 0 = wrap
     // Hair class (v1.66): sigma_a (scene::model::hairAbsorption), beta_N, cuticle tilt; beta_M = roughness, eta = ior.
+    // Glass class (A10 R-2): hairAbsorption holds the solid body's sigma_a = -ln(baseColor) / attenuationDistance (1/m).
     float3 hairAbsorption;
     float hairBetaN;
     float hairTilt;

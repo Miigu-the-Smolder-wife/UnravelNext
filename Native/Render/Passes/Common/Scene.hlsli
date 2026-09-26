@@ -77,7 +77,8 @@ struct GpuMaterial
     float specular, alphaCutoff, transmission, ior;
     uint classFlags, baseColorTexture, normalTexture, roughMetalTexture;
     uint emissiveTexture, occlusionTexture, revision, textureClamp;  // textureClamp: bit per texture, 1 = g_anisoClamp
-    float3 hairAbsorption;  // Hair class (v1.66): sigma_a, beta_N, cuticle tilt (beta_M = roughness, eta = ior)
+    float3 hairAbsorption;  // Hair class (v1.66): sigma_a, beta_N, cuticle tilt (beta_M = roughness, eta = ior); Glass: the
+                            // solid body's sigma_a (1/m, A10 R-2)
     float hairBetaN;
     float hairTilt;
     float cutScale;          // Cut class (v1.66): triplanar repeats per metre, damage band width (m)

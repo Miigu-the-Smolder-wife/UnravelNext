@@ -1081,7 +1081,11 @@ void translucentComposite(FramePassContext& fc, const ViewResources& view, Textu
     const TextureRef vis = view.translucentVis, classes = view.translucentClass;
     const BufferRef stats = g.createBuffer({ "m.glass.stats", 16, 0 });  // raw
     ID3D12PipelineState* clear = fc.shaders.compute("Passes/Shading/ExposureClear");  // (zeroes a raw buffer: P[0].x, count P[0].y)
-    ID3D12PipelineState* kernel = fc.shaders.compute("Passes/Shading/TranslucentComposite");
+    // R-1 / R-2 (A10): with R's refraction service, the view in bands of kGlassBandRows rows (at most kGlassMaxRecords
+    // pixels, so a band's jobs - two per pixel at most - never exceed kGlassMaxJobs): jobs and records, their arguments, R's
+    // rays, then the records applied. Without it, one dispatch over the view (JOBS=0).
+    const bool jobs = static_cast<bool>(fc.services.traceRefractions);
+    ID3D12PipelineState* kernel = fc.shaders.compute(jobs ? "Passes/Shading/TranslucentComposite.JOBS1" : "Passes/Shading/TranslucentComposite.JOBS0");
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
     const uint32_t w = view.view.width, h = view.view.height, none = gpu::kNone;
     const uint32_t textureTable = material::resolveOutputs(fc, view).textureTableSrv;
@@ -1092,12 +1096,49 @@ void translucentComposite(FramePassContext& fc, const ViewResources& view, Textu
                   c.computeConstants(k, 4);
                   c.cmd->Dispatch(1, 1, 1);
               });
+    constexpr uint32_t kGlassMaxJobs = 1u << 20, kGlassMaxRecords = kGlassMaxJobs / 2;
+    const uint32_t bandRows = jobs ? std::max(8u, (kGlassMaxRecords / std::max(w, 1u)) & ~7u) : h;
+    const uint32_t bands = (h + bandRows - 1) / bandRows;
+    const float mirrorMax = jobs ? (float)fc.quality.number("reflection.mirror_roughness_max") : 0.0f;
+    BufferRef glassJobs, glassRecords, glassResults;
+    if (jobs)
+    {
+        glassJobs = g.createBuffer({ "m.glass.jobs", 16 + 48ull * kGlassMaxJobs, 0 });        // raw
+        glassRecords = g.createBuffer({ "m.glass.records", 32 + 48ull * kGlassMaxRecords, 0 });  // raw
+        glassResults = g.createBuffer({ "m.glass.results", 8ull * kGlassMaxJobs, 0 });          // raw
+    }
+    ID3D12PipelineState* argsKernel = jobs ? fc.shaders.compute("Passes/Shading/TranslucentArgs") : nullptr;
+    ID3D12PipelineState* applyKernel = jobs ? fc.shaders.compute("Passes/Shading/TranslucentApply") : nullptr;
+    ID3D12CommandSignature* signature = jobs ? material::dispatchSignature(fc) : nullptr;
+    for (uint32_t band = 0; band < bands; ++band)
+    {
+    const uint32_t row0 = band * bandRows, row1 = std::min(h, row0 + bandRows);
+    if (jobs)
+        g.addPass("m.glass.reset", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(glassJobs, Use::UavCompute);
+                      b.use(glassRecords, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      c.cmd->SetPipelineState(clear);
+                      const uint32_t a[4] = { c.uav(glassJobs), 4, 0, 0 }, b[4] = { c.uav(glassRecords), 8, 0, 0 };
+                      c.computeConstants(a, 4);
+                      c.cmd->Dispatch(1, 1, 1);
+                      c.computeConstants(b, 4);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
     g.addPass("m.glass", QueueType::Graphics,
               [&](PassBuilder& b) {
                   b.use(vis, Use::SrvCompute);
                   b.use(classes, Use::SrvCompute);
                   b.use(colour, Use::UavCompute);
                   b.use(stats, Use::UavCompute);
+                  if (jobs)
+                  {
+                      b.use(glassJobs, Use::UavCompute);
+                      b.use(glassRecords, Use::UavCompute);
+                      b.use(glassResults, Use::UavCompute);
+                  }
                   if (view.visibleClusters.valid()) b.use(view.visibleClusters, Use::SrvCompute);
                   if (r.giCache.valid()) b.use(r.giCache, Use::SrvCompute);
                   for (const TextureRef& t : { r.transmittanceLut, r.multiScatterLut, view.airVolume })
@@ -1112,18 +1153,47 @@ void translucentComposite(FramePassContext& fc, const ViewResources& view, Textu
                blocks = r.vsmBlocks, searchBound = r.vsmSearchBound, layers = r.vsmLayers, vsmConstants = r.vsmConstants,
                visibleClusters = view.visibleClusters, airVolume = view.airVolume](PassContext& c) {
                   const bool shadows = pageTable.valid() && vsmConstants != UINT32_MAX;
-                  const uint32_t k[20] = { c.srv(vis), c.srv(classes), c.uav(colour), c.uav(stats),
-                                           c.srv(visibleClusters), textureTable, giCache.valid() ? c.srv(giCache) : none, 0,
+                  const uint32_t k[24] = { c.srv(vis), c.srv(classes), c.uav(colour), c.uav(stats),
+                                           c.srv(visibleClusters), textureTable, giCache.valid() ? c.srv(giCache) : none,
+                                           jobs ? c.uav(glassResults) : 0,
                                            transmittance.valid() ? c.srv(transmittance) : none, multiScatter.valid() ? c.srv(multiScatter) : none,
                                            airVolume.valid() ? c.srv(airVolume) : none, 0,
                                            shadows ? c.srv(pageTable) : none, shadows ? c.srv(blocks) : none,
                                            shadows && searchBound.valid() ? c.srv(searchBound) : none, shadows ? vsmConstants : none,
-                                           shadows && layers.valid() ? c.srv(layers) : none, 0, 0, 0 };
+                                           shadows && layers.valid() ? c.srv(layers) : none, row0, row1, asUint(mirrorMax),
+                                           jobs ? c.uav(glassJobs) : 0, jobs ? c.uav(glassRecords) : 0, kGlassMaxJobs, kGlassMaxRecords };
                   c.cmd->SetPipelineState(kernel);
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 20);
-                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  c.computeConstants(k, 24);
+                  c.cmd->Dispatch((w + 7) / 8, (row1 - row0 + 7) / 8, 1);
               });
+    if (!jobs) continue;
+    g.addPass("m.glass.args", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(glassJobs, Use::UavCompute);
+                  b.use(glassRecords, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[4] = { c.uav(glassJobs), c.uav(glassRecords), kGlassMaxJobs, kGlassMaxRecords };
+                  c.cmd->SetPipelineState(argsKernel);
+                  c.computeConstants(k, 4);
+                  c.cmd->Dispatch(1, 1, 1);
+              });
+    fc.services.traceRefractions(fc, glassJobs, glassResults, kGlassMaxJobs);
+    g.addPass("m.glass.apply", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(glassRecords, Use::SrvCompute);
+                  b.use(glassRecords, Use::IndirectArgs);
+                  b.use(glassResults, Use::SrvCompute);
+                  b.use(colour, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[4] = { c.srv(glassRecords), c.srv(glassResults), c.uav(colour), kGlassMaxRecords };
+                  c.cmd->SetPipelineState(applyKernel);
+                  c.computeConstants(k, 4);
+                  c.cmd->ExecuteIndirect(signature, 1, c.resource(glassRecords), 4, nullptr, 0);
+              });
+    }
     if (fc.trackState)
     {
         StatsRing& ring = fc.state<StatsRing>("M.statsRing");

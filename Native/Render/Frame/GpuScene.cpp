@@ -538,6 +538,12 @@ gpu::Material GpuScene::packMaterial(const scene::Material& m) const
         g.hairBetaN = m.hairBetaN;
         g.hairTilt = m.hairTilt;
     }
+    if (m.cls == scene::MaterialClass::Glass)
+    {
+        const float d = m.attenuationDistance;
+        g.hairAbsorption = { -std::log(std::max(m.baseColor.x, 1e-4f)) / d, -std::log(std::max(m.baseColor.y, 1e-4f)) / d,
+                             -std::log(std::max(m.baseColor.z, 1e-4f)) / d };
+    }
     if (m.cls == scene::MaterialClass::Cut)
     {
         g.cutScale = m.cutScale;

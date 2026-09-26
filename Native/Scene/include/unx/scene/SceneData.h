@@ -103,6 +103,9 @@ struct Material
     // (linear, [0, 1]; 0 = none) and perceptual roughness sheenRoughness in [0.1, 1].
     float3 sheenColor{ 0, 0, 0 };
     float sheenRoughness = 0.5f;
+    // Glass solid bodies (one-sided; A10 R-2): baseColor is the body's transmittance over attenuationDistance metres, so
+    // sigma_a = -ln(baseColor) / attenuationDistance (1/m). A pane (two-sided) takes baseColor per pass as before.
+    float attenuationDistance = 0.01f;
 };
 
 struct Submesh
