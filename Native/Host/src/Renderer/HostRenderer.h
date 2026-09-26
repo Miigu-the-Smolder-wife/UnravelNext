@@ -46,6 +46,7 @@ struct HostRendererOptions
     bool gpuValidation = false;                    // standalone only: GPU-based validation (implies debugLayer)
     std::filesystem::path shaderDirectory;
     std::filesystem::path qualityDirectory;
+    std::vector<std::string> qualityOverrides;     // "section.key=value" applied after the directory (a game's settings)
 };
 
 struct SceneCommitInfo
@@ -137,6 +138,8 @@ public:
         return (uint32_t)(list.size() - 1);
     }
     SceneCommitInfo commit();
+    // Quality override before commit ("section.key=value", QualityConfig::applyOverride): a game's post terms, for example.
+    void overrideQuality(const std::string& assignment);
     bool committed() const { return m_committed; }
 
     // Per-frame changes (main thread) collected into the next queued frame.

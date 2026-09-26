@@ -29,3 +29,13 @@ exposure_adapt_darker_seconds = 2.5
 exposure_cut_dark = 0.10
 exposure_cut_bright = 0.02
 exposure_centre_sigma = 0.8
+# HDR post chain (FEATURES_GAME 4, 6; A4; Post.cpp): off by default (gates and reference images compare the curve's
+# input); a game turns terms on by quality override. bloom: the energy fraction the lens PSF scatters into its tail
+# (0 = off; the kernel sums to 1) over bloom_levels octaves; vignette: 0..1 blend of natural cos^4 vignetting; grain:
+# relative standard deviation (< 0.4) of the deterministic luminance grain after the curve, multiplicative in linear
+# light (zero-mean, black stays black); lut: a 3D .cube grading LUT.
+post_bloom_strength = 0.0
+post_bloom_levels = 6
+post_vignette = 0.0
+post_grain = 0.0
+post_lut = ""

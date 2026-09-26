@@ -349,6 +349,14 @@ int32_t vfxCheckpointCallback(void* user, uint64_t stream, uint64_t generation, 
 void vfxDetachCallback(void*, uint64_t) {}
 } // namespace
 
+UNX_API int32_t UNX_CALL UnxRendererQualityOverride(UnxRenderer r, const char* utf8Assignment)
+{
+    return call([&] {
+        if (!utf8Assignment) fail("UnxRendererQualityOverride: no assignment");
+        find(r)->overrideQuality(utf8Assignment);
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor)
 {
     return call([&] {

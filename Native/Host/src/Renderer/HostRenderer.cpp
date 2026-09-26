@@ -44,6 +44,7 @@ HostRenderer::HostRenderer(const HostRendererOptions& options) : m_options(optio
     if (options.framesInFlight == 0) fail("framesInFlight must be at least 1");
     if (!options.standalone && (!options.hostDevice || !options.hostQueue)) fail("a host renderer needs the host's device and graphics queue");
     m_quality = QualityConfig::loadDirectory(options.qualityDirectory);
+    for (const std::string& o : options.qualityOverrides) m_quality.applyOverride(o);
     DeviceOptions d;
     if (options.standalone)
     {
@@ -404,6 +405,14 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
     applyEdits(p, m_scene);
     overlay(p, m_applied);
     return p;
+}
+
+void HostRenderer::overrideQuality(const std::string& assignment)
+{
+    requireOpen();
+    // the render threads read the quality config from commit on: a later change would race them
+    if (m_committed) fail("overrideQuality('%s'): quality overrides are applied before commit", assignment.c_str());
+    m_quality.applyOverride(assignment);
 }
 
 float HostRenderer::lastEv100ForTest() const { return m_frameRenderer ? m_frameRenderer->lastEv100() : 0.0f; }

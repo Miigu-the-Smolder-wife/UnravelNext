@@ -1,5 +1,6 @@
 #include "unx/shading/ShadingSystem.h"
 #include "unx/shading/Exposure.h"
+#include "unx/shading/Post.h"
 
 #include "unx/core/Log.h"
 #include "unx/material/MaterialSystem.h"
@@ -272,7 +273,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     ltc.ensure(fc.device, ltcTable(), 4, L"M LTC table");
     ID3D12CommandSignature* signature = material::dispatchSignature(fc);
 
-    const bool linear = view.view.kind != gpu::ViewKind::Main || fc.frame.outputLinearHdr;
+    // Linear writers (exposed radiance in a float target): secondary views, validation frames, and the main view shaded
+    // into the post chain's HDR target (Post.cpp).
+    const bool linear = view.view.kind != gpu::ViewKind::Main || fc.frame.outputLinearHdr || postActive(fc, view);
     // Area-light code only in scenes with area lights (ShadeOpaque AREA variant: exact either way, fewer registers without).
     bool areaLights = false;
     if (const scene::Scene* src = fc.scene.source())
@@ -875,9 +878,14 @@ void shade(FramePassContext& fc, ViewResources& view)
 {
     // Views the frame does not record as the lighting group (planar reflection views through renderView, tests): M's own
     // group over the frame's bands (output.band_pixels; one band by default, v1.31). The banded part checks the view first.
-    const std::vector<RenderGraph::BandedPass> passes = shadingPasses(fc, view);
-    const material::ResolveOutputs& o = material::resolveOutputs(fc, view);
+    // With a post term on, the main view is shaded into the chain's HDR target and the chain writes the display output.
+    const bool post = postActive(fc, view);
+    ViewResources target = view;
+    if (post) target.color = postTarget(fc, view);
+    const std::vector<RenderGraph::BandedPass> passes = shadingPasses(fc, target);
+    const material::ResolveOutputs& o = material::resolveOutputs(fc, target);
     fc.graph.addBandedGroup(view.view.kind != gpu::ViewKind::Main ? "m.lit.planar" : "m.lit", o.height, o.bands, passes);
-    shadingComposite(fc, view);
+    shadingComposite(fc, target);
+    if (post) postChain(fc, view, target.color);
 }
 } // namespace unx::render::shading
