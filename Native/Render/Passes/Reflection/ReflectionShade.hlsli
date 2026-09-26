@@ -21,6 +21,16 @@
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 
+// Geometry that moves this frame (its reflection changes): a rigid transform that changed (GpuScene keeps prev = current
+// once an instance stops), skinned instances and instances in the wind.
+bool reflInstanceMoving(uint sceneInstance)
+{
+    const GpuInstance inst = loadInstance(sceneInstance);
+    if ((inst.flags & INSTANCE_SKINNED) != 0 || ((inst.flags & INSTANCE_WIND) != 0 && inst.windStiffness > 0 && g_windSpeed > 0)) return true;
+    return any(inst.objectToWorld[0] != inst.prevObjectToWorld[0]) || any(inst.objectToWorld[1] != inst.prevObjectToWorld[1]) ||
+           any(inst.objectToWorld[2] != inst.prevObjectToWorld[2]);
+}
+
 // radiance = the hit's radiance toward the ray origin when the sun term is resolved (no sun, or S's VSM holds the hit);
 // otherwise the sun term at full visibility is in sunTerm and needs one shadow ray from shadowOrigin toward a point of
 // the solar disk: the value is radiance + sunTerm x visibility.
@@ -28,6 +38,7 @@ struct ReflHitShade
 {
     float3 radiance, sunTerm, shadowOrigin;
     bool needsShadowRay;
+    bool moving;  // the hit geometry moves this frame (reflInstanceMoving)
 };
 
 ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RtHit hit, float3 origin, float3 direction, float coneWidth,
@@ -36,6 +47,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     ReflHitShade o;
     o.radiance = o.sunTerm = o.shadowOrigin = 0;
     o.needsShadowRay = false;
+    o.moving = false;
     const uint experiment = P[5].x >> 24;
     if (hit.instance == RT_INSTANCE_EMITTER)
     {
@@ -61,6 +73,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
         }
     }
     const RtSurface s = rtSurface(scene, hit, origin, direction);
+    o.moving = reflInstanceMoving(s.sceneInstance);
     const float footprint = coneWidth + hit.t * coneSpread;
     GpuMaterial m = loadMaterial(s.material);
     if ((experiment & 8) == 0) m = rtHitMaterial(m, s, footprint, dot(s.normal, direction));

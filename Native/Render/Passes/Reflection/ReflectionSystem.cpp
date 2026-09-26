@@ -69,6 +69,8 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.experimentDisable = (uint32_t)q.integer("reflection.experiment_disable");
     s.statsLogFrames = (uint32_t)q.integer("reflection.stats_log_frames");
     s.planarViewNsPerPixel = (float)q.number("reflection.planar_view_ns_per_px");
+    s.temporalHistoryMax = (uint32_t)q.integer("reflection.temporal_history_max");
+    s.temporalLobeShift = (float)q.number("reflection.temporal_lobe_shift");
     return s;
 }
 
@@ -342,6 +344,11 @@ ReflectionSystem::~ReflectionSystem()
     if (m_statsReadback) m_statsReadback->Unmap(0, nullptr);
     m_device.deferRelease(m_statsReadback);
     m_device.deferRelease(m_history);
+    for (int k = 0; k < 2; ++k)
+    {
+        m_device.deferRelease(m_accum[k]);
+        m_device.deferRelease(m_accumKeys[k]);
+    }
     if (m_planarRing) m_planarRing->Unmap(0, nullptr);
     m_device.deferRelease(m_planarRing);
     if (m_planarReadback) m_planarReadback->Unmap(0, nullptr);
@@ -369,6 +376,22 @@ void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
     check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_history)),
           "reflection distance history");
     m_history->SetName(L"R reflection distance history");
+    for (int k = 0; k < 2; ++k)
+    {
+        if (m_accum[k]) m_device.deferRelease(m_accum[k]);
+        if (m_accumKeys[k]) m_device.deferRelease(m_accumKeys[k]);
+        d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                       IID_PPV_ARGS(&m_accum[k])),
+              "reflection accumulation");
+        m_accum[k]->SetName(k ? L"R reflection accumulation 1" : L"R reflection accumulation 0");
+        d.Format = DXGI_FORMAT_R32G32_UINT;
+        check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                       IID_PPV_ARGS(&m_accumKeys[k])),
+              "reflection accumulation keys");
+        m_accumKeys[k]->SetName(k ? L"R reflection accumulation keys 1" : L"R reflection accumulation keys 0");
+    }
+    m_accumReset = true;
     m_historyWidth = width;
     m_historyHeight = height;
 }
@@ -851,6 +874,62 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch(tilesX, tilesY, 1);
               });
+    if (main.visId.valid() && main.visibleClusters.valid())
+    {
+        // Time integration (ReflectionAccumulate.hlsl): reset on new textures, a scene revision (upload, materials) or a
+        // history discontinuity (restore, camera cut); ping-pong by parity. Needs V's vis id (surface identity and exact
+        // motion); frames without it (stand-in visibility in tests) keep each frame's own estimate.
+        if (fc.scene.revision() != m_accumSceneRevision || fc.frame.discontinuity != 0) m_accumReset = true;
+        m_accumSceneRevision = fc.scene.revision();
+        const uint32_t prev = m_accumParity, next = m_accumParity ^ 1u;
+        m_accumParity = next;
+        const TextureRef accumPrev = g.importTexture(m_accum[prev].Get(), { "R reflection accumulation (previous)", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+                                                     D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        const TextureRef keysPrev = g.importTexture(m_accumKeys[prev].Get(), { "R reflection accumulation keys (previous)", width, height, 1, 1, DXGI_FORMAT_R32G32_UINT },
+                                                    D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        const TextureRef accumNext = g.importTexture(m_accum[next].Get(), { "R reflection accumulation", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+                                                     D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        const TextureRef keysNext = g.importTexture(m_accumKeys[next].Get(), { "R reflection accumulation keys", width, height, 1, 1, DXGI_FORMAT_R32G32_UINT },
+                                                    D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        const TextureRef visId = main.visId;
+        const BufferRef visibleClusters = main.visibleClusters;
+        const uint32_t flags = (m_accumReset ? 1u : 0u) | ((s.experimentDisable & 512) ? 2u : 0u);
+        m_accumReset = false;
+        const float3 prevCamera = m_prevCamera;
+        m_prevCamera = main.view.position;
+        const float pixelAngle = 2.0f * std::tan(main.view.verticalFov * 0.5f) / height;
+        g.addPass("r.refl.accumulate", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(reflection, Use::UavCompute);
+                      b.use(modes, Use::SrvCompute);
+                      b.use(depth, Use::SrvCompute);
+                      b.use(gbuffer, Use::SrvCompute);
+                      b.use(visId, Use::SrvCompute);
+                      b.use(visibleClusters, Use::SrvCompute);
+                      b.use(history, Use::UavCompute);
+                      b.use(accumPrev, Use::UavCompute);
+                      b.use(keysPrev, Use::UavCompute);
+                      b.use(accumNext, Use::UavCompute);
+                      b.use(keysNext, Use::UavCompute);
+                  },
+                  [&shaders, reflection, modes, depth, gbuffer, visId, visibleClusters, history, accumPrev, keysPrev, accumNext, keysNext, width, height, flags,
+                   prevCamera, pixelAngle, frameConstants, s](PassContext& c) {
+                      const float shift = s.temporalLobeShift;
+                      uint32_t shiftBits, px, py, pz, angleBits;
+                      std::memcpy(&shiftBits, &shift, 4);
+                      std::memcpy(&px, &prevCamera.x, 4);
+                      std::memcpy(&py, &prevCamera.y, 4);
+                      std::memcpy(&pz, &prevCamera.z, 4);
+                      std::memcpy(&angleBits, &pixelAngle, 4);
+                      const uint32_t k[20] = { c.uav(reflection), c.srv(modes), c.srv(depth), c.srv(gbuffer), c.srv(visId), c.srv(visibleClusters), c.uav(history),
+                                               c.uav(accumPrev), c.uav(keysPrev), c.uav(accumNext), c.uav(keysNext), s.temporalHistoryMax, width, height, shiftBits,
+                                               flags, px, py, pz, angleBits };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionAccumulate"));
+                      c.computeConstants(k, 20);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  });
+    }
     // One copy into this frame's read-back slot (read framesInFlight later): candidate pixel counts, timestamps (trace,
     // views) and job counters. A single copy-destination use per frame: the read-back heap buffer takes no barrier.
     const uint32_t tickCount = 2 + 2 * planarCount;

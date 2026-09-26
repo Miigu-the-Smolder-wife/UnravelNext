@@ -25,6 +25,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     float3 sumL = 0, sumG = 0;
     float distSum = 0;
     uint valid = 0;
+    bool moving = false;
     [loop] for (uint i = 0; i < j.rays; ++i)
     {
         float3 dir;
@@ -35,11 +36,12 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         sumL += L;
         sumG += g;
         distSum += f16tof32(v.y >> 16);
+        moving = moving || ((v.w >> 17) & 1u) != 0;  // ReflectionShadeRays: the ray hit moving geometry
         ++valid;
     }
     const float3 gbar = j.mode == REFL_G ? reflLobeControl(j, probeTexture, footprint, probeCount)
                                          : valid == 0 ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w) : 0;
-    results[job] = reflPackResult(reflLobeEstimate(sumL, sumG, valid, gbar), valid > 0 ? distSum / valid : 0);
+    results[job] = reflPackResult(reflLobeEstimate(sumL, sumG, valid, gbar), valid > 0 ? distSum / valid : 0, moving);
     // Diagnostics: G samples and those estimated by the ratio branch, one atomic per wave (GI header).
     const uint gSamples = WaveActiveCountBits(j.mode == REFL_G), gRatio = WaveActiveCountBits(j.mode == REFL_G && reflLobeRatio(sumL, sumG, valid, gbar));
     if (WaveIsFirstLane() && gSamples)

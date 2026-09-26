@@ -4,7 +4,8 @@
 //   M: its own job's result;
 //   G: the samples of its spacing's global grid around it (up to 4, in any marked tile), weighted by bilinear position,
 //      distance to the pixel's tangent plane and normal agreement; a = 0 when none agrees (K fallback, counted).
-// Also stores the reflection hit distance for next frame's G spacing (distance history, R16F).
+// Also stores the reflection hit distance for next frame's G spacing (distance history, R16F), negative when the value's
+// rays hit moving geometry this frame (ReflectionAccumulate then does not integrate it; ReflectionClassify reads |d|).
 // Planar mirror pixels read their reflection camera's colour at (pixel - rectangle origin), divided by the exposure.
 // P[0] = { mode SRV, results SRV, depth SRV, gbuffer SRV }, P[1] = { reflection UAV, history UAV, rows H, planar SRV }
 // P[2] = { width, height, planar byte offset, 0 }, P[3] = planar colour SRVs; frame constants b1 = main view.
@@ -43,7 +44,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     {
         const uint2 r = results[reflJob(m)];
         reflection[pixel] = float4(reflResultRadiance(r), 1);
-        history[pixel] = reflResultDistance(r);
+        history[pixel] = reflResultMoving(r) ? -reflResultDistance(r) : reflResultDistance(r);
         return;
     }
     // G: bilinear over the spacing grid (sample positions s/2 + i s), in tiles R marked this frame.
@@ -54,6 +55,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     const float2 fr = f - floor(f);
     float3 sum = 0;
     float dist = 0, weight = 0;
+    bool moving = false;
     [unroll] for (uint k = 0; k < 4; ++k)
     {
         const int2 o = int2(k & 1, k >> 1);
@@ -71,6 +73,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         sum += w * reflResultRadiance(r);
         dist += w * reflResultDistance(r);
         weight += w;
+        moving = moving || reflResultMoving(r);
     }
     if (weight < 1e-4)
     {
@@ -78,5 +81,5 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         return;
     }
     reflection[pixel] = float4(sum / weight, 1);
-    history[pixel] = dist / weight;
+    history[pixel] = moving ? -dist / weight : dist / weight;
 }

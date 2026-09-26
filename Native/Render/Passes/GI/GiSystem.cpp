@@ -214,8 +214,10 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
 {
     RenderGraph& g = fc.graph;
     const GiSettings& s = m_settings;
-    // Lighting epoch: a new scene upload (geometry, materials, lights) or new sky constants reset every entry's history.
-    if (fc.scene.revision() != m_sceneRevision)
+    // Lighting epoch: a new scene upload (geometry, materials, lights), new sky constants or a restore discontinuity
+    // (snapshot restore, save load: every temporal state resets, world-space caches included; Frame.h) reset every
+    // entry's history. A camera cut keeps the cache.
+    if (fc.scene.revision() != m_sceneRevision || (fc.frame.discontinuity & kDiscontinuityRestore) != 0)
     {
         m_sceneRevision = fc.scene.revision();
         ++m_epoch;

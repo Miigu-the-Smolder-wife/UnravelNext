@@ -17,9 +17,11 @@ float reflSunVisibility(RtSceneSrvs scene, float3 origin, uint seed)
     return rtVisible(scene, sr, RT_MASK_REFLECTION, ((P[5].x >> 24) & 1) ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE) ? 1.0 : 0.0;
 }
 
-float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RayDesc r, float coneWidth, float coneSpread, uint seed, out float hitDistance)
+float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RayDesc r, float coneWidth, float coneSpread, uint seed, out float hitDistance,
+                       out bool moving)
 {
     const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER);
+    moving = false;
     if (hit.t < 0)
     {
         hitDistance = 65000;
@@ -27,6 +29,7 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
     }
     hitDistance = hit.t;
     const ReflHitShade o = reflShadeHit(scene, cache, h, hit, r.Origin, r.Direction, coneWidth, coneSpread);
+    moving = o.moving;
     return o.needsShadowRay ? o.radiance + o.sunTerm * reflSunVisibility(scene, o.shadowOrigin, seed) : o.radiance;
 }
 

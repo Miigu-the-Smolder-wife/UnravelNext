@@ -34,6 +34,8 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     float planarViewNsPerPixel = 0;  // prior cost per mirror pixel of a view (b)
     uint32_t experimentDisable = 0;  // cost attribution only (ReflectionHit.hlsli); 0 in the shipped configuration
     uint32_t statsLogFrames = 0;     // reflection.stats_log_frames: log the GI/reflection counters every N frames (0 = off)
+    uint32_t temporalHistoryMax = 0; // reflection.temporal_history_max: running mean over at most this many frames
+    float temporalLobeShift = 0;     // reflection.temporal_lobe_shift: reflected-direction travel over the window / lobe
     static ReflectionSettings fromQuality(const QualityConfig& q);
 };
 
@@ -94,6 +96,13 @@ private:
     ReflectionSettings m_settings;
     ComPtr<ID3D12Resource> m_history;   // R16_FLOAT reflection hit distance of the last frame (G spacing)
     uint32_t m_historyWidth = 0, m_historyHeight = 0;
+    // Time integration (ReflectionAccumulate.hlsl), ping-pong by frame parity: RGBA16F running mean + n, RG32_UINT key
+    // (scene instance + 1, linear depth). m_accumReset: the next frame ignores the history (new textures, a scene
+    // revision, a discontinuity).
+    ComPtr<ID3D12Resource> m_accum[2], m_accumKeys[2];
+    uint32_t m_accumParity = 0, m_accumSceneRevision = 0;
+    bool m_accumReset = true;
+    float3 m_prevCamera{};
     ComPtr<ID3D12Resource> m_arguments;  // raw: job counters, the trace descriptions (SKY0, SKY1), the shadow description,
                                          // the shade and combine Dispatch arguments (ReflectionSystem.cpp offsets)
     ComPtr<ID3D12CommandSignature> m_dispatchSignature;  // one D3D12_DISPATCH_ARGUMENTS

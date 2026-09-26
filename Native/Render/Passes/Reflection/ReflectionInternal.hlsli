@@ -65,13 +65,16 @@ uint2 reflUnpackPixel(uint v) { return uint2(v & 0xFFFFu, v >> 16); }
 
 // Job result: lobe-normalised radiance (fp16 RGB, x 1/64 like the GI cache) and hit distance (fp16).
 #define REFL_STORE_SCALE (1.0 / 64.0)
-uint2 reflPackResult(float3 radiance, float distance)
+// A job's result: lobe radiance (fp16 x 3) and mean hit distance (fp16, >= 0) whose sign bit says a ray hit moving
+// geometry this frame (ReflectionAccumulate does not integrate such a value over time).
+uint2 reflPackResult(float3 radiance, float distance, bool moving)
 {
     const float3 r = radiance * REFL_STORE_SCALE;
-    return uint2(f32tof16(r.r) | (f32tof16(r.g) << 16), f32tof16(r.b) | (f32tof16(min(distance, 65000.0)) << 16));
+    return uint2(f32tof16(r.r) | (f32tof16(r.g) << 16), f32tof16(r.b) | ((f32tof16(min(distance, 65000.0)) | (moving ? 0x8000u : 0u)) << 16));
 }
 float3 reflResultRadiance(uint2 v) { return float3(f16tof32(v.x), f16tof32(v.x >> 16), f16tof32(v.y)) * 64.0; }
-float reflResultDistance(uint2 v) { return f16tof32(v.y >> 16); }
+float reflResultDistance(uint2 v) { return f16tof32((v.y >> 16) & 0x7FFFu); }
+bool reflResultMoving(uint2 v) { return (v.y >> 31) != 0; }
 
 // Surface of a pixel (main view): world position, shading normal, perceptual roughness, unit vector to the eye.
 struct ReflSurface
