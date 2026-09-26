@@ -90,6 +90,7 @@ const std::vector<float>& coatTable();
 uint32_t coatIndex(float eta);  // the tabulated coat of this index (fails for others)
 float fresnelDielectric(float cosI, float eta);  // exact, unpolarised; eta = n_t / n_i; 1 past the critical angle
 float3 evaluateCoated(const Surface& s, const Coat& c, float3 n, float3 v, float3 l);
+float evaluateCoatLobe(const Coat& c, float3 n, float3 v, float3 l);  // f_c alone (without the cover)
 
 // Hair class (INTERFACES 8.1 v1.66): the fibre's absorption sigma_a (PBRT 4e's convention: per unit fibre radius, the
 // chord of the unit-radius cross-section is the path length; HairBsdf.hlsli hairAttenuation). With melanin (eumelanin +

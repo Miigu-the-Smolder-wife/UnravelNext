@@ -154,6 +154,20 @@ float fresnelDielectric(float cosI, float eta)
     return 0.5f * (rs * rs + rp * rp);
 }
 
+float evaluateCoatLobe(const Coat& c, float3 n, float3 v, float3 l)
+{
+    const float NoV = dot(n, v), NoL = dot(n, l);
+    if (NoV <= 0 || NoL <= 0) return 0;
+    const float* t = coatTable().data() + coatIndex(c.eta) * kCoatTableStride;
+    const float rc = c.roughness, ac = alphaFromRoughness(rc);
+    const float ecv = coatLookup2(t, NoV, rc), ecl = coatLookup2(t, NoL, rc), emv = coatLookup2(t + 1024, NoV, rc), eml = coatLookup2(t + 1024, NoL, rc);
+    const float3 h = normalize(v + l);
+    const float NoH = saturate(dot(n, h)), VoH = saturate(dot(v, h));
+    const float3 nxh = cross(n, h);
+    const float scale = ecv > 0 && ecl > 0 ? std::sqrt(emv * eml / (ecv * ecl)) : 1.0f;
+    return distributionGgx(NoH, dot(nxh, nxh), ac) * visibilitySmithGgxCorrelated(NoV, NoL, ac) * fresnelDielectric(VoH, c.eta) * scale;
+}
+
 float3 evaluateCoated(const Surface& s, const Coat& c, float3 n, float3 v, float3 l)
 {
     const float3 base = evaluate(s, n, v, l);

@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: OUTPUT=0,1 FALLBACK=0,1 AREA=0,1 PLANAR=0,1
+// unx-variants: OUTPUT=0,1 FALLBACK=0,1 AREA=0,1 PLANAR=0,1 LAYERED=0,1
 // Shading kernel of the opaque classes (ARCHITECTURE 2.11; INTERFACES 5.6, 7, 8): one 8 x 8 tile of the class's tile
 // list per group (ExecuteIndirect), pixels of other classes skipped. Per pixel, from the G-buffer, depth and material
 // word (no vis-buffer re-derivation):
@@ -121,7 +121,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     const uint materialIndex = mWordMaterial(word);
     bool active = inView && materialIndex != M_MATERIAL_SKY;
     const GpuMaterial m = loadMaterial(active ? materialIndex : 0);
-    active = active && (P[1].z == 0xFFFFFFFFu || mShadeClass(materialClass(m)) == P[1].z);
+    active = active && (P[1].z == 0xFFFFFFFFu || mShadeClassOf(m) == P[1].z);
     ShadedPixel sp = (ShadedPixel)0;
     if (active) sp = shadeSurface(pixel, word, materialIndex, m, words, gbPacked, depthValue, overflowHead);
 
@@ -216,6 +216,13 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     const bool foliage = s.cls == MATERIAL_FOLIAGE;
     const float3 front = foliage ? diffuse * (1 - s.transmission) : diffuse;
     const float3 back = foliage ? diffuse * s.transmission : 0;
+#if LAYERED
+    // A9 clearcoat (MATERIAL_LAYERS 1.1, MaterialModel.hlsli): f = (1 - c) f_base + c (f_c + f_under); the coat's roughness
+    // from the material word (footprint-filtered). The base terms below are scaled by (1 - c) at the end of each light.
+    ModelCoat coat = modelCoatOf(m);
+    coat.roughness = mWordCoatRoughness(word);
+    const float cover = coat.cover, keep = 1 - cover;
+#endif
 
     AtmosphereSrvs atm;
     atm.transmittance = P[3].x;
@@ -256,7 +263,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         const float3 cap = E * (2 / (1 + cos(g_sunAngularRadius)));  // L_sun x solid angle of the disk
         // The disk's parts above and below the shading normal's horizon (cap-averaged clipped cosines).
         const float above = shCapCosine(NoL), below = shCapCosine(-NoL);
-        float3 sun = 0;
+        float3 sun = 0, coatSun = 0;
         if (NoV > 0)
         {
             if (above > 0)
@@ -264,12 +271,44 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 const float e = modelDirectionalAlbedo(NoV, s.roughness);
                 const float3 compensation = 1 + f0 * (1 / e - 1);
                 sun = front * above * cap;
-                if (experiment & 1) sun += NoL > 0 ? shSpecular(f0, alpha, compensation, n, v, l0, NoV, NoL) * NoL * cap : 0;
-                else sun += shSunSpecular(f0, s.roughness, alpha, compensation, n, v, NoV, l0, E, shPixelAngle(D, Dx));
+                // lobe 0: the base's specular; A9 lobe 1: the coat's (F = 1 through the same disk rules, then the exact
+                // dielectric Fresnel and A2's scale at the disk centre, or for a lobe narrower than the disk its albedo
+                // E_ms(n.v) over the single-scattering E(n.v)): one inlined disk integral for both
+                uint lobes = 1;
+#if LAYERED
+                if (cover > 0) lobes = 2;
+#endif
+                [loop] for (uint lobe = 0; lobe < lobes; ++lobe)
+                {
+                    const bool coatLobe = lobe == 1;
+#if LAYERED
+                    const float3 lf0 = coatLobe ? 1.0.xxx : f0, lcomp = coatLobe ? 1.0.xxx : compensation;
+                    const float lr = coatLobe ? coat.roughness : s.roughness;
+#else
+                    const float3 lf0 = f0, lcomp = compensation;
+                    const float lr = s.roughness;
+#endif
+                    const float la = modelAlpha(lr);
+                    const float3 spec = (experiment & 1) ? (NoL > 0 ? shSpecular(lf0, la, lcomp, n, v, l0, NoV, NoL) * NoL * cap : 0)
+                                                         : shSunSpecular(lf0, lr, la, lcomp, n, v, NoV, l0, E, shPixelAngle(D, Dx));
+#if LAYERED
+                    if (coatLobe)
+                    {
+                        coatSun = spec * shCoatSunWeight(coat, v, l0, NoV, NoL, (experiment & 1) != 0);
+                        continue;
+                    }
+#endif
+                    sun += spec;
+                }
             }
             if (foliage) sun += back * below * cap;
         }
         else if (foliage) sun = back * above * cap;  // viewer behind the shading normal: only light crossing the leaf
+#if LAYERED
+        // the coat lobe over the disk; the base through the coat at the disk centre (its lobe is widened by the coat)
+        if (cover > 0 && NoV > 0)
+            sun = keep * sun + cover * (coatSun + (NoL > 0 ? modelCoatUnder(s, coat, n, v, l0) * above * cap : 0));
+#endif
         radiance += sun * sunVisibility;
     }
 
@@ -297,6 +336,19 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         const float3x3 frameBack = float3x3(frame[0], -frame[1], -frame[2]);
         const float3x3 specular = mul(shLtcInverse(P[5].y, max(NoV, 1e-4), s.roughness), frame);
         const float3 specularAlbedo = shSpecularAlbedo(f0, max(NoV, 1e-4), s.roughness);
+#if LAYERED
+        float3x3 coatSpecular = frame, coatBase = frame;
+        float coatAlbedo = 0;
+        float3 coatBaseAlbedo = 0;
+        if (cover > 0 && NoV > 0)
+        {
+            const float rEq = modelCoatBaseRoughness(s, coat, NoV);
+            coatSpecular = mul(shLtcInverse(P[5].y, max(NoV, 1e-4), coat.roughness), frame);
+            coatBase = mul(shLtcInverse(P[5].y, max(NoV, 1e-4), rEq), frame);
+            coatAlbedo = modelCoatEms(coat, NoV);
+            coatBaseAlbedo = shSpecularAlbedo(f0, modelCoatRefractedCos(NoV, coat.eta), rEq);
+        }
+#endif
 #endif
         uint shadowOrdinal = 0, overflowRecord = 0xFFFFFFFFu;
         ShadowPixelReceiver overflowReceiver = (ShadowPixelReceiver)0;
@@ -323,15 +375,52 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 const float3 Lw = light.color * (light.intensity * window * visibility);
                 // Integrals in order: front diffuse, specular, back (Foliage) -- one inlined evaluator (the diffuse frames
                 // are rotations: closed forms on circular cones).
-                const uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
+                uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
                 const bool specularInReflections = shSpecularInReflections(P[4].x, lightIndex);  // P[4].x: B2 mask
+                float scaleBase = 1;
+#if LAYERED
+                // A9 (MATERIAL_LAYERS 3.1): integrals 3 (the coat lobe, its own LTC, albedo E_ms(n.v)) and 4 (the base
+                // lobe through the coat, the LTC of the outside-equivalent roughness alpha_eq ~ eta alpha'_b) in the same
+                // loop; the base's diffuse-like part through the coat reuses integral 0, with the coat's transmission
+                // and the returned light at the light's centre direction.
+                float3 coatAdd = 0;
+                float coatId = 0, tvtl = 0;
+                if (cover > 0 && NoV > 0)
+                {
+                    scaleBase = keep;
+                    last = 5;
+                    const float muL = max(dot(n, normalize(p)), 1e-4);
+                    tvtl = (1 - modelCoatEms(coat, NoV)) * (1 - modelCoatEms(coat, muL)) / (coat.eta * coat.eta);
+                }
+#endif
                 [loop] for (uint j = first; j < last; ++j)
                 {
-                    if (j == 1 && specularInReflections) continue;
+                    if ((j == 1 || j >= 3) && specularInReflections) continue;
+                    if (j == 2 && !foliage) continue;
+#if LAYERED
+                    const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (j == 3 ? coatSpecular : (j == 4 ? coatBase : (NoV > 0 ? frameBack : frame))));
+#else
                     const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (NoV > 0 ? frameBack : frame));
-                    const float I = shAreaIntegral(light, p, T, j != 1);
-                    radiance += Lw * (j == 0 ? front * (SH_PI * I) : (j == 1 ? specularAlbedo * I : back * (SH_PI * I)));
+#endif
+                    const float I = shAreaIntegral(light, p, T, j == 0 || j == 2);
+#if LAYERED
+                    if (j == 0) coatId = I;
+                    if (j >= 3)
+                    {
+                        coatAdd += (j == 3 ? coatAlbedo : tvtl * coatBaseAlbedo) * I;
+                        continue;
+                    }
+#endif
+                    radiance += scaleBase * Lw * (j == 0 ? front * (SH_PI * I) : (j == 1 ? specularAlbedo * I : back * (SH_PI * I)));
                 }
+#if LAYERED
+                if (last == 5)
+                {
+                    const float muIn = modelCoatRefractedCos(max(dot(n, normalize(p)), 1e-4), coat.eta);
+                    coatAdd += tvtl * (diffuse + modelCoatReturned(s, coat, muIn) / SH_PI) * (SH_PI * coatId);
+                    radiance += cover * Lw * coatAdd;
+                }
+#endif
 #endif
                 continue;  // AREA=0: the scene has no area lights (ShadingSystem)
             }
@@ -349,6 +438,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             float3 f = 0;
             if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
             else if (foliage && NoV * cosL < 0) f = back;
+#if LAYERED
+            if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));
+#endif
             radiance += f * E * (abs(cosL) * visibility);
         }
     }
@@ -358,7 +450,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     const float3 nv = NoV > 0 ? n : -n;
     const float3 r = reflect(-v, n);
     const float halfAngle = reflectionLobeHalfAngle(s.roughness, NoV);
-    float3 irradiance = 0, irradianceBack = 0, incident = 0;
+    float3 irradiance = 0, irradianceBack = 0, incident = 0, coatIncident = 0;
 #if !PLANAR
     if (P[2].y != UNX_NONE && (experiment & 6) != 6)
     {
@@ -372,10 +464,28 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         const bool specular = NoV > 0 && (experiment & 4) == 0;
         const float4 refl = specular && P[2].z != UNX_NONE ? reflectionRadiance(P[2].z, pixel) : float4(0, 0, 0, 0);
         const bool wantRadiance = specular && refl.a <= 0;
-        if ((experiment & 2) == 0 || wantRadiance)
+        // gather 0: the pixel's irradiance and its lobe's K-path radiance; A9 gather 1: the coat lobe's cone (K path; R's
+        // reflection result is the base lobe's) - one inlined gather for both
+        uint gathers = 1;
+#if LAYERED
+        if (cover > 0 && specular) gathers = 2;
+#endif
+        [loop] for (uint gi = 0; gi < gathers; ++gi)
         {
-            const ScreenProbeLighting g =
-                screenProbeGatherTile(probes, pixel / M_TILE, pixel, worldPos, nv, linearZ, foliage && (experiment & 2) == 0, wantRadiance, r, halfAngle);
+            const bool coatCone = gi == 1;
+            if (!coatCone && !((experiment & 2) == 0 || wantRadiance)) continue;
+#if LAYERED
+            const float cone = coatCone ? reflectionLobeHalfAngle(coat.roughness, NoV) : halfAngle;
+#else
+            const float cone = halfAngle;
+#endif
+            const ScreenProbeLighting g = screenProbeGatherTile(probes, pixel / M_TILE, pixel, worldPos, nv, linearZ, !coatCone && foliage && (experiment & 2) == 0,
+                                                                coatCone || wantRadiance, r, cone);
+            if (coatCone)
+            {
+                coatIncident = g.radiance;
+                continue;
+            }
             if ((experiment & 2) == 0)
             {
                 irradiance = g.irradiance * g.occlusion;
@@ -395,7 +505,24 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         irradiance = giCacheIrradiance(gi, worldPos, nv);
         if (foliage) irradianceBack = giCacheIrradiance(gi, worldPos, -nv);
         if (NoV > 0) incident = giCacheRadiance(gi, worldPos, n, r, halfAngle);  // looked up in this surface's normal class
+#if LAYERED
+        if (NoV > 0 && cover > 0) coatIncident = giCacheRadiance(gi, worldPos, n, r, reflectionLobeHalfAngle(coat.roughness, NoV));
+#endif
     }
+#endif
+#if LAYERED
+    if (cover > 0 && NoV > 0)
+    {
+        // MATERIAL_LAYERS 3.1: the base through the coat with the coat's cosine-weighted mean transmission
+        // (1 - K_ms(r_c)) eta^2 and the returned light at the cosine-weighted mean direction (mu = 2/3); the coat lobe from
+        // R's probes at its own cone (K path, gather 1 above) with its albedo E_ms(n.v) - R's reflection result is the base
+        // lobe's.
+        const float tv = 1 - modelCoatEms(coat, NoV), tBar = 1 - modelCoatLookup1(coat.coat * MODEL_COAT_STRIDE + 4096, coat.roughness);
+        const float3 under = tv * tBar * ((front + modelCoatReturned(s, coat, modelCoatRefractedCos(2.0 / 3.0, coat.eta)) / SH_PI) * irradiance +
+                                          incident * shSpecularAlbedo(f0, modelCoatRefractedCos(NoV, coat.eta), modelCoatBaseRoughness(s, coat, NoV)));
+        radiance += keep * (front * irradiance + incident * shSpecularAlbedo(f0, NoV, s.roughness)) + cover * (under + coatIncident * modelCoatEms(coat, NoV));
+    }
+    else
 #endif
     if (NoV > 0) radiance += front * irradiance + incident * shSpecularAlbedo(f0, NoV, s.roughness);
     radiance += back * irradianceBack;

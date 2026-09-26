@@ -25,7 +25,8 @@
 #define M_CLASS_OPAQUE 1u      // Standard and Foliage (INTERFACES 8.1)
 #define M_CLASS_SUBSURFACE 2u
 #define M_CLASS_WATER 3u
-#define M_CLASS_COUNT 4u
+#define M_CLASS_LAYERED 4u     // A9: Standard materials with layers (MATERIAL_LAYERED): ShadeOpaque LAYERED=1
+#define M_CLASS_COUNT 5u
 
 uint mShadeClass(uint materialClass)
 {
@@ -34,10 +35,20 @@ uint mShadeClass(uint materialClass)
     return M_CLASS_OPAQUE;
 }
 
-uint mPackMaterialWord(uint material, float metallic)
+// The material's shade class (A9: a layered Standard material shades in the layered class).
+uint mShadeClassOf(GpuMaterial m)
 {
-    return (material & 0xFFFFu) | (uint(round(saturate(metallic) * 255.0)) << 16);
+    if ((m.classFlags & MATERIAL_LAYERED) != 0 && materialClass(m) == MATERIAL_STANDARD) return M_CLASS_LAYERED;
+    return mShadeClass(materialClass(m));
 }
+
+// Material word: material index (bits 0..15), metallic (16..23), A9 the coat's footprint-filtered perceptual roughness
+// (24..31; MATERIAL_LAYERS 3.4: alpha_c'^2 = alpha_c^2 + the footprint's slope variance, the base's rule).
+uint mPackMaterialWord(uint material, float metallic, float coatRoughness = 0)
+{
+    return (material & 0xFFFFu) | (uint(round(saturate(metallic) * 255.0)) << 16) | (uint(round(saturate(coatRoughness) * 255.0)) << 24);
+}
+float mWordCoatRoughness(uint word) { return (word >> 24) / 255.0; }
 uint mWordMaterial(uint word) { return word & 0xFFFFu; }
 float mWordMetallic(uint word) { return ((word >> 16) & 0xFFu) / 255.0; }
 

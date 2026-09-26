@@ -126,43 +126,75 @@ float modelFresnelDielectric(float cosI, float eta)
     return 0.5 * (rs * rs + rp * rp);
 }
 
-float3 modelEvaluateCoated(ModelSurface s, ModelCoat c, float3 n, float3 v, float3 l)
+float modelCoatEms(ModelCoat c, float mu) { return modelCoatLookup2(c.coat * MODEL_COAT_STRIDE + 1024, mu, c.roughness); }
+
+// f_c: the coat's reflection (A2), without the cover.
+float modelCoatLobe(ModelCoat c, float3 n, float3 v, float3 l)
 {
-    const float3 base = modelEvaluate(s, n, v, l);
-    if (!(c.cover > 0)) return base;
     const float NoV = dot(n, v), NoL = dot(n, l);
-    if (NoV <= 0 || NoL <= 0) return base * (1 - c.cover);
+    if (NoV <= 0 || NoL <= 0) return 0;
     const uint t = c.coat * MODEL_COAT_STRIDE;
-    const float eta = c.eta, rc = c.roughness, ac = modelAlpha(rc);
-    // coat reflection (A2)
-    const float ecv = modelCoatLookup2(t, NoV, rc), ecl = modelCoatLookup2(t, NoL, rc);
-    const float emv = modelCoatLookup2(t + 1024, NoV, rc), eml = modelCoatLookup2(t + 1024, NoL, rc);
+    const float ac = modelAlpha(c.roughness);
+    const float ecv = modelCoatLookup2(t, NoV, c.roughness), ecl = modelCoatLookup2(t, NoL, c.roughness);
+    const float emv = modelCoatLookup2(t + 1024, NoV, c.roughness), eml = modelCoatLookup2(t + 1024, NoL, c.roughness);
     const float3 h = normalize(v + l);
     const float NoH = saturate(dot(n, h)), VoH = saturate(dot(v, h));
     const float3 nxh = cross(n, h);
     const float scale = ecv > 0 && ecl > 0 ? sqrt(emv * eml / (ecv * ecl)) : 1.0;
-    const float fc = modelD(NoH, dot(nxh, nxh), ac) * modelV(NoV, NoL, ac) * modelFresnelDielectric(VoH, eta) * scale;
-    const float tv = 1 - emv, tl = 1 - eml;
-    // first pass (S)
-    const float mv = sqrt(max(0.0, 1 - (1 - NoV * NoV) / (eta * eta))), ml = sqrt(max(0.0, 1 - (1 - NoL * NoL) / (eta * eta)));
+    return modelD(NoH, dot(nxh, nxh), ac) * modelV(NoV, NoL, ac) * modelFresnelDielectric(VoH, c.eta) * scale;
+}
+
+// The light returned by the coat's inside per unit transmitted irradiance, per channel: (a - e)(mu'_l) rho / (1 - rho K_ms)
+// (the f_ms factor without T(mu_v) T(mu_l) / (pi eta^2)); muIn = mu'_l.
+float3 modelCoatReturned(ModelSurface s, ModelCoat c, float muIn)
+{
+    const uint t = c.coat * MODEL_COAT_STRIDE;
+    const float3 F = modelF0(s), rd = s.baseColor * (1 - s.metallic);
+    const float2 abl = modelSpecularAlbedo(muIn, s.roughness);
+    const float axl = modelCoatLookup2(t + 2048, muIn, s.roughness), bxl = modelCoatLookup2(t + 3072, muIn, s.roughness);
+    const float3 comp = 1 + F * (1 / modelDirectionalAlbedo(muIn, s.roughness) - 1);
+    StructuredBuffer<float> table = ResourceDescriptorHeap[g_coatTable];
+    const float3 returned = rd * table[t + 4192] + (F * (abl.x - axl) + (abl.y - bxl)) * comp;
+    const float abar = modelCoatLookup1(t + 4128, s.roughness), bbar = modelCoatLookup1(t + 4160, s.roughness);
+    const float3 rho = rd + (F * abar + bbar) * (1 + F * (1 / (abar + bbar) - 1));
+    const float kms = modelCoatLookup1(t + 4096, c.roughness);
+    return returned * rho / (1 - rho * kms);
+}
+
+float modelCoatRefractedCos(float mu, float eta) { return sqrt(max(0.0, 1 - (1 - mu * mu) / (eta * eta))); }
+
+// f_1 + f_ms: the base seen through the coat, without the cover.
+float3 modelCoatUnder(ModelSurface s, ModelCoat c, float3 n, float3 v, float3 l)
+{
+    const float NoV = dot(n, v), NoL = dot(n, l);
+    if (NoV <= 0 || NoL <= 0) return 0;
+    const float eta = c.eta, ac = modelAlpha(c.roughness);
+    const float tv = 1 - modelCoatEms(c, NoV), tl = 1 - modelCoatEms(c, NoL);
+    const float mv = modelCoatRefractedCos(NoV, eta), ml = modelCoatRefractedCos(NoL, eta);
     const float3 pv = (v - n * NoV) * (1 / eta) + n * mv, pl = (l - n * NoL) * (1 / eta) + n * ml;
     const float sv = 1 - NoV / (eta * mv), sl = 1 - NoL / (eta * ml);
     const float ab = modelAlpha(s.roughness);
     ModelSurface lobe = s;
     lobe.roughness = sqrt(sqrt(ab * ab + 0.25 * (sv * sv + sl * sl) * ac * ac));
     const float3 f1 = modelEvaluate(lobe, n, pv, pl) * (tv * tl / (eta * eta));
-    // light returned by the coat's inside
-    const float3 F = modelF0(s), rd = s.baseColor * (1 - s.metallic);
-    const float2 abl = modelSpecularAlbedo(ml, s.roughness);
-    const float axl = modelCoatLookup2(t + 2048, ml, s.roughness), bxl = modelCoatLookup2(t + 3072, ml, s.roughness);
-    const float3 comp = 1 + F * (1 / modelDirectionalAlbedo(ml, s.roughness) - 1);
-    StructuredBuffer<float> table = ResourceDescriptorHeap[g_coatTable];
-    const float3 returned = rd * table[t + 4192] + (F * (abl.x - axl) + (abl.y - bxl)) * comp;
-    const float abar = modelCoatLookup1(t + 4128, s.roughness), bbar = modelCoatLookup1(t + 4160, s.roughness);
-    const float3 rho = rd + (F * abar + bbar) * (1 + F * (1 / (abar + bbar) - 1));
-    const float kms = modelCoatLookup1(t + 4096, rc);
-    const float3 fms = returned * rho / (1 - rho * kms) * (tl * tv / (MODEL_PI * eta * eta));
-    return base * (1 - c.cover) + (fc + f1 + fms) * c.cover;
+    const float3 fms = modelCoatReturned(s, c, ml) * (tl * tv / (MODEL_PI * eta * eta));
+    return f1 + fms;
+}
+
+float3 modelEvaluateCoated(ModelSurface s, ModelCoat c, float3 n, float3 v, float3 l)
+{
+    const float3 base = modelEvaluate(s, n, v, l);
+    if (!(c.cover > 0)) return base;
+    if (dot(n, v) <= 0 || dot(n, l) <= 0) return base * (1 - c.cover);
+    return base * (1 - c.cover) + (modelCoatLobe(c, n, v, l) + modelCoatUnder(s, c, n, v, l)) * c.cover;
+}
+
+// Outside-equivalent perceptual roughness of the base lobe seen through the coat at the viewer's side (MATERIAL_LAYERS
+// 1.1: alpha_eq ~ eta alpha'_b, with the spread of both passes at mu_v), for lobe-shaped integrals (LTC, probe cones).
+float modelCoatBaseRoughness(ModelSurface s, ModelCoat c, float NoV)
+{
+    const float mv = modelCoatRefractedCos(max(NoV, 1e-4), c.eta), sv = 1 - max(NoV, 1e-4) / (c.eta * mv), ac = modelAlpha(c.roughness), ab = modelAlpha(s.roughness);
+    return sqrt(min(c.eta * sqrt(ab * ab + 0.5 * sv * sv * ac * ac), 1.0));
 }
 
 // The coat of a material (MATERIAL_LAYERED; none: cover 0).

@@ -178,7 +178,15 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             g.roughness = min(sqrt(alphaFiltered), 1.0);
             const uint2 packed = encodeGBuffer(g);
             gbuffer[pixel] = packed;
-            words[pixel] = mPackMaterialWord(s.material, metallic);
+            float coatRoughness = 0;
+            if ((m.classFlags & MATERIAL_LAYERED) != 0)
+            {
+                // A9: the coat's roughness band-limited by the footprint like the base's (MATERIAL_LAYERS 3.4)
+                const float rc = loadMaterialLayers(m.classFlags >> 16).clearcoatRoughness;
+                const float ac = max(rc * rc, 1e-4);
+                coatRoughness = min(sqrt(sqrt(ac * ac + variance)), 1.0);
+            }
+            words[pixel] = mPackMaterialWord(s.material, metallic, coatRoughness);
 
             if (ts.emissive != UNX_NONE && P[1].x != UNX_NONE)
             {
@@ -187,7 +195,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 emissive[pixel] = float4(m.emissive * mSampleGrad(t, (ts.flags & M_TEX_EMISSIVE) != 0, s.uv, s.duvdx, s.duvdy).rgb, 1);
             }
 
-            classBit = 1u << mShadeClass(materialClass(m));
+            classBit = 1u << mShadeClassOf(m);
             // R classifies with the stored (quantised) values; the tile minimum uses the same ones.
             const GBufferSample q = decodeGBuffer(packed);
             lobe = reflectionLobeHalfAngle(q.roughness, dot(q.normal, s.view)) / M_PI;

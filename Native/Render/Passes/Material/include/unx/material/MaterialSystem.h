@@ -15,7 +15,8 @@ enum class ShadeClass : uint32_t
     Opaque = 1,      // Standard + Foliage (INTERFACES 8.1)
     Subsurface = 2,
     Water = 3,
-    Count = 4,
+    Layered = 4,     // A9: Standard materials with layers (clearcoat), ShadeOpaque LAYERED=1
+    Count = 5,
 };
 constexpr uint32_t kShadeClassCount = (uint32_t)ShadeClass::Count;
 constexpr uint32_t kTile = 8;

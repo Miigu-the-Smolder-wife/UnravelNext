@@ -2895,11 +2895,124 @@ void testPreshadedRecords(TestFrame& tf, Report& report)
     report(differing > 0, "preshade: the pre-shaded path ran (its f16 rounding shows)", differing > 0 ? 0.0 : 1.0, 0);
 }
 
+// ---------------------------------------------------------------- 14. clearcoat sun lobe (A9, CoatSunProbe.hlsl)
+// The coat lobe's sun term as ShadeOpaque LAYERED forms it (shSunSpecular with F = 1 at the coat's roughness times
+// shCoatSunWeight) against a dense quadrature of scene::model::evaluateCoatLobe x cos over the disk, for both coats, with
+// the mirror direction at 0 .. 6 disk radii from the centre; relative to the peak of the case's roughness (as test 2).
+void testCoatSun(TestFrame& tf, Report& report)
+{
+    {
+        scene::Scene s;  // the frame constants' sun (defaults) and the coat tables
+        s.name = "coat sun test";
+        s.materials.push_back(scene::Material{});
+        scene::Instance plane;
+        plane.mesh = addPlane(s, 10, 0);
+        s.instances.push_back(plane);
+        scene::Camera cam;
+        cam.name = "coat";
+        cam.position = { 0, 1, 3 };
+        cam.forward = normalize(float3{ 0, -0.3f, -1 });
+        s.cameras.push_back(cam);
+        tf.setScene(s);
+    }
+    const float3 l0 = normalize(tf.sceneData.sun.direction);
+    const double thetaS = tf.sceneData.sun.angularRadius, cosS = std::cos(thetaS);
+    const float3 n{ 0, 1, 0 };
+    const float3 axis = normalize(cross(l0, float3{ 0.3f, 0.2f, 1 }));
+    struct Case
+    {
+        float roughness, offset;
+        uint32_t coat;
+    };
+    std::vector<Case> cases;
+    for (uint32_t coat : { 0u, 1u })
+        for (float r : { 0.07f, 0.1f, 0.15f, 0.2f, 0.3f, 0.5f })
+            for (float o : { 0.0f, 0.5f, 1.0f, 2.0f, 6.0f }) cases.push_back({ r, o, coat });
+    std::vector<float4> q;
+    std::vector<float3> views;
+    for (const Case& c : cases)
+    {
+        const float3 refl = rotateTowards(l0, axis, c.offset * thetaS);
+        const float3 v = normalize(n * (2 * dot(n, refl)) - refl);
+        q.push_back({ n.x, n.y, n.z, c.roughness });
+        q.push_back({ v.x, v.y, v.z, (float)c.coat });
+        views.push_back(v);
+    }
+    std::shared_ptr<std::vector<uint8_t>> out;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, 64, 64);
+        BufferRef in = fc.graph.createBuffer({ "m.test.coat queries", q.size() * 16, 16 });
+        BufferRef res = fc.graph.createBuffer({ "m.test.coat results", cases.size() * 16, 16 });
+        ComPtr<ID3D12Resource> staging = makeBuffer(tf.device, q.size() * 16, D3D12_HEAP_TYPE_UPLOAD);
+        void* p = nullptr;
+        D3D12_RANGE none{ 0, 0 };
+        check(staging->Map(0, &none, &p), "map");
+        std::memcpy(p, q.data(), q.size() * 16);
+        staging->Unmap(0, nullptr);
+        tf.keep(staging);
+        fc.graph.addPass("m.test.upload", QueueType::Graphics, [&](PassBuilder& b) { b.use(in, Use::CopyDst); },
+                         [staging, in, bytes = q.size() * 16](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(in), 0, staging.Get(), 0, bytes); });
+        ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shading/Tests/CoatSunProbe");
+        const D3D12_GPU_VIRTUAL_ADDRESS cb = v.frameConstants;
+        const uint32_t count = (uint32_t)cases.size();
+        fc.graph.addPass("m.test.coat probe", QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             b.use(in, Use::SrvCompute);
+                             b.use(res, Use::UavCompute);
+                         },
+                         [=](PassContext& c) {
+                             const uint32_t k[4] = { c.srv(in), c.uav(res), count, 0 };
+                             c.cmd->SetPipelineState(pso);
+                             c.bindFrameConstants(cb);
+                             c.computeConstants(k, 4);
+                             c.cmd->Dispatch((count + 63) / 64, 1, 1);
+                         });
+        out = tf.readbackBuffer(fc, res, cases.size() * 16);
+    });
+    auto reference = [&](const Case& c, float3 v) {
+        model::Coat coat;
+        coat.cover = 1;
+        coat.roughness = c.roughness;
+        coat.eta = model::kCoatEtas[c.coat];
+        const float3 t = normalize(std::fabs(l0.y) < 0.99f ? cross(float3{ 0, 1, 0 }, l0) : cross(float3{ 1, 0, 0 }, l0));
+        const float3 b = cross(l0, t);
+        const uint32_t nr = 400, na = 1200;
+        double sum = 0;
+        for (uint32_t i = 0; i < nr; ++i)
+        {
+            const double cc = 1 - (i + 0.5) / nr * (1 - cosS), sn = std::sqrt(std::max(1 - cc * cc, 0.0));
+            for (uint32_t k = 0; k < na; ++k)
+            {
+                const double ph = (k + 0.5) / na * 2 * kPi;
+                const float3 l = normalize(l0 * (float)cc + (t * (float)std::cos(ph) + b * (float)std::sin(ph)) * (float)sn);
+                const float NoL = dot(n, l);
+                if (NoL > 0) sum += model::evaluateCoatLobe(coat, n, v, l) * NoL;
+            }
+        }
+        return sum * 2 / (1 + cosS) / ((double)nr * na);
+    };
+    double worst4 = 0, worstNarrow = 0;
+    for (size_t i = 0; i < cases.size(); ++i)
+    {
+        float4 g;
+        std::memcpy(&g, out->data() + i * 16, 16);
+        const double ref = reference(cases[i], views[i]);
+        const double peak = reference({ cases[i].roughness, 0.0f, cases[i].coat }, normalize(n * (2 * dot(n, l0)) - l0));
+        const double e = std::abs(g.y - ref) / std::max(peak, 1e-30);
+        const double alpha = model::alphaFromRoughness(cases[i].roughness);
+        if (e > 5e-3) logf("  coat %u r %.2f offset %.2f: gpu %.5e ref %.5e (peak %.5e) err %.2e\n", cases[i].coat, cases[i].roughness, cases[i].offset, g.y, ref, peak, e);
+        if (alpha >= 2 * thetaS) worst4 = std::max(worst4, e);
+        else worstNarrow = std::max(worstNarrow, e);
+    }
+    report(worst4 < 5e-3, "coat sun lobe [alpha >= 2 theta_s] vs dense quadrature of evaluateCoatLobe (rel. to peak)", worst4, 5e-3);
+    report(worstNarrow < 1e-2, "coat sun lobe [narrow, alpha < 2 theta_s] vs dense quadrature (rel. to peak)", worstNarrow, 1e-2);
+}
+
 int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, preshadeOnly = false;
+        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, preshadeOnly = false, coatOnly = false, warp = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -2910,10 +3023,28 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--coverage-growth") growth = true;
             if (std::string(argv[i]) == "--glass") glassOnly = true;
             if (std::string(argv[i]) == "--preshade") preshadeOnly = true;
+            if (std::string(argv[i]) == "--coat") coatOnly = true;
+            if (std::string(argv[i]) == "--warp") warp = true;  // compute probes only (full frames render black on WARP)
+        }
+        ComPtr<ID3D12Device> warpDevice;
+        if (warp)
+        {
+            ComPtr<IDXGIFactory6> factory;
+            check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "DXGI factory");
+            ComPtr<IDXGIAdapter> adapter;
+            check(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)), "WARP adapter");
+            if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_2, IID_PPV_ARGS(&warpDevice))))
+                check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(&warpDevice)), "WARP device");
         }
         Report report;
         testTable(report);
-        TestFrame tf(debugLayer, gpuValidation);
+        TestFrame tf(debugLayer, gpuValidation, warpDevice.Get());
+        if (coatOnly)  // --coat: test 14 alone
+        {
+            testCoatSun(tf, report);
+            logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
+            return report.failures ? 1 : 0;
+        }
         if (preshadeOnly)  // --preshade: test 13 alone
         {
             testPreshadedRecords(tf, report);
@@ -2945,6 +3076,7 @@ int main(int argc, char** argv)
         testPlanarProducts(tf, report);
         testGlassComposite(tf, report);
         testPreshadedRecords(tf, report);
+        testCoatSun(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

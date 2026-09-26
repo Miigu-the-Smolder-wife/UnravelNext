@@ -179,6 +179,20 @@ float3 shSunSpecular(float3 f0, float roughness, float alpha, float3 compensatio
 }
 
 
+// A9 clearcoat, the coat lobe's sun term: shSunSpecular with f0 = 1 and compensation 1 at the coat's roughness (the lobe's
+// D V cos by the same disk rules) times this weight - the exact dielectric Fresnel and A2's energy scale at the disk centre
+// (they move by < 0.3 deg over it), or for a lobe narrower than the disk (shSunSpecular's lobe fraction of the
+// single-scattering albedo E(n.v)) the A2 lobe's albedo E_ms(n.v) over E(n.v). pointRule: the caller evaluated the lobe at
+// the disk centre (shading experiment bit 1).
+float shCoatSunWeight(ModelCoat c, float3 v, float3 l0, float NoV, float NoL0, bool pointRule)
+{
+    if (!pointRule && modelAlpha(c.roughness) < 2 * g_sunAngularRadius) return modelCoatEms(c, NoV) / modelDirectionalAlbedo(NoV, c.roughness);
+    const uint tb = c.coat * MODEL_COAT_STRIDE;
+    const float muL = max(NoL0, 1e-4), ecv = modelCoatLookup2(tb, NoV, c.roughness), ecl = modelCoatLookup2(tb, muL, c.roughness);
+    const float scale = ecv > 0 && ecl > 0 ? sqrt(modelCoatEms(c, NoV) * modelCoatEms(c, muL) / (ecv * ecl)) : 1.0;
+    return modelFresnelDielectric(saturate(dot(v, normalize(v + l0))), c.eta) * scale;
+}
+
 // Area of the unit pixel square on the inner side of a straight edge: unit normal nrm (pixel space, pointing inside),
 // signed distance d of the pixel centre from the edge (positive inside). Exact for a half-plane.
 float shHalfPlaneCoverage(float2 nrm, float d)
