@@ -1,0 +1,6 @@
+volume grid 160x90x64 tile 24 px, near 0.500 far 65536.0
+E_GATE case=volume resolution=4K media=2048 haze=256 grid=160x90x64 e_passes_ms_median=8.2363 gpu_frame_ms_median=8.2478 p95=9.3245 | volume.constants=0.0010 volume.clear=0.0051 volume.setup=0.0029 volume.count=0.0093 volume.media.scan=0.0215 volume.haze.scan=0.0132 volume.scatter=0.0103 volume.media.slices=8.0051 volume.haze.field=0.1680
+volume grid 107x60x64 tile 24 px, near 0.500 far 65536.0
+E_GATE case=volume resolution=1440p media=2048 haze=256 grid=107x60x64 e_passes_ms_median=3.9272 gpu_frame_ms_median=3.9459 p95=4.9336 | volume.constants=0.0010 volume.clear=0.0051 volume.setup=0.0022 volume.count=0.0083 volume.media.scan=0.0112 volume.haze.scan=0.0071 volume.scatter=0.0093 volume.media.slices=3.8000 volume.haze.field=0.0830
+e gate done
+GpuLock.ps1: background: cpu 8 s >= 4 cores, peak 6.5 cores
