@@ -1,3 +1,7 @@
+## 재개 지점 (렌더 A, 2026-09-27 오전 후반)
+- 면광원 커널 분리 완료(9a5d766): AreaLobes.hlsl(ShadeOpaque AREA_LOBES=1), 늘임 LTC 삭제. 전체 ShadingTests 통과. **배포는 아직**(디스크 대기) — 배포본(Unravel 72444ea1)에는 늘임 LTC 결함이 남아 있다. 다음 배포 때 같이 나간다.
+- 남음: coverage 조각의 sheen·비등방 면광원(CoverageComposite DXIL 0.8 KB, 분리 필요), 좁은 로브 셀 무게, 박막, 최적화.
+
 ## 재개 지점 (렌더 A, 2026-09-27 오전)
 - 끝낸 것: 크래시 수정(2acb060 FX 첫 틱 emitter table, ab26787 null import 가드; Unity 회귀 UnravelNextSceneEditTests), 비등방성 합류(cf5c495, 문서 954c2f3, 배포 Unravel 72444ea1), 면광원 구적 연구·GPU 미러(06706d0, 91883fd).
 - 다음 첫 단계: 면광원 구적을 별도 커널로 셰이딩에 연결한다. ShadeOpaque에 인라인하면 LAYERED 변형이 DXIL 201~248 KB(한도 200 KB)다. 방법 후보: 셰이딩 전에 Layered·Sheen 타일에서 면광원 로브 복사휘도를 RGBA16F로 쓰는 커널(가시성은 ShadeOpaque와 같은 슬롯·overflow 목록, fallback 타일은 VSM 직접). 그다음 늘임 LTC(shAnisoLtc)를 지운다(알려진 결함, 배포 중). sheen+비등방 동시 재질은 검증에서 막는 안을 검토했다(렌더 C 소유 SceneData).
