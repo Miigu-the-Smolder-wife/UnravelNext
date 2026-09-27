@@ -155,6 +155,46 @@ float2 anisoSpecularAlbedo(float3 vLocal, float alphaT, float alphaB);  // (A_a,
 bool anisoFrame(float3 T, float sign, float3 N, float theta, float3 n, float3& t, float3& b);
 float3 evaluateAnisotropic(const Surface& s, const Anisotropy& a, float3 n, float3 v, float3 l);
 
+// Thin-film interference (A9, MATERIAL_LAYERS 1.2; soap films, oil slicks, anodised and coated metal): a film of index
+// ior and thickness d (nm) over a substrate n + ik, seen from an outer medium of index outerEta. The base specular's
+// Fresnel becomes F' = w F_film(v.h) + (1 - w) F_schlick(f0, v.h) (w = coverage), and F'(1) takes f0's place in the
+// multiple-scattering compensation and the split albedo tables (design 1.2). F_film is method (c) with 32 bins, the only
+// RGB method that passed the spectral reference [measured, Results/C/MaterialLayers/REPORT_R2_KO.md 3: mean dE76 <= 0.54,
+// P99 <= 1.5, max <= 2.3 over 0-89 deg x 0-2000 nm]: bins uniform in wavenumber over 360-830 nm; per bin the
+// polarisation-averaged exact Airy reflectance (complex Fresnel, n + ik convention) averaged over the bin's wavenumbers
+// (Poisson kernel, closed form: no truncated series, the thick-film incoherent limit included) with the substrate's n + ik
+// at the bin centre; weighted by the bin's CIE 1931 sums into linear Rec.709 white-balanced to E (ThinFilmTables.inc). A
+// film in total internal reflection (ior < outerEta sin) is evanescent: its Airy reflectance at the bin centre (smooth in
+// wavelength). The result is clamped to [0, 1] per channel (out-of-gamut spectra; no energy above 1).
+// Substrates: Constant (n, k given, the same in every bin) or a metal preset with its spectral n + ik (RGB-fitted triplets
+// fail with (c): REPORT_R2 3).
+enum class FilmSubstrate : uint32_t
+{
+    Constant = 0,
+    Gold,
+    Copper,
+    Silver,
+    Aluminium,
+    Iron,
+    Count,
+};
+struct Film
+{
+    float thickness = 0;   // nm (0 = the bare substrate)
+    float ior = 1.33f;     // film index (real)
+    float coverage = 1;    // w
+    FilmSubstrate substrate = FilmSubstrate::Constant;
+    float substrateIor = 1.5f, substrateExtinction = 0;  // Constant substrate: n, k
+};
+Film filmOf(const Material& m);  // the material's film (thickness 0 = none)
+float3 filmReflectance(const Film& f, float outerEta, float cosOuter);
+// The renderer's film table: F_film at kFilmTableMu cosines mu_i = i / (M - 1), linear between them (3 floats per point).
+// Interpolation error against filmReflectance [measured, unx_test_scene_film]: see ThinFilmTests.cpp.
+constexpr uint32_t kFilmTableMu = 256;
+std::vector<float> filmTable(const Film& f, float outerEta);
+float3 filmFresnel(const Film& f, float3 f0, float VoH, float outerEta = 1);  // F'
+float3 evaluateFilm(const Surface& s, const Film& f, float3 n, float3 v, float3 l);  // evaluate with F' (Standard)
+
 // Hair class (INTERFACES 8.1 v1.66): the fibre's absorption sigma_a (PBRT 4e's convention: per unit fibre radius, the
 // chord of the unit-radius cross-section is the path length; HairBsdf.hlsli hairAttenuation). With melanin (eumelanin +
 // pheomelanin > 0): d'Eon et al. 2011, eu (0.419, 0.697, 1.37) + pheo (0.187, 0.4, 1.05). Otherwise baseColor is the

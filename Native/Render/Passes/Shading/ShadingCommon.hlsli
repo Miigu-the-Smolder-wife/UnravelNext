@@ -17,6 +17,13 @@ float3 shSpecularAlbedo(float3 f0, float NoV, float roughness)
 {
     const float2 ab = modelSpecularAlbedo(NoV, roughness);
     const float e = ab.x + ab.y;
+    // A9 thin film (modelFilmBegin; f0 = F'(1)): the film's share takes F_film at the representative v.h = n.v times E
+    // (MATERIAL_LAYERS 1.3 review 2) - exact for smooth lobes (bubbles, the sun's glint), where a Schlick curve through
+    // F'(1) would carry the normal-incidence colour to every angle.
+#if MODEL_FILM
+    if (g_modelFilmTable != 0)
+        return lerp(g_modelFilmF0 * ab.x + ab.y, modelFilmTable(NoV) * e, g_modelFilmCover) * (1 + f0 * (1 / e - 1));
+#endif
     return (f0 * ab.x + ab.y) * (1 + f0 * (1 / e - 1));
 }
 
@@ -53,7 +60,13 @@ float3 shSunSpecularQuadrature(float3 f0, float alpha, float3 compensation, floa
         // Area-uniform radius: 1 - cos(theta) uniform in [0, 1 - cos theta_s].
         const float c = 1 - glNodes[i] * (1 - cosS), s = sqrt(max(1 - c * c, 0.0));
         float3 ring = 0;
-        [unroll] for (uint k = 0; k < 12; ++k)
+        // (MODEL_FILM kernels: a loop, so the film's F table is not inlined 48 times - DXIL limit; same arithmetic)
+#if MODEL_FILM
+        [loop]
+#else
+        [unroll]
+#endif
+        for (uint k = 0; k < 12; ++k)
         {
             float sp, cp;
             sincos((k + 0.5) * (2 * SH_PI / 12), sp, cp);

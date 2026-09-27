@@ -158,6 +158,15 @@ void addLayerMaterials(scene::Scene& s)
     brushed.anisotropy = 0.7f;
     brushed.anisotropyRotation = 0.3f;
     s.materials.push_back(brushed);
+    scene::Material film;  // A9 thin film: an oxide on copper
+    film.name = "abi film";
+    film.metallic = 1;
+    film.roughness = 0.2f;
+    film.thinFilmThickness = 310;
+    film.thinFilmIor = 1.5f;
+    film.thinFilmCoverage = 0.8f;
+    film.thinFilmSubstrate = 2;
+    s.materials.push_back(film);
 }
 
 // A two-bone bar (skinned) appended to a scene, so the skin stream, skeleton and skinned instance cross the ABI.
@@ -236,7 +245,13 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
     {
         UnxMaterialDesc d{};
         d.size = sizeof d;
-        d.version = 4;
+        d.version = 5;
+        d.thinFilmThickness = m.thinFilmThickness;
+        d.thinFilmIor = m.thinFilmIor;
+        d.thinFilmCoverage = m.thinFilmCoverage;
+        d.thinFilmSubstrate = m.thinFilmSubstrate;
+        d.substrateIor = m.substrateIor;
+        d.substrateExtinction = m.substrateExtinction;
         d.anisotropy = m.anisotropy;
         d.anisotropyRotation = m.anisotropyRotation;
         d.clearcoat = m.clearcoat;

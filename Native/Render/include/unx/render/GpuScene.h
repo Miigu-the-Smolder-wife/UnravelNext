@@ -274,6 +274,7 @@ private:
     void packMaterialLayers(std::vector<gpu::Material>& materials);
     void buildLayerTables(bool anisotropic);
     bool m_anisotropic = false;
+    std::vector<float> m_filmTables;  // A9 thin film tables, appended to the coat table after the anisotropy table
     std::vector<float4> m_morphRows;
     std::vector<uint32_t> m_morphMeshBlock;  // per mesh: word offset of its block in m_morphData, kNone = no morph
     std::vector<uint64_t> m_morphFrame;      // per instance: frame of its latest setMorph

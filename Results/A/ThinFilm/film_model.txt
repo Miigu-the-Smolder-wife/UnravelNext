@@ -1,0 +1,13 @@
+soap bubble air/1.33/air           (c) vs spectral dE76 mean 0.49 P99 1.45 max 2.37 | table (256 mu) vs (c) max 0.19
+oil on water air/1.5/1.33          (c) vs spectral dE76 mean 0.19 P99 0.50 max 0.61 | table (256 mu) vs (c) max 0.00
+water film air/1.33/1.5            (c) vs spectral dE76 mean 0.21 P99 0.57 max 0.66 | table (256 mu) vs (c) max 0.01
+TiO2 coat air/2.4/1.5              (c) vs spectral dE76 mean 0.38 P99 1.11 max 1.63 | table (256 mu) vs (c) max 0.01
+design default air/1.5/(1.5, 2)    (c) vs spectral dE76 mean 0.34 P99 0.90 max 1.07 | table (256 mu) vs (c) max 0.02
+oxide on gold air/1.33             (c) vs spectral dE76 mean 0.14 P99 0.41 max 0.71 | table (256 mu) vs (c) max 0.29
+oxide on copper air/1.5            (c) vs spectral dE76 mean 0.20 P99 0.49 max 0.82 | table (256 mu) vs (c) max 0.16
+anodised aluminium air/1.65        (c) vs spectral dE76 mean 0.09 P99 0.37 max 0.82 | table (256 mu) vs (c) max 0.30
+temper colours on iron air/2.4     (c) vs spectral dE76 mean 0.51 P99 1.48 max 2.13 | table (256 mu) vs (c) max 0.05
+evanescent 1.5/1.33/1.5            (c) vs spectral dE76 mean 0.18 P99 0.90 max 1.63 | table (256 mu) vs (c) max 0.00
+worst: mean 0.51 P99 1.48 max 2.37, table 0.30
+specular albedo with the film (silver, 380 nm): max 0.9876
+PASS

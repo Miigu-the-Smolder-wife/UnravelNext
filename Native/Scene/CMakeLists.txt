@@ -21,3 +21,8 @@ target_link_libraries(unx_test_scene_sheen PRIVATE unx_scene)
 add_executable(unx_test_scene_aniso Tests/AnisoTests.cpp)
 unx_target_defaults(unx_test_scene_aniso)
 target_link_libraries(unx_test_scene_aniso PRIVATE unx_scene)
+# A9 thin film (render A): method (c) against the 1 nm spectral reference, the renderer's table, energy, the scene block.
+add_executable(unx_test_scene_film Tests/ThinFilmTests.cpp)
+unx_target_defaults(unx_test_scene_film)
+target_link_libraries(unx_test_scene_film PRIVATE unx_scene)
+target_compile_definitions(unx_test_scene_film PRIVATE UNX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <iterator>
 #include <thread>
 
@@ -609,5 +610,140 @@ float3 hairAbsorption(const Material& m)
         return l * l;
     };
     return float3{ channel(m.baseColor.x), channel(m.baseColor.y), channel(m.baseColor.z) };
+}
+// ---- Thin film (A9, MATERIAL_LAYERS 1.2, method (c); Reference/Studies/ThinFilm.cpp filmC is the study's form)
+namespace
+{
+#include "ThinFilmTables.inc"
+using cd = std::complex<double>;
+constexpr double kPiD = 3.14159265358979323846;
+
+cd sqrtUpper(cd z)
+{
+    const cd q = std::sqrt(z);
+    return q.imag() < 0 ? -q : q;
+}
+
+// Interface amplitude coefficients (s, p) between media with normal components qa, qb and permittivities ea, eb.
+void filmCoefficients(cd qa, cd qb, cd ea, cd eb, cd r[2])
+{
+    r[0] = (qa - qb) / (qa + qb);
+    r[1] = (eb * qa - ea * qb) / (eb * qa + ea * qb);
+}
+
+// Airy reflectance of one polarisation averaged over wavenumbers [1/hi, 1/lo] (Poisson kernel): first = r01 (real),
+// second = r12, path = the optical path difference 2 d q1 (nm).
+double filmBandReflectance(double first, cd second, double path, double lo, double hi)
+{
+    const double r = std::norm(second), a = first * first, den = (1 - a) + a * (1 - r);
+    if (den == 0) return 1;
+    const double transfer = (1 - a) * (1 - r) / den, baseline = 1 - transfer;
+    const cd z = second * first;
+    const double q = std::abs(z);
+    if (q == 0) return baseline;
+    const double phase = std::arg(z), width = 2 * kPiD * path * (1 / lo - 1 / hi), mid = kPiD * path * (1 / lo + 1 / hi) + phase;
+    if (width == 0)
+    {
+        const double inter = 2 * q * std::cos(mid);
+        return (a + r + inter) / (1 + a * r + inter);
+    }
+    const double sh = std::sin(width * 0.5), ch = std::cos(width * 0.5);
+    const double num = 2 * q * sh * (std::cos(mid) + q * ch), div = 1 + 2 * q * std::cos(mid) * ch + q * q * std::cos(width);
+    return baseline + 2 * transfer * std::atan2(num, div) / width;
+}
+
+cd filmSubstrateAt(const Film& f, uint32_t bin)
+{
+    if (f.substrate == FilmSubstrate::Constant || f.substrate >= FilmSubstrate::Count) return cd(f.substrateIor, f.substrateExtinction);
+    const float* nk = kFilmPresetNk[(uint32_t)f.substrate - 1][bin];
+    return cd(nk[0], nk[1]);
+}
+
+// One bin's polarisation-averaged reflectance.
+double filmBin(const Film& f, double n0, double cos0, uint32_t bin)
+{
+    const double lo = kFilmBinEdges[bin], hi = kFilmBinEdges[bin + 1];
+    const double s2 = n0 * n0 * (1 - cos0 * cos0), nf = f.ior;
+    const cd sub = filmSubstrateAt(f, bin), e2 = sub * sub, q2 = sqrtUpper(e2 - s2);
+    const cd q0 = n0 * cos0;
+    if (f.thickness <= 0)
+    {
+        cd r[2];
+        filmCoefficients(q0, q2, n0 * n0, e2, r);
+        return 0.5 * (std::norm(r[0]) + std::norm(r[1]));
+    }
+    const cd q1 = sqrtUpper(cd(nf * nf - s2, 0));
+    cd r01[2], r12[2];
+    filmCoefficients(q0, q1, n0 * n0, nf * nf, r01);
+    filmCoefficients(q1, q2, nf * nf, e2, r12);
+    if (nf * nf - s2 <= 0)
+    {
+        // evanescent film: no interference; exact Airy at the bin centre (complex phase = decay)
+        const double lambda = 0.5 * (lo + hi);
+        const cd ph = std::exp(cd(0, 1) * (4 * kPiD * f.thickness / lambda) * q1);
+        double R = 0;
+        for (int p = 0; p < 2; ++p) R += 0.5 * std::norm((r01[p] + r12[p] * ph) / (1.0 + r01[p] * r12[p] * ph));
+        return R;
+    }
+    const double path = 2 * f.thickness * q1.real();
+    return 0.5 * (filmBandReflectance(r01[0].real(), r12[0], path, lo, hi) + filmBandReflectance(r01[1].real(), r12[1], path, lo, hi));
+}
+} // namespace
+
+Film filmOf(const Material& m)
+{
+    Film f;
+    f.thickness = m.thinFilmThickness;
+    f.ior = m.thinFilmIor;
+    f.coverage = m.thinFilmCoverage;
+    f.substrate = (FilmSubstrate)m.thinFilmSubstrate;
+    f.substrateIor = m.substrateIor;
+    f.substrateExtinction = m.substrateExtinction;
+    return f;
+}
+
+float3 filmReflectance(const Film& f, float outerEta, float cosOuter)
+{
+    const double c = std::clamp((double)cosOuter, 0.0, 1.0);
+    double rgb[3] = { 0, 0, 0 };
+    for (uint32_t b = 0; b < kFilmTableBins; ++b)
+    {
+        const double R = filmBin(f, outerEta, c, b);
+        for (int k = 0; k < 3; ++k) rgb[k] += R * kFilmBinWeights[b][k];
+    }
+    return float3{ (float)std::clamp(rgb[0], 0.0, 1.0), (float)std::clamp(rgb[1], 0.0, 1.0), (float)std::clamp(rgb[2], 0.0, 1.0) };
+}
+
+std::vector<float> filmTable(const Film& f, float outerEta)
+{
+    std::vector<float> t(3 * kFilmTableMu);
+    for (uint32_t i = 0; i < kFilmTableMu; ++i)
+    {
+        const float3 r = filmReflectance(f, outerEta, (float)i / (kFilmTableMu - 1));
+        t[3 * i] = r.x, t[3 * i + 1] = r.y, t[3 * i + 2] = r.z;
+    }
+    return t;
+}
+
+float3 filmFresnel(const Film& f, float3 f0, float VoH, float outerEta)
+{
+    const float3 schlick = fresnelSchlick(f0, VoH);
+    if (!(f.coverage > 0)) return schlick;
+    return lerp3(schlick, filmReflectance(f, outerEta, VoH), f.coverage);
+}
+
+float3 evaluateFilm(const Surface& s, const Film& film, float3 n, float3 v, float3 l)
+{
+    const float NoV = dot(n, v), NoL = dot(n, l);
+    if (NoV <= 0 || NoL <= 0) return {};
+    const float3 albedo = s.baseColor * ((1 - s.metallic) / kPi);
+    const float3 h = normalize(v + l);
+    const float NoH = saturate(dot(n, h)), VoH = saturate(dot(v, h));
+    const float alpha = alphaFromRoughness(s.roughness);
+    const float3 f = f0(s), fn = filmFresnel(film, f, 1);
+    const float3 nxh = cross(n, h);
+    const float3 single = filmFresnel(film, f, VoH) * (distributionGgx(NoH, dot(nxh, nxh), alpha) * visibilitySmithGgxCorrelated(NoV, NoL, alpha));
+    const float e = directionalAlbedo(NoV, s.roughness);
+    return albedo + single * (float3{ 1, 1, 1 } + fn * (1 / e - 1));
 }
 } // namespace unx::scene::model

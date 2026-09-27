@@ -633,6 +633,7 @@ Surface RtScene::surface(const Hit& hit, float3 rayDir) const
         if (scene::model::anisoFrame(toWorldV(tl), t0.w, nInterp, mat.anisotropyRotation, n, s.aniso.t, s.aniso.b))
             s.aniso.strength = mat.anisotropy;
     }
+    if (mat.thinFilmThickness > 0) s.film = scene::model::filmOf(mat);
     s.bsdf.cls = mat.cls;
     s.bsdf.baseColor = base;
     s.bsdf.roughness = std::clamp(rough, 0.0f, 1.0f);

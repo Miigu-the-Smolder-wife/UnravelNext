@@ -294,7 +294,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     if (const scene::Scene* src = fc.scene.source())
         for (const scene::Material& mt : src->materials)
         {
-            layeredMaterials = layeredMaterials || mt.clearcoat > 0 || mt.anisotropy > 0;  // (A9 anisotropy shades in the layered variants)
+            layeredMaterials = layeredMaterials || mt.clearcoat > 0 || mt.anisotropy > 0 || mt.thinFilmThickness > 0;  // (A9 anisotropy and thin films shade in the layered variants)
             sheenMaterials = sheenMaterials || mt.sheenColor.x > 0 || mt.sheenColor.y > 0 || mt.sheenColor.z > 0;
         }
     auto opaqueKernel = [&](bool fallbackVariant, uint32_t layered) {

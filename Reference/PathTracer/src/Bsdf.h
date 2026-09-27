@@ -38,7 +38,8 @@ struct ModelTerms
 
 inline double dot3(float3 a, float3 b) { return (double)a.x * b.x + (double)a.y * b.y + (double)a.z * b.z; }
 
-inline Rgb evaluateModel(const scene::model::Surface& s, float3 n, float3 v, float3 l)
+// film: A9 thin film (MaterialModel.h evaluateFilm): F' = w F_film(v.h) + (1 - w) Schlick, F'(1) in the compensation
+inline Rgb evaluateModel(const scene::model::Surface& s, float3 n, float3 v, float3 l, const scene::model::Film* film = nullptr)
 {
     const double nov = dot3(n, v), nol = dot3(n, l);
     const double kd = (1 - s.metallic) / 3.14159265358979323846;
@@ -62,6 +63,13 @@ inline Rgb evaluateModel(const scene::model::Surface& s, float3 n, float3 v, flo
     const double diffuseScale = s.cls == scene::MaterialClass::Foliage ? kd * (1 - s.transmission) : kd;
     const double f0c[3] = { f0.x, f0.y, f0.z }, base[3] = { s.baseColor.x, s.baseColor.y, s.baseColor.z };
     double out[3];
+    if (film)
+    {
+        const float3 fv = scene::model::filmFresnel(*film, f0, (float)voh), f1 = scene::model::filmFresnel(*film, f0, 1);
+        const double fr[3] = { fv.x, fv.y, fv.z }, fn[3] = { f1.x, f1.y, f1.z };
+        for (int c = 0; c < 3; ++c) out[c] = base[c] * diffuseScale + fr[c] * dv * (1 + fn[c] * (1 / e - 1));
+        return { (float)out[0], (float)out[1], (float)out[2] };
+    }
     for (int c = 0; c < 3; ++c)
     {
         const double fres = f0c[c] + (1 - f0c[c]) * w;
@@ -135,7 +143,9 @@ public:
         }
         const Rgb f0(scene::model::f0(s.bsdf));
         const float fres = std::pow(1 - m_nov, 5.0f);
-        const float ws = (f0 + (Rgb(1) - f0) * fres).luminance();
+        // (sampling weight only; the film's F at n.v when present)
+        const float ws = s.film.thickness > 0 ? Rgb(scene::model::filmFresnel(s.film, scene::model::f0(s.bsdf), m_nov)).luminance()
+                                              : (f0 + (Rgb(1) - f0) * fres).luminance();
         const Rgb albedo = Rgb(s.bsdf.baseColor) * (1 - s.bsdf.metallic);
         const bool foliage = s.bsdf.cls == scene::MaterialClass::Foliage;
         const float wd = albedo.luminance() * (foliage ? 1 - s.bsdf.transmission : 1.0f);
@@ -156,7 +166,7 @@ public:
         if (m_lambert) return sn > 0 ? Rgb(m_s.bsdf.baseColor) * (1.0f / scene::model::kPi) : Rgb();
         if (sn < 0 && m_s.bsdf.cls != scene::MaterialClass::Foliage) return {};
         if (m_s.aniso.strength > 0) return evaluateAnisotropicModel(m_s.bsdf, m_s.aniso, m_s.ns, m_wo, wi);
-        return evaluateModel(m_s.bsdf, m_s.ns, m_wo, wi);
+        return evaluateModel(m_s.bsdf, m_s.ns, m_wo, wi, m_s.film.thickness > 0 ? &m_s.film : nullptr);
     }
 
     float pdf(float3 wi) const

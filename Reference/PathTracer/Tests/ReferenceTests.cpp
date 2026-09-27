@@ -623,6 +623,28 @@ void testModelAgreement()
          worst, m.g, mf.y);
     if (worst > 2e-4) fail("evaluateModel differs from scene::model::evaluate");
     if (!m.finite() || m.g <= 0) fail("evaluateModel is not finite for a mirror");
+    // A9 thin film: the reference's film (evaluateModel with the Film) is the model's evaluateFilm
+    double worstFilm = 0;
+    scene::model::Film film;
+    film.thickness = 420, film.ior = 1.33f, film.substrate = scene::model::FilmSubstrate::Copper, film.coverage = 0.85f;
+    for (uint32_t i = 0; i < 2000; ++i)
+    {
+        scene::model::Surface s;
+        s.baseColor = { rng.uniform(), rng.uniform(), rng.uniform() };
+        s.roughness = 0.2f + 0.8f * rng.uniform();
+        s.metallic = rng.uniform();
+        const float z0 = rng.uniform(), z1 = rng.uniform(), p0 = 2 * kPi * rng.uniform(), p1 = 2 * kPi * rng.uniform();
+        const float3 fv{ std::sqrt(1 - z0 * z0) * std::cos(p0), std::sqrt(1 - z0 * z0) * std::sin(p0), z0 };
+        const float3 fl{ std::sqrt(1 - z1 * z1) * std::cos(p1), std::sqrt(1 - z1 * z1) * std::sin(p1), z1 };
+        if (fv.z < 0.05f || fl.z < 0.05f) continue;
+        film.thickness = 2000 * rng.uniform();
+        const float3 a = scene::model::evaluateFilm(s, film, n, fv, fl);
+        const reference::Rgb b = reference::evaluateModel(s, n, fv, fl, &film);
+        const float av[3] = { a.x, a.y, a.z }, bv[3] = { b.r, b.g, b.b };
+        for (int c = 0; c < 3; ++c) worstFilm = std::max(worstFilm, std::fabs((double)bv[c] - av[c]) / std::max(1e-3, (double)std::fabs(av[c])));
+    }
+    logf("  model: thin film, max relative difference to scene::model::evaluateFilm %.2e\n", worstFilm);
+    if (worstFilm > 2e-4) fail("evaluateModel with a thin film differs from scene::model::evaluateFilm");
 }
 
 void testHold()

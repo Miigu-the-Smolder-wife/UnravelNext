@@ -49,6 +49,9 @@
 #ifndef AREA_LOBES
 #define AREA_LOBES 0  // AreaLobes.hlsl compiles this file with 1: the area-light lobe terms alone (see there)
 #endif
+#if LAYERED == 1
+#define MODEL_FILM 1  // A9 thin film (MaterialModel.hlsli modelFresnel)
+#endif
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -234,7 +237,13 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     s.specular = m.specular;
     s.transmission = m.transmission;
     const float3 diffuse = s.baseColor * ((1 - s.metallic) / SH_PI);  // Lambert f_d before the Foliage split
+#if LAYERED == 1
+    // A9 thin film (MATERIAL_LAYERS 1.2; film materials are layered without a coat): every base modelFresnel below is F',
+    // and f0 is F'(1) in the compensation and the albedo tables (MaterialModel.hlsli modelFilmBegin).
+    const float3 f0 = modelFilmBegin(m, modelF0(s));
+#else
     const float3 f0 = modelF0(s);
+#endif
     const float alpha = modelAlpha(s.roughness);
     const bool foliage = s.cls == MATERIAL_FOLIAGE;
     const float3 front = foliage ? diffuse * (1 - s.transmission) : diffuse;

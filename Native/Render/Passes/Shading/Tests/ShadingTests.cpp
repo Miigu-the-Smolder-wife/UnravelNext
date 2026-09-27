@@ -35,6 +35,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <fstream>
 #include <chrono>
 #include <cstdlib>
 #include <random>
@@ -3193,6 +3194,139 @@ void testSheenFrame(TestFrame& tf, Report& report)
     (void)st;
 }
 
+// A9 thin film in a frame (MATERIAL_LAYERS 1.2; MaterialModel.h Film): a soap film sphere (black base, water film 1.33
+// of 480 nm over air) and an oxide on copper (film 1.5 of 260 nm over the spectral copper preset, cover 0.9) under the
+// sun, lobes wider than 16 theta_S (the point rule). Each pixel against the C++ model evaluateFilm (the exact method (c),
+// not the renderer's table: the difference includes the table's interpolation) with the pixel's G-buffer inputs.
+// --film-image <path.ppm>: the exposed frame (sRGB, x 4) for the record.
+std::string g_filmImage;
+void testFilmFrame(TestFrame& tf, Report& report)
+{
+    scene::Scene s;
+    s.name = "thin film frame test";
+    scene::Material ground;
+    ground.name = "ground";
+    ground.baseColor = { 0.05f, 0.05f, 0.06f };
+    ground.roughness = 0.6f;
+    scene::Material soap;
+    soap.name = "soap film";
+    soap.baseColor = { 0, 0, 0 };
+    soap.roughness = 0.3f;
+    soap.thinFilmThickness = 480, soap.thinFilmIor = 1.33f, soap.substrateIor = 1, soap.substrateExtinction = 0;
+    scene::Material oxide;
+    oxide.name = "oxide on copper";
+    oxide.baseColor = { 0.95f, 0.64f, 0.54f };
+    oxide.metallic = 1;
+    oxide.roughness = 0.3f;
+    oxide.thinFilmThickness = 260, oxide.thinFilmIor = 1.5f, oxide.thinFilmCoverage = 0.9f, oxide.thinFilmSubstrate = 2;
+    s.materials = { ground, soap, oxide };
+    scene::Instance a;
+    a.mesh = addPlane(s, 40, 0);
+    s.instances.push_back(a);
+    for (uint32_t k = 0; k < 2; ++k)
+    {
+        scene::Instance b;
+        b.mesh = addSphere(s, 1, 64, 128, 1 + k);
+        b.transform = float3x4::translation({ k ? 1.2f : -1.2f, 1, 0 });
+        s.instances.push_back(b);
+    }
+    s.sun.direction = normalize(float3{ -0.3f, 0.6f, 0.75f });
+    scene::Camera cam;
+    cam.name = "film";
+    cam.position = { 0, 1.4f, 5.2f };
+    cam.forward = normalize(float3{ 0, -0.08f, -1 });
+    cam.ev100 = 13;
+    s.cameras.push_back(cam);
+    tf.setScene(s);
+
+    const uint32_t W = 960, H = 540;
+    std::shared_ptr<std::vector<uint8_t>> gb, words, lin, depthRb;
+    ViewDesc desc;
+    tf.frame.outputLinearHdr = true;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, W, H, 0);
+        desc = v.view;
+        v.color = fc.graph.createTexture({ "m.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+        tf.vis.record(fc, v);
+        tracks::materialResolve(fc, v);
+        tracks::shading(fc, v);
+        gb = tf.readback(fc, v.gbuffer);
+        words = tf.readback(fc, material::resolveOutputs(fc, v).materialWord);
+        lin = tf.readback(fc, v.color);
+        depthRb = tf.readback(fc, v.depth);
+    });
+    tf.frame.outputLinearHdr = false;
+    const double exposure = 1.0 / (1.2 * std::exp2(13.0)), thetaS = s.sun.angularRadius;
+    const float3 E = s.sun.color * s.sun.illuminance, l0 = normalize(s.sun.direction);
+    const float cap = (float)(2 / (1 + std::cos(thetaS)));
+    double worst[3] = { 0, 0, 0 };
+    uint32_t count[3] = { 0, 0, 0 };
+    double spread[2][3] = { { 1e9, 1e9, 1e9 }, { 0, 0, 0 } };  // the soap film's chromaticity range (its colours vary with angle)
+    for (uint32_t y = 0; y < H; y += 2)
+        for (uint32_t x = 0; x < W; x += 2)
+        {
+            if (cpuIsEdge(desc, *words, *gb, *depthRb, W, H, x, y, tf.quality)) continue;
+            const uint32_t word = texelOf<uint32_t>(*words, W, x, y);
+            const uint32_t mi = word & 0xFFFF;
+            if (mi > 2) continue;
+            const scene::Material& mat = s.materials[mi];
+            const uint2 pk = texelOf<uint2>(*gb, W, x, y);
+            model::Surface su;
+            su.cls = mat.cls;
+            su.baseColor = { (float)srgbToLinear((pk.y & 0xFF) / 255.0), (float)srgbToLinear(((pk.y >> 8) & 0xFF) / 255.0), (float)srgbToLinear(((pk.y >> 16) & 0xFF) / 255.0) };
+            su.roughness = (pk.y >> 24) / 255.0f;
+            su.metallic = ((word >> 16) & 0xFF) / 255.0f;
+            su.specular = mat.specular;
+            const float3 n = octDecode(pk.x);
+            double D[3], Dx[3];
+            pixelRay(desc, x + 0.5, y + 0.5, D, Dx);
+            const float3 v = normalize(float3{ (float)-D[0], (float)-D[1], (float)-D[2] });
+            const float NoL = dot(n, l0), NoV = dot(n, v);
+            if (NoV <= 0 || NoL < 4 * (float)thetaS) continue;  // the lit side away from the terminator band (point rule)
+            if (model::alphaFromRoughness(su.roughness) < 16 * thetaS) continue;
+            const float3 f = mi == 0 ? model::evaluate(su, n, v, l0) : model::evaluateFilm(su, model::filmOf(mat), n, v, l0);
+            const float3 expected = f * (NoL * cap) * E * (float)exposure;
+            const float4 got = texelOf<float4>(*lin, W, x, y);
+            const double scale = std::max({ expected.x, expected.y, expected.z, 1e-2f });
+            const double e = std::max({ std::abs(got.x - expected.x), std::abs(got.y - expected.y), std::abs(got.z - expected.z) }) / scale;
+            if (e > worst[mi] && e > 1e-2)
+                logf("  film px (%u,%u) mat %u n.v %.4f got (%.5f %.5f %.5f) expected (%.5f %.5f %.5f)\n", x, y, mi, NoV, got.x, got.y, got.z, expected.x,
+                     expected.y, expected.z);
+            worst[mi] = std::max(worst[mi], e);
+            ++count[mi];
+            if (mi == 1 && expected.y > 0.02f)
+            {
+                const double sum = got.x + got.y + got.z;
+                const double c[3] = { got.x / sum, got.y / sum, got.z / sum };
+                for (int k = 0; k < 3; ++k) spread[0][k] = std::min(spread[0][k], c[k]), spread[1][k] = std::max(spread[1][k], c[k]);
+            }
+        }
+    logf("film frame: ground %u px (worst %.2e), soap %u px (worst %.2e), oxide on copper %u px (worst %.2e); soap chromaticity r %.3f-%.3f g %.3f-%.3f "
+         "b %.3f-%.3f\n",
+         count[0], worst[0], count[1], worst[1], count[2], worst[2], spread[0][0], spread[1][0], spread[0][1], spread[1][1], spread[0][2], spread[1][2]);
+    // 1e-2: the renderer's F table (<= 0.30 dE76 against the model, unx_test_scene_film) and the 8-bit G-buffer inputs
+    report(count[1] > 5000 && count[2] > 5000 && std::max(worst[1], worst[2]) < 1e-2, "film frame: soap and oxide pixels vs evaluateFilm (rel.)",
+           std::max(worst[1], worst[2]), 1e-2);
+    report(spread[1][2] - spread[0][2] > 0.05, "film frame: the soap film's colour changes with angle (blue chromaticity range)", spread[1][2] - spread[0][2], 0.05);
+    if (!g_filmImage.empty())
+    {
+        std::vector<unsigned char> px(3 * W * H);
+        for (uint32_t i = 0; i < W * H; ++i)
+        {
+            const float4 c = texelOf<float4>(*lin, W, i % W, i / W);
+            const float ch[3] = { c.x, c.y, c.z };
+            for (int k = 0; k < 3; ++k)
+            {
+                const double l = std::clamp(4.0 * ch[k], 0.0, 1.0);
+                px[3 * i + k] = (unsigned char)std::lround(255 * (l <= 0.0031308 ? 12.92 * l : 1.055 * std::pow(l, 1 / 2.4) - 0.055));
+            }
+        }
+        std::ofstream o(g_filmImage, std::ios::binary);
+        o << "P6\n" << W << " " << H << "\n255\n";
+        o.write((const char*)px.data(), px.size());
+    }
+}
+
 // A9 anisotropy in a frame (MATERIAL_LAYERS 1.5; render C's lobe and word, render A's shading join): two brushed metal
 // spheres under the sun - r 0.3 s 0.8 (both axes wider than the disk) and r 0.08 s 1 (alpha_b 0.0064 narrower than the
 // disk, alpha_t wide: a streak) - each pixel against a dense disk quadrature (48 area-uniform radii x 192 angles) of the
@@ -3737,7 +3871,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, glassJobsOnly = false, preshadeOnly = false, coatOnly = false, sheenOnly = false, anisoOnly = false, areaQuadOnly = false, warp = false;
+        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, glassJobsOnly = false, preshadeOnly = false, coatOnly = false, sheenOnly = false, anisoOnly = false, filmOnly = false, areaQuadOnly = false, warp = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -3752,6 +3886,8 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--coat") coatOnly = true;
             if (std::string(argv[i]) == "--sheen") sheenOnly = true;
             if (std::string(argv[i]) == "--aniso") anisoOnly = true;
+            if (std::string(argv[i]) == "--film") filmOnly = true;
+            if (std::string(argv[i]) == "--film-image" && i + 1 < argc) g_filmImage = argv[i + 1];
             if (std::string(argv[i]) == "--area-quad") areaQuadOnly = true;
             if (std::string(argv[i]) == "--warp") warp = true;  // compute probes only (full frames render black on WARP)
         }
@@ -3775,6 +3911,12 @@ int main(int argc, char** argv)
         {
             testAreaQuadrature(tf, report);
             testAreaLobesFrame(tf, report);
+            logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
+            return report.failures ? 1 : 0;
+        }
+        if (filmOnly)  // --film: the thin film frame alone
+        {
+            testFilmFrame(tf, report);
             logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
             return report.failures ? 1 : 0;
         }
@@ -3841,6 +3983,7 @@ int main(int argc, char** argv)
         testSheen(tf, report);
         testSheenFrame(tf, report);
         testAnisoFrame(tf, report);
+        testFilmFrame(tf, report);
         testAreaQuadrature(tf, report);
         testAreaLobesFrame(tf, report);
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);

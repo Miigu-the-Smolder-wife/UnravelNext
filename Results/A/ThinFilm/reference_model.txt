@@ -1,0 +1,4 @@
+[model]
+  model: max relative difference to scene::model::evaluate 1.30e-06 (roughness >= 0.2); mirror direction, roughness 0: 8.24e+06 (float form: 8.24e+06)
+  model: thin film, max relative difference to scene::model::evaluateFilm 6.27e-07
+reference tests passed

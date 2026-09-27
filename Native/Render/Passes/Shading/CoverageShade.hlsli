@@ -356,7 +356,11 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     const float3 v = sf.view;
     const float NoV = dot(n, v);
     const float3 diffuse = s.baseColor * ((1 - s.metallic) / SH_PI);
+#if COV_COAT
+    const float3 f0 = modelFilmBegin(m, modelF0(s));  // A9 thin film (as ShadeOpaque LAYERED == 1)
+#else
     const float3 f0 = modelF0(s);
+#endif
     const float alpha = modelAlpha(s.roughness);
     const bool foliage = s.cls == MATERIAL_FOLIAGE;
     const float3 front = foliage ? diffuse * (1 - s.transmission) : diffuse;

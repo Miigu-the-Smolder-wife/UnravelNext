@@ -474,13 +474,15 @@ void GpuScene::upload(const scene::Scene& s)
 }
 
 // The coat tables, then the sheen table at 2 x kCoatTableStride (MaterialModel.hlsli MODEL_SHEEN_TABLE), then - only
-// when a material is anisotropic - the anisotropy (A, B) table (Passes/Material/Aniso.hlsli ANISO_TABLE, 832 KB).
+// when a material is anisotropic - the anisotropy (A, B) table (Passes/Material/Aniso.hlsli ANISO_TABLE, 832 KB), then
+// the thin film materials' tables (3 KB each).
 void GpuScene::buildLayerTables(bool anisotropic)
 {
     release(m_coatTable);
     std::vector<float> coat = scene::model::coatTable();
     coat.insert(coat.end(), scene::model::sheenTable().begin(), scene::model::sheenTable().end());
     if (anisotropic) coat.insert(coat.end(), scene::model::anisoAlbedoTable().begin(), scene::model::anisoAlbedoTable().end());
+    coat.insert(coat.end(), m_filmTables.begin(), m_filmTables.end());  // packMaterialLayers' offsets assume this position
     m_coatTable = createStructured(coat.data(), sizeof(float), coat.size(), L"clearcoat, sheen and anisotropy tables");
     m_anisotropic = anisotropic;
 }
@@ -513,13 +515,19 @@ void GpuScene::packMaterialLayers(std::vector<gpu::Material>& materials)
 {
     const scene::Scene& s = *m_source;
     std::vector<gpu::MaterialLayers> layers;
+    // The film tables follow the coat, sheen and (when present, and it only grows) anisotropy tables in coatTable.
+    bool anisotropic = m_anisotropic;
+    for (const scene::Material& m : s.materials) anisotropic |= m.anisotropy > 0;
+    const size_t filmBase = scene::model::coatTable().size() + scene::model::sheenTable().size() + (anisotropic ? scene::model::anisoAlbedoTable().size() : 0);
+    std::vector<float> films;
     for (size_t i = 0; i < materials.size() && i < s.materials.size(); ++i)
     {
         const scene::Material& m = s.materials[i];
-        materials[i].classFlags &= 0xFFFFu & ~((gpu::MaterialLayered | gpu::MaterialSheen | gpu::MaterialAnisotropic) << 8);
+        materials[i].classFlags &= 0xFFFFu & ~((gpu::MaterialLayered | gpu::MaterialSheen | gpu::MaterialAnisotropic | gpu::MaterialThinFilm) << 8);
         const bool sheen = m.sheenColor.x > 0 || m.sheenColor.y > 0 || m.sheenColor.z > 0;
         const bool aniso = m.anisotropy > 0;
-        if (!(m.clearcoat > 0) && !sheen && !aniso) continue;
+        const bool film = m.thinFilmThickness > 0;
+        if (!(m.clearcoat > 0) && !sheen && !aniso && !film) continue;
         if (layers.size() >= 0xFFFFu) fail("GpuScene: more than 65535 layered materials");
         gpu::MaterialLayers l{};
         l.clearcoat = m.clearcoat;
@@ -531,10 +539,26 @@ void GpuScene::packMaterialLayers(std::vector<gpu::Material>& materials)
         l.anisotropy = m.anisotropy;
         l.anisotropyCos = std::cos(m.anisotropyRotation);
         l.anisotropySin = std::sin(m.anisotropyRotation);
-        materials[i].classFlags |= ((gpu::MaterialLayered | (sheen ? gpu::MaterialSheen : 0u) | (aniso ? gpu::MaterialAnisotropic : 0u)) << 8) |
+        if (film)
+        {
+            // the film sees air (validation keeps films out from under a coat)
+            const std::vector<float> t = scene::model::filmTable(scene::model::filmOf(m), 1.0f);
+            l.filmCoverage = m.thinFilmCoverage;
+            l.filmTable = (uint32_t)(filmBase + films.size());
+            films.insert(films.end(), t.begin(), t.end());
+        }
+        materials[i].classFlags |= ((gpu::MaterialLayered | (sheen ? gpu::MaterialSheen : 0u) | (aniso ? gpu::MaterialAnisotropic : 0u) |
+                                     (film ? gpu::MaterialThinFilm : 0u)) << 8) |
                                    (uint32_t)layers.size() << 16;
         layers.push_back(l);
     }
+    // a changed film set (or the anisotropy table arriving before it) moves the tables: rebuild (at load the caller builds)
+    if (m_coatTable.resource && (films != m_filmTables || anisotropic != m_anisotropic))
+    {
+        m_filmTables = std::move(films);
+        buildLayerTables(anisotropic);
+    }
+    else m_filmTables = std::move(films);
     release(m_materialLayerBuffer);
     if (!layers.empty()) m_materialLayerBuffer = createStructured(layers.data(), sizeof(gpu::MaterialLayers), layers.size(), L"material layers");
 }

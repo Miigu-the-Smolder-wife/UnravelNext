@@ -21,6 +21,7 @@
 #elif MODE == 5 || MODE == 6
 #define COV_PRESHADE_LIGHT 1
 #define COV_COAT 1
+#define MODEL_FILM 1  // A9 thin film (MaterialModel.hlsli modelFresnel)
 #define COV_PART (MODE - 4)
 #endif
 #include "Bindless.hlsli"

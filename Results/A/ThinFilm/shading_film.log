@@ -1,0 +1,5 @@
+specular albedo: A + B = model E table (rel.)                          7.999e-08 (limit 1.0e-05) ok
+film frame: ground 59206 px (worst 6.28e-07), soap 5993 px (worst 3.31e-05), oxide on copper 6334 px (worst 8.37e-06); soap chromaticity r 0.000-0.000 g 0.383-0.475 b 0.525-0.617
+film frame: soap and oxide pixels vs evaluateFilm (rel.)               3.306e-05 (limit 1.0e-02) ok
+film frame: the soap film's colour changes with angle (blue chromaticity range) 9.178e-02 (limit 5.0e-02) ok
+passed: 0 failure(s)

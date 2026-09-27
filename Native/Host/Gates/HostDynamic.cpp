@@ -339,7 +339,7 @@ int main(int argc, char** argv)
             auto material = [&](float r0, float g0, float b0, float rough, float metal) {
                 UnxMaterialDesc m{};
                 m.size = sizeof m;
-                m.version = 4;
+                m.version = 5;
                 m.clearcoatIor = 1.5f;
                 m.baseColor[0] = r0; m.baseColor[1] = g0; m.baseColor[2] = b0;
                 m.roughness = rough;

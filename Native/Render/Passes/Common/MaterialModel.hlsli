@@ -37,7 +37,50 @@ float modelV(float NoV, float NoL, float alpha)
     return 0.5 / (gv + gl);
 }
 
-float3 modelFresnel(float3 f0, float VoH) { return f0 + (1 - f0) * pow(1 - saturate(VoH), 5.0); }
+// ---- A9 thin film (MATERIAL_LAYERS 1.2; scene::model::filmFresnel): F' = w F_film(v.h) + (1 - w) F_schlick(f0, v.h),
+// F_film from the material's table (scene::model::filmTable: MODEL_FILM_MU RGB points at mu_i = i / (MODEL_FILM_MU - 1),
+// linear; interpolation error <= 0.30 dE76 [measured, unx_test_scene_film]) in g_coatTable. The film is per-thread state:
+// modelFilmBegin sets it for the pixel being shaded, and every modelFresnel of the base lobe - point lights, the sun's
+// rules, area lights - then evaluates F'. Only kernels compiled with MODEL_FILM carry it (ShadeOpaque LAYERED == 1,
+// CoverageSpecial's layered modes); elsewhere modelFresnel is Schlick alone and modelFilmBegin returns f0.
+#define MODEL_FILM_MU 256u
+static uint g_modelFilmTable = 0;  // offset in g_coatTable (0: no film)
+static float g_modelFilmCover = 0;
+static float3 g_modelFilmF0 = 0;   // the base's own f0 (the Schlick share)
+
+float3 modelFilmTable(float mu)
+{
+    StructuredBuffer<float> t = ResourceDescriptorHeap[g_coatTable];
+    const float x = saturate(mu) * (MODEL_FILM_MU - 1);
+    const uint i = min(uint(x), MODEL_FILM_MU - 2), o = g_modelFilmTable + 3 * i;
+    const float a = x - i;
+    return lerp(float3(t[o], t[o + 1], t[o + 2]), float3(t[o + 3], t[o + 4], t[o + 5]), a);
+}
+
+float3 modelFresnel(float3 f0, float VoH)
+{
+#if MODEL_FILM
+    if (g_modelFilmTable != 0)
+        return lerp(g_modelFilmF0 + (1 - g_modelFilmF0) * pow(1 - saturate(VoH), 5.0), modelFilmTable(VoH), g_modelFilmCover);
+#endif
+    return f0 + (1 - f0) * pow(1 - saturate(VoH), 5.0);
+}
+
+// Starts the film of material m (MATERIAL_THIN_FILM) for this thread; returns F'(1), the f0 of the multiple-scattering
+// compensation and of the split albedo tables (design 1.2), or f0 unchanged without a film.
+float3 modelFilmBegin(GpuMaterial m, float3 f0)
+{
+#if MODEL_FILM
+    if ((m.classFlags & MATERIAL_THIN_FILM) == 0) return f0;
+    const GpuMaterialLayers layers = loadMaterialLayers(m.classFlags >> 16);
+    g_modelFilmTable = layers.filmTable;
+    g_modelFilmCover = layers.filmCoverage;
+    g_modelFilmF0 = f0;
+    return modelFresnel(f0, 1);
+#else
+    return f0;
+#endif
+}
 
 // Bilinear on the end-point-inclusive grid: identical addressing to directionalAlbedo() in C++.
 float modelDirectionalAlbedo(float NoV, float roughness)

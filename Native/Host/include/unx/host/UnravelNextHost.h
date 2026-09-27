@@ -158,8 +158,8 @@ enum UnxMaterialClass  // scene::MaterialClass
 // INTERFACES_KO.md 8.1 material v1.
 typedef struct UnxMaterialDesc
 {
-    uint32_t size, version;     // sizeof, 4 (3 and 2: up to attenuationDistance, 2 without its sheen and attenuation fields;
-                                // 1: up to name)
+    uint32_t size, version;     // sizeof, 5 (4: up to anisotropyRotation; 3 and 2: up to attenuationDistance, 2 without
+                                // its sheen and attenuation fields; 1: up to name)
     uint32_t materialClass;     // UnxMaterialClass
     uint32_t twoSided;
     float baseColor[3];         // linear albedo (dielectric) or f0 (metal)
@@ -184,6 +184,12 @@ typedef struct UnxMaterialDesc
     // (0 = isotropic; alpha_t = alpha + (1 - alpha) s^2, alpha_b = alpha) and the direction's rotation from the tangent
     // towards the bitangent (radians).
     float anisotropy, anisotropyRotation;
+    // version 5 (A9 thin film, MATERIAL_LAYERS 1.2; Standard class, not with a clearcoat, sheen or anisotropy): thickness in
+    // nm (0 = none, up to 5000), film index [1, 3], cover [0, 1], substrate (0: n + ik = substrateIor + i substrateExtinction;
+    // 1..5 the spectral metals gold, copper, silver, aluminium, iron).
+    float thinFilmThickness, thinFilmIor, thinFilmCoverage;
+    uint32_t thinFilmSubstrate;
+    float substrateIor, substrateExtinction;
 } UnxMaterialDesc;
 
 typedef struct UnxSubmesh
@@ -760,7 +766,7 @@ UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming*
 // The managed bridge (Assets/UnravelNextBridge/Runtime/Native/UnravelNextNative.cs) checks the same sizes at start.
 static_assert(sizeof(UnxRendererDesc) == 1040);
 static_assert(sizeof(UnxTextureDesc) == 104);
-static_assert(sizeof(UnxMaterialDesc) == 192);  // version 4 (A9 anisotropy); versions 3 and 2 = 184 (A9 layers); version 1 = 152
+static_assert(sizeof(UnxMaterialDesc) == 216);  // version 5 (A9 thin film); version 4 = 192 (A9 anisotropy); versions 3 and 2 = 184 (A9 layers); version 1 = 152
 static_assert(sizeof(UnxSubmesh) == 16);
 static_assert(sizeof(UnxMeshDesc) == 160);
 static_assert(sizeof(UnxInstanceDesc) == 96);

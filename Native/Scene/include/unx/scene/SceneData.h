@@ -108,6 +108,16 @@ struct Material
     // anisotropy^2, alpha_b = alpha (KHR_materials_anisotropy). 0 = isotropic. Meshes using it need tangents.
     float anisotropy = 0.0f;                 // [0, 1]
     float anisotropyRotation = 0.0f;         // radians
+    // Thin film (A9, MATERIAL_LAYERS 1.2; MaterialModel.h Film; Standard class, not with a clearcoat, sheen or anisotropy):
+    // a film of index thinFilmIor and thinFilmThickness nm over a substrate - thinFilmSubstrate 0: n + ik = substrateIor +
+    // i substrateExtinction (1.0 + 0i: a free film such as a soap bubble's), 1..5 the spectral metals gold, copper,
+    // silver, aluminium, iron - over the fraction thinFilmCoverage of the base's specular Fresnel.
+    float thinFilmThickness = 0.0f;          // nm, [0, 5000]; 0 = no film
+    float thinFilmIor = 1.33f;               // [1, 3]
+    float thinFilmCoverage = 1.0f;           // [0, 1]
+    uint32_t thinFilmSubstrate = 0;          // model::FilmSubstrate
+    float substrateIor = 1.5f;               // [1, 5] (Constant substrate)
+    float substrateExtinction = 0.0f;        // [0, 20]
     // Glass solid bodies (one-sided; A10 R-2): baseColor is the body's transmittance over attenuationDistance metres, so
     // sigma_a = -ln(baseColor) / attenuationDistance (1/m). A pane (two-sided) takes baseColor per pass as before.
     float attenuationDistance = 0.01f;
