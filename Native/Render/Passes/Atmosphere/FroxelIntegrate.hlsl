@@ -78,6 +78,8 @@ groupshared float3 gs_sky[64];  // slice s's sky correction attenuated to the ca
 groupshared uint gs_lastSky;    // 1 + the last slice the sky correction needs
 groupshared uint gs_scan[64];   // shadowed local-light items of the slices (inclusive scan)
 groupshared uint gs_item[64];   // a batch's items: slice | list position << 6
+groupshared float gs_moments[64][8];  // each lane's piece of a shadowed item: its lit set's Legendre moments
+groupshared uint gs_runs[64];         // and its lit runs | 0x80000000 unless fully lit
 
 float3 froxelSelfAttenuation(float3 x) { return select(x > 1e-4, (1 - exp(-x)) / max(x, 1e-4), 1 - 0.5 * x); }
 
@@ -92,50 +94,68 @@ struct AirLocalCount
     uint entries, cells, maxCells, runs, capped;
 };
 
-// Air in-scattering of light l along o + dir t, t in [0, len] (nits), relative to the segment's start; shadowed by its
-// VSM when slot != VSM_LOCAL_NONE (the lit set's node weights, VsmLocalAirWalk.hlsli).
-float3 airLocalLight(GpuLight l, float3 o, float3 dir, float len, AirCoefficients c, float mieG, VsmLocalResources r, VsmLocalLight sl, uint slot,
-                     float width, float biasTexels, uint functions, uint lightIndex, float lateral, inout AirLocalCount count)
+// Angle map of light l over the segment o + dir t, t in [0, len]: t = tc + h tan theta, theta in [th0, th1] = mid +- half.
+struct AirLocalMap
 {
-    const bool withFunction = functions != LIGHT_FUNCTION_NONE && (lightType(l) == LIGHT_POINT || lightType(l) == LIGHT_SPOT);
-    const float tc = dot(l.position - o, dir);
+    float tc, h, th0, th1, mid, half;
+};
+AirLocalMap airLocalMap(GpuLight l, float3 o, float3 dir, float len)
+{
+    AirLocalMap mp;
+    mp.tc = dot(l.position - o, dir);
     // Distance of the line from the light, not below the emitter's size (1 cm for points): the point-source integrand
     // is singular on the line.
-    const float h = max(length(l.position - (o + dir * tc)), max(max(l.size.x, l.size.y), 0.01));
-    const float th0 = atan(-tc / h), th1 = atan((len - tc) / h);
-    const float mid = 0.5 * (th0 + th1), half = 0.5 * (th1 - th0);
-    bool partial = false;
-    VsmLocalAirResult lit = (VsmLocalAirResult)0;
-    if (slot != VSM_LOCAL_NONE)
-    {
-        lit = vsmLocalAirLit(r, sl, slot, o - sl.position, dir, len, width, biasTexels, tc, h, mid, half);
-        ++count.entries;
-        count.cells += lit.steps;
-        count.maxCells = max(count.maxCells, lit.steps);
-        count.runs += lit.litRuns;
-        count.capped |= lit.capped ? 1u : 0u;
-        if (lit.litRuns == 0) return 0;
-        partial = !lit.fullyLit;
-    }
+    mp.h = max(length(l.position - (o + dir * mp.tc)), max(max(l.size.x, l.size.y), 0.01));
+    mp.th0 = atan(-mp.tc / mp.h);
+    mp.th1 = atan((len - mp.tc) / mp.h);
+    mp.mid = 0.5 * (mp.th0 + mp.th1);
+    mp.half = 0.5 * (mp.th1 - mp.th0);
+    return mp;
+}
+
+// The 8-node Gauss-Legendre rule of light l's air in-scattering over the segment (nits); partial: over the lit set of
+// Legendre moments m (VsmLocalAirWalk.hlsli), else over the whole segment.
+float3 airLocalEval(GpuLight l, float3 o, float3 dir, AirLocalMap mp, AirCoefficients c, float mieG, uint functions, uint lightIndex, float lateral,
+                    bool partial, float m[8])
+{
+    const bool withFunction = functions != LIGHT_FUNCTION_NONE && (lightType(l) == LIGHT_POINT || lightType(l) == LIGHT_SPOT);
     float3 sum = 0, full = 0;
     [loop] for (uint i = 0; i < 8; ++i)
     {
-        const float th = mid + half * kGaussX[i];
-        const float t = tc + h * tan(th);
+        const float th = mp.mid + mp.half * kGaussX[i];
+        const float t = mp.tc + mp.h * tan(th);
         const float3 v = o + dir * t - l.position;
-        const float d = h / cos(th);
+        const float d = mp.h / cos(th);
         const float3 w = v / max(length(v), 1e-6);
         const float nu = -sin(th);  // cosine between the light's propagation (w) and the path to the camera (-dir)
         const float3 phase = c.rayleigh * airRayleighPhase(nu) + c.mie * airMiePhase(nu, mieG);
         const float3 f = withFunction ? lightFunction(functions, lightIndex, l.forward, l.right, w, lateral / max(d, 1e-4), g_time) : 1.0;
         const float3 value = froxelIntensity(l, w) * froxelWindow(l, d) * f * phase * exp(-c.extinction * max(t, 0.0));
-        sum += (partial ? vsmLocalAirWeight(kGaussX[i], kGaussW[i], lit.m) : kGaussW[i]) * value;
+        sum += (partial ? vsmLocalAirWeight(kGaussX[i], kGaussW[i], m) : kGaussW[i]) * value;
         full += kGaussW[i] * value;
     }
     // Partly lit: the interpolant over the lit set, within [0, the whole segment's] (the integrand is not negative).
     if (partial) sum = clamp(sum, 0.0, full);
-    return sum * (half / h) * l.color;
+    return sum * (mp.half / mp.h) * l.color;
 }
+
+// Air in-scattering of an unshadowed light along o + dir t, t in [0, len] (nits), relative to the segment's start.
+// Shadowed lights are walked in pieces by the group (main).
+float3 airLocalLight(GpuLight l, float3 o, float3 dir, float len, AirCoefficients c, float mieG, uint functions, uint lightIndex, float lateral)
+{
+    float m[8] = (float[8])0;
+    return airLocalEval(l, o, dir, airLocalMap(l, o, dir, len), c, mieG, functions, lightIndex, lateral, false, m);
+}
+
+// Parameter of piece boundary q of K pieces uniform in theta (q = 0: 0, q = K: len). Both pieces at a boundary evaluate
+// this same expression, so the pieces tile [0, len] with no gap or overlap.
+float airLocalPieceT(AirLocalMap mp, float len, uint q, uint K)
+{
+    if (q == 0) return 0;
+    if (q >= K) return len;
+    return clamp(mp.tc + mp.h * tan(mp.th0 + (mp.th1 - mp.th0) * ((float)q / (float)K)), 0.0, len);
+}
+
 
 // Shadow slot of list position pos's light (VSM_LOCAL_NONE: unshadowed, or no slot this frame).
 uint airLocalSlot(ByteAddressBuffer lists, FroxelGrid g, uint pos, bool localShadows, out uint li)
@@ -297,15 +317,17 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
                 ++myShadowed;
                 continue;
             }
-            const float3 local = airLocalLight(loadLight(li), o, dir, len, cm, a.mieG, lr, (VsmLocalLight)0, VSM_LOCAL_NONE, width, biasTexels, P[4].y, li,
-                                               froxelTileWidth(g, 0.5 * (z0 + z1)), localWalk);
+            const float3 local = airLocalLight(loadLight(li), o, dir, len, cm, a.mieG, P[4].y, li, froxelTileWidth(g, 0.5 * (z0 + z1)));
             source += local;
             skyTerm += local;
         }
     }
-    // Shadowed local lights: the group's (slice, light) items one per lane, in batches of 64 (the walks' lengths vary with
-    // the light and the slice, so a slice walking its own lights one after another held its wave for all of them). Each
-    // slice then adds its items' results in list order (deterministic).
+    // Shadowed local lights: the group's (slice, light) items, each walked by K lanes in K pieces uniform in the light's
+    // angle (K = 64 / items when there are fewer than 64 items, else 1: one walk per lane left most lanes waiting for the
+    // longest walk - 9 % lane use at fp_1000 [measured]). The pieces tile the segment exactly and the lit set's moments
+    // add, so each item's first lane sums its pieces in order and evaluates the rule once. Each slice then adds its
+    // items' results in list order (deterministic). Experiment bit 128: one lane per item (the pieces' reference in
+    // FroxelTests).
     gs_scan[s] = myShadowed;
     GroupMemoryBarrierWithGroupSync();
     [unroll] for (uint ds = 1; ds < 64; ds <<= 1)
@@ -316,14 +338,16 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         GroupMemoryBarrierWithGroupSync();
     }
     const uint itemBase = gs_scan[s] - myShadowed, items = gs_scan[63];
-    [loop] for (uint b = 0; b < items; b += 64)
+    const uint K = (items >= 64 || (experiment & 128) != 0) ? 1u : 64u / max(items, 1u), B = 64u / K;  // lanes per item, items per batch
+    const uint item = s / K, piece = s - item * K;  // item of the batch, piece
+    [loop] for (uint b = 0; b < items; b += B)
     {
         ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].x];
-        const bool mine = myShadowed > 0 && itemBase < b + 64 && itemBase + myShadowed > b;
+        const bool mine = myShadowed > 0 && itemBase < b + B && itemBase + myShadowed > b;
         if (mine)
         {
             uint k = itemBase;
-            for (uint i = 0; i < myCount && k < b + 64; ++i)
+            for (uint i = 0; i < myCount && k < b + B; ++i)
             {
                 uint li;
                 if (airLocalSlot(lists, g, myFirst + i, localShadows, li) == VSM_LOCAL_NONE) continue;
@@ -332,24 +356,59 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             }
         }
         GroupMemoryBarrierWithGroupSync();
-        if (b + s < items)
+        const bool valid = item < B && b + item < items;
+        float z0 = 0, z1 = 0, len = 0;
+        float3 o = 0;
+        uint li = 0;
+        GpuLight l = (GpuLight)0;
+        AirLocalMap mp = (AirLocalMap)0;
+        if (valid)
         {
-            const uint it = gs_item[s], is = it & 63u;
-            const float z0 = froxelNodeDepth(g, is), z1 = froxelNodeDepth(g, is + 1);
-            const float t0 = max(z0 * toRay, tStart), len = z1 * toRay - t0;
-            const float3 o = g_cameraPosition + dir * t0;
+            const uint it = gs_item[item], is = it & 63u;
+            z0 = froxelNodeDepth(g, is);
+            z1 = froxelNodeDepth(g, is + 1);
+            const float t0 = max(z0 * toRay, tStart);
+            len = z1 * toRay - t0;
+            o = g_cameraPosition + dir * t0;
+            const uint h = lists.Load(g.headerBase + froxelIndex(g, tile, is) * 4);
+            const uint slot = airLocalSlot(lists, g, (h >> 6) + (it >> 6), localShadows, li);
+            l = loadLight(li);
+            mp = airLocalMap(l, o, dir, len);
+            StructuredBuffer<VsmLocalLight> locals = ResourceDescriptorHeap[P[3].x];
+            const VsmLocalLight sl = locals[slot];
+            const float ta = airLocalPieceT(mp, len, piece, K), tb = airLocalPieceT(mp, len, piece + 1, K);
+            VsmLocalAirResult lit = (VsmLocalAirResult)0;
+            lit.fullyLit = true;  // an empty piece (tb <= ta) leaves the item's lit set as the other pieces make it
+            if (tb > ta)
+                lit = vsmLocalAirLit(lr, sl, slot, o + dir * ta - sl.position, dir, tb - ta, froxelTileWidth(g, 0.5 * (z0 + z1)) / asfloat(P[2].y),
+                                     biasTexels, mp.tc - ta, mp.h, mp.mid, mp.half);
+            [unroll] for (uint q = 0; q < 8; ++q) gs_moments[s][q] = lit.m[q];
+            gs_runs[s] = lit.litRuns | (lit.fullyLit ? 0u : 0x80000000u);
+            localWalk.cells += lit.steps;
+            localWalk.maxCells = max(localWalk.maxCells, lit.steps);
+            localWalk.capped |= lit.capped ? 1u : 0u;
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (valid && piece == 0)
+        {
+            float m[8] = (float[8])0;
+            uint runs = 0;
+            bool partial = false;
+            for (uint p2 = 0; p2 < K; ++p2)
+            {
+                [unroll] for (uint q = 0; q < 8; ++q) m[q] += gs_moments[s + p2][q];
+                runs += gs_runs[s + p2] & 0x7FFFFFFFu;
+                partial = partial || (gs_runs[s + p2] >> 31) != 0;
+            }
+            ++localWalk.entries;
+            localWalk.runs += runs;
             const float3 pm = airLiftToSurface(a, o + dir * (0.5 * len));
             const AirCoefficients cm = airCoefficients(a, max(0.0, airAltitude(a, pm)));
-            const uint h = lists.Load(g.headerBase + froxelIndex(g, tile, is) * 4);
-            uint li;
-            const uint slot = airLocalSlot(lists, g, (h >> 6) + (it >> 6), localShadows, li);
-            StructuredBuffer<VsmLocalLight> locals = ResourceDescriptorHeap[P[3].x];
-            gs_source[s] = airLocalLight(loadLight(li), o, dir, len, cm, a.mieG, lr, locals[slot], slot, froxelTileWidth(g, 0.5 * (z0 + z1)) / asfloat(P[2].y),
-                                         biasTexels, P[4].y, li, froxelTileWidth(g, 0.5 * (z0 + z1)), localWalk);
+            gs_source[item] = runs == 0 ? 0.0 : airLocalEval(l, o, dir, mp, cm, a.mieG, P[4].y, li, froxelTileWidth(g, 0.5 * (z0 + z1)), partial, m);
         }
         GroupMemoryBarrierWithGroupSync();
         if (mine)
-            for (uint k2 = max(itemBase, b); k2 < min(itemBase + myShadowed, b + 64); ++k2)
+            for (uint k2 = max(itemBase, b); k2 < min(itemBase + myShadowed, b + B); ++k2)
             {
                 source += gs_source[k2 - b];
                 skyTerm += gs_source[k2 - b];

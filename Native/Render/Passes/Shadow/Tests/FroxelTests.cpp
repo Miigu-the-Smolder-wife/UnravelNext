@@ -274,8 +274,8 @@ int main(int argc, char** argv)
         // Node-by-node comparisons need every slice integrated (production integrates only the slices a reader reaches;
         // section 6 checks that those are the same numbers).
         shadow::setFroxelFullDepth(tf.trackState, true);
-        auto run = [&](const scene::Scene& sc, int frames, float ev100 = 14.0f) {
-            tf.setScene(sc);
+        auto run = [&](const scene::Scene& sc, int frames, float ev100 = 14.0f, bool setScene = true) {
+            if (setScene) tf.setScene(sc);
             tf.frame.mainView = ViewDesc::fromCamera(sc.cameras[0], W, H, float4x4{});
             tf.frame.mainView.prevViewProj = tf.frame.mainView.viewProj;
             tf.frame.mainView.ev100 = ev100;
@@ -585,6 +585,53 @@ int main(int argc, char** argv)
             const double meanLimit = shadowed ? 0.03 : 0.01, worstLimit = shadowed ? 0.25 : 0.03;
             report(compared > 100 && sumErr / sumRef < meanLimit, (what + " vs reference (mean relative)").c_str(), sumErr / std::max(sumRef, 1e-30), meanLimit);
             report(worst < worstLimit, (what + " vs reference (largest node)").c_str(), worst, worstLimit);
+            if (shadowed)
+            {
+                // The walk in K pieces per shadowed item (K lanes, FroxelIntegrate.hlsl) against one walk per item (experiment
+                // bit 128): the pieces tile each segment and their lit sets' moments add, so the nodes agree to rounding. Two of
+                // the lights: fewer items per tile, so items get K >= 2 lanes.
+                scene::Scene few = sc;
+                few.lights.resize(2);
+                auto volumeWith = [&](int bits) {
+                    tf.quality.applyOverride("atmosphere.froxels.experiment_disable=" + std::to_string(bits));
+                    // The same scene (no new revision: repeated scene sets change the local shadows after a few, S_STATUS 9d),
+                    // six frames after the quality change.
+                    run(few, 6, -2.0f, false);
+                    return lastVolume;
+                };
+                run(few, 6, -2.0f);
+                const std::vector<uint8_t> whole = volumeWith(128), pieces = volumeWith(0), whole2 = volumeWith(128);
+                tf.quality.applyOverride("atmosphere.froxels.experiment_disable=0");
+                // The shadowed air of this scene changes once after some scene sets and frames (S_STATUS 9d, open): the
+                // pieces are compared with the one-walk runs before and after them, and must equal one of the two.
+                const double exposure = 1.0 / (1.2 * std::exp2(grid.view.ev100));
+                auto compare = [&](const std::vector<uint8_t>& ref, double& mean, double& worstP) {
+                    double sumD = 0, sumW = 0;
+                    uint32_t nodes = 0;
+                    worstP = 0;
+                    for (uint32_t ty = 0; ty < fg.gridY; ++ty)
+                        for (uint32_t tx = 0; tx < fg.gridX; ++tx)
+                            for (uint32_t n = 1; n <= fg.slices; ++n)
+                            {
+                                const ref::D3 p = nodeOf(pieces, tx, ty, n) - nodeOf(without, tx, ty, n);
+                                const ref::D3 w = nodeOf(ref, tx, ty, n) - nodeOf(without, tx, ty, n);
+                                const double r = w.x + w.y + w.z, e = std::abs(p.x - w.x) + std::abs(p.y - w.y) + std::abs(p.z - w.z);
+                                if (r * exposure <= 1e-3) continue;
+                                worstP = std::max(worstP, e / r);
+                                sumD += e;
+                                sumW += r;
+                                ++nodes;
+                            }
+                    mean = sumD / std::max(sumW, 1e-30);
+                    return nodes;
+                };
+                double m1, w1, m2, w2;
+                const uint32_t n1 = compare(whole, m1, w1), n2 = compare(whole2, m2, w2);
+                logf("shadowed air, K pieces vs one walk per item: before %u nodes mean %.3g largest %.3g, after %u nodes mean %.3g largest %.3g\n", n1, m1, w1, n2, m2, w2);
+                const bool first = m1 + w1 <= m2 + w2;
+                report((first ? n1 : n2) > 1000 && (first ? m1 : m2) < 1e-3, "shadowed air: walk in K pieces = one walk (mean relative)", first ? m1 : m2, 1e-3);
+                report((first ? w1 : w2) < 1e-2, "shadowed air: walk in K pieces = one walk (largest node)", first ? w1 : w2, 1e-2);
+            }
 #if defined(FROXEL_TEST_LIGHT_FUNCTIONS)
             for (uint32_t i = 0; i < sc.lights.size(); ++i) lfSet.clear(i);
 #endif

@@ -26,7 +26,8 @@ lights_max = 32                      # per froxel list (<= 32, FROXEL_LIST_MAX);
 near_m = 0.5                         # slice 0 spans the camera .. near_m (far / near)^(1/64)
 far_m = 65536                        # last node of the air volume (air perspective to 64 km; depths beyond clamp)
 experiment_disable = 0               # cost attribution only (never in a verdict): 1 air shadows, 2 local lights, 4 air integration,
-                                     # 8 sun transmittance per substep, 16 multiple scattering per substep, 32 walk stops at pages
+                                     # 8 sun transmittance per substep, 16 multiple scattering per substep, 32 walk stops at pages,
+                                     # 64 local lights' air shadows, 128 one lane per shadowed local-light item (test reference)
 walk_stats = 0                       # 1: count the air shadow walk (slices, mixed, block and texel loads) into the VSM
                                      # stats (RendererGate); measurement only
 air_step_altitude_m = 100            # air integration substeps: at most this altitude change per step and at most min(H_R, H_M) / 12
