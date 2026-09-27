@@ -1,3 +1,8 @@
+## 재개 지점 (렌더 A, 2026-09-27 박막)
+- 박막 구현·커밋 완료(3254655, 3eaa208). CPU·기준 추적기·GPU(--film) 통과. 전체 ShadingTests는 3254655 게이트에서 박막 프레임만 실패했다(이전 장면의 비등방성 플래그로 표 위치가 어긋남). 3eaa208로 고쳤고 **하드웨어 재확인 대기**(사용자 게임 중, HOLD).
+- 게임 뒤 순서: `Tools/CI/Build.ps1 -Track all -Committed` → 게이트 `unx_test_shading_shadingtests.exe`(전체, --film 포함) → `Tools/UnitySlots/UnityLock.ps1 -Slot A ... -- Native/Host/Deploy.ps1 -Build ..\UnravelNext-gate\build\all` → Unravel에 Plugins·Native~와 C# 변경(UnravelNextRendererNative.cs v5, UnravelNextRenderer.cs, UnravelNextUnityContent.cs `_UnravelThinFilm*`)을 함께 커밋. C#은 v5를 보내므로 반드시 새 DLL과 같이 나가야 한다.
+- 남음: 코트 아래 막, sheen·비등방성과 결합, 두께 텍스처(비눗방울 소용돌이), 투명 얇은 막(유리 등급의 비눗방울 투과).
+
 ## 재개 지점 (렌더 A, 2026-09-27 오전 후반)
 - 면광원 커널 분리 완료(9a5d766): AreaLobes.hlsl(ShadeOpaque AREA_LOBES=1), 늘임 LTC 삭제. 전체 ShadingTests 통과. **배포는 아직**(디스크 대기) — 배포본(Unravel 72444ea1)에는 늘임 LTC 결함이 남아 있다. 다음 배포 때 같이 나간다.
 - 남음: coverage 조각의 sheen·비등방 면광원(CoverageComposite DXIL 0.8 KB, 분리 필요), 좁은 로브 셀 무게, 박막, 최적화.
