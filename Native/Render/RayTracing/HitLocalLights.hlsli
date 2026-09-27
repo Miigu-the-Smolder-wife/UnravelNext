@@ -180,7 +180,7 @@ RtLocalSample rtLocalLightSample(RtSceneSrvs scene, float3 x, float u0, float u1
 }
 
 // The model's BRDF x cosine toward wi for the hit (INTERFACES 8.1: diffuse albedo / pi, the GGX lobe with compensation,
-// foliage transmission from behind). diffuseOnly: the GI cache's hit shading (its outgoing radiance is diffuse).
+// foliage transmission from behind). diffuseOnly: Lambert hits (GiAnalytic's closed forms, gi.experiment_disable 1024).
 float3 rtLocalLightBrdfCos(GpuMaterial m, float3 n, float3 v, float3 wi, bool diffuseOnly)
 {
     ModelSurface s;

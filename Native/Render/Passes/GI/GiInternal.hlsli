@@ -114,11 +114,26 @@ static bool g_giKeepReads = true;  // per thread; false: lookups read only (attr
 // Per thread: the trilinear weight of young entries (GiInternal giYoung: still in their Jacobi phase) among the RW lookups'
 // reads since the caller zeroed it (GiTrace's bounce fallback: whether the irradiance it read is a converged estimate).
 static float g_giReadYoung = 0;
+// The entry's Jacobi length (GiIntegrate): updates until the multi-bounce iteration's residual s^J is below
+// GI_JACOBI_RESIDUAL, s = the share of the entry's irradiance its rays read from other cells (bounce light). The fixed
+// gi.jacobi_updates (8, rho^8 < 0.4 % at albedo 0.5) is the minimum: a white-tiled room (s ~ 0.9) needs 53. After the
+// Jacobi phase the running mean mixes old iterates in, which converges at 1 - alpha (1 - s) per update (0.997 at s 0.9,
+// alpha 1/32): the rho = 0.9 furnace was still -16 % after 600 frames, the bathhouse's indirect light -36 % [measured,
+// 2026-09-27].
+#define GI_JACOBI_RESIDUAL 0.004
+// Stored in the history word's top byte in units of 16 updates (0 after a reset or an epoch change: gi.jacobi_updates).
+template <typename B>
+uint giJacobiLength(B b, GiHeader h, uint entry)
+{
+    const uint a = h.offSh + entry * GI_SH_STRIDE;
+    const uint history = b.Load(a + GI_SH_EPOCH) == h.epoch ? b.Load(a + GI_SH_HISTORY) : 0u;
+    return max((history >> 24) * 16u, h.jacobiUpdates);
+}
 void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w)
 {
     const uint a = h.offSh + entry * GI_SH_STRIDE;
     const uint history = b.Load(a + GI_SH_EPOCH) == h.epoch ? b.Load(a + GI_SH_HISTORY) : 0u;
-    if ((history & 0xFFFFu) < h.jacobiUpdates) g_giReadYoung += w;
+    if ((history & 0xFFFu) < max((history >> 24) * 16u, h.jacobiUpdates)) g_giReadYoung += w;  // giYoung
     if (!g_giKeepReads) return;
     if (b.Load(h.offHitStamp + entry * 4) == h.frame) return;
     giTouch(b, h, entry);
@@ -239,9 +254,10 @@ uint64_t giSurfaceKey(GiHeader h, float3 p, float3 n, uint minLevel)
     return giKey(level, giNormalClass(n), int3(floor(p / giCellSize(h, level))));
 }
 
-// History word (GI_SH_HISTORY, 0 after a reset): bits 0-15 = convergence phase, bits 16-31 = updates in the running mean.
+// History word (GI_SH_HISTORY, 0 after a reset): bits 0-11 = convergence phase (saturating), bits 12-23 = updates in the
+// running mean, bits 24-31 = the Jacobi length / 16 (rounded up; giJacobiLength).
 //   An update's only biased input is the bounce light it reads from other cells (sky, sun shadow rays, local and emissive
-//   samples are unbiased from the first update). A cell is young while its phase is < jacobiUpdates: its value still
+//   samples are unbiased from the first update). A cell is young while its phase is < its Jacobi length (giJacobiLength): its value still
 //   carries the Jacobi iteration's error (multi-bounce converges geometrically from the reset). The weight of an update
 //   is Jacobi (alpha 1: replace) by the share y of its bounce reads (texel rays whose hit has a bounce term) that came from
 //   young cells or found no data, and the running mean over at most historyMax updates for the rest (counted, not
@@ -254,20 +270,22 @@ uint64_t giSurfaceKey(GiHeader h, float3 p, float3 n, uint minLevel)
 //   jacobiUpdates), so it shows no single-update noise (the 8 replaced updates showed each cell's 64-ray estimate
 //   alone: cell-sized blotches, D0 play capture 2026-09-26). Past its own young phase a cell averages whatever it reads
 //   (as before): bounce cells are updated less often than screen cells, and waiting for them kept readers replacing.
-uint giHistoryPhase(uint history) { return history & 0xFFFFu; }
-uint giHistorySamples(uint history) { return history >> 16; }
-float giHistoryAlpha(GiHeader h, uint history, float young)
+uint giHistoryPhase(uint history) { return history & 0xFFFu; }
+uint giHistorySamples(uint history) { return (history >> 12) & 0xFFFu; }
+uint giHistoryJacobi(uint history) { return (history >> 24) * 16u; }
+// cap: the running mean's window for this update (GiIntegrate: historyMax after a change, historyStatic while steady).
+float giHistoryAlpha(GiHeader h, uint history, float young, uint jacobi, uint cap)
 {
-    const float mean = max(1.0 / (float)(giHistorySamples(history) + 1), 1.0 / (float)h.historyMax);
-    return giHistoryPhase(history) < h.jacobiUpdates ? lerp(mean, 1.0, saturate(young)) : mean;
+    const float mean = max(1.0 / (float)(giHistorySamples(history) + 1), 1.0 / (float)cap);
+    return giHistoryPhase(history) < jacobi ? lerp(mean, 1.0, saturate(young)) : mean;
 }
-uint giHistoryNext(GiHeader h, uint history, float young)
+uint giHistoryNext(GiHeader h, uint history, float young, uint jacobi, uint cap)
 {
-    if (giHistoryPhase(history) >= h.jacobiUpdates) young = 0;
+    if (giHistoryPhase(history) >= jacobi) young = 0;
     const float n = lerp((float)(giHistorySamples(history) + 1), 1.0, saturate(young));
-    const uint samples = clamp((uint)round(n), 1u, max(h.historyMax, 2u) - 1u);
-    const uint phase = young > 0 ? giHistoryPhase(history) + 1 : max(giHistoryPhase(history) + 1, h.jacobiUpdates);
-    return min(phase, 0xFFFFu) | (samples << 16);
+    const uint samples = clamp((uint)round(n), 1u, max(cap, 2u) - 1u);
+    const uint phase = young > 0 ? giHistoryPhase(history) + 1 : max(giHistoryPhase(history) + 1, jacobi);
+    return min(phase, 0xFFFu) | (min(samples, 0xFFFu) << 12) | (min((jacobi + 15) / 16, 255u) << 24);
 }
 // History word of the entry, 0 when it belongs to an older lighting epoch.
 template <typename B>
@@ -277,7 +295,7 @@ uint giHistory(B b, GiHeader h, uint entry)
     return b.Load(a + GI_SH_EPOCH) == h.epoch ? b.Load(a + GI_SH_HISTORY) : 0u;
 }
 template <typename B>
-bool giYoung(B b, GiHeader h, uint entry) { return giHistoryPhase(giHistory(b, h, entry)) < h.jacobiUpdates; }
+bool giYoung(B b, GiHeader h, uint entry) { return giHistoryPhase(giHistory(b, h, entry)) < giJacobiLength(b, h, entry); }
 
 // SH block coefficients (irradiance, world frame).
 template <typename B>
@@ -381,19 +399,41 @@ bool giProbePixel(Texture2D<float> depth, uint2 probe, uint spacing, uint2 size,
 // the texels and SH are running means whose steady state would carry that bias / alpha (-0.8 % at alpha 1/32).
 uint giPackHalf2(float a, float b) { return f32tof16(nearestHalf(a)) | (f32tof16(nearestHalf(b)) << 16); }
 
-// Shared-exponent RGB (5-bit exponent, bias 15, 9-bit mantissas), non-negative.
-uint giPackRgb9e5(float3 c)
+// Stochastic rounding for running means (GiIntegrate): a mean over n updates moves by (x - m) / n per update, below
+// half a step of fp16 or RGB9E5 for most samples once n is large, and round-to-nearest then holds the median of a skewed
+// sample distribution instead of its mean (-5 % at n = 256 with 10 % bright samples [offline, 2026-09-27]). One step of
+// uniform dither before rounding to nearest makes the stored value's expectation exact. u in [0, 1).
+float giDitherHalf(float x, float u)
+{
+    const float ax = abs(x);
+    const float step = ax < 6.103515625e-5 ? 5.9604644775390625e-8 : exp2(floor(log2(ax)) - 10.0);  // fp16 spacing at x
+    return x + (u - 0.5) * step;
+}
+uint giDitherHash(uint x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+float giDitherUnit(uint x) { return (giDitherHash(x) >> 8) * (1.0 / 16777216.0); }
+
+// Shared-exponent RGB (5-bit exponent, bias 15, 9-bit mantissas), non-negative. dither: per-channel offsets in [0, 1)
+// added before truncation (stochastic rounding), or 0.5 for round to nearest.
+uint giPackRgb9e5(float3 c, float3 dither = float3(0.5, 0.5, 0.5))
 {
     c = clamp(c, 0.0, 65408.0);
     const float m = max(c.r, max(c.g, c.b));
     int e = max(-16, (int)floor(log2(max(m, 1e-30)))) + 16;  // biased exponent of the largest component + 1
     float scale = exp2((float)e - 24.0);
-    uint3 q = (uint3)round(c / scale);
+    uint3 q = (uint3)floor(c / scale + dither);
     if (max(q.r, max(q.g, q.b)) >= 512u)
     {
         ++e;
         scale *= 2;
-        q = (uint3)round(c / scale);
+        q = (uint3)floor(c / scale + dither);
     }
     return min(q.r, 511u) | (min(q.g, 511u) << 9) | (min(q.b, 511u) << 18) | ((uint)clamp(e, 0, 31) << 27);
 }

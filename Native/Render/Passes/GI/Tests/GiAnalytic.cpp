@@ -17,7 +17,7 @@
 // for N frames and evaluates screenProbeIrradiance (M's API) at every probe pixel. Also reports the frames needed to
 // come within 1 % (reconvergence, gi.relight_frames_max).
 //
-//   unx_test_gi_gianalytic [--frames N] [--validate] [--determinism]
+//   unx_test_gi_gianalytic [--frames N] [--validate] [--determinism] [--furnace-albedo RHO (0.5)]
 // --set key=value: quality overrides (e.g. gi.experiment_disable=256 for the emissive panel's texel-only control).
 // --determinism: gi.deterministic off and on, two furnace runs each; on must be bit-identical.
 #include "unx/core/Config.h"
@@ -658,6 +658,7 @@ int main(int argc, char** argv)
     {
         uint32_t frames = 160;
         bool validate = false, determinism = false;
+        float furnaceAlbedo = 0.5f;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -666,9 +667,14 @@ int main(int argc, char** argv)
             else if (a == "--validate") validate = true;
             else if (a == "--determinism") determinism = true;
             else if (a == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
+            else if (a == "--furnace-albedo" && i + 1 < argc) furnaceAlbedo = std::stof(argv[++i]);  // bright rooms (0.9: 10 bounces carry 65 %)
             else fail("unknown argument %s", a.c_str());
         }
         QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+        // The closed forms below are Lambert answers: GI hits shade diffuse only (gi.experiment_disable 1024). The v1 model's
+        // specular lobe at hits (Schlick grazing term even at f0 = 0) has no closed form here; it is checked against the
+        // reference path tracer (Results/R/GiInterior, bathhouse and train interiors).
+        quality.applyOverride("gi.experiment_disable=1024");
         for (const std::string& o : overrides) quality.applyOverride(o);
         DeviceOptions options;
         options.debugLayer = validate;
@@ -684,6 +690,7 @@ int main(int argc, char** argv)
             for (const bool on : { false, true })
             {
                 QualityConfig q = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+                q.applyOverride("gi.experiment_disable=1024");
                 q.applyOverride(on ? "gi.deterministic=true" : "gi.deterministic=false");
                 const float le = 1.0f, rho = 0.5f;
                 auto expected = [&](float3, float3) { return (double)kPi * le / (1 - rho); };
@@ -704,7 +711,7 @@ int main(int argc, char** argv)
             return pass ? 0 : 1;
         }
 
-        const float le = 1.0f, rho = 0.5f;
+        const float le = 1.0f, rho = furnaceAlbedo;
         logf("white furnace: Le %.2f, albedo %.2f, expected E = pi Le / (1 - rho) = %.4f\n", le, rho, kPi * le / (1 - rho));
         const Outcome a = run(device, shaders, quality, furnace(le, rho), { 0, 0, 0 }, { 0, 0, 0 }, [&](float3, float3) { return (double)kPi * le / (1 - rho); },
                               le / (1 - rho), frames, 1920, 1080);
@@ -917,7 +924,7 @@ int main(int argc, char** argv)
             // share (a small excess where E falls steeply: the cache cells' spatial resolution) is judged by the 1 % mean.
             QualityConfig textelOnly = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
             for (const std::string& ov : overrides) textelOnly.applyOverride(ov);
-            textelOnly.applyOverride("gi.experiment_disable=256");
+            textelOnly.applyOverride("gi.experiment_disable=1280");  // 256 | 1024 (Lambert hits, as 'quality')
             const Outcome g = run(device, shaders, textelOnly, emissivePanel(panelLe), { 0, 0, 0 }, { 0, 0, 0 }, panelExpected, 0, frames, 1920, 1080);
             const bool okF = f.mapProbes > 1000 && std::fabs(f.mapMean / f.mapExpectedMean - 1) < 0.01 && std::fabs(f.mapMean / g.mapMean - 1) < 0.005 &&
                              f.mapP99 < 0.5 * g.mapP99;

@@ -15,9 +15,17 @@ jacobi_updates = 8                 # after a reset (new entry, lighting epoch ch
                                    # converges geometrically: rho^8 < 0.4 % at albedo 0.5)
 history_updates_max = 32           # then the running mean over at most this many updates (static scenes converge; slow
                                    # changes such as a moving sun are followed with this window)
+history_updates_max_static = 256   # the running mean's window while the entry's light is steady: a fast mean (1/16) of its
+                                   # anchor irradiance within 4 sigma (the update's own ray spread) of the history; a change
+                                   # beyond that cuts the window to history_updates_max at once (moving sun, lights: any speed).
+                                   # 32 left the bathhouse's indirect light -11 % and its cell blotches at 19 % per-update noise
+                                   # x 0.18 [measured, 2026-09-27]; 256 converges it (stores round stochastically: unbiased)
 ray_length_m = 10000
 hit_update_share = 0.25            # share of the hemisphere updates guaranteed to entries that GI rays hit (bounce cells)
-hit_cell_footprint_scale = 4.0     # bounce cells (2nd+ bounce irradiance at ray hits) = this x the ray footprint (~0.36 t);
+hit_cell_footprint_scale = 2.0     # bounce cells (2nd+ bounce irradiance at ray hits) = this x the ray footprint (~0.36 t);
+                                   # 4 made a few room-sized cells carry a bright room's multi-bounce light: their noise moved
+                                   # the whole bathhouse by 7-11 % between runs, 2: 1.7 % (cache 74 k -> 94 k entries, GI +0.01 ms
+                                   # at 1440p) [measured, 2026-09-27];
                                    # direct sun at hits is an exact shadow ray
 deterministic = false              # same inputs -> bit-identical GI: update selection by key priority (radix select),
                                    # ray seeds by key (user decision: a mode switch until the budget shows the margin)
@@ -25,4 +33,6 @@ experiment_disable = 0             # cost attribution only (recorded in the qual
                                    # textures, 16 = no sun at GI hits, 32 = GI rays that leave the scene below the
                                    # horizon get 0 (not the sky LUT's lit planet ground), 64 = independent ray jitter per
                                    # update (not the R2 sequence over the entry's updates), 128 = no local lights at GI hits, 256 = no emissive-triangle
-                                   # samples (the texel rays alone see emissive meshes). Never nonzero outside measurements.
+                                   # samples (the texel rays alone see emissive meshes), 512 = GI hits without the cache's
+                                   # bounce (one bounce: unx_reference --surface-order 1:2), 1024 = Lambert GI hits (GiAnalytic's
+                                   # closed forms). Never nonzero outside measurements and those tests.

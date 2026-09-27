@@ -3,8 +3,9 @@
 // World radiance cache update rays (ARCHITECTURE 2.5; DispatchRays with alpha any-hit, 1.3-5). The fixed per-frame ray
 // budget is spent as whole-hemisphere updates: 64 threads per updated entry (GiSelect's stalest-first selection, then
 // background entries), thread = texel, direction jittered inside the texel. The hit's outgoing radiance =
-// emission + diffuse albedo / pi * (direct sun at the hit point, one exact shadow ray within the solar disk
-// + indirect irradiance of the hit's cell). The indirect part is the second and later bounces, a smooth field: its cell
+// the full model at the hit (rtHitRadiance, as reflection hits): emission + diffuse albedo / pi x (direct sun at the hit
+// point, one exact shadow ray within the solar disk + indirect irradiance of the hit's cell) + the specular lobe of the
+// sun and of the cell's incident radiance from the mirror direction. The indirect part is the second and later bounces, a smooth field: its cell
 // is gi.hit_cell_footprint_scale x the ray footprint (texel cone ~0.36 t) coarse, and is requested for update next frame.
 // The texel values go to GiIntegrate with two flags (the ray read a bounce term; from a young cell), which
 // sets the entry's history weight (GiInternal giHistoryAlpha) and blends texels, map and SH with it.
@@ -98,8 +99,9 @@ void GiTraceGen()
     }
 
     float3 radiance, sampleRadiance;
-    bool readsBounce = false;  // the hit's radiance has a bounce term (albedo / pi x the cache irradiance read there)
+    bool readsBounce = false;  // the hit's radiance has a bounce term (the cache's irradiance and mirror radiance read there)
     bool youngBounce = false;  // read from a young cell, or from other levels in place of a cell without data
+    float bounceShare = 0;     // luminance share of the radiance that came from the cache reads (GiIntegrate: Jacobi length)
     float3 emissionOut = 0;  // the hit's own emission's share the MIS moves to the emitter samples (1 - w_b) x emission
     bool emitter = false;
     float distanceToHit;
@@ -138,8 +140,12 @@ void GiTraceGen()
         }
         else
         {
-            const float3 albedo = m.baseColor * (1 - m.metallic);
-            float3 irradiance = 0;
+            // The hit is shaded with the full model (rtHitRadiance, as reflection hits): diffuse + the specular lobe of
+            // the sun and of the cache's incident radiance from the mirror direction. Diffuse alone lost the specular
+            // albedo at every bounce (~7 % of a glazed white tile's reflectance), a geometric deficit in bright closed
+            // rooms: the bathhouse's indirect light was 64 % of the reference's [measured, 2026-09-27].
+            const float3 mirror = reflect(r.Direction, s.normal);
+            float3 irradiance = 0, specular = 0;
             bool created;
             const uint bounceLevel = giLevelForSize(h, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z));
             const uint e = giFindOrCreate(b, h, giSurfaceKey(h, s.position, s.normal, bounceLevel), giAnchorAtHit(h, s.position, r.Direction), s.normal, created);
@@ -152,6 +158,10 @@ void GiTraceGen()
                 {
                     float unused;
                     irradiance = giShIrradiance(b, h, e, s.normal, unused);
+                    const float3 na = giAnchorNormal(b, h, e);
+                    float3 ta, ba;
+                    giBasis(na, ta, ba);
+                    specular = giTexelRadiance(b, h, e, giHemiOctEncode(float3(dot(mirror, ta), dot(mirror, ba), max(dot(mirror, na), 0.0))));
                     known = true;
                 }
             }
@@ -162,13 +172,18 @@ void GiTraceGen()
             if (!known)
             {
                 g_giReadYoung = 0;
-                irradiance = giCacheIrradianceAt(b, h, s.position, s.normal, bounceLevel, fallbackWeight);  // coarser, then finer levels
+                float3 sumE, sumL;
+                giCacheLevels(b, h, s.position, s.normal, mirror, true, bounceLevel, sumE, sumL, fallbackWeight);  // coarser, then finer levels
+                irradiance = fallbackWeight > 0 ? sumE / fallbackWeight : 0;
+                specular = fallbackWeight > 0 ? sumL / fallbackWeight : 0;
                 fallbackYoung = g_giReadYoung;
             }
             const float3 l = normalize(g_sunDirection);
             const float cosSun = dot(s.normal, l);
-            float3 sun = 0;
-            if (cosSun > 0 && (P[3].w & 16) == 0)  // 16 (attribution): no sun at GI hits
+            RtHitLighting L;
+            L.sunIlluminance = 0;
+            L.sunVisibility = 0;
+            if ((cosSun > 0 || (m.classFlags & 0xFFu) == MATERIAL_FOLIAGE) && (P[3].w & 16) == 0)  // 16 (attribution): no sun at GI hits
             {
                 const float3 e0 = giSunIlluminance(s.position);
                 if (any(e0 > 0))
@@ -180,7 +195,8 @@ void GiTraceGen()
                     sr.Direction = giSunDirection(seed + 7);
                     sr.TMin = 0;
                     sr.TMax = giRayLength();
-                    sun = e0 * cosSun * (rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0);
+                    L.sunIlluminance = e0;
+                    L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
                 }
             }
             // Local lights: one next-event sample and its shadow ray (experiment 128: none).
@@ -191,13 +207,39 @@ void GiTraceGen()
                                                               hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z));  // the hit cell's footprint
                 if (ls.valid)
                 {
-                    const float3 f = rtLocalLightBrdfCos(m, s.normal, -r.Direction, ls.wi, true);
+                    // A texel holds the mean over its ray cone (half-angle ~atan(GI_FOOTPRINT_PER_METRE / 2)) of what leaves the
+                    // hit toward the anchor: for the specular lobe that mean is the lobe widened by the cone, alpha' =
+                    // sqrt(alpha^2 + tan^2). Evaluated at one direction instead, a glossy hit's point-light highlight came in
+                    // as rare huge samples that stayed in the cells' means as bright dots (train, 2026-09-27). The sun's
+                    // highlight is filtered the same way (rtHitRadiance's pixelAngle).
+                    GpuMaterial mc = m;
+                    const float alpha = modelAlpha(m.roughness), cone = 0.5 * GI_FOOTPRINT_PER_METRE;
+                    mc.roughness = sqrt(sqrt(alpha * alpha + cone * cone));
+                    const float3 f = rtLocalLightBrdfCos(mc, s.normal, -r.Direction, ls.wi, (P[3].w & 1024) != 0);  // full model (1024: Lambert)
                     if (any(f > 0) && (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, giBias(h, s.position)), RT_MASK_GI)))
                         local = f * ls.weight;
                 }
             }
-            radiance = m.emissive + albedo / GI_PI * (irradiance + sun) + local;
-            readsBounce = any(albedo > 0);
+            if ((P[3].w & 512) != 0) irradiance = specular = 0;  // 512 (diagnostic): one bounce, the reference's --surface-order 1:2
+            L.irradiance = irradiance;
+            L.specularRadiance = specular;
+            L.local = local;
+            // The texel cone's angular width filters the sun's highlight (GI_FOOTPRINT_PER_METRE: footprint / distance).
+            float3 unbounced;
+            if ((P[3].w & 1024) == 0)
+            {
+                radiance = rtHitRadiance(m, s.normal, -r.Direction, L, GI_FOOTPRINT_PER_METRE);
+                L.irradiance = L.specularRadiance = 0;
+                unbounced = rtHitRadiance(m, s.normal, -r.Direction, L, GI_FOOTPRINT_PER_METRE);
+            }
+            else  // 1024 (analytic tests): Lambert hits, the closed forms of GiAnalytic (the v1 model's Schlick lobe has none)
+            {
+                unbounced = m.emissive + m.baseColor * (1 - m.metallic) / GI_PI * (L.sunIlluminance * max(cosSun, 0.0) * L.sunVisibility) + local;
+                radiance = unbounced + m.baseColor * (1 - m.metallic) / GI_PI * irradiance;
+            }
+            const float total = dot(radiance, float3(0.2126, 0.7152, 0.0722));
+            bounceShare = total > 0 ? saturate(1 - dot(unbounced, float3(0.2126, 0.7152, 0.0722)) / total) : 0;
+            readsBounce = true;  // the specular term reads the cache too (every surface has a specular lobe)
             // A fallback read is young by the young entries' share of its weight (or without data: 0 in place of the light).
             youngBounce = known ? giYoung(b, h, e) : !(fallbackWeight > 0) || fallbackYoung > 0;
             if (any(m.emissive > 0) && (P[3].w & 256) == 0)  // 256 (attribution): no emitter samples, texel rays alone
@@ -244,7 +286,7 @@ void GiTraceGen()
     samples[thread] = uint4(asuint(sampleRadiance), (uint)round(saturate(uv.x) * 65535.0) | ((uint)round(saturate(uv.y) * 65535.0) << 16));
     // The texel's value for GiIntegrate (third block of the samples buffer): radiance, hit distance (fp16, >= 0), bit 16 =
     // the ray read a bounce term, bit 17 = from young cells. By count, not by luminance: a cell without data reads 0 (the
-    // most biased read has no luminance).
+    // most biased read has no luminance). Bits 18-29: the bounce share of the radiance (luminance, unorm12).
     samples[2 * P[0].y + thread] = uint4(asuint(radiance), (f32tof16(min(distanceToHit, 65000.0)) & 0xFFFFu) | (readsBounce ? 0x10000u : 0u) |
-                                                             (readsBounce && youngBounce ? 0x20000u : 0u));
+                                                             (readsBounce && youngBounce ? 0x20000u : 0u) | ((uint)round(bounceShare * 4095.0) << 18));
 }

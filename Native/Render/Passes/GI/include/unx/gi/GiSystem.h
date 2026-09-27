@@ -16,6 +16,7 @@ namespace unx::render::gi
 struct GiSettings  // from Config/quality/gi.toml
 {
     uint32_t raysPerFrame = 0, capacity = 0, tableSlots = 0, probeSpacing = 0, maxAge = 0, jacobiUpdates = 0, historyMax = 0, maxLevel = 0;
+    uint32_t historyStatic = 0;  // gi.history_updates_max_static (GiIntegrate's change test)
     uint32_t updatesPerFrame = 0;  // raysPerFrame / 64 whole-hemisphere updates
     float cellAngleDeg = 0, cellMin = 0, nearRadius = 0, rayLength = 0, hitUpdateShare = 0, hitCellFootprintScale = 0;
     uint32_t experimentDisable = 0;  // gi.experiment_disable (cost attribution only)

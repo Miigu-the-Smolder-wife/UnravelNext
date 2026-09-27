@@ -96,6 +96,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.maxAge = (uint32_t)q.integer("gi.cache_max_age_frames");
     s.jacobiUpdates = (uint32_t)q.integer("gi.jacobi_updates");
     s.historyMax = (uint32_t)q.integer("gi.history_updates_max");
+    s.historyStatic = (uint32_t)q.integer("gi.history_updates_max_static");
     s.maxLevel = (uint32_t)q.integer("gi.cache_levels_max");
     s.cellAngleDeg = (float)q.number("gi.cache_cell_angle_deg");
     s.cellMin = (float)q.number("gi.cache_cell_min_m");
@@ -111,6 +112,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     if (s.tableSlots < s.capacity) fail("gi.cache table slots (%u) must be >= capacity (%u): GiTableClear resets the map owners", s.tableSlots, s.capacity);
     if (s.probeSpacing != 8) fail("gi.screen_probe_spacing_px must be 8 (3-bit probe offsets, 4 candidate points)");
     if (s.capacity == 0 || s.raysPerFrame < 64 || s.historyMax == 0) fail("gi: zero capacity, rays or history");
+    if (s.historyStatic < s.historyMax || s.historyStatic > 4096 || s.historyMax > 4096) fail("gi: history_updates_max_static below history_updates_max, or a window above 4096 (12-bit count)");
     if (s.maxLevel > 31) fail("gi.cache_levels_max must be <= 31 (5-bit key field)");
     s.updatesPerFrame = s.raysPerFrame / 64;  // whole-hemisphere updates
     return s;
@@ -175,7 +177,7 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[26] = l.hitList;
     h[27] = l.shTable;
     h[30] = m_settings.jacobiUpdates;
-    h[31] = m_settings.historyMax;
+    h[31] = m_settings.historyMax | (m_settings.historyStatic << 16);
     h[37] = l.mapOwner;  // GI_H_MAP_OWNER
     h[60] = l.anchorMin; // deterministic anchors (GiHeader.offAnchorMin)
     h[62] = l.irr;       // irradiance maps (GiHeader.offIrr)

@@ -41,8 +41,10 @@ struct GiSrvs
 #define GI_SH_UPDATES 56u      // completed updates (all time)
 #define GI_SH_SUN_SAMPLES 60u  // sun visibility samples
 #define GI_SH_LAST_UPDATE 64u  // frame stamp of the last selection/update
-#define GI_SH_HISTORY 68u      // convergence phase | mean samples << 16 since the last reset (GiInternal giHistoryAlpha)
+#define GI_SH_HISTORY 68u      // convergence phase | mean samples << 12 | Jacobi length / 16 << 24 (GiInternal giHistoryAlpha)
 #define GI_SH_EPOCH 72u        // lighting epoch of that history
+#define GI_SH_WINDOW 76u       // GiIntegrate's window test: fast mean of the anchor irradiance | mean of its per-update sample
+                               // spread (sigma) << 16, fp16 x GI_STORE_SCALE
 
 // Entry irradiance map (design 2.5 revision, request 18): E(n) at the 9 x 9 hemispherical octahedral directions around
 // the entry's anchor normal (texel (i, j) = giHemiOctDecode(((i, j) + 0.5) / 9); the pole, the anchor normal itself, is
@@ -52,6 +54,7 @@ struct GiSrvs
 // Evaluated with Catmull-Rom (16 texels), clamped at 0.
 #define GI_IRR_N 9u
 #define GI_IRR_STRIDE 336u
+#define GI_IRR_POLE 40u  // the centre texel (4, 4): the anchor normal
 
 // Header (uint4 rows of the first 256 B).
 struct GiHeader
@@ -65,7 +68,7 @@ struct GiHeader
     float3 camera;                    // main camera position of this frame (level selection for every view)
     uint maxLevel;
     uint offSelected, offHitStamp, offHitList, offShTable;
-    uint hitCount0, hitCount1, jacobiUpdates, historyMax;
+    uint hitCount0, hitCount1, jacobiUpdates, historyMax, historyStatic;  // row 7 .w: historyMax | historyStatic << 16
     uint offAnchorMin, flags;         // deterministic anchors (per entry 64-bit min of packed candidates); flags bit 0 = gi.deterministic
     uint offIrr;                      // irradiance maps (GI_IRR_STRIDE per entry)
     uint offSlotAnchor;               // deterministic anchors: per table slot 64-bit min of the candidates of threads that
@@ -84,7 +87,7 @@ GiHeader giHeader(B b)
     h.backgroundCursor = r4.x; h.backgroundCount = r4.y; h.epoch = r4.z; h.liveCount = r4.w;
     h.camera = asfloat(r5.xyz); h.maxLevel = r5.w;
     h.offSelected = r6.x; h.offHitStamp = r6.y; h.offHitList = r6.z; h.offShTable = r6.w;
-    h.hitCount0 = r7.x; h.hitCount1 = r7.y; h.jacobiUpdates = r7.z; h.historyMax = r7.w;
+    h.hitCount0 = r7.x; h.hitCount1 = r7.y; h.jacobiUpdates = r7.z; h.historyMax = r7.w & 0xFFFFu; h.historyStatic = r7.w >> 16;
     const uint4 r15 = b.Load4(240);
     h.offAnchorMin = r15.x; h.flags = r15.y; h.offIrr = r15.z; h.offSlotAnchor = r15.w;
     return h;
