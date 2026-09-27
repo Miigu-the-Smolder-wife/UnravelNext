@@ -63,26 +63,26 @@ coverage composite: pixels with fragments vs CPU composite of CPU-shaded fragmen
 coverage composite: pixels without fragments unchanged (abs.)          0.000e+00 (limit 0.0e+00) ok
 planar products: M.shading: planar view without S's froxel lists while the main view has them (INTERFACES v1.22)
 planar view without S's froxel lists while the main view has them fails 1.000e+00 (limit 1.0e+00) ok
-glass [index 1 (T_p = tint, R_p = 0)]: scene set (28.3 s)
-glass [index 1 (T_p = tint, R_p = 0)]: rendered (28.4 s)
+glass [index 1 (T_p = tint, R_p = 0)]: scene set (19.8 s)
+glass [index 1 (T_p = tint, R_p = 0)]: rendered (19.8 s)
 glass [index 1 (T_p = tint, R_p = 0)]: 16437 class 1 pixels checked, F 0.0000 .. 0.0000, largest sun specular 0.0000 (exposed); statistics: 16437 pane, 0 solid, 0 unlit
 glass [index 1 (T_p = tint, R_p = 0)]: class 1 pixels vs R_p x sun specular + T_p x behind (rel.) 5.950e-08 (limit 5.0e-03) ok
 glass [index 1 (T_p = tint, R_p = 0)]: pixels outside class 1 unchanged 0.000e+00 (limit 0.0e+00) ok
-glass [index 1 (T_p = tint, R_p = 0)]: evaluated (28.4 s)
+glass [index 1 (T_p = tint, R_p = 0)]: evaluated (19.8 s)
 glass [index 1 (T_p = tint, R_p = 0)]: statistics count the class 1 pixels 0.000e+00 (limit 0.0e+00) ok
-glass [index 1.5, sun behind the pane (R_p, T_p)]: scene set (28.5 s)
-glass [index 1.5, sun behind the pane (R_p, T_p)]: rendered (28.5 s)
+glass [index 1.5, sun behind the pane (R_p, T_p)]: scene set (19.9 s)
+glass [index 1.5, sun behind the pane (R_p, T_p)]: rendered (19.9 s)
 glass [index 1.5, sun behind the pane (R_p, T_p)]: 16437 class 1 pixels checked, F 0.0403 .. 0.0583, largest sun specular 0.0000 (exposed); statistics: 16437 pane, 0 solid, 0 unlit
 glass [index 1.5, sun behind the pane (R_p, T_p)]: class 1 pixels vs R_p x sun specular + T_p x behind (rel.) 3.153e-07 (limit 5.0e-03) ok
 glass [index 1.5, sun behind the pane (R_p, T_p)]: pixels outside class 1 unchanged 0.000e+00 (limit 0.0e+00) ok
-glass [index 1.5, sun behind the pane (R_p, T_p)]: evaluated (28.5 s)
+glass [index 1.5, sun behind the pane (R_p, T_p)]: evaluated (19.9 s)
 glass [index 1.5, sun behind the pane (R_p, T_p)]: statistics count the class 1 pixels 0.000e+00 (limit 0.0e+00) ok
-glass [index 1.5, rough, sun in front (R_p x sun specular)]: scene set (28.7 s)
-glass [index 1.5, rough, sun in front (R_p x sun specular)]: rendered (28.7 s)
+glass [index 1.5, rough, sun in front (R_p x sun specular)]: scene set (19.9 s)
+glass [index 1.5, rough, sun in front (R_p x sun specular)]: rendered (19.9 s)
 glass [index 1.5, rough, sun in front (R_p x sun specular)]: 16437 class 1 pixels checked, F 0.0403 .. 0.0583, largest sun specular 6.1541 (exposed); statistics: 16437 pane, 0 solid, 0 unlit
 glass [index 1.5, rough, sun in front (R_p x sun specular)]: class 1 pixels vs R_p x sun specular + T_p x behind (rel.) 2.033e-06 (limit 5.0e-03) ok
 glass [index 1.5, rough, sun in front (R_p x sun specular)]: pixels outside class 1 unchanged 0.000e+00 (limit 0.0e+00) ok
-glass [index 1.5, rough, sun in front (R_p x sun specular)]: evaluated (28.7 s)
+glass [index 1.5, rough, sun in front (R_p x sun specular)]: evaluated (19.9 s)
 glass [index 1.5, rough, sun in front (R_p x sun specular)]: statistics count the class 1 pixels 0.000e+00 (limit 0.0e+00) ok
 preshade: 1858 records, 1858 listed as kind 5, 896 channel values differ
 preshade: every blade record listed as an M pre-shaded record          0.000e+00 (limit 0.0e+00) ok
@@ -106,37 +106,9 @@ aniso frame: 7001 + 6721 pixels checked (6135 streak pixels with alpha_b < 2 the
 aniso frame: r 0.3 s 0.8 sun (disk rule) vs dense disk quadrature (rel.) 3.154e-03 (limit 5.0e-03) ok
 aniso frame: r 0.08 s 1 streak sun vs dense disk quadrature (rel.)     3.875e-03 (limit 1.0e-02) ok
 aniso frame: the highlight is visible (largest exposed sun specular)   6.304e+01 (limit 5.0e-02) ok
-  film px (362,178) mat 1 n.v 0.1549 got (0.00000 0.00000 0.00000) expected (0.00000 0.00356 0.00598)
-  film px (586,178) mat 2 n.v 0.1572 got (0.00884 0.00593 0.00501) expected (0.08656 0.04050 0.05102)
-  film px (598,178) mat 2 n.v 0.1503 got (0.00924 0.00620 0.00524) expected (0.09075 0.04243 0.05348)
-  film px (348,180) mat 1 n.v 0.1603 got (0.00000 0.00000 0.00000) expected (0.00000 0.00377 0.00657)
-  film px (336,184) mat 1 n.v 0.1921 got (0.00000 0.00000 0.00000) expected (0.00000 0.00373 0.00664)
-  film px (330,186) mat 1 n.v 0.1720 got (0.00000 0.00000 0.00000) expected (0.00000 0.00396 0.00714)
-  film px (326,188) mat 1 n.v 0.1788 got (0.00000 0.00000 0.00000) expected (0.00000 0.00396 0.00717)
-  film px (322,190) mat 1 n.v 0.1742 got (0.00000 0.00000 0.00000) expected (0.00000 0.00404 0.00735)
-  film px (342,190) mat 1 n.v 0.4296 got (0.00000 0.00000 0.00000) expected (0.00000 0.00437 0.00744)
-  film px (344,190) mat 1 n.v 0.4423 got (0.00000 0.00000 0.00000) expected (0.00000 0.00445 0.00752)
-  film px (346,190) mat 1 n.v 0.4537 got (0.00000 0.00000 0.00000) expected (0.00000 0.00451 0.00757)
-  film px (348,190) mat 1 n.v 0.4642 got (0.00000 0.00000 0.00000) expected (0.00000 0.00456 0.00760)
-  film px (334,192) mat 1 n.v 0.4086 got (0.00000 0.00000 0.00000) expected (0.00000 0.00443 0.00768)
-  film px (336,192) mat 1 n.v 0.4259 got (0.00000 0.00000 0.00000) expected (0.00000 0.00459 0.00790)
-  film px (338,192) mat 1 n.v 0.4415 got (0.00000 0.00000 0.00000) expected (0.00000 0.00474 0.00810)
-  film px (340,192) mat 1 n.v 0.4556 got (0.00000 0.00000 0.00000) expected (0.00000 0.00488 0.00827)
-  film px (342,192) mat 1 n.v 0.4687 got (0.00000 0.00000 0.00000) expected (0.00000 0.00500 0.00843)
-  film px (344,192) mat 1 n.v 0.4806 got (0.00000 0.00000 0.00000) expected (0.00000 0.00511 0.00855)
-  film px (346,192) mat 1 n.v 0.4911 got (0.00000 0.00000 0.00000) expected (0.00000 0.00519 0.00863)
-  film px (348,192) mat 1 n.v 0.5007 got (0.00000 0.00000 0.00000) expected (0.00000 0.00524 0.00866)
-  film px (334,194) mat 1 n.v 0.4487 got (0.00000 0.00000 0.00000) expected (0.00000 0.00505 0.00867)
-  film px (336,194) mat 1 n.v 0.4643 got (0.00000 0.00000 0.00000) expected (0.00000 0.00526 0.00897)
-  film px (338,194) mat 1 n.v 0.4788 got (0.00000 0.00000 0.00000) expected (0.00000 0.00546 0.00925)
-  film px (340,194) mat 1 n.v 0.4922 got (0.00000 0.00000 0.00000) expected (0.00000 0.00565 0.00950)
-  film px (342,194) mat 1 n.v 0.5042 got (0.00000 0.00000 0.00000) expected (0.00000 0.00581 0.00970)
-  film px (344,194) mat 1 n.v 0.5152 got (0.00000 0.00000 0.00000) expected (0.00000 0.00595 0.00986)
-  film px (346,194) mat 1 n.v 0.5253 got (0.00000 0.00000 0.00000) expected (0.00000 0.00606 0.00998)
-  film px (348,194) mat 1 n.v 0.5343 got (0.00000 0.00000 0.00000) expected (0.00000 0.00613 0.01002)
-film frame: ground 59206 px (worst 6.28e-07), soap 5993 px (worst 1.00e+00), oxide on copper 6334 px (worst 8.98e-01); soap chromaticity r 1000000000.000-0.000 g 1000000000.000-0.000 b 1000000000.000-0.000
-film frame: soap and oxide pixels vs evaluateFilm (rel.)               1.000e+00 (limit 1.0e-02) FAIL
-film frame: the soap film's colour changes with angle (blue chromaticity range) -1.000e+09 (limit 5.0e-02) FAIL
+film frame: ground 59206 px (worst 6.28e-07), soap 5993 px (worst 3.31e-05), oxide on copper 6334 px (worst 8.37e-06); soap chromaticity r 0.000-0.000 g 0.383-0.475 b 0.525-0.617
+film frame: soap and oxide pixels vs evaluateFilm (rel.)               3.306e-05 (limit 1.0e-02) ok
+film frame: the soap film's colour changes with angle (blue chromaticity range) 9.178e-02 (limit 5.0e-02) ok
   aq case 0 shape 0: sheen gpu 1.38355e-18 replica 1.38354e-18, aniso gpu 0.00756115 replica 0.00758322
   aq case 9 shape 0: sheen gpu 5.27428e-05 replica 5.2742e-05, aniso gpu 0.00394428 replica 0.00396249
   aq case 106 shape 2: sheen gpu 3.50188e-06 replica 3.50243e-06, aniso gpu 0.725227 replica 0.732287
@@ -150,5 +122,5 @@ area quadrature: anisotropic r 0.08 s 1 (alpha_b 0.0064) vs reference, energy-we
 area lobes frame: 1680 sphere pixels, largest exposed radiance 0.6647, energy-weighted error 0.0006687, worst 0.002965
 area lobes frame: anisotropic sphere under a rect light vs replica (energy-weighted) 6.687e-04 (limit 5.0e-03) ok
 area lobes frame: the area-light highlight is visible                  6.647e-01 (limit 5.0e-02) ok
-FAILED: 2 failure(s)
-exit 1
+passed: 0 failure(s)
+exit 0
