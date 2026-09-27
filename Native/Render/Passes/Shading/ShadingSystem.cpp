@@ -249,6 +249,7 @@ namespace
 struct ShadingResources
 {
     TextureRef edgeRadiance, edgeTiles;
+    TextureRef areaLobes;  // A9 (AreaLobes.hlsl): area-light lobe radiance of the layered classes (area-lit scenes only)
     BufferRef edgePixels, edgeArgs, fallbackArgs;
 };
 struct ShadingTable
@@ -305,6 +306,27 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     ID3D12PipelineState* opaque = opaqueKernel(false, 0);
     ID3D12PipelineState* opaqueLayered = layeredMaterials ? opaqueKernel(false, 1) : nullptr;
     ID3D12PipelineState* opaqueSheen = sheenMaterials ? opaqueKernel(false, 2) : nullptr;
+    // A9 area-light lobes (AreaLobes.hlsl: ShadeOpaque's light loop with the sheen and anisotropic lobes over each area
+    // light, dispatched on the same tiles right before the layered kernels, which add its texture)
+    bool anisoMaterials = false;
+    if (const scene::Scene* src = fc.scene.source())
+        for (const scene::Material& mt : src->materials) anisoMaterials = anisoMaterials || mt.anisotropy > 0;
+    const bool lobesOn = areaLights && (anisoMaterials || sheenMaterials);
+    auto lobeKernel = [&](bool fallbackVariant, uint32_t layered) {
+        const std::string name = std::string("Passes/Shading/AreaLobes.FALLBACK") + (fallbackVariant ? "1" : "0") + ".PLANAR" +
+                                 (view.view.kind != gpu::ViewKind::Main ? "1" : "0") + ".LAYERED" + std::to_string(layered);
+        return fc.shaders.compute(name.c_str());
+    };
+    ID3D12PipelineState* lobesLayered = lobesOn && anisoMaterials ? lobeKernel(false, 1) : nullptr;
+    ID3D12PipelineState* lobesSheen = lobesOn && sheenMaterials ? lobeKernel(false, 2) : nullptr;
+    // the lobe kernel's writes complete before the layered kernel reads them (the same pass: one global UAV barrier)
+    auto lobeBarrier = [](PassContext& c) {
+        D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                 D3D12_BARRIER_ACCESS_UNORDERED_ACCESS };
+        D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_GLOBAL, 1 };
+        group.pGlobalBarriers = &gb;
+        c.cmd->Barrier(1, &group);
+    };
     ID3D12PipelineState* sky = fc.shaders.compute(linear ? "Passes/Shading/ShadeSky.OUTPUT1" : "Passes/Shading/ShadeSky.OUTPUT0");
     const FrameResources r = fc.resources;
     const bool atmosphere = r.transmittanceLut.valid() && r.multiScatterLut.valid() && r.skyViewLut.valid();
@@ -376,6 +398,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     {
         res.fallbackArgs = fallback ? fc.graph.createBuffer({ "m.shade fallback args", 12, 0 }) : BufferRef{};
         res.edgeRadiance = fc.graph.createTexture({ "m.edge radiance", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        if (lobesOn) res.areaLobes = fc.graph.createTexture({ "m.area lobes", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
         res.edgePixels = fc.graph.createBuffer({ "m.edge pixels", ((uint64_t)v.view.width * v.view.height + 1) * 4, 0 });
         res.edgeArgs = fc.graph.createBuffer({ "m.edge args", 24, 0 });  // dispatch args + pixel count (Edge.hlsli)
         res.edgeTiles = fc.graph.createTexture({ "m.edge tile mask", o.tilesX, o.tilesY, 1, 1, DXGI_FORMAT_R32G32_UINT });  // 64 bits per tile
@@ -417,7 +440,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         if (!found) fail("M.shading: composite part without the banded part for this view in frame %llu", (unsigned long long)fc.frame.frameIndex);
     }
     const BufferRef fallbackArgs = res.fallbackArgs, edgePixels = res.edgePixels, edgeArgs = res.edgeArgs;
-    const TextureRef edgeRadiance = res.edgeRadiance, edgeTiles = res.edgeTiles;
+    const TextureRef edgeRadiance = res.edgeRadiance, edgeTiles = res.edgeTiles, areaLobes = res.areaLobes;
     // Planar views: tiles without mirror pixels are never shaded; edge detection and the composite treat their pixels as
     // outside the view (R always gives the tile mask with the pixel mask, v1.22).
     const TextureRef planarTiles = v.view.planarTileMask;
@@ -506,6 +529,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             b.use(o.materialWord, Use::SrvCompute);
             if (o.emissive.valid()) b.use(o.emissive, Use::SrvCompute);
             if (o.anisoWord.valid()) b.use(o.anisoWord, Use::SrvCompute);
+            if (areaLobes.valid()) b.use(areaLobes, Use::UavComputeDisjoint);
             b.use(o.tiles, Use::SrvCompute);
             b.use(o.tileArgs, Use::IndirectArgs);
             b.use(v.color, Use::UavComputeDisjoint);
@@ -591,6 +615,16 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k32[26] = asUint(histogram.centreSigma);                 // P[6].z
                 k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
                 particleConstants(c, k32 + 22);  // P[5].zw
+                k32[38] = areaLobes.valid() ? c.uav(areaLobes) : none;  // P[9].z (A9 area-light lobes)
+                ID3D12PipelineState* lobes = shadeClass == material::ShadeClass::Layered ? lobesLayered : (shadeClass == material::ShadeClass::Sheen ? lobesSheen : nullptr);
+                if (lobes && areaLobes.valid())
+                {
+                    c.cmd->SetPipelineState(lobes);
+                    c.computeConstants(k32, 40);
+                    c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
+                    lobeBarrier(c);
+                    c.cmd->SetPipelineState(shadeClass == material::ShadeClass::Layered ? opaqueLayered : opaqueSheen);
+                }
                 c.computeConstants(k32, 40);
                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
             }
@@ -607,6 +641,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         const uint32_t sheenBit = 1u << (uint32_t)material::ShadeClass::Sheen;
         std::vector<std::pair<ID3D12PipelineState*, uint32_t>> fallbackRuns = { { opaqueKernel(true, layeredMaterials ? 1 : 0), 0xFFFFFFFFu & ~(sheenMaterials ? sheenBit : 0u) } };
         if (sheenMaterials) fallbackRuns.push_back({ opaqueKernel(true, 2), 0x80000000u | sheenBit });
+        std::vector<ID3D12PipelineState*> fallbackLobes = { lobesOn && anisoMaterials ? lobeKernel(true, 1) : nullptr };
+        if (sheenMaterials) fallbackLobes.push_back(lobesOn ? lobeKernel(true, 2) : nullptr);
         ShadowSrvRing& ring = fc.state<ShadowSrvRing>("M.shadowSrvRing");
         if (vsm) ring.ensure(fc.device);
         ShadowSrvRing* ringPtr = vsm ? &ring : nullptr;
@@ -618,6 +654,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              b.use(o.materialWord, Use::SrvCompute);
                              if (o.emissive.valid()) b.use(o.emissive, Use::SrvCompute);
                              if (o.anisoWord.valid()) b.use(o.anisoWord, Use::SrvCompute);
+                             if (areaLobes.valid()) b.use(areaLobes, Use::UavCompute);
                              b.use(v.shadowOverflowFallbackTiles, Use::SrvCompute);
                              b.use(fallbackArgs, Use::IndirectArgs);
                              b.use(v.color, Use::UavComputeDisjoint);
@@ -678,11 +715,20 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              k32[16] = r.areaLightStable;     // P[4].x (B2)
                              k32[19] = gpu::kNone;            // P[4].w: overflow tiles are shaded twice; the main kernel metered them
                              k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
-                             for (const auto& [kernel, classes] : fallbackRuns)
+                             k32[38] = areaLobes.valid() ? c.uav(areaLobes) : none;  // P[9].z (A9 area-light lobes)
+                             for (size_t run = 0; run < fallbackRuns.size(); ++run)
                              {
+                                 const auto& [kernel, classes] = fallbackRuns[run];
                                  k32[6] = classes;  // P[1].z
-                                 c.cmd->SetPipelineState(kernel);
                                  c.bindFrameConstants(cb);
+                                 if (fallbackLobes[run] && areaLobes.valid())
+                                 {
+                                     c.cmd->SetPipelineState(fallbackLobes[run]);
+                                     c.computeConstants(k32, 40);
+                                     c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
+                                     lobeBarrier(c);
+                                 }
+                                 c.cmd->SetPipelineState(kernel);
                                  c.computeConstants(k32, 40);
                                  c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                              }

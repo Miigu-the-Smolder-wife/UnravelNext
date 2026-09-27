@@ -3,8 +3,8 @@
 // the G-buffer normal and the band-limited (alpha_t', alpha_b'). Its base specular replaces the isotropic lobe:
 //   point lights  the lobe itself (exact);
 //   sun           shAnisoSunSpecular: one rule for every (alpha_t, alpha_b), narrow, wide or a streak (one axis each);
-//   area lights   shAnisoLtc: the stretch that makes the lobe's footprint isotropic, then the isotropic LTC of
-//                 alpha_i = sqrt(alpha_t alpha_b) (FEATURES_GAME 14; its error is measured against the lobe's quadrature);
+//   area lights   AreaLobes.hlsl / AreaQuadrature.hlsli: the lobe over the light by exact slope-space cell masses (the
+//                 stretch to an isotropic LTC was wrong by 36-173 % at alpha_t / alpha_b 1.75, render C's study);
 //   indirect      the lobe's albedo f0 A_a + B_a times the radiance of the equal-area isotropic cone (the G-buffer
 //                 roughness sqrt(sqrt(alpha_t' alpha_b')) that R and the probes read).
 #ifndef UNX_M_ANISO_SHADING_HLSLI
@@ -104,19 +104,6 @@ float3 shAnisoSunSpecular(ShAniso a, float3 f0, float3 n, float3 v, float NoV, f
     const float3 F = f0 + (1 - f0) * pow(1 - saturate(dot(v, h)), 5);
     const float3 comp = 1 + f0 * (1 / (a.ab.x + a.ab.y) - 1);
     return F * comp * (G2 * dot(v, h) / (NoV * hL.z) * mass) * (E / (SH_PI * sinS * sinS));
-}
-
-// The area-light transform of the anisotropic lobe: world -> the lobe's frame (t, b, n), stretched by
-// diag(alpha_i / alpha_t, alpha_i / alpha_b, 1) so the lobe's footprint is isotropic at alpha_i = sqrt(alpha_t alpha_b),
-// then the isotropic LTC inverse of alpha_i at the stretched view's n.v in its own shading frame. The integral's magnitude
-// is the anisotropic albedo (shAnisoAlbedo).
-float3x3 shAnisoLtc(ShAniso a, uint ltcTable, float3 n, float3 v)
-{
-    const float ai = sqrt(a.alpha.x * a.alpha.y);
-    const float3x3 S = float3x3(a.t * (ai / a.alpha.x), a.b * (ai / a.alpha.y), n);  // world -> stretched lobe frame
-    const float3 vs = normalize(mul(S, v));
-    const float3x3 frame = shShadingFrame(float3(0, 0, 1), vs, vs.z);
-    return mul(shLtcInverse(ltcTable, max(vs.z, 1e-4), sqrt(ai)), mul(frame, S));
 }
 
 #endif

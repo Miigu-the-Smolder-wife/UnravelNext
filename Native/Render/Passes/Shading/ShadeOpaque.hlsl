@@ -39,11 +39,16 @@
 // P[7] = { edge radiance UAV (RGBA16F), R's screen probe maps (K path; UNX_NONE = absent), S's shadow overflow list (raw;
 //        FALLBACK: a raw buffer holding this frame's ShadowSrvs), V's water layer vis ids (v1.75; UNX_NONE = none): a
 //        pixel under a water-layer stream surface keeps its radiance too, W's refraction source (tracks::water) }
+// P[9].z A9 area-light lobe texture (RGBA16F UAV, exposed radiance; AreaLobes.hlsl writes it, the LAYERED variants with
+//        AREA read it; UNX_NONE = none)
 // P[9].y A9 anisotropy word (Resolve.hlsl; UNX_NONE = no anisotropic material): read by the LAYERED variants, whose
 //        anisotropic pixels shade the base specular with the anisotropic lobe (AnisoShading.hlsli)
 // P[8] = { W's sun-space water map (v1.77): waterSunDepth, waterSunNormal, waterSunMedium, waterSunConstants (UNX_NONE:
 //        no water) } - a surface under water from the sun takes the refracted sun direction and the water's transmittance
 //        (Passes/Water/WaterLight.hlsli waterSunLight); P[9].x its caustics (waterSunCaustics, UNX_NONE: none)
+#ifndef AREA_LOBES
+#define AREA_LOBES 0  // AreaLobes.hlsl compiles this file with 1: the area-light lobe terms alone (see there)
+#endif
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -53,6 +58,9 @@
 #include "Passes/Shading/AreaLight.hlsli"
 #if LAYERED
 #include "Passes/Shading/AnisoShading.hlsli"
+#if AREA_LOBES
+#include "Passes/Shading/AreaQuadrature.hlsli"
+#endif
 #endif
 #include "Passes/Water/WaterLight.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
@@ -89,7 +97,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     // uniform (root constants), so the whole group reaches the barrier.
     const uint lane = tid.y * M_TILE + tid.x;
 #if !PLANAR
-    const bool probeTile = P[2].y != UNX_NONE && (P[4].z & 6) != 6;
+    const bool probeTile = !AREA_LOBES && P[2].y != UNX_NONE && (P[4].z & 6) != 6;
     ProbeSrvs probes;
     probes.probes = P[2].y;
     probes.occlusion = P[2].y;
@@ -136,6 +144,9 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     active = active && (P[1].z >= 0x80000000u ? ((P[1].z >> shadeClass) & 1u) != 0 : shadeClass == P[1].z);
     ShadedPixel sp = (ShadedPixel)0;
     if (active) sp = shadeSurface(pixel, word, materialIndex, m, words, gbPacked, depthValue, overflowHead);
+#if AREA_LOBES
+    return;  // (the lobe texture is written; edges keep the full kernel's radiance)
+#endif
 
     // ---- edge (E) pixels (EdgeDetect.hlsl marked them in the tile's mask) and the pixels of coverage tiles keep their
     // exposed linear radiance for the composites (EdgeComposite.hlsl, CoverageComposite.hlsl).
@@ -255,8 +266,13 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     atm.aerial = P[3].w;
     const bool haveAtmosphere = atm.transmittance != UNX_NONE;
 
+#if AREA_LOBES
+    float3 radiance = 0;
+    if (false)
+#else
     float3 radiance = m.emissive;
     if (P[1].w != UNX_NONE && mLoadTextureSet(P[4].y, materialIndex).emissive != UNX_NONE)
+#endif
     {
         Texture2D<float4> emissive = ResourceDescriptorHeap[P[1].w];
         radiance = emissive[pixel].rgb;  // material emissive x texture, resolved at the footprint
@@ -293,7 +309,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     }
     const float NoL = dot(n, l0);
     const uint experiment = P[4].z;
-    if (sunVisibility > 0 && (experiment & 16) == 0)
+    if (!AREA_LOBES && sunVisibility > 0 && (experiment & 16) == 0)
     {
         const float3 cap = E * (2 / (1 + cos(g_sunAngularRadius)));  // L_sun x solid angle of the disk
         // The disk's parts above and below the shading normal's horizon (cap-averaged clipped cosines).
@@ -382,11 +398,6 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         float3x3 specular = mul(shLtcInverse(P[5].y, max(NoV, 1e-4), s.roughness), frame);
         float3 specularAlbedo = shSpecularAlbedo(f0, max(NoV, 1e-4), s.roughness);
 #if LAYERED
-        if (aniso.on)
-        {
-            specular = shAnisoLtc(aniso, P[5].y, n, v);
-            specularAlbedo = shAnisoAlbedo(aniso, f0);
-        }
 #endif
 #if LAYERED == 1
         float3x3 coatSpecular = frame, coatBase = frame;
@@ -425,13 +436,28 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 const float window = shAreaWindow(light, p);
                 if (window <= 0) continue;
                 const float3 Lw = light.color * (light.intensity * window * visibility);
+#if AREA_LOBES
+                // A9 the lobes no LTC represents, over the light (AreaQuadrature.hlsli): the anisotropic base (MATERIAL_LAYERS
+                // 1.5; under a coat scaled like the base) and the sheen (1.4) - on the viewer's side
+                if (NoV > 0)
+                {
+#if LAYERED == 1
+                    if (aniso.on && !shSpecularInReflections(P[4].x, lightIndex))
+                        radiance += ((cover > 0) ? keep : 1.0) * Lw * shAreaAniso(light, p, aniso.t, aniso.b, n, v, aniso.alpha, f0, 1 + f0 * (1 / (aniso.ab.x + aniso.ab.y) - 1));
+#endif
+#if LAYERED == 2
+                    radiance += Lw * sheen.color * shAreaSheen(light, p, frame, v, sheen.roughness);
+#endif
+                }
+                continue;
+#endif
                 // Integrals in order: front diffuse, specular, back (Foliage) -- one inlined evaluator (the diffuse frames
                 // are rotations: closed forms on circular cones).
                 uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
                 const bool specularInReflections = shSpecularInReflections(P[4].x, lightIndex);  // P[4].x: B2 mask
                 float scaleBase = 1;
 #if LAYERED == 2
-                scaleBase = keepS;  // (the sheen lobe on area lights: its LTC, sheen step 3)
+                scaleBase = keepS;  // (the sheen lobe over area lights: the lobe texture, AreaLobes.hlsl)
 #endif
 #if LAYERED == 1
                 // A9 (MATERIAL_LAYERS 3.1): integrals 3 (the coat lobe, its own LTC, albedo E_ms(n.v)) and 4 (the base
@@ -451,6 +477,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 [loop] for (uint j = first; j < last; ++j)
                 {
                     if ((j == 1 || j >= 3) && specularInReflections) continue;
+#if LAYERED
+                    if (j == 1 && aniso.on) continue;  // (the anisotropic lobe over the light: the lobe texture, AreaLobes.hlsl)
+#endif
                     if (j == 2 && !foliage) continue;
 #if LAYERED == 1
                     const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (j == 3 ? coatSpecular : (j == 4 ? coatBase : (NoV > 0 ? frameBack : frame))));
@@ -479,6 +508,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #endif
                 continue;  // AREA=0: the scene has no area lights (ShadingSystem)
             }
+#if AREA_LOBES
+            continue;  // (punctual lights: the full kernel)
+#endif
             float3 l;
             const float3 toLight = (light.position - g_cameraPosition) - offset;
             float3 E = shPunctualIlluminance(light, toLight, l);
@@ -506,6 +538,12 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         }
     }
 
+#if AREA_LOBES
+    {
+        RWTexture2D<float4> lobes = ResourceDescriptorHeap[P[9].z];
+        lobes[pixel] = float4(radiance * g_exposure, 0);  // (exposed: f16 range)
+    }
+#else
     // ---- indirect (R): screen probes (main view) or the world cache (planar views). The viewer's side of the shading
     // normal reflects; Foliage also transmits what arrives on the other side.
     const float3 nv = NoV > 0 ? n : -n;
@@ -599,6 +637,14 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     if (NoV > 0) radiance += front * irradiance + incident * baseAlbedo;
     radiance += back * irradianceBack;
 
+#if LAYERED && AREA
+    // A9: the area-light lobes no LTC represents (AreaLobes.hlsl, dispatched before this kernel on the same tiles)
+    if (P[9].z != UNX_NONE)
+    {
+        RWTexture2D<float4> lobes = ResourceDescriptorHeap[P[9].z];
+        radiance += lobes[pixel].rgb / g_exposure;
+    }
+#endif
     // ---- air between the camera and the surface (S's air volume: atmosphere, shadowed air, local lights' air)
     radiance = radiance * airTransmittance + airInscatter;
 
@@ -607,6 +653,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     shExposureHistogram(P[4].w, radiance, pixel, asfloat(P[6].z));  // P[4].w histogram, P[6].z centre sigma (main view)
     const float3 withParticles = shParticles(radiance * g_exposure, pixel, P[5].z, P[5].w);
     color[pixel] = (P[4].z & 4096) ? float4(withParticles / g_exposure, 1) : shEncodeExposed(withParticles);
+#endif
     ShadedPixel o;
     o.radiance = radiance;
     return o;
