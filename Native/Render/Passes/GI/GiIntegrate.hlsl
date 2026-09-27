@@ -117,6 +117,14 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         [unroll] for (uint c = 0; c < 3; ++c) value[c] = giDitherHalf(value[c], giDitherUnit(seed + lane * 4 + c));
         const float dist = lerp(f16tof32(old.y >> 16), f16tof32(s.w & 0xFFFFu), a);
         b.Store2(address, uint2(giPackHalf2(value.r, value.g), giPackHalf2(value.b, dist)));
+        // the emitter texel (fourth samples block, GiTrace): same running mean
+        const float3 emitted = asfloat(samples[3 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane].xyz);
+        const uint emitAddress = giEmitterOffset(h) + (entry * GI_TEXEL_COUNT + lane) * 4;
+        const float3 emitPrevious = giIrrUnpack(b.Load(emitAddress)) * GI_LOAD_SCALE;
+        const bool emitFinite = all(emitted == emitted) && all(abs(emitted) < 3.0e38);
+        const uint re = seed + 4096 + lane * 4;
+        b.Store(emitAddress, giPackRgb9e5(lerp(emitPrevious, emitFinite ? emitted : emitPrevious, emitFinite ? alpha : 0.0) * GI_STORE_SCALE,
+                                          float3(giDitherUnit(re), giDitherUnit(re + 1), giDitherUnit(re + 2))));
     }
 
     // SH: lanes 0..8, one coefficient each (three channels), in the world frame.

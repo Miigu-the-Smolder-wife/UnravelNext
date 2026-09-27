@@ -482,7 +482,7 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
         gi.cache = s.giCache;
         gi.hash = s.giCache;
         gi.pad0 = gi.pad1 = 0;
-        const float3 mirror = giCacheRadiance(gi, P, nv, waterReflect(v, nv), lobePixel);
+        const float3 mirror = giCacheRadiance(gi, P, nv, waterReflect(v, nv), lobePixel, true);  // + emitter texels (no light loop here)
         reflected += mirror;
         rays.reflectFallback = F * mirror * g_exposure;
     }

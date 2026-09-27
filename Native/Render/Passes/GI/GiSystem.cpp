@@ -31,7 +31,7 @@ uint32_t asU(float f)
 // Cache buffer layout (GiCache.hlsli header fields 4..11, 24..27).
 struct Layout
 {
-    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, slotAnchor, end;
+    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, slotAnchor, emit, end;
 };
 
 Layout layoutOf(const GiSettings& s)
@@ -52,7 +52,8 @@ Layout layoutOf(const GiSettings& s)
     l.anchorMin = l.mapOwner + s.capacity * 4;
     l.irr = l.anchorMin + s.capacity * 8;
     l.slotAnchor = l.irr + s.capacity * 336;  // GI_IRR_STRIDE
-    l.end = l.slotAnchor + s.tableSlots * 8;  // deterministic anchors per table slot (GiDetFold)
+    l.emit = l.slotAnchor + s.tableSlots * 8;  // deterministic anchors per table slot (GiDetFold)
+    l.end = l.emit + s.capacity * 256;          // emitter texels: 64 x RGB9E5 per entry (GiCache.hlsli giEmitterOffset)
     return l;
 }
 
@@ -552,8 +553,9 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     const float skyBand = m_skyBand;
     const uint32_t rayCount = s.updatesPerFrame * 64;
     // Each ray's radiance and hemispherical octahedral coordinates, for the per-ray irradiance map and SH (GiIntegrate).
-    // Three blocks: texel samples (irradiance), emitter samples, texel values (radiance, distance, bounce; GiIntegrate blends).
-    const BufferRef samples = g.createBuffer({ "GI ray samples", (uint64_t)rayCount * 3 * 16, 16 });
+    // Four blocks: texel samples (irradiance), emitter samples, texel values (radiance, distance, bounce; GiIntegrate blends),
+    // the texel's analytic-emitter radiance (the emitter texels, K path only).
+    const BufferRef samples = g.createBuffer({ "GI ray samples", (uint64_t)rayCount * 4 * 16, 16 });
     g.addPass("r.gi.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::UavGraphics);

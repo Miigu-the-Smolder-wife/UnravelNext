@@ -159,7 +159,7 @@ void main(uint3 id : SV_DispatchThreadID)
         gi.cache = P[1].z;
         gi.hash = P[1].z;
         gi.pad0 = gi.pad1 = 0;
-        lobe = Rs * giCacheRadiance(gi, worldPos, n, reflect(-v, n), reflectionLobeHalfAngle(r, NoV));
+        lobe = Rs * giCacheRadiance(gi, worldPos, n, reflect(-v, n), reflectionLobeHalfAngle(r, NoV), true);  // + emitter texels (no light loop here)
     }
     // (the in-scatter in front of the glass is inside the behind value)
     const float3 exposed = radiance * airTransmittance * g_exposure, lobeExposed = lobe * airTransmittance * g_exposure;

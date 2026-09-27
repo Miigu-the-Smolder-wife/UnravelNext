@@ -18,11 +18,10 @@ float reflSunVisibility(RtSceneSrvs scene, float3 origin, uint seed)
     return rtVisible(scene, sr, RT_MASK_REFLECTION, ((P[5].x >> 24) & 1) ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE) ? 1.0 : 0.0;
 }
 
-// mask: reflRayMask (the job's path decides whether its rays see the analytic area lights).
 float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RayDesc r, float coneWidth, float coneSpread, uint seed, out float hitDistance,
-                       out float motion, uint mask = RT_MASK_REFLECTION | RT_MASK_EMITTER)
+                       out float motion)
 {
-    const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, mask);
+    const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER);
     motion = 0;
     if (hit.t < 0)
     {

@@ -14,12 +14,11 @@
 // Local lights at the hit: one next-event sample (HitLocalLights.hlsli) and a shadow ray; with them the cache's
 // irradiance is the indirect light only where the direct local light is shaded analytically (M) or by the hits' own
 // sample. Analytic area lights (raytracing.emitters, design 12.4 structure 2): a ray that meets one records radiance 0 in
-// the texel as well as in the irradiance samples - the light occludes what is behind it, and its direct term is shaded
-// exactly by its readers: M's LTC (diffuse, and specular wherever R's result is not its mirror ray), the hits' NEE sample
-// (full BRDF). The texel once kept the light's radiance as an emissive channel for the K path; an 8 x 8 texel (~20 deg)
-// with one ray per update turned a small bright light into a square of the texel's shape, noisy (hit probability x
-// radiance), which every reader then showed: M's K pixels and planar views (white squares, sparkles on the planar
-// camera's water), and ray hits, whose NEE already holds the light's specular (counted twice).
+// the texel and the irradiance samples (the light occludes what is behind it) and the light's radiance in the entry's
+// emitter texel (fourth samples block, GiCache.hlsli giEmitterOffset). Ray hits read the texels alone, their NEE sample
+// shades the light (once, at its true shape: the emitter radiance in the texels read by glossy hits drew texel squares
+// and counted the light's specular twice); the K path's maps and the light-loop-free readers add the emitter texels
+// (M leaves the stable lights' specular to the reflection paths: the interior's -3.47 ms lever, ARCHITECTURE 2.13).
 // Emissive meshes (FEATURES_GAME 12 (ii)): besides its texel ray every thread draws one point of RayScene's emissive
 // triangles from the anchor (HitLocalLights.hlsli) and both estimates of the irradiance are combined by the balance
 // heuristic: the texel rays sample directions with density q = |p|^3 / 2 per sr (uniform in the hemispherical
@@ -108,6 +107,7 @@ void GiTraceGen()
     float bounceShare = 0;     // luminance share of the radiance that came from the cache reads (GiIntegrate: Jacobi length)
     float3 emissionOut = 0;  // the hit's own emission's share the MIS moves to the emitter samples (1 - w_b) x emission
     bool emitter = false;
+    float3 emitterRadiance = 0;  // the analytic area light this ray met (emitter texel)
     float distanceToHit;
     if (hit.t < 0)
     {
@@ -120,10 +120,11 @@ void GiTraceGen()
     }
     else if (hit.instance == RT_INSTANCE_EMITTER)
     {
-        // An analytic area light (raytracing.emitters): 0 in the texel and the irradiance samples (header: its readers
-        // shade its direct term analytically).
+        // An analytic area light (raytracing.emitters): 0 in the texel and the irradiance samples, its radiance in the
+        // emitter texel (header).
         distanceToHit = hit.t;
         radiance = 0;
+        emitterRadiance = rtEmitterCounts(scene.pad, hit.primitive) ? rtEmitterRadiance(hit.primitive, r.Origin) : float3(0, 0, 0);
         emitter = true;
     }
     else
@@ -290,6 +291,7 @@ void GiTraceGen()
         emitterSamples[P[0].y + thread] = uint4(asuint(emitted), octEncode(normalize(emitLocal)));
     }
     samples[thread] = uint4(asuint(sampleRadiance), (uint)round(saturate(uv.x) * 65535.0) | ((uint)round(saturate(uv.y) * 65535.0) << 16));
+    samples[3 * P[0].y + thread] = uint4(asuint(emitterRadiance), 0);  // the emitter texel's value (GiIntegrate)
     // The texel's value for GiIntegrate (third block of the samples buffer): radiance, hit distance (fp16, >= 0), bit 16 =
     // the ray read a bounce term, bit 17 = from young cells. By count, not by luminance: a cell without data reads 0 (the
     // most biased read has no luminance). Bits 18-29: the bounce share of the radiance (luminance, unorm12).

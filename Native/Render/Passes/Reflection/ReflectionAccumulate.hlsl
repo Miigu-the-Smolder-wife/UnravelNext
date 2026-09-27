@@ -61,9 +61,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
     const ReflSurface s = reflSurface(depth, gbuffer, pixel);
     const GpuVisibleCluster vc = loadVisibleCluster(P[1].y, visVisibleCluster(visId));
     const uint instance = vc.instance;
-    // The key carries the path (bit 31: M, whose value holds the analytic area lights; G's does not, B2): a pixel that
-    // changes path starts a new history instead of mixing the two.
-    const uint key = (instance + 1) | (mode == REFL_M ? 0x80000000u : 0u);
+    const uint key = instance + 1;
     keysOut[pixel] = uint2(key, asuint(s.linearDepth));
     RWTexture2D<float2> distanceHistory = ResourceDescriptorHeap[P[1].z];
     const float motion = distanceHistory[pixel].y;  // ReflectionResolve: the value's hit motion

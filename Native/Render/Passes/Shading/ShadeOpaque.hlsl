@@ -217,15 +217,16 @@ float shOverflowVisibility(uint2 pixel, uint ordinal, uint overflowHead, inout u
 #endif
 }
 
-// B2: whether this stable area light's specular is in R's result at the pixel (its M path: a = 2), read once per pixel.
-bool shLightSpecularInResult(uint2 pixel, uint lightIndex, float NoV, uint experiment, inout uint mirrorState)
+// B2 (COVERAGE 12.4 structure 2): a stable area light's specular is in R's reflection paths in the main view (G/M rays
+// see the emitters; the K path's maps carry the cache's emitter texels). Planar views read the cache without them
+// (their giCacheRadiance is the texels alone, prefiltered: the emitter radiance at texel resolution drew squares there)
+// and shade every light's specular by LTC.
+bool shLightSpecularInResult(uint lightIndex)
 {
 #if PLANAR
     return false;
 #else
-    if (!shSpecularInReflections(P[4].x, lightIndex)) return false;
-    if (mirrorState == 0) mirrorState = NoV > 0 && (experiment & 4) == 0 && P[2].z != UNX_NONE && reflectionRadiance(P[2].z, pixel).a > 1.5 ? 2u : 1u;
-    return mirrorState == 2;
+    return shSpecularInReflections(P[4].x, lightIndex);
 #endif
 }
 
@@ -414,13 +415,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         const float e = modelDirectionalAlbedo(max(NoV, 1e-4), s.roughness);
         const float3 compensation = 1 + f0 * (1 / e - 1);
         const uint2 range = froxelLightRange(froxels, pixel, linearZ);
-        // B2 (COVERAGE 12.4 structure 2): a stable area light's specular is in R's reflection result only where that
-        // result is R's M path (a = 2, ReflectionResolve): its one mirror ray sees the analytic emitters. G samples, the
-        // planar cameras, the K path and the GI cache hold no emitter radiance (texel squares and one-ray noise of small
-        // bright lights: GiTrace), so the base lobe's LTC is M's everywhere else. The coat lobe (gather 1) is always K.
-        // Read lazily, at the first stable area light of the list (a value live over the light loop costs occupancy: M's
-        // measurement of hoisting the reflection read, M_STATUS 2026-09-25): 0 = not read yet, 1 = no, 2 = yes.
-        uint mirrorState = 0;
+
 #if AREA
         // Area lights (AreaLight.hlsli): the shading frame, its horizon-flipped twin for Foliage transmission and the
         // LTC transform of the specular lobe, formed once per pixel.
@@ -473,7 +468,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 if (NoV > 0)
                 {
 #if LAYERED == 1
-                    if (aniso.on && !shLightSpecularInResult(pixel, lightIndex, NoV, experiment, mirrorState))
+                    if (aniso.on && !shLightSpecularInResult(lightIndex))
                         radiance += ((cover > 0) ? keep : 1.0) * Lw * shAreaAniso(light, p, aniso.t, aniso.b, n, v, aniso.alpha, f0, 1 + f0 * (1 / (aniso.ab.x + aniso.ab.y) - 1));
 #endif
 #if LAYERED == 2
@@ -485,7 +480,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 // Integrals in order: front diffuse, specular, back (Foliage) -- one inlined evaluator (the diffuse frames
                 // are rotations: closed forms on circular cones).
                 uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
-                const bool specularInReflections = shLightSpecularInResult(pixel, lightIndex, NoV, experiment, mirrorState);  // P[4].x: B2 mask
+                const bool specularInReflections = shLightSpecularInResult(lightIndex);  // P[4].x: B2 mask (planar views: none)
                 float scaleBase = 1;
 #if LAYERED == 2
                 scaleBase = keepS;  // (the sheen lobe over area lights: the lobe texture, AreaLobes.hlsl)
@@ -507,7 +502,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #endif
                 [loop] for (uint j = first; j < last; ++j)
                 {
-                    if ((j == 1 || j == 4) && specularInReflections) continue;  // (j = 3, the coat lobe: its K path has no emitters)
+                    if ((j == 1 || j >= 3) && specularInReflections) continue;
 #if LAYERED
                     if (j == 1 && aniso.on) continue;  // (the anisotropic lobe over the light: the lobe texture, AreaLobes.hlsl)
 #endif

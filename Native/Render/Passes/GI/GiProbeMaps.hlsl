@@ -29,6 +29,8 @@ void main(uint2 group : SV_GroupID, uint texel : SV_GroupIndex)
     {
         const uint2 v = b.Load2(h.offTexels + (entry * GI_TEXEL_COUNT + texel) * 8);
         radiance = float3(f16tof32(v.x), f16tof32(v.x >> 16), f16tof32(v.y));  // x GI_STORE_SCALE, as stored
+        // + the emitter texel (K path: M leaves the stable area lights' specular to it, GiCache.hlsli giEmitterOffset)
+        radiance += giEmitterTexel(b, h, entry, uint2(texel % 8, texel / 8));
     }
     const uint2 tx = uint2(texel % 8, texel / 8);
     const float w = giMapTexelWeight(tx, 8);

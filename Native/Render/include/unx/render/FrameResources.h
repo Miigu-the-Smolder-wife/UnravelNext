@@ -178,10 +178,11 @@ struct FrameResources
                                    // knots per texel) and block profiles; ShadowSrvs.layers
     uint32_t vsmConstants = UINT32_MAX;  // CBV descriptor of this frame's VSM constants    [S]
     // v1.45 (B2, COVERAGE 12.4 structure 2): raw SRV of 1 bit per scene light, set when the light's revision has held for  [M]
-    // >= 8 frames and raytracing.emitters is on. M leaves those area lights' LTC specular to R's M path (its mirror ray
-    // sees the emitters; view.reflection a = 2) and shades it by LTC everywhere else (G rays, the K path and the GI cache
-    // hold no emitter radiance, cloud/render-fixes); R excludes the unset ones from direct emitter hits, so no light is
-    // counted twice or missed.
+    // >= 8 frames and raytracing.emitters is on. M leaves those area lights' LTC specular to R's reflection paths in the
+    // main view (G/M rays see the emitters; the K path's maps carry the GI cache's emitter texels) and shades it by LTC in
+    // planar views (their cache reads are the texels alone); R's ray hits shade the lights by their NEE sample and read
+    // the texels without the emitter texels. R excludes the unset ones from direct emitter hits, so no light is counted
+    // twice or missed.
     // UINT32_MAX when raytracing.emitters is off (M evaluates every area light's specular).
     uint32_t areaLightStable = UINT32_MAX;
     // v1.49 (B4): raw SRV of this frame's celestial record (Celestial.hlsli atmosphereCelestial; upload ring, not a graph  [S]

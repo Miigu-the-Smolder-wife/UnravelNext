@@ -265,7 +265,7 @@ void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w);
 // One level's trilinear accumulation over the 8 cells of the point (entries that exist and have been updated).
 template <typename B>
 void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, bool wantRadiance, uint nc, uint level, inout float3 sumE,
-                       inout float3 sumL, inout float weight, float cone = 0)
+                       inout float3 sumL, inout float weight, float cone = 0, bool emitters = false)
 {
     const float s = giCellSize(h, level);
     const float3 f = worldPos / s - 0.5;
@@ -286,7 +286,7 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
             float3 tb, bb;
             giBasis(n, tb, bb);
             const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
-            sumL += w * giTexelRadianceCone(b, h, entry, giHemiOctEncode(local), cone);
+            sumL += w * giTexelRadianceCone(b, h, entry, giHemiOctEncode(local), cone, emitters);
         }
         weight += w;
         giKeepRead(b, h, entry, w);
@@ -300,7 +300,7 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
 // cone: the radiance's prefilter half-angle (giTexelRadianceCone; 0 = texel resolution, the ray hits' own reads).
 template <typename B>
 void giCacheLevels(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, bool wantRadiance, uint minLevel, out float3 sumE, out float3 sumL,
-                   out float weight, float cone = 0)
+                   out float weight, float cone = 0, bool emitters = false)
 {
     const uint nc = giNormalClass(normal);
     const uint own = giLevel(h, worldPos), first = max(own, minLevel);
@@ -308,9 +308,9 @@ void giCacheLevels(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, 
     float w = 0;
     uint level = first;
     [loop] for (uint attempt = 0; attempt < GI_LEVEL_CLIMB && w <= 0 && level <= h.maxLevel; ++attempt, ++level)
-        giAccumulateLevel(b, h, worldPos, normal, dir, wantRadiance, nc, level, e, l, w, cone);
+        giAccumulateLevel(b, h, worldPos, normal, dir, wantRadiance, nc, level, e, l, w, cone, emitters);
     [loop] for (uint finer = first; w <= 0 && finer > own && first - finer < GI_LEVEL_CLIMB; --finer)
-        giAccumulateLevel(b, h, worldPos, normal, dir, wantRadiance, nc, finer - 1, e, l, w, cone);
+        giAccumulateLevel(b, h, worldPos, normal, dir, wantRadiance, nc, finer - 1, e, l, w, cone, emitters);
     sumE = e;
     sumL = l;
     weight = w;
@@ -452,9 +452,19 @@ float3 giAnchorPosition(B b, GiHeader h, uint entry) { return asfloat(b.Load3(h.
 template <typename B>
 float3 giAnchorNormal(B b, GiHeader h, uint entry) { return giUnpackAnchorNormal(b.Load(h.offAnchor + entry * 16 + 12)); }
 
-// Incident radiance from a direction, bilinear over the 8 x 8 texels of one entry.
+// Emitter texels (after the deterministic anchors' table): per entry 64 RGB9E5 words x GI_STORE_SCALE, the radiance of
+// the analytic area lights (raytracing.emitters, the stable ones) its texel rays met, apart from the texels. The texels
+// hold everything else: ray hits read them with their own next-event sample of the lights (the lights' specular once,
+// at its true shape), and the K path (the probes' maps: texels + emitter texels) and the cache readers without a light
+// loop (glass, water) read both: M leaves those lights' specular to the reflection paths there (COVERAGE 12.4
+// structure 2, ARCHITECTURE 2.13: the interior's -3.47 ms lever), prefiltered by the lobe's cone.
+uint giEmitterOffset(GiHeader h) { return h.offSlotAnchor + h.tableSlots * 8; }
 template <typename B>
-float3 giTexelRadiance(B b, GiHeader h, uint entry, float2 uv)
+float3 giEmitterTexel(B b, GiHeader h, uint entry, uint2 t) { return giIrrUnpack(b.Load(giEmitterOffset(h) + (entry * GI_TEXEL_COUNT + t.y * GI_TEXELS + t.x) * 4)); }
+
+// Incident radiance from a direction, bilinear over the 8 x 8 texels of one entry; emitters: plus its emitter texels.
+template <typename B>
+float3 giTexelRadiance(B b, GiHeader h, uint entry, float2 uv, bool emitters = false)
 {
     const float2 x = uv * GI_TEXELS - 0.5;
     const int2 i0 = int2(floor(x));
@@ -466,7 +476,9 @@ float3 giTexelRadiance(B b, GiHeader h, uint entry, float2 uv)
         const uint2 t = uint2(clamp(i0 + o, 0, int(GI_TEXELS) - 1));
         const uint2 v = b.Load2(h.offTexels + (entry * GI_TEXEL_COUNT + t.y * GI_TEXELS + t.x) * 8);
         const float w = (o.x ? f.x : 1 - f.x) * (o.y ? f.y : 1 - f.y);
-        r += w * float3(f16tof32(v.x), f16tof32(v.x >> 16), f16tof32(v.y));
+        float3 texel = float3(f16tof32(v.x), f16tof32(v.x >> 16), f16tof32(v.y));
+        if (emitters) texel += giEmitterTexel(b, h, entry, t);
+        r += w * texel;
     }
     return r * GI_LOAD_SCALE;
 }
@@ -480,14 +492,14 @@ float3 giTexelRadiance(B b, GiHeader h, uint entry, float2 uv)
 // and continuous between. Cost: 16 texel loads instead of 4 where lod > 0. Below the lod 0 cone (mirror-like lobes) the
 // bilinear texel value as before.
 template <typename B>
-float3 giTexelRadianceCone(B b, GiHeader h, uint entry, float2 uv, float cone)
+float3 giTexelRadianceCone(B b, GiHeader h, uint entry, float2 uv, float cone, bool emitters = false)
 {
     const float lod = clamp(log2(max(cone, 1e-3) / (1.5 * 0.1763)), 0.0, 2.0);
-    if (lod <= 0) return giTexelRadiance(b, h, entry, uv);
+    if (lod <= 0) return giTexelRadiance(b, h, entry, uv, emitters);
     const float o = (exp2(lod) - 1) * 0.5 / GI_TEXELS;
     float3 r = 0;
     [unroll] for (uint k = 0; k < 4; ++k)
-        r += giTexelRadiance(b, h, entry, uv + float2(k & 1 ? o : -o, k & 2 ? o : -o));
+        r += giTexelRadiance(b, h, entry, uv + float2(k & 1 ? o : -o, k & 2 ? o : -o), emitters);
     return r * 0.25;
 }
 
@@ -510,13 +522,15 @@ void giCacheLightingAt(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
 // cone coneHalfAngle (giTexelRadianceCone: the K path's level of detail; texel resolution for lobes within a texel).
 // Readers: M's planar views, glass (TranslucentComposite), W's water fallback. Without the prefilter a rough lobe read one
 // texel's value: a sharp, texel-shaped image of bright content (sky openings, lit windows) on rough surfaces.
-float3 giCacheRadiance(GiSrvs s, float3 worldPos, float3 normal, float3 dir, float coneHalfAngle)
+// emitters: add the emitter texels (readers that shade no area light's specular themselves: glass, water); M's planar
+// views shade every light by LTC and read the texels alone.
+float3 giCacheRadiance(GiSrvs s, float3 worldPos, float3 normal, float3 dir, float coneHalfAngle, bool emitters = false)
 {
     ByteAddressBuffer b = ResourceDescriptorHeap[s.cache];
     const GiHeader h = giHeader(b);
     float3 sumE, sumL;
     float weight;
-    giCacheLevels(b, h, worldPos, normal, dir, true, 0, sumE, sumL, weight, coneHalfAngle);
+    giCacheLevels(b, h, worldPos, normal, dir, true, 0, sumE, sumL, weight, coneHalfAngle, emitters);
     return weight > 0 ? sumL / weight : 0;
 }
 

@@ -1,8 +1,7 @@
 // unx-kernel: cs_6_6 main
 // Reflection resolve (ARCHITECTURE 2.6: "SR = evaluation"), one group per tile that ReflectionClassify marked. Per pixel:
 //   K: a = 0 (M evaluates it);
-//   M: its own job's result, a = 2 (its ray saw the analytic area lights: M adds no LTC specular for them; G and planar
-//      pixels a = 1: M adds it, their rays and cameras do not see the lights);
+//   M: its own job's result;
 //   G: the jobs at the corners of its cell on its spacing's grid (multiples of s; ReflectionJobs makes each G corner a
 //      job), weighted by bilinear position, distance to the pixel's tangent plane and normal agreement; when none agrees
 //      (an object edge) a = 0 this frame (K fallback) and the history's distance is stored negative: next frame the pixel
@@ -53,9 +52,8 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     }
     if (mode == REFL_M)
     {
-        // a = 2: the mirror ray saw the analytic area lights (reflRayMask), so M leaves their specular to this value (B2)
         const uint3 r = results[reflJob(m)];
-        reflection[pixel] = float4(reflStorable(reflResultRadiance(r)), 2);
+        reflection[pixel] = float4(reflStorable(reflResultRadiance(r)), 1);
         history[pixel] = float2(reflSmoothedDistance(history[pixel].x, reflResultDistance(r)), reflResultMotion(r));
         return;
     }
