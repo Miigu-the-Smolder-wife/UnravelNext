@@ -130,11 +130,18 @@ float shadowSunTransmittanceAt(ShadowSrvs s, float3 worldPos, float footprint, f
 
 // The 3 x 3 pages around 'centre' on level L are all resident: the nine table words read together (a short-circuit loop
 // waited for each read before the next; the answer is the same - shadow.vsm.use_stats counts all nine as read).
+// A kernel at the DXIL limit defines SHADOW_RESIDENCY_LOOP 1 (the short-circuit loop: the same answer, less code).
 bool shadowPagesResident3x3(VsmResources r, int2 centre, uint L)
 {
+#if SHADOW_RESIDENCY_LOOP
+    bool covered = true;
+    [loop] for (uint q = 0; q < 9 && covered; ++q) covered = vsmEntry(r, centre + int2((int)(q % 3) - 1, (int)(q / 3) - 1), L) != 0;
+    return covered;
+#else
     uint all = 1;
     [unroll] for (uint q = 0; q < 9; ++q) all &= vsmEntry(r, centre + int2((int)(q % 3) - 1, (int)(q / 3) - 1), L) != 0 ? 1u : 0u;
     return all != 0;
+#endif
 }
 
 // Sun visibility in [0, 1] at a world point with geometric normal (ray hits, R): the direct view's estimator (SMRT:

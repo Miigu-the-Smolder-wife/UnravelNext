@@ -69,6 +69,10 @@ float3 giCacheIrradianceScreenQuad(ByteAddressBuffer b, GiHeader h, bool valid, 
         }
         else if (active)
             giScreenCells(b, h, level, nc, c0, entryLo, entryHi, anchorLo, anchorHi, has);
+        // this lane's corners: those whose anchor sees this lane's point (gi.anchor_visibility; the shared maps are
+        // evaluated for the quad's cells, the weights take this lane's)
+        const uint hasShared = has;
+        if (active) has = giScreenSeen(b, h, entryLo, entryHi, anchorLo, anchorHi, has, worldPos, giCellSize(h, min(level, h.maxLevel)));
         float3 s = 0;
         float w = 0;
         if (shareMaps)
@@ -76,7 +80,7 @@ float3 giCacheIrradianceScreenQuad(ByteAddressBuffer b, GiHeader h, bool valid, 
             // corners 2q and 2q + 1 evaluated here (0 where the corner has no data), then every lane's own weights
             // (both maps' loads unconditional: a corner without data reads entry 0, and its value is not used)
             const uint cA = 2 * quadLane, cB = cA + 1;
-            const bool onA = (has & (1u << cA)) != 0, onB = (has & (1u << cB)) != 0;
+            const bool onA = (hasShared & (1u << cA)) != 0, onB = (hasShared & (1u << cB)) != 0;
             const float3 mA = giIrrMapAt(b, h, onA ? giScreenPick(entryLo, entryHi, cA) : 0u, giUnpackAnchorNormal(onA ? giScreenPick(anchorLo, anchorHi, cA) : 0u), normal);
             const float3 mB = giIrrMapAt(b, h, onB ? giScreenPick(entryLo, entryHi, cB) : 0u, giUnpackAnchorNormal(onB ? giScreenPick(anchorLo, anchorHi, cB) : 0u), normal);
             const float3 m0 = onA ? mA : 0, m1 = onB ? mB : 0;

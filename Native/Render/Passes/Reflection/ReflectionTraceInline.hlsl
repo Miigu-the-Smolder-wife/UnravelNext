@@ -5,6 +5,7 @@
 // the job count; other jobs return at once). JOB = the job mode this library handles (1 REFL_M, 2 REFL_G; a compile
 // constant, so each library holds one mode's code and stays under the kernel size limit); both run every frame. The same value as the split passes (ReflectionHit.hlsli), only slower.
 // Root constants: ReflectionRay.hlsli.
+#define SHADOW_RESIDENCY_LOOP 1  // (the overflow path is at the DXIL limit: ShadowVisibility.hlsli's loop form)
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionHit.hlsli"

@@ -109,6 +109,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.screenFilterCells = (float)q.number("gi.screen_filter_cells");
     s.experimentDisable = (uint32_t)q.integer("gi.experiment_disable");
     s.deterministic = q.boolean("gi.deterministic");
+    s.anchorVisibility = q.has("gi.anchor_visibility") ? q.boolean("gi.anchor_visibility") : true;
     // Fixed by the kernels (GiCache.hlsli, GiProbeGather.hlsl, GiInternal.hlsli probe offsets).
     if (q.integer("gi.cache_octahedral_texels") != 8) fail("gi.cache_octahedral_texels must be 8 (GI_TEXELS)");
     if (q.integer("gi.near_occlusion_taps") != 16) fail("gi.near_occlusion_taps must be 16 (GiProbeGather)");
@@ -360,7 +361,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     };
     uint32_t cam[3];
     std::memcpy(cam, &camera, 12);
-    compute("r.gi.begin", "Passes/GI/GiBegin", 1, { frame, m_epoch, s.deterministic ? 1u : 0u, cam[0], cam[1], cam[2] });
+    compute("r.gi.begin", "Passes/GI/GiBegin", 1, { frame, m_epoch, (s.deterministic ? 1u : 0u) | (s.anchorVisibility ? 2u : 0u), cam[0], cam[1], cam[2] });
     // Deterministic anchors: last frame's per-slot candidates (its ray passes) into the entries before the table clears.
     if (s.deterministic) compute("r.gi.det.fold", "Passes/GI/GiDetFold", groups(s.tableSlots), {});
     // C9 origin rebase: the entries move by whole cells before this frame's rehash files them (GiShift.hlsl).

@@ -1,7 +1,7 @@
 // unx-kernel: cs_6_6 main
 // GI frame setup (one group): frame stamp, lighting epoch, main camera (cell levels for every view), per-frame counters
 // and statistics, the age histogram, this frame's hit list, and the background cursor advanced past last frame's range.
-// P[0] = { cache UAV, frame, epoch, flags (bit 0 = gi.deterministic) }, P[1] = { camera xyz (float bits), 0 }
+// P[0] = { cache UAV, frame, epoch, flags (bit 0 = gi.deterministic, bit 1 = gi.anchor_visibility) }, P[1] = { camera xyz (float bits), 0 }
 #include "Passes/GI/GiInternal.hlsli"
 
 [numthreads(128, 1, 1)]

@@ -38,6 +38,9 @@ hit_cell_footprint_scale = 2.0     # bounce cells (2nd+ bounce irradiance at ray
                                    # direct sun at hits is an exact shadow ray
 deterministic = false              # same inputs -> bit-identical GI: update selection by key priority (radix select),
                                    # ray seeds by key (user decision: a mode switch until the budget shows the margin)
+anchor_visibility = true           # lookups skip a cell entry whose anchor's rays stop before the point (the entry's texel
+                                   # toward it: mean hit distance x 1.5 + a quarter cell; > 45 deg behind its surface): light
+                                   # of the other side of a wall sharing a coarse cell (the ~3 % sunlight leak) is not read
 experiment_disable = 0             # cost attribution only (recorded in the quality hash): 8 = hit materials without
                                    # textures, 16 = no sun at GI hits, 32 = GI rays that leave the scene below the
                                    # horizon get 0 (not the sky LUT's lit planet ground), 64 = independent ray jitter per
