@@ -140,6 +140,9 @@ public:
     const std::vector<LayoutRange>& layoutPrevious() const;
     // The render pass's inputs, imported into 'graph' (frame 'importIndex'); valid = false before the first tick.
     ParticleRenderInputs renderInputs(render::RenderGraph& graph, uint64_t importIndex);
+    // Whether the stream's program table (the last NV_STREAM_PROGRAMS) has a program with this output (NV_SPRITE.., e.g. 5 =
+    // distortion): passes that only draw one output skip themselves when no program has it.
+    bool hasProgramOutput(uint32_t output) const;
     // A3 FX particle lights (NV_STREAM_PROGRAM_LIGHT, render A's contract): of the latest recorded tick, one light slot per
     // active emitter row whose program has the flag (emissive sprites: material 0), in row order, and the chunks of its
     // particles in the render ranges (range index, offset in the range, count <= kLightChunk, slot), ordered by slot then

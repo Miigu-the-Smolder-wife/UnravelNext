@@ -47,6 +47,8 @@ TextureRef volumeMedia(FramePassContext& fc, ViewResources& main, BufferRef frox
     if (!fc.trackState || !froxelLights.valid()) return {};
     fx::ParticleSystem* system = fx::findParticles(*fc.trackState);
     if (!system) return {};
+    constexpr uint32_t kOutputVolume = 3;  // NV_VOLUME (FX StreamRecords.hlsli FX_OUTPUT_VOLUME): no such program, no media
+    if (!system->hasProgramOutput(kOutputVolume)) return {};
     volume::VolumeFrame f = frameOf(fc, main);
     f.froxelLights = froxelLights;
     f.lighting.froxelLights = froxelLights;
@@ -61,6 +63,10 @@ void distortion(FramePassContext& fc, ViewResources& view)
     if (!fc.trackState) return;
     fx::ParticleSystem* system = fx::findParticles(*fc.trackState);
     if (!system) return;
+    // No distortion program in the stream: no haze field, and M's full-screen distortion pass (0.28 ms at 4K in the train,
+    // which has no haze [measured, e6fa5e8]) does not run - its displacement would be 0 everywhere.
+    constexpr uint32_t kOutputDistortion = 5;  // NV_DISTORTION (FX StreamRecords.hlsli FX_OUTPUT_DISTORTION)
+    if (!system->hasProgramOutput(kOutputDistortion)) return;
     volume::VolumeFrame f = frameOf(fc, view);
     f.haze = true;
     const volume::VolumeOutput out = volumePass(fc).record(*system, fc.graph, fc.shaders, fc.quality, fc.frame.frameIndex, f);

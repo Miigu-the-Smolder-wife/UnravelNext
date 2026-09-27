@@ -1394,6 +1394,13 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
     }
 }
 
+bool ParticleSystem::hasProgramOutput(uint32_t output) const
+{
+    for (const uint32_t o : m_impl->programOutput)
+        if (o == output) return true;
+    return false;
+}
+
 TickReadback ParticleSystem::readback(uint64_t stream, uint64_t generation, uint64_t tick)
 {
     Impl& m = *m_impl;
