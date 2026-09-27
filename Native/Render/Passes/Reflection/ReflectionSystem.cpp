@@ -671,7 +671,12 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             if (behind) x0 = y0 = 0, x1 = (float)width, y1 = (float)height;  // crosses the near plane: whole view
             // The origin on the 8 x 8 grid: a classification tile is one tile of the view's tile mask (ReflectionClassify).
             const uint32_t ix0 = (uint32_t)std::clamp(std::floor(x0) - 1, 0.0f, (float)width) & ~7u, iy0 = (uint32_t)std::clamp(std::floor(y0) - 1, 0.0f, (float)height) & ~7u;
-            const uint32_t ix1 = (uint32_t)std::clamp(std::ceil(x1) + 1, 0.0f, (float)width), iy1 = (uint32_t)std::clamp(std::ceil(y1) + 1, 0.0f, (float)height);
+            uint32_t ix1 = (uint32_t)std::clamp(std::ceil(x1) + 1, 0.0f, (float)width), iy1 = (uint32_t)std::clamp(std::ceil(y1) + 1, 0.0f, (float)height);
+            // The size in 64-pixel steps (within the view): the reflection camera's textures and its whole chain take it,
+            // and the render graph's plan key their sizes (an exact rectangle changed them with every camera move). The
+            // camera draws only the mirror's pixels (planarMask): the margin costs mask texels.
+            if (ix1 > ix0) ix1 = std::min(width, ix0 + (ix1 - ix0 + 63) / 64 * 64);
+            if (iy1 > iy0) iy1 = std::min(height, iy0 + (iy1 - iy0 + 63) / 64 * 64);
             const uint64_t rect = (uint64_t)(ix1 - ix0) * (iy1 - iy0);
             if (ix1 <= ix0 || iy1 <= iy0 || (double)rect < minPixels) return;  // the rectangle bounds the count too
             const bool current = m_planeLastSeen[k] + 1 == frame && m_planeRunStart[k] + fc.framesInFlight <= frame;

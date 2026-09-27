@@ -1162,9 +1162,11 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         if (!volumeRanges.empty()) copies.push_back({ &m.volumeRanges, volumeOffset, volumeRanges.size() * 32 });
         if (!ribbonDraw.empty()) copies.push_back({ &m.ribbonDrawRanges, drawRangesOffset, ribbonDraw.size() * 16 });
         if (!ribbonDrawRows.empty()) copies.push_back({ &m.ribbonDrawRows, drawRowsOffset, ribbonDrawRows.size() * 4 });
+        // Every input is declared, copied this tick or not: the pass's uses do not depend on which sections the tick
+        // carries (the render graph's plan key; a section-dependent use list rebuilt the plan on most frames).
         g.addPass("fx.particles.upload", queueType,
                   [&](PassBuilder& b) {
-                      for (const Copy& c : copies) b.use(c.dst->ref, Use::CopyDst);
+                      for (Buf* x : inputs) b.use(x->ref, Use::CopyDst);
                       b.keep();
                   },
                   [copies, upload](PassContext& c) {
@@ -1281,11 +1283,13 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             tc.heightTiles = c.srv(m.heightTiles.ref);
             std::memcpy(constantsCpu, &tc, sizeof tc);
         };
+        // A pass with no groups this tick is still recorded (no Dispatch): the tick's pass list depends on the scene's
+        // structure (collision, depths, ribbons), not on this tick's counts (the render graph's plan key).
         auto dispatch = [&](const char* name, const char* kernel, std::array<uint32_t, 8> p, uint32_t groupCount, bool first = false, bool overlap = false) {
-            if (groupCount == 0) return;
             ID3D12PipelineState* pso = shaders.compute(kernel);
             g.addPass(name, queueType, overlap ? RenderGraph::SetupFn(declareOverlap) : RenderGraph::SetupFn(declare), [=](PassContext& c) mutable {
                 if (first) fillConstants(c);
+                if (groupCount == 0) return;
                 c.cmd->SetPipelineState(pso);
                 c.bindFrameConstants(constants);
                 c.computeConstants(p.data(), 8);

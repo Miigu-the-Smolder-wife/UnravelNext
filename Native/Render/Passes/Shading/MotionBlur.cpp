@@ -222,7 +222,10 @@ void rotationPasses(FramePassContext& fc, const ViewResources& view, TextureRef 
 {
     RenderGraph& g = fc.graph;
     const uint32_t w = view.view.width, h = view.view.height;
-    const TextureRef map = g.createTexture(TextureDesc{ "m.motion.rotationMap", r.mapWidth, r.mapHeight, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+    // (allocated in 256-texel steps: the map's size follows the turn every frame, the render graph's plan key its texture;
+    // the kernels take the map's own size from the constants)
+    auto step = [](uint32_t n) { return std::max(n, std::min((n + 255) / 256 * 256, 16384u)); };
+    const TextureRef map = g.createTexture(TextureDesc{ "m.motion.rotationMap", step(r.mapWidth), step(r.mapHeight), 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
     ID3D12PipelineState* fill = fc.shaders.compute("Passes/Shading/MotionRotation.STEP0");
     ID3D12PipelineState* scan = fc.shaders.compute("Passes/Shading/MotionRotation.STEP1");
     ID3D12PipelineState* read = fc.shaders.compute("Passes/Shading/MotionRotation.STEP2");

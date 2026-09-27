@@ -255,6 +255,12 @@ struct RenderGraph::Impl
     std::vector<ResourceNode> resources;
     std::vector<PassNode> passes;
     std::unique_ptr<Plan> plan;
+    // Recently executed plans besides the current one, most recent first (kPlanCache - 1 at most). Frames alternate
+    // between a few structures (VFX ticks per frame: 0, 1 or 2 packets; ring slots; conditional passes that flip): each
+    // keeps its compiled plan, placed resources and views, and a frame whose key matches one of them reuses it. Their
+    // placed resources share the heap like consecutive frames of different plans always have.
+    static constexpr size_t kPlanCache = 8;
+    std::vector<std::unique_ptr<Plan>> spare;
     ComPtr<ID3D12Heap> heap;
     uint64_t heapSize = 0;
     // Views of imported resources, reused across frames. An entry holds a reference to its resource, so while it is
@@ -279,6 +285,7 @@ struct RenderGraph::Impl
     ~Impl()
     {
         if (plan) releasePlan(*plan);
+        for (auto& p : spare) releasePlan(*p);
         for (auto& [ptr, e] : importedViews)
         {
             releaseViews(e.views);
@@ -371,14 +378,14 @@ struct RenderGraph::Impl
         const uint64_t step = std::max(octave / 8, granule);
         return (c + step - 1) / step * step;
     }
-    void bufferCapacities()
+    void bufferCapacities(const Plan* base)
     {
         for (uint32_t r = 0; r < resources.size(); ++r)
         {
             ResourceNode& n = resources[r];
             if (n.texture || n.imported) continue;
             const uint64_t need = n.bdesc.size;
-            const uint64_t prev = plan && r < plan->capacities.size() && plan->resourceNames[r] == n.name ? plan->capacities[r] : 0;
+            const uint64_t prev = base && r < base->capacities.size() && base->resourceNames[r] == n.name ? base->capacities[r] : 0;
             if (prev >= need && need * 2 >= prev) n.capacity = prev;
             else n.capacity = bufferBucket(prev != 0 && need > prev ? need + need / 4 : need);
         }
@@ -452,7 +459,9 @@ struct RenderGraph::Impl
         return out;
     }
 
-    void compile(RenderGraphStats& stats)
+    // prev: the plan executed last (kept in the cache): identical placed resources are shared with it (views are this
+    // plan's own).
+    void compile(RenderGraphStats& stats, const Plan* prev)
     {
         auto t0 = std::chrono::steady_clock::now();
         auto next = std::make_unique<Plan>();
@@ -659,11 +668,12 @@ struct RenderGraph::Impl
             check(device.d3d()->CreateHeap(&hd, IID_PPV_ARGS(&heap)), "CreateHeap(render graph transients)");
             heap->SetName(L"unx render graph transients");
             heapSize = hd.SizeInBytes;
-            if (plan)
-            {
-                releasePlan(*plan);  // placed resources of the old heap
-                plan.reset();
-            }
+            // every cached plan's placed resources are in the old heap
+            if (plan) releasePlan(*plan);
+            plan.reset();
+            for (auto& p : spare) releasePlan(*p);
+            spare.clear();
+            prev = nullptr;
         }
         DescriptorHeaps& dh = device.descriptors();
         for (uint32_t r : placeOrder)
@@ -674,13 +684,11 @@ struct RenderGraph::Impl
             ph.descKey = mix(mix(mix(std::hash<std::string_view>{}(std::string_view(reinterpret_cast<const char*>(&descs[r]), sizeof(D3D12_RESOURCE_DESC1))), ph.offset),
                                  heapSize),
                              n.texture ? ((uint64_t)n.tdesc.srvFormat << 32 | n.tdesc.uavFormat) : n.bdesc.stride);
-            // Reuse an identical placed resource from the previous plan, with its views plus any view this plan's uses
-            // need that the previous plan's did not (a consumer culled before, live now).
-            if (plan && r < plan->physical.size() && plan->physical[r].resource && plan->physical[r].descKey == ph.descKey)
+            // Share an identical placed resource with the previous plan (same memory, same description); the views are
+            // this plan's own (each plan releases its own descriptors).
+            if (prev && r < prev->physical.size() && prev->physical[r].resource && prev->physical[r].descKey == ph.descKey)
             {
-                ph.resource = std::move(plan->physical[r].resource);
-                ph.views = plan->physical[r].views;
-                plan->physical[r].views = {};
+                ph.resource = prev->physical[r].resource;
                 createViews(r, ph.resource.Get(), sum[r].srv, sum[r].uav, sum[r].rt, sum[r].ds, sum[r].dsRead, ph.views);
                 continue;
             }
@@ -699,11 +707,6 @@ struct RenderGraph::Impl
             createViews(r, ph.resource.Get(), sum[r].srv, sum[r].uav, sum[r].rt, sum[r].ds, sum[r].dsRead, ph.views);
         }
         (void)dh;
-        if (plan)
-        {
-            releasePlan(*plan);
-            plan.reset();
-        }
 
         // 5. Barriers and queue synchronisation.
         //    Same queue: a barrier's "before" scope is exactly the accesses since the previous barrier on that resource;
@@ -1400,14 +1403,37 @@ bool RenderGraph::sharesMemory(uint32_t a, uint32_t b) const
 void RenderGraph::execute(GpuProfiler* profiler)
 {
     Impl& impl = *m_impl;
-    impl.bufferCapacities();
-    const uint64_t key = impl.structureKey();
-    const bool reuse = impl.plan && impl.plan->key == key;
+    // The current plan, then the cached ones: the capacities follow the candidate (a buffer keeps its capacity there), and
+    // the first whose key matches is this frame's plan.
+    bool reuse = false;
+    if (impl.plan)
+    {
+        impl.bufferCapacities(impl.plan.get());
+        reuse = impl.plan->key == impl.structureKey();
+    }
+    for (size_t i = 0; !reuse && i < impl.spare.size(); ++i)
+    {
+        impl.bufferCapacities(impl.spare[i].get());
+        if (impl.spare[i]->key != impl.structureKey()) continue;
+        std::unique_ptr<Impl::Plan> hit = std::move(impl.spare[i]);
+        impl.spare.erase(impl.spare.begin() + (ptrdiff_t)i);
+        if (impl.plan) impl.spare.insert(impl.spare.begin(), std::move(impl.plan));
+        impl.plan = std::move(hit);
+        reuse = true;
+    }
     if (!reuse)
     {
+        impl.bufferCapacities(impl.plan.get());
         ++impl.replans;
         if (impl.plan && (impl.replans <= 16 || impl.replans % 100 == 0)) impl.logReplan();
-        impl.compile(m_stats);
+        // the current plan stays cached (most recent first); the oldest beyond the cache is released
+        if (impl.plan) impl.spare.insert(impl.spare.begin(), std::move(impl.plan));
+        while (impl.spare.size() > Impl::kPlanCache - 1)
+        {
+            impl.releasePlan(*impl.spare.back());
+            impl.spare.pop_back();
+        }
+        impl.compile(m_stats, impl.spare.empty() ? nullptr : impl.spare.front().get());
     }
     else
     {

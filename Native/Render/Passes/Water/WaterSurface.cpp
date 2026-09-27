@@ -250,8 +250,12 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
             }
             if (behind) x0 = 0, y0 = 0, x1 = (float)W, y1 = (float)H;
             const int ix0 = std::max(0, (int)std::floor(x0) - 1), iy0 = std::max(0, (int)std::floor(y0) - 1);
-            const int ix1 = std::min((int)W, (int)std::ceil(x1) + 1), iy1 = std::min((int)H, (int)std::ceil(y1) + 1);
+            int ix1 = std::min((int)W, (int)std::ceil(x1) + 1), iy1 = std::min((int)H, (int)std::ceil(y1) + 1);
             if (ix1 <= ix0 || iy1 <= iy0) continue;
+            // The size in 64-pixel steps (within the view): the reflection camera's chain takes it, and the render graph's
+            // plan key its textures' sizes (the mask keeps the camera to the water's pixels).
+            ix1 = std::min((int)W, ix0 + (ix1 - ix0 + 63) / 64 * 64);
+            iy1 = std::min((int)H, iy0 + (iy1 - iy0 + 63) / 64 * 64);
             PlanarUse u{ p.stream, (uint32_t)planar.size(), { (uint32_t)ix0, (uint32_t)iy0, (uint32_t)(ix1 - ix0), (uint32_t)(iy1 - iy0) }, plane };
             const uint32_t rw = u.rect[2], rh = u.rect[3], k = u.k;
             const TextureRef scratch = g.createTexture(TextureDesc{ "w.planar scratch", rw, rh, 1, 1, DXGI_FORMAT_R8_UINT });
