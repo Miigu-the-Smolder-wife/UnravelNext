@@ -69,13 +69,18 @@ void main(uint i : SV_DispatchThreadID)
     const uint4 now = uint4(inst.transformRevision, inst.deformRevision, castFlags, 1);
     const uint4 last = state[i];
     state[i] = now;
-    if (inst.bonePalette != UNX_NONE) return;  // skinned: MODE 1 (V's posed bounds)
     const bool casts = castFlags == INSTANCE_CAST_SHADOW, casted = last.w != 0 && last.z == INSTANCE_CAST_SHADOW;
     if (!casts && !casted) return;
+    RWByteAddressBuffer list = ResourceDescriptorHeap[P[0].y];
+    if (inst.bonePalette != UNX_NONE)
+    {
+        // skinned: MODE 1 (V's posed bounds); without them (no V this frame) the frame is not cacheable
+        if (P[3].z == 0) list.InterlockedOr(4, VSM_CACHE_UNCACHEABLE);
+        return;
+    }
     const bool changed = any(last.xyz != now.xyz) || last.w == 0;
     const bool animated = (inst.flags & INSTANCE_WIND) != 0 || inst.morph != UNX_NONE || inst.patch != UNX_NONE;
     if (!changed && !animated) return;
-    RWByteAddressBuffer list = ResourceDescriptorHeap[P[0].y];
     const GpuMesh mesh = loadMesh(inst.mesh);
     const float grow = windOffsetBound(inst, mesh.boundsSphere.xyz, mesh.boundsSphere.w) + (inst.morph != UNX_NONE ? inst.morphRadius : 0.0);
     const float r = mesh.boundsSphere.w + grow;
