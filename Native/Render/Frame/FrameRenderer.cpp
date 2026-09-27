@@ -215,6 +215,77 @@ static std::vector<ViewResources> auxiliaryViews(FramePassContext& fc, const Fra
     return out;
 }
 
+// Temporal upscale (output.render_height_max): above that output height the main view renders at it (same aspect) with a
+// sub-pixel jitter (Halton 2, 3; a cycle of ceil(8 x output / internal pixels), at most 64, as temporal upsamplers
+// size theirs), and M's temporal upscale reconstructs the output (Upscale.cpp). Every system of the frame sees the
+// internal view; the previous view-projection is the previous frame's jittered one, so the histories that reproject
+// onto the previous frame's samples (R's reflections and probes, M's) land on them.
+static float halton(uint32_t index, uint32_t base)
+{
+    float f = 1, r = 0;
+    for (uint32_t i = index; i > 0; i /= base)
+    {
+        f /= (float)base;
+        r += f * (float)(i % base);
+    }
+    return r;
+}
+
+void FrameRenderer::setupUpscale(FrameContext& frame)
+{
+    frame.upscale = FrameContext::Upscale{};
+    const int64_t maxHeight = m_quality.has("output.render_height_max") ? m_quality.integer("output.render_height_max") : 0;
+    ViewDesc& v = frame.mainView;
+    // (captures (outputLinearHdr: references and gates compare the native image) and debug buffer views (they show the
+    // view's own buffers pixel for pixel) stay native)
+    if (maxHeight <= 0 || v.kind != gpu::ViewKind::Main || v.height <= (uint32_t)maxHeight || v.width == 0 || frame.outputLinearHdr ||
+        (m_quality.has("debug.view") && m_quality.string("debug.view") != "none"))
+    {
+        m_upscaleValid = false;
+        return;
+    }
+    const uint32_t W = v.width, H = v.height;
+    const uint32_t h = (uint32_t)maxHeight, w = std::max(8u, (uint32_t)std::lround((double)W * h / H));
+    const uint32_t cycle = std::min(64u, std::max(8u, (uint32_t)std::ceil(8.0 * ((double)W * H) / ((double)w * h))));
+    const uint32_t k = (uint32_t)(frame.frameIndex % cycle) + 1;  // Halton from index 1 (index 0 is the origin)
+    const float jx = halton(k, 2) - 0.5f, jy = halton(k, 3) - 0.5f;
+    FrameContext::Upscale& u = frame.upscale;
+    u.outputWidth = W;
+    u.outputHeight = H;
+    u.jitterX = jx;
+    u.jitterY = jy;
+    u.viewProj = v.viewProj;
+    u.proj = v.proj;
+    const bool sameSize = m_upscalePrevWidth == W && m_upscalePrevHeight == H;
+    u.prevViewProj = m_upscaleValid && sameSize ? m_upscalePrevViewProj : v.viewProj;
+    const float exposure = 1.0f / (1.2f * std::exp2(v.ev100));
+    u.exposureRatio = m_upscaleValid && m_upscalePrevExposure > 0 ? exposure / m_upscalePrevExposure : 1.0f;
+    u.reset = !m_upscaleValid || !sameSize || frame.discontinuity != 0;
+    u.prevJitterX = u.reset ? jx : m_upscalePrevJitterX;
+    u.prevJitterY = u.reset ? jy : m_upscalePrevJitterY;
+    // The jittered projection: clip' = T clip with T translating NDC by (2 jx / w, -2 jy / h) (pixel +y is NDC -y), so
+    // the content moves by (jx, jy) internal pixels: rows 0 and 1 of P gain the translation times row 3.
+    const float tx = 2.0f * jx / (float)w, ty = -2.0f * jy / (float)h;
+    for (int c = 0; c < 4; ++c)
+    {
+        v.proj.m[0][c] += tx * v.proj.m[3][c];
+        v.proj.m[1][c] += ty * v.proj.m[3][c];
+    }
+    v.width = w;
+    v.height = h;
+    v.viewProj = mul(v.proj, v.view);
+    v.invViewProj = inverse(v.viewProj);
+    v.prevViewProj = u.reset ? v.viewProj : m_upscalePrevJittered;
+    m_upscalePrevJittered = v.viewProj;
+    m_upscalePrevViewProj = u.viewProj;
+    m_upscalePrevExposure = exposure;
+    m_upscalePrevJitterX = jx;
+    m_upscalePrevJitterY = jy;
+    m_upscalePrevWidth = W;
+    m_upscalePrevHeight = H;
+    m_upscaleValid = true;
+}
+
 ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, TextureRef output)
 {
     // History discontinuity (v1.35): no previous view in this frame; a restore also has no previous transforms or
@@ -226,14 +297,19 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
         if (!std::isfinite(frame.mainView.ev100)) frame.mainView.ev100 = 14.0f;  // (the host's starting value, if any)
         frame.mainView.ev100 = tracks::autoExposureEv100(m_trackState, m_device, m_quality, frame, m_framesInFlight);
     }
+    ViewDesc outputView = frame.mainView;  // (the debug overlay's view when the frame upscales)
+    setupUpscale(frame);  // (after the exposure: the history's exposure ratio)
     m_lastEv100 = frame.mainView.ev100;
     m_viewModelScale = tracks::viewModelPrepare(m_trackState, m_scene, m_quality, frame);  // E (A12): view models at this frame's camera
     if (frame.discontinuity & kDiscontinuityRestore) m_scene.resetMotion();
     // C9 origin rebase: the previous view is expressed in the new coordinates (a point p now was p + shift before).
     if (frame.originShift.x != 0 || frame.originShift.y != 0 || frame.originShift.z != 0)
     {
-        float4x4& pv = frame.mainView.prevViewProj;
-        for (int r = 0; r < 4; ++r) pv.m[r][3] += pv.m[r][0] * frame.originShift.x + pv.m[r][1] * frame.originShift.y + pv.m[r][2] * frame.originShift.z;
+        for (float4x4* pvp : { &frame.mainView.prevViewProj, &frame.upscale.prevViewProj })
+        {
+            float4x4& pv = *pvp;
+            for (int r = 0; r < 4; ++r) pv.m[r][3] += pv.m[r][0] * frame.originShift.x + pv.m[r][1] * frame.originShift.y + pv.m[r][2] * frame.originShift.z;
+        }
     }
     m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);  // transforms, palettes, visibility of this frame
     tracks::particleLightCapacity(m_trackState, m_scene);  // A3: before the imports and every frame constants
@@ -307,7 +383,16 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::distortion(fc, main);
     tracks::shadowVisibility(fc, main);
     tracks::shading(fc, main);
-    tracks::debugOverlay(fc, main);  // E (A15): buffer visualization, debug primitives, HUD over the final colour
+    if (frame.upscale.outputWidth != 0 && m_debugDraw != 0xFFFFFFFFu)
+    {
+        // the overlay draws over the upscaled output: the output-size view (unjittered) and its own frame constants
+        ViewResources overlay = main;
+        overlay.view = outputView;
+        overlay.frameConstants = fc.frameConstantsFor(outputView);
+        tracks::debugOverlay(fc, overlay);
+    }
+    else
+        tracks::debugOverlay(fc, main);  // E (A15): buffer visualization, debug primitives, HUD over the final colour
     return main;
 }
 

@@ -41,7 +41,10 @@ float debugDepthFactor(float2 pixel, float z, uint flags)
 {
     if (!(flags & DEBUG_DEPTH_TEST) || (flags & DEBUG_SCREEN) || P[0].y == DEBUG_DRAW_OFF) return 1;
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].y];
-    const float scene = depth.Load(int3(pixel, 0));
+    // (the scene depth can be smaller than the target: the temporal upscale's internal resolution, Upscale.cpp)
+    uint dw, dh;
+    depth.GetDimensions(dw, dh);
+    const float scene = depth.Load(int3(min(uint2(pixel * float2(dw, dh) / float2(g_viewWidth, g_viewHeight)), uint2(dw, dh) - 1), 0));
     if (z * 1.001f >= scene) return 1;
     return (flags & DEBUG_XRAY) ? 0.25f : 0.0f;
 }

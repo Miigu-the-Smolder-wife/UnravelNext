@@ -3,6 +3,7 @@
 #include "unx/shading/Exposure.h"
 #include "unx/shading/MotionBlur.h"
 #include "unx/shading/Post.h"
+#include "unx/shading/Upscale.h"
 
 #include "unx/core/Log.h"
 #include "unx/material/MaterialSystem.h"
@@ -1291,6 +1292,8 @@ void shade(FramePassContext& fc, ViewResources& view)
     // a float target first, then blurred into the chain's input (display) or into the linear capture itself.
     // Heat haze re-reads it at displaced points too (before the exposure integral: the haze bends what the lens sees).
     // Depth of field (the lens's aperture integral) follows the time integral (FEATURES_GAME 4: time, then lens).
+    // Temporal upscale (output.render_height_max): all of the above at the internal resolution into the chain's HDR
+    // target (postTarget: the view's size), then the upscale to the output resolution, then the chain into view.color.
     const bool post = postActive(fc, view);
     const bool blur = motionBlurActive(fc, view), haze = distortionActive(fc, view), dof = depthOfFieldActive(fc, view);
     const DXGI_FORMAT floatFormat = post ? DXGI_FORMAT_R16G16B16A16_FLOAT : fc.graph.desc(view.color).format;
@@ -1336,6 +1339,13 @@ void shade(FramePassContext& fc, ViewResources& view)
                              },
                              [dst, slot, stats](PassContext& c) { c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 36, c.resource(stats), 0, 8); });
         }
+    }
+    if (upscaleActive(fc, view))
+    {
+        // the output resolution from the internal image and the history (Upscale.cpp); the chain encodes it (postActive)
+        image = temporalUpscale(fc, view, image);
+        postChain(fc, upscaleOutputView(fc, view), image);
+        return;
     }
     if (post) postChain(fc, view, image);
 }

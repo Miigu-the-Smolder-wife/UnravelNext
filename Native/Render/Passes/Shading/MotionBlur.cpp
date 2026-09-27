@@ -115,8 +115,25 @@ RotationStage frameRotation(const ViewDesc& v, float shutter)
     return rotationStage(v, shutter, q);
 }
 
+// Temporal upscale (FrameContext::Upscale): the main view's matrices carry a sub-pixel jitter that changes every frame.
+// The shutter integrates the unjittered motion: the rotation and the activity test take the unjittered matrices, the
+// velocity kernel subtracts the jitter's change (this frame's jitter - the previous frame's).
+ViewDesc shutterView(FramePassContext& fc, const ViewDesc& v)
+{
+    const FrameContext::Upscale& u = fc.frame.upscale;
+    if (v.kind != gpu::ViewKind::Main || u.outputWidth == 0) return v;
+    ViewDesc s = v;
+    s.proj = u.proj;
+    s.viewProj = u.viewProj;
+    s.prevViewProj = u.prevViewProj;
+    return s;
+}
+
 TextureRef velocityPass(FramePassContext& fc, const ViewResources& view, const RotationStage* rotation)
 {
+    const FrameContext::Upscale& u = fc.frame.upscale;
+    const bool jittered = view.view.kind == gpu::ViewKind::Main && u.outputWidth != 0;
+    const float jdx = jittered ? u.jitterX - u.prevJitterX : 0.0f, jdy = jittered ? u.jitterY - u.prevJitterY : 0.0f;
     RenderGraph& g = fc.graph;
     const uint32_t w = view.view.width, h = view.view.height;
     const TextureRef velocity = g.createTexture(TextureDesc{ "m.motion.velocity", w, h, 1, 1, DXGI_FORMAT_R16G16_FLOAT });
@@ -132,7 +149,7 @@ TextureRef velocityPass(FramePassContext& fc, const ViewResources& view, const R
                   b.use(velocity, Use::UavCompute);
               },
               [=](PassContext& c) {
-                  uint32_t k[20] = { c.srv(vis), c.srv(clusters), c.uav(velocity), 0, w, h, r.active ? 1u : 0u, 0 };
+                  uint32_t k[20] = { c.srv(vis), c.srv(clusters), c.uav(velocity), asUint(jdx), w, h, r.active ? 1u : 0u, asUint(jdy) };
                   for (int i = 0; i < 3; ++i)
                   {
                       k[8 + 4 * i] = asUint(r.qt[i].x);
@@ -273,7 +290,8 @@ bool motionBlurActive(FramePassContext& fc, const ViewResources& view)
 {
     if (view.view.kind != gpu::ViewKind::Main || !(shutterOf(fc.quality) > 0)) return false;
     if (!view.visId.valid() || !view.visibleClusters.valid() || !view.depth.valid()) return false;
-    const bool cameraMoved = std::memcmp(&view.view.viewProj, &view.view.prevViewProj, sizeof(float4x4)) != 0;
+    const ViewDesc v = shutterView(fc, view.view);
+    const bool cameraMoved = std::memcmp(&v.viewProj, &v.prevViewProj, sizeof(float4x4)) != 0;
     return cameraMoved || fc.scene.hasMotion();
 }
 
@@ -281,7 +299,7 @@ TextureRef motionVelocity(FramePassContext& fc, const ViewResources& view) { ret
 
 void motionBlur(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst)
 {
-    const RotationStage rotation = frameRotation(view.view, shutterOf(fc.quality));
+    const RotationStage rotation = frameRotation(shutterView(fc, view.view), shutterOf(fc.quality));
     const TextureRef velocity = velocityPass(fc, view, rotation.active ? &rotation : nullptr);
     if (!rotation.active)
     {

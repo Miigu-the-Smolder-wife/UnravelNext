@@ -44,6 +44,13 @@ private:
     uint64_t m_slotFrame = UINT64_MAX;
     TrackState m_trackState;
     float m_lastEv100 = 0;
+    // Temporal upscale (FrameContext::Upscale): the previous frame's jittered and unjittered view-projections, exposure
+    // and output size; valid after the first upscaled frame.
+    float4x4 m_upscalePrevJittered{}, m_upscalePrevViewProj{};
+    float m_upscalePrevExposure = 0, m_upscalePrevJitterX = 0, m_upscalePrevJitterY = 0;
+    uint32_t m_upscalePrevWidth = 0, m_upscalePrevHeight = 0;
+    bool m_upscaleValid = false;
+    void setupUpscale(FrameContext& frame);
     uint32_t m_debugDraw = 0xFFFFFFFFu;  // this frame's FrameConstants::debugDraw (tracks::debugBegin)
     float m_viewModelScale = 1.0f;       // this frame's FrameConstants::viewModelScale (tracks::viewModelPrepare)
 };

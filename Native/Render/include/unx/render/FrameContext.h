@@ -190,6 +190,21 @@ struct FrameContext
     uint32_t poolCount = 0;
     // A14: this frame's auxiliary views (at most FrameRenderer::kMaxViewsPerFrame - 1 with the main view).
     std::vector<AuxView> auxViews;
+    // Temporal upscale (output.render_height_max; set by FrameRenderer::record, not by hosts): outputWidth != 0 means the
+    // main view renders at mainView.width x height (internal) with a sub-pixel jitter of its projection and M's temporal
+    // upscale (Upscale.cpp) reconstructs the output resolution before the post chain. viewProj / prevViewProj are the
+    // unjittered matrices of this and the previous frame (mainView carries the jittered ones: every history of the
+    // frame reprojects onto the previous frame's jittered samples), proj the unjittered projection; jitter in internal
+    // pixels (+x right, +y down: the image content moves by it), prevJitter the previous frame's (= jitter after a
+    // reset); exposureRatio = this frame's exposure over the previous one's; reset: no history.
+    struct Upscale
+    {
+        uint32_t outputWidth = 0, outputHeight = 0;
+        float jitterX = 0, jitterY = 0, prevJitterX = 0, prevJitterY = 0;
+        float4x4 viewProj{}, prevViewProj{}, proj{};
+        float exposureRatio = 1;
+        bool reset = true;
+    } upscale;
 };
 constexpr float kOriginGrid = 1024.0f;
 constexpr uint32_t kGpuSimulationSoft = 1, kGpuSimulationVfx = 2, kGpuSimulationRigid = 4;

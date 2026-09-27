@@ -189,7 +189,16 @@ public:
         ensureAtlas();
 
         DrawList hud;
-        if (s.hud) drawHud(hud, fc.frame.timing, fc.frame.mainView);
+        if (s.hud)
+        {
+            ViewDesc screen = fc.frame.mainView;  // (the overlay draws at the output size: after a temporal upscale, FrameContext::upscale)
+            if (fc.frame.upscale.outputWidth != 0)
+            {
+                screen.width = fc.frame.upscale.outputWidth;
+                screen.height = fc.frame.upscale.outputHeight;
+            }
+            drawHud(hud, fc.frame.timing, screen);
+        }
         const DrawList* lists[2] = { &hud, &list };  // HUD first: the caller's primitives draw over it
         uint32_t counts[3] = {};
         for (const DrawList* l : lists)
