@@ -172,6 +172,10 @@ struct RenderGraph::Impl
         std::string name;
         ID3D12Resource* importedResource = nullptr;
         D3D12_BARRIER_LAYOUT importLayout = D3D12_BARRIER_LAYOUT_COMMON;
+        // Transient buffers: the bytes the plan allocates (>= bdesc.size; bufferCapacities). Producers size many
+        // buffers by this frame's counts (rays, records, segments, jobs); the plan key takes the capacity, so a size
+        // that moves inside it keeps the plan. Views cover the capacity (no kernel reads a buffer's dimensions).
+        uint64_t capacity = 0;
     };
     struct UseRecord
     {
@@ -237,6 +241,10 @@ struct RenderGraph::Impl
     struct Plan
     {
         uint64_t key = 0;
+        // What the key was made of, per element (the replan diagnostic names the first element that differs next time).
+        std::vector<uint64_t> passHashes, resourceHashes;
+        std::vector<std::string> passNames, resourceNames;
+        std::vector<uint64_t> capacities;  // per resource id: ResourceNode::capacity (0: texture or import)
         std::vector<Segment> segments;
         std::vector<Physical> physical;  // per resource id (imported entries unused)
         std::vector<bool> live;
@@ -305,44 +313,103 @@ struct RenderGraph::Impl
         }
     }
 
+    uint64_t resourceHash(const ResourceNode& r) const
+    {
+        uint64_t h = 1469598103934665603ull;
+        h = mix(h, r.texture);
+        h = mix(h, r.imported);
+        if (r.texture)
+        {
+            h = mix(h, r.tdesc.width);
+            h = mix(h, r.tdesc.height);
+            h = mix(h, r.tdesc.depthOrArraySize);
+            h = mix(h, r.tdesc.mipLevels);
+            h = mix(h, r.tdesc.format);
+            h = mix(h, r.tdesc.dimension);
+            h = mix(h, r.tdesc.srvFormat);
+            h = mix(h, r.tdesc.uavFormat);
+        }
+        else
+        {
+            h = mix(h, r.imported ? r.bdesc.size : r.capacity);
+            h = mix(h, r.bdesc.stride);
+        }
+        return mix(h, (uint64_t)r.importLayout);
+    }
+    uint64_t passHash(const PassNode& p) const
+    {
+        uint64_t h = std::hash<std::string>{}(p.name);
+        h = mix(h, (uint64_t)p.queue);
+        h = mix(h, p.keep);
+        h = mix(h, p.fenceAfter);
+        for (const UseRecord& u : p.uses)
+        {
+            h = mix(h, u.resource);
+            h = mix(h, (uint64_t)u.use);
+        }
+        return h;
+    }
     uint64_t structureKey() const
     {
         uint64_t h = 1469598103934665603ull;
-        for (const ResourceNode& r : resources)
-        {
-            h = mix(h, r.texture);
-            h = mix(h, r.imported);
-            if (r.texture)
-            {
-                h = mix(h, r.tdesc.width);
-                h = mix(h, r.tdesc.height);
-                h = mix(h, r.tdesc.depthOrArraySize);
-                h = mix(h, r.tdesc.mipLevels);
-                h = mix(h, r.tdesc.format);
-                h = mix(h, r.tdesc.dimension);
-                h = mix(h, r.tdesc.srvFormat);
-                h = mix(h, r.tdesc.uavFormat);
-            }
-            else
-            {
-                h = mix(h, r.bdesc.size);
-                h = mix(h, r.bdesc.stride);
-            }
-            h = mix(h, (uint64_t)r.importLayout);
-        }
-        for (const PassNode& p : passes)
-        {
-            h = mix(h, std::hash<std::string>{}(p.name));
-            h = mix(h, (uint64_t)p.queue);
-            h = mix(h, p.keep);
-            h = mix(h, p.fenceAfter);
-            for (const UseRecord& u : p.uses)
-            {
-                h = mix(h, u.resource);
-                h = mix(h, (uint64_t)u.use);
-            }
-        }
+        for (const ResourceNode& r : resources) h = mix(h, resourceHash(r));
+        for (const PassNode& p : passes) h = mix(h, passHash(p));
         return h;
+    }
+
+    // Transient buffer capacities for this frame (before the key): the previous plan's capacity for the same buffer
+    // (same id and name) while this frame's size fits it and fills at least half of it; otherwise the size's bucket
+    // (64 KiB granules up to 512 KiB, which placed buffers occupy anyway, then 8 steps per octave: at most 12.5 %
+    // unused), with a quarter of headroom when a buffer grows past its capacity.
+    static uint64_t bufferBucket(uint64_t need)
+    {
+        const uint64_t granule = 64 * 1024;
+        uint64_t c = (need + granule - 1) / granule * granule;
+        if (c <= 8 * granule) return c;
+        uint64_t octave = 1;
+        while (octave * 2 <= c - 1) octave *= 2;  // octave <= c - 1 < 2 octave
+        const uint64_t step = std::max(octave / 8, granule);
+        return (c + step - 1) / step * step;
+    }
+    void bufferCapacities()
+    {
+        for (uint32_t r = 0; r < resources.size(); ++r)
+        {
+            ResourceNode& n = resources[r];
+            if (n.texture || n.imported) continue;
+            const uint64_t need = n.bdesc.size;
+            const uint64_t prev = plan && r < plan->capacities.size() && plan->resourceNames[r] == n.name ? plan->capacities[r] : 0;
+            if (prev >= need && need * 2 >= prev) n.capacity = prev;
+            else n.capacity = bufferBucket(prev != 0 && need > prev ? need + need / 4 : need);
+        }
+    }
+
+    // Why the plan is rebuilt: the first pass or resource whose part of the key differs from the previous plan's
+    // (logged for the first 16 rebuilds, then every 100th; a steady frame rebuilds never).
+    uint64_t replans = 0;
+    void logReplan() const
+    {
+        const Plan& old = *plan;
+        std::string what;
+        const size_t np = std::min(old.passHashes.size(), passes.size());
+        for (size_t i = 0; i < np && what.empty(); ++i)
+            if (old.passHashes[i] != passHash(passes[i]))
+                what = "pass " + std::to_string(i) + " '" + passes[i].name + "' (was '" + old.passNames[i] + "'" +
+                       (passes[i].name == old.passNames[i] ? ": other uses or queue" : "") + ")";
+        const size_t nr = std::min(old.resourceHashes.size(), resources.size());
+        std::string res;
+        for (size_t i = 0; i < nr && res.empty(); ++i)
+            if (old.resourceHashes[i] != resourceHash(resources[i]))
+            {
+                const ResourceNode& n = resources[i];
+                res = "resource " + std::to_string(i) + " '" + n.name + "' (was '" + old.resourceNames[i] + "'";
+                if (!n.texture && n.name == old.resourceNames[i])
+                    res += ": " + std::to_string(i < old.capacities.size() ? old.capacities[i] : 0) + " -> " + std::to_string(n.imported ? n.bdesc.size : n.capacity) + " bytes";
+                res += ")";
+            }
+        logf("render graph: plan rebuilt (%llu): passes %zu -> %zu, resources %zu -> %zu; first differing %s%s%s\n", (unsigned long long)replans,
+             old.passHashes.size(), passes.size(), old.resourceHashes.size(), resources.size(), what.empty() ? "pass: none" : what.c_str(),
+             res.empty() ? "" : "; ", res.c_str());
     }
 
     std::vector<Access> mergedAccesses(const PassNode& p) const
@@ -391,6 +458,22 @@ struct RenderGraph::Impl
         auto next = std::make_unique<Plan>();
         Plan& pl = *next;
         pl.key = structureKey();
+        pl.passHashes.reserve(passes.size());
+        pl.passNames.reserve(passes.size());
+        for (const PassNode& p : passes)
+        {
+            pl.passHashes.push_back(passHash(p));
+            pl.passNames.push_back(p.name);
+        }
+        pl.resourceHashes.reserve(resources.size());
+        pl.resourceNames.reserve(resources.size());
+        pl.capacities.reserve(resources.size());
+        for (const ResourceNode& r : resources)
+        {
+            pl.resourceHashes.push_back(resourceHash(r));
+            pl.resourceNames.push_back(r.name);
+            pl.capacities.push_back(r.texture || r.imported ? 0 : r.capacity);
+        }
         const uint32_t passCount = (uint32_t)passes.size();
         const uint32_t resourceCount = (uint32_t)resources.size();
 
@@ -487,7 +570,7 @@ struct RenderGraph::Impl
             else
             {
                 d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-                d.Width = n.bdesc.size;
+                d.Width = n.capacity;
                 d.Height = d.DepthOrArraySize = d.MipLevels = 1;
                 d.SampleDesc.Count = 1;
                 d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -1013,7 +1096,8 @@ struct RenderGraph::Impl
         else
         {
             const uint32_t stride = n.bdesc.stride;
-            const uint64_t elements = stride ? n.bdesc.size / stride : n.bdesc.size / 4;
+            const uint64_t bytes = n.imported ? n.bdesc.size : n.capacity;
+            const uint64_t elements = stride ? bytes / stride : bytes / 4;
             if (srv && v.srv == UINT32_MAX)
             {
                 D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
@@ -1316,9 +1400,15 @@ bool RenderGraph::sharesMemory(uint32_t a, uint32_t b) const
 void RenderGraph::execute(GpuProfiler* profiler)
 {
     Impl& impl = *m_impl;
+    impl.bufferCapacities();
     const uint64_t key = impl.structureKey();
     const bool reuse = impl.plan && impl.plan->key == key;
-    if (!reuse) impl.compile(m_stats);
+    if (!reuse)
+    {
+        ++impl.replans;
+        if (impl.plan && (impl.replans <= 16 || impl.replans % 100 == 0)) impl.logReplan();
+        impl.compile(m_stats);
+    }
     else
     {
         m_stats = impl.plan->stats;
