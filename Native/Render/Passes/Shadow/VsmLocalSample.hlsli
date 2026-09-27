@@ -7,7 +7,8 @@
 //     z_s occludes some light direction when it is nearer than the receiver's plane there and its tap lies within its
 //     own reach r_L (1 / z_s - 1 / z_r); the blockers' mean 1 / z_s gives the penumbra radius; none: lit;
 //  2. filter: 1 - mean occupancy of `filterTaps` sunflower taps over the disk of radius r_L (mean(1 / z_b) - 1 / z_r),
-//     on the mip whose texel matches the tap spacing.
+//     on the mip whose texel matches the tap spacing; each tap a bilinear test of its 2 x 2 texels (vsmLocalTapOcclusion:
+//     the visibility is continuous in the receiver's position), taps without a resident page left out of the mean.
 // Exact for an occluder at one depth when the taps resolve it; the receiver's plane is evaluated per tap along the tap's
 // own direction (no normal offset), with receiver_bias_texels of the compared mip as tolerance. Taps re-project through
 // the cube, so a penumbra across a face edge reads the neighbouring face. Pages not resident at a mip fall back to the
@@ -57,6 +58,62 @@ uint vsmLocalKeyAt(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, ui
     return VSM_EMPTY;
 }
 
+// Bilinear shadow test (PCF) of one tap: the 2 x 2 texels of mip m (or the nearest coarser resident mip) around direction
+// c, each compared with the receiver's plane depth zp less its tolerance, weighted by the tap's bilinear position.
+// tolerancePerTexel = biasTexels x 2 z_r x (1 + slope): the tolerance is that over the used mip's resolution. Returns the
+// occluded share in [0, 1], or -1 where no mip holds c's page (no data). One point-sampled texel per tap made the
+// visibility a sum of 16 step functions whose steps lie on the texel grid of the chosen mip: stable blotches of about
+// one texel projected onto the receivers (walls near a lamp shade's bulb: wide penumbrae, coarse mips, large blotches),
+// and the hard-light path's four point samples stepped in quarters along the same grid. The 2 x 2 texels of a page's
+// interior come in one gather; at a page edge each texel resolves its own page (a missing one takes the tap's texel).
+float vsmLocalTapOcclusion(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, uint m, float zp, float tolerancePerTexel, out uint mipUsed)
+{
+    const VsmLocalPoint q = vsmLocalProject(l, l.position + c);
+    mipUsed = m;
+    [loop] for (int j = (int)m; j >= 0; --j)
+    {
+        const uint res = vsmLocalRes((uint)j);
+        const float2 tf = vsmLocalTexel(q.xy, (uint)j);
+        const uint2 t = min(uint2(tf), res - 1);
+        const uint2 e = r.table.Load2(vsmLocalSlot(slot, q.face, (uint)j, t >> VSM_PAGE_SHIFT) * 8);
+        if ((e.x & VSM_FLAG_RESIDENT) == 0 || e.y != l.generation) continue;
+        mipUsed = (uint)j;
+        const float zLimit = zp - tolerancePerTexel / res;
+        const float2 g = tf - 0.5;
+        const float2 f = g - floor(g);
+        const int2 i0 = int2(floor(g));
+        const uint2 lo = uint2(clamp(i0, 0, (int)res - 1)), hi = uint2(clamp(i0 + 1, 0, (int)res - 1));
+        const uint2 page = t >> VSM_PAGE_SHIFT;
+        float4 d;  // atlas depths of (lo.x, lo.y), (hi.x, lo.y), (lo.x, hi.y), (hi.x, hi.y)
+        if (all((lo >> VSM_PAGE_SHIFT) == page) && all((hi >> VSM_PAGE_SHIFT) == page) && all(hi == lo + 1))
+        {
+            uint aw, ah;
+            r.pool.GetDimensions(aw, ah);
+            const int3 a = vsmAtlasTexel(e.x & VSM_PHYS_MASK, lo & (VSM_PAGE - 1));
+            const float4 gt = r.pool.GatherRed(g_pointClamp, (float2(a.xy) + 1) / float2(aw, ah));  // (x0 y1, x1 y1, x1 y0, x0 y0)
+            d = float4(gt.w, gt.z, gt.x, gt.y);
+        }
+        else
+        {
+            const float dt = r.pool.Load(vsmAtlasTexel(e.x & VSM_PHYS_MASK, t & (VSM_PAGE - 1)));
+            [unroll] for (uint k = 0; k < 4; ++k)
+            {
+                const uint2 tk = uint2(k & 1 ? hi.x : lo.x, k & 2 ? hi.y : lo.y);
+                const uint2 ek = r.table.Load2(vsmLocalSlot(slot, q.face, (uint)j, tk >> VSM_PAGE_SHIFT) * 8);
+                d[k] = (ek.x & VSM_FLAG_RESIDENT) != 0 && ek.y == l.generation ? r.pool.Load(vsmAtlasTexel(ek.x & VSM_PHYS_MASK, tk & (VSM_PAGE - 1))) : dt;
+            }
+        }
+        float4 occluded;
+        [unroll] for (uint k2 = 0; k2 < 4; ++k2)
+        {
+            const uint key = vsmLocalKeyOfDepth(d[k2], l.nearM, l.farM);
+            occluded[k2] = key != VSM_EMPTY && -vsmDecode(key) < zLimit ? 1.0 : 0.0;
+        }
+        return lerp(lerp(occluded.x, occluded.y, f.x), lerp(occluded.z, occluded.w, f.x), f.y);
+    }
+    return -1;
+}
+
 // Face depth of the receiver's plane along direction c (unit-depth direction from the light), and the tolerance.
 float vsmLocalPlaneDepth(VsmLocalLight l, float3 receiver, float3 normal, float3 c)
 {
@@ -96,20 +153,13 @@ float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3
     const float zMin = max(-vsmDecode(nearest), l.nearM);
     if (zMin >= pr.z) return 1;  // nothing nearer to the light than the receiver
     const float searchR = min(l.radius * (1 / zMin - invZr), 1.0);
+    const float tolerancePerTexel = biasTexels * 2 * pr.z * (1 + slope);
     if (searchR <= texelTan)
     {
-        float occ = 0;
-        [unroll] for (uint j = 0; j < 4; ++j)
-        {
-            const float2 o = (float2(j & 1, j >> 1) - 0.5) * texelTan;
-            const float3 c = c0 + o.x * right - o.y * up;
-            uint mu;
-            const uint key = vsmLocalKeyAt(r, l, slot, c, m, mu);
-            const float zp = vsmLocalPlaneDepth(l, receiver, normal, c);
-            const float tol = biasTexels * (2 * pr.z / vsmLocalRes(mu)) * (1 + slope);
-            occ += key != VSM_EMPTY && -vsmDecode(key) < zp - tol ? 0.25 : 0.0;
-        }
-        return 1 - occ;
+        // hard light: one bilinear shadow test at the receiver
+        uint mu;
+        const float occ = vsmLocalTapOcclusion(r, l, slot, c0, m, vsmLocalPlaneDepth(l, receiver, normal, c0), tolerancePerTexel, mu);
+        return occ > 0 ? 1 - occ : 1;
     }
     // 1. Blocker search.
     const uint ms = min(m, vsmLocalMip(searchR * sqrt(ATMO_PI_FOR_LOCAL / searchTaps) * pr.z, pr.z));
@@ -134,20 +184,22 @@ float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3
     // 2. Penumbra filter.
     const float radius = l.radius * (sumInvZ / count - invZr);
     const uint mf = min(m, vsmLocalMip(radius * sqrt(ATMO_PI_FOR_LOCAL / filterTaps) * pr.z, pr.z));
-    float occ = 0;
+    // Each tap a bilinear shadow test (vsmLocalTapOcclusion); taps whose direction no resident page holds carry no
+    // information and leave the mean (counting them lit made page-shaped light patches wherever the filter reached past
+    // the pages the marking requested).
+    float occ = 0, taps = 0;
     [loop] for (uint i2 = 0; i2 < filterTaps; ++i2)
     {
         const float rr = sqrt((i2 + 0.5) / filterTaps), a = i2 * 2.399963229728653;
         const float2 o = rr * float2(cos(a), sin(a)) * radius;
         const float3 c = c0 + o.x * right + o.y * up;
         uint mu;
-        const uint key = vsmLocalKeyAt(r, l, slot, c, mf, mu);
-        if (key == VSM_EMPTY) continue;
-        const float zp = vsmLocalPlaneDepth(l, receiver, normal, c);
-        const float tol = biasTexels * (2 * pr.z / vsmLocalRes(mu)) * (1 + slope);
-        occ += -vsmDecode(key) < zp - tol ? 1.0 : 0.0;
+        const float t = vsmLocalTapOcclusion(r, l, slot, c, mf, vsmLocalPlaneDepth(l, receiver, normal, c), tolerancePerTexel, mu);
+        if (t < 0) continue;
+        occ += t;
+        taps += 1;
     }
-    return 1 - occ / filterTaps;
+    return taps > 0 ? 1 - occ / taps : 1;
 }
 
 #endif
