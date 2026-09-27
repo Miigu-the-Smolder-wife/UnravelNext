@@ -331,14 +331,19 @@ struct ParticleSystem::Impl
         bool layoutMismatch = false;         // the table's live ranges do not add up to alive_after
         uint64_t fenceBase = 0, fence = 0;
         Queue* queue = nullptr;  // the queue its tick was recorded for
+        uint64_t serial = 0;     // tickSerial of the tick recorded into this slot (guards the readback pass's fence callback)
     };
     std::vector<Slot> slots;
     uint32_t nextSlot = 0;
     int latestSlot = -1;
 
-    // The frame that recorded a tick signals the graphics queue after record() returns, so its fence is the first value
-    // signaled after the recording: resolved from the device queue (which outlives any render graph), conservatively
-    // (a later signal also covers it). A tick whose frame never executed cannot be waited for: that is a caller error.
+    // The tick's readback pass ends its command list with a fence of its own (PassBuilder::fenceAfter), which the graph
+    // reports when it submits the frame: the readback waits for the tick's passes only. Before, the fence was resolved
+    // at wait time as the queue's last signal (conservative: a later signal also covers it) - the end of everything
+    // submitted since, i.e. the whole frame that recorded the tick, so the next fixed step's readback held the CPU until
+    // the GPU had finished that frame and CPU and GPU ran in series (Player at 4K: frame 28 ms against 21.7 ms of GPU
+    // work, the fixed step 26.9 ms of it [measured, e6fa5e8]). The last-signal rule stays the fallback for a slot whose
+    // callback has not run. A tick whose frame never executed cannot be waited for: that is a caller error.
     Queue* queue = nullptr;
     // Bound of a readback wait: 20 s on a GPU. A software adapter (WARP) compiles each kernel to CPU code on its first
     // dispatch, which for the collision kernels takes tens of seconds on a loaded machine, so it gets 10 min.
@@ -1087,6 +1092,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         slot.queue = m.queue;
         slot.fenceBase = m.queue->lastSignaled();
         slot.fence = 0;
+        slot.serial = m.tickSerial;
         m.latestSlot = thisSlot;
         m_latestTick = h.tick;
         m.latestReset = reset;
@@ -1360,11 +1366,19 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         const uint64_t eventBytes = (uint64_t)(h.event_slots + collisionCopy) * sizeof(NV_StreamEvent);
         Buf* reportBuf = &m.counters;
         Buf* eventsBuf = &slot.events;
+        Impl::Slot* slotPtr = &slot;
+        const uint64_t serial = slot.serial;
         g.addPass("fx.particles.readback", queueType,
                   [=](PassBuilder& b) {
                       b.use(reportBuf->ref, Use::CopySrc);
                       b.use(eventsBuf->ref, Use::CopySrc);
                       b.keep();
+                      // the tick's own fence (Impl::resolveFence): the readback waits for the tick, not the frame
+                      b.fenceAfter([slotPtr, serial](Queue& queue, uint64_t fence) {
+                          if (slotPtr->serial != serial || !slotPtr->recorded) return;
+                          slotPtr->queue = &queue;
+                          slotPtr->fence = fence;
+                      });
                   },
                   [=](PassContext& c) {
                       if (keepEvents)

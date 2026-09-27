@@ -23,6 +23,11 @@ public:
     void use(BufferRef buffer, Use use);
     // The pass has effects outside the graph (readback, persistent state) and is never culled.
     void keep();
+    // The pass's command list ends right after it and is submitted with its own fence signal; once execute() has
+    // submitted it, 'onSubmitted' receives the queue and the fence value that completes with this pass (and everything
+    // before it on that queue). A CPU that waits for this pass's results (readbacks) then waits for this point of the
+    // frame, not for the whole frame's queue. Implies keep(). Cost: one more ExecuteCommandLists on that queue.
+    void fenceAfter(std::function<void(Queue& queue, uint64_t fence)> onSubmitted);
 
 private:
     friend class RenderGraph;

@@ -185,6 +185,8 @@ struct RenderGraph::Impl
         ExecuteFn execute;
         std::vector<UseRecord> uses;
         bool keep = false;
+        bool fenceAfter = false;                                    // PassBuilder::fenceAfter (part of the plan key)
+        std::function<void(Queue&, uint64_t)> onFence;              // this frame's callback (not part of the key)
         PassBand band;
     };
 
@@ -333,6 +335,7 @@ struct RenderGraph::Impl
             h = mix(h, std::hash<std::string>{}(p.name));
             h = mix(h, (uint64_t)p.queue);
             h = mix(h, p.keep);
+            h = mix(h, p.fenceAfter);
             for (const UseRecord& u : p.uses)
             {
                 h = mix(h, u.resource);
@@ -853,7 +856,7 @@ struct RenderGraph::Impl
                 if (required[i][k] != UINT32_MAX) signalAfter[required[i][k]] = true;
         }
         for (uint32_t i = 0; i < positions; ++i)
-            if (splitAfter[i]) signalAfter[i] = true;
+            if (splitAfter[i] || (i < N && passes[order[i]].fenceAfter)) signalAfter[i] = true;
         std::vector<int> segmentOfPos(positions, -1);
         int currentSegment[kQueueTypeCount] = { -1, -1, -1 };
         bool splitNext[kQueueTypeCount] = { true, true, true };
@@ -1169,6 +1172,13 @@ void PassBuilder::use(BufferRef buffer, Use use)
 }
 
 void PassBuilder::keep() { m_graph.m_impl->passes[m_pass].keep = true; }
+void PassBuilder::fenceAfter(std::function<void(Queue&, uint64_t)> onSubmitted)
+{
+    auto& p = m_graph.m_impl->passes[m_pass];
+    p.keep = true;
+    p.fenceAfter = true;
+    p.onFence = std::move(onSubmitted);
+}
 
 // ------------------------------------------------------------------------------------------------ PassContext
 
@@ -1420,6 +1430,8 @@ void RenderGraph::execute(GpuProfiler* profiler)
         for (uint32_t w : seg.waitSegments) q.waitGpu(m_device.queue(plan.segments[w].queue), segmentFence[w]);
         segmentFence[s] = m_device.submit(lists[s]);
         m_lastFence[(size_t)seg.queue] = segmentFence[s];
+        for (const Impl::PlanPass& pp : seg.passes)
+            if (pp.pass != UINT32_MAX && impl.passes[pp.pass].onFence) impl.passes[pp.pass].onFence(q, segmentFence[s]);  // PassBuilder::fenceAfter
     }
     for (uint32_t q = 0; q < kQueueTypeCount; ++q)
         for (size_t s = 0; s < plan.segments.size(); ++s)
