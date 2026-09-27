@@ -539,6 +539,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
             if (v.reflection.valid()) b.use(v.reflection, Use::SrvCompute);
             if (r.giCache.valid()) b.use(r.giCache, Use::SrvCompute);  // planar: direct lookups; main: ProbeSrvs.pad1
+            if (v.giIrradiance.valid()) b.use(v.giIrradiance, Use::SrvCompute);  // R's per-pixel front irradiance (P[9].w)
             if (atmosphere)
                 for (TextureRef t : { r.transmittanceLut, r.multiScatterLut, r.skyViewLut }) b.use(t, Use::SrvCompute);
             if (air) b.use(v.airVolume, Use::SrvCompute);
@@ -616,6 +617,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
                 particleConstants(c, k32 + 22);  // P[5].zw
                 k32[38] = areaLobes.valid() ? c.uav(areaLobes) : none;  // P[9].z (A9 area-light lobes)
+                k32[39] = v.giIrradiance.valid() ? c.srv(v.giIrradiance) : none;  // P[9].w (R's per-pixel front irradiance)
                 ID3D12PipelineState* lobes = shadeClass == material::ShadeClass::Layered ? lobesLayered : (shadeClass == material::ShadeClass::Sheen ? lobesSheen : nullptr);
                 if (lobes && areaLobes.valid())
                 {
@@ -663,6 +665,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
                              if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
                              if (v.reflection.valid()) b.use(v.reflection, Use::SrvCompute);
+                             if (v.giIrradiance.valid()) b.use(v.giIrradiance, Use::SrvCompute);  // P[9].w
                              if (atmosphere)
                                  for (TextureRef t : { r.transmittanceLut, r.multiScatterLut }) b.use(t, Use::SrvCompute);
                              if (air) b.use(v.airVolume, Use::SrvCompute);
@@ -716,6 +719,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              k32[19] = gpu::kNone;            // P[4].w: overflow tiles are shaded twice; the main kernel metered them
                              k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
                              k32[38] = areaLobes.valid() ? c.uav(areaLobes) : none;  // P[9].z (A9 area-light lobes)
+                             k32[39] = v.giIrradiance.valid() ? c.srv(v.giIrradiance) : none;  // P[9].w
                              for (size_t run = 0; run < fallbackRuns.size(); ++run)
                              {
                                  const auto& [kernel, classes] = fallbackRuns[run];

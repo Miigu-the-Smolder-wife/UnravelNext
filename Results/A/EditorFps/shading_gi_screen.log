@@ -1,0 +1,125 @@
+specular albedo: A + B = model E table (rel.)                          7.999e-08 (limit 1.0e-05) ok
+scene: 57171 pixels checked, 440 sun-glint pixels (disk regimes), 2231 back-lit leaf pixels, 429 edge pixels left to the composite test
+scene [linear]: pixel radiance vs CPU model on the G-buffer (rel.)     2.369e-03 (limit 5.0e-03) ok
+scene: glint and back-lit transmission pixels present                  4.400e+02 (limit 2.0e+01) ok
+display: RGB10A2 = sRGB OETF(film curve(linear)) (10-bit LSB)          5.617e-01 (limit 1.0e+00) ok
+sun disk centroid: gpu (479.5000, 269.5000) area 2602.402 px, supersampled (479.5000, 269.5000) area 2602.249 px
+sun disk: 228 edge pixels
+sun disk: pixel coverage vs 128x128 supersampling (abs.)               2.890e-03 (limit 2.0e-02) ok
+sun disk: total flux vs L_sun x disk solid angle (rel.)                5.660e-05 (limit 3.0e-03) ok
+  r 0.01 offset 0.95 (narrow lobe): gpu 6.65619e+02 ref 6.60790e+02 (peak 7.38215e+02) err 6.54e-03
+sun specular [point, alpha >= 16 theta_s] vs dense quadrature (rel. to peak) 1.253e-03 (limit 5.0e-03) ok
+sun specular [4-point rule, 2..16 theta_s] vs dense quadrature (rel. to peak) 2.495e-03 (limit 5.0e-03) ok
+sun specular [narrow lobe, alpha < 2 theta_s] vs dense / lobe-sampled reference (rel. to peak) 6.541e-03 (limit 1.0e-02) ok
+local lights: 39512 pixels (7905 in fallback tiles), 268572 light-surface pairs reflected, 2194 transmitted through leaves 
+local lights [point, spot, shadow slots 1-3, overflow list, fallback tiles] vs CPU model (rel.) 1.307e-05 (limit 5.0e-03) ok
+local lights: pixels in overflow fallback tiles checked                7.905e+03 (limit 1.0e+02) ok
+local lights: back-lit leaf pairs present                              2.194e+03 (limit 5.0e+01) ok
+edge area: 7013 triangles; V's coverageTriangleArea worst abs. error 2.20e-07 (near the pixel) / 1.91e-05 (long edges)
+edge area: triangles near the pixel vs double clipping (abs.)          2.682e-07 (limit 2.0e-06) ok
+edge area: long edges up to 800 px vs double clipping (abs.)           1.320e-05 (limit 2.0e-04) ok
+  edge px (507,181) got (0.2312 0.1579) exact (0.2236 0.1579) overlap
+  edge px (528,301) got (0.4546 0.4414) exact (0.4470 0.4414) overlap
+edge composite: 1191 pixels with partial coverage, 239 where both quads' edges meet; mean error over edge pixels 2.68e-05 
+edge composite: pixels outside overlaps vs exact visible areas (abs.)  3.365e-05 (limit 2.0e-03) ok
+edge composite: all pixels (overlaps within 1/32) vs exact visible areas (abs.) 7.607e-03 (limit 3.3e-02) ok
+edge cut-out: 378 pixels partly covered by the cut shape; covered area 7297.55 px (truth 7297.14 px)
+edge cut-out: mean error over partly covered pixels (abs.)             2.124e-03 (limit 2.0e-02) ok
+edge cut-out: every pixel vs supersampled cut shape (abs.)             2.697e-02 (limit 1.5e-01) ok
+edge cut-out: total covered area vs truth (rel.)                       5.517e-05 (limit 3.0e-03) ok
+area lights, rect  : diffuse (front, back) worst 7.11e-05, LTC integral over the shape worst 2.04e-03 (rel. to max(I, 1e-3))
+area lights, disk  : diffuse (front, back) worst 8.35e-05, LTC integral over the shape worst 7.65e-05 (rel. to max(I, 1e-3))
+area lights, sphere: diffuse (front, back) worst 3.84e-05, LTC integral over the shape worst 2.33e-05 (rel. to max(I, 1e-3))
+area lights, tube  : diffuse (front, back) worst 1.51e-05, LTC integral over the shape worst 1.03e-04 (rel. to max(I, 1e-3))
+area lights, LTC fit vs model BRDF over the light, roughness 0.10: mean 0.035, worst 0.075 (3 cases, rel.)
+area lights, LTC fit vs model BRDF over the light, roughness 0.20: mean 0.496, worst 2.895 (8 cases, rel.)
+area lights, LTC fit vs model BRDF over the light, roughness 0.35: mean 0.471, worst 1.096 (20 cases, rel.)
+area lights, LTC fit vs model BRDF over the light, roughness 0.50: mean 0.185, worst 0.713 (20 cases, rel.)
+area lights, LTC fit vs model BRDF over the light, roughness 0.70: mean 0.165, worst 0.491 (21 cases, rel.)
+area lights, LTC fit vs model BRDF over the light, roughness 1.00: mean 0.052, worst 0.215 (23 cases, rel.)
+area lights: diffuse integrals, rect/disk/sphere vs surface grid (rel.) 8.348e-05 (limit 5.0e-03) ok
+area lights: LTC integral over rect/disk/sphere vs surface grid (rel.) 2.041e-03 (limit 5.0e-03) ok
+area lights: tube (exact outline) vs the capsule (rel.)                1.035e-04 (limit 5.0e-03) ok
+area light contours, rect   diffuse:  922 with I >= 1e-3, rel. error p50 2.1e-07 p99 7.2e-06 max 1.4e-05; all (kappa <= 100) vs max(I, 1e-3) worst 1.7e-05
+area light contours, rect   LTC    :  614 with I >= 1e-3, rel. error p50 3.8e-07 p99 1.7e-05 max 3.5e-05; all (kappa <= 100) vs max(I, 1e-3) worst 8.3e-05; kappa > 100 worst 8.6e-05
+area light contours, rect   back   :  956 with I >= 1e-3, rel. error p50 2.3e-07 p99 9.3e-06 max 2.3e-05; all (kappa <= 100) vs max(I, 1e-3) worst 2.3e-05
+area light contours, disk   diffuse:  721 with I >= 1e-3, rel. error p50 2.8e-07 p99 1.3e-05 max 2.2e-05; all (kappa <= 100) vs max(I, 1e-3) worst 4.2e-05
+area light contours, disk   LTC    :  442 with I >= 1e-3, rel. error p50 3.1e-07 p99 3.3e-05 max 5.0e-05; all (kappa <= 100) vs max(I, 1e-3) worst 1.2e-04; kappa > 100 worst 1.9e+00
+area light contours, disk   back   :  711 with I >= 1e-3, rel. error p50 2.5e-07 p99 2.3e-05 max 5.4e-05; all (kappa <= 100) vs max(I, 1e-3) worst 8.1e-05
+area light contours, sphere diffuse:  683 with I >= 1e-3, rel. error p50 1.7e-07 p99 6.6e-06 max 1.9e-05; all (kappa <= 100) vs max(I, 1e-3) worst 2.8e-05
+area light contours, sphere LTC    :  409 with I >= 1e-3, rel. error p50 3.7e-07 p99 2.0e-05 max 3.4e-05; all (kappa <= 100) vs max(I, 1e-3) worst 1.3e-04; kappa > 100 worst 1.2e-04
+area light contours, sphere back   :  690 with I >= 1e-3, rel. error p50 1.8e-07 p99 6.8e-06 max 1.6e-05; all (kappa <= 100) vs max(I, 1e-3) worst 2.0e-05
+area light contours, tube   diffuse:  640 with I >= 1e-3, rel. error p50 6.4e-07 p99 9.0e-06 max 2.0e-05; all (kappa <= 100) vs max(I, 1e-3) worst 2.6e-05
+area light contours, tube   LTC    :  351 with I >= 1e-3, rel. error p50 7.7e-07 p99 2.3e-05 max 3.6e-05; all (kappa <= 100) vs max(I, 1e-3) worst 2.6e-04; kappa > 100 worst 2.5e-03
+area light contours, tube   back   :  623 with I >= 1e-3, rel. error p50 5.2e-07 p99 1.0e-05 max 1.3e-05; all (kappa <= 100) vs max(I, 1e-3) worst 2.2e-05
+area light contours: 542 LTC integrals with kappa(M^-1) > 100 (roughness 0.1, grazing), worst vs max(I, 1e-3) 1.9e+00 (reported, not gated)
+area lights: closed forms vs dense outline, P99 where I >= 1e-3 (rel.) 3.285e-05 (limit 1.0e-04) ok
+area lights: closed forms vs dense outline, worst for kappa <= 100 (rel. to max(I, 1e-3)) 2.555e-04 (limit 1.0e-03) ok
+coverage composite: 6716 fragments in 137 tiles, 2556 pixels checked (383 with several visible fragments, 1627 over the sky, 12 heavy, 6 walked past one round, 1 with several runs, 2 needing more than the rounds take, at most 1081 in a pixel), 8 walks ended by the band A surface; error bits 0x800
+coverage composite: heavy pixels, walks of several rounds, pixels of several runs and over the round limit present 1.000e+00 (limit 1.0e+00) ok
+coverage composite: error bits = COV_M_ERROR_ROUNDS iff pixels over the round limit 0.000e+00 (limit 0.0e+00) ok
+coverage composite: pixels with fragments and with overlapping fragments present 2.550e+02 (limit 5.0e+01) ok
+coverage composite: pixels with fragments vs CPU composite of CPU-shaded fragments (rel.) 1.142e-03 (limit 5.0e-03) ok
+coverage composite: pixels without fragments unchanged (abs.)          0.000e+00 (limit 0.0e+00) ok
+planar products: M.shading: planar view without S's froxel lists while the main view has them (INTERFACES v1.22)
+planar view without S's froxel lists while the main view has them fails 1.000e+00 (limit 1.0e+00) ok
+glass [index 1 (T_p = tint, R_p = 0)]: scene set (20.2 s)
+glass [index 1 (T_p = tint, R_p = 0)]: rendered (20.8 s)
+glass [index 1 (T_p = tint, R_p = 0)]: 16437 class 1 pixels checked, F 0.0000 .. 0.0000, largest sun specular 0.0000 (exposed); statistics: 16437 pane, 0 solid, 0 unlit
+glass [index 1 (T_p = tint, R_p = 0)]: class 1 pixels vs R_p x sun specular + T_p x behind (rel.) 5.950e-08 (limit 5.0e-03) ok
+glass [index 1 (T_p = tint, R_p = 0)]: pixels outside class 1 unchanged 0.000e+00 (limit 0.0e+00) ok
+glass [index 1 (T_p = tint, R_p = 0)]: evaluated (20.8 s)
+glass [index 1 (T_p = tint, R_p = 0)]: statistics count the class 1 pixels 0.000e+00 (limit 0.0e+00) ok
+glass [index 1.5, sun behind the pane (R_p, T_p)]: scene set (20.8 s)
+glass [index 1.5, sun behind the pane (R_p, T_p)]: rendered (20.8 s)
+glass [index 1.5, sun behind the pane (R_p, T_p)]: 16437 class 1 pixels checked, F 0.0403 .. 0.0583, largest sun specular 0.0000 (exposed); statistics: 16437 pane, 0 solid, 0 unlit
+glass [index 1.5, sun behind the pane (R_p, T_p)]: class 1 pixels vs R_p x sun specular + T_p x behind (rel.) 3.153e-07 (limit 5.0e-03) ok
+glass [index 1.5, sun behind the pane (R_p, T_p)]: pixels outside class 1 unchanged 0.000e+00 (limit 0.0e+00) ok
+glass [index 1.5, sun behind the pane (R_p, T_p)]: evaluated (20.8 s)
+glass [index 1.5, sun behind the pane (R_p, T_p)]: statistics count the class 1 pixels 0.000e+00 (limit 0.0e+00) ok
+glass [index 1.5, rough, sun in front (R_p x sun specular)]: scene set (20.9 s)
+glass [index 1.5, rough, sun in front (R_p x sun specular)]: rendered (20.9 s)
+glass [index 1.5, rough, sun in front (R_p x sun specular)]: 16437 class 1 pixels checked, F 0.0403 .. 0.0583, largest sun specular 6.1541 (exposed); statistics: 16437 pane, 0 solid, 0 unlit
+glass [index 1.5, rough, sun in front (R_p x sun specular)]: class 1 pixels vs R_p x sun specular + T_p x behind (rel.) 2.033e-06 (limit 5.0e-03) ok
+glass [index 1.5, rough, sun in front (R_p x sun specular)]: pixels outside class 1 unchanged 0.000e+00 (limit 0.0e+00) ok
+glass [index 1.5, rough, sun in front (R_p x sun specular)]: evaluated (20.9 s)
+glass [index 1.5, rough, sun in front (R_p x sun specular)]: statistics count the class 1 pixels 0.000e+00 (limit 0.0e+00) ok
+preshade: 1858 records, 1858 listed as kind 5, 896 channel values differ
+preshade: every blade record listed as an M pre-shaded record          0.000e+00 (limit 0.0e+00) ok
+preshade: Terrain(1 layer = Standard) records pre-shaded = Standard records shaded in the composite 8.900e-04 (limit 1.0e-03) ok
+preshade: the pre-shaded path ran (its f16 rounding shows)             0.000e+00 (limit 0.0e+00) ok
+preshade: clearcoat records (MODE 4 / 5 / 6, cover 0.001) = Standard records in the composite 1.781e-03 (limit 3.0e-03) ok
+preshade: sheen colour 0.01 changes the records by up to 0.271 of their value
+preshade: sheen records (MODE 4 / 5 / 6) carry the sheen               2.707e-01 (limit 1.0e-03) ok
+preshade: sheen records' change is linear in the colour (0.02 vs 2 x 0.01) 1.344e-03 (limit 1.5e-03) ok
+coat sun lobe [alpha >= 2 theta_s] vs dense quadrature of evaluateCoatLobe (rel. to peak) 7.291e-04 (limit 5.0e-03) ok
+coat sun lobe [narrow, alpha < 2 theta_s] vs dense quadrature (rel. to peak) 9.854e-04 (limit 1.0e-02) ok
+sheen probe: 360 cases; lobe x cos vs C++ 7.70e-06, E_sh 5.96e-08, sun rule vs double 2.47e-06, vs disk average 5.50e-04 (relative to max(value, E_sh / pi))
+sheen: modelSheenLobe x cos vs evaluateSheenLobe (rel. to E_sh / pi)   7.701e-06 (limit 1.0e-03) ok
+sheen: modelSheenAlbedo vs sheenAlbedo (abs.)                          5.960e-08 (limit 1.0e-05) ok
+sheen: modelSheenSun vs the 4-point rule in double (rel.)              2.472e-06 (limit 1.0e-03) ok
+sheen: modelSheenSun vs the disk average (rel.)                        5.499e-04 (limit 3.0e-03) ok
+sheen frame: 75923 pixels checked (8406 cloth, 28 cloth terminator pixels left to the probe), largest sheen sun term 0.3889 (exposed)
+sheen frame: pixels vs keepS x base sun + C x 4-point sheen sun (rel.) 1.447e-05 (limit 5.0e-03) ok
+sheen frame: the sheen term is visible (largest exposed sun sheen)     3.889e-01 (limit 5.0e-02) ok
+aniso frame: 7001 + 6721 pixels checked (6135 streak pixels with alpha_b < 2 theta_s), largest exposed sun specular 63.0443
+aniso frame: r 0.3 s 0.8 sun (disk rule) vs dense disk quadrature (rel.) 3.154e-03 (limit 5.0e-03) ok
+aniso frame: r 0.08 s 1 streak sun vs dense disk quadrature (rel.)     3.875e-03 (limit 1.0e-02) ok
+aniso frame: the highlight is visible (largest exposed sun specular)   6.304e+01 (limit 5.0e-02) ok
+film frame: ground 59206 px (worst 6.28e-07), soap 5993 px (worst 3.31e-05), oxide on copper 6334 px (worst 8.37e-06); soap chromaticity r 0.000-0.000 g 0.383-0.475 b 0.525-0.617
+film frame: soap and oxide pixels vs evaluateFilm (rel.)               3.306e-05 (limit 1.0e-02) ok
+film frame: the soap film's colour changes with angle (blue chromaticity range) 9.178e-02 (limit 5.0e-02) ok
+  aq case 0 shape 0: sheen gpu 1.38355e-18 replica 1.38354e-18, aniso gpu 0.00756115 replica 0.00758322
+  aq case 9 shape 0: sheen gpu 5.27428e-05 replica 5.2742e-05, aniso gpu 0.00394428 replica 0.00396249
+  aq case 106 shape 2: sheen gpu 3.50188e-06 replica 3.50243e-06, aniso gpu 0.725227 replica 0.732287
+  aq case 107 shape 2: sheen gpu 0.0439756 replica 0.0439164, aniso gpu 0.780541 replica 0.815297
+area quadrature: 180 placements (4 shapes); GPU vs double replica worst: sheen 0.00135, anisotropic 0.0426 (rel. to max(value, 1e-3 peak))
+area quadrature: GPU vs independent references, energy-weighted: sheen 0.0006, anisotropic r 0.3 s 0.8 0.0037, r 0.08 s 1 0.0266
+area quadrature: sheen over the light, GPU vs double replica (rel.)    1.348e-03 (limit 2.0e-03) ok
+area quadrature: sheen vs reference, energy-weighted over 180 placements 5.947e-04 (limit 5.0e-03) ok
+area quadrature: anisotropic r 0.3 s 0.8 vs reference, energy-weighted 3.691e-03 (limit 5.0e-03) ok
+area quadrature: anisotropic r 0.08 s 1 (alpha_b 0.0064) vs reference, energy-weighted 2.662e-02 (limit 3.0e-02) ok
+area lobes frame: 1680 sphere pixels, largest exposed radiance 0.6647, energy-weighted error 0.0006687, worst 0.002965
+area lobes frame: anisotropic sphere under a rect light vs replica (energy-weighted) 6.687e-04 (limit 5.0e-03) ok
+area lobes frame: the area-light highlight is visible                  6.647e-01 (limit 5.0e-02) ok
+passed: 0 failure(s)

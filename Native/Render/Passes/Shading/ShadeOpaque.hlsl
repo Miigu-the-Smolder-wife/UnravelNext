@@ -39,6 +39,8 @@
 // P[7] = { edge radiance UAV (RGBA16F), R's screen probe maps (K path; UNX_NONE = absent), S's shadow overflow list (raw;
 //        FALLBACK: a raw buffer holding this frame's ShadowSrvs), V's water layer vis ids (v1.75; UNX_NONE = none): a
 //        pixel under a water-layer stream surface keeps its radiance too, W's refraction source (tracks::water) }
+// P[9].w R's per-pixel front GI irradiance (view.giIrradiance, RGBA16F: rgb x exposure, a = cache data; UNX_NONE: none,
+//        planar views): replaces the cache lookup in the probe gather (Foliage keeps the cache for its back side)
 // P[9].z A9 area-light lobe texture (RGBA16F UAV, exposed radiance; AreaLobes.hlsl writes it, the LAYERED variants with
 //        AREA read it; UNX_NONE = none)
 // P[9].y A9 anisotropy word (Resolve.hlsl; UNX_NONE = no anisotropic material): read by the LAYERED variants, whose
@@ -573,7 +575,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         probes.probes = P[2].y;
         probes.occlusion = P[2].y;
         probes.pad0 = P[7].y;
-        probes.pad1 = P[2].w != UNX_NONE ? P[2].w + 1 : 0;
+        // R's per-pixel front irradiance (P[9].w, view.giIrradiance: r.gi.screen, then R's edge-preserving denoise) replaces
+        // the cache lookup inside the gather; the cache stays for Foliage's back side (not in the texture)
+        probes.pad1 = P[2].w != UNX_NONE && (P[9].w == UNX_NONE || foliage) ? P[2].w + 1 : 0;
         const bool specular = NoV > 0 && (experiment & 4) == 0;
         const float4 refl = specular && P[2].z != UNX_NONE ? reflectionRadiance(P[2].z, pixel) : float4(0, 0, 0, 0);
         const bool wantRadiance = specular && refl.a <= 0;
@@ -601,7 +605,14 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             }
             if ((experiment & 2) == 0)
             {
-                irradiance = g.irradiance * g.occlusion;
+                float3 front = g.irradiance;
+                if (P[9].w != UNX_NONE)
+                {
+                    Texture2D<float4> screenIrradiance = ResourceDescriptorHeap[P[9].w];
+                    const float4 e = screenIrradiance[pixel];  // rgb = irradiance x exposure, a = 1 where the cache had data
+                    if (e.a > 0) front = e.rgb / g_exposure;
+                }
+                irradiance = front * g.occlusion;
                 irradianceBack = g.irradianceBack * g.occlusion;
             }
             if (wantRadiance) incident = g.radiance;

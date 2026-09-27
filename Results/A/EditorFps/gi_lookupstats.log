@@ -1,0 +1,30 @@
+waiting for the GPU measurement lock; held by: {"track":"R","kind":"correctness","pid":29312,"started":"2026-09-27T22:07:48","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/R/GiInterior/bath_look1_ev6.unxscene --capture Results/R/GiInterior/D_bath_1080.pfm --out Results/R/GiInterior/rg_x --resolution 1920x1080 --frames 600"}
+waiting for the GPU measurement lock; held by: {"track":"R","kind":"correctness","pid":29312,"started":"2026-09-27T22:07:48","timeoutMinutes":45,"command":"build/all/bin/unx_gate_shadow_renderergate.exe --scene Results/R/GiInterior/bath_look1_ev6.unxscene --capture Results/R/GiInterior/D_bath_1080.pfm --out Results/R/GiInterior/rg_x --resolution 1920x1080 --frames 600"}
+scene interior (cd88bc94b9728f30), camera 'overview', 34 instances, quality c524c8c083054f83
+RayScene: 34 static + 1 dynamic instances (0 deformed), 34 mesh BLAS (9342 tris, 0.2 MB compacted from 0.7 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 19 ms (records and mesh BLAS 6.4, proxies 0.0, deformed setup 2.4, static TLAS and records 6.5, first dynamic build 3.9)
+RayScene resident (MB): static BLAS+TLAS 0.3 (BLAS 0.2, TLAS 0.01, descs+scratch 0.01), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.001), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 34 static instances in 6 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 202.0 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 1 planar reflector planes from 2 flat mirror triangles (3968 smooth-shaded mirror triangles stay on rays), 0.0 ms
+S VSM: 3311 page requests exceeded the 4096-page atlas (frame 1): the atlas grows to 9344 pages
+S shadow overflow: frame 1 needed 7372800 words (55552 tiles over capacity): capacity grows to 16777216 words
+[interior_overview_1440p_integrated 1440p] gpu frame median 14.3048 ms, p95 17.0457, p99 17.0723 (n=30) | cpu frame median 1.0286 ms (record 0.5554, submit 0.0880) | SM clock median 2805 MHz (min 2805) | passes 178, barriers 1032 in 167 batches, cross-queue syncs 0, command lists 1, transients 111 (774.2 MB aliased / 1533.4 MB unaliased) | quality c524c8c083054f83
+[interior_overview_1440p_integrated 1440p] outside passes: graphics 1 lists, head 0.0000, tail 0.0000, gap 0.0000 ms (medians)
+R 1440p: GI cache lookup (M, front side) per pixel: levels 1.312 (22.30 % of pixels > 1), cells 10.50, table slots 11.31 (1.08 per cell), cells with data 6.90; per 8x8 tile: distinct cells 18.9 (max 164), distinct entries 11.9 (max 63) over 57600 tiles, 3686400 pixels
+R 1440p: tiles by distinct entries: 3:15 4:5105 5:608 6:9969 7:1839 8:8411 9:3404 10:2229 11:2025 12:5964 13:1385 14:989 15:1302 16:1981 17:1158 18:2110 19:736 20:1216 21:726 22:1071 23:579 24:781 25:401 26:507 27:309 28:438 29:228 30:336 31:201 32:234 33:151 34:221 35:100 36:197 37:73 38:132 39:68 40:77 41:51 42:60 43:38 44:48 45:24 46:31 47:19 48:12 49:7 50:10 51:8 52:2 53:4 54:3 55:2 57:2 60:1 62:1 63:1
+R 1440p: group-resolved lookup (GiCacheTile.hlsli) vs per-pixel: 0 pixels differ (max relative 0), 1.2050 cells per pixel not in the tile table
+R 1440p: entries evaluated per pixel 6.90; against the reconstruction before the partner corners: mean relative 0.0734, max 0.944, over 1 % 63.95 %, over 5 % 40.427 % of 3686400 pixels
+R 1440p: r.gi.screen texture vs per-pixel lookup on M's inputs: 0 pixels with a different data flag, 3686400 compared, 3685869 over 1.1e-3 relative (max 9.52) FAIL
+R 1440p: reflections 1.293 ms (trace 0.087 ms, classify 0.045, resolve 0.074)
+R 1440p: integrated frame 14.305 ms GPU (median)
+R 1440p: GI 3.029 ms (trace 0.802 ms = 0.62 G rays/s incl. hit shading), acceleration structures 0.027 ms; stand-in primary visibility 0.000 ms (not R)
+R 1440p: over 35 frames: exact set 0.00 of 0 slots occupied, 0.000 slot builds / frame (0), 0 exact vertices deformed / frame; proxy cut switches 0.000 / frame (0); per frame 0.00 instances wanted, 0.00 hit often but within their proxy's error bound
+R 1440p: dynamic TLAS input: 1 instances, 1 distinct BLAS, 0 non-finite transforms, 0 mask 0, 0 null BLAS, max scale 1.000, translation span 0.0 x 0.0 x 0.0 m
+R 1440p: last frame: proxy cuts 0 triangles refit, 0 vertices deformed; finest cut's posed error bound up to 0.0 x V's bind-pose error
+R 1440p: reflection jobs 116429 (M 18176 = rays 18176; G samples 97591 = rays 390364), G pixels 1206926
+R 1440p: planar candidates 1 visible, largest plane 130914 mirror pixels, 1 views (130914 px), CPU 0.003 ms
+R 1440p: planar cost choice: rays 4.407 ns/ray (measured), views 0.638 ms + 0.000 ns per mirror pixel (fit of measured views), last views 0.630 ms over 158177 rectangle px
+R 1440p: cache 57139 live, 43364 requested, 7812 selected + 0 background updates, 52275 hit entries, 115 created, 0 allocation failures, 0 table overflows
+R 1440p: reflection hits' cache lookups 403692, with no data at any level searched 0 (0.000 %)
+R 1440p: reflection G samples 97591, estimated by the ratio branch (beta < 1) 3141 (3.22 %)
+R 1440p: G samples by log2(mean L / mean g): <-3 1321, -3 1553, -2 6078, -1 45298, 0 35278, 1 6031, 2 1363, 3 477, >=4 192; mean g = 0 0
