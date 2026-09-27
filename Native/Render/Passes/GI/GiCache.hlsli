@@ -218,15 +218,21 @@ float3 giIrrMapAt(B b, GiHeader h, uint entry, float3 na, float3 n)
     const float2 f = e - float2(i0);
     const float4 wx = giCatmullRom(f.x), wy = giCatmullRom(f.y);
     const uint base = h.offIrr + entry * GI_IRR_STRIDE;
+    // A row's four texels are consecutive words: one Load4 per row from x0 = clamp(i0.x - 1, 0, N - 4), which holds every
+    // clamped column the row reads (i0.x - 1 is in [-2, 7]: the clamped columns stay within x0 .. x0 + 3). The same
+    // texels, weights and order as one load per texel (bit-identical), a quarter of the load instructions: the map
+    // evaluation is the bulk of every cache lookup (M's per-pixel irradiance, ray hits).
+    const int x0 = clamp(i0.x - 1, 0, (int)GI_IRR_N - 4);
     float3 sum = 0;
     [unroll] for (uint jy = 0; jy < 4; ++jy)
     {
         const uint iy = (uint)clamp(i0.y - 1 + (int)jy, 0, (int)GI_IRR_N - 1);
+        const uint4 words = b.Load4(base + (iy * GI_IRR_N + (uint)x0) * 4);
         float3 row = 0;
         [unroll] for (uint jx = 0; jx < 4; ++jx)
         {
-            const uint ix = (uint)clamp(i0.x - 1 + (int)jx, 0, (int)GI_IRR_N - 1);
-            row += wx[jx] * giIrrUnpack(b.Load(base + (iy * GI_IRR_N + ix) * 4));
+            const int k = clamp(i0.x - 1 + (int)jx, 0, (int)GI_IRR_N - 1) - x0;  // in [0, 3]
+            row += wx[jx] * giIrrUnpack(k == 0 ? words.x : (k == 1 ? words.y : (k == 2 ? words.z : words.w)));
         }
         sum += wy[jy] * row;
     }
