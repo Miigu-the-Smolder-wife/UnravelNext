@@ -1,7 +1,7 @@
 // unx-kernel: cs_6_6 main
 // Raster tile mask and atlas slots of the sun levels for V's depth raster service (INTERFACES 5.3, tile atlas v1.32):
-// per clipmap level (one raster view each), one bit per 128-texel viewport tile = window page, set when that page has a
-// physical page this frame (VsmScan), and the page's atlas slot in word (level x 512 + word) x 32 + bit of the slots
+// per clipmap level (one raster view each), one bit per 128-texel viewport tile = window page, set when that page is drawn
+// this frame (a new physical page, VsmScan; kept pages are not redrawn, VsmCache), and the page's atlas slot in word (level x 512 + word) x 32 + bit of the slots
 // buffer. One thread per 32-bit mask word.
 // P[0].x page table SRV (raw), P[0].y mask UAV (raw), P[0].z VSM constants CBV, P[0].w atlas slots UAV (raw)
 #include "Passes/Shadow/VsmCommon.hlsli"
@@ -21,7 +21,7 @@ void main(uint word : SV_DispatchThreadID)
         const uint tile = (word % wordsPerLevel) * 32 + i;  // row-major over the window
         const int2 page = vsmOrigin(c, k) + int2(tile % VSM_TABLE, tile / VSM_TABLE);
         const uint e = table.Load(vsmSlot(page, k) * 8);
-        if (e & VSM_FLAG_RESIDENT)
+        if ((e & (VSM_FLAG_RESIDENT | VSM_FLAG_DIRTY)) == (VSM_FLAG_RESIDENT | VSM_FLAG_DIRTY))  // drawn this frame (kept pages: VsmCache)
         {
             bits |= 1u << i;
             slots.Store((word * 32 + i) * 4, e & VSM_PHYS_MASK);

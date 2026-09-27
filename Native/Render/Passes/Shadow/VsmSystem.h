@@ -66,6 +66,7 @@ struct VsmStats
 {
     uint64_t frame = 0;          // frame the counters belong to
     uint32_t requested = 0, allocated = 0, dirty = 0, exhausted = 0, freePages = 0, pixelRequested = 0;
+    uint32_t cachedPages = 0;    // sun pages kept from an earlier frame (shadow.vsm.cache; requested = cached + new, dirty = drawn)
     // Visibility passes (all views of the frame): pixels per path (VsmSample.hlsli VSM_PATH_*).
     uint32_t pathNoCaster = 0, pathRegionLit = 0, pathRegionUmbra = 0, pathSearchLit = 0, pathFiltered = 0, pathDiskLit = 0, pathDiskUmbra = 0;
     // Local lights of the latest recorded frame (CPU): shadow slots in use, raster-active, casting lights without a slot.

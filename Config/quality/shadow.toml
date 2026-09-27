@@ -10,6 +10,10 @@ lod_bias = 0.0                  # level = floor(log2(pixel footprint / level-0 t
 receiver_bias_texels = 1.0      # receiver-plane tolerance, texels of the compared level (x (1 + plane slope)); no lateral shift
 max_receiver_slope = 8.0        # clamp of the receiver plane's light-space gradient (surfaces within ~7 deg of grazing)
 height_margin_m = 500.0         # caster height range margin (dynamic casters) around the scene's bounds
+cache = true                    # sun page cache (user decision 2026-09-28, VsmCache.hlsl): a requested sun page keeps its content
+                                # when it was resident last frame and no changed caster (moved, deformed, skinned, wind, morph,
+                                # shown / hidden) touched it; the sun, the caster range, a scene revision, an origin rebase or a
+                                # restore redraws every page (the one path, the budget's worst case). false = the one path always
 use_stats = 0                     # 1: count which sun pages lookups read, by request kind (measurement only; RendererGate)
 subtile_stats = 0                 # 1: count the 32^2 sub-tiles of requested pages that pixels sample (measurement only)
 fragment_check = 0                # 1: the fragment pass evaluates every coverage record and counts those whose settled pixel

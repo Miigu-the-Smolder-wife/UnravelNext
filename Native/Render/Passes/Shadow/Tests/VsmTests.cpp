@@ -264,6 +264,13 @@ int main(int argc, char** argv)
             report(penCount == 0 || penSum / penCount < 0.05, format("%s: penumbra mean |V - V_ref|", label).c_str(), penCount ? penSum / penCount : 0, 0.05);
         };
 
+        // shadow.vsm.cache (the sun page cache, VsmCache.hlsl): frames without a change keep every page; a moved caster or
+        // camera draws only the pages it touched. The comparisons against the reference below check that the kept pages
+        // hold what a fresh render would. Off: the one path (every requested page drawn every frame).
+        const bool cache = tf.quality.has("shadow.vsm.cache") && tf.quality.boolean("shadow.vsm.cache");
+        logf("shadow.vsm.cache = %s\n", cache ? "true" : "false");
+        // Some pages drawn, not all (cache) / all (one path).
+        auto partlyDrawn = [&](const shadow::VsmStats& st) { return cache ? st.dirty > 0 && st.dirty < st.requested : st.dirty == st.requested; };
         auto dirtyByLevel = [&](const Frame& f) {
             std::vector<uint32_t> n(shadow::kLevels, 0);
             for (uint32_t s = 0; s < shadow::kSlots; ++s)
@@ -283,9 +290,16 @@ int main(int argc, char** argv)
         report(s1.requested > 0 && s1.allocated == s1.requested && s1.dirty == s1.requested && s1.exhausted == 0, "first frame: every requested page allocated and rendered",
                s1.dirty, s1.requested);
         const shadow::VsmStats s2 = statsAfter();
-        report(s2.requested == s1.requested && s2.dirty == s2.requested && s2.exhausted == 0, "steady camera: every requested page drawn again", s2.dirty, s2.requested);
+        report(s2.requested == s1.requested && (cache ? s2.dirty == 0 && s2.cachedPages == s2.requested : s2.dirty == s2.requested) && s2.exhausted == 0,
+               cache ? "steady camera: every requested page kept" : "steady camera: every requested page drawn again", s2.dirty, cache ? 0 : s2.requested);
         Frame f2 = runFrame(true);
-        report(f1.table == f2.table, "steady camera: the same page table (deterministic assignment)", f1.table == f2.table ? 0 : 1, 0);
+        // (the same pages and physical pages; the drawn-this-frame bit differs with the cache)
+        auto withoutDrawn = [](std::vector<uint8_t> t) {
+            for (size_t i = 0; i + 8 <= t.size(); i += 8) t[i + 3] &= (uint8_t)~((1u << 29 | 1u << 30) >> 24);
+            return t;
+        };
+        const bool sameTable = withoutDrawn(f1.table) == withoutDrawn(f2.table);
+        report(sameTable, "steady camera: the same page table (deterministic assignment)", sameTable ? 0 : 1, 0);
         compare(f2, "static", 2);
 
         // shadowSunVisibilityAt at the receivers of f2, footprints of 1, 4 and 16 pixels (ray cones wider than a pixel).
@@ -526,7 +540,7 @@ int main(int argc, char** argv)
         runFrame(false);
         const shadow::VsmStats s3 = statsAfter();
         logf("camera move 0.32 m: requested %u, allocated %u, dirty %u\n", s3.requested, s3.allocated, s3.dirty);
-        report(s3.dirty == s3.requested && s3.exhausted == 0, "camera move: every requested page drawn", s3.dirty, s3.requested);
+        report(partlyDrawn(s3) && s3.exhausted == 0, cache ? "camera move: only the new pages drawn" : "camera move: every requested page drawn", s3.dirty, s3.requested);
         setCamera(cam.position);
         runFrame(false);
         runFrame(false);
@@ -552,10 +566,11 @@ int main(int argc, char** argv)
             Frame moved = runFrame(true);
             const shadow::VsmStats sm = statsAfter();
             logf("moved caster: requested %u, dirty %u\n", sm.requested, sm.dirty);
-            report(sm.dirty == sm.requested, "moved caster: every requested page drawn", sm.dirty, sm.requested);
+            report(partlyDrawn(sm), cache ? "moved caster: the pages under it drawn" : "moved caster: every requested page drawn", sm.dirty, sm.requested);
             compare(moved, "after caster move", 2);
             const shadow::VsmStats sn = statsAfter();
-            report(sn.dirty == sn.requested, "caster at rest again: every requested page drawn", sn.dirty, sn.requested);
+            report(cache ? sn.dirty < sn.requested : sn.dirty == sn.requested, cache ? "caster at rest again: pages kept" : "caster at rest again: every requested page drawn",
+                   sn.dirty, sn.requested);
         }
 
         // 3b. Slow drift (2 mm per frame for 30 frames, 6 cm in all): every level is drawn every frame, and the shadow
@@ -589,7 +604,7 @@ int main(int argc, char** argv)
             for (uint32_t k = 0; k < 10; ++k) line += format(" %u:%u", k, dirty[k]);
             logf("slow drift 6 cm over 30 frames, dirty pages by level:%s\n", line.c_str());
             const shadow::VsmStats sd = shadow::stats(tf.trackState);
-            report(sd.dirty == sd.requested, "slow drift: every requested page drawn each frame", sd.dirty, sd.requested);
+            report(partlyDrawn(sd), cache ? "slow drift: the pages under the pole drawn each frame" : "slow drift: every requested page drawn each frame", sd.dirty, sd.requested);
             boxes[2].centre = boxes[2].centre + float3{ 0.06f, 0, 0 };
             compare(last, "after slow drift", 2);
         }
@@ -675,7 +690,8 @@ int main(int argc, char** argv)
             }
             logf("wind (sway range %.4f m) dirty pages over 20 frames by level:%s\n", sway, line.c_str());
             const shadow::VsmStats sw = shadow::stats(tf.trackState);
-            report(sw.dirty == sw.requested && fineDirty + coarseDirty > 0, "wind: every requested page drawn each frame", sw.dirty, sw.requested);
+            report((cache ? sw.dirty > 0 : sw.dirty == sw.requested) && fineDirty + coarseDirty > 0,
+                   cache ? "wind: the wind caster's pages drawn each frame" : "wind: every requested page drawn each frame", sw.dirty, sw.requested);
 
             // 6. Wind change after commit (v1.23): the source scene's wind is edited before a frame (the host's path, no
             //    scene reload). (a) The endpoint bound holds for the v1 model over random transitions (C++ twin of
@@ -738,7 +754,7 @@ int main(int argc, char** argv)
                 }
                 logf("wind gust %.1f -> %.1f m/s, +3 deg (bound <= %.4f m, gust term %.4f m): dirty pages by level:%s" "\n", ws0, ws1, worst, change, gustLine.c_str());
                 const shadow::VsmStats sg = shadow::stats(tf.trackState);
-                report(sg.dirty == sg.requested && coarse + fine > 0, "wind change: every requested page drawn with the gust", sg.dirty, sg.requested);
+                report(sg.dirty == sg.requested && coarse + fine > 0, "wind change: every requested page drawn with the gust", sg.dirty, sg.requested);  // (a changed wind: the cache redraws all)
             }
         }
 

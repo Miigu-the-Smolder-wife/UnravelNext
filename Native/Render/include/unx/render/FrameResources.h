@@ -177,6 +177,11 @@ struct FrameResources
                                    // page its layer + 1 (0 = none, T = 1), then the layer pages (4
                                    // knots per texel) and block profiles; ShadowSrvs.layers
     uint32_t vsmConstants = UINT32_MAX;  // CBV descriptor of this frame's VSM constants    [S]
+    // V's skinned-instance bounds of this frame (prepareCullScene, v.cull.skinBounds): StructuredBuffer<float4> world     [V]
+    // spheres, 2 per skin slot (current, previous palette and transform; radius < 0 = unbounded), the slots' instance
+    // indices (SRV of a StructuredBuffer<uint>) and the slot count. S's page cache invalidates their shadow footprint.
+    BufferRef skinBounds;
+    uint32_t skinInstancesSrv = UINT32_MAX, skinCount = 0;
     // v1.45 (B2, COVERAGE 12.4 structure 2): raw SRV of 1 bit per scene light, set when the light's revision has held for  [M]
     // >= 8 frames and raytracing.emitters is on. M leaves those area lights' LTC specular to R's reflection paths in the
     // main view (G/M rays see the emitters; the K path's maps carry the GI cache's emitter texels) and shades it by LTC in

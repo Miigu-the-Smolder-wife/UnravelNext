@@ -8,13 +8,19 @@
 //           arguments of the per-page passes; requests past the capacity are counted (pool exhausted: the pool grows).
 //   MODE 2: per group again: slot -> page = base + prefix; table entry (page | RESIDENT | DIRTY, tag), page list entry
 //           (slot, page) at index page, page metadata; requests consumed.
+// Sun page cache (VsmCache.hlsl, shadow.vsm.cache): requests marked kept (bit 31) keep their table entry and physical page
+// (DIRTY and STALE cleared: not drawn); the others are counted and numbered as above, and the n-th one gets the n-th
+// free physical page (P[3].x, VsmCache MODE 4: 0, 1, 2, .. when nothing is kept - the one path). The page list holds the
+// pages drawn this frame, by that number. Stats: requested and allocated include the kept pages (the atlas sizing).
 // P[0] = { requests UAV (raw), page table UAV (raw), groups UAV (raw), stats UAV (raw) }
 // P[1] = { slots (scanned: the sun's and the assigned local lights'), capacity (atlas pages), VSM constants CBV, groups }
 // P[2] = { page list UAV (raw: count, pad, (slot, page) pairs), page metadata UAV, local lights SRV, indirect args UAV }
+// P[3] = { free pages (raw: count, 0, 0, 0, then pages), 0, 0, 0 }
 // Stats words: 0 requested, 1 assigned, 2 drawn (= assigned), 3 over capacity, 5 requested by pixels, 32 + k per level,
 // 53 sampled 32^2 sub-tiles (shadow.vsm.subtile_stats).
 #include "Passes/Shadow/VsmLocal.hlsli"
 
+#define VSM_REQ_KEPT (1u << 31)
 #define SCAN_THREADS 256u
 #define SCAN_PER_THREAD 4u
 #define SCAN_GROUP_SLOTS (SCAN_THREADS * SCAN_PER_THREAD)
@@ -50,9 +56,12 @@ void main(uint lane : SV_GroupIndex)
         }
     if (lane == TOTAL_THREADS - 1)
     {
-        const uint total = g_sums[lane], capacity = P[1].y, assigned = min(total, capacity);
+        RWByteAddressBuffer free = ResourceDescriptorHeap[P[3].x];
+        const uint total = g_sums[lane], capacity = min(P[1].y, free.Load(0)), assigned = min(total, capacity);
         RWByteAddressBuffer stats = ResourceDescriptorHeap[P[0].w];
-        stats.Store4(0, uint4(total, assigned, assigned, total - assigned));
+        const uint kept = stats.Load(24);  // (VsmCache MODE 3)
+        stats.Store4(0, uint4(total + kept, assigned + kept, assigned, total - assigned));
+        stats.Store(16, capacity);  // free physical pages for the new ones
         RWByteAddressBuffer list = ResourceDescriptorHeap[P[2].x];
         list.Store2(0, uint2(assigned, 0));
         RWByteAddressBuffer args = ResourceDescriptorHeap[P[2].w];
@@ -74,7 +83,7 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     [unroll] for (uint i = 0; i < SCAN_PER_THREAD; ++i)
     {
         req[i] = first + i < slots ? requests.Load((first + i) * 4) : 0u;
-        mine += req[i] != 0 ? 1u : 0u;
+        mine += req[i] != 0 && (req[i] & VSM_REQ_KEPT) == 0 ? 1u : 0u;  // (kept requests take no new page)
     }
     // Exclusive prefix of 'mine' over the group's threads in thread order, and the group total.
     const uint laneCount = WaveGetLaneCount(), wave = lane / laneCount, waves = (SCAN_THREADS + laneCount - 1) / laneCount;
@@ -91,7 +100,8 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
 #if MODE == 0
     if (lane == 0) groups.Store(group * 4, total);
 #else
-    const uint capacity = P[1].y;
+    RWByteAddressBuffer free = ResourceDescriptorHeap[P[3].x];
+    const uint capacity = min(P[1].y, free.Load(0));
     RWByteAddressBuffer table = ResourceDescriptorHeap[P[0].y];
     RWByteAddressBuffer stats = ResourceDescriptorHeap[P[0].w];
     RWByteAddressBuffer list = ResourceDescriptorHeap[P[2].x];
@@ -120,18 +130,30 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
                 StructuredBuffer<VsmLocalLight> lights = ResourceDescriptorHeap[P[2].z];
                 tag = lights[(slot - VSM_SUN_SLOTS) / VSM_LOCAL_LIGHT_SLOTS].generation;
             }
-            if (page < capacity)
+            if (req[j] & VSM_REQ_KEPT)
             {
-                e = uint2(page | VSM_FLAG_RESIDENT | VSM_FLAG_DIRTY, tag);
-                list.Store2(8 + page * 8, uint2(slot, page));
-                VsmPageMeta m = (VsmPageMeta)0;
-                m.owner = slot | 0x80000000u;
-                m.lastRequested = c.frame;
-                m.renderTime = asuint(c.time);
-                m.maxHeight = VSM_EMPTY;  // VsmPageMax
-                meta[page] = m;
+                // the page as drawn in an earlier frame: same physical page, tag and metadata
+                const uint2 last = table.Load2(slot * 8);
+                e = uint2(last.x & ~(VSM_FLAG_DIRTY | VSM_FLAG_STALE), last.y);
+                meta[last.x & VSM_PHYS_MASK].lastRequested = c.frame;
             }
-            ++page;
+            else
+            {
+                // 'page' is the request's number among this frame's new ones: the page-th free physical page
+                if (page < capacity)
+                {
+                    const uint phys = free.Load(16 + page * 4);
+                    e = uint2(phys | VSM_FLAG_RESIDENT | VSM_FLAG_DIRTY, tag);
+                    list.Store2(8 + page * 8, uint2(slot, phys));
+                    VsmPageMeta m = (VsmPageMeta)0;
+                    m.owner = slot | 0x80000000u;
+                    m.lastRequested = c.frame;
+                    m.renderTime = asuint(c.time);
+                    m.maxHeight = VSM_EMPTY;  // VsmPageMax
+                    meta[phys] = m;
+                }
+                ++page;
+            }
         }
         table.Store2(slot * 8, e);
     }

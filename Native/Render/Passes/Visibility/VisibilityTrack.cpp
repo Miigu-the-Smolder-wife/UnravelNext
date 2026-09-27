@@ -451,6 +451,13 @@ void prepareCullScene(FramePassContext& fc, State& s, D3D12_GPU_VIRTUAL_ADDRESS 
     RenderGraph& g = fc.graph;
     s.chunksRef = g.importBuffer(s.chunks.resource.Get(), { "v.cull.chunks", s.chunks.bytes, (uint32_t)sizeof(CullChunk) });
     s.skinBoundsRef = g.importBuffer(s.skinBounds.resource.Get(), { "v.cull.skinBounds", s.skinBounds.bytes, 16 });
+    if (s.skinCount > 0)
+    {
+        // (S's page cache: the skinned casters' shadow footprint, FrameResources::skinBounds)
+        fc.resources.skinBounds = s.skinBoundsRef;
+        fc.resources.skinInstancesSrv = s.skinList.srv;
+        fc.resources.skinCount = s.skinCount;
+    }
     if (s.chunkBoundsPending)
     {
         s.chunkBoundsPending = false;
