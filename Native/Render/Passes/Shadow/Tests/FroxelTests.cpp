@@ -594,44 +594,72 @@ int main(int argc, char** argv)
                 few.lights.resize(2);
                 auto volumeWith = [&](int bits) {
                     tf.quality.applyOverride("atmosphere.froxels.experiment_disable=" + std::to_string(bits));
-                    // The same scene (no new revision: repeated scene sets change the local shadows after a few, S_STATUS 9d),
-                    // six frames after the quality change.
+                    // The same scene, six frames after the quality change.
                     run(few, 6, -2.0f, false);
                     return lastVolume;
                 };
                 run(few, 6, -2.0f);
-                const std::vector<uint8_t> whole = volumeWith(128), pieces = volumeWith(0), whole2 = volumeWith(128);
+                {
+                    // Regression (S_STATUS 9e): a static scene gives the same air every frame through a whole cycle of
+                    // the local-light upload ring (16 frames), with scene sets in between, after more than 256 scene
+                    // lights have grown the ring's slot map. The ring's slice stride was a multiple of 256 only, so two
+                    // slices in three put the 48-byte light records' view 16 or 32 bytes off: those frames' local shadow
+                    // pages were neither requested nor found and the shadowed air was unshadowed.
+                    scene::Scene many = few;
+                    for (uint32_t i = (uint32_t)many.lights.size(); i < 301; ++i)
+                    {
+                        scene::Light d = few.lights[0];
+                        d.position = { 1000.0f + (float)i, 500, 1000 };  // far outside the view and every froxel
+                        d.range = 1;
+                        d.castShadow = false;
+                        many.lights.push_back(d);
+                    }
+                    run(many, 1, -2.0f);
+                    std::shared_ptr<std::vector<uint8_t>> tableRb;
+                    beforeFroxels = [&](FramePassContext& fc) { tableRb = tf.readbackBuffer(fc, fc.resources.vsmPageTable, (uint64_t)shadow::kTotalSlots * 8); };
+                    run(few, 2, -2.0f);
+                    std::vector<uint8_t> first;
+                    uint32_t differing = 0, withoutLocal = 0;
+                    for (int f = 0; f < 16; ++f)
+                    {
+                        run(few, 1, -2.0f, f % 2 == 0);
+                        uint32_t local = 0;
+                        for (uint32_t sl = shadow::kSlots; sl < shadow::kTotalSlots; ++sl)
+                        {
+                            uint32_t e0;
+                            std::memcpy(&e0, tableRb->data() + (size_t)sl * 8, 4);
+                            local += (e0 >> 31) & 1u;
+                        }
+                        withoutLocal += local == 0 ? 1u : 0u;
+                        if (f == 0) first = lastVolume;
+                        else differing += lastVolume != first ? 1u : 0u;
+                    }
+                    beforeFroxels = nullptr;
+                    logf("static scene over the local-light ring (16 frames, scene set every other frame): %u frames differ from the first, %u without local shadow pages\n",
+                         differing, withoutLocal);
+                    report(differing == 0, "static scene: the same air every frame (bits), 16 frames after 301 scene lights", differing, 0);
+                    report(withoutLocal == 0, "static scene: local shadow pages resident every frame", withoutLocal, 0);
+                }                const std::vector<uint8_t> whole = volumeWith(128), pieces = volumeWith(0);
                 tf.quality.applyOverride("atmosphere.froxels.experiment_disable=0");
-                // The shadowed air of this scene changes once after some scene sets and frames (S_STATUS 9d, open): the
-                // pieces are compared with the one-walk runs before and after them, and must equal one of the two.
                 const double exposure = 1.0 / (1.2 * std::exp2(grid.view.ev100));
-                auto compare = [&](const std::vector<uint8_t>& ref, double& mean, double& worstP) {
-                    double sumD = 0, sumW = 0;
-                    uint32_t nodes = 0;
-                    worstP = 0;
-                    for (uint32_t ty = 0; ty < fg.gridY; ++ty)
-                        for (uint32_t tx = 0; tx < fg.gridX; ++tx)
-                            for (uint32_t n = 1; n <= fg.slices; ++n)
-                            {
-                                const ref::D3 p = nodeOf(pieces, tx, ty, n) - nodeOf(without, tx, ty, n);
-                                const ref::D3 w = nodeOf(ref, tx, ty, n) - nodeOf(without, tx, ty, n);
-                                const double r = w.x + w.y + w.z, e = std::abs(p.x - w.x) + std::abs(p.y - w.y) + std::abs(p.z - w.z);
-                                if (r * exposure <= 1e-3) continue;
-                                worstP = std::max(worstP, e / r);
-                                sumD += e;
-                                sumW += r;
-                                ++nodes;
-                            }
-                    mean = sumD / std::max(sumW, 1e-30);
-                    return nodes;
-                };
-                double m1, w1, m2, w2;
-                const uint32_t n1 = compare(whole, m1, w1), n2 = compare(whole2, m2, w2);
-                logf("shadowed air, K pieces vs one walk per item: before %u nodes mean %.3g largest %.3g, after %u nodes mean %.3g largest %.3g\n", n1, m1, w1, n2, m2, w2);
-                const bool first = m1 + w1 <= m2 + w2;
-                report((first ? n1 : n2) > 1000 && (first ? m1 : m2) < 1e-3, "shadowed air: walk in K pieces = one walk (mean relative)", first ? m1 : m2, 1e-3);
-                report((first ? w1 : w2) < 1e-2, "shadowed air: walk in K pieces = one walk (largest node)", first ? w1 : w2, 1e-2);
-            }
+                double worstP = 0, sumD = 0, sumW = 0;
+                uint32_t nodes = 0;
+                for (uint32_t ty = 0; ty < fg.gridY; ++ty)
+                    for (uint32_t tx = 0; tx < fg.gridX; ++tx)
+                        for (uint32_t n = 1; n <= fg.slices; ++n)
+                        {
+                            const ref::D3 p = nodeOf(pieces, tx, ty, n) - nodeOf(without, tx, ty, n);
+                            const ref::D3 w = nodeOf(whole, tx, ty, n) - nodeOf(without, tx, ty, n);
+                            const double r = w.x + w.y + w.z, e = std::abs(p.x - w.x) + std::abs(p.y - w.y) + std::abs(p.z - w.z);
+                            if (r * exposure <= 1e-3) continue;
+                            worstP = std::max(worstP, e / r);
+                            sumD += e;
+                            sumW += r;
+                            ++nodes;
+                        }
+                logf("shadowed air, K pieces vs one walk per item: %u nodes, mean relative difference %.3g, largest %.3g\n", nodes, sumD / std::max(sumW, 1e-30), worstP);
+                report(nodes > 1000 && sumD / std::max(sumW, 1e-30) < 1e-3, "shadowed air: walk in K pieces = one walk (mean relative)", sumD / std::max(sumW, 1e-30), 1e-3);
+                report(worstP < 1e-2, "shadowed air: walk in K pieces = one walk (largest node)", worstP, 1e-2);            }
 #if defined(FROXEL_TEST_LIGHT_FUNCTIONS)
             for (uint32_t i = 0; i < sc.lights.size(); ++i) lfSet.clear(i);
 #endif

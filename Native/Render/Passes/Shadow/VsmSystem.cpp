@@ -388,9 +388,18 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
     const uint32_t cap = std::max(n, 1u);
     if (!s.localRing || cap > s.localCap)
     {
-        if (s.localRing) fc.device.deferRelease(s.localRing);
+        if (s.localRing)
+        {
+            fc.device.deferRelease(s.localRing);
+            DescriptorHeaps* old = &fc.device.descriptors();
+            for (uint32_t r = 0; r < kRingSlots; ++r)
+                for (uint32_t srv : { s.localLightsSrv[r], s.localActiveSrv[r], s.localSlotOfSrv[r] }) fc.device.deferCall([old, srv] { old->freeResource(srv); });
+        }
         s.localCap = std::max(cap, 256u);
-        s.localStride = (kLocalLights * 48 + kLocalLights * 4 + s.localCap * 4 + 255) & ~255u;
+        // A multiple of 768 = lcm(48, 256): each slice's structured views start at a whole element (FirstElement = byte
+        // offset / stride). A stride of 256 alone put the 48-byte records' view of two slices in three 16 or 32 bytes early
+        // once more than 256 scene lights had grown the slot map, and the local lights read garbage there (S_STATUS 9e).
+        s.localStride = (kLocalLights * 48 + kLocalLights * 4 + s.localCap * 4 + 767) / 768 * 768;
         s.localRing = createBuffer(fc.device, L"S VSM local lights ring", (uint64_t)kRingSlots * s.localStride, D3D12_HEAP_TYPE_UPLOAD);
         D3D12_RANGE nothing{ 0, 0 };
         check(s.localRing->Map(0, &nothing, reinterpret_cast<void**>(&s.localMapped)), "map VSM local ring");
@@ -398,6 +407,8 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
         for (uint32_t r = 0; r < kRingSlots; ++r)
         {
             auto view = [&](uint64_t offset, uint32_t elements, uint32_t stride) {
+                if ((r * (uint64_t)s.localStride + offset) % stride != 0) fail("VSM local ring: slice %u view at byte %llu is not a whole %u-byte element", r,
+                                                                               (unsigned long long)(r * (uint64_t)s.localStride + offset), stride);
                 const uint32_t index = h.allocateResource();
                 D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
                 sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
