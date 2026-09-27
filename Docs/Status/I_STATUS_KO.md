@@ -1,7 +1,8 @@
-## 재개 지점 (렌더 A, 2026-09-27 박막)
-- 박막 구현·커밋 완료(3254655, 3eaa208). CPU·기준 추적기·GPU(--film) 통과. 전체 ShadingTests는 3254655 게이트에서 박막 프레임만 실패했다(이전 장면의 비등방성 플래그로 표 위치가 어긋남). 3eaa208로 고쳤고 **하드웨어 재확인 대기**(사용자 게임 중, HOLD).
-- 게임 뒤 순서: `Tools/CI/Build.ps1 -Track all -Committed` → 게이트 `unx_test_shading_shadingtests.exe`(전체, --film 포함) → `Tools/UnitySlots/UnityLock.ps1 -Slot A ... -- Native/Host/Deploy.ps1 -Build ..\UnravelNext-gate\build\all` → Unravel에 Plugins·Native~와 C# 변경(UnravelNextRendererNative.cs v5, UnravelNextRenderer.cs, UnravelNextUnityContent.cs `_UnravelThinFilm*`)을 함께 커밋. C#은 v5를 보내므로 반드시 새 DLL과 같이 나가야 한다. C# 변경은 `Results/A/ThinFilm/unity_bridge_v5.patch`에 있다(작업 트리에서는 되돌렸다: 열린 편집기가 v4 DLL에 v5를 보내지 않게). 배포 때 `git apply`로 적용한다.
-- 남음: 코트 아래 막, sheen·비등방성과 결합, 두께 텍스처(비눗방울 소용돌이), 투명 얇은 막(유리 등급의 비눗방울 투과).
+## 재개 지점 (렌더 A, 2026-09-27 박막 배포 뒤; 주간 92 %, 스프린트 닫힘)
+- 상태: 모든 작업이 커밋·배포됨. 박막(3254655, 3eaa208) 배포 = Unravel 9cb3434a(빌드 eb41b5e). 게이트 전체 ShadingTests 하드웨어 통과(박막 프레임은 비등방성 프레임 뒤에서 비눗방울 3.3e-5, 구리 산화막 8.4e-6), Unity UnravelNextSceneEditTests + UnravelNextD0SceneTests 2/2 통과, 렌더 이벤트 실패 0, TDR 0.
+- Unity 속성: `_UnravelThinFilmThickness`(nm), `_UnravelThinFilmIor`, `_UnravelThinFilmCoverage`, `_UnravelThinFilmSubstrate`(0 상수, 1..5 금·구리·은·알루미늄·철), `_UnravelSubstrateIor`/`_UnravelSubstrateExtinction`. UnxMaterialDesc v5(216 B). C#의 배치 검사(RequireLayouts)도 크기를 같이 바꿔야 한다(첫 Unity 실행이 192 B 검사로 실패했었다).
+- 비눗방울 캡처(`Results/A/ThinFilm/film_frame.png`)는 수치로는 맞지만 해만 있는 시험 장면이라 청록 하이라이트가 있는 어두운 구로 보인다. 비눗방울답게 보이려면 하늘 반사가 있는 장면, 투명 얇은 막(투과), 두께 변화가 필요하다.
+- 다음(박막 남은 것): 투명 얇은 막(유리 등급, 비눗방울 투과) → 두께 텍스처 → 코트 아래 막(바깥 1.5: 임계각 주변 표 배치) → sheen·비등방성과 결합 → 하늘 있는 장면에서 비눗방울 캡처. 그다음 자동차 도장 → 스타일화 → 최적화.
 
 ## 재개 지점 (렌더 A, 2026-09-27 오전 후반)
 - 면광원 커널 분리 완료(9a5d766): AreaLobes.hlsl(ShadeOpaque AREA_LOBES=1), 늘임 LTC 삭제. 전체 ShadingTests 통과. **배포는 아직**(디스크 대기) — 배포본(Unravel 72444ea1)에는 늘임 LTC 결함이 남아 있다. 다음 배포 때 같이 나간다.
