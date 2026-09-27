@@ -1,4 +1,4 @@
-// Temporal upscale of M (user decision 2026-09-27: internal resolution + temporal upscale for the 4K budget;
+// Temporal upscale of M (user decision 2026-09-28: internal resolution + temporal upscale for the 4K budget;
 // output.render_height_max, FrameContext::Upscale set by FrameRenderer::setupUpscale). Above render_height_max the main
 // view renders at that height with a Halton (2, 3) sub-pixel jitter of its projection; every system of the frame sees
 // that internal view. After the shading chain (haze, motion blur, depth of field at the internal resolution) two passes

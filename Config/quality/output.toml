@@ -10,7 +10,7 @@ resolutions = ["3840x2160", "2560x1440"]
 # banded at 4K / 8 = 1036800 (8 bands at 4K, 4 at 1440p) M measured city 4K 6.725 -> 6.800 ms (shading is latency-bound,
 # the L2 hits do not pay for the per-band barriers yet). Measure again at 1036800 when shading nears its floor.
 band_pixels = 0
-# Temporal upscale (user decision 2026-09-27: internal resolution + temporal upscale for the 4K budget): above this
+# Temporal upscale (user decision 2026-09-28: internal resolution + temporal upscale for the 4K budget): above this
 # output height the main view renders at this height (same aspect) with a sub-pixel jitter, and M's temporal upscale
 # (Passes/Shading/Upscale.cpp) reconstructs the output resolution before the post chain. 0 = off (native everywhere).
 # 1440: 4K renders 2560 x 1440 (0.44 of the pixels); 1440p and below stay native.
