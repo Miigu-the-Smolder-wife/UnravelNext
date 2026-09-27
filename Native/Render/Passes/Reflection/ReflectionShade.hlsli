@@ -68,7 +68,25 @@ struct ReflHitShade
     float3 radiance, sunTerm, shadowOrigin;
     bool needsShadowRay;
     float motion;  // the hit's displacement since the previous tick over the footprint (reflHitMotion)
+    // REFL_DEFER_PENUMBRA (r.refl.shade): S's VSM holds the hit but its region needs the penumbra filter; sunTerm is the
+    // sun term at full visibility times the transmittance, the value radiance + sunTerm x shadowSunPenumbraDeferred(
+    // shadowOrigin = the hit point, penumbraNormal, penumbraLevel, penumbraReach) (ReflectionPenumbra.hlsl).
+    bool needsPenumbra;
+    float3 penumbraNormal;
+    uint penumbraLevel;
+    float penumbraReach;
 };
+
+// This frame's ShadowSrvs (P[5].z raw buffer; P[5].z = UNX_NONE: none).
+ShadowSrvs reflShadowSrvs()
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[P[5].z];
+    const uint4 a = b.Load4(0), c = b.Load4(16);
+    ShadowSrvs vsm;
+    vsm.pageTable = a.x; vsm.pool = a.y; vsm.blocks = a.z; vsm.searchBound = a.w;
+    vsm.constants = c.x; vsm.lights = c.y; vsm.pad0 = c.z; vsm.layers = c.w;
+    return vsm;
+}
 
 // Local lights (HitLocalLights.hlsli): one next-event sample drawn with localSeed; its visibility is localVisible (the
 // compute path: ReflectionLocalShadow traced it before, same seed and hit point) or, with REFL_LOCAL_TRACE (the ray
@@ -81,6 +99,10 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     o.radiance = o.sunTerm = o.shadowOrigin = 0;
     o.needsShadowRay = false;
     o.motion = 0;
+    o.needsPenumbra = false;
+    o.penumbraNormal = 0;
+    o.penumbraLevel = 0;
+    o.penumbraReach = 0;
     const uint experiment = P[5].x >> 24;
     if (hit.instance == RT_INSTANCE_EMITTER)
     {
@@ -160,6 +182,10 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     const float3 v = -direction;
     L.sunIlluminance = 0;
     L.sunVisibility = 0;
+    // A sun term kept apart (a shadow ray or the deferred penumbra filter supplies its visibility): the value at
+    // visibility 0 and the term at full visibility x splitScale (rtHitRadiance is linear in the visibility).
+    bool split = false;
+    float splitScale = 1;
     const float3 l = normalize(g_sunDirection);
     if (dot(s.normal, l) > 0 || materialClass(m) == MATERIAL_FOLIAGE)
     {
@@ -171,12 +197,23 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
             bool resident = false;
             if (P[5].z != UNX_NONE && (experiment & 6) == 0)
             {
-                ByteAddressBuffer b = ResourceDescriptorHeap[P[5].z];
-                const uint4 a = b.Load4(0), c = b.Load4(16);
-                ShadowSrvs vsm;
-                vsm.pageTable = a.x; vsm.pool = a.y; vsm.blocks = a.z; vsm.searchBound = a.w;
-                vsm.constants = c.x; vsm.lights = c.y; vsm.pad0 = c.z; vsm.layers = c.w;
-                L.sunVisibility = shadowSunVisibilityAt(vsm, s.position, s.geometricNormal, footprint, resident);
+#if REFL_DEFER_PENUMBRA
+                const ShadowSunClassified sc = shadowSunClassifyAt(reflShadowSrvs(), s.position, s.geometricNormal, footprint);
+                resident = sc.resident;
+                L.sunVisibility = sc.visibility;
+                if (resident && sc.penumbra)
+                {
+                    split = true;
+                    splitScale = sc.transmittance;
+                    o.shadowOrigin = s.position;
+                    o.needsPenumbra = true;
+                    o.penumbraNormal = s.geometricNormal;
+                    o.penumbraLevel = sc.k;
+                    o.penumbraReach = sc.reach;
+                }
+#else
+                L.sunVisibility = shadowSunVisibilityAt(reflShadowSrvs(), s.position, s.geometricNormal, footprint, resident);
+#endif
             }
             if (experiment & 2)
             {
@@ -187,20 +224,22 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
             {
                 // Sun term at full visibility apart; offset along the geometric normal on the sun's side (leaves
                 // transmit: the ray leaves the lit side; the shading normal can point under the triangle).
-                L.sunVisibility = 0;
-                const float3 unlit = rtHitRadiance(m, s.normal, v, L, coneSpread);
-                L.sunVisibility = 1;
-                o.sunTerm = rtHitRadiance(m, s.normal, v, L, coneSpread) - unlit;
-                o.radiance = unlit;
+                split = true;
                 const float side = dot(s.geometricNormal, l) > 0 ? 1.0 : -1.0;
                 o.shadowOrigin = s.position + side * s.geometricNormal * (1e-3 + 2e-4 * distance(s.position, g_cameraPosition));
                 o.needsShadowRay = true;
-                return o;
             }
         }
     }
+    if (split) L.sunVisibility = 0;
     o.radiance = rtHitRadiance(m, s.normal, v, L, coneSpread);
+    if (split)
+    {
+        L.sunVisibility = splitScale;
+        o.sunTerm = rtHitRadiance(m, s.normal, v, L, coneSpread) - o.radiance;
+    }
     return o;
 }
+
 
 #endif

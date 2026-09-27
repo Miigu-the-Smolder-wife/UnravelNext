@@ -48,7 +48,8 @@ float3 xform(const float4 rows[3], float3 p)
 constexpr uint32_t kShadowDescOffset = 16 + 2 * kDescStride, kShadeArgsOffset = kShadowDescOffset + kDescStride, kCombineArgsOffset = kShadeArgsOffset + 16;
 constexpr uint32_t kLocalDescOffset = kCombineArgsOffset + 16;  // local-light shadow rays (ReflectionLocalShadow)
 constexpr uint32_t kInlineDescOffset = kLocalDescOffset + kDescStride;  // jobs over the ray capacity (ReflectionTraceInline, 2 x 2 variants)
-constexpr uint32_t kArgumentsBytes = kInlineDescOffset + 4 * kDescStride;
+constexpr uint32_t kPenumbraArgsOffset = kInlineDescOffset + 4 * kDescStride;  // ReflectionPenumbra Dispatch arguments
+constexpr uint32_t kArgumentsBytes = kPenumbraArgsOffset + 16;
 const char* const kTraceLibrary[2] = { "Passes/Reflection/ReflectionTrace.SKY0", "Passes/Reflection/ReflectionTrace.SKY1" };
 const char* const kInlineLibrary[2][2] = { { "Passes/Reflection/ReflectionTraceInline.SKY0.JOB1", "Passes/Reflection/ReflectionTraceInline.SKY0.JOB2" },
                                            { "Passes/Reflection/ReflectionTraceInline.SKY1.JOB1", "Passes/Reflection/ReflectionTraceInline.SKY1.JOB2" } };
@@ -849,8 +850,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     }
     // Rays buffer of the split passes (ReflectionRay.hlsli): header, hit records, ray -> job, values, shadow rays.
     const uint32_t rayCapacity = (s.experimentDisable & 64) ? 0 : m_rayCapacity;
-    static_assert(16 + (1ull << 24) * 56 < (1ull << 30), "the rays buffer stays under 1 GB");  // 64: every job inline (A/B of the split)
-    const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 16 + (uint64_t)rayCapacity * 56, 0 });  // REFL_RAYS_SLOT_BYTES
+    static_assert(32 + (1ull << 24) * 56 < (1ull << 30), "the rays buffer stays under 1 GB");  // 64: every job inline (A/B of the split)
+    const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 32 + (uint64_t)rayCapacity * 56, 0 });  // REFL_RAYS_HEADER + REFL_RAYS_SLOT_BYTES
     g.addPass("r.refl.args", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(args, Use::UavCompute);
@@ -956,7 +957,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(raysBuffer, Use::UavCompute);
                   },
                   [&shaders, args, raysBuffer, stage](PassContext& c) {
-                      const uint32_t k[12] = { c.uav(args), c.uav(raysBuffer), stage, 0, kShadeArgsOffset, kCombineArgsOffset,
+                      const uint32_t k[12] = { c.uav(args), c.uav(raysBuffer), stage, kPenumbraArgsOffset, kShadeArgsOffset, kCombineArgsOffset,
                                                kShadowDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
                                                kLocalDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
                                                kInlineDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), kDescStride, 4, 0 };
@@ -1025,6 +1026,20 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
                   shadowPipeline.dispatchIndirect(c.cmd, argumentResource, kShadowDescOffset);
+              });
+    // The penumbra filter of the hits the shade pass queued (ReflectionPenumbra.hlsl; the args from r.refl.shadowargs).
+    g.addPass("r.refl.penumbra", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(args, Use::IndirectArgs);
+                  declareShared(b);
+              },
+              [&shaders, constantsFor, frameConstants, argumentResource, dispatchSignature](PassContext& c) {
+                  uint32_t k[32] = {};
+                  constantsFor(c, k);
+                  c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionPenumbra"));
+                  c.computeConstants(k, 32);
+                  c.bindFrameConstants(frameConstants);
+                  c.cmd->ExecuteIndirect(dispatchSignature, 1, argumentResource, kPenumbraArgsOffset, nullptr, 0);
               });
     g.addPass("r.refl.combine", QueueType::Compute,
               [&](PassBuilder& b) {

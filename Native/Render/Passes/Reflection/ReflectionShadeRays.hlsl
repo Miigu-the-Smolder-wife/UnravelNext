@@ -3,8 +3,10 @@
 // Hit shading of this frame's reflection rays in compute (ARCHITECTURE 2.6 revision 1), one thread per ray slot of the
 // rays buffer (ReflectionRay.hlsli), dispatched indirectly for the slots allocated. Replays the job's direction, shades
 // the hit (ReflectionShade.hlsli: surface, material, GI cache, S's VSM for the sun) or the sky, and stores the value; a
-// hit the VSM does not hold keeps its sun term apart and queues one shadow ray (ReflectionShadow). Root constants:
-// ReflectionRay.hlsli.
+// hit the VSM does not hold keeps its sun term apart and queues one shadow ray (ReflectionShadow); a hit the VSM holds in
+// a region that needs the penumbra filter keeps it apart too and queues the filter (ReflectionPenumbra: the same
+// estimator in dense waves). Root constants: ReflectionRay.hlsli.
+#define REFL_DEFER_PENUMBRA 1
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionShade.hlsli"
 
@@ -53,6 +55,17 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         radiance = o.radiance;
         distanceToHit = hit.t;
         motion = o.motion;
+        if (o.needsPenumbra)
+        {
+            // queued from the sun queue's top (one atomic per wave); the hit record, read above, takes the normal and reach
+            sun = o.sunTerm;
+            const uint lanes = WaveActiveCountBits(true), before = WavePrefixCountBits(true);
+            uint first = 0;
+            if (WaveIsFirstLane()) rays.InterlockedAdd(16, lanes, first);
+            const uint index = WaveReadLaneFirst(first) + before;  // < slots <= capacity (with the shadow rays)
+            rays.Store4(reflRaysPenumbraOffset(capacity, index), uint4(asuint(o.shadowOrigin), slot | (o.penumbraLevel << 24)));
+            rays.Store4(reflRaysHitOffset(slot), uint4(asuint(o.penumbraNormal), asuint(o.penumbraReach)));
+        }
         if (o.needsShadowRay)
         {
             sun = o.sunTerm;

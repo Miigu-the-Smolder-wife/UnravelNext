@@ -8,14 +8,17 @@
 // UAV (raw), ShadowSrvs buffer (ReflectionShade.hlsli), exact set counts }, P[6], P[7] = RtSceneSrvs. Frame constants
 // b1 = main view.
 //
-// Rays buffer (raw): header { rays allocated (atomic), capacity, shadow rays (atomic), 0 }, then per ray slot:
-//   hit records    uint4 at 16 + slot x 16: { instance | front face << 31 (REFL_RAY_MISS, REFL_RAY_NONE), geometry, primitive,
-//                  t }
-//   barycentrics   uint  at 16 + capacity x 16 + slot x 4: 2 x unorm16 (attributes only; the position comes from t)
-//   ray -> job     uint  at 16 + capacity x 20 + slot x 4: job | ray index << 28
-//   shaded value   uint4 at 16 + capacity x 24 + slot x 16: { radiance rg, radiance b | hit distance, sun term rg, sun
+// Rays buffer (raw): header { rays allocated (atomic), capacity, shadow rays (atomic), jobs; penumbra hits (atomic), 0, 0,
+// 0 } (32 B), then per ray slot:
+//   hit records    uint4 at 32 + slot x 16: { instance | front face << 31 (REFL_RAY_MISS, REFL_RAY_NONE), geometry, primitive,
+//                  t }; after the shade pass a penumbra hit's record holds { geometric normal xyz, filter reach }
+//   barycentrics   uint  at 32 + capacity x 16 + slot x 4: 2 x unorm16 (attributes only; the position comes from t)
+//   ray -> job     uint  at 32 + capacity x 20 + slot x 4: job | ray index << 28
+//   shaded value   uint4 at 32 + capacity x 24 + slot x 16: { radiance rg, radiance b | hit distance, sun term rg, sun
 //                  term b | valid << 16 } (fp16, radiance and sun term x REFL_STORE_SCALE)
-//   shadow rays    uint4 at 16 + capacity x 40 + index x 16: { origin xyz, slot }  (56 B per slot in all)
+//   sun queue      uint4 at 32 + capacity x 40 + index x 16: shadow rays from index 0 up { origin xyz, slot }, penumbra
+//                  hits from index capacity - 1 down { hit point xyz, slot | filter level << 24 } (ReflectionShadeRays; a
+//                  slot queues at most one of the two, so both fit)  (56 B per slot in all)
 // A job whose rays do not fit (header capacity) is traced and shaded inline by the trace pass (ReflectionHit.hlsli) and
 // its result written there; results[job] = { first slot, REFL_JOB_SPLIT } marks the split jobs for the combine pass.
 #ifndef UNX_REFLECTION_RAY_HLSLI
@@ -31,12 +34,15 @@
 #define REFL_JOB_SPLIT 0xFFFFFFFFu  // results[job].y of a job whose rays are in the rays buffer (never a packed fp16 pair)
 #define REFL_JOB_INLINE 0xFFFFFFFEu  // results[job].y of a job left to ReflectionTraceInline (the distance half is >= 0: never)
 
-uint reflRaysHitOffset(uint slot) { return 16 + slot * 16; }
-uint reflRaysBaryOffset(uint capacity, uint slot) { return 16 + capacity * 16 + slot * 4; }
-uint reflRaysJobOffset(uint capacity, uint slot) { return 16 + capacity * 20 + slot * 4; }
-uint reflRaysValueOffset(uint capacity, uint slot) { return 16 + capacity * 24 + slot * 16; }
-uint reflRaysShadowOffset(uint capacity, uint index) { return 16 + capacity * 40 + index * 16; }
+#define REFL_RAYS_HEADER 32u
+uint reflRaysHitOffset(uint slot) { return REFL_RAYS_HEADER + slot * 16; }
+uint reflRaysBaryOffset(uint capacity, uint slot) { return REFL_RAYS_HEADER + capacity * 16 + slot * 4; }
+uint reflRaysJobOffset(uint capacity, uint slot) { return REFL_RAYS_HEADER + capacity * 20 + slot * 4; }
+uint reflRaysValueOffset(uint capacity, uint slot) { return REFL_RAYS_HEADER + capacity * 24 + slot * 16; }
+uint reflRaysShadowOffset(uint capacity, uint index) { return REFL_RAYS_HEADER + capacity * 40 + index * 16; }
 #define REFL_RAYS_SLOT_BYTES 56u
+// Penumbra hit i (0 = the first queued) in the sun queue, from its top.
+uint reflRaysPenumbraOffset(uint capacity, uint i) { return reflRaysShadowOffset(capacity, capacity - 1 - i); }
 
 struct ReflJob
 {

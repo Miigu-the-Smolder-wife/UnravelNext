@@ -173,6 +173,78 @@ float shadowSunVisibilityAt(ShadowSrvs s, float3 worldPos, float3 normal, float 
            shadowSunTransmittanceAt(s, worldPos, footprint, footprint);
 }
 
+// shadowSunVisibilityAt in two steps, for callers that defer the penumbra filter to a pass of their own (R's reflection
+// hits, ReflectionPenumbra.hlsl: the filter's 5 + 16 dependent taps run only on the hits whose region needs them, in
+// dense waves, instead of stalling every wave of the hit shading that holds one). The same estimator, levels and inputs:
+// visibility = { 1 lit | 0 umbra | shadowSunPenumbraDeferred(...) } x transmittance.
+struct ShadowSunClassified
+{
+    bool resident;       // false: no level holds the point (the caller traces a shadow ray)
+    bool penumbra;       // the filter is still to run (shadowSunPenumbraDeferred with k and reach)
+    float visibility;    // lit / umbra: the visibility with the transmittance; penumbra: 0
+    float transmittance; // the thin casters' transmittance (the penumbra's factor)
+    uint k;              // the receiver's and the filter's level
+    float reach;         // the filter disk's reach (vsmSunClassify)
+};
+ShadowSunClassified shadowSunClassifyAt(ShadowSrvs s, float3 worldPos, float3 normal, float footprint)
+{
+    ShadowSunClassified o;
+    o.resident = o.penumbra = false;
+    o.visibility = 1;
+    o.transmittance = 1;
+    o.k = 0;
+    o.reach = 0;
+    VsmResources r;
+    r.table = ResourceDescriptorHeap[s.pageTable];
+    r.pool = ResourceDescriptorHeap[vsmAtlasSrv(s.constants)];
+    r.blocks = ResourceDescriptorHeap[s.blocks];
+    r.searchBound = ResourceDescriptorHeap[s.searchBound];
+    r.cbv = s.constants;
+    ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[s.constants];
+    const uint k = vsmLevelForFootprint(c, footprint);
+    uint level = 0xFFFFFFFFu;
+    [loop] for (int j = min(3, (int)k); j >= 0; --j)  // (shadowSunVisibilityAt's residency rule)
+    {
+        const uint L = k - j;
+        if (vsmEntry(r, vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L).xy, L)), L) == 0) continue;
+        bool covered = true;
+        if (L + 1 < VSM_LEVELS)
+        {
+            const int2 centre = vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L + 1).xy, L + 1));
+            [loop] for (uint q = 0; q < 9 && covered; ++q)
+                covered = vsmEntry(r, centre + int2((int)(q % 3) - 1, (int)(q / 3) - 1), L + 1) != 0;
+        }
+        if (!covered) continue;
+        level = L;
+        break;
+    }
+    o.resident = level != 0xFFFFFFFFu;
+    if (!o.resident) return o;
+    // vsmSunVisibility's steps at footprint = vsmTexel(level)
+    const float texel = vsmTexel(level);
+    const VsmReceiver rc = vsmMakeReceiver(c, worldPos, normal, vsmLevelForFootprint(c, texel));
+    uint path;
+    const uint cls = vsmSunClassify(r, rc, texel, c.tanSunRadius, o.k, o.reach, path);
+    o.transmittance = shadowSunTransmittanceAt(s, worldPos, footprint, footprint);
+    o.penumbra = cls != VSM_REGION_LIT && cls != VSM_REGION_UMBRA;
+    o.visibility = cls == VSM_REGION_LIT ? o.transmittance : 0;
+    return o;
+}
+// The penumbra filter of a point shadowSunClassifyAt left (penumbra = true): times its transmittance, the value
+// shadowSunVisibilityAt returns there.
+float shadowSunPenumbraDeferred(ShadowSrvs s, float3 worldPos, float3 normal, uint k, float reach)
+{
+    VsmResources r;
+    r.table = ResourceDescriptorHeap[s.pageTable];
+    r.pool = ResourceDescriptorHeap[vsmAtlasSrv(s.constants)];
+    r.blocks = ResourceDescriptorHeap[s.blocks];
+    r.searchBound = ResourceDescriptorHeap[s.searchBound];
+    r.cbv = s.constants;
+    ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[s.constants];
+    uint path;
+    return vsmSunPenumbra(r, vsmMakeReceiver(c, worldPos, normal, k), k, reach, c.tanSunRadius, c.searchTaps, c.filterTaps, path);
+}
+
 // Sun visibility in [0, 1] at a point in the air (particle centres, FX request 20260926_FX_particle_render_pass 8e): no
 // receiver surface (the receiver plane faces the sun, as the air walk's points), the level for 'footprint' (metres: the
 // larger of the particle's radius and the pixel footprint at its depth) or the nearest resident one, finer levels first
