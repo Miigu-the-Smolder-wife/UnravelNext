@@ -30,6 +30,7 @@
 // radiance) keep the full emission.
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli: SKY0 atmosphere LUTs, SKY1 constants), ray length; P[3].w = gi.experiment_disable
 // P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view (sun, scene buffers).
+#define GI_CORNER_BATCH 2u  // the cache's corner lookups batched (GiCache.hlsli)
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitDecals.hlsli"

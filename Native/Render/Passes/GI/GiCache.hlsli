@@ -127,10 +127,28 @@ uint giHash(uint64_t key)
 }
 
 // Table slot: uint64 key at +0, entry index at +8 (16 B per slot).
+uint giHomeSlot(GiHeader h, uint64_t key) { return giHash(key) & (h.tableSlots - 1); }
+// The probe sequence of 'key' from its home slot, whose contents 'first' the caller loaded (giFind loads it here; the
+// corner lookups load the home slots of all their keys together first: the loads of one key no longer wait for the
+// previous key's probe loop, and a key in its home slot - the usual case at <= 50 % load - needs no further load).
+template <typename B>
+uint giFindFrom(B b, GiHeader h, uint64_t key, uint slot, uint4 first)
+{
+    uint4 s = first;
+    [loop] for (uint i = 0; i < GI_PROBE_LIMIT; ++i)
+    {
+        if (i > 0) s = b.Load4(h.offTable + slot * 16);
+        const uint64_t k = (uint64_t)s.x | ((uint64_t)s.y << 32);
+        if (k == key) return s.z;  // GI_ENTRY_PENDING while its creator is still writing it
+        if (k == 0) return GI_ENTRY_PENDING;
+        slot = (slot + 1) & (h.tableSlots - 1);
+    }
+    return GI_ENTRY_PENDING;
+}
 template <typename B>
 uint giFind(B b, GiHeader h, uint64_t key)
 {
-    uint slot = giHash(key) & (h.tableSlots - 1);
+    uint slot = giHomeSlot(h, key);
     [loop] for (uint i = 0; i < GI_PROBE_LIMIT; ++i)
     {
         const uint4 s = b.Load4(h.offTable + slot * 16);
@@ -140,6 +158,29 @@ uint giFind(B b, GiHeader h, uint64_t key)
         slot = (slot + 1) & (h.tableSlots - 1);
     }
     return GI_ENTRY_PENDING;
+}
+// The entries of a level's 8 corner cells (normal class nc, cells c0 + {0,1}^3 in corner order c = x | y << 1 | z << 2)
+// and each one's update count: the same entries as 8 giFind calls, their loads issued in two batches (home slots, then
+// update counts) instead of 8 dependent chains. entry = GI_ENTRY_PENDING: no cell; updates: 0 for those.
+template <typename B>
+void giFindCorners(B b, GiHeader h, uint level, uint nc, int3 c0, out uint entry[8], out uint updates[8])
+{
+    uint64_t key[8];
+    uint slot[8];
+    uint4 first[8];
+    [unroll] for (uint c = 0; c < 8; ++c)
+    {
+        key[c] = giKey(level, nc, c0 + int3(c & 1, (c >> 1) & 1, c >> 2));
+        slot[c] = giHomeSlot(h, key[c]);
+        first[c] = b.Load4(h.offTable + slot[c] * 16);
+    }
+    [unroll] for (uint c = 0; c < 8; ++c) entry[c] = giFindFrom(b, h, key[c], slot[c], first[c]);
+    [unroll] for (uint c = 0; c < 8; ++c)
+    {
+        const uint e = entry[c] != GI_ENTRY_PENDING ? entry[c] : 0u;  // (entry 0's word: always in the buffer)
+        const uint u = b.Load(h.offSh + e * GI_SH_STRIDE + GI_SH_UPDATES);
+        updates[c] = entry[c] != GI_ENTRY_PENDING ? u : 0u;
+    }
 }
 
 // ---- texel mapping: hemispherical octahedral 8 x 8 around the entry normal
@@ -263,6 +304,58 @@ void giKeepRead(ByteAddressBuffer b, GiHeader h, uint entry, float w) {}
 void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w);
 
 // One level's trilinear accumulation over the 8 cells of the point (entries that exist and have been updated).
+// Batched corner lookups (opt-in per kernel, before including this file): GI_CORNER_BATCH = N > 0 issues the table lookups
+// of a level's 8 corners together (giFindCorners) and their maps N corners at a time (8 / N dependent round trips for the
+// maps instead of 8), with the same corners, values and summation order. Each corner of a batch and each corner's probe
+// loop is inlined code, so only the dedicated lookup kernels opt in (r.gi.screen, the reflection and GI hit shading);
+// the shading kernels (register budget, DXIL limit) keep the sequential form (0, the default).
+#ifndef GI_CORNER_BATCH
+#define GI_CORNER_BATCH 0
+#endif
+#if GI_CORNER_BATCH
+// The corners' table lookups are issued together (giFindCorners), then their maps GI_CORNER_BATCH corners at a time with
+// the loads unconditional (a corner without data reads entry 0 and is not added): the same corners, values and summation
+// order as one dependent chain per corner.
+template <typename B>
+void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, bool wantRadiance, uint nc, uint level, inout float3 sumE,
+                       inout float3 sumL, inout float weight, float cone = 0, bool emitters = false)
+{
+    const float s = giCellSize(h, level);
+    const float3 f = worldPos / s - 0.5;
+    const int3 c0 = int3(floor(f));
+    const float3 t = f - floor(f);
+    uint entries[8], updates[8];
+    giFindCorners(b, h, level, nc, c0, entries, updates);
+    [loop] for (uint batch = 0; batch < 8 / GI_CORNER_BATCH; ++batch)
+    {
+        [unroll] for (uint j = 0; j < GI_CORNER_BATCH; ++j)
+        {
+            const uint k = batch * GI_CORNER_BATCH + j;
+            const bool has = updates[k] != 0;  // no information yet: not added
+            const uint entry = has ? entries[k] : 0u;
+            const float3 o = float3(k & 1, (k >> 1) & 1, k >> 2);
+            const float3 wt = lerp(1 - t, t, o);
+            const float w = wt.x * wt.y * wt.z;
+            float sv;
+            const float3 e = giShIrradiance(b, h, entry, normal, sv);
+            float3 l = 0;
+            if (wantRadiance)
+            {
+                const float3 n = giAnchorNormal(b, h, entry);
+                float3 tb, bb;
+                giBasis(n, tb, bb);
+                const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
+                l = giTexelRadianceCone(b, h, entry, giHemiOctEncode(local), cone, emitters);
+            }
+            if (!has) continue;
+            sumE += w * e;
+            if (wantRadiance) sumL += w * l;
+            weight += w;
+            giKeepRead(b, h, entry, w);
+        }
+    }
+}
+#else
 template <typename B>
 void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, bool wantRadiance, uint nc, uint level, inout float3 sumE,
                        inout float3 sumL, inout float weight, float cone = 0, bool emitters = false)
@@ -292,6 +385,7 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
         giKeepRead(b, h, entry, w);
     }
 }
+#endif
 
 // Level search of the lookups: from the point's level (at least minLevel) up to GI_LEVEL_CLIMB coarser levels; when none of
 // those has data and minLevel raised the start, down through the finer levels to the point's own level (the cells
@@ -377,6 +471,31 @@ float giScreenCornerWeight(uint has, uint c, float3 t, float3 share)
 uint giScreenPick(uint4 lo, uint4 hi, uint c) { return c < 4 ? lo[c & 3] : hi[c & 3]; }
 // One level from its resolved corners (entries and packed anchor normals of corners 0..3 and 4..7, 'has' as above; the
 // caller resolves them: giScreenCell per pixel, or the group's table, GiCacheTile.hlsli).
+#if GI_CORNER_BATCH
+// The maps GI_CORNER_BATCH corners at a time with unconditional loads (a corner without data reads entry 0 and adds
+// nothing): the same corners and summation order as one dependent chain per corner.
+template <typename B>
+void giScreenLevel(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo, uint4 anchorHi, uint has, float3 t, float3 normal, out float3 sum,
+                   out float w)
+{
+    const float3 share = normal * normal;
+    sum = 0;
+    w = 0;
+    [loop] for (uint batch = 0; batch < 8 / GI_CORNER_BATCH; ++batch)
+    {
+        [unroll] for (uint j = 0; j < GI_CORNER_BATCH; ++j)
+        {
+            const uint c = batch * GI_CORNER_BATCH + j;
+            const bool on = (has & (1u << c)) != 0;
+            const float3 m = giIrrMapAt(b, h, on ? giScreenPick(entryLo, entryHi, c) : 0u, giUnpackAnchorNormal(on ? giScreenPick(anchorLo, anchorHi, c) : 0u), normal);
+            const float wc = giScreenCornerWeight(has, c, t, share);
+            if (wc <= 0) continue;
+            sum += wc * m;
+            w += wc;
+        }
+    }
+}
+#else
 template <typename B>
 void giScreenLevel(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo, uint4 anchorHi, uint has, float3 t, float3 normal, out float3 sum,
                    out float w)
@@ -390,6 +509,27 @@ void giScreenLevel(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo
         if (wc <= 0) continue;
         sum += wc * giIrrMapAt(b, h, giScreenPick(entryLo, entryHi, c), giUnpackAnchorNormal(giScreenPick(anchorLo, anchorHi, c)), normal);
         w += wc;
+    }
+}
+#endif
+// A level's corner cells for the screen lookups: entry (GI_ENTRY_PENDING: none, or not updated yet) and packed anchor
+// normal of corners 0..3 and 4..7, 'has' bit c when corner c has data. The same cells as 8 giScreenCell calls, their
+// loads in three batches (home slots, update counts, anchor normals).
+template <typename B>
+void giScreenCells(B b, GiHeader h, uint level, uint nc, int3 c0, out uint4 entryLo, out uint4 entryHi, out uint4 anchorLo, out uint4 anchorHi,
+                   out uint has)
+{
+    uint entry[8], updates[8];
+    giFindCorners(b, h, level, nc, c0, entry, updates);
+    has = 0;
+    [unroll] for (uint c = 0; c < 8; ++c)
+    {
+        const bool ok = updates[c] != 0;
+        const uint anchor = b.Load(h.offAnchor + (ok ? entry[c] : 0u) * 16 + 12);
+        const uint e = ok ? entry[c] : GI_ENTRY_PENDING, a = ok ? anchor : 0u;
+        if (c < 4) entryLo[c] = e, anchorLo[c] = a;
+        else entryHi[c - 4] = e, anchorHi[c - 4] = a;
+        if (ok) has |= 1u << c;
     }
 }
 // A cell's entry with data (GI_ENTRY_PENDING: none, or not updated yet) and its packed anchor normal.
@@ -419,6 +559,9 @@ float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, 
         const int3 c0 = int3(floor(f));
         uint4 entryLo, entryHi, anchorLo, anchorHi;
         uint has = 0;
+#if GI_CORNER_BATCH
+        giScreenCells(b, h, level, nc, c0, entryLo, entryHi, anchorLo, anchorHi, has);
+#else
         [unroll] for (uint c = 0; c < 8; ++c)
         {
             uint anchor;
@@ -427,6 +570,7 @@ float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, 
             else entryHi[c - 4] = entry, anchorHi[c - 4] = anchor;
             if (entry != GI_ENTRY_PENDING) has |= 1u << c;
         }
+#endif
         float3 s;
         float w;
         giScreenLevel(b, h, entryLo, entryHi, anchorLo, anchorHi, has, f - floor(f), normal, s, w);

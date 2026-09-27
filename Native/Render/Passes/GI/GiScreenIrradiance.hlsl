@@ -14,6 +14,7 @@
 // form a quad does not matter: sharing happens only where the keys are equal. Lanes outside the view take part in the
 // exchange with an invalid key (no early return before the quad operations).
 // P[0] = { cache SRV, depth SRV, gbuffer SRV, output UAV }, P[1] = { width, height, 0, 0 }; b1 = the main view.
+#define GI_CORNER_BATCH 4u  // the cache's corner lookups batched (GiCache.hlsli)
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/GI/GiScreenInputs.hlsli"
 
@@ -45,10 +46,18 @@ float3 giCacheIrradianceScreenQuad(ByteAddressBuffer b, GiHeader h, bool valid, 
         uint has = 0;
         if (shareCells)
         {
-            uint a0, a1;
+            // this lane's two cells (giScreenCell's result), their loads issued together
             const uint cA = 2 * quadLane, cB = cA + 1;
-            const uint e0 = giScreenCell(b, h, giKey(level, nc, c0 + int3(cA & 1, (cA >> 1) & 1, cA >> 2)), a0);
-            const uint e1 = giScreenCell(b, h, giKey(level, nc, c0 + int3(cB & 1, (cB >> 1) & 1, cB >> 2)), a1);
+            const uint64_t kA = giKey(level, nc, c0 + int3(cA & 1, (cA >> 1) & 1, cA >> 2)), kB = giKey(level, nc, c0 + int3(cB & 1, (cB >> 1) & 1, cB >> 2));
+            const uint sA = giHomeSlot(h, kA), sB = giHomeSlot(h, kB);
+            const uint4 fA = b.Load4(h.offTable + sA * 16), fB = b.Load4(h.offTable + sB * 16);
+            uint e0 = giFindFrom(b, h, kA, sA, fA), e1 = giFindFrom(b, h, kB, sB, fB);
+            const uint i0 = e0 != GI_ENTRY_PENDING ? e0 : 0u, i1 = e1 != GI_ENTRY_PENDING ? e1 : 0u;
+            const uint u0 = b.Load(h.offSh + i0 * GI_SH_STRIDE + GI_SH_UPDATES), u1 = b.Load(h.offSh + i1 * GI_SH_STRIDE + GI_SH_UPDATES);
+            const uint n0 = b.Load(h.offAnchor + i0 * 16 + 12), n1 = b.Load(h.offAnchor + i1 * 16 + 12);
+            if (e0 != GI_ENTRY_PENDING && u0 == 0) e0 = GI_ENTRY_PENDING;
+            if (e1 != GI_ENTRY_PENDING && u1 == 0) e1 = GI_ENTRY_PENDING;
+            const uint a0 = e0 != GI_ENTRY_PENDING ? n0 : 0u, a1 = e1 != GI_ENTRY_PENDING ? n1 : 0u;
             [unroll] for (uint c = 0; c < 8; ++c)
             {
                 const uint entry = QuadReadLaneAt((c & 1) ? e1 : e0, c >> 1);
@@ -59,25 +68,18 @@ float3 giCacheIrradianceScreenQuad(ByteAddressBuffer b, GiHeader h, bool valid, 
             }
         }
         else if (active)
-        {
-            [unroll] for (uint c = 0; c < 8; ++c)
-            {
-                uint anchor;
-                const uint entry = giScreenCell(b, h, giKey(level, nc, c0 + int3(c & 1, (c >> 1) & 1, c >> 2)), anchor);
-                if (c < 4) entryLo[c] = entry, anchorLo[c] = anchor;
-                else entryHi[c - 4] = entry, anchorHi[c - 4] = anchor;
-                if (entry != GI_ENTRY_PENDING) has |= 1u << c;
-            }
-        }
+            giScreenCells(b, h, level, nc, c0, entryLo, entryHi, anchorLo, anchorHi, has);
         float3 s = 0;
         float w = 0;
         if (shareMaps)
         {
             // corners 2q and 2q + 1 evaluated here (0 where the corner has no data), then every lane's own weights
-            float3 m0 = 0, m1 = 0;
+            // (both maps' loads unconditional: a corner without data reads entry 0, and its value is not used)
             const uint cA = 2 * quadLane, cB = cA + 1;
-            if ((has & (1u << cA)) != 0) m0 = giIrrMapAt(b, h, giScreenPick(entryLo, entryHi, cA), giUnpackAnchorNormal(giScreenPick(anchorLo, anchorHi, cA)), normal);
-            if ((has & (1u << cB)) != 0) m1 = giIrrMapAt(b, h, giScreenPick(entryLo, entryHi, cB), giUnpackAnchorNormal(giScreenPick(anchorLo, anchorHi, cB)), normal);
+            const bool onA = (has & (1u << cA)) != 0, onB = (has & (1u << cB)) != 0;
+            const float3 mA = giIrrMapAt(b, h, onA ? giScreenPick(entryLo, entryHi, cA) : 0u, giUnpackAnchorNormal(onA ? giScreenPick(anchorLo, anchorHi, cA) : 0u), normal);
+            const float3 mB = giIrrMapAt(b, h, onB ? giScreenPick(entryLo, entryHi, cB) : 0u, giUnpackAnchorNormal(onB ? giScreenPick(anchorLo, anchorHi, cB) : 0u), normal);
+            const float3 m0 = onA ? mA : 0, m1 = onB ? mB : 0;
             const float3 share = normal * normal;
             const float3 t = f - floor(f);
             [unroll] for (uint c = 0; c < 8; ++c)
