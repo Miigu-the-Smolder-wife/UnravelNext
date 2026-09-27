@@ -128,6 +128,15 @@ float shadowSunTransmittanceAt(ShadowSrvs s, float3 worldPos, float footprint, f
     return vsmLayerTransmittance(layers, c.poolPagesX * c.poolPagesY, vsmEntry(r, page, k), page, ls.xy, k, reach, ls.z);
 }
 
+// The 3 x 3 pages around 'centre' on level L are all resident: the nine table words read together (a short-circuit loop
+// waited for each read before the next; the answer is the same - shadow.vsm.use_stats counts all nine as read).
+bool shadowPagesResident3x3(VsmResources r, int2 centre, uint L)
+{
+    uint all = 1;
+    [unroll] for (uint q = 0; q < 9; ++q) all &= vsmEntry(r, centre + int2((int)(q % 3) - 1, (int)(q / 3) - 1), L) != 0 ? 1u : 0u;
+    return all != 0;
+}
+
 // Sun visibility in [0, 1] at a world point with geometric normal (ray hits, R): the direct view's estimator (SMRT:
 // reach classification, blocker search, disk filter; vsmSunVisibility) on the level whose texel matches 'footprint'
 // (metres, the ray cone's width at the hit), or on one of the three finer levels when that page is not resident (finer
@@ -154,13 +163,7 @@ float shadowSunVisibilityAt(ShadowSrvs s, float3 worldPos, float3 normal, float 
     {
         const uint L = k - j;
         if (vsmEntry(r, vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L).xy, L)), L) == 0) continue;
-        bool covered = true;
-        if (L + 1 < VSM_LEVELS)
-        {
-            const int2 centre = vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L + 1).xy, L + 1));
-            [loop] for (uint q = 0; q < 9 && covered; ++q)
-                covered = vsmEntry(r, centre + int2((int)(q % 3) - 1, (int)(q / 3) - 1), L + 1) != 0;
-        }
+        const bool covered = L + 1 >= VSM_LEVELS || shadowPagesResident3x3(r, vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L + 1).xy, L + 1)), L + 1);
         if (!covered) continue;
         level = L;
         break;
@@ -207,13 +210,7 @@ ShadowSunClassified shadowSunClassifyAt(ShadowSrvs s, float3 worldPos, float3 no
     {
         const uint L = k - j;
         if (vsmEntry(r, vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L).xy, L)), L) == 0) continue;
-        bool covered = true;
-        if (L + 1 < VSM_LEVELS)
-        {
-            const int2 centre = vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L + 1).xy, L + 1));
-            [loop] for (uint q = 0; q < 9 && covered; ++q)
-                covered = vsmEntry(r, centre + int2((int)(q % 3) - 1, (int)(q / 3) - 1), L + 1) != 0;
-        }
+        const bool covered = L + 1 >= VSM_LEVELS || shadowPagesResident3x3(r, vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L + 1).xy, L + 1)), L + 1);
         if (!covered) continue;
         level = L;
         break;
