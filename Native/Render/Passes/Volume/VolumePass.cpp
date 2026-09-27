@@ -31,7 +31,7 @@ struct VolumeConstants
     uint32_t mediaEntries, mediaEntryCapacity, volumeSlices, mediaTiles;
     uint32_t shadow[8];
     uint32_t giCache, airVolume, transmittance, multiScatter;
-    float streamAxes[3]; uint32_t pad0;
+    float streamAxes[3]; uint32_t hazeCells;
 };
 static_assert(sizeof(VolumeConstants) == 240);
 constexpr uint32_t kConstantSlots = 64, kConstantSlotBytes = 256;
@@ -39,6 +39,19 @@ constexpr uint32_t kHazeScale = 4, kHazeTile = 8;  // VOLUME_HAZE_SCALE, VOLUME_
 constexpr uint32_t kRecordBytes = 48;
 
 uint32_t groups(uint64_t n, uint32_t size) { return (uint32_t)((n + size - 1) / size); }
+constexpr uint32_t kLooseSpan = 4;  // VolumeCommon.hlsli VOLUME_LOOSE_SPAN: a record's list cells span at most K x K
+// Cells of the loose-quadtree tile lists over a tilesX x tilesY grid: every level from the tiles to the first 1 x 1
+// (VolumeCommon.hlsli volumeLevelBase(tiles, volumeLevelCount(tiles))).
+uint32_t listCells(uint32_t tilesX, uint32_t tilesY)
+{
+    uint32_t cells = 0;
+    for (uint32_t L = 0;; ++L)
+    {
+        const uint32_t x = (tilesX + (1u << L) - 1) >> L, y = (tilesY + (1u << L) - 1) >> L;
+        cells += x * y;
+        if (x <= 1 && y <= 1) return cells;
+    }
+}
 } // namespace
 
 void froxelGridSize(const QualityConfig& q, uint32_t width, uint32_t height, uint32_t& gridX, uint32_t& gridY, uint32_t& slices, uint32_t& tilePx)
@@ -97,16 +110,16 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
     else in.threads = externalCount;
     const uint32_t width = f.view->width, height = f.view->height;
     froxelGridSize(quality, width, height, out.gridX, out.gridY, out.slices, out.tilePx);
-    const uint32_t mediaTiles = out.gridX * out.gridY;
+    const uint32_t mediaTiles = listCells(out.gridX, out.gridY);  // media list cells (loose quadtree, VolumeCommon.hlsli)
     out.hazeWidth = (width + kHazeScale - 1) / kHazeScale;
     out.hazeHeight = (height + kHazeScale - 1) / kHazeScale;
     const uint32_t hazeTilesX = (out.hazeWidth + kHazeTile - 1) / kHazeTile, hazeTilesY = (out.hazeHeight + kHazeTile - 1) / kHazeTile;
-    const uint32_t hazeTiles = hazeTilesX * hazeTilesY;
+    const uint32_t hazeTiles = listCells(hazeTilesX, hazeTilesY);  // haze list cells
     const uint32_t threads = in.threads;
-    // Entry buffers: 8 per particle plus one per tile; more sets the overflow status (reported; the capacity is a cost term
-    // to redesign, never a silent cap).
-    out.mediaEntryCapacity = std::max<uint32_t>(threads * 8u + mediaTiles, 4096u);
-    out.hazeEntryCapacity = std::max<uint32_t>(threads * 8u + hazeTiles, 4096u);
+    // Entry buffers: a record has at most K^2 entries (its loose-quadtree cells), so K^2 per render thread is exact - the
+    // overflow status can only report a defect, never a load.
+    out.mediaEntryCapacity = std::max<uint32_t>(threads * kLooseSpan * kLooseSpan, 1u);
+    out.hazeEntryCapacity = std::max<uint32_t>(threads * kLooseSpan * kLooseSpan, 1u);
     const double w = in.dt > 0 ? std::clamp((f.time - (in.tickTime - in.dt)) / in.dt, 0.0, 1.0) : 1.0;
     out.valid = true;
     out.threads = threads;
@@ -117,11 +130,11 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
     out.mediaCounts = g.createBuffer(BufferDesc{ "volume.media.counts", (uint64_t)mediaTiles * 4, 4 });
     out.mediaStarts = g.createBuffer(BufferDesc{ "volume.media.starts", (uint64_t)mediaTiles * 4, 4 });
     const BufferRef mediaFill = g.createBuffer(BufferDesc{ "volume.media.fill", (uint64_t)mediaTiles * 4, 4 });
-    out.mediaEntries = g.createBuffer(BufferDesc{ "volume.media.entries", (uint64_t)out.mediaEntryCapacity * 8, 8 });
+    out.mediaEntries = g.createBuffer(BufferDesc{ "volume.media.entries", (uint64_t)out.mediaEntryCapacity * 16, 16 });
     out.hazeCounts = g.createBuffer(BufferDesc{ "volume.haze.counts", (uint64_t)hazeTiles * 4, 4 });
     out.hazeStarts = g.createBuffer(BufferDesc{ "volume.haze.starts", (uint64_t)hazeTiles * 4, 4 });
     const BufferRef hazeFill = g.createBuffer(BufferDesc{ "volume.haze.fill", (uint64_t)hazeTiles * 4, 4 });
-    out.hazeEntries = g.createBuffer(BufferDesc{ "volume.haze.entries", (uint64_t)out.hazeEntryCapacity * 8, 8 });
+    out.hazeEntries = g.createBuffer(BufferDesc{ "volume.haze.entries", (uint64_t)out.hazeEntryCapacity * 16, 16 });
     if (media) out.volumeSlices = g.createTexture(TextureDesc{ "volume.slices", out.gridX, out.gridY, (uint16_t)(2 * out.slices), 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D });
     if (f.haze)
     {
@@ -151,6 +164,7 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
     vc.hazeEntryCapacity = out.hazeEntryCapacity;
     vc.mediaEntryCapacity = out.mediaEntryCapacity;
     vc.mediaTiles = mediaTiles;
+    vc.hazeCells = hazeTiles;
     const uint32_t slot = m_next;
     m_next = (m_next + 1) % kConstantSlots;
     uint8_t* mapped = m_mapped + (uint64_t)slot * kConstantSlotBytes;
@@ -238,8 +252,8 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
         b.use(o.records, Use::UavCompute);
         useLists(b);
     });
-    // binning: one thread per (record, tile row) - rows = the taller of the two tile grids
-    const uint32_t binRows = std::max(media ? out.gridY : 0u, f.haze ? hazeTilesY : 0u);
+    // binning: one thread per (record, cell row) - at most K cell rows per record (VolumeCommon.hlsli)
+    const uint32_t binRows = kLooseSpan;
     dispatch("volume.count", "Passes/Volume/VolumeSetup.STEP4", groups(threads, 256), binRows, 0, [=](PassBuilder& b) {
         b.use(o.records, Use::UavCompute);
         if (froxelLights.valid()) b.use(froxelLights, Use::SrvCompute);
@@ -253,7 +267,7 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
         useLists(b);
     });
     if (media)
-        dispatch("volume.media.slices", "Passes/Volume/VolumeSlices", mediaTiles, 1, 0, [=](PassBuilder& b) {
+        dispatch("volume.media.slices", "Passes/Volume/VolumeSlices", out.gridX * out.gridY, 1, 0, [=](PassBuilder& b) {
             b.use(o.records, Use::SrvCompute);
             b.use(froxelLights, Use::SrvCompute);
             for (const BufferRef& x : { o.mediaCounts, o.mediaStarts, o.mediaEntries }) b.use(x, Use::SrvCompute);

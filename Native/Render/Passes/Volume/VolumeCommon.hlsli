@@ -44,9 +44,47 @@ struct VolumeConstants
     uint shadow[8];                     // S's ShadowSrvs (page table, pool/atlas, blocks, search bound, constants, lights,
                                         // slot of light, layers)
     uint giCache, airVolume, transmittance, multiScatter;
-    float3 streamAxes; uint pad0;  // stream (VFX World) -> renderer axis signs (FrameContext::streamAxes): the offsets and
-                                   // the particles are in stream space, volumeParticleAt maps each camera-relative position
+    float3 streamAxes; uint hazeCells;  // stream (VFX World) -> renderer axis signs (FrameContext::streamAxes): the offsets and
+                                        // the particles are in stream space, volumeParticleAt maps each camera-relative
+                                        // position; hazeCells: the haze lists' cells (mediaTiles: the media lists' cells)
 };
+
+// ---- Tile lists as a loose quadtree (media on the froxel tiles, haze on the haze tiles). A record's tile rectangle
+// [t0, t1] is listed at the smallest level L whose cells (2^L x 2^L tiles) it spans at most K x K of (K =
+// VOLUME_LOOSE_SPAN), so a record has at most K^2 entries whatever its size: the entry buffer's capacity K^2 x records is
+// exact and no entry is ever dropped (a per-tile list needs one entry per covered tile; a puff near the camera covers
+// thousands). A tile reads the cell holding it at every level and keeps the entries whose rectangle holds it; the tiles a
+// record's cells cover beyond its rectangle are at most ((K + 1) / (K - 1))^2 of it (K = 4: 2.8x worst, the entry's
+// rectangle test only). Levels are concatenated from L = 0 (the tiles) to the first 1 x 1.
+// Entry: uint4 (record, z0 | z1 as halves (media), t0.x | t0.y << 16, t1.x | t1.y << 16).
+#define VOLUME_LOOSE_SPAN 4u  // VolumePass.cpp kLooseSpan
+uint2 volumeLevelDims(uint2 tiles, uint L) { return (tiles + (1u << L) - 1u) >> L; }
+uint volumeLevelCount(uint2 tiles)
+{
+    uint L = 0;
+    [loop] while (any(volumeLevelDims(tiles, L) > 1u)) ++L;
+    return L + 1;
+}
+uint volumeLevelBase(uint2 tiles, uint L)
+{
+    uint base = 0;
+    [loop] for (uint k = 0; k < L; ++k)
+    {
+        const uint2 d = volumeLevelDims(tiles, k);
+        base += d.x * d.y;
+    }
+    return base;
+}
+uint volumeLevelOf(uint2 t0, uint2 t1)
+{
+    uint L = 0;
+    [loop] while (any((t1 >> L) - (t0 >> L) >= VOLUME_LOOSE_SPAN)) ++L;
+    return L;
+}
+bool volumeEntryHolds(uint4 e, uint2 tile)
+{
+    return all(tile >= uint2(e.z & 0xFFFFu, e.z >> 16)) && all(tile <= uint2(e.w & 0xFFFFu, e.w >> 16));
+}
 
 // One particle of the frame, 48 B (index = render thread).
 struct VolumeRecord

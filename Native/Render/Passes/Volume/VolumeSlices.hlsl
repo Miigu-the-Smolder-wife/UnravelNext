@@ -23,25 +23,36 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
     const uint2 tile = uint2(tileIndex % g.gridX, tileIndex / g.gridX);
     StructuredBuffer<uint> counts = ResourceDescriptorHeap[c.mediaCounts];
     StructuredBuffer<uint> starts = ResourceDescriptorHeap[c.mediaStarts];
-    StructuredBuffer<uint2> entries = ResourceDescriptorHeap[c.mediaEntries];
+    StructuredBuffer<uint4> entries = ResourceDescriptorHeap[c.mediaEntries];
     StructuredBuffer<VolumeRecord> records = ResourceDescriptorHeap[c.records];
-    const uint first = starts[tileIndex];
-    const uint count = first < c.mediaEntryCapacity ? min(counts[tileIndex], c.mediaEntryCapacity - first) : 0u;
     const float3 ray = froxelTileRay(g, tile);  // camera-relative, unit view depth
     const float speed = length(ray);
     const float zs0 = froxelNodeDepth(g, s), zs1 = froxelNodeDepth(g, s + 1);
     float3 tau = 0, source = 0;
-    for (uint i = 0; i < count; ++i)
+    // The cell holding the tile at every level of the loose quadtree (VolumeCommon.hlsli).
+    const uint2 tiles = uint2(g.gridX, g.gridY);
+    const uint levels = volumeLevelCount(tiles);
+    uint base = 0;
+    for (uint L = 0; L < levels; ++L)
     {
-        const uint2 e = entries[first + i];
-        const float z0 = max(f16tof32(e.y), zs0), z1 = min(f16tof32(e.y >> 16), zs1);
-        if (!(z1 > z0)) continue;
-        const VolumeRecord r = records[e.x];
-        const float segment = volumeTentLine(float3(0, 0, 0), ray, z0, z1, r.centre, r.radius);
-        if (!(segment > 0)) continue;
-        const float A = speed * r.mass / (r.radius * r.radius * r.radius) * segment;
-        tau += A * r.a;
-        source += A * r.b;
+        const uint2 dims = volumeLevelDims(tiles, L), cellXY = tile >> L;
+        const uint cell = base + cellXY.y * dims.x + cellXY.x;
+        base += dims.x * dims.y;
+        const uint first = starts[cell];
+        const uint count = first < c.mediaEntryCapacity ? min(counts[cell], c.mediaEntryCapacity - first) : 0u;
+        for (uint i = 0; i < count; ++i)
+        {
+            const uint4 e = entries[first + i];
+            if (!volumeEntryHolds(e, tile)) continue;
+            const float z0 = max(f16tof32(e.y), zs0), z1 = min(f16tof32(e.y >> 16), zs1);
+            if (!(z1 > z0)) continue;
+            const VolumeRecord r = records[e.x];
+            const float segment = volumeTentLine(float3(0, 0, 0), ray, z0, z1, r.centre, r.radius);
+            if (!(segment > 0)) continue;
+            const float A = speed * r.mass / (r.radius * r.radius * r.radius) * segment;
+            tau += A * r.a;
+            source += A * r.b;
+        }
     }
     if (!all(isfinite(tau)) || !all(isfinite(source)))
     {

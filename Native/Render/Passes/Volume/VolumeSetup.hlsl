@@ -7,8 +7,9 @@
 //          its appearance at that age; a volume-output particle -> media record (lit once: fxLitRadiance's law with
 //          albedo 1, i.e. L_in per unit scattering) and the froxel tiles its bounding sphere (tent cube half-width r x
 //          sqrt 3) covers; a distortion-output particle -> haze record and the 1/4-resolution tiles its support covers.
-//   STEP=2 scan (P[0].y = 0 media, 1 haze): one group, exclusive prefix of the tile counts -> tile starts, entry total.
-//   STEP=3 scatter: the entries (media: record, z0 | z1 as halves; haze: record) at tile start + atomic fill.
+//   STEP=4 count: the record's loose-quadtree cells (at most K x K, VolumeCommon.hlsli), thread per record and cell row.
+//   STEP=2 scan (P[0].y = 0 media, 1 haze): one group, exclusive prefix of the cell counts -> cell starts, entry total.
+//   STEP=3 scatter: the entries (record, z0 | z1 as halves (media), tile rectangle) at cell start + atomic fill.
 #include "Passes/Volume/VolumeCommon.hlsli"
 #include "Passes/FX/ParticleLayerPass.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
@@ -217,7 +218,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : S
 {
     const VolumeConstants c = volumeConstants();
 #if STEP == 0
-    const uint mediaTiles = c.mediaTiles, hazeTiles = c.hazeTilesX * c.hazeTilesY;
+    const uint mediaTiles = c.mediaTiles, hazeTiles = c.hazeCells;  // list cells (VolumeCommon.hlsli)
     if (id.x < mediaTiles)
     {
         RWStructuredBuffer<uint> counts = ResourceDescriptorHeap[c.mediaCounts];
@@ -297,7 +298,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : S
         }
         records[t] = rec;
     }
-    return;  // binning: STEP 4 (counts) and STEP 3 (entries), one thread per record and tile row
+    return;  // binning: STEP 4 (counts) and STEP 3 (entries), one thread per record and cell row
 #else
     rec = records[t];
 #endif
@@ -325,13 +326,17 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : S
     const float2 lo = floor(plo / span), hi = floor(phi / span);
     if (any(hi < 0.0f) || lo.x > (float)(tilesX - 1) || lo.y > (float)(tilesY - 1)) return;
     const uint2 t0 = (uint2)clamp(lo, 0.0f, float2(tilesX - 1, tilesY - 1)), t1 = (uint2)clamp(hi, 0.0f, float2(tilesX - 1, tilesY - 1));
-    // One tile row of the record's rectangle per thread (dispatch Y = row): a thread's work is at most one row of the
-    // grid (tilesX atomics) whatever the particle's size, and the rows of a large particle run in parallel.
-    const uint y = t0.y + gid.y;
-    if (y > t1.y) return;
+    // The loose quadtree level where the rectangle spans at most K x K cells (VolumeCommon.hlsli): one cell row per thread
+    // (dispatch Y = K), at most K atomics each whatever the particle's size.
+    const uint2 tiles = uint2(tilesX, tilesY);
+    const uint L = volumeLevelOf(t0, t1);
+    const uint2 c0 = t0 >> L, c1 = t1 >> L, dims = volumeLevelDims(tiles, L);
+    const uint base = volumeLevelBase(tiles, L);
+    const uint y = c0.y + gid.y;
+    if (y > c1.y) return;
 #if STEP == 4
     RWStructuredBuffer<uint> counts = ResourceDescriptorHeap[countsIndex];
-    [loop] for (uint x = t0.x; x <= t1.x; ++x) InterlockedAdd(counts[y * tilesX + x], 1u);
+    [loop] for (uint x = c0.x; x <= c1.x; ++x) InterlockedAdd(counts[base + y * dims.x + x], 1u);
     if (gid.y == 0u)
     {
         RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[c.counters];
@@ -340,15 +345,16 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : S
 #else
     RWStructuredBuffer<uint> fill = ResourceDescriptorHeap[fillIndex];
     RWStructuredBuffer<uint> starts = ResourceDescriptorHeap[startsIndex];
-    RWStructuredBuffer<uint2> entries = ResourceDescriptorHeap[entriesIndex];
+    RWStructuredBuffer<uint4> entries = ResourceDescriptorHeap[entriesIndex];
     const uint zz = f32tof16(z0 * 0.999f) | (f32tof16(z1 * 1.001f) << 16);  // widened past half-float rounding (the density is 0 there)
-    [loop] for (uint x = t0.x; x <= t1.x; ++x)
+    const uint4 entry = uint4(t, zz, t0.x | (t0.y << 16), t1.x | (t1.y << 16));
+    [loop] for (uint x = c0.x; x <= c1.x; ++x)
     {
-        const uint tile = y * tilesX + x;
+        const uint tile = base + y * dims.x + x;
         uint slot;
         InterlockedAdd(fill[tile], 1u, slot);
         const uint at = starts[tile] + slot;
-        if (at < capacity) entries[at] = uint2(t, zz);
+        if (at < capacity) entries[at] = entry;
         else volumeStatus(c, overflowBit);
     }
 #endif
@@ -357,7 +363,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : S
     uint tiles;
     RWStructuredBuffer<uint> counts = ResourceDescriptorHeap[haze ? c.hazeCounts : c.mediaCounts];
     RWStructuredBuffer<uint> starts = ResourceDescriptorHeap[haze ? c.hazeStarts : c.mediaStarts];
-    tiles = haze ? c.hazeTilesX * c.hazeTilesY : c.mediaTiles;
+    tiles = haze ? c.hazeCells : c.mediaTiles;  // list cells of every level (VolumeCommon.hlsli)
     const uint t = gtid.x, per = (tiles + 255u) / 256u;
     uint local = 0u;
     for (uint k = 0u; k < per; ++k)

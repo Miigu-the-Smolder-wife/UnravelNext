@@ -16,27 +16,38 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
     const VolumeConstants c = volumeConstants();
     const uint2 q = gid.xy * VOLUME_HAZE_TILE + gtid.xy;
     if (q.x >= c.hazeWidth || q.y >= c.hazeHeight) return;
-    const uint tileIndex = gid.y * c.hazeTilesX + gid.x;
     StructuredBuffer<uint> counts = ResourceDescriptorHeap[c.hazeCounts];
     StructuredBuffer<uint> starts = ResourceDescriptorHeap[c.hazeStarts];
-    StructuredBuffer<uint2> entries = ResourceDescriptorHeap[c.hazeEntries];
+    StructuredBuffer<uint4> entries = ResourceDescriptorHeap[c.hazeEntries];
     StructuredBuffer<VolumeRecord> records = ResourceDescriptorHeap[c.records];
-    const uint first = starts[tileIndex];
-    const uint count = first < c.hazeEntryCapacity ? min(counts[tileIndex], c.hazeEntryCapacity - first) : 0u;
     const float2 pixel = float2(q) * VOLUME_HAZE_SCALE + 0.5f * VOLUME_HAZE_SCALE;
     const float3 dir = normalize(volumeRayAt(pixel));
     float3 theta = 0;
     float front = 0;
-    for (uint i = 0; i < count; ++i)
+    // The cell holding the tile at every level of the loose quadtree (VolumeCommon.hlsli).
+    const uint2 tile = gid.xy, tiles = uint2(c.hazeTilesX, c.hazeTilesY);
+    const uint levels = volumeLevelCount(tiles);
+    uint base = 0;
+    for (uint L = 0; L < levels; ++L)
     {
-        const VolumeRecord r = records[entries[first + i].x];
-        const float t = dot(r.centre, dir);
-        const float3 qv = dir * t - r.centre;
-        const float b = length(qv);
-        if (!(t > 0) || b >= r.mass) continue;
-        if (b > 0) theta += volumeHazeGradient(b, r.radius, r.a) * (qv / b);
-        const float zc = -mul((float3x3)g_view, r.centre).z;
-        front = max(front, g_nearPlane / max(zc - r.mass, g_nearPlane));
+        const uint2 dims = volumeLevelDims(tiles, L), cellXY = tile >> L;
+        const uint cell = base + cellXY.y * dims.x + cellXY.x;
+        base += dims.x * dims.y;
+        const uint first = starts[cell];
+        const uint count = first < c.hazeEntryCapacity ? min(counts[cell], c.hazeEntryCapacity - first) : 0u;
+        for (uint i = 0; i < count; ++i)
+        {
+            const uint4 e = entries[first + i];
+            if (!volumeEntryHolds(e, tile)) continue;
+            const VolumeRecord r = records[e.x];
+            const float t = dot(r.centre, dir);
+            const float3 qv = dir * t - r.centre;
+            const float b = length(qv);
+            if (!(t > 0) || b >= r.mass) continue;
+            if (b > 0) theta += volumeHazeGradient(b, r.radius, r.a) * (qv / b);
+            const float zc = -mul((float3x3)g_view, r.centre).z;
+            front = max(front, g_nearPlane / max(zc - r.mass, g_nearPlane));
+        }
     }
     float2 D = 0;
     if (any(theta != 0)) D = volumePixelOf(normalize(dir + theta)) - volumePixelOf(dir);

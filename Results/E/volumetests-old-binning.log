@@ -1,0 +1,8 @@
+waiting for the GPU measurement lock: yielding to the timing waiter S (pid 74380) :: C:\Users\USER\AppData\Local\Temp\claude\C--Users-USER-Unravel\3eb6dffa-8341-4a2e-9703-d5230acb1df7\scratchpad\runX\unx_gate_shadow_renderergate.exe --scene fp_1000.unxscene --resolution 4K --frames 300 --out C:\Users\USER\UnravelNext\Results\B\Opt0927\froxel_rounds_stats\fp_1000_B1 --set atmosphere.froxels.walk_stats=1
+stage device
+stage probe
+probe: 256 queries, tent line worst rel 4.99e-06, haze gradient worst rel 2.23e-04
+stage media
+FAIL C:\Users\USER\UnravelNext\Native\Render\Passes\Volume\Tests\VolumeTests.cpp:277: media status 0x1
+media: 54 x 30 x 64 froxels, 10330 with media, 3159 list entries, max slice tau 0.894, worst tau rel 1.15e-03
+GpuLock.ps1: cpu-contended: 1 s >= 4 cores, peak 7.4 cores; top: Unity.exe (47684) 6 core-s, dotnet.exe (43716) 1 core-s, UnityPackageManager.exe (25804) 0 core-s, Unity.Licensing.Client.exe (78440) 0 core-s

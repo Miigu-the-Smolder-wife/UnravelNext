@@ -4,7 +4,9 @@
 //      Legendre 16) for random queries vs fine composite quadrature (and a central difference of the integrated index);
 //   2. media: given records (VolumePass::recordRecords) -> froxel tile lists -> volumeSlices, every tile and slice vs the
 //      reference sum of the records' exact segment integrals (half-float storage: |d| <= 2e-3 |ref| + 1e-4); one record
-//      crosses the near plane (whole-view binning);
+//      crosses the near plane (whole-view binning); a second set is an explosion's smoke crowd (24 puffs r 1 m at 6 m, each
+//      over ~400 tiles: the per-tile lists before the loose quadtree overflowed and dropped the lower tile rows - the
+//      puffs' flat bottom), with at most 16 list entries per record (loose span 4);
 //   3. haze: blob and shell records -> 1/4-resolution deflection field and front depth, every texel vs the reference bent
 //      ray (|dD| <= 2e-3 |D| + 2e-3 px); a strong record sets VOLUME_STATUS_HAZE_LARGE (|D| >= 8 px reported, not clamped).
 //   unx_test_volume_volumetests [--no-debug-layer]
@@ -223,6 +225,7 @@ int main(int argc, char** argv)
         // ---- 2. media slices
         std::printf("stage media\n");
         std::fflush(stdout);
+        for (int crowd = 0; crowd < 2; ++crowd)
         {
             uint32_t gridX, gridY, slices, tilePx;
             volume::froxelGridSize(tf.quality, W, H, gridX, gridY, slices, tilePx);
@@ -242,6 +245,14 @@ int main(int argc, char** argv)
             media(fwd * 18 + D3{ 2.0, 1.0, 0 }, 3.0f, 6.0f, { 0.5f, 0.5f, 0.5f }, { 10, 10, 10 });
             media(fwd * 35 + D3{ -4.0, 0.5, 0 }, 0.4f, 0.3f, { 1.0f, 0.5f, 0.2f }, { 500, 200, 50 });
             media(fwd * 0.6 + D3{ 0.0, 0.0, 0 }, 1.0f, 0.5f, { 0.3f, 0.3f, 0.3f }, { 5, 5, 5 });  // reaches the near plane
+            if (crowd)
+            {
+                recs.clear();
+                std::mt19937 crowdRng(7);
+                std::uniform_real_distribution<double> u(-1.0, 1.0);
+                for (int k = 0; k < 24; ++k)
+                    media(fwd * 6 + D3{ 0.8 * u(crowdRng), 0.4 * u(crowdRng), 0.8 * u(crowdRng) }, 1.0f, 1.0f, { 0.6f, 0.6f, 0.6f }, { 30, 28, 25 });
+            }
             Record none{};
             recs.push_back(none);  // an empty slot (kind 0)
             std::shared_ptr<std::vector<uint8_t>> slicesTex, counters;
@@ -265,6 +276,7 @@ int main(int argc, char** argv)
             const uint32_t* cnt = reinterpret_cast<const uint32_t*>(counters->data());
             S_CHECK(cnt[2] == 0, "media status 0x%x", cnt[2]);
             S_CHECK(cnt[3] == (uint32_t)recs.size() - 1, "records binned %u", cnt[3]);
+            S_CHECK(cnt[0] <= 16 * cnt[3], "%u media list entries for %u records (at most 16 each)", cnt[0], cnt[3]);
             pitch = TestFrame::rowPitch(gridX, 8);
             const size_t slicePitch = (size_t)pitch * gridY;
             auto texel = [&](uint32_t x, uint32_t y, uint32_t z, int k) {
@@ -311,7 +323,7 @@ int main(int argc, char** argv)
                 }
             S_CHECK(mismatches == 0, "%u slice values differ from the reference", mismatches);
             S_CHECK(nonzero > 100, "only %u froxels hold media", nonzero);
-            std::printf("media: %u x %u x %u froxels, %u with media, max slice tau %.3f, worst tau rel %.2e\n", gridX, gridY, slices, nonzero, maxTau, worst);
+            std::printf("media%s: %u x %u x %u froxels, %u with media, %u list entries, max slice tau %.3f, worst tau rel %.2e\n", crowd ? " (smoke crowd)" : "", gridX, gridY, slices, nonzero, cnt[0], maxTau, worst);
         }
 
         // ---- 3. haze

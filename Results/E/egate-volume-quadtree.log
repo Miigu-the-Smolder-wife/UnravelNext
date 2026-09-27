@@ -1,0 +1,5 @@
+volume grid 160x90x64 tile 24 px, near 0.500 far 65536.0
+E_GATE case=volume resolution=4K media=2048 haze=256 grid=160x90x64 e_passes_ms_median=7.8773 gpu_frame_ms_median=7.8981 p95=8.9529 | volume.constants=0.0010 volume.clear=0.0051 volume.setup=0.0022 volume.count=0.0093 volume.media.scan=0.0215 volume.haze.scan=0.0132 volume.scatter=0.0103 volume.media.slices=7.6478 volume.haze.field=0.1670
+volume grid 107x60x64 tile 24 px, near 0.500 far 65536.0
+E_GATE case=volume resolution=1440p media=2048 haze=256 grid=107x60x64 e_passes_ms_median=3.6921 gpu_frame_ms_median=3.7238 p95=4.6313 | volume.constants=0.0010 volume.clear=0.0051 volume.setup=0.0022 volume.count=0.0083 volume.media.scan=0.0112 volume.haze.scan=0.0071 volume.scatter=0.0093 volume.media.slices=3.5640 volume.haze.field=0.0840
+e gate done
