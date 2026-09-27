@@ -427,6 +427,11 @@ void GpuScene::upload(const scene::Scene& s)
         for (uint32_t slot = gpu::kPatchSlots; slot-- > 0;) m_patchFreeSlots.push_back(slot);
     }
     m_patchSlotOf.assign(m_instances.size() + rc.instances, gpu::kNone);
+    // The layer tables are rebuilt below (buildLayerTables) for this scene: packMaterialLayers places the film tables for
+    // its anisotropy, not a previous scene's (a stale flag moved them past the rebuilt table's end: ShadingTests' film
+    // frame after the anisotropy frame read zeros).
+    release(m_coatTable);
+    m_anisotropic = false;
     packTerrainLayers(materials);
     packMaterialLayers(materials);
     m_materialBuffer = createStructured(materials.data(), sizeof(gpu::Material), materials.size(), L"scene materials");

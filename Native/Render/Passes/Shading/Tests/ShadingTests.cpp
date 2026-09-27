@@ -3914,8 +3914,9 @@ int main(int argc, char** argv)
             logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
             return report.failures ? 1 : 0;
         }
-        if (filmOnly)  // --film: the thin film frame alone
+        if (filmOnly)  // --film: the thin film frame, after a scene with anisotropy (the layer tables' re-placement across scenes)
         {
+            testAnisoFrame(tf, report);
             testFilmFrame(tf, report);
             logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
             return report.failures ? 1 : 0;
