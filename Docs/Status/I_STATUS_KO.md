@@ -1,3 +1,9 @@
+## 재개 지점 (렌더 A, 2026-09-27 오전)
+- 끝낸 것: 크래시 수정(2acb060 FX 첫 틱 emitter table, ab26787 null import 가드; Unity 회귀 UnravelNextSceneEditTests), 비등방성 합류(cf5c495, 문서 954c2f3, 배포 Unravel 72444ea1), 면광원 구적 연구·GPU 미러(06706d0, 91883fd).
+- 다음 첫 단계: 면광원 구적을 별도 커널로 셰이딩에 연결한다. ShadeOpaque에 인라인하면 LAYERED 변형이 DXIL 201~248 KB(한도 200 KB)다. 방법 후보: 셰이딩 전에 Layered·Sheen 타일에서 면광원 로브 복사휘도를 RGBA16F로 쓰는 커널(가시성은 ShadeOpaque와 같은 슬롯·overflow 목록, fallback 타일은 VSM 직접). 그다음 늘임 LTC(shAnisoLtc)를 지운다(알려진 결함, 배포 중). sheen+비등방 동시 재질은 검증에서 막는 안을 검토했다(렌더 C 소유 SceneData).
+- 좁은 로브(α_b 0.0064) 면광원 정확도 2.7 %(게이트 2 %): 수평선에 걸친 큰 구, 긴 관에서 나온다. 셀 무게(중심값)와 float 조건수가 후보 원인이다.
+- 남은 순서: 면광원 커널 → 박막 → 최적화(M 영역, 렌더 B 기준표 FEATURE_STATUS "최적화 기준표": m.lit.shade.b0 D0 3.42 ms, fp 3.82 ms). 렌더 이벤트 실패가 Unity 콘솔에 안 뜨는 결함(네이티브 로그만)도 남음.
+
 ## 재개 지점 (렌더 A, 2026-09-27 저녁; 주간 87 %, 90 % 상한 앞 정지)
 - 상태: 모든 작업 커밋됨(UnravelNext bdc2b48까지, Unravel 751b8927까지). 마지막 배포 Unravel 751b8927 = 빌드 cbb572a(ShadingTests 하드웨어 통과). 배포 절차는 아래 그대로이며, Deploy.ps1은 상대 -Build 경로 결함을 faa3837로 고쳤다.
 - 이번에 끝낸 것:
