@@ -144,12 +144,27 @@ float shadowSunVisibilityAt(ShadowSrvs s, float3 worldPos, float3 normal, float 
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[s.constants];
     const uint k = vsmLevelForFootprint(c, footprint);
     uint level = 0xFFFFFFFFu;
-    [loop] for (uint j = 0; j < 4 && j <= k; ++j)
-        if (vsmEntry(r, vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, k - j).xy, k - j)), k - j) != 0)
+    // A level serves a hit only where the direct view's residency contract holds there (VsmPropagate: a pixel's page at
+    // level L brings the 3 x 3 pages around it on L + 1 .. L + 3, where the blocker search and penumbra taps fall back):
+    // the point's page and the 3 x 3 on L + 1. Pages resident for other reasons (the air's, VsmMarkAir, which are not
+    // propagated) failed the fallback: taps off their page read "no caster", and floor reflections in a closed bathhouse
+    // showed sunlight through its walls (22 % of the image; a shadow ray there: 0.7 %) [measured, 2026-09-27]. Finest
+    // level first: the direct view's own pages, the most accurate. None: a shadow ray (resident = false).
+    [loop] for (int j = min(3, (int)k); j >= 0; --j)
+    {
+        const uint L = k - j;
+        if (vsmEntry(r, vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L).xy, L)), L) == 0) continue;
+        bool covered = true;
+        if (L + 1 < VSM_LEVELS)
         {
-            level = k - j;
-            break;
+            const int2 centre = vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L + 1).xy, L + 1));
+            [loop] for (uint q = 0; q < 9 && covered; ++q)
+                covered = vsmEntry(r, centre + int2((int)(q % 3) - 1, (int)(q / 3) - 1), L + 1) != 0;
         }
+        if (!covered) continue;
+        level = L;
+        break;
+    }
     resident = level != 0xFFFFFFFFu;
     if (!resident) return 1;
     uint path;

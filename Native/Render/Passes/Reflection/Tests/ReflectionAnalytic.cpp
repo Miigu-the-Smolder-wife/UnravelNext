@@ -824,6 +824,10 @@ int main(int argc, char** argv)
             else fail("unknown argument %s", a.c_str());
         }
         QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+        // The expectations below are those of a Lambert GI cache (its rays shade hits diffusely: the furnace's L = Le / (1 -
+        // rho), the lit wall's cache light without the mirror floor's reflection of it). GI hits shade the full v1 model
+        // (2439c7c), whose specular lobe has no closed form here: Lambert hits (gi.experiment_disable 1024), as GiAnalytic.
+        quality.applyOverride("gi.experiment_disable=1024");
         for (const std::string& o : overrides) quality.applyOverride(o);
         DeviceOptions options;
         options.debugLayer = validate;
@@ -914,6 +918,7 @@ int main(int argc, char** argv)
         }
         {
             QualityConfig proxyQuality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            proxyQuality.applyOverride("gi.experiment_disable=1024");
             proxyQuality.applyOverride("raytracing.character_proxy_triangles=100");
             proxyQuality.applyOverride("raytracing.skinned_proxy_cuts=\"cluster_lod\"");  // the test's holed proxy is a V cut
             const scene::Scene t = skinnedPanelInMirror();
@@ -948,6 +953,7 @@ int main(int argc, char** argv)
             const Outcome c = run(device, shaders, proxyQuality, t, { 0, 0, 0 }, expected, 16, 1920, 1080, nullptr, &cuts);
             // Control: without the exact set the proxy's holes must show (the check above can fail).
             QualityConfig noExact = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            noExact.applyOverride("gi.experiment_disable=1024");
             noExact.applyOverride("raytracing.character_proxy_triangles=100");
             noExact.applyOverride("raytracing.exact_set_max=0");
             noExact.applyOverride("raytracing.skinned_proxy_cuts=\"cluster_lod\"");
@@ -1024,6 +1030,7 @@ int main(int argc, char** argv)
         {
             // 6. Area light as ray geometry, seen in a mirror.
             QualityConfig emitterQuality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            emitterQuality.applyOverride("gi.experiment_disable=1024");
             for (const std::string& o : overrides) emitterQuality.applyOverride(o);
             emitterQuality.applyOverride("raytracing.emitters=true");
             const scene::Scene t = rectLightInMirror();
