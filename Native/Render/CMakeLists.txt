@@ -58,9 +58,13 @@ endforeach()
 string(SHA256 UNX_SHADER_ABI "${unx_abi_text}")
 string(SUBSTRING "${UNX_SHADER_ABI}" 0 16 UNX_SHADER_ABI)
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/abi.stamp" "${UNX_SHADER_ABI}")
-add_custom_command(TARGET unx_render_shaders POST_BUILD
+# (every build, after the kernels: a POST_BUILD step ran only when the shader target itself rebuilt, so a hash changed at
+# configure time without every kernel recompiling left the old stamp beside the kernels - Unity refused a deployed build,
+# render A 2026-09-27)
+add_custom_target(unx_render_shader_abi ALL
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/abi.stamp" "${UNX_SHADER_OUTPUT}/abi.stamp"
   VERBATIM)
+add_dependencies(unx_render_shader_abi unx_render_shaders)
 set_source_files_properties(src/Shaders.cpp PROPERTIES COMPILE_DEFINITIONS "UNX_SHADER_ABI=\"${UNX_SHADER_ABI}\"")
 
 # An engine executable: Agility exports, runtime DLLs in bin/D3D12, and the compiled kernels.
