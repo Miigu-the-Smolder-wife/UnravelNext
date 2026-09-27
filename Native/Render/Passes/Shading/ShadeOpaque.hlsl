@@ -401,6 +401,15 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         const float e = modelDirectionalAlbedo(max(NoV, 1e-4), s.roughness);
         const float3 compensation = 1 + f0 * (1 / e - 1);
         const uint2 range = froxelLightRange(froxels, pixel, linearZ);
+        // B2 (COVERAGE 12.4 structure 2): a stable area light's specular is in R's reflection result only where that
+        // result is R's M path (a = 2, ReflectionResolve): its one mirror ray sees the analytic emitters. G samples, the
+        // planar cameras, the K path and the GI cache hold no emitter radiance (texel squares and one-ray noise of small
+        // bright lights: GiTrace), so the base lobe's LTC is M's everywhere else. The coat lobe (gather 1) is always K.
+#if !PLANAR
+        const bool mirrorResult = NoV > 0 && (experiment & 4) == 0 && P[2].z != UNX_NONE && P[4].x != UNX_NONE && reflectionRadiance(P[2].z, pixel).a > 1.5;
+#else
+        const bool mirrorResult = false;
+#endif
 #if AREA
         // Area lights (AreaLight.hlsli): the shading frame, its horizon-flipped twin for Foliage transmission and the
         // LTC transform of the specular lobe, formed once per pixel.
@@ -453,7 +462,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 if (NoV > 0)
                 {
 #if LAYERED == 1
-                    if (aniso.on && !shSpecularInReflections(P[4].x, lightIndex))
+                    if (aniso.on && !(mirrorResult && shSpecularInReflections(P[4].x, lightIndex)))
                         radiance += ((cover > 0) ? keep : 1.0) * Lw * shAreaAniso(light, p, aniso.t, aniso.b, n, v, aniso.alpha, f0, 1 + f0 * (1 / (aniso.ab.x + aniso.ab.y) - 1));
 #endif
 #if LAYERED == 2
@@ -465,7 +474,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 // Integrals in order: front diffuse, specular, back (Foliage) -- one inlined evaluator (the diffuse frames
                 // are rotations: closed forms on circular cones).
                 uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
-                const bool specularInReflections = shSpecularInReflections(P[4].x, lightIndex);  // P[4].x: B2 mask
+                const bool specularInReflections = mirrorResult && shSpecularInReflections(P[4].x, lightIndex);  // P[4].x: B2 mask
                 float scaleBase = 1;
 #if LAYERED == 2
                 scaleBase = keepS;  // (the sheen lobe over area lights: the lobe texture, AreaLobes.hlsl)
@@ -487,7 +496,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #endif
                 [loop] for (uint j = first; j < last; ++j)
                 {
-                    if ((j == 1 || j >= 3) && specularInReflections) continue;
+                    if ((j == 1 || j == 4) && specularInReflections) continue;  // (j = 3, the coat lobe: its K path has no emitters)
 #if LAYERED
                     if (j == 1 && aniso.on) continue;  // (the anisotropic lobe over the light: the lobe texture, AreaLobes.hlsl)
 #endif

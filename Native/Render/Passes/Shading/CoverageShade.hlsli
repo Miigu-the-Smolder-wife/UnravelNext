@@ -484,7 +484,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                 if (window <= 0) continue;
                 const float3 Lw = light.color * (light.intensity * window * visibility);
                 uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
-                const bool specularInReflections = shSpecularInReflections(P[7].y, lightIndex);  // P[7].y: B2 mask
+                const bool specularInReflections = shSpecularInReflections(P[7].y, lightIndex);  // P[7].y: B2 mask (UNX_NONE: no R result here)
                 float scaleBase = 1;
 #if COV_COAT
                 // as ShadeOpaque LAYERED (MATERIAL_LAYERS 3.1): integrals 3 (coat lobe) and 4 (the base lobe through the

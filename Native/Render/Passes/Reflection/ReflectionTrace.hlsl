@@ -52,7 +52,7 @@ void ReflectionTraceGen()
         r.Direction = dir;
         r.TMin = 0;
         r.TMax = giRayLength();
-        const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER);
+        const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, reflRayMask(j));
         rays.Store4(reflRaysHitOffset(slot), hit.t < 0 ? uint4(REFL_RAY_MISS, 0, 0, 0)
                                                         : uint4(hit.instance | (hit.frontFace << 31), hit.geometry, hit.primitive, asuint(hit.t)));
         if (hit.t >= 0) rays.Store(reflRaysBaryOffset(capacity, slot), reflPackBarycentrics(hit.barycentrics));

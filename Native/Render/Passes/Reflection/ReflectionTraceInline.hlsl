@@ -33,7 +33,7 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
         r.TMax = giRayLength();
         float d;
         float hitMotion;
-        const float3 L = reflHitRadiance(scene, cache, h, r, j.coneWidth, j.coneSpread, seed, d, hitMotion);
+        const float3 L = reflHitRadiance(scene, cache, h, r, j.coneWidth, j.coneSpread, seed, d, hitMotion, reflRayMask(j));
         motion = max(motion, hitMotion);
         const float3 g = j.mode == REFL_G ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, dir, 0.1763, P[3].w) : 0;
         sumL += L;

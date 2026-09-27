@@ -13,9 +13,13 @@
 // P[0] = { cache UAV, ray budget (dispatch width), hit cell footprint scale (float bits), 0 }
 // Local lights at the hit: one next-event sample (HitLocalLights.hlsli) and a shadow ray; with them the cache's
 // irradiance is the indirect light only where the direct local light is shaded analytically (M) or by the hits' own
-// sample. Emissive channel (design 12.4 structure 2): a ray that meets an analytic area light (raytracing.emitters)
-// stores its radiance in the texel (the K path's radiance) but not in the irradiance samples (M's LTC / the hits' NEE
-// are the direct term).
+// sample. Analytic area lights (raytracing.emitters, design 12.4 structure 2): a ray that meets one records radiance 0 in
+// the texel as well as in the irradiance samples - the light occludes what is behind it, and its direct term is shaded
+// exactly by its readers: M's LTC (diffuse, and specular wherever R's result is not its mirror ray), the hits' NEE sample
+// (full BRDF). The texel once kept the light's radiance as an emissive channel for the K path; an 8 x 8 texel (~20 deg)
+// with one ray per update turned a small bright light into a square of the texel's shape, noisy (hit probability x
+// radiance), which every reader then showed: M's K pixels and planar views (white squares, sparkles on the planar
+// camera's water), and ray hits, whose NEE already holds the light's specular (counted twice).
 // Emissive meshes (FEATURES_GAME 12 (ii)): besides its texel ray every thread draws one point of RayScene's emissive
 // triangles from the anchor (HitLocalLights.hlsli) and both estimates of the irradiance are combined by the balance
 // heuristic: the texel rays sample directions with density q = |p|^3 / 2 per sr (uniform in the hemispherical
@@ -116,10 +120,10 @@ void GiTraceGen()
     }
     else if (hit.instance == RT_INSTANCE_EMITTER)
     {
-        // An analytic area light (raytracing.emitters): the texel keeps its radiance (emissive channel: the K path's
-        // radiance), the irradiance samples do not (the direct term is M's analytic one or the hits' NEE sample).
+        // An analytic area light (raytracing.emitters): 0 in the texel and the irradiance samples (header: its readers
+        // shade its direct term analytically).
         distanceToHit = hit.t;
-        radiance = rtEmitterCounts(scene.pad, hit.primitive) ? rtEmitterRadiance(hit.primitive, r.Origin) : float3(0, 0, 0);
+        radiance = 0;
         emitter = true;
     }
     else

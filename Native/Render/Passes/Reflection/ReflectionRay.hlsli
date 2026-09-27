@@ -122,4 +122,12 @@ float3 reflLobeControl(ReflJob j, Texture2D<uint4> probes, GiProbeFootprint foot
 
 float3 reflRayOrigin(ReflSurface s) { return s.position + s.normal * (1e-3 + 2e-4 * s.linearDepth); }
 
+// Instance mask of a job's rays. B2 (COVERAGE 12.4 structure 2): only the M path's mirror ray sees the analytic area
+// lights (raytracing.emitters); M then leaves those lights' specular to the result (ReflectionResolve stores a = 2). A G
+// sample's 4 VNDF rays would find a small bright light rarely (one-ray noise the control variate no longer cancels: the
+// cache holds no emitter radiance, GiTrace), so G, like K and the planar cameras, leaves it to M's exact LTC.
+#ifdef RT_MASK_EMITTER  // the tracing kernels (RayScene.hlsli)
+uint reflRayMask(ReflJob j) { return RT_MASK_REFLECTION | (j.mode == REFL_M ? RT_MASK_EMITTER : 0u); }
+#endif
+
 #endif

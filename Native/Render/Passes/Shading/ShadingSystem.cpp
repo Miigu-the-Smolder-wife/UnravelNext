@@ -894,7 +894,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             k[26] = r.giCache.valid() ? c.srv(r.giCache) : gpu::kNone;
             k[27] = fragmentShadows && v.shadowFragmentSun.valid() ? c.srv(v.shadowFragmentSun) : gpu::kNone;
             k[28] = fragmentShadows ? c.srv(v.coverageDepthRange) : gpu::kNone;
-            k[29] = r.areaLightStable;  // P[7].y (B2)
+            k[29] = gpu::kNone;  // P[7].y (B2): coverage fragments read no R reflection result (their K path and the cache hold
+                                 // no emitter radiance, GiTrace), so every area light's LTC specular is theirs
             k[30] = r.surfaceConstants.valid() ? c.srv(r.surfaceConstants) : gpu::kNone;  // P[7].z (A7 surface layers)
             k[31] = r.weather != UINT32_MAX ? r.weather : gpu::kNone;                  // P[7].w
             k[32] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : gpu::kNone;  // P[8].x (A8; the arrays hold 48)

@@ -259,7 +259,7 @@ void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w);
 // One level's trilinear accumulation over the 8 cells of the point (entries that exist and have been updated).
 template <typename B>
 void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, bool wantRadiance, uint nc, uint level, inout float3 sumE,
-                       inout float3 sumL, inout float weight)
+                       inout float3 sumL, inout float weight, float cone = 0)
 {
     const float s = giCellSize(h, level);
     const float3 f = worldPos / s - 0.5;
@@ -280,7 +280,7 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
             float3 tb, bb;
             giBasis(n, tb, bb);
             const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
-            sumL += w * giTexelRadiance(b, h, entry, giHemiOctEncode(local));
+            sumL += w * giTexelRadianceCone(b, h, entry, giHemiOctEncode(local), cone);
         }
         weight += w;
         giKeepRead(b, h, entry, w);
@@ -291,9 +291,10 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
 // those has data and minLevel raised the start, down through the finer levels to the point's own level (the cells
 // screen probes and nearer rays created there). A ray hit's footprint level is often coarser than every cell that exists
 // at its point: stopping at the coarse side returned 0 there (black reflection samples on surfaces the cache covers).
+// cone: the radiance's prefilter half-angle (giTexelRadianceCone; 0 = texel resolution, the ray hits' own reads).
 template <typename B>
 void giCacheLevels(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, bool wantRadiance, uint minLevel, out float3 sumE, out float3 sumL,
-                   out float weight)
+                   out float weight, float cone = 0)
 {
     const uint nc = giNormalClass(normal);
     const uint own = giLevel(h, worldPos), first = max(own, minLevel);
@@ -301,9 +302,9 @@ void giCacheLevels(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, 
     float w = 0;
     uint level = first;
     [loop] for (uint attempt = 0; attempt < GI_LEVEL_CLIMB && w <= 0 && level <= h.maxLevel; ++attempt, ++level)
-        giAccumulateLevel(b, h, worldPos, normal, dir, wantRadiance, nc, level, e, l, w);
+        giAccumulateLevel(b, h, worldPos, normal, dir, wantRadiance, nc, level, e, l, w, cone);
     [loop] for (uint finer = first; w <= 0 && finer > own && first - finer < GI_LEVEL_CLIMB; --finer)
-        giAccumulateLevel(b, h, worldPos, normal, dir, wantRadiance, nc, finer - 1, e, l, w);
+        giAccumulateLevel(b, h, worldPos, normal, dir, wantRadiance, nc, finer - 1, e, l, w, cone);
     sumE = e;
     sumL = l;
     weight = w;
@@ -464,6 +465,26 @@ float3 giTexelRadiance(B b, GiHeader h, uint entry, float2 uv)
     return r * GI_LOAD_SCALE;
 }
 
+// Incident radiance from a direction prefiltered by a cone of half-angle 'cone' (radians), one entry. The level of detail
+// is the K path's (ScreenProbes.hlsli giProbeFootprintRadiance: the map mip whose texel cone matches the cone with the
+// Nyquist margin 1.5, 8 x 8 texel ~10.1 deg half-angle), so the planar views' and the main view's K values filter alike:
+// lod = log2(cone / (1.5 x 0.1763)) in [0, 2]. Mip lod of the 8 x 8 map read bilinearly is a box of 2^lod texels; here it
+// is formed from the texels themselves (no stored mips): four bilinear taps at (+-o, +-o) texels around the direction,
+// o = (2^lod - 1) / 2, the mean of four 2 x 2 texel blocks at integer lods (lod 1: the 3 x 3 tent, lod 2: the 4 x 4 box)
+// and continuous between. Cost: 16 texel loads instead of 4 where lod > 0. Below the lod 0 cone (mirror-like lobes) the
+// bilinear texel value as before.
+template <typename B>
+float3 giTexelRadianceCone(B b, GiHeader h, uint entry, float2 uv, float cone)
+{
+    const float lod = clamp(log2(max(cone, 1e-3) / (1.5 * 0.1763)), 0.0, 2.0);
+    if (lod <= 0) return giTexelRadiance(b, h, entry, uv);
+    const float o = (exp2(lod) - 1) * 0.5 / GI_TEXELS;
+    float3 r = 0;
+    [unroll] for (uint k = 0; k < 4; ++k)
+        r += giTexelRadiance(b, h, entry, uv + float2(k & 1 ? o : -o, k & 2 ? o : -o));
+    return r * 0.25;
+}
+
 // Irradiance and incident radiance from direction dir at a surface point, in one pass over the cells (ray hits need
 // both): trilinear over the 8 cells of the point's level (at least minLevel) and normal class like giCacheIrradianceAt;
 // each existing updated entry contributes its SH irradiance and its texel-resolution radiance toward dir (bilinear over
@@ -479,15 +500,18 @@ void giCacheLightingAt(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
 }
 
 // Incident radiance from direction dir at a surface point with normal 'normal' (v1.6 request 20260925_R_hit_shading.md):
-// the surface's own entries (its normal class), trilinear over 8 cells with level climbing (giCacheLightingAt), texel
-// resolution (8 x 8 hemisphere, ~22 deg texels; coneHalfAngle reserved for the lobe prefilter).
+// the surface's own entries (its normal class), trilinear over 8 cells with level climbing, prefiltered by the lobe's
+// cone coneHalfAngle (giTexelRadianceCone: the K path's level of detail; texel resolution for lobes within a texel).
+// Readers: M's planar views, glass (TranslucentComposite), W's water fallback. Without the prefilter a rough lobe read one
+// texel's value: a sharp, texel-shaped image of bright content (sky openings, lit windows) on rough surfaces.
 float3 giCacheRadiance(GiSrvs s, float3 worldPos, float3 normal, float3 dir, float coneHalfAngle)
 {
     ByteAddressBuffer b = ResourceDescriptorHeap[s.cache];
     const GiHeader h = giHeader(b);
-    float3 irradiance, radiance;
-    giCacheLightingAt(b, h, worldPos, normal, dir, 0, irradiance, radiance);
-    return radiance;
+    float3 sumE, sumL;
+    float weight;
+    giCacheLevels(b, h, worldPos, normal, dir, true, 0, sumE, sumL, weight, coneHalfAngle);
+    return weight > 0 ? sumL / weight : 0;
 }
 
 // Deprecated (v1): keys the entry by dir's normal class instead of the surface's, so it can read another surface's
