@@ -102,7 +102,9 @@ struct ViewResources
     // normal turned towards the viewer) x g_exposure; a = 1 where the cache has the value, 0 where M uses the probes.
     // Front faces only (M keeps its own lookup for Foliage back faces). Invalid = M looks the cache up itself.  [R]
     // cloud/render-fixes: after r.gi.screen.filter (GiScreenFilter.hlsl, gi.screen_filter_cells), the edge-preserving
-    // spatial filter over the cache cells' blotches; a pixel without its own value takes its surface neighbours' (a = 1).
+    // spatial filter over the cache cells' blotches; a pixel without its own value takes its surface neighbours' (a = 1);
+    // the main view's rgb carries the screen probes' near occlusion too (E x occlusion x exposure: M gathers the probes
+    // only for the K path and Foliage's back side).
     TextureRef giIrradiance;
     TextureRef reflectionLobeTiles;  // R8_UNORM ceil(W/8) x ceil(H/8): min over the tile's      [M]
                                      // surface pixels of reflectionLobeHalfAngle(r, NoV) / pi

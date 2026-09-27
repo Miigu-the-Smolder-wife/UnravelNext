@@ -501,17 +501,24 @@ float4 giFootprintIrradiance(Src t, GiProbeFootprint fp, int2 count, float3 norm
     return any ? sum : float4(0, 0, 0, 1);
 }
 
+// wantIrradiance = false: the caller has the front irradiance and occlusion already (M's main view: view.giIrradiance, which
+// carries both): no SH evaluation and no front cache lookup (irradiance 0; occlusion 1 unless 'back' needs it).
 template <typename Src>
 ScreenProbeLighting giProbeGatherFrom(Src t, ProbeSrvs s, uint2 pixel, float3 worldPos, float3 normal, float linearDepth, bool back, bool wantRadiance,
-                                      float3 dir, float coneHalfAngle, float lobeAlpha = -1)
+                                      float3 dir, float coneHalfAngle, float lobeAlpha = -1, bool wantIrradiance = true)
 {
     float spacing;
     int2 count;
     const GiProbeFootprint fp = giProbeFootprintAt(t, pixel, worldPos, normal, linearDepth, spacing, count);
     ScreenProbeLighting o;
-    const float4 e = giFootprintIrradiance(t, fp, count, normal);
-    o.irradiance = e.rgb;
-    o.occlusion = e.a;
+    o.irradiance = 0;
+    o.occlusion = 1;
+    if (wantIrradiance || back)
+    {
+        const float4 e = giFootprintIrradiance(t, fp, count, normal);
+        o.irradiance = e.rgb;
+        o.occlusion = e.a;
+    }
     o.irradianceBack = 0;
     if (back)
     {
@@ -524,8 +531,11 @@ ScreenProbeLighting giProbeGatherFrom(Src t, ProbeSrvs s, uint2 pixel, float3 wo
         ByteAddressBuffer cache = ResourceDescriptorHeap[s.pad1 - 1];
         const GiHeader h = giHeader(cache);
         float weight;
-        const float3 front = giCacheIrradianceScreen(cache, h, worldPos, normal, weight);
-        if (weight > 0) o.irradiance = front;
+        if (wantIrradiance)
+        {
+            const float3 front = giCacheIrradianceScreen(cache, h, worldPos, normal, weight);
+            if (weight > 0) o.irradiance = front;
+        }
         if (back)
         {
             const float3 behind = giCacheIrradianceScreen(cache, h, worldPos, -normal, weight);
@@ -556,11 +566,11 @@ ScreenProbeLighting screenProbeGatherLobe(ProbeSrvs s, uint2 pixel, float3 world
 #ifdef GI_PROBE_TILE_CACHE
 // screenProbeGather for a pixel of 'tile' (its 8 x 8 group) after giProbeTileLoad and the group barrier.
 ScreenProbeLighting screenProbeGatherTile(ProbeSrvs s, uint2 tile, uint2 pixel, float3 worldPos, float3 normal, float linearDepth, bool back, bool wantRadiance,
-                                          float3 dir, float coneHalfAngle)
+                                          float3 dir, float coneHalfAngle, bool wantIrradiance = true)
 {
     GiProbeTile t;
     t.first = int2(tile);
-    return giProbeGatherFrom(t, s, pixel, worldPos, normal, linearDepth, back, wantRadiance, dir, coneHalfAngle);
+    return giProbeGatherFrom(t, s, pixel, worldPos, normal, linearDepth, back, wantRadiance, dir, coneHalfAngle, -1, wantIrradiance);
 }
 // screenProbeGatherLobe for a pixel of 'tile' (its 8 x 8 group) after giProbeTileLoad and the group barrier.
 ScreenProbeLighting screenProbeGatherLobeTile(ProbeSrvs s, uint2 tile, uint2 pixel, float3 worldPos, float3 normal, float linearDepth, bool back, bool wantRadiance,

@@ -585,12 +585,24 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         probes.probes = P[2].y;
         probes.occlusion = P[2].y;
         probes.pad0 = P[7].y;
-        // R's per-pixel front irradiance (P[9].w, view.giIrradiance: r.gi.screen, then R's edge-preserving denoise) replaces
-        // the cache lookup inside the gather; the cache stays for Foliage's back side (not in the texture)
-        probes.pad1 = P[2].w != UNX_NONE && (P[9].w == UNX_NONE || foliage) ? P[2].w + 1 : 0;
+        // R's per-pixel front irradiance (P[9].w, view.giIrradiance: r.gi.screen, then R's edge-preserving filter, with the
+        // probes' near occlusion multiplied in): where it has data it is the pixel's whole front diffuse indirect
+        // irradiance, and the gather runs only for what the texture does not hold - the K path's radiance and Foliage's
+        // back side (its occlusion from the footprint as before; the cache stays for that side). Elsewhere (no texture, or
+        // no data at the pixel) the gather's irradiance x occlusion as before.
+        float4 screenE = 0;
+        if (P[9].w != UNX_NONE)
+        {
+            Texture2D<float4> screenIrradiance = ResourceDescriptorHeap[P[9].w];
+            screenE = screenIrradiance[pixel];  // rgb = irradiance x occlusion x exposure, a = 1 where the cache had data
+        }
+        const bool fromScreen = screenE.a > 0;
+        const bool gatherIrradiance = (experiment & 2) == 0 && !fromScreen;
+        probes.pad1 = P[2].w != UNX_NONE && (gatherIrradiance || foliage) ? P[2].w + 1 : 0;
         const bool specular = NoV > 0 && (experiment & 4) == 0;
         const float4 refl = specular && P[2].z != UNX_NONE ? reflectionRadiance(P[2].z, pixel) : float4(0, 0, 0, 0);
         const bool wantRadiance = specular && refl.a <= 0;
+        if (fromScreen && (experiment & 2) == 0) irradiance = screenE.rgb / g_exposure;
         // gather 0: the pixel's irradiance and its lobe's K-path radiance; A9 gather 1: the coat lobe's cone (K path; R's
         // reflection result is the base lobe's) - one inlined gather for both
         uint gathers = 1;
@@ -600,31 +612,22 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         [loop] for (uint gi = 0; gi < gathers; ++gi)
         {
             const bool coatCone = gi == 1;
-            if (!coatCone && !((experiment & 2) == 0 || wantRadiance)) continue;
+            const bool backSide = !coatCone && foliage && (experiment & 2) == 0;
+            if (!coatCone && !(gatherIrradiance || backSide || wantRadiance)) continue;
 #if LAYERED == 1
             const float cone = coatCone ? reflectionLobeHalfAngle(coat.roughness, NoV) : halfAngle;
 #else
             const float cone = halfAngle;
 #endif
-            const ScreenProbeLighting g = screenProbeGatherTile(probes, pixel / M_TILE, pixel, worldPos, nv, linearZ, !coatCone && foliage && (experiment & 2) == 0,
-                                                                coatCone || wantRadiance, r, cone);
+            const ScreenProbeLighting g = screenProbeGatherTile(probes, pixel / M_TILE, pixel, worldPos, nv, linearZ, backSide, coatCone || wantRadiance, r, cone,
+                                                                !coatCone && gatherIrradiance);
             if (coatCone)
             {
                 coatIncident = g.radiance;
                 continue;
             }
-            if ((experiment & 2) == 0)
-            {
-                float3 front = g.irradiance;
-                if (P[9].w != UNX_NONE)
-                {
-                    Texture2D<float4> screenIrradiance = ResourceDescriptorHeap[P[9].w];
-                    const float4 e = screenIrradiance[pixel];  // rgb = irradiance x exposure, a = 1 where the cache had data
-                    if (e.a > 0) front = e.rgb / g_exposure;
-                }
-                irradiance = front * g.occlusion;
-                irradianceBack = g.irradianceBack * g.occlusion;
-            }
+            if (gatherIrradiance) irradiance = g.irradiance * g.occlusion;
+            if (backSide) irradianceBack = g.irradianceBack * g.occlusion;
             if (wantRadiance) incident = g.radiance;
         }
         if (specular && refl.a > 0) incident = refl.rgb;

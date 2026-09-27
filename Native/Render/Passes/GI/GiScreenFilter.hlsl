@@ -17,11 +17,37 @@
 // the resolution the cache already has, so a real gradient loses at most what one cell of trilinear interpolation does.
 // (Concept reference only, no code: the spatial filtering of screen probes in UE5 Lumen, Engine/Shaders/Private/Lumen/
 // LumenScreenProbeFiltering.usf, which weights neighbours by plane distance and normal; SVGF-style edge-stopping weights.)
+// The main view's output then carries the screen probes' near occlusion (the probe footprint M's gather evaluates, same
+// function and inputs, ScreenProbes.hlsli): rgb = E x occlusion x exposure, the pixel's whole front diffuse indirect
+// irradiance, so M's shading kernel needs no probe gather for it (only the K path's radiance and Foliage's back side
+// gather). Views without probes (planar views): occlusion 1. gi.screen_filter_cells = 0: no spatial filter, the
+// occlusion still applied (M relies on it).
 // P[0] = { r.gi.screen SRV (RGBA16F: rgb = E x exposure, a = 1 data), depth SRV, gbuffer SRV, output UAV }
-// P[1] = { width, height, GI cache SRV (raw), asuint(pixel angle, radians) }, P[2] = { asuint(radius in cell edges), 0, 0, 0 }
-// Frame constants b1 = main view.
+// P[1] = { width, height, GI cache SRV (raw), asuint(pixel angle, radians) }, P[2] = { asuint(radius in cell edges), view.screenProbes
+// SRV (UNX_NONE: none), 0, 0 }
+// Frame constants b1 = the view's.
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/GI/GiScreenInputs.hlsli"
+#include "Passes/GI/ScreenProbes.hlsli"
+
+// The near occlusion of M's probe footprint at the pixel (giProbeGatherFrom -> giFootprintIrradiance's a, without the SH).
+float giScreenOcclusion(uint2 pixel, float3 p, float3 n, float linearZ)
+{
+    if (P[2].y == UNX_NONE) return 1;
+    Texture2D<uint4> t = ResourceDescriptorHeap[P[2].y];
+    float spacing;
+    int2 count;
+    const GiProbeFootprint fp = giProbeFootprintAt(t, pixel, p, n, linearZ, spacing, count);
+    float occlusion = 0;
+    bool any = false;
+    [unroll] for (uint k = 0; k < 4; ++k)
+    {
+        if (fp.weight[k] <= 0) continue;
+        occlusion += fp.weight[k] * ((giProbePlane(t, uint2(fp.probe[k]), 4, count).y >> 16) / 65535.0);  // giLoadProbeRecord's word 13
+        any = true;
+    }
+    return any ? occlusion : 1;
+}
 
 #define GI_FILTER_TAPS 12u
 #define GI_FILTER_MAX_PX 48.0
@@ -44,13 +70,14 @@ void main(uint2 pixel : SV_DispatchThreadID)
     }
     const float4 centre = raw.Load(int3(pixel, 0));
     const float linearZ = linearDepth(depthValue);
+    const float occlusion = giScreenOcclusion(pixel, p, n, linearZ);
     ByteAddressBuffer cache = ResourceDescriptorHeap[P[1].z];
     const GiHeader h = giHeader(cache);
     const float cellPx = giCellSize(h, giLevel(h, p)) / max(linearZ * asfloat(P[1].w), 1e-9);
     const float radius = min(asfloat(P[2].x) * cellPx, GI_FILTER_MAX_PX);
     if (radius < 1.5)
     {
-        output[pixel] = centre;
+        output[pixel] = float4(centre.rgb * occlusion, centre.a);
         return;
     }
     float3 sum = centre.a > 0 ? centre.rgb : 0;
@@ -78,5 +105,5 @@ void main(uint2 pixel : SV_DispatchThreadID)
         sum += w * e.rgb;
         weight += w;
     }
-    output[pixel] = weight > 0 ? float4(sum / weight, 1) : centre;
+    output[pixel] = weight > 0 ? float4(sum / weight * occlusion, 1) : float4(centre.rgb * occlusion, centre.a);
 }
