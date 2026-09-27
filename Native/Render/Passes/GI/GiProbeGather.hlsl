@@ -5,11 +5,67 @@
 // cosine-distributed hemisphere points within r = min(gi.near_occlusion_radius_m, cache cell edge) — occlusion below
 // the cache's own resolution only, so the cache (whose rays already see larger occluders) is not darkened twice.
 // A point is occluded when the depth buffer shows a surface in front of it closer than r along the view ray.
+// The occlusion is integrated over time per probe (gi.screen_occlusion_history_frames): the 16 points turn by a golden-
+// ratio step every frame, and the probe's surface point is found in the previous frame's probes by its exact motion
+// (GiScreenHistory.hlsli), where the probe there on the same plane with the same normal carries its running mean. One
+// frame's 16 points quantise the occlusion to 1/16 per probe, and neighbouring probes' different point sets drew an 8 x 8
+// px pattern wherever something occludes (corners, contacts), fixed to the screen probe grid (a mosaic sliding over the
+// surfaces in motion). Occlusion depends on geometry only, so the window costs no lighting lag; a moving occluder is
+// followed by a clamp of the history to the frame's own estimate +- 3 sigma of its 16-point binomial spread (UE5 Lumen's
+// screen probe gather integrates its probes over time the same way: concept only, Engine/Shaders/Private/Lumen/
+// LumenScreenProbeGather.usf, temporal reprojection of the probes with depth and normal rejection).
 // P[0] = { cache UAV (raw), depth SRV, gbuffer SRV, probes UAV }, P[1] = { probesX, probesY, width, height },
 // P[2] = { spacing, near occlusion radius (float bits), map owner list UAV, map dispatch args UAV } (reset here for
-// GiProbeMapOwners); frame constants b1 = main view.
+// GiProbeMapOwners), P[3] = { vis id SRV (UNX_NONE: no history), visible clusters SRV, previous probe history UAV, probe
+// history UAV }, P[4] = { flags (bit 0: reset the history), history frames, previous probesX, previous probesY };
+// frame constants b1 = main view.
+// Probe history (persistent, RGBA32_UINT (2 probesX) x probesY): texel (2i, j) = { world position (f32 x 3), packed
+// normal (0 = no surface) }, texel (2i + 1, j) = { occlusion mean (f32), frames in it, 0, 0 }.
 #include "GBuffer.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
+#include "Passes/GI/GiScreenHistory.hlsli"
+
+// The occlusion history of the probe's surface point from the previous frame's probes (bilinear over the four around its
+// previous pixel, those on its plane and facing its way); n = the frames in it (0: none).
+float giProbeOcclusionHistory(uint2 pixel, float3 p, float3 normal, uint spacing, out uint n)
+{
+    n = 0;
+    if (P[3].x == UNX_NONE || (P[4].x & 1u) != 0) return 0;
+    float3 prevP, prevN;
+    uint instance;
+    giPreviousSurface(P[3].x, P[3].y, pixel, p, normal, prevP, prevN, instance);
+    float2 prevPixel;
+    float prevDepth;
+    if (!giPreviousPixel(prevP, float2(P[1].zw), prevPixel, prevDepth)) return 0;
+    const int2 prevCount = int2(P[4].zw);
+    RWTexture2D<uint4> history = ResourceDescriptorHeap[P[3].z];
+    const float2 f = (prevPixel - 0.5) / spacing;  // probe (i, j) sits at pixel (spacing i, spacing j) (centre + 0.5)
+    const int2 i0 = int2(floor(f));
+    const float2 fr = f - floor(f);
+    float sum = 0, weight = 0;
+    uint frames = 0xFFFFFFFFu;
+    [unroll] for (uint k = 0; k < 4; ++k)
+    {
+        const int2 o = int2(k & 1, k >> 1);
+        const int2 q = i0 + o;
+        if (any(q < 0) || any(q >= prevCount)) continue;
+        const uint4 a = history[uint2(2 * q.x, q.y)];
+        if (a.w == 0) continue;
+        const float3 qp = asfloat(a.xyz);
+        const float plane = saturate(1 - abs(dot(prevN, qp - prevP)) / max(prevDepth, 1e-6) / 0.02);
+        const float agree = saturate(dot(prevN, giUnpackAnchorNormal(a.w)));
+        const float agree2 = agree * agree;
+        const float w = (o.x ? fr.x : 1 - fr.x) * (o.y ? fr.y : 1 - fr.y) * (plane * plane) * (agree2 * agree2);
+        if (w <= 0) continue;
+        const uint4 b = history[uint2(2 * q.x + 1, q.y)];
+        sum += w * asfloat(b.x);
+        weight += w;
+        frames = min(frames, b.y);
+    }
+    if (weight < 1e-4 || frames == 0xFFFFFFFFu) return 0;
+    n = frames;
+    return sum / weight;
+}
 
 float nearOcclusion(Texture2D<float> depth, float3 p, float3 n, float radius, uint rotation, uint2 size)
 {
@@ -68,11 +124,17 @@ void main(uint2 probe : SV_DispatchThreadID)
     uint2 pixel;
     float d;
     float3 c[9];
+    const bool keepHistory = P[3].x != UNX_NONE;
     if (!giProbePixel(depth, probe, spacing, size, pixel, d))
     {
         [unroll] for (uint k = 0; k < 9; ++k) c[k] = 0;
         giStoreProbe(probes, probe, count, c, float3(0, 0, 0), float3(0, 0, 1), 1, false);
         probes[uint2(probe.x * 8 + 5, probe.y * 4 + 3)] = uint4(GI_ENTRY_PENDING, 0, 0, 0);  // radiance map source (GiProbeMaps)
+        if (keepHistory)
+        {
+            RWTexture2D<uint4> next = ResourceDescriptorHeap[P[3].w];
+            next[uint2(2 * probe.x, probe.y)] = uint4(0, 0, 0, 0);
+        }
         return;
     }
     const float3 p = worldFromDepth(float2(pixel), d);
@@ -82,6 +144,27 @@ void main(uint2 probe : SV_DispatchThreadID)
     probes[uint2(probe.x * 8 + 5, probe.y * 4 + 3)] = uint4(mapEntry, 0, 0, 0);  // radiance map source (GiProbeMaps)
     if (mapEntry != GI_ENTRY_PENDING) b.InterlockedMin(b.Load(GI_H_MAP_OWNER) + mapEntry * 4, probe.y * count.x + probe.x);
     const float radius = min(asfloat(P[2].y), giCellSize(h, giLevel(h, p)));
-    const float occlusion = nearOcclusion(depth, p + n * (1e-3 * linearDepth(d)), n, radius, probe.x * 7919u + probe.y * 104729u, size);
+    // the points turn by 633 / 1024 of a turn per frame (golden ratio): successive frames fill the circle evenly
+    const uint rotation = probe.x * 7919u + probe.y * 104729u + (keepHistory ? h.frame * 633u : 0u);
+    const float raw = nearOcclusion(depth, p + n * (1e-3 * linearDepth(d)), n, radius, rotation, size);
+    float occlusion = raw;
+    uint frames = 0;
+    if (keepHistory)
+    {
+        uint n0;
+        const float previous = giProbeOcclusionHistory(pixel, p, n, spacing, n0);
+        if (n0 > 0)
+        {
+            // a moving occluder: the history within 3 sigma of this frame's 16-point estimate (binomial, floor 1/16)
+            const float sigma = sqrt(max(raw * (1 - raw), 1.0 / 16.0) / 16.0);
+            const uint m = min(n0, max(P[4].y, 1u) - 1);
+            occlusion = lerp(clamp(previous, raw - 3 * sigma, raw + 3 * sigma), raw, 1.0 / (m + 1));
+            frames = m + 1;
+        }
+        else frames = 1;
+        RWTexture2D<uint4> next = ResourceDescriptorHeap[P[3].w];
+        next[uint2(2 * probe.x, probe.y)] = uint4(asuint(p), max(giPackNormal(n), 1u));
+        next[uint2(2 * probe.x + 1, probe.y)] = uint4(asuint(occlusion), frames, 0, 0);
+    }
     giStoreProbe(probes, probe, count, c, p, n, occlusion, true);
 }

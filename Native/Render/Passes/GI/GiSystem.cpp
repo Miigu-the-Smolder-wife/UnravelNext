@@ -104,6 +104,8 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.rayLength = (float)q.number("gi.ray_length_m");
     s.hitUpdateShare = (float)q.number("gi.hit_update_share");
     s.hitCellFootprintScale = (float)q.number("gi.hit_cell_footprint_scale");
+    s.screenOcclusionHistory = (uint32_t)q.integer("gi.screen_occlusion_history_frames");
+    s.screenFilterCells = (float)q.number("gi.screen_filter_cells");
     s.experimentDisable = (uint32_t)q.integer("gi.experiment_disable");
     s.deterministic = q.boolean("gi.deterministic");
     // Fixed by the kernels (GiCache.hlsli, GiProbeGather.hlsl, GiInternal.hlsli probe offsets).
@@ -114,6 +116,8 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     if (s.capacity == 0 || s.raysPerFrame < 64 || s.historyMax == 0) fail("gi: zero capacity, rays or history");
     if (s.historyStatic < s.historyMax || s.historyStatic > 4096 || s.historyMax > 4096) fail("gi: history_updates_max_static below history_updates_max, or a window above 4096 (12-bit count)");
     if (s.maxLevel > 31) fail("gi.cache_levels_max must be <= 31 (5-bit key field)");
+    if (s.screenOcclusionHistory < 1 || s.screenOcclusionHistory > 255) fail("gi.screen_occlusion_history_frames must be in [1, 255]");
+    if (!(s.screenFilterCells >= 0 && s.screenFilterCells <= 2)) fail("gi.screen_filter_cells must be in [0, 2] (cell edges)");
     s.updatesPerFrame = s.raysPerFrame / 64;  // whole-hemisphere updates
     return s;
 }
@@ -209,8 +213,35 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
          m_settings.raysPerFrame, m_settings.updatesPerFrame);
 }
 
+void GiSystem::ensureProbeHistory(uint32_t probesX, uint32_t probesY)
+{
+    if (m_probeHistory[0] && m_probeHistoryX == probesX && m_probeHistoryY == probesY) return;
+    D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC1 d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    d.Width = 2ull * probesX;
+    d.Height = probesY;
+    d.DepthOrArraySize = d.MipLevels = 1;
+    d.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+    d.SampleDesc.Count = 1;
+    d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    for (int k = 0; k < 2; ++k)
+    {
+        if (m_probeHistory[k]) m_device.deferRelease(m_probeHistory[k]);
+        check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                       IID_PPV_ARGS(&m_probeHistory[k])),
+              "GI probe occlusion history");
+        m_probeHistory[k]->SetName(k ? L"R GI probe occlusion history 1" : L"R GI probe occlusion history 0");
+    }
+    m_probeHistoryX = probesX;
+    m_probeHistoryY = probesY;
+    m_probeHistoryReset = true;  // (new textures hold nothing; the previous grid had other dimensions)
+}
+
 GiSystem::~GiSystem()
 {
+    for (auto& t : m_probeHistory)
+        if (t) m_device.deferRelease(t);
     if (m_changeRing)
     {
         m_changeRing->Unmap(0, nullptr);
@@ -508,6 +539,31 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     // Map owner list (count, then probe indices) and its indirect dispatch arguments, reset by the gather.
     const BufferRef owners = g.createBuffer({ "GI map owners", 4ull + 4ull * probesX * probesY, 0 });
     const BufferRef mapArgs = g.createBuffer({ "GI map dispatch args", 16, 0 });
+    // The probes' occlusion over time (GiProbeGather): needs V's vis id (the surface's exact motion); frames without it
+    // (stand-in visibility in tests) take each frame's own 16 points at a fixed rotation. The history restarts on new
+    // textures, a scene revision (geometry may have changed) or a history discontinuity (restore, camera cut).
+    const bool probeHistory = main.visId.valid() && main.visibleClusters.valid() && s.screenOcclusionHistory > 1;
+    TextureRef historyPrev, historyNext;
+    uint32_t historyFlags = 0, historyPrevX = 0, historyPrevY = 0;
+    if (probeHistory)
+    {
+        const uint32_t oldX = m_probeHistoryX, oldY = m_probeHistoryY;
+        ensureProbeHistory(probesX, probesY);
+        if (fc.scene.revision() != m_probeHistoryRevision || fc.frame.discontinuity != 0) m_probeHistoryReset = true;
+        m_probeHistoryRevision = fc.scene.revision();
+        historyFlags = m_probeHistoryReset ? 1u : 0u;
+        m_probeHistoryReset = false;
+        historyPrevX = oldX == probesX ? probesX : 0;
+        historyPrevY = oldY == probesY ? probesY : 0;
+        const uint32_t prev = m_probeHistoryParity, next = prev ^ 1u;
+        m_probeHistoryParity = next;
+        historyPrev = g.importTexture(m_probeHistory[prev].Get(), { "GI probe occlusion history (previous)", 2 * probesX, probesY, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT },
+                                      D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        historyNext = g.importTexture(m_probeHistory[next].Get(), { "GI probe occlusion history", 2 * probesX, probesY, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT },
+                                      D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    }
+    const TextureRef visId = main.visId;
+    const BufferRef visibleClusters = main.visibleClusters;
     g.addPass("r.gi.gather", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::UavCompute);  // radiance map owners
@@ -516,12 +572,24 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   b.use(probes, Use::UavCompute);
                   b.use(owners, Use::UavCompute);
                   b.use(mapArgs, Use::UavCompute);
+                  if (probeHistory)
+                  {
+                      b.use(visId, Use::SrvCompute);
+                      b.use(visibleClusters, Use::SrvCompute);
+                      b.use(historyPrev, Use::UavCompute);
+                      b.use(historyNext, Use::UavCompute);
+                  }
               },
-              [&shaders, cache, depth, gbuffer, probes, owners, mapArgs, probesX, probesY, frameConstants, s, main](PassContext& c) {
-                  const uint32_t k[12] = { c.uav(cache), c.srv(depth), c.srv(gbuffer), c.uav(probes), probesX, probesY, main.view.width, main.view.height,
-                                           s.probeSpacing, asU(s.nearRadius), c.uav(owners), c.uav(mapArgs) };
+              [&shaders, cache, depth, gbuffer, probes, owners, mapArgs, probesX, probesY, frameConstants, s, main, probeHistory, visId, visibleClusters,
+               historyPrev, historyNext, historyFlags, historyPrevX, historyPrevY](PassContext& c) {
+                  const uint32_t none = 0xFFFFFFFFu;
+                  const uint32_t k[20] = { c.uav(cache), c.srv(depth), c.srv(gbuffer), c.uav(probes), probesX, probesY, main.view.width, main.view.height,
+                                           s.probeSpacing, asU(s.nearRadius), c.uav(owners), c.uav(mapArgs),
+                                           probeHistory ? c.srv(visId) : none, probeHistory ? c.srv(visibleClusters) : none,
+                                           probeHistory ? c.uav(historyPrev) : none, probeHistory ? c.uav(historyNext) : none,
+                                           historyFlags, s.screenOcclusionHistory, historyPrevX, historyPrevY };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiProbeGather"));
-                  c.computeConstants(k, 12);
+                  c.computeConstants(k, 20);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
               });
@@ -555,8 +623,10 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
               });
     // M's per-pixel cache irradiance (front side) as a pass of its own (GiScreenIrradiance.hlsl; R_STATUS 0, GI tile path
     // verdict): M reads view.giIrradiance once instead of the lookup inside its shading kernel. Culled while nothing reads it.
+    // Then the edge-preserving spatial filter over the cells' blotches (GiScreenFilter.hlsl) makes view.giIrradiance.
+    TextureRef screenRaw;
     {
-        const TextureRef screen = g.createTexture({ "GI screen irradiance", main.view.width, main.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        const TextureRef screen = g.createTexture({ "GI screen irradiance (unfiltered)", main.view.width, main.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
         g.addPass("r.gi.screen", QueueType::Compute,
                   [&](PassBuilder& b) {
                       b.use(cache, Use::SrvCompute);
@@ -571,7 +641,30 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                       c.bindFrameConstants(frameConstants);
                       c.cmd->Dispatch((main.view.width + 7) / 8, (main.view.height + 7) / 8, 1);
                   });
+        screenRaw = screen;
         main.giIrradiance = screen;
+        if (s.screenFilterCells > 0)
+        {
+            const TextureRef filtered = g.createTexture({ "GI screen irradiance", main.view.width, main.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            const float pixelAngle = 2.0f * std::tan(main.view.verticalFov * 0.5f) / (float)main.view.height;
+            g.addPass("r.gi.screen.filter", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(screen, Use::SrvCompute);
+                          b.use(depth, Use::SrvCompute);
+                          b.use(gbuffer, Use::SrvCompute);
+                          b.use(cache, Use::SrvCompute);
+                          b.use(filtered, Use::UavCompute);
+                      },
+                      [&shaders, screen, depth, gbuffer, cache, filtered, frameConstants, main, pixelAngle, s](PassContext& c) {
+                          const uint32_t k[12] = { c.srv(screen), c.srv(depth), c.srv(gbuffer), c.uav(filtered), main.view.width, main.view.height, c.srv(cache),
+                                                   asU(pixelAngle), asU(s.screenFilterCells), 0, 0, 0 };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiScreenFilter"));
+                          c.computeConstants(k, 12);
+                          c.bindFrameConstants(frameConstants);
+                          c.cmd->Dispatch((main.view.width + 7) / 8, (main.view.height + 7) / 8, 1);
+                      });
+            main.giIrradiance = filtered;
+        }
     }
     if (m_lookupStatsOn)
     {
@@ -597,12 +690,12 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                           b.use(depth, Use::SrvCompute);
                           b.use(gbuffer, Use::SrvCompute);
                           b.use(counters, Use::UavCompute);
-                          b.use(main.giIrradiance, Use::SrvCompute);
+                          b.use(screenRaw, Use::SrvCompute);  // r.gi.screen's own values (before the filter)
                           b.keep();
                       },
-                      [&shaders, cache, depth, gbuffer, counters, frameConstants, main, clear](PassContext& c) {
+                      [&shaders, cache, depth, gbuffer, counters, frameConstants, main, clear, screenRaw](PassContext& c) {
                           const uint32_t k[8] = { c.srv(cache), c.srv(depth), c.srv(gbuffer), c.uav(counters), main.view.width, main.view.height, clear,
-                                                  c.srv(main.giIrradiance) };
+                                                  c.srv(screenRaw) };
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/Gates/GiLookupStats"));
                           c.computeConstants(k, 8);
                           c.bindFrameConstants(frameConstants);

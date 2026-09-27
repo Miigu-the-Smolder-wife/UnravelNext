@@ -101,6 +101,8 @@ struct ViewResources
     // the end of globalIllumination: rgb = giCacheIrradianceScreen at M's surface point (camera + mPixelRay x linear z, the
     // normal turned towards the viewer) x g_exposure; a = 1 where the cache has the value, 0 where M uses the probes.
     // Front faces only (M keeps its own lookup for Foliage back faces). Invalid = M looks the cache up itself.  [R]
+    // cloud/render-fixes: after r.gi.screen.filter (GiScreenFilter.hlsl, gi.screen_filter_cells), the edge-preserving
+    // spatial filter over the cache cells' blotches; a pixel without its own value takes its surface neighbours' (a = 1).
     TextureRef giIrradiance;
     TextureRef reflectionLobeTiles;  // R8_UNORM ceil(W/8) x ceil(H/8): min over the tile's      [M]
                                      // surface pixels of reflectionLobeHalfAngle(r, NoV) / pi
@@ -174,8 +176,10 @@ struct FrameResources
                                    // knots per texel) and block profiles; ShadowSrvs.layers
     uint32_t vsmConstants = UINT32_MAX;  // CBV descriptor of this frame's VSM constants    [S]
     // v1.45 (B2, COVERAGE 12.4 structure 2): raw SRV of 1 bit per scene light, set when the light's revision has held for  [M]
-    // >= 8 frames and raytracing.emitters is on. M leaves those area lights' LTC specular to R's reflection paths (K/G/M
-    // see the emitters); R excludes the unset ones from direct emitter hits, so no light is counted twice or missed.
+    // >= 8 frames and raytracing.emitters is on. M leaves those area lights' LTC specular to R's M path (its mirror ray
+    // sees the emitters; view.reflection a = 2) and shades it by LTC everywhere else (G rays, the K path and the GI cache
+    // hold no emitter radiance, cloud/render-fixes); R excludes the unset ones from direct emitter hits, so no light is
+    // counted twice or missed.
     // UINT32_MAX when raytracing.emitters is off (M evaluates every area light's specular).
     uint32_t areaLightStable = UINT32_MAX;
     // v1.49 (B4): raw SRV of this frame's celestial record (Celestial.hlsli atmosphereCelestial; upload ring, not a graph  [S]

@@ -7,7 +7,10 @@
 //   r.gi.place -> r.gi.carry                                  requests: probe surfaces (find/create), last frame's ray hits
 //   r.gi.age -> r.gi.setup -> r.gi.select                     stalest-first choice of budget / 64 hemisphere updates
 //   r.gi.trace (DispatchRays) -> r.gi.integrate               64 rays per update -> texels -> exact SH irradiance
-//   r.gi.gather                                               probes: trilinear SH + near occlusion -> view.screenProbes
+//   r.gi.gather                                               probes: trilinear SH + near occlusion (integrated over
+//                                                             time per probe) -> view.screenProbes
+//   r.gi.screen -> r.gi.screen.filter                         per-pixel cache irradiance, edge-preserving spatial filter
+//                                                             -> view.giIrradiance
 #include "unx/render/Frame.h"
 #include "unx/rt/RayScene.h"
 
@@ -19,6 +22,8 @@ struct GiSettings  // from Config/quality/gi.toml
     uint32_t historyStatic = 0;  // gi.history_updates_max_static (GiIntegrate's change test)
     uint32_t updatesPerFrame = 0;  // raysPerFrame / 64 whole-hemisphere updates
     float cellAngleDeg = 0, cellMin = 0, nearRadius = 0, rayLength = 0, hitUpdateShare = 0, hitCellFootprintScale = 0;
+    uint32_t screenOcclusionHistory = 0;  // gi.screen_occlusion_history_frames (GiProbeGather's time integration; 1 = off)
+    float screenFilterCells = 0;          // gi.screen_filter_cells (GiScreenFilter's radius in cell edges; 0 = off)
     uint32_t experimentDisable = 0;  // gi.experiment_disable (cost attribution only)
     bool deterministic = false;      // gi.deterministic: same inputs -> bit-identical cache (selection by key priority, seeds by key)
     static GiSettings fromQuality(const QualityConfig& q);
@@ -104,6 +109,11 @@ private:
     float3 m_skyRadiance{}, m_sunIlluminance{};
     float m_skyBand = 1;
     uint32_t m_epoch = 1, m_sceneRevision = 0;
+    // Screen probe occlusion history (GiProbeGather): ping-pong by parity, RGBA32_UINT (2 probesX) x probesY.
+    ComPtr<ID3D12Resource> m_probeHistory[2];
+    uint32_t m_probeHistoryX = 0, m_probeHistoryY = 0, m_probeHistoryParity = 0, m_probeHistoryRevision = 0;
+    bool m_probeHistoryReset = true;
+    void ensureProbeHistory(uint32_t probesX, uint32_t probesY);
     // Change boxes for GiInvalidate (B3): a mapped upload ring, one slot per frame of kChangeSlots, raw SRVs.
     static constexpr uint32_t kChangeSlots = 4, kChangeBoxesMax = 256, kChangeSlotBytes = 16 + kChangeBoxesMax * 32 + 240;
     ComPtr<ID3D12Resource> m_changeRing;

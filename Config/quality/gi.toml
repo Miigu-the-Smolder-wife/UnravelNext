@@ -6,6 +6,14 @@ cache_octahedral_texels = 8        # 8 x 8 per entry
 screen_probe_spacing_px = 8
 near_occlusion_radius_m = 0.5
 near_occlusion_taps = 16
+screen_occlusion_history_frames = 16  # the probes' near occlusion integrated over time (GiProbeGather: the 16 points turn every
+                                   # frame, the probe's surface point found in last frame's probes by its exact motion; a
+                                   # running mean over at most this many frames, clamped to 3 sigma of the frame's own
+                                   # estimate). 1 = each frame's 16 points alone: 1/16 steps per probe, an 8 x 8 px pattern
+                                   # where anything occludes. Geometry only, so no lighting lag.
+screen_filter_cells = 0.75         # r.gi.screen.filter: edge-preserving spatial filter of M's per-pixel cache irradiance over
+                                   # this share of the pixel's cache cell edge (plane, normal^32 and data weights, 12 taps);
+                                   # it averages the cells' independent errors (blotches of the cell's size). 0 = off.
 relight_frames_max = 8             # frames to reconverge after a light change (quality definition, section 3)
 cache_cell_angle_deg = 0.5         # cache cell edge ~ distance * tan(angle): ~16 px at 4K 60 deg (level = ceil(log2(edge / min)))
 cache_cell_min_m = 0.0625          # finest cell edge (level 0)
