@@ -1,0 +1,13 @@
+specular albedo: A + B = model E table (rel.)                          7.999e-08 (limit 1.0e-05) ok
+  aq case 0 shape 0: sheen gpu 1.38355e-18 replica 1.38354e-18, aniso gpu 0.00756115 replica 0.00758322
+  aq case 9 shape 0: sheen gpu 5.27428e-05 replica 5.2742e-05, aniso gpu 0.00394428 replica 0.00396249
+  aq case 106 shape 2: sheen gpu 3.50188e-06 replica 3.50243e-06, aniso gpu 0.725227 replica 0.732287
+  aq case 107 shape 2: sheen gpu 0.0439756 replica 0.0439164, aniso gpu 0.780541 replica 0.815297
+area quadrature: 180 placements (4 shapes); GPU vs double replica worst: sheen 0.00135, anisotropic 0.0426 (rel. to max(value, 1e-3 peak))
+area quadrature: GPU vs independent references, energy-weighted: sheen 0.0006, anisotropic r 0.3 s 0.8 0.0037, r 0.08 s 1 0.0266
+area quadrature: sheen over the light, GPU vs double replica (rel.)    1.348e-03 (limit 2.0e-03) ok
+area quadrature: sheen vs reference, energy-weighted over 180 placements 5.947e-04 (limit 5.0e-03) ok
+area quadrature: anisotropic r 0.3 s 0.8 vs reference, energy-weighted 3.691e-03 (limit 5.0e-03) ok
+area quadrature: anisotropic r 0.08 s 1 (alpha_b 0.0064) vs reference, energy-weighted 2.662e-02 (limit 2.0e-02) FAIL
+FAILED: 1 failure(s)
+GpuLock.ps1: background: cpu 6 s >= 4 cores, peak 5.6 cores

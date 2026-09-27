@@ -26,6 +26,7 @@
 //   unx_test_shading_shadingtests [--no-debug-layer] [--gbv] [--glass] [--set key=value ...]   (--gbv: GPU-based validation;
 //   --set output.band_pixels=65536 runs the banded passes with 8 bands at the tests' 960 x 540)
 #include "FilmCurve.h"
+#include "AreaQuadReplica.h"
 #include "../../Material/Tests/MTestFrame.h"
 
 #include "unx/scene/MaterialModel.h"
@@ -3330,6 +3331,160 @@ void testAnisoFrame(TestFrame& tf, Report& report)
     report(largest > 0.05, "aniso frame: the highlight is visible (largest exposed sun specular)", largest, 0.05);
 }
 
+// A9 area lights for the sheen and anisotropic lobes (AreaQuadrature.hlsli): the GPU mirror against the double replica
+// (Tests/AreaQuadReplica.h; its study AreaQuad.cpp measures the method against independent references) over the study's
+// placements - 4 shapes x 5 directions (one partly below the horizon) x 3 sizes x 3 views - for sheen r 0.2 / 0.5 and
+// anisotropic (r, s) (0.3, 0.8), (0.08, 1).
+void testAreaQuadrature(TestFrame& tf, Report& report)
+{
+    namespace aq = unx::aqr;
+    {
+        scene::Scene s;  // the scene's tables (the sheen table in the coat buffer)
+        s.name = "area quadrature test";
+        scene::Material m;
+        m.sheenColor = { 0.5f, 0.5f, 0.5f };
+        s.materials = { m };
+        scene::Instance a;
+        a.mesh = addPlane(s, 4, 0);
+        s.instances.push_back(a);
+        scene::Camera cam;
+        cam.position = { 0, 1, 3 };
+        cam.forward = { 0, 0, -1 };
+        s.cameras.push_back(cam);
+        tf.setScene(s);
+    }
+    struct Case
+    {
+        aq::Light L;
+        aq::V3 v;
+        double rSheen;
+        aq::Aniso a;
+        double refSheen = 0, refAniso = 0;    // the replica
+        double truthSheen = 0, truthAniso = 0;  // the independent references (1024^2 grids)
+    };
+    std::vector<Case> cases;
+    const double thetas[] = { 0.3, 0.9, 1.35, 1.55, 1.7 }, sizes[] = { 0.05, 0.2, 0.6 }, views[] = { 0.2, 0.9, 1.35 };
+    const double anisoR[2][2] = { { 0.3, 0.8 }, { 0.08, 1.0 } };
+    int idx = 0;
+    for (int sh = 0; sh < 4; ++sh)
+        for (double th : thetas)
+            for (double hs : sizes)
+                for (double vt : views)
+                {
+                    Case c;
+                    c.L.shape = (aq::Shape)sh;
+                    const double phi = 0.7 + sh;
+                    c.L.p = aq::V3{ std::sin(th) * std::cos(phi), std::sin(th) * std::sin(phi), std::cos(th) };
+                    c.L.forward = aq::normalize(c.L.p * -1 + aq::V3{ 0.2, -0.1, 0.1 });
+                    c.L.right = aq::normalize(aq::cross(c.L.forward, aq::V3{ 0.3, 0.9, 0.1 }));
+                    const double ext = 2 * std::tan(hs);
+                    c.L.sx = sh == aq::Rect ? ext : sh == aq::Tube ? 2.5 * ext : 0.5 * ext;
+                    c.L.sy = sh == aq::Rect ? 0.6 * ext : sh == aq::Tube ? 0.15 * ext : 0;
+                    if (sh == aq::Tube) c.L.right = aq::normalize(aq::cross(c.L.p, aq::V3{ 0.1, 0.2, 1 }));
+                    c.v = aq::V3{ std::sin(vt), 0, std::cos(vt) };
+                    c.rSheen = idx % 2 ? 0.5 : 0.2;
+                    const int k = (idx / 2) % 2;
+                    const float2 al = model::anisoAlphas((float)anisoR[k][0], (float)anisoR[k][1]);
+                    c.a.at = al.x, c.a.ab = al.y;
+                    const double rot = 0.5 + k;
+                    c.a.t = aq::V3{ std::cos(rot), std::sin(rot), 0 }, c.a.b = aq::V3{ -std::sin(rot), std::cos(rot), 0 };
+                    c.a.f0 = { 0.9, 0.9, 0.9 };
+                    const float2 AB = model::anisoSpecularAlbedo({ (float)aq::dot(c.v, c.a.t), (float)aq::dot(c.v, c.a.b), (float)c.v.z }, (float)c.a.at, (float)c.a.ab);
+                    c.a.Ea = AB.x + AB.y;
+                    std::vector<aq::Elem> loop, region;
+                    if (aq::outline(c.L, loop) && aq::clipHorizon(loop, region))
+                    {
+                        c.refSheen = aq::sheenQuad(region, c.v, c.rSheen, 6);
+                        c.refAniso = aq::anisoQuad(region, c.v, c.a, 6);
+                    }
+                    c.truthSheen = aq::coneReference(c.L, 1024, [&](aq::V3 l) {
+                        return (double)model::evaluateSheenLobe((float)c.rSheen, { 0, 0, 1 }, { (float)c.v.x, (float)c.v.y, (float)c.v.z }, { (float)l.x, (float)l.y, (float)l.z }) * l.z;
+                    });
+                    c.truthAniso = aq::lobeReference(c.L, c.v, c.a, 1024);
+                    cases.push_back(c);
+                    ++idx;
+                }
+    std::vector<gpu::Light> lights;
+    std::vector<float4> q;
+    auto f3 = [](aq::V3 x) { return float3{ (float)x.x, (float)x.y, (float)x.z }; };
+    for (const Case& c : cases)
+    {
+        gpu::Light l{};
+        l.position = f3(c.L.p);
+        l.typeFlags = 2 + (uint32_t)c.L.shape;
+        l.forward = f3(c.L.forward);
+        l.range = 1e6f;
+        l.right = f3(c.L.right);
+        l.intensity = 1;
+        l.color = { 1, 1, 1 };
+        l.size = { (float)c.L.sx, (float)c.L.sy };
+        lights.push_back(l);
+        q.push_back({ 0, 0, 1, (float)c.rSheen });
+        q.push_back({ (float)c.v.x, (float)c.v.y, (float)c.v.z, (float)c.a.f0.x });
+        q.push_back({ (float)c.a.t.x, (float)c.a.t.y, (float)c.a.t.z, (float)c.a.at });
+        q.push_back({ (float)c.a.b.x, (float)c.a.b.y, (float)c.a.b.z, (float)c.a.ab });
+        q.push_back({ (float)(1 + c.a.f0.x * (1 / c.a.Ea - 1)), 0, 0, 0 });
+    }
+    ComPtr<ID3D12Resource> lightBuf = uploadStatic(tf.device, lights.data(), lights.size() * sizeof(gpu::Light), L"test aq lights");
+    ComPtr<ID3D12Resource> queryBuf = uploadStatic(tf.device, q.data(), q.size() * 16, L"test aq queries");
+    auto srvOf = [&](ID3D12Resource* r, uint32_t count, uint32_t stride) {
+        const uint32_t srv = tf.device.descriptors().allocateResource();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Buffer.NumElements = count;
+        sd.Buffer.StructureByteStride = stride;
+        tf.device.d3d()->CreateShaderResourceView(r, &sd, tf.device.descriptors().resourceCpu(srv));
+        return srv;
+    };
+    const uint32_t lightSrv = srvOf(lightBuf.Get(), (uint32_t)lights.size(), sizeof(gpu::Light)), querySrv = srvOf(queryBuf.Get(), (uint32_t)q.size(), 16);
+    std::shared_ptr<std::vector<uint8_t>> out;
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, 64, 64);
+        BufferRef res = fc.graph.createBuffer({ "m.test.aq results", cases.size() * 16, 16 });
+        ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shading/Tests/AreaQuadProbe");
+        const D3D12_GPU_VIRTUAL_ADDRESS cb = v.frameConstants;
+        const uint32_t count = (uint32_t)cases.size();
+        fc.graph.addPass("m.test.aq", QueueType::Graphics, [&](PassBuilder& b) { b.use(res, Use::UavCompute); },
+                         [=](PassContext& c) {
+                             const uint32_t k[4] = { lightSrv, querySrv, c.uav(res), count };
+                             c.cmd->SetPipelineState(pso);
+                             c.bindFrameConstants(cb);
+                             c.computeConstants(k, 4);
+                             c.cmd->Dispatch((count + 63) / 64, 1, 1);
+                         });
+        out = tf.readbackBuffer(fc, res, cases.size() * 16);
+    });
+    for (uint32_t srv : { lightSrv, querySrv }) tf.device.descriptors().freeResource(srv);
+    std::vector<float4> r(cases.size());
+    std::memcpy(r.data(), out->data(), cases.size() * 16);
+    double peakS = 0, peakA = 0, worstS = 0, worstA = 0;
+    for (const Case& c : cases) peakS = std::max(peakS, c.refSheen), peakA = std::max(peakA, c.refAniso);
+    for (size_t i = 0; i < cases.size(); ++i)
+    {
+        const double es = std::abs(r[i].x - cases[i].refSheen) / std::max(cases[i].refSheen, 1e-3 * peakS);
+        const double ea = std::abs(r[i].y - cases[i].refAniso) / std::max(cases[i].refAniso, 1e-3 * peakA);
+        if ((es > 2e-3 && es > worstS) || (ea > 2e-3 && ea > worstA))
+            logf("  aq case %zu shape %d: sheen gpu %.6g replica %.6g, aniso gpu %.6g replica %.6g\n", i, (int)cases[i].L.shape, r[i].x, cases[i].refSheen, r[i].y, cases[i].refAniso);
+        worstS = std::max(worstS, es), worstA = std::max(worstA, ea);
+    }
+    // accuracy against the independent references, energy-weighted per lobe (the study's measure): sum |gpu - truth| / sum truth
+    double eS = 0, tS = 0, eA = 0, tA = 0, eAn = 0, tAn = 0;
+    for (size_t i = 0; i < cases.size(); ++i)
+    {
+        eS += std::abs(r[i].x - cases[i].truthSheen), tS += cases[i].truthSheen;
+        const bool narrow = cases[i].a.ab < 0.01;
+        (narrow ? eAn : eA) += std::abs(r[i].y - cases[i].truthAniso);
+        (narrow ? tAn : tA) += cases[i].truthAniso;
+    }
+    logf("area quadrature: %zu placements (4 shapes); GPU vs double replica worst: sheen %.3g, anisotropic %.3g (rel. to max(value, 1e-3 peak))\n", cases.size(), worstS, worstA);
+    logf("area quadrature: GPU vs independent references, energy-weighted: sheen %.4f, anisotropic r 0.3 s 0.8 %.4f, r 0.08 s 1 %.4f\n", eS / tS, eA / tA, eAn / tAn);
+    report(worstS <= 2e-3, "area quadrature: sheen over the light, GPU vs double replica (rel.)", worstS, 2e-3);
+    report(eS / tS <= 5e-3, "area quadrature: sheen vs reference, energy-weighted over 180 placements", eS / tS, 5e-3);
+    report(eA / tA <= 5e-3, "area quadrature: anisotropic r 0.3 s 0.8 vs reference, energy-weighted", eA / tA, 5e-3);
+    report(eAn / tAn <= 2e-2, "area quadrature: anisotropic r 0.08 s 1 (alpha_b 0.0064) vs reference, energy-weighted", eAn / tAn, 2e-2);
+}
+
 void testCoatSun(TestFrame& tf, Report& report)
 {
     {
@@ -3443,7 +3598,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, glassJobsOnly = false, preshadeOnly = false, coatOnly = false, sheenOnly = false, anisoOnly = false, warp = false;
+        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, glassJobsOnly = false, preshadeOnly = false, coatOnly = false, sheenOnly = false, anisoOnly = false, areaQuadOnly = false, warp = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -3458,6 +3613,7 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--coat") coatOnly = true;
             if (std::string(argv[i]) == "--sheen") sheenOnly = true;
             if (std::string(argv[i]) == "--aniso") anisoOnly = true;
+            if (std::string(argv[i]) == "--area-quad") areaQuadOnly = true;
             if (std::string(argv[i]) == "--warp") warp = true;  // compute probes only (full frames render black on WARP)
         }
         ComPtr<ID3D12Device> warpDevice;
@@ -3476,6 +3632,12 @@ int main(int argc, char** argv)
         Report report;
         testTable(report);
         TestFrame tf(debugLayer, gpuValidation, warpDevice.Get());
+        if (areaQuadOnly)  // --area-quad: the sheen / anisotropic area-light probe alone
+        {
+            testAreaQuadrature(tf, report);
+            logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
+            return report.failures ? 1 : 0;
+        }
         if (anisoOnly)  // --aniso: the anisotropy frame alone
         {
             testAnisoFrame(tf, report);
@@ -3539,6 +3701,8 @@ int main(int argc, char** argv)
         testSheen(tf, report);
         testSheenFrame(tf, report);
         testAnisoFrame(tf, report);
+        // (testAreaQuadrature: --area-quad until the quadrature is wired into the shading kernels; its alpha_b 0.0064 gate
+        // measures 2.7 % against 2 %)
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }
