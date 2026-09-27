@@ -217,6 +217,18 @@ float shOverflowVisibility(uint2 pixel, uint ordinal, uint overflowHead, inout u
 #endif
 }
 
+// B2: whether this stable area light's specular is in R's result at the pixel (its M path: a = 2), read once per pixel.
+bool shLightSpecularInResult(uint2 pixel, uint lightIndex, float NoV, uint experiment, inout uint mirrorState)
+{
+#if PLANAR
+    return false;
+#else
+    if (!shSpecularInReflections(P[4].x, lightIndex)) return false;
+    if (mirrorState == 0) mirrorState = NoV > 0 && (experiment & 4) == 0 && P[2].z != UNX_NONE && reflectionRadiance(P[2].z, pixel).a > 1.5 ? 2u : 1u;
+    return mirrorState == 2;
+#endif
+}
+
 ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, uint2 gbPacked, float depthValue,
                          uint overflowHead)
 {
@@ -406,11 +418,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         // result is R's M path (a = 2, ReflectionResolve): its one mirror ray sees the analytic emitters. G samples, the
         // planar cameras, the K path and the GI cache hold no emitter radiance (texel squares and one-ray noise of small
         // bright lights: GiTrace), so the base lobe's LTC is M's everywhere else. The coat lobe (gather 1) is always K.
-#if !PLANAR
-        const bool mirrorResult = NoV > 0 && (experiment & 4) == 0 && P[2].z != UNX_NONE && P[4].x != UNX_NONE && reflectionRadiance(P[2].z, pixel).a > 1.5;
-#else
-        const bool mirrorResult = false;
-#endif
+        // Read lazily, at the first stable area light of the list (a value live over the light loop costs occupancy: M's
+        // measurement of hoisting the reflection read, M_STATUS 2026-09-25): 0 = not read yet, 1 = no, 2 = yes.
+        uint mirrorState = 0;
 #if AREA
         // Area lights (AreaLight.hlsli): the shading frame, its horizon-flipped twin for Foliage transmission and the
         // LTC transform of the specular lobe, formed once per pixel.
@@ -463,7 +473,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 if (NoV > 0)
                 {
 #if LAYERED == 1
-                    if (aniso.on && !(mirrorResult && shSpecularInReflections(P[4].x, lightIndex)))
+                    if (aniso.on && !shLightSpecularInResult(pixel, lightIndex, NoV, experiment, mirrorState))
                         radiance += ((cover > 0) ? keep : 1.0) * Lw * shAreaAniso(light, p, aniso.t, aniso.b, n, v, aniso.alpha, f0, 1 + f0 * (1 / (aniso.ab.x + aniso.ab.y) - 1));
 #endif
 #if LAYERED == 2
@@ -475,7 +485,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 // Integrals in order: front diffuse, specular, back (Foliage) -- one inlined evaluator (the diffuse frames
                 // are rotations: closed forms on circular cones).
                 uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
-                const bool specularInReflections = mirrorResult && shSpecularInReflections(P[4].x, lightIndex);  // P[4].x: B2 mask
+                const bool specularInReflections = shLightSpecularInResult(pixel, lightIndex, NoV, experiment, mirrorState);  // P[4].x: B2 mask
                 float scaleBase = 1;
 #if LAYERED == 2
                 scaleBase = keepS;  // (the sheen lobe over area lights: the lobe texture, AreaLobes.hlsl)
