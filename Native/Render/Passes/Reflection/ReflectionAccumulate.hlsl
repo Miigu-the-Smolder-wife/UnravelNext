@@ -73,22 +73,26 @@ void main(uint2 pixel : SV_DispatchThreadID)
     float state = 0;  // diagnostics (flags bit 2): 0 no valid tap, 0.25 behind the camera, 0.5 taps valid with no history, 0.75 window 0, 1 integrated
     if ((flags & 3u) == 0)
     {
-        // The pixel's point one frame ago: barycentric in its triangle, previous-tick vertices.
+        // The pixel's point one frame ago: barycentric in its triangle, previous-tick vertices. An instance that did not
+        // move or deform (deformInstanceStill) keeps the point: no triangle or vertex loads (most pixels of a frame).
         const GpuInstance inst = loadInstance(instance);
-        const GpuMesh mesh = loadMesh(inst.mesh);
-        const uint3 tri = loadClusterTriangle(loadCluster(vc.cluster), visTriangle(visId));
-        const DeformedVertex d0 = deformVertex(inst, mesh, tri.x), d1 = deformVertex(inst, mesh, tri.y), d2 = deformVertex(inst, mesh, tri.z);
-        const float3 e1 = d1.world - d0.world, e2 = d2.world - d0.world, q = s.position - d0.world;
-        const float3 ng = cross(e1, e2);
-        const float area2 = dot(ng, ng);
         float3 prevPosition = s.position;
         float3 prevNormal = s.normal;
-        if (area2 > 1e-20)
+        if (!deformInstanceStill(inst))
         {
-            const float b1 = dot(cross(q, e2), ng) / area2, b2 = dot(cross(e1, q), ng) / area2;
-            prevPosition = d0.prevWorld + (d1.prevWorld - d0.prevWorld) * b1 + (d2.prevWorld - d0.prevWorld) * b2;
-            const float3 ngPrev = cross(d1.prevWorld - d0.prevWorld, d2.prevWorld - d0.prevWorld);
-            if (dot(ngPrev, ngPrev) > 1e-20) prevNormal = normalize(rotateBetween(normalize(ng), normalize(ngPrev), s.normal));
+            const GpuMesh mesh = loadMesh(inst.mesh);
+            const uint3 tri = loadClusterTriangle(loadCluster(vc.cluster), visTriangle(visId));
+            const DeformedVertex d0 = deformVertex(inst, mesh, tri.x), d1 = deformVertex(inst, mesh, tri.y), d2 = deformVertex(inst, mesh, tri.z);
+            const float3 e1 = d1.world - d0.world, e2 = d2.world - d0.world, q = s.position - d0.world;
+            const float3 ng = cross(e1, e2);
+            const float area2 = dot(ng, ng);
+            if (area2 > 1e-20)
+            {
+                const float b1 = dot(cross(q, e2), ng) / area2, b2 = dot(cross(e1, q), ng) / area2;
+                prevPosition = d0.prevWorld + (d1.prevWorld - d0.prevWorld) * b1 + (d2.prevWorld - d0.prevWorld) * b2;
+                const float3 ngPrev = cross(d1.prevWorld - d0.prevWorld, d2.prevWorld - d0.prevWorld);
+                if (dot(ngPrev, ngPrev) > 1e-20) prevNormal = normalize(rotateBetween(normalize(ng), normalize(ngPrev), s.normal));
+            }
         }
         const float4 clip = mul(g_prevViewProj, float4(prevPosition, 1));
         state = 0.25;

@@ -169,6 +169,16 @@ void morphVertex(GpuInstance inst, uint meshVertex, bool previous, inout float3 
     nOut = normalize(n);
 }
 
+// True when deformVertex gives every vertex of the instance prevWorld == world: no morph, no skinning, no wind and the
+// same transform in both ticks. Readers that only need a surface point's previous position (history reprojection) then
+// take the point itself and skip the triangle's vertex loads.
+bool deformInstanceStill(GpuInstance inst)
+{
+    if (inst.morph != UNX_NONE || (inst.flags & (INSTANCE_SKINNED | INSTANCE_WIND)) != 0) return false;
+    return all(inst.objectToWorld[0] == inst.prevObjectToWorld[0]) && all(inst.objectToWorld[1] == inst.prevObjectToWorld[1]) &&
+           all(inst.objectToWorld[2] == inst.prevObjectToWorld[2]);
+}
+
 DeformedVertex deformVertex(GpuInstance inst, GpuMesh mesh, uint meshVertex)
 {
     const VertexData v = loadVertex(mesh, meshVertex);

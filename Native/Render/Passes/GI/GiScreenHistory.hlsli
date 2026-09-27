@@ -31,6 +31,7 @@ void giPreviousSurface(uint visIdSrv, uint visibleClustersSrv, uint2 pixel, floa
     const GpuVisibleCluster vc = loadVisibleCluster(visibleClustersSrv, visVisibleCluster(visId));
     instance = vc.instance + 1;
     const GpuInstance inst = loadInstance(vc.instance);
+    if (deformInstanceStill(inst)) return;  // the point itself (no vertex loads)
     const GpuMesh mesh = loadMesh(inst.mesh);
     const uint3 tri = loadClusterTriangle(loadCluster(vc.cluster), visTriangle(visId));
     const DeformedVertex d0 = deformVertex(inst, mesh, tri.x), d1 = deformVertex(inst, mesh, tri.y), d2 = deformVertex(inst, mesh, tri.z);
