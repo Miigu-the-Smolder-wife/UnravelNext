@@ -63,6 +63,9 @@ void shadingComposite(FramePassContext& fc, ViewResources& view);               
 void accelerationStructures(FramePassContext& fc);                // static/dynamic TLAS, BLAS refits -> FrameResources
 void globalIllumination(FramePassContext& fc, ViewResources& main);  // cache update rays, screen probes, near occlusion
 void reflections(FramePassContext& fc, ViewResources& main);      // K/G/M rays, planar mirrors (via renderView)
+// A secondary view's per-pixel GI cache irradiance (view.giIrradiance: r.gi.screen and its filter, as the main view's),
+// between its material resolve and its shading (FrameServices::renderView); nothing before GI's first frame.
+void giScreenIrradiance(FramePassContext& fc, ViewResources& view);
 // R-W2 / R-2: refraction rays for a job list (FrameServices::traceRefractions, its format); declares its passes.
 void refraction(FramePassContext& fc, BufferRef jobs, BufferRef results, uint32_t maxJobs);
 

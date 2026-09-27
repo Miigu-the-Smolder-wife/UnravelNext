@@ -8,5 +8,6 @@ namespace unx::render::tracks
 void accelerationStructures(FramePassContext&) { pending("R.accelerationStructures (track disabled in this build)"); }
 void globalIllumination(FramePassContext&, ViewResources&) { pending("R.globalIllumination (track disabled in this build)"); }
 void reflections(FramePassContext&, ViewResources&) { pending("R.reflections (track disabled in this build)"); }
+void giScreenIrradiance(FramePassContext&, ViewResources&) {}
 void refraction(FramePassContext&, BufferRef, BufferRef, uint32_t) { pending("R.refraction (track disabled in this build)"); }
 } // namespace unx::render::tracks

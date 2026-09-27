@@ -14,4 +14,10 @@ void globalIllumination(FramePassContext& fc, ViewResources& main)
     }
     gi::GiSystem::get(fc).record(fc, main, rt::RayScene::get(fc));
 }
+
+void giScreenIrradiance(FramePassContext& fc, ViewResources& view)
+{
+    if (!fc.trackState) return;
+    if (gi::GiSystem* gi = gi::GiSystem::find(*fc.trackState)) gi->recordSecondaryScreen(fc, view);
+}
 } // namespace unx::render::tracks

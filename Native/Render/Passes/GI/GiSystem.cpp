@@ -253,6 +253,67 @@ GiSystem::~GiSystem()
     m_device.deferRelease(m_dispatchSignature);
 }
 
+// r.gi.screen (GiScreenIrradiance.hlsl) and r.gi.screen.filter (GiScreenFilter.hlsl) of a view: its per-pixel cache
+// irradiance into view.giIrradiance (the filtered texture; the unfiltered one is returned for the lookup-stats gate).
+// The main view, and the planar reflection views (recordSecondaryScreen: the same lookup and filter as the main view,
+// where they looked the cache up per pixel with the plain trilinear rule and no filter). Secondary views' passes carry
+// ".planar" (their cost is the reflection budget's, as M's planar passes).
+TextureRef GiSystem::recordScreen(FramePassContext& fc, ViewResources& view, BufferRef cache)
+{
+    RenderGraph& g = fc.graph;
+    const GiSettings& s = m_settings;
+    ShaderLibrary& shaders = fc.shaders;
+    const bool planar = view.view.kind != gpu::ViewKind::Main;
+    const TextureRef depth = view.depth, gbuffer = view.gbuffer;
+    const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = view.frameConstants;
+    const uint32_t width = view.view.width, height = view.view.height;
+    const TextureRef screen = g.createTexture({ "GI screen irradiance (unfiltered)", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    g.addPass(planar ? "r.gi.screen.planar" : "r.gi.screen", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(cache, Use::SrvCompute);
+                  b.use(depth, Use::SrvCompute);
+                  b.use(gbuffer, Use::SrvCompute);
+                  b.use(screen, Use::UavCompute);
+              },
+              [&shaders, cache, depth, gbuffer, screen, frameConstants, width, height](PassContext& c) {
+                  const uint32_t k[8] = { c.srv(cache), c.srv(depth), c.srv(gbuffer), c.uav(screen), width, height, 0, 0 };
+                  c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiScreenIrradiance"));
+                  c.computeConstants(k, 8);
+                  c.bindFrameConstants(frameConstants);
+                  c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+              });
+    view.giIrradiance = screen;
+    if (s.screenFilterCells > 0)
+    {
+        const TextureRef filtered = g.createTexture({ "GI screen irradiance", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        const float pixelAngle = 2.0f * std::tan(view.view.verticalFov * 0.5f) / (float)height;
+        g.addPass(planar ? "r.gi.screen.filter.planar" : "r.gi.screen.filter", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(screen, Use::SrvCompute);
+                      b.use(depth, Use::SrvCompute);
+                      b.use(gbuffer, Use::SrvCompute);
+                      b.use(cache, Use::SrvCompute);
+                      b.use(filtered, Use::UavCompute);
+                  },
+                  [&shaders, screen, depth, gbuffer, cache, filtered, frameConstants, width, height, pixelAngle, s](PassContext& c) {
+                      const uint32_t k[12] = { c.srv(screen), c.srv(depth), c.srv(gbuffer), c.uav(filtered), width, height, c.srv(cache),
+                                               asU(pixelAngle), asU(s.screenFilterCells), 0, 0, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiScreenFilter"));
+                      c.computeConstants(k, 12);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  });
+        view.giIrradiance = filtered;
+    }
+    return screen;
+}
+
+void GiSystem::recordSecondaryScreen(FramePassContext& fc, ViewResources& view)
+{
+    if (!fc.resources.giCache.valid() || !view.depth.valid() || !view.gbuffer.valid()) return;  // (no cache this frame yet: the view keeps its direct lookups)
+    recordScreen(fc, view, fc.resources.giCache);
+}
+
 void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& rays)
 {
     RenderGraph& g = fc.graph;
@@ -624,48 +685,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     // M's per-pixel cache irradiance (front side) as a pass of its own (GiScreenIrradiance.hlsl; R_STATUS 0, GI tile path
     // verdict): M reads view.giIrradiance once instead of the lookup inside its shading kernel. Culled while nothing reads it.
     // Then the edge-preserving spatial filter over the cells' blotches (GiScreenFilter.hlsl) makes view.giIrradiance.
-    TextureRef screenRaw;
-    {
-        const TextureRef screen = g.createTexture({ "GI screen irradiance (unfiltered)", main.view.width, main.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
-        g.addPass("r.gi.screen", QueueType::Compute,
-                  [&](PassBuilder& b) {
-                      b.use(cache, Use::SrvCompute);
-                      b.use(depth, Use::SrvCompute);
-                      b.use(gbuffer, Use::SrvCompute);
-                      b.use(screen, Use::UavCompute);
-                  },
-                  [&shaders, cache, depth, gbuffer, screen, frameConstants, main](PassContext& c) {
-                      const uint32_t k[8] = { c.srv(cache), c.srv(depth), c.srv(gbuffer), c.uav(screen), main.view.width, main.view.height, 0, 0 };
-                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiScreenIrradiance"));
-                      c.computeConstants(k, 8);
-                      c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch((main.view.width + 7) / 8, (main.view.height + 7) / 8, 1);
-                  });
-        screenRaw = screen;
-        main.giIrradiance = screen;
-        if (s.screenFilterCells > 0)
-        {
-            const TextureRef filtered = g.createTexture({ "GI screen irradiance", main.view.width, main.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
-            const float pixelAngle = 2.0f * std::tan(main.view.verticalFov * 0.5f) / (float)main.view.height;
-            g.addPass("r.gi.screen.filter", QueueType::Compute,
-                      [&](PassBuilder& b) {
-                          b.use(screen, Use::SrvCompute);
-                          b.use(depth, Use::SrvCompute);
-                          b.use(gbuffer, Use::SrvCompute);
-                          b.use(cache, Use::SrvCompute);
-                          b.use(filtered, Use::UavCompute);
-                      },
-                      [&shaders, screen, depth, gbuffer, cache, filtered, frameConstants, main, pixelAngle, s](PassContext& c) {
-                          const uint32_t k[12] = { c.srv(screen), c.srv(depth), c.srv(gbuffer), c.uav(filtered), main.view.width, main.view.height, c.srv(cache),
-                                                   asU(pixelAngle), asU(s.screenFilterCells), 0, 0, 0 };
-                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiScreenFilter"));
-                          c.computeConstants(k, 12);
-                          c.bindFrameConstants(frameConstants);
-                          c.cmd->Dispatch((main.view.width + 7) / 8, (main.view.height + 7) / 8, 1);
-                      });
-            main.giIrradiance = filtered;
-        }
-    }
+    const TextureRef screenRaw = recordScreen(fc, main, cache);
     if (m_lookupStatsOn)
     {
         if (!m_lookupStats)

@@ -39,8 +39,9 @@
 // P[7] = { edge radiance UAV (RGBA16F), R's screen probe maps (K path; UNX_NONE = absent), S's shadow overflow list (raw;
 //        FALLBACK: a raw buffer holding this frame's ShadowSrvs), V's water layer vis ids (v1.75; UNX_NONE = none): a
 //        pixel under a water-layer stream surface keeps its radiance too, W's refraction source (tracks::water) }
-// P[9].w R's per-pixel front GI irradiance (view.giIrradiance, RGBA16F: rgb x exposure, a = cache data; UNX_NONE: none,
-//        planar views): replaces the cache lookup in the probe gather (Foliage keeps the cache for its back side)
+// P[9].w R's per-pixel front GI irradiance (view.giIrradiance, RGBA16F: rgb x exposure, a = cache data; UNX_NONE: none):
+//        replaces the cache lookup in the probe gather (main view) or the direct lookup (planar views: R's
+//        r.gi.screen.planar); Foliage keeps the cache for its back side
 // P[9].z A9 area-light lobe texture (RGBA16F UAV, exposed radiance; AreaLobes.hlsl writes it, the LAYERED variants with
 //        AREA read it; UNX_NONE = none)
 // P[9].y A9 anisotropy word (Resolve.hlsl; UNX_NONE = no anisotropic material): read by the LAYERED variants, whose
@@ -635,7 +636,15 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         gi.cache = P[2].w;
         gi.hash = P[2].w;
         gi.pad0 = gi.pad1 = 0;
-        irradiance = giCacheIrradiance(gi, worldPos, nv);
+        // R's per-pixel front irradiance of this view (P[9].w: r.gi.screen.planar and its filter, the main view's lookup
+        // and filter), else the direct trilinear lookup
+        float4 e = 0;
+        if (P[9].w != UNX_NONE)
+        {
+            Texture2D<float4> screenIrradiance = ResourceDescriptorHeap[P[9].w];
+            e = screenIrradiance[pixel];
+        }
+        irradiance = e.a > 0 ? e.rgb / g_exposure : giCacheIrradiance(gi, worldPos, nv);
         if (foliage) irradianceBack = giCacheIrradiance(gi, worldPos, -nv);
         if (NoV > 0) incident = giCacheRadiance(gi, worldPos, n, r, halfAngle);  // looked up in this surface's normal class
 #if LAYERED == 1

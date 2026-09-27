@@ -260,6 +260,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
         tracks::visibility(c, view);
         tracks::decals(c, view);
         tracks::materialResolve(c, view);
+        tracks::giScreenIrradiance(c, view);  // R: the view's per-pixel cache irradiance (planar views, as the main view's)
         tracks::shadowVisibility(c, view);
         tracks::shading(c, view);
         return view;

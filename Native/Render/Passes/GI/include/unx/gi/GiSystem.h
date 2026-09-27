@@ -70,6 +70,9 @@ public:
 
     // Declares the GI passes of the main view and creates view.screenProbes; FrameResources::giCache is imported here.
     void record(FramePassContext& fc, ViewResources& main, rt::RayScene& rays);
+    // A secondary (planar reflection) view's per-pixel cache irradiance and its filter into view.giIrradiance, after the
+    // view's material resolve (depth, G-buffer) and after record (this frame's cache); nothing without the cache.
+    void recordSecondaryScreen(FramePassContext& fc, ViewResources& view);
 
     // Constant sky radiance (nits) and sun illuminance (lux) for escaping rays instead of the atmosphere (tests, and
     // until S's atmosphere header is committed: GiTrace variant SKY1).
@@ -114,6 +117,7 @@ private:
     uint32_t m_probeHistoryX = 0, m_probeHistoryY = 0, m_probeHistoryParity = 0, m_probeHistoryRevision = 0;
     bool m_probeHistoryReset = true;
     void ensureProbeHistory(uint32_t probesX, uint32_t probesY);
+    TextureRef recordScreen(FramePassContext& fc, ViewResources& view, BufferRef cache);
     // Change boxes for GiInvalidate (B3): a mapped upload ring, one slot per frame of kChangeSlots, raw SRVs.
     static constexpr uint32_t kChangeSlots = 4, kChangeBoxesMax = 256, kChangeSlotBytes = 16 + kChangeBoxesMax * 32 + 240;
     ComPtr<ID3D12Resource> m_changeRing;
