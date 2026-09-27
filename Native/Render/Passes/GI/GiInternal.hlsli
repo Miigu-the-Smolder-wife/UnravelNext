@@ -114,6 +114,8 @@ static bool g_giKeepReads = true;  // per thread; false: lookups read only (attr
 // Per thread: the trilinear weight of young entries (GiInternal giYoung: still in their Jacobi phase) among the RW lookups'
 // reads since the caller zeroed it (GiTrace's bounce fallback: whether the irradiance it read is a converged estimate).
 static float g_giReadYoung = 0;
+static bool g_giTrackYoung = false;  // per thread: accumulate g_giReadYoung (GiTrace's bounce fallback sets it around its read;
+                                     // the other RW readers - reflection hits - do not use it and skip its two loads per entry)
 // The entry's Jacobi length (GiIntegrate): updates until the multi-bounce iteration's residual s^J is below
 // GI_JACOBI_RESIDUAL, s = the share of the entry's irradiance its rays read from other cells (bounce light). The fixed
 // gi.jacobi_updates (8, rho^8 < 0.4 % at albedo 0.5) is the minimum: a white-tiled room (s ~ 0.9) needs 53. After the
@@ -131,9 +133,12 @@ uint giJacobiLength(B b, GiHeader h, uint entry)
 }
 void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w)
 {
-    const uint a = h.offSh + entry * GI_SH_STRIDE;
-    const uint history = b.Load(a + GI_SH_EPOCH) == h.epoch ? b.Load(a + GI_SH_HISTORY) : 0u;
-    if ((history & 0xFFFu) < max((history >> 24) * 16u, h.jacobiUpdates)) g_giReadYoung += w;  // giYoung
+    if (g_giTrackYoung)
+    {
+        const uint a = h.offSh + entry * GI_SH_STRIDE;
+        const uint history = b.Load(a + GI_SH_EPOCH) == h.epoch ? b.Load(a + GI_SH_HISTORY) : 0u;
+        if ((history & 0xFFFu) < max((history >> 24) * 16u, h.jacobiUpdates)) g_giReadYoung += w;  // giYoung
+    }
     if (!g_giKeepReads) return;
     if (b.Load(h.offHitStamp + entry * 4) == h.frame) return;
     giTouch(b, h, entry);

@@ -176,11 +176,13 @@ void GiTraceGen()
             if (!known)
             {
                 g_giReadYoung = 0;
+                g_giTrackYoung = true;
                 float3 sumE, sumL;
                 giCacheLevels(b, h, s.position, s.normal, mirror, true, bounceLevel, sumE, sumL, fallbackWeight);  // coarser, then finer levels
                 irradiance = fallbackWeight > 0 ? sumE / fallbackWeight : 0;
                 specular = fallbackWeight > 0 ? sumL / fallbackWeight : 0;
                 fallbackYoung = g_giReadYoung;
+                g_giTrackYoung = false;
             }
             const float3 l = normalize(g_sunDirection);
             const float cosSun = dot(s.normal, l);
