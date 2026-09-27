@@ -1936,13 +1936,14 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     // clusters in band A lists).
     const bool depthOut = request.depthTarget.valid();
     ID3D12PipelineState* pso[kBandLists];
+    const bool out64 = fc.scene.maxClusterVertices() <= 64 && fc.scene.maxClusterTriangles() <= 64;  // OUT64
     for (uint32_t l = 0; l < kBandLists; ++l)
     {
         const bool back = request.cull == D3D12_CULL_MODE_BACK && (l == kListABack || l == kListAAlphaBack);
         MeshPipelineDesc d;
         // DEPTH1: no pixel kernel reads the attributes (hardware depth only), so the kernel exports none of them
         d.meshShader = std::string("Passes/Visibility/DepthRaster.ms.TILE") + (atlas ? "2" : request.tileLocal ? "1" : "0") +
-                       (request.pixelKernel.empty() ? ".DEPTH1" : ".DEPTH0");
+                       (request.pixelKernel.empty() ? ".DEPTH1" : ".DEPTH0") + (out64 ? ".OUT64" : ".OUT128");
         d.pixelShader = request.pixelKernel;
         d.depthFormat = depthOut ? depthFormat : DXGI_FORMAT_UNKNOWN;
         d.depthWrite = depthOut;
@@ -1950,7 +1951,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
         d.conservative = request.conservative;
         pso[l] = fc.shaders.mesh("v.depth|" + request.pixelKernel + (back ? "|back" : "|none") +
                                      (depthOut ? (depthFormat == DXGI_FORMAT_D16_UNORM ? "|d16" : "|d32") : "|uav") + (request.conservative ? "|cons" : "") +
-                                     (atlas ? "|atlas" : request.tileLocal ? "|tile" : ""), d);
+                                     (atlas ? "|atlas" : request.tileLocal ? "|tile" : "") + (out64 ? "|out64" : ""), d);
     }
     std::vector<D3D12_VIEWPORT> viewports;
     std::vector<D3D12_RECT> scissors;

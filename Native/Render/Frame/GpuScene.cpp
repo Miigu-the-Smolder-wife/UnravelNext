@@ -778,10 +778,21 @@ void GpuScene::setMaterials(std::span<const uint32_t> indices)
     m_materialBuffer = createStructured(m_materials.data(), sizeof(gpu::Material), m_materials.size(), L"scene materials");
 }
 
+void GpuScene::noteClusterSizes(const ClusterData& c)
+{
+    for (const gpu::Cluster& k : c.clusters)
+    {
+        m_maxClusterVertices = std::max(m_maxClusterVertices, k.counts & 0xFFu);
+        m_maxClusterTriangles = std::max(m_maxClusterTriangles, (k.counts >> 8) & 0xFFu);
+    }
+}
+
 void GpuScene::setClusters(ClusterData data)
 {
     m_clusterData = std::move(data);
     const ClusterData& c = m_clusterData;
+    m_maxClusterVertices = m_maxClusterTriangles = 0;
+    noteClusterSizes(c);
     for (Buffer* b : { &m_clusterBuffer, &m_lodLevelBuffer, &m_lodLevelClusterBuffer, &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer }) release(*b);
     for (auto& [name, b] : m_named) release(b);
     m_named.clear();
@@ -1289,6 +1300,7 @@ uint32_t GpuScene::addRuntimeMesh(const scene::Mesh& m, const ClusterData& cd)
     }
     if (depth > kRuntimeMaxDepth) fail("GpuScene::addRuntimeMesh: hierarchy depth %u > %u (build runtime meshes without simplification)", depth, kRuntimeMaxDepth);
     const uint32_t n = (uint32_t)m.positions.size();
+    noteClusterSizes(cd);
     RuntimeMesh r;
     struct Want { uint32_t target, count; uint32_t* first; };
     Want wants[] = { { RtVertices, n, &r.vertices }, { RtIndices, (uint32_t)m.indices.size(), &r.indices }, { RtSubmeshes, (uint32_t)m.submeshes.size(), &r.submeshes },

@@ -80,6 +80,10 @@ public:
     // Installs V's cluster hierarchy (replaces the placeholder buffers). A CPU copy is kept for readers (R: BLAS inputs).
     void setClusters(ClusterData clusters);
     const ClusterData& clusters() const { return m_clusterData; }
+    // The largest vertex and triangle count of any installed cluster (setClusters and runtime meshes; never decreases
+    // until the next setClusters): V's depth raster declares 64 outputs instead of 128 when both fit.
+    uint32_t maxClusterVertices() const { return m_maxClusterVertices; }
+    uint32_t maxClusterTriangles() const { return m_maxClusterTriangles; }
     // Scene indices and counts of FrameConstants.
     void fill(gpu::FrameConstants& constants) const;
 
@@ -280,6 +284,8 @@ private:
     float morphRadiusOf(uint32_t instance) const;
     std::vector<std::pair<std::string, Buffer>> m_named;
     ClusterData m_clusterData;
+    uint32_t m_maxClusterVertices = 0, m_maxClusterTriangles = 0;
+    void noteClusterSizes(const ClusterData& c);
     uint32_t m_revision = 0;
 
     // Per-frame updates: CPU mirrors of the palettes, the frame of each instance's latest change, the instances changed

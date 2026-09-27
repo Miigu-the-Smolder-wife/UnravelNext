@@ -1,5 +1,5 @@
 // unx-kernel: ms_6_6 main
-// unx-variants: TILE=0,1,2 DEPTH=0,1
+// unx-variants: TILE=0,1,2 DEPTH=0,1 OUT=64,128
 // Depth raster service (FrameServices::rasterizeDepth, INTERFACES 5.3): one mesh-shader group per draw-list entry,
 // any number of views (the visible entry carries the view). Outputs match struct DepthRasterPixel (DepthRaster.hlsli)
 // for the requester's pixel kernel: position, uv (alpha test), userData, material, instance.
@@ -16,6 +16,11 @@
 //   P[1] phase (always 1: the service culls in one phase), list capacity, views SRV, viewport per view (0 = one viewport)
 //   P[2] tile pairs SRV (uint3, TILE=1,2), atlas slots SRV (raw, TILE=2), atlas tiles per row, atlas size (w | h << 16)
 #include "Passes/Visibility/VisibilityCommon.hlsli"
+
+// OUT: the declared output arrays (vertices, primitives). The service picks 64 when every installed cluster has at most
+// 64 vertices and 64 triangles (GpuScene::maxClusterVertices/Triangles; visibility.cluster_vertices/triangles = 64): the
+// group's output allocation halves, so an SM holds more groups (the raster is bound by that, not by the culled triangles).
+#define MS_OUT OUT
 
 struct VertexOut
 {
@@ -42,13 +47,13 @@ struct PrimitiveOut
 };
 
 #if TILE
-groupshared float3 g_pixel[128];  // viewport-relative pixel position per vertex, z = 1 in front of the eye
+groupshared float3 g_pixel[MS_OUT];  // viewport-relative pixel position per vertex, z = 1 in front of the eye
 #endif
 
 [outputtopology("triangle")]
 [numthreads(64, 1, 1)]
-void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices VertexOut verts[128], out primitives PrimitiveOut prims[128],
-          out indices uint3 tris[128])
+void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices VertexOut verts[MS_OUT], out primitives PrimitiveOut prims[MS_OUT],
+          out indices uint3 tris[MS_OUT])
 {
     ByteAddressBuffer state = ResourceDescriptorHeap[P[0].z];
     ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].y];
@@ -73,7 +78,8 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     const GpuMesh mesh = loadMesh(inst.mesh);
     const GpuCluster cl = loadCluster(entry.y & 0xFFFFFFu);
     const uint material = clusterMaterial(inst, cl);
-    const uint vertexCount = valid ? clusterVertexCount(cl) : 0, triangleCount = valid ? clusterTriangleCount(cl) : 0;
+    // (the CPU picks OUT64 only when every cluster fits; the clamp only keeps an output count within the declaration)
+    const uint vertexCount = valid ? min(clusterVertexCount(cl), MS_OUT) : 0, triangleCount = valid ? min(clusterTriangleCount(cl), MS_OUT) : 0;
 #if TILE
     // Tile rectangle in viewport pixels [lo, hi) and as NDC bounds (y up: top = 1 - 2 lo.y / H).
     const float2 lo = float2(pair.y & 0xFFFFu, pair.y >> 16) * v.tilePx;
