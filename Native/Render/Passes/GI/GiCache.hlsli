@@ -301,8 +301,13 @@ float3 giShIrradiance(B b, GiHeader h, uint entry, float3 n, out float sunVisibi
 // Read hook of the lookups below, per contributing entry. Read-only readers (M's shading) do nothing; R's ray hits read
 // through the RW cache and keep what they read alive and requested (GiInternal.hlsli): an entry only readers see must not
 // be left at its first, unconverged update. w = the entry's trilinear weight in the lookup.
-void giKeepRead(ByteAddressBuffer b, GiHeader h, uint entry, float w) {}
-void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w);
+void giKeepRead(ByteAddressBuffer b, GiHeader h, uint entry, float w, bool known = false) {}
+void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w, bool known = false);
+// A lookup's own cell, whose entry the caller has just found or created (giFindOrCreate: reflection hits): the corner
+// with this key takes g_giKnownEntry instead of probing the table again (the same entry - or a pending / new one, which
+// has no update and is skipped either way), per thread; 0 = none (a key always has bit 63 set).
+static uint64_t g_giKnownKey = 0;
+static uint g_giKnownEntry = 0;
 
 // One level's trilinear accumulation over the 8 cells of the point (entries that exist and have been updated).
 template <typename B>
@@ -319,7 +324,9 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
     [loop] for (uint k = 0; k < 8; ++k)
     {
         const int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
-        const uint entry = giFind(b, h, giKey(level, nc, c0 + o));
+        const uint64_t key = giKey(level, nc, c0 + o);
+        const bool known = key == g_giKnownKey;  // the caller's own cell (giFindOrCreate just returned its entry)
+        const uint entry = known ? g_giKnownEntry : giFind(b, h, key);
         if (entry == GI_ENTRY_PENDING) continue;
         const uint updates = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES);
         if (updates == 0) continue;  // no information yet
@@ -338,7 +345,7 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
             const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
             l = w * giTexelRadianceCone(b, h, entry, giHemiOctEncode(local), cone, emitters);
         }
-        giKeepRead(b, h, entry, w);
+        giKeepRead(b, h, entry, w, known);  // (known: touched and requested by the caller already)
         if (seen)
         {
             sumE += e;
@@ -374,11 +381,27 @@ void giCacheLevels(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, 
     const uint own = giLevel(h, worldPos), first = max(own, minLevel);
     float3 e = 0, l = 0;
     float w = 0;
-    uint level = first;
-    [loop] for (uint attempt = 0; attempt < GI_LEVEL_CLIMB && w <= 0 && level <= h.maxLevel; ++attempt, ++level)
-        giAccumulateLevel(b, h, worldPos, normal, dir, wantRadiance, nc, level, e, l, w, cone, emitters);
-    [loop] for (uint finer = first; w <= 0 && finer > own && first - finer < GI_LEVEL_CLIMB; --finer)
-        giAccumulateLevel(b, h, worldPos, normal, dir, wantRadiance, nc, finer - 1, e, l, w, cone, emitters);
+    // One loop over the same level sequence as a climb loop followed by a descent loop (the climb stops for good once its
+    // condition fails: attempt and level only grow, and w > 0 stops the descent too): one inlined copy of the corner walk.
+    uint attempt = 0, level = first, finer = first;
+    [loop] for (uint guard = 0; guard < 2 * GI_LEVEL_CLIMB; ++guard)
+    {
+        uint at;
+        if (attempt < GI_LEVEL_CLIMB && w <= 0 && level <= h.maxLevel)
+        {
+            at = level;
+            ++attempt;
+            ++level;
+        }
+        else if (w <= 0 && finer > own && first - finer < GI_LEVEL_CLIMB)
+        {
+            at = finer - 1;
+            --finer;
+        }
+        else
+            break;
+        giAccumulateLevel(b, h, worldPos, normal, dir, wantRadiance, nc, at, e, l, w, cone, emitters);
+    }
     sumE = e;
     sumL = l;
     weight = w;

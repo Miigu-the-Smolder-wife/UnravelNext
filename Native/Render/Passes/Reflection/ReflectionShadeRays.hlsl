@@ -7,6 +7,7 @@
 // a region that needs the penumbra filter keeps it apart too and queues the filter (ReflectionPenumbra: the same
 // estimator in dense waves). Root constants: ReflectionRay.hlsli.
 #define REFL_DEFER_PENUMBRA 1
+#define REFL_CHOICE_GIVEN 1  // the local light chosen by ReflectionLocalShadow (its value words)
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionShade.hlsli"
 
@@ -51,7 +52,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         hit.barycentrics = reflUnpackBarycentrics(rays.Load(reflRaysBaryOffset(capacity, slot)));
         hit.pad = 0;
         const ReflHitShade o = reflShadeHit(rtSceneSrvs(P[6], P[7]), cache, h, hit, reflRayOrigin(j.s), dir, j.coneWidth, j.coneSpread, reflLocalSeed(j, owner >> 28),
-                                            ((record.x >> 30) & 1u) != 0);
+                                            ((record.x >> 30) & 1u) != 0, rays.Load2(valueOffset));  // the choice ReflectionLocalShadow stored
         radiance = o.radiance;
         distanceToHit = hit.t;
         motion = o.motion;

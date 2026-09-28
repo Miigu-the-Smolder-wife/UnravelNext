@@ -85,8 +85,10 @@ ShadowSrvs reflShadowSrvs()
 // Local lights (HitLocalLights.hlsli): one next-event sample drawn with localSeed; its visibility is localVisible (the
 // compute path: ReflectionLocalShadow traced it before, same seed and hit point) or, with REFL_LOCAL_TRACE (the ray
 // generation paths), traced here. Lights that cast no shadow: visible.
+// localChoice: the light ReflectionLocalShadow chose for this hit (rtPackLocalChoice; x = REFL_NO_CHOICE: choose here).
+#define REFL_NO_CHOICE 0x7FFFFFFFu
 ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RtHit hit, float3 origin, float3 direction, float coneWidth,
-                          float coneSpread, uint localSeed, bool localVisible)
+                          float coneSpread, uint localSeed, bool localVisible, uint2 localChoice = uint2(REFL_NO_CHOICE, 0))
 {
     ReflHitShade o;
     o.radiance = o.sunTerm = o.shadowOrigin = 0;
@@ -138,7 +140,14 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     RtHitLighting L;
     L.irradiance = L.specularRadiance = L.local = 0;
     {
-        const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(localSeed), giUnit(localSeed + 1), giUnit(localSeed + 2), footprint);
+        RtLocalChoice choice;
+#if REFL_CHOICE_GIVEN
+        choice = rtUnpackLocalChoice(localChoice);  // (r.refl.shade: ReflectionLocalShadow chose for every hit)
+#else
+        if (localChoice.x == REFL_NO_CHOICE) choice = rtLocalLightChoose(scene, s.position, giUnit(localSeed));
+        else choice = rtUnpackLocalChoice(localChoice);
+#endif
+        const RtLocalSample ls = rtLocalLightFinish(scene, choice, s.position, giUnit(localSeed + 1), giUnit(localSeed + 2), footprint);
         if (ls.valid)
         {
             const float3 f = rtLocalLightBrdfCos(m, s.normal, -direction, ls.wi, false);
@@ -156,7 +165,10 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
         if ((experiment & 256) == 0)  // 256: reflection hits read the cache only (the estimator's bias apart from cache feedback)
         {
             bool created;
-            const uint e = giFindOrCreate(cache, h, giSurfaceKey(h, s.position, s.normal, footprintLevel), giAnchorAtHit(h, s.position, direction), s.normal, created);
+            const uint64_t key = giSurfaceKey(h, s.position, s.normal, footprintLevel);
+            const uint e = giFindOrCreate(cache, h, key, giAnchorAtHit(h, s.position, direction), s.normal, created);
+            g_giKnownKey = key;  // giCacheLevels below: the corner with this key takes e (GiCache.hlsli)
+            g_giKnownEntry = e;
             if (e != GI_ENTRY_PENDING)
             {
                 if (cache.Load(h.offHitStamp + e * 4) != h.frame)  // (stamped this frame: touched and requested already, giKeepRead)

@@ -37,7 +37,12 @@ void ReflectionLocalShadowGen()
     // rebuilt, so hits whose sample casts no shadow skip the rebuild.
     const float3 origin = reflRayOrigin(j.s);
     const uint seed = reflLocalSeed(j, owner >> 28);
-    const RtLocalSample ls = rtLocalLightSample(scene, origin + dir * hit.t, giUnit(seed), giUnit(seed + 1), giUnit(seed + 2), 0);  // the choice only
+    const float3 x = origin + dir * hit.t;
+    const RtLocalChoice choice = rtLocalLightChoose(scene, x, giUnit(seed));
+    // The choice to the shading pass through the slot's value words (not written before r.refl.shade stores the value):
+    // it draws on the same light without walking the cell's lights again (ReflectionShade.hlsli).
+    rays.Store2(reflRaysValueOffset(capacity, slot), rtPackLocalChoice(choice));
+    const RtLocalSample ls = rtLocalLightFinish(scene, choice, x, giUnit(seed + 1), giUnit(seed + 2), 0);  // (visibility: the footprint does not matter)
     if (!ls.valid || !ls.castShadow) return;
     const RtSurface s = rtSurface(scene, hit, origin, dir);
     // A sample below the hit's shading normal adds nothing to the hit (rtLocalLightBrdfCos is 0 for N.L <= 0 unless the

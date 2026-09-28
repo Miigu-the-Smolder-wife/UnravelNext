@@ -140,7 +140,7 @@ uint giJacobiLength(B b, GiHeader h, uint entry)
     const uint history = b.Load(a + GI_SH_EPOCH) == h.epoch ? b.Load(a + GI_SH_HISTORY) : 0u;
     return max((history >> 24) * 16u, h.jacobiUpdates);
 }
-void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w)
+void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w, bool known)
 {
     if (g_giTrackYoung)
     {
@@ -148,7 +148,7 @@ void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w)
         const uint history = b.Load(a + GI_SH_EPOCH) == h.epoch ? b.Load(a + GI_SH_HISTORY) : 0u;
         if ((history & 0xFFFu) < max((history >> 24) * 16u, h.jacobiUpdates)) g_giReadYoung += w;  // giYoung
     }
-    if (!g_giKeepReads) return;
+    if (!g_giKeepReads || known) return;  // (known: the caller stamped it this frame)
     if (b.Load(h.offHitStamp + entry * 4) == h.frame) return;
     giTouch(b, h, entry);
     giRequestHit(b, h, entry);

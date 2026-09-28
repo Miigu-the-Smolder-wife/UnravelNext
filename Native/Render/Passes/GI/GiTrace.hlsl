@@ -153,7 +153,10 @@ void GiTraceGen()
             float3 irradiance = 0, specular = 0;
             bool created;
             const uint bounceLevel = giLevelForSize(h, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z));
-            const uint e = giFindOrCreate(b, h, giSurfaceKey(h, s.position, s.normal, bounceLevel), giAnchorAtHit(h, s.position, r.Direction), s.normal, created);
+            const uint64_t bounceKey = giSurfaceKey(h, s.position, s.normal, bounceLevel);
+            const uint e = giFindOrCreate(b, h, bounceKey, giAnchorAtHit(h, s.position, r.Direction), s.normal, created);
+            g_giKnownKey = bounceKey;  // the fallback's lookup below: this cell's corner takes e (GiCache.hlsli)
+            g_giKnownEntry = e;
             bool known = false;
             if (e != GI_ENTRY_PENDING)
             {

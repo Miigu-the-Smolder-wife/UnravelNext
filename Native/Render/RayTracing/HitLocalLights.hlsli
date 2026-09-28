@@ -134,10 +134,21 @@ struct RtLocalSample
     float distance;
     float3 weight;
 };
-RtLocalSample rtLocalLightSample(RtSceneSrvs scene, float3 x, float u0, float u1, float u2, float footprintWidth)
+// The sample in two steps, the same operations as one: the choice of the light (the cell and FX walks: every cost of the
+// sample that grows with the lights) and the draw on it. li: the scene light, or g_lightCount + the FX light.
+struct RtLocalChoice
 {
-    RtLocalSample o = (RtLocalSample)0;
-    if (scene.pad == 0xFFFFFFFFu) return o;
+    bool valid;
+    uint li;
+    float probability;
+};
+RtLocalChoice rtLocalLightChoose(RtSceneSrvs scene, float3 x, float u0)
+{
+    RtLocalChoice c;
+    c.valid = false;
+    c.li = 0;
+    c.probability = 0;
+    if (scene.pad == 0xFFFFFFFFu) return c;
     g_rtLightData = scene.pad;
     ByteAddressBuffer b = ResourceDescriptorHeap[scene.pad];
     const RtLightGrid grid = b.Load<RtLightGrid>(0);
@@ -145,27 +156,39 @@ RtLocalSample rtLocalLightSample(RtSceneSrvs scene, float3 x, float u0, float u1
     const float total = rtLightTotal(cell, x);
     uint cdf;
     const float fxW = rtFxWeight(b, x, cdf);
-    if (!(total + fxW > 0)) return o;
+    if (!(total + fxW > 0)) return c;
     const float pFx = fxW / (total + fxW);
     float probability;
     uint li;
-    RtLight l;
     if (u0 < pFx)
     {
         const uint j = rtFxChoose(cdf, x, fxW, u0 / pFx, probability);
-        if (j == ~0u) return o;
+        if (j == ~0u) return c;
         probability *= pFx;
         li = g_lightCount + j;
-        l = rtFxLight(j);
     }
     else
     {
         li = rtLightChoose(cell, x, total, pFx > 0 ? (u0 - pFx) / (1 - pFx) : u0, probability);
-        if (li == ~0u) return o;
+        if (li == ~0u) return c;
         probability *= 1 - pFx;
-        l = rtLightFetch(li);
     }
-    if (!(probability > 0)) return o;
+    if (!(probability > 0)) return c;
+    c.valid = true;
+    c.li = li;
+    c.probability = probability;
+    return c;
+}
+RtLocalSample rtLocalLightFinish(RtSceneSrvs scene, RtLocalChoice c, float3 x, float u1, float u2, float footprintWidth)
+{
+    RtLocalSample o = (RtLocalSample)0;
+    if (!c.valid) return o;
+    g_rtLightData = scene.pad;
+    ByteAddressBuffer b = ResourceDescriptorHeap[scene.pad];
+    const uint li = c.li;
+    RtLight l;
+    if (li >= g_lightCount) l = rtFxLight(li - g_lightCount);
+    else l = rtLightFetch(li);
     RtLightSample s;
     if (!rtLightSample(l, x, u1, u2, s) || !(s.pdf > 0)) return o;
     o.valid = true;
@@ -173,10 +196,24 @@ RtLocalSample rtLocalLightSample(RtSceneSrvs scene, float3 x, float u0, float u1
     o.light = li;
     o.wi = s.wi;
     o.distance = s.distance;
-    o.weight = s.L / (s.pdf * probability);
+    o.weight = s.L / (s.pdf * c.probability);
     if (l.type == kRtLightPoint || l.type == kRtLightSpot)
         o.weight *= lightFunction(b.Load(80), li, l.forward, l.right, -s.wi, footprintWidth / max(s.distance, 1e-4), g_time);
     return o;
+}
+RtLocalSample rtLocalLightSample(RtSceneSrvs scene, float3 x, float u0, float u1, float u2, float footprintWidth)
+{
+    return rtLocalLightFinish(scene, rtLocalLightChoose(scene, x, u0), x, u1, u2, footprintWidth);
+}
+// A choice packed in two words (ReflectionLocalShadow -> ReflectionShadeRays): valid bit 31 | li, probability.
+uint2 rtPackLocalChoice(RtLocalChoice c) { return uint2(c.valid ? 0x80000000u | c.li : 0u, asuint(c.probability)); }
+RtLocalChoice rtUnpackLocalChoice(uint2 v)
+{
+    RtLocalChoice c;
+    c.valid = (v.x & 0x80000000u) != 0;
+    c.li = v.x & 0x7FFFFFFFu;
+    c.probability = asfloat(v.y);
+    return c;
 }
 
 // The model's BRDF x cosine toward wi for the hit (INTERFACES 8.1: diffuse albedo / pi, the GGX lobe with compensation,
