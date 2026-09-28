@@ -171,10 +171,11 @@ CovFragmentShadow covFragmentShadow(uint2 pixel, uint element, float linearZ)
 // A local light's visibility: its slot in the froxel list at each end (S's shadowSlotOfLight at z_near and z_far); a light
 // past the third shadowed one of a list has no fragment slot there and counts as visible (INTERFACES 7.3 v1.41 carries
 // no overflow for fragments).
-float covLocalVisibility(CovFragmentShadow s, FroxelSrvs froxels, uint2 pixel, float zNear, float zFar, uint lightIndex)
+// nearCasters / farCasters: shadowFirstCasters at z_near and z_far, once per fragment (two list walks per light before).
+float covLocalVisibility(CovFragmentShadow s, uint3 nearCasters, uint3 farCasters, uint lightIndex)
 {
     if (!s.valid) return 1;
-    const uint a = shadowSlotOfLight(froxels, pixel, zNear, lightIndex), b = shadowSlotOfLight(froxels, pixel, zFar, lightIndex);
+    const uint a = shadowSlotAmong(nearCasters, lightIndex), b = shadowSlotAmong(farCasters, lightIndex);
     const float vn = a >= 1 && a <= 3 ? covByte(s.nearSlots, a) : 1;
     const float vf = b >= 1 && b <= 3 ? covByte(s.farSlots, b) : 1;
     return lerp(vn, vf, s.t);
@@ -471,11 +472,17 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         }
 #endif
 #endif
+        uint3 nearCasters = 0xFFFFFFFFu, farCasters = 0xFFFFFFFFu;
+        if (shadow.valid)
+        {
+            nearCasters = shadowFirstCasters(froxels, pixel, zNear);
+            farCasters = shadowFirstCasters(froxels, pixel, zFar);
+        }
         for (uint i = 0; i < range.y; ++i)
         {
             const uint lightIndex = froxelLight(froxels, range.x + i);
             const GpuLight light = loadLight(lightIndex);
-            const float visibility = covLocalVisibility(shadow, froxels, pixel, zNear, zFar, lightIndex);
+            const float visibility = covLocalVisibility(shadow, nearCasters, farCasters, lightIndex);
             if (lightType(light) > LIGHT_SPOT)
             {
 #if AREA

@@ -43,6 +43,27 @@ uint shadowSlotOfLight(FroxelSrvs f, uint2 pixel, float linearDepth, uint lightI
     return 0xFFFFFFFFu;
 }
 
+// The first three shadow-casting lights of the pixel's froxel list at linearDepth (0xFFFFFFFF past the list): the lights
+// shadowSlotOfLight gives slots 1-3, found in one walk for a caller asking about every light of the list.
+uint3 shadowFirstCasters(FroxelSrvs f, uint2 pixel, float linearDepth)
+{
+    const uint2 range = froxelLightRange(f, pixel, linearDepth);
+    uint3 casters = 0xFFFFFFFFu;
+    uint ordinal = 0;
+    [loop] for (uint i = 0; i < range.y && ordinal < 3; ++i)
+    {
+        const uint li = froxelLight(f, range.x + i);
+        if (!lightCastsShadow(loadLight(li))) continue;
+        casters[ordinal++] = li;
+    }
+    return casters;
+}
+// shadowSlotOfLight from shadowFirstCasters (list entries are unique).
+uint shadowSlotAmong(uint3 casters, uint lightIndex)
+{
+    return lightIndex == casters.x ? 1u : lightIndex == casters.y ? 2u : lightIndex == casters.z ? 3u : 0xFFFFFFFFu;
+}
+
 // Visibility in [0, 1] of scene light lightIndex at a world point with geometric normal: the local-light estimator of the
 // visibility slots (VsmLocalSample.hlsli) on the finest resident mip there. For shadow-casting lights past the third of a
 // pixel's list; 1 for lights without a shadow slot.

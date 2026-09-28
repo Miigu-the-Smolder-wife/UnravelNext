@@ -445,22 +445,46 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         {
             const uint lightIndex = froxelLight(froxels, range.x + i);
             const GpuLight light = loadLight(lightIndex);
-            float visibility = 1;
-            if (lightCastsShadow(light))
+            // The light's shadow ordinal is counted here; its visibility (a slot, or the overflow records' dependent
+            // loads) is read only for a light that adds something at this pixel (a window, a spot factor and a lobe on
+            // the side it lights): the others added exactly 0.
+            const bool casts = lightCastsShadow(light);
+            if (casts) ++shadowOrdinal;
+            const bool area = lightType(light) > LIGHT_SPOT;
+            float3 p = 0, toLight = 0, l = 0, E = 0;
+            float window = 0, cosL = 0;
+            if (area)
             {
-                ++shadowOrdinal;
+#if AREA
+                // Lights whose window is 0 here (the froxel's lists hold every light reaching the froxel) add exactly 0.
+                p = (light.position - g_cameraPosition) - offset;
+                window = shAreaWindow(light, p);
+                if (window <= 0) continue;
+#else
+                continue;  // AREA=0: the scene has no area lights (ShadingSystem)
+#endif
+            }
+            else
+            {
+#if AREA_LOBES
+                continue;  // (punctual lights: the full kernel)
+#endif
+                toLight = (light.position - g_cameraPosition) - offset;
+                E = shPunctualIlluminance(light, toLight, l);
+                cosL = dot(n, l);
+                // Every lobe below is 0 off (NoV > 0, cosL > 0) and the Foliage back side (the coat and sheen lobes too:
+                // MaterialModel.hlsli returns 0 for NoL <= 0), and E = 0 outside the window or the spot cone.
+                if (all(E == 0) || !((NoV > 0 && cosL > 0) || (foliage && NoV * cosL < 0))) continue;
+            }
+            float visibility = 1;
+            if (casts)
                 visibility = shadowOrdinal <= 3 ? shadowSlot(shadowPacked, shadowOrdinal)
                                                 : shOverflowVisibility(pixel, shadowOrdinal, overflowHead, overflowRecord, overflowReceiver, lightIndex);
-            }
             if (visibility <= 0) continue;
-            if (lightType(light) > LIGHT_SPOT)
+            if (area)
             {
 #if AREA
                 // L w (f_d pi I + E_s I_ltc) on the viewer's side of n; Foliage transmits what arrives on the other.
-                // Lights whose window is 0 here (the froxel's lists hold every light reaching the froxel) add exactly 0.
-                const float3 p = (light.position - g_cameraPosition) - offset;
-                const float window = shAreaWindow(light, p);
-                if (window <= 0) continue;
                 const float3 Lw = light.color * (light.intensity * window * visibility);
 #if AREA_LOBES
                 // A9 the lobes no LTC represents, over the light (AreaQuadrature.hlsli): the anisotropic base (MATERIAL_LAYERS
@@ -537,9 +561,6 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #if AREA_LOBES
             continue;  // (punctual lights: the full kernel)
 #endif
-            float3 l;
-            const float3 toLight = (light.position - g_cameraPosition) - offset;
-            float3 E = shPunctualIlluminance(light, toLight, l);
             if (P[6].w != UNX_NONE)
             {
                 // A8 (E's table): the light's function in the direction from the light to this point; the footprint is
@@ -547,7 +568,6 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 const float footprint = linearZ * (2 * g_tanHalfFovY / g_viewHeight) / max(length(toLight), 1e-4);
                 E *= lightFunction(P[6].w, lightIndex, light.forward, light.right, -l, footprint, g_time);
             }
-            const float cosL = dot(n, l);
             float3 f = 0;
             if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
             else if (foliage && NoV * cosL < 0) f = back;
