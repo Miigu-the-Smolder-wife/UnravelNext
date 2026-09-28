@@ -142,6 +142,11 @@ float vsmLocalPlaneDepthAt(VsmLocalLight l, float3 receiver, float3 normal, floa
 float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3 receiver, float3 normal, float footprint, float biasTexels,
                          float maxSlope, uint searchTaps, uint filterTaps)
 {
+    // Past the light's reach (farM = range + emitter radius) its shading window is 0 (shPunctualIlluminance,
+    // shAreaWindow: w(d) = 0 for d >= range), so the visibility there multiplies nothing: 1 without the estimator. The
+    // froxel lists hold the lights whose sphere meets the froxel, not each pixel (VsmLocalMark skips the same pixels).
+    const float3 dl = receiver - l.position;
+    if (dot(dl, dl) >= l.farM * l.farM) return 1;
     const VsmLocalPoint pr = vsmLocalProject(l, receiver);
     if (pr.z <= l.nearM) return 1;
     float3 right, up, axis;
