@@ -4,7 +4,8 @@
 // its pixel footprint (vsmLocalMip), and at the two coarser mips (the estimator's wide taps fall back to them); at each
 // of these mips also the pages half a page away in the four face directions, re-projected through the cube (a tap near
 // a face edge reads the neighbouring face). Of each axis's two half-page neighbours one is always the centre's own page
-// (vsmHalfStepStays): only the other is projected and requested - the same requests, 3 projections per mip instead of 5.
+// (vsmHalfStepStays): only the other is projected and requested - the same requests; the centre is projected once for
+// the three mips.
 // Duplicate requests within a wave store once.
 // P[0].x depth SRV (Texture2D<float>), P[0].y requests UAV (raw), P[0].z local lights SRV, P[0].w slot of light SRV
 // (StructuredBuffer<uint>: scene light -> shadow slot or VSM_LOCAL_NONE)
@@ -14,10 +15,9 @@
 #include "Passes/Atmosphere/Froxel.hlsli"
 #include "Passes/Shadow/VsmLocal.hlsli"
 
-// The request of direction 'dir' (unit depth) at mip; returns the page's continuous coordinates (texel / 128) on its face.
-float2 request(RWByteAddressBuffer requests, VsmLocalLight l, uint light, float3 dir, uint mip)
+// The request of the projected point q at mip; returns the page's continuous coordinates (texel / 128) on its face.
+float2 requestAt(RWByteAddressBuffer requests, uint light, VsmLocalPoint q, uint mip)
 {
-    const VsmLocalPoint q = vsmLocalProject(l, l.position + dir);
     const float2 t = vsmLocalTexel(q.xy, mip) / VSM_PAGE;
     const uint2 page = min(uint2(t), (1u << mip) - 1);
     const uint at = vsmLocalSlot(light, q.face, mip, page);
@@ -25,14 +25,27 @@ float2 request(RWByteAddressBuffer requests, VsmLocalLight l, uint light, float3
     if (at != WaveReadLaneFirst(at) || WaveIsFirstLane()) requests.Store(at * 4, VSM_REQ_PIXEL);
     return t;
 }
-// Whether moving by half a page from page coordinate u towards 'sign' stays in the same page with a margin (1/1024 of a
-// page: far above the rounding of the re-projection): that neighbour's request is the centre's and is skipped. Half a
-// page to one side always stays in the page (the side away from the nearer edge), so each axis requests at most one
-// neighbour; near an edge (within the margin) both are requested as before.
-bool vsmHalfStepStays(float u, float sign)
+// The request of direction 'dir' (unit depth) at mip.
+float2 request(RWByteAddressBuffer requests, VsmLocalLight l, uint light, float3 dir, uint mip)
+{
+    return requestAt(requests, light, vsmLocalProject(l, l.position + dir), mip);
+}
+// Whether moving by half a page from page coordinate u towards 'sign' stays in the same page with a margin: that
+// neighbour's request is the centre's and is skipped. Half a page to one side always stays in the page (the side away
+// from the nearer edge), so each axis requests at most one neighbour; near an edge (within the margin) both are requested
+// as before. The margin bounds the rounding of the re-projection: vsmLocalProject subtracts the light's position from
+// position + direction (absolute error ~ ulp(|position|) in tangent units), which is 2^mip / 2 pages per tangent unit:
+// margin = 1/1024 + 2^mip x 4 ulp(max |position|) (at mip 6 and 1000 m from the origin: 1/1024 + 0.016).
+float vsmMarkMargin(float3 position, uint mip)
+{
+    const float a = max(abs(position.x), max(abs(position.y), abs(position.z)));
+    const float ulp = asfloat(asuint(max(a, 1.0)) + 1u) - max(a, 1.0);
+    return 1.0 / 1024.0 + float(1u << mip) * 4 * ulp;
+}
+bool vsmHalfStepStays(float u, float sign, float margin)
 {
     const float f = frac(u);
-    return sign > 0 ? f + 0.5 < 1.0 - 1.0 / 1024.0 : f - 0.5 > 1.0 / 1024.0;
+    return sign > 0 ? f + 0.5 < 1.0 - margin : f - 0.5 > margin;
 }
 
 [numthreads(8, 8, 1)]
@@ -67,19 +80,21 @@ void main(uint2 px : SV_DispatchThreadID)
         float3 right, up, axis;
         vsmCubeBasis(q.face, right, up, axis);
         const uint m = vsmLocalMip(footprint, q.z);
+        const float3 c = axis + q.xy.x * right + q.xy.y * up;  // direction at unit depth
+        const VsmLocalPoint qc = vsmLocalProject(l, l.position + c);  // (the same projection at every mip)
         [unroll] for (uint j = 0; j < 3; ++j)
         {
             if (j > m) break;
             const uint mip = m - j;
             // Half a page of mip in tangent units: 128 / res x 2 / 2.
             const float h = float(VSM_PAGE) / vsmLocalRes(mip);
-            const float3 c = axis + q.xy.x * right + q.xy.y * up;  // direction at unit depth
-            const float2 t = request(requests, l, slot, c, mip);
+            const float2 t = requestAt(requests, slot, qc, mip);
+            const float margin = vsmMarkMargin(l.position, mip);
             // (texel x grows with right, texel y grows against up: vsmLocalTexel)
-            if (!vsmHalfStepStays(t.x, 1)) request(requests, l, slot, c + h * right, mip);
-            if (!vsmHalfStepStays(t.x, -1)) request(requests, l, slot, c - h * right, mip);
-            if (!vsmHalfStepStays(t.y, -1)) request(requests, l, slot, c + h * up, mip);
-            if (!vsmHalfStepStays(t.y, 1)) request(requests, l, slot, c - h * up, mip);
+            if (!vsmHalfStepStays(t.x, 1, margin)) request(requests, l, slot, c + h * right, mip);
+            if (!vsmHalfStepStays(t.x, -1, margin)) request(requests, l, slot, c - h * right, mip);
+            if (!vsmHalfStepStays(t.y, -1, margin)) request(requests, l, slot, c + h * up, mip);
+            if (!vsmHalfStepStays(t.y, 1, margin)) request(requests, l, slot, c - h * up, mip);
         }
     }
 }
