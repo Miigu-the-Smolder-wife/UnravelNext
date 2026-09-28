@@ -445,6 +445,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         const float e = modelDirectionalAlbedo(max(NoV, 1e-4), s.roughness);
         const float3 compensation = 1 + f0 * (1 / e - 1);
         const uint2 range = froxelLightRange(froxels, pixel, linearZ);
+        const uint indexBase = froxelIndexBase(froxels);
         float zNear = linearZ, zFar = linearZ;
         if (shadow.valid)
         {
@@ -480,7 +481,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         }
         for (uint i = 0; i < range.y; ++i)
         {
-            const uint lightIndex = froxelLight(froxels, range.x + i);
+            const uint lightIndex = froxelLightAt(froxels, indexBase, range.x + i);
             const GpuLight light = loadLight(lightIndex);
             const float visibility = covLocalVisibility(shadow, nearCasters, farCasters, lightIndex);
             if (lightType(light) > LIGHT_SPOT)

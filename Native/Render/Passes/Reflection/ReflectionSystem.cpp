@@ -898,12 +898,14 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     std::memcpy(m_refract.scene, scene, sizeof scene);
     m_refract.rays = &rays, m_refract.frameConstants = frameConstants, m_refract.variant = variant;
     // Root constants shared by the trace, shade, shadow and combine passes (ReflectionRay.hlsli).
+    // gi = false (the traversal and the local-light shadow rays): GI's cache and screen probes are not bound (UNX_NONE)
+    // nor declared, so those passes do not wait for GI's block (output.async_compute_passes).
     auto constantsFor = [jobs, results, modes, probes, depth, gbuffer, cache, luts, atmosphere, sky, sun, rayLength, s, frame, scene, experiment, exactCounts,
-                         probeMaps, vsm, rayScene, frameIndex, raysBuffer](PassContext& c, uint32_t k[32]) {
+                         probeMaps, vsm, rayScene, frameIndex, raysBuffer](PassContext& c, uint32_t k[32], bool gi = true) {
         k[0] = c.srv(jobs);
         k[1] = c.uav(results);
         k[2] = c.srv(modes);
-        k[3] = c.srv(probes);
+        k[3] = gi ? c.srv(probes) : 0xFFFFFFFFu;
         k[4] = asU(sky.x);
         k[5] = asU(sky.y);
         k[6] = asU(sky.z);
@@ -912,10 +914,10 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         k[12] = asU(sun.x);
         k[13] = asU(sun.y);
         k[14] = asU(sun.z);
-        k[15] = c.srv(probeMaps);
+        k[15] = gi ? c.srv(probeMaps) : 0xFFFFFFFFu;
         k[16] = c.srv(depth);
         k[17] = c.srv(gbuffer);
-        k[18] = c.uav(cache);
+        k[18] = gi ? c.uav(cache) : 0xFFFFFFFFu;
         k[19] = s.raysPerSample;
         k[20] = (frame & 0xFFFFFFu) | (experiment << 24);
         k[21] = c.uav(raysBuffer);
@@ -924,15 +926,18 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         std::memcpy(&k[24], scene, sizeof scene);
     };
     // Every resource constantsFor names, declared by each pass that binds it (all-shading uses cover DispatchRays and compute).
-    auto declareShared = [&](PassBuilder& b) {
+    auto declareShared = [&](PassBuilder& b, bool gi = true) {
         b.use(raysBuffer, Use::UavGraphics);
         b.use(jobs, Use::SrvGraphics);
         b.use(modes, Use::SrvGraphics);
-        b.use(probes, Use::SrvGraphics);
-        b.use(probeMaps, Use::SrvGraphics);
+        if (gi)
+        {
+            b.use(probes, Use::SrvGraphics);
+            b.use(probeMaps, Use::SrvGraphics);
+        }
         b.use(depth, Use::SrvGraphics);
         b.use(gbuffer, Use::SrvGraphics);
-        b.use(cache, Use::UavGraphics);
+        if (gi) b.use(cache, Use::UavGraphics);
         b.use(results, Use::UavGraphics);
         if (exactCounts.valid()) b.use(exactCounts, Use::UavGraphics);
         rt::RayScene::declareVsm(b, vsm);
@@ -944,11 +949,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     g.addPass("r.refl.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(args, Use::IndirectArgs);
-                  declareShared(b);
+                  declareShared(b, false);
               },
               [&pipeline, constantsFor, frameConstants, argumentResource, variant, timestamps, firstTick](PassContext& c) {
                   uint32_t k[32] = {};
-                  constantsFor(c, k);
+                  constantsFor(c, k, false);
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick);
@@ -972,6 +977,22 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   });
     };
     rayArgs("r.refl.rayargs", 0);
+    // Local-light samples of the hits: their shadow rays before the compute shading (bit 30 of the hit records). Declared
+    // before the inline passes (which read GI's cache; they never touch the rays buffer), so it runs while GI's block is
+    // still on the async queue.
+    rt::RayPipeline& localShadowPipeline = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(kLocalShadowLibrary, { "ReflectionLocalShadowGen" }));
+    g.addPass("r.refl.localshadow", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(args, Use::IndirectArgs);
+                  declareShared(b, false);
+              },
+              [&localShadowPipeline, constantsFor, frameConstants, argumentResource](PassContext& c) {
+                  uint32_t k[32] = {};
+                  constantsFor(c, k, false);
+                  c.computeConstants(k, 32);
+                  c.bindFrameConstants(frameConstants);
+                  localShadowPipeline.dispatchIndirect(c.cmd, argumentResource, kLocalDescOffset);
+              });
     // Jobs over the ray capacity: traced, shaded and combined in their own ray generation library.
     for (uint32_t mode = 0; mode < 2; ++mode)
     {
@@ -990,20 +1011,6 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       inlinePipeline.dispatchIndirect(c.cmd, argumentResource, kInlineDescOffset + (variant * 2 + mode) * kDescStride);
                   });
     }
-    // Local-light samples of the hits: their shadow rays before the compute shading (bit 30 of the hit records).
-    rt::RayPipeline& localShadowPipeline = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(kLocalShadowLibrary, { "ReflectionLocalShadowGen" }));
-    g.addPass("r.refl.localshadow", QueueType::Compute,
-              [&](PassBuilder& b) {
-                  b.use(args, Use::IndirectArgs);
-                  declareShared(b);
-              },
-              [&localShadowPipeline, constantsFor, frameConstants, argumentResource](PassContext& c) {
-                  uint32_t k[32] = {};
-                  constantsFor(c, k);
-                  c.computeConstants(k, 32);
-                  c.bindFrameConstants(frameConstants);
-                  localShadowPipeline.dispatchIndirect(c.cmd, argumentResource, kLocalDescOffset);
-              });
     ID3D12CommandSignature* dispatchSignature = m_dispatchSignature.Get();
     g.addPass("r.refl.shade", QueueType::Compute,
               [&](PassBuilder& b) {

@@ -68,6 +68,7 @@ uint localSlots(ShadowSrvs s, uint2 px, float3 p, float3 n, float deviceDepth)
     f.scattering = 0;
     f.pad = 0;
     const uint2 range = froxelLightRange(f, px, linearDepth(deviceDepth));
+    const uint indexBase = froxelIndexBase(f);
     ShadowPixelReceiver pr;
     pr.world = p;
     pr.normal = n;
@@ -76,7 +77,7 @@ uint localSlots(ShadowSrvs s, uint2 px, float3 p, float3 n, float deviceDepth)
     uint ordinal = 0;
     [loop] for (uint i = 0; i < range.y && ordinal < 3; ++i)
     {
-        const uint li = froxelLight(f, range.x + i);
+        const uint li = froxelLightAt(f, indexBase, range.x + i);
         if (!lightCastsShadow(loadLight(li))) continue;
         ++ordinal;
         const float v = shadowLocalVisibilityAtReceiver(s, li, pr);

@@ -75,6 +75,7 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
         f.scattering = 0;
         f.pad = 0;
         const uint2 range = froxelLightRange(f, px, linearDepth(depth));
+        const uint indexBase = froxelIndexBase(f);
         ShadowSrvs ss;
         ss.pageTable = P[1].y;
         ss.pool = P[1].z;
@@ -92,7 +93,7 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
         uint ordinal = 0, live = 0;
         [loop] for (uint i = 0; i < range.y; ++i)
         {
-            const uint li = froxelLight(f, range.x + i);
+            const uint li = froxelLightAt(f, indexBase, range.x + i);
             if (!lightCastsShadow(loadLight(li))) continue;
             ++ordinal;
             // Past the third: the tile goes to the overflow list (ShadowOverflow.hlsl evaluates every such light) only

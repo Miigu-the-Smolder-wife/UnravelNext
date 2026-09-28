@@ -415,6 +415,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         const float e = modelDirectionalAlbedo(max(NoV, 1e-4), s.roughness);
         const float3 compensation = 1 + f0 * (1 / e - 1);
         const uint2 range = froxelLightRange(froxels, pixel, linearZ);
+        const uint indexBase = froxelIndexBase(froxels);
 
 #if AREA
         // Area lights (AreaLight.hlsli): the shading frame, its horizon-flipped twin for Foliage transmission and the
@@ -443,7 +444,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         ShadowPixelReceiver overflowReceiver = (ShadowPixelReceiver)0;
         for (uint i = 0; i < range.y; ++i)
         {
-            const uint lightIndex = froxelLight(froxels, range.x + i);
+            const uint lightIndex = froxelLightAt(froxels, indexBase, range.x + i);
             const GpuLight light = loadLight(lightIndex);
             // The light's shadow ordinal is counted here; its visibility (a slot, or the overflow records' dependent
             // loads) is read only for a light that adds something at this pixel (a window, a spot factor and a lobe on

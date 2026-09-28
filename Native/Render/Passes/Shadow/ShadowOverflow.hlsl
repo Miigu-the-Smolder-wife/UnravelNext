@@ -48,11 +48,12 @@ void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
     const float depth = inside ? depthTex.Load(int3(px, 0)) : 0.0;
     uint2 range = 0;
     if (depth > 0) range = froxelLightRange(f, px, linearDepth(depth));
+    const uint indexBase = froxelIndexBase(f);
     uint count = 0;
     {
         uint ordinal = 0;
         [loop] for (uint i = 0; i < range.y; ++i)
-            if (lightCastsShadow(loadLight(froxelLight(f, range.x + i)))) ++ordinal;
+            if (lightCastsShadow(loadLight(froxelLightAt(f, indexBase, range.x + i)))) ++ordinal;
         count = ordinal > 3 ? ordinal - 3 : 0;
     }
     const uint words = (count + 3) / 4;
@@ -126,7 +127,7 @@ void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
     uint ordinal = 0, n = 0, packed = 0;
     [loop] for (uint i = 0; i < range.y; ++i)
     {
-        const uint li = froxelLight(f, range.x + i);
+        const uint li = froxelLightAt(f, indexBase, range.x + i);
         if (!lightCastsShadow(loadLight(li))) continue;
         if (++ordinal <= 3) continue;
         const uint v = (uint)round(saturate(shadowLocalVisibilityAtReceiver(ss, li, pr)) * 255.0);

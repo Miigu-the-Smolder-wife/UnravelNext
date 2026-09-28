@@ -35,6 +35,20 @@ uint froxelEntry(FroxelSrvs f, uint i)
     return (i & 1) ? (w >> 16) : (w & 0xFFFFu);
 }
 uint froxelLight(FroxelSrvs f, uint i) { return froxelEntry(f, i) & 0x7FFFu; }
+// The same entries with FroxelGrid::indexBase read once before a light loop (froxelIndexBase): the base load stood in
+// every iteration's chain of dependent loads (base, entry word, light record).
+uint froxelIndexBase(FroxelSrvs f)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[f.lightIndices];
+    return b.Load(36);
+}
+uint froxelEntryAt(FroxelSrvs f, uint indexBase, uint i)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[f.lightIndices];
+    const uint w = b.Load(indexBase + (i >> 1) * 4);
+    return (i & 1) ? (w >> 16) : (w & 0xFFFFu);
+}
+uint froxelLightAt(FroxelSrvs f, uint indexBase, uint i) { return froxelEntryAt(f, indexBase, i) & 0x7FFFu; }
 // True when list entry i's light casts local shadows through S's VSM (it takes one of the visibility slots 1-3 in list
 // order, ShadowVisibility.hlsli shadowSlotOfLight).
 bool froxelLightShadowed(FroxelSrvs f, uint i) { return (froxelEntry(f, i) & 0x8000u) != 0; }

@@ -32,10 +32,11 @@ struct ShadowSrvs
 uint shadowSlotOfLight(FroxelSrvs f, uint2 pixel, float linearDepth, uint lightIndex)
 {
     const uint2 range = froxelLightRange(f, pixel, linearDepth);
+    const uint indexBase = froxelIndexBase(f);
     uint ordinal = 0;
     [loop] for (uint i = 0; i < range.y && ordinal < 3; ++i)
     {
-        const uint li = froxelLight(f, range.x + i);
+        const uint li = froxelLightAt(f, indexBase, range.x + i);
         if (!lightCastsShadow(loadLight(li))) continue;
         ++ordinal;
         if (li == lightIndex) return ordinal;
@@ -48,11 +49,12 @@ uint shadowSlotOfLight(FroxelSrvs f, uint2 pixel, float linearDepth, uint lightI
 uint3 shadowFirstCasters(FroxelSrvs f, uint2 pixel, float linearDepth)
 {
     const uint2 range = froxelLightRange(f, pixel, linearDepth);
+    const uint indexBase = froxelIndexBase(f);
     uint3 casters = 0xFFFFFFFFu;
     uint ordinal = 0;
     [loop] for (uint i = 0; i < range.y && ordinal < 3; ++i)
     {
-        const uint li = froxelLight(f, range.x + i);
+        const uint li = froxelLightAt(f, indexBase, range.x + i);
         if (!lightCastsShadow(loadLight(li))) continue;
         casters[ordinal++] = li;
     }

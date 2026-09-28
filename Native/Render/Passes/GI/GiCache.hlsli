@@ -510,9 +510,11 @@ uint giScreenCellUpdates(B b, GiHeader h, uint64_t key, out uint anchor, out uin
     updates = 0;
     if (entry != GI_ENTRY_PENDING)
     {
+        // Both words depend on the entry only: issued together (one round trip, not the anchor after the count).
         updates = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES);
+        const uint packed = b.Load(h.offAnchor + entry * 16 + 12);
         if (updates == 0) entry = GI_ENTRY_PENDING;
-        else anchor = b.Load(h.offAnchor + entry * 16 + 12);
+        else anchor = packed;
     }
     return entry;
 }

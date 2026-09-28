@@ -11,7 +11,8 @@
 // hit shading runs in compute (ReflectionShade.hlsl, then ReflectionShadow for off-screen sun visibility, then
 // ReflectionCombine for the job's value). A job whose rays do not fit this frame's capacity is marked REFL_JOB_INLINE and
 // traced, shaded and combined by ReflectionTraceInline (ReflectionHit.hlsli): the same value, only slower (a separate
-// library keeps this one small). Root constants: ReflectionRay.hlsli.
+// library keeps this one small). Root constants: ReflectionRay.hlsli; GI's cache and screen probes are not bound here
+// (UNX_NONE: the pass does not wait for GI's block, ReflectionSystem).
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
 
@@ -20,9 +21,7 @@ void ReflectionTraceGen()
 {
     const uint job = DispatchRaysIndex().x;
     RWStructuredBuffer<uint3> results = ResourceDescriptorHeap[P[0].y];
-    RWByteAddressBuffer cache = ResourceDescriptorHeap[P[4].z];
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[5].y];
-    const GiHeader h = giHeader(cache);
     const RtSceneSrvs scene = rtScene();
     const ReflJob j = reflLoadJob(job);
     const uint capacity = rays.Load(4);

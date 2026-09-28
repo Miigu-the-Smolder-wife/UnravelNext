@@ -90,11 +90,12 @@ void main(uint2 pixel : SV_DispatchThreadID)
         const float phi = i * 2.39996323;
         const int2 q = int2(pixel) + int2(round(r * float2(cos(phi), sin(phi))));
         if (any(q < 0) || any(q >= int2(size))) continue;
+        // The tap's value and depth in one round trip (a tap without data ignores its depth).
         const float4 e = raw.Load(int3(q, 0));
+        const float qd = depth.Load(int3(q, 0));
         if (!(e.a > 0)) continue;
         // The tap's position first (giScreenInputs' formula); off the pixel's plane (weight 0) its normal is not needed:
         // the G-buffer load and decode only for taps on the plane. Same weights and sums (a skipped tap added 0).
-        const float qd = depth.Load(int3(q, 0));
         if (qd <= 0) continue;
         float3 D, Dx, Dy;
         mPixelRay(float2(uint2(q)) + 0.5, D, Dx, Dy);
