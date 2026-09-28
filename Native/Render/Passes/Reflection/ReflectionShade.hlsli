@@ -147,8 +147,9 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
             const float3 f = rtLocalLightBrdfCos(m, s.normal, -direction, ls.wi, false);
             bool visible = !ls.castShadow || localVisible;
 #if REFL_LOCAL_TRACE
-            visible = !ls.castShadow ||
-                      rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition)), RT_MASK_REFLECTION);
+            if (any(f > 0))  // (f = 0: the visibility multiplies nothing, no ray)
+                visible = !ls.castShadow ||
+                          rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition)), RT_MASK_REFLECTION);
 #endif
             if (visible) L.local = f * ls.weight;
         }

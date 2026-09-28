@@ -3,7 +3,7 @@
 // per allocated ray slot, before the compute hit shading: the slot's hit point is rebuilt exactly as ReflectionShade
 // builds it (rtSurface of the stored hit record), the same light sample is drawn (reflLocalSeed of the slot's owner), and
 // one shadow ray is traced toward it; a visible sample sets bit 30 of the hit record's first word (instance ids are 24
-// bits), which ReflectionShadeRays reads. Lights that cast no shadow need no ray. Root constants: ReflectionRay.hlsli.
+// bits), which ReflectionShadeRays reads. Lights that cast no shadow, and samples the hit's BRDF gives 0, need no ray. Root constants: ReflectionRay.hlsli.
 #define SKY 1  // no sky lookups here
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
@@ -38,6 +38,9 @@ void ReflectionLocalShadowGen()
     const uint seed = reflLocalSeed(owner);
     const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(seed), giUnit(seed + 1), giUnit(seed + 2), 0);  // the choice only
     if (!ls.valid || !ls.castShadow) return;
+    // A sample below the hit's shading normal adds nothing to the hit (rtLocalLightBrdfCos is 0 for N.L <= 0 unless the
+    // material is Foliage, which transmits): its visibility is not read, no ray (the same s.normal as the shading's).
+    if (dot(s.normal, ls.wi) <= 0 && materialClass(loadMaterial(s.material)) != MATERIAL_FOLIAGE) return;
     if (rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition)), RT_MASK_REFLECTION))
         rays.Store(reflRaysHitOffset(slot), record.x | (1u << 30));
 }
