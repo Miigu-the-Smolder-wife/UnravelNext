@@ -26,10 +26,10 @@ struct VsmLocalResources
     ByteAddressBuffer blocks;  // VsmPageMax: per physical page, the page block's range.y = nearest caster key
 };
 
-// Nearest caster key of the page holding direction c at mip m (or the nearest coarser resident mip); VSM_EMPTY if none.
-uint vsmLocalPageNearest(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, uint m)
+// Nearest caster key of the page holding the projected point q at mip m (or the nearest coarser resident mip);
+// VSM_EMPTY if none.
+uint vsmLocalPageNearestAt(VsmLocalResources r, VsmLocalLight l, uint slot, VsmLocalPoint q, uint m)
 {
-    const VsmLocalPoint q = vsmLocalProject(l, l.position + c);
     [loop] for (int j = (int)m; j >= 0; --j)
     {
         const uint2 t = min(uint2(vsmLocalTexel(q.xy, (uint)j)), vsmLocalRes((uint)j) - 1);
@@ -38,6 +38,38 @@ uint vsmLocalPageNearest(VsmLocalResources r, VsmLocalLight l, uint slot, float3
             return r.blocks.Load(((e.x & VSM_PHYS_MASK) * VSM_BLOCK_ENTRIES + VSM_BLOCK_OFFSET_128) * VSM_BLOCK_BYTES + 4);  // range.y
     }
     return VSM_EMPTY;
+}
+// The same for direction c.
+uint vsmLocalPageNearest(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, uint m)
+{
+    return vsmLocalPageNearestAt(r, l, slot, vsmLocalProject(l, l.position + c), m);
+}
+// The largest of vsmLocalPageNearest over the five directions c0, c0 +- hp right, c0 +- hp up at mip mp, with the five
+// projections and page-table loads issued together and the blocks loaded for the resident ones; only a page not resident
+// at mp walks the coarser mips (vsmLocalPageNearestAt). The same keys, and the maximum does not depend on the order: the
+// same value as five calls one after another, whose table and blocks loads formed one chain of ten round trips.
+uint vsmLocalPageNearest5(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c0, float3 right, float3 up, float hp, uint mp)
+{
+    VsmLocalPoint q[5];
+    uint2 e[5];
+    [unroll] for (uint k = 0; k < 5; ++k)
+    {
+        const float3 c = k == 0 ? c0 : (k == 1 ? c0 + hp * right : (k == 2 ? c0 - hp * right : (k == 3 ? c0 + hp * up : c0 - hp * up)));
+        q[k] = vsmLocalProject(l, l.position + c);
+        const uint2 t = min(uint2(vsmLocalTexel(q[k].xy, mp)), vsmLocalRes(mp) - 1);
+        e[k] = r.table.Load2(vsmLocalSlot(slot, q[k].face, mp, t >> VSM_PAGE_SHIFT) * 8);
+    }
+    uint nearest = VSM_EMPTY;
+    [unroll] for (uint k2 = 0; k2 < 5; ++k2)
+    {
+        uint v;
+        if ((e[k2].x & VSM_FLAG_RESIDENT) != 0 && e[k2].y == l.generation)
+            v = r.blocks.Load(((e[k2].x & VSM_PHYS_MASK) * VSM_BLOCK_ENTRIES + VSM_BLOCK_OFFSET_128) * VSM_BLOCK_BYTES + 4);  // range.y
+        else
+            v = mp > 0 ? vsmLocalPageNearestAt(r, l, slot, q[k2], mp - 1) : VSM_EMPTY;
+        nearest = max(nearest, v);
+    }
+    return nearest;
 }
 
 // Stored key (vsmEncode(-z)) of the texel of mip m (or the nearest coarser resident mip) holding direction c.
@@ -169,12 +201,7 @@ float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3
     // Nearest caster around the receiver (its page and the four neighbours, two mips coarser).
     const uint mp = m >= 2 ? m - 2 : 0;
     const float hp = float(VSM_PAGE) / vsmLocalRes(mp) * 2;  // a page of mip mp in tangent units
-    uint nearest = VSM_EMPTY;
-    nearest = max(nearest, vsmLocalPageNearest(r, l, slot, c0, mp));
-    nearest = max(nearest, vsmLocalPageNearest(r, l, slot, c0 + hp * right, mp));
-    nearest = max(nearest, vsmLocalPageNearest(r, l, slot, c0 - hp * right, mp));
-    nearest = max(nearest, vsmLocalPageNearest(r, l, slot, c0 + hp * up, mp));
-    nearest = max(nearest, vsmLocalPageNearest(r, l, slot, c0 - hp * up, mp));
+    const uint nearest = vsmLocalPageNearest5(r, l, slot, c0, right, up, hp, mp);
     if (nearest == VSM_EMPTY) return 1;
     const float zMin = max(-vsmDecode(nearest), l.nearM);
     if (zMin >= pr.z) return 1;  // nothing nearer to the light than the receiver
