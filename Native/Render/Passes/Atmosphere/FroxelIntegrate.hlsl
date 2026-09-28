@@ -261,6 +261,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     lr.pool = ResourceDescriptorHeap[P[1].y];
     lr.blocks = ResourceDescriptorHeap[P[1].z];
     uint myFirst = 0, myCount = 0, myShadowed = 0;
+    uint2 myReach = 0;  // list positions (bit i of 64) of the shadowed lights whose range the slice's segment enters
     if (hasAir && (zs0 < zSurface || s < gs_lastSky))
     {
         const float z0 = zs0, z1 = zs1;
@@ -312,12 +313,20 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         for (uint i = 0; i < myCount; ++i)
         {
             uint li;
-            if (airLocalSlot(lists, g, myFirst + i, localShadows, li) != VSM_LOCAL_NONE)
+            const uint slot = airLocalSlot(lists, g, myFirst + i, localShadows, li);
+            // A light whose range the segment's line never enters (distance h >= range; the rule's nodes lie at h / cos
+            // >= h, where the window is 0) adds exactly 0: neither evaluated nor walked. (The froxel lists hold the lights
+            // whose sphere meets the froxel, about a tenth of the depth beside the tile's centre ray.)
+            const GpuLight light = loadLight(li);
+            if (airLocalMap(light, o, dir, len).h >= light.range) continue;
+            if (slot != VSM_LOCAL_NONE)
             {
+                if (i < 32) myReach.x |= 1u << i;
+                else myReach.y |= 1u << (i - 32);
                 ++myShadowed;
                 continue;
             }
-            const float3 local = airLocalLight(loadLight(li), o, dir, len, cm, a.mieG, P[4].y, li, froxelTileWidth(g, 0.5 * (z0 + z1)));
+            const float3 local = airLocalLight(light, o, dir, len, cm, a.mieG, P[4].y, li, froxelTileWidth(g, 0.5 * (z0 + z1)));
             source += local;
             skyTerm += local;
         }
@@ -349,8 +358,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             uint k = itemBase;
             for (uint i = 0; i < myCount && k < b + B; ++i)
             {
-                uint li;
-                if (airLocalSlot(lists, g, myFirst + i, localShadows, li) == VSM_LOCAL_NONE) continue;
+                if (((i < 32 ? myReach.x >> i : myReach.y >> (i - 32)) & 1u) == 0) continue;  // (the counted items)
                 if (k >= b) gs_item[k - b] = s | i << 6;
                 ++k;
             }
