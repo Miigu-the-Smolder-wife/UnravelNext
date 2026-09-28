@@ -256,7 +256,9 @@ void FrameRenderer::setupUpscale(FrameContext& frame)
     }
     const uint32_t W = v.width, H = v.height;
     const uint32_t w = std::max(8u, (uint32_t)std::lround((double)W * h / H));
-    const uint32_t cycle = std::min(64u, std::max(8u, (uint32_t)std::ceil(8.0 * ((double)W * H) / ((double)w * h))));
+    // 64 positions per internal pixel whatever the ratio: the upscale's narrow output-pixel kernel (output.upscale_kernel)
+    // needs samples within about a tenth of an output pixel of every output centre (Upscale.hlsl).
+    const uint32_t cycle = 64;
     const uint32_t k = (uint32_t)(frame.frameIndex % cycle) + 1;  // Halton from index 1 (index 0 is the origin)
     const float jx = halton(k, 2) - 0.5f, jy = halton(k, 3) - 0.5f;
     FrameContext::Upscale& u = frame.upscale;

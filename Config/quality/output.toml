@@ -20,6 +20,12 @@ band_pixels = 0
 render_scale = 0.6667
 render_scale_min_height = 1080
 render_height_max = 1440
-# The upscale's history: at most this many frames' weight (a running mean of the jittered samples, clamped to the current
-# neighbourhood in YCoCg). The Halton cycle is ceil(8 x output / internal pixels) frames (18 at 4K from 1440p).
-upscale_history_frames = 24
+# The upscale's reconstruction (Passes/Shading/Upscale.hlsl): each frame's jittered samples weighted by exp(-K d^2), d in
+# output pixels (K 60: sigma 0.09 output px), accumulated over the 64-position Halton cycle, so a still image converges to
+# the native point sample; the history keeps at most upscale_history_frames frames of that weight where the pixel is
+# still and upscale_history_frames_moving where it moves (each moving frame resamples the history: a long one blurs).
+# CPU model (Tools/ImageQuality, band 0.25-0.5 cycles/px against native, 2/3 scale): still energy 0.92 / SSIM 0.996,
+# 1.4 px/frame pan 0.56 / 0.92 (the 974c6bb kernel: 0.10 / 0.78 and 0.03 / 0.77).
+upscale_kernel = 60.0
+upscale_history_frames = 64
+upscale_history_frames_moving = 8

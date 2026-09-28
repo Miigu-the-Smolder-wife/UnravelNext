@@ -1,23 +1,36 @@
 // unx-kernel: cs_6_6 main
-// Temporal upscale (Upscale.cpp; output.render_height_max): the output pixel's value from the jittered internal samples
-// around it and its reprojected history. Per output pixel (centre x in unjittered internal pixel coordinates):
-//   current  the 3 x 3 internal samples around x, each at its unjittered centre k + 0.5 - jitter, weighted by a Gaussian
-//            of its distance d (internal pixels): w = exp(-2.29 d^2) (a Blackman-Harris-like window), in a reversible
-//            tone map c / (1 + max(c)) (a lone bright sample cannot dominate the mean);
+// Temporal upscale (Upscale.cpp; output.render_scale): the output pixel's value from the jittered internal samples around
+// it and its reprojected history. Per output pixel (centre x in unjittered internal pixel coordinates):
+//   current  the 3 x 3 internal samples around x, each at its unjittered centre k + 0.5 - jitter, weighted by
+//            exp(-K d^2) with d its distance in OUTPUT pixels (output.upscale_kernel K, 40: sigma 0.11 output px), in a
+//            reversible tone map c / (1 + max(c)) (a lone bright sample cannot dominate the mean). The history
+//            accumulates these weights over the jitter cycle (64 Halton (2, 3) positions per 1 x 1 internal pixel), so the
+//            converged value is the scene sampled within about a tenth of an output pixel of the output pixel's centre -
+//            the native image's point sample. (The kernel was exp(-2.29 d^2) in INTERNAL pixels: sigma 0.7 output px at
+//            2/3 scale, whose blur every frame's value carried into the converged image: 974c6bb's upscaled captures
+//            were visibly blurred - carving outlines, mouldings and wood grain [measured, user]; in the CPU model of this
+//            kernel (Tools/ImageQuality, band 0.25-0.5 cycles/px) energy ratio 0.10, SSIM 0.78 against native.) Where
+//            the history has no weight yet (a new surface), the wide internal-pixel kernel fills the pixel as before.
 //   history  the previous output at x - motion (the motion of the nearest of the 3 x 3 samples: edges take the
-//            foreground's), Catmull-Rom (5 bilinear taps), times the exposure ratio, clipped to the samples' YCoCg
-//            box (their mean +- 1 sigma, within their min / max) towards its centre;
-//   blend    alpha = c / (c + n), c = the nearest sample's weight (how well this frame's samples cover x: 1 on a sample,
-//            lower between them), n = the history's accumulated weight (alpha channel, at most
-//            output.upscale_history_frames); the new weight min(n + c, max).
+//            foreground's), Catmull-Rom (5 bilinear taps), times the exposure ratio; corrected at LOW frequency only:
+//            its mean over one internal pixel (4 bilinear taps) is clipped to the samples' YCoCg box (their mean +- 1
+//            sigma, within their min / max) and the history moved by that difference, so a lighting change or a
+//            disocclusion moves it while the sub-internal-pixel detail it accumulated (thin lines the 3 x 3 samples of
+//            one frame may all miss) is kept; where the correction is large against the box (a different surface) the
+//            whole history is clipped as before. (Clipping the full-resolution history to the internal 3 x 3 box every
+//            frame removed exactly that detail.)
+//   blend    alpha = w / (w + n), w = this frame's summed sample weight, n = the history's (alpha channel), capped at
+//            output.upscale_history_frames frames of weight where the pixel is still and at
+//            output.upscale_history_frames_moving where it moves by a quarter output pixel or more (every frame of
+//            motion resamples the history: a long history blurs moving detail [CPU model]); the new weight min(n + w, cap).
 // A history outside the previous frame, or a reset (first frame, size change, cut, restore): n = 0.
 // (Concept reference only, no code: the temporal upsampling of UE5 TSR / TAAU - Engine/Shaders/Private/TemporalAA/ and
 // TemporalAA.usf: jittered samples reprojected into an output-resolution history, neighbourhood clamping in YCoCg,
-// nearest-depth motion dilation, a Blackman-Harris sample window.)
+// nearest-depth motion dilation.)
 // P[0] = { colour SRV (internal, exposed linear), depth SRV (internal), motion SRV (internal, UpscaleMotion.hlsl),
 // history SRV (output) }, P[1] = { output UAV (RGBA16F: rgb exposed linear, a = history weight), internal width, height,
 // flags (1: reset) }, P[2] = { output width, height, asuint(jitter x), asuint(jitter y) }, P[3] = { asuint(exposure
-// ratio), asuint(maximum history weight), 0, 0 }.
+// ratio), asuint(history frames still), asuint(history frames moving), asuint(kernel K) }.
 #include "Bindless.hlsli"
 
 float upMax3(float3 c) { return max(c.r, max(c.g, c.b)); }
@@ -66,12 +79,14 @@ void main(uint2 o : SV_DispatchThreadID)
     RWTexture2D<float4> output = ResourceDescriptorHeap[P[1].x];
     const int2 inSize = int2(P[1].yz);
     const float2 jitter = asfloat(P[2].zw);
+    const float2 scale = float2(outSize) / float2(inSize);  // output pixels per internal pixel
+    const float K = asfloat(P[3].w);
     const float2 uv = (float2(o) + 0.5) / float2(outSize);
     const float2 x = uv * float2(inSize);
     const int2 kc = int2(floor(x + jitter));  // the sample whose unjittered centre is within half a pixel of x
 
-    float3 sum = 0, m1 = 0, m2 = 0, lo = 1e30, hi = -1e30;
-    float wsum = 0, wmax = 0, nearest = -1;
+    float3 sumWide = 0, sum = 0, m1 = 0, m2 = 0, lo = 1e30, hi = -1e30;
+    float wsumWide = 0, wsum = 0, nearest = -1;
     int2 nearestK = clamp(kc, 0, inSize - 1);
     [unroll] for (int dy = -1; dy <= 1; ++dy)
         [unroll] for (int dx = -1; dx <= 1; ++dx)
@@ -84,11 +99,14 @@ void main(uint2 o : SV_DispatchThreadID)
             m2 += y * y;
             lo = min(lo, y);
             hi = max(hi, y);
-            const float2 d = float2(k) + 0.5 - jitter - x;
-            const float w = exp(-2.29 * dot(d, d));
+            const float2 d = float2(k) + 0.5 - jitter - x;  // internal pixels
+            const float wWide = exp(-2.29 * dot(d, d));
+            sumWide += wWide * c;
+            wsumWide += wWide;
+            const float2 dOut = d * scale;
+            const float w = exp(-K * dot(dOut, dOut));
             sum += w * c;
             wsum += w;
-            wmax = max(wmax, w);
             const float z = depth.Load(int3(k, 0));  // reversed Z: the largest is the nearest
             if (z > nearest)
             {
@@ -96,27 +114,46 @@ void main(uint2 o : SV_DispatchThreadID)
                 nearestK = k;
             }
         }
-    const float3 current = sum / max(wsum, 1e-6);
+    const float3 wide = sumWide / max(wsumWide, 1e-6);
 
-    const float maxWeight = asfloat(P[3].y);
+    // The history's weight cap in frames of this kernel's expected per-frame weight (sample density 1 / (scale.x
+    // scale.y) per output pixel^2 times the kernel's integral pi / K): still or moving.
+    const float2 motionUv = motionTex.Load(int3(nearestK, 0));
+    const float movePx = length(motionUv * float2(outSize));
+    const float perFrame = (3.14159265 / K) / (scale.x * scale.y);
+    const float capFrames = lerp(asfloat(P[3].y), asfloat(P[3].z), saturate(movePx / 0.25));
+    const float cap = capFrames * perFrame;
     float n = 0;
     float3 history = 0;
-    const float2 prevUv = uv - motionTex.Load(int3(nearestK, 0));
+    const float2 prevUv = uv - motionUv;
+    const float3 mean = m1 / 9, sigma = sqrt(max(m2 / 9 - mean * mean, 0));
+    const float3 boxLo = max(lo, mean - sigma), boxHi = min(hi, mean + sigma);
     if ((P[1].w & 1u) == 0 && all(prevUv >= 0) && all(prevUv <= 1))
     {
         Texture2D<float4> historyTex = ResourceDescriptorHeap[P[0].w];
         const float4 h = upHistory(historyTex, prevUv, float2(outSize));
         if (all(isfinite(h)))
         {
-            history = upTonemap(max(h.rgb * asfloat(P[3].x), 0));
-            n = clamp(h.a, 0, maxWeight);
+            const float ratio = asfloat(P[3].x);
+            history = upTonemap(max(h.rgb * ratio, 0));
+            n = clamp(h.a, 0, cap);
+            // Low-frequency correction: the history's mean over one internal pixel against the samples' box.
+            const float2 o2 = 0.5 / float2(inSize);  // half an internal pixel in uv
+            float3 low = 0;
+            [unroll] for (uint q = 0; q < 4; ++q)
+                low += upTonemap(max(historyTex.SampleLevel(g_linearClamp, prevUv + float2(q & 1 ? o2.x : -o2.x, q & 2 ? o2.y : -o2.y), 0).rgb * ratio, 0));
+            const float3 lowY = upYCoCg(low * 0.25);
+            const float3 delta = upClip(lowY, boxLo, boxHi) - lowY;
+            const float3 extent = max(boxHi - boxLo, 1e-4);
+            const float reject = saturate(max(abs(delta.x) / extent.x, max(abs(delta.y) / extent.y, abs(delta.z) / extent.z)));
+            const float3 hY = upYCoCg(history);
+            history = upRgb(lerp(hY + delta, upClip(hY, boxLo, boxHi), reject));
         }
     }
-    const float3 mean = m1 / 9, sigma = sqrt(max(m2 / 9 - mean * mean, 0));
-    const float3 boxLo = max(lo, mean - sigma), boxHi = min(hi, mean + sigma);
-    history = upRgb(upClip(upYCoCg(history), boxLo, boxHi));
-
-    const float alpha = wmax / (wmax + n);  // n = 0: the current samples alone
-    const float3 result = max(lerp(history, current, alpha), 0);
-    output[o] = float4(upInverse(result), min(n + wmax, maxWeight));
+    // This frame's value: the narrow kernel's mean; where the history holds little (a new surface), the wide kernel's.
+    const float3 sharp = wsum > 1e-5 ? sum / wsum : wide;
+    const float3 current = lerp(wide, sharp, saturate(n / max(4 * perFrame, 1e-6)));
+    const float alpha = wsum / max(wsum + n, 1e-9);
+    const float3 result = max(lerp(history, current, n > 0 ? alpha : 1.0), 0);
+    output[o] = float4(upInverse(result), min(n + wsum, cap));
 }

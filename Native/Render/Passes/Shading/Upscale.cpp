@@ -98,8 +98,11 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     const FrameContext::Upscale& u = fc.frame.upscale;
     RenderGraph& g = fc.graph;
     const uint32_t w = view.view.width, h = view.view.height, W = u.outputWidth, H = u.outputHeight;
-    const int64_t frames = fc.quality.has("output.upscale_history_frames") ? fc.quality.integer("output.upscale_history_frames") : 24;
-    if (frames < 1 || frames > 256) fail("output.upscale_history_frames must be in [1, 256]");
+    const int64_t frames = fc.quality.has("output.upscale_history_frames") ? fc.quality.integer("output.upscale_history_frames") : 64;
+    const int64_t framesMoving = fc.quality.has("output.upscale_history_frames_moving") ? fc.quality.integer("output.upscale_history_frames_moving") : 8;
+    const double kernel = fc.quality.has("output.upscale_kernel") ? fc.quality.number("output.upscale_kernel") : 60.0;
+    if (frames < 1 || frames > 256 || framesMoving < 1 || framesMoving > frames) fail("output.upscale_history_frames(_moving) must be in [1, 256], moving <= still");
+    if (!(kernel >= 1 && kernel <= 1000)) fail("output.upscale_kernel must be in [1, 1000]");
     UpscaleState& s = fc.state<UpscaleState>("M.upscale");
     s.ensure(fc.device, W, H);
     const bool reset = u.reset || s.fresh;
@@ -137,7 +140,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                   c.computeConstants(k, 24);
                   c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
               });
-    const float ratio = u.exposureRatio, maxWeight = (float)frames;
+    const float ratio = u.exposureRatio, capStill = (float)frames, capMoving = (float)framesMoving, kernelK = (float)kernel;
     ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shading/Upscale");
     g.addPass("m.upscale", QueueType::Graphics,
               [&](PassBuilder& b) {
@@ -149,7 +152,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
               },
               [=](PassContext& c) {
                   const uint32_t k[16] = { c.srv(src), c.srv(depth), c.srv(motion), c.srv(history), c.uav(output), w, h, reset ? 1u : 0u,
-                                           W, H, asUint(jx), asUint(jy), asUint(ratio), asUint(maxWeight), 0, 0 };
+                                           W, H, asUint(jx), asUint(jy), asUint(ratio), asUint(capStill), asUint(capMoving), asUint(kernelK) };
                   c.cmd->SetPipelineState(pso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 16);
