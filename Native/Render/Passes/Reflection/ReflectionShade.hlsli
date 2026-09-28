@@ -160,8 +160,11 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
             const uint e = giFindOrCreate(cache, h, giSurfaceKey(h, s.position, s.normal, footprintLevel), giAnchorAtHit(h, s.position, direction), s.normal, created);
             if (e != GI_ENTRY_PENDING)
             {
-                giTouch(cache, h, e);
-                giRequestHit(cache, h, e);
+                if (cache.Load(h.offHitStamp + e * 4) != h.frame)  // (stamped this frame: touched and requested already, giKeepRead)
+                {
+                    giTouch(cache, h, e);
+                    giRequestHit(cache, h, e);
+                }
             }
         }
         g_giKeepReads = (experiment & 256) == 0;

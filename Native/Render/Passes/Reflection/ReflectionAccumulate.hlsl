@@ -46,6 +46,14 @@ void main(uint2 pixel : SV_DispatchThreadID)
     RWTexture2D<float4> accumOut = ResourceDescriptorHeap[P[2].y];
     RWTexture2D<uint2> keysOut = ResourceDescriptorHeap[P[2].z];
     const float4 current = reflection[pixel];
+    // A tile ReflectionClassify left all K (its validity texel, rows below the view, is 0: ReflectionBegin) has no mode
+    // or value written this frame: no history (its modes and values are not this frame's).
+    if (reflection[uint2(pixel.x / 8, size.y + pixel.y / 8)].a < 0.5)
+    {
+        keysOut[pixel] = uint2(0, 0);
+        accumOut[pixel] = float4(current.rgb, 0);
+        return;
+    }
     Texture2D<uint> modes = ResourceDescriptorHeap[P[0].y];
     const uint mode = reflMode(modes.Load(int3(pixel, 0)));
     Texture2D<uint> visIds = ResourceDescriptorHeap[P[1].x];

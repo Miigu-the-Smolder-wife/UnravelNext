@@ -157,8 +157,11 @@ void GiTraceGen()
             bool known = false;
             if (e != GI_ENTRY_PENDING)
             {
-                giTouch(b, h, e);
-                giRequestHit(b, h, e);
+                if (b.Load(h.offHitStamp + e * 4) != h.frame)  // (stamped this frame: touched and requested already, giKeepRead)
+                {
+                    giTouch(b, h, e);
+                    giRequestHit(b, h, e);
+                }
                 if (!created && b.Load(h.offSh + e * GI_SH_STRIDE + GI_SH_UPDATES) != 0)
                 {
                     float unused;

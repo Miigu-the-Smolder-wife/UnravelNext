@@ -34,10 +34,13 @@ void ReflectionLocalShadowGen()
     hit.pad = 0;
     if (hit.instance == RT_INSTANCE_EMITTER) return;
     const RtSceneSrvs scene = rtScene();
-    const RtSurface s = rtSurface(scene, hit, reflRayOrigin(j.s), dir);
+    // The sample needs only the hit point (rtSurface's position, origin + direction t): drawn before the surface is
+    // rebuilt, so hits whose sample casts no shadow skip the rebuild.
+    const float3 origin = reflRayOrigin(j.s);
     const uint seed = reflLocalSeed(owner);
-    const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(seed), giUnit(seed + 1), giUnit(seed + 2), 0);  // the choice only
+    const RtLocalSample ls = rtLocalLightSample(scene, origin + dir * hit.t, giUnit(seed), giUnit(seed + 1), giUnit(seed + 2), 0);  // the choice only
     if (!ls.valid || !ls.castShadow) return;
+    const RtSurface s = rtSurface(scene, hit, origin, dir);
     // A sample below the hit's shading normal adds nothing to the hit (rtLocalLightBrdfCos is 0 for N.L <= 0 unless the
     // material is Foliage, which transmits): its visibility is not read, no ray (the same s.normal as the shading's).
     if (dot(s.normal, ls.wi) <= 0 && materialClass(loadMaterial(s.material)) != MATERIAL_FOLIAGE) return;

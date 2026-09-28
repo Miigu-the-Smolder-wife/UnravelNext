@@ -229,7 +229,8 @@ ShadowSunClassified shadowSunClassifyAt(ShadowSrvs s, float3 worldPos, float3 no
     const VsmReceiver rc = vsmMakeReceiver(c, worldPos, normal, vsmLevelForFootprint(c, texel));
     uint path;
     const uint cls = vsmSunClassify(r, rc, texel, c.tanSunRadius, o.k, o.reach, path);
-    o.transmittance = shadowSunTransmittanceAt(s, worldPos, footprint, footprint);
+    // (umbra: visibility 0 whatever the thin casters pass; its transmittance is read by nobody)
+    if (cls != VSM_REGION_UMBRA) o.transmittance = shadowSunTransmittanceAt(s, worldPos, footprint, footprint);
     o.penumbra = cls != VSM_REGION_LIT && cls != VSM_REGION_UMBRA;
     o.visibility = cls == VSM_REGION_LIT ? o.transmittance : 0;
     return o;
