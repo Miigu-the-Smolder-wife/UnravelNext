@@ -31,6 +31,9 @@ struct HarnessOptions
     std::string label;
     std::filesystem::path outputDirectory;  // empty = no files
     bool writePassCsv = true;
+    // Workload counters of the run (RENDERER_REDESIGN P0: the quantities the cost formulas use), called after the last
+    // frame: JSON members ("key": value, ...) written as the result's "workload" object; empty = none.
+    std::function<std::string()> extraJson;
 };
 
 struct Distribution

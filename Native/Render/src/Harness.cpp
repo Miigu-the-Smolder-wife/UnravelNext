@@ -294,6 +294,7 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
         js << " \"resolution\": " << jsonString(format("%ux%u", resolution.width, resolution.height)) << ",\n";
         js << " \"quality_sha256\": " << jsonString(m_quality.hash()) << ",\n";
         js << " \"quality_file\": " << jsonString(m_quality.origin()) << ",\n";
+        if (options.extraJson) js << " \"workload\": {" << options.extraJson() << "},\n";
         js << " \"build\": {\"commit\": " << jsonString(UNX_BUILD_COMMIT) << ", \"dirty\": " << (UNX_BUILD_DIRTY ? "true" : "false") << ", \"diff_sha256\": " << jsonString(UNX_BUILD_DIFF_SHA256) << "},\n";
         js << " \"adapter\": " << jsonString(caps.adapter) << ", \"driver\": " << jsonString(caps.driver) << ",\n";
         js << " \"d3d12core\": " << jsonString(caps.runtimeVersion) << ", \"agility_package\": " << jsonString(UNX_AGILITY_PACKAGE_VERSION) << ",\n";

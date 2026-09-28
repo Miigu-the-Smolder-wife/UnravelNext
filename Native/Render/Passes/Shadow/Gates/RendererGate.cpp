@@ -23,6 +23,12 @@
 #include "VsmSystem.h"
 #include "../../Atmosphere/Celestial.h"
 
+#if __has_include("unx/refl/ReflectionSystem.h")
+#include "unx/refl/ReflectionSystem.h"
+#endif
+#if __has_include("unx/gi/GiSystem.h")
+#include "unx/gi/GiSystem.h"
+#endif
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/render/FrameRenderer.h"
@@ -267,6 +273,40 @@ int main(int argc, char** argv)
             double dirtySum = 0, trianglesSum = 0, requestedSum = 0;
             uint32_t samples = 0, exhausted = 0, requestedMax = 0, overTiles = 0, overflowWordsMax = 0, overflowLightsMax = 0;
             uint64_t lastStatsFrame = 0;
+            uint32_t internalW = 0, internalH = 0;  // the main view's render size (the internal resolution when it upscales)
+            // P0 workload (RENDERER_REDESIGN 0.4): the sizes and the counts the cost formulas use, into the result's JSON.
+            options.extraJson = [&]() {
+                std::string js = format("\"output\": \"%ux%u\", \"internal\": \"%ux%u\", \"render_scale\": %.4f", res.width, res.height, internalW, internalH,
+                                        quality.has("output.render_scale") ? quality.number("output.render_scale") : 1.0);
+                js += format(", \"vsm_dirty_pages_mean\": %.1f, \"vsm_raster_triangles_mean\": %.0f, \"vsm_requested_mean\": %.1f, \"vsm_requested_max\": %u, "
+                             "\"vsm_exhausted_frames\": %u, \"overflow_lights_max\": %u",
+                             samples ? dirtySum / samples : 0.0, samples ? trianglesSum / samples : 0.0, samples ? requestedSum / samples : 0.0, requestedMax, exhausted,
+                             overflowLightsMax);
+                const shadow::VsmStats& vs = shadow::stats(renderer.trackState());
+                js += format(", \"vsm_cached_pages\": %u, \"vsm_local_active\": %u, \"vsm_paths\": [%u, %u, %u, %u, %u, %u, %u]", vs.cachedPages, vs.localActive,
+                             vs.pathNoCaster, vs.pathRegionLit, vs.pathRegionUmbra, vs.pathSearchLit, vs.pathFiltered, vs.pathDiskLit, vs.pathDiskUmbra);
+                js += format(", \"froxel_light_entries\": %u", shadow::froxelStats(renderer.trackState()).indexCount);
+#if __has_include("unx/refl/ReflectionSystem.h")
+                if (refl::ReflectionSystem* rs = refl::ReflectionSystem::find(renderer.trackState()))
+                {
+                    const refl::ReflectionSystem::Stats st = rs->readStats();
+                    const uint32_t raysPerSample = (uint32_t)quality.integer("reflection.g_rays_per_sample");
+                    js += format(", \"reflection_jobs\": %u, \"reflection_mirror_jobs\": %u, \"reflection_glossy_jobs\": %u, \"reflection_glossy_pixels\": %u, "
+                                 "\"reflection_primary_rays\": %u, \"reflection_planar_views\": %u, \"reflection_planar_pixels\": %u",
+                                 st.jobs, st.mirrorJobs, st.glossyJobs, st.glossyPixels, st.mirrorJobs + st.glossyJobs * raysPerSample, st.planarViews, st.planarPixels);
+                }
+#endif
+#if __has_include("unx/gi/GiSystem.h")
+                if (gi::GiSystem* gs = gi::GiSystem::find(renderer.trackState()))
+                {
+                    const gi::GiStats st = gs->readStats();
+                    js += format(", \"gi_live_entries\": %u, \"gi_requested\": %u, \"gi_selected_updates\": %u, \"gi_primary_rays\": %u, \"gi_background\": %u, "
+                                 "\"gi_reflection_hit_lookups\": %u",
+                                 st.live, st.requested, st.selected, st.selected * 64u, st.background, st.hitLookups);
+                }
+#endif
+                return js;
+            };
             const HarnessResult r = harness.run(res, options, [&](RenderGraph& g, const Resolution& rr, uint64_t frame) {
                 FrameContext fc;
                 fc.frameIndex = frame;
@@ -305,6 +345,8 @@ int main(int argc, char** argv)
                 const TextureRef output = g.createTexture({ "gate output", rr.width, rr.height, 1, 1,
                                                             fc.outputLinearHdr ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R10G10B10A2_UNORM });
                 const ViewResources rendered = renderer.record(g, fc, output);
+                internalW = rendered.view.width;
+                internalH = rendered.view.height;
                 if (!capturePath.empty())
                 {
                     if (captureUpscaled && !rendered.upscaled.valid())
