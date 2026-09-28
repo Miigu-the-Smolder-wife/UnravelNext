@@ -132,8 +132,11 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
                                           float3(giDitherUnit(re), giDitherUnit(re + 1), giDitherUnit(re + 2))));
     }
 
-    // SH: lanes 0..8, one coefficient each (three channels), in the world frame.
-    if (lane < 9)
+    // SH: lanes 96..104, one coefficient each (three channels), in the world frame. (The last wave's lanes: the map below
+    // takes lanes 0..80, so the two loops run on different waves at the same time instead of one after the other on the
+    // first; the same loop per coefficient, bit-identical.)
+    const uint shLane = lane - 96u;
+    if (lane >= 96u && shLane < 9)
     {
         float3 c = 0;
         [loop] for (uint k = 0; k < 2 * GI_TEXEL_COUNT; ++k)
@@ -141,10 +144,10 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
             const float3 d = gs_local[k];
             float y[9];
             giShBasis(t * d.x + bt * d.y + na * d.z, y);
-            c += gs_sample[k].xyz * (y[lane] * gs_sample[k].w);
+            c += gs_sample[k].xyz * (y[shLane] * gs_sample[k].w);
         }
-        const float a = lane == 0 ? GI_PI : (lane < 4 ? 2 * GI_PI / 3 : GI_PI / 4);
-        gs_sh[lane] = c * a;
+        const float a = shLane == 0 ? GI_PI : (shLane < 4 ? 2 * GI_PI / 3 : GI_PI / 4);
+        gs_sh[shLane] = c * a;
     }
     // Irradiance map: lanes 0..80, one direction each.
     if (lane < GI_IRR_N * GI_IRR_N)
