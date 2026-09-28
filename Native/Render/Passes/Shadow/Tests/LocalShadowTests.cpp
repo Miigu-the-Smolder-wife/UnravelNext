@@ -376,24 +376,41 @@ int main(int argc, char** argv)
                     const uint32_t past = count > 3 ? count - 3 : 0;  // every light of this scene casts shadows
                     const uint32_t head = word(heads, (y / 8) * ph + (x / 8) * 4ull);
                     uint32_t block = 0, pw = 0;
+                    bool unlisted = false;  // head 0 with lights past the third: none of them may reach the pixel
                     if (past)
                     {
                         if (head == 0)
                         {
-                            ++missing;
-                            continue;
+                            // A tile is listed only when a light past the third can shade one of its pixels
+                            // (shadowLocalCanShadow: within its reach, farM >= range): here every such light is out of
+                            // reach (M takes 1 for them), or the tile is missing.
+                            for (uint32_t k = 3; k < count && !unlisted; ++k)
+                            {
+                                const uint32_t iw = word(lists, indexBase + ((first + k) >> 1) * 4ull);
+                                const scene::Light& l = sc.lights.at(((first + k) & 1 ? iw >> 16 : iw & 0xFFFF) & 0x7FFF);
+                                if (length(l.position - p) < l.range) unlisted = true;
+                            }
+                            if (unlisted)
+                            {
+                                ++missing;
+                                continue;
+                            }
+                            unlisted = true;
                         }
                         if (head == 0xFFFFFFFFu)
                         {
                             ++overCapacity;
                             continue;
                         }
-                        block = head - 1;
-                        pw = word(overflow, (block + (y % 8) * 8 + x % 8) * 4ull);
+                        if (!unlisted)
+                        {
+                            block = head - 1;
+                            pw = word(overflow, (block + (y % 8) * 8 + x % 8) * 4ull);
+                        }
                     }
                     else if (head != 0 && head != 0xFFFFFFFFu)
                         pw = word(overflow, (head - 1 + (y % 8) * 8 + x % 8) * 4ull);
-                    if ((pw >> 24) != past)
+                    if (!unlisted && (pw >> 24) != past)
                     {
                         if (badCount++ < verbose) logf("  px (%u,%u): list has %u lights, overflow word count %u\n", x, y, count, pw >> 24);
                         continue;
@@ -405,6 +422,7 @@ int main(int argc, char** argv)
                         const scene::Light& l = sc.lights.at(li);
                         const float3 toLight = l.position - p;
                         if (length(toLight) > l.range * 0.95f || dot(n, normalize(toLight)) < 0.05f) continue;
+                        if (unlisted && k >= 3) continue;  // (out of reach: not reached here)
                         float gpu;
                         if (k < 3)
                             gpu = ((packed >> (8 * (k + 1))) & 0xFF) / 255.0f;

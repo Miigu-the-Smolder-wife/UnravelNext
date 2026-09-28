@@ -100,6 +100,19 @@ float shadowLocalVisibilityAtReceiver(ShadowSrvs s, uint lightIndex, ShadowPixel
     return vsmLocalVisibility(r, lights[slot], slot, rc.world, rc.normal, rc.footprint, c.receiverBiasTexels, c.maxReceiverSlope, c.searchTaps,
                               c.filterTaps);
 }
+// Whether shadowLocalVisibilityAtReceiver can be anything but 1 at world: the light has a shadow slot and the point is
+// within its reach and beyond its near plane (vsmLocalVisibility's early outs, the same expressions).
+bool shadowLocalCanShadow(ShadowSrvs s, uint lightIndex, float3 world)
+{
+    StructuredBuffer<uint> slotOf = ResourceDescriptorHeap[s.pad0];
+    const uint slot = slotOf[lightIndex];
+    if (slot == VSM_LOCAL_NONE) return false;
+    StructuredBuffer<VsmLocalLight> lights = ResourceDescriptorHeap[s.lights];
+    const VsmLocalLight l = lights[slot];
+    const float3 dl = world - l.position;
+    if (dot(dl, dl) >= l.farM * l.farM) return false;
+    return vsmLocalProject(l, world).z > l.nearM;
+}
 float shadowLocalVisibilityAtPixel(ShadowSrvs s, uint lightIndex, uint2 pixel, uint depthSrv, uint gbufferSrv)
 {
     const ShadowPixelReceiver rc = shadowPixelReceiver(pixel, depthSrv, gbufferSrv);

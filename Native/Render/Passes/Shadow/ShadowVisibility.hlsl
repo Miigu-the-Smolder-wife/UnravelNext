@@ -8,8 +8,9 @@
 // the reach square all below or all above the receiver's plane) and compacts the rest into a list for pass 2
 // (ShadowPenumbra.hlsl, indirect).
 // PATHS=1 (diagnostics): writes each pixel's VSM_PATH_* (0xFF = sky) instead of the visibility.
-// Shadow-casting lights past the third (INTERFACES 7.3 overflow list, v1.20): each pixel counts them (list only, no VSM
-// taps); a tile (= this 8x8 group = M's shading tile) without any writes its shadowOverflowTiles head 0, a tile with some
+// Shadow-casting lights past the third (INTERFACES 7.3 overflow list, v1.20): each pixel looks for one that can shade it
+// (shadowLocalCanShadow: a slot, within reach, beyond the near plane; no VSM taps); a tile (= this 8x8 group = M's
+// shading tile) without any writes its shadowOverflowTiles head 0 (M then takes 1, what each would store), a tile with some
 // goes to the overflow tile list, whose tiles ShadowOverflow.hlsl allocates and evaluates.
 // P[0].x depth SRV, P[0].y G-buffer SRV (RG32_UINT), P[0].z output UAV (R32_UINT), P[0].w VSM constants CBV
 // P[1].x overflow tile list UAV (raw: count, dispatch args, tiles y << 16 | x; 0xFFFFFFFF: no overflow list in this view),
@@ -88,18 +89,24 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
         pr.normal = normal;
         pr.footprint = footprint;
         pr.valid = 1;
-        uint ordinal = 0;
+        uint ordinal = 0, live = 0;
         [loop] for (uint i = 0; i < range.y; ++i)
         {
             const uint li = froxelLight(f, range.x + i);
             if (!lightCastsShadow(loadLight(li))) continue;
             ++ordinal;
-            if (ordinal > 3) continue;  // counted for the overflow list (ShadowOverflow.hlsl evaluates it)
+            // Past the third: the tile goes to the overflow list (ShadowOverflow.hlsl evaluates every such light) only
+            // when one of them can be below 1 here; otherwise its head 0 gives M exactly the 1 each would store (255).
+            if (ordinal > 3)
+            {
+                if (live == 0 && shadowLocalCanShadow(ss, li, world)) live = 1;
+                continue;
+            }
             // No shadow slot (more than 128 casting lights): 1, stored 255.
             const float v = shadowLocalVisibilityAtReceiver(ss, li, pr);
             local = (local & ~(0xFFu << (8 * ordinal))) | ((uint)round(saturate(v) * 255.0) << (8 * ordinal));
         }
-        overflow = ordinal > 3 ? ordinal - 3 : 0;
+        overflow = live;
     }
     // Thin casters (transmittance layer, v1.26): T at the receiver over the reach of its settled class.
     float sunT = 1;
