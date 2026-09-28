@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: PHASE=1,2 SOURCE=0,1
+// unx-variants: PHASE=1,2 SOURCE=0,1,2
 // Instance culling. PHASE=1 SOURCE=0: the run's flat instances (CullScene: dynamic and skinned instances, and every
 // instance outside a chunk) x every view (dispatch y = view); PHASE=1 SOURCE=1: one group per visible chunk item
 // (CullChunks PHASE=1), its members (<= CHUNK_INSTANCES: four passes of 64). Frustum + clip plane, raster-service tile
@@ -82,21 +82,24 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint lane : SV
 #if PHASE == 1 && SOURCE == 0
     const CullView v0 = loadView(min(id.y, VIEW_COUNT - 1));
     const CullScene cs = loadCullScene(v0.cullSceneSrv);
-    // The flat list, then the C2b runtime instances (added between frames, no scene revision), then the GPU-written ones
-    // (the dispatch covers their capacity; threads past the live count do nothing).
+    // The flat list, then the C2b runtime instances (added between frames, no scene revision). The GPU-written ones:
+    // SOURCE=2 (indirect, from their live count).
     const uint cpuCount = cs.flatCount + v0.runtimeCount;
-    const bool valid = id.y < VIEW_COUNT && (id.x < cpuCount || id.x - cpuCount < gpuInstanceCount(v0));
+    const bool valid = id.y < VIEW_COUNT && id.x < cpuCount && !cullViewTilesEmpty(v0, id.y);
     uint instance = 0;
     if (valid && id.x < cs.flatCount)
     {
         StructuredBuffer<uint> flat = ResourceDescriptorHeap[cs.flatSrv];
         instance = flat[id.x];
     }
-    else if (valid && id.x < cpuCount)
-        instance = v0.runtimeFirst + (id.x - cs.flatCount);
     else if (valid)
-        instance = v0.gpuFirst + (id.x - cpuCount);
+        instance = v0.runtimeFirst + (id.x - cs.flatCount);
     cullInstance(state, instance, id.y, valid);
+#elif PHASE == 1 && SOURCE == 2
+    // The GPU-written instances (A3 mesh particles): ceil(live / 64) x views groups (CullReset, VA_GPU_INSTANCES).
+    const CullView v0 = loadView(min(id.y, VIEW_COUNT - 1));
+    const bool valid = id.y < VIEW_COUNT && id.x < gpuInstanceCount(v0) && !cullViewTilesEmpty(v0, id.y);
+    cullInstance(state, valid ? v0.gpuFirst + id.x : 0, id.y, valid);
 #elif PHASE == 1
     // One group per chunk item: the item and the chunk are uniform over the group.
     const uint item = gid.x + gid.y * 65535u;

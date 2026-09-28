@@ -74,7 +74,7 @@ constexpr uint32_t kBandLists = 6;  // lists of the cull bands (the depth raster
 constexpr uint32_t kAListCount = 4;  // lists drawn by the vis buffer raster
 
 // Indirect argument words.
-constexpr uint32_t kArgNodes = 0, kArgGroups = 3, kArgDeferredClusters = 6, kArgDeferredInstances = 9, kArgSeedNodes = 12, kArgCovMesh = 33,
+constexpr uint32_t kArgNodes = 0, kArgGroups = 3, kArgDeferredClusters = 6, kArgDeferredInstances = 9, kArgSeedNodes = 12, kArgGpuInstances = 15, kArgCovMesh = 33,
                    kArgCovClear = 36, kArgCovRecords = 39, kArgChunkItems = 42, kArgDeferredChunks = 45, kArgMesh = 48, kArgCovTMesh = 72, kArgWords = 78;
 
 // Band modes of a cull run (CullShared.hlsli BAND_MODE_*): A = every band in the band A lists (raster service, secondary

@@ -68,6 +68,18 @@ TileMasks tileMasks()
     return m;
 }
 
+// A raster-service view whose tile mask has no tile set (its coarse words all 0): every cluster of it fails the tile
+// test (CullClusters), so nothing of it is drawn; the instance and chunk passes drop it at once (static frames with the
+// shadow page caches leave every local-light view empty). False without a mask. Uniform over a group (one view).
+bool cullViewTilesEmpty(CullView v, uint view)
+{
+    if (TILE_MASK_SRV == UNX_NONE || TILE_COARSE_SRV == UNX_NONE || v.cullMaskOffset == UNX_NONE) return false;
+    ByteAddressBuffer coarse = ResourceDescriptorHeap[TILE_COARSE_SRV];
+    uint any = 0;
+    [loop] for (uint w = 0; w < TILE_COARSE_WORDS; ++w) any |= coarse.Load(4 * (view * TILE_COARSE_WORDS + w));
+    return any == 0;
+}
+
 // Raster-service tile mask test of a bounding sphere (true without a mask).
 bool tileVisible(CullView v, uint view, float4 s) { return TILE_MASK_SRV == UNX_NONE || tileMaskCovered(v, view, tileMasks(), s); }
 

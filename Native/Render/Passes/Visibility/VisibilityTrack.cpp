@@ -926,7 +926,9 @@ void cullPhase(FramePassContext& fc, State& s, const Run& r, uint32_t phase)
             cullPass(fc, s, r, "chunks.p1", "Passes/Visibility/CullChunks.PHASE1", phase, (r.chunkCount + 63) / 64, r.viewCount, 0);
         const uint32_t runtime = (uint32_t)fc.scene.instances().size() - fc.scene.staticInstanceCount();  // C2b
         const uint32_t gpuCapacity = fc.scene.gpuInstanceRange().capacity;  // A3 mesh particles (count on the GPU)
-        cullPass(fc, s, r, "instances.p1", "Passes/Visibility/CullInstances.PHASE1.SOURCE0", phase, std::max((r.flatCount + runtime + gpuCapacity + 63) / 64, 1u), r.viewCount, 0);
+        cullPass(fc, s, r, "instances.p1", "Passes/Visibility/CullInstances.PHASE1.SOURCE0", phase, std::max((r.flatCount + runtime + 63) / 64, 1u), r.viewCount, 0);
+        // (their live count on the GPU sizes the dispatch: CullReset's VA_GPU_INSTANCES)
+        if (gpuCapacity > 0) cullPass(fc, s, r, "instances.gpu.p1", "Passes/Visibility/CullInstances.PHASE1.SOURCE2", phase, 0, 0, kArgGpuInstances);
         if (r.chunkCount > 0)
         {
             cullPass(fc, s, r, "prepare.chunks.p1", "Passes/Visibility/CullPrepare.MODE4", phase, 1, 1, 0);

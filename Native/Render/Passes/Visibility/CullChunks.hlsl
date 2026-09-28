@@ -25,8 +25,9 @@ void main(uint3 id : SV_DispatchThreadID)
 #if PHASE == 1
     chunk = id.x;
     view = id.y;
-    const CullScene cs = loadCullScene(loadView(min(view, VIEW_COUNT - 1)).cullSceneSrv);
-    valid = chunk < cs.chunkCount && view < VIEW_COUNT;
+    const CullView cv = loadView(min(view, VIEW_COUNT - 1));
+    const CullScene cs = loadCullScene(cv.cullSceneSrv);
+    valid = chunk < cs.chunkCount && view < VIEW_COUNT && !cullViewTilesEmpty(cv, view);
 #else
     const uint count = min(state.Load(4 * VS_DEFER_CHUNKS), CAP_DEFERRED);
     valid = id.x < count;

@@ -146,7 +146,8 @@ uint skinSlot(CullScene cs, uint instance)
 #define VA_DEFERRED_CLUSTERS 6u
 #define VA_DEFERRED_INSTANCES 9u
 #define VA_SEED_NODES 12u
-                              // words 15 .. 32: unused
+#define VA_GPU_INSTANCES 15u  // phase 1 over the live GPU-written instances (CullReset: ceil(live / 64) x views)
+                              // words 18 .. 32: unused
 #define VA_COV_MESH 33u       // coverage raster: every band B list entry (both phases)
 #define VA_COV_CLEAR 36u      // tile clear over last frame's coverage tiles (one group per tile)
 #define VA_COV_RECORDS 39u    // count and scatter over the stored stream entries (one group per COV_BLOCK)
