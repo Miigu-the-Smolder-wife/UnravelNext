@@ -68,9 +68,12 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         }
         if (o.needsShadowRay)
         {
+            // queued from the shadow queue's top, one atomic per wave (as the penumbra queue)
             sun = o.sunTerm;
-            uint index;
-            rays.InterlockedAdd(8, 1u, index);
+            const uint lanes = WaveActiveCountBits(true), before = WavePrefixCountBits(true);
+            uint first = 0;
+            if (WaveIsFirstLane()) rays.InterlockedAdd(8, lanes, first);
+            const uint index = WaveReadLaneFirst(first) + before;
             rays.Store4(reflRaysShadowOffset(capacity, index), uint4(asuint(o.shadowOrigin), slot));  // index < slots <= capacity
         }
     }

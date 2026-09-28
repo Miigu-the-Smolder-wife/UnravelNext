@@ -29,19 +29,13 @@
 // previous transform of the object-space point). Static instances: 0.
 // The time integration keeps n x motion <= reflection.temporal_lobe_shift: the reflected content may move at most that
 // share of the footprint over the window.
-float reflHitMotion(RtSceneSrvs scene, RtHit hit, float footprint)
+// inst, mesh, ri, tri: the hit's records (rtSurfaceParts).
+float reflHitMotion(RtSceneSrvs scene, RtHit hit, GpuInstance inst, GpuMesh mesh, RtInstance ri, RtTriangle tri, float footprint)
 {
-    GpuInstance inst;
-    GpuMesh mesh;
-    RtGeometry g;
-    rtMaterial(scene, hit, inst, mesh, g);
-    RtGeometry unused;
-    const RtInstance ri = rtResolve(scene, hit, unused);
     const bool deformed = (ri.flags & RT_INSTANCE_DEFORMED) != 0;
     if (!deformed && all(inst.objectToWorld[0] == inst.prevObjectToWorld[0]) && all(inst.objectToWorld[1] == inst.prevObjectToWorld[1]) &&
         all(inst.objectToWorld[2] == inst.prevObjectToWorld[2]))
         return 0;
-    const RtTriangle tri = rtTriangle(scene, g, hit.primitive);
     const float3 w = rtBary(hit.barycentrics);
     float3 delta;
     if (deformed)
@@ -127,9 +121,13 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
             InterlockedAdd(counts[deformedIndex], 1u);
         }
     }
-    const RtSurface s = rtSurface(scene, hit, origin, direction);
+    GpuInstance hitInst;
+    GpuMesh hitMesh;
+    RtInstance hitRi;
+    RtTriangle hitTri;
+    const RtSurface s = rtSurfaceParts(scene, hit, origin, direction, hitInst, hitMesh, hitRi, hitTri);
     const float footprint = coneWidth + hit.t * coneSpread;
-    o.motion = reflHitMotion(scene, hit, footprint);
+    o.motion = reflHitMotion(scene, hit, hitInst, hitMesh, hitRi, hitTri, footprint);
     GpuMaterial m = loadMaterial(s.material);
     if ((experiment & 8) == 0)
     {

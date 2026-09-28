@@ -165,17 +165,18 @@ struct RtSurface
     bool frontFace;
 };
 
-RtSurface rtSurface(RtSceneSrvs s, RtHit h, float3 origin, float3 direction)
+// With the records it read (a caller needing more of the hit, e.g. its motion, does not load them again).
+RtSurface rtSurfaceParts(RtSceneSrvs s, RtHit h, float3 origin, float3 direction, out GpuInstance inst, out GpuMesh mesh, out RtInstance ri,
+                         out RtTriangle tri)
 {
-    GpuInstance inst;
-    GpuMesh mesh;
     RtGeometry g;
     RtSurface o;
-    o.material = rtMaterial(s, h, inst, mesh, g);
-    RtGeometry unused;
-    const RtInstance ri = rtResolve(s, h, unused);
+    ri = rtResolve(s, h, g);
+    inst = loadInstance(ri.sceneInstance);
+    mesh = loadMesh(inst.mesh);
+    o.material = instanceMaterial(inst, loadSubmesh(mesh.submeshOffset + g.submesh), g.submesh);  // rtMaterial
     o.sceneInstance = ri.sceneInstance;
-    const RtTriangle tri = rtTriangle(s, g, h.primitive);
+    tri = rtTriangle(s, g, h.primitive);
     const float3 w = rtBary(h.barycentrics);
     float3 p0, p1, p2, n;
     if ((ri.flags & RT_INSTANCE_DEFORMED) != 0)
@@ -210,6 +211,14 @@ RtSurface rtSurface(RtSceneSrvs s, RtHit h, float3 origin, float3 direction)
         o.normal = n;
     }
     return o;
+}
+RtSurface rtSurface(RtSceneSrvs s, RtHit h, float3 origin, float3 direction)
+{
+    GpuInstance inst;
+    GpuMesh mesh;
+    RtInstance ri;
+    RtTriangle tri;
+    return rtSurfaceParts(s, h, origin, direction, inst, mesh, ri, tri);
 }
 
 // Alpha test of a hit candidate (any-hit). INTERFACES 8.1: opaque when baseColor texture alpha >= alphaCutoff.
