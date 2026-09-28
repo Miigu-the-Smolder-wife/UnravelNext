@@ -1,7 +1,8 @@
-// Temporal upscale of M (user decision 2026-09-28: internal resolution + temporal upscale for the 4K budget;
-// output.render_height_max, FrameContext::Upscale set by FrameRenderer::setupUpscale). Above render_height_max the main
-// view renders at that height with a Halton (2, 3) sub-pixel jitter of its projection; every system of the frame sees
-// that internal view. After the shading chain (haze, motion blur, depth of field at the internal resolution) two passes
+// Temporal upscale of M (user decisions 2026-09-28: internal resolution + temporal upscale for the 4K budget, then for
+// 1440p and 1080p; output.render_scale, output.render_height_max, FrameContext::Upscale set by
+// FrameRenderer::setupUpscale). The main view renders at the output height x render_scale (at most render_height_max)
+// with a Halton (2, 3) sub-pixel jitter of its projection; every system of the frame sees that internal view, and M's
+// texture footprints are the output pixel's (FrameConstants::upscaleRatio). After the shading chain (haze, motion blur, depth of field at the internal resolution) two passes
 // reconstruct the output resolution:
 //   m.upscale.motion  per internal sample, the output-UV motion to the previous frame's unjittered view
 //                     (UpscaleMotion.hlsl: the vis buffer's triangle in its previous-tick vertices);
@@ -10,7 +11,7 @@
 //                     against the history's weight (Upscale.hlsl).
 // The output (RGBA16F at the output resolution, persistent ping-pong) is the post chain's input and the next frame's
 // history. Cost per output pixel is fixed (9 colour + 9 depth loads, 1 motion load, 5 bilinear history taps); the
-// shading, reflections, GI screen passes, shadows' projections and resolve run on 0.44 of the 4K pixels (1440p).
+// shading, reflections, GI screen passes, shadows' projections and resolve run on 0.44 of the output pixels (2/3 height).
 #include "unx/shading/Upscale.h"
 
 #include "unx/core/Config.h"

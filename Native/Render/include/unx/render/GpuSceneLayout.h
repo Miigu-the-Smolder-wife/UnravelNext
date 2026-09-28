@@ -288,6 +288,12 @@ struct FrameConstants
     // lights the GPU wrote this frame at lights[lightCount, lightCount + F) (kNone: no FX light tail); fxLightCapacity:
     // F_max, the tail's size (readers use min(F, fxLightCapacity)). lightCount + fxLightCapacity <= 32768.
     uint32_t materialLayers, coatTable, fxLightCount, fxLightCapacity;
+    // Temporal upscale (output.render_scale, FrameContext::Upscale): upscaleRatio = the main view's internal / output
+    // height while it renders below the output (0 = native; every other view 0). M's texture footprints are taken over
+    // the output pixel (x upscaleRatio, the temporal upsamplers' mip bias log2 ratio): the upscale accumulates the
+    // jittered internal samples into output pixels, which then show the native resolution's texture detail.
+    float upscaleRatio;
+    uint32_t pad0, pad1, pad2;
 };
-static_assert(sizeof(FrameConstants) == 576);
+static_assert(sizeof(FrameConstants) == 592);
 } // namespace unx::render::gpu

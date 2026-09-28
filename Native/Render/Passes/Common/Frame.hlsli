@@ -36,6 +36,8 @@ cbuffer FrameConstants : register(b1)
     uint g_terrainLayers;                           // v1.74 Terrain-class material layers (Scene.hlsli GpuTerrainLayer)
     uint g_materialLayers, g_coatTable;  // v1.76 A9 layer records, coat tables (MaterialModel.hlsli)
     uint g_fxLightCount, g_fxLightCapacity;  // v1.79 A3 FX lights: StructuredBuffer<uint> [0] = F at lights[g_lightCount..) (kNone: none), F_max
+    float g_upscaleRatio;  // internal / output height of an upscaled main view, 0 = native (GpuSceneLayout.h)
+    uint g_framePad0, g_framePad1, g_framePad2;
 };
 
 // Reversed-Z infinite projection: device depth d = near / viewDistance (1 at the near plane, 0 = sky).

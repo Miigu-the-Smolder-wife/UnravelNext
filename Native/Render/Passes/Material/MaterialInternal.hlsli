@@ -70,10 +70,20 @@ struct MTextureSet
     uint flags, coverage;
 };
 
-// Footprint-filtered sample with the texture's addressing (MTextureSet.flags / gpu::Material.textureClamp bit).
-float4 mSampleGrad(Texture2D<float4> t, bool clampAddress, float2 uv, float2 duvdx, float2 duvdy)
+// Scale of M's texture footprints: the output pixel's share of the view's pixel (g_upscaleRatio: an upscaled main view's
+// internal / output height; 1 when the view renders at its output resolution). The upscale reconstructs output pixels
+// from jittered internal samples, so the footprint of an output pixel gives the native resolution's texture detail.
+float mFootprintScale() { return g_upscaleRatio > 0 ? g_upscaleRatio : 1.0; }
+float4 mSampleGradRaw(Texture2D<float4> t, bool clampAddress, float2 uv, float2 duvdx, float2 duvdy)
 {
     return clampAddress ? t.SampleGrad(g_anisoClamp, uv, duvdx, duvdy) : t.SampleGrad(g_anisoWrap, uv, duvdx, duvdy);
+}
+// Footprint-filtered sample with the texture's addressing (MTextureSet.flags / gpu::Material.textureClamp bit); duvdx /
+// duvdy per view pixel (mFootprintScale applied here).
+float4 mSampleGrad(Texture2D<float4> t, bool clampAddress, float2 uv, float2 duvdx, float2 duvdy)
+{
+    const float k = mFootprintScale();
+    return mSampleGradRaw(t, clampAddress, uv, duvdx * k, duvdy * k);
 }
 
 #define M_TEX_BASE_COLOR 1u
@@ -104,7 +114,9 @@ struct MSlopeMoments
 
 MSlopeMoments mNormalMoments(Texture2D<float4> t, float2 uv, float2 duvdx, float2 duvdy, float S, bool clampAddress)
 {
-    const float4 m = mSampleGrad(t, clampAddress, uv, duvdx, duvdy);
+    duvdx *= mFootprintScale();  // (per view pixel in, over the output pixel from here: mSampleGrad)
+    duvdy *= mFootprintScale();
+    const float4 m = mSampleGradRaw(t, clampAddress, uv, duvdx, duvdy);
     uint w, h;
     t.GetDimensions(w, h);
     const float2 size = float2(w, h);

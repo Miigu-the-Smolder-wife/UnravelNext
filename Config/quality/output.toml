@@ -10,10 +10,14 @@ resolutions = ["3840x2160", "2560x1440"]
 # banded at 4K / 8 = 1036800 (8 bands at 4K, 4 at 1440p) M measured city 4K 6.725 -> 6.800 ms (shading is latency-bound,
 # the L2 hits do not pay for the per-band barriers yet). Measure again at 1036800 when shading nears its floor.
 band_pixels = 0
-# Temporal upscale (user decision 2026-09-28: internal resolution + temporal upscale for the 4K budget): above this
-# output height the main view renders at this height (same aspect) with a sub-pixel jitter, and M's temporal upscale
-# (Passes/Shading/Upscale.cpp) reconstructs the output resolution before the post chain. 0 = off (native everywhere).
-# 1440: 4K renders 2560 x 1440 (0.44 of the pixels); 1440p and below stay native.
+# Temporal upscale (user decisions 2026-09-28: internal resolution + temporal upscale for the 4K budget, then for 1440p
+# and 1080p as well): outputs of at least render_scale_min_height render the main view at output height x render_scale,
+# at most render_height_max (same aspect), with a sub-pixel jitter, and M's temporal upscale
+# (Passes/Shading/Upscale.cpp) reconstructs the output resolution before the post chain; M's texture footprints are
+# those of the output pixel (FrameConstants::upscaleRatio). render_scale 1 = off (native everywhere).
+# 2/3: 4K renders 2560 x 1440, 1440p 1707 x 960, 1080p 1280 x 720 (0.44 of the pixels); outputs below 1080 stay native.
+render_scale = 0.6667
+render_scale_min_height = 1080
 render_height_max = 1440
 # The upscale's history: at most this many frames' weight (a running mean of the jittered samples, clamped to the current
 # neighbourhood in YCoCg). The Halton cycle is ceil(8 x output / internal pixels) frames (18 at 4K from 1440p).

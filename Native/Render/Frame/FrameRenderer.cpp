@@ -115,6 +115,10 @@ D3D12_GPU_VIRTUAL_ADDRESS FrameRenderer::allocateFrameConstants(const FrameConte
     gpu::FrameConstants c = frameConstants(m_scene, frame, view);
     c.debugDraw = m_debugDraw;
     c.viewModelScale = view.kind == gpu::ViewKind::Main ? m_viewModelScale : 1.0f;  // other views see the true geometry
+    // (the main view renders below the output: its texture footprints over the output pixel, GpuSceneLayout.h)
+    const bool upscaled = frame.upscale.outputHeight > view.height && view.kind == gpu::ViewKind::Main && view.width == frame.mainView.width &&
+                          view.height == frame.mainView.height;
+    c.upscaleRatio = upscaled ? (float)view.height / (float)frame.upscale.outputHeight : 0.0f;
     std::memcpy(m_mapped + offset, &c, sizeof c);
     return m_constants->GetGPUVirtualAddress() + offset;
 }
@@ -215,8 +219,8 @@ static std::vector<ViewResources> auxiliaryViews(FramePassContext& fc, const Fra
     return out;
 }
 
-// Temporal upscale (output.render_height_max): above that output height the main view renders at it (same aspect) with a
-// sub-pixel jitter (Halton 2, 3; a cycle of ceil(8 x output / internal pixels), at most 64, as temporal upsamplers
+// Temporal upscale (output.render_scale, output.render_height_max): the main view renders at the output height x
+// render_scale, at most render_height_max (same aspect), with a sub-pixel jitter (Halton 2, 3; a cycle of ceil(8 x output / internal pixels), at most 64, as temporal upsamplers
 // size theirs), and M's temporal upscale reconstructs the output (Upscale.cpp). Every system of the frame sees the
 // internal view; the previous view-projection is the previous frame's jittered one, so the histories that reproject
 // onto the previous frame's samples (R's reflections and probes, M's) land on them.
@@ -235,17 +239,23 @@ void FrameRenderer::setupUpscale(FrameContext& frame)
 {
     frame.upscale = FrameContext::Upscale{};
     const int64_t maxHeight = m_quality.has("output.render_height_max") ? m_quality.integer("output.render_height_max") : 0;
+    const double scale = m_quality.has("output.render_scale") ? m_quality.number("output.render_scale") : 1.0;
+    const int64_t minHeight = m_quality.has("output.render_scale_min_height") ? m_quality.integer("output.render_scale_min_height") : 0;
+    if (!(scale > 0 && scale <= 1)) fail("output.render_scale must be in (0, 1]");
     ViewDesc& v = frame.mainView;
-    // (captures (outputLinearHdr: references and gates compare the native image) and debug buffer views (they show the
-    // view's own buffers pixel for pixel) stay native)
-    if (maxHeight <= 0 || v.kind != gpu::ViewKind::Main || v.height <= (uint32_t)maxHeight || v.width == 0 || frame.outputLinearHdr ||
+    // Internal height: the output's x render_scale (outputs of at least render_scale_min_height), at most render_height_max
+    // (0: no cap); native when that is not below the output. (captures (outputLinearHdr: references and gates compare the
+    // native image) and debug buffer views (they show the view's own buffers pixel for pixel) stay native)
+    uint32_t h = v.height == 0 || (int64_t)v.height < minHeight ? v.height : std::max(8u, (uint32_t)std::lround((double)v.height * scale));
+    if (maxHeight > 0) h = std::min(h, (uint32_t)maxHeight);
+    if (maxHeight < 0 || v.kind != gpu::ViewKind::Main || h >= v.height || v.width == 0 || frame.outputLinearHdr ||
         (m_quality.has("debug.view") && m_quality.string("debug.view") != "none"))
     {
         m_upscaleValid = false;
         return;
     }
     const uint32_t W = v.width, H = v.height;
-    const uint32_t h = (uint32_t)maxHeight, w = std::max(8u, (uint32_t)std::lround((double)W * h / H));
+    const uint32_t w = std::max(8u, (uint32_t)std::lround((double)W * h / H));
     const uint32_t cycle = std::min(64u, std::max(8u, (uint32_t)std::ceil(8.0 * ((double)W * H) / ((double)w * h))));
     const uint32_t k = (uint32_t)(frame.frameIndex % cycle) + 1;  // Halton from index 1 (index 0 is the origin)
     const float jx = halton(k, 2) - 0.5f, jy = halton(k, 3) - 0.5f;
