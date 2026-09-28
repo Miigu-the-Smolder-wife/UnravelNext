@@ -109,7 +109,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.screenFilterCells = (float)q.number("gi.screen_filter_cells");
     s.screenUpdateFrames = q.has("gi.screen_update_frames") ? (uint32_t)q.integer("gi.screen_update_frames") : 1;
     s.experimentDisable = (uint32_t)q.integer("gi.experiment_disable");
-    s.deterministic = q.boolean("gi.deterministic");
+    s.deterministic = q.boolean("gi.deterministic") || (q.has("debug.deterministic") && q.boolean("debug.deterministic"));  // (debug.deterministic implies it)
     s.anchorVisibility = q.has("gi.anchor_visibility") ? q.boolean("gi.anchor_visibility") : false;
     // Fixed by the kernels (GiCache.hlsli, GiProbeGather.hlsl, GiInternal.hlsli probe offsets).
     if (q.integer("gi.cache_octahedral_texels") != 8) fail("gi.cache_octahedral_texels must be 8 (GI_TEXELS)");
@@ -605,6 +605,19 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch(dispatch, 1, 1);
               });
+    if (!detState)
+    {
+        // Background updates of the index range into the selected list, then the range emptied (GiBackgroundList.hlsl:
+        // the trace and the integration read one list; each testing the range on its own could disagree).
+        for (const uint32_t mode : { 0u, 1u })
+            g.addPass(mode == 0 ? "r.gi.background" : "r.gi.background.done", QueueType::Compute, [&](PassBuilder& b) { b.use(cache, Use::UavCompute); },
+                      [&shaders, cache, mode, dispatch = groups(s.updatesPerFrame)](PassContext& c) {
+                          const uint32_t k[4] = { c.uav(cache), mode, 0, 0 };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiBackgroundList"));
+                          c.computeConstants(k, 4);
+                          c.cmd->Dispatch(mode == 0 ? dispatch : 1, 1, 1);
+                      });
+    }
     if (detState)
     {
         // Background updates by key priority among the live entries not selected (tier 2), then appended.

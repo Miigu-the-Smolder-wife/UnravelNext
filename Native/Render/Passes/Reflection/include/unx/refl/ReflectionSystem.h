@@ -36,6 +36,10 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     uint32_t statsLogFrames = 0;     // reflection.stats_log_frames: log the GI/reflection counters every N frames (0 = off)
     uint32_t temporalHistoryMax = 0; // reflection.temporal_history_max: running mean over at most this many frames
     float temporalLobeShift = 0;     // reflection.temporal_lobe_shift: reflected-direction travel over the window / lobe
+    // debug.deterministic: the planar view / ray choice from the priors alone (planarRayNs, the view's prior a + b x),
+    // never from measured GPU times (they differ between runs, and a plane drawn by a camera or by rays differs in value).
+    bool deterministic = false;
+    float planarRayNs = 0;  // reflection.planar_ray_ns: prior cost per traced reflection ray
     static ReflectionSettings fromQuality(const QualityConfig& q);
 };
 

@@ -13,7 +13,7 @@ void main(uint entry : SV_DispatchThreadID)
     if (entry >= h.capacity) return;
     const uint4 meta = b.Load4(h.offMeta + entry * 16);
     if (meta.y == 0) return;  // free (keys always have bit 63 set)
-    const uint maxAge = h.freeCount < h.capacity / 8 ? min(h.maxAge, 30u) : h.maxAge;
+    const uint maxAge = (h.flags & 4u) != 0 ? min(h.maxAge, 30u) : h.maxAge;  // (pressure: GiBegin's snapshot of the free count)
     if (h.frame - meta.z <= maxAge) return;
     b.Store2(h.offMeta + entry * 16, uint2(0, 0));
     uint slot;

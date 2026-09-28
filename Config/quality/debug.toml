@@ -19,3 +19,9 @@ view_probe = [-1, -1]
 max_lines = 1048576
 max_triangles = 262144
 max_glyphs = 65536
+# Deterministic runs (renderergate image comparisons, 84e789f): two runs of the same frames give the same image bit for bit.
+# Implies gi.deterministic (update selection and ray seeds by key); R's planar view / ray choice from its priors
+# (reflection.planar_ray_ns, planar_view_*), not from measured GPU times; S's statistics that size buffers read at a fixed
+# frame lag. Every stochastic sample of the frame is keyed by frame and content in both modes. Costs: GI's radix select
+# passes (gi.deterministic). Off in play.
+deterministic = false

@@ -78,6 +78,8 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.planarViewNsPerPixel = (float)q.number("reflection.planar_view_ns_per_px");
     s.temporalHistoryMax = (uint32_t)q.integer("reflection.temporal_history_max");
     s.temporalLobeShift = (float)q.number("reflection.temporal_lobe_shift");
+    s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
+    s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;
 }
 
@@ -199,6 +201,13 @@ ReflectionSystem::ReflectionSystem(Device& device, ShaderLibrary& shaders, const
     // The prior as two points of the fit (at 0 and at 1 M mirror pixels); measured views outweigh them after a few.
     addViewSample(0, m_viewFixedNs, 1);
     addViewSample(1e6, m_viewFixedNs + 1e6 * m_viewNsPerPixel, 1);
+    if (m_settings.deterministic)
+    {
+        // debug.deterministic: the priors alone (no measurement ever replaces them).
+        m_viewNsPerPixel = m_settings.planarViewNsPerPixel;
+        m_viewFixedNs = m_settings.planarViewFixedMs * 1e6f;
+        m_rayNs = m_settings.planarRayNs;
+    }
 }
 
 void ReflectionSystem::addViewSample(double pixels, double ns, double weight)
@@ -580,13 +589,14 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             // inline path, -3.9 % and -1.8 %]; 4 K frames trace at most ~9 M rays (full-screen mirror plus G).
             if (traced > 0.75 * m_rayCapacity)
                 while (m_rayCapacity < 1.5 * traced && m_rayCapacity < (1u << 24)) m_rayCapacity *= 2;
-            if (ticks[1] > ticks[0] && traced >= 4096)
+            if (m_settings.deterministic) {}  // (measured times are not used: the choice from the priors)
+            else if (ticks[1] > ticks[0] && traced >= 4096)
             {
                 const float sample = (float)((ticks[1] - ticks[0]) * m_tickMs * 1e6 / traced);
                 m_rayNs = m_rayNs > 0 ? m_rayNs + (sample - m_rayNs) / 16 : sample;
             }
             m_lastViewMs = 0;
-            for (size_t v = 0; v < m_slotViewPlanes[oldSlot].size(); ++v)
+            for (size_t v = 0; v < (m_settings.deterministic ? 0 : m_slotViewPlanes[oldSlot].size()); ++v)
             {
                 const uint64_t t0 = ticks[2 + 2 * v], t1 = ticks[3 + 2 * v];
                 if (t1 <= t0) continue;  // not bracketed (the view's passes ran on another queue): no measurement

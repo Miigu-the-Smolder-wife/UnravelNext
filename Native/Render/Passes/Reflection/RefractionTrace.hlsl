@@ -64,7 +64,10 @@ void RefractionGen()
     const RtSceneSrvs scene = rtScene();
     RWByteAddressBuffer cache = ResourceDescriptorHeap[P[4].z];
     const GiHeader h = giHeader(cache);
-    const uint seed = giRandom(job * 9781u + (P[5].x & 0xFFFFFFu) * 6271u + 17u);
+    // The job's seed from its own ray (origin, direction) and the frame, not from its index: jobs are appended by atomics
+    // (TranslucentComposite, WaterSurface), in an order that differs between runs.
+    const uint3 ob = asuint(o), db = asuint(d);
+    const uint seed = giRandom(giRandom(ob.x ^ giRandom(ob.y ^ giRandom(ob.z))) ^ giRandom(db.x * 9781u + db.y * 6271u + db.z) ^ ((P[5].x & 0xFFFFFFu) * 6271u + 17u));
     float3 throughput = 1, L = 0;
     bool inside = (flags & 0xFFu) != 0xFFu;  // medium 0xFF: a reflection ray from the layer's surface (R-W1, R-1), outside
     [loop] for (uint segment = 0; segment < REFRACT_SEGMENTS; ++segment)

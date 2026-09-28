@@ -13,7 +13,9 @@ void main(uint lane : SV_GroupIndex)
     const GiHeader h = giHeader(b);
     b.Store(GI_H_FRAME, P[0].y);
     b.Store(GI_H_EPOCH, P[0].z);
-    b.Store(244, P[0].w);  // GiHeader.flags
+    // GiHeader.flags; bit 2: the pool is under pressure (fewer than 1/8 of the entries free) - GiEvict's age limit, decided
+    // here once: its threads read the free count while the same dispatch raised it, so the limit could flip mid-dispatch.
+    b.Store(244, P[0].w | (h.freeCount < h.capacity / 8 ? 4u : 0u));
     b.Store3(GI_H_CAMERA, P[1].xyz);
     b.Store(GI_H_UPDATE_COUNT, 0u);
     b.Store(GI_H_SELECTED_COUNT, 0u);
