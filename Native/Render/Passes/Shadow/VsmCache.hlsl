@@ -1,6 +1,6 @@
 // unx-kernel: cs_6_6 main
 // unx-variants: MODE=0,1,2,3,4,5
-// Sun page cache (shadow.vsm.cache; user decision 2026-09-28: static pages are reused, and the worst case - a sun moving
+// Sun page cache (shadow.vsm.cache; design choice: static pages are reused, and the worst case - a sun moving
 // without limit, every page redrawn - stays the one path's cost). A sun page's content is the height field of the
 // casters over its light-space square: it changes only where a caster moved, deformed, appeared or vanished, or when
 // the sun, the caster height range (the raster's depth mapping), the scene or the atlas changed (VsmSystem.cpp: the

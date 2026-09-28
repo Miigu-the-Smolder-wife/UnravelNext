@@ -101,7 +101,12 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     const float spreadMean = history == 0 ? spread : lerp(spreadOld, spread, 1.0 / 16.0);
     const uint cap = steady ? h.historyStatic : h.historyMax;
     const float alpha = giHistoryAlpha(h, history, young, jacobiLength, cap);
-    const uint seed = entry * 0x9E3779B9u ^ h.frame * 0x85EBCA6Bu;  // stochastic rounding of the stores (giDitherHalf)
+    // Stochastic rounding of the stores (giDitherHalf). gi.deterministic (header flags bit 0): seeded from the entry's key
+    // (giDetPriority, as GiTrace's rays), not its index - the index is the order the free list was popped in, which the
+    // threads creating entries race for, so two runs of the same frames rounded differently and the cache (and every
+    // image reading it) was not bit-identical (HostMotion's static shutter check failed on main).
+    const uint identity = (h.flags & 1u) != 0 ? giDetPriority(b, h, entry) : entry;
+    const uint seed = identity * 0x9E3779B9u ^ h.frame * 0x85EBCA6Bu;
 
     // Texels: lanes 0..63 (radiance, hit distance).
     if (lane < GI_TEXEL_COUNT)

@@ -127,28 +127,10 @@ uint giHash(uint64_t key)
 }
 
 // Table slot: uint64 key at +0, entry index at +8 (16 B per slot).
-uint giHomeSlot(GiHeader h, uint64_t key) { return giHash(key) & (h.tableSlots - 1); }
-// The probe sequence of 'key' from its home slot, whose contents 'first' the caller loaded (giFind loads it here; the
-// corner lookups load the home slots of all their keys together first: the loads of one key no longer wait for the
-// previous key's probe loop, and a key in its home slot - the usual case at <= 50 % load - needs no further load).
-template <typename B>
-uint giFindFrom(B b, GiHeader h, uint64_t key, uint slot, uint4 first)
-{
-    uint4 s = first;
-    [loop] for (uint i = 0; i < GI_PROBE_LIMIT; ++i)
-    {
-        if (i > 0) s = b.Load4(h.offTable + slot * 16);
-        const uint64_t k = (uint64_t)s.x | ((uint64_t)s.y << 32);
-        if (k == key) return s.z;  // GI_ENTRY_PENDING while its creator is still writing it
-        if (k == 0) return GI_ENTRY_PENDING;
-        slot = (slot + 1) & (h.tableSlots - 1);
-    }
-    return GI_ENTRY_PENDING;
-}
 template <typename B>
 uint giFind(B b, GiHeader h, uint64_t key)
 {
-    uint slot = giHomeSlot(h, key);
+    uint slot = giHash(key) & (h.tableSlots - 1);
     [loop] for (uint i = 0; i < GI_PROBE_LIMIT; ++i)
     {
         const uint4 s = b.Load4(h.offTable + slot * 16);
@@ -158,29 +140,6 @@ uint giFind(B b, GiHeader h, uint64_t key)
         slot = (slot + 1) & (h.tableSlots - 1);
     }
     return GI_ENTRY_PENDING;
-}
-// The entries of a level's 8 corner cells (normal class nc, cells c0 + {0,1}^3 in corner order c = x | y << 1 | z << 2)
-// and each one's update count: the same entries as 8 giFind calls, their loads issued in two batches (home slots, then
-// update counts) instead of 8 dependent chains. entry = GI_ENTRY_PENDING: no cell; updates: 0 for those.
-template <typename B>
-void giFindCorners(B b, GiHeader h, uint level, uint nc, int3 c0, out uint entry[8], out uint updates[8])
-{
-    uint64_t key[8];
-    uint slot[8];
-    uint4 first[8];
-    [unroll] for (uint c = 0; c < 8; ++c)
-    {
-        key[c] = giKey(level, nc, c0 + int3(c & 1, (c >> 1) & 1, c >> 2));
-        slot[c] = giHomeSlot(h, key[c]);
-        first[c] = b.Load4(h.offTable + slot[c] * 16);
-    }
-    [unroll] for (uint c = 0; c < 8; ++c) entry[c] = giFindFrom(b, h, key[c], slot[c], first[c]);
-    [unroll] for (uint c = 0; c < 8; ++c)
-    {
-        const uint e = entry[c] != GI_ENTRY_PENDING ? entry[c] : 0u;  // (entry 0's word: always in the buffer)
-        const uint u = b.Load(h.offSh + e * GI_SH_STRIDE + GI_SH_UPDATES);
-        updates[c] = entry[c] != GI_ENTRY_PENDING ? u : 0u;
-    }
 }
 
 // ---- texel mapping: hemispherical octahedral 8 x 8 around the entry normal
@@ -250,16 +209,15 @@ float3 giUnpackAnchorNormal(uint packed)
 // wall, when a room's floor and the ground outside share a coarse cell and normal class - read the outside's light (the
 // ~3 % sunlight through walls, R_STATUS). The entry's texel toward the point holds the running mean distance its rays
 // travelled before a hit (GiIntegrate, texel half 3): a point farther than 1.5 x that plus a quarter cell, or well behind
-// the anchor's surface (more than 45 deg below its tangent plane), is not seen; that corner counts as without data (the
-// lookup's partner and level rules then fill it as a missing cell). Points within a quarter cell of the anchor are seen.
+// the anchor's surface (more than 45 deg below its tangent plane), is not seen. Points within a quarter cell of the
+// anchor are seen. A rejected corner's weight goes to the seen corners of its own level (giScreenVisRenorm; the ray-hit
+// lookups normalise within the level), never to the next coarser level, whose larger cells reach through the wall.
 // Visibility is judged only in a level whose every corner with data is converged (GI_VIS_MIN_UPDATES updates: the texel
-// distance a mean of that many rays); a level with a young corner is read as without the test. Judging young entries by
-// their single-ray distances rejected converged neighbours at random, and judging only the converged ones while young
-// ones always counted moved the lookup's weight onto the young, still converging cells whenever a converged corner was
-// rejected (a cold cache read low: ReflectionAnalytic furnace, M 4.22 % and G 12.44 -> 15.63 %, 2026-09-28). The leak
-// this test is for is between long-lived cells (a room's floor and the ground outside). A level whose every corner with
-// data is not seen keeps them all (visibility re-weights among the corners, it never empties a level), and every corner
-// read is kept alive and requested as before (giKeepRead).
+// distance a mean of that many rays); a level with a young corner is read as without the test (a young entry's one- or
+// two-ray distance rejects at random, and a rejected converged corner would hand its weight to still-converging ones).
+// The leak is between long-lived cells (a room's floor and the ground outside). A level whose every corner with data is
+// not seen keeps them all (visibility never empties a level), and every corner read is kept alive and requested as
+// before (giKeepRead).
 #define GI_VIS_MIN_UPDATES 16u
 // Whether visibility is judged for a corner entry with 'updates' updates (the level is judged when all its corners are).
 bool giVisJudged(GiHeader h, uint updates) { return (h.flags & 2u) != 0 && updates >= GI_VIS_MIN_UPDATES; }
@@ -347,78 +305,6 @@ void giKeepRead(ByteAddressBuffer b, GiHeader h, uint entry, float w) {}
 void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w);
 
 // One level's trilinear accumulation over the 8 cells of the point (entries that exist and have been updated).
-// Batched corner lookups (opt-in per kernel, before including this file): GI_CORNER_BATCH = N > 0 issues the table lookups
-// of a level's 8 corners together (giFindCorners) and their maps N corners at a time (8 / N dependent round trips for the
-// maps instead of 8), with the same corners, values and summation order. Each corner of a batch and each corner's probe
-// loop is inlined code, so only the dedicated lookup kernels opt in (r.gi.screen, the reflection and GI hit shading);
-// the shading kernels (register budget, DXIL limit) keep the sequential form (0, the default).
-#ifndef GI_CORNER_BATCH
-#define GI_CORNER_BATCH 0
-#endif
-#if GI_CORNER_BATCH
-// The corners' table lookups are issued together (giFindCorners), then their maps GI_CORNER_BATCH corners at a time with
-// the loads unconditional (a corner without data reads entry 0 and is not added): the same corners, values and summation
-// order as one dependent chain per corner.
-template <typename B>
-void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, bool wantRadiance, uint nc, uint level, inout float3 sumE,
-                       inout float3 sumL, inout float weight, float cone = 0, bool emitters = false)
-{
-    const float s = giCellSize(h, level);
-    const float3 f = worldPos / s - 0.5;
-    const int3 c0 = int3(floor(f));
-    const float3 t = f - floor(f);
-    uint entries[8], updates[8];
-    giFindCorners(b, h, level, nc, c0, entries, updates);
-    bool judged = true;  // every corner with data converged (giVisJudged): the visibility test applies
-    [unroll] for (uint q = 0; q < 8; ++q) judged = judged && (updates[q] == 0 || giVisJudged(h, updates[q]));
-    float3 hiddenE = 0, hiddenL = 0;  // the corners the visibility test left out (added when it left out all of them)
-    float hiddenW = 0, seenW = 0;
-    [loop] for (uint batch = 0; batch < 8 / GI_CORNER_BATCH; ++batch)
-    {
-        [unroll] for (uint j = 0; j < GI_CORNER_BATCH; ++j)
-        {
-            const uint k = batch * GI_CORNER_BATCH + j;
-            const uint entry = updates[k] != 0 ? entries[k] : 0u;
-            const bool data = updates[k] != 0;  // no information yet: not added
-            const uint4 anchor = b.Load4(h.offAnchor + entry * 16);  // position and packed normal (visibility and radiance)
-            const float3 n = giUnpackAnchorNormal(anchor.w);
-            const bool has = data && (!judged || giAnchorSeesPointAt(b, h, entry, asfloat(anchor.xyz), n, worldPos, s));
-            const float3 o = float3(k & 1, (k >> 1) & 1, k >> 2);
-            const float3 wt = lerp(1 - t, t, o);
-            const float w = wt.x * wt.y * wt.z;
-            float sv;
-            const float3 e = giIrrMapAt(b, h, entry, n, normal);
-            float3 l = 0;
-            if (wantRadiance)
-            {
-                float3 tb, bb;
-                giBasis(n, tb, bb);
-                const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
-                l = giTexelRadianceCone(b, h, entry, giHemiOctEncode(local), cone, emitters);
-            }
-            if (!data) continue;
-            giKeepRead(b, h, entry, w);
-            if (!has)
-            {
-                hiddenE += w * e;
-                hiddenL += w * l;
-                hiddenW += w;
-                continue;
-            }
-            sumE += w * e;
-            if (wantRadiance) sumL += w * l;
-            weight += w;
-            seenW += w;
-        }
-    }
-    if (seenW <= 0 && hiddenW > 0)
-    {
-        sumE += hiddenE;
-        if (wantRadiance) sumL += hiddenL;
-        weight += hiddenW;
-    }
-}
-#else
 template <typename B>
 void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 dir, bool wantRadiance, uint nc, uint level, inout float3 sumE,
                        inout float3 sumL, inout float weight, float cone = 0, bool emitters = false)
@@ -474,7 +360,6 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
         weight += hiddenW;
     }
 }
-#endif
 
 // Level search of the lookups: from the point's level (at least minLevel) up to GI_LEVEL_CLIMB coarser levels; when none of
 // those has data and minLevel raised the start, down through the finer levels to the point's own level (the cells
@@ -560,31 +445,6 @@ float giScreenCornerWeight(uint has, uint c, float3 t, float3 share)
 uint giScreenPick(uint4 lo, uint4 hi, uint c) { return c < 4 ? lo[c & 3] : hi[c & 3]; }
 // One level from its resolved corners (entries and packed anchor normals of corners 0..3 and 4..7, 'has' as above; the
 // caller resolves them: giScreenCell per pixel, or the group's table, GiCacheTile.hlsli).
-#if GI_CORNER_BATCH
-// The maps GI_CORNER_BATCH corners at a time with unconditional loads (a corner without data reads entry 0 and adds
-// nothing): the same corners and summation order as one dependent chain per corner.
-template <typename B>
-void giScreenLevel(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo, uint4 anchorHi, uint has, float3 t, float3 normal, out float3 sum,
-                   out float w)
-{
-    const float3 share = normal * normal;
-    sum = 0;
-    w = 0;
-    [loop] for (uint batch = 0; batch < 8 / GI_CORNER_BATCH; ++batch)
-    {
-        [unroll] for (uint j = 0; j < GI_CORNER_BATCH; ++j)
-        {
-            const uint c = batch * GI_CORNER_BATCH + j;
-            const bool on = (has & (1u << c)) != 0;
-            const float3 m = giIrrMapAt(b, h, on ? giScreenPick(entryLo, entryHi, c) : 0u, giUnpackAnchorNormal(on ? giScreenPick(anchorLo, anchorHi, c) : 0u), normal);
-            const float wc = giScreenCornerWeight(has, c, t, share);
-            if (wc <= 0) continue;
-            sum += wc * m;
-            w += wc;
-        }
-    }
-}
-#else
 template <typename B>
 void giScreenLevel(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo, uint4 anchorHi, uint has, float3 t, float3 normal, out float3 sum,
                    out float w)
@@ -600,7 +460,20 @@ void giScreenLevel(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo
         w += wc;
     }
 }
-#endif
+// Visibility re-weights among the level's corners: the seen corners' sum is scaled to the weight the corners with data
+// ('hasData') have, so a rejected corner hands its weight to the seen ones of its own level. Counted as a missing cell
+// instead, a rejected corner's weight went (after its normal-axis partner, usually rejected too) to the next coarser level,
+// whose larger cells reach through the wall: the outside's sky light the test exists to keep out came back from there
+// (bright bluish blotches on the bathhouse floor along its walls, 20379fb, 2026-09-28).
+void giScreenVisRenorm(uint hasData, uint seen, float3 t, float3 normal, inout float3 s, inout float w)
+{
+    if (seen == hasData || w <= 0) return;
+    const float3 share = normal * normal;
+    float wData = 0;
+    [unroll] for (uint c = 0; c < 8; ++c) wData += giScreenCornerWeight(hasData, c, t, share);
+    s *= wData / w;
+    w = wData;
+}
 // The corners of 'has' whose anchor does not see the point cleared (giAnchorSeesPoint): they count as missing cells.
 // judged: GI_VIS_JUDGED (every corner with data converged, giVisJudged), GI_VIS_YOUNG (one is not: the level is read without
 // the test and nothing more is loaded), GI_VIS_UNKNOWN (the update counts are read here).
@@ -613,12 +486,7 @@ uint giScreenSeen(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo,
     if ((h.flags & 2u) == 0 || judged == GI_VIS_YOUNG || has == 0) return has;
     uint seen = has;
     bool all = true;
-#if GI_CORNER_BATCH
-    [unroll]
-#else
-    [loop]
-#endif
-    for (uint c = 0; c < 8; ++c)
+    [loop] for (uint c = 0; c < 8; ++c)
     {
         const bool on = (has & (1u << c)) != 0;
         const uint entry = on ? giScreenPick(entryLo, entryHi, c) : 0u;
@@ -628,41 +496,26 @@ uint giScreenSeen(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo,
     }
     return all && seen != 0 ? seen : has;  // (a level with a young corner is read without the test; visibility never empties a level)
 }
-// A level's corner cells for the screen lookups: entry (GI_ENTRY_PENDING: none, or not updated yet) and packed anchor
-// normal of corners 0..3 and 4..7, 'has' bit c when corner c has data. The same cells as 8 giScreenCell calls, their
-// loads in three batches (home slots, update counts, anchor normals).
+// A cell's entry with data (GI_ENTRY_PENDING: none, or not updated yet), its packed anchor normal and update count.
 template <typename B>
-void giScreenCells(B b, GiHeader h, uint level, uint nc, int3 c0, out uint4 entryLo, out uint4 entryHi, out uint4 anchorLo, out uint4 anchorHi,
-                   out uint has, out uint judged)
-{
-    uint entry[8], updates[8];
-    giFindCorners(b, h, level, nc, c0, entry, updates);
-    has = 0;
-    judged = GI_VIS_JUDGED;  // (giScreenSeen)
-    [unroll] for (uint q = 0; q < 8; ++q)
-        if (updates[q] != 0 && !giVisJudged(h, updates[q])) judged = GI_VIS_YOUNG;
-    [unroll] for (uint c = 0; c < 8; ++c)
-    {
-        const bool ok = updates[c] != 0;
-        const uint anchor = b.Load(h.offAnchor + (ok ? entry[c] : 0u) * 16 + 12);
-        const uint e = ok ? entry[c] : GI_ENTRY_PENDING, a = ok ? anchor : 0u;
-        if (c < 4) entryLo[c] = e, anchorLo[c] = a;
-        else entryHi[c - 4] = e, anchorHi[c - 4] = a;
-        if (ok) has |= 1u << c;
-    }
-}
-// A cell's entry with data (GI_ENTRY_PENDING: none, or not updated yet) and its packed anchor normal.
-template <typename B>
-uint giScreenCell(B b, GiHeader h, uint64_t key, out uint anchor)
+uint giScreenCellUpdates(B b, GiHeader h, uint64_t key, out uint anchor, out uint updates)
 {
     uint entry = giFind(b, h, key);
     anchor = 0;
+    updates = 0;
     if (entry != GI_ENTRY_PENDING)
     {
-        if (b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0) entry = GI_ENTRY_PENDING;
+        updates = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES);
+        if (updates == 0) entry = GI_ENTRY_PENDING;
         else anchor = b.Load(h.offAnchor + entry * 16 + 12);
     }
     return entry;
+}
+template <typename B>
+uint giScreenCell(B b, GiHeader h, uint64_t key, out uint anchor)
+{
+    uint updates;
+    return giScreenCellUpdates(b, h, key, anchor, updates);
 }
 template <typename B>
 float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, out float weight)
@@ -677,23 +530,22 @@ float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, 
         const float3 f = worldPos / giCellSize(h, level) - 0.5;
         const int3 c0 = int3(floor(f));
         uint4 entryLo, entryHi, anchorLo, anchorHi;
-        uint has = 0, judged = GI_VIS_UNKNOWN;
-#if GI_CORNER_BATCH
-        giScreenCells(b, h, level, nc, c0, entryLo, entryHi, anchorLo, anchorHi, has, judged);
-#else
+        uint has = 0, judged = GI_VIS_JUDGED;
         [unroll] for (uint c = 0; c < 8; ++c)
         {
-            uint anchor;
-            const uint entry = giScreenCell(b, h, giKey(level, nc, c0 + int3(c & 1, (c >> 1) & 1, c >> 2)), anchor);
+            uint anchor, updates;
+            const uint entry = giScreenCellUpdates(b, h, giKey(level, nc, c0 + int3(c & 1, (c >> 1) & 1, c >> 2)), anchor, updates);
             if (c < 4) entryLo[c] = entry, anchorLo[c] = anchor;
             else entryHi[c - 4] = entry, anchorHi[c - 4] = anchor;
             if (entry != GI_ENTRY_PENDING) has |= 1u << c;
+            if (entry != GI_ENTRY_PENDING && !giVisJudged(h, updates)) judged = GI_VIS_YOUNG;
         }
-#endif
+        const uint hasData = has;
         has = giScreenSeen(b, h, entryLo, entryHi, anchorLo, anchorHi, has, worldPos, giCellSize(h, level), judged);
         float3 s;
         float w;
         giScreenLevel(b, h, entryLo, entryHi, anchorLo, anchorHi, has, f - floor(f), normal, s, w);
+        giScreenVisRenorm(hasData, has, f - floor(f), normal, s, w);
         const float take = k == 0 ? 1 - beta : 1.0;  // the band passes beta of the point on to the next level
         result += (remain * take) * s;
         remain *= 1 - take * w;

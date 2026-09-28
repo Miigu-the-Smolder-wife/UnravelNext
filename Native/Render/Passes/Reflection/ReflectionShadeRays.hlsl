@@ -7,7 +7,6 @@
 // a region that needs the penumbra filter keeps it apart too and queues the filter (ReflectionPenumbra: the same
 // estimator in dense waves). Root constants: ReflectionRay.hlsli.
 #define REFL_DEFER_PENUMBRA 1
-#define GI_CORNER_BATCH 2u  // the cache's corner lookups batched (GiCache.hlsli)
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionShade.hlsli"
 
