@@ -16,12 +16,23 @@ struct VsmResources
     uint cbv;  // VsmConstants constant buffer view (a ConstantBuffer member makes DXC fail; bound per function)
 };
 
-// Page entry of an absolute page at level k, or 0 when not resident or out of the window.
+// Page entry of an absolute page at level k, or 0 when not resident or out of the window. The thread keeps the table
+// words of the last slot it read (a thread's taps - blocker search, penumbra filter, region tests - mostly fall in the
+// page of the previous one, and each table read was a dependent load before the texel's): the same words, the table is
+// read-only while the lookups run. Bypassed when the read bits are measured (shadow.vsm.use_stats counts every read).
+static uint g_vsmEntrySlot = 0xFFFFFFFFu;
+static uint2 g_vsmEntryWords = uint2(0, 0);
 uint vsmEntry(VsmResources r, int2 page, uint k)
 {
     ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[r.cbv];
     if (!vsmInWindow(vc, page, k)) return 0;
-    const uint2 e = r.table.Load2(vsmSlot(page, k) * 8);
+    const uint slot = vsmSlot(page, k);
+    if (slot != g_vsmEntrySlot || vc.useStats != 0)
+    {
+        g_vsmEntryWords = r.table.Load2(slot * 8);
+        g_vsmEntrySlot = slot;
+    }
+    const uint2 e = g_vsmEntryWords;
     const bool hit = (e.x & VSM_FLAG_RESIDENT) != 0 && e.y == vsmTag(page);
     if (hit && vc.useStats != 0)
     {

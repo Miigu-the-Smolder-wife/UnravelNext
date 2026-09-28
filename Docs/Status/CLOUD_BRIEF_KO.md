@@ -156,3 +156,13 @@ GPU가 없어 **모두 미검증**이다. HLSL은 리눅스 dxc 1.8.2505(빌드�
   - 리눅스 dxc 492 커널 전부 컴파일(MODE 6 추가), 최대 DXIL 193.1 KB(ShadeOpaque LAYERED2; 반사 인라인 커널은 셰이딩 1회로 줄어 그 아래). C++ 구문·경고 검사 0건. GPU 미검증.
   - 다음 단계 후보(1440p·1080p): s.vsm.localmark 1.18 · s.shadow.overflow 1.05 · s.froxel.integrate 1.10 · s.shadow.visibility 0.88(욕탕 내부 1440p). 계측 없이 [예상]만으로 넣은 구조 변경이 두 번 느려졌으므로, 다음은 이 패스들의 항목별 비용(패스 내부 단계 시간)을 먼저 받고 고른다.
   - furnace(main에서도 실패, G 최악 13.18 %): 이번에도 원인 화소를 모른다. 로그의 `G outlier` / `M outlier` 줄(화소·값·기대·sigma·허용치·표면·거칠기)을 README에 붙여 주면 기대값 식(벽 hit의 Le + ρL + S(NoV)L, 캐시 L = 2, Lambert GI)과 G 경로(제어 변량 = K 지도)의 어느 쪽이 어긋나는지 바로 가를 수 있다.
+
+## 세션 4 · 구조 최적화 (887b5d8 이후, 품질·표본·부하 그대로)
+
+기준 실측(1db06e4, RTX 4080, renderergate 정지 600프레임, A/B/B/A 중앙값): 기차 내부 1440p·출력 1440p 9.93 ms, 기차 내부 1440p·출력 4K 10.42 ms, 욕탕 내부 1440p·출력 1440p 15.53 ms, 욕탕 내부 1440p·출력 4K 16.06 ms. 887b5d8(국소광 페이지 캐시, hit 셰이딩 1회)은 아직 미측정. 아래 커밋은 모두 **결과가 같은 구조 변경**(같은 요청·같은 탭·같은 값)이며 GPU 미검증.
+
+- **[국소광 요청·탭 조회의 중복 제거 + 태양 페이지 테이블 워드 재사용]**
+  - s.vsm.localmark(욕탕 내부 1440p 1.18 ms): 화소·광원·mip마다 중심 + 반 페이지 이웃 4개를 전부 큐브 투영해 요청했는데, 각 축의 두 이웃 중 하나는 항상 중심과 같은 페이지다(반 페이지 이동은 가까운 경계 반대쪽으로는 페이지를 넘지 못함). 그 쪽은 투영·저장을 건너뛴다(경계에서 1/1024 페이지 이내면 원래대로 둘 다) → mip당 투영 5 → 3, 같은 요청 집합. [예상] localmark −30~40 %.
+  - 국소광 가시성(s.shadow.visibility·s.shadow.overflow·froxel이 공유, VsmLocalSample.hlsli): 탭마다 방향을 투영한 뒤 수신면 깊이(`vsmLocalPlaneDepth`)를 위해 같은 방향을 **다시 투영**했다 → 탭 자신의 투영 면으로 계산(`vsmLocalPlaneDepthAt`, 같은 값). 필터 탭(16)과 경광원 탭은 마지막으로 읽은 페이지의 테이블 워드를 재사용(대부분의 탭이 앞 탭과 같은 페이지: 의존 적재 제거). 차단자 탐색 탭도 재투영 제거. [예상] 국소광 가시성 비용 −20~30 %(욕탕 visibility 0.88·overflow 1.05 ms의 해당 몫).
+  - 태양(VsmSample.hlsli `vsmEntry`): 스레드가 마지막 슬롯의 테이블 워드를 기억(정적 변수). 반그림자 탐색·필터 탭과 영역 분류가 대부분 같은 페이지를 연달아 읽는다. 사용 통계 측정(`shadow.vsm.use_stats`)일 때는 매번 읽음. [예상] s.shadow.penumbra(기차 내부 1440p 1.02 ms) −10~20 %, 반사 hit 태양 분류도 조금.
+  - 확인: LocalShadowTests·VsmTests·ShadingTests 통과(값이 같아야 함), 욕탕·기차 화면 동일(국소광 그림자, 태양 반그림자), 욕탕 1440p s.vsm.localmark·s.shadow.visibility·s.shadow.overflow, 기차 1440p s.shadow.penumbra A/B.

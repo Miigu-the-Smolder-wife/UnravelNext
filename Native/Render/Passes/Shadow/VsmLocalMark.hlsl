@@ -3,7 +3,8 @@
 // each shadowed light of its froxel list that reaches it, the page under it at the mip whose texel is not larger than
 // its pixel footprint (vsmLocalMip), and at the two coarser mips (the estimator's wide taps fall back to them); at each
 // of these mips also the pages half a page away in the four face directions, re-projected through the cube (a tap near
-// a face edge reads the neighbouring face).
+// a face edge reads the neighbouring face). Of each axis's two half-page neighbours one is always the centre's own page
+// (vsmHalfStepStays): only the other is projected and requested - the same requests, 3 projections per mip instead of 5.
 // P[0].x depth SRV (Texture2D<float>), P[0].y requests UAV (raw), P[0].z local lights SRV, P[0].w slot of light SRV
 // (StructuredBuffer<uint>: scene light -> shadow slot or VSM_LOCAL_NONE)
 // P[1] = FroxelSrvs (lights, lightIndices, scattering, pad). Frame constants of the view.
@@ -12,11 +13,23 @@
 #include "Passes/Atmosphere/Froxel.hlsli"
 #include "Passes/Shadow/VsmLocal.hlsli"
 
-void request(RWByteAddressBuffer requests, VsmLocalLight l, uint light, float3 dir, uint mip)
+// The request of direction 'dir' (unit depth) at mip; returns the page's continuous coordinates (texel / 128) on its face.
+float2 request(RWByteAddressBuffer requests, VsmLocalLight l, uint light, float3 dir, uint mip)
 {
     const VsmLocalPoint q = vsmLocalProject(l, l.position + dir);
-    const uint2 page = min(uint2(vsmLocalTexel(q.xy, mip)) >> VSM_PAGE_SHIFT, (1u << mip) - 1);
+    const float2 t = vsmLocalTexel(q.xy, mip) / VSM_PAGE;
+    const uint2 page = min(uint2(t), (1u << mip) - 1);
     requests.Store(vsmLocalSlot(light, q.face, mip, page) * 4, VSM_REQ_PIXEL);
+    return t;
+}
+// Whether moving by half a page from page coordinate u towards 'sign' stays in the same page with a margin (1/1024 of a
+// page: far above the rounding of the re-projection): that neighbour's request is the centre's and is skipped. Half a
+// page to one side always stays in the page (the side away from the nearer edge), so each axis requests at most one
+// neighbour; near an edge (within the margin) both are requested as before.
+bool vsmHalfStepStays(float u, float sign)
+{
+    const float f = frac(u);
+    return sign > 0 ? f + 0.5 < 1.0 - 1.0 / 1024.0 : f - 0.5 > 1.0 / 1024.0;
 }
 
 [numthreads(8, 8, 1)]
@@ -58,11 +71,12 @@ void main(uint2 px : SV_DispatchThreadID)
             // Half a page of mip in tangent units: 128 / res x 2 / 2.
             const float h = float(VSM_PAGE) / vsmLocalRes(mip);
             const float3 c = axis + q.xy.x * right + q.xy.y * up;  // direction at unit depth
-            request(requests, l, slot, c, mip);
-            request(requests, l, slot, c + h * right, mip);
-            request(requests, l, slot, c - h * right, mip);
-            request(requests, l, slot, c + h * up, mip);
-            request(requests, l, slot, c - h * up, mip);
+            const float2 t = request(requests, l, slot, c, mip);
+            // (texel x grows with right, texel y grows against up: vsmLocalTexel)
+            if (!vsmHalfStepStays(t.x, 1)) request(requests, l, slot, c + h * right, mip);
+            if (!vsmHalfStepStays(t.x, -1)) request(requests, l, slot, c - h * right, mip);
+            if (!vsmHalfStepStays(t.y, -1)) request(requests, l, slot, c + h * up, mip);
+            if (!vsmHalfStepStays(t.y, 1)) request(requests, l, slot, c - h * up, mip);
         }
     }
 }

@@ -41,9 +41,10 @@ uint vsmLocalPageNearest(VsmLocalResources r, VsmLocalLight l, uint slot, float3
 }
 
 // Stored key (vsmEncode(-z)) of the texel of mip m (or the nearest coarser resident mip) holding direction c.
-uint vsmLocalKeyAt(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, uint m, out uint mipUsed)
+uint vsmLocalKeyAt(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, uint m, out uint mipUsed, out uint face)
 {
     const VsmLocalPoint q = vsmLocalProject(l, l.position + c);
+    face = q.face;
     mipUsed = m;
     [loop] for (int j = (int)m; j >= 0; --j)
     {
@@ -66,16 +67,29 @@ uint vsmLocalKeyAt(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, ui
 // one texel projected onto the receivers (walls near a lamp shade's bulb: wide penumbrae, coarse mips, large blotches),
 // and the hard-light path's four point samples stepped in quarters along the same grid. The 2 x 2 texels of a page's
 // interior come in one gather; at a page edge each texel resolves its own page (a missing one takes the tap's texel).
-float vsmLocalTapOcclusion(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, uint m, float zp, float tolerancePerTexel, out uint mipUsed)
+// The receiver's plane depth zp along c comes from the tap's own projection (vsmLocalPlaneDepthAt: its face), and the
+// page-table entry of the last page the caller's taps read is kept (cacheSlot, cacheEntry: most taps of a filter disk fall
+// in the page of the previous one, whose table word no longer needs a dependent load). The same values as projecting c
+// again for zp and loading every entry.
+float vsmLocalPlaneDepthAt(VsmLocalLight l, float3 receiver, float3 normal, float3 c, uint face);
+float vsmLocalTapOcclusion(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, uint m, float3 receiver, float3 normal, float tolerancePerTexel,
+                           out uint mipUsed, inout uint cacheSlot, inout uint2 cacheEntry)
 {
     const VsmLocalPoint q = vsmLocalProject(l, l.position + c);
+    const float zp = vsmLocalPlaneDepthAt(l, receiver, normal, c, q.face);
     mipUsed = m;
     [loop] for (int j = (int)m; j >= 0; --j)
     {
         const uint res = vsmLocalRes((uint)j);
         const float2 tf = vsmLocalTexel(q.xy, (uint)j);
         const uint2 t = min(uint2(tf), res - 1);
-        const uint2 e = r.table.Load2(vsmLocalSlot(slot, q.face, (uint)j, t >> VSM_PAGE_SHIFT) * 8);
+        const uint pageSlot = vsmLocalSlot(slot, q.face, (uint)j, t >> VSM_PAGE_SHIFT);
+        if (pageSlot != cacheSlot)
+        {
+            cacheEntry = r.table.Load2(pageSlot * 8);
+            cacheSlot = pageSlot;
+        }
+        const uint2 e = cacheEntry;
         if ((e.x & VSM_FLAG_RESIDENT) == 0 || e.y != l.generation) continue;
         mipUsed = (uint)j;
         const float zLimit = zp - tolerancePerTexel / res;
@@ -115,11 +129,10 @@ float vsmLocalTapOcclusion(VsmLocalResources r, VsmLocalLight l, uint slot, floa
 }
 
 // Face depth of the receiver's plane along direction c (unit-depth direction from the light), and the tolerance.
-float vsmLocalPlaneDepth(VsmLocalLight l, float3 receiver, float3 normal, float3 c)
+float vsmLocalPlaneDepthAt(VsmLocalLight l, float3 receiver, float3 normal, float3 c, uint face)
 {
-    const VsmLocalPoint q = vsmLocalProject(l, l.position + c);
     float3 right, up, axis;
-    vsmCubeBasis(q.face, right, up, axis);
+    vsmCubeBasis(face, right, up, axis);
     const float nc = dot(normal, c);
     // Plane n . (x - receiver) = 0 along x = light + t c: t = n . (receiver - light) / n . c (grazing: far away).
     const float t = abs(nc) > 1e-6 ? dot(normal, receiver - l.position) / nc : 3.0e38;
@@ -157,8 +170,9 @@ float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3
     if (searchR <= texelTan)
     {
         // hard light: one bilinear shadow test at the receiver
-        uint mu;
-        const float occ = vsmLocalTapOcclusion(r, l, slot, c0, m, vsmLocalPlaneDepth(l, receiver, normal, c0), tolerancePerTexel, mu);
+        uint mu, cacheSlot = 0xFFFFFFFFu;
+        uint2 cacheEntry = 0;
+        const float occ = vsmLocalTapOcclusion(r, l, slot, c0, m, receiver, normal, tolerancePerTexel, mu, cacheSlot, cacheEntry);
         return occ > 0 ? 1 - occ : 1;
     }
     // 1. Blocker search.
@@ -169,11 +183,11 @@ float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3
         const float rr = sqrt((i + 0.5) / searchTaps), a = i * 2.399963229728653;
         const float2 o = rr * float2(cos(a), sin(a)) * searchR;
         const float3 c = c0 + o.x * right + o.y * up;
-        uint mu;
-        const uint key = vsmLocalKeyAt(r, l, slot, c, ms, mu);
+        uint mu, face;
+        const uint key = vsmLocalKeyAt(r, l, slot, c, ms, mu, face);
         if (key == VSM_EMPTY) continue;
         const float zs = -vsmDecode(key);
-        const float zp = vsmLocalPlaneDepth(l, receiver, normal, c);
+        const float zp = vsmLocalPlaneDepthAt(l, receiver, normal, c, face);
         const float tol = biasTexels * (2 * pr.z / vsmLocalRes(mu)) * (1 + slope);
         if (zs >= zp - tol) continue;
         if (length(o) - 0.7071 * 2.0 / vsmLocalRes(mu) > l.radius * (1 / max(zs, l.nearM) - invZr)) continue;
@@ -188,13 +202,15 @@ float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3
     // information and leave the mean (counting them lit made page-shaped light patches wherever the filter reached past
     // the pages the marking requested).
     float occ = 0, taps = 0;
+    uint cacheSlot = 0xFFFFFFFFu;
+    uint2 cacheEntry = 0;
     [loop] for (uint i2 = 0; i2 < filterTaps; ++i2)
     {
         const float rr = sqrt((i2 + 0.5) / filterTaps), a = i2 * 2.399963229728653;
         const float2 o = rr * float2(cos(a), sin(a)) * radius;
         const float3 c = c0 + o.x * right + o.y * up;
         uint mu;
-        const float t = vsmLocalTapOcclusion(r, l, slot, c, mf, vsmLocalPlaneDepth(l, receiver, normal, c), tolerancePerTexel, mu);
+        const float t = vsmLocalTapOcclusion(r, l, slot, c, mf, receiver, normal, tolerancePerTexel, mu, cacheSlot, cacheEntry);
         if (t < 0) continue;
         occ += t;
         taps += 1;
