@@ -31,7 +31,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         float3 dir;
         if (!reflNextDirection(j, seed, dir)) continue;
         const uint4 v = rays.Load4(reflRaysValueOffset(capacity, marker.x + i));
-        const float3 L = float3(f16tof32(v.x), f16tof32(v.x >> 16), f16tof32(v.y)) / REFL_STORE_SCALE;
+        const float3 L = reflValueRadiance(v);
         const float3 g = j.mode == REFL_G ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, dir, 0.1763, P[3].w) : 0;
         sumL += L;
         sumG += g;

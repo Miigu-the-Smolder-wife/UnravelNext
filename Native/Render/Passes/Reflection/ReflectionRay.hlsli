@@ -24,6 +24,7 @@
 #ifndef UNX_REFLECTION_RAY_HLSLI
 #define UNX_REFLECTION_RAY_HLSLI
 #include "Passes/Reflection/ReflectionInternal.hlsli"
+#include "Passes/Reflection/ReflectionValue.hlsli"
 #include "Passes/GI/ScreenProbes.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
 #include "Passes/GI/GiSky.hlsli"  // giRandom, giUnit (the includer defines SKY)
@@ -106,13 +107,6 @@ bool reflRayDirection(ReflJob j, uint index, out float3 dir)
     [loop] for (uint i = 0; i <= index; ++i) found = reflNextDirection(j, seed, dir);
     return found;
 }
-
-uint reflPackBarycentrics(float2 b)
-{
-    const uint2 q = uint2(round(saturate(b) * 65535.0));
-    return q.x | (q.y << 16);
-}
-float2 reflUnpackBarycentrics(uint v) { return float2(v & 0xFFFFu, v >> 16) / 65535.0; }
 
 // The control variate's lobe integral for a G job: the mean of g (the screen-probe cache at texel resolution, the same
 // function the rays' g_i sample) over a fixed 4 x 4 stratified VNDF quadrature of the lobe, masked directions excluded as

@@ -11,8 +11,6 @@
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionShade.hlsli"
 
-uint reflPackHalf2(float a, float b) { return f32tof16(a) | (f32tof16(b) << 16); }
-
 [numthreads(64, 1, 1)]
 void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
@@ -78,7 +76,5 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
             rays.Store4(reflRaysShadowOffset(capacity, index), uint4(asuint(o.shadowOrigin), slot));  // index < slots <= capacity
         }
     }
-    const float3 r = radiance * REFL_STORE_SCALE, s = sun * REFL_STORE_SCALE;
-    rays.Store4(valueOffset, uint4(reflPackHalf2(r.r, r.g), reflPackHalf2(r.b, min(distanceToHit, 65000.0)), reflPackHalf2(s.r, s.g),
-                                   f32tof16(s.b) | (1u << 16) | ((f32tof16(min(motion, 60000.0)) & 0x7FFFu) << 17)));  // bit 16 valid, 17.. hit motion (fp16 >= 0)
+    rays.Store4(valueOffset, reflStoreValue(radiance, sun, distanceToHit, motion));
 }

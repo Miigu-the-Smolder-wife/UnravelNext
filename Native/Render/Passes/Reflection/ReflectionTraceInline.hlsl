@@ -6,6 +6,7 @@
 // constant, so each library holds one mode's code and stays under the kernel size limit); both run every frame. The same value as the split passes (ReflectionHit.hlsli), only slower.
 // Root constants: ReflectionRay.hlsli.
 #define SHADOW_RESIDENCY_LOOP 1  // (the overflow path is at the DXIL limit: ShadowVisibility.hlsli's loop form)
+#define REFL_OVERFLOW 1  // use the same stored attributes/values as the split passes
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionHit.hlsli"
@@ -56,9 +57,11 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
     if (j.mode == REFL_G && valid > 0)
     {
         const float lumL = dot(sumL, float3(0.2126, 0.7152, 0.0722)), lumG = dot(sumG, float3(0.2126, 0.7152, 0.0722));
-        const uint bin = lumG > 1e-8 ? (uint)clamp(floor(log2(max(lumL, 1e-30) / lumG)) + 4, 0.0, (float)GI_G_HIST_BINS - 1) : GI_G_HIST_BINS - 1;
         RWByteAddressBuffer histCache = ResourceDescriptorHeap[P[4].z];
-        histCache.InterlockedAdd(GI_H_STAT_G_HIST + bin * 4, 1u);
+        if (lumG > 1e-8)
+            histCache.InterlockedAdd(GI_H_STAT_G_HIST + (uint)clamp(floor(log2(max(lumL, 1e-30) / lumG)) + 4, 0.0, (float)GI_G_HIST_BINS - 1) * 4, 1u);
+        else
+            histCache.InterlockedAdd(GI_H_STAT_G_ZERO, 1u);
     }
 }
 
