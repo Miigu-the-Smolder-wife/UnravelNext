@@ -207,6 +207,26 @@ uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anch
         giDetAnchorCandidate(b, h, existing, key, anchor, normal);
         return existing;
     }
+    if ((h.flags & 1u) != 0)
+    {
+        // Missing keys are requests, never allocations in a reader dispatch.
+        // GiAdmission sorts and deduplicates all requests before choosing the
+        // keys that fit. Capacity covers every producer, not an append budget.
+        uint request;
+        b.InterlockedAdd(h.offAdmission, 1u, request);
+        const uint limit = b.Load(h.offAdmission + 4);
+        if (request >= limit)
+        {
+            b.InterlockedOr(h.offAdmission + 24, 1u); // hard diagnostic: a producer-bound violation
+            b.InterlockedAdd(GI_H_STAT_TABLE_FULL, 1u); // exposed by the existing GI statistics/readback
+            return GI_ENTRY_PENDING;
+        }
+        const uint a = h.offAdmission + 256 + (h.capacity + request) * 32;
+        const uint64_t candidate = giPackAnchorCandidate(h, key, anchor, normal);
+        b.Store4(a, uint4((uint)key, (uint)(key >> 32), (uint)candidate, (uint)(candidate >> 32)));
+        b.Store4(a + 16, uint4(0, 1, 0, 0)); // entry unused, kind = new
+        return GI_ENTRY_PENDING;
+    }
     uint slot = giHash(key) & (h.tableSlots - 1);
     [loop] for (uint i = 0; i < GI_PROBE_LIMIT; ++i)
     {

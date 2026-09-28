@@ -145,6 +145,8 @@ GiSystem* GiSystem::find(TrackState& state) { return state.get<GiSystemSlot>("R.
 
 GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(device), m_settings(GiSettings::fromQuality(quality))
 {
+    if (quality.has("reflection.g_rays_per_sample"))
+        m_reflectionRays = (uint32_t)std::max<int64_t>(1, quality.integer("reflection.g_rays_per_sample"));
     D3D12_FEATURE_DATA_D3D12_OPTIONS11 o11{};
     check(device.d3d()->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS11, &o11, sizeof o11), "OPTIONS11");
     if (!o11.AtomicInt64OnDescriptorHeapResourceSupported) fail("GI cache: 64-bit atomics on descriptor-heap resources are required (hash keys)");
@@ -190,6 +192,7 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[60] = l.anchorMin; // deterministic anchors (GiHeader.offAnchorMin)
     h[62] = l.irr;       // irradiance maps (GiHeader.offIrr)
     h[63] = l.slotAnchor;  // deterministic anchors per table slot (GiHeader.offSlotAnchor)
+    h[192] = l.end; // deterministic admission tail, grown before its first use
     for (uint32_t e = 0; e < m_settings.capacity; ++e) head[l.freeList / 4 + e] = m_settings.capacity - 1 - e;  // pops 0, 1, 2 ...
     for (uint32_t t = 0; t < m_settings.tableSlots; ++t) head[l.table / 4 + t * 4 + 2] = 0xFFFFFFFFu;
     std::memcpy(&tail[(l.shTable - l.hitStamp) / 4], shTable.data(), shTable.size() * 4);
@@ -419,6 +422,104 @@ void GiSystem::recordSecondaryScreen(FramePassContext& fc, ViewResources& view)
     recordScreen(fc, view, fc.resources.giCache);
 }
 
+void GiSystem::ensureAdmission(FramePassContext& fc, const ViewResources& main)
+{
+    // One request per traced GI/reflection hit, and two levels per probe on
+    // both placement walks. No budget truncation: reserve the producer bound.
+    const uint64_t pixels = (uint64_t)main.view.width * main.view.height;
+    const uint64_t probes = ((main.view.width + m_settings.probeSpacing - 1) / m_settings.probeSpacing + 1ull) *
+                            ((main.view.height + m_settings.probeSpacing - 1) / m_settings.probeSpacing + 1ull);
+    const uint64_t wanted = pixels * m_reflectionRays + m_settings.raysPerFrame + 4 * probes;
+    if (wanted <= m_admissionCapacity) return;
+    const uint64_t total = wanted + m_settings.capacity;
+    const Layout layout = layoutOf(m_settings);
+    uint64_t scanWords = 0;
+    for (uint64_t count = (total + 255) / 256;; count = (count + 255) / 256)
+    {
+        scanWords += count;
+        if (count <= 1) break;
+    }
+    const uint64_t bytes = layout.end + 256ull + total * 64 + (scanWords + 1) * 4;
+    if (bytes >= (1ull << 32)) fail("GI deterministic admission exceeds the raw-buffer address space; producer bound needs partitioning");
+    D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC1 d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = bytes;
+    d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    ComPtr<ID3D12Resource> grown;
+    check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr,
+                                                   IID_PPV_ARGS(&grown)), "GI deterministic admission workspace");
+    grown->SetName(L"GI cache with deterministic admission");
+    RenderGraph& graph = fc.graph;
+    const BufferRef oldCache = graph.importBuffer(m_cache.Get(), { "GI cache before admission growth", m_bytes, 0 });
+    const BufferRef newCache = graph.importBuffer(grown.Get(), { "GI cache", bytes, 0 });
+    const uint64_t copyBytes = m_bytes;
+    graph.addPass("r.gi.admit.grow", QueueType::Graphics,
+                  [&](PassBuilder& b) { b.use(oldCache, Use::CopySrc); b.use(newCache, Use::CopyDst); },
+                  [oldCache, newCache, copyBytes](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(newCache), 0, c.resource(oldCache), 0, copyBytes); });
+    ShaderLibrary& shaders = fc.shaders;
+    const uint32_t capacity = (uint32_t)wanted, first = m_admissionCapacity == 0 ? 1u : 0u;
+    graph.addPass("r.gi.admit.init", QueueType::Compute, [&](PassBuilder& b) { b.use(newCache, Use::UavCompute); },
+                  [&shaders, newCache, capacity, first](PassContext& c) {
+                      const uint32_t k[4] = { c.uav(newCache), capacity, first, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAdmissionInit"));
+                      c.computeConstants(k, 4); c.cmd->Dispatch(1, 1, 1);
+                  });
+    m_device.deferRelease(m_cache);
+    m_cache = std::move(grown);
+    m_bytes = bytes;
+    m_admissionCapacity = capacity;
+}
+
+void GiSystem::recordAdmission(FramePassContext& fc, BufferRef cache)
+{
+    RenderGraph& graph = fc.graph;
+    ShaderLibrary& shaders = fc.shaders;
+    const uint32_t requestCapacity = m_admissionCapacity, pool = m_settings.capacity;
+    const uint32_t total = requestCapacity + pool;
+    const BufferRef args = graph.createBuffer({ "GI admission dispatch", 16, 0 });
+    ID3D12CommandSignature* signature = dispatchSignature();
+    graph.addPass("r.gi.admit.prepare", QueueType::Compute,
+                  [&](PassBuilder& b) { b.use(cache, Use::UavCompute); b.use(args, Use::UavCompute); },
+                  [&shaders, cache, args, pool, requestCapacity](PassContext& c) {
+                      const uint32_t k[4] = { c.uav(cache), c.uav(args), requestCapacity, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAdmissionPrepare"));
+                      c.computeConstants(k, 4); c.cmd->Dispatch((pool + 255) / 256, 1, 1);
+                  });
+    auto indirect = [&](const char* name, const char* kernel, uint32_t parity, uint32_t span) {
+        graph.addPass(name, QueueType::Compute,
+                      [&](PassBuilder& b) { b.use(cache, Use::UavCompute); b.use(args, Use::IndirectArgs); },
+                      [&shaders, cache, args, signature, requestCapacity, kernel, parity, span](PassContext& c) {
+                          const uint32_t k[4] = { c.uav(cache), requestCapacity, parity, span };
+                          c.cmd->SetPipelineState(shaders.compute(kernel)); c.computeConstants(k, 4);
+                          c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 0, nullptr, 0);
+                      });
+    };
+    uint32_t parity = 0;
+    for (uint32_t span = 1; span < total; span *= 2)
+    {
+        indirect("r.gi.admit.merge", "Passes/GI/GiAdmissionMerge", parity, span);
+        parity = 1 - parity;
+    }
+    indirect("r.gi.admit.mark", "Passes/GI/GiAdmissionMark", parity, 0);
+    uint32_t level = 0;
+    for (uint32_t count = (total + 255) / 256;; count = (count + 255) / 256, ++level)
+    {
+        const uint32_t groups = (count + 255) / 256;
+        graph.addPass("r.gi.admit.scan", QueueType::Compute, [&](PassBuilder& b) { b.use(cache, Use::UavCompute); },
+                      [&shaders, cache, requestCapacity, level, groups](PassContext& c) {
+                          const uint32_t k[4] = { c.uav(cache), requestCapacity, level, 0 };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAdmissionScan"));
+                          c.computeConstants(k, 4); c.cmd->Dispatch(groups, 1, 1);
+                      });
+        if (count <= 256) break;
+    }
+    indirect("r.gi.admit.publish", "Passes/GI/GiAdmissionPublish", parity, 0);
+}
+
 void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& rays)
 {
     RenderGraph& g = fc.graph;
@@ -430,6 +531,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     // lights) keeps the epoch: GiInvalidate restarts only the entries whose texel rays can see a changed box.
     if ((fc.frame.discontinuity & kDiscontinuityRestore) != 0 || (fc.scene.revision() != m_sceneRevision && !rays.incrementalRebuild())) ++m_epoch;
     m_sceneRevision = fc.scene.revision();
+    if (s.deterministic) ensureAdmission(fc, main);
     const BufferRef cache = g.importBuffer(m_cache.Get(), { "GI cache", m_bytes, 0 });
     fc.resources.giCache = cache;
     // Probes at the tile corners (design revision 12.3): one more column and row than tiles.
@@ -465,18 +567,33 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     std::memcpy(cam, &camera, 12);
     compute("r.gi.begin", "Passes/GI/GiBegin", 1, { frame, m_epoch, (s.deterministic ? 1u : 0u) | (s.anchorVisibility ? 2u : 0u), cam[0], cam[1], cam[2] });
     // Deterministic anchors: last frame's per-slot candidates (its ray passes) into the entries before the table clears.
-    if (s.deterministic) compute("r.gi.det.fold", "Passes/GI/GiDetFold", groups(s.tableSlots), {});
     // C9 origin rebase: the entries move by whole cells before this frame's rehash files them (GiShift.hlsl).
     if (fc.frame.originShift.x != 0 || fc.frame.originShift.y != 0 || fc.frame.originShift.z != 0)
     {
         uint32_t d[3];
         std::memcpy(d, &fc.frame.originShift, 12);
         compute("r.gi.shift", "Passes/GI/GiShift", groups(s.capacity), { d[0], d[1], d[2] });
+        if (s.deterministic)
+        {
+            const uint32_t dx = d[0], dy = d[1], dz = d[2], count = (m_admissionCapacity + 255) / 256;
+            g.addPass("r.gi.admit.shift", QueueType::Compute, [&](PassBuilder& b) { b.use(cache, Use::UavCompute); },
+                      [&shaders, cache, dx, dy, dz, count](PassContext& c) {
+                          const uint32_t k[4] = { c.uav(cache), dx, dy, dz };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAdmissionShift")); c.computeConstants(k, 4);
+                          c.cmd->Dispatch(std::min(count, 65535u), (count + 65534) / 65535, 1);
+                      });
+        }
     }
     compute("r.gi.evict", "Passes/GI/GiEvict", groups(s.capacity), {});
     compute("r.gi.clear", "Passes/GI/GiTableClear", groups(s.tableSlots), {});
-    compute("r.gi.rehash", "Passes/GI/GiRehash", groups(s.capacity), {});
-    g.addPass("r.gi.place", QueueType::Compute,
+    if (s.deterministic) recordAdmission(fc, cache);
+    else compute("r.gi.rehash", "Passes/GI/GiRehash", groups(s.capacity), {});
+    // First placement collects missing keys; after admission a second placement
+    // requests the complete stable footprint, including this frame's new cells.
+    for (uint32_t placement = 0; placement < (s.deterministic ? 2u : 1u); ++placement)
+    {
+    if (placement == 1) recordAdmission(fc, cache);
+    g.addPass(placement == 0 ? "r.gi.place" : "r.gi.place.admitted", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::UavCompute);
                   b.use(depth, Use::SrvCompute);
@@ -489,9 +606,9 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
               });
+    }
     if (s.deterministic)
     {
-        compute("r.gi.det.foldplace", "Passes/GI/GiDetFold", groups(s.tableSlots), {});  // the probe placement's candidates
         compute("r.gi.det.anchors", "Passes/GI/GiDetAnchors", groups(s.capacity), {});  // before any ray leaves an anchor
     }
     // Local invalidation (B3): the ray scene's change boxes of this frame (instance edits keep the epoch).

@@ -73,6 +73,7 @@ struct GiHeader
     uint offIrr;                      // irradiance maps (GI_IRR_STRIDE per entry)
     uint offSlotAnchor;               // deterministic anchors: per table slot 64-bit min of the candidates of threads that
                                       // found the key with its entry not yet published (GiDetFold)
+    uint offAdmission;                // deterministic admission workspace; header word at byte 768
 };
 
 template <typename B>
@@ -90,6 +91,7 @@ GiHeader giHeader(B b)
     h.hitCount0 = r7.x; h.hitCount1 = r7.y; h.jacobiUpdates = r7.z; h.historyMax = r7.w & 0xFFFFu; h.historyStatic = r7.w >> 16;
     const uint4 r15 = b.Load4(240);
     h.offAnchorMin = r15.x; h.flags = r15.y; h.offIrr = r15.z; h.offSlotAnchor = r15.w;
+    h.offAdmission = b.Load(768);
     return h;
 }
 
@@ -130,6 +132,28 @@ uint giHash(uint64_t key)
 template <typename B>
 uint giFind(B b, GiHeader h, uint64_t key)
 {
+    if ((h.flags & 1u) != 0)
+    {
+        // Two sorted, immutable ranges: retained entries, then this admission's
+        // new entries. No concurrent publication and no bounded-probe losses.
+        const uint2 counts = b.Load2(h.offAdmission + 16);
+        uint first = 0;
+        [unroll] for (uint range = 0; range < 2; ++range)
+        {
+            uint lo = first, hi = first + counts[range];
+            [loop] for (uint step = 0; step < 32 && lo < hi; ++step)
+            {
+                const uint mid = lo + (hi - lo) / 2;
+                const uint4 s = b.Load4(h.offTable + mid * 16);
+                const uint64_t k = (uint64_t)s.x | ((uint64_t)s.y << 32);
+                if (k == key) return s.z;
+                if (k < key) lo = mid + 1;
+                else hi = mid;
+            }
+            first += counts[range];
+        }
+        return GI_ENTRY_PENDING;
+    }
     uint slot = giHash(key) & (h.tableSlots - 1);
     [loop] for (uint i = 0; i < GI_PROBE_LIMIT; ++i)
     {

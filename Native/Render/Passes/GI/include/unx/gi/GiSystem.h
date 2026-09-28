@@ -111,6 +111,9 @@ private:
     ComPtr<ID3D12CommandSignature> m_dispatchSignature;  // one D3D12_DISPATCH_ARGUMENTS, 16 B stride (radiance maps)
     ID3D12CommandSignature* dispatchSignature();
     uint64_t m_bytes = 0;
+    uint32_t m_admissionCapacity = 0, m_reflectionRays = 1;
+    void ensureAdmission(FramePassContext& fc, const ViewResources& main);
+    void recordAdmission(FramePassContext& fc, BufferRef cache);
     float3 m_skyRadiance{}, m_sunIlluminance{};
     float m_skyBand = 1;
     uint32_t m_epoch = 1, m_sceneRevision = 0;
