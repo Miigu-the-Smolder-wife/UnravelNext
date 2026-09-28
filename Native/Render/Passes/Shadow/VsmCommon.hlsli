@@ -126,6 +126,29 @@ uint vsmEncode(float h)
 float vsmDecode(uint e) { return asfloat((e & 0x80000000u) ? (e & 0x7FFFFFFFu) : ~e); }
 #define VSM_EMPTY 0u
 
+// Sunflower point i of n in the unit disk (equal area): radius sqrt((i + 0.5) / n), angle i x the golden angle. The
+// configured tap counts (shadow.vsm.search_taps 5, filter_taps 16; the local lights' the same) read the points from
+// tables (evaluated in double precision, rounded to float): the taps' loops no longer spend a square root and a sine
+// and cosine per tap; other counts evaluate them.
+static const float2 kVsmDisk5[5] = {
+    float2(0.316227764, 0), float2(-0.403873563, 0.369981259), float2(0.0618193224, -0.704399288), float2(0.509056449, 0.663974047),
+    float2(-0.934181213, -0.165243506)
+};
+static const float2 kVsmDisk16[16] = {
+    float2(0.176776692, 0), float2(-0.225772187, 0.206825823), float2(0.0345580503, -0.393771172), float2(0.28457123, 0.371172756),
+    float2(-0.522223175, -0.0923739299), float2(0.494695395, -0.314684719), float2(-0.165465921, 0.615525007), float2(-0.315561473, -0.60759443),
+    float2(0.684642136, 0.25003022), float2(-0.712256074, 0.29400897), float2(0.343354493, -0.733728647), float2(0.253730237, 0.808932006),
+    float2(-0.764745891, -0.443185866), float2(0.897134006, -0.197232395), float2(-0.547506928, 0.778772235), float2(-0.126486778, -0.976089716)
+};
+float2 vsmDiskPoint(uint i, uint n)
+{
+    if (n == 16) return kVsmDisk16[i];
+    if (n == 5) return kVsmDisk5[i];
+    const float rr = sqrt((i + 0.5) / n);
+    const float a = i * 2.399963229728653;
+    return rr * float2(cos(a), sin(a));
+}
+
 // S error bits (INTERFACES 3.6): VSM stats word 15, OR-ed by a kernel whose data-dependent loop reached its hard cap
 // (the result is then truncated, not silently accepted); any bit fails the gates (VsmStats::errorBits).
 #define VSM_STATS_ERROR_BYTE 60u

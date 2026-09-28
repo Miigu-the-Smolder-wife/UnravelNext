@@ -5,6 +5,7 @@
 // of these mips also the pages half a page away in the four face directions, re-projected through the cube (a tap near
 // a face edge reads the neighbouring face). Of each axis's two half-page neighbours one is always the centre's own page
 // (vsmHalfStepStays): only the other is projected and requested - the same requests, 3 projections per mip instead of 5.
+// Duplicate requests within a wave store once.
 // P[0].x depth SRV (Texture2D<float>), P[0].y requests UAV (raw), P[0].z local lights SRV, P[0].w slot of light SRV
 // (StructuredBuffer<uint>: scene light -> shadow slot or VSM_LOCAL_NONE)
 // P[1] = FroxelSrvs (lights, lightIndices, scattering, pad). Frame constants of the view.
@@ -19,7 +20,9 @@ float2 request(RWByteAddressBuffer requests, VsmLocalLight l, uint light, float3
     const VsmLocalPoint q = vsmLocalProject(l, l.position + dir);
     const float2 t = vsmLocalTexel(q.xy, mip) / VSM_PAGE;
     const uint2 page = min(uint2(t), (1u << mip) - 1);
-    requests.Store(vsmLocalSlot(light, q.face, mip, page) * 4, VSM_REQ_PIXEL);
+    const uint at = vsmLocalSlot(light, q.face, mip, page);
+    // Duplicate requests within the wave's active lanes store once (VsmMark): the same word, the same value.
+    if (at != WaveReadLaneFirst(at) || WaveIsFirstLane()) requests.Store(at * 4, VSM_REQ_PIXEL);
     return t;
 }
 // Whether moving by half a page from page coordinate u towards 'sign' stays in the same page with a margin (1/1024 of a

@@ -185,8 +185,7 @@ float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3
     float sumInvZ = 0, count = 0;
     [loop] for (uint i = 0; i < searchTaps; ++i)
     {
-        const float rr = sqrt((i + 0.5) / searchTaps), a = i * 2.399963229728653;
-        const float2 o = rr * float2(cos(a), sin(a)) * searchR;
+        const float2 o = vsmDiskPoint(i, searchTaps) * searchR;
         const float3 c = c0 + o.x * right + o.y * up;
         uint mu, face;
         const uint key = vsmLocalKeyAt(r, l, slot, c, ms, mu, face);
@@ -211,8 +210,7 @@ float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3
     uint2 cacheEntry = 0;
     [loop] for (uint i2 = 0; i2 < filterTaps; ++i2)
     {
-        const float rr = sqrt((i2 + 0.5) / filterTaps), a = i2 * 2.399963229728653;
-        const float2 o = rr * float2(cos(a), sin(a)) * radius;
+        const float2 o = vsmDiskPoint(i2, filterTaps) * radius;
         const float3 c = c0 + o.x * right + o.y * up;
         uint mu;
         const float t = vsmLocalTapOcclusion(r, l, slot, c, mf, receiver, normal, tolerancePerTexel, mu, cacheSlot, cacheEntry);

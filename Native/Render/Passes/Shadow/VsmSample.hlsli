@@ -422,13 +422,7 @@ uint vsmFragmentSegmentClassify(VsmResources r, float3 p0, float3 p1, float z0, 
     return lit == pieces ? VSM_REGION_LIT : umbra == pieces ? VSM_REGION_UMBRA : VSM_REGION_MIXED;
 }
 
-// Sunflower point i of n in the unit disk (equal area).
-float2 vsmDiskPoint(uint i, uint n)
-{
-    const float rr = sqrt((i + 0.5) / n);
-    const float a = i * 2.399963229728653;
-    return rr * float2(cos(a), sin(a));
-}
+// vsmDiskPoint: VsmCommon.hlsli.
 
 // Level at or above k whose texel is closest to (not above) 'size' metres.
 uint vsmLevelForSize(ConstantBuffer<VsmConstants> c, uint k, float size)
