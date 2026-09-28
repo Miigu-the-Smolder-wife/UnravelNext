@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <chrono>
@@ -94,6 +95,21 @@ struct Buf
         return ref;
     }
 };
+
+// UNX_FX_FRAME_FENCE=1 (diagnostics: bisecting a result that differs with the tick's own fence, 6522f82): the readback
+// pass ends no command list and a tick's fence is the queue's last signal at wait time (the whole frame), as before.
+bool frameFenceOnly()
+{
+    static const bool on = [] {
+        char* v = nullptr;
+        size_t n = 0;
+        const bool set = _dupenv_s(&v, &n, "UNX_FX_FRAME_FENCE") == 0 && v && v[0] == '1';
+        free(v);
+        if (set) unx::logf("FX particles: frame fences (UNX_FX_FRAME_FENCE=1)\n");
+        return set;
+    }();
+    return on;
+}
 
 const NV_StreamHeader& headerOf(const std::vector<uint8_t>& packet) { return *reinterpret_cast<const NV_StreamHeader*>(packet.data()); }
 // Header bytes every stream version has (NativeVfx before executor version 4 wrote 320: sections may start there); the
@@ -1378,6 +1394,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
                       b.use(eventsBuf->ref, Use::CopySrc);
                       b.keep();
                       // the tick's own fence (Impl::resolveFence): the readback waits for the tick, not the frame
+                      if (frameFenceOnly()) return;
                       b.fenceAfter([slotPtr, serial](Queue& queue, uint64_t fence) {
                           if (slotPtr->serial != serial || !slotPtr->recorded) return;
                           slotPtr->queue = &queue;

@@ -252,18 +252,23 @@ float3 giUnpackAnchorNormal(uint packed)
 // travelled before a hit (GiIntegrate, texel half 3): a point farther than 1.5 x that plus a quarter cell, or well behind
 // the anchor's surface (more than 45 deg below its tangent plane), is not seen; that corner counts as without data (the
 // lookup's partner and level rules then fill it as a missing cell). Points within a quarter cell of the anchor are seen.
-// Only a converged entry (GI_VIS_MIN_UPDATES updates: its texel distance a mean of that many rays) is judged: a young
-// entry's single-ray distances rejected converged neighbours at random and moved the lookup's weight onto young, still
-// converging cells (ReflectionAnalytic furnace, 2026-09-28). A level whose every corner with data is not seen keeps them
-// all (the lookup as before: visibility re-weights among the corners, it never empties a level), and every corner read
-// is kept alive and requested as before (giKeepRead).
+// Visibility is judged only in a level whose every corner with data is converged (GI_VIS_MIN_UPDATES updates: the texel
+// distance a mean of that many rays); a level with a young corner is read as without the test. Judging young entries by
+// their single-ray distances rejected converged neighbours at random, and judging only the converged ones while young
+// ones always counted moved the lookup's weight onto the young, still converging cells whenever a converged corner was
+// rejected (a cold cache read low: ReflectionAnalytic furnace, M 4.22 % and G 12.44 -> 15.63 %, 2026-09-28). The leak
+// this test is for is between long-lived cells (a room's floor and the ground outside). A level whose every corner with
+// data is not seen keeps them all (visibility re-weights among the corners, it never empties a level), and every corner
+// read is kept alive and requested as before (giKeepRead).
 #define GI_VIS_MIN_UPDATES 16u
+// Whether visibility is judged for a corner entry with 'updates' updates (the level is judged when all its corners are).
+bool giVisJudged(GiHeader h, uint updates) { return (h.flags & 2u) != 0 && updates >= GI_VIS_MIN_UPDATES; }
+// (anchor: the entry's anchor position, its word at offAnchor, read by the caller with the normal in one load)
 template <typename B>
-bool giAnchorSeesPoint(B b, GiHeader h, uint entry, float3 anchorNormal, float3 p, float cellSize)
+bool giAnchorSeesPointAt(B b, GiHeader h, uint entry, float3 anchor, float3 anchorNormal, float3 p, float cellSize)
 {
     if ((h.flags & 2u) == 0) return true;
-    if (b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) < GI_VIS_MIN_UPDATES) return true;
-    const float3 d = p - asfloat(b.Load3(h.offAnchor + entry * 16));
+    const float3 d = p - anchor;
     const float dist = length(d), slack = 0.25 * cellSize;
     if (!(dist > slack)) return true;
     const float3 dir = d / dist;
@@ -276,6 +281,11 @@ bool giAnchorSeesPoint(B b, GiHeader h, uint entry, float3 anchorNormal, float3 
     const uint2 tx = min(uint2(giHemiOctEncode(local) * GI_TEXELS), uint2(GI_TEXELS - 1, GI_TEXELS - 1));
     const float reach = f16tof32(b.Load(h.offTexels + (entry * GI_TEXEL_COUNT + tx.y * GI_TEXELS + tx.x) * 8 + 4) >> 16);
     return dist <= 1.5 * reach + slack;
+}
+template <typename B>
+bool giAnchorSeesPoint(B b, GiHeader h, uint entry, float3 anchorNormal, float3 p, float cellSize)
+{
+    return giAnchorSeesPointAt(b, h, entry, asfloat(b.Load3(h.offAnchor + entry * 16)), anchorNormal, p, cellSize);
 }
 
 // Irradiance (x 1, not stored scale) of an entry for normal n from its map; normals below the entry's hemisphere use
@@ -359,6 +369,8 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
     const float3 t = f - floor(f);
     uint entries[8], updates[8];
     giFindCorners(b, h, level, nc, c0, entries, updates);
+    bool judged = true;  // every corner with data converged (giVisJudged): the visibility test applies
+    [unroll] for (uint q = 0; q < 8; ++q) judged = judged && (updates[q] == 0 || giVisJudged(h, updates[q]));
     float3 hiddenE = 0, hiddenL = 0;  // the corners the visibility test left out (added when it left out all of them)
     float hiddenW = 0, seenW = 0;
     [loop] for (uint batch = 0; batch < 8 / GI_CORNER_BATCH; ++batch)
@@ -368,16 +380,17 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
             const uint k = batch * GI_CORNER_BATCH + j;
             const uint entry = updates[k] != 0 ? entries[k] : 0u;
             const bool data = updates[k] != 0;  // no information yet: not added
-            const bool has = data && giAnchorSeesPoint(b, h, entry, giAnchorNormal(b, h, entry), worldPos, s);
+            const uint4 anchor = b.Load4(h.offAnchor + entry * 16);  // position and packed normal (visibility and radiance)
+            const float3 n = giUnpackAnchorNormal(anchor.w);
+            const bool has = data && (!judged || giAnchorSeesPointAt(b, h, entry, asfloat(anchor.xyz), n, worldPos, s));
             const float3 o = float3(k & 1, (k >> 1) & 1, k >> 2);
             const float3 wt = lerp(1 - t, t, o);
             const float w = wt.x * wt.y * wt.z;
             float sv;
-            const float3 e = giShIrradiance(b, h, entry, normal, sv);
+            const float3 e = giIrrMapAt(b, h, entry, n, normal);
             float3 l = 0;
             if (wantRadiance)
             {
-                const float3 n = giAnchorNormal(b, h, entry);
                 float3 tb, bb;
                 giBasis(n, tb, bb);
                 const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
@@ -416,20 +429,24 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
     const float3 t = f - floor(f);
     float3 hiddenE = 0, hiddenL = 0;  // the corners the visibility test left out (added when it left out all of them)
     float hiddenW = 0, seenW = 0;
+    bool young = false;  // a corner with data not yet converged (giVisJudged): the level is read without the test
     [loop] for (uint k = 0; k < 8; ++k)
     {
         const int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
         const uint entry = giFind(b, h, giKey(level, nc, c0 + o));
-        if (entry == GI_ENTRY_PENDING || b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0) continue;  // no information yet
-        const bool seen = giAnchorSeesPoint(b, h, entry, giAnchorNormal(b, h, entry), worldPos, s);  // (else behind a surface from the anchor)
+        if (entry == GI_ENTRY_PENDING) continue;
+        const uint updates = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES);
+        if (updates == 0) continue;  // no information yet
+        young = young || !giVisJudged(h, updates);
+        const uint4 anchor = b.Load4(h.offAnchor + entry * 16);  // position and packed normal (visibility and radiance)
+        const float3 n = giUnpackAnchorNormal(anchor.w);
+        const bool seen = giAnchorSeesPointAt(b, h, entry, asfloat(anchor.xyz), n, worldPos, s);  // (else behind a surface from the anchor)
         const float3 wt = lerp(1 - t, t, float3(o));
         const float w = wt.x * wt.y * wt.z;
-        float sv;
-        const float3 e = w * giShIrradiance(b, h, entry, normal, sv);
+        const float3 e = w * giIrrMapAt(b, h, entry, n, normal);
         float3 l = 0;
         if (wantRadiance)
         {
-            const float3 n = giAnchorNormal(b, h, entry);
             float3 tb, bb;
             giBasis(n, tb, bb);
             const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
@@ -450,7 +467,7 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
             hiddenW += w;
         }
     }
-    if (seenW <= 0 && hiddenW > 0)
+    if ((seenW <= 0 || young) && hiddenW > 0)
     {
         sumE += hiddenE;
         if (wantRadiance) sumL += hiddenL;
@@ -585,11 +602,17 @@ void giScreenLevel(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo
 }
 #endif
 // The corners of 'has' whose anchor does not see the point cleared (giAnchorSeesPoint): they count as missing cells.
+// judged: GI_VIS_JUDGED (every corner with data converged, giVisJudged), GI_VIS_YOUNG (one is not: the level is read without
+// the test and nothing more is loaded), GI_VIS_UNKNOWN (the update counts are read here).
+#define GI_VIS_YOUNG 0u
+#define GI_VIS_JUDGED 1u
+#define GI_VIS_UNKNOWN 2u
 template <typename B>
-uint giScreenSeen(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo, uint4 anchorHi, uint has, float3 p, float cellSize)
+uint giScreenSeen(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo, uint4 anchorHi, uint has, float3 p, float cellSize, uint judged = GI_VIS_UNKNOWN)
 {
-    if ((h.flags & 2u) == 0) return has;
+    if ((h.flags & 2u) == 0 || judged == GI_VIS_YOUNG || has == 0) return has;
     uint seen = has;
+    bool all = true;
 #if GI_CORNER_BATCH
     [unroll]
 #else
@@ -598,21 +621,26 @@ uint giScreenSeen(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo,
     for (uint c = 0; c < 8; ++c)
     {
         const bool on = (has & (1u << c)) != 0;
-        const bool sees = giAnchorSeesPoint(b, h, on ? giScreenPick(entryLo, entryHi, c) : 0u, giUnpackAnchorNormal(on ? giScreenPick(anchorLo, anchorHi, c) : 0u), p, cellSize);
+        const uint entry = on ? giScreenPick(entryLo, entryHi, c) : 0u;
+        if (judged == GI_VIS_UNKNOWN) all = all && (!on || giVisJudged(h, b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES)));
+        const bool sees = giAnchorSeesPoint(b, h, entry, giUnpackAnchorNormal(on ? giScreenPick(anchorLo, anchorHi, c) : 0u), p, cellSize);
         if (on && !sees) seen &= ~(1u << c);
     }
-    return seen != 0 ? seen : has;  // (visibility never empties a level: see giAnchorSeesPoint)
+    return all && seen != 0 ? seen : has;  // (a level with a young corner is read without the test; visibility never empties a level)
 }
 // A level's corner cells for the screen lookups: entry (GI_ENTRY_PENDING: none, or not updated yet) and packed anchor
 // normal of corners 0..3 and 4..7, 'has' bit c when corner c has data. The same cells as 8 giScreenCell calls, their
 // loads in three batches (home slots, update counts, anchor normals).
 template <typename B>
 void giScreenCells(B b, GiHeader h, uint level, uint nc, int3 c0, out uint4 entryLo, out uint4 entryHi, out uint4 anchorLo, out uint4 anchorHi,
-                   out uint has)
+                   out uint has, out uint judged)
 {
     uint entry[8], updates[8];
     giFindCorners(b, h, level, nc, c0, entry, updates);
     has = 0;
+    judged = GI_VIS_JUDGED;  // (giScreenSeen)
+    [unroll] for (uint q = 0; q < 8; ++q)
+        if (updates[q] != 0 && !giVisJudged(h, updates[q])) judged = GI_VIS_YOUNG;
     [unroll] for (uint c = 0; c < 8; ++c)
     {
         const bool ok = updates[c] != 0;
@@ -649,9 +677,9 @@ float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, 
         const float3 f = worldPos / giCellSize(h, level) - 0.5;
         const int3 c0 = int3(floor(f));
         uint4 entryLo, entryHi, anchorLo, anchorHi;
-        uint has = 0;
+        uint has = 0, judged = GI_VIS_UNKNOWN;
 #if GI_CORNER_BATCH
-        giScreenCells(b, h, level, nc, c0, entryLo, entryHi, anchorLo, anchorHi, has);
+        giScreenCells(b, h, level, nc, c0, entryLo, entryHi, anchorLo, anchorHi, has, judged);
 #else
         [unroll] for (uint c = 0; c < 8; ++c)
         {
@@ -662,7 +690,7 @@ float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, 
             if (entry != GI_ENTRY_PENDING) has |= 1u << c;
         }
 #endif
-        has = giScreenSeen(b, h, entryLo, entryHi, anchorLo, anchorHi, has, worldPos, giCellSize(h, level));
+        has = giScreenSeen(b, h, entryLo, entryHi, anchorLo, anchorHi, has, worldPos, giCellSize(h, level), judged);
         float3 s;
         float w;
         giScreenLevel(b, h, entryLo, entryHi, anchorLo, anchorHi, has, f - floor(f), normal, s, w);

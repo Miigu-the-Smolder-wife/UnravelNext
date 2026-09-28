@@ -1159,6 +1159,20 @@ struct RenderGraph::Impl
         }();
         return on;
     }
+    // UNX_GRAPH_PLAN_CACHE=0 (diagnostics: bisecting a result that differs with the plan cache): only the plan executed
+    // last is kept, as before the cache (a frame whose key differs compiles, sharing identical placed resources with it).
+    static bool planCacheOn()
+    {
+        static const bool on = [] {
+            char* v = nullptr;
+            size_t n = 0;
+            const bool off = _dupenv_s(&v, &n, "UNX_GRAPH_PLAN_CACHE") == 0 && v && v[0] == '0';
+            free(v);
+            if (off) logf("render graph: plan cache off (UNX_GRAPH_PLAN_CACHE=0)\n");
+            return !off;
+        }();
+        return on;
+    }
     // UNX_GRAPH_DUMP=1: every compiled plan is logged (segments, passes, barriers, transient placement).
     public:
     static bool dumpPlans()
@@ -1434,6 +1448,11 @@ void RenderGraph::execute(GpuProfiler* profiler)
             impl.spare.pop_back();
         }
         impl.compile(m_stats, impl.spare.empty() ? nullptr : impl.spare.front().get());
+        if (!Impl::planCacheOn())
+        {
+            for (auto& p : impl.spare) impl.releasePlan(*p);
+            impl.spare.clear();
+        }
     }
     else
     {

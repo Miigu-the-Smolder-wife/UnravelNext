@@ -43,7 +43,7 @@ float3 giCacheIrradianceScreenQuad(ByteAddressBuffer b, GiHeader h, bool valid, 
         const bool sameNormal = all(asuint(normal) == asuint(QuadReadLaneAt(normal, 0)));
         const bool shareMaps = shareCells && giQuadAll(sameNormal) != 0;
         uint4 entryLo = GI_ENTRY_PENDING, entryHi = GI_ENTRY_PENDING, anchorLo = 0, anchorHi = 0;
-        uint has = 0;
+        uint has = 0, judged = GI_VIS_UNKNOWN;
         if (shareCells)
         {
             // this lane's two cells (giScreenCell's result), their loads issued together
@@ -58,6 +58,9 @@ float3 giCacheIrradianceScreenQuad(ByteAddressBuffer b, GiHeader h, bool valid, 
             if (e0 != GI_ENTRY_PENDING && u0 == 0) e0 = GI_ENTRY_PENDING;
             if (e1 != GI_ENTRY_PENDING && u1 == 0) e1 = GI_ENTRY_PENDING;
             const uint a0 = e0 != GI_ENTRY_PENDING ? n0 : 0u, a1 = e1 != GI_ENTRY_PENDING ? n1 : 0u;
+            // the level is judged when the quad's 8 corners with data are all converged (giScreenSeen)
+            const bool pairJudged = (e0 == GI_ENTRY_PENDING || giVisJudged(h, u0)) && (e1 == GI_ENTRY_PENDING || giVisJudged(h, u1));
+            judged = giQuadAll(pairJudged) != 0 ? GI_VIS_JUDGED : GI_VIS_YOUNG;
             [unroll] for (uint c = 0; c < 8; ++c)
             {
                 const uint entry = QuadReadLaneAt((c & 1) ? e1 : e0, c >> 1);
@@ -68,11 +71,11 @@ float3 giCacheIrradianceScreenQuad(ByteAddressBuffer b, GiHeader h, bool valid, 
             }
         }
         else if (active)
-            giScreenCells(b, h, level, nc, c0, entryLo, entryHi, anchorLo, anchorHi, has);
+            giScreenCells(b, h, level, nc, c0, entryLo, entryHi, anchorLo, anchorHi, has, judged);
         // this lane's corners: those whose anchor sees this lane's point (gi.anchor_visibility; the shared maps are
         // evaluated for the quad's cells, the weights take this lane's)
         const uint hasShared = has;
-        if (active) has = giScreenSeen(b, h, entryLo, entryHi, anchorLo, anchorHi, has, worldPos, giCellSize(h, min(level, h.maxLevel)));
+        if (active) has = giScreenSeen(b, h, entryLo, entryHi, anchorLo, anchorHi, has, worldPos, giCellSize(h, min(level, h.maxLevel)), judged);
         float3 s = 0;
         float w = 0;
         if (shareMaps)
