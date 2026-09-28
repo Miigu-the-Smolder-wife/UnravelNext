@@ -468,11 +468,15 @@ uint vsmSunClassify(VsmResources r, VsmReceiver rc, float footprint, float tanSu
     return cls;
 }
 
-// Steps 2 and 3 for a receiver vsmSunClassify left mixed.
-float vsmSunPenumbra(VsmResources r, VsmReceiver rc, uint k, float reach, float tanSun, uint searchTaps, uint filterTaps, out uint path)
+// Step 2 for a receiver vsmSunClassify left mixed: the blocker search and the classification of the penumbra disk.
+// Returns the visibility when they settle it (search lit, disk lit, disk umbra), else -1 with the filter's radius and
+// level (step 3: vsmSunPenumbraFilter). rc: the receiver at level k (vsmReceiverAt of the caller's receiver).
+float vsmSunPenumbraSearch(VsmResources r, VsmReceiver rc, uint k, float reach, float tanSun, uint searchTaps, uint filterTaps, out float radius,
+                           out uint kf, out uint path)
 {
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[r.cbv];
-    rc = vsmReceiverAt(c, rc, k);
+    radius = 0;
+    kf = k;
     const uint ks = vsmLevelForSize(c, k, reach * sqrt(ATMO_PI_FOR_VSM / searchTaps));
     float sum = 0, count = 0;
     [loop] for (uint i = 0; i < searchTaps; ++i)
@@ -500,7 +504,7 @@ float vsmSunPenumbra(VsmResources r, VsmReceiver rc, uint k, float reach, float 
         path = VSM_PATH_SEARCH_LIT;
         return 1;
     }
-    const float radius = (sum / count) * tanSun;
+    radius = (sum / count) * tanSun;
     const uint diskClass = vsmRegionClassify(r, rc, radius, k);
     if (diskClass == VSM_REGION_LIT)
     {
@@ -513,11 +517,26 @@ float vsmSunPenumbra(VsmResources r, VsmReceiver rc, uint k, float reach, float 
         return 0;
     }
     path = VSM_PATH_FILTERED;
-    const uint kf = vsmLevelForSize(c, k, radius * sqrt(ATMO_PI_FOR_VSM / filterTaps));
+    kf = vsmLevelForSize(c, k, radius * sqrt(ATMO_PI_FOR_VSM / filterTaps));
+    return -1;
+}
+// Step 3: 1 - the mean occupancy of the filter taps over the disk of 'radius' on level kf (rc as for the search).
+float vsmSunPenumbraFilter(VsmResources r, VsmReceiver rc, float radius, uint kf, uint filterTaps)
+{
     float occ = 0;
     [loop] for (uint i2 = 0; i2 < filterTaps; ++i2)
         occ += vsmOccupancy(r, rc, vsmDiskPoint(i2, filterTaps) * radius, kf);
     return 1 - occ / filterTaps;
+}
+// Steps 2 and 3 for a receiver vsmSunClassify left mixed.
+float vsmSunPenumbra(VsmResources r, VsmReceiver rc, uint k, float reach, float tanSun, uint searchTaps, uint filterTaps, out uint path)
+{
+    ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[r.cbv];
+    rc = vsmReceiverAt(c, rc, k);
+    float radius;
+    uint kf;
+    const float settled = vsmSunPenumbraSearch(r, rc, k, reach, tanSun, searchTaps, filterTaps, radius, kf, path);
+    return settled >= 0 ? settled : vsmSunPenumbraFilter(r, rc, radius, kf, filterTaps);
 }
 
 float vsmSunVisibility(VsmResources r, float3 p, float3 n, float footprint, float tanSun, uint searchTaps, uint filterTaps, out uint path)
