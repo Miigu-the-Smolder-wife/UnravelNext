@@ -14,11 +14,11 @@ namespace unx::render
 struct Resolution
 {
     uint32_t width = 0, height = 0;
-    std::string name;  // "4K" / "1440p"
+    std::string name;  // "4K" / "1440p" / "1080p"
 };
 
 // Measurement happens only at the target resolutions (ARCHITECTURE_KO.md 6: the harness refuses others). The
-// accepted set is the intersection of {3840x2160, 2560x1440} and quality key output.resolutions.
+// accepted set is the intersection of {3840x2160, 2560x1440, 1920x1080} and quality key output.resolutions.
 Resolution resolutionFromString(const std::string& text, const QualityConfig& quality);
 
 struct HarnessOptions

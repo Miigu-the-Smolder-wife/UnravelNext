@@ -1,4 +1,5 @@
 // unx-kernel: cs_6_6 main
+// unx-variants: SPLIT=0,1
 // r.gi.screen: M's per-pixel GI cache irradiance (front side) as a pass of its own, written to view.giIrradiance for M's
 // shading kernel to read once (R_STATUS_KO.md 0, GI tile path verdict: the lookup costs 2.44 ms at 4K in a kernel of its
 // own occupancy [measured], against ~3.4 ms inside M's shading kernel [expected]). The same function on the same inputs
@@ -9,7 +10,12 @@
 // converged. (A quad-shared form with batched corner loads, plus the visibility loads, measured 1.44 ms against this
 // form's 0.77 without visibility at 1440p [measured, 20379fb, RTX 4080]: the shared form is removed.)
 //
-// Frame split (gi.screen_update_frames = N > 1, the main view with V's vis buffer; user decision 2026-09-28): the view's
+// SPLIT=0: the lookup for every pixel (the default: gi.screen_update_frames = 1). SPLIT=1, frame split
+// (gi.screen_update_frames = N > 1, the main view with V's vis buffer; user decision 2026-09-28; off by default since
+// 368e103 [measured]: r.gi.screen 0.89 -> 0.98 ms at internal 1440p - the reuse tests below compare each neighbour's
+// G-buffer normal, which is the normal-mapped shading normal, so on textured surfaces most pixels fail the test and pay
+// the attempt and the lookup; the lookup's value depends on that exact normal, so a neighbour's value is not the pixel's
+// either): the view's
 // 8 x 8 tiles take turns - a tile looks the cache up in one frame of N (2 x 2 tile Bayer order, whole groups, so the
 // waves that reuse skip the lookup). A pixel of a tile that does not look up this frame takes its own surface point's
 // value of the previous frame: the point's exact motion (GiScreenHistory.hlsli giPreviousSurface: the vis buffer's
@@ -32,6 +38,7 @@
 #include "Passes/GI/GiScreenInputs.hlsli"
 #include "Passes/GI/GiScreenHistory.hlsli"
 
+#if SPLIT
 #define GI_SPLIT_KEYS 1u
 #define GI_SPLIT_PREVIOUS 2u
 
@@ -105,6 +112,8 @@ bool giScreenReuse(uint2 pixel, float3 worldPos, float3 nv, float footprint, uin
     return true;
 }
 
+#endif
+
 [numthreads(8, 8, 1)]
 void main(uint2 pixel : SV_DispatchThreadID, uint2 tile : SV_GroupID)
 {
@@ -119,6 +128,7 @@ void main(uint2 pixel : SV_DispatchThreadID, uint2 tile : SV_GroupID)
     uint age = 0;
     const bool surface = giScreenInputs(pixel, depthValue, gbuffer.Load(int3(pixel, 0)), worldPos, nv);
     bool lookup = surface;
+#if SPLIT
     if (surface && (split & GI_SPLIT_PREVIOUS) != 0)
     {
         const uint n = (split >> 4) & 7u, phase = (split >> 2) & 3u;
@@ -129,6 +139,7 @@ void main(uint2 pixel : SV_DispatchThreadID, uint2 tile : SV_GroupID)
             lookup = !giScreenReuse(pixel, worldPos, nv, footprint, n - 1, result, age);
         }
     }
+#endif
     if (lookup)
     {
         ByteAddressBuffer cache = ResourceDescriptorHeap[P[0].x];
@@ -137,9 +148,11 @@ void main(uint2 pixel : SV_DispatchThreadID, uint2 tile : SV_GroupID)
         result = weight > 0 ? float4(e * g_exposure, 1) : float4(0, 0, 0, 0);
     }
     output[pixel] = result;
+#if SPLIT
     if (split & GI_SPLIT_KEYS)
     {
         RWTexture2D<uint2> keys = ResourceDescriptorHeap[P[2].y];
         keys[pixel] = surface ? uint2(asuint(depthValue), giScreenPackNormal(nv, age)) : uint2(0, 0);
     }
+#endif
 }

@@ -1344,6 +1344,7 @@ void shade(FramePassContext& fc, ViewResources& view)
     {
         // the output resolution from the internal image and the history (Upscale.cpp); the chain encodes it (postActive)
         image = temporalUpscale(fc, view, image);
+        view.upscaled = image;  // (captures of the upscaled image: renderergate --capture-output)
         postChain(fc, upscaleOutputView(fc, view), image);
         return;
     }

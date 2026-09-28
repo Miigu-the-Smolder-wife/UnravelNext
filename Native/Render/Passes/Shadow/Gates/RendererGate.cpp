@@ -5,9 +5,14 @@
 // Needs a build with tracks V, M, S and C (Build.ps1 -Track S -Tracks "V;M;S;C", or -Track all). GPU lock required:
 //   powershell -File Tools/CI/GpuLock.ps1 -Track S -- build/S/bin/unx_gate_shadow_renderergate.exe
 //       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--moving] [--sun-deg-per-s R]
-//       [--wind-gust-period-s T] [--camera NAME] [--capture FILE.pfm] [--out DIR] [--set k=v]
+//       [--wind-gust-period-s T] [--camera NAME] [--capture FILE.pfm | --capture-output FILE.pfm] [--out DIR] [--set k=v]
+//       (--resolution also 1080p, and all = 4K, 1440p, 1080p)
 // --capture: the main view's linear scene radiance (FrameContext::outputLinearHdr, x exposure) of the last frame as
-// a PFM for unx_reference compare (one resolution; the frames still render as measured, plus one copy each).
+// a PFM for unx_reference compare (one resolution; the frames still render as measured, plus one copy each). The frame
+// renders at the output resolution (no temporal upscale).
+// --capture-output: the same units (linear radiance x exposure, before the post chain's encoding) at the output
+// resolution after the temporal upscale (ViewResources::upscaled: the frames render as in play, at the internal
+// resolution output.render_scale gives): with --capture of the same scene, the upscaled image against the native one.
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h") && defined(UNX_HAS_SCENEGEN)
 #define S_RENDERER_GATE 1
 #include "unx/clusterbuilder/ClusterBuilder.h"
@@ -28,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -58,6 +64,37 @@ scene::Camera cameraAt(const scene::Scene& s, bool moving, double time, const st
 } // namespace
 #endif
 
+#if S_RENDERER_GATE
+namespace
+{
+// IEEE 754 binary16 -> float (the upscaled capture's RGBA16F).
+float halfToFloat(uint16_t h)
+{
+    const uint32_t sign = (uint32_t)(h & 0x8000u) << 16, exponent = (h >> 10) & 0x1Fu, mantissa = h & 0x3FFu;
+    uint32_t bits;
+    if (exponent == 0)
+    {
+        if (mantissa == 0) bits = sign;
+        else
+        {
+            uint32_t e = 113, m = mantissa;  // subnormal: normalise
+            while ((m & 0x400u) == 0)
+            {
+                m <<= 1;
+                --e;
+            }
+            bits = sign | (e << 23) | ((m & 0x3FFu) << 13);
+        }
+    }
+    else if (exponent == 31) bits = sign | 0x7F800000u | (mantissa << 13);
+    else bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+    float f;
+    std::memcpy(&f, &bits, 4);
+    return f;
+}
+} // namespace
+#endif
+
 int main(int argc, char** argv)
 {
     int gateFailures = 0;
@@ -74,6 +111,7 @@ int main(int argc, char** argv)
         bool moving = false;
         float sunDegPerS = 0;  // moving sun (time of day): the sun turns about the horizontal axis normal to it
         std::string capturePath;  // --capture: last frame's linear radiance as PFM
+        bool captureUpscaled = false;  // --capture-output: the upscaled image (ViewResources::upscaled) instead of the native frame
         std::string cameraName;   // --camera: a camera of the scene by name (default: the first)
         float gustPeriodS = 0;  // wind change after commit (v1.23): every gustPeriodS the source scene's wind alternates
                                 // between the scene's and +30 % speed / +20 degrees (no reload; the host's path)
@@ -100,6 +138,11 @@ int main(int argc, char** argv)
             else if (a == "--sun-deg-per-s") sunDegPerS = std::stof(next());
             else if (a == "--wind-gust-period-s") gustPeriodS = std::stof(next());
             else if (a == "--capture") capturePath = next();
+            else if (a == "--capture-output")
+            {
+                capturePath = next();
+                captureUpscaled = true;
+            }
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
             else if (a == "--warmup-seconds") warmupSeconds = std::stod(next());  // repro of early frames (never with timings)
@@ -198,14 +241,16 @@ int main(int argc, char** argv)
         gpuScene.upload(s);
         gpuScene.setClusters(std::move(clusters));
         Harness harness(device, quality);
-        const std::vector<std::string> resolutions = resolutionArg == "both" ? std::vector<std::string>{ "4K", "1440p" } : std::vector<std::string>{ resolutionArg };
+        const std::vector<std::string> resolutions = resolutionArg == "both"  ? std::vector<std::string>{ "4K", "1440p" }
+                                                   : resolutionArg == "all" ? std::vector<std::string>{ "4K", "1440p", "1080p" }
+                                                                            : std::vector<std::string>{ resolutionArg };
         for (const std::string& rs : resolutions)
         {
             // A repro of an engine capture at its own size (WxH): with --capture only, and its timings are not measurements.
             Resolution res;
-            if (const size_t x = rs.find('x'); x != std::string::npos && rs != "3840x2160" && rs != "2560x1440")
+            if (const size_t x = rs.find('x'); x != std::string::npos && rs != "3840x2160" && rs != "2560x1440" && rs != "1920x1080")
             {
-                if (capturePath.empty()) fail("--resolution %s: other sizes than 4K and 1440p only for a --capture repro", rs.c_str());
+                if (capturePath.empty()) fail("--resolution %s: other sizes than 4K, 1440p and 1080p only for a --capture repro", rs.c_str());
                 res = { (uint32_t)std::stoul(rs.substr(0, x)), (uint32_t)std::stoul(rs.substr(x + 1)), rs + " (repro, not a measurement)" };
             }
             else
@@ -253,15 +298,18 @@ int main(int argc, char** argv)
                     s.sun.direction = normalize(sun0 * ca + cross(sunAxis, sun0) * sa);
                 }
                 prev = fc.mainView.viewProj;
-                fc.outputLinearHdr = !capturePath.empty();
+                fc.outputLinearHdr = !capturePath.empty() && !captureUpscaled;
                 fc.celestial = celestial;
                 fc.autoExposure = autoExposure;
                 captureEv100 = fc.mainView.ev100;
                 const TextureRef output = g.createTexture({ "gate output", rr.width, rr.height, 1, 1,
-                                                            capturePath.empty() ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R32G32B32A32_FLOAT });
-                renderer.record(g, fc, output);
+                                                            fc.outputLinearHdr ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R10G10B10A2_UNORM });
+                const ViewResources rendered = renderer.record(g, fc, output);
                 if (!capturePath.empty())
                 {
+                    if (captureUpscaled && !rendered.upscaled.valid())
+                        fail("--capture-output: the frame renders at its output resolution (output.render_scale / render_scale_min_height): use --capture");
+                    const TextureRef source = captureUpscaled ? rendered.upscaled : output;
                     if (!captureBuffer)
                     {
                         D3D12_RESOURCE_DESC td{};
@@ -270,7 +318,7 @@ int main(int argc, char** argv)
                         td.Height = rr.height;
                         td.DepthOrArraySize = 1;
                         td.MipLevels = 1;
-                        td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+                        td.Format = captureUpscaled ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT;
                         td.SampleDesc.Count = 1;
                         UINT rows;
                         UINT64 rowBytes, total;
@@ -292,13 +340,13 @@ int main(int argc, char** argv)
                     const D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = captureFootprint;
                     g.addPass("s.gate.capture", QueueType::Graphics,
                               [&](PassBuilder& b) {
-                                  b.use(output, Use::CopySrc);
+                                  b.use(source, Use::CopySrc);
                                   b.keep();
                               },
                               [=](PassContext& ctx) {
                                   D3D12_TEXTURE_COPY_LOCATION dst{ rb, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
                                   dst.PlacedFootprint = fp;
-                                  D3D12_TEXTURE_COPY_LOCATION src{ ctx.resource(output), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                                  D3D12_TEXTURE_COPY_LOCATION src{ ctx.resource(source), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
                                   src.SubresourceIndex = 0;
                                   ctx.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
                               });
@@ -333,10 +381,22 @@ int main(int argc, char** argv)
                 const float toRadiance = 1.0f;
                 for (uint32_t y = 0; y < res.height; ++y)
                 {
-                    const float* row = reinterpret_cast<const float*>(static_cast<const uint8_t*>(mapped) + captureFootprint.Offset + (size_t)y * captureFootprint.Footprint.RowPitch);
+                    const uint8_t* rowBytes = static_cast<const uint8_t*>(mapped) + captureFootprint.Offset + (size_t)y * captureFootprint.Footprint.RowPitch;
                     float* dstRow = &rgb[(size_t)(res.height - 1 - y) * res.width * 3];
                     for (uint32_t x = 0; x < res.width; ++x)
-                        for (int c = 0; c < 3; ++c) dstRow[x * 3 + c] = row[x * 4 + c] * toRadiance;
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            float v;
+                            if (captureUpscaled)  // RGBA16F
+                            {
+                                uint16_t hv;
+                                std::memcpy(&hv, rowBytes + (x * 4 + c) * 2, 2);
+                                v = halfToFloat(hv);
+                            }
+                            else
+                                std::memcpy(&v, rowBytes + (x * 4 + c) * 4, 4);
+                            dstRow[x * 3 + c] = v * toRadiance;
+                        }
                 }
                 D3D12_RANGE none{ 0, 0 };
                 captureBuffer->Unmap(0, &none);
@@ -344,7 +404,8 @@ int main(int argc, char** argv)
                 if (!file) fail("cannot write %s", capturePath.c_str());
                 file.write(header.data(), (std::streamsize)header.size());
                 file.write(reinterpret_cast<const char*>(rgb.data()), (std::streamsize)(rgb.size() * sizeof(float)));
-                logf("captured %ux%u linear radiance x exposure (ev100 %.2f) -> %s\n", res.width, res.height, captureEv100, capturePath.c_str());
+                logf("captured %ux%u linear radiance x exposure (ev100 %.2f, %s) -> %s\n", res.width, res.height, captureEv100,
+                     captureUpscaled ? "after the temporal upscale" : "native", capturePath.c_str());
                 captureBuffer.Reset();
             }
             const shadow::VsmStats& st = shadow::stats(renderer.trackState());

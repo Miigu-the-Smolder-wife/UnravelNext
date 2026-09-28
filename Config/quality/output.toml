@@ -3,8 +3,9 @@
 # SHA-256 of the merged effective values.
 
 [output]
-# Measurement and gate resolutions. The harness refuses anything else.
-resolutions = ["3840x2160", "2560x1440"]
+# Measurement and gate resolutions (output resolutions). The harness refuses anything else. 1080p: the mainstream target
+# with 1440p (user 2026-09-28).
+resolutions = ["3840x2160", "2560x1440", "1920x1080"]
 # Banded pass groups (RenderGraph::addBandedGroup, passBandCount): pixels per band, so a band's intermediate buffers stay
 # in L2 between producer and consumer passes; 0 = one band (the whole view). Default 0 (v1.31): with only M's passes
 # banded at 4K / 8 = 1036800 (8 bands at 4K, 4 at 1440p) M measured city 4K 6.725 -> 6.800 ms (shading is latency-bound,

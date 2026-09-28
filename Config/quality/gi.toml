@@ -15,11 +15,12 @@ screen_filter_cells = 0.75         # r.gi.screen.filter: edge-preserving spatial
                                    # this share of the pixel's cache cell edge (plane, normal^32 and data weights, 12 taps);
                                    # it averages the cells' independent errors (blotches of the cell's size). 0 = no spatial
                                    # filter (the pass still multiplies the probes' near occlusion in: M reads E x occlusion).
-screen_update_frames = 4          # r.gi.screen's frame split (user decision 2026-09-28): the main view's 8 x 8 tiles look the
-                                   # cache up in turn, one frame of N; the other pixels take their own surface point's value of
-                                   # the previous frame (exact motion, bilinear over 4 previous pixels that each hold the same
-                                   # surface; disocclusions, edges and moving objects look up). Values at most N - 1 frames old
-                                   # (lighting lag of the per-pixel lookup; the probes and the cache are not split). 1 = off.
+screen_update_frames = 1          # r.gi.screen's frame split (user decision 2026-09-28, GiScreenIrradiance SPLIT=1): the main
+                                   # view's 8 x 8 tiles look the cache up in turn, one frame of N; the other pixels take their
+                                   # own surface point's value of the previous frame when 4 neighbours hold the same surface.
+                                   # 1 = off (the default since 368e103: 0.89 -> 0.98 ms at internal 1440p [measured] - the
+                                   # neighbours' normal test uses the normal-mapped G-buffer normal, so textured surfaces fail
+                                   # it, and the lookup depends on that exact normal: no exact reuse there).
 relight_frames_max = 8             # frames to reconverge after a light change (quality definition, section 3)
 cache_cell_angle_deg = 0.5         # cache cell edge ~ distance * tan(angle): ~16 px at 4K 60 deg (level = ceil(log2(edge / min)))
 cache_cell_min_m = 0.0625          # finest cell edge (level 0)

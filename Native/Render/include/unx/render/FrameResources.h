@@ -129,6 +129,10 @@ struct ViewResources
     BufferRef decalFrames;         // StructuredBuffer<DecalFrame>: the frame's decals, camera-relative               [E]
     BufferRef decalTiles;          // raw: 16 x 16 px tile lists (<= 16 decals per tile, header + status)             [E]
     TextureRef color;              // final colour target of this view                      [M]
+    // The temporal upscale's output (output resolution, RGBA16F: rgb = linear radiance x exposure before the post chain's
+    // encoding, a = history weight; Upscale.cpp), for captures of the upscaled image; invalid when the frame renders at
+    // its output resolution.                                                                  [M]
+    TextureRef upscaled;
 };
 
 // A triangle stream the GPU makes in the frame (INTERFACES v1.60; W's water surface and fluid surface, request

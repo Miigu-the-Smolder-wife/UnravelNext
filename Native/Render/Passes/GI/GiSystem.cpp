@@ -371,7 +371,7 @@ TextureRef GiSystem::recordScreen(FramePassContext& fc, ViewResources& view, Buf
                                      split ? c.srv(prevKeys) : none, split ? c.uav(keys) : none, split ? c.srv(prevScreen) : none, split ? c.srv(visId) : none,
                                      split ? c.srv(visibleClusters) : none, 0, 0, 0 };
                   std::memcpy(&k[16], &invPrev, 64);  // rows (row_major in HLSL)
-                  c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiScreenIrradiance"));
+                  c.cmd->SetPipelineState(shaders.compute(split ? "Passes/GI/GiScreenIrradiance.SPLIT1" : "Passes/GI/GiScreenIrradiance.SPLIT0"));
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);

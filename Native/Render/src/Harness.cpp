@@ -75,7 +75,8 @@ Resolution resolutionFromString(const std::string& text, const QualityConfig& qu
     Resolution r;
     if (text == "4K" || text == "3840x2160") r = { 3840, 2160, "4K" };
     else if (text == "1440p" || text == "2560x1440") r = { 2560, 1440, "1440p" };
-    else fail("resolution '%s' refused: measurements are taken only at 4K (3840x2160) and 1440p (2560x1440)", text.c_str());
+    else if (text == "1080p" || text == "1920x1080") r = { 1920, 1080, "1080p" };
+    else fail("resolution '%s' refused: measurements are taken only at 4K (3840x2160), 1440p (2560x1440) and 1080p (1920x1080)", text.c_str());
     const std::string key = format("%ux%u", r.width, r.height);
     auto allowed = quality.strings("output.resolutions");
     if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) fail("resolution %s is not listed in output.resolutions of %s", key.c_str(), quality.origin().c_str());
