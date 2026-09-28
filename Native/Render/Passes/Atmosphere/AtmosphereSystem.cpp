@@ -625,7 +625,13 @@ void record(FramePassContext& fc)
         return frameConstants;
     };
 
-    if (!s.skyValid || std::memcmp(&sun, &s.skySun, sizeof sun) != 0 || altitude != s.skyAltitude)
+    // The camera altitude changes the sky over the atmosphere's scale heights (1.2 - 8 km) and moves the horizon by
+    // 1 / sqrt(2 h R) rad per metre (2e-4 rad/m at 1.8 m): a rebuild for every vertical step (walking, head bob, stairs,
+    // the curvature term away from the origin) changed no displayed value. The view is rebuilt when the altitude moved
+    // by more than max(0.25 m, 1e-4 altitude) since its build: below 1e-4 of the radiance and 0.1 px of horizon at
+    // 960 px (the readers already take it for points tens of metres from the camera).
+    const float altitudeTolerance = std::max(0.25f, 1e-4f * std::fabs(altitude));
+    if (!s.skyValid || std::memcmp(&sun, &s.skySun, sizeof sun) != 0 || !(std::fabs(altitude - s.skyAltitude) <= altitudeTolerance))
     {
         ID3D12PipelineState* ps = sh.compute("Passes/Atmosphere/SkyView");
         const D3D12_GPU_VIRTUAL_ADDRESS cb = constants();
