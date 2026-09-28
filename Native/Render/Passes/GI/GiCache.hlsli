@@ -442,7 +442,12 @@ float giScreenCornerWeight(uint has, uint c, float3 t, float3 share)
     }
     return w;
 }
-uint giScreenPick(uint4 lo, uint4 hi, uint c) { return c < 4 ? lo[c & 3] : hi[c & 3]; }
+// (selects, not a dynamic component index: that made local arrays, 4 per level in r.gi.screen and 16 in ShadeOpaque)
+uint giScreenPick(uint4 lo, uint4 hi, uint c)
+{
+    const uint4 v = c < 4 ? lo : hi;
+    return (c & 2) ? ((c & 1) ? v.w : v.z) : ((c & 1) ? v.y : v.x);
+}
 // One level from its resolved corners (entries and packed anchor normals of corners 0..3 and 4..7, 'has' as above; the
 // caller resolves them: giScreenCell per pixel, or the group's table, GiCacheTile.hlsli).
 template <typename B>
