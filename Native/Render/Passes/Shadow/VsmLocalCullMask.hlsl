@@ -3,7 +3,8 @@
 // (active light a, face, mip) with a viewport of res = 128 x 2^mip texels, 2^mip x 2^mip tiles of 128 px. The views'
 // masks are packed (VsmLocal.hlsli VSM_LOCAL_*_WORDS): mip after mip, face after face, light after light. A bit is set
 // where the tile is a page of that mip with a physical page this frame; its atlas slot goes to word (mask word) x 32 +
-// bit of the slots buffer. One thread per mask word.
+// bit of the slots buffer. Only pages given this frame (DIRTY): a page kept from an earlier frame (page cache, VsmCache.hlsl
+// MODE 3) holds its content and is not drawn again, as the sun's (VsmCullMask). One thread per mask word.
 // P[0].x page table SRV (raw), P[0].y local mask UAV (raw), P[0].z active light count, P[0].w active slots SRV
 // (StructuredBuffer<uint>: active light a -> shadow slot); P[1].x local atlas slots UAV (raw)
 #include "Bindless.hlsli"
@@ -29,7 +30,7 @@ void main(uint id : SV_DispatchThreadID)
         const uint tile = wordInView * 32 + b;
         if (tile >= n * n) break;
         const uint e = table.Load(vsmLocalSlot(light, face, mip, uint2(tile % n, tile / n)) * 8);
-        if (e & VSM_FLAG_RESIDENT)
+        if ((e & (VSM_FLAG_RESIDENT | VSM_FLAG_DIRTY)) == (VSM_FLAG_RESIDENT | VSM_FLAG_DIRTY))
         {
             bits |= 1u << b;
             slots.Store((id * 32 + b) * 4, e & VSM_PHYS_MASK);

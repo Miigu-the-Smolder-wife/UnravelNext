@@ -1,13 +1,15 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: MODE=0,1,2,3,4,5
-// Sun page cache (shadow.vsm.cache; design choice: static pages are reused, and the worst case - a sun moving
-// without limit, every page redrawn - stays the one path's cost). A sun page's content is the height field of the
-// casters over its light-space square: it changes only where a caster moved, deformed, appeared or vanished, or when
-// the sun, the caster height range (the raster's depth mapping), the scene or the atlas changed (VsmSystem.cpp: the
-// frame is then not "cacheable" and every requested page is drawn, as before). So a page requested this frame keeps
-// its physical page and content when it was resident last frame for the same absolute page (tag), and no changed caster
-// touched it; only the other requested pages get a free physical page, a clear and the raster. Local-light pages are
-// drawn every frame (their lights move with trains and doors; their faces are not cached here).
+// unx-variants: MODE=0,1,2,3,4,5,6
+// Page cache (shadow.vsm.cache; design choice: static pages are reused, and the worst case - a sun moving without
+// limit, every page redrawn - stays the one path's cost). A sun page's content is the height field of the casters over
+// its light-space square: it changes only where a caster moved, deformed, appeared or vanished, or when the sun, the
+// caster height range (the raster's depth mapping), the scene or the atlas changed (VsmSystem.cpp: the frame is then not
+// "cacheable" and every requested page is drawn, as before). So a page requested this frame keeps its physical page and
+// content when it was resident last frame for the same absolute page (tag), and no changed caster touched it; only the
+// other requested pages get a free physical page, a clear and the raster. A local light's page is a face depth of the
+// casters within its range: its tag is the light's generation (VsmSystem.cpp: position, range, emitter radius, type and
+// the shadow slot's light), and a light whose range meets a changed caster's sphere has every page redrawn (MODE 6; a
+// light moving with a train or a door changes its generation).
 //   MODE 5 (1 group): clear the used-page bitmap and the changed-caster list header.
 //   MODE 0: per scene instance, its caster state (transform and deformation revisions, cast / hidden flags) against last
 //           frame's; a caster that changed, appeared or vanished, or one animated every frame (wind, morphs, terrain
@@ -17,8 +19,10 @@
 //           spheres), both spheres of a skinned instance casting now or last frame, every frame; an unbounded one (radius
 //           < 0) makes the frame uncacheable.
 //   MODE 2: per level and changed caster sphere, the resident sun pages of the level under it become stale.
-//   MODE 3: per requested sun slot of a cacheable frame, keep: resident last frame, same tag, not stale -> the request is
-//           marked kept and its physical page used.
+//   MODE 6: per local shadow slot, whether its light's range (farM around its position) meets a changed caster's sphere:
+//           a bit per light after the used-page bitmap (the light's pages are not kept this frame).
+//   MODE 3: per requested slot (sun and local) of a cacheable frame, keep: resident last frame, same tag, not stale (sun)
+//           or its light unchanged in range (local) -> the request is marked kept and its physical page used.
 //   MODE 4 (1 group): the free physical pages in page order (deterministic): the pages the scan assigns (VsmScan). With
 //           nothing kept (an uncacheable frame) it is 0, 1, 2, .. and the assignment is the one path's.
 // Error handling: the changed-caster list has a fixed capacity; past it the frame is uncacheable (flag), never partial.
@@ -27,12 +31,15 @@
 // P[1] = { list capacity (spheres), page table UAV (raw), requests UAV (raw), used-page bitmap UAV (raw) }
 // P[2] = { free list UAV (raw: count, 0, 0, 0, then pages), atlas pages, scanned slots, cacheable (1) }
 // P[3] = { skin bounds SRV, skin instances SRV, skin count, stats UAV (raw; word 6: kept pages) }
+// P[4] = { local lights SRV (VsmLocalLight per shadow slot), local shadow slots in use, 0, 0 }
 // Frame constants of the main view (scene buffers, wind).
 #include "Deformation.hlsli"
-#include "Passes/Shadow/VsmCommon.hlsli"
+#include "Passes/Shadow/VsmLocal.hlsli"
 
 #define VSM_REQ_KEPT (1u << 31)
 #define VSM_CACHE_UNCACHEABLE 1u
+// The local lights' changed bits: VSM_LOCAL_LIGHTS / 32 words after the used-page bitmap (whose words cover the pages).
+uint localChangedOffset() { return (P[2].y + 31) / 32 * 4; }
 
 void appendSphere(RWByteAddressBuffer list, float3 centre, float radius)
 {
@@ -50,7 +57,7 @@ float stretch(float4 rows[3]) { return sqrt(dot(rows[0].xyz, rows[0].xyz) + dot(
 void main(uint i : SV_DispatchThreadID)
 {
     RWByteAddressBuffer used = ResourceDescriptorHeap[P[1].w];
-    const uint words = (P[2].y + 31) / 32;
+    const uint words = (P[2].y + 31) / 32 + VSM_LOCAL_LIGHTS / 32;  // (and the local lights' changed bits)
     [loop] for (uint w = i; w < words; w += 256) used.Store(w * 4, 0);
     if (i == 0)
     {
@@ -154,7 +161,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 [numthreads(256, 1, 1)]
 void main(uint slot : SV_DispatchThreadID)
 {
-    if (slot >= min(P[2].z, VSM_SUN_SLOTS) || P[2].w == 0) return;
+    if (slot >= P[2].z || P[2].w == 0) return;
     RWByteAddressBuffer list = ResourceDescriptorHeap[P[0].y];
     if (list.Load(4) != 0) return;  // uncacheable
     RWByteAddressBuffer requests = ResourceDescriptorHeap[P[1].z];
@@ -162,16 +169,37 @@ void main(uint slot : SV_DispatchThreadID)
     bool kept = false;
     if (req != 0)
     {
-        ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[P[0].w];
         RWByteAddressBuffer table = ResourceDescriptorHeap[P[1].y];
+        RWByteAddressBuffer used = ResourceDescriptorHeap[P[1].w];
         const uint2 e = table.Load2(slot * 8);
-        const uint k = slot / VSM_SLOTS_PER_LEVEL, phys = e.x & VSM_PHYS_MASK;
-        const uint tag = vsmTag(vsmSlotAbsPage(c, slot % VSM_SLOTS_PER_LEVEL, k));
-        kept = (e.x & VSM_FLAG_RESIDENT) != 0 && (e.x & VSM_FLAG_STALE) == 0 && e.y == tag && phys < P[2].y;
+        const uint phys = e.x & VSM_PHYS_MASK;
+        uint tag;
+        bool unchanged = true;
+        if (slot < VSM_SUN_SLOTS)
+        {
+            ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[P[0].w];
+            const uint k = slot / VSM_SLOTS_PER_LEVEL;
+            tag = vsmTag(vsmSlotAbsPage(c, slot % VSM_SLOTS_PER_LEVEL, k));
+        }
+        else
+        {
+            // a local light's page: its light's generation, and no changed caster in the light's range (MODE 6)
+            // (slots of lights no longer in use - the scan's range keeps last frame's - are not kept)
+            const uint light = (slot - VSM_SUN_SLOTS) / VSM_LOCAL_LIGHT_SLOTS;
+            tag = 0;
+            unchanged = light < P[4].y;
+            if (unchanged)
+            {
+                StructuredBuffer<VsmLocalLight> lights = ResourceDescriptorHeap[P[4].x];
+                const VsmLocalLight l = lights[light];
+                tag = l.generation;
+                unchanged = l.active != 0 && ((used.Load(localChangedOffset() + (light >> 5) * 4) >> (light & 31u)) & 1u) == 0;
+            }
+        }
+        kept = unchanged && (e.x & VSM_FLAG_RESIDENT) != 0 && (e.x & VSM_FLAG_STALE) == 0 && e.y == tag && phys < P[2].y;
         if (kept)
         {
             requests.Store(slot * 4, req | VSM_REQ_KEPT);
-            RWByteAddressBuffer used = ResourceDescriptorHeap[P[1].w];
             used.InterlockedOr((phys >> 5) * 4, 1u << (phys & 31u));
         }
     }
@@ -213,5 +241,31 @@ void main(uint lane : SV_GroupIndex)
         if (p < pages && ((used.Load((p >> 5) * 4) >> (p & 31u)) & 1u) == 0) free.Store(16 + (at++) * 4, p);
     }
     if (lane == FREE_THREADS - 1) free.Store(0, g_free[lane]);
+}
+#elif MODE == 6
+// One thread per local shadow slot in use: its light's range meets a changed caster's sphere (the list's spheres, at most
+// its capacity) -> the light's changed bit. Uncacheable frames keep nothing anyway.
+[numthreads(64, 1, 1)]
+void main(uint light : SV_DispatchThreadID)
+{
+    if (light >= P[4].y || P[2].w == 0) return;
+    RWByteAddressBuffer list = ResourceDescriptorHeap[P[0].y];
+    const uint2 header = list.Load2(0);
+    if (header.y != 0) return;
+    StructuredBuffer<VsmLocalLight> lights = ResourceDescriptorHeap[P[4].x];
+    const VsmLocalLight l = lights[light];
+    if (l.active == 0) return;
+    const uint count = min(header.x, P[1].x);
+    bool changed = false;
+    [loop] for (uint i = 0; i < count && !changed; ++i)
+    {
+        const float4 s = asfloat(list.Load4(16 + i * 16));
+        changed = distance(s.xyz, l.position) <= s.w + l.farM;
+    }
+    if (changed)
+    {
+        RWByteAddressBuffer used = ResourceDescriptorHeap[P[1].w];
+        used.InterlockedOr(localChangedOffset() + (light >> 5) * 4, 1u << (light & 31u));
+    }
 }
 #endif

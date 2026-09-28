@@ -98,6 +98,7 @@ constexpr uint32_t kLocalFaceWords = 173, kLocalLightWords = 6 * kLocalFaceWords
 constexpr uint32_t kLocalViewWordOffset[kLocalMips] = { 0, 1, 2, 3, 5, 13, 45 };
 constexpr uint32_t kScanGroupSlots = 1024;  // VsmScan.hlsl
 constexpr uint32_t kScanGroupsMax = (kTotalSlots + kScanGroupSlots - 1) / kScanGroupSlots;
+constexpr uint32_t kCacheWords = 20;  // VsmCache.hlsl root constants P[0..4]
 
 // Views of the resources created once (constants ring).
 void createFixedViews(Device& device, State& s)
@@ -754,17 +755,22 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const uint32_t skinCount = cacheOn && fc.resources.skinBounds.valid() ? fc.resources.skinCount : 0;
     const uint32_t changedCapacity = 2 * (instanceCount + skinCount) + 64;
     const BufferRef changed = g.createBuffer(BufferDesc{ "S VSM changed casters", 16 + (uint64_t)changedCapacity * 16, 0 });
-    const BufferRef usedPages = g.createBuffer(BufferDesc{ "S VSM used pages", std::max<uint64_t>(16, (uint64_t)(pagesNow + 31) / 32 * 4), 0 });
+    // (the page bitmap, then the local lights' changed bits: VsmCache.hlsl localChangedOffset)
+    const BufferRef usedPages = g.createBuffer(BufferDesc{ "S VSM used pages", (uint64_t)(pagesNow + 31) / 32 * 4 + kLocalLights / 32 * 4, 0 });
     const BufferRef freePages = g.createBuffer(BufferDesc{ "S VSM free pages", 16 + (uint64_t)pagesNow * 4, 0 });
     const BufferRef casterStateRef = cacheOn ? g.importBuffer(s.casterState.Get(), BufferDesc{ "S VSM caster state", (uint64_t)s.casterStateCount * 16, 16 }) : BufferRef{};
     const BufferRef skinBounds = fc.resources.skinBounds;
     const uint32_t skinInstancesSrv = fc.resources.skinInstancesSrv;
     // (the kernels' root constants: VsmCache.hlsl)
-    auto cacheWords = [=](PassContext& ctx, uint32_t (&k)[16]) {
-        const uint32_t w[16] = { casterStateRef.valid() ? ctx.uav(casterStateRef) : 0xFFFFFFFFu, ctx.uav(changed), instanceCount, ring,
-                                 changedCapacity, ctx.uav(table), ctx.uav(requests), ctx.uav(usedPages),
-                                 ctx.uav(freePages), pagesNow, scanSlots, cacheable ? 1u : 0u,
-                                 skinCount ? ctx.srv(skinBounds) : 0xFFFFFFFFu, skinInstancesSrv, skinCount, ctx.uav(statsBuf) };
+    // Local lights (MODE 3, 6): their data this frame and the shadow slots in use; a light's pages are kept while its
+    // generation holds and no changed caster meets its range.
+    const uint32_t localSlotsUsed = s.localUsed;
+    auto cacheWords = [=](PassContext& ctx, uint32_t (&k)[kCacheWords]) {
+        const uint32_t w[kCacheWords] = { casterStateRef.valid() ? ctx.uav(casterStateRef) : 0xFFFFFFFFu, ctx.uav(changed), instanceCount, ring,
+                                          changedCapacity, ctx.uav(table), ctx.uav(requests), ctx.uav(usedPages),
+                                          ctx.uav(freePages), pagesNow, scanSlots, cacheable ? 1u : 0u,
+                                          skinCount ? ctx.srv(skinBounds) : 0xFFFFFFFFu, skinInstancesSrv, skinCount, ctx.uav(statsBuf),
+                                          localSlotsUsed ? localLightsSrv : 0xFFFFFFFFu, localSlotsUsed, 0, 0 };
         std::memcpy(k, w, sizeof w);
     };
     {
@@ -775,10 +781,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.use(usedPages, Use::UavCompute);
                   },
                   [=](PassContext& ctx) {
-                      uint32_t k[16];
+                      uint32_t k[kCacheWords];
                       cacheWords(ctx, k);
                       ctx.cmd->SetPipelineState(pso);
-                      ctx.computeConstants(k, 16);
+                      ctx.computeConstants(k, kCacheWords);
                       ctx.cmd->Dispatch(1, 1, 1);
                   });
     }
@@ -794,11 +800,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                           b.use(skinBounds, Use::SrvCompute);
                       },
                       [=](PassContext& ctx) {
-                          uint32_t k[16];
+                          uint32_t k[kCacheWords];
                           cacheWords(ctx, k);
                           ctx.cmd->SetPipelineState(pso);
                           ctx.bindFrameConstants(mainConstants);
-                          ctx.computeConstants(k, 16);
+                          ctx.computeConstants(k, kCacheWords);
                           ctx.cmd->Dispatch(groups(skinCount, 64), 1, 1);
                       });
         }
@@ -811,12 +817,29 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                           b.keep();  // (the caster state carries over to the next frame)
                       },
                       [=](PassContext& ctx) {
-                          uint32_t k[16];
+                          uint32_t k[kCacheWords];
                           cacheWords(ctx, k);
                           ctx.cmd->SetPipelineState(pso);
                           ctx.bindFrameConstants(mainConstants);
-                          ctx.computeConstants(k, 16);
+                          ctx.computeConstants(k, kCacheWords);
                           ctx.cmd->Dispatch(groups(std::max(instanceCount, 1u), 64), 1, 1);
+                      });
+        }
+        if (localSlotsUsed > 0)
+        {
+            // the local lights whose range meets a changed caster (their pages are drawn anew this frame)
+            ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmCache.MODE6");
+            g.addPass("s.vsm.cache.locallights", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(changed, Use::UavCompute);
+                          b.use(usedPages, Use::UavCompute);
+                      },
+                      [=](PassContext& ctx) {
+                          uint32_t k[kCacheWords];
+                          cacheWords(ctx, k);
+                          ctx.cmd->SetPipelineState(pso);
+                          ctx.computeConstants(k, kCacheWords);
+                          ctx.cmd->Dispatch(groups(localSlotsUsed, 64), 1, 1);
                       });
         }
         {
@@ -827,10 +850,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                           b.use(table, Use::UavCompute);
                       },
                       [=](PassContext& ctx) {
-                          uint32_t k[16];
+                          uint32_t k[kCacheWords];
                           cacheWords(ctx, k);
                           ctx.cmd->SetPipelineState(pso);
-                          ctx.computeConstants(k, 16);
+                          ctx.computeConstants(k, kCacheWords);
                           ctx.cmd->Dispatch(kLevels, 32, 1);  // VsmCache.hlsl STALE_GROUPS_PER_LEVEL
                       });
         }
@@ -970,11 +993,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.use(statsBuf, Use::UavCompute);
                   },
                   [=](PassContext& ctx) {
-                      uint32_t k[16];
+                      uint32_t k[kCacheWords];
                       cacheWords(ctx, k);
                       ctx.cmd->SetPipelineState(keep);
-                      ctx.computeConstants(k, 16);
-                      ctx.cmd->Dispatch(cacheable ? groups(std::min(scanSlots, kSlots), 256) : 1, 1, 1);
+                      ctx.computeConstants(k, kCacheWords);
+                      ctx.cmd->Dispatch(cacheable ? groups(scanSlots, 256) : 1, 1, 1);  // (sun and local slots)
                   });
         g.addPass("s.vsm.cache.free", QueueType::Compute,
                   [&](PassBuilder& b) {
@@ -982,10 +1005,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.use(freePages, Use::UavCompute);
                   },
                   [=](PassContext& ctx) {
-                      uint32_t k[16];
+                      uint32_t k[kCacheWords];
                       cacheWords(ctx, k);
                       ctx.cmd->SetPipelineState(free);
-                      ctx.computeConstants(k, 16);
+                      ctx.computeConstants(k, kCacheWords);
                       ctx.cmd->Dispatch(1, 1, 1);
                   });
     }

@@ -231,15 +231,15 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
             }
         }
     }
+    // One evaluation for every hit: the split ones take the value at visibility 0 and the sun's term at full visibility x
+    // splitScale from it (rtHitRadianceParts). Two evaluations (visibility 0, then splitScale, subtracted) put a second
+    // full hit shading into every wave holding one penumbra or shadow-ray hit (r.refl.shade 1.76 -> 2.05 ms at 1440p with
+    // the penumbra deferral, 1db06e4 [measured]).
     if (split) L.sunVisibility = 0;
-    o.radiance = rtHitRadiance(m, s.normal, v, L, coneSpread);
-    if (split)
-    {
-        L.sunVisibility = splitScale;
-        o.sunTerm = rtHitRadiance(m, s.normal, v, L, coneSpread) - o.radiance;
-    }
+    float3 sunFull;
+    o.radiance = rtHitRadianceParts(m, s.normal, v, L, coneSpread, split, sunFull);
+    if (split) o.sunTerm = sunFull * splitScale;
     return o;
 }
-
 
 #endif

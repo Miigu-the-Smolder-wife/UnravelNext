@@ -109,7 +109,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.screenFilterCells = (float)q.number("gi.screen_filter_cells");
     s.experimentDisable = (uint32_t)q.integer("gi.experiment_disable");
     s.deterministic = q.boolean("gi.deterministic");
-    s.anchorVisibility = q.has("gi.anchor_visibility") ? q.boolean("gi.anchor_visibility") : true;
+    s.anchorVisibility = q.has("gi.anchor_visibility") ? q.boolean("gi.anchor_visibility") : false;
     // Fixed by the kernels (GiCache.hlsli, GiProbeGather.hlsl, GiInternal.hlsli probe offsets).
     if (q.integer("gi.cache_octahedral_texels") != 8) fail("gi.cache_octahedral_texels must be 8 (GI_TEXELS)");
     if (q.integer("gi.near_occlusion_taps") != 16) fail("gi.near_occlusion_taps must be 16 (GiProbeGather)");

@@ -65,7 +65,10 @@ struct RtHitLighting
 
 // n faces the ray origin side (RtSurface); v = unit vector toward the ray origin; pixelAngle = the ray cone's angular
 // width at the hit (filters a mirror hit's sun-disk edge like the direct view's pixel).
-float3 rtHitRadiance(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle)
+// sunFull: the sun's term at full visibility (the radiance is linear in L.sunVisibility: radiance = the rest + sunFull x
+// visibility), evaluated also at visibility 0 when wantSun - callers that get the visibility later (a shadow ray, the
+// deferred penumbra filter) take both from one evaluation instead of shading the hit twice.
+float3 rtHitRadianceParts(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle, bool wantSun, out float3 sunFull)
 {
     ModelSurface s;
     s.cls = m.classFlags & 0xFFu;
@@ -83,16 +86,21 @@ float3 rtHitRadiance(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float p
     const float alpha = modelAlpha(s.roughness);
     const float3 f0 = modelF0(s);
     const float3 compensation = 1 + f0 * (1 / modelDirectionalAlbedo(NoV, s.roughness) - 1);
-    float3 sun = 0;
-    if (L.sunVisibility > 0 && any(L.sunIlluminance > 0))
+    sunFull = 0;
+    if ((wantSun || L.sunVisibility > 0) && any(L.sunIlluminance > 0))
     {
         if (NoL > 0)
-            sun = diffuseAlbedo * L.sunIlluminance * NoL + shSunSpecular(f0, s.roughness, alpha, compensation, n, v, NoV, l0, L.sunIlluminance, pixelAngle);
+            sunFull = diffuseAlbedo * L.sunIlluminance * NoL + shSunSpecular(f0, s.roughness, alpha, compensation, n, v, NoV, l0, L.sunIlluminance, pixelAngle);
         else if (foliage)
-            sun = albedo * s.transmission * L.sunIlluminance * -NoL;  // transmitted through the leaf (model v1)
-        sun *= L.sunVisibility;  // fractional in penumbrae (the VSM estimate); was only tested > 0, giving full sun there
+            sunFull = albedo * s.transmission * L.sunIlluminance * -NoL;  // transmitted through the leaf (model v1)
     }
+    const float3 sun = sunFull * L.sunVisibility;  // fractional in penumbrae (the VSM estimate); was only tested > 0, giving full sun there
     return m.emissive + sun + diffuseAlbedo * L.irradiance + shSpecularAlbedo(f0, NoV, s.roughness) * L.specularRadiance + L.local;
+}
+float3 rtHitRadiance(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle)
+{
+    float3 sunFull;
+    return rtHitRadianceParts(m, n, v, L, pixelAngle, false, sunFull);
 }
 
 #endif
