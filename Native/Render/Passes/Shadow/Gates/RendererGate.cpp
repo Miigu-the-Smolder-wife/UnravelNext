@@ -13,6 +13,11 @@
 // --capture-output: the same units (linear radiance x exposure, before the post chain's encoding) at the output
 // resolution after the temporal upscale (ViewResources::upscaled: the frames render as in play, at the internal
 // resolution output.render_scale gives): with --capture of the same scene, the upscaled image against the native one.
+// --warmup-frames N: the warm-up by frame count (HarnessOptions::warmupFrames), so the last frame has the same index in
+// every run; the default with --capture / --capture-output / --luminance-log is 300 (the time-based warm-up ended at a
+// different frame each run and in each configuration: every temporal state differed at the captured frame).
+// --luminance-log FILE.csv: per frame (warm-up included) the mean luminance of the gate output (GateLuminance.hlsl:
+// display-encoded unorm, or L / (1 + L) of a linear capture), "frame,mean" - the brightness of a still scene over the run.
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h") && defined(UNX_HAS_SCENEGEN)
 #define S_RENDERER_GATE 1
 #include "unx/clusterbuilder/ClusterBuilder.h"
@@ -20,6 +25,7 @@
 #include "unx/visibility/Visibility.h"
 #endif
 #include "FroxelSystem.h"
+#include "SResources.h"
 #include "VsmSystem.h"
 #include "../../Atmosphere/Celestial.h"
 
@@ -123,6 +129,8 @@ int main(int argc, char** argv)
                                 // between the scene's and +30 % speed / +20 degrees (no reload; the host's path)
         std::vector<std::string> overrides;
         double warmupSeconds = -1;  // --warmup-seconds: the harness default when negative
+        int64_t warmupFrames = -1;  // --warmup-frames (captures and luminance logs: 300 when not given)
+        std::string luminancePath;  // --luminance-log
         std::string cameraAt6, saveScene;
         std::string timeArg, placeArg;
         bool autoExposure = false;
@@ -151,6 +159,8 @@ int main(int argc, char** argv)
             }
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
+            else if (a == "--warmup-frames") warmupFrames = std::stoll(next());
+            else if (a == "--luminance-log") luminancePath = next();
             else if (a == "--warmup-seconds") warmupSeconds = std::stod(next());  // repro of early frames (never with timings)
             else if (a == "--camera-at") cameraAt6 = next();  // "px,py,pz,tx,ty,tz": camera 0 moved to look from p at t (repros)
             else if (a == "--save-scene") saveScene = next();  // the scene as rendered (with --camera-at) for unx_reference
@@ -266,6 +276,13 @@ int main(int argc, char** argv)
             HarnessOptions options;
             options.frames = frames;
             if (warmupSeconds >= 0) options.warmupSeconds = warmupSeconds;
+            if (warmupFrames >= 0) options.warmupFrames = (uint32_t)warmupFrames;
+            else if (!capturePath.empty() || !luminancePath.empty()) options.warmupFrames = 300;
+            // --luminance-log: one uint64 sum per frame (GateLuminance.hlsl), read back after the run.
+            constexpr uint32_t kLuminanceSlots = 1u << 15;
+            ComPtr<ID3D12Resource> luminanceSums;
+            uint64_t lastFrame = 0;
+            if (!luminancePath.empty()) luminanceSums = s_detail::createBuffer(device, L"gate luminance sums", (uint64_t)kLuminanceSlots * 8);
             options.label = "S " + sceneName + (moving ? " moving " : " static ") + (sunDegPerS != 0 ? "sun " + std::to_string(sunDegPerS) + " deg/s " : "") + (gustPeriodS > 0 ? "gusts " : "") + rs;
             if (!out.empty()) options.outputDirectory = out;
             float4x4 prev = ViewDesc::fromCamera(cameraAt(s, moving, 0, cameraName), res.width, res.height, {}).viewProj;
@@ -347,6 +364,25 @@ int main(int argc, char** argv)
                 const ViewResources rendered = renderer.record(g, fc, output);
                 internalW = rendered.view.width;
                 internalH = rendered.view.height;
+                lastFrame = frame;
+                if (luminanceSums)
+                {
+                    const BufferRef sums = g.importBuffer(luminanceSums.Get(), { "gate luminance sums", (uint64_t)kLuminanceSlots * 8, 0 });
+                    const uint32_t slot = (uint32_t)(frame % kLuminanceSlots), w = rr.width, h = rr.height, linear = fc.outputLinearHdr ? 1u : 0u;
+                    for (const uint32_t clear : { 1u, 0u })
+                        g.addPass(clear ? "s.gate.luminance.clear" : "s.gate.luminance", QueueType::Compute,
+                                  [&](PassBuilder& b) {
+                                      if (!clear) b.use(output, Use::SrvCompute);
+                                      b.use(sums, Use::UavCompute);
+                                      b.keep();
+                                  },
+                                  [&shaders, output, sums, slot, w, h, linear, clear](PassContext& c) {
+                                      const uint32_t k[8] = { clear ? 0xFFFFFFFFu : c.srv(output), c.uav(sums), slot, w, h, linear, clear, 0 };
+                                      c.cmd->SetPipelineState(shaders.compute("Passes/Shadow/Gates/GateLuminance"));
+                                      c.computeConstants(k, 8);
+                                      c.cmd->Dispatch(clear ? 1 : (w + 7) / 8, clear ? 1 : (h + 7) / 8, 1);
+                                  });
+                }
                 if (!capturePath.empty())
                 {
                     if (captureUpscaled && !rendered.upscaled.valid())
@@ -410,6 +446,33 @@ int main(int argc, char** argv)
                 }
             });
             harness.printSummary(r);
+            if (luminanceSums)
+            {
+                // The harness waited for the GPU at its end: copy the sums out and write one line per rendered frame.
+                const uint64_t bytes = (uint64_t)kLuminanceSlots * 8;
+                ComPtr<ID3D12Resource> rb = s_detail::createBuffer(device, L"gate luminance readback", bytes, D3D12_HEAP_TYPE_READBACK);
+                CommandList cl = device.acquireCommandList(QueueType::Graphics);
+                D3D12_BUFFER_BARRIER bb{ D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                                         luminanceSums.Get(), 0, UINT64_MAX };
+                D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_BUFFER, 1 };
+                group.pBufferBarriers = &bb;
+                cl.list->Barrier(1, &group);
+                cl.list->CopyBufferRegion(rb.Get(), 0, luminanceSums.Get(), 0, bytes);
+                device.queue(QueueType::Graphics).waitCpu(device.submit(cl));
+                void* mapped = nullptr;
+                check(rb->Map(0, nullptr, &mapped), "map luminance sums");
+                const uint64_t* sums = static_cast<const uint64_t*>(mapped);
+                std::ofstream file(luminancePath);
+                if (!file) fail("cannot write %s", luminancePath.c_str());
+                file << "frame,mean\n";
+                const uint64_t first = lastFrame + 1 > kLuminanceSlots ? lastFrame + 1 - kLuminanceSlots : 0;
+                for (uint64_t f = first; f <= lastFrame; ++f)
+                    file << f << "," << format("%.7f", (double)sums[f % kLuminanceSlots] / (1023.0 * res.width * res.height)) << "\n";
+                D3D12_RANGE none{ 0, 0 };
+                rb->Unmap(0, &none);
+                logf("luminance of frames %llu..%llu -> %s\n", (unsigned long long)first, (unsigned long long)lastFrame, luminancePath.c_str());
+            }
+            if (!capturePath.empty()) logf("captured frame index %llu (warm-up %llu frames)\n", (unsigned long long)lastFrame, (unsigned long long)r.firstMeasuredFrame);
             if (!capturePath.empty() && captureBuffer)
             {
                 // The harness waits for the GPU at its end: the readback holds the last frame. PFM: "PF", width height,

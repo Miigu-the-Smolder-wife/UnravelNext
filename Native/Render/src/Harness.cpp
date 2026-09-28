@@ -204,13 +204,15 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
             if (cpu.size() < options.frames) cpu.push_back({ total, graph.stats().cpuRecordMs, graph.stats().cpuSubmitMs });
             if (frame % 16 == 0) clocks.push_back((double)sampleSmClockMHz());
         }
-        else if (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() >= options.warmupSeconds)
+        else if (options.warmupFrames > 0 ? frame + 1 >= options.warmupFrames
+                                           : std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() >= options.warmupSeconds)
         {
             firstMeasured = frame + 1;
             windowStartMs = unixMs();
         }
     }
     m_device.waitIdle();
+    result.firstMeasuredFrame = firstMeasured == UINT64_MAX ? 0 : firstMeasured;
     int contentionIntervalMs = 1000;
     readContention(windowStartMs, unixMs(), result, contentionIntervalMs);
     result.graph = graph.stats();
@@ -309,7 +311,7 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
             js << "]},\n";
         }
         js << " \"queue_priority\": " << jsonString(m_device.options().queuePriority == D3D12_COMMAND_QUEUE_PRIORITY_HIGH ? "high" : "normal") << ",\n";
-        js << " \"warmup_s\": " << options.warmupSeconds << ", \"frames\": " << timings.size() << ", \"frames_in_flight\": " << options.framesInFlight << ", \"pass_timestamps\": " << (options.passTimestamps ? "true" : "false")
+        js << " \"warmup_s\": " << options.warmupSeconds << ", \"warmup_frames\": " << result.firstMeasuredFrame << ", \"frames\": " << timings.size() << ", \"frames_in_flight\": " << options.framesInFlight << ", \"pass_timestamps\": " << (options.passTimestamps ? "true" : "false")
            << ", \"async_compute\": " << (options.asyncCompute ? "true" : "false") << ",\n";
         js << " \"gpu_frame_ms\": " << jsonDistribution(result.gpuFrameMs) << ",\n";
         js << " \"cpu_frame_ms\": " << jsonDistribution(result.cpuFrameMs) << ",\n";

@@ -24,6 +24,10 @@ Resolution resolutionFromString(const std::string& text, const QualityConfig& qu
 struct HarnessOptions
 {
     double warmupSeconds = 1.5;  // ARCHITECTURE 1.1: clocks ramp for ~1 s; shorter warm-ups under-measure 2-4x
+    // Warm-up by frame count instead of time (0: warmupSeconds). A time-based warm-up ends at a different frame each run
+    // (and differs between configurations of different speed): every temporal state - GI cache convergence, jitter
+    // phase, histories - then differs at the captured last frame. Image comparisons need the same frame index.
+    uint32_t warmupFrames = 0;
     uint32_t frames = 600;
     uint32_t framesInFlight = 2;
     bool passTimestamps = true;
@@ -48,6 +52,7 @@ struct HarnessResult
     std::string label;
     Resolution resolution;
     Distribution gpuFrameMs;
+    uint64_t firstMeasuredFrame = 0;  // frames before the measured ones (the warm-up)
     Distribution cpuFrameMs;    // build + compile + record + submit on the calling thread
     Distribution cpuRecordMs;
     Distribution cpuSubmitMs;
