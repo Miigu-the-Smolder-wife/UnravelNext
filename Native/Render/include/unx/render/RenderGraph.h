@@ -154,6 +154,11 @@ public:
     // (ARCHITECTURE 1.2, 4.3), so in-frame async compute only pays for large independent blocks and is opt-in.
     void setAsyncCompute(bool enabled) { m_asyncCompute = enabled; }
     bool asyncCompute() const { return m_asyncCompute; }
+    // Selected large independent blocks on the async queue while setAsyncCompute is off: a pass declared for
+    // QueueType::Compute whose name is listed ("name" exactly, or "prefix*") runs on the compute queue, every other pass
+    // on the graphics queue. Applies to the passes added after the call. The data dependencies are the declared uses, so
+    // the results are those of the one-queue frame; only the overlap and the cross-queue fences change the time.
+    void setAsyncPasses(std::vector<std::string> names) { m_asyncPasses = std::move(names); }
 
     // Compiles (or reuses) the plan, records all passes, submits them with the queue synchronisation, and resets
     // the declarations for the next frame. 'profiler' (optional) timestamps every pass.
@@ -175,5 +180,7 @@ private:
     RenderGraphStats m_stats;
     uint64_t m_lastFence[kQueueTypeCount] = {};
     bool m_asyncCompute = false;
+    std::vector<std::string> m_asyncPasses;
+    bool isAsyncPass(std::string_view name) const;
 };
 } // namespace unx::render

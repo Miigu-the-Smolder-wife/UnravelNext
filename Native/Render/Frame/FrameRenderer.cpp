@@ -326,6 +326,8 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);  // transforms, palettes, visibility of this frame
     tracks::particleLightCapacity(m_trackState, m_scene);  // A3: before the imports and every frame constants
     FrameResources resources;
+    // output.async_compute_passes: the named passes on the async compute queue (RenderGraph::setAsyncPasses).
+    graph.setAsyncPasses(m_quality.has("output.async_compute_passes") ? m_quality.strings("output.async_compute_passes") : std::vector<std::string>{});
     importFxLights(graph, m_scene, resources);
     FrameServices services;
     FramePassContext fc{ m_device, graph, m_shaders, m_quality, m_scene, frame, resources, services,
@@ -360,8 +362,9 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     main.color = output;
     std::vector<ViewResources> aux = auxiliaryViews(fc, frame);  // A14: in drawing order
 
-    // ARCHITECTURE 4.1, one graphics queue (4.3). Order matters only through declared dependencies; it follows the
-    // design so the reader can map passes to the budget table. A14 phases (Requests/20260926_C_per_view_history.md 5):
+    // ARCHITECTURE 4.1, one graphics queue (4.3) except the passes output.async_compute_passes names (GI's block on the
+    // async queue). Order matters only through declared dependencies; it follows the design so the reader can map passes
+    // to the budget table. A14 phases (Requests/20260926_C_per_view_history.md 5):
     // every view's visibility, the shadow pages once, the auxiliary views' shading, then the main view's resolve (its
     // materials read the auxiliary outputs of this frame).
     tracks::simulation(fc);  // C0
@@ -390,10 +393,13 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     main.froxelLights = resources.froxelLights;  // the main view's per-view S products (v1.22)
     main.airVolume = resources.aerialPerspective;
     tracks::globalIllumination(fc, main);
+    // S's screen visibility reads the resolve and the shadow pages only and is read only by M's shading: declared right
+    // after GI, the graphics queue runs it while GI's passes run on the async queue (output.async_compute_passes), before
+    // the reflections wait for GI's cache.
+    tracks::shadowVisibility(fc, main);
     tracks::reflections(fc, main);
     tracks::particles(fc, main);
     tracks::distortion(fc, main);
-    tracks::shadowVisibility(fc, main);
     tracks::shading(fc, main);
     if (frame.upscale.outputWidth != 0 && m_debugDraw != 0xFFFFFFFFu)
     {

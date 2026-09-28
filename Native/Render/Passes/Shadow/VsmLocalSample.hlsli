@@ -72,6 +72,10 @@ uint vsmLocalKeyAt(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, ui
 // in the page of the previous one, whose table word no longer needs a dependent load). The same values as projecting c
 // again for zp and loading every entry.
 float vsmLocalPlaneDepthAt(VsmLocalLight l, float3 receiver, float3 normal, float3 c, uint face);
+// The atlas' size for the gathers, queried once per thread (every VsmLocalResources.pool is the one VSM atlas): the query
+// sat in front of every gather of the tap loops [DXIL: a getDimensions per textureGather], a texture-pipe round trip per
+// tap. The same integers and the same division.
+static uint2 g_vsmLocalPoolSize = uint2(0, 0);
 float vsmLocalTapOcclusion(VsmLocalResources r, VsmLocalLight l, uint slot, float3 c, uint m, float3 receiver, float3 normal, float tolerancePerTexel,
                            out uint mipUsed, inout uint cacheSlot, inout uint2 cacheEntry)
 {
@@ -101,10 +105,14 @@ float vsmLocalTapOcclusion(VsmLocalResources r, VsmLocalLight l, uint slot, floa
         float4 d;  // atlas depths of (lo.x, lo.y), (hi.x, lo.y), (lo.x, hi.y), (hi.x, hi.y)
         if (all((lo >> VSM_PAGE_SHIFT) == page) && all((hi >> VSM_PAGE_SHIFT) == page) && all(hi == lo + 1))
         {
-            uint aw, ah;
-            r.pool.GetDimensions(aw, ah);
+            if (g_vsmLocalPoolSize.x == 0)
+            {
+                uint aw, ah;
+                r.pool.GetDimensions(aw, ah);
+                g_vsmLocalPoolSize = uint2(aw, ah);
+            }
             const int3 a = vsmAtlasTexel(e.x & VSM_PHYS_MASK, lo & (VSM_PAGE - 1));
-            const float4 gt = r.pool.GatherRed(g_pointClamp, (float2(a.xy) + 1) / float2(aw, ah));  // (x0 y1, x1 y1, x1 y0, x0 y0)
+            const float4 gt = r.pool.GatherRed(g_pointClamp, (float2(a.xy) + 1) / float2(g_vsmLocalPoolSize));  // (x0 y1, x1 y1, x1 y0, x0 y0)
             d = float4(gt.w, gt.z, gt.x, gt.y);
         }
         else

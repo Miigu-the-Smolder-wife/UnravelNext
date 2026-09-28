@@ -456,6 +456,13 @@ struct RenderGraph::Impl
                                  ? D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ
                                  : D3D12_BARRIER_LAYOUT_GENERIC_READ;
         }
+        // A compute-queue list runs only compute and ray tracing shaders: the "all shading" scopes (the Graphics uses,
+        // which cover DispatchRays) are named by those two stages there.
+        if (p.queue != QueueType::Graphics)
+            for (Access& a : out)
+                if (a.sync & (D3D12_BARRIER_SYNC_ALL_SHADING | D3D12_BARRIER_SYNC_NON_PIXEL_SHADING))
+                    a.sync = (D3D12_BARRIER_SYNC)((a.sync & ~(D3D12_BARRIER_SYNC_ALL_SHADING | D3D12_BARRIER_SYNC_NON_PIXEL_SHADING)) |
+                                                  D3D12_BARRIER_SYNC_COMPUTE_SHADING | D3D12_BARRIER_SYNC_RAYTRACING);
         return out;
     }
 
@@ -1367,12 +1374,26 @@ BufferRef RenderGraph::importBuffer(ID3D12Resource* resource, const BufferDesc& 
     return { (uint32_t)m_impl->resources.size() - 1 };
 }
 
+bool RenderGraph::isAsyncPass(std::string_view name) const
+{
+    for (const std::string& n : m_asyncPasses)
+    {
+        if (!n.empty() && n.back() == '*')
+        {
+            if (name.substr(0, n.size() - 1) == std::string_view(n).substr(0, n.size() - 1)) return true;
+        }
+        else if (name == n)
+            return true;
+    }
+    return false;
+}
+
 void RenderGraph::addPass(std::string_view name, QueueType queue, const SetupFn& setup, ExecuteFn execute)
 {
     if (queue == QueueType::Copy) fail("render graph: copy-queue passes are not supported yet");
     Impl::PassNode p;
     p.name = std::string(name);
-    p.queue = m_asyncCompute ? queue : QueueType::Graphics;
+    p.queue = m_asyncCompute || (queue == QueueType::Compute && isAsyncPass(name)) ? queue : QueueType::Graphics;
     p.execute = std::move(execute);
     m_impl->passes.push_back(std::move(p));
     PassBuilder b(*this, (uint32_t)m_impl->passes.size() - 1);

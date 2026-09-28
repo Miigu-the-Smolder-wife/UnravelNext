@@ -18,10 +18,11 @@ groupshared float4 gs_sample[2 * GI_TEXEL_COUNT];  // radiance, solid-angle weig
 groupshared float3 gs_local[2 * GI_TEXEL_COUNT];   // direction in the anchor frame
 groupshared float3 gs_sh[9];
 groupshared float gs_shWeight[2 * GI_TEXEL_COUNT * 9];  // per sample: its SH basis x its weight (the SH lanes' factors)
-groupshared float4 gs_sums;  // the group's serial sums (one wave): bounce young, bounce reads, bounce irradiance, total E
-groupshared float gs_sumE2;
+groupshared float3 gs_bounceSums;  // bounce young, bounce reads, bounce irradiance (one wave's serial sums)
+groupshared float2 gs_totals;      // total E, total E^2 (another wave's serial sums)
 groupshared float2 gs_bounce[GI_TEXEL_COUNT];  // per texel ray: 1 if its bounce read was young, 1 if it read a bounce term
 groupshared float gs_bounceIrradiance[GI_TEXEL_COUNT];  // per texel ray: its bounce light's share of the anchor's irradiance (luminance)
+groupshared uint gs_emitted[GI_TEXEL_COUNT];  // per emitter sample: 1 when its value is not 0
 
 [numthreads(128, 1, 1)]
 void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
@@ -37,6 +38,17 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     const float3 na = giAnchorNormal(b, h, entry);
     float3 t, bt;
     giBasis(na, t, bt);
+    // The entry's stored values the update blends with, loaded before the barriers (only this group writes the entry in
+    // this pass): the steady test's window and pole, each texel lane's texel and emitter texel, each map lane's direction.
+    const uint window = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_WINDOW);
+    const uint heldWord = b.Load(h.offIrr + entry * GI_IRR_STRIDE + GI_IRR_POLE * 4);
+    const uint texelAddress = h.offTexels + (entry * GI_TEXEL_COUNT + lane) * 8;
+    const uint emitAddress = giEmitterOffset(h) + (entry * GI_TEXEL_COUNT + lane) * 4;
+    const uint irrAddress = h.offIrr + entry * GI_IRR_STRIDE + lane * 4;
+    uint2 texelOld = 0;
+    uint emitOld = 0, irrOld = 0;
+    uint4 texelSample = 0;
+    float3 emitted = 0;
 
     if (lane < GI_TEXEL_COUNT)
     {
@@ -53,11 +65,14 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         const bool finite = all(value == value) && all(abs(value) < 3.0e38);
         gs_sample[lane] = finite ? float4(value, 2 / (len * len * len) / (float)GI_TEXEL_COUNT) : float4(0, 0, 0, 0);
         gs_local[lane] = q / len;
-        const uint4 texel = samples[2 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane];
-        const uint w = texel.w;
+        texelSample = samples[2 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane];
+        const uint w = texelSample.w;
         gs_bounce[lane] = float2((w >> 17) & 1u, (w >> 16) & 1u);
-        const float lum = dot(asfloat(texel.xyz), float3(0.2126, 0.7152, 0.0722));
+        const float lum = dot(asfloat(texelSample.xyz), float3(0.2126, 0.7152, 0.0722));
         gs_bounceIrradiance[lane] = finite && lum < 3.0e38 ? ((w >> 18) & 4095u) / 4095.0 * lum * gs_sample[lane].w * gs_local[lane].z : 0.0;
+        texelOld = b.Load2(texelAddress);
+        emitted = asfloat(samples[3 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane].xyz);
+        emitOld = b.Load(emitAddress);
     }
     else if (lane < 2 * GI_TEXEL_COUNT)
     {
@@ -66,7 +81,9 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         const bool finite = all(value == value) && all(abs(value) < 3.0e38);
         gs_sample[lane] = finite ? float4(value, 1.0 / GI_TEXEL_COUNT) : float4(0, 0, 0, 0);
         gs_local[lane] = octDecode(s.w);
+        gs_emitted[lane - GI_TEXEL_COUNT] = finite && any(value != 0) ? 1u : 0u;
     }
+    if (lane < GI_IRR_N * GI_IRR_N) irrOld = b.Load(irrAddress);
     if (lane < 2 * GI_TEXEL_COUNT)
     {
         // The SH lanes' factor of this sample, y_j(w) x dw (world frame), once per sample instead of once per sample
@@ -78,34 +95,61 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         [unroll] for (uint j = 0; j < 9; ++j) gs_shWeight[lane * 9 + j] = y[j] * w;
     }
     GroupMemoryBarrierWithGroupSync();
-    // The serial sums over the samples: one wave (every lane of it the same loops in the same order), shared - every wave
-    // of the group ran them before.
-    if (lane < WaveGetLaneCount())
+    // The loops run over the texel samples, then the emitter samples unless all of these are 0 (no emissive triangles,
+    // or none visible from the anchor): every term they would add is then +0, which leaves each sum as it is (a sum that
+    // starts at +0 never becomes -0), so the sums are the full loops' bit for bit.
+    bool anyEmitted = false;
+    for (uint i = WaveGetLaneIndex(); i < GI_TEXEL_COUNT; i += WaveGetLaneCount()) anyEmitted = anyEmitted || gs_emitted[i] != 0;
+    const uint count = WaveActiveAnyTrue(anyEmitted) ? 2 * GI_TEXEL_COUNT : GI_TEXEL_COUNT;
+    // Every sum below is one loop in sample order, as before; the loops are spread over the group's waves so they run at
+    // the same time (the wave holding lane 64: the map's last directions and the E sums; the wave holding lane 96: the SH
+    // coefficients and the bounce sums; with 64-lane waves one wave holds both): the same values, a shorter critical path
+    // than the serial sums on one wave ahead of the map and SH loops.
+    const uint waveSize = WaveGetLaneCount();
+    if (lane / waveSize == 96u / waveSize)
     {
         float2 bounceSum = 0;
         [loop] for (uint k = 0; k < GI_TEXEL_COUNT; ++k) bounceSum += gs_bounce[k];
-        float bounceSumE = 0, sumE = 0, sumE2 = 0;
+        float bounceSumE = 0;
         [loop] for (uint k = 0; k < GI_TEXEL_COUNT; ++k) bounceSumE += gs_bounceIrradiance[k];
-        [loop] for (uint k = 0; k < 2 * GI_TEXEL_COUNT; ++k)
+        if (WaveIsFirstLane()) gs_bounceSums = float3(bounceSum, bounceSumE);
+    }
+    if (lane / waveSize == 64u / waveSize)
+    {
+        float sumE = 0, sumE2 = 0;
+        [loop] for (uint k = 0; k < count; ++k)
         {
             const float c = dot(gs_sample[k].xyz, float3(0.2126, 0.7152, 0.0722)) * gs_sample[k].w * max(gs_local[k].z, 0.0);
             sumE += c;
             sumE2 += c * c;
         }
-        if (lane == 0)
-        {
-            gs_sums = float4(bounceSum, bounceSumE, sumE);
-            gs_sumE2 = sumE2;
-        }
+        if (WaveIsFirstLane()) gs_totals = float2(sumE, sumE2);
+    }
+    // SH: lanes 96..104, one coefficient each (three channels), in the world frame, from the per-sample factors.
+    const uint shLane = lane - 96u;
+    if (lane >= 96u && shLane < 9)
+    {
+        float3 c = 0;
+        [loop] for (uint k = 0; k < count; ++k) c += gs_sample[k].xyz * gs_shWeight[k * 9 + shLane];
+        const float a = shLane == 0 ? GI_PI : (shLane < 4 ? 2 * GI_PI / 3 : GI_PI / 4);
+        gs_sh[shLane] = c * a;
+    }
+    // Irradiance map: lanes 0..80, one direction each (the sum here, the blend after the weight below).
+    float3 e = 0;
+    if (lane < GI_IRR_N * GI_IRR_N)
+    {
+        const uint ix = lane % GI_IRR_N, iy = lane / GI_IRR_N;
+        const float3 nj = giHemiOctDecode((float2(ix, iy) + 0.5) / (float)GI_IRR_N);
+        [loop] for (uint k = 0; k < count; ++k) e += gs_sample[k].xyz * (max(dot(nj, gs_local[k]), 0.0) * gs_sample[k].w);
     }
     GroupMemoryBarrierWithGroupSync();
-    const float2 bounce = gs_sums.xy;
+    const float2 bounce = gs_bounceSums.xy;
     const float young = bounce.y > 0 ? bounce.x / bounce.y : 0.0;  // no bounce light read: nothing biased
     // Jacobi length (GiInternal giJacobiLength): s = bounce share of this update's irradiance at the anchor normal; J with
     // s^J <= GI_JACOBI_RESIDUAL. Early iterates read a darker cache (s too small), so J grows during the Jacobi phase; after
     // it J is kept until a reset (a maximum over later noisy updates kept growing and sent converged cells back to Jacobi
     // replacement: the bathhouse's level drifted by +-6 % over 100 frames).
-    const float bounceE = gs_sums.z, totalE = gs_sums.w, totalE2 = gs_sumE2;
+    const float bounceE = gs_bounceSums.z, totalE = gs_totals.x, totalE2 = gs_totals.y;
     const float share = totalE > 0 ? saturate(bounceE / totalE) : 0.0;
     const uint wanted = share > 0 ? (uint)min(ceil(log(GI_JACOBI_RESIDUAL) / log(min(share, 0.9995))), 4095.0) : 0u;
     const uint storedJacobi = giHistoryJacobi(history);
@@ -118,9 +162,8 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     // the light is steady and the window grows to historyStatic; beyond, it is cut to historyMax (a light change of any
     // speed is followed as before). The test reads the state before this update: a window chosen by this update's own
     // value or spread would weight its high and low samples differently (a biased mean).
-    const uint window = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_WINDOW);
     const float fastOld = f16tof32(window) * GI_LOAD_SCALE, spreadOld = f16tof32(window >> 16) * GI_LOAD_SCALE;
-    const float held = dot(giIrrUnpack(b.Load(h.offIrr + entry * GI_IRR_STRIDE + GI_IRR_POLE * 4)) * GI_LOAD_SCALE, float3(0.2126, 0.7152, 0.0722));
+    const float held = dot(giIrrUnpack(heldWord) * GI_LOAD_SCALE, float3(0.2126, 0.7152, 0.0722));
     const bool steady = history != 0 && abs(fastOld - held) <= 3 * spreadOld / sqrt(31.0) + 0.01 * held;
     const float spread = sqrt(max(totalE2 - totalE * totalE / (2.0 * GI_TEXEL_COUNT), 0.0));
     const float fast = history == 0 ? totalE : lerp(fastOld, totalE, 1.0 / 16.0);
@@ -137,52 +180,29 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     // Texels: lanes 0..63 (radiance, hit distance).
     if (lane < GI_TEXEL_COUNT)
     {
-        const uint4 s = samples[2 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane];
-        const uint address = h.offTexels + (entry * GI_TEXEL_COUNT + lane) * 8;
-        const uint2 old = b.Load2(address);
-        const float3 previous = float3(f16tof32(old.x), f16tof32(old.x >> 16), f16tof32(old.y)) * GI_LOAD_SCALE;
-        const float3 sample = asfloat(s.xyz);
+        const float3 previous = float3(f16tof32(texelOld.x), f16tof32(texelOld.x >> 16), f16tof32(texelOld.y)) * GI_LOAD_SCALE;
+        const float3 sample = asfloat(texelSample.xyz);
         const bool finite = all(sample == sample) && all(abs(sample) < 3.0e38);
         const float a = finite ? alpha : 0.0;  // a non-finite value keeps the texel as it was
         float3 value = lerp(previous, finite ? sample : previous, a) * GI_STORE_SCALE;
         [unroll] for (uint c = 0; c < 3; ++c) value[c] = giDitherHalf(value[c], giDitherUnit(seed + lane * 4 + c));
-        const float dist = lerp(f16tof32(old.y >> 16), f16tof32(s.w & 0xFFFFu), a);
-        b.Store2(address, uint2(giPackHalf2(value.r, value.g), giPackHalf2(value.b, dist)));
+        const float dist = lerp(f16tof32(texelOld.y >> 16), f16tof32(texelSample.w & 0xFFFFu), a);
+        b.Store2(texelAddress, uint2(giPackHalf2(value.r, value.g), giPackHalf2(value.b, dist)));
         // the emitter texel (fourth samples block, GiTrace): same running mean
-        const float3 emitted = asfloat(samples[3 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane].xyz);
-        const uint emitAddress = giEmitterOffset(h) + (entry * GI_TEXEL_COUNT + lane) * 4;
-        const float3 emitPrevious = giIrrUnpack(b.Load(emitAddress)) * GI_LOAD_SCALE;
+        const float3 emitPrevious = giIrrUnpack(emitOld) * GI_LOAD_SCALE;
         const bool emitFinite = all(emitted == emitted) && all(abs(emitted) < 3.0e38);
         const uint re = seed + 4096 + lane * 4;
         b.Store(emitAddress, giPackRgb9e5(lerp(emitPrevious, emitFinite ? emitted : emitPrevious, emitFinite ? alpha : 0.0) * GI_STORE_SCALE,
                                           float3(giDitherUnit(re), giDitherUnit(re + 1), giDitherUnit(re + 2))));
     }
-
-    // SH: lanes 96..104, one coefficient each (three channels), in the world frame, from the per-sample factors. (The last wave's lanes: the map below
-    // takes lanes 0..80, so the two loops run on different waves at the same time instead of one after the other on the
-    // first; the same loop per coefficient, bit-identical.)
-    const uint shLane = lane - 96u;
-    if (lane >= 96u && shLane < 9)
-    {
-        float3 c = 0;
-        [loop] for (uint k = 0; k < 2 * GI_TEXEL_COUNT; ++k) c += gs_sample[k].xyz * gs_shWeight[k * 9 + shLane];
-        const float a = shLane == 0 ? GI_PI : (shLane < 4 ? 2 * GI_PI / 3 : GI_PI / 4);
-        gs_sh[shLane] = c * a;
-    }
-    // Irradiance map: lanes 0..80, one direction each.
+    // Irradiance map: the blend of lanes 0..80.
     if (lane < GI_IRR_N * GI_IRR_N)
     {
-        const uint ix = lane % GI_IRR_N, iy = lane / GI_IRR_N;
-        const float3 nj = giHemiOctDecode((float2(ix, iy) + 0.5) / (float)GI_IRR_N);
-        float3 e = 0;
-        [loop] for (uint k = 0; k < 2 * GI_TEXEL_COUNT; ++k) e += gs_sample[k].xyz * (max(dot(nj, gs_local[k]), 0.0) * gs_sample[k].w);
-        const uint address = h.offIrr + entry * GI_IRR_STRIDE + lane * 4;
-        const float3 previous = giIrrUnpack(b.Load(address)) * GI_LOAD_SCALE;
+        const float3 previous = giIrrUnpack(irrOld) * GI_LOAD_SCALE;
         const uint r = seed + 1024 + lane * 4;
-        b.Store(address, giPackRgb9e5(lerp(previous, e, alpha) * GI_STORE_SCALE, float3(giDitherUnit(r), giDitherUnit(r + 1), giDitherUnit(r + 2))));
+        b.Store(irrAddress, giPackRgb9e5(lerp(previous, e, alpha) * GI_STORE_SCALE, float3(giDitherUnit(r), giDitherUnit(r + 1), giDitherUnit(r + 2))));
     }
-    GroupMemoryBarrierWithGroupSync();
-    if (lane != 0) return;
+    if (lane != 0) return;  // (gs_sh was written before the barrier above)
 
     float3 previous[9];
     giLoadSh(b, h, entry, previous);

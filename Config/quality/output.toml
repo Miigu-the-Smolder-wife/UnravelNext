@@ -11,6 +11,13 @@ resolutions = ["3840x2160", "2560x1440", "1920x1080"]
 # banded at 4K / 8 = 1036800 (8 bands at 4K, 4 at 1440p) M measured city 4K 6.725 -> 6.800 ms (shading is latency-bound,
 # the L2 hits do not pay for the per-band barriers yet). Measure again at 1036800 when shading nears its floor.
 band_pixels = 0
+# Async compute (RenderGraph::setAsyncPasses): these passes run on the compute queue, every other pass on the graphics
+# queue; the declared uses order them (fences where a pass reads what the other queue wrote), so the image is the
+# one-queue frame's. GI's block (cache upkeep, the 500 k update rays, integrate, probes, screen irradiance: ~1.5 ms at
+# internal 960p, resolution-independent in its rays [measured 974c6bb]) overlaps S's froxels and screen visibility, which
+# are declared between the resolve and the reflections (FrameRenderer::record). A cross-queue fence costs 62-80 us
+# (RenderGraph.h): two per frame here. [] = one queue (the frame before this key).
+async_compute_passes = ["r.gi.begin", "r.gi.shift", "r.gi.evict", "r.gi.clear", "r.gi.rehash", "r.gi.place", "r.gi.invalidate", "r.gi.carry", "r.gi.age", "r.gi.setup", "r.gi.select", "r.gi.det.*", "r.gi.trace", "r.gi.integrate", "r.gi.gather", "r.gi.mapowners", "r.gi.maps", "r.gi.screen", "r.gi.screen.filter", "r.gi.lookupstats*"]
 # Temporal upscale (user decisions 2026-09-28: internal resolution + temporal upscale for the 4K budget, then for 1440p
 # and 1080p as well): outputs of at least render_scale_min_height render the main view at output height x render_scale,
 # at most render_height_max (same aspect), with a sub-pixel jitter, and M's temporal upscale
