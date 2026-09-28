@@ -301,13 +301,8 @@ float3 giShIrradiance(B b, GiHeader h, uint entry, float3 n, out float sunVisibi
 // Read hook of the lookups below, per contributing entry. Read-only readers (M's shading) do nothing; R's ray hits read
 // through the RW cache and keep what they read alive and requested (GiInternal.hlsli): an entry only readers see must not
 // be left at its first, unconverged update. w = the entry's trilinear weight in the lookup.
-void giKeepRead(ByteAddressBuffer b, GiHeader h, uint entry, float w, bool known = false) {}
-void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w, bool known = false);
-// A lookup's own cell, whose entry the caller has just found or created (giFindOrCreate: reflection hits): the corner
-// with this key takes g_giKnownEntry instead of probing the table again (the same entry - or a pending / new one, which
-// has no update and is skipped either way), per thread; 0 = none (a key always has bit 63 set).
-static uint64_t g_giKnownKey = 0;
-static uint g_giKnownEntry = 0;
+void giKeepRead(ByteAddressBuffer b, GiHeader h, uint entry, float w) {}
+void giKeepRead(RWByteAddressBuffer b, GiHeader h, uint entry, float w);
 
 // One level's trilinear accumulation over the 8 cells of the point (entries that exist and have been updated).
 template <typename B>
@@ -324,9 +319,7 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
     [loop] for (uint k = 0; k < 8; ++k)
     {
         const int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
-        const uint64_t key = giKey(level, nc, c0 + o);
-        const bool known = key == g_giKnownKey;  // the caller's own cell (giFindOrCreate just returned its entry)
-        const uint entry = known ? g_giKnownEntry : giFind(b, h, key);
+        const uint entry = giFind(b, h, giKey(level, nc, c0 + o));
         if (entry == GI_ENTRY_PENDING) continue;
         const uint updates = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES);
         if (updates == 0) continue;  // no information yet
@@ -345,7 +338,7 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
             const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
             l = w * giTexelRadianceCone(b, h, entry, giHemiOctEncode(local), cone, emitters);
         }
-        giKeepRead(b, h, entry, w, known);  // (known: touched and requested by the caller already)
+        giKeepRead(b, h, entry, w);
         if (seen)
         {
             sumE += e;
