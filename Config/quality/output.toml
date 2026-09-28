@@ -11,17 +11,14 @@ resolutions = ["3840x2160", "2560x1440", "1920x1080"]
 # banded at 4K / 8 = 1036800 (8 bands at 4K, 4 at 1440p) M measured city 4K 6.725 -> 6.800 ms (shading is latency-bound,
 # the L2 hits do not pay for the per-band barriers yet). Measure again at 1036800 when shading nears its floor.
 band_pixels = 0
-# Async compute (RenderGraph::setAsyncPasses): these passes run on the compute queue, every other pass on the graphics
-# queue; the declared uses order them (fences where a pass reads what the other queue wrote), so the image is the
-# one-queue frame's. The compute queue takes R's ray-tracing structures of the frame (deformed BLAS refit, TLAS builds:
-# 0.11 / 0.03 ms, read first by GI's rays: they overlap V's culling and raster and S's pages), S's froxel integration (0.15 / 0.50 ms train / bath at internal 960p) and
-# GI's block (cache upkeep, the 500 k update rays, integrate, probes, screen irradiance: ~1.5 ms, resolution-independent in
-# its rays [measured 974c6bb]); the graphics queue meanwhile runs S's screen visibility (0.48 / 1.41 ms, declared right
-# after GI: FrameRenderer::record) and the reflections' classification, jobs, traversal and local shadow rays, which do
-# not read GI's cache; the screen lookup overlaps the reflection hits (GiSystem::recordScreen). A cross-queue fence costs
-# 62-80 us (RenderGraph.h): about three per frame here. [] = one queue (the frame before this key); "s.shadow.*" added
-# moves the screen visibility behind GI on the compute queue (train shorter, bath longer [expected]).
-async_compute_passes = ["r.as.deform", "r.as.refit", "r.as.tlas.static", "r.as.tlas.sync", "r.as.tlas.dynamic", "s.froxel.tiledepth", "s.froxel.integrate", "r.gi.begin", "r.gi.shift", "r.gi.evict", "r.gi.clear", "r.gi.rehash", "r.gi.place", "r.gi.invalidate", "r.gi.carry", "r.gi.age", "r.gi.setup", "r.gi.select", "r.gi.det.*", "r.gi.trace", "r.gi.integrate", "r.gi.gather", "r.gi.mapowners", "r.gi.maps", "r.gi.screen", "r.gi.screen.filter", "r.gi.lookupstats*"]
+# Async compute (RenderGraph::setAsyncPasses): the named passes run on the compute queue, every other pass on the graphics
+# queue; the declared uses order them (fences where a pass reads what the other queue wrote). Off: measured slower in all
+# four cases [84e789f, RTX 4080, 600 frames, median ms, internal 960p / 720p]: train 1440p 5.41 / 5.44 async vs 5.29 / 5.36
+# serial, bath 1440p 6.29 / 6.30 vs 6.10 / 6.09, train 1080p 3.84 / 3.86 vs 3.81 / 3.76, bath 1080p 4.60 / 4.51 vs
+# 4.43 / 4.37 (the list was: TLAS builds, froxel integration and GI's block; + "s.shadow.*": train 1080p 3.76 / 3.71,
+# the rest still slower). The fences (62-80 us each, RenderGraph.h) and the two queues sharing the SMs of latency-bound
+# kernels cost more than the overlap gave. [] = one queue.
+async_compute_passes = []
 # Temporal upscale (user decisions 2026-09-28: internal resolution + temporal upscale for the 4K budget, then for 1440p
 # and 1080p as well): outputs of at least render_scale_min_height render the main view at output height x render_scale,
 # at most render_height_max (same aspect), with a sub-pixel jitter, and M's temporal upscale
@@ -39,4 +36,6 @@ render_height_max = 1440
 # 1.4 px/frame pan 0.56 / 0.92 (the 974c6bb kernel: 0.10 / 0.78 and 0.03 / 0.77).
 upscale_kernel = 60.0
 upscale_history_frames = 64
-upscale_history_frames_moving = 8
+# Moving: 4 (8 before 2026-09-29) with the Lanczos-3 moving history and its min / max clip (Upscale.hlsl): more of the
+# detail stays in the CPU model's slow pans (SSIM 0.73-0.77 -> 0.86-0.87 at 0.2-0.45 px / frame).
+upscale_history_frames_moving = 4

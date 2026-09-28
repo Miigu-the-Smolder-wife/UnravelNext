@@ -12,13 +12,12 @@
 //            kernel (Tools/ImageQuality, band 0.25-0.5 cycles/px) energy ratio 0.10, SSIM 0.78 against native.) Where
 //            the history has no weight yet (a new surface), the wide internal-pixel kernel fills the pixel as before.
 //   history  the previous output at x - motion (the motion of the nearest of the 3 x 3 samples: edges take the
-//            foreground's), Catmull-Rom (5 bilinear taps), times the exposure ratio; corrected at LOW frequency only:
-//            its mean over one internal pixel (4 bilinear taps) is clipped to the samples' YCoCg box (their mean +- 1
-//            sigma, within their min / max) and the history moved by that difference, so a lighting change or a
-//            disocclusion moves it while the sub-internal-pixel detail it accumulated (thin lines the 3 x 3 samples of
-//            one frame may all miss) is kept; where the correction is large against the box (a different surface) the
-//            whole history is clipped as before. (Clipping the full-resolution history to the internal 3 x 3 box every
-//            frame removed exactly that detail.)
+//            foreground's), Catmull-Rom (5 bilinear taps) where the pixel is still, Lanczos-3 (6 x 6 loads) where it
+//            moves, times the exposure ratio. Still: corrected at LOW frequency only, and only where its mean over one
+//            internal pixel (4 bilinear taps) lies outside the samples' YCoCg min / max widened by half their extent
+//            (a lighting change, a disocclusion): moved by that difference, fully clipped where the difference is as
+//            large as the extent. Moving (a quarter output pixel per frame and more, blended in): clipped to the min /
+//            max widened by a tenth. See the comments at the correction for the measurements.
 //   blend    alpha = w / (w + n), w = this frame's summed sample weight, n = the history's (alpha channel), capped at
 //            output.upscale_history_frames frames of weight where the pixel is still and at
 //            output.upscale_history_frames_moving where it moves by a quarter output pixel or more (every frame of
@@ -58,6 +57,35 @@ float4 upHistory(Texture2D<float4> t, float2 uv, float2 size)
     return r / (wa + wb + wc + wd + we);
 }
 
+// Lanczos-3 of t at uv (6 x 6 texel loads, separable weights normalised): the moving history's resampling. Catmull-Rom
+// every frame of motion took most of the detail near the output Nyquist frequency away from the history within a few
+// frames (CPU model, fine wood grain panned 0.2-0.45 px / frame: energy 0.19-0.23 of native with Catmull-Rom, 0.37-0.38
+// with Lanczos-3 and the moving clip below; SSIM 0.73-0.77 -> 0.86-0.87). Its overshoot is removed by that clip.
+float upLanczos(float x) { return abs(x) < 1e-4 ? 1.0 : (abs(x) >= 3 ? 0.0 : 3 * sin(3.14159265 * x) * sin(3.14159265 * x / 3) / (9.8696044 * x * x)); }
+float4 upHistoryLanczos(Texture2D<float4> t, float2 uv, float2 size)
+{
+    const float2 pos = uv * size - 0.5;
+    const float2 f0 = floor(pos), f = pos - f0;
+    float wx[6], wy[6];
+    float sx = 0, sy = 0;
+    [unroll] for (int i = 0; i < 6; ++i)
+    {
+        wx[i] = upLanczos(f.x - (i - 2));
+        wy[i] = upLanczos(f.y - (i - 2));
+        sx += wx[i];
+        sy += wy[i];
+    }
+    const int2 hi = int2(size) - 1;
+    float4 r = 0;
+    [unroll] for (int y = 0; y < 6; ++y)
+    {
+        float4 row = 0;
+        [unroll] for (int x = 0; x < 6; ++x) row += wx[x] * t.Load(int3(clamp(int2(f0) + int2(x - 2, y - 2), 0, hi), 0));
+        r += wy[y] * row;
+    }
+    return r / (sx * sy);
+}
+
 // h moved towards the box centre until it is inside the box (lo, hi).
 float3 upClip(float3 h, float3 lo, float3 hi)
 {
@@ -85,7 +113,7 @@ void main(uint2 o : SV_DispatchThreadID)
     const float2 x = uv * float2(inSize);
     const int2 kc = int2(floor(x + jitter));  // the sample whose unjittered centre is within half a pixel of x
 
-    float3 sumWide = 0, sum = 0, m1 = 0, m2 = 0, lo = 1e30, hi = -1e30;
+    float3 sumWide = 0, sum = 0, lo = 1e30, hi = -1e30;
     float wsumWide = 0, wsum = 0, nearest = -1;
     int2 nearestK = clamp(kc, 0, inSize - 1);
     [unroll] for (int dy = -1; dy <= 1; ++dy)
@@ -95,8 +123,6 @@ void main(uint2 o : SV_DispatchThreadID)
             float3 c = colour.Load(int3(k, 0)).rgb;
             c = all(isfinite(c)) ? upTonemap(max(c, 0)) : 0;
             const float3 y = upYCoCg(c);
-            m1 += y;
-            m2 += y * y;
             lo = min(lo, y);
             hi = max(hi, y);
             const float2 d = float2(k) + 0.5 - jitter - x;  // internal pixels
@@ -126,28 +152,38 @@ void main(uint2 o : SV_DispatchThreadID)
     float n = 0;
     float3 history = 0;
     const float2 prevUv = uv - motionUv;
-    const float3 mean = m1 / 9, sigma = sqrt(max(m2 / 9 - mean * mean, 0));
-    const float3 boxLo = max(lo, mean - sigma), boxHi = min(hi, mean + sigma);
+    const float moving = saturate(movePx / 0.25);
+    const float3 extent = max(hi - lo, 1e-4);
     if ((P[1].w & 1u) == 0 && all(prevUv >= 0) && all(prevUv <= 1))
     {
         Texture2D<float4> historyTex = ResourceDescriptorHeap[P[0].w];
-        const float4 h = upHistory(historyTex, prevUv, float2(outSize));
+        const float4 h = movePx > 1e-3 ? upHistoryLanczos(historyTex, prevUv, float2(outSize)) : upHistory(historyTex, prevUv, float2(outSize));
         if (all(isfinite(h)))
         {
             const float ratio = asfloat(P[3].x);
             history = upTonemap(max(h.rgb * ratio, 0));
             n = clamp(h.a, 0, cap);
-            // Low-frequency correction: the history's mean over one internal pixel against the samples' box.
+            // Still: a low-frequency correction only where the history's mean over one internal pixel lies clearly
+            // outside what this frame's samples span (their min / max widened by half its extent: a lighting change, a
+            // disocclusion). The samples' mean +- 1 sigma box (4f2c4eb) moved the history every frame by a different
+            // amount per output pixel - the 3 x 3 samples of a frame do not span sub-internal-pixel detail, and which
+            // ones fall around a pixel depends on the jitter and on the pixel's phase in the 3 : 2 grid: a regular
+            // grid and comb pattern on the wood grain and steps along the mouldings that native does not have
+            // [84e789f crop_train_1440, user]; CPU model (Tools/ImageQuality/UpscaleModel.py, high-contrast grain, still):
+            // SSIM 0.958 / energy 1.16 with the sigma box, 0.9987 / 0.95 with this one, the same lag after a lighting
+            // change as before.
             const float2 o2 = 0.5 / float2(inSize);  // half an internal pixel in uv
             float3 low = 0;
             [unroll] for (uint q = 0; q < 4; ++q)
                 low += upTonemap(max(historyTex.SampleLevel(g_linearClamp, prevUv + float2(q & 1 ? o2.x : -o2.x, q & 2 ? o2.y : -o2.y), 0).rgb * ratio, 0));
             const float3 lowY = upYCoCg(low * 0.25);
-            const float3 delta = upClip(lowY, boxLo, boxHi) - lowY;
-            const float3 extent = max(boxHi - boxLo, 1e-4);
+            const float3 delta = upClip(lowY, lo - 0.5 * extent, hi + 0.5 * extent) - lowY;
             const float reject = saturate(max(abs(delta.x) / extent.x, max(abs(delta.y) / extent.y, abs(delta.z) / extent.z)));
             const float3 hY = upYCoCg(history);
-            history = upRgb(lerp(hY + delta, upClip(hY, boxLo, boxHi), reject));
+            const float3 still = lerp(hY + delta, upClip(hY, lo, hi), reject);
+            // Moving: the whole history within the samples' min / max widened by a tenth (the Lanczos overshoot and
+            // what moved in from elsewhere; a moving history holds no sub-internal-pixel detail the clip could remove).
+            history = upRgb(lerp(still, upClip(hY, lo - 0.1 * extent, hi + 0.1 * extent), moving));
         }
     }
     // This frame's value: the narrow kernel's mean; where the history holds little (a new surface), the wide kernel's.
