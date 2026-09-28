@@ -295,7 +295,7 @@ int main(int argc, char** argv)
         Frame f2 = runFrame(true);
         // (the same pages and physical pages; the drawn-this-frame bit differs with the cache)
         auto withoutDrawn = [](std::vector<uint8_t> t) {
-            for (size_t i = 0; i + 8 <= t.size(); i += 8) t[i + 3] &= (uint8_t)~((1u << 29 | 1u << 30) >> 24);
+            for (size_t i = 0; i + 8 <= t.size(); i += 8) t[i + 3] = (uint8_t)(t[i + 3] & (0xFFu & ~((1u << 29 | 1u << 30) >> 24)));
             return t;
         };
         const bool sameTable = withoutDrawn(f1.table) == withoutDrawn(f2.table);
