@@ -579,22 +579,37 @@ template <typename B>
 float3 giEmitterTexel(B b, GiHeader h, uint entry, uint2 t) { return giIrrUnpack(b.Load(giEmitterOffset(h) + (entry * GI_TEXEL_COUNT + t.y * GI_TEXELS + t.x) * 4)); }
 
 // Incident radiance from a direction, bilinear over the 8 x 8 texels of one entry; emitters: plus its emitter texels.
+// A row's two texels are adjacent words (8 B each): one Load4 per row when both are inside the map, one Load2 when the
+// clamp makes them the same texel (the map's edge) - the same texels, weights and summation order as a load per texel,
+// half the load instructions (every ray hit's radiance read and every cone tap goes through here).
 template <typename B>
 float3 giTexelRadiance(B b, GiHeader h, uint entry, float2 uv, bool emitters = false)
 {
     const float2 x = uv * GI_TEXELS - 0.5;
     const int2 i0 = int2(floor(x));
     const float2 f = x - floor(x);
+    const uint2 lo = uint2(clamp(i0, 0, int(GI_TEXELS) - 1)), hi = uint2(clamp(i0 + 1, 0, int(GI_TEXELS) - 1));
+    const bool pair = hi.x == lo.x + 1;
     float3 r = 0;
-    [unroll] for (uint k = 0; k < 4; ++k)
+    [unroll] for (uint row = 0; row < 2; ++row)
     {
-        const int2 o = int2(k & 1, k >> 1);
-        const uint2 t = uint2(clamp(i0 + o, 0, int(GI_TEXELS) - 1));
-        const uint2 v = b.Load2(h.offTexels + (entry * GI_TEXEL_COUNT + t.y * GI_TEXELS + t.x) * 8);
-        const float w = (o.x ? f.x : 1 - f.x) * (o.y ? f.y : 1 - f.y);
-        float3 texel = float3(f16tof32(v.x), f16tof32(v.x >> 16), f16tof32(v.y));
-        if (emitters) texel += giEmitterTexel(b, h, entry, t);
-        r += w * texel;
+        const uint y = row ? hi.y : lo.y;
+        const uint address = h.offTexels + (entry * GI_TEXEL_COUNT + y * GI_TEXELS + lo.x) * 8;
+        uint4 v;
+        if (pair) v = b.Load4(address);
+        else
+        {
+            v.xy = b.Load2(address);
+            v.zw = v.xy;
+        }
+        [unroll] for (uint c = 0; c < 2; ++c)
+        {
+            const uint2 w2 = c ? v.zw : v.xy;
+            const float w = (c ? f.x : 1 - f.x) * (row ? f.y : 1 - f.y);
+            float3 texel = float3(f16tof32(w2.x), f16tof32(w2.x >> 16), f16tof32(w2.y));
+            if (emitters) texel += giEmitterTexel(b, h, entry, uint2(c ? hi.x : lo.x, y));
+            r += w * texel;
+        }
     }
     return r * GI_LOAD_SCALE;
 }
