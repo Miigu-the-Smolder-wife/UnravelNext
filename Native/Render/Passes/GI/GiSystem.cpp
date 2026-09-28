@@ -349,9 +349,19 @@ TextureRef GiSystem::recordScreen(FramePassContext& fc, ViewResources& view, Buf
         if (!planar) m_screenValid = false;  // (a frame without the split leaves no history)
         screen = g.createTexture({ "GI screen irradiance (unfiltered)", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     }
+    // The main view's lookups read the cache concurrently with the reflection hits that follow (useConcurrentRead): those
+    // write only what the lookups do not read or read as missing - hit stamps, age, request lists, statistics, and new
+    // entries (a new entry has no update yet: giScreenCellUpdates takes it as a missing cell, as before it existed; an
+    // insertion fills an empty table slot, which ends no other key's probe run). So the reflections do not wait for the
+    // lookup and its filter (~0.6 ms at internal 960p [measured 974c6bb]), which overlap them from the async queue with
+    // the same values. The planar views' lookups keep the plain order.
+    const auto readCache = [&](PassBuilder& b) {
+        if (planar) b.use(cache, Use::SrvCompute);
+        else b.useConcurrentRead(cache);
+    };
     g.addPass(planar ? "r.gi.screen.planar" : "r.gi.screen", QueueType::Compute,
               [&](PassBuilder& b) {
-                  b.use(cache, Use::SrvCompute);
+                  readCache(b);
                   b.use(depth, Use::SrvCompute);
                   b.use(gbuffer, Use::SrvCompute);
                   b.use(screen, Use::UavCompute);
@@ -387,7 +397,7 @@ TextureRef GiSystem::recordScreen(FramePassContext& fc, ViewResources& view, Buf
                   b.use(screen, Use::SrvCompute);
                   b.use(depth, Use::SrvCompute);
                   b.use(gbuffer, Use::SrvCompute);
-                  b.use(cache, Use::SrvCompute);
+                  readCache(b);
                   if (probes.valid()) b.use(probes, Use::SrvCompute);
                   b.use(filtered, Use::UavCompute);
               },

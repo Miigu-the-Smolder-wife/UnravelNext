@@ -181,6 +181,7 @@ struct RenderGraph::Impl
     {
         uint32_t resource;
         Use use;
+        bool concurrent = false;  // PassBuilder::useConcurrentRead
     };
     struct PassNode
     {
@@ -203,6 +204,7 @@ struct RenderGraph::Impl
         D3D12_BARRIER_ACCESS access;
         D3D12_BARRIER_LAYOUT layout;
         bool disjoint = false;
+        bool concurrent = false;  // every use of the resource in the pass is a concurrent read (useConcurrentRead)
     };
 
     struct Views
@@ -353,6 +355,7 @@ struct RenderGraph::Impl
         {
             h = mix(h, u.resource);
             h = mix(h, (uint64_t)u.use);
+            h = mix(h, u.concurrent);
         }
         return h;
     }
@@ -428,9 +431,10 @@ struct RenderGraph::Impl
             auto it = std::find_if(out.begin(), out.end(), [&](const Access& a) { return a.resource == u.resource; });
             if (it == out.end())
             {
-                out.push_back({ u.resource, info.write, info.sync, info.access, info.layout, info.disjoint });
+                out.push_back({ u.resource, info.write, info.sync, info.access, info.layout, info.disjoint, u.concurrent });
                 continue;
             }
+            it->concurrent = it->concurrent && u.concurrent;
             if (it->write || info.write)
             {
                 // Only a UAV may be both read and written by one pass; combining any other write with another use
@@ -892,6 +896,9 @@ struct RenderGraph::Impl
                         t.pendDisjoint = true;
                     }
                 }
+                // A concurrent read (useConcurrentRead) waited for the writes before it above, but later writers do not
+                // wait for it: it is not recorded as a pending access or a reader position.
+                if (a.concurrent && !a.write && !exclusive) continue;
                 t.pendQueue = q;
                 t.pendDisjoint = t.pendDisjoint && a.disjoint;
                 t.pendSync |= a.sync;
@@ -1277,6 +1284,12 @@ void PassBuilder::use(BufferRef buffer, Use use)
     if (!buffer.valid() || buffer.id >= impl.resources.size() || impl.resources[buffer.id].texture) fail("render graph: invalid buffer in pass '%s'", impl.passes[m_pass].name.c_str());
     if (use == Use::RenderTarget || use == Use::DepthWrite || use == Use::DepthRead) fail("render graph: buffer used as a render target or depth");
     impl.passes[m_pass].uses.push_back({ buffer.id, use });
+}
+
+void PassBuilder::useConcurrentRead(BufferRef buffer)
+{
+    use(buffer, Use::SrvCompute);
+    m_graph.m_impl->passes[m_pass].uses.back().concurrent = true;
 }
 
 void PassBuilder::keep() { m_graph.m_impl->passes[m_pass].keep = true; }

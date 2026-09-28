@@ -240,8 +240,12 @@ uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anch
                 b.Store2(h.offAnchorMin + entry * 8, uint2(0xFFFFFFFFu, 0xFFFFFFFFu));
                 uint64_t previous;
                 b.InterlockedMin64(h.offAnchorMin + entry * 8, giPackAnchorCandidate(h, key, anchor, normal), previous);
-                DeviceMemoryBarrier();  // the candidate before the entry is published
             }
+            // The new entry's record (zero updates) before the entry is published: a reader that finds the key sees either
+            // GI_ENTRY_PENDING or a record without updates, never the previous occupant's (readers run concurrently in the
+            // same dispatch, and the main view's screen lookups beside the reflection hits, GiSystem::recordScreen); in
+            // deterministic mode also the candidate above.
+            DeviceMemoryBarrier();
             b.Store(address + 8, entry);
             b.InterlockedAdd(GI_H_STAT_CREATED, 1u);
             created = true;

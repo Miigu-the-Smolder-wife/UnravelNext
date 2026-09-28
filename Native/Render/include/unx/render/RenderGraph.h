@@ -21,6 +21,10 @@ public:
     BufferRef createBuffer(const BufferDesc& desc);
     void use(TextureRef texture, Use use);
     void use(BufferRef buffer, Use use);
+    // A shader-resource read of a buffer that writers declared after this pass need not wait for: the caller guarantees
+    // that what those writers change is not what this pass reads (or does not change its result), so the read may overlap
+    // them on another queue. It still waits for the writes before it (the barrier on its queue, the fence across queues).
+    void useConcurrentRead(BufferRef buffer);
     // The pass has effects outside the graph (readback, persistent state) and is never culled.
     void keep();
     // The pass's command list ends right after it and is submitted with its own fence signal; once execute() has
