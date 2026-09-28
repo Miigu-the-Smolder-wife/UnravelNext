@@ -14,7 +14,8 @@ void ReflectionShadowGen()
     const uint capacity = rays.Load(4);
     const uint4 entry = rays.Load4(reflRaysShadowOffset(capacity, DispatchRaysIndex().x));
     const uint slot = entry.w;
-    const float visibility = reflSunVisibility(rtScene(), asfloat(entry.xyz), giRandom(slot * 7919u + (P[5].x & 0xFFFFFFu) * 104729u + 17u));
+    const uint owner = rays.Load(reflRaysJobOffset(capacity, slot));
+    const float visibility = reflSunVisibility(rtScene(), asfloat(entry.xyz), reflSunSeed(reflJobSeed(owner & 0x0FFFFFFFu), owner >> 28));
     const uint offset = reflRaysValueOffset(capacity, slot);
     const uint4 v = rays.Load4(offset);
     const float3 radiance = float3(f16tof32(v.x), f16tof32(v.x >> 16), f16tof32(v.y)) + visibility * float3(f16tof32(v.z), f16tof32(v.z >> 16), f16tof32(v.w));

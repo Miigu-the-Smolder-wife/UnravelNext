@@ -52,6 +52,14 @@ struct ReflJob
     float alpha, lobe, coneWidth, coneSpread;
 };
 
+// A job's seed: its pixel and the frame (not the job's index: jobs are appended by atomics, their order differs between runs).
+uint reflPixelSeed(uint2 pixel) { return giRandom(pixel.x * 7919u + pixel.y * 104729u + (P[5].x & 0xFFFFFFu) * 15485863u); }
+uint reflJobSeed(uint job)
+{
+    StructuredBuffer<uint> jobs = ResourceDescriptorHeap[P[0].x];
+    return reflPixelSeed(reflUnpackPixel(jobs[job]));
+}
+
 ReflJob reflLoadJob(uint job)
 {
     StructuredBuffer<uint> jobs = ResourceDescriptorHeap[P[0].x];
@@ -69,7 +77,7 @@ ReflJob reflLoadJob(uint job)
     const float pixelSpread = 2 * g_tanHalfFovY / g_viewHeight;
     j.coneWidth = pixelSpread * distance(j.s.position, g_cameraPosition);
     j.coneSpread = pixelSpread + 2 * tan(j.lobe);
-    j.seed = giRandom(j.pixel.x * 7919u + j.pixel.y * 104729u + (P[5].x & 0xFFFFFFu) * 15485863u);
+    j.seed = reflPixelSeed(j.pixel);
     return j;
 }
 
@@ -127,6 +135,13 @@ float3 reflLobeControl(ReflJob j, Texture2D<uint4> probes, GiProbeFootprint foot
 }
 
 float3 reflRayOrigin(ReflSurface s) { return s.position + s.normal * (1e-3 + 2e-4 * s.linearDepth); }
+
+// Seed of the local-light sample at the hit of ray 'ray' of job j (ReflectionLocalShadow traces its visibility,
+// ReflectionShadeRays shades it: the same draw): from the job's pixel seed (pixel and frame) and the ray's index, not
+// from the job's index - the index is the order the jobs were appended in (atomics), which differs between runs.
+uint reflLocalSeed(ReflJob j, uint ray) { return giRandom(j.seed * 7919u + ray * 104729u + 31u); }
+// Seed of the sun's shadow ray at that hit (ReflectionShadow, and the inline path's own shadow ray): the same kind of key.
+uint reflSunSeed(uint jobSeed, uint ray) { return giRandom(jobSeed * 7919u + ray * 104729u + 17u); }
 
 
 #endif

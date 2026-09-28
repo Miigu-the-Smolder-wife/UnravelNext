@@ -18,8 +18,10 @@ float reflSunVisibility(RtSceneSrvs scene, float3 origin, uint seed)
     return rtVisible(scene, sr, RT_MASK_REFLECTION, ((P[5].x >> 24) & 1) ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE) ? 1.0 : 0.0;
 }
 
-float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RayDesc r, float coneWidth, float coneSpread, uint seed, out float hitDistance,
-                       out float motion)
+// localSeed: the local-light sample's seed, sunSeed: the sun shadow ray's (reflLocalSeed, reflSunSeed of the job and ray:
+// the same draws as the split passes, so a job gets the same value on either path).
+float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RayDesc r, float coneWidth, float coneSpread, uint localSeed, uint sunSeed,
+                       out float hitDistance, out float motion)
 {
     const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER);
     motion = 0;
@@ -29,9 +31,9 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
         return giSkyRadiance(r.Direction);
     }
     hitDistance = hit.t;
-    const ReflHitShade o = reflShadeHit(scene, cache, h, hit, r.Origin, r.Direction, coneWidth, coneSpread, giRandom(seed * 3u + 101u), false);
+    const ReflHitShade o = reflShadeHit(scene, cache, h, hit, r.Origin, r.Direction, coneWidth, coneSpread, localSeed, false);
     motion = o.motion;
-    return o.needsShadowRay ? o.radiance + o.sunTerm * reflSunVisibility(scene, o.shadowOrigin, seed) : o.radiance;
+    return o.needsShadowRay ? o.radiance + o.sunTerm * reflSunVisibility(scene, o.shadowOrigin, sunSeed) : o.radiance;
 }
 
 #endif

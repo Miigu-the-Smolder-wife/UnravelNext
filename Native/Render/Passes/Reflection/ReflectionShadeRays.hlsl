@@ -50,7 +50,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         hit.primitive = record.z;
         hit.barycentrics = reflUnpackBarycentrics(rays.Load(reflRaysBaryOffset(capacity, slot)));
         hit.pad = 0;
-        const ReflHitShade o = reflShadeHit(rtSceneSrvs(P[6], P[7]), cache, h, hit, reflRayOrigin(j.s), dir, j.coneWidth, j.coneSpread, reflLocalSeed(owner),
+        const ReflHitShade o = reflShadeHit(rtSceneSrvs(P[6], P[7]), cache, h, hit, reflRayOrigin(j.s), dir, j.coneWidth, j.coneSpread, reflLocalSeed(j, owner >> 28),
                                             ((record.x >> 30) & 1u) != 0);
         radiance = o.radiance;
         distanceToHit = hit.t;

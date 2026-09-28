@@ -85,7 +85,6 @@ ShadowSrvs reflShadowSrvs()
 // Local lights (HitLocalLights.hlsli): one next-event sample drawn with localSeed; its visibility is localVisible (the
 // compute path: ReflectionLocalShadow traced it before, same seed and hit point) or, with REFL_LOCAL_TRACE (the ray
 // generation paths), traced here. Lights that cast no shadow: visible.
-uint reflLocalSeed(uint owner) { return giRandom(owner * 7919u + (P[5].x & 0xFFFFFFu) * 104729u + 31u); }
 ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RtHit hit, float3 origin, float3 direction, float coneWidth,
                           float coneSpread, uint localSeed, bool localVisible)
 {
