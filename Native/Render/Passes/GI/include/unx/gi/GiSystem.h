@@ -24,6 +24,7 @@ struct GiSettings  // from Config/quality/gi.toml
     float cellAngleDeg = 0, cellMin = 0, nearRadius = 0, rayLength = 0, hitUpdateShare = 0, hitCellFootprintScale = 0;
     uint32_t screenOcclusionHistory = 0;  // gi.screen_occlusion_history_frames (GiProbeGather's time integration; 1 = off)
     float screenFilterCells = 0;          // gi.screen_filter_cells (GiScreenFilter's radius in cell edges; 0 = off)
+    uint32_t screenUpdateFrames = 1;      // gi.screen_update_frames (r.gi.screen's frame split, GiScreenIrradiance; 1 = off)
     uint32_t experimentDisable = 0;  // gi.experiment_disable (cost attribution only)
     bool deterministic = false;      // gi.deterministic: same inputs -> bit-identical cache (selection by key priority, seeds by key)
     bool anchorVisibility = false;   // gi.anchor_visibility: lookups skip entries whose anchor does not see the point (GiHeader.flags bit 1)
@@ -118,6 +119,14 @@ private:
     uint32_t m_probeHistoryX = 0, m_probeHistoryY = 0, m_probeHistoryParity = 0, m_probeHistoryRevision = 0;
     bool m_probeHistoryReset = true;
     void ensureProbeHistory(uint32_t probesX, uint32_t probesY);
+    // r.gi.screen's frame split (gi.screen_update_frames): the main view's value (RGBA16F) and keys (R32G32_UINT: device
+    // depth, normal and age) ping-pong by parity; the previous frame's inverse view-projection and exposure.
+    ComPtr<ID3D12Resource> m_screenValue[2], m_screenKeys[2];
+    uint32_t m_screenX = 0, m_screenY = 0, m_screenParity = 0, m_screenRevision = 0, m_screenEpoch = 0;
+    bool m_screenValid = false;
+    float4x4 m_screenPrevInvViewProj{};
+    float m_screenPrevExposure = 0;
+    void ensureScreenHistory(uint32_t width, uint32_t height);
     TextureRef recordScreen(FramePassContext& fc, ViewResources& view, BufferRef cache);
     // Change boxes for GiInvalidate (B3): a mapped upload ring, one slot per frame of kChangeSlots, raw SRVs.
     static constexpr uint32_t kChangeSlots = 4, kChangeBoxesMax = 256, kChangeSlotBytes = 16 + kChangeBoxesMax * 32 + 240;

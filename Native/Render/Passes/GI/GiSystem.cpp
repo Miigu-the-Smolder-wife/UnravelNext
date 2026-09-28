@@ -107,6 +107,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.hitCellFootprintScale = (float)q.number("gi.hit_cell_footprint_scale");
     s.screenOcclusionHistory = (uint32_t)q.integer("gi.screen_occlusion_history_frames");
     s.screenFilterCells = (float)q.number("gi.screen_filter_cells");
+    s.screenUpdateFrames = q.has("gi.screen_update_frames") ? (uint32_t)q.integer("gi.screen_update_frames") : 1;
     s.experimentDisable = (uint32_t)q.integer("gi.experiment_disable");
     s.deterministic = q.boolean("gi.deterministic");
     s.anchorVisibility = q.has("gi.anchor_visibility") ? q.boolean("gi.anchor_visibility") : false;
@@ -120,6 +121,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     if (s.maxLevel > 31) fail("gi.cache_levels_max must be <= 31 (5-bit key field)");
     if (s.screenOcclusionHistory < 1 || s.screenOcclusionHistory > 255) fail("gi.screen_occlusion_history_frames must be in [1, 255]");
     if (!(s.screenFilterCells >= 0 && s.screenFilterCells <= 2)) fail("gi.screen_filter_cells must be in [0, 2] (cell edges)");
+    if (s.screenUpdateFrames < 1 || s.screenUpdateFrames > 4) fail("gi.screen_update_frames must be in [1, 4] (2-bit value age, 2 x 2 tile order)");
     s.updatesPerFrame = s.raysPerFrame / 64;  // whole-hemisphere updates
     return s;
 }
@@ -240,10 +242,45 @@ void GiSystem::ensureProbeHistory(uint32_t probesX, uint32_t probesY)
     m_probeHistoryReset = true;  // (new textures hold nothing; the previous grid had other dimensions)
 }
 
+void GiSystem::ensureScreenHistory(uint32_t width, uint32_t height)
+{
+    if (m_screenValue[0] && m_screenX == width && m_screenY == height) return;
+    D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC1 d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    d.Width = width;
+    d.Height = height;
+    d.DepthOrArraySize = d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    const auto create = [&](ComPtr<ID3D12Resource>& t, DXGI_FORMAT format) {
+        if (t) m_device.deferRelease(t);
+        d.Format = format;
+        check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                       IID_PPV_ARGS(&t)),
+              "GI screen history");
+    };
+    for (int k = 0; k < 2; ++k)
+    {
+        create(m_screenValue[k], DXGI_FORMAT_R16G16B16A16_FLOAT);
+        create(m_screenKeys[k], DXGI_FORMAT_R32G32_UINT);
+        m_screenValue[k]->SetName(k ? L"R GI screen irradiance 1" : L"R GI screen irradiance 0");
+        m_screenKeys[k]->SetName(k ? L"R GI screen keys 1" : L"R GI screen keys 0");
+    }
+    m_screenX = width;
+    m_screenY = height;
+    m_screenValid = false;  // (new textures hold nothing)
+}
+
 GiSystem::~GiSystem()
 {
     for (auto& t : m_probeHistory)
         if (t) m_device.deferRelease(t);
+    for (int k = 0; k < 2; ++k)
+    {
+        if (m_screenValue[k]) m_device.deferRelease(m_screenValue[k]);
+        if (m_screenKeys[k]) m_device.deferRelease(m_screenKeys[k]);
+    }
     if (m_changeRing)
     {
         m_changeRing->Unmap(0, nullptr);
@@ -269,18 +306,73 @@ TextureRef GiSystem::recordScreen(FramePassContext& fc, ViewResources& view, Buf
     const TextureRef depth = view.depth, gbuffer = view.gbuffer;
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = view.frameConstants;
     const uint32_t width = view.view.width, height = view.view.height;
-    const TextureRef screen = g.createTexture({ "GI screen irradiance (unfiltered)", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    // Frame split (gi.screen_update_frames, GiScreenIrradiance.hlsl): the main view with V's vis buffer (the surface's
+    // exact motion); not while the lookup statistics compare the texture with the lookup. The history restarts on new
+    // textures, a scene revision, a lighting epoch, a history discontinuity (restore, camera cut) or an origin shift.
+    const TextureRef visId = view.visId;
+    const BufferRef visibleClusters = view.visibleClusters;
+    const bool split = !planar && s.screenUpdateFrames > 1 && visId.valid() && visibleClusters.valid() && !m_lookupStatsOn;
+    TextureRef screen, keys, prevScreen, prevKeys;
+    uint32_t splitFlags = 0;
+    float exposureRatio = 1;
+    float4x4 invPrev{};
+    if (split)
+    {
+        ensureScreenHistory(width, height);
+        const float3 shift = fc.frame.originShift;
+        if (fc.scene.revision() != m_screenRevision || m_epoch != m_screenEpoch || fc.frame.discontinuity != 0 || shift.x != 0 || shift.y != 0 ||
+            shift.z != 0)
+            m_screenValid = false;
+        m_screenRevision = fc.scene.revision();
+        m_screenEpoch = m_epoch;
+        const float exposure = 1.0f / (1.2f * std::exp2(view.view.ev100));
+        exposureRatio = m_screenValid && m_screenPrevExposure > 0 ? exposure / m_screenPrevExposure : 1.0f;
+        invPrev = m_screenPrevInvViewProj;
+        splitFlags = 1u | (m_screenValid ? 2u : 0u) | ((uint32_t)(fc.frame.frameIndex % s.screenUpdateFrames) << 2) | (s.screenUpdateFrames << 4);
+        m_screenPrevExposure = exposure;
+        m_screenPrevInvViewProj = view.view.invViewProj;
+        m_screenValid = true;
+        const uint32_t prev = m_screenParity, next = prev ^ 1u;
+        m_screenParity = next;
+        const TextureDesc vd{ "GI screen irradiance (unfiltered)", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT };
+        const TextureDesc kd{ "GI screen keys", width, height, 1, 1, DXGI_FORMAT_R32G32_UINT };
+        TextureDesc pvd = vd, pkd = kd;
+        pvd.name = "GI screen irradiance (previous)";
+        pkd.name = "GI screen keys (previous)";
+        screen = g.importTexture(m_screenValue[next].Get(), vd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        keys = g.importTexture(m_screenKeys[next].Get(), kd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        prevScreen = g.importTexture(m_screenValue[prev].Get(), pvd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        prevKeys = g.importTexture(m_screenKeys[prev].Get(), pkd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    }
+    else
+    {
+        if (!planar) m_screenValid = false;  // (a frame without the split leaves no history)
+        screen = g.createTexture({ "GI screen irradiance (unfiltered)", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    }
     g.addPass(planar ? "r.gi.screen.planar" : "r.gi.screen", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::SrvCompute);
                   b.use(depth, Use::SrvCompute);
                   b.use(gbuffer, Use::SrvCompute);
                   b.use(screen, Use::UavCompute);
+                  if (split)
+                  {
+                      b.use(keys, Use::UavCompute);
+                      b.use(prevScreen, Use::SrvCompute);
+                      b.use(prevKeys, Use::SrvCompute);
+                      b.use(visId, Use::SrvCompute);
+                      b.use(visibleClusters, Use::SrvCompute);
+                  }
               },
-              [&shaders, cache, depth, gbuffer, screen, frameConstants, width, height](PassContext& c) {
-                  const uint32_t k[8] = { c.srv(cache), c.srv(depth), c.srv(gbuffer), c.uav(screen), width, height, 0, 0 };
+              [&shaders, cache, depth, gbuffer, screen, frameConstants, width, height, split, keys, prevScreen, prevKeys, visId, visibleClusters, splitFlags,
+               exposureRatio, invPrev](PassContext& c) {
+                  const uint32_t none = 0xFFFFFFFFu;
+                  uint32_t k[32] = { c.srv(cache), c.srv(depth), c.srv(gbuffer), c.uav(screen), width, height, splitFlags, asU(exposureRatio),
+                                     split ? c.srv(prevKeys) : none, split ? c.uav(keys) : none, split ? c.srv(prevScreen) : none, split ? c.srv(visId) : none,
+                                     split ? c.srv(visibleClusters) : none, 0, 0, 0 };
+                  std::memcpy(&k[16], &invPrev, 64);  // rows (row_major in HLSL)
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiScreenIrradiance"));
-                  c.computeConstants(k, 8);
+                  c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
               });
