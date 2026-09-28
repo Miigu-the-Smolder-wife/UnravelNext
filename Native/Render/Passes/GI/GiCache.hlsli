@@ -252,10 +252,17 @@ float3 giUnpackAnchorNormal(uint packed)
 // travelled before a hit (GiIntegrate, texel half 3): a point farther than 1.5 x that plus a quarter cell, or well behind
 // the anchor's surface (more than 45 deg below its tangent plane), is not seen; that corner counts as without data (the
 // lookup's partner and level rules then fill it as a missing cell). Points within a quarter cell of the anchor are seen.
+// Only a converged entry (GI_VIS_MIN_UPDATES updates: its texel distance a mean of that many rays) is judged: a young
+// entry's single-ray distances rejected converged neighbours at random and moved the lookup's weight onto young, still
+// converging cells (ReflectionAnalytic furnace, 2026-09-28). A level whose every corner with data is not seen keeps them
+// all (the lookup as before: visibility re-weights among the corners, it never empties a level), and every corner read
+// is kept alive and requested as before (giKeepRead).
+#define GI_VIS_MIN_UPDATES 16u
 template <typename B>
 bool giAnchorSeesPoint(B b, GiHeader h, uint entry, float3 anchorNormal, float3 p, float cellSize)
 {
     if ((h.flags & 2u) == 0) return true;
+    if (b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) < GI_VIS_MIN_UPDATES) return true;
     const float3 d = p - asfloat(b.Load3(h.offAnchor + entry * 16));
     const float dist = length(d), slack = 0.25 * cellSize;
     if (!(dist > slack)) return true;
@@ -352,14 +359,16 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
     const float3 t = f - floor(f);
     uint entries[8], updates[8];
     giFindCorners(b, h, level, nc, c0, entries, updates);
+    float3 hiddenE = 0, hiddenL = 0;  // the corners the visibility test left out (added when it left out all of them)
+    float hiddenW = 0, seenW = 0;
     [loop] for (uint batch = 0; batch < 8 / GI_CORNER_BATCH; ++batch)
     {
         [unroll] for (uint j = 0; j < GI_CORNER_BATCH; ++j)
         {
             const uint k = batch * GI_CORNER_BATCH + j;
             const uint entry = updates[k] != 0 ? entries[k] : 0u;
-            // no information yet, or the anchor does not see the point: not added
-            const bool has = updates[k] != 0 && giAnchorSeesPoint(b, h, entry, giAnchorNormal(b, h, entry), worldPos, s);
+            const bool data = updates[k] != 0;  // no information yet: not added
+            const bool has = data && giAnchorSeesPoint(b, h, entry, giAnchorNormal(b, h, entry), worldPos, s);
             const float3 o = float3(k & 1, (k >> 1) & 1, k >> 2);
             const float3 wt = lerp(1 - t, t, o);
             const float w = wt.x * wt.y * wt.z;
@@ -374,12 +383,26 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
                 const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
                 l = giTexelRadianceCone(b, h, entry, giHemiOctEncode(local), cone, emitters);
             }
-            if (!has) continue;
+            if (!data) continue;
+            giKeepRead(b, h, entry, w);
+            if (!has)
+            {
+                hiddenE += w * e;
+                hiddenL += w * l;
+                hiddenW += w;
+                continue;
+            }
             sumE += w * e;
             if (wantRadiance) sumL += w * l;
             weight += w;
-            giKeepRead(b, h, entry, w);
+            seenW += w;
         }
+    }
+    if (seenW <= 0 && hiddenW > 0)
+    {
+        sumE += hiddenE;
+        if (wantRadiance) sumL += hiddenL;
+        weight += hiddenW;
     }
 }
 #else
@@ -391,26 +414,47 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
     const float3 f = worldPos / s - 0.5;
     const int3 c0 = int3(floor(f));
     const float3 t = f - floor(f);
+    float3 hiddenE = 0, hiddenL = 0;  // the corners the visibility test left out (added when it left out all of them)
+    float hiddenW = 0, seenW = 0;
     [loop] for (uint k = 0; k < 8; ++k)
     {
         const int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
         const uint entry = giFind(b, h, giKey(level, nc, c0 + o));
         if (entry == GI_ENTRY_PENDING || b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0) continue;  // no information yet
-        if (!giAnchorSeesPoint(b, h, entry, giAnchorNormal(b, h, entry), worldPos, s)) continue;  // behind a surface from the anchor
+        const bool seen = giAnchorSeesPoint(b, h, entry, giAnchorNormal(b, h, entry), worldPos, s);  // (else behind a surface from the anchor)
         const float3 wt = lerp(1 - t, t, float3(o));
         const float w = wt.x * wt.y * wt.z;
         float sv;
-        sumE += w * giShIrradiance(b, h, entry, normal, sv);
+        const float3 e = w * giShIrradiance(b, h, entry, normal, sv);
+        float3 l = 0;
         if (wantRadiance)
         {
             const float3 n = giAnchorNormal(b, h, entry);
             float3 tb, bb;
             giBasis(n, tb, bb);
             const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
-            sumL += w * giTexelRadianceCone(b, h, entry, giHemiOctEncode(local), cone, emitters);
+            l = w * giTexelRadianceCone(b, h, entry, giHemiOctEncode(local), cone, emitters);
         }
-        weight += w;
         giKeepRead(b, h, entry, w);
+        if (seen)
+        {
+            sumE += e;
+            if (wantRadiance) sumL += l;
+            weight += w;
+            seenW += w;
+        }
+        else
+        {
+            hiddenE += e;
+            hiddenL += l;
+            hiddenW += w;
+        }
+    }
+    if (seenW <= 0 && hiddenW > 0)
+    {
+        sumE += hiddenE;
+        if (wantRadiance) sumL += hiddenL;
+        weight += hiddenW;
     }
 }
 #endif
@@ -557,7 +601,7 @@ uint giScreenSeen(B b, GiHeader h, uint4 entryLo, uint4 entryHi, uint4 anchorLo,
         const bool sees = giAnchorSeesPoint(b, h, on ? giScreenPick(entryLo, entryHi, c) : 0u, giUnpackAnchorNormal(on ? giScreenPick(anchorLo, anchorHi, c) : 0u), p, cellSize);
         if (on && !sees) seen &= ~(1u << c);
     }
-    return seen;
+    return seen != 0 ? seen : has;  // (visibility never empties a level: see giAnchorSeesPoint)
 }
 // A level's corner cells for the screen lookups: entry (GI_ENTRY_PENDING: none, or not updated yet) and packed anchor
 // normal of corners 0..3 and 4..7, 'has' bit c when corner c has data. The same cells as 8 giScreenCell calls, their

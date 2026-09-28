@@ -689,7 +689,7 @@ int main(int argc, char** argv)
                 line += format(" L%u:%u", k, total[k]);
             }
             logf("wind (sway range %.4f m) dirty pages over 20 frames by level:%s\n", sway, line.c_str());
-            const shadow::VsmStats sw = shadow::stats(tf.trackState);
+            const shadow::VsmStats sw = statsAfter();  // (the last wind frame's counters)
             report((cache ? sw.dirty > 0 : sw.dirty == sw.requested) && fineDirty + coarseDirty > 0,
                    cache ? "wind: the wind caster's pages drawn each frame" : "wind: every requested page drawn each frame", sw.dirty, sw.requested);
 
@@ -753,8 +753,11 @@ int main(int argc, char** argv)
                     gustLine += format(" L%u:%u", k, n[k]);
                 }
                 logf("wind gust %.1f -> %.1f m/s, +3 deg (bound <= %.4f m, gust term %.4f m): dirty pages by level:%s" "\n", ws0, ws1, worst, change, gustLine.c_str());
-                const shadow::VsmStats sg = shadow::stats(tf.trackState);
-                report(sg.dirty == sg.requested && coarse + fine > 0, "wind change: every requested page drawn with the gust", sg.dirty, sg.requested);  // (a changed wind: the cache redraws all)
+                // The gust frame's own counters (shadow::stats holds the newest harvested frame: the one before the gust,
+                // a steady wind frame, which with the page cache draws only the swaying caster's pages).
+                const shadow::VsmStats sg = statsAfter();
+                // A changed scene wind redraws every page (the cache's wind rule; one path: every frame)
+                report(sg.dirty == sg.requested && coarse + fine > 0, "wind change: every requested page drawn with the gust", sg.dirty, sg.requested);
             }
         }
 
