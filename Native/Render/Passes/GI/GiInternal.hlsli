@@ -84,6 +84,15 @@ uint giDetPriority(RWByteAddressBuffer b, GiHeader h, uint entry)
     const uint2 key = b.Load2(h.offMeta + entry * 16);
     return giDetHash(key.x ^ giDetHash(key.y ^ (h.frame * 0x9E3779B9u)));
 }
+// The entry's identity for its ray seeds, texel rotations and dither in deterministic mode: its key, hashed, without the
+// frame (giDetPriority's frame term re-drew the texels' R2 rotation every frame: the low-discrepancy walk over the
+// entry's updates became independent jitter - a noisier cache in deterministic mode than in the default one).
+template <typename B>
+uint giDetKey(B b, GiHeader h, uint entry)
+{
+    const uint2 key = b.Load2(h.offMeta + entry * 16);
+    return giDetHash(key.x ^ giDetHash(key.y));
+}
 // A background candidate (deterministic mode): live and not updated this frame.
 bool giDetBackgroundCandidate(RWByteAddressBuffer b, GiHeader h, uint entry)
 {

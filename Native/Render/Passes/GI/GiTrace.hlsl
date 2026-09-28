@@ -64,7 +64,7 @@ void GiTraceGen()
     giBasis(n, t, bt);
     const uint shAddress = h.offSh + entry * GI_SH_STRIDE;
     // gi.deterministic (P[0].w bit 0): seeds from the entry's key, not its index (allocation order).
-    const uint identity = (P[0].w & 1u) != 0 ? giDetPriority(b, h, entry) : entry;
+    const uint identity = (P[0].w & 1u) != 0 ? giDetKey(b, h, entry) : entry;
     const uint seed = giRandom(identity * 9781u + h.frame * 6271u + texel * 26699u);
     // The point inside the texel: the entry's successive updates walk the R2 sequence (Roberts 2018) from a per-texel
     // rotation, so the history (a running mean over <= history_updates_max updates) averages well-spread points of every

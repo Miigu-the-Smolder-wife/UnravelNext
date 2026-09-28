@@ -174,7 +174,7 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     // (giDetPriority, as GiTrace's rays), not its index - the index is the order the free list was popped in, which the
     // threads creating entries race for, so two runs of the same frames rounded differently and the cache (and every
     // image reading it) was not bit-identical (HostMotion's static shutter check failed on main).
-    const uint identity = (h.flags & 1u) != 0 ? giDetPriority(b, h, entry) : entry;
+    const uint identity = (h.flags & 1u) != 0 ? giDetKey(b, h, entry) : entry;
     const uint seed = identity * 0x9E3779B9u ^ h.frame * 0x85EBCA6Bu;
 
     // Texels: lanes 0..63 (radiance, hit distance).

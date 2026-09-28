@@ -222,7 +222,11 @@ void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t
     if (s.lastStatsSlot >= 0) s.statsFence[s.lastStatsSlot] = fc.graph.lastFence(QueueType::Graphics);
     for (uint32_t i = 0; i < kStatsSlots; ++i)
     {
-        if (s.statsFence[i] == 0 || s.statsFence[i] > completed || s.statsFrame[i] <= s.latest.frame) continue;
+        // Only frames at least framesInFlight old (the host has waited for those): the newest read is then always frame -
+        // framesInFlight, not whichever frame the GPU happened to finish (the counts size buffers: runs differed).
+        if (s.statsFence[i] == 0 || s.statsFence[i] > completed || s.statsFrame[i] <= s.latest.frame ||
+            s.statsFrame[i] + fc.framesInFlight > fc.frame.frameIndex)
+            continue;
         uint32_t* p = nullptr;
         D3D12_RANGE r{ i * kHeaderBytes, (i + 1) * kHeaderBytes };
         check(s.statsReadback->Map(0, &r, reinterpret_cast<void**>(&p)), "map froxel stats");
