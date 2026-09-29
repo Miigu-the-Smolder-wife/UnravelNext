@@ -1,5 +1,5 @@
 // unx-kernel: lib_6_6 main
-// unx-variants: SKY=0,1
+// unx-variants: SKY=0,1 SPLIT=0,1
 // World radiance cache update rays (ARCHITECTURE 2.5; DispatchRays with alpha any-hit, 1.3-5). The fixed per-frame ray
 // budget is spent as whole-hemisphere updates: 64 threads per updated entry (GiSelect's stalest-first selection, then
 // background entries), thread = texel, direction jittered inside the texel. The hit's outgoing radiance =
@@ -102,6 +102,9 @@ void GiTraceGen()
     }
 
     float3 radiance, sampleRadiance;
+#if SPLIT
+    float3 nonBounceRadiance = 0, bounceRadiance = 0;
+#endif
     bool readsBounce = false;  // the hit's radiance has a bounce term (the cache's irradiance and mirror radiance read there)
     bool youngBounce = false;  // read from a young cell, or from other levels in place of a cell without data
     float bounceShare = 0;     // luminance share of the radiance that came from the cache reads (GiIntegrate: Jacobi length)
@@ -239,6 +242,16 @@ void GiTraceGen()
             if ((P[3].w & 1024) == 0)
             {
                 radiance = rtHitRadiance(m, s.normal, -r.Direction, L, GI_FOOTPRINT_PER_METRE);
+#if SPLIT
+                // Evaluate the cache-fed RGB terms themselves, not a luminance
+                // fraction or the subtraction of two nearly equal bright values.
+                RtHitLighting bounceLight = (RtHitLighting)0;
+                bounceLight.irradiance = L.irradiance;
+                bounceLight.specularRadiance = L.specularRadiance;
+                GpuMaterial bounceMaterial = m;
+                bounceMaterial.emissive = 0;
+                bounceRadiance = rtHitRadiance(bounceMaterial, s.normal, -r.Direction, bounceLight, GI_FOOTPRINT_PER_METRE);
+#endif
                 L.irradiance = L.specularRadiance = 0;
                 unbounced = rtHitRadiance(m, s.normal, -r.Direction, L, GI_FOOTPRINT_PER_METRE);
             }
@@ -246,7 +259,13 @@ void GiTraceGen()
             {
                 unbounced = m.emissive + m.baseColor * (1 - m.metallic) / GI_PI * (L.sunIlluminance * max(cosSun, 0.0) * L.sunVisibility) + local;
                 radiance = unbounced + m.baseColor * (1 - m.metallic) / GI_PI * irradiance;
+#if SPLIT
+                bounceRadiance = m.baseColor * (1 - m.metallic) / GI_PI * irradiance;
+#endif
             }
+#if SPLIT
+            nonBounceRadiance = unbounced;
+#endif
             const float total = dot(radiance, float3(0.2126, 0.7152, 0.0722));
             bounceShare = total > 0 ? saturate(1 - dot(unbounced, float3(0.2126, 0.7152, 0.0722)) / total) : 0;
             readsBounce = true;  // the specular term reads the cache too (every surface has a specular lobe)
@@ -295,6 +314,12 @@ void GiTraceGen()
     }
     samples[thread] = uint4(asuint(sampleRadiance), (uint)round(saturate(uv.x) * 65535.0) | ((uint)round(saturate(uv.y) * 65535.0) << 16));
     samples[3 * P[0].y + thread] = uint4(asuint(emitterRadiance), 0);  // the emitter texel's value (GiIntegrate)
+#if SPLIT
+    if (!readsBounce) nonBounceRadiance = radiance; // sky, emitters, closed back faces
+    samples[4 * P[0].y + thread] = uint4(asuint(emitter ? float3(0, 0, 0) : nonBounceRadiance - emissionOut), 0);
+    samples[5 * P[0].y + thread] = uint4(asuint(nonBounceRadiance), 0);
+    samples[6 * P[0].y + thread] = uint4(asuint(bounceRadiance), 0);
+#endif
     // The texel's value for GiIntegrate (third block of the samples buffer): radiance, hit distance (fp16, >= 0), bit 16 =
     // the ray read a bounce term, bit 17 = from young cells. By count, not by luminance: a cell without data reads 0 (the
     // most biased read has no luminance). Bits 18-29: the bounce share of the radiance (luminance, unorm12).

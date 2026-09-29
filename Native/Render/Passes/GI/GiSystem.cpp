@@ -31,7 +31,7 @@ uint32_t asU(float f)
 // Cache buffer layout (GiCache.hlsli header fields 4..11, 24..27).
 struct Layout
 {
-    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, slotAnchor, emit, end;
+    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, slotAnchor, emit, split, end;
 };
 
 Layout layoutOf(const GiSettings& s)
@@ -53,7 +53,10 @@ Layout layoutOf(const GiSettings& s)
     l.irr = l.anchorMin + s.capacity * 8;
     l.slotAnchor = l.irr + s.capacity * 336;  // GI_IRR_STRIDE
     l.emit = l.slotAnchor + s.tableSlots * 8;  // deterministic anchors per table slot (GiDetFold)
-    l.end = l.emit + s.capacity * 256;          // emitter texels: 64 x RGB9E5 per entry (GiCache.hlsli giEmitterOffset)
+    l.split = l.emit + s.capacity * 256;       // emitter texels: 64 x RGB9E5 per entry (GiCache.hlsli giEmitterOffset)
+    const uint64_t end = l.split + (s.splitBounceHistory ? (uint64_t)s.capacity * 3712 : 0); // GiSplitHistory.hlsli
+    if (end >= (1ull << 32)) fail("GI split history exceeds raw-buffer address space");
+    l.end = (uint32_t)end;
     return l;
 }
 
@@ -98,6 +101,9 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.jacobiUpdates = (uint32_t)q.integer("gi.jacobi_updates");
     s.historyMax = (uint32_t)q.integer("gi.history_updates_max");
     s.historyStatic = (uint32_t)q.integer("gi.history_updates_max_static");
+    s.splitBounceHistory = q.has("gi.split_bounce_history") && q.boolean("gi.split_bounce_history");
+    if (q.has("gi.bounce_history_updates")) s.bounceHistoryUpdates = (uint32_t)q.integer("gi.bounce_history_updates");
+    if (s.bounceHistoryUpdates == 0 || s.bounceHistoryUpdates > 32) fail("gi.bounce_history_updates must be in [1, 32]");
     s.maxLevel = (uint32_t)q.integer("gi.cache_levels_max");
     s.cellAngleDeg = (float)q.number("gi.cache_cell_angle_deg");
     s.cellMin = (float)q.number("gi.cache_cell_min_m");
@@ -193,6 +199,8 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[62] = l.irr;       // irradiance maps (GiHeader.offIrr)
     h[63] = l.slotAnchor;  // deterministic anchors per table slot (GiHeader.offSlotAnchor)
     h[192] = l.end; // deterministic admission tail, grown before its first use
+    h[193] = m_settings.splitBounceHistory ? l.split : 0;
+    h[194] = m_settings.bounceHistoryUpdates;
     for (uint32_t e = 0; e < m_settings.capacity; ++e) head[l.freeList / 4 + e] = m_settings.capacity - 1 - e;  // pops 0, 1, 2 ...
     for (uint32_t t = 0; t < m_settings.tableSlots; ++t) head[l.table / 4 + t * 4 + 2] = 0xFFFFFFFFu;
     std::memcpy(&tail[(l.shTable - l.hitStamp) / 4], shTable.data(), shTable.size() * 4);
@@ -780,15 +788,15 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     const FrameResources& fr = fc.resources;
     const bool atmosphere = fr.transmittanceLut.valid() && fr.multiScatterLut.valid() && fr.skyViewLut.valid() && fr.aerialPerspective.valid();
     const TextureRef luts[4] = { fr.transmittanceLut, fr.multiScatterLut, fr.skyViewLut, fr.aerialPerspective };
-    rt::RayPipeline& pipeline =
-        rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(atmosphere ? "Passes/GI/GiTrace.SKY0" : "Passes/GI/GiTrace.SKY1", { "GiTraceGen" }));
+    const std::string traceKernel = std::string("Passes/GI/GiTrace.SKY") + (atmosphere ? "0" : "1") + (s.splitBounceHistory ? ".SPLIT1" : ".SPLIT0");
+    rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(traceKernel, { "GiTraceGen" }));
     const float3 sky = m_skyRadiance, sun = m_sunIlluminance;
     const float skyBand = m_skyBand;
     const uint32_t rayCount = s.updatesPerFrame * 64;
     // Each ray's radiance and hemispherical octahedral coordinates, for the per-ray irradiance map and SH (GiIntegrate).
     // Four blocks: texel samples (irradiance), emitter samples, texel values (radiance, distance, bounce; GiIntegrate blends),
     // the texel's analytic-emitter radiance (the emitter texels, K path only).
-    const BufferRef samples = g.createBuffer({ "GI ray samples", (uint64_t)rayCount * 4 * 16, 16 });
+    const BufferRef samples = g.createBuffer({ "GI ray samples", (uint64_t)rayCount * (s.splitBounceHistory ? 7 : 4) * 16, 16 });
     g.addPass("r.gi.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::UavGraphics);
@@ -825,9 +833,9 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   b.use(cache, Use::UavCompute);
                   b.use(samples, Use::SrvCompute);
               },
-              [&shaders, cache, samples, updates = s.updatesPerFrame, frameConstants](PassContext& c) {
+              [&shaders, cache, samples, updates = s.updatesPerFrame, split = s.splitBounceHistory, frameConstants](PassContext& c) {
                   const uint32_t k[4] = { c.uav(cache), updates, c.srv(samples), 0 };
-                  c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiIntegrate"));
+                  c.cmd->SetPipelineState(shaders.compute(split ? "Passes/GI/GiIntegrate.SPLIT1" : "Passes/GI/GiIntegrate.SPLIT0"));
                   c.computeConstants(k, 4);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch(updates, 1, 1);  // one group per update slot

@@ -28,6 +28,8 @@ struct GiSettings  // from Config/quality/gi.toml
     uint32_t experimentDisable = 0;  // gi.experiment_disable (cost attribution only)
     bool deterministic = false;      // gi.deterministic: same inputs -> bit-identical cache (selection by key priority, seeds by key)
     bool anchorVisibility = false;   // gi.anchor_visibility: lookups skip entries whose anchor does not see the point (GiHeader.flags bit 1)
+    bool splitBounceHistory = false;
+    uint32_t bounceHistoryUpdates = 4;
     static GiSettings fromQuality(const QualityConfig& q);
 };
 

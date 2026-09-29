@@ -30,6 +30,9 @@ jacobi_updates = 8                 # after a reset (new entry, lighting epoch ch
                                    # converges geometrically: rho^8 < 0.4 % at albedo 0.5)
 history_updates_max = 32           # then the running mean over at most this many updates (static scenes converge; slow
                                    # changes such as a moving sun are followed with this window)
+split_bounce_history = false       # experimental: separate non-bounce long mean from cache-bounce short mean;
+                                   # enable only after bath 1080p / 3000-frame luminance and motion validation
+bounce_history_updates = 4         # short window after the Jacobi phase (the long component uses the existing window)
 history_updates_max_static = 256   # the running mean's window while the entry's light is steady: a fast mean (1/16) of its
                                    # anchor irradiance within 4 sigma (the update's own ray spread) of the history; a change
                                    # beyond that cuts the window to history_updates_max at once (moving sun, lights: any speed).

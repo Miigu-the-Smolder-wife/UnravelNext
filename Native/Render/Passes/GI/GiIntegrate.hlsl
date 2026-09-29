@@ -1,4 +1,5 @@
 // unx-kernel: cs_6_6 main
+// unx-variants: SPLIT=0,1
 // Folds each updated entry's 64 new ray samples (GiTrace: radiance and the ray's hemispherical octahedral coordinates)
 // into its irradiance, per ray (design 2.5 revision, request 18): every sample weighs L by its own direction and solid
 // angle, dw = 2 / |p|^3 x the texel's UV area (p = the octahedron point of the map; the density integrates to 2 pi), not
@@ -13,6 +14,11 @@
 // One group per update slot (selected entries, then background). P[0] = { cache UAV, updates per frame, samples SRV, 0 }
 #include "Scene.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
+#if SPLIT
+#include "Passes/GI/GiSplitHistory.hlsli"
+groupshared float3 gs_direct[2 * GI_TEXEL_COUNT], gs_reflected[2 * GI_TEXEL_COUNT];
+groupshared float3 gs_directSh[9], gs_reflectedSh[9];
+#endif
 
 groupshared float4 gs_sample[2 * GI_TEXEL_COUNT];  // radiance, solid-angle weight (texel samples, then emitter samples)
 groupshared float3 gs_local[2 * GI_TEXEL_COUNT];   // direction in the anchor frame
@@ -49,6 +55,11 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     uint emitOld = 0, irrOld = 0;
     uint4 texelSample = 0;
     float3 emitted = 0;
+#if SPLIT
+    float3 directTexel = 0, reflectedTexel = 0;
+    const uint splitBase = giSplitBase(b, entry);
+    const uint splitUpdates = history == 0 ? 0 : b.Load(splitBase);
+#endif
 
     if (lane < GI_TEXEL_COUNT)
     {
@@ -65,6 +76,14 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         const bool finite = all(value == value) && all(abs(value) < 3.0e38);
         gs_sample[lane] = finite ? float4(value, 2 / (len * len * len) / (float)GI_TEXEL_COUNT) : float4(0, 0, 0, 0);
         gs_local[lane] = q / len;
+#if SPLIT
+        const uint budget = P[0].y * GI_TEXEL_COUNT, ray = slot * GI_TEXEL_COUNT + lane;
+        const float3 directSample = asfloat(samples[4 * budget + ray].xyz);
+        directTexel = asfloat(samples[5 * budget + ray].xyz);
+        reflectedTexel = asfloat(samples[6 * budget + ray].xyz);
+        gs_direct[lane] = finite && all(isfinite(directSample)) ? directSample : float3(0, 0, 0);
+        gs_reflected[lane] = finite && all(isfinite(reflectedTexel)) ? reflectedTexel : float3(0, 0, 0);
+#endif
         texelSample = samples[2 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane];
         const uint w = texelSample.w;
         gs_bounce[lane] = float2((w >> 17) & 1u, (w >> 16) & 1u);
@@ -82,6 +101,10 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         gs_sample[lane] = finite ? float4(value, 1.0 / GI_TEXEL_COUNT) : float4(0, 0, 0, 0);
         gs_local[lane] = octDecode(s.w);
         gs_emitted[lane - GI_TEXEL_COUNT] = finite && any(value != 0) ? 1u : 0u;
+#if SPLIT
+        gs_direct[lane] = gs_sample[lane].xyz;
+        gs_reflected[lane] = 0;
+#endif
     }
     if (lane < GI_IRR_N * GI_IRR_N) irrOld = b.Load(irrAddress);
     if (lane < 2 * GI_TEXEL_COUNT)
@@ -133,14 +156,35 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         [loop] for (uint k = 0; k < count; ++k) c += gs_sample[k].xyz * gs_shWeight[k * 9 + shLane];
         const float a = shLane == 0 ? GI_PI : (shLane < 4 ? 2 * GI_PI / 3 : GI_PI / 4);
         gs_sh[shLane] = c * a;
+#if SPLIT
+        float3 direct = 0, reflected = 0;
+        [loop] for (uint k = 0; k < count; ++k)
+        {
+            direct += gs_direct[k] * gs_shWeight[k * 9 + shLane];
+            reflected += gs_reflected[k] * gs_shWeight[k * 9 + shLane];
+        }
+        gs_directSh[shLane] = direct * a;
+        gs_reflectedSh[shLane] = reflected * a;
+#endif
     }
     // Irradiance map: lanes 0..80, one direction each (the sum here, the blend after the weight below).
     float3 e = 0;
+#if SPLIT
+    float3 directE = 0, reflectedE = 0;
+#endif
     if (lane < GI_IRR_N * GI_IRR_N)
     {
         const uint ix = lane % GI_IRR_N, iy = lane / GI_IRR_N;
         const float3 nj = giHemiOctDecode((float2(ix, iy) + 0.5) / (float)GI_IRR_N);
         [loop] for (uint k = 0; k < count; ++k) e += gs_sample[k].xyz * (max(dot(nj, gs_local[k]), 0.0) * gs_sample[k].w);
+#if SPLIT
+        [loop] for (uint k = 0; k < count; ++k)
+        {
+            const float factor = max(dot(nj, gs_local[k]), 0.0) * gs_sample[k].w;
+            directE += gs_direct[k] * factor;
+            reflectedE += gs_reflected[k] * factor;
+        }
+#endif
     }
     GroupMemoryBarrierWithGroupSync();
     const float2 bounce = gs_bounceSums.xy;
@@ -170,6 +214,11 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     const float spreadMean = history == 0 ? spread : lerp(spreadOld, spread, 1.0 / 16.0);
     const uint cap = steady ? h.historyStatic : h.historyMax;
     const float alpha = giHistoryAlpha(h, history, young, jacobiLength, cap);
+#if SPLIT
+    const float directAlpha = max(1.0 / (float)(splitUpdates + 1), 1.0 / (float)cap);
+    const float bounceAlpha = giHistoryPhase(history) < jacobiLength ? 1.0 :
+                             max(1.0 / (float)(splitUpdates + 1), 1.0 / (float)b.Load(776));
+#endif
     // Stochastic rounding of the stores (giDitherHalf). gi.deterministic (header flags bit 0): seeded from the entry's key
     // (giDetPriority, as GiTrace's rays), not its index - the index is the order the free list was popped in, which the
     // threads creating entries race for, so two runs of the same frames rounded differently and the cache (and every
@@ -185,6 +234,9 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         const bool finite = all(sample == sample) && all(abs(sample) < 3.0e38);
         const float a = finite ? alpha : 0.0;  // a non-finite value keeps the texel as it was
         float3 value = lerp(previous, finite ? sample : previous, a) * GI_STORE_SCALE;
+#if SPLIT
+        value = giSplitBlend(b, splitBase, lane, directTexel, reflectedTexel, directAlpha, bounceAlpha, history == 0) * GI_STORE_SCALE;
+#endif
         [unroll] for (uint c = 0; c < 3; ++c) value[c] = giDitherHalf(value[c], giDitherUnit(seed + lane * 4 + c));
         const float dist = lerp(f16tof32(texelOld.y >> 16), f16tof32(texelSample.w & 0xFFFFu), a);
         b.Store2(texelAddress, uint2(giPackHalf2(value.r, value.g), giPackHalf2(value.b, dist)));
@@ -192,7 +244,13 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         const float3 emitPrevious = giIrrUnpack(emitOld) * GI_LOAD_SCALE;
         const bool emitFinite = all(emitted == emitted) && all(abs(emitted) < 3.0e38);
         const uint re = seed + 4096 + lane * 4;
-        b.Store(emitAddress, giPackRgb9e5(lerp(emitPrevious, emitFinite ? emitted : emitPrevious, emitFinite ? alpha : 0.0) * GI_STORE_SCALE,
+        const float emitAlpha =
+#if SPLIT
+            directAlpha;
+#else
+            alpha;
+#endif
+        b.Store(emitAddress, giPackRgb9e5(lerp(emitPrevious, emitFinite ? emitted : emitPrevious, emitFinite ? emitAlpha : 0.0) * GI_STORE_SCALE,
                                           float3(giDitherUnit(re), giDitherUnit(re + 1), giDitherUnit(re + 2))));
     }
     // Irradiance map: the blend of lanes 0..80.
@@ -200,7 +258,11 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     {
         const float3 previous = giIrrUnpack(irrOld) * GI_LOAD_SCALE;
         const uint r = seed + 1024 + lane * 4;
-        b.Store(irrAddress, giPackRgb9e5(lerp(previous, e, alpha) * GI_STORE_SCALE, float3(giDitherUnit(r), giDitherUnit(r + 1), giDitherUnit(r + 2))));
+        float3 value = lerp(previous, e, alpha);
+#if SPLIT
+        value = giSplitBlend(b, splitBase, GI_TEXEL_COUNT + lane, directE, reflectedE, directAlpha, bounceAlpha, history == 0);
+#endif
+        b.Store(irrAddress, giPackRgb9e5(value * GI_STORE_SCALE, float3(giDitherUnit(r), giDitherUnit(r + 1), giDitherUnit(r + 2))));
     }
     if (lane != 0) return;  // (gs_sh was written before the barrier above)
 
@@ -209,7 +271,11 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     float v[27];
     [unroll] for (uint k = 0; k < 9; ++k)
     {
-        const float3 e = lerp(previous[k], gs_sh[k], alpha) * GI_STORE_SCALE;
+        float3 e = lerp(previous[k], gs_sh[k], alpha) * GI_STORE_SCALE;
+#if SPLIT
+        e = giSplitBlend(b, splitBase, GI_TEXEL_COUNT + GI_IRR_N * GI_IRR_N + k, gs_directSh[k], gs_reflectedSh[k],
+                         directAlpha, bounceAlpha, history == 0) * GI_STORE_SCALE;
+#endif
         v[3 * k] = giDitherHalf(e.r, giDitherUnit(seed + 2048 + 3 * k));
         v[3 * k + 1] = giDitherHalf(e.g, giDitherUnit(seed + 2049 + 3 * k));
         v[3 * k + 2] = giDitherHalf(e.b, giDitherUnit(seed + 2050 + 3 * k));
@@ -226,6 +292,9 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     if (history == 0) b.InterlockedAdd(GI_H_STAT_RESETS, 1u);
     b.Store(address + GI_SH_UPDATES, b.Load(address + GI_SH_UPDATES) + 1);
     b.Store(address + GI_SH_LAST_UPDATE, h.frame);
+#if SPLIT
+    b.Store(splitBase, min(splitUpdates + 1, 4095u));
+#endif
     b.Store3(address + GI_SH_HISTORY, uint3(giHistoryNext(h, history, young, jacobiLength, cap), h.epoch,
                                             f32tof16(nearestHalf(fast * GI_STORE_SCALE)) | (f32tof16(nearestHalf(spreadMean * GI_STORE_SCALE)) << 16)));
 }
