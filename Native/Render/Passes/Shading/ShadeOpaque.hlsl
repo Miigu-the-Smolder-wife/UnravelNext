@@ -181,7 +181,8 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
 // Visibility of the shadow-casting light at 'ordinal' (> 3) of the pixel's list order: S's overflow run (main kernel) or
 // S's VSM estimator (fallback tiles). 1 without S's resources. 'record' caches the pixel's overflow record (main kernel)
 // or marks the receiver as built (fallback: 'receiver', built once per pixel).
-float shOverflowVisibility(uint2 pixel, uint ordinal, uint overflowHead, inout uint record, inout ShadowPixelReceiver receiver, uint lightIndex)
+float shOverflowVisibility(uint2 pixel, uint ordinal, uint overflowHead, inout uint record, inout uint2 packedCache,
+                           inout ShadowPixelReceiver receiver, uint lightIndex)
 {
 #if FALLBACK
     // S's own evaluation for the slots and the overflow list (the visibility pass's receiver: position, normal and
@@ -209,10 +210,11 @@ float shOverflowVisibility(uint2 pixel, uint ordinal, uint overflowHead, inout u
     if (overflowHead == 0 || P[7].z == UNX_NONE) return 1;
     ByteAddressBuffer b = ResourceDescriptorHeap[P[7].z];
     const uint block = overflowHead - 1;
-    if (record == 0xFFFFFFFFu) record = b.Load(4 * (block + (pixel.y % M_TILE) * M_TILE + (pixel.x % M_TILE)));
     const uint j = ordinal - 4;
     if (j >= (record >> 24)) return 1;
-    const uint w = b.Load(4 * (block + (record & 0xFFFFFFu) + j / 4));
+    const uint word = j / 4;
+    if (packedCache.x != word) packedCache = uint2(word, b.Load(4 * (block + (record & 0xFFFFFFu) + word)));
+    const uint w = packedCache.y;
     return ((w >> (8 * (j & 3))) & 0xFFu) / 255.0;
 #endif
 }
@@ -416,6 +418,18 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         const float3 compensation = 1 + f0 * (1 / e - 1);
         const uint2 range = froxelLightRange(froxels, pixel, linearZ);
         const uint indexBase = froxelIndexBase(froxels);
+        uint shadowOrdinal = 0, overflowRecord = 0xFFFFFFFFu;
+        uint2 overflowPacked = uint2(0xFFFFFFFFu, 0);
+#if !FALLBACK
+        // Resolve the pixel record before LTC/BRDF work. Visibility words are
+        // still demand-loaded, at most once for each four consecutive casters.
+        overflowRecord = 0;
+        if (range.y > 3 && overflowHead != 0 && P[7].z != UNX_NONE)
+        {
+            ByteAddressBuffer records = ResourceDescriptorHeap[P[7].z];
+            overflowRecord = records.Load(4 * (overflowHead - 1 + (pixel.y % M_TILE) * M_TILE + (pixel.x % M_TILE)));
+        }
+#endif
 
 #if AREA
         // Area lights (AreaLight.hlsli): the shading frame, its horizon-flipped twin for Foliage transmission and the
@@ -440,7 +454,6 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         }
 #endif
 #endif
-        uint shadowOrdinal = 0, overflowRecord = 0xFFFFFFFFu;
         ShadowPixelReceiver overflowReceiver = (ShadowPixelReceiver)0;
         uint4 lightWords = 0;
         for (uint i = 0; i < range.y; ++i)
@@ -481,7 +494,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             float visibility = 1;
             if (casts)
                 visibility = shadowOrdinal <= 3 ? shadowSlot(shadowPacked, shadowOrdinal)
-                                                : shOverflowVisibility(pixel, shadowOrdinal, overflowHead, overflowRecord, overflowReceiver, lightIndex);
+                                                : shOverflowVisibility(pixel, shadowOrdinal, overflowHead, overflowRecord, overflowPacked, overflowReceiver, lightIndex);
             if (visibility <= 0) continue;
             if (area)
             {
