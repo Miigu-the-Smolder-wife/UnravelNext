@@ -271,3 +271,98 @@ GPU가 없어 **모두 미검증**이다. HLSL은 리눅스 dxc 1.8.2505(빌드�
   - `debug.deterministic = true`는 gi.deterministic을 포함. 남은 것(감사 목록, 아직 안 함): 결정론 모드에서 초기 프레임의 반사 광선 용량 넘침(값은 이제 경로와 무관하게 같아야 함 — inline과 split의 해 가시도 추정기가 비트까지 같은지는 미확인), GI 풀/테이블 고갈 시 도착 순서(통계 STAT_ALLOC_FAIL·TABLE_FULL이 0이면 무관), VSM·froxel 통계 읽기 프레임(아래 커밋), 가시성 버퍼 동일 깊이 타이(동일 평면 겹침에서만), 투명 합성 동일 깊이 타이.
   - **확인:** `--set debug.deterministic=true --warmup-frames 300`으로 같은 설정 두 번 → 캡처가 비트 동일한지(UpscaleCompare로 차이 0 또는 cmp). 다르면 어느 영역인지 알려 주면 좁힌다. 기본 모드 두 번의 차이(4.4 %)가 얼마나 줄었는지도.
 - **[결정론 2]** (6) VSM·froxel 통계 읽기가 "GPU가 막 끝낸 가장 새 슬롯"이라 실행마다 다른 프레임을 읽었다(아틀라스 증가·그림자 overflow 용량이 이 값으로 정해짐) → framesInFlight 이상 지난 슬롯만(호스트가 기다린 프레임 = 항상 frame − framesInFlight). (7) gi.deterministic에서 텍셀 R2 회전 시드가 프레임을 포함한 우선순위라 매 프레임 회전이 새로 뽑혀 저불일치 걷기가 독립 지터가 됨(결정론 모드가 기본보다 잡음 많음) → 프레임 없는 키 해시 `giDetKey`(광선 시드·디더에는 프레임이 따로 들어감). 남은 것: 투명 합성의 같은 깊이 타이(풀 원소 순), 가시성 버퍼의 같은 깊이 타이(그리기 순) — 동일 평면 겹침에서만.
+
+## 세션 11 · 결정론 마무리·이력 분리 실험·동일 계산 최적화 (2026-09-29)
+
+기준은 `cloud/render-fixes`의 `25d639c`다. 아래는 **구현과 컴파일 검증** 기록이다. 이 세션에서는 GPU를 실행하지 않았다. 따라서 영상 비트 일치, 품질 향상, GPU 시간, 레지스터 수·점유율·spill, TDR 여부는 모두 로컬 확인 대기다. 특히 "같은 계산"은 설계 의도이며 **비트 동일 통과를 뜻하지 않는다**. Unreal 코드를 복사하지 않았고, 표본·광선·탭 수나 출력/내부 해상도를 줄이지 않았다.
+
+### 11.1 항목별 커밋과 판정 기준
+
+시간은 RTX 4080의 1440p 출력 기준 **[예상]**, 측정값이 아니다. 각각 겹치는 비용이 있어 행별 이득을 그대로 더하면 안 된다. 결정론용 추가 작업은 성능 이득에 넣지 않는다.
+
+| 항목·커밋 | 실제 변경 | 이득·비용 [예상] | 로컬에서 확인할 것 |
+|---|---|---|---|
+| 0 · `2441753` | 미완성 known-entry 전역 재사용만 제거. `25d639c`의 완성된 국소광 선택 전달·GI 레벨 단일 루프는 유지 | 이득 0; 정상 조회 복원으로 일부 조회 비용 증가 가능 | 미완성 전역 상태 없음, 반사/GI 회귀 |
+| 1a · `0b9d7e6` | inline 용량 초과와 split이 같은 해 분류·penumbra 필터, bary 저장 경계, 반사/해 항 FP16 저장·합성 함수를 사용 | 속도 목적 아님; 초기 overflow 프레임은 더 비쌀 수 있음 | 결정론 모드 초기 프레임, M/G, sky, nonresident, grazing. `reflection.experiment_disable=0/64` 결과 **비트 일치** |
+| 1b · `8197079` | 결정론 GI에서 missing-key 요청을 모아 안정 정렬·중복 제거 후 키 순/빈 슬롯 순으로 등록. 테이블은 두 정렬 구간 조회. 프로브는 수집→등록→재생, 광선 요청은 다음 프레임 등록 | 기본 모드 추가 비용 0. 결정론 모드는 여러 정렬 dispatch와 큰 임시 메모리 추가; 2~3 ms 예산에 포함할 최적화가 아님 | `unx_test_gi_admission --validate`: 고갈·동일 버킷 충돌·중복·65536 scan 경계·입력 순열. 작은 풀 반복 캡처, origin rebase/resize, GBV, request-capacity 오류 0 |
+| 1c · `a30bc03` | 투명 동심도 정렬에 실제 primitive identity 사용. 결정론 가시성은 최종 깊이를 바꾸지 않고 stable winner 선택 후 ID 재기록 | 기본 동심도 비교 0~0.03 ms 비용; 결정론 replay +0.05~0.4 ms, 8 B/pixel 승자 버퍼 | VisibilityTests의 `depth_ties_choose_stable_primitive`; 겹친 유리·heavy coverage·planar mask·움직임. 이미지뿐 아니라 decoded primitive identity 반복 일치 |
+| 2 · `1a1d4ca` | GI 비반사 RGB와 cache-bounce RGB를 따로 적분·저장. `gi.split_bounce_history=false` 기본 유지, `bounce_history_updates=4` | OFF 0 ms. ON +0.15~0.45 ms; 엔트리당 3712 B, 20만 엔트리 약 708 MiB; 광선당 임시 48 B 추가 | OFF/부모 비트 일치. 욕탕 1080p 3000프레임 luminance OFF/ON, 평균 에너지·분산·저주파 drift·이동/조명 응답. 개선 입증 후 켤지 결정 |
+| 3a · `963b92d` | 8개 GI corner ID를 먼저 조회. 지도 합산은 원래 순서. `reflection.batch_gi_corners=false`; OFF/ON 별도 컴파일 변형 | ON −0.03~0.15 ms 또는 점유율 악화; OFF에는 추가 ID 벡터가 컴파일되지 않음 | OFF/ON 비트 일치, registers/occupancy/spill, shade+inline 합. 이전 일괄 조회 회귀 때문에 측정 전 기본 ON 금지 |
+| 3b · `3757c48` | 해 가시도 후보 레벨 최대 4개의 중심 페이지를 먼저 적재, 같은 finest-first 3×3 거주 판정 | −0.01~0.06 ms; 선조회 추가 트래픽으로 손해 가능 | 경계·비상주 hit 비트 일치. `use_stats=0` 시간; use_stats는 선조회한 중심도 읽힘으로 표시 |
+| 3c · `aad3991` | 데칼 정렬용 호출자 scratch 배열을 `inout`으로 전달, 원래 정렬·혼합 유지 | 데칼 많은 경우 −0.00~0.03 ms | 겹친 priority/order 데칼·최대 개수·이동 hit 비트 일치, scratch/spill |
+| 3d · `9a2cbc9` | 광선마다 VNDF 첫 시도 직전 시드 저장. shade/local-shadow가 앞 광선의 rejection sequence를 재생하지 않음; combine도 같은 저장 시드 사용 | −0.02~0.10 ms, ray slot 56→60 B | 모두 기각된 광선·grazing·초기 용량 경계·4-ray G, RNG/캡처 비트 일치 |
+| 3e · `cbc5b86` | jobs의 9개 이웃 타일 유효값을 그룹당 한 번 적재. resolve 결과/표면, accumulate 이력/키의 독립 적재를 앞당김 | 세 패스 합 −0.01~0.07 ms; disocclusion은 추가 읽기 비용 가능 | 부분 타일·SELF 전환·변형/컷·이력 리셋 비트 일치, 패스별 시간 |
+| 4a · `61bfcbe` | S/M 광원 순회에서 packed word 4개(광원 8개)씩 적재. 끝부분은 해당 목록 안의 워드만 읽음 | S+M −0.02~0.10 ms | 목록 0/1/2/7/8/9/31/32, 홀수 lights_max, 마지막 froxel, 투명·fallback 비트 일치 |
+| 4b · `bf98e5a` | M의 overflow 헤더를 BRDF/LTC 계산 전에 적재; 필요한 가시도 word를 caster 4개 사이 재사용 | −0.01~0.05 ms | caster ordinal이 건너뛰어지는 조명, 강제 overflow capacity, planar/M 비트 일치 |
+| 4c · `a41b16b` | 국소광 overflow blocker 탐색/필터 분리. FP32 handoff, 항목당 고유 결과 byte. 큐 초과는 **같은 필터를 즉시 실행** | 욕탕 S −0.03~0.20 ms 또는 dispatch 비용으로 회귀. 일반 pixel bound에서 큐 약 6 B/pixel | `shadow.vsm.overflow_filter_queue=false/true`; LocalShadowTests의 같은 프레임 logical byte 비교. 큐 포화·overflow fallback·움직이는 광원·GBV |
+| 4d · `caa7eb6` | 필요한 air slice를 전체 froxel 수 용량의 큐에 모아 적분, 원래 index에 FP32 기록. tile별 국소광 합산·미디어 혼합·prefix scan은 기존 순서. `atmosphere.froxels.integration_queue`로 A/B | 기차 −0.00~0.05, 욕탕 −0.03~0.18 ms; 큐 준비·scratch 트래픽으로 회귀 가능. froxel당 68 B 추가(1920×1080, tile24, 64slice 약 14.9 MiB) | FroxelTests `--queue-ab`: 같은 프레임 volume의 실제 texel byte 비교(행 padding 제외). sky/roof/국소광/미디어/planar, 1~64 slices, GBV·각 큐 패스 합 시간 |
+
+후속 상한·검증 보완도 별도 커밋이다.
+
+| 커밋 | 이유·변경 | [예상]·로컬 확인 |
+|---|---|---|
+| `aa8c622` (3d 보완) | ray owner의 기존 4-bit index와 맞게 `g_rays_per_sample`을 변환 전에 1~16으로 검사 | 비용 0. 기본 4 유지. 0/음수/17 거부, 16-ray grazing. 설정을 조용히 낮추지 않음 |
+| `a48d2f5` (4c 보완) | immediate/queued search·filter 탭을 1~64로 검사해 설정으로 무한대에 가까운 루프가 들어오지 않게 함 | 비용 0. 기본 5/16 유지. 0/음수/65 거부, 64/64 + 포화 검사. 초과 설정은 clamp하지 않고 실패 |
+| `91a313f` | 기존 CPU 설정 테스트의 오래된 1080p 거부 기대 수정, 비목표 720p 거부는 유지 | GPU 변화 0. CPU `quality` 3/3 통과 |
+
+1a~1c는 기존의 불안정한 결과를 고치는 변경이라 버그가 드러나던 입력에서 부모 영상과 같다는 주장이 아니다. 2의 ON도 다른 추정 방식이므로 동일 결과 최적화에 넣지 않는다. 3·4는 각 부모 대비 결정론 비트 일치가 통과해야 채택한다.
+
+### 11.2 구현 범위·메모리·실행 상한
+
+- 분리 GI 이력은 FP32 RGB 두 벌을 texel 64개, irradiance map 81개, SH 9개에 저장한다. 외부 캐시 제품은 두 평균의 합을 기존 형식으로 저장한다. 새 엔트리/epoch 리셋은 split 평균도 리셋한다. 비반사는 처음부터 긴 평균, cache-bounce는 Jacobi 구간에 즉시 갱신하고 이후 짧은 창을 쓴다. 광선 수는 동일하다. ON은 아직 "더 낫다"고 확인되지 않았다.
+- 결정론 GI admission은 normal path를 대체하지 않는다. 요청 용량은 반사 생산자·GI 광선·프로브의 최악 개수로 잡으며, raw buffer가 32-bit 주소 범위를 넘으면 실패한다. request 초과 오류를 숨기거나 임의 표본을 버리지 않는다. 큰 화면에서 추가 메모리가 수백 MiB~수 GiB일 수 있다. 정렬 merge는 스레드당 binary search 최대 32회, 256원소 scan은 최대 4계층이다.
+- 국소광 overflow 큐는 `min(4 * overflowWords, max(1024, pixels / 8))`개다. 48 B/항목이며, 초과는 inline 필터다. 큐 순서와 결과 byte 주소는 분리되어 있다. producer 완료 뒤 consumer가 겹치지 않는 byte를 OR한다. 큐 counter의 32-bit 최악 개수도 검사한다.
+- froxel 큐에는 필요한 slice를 정확히 한 번 넣고, 용량은 모든 slice 수다. 적분 내부는 원래 최대 32 altitude substep, 기존 VSM air-walk 상한을 유지한다. 64 B FP32 scratch를 통해 원래 tile/slice index로 되돌리므로 큐 도착 순서는 FP 합산 순서를 바꾸지 않는다. 국소광의 기존 분할 수 K 및 list 순서, media 계산도 유지한다. 큐와 간접 dispatch는 표준 D3D12다.
+- 기본 비동기 목록은 계속 `[]`이다. 큐를 만들었다는 이유로 async가 빨라졌다고 간주하지 않는다. 새 pass/resource의 lifetime은 render graph 선언으로 연결했다.
+
+### 11.3 실제 검증과 로컬 실행
+
+- `Tools/CI/Build.ps1 -Track rendercheck -Tracks all -Jobs 4 -LowPriority`로 전체 소스와 테스트를 MSVC `/W4 /WX` 빌드했다. 생성 `.obj`/scan 파일 560개를 이 작업 폴더 안에서만 제거한 뒤 수행한 빌드는 342.6초에 통과했다(`build/final-source-build.log`). 앞선 증분 빌드는 수정 테스트의 오래된 오브젝트를 재사용한 흔적이 있어 현재 소스 증거로 채택하지 않았다.
+- 그 뒤 실행 상한/설정 테스트 보완의 세 C++ 오브젝트를 명시적으로 다시 만들고 전체 링크·헤더 의존성 검사를 통과했다(`build/bounds-test-build.log`, 32.0초). 검증한 구현 tip은 `91a313f`이며 이 세션 기록 커밋은 문서만 추가한다. 로컬의 기존 gate/build 캐시도 그대로 신뢰하지 말고, 새 빌드 폴더 또는 생성 오브젝트 정리 후 실제 변경 C++의 컴파일 로그를 확인한다.
+- 모든 커널 변형의 200 KiB DXIL gate가 통과했다. 빌드 산출물 중 최댓값은 `FxLayerSetup.STEP0` 204560 B(한도 204800 B). froxel QUEUED0/1은 56516/45240 B, 별도 air 적분은 14064 B다. 이는 바이너리 크기이며 GPU 레지스터 수나 실행 시간의 증거가 아니다.
+- GPU 장치를 만들지 않는 `unx_unit_tests quality`를 실행했다. 처음에는 기존의 1080p 거부 기대 때문에 2/3이었고, `25d639c`부터 설정은 이미 1080p를 허용함을 소스 비교로 확인했다. 테스트 기대를 수정한 뒤 **3/3 통과**했다(`build/cpu-quality.log`). GPU 디버그 레이어 검증을 실행한 것은 아니다.
+- `git diff --check` 통과. 다른 checkout의 엔진 DLL/제품을 대신 사용하지 않았다. submodule과 공식 dependency cache는 사용하되 엔진/테스트는 이 작업 소스에서 빌드했다.
+
+컴파일은 영상/GPU 성능의 검증이 아니다. 이 세션에서 실행하지 않은 것은 모든 GPU 테스트, 비트 비교, 3000프레임 곡선, 레지스터/점유율 측정, 1080p/1440p 시간이다. 2~3 ms 달성을 주장하지 않는다.
+
+로컬 조정 세션은 기존 main의 `Tools/Verify/Verify-CloudBranch.ps1 -Ref origin/cloud/render-fixes`를 사용한다. 이 스크립트는 현재 cloud 기준 커밋에는 없고, 로컬 main에 존재하는 것을 확인했다. 로컬의 작업/검증 checkout을 이 세션에서 바꾸지 않았다. 결과는 기존 절차대로 `origin/local/verify-<커밋>`에 올린다.
+
+기존 runner의 tests 목록에는 새 GI admission/visibility tie 및 froxel `--queue-ab`가 자동 포함되지 않는다. 로컬 GPU lock 안에서 다음을 추가하고 결과를 함께 보관해야 한다.
+
+1. `unx_test_gi_admission --validate`, `unx_test_visibility_visibilitytests`(동심도 테스트 포함), `unx_test_shadow_localshadowtests`, `unx_test_shadow_froxeltests --queue-ab --set debug.deterministic=true`. 테스트 실행 파일은 이 소스 빌드의 `build/all/bin` 제품을 쓴다.
+2. 각 최적화 커밋과 부모를 같은 scene/config, `debug.deterministic=true`, `--warmup-frames 300`, 고정 `--frames`로 비교한다. 초기 overflow 검사는 별도로 워밍업 0/초기 프레임도 포함한다. 첫 번째는 같은 커밋 반복 두 번이 byte 동일해야 한다. 그다음 부모/변경 쌍을 비교한다. SSIM/허용 오차 판정으로 비트 일치를 대체하지 않는다. 최종 캡처 byte/hash와 GPU debug/GBV 오류 0을 남긴다.
+3. `reflection.batch_gi_corners=false/true`, `shadow.vsm.overflow_filter_queue=false/true`, `atmosphere.froxels.integration_queue=false/true`를 각각 단독 A/B한다. 전체 프레임과 하위 패스 합, 메모리·registers·occupancy·spill을 함께 본다. 큐 producer만 빨라진 것은 이득이 아니다.
+4. 욕탕 1080p `--frames 3000 --luminance-log <파일>`에 `gi.split_bounce_history=false/true`를 비교한다. 평균 밝기가 낮아져 분산만 줄어든 경우 불합격이다. 같은 커밋 안 재현성 검사와 별도로 독립 seed의 평균·분산, 이동/가림 해제/조명 변화 응답을 봐야 한다. 확인 전 OFF 유지.
+5. 시간은 **debug.deterministic=false**, 동일 출력·내부 해상도·품질 hash·직렬 큐·무경합에서 두 번 이상 측정한다. 결정론 admission/replay의 비용을 일반 프레임과 섞지 않는다. 현재 미승인 영상이 기준에 섞이지 않았는지 정지·이동 품질도 확인한다.
+
+### 11.4 1440p 2~3 ms까지 남은 몫
+
+최신 기준은 사용자가 제공한 `84e789f` 직렬 **[실측]**: 기차 1440p 5.33 / 1080p 3.79, 욕탕 1440p 6.10 / 1080p 4.40 ms다. 1440p에서 3 ms까지 **2.33 / 3.10 ms**, 2 ms까지 **3.33 / 4.10 ms**를 더 줄여야 한다. 이번 tip의 시간은 아직 없다.
+
+최신 84e789f의 패스별 JSON은 이 checkout에 없으므로 패스별 현재 시간으로 꾸며 쓰지 않는다. 아래 시간은 `main:Results/Local/Timing20260929/974c6bb_*_2560x1440.json`의 pass mean 합을 다시 집계한 **과거 [실측]**이다(출력1440p/내부960p, 당시 업스케일 화질 불합격). 구조상 큰 비용의 위치와 필요 감축 규모만 보여 준다. 최신 결과로 각 행을 교체해야 한다.
+
+| 패스 묶음 | 과거 기차 / 욕탕 ms | 3 ms 설계 배분 기차 / 욕탕 [목표] | 이번 항목이 만지는 부분 |
+|---|---:|---:|---|
+| R 반사 | 2.019 / 0.835 | 0.85 / 0.40 | corner·해 적재, 데칼, VNDF 재생, jobs/resolve/accumulate |
+| GI | 1.576 / 1.691 | 0.80 / 0.80 | 이번 이력 분리는 성능 절감이 아니며 ON 비용 증가 가능 |
+| S 그림자·VSM | 0.674 / 2.065 | 0.50 / 0.90 | 목록·국소광 overflow 분리. 페이지 렌더/요청의 큰 몫은 그대로 |
+| S froxel | 0.183 / 0.554 | 0.15 / 0.20 | 같은 air slice 계산의 큐 배치 |
+| M | 0.762 / 1.099 | 0.45 / 0.50 | light word/overflow 적재. BRDF·재질 계산량은 그대로 |
+| V | 0.161 / 0.160 | 0.15 / 0.15 | normal mode 성능 변화 거의 없음 |
+| AS | 0.111 / 0.026 | 0.06 / 0.03 | 이번 항목에 큰 절감 없음 |
+| 제출 간 간격 등 여유 | 별도 측정 필요 | 0.04 / 0.02 | 새 dispatch 비용도 여기에 반영 |
+| 합 | 5.485 / 6.431 (패스 합) | 3.00 / 3.00 | 2 ms는 이 배분에서 추가 1 ms 필요 |
+
+이번 동일 계산 최적화의 합산 이득은 우선 **0.1~0.6 ms [예상]** 정도를 검증할 범위로 본다(일부 회귀 가능, 개별 행의 상단을 더한 수치 아님). 이 예상만으로 최신 기준의 2.33~3.10 ms 부족분을 메울 근거는 없다. GI split ON은 이 예산 밖의 품질 실험이다. 해상도·표본·부하를 낮춰 목표를 맞춘 것으로 보고하지 않는다.
+
+### 11.5 후속 재설계와 결정 필요
+
+**동일 결과 조건으로 먼저 검토할 재설계**: GI/반사 hit의 불변 조회 자료를 단계별로 분리하고, 같은 key/페이지 읽기를 묶되 광선·corner·합산 순서는 원래 index로 되돌리는 방식. GI trace와 integrate의 큰 live state를 분리해 occupancy를 확보하는 방식. 국소광 shadow의 정확한 early-out과 필터 작업 큐를 전체 slot/M fallback까지 확장하는 방식. 모두 실제 register/spill·대기 원인·새 scratch/dispatch 비용 측정이 선행되어야 하며, prefix sum이나 wave reduction으로 FP 덧셈 순서를 바꾸는 것은 동일 결과 변경으로 분류하지 않는다.
+
+**결정 필요 — 이번에 적용하지 않은 것**:
+
+- 분리 GI 이력 ON: 실제 게임플레이에서 에너지·시간 응답·세부가 더 나은지 먼저 확인하고 결정한다. 비용/메모리 증가도 함께 수용 여부를 정한다.
+- 다른 반사/GI 추정기, reservoir/temporal reuse, proxy 근사, 더 강한 시간 필터: 정지 통계나 SSIM만으로 "보이는 것이 같다"고 할 수 없다. 움직임·가림 해제·조명 변화에서 차이가 있으면 동등 최적화 목록에 넣지 않는다. 이 세션에는 구현하지 않았다.
+- 내부 해상도·광선/탭 수·GI 갱신량·광원 수·장면 부하 감소는 현재 고정 규칙에 어긋난다. 목표 달성 수단으로 채택하지 않았으며, 현 규칙 아래에서는 사용할 수 없다.
+
+아직 완료되지 않은 것은 위 로컬 GPU 수용 검사와 2~3 ms 성능 목표의 실측 입증이다. 코드는 항목별로 되돌릴 수 있는 커밋으로 나눴고, 미완성 known-entry 경로는 남겨 두지 않았다.
