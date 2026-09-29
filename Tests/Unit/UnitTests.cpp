@@ -160,7 +160,8 @@ UNX_TEST(quality_file_loads)
     QualityConfig q = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
     CHECK(resolutionFromString("4K", q).width == 3840);
     CHECK(resolutionFromString("2560x1440", q).height == 1440);
-    CHECK(throws([&] { resolutionFromString("1920x1080", q); }));  // the harness refuses non-target resolutions
+    CHECK(resolutionFromString("1920x1080", q).width == 1920);  // 1080p is a configured target since 2026-09-28
+    CHECK(throws([&] { resolutionFromString("1280x720", q); }));  // the harness still refuses non-target output resolutions
 }
 
 UNX_TEST(quality_directory_namespaces)
