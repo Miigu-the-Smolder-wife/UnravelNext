@@ -180,6 +180,39 @@ bool shadowPagesResident3x3(VsmResources r, int2 centre, uint L)
 #endif
 }
 
+// Load all candidate centre pages before the dependent coverage walk. This
+// bypasses vsmEntry's one-slot cache, so independent table loads do not form a
+// chain through its mutable last-slot state. Selection is still finest first.
+uint shadowSunResidentLevel(VsmResources r, ConstantBuffer<VsmConstants> c, float3 worldPos, uint k)
+{
+    const uint first = k - min(3u, k);
+    uint centres = 0;
+    [unroll] for (uint i = 0; i < 4; ++i)
+    {
+        const uint L = first + i;
+        if (L > k) continue;
+        const int2 page = vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L).xy, L));
+        if (!vsmInWindow(c, page, L)) continue;
+        const uint slot = vsmSlot(page, L);
+        const uint2 words = r.table.Load2(slot * 8);
+        const bool hit = (words.x & VSM_FLAG_RESIDENT) != 0 && words.y == vsmTag(page);
+        if (hit) centres |= 1u << i;
+        if (hit && c.useStats != 0)
+        {
+            RWByteAddressBuffer use = ResourceDescriptorHeap[c.useStats - 1];
+            use.InterlockedOr(slot * 4, 1u);
+        }
+    }
+    [loop] for (uint i = 0; i < 4; ++i)
+    {
+        if ((centres & (1u << i)) == 0) continue;
+        const uint L = first + i;
+        if (L + 1 >= VSM_LEVELS || shadowPagesResident3x3(r,
+            vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L + 1).xy, L + 1)), L + 1)) return L;
+    }
+    return 0xFFFFFFFFu;
+}
+
 // Sun visibility in [0, 1] at a world point with geometric normal (ray hits, R): the direct view's estimator (SMRT:
 // reach classification, blocker search, disk filter; vsmSunVisibility) on the level whose texel matches 'footprint'
 // (metres, the ray cone's width at the hit), or on one of the three finer levels when that page is not resident (finer
@@ -195,22 +228,7 @@ float shadowSunVisibilityAt(ShadowSrvs s, float3 worldPos, float3 normal, float 
     r.cbv = s.constants;
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[s.constants];
     const uint k = vsmLevelForFootprint(c, footprint);
-    uint level = 0xFFFFFFFFu;
-    // A level serves a hit only where the direct view's residency contract holds there (VsmPropagate: a pixel's page at
-    // level L brings the 3 x 3 pages around it on L + 1 .. L + 3, where the blocker search and penumbra taps fall back):
-    // the point's page and the 3 x 3 on L + 1. Pages resident for other reasons (the air's, VsmMarkAir, which are not
-    // propagated) failed the fallback: taps off their page read "no caster", and floor reflections in a closed bathhouse
-    // showed sunlight through its walls (22 % of the image; a shadow ray there: 0.7 %) [measured, 2026-09-27]. Finest
-    // level first: the direct view's own pages, the most accurate. None: a shadow ray (resident = false).
-    [loop] for (int j = min(3, (int)k); j >= 0; --j)
-    {
-        const uint L = k - j;
-        if (vsmEntry(r, vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L).xy, L)), L) == 0) continue;
-        const bool covered = L + 1 >= VSM_LEVELS || shadowPagesResident3x3(r, vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L + 1).xy, L + 1)), L + 1);
-        if (!covered) continue;
-        level = L;
-        break;
-    }
+    const uint level = shadowSunResidentLevel(r, c, worldPos, k);
     resident = level != 0xFFFFFFFFu;
     if (!resident) return 1;
     uint path;
@@ -248,16 +266,7 @@ ShadowSunClassified shadowSunClassifyAt(ShadowSrvs s, float3 worldPos, float3 no
     r.cbv = s.constants;
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[s.constants];
     const uint k = vsmLevelForFootprint(c, footprint);
-    uint level = 0xFFFFFFFFu;
-    [loop] for (int j = min(3, (int)k); j >= 0; --j)  // (shadowSunVisibilityAt's residency rule)
-    {
-        const uint L = k - j;
-        if (vsmEntry(r, vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L).xy, L)), L) == 0) continue;
-        const bool covered = L + 1 >= VSM_LEVELS || shadowPagesResident3x3(r, vsmAbsPage(vsmAbsTexel(c, vsmLightSpaceAt(c, worldPos, L + 1).xy, L + 1)), L + 1);
-        if (!covered) continue;
-        level = L;
-        break;
-    }
+    const uint level = shadowSunResidentLevel(r, c, worldPos, k);
     o.resident = level != 0xFFFFFFFFu;
     if (!o.resident) return o;
     // vsmSunVisibility's steps at footprint = vsmTexel(level)
