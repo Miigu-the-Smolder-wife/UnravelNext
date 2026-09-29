@@ -602,8 +602,13 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     c.receiverBiasTexels = (float)q.number("shadow.vsm.receiver_bias_texels");
     c.maxReceiverSlope = (float)q.number("shadow.vsm.max_receiver_slope");
     c.instanceCount = (uint32_t)fc.scene.instances().size();
-    c.searchTaps = (uint32_t)q.integer("shadow.vsm.search_taps");
-    c.filterTaps = (uint32_t)q.integer("shadow.vsm.filter_taps");
+    const int64_t searchTaps = q.integer("shadow.vsm.search_taps"), filterTaps = q.integer("shadow.vsm.filter_taps");
+    // Structural per-item bound for immediate and queued visibility. Preserve
+    // every configured tap; reject unsupported counts rather than clamping.
+    if (searchTaps < 1 || searchTaps > 64 || filterTaps < 1 || filterTaps > 64)
+        fail("shadow.vsm search_taps and filter_taps must be in [1, 64]");
+    c.searchTaps = (uint32_t)searchTaps;
+    c.filterTaps = (uint32_t)filterTaps;
     const float3 cam = main.view.position;
     c.cameraUV[0] = dot(cam, c.lightX);
     c.cameraUV[1] = dot(cam, c.lightY);
