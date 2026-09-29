@@ -85,6 +85,10 @@ ShaderLibrary& shaders()
 QualityConfig quality(const std::vector<std::string>& overrides = {})
 {
     QualityConfig q = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+    // These geometric oracles and readback footprints use the requested raster
+    // size. Temporal upscaling changes both that size and its projection.
+    q.applyOverride("output.render_scale=1");
+    q.applyOverride("output.render_height_max=0");
     for (const std::string& o : overrides) q.applyOverride(o);
     return q;
 }
@@ -258,6 +262,26 @@ ComPtr<ID3D12Resource> readbackBuffer(uint64_t bytes)
     return r;
 }
 
+ComPtr<ID3D12Resource> uploadWords(const std::vector<uint32_t>& words)
+{
+    D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_UPLOAD };
+    D3D12_RESOURCE_DESC1 rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = words.size() * sizeof(uint32_t);
+    rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> resource;
+    check(device().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED,
+          nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&resource)), "test word upload");
+    void* mapped = nullptr;
+    const D3D12_RANGE none{ 0, 0 };
+    check(resource->Map(0, &none, &mapped), "map test word upload");
+    std::memcpy(mapped, words.data(), (size_t)rd.Width);
+    resource->Unmap(0, nullptr);
+    return resource;
+}
+
 void copyTexture(PassContext& c, TextureRef t, ID3D12Resource* dst, uint32_t width, uint32_t height)
 {
     D3D12_TEXTURE_COPY_LOCATION to{}, from{};
@@ -302,6 +326,7 @@ RunOut renderRun(const scene::Scene& s, const QualityConfig& q, const std::vecto
         fr.mainView = ViewDesc::fromCamera(cams[f], width, height, prev);
         TextureRef output = graph.createTexture({ "test output", width, height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
         const ViewResources main = renderer.record(graph, fr, output);
+        CHECK(main.view.width == width && main.view.height == height);
         ID3D12Resource *d = depthRb.Get(), *v = visRb.Get(), *l = listRb.Get();
         graph.addPass("test.readback", QueueType::Graphics,
                       [&](PassBuilder& b) {
@@ -318,7 +343,7 @@ RunOut renderRun(const scene::Scene& s, const QualityConfig& q, const std::vecto
         graph.execute(nullptr);
         device().waitIdle();
         FrameOut fo;
-        fo.view = fr.mainView;
+        fo.view = main.view;
         fo.depth = readTexture<float>(d, width, height);
         fo.visId = readTexture<uint32_t>(v, width, height);
         fo.visible.resize(capacity * 2);
@@ -639,6 +664,7 @@ UNX_TEST(raster_service)
     auto sparseTile = [&](uint32_t x, uint32_t y) { return (sparseRows[y / 128] >> (x / 128)) & 1; };
     const uint32_t sparseWords[2] = { sparseRows[0] | sparseRows[1] << 8 | sparseRows[2] << 16 | (uint32_t)sparseRows[3] << 24,
                                       sparseRows[4] | sparseRows[5] << 8 | sparseRows[6] << 16 | (uint32_t)sparseRows[7] << 24 };
+    const auto maskUpload = uploadWords({ 0x0F0F0F0Fu, 0x0F0F0F0Fu, sparseWords[0], sparseWords[1] });
     ComPtr<ID3D12Resource> rbDepth = readbackBuffer((uint64_t)rowPitch(size) * size), rbBits = readbackBuffer((uint64_t)rowPitch(size) * size),
                            rbIds = readbackBuffer((uint64_t)rowPitch(size) * size), rbFine = readbackBuffer((uint64_t)rowPitch(size) * size);
     ID3D12Resource *pd = rbDepth.Get(), *pb = rbBits.Get(), *pi = rbIds.Get(), *pf = rbFine.Get();
@@ -701,9 +727,8 @@ UNX_TEST(raster_service)
                               c.cmd->Dispatch(size / 8, size / 8, 1);
                           }
                           // 8 x 8 tiles of 128 px (two words for the one view): columns 0-3 set in every row.
-                          D3D12_WRITEBUFFERIMMEDIATE_PARAMETER words[2];
-                          for (uint32_t w = 0; w < 2; ++w) words[w] = { c.address(mask) + 4 * w, 0x0F0F0F0Fu };
-                          c.cmd->WriteBufferImmediate(2, words, nullptr);
+                          // Explicit destination identity avoids WARNING 926 on aliased transient GPU VAs.
+                          c.cmd->CopyBufferRegion(c.resource(mask), 0, maskUpload.Get(), 0, 8);
                       });
         DepthRasterRequest pk;
         pk.name = "test.kernel";
@@ -747,9 +772,7 @@ UNX_TEST(raster_service)
                               c.computeConstants(k, 4);
                               c.cmd->Dispatch(size / 8, size / 8, 1);
                           }
-                          D3D12_WRITEBUFFERIMMEDIATE_PARAMETER words[2];
-                          for (uint32_t w = 0; w < 2; ++w) words[w] = { c.address(sparseMask) + 4 * w, sparseWords[w] };
-                          c.cmd->WriteBufferImmediate(2, words, nullptr);
+                          c.cmd->CopyBufferRegion(c.resource(sparseMask), 0, maskUpload.Get(), 8, 8);
                       });
         for (uint32_t k = 0; k < 2; ++k)
         {
@@ -1007,6 +1030,9 @@ UNX_TEST(raster_service_tile_atlas)
             ++set;
         }
     CHECK(set == 30);
+    std::vector<uint32_t> maskAndSlots{ words[0], words[1] };
+    maskAndSlots.insert(maskAndSlots.end(), slotOf.begin(), slotOf.end());
+    const auto maskUpload = uploadWords(maskAndSlots);
     const uint32_t atlasW = perRow * tilePx, atlasH = (slotCount + perRow - 1) / perRow * tilePx;
 
     ComPtr<ID3D12Resource> rbRef = readbackBuffer((uint64_t)rowPitch(size) * size), rb32 = readbackBuffer((uint64_t)rowPitch(atlasW) * atlasH),
@@ -1040,10 +1066,8 @@ UNX_TEST(raster_service_tile_atlas)
                       },
                       [=](PassContext& c) {
                           for (TextureRef t : { ref, atlas32, atlas16 }) c.cmd->ClearDepthStencilView(c.dsv(t), D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
-                          D3D12_WRITEBUFFERIMMEDIATE_PARAMETER w[2 + 64];
-                          for (uint32_t i = 0; i < 2; ++i) w[i] = { c.address(mask) + 4 * i, words[i] };
-                          for (uint32_t i = 0; i < 64; ++i) w[2 + i] = { c.address(slots) + 4 * i, slotOf[i] };
-                          c.cmd->WriteBufferImmediate(66, w, nullptr);
+                          c.cmd->CopyBufferRegion(c.resource(mask), 0, maskUpload.Get(), 0, 8);
+                          c.cmd->CopyBufferRegion(c.resource(slots), 0, maskUpload.Get(), 8, 64 * 4);
                       });
         DepthRasterRequest local;
         local.name = "test.atlas.local";
