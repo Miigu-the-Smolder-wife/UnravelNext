@@ -51,9 +51,16 @@ constexpr uint32_t kInlineDescOffset = kLocalDescOffset + kDescStride;  // jobs 
 constexpr uint32_t kPenumbraArgsOffset = kInlineDescOffset + 4 * kDescStride;  // ReflectionPenumbra Dispatch arguments
 constexpr uint32_t kArgumentsBytes = kPenumbraArgsOffset + 16;
 const char* const kTraceLibrary[2] = { "Passes/Reflection/ReflectionTrace.SKY0", "Passes/Reflection/ReflectionTrace.SKY1" };
-const char* const kInlineLibrary[2][2] = { { "Passes/Reflection/ReflectionTraceInline.SKY0.JOB1", "Passes/Reflection/ReflectionTraceInline.SKY0.JOB2" },
-                                           { "Passes/Reflection/ReflectionTraceInline.SKY1.JOB1", "Passes/Reflection/ReflectionTraceInline.SKY1.JOB2" } };
-const char* const kShadeKernel[2] = { "Passes/Reflection/ReflectionShadeRays.SKY0", "Passes/Reflection/ReflectionShadeRays.SKY1" };
+const char* const kInlineLibrary[2][2][2] = {
+    { { "Passes/Reflection/ReflectionTraceInline.SKY0.JOB1.CORNERS0", "Passes/Reflection/ReflectionTraceInline.SKY0.JOB1.CORNERS1" },
+      { "Passes/Reflection/ReflectionTraceInline.SKY0.JOB2.CORNERS0", "Passes/Reflection/ReflectionTraceInline.SKY0.JOB2.CORNERS1" } },
+    { { "Passes/Reflection/ReflectionTraceInline.SKY1.JOB1.CORNERS0", "Passes/Reflection/ReflectionTraceInline.SKY1.JOB1.CORNERS1" },
+      { "Passes/Reflection/ReflectionTraceInline.SKY1.JOB2.CORNERS0", "Passes/Reflection/ReflectionTraceInline.SKY1.JOB2.CORNERS1" } }
+};
+const char* const kShadeKernel[2][2] = {
+    { "Passes/Reflection/ReflectionShadeRays.SKY0.CORNERS0", "Passes/Reflection/ReflectionShadeRays.SKY0.CORNERS1" },
+    { "Passes/Reflection/ReflectionShadeRays.SKY1.CORNERS0", "Passes/Reflection/ReflectionShadeRays.SKY1.CORNERS1" }
+};
 const char* const kRefractLibrary[2] = { "Passes/Reflection/RefractionTrace.SKY0", "Passes/Reflection/RefractionTrace.SKY1" };
 constexpr const char* kShadowLibrary = "Passes/Reflection/ReflectionShadow";
 constexpr const char* kLocalShadowLibrary = "Passes/Reflection/ReflectionLocalShadow";
@@ -74,6 +81,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     if (s.planarViewsMax > kPlanarMax) fail("reflection.planar_views_max must be <= %u", kPlanarMax);
     s.planarViewFixedMs = (float)q.number("reflection.planar_view_fixed_ms");
     s.experimentDisable = (uint32_t)q.integer("reflection.experiment_disable");
+    s.batchGiCorners = q.has("reflection.batch_gi_corners") && q.boolean("reflection.batch_gi_corners");
     s.statsLogFrames = (uint32_t)q.integer("reflection.stats_log_frames");
     s.planarViewNsPerPixel = (float)q.number("reflection.planar_view_ns_per_px");
     s.temporalHistoryMax = (uint32_t)q.integer("reflection.temporal_history_max");
@@ -133,7 +141,7 @@ ReflectionSystem::ReflectionSystem(Device& device, ShaderLibrary& shaders, const
     for (int v = 0; v < 4; ++v)
     {
         const D3D12_DISPATCH_RAYS_DESC desc =
-            rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kInlineLibrary[v / 2][v % 2], { "ReflectionTraceInlineGen" })).dispatchDesc(0, 0, 1, 1);
+            rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kInlineLibrary[v / 2][v % 2][m_settings.batchGiCorners], { "ReflectionTraceInlineGen" })).dispatchDesc(0, 0, 1, 1);
         std::memcpy(image + kInlineDescOffset + v * kDescStride, &desc, sizeof desc);
     }
     {
@@ -1007,7 +1015,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     for (uint32_t mode = 0; mode < 2; ++mode)
     {
         rt::RayPipeline& inlinePipeline =
-            rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(kInlineLibrary[variant][mode], { "ReflectionTraceInlineGen" }));
+            rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(kInlineLibrary[variant][mode][s.batchGiCorners], { "ReflectionTraceInlineGen" }));
         g.addPass(mode == 0 ? "r.refl.inline.m" : "r.refl.inline.g", QueueType::Compute,
                   [&](PassBuilder& b) {
                       b.use(args, Use::IndirectArgs);
@@ -1027,10 +1035,10 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   b.use(args, Use::IndirectArgs);
                   declareShared(b);
               },
-              [&shaders, constantsFor, frameConstants, argumentResource, variant, dispatchSignature](PassContext& c) {
+              [&shaders, constantsFor, frameConstants, argumentResource, variant, dispatchSignature, batchCorners = s.batchGiCorners](PassContext& c) {
                   uint32_t k[32] = {};
                   constantsFor(c, k);
-                  c.cmd->SetPipelineState(shaders.compute(kShadeKernel[variant]));
+                  c.cmd->SetPipelineState(shaders.compute(kShadeKernel[variant][batchCorners]));
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->ExecuteIndirect(dispatchSignature, 1, argumentResource, kShadeArgsOffset, nullptr, 0);

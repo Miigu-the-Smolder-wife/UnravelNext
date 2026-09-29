@@ -340,10 +340,29 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
     float3 hiddenE = 0, hiddenL = 0;  // the corners the visibility test left out (added when it left out all of them)
     float hiddenW = 0, seenW = 0;
     bool young = false;  // a corner with data not yet converged (giVisJudged): the level is read without the test
+#if GI_BATCH_CORNERS
+    // Preload only the eight entry IDs: no maps/anchors kept live across the
+    // lookup walk. Fixed vectors avoid a dynamically indexed local array.
+    uint4 cornersLo = GI_ENTRY_PENDING, cornersHi = GI_ENTRY_PENDING;
     [loop] for (uint k = 0; k < 8; ++k)
     {
         const int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
         const uint entry = giFind(b, h, giKey(level, nc, c0 + o));
+        if (k < 4) cornersLo = uint4(k == 0 ? entry : cornersLo.x, k == 1 ? entry : cornersLo.y,
+                                    k == 2 ? entry : cornersLo.z, k == 3 ? entry : cornersLo.w);
+        else cornersHi = uint4(k == 4 ? entry : cornersHi.x, k == 5 ? entry : cornersHi.y,
+                               k == 6 ? entry : cornersHi.z, k == 7 ? entry : cornersHi.w);
+    }
+#endif
+    [loop] for (uint k = 0; k < 8; ++k)
+    {
+        const int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
+#if GI_BATCH_CORNERS
+        const uint4 ids = k < 4 ? cornersLo : cornersHi;
+        const uint entry = (k & 2) ? ((k & 1) ? ids.w : ids.z) : ((k & 1) ? ids.y : ids.x);
+#else
+        const uint entry = giFind(b, h, giKey(level, nc, c0 + o));
+#endif
         if (entry == GI_ENTRY_PENDING) continue;
         const uint updates = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES);
         if (updates == 0) continue;  // no information yet

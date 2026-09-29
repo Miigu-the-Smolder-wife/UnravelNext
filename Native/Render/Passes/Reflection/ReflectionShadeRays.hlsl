@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: SKY=0,1
+// unx-variants: SKY=0,1 CORNERS=0,1
 // Hit shading of this frame's reflection rays in compute (ARCHITECTURE 2.6 revision 1), one thread per ray slot of the
 // rays buffer (ReflectionRay.hlsli), dispatched indirectly for the slots allocated. Replays the job's direction, shades
 // the hit (ReflectionShade.hlsli: surface, material, GI cache, S's VSM for the sun) or the sky, and stores the value; a
@@ -7,6 +7,7 @@
 // a region that needs the penumbra filter keeps it apart too and queues the filter (ReflectionPenumbra: the same
 // estimator in dense waves). Root constants: ReflectionRay.hlsli.
 #define REFL_DEFER_PENUMBRA 1
+#define GI_BATCH_CORNERS CORNERS
 #define REFL_CHOICE_GIVEN 1  // the local light chosen by ReflectionLocalShadow (its value words)
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionShade.hlsli"

@@ -33,6 +33,7 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     float planarViewFixedMs = 0;     // prior fixed cost of a reflection view (a)
     float planarViewNsPerPixel = 0;  // prior cost per mirror pixel of a view (b)
     uint32_t experimentDisable = 0;  // cost attribution only (ReflectionHit.hlsli); 0 in the shipped configuration
+    bool batchGiCorners = false;    // compile variant; OFF has no extra live IDs/registers
     uint32_t statsLogFrames = 0;     // reflection.stats_log_frames: log the GI/reflection counters every N frames (0 = off)
     uint32_t temporalHistoryMax = 0; // reflection.temporal_history_max: running mean over at most this many frames
     float temporalLobeShift = 0;     // reflection.temporal_lobe_shift: reflected-direction travel over the window / lobe

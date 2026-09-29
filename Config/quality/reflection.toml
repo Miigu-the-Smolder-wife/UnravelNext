@@ -1,5 +1,6 @@
 # Owner: R. ARCHITECTURE 2.6.
 [reflection]
+batch_gi_corners = false # A/B only until register/occupancy and deterministic bit checks pass
 cache_lobe_half_angle_min_deg = 22.0   # K path when the (narrowed) lobe is at least this wide
 g_rays_per_sample = 4
 g_sample_spacing_px = [1, 16]

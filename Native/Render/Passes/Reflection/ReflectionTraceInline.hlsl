@@ -1,5 +1,5 @@
 // unx-kernel: lib_6_6 main
-// unx-variants: SKY=0,1 JOB=1,2
+// unx-variants: SKY=0,1 JOB=1,2 CORNERS=0,1
 // The reflection jobs whose rays did not fit this frame's rays buffer (ReflectionTrace marked them REFL_JOB_INLINE):
 // traced, shaded and combined in the ray generation shader, one thread per job of the frame (dispatched indirectly with
 // the job count; other jobs return at once). JOB = the job mode this library handles (1 REFL_M, 2 REFL_G; a compile
@@ -7,6 +7,7 @@
 // Root constants: ReflectionRay.hlsli.
 #define SHADOW_RESIDENCY_LOOP 1  // (the overflow path is at the DXIL limit: ShadowVisibility.hlsli's loop form)
 #define REFL_OVERFLOW 1  // use the same stored attributes/values as the split passes
+#define GI_BATCH_CORNERS CORNERS
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionHit.hlsli"
