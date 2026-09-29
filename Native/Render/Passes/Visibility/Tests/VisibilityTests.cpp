@@ -456,6 +456,39 @@ UNX_TEST(vis_id_decodes_to_the_covering_triangle)
     CHECK(checked > 100000);
 }
 
+UNX_TEST(depth_ties_choose_stable_primitive)
+{
+    scene::Scene scene = makeScene();
+    const auto originals = scene.instances;
+    scene.instances.insert(scene.instances.end(), originals.begin(), originals.end());
+    const auto cams = movingCameras(3);
+    const auto q = quality({ "debug.deterministic = true", "visibility.occlusion_culling = false" });
+    const auto a = renderRun(scene, q, cams, 320, 180);
+    const auto b = renderRun(scene, q, cams, 320, 180);
+    size_t checked = 0;
+    for (size_t frame = 0; frame < a.frames.size(); ++frame)
+    {
+        const auto& x = a.frames[frame];
+        const auto& y = b.frames[frame];
+        CHECK(std::memcmp(x.depth.data(), y.depth.data(), x.depth.size() * sizeof(float)) == 0);
+        for (size_t pixel = 0; pixel < x.visId.size(); ++pixel)
+        {
+            const uint32_t ix = x.visId[pixel], iy = y.visId[pixel];
+            if (ix == kVisNone) { CHECK(iy == kVisNone); continue; }
+            CHECK(iy != kVisNone);
+            const uint32_t ex = (ix - 1) >> 7, ey = (iy - 1) >> 7;
+            // Every original has an exactly coincident copy with a larger id.
+            CHECK(x.visible[ex * 2] < originals.size());
+            CHECK(x.visible[ex * 2] == y.visible[ey * 2]);
+            CHECK(x.visible[ex * 2 + 1] == y.visible[ey * 2 + 1]);
+            CHECK(((ix - 1) & 127) == ((iy - 1) & 127));
+            ++checked;
+        }
+    }
+    CHECK(checked > 100);
+    CHECK(device().drainDebugMessages() == 0);
+}
+
 UNX_TEST(lod_cut_has_no_holes)
 {
     const scene::Scene s = makeScene();

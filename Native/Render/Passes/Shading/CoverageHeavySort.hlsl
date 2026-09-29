@@ -5,7 +5,7 @@
 // to the pair buffer at the records' elements; the run's cursor starts at its first pair. The group's work is one run of
 // COV_BLOCK records whatever the pixel holds.
 // P[0] = { state (raw), heavy records (raw), pairs UAV (raw, 2 words per record of V's pool), run cursors UAV (raw) },
-// P[1] = { heavy capacity, V's records (StructuredBuffer<uint4>), 0, 0 }
+// P[1] = { heavy capacity, V's records (StructuredBuffer<uint4>), visible clusters, 0 }
 #include "Bindless.hlsli"
 #include "Passes/Shading/CoverageShade.hlsli"
 
@@ -39,7 +39,7 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
                 const uint i = (t / stride) * 2 * stride + t % stride, j = i + stride;
                 const bool up = (i & size) == 0;
                 const uint2 a = gs_run[i], b = gs_run[j];
-                if (up ? covBefore(b, a) : covBefore(a, b))
+                if (up ? covBefore(b, a, records, P[1].z) : covBefore(a, b, records, P[1].z))
                 {
                     gs_run[i] = b;
                     gs_run[j] = a;

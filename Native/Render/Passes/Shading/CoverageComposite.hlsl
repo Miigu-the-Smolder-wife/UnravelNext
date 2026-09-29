@@ -81,7 +81,7 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
                 const uint j = k ^ stride;
                 if (j <= k) continue;
                 const bool up = (k & size) == 0;
-                if (up ? covBefore(a[j], a[k]) : covBefore(a[k], a[j]))
+                if (up ? covBefore(a[j], a[k], records, P[1].x) : covBefore(a[k], a[j], records, P[1].x))
                 {
                     const uint2 t = a[k];
                     a[k] = a[j];

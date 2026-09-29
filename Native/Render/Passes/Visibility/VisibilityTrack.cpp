@@ -1035,6 +1035,71 @@ void rasterPass(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
                      });
 }
 
+// Deterministic mode's immutable-depth replay: choose the lowest stable
+// (instance, cluster, triangle), then publish its transient visibility id.
+void resolveDepthTies(FramePassContext& fc, State& s, const Run& r, const ViewResources& view,
+                      TextureRef depth, TextureRef vis, uint32_t firstList, uint32_t endList)
+{
+    if (!fc.quality.has("debug.deterministic") || !fc.quality.boolean("debug.deterministic")) return;
+    const uint32_t width = view.view.width, height = view.view.height;
+    RenderGraph& graph = fc.graph;
+    ShaderLibrary& shaders = fc.shaders;
+    const auto winners = graph.createBuffer({ "v.depth tie winners", (uint64_t)width * height * 8, 0 });
+    const auto args = graph.createBuffer({ "v.depth tie arguments", kLists * 12ull, 0 });
+    const Run run = r;
+    graph.addPass("v.depth tie init", QueueType::Compute,
+                  [&](PassBuilder& b) { b.use(winners, Use::UavCompute); b.use(args, Use::UavCompute); b.use(run.state, Use::SrvCompute); },
+                  [=, &shaders](PassContext& c) {
+                      const uint32_t k[8] = { c.uav(winners), c.uav(args), c.srv(run.state), run.cfg.capVisible, width, height, 0, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/Visibility/DepthTieInit")); c.computeConstants(k, 8);
+                      c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  });
+    ID3D12CommandSignature* signature = s.meshSignature.Get();
+    const auto frameConstants = view.frameConstants;
+    for (uint32_t mode = 0; mode < 2; ++mode)
+    {
+        std::vector<ID3D12PipelineState*> pipelines;
+        for (uint32_t list = firstList; list < endList; ++list)
+        {
+            const bool alpha = list == kListAAlphaBack || list == kListAAlphaNone || list >= kListTBack;
+            const bool back = list == kListABack || list == kListAAlphaBack || list == kListTBack;
+            MeshPipelineDesc d;
+            d.meshShader = alpha ? "Passes/Visibility/VisRaster.ms.ALPHA1" : "Passes/Visibility/VisRaster.ms.ALPHA0";
+            d.pixelShader = "Passes/Visibility/DepthTie.ps.MODE" + std::to_string(mode) + ".ALPHA" + (alpha ? "1" : "0");
+            if (mode == 1) d.renderTargets = { DXGI_FORMAT_R32_UINT };
+            d.depthWrite = false;
+            d.cull = back ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+            d.frontCounterClockwise = !view.view.mirrored;
+            pipelines.push_back(shaders.mesh("v.tie|" + d.pixelShader + (back ? "|back" : "|none") +
+                                             (view.view.mirrored ? "|mirrored" : ""), d));
+        }
+        graph.addPass(mode == 0 ? "v.depth tie select" : "v.depth tie publish", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(winners, mode == 0 ? Use::UavGraphics : Use::SrvGraphics);
+                          b.use(vis, mode == 0 ? Use::SrvGraphics : Use::RenderTarget);
+                          b.use(depth, Use::SrvGraphics); b.use(args, Use::IndirectArgs);
+                          b.use(run.visible, Use::SrvGraphics); b.use(run.lists, Use::SrvGraphics); b.use(run.state, Use::SrvGraphics);
+                      },
+                      [=](PassContext& c) {
+                          const D3D12_VIEWPORT viewport{ 0, 0, (float)width, (float)height, 0, 1 };
+                          const D3D12_RECT scissor{ 0, 0, (LONG)width, (LONG)height };
+                          c.cmd->RSSetViewports(1, &viewport); c.cmd->RSSetScissorRects(1, &scissor);
+                          if (mode == 1) { const auto target = c.rtv(vis); c.cmd->OMSetRenderTargets(1, &target, FALSE, nullptr); }
+                          else c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+                          c.bindFrameConstants(frameConstants);
+                          for (uint32_t list = firstList; list < endList; ++list)
+                          {
+                              const uint32_t k[16] = { c.srv(run.visible), c.srv(run.lists), c.srv(run.state), list,
+                                  1, run.cfg.capVisible, run.viewsSrv, 0,
+                                  mode == 0 ? c.uav(winners) : c.srv(winners), c.srv(depth), width, 0,
+                                  mode == 0 ? c.srv(vis) : kNone, 0, 0, 0 };
+                              c.cmd->SetPipelineState(pipelines[list - firstList]); c.graphicsConstants(k, 16);
+                              c.cmd->ExecuteIndirect(signature, 1, c.resource(args), list * 12ull, nullptr, 0);
+                          }
+                      });
+    }
+}
+
 // HiZ from the depth buffer: five levels per pass (HiZ.hlsl), each pass after the previous one's writes.
 void hizPasses(FramePassContext& fc, const Hiz& h, TextureRef hizRef, TextureRef depth, uint32_t width, uint32_t height, const std::string& tag)
 {
@@ -1611,6 +1676,7 @@ void visibility(FramePassContext& fc, ViewResources& view)
     rasterPass(fc, s, r, view, 1);
     if (!vs)
     {
+        resolveDepthTies(fc, s, r, view, view.depth, view.visId, 0, kAListCount);
         recordStats(fc, s, r, statsName);  // the frame's last planar reflection view (R's planar reflection costs)
         return;
     }
@@ -1621,6 +1687,7 @@ void visibility(FramePassContext& fc, ViewResources& view)
         rasterPass(fc, s, r, view, 2);
         hizPasses(fc, vs->hiz, r.hiz, view.depth, width, height, "final");
     }
+    resolveDepthTies(fc, s, r, view, view.depth, view.visId, 0, kAListCount);
     waterLayer(fc, s, r, view);
     if (r.bandMode != kBandModeA) translucentLayer(fc, s, r, view);
     if (r.bandMode != kBandModeA) coveragePasses(fc, s, r, view);
@@ -1736,6 +1803,7 @@ void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResource
                   const uint32_t extra[1] = { kNone };
                   draw(c, 1, extra);
               });
+    resolveDepthTies(fc, s, r, view, depth, vis, kListTBack, kListTNone + 1);
     ID3D12PipelineState* classPso = fc.shaders.compute("Passes/Visibility/TranslucentClass.MODE1");
     g.addPass("v.translucent.class", QueueType::Graphics,
               [&](PassBuilder& b) {

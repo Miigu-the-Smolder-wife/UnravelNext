@@ -1038,10 +1038,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                       b.use(pairs, Use::UavCompute);
                       b.use(cursors, Use::UavCompute);
                       b.use(v.coverageRecords, Use::SrvCompute);
+                      b.use(v.visibleClusters, Use::SrvCompute);
                       b.use(args, Use::IndirectArgs);
                   },
                   [=](PassContext& c) {
-                      const uint32_t p[8] = { c.srv(state), c.srv(heavy), c.uav(pairs), c.uav(cursors), hcap, c.srv(v.coverageRecords), 0, 0 };
+                      const uint32_t p[8] = { c.srv(state), c.srv(heavy), c.uav(pairs), c.uav(cursors), hcap, c.srv(v.coverageRecords), c.srv(v.visibleClusters), 0 };
                       c.cmd->SetPipelineState(sort);
                       c.computeConstants(p, 8);
                       c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 16, nullptr, 0);

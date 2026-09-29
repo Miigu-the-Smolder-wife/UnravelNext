@@ -66,14 +66,20 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
             const uint cursor = cursors.Load(4 * (rec1.x + run)), end = rec0.y + min((run + 1) * COV_BLOCK, rec0.z);
             if (cursor >= end) continue;
             const uint2 key = pairs.Load2(8 * cursor);
-            if (covBefore(key, best))
+            if (covBefore(key, best, records, P[1].x))
             {
                 best = key;
                 bestRun = run;
             }
         }
-        const uint depth = WaveActiveMax(best.x);
-        const uint element = WaveActiveMin(best.x == depth ? best.y : 0xFFFFFFFFu);
+        uint2 winner = best;
+        [unroll] for (uint step = 1; step < COV_ROUND; step *= 2)
+        {
+            const uint otherLane = WaveGetLaneIndex() ^ step;
+            const uint2 other = uint2(WaveReadLaneAt(winner.x, otherLane), WaveReadLaneAt(winner.y, otherLane));
+            if (covBefore(other, winner, records, P[1].x)) winner = other;
+        }
+        const uint depth = winner.x, element = winner.y;
         if ((depth == 0 && element == 0xFFFFFFFFu) || depth < bandA)
         {
             exhausted = true;  // no fragment left in front of the band A surface

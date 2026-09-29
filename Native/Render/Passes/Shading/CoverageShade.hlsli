@@ -47,6 +47,7 @@
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/Visibility/Coverage.hlsli"
 #include "Passes/Visibility/CoverageTiles.hlsli"
+#include "PrimitiveOrder.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
 #define GI_PROBE_TILE_CACHE
 #include "Passes/GI/ScreenProbes.hlsli"
@@ -113,8 +114,24 @@ uint4 covProbeFetch(uint2 tileCoord, uint lane)
     return giProbeTileFetch(probes, tileCoord, lane, giProbeCountOfView());
 }
 
-// Order key of a fragment: nearer first (reversed-Z depth, see-through bit dropped), then pool element. a before b.
-bool covBefore(uint2 a, uint2 b) { return a.x > b.x || (a.x == b.x && a.y < b.y); }
+// Nearer first; at equal depth use stable geometry, then the fragment payload.
+// Only byte-identical fragments may fall back to their temporary pool element.
+bool covBefore(uint2 a, uint2 b, StructuredBuffer<uint4> records, uint visibleSrv)
+{
+    if (a.x != b.x) return a.x > b.x;
+    if (a.y == b.y) return false;
+    if (a.y == 0xFFFFFFFFu || b.y == 0xFFFFFFFFu) return a.y < b.y;
+    const uint4 ra = records[a.y], rb = records[b.y];
+    const uint ka = ra.x >> 30, kb = rb.x >> 30;
+    if (ka != kb) return ka < kb;
+    const uint64_t ia = ka < 2 ? primitiveOrder(visibleSrv, coverageClusterVisId(ra.x)) : (uint64_t)ra.x;
+    const uint64_t ib = kb < 2 ? primitiveOrder(visibleSrv, coverageClusterVisId(rb.x)) : (uint64_t)rb.x;
+    if (ia != ib) return ia < ib;
+    if (ra.y != rb.y) return ra.y < rb.y;
+    if (ra.z != rb.z) return ra.z < rb.z;
+    if (ra.w != rb.w) return ra.w < rb.w;
+    return a.y < b.y;
+}
 uint2 covKey(StructuredBuffer<uint4> records, uint element) { return uint2(records[element].y & ~COV_DEPTH_SEE_THROUGH, element); }
 static const uint2 COV_KEY_AFTER_ALL = uint2(0, 0xFFFFFFFFu);  // after every key (a record's element is below it)
 
