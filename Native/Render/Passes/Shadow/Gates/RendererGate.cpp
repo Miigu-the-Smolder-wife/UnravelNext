@@ -17,7 +17,8 @@
 // every run; the default with --capture / --capture-output / --luminance-log is 300 (the time-based warm-up ended at a
 // different frame each run and in each configuration: every temporal state differed at the captured frame).
 // --luminance-log FILE.csv: per frame (warm-up included) the mean luminance of the gate output (GateLuminance.hlsl:
-// display-encoded unorm, or L / (1 + L) of a linear capture), "frame,mean" - the brightness of a still scene over the run.
+// exposed-linear source before display encoding), "frame,mean_linear_exposed,invalid_pixels".
+// The logger reads the upscale output when active; native runs request linear output. GI split history stays opt-in.
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h") && defined(UNX_HAS_SCENEGEN)
 #define S_RENDERER_GATE 1
 #include "unx/clusterbuilder/ClusterBuilder.h"
@@ -278,11 +279,11 @@ int main(int argc, char** argv)
             if (warmupSeconds >= 0) options.warmupSeconds = warmupSeconds;
             if (warmupFrames >= 0) options.warmupFrames = (uint32_t)warmupFrames;
             else if (!capturePath.empty() || !luminancePath.empty()) options.warmupFrames = 300;
-            // --luminance-log: one uint64 sum per frame (GateLuminance.hlsl), read back after the run.
+            // --luminance-log: uint64 fixed-point sum + invalid count per frame, read back after the run.
             constexpr uint32_t kLuminanceSlots = 1u << 15;
             ComPtr<ID3D12Resource> luminanceSums;
             uint64_t lastFrame = 0;
-            if (!luminancePath.empty()) luminanceSums = s_detail::createBuffer(device, L"gate luminance sums", (uint64_t)kLuminanceSlots * 8);
+            if (!luminancePath.empty()) luminanceSums = s_detail::createBuffer(device, L"gate luminance sums", (uint64_t)kLuminanceSlots * 16);
             options.label = "S " + sceneName + (moving ? " moving " : " static ") + (sunDegPerS != 0 ? "sun " + std::to_string(sunDegPerS) + " deg/s " : "") + (gustPeriodS > 0 ? "gusts " : "") + rs;
             if (!out.empty()) options.outputDirectory = out;
             float4x4 prev = ViewDesc::fromCamera(cameraAt(s, moving, 0, cameraName), res.width, res.height, {}).viewProj;
@@ -356,6 +357,16 @@ int main(int argc, char** argv)
                 }
                 prev = fc.mainView.viewProj;
                 fc.outputLinearHdr = !capturePath.empty() && !captureUpscaled;
+                if (luminanceSums && !fc.outputLinearHdr)
+                {
+                    // Match setupUpscale's resolution decision, preserving the actual upscale path.
+                    const double scale = quality.number("output.render_scale");
+                    uint32_t height = (int64_t)rr.height < quality.integer("output.render_scale_min_height") ? rr.height :
+                        std::max(8u, (uint32_t)std::lround(rr.height * scale));
+                    const int64_t cap = quality.integer("output.render_height_max");
+                    if (cap > 0) height = std::min(height, (uint32_t)cap);
+                    if (cap < 0 || height >= rr.height) fc.outputLinearHdr = true;
+                }
                 fc.celestial = celestial;
                 fc.autoExposure = autoExposure;
                 captureEv100 = fc.mainView.ev100;
@@ -367,17 +378,20 @@ int main(int argc, char** argv)
                 lastFrame = frame;
                 if (luminanceSums)
                 {
-                    const BufferRef sums = g.importBuffer(luminanceSums.Get(), { "gate luminance sums", (uint64_t)kLuminanceSlots * 8, 0 });
-                    const uint32_t slot = (uint32_t)(frame % kLuminanceSlots), w = rr.width, h = rr.height, linear = fc.outputLinearHdr ? 1u : 0u;
+                    const BufferRef sums = g.importBuffer(luminanceSums.Get(), { "gate luminance sums", (uint64_t)kLuminanceSlots * 16, 0 });
+                    const TextureRef source = rendered.upscaled.valid() ? rendered.upscaled : output;
+                    if (!rendered.upscaled.valid() && !fc.outputLinearHdr) fail("luminance log requires a linear colour source");
+                    const uint32_t slot = (uint32_t)(frame % kLuminanceSlots), w = rr.width, h = rr.height;
+                    if ((uint64_t)w * h > (1ull << 24)) fail("luminance log exceeds its fixed-point pixel bound");
                     for (const uint32_t clear : { 1u, 0u })
                         g.addPass(clear ? "s.gate.luminance.clear" : "s.gate.luminance", QueueType::Compute,
                                   [&](PassBuilder& b) {
-                                      if (!clear) b.use(output, Use::SrvCompute);
+                                      if (!clear) b.use(source, Use::SrvCompute);
                                       b.use(sums, Use::UavCompute);
                                       b.keep();
                                   },
-                                  [&shaders, output, sums, slot, w, h, linear, clear](PassContext& c) {
-                                      const uint32_t k[8] = { clear ? 0xFFFFFFFFu : c.srv(output), c.uav(sums), slot, w, h, linear, clear, 0 };
+                                  [&shaders, source, sums, slot, w, h, clear](PassContext& c) {
+                                      const uint32_t k[8] = { clear ? 0xFFFFFFFFu : c.srv(source), c.uav(sums), slot, w, h, 0, clear, 0 };
                                       c.cmd->SetPipelineState(shaders.compute("Passes/Shadow/Gates/GateLuminance"));
                                       c.computeConstants(k, 8);
                                       c.cmd->Dispatch(clear ? 1 : (w + 7) / 8, clear ? 1 : (h + 7) / 8, 1);
@@ -449,7 +463,7 @@ int main(int argc, char** argv)
             if (luminanceSums)
             {
                 // The harness waited for the GPU at its end: copy the sums out and write one line per rendered frame.
-                const uint64_t bytes = (uint64_t)kLuminanceSlots * 8;
+                const uint64_t bytes = (uint64_t)kLuminanceSlots * 16;
                 ComPtr<ID3D12Resource> rb = s_detail::createBuffer(device, L"gate luminance readback", bytes, D3D12_HEAP_TYPE_READBACK);
                 CommandList cl = device.acquireCommandList(QueueType::Graphics);
                 D3D12_BUFFER_BARRIER bb{ D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, D3D12_BARRIER_ACCESS_COPY_SOURCE,
@@ -464,10 +478,14 @@ int main(int argc, char** argv)
                 const uint64_t* sums = static_cast<const uint64_t*>(mapped);
                 std::ofstream file(luminancePath);
                 if (!file) fail("cannot write %s", luminancePath.c_str());
-                file << "frame,mean\n";
+                file << "frame,mean_linear_exposed,invalid_pixels\n";
                 const uint64_t first = lastFrame + 1 > kLuminanceSlots ? lastFrame + 1 - kLuminanceSlots : 0;
                 for (uint64_t f = first; f <= lastFrame; ++f)
-                    file << f << "," << format("%.7f", (double)sums[f % kLuminanceSlots] / (1023.0 * res.width * res.height)) << "\n";
+                {
+                    const uint64_t slot = f % kLuminanceSlots;
+                    const uint32_t invalid = (uint32_t)sums[slot * 2 + 1];
+                    file << f << "," << format("%.9f", (double)sums[slot * 2] / (4096.0 * res.width * res.height)) << "," << invalid << "\n";
+                }
                 D3D12_RANGE none{ 0, 0 };
                 rb->Unmap(0, &none);
                 logf("luminance of frames %llu..%llu -> %s\n", (unsigned long long)first, (unsigned long long)lastFrame, luminancePath.c_str());
