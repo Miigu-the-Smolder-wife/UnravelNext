@@ -1,6 +1,6 @@
 // Reflection rays of a job and their records (R-internal): the per-job setup and direction sequence shared by the trace
 // (DispatchRays: traversal), shade (compute: hit shading) and combine (compute: the job's value) passes, which replay the
-// same seeded VNDF draws instead of storing directions; and the layout of the rays buffer.
+// same seeded VNDF draws from each ray's saved starting seed; and the layout of the rays buffer.
 //
 // Root constants, the same in every pass: P[0] = { jobs SRV, results UAV (uint3 per job), mode SRV, probes SRV },
 // P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli), ray length in P[1].w, P[3].w = view.screenProbeMaps SRV,
@@ -18,7 +18,8 @@
 //                  term b | valid << 16 } (fp16, radiance and sun term x REFL_STORE_SCALE)
 //   sun queue      uint4 at 32 + capacity x 40 + index x 16: shadow rays from index 0 up { origin xyz, slot }, penumbra
 //                  hits from index capacity - 1 down { hit point xyz, slot | filter level << 24 } (ReflectionShadeRays; a
-//                  slot queues at most one of the two, so both fit)  (56 B per slot in all)
+//                  slot queues at most one of the two, so both fit)
+//   VNDF seed      uint at 32 + capacity x 56 + slot x 4: before this ray's first attempt (60 B per slot in all)
 // A job whose rays do not fit (header capacity) is traced and shaded inline by the trace pass (ReflectionHit.hlsli) and
 // its result written there; results[job] = { first slot, REFL_JOB_SPLIT } marks the split jobs for the combine pass.
 #ifndef UNX_REFLECTION_RAY_HLSLI
@@ -41,7 +42,8 @@ uint reflRaysBaryOffset(uint capacity, uint slot) { return REFL_RAYS_HEADER + ca
 uint reflRaysJobOffset(uint capacity, uint slot) { return REFL_RAYS_HEADER + capacity * 20 + slot * 4; }
 uint reflRaysValueOffset(uint capacity, uint slot) { return REFL_RAYS_HEADER + capacity * 24 + slot * 16; }
 uint reflRaysShadowOffset(uint capacity, uint index) { return REFL_RAYS_HEADER + capacity * 40 + index * 16; }
-#define REFL_RAYS_SLOT_BYTES 56u
+uint reflRaysSeedOffset(uint capacity, uint slot) { return REFL_RAYS_HEADER + capacity * 56 + slot * 4; }
+#define REFL_RAYS_SLOT_BYTES 60u
 // Penumbra hit i (0 = the first queued) in the sun queue, from its top.
 uint reflRaysPenumbraOffset(uint capacity, uint i) { return reflRaysShadowOffset(capacity, capacity - 1 - i); }
 
@@ -98,14 +100,12 @@ bool reflNextDirection(ReflJob j, inout uint seed, out float3 dir)
     return false;
 }
 
-// The direction of ray 'index' (replaying the draws of the rays before it).
-bool reflRayDirection(ReflJob j, uint index, out float3 dir)
+// One ray's original rejection sequence, at most eight draws regardless of its
+// index. The trace stores the pre-draw seed even when all attempts are masked.
+bool reflStoredDirection(ReflJob j, RWByteAddressBuffer rays, uint capacity, uint slot, out float3 dir)
 {
-    uint seed = j.seed;
-    bool found = false;
-    dir = 0;
-    [loop] for (uint i = 0; i <= index; ++i) found = reflNextDirection(j, seed, dir);
-    return found;
+    uint seed = rays.Load(reflRaysSeedOffset(capacity, slot));
+    return reflNextDirection(j, seed, dir);
 }
 
 // The control variate's lobe integral for a G job: the mean of g (the screen-probe cache at texel resolution, the same

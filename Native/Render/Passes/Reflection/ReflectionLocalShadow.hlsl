@@ -22,7 +22,7 @@ void ReflectionLocalShadowGen()
     const uint owner = rays.Load(reflRaysJobOffset(capacity, slot));
     const ReflJob j = reflLoadJob(owner & 0x0FFFFFFFu);
     float3 dir;
-    reflRayDirection(j, owner >> 28, dir);
+    reflStoredDirection(j, rays, capacity, slot, dir);
     RtHit hit;
     hit.t = asfloat(record.w);
     hit.instance = record.x & 0x00FFFFFFu;

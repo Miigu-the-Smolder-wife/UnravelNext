@@ -21,7 +21,6 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     float probeSpacing;
     int2 probeCount;
     const GiProbeFootprint footprint = giProbeFootprint(probeTexture, j.pixel, j.s.normal, j.s.linearDepth, probeSpacing, probeCount);
-    uint seed = j.seed;
     float3 sumL = 0, sumG = 0;
     float nearest = 65000;  // the lobe's nearest hit (ReflectionClassify's blur: the sharpest content the lobe sees)
     uint valid = 0;
@@ -29,7 +28,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     [loop] for (uint i = 0; i < j.rays; ++i)
     {
         float3 dir;
-        if (!reflNextDirection(j, seed, dir)) continue;
+        if (!reflStoredDirection(j, rays, capacity, marker.x + i, dir)) continue;
         const uint4 v = rays.Load4(reflRaysValueOffset(capacity, marker.x + i));
         const float3 L = reflValueRadiance(v);
         const float3 g = j.mode == REFL_G ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, dir, 0.1763, P[3].w) : 0;

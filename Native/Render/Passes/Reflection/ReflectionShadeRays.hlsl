@@ -29,7 +29,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     const uint owner = rays.Load(reflRaysJobOffset(capacity, slot));
     const ReflJob j = reflLoadJob(owner & 0x0FFFFFFFu);
     float3 dir;
-    reflRayDirection(j, owner >> 28, dir);
+    reflStoredDirection(j, rays, capacity, slot, dir);
     float3 radiance, sun = 0;
     float distanceToHit;
     float motion = 0;

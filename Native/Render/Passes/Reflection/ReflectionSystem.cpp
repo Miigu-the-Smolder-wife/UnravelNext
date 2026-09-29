@@ -592,7 +592,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             const uint32_t* counters = reinterpret_cast<const uint32_t*>(slot + kJobsOffset);  // total jobs, M, G samples, G pixels
             const double traced = (double)counters[1] + (double)counters[2] * m_settings.raysPerSample;
             // Ray slots for the split passes: 1.5 x the traced rays once they pass 3/4 of the capacity (a frame beyond it
-            // traces the overflowing jobs inline: the same values, slower). At most 2^24 slots (56 B each, 0.94 GB): at 2^26
+            // traces the overflowing jobs inline: the same values, slower). At most 2^24 slots (60 B each, 1.01 GB): at 2^26
             // slots (3.8 GB) and still at 2^25 (1.9 GB) slots lost their stores [measured: a 64-ray reference against the
             // inline path, -3.9 % and -1.8 %]; 4 K frames trace at most ~9 M rays (full-screen mirror plus G).
             if (traced > 0.75 * m_rayCapacity)
@@ -873,8 +873,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     }
     // Rays buffer of the split passes (ReflectionRay.hlsli): header, hit records, ray -> job, values, shadow rays.
     const uint32_t rayCapacity = (s.experimentDisable & 64) ? 0 : m_rayCapacity;
-    static_assert(32 + (1ull << 24) * 56 < (1ull << 30), "the rays buffer stays under 1 GB");  // 64: every job inline (A/B of the split)
-    const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 32 + (uint64_t)rayCapacity * 56, 0 });  // REFL_RAYS_HEADER + REFL_RAYS_SLOT_BYTES
+    static_assert(32 + (1ull << 24) * 60 < (1ull << 30), "the rays buffer stays under 1 GiB");  // 64: every job inline (A/B of the split)
+    const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 32 + (uint64_t)rayCapacity * 60, 0 });  // REFL_RAYS_HEADER + REFL_RAYS_SLOT_BYTES
     g.addPass("r.refl.args", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(args, Use::UavCompute);

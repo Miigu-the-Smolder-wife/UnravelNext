@@ -40,6 +40,7 @@ void ReflectionTraceGen()
     {
         const uint slot = base + i;
         rays.Store(reflRaysJobOffset(capacity, slot), job | (i << 28));
+        rays.Store(reflRaysSeedOffset(capacity, slot), seed);
         float3 dir;
         if (!reflNextDirection(j, seed, dir))
         {
