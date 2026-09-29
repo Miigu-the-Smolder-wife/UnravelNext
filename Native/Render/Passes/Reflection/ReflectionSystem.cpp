@@ -71,12 +71,15 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     ReflectionSettings s;
     s.kHalfAngle = (float)(q.number("reflection.cache_lobe_half_angle_min_deg") * 3.14159265358979 / 180.0);
     s.mirrorRoughness = (float)q.number("reflection.mirror_roughness_max");
-    s.raysPerSample = (uint32_t)q.integer("reflection.g_rays_per_sample");
+    const int64_t rayCount = q.integer("reflection.g_rays_per_sample");
+    // Ray ownership stores the within-job index in four bits. Reject invalid
+    // configuration instead of truncating samples or aliasing their identities.
+    if (rayCount < 1 || rayCount > 16) fail("reflection.g_rays_per_sample must be in [1, 16] (4-bit ray index)");
+    s.raysPerSample = (uint32_t)rayCount;
     const std::vector<double> spacing = q.numbers("reflection.g_sample_spacing_px");
     if (spacing.size() != 2 || spacing[0] != 1) fail("reflection.g_sample_spacing_px must be [1, max]");
     // Samples live on per-tile grids: spacings above 8 px are sampled at 8 (denser than the bound, never sparser).
     s.maxSpacing = (uint32_t)std::min(spacing[1], 8.0);
-    if (s.raysPerSample == 0) fail("reflection.g_rays_per_sample must be > 0");
     s.planarViewsMax = (uint32_t)q.integer("reflection.planar_views_max");
     if (s.planarViewsMax > kPlanarMax) fail("reflection.planar_views_max must be <= %u", kPlanarMax);
     s.planarViewFixedMs = (float)q.number("reflection.planar_view_fixed_ms");
