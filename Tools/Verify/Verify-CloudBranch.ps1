@@ -45,7 +45,7 @@ function Invoke-Locked([string]$kind, [string[]]$lines) {
     '$ErrorActionPreference = "Continue"',
     "Set-Location '$gate'",
     ("`$games = @('" + ($games -join "','") + "')"),
-    'function R($name, $file, [string[]]$a) {',
+    'function Invoke-Step($name, $file, [string[]]$a) {',
     '  if (Get-Process -Name $games -ErrorAction SilentlyContinue) { "STOP game"; exit 3 }',
     '  $sw = [Diagnostics.Stopwatch]::StartNew()',
     "  `$log = Join-Path '$Out' (`$name + '.log')",
@@ -95,7 +95,7 @@ if ($Phases -contains "tests") {
   "== tests"
   $tests = @("unx_test_reflection_reflectionanalytic", "unx_test_gi_gianalytic", "unx_test_host_hostmotion", "unx_test_shadow_localshadowtests", "unx_test_shadow_froxeltests")
   if ($Quick) { $tests = @("unx_test_shadow_localshadowtests") }
-  Invoke-Locked "correctness" ($tests | ForEach-Object { "R $(Q "tests\$_") $(Q (Join-Path $gate "build\all\bin\$_.exe")) @()" })
+  Invoke-Locked "correctness" ($tests | ForEach-Object { "Invoke-Step $(Q "tests\$_") $(Q (Join-Path $gate "build\all\bin\$_.exe")) @()" })
 }
 if ($Phases -contains "caps") {
   "== captures (native vs upscaled)"
@@ -107,8 +107,8 @@ if ($Phases -contains "caps") {
       foreach ($md in $modes) {
         $base = "$($sc)_$($r)_$($md.m)"
         $common = @("--scene", $scenes[$sc], "--resolution", $r) + $md.a + $frames
-        $lines += "R $(Q "caps\$($base)_native") $(Q $exe) @(" + ((($common + @("--capture", (Join-Path $Out "caps\$($base)_native.pfm"))) | ForEach-Object { Q $_ }) -join ",") + ")"
-        $lines += "R $(Q "caps\$($base)_up") $(Q $exe) @(" + ((($common + @("--capture-output", (Join-Path $Out "caps\$($base)_up.pfm"))) | ForEach-Object { Q $_ }) -join ",") + ")"
+        $lines += "Invoke-Step $(Q "caps\$($base)_native") $(Q $exe) @(" + ((($common + @("--capture", (Join-Path $Out "caps\$($base)_native.pfm"))) | ForEach-Object { Q $_ }) -join ",") + ")"
+        $lines += "Invoke-Step $(Q "caps\$($base)_up") $(Q $exe) @(" + ((($common + @("--capture-output", (Join-Path $Out "caps\$($base)_up.pfm"))) | ForEach-Object { Q $_ }) -join ",") + ")"
       }
     }
   }
@@ -122,7 +122,7 @@ if ($Phases -contains "determinism") {
       foreach ($i in 1, 2) {
         $a = @("--scene", $scenes[$sc], "--resolution", "1920x1080", "--warmup-frames", "300") + $v.a + @("--capture-output", (Join-Path $Out "det\$($sc)_$($v.n)$i.pfm"))
         if ($Quick) { $a = @("--scene", $scenes[$sc], "--resolution", "1920x1080", "--warmup-frames", "60", "--frames", "60") + $v.a + @("--capture-output", (Join-Path $Out "det\$($sc)_$($v.n)$i.pfm")) }
-        $lines += "R $(Q "det\$($sc)_$($v.n)$i") $(Q $exe) @(" + (($a | ForEach-Object { Q $_ }) -join ",") + ")"
+        $lines += "Invoke-Step $(Q "det\$($sc)_$($v.n)$i") $(Q $exe) @(" + (($a | ForEach-Object { Q $_ }) -join ",") + ")"
       }
     }
   }
@@ -133,7 +133,7 @@ if ($Phases -contains "luminance") {
   $n = if ($Quick) { "200" } else { "3000" }
   $sc = if ($Quick) { "train" } else { "bath" }
   $a = @("--scene", $scenes[$sc], "--resolution", "1920x1080", "--frames", $n, "--luminance-log", (Join-Path $Out "lum\$($sc)_1080_default.csv"))
-  Invoke-Locked "correctness" @("R $(Q "lum\$($sc)_1080_default") $(Q $exe) @(" + (($a | ForEach-Object { Q $_ }) -join ",") + ")")
+  Invoke-Locked "correctness" @("Invoke-Step $(Q "lum\$($sc)_1080_default") $(Q $exe) @(" + (($a | ForEach-Object { Q $_ }) -join ",") + ")")
 }
 if ($Phases -contains "timing") {
   "== timing (two rounds)"
@@ -143,7 +143,7 @@ if ($Phases -contains "timing") {
     foreach ($sc in $sceneNames) {
       foreach ($r in $timingRes) {
         $a = @("--scene", $scenes[$sc], "--resolution", $r, "--out", (Join-Path $Out "timing\$($sc)_$($r)_$round")) + $(if ($Quick) { @("--frames", "60") } else { @() })
-        $lines += "R $(Q "timing\$($sc)_$($r)_$round") $(Q $exe) @(" + (($a | ForEach-Object { Q $_ }) -join ",") + ")"
+        $lines += "Invoke-Step $(Q "timing\$($sc)_$($r)_$round") $(Q $exe) @(" + (($a | ForEach-Object { Q $_ }) -join ",") + ")"
       }
     }
   }
