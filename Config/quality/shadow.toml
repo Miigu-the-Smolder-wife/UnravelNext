@@ -24,5 +24,6 @@ search_taps = 5                 # blocker-height taps (2 x 2 texels each) over t
 filter_taps = 16                # penumbra occupancy taps over the disk of radius d_b tan(theta_s); 16 = knee of the measured error (VsmTests)
 local_lights_max = 128
 page_sort_tile_px = 64
+overflow_filter_queue = true   # same filter in two stages; excess queue items execute inline (A/B: false)
 overflow_capacity_words = 0     # overflow list capacity (INTERFACES 7.3): 0 = automatic (1.5 x need); > 0 forces it (tests: 1 sends every
                                 # overflow tile to M's fallback). A size, not a quality: results are exact either way

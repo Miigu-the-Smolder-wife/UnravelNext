@@ -179,9 +179,19 @@ float vsmLocalPlaneDepthAt(VsmLocalLight l, float3 receiver, float3 normal, floa
     return t > 0 ? t * dot(c, axis) : 3.0e38;
 }
 
-float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3 receiver, float3 normal, float footprint, float biasTexels,
-                         float maxSlope, uint searchTaps, uint filterTaps)
+// Full-precision handoff between blocker search and the identical ordered filter.
+// mip == VSM_LOCAL_NONE means the visibility was settled by the first stage.
+struct VsmLocalFilter
 {
+    float3 centre;
+    float radius, tolerance;
+    uint mip, face;
+};
+float vsmLocalClassify(VsmLocalResources r, VsmLocalLight l, uint slot, float3 receiver, float3 normal, float footprint, float biasTexels,
+                       float maxSlope, uint searchTaps, uint filterTaps, out VsmLocalFilter filter)
+{
+    filter = (VsmLocalFilter)0;
+    filter.mip = VSM_LOCAL_NONE;
     // Past the light's reach (farM = range + emitter radius) its shading window is 0 (shPunctualIlluminance,
     // shAreaWindow: w(d) = 0 for d >= range), so the visibility there multiplies nothing: 1 without the estimator. The
     // froxel lists hold the lights whose sphere meets the froxel, not each pixel (VsmLocalMark skips the same pixels).
@@ -237,6 +247,21 @@ float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3
     // 2. Penumbra filter.
     const float radius = l.radius * (sumInvZ / count - invZr);
     const uint mf = min(m, vsmLocalMip(radius * sqrt(ATMO_PI_FOR_LOCAL / filterTaps) * pr.z, pr.z));
+    filter.centre = c0;
+    filter.radius = radius;
+    filter.tolerance = tolerancePerTexel;
+    filter.mip = mf;
+    filter.face = pr.face;
+    return 0;
+}
+float vsmLocalFilterVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3 receiver, float3 normal,
+                               VsmLocalFilter filter, uint filterTaps)
+{
+    float3 right, up, axis;
+    vsmCubeBasis(filter.face, right, up, axis);
+    const float3 c0 = filter.centre;
+    const float radius = filter.radius, tolerancePerTexel = filter.tolerance;
+    const uint mf = filter.mip;
     // Each tap a bilinear shadow test (vsmLocalTapOcclusion); taps whose direction no resident page holds carry no
     // information and leave the mean (counting them lit made page-shaped light patches wherever the filter reached past
     // the pages the marking requested).
@@ -254,6 +279,14 @@ float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3
         taps += 1;
     }
     return taps > 0 ? 1 - occ / taps : 1;
+}
+
+float vsmLocalVisibility(VsmLocalResources r, VsmLocalLight l, uint slot, float3 receiver, float3 normal, float footprint, float biasTexels,
+                         float maxSlope, uint searchTaps, uint filterTaps)
+{
+    VsmLocalFilter filter;
+    const float value = vsmLocalClassify(r, l, slot, receiver, normal, footprint, biasTexels, maxSlope, searchTaps, filterTaps, filter);
+    return filter.mip == VSM_LOCAL_NONE ? value : vsmLocalFilterVisibility(r, l, slot, receiver, normal, filter, filterTaps);
 }
 
 #endif

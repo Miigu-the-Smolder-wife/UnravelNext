@@ -453,6 +453,53 @@ int main(int argc, char** argv)
             report((double)grossOverflow / std::max(nOverflow, 1) < 2e-3, "overflow scene: fraction |V - V_ref| > 0.25 past the third",
                    (double)grossOverflow / std::max(nOverflow, 1), 2e-3);
 
+            // Two schedules of the same frame/VSM: compare logical overflow
+            // bytes, not atomic allocation addresses or unused buffer padding.
+            {
+                std::shared_ptr<std::vector<uint8_t>> abHeads[2], abValues[2];
+                const bool savedQueue = tf.quality.boolean("shadow.vsm.overflow_filter_queue");
+                tf.run([&](FramePassContext& fc) {
+                    ViewResources main;
+                    main.view = fc.frame.mainView;
+                    main.frameConstants = fc.frameConstantsFor(main.view);
+                    raster.mainView(fc, main);
+                    tracks::shadowPages(fc, main);
+                    for (uint32_t mode = 0; mode < 2; ++mode)
+                    {
+                        tf.quality.applyOverride(mode ? "shadow.vsm.overflow_filter_queue=true" : "shadow.vsm.overflow_filter_queue=false");
+                        ViewResources candidate = main;
+                        tracks::shadowVisibility(fc, candidate);
+                        abHeads[mode] = tf.readback(fc, candidate.shadowOverflowTiles);
+                        abValues[mode] = tf.readbackBuffer(fc, candidate.shadowOverflow, (uint64_t)capacity * 4);
+                    }
+                });
+                tf.quality.applyOverride(savedQueue ? "shadow.vsm.overflow_filter_queue=true" : "shadow.vsm.overflow_filter_queue=false");
+                uint32_t different = 0, compared = 0;
+                for (uint32_t y = 0; y < H; ++y)
+                    for (uint32_t x = 0; x < W; ++x)
+                    {
+                        const uint32_t a = word(*abHeads[0], (y / 8) * ph + (x / 8) * 4ull);
+                        const uint32_t b = word(*abHeads[1], (y / 8) * ph + (x / 8) * 4ull);
+                        if (a == 0 || b == 0 || a == UINT32_MAX || b == UINT32_MAX)
+                        {
+                            different += a != b ? 1u : 0u;
+                            continue;
+                        }
+                        const uint32_t pixelOffset = (y % 8) * 8 + x % 8;
+                        const uint32_t ra = word(*abValues[0], (uint64_t)(a - 1 + pixelOffset) * 4);
+                        const uint32_t rb = word(*abValues[1], (uint64_t)(b - 1 + pixelOffset) * 4);
+                        different += (ra >> 24) != (rb >> 24) ? 1u : 0u;
+                        for (uint32_t j = 0; j < std::min(ra >> 24, rb >> 24); ++j)
+                        {
+                            const uint32_t va = word(*abValues[0], (uint64_t)(a - 1 + (ra & 0xFFFFFFu) + j / 4) * 4);
+                            const uint32_t vb = word(*abValues[1], (uint64_t)(b - 1 + (rb & 0xFFFFFFu) + j / 4) * 4);
+                            different += ((va >> (8 * (j % 4))) & 255u) != ((vb >> (8 * (j % 4))) & 255u) ? 1u : 0u;
+                            ++compared;
+                        }
+                    }
+                report(compared > 2000 && different == 0, "overflow queued/inline visibility bytes identical", different, 0);
+            }
+
             // Forced capacity 1 word (M's fallback test): every overflow tile is over it, listed once in the fallback tiles.
             {
                 tf.quality.applyOverride("shadow.vsm.overflow_capacity_words=1");

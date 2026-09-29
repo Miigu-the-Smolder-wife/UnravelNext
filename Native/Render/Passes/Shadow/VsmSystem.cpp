@@ -1540,6 +1540,25 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   });
     }
     if (!overflowList) return;
+    // Bounded dense filter queue. It changes scheduling only: excess items run
+    // the same filter in the producer, so capacity never discards a light/tap.
+    const bool splitOverflow = localSlots && (!fc.quality.has("shadow.vsm.overflow_filter_queue") || fc.quality.boolean("shadow.vsm.overflow_filter_queue"));
+    BufferRef overflowFilter, overflowFilterArgs;
+    if (splitOverflow)
+    {
+        const uint64_t pixels = (uint64_t)w * h;
+        if (pixels * 29 >= (1ull << 32)) fail("overflow filter counter exceeds 32-bit bound"); // list max 32, first 3 in slots
+        const uint32_t filterCapacity = (uint32_t)std::min<uint64_t>((uint64_t)capacity * 4, std::max<uint64_t>(1024, pixels / 8));
+        overflowFilter = g.createBuffer({ "S local overflow filter queue", 16 + (uint64_t)filterCapacity * 48, 0 });
+        overflowFilterArgs = g.createBuffer({ "S local overflow filter args", 16, 0 });
+        ID3D12PipelineState* begin = fc.shaders.compute("Passes/Shadow/ShadowOverflowArgs.MODE0");
+        g.addPass("s.shadow.overflow.begin", QueueType::Compute,
+                  [&](PassBuilder& b) { b.use(overflowFilter, Use::UavCompute); },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.uav(overflowFilter), 0, filterCapacity, 0 };
+                      ctx.cmd->SetPipelineState(begin); ctx.computeConstants(k, 4); ctx.cmd->Dispatch(1, 1, 1);
+                  });
+    }
     // Overflow tiles: recount, one block per tile from the capacity, the lights past the third (indirect, one group per
     // listed tile; without local slots the list is empty and the dispatch has no groups).
     g.addPass("s.shadow.overflow", QueueType::Compute,
@@ -1556,6 +1575,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   b.use(fallback, Use::UavCompute);
                   b.use(counter, Use::UavCompute);
                   b.use(statsBuf, Use::UavCompute);
+                  if (splitOverflow) b.use(overflowFilter, Use::UavCompute);
                   if (localSlots) b.use(froxelLists, Use::SrvCompute);
                   if (mirrorMask.valid()) b.use(mirrorMask, Use::SrvCompute);
                   if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
@@ -1564,11 +1584,35 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(heads), ring, ctx.srv(overflowTiles), ctx.srv(table), ctx.srv(atlas),
                                            ctx.srv(blocks), ctx.uav(overflow), capacity, ctx.uav(fallback), ctx.uav(statsBuf),
                                            localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv, ctx.uav(counter),
-                                           mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu, 0, 0, 0 };
+                                           mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu,
+                                           splitOverflow ? ctx.uav(overflowFilter) : 0xFFFFFFFFu, 0, 0 };
                   ctx.cmd->SetPipelineState(po);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 20);
                   ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(overflowTiles), 4, nullptr, 0);
               });
+    if (splitOverflow)
+    {
+        ID3D12PipelineState* makeArgs = fc.shaders.compute("Passes/Shadow/ShadowOverflowArgs.MODE1");
+        ID3D12PipelineState* filter = fc.shaders.compute("Passes/Shadow/ShadowOverflowFilter");
+        g.addPass("s.shadow.overflow.args", QueueType::Compute,
+                  [&](PassBuilder& b) { b.use(overflowFilter, Use::UavCompute); b.use(overflowFilterArgs, Use::UavCompute); },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.uav(overflowFilter), ctx.uav(overflowFilterArgs), 0, 0 };
+                      ctx.cmd->SetPipelineState(makeArgs); ctx.computeConstants(k, 4); ctx.cmd->Dispatch(1, 1, 1);
+                  });
+        g.addPass("s.shadow.overflow.filter", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(overflowFilter, Use::SrvCompute); b.use(overflowFilterArgs, Use::IndirectArgs);
+                      b.use(overflow, Use::UavCompute); b.use(depth, Use::SrvCompute); b.use(gbuffer, Use::SrvCompute);
+                      b.use(table, Use::SrvCompute); b.use(atlas, Use::SrvCompute); b.use(blocks, Use::SrvCompute);
+                  },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[12] = { ctx.srv(overflowFilter), ctx.uav(overflow), ctx.srv(depth), ctx.srv(gbuffer),
+                                               ctx.srv(table), ctx.srv(atlas), ctx.srv(blocks), ring, localLightsSrv, 0, 0, 0 };
+                      ctx.cmd->SetPipelineState(filter); ctx.bindFrameConstants(constants); ctx.computeConstants(k, 12);
+                      ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(overflowFilterArgs), 0, nullptr, 0);
+                  });
+    }
 }
 } // namespace unx::render::shadow

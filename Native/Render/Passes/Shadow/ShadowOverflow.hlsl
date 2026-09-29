@@ -24,6 +24,36 @@
 groupshared uint gs_scan[64];
 groupshared uint gs_pixels, gs_lights, gs_head;
 
+// Queue only the filter stage; exhaustion executes that same stage here. The
+// output byte is zero while queued and is ORed exactly once by the consumer.
+float overflowVisibility(ShadowSrvs ss, uint li, ShadowPixelReceiver pr, uint2 pixel, uint address, uint shift)
+{
+    if (P[4].y == 0xFFFFFFFFu) return shadowLocalVisibilityAtReceiver(ss, li, pr);
+    StructuredBuffer<uint> slotOf = ResourceDescriptorHeap[ss.pad0];
+    const uint slot = slotOf[li];
+    if (slot == VSM_LOCAL_NONE) return 1;
+    StructuredBuffer<VsmLocalLight> lights = ResourceDescriptorHeap[ss.lights];
+    const VsmLocalLight light = lights[slot];
+    ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[ss.constants];
+    VsmLocalResources r;
+    r.table = ResourceDescriptorHeap[ss.pageTable]; r.pool = ResourceDescriptorHeap[vsmAtlasSrv(ss.constants)];
+    r.blocks = ResourceDescriptorHeap[ss.blocks];
+    VsmLocalFilter filter;
+    const float value = vsmLocalClassify(r, light, slot, pr.world, pr.normal, pr.footprint,
+        c.receiverBiasTexels, c.maxReceiverSlope, c.searchTaps, c.filterTaps, filter);
+    if (filter.mip == VSM_LOCAL_NONE) return value;
+    RWByteAddressBuffer queue = ResourceDescriptorHeap[P[4].y];
+    uint item;
+    queue.InterlockedAdd(0, 1, item);
+    if (item >= queue.Load(4))
+        return vsmLocalFilterVisibility(r, light, slot, pr.world, pr.normal, filter, c.filterTaps);
+    const uint at = 16 + item * 48;
+    queue.Store4(at, uint4(pixel.x | (pixel.y << 16), slot, address, shift));
+    queue.Store4(at + 16, uint4(asuint(filter.centre), asuint(filter.radius)));
+    queue.Store4(at + 32, uint4(asuint(filter.tolerance), filter.mip, filter.face, 0));
+    return 0;
+}
+
 [numthreads(64, 1, 1)]
 void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
 {
@@ -132,7 +162,8 @@ void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
         const uint li = froxelLightBuffered(f, indexBase, range, i, lightWords);
         if (!lightCastsShadow(loadLight(li))) continue;
         if (++ordinal <= 3) continue;
-        const uint v = (uint)round(saturate(shadowLocalVisibilityAtReceiver(ss, li, pr)) * 255.0);
+        const uint v = (uint)round(saturate(overflowVisibility(ss, li, pr, px,
+            (block + runStart + n / 4) * 4, 8 * (n & 3u))) * 255.0);
         packed |= v << (8 * (n & 3u));
         if ((++n & 3u) == 0 || n == count)
         {
