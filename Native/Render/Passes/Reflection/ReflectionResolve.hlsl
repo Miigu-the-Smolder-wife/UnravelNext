@@ -74,12 +74,14 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         if (reflection[uint2(q.x / 8, rows + q.y / 8)].a < 0.5) continue;  // tile not classified this frame
         const uint mq = modes.Load(int3(q, 0));
         if (reflMode(mq) != REFL_G || reflJob(mq) == REFL_NO_JOB || (all(q == int2(pixel)) && (m & REFL_SELF) != 0)) continue;  // an own-job pixel tests its grid without itself
+        // Result and surface are independent reads; issue both before the
+        // tangent-plane/lobe weight. Accumulation remains k = 0..3.
+        const uint3 r = results[reflJob(mq)];
         const ReflSurface t = reflSurface(depth, gbuffer, uint2(q));
         const float plane = abs(dot(s.normal, t.position - s.position)) / max(s.linearDepth, 1e-4);
         const float w = (o.x ? fr.x : 1 - fr.x) * (o.y ? fr.y : 1 - fr.y) * pow(saturate(1 - plane / 0.02), 2) * pow(saturate(dot(s.normal, t.normal)), 8) *
                         saturate(1 - abs(s.roughness - t.roughness) * 4);
         if (w <= 0) continue;
-        const uint3 r = results[reflJob(mq)];
         sum += w * reflResultRadiance(r);
         dist += w * reflResultDistance(r);
         weight += w;

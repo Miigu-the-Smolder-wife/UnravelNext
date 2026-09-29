@@ -13,6 +13,7 @@
 
 #define JOBS_NONE 0xFu
 groupshared uint gs_want[24 * 24];  // log2 of the spacing a G pixel wants, JOBS_NONE otherwise
+groupshared uint gs_tiles[9];      // the nine validity flags, once per group instead of once per pixel
 
 [numthreads(8, 8, 1)]
 void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : SV_GroupIndex)
@@ -21,6 +22,13 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
     if (reflection[uint2(tile.x, P[2].y + tile.y)].a < 0.5) return;  // all K (or planar only): no G pixel
     const uint2 size = P[1].xy, tiles = P[1].zw;
     RWTexture2D<uint> modes = ResourceDescriptorHeap[P[0].x];
+    if (lane < 9)
+    {
+        const int2 at = int2(tile) + int2(lane % 3, lane / 3) - 1;
+        gs_tiles[lane] = all(at >= 0) && all(at < int2(tiles)) ?
+            (reflection[uint2(at.x, P[2].y + at.y)].a >= 0.5 ? 1u : 0u) : 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
     // The 3 x 3 tiles' wanted spacings (9 texels per thread).
     for (uint i = lane; i < 24 * 24; i += 64)
     {
@@ -28,8 +36,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
         uint want = JOBS_NONE;
         if (all(a >= 0) && all(a < int2(size)))
         {
-            const uint2 at = uint2(a) / 8;
-            if (all(at < tiles) && reflection[uint2(at.x, P[2].y + at.y)].a >= 0.5)
+            if (gs_tiles[(i / 24 / 8) * 3 + (i % 24 / 8)] != 0)
             {
                 const uint m = modes[uint2(a)];
                 if (reflMode(m) == REFL_G) want = (m >> 2) & 7u;

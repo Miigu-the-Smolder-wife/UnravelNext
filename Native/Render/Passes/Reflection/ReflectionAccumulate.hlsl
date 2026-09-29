@@ -124,10 +124,10 @@ void main(uint2 pixel : SV_DispatchThreadID)
                 const int2 t = i0 + o;
                 if (any(t < 0) || any(t >= int2(size))) continue;
                 const uint2 stored = keysPrev[t];
+                const float4 a = accumPrev[t];  // independent of the key/depth acceptance arithmetic
                 if (stored.x != key || abs(asfloat(stored.y) - clip.w) > tolerance) continue;
                 const float w = (o.x ? f.x : 1 - f.x) * (o.y ? f.y : 1 - f.y);
                 if (w <= 0) continue;
-                const float4 a = accumPrev[t];
                 sum += w * a.rgb;
                 weight += w;
                 nPrev = min(nPrev, (uint)a.a);
