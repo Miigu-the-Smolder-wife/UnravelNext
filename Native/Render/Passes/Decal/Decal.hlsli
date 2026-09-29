@@ -141,7 +141,9 @@ float decalLayer(DecalContext c, DecalFrame d, DecalSurface s, out DecalMaterial
 }
 
 // The given decals (indices into the frame records) over the material, lowest (priority, order) first.
-void decalApplyList(DecalContext c, uint ids[DECAL_PER_TILE], uint count, DecalSurface s, inout DecalMaterial m)
+// The caller owns this scratch list and never reads its original order again.
+// inout lets the sort use that storage instead of an HLSL by-value array copy.
+void decalApplyList(DecalContext c, inout uint ids[DECAL_PER_TILE], uint count, DecalSurface s, inout DecalMaterial m)
 {
     StructuredBuffer<DecalFrame> frames = ResourceDescriptorHeap[c.frames];
     // insertion sort by (priority, order)
@@ -191,7 +193,7 @@ void decalApply(DecalContext c, uint2 pixel, DecalSurface s, inout DecalMaterial
 // A ray hit's decals (R's hit shading, FEATURES_GAME 5.2): the candidates R's decal-AABB query collected (at most
 // DECAL_PER_TILE; the box test of each happens here), over the hit's material. c.tiles is not read. The AABB of decal i
 // is its frame record's camera-relative box: centre +- (|axisX| + |axisY| + |axisZ|) per component.
-void decalApplyHit(DecalContext c, uint ids[DECAL_PER_TILE], uint count, DecalSurface s, inout DecalMaterial m)
+void decalApplyHit(DecalContext c, inout uint ids[DECAL_PER_TILE], uint count, DecalSurface s, inout DecalMaterial m)
 {
     if (c.frames == DECAL_NONE || count == 0) return;
     decalApplyList(c, ids, min(count, DECAL_PER_TILE), s, m);
