@@ -91,9 +91,10 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
         pr.footprint = footprint;
         pr.valid = 1;
         uint ordinal = 0, live = 0;
+        uint4 lightWords = 0;
         [loop] for (uint i = 0; i < range.y; ++i)
         {
-            const uint li = froxelLightAt(f, indexBase, range.x + i);
+            const uint li = froxelLightBuffered(f, indexBase, range, i, lightWords);
             if (!lightCastsShadow(loadLight(li))) continue;
             ++ordinal;
             // Past the third: the tile goes to the overflow list (ShadowOverflow.hlsl evaluates every such light) only

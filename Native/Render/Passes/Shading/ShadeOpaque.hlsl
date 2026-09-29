@@ -442,9 +442,10 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #endif
         uint shadowOrdinal = 0, overflowRecord = 0xFFFFFFFFu;
         ShadowPixelReceiver overflowReceiver = (ShadowPixelReceiver)0;
+        uint4 lightWords = 0;
         for (uint i = 0; i < range.y; ++i)
         {
-            const uint lightIndex = froxelLightAt(froxels, indexBase, range.x + i);
+            const uint lightIndex = froxelLightBuffered(froxels, indexBase, range, i, lightWords);
             const GpuLight light = loadLight(lightIndex);
             // The light's shadow ordinal is counted here; its visibility (a slot, or the overflow records' dependent
             // loads) is read only for a light that adds something at this pixel (a window, a spot factor and a lobe on

@@ -75,9 +75,10 @@ uint localSlots(ShadowSrvs s, uint2 px, float3 p, float3 n, float deviceDepth)
     pr.footprint = pixelFootprint(deviceDepth);
     pr.valid = 1;
     uint ordinal = 0;
+    uint4 lightWords = 0;
     [loop] for (uint i = 0; i < range.y && ordinal < 3; ++i)
     {
-        const uint li = froxelLightAt(f, indexBase, range.x + i);
+        const uint li = froxelLightBuffered(f, indexBase, range, i, lightWords);
         if (!lightCastsShadow(loadLight(li))) continue;
         ++ordinal;
         const float v = shadowLocalVisibilityAtReceiver(s, li, pr);

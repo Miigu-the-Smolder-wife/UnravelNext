@@ -496,9 +496,10 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             nearCasters = shadowFirstCasters(froxels, pixel, zNear);
             farCasters = shadowFirstCasters(froxels, pixel, zFar);
         }
+        uint4 lightWords = 0;
         for (uint i = 0; i < range.y; ++i)
         {
-            const uint lightIndex = froxelLightAt(froxels, indexBase, range.x + i);
+            const uint lightIndex = froxelLightBuffered(froxels, indexBase, range, i, lightWords);
             const GpuLight light = loadLight(lightIndex);
             const float visibility = covLocalVisibility(shadow, nearCasters, farCasters, lightIndex);
             if (lightType(light) > LIGHT_SPOT)

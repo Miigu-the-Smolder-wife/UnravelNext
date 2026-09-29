@@ -34,9 +34,10 @@ uint shadowSlotOfLight(FroxelSrvs f, uint2 pixel, float linearDepth, uint lightI
     const uint2 range = froxelLightRange(f, pixel, linearDepth);
     const uint indexBase = froxelIndexBase(f);
     uint ordinal = 0;
+    uint4 lightWords = 0;
     [loop] for (uint i = 0; i < range.y && ordinal < 3; ++i)
     {
-        const uint li = froxelLightAt(f, indexBase, range.x + i);
+        const uint li = froxelLightBuffered(f, indexBase, range, i, lightWords);
         if (!lightCastsShadow(loadLight(li))) continue;
         ++ordinal;
         if (li == lightIndex) return ordinal;
@@ -52,9 +53,10 @@ uint3 shadowFirstCasters(FroxelSrvs f, uint2 pixel, float linearDepth)
     const uint indexBase = froxelIndexBase(f);
     uint3 casters = 0xFFFFFFFFu;
     uint ordinal = 0;
+    uint4 lightWords = 0;
     [loop] for (uint i = 0; i < range.y && ordinal < 3; ++i)
     {
-        const uint li = froxelLightAt(f, indexBase, range.x + i);
+        const uint li = froxelLightBuffered(f, indexBase, range, i, lightWords);
         if (!lightCastsShadow(loadLight(li))) continue;
         casters[ordinal++] = li;
     }

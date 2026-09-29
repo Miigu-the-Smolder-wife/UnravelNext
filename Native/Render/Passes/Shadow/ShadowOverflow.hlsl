@@ -52,8 +52,9 @@ void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
     uint count = 0;
     {
         uint ordinal = 0;
+        uint4 lightWords = 0;
         [loop] for (uint i = 0; i < range.y; ++i)
-            if (lightCastsShadow(loadLight(froxelLightAt(f, indexBase, range.x + i)))) ++ordinal;
+            if (lightCastsShadow(loadLight(froxelLightBuffered(f, indexBase, range, i, lightWords)))) ++ordinal;
         count = ordinal > 3 ? ordinal - 3 : 0;
     }
     const uint words = (count + 3) / 4;
@@ -125,9 +126,10 @@ void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
     ss.pad0 = P[3].z;
     ss.layers = 0xFFFFFFFFu;
     uint ordinal = 0, n = 0, packed = 0;
+    uint4 lightWords = 0;
     [loop] for (uint i = 0; i < range.y; ++i)
     {
-        const uint li = froxelLightAt(f, indexBase, range.x + i);
+        const uint li = froxelLightBuffered(f, indexBase, range, i, lightWords);
         if (!lightCastsShadow(loadLight(li))) continue;
         if (++ordinal <= 3) continue;
         const uint v = (uint)round(saturate(shadowLocalVisibilityAtReceiver(ss, li, pr)) * 255.0);

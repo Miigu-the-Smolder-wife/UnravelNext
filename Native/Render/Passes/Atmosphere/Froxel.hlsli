@@ -49,6 +49,28 @@ uint froxelEntryAt(FroxelSrvs f, uint indexBase, uint i)
     return (i & 1) ? (w >> 16) : (w & 0xFFFFu);
 }
 uint froxelLightAt(FroxelSrvs f, uint indexBase, uint i) { return froxelEntryAt(f, indexBase, i) & 0x7FFFu; }
+// Ascending walk of one range. FroxelLists gives every range an even first
+// entry (fixed even stride), including odd-length lists. Fetch four packed
+// words per eight lights; the tail reads only words owned by this range.
+uint froxelLightBuffered(FroxelSrvs f, uint indexBase, uint2 range, uint i, inout uint4 words)
+{
+    if ((i & 7u) == 0)
+    {
+        ByteAddressBuffer b = ResourceDescriptorHeap[f.lightIndices];
+        const uint address = indexBase + ((range.x + i) >> 1) * 4;
+        const uint remaining = range.y - i;
+        if (remaining >= 8) words = b.Load4(address);
+        else
+        {
+            words.x = b.Load(address);
+            words.y = remaining > 2 ? b.Load(address + 4) : 0;
+            words.z = remaining > 4 ? b.Load(address + 8) : 0;
+            words.w = remaining > 6 ? b.Load(address + 12) : 0;
+        }
+    }
+    const uint w = (i & 4u) ? ((i & 2u) ? words.w : words.z) : ((i & 2u) ? words.y : words.x);
+    return ((w >> (16 * (i & 1u))) & 0x7FFFu);
+}
 // True when list entry i's light casts local shadows through S's VSM (it takes one of the visibility slots 1-3 in list
 // order, ShadowVisibility.hlsli shadowSlotOfLight).
 bool froxelLightShadowed(FroxelSrvs f, uint i) { return (froxelEntry(f, i) & 0x8000u) != 0; }
