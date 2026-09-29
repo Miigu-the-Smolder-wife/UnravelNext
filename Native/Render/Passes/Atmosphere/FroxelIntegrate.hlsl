@@ -1,4 +1,5 @@
 // unx-kernel: cs_6_6 main
+// unx-variants: QUEUED=0,1
 // Air volume of the main view on the froxel grid (ARCHITECTURE 2.3 "볼륨 산란"; Atmosphere.hlsli atmosphereAerial /
 // atmosphereAirView). One group per screen tile, one thread per depth slice; slice s is the segment of the tile-centre
 // ray between nodes s and s + 1 (node 0 = camera, node S = far_m). Per slice, midpoint substeps of at most
@@ -62,15 +63,7 @@
 // in-scattering the sky LUT has), so the sum is exact given the LUT's air: the LUT's air behind the media is attenuated
 // by them, the air in front is not.
 // Frame constants of the view (main, or a planar reflection view).
-#include "Bindless.hlsli"
-#include "Frame.hlsli"
-#include "Scene.hlsli"
-#include "Passes/Atmosphere/AtmosphereCommon.hlsli"
-#include "Passes/Atmosphere/FroxelCommon.hlsli"
-#include "Passes/Shadow/VsmAir.hlsli"
-#include "Passes/Shadow/VsmLocalAirWalk.hlsli"
-#include "Passes/Lights/LightFunction.hlsli"
-
+#include "Passes/Atmosphere/FroxelSlice.hlsli"
 groupshared float3 gs_tau[64];
 groupshared float3 gs_source[64];
 groupshared float4 gs_hat[64];  // L / (1 - T) of node s + 1, .w = 1 where the node has air
@@ -80,93 +73,6 @@ groupshared uint gs_scan[64];   // shadowed local-light items of the slices (inc
 groupshared uint gs_item[64];   // a batch's items: slice | list position << 6
 groupshared float gs_moments[64][8];  // each lane's piece of a shadowed item: its lit set's Legendre moments
 groupshared uint gs_runs[64];         // and its lit runs | 0x80000000 unless fully lit
-
-float3 froxelSelfAttenuation(float3 x) { return select(x > 1e-4, (1 - exp(-x)) / max(x, 1e-4), 1 - 0.5 * x); }
-
-static const float kGaussX[8] = { -0.9602898564975363, -0.7966664774136267, -0.5255324099163290, -0.1834346424956498,
-                                  0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363 };
-static const float kGaussW[8] = { 0.1012285362903763, 0.2223810344533745, 0.3137066458778873, 0.3626837833783620,
-                                  0.3626837833783620, 0.3137066458778873, 0.2223810344533745, 0.1012285362903763 };
-
-// Local lights' air walk statistics (P[2].w bit 16, measurement only) and its cap.
-struct AirLocalCount
-{
-    uint entries, cells, maxCells, runs, capped;
-};
-
-// Angle map of light l over the segment o + dir t, t in [0, len]: t = tc + h tan theta, theta in [th0, th1] = mid +- half.
-struct AirLocalMap
-{
-    float tc, h, th0, th1, mid, half;
-};
-AirLocalMap airLocalMap(GpuLight l, float3 o, float3 dir, float len)
-{
-    AirLocalMap mp;
-    mp.tc = dot(l.position - o, dir);
-    // Distance of the line from the light, not below the emitter's size (1 cm for points): the point-source integrand
-    // is singular on the line.
-    mp.h = max(length(l.position - (o + dir * mp.tc)), max(max(l.size.x, l.size.y), 0.01));
-    mp.th0 = atan(-mp.tc / mp.h);
-    mp.th1 = atan((len - mp.tc) / mp.h);
-    mp.mid = 0.5 * (mp.th0 + mp.th1);
-    mp.half = 0.5 * (mp.th1 - mp.th0);
-    return mp;
-}
-
-// The 8-node Gauss-Legendre rule of light l's air in-scattering over the segment (nits); partial: over the lit set of
-// Legendre moments m (VsmLocalAirWalk.hlsli), else over the whole segment.
-float3 airLocalEval(GpuLight l, float3 o, float3 dir, AirLocalMap mp, AirCoefficients c, float mieG, uint functions, uint lightIndex, float lateral,
-                    bool partial, float m[8])
-{
-    const bool withFunction = functions != LIGHT_FUNCTION_NONE && (lightType(l) == LIGHT_POINT || lightType(l) == LIGHT_SPOT);
-    float3 sum = 0, full = 0;
-    [loop] for (uint i = 0; i < 8; ++i)
-    {
-        const float th = mp.mid + mp.half * kGaussX[i];
-        const float t = mp.tc + mp.h * tan(th);
-        const float3 v = o + dir * t - l.position;
-        const float d = mp.h / cos(th);
-        const float3 w = v / max(length(v), 1e-6);
-        const float nu = -sin(th);  // cosine between the light's propagation (w) and the path to the camera (-dir)
-        const float3 phase = c.rayleigh * airRayleighPhase(nu) + c.mie * airMiePhase(nu, mieG);
-        const float3 f = withFunction ? lightFunction(functions, lightIndex, l.forward, l.right, w, lateral / max(d, 1e-4), g_time) : 1.0;
-        const float3 value = froxelIntensity(l, w) * froxelWindow(l, d) * f * phase * exp(-c.extinction * max(t, 0.0));
-        sum += (partial ? vsmLocalAirWeight(kGaussX[i], kGaussW[i], m) : kGaussW[i]) * value;
-        full += kGaussW[i] * value;
-    }
-    // Partly lit: the interpolant over the lit set, within [0, the whole segment's] (the integrand is not negative).
-    if (partial) sum = clamp(sum, 0.0, full);
-    return sum * (mp.half / mp.h) * l.color;
-}
-
-// Air in-scattering of an unshadowed light along o + dir t, t in [0, len] (nits), relative to the segment's start.
-// Shadowed lights are walked in pieces by the group (main).
-float3 airLocalLight(GpuLight l, float3 o, float3 dir, float len, AirCoefficients c, float mieG, uint functions, uint lightIndex, float lateral)
-{
-    float m[8] = (float[8])0;
-    return airLocalEval(l, o, dir, airLocalMap(l, o, dir, len), c, mieG, functions, lightIndex, lateral, false, m);
-}
-
-// Parameter of piece boundary q of K pieces uniform in theta (q = 0: 0, q = K: len). Both pieces at a boundary evaluate
-// this same expression, so the pieces tile [0, len] with no gap or overlap.
-float airLocalPieceT(AirLocalMap mp, float len, uint q, uint K)
-{
-    if (q == 0) return 0;
-    if (q >= K) return len;
-    return clamp(mp.tc + mp.h * tan(mp.th0 + (mp.th1 - mp.th0) * ((float)q / (float)K)), 0.0, len);
-}
-
-
-// Shadow slot of list position pos's light (VSM_LOCAL_NONE: unshadowed, or no slot this frame).
-uint airLocalSlot(ByteAddressBuffer lists, FroxelGrid g, uint pos, bool localShadows, out uint li)
-{
-    const uint w = lists.Load(g.indexBase + (pos >> 1) * 4);
-    const uint entry = (pos & 1) ? w >> 16 : w & 0xFFFFu;
-    li = entry & 0x7FFFu;
-    if (!localShadows || (entry & 0x8000u) == 0) return VSM_LOCAL_NONE;
-    StructuredBuffer<uint> slotOf = ResourceDescriptorHeap[P[3].y];
-    return slotOf[li];
-}
 
 [numthreads(64, 1, 1)]
 void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
@@ -264,44 +170,16 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     uint2 myReach = 0;  // list positions (bit i of 64) of the shadowed lights whose range the slice's segment enters
     if (hasAir && (zs0 < zSurface || s < gs_lastSky))
     {
+#if QUEUED
+        ByteAddressBuffer air = ResourceDescriptorHeap[P[4].w];
+        const FroxelAirResult integrated = froxelLoadAir(air, froxelIndex(g, tile, s));
+#else
+        const FroxelAirResult integrated = froxelAirSlice(g, tile, s);
+#endif
+        tau = integrated.tau; source = integrated.source; skyTerm = integrated.sky; walk = integrated.walk;
         const float z0 = zs0, z1 = zs1;
         const float t0 = max(z0 * toRay, tStart), len = z1 * toRay - t0;
         const float3 o = g_cameraPosition + dir * t0;
-        // Substeps: the air's density is exponential in altitude; midpoint steps of at most stepAltitude.
-        const float h0 = airAltitude(a, o), h1 = airAltitude(a, o + dir * len), hm = airAltitude(a, o + dir * (0.5 * len));
-        const float dh = max(max(abs(h1 - h0), abs(hm - h0)), abs(hm - h1));
-        const uint steps = (experiment & 4) ? 0u : (uint)clamp(ceil(dh / stepAltitude), 1.0, 32.0);
-        const float dt = len / steps;
-        float3 single = 0, multi = 0;
-        [loop] for (uint k = 0; k < steps; ++k)
-        {
-            const float3 p = airLiftToSurface(a, o + dir * ((k + 0.5) * dt));
-            const AirCoefficients c = airCoefficients(a, max(0.0, airAltitude(a, p)));
-            const float3 w = exp(-tau) * airIntegral(c.extinction, dt);
-            single += w * (c.rayleigh * phaseR + c.mie * phaseM) * ((experiment & 8) ? 1.0 : airSunTransmittance(a, tlut, p, sun));
-            multi += w * (c.rayleigh + c.mie) * ((experiment & 16) ? 1.0 : airMultipleScattering(a, mlut, p, dir, sun));
-            tau += c.extinction * dt;
-        }
-        // Casters' shadows in the air: the shadowed fraction of the segment removes that part of the single scattering.
-        float f = 0;
-        if (P[1].w != 0xFFFFFFFFu && any(single > 0) && (experiment & 1) == 0)
-        {
-            VsmResources r;
-            r.table = ResourceDescriptorHeap[P[1].x];
-            r.pool = ResourceDescriptorHeap[P[1].y];
-            r.blocks = ResourceDescriptorHeap[P[1].z];
-            r.searchBound = ResourceDescriptorHeap[P[2].x];
-            r.cbv = P[1].w;
-            ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[P[1].w];
-            uint k;
-            if (vsmAirLevel(vc, froxelTileWidth(g, 0.5 * (z0 + z1)), asfloat(P[2].y), k))
-            {
-                f = vsmAirShadowFraction(r, o, o + dir * len, k, walk, (experiment & 32) != 0);
-                ++walk.slices;
-            }
-        }
-        source = E * (single * (1 - f) + multi);
-        skyTerm = -E * single * f;  // what the sky LUT has and the shadows remove
         // Local lights of the froxel's list (air at the segment's midpoint).
         const float3 pm = airLiftToSurface(a, o + dir * (0.5 * len));
         const AirCoefficients cm = airCoefficients(a, max(0.0, airAltitude(a, pm)));

@@ -220,7 +220,7 @@ int main(int argc, char** argv)
     {
         bool debugLayer = true, debug = false, keepFroxels = false, uploadFirst = false;
         int debugTile[2] = { 3, 2 };
-        bool gbv = false;
+        bool gbv = false, queueAb = false;
         uint32_t W = 1920, H = 1080;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
@@ -232,6 +232,7 @@ int main(int argc, char** argv)
             else if (a == "--set") overrides.push_back(argv[++i]);
             else if (a == "--debug") debug = true;
             else if (a == "--gbv") gbv = true;  // GPU-based validation
+            else if (a == "--queue-ab") queueAb = true; // same frame, all stored volume bits (padding excluded)
             else if (a == "--tile") { debugTile[0] = std::stoi(argv[++i]); debugTile[1] = std::stoi(argv[++i]); }  // per-node print of one tile (section 2)
             else if (a == "--keep") keepFroxels = true;
             else if (a == "--upload-first") uploadFirst = true;  // diagnostic: probe input declared before the froxel passes
@@ -283,7 +284,7 @@ int main(int argc, char** argv)
             grid.view = tf.frame.mainView;
             for (int f = 0; f < frames; ++f)
             {
-                std::shared_ptr<std::vector<uint8_t>> lists, volume, depthRb;
+                std::shared_ptr<std::vector<uint8_t>> lists, volume, depthRb, otherVolume;
                 const bool read = f + 1 == frames;  // earlier frames without readback: the plan changes (consumer culled)
                 tf.run([&](FramePassContext& fc) {
                     ViewResources main;
@@ -301,6 +302,14 @@ int main(int argc, char** argv)
                         lists = tf.readbackBuffer(fc, fc.resources.froxelLights, listBytes);
                         volume = tf.readback(fc, fc.resources.froxels);
                         if (wantDepth) depthRb = tf.readback(fc, main.depth);
+                        if (queueAb)
+                        {
+                            const bool saved = tf.quality.boolean("atmosphere.froxels.integration_queue");
+                            tf.quality.applyOverride(saved ? "atmosphere.froxels.integration_queue=false" : "atmosphere.froxels.integration_queue=true");
+                            tracks::froxels(fc, main);
+                            otherVolume = tf.readback(fc, fc.resources.froxels);
+                            tf.quality.applyOverride(saved ? "atmosphere.froxels.integration_queue=true" : "atmosphere.froxels.integration_queue=false");
+                        }
                     }
                 });
                 tf.frame.time += tf.frame.deltaTime;
@@ -309,6 +318,15 @@ int main(int argc, char** argv)
                     lastLists = *lists;
                     lastVolume = *volume;
                     if (depthRb) lastDepth = *depthRb;
+                    if (otherVolume)
+                    {
+                        const uint32_t pitch = TestFrame::rowPitch(fg.gridX, 8), rows = fg.gridY * (3 * (fg.slices + 1) + 2);
+                        uint32_t different = 0;
+                        for (uint32_t row = 0; row < rows; ++row)
+                            for (uint32_t byte = 0; byte < fg.gridX * 8; ++byte)
+                                different += (*volume)[(size_t)row * pitch + byte] != (*otherVolume)[(size_t)row * pitch + byte] ? 1u : 0u;
+                        report(different == 0, "froxel queued/tile volume bits identical", different, 0);
+                    }
                 }
             }
         };

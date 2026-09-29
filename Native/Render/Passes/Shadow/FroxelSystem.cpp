@@ -23,6 +23,7 @@ constexpr uint32_t kListMax = 32;  // FROXEL_LIST_MAX (FroxelLists.hlsl)
 struct State
 {
     ComPtr<ID3D12Resource> statsReadback;
+    ComPtr<ID3D12CommandSignature> dispatchSignature;
     uint64_t statsFrame[kStatsSlots] = {};
     uint64_t statsFence[kStatsSlots] = {};
     int lastStatsSlot = -1;
@@ -157,49 +158,98 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     const bool shadows = frameRefs(fc, vsm);
     const D3D12_GPU_VIRTUAL_ADDRESS constants = view.frameConstants;
     const uint32_t localLights = fc.resources.vsmLocalLights, slotOfLight = fc.resources.vsmSlotOfLight;
-    ID3D12PipelineState* pi = fc.shaders.compute("Passes/Atmosphere/FroxelIntegrate");
+    const bool queued = !q.has("atmosphere.froxels.integration_queue") || q.boolean("atmosphere.froxels.integration_queue");
+    ID3D12PipelineState* pi = fc.shaders.compute(queued ? "Passes/Atmosphere/FroxelIntegrate.QUEUED1" : "Passes/Atmosphere/FroxelIntegrate.QUEUED0");
     // Readers per tile: the integration stops where no reader reaches (FroxelIntegrate.hlsl).
     const bool bounded = readers.valid();
     const BufferRef functions = fc.resources.lightFunctions;  // E's light functions (A8; invalid: none)
+    BufferRef work, workArgs, air;
+    ID3D12CommandSignature* signature = nullptr;
+    if (queued)
+    {
+        const uint64_t count = (uint64_t)grid.gridX * grid.gridY * grid.slices;
+        if (count * 64 >= (1ull << 32)) fail("froxel air scratch exceeds 32-bit raw buffer addressing");
+        work = g.createBuffer({ "S froxel integration queue", 16 + count * 4, 0 });
+        workArgs = g.createBuffer({ "S froxel integration args", 16, 0 });
+        air = g.createBuffer({ "S froxel FP32 air slices", count * 64, 0 });
+        State& state = fc.state<State>(kStateKey);
+        if (!state.dispatchSignature)
+        {
+            D3D12_INDIRECT_ARGUMENT_DESC arg{};
+            arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+            D3D12_COMMAND_SIGNATURE_DESC desc{};
+            desc.ByteStride = 16; desc.NumArgumentDescs = 1; desc.pArgumentDescs = &arg;
+            check(fc.device.d3d()->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(&state.dispatchSignature)), "froxel queue dispatch signature");
+        }
+        signature = state.dispatchSignature.Get();
+    }
+    auto inputs = [=](PassBuilder& b) {
+        b.use(lights, Use::SrvCompute);
+        if (bounded) b.use(readers, Use::SrvCompute);
+        if (media.valid()) b.use(media, Use::SrvCompute);
+        if (functions.valid()) b.use(functions, Use::SrvCompute);
+        b.use(tlut, Use::SrvCompute); b.use(mlut, Use::SrvCompute);
+        if (shadows)
+        {
+            b.use(vsm.table, Use::SrvCompute); b.use(vsm.atlas, Use::SrvCompute);
+            b.use(vsm.blocks, Use::SrvCompute); b.use(vsm.bound, Use::SrvCompute);
+            b.use(vsm.stats, Use::UavCompute);
+            if (vsm.use.valid()) b.use(vsm.use, Use::UavCompute);
+        }
+    };
+    auto bind = [=](PassContext& ctx, uint32_t workDescriptor, uint32_t airDescriptor) {
+        uint32_t k[20] = { ctx.srv(lights), workDescriptor == 0xFFFFFFFFu ? ctx.uav(volume) : 0xFFFFFFFFu, ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
+                           bounded ? ctx.srv(readers) : 0xFFFFFFFFu, 0xFFFFFFFFu, media.valid() ? ctx.srv(media) : 0xFFFFFFFFu,
+                           functions.valid() ? ctx.srv(functions) : 0xFFFFFFFFu, workDescriptor, airDescriptor };
+        if (shadows)
+        {
+            k[4] = ctx.srv(vsm.table); k[5] = ctx.srv(vsm.atlas); k[6] = ctx.srv(vsm.blocks);
+            k[7] = vsm.constantsCbv; k[8] = ctx.srv(vsm.bound); k[15] = ctx.uav(vsm.stats);
+            std::memcpy(&k[9], &grid.shadowTexelsPerTile, 4);
+        }
+        std::memcpy(&k[10], &stepAltitude, 4);
+        k[11] = experiment | (walkStats ? 0x10000u : 0u);
+        ctx.bindFrameConstants(constants); ctx.computeConstants(k, 20);
+    };
+    if (queued)
+    {
+        ID3D12PipelineState* begin = fc.shaders.compute("Passes/Atmosphere/FroxelQueueArgs.MODE0");
+        ID3D12PipelineState* prepare = fc.shaders.compute("Passes/Atmosphere/FroxelQueuePrepare");
+        ID3D12PipelineState* args = fc.shaders.compute("Passes/Atmosphere/FroxelQueueArgs.MODE1");
+        ID3D12PipelineState* integrate = fc.shaders.compute("Passes/Atmosphere/FroxelQueueIntegrate");
+        g.addPass("s.froxel.queue.begin" + suffix, QueueType::Compute,
+                  [&](PassBuilder& b) { b.use(work, Use::UavCompute); },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.uav(work), 0, 0, 0 };
+                      ctx.cmd->SetPipelineState(begin); ctx.computeConstants(k, 4); ctx.cmd->Dispatch(1, 1, 1);
+                  });
+        g.addPass("s.froxel.queue.prepare" + suffix, QueueType::Compute,
+                  [&](PassBuilder& b) { inputs(b); b.use(work, Use::UavCompute); b.use(air, Use::UavCompute); },
+                  [=](PassContext& ctx) {
+                      ctx.cmd->SetPipelineState(prepare); bind(ctx, ctx.uav(work), ctx.uav(air));
+                      ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+                  });
+        g.addPass("s.froxel.queue.args" + suffix, QueueType::Compute,
+                  [&](PassBuilder& b) { b.use(work, Use::UavCompute); b.use(workArgs, Use::UavCompute); },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.uav(work), ctx.uav(workArgs), 0, 0 };
+                      ctx.cmd->SetPipelineState(args); ctx.computeConstants(k, 4); ctx.cmd->Dispatch(1, 1, 1);
+                  });
+        g.addPass("s.froxel.queue.integrate" + suffix, QueueType::Compute,
+                  [&](PassBuilder& b) { inputs(b); b.use(work, Use::SrvCompute); b.use(workArgs, Use::IndirectArgs); b.use(air, Use::UavCompute); },
+                  [=](PassContext& ctx) {
+                      ctx.cmd->SetPipelineState(integrate); bind(ctx, ctx.srv(work), ctx.uav(air));
+                      ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(workArgs), 0, nullptr, 0);
+                  });
+    }
     g.addPass("s.froxel.integrate" + suffix, QueueType::Compute,
               [&](PassBuilder& b) {
-                  b.use(lights, Use::SrvCompute);
-                  if (bounded) b.use(readers, Use::SrvCompute);
-                  if (media.valid()) b.use(media, Use::SrvCompute);
-                  if (functions.valid()) b.use(functions, Use::SrvCompute);
-                  b.use(tlut, Use::SrvCompute);
-                  b.use(mlut, Use::SrvCompute);
-                  b.use(volume, Use::UavCompute);
+                  inputs(b); b.use(volume, Use::UavCompute);
+                  if (queued) b.use(air, Use::SrvCompute);
                   if (keepVolume) b.keep();
-                  if (shadows)
-                  {
-                      b.use(vsm.table, Use::SrvCompute);
-                      b.use(vsm.atlas, Use::SrvCompute);
-                      b.use(vsm.blocks, Use::SrvCompute);
-                      b.use(vsm.bound, Use::SrvCompute);
-                      b.use(vsm.stats, Use::UavCompute);  // error word (INTERFACES 3.6); walk statistics with walkStats
-                      if (vsm.use.valid()) b.use(vsm.use, Use::UavCompute);  // shadow.vsm.use_stats (vsmEntry)
-                  }
               },
               [=](PassContext& ctx) {
-                  uint32_t k[20] = { ctx.srv(lights), ctx.uav(volume), ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
-                                     bounded ? ctx.srv(readers) : 0xFFFFFFFFu, 0xFFFFFFFFu, media.valid() ? ctx.srv(media) : 0xFFFFFFFFu,
-                                     functions.valid() ? ctx.srv(functions) : 0xFFFFFFFFu, 0, 0 };
-                  if (shadows)
-                  {
-                      k[4] = ctx.srv(vsm.table);
-                      k[5] = ctx.srv(vsm.atlas);
-                      k[6] = ctx.srv(vsm.blocks);
-                      k[7] = vsm.constantsCbv;
-                      k[8] = ctx.srv(vsm.bound);
-                      std::memcpy(&k[9], &grid.shadowTexelsPerTile, 4);
-                      k[15] = ctx.uav(vsm.stats);
-                  }
-                  std::memcpy(&k[10], &stepAltitude, 4);
-                  k[11] = experiment | (walkStats ? 0x10000u : 0u);
-                  ctx.cmd->SetPipelineState(pi);
-                  ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 20);
+                  ctx.cmd->SetPipelineState(pi); bind(ctx, 0xFFFFFFFFu, queued ? ctx.srv(air) : 0xFFFFFFFFu);
                   ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
               });
     if (!shadows) tracks::pending("S.froxels: sun shadows of the air (shadowPages not recorded this frame)");

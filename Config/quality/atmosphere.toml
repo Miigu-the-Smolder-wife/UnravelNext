@@ -20,6 +20,7 @@ sky_view_lut = [192, 128]
 sky_view_segments = 128              # quadratic segments x Gauss-Legendre 4 along each sky ray
 
 [atmosphere.froxels]
+integration_queue = true             # same air-slice estimator in dense waves; false is the tile-scheduled A/B path
 tile_px = 24
 depth_slices = 64                    # exponential in view depth between near_m and far_m (<= 64: one thread per slice)
 lights_max = 32                      # per froxel list (<= 32, FROXEL_LIST_MAX); more reaching a froxel are counted
