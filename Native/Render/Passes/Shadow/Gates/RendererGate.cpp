@@ -302,7 +302,11 @@ int main(int argc, char** argv)
         std::string frameLogPath, giCacheStatsPath;
         bool listLights = false;
         bool stripNormalMaps = false;
-        bool stripEmissive = false;  // --strip-emissive (diagnostics): every material's emission 0 (emitters by lights only)  // --strip-normal-maps (diagnostics): every material without its normal map
+        bool stripEmissive = false;
+        bool diffuseMaterials = false;
+        bool whiteMaterials = false;
+        int64_t onlyLight = -1;
+        bool stripClearcoat = false;  // --strip-clearcoat (diagnostics): every clearcoat 0 (the reference tracer has no coat layer)  // --only-light i (diagnostics): every other light's intensity 0  // --white-materials (diagnostics): every material untextured grey 0.5 Lambert (with --diffuse-materials' rules)  // --diffuse-materials (diagnostics): specular 0, metallic 0, roughness 1, no texture maps but colour  // --strip-emissive (diagnostics): every material's emission 0 (emitters by lights only)  // --strip-normal-maps (diagnostics): every material without its normal map
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -405,7 +409,11 @@ int main(int argc, char** argv)
             }
             else if (a == "--list-lights") listLights = true;
             else if (a == "--strip-normal-maps") stripNormalMaps = true;
-            else if (a == "--strip-emissive") stripEmissive = true;  // (with --save-scene: the same scene for unx_reference)  // print the scene's lights and cameras and stop (no GPU)
+            else if (a == "--strip-emissive") stripEmissive = true;
+            else if (a == "--diffuse-materials") diffuseMaterials = true;
+            else if (a == "--white-materials") diffuseMaterials = whiteMaterials = true;
+            else if (a == "--only-light") onlyLight = std::stoll(next());
+            else if (a == "--strip-clearcoat") stripClearcoat = true;  // (with --save-scene: the same scene for unx_reference)  // print the scene's lights and cameras and stop (no GPU)
             else if (a == "--frame-log") frameLogPath = next();
             else if (a == "--gi-cache-stats") giCacheStatsPath = next();
             else if (a == "--origin-shift")
@@ -434,6 +442,7 @@ int main(int argc, char** argv)
             for (const scene::Camera& c : ls.cameras)
                 logf("camera '%s' at (%.3f, %.3f, %.3f) forward (%.3f, %.3f, %.3f), ev100 %.2f\n", c.name.c_str(), c.position.x, c.position.y, c.position.z, c.forward.x,
                      c.forward.y, c.forward.z, c.ev100);
+            for (const scene::Camera& c : ls.cameras) logf("camera '%s' vertical fov %.6f rad, near %.4f m\n", c.name.c_str(), c.verticalFov, c.nearPlane);
             for (const scene::CameraPath& p : ls.paths)
                 logf("path '%s': %zu keys over %.2f s\n", p.name.c_str(), p.keys.size(), p.keys.empty() ? 0.0f : p.keys.back().time - p.keys.front().time);
             logf("sun direction (%.4f, %.4f, %.4f), %g lux\n", ls.sun.direction.x, ls.sun.direction.y, ls.sun.direction.z, ls.sun.illuminance);
@@ -454,6 +463,9 @@ int main(int argc, char** argv)
                 logf("material %zu '%s': class %u, baseColor (%.3f, %.3f, %.3f), roughness %.3f, metallic %.2f, specular %.2f, base texture %s, normal %u, roughMetal %u, emissive (%g, %g, %g)\n", i,
                      m.name.c_str(), (uint32_t)m.cls, m.baseColor.x, m.baseColor.y, m.baseColor.z, m.roughness, m.metallic, m.specular, tex.c_str(), m.normalTexture,
                      m.roughMetalTexture, m.emissive.x, m.emissive.y, m.emissive.z);
+                if (m.clearcoat > 0 || m.sheenColor.x > 0 || m.sheenColor.y > 0 || m.sheenColor.z > 0 || m.anisotropy > 0)
+                    logf("    layers: clearcoat %.3f (roughness %.3f, ior %.2f), sheen (%.3f, %.3f, %.3f), anisotropy %.3f\n", m.clearcoat, m.clearcoatRoughness,
+                         m.clearcoatIor, m.sheenColor.x, m.sheenColor.y, m.sheenColor.z, m.anisotropy);
             }
             return 0;
         }
@@ -492,6 +504,28 @@ int main(int argc, char** argv)
         }
         if (stripNormalMaps)
             for (scene::Material& m : s.materials) m.normalTexture = scene::kNone;
+        if (stripClearcoat)
+            for (scene::Material& m : s.materials) m.clearcoat = 0;
+        if (onlyLight >= 0)
+            for (size_t i = 0; i < s.lights.size(); ++i)
+                if ((int64_t)i != onlyLight) s.lights[i].intensity = 0;
+        if (diffuseMaterials)
+            for (scene::Material& m : s.materials)
+            {
+                m.specular = 0;
+                m.metallic = 0;
+                m.roughness = 1;
+                m.roughMetalTexture = scene::kNone;
+                m.normalTexture = scene::kNone;
+                if (whiteMaterials && m.cls == scene::MaterialClass::Standard)
+                {
+                    m.clearcoat = 0;
+                    m.sheenColor = { 0, 0, 0 };
+                    m.anisotropy = 0;
+                    m.baseColor = { 0.5f, 0.5f, 0.5f };
+                    m.baseColorTexture = scene::kNone;
+                }
+            }
         if (stripEmissive)
             for (scene::Material& m : s.materials)
             {
@@ -811,11 +845,13 @@ int main(int argc, char** argv)
                             const TextureDesc& td = g.desc(source);
                             slot->format = td.format;
                             slot->width = td.width;
-                            slot->height = td.height;
+                            // view.reflection holds per-tile rows below the image (ReflectionSystem: height + tiles):
+                            // only the view's rows are the layer
+                            slot->height = layer == "refl" ? std::min(td.height, rendered.view.height) : td.height;
                             D3D12_RESOURCE_DESC rd{};
                             rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-                            rd.Width = td.width;
-                            rd.Height = td.height;
+                            rd.Width = slot->width;
+                            rd.Height = slot->height;
                             rd.DepthOrArraySize = 1;
                             rd.MipLevels = 1;
                             rd.Format = td.format;
@@ -839,6 +875,7 @@ int main(int argc, char** argv)
                         slot->written = true;
                         ID3D12Resource* rb = slot->buffer.Get();
                         const D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = slot->footprint;
+                        const D3D12_BOX box{ 0, 0, 0, slot->width, slot->height, 1 };
                         g.addPass("s.gate.capture", QueueType::Graphics,
                                   [&](PassBuilder& b) {
                                       b.use(source, Use::CopySrc);
@@ -849,7 +886,7 @@ int main(int argc, char** argv)
                                       dst.PlacedFootprint = fp;
                                       D3D12_TEXTURE_COPY_LOCATION src{ ctx.resource(source), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
                                       src.SubresourceIndex = 0;
-                                      ctx.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                                      ctx.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
                                   });
                     }
                 }
