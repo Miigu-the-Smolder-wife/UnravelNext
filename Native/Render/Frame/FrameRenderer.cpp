@@ -269,7 +269,9 @@ void FrameRenderer::setupUpscale(FrameContext& frame)
     u.viewProj = v.viewProj;
     u.proj = v.proj;
     const bool sameSize = m_upscalePrevWidth == W && m_upscalePrevHeight == H;
-    u.prevViewProj = m_upscaleValid && sameSize ? m_upscalePrevViewProj : v.viewProj;
+    // (a cut or restore has no previous view here either: the output view's motion blur read the pre-cut camera and smeared
+    // the first frame after every cut - redesign V2 P0 cut captures)
+    u.prevViewProj = m_upscaleValid && sameSize && frame.discontinuity == 0 ? m_upscalePrevViewProj : v.viewProj;
     const float exposure = 1.0f / (1.2f * std::exp2(v.ev100));
     u.exposureRatio = m_upscaleValid && m_upscalePrevExposure > 0 ? exposure / m_upscalePrevExposure : 1.0f;
     u.reset = !m_upscaleValid || !sameSize || frame.discontinuity != 0;
