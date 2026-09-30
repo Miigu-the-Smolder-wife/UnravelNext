@@ -1,0 +1,2 @@
+furnace (value / expected; cache L = 2): 129600 surface samples: K 51259, M 38868 (mean 0.9990, worst 4.93 %, 3 beyond 
+RESULT FAIL
