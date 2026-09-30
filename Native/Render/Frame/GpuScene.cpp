@@ -1152,6 +1152,44 @@ void GpuScene::rebase(float3 shift)
     }
 }
 
+void GpuScene::setLights(std::span<const uint32_t> indices)
+{
+    if (!m_source) fail("GpuScene::setLights: no scene uploaded");
+    bool geometry = false, any = false;
+    for (uint32_t i : indices)
+    {
+        if (i >= m_lights.size() || i >= m_source->lights.size())
+            fail("GpuScene::setLights: light %u (the GPU scene has %zu, the source %zu; lights are not added after upload)", i, m_lights.size(), m_source->lights.size());
+        const scene::Light& l = m_source->lights[i];
+        gpu::Light g{};
+        g.position = l.position - m_originOffset;
+        g.forward = l.forward;
+        g.right = l.right;
+        g.range = l.range;
+        g.intensity = l.intensity;
+        g.color = l.color;
+        const float ci = std::cos(l.spotInner), co = std::cos(l.spotOuter);
+        g.spotScale = 1.0f / std::max(ci - co, 1e-4f);
+        g.spotOffset = -co * g.spotScale;
+        g.size = l.size;
+        g.typeFlags = (uint32_t)l.type | ((l.castShadow ? 1u : 0u) << 8) | (0xFFFFu << 16);
+        const gpu::Light& old = m_lights[i];
+        const bool shape = std::memcmp(&g.position, &old.position, sizeof g.position) != 0 || std::memcmp(&g.forward, &old.forward, sizeof g.forward) != 0 ||
+                           std::memcmp(&g.right, &old.right, sizeof g.right) != 0 || g.range != old.range || g.spotScale != old.spotScale ||
+                           g.spotOffset != old.spotOffset || std::memcmp(&g.size, &old.size, sizeof g.size) != 0 || g.typeFlags != old.typeFlags;
+        const bool radiometric = g.intensity != old.intensity || std::memcmp(&g.color, &old.color, sizeof g.color) != 0;
+        if (!shape && !radiometric) continue;
+        g.revision = old.revision + 1;
+        m_lights[i] = g;
+        geometry = geometry || shape;
+        any = true;
+    }
+    if (!any) return;
+    if (geometry) ++m_revision;
+    release(m_lightBuffer);
+    createLightBuffer(m_lights);
+}
+
 // ---- C2b runtime pool ----------------------------------------------------------------------------------------------
 
 uint32_t GpuScene::RangeAllocator::allocate(uint32_t count)

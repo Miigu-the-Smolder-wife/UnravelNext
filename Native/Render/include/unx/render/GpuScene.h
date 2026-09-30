@@ -195,6 +195,13 @@ public:
     // over the instances, no re-upload); lights are re-uploaded. Call before the frame's transform updates.
     void rebase(float3 shift);
     float3 originOffset() const { return m_originOffset; }  // sum of the shifts applied since upload
+    // Light edits (RENDERER_REDESIGN_V2 3.3, the renderer gate's --light-toggle-at; a game's lamp switch): the lights at
+    // 'indices' are packed from source lights[i] again and the table is re-uploaded (as rebase does). A change of
+    // intensity or colour bumps only those lights' revision (per-light readers compare it: M's area-light stability; the
+    // GI cache sees the change through its own window test); a change of type, position, direction, range, size, spot
+    // angles or shadow flag also bumps the scene revision (S's local pages, the GI epoch, R's ray scene). Call before the
+    // frame's constants are allocated.
+    void setLights(std::span<const uint32_t> indices);
     // Material textures published by M's texture system (INTERFACES_KO.md 6.3, v1.10): one entry per scene material.
     // Rewrites the material buffer (new SRV; the old one is released when the GPU is done) and bumps the revision of the
     // materials whose textures changed and the scene revision. Call before any frame constants of the frame are
