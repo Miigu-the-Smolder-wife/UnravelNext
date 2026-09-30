@@ -1,0 +1,75 @@
+RayScene: 1 static + 0 dynamic instances (0 deformed), 1 mesh BLAS (14 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 10 ms (records and mesh BLAS 4.2, proxies 0.0, deformed setup 1.3, static TLAS and records 1.8, first dynamic build 2.3)
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 1 planar reflector planes from 2 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 39 -> 38, resources 24 -> 24; first differing pass 21 'r.refl.begin' (was 'r.refl.history.clear')
+render graph: plan rebuilt (3): passes 38 -> 38, resources 24 -> 24; first differing pass: none; resource 22 'R reflection rays' (was 'R reflection rays': 67108864 -> 671088640 bytes)
+cache scan: 50858 live updated entries; off by > 2 %: SH irradiance 3913, texel mean 83, texel minimum 2698 (5176 recorded)
+furnace anchors outside the free room: 0
+furnace (value / expected; cache L = 2): 129600 surface samples: K 51259, M 38868 (mean 1.0007, worst 3.20 %, 0 beyond 3 % + z sigma), G 39473 (mean 1.0003, worst 16.49 %) -> PASS
+RayScene: 1 static + 0 dynamic instances (0 deformed), 1 mesh BLAS (2 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 11 ms (records and mesh BLAS 3.5, proxies 0.0, deformed setup 1.7, static TLAS and records 2.9, first dynamic build 2.7)
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 1 planar reflector planes from 2 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 39 -> 38, resources 24 -> 24; first differing pass 21 'r.refl.begin' (was 'r.refl.history.clear')
+render graph: plan rebuilt (3): passes 38 -> 38, resources 24 -> 24; first differing pass: none; resource 22 'R reflection rays' (was 'R reflection rays': 67108864 -> 335544320 bytes)
+sky mirror (L = 1): 129600 surface samples: K 0, M 129600 (mean 1.0000, worst 0.00 %), G 0 -> PASS
+RayScene: 2 static + 0 dynamic instances (0 deformed), 2 mesh BLAS (4 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 7 ms (records and mesh BLAS 1.3, proxies 0.0, deformed setup 1.4, static TLAS and records 2.7, first dynamic build 1.4)
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 1 planar reflector planes from 2 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 39 -> 38, resources 24 -> 24; first differing pass 21 'r.refl.begin' (was 'r.refl.history.clear')
+render graph: plan rebuilt (3): passes 38 -> 38, resources 24 -> 24; first differing pass: none; resource 22 'R reflection rays' (was 'R reflection rays': 67108864 -> 167772160 bytes)
+textured wall in a mirror: 14508 M pixels on the wall's reflection (mean value / expected 0.9997, worst 6.82 %, 0 beyond 3 % + z sigma) -> PASS
+RayScene: 1 static + 1 dynamic instances (1 deformed), 1 mesh BLAS (2 tris, 0.0 MB compacted from 0.0 MB), deformed 64 tris / 80 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 569 ms (records and mesh BLAS 1.1, proxies 0.8, deformed setup 2.0, static TLAS and records 2.3, first dynamic build 562.7)
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 1 planar reflector planes from 2 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 44 -> 43, resources 31 -> 31; first differing pass 25 'r.refl.begin' (was 'r.refl.history.clear')
+render graph: plan rebuilt (3): passes 43 -> 43, resources 31 -> 31; first differing pass: none; resource 28 'R reflection rays' (was 'R reflection rays': 67108864 -> 167772160 bytes)
+render graph: plan rebuilt (4): passes 43 -> 42, resources 31 -> 31; first differing pass 1 'r.as.deform' (was 'r.as.exact.patch')
+RayScene: 1 static + 1 dynamic instances (1 deformed), 1 mesh BLAS (2 tris, 0.0 MB compacted from 0.0 MB), deformed 64 tris / 80 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 7 ms (records and mesh BLAS 1.0, proxies 0.8, deformed setup 2.3, static TLAS and records 1.7, first dynamic build 1.1)
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 1 planar reflector planes from 2 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 41 -> 40, resources 28 -> 28; first differing pass 23 'r.refl.begin' (was 'r.refl.history.clear')
+render graph: plan rebuilt (3): passes 40 -> 40, resources 28 -> 28; first differing pass: none; resource 26 'R reflection rays' (was 'R reflection rays': 67108864 -> 167772160 bytes)
+  M outlier at pixel (792, 524): 0.0000 (expected 5.0000, sigma 0.0000, hit NoV 1.000; surface (0.000, 0.000, 0.000) roughness 0.00)
+    neighbour -1: 0.0000 / 0.0000
+    neighbour +1: 5.0000 / 5.0000
+  M outlier at pixel (812, 524): 0.0000 (expected 5.0000, sigma 0.0000, hit NoV 1.000; surface (0.000, 0.000, 0.000) roughness 0.00)
+    neighbour -1: 5.0000 / 5.0000
+    neighbour +1: 0.0000 / 5.0000
+  M outlier at pixel (816, 524): 0.0000 (expected 5.0000, sigma 0.0000, hit NoV 1.000; surface (0.000, 0.000, 0.000) roughness 0.00)
+    neighbour -1: 0.0000 / 5.0000
+    neighbour +1: 0.0000 / 5.0000
+  M outlier at pixel (820, 524): 0.0000 (expected 5.0000, sigma 0.0000, hit NoV 1.000; surface (0.000, 0.000, 0.000) roughness 0.00)
+    neighbour -1: 0.0000 / 5.0000
+    neighbour +1: 0.0000 / 5.0000
+  M outlier at pixel (824, 524): 0.0000 (expected 5.0000, sigma 0.0000, hit NoV 1.000; surface (0.000, 0.000, 0.000) roughness 0.00)
+    neighbour -1: 0.0000 / 5.0000
+    neighbour +1: 0.0000 / 5.0000
+  M outlier at pixel (828, 524): 0.0000 (expected 5.0000, sigma 0.0000, hit NoV 1.000; surface (0.000, 0.000, 0.000) roughness 0.00)
+    neighbour -1: 0.0000 / 5.0000
+    neighbour +1: 0.0000 / 5.0000
+exact set control (no exact set, proxy with holes): mean value / expected 0.5066
+exact set: 1 of 1 slot(s) occupied; 3808 M pixels on the panel's reflection (mean value / expected 1.0000, worst 0.00 %, 0 beyond 3 % + z sigma) -> PASS
+RayScene: 2 static + 0 dynamic instances (0 deformed), 2 mesh BLAS (4 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 5 ms (records and mesh BLAS 1.7, proxies 0.0, deformed setup 1.0, static TLAS and records 1.6, first dynamic build 0.9)
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 1 planar reflector planes from 2 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 39 -> 38, resources 24 -> 24; first differing pass 21 'r.refl.begin' (was 'r.refl.history.clear')
+render graph: plan rebuilt (3): passes 38 -> 38, resources 24 -> 24; first differing pass: none; resource 22 'R reflection rays' (was 'R reflection rays': 67108864 -> 167772160 bytes)
+  M outlier at pixel (1104, 556): 1.2490 (expected 1.2902, sigma 0.0000, hit NoV 1.000; surface (0.000, 0.000, 0.000) roughness 0.00)
+    neighbour -1: 1.3184 / 1.3179
+    neighbour +1: 1.2637 / 1.2626
+local light at hits: 14508 M pixels on the lit wall's reflection (mean value / expected 0.9999, worst 3.19 %, 1 beyond 3 %; GGX-tail expectation 12.57, allowed 29) -> PASS
+RayScene: 1 static + 1 dynamic instances (0 deformed), 1 mesh BLAS (2 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 8 ms (records and mesh BLAS 1.5, proxies 0.0, deformed setup 1.3, static TLAS and records 3.3, first dynamic build 1.4)
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.001), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 1 planar reflector planes from 2 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 39 -> 38, resources 24 -> 24; first differing pass 21 'r.refl.begin' (was 'r.refl.history.clear')
+render graph: plan rebuilt (3): passes 38 -> 38, resources 24 -> 24; first differing pass: none; resource 22 'R reflection rays' (was 'R reflection rays': 67108864 -> 167772160 bytes)
+area light in a mirror (emitters on): 1110 M pixels on the light's reflection (mean value / expected 0.9995, worst 0.08 %, 0 beyond 3 % + z sigma) -> PASS
+debug layer + GPU-based validation errors: 0
+RESULT PASS

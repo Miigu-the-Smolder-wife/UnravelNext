@@ -1,0 +1,42 @@
+[0/2] Re-checking globbed directories...
+[1/694] Generating CXX dyndep file CMakeFiles\unx_meshoptimizer.dir\CXX.dd
+[2/673] Generating CXX dyndep file Tools\ShaderCompiler\CMakeFiles\unx_shaderc.dir\CXX.dd
+[3/142] DirectStorage runtime DLLs
+[4/142] Build identity
+[5/142] Generating CXX dyndep file Native\Core\CMakeFiles\unx_core.dir\CXX.dd
+[6/136] Generating CXX dyndep file Native\Scene\CMakeFiles\unx_scene.dir\CXX.dd
+[7/132] HLSL Passes/Reflection/ReflectionUpscaleAccumulate
+[8/132] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_material.dir\CXX.dd
+[9/128] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_raytracing.dir\CXX.dd
+[10/123] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_fx.dir\CXX.dd
+[11/117] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_gi.dir\CXX.dd
+[12/114] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_atmosphere.dir\CXX.dd
+[13/106] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_debug.dir\CXX.dd
+[14/104] Scanning C:\Users\USER\UnravelNext-render-followup\Native\Render\src\Harness.cpp for CXX dependencies
+[15/104] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_decal.dir\CXX.dd
+[16/101] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_hair.dir\CXX.dd
+[17/99] Generating CXX dyndep file Native\Render\CMakeFiles\unx_render.dir\CXX.dd
+[18/93] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_lights.dir\CXX.dd
+[19/91] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_shading.dir\CXX.dd
+[20/83] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_shadow.dir\CXX.dd
+[21/79] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_streaming.dir\CXX.dd
+[22/77] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_viewmodel.dir\CXX.dd
+[23/75] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_volume.dir\CXX.dd
+[24/72] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_water.dir\CXX.dd
+[25/60] HLSL Passes/Reflection/ReflectionUpscaleControl
+[26/60] HLSL Passes/Reflection/ReflectionUpscaleSample
+[27/60] HLSL Passes/Shading/Upscale
+[28/60] Generating CXX dyndep file Tools\SceneGen\CMakeFiles\unx_scenegen.dir\CXX.dd
+[29/53] Generating CXX dyndep file Native\Render\CMakeFiles\unx_agility_exports.dir\CXX.dd
+[30/52] Building CXX object Native\Render\CMakeFiles\unx_render.dir\src\Harness.cpp.obj
+[31/52] Linking CXX static library lib\unx_render.lib
+[32/52] Generating CXX dyndep file Tools\ClusterBuilder\CMakeFiles\unx_clusterbuilder.dir\CXX.dd
+[33/48] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_visibility.dir\CXX.dd
+[34/46] Generating CXX dyndep file Native\Render\CMakeFiles\unx_frame.dir\CXX.dd
+[35/43] Generating CXX dyndep file Native\Render\CMakeFiles\unx_gate_shadow_renderergate.dir\CXX.dd
+[36/42] Scanning C:\Users\USER\UnravelNext-render-followup\Native\Render\Passes\Reflection\ReflectionSystem.cpp for CXX dependencies
+[37/42] Generating CXX dyndep file Native\Render\CMakeFiles\unx_module_reflection.dir\CXX.dd
+[38/41] Building CXX object Native\Render\CMakeFiles\unx_module_reflection.dir\Passes\Reflection\ReflectionSystem.cpp.obj
+[39/41] Linking CXX static library lib\unx_module_reflection.lib
+[40/41] Linking CXX executable bin\unx_gate_shadow_renderergate.exe
+build ok in 10.5 s -> C:\Users\USER\UnravelNext-render-followup\build\rendercheck (tracks: core;all)

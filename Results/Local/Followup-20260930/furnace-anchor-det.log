@@ -1,0 +1,26 @@
+RayScene: 1 static + 0 dynamic instances (0 deformed), 1 mesh BLAS (14 tris, 0.0 MB compacted from 0.0 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 7 ms (records and mesh BLAS 3.5, proxies 0.0, deformed setup 1.3, static TLAS and records 1.9, first dynamic build 0.7)
+RayScene resident (MB): static BLAS+TLAS 0.0 (BLAS 0.0, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 1 planar reflector planes from 2 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 117 -> 114, resources 29 -> 27; first differing pass 3 'r.gi.begin' (was 'r.gi.admit.grow'); resource 6 'GI cache' (was 'GI cache before admission growth')
+render graph: plan rebuilt (3): passes 114 -> 114, resources 27 -> 27; first differing pass: none; resource 25 'R reflection rays' (was 'R reflection rays': 67108864 -> 671088640 bytes)
+  M outlier at pixel (596, 728): 2.1406 (expected 2.0741, sigma 0.0000, hit NoV 0.844; surface (-1.065, 0.000, 2.976) roughness 0.05)
+    neighbour -1: 2.0775 / 2.0741
+    neighbour +1: 2.0742 / 2.0741
+  M outlier at pixel (688, 756): 2.1758 (expected 2.0743, sigma 0.0043, hit NoV 0.854; surface (-0.746, 0.000, 3.152) roughness 0.05)
+    neighbour -1: 2.0586 / 2.0743
+    neighbour +1: 2.0762 / 2.0743
+  M outlier at pixel (68, 788): 2.0143 (expected 2.0818, sigma 0.0002, hit NoV 0.677; surface (-2.286, 0.000, 3.328) roughness 0.05)
+    neighbour -1: 2.0391 / 2.0817
+    neighbour +1: 2.0540 / 2.0820
+  M outlier at pixel (76, 820): 2.0163 (expected 2.0825, sigma 0.0003, hit NoV 0.671; surface (-2.125, 0.000, 3.481) roughness 0.05)
+    neighbour -1: 2.0911 / 2.0823
+    neighbour +1: 2.0957 / 2.0827
+  M outlier at pixel (624, 996): 2.1712 (expected 2.0895, sigma 0.0008, hit NoV 0.612; surface (-0.601, 0.000, 4.073) roughness 0.05)
+    neighbour -1: 2.1087 / 2.0896
+    neighbour +1: 2.1784 / 2.0894
+  M outlier at pixel (628, 996): 2.1784 (expected 2.0894, sigma 0.0008, hit NoV 0.613; surface (-0.594, 0.000, 4.073) roughness 0.05)
+    neighbour -1: 2.1712 / 2.0895
+    neighbour +1: 2.1107 / 2.0893
+furnace (value / expected; cache L = 2): 129600 surface samples: K 51259, M 38868 (mean 1.0009, worst 4.89 %, 11 beyond 3 % + z sigma), G 39473 (mean 1.0002, worst 12.65 %) -> FAIL
+RESULT FAIL (furnace only), D3D12 errors: 0

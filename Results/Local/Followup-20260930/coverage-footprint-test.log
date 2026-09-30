@@ -1,0 +1,18 @@
+    within 0.75 px: 220101 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 2.84 per cutting triangle (worst 14), 2.57 per triangle overall
+    within 3 px: 122718 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 1.88 per cutting triangle (worst 12), 0.91 per triangle overall
+    within 30 px: 15893 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 1.50 per cutting triangle (worst 10), 0.09 per triangle overall
+    pixel footprint scale 1.000000: PASS
+    within 0.75 px: 183112 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 0.05 per cutting triangle (worst 4), 0.04 per triangle overall
+    within 3 px: 70883 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 0.03 per cutting triangle (worst 4), 0.01 per triangle overall
+    within 30 px: 7920 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 0.03 per cutting triangle (worst 1), 0.00 per triangle overall
+    pixel footprint scale 0.500000: PASS
+    within 0.75 px: 202748 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 0.04 per cutting triangle (worst 4), 0.04 per triangle overall
+    within 3 px: 90144 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 0.02 per cutting triangle (worst 3), 0.01 per triangle overall
+    within 30 px: 10667 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 0.02 per cutting triangle (worst 1), 0.00 per triangle overall
+    pixel footprint scale 0.666667: PASS
+    within 0.75 px: 209427 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 0.04 per cutting triangle (worst 3), 0.03 per triangle overall
+    within 3 px: 99070 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 0.02 per cutting triangle (worst 2), 0.01 per triangle overall
+    within 30 px: 11996 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 0.02 per cutting triangle (worst 2), 0.00 per triangle overall
+    pixel footprint scale 0.750000: PASS
+PASS coverage_mask_lut_matches_exact
+1/1 passed, D3D12 debug-layer errors: 0

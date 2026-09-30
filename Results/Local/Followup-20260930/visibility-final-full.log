@@ -1,0 +1,128 @@
+RayScene: 84 static + 0 dynamic instances (0 deformed), 3 mesh BLAS (53840 tris, 1.4 MB compacted from 3.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 9 ms (records and mesh BLAS 5.0, proxies 0.0, deformed setup 1.2, static TLAS and records 2.1, first dynamic build 1.0)
+RayScene resident (MB): static BLAS+TLAS 1.6 (BLAS 1.5, TLAS 0.03, descs+scratch 0.02), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 159 -> 149, resources 114 -> 115; first differing pass 0 'r.as.tlas.sync' (was 's.atmosphere.params'); resource 5 'RT static TLAS' (was 'S ms radiance')
+render graph: plan rebuilt (3): passes 149 -> 149, resources 115 -> 115; first differing pass: none; resource 97 'R reflection rays' (was 'R reflection rays': 67108864 -> 671088640 bytes)
+RayScene: 84 static + 0 dynamic instances (0 deformed), 3 mesh BLAS (53840 tris, 1.4 MB compacted from 3.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 6 ms (records and mesh BLAS 1.9, proxies 0.0, deformed setup 1.0, static TLAS and records 2.0, first dynamic build 1.1)
+RayScene resident (MB): static BLAS+TLAS 1.6 (BLAS 1.5, TLAS 0.03, descs+scratch 0.02), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 159 -> 130, resources 114 -> 115; first differing pass 0 'r.as.tlas.sync' (was 's.atmosphere.params'); resource 5 'RT static TLAS' (was 'S ms radiance')
+render graph: plan rebuilt (3): passes 130 -> 130, resources 115 -> 115; first differing pass: none; resource 97 'R reflection rays' (was 'R reflection rays': 67108864 -> 671088640 bytes)
+    occlusion on : frame 5, 38 instances, 373 nodes, 1984 clusters tested, 611 visible, triangles A/B/C 37154/680/0, deferred 41/0/146, overflow 0x0
+    occlusion off: frame 5, 74 instances, 625 nodes, 2468 clusters tested, 970 visible, triangles A/B/C 58600/680/0, deferred 0/0/0, overflow 0x0
+    frame 0: 1267624 of 3686400 pixels sky
+    8 frames: depth identical to rendering without occlusion culling
+PASS occlusion_is_conservative
+RayScene: 84 static + 0 dynamic instances (0 deformed), 3 mesh BLAS (53840 tris, 1.4 MB compacted from 3.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 6 ms (records and mesh BLAS 2.0, proxies 0.0, deformed setup 1.0, static TLAS and records 1.8, first dynamic build 0.8)
+RayScene resident (MB): static BLAS+TLAS 1.6 (BLAS 1.5, TLAS 0.03, descs+scratch 0.02), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 159 -> 149, resources 114 -> 115; first differing pass 0 'r.as.tlas.sync' (was 's.atmosphere.params'); resource 5 'RT static TLAS' (was 'S ms radiance')
+render graph: plan rebuilt (3): passes 149 -> 149, resources 115 -> 115; first differing pass: none; resource 97 'R reflection rays' (was 'R reflection rays': 67108864 -> 671088640 bytes)
+    289897 pixels: vis id -> (instance, cluster, triangle) covers the pixel centre at the stored depth (18 within 1/64 px of an edge)
+PASS vis_id_decodes_to_the_covering_triangle
+RayScene: 168 static + 0 dynamic instances (0 deformed), 3 mesh BLAS (53840 tris, 1.4 MB compacted from 3.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.1 MB dynamic 0.02 MB, load 5 ms (records and mesh BLAS 2.0, proxies 0.0, deformed setup 0.9, static TLAS and records 1.4, first dynamic build 0.8)
+RayScene resident (MB): static BLAS+TLAS 1.6 (BLAS 1.5, TLAS 0.05, descs+scratch 0.03), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 168 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 231 -> 200, resources 121 -> 120; first differing pass 0 'r.as.tlas.sync' (was 's.atmosphere.params'); resource 5 'RT static TLAS' (was 'S ms radiance')
+RayScene: 168 static + 0 dynamic instances (0 deformed), 3 mesh BLAS (53840 tris, 1.4 MB compacted from 3.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.1 MB dynamic 0.02 MB, load 5 ms (records and mesh BLAS 2.2, proxies 0.0, deformed setup 0.9, static TLAS and records 1.5, first dynamic build 0.8)
+RayScene resident (MB): static BLAS+TLAS 1.6 (BLAS 1.5, TLAS 0.05, descs+scratch 0.03), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 168 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 231 -> 200, resources 121 -> 120; first differing pass 0 'r.as.tlas.sync' (was 's.atmosphere.params'); resource 5 'RT static TLAS' (was 'S ms radiance')
+PASS depth_ties_choose_stable_primitive
+RayScene: 84 static + 0 dynamic instances (0 deformed), 3 mesh BLAS (53840 tris, 1.4 MB compacted from 3.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 5 ms (records and mesh BLAS 2.0, proxies 0.0, deformed setup 1.1, static TLAS and records 1.4, first dynamic build 0.8)
+RayScene resident (MB): static BLAS+TLAS 1.6 (BLAS 1.5, TLAS 0.03, descs+scratch 0.02), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 159 -> 122, resources 114 -> 108; first differing pass 0 'r.as.tlas.sync' (was 's.atmosphere.params'); resource 5 'RT static TLAS' (was 'S ms radiance')
+RayScene: 84 static + 0 dynamic instances (0 deformed), 3 mesh BLAS (53840 tris, 1.4 MB compacted from 3.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 6 ms (records and mesh BLAS 2.0, proxies 0.0, deformed setup 1.1, static TLAS and records 1.9, first dynamic build 1.1)
+RayScene resident (MB): static BLAS+TLAS 1.6 (BLAS 1.5, TLAS 0.03, descs+scratch 0.02), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+render graph: plan rebuilt (2): passes 159 -> 122, resources 114 -> 108; first differing pass 0 'r.as.tlas.sync' (was 's.atmosphere.params'); resource 5 'RT static TLAS' (was 'S ms radiance')
+    LOD 1 px : frame 0, 84 instances, 601 nodes, 926 clusters tested, 445 visible, triangles A/B/C 23721/128/0, deferred 0/0/0, overflow 0x0
+    source   : frame 0, 84 instances, 918 nodes, 7526 clusters tested, 2947 visible, triangles A/B/C 183253/640/0, deferred 0/0/0, overflow 0x0
+    115658 covered pixels at source detail; LOD cut: 0 holes, 0 extra pixels away from silhouettes
+PASS lod_cut_has_no_holes
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+render graph: plan rebuilt (2): passes 108 -> 126, resources 83 -> 83; first differing pass 0 'v.cull.reset' (was 'v.cull.chunkBounds')
+    service, hardware depth: frame 0, 84 instances, 586 nodes, 1072 clusters tested, 500 visible, triangles A/B/C 27471/320/0, deferred 0/0/0, overflow 0x0
+    service, pixel kernel  : frame 0, 44 instances, 312 nodes, 652 clusters tested, 264 visible, triangles A/B/C 14591/128/0, deferred 0/0/0, overflow 0x0
+    service, source detail : frame 0, 84 instances, 918 nodes, 7526 clusters tested, 3620 visible, triangles A/B/C 223808/0/0, deferred 0/0/0, overflow 0x0
+    service, sparse mask   : frame 0, 60 instances, 418 nodes, 808 clusters tested, 357 visible, triangles A/B/C 19592/320/0, deferred 0/0/0, overflow 0x0
+    service, tile-local    : frame 0, 60 instances, 418 nodes, 808 clusters tested, 357 visible, triangles A/B/C 19592/320/0, deferred 0/0/0, overflow 0x0
+    hardware depth: 0 uncovered; LOD vs source on 487085 terrain pixels (normal distance, 39156 silhouette pixels excluded): worst 0.120 m = 1.53 LOD px, 4292 beyond 1 LOD px; pixel kernel (masked left half, 524288 px): 0 depth mismatches, 0 bad instance/userData
+    tile-local vs whole-view raster, sparse mask (491520 px in set tiles): fragments inside 526072 vs 526072, outside 0 vs 504639; per-pixel differences in set tiles: fragments 0, depth 94662, ids at equal depth 0, whole-view vs hardware depth 0; pixels written outside 0; 449 pairs; depth difference worst 1025 ulp = 3.05e-05 = 0.0068 px lateral (0 px beyond 1/64 px)
+PASS raster_service
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+    491520 texels in 30 set tiles (491520 covered): 428306 exact, 63214 within the snap bound (worst 0.67 snap steps x G), 0 edge flips, 0 other; D16 worst 8.55e-06 (1 step 1.53e-05), 0 beyond; 0 texels written in unused slots
+PASS raster_service_tile_atlas
+V: instance hierarchy: 84 static instances in 7 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+render graph: plan rebuilt (2): passes 18 -> 21, resources 14 -> 17; first differing pass 0 'test.mask.upload' (was 'v.cull.chunkBounds'); resource 0 'test planar mask' (was 'v.depth')
+render graph: plan rebuilt (3): passes 21 -> 17, resources 17 -> 14; first differing pass 0 'v.cull.secondary.reset' (was 'test.mask.upload'); resource 0 'v.depth' (was 'test planar mask')
+    153995 mirror pixels (95982 covered): 0 differ from the unmasked view; 0 other pixels not VIS_NONE at depth 1
+    unmasked: frame 0, 78 instances, 621 nodes, 1696 clusters tested, 654 visible, triangles A/B/C 37363/1536/0, deferred 0/0/0, overflow 0x0
+    masked  : frame 1, 26 instances, 263 nodes, 1082 clusters tested, 214 visible, triangles A/B/C 12713/448/0, deferred 0/0/0, overflow 0x0
+PASS planar_mask_draws_only_mirror_pixels
+    within 0.75 px: 220101 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 2.84 per cutting triangle (worst 14), 2.57 per triangle overall
+    within 3 px: 122718 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 1.88 per cutting triangle (worst 12), 0.91 per triangle overall
+    within 30 px: 15893 triangles cut the pixel, masks differing from the exact one 0; subsamples tested exactly: 1.50 per cutting triangle (worst 10), 0.09 per triangle overall
+PASS coverage_mask_lut_matches_exact
+RayScene: 6 static + 0 dynamic instances (0 deformed), 6 mesh BLAS (8640 tris, 0.2 MB compacted from 0.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 6 ms (records and mesh BLAS 2.0, proxies 0.0, deformed setup 1.3, static TLAS and records 1.9, first dynamic build 1.1)
+RayScene resident (MB): static BLAS+TLAS 0.3 (BLAS 0.2, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 6 static instances in 3 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+render graph: plan rebuilt (2): passes 234 -> 200, resources 148 -> 146; first differing pass 0 'r.as.tlas.sync' (was 's.atmosphere.params'); resource 5 'RT static TLAS' (was 'S ms radiance')
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+    [defaults] stats (frame 1): triangles A/B/C 50/58/8532, list B 281, coverage fragments 70538 in 295 tiles, 349 blocks, 1 tiles of more than one block, capacity 262144, overflow 0x0
+    reference card (front winding, band A, back faces culled): 961 pixels, signed area -486.0 px (front < 0)
+    [defaults] frame 0: 282 tiles (1 of more than one block, deepest 51641 records), 65998 records of capacity 262144 (332 blocks); 65998 checked against the exact clip (172 duplicates of clipped pieces; worst area error 5.25e-04 px, depth 8.10e-06 relative, slivers < 1e-2 px2 7.97e-03, normal 0.77 degrees); 51641 see-through records; 60 pixels with a full opaque union, 60 opaqueCovered; 0 expected missing; 144 back-facing triangles culled, 1156 pixel fragments occluded by band A, 6933 marginal; 0 stale tiles, 0 stale depth ranges
+    [defaults] frame 1: 295 tiles (1 of more than one block, deepest 56000 records), 70538 records of capacity 262144 (349 blocks); 70538 checked against the exact clip (162 duplicates of clipped pieces; worst area error 5.24e-04 px, depth 1.25e-05 relative, slivers < 1e-2 px2 8.83e-03, normal 0.70 degrees); 56000 see-through records; 38 pixels with a full opaque union, 38 opaqueCovered; 0 expected missing; 144 back-facing triangles culled, 1070 pixel fragments occluded by band A, 327 marginal; 0 stale tiles, 0 stale depth ranges
+    [defaults] frame 2: 286 tiles (1 of more than one block, deepest 56000 records), 70349 records of capacity 262144 (340 blocks); 70349 checked against the exact clip (195 duplicates of clipped pieces; worst area error 5.23e-04 px, depth 7.62e-06 relative, slivers < 1e-2 px2 7.18e-03, normal 0.72 degrees); 56000 see-through records; 38 pixels with a full opaque union, 38 opaqueCovered; 0 expected missing; 144 back-facing triangles culled, 1024 pixel fragments occluded by band A, 308 marginal; 0 stale tiles, 0 stale depth ranges
+    [defaults] frame 3: 304 tiles (1 of more than one block, deepest 65916 records), 80513 records of capacity 262144 (368 blocks); 80513 checked against the exact clip (157 duplicates of clipped pieces; worst area error 5.32e-04 px, depth 2.08e-05 relative, slivers < 1e-2 px2 1.57e-02, normal 0.78 degrees); 65916 see-through records; 57 pixels with a full opaque union, 57 opaqueCovered; 0 expected missing; 144 back-facing triangles culled, 1024 pixel fragments occluded by band A, 4443 marginal; 0 stale tiles, 0 stale depth ranges
+RayScene: 6 static + 0 dynamic instances (0 deformed), 6 mesh BLAS (8640 tris, 0.2 MB compacted from 0.6 MB), deformed 0 tris / 0 verts (0 above proxy budget), TLAS static 0.0 MB dynamic 0.02 MB, load 5 ms (records and mesh BLAS 1.8, proxies 0.0, deformed setup 0.9, static TLAS and records 1.4, first dynamic build 0.8)
+RayScene resident (MB): static BLAS+TLAS 0.3 (BLAS 0.2, TLAS 0.00, descs+scratch 0.00), dynamic AS 0.0 (deformed BLAS 0.0, scratch 0.0, TLAS+scratch+descs 0.03, emitters 0.000), deformed vertices 0.0, records 0.0 (instances, geometries, proxy indices, vertex map, deform jobs)
+V: instance hierarchy: 6 static instances in 3 chunks (64 m cells, <= 256 each), 0 flat instances, 0 skinned (0 joint spheres)
+GI cache: 200000 entries, 524288 table slots, 250.8 MB (texels 97.7 MB), finest cell 0.062 m, cell 0.50 deg, 500000 rays = 7812 hemisphere updates per frame
+R reflections: 0 planar reflector planes from 0 flat mirror triangles (0 smooth-shaded mirror triangles stay on rays), 0.0 ms
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+render graph: plan rebuilt (2): passes 234 -> 200, resources 148 -> 146; first differing pass 0 'r.as.tlas.sync' (was 's.atmosphere.params'); resource 5 'RT static TLAS' (was 'S ms radiance')
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+V: capacity exceeded in 'main', frame 0 (bits 0x100): raise visibility.max_* (Stats::overflow; 0x100: the coverage record pool ran out, it grows from the next completed frame; 0x400: a shader loop reached its iteration bound or a coverage consistency check failed, a defect)
+render graph: plan rebuilt (3): passes 200 -> 200, resources 146 -> 146; first differing pass: none; resource 33 'v.coverage.stream' (was 'v.coverage.stream': 1048576 -> 2621440 bytes)
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+[d3d12 WARNING 820] ID3D12CommandList::ClearRenderTargetView: The clear values do not match those passed to resource creation. The clear operation is typically slower as a result; but will still clear to the desired value.
+    [small capacity floor] stats (frame 1): triangles A/B/C 50/58/8532, list B 281, coverage fragments 70538 in 295 tiles, 344 blocks, 1 tiles of more than one block, capacity 65536, overflow 0x100
+    reference card (front winding, band A, back faces culled): 961 pixels, signed area -486.0 px (front < 0)
+    missing: pixel 192097, area 0.274995, depth 0.0152161
+    missing: pixel 192098, area 0.224997, depth 0.0152161
+    missing: pixel 192099, area 0.174998, depth 0.0152161
+    missing: pixel 192100, area 0.124998, depth 0.0152161
+    missing: pixel 192101, area 0.0749991, depth 0.0152161
+    [small capacity floor] frame 0: 282 tiles (1 of more than one block, deepest 51179 records), 65536 records of capacity 65536 (331 blocks); 65536 checked against the exact clip (172 duplicates of clipped pieces; worst area error 5.25e-04 px, depth 8.10e-06 relative, slivers < 1e-2 px2 7.97e-03, normal 0.77 degrees); 51179 see-through records; 60 pixels with a full opaque union, 60 opaqueCovered; 427 expected missing (the pool was full); 144 back-facing triangles culled, 1156 pixel fragments occluded by band A, 6933 marginal; 0 stale tiles, 0 stale depth ranges
+    missing: pixel 192097, area 0.158447, depth 0.0178929
+    missing: pixel 192098, area 0.247312, depth 0.0178929
+    missing: pixel 192099, area 0.197312, depth 0.0178929
+    missing: pixel 192100, area 0.147313, depth 0.0178929
+    missing: pixel 192101, area 0.0973131, depth 0.0178929
+    [small capacity floor] frame 1: 295 tiles (1 of more than one block, deepest 50998 records), 65536 records of capacity 65536 (344 blocks); 65536 checked against the exact clip (162 duplicates of clipped pieces; worst area error 5.24e-04 px, depth 1.25e-05 relative, slivers < 1e-2 px2 8.83e-03, normal 0.70 degrees); 50998 see-through records; 38 pixels with a full opaque union, 38 opaqueCovered; 5002 expected missing (the pool was full); 144 back-facing triangles culled, 1070 pixel fragments occluded by band A, 327 marginal; 0 stale tiles, 0 stale depth ranges
+    [small capacity floor] frame 2: 286 tiles (1 of more than one block, deepest 56000 records), 70349 records of capacity 131072 (340 blocks); 70349 checked against the exact clip (195 duplicates of clipped pieces; worst area error 5.23e-04 px, depth 7.62e-06 relative, slivers < 1e-2 px2 7.18e-03, normal 0.72 degrees); 56000 see-through records; 38 pixels with a full opaque union, 38 opaqueCovered; 0 expected missing; 144 back-facing triangles culled, 1024 pixel fragments occluded by band A, 308 marginal; 0 stale tiles, 0 stale depth ranges
+    [small capacity floor] frame 3: 304 tiles (1 of more than one block, deepest 65916 records), 80513 records of capacity 131072 (368 blocks); 80513 checked against the exact clip (157 duplicates of clipped pieces; worst area error 5.32e-04 px, depth 2.08e-05 relative, slivers < 1e-2 px2 1.57e-02, normal 0.78 degrees); 65916 see-through records; 57 pixels with a full opaque union, 57 opaqueCovered; 0 expected missing; 144 back-facing triangles culled, 1024 pixel fragments occluded by band A, 4443 marginal; 0 stale tiles, 0 stale depth ranges
+    coverage layer exact over 3 frames in 2 configurations
+PASS coverage_layer_is_exact
+9/9 passed, D3D12 debug-layer errors: 0
