@@ -77,6 +77,6 @@
 
 ## 사용자 결정 (V2.1 뒤, 2026-09-30 밤)
 
-- **P0~P3 구현을 시작한다**(클라우드 Opus). 구현 브랜치는 `cloud/redesign-v2`(1adf2f1)다. `cloud/render-fixes` 542ee68(업스케일 WIP 5e31d8c 제외)에 main을 합친 것이다. 지시문은 Unravel `Docs/Rebuild/SESSION_PROMPTS_20260930_KO.md` D절에 있다.
+- **P0~P3 구현을 시작한다.** 클라우드가 아니라 이 PC의 일반 세션이 한다(사용자). 구현 브랜치는 `redesign-v2`(1adf2f1)이고, 작업 폴더는 `C:\Users\USER\UnravelNext-redesign`이다. `cloud/render-fixes` 542ee68(업스케일 WIP 5e31d8c 제외)에 main을 합친 것이다. 지시문은 Unravel `Docs/Rebuild/SESSION_PROMPTS_20260930_KO.md` D절에 있다.
 - **D-8 승인**(GI hit 직접광을 VSM·LTC로). D-1과 함께 기본이다.
 - D-2는 그대로 P3·MB-B 실측 뒤에 정한다. D-5′·D-9·D-11은 P0 카운터와 MB 실측 뒤에 올린다.
