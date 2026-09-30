@@ -62,7 +62,7 @@ using namespace unx;
 namespace
 {
 // Bumped whenever the estimator changes in a way that changes images: part of the cache key's quality hash.
-constexpr const char* kEstimatorVersion = "unx-reference-1";
+constexpr const char* kEstimatorVersion = "unx-reference-2";  // 2: A9 clearcoat and sheen
 
 struct Args
 {
@@ -276,6 +276,10 @@ std::string nowIso()
 
 std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const std::string& label, const reference::ResolvedCamera& cam, const QualityConfig& q)
 {
+    if (a.gpu || a.warp)
+        for (const scene::Material& m : s.materials)
+            if (m.clearcoat > 0 || m.sheenColor.x > 0 || m.sheenColor.y > 0 || m.sheenColor.z > 0)
+                fail("--device gpu/warp: the GPU tracer has no A9 clearcoat or sheen (material '%s'); render this scene on the CPU", m.name.c_str());
     const ReferenceKeys k = referenceKeys(q, a.spp, reference::hasSunCausticSurfaces(s), a.orderMin, a.orderMax, a.surfMin, a.surfMax, a.gpu, a.renderSeed);
     std::filesystem::path pfm = cachePath(s, label, a.width, a.height, k);
     if (a.warp) pfm.replace_filename(pfm.stem().string() + "_warp.pfm");  // never mistaken for a GPU reference
