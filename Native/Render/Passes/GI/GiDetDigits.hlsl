@@ -2,6 +2,7 @@
 // Deterministic update selection (gi.deterministic), one radix level: the requested entries in a tier's threshold age
 // bucket are ranked by a priority hash of their key and the frame (giDetPriority), not by the order their atomic fills
 // arrive in. Level L counts the entries whose priority matches the prefix resolved so far by their next 8 bits.
+// Tiers 0 and 1: the request tiers' threshold buckets; 3 and 4: their young ranges' (gi.update_tiers).
 // Mode 1 (P[0].w): the background updates instead (tier 2): every live entry not updated this frame, quota =
 // GI_H_BG_COUNT (the index-range background of the default mode depends on allocation order).
 // P[0] = { cache UAV, selection state UAV (raw, GI_DET_* layout), level 0..3, mode 0 (update list) | 1 (background) }
@@ -20,8 +21,12 @@ void main(uint i : SV_DispatchThreadID)
         const uint item = b.Load(h.offUpdate + i * 4);
         tier = item >> 31;
         entry = item & ~GI_TIER_HIT;
-        const uint2 select = b.Load2(GI_H_SELECT + tier * 16);  // threshold bucket, quota
-        if (select.y == 0 || giAgeBucket(b, h, entry) != select.x) return;
+        // gi.update_tiers: the young range (GI_H_SELECT_T0) resolves in state slot 3 + tier
+        const uint bucket = giPriorityBucket(b, h, entry);
+        const bool young = (b.Load(GI_P1_FLAGS) & 1u) != 0 && bucket >= GI_T0_BUCKET;
+        const uint2 select = b.Load2(young ? GI_H_SELECT_T0 + tier * 16 : GI_H_SELECT + tier * 16);  // threshold bucket, quota
+        if (select.y == 0 || bucket != select.x) return;
+        if (young) tier += 3;
     }
     else
     {

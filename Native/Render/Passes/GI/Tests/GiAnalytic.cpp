@@ -373,7 +373,8 @@ struct Outcome
 // radiance is not checked (not uniform).
 Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky, float3 sun,
             const std::function<double(float3, float3)>& expected, double expectedRadiance, uint32_t frames, uint32_t width, uint32_t height,
-            float skyBand = 1, float lobeAlpha = 0, const std::function<void(uint32_t, GpuScene&)>& edit = {})
+            float skyBand = 1, float lobeAlpha = 0, const std::function<void(uint32_t, GpuScene&)>& edit = {},
+            const std::function<scene::Camera(uint32_t)>& cameraAtFrame = {})
 {
     GpuScene gpuScene(device);
     gpuScene.upload(s);
@@ -383,7 +384,8 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
     {
         TrackState state;
         RenderGraph graph(device);
-        const ViewDesc view = ViewDesc::fromCamera(s.cameras[0], width, height, float4x4{});
+        const ViewDesc baseView = ViewDesc::fromCamera(s.cameras[0], width, height, float4x4{});
+        float3 previousCamera = s.cameras[0].position;
         Buffer constants = createBuffer(device, 1024, D3D12_HEAP_TYPE_UPLOAD, false);
         uint8_t* mapped = nullptr;
         D3D12_RANGE none{ 0, 0 };
@@ -402,6 +404,12 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
             frame.frameIndex = f;
             frame.time = f / 60.0;
             frame.deltaTime = 1 / 60.0f;
+            // cameraAtFrame (test 7): a camera per frame; a move is a cut (no previous view, FrameContext::discontinuity).
+            const scene::Camera camera = cameraAtFrame ? cameraAtFrame(f) : s.cameras[0];
+            const bool cut = camera.position.x != previousCamera.x || camera.position.y != previousCamera.y || camera.position.z != previousCamera.z;
+            previousCamera = camera.position;
+            const ViewDesc view = cameraAtFrame ? ViewDesc::fromCamera(camera, width, height, float4x4{}) : baseView;
+            if (cut) frame.discontinuity |= kDiscontinuityCut;
             frame.mainView = view;
             FrameResources resources;
             FrameServices services;
@@ -722,6 +730,39 @@ int main(int argc, char** argv)
              100 * (a.mean / (kPi * le / (1 - rho)) - 1), 100 * a.worst, a.converged, 100 * a.radianceWorst, okA ? "PASS" : "FAIL");
         pass = pass && okA;
 
+        {
+            // 7. Parent prior after a cut (redesign V2 P1, RENDERER_REDESIGN_V2 1.1b): the furnace converges from its camera,
+            // then a cut to the other end of the room looking back (the near wall and the floor below it: cells no probe
+            // made before). Four frames after the cut the cells there have had their first updates, with gi.parent_prior
+            // from their converged parents. The furnace's radiance is uniform - every ray returns the same value - so it has
+            // no per-update noise for the prior to remove (that is measured on the game scenes: renderergate --cut-at); it
+            // checks the prior's mechanics: priors are applied and add no bias (a parent's value is exact here). Gate: priors
+            // in the last frame, the cache maps' mean within 1 % and P99 at most 10 %, as without the P1 switches (reported).
+            const uint32_t cutFrame = std::max(frames / 2, 60u), after = 4;
+            scene::Scene room = furnace(le, rho);
+            scene::Camera back = room.cameras[0];
+            back.position = { 0, 2.5f, -4.5f };
+            back.forward = normalize(float3{ -0.3f, -0.35f, 1 });
+            back.up = normalize(cross(cross(back.forward, float3{ 0, 1, 0 }), back.forward));
+            auto at = [&](uint32_t f) { return f < cutFrame ? room.cameras[0] : back; };
+            auto uniform = [&](float3, float3) { return (double)kPi * le / (1 - rho); };
+            QualityConfig off = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            off.applyOverride("gi.experiment_disable=1024");
+            for (const std::string& o : overrides) off.applyOverride(o);
+            for (const char* o : { "gi.update_tiers=false", "gi.parent_prior=false", "gi.relight_restart=false" }) off.applyOverride(o);
+            QualityConfig on = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            on.applyOverride("gi.experiment_disable=1024");
+            for (const std::string& o : overrides) on.applyOverride(o);
+            for (const char* o : { "gi.update_tiers=true", "gi.parent_prior=true" }) on.applyOverride(o);  // (off by default: gi.toml)
+            const Outcome on7 = run(device, shaders, on, room, { 0, 0, 0 }, { 0, 0, 0 }, uniform, -1, cutFrame + after, 1920, 1080, 1, 0, {}, at);
+            const Outcome off7 = run(device, shaders, off, room, { 0, 0, 0 }, { 0, 0, 0 }, uniform, -1, cutFrame + after, 1920, 1080, 1, 0, {}, at);
+            const bool ok7 = on7.mapProbes > 0 && on7.stats.priors > 0 && on7.mapP99 <= 0.10 && std::fabs(on7.mapMean / on7.mapExpectedMean - 1) <= 0.01;
+            logf("parent prior after a cut (%u frames after, frame %u): cache maps P99 %.2f %% (mean %+.2f %%), without P1 %.2f %% (mean %+.2f %%); priors in the last "
+                 "frame %u, parent-child estimate %.2f %% -> %s\n",
+                 after, cutFrame, 100 * on7.mapP99, 100 * (on7.mapMean / on7.mapExpectedMean - 1), 100 * off7.mapP99, 100 * (off7.mapMean / off7.mapExpectedMean - 1),
+                 on7.stats.priors, 100 * on7.stats.parentDelta, ok7 ? "PASS" : "FAIL");
+            pass = pass && ok7;
+        }
         logf("open sky: L 1, ground albedo 0.5, expected E = pi\n");
         const Outcome b = run(device, shaders, quality, openSky(0.5f), { 1, 1, 1 }, { 0, 0, 0 }, [](float3, float3) { return (double)kPi; }, 1.0, frames, 1920, 1080);
         const bool okB = std::fabs(b.mapMean / kPi - 1) < 0.01 && b.mapWorst < 0.03 && b.radianceWorst < 0.03 && b.tilePixels > 0 && b.tileMismatches == 0;

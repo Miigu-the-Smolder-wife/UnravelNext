@@ -105,6 +105,49 @@ uint giAgeBucket(RWByteAddressBuffer b, GiHeader h, uint entry)
     return last == 0 ? GI_AGE_BUCKETS - 1 : min(h.frame - last, GI_AGE_BUCKETS - 1);
 }
 
+// ---- Redesign V2 P1 (RENDERER_REDESIGN_V2 1.1): update tiers, the parent prior, relight restarts.
+// Header words (the spare bytes after the admission word, GiSystem.cpp h[195..]):
+#define GI_P1_FLAGS 780         // bit 0 gi.update_tiers, bit 1 gi.parent_prior, bit 2 gi.relight_restart, bit 3 gi.hit_light_footprint
+#define GI_P1_T0_SHARE 784      // gi.young_update_share (float): the most of a tier's updates the young (T0) entries take
+#define GI_P1_DELTA2 788        // running estimate of the parent-child relative squared difference (float), kept by GiBegin
+#define GI_P1_DELTA_SUM 792     // this frame's samples of it: sum of min(d^2, 1) x 2^16, count (GiIntegrate)
+#define GI_P1_DELTA_COUNT 796
+#define GI_P1_STAT_PRIORS 800   // statistics of this frame: updates that started from a parent prior, relight restarts,
+#define GI_P1_STAT_RESTARTS 804 // T0 and T1 entries selected
+#define GI_P1_STAT_T0 808
+#define GI_P1_STAT_T1 812
+#define GI_H_SELECT_T0 816      // per request tier (16 B each): the young range's threshold bucket, quota, fill counter
+// Priority buckets with the tiers on (gi.update_tiers): 60..63 = T0 (fewer than 4 measured updates since the entry's creation
+// or restart; 63 = none), 48..59 = T1 (4..15; fewer first), 0..47 = the rest by age (frames since the last update, 47 = 47
+// or more, or never updated). Selection takes buckets from the top: the young cells converge first (a disocclusion, a cut,
+// a relit area), the rest keeps the stalest-first rotation. Off: the age bucket alone (the previous rule).
+#define GI_T0_BUCKET 60u
+#define GI_T1_BUCKET 48u
+// The entry's measured updates since its creation or its last restart (GiIntegrate), 0 when its history belongs to an
+// older lighting epoch (a whole-cache restart).
+template <typename B>
+uint giRestartUpdates(B b, GiHeader h, uint entry)
+{
+    const uint a = h.offSh + entry * GI_SH_STRIDE;
+    return b.Load(a + GI_SH_EPOCH) == h.epoch && b.Load(a + GI_SH_HISTORY) != 0 ? (b.Load(a + GI_SH_RESTART) & 0xFFFFu) : 0u;
+}
+uint giPriorityBucket(RWByteAddressBuffer b, GiHeader h, uint entry)
+{
+    if ((b.Load(GI_P1_FLAGS) & 1u) == 0) return giAgeBucket(b, h, entry);
+    const uint n = giRestartUpdates(b, h, entry);
+    if (n < 4) return GI_AGE_BUCKETS - 1 - n;
+    if (n < 16) return GI_T0_BUCKET - 1 - (n - 4);
+    const uint last = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_LAST_UPDATE);
+    return last == 0 ? GI_T1_BUCKET - 1 : min(h.frame - last, GI_T1_BUCKET - 1);
+}
+// The key of the cell containing a cell 'steps' levels up (s_{l+k} = 2^k s_l: cell / 2^k, floor), same normal class.
+uint64_t giParentKey(uint64_t key, uint steps)
+{
+    const uint level = (uint)(key & 31u), normalClass = (uint)((key >> 5) & 7u);
+    const int3 cell = (int3(uint3((uint)(key >> 8), (uint)(key >> 26), (uint)(key >> 44)) & 0x3FFFFu) << 14) >> 14;  // sign-extend 18 bits
+    return giKey(level + steps, normalClass, cell >> steps);
+}
+
 // Records an entry that a GI ray hit this frame (its irradiance fed a bounce): requested for update next frame.
 void giRequestHit(RWByteAddressBuffer b, GiHeader h, uint entry)
 {

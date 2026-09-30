@@ -39,7 +39,8 @@ struct GiSrvs
 // half of word 13), then bookkeeping words.
 #define GI_SH_STRIDE 80u
 #define GI_SH_UPDATES 56u      // completed updates (all time)
-#define GI_SH_SUN_SAMPLES 60u  // sun visibility samples
+#define GI_SH_RESTART 60u      // redesign V2 P1 (GiInternal giRestartUpdates): measured updates since the entry's creation
+                               // or its last restart, low 16 bits (was the unused sun-sample count)
 #define GI_SH_LAST_UPDATE 64u  // frame stamp of the last selection/update
 #define GI_SH_HISTORY 68u      // convergence phase | mean samples << 12 | Jacobi length / 16 << 24 (GiInternal giHistoryAlpha)
 #define GI_SH_EPOCH 72u        // lighting epoch of that history

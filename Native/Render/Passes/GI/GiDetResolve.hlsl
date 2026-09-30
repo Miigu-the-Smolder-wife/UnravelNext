@@ -4,7 +4,8 @@
 // the exact priority v of the quota-th entry: GiSelect takes every entry below v, and the entries equal to v only when
 // all of them fit (a hash tie at the boundary leaves those slots unused rather than picking by arrival order).
 // Level 0 also initialises the tier's state from GI_H_SELECT. The histogram is cleared for the next level.
-// P[0] = { cache UAV, selection state UAV (raw), level 0..3, mode 0 (tiers 0, 1: groups 0, 1) | 1 (tier 2: group 0) }
+// P[0] = { cache UAV, selection state UAV (raw), level 0..3, mode 0 (tiers 0, 1, and the young ranges 3, 4: groups 0..3) | 1
+// (tier 2: group 0) }
 #include "Passes/GI/GiInternal.hlsli"
 
 groupshared uint g_scan[256];
@@ -12,7 +13,7 @@ groupshared uint g_scan[256];
 [numthreads(256, 1, 1)]
 void main(uint d : SV_GroupThreadID, uint group : SV_GroupID)
 {
-    const uint tier = P[0].w == 0 ? group : 2;
+    const uint tier = P[0].w == 0 ? (group < 2 ? group : group + 1) : 2;  // mode 0: groups 0, 1 = tiers 0, 1; 2, 3 = slots 3, 4 (young ranges)
     RWByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
     RWByteAddressBuffer state = ResourceDescriptorHeap[P[0].y];
     const uint level = P[0].z;
@@ -28,7 +29,7 @@ void main(uint d : SV_GroupThreadID, uint group : SV_GroupID)
         GroupMemoryBarrierWithGroupSync();
     }
     const uint inclusive = g_scan[d], exclusive = inclusive - count;
-    const uint quota = tier < 2 ? b.Load(GI_H_SELECT + tier * 16 + 4) : b.Load(GI_H_BG_COUNT);
+    const uint quota = tier < 2 ? b.Load(GI_H_SELECT + tier * 16 + 4) : (tier > 2 ? b.Load(GI_H_SELECT_T0 + (tier - 3) * 16 + 4) : b.Load(GI_H_BG_COUNT));
     const uint remaining = level == 0 ? quota : state.Load(base + GI_DET_REMAINING);
     const uint prefix = level == 0 ? 0u : state.Load(base + GI_DET_PREFIX);
     GroupMemoryBarrierWithGroupSync();

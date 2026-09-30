@@ -11,6 +11,15 @@
 // visibility half of SH word 13 is kept; the update is recorded (count, history word, epoch, frame).
 // The emitter samples (GiTrace: one per texel ray, MIS-weighted radiance over p_l, direction in the anchor frame) follow
 // the texel samples at index ray budget + slot x 64 + k; each adds L_w max(0, n_j . w) / 64.
+// Redesign V2 P1 (RENDERER_REDESIGN_V2 1.1; SPLIT=0 only):
+//   a seeded entry (GiPrior wrote its converged parent's map, texels and SH into it this frame: GI_SH_RESTART bit 16, no
+//     history and no update yet) weighs the seed as kappa updates: E = (E_meas + kappa E_seed) / (1 + kappa),
+//     kappa = (sigma_update / delta)^2 in [2, 64] (sigma_update: this update's relative spread; delta^2: GiBegin's running
+//     estimate of the parent-child difference of converged cells), then the running mean from kappa + 1 samples; the seed
+//     is a converged multi-bounce value: the Jacobi phase is skipped;
+//   relight restart (gi.relight_restart, off by default): an entry with 4 or more updates whose update's anchor irradiance
+//     lies more than 5 sigma + 5 % from its history weighs this update 1/2 and restarts its mean, window and count;
+//   the restart count (GI_SH_RESTART low 16 bits): measured updates since creation or the last restart (the tiers' order).
 // One group per update slot (selected entries, then background). P[0] = { cache UAV, updates per frame, samples SRV, 0 }
 #include "Scene.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
@@ -42,6 +51,14 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     if (!giUpdateSlot(b, h, slot, entry, background)) return;  // uniform over the group
     const uint history = giHistory(b, h, entry);
     const float3 na = giAnchorNormal(b, h, entry);
+#if SPLIT
+    const uint p1 = 0;  // the split history (experimental) keeps the previous rules
+#else
+    const uint p1 = b.Load(GI_P1_FLAGS);
+#endif
+    const uint restartWord = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_RESTART);
+    const uint restartCount = giRestartUpdates(b, h, entry);
+    const bool prior = (p1 & 2u) != 0 && (restartWord & 0x10000u) != 0 && history == 0 && b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0;
     float3 t, bt;
     giBasis(na, t, bt);
     // The entry's stored values the update blends with, loaded before the barriers (only this group writes the entry in
@@ -210,10 +227,15 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     const float held = dot(giIrrUnpack(heldWord) * GI_LOAD_SCALE, float3(0.2126, 0.7152, 0.0722));
     const bool steady = history != 0 && abs(fastOld - held) <= 3 * spreadOld / sqrt(31.0) + 0.01 * held;
     const float spread = sqrt(max(totalE2 - totalE * totalE / (2.0 * GI_TEXEL_COUNT), 0.0));
-    const float fast = history == 0 ? totalE : lerp(fastOld, totalE, 1.0 / 16.0);
-    const float spreadMean = history == 0 ? spread : lerp(spreadOld, spread, 1.0 / 16.0);
+    const bool windowReset = history == 0 || ((p1 & 4u) != 0 && history != 0 && restartCount >= 4 && abs(totalE - held) > 5.0 * spreadOld + 0.05 * held);
+    const float fast = windowReset ? totalE : lerp(fastOld, totalE, 1.0 / 16.0);
+    const float spreadMean = windowReset ? spread : lerp(spreadOld, spread, 1.0 / 16.0);
     const uint cap = steady ? h.historyStatic : h.historyMax;
-    const float alpha = giHistoryAlpha(h, history, young, jacobiLength, cap);
+    const float alphaHistory = giHistoryAlpha(h, history, young, jacobiLength, cap);
+    const bool restart = (p1 & 4u) != 0 && history != 0 && restartCount >= 4 && abs(totalE - held) > 5.0 * spreadOld + 0.05 * held;
+    const float relSpread = totalE > 0 ? spread / totalE : 1.0;
+    const float kappa = clamp(relSpread * relSpread / max(asfloat(b.Load(GI_P1_DELTA2)), 1e-6), 2.0, 64.0);
+    const float alpha = prior ? 1.0 / (1.0 + kappa) : (restart ? 0.5 : alphaHistory);
 #if SPLIT
     const float directAlpha = max(1.0 / (float)(splitUpdates + 1), 1.0 / (float)cap);
     const float bounceAlpha = giHistoryPhase(history) < jacobiLength ? 1.0 :
@@ -290,11 +312,16 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     b.Store4(address + 32, uint4(word[8], word[9], word[10], word[11]));
     b.Store2(address + 48, uint2(word[12], word[13]));
     if (history == 0) b.InterlockedAdd(GI_H_STAT_RESETS, 1u);
+    if (restart) b.InterlockedAdd(GI_P1_STAT_RESTARTS, 1u);
+    b.Store(address + GI_SH_RESTART, history == 0 || restart ? 1u : min(restartCount + 1, 65535u));
     b.Store(address + GI_SH_UPDATES, b.Load(address + GI_SH_UPDATES) + 1);
     b.Store(address + GI_SH_LAST_UPDATE, h.frame);
 #if SPLIT
     b.Store(splitBase, min(splitUpdates + 1, 4095u));
 #endif
-    b.Store3(address + GI_SH_HISTORY, uint3(giHistoryNext(h, history, young, jacobiLength, cap), h.epoch,
+    const uint jacobiByte = min((jacobiLength + 15) / 16, 255u) << 24;
+    const uint historyWord = prior ? (min(jacobiLength, 0xFFFu) | (min((uint)round(kappa) + 1, max(cap, 2u) - 1u) << 12) | jacobiByte)
+                             : restart ? ((history & 0xFFFu) | (1u << 12) | jacobiByte) : giHistoryNext(h, history, young, jacobiLength, cap);
+    b.Store3(address + GI_SH_HISTORY, uint3(historyWord, h.epoch,
                                             f32tof16(nearestHalf(fast * GI_STORE_SCALE)) | (f32tof16(nearestHalf(spreadMean * GI_STORE_SCALE)) << 16)));
 }

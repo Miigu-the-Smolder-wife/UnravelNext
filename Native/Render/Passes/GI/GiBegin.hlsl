@@ -32,4 +32,18 @@ void main(uint lane : SV_GroupIndex)
     b.Store(GI_H_STAT_G_ZERO, 0u);
     b.Store4(GI_H_SELECT, uint4(0, 0, 0, 0));
     b.Store4(GI_H_SELECT + 16, uint4(0, 0, 0, 0));
+    // Redesign V2 P1: the young ranges' selection, and the parent-child difference's running estimate (GI_P1_DELTA2, the
+    // parent prior's weight) from last frame's samples of converged children with converged parents (GiIntegrate); a frame
+    // of 16384 samples or more moves it by 1/8 (fewer: in proportion). Then this frame's counters.
+    b.Store4(GI_H_SELECT_T0, uint4(0, 0, 0, 0));
+    b.Store4(GI_H_SELECT_T0 + 16, uint4(0, 0, 0, 0));
+    const uint count = b.Load(GI_P1_DELTA_COUNT);
+    if (count > 0)
+    {
+        const float mean = (float)b.Load(GI_P1_DELTA_SUM) / (65536.0 * (float)count);
+        const float old = asfloat(b.Load(GI_P1_DELTA2));
+        b.Store(GI_P1_DELTA2, asuint(old + (mean - old) * (0.125 * min((float)count / 16384.0, 1.0))));
+    }
+    b.Store4(GI_P1_DELTA_SUM, uint4(0, 0, 0, 0));  // sum, count, priors, restarts
+    b.Store2(GI_P1_STAT_T0, uint2(0, 0));
 }

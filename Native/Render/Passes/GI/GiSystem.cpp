@@ -117,6 +117,16 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.experimentDisable = (uint32_t)q.integer("gi.experiment_disable");
     s.deterministic = q.boolean("gi.deterministic") || (q.has("debug.deterministic") && q.boolean("debug.deterministic"));  // (debug.deterministic implies it)
     s.anchorVisibility = q.has("gi.anchor_visibility") ? q.boolean("gi.anchor_visibility") : false;
+    // Redesign V2 P1 (A/B switches; GiInternal.hlsli GI_P1_*).
+    s.updateTiers = q.has("gi.update_tiers") && q.boolean("gi.update_tiers");
+    s.youngUpdateShare = q.has("gi.young_update_share") ? (float)q.number("gi.young_update_share") : 0.6f;
+    s.parentPrior = q.has("gi.parent_prior") && q.boolean("gi.parent_prior");
+    s.parentDeltaInitial = q.has("gi.parent_delta_initial") ? (float)q.number("gi.parent_delta_initial") : 0.05f;
+    s.relightRestart = q.has("gi.relight_restart") && q.boolean("gi.relight_restart");
+    s.hitLightFootprint = q.has("gi.hit_light_footprint") && q.boolean("gi.hit_light_footprint");
+    s.lightInvalidation = q.has("gi.light_invalidation") && q.boolean("gi.light_invalidation");
+    if (!(s.youngUpdateShare >= 0 && s.youngUpdateShare <= 1)) fail("gi.young_update_share must be in [0, 1]");
+    if (!(s.parentDeltaInitial > 0 && s.parentDeltaInitial < 1)) fail("gi.parent_delta_initial must be in (0, 1)");
     // Fixed by the kernels (GiCache.hlsli, GiProbeGather.hlsl, GiInternal.hlsli probe offsets).
     if (q.integer("gi.cache_octahedral_texels") != 8) fail("gi.cache_octahedral_texels must be 8 (GI_TEXELS)");
     if (q.integer("gi.near_occlusion_taps") != 16) fail("gi.near_occlusion_taps must be 16 (GiProbeGather)");
@@ -201,6 +211,9 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[192] = l.end; // deterministic admission tail, grown before its first use
     h[193] = m_settings.splitBounceHistory ? l.split : 0;
     h[194] = m_settings.bounceHistoryUpdates;
+    h[195] = (m_settings.updateTiers ? 1u : 0u) | (m_settings.parentPrior ? 2u : 0u) | (m_settings.relightRestart ? 4u : 0u) | (m_settings.hitLightFootprint ? 8u : 0u);  // GI_P1_FLAGS
+    h[196] = asU(m_settings.youngUpdateShare);                                     // GI_P1_T0_SHARE
+    h[197] = asU(m_settings.parentDeltaInitial * m_settings.parentDeltaInitial);  // GI_P1_DELTA2
     for (uint32_t e = 0; e < m_settings.capacity; ++e) head[l.freeList / 4 + e] = m_settings.capacity - 1 - e;  // pops 0, 1, 2 ...
     for (uint32_t t = 0; t < m_settings.tableSlots; ++t) head[l.table / 4 + t * 4 + 2] = 0xFFFFFFFFu;
     std::memcpy(&tail[(l.shTable - l.hitStamp) / 4], shTable.data(), shTable.size() * 4);
@@ -619,8 +632,33 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     {
         compute("r.gi.det.anchors", "Passes/GI/GiDetAnchors", groups(s.capacity), {});  // before any ray leaves an anchor
     }
-    // Local invalidation (B3): the ray scene's change boxes of this frame (instance edits keep the epoch).
-    if (!rays.changes().empty())
+    // Local invalidation (B3): the ray scene's change boxes of this frame (instance edits keep the epoch). Redesign V2 P1
+    // (1.1a "restarted by a light revision"): a light whose record changed since the last frame (GpuScene::setLights: a
+    // lamp switched, dimmed, recoloured or moved) adds its range sphere's box - before and after, when it moved - so the
+    // entries whose texel rays see the region it lights restart (history 0, then the update tiers take them first) instead
+    // of keeping its old bounce light for the steady window (a bath lamp switched off: 256 frames later the image still
+    // held a third of the difference [measured, P0 relight baseline]).
+    std::vector<std::pair<float3, float3>> changes = rays.changes();
+    {
+        const std::vector<gpu::Light>& lights = fc.scene.lights();
+        const float3 shift = fc.frame.originShift;
+        if (!s.lightInvalidation || m_lightSeen.size() != lights.size() || shift.x != 0 || shift.y != 0 || shift.z != 0)
+            m_lightSeen = lights;  // (first frame, a new scene - the epoch restarts everything anyway - or an origin rebase, which
+                                   // moves every light with the world: no lighting change)
+        for (size_t i = 0; i < lights.size(); ++i)
+        {
+            const gpu::Light& now = lights[i];
+            const gpu::Light& was = m_lightSeen[i];
+            if (now.revision == was.revision && std::memcmp(&now, &was, sizeof now) == 0) continue;
+            for (const gpu::Light* l : { &was, &now })
+            {
+                const float r = std::max(l->range, 0.0f);
+                changes.push_back({ l->position - float3{ r, r, r }, l->position + float3{ r, r, r } });
+            }
+        }
+        m_lightSeen = lights;
+    }
+    if (!changes.empty())
     {
         if (!m_changeRing)
         {
@@ -656,7 +694,6 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
         static_assert(kChangeSlotBytes % 16 == 0, "raw view offsets");
         const uint32_t slot = (uint32_t)(fc.frame.frameIndex % kChangeSlots);
         uint8_t* dst = m_changeMapped + (size_t)slot * kChangeSlotBytes;
-        const auto& changes = rays.changes();
         const uint32_t count = (uint32_t)std::min<size_t>(changes.size(), kChangeBoxesMax);
         for (uint32_t i = 0; i < count; ++i)
         {
@@ -688,17 +725,17 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     std::optional<BufferRef> detState;
     if (s.deterministic)
     {
-        const BufferRef state = g.createBuffer({ "GI deterministic selection", 3ull * 1040, 0 });
+        const BufferRef state = g.createBuffer({ "GI deterministic selection", 5ull * 1040, 0 });
         detState = state;
         for (uint32_t level = 0; level < 4; ++level)
         {
             if (level == 0)
                 g.addPass("r.gi.det.clear", QueueType::Compute, [&](PassBuilder& b) { b.use(state, Use::UavCompute); },
                           [&shaders, state](PassContext& c) {
-                              const uint32_t k[4] = { c.uav(state), 3 * 1040 / 4, 0, 0 };
+                              const uint32_t k[4] = { c.uav(state), 5 * 1040 / 4, 0, 0 };
                               c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiDetClear"));
                               c.computeConstants(k, 4);
-                              c.cmd->Dispatch((3 * 1040 / 4 + 63) / 64, 1, 1);
+                              c.cmd->Dispatch((5 * 1040 / 4 + 63) / 64, 1, 1);
                           });
             for (const char* kernel : { "Passes/GI/GiDetDigits", "Passes/GI/GiDetResolve" })
             {
@@ -713,7 +750,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                               c.cmd->SetPipelineState(shaders.compute(kernel));
                               c.computeConstants(k, 4);
                               c.bindFrameConstants(frameConstants);
-                              c.cmd->Dispatch(digits ? dispatch : 2, 1, 1);
+                              c.cmd->Dispatch(digits ? dispatch : 4, 1, 1);  // resolve: tiers 0, 1 and their young ranges (slots 3, 4)
                           });
             }
         }
@@ -780,6 +817,9 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   });
     }
 
+    // Redesign V2 P1 (GiPrior.hlsl): parents of this frame's updates - kept alive, seeds of never-updated entries, samples of
+    // the parent-child difference - before the rays and the integration touch any entry.
+    if (s.parentPrior) compute("r.gi.prior", "Passes/GI/GiPrior", s.updatesPerFrame, { s.updatesPerFrame });
     uint32_t scene[8];
     rays.recordDecals(fc, main);  // decals at hits (HitDecals.hlsli): header words before rootConstants
     rays.rootConstants(scene);
@@ -1027,20 +1067,20 @@ GiStats GiSystem::readStats()
     D3D12_HEAP_PROPERTIES rb{ D3D12_HEAP_TYPE_READBACK };
     D3D12_RESOURCE_DESC1 d{};
     d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    d.Width = 256;
+    d.Width = 1024;
     d.Height = d.DepthOrArraySize = d.MipLevels = 1;
     d.SampleDesc.Count = 1;
     d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     ComPtr<ID3D12Resource> readback;
     check(m_device.d3d()->CreateCommittedResource3(&rb, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&readback)), "GI stats readback");
     CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
-    cl.list->CopyBufferRegion(readback.Get(), 0, m_cache.Get(), 0, 256);
+    cl.list->CopyBufferRegion(readback.Get(), 0, m_cache.Get(), 0, 1024);
     m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(cl));
-    uint32_t h[64];
+    uint32_t h[256];
     void* mapped = nullptr;
-    D3D12_RANGE all{ 0, 256 };
+    D3D12_RANGE all{ 0, 1024 };
     check(readback->Map(0, &all, &mapped), "map GI stats");
-    std::memcpy(h, mapped, 256);
+    std::memcpy(h, mapped, 1024);
     D3D12_RANGE none{ 0, 0 };
     readback->Unmap(0, &none);
     GiStats st;
@@ -1062,6 +1102,14 @@ GiStats GiSystem::readStats()
     st.gRatio = h[49];
     for (int i = 0; i < 9; ++i) st.gHistogram[i] = h[50 + i];  // GI_H_STAT_G_HIST
     st.gZero = h[59];                                            // GI_H_STAT_G_ZERO
+    // Redesign V2 P1 (GiInternal.hlsli GI_P1_*): this frame's priors, restarts, T0 / T1 selections, the delta estimate.
+    st.priors = h[200];
+    st.restarts = h[201];
+    st.selectedYoung = h[202];
+    st.selectedT1 = h[203];
+    float d2;
+    std::memcpy(&d2, &h[197], 4);
+    st.parentDelta = std::sqrt(std::max(d2, 0.0f));
     return st;
 }
 } // namespace unx::render::gi

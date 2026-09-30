@@ -38,6 +38,30 @@ history_updates_max_static = 256   # the running mean's window while the entry's
                                    # beyond that cuts the window to history_updates_max at once (moving sun, lights: any speed).
                                    # 32 left the bathhouse's indirect light -11 % and its cell blotches at 19 % per-update noise
                                    # x 0.18 [measured, 2026-09-27]; 256 converges it (stores round stochastically: unbiased)
+# Redesign V2 P1 (RENDERER_REDESIGN_V2 1.1; the previous rules stay behind these switches for A/B):
+update_tiers = false               # off by default (measured, P1): with parent_prior it slowed the reflection furnace's hit
+                                   # cells (3 of 3 runs fail, each alone passes), and neither changed the cut recovery in the
+                                   # bath or train (tile P95 within 1-2 points of off at frames 1-256). 1.1a: requested entries with fewer than 4 measured updates since their creation or
+                                   # restart first (T0, at most young_update_share of each request tier's updates), then
+                                   # 4..15 (T1), then the stalest (the previous rule); false = age order alone
+young_update_share = 0.6           # the most of a tier's updates T0 takes (the rest keeps the converged cells rotating)
+parent_prior = false               # 1.1b: a first update starts from the converged parent (level + 1, else + 2) worth
+                                   # kappa = (update spread / parent_delta)^2 in [2, 64] updates, Jacobi skipped; the
+                                   # parent is kept alive and requested (created) while the entry is young
+parent_delta_initial = 0.05        # the parent-child relative difference assumed until GiIntegrate has measured it
+relight_restart = false            # an entry whose update lies 5 sigma + 5 % from its history restarts (weight 1/2, T0).
+                                   # Off: one update is not a robust change test - the bath's local-light samples are
+                                   # heavy-tailed, the test fired on single bright updates and pulled cells toward them
+                                   # (65 % of the read entries stayed "young" in a still 600-frame run, P1 first run)
+light_invalidation = true          # P1: a light whose record changed (GpuScene::setLights: switched, dimmed, moved) restarts
+                                   # the entries whose texel rays see its range (GiInvalidate), instead of keeping its old
+                                   # bounce light for the steady window
+hit_light_footprint = false        # P1 experiment: a point or spot light's diffuse term at a GI ray hit as its exact mean over
+                                   # the texel ray's footprint on the hit plane (GiTrace giPointFootprintScale), not its value
+                                   # at one point (a lamp's 1 / d^2 hotspot gives rare huge samples: bathhouse, 44 % of the GI
+                                   # energy from hits over 1000 nit). It removes the cells' bright spots but darkens the bath
+                                   # by a further 2-4 % against the path tracer (-17.6 % vs -13.9 % at 2000 frames, 1080p
+                                   # [measured, P1]): off until the footprint model keeps the energy
 ray_length_m = 10000
 hit_update_share = 0.25            # share of the hemisphere updates guaranteed to entries that GI rays hit (bounce cells)
 hit_cell_footprint_scale = 2.0     # bounce cells (2nd+ bounce irradiance at ray hits) = this x the ray footprint (~0.36 t);
@@ -59,4 +83,5 @@ experiment_disable = 0             # cost attribution only (recorded in the qual
                                    # update (not the R2 sequence over the entry's updates), 128 = no local lights at GI hits, 256 = no emissive-triangle
                                    # samples (the texel rays alone see emissive meshes), 512 = GI hits without the cache's
                                    # bounce (one bounce: unx_reference --surface-order 1:2), 1024 = Lambert GI hits (GiAnalytic's
-                                   # closed forms). Never nonzero outside measurements and those tests.
+                                   # closed forms), 4096 = local lights at GI hits: every light of the cell with
+                                   # its shadow ray instead of one sample (diagnostic). Never nonzero outside measurements and those tests.

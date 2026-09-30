@@ -41,6 +41,44 @@
 #define GI_FOOTPRINT_PER_METRE 0.36
 
 float giBias(GiHeader h, float3 p) { return 1e-3 + 2e-4 * distance(p, h.camera); }
+
+// Redesign V2 P1 (gi.hit_light_footprint, GI_P1_FLAGS bit 3): a texel holds the mean over its ray cone of the radiance
+// leaving the hits toward the anchor (the specular lobe is widened by the cone below for the same reason). A point or spot
+// light's diffuse term at one hit point is 1 / d^2 there: GI rays landing in a lamp's hotspot (a ceiling 10 cm above a
+// bulb) gave rare samples hundreds of times the mean - in the bathhouse 44 % of the converged GI energy came from hits
+// whose local term exceeded 1000 nit (a diagnostic cap), and new cells stayed spotted for seconds. The diffuse term is
+// instead the exact mean of the light's irradiance over the ray's footprint on the hit plane: the texel cone's square
+// cross-section (side GI_FOOTPRINT_PER_METRE x t) projected along the ray onto the plane, mean E = I x Omega / area, Omega
+// the footprint quadrilateral's solid angle seen from the light (Van Oosterom and Strackee 1983, two triangles). Returned
+// as the factor on the point value, I cos / d^2 (1 when the footprint vanishes: exact in the limit). The light's window,
+// spot factor, choice and shadow ray stay those of the hit point (smooth over the footprint, or the visibility estimate
+// the cell averages as before).
+float giTriangleSolidAngle(float3 a, float3 b, float3 c)
+{
+    const float la = length(a), lb = length(b), lc = length(c);
+    const float num = dot(a, cross(b, c));
+    const float den = la * lb * lc + dot(a, b) * lc + dot(a, c) * lb + dot(b, c) * la;
+    return 2 * atan2(num, den);
+}
+float giPointFootprintScale(float3 light, float3 x, float3 n, float3 dir, float t)
+{
+    const float a = t * GI_FOOTPRINT_PER_METRE, dn = dot(n, dir);
+    const float3 d = light - x;
+    const float d2 = dot(d, d), cosx = dot(n, d) * rsqrt(max(d2, 1e-12));
+    if (!(a > 0) || abs(dn) < 1e-3 || !(cosx > 0) || !(d2 > 0)) return 1;
+    float3 u, v;
+    giBasis(dir, u, v);
+    float3 c[4];
+    [unroll] for (uint k = 0; k < 4; ++k)
+    {
+        const float3 p = x + (u * ((k & 1) ? 0.5 : -0.5) + v * ((k & 2) ? 0.5 : -0.5)) * a;
+        c[k] = p - dir * (dot(n, p - x) / dn) - light;  // on the hit plane, relative to the light
+    }
+    // corners 0 (-,-), 1 (+,-), 3 (+,+), 2 (-,+): the quadrilateral in order
+    const float omega = abs(giTriangleSolidAngle(c[0], c[1], c[3]) + giTriangleSolidAngle(c[0], c[3], c[2]));
+    const float area = a * a / abs(dn);
+    return (omega / area) / (cosx / d2);
+}
 // Density of the texel rays at direction l (anchor frame, unit): uniform in the hemispherical octahedral map's uv, whose
 // point p = l / (|l.x| + |l.y| + l.z) has dw / (du dv) = 2 / |p|^3.
 float giTexelDensity(float3 l) { const float s = abs(l.x) + abs(l.y) + l.z; return 0.5 / (s * s * s); }
@@ -214,7 +252,40 @@ void GiTraceGen()
             }
             // Local lights: one next-event sample and its shadow ray (experiment 128: none).
             float3 local = 0;
-            if ((P[3].w & 128) == 0)
+            if ((P[3].w & 128) == 0 && (P[3].w & 4096) != 0 && scene.pad != 0xFFFFFFFFu)
+            {
+                // Experiment 4096 (diagnostic, redesign V2 P1 cause search): every light of the hit's cell, each with its own
+                // shadow ray - the deterministic estimator of the same sum (no light choice), traced. Scene lights only.
+                g_rtLightData = scene.pad;
+                ByteAddressBuffer lb = ResourceDescriptorHeap[scene.pad];
+                const RtLightGrid grid = lb.Load<RtLightGrid>(0);
+                const uint cell = rtLightCell(grid, s.position);
+                if (cell != ~0u)
+                {
+                    GpuMaterial mc = m;
+                    const float alpha = modelAlpha(m.roughness), cone = 0.5 * GI_FOOTPRINT_PER_METRE;
+                    mc.roughness = sqrt(sqrt(alpha * alpha + cone * cone));
+                    const uint k1 = rtLightCellStart(cell + 1);
+                    [loop] for (uint k = rtLightCellStart(cell); k < k1; ++k)
+                    {
+                        const uint li = rtLightCellLight(k);
+                        const RtLight l = rtLightFetch(li);
+                        RtLightSample ls;
+                        if (!rtLightSample(l, s.position, giUnit(seed + 12 + 2 * k), giUnit(seed + 13 + 2 * k), ls) || !(ls.pdf > 0)) continue;
+                        RtLocalSample one = (RtLocalSample)0;
+                        one.valid = true;
+                        one.castShadow = l.castShadow != 0;
+                        one.light = li;
+                        one.wi = ls.wi;
+                        one.distance = ls.distance;
+                        one.weight = ls.L / ls.pdf;
+                        const float3 f = rtLocalLightBrdfCos(mc, s.normal, -r.Direction, one.wi, (P[3].w & 1024) != 0);
+                        if (any(f > 0) && (!one.castShadow || rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, one, giBias(h, s.position)), RT_MASK_GI)))
+                            local += f * one.weight;
+                    }
+                }
+            }
+            else if ((P[3].w & 128) == 0)
             {
                 const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(seed + 11), giUnit(seed + 12), giUnit(seed + 13),
                                                               hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z));  // the hit cell's footprint
@@ -228,10 +299,30 @@ void GiTraceGen()
                     GpuMaterial mc = m;
                     const float alpha = modelAlpha(m.roughness), cone = 0.5 * GI_FOOTPRINT_PER_METRE;
                     mc.roughness = sqrt(sqrt(alpha * alpha + cone * cone));
-                    const float3 f = rtLocalLightBrdfCos(mc, s.normal, -r.Direction, ls.wi, (P[3].w & 1024) != 0);  // full model (1024: Lambert)
+                    float3 f = rtLocalLightBrdfCos(mc, s.normal, -r.Direction, ls.wi, (P[3].w & 1024) != 0);  // full model (1024: Lambert)
+                    if ((b.Load(GI_P1_FLAGS) & 8u) != 0 && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE && dot(s.normal, ls.wi) > 0)
+                    {
+                        // P1: the diffuse term as its mean over the ray's footprint (giPointFootprintScale; point and spot lights)
+                        RtLight lf;
+                        if (ls.light < g_lightCount) lf = rtLightFetch(ls.light);
+                        else lf = rtFxLight(ls.light - g_lightCount);
+                        if (lf.type == kRtLightPoint || lf.type == kRtLightSpot)
+                        {
+                            const float3 diffuse = m.baseColor * ((1 - m.metallic) / GI_PI) * dot(s.normal, ls.wi);
+                            f += diffuse * (giPointFootprintScale(lf.position, s.position, s.geometricNormal, r.Direction, hit.t) - 1);
+                        }
+                    }
                     if (any(f > 0) && (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, giBias(h, s.position)), RT_MASK_GI)))
                         local = f * ls.weight;
                 }
+            }
+            if ((P[3].w & (8192u | 16384u)) != 0)
+            {
+                // Experiment 8192 (diagnostic only - a cap is a bias): the local term's luminance capped at 100 nit (16384: 1000 nit), to tell
+                // whether the cells' rare bright updates come from hits in local-light hotspots (redesign V2 P1 cause search).
+                const float lum = dot(local, float3(0.2126, 0.7152, 0.0722));
+                const float cap = (P[3].w & 8192u) != 0 ? 100.0 : 1000.0;
+                if (lum > cap) local *= cap / lum;
             }
             if ((P[3].w & 512) != 0) irradiance = specular = 0;  // 512 (diagnostic): one bounce, the reference's --surface-order 1:2
             L.irradiance = irradiance;

@@ -30,6 +30,13 @@ struct GiSettings  // from Config/quality/gi.toml
     bool anchorVisibility = false;   // gi.anchor_visibility: lookups skip entries whose anchor does not see the point (GiHeader.flags bit 1)
     bool splitBounceHistory = false;
     uint32_t bounceHistoryUpdates = 4;
+    // Redesign V2 P1 (RENDERER_REDESIGN_V2 1.1; A/B switches, gi.toml): update tiers (young entries first, at most
+    // youngUpdateShare of a tier's updates), the parent prior of first updates (parentDeltaInitial: the parent-child
+    // difference assumed until measured), relight restarts.
+    bool updateTiers = false, parentPrior = false, relightRestart = false;
+    bool hitLightFootprint = false;
+    bool lightInvalidation = false;  // gi.light_invalidation: a changed light restarts the entries that see its range  // gi.hit_light_footprint: point / spot lights' diffuse term at GI hits as its footprint mean
+    float youngUpdateShare = 0.6f, parentDeltaInitial = 0.05f;
     static GiSettings fromQuality(const QualityConfig& q);
 };
 
@@ -42,6 +49,10 @@ struct GiStats  // header counters of the last completed frame (tests, diagnosti
     uint32_t gSamples = 0, gRatio = 0;       // reflection G samples, and those estimated by the ratio branch (reflLobeEstimate)
     uint32_t gHistogram[9] = {};             // G samples by log2(mean L / mean g), bins [-4, 5)
     uint32_t gZero = 0;                      // G samples with mean g = 0 (not in the histogram)
+    // Redesign V2 P1: updates that started from a parent prior, relight restarts, young (T0) and T1 entries selected, and
+    // the running estimate of the parent-child relative difference (sqrt of GI_P1_DELTA2).
+    uint32_t priors = 0, restarts = 0, selectedYoung = 0, selectedT1 = 0;
+    float parentDelta = 0;
 };
 
 // The information quantity of M's per-pixel cache lookup on the main view (Gates/GiLookupStats.hlsl; gates only).
@@ -138,5 +149,6 @@ private:
     ComPtr<ID3D12Resource> m_changeRing;
     uint8_t* m_changeMapped = nullptr;
     uint32_t m_changeSrv[kChangeSlots] = {};
+    std::vector<gpu::Light> m_lightSeen;  // P1: last frame's light records (changed lights invalidate their range)
 };
 } // namespace unx::render::gi
