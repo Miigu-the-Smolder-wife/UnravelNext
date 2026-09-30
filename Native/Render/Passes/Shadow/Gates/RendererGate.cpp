@@ -301,6 +301,8 @@ int main(int argc, char** argv)
         std::vector<std::string> captureLayers{ "final" };
         std::string frameLogPath, giCacheStatsPath;
         bool listLights = false;
+        bool stripNormalMaps = false;
+        bool stripEmissive = false;  // --strip-emissive (diagnostics): every material's emission 0 (emitters by lights only)  // --strip-normal-maps (diagnostics): every material without its normal map
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -401,7 +403,9 @@ int main(int argc, char** argv)
                     at = comma + 1;
                 }
             }
-            else if (a == "--list-lights") listLights = true;  // print the scene's lights and cameras and stop (no GPU)
+            else if (a == "--list-lights") listLights = true;
+            else if (a == "--strip-normal-maps") stripNormalMaps = true;
+            else if (a == "--strip-emissive") stripEmissive = true;  // (with --save-scene: the same scene for unx_reference)  // print the scene's lights and cameras and stop (no GPU)
             else if (a == "--frame-log") frameLogPath = next();
             else if (a == "--gi-cache-stats") giCacheStatsPath = next();
             else if (a == "--origin-shift")
@@ -433,6 +437,24 @@ int main(int argc, char** argv)
             for (const scene::CameraPath& p : ls.paths)
                 logf("path '%s': %zu keys over %.2f s\n", p.name.c_str(), p.keys.size(), p.keys.empty() ? 0.0f : p.keys.back().time - p.keys.front().time);
             logf("sun direction (%.4f, %.4f, %.4f), %g lux\n", ls.sun.direction.x, ls.sun.direction.y, ls.sun.direction.z, ls.sun.illuminance);
+            for (size_t i = 0; i < ls.materials.size(); ++i)
+            {
+                const scene::Material& m = ls.materials[i];
+                std::string tex = "none";
+                if (m.baseColorTexture != scene::kNone && m.baseColorTexture < ls.textures.size())
+                {
+                    const scene::Texture& t = ls.textures[m.baseColorTexture];
+                    double mean[3] = {};
+                    const size_t n = (size_t)t.width * t.height;
+                    if (t.texels.size() >= n * 4)
+                        for (size_t k = 0; k < n; ++k)
+                            for (int c = 0; c < 3; ++c) mean[c] += t.texels[k * 4 + c] / 255.0 / (double)n;
+                    tex = format("'%s' %ux%u format %u, mean texel (%.3f, %.3f, %.3f)", t.name.c_str(), t.width, t.height, (uint32_t)t.format, mean[0], mean[1], mean[2]);
+                }
+                logf("material %zu '%s': class %u, baseColor (%.3f, %.3f, %.3f), roughness %.3f, metallic %.2f, specular %.2f, base texture %s, normal %u, roughMetal %u, emissive (%g, %g, %g)\n", i,
+                     m.name.c_str(), (uint32_t)m.cls, m.baseColor.x, m.baseColor.y, m.baseColor.z, m.roughness, m.metallic, m.specular, tex.c_str(), m.normalTexture,
+                     m.roughMetalTexture, m.emissive.x, m.emissive.y, m.emissive.z);
+            }
             return 0;
         }
         requireGpuLock("unx_gate_shadow_renderergate");
@@ -468,6 +490,14 @@ int main(int argc, char** argv)
             c.forward = normalize(float3{ v[3] - v[0], v[4] - v[1], v[5] - v[2] });
             c.up = normalize(cross(cross(c.forward, float3{ 0, 1, 0 }), c.forward));
         }
+        if (stripNormalMaps)
+            for (scene::Material& m : s.materials) m.normalTexture = scene::kNone;
+        if (stripEmissive)
+            for (scene::Material& m : s.materials)
+            {
+                m.emissive = { 0, 0, 0 };
+                m.emissiveTexture = scene::kNone;
+            }
         if (!saveScene.empty())
         {
             scene::save(s, saveScene);
