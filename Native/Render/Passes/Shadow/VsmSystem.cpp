@@ -349,21 +349,67 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
             ++s.localGen[i];
         }
     }
-    s.localWithoutSlot = 0;
-    uint32_t freeSlot = 0;
-    for (uint32_t li = 0; li < n; ++li)
+    // Slots by priority (game request 09-30: past kLocalLights shadowed lights the first-come order left the lights the view
+    // needs without shadows). Score: in the main view first (the range sphere meets the frustum or holds the eye), then the
+    // light's reach at the eye, intensity x luminance x (range / max(distance, range))^2. Lights without a slot take the
+    // free slots best first, then replace the weakest holder when they score 1.25 x more (at most 8 replacements a frame:
+    // a replaced slot's pages render anew). The rest (localWithoutSlot) light without shadows until a slot frees.
+    struct Priority
     {
-        if (!lights[li].castShadow || s.slotOfLight[li] != 0xFFFFu) continue;
+        bool inView = false;
+        float value = 0;
+        bool beats(const Priority& o, float margin) const { return inView != o.inView ? inView : value > margin * o.value; }
+    };
+    auto priority = [&](uint32_t li) {
+        const scene::Light& l = lights[li];
+        const float3 eye = main.view.position;
+        const float3 d = { l.position.x - eye.x, l.position.y - eye.y, l.position.z - eye.z };
+        const float dist2 = dot(d, d), reach = l.range + emitterRadius(l);
+        Priority p;
+        p.inView = dist2 <= reach * reach || sphereInView(main.view.viewProj, l.position, reach);
+        const float lum = std::max(0.2126f * l.color.x + 0.7152f * l.color.y + 0.0722f * l.color.z, 1e-6f);
+        p.value = std::max(l.intensity, 0.0f) * lum * reach * reach / std::max(std::max(dist2, reach * reach), 1e-6f);
+        return p;
+    };
+    std::vector<std::pair<Priority, uint32_t>> waiting;  // lights without a slot, best first
+    for (uint32_t li = 0; li < n; ++li)
+        if (lights[li].castShadow && s.slotOfLight[li] == 0xFFFFu) waiting.push_back({ priority(li), li });
+    std::sort(waiting.begin(), waiting.end(), [](const auto& a, const auto& b) { return a.first.beats(b.first, 1.0f) || (!b.first.beats(a.first, 1.0f) && a.second < b.second); });
+    uint32_t freeSlot = 0, replaced = 0;
+    for (const auto& [pr, li] : waiting)
+    {
         while (freeSlot < kLocalLights && s.localLight[freeSlot] != 0) ++freeSlot;
-        if (freeSlot == kLocalLights)
+        uint32_t slot = freeSlot;
+        if (slot == kLocalLights && replaced < 8)
         {
-            ++s.localWithoutSlot;
-            continue;
+            // the weakest holder, replaced when this light is clearly more important (1.25 x, or in view against out of view)
+            Priority weakest;
+            weakest.inView = true;
+            weakest.value = 3.0e38f;
+            for (uint32_t i = 0; i < kLocalLights; ++i)
+            {
+                const Priority h = priority(s.localLight[i] - 1);
+                if (weakest.beats(h, 1.0f))
+                {
+                    weakest = h;
+                    slot = i;
+                }
+            }
+            if (slot == kLocalLights || !pr.beats(weakest, 1.25f)) slot = kLocalLights;
+            else
+            {
+                s.slotOfLight[s.localLight[slot] - 1] = 0xFFFFu;
+                ++replaced;
+            }
         }
-        s.localLight[freeSlot] = li + 1;
-        ++s.localGen[freeSlot];
-        s.slotOfLight[li] = freeSlot;
+        if (slot == kLocalLights) continue;
+        s.localLight[slot] = li + 1;
+        ++s.localGen[slot];
+        s.slotOfLight[li] = slot;
     }
+    s.localWithoutSlot = 0;
+    for (uint32_t li = 0; li < n; ++li)
+        if (lights[li].castShadow && s.slotOfLight[li] == 0xFFFFu) ++s.localWithoutSlot;
     s.localUsed = 0;
     s.localActive.clear();
     for (uint32_t i = 0; i < kLocalLights; ++i)

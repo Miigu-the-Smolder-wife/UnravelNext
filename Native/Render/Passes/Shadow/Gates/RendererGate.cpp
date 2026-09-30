@@ -138,6 +138,7 @@ int main(int argc, char** argv)
         uint64_t shiftAt = UINT64_MAX;  // --origin-shift-at F --origin-shift x,y,z: a C9 rebase at frame F (repros)
         float cloudCoverage = 0;         // --clouds C: B5 cloud layer (FrameContext::clouds) with coverage C, other fields default
         float3 shiftBy{};  // --time YYYY-MM-DDTHH:MM (UT), --place lat,lon: sun, moon, stars (B4)
+        uint32_t addShadowLights = 0;  // --add-shadow-lights N (game request 09-30: frames failed past ~97 shadowed local lights)
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -170,6 +171,7 @@ int main(int argc, char** argv)
             else if (a == "--auto-exposure") autoExposure = true;
             else if (a == "--origin-shift-at") shiftAt = std::stoull(next());
             else if (a == "--clouds") cloudCoverage = std::stof(next());
+            else if (a == "--add-shadow-lights") addShadowLights = (uint32_t)std::stoul(next());
             else if (a == "--origin-shift")
             {
                 const std::string v = next();
@@ -246,6 +248,22 @@ int main(int argc, char** argv)
         const float3 sunAxis = normalize(cross(sun0, float3{ 0, 1, 0 }));
         const float wind0 = s.windSpeed;
         const float3 windDir0 = s.windDirection;
+        if (addShadowLights > 0 && !s.cameras.empty())
+        {
+            // N shadowed point lights on a grid around the host camera (1.5 m apart, 20 per row, 1 m above it, range 4 m)
+            const scene::Camera& cam = s.cameras[0];  // (the gate renders camera 0)
+            for (uint32_t i = 0; i < addShadowLights; ++i)
+            {
+                scene::Light l;
+                l.type = scene::LightType::Point;
+                l.position = { cam.position.x + 1.5f * ((float)(i % 20) - 9.5f), cam.position.y + 1.0f, cam.position.z + 1.5f * ((float)(i / 20) - 4.5f) };
+                l.intensity = 20;
+                l.range = 4;
+                l.castShadow = true;
+                s.lights.push_back(l);
+            }
+            logf("added %u shadowed point lights around the camera: %zu lights\n", addShadowLights, s.lights.size());
+        }
         ClusterData clusters = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality));
         logf("scene %s (%s), %zu instances, %zu clusters, camera %s\n", sceneName.c_str(), scene::contentHash(s).substr(0, 16).c_str(), s.instances.size(),
              clusters.clusters.size(), moving ? "path 0 (moving)" : (cameraName.empty() ? "0 (static)" : cameraName.c_str()));
@@ -534,6 +552,7 @@ int main(int argc, char** argv)
                 captureBuffer.Reset();
             }
             const shadow::VsmStats& st = shadow::stats(renderer.trackState());
+            logf("local shadows: %u slots assigned, %u raster-active, %u shadowed lights without a slot\n", st.localAssigned, st.localActive, st.localWithoutSlot);
             double sPasses = 0, raster = 0;
             for (const auto& [name, d] : r.passMs)
                 if (name.rfind("s.", 0) == 0)
