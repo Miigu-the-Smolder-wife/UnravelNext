@@ -216,7 +216,7 @@ def _plan(out, phase):
 
 def _layer_mask(path):
     a = path[:-4] + "_alpha.pfm"
-    return (mm.read_pfm(a)[..., 0] > 0.5) if os.path.exists(a) else None
+    return (mm.read_pfm(a)[..., 0] > 0) if os.path.exists(a) else None  # gi: data flag; refl: history weight (0 = no value)
 
 
 def _metrics(test, ref, layers=("gi", "refl")):
@@ -230,6 +230,9 @@ def _metrics(test, ref, layers=("gi", "refl")):
             continue
         a, b = mm.read_pfm(lt), mm.read_pfm(lr)
         mask = _layer_mask(lr)
+        if mask is not None:
+            mt = _layer_mask(lt)
+            mask = mask & mt if mt is not None else mask
         txt += f"; {layer} 층 σ {mm.layer_sigma(a, mask) * 100:.1f} % (기준 {mm.layer_sigma(b, mask) * 100:.1f} %), 층 오차 P95 {mm.layer_error(a, b, mask) * 100:.1f} %"
     return r, txt
 
@@ -299,7 +302,8 @@ def relight(out):
     for log in sorted(glob.glob(os.path.join(out, "relight", "*_frames.csv"))):
         base = log[:-len("_frames.csv")]
         name = os.path.basename(base)
-        ref = f"{base}_ref_f{still - 1}.pfm"
+        # the same run continued (plan "long"); older plans: a separate run with the change from frame 0
+        ref = f"{base}_f{plan['long'] - 1}.pfm" if "long" in plan else f"{base}_ref_f{still - 1}.pfm"
         if not os.path.exists(ref):
             continue
         rows = []
@@ -329,7 +333,10 @@ def cut(out):
     for log in sorted(glob.glob(os.path.join(out, "cut", "*_frames.csv"))):
         base = log[:-len("_frames.csv")]
         name = os.path.basename(base)
-        ref1, ref2 = f"{base}_ref1_f{still - 1}.pfm", f"{base}_ref2_f{still - 1}.pfm"
+        if "long" in plan:
+            ref1, ref2 = f"{base}_f{plan['long'] - 1}.pfm", f"{base}_floor_f{plan['long'] - 1}.pfm"
+        else:
+            ref1, ref2 = f"{base}_ref1_f{still - 1}.pfm", f"{base}_ref2_f{still - 1}.pfm"
         if not os.path.exists(ref1):
             continue
         rows = []

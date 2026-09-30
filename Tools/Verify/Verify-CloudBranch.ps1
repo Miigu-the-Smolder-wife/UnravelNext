@@ -157,6 +157,7 @@ $motionCases = [ordered]@{ rot90 = @{ bath = @("--path-rotate", "90"); train = @
 function Gate-Line([string]$name, [string[]]$a) { "Invoke-Step $(Q $name) $(Q $exe) @(" + (($a | ForEach-Object { Q $_ }) -join ",") + ")" }
 $warm = if ($Quick) { 60 } else { 300 }
 $still = if ($Quick) { 120 } else { 600 }
+$long = if ($Quick) { 240 } else { 2000 }  # relight and cut: the same run continued to this frame is the reference
 if ($Phases -contains "motion") {
   "== motion (Q-B: rotation 90 / 180 deg/s, walk 1.5 m/s, run 4 m/s: frames 1, 4, 8, 16, 32 of motion; still flicker)"
   $lines = @()
@@ -195,18 +196,16 @@ if ($Phases -contains "relight") {
       foreach ($ev in @("light", "sun")) {
         $base = "relight\$($sc)_$($r)_$ev"
         $at = { param($f) if ($ev -eq "light") { @("--light-toggle-at", "$f,$($lightIndex[$sc])") } else { @("--sun-step-at", "$f,10") } }
+        # The reference is the same run continued (frame $long - 1): a run with the change from frame 0 converges to another
+        # level in the bath - the GI cache's level depends on the camera's and the lights' history [measured, P1].
         $frames = @($ks | ForEach-Object { $warm + $_ - 1 })
-        $last = ($frames | Measure-Object -Maximum).Maximum
-        $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$($last + 1)") + (& $at $warm) +
-          @("--capture-output", (Join-Path $Out "$base.pfm"), "--capture-frames", ((@($warm - 1) + $frames) -join ","), "--capture-layers", "final,gi,refl", "--frame-log", (Join-Path $Out "$($base)_frames.csv"))
+        $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$long") + (& $at $warm) +
+          @("--capture-output", (Join-Path $Out "$base.pfm"), "--capture-frames", ((@($warm - 1) + $frames + @($long - 1)) -join ","), "--capture-layers", "final,gi,refl", "--frame-log", (Join-Path $Out "$($base)_frames.csv"))
         $lines += Gate-Line $base $a
-        $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$still") + (& $at 0) +
-          @("--capture-output", (Join-Path $Out "$($base)_ref.pfm"), "--capture-frames", "$($still - 1)", "--capture-layers", "final,gi,refl")
-        $lines += Gate-Line "$($base)_ref" $a
       }
     }
   }
-  @{ warm = $warm; still = $still; ks = $ks } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $Out "relight\plan.json")
+  @{ warm = $warm; still = $still; ks = $ks; long = $long } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $Out "relight\plan.json")
   Invoke-Locked "correctness" $lines
 }
 if ($Phases -contains "cut") {
@@ -216,21 +215,20 @@ if ($Phases -contains "cut") {
   foreach ($sc in $sceneNames) {
     foreach ($r in $resolutions) {
       $base = "cut\$($sc)_$($r)"
+      # The reference is the same run continued to frame $long - 1 (a cold start at the cut's pose converges to another
+      # level in the bath [measured, P1]); a second identical run's last frame gives the noise floor.
       $frames = @($ks | ForEach-Object { $warm + $_ - 1 })
-      $last = ($frames | Measure-Object -Maximum).Maximum
-      $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$($last + 1)", "--path-rotate", "180", "--path-time", "0",
-        "--cut-at", "$($warm):1.0", "--capture-output", (Join-Path $Out "$base.pfm"), "--capture-frames", ($frames -join ","), "--capture-layers", "final,gi,refl",
+      $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$long", "--path-rotate", "180", "--path-time", "0",
+        "--cut-at", "$($warm):1.0", "--capture-output", (Join-Path $Out "$base.pfm"), "--capture-frames", (($frames + @($long - 1)) -join ","), "--capture-layers", "final,gi,refl",
         "--frame-log", (Join-Path $Out "$($base)_frames.csv"), "--gi-cache-stats", (Join-Path $Out "$($base)_gi.json"))
       $lines += Gate-Line $base $a
-      foreach ($i in 1, 2) {
-        $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$still", "--path-rotate", "180", "--path-time", "1.0",
-          "--capture-output", (Join-Path $Out "$($base)_ref$i.pfm"), "--capture-frames", "$($still - 1)", "--capture-layers", "final,gi,refl") +
-          $(if ($i -eq 1) { @("--gi-cache-stats", (Join-Path $Out "$($base)_ref_gi.json")) } else { @() })
-        $lines += Gate-Line "$($base)_ref$i" $a
-      }
+      $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$long", "--path-rotate", "180", "--path-time", "0",
+        "--cut-at", "$($warm):1.0", "--capture-output", (Join-Path $Out "$($base)_floor.pfm"), "--capture-frames", "$($long - 1)", "--capture-layers", "final,gi,refl",
+        "--gi-cache-stats", (Join-Path $Out "$($base)_ref_gi.json"))
+      $lines += Gate-Line "$($base)_floor" $a
     }
   }
-  @{ warm = $warm; still = $still; ks = $ks } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $Out "cut\plan.json")
+  @{ warm = $warm; still = $still; ks = $ks; long = $long } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $Out "cut\plan.json")
   Invoke-Locked "correctness" $lines
 }
 if ($Phases -contains "unity") {

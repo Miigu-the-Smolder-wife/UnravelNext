@@ -75,6 +75,9 @@ def layer_sigma(layer, mask=None):
     s = tiles(hp, 8).std(axis=(1, 3))
     m = tiles(l, 8).mean(axis=(1, 3))
     valid = m > max(np.percentile(m, 50) * 1e-3, 1e-9)
+    # tiles far below the layer's typical level (a reflection of a black corner) would divide by ~0: floor at 5 % of the
+    # median tile
+    m = np.maximum(m, 0.05 * np.percentile(m[valid], 50)) if valid.any() else m
     if mask is not None:
         valid &= tiles(mask.astype(np.float64), 8).mean(axis=(1, 3)) > 0.99
     if not valid.any():
@@ -87,6 +90,7 @@ def layer_error(layer, ref, mask=None):
     d = tiles(np.abs(l - r), 8).mean(axis=(1, 3))
     m = tiles(r, 8).mean(axis=(1, 3))
     valid = m > max(np.percentile(m, 50) * 1e-3, 1e-9)
+    m = np.maximum(m, 0.05 * np.percentile(m[valid], 50)) if valid.any() else m  # (as layer_sigma)
     if mask is not None:
         valid &= tiles(mask.astype(np.float64), 8).mean(axis=(1, 3)) > 0.99
     if not valid.any():
