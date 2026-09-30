@@ -891,12 +891,13 @@ int main(int argc, char** argv)
                     if (gi::GiSystem* gs = gi::GiSystem::find(renderer.trackState()))
                     {
                         const gi::GiStats gst = gs->readStats();
-                        tr += format(",%u,%u,%u,%u,%u,%u,%u", gst.live, gst.requested, gst.selected, gst.created, gst.resets, gst.evicted, gst.epoch);
+                        tr += format(",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.5f", gst.live, gst.requested, gst.selected, gst.created, gst.resets, gst.evicted, gst.epoch,
+                                     gst.priors, gst.restarts, gst.selectedYoung, gst.selectedT1, gst.parentDelta);
                     }
                     else
-                        tr += ",,,,,,,";
+                        tr += ",,,,,,,,,,,,";
 #else
-                    tr += ",,,,,,,";
+                    tr += ",,,,,,,,,,,,";
 #endif
 #if __has_include("unx/refl/ReflectionSystem.h")
                     if (refl::ReflectionSystem* rsys = refl::ReflectionSystem::find(renderer.trackState()))
@@ -1004,7 +1005,7 @@ int main(int argc, char** argv)
                 std::ofstream file(frameLogPath);
                 if (!file) fail("cannot write %s", frameLogPath.c_str());
                 file << "frame,t,px,py,pz,fx,fy,fz,cut,light_on,sun_turn_deg,surface_px,disoccluded_px,offscreen_px,sky_px,d,"
-                        "vsm_stats_frame,vsm_dirty,vsm_requested,gi_live,gi_requested,gi_selected,gi_created,gi_resets,gi_evicted,gi_epoch,"
+                        "vsm_stats_frame,vsm_dirty,vsm_requested,gi_live,gi_requested,gi_selected,gi_created,gi_resets,gi_evicted,gi_epoch,gi_priors,gi_restarts,gi_t0,gi_t1,gi_parent_delta,"
                         "refl_jobs,refl_mirror_jobs,refl_glossy_jobs,refl_glossy_pixels,refl_planar_pixels\n";
                 for (const FrameLogRow& row : frameLog)
                 {
