@@ -15,7 +15,8 @@ param(
   [string]$GameProject = "C:\Users\USER\UnravelGames\BathhouseTycoon",          # -Phases unity (after a deployment)
   [string]$GameScene = "Assets/Game/BathhouseTycoon/Scenes/Bathhouse.unity",
   [switch]$Quick,
-  [switch]$DropPfm, # after the report: delete the PFM captures (motion, relight and cut make tens of GB per run)
+  [switch]$KeepPfm, # keep the PFM captures after the report (default: deleted - motion, relight and cut make tens of GB per run)
+  [switch]$DropPfm, # (the default now; accepted for older callers)
   [switch]$Local,   # build and run in this checkout (build\all of its working tree) instead of ..\UnravelNext-gate at -Ref
                     # (an implementation session measuring its own branch; the coordination session keeps the default)
   [switch]$DryRun   # write each GPU batch and parse it, run nothing on the GPU (checks the script itself)
@@ -296,7 +297,7 @@ if ($Phases -contains "report") {
   & python (Join-Path $root "Tools\Verify\verify_analyze.py") $Out $gate
   if ($LASTEXITCODE -ne 0) { throw "보고서 작성 실패" }
   "보고서: $(Join-Path $Out 'SUMMARY_KO.md')"
-  if ($DropPfm) {
+  if (-not $KeepPfm) {
     $pfm = Get-ChildItem $Out -Recurse -Filter *.pfm -ErrorAction SilentlyContinue
     "PFM 삭제: $($pfm.Count)개, $([math]::Round((($pfm | Measure-Object Length -Sum).Sum) / 1GB, 1)) GB"
     $pfm | Remove-Item -ErrorAction SilentlyContinue
