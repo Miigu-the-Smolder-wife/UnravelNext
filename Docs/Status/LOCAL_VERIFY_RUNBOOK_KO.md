@@ -38,6 +38,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Tools\Verify\Verify-CloudBra
 | `build` | `Tools\CI\Build.ps1 -Track all -Committed -Ref origin/cloud/render-fixes` → `C:\Users\USER\UnravelNext-gate`에 빌드한다. 빌드가 끝나면 장면 파일을 거기에 하드링크한다(빌드가 작업 폴더를 정리하면서 지우므로 매번 다시). | 1~3분 |
 | `tests` | reflectionanalytic, gianalytic, hostmotion, LocalShadowTests, FroxelTests | 약 2분 |
 | `caps` | 기차·욕탕 × 1440p·1080p를 원래 해상도(`--capture`)와 업스케일(`--capture-output`)로 캡처한다. 정지 장면은 둘 다, 움직임(`--moving`)과 해 이동(`--sun-deg-per-s 20`, 조명 변화 잔상 확인용)은 기차만. | 약 8분 |
+| `convergence` | 장면을 연 직후(가장 심한 가림 해제)부터 1·4·16·64·256프레임째와 600프레임 수렴 화면을 업스케일 출력으로 캡처해, 오차와 "타일 P95 ≤ 3 %에 닿는 프레임"을 잰다(사용자 요구 2026-09-30: 몇 프레임 안에 깨끗해야 한다). `conv/strip_*.png`로 눈으로도 본다. | 약 6분 |
+| `unity` (따로 실행, 배포 뒤) | 게임 프로젝트(`-GameProject`, `-GameScene`, 기본은 목욕탕)를 Unity batchmode로 열어 플레이 모드 게임 뷰를 캡처한다. 레벨 빌드 뒤 1·4·16·64프레임, 가만히 선 8프레임의 깜빡임 지도, 걷는 중. 그 프로젝트에 **이미 배포된** 렌더러를 보고, 프로젝트는 닫혀 있어야 한다. | 약 5분 |
 | `determinism` | 1080p에서 `debug.deterministic=true`로 두 번, 기본 모드로 두 번 캡처한다(`--warmup-frames 300`). | 약 3분 |
 | `luminance` | 욕탕 1080p 3000프레임의 프레임별 평균 밝기(`--luminance-log`) | 약 1분 |
 | `timing` | 기차·욕탕 × 1080p·1440p·4K를 두 번 잰다(GpuLock timing, 비동기는 기본값대로 꺼짐). | 약 6분 |

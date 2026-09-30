@@ -157,6 +157,82 @@ def timing(out):
     return lines, detail
 
 
+def mapped_luma(img, key):
+    lum = np.nan_to_num(img @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0) * key
+    lum = np.maximum(lum, 0)
+    return lum / (1 + lum)
+
+
+def convergence(out):
+    """Cold-start curves: conv/<scene>_<res>_<k>.pfm against conv/<scene>_<res>_ref.pfm. Error on L/(1+L) at the reference's
+    display exposure: mean relative error and the P95 of 16x16 tile errors; frames to clean = the first k whose tile P95
+    is at most 3 % (a candidate threshold, not a replacement for looking at conv/strip_*.png)."""
+    lines, groups = [], {}
+    for f in glob.glob(os.path.join(out, "conv", "*.pfm")):
+        base = os.path.basename(f)[:-4]
+        scene_res, k = base.rsplit("_", 1)
+        groups.setdefault(scene_res, {})[k] = f
+    for scene_res in sorted(groups):
+        g = groups[scene_res]
+        if "ref" not in g:
+            continue
+        ref = read_pfm(g["ref"])
+        key = display_key(ref)
+        mr = mapped_luma(ref, key)
+        h, w = mr.shape
+        th, tw = h // 16, w // 16
+        ks = sorted((int(k) for k in g if k != "ref"))
+        row, clean = [], None
+        strip = []
+        cw, ch = min(480, w), min(270, h)
+        x0, y0 = (w - cw) // 2, (h - ch) // 2
+        for k in ks:
+            img = read_pfm(g[str(k)])
+            mk = mapped_luma(img, key)
+            d = np.abs(mk - mr)
+            rel = d.mean() / max(mr.mean(), 1e-9)
+            tiles = d[:th * 16, :tw * 16].reshape(th, 16, tw, 16).mean(axis=(1, 3)) / np.maximum(mr[:th * 16, :tw * 16].reshape(th, 16, tw, 16).mean(axis=(1, 3)), 1e-3)
+            p95 = float(np.percentile(tiles, 95))
+            row.append(f"{k}프레임: 평균 {rel * 100:.1f} %, 타일 P95 {p95 * 100:.1f} %")
+            if clean is None and p95 <= 0.03:
+                clean = k
+            strip.append(tonemap(img * key)[y0:y0 + ch, x0:x0 + cw])
+        strip.append(tonemap(ref * key)[y0:y0 + ch, x0:x0 + cw])
+        s = Image.new("RGB", (len(strip) * (cw + 4), ch), (255, 0, 255))
+        for i, a in enumerate(strip):
+            s.paste(Image.fromarray(a), (i * (cw + 4), 0))
+        s.save(os.path.join(out, "conv", f"strip_{scene_res}.png"))
+        lines.append(f"- {scene_res}: " + "; ".join(row) + f" → 타일 P95 ≤ 3 %에 닿는 프레임: {clean if clean is not None else '측정 범위 밖(더 늦음)'} (`conv/strip_{scene_res}.png`: 왼쪽부터 {', '.join(str(k) for k in ks)}프레임, 마지막이 수렴)")
+    return lines
+
+
+def unity(out):
+    lines = []
+    for size_dir in sorted(glob.glob(os.path.join(out, "unity", "*"))):
+        if not os.path.isdir(size_dir):
+            continue
+        size = os.path.basename(size_dir)
+        rep = os.path.join(size_dir, "play_report.txt")
+        if os.path.exists(rep):
+            for l in open(rep, encoding="utf-8", errors="replace"):
+                if "flicker" in l:
+                    lines.append(f"- {size}: {l.strip()}")
+        names = [n for n in ("first1", "first4", "first16", "first64", "still0", "walk3")
+                 for _ in [0] if glob.glob(os.path.join(size_dir, f"play_*_{n}.png"))]
+        imgs = [Image.open(glob.glob(os.path.join(size_dir, f"play_*_{n}.png"))[0]).convert("RGB") for n in names]
+        if imgs:
+            tw = 480
+            th = round(imgs[0].height * tw / imgs[0].width)
+            s = Image.new("RGB", (len(imgs) * (tw + 4), th), (255, 0, 255))
+            for i, im in enumerate(imgs):
+                s.paste(im.resize((tw, th), Image.LANCZOS), (i * (tw + 4), 0))
+            s.save(os.path.join(out, "unity", f"strip_{size}.png"))
+            lines.append(f"- {size}: `unity/strip_{size}.png` = {', '.join(names)} (전체 프레임은 `unity/{size}/`)")
+        if not os.path.exists(rep) and not imgs:
+            lines.append(f"- {size}: 결과 없음 (`unity_{size}.log` 확인)")
+    return lines
+
+
 def main():
     out, gate = sys.argv[1], sys.argv[2]
     md = ["# 로컬 검증 결과", ""]
@@ -183,6 +259,15 @@ def main():
         side_by_side(read_pfm(native), read_pfm(up), os.path.join(out, "caps", f"cmp_{name}.png"), os.path.join(out, "caps", f"crop_{name}.png"))
         md.append(f"- {name}: {fmt_cmp(upscale_compare(gate, native, up, None))}")
     md.append("")
+    # convergence and the Unity game view (user requirement 2026-09-30: clean in every frame while moving)
+    conv = convergence(out)
+    if conv:
+        md += ["## 수렴 곡선 (장면 첫 프레임부터, 업스케일 출력) — 움직임 화질의 대리 지표", "",
+               "장면을 연 직후는 가장 심한 가림 해제다(조명 편집 뒤 재빌드도 지금은 같다). 사용자 요구는 몇 프레임 안에 깨끗해지는 것이다.", ""] + conv + [""]
+    uni = unity(out)
+    if uni:
+        md += ["## Unity 게임 뷰 (플레이 모드, 배포된 렌더러)", "",
+               "first1~64 = 레벨 빌드 뒤 그 프레임, still = 가만히 선 8프레임의 깜빡임(루마 표준편차, 10-bit 코드), walk = 걷는 중. **눈으로 볼 것.**", ""] + uni + [""]
     # determinism
     md += ["## 결정론 (같은 설정 두 번)", ""]
     for p1 in sorted(glob.glob(os.path.join(out, "det", "*1.pfm"))):

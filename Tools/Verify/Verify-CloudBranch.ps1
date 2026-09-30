@@ -11,7 +11,9 @@
 param(
   [string]$Ref = "origin/cloud/render-fixes",
   [string]$Out = "",
-  [string[]]$Phases = @("build", "tests", "caps", "determinism", "luminance", "timing", "report"),
+  [string[]]$Phases = @("build", "tests", "caps", "convergence", "determinism", "luminance", "timing", "report"),
+  [string]$GameProject = "C:\Users\USER\UnravelGames\BathhouseTycoon",          # -Phases unity (after a deployment)
+  [string]$GameScene = "Assets/Game/BathhouseTycoon/Scenes/Bathhouse.unity",
   [switch]$Quick,
   [switch]$DryRun   # write each GPU batch and parse it, run nothing on the GPU (checks the script itself)
 )
@@ -25,7 +27,7 @@ function Test-Game {
   $g = Get-Process -Name $games -ErrorAction SilentlyContinue
   if ($g) { throw "게임 실행 중($($g[0].Name)): GPU 작업을 하지 않는다. 게임을 끝낸 뒤 다시 실행한다." }
 }
-$gpuPhases = @($Phases | Where-Object { $_ -in @("build", "tests", "caps", "determinism", "luminance", "timing") }).Count -gt 0
+$gpuPhases = @($Phases | Where-Object { $_ -in @("build", "tests", "caps", "convergence", "determinism", "luminance", "timing") }).Count -gt 0
 if ($gpuPhases -and -not $DryRun) { Test-Game }
 & git -C $root fetch -q origin 2>$null
 $sha = (& git -C $root rev-parse --short $Ref).Trim()
@@ -113,6 +115,49 @@ if ($Phases -contains "caps") {
     }
   }
   Invoke-Locked "correctness" $lines
+}
+if ($Phases -contains "convergence") {
+  # Cold start (the worst disocclusion; a light edit rebuild is the same today): the upscaled output after k frames
+  # against the output after 600 frames (user requirement 2026-09-30: clean within a few frames, never seconds).
+  "== convergence (cold start: frames 1, 4, 16, 64, 256 vs 600)"
+  $lines = @()
+  $ks = if ($Quick) { @(1, 4) } else { @(1, 4, 16, 64, 256) }
+  $refFrames = if ($Quick) { "60" } else { "600" }
+  foreach ($sc in $sceneNames) {
+    foreach ($r in $resolutions) {
+      foreach ($k in ($ks + @("ref"))) {
+        $n = if ($k -eq "ref") { $refFrames } else { "$k" }
+        $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", $n, "--capture-output", (Join-Path $Out "conv\$($sc)_$($r)_$k.pfm"))
+        $lines += "Invoke-Step $(Q "conv\$($sc)_$($r)_$k") $(Q $exe) @(" + (($a | ForEach-Object { Q $_ }) -join ",") + ")"
+      }
+    }
+  }
+  New-Item -ItemType Directory -Force (Join-Path $Out "conv") | Out-Null
+  Invoke-Locked "correctness" $lines
+}
+if ($Phases -contains "unity") {
+  # After a deployment: the game project in Unity (batch mode, no window) - play-mode frames as the user sees them:
+  # the first frames after the level's build, 8 still frames with their flicker map, walking frames. Uses the renderer
+  # already deployed in that project. The project must be closed.
+  "== unity ($GameProject, $GameScene)"
+  if (-not $DryRun) { Test-Game }
+  $open = Get-CimInstance Win32_Process -Filter "Name='Unity.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Replace('\', '/').ToLower().Contains($GameProject.Replace('\', '/').ToLower()) }
+  if ($open) { throw "Unity가 $GameProject 를 열고 있다: 닫은 뒤 다시 실행한다" }
+  $unity = "C:\Program Files\Unity\Hub\Editor\6000.6.0f1\Editor\Unity.exe"
+  $u2 = Join-Path $GameProject "Artifacts\U2"
+  if (Test-Path $u2) { Get-ChildItem $u2 -File | Remove-Item }
+  foreach ($size in $(if ($Quick) { @("1920x1080") } else { @("1920x1080", "2560x1440") })) {
+    $env:UNX_U2_SCENE = $GameScene; $env:UNX_U2_FIRST = "1,4,16,64"; $env:UNX_U2_SIZE = $size
+    $log = Join-Path $Out "unity_$size.log"
+    if (-not $DryRun) {
+      & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "Tools\CI\GpuLock.ps1") -Track all -Kind correctness -TimeoutMinutes 40 -- $unity -batchmode -projectPath $GameProject -force-d3d12 -runTests -testPlatform EditMode -testFilter "UnravelNextBridge.Tests.UnravelNextU2CaptureTests" -testResults (Join-Path $Out "unity_$size.xml") -logFile $log *> (Join-Path $Out "unity_$($size)_lock.log")
+      "unity $size exit $LASTEXITCODE"
+      $dst = Join-Path $Out "unity\$size"
+      New-Item -ItemType Directory -Force $dst | Out-Null
+      if (Test-Path $u2) { Get-ChildItem $u2 -File | Move-Item -Destination $dst -Force }
+    }
+    Remove-Item Env:UNX_U2_SCENE, Env:UNX_U2_FIRST, Env:UNX_U2_SIZE -ErrorAction SilentlyContinue
+  }
 }
 if ($Phases -contains "determinism") {
   "== determinism pairs (1080p)"
