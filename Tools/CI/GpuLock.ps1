@@ -41,6 +41,13 @@
 # up. A correctness acquirer yields to every live timing waiter (re-checked every 250 ms, and once more right after the
 # mutex is taken: it releases the mutex again if a timing waiter or HOLD appeared). No one acquires while .gpulock/HOLD
 # exists (the user's "I am playing" sign; its content is the reason). Waiter files of dead processes are removed.
+# v1.83 (INTERFACES 3.3; coordination 2026-10-01: a correctness Verify and a hardware fluid run waited 2 h and 1.5 h while later arrivals
+# took the lock 16 times, and the redesign worktree kept its own .gpulock, so its timing waiters, history and the HOLD
+# sign were invisible to the main checkout's users): every worktree uses the main checkout's .gpulock (a worktree's .git
+# file names its git folder, whose "commondir" leads to the shared one; UNX_GPU_LOCK_DIR overrides, as for the native
+# slices), and waiters take turns first come, first served: timing before correctness, then by "since", then by pid. A
+# waiter acquires only when no live waiter is ahead of it. A waiter file whose pid now belongs to a process started
+# after the file's "since" (a reused pid) is stale and removed.
 # Arguments are parsed by hand (no param block) so everything after "--" reaches the command unchanged.
 $ErrorActionPreference = "Stop"
 $Track = $null
@@ -760,7 +767,22 @@ function Resolve-Launch([object[]]$cmd) {
 }
 
 $root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
-$lockDir = Join-Path $root ".gpulock"
+# One .gpulock for the main checkout and all its worktrees (v1.83).
+$lockRoot = $root
+$dotGit = Join-Path $root ".git"
+if (Test-Path $dotGit -PathType Leaf) {
+  try {
+    $gitDir = [IO.File]::ReadAllText($dotGit).Trim() -replace '^gitdir:\s*', ''
+    if (-not [IO.Path]::IsPathRooted($gitDir)) { $gitDir = Join-Path $root $gitDir }
+    $common = $gitDir
+    $commonFile = Join-Path $gitDir "commondir"
+    if (Test-Path $commonFile) { $common = [IO.File]::ReadAllText($commonFile).Trim() }
+    if (-not [IO.Path]::IsPathRooted($common)) { $common = Join-Path $gitDir $common }
+    $lockRoot = Split-Path -Parent ([IO.Path]::GetFullPath($common))
+  } catch { $lockRoot = $root }
+}
+$lockDir = Join-Path $lockRoot ".gpulock"
+if ($env:UNX_GPU_LOCK_DIR) { $lockDir = $env:UNX_GPU_LOCK_DIR }
 New-Item -ItemType Directory -Force $lockDir | Out-Null
 $current = Join-Path $lockDir "current.json"
 $history = Join-Path $lockDir "history.log"
@@ -802,23 +824,35 @@ function Add-History([string]$line) {
   Write-Warning "GpuLock.ps1: could not append to $history"
 }
 
-# Waiters (v1.40): .gpulock/waiting/<pid>.json while waiting; correctness yields to live timing waiters; HOLD stops all.
+# Waiters (v1.40): .gpulock/waiting/<pid>.json while waiting; HOLD stops all. Turns (v1.83): timing before correctness,
+# then first come ("since", then pid).
 $waitDir = Join-Path $lockDir "waiting"
 New-Item -ItemType Directory -Force $waitDir | Out-Null
 $waitFile = Join-Path $waitDir ("{0}.json" -f $PID)
+$waitSince = (Get-Date).ToString("s")
 function Write-Waiting {
-  $w = [ordered]@{ track = $Track; kind = $Kind; pid = $PID; since = (Get-Date).ToString("s"); command = ($Command -join " ") }
+  $w = [ordered]@{ track = $Track; kind = $Kind; pid = $PID; since = $waitSince; command = ($Command -join " ") }
   $tmp = "$waitFile.tmp"
   [IO.File]::WriteAllText($tmp, ($w | ConvertTo-Json -Compress), $utf8)
   if (-not [UnxGpuLockJob]::ReplaceFile($tmp, $waitFile)) { Remove-Item $tmp -ErrorAction SilentlyContinue }
 }
-function Get-TimingWaiter {
+function Get-Rank([string]$kind) { if ($kind -eq "timing") { return 0 } return 1 }
+# The first live waiter whose turn comes before this one's (null: none).
+function Get-WaiterAhead {
+  $rank = Get-Rank $Kind
   foreach ($f in @(Get-ChildItem $waitDir -Filter *.json -ErrorAction SilentlyContinue)) {
     $w = $null
     try { $w = [IO.File]::ReadAllText($f.FullName) | ConvertFrom-Json } catch { continue }
     if (-not $w -or [int]$w.pid -eq $PID) { continue }
-    if (-not (Get-Process -Id ([int]$w.pid) -ErrorAction SilentlyContinue)) { Remove-Item $f.FullName -ErrorAction SilentlyContinue; continue }
-    if ($w.kind -eq "timing") { return $w }
+    $p = Get-Process -Id ([int]$w.pid) -ErrorAction SilentlyContinue
+    $reused = $false
+    if ($p) { try { $reused = $p.StartTime -gt ([datetime]$w.since).AddSeconds(5) } catch { } }
+    if (-not $p -or $reused) { Remove-Item $f.FullName -ErrorAction SilentlyContinue; continue }
+    $r = Get-Rank ([string]$w.kind)
+    if ($r -lt $rank) { return $w }
+    if ($r -gt $rank) { continue }
+    $order = [string]::CompareOrdinal([string]$w.since, $waitSince)
+    if ($order -lt 0 -or ($order -eq 0 -and [int]$w.pid -lt $PID)) { return $w }
   }
   return $null
 }
@@ -834,10 +868,8 @@ function Get-Hold {
 function Get-Blocker {
   $hold = Get-Hold
   if ($hold) { return "HOLD: $hold" }
-  if ($Kind -eq "correctness") {
-    $w = Get-TimingWaiter
-    if ($w) { return "yielding to the timing waiter {0} (pid {1}) :: {2}" -f $w.track, $w.pid, $w.command }
-  }
+  $w = Get-WaiterAhead
+  if ($w) { return "in line behind {0} ({1}, pid {2}, since {3}) :: {4}" -f $w.track, $w.kind, $w.pid, $w.since, $w.command }
   return $null
 }
 
