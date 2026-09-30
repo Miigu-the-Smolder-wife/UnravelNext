@@ -156,7 +156,7 @@ void GiTraceGen()
             float3 irradiance = 0, specular = 0;
             bool created;
             const uint bounceLevel = giLevelForSize(h, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z));
-            const uint e = giFindOrCreate(b, h, giSurfaceKey(h, s.position, s.normal, bounceLevel), giAnchorAtHit(h, s.position, r.Direction), s.normal, created);
+            const uint e = giFindOrCreate(b, h, giSurfaceKey(h, s.position, s.normal, bounceLevel), giAnchorAtHit(h, s.position, r.Direction, hit.t), s.normal, created);
             bool known = false;
             if (e != GI_ENTRY_PENDING)
             {

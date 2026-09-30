@@ -567,8 +567,9 @@ ClusterData panelCuts(const scene::Scene& s)
 
 // --scan-cache: after a run, every live GI cache entry against the furnace's uniform L = 2 (Passes/GI/Tests/GiCacheScan).
 bool g_scanCache = false;
+bool g_checkFurnaceAnchors = false;
 
-void scanCache(Device& device, ShaderLibrary& shaders, gi::GiSystem& gi, float L)
+uint32_t scanCache(Device& device, ShaderLibrary& shaders, gi::GiSystem& gi, float L, bool details)
 {
     constexpr uint64_t kBytes = 32 + 64 * 64;
     Buffer result = createBuffer(device, kBytes, D3D12_HEAP_TYPE_DEFAULT, true);
@@ -578,9 +579,9 @@ void scanCache(Device& device, ShaderLibrary& shaders, gi::GiSystem& gi, float L
     const BufferRef out = g.importBuffer(result.resource.Get(), { "scan result", kBytes, 0 });
     g.addPass("test.scan.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(out, Use::CopyDst); },
               [out](PassContext& c) {
-                  D3D12_WRITEBUFFERIMMEDIATE_PARAMETER p[5];
-                  for (int i = 0; i < 5; ++i) p[i] = { c.resource(out)->GetGPUVirtualAddress() + 4 * i, 0 };
-                  c.cmd->WriteBufferImmediate(5, p, nullptr);
+                  D3D12_WRITEBUFFERIMMEDIATE_PARAMETER p[6];
+                  for (int i = 0; i < 6; ++i) p[i] = { c.resource(out)->GetGPUVirtualAddress() + 4 * i, 0 };
+                  c.cmd->WriteBufferImmediate(6, p, nullptr);
               });
     const uint32_t capacity = gi.settings().capacity;
     g.addPass("test.scan", QueueType::Compute,
@@ -591,11 +592,13 @@ void scanCache(Device& device, ShaderLibrary& shaders, gi::GiSystem& gi, float L
               },
               [&shaders, cache, out, L, capacity](PassContext& c) {
                   const float tolerance = 0.02f;
-                  uint32_t k[4] = { c.srv(cache), c.uav(out), 0, 0 };
+                  uint32_t k[12] = { c.srv(cache), c.uav(out), 0, 0 };
                   std::memcpy(&k[2], &L, 4);
                   std::memcpy(&k[3], &tolerance, 4);
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/Tests/GiCacheScan"));
-                  c.computeConstants(k, 4);
+                  const float bounds[8] = { -6.0f, 0.0f, -6.0f, 1e-4f, 6.0f, 5.0f, 6.0f, 0.0f };
+                  std::memcpy(&k[4], bounds, sizeof bounds);
+                  c.computeConstants(k, 12);
                   c.cmd->Dispatch((capacity + 63) / 64, 1, 1);
               });
     g.execute(nullptr);
@@ -611,13 +614,15 @@ void scanCache(Device& device, ShaderLibrary& shaders, gi::GiSystem& gi, float L
     readback.resource->Unmap(0, &none);
     logf("cache scan: %u live updated entries; off by > 2 %%: SH irradiance %u, texel mean %u, texel minimum %u (%u recorded)\n", w[0], w[1], w[2], w[3], w[4]);
     auto f = [&](uint32_t i) { float v; std::memcpy(&v, &w[i], 4); return v; };
-    for (uint32_t r = 0; r < std::min(w[4], 64u); ++r)
+    logf("furnace anchors outside the free room: %u\n", w[5]);
+    for (uint32_t r = 0; details && r < std::min(w[4], 64u); ++r)
     {
         const uint32_t a = 8 + r * 16;
-        logf("  entry %u level %u class %u at (%.3f, %.3f, %.3f) n (%.2f, %.2f, %.2f): E %.4f, texel mean %.4f min %.4f, updates %u history %u, used %u updated %u\n",
+        logf("  entry %u level %u class %u at (%.6f, %.6f, %.6f) n (%.4f, %.4f, %.4f): E %.4f, texel mean %.4f min %.4f, updates %u history %u, used %u updated %u\n",
              w[a + 11], w[a + 3] & 255, w[a + 3] >> 8, f(a), f(a + 1), f(a + 2), f(a + 12), f(a + 13), f(a + 14), f(a + 4), f(a + 5), f(a + 6), w[a + 7], w[a + 8], w[a + 9],
              w[a + 10]);
     }
+    return w[5];
 }
 
 struct Outcome
@@ -627,6 +632,7 @@ struct Outcome
     double excessM = -1, excessG = -1;  // largest deviation beyond the pixel's allowance (<= 0: all within)
     uint32_t exactOccupied = 0, exactSlots = 0;  // RayScene's reflection exact set after the last frame
     uint32_t outliersM = 0, outliersG = 0;
+    uint32_t invalidAnchors = 0;
 };
 
 Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality, const scene::Scene& s, float3 sky,
@@ -737,10 +743,10 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
         graph.execute(nullptr);
         device.queue(QueueType::Graphics).waitCpu(graph.lastFence(QueueType::Graphics));
     }
-    if (g_scanCache)
+    if (g_checkFurnaceAnchors || g_scanCache)
     {
-        g_scanCache = false;  // the furnace (first scene) only
-        if (gi::GiSystem* gi = gi::GiSystem::find(state)) scanCache(device, shaders, *gi, 2.0f);
+        if (gi::GiSystem* gi = gi::GiSystem::find(state)) out.invalidAnchors = scanCache(device, shaders, *gi, 2.0f, g_scanCache);
+        g_scanCache = g_checkFurnaceAnchors = false;  // the closed furnace only
     }
     CommandList cl = device.acquireCommandList(QueueType::Graphics);
     cl.list->CopyBufferRegion(readback.resource.Get(), 0, result.resource.Get(), 0, resultBytes);
@@ -811,8 +817,12 @@ int main(int argc, char** argv)
 {
     try
     {
-        uint32_t frames = 128;  // cold cache: cells only reflections reach converge in ~100 frames (48: 4 of 38962 M pixels still 4 % low)
-        bool validate = false;
+        // A cold cache must converge before comparison with the equilibrium answer.
+        // 128 frames left 1..11 M outliers after fixing invalid crease anchors;
+        // the old test also had stochastic failures (GiTrace's MIS history).
+        // Keep the 3% + z*sigma gate; allow 256 frames, without extra rays per frame.
+        uint32_t frames = 256;
+        bool validate = false, furnaceOnly = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -820,6 +830,7 @@ int main(int argc, char** argv)
             if (a == "--frames" && i + 1 < argc) frames = (uint32_t)std::stoul(argv[++i]);
             else if (a == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
             else if (a == "--validate") validate = true;
+            else if (a == "--furnace-only") furnaceOnly = true;
             else if (a == "--scan-cache") g_scanCache = true;  // diagnostics: GI cache entries vs the furnace (first scene only)
             else fail("unknown argument %s", a.c_str());
         }
@@ -837,12 +848,19 @@ int main(int argc, char** argv)
         bool pass = true;
 
         const scene::Scene furnace = furnaceWithMirrors(1, 0.5f);
+        g_checkFurnaceAnchors = true;
         const Outcome a = run(device, shaders, quality, furnace, { 0, 0, 0 },
                               furnaceExpectation(ViewDesc::fromCamera(furnace.cameras[0], 1920, 1080, float4x4{}), 1920, 1080, 1.0, 0.5), frames, 1920, 1080);
-        const bool okA = a.mirror > 0 && a.glossy > 0 && std::fabs(a.meanM - 1) < 0.01 && std::fabs(a.meanG - 1) < 0.01 && a.excessM <= 0 && a.excessG <= 0;
+        const bool okA = a.invalidAnchors == 0 && a.mirror > 0 && a.glossy > 0 && std::fabs(a.meanM - 1) < 0.01 && std::fabs(a.meanG - 1) < 0.01 && a.excessM <= 0 && a.excessG <= 0;
         logf("furnace (value / expected; cache L = 2): %u surface samples: K %u, M %u (mean %.4f, worst %.2f %%, %u beyond 3 %% + z sigma), G %u (mean %.4f, worst %.2f %%) -> %s\n", a.surface, a.k,
              a.mirror, a.meanM, 100 * a.worstM, a.outliersM, a.glossy, a.meanG, 100 * a.worstG, okA ? "PASS" : "FAIL");
         pass = pass && okA;
+        if (furnaceOnly)
+        {
+            const uint32_t errors = device.drainDebugMessages();
+            logf("RESULT %s (furnace only), D3D12 errors: %u\n", pass && errors == 0 ? "PASS" : "FAIL", errors);
+            return pass && errors == 0 ? 0 : 1;
+        }
 
         const Outcome b = run(device, shaders, quality, mirrorUnderSky(), { 1, 1, 1 }, [](uint32_t, uint32_t) { return Expectation{ 1.0, 0.0 }; }, frames, 1920, 1080);
         const bool okB = b.mirror > 0 && std::fabs(b.meanM - 1) < 0.01 && b.worstM < 0.03;

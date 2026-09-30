@@ -166,9 +166,12 @@ uint giPackNormal(float3 n)
 // distance to the camera, twice the GI ray origin offset). The hit lies on the boundary of free space, possibly on a crease
 // where another face meets it; the ray came through free space, so the step moves the anchor off every face it touches,
 // and the entry's own rays (anchor + normal offset) no longer start on a neighbouring face's plane.
-float3 giAnchorAtHit(GiHeader h, float3 hitPosition, float3 rayDirection)
+float3 giAnchorAtHit(GiHeader h, float3 hitPosition, float3 rayDirection, float rayDistance)
 {
-    return hitPosition - rayDirection * (2e-3 + 4e-4 * distance(hitPosition, h.camera));
+    // Only the traced segment is known to be free. Near a crease the desired
+    // offset can exceed t and step behind the ray origin, through its surface.
+    const float back = min(2e-3 + 4e-4 * distance(hitPosition, h.camera), 0.5 * max(rayDistance, 0.0));
+    return hitPosition - rayDirection * back;
 }
 
 // Finds the entry of 'key' or creates it with the given anchor. Returns GI_ENTRY_PENDING when the entry is being

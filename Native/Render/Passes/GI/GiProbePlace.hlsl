@@ -19,7 +19,7 @@ void main(uint2 probe : SV_DispatchThreadID)
     const float3 p = worldFromDepth(float2(pixel), d);
     const float3 n = decodeGBuffer(gbuffer.Load(int3(pixel, 0))).normal;
     bool created;
-    const uint own = giFindOrCreate(b, h, giSurfaceKey(h, p, n, 0), giAnchorAtHit(h, p, normalize(p - g_cameraPosition)), n, created);
+    const uint own = giFindOrCreate(b, h, giSurfaceKey(h, p, n, 0), giAnchorAtHit(h, p, normalize(p - g_cameraPosition), distance(p, g_cameraPosition)), n, created);
     if (own != GI_ENTRY_PENDING)
     {
         giTouch(b, h, own);
@@ -35,7 +35,7 @@ void main(uint2 probe : SV_DispatchThreadID)
         uint centre = own;
         if (l != level)
         {
-            centre = giFindOrCreate(b, h, giSurfaceKey(h, p, n, l), giAnchorAtHit(h, p, normalize(p - g_cameraPosition)), n, created);
+            centre = giFindOrCreate(b, h, giSurfaceKey(h, p, n, l), giAnchorAtHit(h, p, normalize(p - g_cameraPosition), distance(p, g_cameraPosition)), n, created);
             if (centre != GI_ENTRY_PENDING)
             {
                 giTouch(b, h, centre);
