@@ -330,6 +330,19 @@ struct ParticleSystem::Impl
     std::vector<NV_StreamHeightField> heightTable;
     Buf heightTiles{ "fx.heightTiles", 4 }, heightFields{ "fx.heightFields", 112 };
     uint32_t submittedPrograms = 0, submittedBodyMax = 0;  // tables as of the last submitted packet (validation)
+    // Every persistent buffer in a fixed order (declaration order): imported at the start of a frame's ticks so the render
+    // graph's resource order does not follow the tick parity or the sections a tick carries (the plan key: the ping-pong
+    // pairs and optional inputs imported at first use gave the same passes a different resource order on every other
+    // frame, and the plan was compiled anew - Unity level logs, game request 10-01).
+    std::vector<Buf*> persistent()
+    {
+        return { &posAge[0], &posAge[1], &velocity[0], &velocity[1], &orientation[0], &orientation[1], &restoreOrientations, &inRanges, &inBlocks,
+                 &renderRanges, &renderBlocks, &emitterTable, &emitterStamp, &emitterUpdates, &emitterUpdateRows, &emitterPatches, &dynamic[0], &dynamic[1],
+                 &counters, &programs, &curveKeys, &spawns, &explicitBirths, &fields, &worldFields, &surfaces, &restore, &birthIndex, &dynamicSurfaces,
+                 &bodies, &tickSurfaces, &ribbonPoints, &ribbonLinks, &ribbonVertices, &ribbonRanges, &ribbonRunStart, &ribbonTangents, &ribbonDrawRanges,
+                 &ribbonDrawRows, &surfaceBoxes, &colliders, &trace, &rowMotion, &overflowRecords, &volumeRecords, &volumeSide, &volumeRanges, &gridBlocks,
+                 &gridCount, &gridStart, &gridFill, &gridEntries, &gridLarge, &heightTiles, &heightFields };
+    }
 
     struct Slot
     {
@@ -444,6 +457,13 @@ void ParticleSystem::record(RenderGraph& graph, ShaderLibrary& shaders, uint64_t
 void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary& shaders, uint64_t importIndex, QueueType queueType)
 {
     Impl& m = *m_impl;
+    if (!m_pending.empty())
+    {
+        for (Buf* b : m.persistent())
+            if (b->resource) b->import(g, importIndex);
+        for (auto& x : m.slots)  // the tick ring's event buffers, slot order
+            if (x.events.resource) x.events.import(g, importIndex);
+    }
     while (!m_pending.empty())
     {
         std::vector<uint8_t> packet = std::move(m_pending.front());

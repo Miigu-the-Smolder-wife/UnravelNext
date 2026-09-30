@@ -60,6 +60,7 @@ struct HarnessResult
     std::map<std::string, Distribution> passMs;
     std::vector<std::string> passOrder;
     RenderGraphStats graph;
+    uint32_t replannedFrames = 0;  // measured frames whose render graph plan was compiled anew (not reused from the cache)
     // GPU contention in the measurement window (GpuLock.ps1 v1.39 sampler, UNX_GPU_CONTENTION): seconds in which some
     // process outside the measured tree kept the GPU busy >= its threshold, and those samples. -1 = no sampler data.
     double contendedSeconds = -1;

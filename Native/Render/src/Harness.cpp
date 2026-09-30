@@ -207,6 +207,7 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
         if (measuring)
         {
             if (cpu.size() < options.frames) cpu.push_back({ total, graph.stats().cpuRecordMs, graph.stats().cpuSubmitMs });
+            if (!graph.stats().planReused) ++result.replannedFrames;
             if (frame % 16 == 0) clocks.push_back((double)sampleSmClockMHz());
         }
         else if (options.warmupFrames < 0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() >= options.warmupSeconds)
@@ -281,7 +282,12 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
 
     if (!options.outputDirectory.empty())
     {
-        const std::string base = format("%s_%s_%s", options.label.c_str(), resolution.name.c_str(), stamp().c_str());
+        // The label as one file name: a scene path in it (renderergate labels carry the scene argument) made nested
+        // directories, and an absolute one's drive colon failed the write after the run.
+        std::string label = options.label;
+        for (char& ch : label)
+            if (ch == '/' || ch == '\\' || ch == ':' || ch == '*' || ch == '?' || ch == '"' || ch == '<' || ch == '>' || ch == '|') ch = '_';
+        const std::string base = format("%s_%s_%s", label.c_str(), resolution.name.c_str(), stamp().c_str());
         std::filesystem::create_directories(options.outputDirectory);
         if (options.writePassCsv && options.passTimestamps)
         {
@@ -347,11 +353,11 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
 void Harness::printSummary(const HarnessResult& r) const
 {
     logf("[%s %s] gpu frame median %.4f ms, p95 %.4f, p99 %.4f (n=%u) | cpu frame median %.4f ms (record %.4f, submit %.4f) | SM clock median %.0f MHz (min %.0f) | "
-         "passes %u, barriers %u in %u batches, cross-queue syncs %u, command lists %u, transients %u (%.1f MB aliased / %.1f MB unaliased) | quality %s\n",
+         "passes %u, barriers %u in %u batches, cross-queue syncs %u, command lists %u, transients %u (%.1f MB aliased / %.1f MB unaliased), replanned frames %u | quality %s\n",
          r.label.c_str(), r.resolution.name.c_str(), r.gpuFrameMs.median, r.gpuFrameMs.p95, r.gpuFrameMs.p99, r.gpuFrameMs.count, r.cpuFrameMs.median,
          r.cpuRecordMs.median, r.cpuSubmitMs.median, r.smClockMHz.median, r.smClockMHz.min, r.graph.livePasses, r.graph.barriers, r.graph.barrierBatches,
          r.graph.crossQueueSyncs, r.graph.commandLists, r.graph.transientResources, r.graph.transientBytesAliased / 1048576.0, r.graph.transientBytesUnaliased / 1048576.0,
-         m_quality.shortHash().c_str());
+         r.replannedFrames, m_quality.shortHash().c_str());
     logf("[%s %s] outside passes: graphics %u lists, head %.4f, tail %.4f, gap %.4f ms (medians)%s\n", r.label.c_str(), r.resolution.name.c_str(), r.queueLists[0],
          r.queueHeadMs[0].median, r.queueTailMs[0].median, r.queueGapMs[0].median,
          r.queueLists[1] ? format(" | compute %u lists, head %.4f, tail %.4f, gap %.4f ms", r.queueLists[1], r.queueHeadMs[1].median, r.queueTailMs[1].median, r.queueGapMs[1].median).c_str()
