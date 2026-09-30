@@ -5,7 +5,11 @@
 //   diffuse    cosine hemisphere about the shading normal
 //   transmit   (Foliage) cosine hemisphere about the reversed shading normal
 // Lobe probabilities follow the lobes' albedo estimates with a floor on the specular lobe, so every direction with
-// f > 0 has pdf > 0. Directions must lie on the same side of the geometric and the shading normal (no light leaks
+// f > 0 has pdf > 0.
+// A9 layers (redesign V2.2, the reference had none: a glazed wall rendered as its base): a clearcoat is evaluated by
+// scene::model::evaluateCoated (the shared definition) and sampled by a fourth lobe, GGX visible normals of the coat's
+// alpha, taken with probability cover x max(F_eta(n.v), 0.1) (the others scaled by the rest); a sheen by evaluateSheen,
+// sampled by the cosine lobe (at least 10 % of the choices). The pdf is the mixture's sum (one-sample MIS). Directions must lie on the same side of the geometric and the shading normal (no light leaks
 // through the geometric surface from interpolated normals).
 #include "RtScene.h"
 
@@ -141,6 +145,9 @@ public:
             m_pTrans = 0;
             return;
         }
+        m_coat = s.coat.cover > 0;
+        m_sheen = s.sheen.color.x > 0 || s.sheen.color.y > 0 || s.sheen.color.z > 0;
+        if (m_coat) m_alphaC = scene::model::alphaFromRoughness(s.coat.roughness);
         const Rgb f0(scene::model::f0(s.bsdf));
         const float fres = std::pow(1 - m_nov, 5.0f);
         // (sampling weight only; the film's F at n.v when present)
@@ -156,6 +163,21 @@ public:
         m_pDiff = rest > 0 ? (1 - m_pSpec) * wd / rest : 0.0f;
         m_pTrans = rest > 0 ? (1 - m_pSpec) * wt / rest : 0.0f;
         if (rest <= 0) m_pSpec = 1;
+        if (m_sheen && m_pDiff < 0.1f)
+        {
+            // the sheen lobe is broad: the cosine lobe samples it
+            const float keep = 0.9f / std::max(m_pSpec + m_pTrans, 1e-6f);
+            m_pSpec *= keep;
+            m_pTrans *= keep;
+            m_pDiff = 0.1f;
+        }
+        if (m_coat)
+        {
+            m_pCoat = std::clamp(s.coat.cover * std::max(scene::model::fresnelDielectric(m_nov, s.coat.eta), 0.1f), 0.05f, 0.9f);
+            m_pSpec *= 1 - m_pCoat;
+            m_pDiff *= 1 - m_pCoat;
+            m_pTrans *= 1 - m_pCoat;
+        }
     }
 
     // BRDF value without the cosine; zero for directions on inconsistent sides.
@@ -165,6 +187,8 @@ public:
         if (gn * sn <= 0) return {};
         if (m_lambert) return sn > 0 ? Rgb(m_s.bsdf.baseColor) * (1.0f / scene::model::kPi) : Rgb();
         if (sn < 0 && m_s.bsdf.cls != scene::MaterialClass::Foliage) return {};
+        if (m_coat) return Rgb(scene::model::evaluateCoated(m_s.bsdf, m_s.coat, m_s.ns, m_wo, wi));
+        if (m_sheen) return Rgb(scene::model::evaluateSheen(m_s.bsdf, m_s.sheen, m_s.ns, m_wo, wi));
         if (m_s.aniso.strength > 0) return evaluateAnisotropicModel(m_s.bsdf, m_s.aniso, m_s.ns, m_wo, wi);
         return evaluateModel(m_s.bsdf, m_s.ns, m_wo, wi, m_s.film.thickness > 0 ? &m_s.film : nullptr);
     }
@@ -176,6 +200,7 @@ public:
         {
             float p = m_pDiff * sn / scene::model::kPi;
             if (m_pSpec > 0) p += m_pSpec * specPdf(wi);
+            if (m_pCoat > 0) p += m_pCoat * isotropicPdf(wi, m_alphaC);
             return p;
         }
         return m_pTrans * (-sn) / scene::model::kPi;
@@ -184,7 +209,12 @@ public:
     bool sample(float uLobe, float u1, float u2, BsdfSample& out) const
     {
         float3 wi;
-        if (uLobe < m_pSpec)
+        if (uLobe < m_pCoat)
+        {
+            wi = visibleNormalReflection(m_alphaC, m_alphaC, u1, u2);
+            if (dot(wi, m_s.ns) <= 0) return false;
+        }
+        else if ((uLobe -= m_pCoat) < m_pSpec)
         {
             wi = sampleVisibleNormalReflection(u1, u2);
             if (dot(wi, m_s.ns) <= 0) return false;
@@ -228,15 +258,32 @@ private:
             const double g1 = 2 * nov / (nov + std::sqrt(at * at * vt * vt + ab * ab * vb * vb + nov * nov));
             return (float)(g1 / (3.14159265358979323846 * at * ab * d * d) / (4 * nov));
         }
+        return isotropicPdf(wi, m_alpha);
+    }
+
+    // G1(v) D(h) / (4 n.v) of an isotropic GGX lobe of alpha a about the shading normal (base or coat)
+    float isotropicPdf(float3 wi, float a) const
+    {
+        double hx = (double)m_wo.x + wi.x, hy = (double)m_wo.y + wi.y, hz = (double)m_wo.z + wi.z;
+        const double hl = std::sqrt(hx * hx + hy * hy + hz * hz);
+        hx /= hl;
+        hy /= hl;
+        hz /= hl;
+        const float3 n = m_s.ns;
+        const double noh = n.x * hx + n.y * hy + n.z * hz;
+        if (noh <= 0) return 0;
+        const double nov = m_nov;
         const double cx = n.y * hz - n.z * hy, cy = n.z * hx - n.x * hz, cz = n.x * hy - n.y * hx;
-        const double a = m_alpha, a2 = a * a;
+        const double a2 = (double)a * a;
         const double g1 = 2 * nov / (nov + std::sqrt(a2 + (1 - a2) * nov * nov));
         return (float)(g1 * ModelTerms::ggx(noh, cx * cx + cy * cy + cz * cz, a) / (4 * nov));
     }
 
-    float3 sampleVisibleNormalReflection(float u1, float u2) const
+    float3 sampleVisibleNormalReflection(float u1, float u2) const { return visibleNormalReflection(m_alpha, m_alphaB, u1, u2); }
+
+    float3 visibleNormalReflection(float a, float ab, float u1, float u2) const
     {
-        const float a = m_alpha, ab = m_alphaB;  // (alpha_t, alpha_b); equal for isotropic lobes
+        // (alpha_t, alpha_b); equal for isotropic lobes
         const float3 v{ dot(m_wo, m_t), dot(m_wo, m_b), dot(m_wo, m_s.ns) };
         const float3 vh = normalize(float3{ a * v.x, ab * v.y, v.z });
         const float lensq = vh.x * vh.x + vh.y * vh.y;
@@ -255,7 +302,8 @@ private:
     const Surface& m_s;
     float3 m_wo, m_t, m_b;
     bool m_lambert;
-    float m_nov = 1, m_alpha = 1, m_alphaB = 1, m_pSpec = 0, m_pDiff = 0, m_pTrans = 0;
+    bool m_coat = false, m_sheen = false;
+    float m_nov = 1, m_alpha = 1, m_alphaB = 1, m_alphaC = 1, m_pSpec = 0, m_pDiff = 0, m_pTrans = 0, m_pCoat = 0;
 };
 
 inline float powerHeuristic(float a, float b)

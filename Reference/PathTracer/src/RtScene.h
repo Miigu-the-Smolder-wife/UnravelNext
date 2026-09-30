@@ -37,6 +37,8 @@ struct Surface
     scene::model::Surface bsdf;
     scene::model::Anisotropy aniso;  // strength 0 = isotropic; else the frame (t, b) about ns (MaterialModel.h anisoFrame)
     scene::model::Film film;         // A9 thin film (thickness 0 = none; MaterialModel.h Film, the exact method (c))
+    scene::model::Coat coat;         // A9 clearcoat (cover 0 = none; MaterialModel.h evaluateCoated)
+    scene::model::Sheen sheen;       // A9 sheen (colour 0 = none; MaterialModel.h evaluateSheen)
     Rgb emission;
     uint32_t material = 0;
     float ior = 1.5f;  // the material's index of refraction (Water: Dielectric.h)

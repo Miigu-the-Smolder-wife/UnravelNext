@@ -161,6 +161,45 @@ void testPoint()
     expectNear("point", m, lambert(0.5f) * 1000 * windowW(3, 30) / 9.0, 1e-4);
 }
 
+// A9 clearcoat in a render: a point light over a coated plane (white base 0.8, coat 1, roughness 0.3 so the lobe is
+// resolved by the 16 x 16 patch) seen from above: L = evaluateCoated(v, l) cos I / d^2 (the direct light's closed form),
+// and the same plane's ratio coated / uncoated against the model's ratio (the engine's coat/no-coat difference was 0.57
+// against the reference's 1.000 before the reference had the layer).
+void testCoat()
+{
+    auto scene = [](float cover) {
+        scene::Scene s = planeScene(0.8f);
+        s.materials[0].roughness = 0.5f;
+        s.materials[0].specular = 0.5f;
+        s.materials[0].clearcoat = cover;
+        s.materials[0].clearcoatRoughness = 0.3f;
+        scene::Light l;
+        l.type = scene::LightType::Point;
+        l.position = { 2, 3, 0 };
+        l.intensity = 1000;
+        l.range = 30;
+        l.castShadow = true;
+        s.lights.push_back(l);
+        return s;
+    };
+    const float3 v{ 0, 1, 0 }, lp{ 2, 3, 0 };
+    const float d2 = dot(lp, lp);
+    const float3 l = normalize(lp);
+    scene::model::Surface su;
+    su.baseColor = { 0.8f, 0.8f, 0.8f };
+    su.roughness = 0.5f;
+    su.specular = 0.5f;
+    scene::model::Coat coat;
+    coat.cover = 1;
+    coat.roughness = 0.3f;
+    const double coated = scene::model::evaluateCoated(su, coat, v, v, l).y * l.y * 1000 * windowW(std::sqrt(d2), 30) / d2;
+    const double bare = scene::model::evaluate(su, v, v, l).y * l.y * 1000 * windowW(std::sqrt(d2), 30) / d2;
+    const Measured mc = renderPatch(scene(1), 64), mb = renderPatch(scene(0), 64);
+    expectNear("coated", mc, coated, 1e-3);
+    expectNear("bare", mb, bare, 1e-3);
+    logf("  coated / bare: rendered %.4f, model %.4f\n", mc.mean / mb.mean, coated / bare);
+}
+
 void testRect()
 {
     scene::Scene s = planeScene(0.5f);
@@ -513,6 +552,8 @@ void testBsdfSampling()
         float3 base;
         float roughness, metallic, transmission, nov;
         float aniso = 0;  // A9 anisotropy strength (frame: t rotated 0.5 rad about n from x)
+        float coat = 0, coatRoughness = 0.05f, coatEta = 1.5f;  // A9 clearcoat
+        float3 sheen{ 0, 0, 0 };                                // A9 sheen colour (roughness 0.5)
     };
     const Case cases[] = {
         { scene::MaterialClass::Standard, { 0.5f, 0.5f, 0.5f }, 0.5f, 0.0f, 0.0f, 0.8f },
@@ -523,6 +564,10 @@ void testBsdfSampling()
         { scene::MaterialClass::Standard, { 0.95f, 0.64f, 0.54f }, 0.3f, 1.0f, 0.0f, 0.6f, 0.8f },
         { scene::MaterialClass::Standard, { 0.9f, 0.9f, 0.9f }, 0.1f, 1.0f, 0.0f, 0.3f, 0.95f },
         { scene::MaterialClass::Standard, { 0.4f, 0.3f, 0.2f }, 0.5f, 0.0f, 0.0f, 0.9f, 0.5f },
+        { scene::MaterialClass::Standard, { 0.8f, 0.8f, 0.8f }, 0.4f, 0.0f, 0.0f, 0.8f, 0, 1.0f, 0.05f, 1.5f },   // glazed tile
+        { scene::MaterialClass::Standard, { 0.3f, 0.5f, 0.7f }, 0.3f, 0.0f, 0.0f, 0.3f, 0, 0.6f, 0.2f, 1.33f },  // wet, grazing
+        { scene::MaterialClass::Standard, { 0.9f, 0.9f, 0.9f }, 0.3f, 1.0f, 0.0f, 0.6f, 0, 1.0f, 0.1f, 1.5f },   // coated metal
+        { scene::MaterialClass::Standard, { 0.2f, 0.1f, 0.4f }, 0.8f, 0.0f, 0.0f, 0.4f, 0, 0, 0.05f, 1.5f, { 0.8f, 0.7f, 0.9f } },  // cloth
     };
     for (const Case& c : cases)
     {
@@ -536,6 +581,10 @@ void testBsdfSampling()
         s.aniso.strength = c.aniso;
         s.aniso.t = { std::cos(0.5f), std::sin(0.5f), 0 };
         s.aniso.b = { -std::sin(0.5f), std::cos(0.5f), 0 };
+        s.coat.cover = c.coat;
+        s.coat.roughness = c.coatRoughness;
+        s.coat.eta = c.coatEta;
+        s.sheen.color = c.sheen;
         const float3 wo{ std::sqrt(1 - c.nov * c.nov), 0, c.nov };
         const reference::Bsdf b(s, wo);
         const uint32_t N = 1 << 20;
@@ -559,9 +608,28 @@ void testBsdfSampling()
         const double mB = sumB / N, mU = sumU / N;
         const double sB = std::sqrt(std::max(0.0, sumB2 / N - mB * mB) / N), sU = std::sqrt(std::max(0.0, sumU2 / N - mU * mU) / N);
         const double diff = std::fabs(mB - mU), tol = 5 * std::sqrt(sB * sB + sU * sU);
-        logf("  bsdf r=%.2f m=%.1f cls=%d nov=%.2f s=%.2f: E_bsdf %.5f  E_uniform %.5f  |diff| %.2e (tol %.2e), integral of pdf %.4f\n", c.roughness, c.metallic, (int)c.cls, c.nov, c.aniso, mB,
-             mU, diff, tol, pdfInt / N);
+        logf("  bsdf r=%.2f m=%.1f cls=%d nov=%.2f s=%.2f coat=%.1f sheen=%.1f: E_bsdf %.5f  E_uniform %.5f  |diff| %.2e (tol %.2e), integral of pdf %.4f\n", c.roughness, c.metallic,
+             (int)c.cls, c.nov, c.aniso, c.coat, c.sheen.y, mB, mU, diff, tol, pdfInt / N);
         if (diff > tol) fail("bsdf sampling inconsistent with evaluation");
+        if (c.coat > 0 || c.sheen.y > 0)
+        {
+            // A9 layers: the evaluation is the shared model's, and the directional albedo by the sampler equals a
+            // deterministic quadrature of it (midpoint in (cos theta, phi), 1024 x 1024) within 0.5 %
+            const uint32_t Q = 1024;
+            double quad = 0;
+            for (uint32_t i = 0; i < Q; ++i)
+                for (uint32_t j = 0; j < Q; ++j)
+                {
+                    const float z = (i + 0.5f) / Q, r = std::sqrt(std::max(0.0f, 1 - z * z)), phi = 2 * kPi * (j + 0.5f) / Q;
+                    const float3 l{ r * std::cos(phi), r * std::sin(phi), z };
+                    const float3 m = c.coat > 0 ? scene::model::evaluateCoated(s.bsdf, s.coat, s.ns, wo, l) : scene::model::evaluateSheen(s.bsdf, s.sheen, s.ns, wo, l);
+                    const double e = b.eval(l).g;
+                    if (std::fabs(e - m.y) > 1e-5 * std::max(1.0, (double)m.y)) fail("layered reference evaluation differs from the model at (%.3f, %.3f, %.3f)", l.x, l.y, l.z);
+                    quad += m.y * z * (2 * kPi / Q / Q);
+                }
+            logf("    layered albedo: sampler %.5f, quadrature of the model %.5f (%+.3f %%)\n", mB, quad, 100 * (mB / quad - 1));
+            if (std::fabs(mB / quad - 1) > 0.005) fail("layered albedo by the sampler differs from the model's integral by more than 0.5 %%");
+        }
         if (c.aniso > 0)
         {
             // A9: the double evaluation against the C++ model (MaterialModel.h evaluateAnisotropic), relative to E / pi
@@ -945,6 +1013,7 @@ int main(int argc, char** argv)
         run("cut", testCutFace);
         run("water", testWater);
         run("point", testPoint);
+        run("coat", testCoat);
         run("rect", testRect);
         run("sphere", testSphere);
         run("disk", testDiskAndTube);

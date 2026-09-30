@@ -634,6 +634,18 @@ Surface RtScene::surface(const Hit& hit, float3 rayDir) const
             s.aniso.strength = mat.anisotropy;
     }
     if (mat.thinFilmThickness > 0) s.film = scene::model::filmOf(mat);
+    if (mat.clearcoat > 0)
+    {
+        // A9 clearcoat, as the engine (MaterialModel.hlsli modelCoatOf): the tabulated coat of the material's index
+        s.coat.cover = std::clamp(mat.clearcoat, 0.0f, 1.0f);
+        s.coat.roughness = std::clamp(mat.clearcoatRoughness, 0.0f, 1.0f);
+        s.coat.eta = scene::model::kCoatEtas[scene::model::coatIndex(mat.clearcoatIor)];
+    }
+    if (mat.sheenColor.x > 0 || mat.sheenColor.y > 0 || mat.sheenColor.z > 0)
+    {
+        s.sheen.color = mat.sheenColor;
+        s.sheen.roughness = std::clamp(mat.sheenRoughness, 0.1f, 1.0f);
+    }
     s.bsdf.cls = mat.cls;
     s.bsdf.baseColor = base;
     s.bsdf.roughness = std::clamp(rough, 0.0f, 1.0f);
