@@ -1,0 +1,22 @@
+  base first frame 1 (level builds 0)
+  base first frame 4 (level builds 0)
+  base first frame 16 (level builds 0)
+  base first frame 64 (level builds 0)
+  base still frame 0: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base still frame 1: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base still frame 2: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base still frame 3: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base still frame 4: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base still frame 5: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base still frame 6: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base still frame 7: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+base [] still: flicker (luma std over 8 frames, 10-bit codes) mean 3.67, p50 1.78, p99 30.98, max 262.35
+  base frozen frame 0: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base frozen frame 1: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base frozen frame 2: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base frozen frame 3: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base frozen frame 4: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base frozen frame 5: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base frozen frame 6: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+  base frozen frame 7: camera (1.5000, 2.4100, 8.0000) euler (0.000, 0.000, 0.000); transforms changed 0, of resting entities 0
+base [] frozen: flicker (luma std over 8 frames, 10-bit codes) mean 3.56, p50 1.72, p99 30.52, max 296.36
