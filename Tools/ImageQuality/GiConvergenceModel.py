@@ -99,6 +99,42 @@ def cut_model(seed, new=17000, live=94000, R=7812, P=12, noise=0.19, t0share=0.6
             tiles = est_err[: (new // m) * m].reshape(-1, m).mean(axis=1)
             out[f] = float(np.percentile(np.abs(tiles), 95))
     return out
+def split_model(seed, C=3000, P=12, frames=2000, rho=0.9, S=0.2, noiseS=0.19, noiseB=0.05, capS=256, bwin=4, start=0.0):
+    """Redesign V2.2 11.2 (P1'-b): per cell the non-bounce part S (unbiased from the first update: running mean, weight
+    max(1 / (n + 1), 1 / capS)) and the bounce part B = rho x the mean of 64 other cells' stored E = S + B, blended with
+    max(1 / (n + 1), 1 / bwin) (bwin 1: Jacobi replacement). Weights are functions of the cell's update count only.
+    start: the cells' initial E as a fraction of the fixed point (a history: 0 = cold cache, 0.6 = cells that converged
+    their mean on a darker iteration and carry n = capS); returns the mean E over frames. The fixed point is S / (1 - rho)
+    for every start; the error contracts by 1 - a_B (1 - rho) per update (a_B = 1 / bwin once n >= bwin)."""
+    rng = np.random.default_rng(seed)
+    fixed = S / (1 - rho)
+    Sm = np.full(C, S if start > 0 else 0.0); Bm = np.full(C, start * fixed - S if start > 0 else 0.0)
+    n = np.full(C, capS if start > 0 else 0)
+    offs = rng.integers(0, P, C); traj = []
+    for f in range(frames):
+        sel = np.where((f + offs) % P == 0)[0]
+        if len(sel):
+            E = Sm + Bm
+            reads = rng.integers(0, C, (len(sel), 64))
+            b = rho * E[reads].mean(1) * (1 + noiseB * rng.standard_normal(len(sel)))
+            s = S * (1 + noiseS * rng.standard_normal(len(sel)))
+            aS = np.maximum(1 / (n[sel] + 1), 1 / capS); aB = np.maximum(1 / (n[sel] + 1), 1 / bwin)
+            Sm[sel] += (s - Sm[sel]) * aS; Bm[sel] += (b - Bm[sel]) * aB
+            n[sel] = np.minimum(n[sel] + 1, 4095)
+        traj.append((Sm + Bm).mean())
+    return np.array(traj)
+if __name__ == '__main__' and len(sys.argv) > 1 and sys.argv[1] == 'split':
+    kw = dict(a.split('=') for a in sys.argv[2:]); kw = {k: (float(v) if '.' in v else int(v)) for k, v in kw.items()}
+    fixed = kw.get('S', 0.2) / (1 - kw.get('rho', 0.9))
+    for bw in (1, 2, 4):
+        T = {st: np.array([split_model(r, **{**kw, 'bwin': bw, 'start': st}) for r in range(4)]) for st in (0.0, 0.6)}
+        cells = []
+        for f in (120, 300, 600, 1200, 1999):
+            if f < T[0.0].shape[1]:
+                a, b = T[0.0][:, f].mean(), T[0.6][:, f].mean()
+                cells.append(f"{f}: cold {100 * (a / fixed - 1):+5.1f} % / history {100 * (b / fixed - 1):+5.1f} % (runs {100 * T[0.0][:, f].std() / a:.2f} %)")
+        print(f"bwin {bw}: " + "; ".join(cells))
+    sys.exit(0)
 if __name__=='__main__' and len(sys.argv) > 1 and sys.argv[1] == 'cut':
     kw = dict(a.split('=') for a in sys.argv[2:]); kw = {k: (float(v) if '.' in v else int(v)) for k, v in kw.items()}
     for name, opts in (("current (no tiers, no prior)", {}), ("tiers", dict(tiers=True)), ("tiers + prior", dict(tiers=True, prior=True)),
