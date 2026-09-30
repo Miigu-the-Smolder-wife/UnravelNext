@@ -512,8 +512,7 @@ int main(int argc, char** argv)
                  l.position.y, l.position.z, l.intensity, l.range, (int)l.castShadow, (unsigned long long)lightToggleAt);
         }
         if (moving && (s.paths.empty() || s.paths[0].keys.size() < 2))
-            logf("--moving: the scene has no camera path 0: the camera stays still (use --path-rotate / --path-translate for motion)
-");
+            logf("--moving: the scene has no camera path 0: the camera stays still (use --path-rotate / --path-translate for motion)\n");
         // The pose function and its time per frame (head comment).
         if (!pathTimes.empty() && (pathTime >= 0 || cutAt != UINT64_MAX)) fail("--path-time-list replaces --path-time and --cut-at");
         if (!pathTimes.empty() && segmentFrames == 0) fail("--segment-frames 0");
