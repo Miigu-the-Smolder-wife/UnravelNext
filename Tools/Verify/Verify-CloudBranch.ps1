@@ -11,15 +11,17 @@
 param(
   [string]$Ref = "origin/cloud/render-fixes",
   [string]$Out = "",
-  [string[]]$Phases = @("build", "tests", "caps", "convergence", "determinism", "luminance", "timing", "report"),
+  [string[]]$Phases = @("build", "tests", "caps", "convergence", "motion", "relight", "cut", "determinism", "luminance", "timing", "report"),
   [string]$GameProject = "C:\Users\USER\UnravelGames\BathhouseTycoon",          # -Phases unity (after a deployment)
   [string]$GameScene = "Assets/Game/BathhouseTycoon/Scenes/Bathhouse.unity",
   [switch]$Quick,
+  [switch]$Local,   # build and run in this checkout (build\all of its working tree) instead of ..\UnravelNext-gate at -Ref
+                    # (an implementation session measuring its own branch; the coordination session keeps the default)
   [switch]$DryRun   # write each GPU batch and parse it, run nothing on the GPU (checks the script itself)
 )
 $ErrorActionPreference = "Continue"  # (native tools write to stderr; failures are checked by exit code and thrown explicitly)
 $root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
-$gate = Join-Path (Split-Path -Parent $root) "UnravelNext-gate"
+$gate = if ($Local) { $root } else { Join-Path (Split-Path -Parent $root) "UnravelNext-gate" }
 $games = @("League of Legends", "Remnant2-Win64-Shipping", "Overwatch", "VALORANT-Win64-Shipping", "cs2", "r5apex", "FortniteClient-Win64-Shipping")
 if ($Phases.Count -eq 1 -and $Phases[0] -match ",") { $Phases = $Phases[0] -split "," }
 
@@ -27,12 +29,12 @@ function Test-Game {
   $g = Get-Process -Name $games -ErrorAction SilentlyContinue
   if ($g) { throw "게임 실행 중($($g[0].Name)): GPU 작업을 하지 않는다. 게임을 끝낸 뒤 다시 실행한다." }
 }
-$gpuPhases = @($Phases | Where-Object { $_ -in @("build", "tests", "caps", "convergence", "determinism", "luminance", "timing") }).Count -gt 0
+$gpuPhases = @($Phases | Where-Object { $_ -in @("build", "tests", "caps", "convergence", "motion", "relight", "cut", "determinism", "luminance", "timing") }).Count -gt 0
 if ($gpuPhases -and -not $DryRun) { Test-Game }
 & git -C $root fetch -q origin 2>$null
-$sha = (& git -C $root rev-parse --short $Ref).Trim()
+$sha = if ($Local) { (& git -C $root rev-parse --short HEAD).Trim() + $(if (& git -C $root status --porcelain --untracked-files=no) { "-dirty" } else { "" }) } else { (& git -C $root rev-parse --short $Ref).Trim() }
 if (-not $Out) { $Out = Join-Path $root "Results\Local\Verify-$sha" }
-foreach ($d in "", "tests", "caps", "det", "lum", "timing") { New-Item -ItemType Directory -Force (Join-Path $Out $d) | Out-Null }
+foreach ($d in "", "tests", "caps", "det", "lum", "timing", "motion", "relight", "cut") { New-Item -ItemType Directory -Force (Join-Path $Out $d) | Out-Null }
 $steps = Join-Path $Out "steps.csv"
 $exe = Join-Path $gate "build\all\bin\unx_gate_shadow_renderergate.exe"
 $scenes = @{ bath = "Results\R\GiInterior\bath_bt0_ev6.unxscene"; train = "Results\R\GiInterior\train_v0_ev6.unxscene" }
@@ -72,7 +74,9 @@ function Q([string]$s) { "'" + $s.Replace("'", "''") + "'" }
 if ($Phases -contains "build" -and -not $DryRun) {
   "== build $Ref"
   $log = Join-Path $Out "build.log"
-  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "Tools\CI\Build.ps1") -Track all -Committed -Ref $Ref *> $log
+  if ($Local) { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "Tools\CI\Build.ps1") -Track all *> $log }
+  else { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "Tools\CI\Build.ps1") -Track all -Committed -Ref $Ref *> $log }
+  if ($LASTEXITCODE -ne 0 -and $Local) { throw "빌드 실패: $log" }
   if ($LASTEXITCODE -ne 0) {
     # A build stopped earlier can leave 0-byte object files (LNK1136); remove them once and build again.
     $empty = Get-ChildItem (Join-Path $gate "build\all") -Recurse -Include *.obj -ErrorAction SilentlyContinue | Where-Object { $_.Length -eq 0 }
@@ -82,7 +86,7 @@ if ($Phases -contains "build" -and -not $DryRun) {
   (& git -C $gate rev-parse --short HEAD).Trim() | Set-Content (Join-Path $Out "gate_sha.txt")
 }
 # The committed build leaves the gate worktree clean, which removes the scene links: link them again every time.
-foreach ($s in $scenes.Values) {
+foreach ($s in $(if ($Local) { @() } else { $scenes.Values })) {
   $dst = Join-Path $gate $s
   New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
   if (-not (Test-Path $dst)) { New-Item -ItemType HardLink -Path $dst -Target (Join-Path $root $s) | Out-Null }
@@ -105,7 +109,8 @@ if ($Phases -contains "caps") {
   foreach ($sc in $sceneNames) {
     foreach ($r in $resolutions) {
       $modes = @(@{ m = "static"; a = @() })
-      if ($sc -eq "train") { $modes += @{ m = "moving"; a = @("--moving") }; $modes += @{ m = "sun"; a = @("--sun-deg-per-s", "20") } }
+      # "moving": a 90 deg/s turn (the scenes have no camera path, so --moving kept the camera still before 2026-10-01)
+      if ($sc -eq "train") { $modes += @{ m = "moving"; a = @("--path-rotate", "90") }; $modes += @{ m = "sun"; a = @("--sun-deg-per-s", "20") } }
       foreach ($md in $modes) {
         $base = "$($sc)_$($r)_$($md.m)"
         $common = @("--scene", $scenes[$sc], "--resolution", $r) + $md.a + $frames
@@ -133,6 +138,99 @@ if ($Phases -contains "convergence") {
     }
   }
   New-Item -ItemType Directory -Force (Join-Path $Out "conv") | Out-Null
+  Invoke-Locked "correctness" $lines
+}
+# Redesign V2 3.3 (P0): motion, lighting changes and cuts, each frame against the converged still image of the same pose
+# (--path-time; several poses per reference run with --path-time-list). Frames are counted from the event: frame W + k - 1
+# of a run is the k-th frame that shows the motion / the change / the cut (W = the warm-up, 300 still frames). Layers:
+# final (the image), gi (view.giIrradiance), refl (view.reflection).
+# The lamp each scene toggles (renderergate --list-lights): bath 5 = the ceiling lamp over the camera's view line
+# (-6.75, 3.1, -1.25), train 7 = the lower-deck lamp 9 m behind the camera (0, 2.55, 29).
+$lightIndex = @{ bath = "5"; train = "7" }
+# Walking and running: along the bath's length (its camera looks down it); along the train car (its camera faces the side
+# wall, so the move is sideways: --path-translate 0,v).
+# The motion runs and their references use shading.motion_blur_shutter=0: a still reference has no blur, so the numbers
+# judge the noise without the shutter hiding (or adding) anything - stricter than the game's 180 degree shutter.
+$noBlur = @("--set", "shading.motion_blur_shutter=0")
+$motionCases = [ordered]@{ rot90 = @{ bath = @("--path-rotate", "90"); train = @("--path-rotate", "90") }; rot180 = @{ bath = @("--path-rotate", "180"); train = @("--path-rotate", "180") };
+  walk = @{ bath = @("--path-translate", "1.5"); train = @("--path-translate", "0,1.5") }; run = @{ bath = @("--path-translate", "4"); train = @("--path-translate", "0,4") } }
+function Gate-Line([string]$name, [string[]]$a) { "Invoke-Step $(Q $name) $(Q $exe) @(" + (($a | ForEach-Object { Q $_ }) -join ",") + ")" }
+$warm = if ($Quick) { 60 } else { 300 }
+$still = if ($Quick) { 120 } else { 600 }
+if ($Phases -contains "motion") {
+  "== motion (Q-B: rotation 90 / 180 deg/s, walk 1.5 m/s, run 4 m/s: frames 1, 4, 8, 16, 32 of motion; still flicker)"
+  $lines = @()
+  $ks = if ($Quick) { @(1, 8) } else { @(1, 4, 8, 16, 32) }
+  $refKs = if ($Quick) { @(8) } else { @(8, 16, 32) }
+  foreach ($sc in $sceneNames) {
+    foreach ($r in $resolutions) {
+      foreach ($case in $motionCases.Keys) {
+        $base = "motion\$($sc)_$($r)_$case"
+        $frames = @($ks | ForEach-Object { $warm + $_ })
+        $last = ($frames | Measure-Object -Maximum).Maximum
+        $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$($last + 1)", "--motion-start", "$warm") + $motionCases[$case][$sc] + $noBlur +
+          @("--capture-output", (Join-Path $Out "$base.pfm"), "--capture-frames", ($frames -join ","), "--capture-layers", "final,gi,refl", "--frame-log", (Join-Path $Out "$($base)_frames.csv"))
+        $lines += Gate-Line $base $a
+        $times = @($refKs | ForEach-Object { "{0:0.######}" -f ($_ / 60.0) })
+        $caps = @(0..($refKs.Count - 1) | ForEach-Object { ($_ + 1) * $still - 1 })
+        $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$($still * $refKs.Count)") + $motionCases[$case][$sc] + $noBlur +
+          @("--path-time-list", ($times -join ","), "--segment-frames", "$still", "--capture-output", (Join-Path $Out "$($base)_ref.pfm"), "--capture-frames", ($caps -join ","), "--capture-layers", "final,gi,refl")
+        $lines += Gate-Line "$($base)_ref" $a
+      }
+      # Still flicker (Q-D in the gate): 8 consecutive frames after the still warm-up.
+      $base = "motion\$($sc)_$($r)_still"
+      $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$($still + 8)", "--capture-output", (Join-Path $Out "$base.pfm"), "--capture-frames", ((0..7 | ForEach-Object { $still + $_ }) -join ","))
+      $lines += Gate-Line $base $a
+    }
+  }
+  @{ warm = $warm; still = $still; ks = $ks; refKs = $refKs } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $Out "motion\plan.json")
+  Invoke-Locked "correctness" $lines
+}
+if ($Phases -contains "relight") {
+  "== relight (Q-C: a lamp off, the sun turned 10 deg: frames 1, 4, 8, 16, 64, 256 after the change)"
+  $lines = @()
+  $ks = if ($Quick) { @(1, 8) } else { @(1, 4, 8, 16, 64, 256) }
+  foreach ($sc in $sceneNames) {
+    foreach ($r in $resolutions) {
+      foreach ($ev in @("light", "sun")) {
+        $base = "relight\$($sc)_$($r)_$ev"
+        $at = { param($f) if ($ev -eq "light") { @("--light-toggle-at", "$f,$($lightIndex[$sc])") } else { @("--sun-step-at", "$f,10") } }
+        $frames = @($ks | ForEach-Object { $warm + $_ - 1 })
+        $last = ($frames | Measure-Object -Maximum).Maximum
+        $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$($last + 1)") + (& $at $warm) +
+          @("--capture-output", (Join-Path $Out "$base.pfm"), "--capture-frames", ((@($warm - 1) + $frames) -join ","), "--capture-layers", "final,gi,refl", "--frame-log", (Join-Path $Out "$($base)_frames.csv"))
+        $lines += Gate-Line $base $a
+        $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$still") + (& $at 0) +
+          @("--capture-output", (Join-Path $Out "$($base)_ref.pfm"), "--capture-frames", "$($still - 1)", "--capture-layers", "final,gi,refl")
+        $lines += Gate-Line "$($base)_ref" $a
+      }
+    }
+  }
+  @{ warm = $warm; still = $still; ks = $ks } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $Out "relight\plan.json")
+  Invoke-Locked "correctness" $lines
+}
+if ($Phases -contains "cut") {
+  "== cut (Q-A: a camera cut to the view turned 180 deg: frames 1, 4, 16, 64, 256 after the cut; two references for the noise floor)"
+  $lines = @()
+  $ks = if ($Quick) { @(1, 4) } else { @(1, 4, 16, 64, 256) }
+  foreach ($sc in $sceneNames) {
+    foreach ($r in $resolutions) {
+      $base = "cut\$($sc)_$($r)"
+      $frames = @($ks | ForEach-Object { $warm + $_ - 1 })
+      $last = ($frames | Measure-Object -Maximum).Maximum
+      $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$($last + 1)", "--path-rotate", "180", "--path-time", "0",
+        "--cut-at", "$($warm):1.0", "--capture-output", (Join-Path $Out "$base.pfm"), "--capture-frames", ($frames -join ","), "--capture-layers", "final,gi,refl",
+        "--frame-log", (Join-Path $Out "$($base)_frames.csv"), "--gi-cache-stats", (Join-Path $Out "$($base)_gi.json"))
+      $lines += Gate-Line $base $a
+      foreach ($i in 1, 2) {
+        $a = @("--scene", $scenes[$sc], "--resolution", $r, "--warmup-frames", "0", "--frames", "$still", "--path-rotate", "180", "--path-time", "1.0",
+          "--capture-output", (Join-Path $Out "$($base)_ref$i.pfm"), "--capture-frames", "$($still - 1)", "--capture-layers", "final,gi,refl") +
+          $(if ($i -eq 1) { @("--gi-cache-stats", (Join-Path $Out "$($base)_ref_gi.json")) } else { @() })
+        $lines += Gate-Line "$($base)_ref$i" $a
+      }
+    }
+  }
+  @{ warm = $warm; still = $still; ks = $ks } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $Out "cut\plan.json")
   Invoke-Locked "correctness" $lines
 }
 if ($Phases -contains "unity") {

@@ -10,10 +10,13 @@ Reads what the PowerShell script left in OUT_DIR and writes OUT_DIR/SUMMARY_KO.m
   timing/<scene>_<res>_<round>/**/*.json    renderergate --out results
 Numbers from the machine are measured values; the report labels them [실측].
 """
-import csv, glob, json, os, subprocess, sys
+import csv, glob, json, os, re, subprocess, sys
 
 import numpy as np
 from PIL import Image, ImageDraw
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import motion_metrics as mm  # noqa: E402  (RENDERER_REDESIGN_V2 3.1 metrics)
 
 
 def read_pfm(path):
@@ -206,6 +209,154 @@ def convergence(out):
     return lines
 
 
+def _plan(out, phase):
+    p = os.path.join(out, phase, "plan.json")
+    return json.load(open(p, encoding="utf-8-sig")) if os.path.exists(p) else None
+
+
+def _layer_mask(path):
+    a = path[:-4] + "_alpha.pfm"
+    return (mm.read_pfm(a)[..., 0] > 0.5) if os.path.exists(a) else None
+
+
+def _metrics(test, ref, layers=("gi", "refl")):
+    """final image and the internal layers of one capture against its reference (same pose, converged)."""
+    r = mm.compare(test, ref)
+    txt = f"타일 P95 {r['tile_p95'] * 100:.1f} %, 무늬 {r['pattern']:.2f}" + (f" ({r['pattern_at']})" if r["pattern"] > 1.1 else "")
+    for layer in layers:
+        # renderergate names a layer's capture <base>_<layer>_f<frame>.pfm beside <base>_f<frame>.pfm
+        lt, lr = (re.sub(r"_f(\d+)\.pfm$", rf"_{layer}_f\1.pfm", p) for p in (test, ref))
+        if lt == test or lr == ref or not os.path.exists(lt) or not os.path.exists(lr):
+            continue
+        a, b = mm.read_pfm(lt), mm.read_pfm(lr)
+        mask = _layer_mask(lr)
+        txt += f"; {layer} 층 σ {mm.layer_sigma(a, mask) * 100:.1f} % (기준 {mm.layer_sigma(b, mask) * 100:.1f} %), 층 오차 P95 {mm.layer_error(a, b, mask) * 100:.1f} %"
+    return r, txt
+
+
+def _strip(paths, out_png, key_from):
+    ref = mm.read_pfm(key_from)
+    key = mm.display_key(ref)
+    imgs = [tonemap(mm.read_pfm(p) * key) for p in paths]
+    h, w = imgs[0].shape[:2]
+    cw, ch = min(480, w), min(270, h)
+    x0, y0 = (w - cw) // 2, (h - ch) // 2
+    s = Image.new("RGB", (len(imgs) * (cw + 4), ch), (255, 0, 255))
+    for i, a in enumerate(imgs):
+        s.paste(Image.fromarray(a[y0:y0 + ch, x0:x0 + cw]), (i * (cw + 4), 0))
+    s.save(out_png)
+
+
+def _frame_log_summary(csv_path, first):
+    if not os.path.exists(csv_path):
+        return ""
+    rows = list(csv.DictReader(open(csv_path, encoding="utf-8")))
+    rows = [r for r in rows if int(r["frame"]) >= first]
+    if not rows:
+        return ""
+    d = [float(r["d"]) for r in rows]
+    created = [int(r["gi_created"] or 0) for r in rows]
+    resets = [int(r["gi_resets"] or 0) for r in rows]
+    return f"d 평균 {np.mean(d) * 100:.2f} % 최대 {np.max(d) * 100:.2f} %, GI 새 항목/프레임 평균 {np.mean(created):.0f} 최대 {np.max(created)}, 재시작 평균 {np.mean(resets):.0f}"
+
+
+def motion(out):
+    plan = _plan(out, "motion")
+    if not plan:
+        return []
+    warm, still, ks, ref_ks = plan["warm"], plan["still"], list(plan["ks"]), list(plan["refKs"])
+    lines = []
+    for log in sorted(glob.glob(os.path.join(out, "motion", "*_frames.csv"))):
+        base = log[:-len("_frames.csv")]
+        name = os.path.basename(base)
+        rows = []
+        for j, k in enumerate(ref_ks):
+            test, ref = f"{base}_f{warm + k}.pfm", f"{base}_ref_f{(j + 1) * still - 1}.pfm"
+            if os.path.exists(test) and os.path.exists(ref):
+                _, txt = _metrics(test, ref)
+                rows.append(f"{k}프레임: {txt}")
+        caps = [f"{base}_f{warm + k}.pfm" for k in ks if os.path.exists(f"{base}_f{warm + k}.pfm")]
+        last_ref = f"{base}_ref_f{len(ref_ks) * still - 1}.pfm"
+        if caps and os.path.exists(last_ref):
+            _strip(caps + [last_ref], os.path.join(out, "motion", f"strip_{name}.png"), last_ref)
+        lines.append(f"- {name}: " + " / ".join(rows) + f" [{_frame_log_summary(log, warm)}] (`motion/strip_{name}.png`: 움직임 {', '.join(str(k) for k in ks)}프레임, 마지막이 {ref_ks[-1]}프레임 시각의 정지 수렴)")
+    for first in sorted(glob.glob(os.path.join(out, "motion", "*_still_f*.pfm"))):
+        if not first.endswith(f"_f{still}.pfm"):
+            continue
+        frames = [first.replace(f"_f{still}.pfm", f"_f{still + i}.pfm") for i in range(8)]
+        if all(os.path.exists(f) for f in frames):
+            fl = mm.flicker([mm.read_pfm(f) for f in frames])
+            lines.append(f"- {os.path.basename(first).replace(f'_f{still}.pfm', '')} 정지 깜빡임 (10비트 휘도 σ, {still}프레임 뒤 8프레임): 평균 {fl['mean']:.2f}, p50 {fl['p50']:.2f}, p99 {fl['p99']:.2f}, 최대 {fl['max']:.1f}")
+    return lines
+
+
+def relight(out):
+    plan = _plan(out, "relight")
+    if not plan:
+        return []
+    warm, still, ks = plan["warm"], plan["still"], list(plan["ks"])
+    lines = []
+    for log in sorted(glob.glob(os.path.join(out, "relight", "*_frames.csv"))):
+        base = log[:-len("_frames.csv")]
+        name = os.path.basename(base)
+        ref = f"{base}_ref_f{still - 1}.pfm"
+        if not os.path.exists(ref):
+            continue
+        rows = []
+        before = f"{base}_f{warm - 1}.pfm"
+        if os.path.exists(before):
+            r = mm.compare(before, ref)
+            rows.append(f"변화 전(변화의 크기) 타일 P95 {r['tile_p95'] * 100:.1f} %")
+        caps = []
+        for k in ks:
+            test = f"{base}_f{warm + k - 1}.pfm"
+            if os.path.exists(test):
+                _, txt = _metrics(test, ref)
+                rows.append(f"{k}프레임: {txt}")
+                caps.append(test)
+        if caps:
+            _strip(caps + [ref], os.path.join(out, "relight", f"strip_{name}.png"), ref)
+        lines.append(f"- {name}: " + " / ".join(rows) + f" (`relight/strip_{name}.png`: {', '.join(str(k) for k in ks)}프레임, 마지막이 변화 뒤 정지 수렴)")
+    return lines
+
+
+def cut(out):
+    plan = _plan(out, "cut")
+    if not plan:
+        return []
+    warm, still, ks = plan["warm"], plan["still"], list(plan["ks"])
+    lines = []
+    for log in sorted(glob.glob(os.path.join(out, "cut", "*_frames.csv"))):
+        base = log[:-len("_frames.csv")]
+        name = os.path.basename(base)
+        ref1, ref2 = f"{base}_ref1_f{still - 1}.pfm", f"{base}_ref2_f{still - 1}.pfm"
+        if not os.path.exists(ref1):
+            continue
+        rows = []
+        if os.path.exists(ref2):
+            r = mm.compare(ref2, ref1)
+            rows.append(f"기준 잡음 바닥(기준 두 번의 차) 타일 P95 {r['tile_p95'] * 100:.1f} %")
+        caps = []
+        for k in ks:
+            test = f"{base}_f{warm + k - 1}.pfm"
+            if os.path.exists(test):
+                _, txt = _metrics(test, ref1)
+                rows.append(f"{k}프레임: {txt}")
+                caps.append(test)
+        if caps:
+            _strip(caps + [ref1], os.path.join(out, "cut", f"strip_{name}.png"), ref1)
+        gi = []
+        for tag, js in (("컷 뒤 마지막 프레임", f"{base}_gi.json"), ("정지 수렴", f"{base}_ref_gi.json")):
+            if os.path.exists(js):
+                g = json.load(open(js, encoding="utf-8"))
+                l1 = g.get("gi_parent_l1", {})
+                gi.append(f"{tag}: 살아 있는 항목 {g.get('gi_cache_live')}, 16회 이상 {g.get('gi_cache_converged16')}, 지난 프레임에 읽힌 항목 {g.get('gi_cache_read_last_frame')} 중 갱신 < 4회 {g.get('gi_cache_read_young4')}·< 16회 {g.get('gi_cache_read_young16')}; "
+                          f"부모(l+1)–자식 수렴값 차 {l1.get('pairs')}쌍 p50 {l1.get('p50', 0) * 100:.1f} % p95 {l1.get('p95', 0) * 100:.1f} %, ≤ 3 % {l1.get('share_le_3pct', 0) * 100:.0f} %")
+        lines.append(f"- {name}: " + " / ".join(rows) + f" [{_frame_log_summary(log, warm)}] (`cut/strip_{name}.png`: 컷 뒤 {', '.join(str(k) for k in ks)}프레임, 마지막이 정지 수렴)")
+        lines += [f"  - GI 캐시 {x}" for x in gi]
+    return lines
+
+
 def unity(out):
     lines = []
     for size_dir in sorted(glob.glob(os.path.join(out, "unity", "*"))):
@@ -264,6 +415,14 @@ def main():
     if conv:
         md += ["## 수렴 곡선 (장면 첫 프레임부터, 업스케일 출력) — 움직임 화질의 대리 지표", "",
                "장면을 연 직후는 가장 심한 가림 해제다(조명 편집 뒤 재빌드도 지금은 같다). 사용자 요구는 몇 프레임 안에 깨끗해지는 것이다.", ""] + conv + [""]
+    for title, fn, note in (
+            ("움직임 (Q-B) — 같은 경로 시각의 정지 수렴 화면 대비", motion,
+             "회전 90·180°/s, 걷기 1.5 m/s, 달리기 4 m/s. 층 σ = 변조를 푼 층의 고역 잡음(기준 값은 층 자체의 무늬), 층 오차 = 수렴한 층과의 거리. 무늬 ≤ 1.1이 목표."),
+            ("조명 변화 (Q-C) — 변화 뒤 정지 수렴 화면 대비", relight, "light = 국소광 하나 끔, sun = 해 10° 이동."),
+            ("컷 (Q-A) — 180° 돌아선 시점으로 순간 이동, 그 시점의 정지 수렴 화면 대비", cut, "")):
+        sec = fn(out)
+        if sec:
+            md += [f"## {title}", ""] + ([note, ""] if note else []) + sec + [""]
     uni = unity(out)
     if uni:
         md += ["## Unity 게임 뷰 (플레이 모드, 배포된 렌더러)", "",
