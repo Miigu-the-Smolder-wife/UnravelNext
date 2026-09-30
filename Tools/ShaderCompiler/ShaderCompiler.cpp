@@ -1,7 +1,7 @@
 // unx_shaderc: build-time HLSL -> DXIL compiler (one kernel per invocation).
 //
 //   unx_shaderc --src <file.hlsl> --profile cs_6_6 --entry main --out <file.dxil> [--depfile <file.d>]
-//               [--max-kb 200] [-I <dir>]... [-D NAME=VALUE]...
+//               [--max-kb 200] [--strict-fp] [-I <dir>]... [-D NAME=VALUE]...
 //
 // Writes the stripped DXIL (what PSO creation consumes), a PDB next to it for PIX, and a Make-style depfile
 // listing every included file so Ninja rebuilds exactly the kernels an include change affects. Fails when the
@@ -99,6 +99,7 @@ int main(int argc, char** argv)
 {
     std::string src, profile, entry, out, depfile;
     size_t maxKb = 0;
+    bool strictFp = false;
     std::vector<std::string> includes, defines;
     for (int i = 1; i < argc; ++i)
     {
@@ -110,6 +111,7 @@ int main(int argc, char** argv)
         else if (a == "--out") out = next();
         else if (a == "--depfile") depfile = next();
         else if (a == "--max-kb") maxKb = std::stoul(next());
+        else if (a == "--strict-fp") strictFp = true;
         else if (a == "-I") includes.push_back(next());
         else if (a == "-D") defines.push_back(next());
         else fail("unknown argument " + a);
@@ -135,6 +137,7 @@ int main(int argc, char** argv)
         L"-HV", L"2021", L"-O3", L"-WX", L"-Zi", L"-Qstrip_debug", L"-Qstrip_reflect", L"-Zsb",
         L"-D", L"UNX_SHADER=1",
     };
+    if (strictFp) args.push_back(L"-Gis");
     args.push_back(L"-I"); args.push_back(srcPath.parent_path().wstring());
     for (const auto& inc : includes) { args.push_back(L"-I"); args.push_back(widen(inc)); }
     for (const auto& def : defines) { args.push_back(L"-D"); args.push_back(widen(def)); }

@@ -1,5 +1,6 @@
 # Build-time HLSL compilation. One kernel per file; each file declares itself in its first lines:
 #   // unx-kernel: <profile> <entry>            e.g. // unx-kernel: cs_6_6 main
+#   // unx-strict-fp                     optional; identical arithmetic across split/inline kernels
 #   // unx-variants: NAME=a,b OTHER=x,y         optional; one DXIL per combination (compile constants, no runtime modes)
 # Output: <out>/<path relative to root, without .hlsl>[.NAMEa.OTHERx].dxil (+ .pdb). The compiler fails the build
 # when a DXIL exceeds UNX_DXIL_LIMIT_KB (ARCHITECTURE_KO.md 4.4: cold PSO creation <= 0.8 s).
@@ -34,6 +35,11 @@ function(unx_add_shaders target)
     separate_arguments(kernel_args UNIX_COMMAND "${kernel_line}")
     list(GET kernel_args 0 profile)
     list(GET kernel_args 1 entry)
+    file(STRINGS "${src}" strict_fp_line LIMIT_COUNT 1 REGEX "^// unx-strict-fp$")
+    set(fp_options)
+    if(strict_fp_line)
+      list(APPEND fp_options --strict-fp)
+    endif()
     file(STRINGS "${src}" variant_line LIMIT_COUNT 1 REGEX "^// unx-variants:")
     set(combos "")  # list of ";"-free strings "NAME=a|OTHER=x"
     if(variant_line)
@@ -80,7 +86,7 @@ function(unx_add_shaders target)
       endforeach()
       add_custom_command(OUTPUT "${out}"
         COMMAND $<TARGET_FILE:unx_shaderc> --src "${src}" --profile ${profile} --entry ${entry}
-                --out "${out}" --depfile "${out}.d" --max-kb ${UNX_DXIL_LIMIT_KB} ${incs} ${defs}
+                --out "${out}" --depfile "${out}.d" --max-kb ${UNX_DXIL_LIMIT_KB} ${fp_options} ${incs} ${defs}
         DEPENDS "${src}" unx_shaderc
         DEPFILE "${out}.d"
         COMMENT "HLSL ${rel}${suffix}"

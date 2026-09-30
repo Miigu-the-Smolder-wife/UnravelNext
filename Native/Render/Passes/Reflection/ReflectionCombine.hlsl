@@ -1,4 +1,6 @@
 // unx-kernel: cs_6_6 main
+// unx-strict-fp
+// Split/overflow and direction replay must agree before FP16 stores and ray traversal.
 // The value of each reflection job whose rays went through the rays buffer (ReflectionRay.hlsli: results[job] = { first
 // slot, REFL_JOB_SPLIT }), from its rays' shaded values, as ReflectionTrace's inline path: M = the sample; G =
 // reflLobeEstimate with the screen-probe control variate in the replayed direction; no unmasked sample: the cache's lobe

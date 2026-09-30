@@ -1,4 +1,6 @@
 // unx-kernel: lib_6_6 main
+// unx-strict-fp
+// Split/overflow and direction replay must agree before FP16 stores and ray traversal.
 // unx-variants: SKY=0,1
 // Reflection rays (ARCHITECTURE 2.6 G and M paths; DispatchRays with alpha any-hit), one thread per job, dispatched
 // indirectly with this frame's job count. The value is the lobe-normalised incident radiance (VNDF samples of the GGX

@@ -1,4 +1,6 @@
 // unx-kernel: cs_6_6 main
+// unx-strict-fp
+// Split/overflow and direction replay must agree before FP16 stores and ray traversal.
 // unx-variants: SKY=0,1 CORNERS=0,1
 // Hit shading of this frame's reflection rays in compute (ARCHITECTURE 2.6 revision 1), one thread per ray slot of the
 // rays buffer (ReflectionRay.hlsli), dispatched indirectly for the slots allocated. Replays the job's direction, shades

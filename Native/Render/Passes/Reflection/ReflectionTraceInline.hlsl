@@ -1,4 +1,6 @@
 // unx-kernel: lib_6_6 main
+// unx-strict-fp
+// Split/overflow and direction replay must agree before FP16 stores and ray traversal.
 // unx-variants: SKY=0,1 JOB=1,2 CORNERS=0,1
 // The reflection jobs whose rays did not fit this frame's rays buffer (ReflectionTrace marked them REFL_JOB_INLINE):
 // traced, shaded and combined in the ray generation shader, one thread per job of the frame (dispatched indirectly with

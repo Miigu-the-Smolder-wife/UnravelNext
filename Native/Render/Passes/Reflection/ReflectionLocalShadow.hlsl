@@ -1,4 +1,6 @@
 // unx-kernel: lib_6_6 main
+// unx-strict-fp
+// Split/overflow and direction replay must agree before FP16 stores and ray traversal.
 // Visibility of the local-light samples of this frame's reflection hits (HitLocalLights.hlsli), one ray generation thread
 // per allocated ray slot, before the compute hit shading: the slot's hit point is rebuilt exactly as ReflectionShade
 // builds it (rtSurface of the stored hit record), the same light sample is drawn (reflLocalSeed of the slot's job and ray), and

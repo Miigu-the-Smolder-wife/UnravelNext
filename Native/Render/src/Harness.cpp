@@ -150,6 +150,7 @@ void readContention(int64_t from, int64_t to, HarnessResult& result, int& interv
 HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& options, const BuildFrame& build)
 {
     if (resolution.width == 0) fail("harness: resolution not set");
+    if (options.frames == 0 || options.framesInFlight == 0 || options.warmupFrames < -1) fail("harness: invalid frame counts");
     const std::string lockHolder = requireGpuLock("Harness::run");
     RenderGraph graph(m_device);
     graph.setAsyncCompute(options.asyncCompute);
@@ -166,7 +167,7 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
     std::vector<int64_t> submittedMs;  // unix ms of each measured frame's submission (contention matching)
     std::map<uint64_t, int64_t> submitOf;
     std::vector<double> clocks;
-    uint64_t firstMeasured = UINT64_MAX;
+    uint64_t firstMeasured = options.warmupFrames >= 0 ? (uint64_t)options.warmupFrames : UINT64_MAX;
     int64_t windowStartMs = 0;
     const auto start = std::chrono::steady_clock::now();
     HarnessResult result;
@@ -190,7 +191,11 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
             submitOf.erase(done);
         }
         if (timings.size() >= options.frames) break;
+        // Drain timestamp slots without rendering extra frames: captures and
+        // histories must end at warmupFrames + frames - 1, independent of lag.
+        if (firstMeasured != UINT64_MAX && frame >= firstMeasured + options.frames) continue;
 
+        if (frame == firstMeasured && windowStartMs == 0) windowStartMs = unixMs();
         const auto t0 = std::chrono::steady_clock::now();
         build(graph, resolution, frame);
         graph.execute(&profiler);
@@ -198,14 +203,13 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
         const double total = msSince(t0);
         for (uint32_t q = 0; q < kQueueTypeCount; ++q) slotFence[slot][q] = graph.lastFence((QueueType)q);
 
-        const bool measuring = firstMeasured != UINT64_MAX;
+        const bool measuring = firstMeasured != UINT64_MAX && frame >= firstMeasured;
         if (measuring)
         {
             if (cpu.size() < options.frames) cpu.push_back({ total, graph.stats().cpuRecordMs, graph.stats().cpuSubmitMs });
             if (frame % 16 == 0) clocks.push_back((double)sampleSmClockMHz());
         }
-        else if (options.warmupFrames > 0 ? frame + 1 >= options.warmupFrames
-                                           : std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() >= options.warmupSeconds)
+        else if (options.warmupFrames < 0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() >= options.warmupSeconds)
         {
             firstMeasured = frame + 1;
             windowStartMs = unixMs();
