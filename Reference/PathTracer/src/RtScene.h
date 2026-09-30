@@ -82,6 +82,9 @@ public:
 
     bool intersect(float3 o, float3 d, float tnear, float tfar, uint32_t mask, Hit& hit) const;
     bool occluded(float3 o, float3 d, float tnear, float tfar) const;  // shadow casters only
+    // Light-sample visibility: 0 behind a shadow caster, the product of the glass panes' transmittances on the way
+    // (Dielectric.h paneOptics), 1 in the clear.
+    Rgb shadowTransmittance(float3 o, float3 d, float tnear, float tfar) const;
     Surface surface(const Hit& hit, float3 rayDir) const;
 
     const scene::Scene& scene() const { return m_scene; }
@@ -107,6 +110,7 @@ private:
     std::vector<int32_t> m_geomToGroup;                  // top-level geomID -> group or -1
     std::vector<int32_t> m_geomToDeformed;               // top-level geomID -> deformed index or -1
     std::vector<Texture> m_textures;
+    bool m_hasPanes = false;  // a two-sided Glass material exists (shadowTransmittance walks the hits)
     std::vector<std::vector<uint8_t>> m_cutEdges;         // per scene mesh, per triangle: Cut boundary edge bits (A11)
     DeformationReport m_deform;
 };

@@ -62,6 +62,28 @@ inline DielectricSample sampleDielectric(const Surface& s, float3 wo, float ior,
     return out;
 }
 
+// Glass (A10) in the CPU reference. A solid body (one-sided) is the same interface and medium as water, with
+// sigma_a = -ln(baseColor) / attenuationDistance (the material's transmittance over that distance). A pane (two-sided,
+// no thickness in the geometry) is a thin sheet of index ior and tint t per pass, the engine's TranslucentComposite
+// definition with the incoherent internal reflections summed: R = F + (1 - F)^2 F t^2 / (1 - F^2 t^2),
+// T = (1 - F)^2 t / (1 - F^2 t^2), F the exact unpolarised Fresnel at the incidence angle; the transmitted direction is
+// unchanged. Panes pass light samples with T (RtScene::shadowTransmittance); solid bodies block them (their refraction
+// moves the image: paths only). Smooth glass only (the reference refuses roughness above 0.02 - condition recorded).
+struct PaneOptics
+{
+    Rgb R, T;
+};
+inline PaneOptics paneOptics(double cosI, float ior, float3 tint)
+{
+    const double F = dielectricFresnel(std::fabs(cosI), 1.0 / ior);
+    auto r = [&](double t) { return F + (1 - F) * (1 - F) * F * t * t / (1 - F * F * t * t); };
+    auto tr = [&](double t) { return (1 - F) * (1 - F) * t / (1 - F * F * t * t); };
+    PaneOptics o;
+    o.R = Rgb(float3{ (float)r(tint.x), (float)r(tint.y), (float)r(tint.z) });
+    o.T = Rgb(float3{ (float)tr(tint.x), (float)tr(tint.y), (float)tr(tint.z) });
+    return o;
+}
+
 // The medium's absorption per metre from its 1 m transmittance.
 inline Rgb dielectricAbsorption(float3 transmittance)
 {

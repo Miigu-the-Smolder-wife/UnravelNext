@@ -200,6 +200,113 @@ void testCoat()
     logf("  coated / bare: rendered %.4f, model %.4f\n", mc.mean / mb.mean, coated / bare);
 }
 
+// A10 glass (Dielectric.h): closed forms at normal incidence over the lit patch (point light straight above the patch's
+// centre at 3 m, plane albedo 0.5). F = ((n - 1) / (n + 1))^2 for n = 1.5.
+//   pane (two-sided, tint 0.9) between the camera and the plane:       L = T_pane L_plane
+//   solid slab (12 mm box, transmittance 0.9 over 1 cm) instead:      L = (1 - F)^2 tau L_plane, tau = 0.9^1.2 (one pass)
+//   pane between the light and the plane (camera past its edge):       L = T_pane L_plane (the light sample through the pane)
+// Each case keeps the surface orders its closed form counts (renderPatch surfaceOrderMax): the camera's glass vertex and
+// the plane (2; the slab's entry and exit: 3; light through a pane: 1), without the plane-glass-plane interreflections.
+scene::Mesh glassQuad(float y, float half)
+{
+    scene::Mesh m;
+    m.name = "pane";
+    m.positions = { { -half, y, -half }, { -half, y, half }, { half, y, half }, { half, y, -half } };
+    m.normals = { { 0, 1, 0 }, { 0, 1, 0 }, { 0, 1, 0 }, { 0, 1, 0 } };
+    m.uv0 = { { 0, 0 }, { 0, 1 }, { 1, 1 }, { 1, 0 } };
+    m.indices = { 0, 1, 2, 0, 2, 3 };
+    m.submeshes = { { 0, 6, 1 } };
+    return m;
+}
+scene::Mesh glassSlab(float y0, float y1, float half)
+{
+    // an axis-aligned box, faces out (one-sided solid body)
+    scene::Mesh m;
+    m.name = "slab";
+    const float3 lo{ -half, y0, -half }, hi{ half, y1, half };
+    const float3 n[6] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+    for (int f = 0; f < 6; ++f)
+    {
+        const float3 out = n[f];
+        const float3 u = std::fabs(out.y) > 0.5f ? float3{ 1, 0, 0 } : float3{ 0, 1, 0 };
+        const float3 v = cross(out, u);
+        const float3 c = (lo + hi) * 0.5f, h = (hi - lo) * 0.5f;
+        auto corner = [&](float a, float b) {
+            const float3 q = out + u * a + v * b;
+            return float3{ c.x + q.x * h.x, c.y + q.y * h.y, c.z + q.z * h.z };
+        };
+        const uint32_t base = (uint32_t)m.positions.size();
+        for (auto [a, b] : { std::pair{ -1.f, -1.f }, { 1.f, -1.f }, { 1.f, 1.f }, { -1.f, 1.f } })
+        {
+            m.positions.push_back(corner(a, b));
+            m.normals.push_back(out);
+            m.uv0.push_back({ a * 0.5f + 0.5f, b * 0.5f + 0.5f });
+        }
+        m.indices.insert(m.indices.end(), { base, base + 1, base + 2, base, base + 2, base + 3 });  // counter-clockwise about out
+    }
+    m.submeshes = { { 0, 36, 1 } };
+    return m;
+}
+void testGlass()
+{
+    const double F = 0.04, tint = 0.9;
+    const double Tpane = (1 - F) * (1 - F) * tint / (1 - F * F * tint * tint);
+    const double tau = std::pow(0.9, 1.2), Tslab = (1 - F) * (1 - F) * tau;
+    auto withLight = [](scene::Scene& s) {
+        scene::Light l;
+        l.type = scene::LightType::Point;
+        l.position = { 0, 3, 0 };
+        l.intensity = 1000;
+        l.range = 30;
+        l.castShadow = true;
+        s.lights.push_back(l);
+    };
+    const double bare = lambert(0.5f) * 1000 * windowW(3, 30) / 9.0;
+    auto glassMaterial = [](bool twoSided, float3 tint3) {
+        scene::Material g;
+        g.name = twoSided ? "pane glass" : "solid glass";
+        g.cls = scene::MaterialClass::Glass;
+        g.baseColor = tint3;
+        g.roughness = 0;
+        g.ior = 1.5f;
+        g.twoSided = twoSided;
+        g.attenuationDistance = 0.01f;
+        return g;
+    };
+    {
+        scene::Scene s = planeScene(0.5f);
+        withLight(s);
+        s.materials.push_back(glassMaterial(true, { 0.9f, 0.9f, 0.9f }));
+        s.meshes.push_back(glassQuad(10, 5));
+        scene::Instance in;
+        in.mesh = 1;
+        s.instances.push_back(in);
+        expectNear("pane", renderPatch(s, 256, true, 2), Tpane * bare, 2e-3);
+    }
+    {
+        scene::Scene s = planeScene(0.5f);
+        withLight(s);
+        s.materials.push_back(glassMaterial(false, { 0.9f, 0.9f, 0.9f }));
+        s.meshes.push_back(glassSlab(10, 10.012f, 5));
+        scene::Instance in;
+        in.mesh = 1;
+        s.instances.push_back(in);
+        expectNear("slab", renderPatch(s, 1024, true, 3), Tslab * bare, 2e-3);
+    }
+    {
+        scene::Scene s = planeScene(0.5f);
+        withLight(s);
+        s.materials.push_back(glassMaterial(true, { 0.9f, 0.9f, 0.9f }));
+        s.meshes.push_back(glassQuad(2, 0.5f));  // between the light (3 m) and the patch; the camera (50 m) sees past it
+        scene::Instance in;
+        in.mesh = 1;
+        s.instances.push_back(in);
+        s.cameras[0].position = { 15, 50, 0 };  // (its ray crosses y = 2 at x = 0.6: past the pane's edge)
+        s.cameras[0].forward = normalize(float3{ -15, -50, 0 });
+        expectNear("through", renderPatch(s, 256, true, 1), Tpane * bare, 2e-3);
+    }
+}
+
 void testRect()
 {
     scene::Scene s = planeScene(0.5f);
@@ -1000,7 +1107,7 @@ int main(int argc, char** argv)
         const char* only = argc > arg ? argv[arg] : nullptr;
         auto run = [&](const char* name, void (*fn)()) {
             if (only && std::strcmp(only, name) != 0) return;
-            const bool cpuOnly = std::strcmp(name, "hold") == 0 || std::strcmp(name, "atmosphere") == 0 || std::strcmp(name, "model") == 0 || std::strcmp(name, "bsdf") == 0 || std::strcmp(name, "cut") == 0 || std::strcmp(name, "water") == 0;
+            const bool cpuOnly = std::strcmp(name, "glass") == 0 || std::strcmp(name, "hold") == 0 || std::strcmp(name, "atmosphere") == 0 || std::strcmp(name, "model") == 0 || std::strcmp(name, "bsdf") == 0 || std::strcmp(name, "cut") == 0 || std::strcmp(name, "water") == 0;
             if (g_gpu && cpuOnly) return;
             logf("[%s]\n", name);
             fn();
@@ -1014,6 +1121,7 @@ int main(int argc, char** argv)
         run("water", testWater);
         run("point", testPoint);
         run("coat", testCoat);
+        run("glass", testGlass);
         run("rect", testRect);
         run("sphere", testSphere);
         run("disk", testDiskAndTube);

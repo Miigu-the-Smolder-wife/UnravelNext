@@ -222,8 +222,9 @@ struct PathTracer::Impl
         if (!tau.finite()) return {};
         const float3 o = useOffset ? offsetRayOrigin(p, offsetNormal) : p;
         ++cnt.rays;
-        if (rt->occluded(o, w, 0.0f, INFINITY)) return {};
-        return sunRadiance * expNeg(tau);
+        const Rgb through = rt->shadowTransmittance(o, w, 0.0f, INFINITY);
+        if (through.isZero()) return {};
+        return through * sunRadiance * expNeg(tau);
     }
 
     // Local light arriving at p from a sample (visibility for shadowing lights, atmosphere along the segment).
@@ -234,7 +235,9 @@ struct PathTracer::Impl
         {
             const float3 o = useOffset ? offsetRayOrigin(p, offsetNormal) : p;
             ++cnt.rays;
-            if (rt->occluded(o, ls.wi, 0.0f, ls.distance * (1 - 1e-4f))) return {};
+            const Rgb through = rt->shadowTransmittance(o, ls.wi, 0.0f, ls.distance * (1 - 1e-4f));
+            if (through.isZero()) return {};
+            return through * ls.L * expNeg(atm.opticalDepth(toD(p), ls.wi, ls.distance));
         }
         return ls.L * expNeg(atm.opticalDepth(toD(p), ls.wi, ls.distance));
     }
@@ -586,8 +589,19 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
             }
         }
 
-        // Inside water: Beer-Lambert absorption over the segment; the air model does not apply there.
-        if (inWater) beta *= expNeg(waterSigma * (float)segLen);
+        // Inside water or glass: Beer-Lambert absorption over the segment; the air model does not apply there. The length
+        // runs from the previous surface point, not from the ray origin: the origin offset (offsetRayOrigin, 256 ulps:
+        // 0.24 mm at 10 m) shortened a 12 mm glass slab's path by 4 % (its transmittance +0.27 % [measured, ReferenceTests]).
+        if (inWater)
+        {
+            double mediumLen = segLen;
+            if (prev == Prev::Surface && end == End::Surface)
+            {
+                const float3 q = o + d * (float)hit.t;
+                mediumLen = length(q - prevPos);
+            }
+            beta *= expNeg(waterSigma * (float)mediumLen);
+        }
 
         // --- 1. analytic area-light emission along the segment (after a surface vertex)
         if (prev == Prev::Surface)
@@ -686,7 +700,38 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
         {
             s = rt->surface(hit, d);
             if (!s.emission.isZero()) L += beta * s.emission * orderWeight(nVol, surfVerts);
-            if (s.bsdf.cls == scene::MaterialClass::Water)
+            const scene::Material* glass = s.bsdf.cls == scene::MaterialClass::Glass ? &rt->scene().materials[s.material] : nullptr;
+            if (glass && glass->twoSided)
+            {
+                // A glass pane (Dielectric.h paneOptics): reflect with the share of R, else pass straight through with T
+                const PaneOptics po = paneOptics(dot3(s.ng, d), glass->ior, s.bsdf.baseColor);
+                const float pr = po.R.luminance() / std::max(po.R.luminance() + po.T.luminance(), 1e-12f);
+                const bool reflect = smp.get1D() < pr;
+                const float3 nn = dot(s.ng, d) < 0 ? s.ng : -s.ng;  // the normal on the viewer's side
+                const float3 wi = reflect ? normalize(d - nn * (2 * dot(nn, d))) : d;
+                beta *= reflect ? po.R * (1 / pr) : po.T * (1 / (1 - pr));
+                ++surfVerts;
+                chain = false;
+                dropSun = false;
+                if (surfVerts > surfMax) break;
+                lights.gather(s.p, cands);
+                prevDelta = true;
+                prevPos = s.p;
+                std::swap(prevCands, cands);
+                prev = Prev::Surface;
+                o = offsetRayOrigin(s.p, dot(nn, wi) >= 0 ? nn : -nn);
+                d = wi;
+                tmin = 0;
+                if (bounce + 1 >= rrStart)
+                {
+                    const float q = std::min(1.0f, beta.max());
+                    if (!(smp.get1D() < q)) break;
+                    beta *= 1.0f / q;
+                }
+                if (beta.isZero()) break;
+                continue;
+            }
+            if (s.bsdf.cls == scene::MaterialClass::Water || glass)
             {
                 // A smooth dielectric interface (Dielectric.h): no light sampling at this delta vertex; the path reflects
                 // with probability F or refracts, entering or leaving the water body.
@@ -695,7 +740,8 @@ Rgb PathTracer::Impl::radiance(float3 origin, float3 dir, float tnear, Sampler& 
                 if (ds.refracted)
                 {
                     inWater = ds.entering;
-                    if (inWater) waterSigma = dielectricAbsorption(s.bsdf.baseColor);
+                    if (inWater) waterSigma = glass ? dielectricAbsorption(s.bsdf.baseColor) * (1 / std::max(glass->attenuationDistance, 1e-6f))
+                                                    : dielectricAbsorption(s.bsdf.baseColor);
                 }
                 ++surfVerts;
                 chain = false;  // (water scenes refuse sun caustics)

@@ -1,4 +1,5 @@
 #include "RtScene.h"
+#include "Dielectric.h"
 
 #include "CutFace.h"
 
@@ -208,8 +209,11 @@ RtScene::RtScene(const scene::Scene& s, float time, uint32_t threads) : m_scene(
     for (const scene::Material& m : s.materials)
     {
         if (m.cls != scene::MaterialClass::Standard && m.cls != scene::MaterialClass::Foliage && m.cls != scene::MaterialClass::Cut &&
-            m.cls != scene::MaterialClass::Water)
-            fail("reference: material '%s' uses a class without a model here (INTERFACES 8.1: Standard, Foliage, Cut; Water: Dielectric.h)", m.name.c_str());
+            m.cls != scene::MaterialClass::Water && m.cls != scene::MaterialClass::Glass)
+            fail("reference: material '%s' uses a class without a model here (INTERFACES 8.1: Standard, Foliage, Cut; Water, Glass: Dielectric.h)", m.name.c_str());
+        if (m.cls == scene::MaterialClass::Glass && m.roughness > 0.02f)
+            fail("reference: glass material '%s' has roughness %.3f (Dielectric.h: smooth glass only)", m.name.c_str(), m.roughness);
+        if (m.cls == scene::MaterialClass::Glass && m.twoSided) m_hasPanes = true;
         if (m.cls == scene::MaterialClass::Water && m.twoSided)
             fail("reference: water material '%s' is two-sided (Dielectric.h: its front faces point out of the water)", m.name.c_str());
         if (m.occlusionTexture != scene::kNone)
@@ -517,6 +521,25 @@ bool RtScene::occluded(float3 o, float3 d, float tnear, float tfar) const
     rtcInitOccludedArguments(&args);
     rtcOccluded1(m_top, &r, &args);
     return r.tfar < 0;
+}
+
+Rgb RtScene::shadowTransmittance(float3 o, float3 d, float tnear, float tfar) const
+{
+    if (!m_hasPanes) return occluded(o, d, tnear, tfar) ? Rgb() : Rgb(1);
+    Rgb T(1);
+    for (int k = 0; k < 64; ++k)
+    {
+        Hit h;
+        if (!intersect(o, d, tnear, tfar, kMaskShadow, h)) return T;
+        const MeshData& md = meshOf(h.instance);
+        const scene::Material& m = m_scene.materials[materialOf(h.instance, md, h.triangle)];
+        if (m.cls != scene::MaterialClass::Glass || !m.twoSided) return {};
+        const Surface s = surface(h, d);
+        T = T * paneOptics(dot3(s.ng, d), m.ior, s.bsdf.baseColor).T;
+        tnear = h.t * (1 + 1e-6f) + 1e-5f;
+        if (T.isZero() || !(tnear < tfar)) return T.isZero() ? Rgb() : T;
+    }
+    return {};  // (64 panes on one segment)
 }
 
 Surface RtScene::surface(const Hit& hit, float3 rayDir) const
