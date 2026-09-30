@@ -129,6 +129,64 @@ bool processAlive(uint32_t pid)
     return alive;
 }
 
+// The main checkout of 'root': a worktree's .git file names its git folder, whose "commondir" leads to the shared git
+// folder, whose parent is the main checkout (GpuLock.ps1 v1.83: one .gpulock for all worktrees); 'root' otherwise.
+std::filesystem::path mainCheckout(const std::filesystem::path& root)
+{
+    namespace fsx = std::filesystem;
+    std::error_code ec;
+    const fsx::path dotGit = root / ".git";
+    if (!fsx::is_regular_file(dotGit, ec)) return root;
+    auto trimmed = [](std::string s) {
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ' || s.back() == '\t')) s.pop_back();
+        size_t i = 0;
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+        return s.substr(i);
+    };
+    const std::string text = trimmed(readAll(dotGit));
+    if (text.rfind("gitdir:", 0) != 0) return root;
+    fsx::path gitDir = trimmed(text.substr(7));
+    if (gitDir.is_relative()) gitDir = root / gitDir;
+    fsx::path common = gitDir;
+    const std::string commonDir = trimmed(readAll(gitDir / "commondir"));
+    if (!commonDir.empty())
+    {
+        common = commonDir;
+        if (common.is_relative()) common = gitDir / common;
+    }
+    std::wstring s = fsx::absolute(common, ec).lexically_normal().wstring();
+    while (s.size() > 3 && (s.back() == L'\\' || s.back() == L'/')) s.pop_back();
+    const fsx::path parent = fsx::path(s).parent_path();
+    return parent.empty() ? root : parent;
+}
+
+// True when pid belongs to a process started more than 5 s after 'since' (local "YYYY-MM-DDTHH:MM:SS"): the waiter file's
+// process is gone and its pid reused, so the file is stale (GpuLock.ps1 v1.83).
+bool reusedPid(uint32_t pid, const std::string& since)
+{
+    SYSTEMTIME local{}, utc{};
+    if (sscanf_s(since.c_str(), "%hu-%hu-%huT%hu:%hu:%hu", &local.wYear, &local.wMonth, &local.wDay, &local.wHour, &local.wMinute, &local.wSecond) != 6) return false;
+    FILETIME sinceTime{};
+    if (!TzSpecificLocalTimeToSystemTime(nullptr, &local, &utc) || !SystemTimeToFileTime(&utc, &sinceTime)) return false;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return false;
+    FILETIME created{}, exited{}, kernel{}, user{};
+    const bool ok = GetProcessTimes(h, &created, &exited, &kernel, &user) != 0;
+    CloseHandle(h);
+    auto ticks = [](FILETIME f) { return ((uint64_t)f.dwHighDateTime << 32) | f.dwLowDateTime; };
+    return ok && ticks(created) > ticks(sinceTime) + 5ull * 10000000ull;
+}
+
+// Whether a waiter (kind, since, pid) takes its turn before this one: timing before correctness, then first come
+// ("since", then pid) - GpuLock.ps1 v1.83.
+bool turnBefore(const std::string& kind, const std::string& since, uint32_t pid, const std::string& selfKind, const std::string& selfSince, uint32_t self)
+{
+    const int rank = kind == "timing" ? 0 : 1, selfRank = selfKind == "timing" ? 0 : 1;
+    if (rank != selfRank) return rank < selfRank;
+    const int order = since.compare(selfSince);
+    return order < 0 || (order == 0 && pid < self);
+}
+
 std::string defaultLockDir()
 {
     char* value = nullptr;
@@ -142,7 +200,8 @@ std::string defaultLockDir()
     std::error_code ec;
     for (fs::path p = fs::current_path(ec); !p.empty(); p = p.parent_path())
     {
-        if (fs::is_directory(p / ".gpulock", ec) || fs::exists(p / ".git", ec)) return (p / ".gpulock").string();
+        if (fs::exists(p / ".git", ec)) return (mainCheckout(p) / ".gpulock").string();  // one folder for all worktrees (v1.83)
+        if (fs::is_directory(p / ".gpulock", ec)) return (p / ".gpulock").string();
         if (p == p.root_path()) break;
     }
     fail("GpuLockSlice: no .gpulock folder above %s (run from the repository or set UNX_GPU_LOCK_DIR)", fs::current_path(ec).string().c_str());
@@ -185,9 +244,9 @@ void GpuLockSlice::appendHistory(const std::string& line)
     logf("GpuLockSlice: could not append to %s\n", p.string().c_str());
 }
 
-// Why this process must not take the lock now (empty: it may): HOLD, or for kind correctness a live timing waiter.
-// Waiting files of dead processes are removed.
-std::string GpuLockSlice::blocker()
+// Why this process must not take the lock now (empty: it may): HOLD, or a live waiter whose turn comes first (v1.83:
+// timing before correctness, then "since", then pid). Waiting files of dead processes and of reused pids are removed.
+std::string GpuLockSlice::blocker(const std::string& since)
 {
     std::error_code ec;
     const fs::path hold = fs::path(m_dir) / "HOLD";
@@ -197,7 +256,6 @@ std::string GpuLockSlice::blocker()
         while (!reason.empty() && (reason.back() == '\n' || reason.back() == '\r' || reason.back() == ' ')) reason.pop_back();
         return "HOLD: " + (reason.empty() ? std::string("(no reason given)") : reason);
     }
-    if (m_kind != "correctness") return {};
     const uint32_t self = GetCurrentProcessId();
     for (const fs::directory_entry& e : fs::directory_iterator(fs::path(m_dir) / "waiting", ec))
     {
@@ -205,13 +263,15 @@ std::string GpuLockSlice::blocker()
         const std::string json = readAll(e.path());
         const uint32_t pid = (uint32_t)std::strtoul(jsonField(json, "pid").c_str(), nullptr, 10);
         if (pid == 0 || pid == self) continue;
-        if (!processAlive(pid))
+        const std::string kind = jsonField(json, "kind"), waiting = jsonField(json, "since");
+        if (!processAlive(pid) || reusedPid(pid, waiting))
         {
             std::error_code rc;
             fs::remove(e.path(), rc);
             continue;
         }
-        if (jsonField(json, "kind") == "timing") return "timing waiter " + jsonField(json, "track") + " (pid " + std::to_string(pid) + ")";
+        if (turnBefore(kind, waiting, pid, m_kind, since, self))
+            return "in line behind " + jsonField(json, "track") + " (" + kind + ", pid " + std::to_string(pid) + ", since " + waiting + ")";
     }
     return {};
 }
@@ -223,13 +283,14 @@ bool GpuLockSlice::acquire(std::chrono::milliseconds waitLimit, const std::strin
     const uint32_t self = GetCurrentProcessId();
     const fs::path waitFile = fs::path(m_dir) / "waiting" / (std::to_string(self) + ".json");
     const std::string command = m_what + (label.empty() ? "" : " " + label);
-    writeAtomic(waitFile, "{\"track\":\"" + jsonEscape(m_track) + "\",\"kind\":\"" + m_kind + "\",\"pid\":" + std::to_string(self) + ",\"since\":\"" + localTime() +
+    const std::string since = localTime();
+    writeAtomic(waitFile, "{\"track\":\"" + jsonEscape(m_track) + "\",\"kind\":\"" + m_kind + "\",\"pid\":" + std::to_string(self) + ",\"since\":\"" + since +
                               "\",\"command\":\"" + jsonEscape(command) + "\"}");
     m_lastBlocker.clear();
     bool got = false, abandoned = false;
     while (std::chrono::steady_clock::now() - start < waitLimit)
     {
-        const std::string b = blocker();
+        const std::string b = blocker(since);
         if (!b.empty())
         {
             m_lastBlocker = b;
@@ -240,7 +301,7 @@ bool GpuLockSlice::acquire(std::chrono::milliseconds waitLimit, const std::strin
         const DWORD r = WaitForSingleObject(m_mutex, (DWORD)std::clamp<long long>(left, 0, 1000));
         if (r != WAIT_OBJECT_0 && r != WAIT_ABANDONED) continue;
         abandoned = r == WAIT_ABANDONED;
-        const std::string late = blocker();  // a timing waiter or HOLD appeared while this one waited on the mutex
+        const std::string late = blocker(since);  // a waiter ahead or HOLD appeared while this one waited on the mutex
         if (!late.empty())
         {
             m_lastBlocker = late;

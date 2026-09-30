@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <fstream>
 
@@ -145,9 +146,67 @@ std::string field(const std::string& json, const char* key)
     return json.substr(q, e == std::string::npos ? std::string::npos : e - q);
 }
 
-// A live timing waiter in .gpulock/waiting (INTERFACES 3.3 v1.40: correctness acquisitions yield to it); removes the
-// records of waiters whose process is gone.
-bool timingWaiter(const std::filesystem::path& dir, uint32_t self)
+// The main checkout of 'root': a worktree's .git file names its git folder, whose "commondir" leads to the shared git
+// folder, whose parent is the main checkout (GpuLock.ps1 v1.83: one .gpulock for all worktrees); 'root' otherwise.
+std::filesystem::path mainCheckout(const std::filesystem::path& root)
+{
+    namespace fsx = std::filesystem;
+    std::error_code ec;
+    const fsx::path dotGit = root / ".git";
+    if (!fsx::is_regular_file(dotGit, ec)) return root;
+    auto trimmed = [](std::string s) {
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ' || s.back() == '\t')) s.pop_back();
+        size_t i = 0;
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+        return s.substr(i);
+    };
+    const std::string text = trimmed(readShared(dotGit));
+    if (text.rfind("gitdir:", 0) != 0) return root;
+    fsx::path gitDir = trimmed(text.substr(7));
+    if (gitDir.is_relative()) gitDir = root / gitDir;
+    fsx::path common = gitDir;
+    const std::string commonDir = trimmed(readShared(gitDir / "commondir"));
+    if (!commonDir.empty())
+    {
+        common = commonDir;
+        if (common.is_relative()) common = gitDir / common;
+    }
+    std::wstring s = fsx::absolute(common, ec).lexically_normal().wstring();
+    while (s.size() > 3 && (s.back() == L'\\' || s.back() == L'/')) s.pop_back();
+    const fsx::path parent = fsx::path(s).parent_path();
+    return parent.empty() ? root : parent;
+}
+
+// True when pid belongs to a process started more than 5 s after 'since' (local "YYYY-MM-DDTHH:MM:SS"): the waiter file's
+// process is gone and its pid reused, so the file is stale (GpuLock.ps1 v1.83).
+bool reusedPid(uint32_t pid, const std::string& since)
+{
+    SYSTEMTIME local{}, utc{};
+    if (sscanf_s(since.c_str(), "%hu-%hu-%huT%hu:%hu:%hu", &local.wYear, &local.wMonth, &local.wDay, &local.wHour, &local.wMinute, &local.wSecond) != 6) return false;
+    FILETIME sinceTime{};
+    if (!TzSpecificLocalTimeToSystemTime(nullptr, &local, &utc) || !SystemTimeToFileTime(&utc, &sinceTime)) return false;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return false;
+    FILETIME created{}, exited{}, kernel{}, user{};
+    const bool ok = GetProcessTimes(h, &created, &exited, &kernel, &user) != 0;
+    CloseHandle(h);
+    auto ticks = [](FILETIME f) { return ((uint64_t)f.dwHighDateTime << 32) | f.dwLowDateTime; };
+    return ok && ticks(created) > ticks(sinceTime) + 5ull * 10000000ull;
+}
+
+// Whether a waiter (kind, since, pid) takes its turn before this one: timing before correctness, then first come
+// ("since", then pid) - GpuLock.ps1 v1.83.
+bool turnBefore(const std::string& kind, const std::string& since, uint32_t pid, const std::string& selfKind, const std::string& selfSince, uint32_t self)
+{
+    const int rank = kind == "timing" ? 0 : 1, selfRank = selfKind == "timing" ? 0 : 1;
+    if (rank != selfRank) return rank < selfRank;
+    const int order = since.compare(selfSince);
+    return order < 0 || (order == 0 && pid < self);
+}
+
+// A live waiter in .gpulock/waiting whose turn comes before this correctness slice's (INTERFACES 3.3 v1.83: timing first,
+// then "since", then pid); removes the records of waiters whose process is gone or whose pid was reused.
+bool waiterAhead(const std::filesystem::path& dir, uint32_t self, const std::string& selfSince)
 {
     std::error_code ec;
     if (!std::filesystem::exists(dir, ec)) return false;
@@ -159,12 +218,13 @@ bool timingWaiter(const std::filesystem::path& dir, uint32_t self)
         const std::string pid = field(text, "pid");
         const uint32_t p = pid.empty() ? 0 : (uint32_t)std::strtoul(pid.c_str(), nullptr, 10);
         if (p == self) continue;
-        if (p == 0 || !processAlive(p))
+        const std::string since = field(text, "since");
+        if (p == 0 || !processAlive(p) || reusedPid(p, since))
         {
             std::filesystem::remove(e.path(), ec);
             continue;
         }
-        if (field(text, "kind") == "timing") found = true;
+        if (turnBefore(field(text, "kind"), since, p, "correctness", selfSince, self)) found = true;
     }
     return found;
 }
@@ -175,6 +235,14 @@ std::string sliceText(uint32_t k, uint32_t total) { return "slice " + std::to_st
 GpuSlice::GpuSlice(std::filesystem::path lockDir, std::string track, std::string what)
     : m_dir(std::move(lockDir)), m_track(std::move(track)), m_what(std::move(what))
 {
+    // One .gpulock for the main checkout and all its worktrees (v1.83; UNX_GPU_LOCK_DIR overrides, as for GpuLock.ps1).
+    char* env = nullptr;
+    size_t envSize = 0;
+    if (_dupenv_s(&env, &envSize, "UNX_GPU_LOCK_DIR") == 0 && env && *env)
+        m_dir = env;
+    else if (m_dir.filename() == ".gpulock")
+        m_dir = mainCheckout(m_dir.parent_path()) / ".gpulock";
+    std::free(env);
     std::filesystem::create_directories(m_dir);
     m_mutex = CreateMutexW(nullptr, FALSE, L"Local\\UnravelNext.GpuMeasurement");
     if (!m_mutex) fail("gpu slice: CreateMutex failed (%lu)", GetLastError());
@@ -212,7 +280,8 @@ double GpuSlice::acquire()
     const std::filesystem::path hold = m_dir / "HOLD", current = m_dir / "current.json", history = m_dir / "history.log";
     const std::filesystem::path waitingDir = m_dir / "waiting", waitingFile = waitingDir / (std::to_string(self) + ".json");
     std::filesystem::create_directories(waitingDir);
-    writeReplace(waitingFile, "{\"track\":\"" + m_track + "\",\"kind\":\"correctness\",\"pid\":" + std::to_string(self) + ",\"since\":\"" + nowText() +
+    const std::string since = nowText();
+    writeReplace(waitingFile, "{\"track\":\"" + m_track + "\",\"kind\":\"correctness\",\"pid\":" + std::to_string(self) + ",\"since\":\"" + since +
                                   "\",\"command\":\"" + jsonEscape(m_what) + "\"}");
     struct RemoveOnExit
     {
@@ -233,9 +302,9 @@ double GpuSlice::acquire()
             Sleep(1000);
             continue;
         }
-        if (timingWaiter(waitingDir, self))
+        if (waiterAhead(waitingDir, self, since))
         {
-            if (!yieldAnnounced) logf("gpu slice: a timing measurement is waiting - yielding\n");
+            if (!yieldAnnounced) logf("gpu slice: in line behind an earlier waiter (or a timing measurement)\n");
             yieldAnnounced = true;
             Sleep(250);
             continue;
@@ -254,8 +323,8 @@ double GpuSlice::acquire()
                                                field(stale, "command"));
             }
             else if (r == WAIT_ABANDONED) appendHistory(history, nowText() + " stale release (unknown holder)");
-            // HOLD or a timing waiter may have appeared while this process waited for the mutex.
-            if (std::filesystem::exists(hold) || timingWaiter(waitingDir, self))
+            // HOLD or a waiter ahead may have appeared while this process waited for the mutex.
+            if (std::filesystem::exists(hold) || waiterAhead(waitingDir, self, since))
             {
                 ReleaseMutex((HANDLE)m_mutex);
                 Sleep(250);

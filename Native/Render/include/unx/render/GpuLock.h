@@ -43,7 +43,7 @@ public:
     const std::string& lockDir() const { return m_dir; }
 
 private:
-    std::string blocker();
+    std::string blocker(const std::string& since);
     void appendHistory(const std::string& line);
 
     std::string m_track, m_kind, m_what, m_dir, m_label, m_lastBlocker;
