@@ -137,6 +137,13 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
   - **대기자 표시**: 기다리는 쪽은 첫 대기 전에 `.gpulock/waiting/<pid>.json`(`{track, kind, pid, since, command}`, tmp 뒤 `MoveFileEx` 교체)을 쓰고, 얻거나 포기하면 지운다. 죽은 pid의 파일은 보는 쪽이 지운다.
   - **correctness 양보**: kind = correctness인 획득은 살아 있는 timing 대기자가 있으면 250 ms마다 다시 보며 기다린다. 뮤텍스를 얻은 직후에도 한 번 더 보고, 그 사이 timing 대기자나 HOLD가 생겼으면 다시 놓는다. timing끼리는 뮤텍스 순서를 따른다.
   - **HOLD**: `.gpulock/HOLD`가 있으면 아무도 새로 얻지 않는다(사용자가 게임할 때 두는 표지, 내용 = 사유; 조율 규칙).
+  - (v1.83, 조율 세션 2026-10-01) **차례와 공용 폴더**:
+    - 기다리는 쪽은 차례대로 얻는다. timing이 correctness보다 먼저이고, 같은 종류 안에서는 `since` 순, 같으면 pid 순이다. 자기보다 앞선 살아 있는 대기자가 있으면 얻지 않는다. 뮤텍스를 얻은 직후에도 다시 본다.
+    - 대기 파일의 pid가 `since`보다 5 s 넘게 늦게 시작한 프로세스의 것이면(재사용된 pid) 그 파일은 낡은 것으로 지운다.
+    - 잠금 폴더는 **주 체크아웃의 `.gpulock` 하나**다. worktree의 `.git` 파일 → 그 git 폴더의 `commondir` → 공용 git 폴더의 부모를 따른다. `UNX_GPU_LOCK_DIR`가 있으면 그것을 쓴다.
+    - 이유: correctness Verify가 2시간, 하드웨어 유체 실행이 1.5시간 기다리는 동안 나중에 온 실행이 16번 먼저 얻었다. 또 redesign worktree가 자기 `.gpulock`을 따로 써서, 그쪽 timing 대기자·history·HOLD가 주 체크아웃 쪽에 보이지 않았다.
+    - 프로세스 안 조각(`GpuLock.cpp`, `GpuSlice.cpp`)도 같은 차례와 폴더 규칙을 따라야 한다. 그때까지 기존 worktree의 `.gpulock`은 주 체크아웃 폴더를 가리키는 디렉터리 정션이다.
+    - [실측] 별도 뮤텍스 사본 시험: 보유자 H(8 s)가 있는 동안 correctness A·B, timing T, correctness D가 차례로 오자 H→T→A→B→D 순서로 얻었다. 살아 있는 다른 프로세스의 pid에 어제 `since`를 단 가짜 timing 대기 파일은 지워졌고 아무도 막지 않았다.
   - **프로세스 안 조각**(C의 GPU 기준 경로추적기 등 수 분짜리 correctness 작업): 같은 규약(뮤텍스 이름, current.json 원자 교체, history 줄, 대기자·양보·HOLD)을 프로세스 안에서 조각마다 따른다. history 줄은 `acquire C (correctness) :: slice k/N <what>` / `release C (correctness) exit 0 slice k/N <ms> ms`, 조각이 15 s를 넘으면 `LONG_SLICE`. C++ API는 `GpuLock.h`의 `GpuLockSlice(track, kind, what)`다(v1.42): `acquire(waitLimit, label)`이 false면 못 얻은 것이고 `lastBlocker()`가 이유다. `release(exitCode)`, 소멸자가 놓는다. 조각 동안 그 프로세스의 `UNX_GPU_LOCK` = track이다. 잠금 폴더는 `UNX_GPU_LOCK_DIR` 또는 현재 디렉터리에서 위로 찾은 `.gpulock`(저장소를 작업 디렉터리로 두고 실행)이다. acquire와 release는 같은 스레드에서 부른다(Win32 뮤텍스). [실측] 단위 시험 `gpu_lock_slice_protocol`(별도 뮤텍스·임시 폴더): 얻기·놓기의 current.json과 history 줄, HOLD 차단과 사유, 살아 있는 timing 대기자에게 양보한 뒤 그 프로세스가 끝나면 얻고 대기 파일을 지운다.
   - [실측] 자체 시험(작업 트리 사본, 진짜 뮤텍스): HOLD가 있으면 얻지 않고 사유를 알린다. 살아 있는 가짜 timing 대기자가 있으면 correctness가 양보한다. 그 프로세스가 끝나면 파일이 지워지고 곧 얻는다.
   - [실측] CPU 시험(9 s 명령, 잡 밖에서 powershell 바쁜 루프 5개 8 s): release 줄 `background: cpu 7 s >= 4 cores, peak 5.2 cores`(바쁜 루프 = 배경)와 `cpu-contended: 9 s >= 4 cores, peak 26.9 cores; top: unx_reference.exe 159 core-s, unx_study_material_layers.exe 18, cl.exe 9, unx_test_fx_particletests.exe 9`(같은 시각 다른 세션들의 실제 CPU 작업)가 나왔다. 짧은 끝 구간 규칙 전에는 0.1 s 구간이 "peak 58.1 cores"를 만들었다.
