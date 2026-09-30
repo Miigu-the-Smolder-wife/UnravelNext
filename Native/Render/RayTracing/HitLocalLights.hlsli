@@ -12,6 +12,7 @@
 #define UNX_RT_HIT_LOCAL_LIGHTS_HLSLI
 #include "RayTracing/RayScene.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
+#include "RayTracing/HitLayers.hlsli"
 #include "Passes/Material/MaterialTextures.hlsli"
 #include "../../../Reference/GpuTracer/shared/Lights.hlsli"
 #include "Passes/Lights/LightFunction.hlsli"
@@ -237,7 +238,16 @@ float3 rtLocalLightBrdfCos(GpuMaterial m, float3 n, float3 v, float3 wi, bool di
     const float alpha = modelAlpha(s.roughness);
     const float3 f0 = modelF0(s);
     const float3 compensation = 1 + f0 * (1 / modelDirectionalAlbedo(NoV, s.roughness) - 1);
-    return diffuse + shSpecular(f0, alpha, compensation, n, v, wi, NoV, NoL) * NoL;
+    const float3 base = diffuse + shSpecular(f0, alpha, compensation, n, v, wi, NoV, NoL) * NoL;
+    if ((m.classFlags & MATERIAL_LAYERED) != 0 && !foliage)
+    {
+        // A9 layers (HitShading.hlsli rtHitCoat: the coat lobe widened by the hit's cone)
+        const ModelCoat coat = rtHitCoat(m);
+        if (coat.cover > 0) return (1 - coat.cover) * base + coat.cover * (modelCoatLobe(coat, n, v, wi) + modelCoatUnder(s, coat, n, v, wi)) * NoL;
+        const ModelSheen sheen = modelSheenOf(m);
+        if (any(sheen.color > 0)) return modelSheenKeep(sheen, NoV) * base + sheen.color * modelSheenLobe(sheen.roughness, n, v, wi) * NoL;
+    }
+    return base;
 }
 
 // Shadow ray origin: the hit stepped off its surface on the side the light is on (geometric normal; leaves transmit),

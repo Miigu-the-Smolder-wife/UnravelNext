@@ -18,6 +18,7 @@
 #ifndef UNX_RT_HIT_SHADING_HLSLI
 #define UNX_RT_HIT_SHADING_HLSLI
 #include "Passes/Shading/ShadingCommon.hlsli"
+#include "RayTracing/HitLayers.hlsli"
 
 // The material at a ray hit with its textures applied (baseColor x texture, roughness / metallic x the RG8 factors,
 // emissive x texture), each at the ray cone's level of detail (Akenine-Moller et al. 2019):
@@ -68,6 +69,13 @@ struct RtHitLighting
 // sunFull: the sun's term at full visibility (the radiance is linear in L.sunVisibility: radiance = the rest + sunFull x
 // visibility), evaluated also at visibility 0 when wantSun - callers that get the visibility later (a shadow ray, the
 // deferred penumbra filter) take both from one evaluation instead of shading the hit twice.
+// A9 layers at ray hits (redesign V2.2 P1'-b; before, hits shaded the bare base: a glazed wall bounced its base's light
+// with no coat transmission loss, and the bath's multi-bounce GI came out +20-25 % over the coat-aware reference
+// [measured, 1080p]): the clearcoat as the direct view shades it (ShadeOpaque LAYERED 1: modelEvaluateCoated for the sun;
+// for the cache's light, the base through the coat with the coat's mean transmission and the coat lobe's albedo), the
+// sheen as ShadeOpaque LAYERED 2. The coat lobe is widened by the hit's cone (HitLayers.hlsli g_rtHitCone, GI texel rays: its half-width)
+// as the base lobe is for local lights; the coat lobe's incident radiance is the base lobe's mirror-direction radiance
+// (the hit has no second cone lookup).
 float3 rtHitRadianceParts(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle, bool wantSun, out float3 sunFull)
 {
     ModelSurface s;
@@ -94,8 +102,30 @@ float3 rtHitRadianceParts(GpuMaterial m, float3 n, float3 v, RtHitLighting L, fl
         else if (foliage)
             sunFull = albedo * s.transmission * L.sunIlluminance * -NoL;  // transmitted through the leaf (model v1)
     }
+    float3 cached = diffuseAlbedo * L.irradiance + shSpecularAlbedo(f0, NoV, s.roughness) * L.specularRadiance;
+    if ((m.classFlags & MATERIAL_LAYERED) != 0 && !foliage)
+    {
+        const ModelCoat coat = rtHitCoat(m);
+        const ModelSheen sheen = modelSheenOf(m);
+        if (coat.cover > 0)
+        {
+            const float keep = 1 - coat.cover;
+            if (NoL > 0 && any(sunFull > 0))
+                sunFull = keep * sunFull + coat.cover * (modelCoatLobe(coat, n, v, l0) + modelCoatUnder(s, coat, n, v, l0)) * L.sunIlluminance * NoL;
+            const float tv = 1 - modelCoatEms(coat, NoV), tBar = 1 - modelCoatLookup1(coat.coat * MODEL_COAT_STRIDE + 4096, coat.roughness);
+            const float3 under = tv * tBar * ((diffuseAlbedo + modelCoatReturned(s, coat, modelCoatRefractedCos(2.0 / 3.0, coat.eta)) / MODEL_PI) * L.irradiance +
+                                              L.specularRadiance * shSpecularAlbedo(f0, modelCoatRefractedCos(NoV, coat.eta), modelCoatBaseRoughness(s, coat, NoV)));
+            cached = keep * cached + coat.cover * (under + L.specularRadiance * modelCoatEms(coat, NoV));
+        }
+        else if (any(sheen.color > 0))
+        {
+            const float keepS = modelSheenKeep(sheen, NoV);
+            if (NoL > 0 && any(sunFull > 0)) sunFull = keepS * sunFull + sheen.color * modelSheenLobe(sheen.roughness, n, v, l0) * L.sunIlluminance * NoL;
+            cached = keepS * cached + sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / MODEL_PI) * L.irradiance;
+        }
+    }
     const float3 sun = sunFull * L.sunVisibility;  // fractional in penumbrae (the VSM estimate); was only tested > 0, giving full sun there
-    return m.emissive + sun + diffuseAlbedo * L.irradiance + shSpecularAlbedo(f0, NoV, s.roughness) * L.specularRadiance + L.local;
+    return m.emissive + sun + cached + L.local;
 }
 float3 rtHitRadiance(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle)
 {

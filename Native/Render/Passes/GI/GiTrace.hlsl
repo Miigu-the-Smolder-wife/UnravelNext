@@ -94,6 +94,7 @@ void GiTraceGen()
     bool background;
     if (!giUpdateSlot(b, h, thread / GI_TEXEL_COUNT, entry, background)) return;
     const uint texel = thread % GI_TEXEL_COUNT;
+    g_rtHitCone = 0.5 * GI_FOOTPRINT_PER_METRE;  // A9 coat lobes at the hits: widened by the texel cone (HitShading rtHitCoat)
 
     const RtSceneSrvs scene = rtScene();
     const float3 anchor = giAnchorPosition(b, h, entry);
