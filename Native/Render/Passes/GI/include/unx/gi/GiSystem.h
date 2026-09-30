@@ -43,7 +43,11 @@ struct GiSettings  // from Config/quality/gi.toml
     // current bounce part's window (gi.bounce_split_updates, 1 = replacement).
     bool bounceSplit = false;
     uint32_t bounceSplitUpdates = 1;
-    bool anchorResample = false;  // gi.anchor_resample: each update moves the anchor to a random lookup point (GiInternal giAnchorOffer)
+    bool anchorResample = false;
+    // gi.history_window_rule "lighting": the running mean's window from the scene (history_updates_max while the sun
+    // changed within lightingRecentFrames, else the static window); "samples": from the entry's own statistics.
+    bool windowByLighting = true;
+    uint32_t lightingRecentFrames = 256;  // gi.anchor_resample: each update moves the anchor to a random lookup point (GiInternal giAnchorOffer)
     float youngUpdateShare = 0.6f, parentDeltaInitial = 0.05f;
     static GiSettings fromQuality(const QualityConfig& q);
 };
@@ -158,6 +162,8 @@ private:
     ComPtr<ID3D12Resource> m_changeRing;
     uint8_t* m_changeMapped = nullptr;
     uint32_t m_changeSrv[kChangeSlots] = {};
+    float m_sunSeen[8] = {};                // the sun of the last frame (window rule "lighting")
+    uint64_t m_lightingChangedFrame = 0;   // the frame it last changed
     std::vector<gpu::Light> m_lightSeen;  // P1: last frame's light records (changed lights invalidate their range)
 };
 } // namespace unx::render::gi

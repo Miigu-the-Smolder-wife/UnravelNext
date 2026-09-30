@@ -133,6 +133,14 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.hitLightFootprintScale = q.has("gi.hit_light_footprint_scale") ? (float)q.number("gi.hit_light_footprint_scale") : 1.0f;
     s.bounceSplit = q.has("gi.bounce_split") && q.boolean("gi.bounce_split");
     s.anchorResample = q.has("gi.anchor_resample") && q.boolean("gi.anchor_resample");
+    if (q.has("gi.history_window_rule"))
+    {
+        const std::string rule = q.string("gi.history_window_rule");
+        if (rule == "lighting") s.windowByLighting = true;
+        else if (rule == "samples") s.windowByLighting = false;
+        else fail("gi.history_window_rule must be \"lighting\" or \"samples\"");
+    }
+    if (q.has("gi.lighting_recent_frames")) s.lightingRecentFrames = (uint32_t)q.integer("gi.lighting_recent_frames");
     if (q.has("gi.bounce_split_updates")) s.bounceSplitUpdates = (uint32_t)q.integer("gi.bounce_split_updates");
     if (s.bounceSplitUpdates == 0 || s.bounceSplitUpdates > 32) fail("gi.bounce_split_updates must be in [1, 32]");
     if (s.bounceSplit && s.splitBounceHistory) fail("gi.bounce_split and gi.split_bounce_history are exclusive");
@@ -568,6 +576,18 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     // lights) keeps the epoch: GiInvalidate restarts only the entries whose texel rays can see a changed box.
     if ((fc.frame.discontinuity & kDiscontinuityRestore) != 0 || (fc.scene.revision() != m_sceneRevision && !rays.incrementalRebuild())) ++m_epoch;
     m_sceneRevision = fc.scene.revision();
+    // Window rule "lighting" (GiIntegrate): the frame the sun last changed (direction, illuminance, colour, disk).
+    if (const scene::Scene* src = fc.scene.source())
+    {
+        const scene::Sun& sun = src->sun;
+        const float now[8] = { sun.direction.x, sun.direction.y, sun.direction.z, sun.illuminance, sun.color.x, sun.color.y, sun.color.z, sun.angularRadius };
+        if (std::memcmp(now, m_sunSeen, sizeof now) != 0)
+        {
+            std::memcpy(m_sunSeen, now, sizeof now);
+            m_lightingChangedFrame = fc.frame.frameIndex;
+        }
+    }
+    const uint32_t windowRule = !s.windowByLighting ? 0u : (fc.frame.frameIndex - m_lightingChangedFrame < s.lightingRecentFrames ? 2u : 1u);
     if (s.deterministic) ensureAdmission(fc, main);
     const BufferRef cache = g.importBuffer(m_cache.Get(), { "GI cache", m_bytes, 0 });
     fc.resources.giCache = cache;
@@ -889,8 +909,8 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   b.use(cache, Use::UavCompute);
                   b.use(samples, Use::SrvCompute);
               },
-              [&shaders, cache, samples, updates = s.updatesPerFrame, split = s.splitBounceHistory, frameConstants](PassContext& c) {
-                  const uint32_t k[4] = { c.uav(cache), updates, c.srv(samples), 0 };
+              [&shaders, cache, samples, updates = s.updatesPerFrame, split = s.splitBounceHistory, frameConstants, windowRule](PassContext& c) {
+                  const uint32_t k[4] = { c.uav(cache), updates, c.srv(samples), windowRule };
                   c.cmd->SetPipelineState(shaders.compute(split ? "Passes/GI/GiIntegrate.SPLIT1" : "Passes/GI/GiIntegrate.SPLIT0"));
                   c.computeConstants(k, 4);
                   c.bindFrameConstants(frameConstants);

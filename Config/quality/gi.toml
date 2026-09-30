@@ -41,6 +41,12 @@ bounce_split_updates = 1           # the current bounce part's window (1 = repla
 anchor_resample = false            # V2.2 P1'-b: each update moves the entry's anchor to a random point among the surface
                                    # points that looked it up since its last update (the value = the mean over where the cell is
                                    # read, not the irradiance at its creator's point: the level depended on the history)
+history_window_rule = "lighting"   # V2.2 11.2-3: the running mean's window from the scene - history_updates_max while the sun
+                                   # changed within lighting_recent_frames, the static window otherwise (local lights and geometry
+                                   # restart their entries). "samples" (the previous rule, below) chose it from each entry's own
+                                   # fast mean and spread: heavy-tailed lamp-hotspot samples biased the single bounce beside a
+                                   # lamp by +7 to +13 % (GiAnalytic 8; fixed window within 0.33 %) [measured]
+lighting_recent_frames = 256
 history_updates_max_static = 256   # the running mean's window while the entry's light is steady: a fast mean (1/16) of its
                                    # anchor irradiance within 4 sigma (the update's own ray spread) of the history; a change
                                    # beyond that cuts the window to history_updates_max at once (moving sun, lights: any speed).

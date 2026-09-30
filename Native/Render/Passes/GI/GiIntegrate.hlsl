@@ -28,7 +28,14 @@
 //   (GiInternal giBounceL1Load). The running mean of a weakly contracting iteration converges as n^-(1 - rho); here the
 //   bounce part contracts by rho per update as Jacobi does while the non-bounce part (unbiased from its first sample)
 //   keeps its long mean. Only the correction B - Bm is truncated to L1 (small once converged); M keeps every direction.
-// One group per update slot (selected entries, then background). P[0] = { cache UAV, updates per frame, samples SRV, 0 }
+// Window rule (gi.history_window_rule; redesign V2.2 11.2-3, weights = functions of the update count): "lighting" (P[0].w
+//   1 or 2) takes the running mean's window from the scene, not from the samples - history_updates_max while the sun or sky
+//   changed within gi.lighting_recent_frames (2), history_updates_max_static otherwise (1); local lights and geometry restart
+//   their entries (GiInvalidate). "samples" (0, the previous rule) chose it from the entry's own fast mean and spread: a
+//   heavy-tailed sample (a lamp's hotspot) moved the fast mean, cut the window and changed the weight of the samples around
+//   it - GiAnalytic 8's single bounce beside a lamp came out +7 to +13 % (fixed window: within 0.33 %) [measured, 1920 frames].
+// One group per update slot (selected entries, then background). P[0] = { cache UAV, updates per frame, samples SRV,
+// window rule }
 #include "Scene.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
 #if SPLIT
@@ -253,7 +260,7 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     // value or spread would weight its high and low samples differently (a biased mean).
     const float fastOld = f16tof32(window) * GI_LOAD_SCALE, spreadOld = f16tof32(window >> 16) * GI_LOAD_SCALE;
     const float held = dot(giIrrUnpack(heldWord) * GI_LOAD_SCALE, float3(0.2126, 0.7152, 0.0722));
-    const bool steady = history != 0 && abs(fastOld - held) <= 3 * spreadOld / sqrt(31.0) + 0.01 * held;
+    const bool steady = P[0].w != 0 ? P[0].w == 1 : history != 0 && abs(fastOld - held) <= 3 * spreadOld / sqrt(31.0) + 0.01 * held;
     const float spread = sqrt(max(totalE2 - totalE * totalE / (2.0 * GI_TEXEL_COUNT), 0.0));
     const bool windowReset = history == 0 || ((p1 & 4u) != 0 && history != 0 && restartCount >= 4 && abs(totalE - held) > 5.0 * spreadOld + 0.05 * held);
     const float fast = windowReset ? totalE : lerp(fastOld, totalE, 1.0 / 16.0);
