@@ -340,7 +340,9 @@ struct RenderGraph::Impl
         }
         else
         {
-            h = mix(h, r.imported ? r.bdesc.size : r.capacity);
+            // An imported buffer's size is not part of the plan (placement is for transients; imported views are cached per
+            // resource, Imported::viewKey): FX ring buffers grow with the ticks' contents and changed the key on most frames.
+            h = mix(h, r.imported ? 0 : r.capacity);
             h = mix(h, r.bdesc.stride);
         }
         return mix(h, (uint64_t)r.importLayout);
@@ -399,7 +401,39 @@ struct RenderGraph::Impl
     uint64_t replans = 0;
     void logReplan() const
     {
-        const Plan& old = *plan;
+        // Against the cached plan with the same passes when there is one (the reason the cache missed), else the current one.
+        const Plan* same = nullptr;
+        for (const Plan* c : { plan.get() })
+            if (c && c->passHashes.size() == passes.size()) same = c;
+        for (const auto& c : spare)
+        {
+            if (same || c->passHashes.size() != passes.size()) continue;
+            bool all = true;
+            for (size_t i = 0; i < passes.size() && all; ++i) all = c->passHashes[i] == passHash(passes[i]);
+            if (all) same = c.get();
+        }
+        if (!same)
+        {
+            // else a cached plan with the same pass names (its resources differ: the pass hashes carry resource ids)
+            for (const auto& c : spare)
+            {
+                if (same || c->passNames.size() != passes.size()) continue;
+                bool all = true;
+                for (size_t i = 0; i < passes.size() && all; ++i) all = c->passNames[i] == passes[i].name;
+                if (all) same = c.get();
+            }
+            if (same)
+            {
+                const size_t nr = std::min(same->resourceNames.size(), resources.size());
+                size_t i = 0;
+                while (i < nr && same->resourceNames[i] == resources[i].name) ++i;
+                logf("render graph: plan rebuilt (%llu): the cached plan with these %zu passes has %zu resources, this frame %zu; first differing resource %zu '%s' (was '%s')\n",
+                     (unsigned long long)replans, passes.size(), same->resourceNames.size(), resources.size(), i, i < resources.size() ? resources[i].name.c_str() : "-",
+                     i < same->resourceNames.size() ? same->resourceNames[i].c_str() : "-");
+                return;
+            }
+        }
+        const Plan& old = same ? *same : *plan;
         std::string what;
         const size_t np = std::min(old.passHashes.size(), passes.size());
         for (size_t i = 0; i < np && what.empty(); ++i)
@@ -417,6 +451,12 @@ struct RenderGraph::Impl
                     res += ": " + std::to_string(i < old.capacities.size() ? old.capacities[i] : 0) + " -> " + std::to_string(n.imported ? n.bdesc.size : n.capacity) + " bytes";
                 res += ")";
             }
+        if (res.empty() && old.resourceHashes.size() != resources.size())
+        {
+            // the same prefix: the first resource only one of the two plans has
+            const bool more = resources.size() > old.resourceHashes.size();
+            res = "extra resource " + std::to_string(nr) + " '" + (more ? resources[nr].name : old.resourceNames[nr]) + "' " + (more ? "(new)" : "(was)");
+        }
         logf("render graph: plan rebuilt (%llu): passes %zu -> %zu, resources %zu -> %zu; first differing %s%s%s\n", (unsigned long long)replans,
              old.passHashes.size(), passes.size(), old.resourceHashes.size(), resources.size(), what.empty() ? "pass: none" : what.c_str(),
              res.empty() ? "" : "; ", res.c_str());

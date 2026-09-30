@@ -22,6 +22,7 @@
 #include "unx/render/Tracks.h"
 
 #include <algorithm>
+#include <sstream>
 #include <chrono>
 #include <filesystem>
 #include <cstdio>
@@ -48,6 +49,7 @@ int main(int argc, char** argv)
     {
         std::string load = "both", resolution = "both", out = std::string(UNX_SOURCE_DIR) + "/Results/FX/ParticleGate";
         uint32_t frames = 600;
+        std::vector<uint32_t> tickPattern = { 1 };  // --tick-pattern (core load): tick packets per frame, cycling
         bool delta = true, patchesOn = true, heightfield = true;
         bool passTimestamps = true;  // --no-pass-timestamps: frame timing only (the per-pass queries serialise the queue)  // emitter table as NV_STREAM_EMITTER_DELTA packets (--no-delta: whole table every tick, A/B)
         // --packets DIR: submit a recorded stream (ParticleTests --record: packet_NNNN.bin) open loop. The GPU tick is then
@@ -65,6 +67,14 @@ int main(int argc, char** argv)
             else if (a == "--frames") frames = (uint32_t)std::stoul(next());
             else if (a == "--out") out = next();
             else if (a == "--set") overrides.push_back(next());
+            else if (a == "--tick-pattern")
+            {
+                // tick packets per frame, cycling (e.g. 0,1,0,2: a 60 Hz authority under a faster frame rate)
+                tickPattern.clear();
+                std::stringstream ss(next());
+                for (std::string t; std::getline(ss, t, ',');) tickPattern.push_back((uint32_t)std::stoul(t));
+                if (tickPattern.empty()) fail("--tick-pattern: empty");
+            }
             else if (a == "--no-delta") delta = false;
             else if (a == "--no-heightfield") heightfield = false;
             else if (a == "--no-patches") patchesOn = false;
@@ -128,6 +138,26 @@ int main(int argc, char** argv)
                         previous = rb.events;
                     }
                     const auto c0 = std::chrono::steady_clock::now();
+                    const uint32_t ticksNow = tickPattern[f % tickPattern.size()];
+                    if (ticksNow != 1 && (cfg.features || !packets.empty())) fail("--tick-pattern: core load, generated packets only");
+                    for (uint32_t extra = 1; extra < ticksNow; ++extra)
+                    {
+                        // the frame's earlier ticks (a slow frame under a 60 Hz authority)
+                        std::vector<uint8_t> early = stream.next(nullptr);
+                        const NV_StreamHeader& eh = *reinterpret_cast<const NV_StreamHeader*>(early.data());
+                        lastTick = eh.tick;
+                        ps.submit(early.data(), early.size());
+                    }
+                    if (ticksNow == 0)
+                    {
+                        // a frame without a tick: the module records nothing new
+                        frame.frameIndex = f;
+                        FrameResources resources0;
+                        FramePassContext fc0{ device, graph, shaders, quality, scene, frame, resources0, services,
+                                              [](const ViewDesc&) -> D3D12_GPU_VIRTUAL_ADDRESS { return 0; }, &state };
+                        tracks::simulation(fc0);
+                        return;
+                    }
                     std::vector<uint8_t> packet;
                     if (packets.empty()) packet = stream.next(lastTick ? &previous : nullptr);
                     else
