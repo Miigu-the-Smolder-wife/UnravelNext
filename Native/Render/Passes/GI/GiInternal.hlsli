@@ -121,6 +121,26 @@ uint giAgeBucket(RWByteAddressBuffer b, GiHeader h, uint entry)
 // light, the luminance of f x weight with the point diffuse term and with its footprint mean, without and with the hit's
 // visibility, and the same four for hits whose point term exceeds 1000 nit; x 1024, 64-bit sums since the cache's creation.
 #define GI_AUDIT_SUMS 856       // 8 x uint64: pt, fp, pt V, fp V, then the > 1000 nit subset
+// Bounce split (gi.bounce_split, GI_P1_FLAGS bit 4; RENDERER_REDESIGN_V2 11.2): per entry 48 B at the word's offset, the
+// L1 radiance SH (world frame, fp16 x GI_STORE_SCALE, 4 coefficients x RGB) of the bounce part B of the entry's rays, twice:
+// the current B (blended with max(1 / (n + 1), 1 / window), window 1 = Jacobi replacement) and its long mean Bm (the
+// entry's own weights). GiIntegrate keeps the map, SH and texels as the long mean M of the whole samples and stores
+// M + (B - Bm) projected: the non-bounce part keeps its long mean, the bounce part follows the neighbours' current values.
+#define GI_BSPLIT_OFFSET 920
+#define GI_BSPLIT_WINDOW 924    // gi.bounce_split_updates (the current B's window)
+void giBounceL1Load(RWByteAddressBuffer b, uint entry, out float3 cur[4], out float3 mean[4])
+{
+    const uint a = b.Load(GI_BSPLIT_OFFSET) + entry * 48;
+    const uint4 w0 = b.Load4(a), w1 = b.Load4(a + 16), w2 = b.Load4(a + 32);
+    const uint w[12] = { w0.x, w0.y, w0.z, w0.w, w1.x, w1.y, w1.z, w1.w, w2.x, w2.y, w2.z, w2.w };
+    float v[24];
+    [unroll] for (uint i = 0; i < 24; ++i) v[i] = f16tof32(w[i >> 1] >> ((i & 1) * 16)) * GI_LOAD_SCALE;
+    [unroll] for (uint c = 0; c < 4; ++c)
+    {
+        cur[c] = float3(v[3 * c], v[3 * c + 1], v[3 * c + 2]);
+        mean[c] = float3(v[12 + 3 * c], v[13 + 3 * c], v[14 + 3 * c]);
+    }
+}
 #define GI_H_SELECT_T0 816      // per request tier (16 B each): the young range's threshold bucket, quota, fill counter
 // Priority buckets with the tiers on (gi.update_tiers): 60..63 = T0 (fewer than 4 measured updates since the entry's creation
 // or restart; 63 = none), 48..59 = T1 (4..15; fewer first), 0..47 = the rest by age (frames since the last update, 47 = 47
@@ -248,6 +268,35 @@ void giDetAnchorCandidate(RWByteAddressBuffer b, GiHeader h, uint entry, uint64_
     b.InterlockedMin64(h.offAnchorMin + entry * 8, giPackAnchorCandidate(h, key, p, n), previous);
 }
 
+// Anchor resampling (gi.anchor_resample; redesign V2.2 P1'-b cause: the cached level depended on the history). An entry's
+// value is the irradiance at its anchor, and the anchor was its creator's point (or the deterministic minimum of the
+// first frame's candidates): a coarse cell over a lamp's 1 / d^2 gradient or next to an edge held the light of whichever
+// point happened to come first, so the same view reached a different level after another history (bath, 7 % [measured]).
+// Every lookup that finds an entry offers its surface point: a 64-bit maximum of (22-bit random priority | 42-bit point
+// in the cell, giPackAnchorCandidate's grid), so each update's integration (GiIntegrate) moves the anchor to a uniform
+// choice among the lookups since the entry's last update, and the history averages the irradiance over where the cell
+// is read. The normal stays the entry's (a cell is one normal class). A plain load first: a lower priority adds no atomic.
+#define GI_RESAMPLE_OFFSET 928  // header word: the candidates (8 B per entry), 0 = off
+void giAnchorOffer(RWByteAddressBuffer b, GiHeader h, uint entry, uint64_t key, float3 p)
+{
+    const uint base = b.Load(GI_RESAMPLE_OFFSET);
+    if (base == 0 || entry == GI_ENTRY_PENDING) return;
+    const uint64_t spot = giPackAnchorCandidate(h, key, p, float3(0, 0, 1)) >> 22;  // 42 bits: the position
+    const uint prio = (giDetHash((uint)spot ^ (uint)(spot >> 21) * 0x9E3779B9u ^ h.frame * 0x85EBCA6Bu) >> 10) | 1u;  // 22 bits, != 0
+    const uint address = base + entry * 8;
+    if ((b.Load(address + 4) >> 10) >= prio) return;  // (the high word holds the priority's 22 bits)
+    uint64_t previous;
+    b.InterlockedMax64(address, ((uint64_t)prio << 42) | spot, previous);
+}
+float3 giAnchorOfferPosition(GiHeader h, uint64_t key, uint64_t offer)
+{
+    const uint level = (uint)(key & 31u);
+    const float s = giCellSize(h, level);
+    const int3 cell = (int3(uint3((uint)(key >> 8), (uint)(key >> 26), (uint)(key >> 44)) & 0x3FFFFu) << 14) >> 14;
+    const uint3 q = uint3((uint)(offer >> 28) & 16383u, (uint)(offer >> 14) & 16383u, (uint)offer & 16383u);
+    return float3(cell) * s - 0.5 * s + float3(q) / 16383.0 * (2 * s);
+}
+
 uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anchor, float3 normal, out bool created)
 {
     created = false;
@@ -256,6 +305,7 @@ uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anch
     if (existing != GI_ENTRY_PENDING)
     {
         giDetAnchorCandidate(b, h, existing, key, anchor, normal);
+        giAnchorOffer(b, h, existing, key, anchor);
         return existing;
     }
     if ((h.flags & 1u) != 0)
@@ -315,6 +365,7 @@ uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anch
             [loop] for (uint t = 0; t < GI_IRR_STRIDE / 16; ++t) b.Store4(h.offIrr + entry * GI_IRR_STRIDE + t * 16, 0u);
             [loop] for (uint t = 0; t < GI_TEXEL_COUNT * 4 / 16; ++t) b.Store4(giEmitterOffset(h) + entry * GI_TEXEL_COUNT * 4 + t * 16, 0u);
             b.Store(h.offHitStamp + entry * 4, 0u);
+            if (b.Load(GI_RESAMPLE_OFFSET) != 0) b.Store2(b.Load(GI_RESAMPLE_OFFSET) + entry * 8, uint2(0, 0));  // no offer of a previous occupant
             if (h.flags & 1u)
             {
                 b.Store2(h.offAnchorMin + entry * 8, uint2(0xFFFFFFFFu, 0xFFFFFFFFu));

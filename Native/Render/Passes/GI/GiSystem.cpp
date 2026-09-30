@@ -31,7 +31,7 @@ uint32_t asU(float f)
 // Cache buffer layout (GiCache.hlsli header fields 4..11, 24..27).
 struct Layout
 {
-    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, slotAnchor, emit, split, end;
+    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, slotAnchor, emit, split, bsplit, resample, end;
 };
 
 Layout layoutOf(const GiSettings& s)
@@ -54,8 +54,13 @@ Layout layoutOf(const GiSettings& s)
     l.slotAnchor = l.irr + s.capacity * 336;  // GI_IRR_STRIDE
     l.emit = l.slotAnchor + s.tableSlots * 8;  // deterministic anchors per table slot (GiDetFold)
     l.split = l.emit + s.capacity * 256;       // emitter texels: 64 x RGB9E5 per entry (GiCache.hlsli giEmitterOffset)
-    const uint64_t end = l.split + (s.splitBounceHistory ? (uint64_t)s.capacity * 3712 : 0); // GiSplitHistory.hlsli
-    if (end >= (1ull << 32)) fail("GI split history exceeds raw-buffer address space");
+    const uint64_t bsplit = l.split + (s.splitBounceHistory ? (uint64_t)s.capacity * 3712 : 0); // GiSplitHistory.hlsli
+    if (bsplit >= (1ull << 32)) fail("GI split history exceeds raw-buffer address space");
+    l.bsplit = (uint32_t)bsplit;
+    const uint64_t resample = bsplit + (s.bounceSplit ? (uint64_t)s.capacity * 48 : 0);  // gi.bounce_split (GiInternal GI_BSPLIT_OFFSET)
+    l.resample = (uint32_t)resample;
+    const uint64_t end = resample + (s.anchorResample ? (uint64_t)s.capacity * 8 : 0);  // gi.anchor_resample (GI_RESAMPLE_OFFSET)
+    if (end >= (1ull << 32)) fail("GI cache exceeds raw-buffer address space");
     l.end = (uint32_t)end;
     return l;
 }
@@ -126,6 +131,11 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.hitLightFootprint = q.has("gi.hit_light_footprint") && q.boolean("gi.hit_light_footprint");
     s.lightInvalidation = q.has("gi.light_invalidation") && q.boolean("gi.light_invalidation");
     s.hitLightFootprintScale = q.has("gi.hit_light_footprint_scale") ? (float)q.number("gi.hit_light_footprint_scale") : 1.0f;
+    s.bounceSplit = q.has("gi.bounce_split") && q.boolean("gi.bounce_split");
+    s.anchorResample = q.has("gi.anchor_resample") && q.boolean("gi.anchor_resample");
+    if (q.has("gi.bounce_split_updates")) s.bounceSplitUpdates = (uint32_t)q.integer("gi.bounce_split_updates");
+    if (s.bounceSplitUpdates == 0 || s.bounceSplitUpdates > 32) fail("gi.bounce_split_updates must be in [1, 32]");
+    if (s.bounceSplit && s.splitBounceHistory) fail("gi.bounce_split and gi.split_bounce_history are exclusive");
     if (!(s.youngUpdateShare >= 0 && s.youngUpdateShare <= 1)) fail("gi.young_update_share must be in [0, 1]");
     if (!(s.parentDeltaInitial > 0 && s.parentDeltaInitial < 1)) fail("gi.parent_delta_initial must be in (0, 1)");
     // Fixed by the kernels (GiCache.hlsli, GiProbeGather.hlsl, GiInternal.hlsli probe offsets).
@@ -212,10 +222,14 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[192] = l.end; // deterministic admission tail, grown before its first use
     h[193] = m_settings.splitBounceHistory ? l.split : 0;
     h[194] = m_settings.bounceHistoryUpdates;
-    h[195] = (m_settings.updateTiers ? 1u : 0u) | (m_settings.parentPrior ? 2u : 0u) | (m_settings.relightRestart ? 4u : 0u) | (m_settings.hitLightFootprint ? 8u : 0u);  // GI_P1_FLAGS
+    h[195] = (m_settings.updateTiers ? 1u : 0u) | (m_settings.parentPrior ? 2u : 0u) | (m_settings.relightRestart ? 4u : 0u) | (m_settings.hitLightFootprint ? 8u : 0u) |
+             (m_settings.bounceSplit ? 16u : 0u);  // GI_P1_FLAGS
     h[196] = asU(m_settings.youngUpdateShare);                                     // GI_P1_T0_SHARE
     h[197] = asU(m_settings.parentDeltaInitial * m_settings.parentDeltaInitial);  // GI_P1_DELTA2
     h[212] = asU(m_settings.hitLightFootprintScale);                              // GI_P1_FOOTPRINT_SCALE
+    h[230] = m_settings.bounceSplit ? l.bsplit : 0;                                // GI_BSPLIT_OFFSET
+    h[231] = m_settings.bounceSplitUpdates;                                        // GI_BSPLIT_WINDOW
+    h[232] = m_settings.anchorResample ? l.resample : 0;                           // GI_RESAMPLE_OFFSET
     for (uint32_t e = 0; e < m_settings.capacity; ++e) head[l.freeList / 4 + e] = m_settings.capacity - 1 - e;  // pops 0, 1, 2 ...
     for (uint32_t t = 0; t < m_settings.tableSlots; ++t) head[l.table / 4 + t * 4 + 2] = 0xFFFFFFFFu;
     std::memcpy(&tail[(l.shTable - l.hitStamp) / 4], shTable.data(), shTable.size() * 4);
@@ -838,7 +852,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     // Each ray's radiance and hemispherical octahedral coordinates, for the per-ray irradiance map and SH (GiIntegrate).
     // Four blocks: texel samples (irradiance), emitter samples, texel values (radiance, distance, bounce; GiIntegrate blends),
     // the texel's analytic-emitter radiance (the emitter texels, K path only).
-    const BufferRef samples = g.createBuffer({ "GI ray samples", (uint64_t)rayCount * (s.splitBounceHistory ? 7 : 4) * 16, 16 });
+    const BufferRef samples = g.createBuffer({ "GI ray samples", (uint64_t)rayCount * (s.splitBounceHistory ? 7 : s.bounceSplit ? 5 : 4) * 16, 16 });
     g.addPass("r.gi.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::UavGraphics);

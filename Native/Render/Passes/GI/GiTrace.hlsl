@@ -120,6 +120,14 @@ void GiTraceGen()
     const float3 local = giHemiOctDecode(uv);
     RayDesc r;
     r.Origin = anchor + n * giBias(h, anchor);
+    if ((P[3].w & 65536u) != 0)
+    {
+        // Experiment 65536 (diagnostic, redesign V2.2 P1'-b cause search): each ray from a uniform point of the cell's
+        // tangent square around the anchor (the cell's area mean instead of its anchor point's irradiance; points past the
+        // surface's edge are not corrected) - does the cached level depend on where the cell's anchor happened to land?
+        const float cell = giCellSize(h, b.Load(h.offMeta + entry * 16) & 31u);
+        r.Origin += (t * (giUnit(seed + 40) - 0.5) + bt * (giUnit(seed + 41) - 0.5)) * cell;
+    }
     r.Direction = normalize(t * local.x + bt * local.y + n * local.z);
     r.TMin = 0;
     r.TMax = giRayLength();
@@ -140,8 +148,9 @@ void GiTraceGen()
     }
 
     float3 radiance, sampleRadiance;
+    float3 bounceRadiance = 0;  // the cache-fed part of the radiance (SPLIT, and gi.bounce_split: GI_P1_FLAGS bit 4)
 #if SPLIT
-    float3 nonBounceRadiance = 0, bounceRadiance = 0;
+    float3 nonBounceRadiance = 0;
 #endif
     bool readsBounce = false;  // the hit's radiance has a bounce term (the cache's irradiance and mirror radiance read there)
     bool youngBounce = false;  // read from a young cell, or from other levels in place of a cell without data
@@ -353,16 +362,19 @@ void GiTraceGen()
             if ((P[3].w & 1024) == 0)
             {
                 radiance = rtHitRadiance(m, s.normal, -r.Direction, L, GI_FOOTPRINT_PER_METRE);
-#if SPLIT
-                // Evaluate the cache-fed RGB terms themselves, not a luminance
-                // fraction or the subtraction of two nearly equal bright values.
-                RtHitLighting bounceLight = (RtHitLighting)0;
-                bounceLight.irradiance = L.irradiance;
-                bounceLight.specularRadiance = L.specularRadiance;
-                GpuMaterial bounceMaterial = m;
-                bounceMaterial.emissive = 0;
-                bounceRadiance = rtHitRadiance(bounceMaterial, s.normal, -r.Direction, bounceLight, GI_FOOTPRINT_PER_METRE);
+#if !SPLIT
+                if ((b.Load(GI_P1_FLAGS) & 16u) != 0)
 #endif
+                {
+                    // Evaluate the cache-fed RGB terms themselves, not a luminance
+                    // fraction or the subtraction of two nearly equal bright values.
+                    RtHitLighting bounceLight = (RtHitLighting)0;
+                    bounceLight.irradiance = L.irradiance;
+                    bounceLight.specularRadiance = L.specularRadiance;
+                    GpuMaterial bounceMaterial = m;
+                    bounceMaterial.emissive = 0;
+                    bounceRadiance = rtHitRadiance(bounceMaterial, s.normal, -r.Direction, bounceLight, GI_FOOTPRINT_PER_METRE);
+                }
                 L.irradiance = L.specularRadiance = 0;
                 unbounced = rtHitRadiance(m, s.normal, -r.Direction, L, GI_FOOTPRINT_PER_METRE);
             }
@@ -370,9 +382,7 @@ void GiTraceGen()
             {
                 unbounced = m.emissive + m.baseColor * (1 - m.metallic) / GI_PI * (L.sunIlluminance * max(cosSun, 0.0) * L.sunVisibility) + local;
                 radiance = unbounced + m.baseColor * (1 - m.metallic) / GI_PI * irradiance;
-#if SPLIT
                 bounceRadiance = m.baseColor * (1 - m.metallic) / GI_PI * irradiance;
-#endif
             }
 #if SPLIT
             nonBounceRadiance = unbounced;
@@ -430,6 +440,9 @@ void GiTraceGen()
     samples[4 * P[0].y + thread] = uint4(asuint(emitter ? float3(0, 0, 0) : nonBounceRadiance - emissionOut), 0);
     samples[5 * P[0].y + thread] = uint4(asuint(nonBounceRadiance), 0);
     samples[6 * P[0].y + thread] = uint4(asuint(bounceRadiance), 0);
+#else
+    // gi.bounce_split (V2.2 11.2): the ray's cache-fed radiance, fifth block (GiIntegrate's B part)
+    if ((b.Load(GI_P1_FLAGS) & 16u) != 0) samples[4 * P[0].y + thread] = uint4(asuint(emitter ? float3(0, 0, 0) : bounceRadiance), 0);
 #endif
     // The texel's value for GiIntegrate (third block of the samples buffer): radiance, hit distance (fp16, >= 0), bit 16 =
     // the ray read a bounce term, bit 17 = from young cells. By count, not by luminance: a cell without data reads 0 (the

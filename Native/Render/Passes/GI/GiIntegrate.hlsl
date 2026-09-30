@@ -20,6 +20,14 @@
 //   relight restart (gi.relight_restart, off by default): an entry with 4 or more updates whose update's anchor irradiance
 //     lies more than 5 sigma + 5 % from its history weighs this update 1/2 and restarts its mean, window and count;
 //   the restart count (GI_SH_RESTART low 16 bits): measured updates since creation or the last restart (the tiers' order).
+// Redesign V2.2 11.2 (P1'-b), gi.bounce_split (GI_P1_FLAGS bit 4; SPLIT=0): unbiased convergence of the multi-bounce
+//   iteration E = S + T E. The map, SH and texels are the long mean M of the whole samples (weight max(1 / (n + 1), 1 / cap):
+//   the entry's update count and the steady window, never its neighbours' age - no Jacobi phase, no young weighting), and
+//   the stored value is M + (B - Bm), B the current bounce part (the rays' cache-fed radiance, GiTrace's fifth block;
+//   weight max(1 / (n + 1), 1 / window), window 1 = replacement) and Bm its long mean (M's weights), both L1 radiance SH
+//   (GiInternal giBounceL1Load). The running mean of a weakly contracting iteration converges as n^-(1 - rho); here the
+//   bounce part contracts by rho per update as Jacobi does while the non-bounce part (unbiased from its first sample)
+//   keeps its long mean. Only the correction B - Bm is truncated to L1 (small once converged); M keeps every direction.
 // One group per update slot (selected entries, then background). P[0] = { cache UAV, updates per frame, samples SRV, 0 }
 #include "Scene.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
@@ -38,6 +46,10 @@ groupshared float2 gs_totals;      // total E, total E^2 (another wave's serial 
 groupshared float2 gs_bounce[GI_TEXEL_COUNT];  // per texel ray: 1 if its bounce read was young, 1 if it read a bounce term
 groupshared float gs_bounceIrradiance[GI_TEXEL_COUNT];  // per texel ray: its bounce light's share of the anchor's irradiance (luminance)
 groupshared uint gs_emitted[GI_TEXEL_COUNT];  // per emitter sample: 1 when its value is not 0
+#if !SPLIT
+groupshared float3 gs_bounceRay[GI_TEXEL_COUNT];  // gi.bounce_split: each texel ray's cache-fed radiance
+groupshared float3 gs_bounceSample[4];            // its L1 radiance SH (world frame)
+#endif
 
 [numthreads(128, 1, 1)]
 void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
@@ -56,6 +68,7 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
 #else
     const uint p1 = b.Load(GI_P1_FLAGS);
 #endif
+    const bool bsplit = (p1 & 16u) != 0;
     const uint restartWord = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_RESTART);
     const uint restartCount = giRestartUpdates(b, h, entry);
     const bool prior = (p1 & 2u) != 0 && (restartWord & 0x10000u) != 0 && history == 0 && b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0;
@@ -102,6 +115,13 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         gs_reflected[lane] = finite && all(isfinite(reflectedTexel)) ? reflectedTexel : float3(0, 0, 0);
 #endif
         texelSample = samples[2 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane];
+#if !SPLIT
+        if (bsplit)
+        {
+            const float3 br = asfloat(samples[4 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane].xyz);
+            gs_bounceRay[lane] = finite && all(br == br) && all(abs(br) < 3.0e38) ? br : float3(0, 0, 0);
+        }
+#endif
         const uint w = texelSample.w;
         gs_bounce[lane] = float2((w >> 17) & 1u, (w >> 16) & 1u);
         const float lum = dot(asfloat(texelSample.xyz), float3(0.2126, 0.7152, 0.0722));
@@ -173,6 +193,14 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         [loop] for (uint k = 0; k < count; ++k) c += gs_sample[k].xyz * gs_shWeight[k * 9 + shLane];
         const float a = shLane == 0 ? GI_PI : (shLane < 4 ? 2 * GI_PI / 3 : GI_PI / 4);
         gs_sh[shLane] = c * a;
+#if !SPLIT
+        if (bsplit && shLane < 4)
+        {
+            float3 cb = 0;
+            [loop] for (uint k = 0; k < GI_TEXEL_COUNT; ++k) cb += gs_bounceRay[k] * gs_shWeight[k * 9 + shLane];
+            gs_bounceSample[shLane] = cb;
+        }
+#endif
 #if SPLIT
         float3 direct = 0, reflected = 0;
         [loop] for (uint k = 0; k < count; ++k)
@@ -235,7 +263,36 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     const bool restart = (p1 & 4u) != 0 && history != 0 && restartCount >= 4 && abs(totalE - held) > 5.0 * spreadOld + 0.05 * held;
     const float relSpread = totalE > 0 ? spread / totalE : 1.0;
     const float kappa = clamp(relSpread * relSpread / max(asfloat(b.Load(GI_P1_DELTA2)), 1e-6), 2.0, 64.0);
-    const float alpha = prior ? 1.0 / (1.0 + kappa) : (restart ? 0.5 : alphaHistory);
+    float alpha = prior ? 1.0 / (1.0 + kappa) : (restart ? 0.5 : alphaHistory);
+    // gi.bounce_split: the weight of M and Bm (update count and window alone) and of the current B; the entry's L1 pair
+    // before this update (0 after a reset; a seeded entry has its parent's, GiPrior) and after it (rounded as stored, the
+    // same in every lane), and the corrections B - Bm of both.
+    float3 dOld[4], dNew[4], bCurNew[4], bMeanNew[4];
+    [unroll] for (uint c0 = 0; c0 < 4; ++c0) dOld[c0] = dNew[c0] = bCurNew[c0] = bMeanNew[c0] = 0;
+#if !SPLIT
+    if (bsplit)
+    {
+        const float n = prior ? kappa : (history == 0 ? 0.0 : (float)giHistorySamples(history));
+        alpha = prior ? 1.0 / (1.0 + kappa) : max(1.0 / (n + 1), 1.0 / (float)cap);
+        const float alphaB = max(1.0 / (n + 1), 1.0 / (float)max(b.Load(GI_BSPLIT_WINDOW), 1u));
+        float3 bCur[4], bMean[4];
+        giBounceL1Load(b, entry, bCur, bMean);
+        const uint dseed = (((h.flags & 1u) != 0 ? giDetKey(b, h, entry) : entry) * 0x9E3779B9u ^ h.frame * 0x85EBCA6Bu) + 8192u;
+        [unroll] for (uint c = 0; c < 4; ++c)
+        {
+            if (history == 0 && !prior) bCur[c] = bMean[c] = 0;
+            dOld[c] = bCur[c] - bMean[c];
+            const float3 cn = lerp(bCur[c], gs_bounceSample[c], alphaB) * GI_STORE_SCALE;
+            const float3 mn = lerp(bMean[c], gs_bounceSample[c], alpha) * GI_STORE_SCALE;
+            [unroll] for (uint ch = 0; ch < 3; ++ch)
+            {
+                bCurNew[c][ch] = giDitherHalf(cn[ch], giDitherUnit(dseed + c * 8 + ch)) * GI_LOAD_SCALE;
+                bMeanNew[c][ch] = giDitherHalf(mn[ch], giDitherUnit(dseed + c * 8 + 4 + ch)) * GI_LOAD_SCALE;
+            }
+            dNew[c] = bCurNew[c] - bMeanNew[c];
+        }
+    }
+#endif
 #if SPLIT
     const float directAlpha = max(1.0 / (float)(splitUpdates + 1), 1.0 / (float)cap);
     const float bounceAlpha = giHistoryPhase(history) < jacobiLength ? 1.0 :
@@ -256,6 +313,21 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         const bool finite = all(sample == sample) && all(abs(sample) < 3.0e38);
         const float a = finite ? alpha : 0.0;  // a non-finite value keeps the texel as it was
         float3 value = lerp(previous, finite ? sample : previous, a) * GI_STORE_SCALE;
+        if (bsplit)
+        {
+            // M = stored - (B - Bm) toward the texel's centre direction (radiance: the SH basis alone)
+            const float3 l = giHemiOctDecode((float2(lane % GI_TEXELS, lane / GI_TEXELS) + 0.5) / GI_TEXELS);
+            float y[9];
+            giShBasis(t * l.x + bt * l.y + na * l.z, y);
+            float3 before = 0, after = 0;
+            [unroll] for (uint c = 0; c < 4; ++c)
+            {
+                before += dOld[c] * y[c];
+                after += dNew[c] * y[c];
+            }
+            const float3 m = previous - before;
+            value = (lerp(m, finite ? sample : m, a) + after) * GI_STORE_SCALE;
+        }
 #if SPLIT
         value = giSplitBlend(b, splitBase, lane, directTexel, reflectedTexel, directAlpha, bounceAlpha, history == 0) * GI_STORE_SCALE;
 #endif
@@ -281,6 +353,19 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         const float3 previous = giIrrUnpack(irrOld) * GI_LOAD_SCALE;
         const uint r = seed + 1024 + lane * 4;
         float3 value = lerp(previous, e, alpha);
+        if (bsplit)
+        {
+            const float3 nj = giHemiOctDecode((float2(lane % GI_IRR_N, lane / GI_IRR_N) + 0.5) / (float)GI_IRR_N);
+            float y[9];
+            giShBasis(t * nj.x + bt * nj.y + na * nj.z, y);
+            float3 before = GI_PI * dOld[0] * y[0], after = GI_PI * dNew[0] * y[0];  // irradiance: A_0 = pi, A_1 = 2 pi / 3
+            [unroll] for (uint c = 1; c < 4; ++c)
+            {
+                before += (2 * GI_PI / 3) * dOld[c] * y[c];
+                after += (2 * GI_PI / 3) * dNew[c] * y[c];
+            }
+            value = lerp(previous - before, e, alpha) + after;
+        }
 #if SPLIT
         value = giSplitBlend(b, splitBase, GI_TEXEL_COUNT + lane, directE, reflectedE, directAlpha, bounceAlpha, history == 0);
 #endif
@@ -294,6 +379,11 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     [unroll] for (uint k = 0; k < 9; ++k)
     {
         float3 e = lerp(previous[k], gs_sh[k], alpha) * GI_STORE_SCALE;
+        if (bsplit && k < 4)
+        {
+            const float A = k == 0 ? GI_PI : 2 * GI_PI / 3;
+            e = (lerp(previous[k] - A * dOld[k], gs_sh[k], alpha) + A * dNew[k]) * GI_STORE_SCALE;
+        }
 #if SPLIT
         e = giSplitBlend(b, splitBase, GI_TEXEL_COUNT + GI_IRR_N * GI_IRR_N + k, gs_directSh[k], gs_reflectedSh[k],
                          directAlpha, bounceAlpha, history == 0) * GI_STORE_SCALE;
@@ -319,9 +409,42 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
 #if SPLIT
     b.Store(splitBase, min(splitUpdates + 1, 4095u));
 #endif
+#if !SPLIT
+    if (bsplit)
+    {
+        const uint a = b.Load(GI_BSPLIT_OFFSET) + entry * 48;
+        float v[24];
+        [unroll] for (uint c = 0; c < 4; ++c)
+            [unroll] for (uint ch = 0; ch < 3; ++ch)
+            {
+                v[3 * c + ch] = bCurNew[c][ch] * GI_STORE_SCALE;
+                v[12 + 3 * c + ch] = bMeanNew[c][ch] * GI_STORE_SCALE;
+            }
+        uint w[12];
+        [unroll] for (uint i = 0; i < 12; ++i) w[i] = giPackHalf2(v[2 * i], v[2 * i + 1]);
+        b.Store4(a, uint4(w[0], w[1], w[2], w[3]));
+        b.Store4(a + 16, uint4(w[4], w[5], w[6], w[7]));
+        b.Store4(a + 32, uint4(w[8], w[9], w[10], w[11]));
+    }
+#endif
+    {
+        // gi.anchor_resample (GiInternal giAnchorOffer): the next update's anchor, a uniform choice among this one's lookups
+        const uint rb = b.Load(GI_RESAMPLE_OFFSET);
+        if (rb != 0)
+        {
+            const uint2 offer = b.Load2(rb + entry * 8);
+            if ((offer.x | offer.y) != 0)
+            {
+                const uint2 key = b.Load2(h.offMeta + entry * 16);
+                const uint64_t o = ((uint64_t)offer.y << 32) | offer.x;
+                b.Store3(h.offAnchor + entry * 16, asuint(giAnchorOfferPosition(h, ((uint64_t)key.y << 32) | key.x, o & ((1ull << 42) - 1))));
+                b.Store2(rb + entry * 8, uint2(0, 0));
+            }
+        }
+    }
     const uint jacobiByte = min((jacobiLength + 15) / 16, 255u) << 24;
     const uint historyWord = prior ? (min(jacobiLength, 0xFFFu) | (min((uint)round(kappa) + 1, max(cap, 2u) - 1u) << 12) | jacobiByte)
-                             : restart ? ((history & 0xFFFu) | (1u << 12) | jacobiByte) : giHistoryNext(h, history, young, jacobiLength, cap);
+                             : restart ? ((history & 0xFFFu) | (1u << 12) | jacobiByte) : giHistoryNext(h, history, bsplit ? 0.0 : young, jacobiLength, cap);
     b.Store3(address + GI_SH_HISTORY, uint3(historyWord, h.epoch,
                                             f32tof16(nearestHalf(fast * GI_STORE_SCALE)) | (f32tof16(nearestHalf(spreadMean * GI_STORE_SCALE)) << 16)));
 }

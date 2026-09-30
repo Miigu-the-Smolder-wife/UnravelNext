@@ -33,6 +33,14 @@ history_updates_max = 32           # then the running mean over at most this man
 split_bounce_history = false       # experimental: separate non-bounce long mean from cache-bounce short mean;
                                    # enable only after bath 1080p / 3000-frame luminance and motion validation
 bounce_history_updates = 4         # short window after the Jacobi phase (the long component uses the existing window)
+bounce_split = false               # V2.2 11.2 (P1'-b): the map, SH and texels as the long mean M of the samples plus the
+                                   # correction B - Bm (the rays' cache-fed part, current and long mean, as L1 radiance SH,
+                                   # 48 B per entry): weights by update count only, no Jacobi phase; the bounce part follows
+                                   # its neighbours' current values (the running mean converged as n^-(1 - rho))
+bounce_split_updates = 1           # the current bounce part's window (1 = replacement: contraction rho per update)
+anchor_resample = false            # V2.2 P1'-b: each update moves the entry's anchor to a random point among the surface
+                                   # points that looked it up since its last update (the value = the mean over where the cell is
+                                   # read, not the irradiance at its creator's point: the level depended on the history)
 history_updates_max_static = 256   # the running mean's window while the entry's light is steady: a fast mean (1/16) of its
                                    # anchor irradiance within 4 sigma (the update's own ray spread) of the history; a change
                                    # beyond that cuts the window to history_updates_max at once (moving sun, lights: any speed).

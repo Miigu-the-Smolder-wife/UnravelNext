@@ -41,6 +41,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         [loop] for (uint k = 0; k < GI_IRR_STRIDE / 16; ++k) b.Store4(h.offIrr + entry * GI_IRR_STRIDE + k * 16, 0u);
         [loop] for (uint k = 0; k < GI_TEXEL_COUNT / 4; ++k) b.Store4(giEmitterOffset(h) + entry * GI_TEXEL_COUNT * 4 + k * 16, 0u);
         b.Store2(h.offAnchorMin + entry * 8, r.keyAnchor.zw);
+        if (b.Load(GI_RESAMPLE_OFFSET) != 0) b.Store2(b.Load(GI_RESAMPLE_OFFSET) + entry * 8, uint2(0, 0));  // gi.anchor_resample: no stale offer
         // Carried after screen requests so visible entries retain tier 0.
         b.Store(h.offHitStamp + entry * 4, h.frame - 1);
         uint slot;

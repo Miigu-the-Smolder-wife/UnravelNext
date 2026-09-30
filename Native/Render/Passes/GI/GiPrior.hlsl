@@ -93,6 +93,15 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
             b.Store4(ea + 32, b.Load4(pa + 32));
             b.Store2(ea + 48, b.Load2(pa + 48));
             b.Store(ea + GI_SH_RESTART, 1u << 16);  // seeded (GiIntegrate)
+            if ((b.Load(GI_P1_FLAGS) & 16u) != 0)
+            {
+                // gi.bounce_split: the parent's bounce L1 pair (world frame), which its map's bounce part came with
+                const uint base = b.Load(GI_BSPLIT_OFFSET);
+                const uint ps = base + parent * 48, es = base + entry * 48;
+                b.Store4(es, b.Load4(ps));
+                b.Store4(es + 16, b.Load4(ps + 16));
+                b.Store4(es + 32, b.Load4(ps + 32));
+            }
             b.InterlockedAdd(GI_P1_STAT_PRIORS, 1u);
         }
     }

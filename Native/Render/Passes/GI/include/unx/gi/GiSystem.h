@@ -36,7 +36,14 @@ struct GiSettings  // from Config/quality/gi.toml
     bool updateTiers = false, parentPrior = false, relightRestart = false;
     bool hitLightFootprint = false;
     bool lightInvalidation = false;
-    float hitLightFootprintScale = 1.0f;  // gi.hit_light_footprint_scale (diagnostics)  // gi.light_invalidation: a changed light restarts the entries that see its range  // gi.hit_light_footprint: point / spot lights' diffuse term at GI hits as its footprint mean
+    // gi.hit_light_footprint: point / spot lights' diffuse term at GI hits as its footprint mean; gi.light_invalidation: a
+    // changed light restarts the entries that see its range; gi.hit_light_footprint_scale: the footprint's size (diagnostics).
+    float hitLightFootprintScale = 1.0f;
+    // Redesign V2.2 11.2 (P1'-b): gi.bounce_split (the bounce part as a current L1 pair beside the long mean) and the
+    // current bounce part's window (gi.bounce_split_updates, 1 = replacement).
+    bool bounceSplit = false;
+    uint32_t bounceSplitUpdates = 1;
+    bool anchorResample = false;  // gi.anchor_resample: each update moves the anchor to a random lookup point (GiInternal giAnchorOffer)
     float youngUpdateShare = 0.6f, parentDeltaInitial = 0.05f;
     static GiSettings fromQuality(const QualityConfig& q);
 };
