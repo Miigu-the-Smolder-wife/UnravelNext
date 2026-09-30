@@ -213,10 +213,14 @@ void GiTraceGen()
                     giTouch(b, h, e);
                     giRequestHit(b, h, e);
                 }
-                if (!created && b.Load(h.offSh + e * GI_SH_STRIDE + GI_SH_UPDATES) != 0)
+                // Experiment 262144 (diagnostic, V2.2 P1'-b): every bounce read through the interpolated level search below
+                if (!created && b.Load(h.offSh + e * GI_SH_STRIDE + GI_SH_UPDATES) != 0 && (P[3].w & 262144u) == 0)
                 {
                     float unused;
                     irradiance = giShIrradiance(b, h, e, s.normal, unused);
+                    // Experiment 131072 (diagnostic, V2.2 P1'-b: the multi-bounce part is 92 % of the reference's): the bounce
+                    // read from the cell's irradiance map instead of its L2 SH
+                    if ((P[3].w & 131072u) != 0) irradiance = giIrrMapAt(b, h, e, giAnchorNormal(b, h, e), s.normal);
                     const float3 na = giAnchorNormal(b, h, e);
                     float3 ta, ba;
                     giBasis(na, ta, ba);

@@ -103,5 +103,7 @@ experiment_disable = 0             # cost attribution only (recorded in the qual
                                    # bounce (one bounce: unx_reference --surface-order 1:2), 1024 = Lambert GI hits (GiAnalytic's
                                    # closed forms), 4096 = local lights at GI hits: every light of the cell with
                                    # its shadow ray instead of one sample (diagnostic), 32768 = energy audit (point term against
-                                   # footprint mean over the same hits, printed by renderergate --out). Never nonzero outside
+                                   # footprint mean over the same hits, printed by renderergate --out), 65536 = GI rays from random points of
+                                   # their cell's tangent square, 131072 = bounce reads from the cell's irradiance map (not its SH),
+                                   # 262144 = every bounce read through the interpolated level search (diagnostics). Never nonzero outside
                                    # measurements and those tests.
