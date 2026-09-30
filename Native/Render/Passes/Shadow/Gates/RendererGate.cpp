@@ -703,6 +703,18 @@ int main(int argc, char** argv)
                     js += format(", \"gi_live_entries\": %u, \"gi_requested\": %u, \"gi_selected_updates\": %u, \"gi_primary_rays\": %u, \"gi_background\": %u, "
                                  "\"gi_reflection_hit_lookups\": %u",
                                  st.live, st.requested, st.selected, st.selected * 64u, st.background, st.hitLookups);
+                    if (st.audit[0] != 0 || st.audit[4] != 0)
+                    {
+                        // gi.experiment_disable 32768: point term against footprint mean over the same GI hits (GI_AUDIT_SUMS)
+                        const double k = 1.0 / 1024;
+                        for (int set = 0; set < 2; ++set)
+                        {
+                            const uint64_t* a = st.audit + set * 4;
+                            logf("GI energy audit (%s): point %.6g, footprint %.6g (ratio %.5f); visible: point %.6g, footprint %.6g (ratio %.5f)\n",
+                                 set ? "hits > 1000 nit" : "all hits", a[0] * k, a[1] * k, a[0] ? (double)a[1] / a[0] : 0.0, a[2] * k, a[3] * k,
+                                 a[2] ? (double)a[3] / a[2] : 0.0);
+                        }
+                    }
                 }
 #endif
                 return js;

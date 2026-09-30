@@ -60,9 +60,9 @@ float giTriangleSolidAngle(float3 a, float3 b, float3 c)
     const float den = la * lb * lc + dot(a, b) * lc + dot(a, c) * lb + dot(b, c) * la;
     return 2 * atan2(num, den);
 }
-float giPointFootprintScale(float3 light, float3 x, float3 n, float3 dir, float t)
+float giPointFootprintScale(float3 light, float3 x, float3 n, float3 dir, float t, float sizeScale)
 {
-    const float a = t * GI_FOOTPRINT_PER_METRE, dn = dot(n, dir);
+    const float a = t * GI_FOOTPRINT_PER_METRE * sizeScale, dn = dot(n, dir);
     const float3 d = light - x;
     const float d2 = dot(d, d), cosx = dot(n, d) * rsqrt(max(d2, 1e-12));
     if (!(a > 0) || abs(dn) < 1e-3 || !(cosx > 0) || !(d2 > 0)) return 1;
@@ -300,7 +300,9 @@ void GiTraceGen()
                     const float alpha = modelAlpha(m.roughness), cone = 0.5 * GI_FOOTPRINT_PER_METRE;
                     mc.roughness = sqrt(sqrt(alpha * alpha + cone * cone));
                     float3 f = rtLocalLightBrdfCos(mc, s.normal, -r.Direction, ls.wi, (P[3].w & 1024) != 0);  // full model (1024: Lambert)
-                    if ((b.Load(GI_P1_FLAGS) & 8u) != 0 && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE && dot(s.normal, ls.wi) > 0)
+                    const bool audit = (P[3].w & 32768u) != 0;
+                    float3 fPoint = f, fFootprint = f;
+                    if ((audit || (b.Load(GI_P1_FLAGS) & 8u) != 0) && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE && dot(s.normal, ls.wi) > 0)
                     {
                         // P1: the diffuse term as its mean over the ray's footprint (giPointFootprintScale; point and spot lights)
                         RtLight lf;
@@ -309,11 +311,29 @@ void GiTraceGen()
                         if (lf.type == kRtLightPoint || lf.type == kRtLightSpot)
                         {
                             const float3 diffuse = m.baseColor * ((1 - m.metallic) / GI_PI) * dot(s.normal, ls.wi);
-                            f += diffuse * (giPointFootprintScale(lf.position, s.position, s.geometricNormal, r.Direction, hit.t) - 1);
+                            fFootprint += diffuse * (giPointFootprintScale(lf.position, s.position, s.geometricNormal, r.Direction, hit.t, asfloat(b.Load(GI_P1_FOOTPRINT_SCALE))) - 1);
+                            if ((b.Load(GI_P1_FLAGS) & 8u) != 0) f = fFootprint;
                         }
                     }
-                    if (any(f > 0) && (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, giBias(h, s.position)), RT_MASK_GI)))
+                    const bool visible = (any(f > 0) || (audit && any(fPoint > 0))) &&
+                                         (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, giBias(h, s.position)), RT_MASK_GI));
+                    if (visible && any(f > 0))
                         local = f * ls.weight;
+                    if (audit)
+                    {
+                        // Energy audit (GI_AUDIT_SUMS): the same hits, point term against footprint mean, visibility apart
+                        const float3 Y = float3(0.2126, 0.7152, 0.0722);
+                        const float pt = max(dot(fPoint * ls.weight, Y), 0), fp = max(dot(fFootprint * ls.weight, Y), 0);
+                        const uint base = GI_AUDIT_SUMS + (pt > 1000 ? 32u : 0u);
+                        uint64_t prev;
+                        b.InterlockedAdd64(base + 0, (uint64_t)(pt * 1024), prev);
+                        b.InterlockedAdd64(base + 8, (uint64_t)(fp * 1024), prev);
+                        if (visible)
+                        {
+                            b.InterlockedAdd64(base + 16, (uint64_t)(pt * 1024), prev);
+                            b.InterlockedAdd64(base + 24, (uint64_t)(fp * 1024), prev);
+                        }
+                    }
                 }
             }
             if ((P[3].w & (8192u | 16384u)) != 0)

@@ -53,6 +53,10 @@ relight_restart = false            # an entry whose update lies 5 sigma + 5 % fr
                                    # Off: one update is not a robust change test - the bath's local-light samples are
                                    # heavy-tailed, the test fired on single bright updates and pulled cells toward them
                                    # (65 % of the read entries stayed "young" in a still 600-frame run, P1 first run)
+hit_light_footprint_scale = 1.0    # diagnostics: the footprint's side over the texel cone's. Energy audit (32768, 600 frames,
+                                   # clearcoat stripped, 1080p [measured]): footprint / point energy over the same hits 0.946 /
+                                   # 0.968 / 0.986 (bath) and 0.914 / 0.962 / 0.985 (train) at 1 / 0.5 / 0.25, the same
+                                   # without visibility: the footprint reaches past the real surface (lamp fixtures, corners)
 light_invalidation = true          # P1: a light whose record changed (GpuScene::setLights: switched, dimmed, moved) restarts
                                    # the entries whose texel rays see its range (GiInvalidate), instead of keeping its old
                                    # bounce light for the steady window
@@ -84,4 +88,6 @@ experiment_disable = 0             # cost attribution only (recorded in the qual
                                    # samples (the texel rays alone see emissive meshes), 512 = GI hits without the cache's
                                    # bounce (one bounce: unx_reference --surface-order 1:2), 1024 = Lambert GI hits (GiAnalytic's
                                    # closed forms), 4096 = local lights at GI hits: every light of the cell with
-                                   # its shadow ray instead of one sample (diagnostic). Never nonzero outside measurements and those tests.
+                                   # its shadow ray instead of one sample (diagnostic), 32768 = energy audit (point term against
+                                   # footprint mean over the same hits, printed by renderergate --out). Never nonzero outside
+                                   # measurements and those tests.

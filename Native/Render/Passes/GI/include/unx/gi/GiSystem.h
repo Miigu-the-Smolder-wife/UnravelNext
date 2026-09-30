@@ -35,7 +35,8 @@ struct GiSettings  // from Config/quality/gi.toml
     // difference assumed until measured), relight restarts.
     bool updateTiers = false, parentPrior = false, relightRestart = false;
     bool hitLightFootprint = false;
-    bool lightInvalidation = false;  // gi.light_invalidation: a changed light restarts the entries that see its range  // gi.hit_light_footprint: point / spot lights' diffuse term at GI hits as its footprint mean
+    bool lightInvalidation = false;
+    float hitLightFootprintScale = 1.0f;  // gi.hit_light_footprint_scale (diagnostics)  // gi.light_invalidation: a changed light restarts the entries that see its range  // gi.hit_light_footprint: point / spot lights' diffuse term at GI hits as its footprint mean
     float youngUpdateShare = 0.6f, parentDeltaInitial = 0.05f;
     static GiSettings fromQuality(const QualityConfig& q);
 };
@@ -53,6 +54,7 @@ struct GiStats  // header counters of the last completed frame (tests, diagnosti
     // the running estimate of the parent-child relative difference (sqrt of GI_P1_DELTA2).
     uint32_t priors = 0, restarts = 0, selectedYoung = 0, selectedT1 = 0;
     float parentDelta = 0;
+    uint64_t audit[8] = {};  // energy audit sums (GiInternal.hlsli GI_AUDIT_SUMS, x 1024; gi.experiment_disable 32768)
 };
 
 // The information quantity of M's per-pixel cache lookup on the main view (Gates/GiLookupStats.hlsl; gates only).

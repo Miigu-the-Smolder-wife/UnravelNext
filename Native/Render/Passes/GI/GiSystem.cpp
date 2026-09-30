@@ -125,6 +125,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.relightRestart = q.has("gi.relight_restart") && q.boolean("gi.relight_restart");
     s.hitLightFootprint = q.has("gi.hit_light_footprint") && q.boolean("gi.hit_light_footprint");
     s.lightInvalidation = q.has("gi.light_invalidation") && q.boolean("gi.light_invalidation");
+    s.hitLightFootprintScale = q.has("gi.hit_light_footprint_scale") ? (float)q.number("gi.hit_light_footprint_scale") : 1.0f;
     if (!(s.youngUpdateShare >= 0 && s.youngUpdateShare <= 1)) fail("gi.young_update_share must be in [0, 1]");
     if (!(s.parentDeltaInitial > 0 && s.parentDeltaInitial < 1)) fail("gi.parent_delta_initial must be in (0, 1)");
     // Fixed by the kernels (GiCache.hlsli, GiProbeGather.hlsl, GiInternal.hlsli probe offsets).
@@ -214,6 +215,7 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[195] = (m_settings.updateTiers ? 1u : 0u) | (m_settings.parentPrior ? 2u : 0u) | (m_settings.relightRestart ? 4u : 0u) | (m_settings.hitLightFootprint ? 8u : 0u);  // GI_P1_FLAGS
     h[196] = asU(m_settings.youngUpdateShare);                                     // GI_P1_T0_SHARE
     h[197] = asU(m_settings.parentDeltaInitial * m_settings.parentDeltaInitial);  // GI_P1_DELTA2
+    h[212] = asU(m_settings.hitLightFootprintScale);                              // GI_P1_FOOTPRINT_SCALE
     for (uint32_t e = 0; e < m_settings.capacity; ++e) head[l.freeList / 4 + e] = m_settings.capacity - 1 - e;  // pops 0, 1, 2 ...
     for (uint32_t t = 0; t < m_settings.tableSlots; ++t) head[l.table / 4 + t * 4 + 2] = 0xFFFFFFFFu;
     std::memcpy(&tail[(l.shTable - l.hitStamp) / 4], shTable.data(), shTable.size() * 4);
@@ -1110,6 +1112,7 @@ GiStats GiSystem::readStats()
     float d2;
     std::memcpy(&d2, &h[197], 4);
     st.parentDelta = std::sqrt(std::max(d2, 0.0f));
+    std::memcpy(st.audit, &h[214], sizeof(st.audit));  // GI_AUDIT_SUMS 856
     return st;
 }
 } // namespace unx::render::gi

@@ -116,6 +116,11 @@ uint giAgeBucket(RWByteAddressBuffer b, GiHeader h, uint entry)
 #define GI_P1_STAT_RESTARTS 804 // T0 and T1 entries selected
 #define GI_P1_STAT_T0 808
 #define GI_P1_STAT_T1 812
+#define GI_P1_FOOTPRINT_SCALE 848  // gi.hit_light_footprint_scale (float, diagnostics: the footprint's side over the texel cone's)
+// Energy audit (gi.experiment_disable 32768, diagnostics): over every GI hit whose chosen local light is a point or spot
+// light, the luminance of f x weight with the point diffuse term and with its footprint mean, without and with the hit's
+// visibility, and the same four for hits whose point term exceeds 1000 nit; x 1024, 64-bit sums since the cache's creation.
+#define GI_AUDIT_SUMS 856       // 8 x uint64: pt, fp, pt V, fp V, then the > 1000 nit subset
 #define GI_H_SELECT_T0 816      // per request tier (16 B each): the young range's threshold bucket, quota, fill counter
 // Priority buckets with the tiers on (gi.update_tiers): 60..63 = T0 (fewer than 4 measured updates since the entry's creation
 // or restart; 63 = none), 48..59 = T1 (4..15; fewer first), 0..47 = the rest by age (frames since the last update, 47 = 47
