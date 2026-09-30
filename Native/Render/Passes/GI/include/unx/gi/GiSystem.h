@@ -47,7 +47,11 @@ struct GiSettings  // from Config/quality/gi.toml
     // gi.history_window_rule "lighting": the running mean's window from the scene (history_updates_max while the sun
     // changed within lightingRecentFrames, else the static window); "samples": from the entry's own statistics.
     bool windowByLighting = true;
-    uint32_t lightingRecentFrames = 256;  // gi.anchor_resample: each update moves the anchor to a random lookup point (GiInternal giAnchorOffer)
+    uint32_t lightingRecentFrames = 256;
+    // gi.path_guiding (D-12, off: a decision item): the rays' texels from a mixture of the uniform choice
+    // (pathGuidingUniformShare) and one proportional to the texels' irradiance share (GiGuide.hlsl).
+    bool pathGuiding = false;
+    float pathGuidingUniformShare = 0.5f;  // gi.anchor_resample: each update moves the anchor to a random lookup point (GiInternal giAnchorOffer)
     float youngUpdateShare = 0.6f, parentDeltaInitial = 0.05f;
     static GiSettings fromQuality(const QualityConfig& q);
 };

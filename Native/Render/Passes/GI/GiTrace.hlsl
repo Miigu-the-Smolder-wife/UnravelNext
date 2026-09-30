@@ -117,7 +117,24 @@ void GiTraceGen()
         const uint updates = b.Load(shAddress + GI_SH_UPDATES);
         jitter = frac(float2(giUnit(rotation), giUnit(rotation + 1)) + (float)(updates & 0xFFFFu) * float2(0.7548776662, 0.5698402910));
     }
-    const float2 uv = (float2(texel % GI_TEXELS, texel / GI_TEXELS) + jitter) / GI_TEXELS;
+    uint texelUsed = texel;
+    if (P[4].z != 0xFFFFFFFFu)
+    {
+        // gi.path_guiding (GiGuide.hlsl, D-12): this ray's texel from the slot's mixture CDF, jittered uniformly inside it
+        StructuredBuffer<float> guide = ResourceDescriptorHeap[P[4].z];
+        const uint base = (thread / GI_TEXEL_COUNT) * GI_TEXEL_COUNT;
+        const float u = giUnit(seed + 60);
+        uint lo = 0, hi = GI_TEXEL_COUNT - 1;
+        [loop] for (uint step = 0; step < 6 && lo < hi; ++step)
+        {
+            const uint mid = (lo + hi) / 2;
+            if (guide[base + mid] > u) hi = mid;
+            else lo = mid + 1;
+        }
+        texelUsed = lo;
+        jitter = float2(giUnit(seed + 61), giUnit(seed + 62));
+    }
+    const float2 uv = (float2(texelUsed % GI_TEXELS, texelUsed / GI_TEXELS) + jitter) / GI_TEXELS;
     const float3 local = giHemiOctDecode(uv);
     RayDesc r;
     r.Origin = anchor + n * giBias(h, anchor);

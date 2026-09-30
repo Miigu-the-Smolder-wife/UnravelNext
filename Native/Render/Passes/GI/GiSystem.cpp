@@ -141,6 +141,10 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
         else fail("gi.history_window_rule must be \"lighting\" or \"samples\"");
     }
     if (q.has("gi.lighting_recent_frames")) s.lightingRecentFrames = (uint32_t)q.integer("gi.lighting_recent_frames");
+    s.pathGuiding = q.has("gi.path_guiding") && q.boolean("gi.path_guiding");
+    if (q.has("gi.path_guiding_uniform_share")) s.pathGuidingUniformShare = (float)q.number("gi.path_guiding_uniform_share");
+    if (!(s.pathGuidingUniformShare > 0 && s.pathGuidingUniformShare <= 1)) fail("gi.path_guiding_uniform_share must be in (0, 1] (unbiased only with a uniform share)");
+    if (s.pathGuiding && (s.splitBounceHistory || s.bounceSplit)) fail("gi.path_guiding is not combined with the split histories");
     if (q.has("gi.bounce_split_updates")) s.bounceSplitUpdates = (uint32_t)q.integer("gi.bounce_split_updates");
     if (s.bounceSplitUpdates == 0 || s.bounceSplitUpdates > 32) fail("gi.bounce_split_updates must be in [1, 32]");
     if (s.bounceSplit && s.splitBounceHistory) fail("gi.bounce_split and gi.split_bounce_history are exclusive");
@@ -866,6 +870,25 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     const TextureRef luts[4] = { fr.transmittanceLut, fr.multiScatterLut, fr.skyViewLut, fr.aerialPerspective };
     const std::string traceKernel = std::string("Passes/GI/GiTrace.SKY") + (atmosphere ? "0" : "1") + (s.splitBounceHistory ? ".SPLIT1" : ".SPLIT0");
     rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(traceKernel, { "GiTraceGen" }));
+    // gi.path_guiding (D-12): the slots' texel CDFs before the rays (GiGuide.hlsl)
+    BufferRef guide{};
+    if (s.pathGuiding)
+    {
+        guide = g.createBuffer({ "GI guide", (uint64_t)s.updatesPerFrame * 64 * 4, 4 });
+        g.addPass("r.gi.guide", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(cache, Use::UavCompute);
+                      b.use(guide, Use::UavCompute);
+                  },
+                  [&shaders, cache, guide, updates = s.updatesPerFrame, share = s.pathGuidingUniformShare](PassContext& c) {
+                      uint32_t shareBits;
+                      std::memcpy(&shareBits, &share, 4);
+                      const uint32_t k[4] = { c.uav(cache), updates, c.uav(guide), shareBits };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiGuide"));
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(updates, 1, 1);
+                  });
+    }
     const float3 sky = m_skyRadiance, sun = m_sunIlluminance;
     const float skyBand = m_skyBand;
     const uint32_t rayCount = s.updatesPerFrame * 64;
@@ -877,12 +900,13 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
               [&](PassBuilder& b) {
                   b.use(cache, Use::UavGraphics);
                   b.use(samples, Use::UavGraphics);
+                  if (guide.valid()) b.use(guide, Use::SrvGraphics);
                   rays.declareTraversal(b);
                   rays.declareDecals(b);
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
-              [&pipeline, cache, samples, rayCount, s, sky, sun, skyBand, scene, frameConstants, atmosphere, luts](PassContext& c) {
+              [&pipeline, cache, samples, guide, rayCount, s, sky, sun, skyBand, scene, frameConstants, atmosphere, luts](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = c.uav(cache);
                   k[1] = rayCount;
@@ -899,6 +923,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   k[15] = s.experimentDisable;
                   k[16] = asU(skyBand);
                   k[17] = c.uav(samples);
+                  k[18] = guide.valid() ? c.srv(guide) : 0xFFFFFFFFu;  // gi.path_guiding (P[4].z)
                   std::memcpy(&k[24], scene, sizeof scene);
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
@@ -908,11 +933,12 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
               [&](PassBuilder& b) {
                   b.use(cache, Use::UavCompute);
                   b.use(samples, Use::SrvCompute);
+                  if (guide.valid()) b.use(guide, Use::SrvCompute);
               },
-              [&shaders, cache, samples, updates = s.updatesPerFrame, split = s.splitBounceHistory, frameConstants, windowRule](PassContext& c) {
-                  const uint32_t k[4] = { c.uav(cache), updates, c.srv(samples), windowRule };
+              [&shaders, cache, samples, guide, updates = s.updatesPerFrame, split = s.splitBounceHistory, frameConstants, windowRule](PassContext& c) {
+                  const uint32_t k[8] = { c.uav(cache), updates, c.srv(samples), windowRule, guide.valid() ? c.srv(guide) : 0xFFFFFFFFu, 0, 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute(split ? "Passes/GI/GiIntegrate.SPLIT1" : "Passes/GI/GiIntegrate.SPLIT0"));
-                  c.computeConstants(k, 4);
+                  c.computeConstants(k, 8);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch(updates, 1, 1);  // one group per update slot
               });

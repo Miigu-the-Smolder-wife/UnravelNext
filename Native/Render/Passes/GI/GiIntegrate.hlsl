@@ -34,8 +34,11 @@
 //   their entries (GiInvalidate). "samples" (0, the previous rule) chose it from the entry's own fast mean and spread: a
 //   heavy-tailed sample (a lamp's hotspot) moved the fast mean, cut the window and changed the weight of the samples around
 //   it - GiAnalytic 8's single bounce beside a lamp came out +7 to +13 % (fixed window: within 0.33 %) [measured, 1920 frames].
+// gi.path_guiding (D-12, GiGuide.hlsl; P[1].x = the guide SRV, 0xFFFFFFFF = off): the rays' texels follow the slot's
+//   mixture CDF: each ray's solid-angle weight is divided by 64 x its texel's probability (1 / 64 when uniform), and a
+//   texel blends the mean of the rays that landed in it (none: kept as it was).
 // One group per update slot (selected entries, then background). P[0] = { cache UAV, updates per frame, samples SRV,
-// window rule }
+// window rule }, P[1] = { guide SRV }
 #include "Scene.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
 #if SPLIT
@@ -53,6 +56,9 @@ groupshared float2 gs_totals;      // total E, total E^2 (another wave's serial 
 groupshared float2 gs_bounce[GI_TEXEL_COUNT];  // per texel ray: 1 if its bounce read was young, 1 if it read a bounce term
 groupshared float gs_bounceIrradiance[GI_TEXEL_COUNT];  // per texel ray: its bounce light's share of the anchor's irradiance (luminance)
 groupshared uint gs_emitted[GI_TEXEL_COUNT];  // per emitter sample: 1 when its value is not 0
+groupshared uint gs_rayTexel[GI_TEXEL_COUNT];   // gi.path_guiding: each texel ray's texel
+groupshared float4 gs_rayTexelValue[GI_TEXEL_COUNT];  // its texel sample (radiance, hit distance)
+groupshared float3 gs_rayEmitted[GI_TEXEL_COUNT];     // its emitter texel sample
 #if !SPLIT
 groupshared float3 gs_bounceRay[GI_TEXEL_COUNT];  // gi.bounce_split: each texel ray's cache-fed radiance
 groupshared float3 gs_bounceSample[4];            // its L1 radiance SH (world frame)
@@ -111,7 +117,16 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         // became NaN would stay so and spread through every bounce that reads it.
         const float3 value = asfloat(s.xyz);
         const bool finite = all(value == value) && all(abs(value) < 3.0e38);
-        gs_sample[lane] = finite ? float4(value, 2 / (len * len * len) / (float)GI_TEXEL_COUNT) : float4(0, 0, 0, 0);
+        float probability = 1.0 / GI_TEXEL_COUNT;
+        const uint rayTexel = min((uint)(uv.x * GI_TEXELS), GI_TEXELS - 1) + GI_TEXELS * min((uint)(uv.y * GI_TEXELS), GI_TEXELS - 1);
+        if (P[1].x != 0xFFFFFFFFu)
+        {
+            StructuredBuffer<float> guide = ResourceDescriptorHeap[P[1].x];
+            const uint base = slot * GI_TEXEL_COUNT;
+            probability = max(guide[base + rayTexel] - (rayTexel > 0 ? guide[base + rayTexel - 1] : 0.0), 1e-9);
+        }
+        gs_rayTexel[lane] = rayTexel;
+        gs_sample[lane] = finite ? float4(value, 2 / (len * len * len) / (float)GI_TEXEL_COUNT / (probability * GI_TEXEL_COUNT)) : float4(0, 0, 0, 0);
         gs_local[lane] = q / len;
 #if SPLIT
         const uint budget = P[0].y * GI_TEXEL_COUNT, ray = slot * GI_TEXEL_COUNT + lane;
@@ -136,6 +151,8 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         texelOld = b.Load2(texelAddress);
         emitted = asfloat(samples[3 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane].xyz);
         emitOld = b.Load(emitAddress);
+        gs_rayTexelValue[lane] = float4(asfloat(texelSample.xyz), f16tof32(texelSample.w & 0xFFFFu));
+        gs_rayEmitted[lane] = emitted;
     }
     else if (lane < 2 * GI_TEXEL_COUNT)
     {
@@ -316,9 +333,29 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     if (lane < GI_TEXEL_COUNT)
     {
         const float3 previous = float3(f16tof32(texelOld.x), f16tof32(texelOld.x >> 16), f16tof32(texelOld.y)) * GI_LOAD_SCALE;
-        const float3 sample = asfloat(texelSample.xyz);
-        const bool finite = all(sample == sample) && all(abs(sample) < 3.0e38);
-        const float a = finite ? alpha : 0.0;  // a non-finite value keeps the texel as it was
+        float3 sample = asfloat(texelSample.xyz);
+        bool finite = all(sample == sample) && all(abs(sample) < 3.0e38);
+        float sampleDistance = f16tof32(texelSample.w & 0xFFFFu);
+        if (P[1].x != 0xFFFFFFFFu)
+        {
+            // gi.path_guiding: the mean of the finite rays that landed in this texel (lane = texel)
+            float4 sum = 0;
+            float3 emitSum = 0;
+            uint count = 0;
+            [loop] for (uint k = 0; k < GI_TEXEL_COUNT; ++k)
+            {
+                const float4 v = gs_rayTexelValue[k];
+                if (gs_rayTexel[k] != lane || !(all(v.xyz == v.xyz) && all(abs(v.xyz) < 3.0e38))) continue;
+                sum += v;
+                emitSum += gs_rayEmitted[k];
+                ++count;
+            }
+            finite = count > 0;
+            sample = finite ? sum.xyz / count : previous;
+            sampleDistance = finite ? sum.w / count : 0;
+            emitted = finite ? emitSum / count : 0;
+        }
+        const float a = finite ? alpha : 0.0;  // a non-finite value (or, guided, no ray in the texel) keeps the texel as it was
         float3 value = lerp(previous, finite ? sample : previous, a) * GI_STORE_SCALE;
         if (bsplit)
         {
@@ -339,11 +376,11 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         value = giSplitBlend(b, splitBase, lane, directTexel, reflectedTexel, directAlpha, bounceAlpha, history == 0) * GI_STORE_SCALE;
 #endif
         [unroll] for (uint c = 0; c < 3; ++c) value[c] = giDitherHalf(value[c], giDitherUnit(seed + lane * 4 + c));
-        const float dist = lerp(f16tof32(texelOld.y >> 16), f16tof32(texelSample.w & 0xFFFFu), a);
+        const float dist = lerp(f16tof32(texelOld.y >> 16), sampleDistance, a);
         b.Store2(texelAddress, uint2(giPackHalf2(value.r, value.g), giPackHalf2(value.b, dist)));
         // the emitter texel (fourth samples block, GiTrace): same running mean
         const float3 emitPrevious = giIrrUnpack(emitOld) * GI_LOAD_SCALE;
-        const bool emitFinite = all(emitted == emitted) && all(abs(emitted) < 3.0e38);
+        const bool emitFinite = all(emitted == emitted) && all(abs(emitted) < 3.0e38) && (P[1].x == 0xFFFFFFFFu || finite);
         const uint re = seed + 4096 + lane * 4;
         const float emitAlpha =
 #if SPLIT

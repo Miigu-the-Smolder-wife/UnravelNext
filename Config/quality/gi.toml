@@ -47,6 +47,10 @@ history_window_rule = "lighting"   # V2.2 11.2-3: the running mean's window from
                                    # fast mean and spread: heavy-tailed lamp-hotspot samples biased the single bounce beside a
                                    # lamp by +7 to +13 % (GiAnalytic 8; fixed window within 0.33 %) [measured]
 lighting_recent_frames = 256
+path_guiding = false               # V2.2 D-12 (decision item): each GI ray's texel from a mixture of the uniform choice and one
+                                   # proportional to the texels' irradiance share in the history (GiGuide.hlsl), weighted by
+                                   # 1 / pdf (balance heuristic); texels average the rays that landed in them. Same ray count
+path_guiding_uniform_share = 0.5
 history_updates_max_static = 256   # the running mean's window while the entry's light is steady: a fast mean (1/16) of its
                                    # anchor irradiance within 4 sigma (the update's own ray spread) of the history; a change
                                    # beyond that cuts the window to history_updates_max at once (moving sun, lights: any speed).
