@@ -294,6 +294,7 @@ int main(int argc, char** argv)
         float rotateDegPerS = 0, translateMps = 0, strafeMps = 0;
         bool synthetic = false;
         uint64_t motionStart = 0, cutAt = UINT64_MAX, lightToggleAt = UINT64_MAX, sunStepAt = UINT64_MAX;
+        uint32_t addShadowLights = 0;  // --add-shadow-lights N (game request 09-30: frames failed past ~97 shadowed local lights)
         double cutTime = 0;
         uint32_t lightToggleIndex = 0;
         float sunStepDeg = 0;
@@ -374,6 +375,7 @@ int main(int argc, char** argv)
                 cutAt = std::stoull(v.substr(0, colon));
                 if (colon != std::string::npos) cutTime = std::stod(v.substr(colon + 1));
             }
+            else if (a == "--add-shadow-lights") addShadowLights = (uint32_t)std::stoul(next());
             else if (a == "--light-toggle-at")
             {
                 const std::string v = next();
@@ -568,6 +570,22 @@ int main(int argc, char** argv)
         const float3 windDir0 = s.windDirection;
         if (lightToggleAt != UINT64_MAX && lightToggleIndex >= s.lights.size())
             fail("--light-toggle-at: light %u of %zu", lightToggleIndex, s.lights.size());
+        if (addShadowLights > 0 && !s.cameras.empty())
+        {
+            // N shadowed point lights on a grid around the host camera (1.5 m apart, 20 per row, 1 m above it, range 4 m)
+            const scene::Camera& cam = s.cameras[0];  // (the gate renders camera 0)
+            for (uint32_t i = 0; i < addShadowLights; ++i)
+            {
+                scene::Light l;
+                l.type = scene::LightType::Point;
+                l.position = { cam.position.x + 1.5f * ((float)(i % 20) - 9.5f), cam.position.y + 1.0f, cam.position.z + 1.5f * ((float)(i / 20) - 4.5f) };
+                l.intensity = 20;
+                l.range = 4;
+                l.castShadow = true;
+                s.lights.push_back(l);
+            }
+            logf("added %u shadowed point lights around the camera: %zu lights\n", addShadowLights, s.lights.size());
+        }
         const std::vector<scene::Light> lights0 = s.lights;
         if (lightToggleAt != UINT64_MAX)
         {
@@ -1128,6 +1146,7 @@ int main(int argc, char** argv)
             }
 #endif
             const shadow::VsmStats& st = shadow::stats(renderer.trackState());
+            logf("local shadows: %u slots assigned, %u raster-active, %u shadowed lights without a slot\n", st.localAssigned, st.localActive, st.localWithoutSlot);
             double sPasses = 0, raster = 0;
             for (const auto& [name, d] : r.passMs)
                 if (name.rfind("s.", 0) == 0)

@@ -305,6 +305,10 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     // History discontinuity (v1.35): no previous view in this frame; a restore also has no previous transforms or
     // palettes. The tracks reset their own temporal state from frame.discontinuity.
     FrameContext frame = in;
+    // A new recording: per-frame allocations restart even when a failed attempt left this frame index behind (the views
+    // of a frame that failed kept counting, and every later attempt failed with "more than 16 views").
+    m_trackState.beginRecord();
+    m_slotFrame = UINT64_MAX;
     if (frame.discontinuity != 0) frame.mainView.prevViewProj = frame.mainView.viewProj;
     if (frame.autoExposure)
     {

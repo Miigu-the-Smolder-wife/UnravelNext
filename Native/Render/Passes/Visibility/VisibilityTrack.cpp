@@ -40,7 +40,7 @@ using namespace unx::visibility::detail;
 namespace hier = unx::clusterbuilder::gpu;
 
 constexpr uint32_t kNone = gpu::kNone;
-constexpr uint32_t kViewsPerSlot = 4096;  // cull views uploaded per frame (all runs)
+constexpr uint32_t kViewsPerSlot = 4096;  // cull views of one upload chunk per frame in flight (more chunks as a frame needs)
 constexpr uint32_t kReadbackBytes = 256;
 
 struct Settings
@@ -121,11 +121,18 @@ struct State
 {
     Device* device = nullptr;
     ComPtr<ID3D12CommandSignature> dispatchSignature, meshSignature;
-    ComPtr<ID3D12Resource> upload;
-    uint8_t* uploadMapped = nullptr;
+    // Cull view uploads: chunks of slots x kViewsPerSlot views; a frame takes the chunks it needs in order (a run's views stay
+    // in one chunk). A frame with more views than one chunk holds - S's 42 views per shadowed local light past ~97 lights -
+    // used to fail ("more than 4096 cull views"); the chunks stay allocated for later frames.
+    struct ViewChunk
+    {
+        ComPtr<ID3D12Resource> buffer;
+        uint8_t* mapped = nullptr;
+    };
+    std::vector<ViewChunk> viewChunks;
     uint32_t slots = 0;
-    uint64_t frame = UINT64_MAX;
-    uint32_t viewsUsed = 0, runsUsed = 0;
+    uint64_t frame = UINT64_MAX, record = UINT64_MAX;
+    uint32_t chunkUsed = 0, viewsUsed = 0, runsUsed = 0;
     std::vector<std::vector<uint32_t>> runSrvs;  // per slot: view SRVs of the runs of that frame
     struct StatsRun  // cull state readback of a named run ("main" or a raster request), one slot per frame in flight
     {
@@ -168,7 +175,8 @@ struct State
             if (v.hiz.srv != kNone) h.freeResource(v.hiz.srv);
             for (uint32_t i : v.hiz.uavs) h.freeResource(i);
         }
-        if (upload) upload->Unmap(0, nullptr);
+        for (ViewChunk& c : viewChunks)
+            if (c.buffer) c.buffer->Unmap(0, nullptr);
         for (auto& [name, run] : stats)
             if (run.readback) run.readback->Unmap(0, nullptr);
         for (VBuffer* b : { &cullScene, &chunks, &chunkInstances, &flat, &skinList, &skinSlots, &jointSpheres, &skinBounds })
@@ -228,9 +236,6 @@ State& state(FramePassContext& fc)
     s.slots = std::max(fc.framesInFlight, 1u);
     s.dispatchSignature = signature(fc.device, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH);
     s.meshSignature = signature(fc.device, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH);
-    s.upload = createBuffer(fc.device, (uint64_t)s.slots * kViewsPerSlot * sizeof(CullView), D3D12_HEAP_TYPE_UPLOAD, L"V cull views");
-    D3D12_RANGE none{ 0, 0 };
-    check(s.upload->Map(0, &none, reinterpret_cast<void**>(&s.uploadMapped)), "map V cull views");
     s.runSrvs.resize(s.slots);
     return s;
 }
@@ -655,22 +660,39 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
 
 uint32_t uploadViews(State& s, FramePassContext& fc, const std::vector<CullView>& views)
 {
-    if (s.frame != fc.frame.frameIndex)
+    const uint64_t record = fc.trackState ? fc.trackState->recordSerial() : 0;
+    if (s.frame != fc.frame.frameIndex || s.record != record)
     {
         s.frame = fc.frame.frameIndex;
+        s.record = record;
+        s.chunkUsed = 0;
         s.viewsUsed = 0;
         s.runsUsed = 0;
     }
-    if (s.viewsUsed + views.size() > kViewsPerSlot) fail("V: more than %u cull views in one frame", kViewsPerSlot);
+    if (views.size() > kViewsPerSlot) fail("V: a raster run of %zu views (at most %u)", views.size(), kViewsPerSlot);
+    if (s.viewsUsed + views.size() > kViewsPerSlot)
+    {
+        ++s.chunkUsed;
+        s.viewsUsed = 0;
+    }
+    if (s.chunkUsed == s.viewChunks.size())
+    {
+        State::ViewChunk c;
+        c.buffer = createBuffer(fc.device, (uint64_t)s.slots * kViewsPerSlot * sizeof(CullView), D3D12_HEAP_TYPE_UPLOAD, L"V cull views");
+        D3D12_RANGE none{ 0, 0 };
+        check(c.buffer->Map(0, &none, reinterpret_cast<void**>(&c.mapped)), "map V cull views");
+        s.viewChunks.push_back(c);
+    }
+    const State::ViewChunk& chunk = s.viewChunks[s.chunkUsed];
     const uint32_t slot = (uint32_t)(fc.frame.frameIndex % s.slots);
     const uint32_t first = slot * kViewsPerSlot + s.viewsUsed;
-    std::memcpy(s.uploadMapped + (uint64_t)first * sizeof(CullView), views.data(), views.size() * sizeof(CullView));
+    std::memcpy(chunk.mapped + (uint64_t)first * sizeof(CullView), views.data(), views.size() * sizeof(CullView));
     // Every view of a run culls the same scene (C3) and the same runtime instances (C2b).
     const GpuScene::GpuInstanceRange gpuRange = fc.scene.gpuInstanceRange();
     const uint32_t runtime[5] = { s.cullScene.srv, fc.scene.staticInstanceCount(),
                                   (uint32_t)fc.scene.instances().size() > fc.scene.staticInstanceCount() ? (uint32_t)fc.scene.instances().size() - fc.scene.staticInstanceCount() : 0u,
                                   gpuRange.first, gpuRange.capacity };
-    for (size_t v = 0; v < views.size(); ++v) std::memcpy(s.uploadMapped + (uint64_t)(first + v) * sizeof(CullView) + offsetof(CullView, cullSceneSrv), runtime, sizeof runtime);
+    for (size_t v = 0; v < views.size(); ++v) std::memcpy(chunk.mapped + (uint64_t)(first + v) * sizeof(CullView) + offsetof(CullView, cullSceneSrv), runtime, sizeof runtime);
     std::vector<uint32_t>& srvs = s.runSrvs[slot];
     if (s.runsUsed == srvs.size()) srvs.push_back(fc.device.descriptors().allocateResource());
     const uint32_t srv = srvs[s.runsUsed++];
@@ -681,7 +703,7 @@ uint32_t uploadViews(State& s, FramePassContext& fc, const std::vector<CullView>
     sd.Buffer.FirstElement = first;
     sd.Buffer.NumElements = (UINT)views.size();
     sd.Buffer.StructureByteStride = sizeof(CullView);
-    fc.device.d3d()->CreateShaderResourceView(s.upload.Get(), &sd, fc.device.descriptors().resourceCpu(srv));
+    fc.device.d3d()->CreateShaderResourceView(chunk.buffer.Get(), &sd, fc.device.descriptors().resourceCpu(srv));
     s.viewsUsed += (uint32_t)views.size();
     return srv;
 }

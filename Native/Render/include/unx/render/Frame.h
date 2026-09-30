@@ -49,9 +49,14 @@ public:
         return *static_cast<T*>(p.get());
     }
     void clear() { m_entries.clear(); }
+    // One recording of a frame (FrameRenderer::record): tracks that count per-frame allocations key them on this as well
+    // as on the frame index - a recording that failed keeps its frame index, and the next attempt starts from zero.
+    void beginRecord() { ++m_record; }
+    uint64_t recordSerial() const { return m_record; }
 
 private:
     std::unordered_map<std::string, std::shared_ptr<void>> m_entries;
+    uint64_t m_record = 0;
 };
 
 // Cross-track services, provided by core (unx_frame) so modules never link each other.
