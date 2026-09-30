@@ -103,7 +103,7 @@ void main(uint2 o : SV_DispatchThreadID)
     if (any(o >= outSize)) return;
     Texture2D<float4> colour = ResourceDescriptorHeap[P[0].x];
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].y];
-    Texture2D<float2> motionTex = ResourceDescriptorHeap[P[0].z];
+    Texture2D<float4> motionTex = ResourceDescriptorHeap[P[0].z];
     RWTexture2D<float4> output = ResourceDescriptorHeap[P[1].x];
     const int2 inSize = int2(P[1].yz);
     const float2 jitter = asfloat(P[2].zw);
@@ -113,83 +113,71 @@ void main(uint2 o : SV_DispatchThreadID)
     const float2 x = uv * float2(inSize);
     const int2 kc = int2(floor(x + jitter));  // the sample whose unjittered centre is within half a pixel of x
 
-    float3 sumWide = 0, sum = 0, lo = 1e30, hi = -1e30;
+    Texture2D<float4> base = ResourceDescriptorHeap[P[4].x];
+    float3 sumWide = 0, sum = 0, baseWide = 0, baseSum = 0;
     float wsumWide = 0, wsum = 0, nearest = -1;
     int2 nearestK = clamp(kc, 0, inSize - 1);
     [unroll] for (int dy = -1; dy <= 1; ++dy)
         [unroll] for (int dx = -1; dx <= 1; ++dx)
         {
             const int2 k = clamp(kc + int2(dx, dy), 0, inSize - 1);
-            float3 c = colour.Load(int3(k, 0)).rgb;
-            c = all(isfinite(c)) ? upTonemap(max(c, 0)) : 0;
-            const float3 y = upYCoCg(c);
-            lo = min(lo, y);
-            hi = max(hi, y);
-            const float2 d = float2(k) + 0.5 - jitter - x;  // internal pixels
+            const float3 c = max(colour.Load(int3(k, 0)).rgb, 0);
+            const float3 b = base.Load(int3(k, 0)).rgb;
+            const float3 detail = all(isfinite(c)) ? c : 0;
+            const float2 d = float2(k) + 0.5 - jitter - x;
             const float wWide = exp(-2.29 * dot(d, d));
-            sumWide += wWide * c;
+            sumWide += wWide * detail;
+            baseWide += wWide * b;
             wsumWide += wWide;
             const float2 dOut = d * scale;
             const float w = exp(-K * dot(dOut, dOut));
-            sum += w * c;
+            sum += w * detail;
+            baseSum += w * b;
             wsum += w;
-            const float z = depth.Load(int3(k, 0));  // reversed Z: the largest is the nearest
-            if (z > nearest)
-            {
-                nearest = z;
-                nearestK = k;
-            }
+            const float z = depth.Load(int3(k, 0));
+            if (z > nearest) { nearest = z; nearestK = k; }
         }
     const float3 wide = sumWide / max(wsumWide, 1e-6);
-
-    // The history's weight cap in frames of this kernel's expected per-frame weight (sample density 1 / (scale.x
-    // scale.y) per output pixel^2 times the kernel's integral pi / K): still or moving.
-    const float2 motionUv = motionTex.Load(int3(nearestK, 0));
+    const float4 surface = motionTex.Load(int3(nearestK, 0));
+    const float2 motionUv = surface.xy;
     const float movePx = length(motionUv * float2(outSize));
     const float perFrame = (3.14159265 / K) / (scale.x * scale.y);
     const float capFrames = lerp(asfloat(P[3].y), asfloat(P[3].z), saturate(movePx / 0.25));
     const float cap = capFrames * perFrame;
     float n = 0;
-    float3 history = 0;
+    float3 history = 0, historyBase = 0;
     const float2 prevUv = uv - motionUv;
-    const float moving = saturate(movePx / 0.25);
-    const float3 extent = max(hi - lo, 1e-4);
     if ((P[1].w & 1u) == 0 && all(prevUv >= 0) && all(prevUv <= 1))
     {
         Texture2D<float4> historyTex = ResourceDescriptorHeap[P[0].w];
-        const float4 h = movePx > 1e-3 ? upHistoryLanczos(historyTex, prevUv, float2(outSize)) : upHistory(historyTex, prevUv, float2(outSize));
-        if (all(isfinite(h)))
+        Texture2D<float4> baseHistory = ResourceDescriptorHeap[P[4].z];
+        const float previousDepth = baseHistory.SampleLevel(g_pointClamp, prevUv, 0).a;
+        const bool geometryMatches = surface.w == 0 ? previousDepth == 0 :
+            previousDepth > 0 && abs(previousDepth - surface.w) <= max(0.002, 0.01 * surface.w);
+        const float4 h = movePx == 0 ? historyTex.Load(int3(o, 0)) :
+                         movePx > 1e-3 ? upHistoryLanczos(historyTex, prevUv, float2(outSize)) : upHistory(historyTex, prevUv, float2(outSize));
+        const float4 hb = movePx == 0 ? baseHistory.Load(int3(o, 0)) :
+                          movePx > 1e-3 ? upHistoryLanczos(baseHistory, prevUv, float2(outSize)) : upHistory(baseHistory, prevUv, float2(outSize));
+        if (geometryMatches && all(isfinite(h)) && all(isfinite(hb)))
         {
-            const float ratio = asfloat(P[3].x);
-            history = upTonemap(max(h.rgb * ratio, 0));
+            history = max(h.rgb, 0) * asfloat(P[3].x);
+            historyBase = max(hb.rgb, 0) * asfloat(P[3].x);
             n = clamp(h.a, 0, cap);
-            // Still: a low-frequency correction only where the history's mean over one internal pixel lies clearly
-            // outside what this frame's samples span (their min / max widened by half its extent: a lighting change, a
-            // disocclusion). The samples' mean +- 1 sigma box (4f2c4eb) moved the history every frame by a different
-            // amount per output pixel - the 3 x 3 samples of a frame do not span sub-internal-pixel detail, and which
-            // ones fall around a pixel depends on the jitter and on the pixel's phase in the 3 : 2 grid: a regular
-            // grid and comb pattern on the wood grain and steps along the mouldings that native does not have
-            // [84e789f crop_train_1440, user]; CPU model (Tools/ImageQuality/UpscaleModel.py, high-contrast grain, still):
-            // SSIM 0.958 / energy 1.16 with the sigma box, 0.9987 / 0.95 with this one, the same lag after a lighting
-            // change as before.
-            const float2 o2 = 0.5 / float2(inSize);  // half an internal pixel in uv
-            float3 low = 0;
-            [unroll] for (uint q = 0; q < 4; ++q)
-                low += upTonemap(max(historyTex.SampleLevel(g_linearClamp, prevUv + float2(q & 1 ? o2.x : -o2.x, q & 2 ? o2.y : -o2.y), 0).rgb * ratio, 0));
-            const float3 lowY = upYCoCg(low * 0.25);
-            const float3 delta = upClip(lowY, lo - 0.5 * extent, hi + 0.5 * extent) - lowY;
-            const float reject = saturate(max(abs(delta.x) / extent.x, max(abs(delta.y) / extent.y, abs(delta.z) / extent.z)));
-            const float3 hY = upYCoCg(history);
-            const float3 still = lerp(hY + delta, upClip(hY, lo, hi), reject);
-            // Moving: the whole history within the samples' min / max widened by a tenth (the Lanczos overshoot and
-            // what moved in from elsewhere; a moving history holds no sub-internal-pixel detail the clip could remove).
-            history = upRgb(lerp(still, upClip(hY, lo - 0.1 * extent, hi + 0.1 * extent), moving));
         }
     }
-    // This frame's value: the narrow kernel's mean; where the history holds little (a new surface), the wide kernel's.
     const float3 sharp = wsum > 1e-5 ? sum / wsum : wide;
     const float3 current = lerp(wide, sharp, saturate(n / max(4 * perFrame, 1e-6)));
+    const float3 wideBase = baseWide / max(wsumWide, 1e-6);
+    const float3 sharpBase = wsum > 1e-5 ? baseSum / wsum : wideBase;
+    const float3 currentBase = lerp(wideBase, sharpBase, saturate(n / max(4 * perFrame, 1e-6)));
     const float alpha = wsum / max(wsum + n, 1e-9);
     const float3 result = max(lerp(history, current, n > 0 ? alpha : 1.0), 0);
-    output[o] = float4(upInverse(result), min(n + wsum, cap));
+    RWTexture2D<float4> detailOutput = ResourceDescriptorHeap[P[4].y];
+    RWTexture2D<float4> baseOutput = ResourceDescriptorHeap[P[4].w];
+    const float3 resultBase = max(lerp(historyBase, currentBase, n > 0 ? alpha : 1.0), 0);
+    detailOutput[o] = float4(result, min(n + wsum, cap));
+    baseOutput[o] = float4(resultBase, surface.z);
+    const float2 baseUv = (x + jitter) / float2(inSize);
+    const float3 baseNow = max(base.SampleLevel(g_linearClamp, baseUv, 0).rgb, 0);
+    output[o] = float4(min(baseNow * (result / max(resultBase, 1e-6)), 65504.0), 1);
 }

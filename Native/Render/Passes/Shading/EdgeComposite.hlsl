@@ -185,8 +185,10 @@ void main(uint i : SV_DispatchThreadID)
         const float3 b = edgeProject(t.w1 - g_cameraPosition);
         const float3 c = edgeProject(t.w2 - g_cameraPosition);
         if (min(a.z, min(b.z, c.z)) <= g_nearPlane * 0.5) continue;  // crosses the camera plane: left to the remainder
-        const float ar = edgeTriangleArea(a.xy, b.xy, c.xy, float2(pixel));
-        const uint m = (P[3].x & 512) ? 0xFFFFFFFFu : coverageTriangleMask(a.xy, b.xy, c.xy, float2(pixel));
+        float2 ca = a.xy, cb = b.xy, cc = c.xy;
+        coveragePixelTriangle(ca, cb, cc, float2(pixel), g_upscaleRatio > 0 ? g_upscaleRatio : 1);
+        const float ar = edgeTriangleArea(ca, cb, cc, float2(pixel));
+        const uint m = (P[3].x & 512) ? 0xFFFFFFFFu : coverageTriangleMask(ca, cb, cc, float2(pixel));
         float cut = 1;
         const MTextureSet ts = mLoadTextureSet(P[3].y, t.material);
         if (ts.coverage != UNX_NONE && (P[3].x & 1024) == 0)

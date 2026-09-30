@@ -34,6 +34,33 @@ void main(uint id : SV_DispatchThreadID)
     for (uint k = 0; k < 3; ++k) v[k] = 0.5 + (float2(unitRandom(state), unitRandom(state)) * 2 - 1) * spread;
     StructuredBuffer<uint2> lut = ResourceDescriptorHeap[P[0].x];
     RWByteAddressBuffer output = ResourceDescriptorHeap[P[0].y];
+    const float scale = asfloat(P[1].x);
+    if (scale > 0)
+    {
+        // Independent oracle: move the sample positions, leaving the triangle
+        // untouched. Production moves the triangle and uses the unit-pixel LUT.
+        const float orient = (v[1].x - v[0].x) * (v[2].y - v[0].y) - (v[2].x - v[0].x) * (v[1].y - v[0].y);
+        const float sign = orient >= 0 ? 1 : -1;
+        uint exact = 0, ambiguous = 0;
+        [unroll] for (uint j = 0; j < COVERAGE_SAMPLES; ++j)
+        {
+            const float2 q = 0.5 + (coverageSample(j) - 0.5) * scale;
+            bool inside = true, edge = false;
+            [unroll] for (uint e = 0; e < 3; ++e)
+            {
+                const float2 a = v[e], b = v[(e + 1) % 3];
+                const float value = ((b.x - a.x) * (q.y - a.y) - (b.y - a.y) * (q.x - a.x)) * sign;
+                inside = inside && value >= 0;
+                // Same geometric edge tolerance as the raster coverage oracle,
+                // in internal pixels; do not treat float edge ties as mismasks.
+                edge = edge || abs(value) <= 2e-4 * length(b - a);
+            }
+            if (inside) exact |= 1u << j;
+            if (edge) ambiguous |= 1u << j;
+        }
+        output.Store3(12 * id, uint3(exact, coveragePixelMaskLut(v[0], v[1], v[2], 0, scale, lut), ambiguous));
+        return;
+    }
     // Subsamples the LUT path leaves to the exact test (its extra work), recomputed here the same way.
     const float orient = (v[1].x - v[0].x) * (v[2].y - v[0].y) - (v[2].x - v[0].x) * (v[1].y - v[0].y);
     const float s = orient >= 0 ? 1.0 : -1.0;

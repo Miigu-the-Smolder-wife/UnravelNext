@@ -67,7 +67,7 @@ void main(uint i : SV_DispatchThreadID)
         const float depth = depthTex.Load(int3(px, 0));
         float3 normal;
         const float3 world = shadowReceiver(depthTex, P[0].y, px, depth, normal);
-        const float footprint = 2 * linearDepth(depth) * g_tanHalfFovY / g_viewHeight;
+        const float footprint = outputPixelFootprint(linearDepth(depth));
 #if STAGE == 0
         const float tanSun = tan(g_sunAngularRadius);
         const uint k = vsmLevelForFootprint(vc, footprint);

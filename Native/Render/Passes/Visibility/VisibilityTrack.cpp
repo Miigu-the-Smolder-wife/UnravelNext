@@ -1654,6 +1654,13 @@ void visibility(FramePassContext& fc, ViewResources& view)
         r.hizHeight = vs->hiz.height;
     }
     CullView cullView = viewOf(view.view, cfg, occlusion);
+    if (fc.frame.upscale.outputHeight > fc.frame.mainView.height)
+    {
+        if (view.view.kind == gpu::ViewKind::Main)
+            cullView.lodScale = view.view.proj.m[1][1] * 0.5f * (float)fc.frame.upscale.outputHeight;
+        else if (view.view.kind == gpu::ViewKind::PlanarReflection)
+            cullView.lodScale *= (float)fc.frame.upscale.outputHeight / (float)fc.frame.mainView.height;
+    }
     if (vs)
     {
         // Band hysteresis (a) re-evaluates the band from the previous frame's camera; a history discontinuity (cut,

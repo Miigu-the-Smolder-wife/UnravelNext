@@ -77,7 +77,7 @@ ReflJob reflLoadJob(uint job)
     j.rays = j.mode == REFL_M ? 1u : P[4].w;
     j.lobe = reflectionLobeHalfAngle(j.s.roughness, dot(j.s.normal, j.s.view));
     // Ray cone of the pixel (ReflectionShade.hlsli): its width at this surface and its spread after the lobe.
-    const float pixelSpread = 2 * g_tanHalfFovY / g_viewHeight;
+    const float pixelSpread = outputPixelFootprint(1);
     j.coneWidth = pixelSpread * distance(j.s.position, g_cameraPosition);
     j.coneSpread = pixelSpread + 2 * tan(j.lobe);
     j.seed = reflPixelSeed(j.pixel);

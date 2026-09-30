@@ -22,6 +22,113 @@ uint32_t asU(float f)
     return u;
 }
 
+// Upscaled main views retain reflection samples in output coordinates. Keeping
+// them on the jittered internal grid would repeatedly low-pass the signal before
+// the output reconstruction sees it. Ray generation and the temporal validity
+// rules (surface, depth, lobe travel and reflected hit motion) remain unchanged.
+struct OutputReflectionHistory
+{
+    Device* device = nullptr;
+    ComPtr<ID3D12Resource> colour[2], keys[2];
+    uint32_t width = 0, height = 0, parity = 0;
+    bool fresh = true;
+    ~OutputReflectionHistory()
+    {
+        if (!device) return;
+        for (auto& r : colour) if (r) device->deferRelease(r);
+        for (auto& r : keys) if (r) device->deferRelease(r);
+    }
+    void ensure(Device& d, uint32_t w, uint32_t h)
+    {
+        if (colour[0] && width == w && height == h) return;
+        device = &d;
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC1 desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = w; desc.Height = h;
+        desc.DepthOrArraySize = desc.MipLevels = 1;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        for (uint32_t i = 0; i < 2; ++i)
+        {
+            if (colour[i]) d.deferRelease(colour[i]);
+            if (keys[i]) d.deferRelease(keys[i]);
+            desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS,
+                  nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&colour[i])), "R output history");
+            desc.Format = DXGI_FORMAT_R32G32_UINT;
+            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS,
+                  nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&keys[i])), "R output history keys");
+        }
+        width = w; height = h; fresh = true;
+    }
+};
+
+void accumulateOutputReflection(FramePassContext& fc, const ViewResources& main, TextureRef reflection, TextureRef modes,
+                                TextureRef distance, uint32_t historyMax, float lobeShift, uint32_t flags, float3 prevCamera)
+{
+    RenderGraph& g = fc.graph;
+    const auto& u = fc.frame.upscale;
+    const uint32_t w = main.view.width, h = main.view.height, W = u.outputWidth, H = u.outputHeight;
+    auto& state = fc.state<OutputReflectionHistory>("R.outputHistory");
+    state.ensure(fc.device, W, H);
+    if (state.fresh || u.reset) flags |= 1u;
+    state.fresh = false;
+    const uint32_t prev = state.parity, next = prev ^ 1u;
+    state.parity = next;
+    auto importColour = [&](uint32_t i) { return g.importTexture(state.colour[i].Get(),
+        { "R output history", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS); };
+    auto importKeys = [&](uint32_t i) { return g.importTexture(state.keys[i].Get(),
+        { "R output history keys", W, H, 1, 1, DXGI_FORMAT_R32G32_UINT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS); };
+    const TextureRef before = importColour(prev), after = importColour(next), keysBefore = importKeys(prev), keysAfter = importKeys(next);
+    const TextureRef depth = main.depth, gbuffer = main.gbuffer, vis = main.visId;
+    const BufferRef visible = main.visibleClusters;
+    const TextureRef probes = main.screenProbes, maps = main.screenProbeMaps;
+    const TextureRef control = g.createTexture({ "R reconstruction control", w, h, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+    const auto cb = main.frameConstants;
+    auto* controlPso = fc.shaders.compute("Passes/Reflection/ReflectionUpscaleControl");
+    g.addPass("r.refl.accumulate.control", QueueType::Compute,
+        [&](PassBuilder& b) {
+            for (const auto t : { reflection, modes, depth, gbuffer, probes, maps }) b.use(t, Use::SrvCompute);
+            b.use(control, Use::UavCompute);
+        },
+        [=](PassContext& c) {
+            const uint32_t k[12] = { c.srv(reflection), c.srv(modes), c.srv(depth), c.srv(gbuffer), c.srv(probes), c.srv(maps), c.uav(control), w, h, 0, 0, 0 };
+            c.cmd->SetPipelineState(controlPso); c.computeConstants(k, 12); c.bindFrameConstants(cb);
+            c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+        });
+    float4x4 delta{};
+    for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) delta.m[r][c] = u.prevViewProj.m[r][c] - u.viewProj.m[r][c];
+    const float jx = u.jitterX, jy = u.jitterY, angle = 2 * std::tan(main.view.verticalFov * 0.5f) / H;
+    auto* accumulate = fc.shaders.compute("Passes/Reflection/ReflectionUpscaleAccumulate");
+    g.addPass("r.refl.accumulate.output", QueueType::Compute,
+        [&](PassBuilder& b) {
+            for (const auto t : { reflection, modes, depth, gbuffer, vis, distance, before, keysBefore, control }) b.use(t, Use::SrvCompute);
+            b.use(visible, Use::SrvCompute); b.use(after, Use::UavCompute); b.use(keysAfter, Use::UavCompute);
+        },
+        [=](PassContext& c) {
+            uint32_t k[44] = { c.srv(reflection), c.srv(modes), c.srv(depth), c.srv(gbuffer), c.srv(vis), c.srv(visible), c.srv(distance), c.srv(before),
+                c.srv(keysBefore), c.uav(after), c.uav(keysAfter), historyMax, w, h, asU(lobeShift), flags,
+                asU(prevCamera.x), asU(prevCamera.y), asU(prevCamera.z), asU(angle), W, H, asU(jx), asU(jy) };
+            for (int r = 0; r < 4; ++r) for (int col = 0; col < 4; ++col) k[24 + 4 * r + col] = asU(delta.m[r][col]);
+            k[40] = c.srv(control);
+            c.cmd->SetPipelineState(accumulate); c.computeConstants(k, 44); c.bindFrameConstants(cb);
+            c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+        });
+    auto* sample = fc.shaders.compute("Passes/Reflection/ReflectionUpscaleSample");
+    g.addPass("r.refl.accumulate.sample", QueueType::Compute,
+        [&](PassBuilder& b) {
+            for (const auto t : { after, keysAfter, depth, gbuffer, vis, modes, control }) b.use(t, Use::SrvCompute);
+            b.use(visible, Use::SrvCompute); b.use(reflection, Use::UavCompute);
+        },
+        [=](PassContext& c) {
+            const uint32_t k[16] = { c.uav(reflection), c.srv(after), c.srv(keysAfter), c.srv(depth), c.srv(vis), c.srv(visible), c.srv(gbuffer), c.srv(modes),
+                w, h, W, H, asU(jx), asU(jy), c.srv(control), 0 };
+            c.cmd->SetPipelineState(sample); c.computeConstants(k, 16); c.bindFrameConstants(cb);
+            c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+        });
+}
+
 constexpr uint32_t kDescStride = (uint32_t)((sizeof(D3D12_DISPATCH_RAYS_DESC) + 7) / 8 * 8);
 constexpr uint32_t kPlanarMax = 4, kCandidatesMax = 64, kPlanarSlotBytes = 4096, kPlanarSlots = 4;  // ring slots > frames in flight
 // Read-back slot: candidate pixel counts, timestamps (trace begin/end, then begin/end per view), job counters (args 0..16).
@@ -1134,6 +1241,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         const float3 prevCamera = m_prevCamera;
         m_prevCamera = main.view.position;
         const float pixelAngle = 2.0f * std::tan(main.view.verticalFov * 0.5f) / height;
+        if (fc.frame.upscale.outputWidth > width)
+            accumulateOutputReflection(fc, main, reflection, modes, history, s.temporalHistoryMax, s.temporalLobeShift, flags, prevCamera);
+        else
         g.addPass("r.refl.accumulate", QueueType::Compute,
                   [&](PassBuilder& b) {
                       b.use(reflection, Use::UavCompute);

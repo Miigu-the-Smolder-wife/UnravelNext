@@ -91,7 +91,11 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
         }
         else
         {
-            const MSurface s = mSurfaceFromVis(visId, P[0].y, float2(pixel) + 0.5);
+            MSurface s = mSurfaceFromVis(visId, P[0].y, float2(pixel) + 0.5);
+            // Geometry normal variance, like texture moments, is over an output
+            // pixel. UV gradients are scaled inside mSampleGrad/mNormalMoments.
+            s.dndx *= mFootprintScale();
+            s.dndy *= mFootprintScale();
             const GpuMaterial m = loadMaterial(s.material);
             const MTextureSet ts = mLoadTextureSet(P[2].x, s.material);
 

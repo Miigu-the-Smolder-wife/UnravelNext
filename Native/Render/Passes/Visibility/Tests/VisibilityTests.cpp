@@ -1791,104 +1791,110 @@ UNX_TEST(coverage_mask_lut_matches_exact)
     // table of masks at the bin centres missed the gate |coverage difference| P99 <= 1/32 (P99 2/32, worst 5/32): every
     // subsample within a bin's reach of the edge could land on the wrong side. The table now holds conservative masks and
     // the open subsamples are tested exactly, so the result must be the exact mask, bit for bit.
-    const std::vector<uint32_t>& table = coverageMaskTable();
-    const uint32_t cases = 3u << 18;  // three size classes (TestCoverageMaskLut.hlsl), 262,144 each
-    auto buffer = [&](D3D12_HEAP_TYPE heap, uint64_t bytes, bool uav) {
-        D3D12_HEAP_PROPERTIES hp{ heap };
-        D3D12_RESOURCE_DESC1 rd{};
-        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        rd.Width = bytes;
-        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
-        rd.SampleDesc.Count = 1;
-        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        rd.Flags = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
-        ComPtr<ID3D12Resource> r;
-        check(device().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&r)),
-              "test buffer");
-        return r;
-    };
-    ComPtr<ID3D12Resource> lut = buffer(D3D12_HEAP_TYPE_UPLOAD, table.size() * 4, false), out = buffer(D3D12_HEAP_TYPE_DEFAULT, (uint64_t)cases * 12, true),
-                           rb = readbackBuffer((uint64_t)cases * 12);
+    for (const float pixelScale : { 0.0f, 0.5f, 2.0f / 3.0f, 0.75f })
     {
-        void* m = nullptr;
-        check(lut->Map(0, nullptr, &m), "map lut");
-        std::memcpy(m, table.data(), table.size() * 4);
-        lut->Unmap(0, nullptr);
-    }
-    const uint32_t lutSrv = device().descriptors().allocateResource(), outUav = device().descriptors().allocateResource();
-    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
-    sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sd.Buffer.NumElements = (UINT)table.size() / 2;
-    sd.Buffer.StructureByteStride = 8;
-    device().d3d()->CreateShaderResourceView(lut.Get(), &sd, device().descriptors().resourceCpu(lutSrv));
-    D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
-    ud.Format = DXGI_FORMAT_R32_TYPELESS;
-    ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-    ud.Buffer.NumElements = cases * 3;
-    ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-    device().d3d()->CreateUnorderedAccessView(out.Get(), nullptr, &ud, device().descriptors().resourceCpu(outUav));
-
-    RenderGraph graph(device());
-    ID3D12PipelineState* kernel = shaders().compute("Passes/Visibility/Tests/TestCoverageMaskLut");
-    const BufferRef lutRef = graph.importBuffer(lut.Get(), { "test.lut", table.size() * 4, 8 });
-    const BufferRef outRef = graph.importBuffer(out.Get(), { "test.lut.out", (uint64_t)cases * 12, 0 });
-    ID3D12Resource* dst = rb.Get();
-    graph.addPass("test.lut", QueueType::Graphics,
-                  [&](PassBuilder& b) {
-                      b.use(lutRef, Use::SrvCompute);
-                      b.use(outRef, Use::UavCompute);
-                  },
-                  [=](PassContext& c) {
-                      const uint32_t k[4] = { lutSrv, outUav, cases, 0x1234567u };
-                      c.cmd->SetPipelineState(kernel);
-                      c.computeConstants(k, 4);
-                      c.cmd->Dispatch((cases + 63) / 64, 1, 1);
-                  });
-    graph.addPass("test.lut.readback", QueueType::Graphics,
-                  [&](PassBuilder& b) {
-                      b.use(outRef, Use::CopySrc);
-                      b.keep();
-                  },
-                  [=](PassContext& c) { c.cmd->CopyBufferRegion(dst, 0, c.resource(outRef), 0, (uint64_t)cases * 12); });
-    graph.execute(nullptr);
-    device().waitIdle();
-
-    const uint32_t* r = nullptr;
-    check(rb->Map(0, nullptr, (void**)&r), "map");
-    // Per size class: triangles cutting the pixel (a mask neither empty nor full), masks differing from the exact one,
-    // and the subsamples tested exactly per such triangle (the LUT path's extra work; the exact mask tests 32 x 3 edges).
-    const char* classNames[3] = { "within 0.75 px", "within 3 px", "within 30 px" };
-    bool pass = true;
-    for (uint32_t sc = 0; sc < 3; ++sc)
-    {
-        uint64_t cut = 0, differ = 0, tested = 0, testedAll = 0, all = 0;
-        uint32_t worstTested = 0;
-        for (uint32_t i = sc; i < cases; i += 3)
+        const std::vector<uint32_t>& table = coverageMaskTable();
+        const uint32_t cases = 3u << 18;  // three size classes (TestCoverageMaskLut.hlsl), 262,144 each
+        auto buffer = [&](D3D12_HEAP_TYPE heap, uint64_t bytes, bool uav) {
+            D3D12_HEAP_PROPERTIES hp{ heap };
+            D3D12_RESOURCE_DESC1 rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            rd.Width = bytes;
+            rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            rd.Flags = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
+            ComPtr<ID3D12Resource> r;
+            check(device().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&r)),
+                  "test buffer");
+            return r;
+        };
+        ComPtr<ID3D12Resource> lut = buffer(D3D12_HEAP_TYPE_UPLOAD, table.size() * 4, false), out = buffer(D3D12_HEAP_TYPE_DEFAULT, (uint64_t)cases * 12, true),
+                               rb = readbackBuffer((uint64_t)cases * 12);
         {
-            const uint32_t exact = r[3 * i], fast = r[3 * i + 1], t = r[3 * i + 2];
-            ++all;
-            testedAll += t;
-            if (exact != fast) ++differ;
-            if (exact != 0 && exact != 0xFFFFFFFFu)
-            {
-                ++cut;
-                tested += t;
-                worstTested = std::max(worstTested, t);
-            }
+            void* m = nullptr;
+            check(lut->Map(0, nullptr, &m), "map lut");
+            std::memcpy(m, table.data(), table.size() * 4);
+            lut->Unmap(0, nullptr);
         }
-        logf("    %s: %llu triangles cut the pixel, masks differing from the exact one %llu; subsamples tested exactly: %.2f per cutting triangle (worst %u), "
-             "%.2f per triangle overall\n",
-             classNames[sc], (unsigned long long)cut, (unsigned long long)differ, cut ? (double)tested / cut : 0.0, worstTested, all ? (double)testedAll / all : 0.0);
-        pass = pass && cut > 0 && differ == 0;
+        const uint32_t lutSrv = device().descriptors().allocateResource(), outUav = device().descriptors().allocateResource();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Buffer.NumElements = (UINT)table.size() / 2;
+        sd.Buffer.StructureByteStride = 8;
+        device().d3d()->CreateShaderResourceView(lut.Get(), &sd, device().descriptors().resourceCpu(lutSrv));
+        D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = DXGI_FORMAT_R32_TYPELESS;
+        ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = cases * 3;
+        ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        device().d3d()->CreateUnorderedAccessView(out.Get(), nullptr, &ud, device().descriptors().resourceCpu(outUav));
+
+        RenderGraph graph(device());
+        ID3D12PipelineState* kernel = shaders().compute("Passes/Visibility/Tests/TestCoverageMaskLut");
+        const BufferRef lutRef = graph.importBuffer(lut.Get(), { "test.lut", table.size() * 4, 8 });
+        const BufferRef outRef = graph.importBuffer(out.Get(), { "test.lut.out", (uint64_t)cases * 12, 0 });
+        ID3D12Resource* dst = rb.Get();
+        graph.addPass("test.lut", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(lutRef, Use::SrvCompute);
+                          b.use(outRef, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t scaleBits;
+                          std::memcpy(&scaleBits, &pixelScale, sizeof(scaleBits));
+                          const uint32_t k[8] = { lutSrv, outUav, cases, 0x1234567u, scaleBits, 0, 0, 0 };
+                          c.cmd->SetPipelineState(kernel);
+                          c.computeConstants(k, 8);
+                          c.cmd->Dispatch((cases + 63) / 64, 1, 1);
+                      });
+        graph.addPass("test.lut.readback", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(outRef, Use::CopySrc);
+                          b.keep();
+                      },
+                      [=](PassContext& c) { c.cmd->CopyBufferRegion(dst, 0, c.resource(outRef), 0, (uint64_t)cases * 12); });
+        graph.execute(nullptr);
+        device().waitIdle();
+
+        const uint32_t* r = nullptr;
+        check(rb->Map(0, nullptr, (void**)&r), "map");
+        // Per size class: triangles cutting the pixel (a mask neither empty nor full), masks differing from the exact one,
+        // and the subsamples tested exactly per such triangle (the LUT path's extra work; the exact mask tests 32 x 3 edges).
+        const char* classNames[3] = { "within 0.75 px", "within 3 px", "within 30 px" };
+        bool pass = true;
+        for (uint32_t sc = 0; sc < 3; ++sc)
+        {
+            uint64_t cut = 0, differ = 0, tested = 0, testedAll = 0, all = 0;
+            uint32_t worstTested = 0;
+            for (uint32_t i = sc; i < cases; i += 3)
+            {
+                const uint32_t exact = r[3 * i], fast = r[3 * i + 1], t = r[3 * i + 2];
+                ++all;
+                testedAll += pixelScale > 0 ? (uint64_t)__popcnt(t) : t;
+                if ((exact ^ fast) & (pixelScale > 0 ? ~t : 0xFFFFFFFFu)) ++differ;
+                if (exact != 0 && exact != 0xFFFFFFFFu)
+                {
+                    ++cut;
+                    tested += pixelScale > 0 ? (uint64_t)__popcnt(t) : t;
+                    worstTested = std::max(worstTested, pixelScale > 0 ? (uint32_t)__popcnt(t) : t);
+                }
+            }
+            logf("    %s: %llu triangles cut the pixel, masks differing from the exact one %llu; %s: %.2f per cutting triangle (worst %u), "
+                 "%.2f per triangle overall\n",
+                 classNames[sc], (unsigned long long)cut, (unsigned long long)differ, pixelScale > 0 ? "edge-ambiguous subsamples" : "subsamples tested exactly", cut ? (double)tested / cut : 0.0, worstTested, all ? (double)testedAll / all : 0.0);
+            pass = pass && cut > 0 && differ == 0;
+        }
+        rb->Unmap(0, nullptr);
+        device().descriptors().freeResource(lutSrv);
+        device().descriptors().freeResource(outUav);
+        device().deferRelease(lut);
+        device().deferRelease(out);
+        device().deferRelease(rb);
+        logf("    pixel footprint scale %.6f: %s\n", pixelScale > 0 ? pixelScale : 1.0f, pass ? "PASS" : "FAIL");
+        CHECK(pass);
     }
-    rb->Unmap(0, nullptr);
-    device().descriptors().freeResource(lutSrv);
-    device().descriptors().freeResource(outUav);
-    device().deferRelease(lut);
-    device().deferRelease(out);
-    device().deferRelease(rb);
-    CHECK(pass);
 }
 
 UNX_TEST(coverage_layer_is_exact)

@@ -50,11 +50,11 @@ float2 coveragePolygonUv(float4 a, float4 b, float4 c, float2 ta, float2 tb, flo
 CoverageSample coveragePolygonGeometry(CoveragePolygon p, float2 pixel, out float2 mid)
 {
     CoverageSample s;
-    s.area = coverageTriangleAreaCentroid(p.a.xy, p.b.xy, p.c.xy, pixel, mid);
+    s.area = coveragePixelAreaCentroid(p.a.xy, p.b.xy, p.c.xy, pixel, g_upscaleRatio > 0 ? g_upscaleRatio : 1, mid);
     if (p.quad)
     {
         float2 c2;
-        const float area2 = coverageTriangleAreaCentroid(p.a.xy, p.c.xy, p.d.xy, pixel, c2);
+        const float area2 = coveragePixelAreaCentroid(p.a.xy, p.c.xy, p.d.xy, pixel, g_upscaleRatio > 0 ? g_upscaleRatio : 1, c2);
         if (area2 > 0) mid = (mid * s.area + c2 * area2) / (s.area + area2);
         s.area += area2;
     }
@@ -72,8 +72,8 @@ uint coveragePolygonMask(CoveragePolygon p, float2 pixel)
 {
     // The frame's coverage mask LUT (v1.34): coverageTriangleMask's bits at a fraction of the edge evaluations.
     StructuredBuffer<uint2> lut = ResourceDescriptorHeap[g_coverageMaskLut];
-    uint mask = coverageTriangleMaskLut(p.a.xy, p.b.xy, p.c.xy, pixel, lut);
-    if (p.quad) mask |= coverageTriangleMaskLut(p.a.xy, p.c.xy, p.d.xy, pixel, lut);
+    uint mask = coveragePixelMaskLut(p.a.xy, p.b.xy, p.c.xy, pixel, g_upscaleRatio > 0 ? g_upscaleRatio : 1, lut);
+    if (p.quad) mask |= coveragePixelMaskLut(p.a.xy, p.c.xy, p.d.xy, pixel, g_upscaleRatio > 0 ? g_upscaleRatio : 1, lut);
     return mask;
 }
 
@@ -86,7 +86,7 @@ void coveragePolygonAlpha(CoveragePolygon p, uint material, float2 pixel, float2
     const float2 ub = second ? p.tc : p.tb, uc = second ? p.td : p.tc;
     const GpuMaterial m = loadMaterial(material);
     const float2 uv0 = coveragePolygonUv(p.a, pb, pc, p.ta, ub, uc, mid);
-    const float footprint = 0.17677670;  // 1 / sqrt(COVERAGE_SAMPLES)
+    const float footprint = 0.17677670 * (g_upscaleRatio > 0 ? g_upscaleRatio : 1);  // 1 / sqrt(COVERAGE_SAMPLES)
     const float2 duvdx = (coveragePolygonUv(p.a, pb, pc, p.ta, ub, uc, mid + float2(1, 0)) - uv0) * footprint;
     const float2 duvdy = (coveragePolygonUv(p.a, pb, pc, p.ta, ub, uc, mid + float2(0, 1)) - uv0) * footprint;
     const uint before = countbits(s.mask);
@@ -99,7 +99,7 @@ void coveragePolygonAlpha(CoveragePolygon p, uint material, float2 pixel, float2
     for (uint bits = s.mask; bits != 0; bits &= bits - 1)
     {
         const uint i = firstbitlow(bits);
-        const float2 uv = coveragePolygonUv(p.a, pb, pc, p.ta, ub, uc, pixel + coverageSample(i));
+        const float2 uv = coveragePolygonUv(p.a, pb, pc, p.ta, ub, uc, pixel + 0.5 + (coverageSample(i) - 0.5) * (g_upscaleRatio > 0 ? g_upscaleRatio : 1));
         if (materialBaseColorGrad(m, uv, duvdx, duvdy).a < m.alphaCutoff) pass &= ~(1u << i);
     }
     s.area = pass == 0 ? 0 : s.area * (float)countbits(pass) / (float)before;

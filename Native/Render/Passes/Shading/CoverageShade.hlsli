@@ -206,7 +206,7 @@ float2 covFragmentCentre(MVertex v0, MVertex v1, MVertex v2, uint2 pixel)
 {
     const float3 a = covProject(v0.world - g_cameraPosition), b = covProject(v1.world - g_cameraPosition), c = covProject(v2.world - g_cameraPosition);
     float2 centre = float2(pixel) + 0.5;
-    if (min(a.z, min(b.z, c.z)) > 0) coverageTriangleAreaCentroid(a.xy, b.xy, c.xy, float2(pixel), centre);
+    if (min(a.z, min(b.z, c.z)) > 0) coveragePixelAreaCentroid(a.xy, b.xy, c.xy, float2(pixel), g_upscaleRatio > 0 ? g_upscaleRatio : 1, centre);
     return centre;
 }
 
@@ -219,11 +219,18 @@ struct CovMaterial
     float variance;   // slope variance (geometric + textures)
     float coatRoughness;  // A9: the coat's footprint-filtered perceptual roughness (layered materials; 0 otherwise)
 };
+// Geometric normal derivatives, like texture gradients, span an output
+// pixel. Keep the native expression unchanged when no reconstruction is active.
+float covGeometricVariance(MSurface sf)
+{
+    const float3 dx = sf.dndx * mFootprintScale(), dy = sf.dndy * mFootprintScale();
+    return (dot(dx, dx) + dot(dy, dy)) / 12.0;
+}
 CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTextureSet ts)
 {
     float3 baseColor = m.baseColor, n;
     float roughness = m.roughness, metallic = m.metallic;
-    float variance = (dot(sf.dndx, sf.dndx) + dot(sf.dndy, sf.dndy)) / 12.0;
+    float variance = covGeometricVariance(sf);
 #if COV_PRESHADE_CLASSES == 1
     if (materialClass(m) == MATERIAL_CUT)
     {
@@ -336,7 +343,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         SurfaceLayerMaterial lm;
         lm.baseColor = baseColor; lm.roughness = roughness; lm.metallic = metallic; lm.normal = n; lm.variance = variance;
         surfaceLayersApply(li, g_cameraPosition + sf.offset, backSide ? -sf.geometricNormal : sf.geometricNormal,
-                           (dot(sf.dndx, sf.dndx) + dot(sf.dndy, sf.dndy)) / 12.0, lm);
+                           covGeometricVariance(sf), lm);
         baseColor = lm.baseColor; roughness = lm.roughness; metallic = lm.metallic; n = lm.normal; variance = lm.variance;
     }
     // the reference's rules on the final shading normal (MaterialInternal.hlsli), as in the resolve

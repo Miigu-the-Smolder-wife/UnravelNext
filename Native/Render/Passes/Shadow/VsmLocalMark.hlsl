@@ -75,7 +75,7 @@ void main(uint2 px : SV_DispatchThreadID)
     if (depth <= 0) return;
     const float3 world = worldFromDepth(float2(px), depth);
     const float z = linearDepth(depth);
-    const float footprint = 2 * z * g_tanHalfFovY / g_viewHeight;
+    const float footprint = outputPixelFootprint(z);
     FroxelSrvs f;
     f.lights = P[1].x;
     f.lightIndices = P[1].y;

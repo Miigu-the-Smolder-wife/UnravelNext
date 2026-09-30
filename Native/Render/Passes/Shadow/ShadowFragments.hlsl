@@ -53,7 +53,7 @@ VsmResources fragmentVsm()
     r.cbv = P[2].x;
     return r;
 }
-float pixelFootprint(float deviceDepth) { return 2 * linearDepth(deviceDepth) * g_tanHalfFovY / g_viewHeight; }
+float pixelFootprint(float deviceDepth) { return outputPixelFootprint(linearDepth(deviceDepth)); }
 float fragmentSunT(ShadowSrvs s, float3 p, float footprint) { return P[3].y != 0xFFFFFFFFu ? shadowSunTransmittanceAt(s, p, footprint, footprint) : 1.0; }
 
 #if MODE == 0
@@ -108,7 +108,7 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     float3 surfaceNormal = 0, surfacePoint = pNear;
     if (dSurface > 0) surfacePoint = shadowReceiver(depthTex, P[3].w, px, dSurface, surfaceNormal);
     const ShadowSrvs s = fragmentSrvs();
-    const uint cls = vsmFragmentSegmentClassify(fragmentVsm(), pNear, pFar, linearDepth(dNear), linearDepth(dFar), 2 * g_tanHalfFovY / g_viewHeight,
+    const uint cls = vsmFragmentSegmentClassify(fragmentVsm(), pNear, pFar, linearDepth(dNear), linearDepth(dFar), outputPixelFootprint(1),
                                                 tan(g_sunAngularRadius), surfacePoint, surfaceNormal);
     uint sun = 0, pair = 0;
     if (cls == VSM_REGION_LIT)

@@ -22,7 +22,7 @@ void main(uint2 px : SV_DispatchThreadID)
     RWByteAddressBuffer requests = ResourceDescriptorHeap[P[0].y];
     const float dNear = asfloat(range.x), dFar = asfloat(range.y);
     const float3 p0 = worldFromDepth(float2(px), dNear), p1 = worldFromDepth(float2(px), dFar);
-    const float z0 = linearDepth(dNear), z1 = linearDepth(dFar), pixelScale = 2 * g_tanHalfFovY / g_viewHeight;
+    const float z0 = linearDepth(dNear), z1 = linearDepth(dFar), pixelScale = outputPixelFootprint(1);
     uint k = vsmLevelForFootprint(c, z0 * pixelScale);
     float z = z0;
     uint steps = 0;

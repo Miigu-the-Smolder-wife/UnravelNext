@@ -17,7 +17,7 @@ void main(uint2 px : SV_DispatchThreadID)
     if (depth <= 0) return;  // sky
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[P[0].z];
     const float3 world = worldFromDepth(float2(px), depth);
-    const float footprint = 2 * linearDepth(depth) * g_tanHalfFovY / g_viewHeight;
+    const float footprint = outputPixelFootprint(linearDepth(depth));
     const uint k = vsmLevelForFootprint(c, footprint);
     const float3 ls = vsmLightSpaceAt(c, world, k);
     const int2 page = vsmAbsPage(vsmAbsTexel(c, ls.xy, k));

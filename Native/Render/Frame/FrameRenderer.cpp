@@ -115,10 +115,13 @@ D3D12_GPU_VIRTUAL_ADDRESS FrameRenderer::allocateFrameConstants(const FrameConte
     gpu::FrameConstants c = frameConstants(m_scene, frame, view);
     c.debugDraw = m_debugDraw;
     c.viewModelScale = view.kind == gpu::ViewKind::Main ? m_viewModelScale : 1.0f;  // other views see the true geometry
-    // (the main view renders below the output: its texture footprints over the output pixel, GpuSceneLayout.h)
-    const bool upscaled = frame.upscale.outputHeight > view.height && view.kind == gpu::ViewKind::Main && view.width == frame.mainView.width &&
-                          view.height == frame.mainView.height;
-    c.upscaleRatio = upscaled ? (float)view.height / (float)frame.upscale.outputHeight : 0.0f;
+    // A cropped planar view retains the main view's pixel angle and jitter.
+    // Its samples reconstruct the same output pixels, so it inherits the main
+    // footprint ratio too (using the crop height here would shrink it twice).
+    const bool upscaled = frame.upscale.outputHeight > frame.mainView.height &&
+                          (view.kind == gpu::ViewKind::PlanarReflection ||
+                           (view.kind == gpu::ViewKind::Main && view.width == frame.mainView.width && view.height == frame.mainView.height));
+    c.upscaleRatio = upscaled ? (float)frame.mainView.height / (float)frame.upscale.outputHeight : 0.0f;
     std::memcpy(m_mapped + offset, &c, sizeof c);
     return m_constants->GetGPUVirtualAddress() + offset;
 }

@@ -410,7 +410,9 @@ int main(int argc, char** argv)
                         td.Height = rr.height;
                         td.DepthOrArraySize = 1;
                         td.MipLevels = 1;
-                        td.Format = captureUpscaled ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT;
+                        td.Format = g.desc(source).format;
+                        if (td.Format != DXGI_FORMAT_R16G16B16A16_FLOAT && td.Format != DXGI_FORMAT_R32G32B32A32_FLOAT)
+                            fail("capture requires RGBA16F or RGBA32F linear colour");
                         td.SampleDesc.Count = 1;
                         UINT rows;
                         UINT64 rowBytes, total;
@@ -510,7 +512,7 @@ int main(int argc, char** argv)
                         for (int c = 0; c < 3; ++c)
                         {
                             float v;
-                            if (captureUpscaled)  // RGBA16F
+                            if (captureFootprint.Footprint.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
                             {
                                 uint16_t hv;
                                 std::memcpy(&hv, rowBytes + (x * 4 + c) * 2, 2);

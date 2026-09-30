@@ -37,13 +37,15 @@ uint32_t asUint(float f)
 struct UpscaleState
 {
     Device* device = nullptr;
-    ComPtr<ID3D12Resource> history[2];
+    ComPtr<ID3D12Resource> history[2], baseHistory[2];
     uint32_t width = 0, height = 0, parity = 0;
     bool fresh = true;  // the textures hold nothing yet
     ~UpscaleState()
     {
         if (!device) return;
         for (auto& t : history)
+            if (t) device->deferRelease(t);
+        for (auto& t : baseHistory)
             if (t) device->deferRelease(t);
     }
     void ensure(Device& d, uint32_t w, uint32_t h)
@@ -56,7 +58,7 @@ struct UpscaleState
         desc.Width = w;
         desc.Height = h;
         desc.DepthOrArraySize = desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         desc.SampleDesc.Count = 1;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         for (int k = 0; k < 2; ++k)
@@ -65,7 +67,13 @@ struct UpscaleState
             check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
                                                     IID_PPV_ARGS(&history[k])),
                   "M upscale history");
-            history[k]->SetName(k ? L"M upscale history 1" : L"M upscale history 0");
+            history[k]->SetName(k ? L"M upscale detail history 1" : L"M upscale detail history 0");
+            D3D12_RESOURCE_DESC1 depthDesc = desc;
+            depthDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            if (baseHistory[k]) d.deferRelease(baseHistory[k]);
+            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &depthDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                    IID_PPV_ARGS(&baseHistory[k])), "M upscale illumination history");
+            baseHistory[k]->SetName(k ? L"M upscale illumination history 1" : L"M upscale illumination history 0");
         }
         width = w;
         height = h;
@@ -109,17 +117,27 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     s.fresh = false;
     const uint32_t prev = s.parity, next = prev ^ 1u;
     s.parity = next;
-    const TextureRef history = g.importTexture(s.history[prev].Get(), { "m.upscale.history (previous)", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+    const TextureRef history = g.importTexture(s.history[prev].Get(), { "m.upscale.history (previous)", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT },
                                                D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    const TextureRef output = g.importTexture(s.history[next].Get(), { "m.upscale.history", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+    const TextureRef detailNext = g.importTexture(s.history[next].Get(), { "m.upscale.detail", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT },
                                               D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    const TextureRef motion = g.createTexture(TextureDesc{ "m.upscale.motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
+    const TextureRef basePrev = g.importTexture(s.baseHistory[prev].Get(), { "m.upscale.illumination (previous)", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT },
+                                              D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    const TextureRef baseNext = g.importTexture(s.baseHistory[next].Get(), { "m.upscale.illumination", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT },
+                                              D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    const TextureRef output = g.createTexture({ "m.upscale.output", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    const TextureRef base = g.createTexture({ "m.upscale.base", w, h, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+    const TextureRef motion = g.createTexture(TextureDesc{ "m.upscale.motion", w, h, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
     const TextureRef depth = view.depth, vis = view.visId;
     const BufferRef clusters = view.visibleClusters;
     const bool hasVis = vis.valid() && clusters.valid();
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
     const float jx = u.jitterX, jy = u.jitterY;
-    const float4x4 prevViewProj = u.prevViewProj;
+    // Subtract once on the CPU. Identical views produce an exact zero delta,
+    // avoiding cancellation of two almost equal projected UVs on the GPU.
+    float4x4 viewProjDelta{};
+    for (int row = 0; row < 4; ++row)
+        for (int col = 0; col < 4; ++col) viewProjDelta.m[row][col] = u.prevViewProj.m[row][col] - u.viewProj.m[row][col];
     ID3D12PipelineState* motionPso = fc.shaders.compute("Passes/Shading/UpscaleMotion");
     g.addPass("m.upscale.motion", QueueType::Graphics,
               [&](PassBuilder& b) {
@@ -134,10 +152,19 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
               [=](PassContext& c) {
                   uint32_t k[24] = { hasVis ? c.srv(vis) : 0xFFFFFFFFu, hasVis ? c.srv(clusters) : 0xFFFFFFFFu, c.srv(depth), c.uav(motion), w, h, asUint(jx), asUint(jy) };
                   for (int r = 0; r < 4; ++r)
-                      for (int col = 0; col < 4; ++col) k[8 + 4 * r + col] = asUint(prevViewProj.m[r][col]);
+                      for (int col = 0; col < 4; ++col) k[8 + 4 * r + col] = asUint(viewProjDelta.m[r][col]);
                   c.cmd->SetPipelineState(motionPso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 24);
+                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+              });
+    ID3D12PipelineState* basePso = fc.shaders.compute("Passes/Shading/UpscaleBase");
+    g.addPass("m.upscale.base", QueueType::Graphics,
+              [&](PassBuilder& b) { b.use(src, Use::SrvCompute); b.use(base, Use::UavCompute); },
+              [=](PassContext& c) {
+                  const uint32_t k[4] = { c.srv(src), c.uav(base), w, h };
+                  c.cmd->SetPipelineState(basePso);
+                  c.computeConstants(k, 4);
                   c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
               });
     const float ratio = u.exposureRatio, capStill = (float)frames, capMoving = (float)framesMoving, kernelK = (float)kernel;
@@ -148,14 +175,19 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                   b.use(depth, Use::SrvCompute);
                   b.use(motion, Use::SrvCompute);
                   b.use(history, Use::SrvCompute);
+                  b.use(base, Use::SrvCompute);
+                  b.use(basePrev, Use::SrvCompute);
+                  b.use(detailNext, Use::UavCompute);
+                  b.use(baseNext, Use::UavCompute);
                   b.use(output, Use::UavCompute);
               },
               [=](PassContext& c) {
-                  const uint32_t k[16] = { c.srv(src), c.srv(depth), c.srv(motion), c.srv(history), c.uav(output), w, h, reset ? 1u : 0u,
-                                           W, H, asUint(jx), asUint(jy), asUint(ratio), asUint(capStill), asUint(capMoving), asUint(kernelK) };
+                  const uint32_t k[20] = { c.srv(src), c.srv(depth), c.srv(motion), c.srv(history), c.uav(output), w, h, reset ? 1u : 0u,
+                                           W, H, asUint(jx), asUint(jy), asUint(ratio), asUint(capStill), asUint(capMoving), asUint(kernelK),
+                                           c.srv(base), c.uav(detailNext), c.srv(basePrev), c.uav(baseNext) };
                   c.cmd->SetPipelineState(pso);
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 16);
+                  c.computeConstants(k, 20);
                   c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
               });
     return output;

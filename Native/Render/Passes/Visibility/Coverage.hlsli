@@ -190,4 +190,32 @@ uint coverageTriangleMask(float2 a, float2 b, float2 c, float2 pixel)
     return mask;
 }
 
+// Evaluate an output-pixel box centred at this internal sample. Scale is explicit:
+// the pure coverage/LUT tests and shadow raster service retain their unit box.
+void coveragePixelTriangle(inout float2 a, inout float2 b, inout float2 c, float2 pixel, float scale)
+{
+    if (scale == 1) return;
+    const float2 centre = pixel + 0.5;
+    a = centre + (a - centre) / scale;
+    b = centre + (b - centre) / scale;
+    c = centre + (c - centre) / scale;
+}
+float coveragePixelAreaCentroid(float2 a, float2 b, float2 c, float2 pixel, float scale, out float2 centre)
+{
+    coveragePixelTriangle(a, b, c, pixel, scale);
+    const float area = coverageTriangleAreaCentroid(a, b, c, pixel, centre);
+    if (scale != 1) centre = pixel + 0.5 + (centre - pixel - 0.5) * scale;
+    return area;
+}
+uint coveragePixelMask(float2 a, float2 b, float2 c, float2 pixel, float scale)
+{
+    coveragePixelTriangle(a, b, c, pixel, scale);
+    return coverageTriangleMask(a, b, c, pixel);
+}
+uint coveragePixelMaskLut(float2 a, float2 b, float2 c, float2 pixel, float scale, StructuredBuffer<uint2> lut)
+{
+    coveragePixelTriangle(a, b, c, pixel, scale);
+    return coverageTriangleMaskLut(a, b, c, pixel, lut);
+}
+
 #endif

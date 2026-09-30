@@ -43,6 +43,15 @@ cbuffer FrameConstants : register(b1)
 // Reversed-Z infinite projection: device depth d = near / viewDistance (1 at the near plane, 0 = sky).
 float linearDepth(float deviceDepth) { return g_nearPlane / max(deviceDepth, 1e-30); }
 
+// Surface shading and its ray cones resolve output pixels. Using the internal
+// pixel here silently picks coarser shadow pages and reflection texture mips.
+// Keep the native arithmetic order, including the zero/default ABI value.
+float outputPixelFootprint(float viewDepth)
+{
+    const float footprint = 2 * viewDepth * g_tanHalfFovY / g_viewHeight;
+    return g_upscaleRatio > 0 ? footprint * g_upscaleRatio : footprint;
+}
+
 // World position of a pixel centre (pixel in [0, size)) at a device depth.
 float3 worldFromDepth(float2 pixel, float deviceDepth)
 {

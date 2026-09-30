@@ -102,7 +102,7 @@ ShadowPixelReceiver shadowPixelReceiver(uint2 pixel, uint depthSrv, uint gbuffer
     const float depth = depthTex.Load(int3(pixel, 0));
     if (depth <= 0) return rc;
     rc.world = shadowReceiver(depthTex, gbufferSrv, pixel, depth, rc.normal);
-    rc.footprint = 2 * linearDepth(depth) * g_tanHalfFovY / g_viewHeight;
+    rc.footprint = outputPixelFootprint(linearDepth(depth));
     rc.valid = 1;
     return rc;
 }
