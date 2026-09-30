@@ -46,6 +46,66 @@ def run(seed, C=3000, P=12, frames=1000, rho=0.8, S=0.2, noise=0.19, jac=8, hmax
             fast[sel]=np.where(h, fo+(est-fo)/16, est); spr[sel]=np.where(h, so+(sp-so)/16, sp); hist0[sel]=False
         traj.append(E.mean())
     return np.array(traj)
+def cut_model(seed, new=17000, live=94000, R=7812, P=12, noise=0.19, t0share=0.6, prior=False, kappa=2.0, delta=0.03,
+              tiers=False, cachefilter=False, cells_per_tile=4, frames=(1, 4, 16, 64, 256)):
+    """Redesign V2 1.1 (P1) prediction for a cut: 'new' cells appear at frame 0 (N_new ~ N_vis), the other live cells are
+    converged. Per new cell: its estimate after n updates of 64 rays has relative noise 'noise' / sqrt(n); with the parent
+    prior (1.1b) it starts from the parent's converged value, off by the parent-child difference (relative, N(0, delta)),
+    worth kappa updates: E = (n E_meas + kappa E_prior) / (n + kappa). The cache filter (1.1c) averages an updated cell with
+    its 6 same-level neighbours, weight n_j / (n_j + 4): the neighbours are new too (a cut), their independent noise adds
+    up to 6 n_j / (n_j + 4) more update-equivalents (their own content differences are ignored: an optimistic bound).
+    Updates: without tiers (the current rule, 2 tiers by readers and age), a new cell gets its first update within
+    ceil(new / R) frames and then one every P frames; with tiers (1.1a), cells with < 4 updates share t0share of R (T0),
+    cells with 4-16 updates the rest first (T1), the converged cells the remainder.
+    Returns, per requested frame, the P95 over tiles (cells_per_tile independent new cells averaged) of the relative
+    error of the tile mean - the unit of the baseline's 16 x 16 tile P95 (the GI term alone: direct light adds none, so
+    on screen the error is this times the indirect share of the pixel)."""
+    rng = np.random.default_rng(seed)
+    n = np.zeros(new)
+    order = rng.permutation(new)  # first-update order of the new cells
+    rank = np.empty(new, int); rank[order] = np.arange(new)
+    out = {}
+    for f in range(1, max(frames) + 1):
+        if tiers:
+            budget = R
+            young = np.where(n < 4)[0]
+            t0 = min(len(young), int(t0share * R))
+            if t0:
+                pick = young[np.argsort(n[young] + rank[young] / new)[:t0]]
+                n[pick] += 1; budget -= t0
+            mid = np.where((n >= 4) & (n < 16))[0]
+            t1 = min(len(mid), budget)
+            if t1:
+                pick = mid[np.argsort(n[mid] + rank[mid] / new)[:t1]]
+                n[pick] += 1; budget -= t1
+            if budget > 0:  # T3: the whole live set by age
+                rest = np.where(n >= 16)[0]
+                n[rest] += (rng.random(len(rest)) < budget / max(live, 1))
+        else:
+            first = rank < f * R  # first updates in creation order at R per frame, then one every P frames
+            due = first & ((f - 1 - rank // R) % P == 0)
+            n[due] += 1
+        if f in frames:
+            meas = noise / np.sqrt(np.maximum(n, 1e-9)) * rng.standard_normal(new)
+            if prior:
+                par = delta * rng.standard_normal(new)
+                est_err = (n * meas + kappa * par) / (n + kappa)
+            else:
+                est_err = np.where(n > 0, meas, 1.0)  # no update yet: no value (the reader's fallback: counted as 100 %)
+            if cachefilter:
+                w = n / (n + 4)
+                est_err = np.where(n > 0, est_err / np.sqrt(1 + 6 * w), est_err)
+            m = cells_per_tile
+            tiles = est_err[: (new // m) * m].reshape(-1, m).mean(axis=1)
+            out[f] = float(np.percentile(np.abs(tiles), 95))
+    return out
+if __name__=='__main__' and len(sys.argv) > 1 and sys.argv[1] == 'cut':
+    kw = dict(a.split('=') for a in sys.argv[2:]); kw = {k: (float(v) if '.' in v else int(v)) for k, v in kw.items()}
+    for name, opts in (("current (no tiers, no prior)", {}), ("tiers", dict(tiers=True)), ("tiers + prior", dict(tiers=True, prior=True)),
+                       ("tiers + prior + cache filter", dict(tiers=True, prior=True, cachefilter=True))):
+        r = cut_model(0, **{**kw, **opts})
+        print(f"{name:32s} " + "  ".join(f"{f}: {v * 100:5.1f} %" for f, v in r.items()))
+    sys.exit(0)
 if __name__=='__main__':
     kw=dict(a.split('=') for a in sys.argv[1:]); kw={k:(float(v) if '.' in v else int(v)) for k,v in kw.items()}
     T=np.array([run(s,**kw) for s in range(8)])
