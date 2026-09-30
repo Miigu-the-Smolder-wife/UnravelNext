@@ -10,6 +10,8 @@
 //  5. Horizon band sky: a ground plane under a constant sky only between elevation 0 and 10 deg (a sunset sky is brightest
 //     there). E = pi L cos^2(80 deg) exactly. The cache's irradiance comes from order-2 SH, whose truncated cosine kernel
 //     overestimates light near the horizon (at 85 deg from the normal 0.141 against cos = 0.087): this measures it.
+//  8. A point light beside white surfaces over a black floor (a large ceiling, a small panel, a corner, a lampshade): the
+//     floor's single bounce against the exact integral over the light's directions (lightNearExpected), +-0.5 %.
 //  4. A single sunlit plane (albedo 0.5, no sky), level and tilted 25 deg: a plane cannot see itself, so its indirect
 //     irradiance is exactly 0. Any light the cache gives it is spurious bounce (self-hits, cells that sample around the
 //     surface, directions below a record's hemisphere); reported as E over the plane's direct sun irradiance.
@@ -281,6 +283,188 @@ scene::Scene emissivePanel(float radiance)
     cam.up = normalize(cross(cross(cam.forward, float3{ 0, 1, 0 }), cam.forward));
     s.cameras.push_back(cam);
     return s;
+}
+
+// 8. A point light beside white Lambert surfaces over a black floor (redesign V2.2 11.1 / P1'-a, the cone-mean energy
+// test widened by the coordination session): the floor's cached irradiance is the surfaces' single bounce (GI hits
+// without the cache's bounce: experiment 512), E(p) = I rho / pi x integral over directions w from the light of
+// window(d) K(p, y(w)) V(p, y) dw, y(w) the first surface the light's ray meets on its lit side, K = cos_p cos_y / r^2
+// (E_l dA = I dw: the 1 / d^2 hotspot is exact in this parametrisation). Cases: a large ceiling 10 cm above the light
+// (the plane the footprint model assumes), a 20 cm panel 5 cm above it (a surface smaller than the texel cone's
+// footprint), a ceiling and soffit meeting 10 cm from it (a corner: the footprint reaches past both edges), a lampshade
+// around it (an open-bottom box: its inside seen through the opening). Any estimator of the hit's light must give the
+// same mean; a footprint-type estimator loses the part of its footprint past the real surface.
+struct LitRect
+{
+    float3 c, u, v;  // points c + a u + b v, a, b in [0, 1]; normal unit(u x v), the lit side
+};
+struct LightNearCase
+{
+    const char* name;
+    float3 light;
+    std::vector<LitRect> rects;
+};
+std::vector<LightNearCase> lightNearCases()
+{
+    std::vector<LightNearCase> c;
+    c.push_back({ "large ceiling, light 1 m below (no hotspot: the cache's own accuracy)", { 0, 2.0f, 0 }, { { { -20, 3, -20 }, { 40, 0, 0 }, { 0, 0, 40 } } } });
+    c.push_back({ "large ceiling, light 10 cm below", { 0, 2.9f, 0 }, { { { -20, 3, -20 }, { 40, 0, 0 }, { 0, 0, 40 } } } });
+    c.push_back({ "20 cm panel, light 5 cm below", { 0, 2.95f, 0 }, { { { -0.1f, 3, -0.1f }, { 0.2f, 0, 0 }, { 0, 0, 0.2f } } } });
+    c.push_back({ "ceiling-soffit corner, light 10 cm from both", { 0.1f, 2.9f, 0 },
+                  { { { 0, 3, -20 }, { 20, 0, 0 }, { 0, 0, 40 } }, { { 0, 2, 20 }, { 0, 0, -40 }, { 0, 1, 0 } } } });
+    const float h = 0.15f, top = 2.7f, bottom = 2.45f;  // 30 cm shade, 25 cm tall, light 10 cm below its top
+    c.push_back({ "lampshade (open bottom), light inside", { 0, 2.6f, 0 },
+                  { { { -h, top, -h }, { 2 * h, 0, 0 }, { 0, 0, 2 * h } },            // top, facing down
+                    { { -h, bottom, -h }, { 2 * h, 0, 0 }, { 0, top - bottom, 0 } },  // z = -h, facing +z
+                    { { h, bottom, h }, { -2 * h, 0, 0 }, { 0, top - bottom, 0 } },   // z = +h, facing -z
+                    { { -h, bottom, h }, { 0, 0, -2 * h }, { 0, top - bottom, 0 } },  // x = -h, facing +x
+                    { { h, bottom, -h }, { 0, 0, 2 * h }, { 0, top - bottom, 0 } } } });  // x = +h, facing -x
+    return c;
+}
+scene::Scene lightNearScene(const LightNearCase& k, float intensity, float albedo)
+{
+    scene::Scene s;
+    s.name = "gi_light_near_surfaces";
+    scene::Material floor;
+    floor.name = "black floor";
+    floor.baseColor = { 0, 0, 0 };
+    s.materials.push_back(floor);
+    scene::Material white;
+    white.name = "white lambert";
+    white.baseColor = { albedo, albedo, albedo };
+    white.roughness = 1;
+    white.specular = 0;
+    s.materials.push_back(white);
+    scene::Mesh plane;
+    plane.name = "floor";
+    for (auto [x, z] : { std::pair{ -200.f, -200.f }, { 200.f, -200.f }, { 200.f, 200.f }, { -200.f, 200.f } })
+    {
+        plane.positions.push_back({ x, 0, z });
+        plane.normals.push_back({ 0, 1, 0 });
+        plane.uv0.push_back({ x, z });
+    }
+    plane.indices = { 0, 2, 1, 0, 3, 2 };
+    plane.submeshes.push_back({ 0, 6, 0 });
+    s.meshes.push_back(plane);
+    scene::Mesh lit;
+    lit.name = "lit surfaces";
+    for (const LitRect& r : k.rects)
+    {
+        const float3 n = normalize(cross(r.u, r.v));
+        const uint32_t b = (uint32_t)lit.positions.size();
+        for (const float3 q : { r.c, r.c + r.u, r.c + r.u + r.v, r.c + r.v })
+        {
+            lit.positions.push_back(q);
+            lit.normals.push_back(n);
+            lit.uv0.push_back({ q.x, q.z });
+        }
+        lit.indices.insert(lit.indices.end(), { b, b + 1, b + 2, b, b + 2, b + 3 });  // counter-clockwise about n
+    }
+    lit.submeshes.push_back({ 0, (uint32_t)lit.indices.size(), 1 });
+    s.meshes.push_back(lit);
+    s.instances.push_back({});
+    scene::Instance q;
+    q.mesh = 1;
+    s.instances.push_back(q);
+    s.sun.illuminance = 0;
+    scene::Light l;
+    l.type = scene::LightType::Point;
+    l.position = k.light;
+    l.intensity = intensity;
+    l.range = 30;
+    l.castShadow = true;
+    s.lights.push_back(l);
+    scene::Camera cam;
+    cam.name = "floor";
+    cam.position = { 2.0f, 1.6f, 3.0f };
+    cam.forward = normalize(float3{ 0.6f, 0, 0 } - cam.position);
+    cam.up = normalize(cross(cross(cam.forward, float3{ 0, 1, 0 }), cam.forward));
+    s.cameras.push_back(cam);
+    return s;
+}
+// The exact single bounce on a floor grid (x, z in [-2.5, 2.5], 0.1 m), by quadrature over the light's directions
+// (512 x 1024 stratified cells of the sphere; the rects' outlines are the only discontinuities).
+struct FloorGrid
+{
+    static constexpr int N = 51;
+    std::vector<double> e = std::vector<double>(N * N, 0.0);
+    double at(float x, float z) const
+    {
+        const float fx = (x + 2.5f) / 0.1f, fz = (z + 2.5f) / 0.1f;
+        if (!(fx >= 0 && fz >= 0 && fx <= N - 1 && fz <= N - 1)) return -1;
+        const int ix = std::min((int)fx, N - 2), iz = std::min((int)fz, N - 2);
+        const double tx = fx - ix, tz = fz - iz;
+        return (e[iz * N + ix] * (1 - tx) + e[iz * N + ix + 1] * tx) * (1 - tz) + (e[(iz + 1) * N + ix] * (1 - tx) + e[(iz + 1) * N + ix + 1] * tx) * tz;
+    }
+};
+FloorGrid lightNearExpected(const LightNearCase& k, float intensity, float albedo)
+{
+    struct Hit
+    {
+        float3 y, n;
+        double w;  // I rho / pi window(d) dw
+        int rect;
+    };
+    std::vector<Hit> hits;
+    const int NZ = 512, NP = 1024;
+    const double dw = 4 * kPi / ((double)NZ * NP);
+    for (int i = 0; i < NZ; ++i)
+        for (int j = 0; j < NP; ++j)
+        {
+            const float z = 1 - 2 * (i + 0.5f) / NZ, r = std::sqrt(std::max(0.0f, 1 - z * z)), phi = 2 * kPi * (j + 0.5f) / NP;
+            const float3 w{ r * std::cos(phi), z, r * std::sin(phi) };
+            float best = 1e30f;
+            Hit h{};
+            for (const LitRect& rc : k.rects)
+            {
+                const float3 n = normalize(cross(rc.u, rc.v));
+                const float dn = dot(n, w);
+                if (!(dn < 0)) continue;  // the light on the lit side only
+                const float t = dot(n, rc.c - k.light) / dn;
+                if (!(t > 0) || t >= best) continue;
+                const float3 q = k.light + w * t, o = q - rc.c;
+                const float a = dot(o, rc.u) / dot(rc.u, rc.u), b = dot(o, rc.v) / dot(rc.v, rc.v);
+                if (a < 0 || a > 1 || b < 0 || b > 1) continue;
+                best = t;
+                const float rr = t / 30, r4 = rr * rr * rr * rr, win = std::clamp(1 - r4, 0.0f, 1.0f);
+                h = { q, n, (double)intensity * albedo / kPi * win * win * dw, (int)(&rc - k.rects.data()) };
+            }
+            if (best < 1e30f) hits.push_back(h);
+        }
+    FloorGrid g;
+    for (int iz = 0; iz < FloorGrid::N; ++iz)
+        for (int ix = 0; ix < FloorGrid::N; ++ix)
+        {
+            const float3 p{ -2.5f + 0.1f * ix, 0, -2.5f + 0.1f * iz };
+            double sum = 0;
+            for (const Hit& h : hits)
+            {
+                const float3 d = h.y - p;
+                const float r2 = dot(d, d), rl = std::sqrt(r2);
+                const float cp = d.y / rl, cy = -dot(h.n, d) / rl;
+                if (!(cp > 0) || !(cy > 0)) continue;
+                // visible from p unless another rect crosses the segment (either face: the back of a one-sided rect is
+                // "inside closed geometry" to a GI ray, radiance 0 - the soffit seen from behind, the shade's outside)
+                bool blocked = false;
+                for (size_t o = 0; o < k.rects.size() && !blocked; ++o)
+                {
+                    if ((int)o == h.rect) continue;
+                    const LitRect& rc = k.rects[o];
+                    const float3 nn = cross(rc.u, rc.v);
+                    const float dn = dot(nn, d);
+                    if (dn == 0) continue;
+                    const float t = dot(nn, rc.c - p) / dn;
+                    if (!(t > 1e-4f && t < 1 - 1e-4f)) continue;
+                    const float3 x = p + d * t - rc.c;
+                    const float a = dot(x, rc.u) / dot(rc.u, rc.u), b = dot(x, rc.v) / dot(rc.v, rc.v);
+                    blocked = a >= 0 && a <= 1 && b >= 0 && b <= 1;
+                }
+                if (blocked) continue;
+                sum += h.w * cp * cy / r2;
+            }
+            g.e[iz * FloorGrid::N + ix] = sum;
+        }
+    return g;
 }
 
 // The open sky scene with a second mesh, a black 2 m cube (centre at the origin), that no instance uses at upload: the
@@ -665,7 +849,8 @@ int main(int argc, char** argv)
     try
     {
         uint32_t frames = 160;
-        bool validate = false, determinism = false;
+        bool validate = false, determinism = false, onlyLightNear = false;
+        uint32_t lightNearFrames = 1200;  // the 20 cm panel case: +-0.7 % between runs at 480 frames (P99 68 %)
         float furnaceAlbedo = 0.5f;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
@@ -674,6 +859,8 @@ int main(int argc, char** argv)
             if (a == "--frames" && i + 1 < argc) frames = (uint32_t)std::stoul(argv[++i]);
             else if (a == "--validate") validate = true;
             else if (a == "--determinism") determinism = true;
+            else if (a == "--only-light-near") onlyLightNear = true;  // test 8 alone
+            else if (a == "--light-near-frames" && i + 1 < argc) lightNearFrames = (uint32_t)std::stoul(argv[++i]);
             else if (a == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
             else if (a == "--furnace-albedo" && i + 1 < argc) furnaceAlbedo = std::stof(argv[++i]);  // bright rooms (0.9: 10 bounces carry 65 %)
             else fail("unknown argument %s", a.c_str());
@@ -719,6 +906,41 @@ int main(int argc, char** argv)
             return pass ? 0 : 1;
         }
 
+        auto lightNear = [&]() {
+            // 8. Light beside small surfaces, corners and a lampshade (see lightNearCases): the configured estimator of the
+            // hit's local light must keep the energy within 0.5 % (mean over the floor probes); the P1 footprint mean
+            // (gi.hit_light_footprint) is reported beside it.
+            const float I = 50, rho8 = 0.8f;
+            for (const LightNearCase& k : lightNearCases())
+            {
+                const FloorGrid g = lightNearExpected(k, I, rho8);
+                auto expected8 = [&](float3 p, float3 n) -> double {
+                    if (n.y < 0.99f || std::fabs(p.y) > 0.05f) return -1;
+                    return g.at(p.x, p.z);
+                };
+                const scene::Scene sc = lightNearScene(k, I, rho8);
+                QualityConfig q8 = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+                q8.applyOverride("gi.experiment_disable=1536");  // Lambert hits, one bounce
+                for (const std::string& o : overrides) q8.applyOverride(o);
+                QualityConfig fp = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+                fp.applyOverride("gi.experiment_disable=1536");
+                fp.applyOverride("gi.hit_light_footprint=true");
+                const Outcome o8 = run(device, shaders, q8, sc, { 0, 0, 0 }, { 0, 0, 0 }, expected8, -1, lightNearFrames, 1920, 1080);
+                const Outcome f8 = run(device, shaders, fp, sc, { 0, 0, 0 }, { 0, 0, 0 }, expected8, -1, lightNearFrames, 1920, 1080);
+                const double e8 = o8.mapMean / o8.mapExpectedMean - 1, ef = f8.mapMean / f8.mapExpectedMean - 1;
+                const bool ok8 = o8.mapProbes > 1000 && std::fabs(e8) <= 0.005;
+                logf("light near surfaces, %s (%u frames): %u probe points, expected mean E %.5f; configured estimator %+.2f %% (P99 %.2f %%) -> %s; footprint mean %+.2f %% "
+                     "(P99 %.2f %%, reported)\n",
+                     k.name, lightNearFrames, o8.mapProbes, o8.mapExpectedMean, 100 * e8, 100 * o8.mapP99, ok8 ? "PASS" : "FAIL", 100 * ef, 100 * f8.mapP99);
+                pass = pass && ok8;
+            }
+        };
+        if (onlyLightNear)
+        {
+            lightNear();
+            logf("RESULT %s\n", pass ? "PASS" : "FAIL");
+            return pass ? 0 : 1;
+        }
         const float le = 1.0f, rho = furnaceAlbedo;
         logf("white furnace: Le %.2f, albedo %.2f, expected E = pi Le / (1 - rho) = %.4f\n", le, rho, kPi * le / (1 - rho));
         const Outcome a = run(device, shaders, quality, furnace(le, rho), { 0, 0, 0 }, { 0, 0, 0 }, [&](float3, float3) { return (double)kPi * le / (1 - rho); },
@@ -763,6 +985,7 @@ int main(int argc, char** argv)
                  on7.stats.priors, 100 * on7.stats.parentDelta, ok7 ? "PASS" : "FAIL");
             pass = pass && ok7;
         }
+        lightNear();
         logf("open sky: L 1, ground albedo 0.5, expected E = pi\n");
         const Outcome b = run(device, shaders, quality, openSky(0.5f), { 1, 1, 1 }, { 0, 0, 0 }, [](float3, float3) { return (double)kPi; }, 1.0, frames, 1920, 1080);
         const bool okB = std::fabs(b.mapMean / kPi - 1) < 0.01 && b.mapWorst < 0.03 && b.radianceWorst < 0.03 && b.tilePixels > 0 && b.tileMismatches == 0;
